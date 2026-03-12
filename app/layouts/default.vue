@@ -6,6 +6,7 @@ const navigation = [
   { label: 'アップロード', icon: 'i-lucide-upload', to: '/upload' },
   { label: '運行一覧', icon: 'i-lucide-truck', to: '/operations' },
   { label: '日別稼働', icon: 'i-lucide-clock', to: '/daily-hours' },
+  { label: 'イベント分類', icon: 'i-lucide-settings', to: '/event-classifications' },
 ]
 
 async function handleLogout() {

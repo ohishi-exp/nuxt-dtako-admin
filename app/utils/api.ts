@@ -4,6 +4,7 @@ import type {
   CsvJsonResponse, CsvType,
   UploadResponse,
   DailyHoursResponse, DailyHoursFilter,
+  EventClassification,
 } from '~/types'
 
 let apiBase = ''
@@ -129,6 +130,19 @@ export async function uploadZip(file: File): Promise<UploadResponse> {
   return request<UploadResponse>('/api/upload', {
     method: 'POST',
     body: formData,
+  })
+}
+
+// --- Event Classifications ---
+
+export async function getEventClassifications(): Promise<EventClassification[]> {
+  return request<EventClassification[]>('/api/event-classifications')
+}
+
+export async function updateEventClassification(id: string, classification: string): Promise<EventClassification> {
+  return request<EventClassification>(`/api/event-classifications/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ classification }),
   })
 }
 

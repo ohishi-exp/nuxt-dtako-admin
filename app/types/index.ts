@@ -112,6 +112,17 @@ export interface UploadResponse {
   status: string
 }
 
+// --- Event Classifications ---
+
+export interface EventClassification {
+  id: string
+  tenant_id: string
+  event_cd: string
+  event_name: string
+  classification: string
+  created_at: string
+}
+
 // --- Daily Work Hours ---
 
 export interface DailyWorkHours {
