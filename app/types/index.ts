@@ -19,6 +19,25 @@ export interface RefreshResponse {
   expires_in: number
 }
 
+// --- API Tokens ---
+
+export interface ApiTokenListItem {
+  id: string
+  name: string
+  token_prefix: string
+  expires_at: string | null
+  revoked_at: string | null
+  last_used_at: string | null
+  created_at: string
+}
+
+export interface CreateApiTokenResponse {
+  id: string
+  name: string
+  token: string
+  token_prefix: string
+}
+
 // --- Domain ---
 
 export interface Driver {
@@ -153,4 +172,85 @@ export interface DailyHoursResponse {
   total: number
   page: number
   per_page: number
+}
+
+// --- Work Times (始業・終業) ---
+
+export interface WorkTimeItem {
+  id: string
+  driver_id: string
+  work_date: string
+  unko_no: string
+  segment_index: number
+  start_at: string
+  end_at: string
+  work_minutes: number
+  labor_minutes: number
+}
+
+export interface WorkTimesResponse {
+  items: WorkTimeItem[]
+  total: number
+  page: number
+  per_page: number
+}
+
+// --- Restraint Report (拘束時間管理表) ---
+
+export interface RestraintReportFilter {
+  driver_id: string
+  year: number
+  month: number
+}
+
+export interface OperationDetail {
+  unko_no: string
+  drive_minutes: number
+  cargo_minutes: number
+  break_minutes: number
+  restraint_minutes: number
+}
+
+export interface RestraintDayRow {
+  date: string
+  is_holiday: boolean
+  start_time: string | null
+  end_time: string | null
+  operations: OperationDetail[]
+  drive_minutes: number
+  cargo_minutes: number
+  break_minutes: number
+  restraint_total_minutes: number
+  restraint_cumulative_minutes: number
+  drive_average_minutes: number
+  rest_period_minutes: number | null
+  remarks: string
+}
+
+export interface WeeklySubtotal {
+  week_end_date: string
+  drive_minutes: number
+  cargo_minutes: number
+  break_minutes: number
+  restraint_minutes: number
+}
+
+export interface MonthlyTotal {
+  drive_minutes: number
+  cargo_minutes: number
+  break_minutes: number
+  restraint_minutes: number
+  fiscal_year_cumulative_minutes: number
+  fiscal_year_total_minutes: number
+}
+
+export interface RestraintReportResponse {
+  driver_id: string
+  driver_name: string
+  year: number
+  month: number
+  max_restraint_minutes: number
+  days: RestraintDayRow[]
+  weekly_subtotals: WeeklySubtotal[]
+  monthly_total: MonthlyTotal
 }

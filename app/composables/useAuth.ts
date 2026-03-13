@@ -106,7 +106,7 @@ export function useAuth() {
     try {
       const parts = data.access_token.split('.')
       if (!parts[1]) throw new Error('Invalid JWT')
-      const payload = JSON.parse(atob(parts[1]))
+      const payload = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(parts[1]), c => c.charCodeAt(0))))
       user.value = {
         id: payload.sub,
         email: payload.email,
@@ -146,7 +146,7 @@ export function useAuth() {
     try {
       const parts = token.split('.')
       if (!parts[1]) return
-      const payload = JSON.parse(atob(parts[1]))
+      const payload = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(parts[1]), c => c.charCodeAt(0))))
       if (!payload.exp) return
 
       const expiresAt = payload.exp * 1000

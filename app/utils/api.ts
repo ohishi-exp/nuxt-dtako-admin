@@ -5,6 +5,9 @@ import type {
   UploadResponse,
   DailyHoursResponse, DailyHoursFilter,
   EventClassification,
+  WorkTimesResponse,
+  RestraintReportFilter, RestraintReportResponse,
+  ApiTokenListItem, CreateApiTokenResponse,
 } from '~/types'
 
 let apiBase = ''
@@ -150,4 +153,33 @@ export async function updateEventClassification(id: string, classification: stri
 
 export async function getDailyHours(filter: DailyHoursFilter = {}): Promise<DailyHoursResponse> {
   return request<DailyHoursResponse>(`/api/daily-hours${toParams(filter)}`)
+}
+
+// --- Work Times (始業・終業) ---
+
+export async function getWorkTimes(filter: DailyHoursFilter = {}): Promise<WorkTimesResponse> {
+  return request<WorkTimesResponse>(`/api/work-times${toParams(filter)}`)
+}
+
+// --- Restraint Report (拘束時間管理表) ---
+
+export async function getRestraintReport(filter: RestraintReportFilter): Promise<RestraintReportResponse> {
+  return request<RestraintReportResponse>(`/api/restraint-report${toParams(filter)}`)
+}
+
+// --- API Tokens ---
+
+export async function getApiTokens(): Promise<ApiTokenListItem[]> {
+  return request<ApiTokenListItem[]>('/api/api-tokens')
+}
+
+export async function createApiToken(name: string, expiresInDays?: number): Promise<CreateApiTokenResponse> {
+  return request<CreateApiTokenResponse>('/api/api-tokens', {
+    method: 'POST',
+    body: JSON.stringify({ name, expires_in_days: expiresInDays ?? null }),
+  })
+}
+
+export async function revokeApiToken(id: string): Promise<void> {
+  await request<void>(`/api/api-tokens/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
