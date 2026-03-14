@@ -10,7 +10,7 @@ import type {
   ApiTokenListItem, CreateApiTokenResponse,
   TenantMember,
   SwitchTenantResponse,
-  ScrapeRequest, ScrapeResponse,
+  ScrapeRequest, ScrapeResponse, ScrapeHistoryItem,
   CalendarResponse,
 } from '~/types'
 
@@ -219,6 +219,10 @@ export async function getCalendar(year: number, month: number): Promise<Calendar
 }
 
 // --- Scraper ---
+
+export async function getScrapeHistory(limit = 50): Promise<ScrapeHistoryItem[]> {
+  return request<ScrapeHistoryItem[]>(`/api/scraper/history?limit=${limit}`)
+}
 
 export async function triggerScrape(req: ScrapeRequest): Promise<ScrapeResponse> {
   return request<ScrapeResponse>('/api/scraper/trigger', {

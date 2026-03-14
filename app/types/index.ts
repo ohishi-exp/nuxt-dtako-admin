@@ -235,6 +235,15 @@ export interface ScrapeResponse {
   results: ScrapeResult[]
 }
 
+export interface ScrapeHistoryItem {
+  id: string
+  target_date: string
+  comp_id: string
+  status: string
+  message: string | null
+  created_at: string
+}
+
 // --- Calendar ---
 
 export interface CalendarDateEntry {

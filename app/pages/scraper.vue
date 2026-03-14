@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { getCalendar, triggerScrapeStream } from '~/utils/api'
-import type { ScrapeResult } from '~/types'
+import { getCalendar, triggerScrapeStream, getScrapeHistory } from '~/utils/api'
+import type { ScrapeResult, ScrapeHistoryItem } from '~/types'
 import type { ScrapeProgressEvent } from '~/utils/api'
 
 const compIdOptions = [
@@ -8,6 +8,11 @@ const compIdOptions = [
   { label: '27324455 (大石運輸倉庫)', value: '27324455' },
   { label: '75700192 (北海大運)', value: '75700192' },
 ]
+
+const compIdLabels: Record<string, string> = {
+  '27324455': '大石運輸倉庫',
+  '75700192': '北海大運',
+}
 
 const selectedCompId = useState('scraper-compId', () => '')
 const skipUpload = useState('scraper-skipUpload', () => false)
@@ -223,15 +228,212 @@ async function handleScrape() {
   }
 
   isRunning.value = false
-  // Reload calendar to reflect new data
   await loadCalendar()
+  await loadHistory()
+}
+
+// --- リラン ---
+
+async function handleRerun(task: DayTask) {
+  const failedIds = task.results
+    .filter(r => r.status === 'error')
+    .map(r => r.comp_id)
+  if (failedIds.length === 0 && !task.error) return
+
+  // エラー results を除去、成功は保持
+  task.results = task.results.filter(r => r.status !== 'error')
+  task.error = undefined
+  task.status = 'running'
+  task.step = undefined
+  isRunning.value = true
+
+  // failedIds が空（task-level error）の場合は元の comp_id 設定で再実行
+  const idsToRetry = failedIds.length > 0 ? failedIds : [selectedCompId.value || undefined]
+
+  for (const compId of idsToRetry) {
+    try {
+      await triggerScrapeStream(
+        {
+          comp_id: compId || undefined,
+          start_date: task.date,
+          end_date: task.date,
+          skip_upload: skipUpload.value,
+        },
+        (evt: ScrapeProgressEvent) => {
+          if (evt.event === 'progress') {
+            task.step = evt.step
+          }
+          else if (evt.event === 'result') {
+            task.results.push({
+              comp_id: evt.comp_id || '',
+              status: evt.status || 'error',
+              message: evt.message || '',
+            })
+          }
+          else if (evt.event === 'done') {
+            task.step = undefined
+          }
+        },
+      )
+    }
+    catch (e) {
+      task.results.push({
+        comp_id: compId || '',
+        status: 'error',
+        message: e instanceof Error ? e.message : 'エラー',
+      })
+    }
+  }
+
+  task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'
+  isRunning.value = false
+  await loadCalendar()
+  await loadHistory()
+}
+
+async function handleRerunAllErrors() {
+  const errorTasks = tasks.value.filter(t => t.status === 'error')
+  if (errorTasks.length === 0) return
+
+  isRunning.value = true
+  for (const task of errorTasks) {
+    // handleRerun 内で isRunning を管理しないよう、直接ロジックを実行
+    const failedIds = task.results
+      .filter(r => r.status === 'error')
+      .map(r => r.comp_id)
+
+    task.results = task.results.filter(r => r.status !== 'error')
+    task.error = undefined
+    task.status = 'running'
+    task.step = undefined
+
+    const idsToRetry = failedIds.length > 0 ? failedIds : [selectedCompId.value || undefined]
+
+    for (const compId of idsToRetry) {
+      try {
+        await triggerScrapeStream(
+          {
+            comp_id: compId || undefined,
+            start_date: task.date,
+            end_date: task.date,
+            skip_upload: skipUpload.value,
+          },
+          (evt: ScrapeProgressEvent) => {
+            if (evt.event === 'progress') {
+              task.step = evt.step
+            }
+            else if (evt.event === 'result') {
+              task.results.push({
+                comp_id: evt.comp_id || '',
+                status: evt.status || 'error',
+                message: evt.message || '',
+              })
+            }
+            else if (evt.event === 'done') {
+              task.step = undefined
+            }
+          },
+        )
+      }
+      catch (e) {
+        task.results.push({
+          comp_id: compId || '',
+          status: 'error',
+          message: e instanceof Error ? e.message : 'エラー',
+        })
+      }
+    }
+
+    task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'
+  }
+
+  isRunning.value = false
+  await loadCalendar()
+  await loadHistory()
+}
+
+// --- 履歴 ---
+
+const history = ref<ScrapeHistoryItem[]>([])
+const historyLoading = ref(false)
+
+async function loadHistory() {
+  historyLoading.value = true
+  try {
+    history.value = await getScrapeHistory(50)
+  }
+  catch {
+    history.value = []
+  }
+  finally {
+    historyLoading.value = false
+  }
+}
+
+// 履歴からリラン
+async function handleHistoryRerun(item: ScrapeHistoryItem) {
+  isRunning.value = true
+
+  // リアルタイムタスクとして追加
+  const task: DayTask = {
+    date: item.target_date,
+    status: 'running',
+    results: [],
+  }
+  tasks.value = [task]
+
+  try {
+    await triggerScrapeStream(
+      {
+        comp_id: item.comp_id,
+        start_date: item.target_date,
+        end_date: item.target_date,
+        skip_upload: skipUpload.value,
+      },
+      (evt: ScrapeProgressEvent) => {
+        if (evt.event === 'progress') {
+          task.step = evt.step
+        }
+        else if (evt.event === 'result') {
+          task.results.push({
+            comp_id: evt.comp_id || '',
+            status: evt.status || 'error',
+            message: evt.message || '',
+          })
+        }
+        else if (evt.event === 'done') {
+          task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'
+          task.step = undefined
+        }
+      },
+    )
+    if (task.status === 'running') {
+      task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'
+    }
+  }
+  catch (e) {
+    task.error = e instanceof Error ? e.message : 'エラー'
+    task.status = 'error'
+  }
+
+  isRunning.value = false
+  await loadCalendar()
+  await loadHistory()
+}
+
+function formatDatetime(iso: string): string {
+  const d = new Date(iso)
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
 const completedCount = computed(() => tasks.value.filter(t => t.status === 'success' || t.status === 'error').length)
 const successCount = computed(() => tasks.value.filter(t => t.status === 'success').length)
 const errorCount = computed(() => tasks.value.filter(t => t.status === 'error').length)
 
-onMounted(loadCalendar)
+onMounted(() => {
+  loadCalendar()
+  loadHistory()
+})
 </script>
 
 <template>
@@ -347,6 +549,15 @@ onMounted(loadCalendar)
         <span>{{ completedCount }} / {{ tasks.length }} 完了</span>
         <span v-if="successCount" class="text-green-600">{{ successCount }} 成功</span>
         <span v-if="errorCount" class="text-red-600">{{ errorCount }} エラー</span>
+        <UButton
+          v-if="errorCount > 0 && !isRunning"
+          label="全エラーをリラン"
+          icon="i-lucide-refresh-cw"
+          variant="soft"
+          color="warning"
+          size="xs"
+          @click="handleRerunAllErrors"
+        />
       </div>
 
       <div class="space-y-2">
@@ -386,6 +597,16 @@ onMounted(loadCalendar)
             <span v-if="task.status === 'running'" class="text-blue-600 dark:text-blue-400">
               {{ task.step ? stepLabels[task.step] || task.step : '実行中...' }}
             </span>
+            <div class="flex-1" />
+            <UButton
+              v-if="task.status === 'error' && !isRunning"
+              label="リラン"
+              icon="i-lucide-refresh-cw"
+              variant="soft"
+              color="warning"
+              size="xs"
+              @click="handleRerun(task)"
+            />
           </div>
 
           <div v-if="task.results.length" class="mt-2 pl-6 space-y-1">
@@ -404,5 +625,75 @@ onMounted(loadCalendar)
         </div>
       </div>
     </div>
+
+    <!-- Scrape History -->
+    <UCard class="mt-6">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-bold">
+          スクレイプ履歴
+        </h2>
+        <UButton
+          icon="i-lucide-refresh-cw"
+          variant="ghost"
+          size="xs"
+          :loading="historyLoading"
+          @click="loadHistory"
+        />
+      </div>
+
+      <div v-if="historyLoading && history.length === 0" class="py-8 text-center text-gray-400">
+        <UIcon name="i-lucide-loader-circle" class="animate-spin size-5 inline-block mr-2" />
+        読み込み中...
+      </div>
+
+      <div v-else-if="history.length === 0" class="py-8 text-center text-gray-400 text-sm">
+        履歴がありません
+      </div>
+
+      <div v-else class="space-y-1.5">
+        <div
+          v-for="item in history"
+          :key="item.id"
+          class="flex items-center gap-2 px-3 py-2 rounded-lg text-sm border"
+          :class="{
+            'border-green-200 dark:border-green-800 bg-green-50/50 dark:bg-green-950/30': item.status === 'success',
+            'border-red-200 dark:border-red-800 bg-red-50/50 dark:bg-red-950/30': item.status === 'error',
+            'border-gray-200 dark:border-gray-800': item.status !== 'success' && item.status !== 'error',
+          }"
+        >
+          <UIcon
+            v-if="item.status === 'success'"
+            name="i-lucide-check-circle"
+            class="size-4 text-green-500 shrink-0"
+          />
+          <UIcon
+            v-else
+            name="i-lucide-alert-circle"
+            class="size-4 text-red-500 shrink-0"
+          />
+          <span class="text-xs text-gray-500 shrink-0">{{ formatDatetime(item.created_at) }}</span>
+          <span class="font-medium shrink-0">{{ item.target_date }}</span>
+          <span class="text-xs text-gray-500 shrink-0">[{{ item.comp_id }}] {{ compIdLabels[item.comp_id] || '' }}</span>
+          <span
+            v-if="item.message"
+            class="text-xs truncate"
+            :class="item.status === 'success' ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'"
+            :title="item.message"
+          >
+            {{ item.message }}
+          </span>
+          <div class="flex-1" />
+          <UButton
+            v-if="item.status === 'error' && !isRunning"
+            label="リラン"
+            icon="i-lucide-refresh-cw"
+            variant="soft"
+            color="warning"
+            size="xs"
+            @click="handleHistoryRerun(item)"
+          />
+        </div>
+      </div>
+    </UCard>
   </div>
 </template>
