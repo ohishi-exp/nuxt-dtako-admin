@@ -153,8 +153,8 @@ function clearSelection() {
   selectedDates.value = new Set()
 }
 
-// Scraping
-const isRunning = ref(false)
+// Scraping (useState でページ遷移しても保持)
+const isRunning = useState('scraper-running', () => false)
 
 const stepLabels: Record<string, string> = {
   login: 'ログイン中...',
@@ -170,7 +170,7 @@ interface DayTask {
   error?: string
 }
 
-const tasks = ref<DayTask[]>([])
+const tasks = useState<DayTask[]>('scraper-tasks', () => [])
 
 async function handleScrape() {
   const dates = [...selectedDates.value].sort()
