@@ -8,6 +8,7 @@ const navigation = [
   { label: '日別稼働', icon: 'i-lucide-clock', to: '/daily-hours' },
   { label: '拘束時間管理表', icon: 'i-lucide-shield-check', to: '/restraint-report' },
   { label: 'イベント分類', icon: 'i-lucide-settings', to: '/event-classifications' },
+  { label: 'メンバー管理', icon: 'i-lucide-users', to: '/members' },
   { label: 'APIトークン', icon: 'i-lucide-key', to: '/api-tokens' },
   { label: 'スクレイプ', icon: 'i-lucide-download', to: '/scraper' },
 ]

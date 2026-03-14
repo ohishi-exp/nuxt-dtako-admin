@@ -32,6 +32,14 @@ export interface SwitchTenantResponse {
   tenant_name: string
 }
 
+// --- Tenant Members ---
+
+export interface TenantMember {
+  email: string
+  role: string
+  created_at: string
+}
+
 // --- API Tokens ---
 
 export interface ApiTokenListItem {

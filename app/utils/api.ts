@@ -8,6 +8,7 @@ import type {
   WorkTimesResponse,
   RestraintReportFilter, RestraintReportResponse,
   ApiTokenListItem, CreateApiTokenResponse,
+  TenantMember,
   SwitchTenantResponse,
   ScrapeRequest, ScrapeResponse,
   CalendarResponse,
@@ -168,6 +169,30 @@ export async function getWorkTimes(filter: DailyHoursFilter = {}): Promise<WorkT
 
 export async function getRestraintReport(filter: RestraintReportFilter): Promise<RestraintReportResponse> {
   return request<RestraintReportResponse>(`/api/restraint-report${toParams(filter)}`)
+}
+
+// --- Members ---
+
+export async function getMembers(): Promise<TenantMember[]> {
+  return request<TenantMember[]>('/api/members')
+}
+
+export async function inviteMember(email: string, role: string): Promise<TenantMember> {
+  return request<TenantMember>('/api/members', {
+    method: 'POST',
+    body: JSON.stringify({ email, role }),
+  })
+}
+
+export async function updateMemberRole(email: string, role: string): Promise<void> {
+  await request<void>(`/api/members/${encodeURIComponent(email)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ role }),
+  })
+}
+
+export async function deleteMember(email: string): Promise<void> {
+  await request<void>(`/api/members/${encodeURIComponent(email)}`, { method: 'DELETE' })
 }
 
 // --- API Tokens ---
