@@ -7,7 +7,8 @@ const activeTab = ref('segments')
 
 // Filters
 const selectedDriverId = ref('')
-const selectedMonth = ref('')
+const now = new Date()
+const selectedMonth = ref(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`)
 const page = ref(1)
 const perPage = 50
 

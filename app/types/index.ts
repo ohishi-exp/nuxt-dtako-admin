@@ -208,6 +208,38 @@ export interface WorkTimesResponse {
   per_page: number
 }
 
+// --- Scraper ---
+
+export interface ScrapeRequest {
+  start_date?: string
+  end_date?: string
+  comp_id?: string
+  skip_upload?: boolean
+}
+
+export interface ScrapeResult {
+  comp_id: string
+  status: string
+  message: string
+}
+
+export interface ScrapeResponse {
+  results: ScrapeResult[]
+}
+
+// --- Calendar ---
+
+export interface CalendarDateEntry {
+  date: string
+  count: number
+}
+
+export interface CalendarResponse {
+  year: number
+  month: number
+  dates: CalendarDateEntry[]
+}
+
 // --- Restraint Report (拘束時間管理表) ---
 
 export interface RestraintReportFilter {

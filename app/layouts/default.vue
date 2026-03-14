@@ -9,6 +9,7 @@ const navigation = [
   { label: '拘束時間管理表', icon: 'i-lucide-shield-check', to: '/restraint-report' },
   { label: 'イベント分類', icon: 'i-lucide-settings', to: '/event-classifications' },
   { label: 'APIトークン', icon: 'i-lucide-key', to: '/api-tokens' },
+  { label: 'スクレイプ', icon: 'i-lucide-download', to: '/scraper' },
 ]
 
 const tenantOptions = computed(() =>

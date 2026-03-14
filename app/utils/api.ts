@@ -9,6 +9,8 @@ import type {
   RestraintReportFilter, RestraintReportResponse,
   ApiTokenListItem, CreateApiTokenResponse,
   SwitchTenantResponse,
+  ScrapeRequest, ScrapeResponse,
+  CalendarResponse,
 } from '~/types'
 
 let apiBase = ''
@@ -183,6 +185,84 @@ export async function createApiToken(name: string, expiresInDays?: number): Prom
 
 export async function revokeApiToken(id: string): Promise<void> {
   await request<void>(`/api/api-tokens/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+// --- Calendar ---
+
+export async function getCalendar(year: number, month: number): Promise<CalendarResponse> {
+  return request<CalendarResponse>(`/api/operations/calendar?year=${year}&month=${month}`)
+}
+
+// --- Scraper ---
+
+export async function triggerScrape(req: ScrapeRequest): Promise<ScrapeResponse> {
+  return request<ScrapeResponse>('/api/scraper/trigger', {
+    method: 'POST',
+    body: JSON.stringify(req),
+  })
+}
+
+export interface ScrapeProgressEvent {
+  event: string    // "progress" | "result" | "done"
+  comp_id?: string
+  step?: string    // "login" | "download" | "upload" | "done"
+  status?: string  // "success" | "error"
+  message?: string
+}
+
+/**
+ * SSE ストリームでスクレイプ実行。各イベントで onEvent コールバックが呼ばれる。
+ */
+export async function triggerScrapeStream(
+  req: ScrapeRequest,
+  onEvent: (evt: ScrapeProgressEvent) => void,
+): Promise<void> {
+  const url = `${apiBase}/api/scraper/trigger`
+  const token = getAccessToken?.()
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (token) headers['Authorization'] = `Bearer ${token}`
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(req),
+  })
+
+  if (!res.ok) {
+    throw new Error(`Scraper error: ${res.status} ${await res.text()}`)
+  }
+
+  const reader = res.body?.getReader()
+  if (!reader) throw new Error('No response body')
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+
+    // SSE パース: "data: {...}\n\n"
+    while (buffer.includes('\n\n')) {
+      const idx = buffer.indexOf('\n\n')
+      const message = buffer.slice(0, idx)
+      buffer = buffer.slice(idx + 2)
+
+      for (const line of message.split('\n')) {
+        if (line.startsWith('data:')) {
+          const data = line.slice(5).trim()
+          if (data) {
+            try {
+              onEvent(JSON.parse(data))
+            }
+            catch { /* ignore parse errors */ }
+          }
+        }
+      }
+    }
+  }
 }
 
 // --- Tenant Switching ---
