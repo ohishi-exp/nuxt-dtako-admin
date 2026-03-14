@@ -1,11 +1,17 @@
 // --- Auth ---
 
+export interface TenantInfo {
+  tenant_id: string
+  tenant_name: string
+}
+
 export interface AuthUser {
   id: string
   email: string
   name: string
   tenant_id: string
   role: string
+  tenants?: TenantInfo[]
 }
 
 export interface AuthResponse {
@@ -17,6 +23,13 @@ export interface AuthResponse {
 export interface RefreshResponse {
   access_token: string
   expires_in: number
+}
+
+export interface SwitchTenantResponse {
+  access_token: string
+  expires_in: number
+  tenant_id: string
+  tenant_name: string
 }
 
 // --- API Tokens ---

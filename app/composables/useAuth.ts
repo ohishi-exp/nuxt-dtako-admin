@@ -1,4 +1,5 @@
-import type { AuthUser, AuthResponse, RefreshResponse } from '~/types'
+import type { AuthUser, AuthResponse, RefreshResponse, TenantInfo } from '~/types'
+import { switchTenant as switchTenantApi } from '~/utils/api'
 
 const REFRESH_TOKEN_KEY = 'dtako_refresh_token'
 
@@ -6,6 +7,8 @@ const REFRESH_TOKEN_KEY = 'dtako_refresh_token'
 const user = ref<AuthUser | null>(null)
 const accessToken = ref<string | null>(null)
 const isLoading = ref(true)
+const tenants = ref<TenantInfo[]>([])
+const currentTenantName = ref('')
 
 let initialized = false
 let refreshTimerId: ReturnType<typeof setTimeout> | null = null
@@ -28,6 +31,8 @@ export function useAuth() {
     if (refreshToken) {
       try {
         await refreshAccessToken(refreshToken)
+        // refresh 成功後に /me からテナント一覧を取得
+        await fetchMe()
       } catch {
         if (typeof window !== 'undefined') {
           localStorage.removeItem(REFRESH_TOKEN_KEY)
@@ -82,6 +87,28 @@ export function useAuth() {
 
     const data: AuthResponse = await res.json()
     setTokens(data)
+
+    // ログイン後にテナント一覧を取得
+    await fetchMe()
+  }
+
+  /** /auth/me からユーザー情報 + テナント一覧を取得 */
+  async function fetchMe(): Promise<void> {
+    if (!accessToken.value) return
+    try {
+      const res = await fetch(`${apiBase}/api/auth/me`, {
+        headers: { Authorization: `Bearer ${accessToken.value}` },
+      })
+      if (res.ok) {
+        const data = await res.json()
+        tenants.value = data.tenants || []
+        // テナント名を設定
+        const current = tenants.value.find(t => t.tenant_id === data.tenant_id)
+        currentTenantName.value = current?.tenant_name || ''
+      }
+    } catch {
+      // me 取得失敗しても続行
+    }
   }
 
   /** Refresh token で access token を更新 */
@@ -166,6 +193,22 @@ export function useAuth() {
     }
   }
 
+  /** テナント切り替え */
+  async function switchToTenant(tenantId: string): Promise<void> {
+    const res = await switchTenantApi(tenantId)
+    accessToken.value = res.access_token
+    currentTenantName.value = res.tenant_name
+
+    if (user.value) {
+      user.value = { ...user.value, tenant_id: res.tenant_id }
+    }
+
+    scheduleAutoRefresh()
+
+    // 全データ再取得のためリロード
+    window.location.reload()
+  }
+
   /** ログアウト */
   async function logout() {
     if (refreshTimerId) {
@@ -186,6 +229,8 @@ export function useAuth() {
 
     accessToken.value = null
     user.value = null
+    tenants.value = []
+    currentTenantName.value = ''
     if (typeof window !== 'undefined') {
       localStorage.removeItem(REFRESH_TOKEN_KEY)
     }
@@ -196,10 +241,13 @@ export function useAuth() {
     accessToken: readonly(accessToken),
     isAuthenticated,
     isLoading: readonly(isLoading),
+    tenants: readonly(tenants),
+    currentTenantName: readonly(currentTenantName),
     init,
     loginWithGoogleRedirect,
     handleGoogleCallback,
     refreshAccessToken,
+    switchToTenant,
     logout,
   }
 }

@@ -8,6 +8,7 @@ import type {
   WorkTimesResponse,
   RestraintReportFilter, RestraintReportResponse,
   ApiTokenListItem, CreateApiTokenResponse,
+  SwitchTenantResponse,
 } from '~/types'
 
 let apiBase = ''
@@ -182,4 +183,13 @@ export async function createApiToken(name: string, expiresInDays?: number): Prom
 
 export async function revokeApiToken(id: string): Promise<void> {
   await request<void>(`/api/api-tokens/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+// --- Tenant Switching ---
+
+export async function switchTenant(tenantId: string): Promise<SwitchTenantResponse> {
+  return request<SwitchTenantResponse>('/api/auth/switch-tenant', {
+    method: 'POST',
+    body: JSON.stringify({ tenant_id: tenantId }),
+  })
 }
