@@ -9,8 +9,8 @@ const compIdOptions = [
   { label: '75700192 (北海大運)', value: '75700192' },
 ]
 
-const selectedCompId = ref('')
-const skipUpload = ref(false)
+const selectedCompId = useState('scraper-compId', () => '')
+const skipUpload = useState('scraper-skipUpload', () => false)
 
 // Calendar state
 const now = new Date()
@@ -245,7 +245,9 @@ onMounted(loadCalendar)
       <div class="flex flex-wrap gap-4 items-end">
         <div>
           <label class="block text-sm font-medium mb-1">企業</label>
-          <USelect v-model="selectedCompId" :items="compIdOptions" />
+          <select v-model="selectedCompId" class="border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-900 dark:border-gray-700">
+            <option v-for="opt in compIdOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+          </select>
         </div>
         <label class="flex items-center gap-2">
           <input v-model="skipUpload" type="checkbox" class="rounded">

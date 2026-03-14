@@ -14,13 +14,13 @@ const deleting = ref(false)
 
 // CSV tabs
 const csvTabs = [
-  { key: 'kudguri' as CsvType, label: '拘束データ' },
   { key: 'events' as CsvType, label: 'イベント' },
+  { key: 'kudguri' as CsvType, label: '拘束データ' },
   { key: 'tolls' as CsvType, label: '料金' },
   { key: 'ferries' as CsvType, label: 'フェリー' },
   { key: 'speed' as CsvType, label: '速度' },
 ]
-const activeTab = ref<CsvType>('kudguri')
+const activeTab = ref<CsvType>('events')
 const csvData = ref<Record<string, CsvJsonResponse>>({})
 const csvLoading = ref(false)
 
@@ -150,7 +150,13 @@ function formatDatetime(val: string | null): string {
             {{ tab.label }}
           </button>
         </div>
+        <EventDataTable
+          v-if="activeTab === 'events'"
+          :data="csvData[activeTab] || { headers: [], rows: [] }"
+          :loading="csvLoading && !csvData[activeTab]"
+        />
         <CsvDataTable
+          v-else
           :headers="csvData[activeTab]?.headers || []"
           :rows="csvData[activeTab]?.rows || []"
           :loading="csvLoading && !csvData[activeTab]"

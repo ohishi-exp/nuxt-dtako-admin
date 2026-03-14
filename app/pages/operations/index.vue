@@ -21,6 +21,7 @@ const loading = ref(false)
 
 // Table columns
 const columns = [
+  { key: 'operation_date', label: '運行日' },
   { key: 'reading_date', label: '読取日' },
   { key: 'unko_no', label: '運行NO' },
   { key: 'driver_name', label: 'ドライバー' },
@@ -90,6 +91,50 @@ function scoreColor(val: number | null): string {
 }
 
 const totalPages = computed(() => Math.ceil(total.value / perPage))
+
+// ドライバー検索
+const driverSearch = ref('')
+const driverDropdown = ref(false)
+const filteredDrivers = computed(() => {
+  const q = driverSearch.value.toLowerCase()
+  if (!q) return drivers.value
+  return drivers.value.filter(d => d.driver_name.toLowerCase().includes(q) || d.driver_cd.includes(q))
+})
+function selectDriver(d: Driver) {
+  selectedDriverCd.value = d.driver_cd
+  driverSearch.value = d.driver_name
+  driverDropdown.value = false
+}
+function clearDriver() {
+  selectedDriverCd.value = ''
+  driverSearch.value = ''
+}
+
+// 車両検索
+const vehicleSearch = ref('')
+const vehicleDropdown = ref(false)
+const filteredVehicles = computed(() => {
+  const q = vehicleSearch.value.toLowerCase()
+  if (!q) return vehicles.value
+  return vehicles.value.filter(v => v.vehicle_name.toLowerCase().includes(q) || v.vehicle_cd.includes(q))
+})
+function selectVehicle(v: Vehicle) {
+  selectedVehicleCd.value = v.vehicle_cd
+  vehicleSearch.value = v.vehicle_name
+  vehicleDropdown.value = false
+}
+function clearVehicle() {
+  selectedVehicleCd.value = ''
+  vehicleSearch.value = ''
+}
+
+// ドロップダウンを閉じる（input の blur で遅延して閉じる）
+function closeDriverDropdown() {
+  setTimeout(() => { driverDropdown.value = false }, 200)
+}
+function closeVehicleDropdown() {
+  setTimeout(() => { vehicleDropdown.value = false }, 200)
+}
 </script>
 
 <template>
@@ -106,19 +151,57 @@ const totalPages = computed(() => Math.ceil(total.value / perPage))
         <label class="text-xs text-gray-500 block mb-1">終了日</label>
         <input v-model="dateTo" type="date" class="border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-900 dark:border-gray-700">
       </div>
-      <div>
+      <div class="relative">
         <label class="text-xs text-gray-500 block mb-1">ドライバー</label>
-        <select v-model="selectedDriverCd" class="border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-900 dark:border-gray-700">
-          <option value="">すべて</option>
-          <option v-for="d in drivers" :key="d.id" :value="d.driver_cd">{{ d.driver_name }}</option>
-        </select>
+        <input
+          v-model="driverSearch"
+          type="text"
+          placeholder="すべて"
+          class="border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-900 dark:border-gray-700 w-44"
+          @focus="driverDropdown = true"
+          @input="driverDropdown = true"
+          @blur="closeDriverDropdown"
+        >
+        <button v-if="selectedDriverCd" class="absolute right-2 top-7 text-gray-400 hover:text-gray-600" @click="clearDriver">
+          <UIcon name="i-lucide-x" class="size-3.5" />
+        </button>
+        <div v-if="driverDropdown" class="absolute z-10 mt-1 w-56 max-h-48 overflow-auto bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg">
+          <button
+            v-for="d in filteredDrivers"
+            :key="d.id"
+            class="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800"
+            @mousedown.prevent="selectDriver(d)"
+          >
+            {{ d.driver_name }}
+          </button>
+          <div v-if="filteredDrivers.length === 0" class="px-3 py-2 text-xs text-gray-400">該当なし</div>
+        </div>
       </div>
-      <div>
+      <div class="relative">
         <label class="text-xs text-gray-500 block mb-1">車両</label>
-        <select v-model="selectedVehicleCd" class="border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-900 dark:border-gray-700">
-          <option value="">すべて</option>
-          <option v-for="v in vehicles" :key="v.id" :value="v.vehicle_cd">{{ v.vehicle_name }}</option>
-        </select>
+        <input
+          v-model="vehicleSearch"
+          type="text"
+          placeholder="すべて"
+          class="border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-900 dark:border-gray-700 w-52"
+          @focus="vehicleDropdown = true"
+          @input="vehicleDropdown = true"
+          @blur="closeVehicleDropdown"
+        >
+        <button v-if="selectedVehicleCd" class="absolute right-2 top-7 text-gray-400 hover:text-gray-600" @click="clearVehicle">
+          <UIcon name="i-lucide-x" class="size-3.5" />
+        </button>
+        <div v-if="vehicleDropdown" class="absolute z-10 mt-1 w-60 max-h-48 overflow-auto bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg">
+          <button
+            v-for="v in filteredVehicles"
+            :key="v.id"
+            class="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800"
+            @mousedown.prevent="selectVehicle(v)"
+          >
+            {{ v.vehicle_name }}
+          </button>
+          <div v-if="filteredVehicles.length === 0" class="px-3 py-2 text-xs text-gray-400">該当なし</div>
+        </div>
       </div>
     </div>
 
@@ -151,6 +234,7 @@ const totalPages = computed(() => Math.ceil(total.value / perPage))
             class="border-t border-gray-100 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer transition-colors"
             @click="onRowClick(op)"
           >
+            <td class="px-4 py-3">{{ op.operation_date || '-' }}</td>
             <td class="px-4 py-3">{{ op.reading_date }}</td>
             <td class="px-4 py-3 font-mono">{{ op.unko_no }}</td>
             <td class="px-4 py-3">{{ op.driver_name || '-' }}</td>
