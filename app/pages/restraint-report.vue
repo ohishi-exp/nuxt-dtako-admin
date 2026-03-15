@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { getDrivers, getRestraintReport, downloadRestraintReportPdfStream, downloadRestraintReportPdfSingle, recalculateStream } from '~/utils/api'
+import { getDrivers, getRestraintReport, downloadRestraintReportPdfStream, downloadRestraintReportPdfSingle, recalculateStream, recalculateDriverStream } from '~/utils/api'
 import type { PdfProgressEvent, RecalcProgressEvent } from '~/utils/api'
 import type { Driver, RestraintReportResponse, RestraintDayRow } from '~/types'
 
@@ -151,6 +151,46 @@ async function runRecalculate() {
   }
 }
 
+const driverRecalcLoading = ref(false)
+
+async function runDriverRecalculate() {
+  if (!selectedMonth.value || !selectedDriverId.value) return
+  const [y, m] = selectedMonth.value.split('-').map(Number)
+  const driverName = drivers.value.find(d => d.id === selectedDriverId.value)?.driver_name || ''
+  if (!confirm(`${driverName} の ${y}年${m}月を再計算します。よろしいですか？`)) return
+  driverRecalcLoading.value = true
+  recalcResult.value = '準備中...'
+  recalcError.value = ''
+  let gotDone = false
+  try {
+    await recalculateDriverStream(y, m, selectedDriverId.value, (evt: RecalcProgressEvent) => {
+      if (evt.event === 'progress') {
+        const stepLabel = evt.step === 'download' ? 'DL' : evt.step === 'save' ? '保存' : '処理'
+        recalcResult.value = `再計算中 (${evt.current}/${evt.total}) ${stepLabel}中...`
+      } else if (evt.event === 'done') {
+        gotDone = true
+        recalcResult.value = `${driverName} 再計算完了`
+      } else if (evt.event === 'error') {
+        gotDone = true
+        recalcResult.value = evt.message || '再計算に失敗しました'
+        recalcError.value = evt.message || '再計算に失敗しました'
+      }
+    })
+    if (gotDone && !recalcError.value) {
+      await fetchReport()
+    }
+  } catch (e: unknown) {
+    if (!gotDone) {
+      recalcResult.value = 'エラーが発生しました'
+    }
+  } finally {
+    driverRecalcLoading.value = false
+    if (gotDone) {
+      setTimeout(() => { recalcResult.value = '' }, 10000)
+    }
+  }
+}
+
 const monthLabel = computed(() => {
   if (!selectedMonth.value) return ''
   const [y, m] = selectedMonth.value.split('-').map(Number)
@@ -176,7 +216,8 @@ const monthLabel = computed(() => {
       <UButton label="PDF" icon="i-lucide-file-down" size="sm" color="neutral" variant="outline" :loading="singlePdfLoading" :disabled="!selectedDriverId || !selectedMonth" @click="downloadSinglePdf" />
       <UButton label="全員PDF" icon="i-lucide-files" size="sm" color="neutral" variant="outline" :loading="pdfLoading" :disabled="!selectedMonth" @click="downloadPdf" />
       <span v-if="pdfProgress" class="text-xs text-gray-500 self-center">{{ pdfProgress }}</span>
-      <UButton label="再計算" icon="i-lucide-refresh-cw" size="sm" color="warning" variant="outline" :loading="recalcLoading" :disabled="!selectedMonth" @click="runRecalculate" />
+      <UButton label="再計算" icon="i-lucide-refresh-cw" size="sm" color="warning" variant="outline" :loading="driverRecalcLoading" :disabled="!selectedDriverId || !selectedMonth" @click="runDriverRecalculate" />
+      <UButton label="全員再計算" icon="i-lucide-refresh-cw" size="sm" color="warning" variant="outline" :loading="recalcLoading" :disabled="!selectedMonth" @click="runRecalculate" />
       <span v-if="recalcResult" class="text-xs text-gray-500 self-center">{{ recalcResult }}</span>
     </div>
 

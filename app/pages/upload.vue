@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { uploadZip, getPendingUploads, rerunUpload } from '~/utils/api'
+import { uploadZip, getPendingUploads, rerunUpload, getUploads, splitCsv } from '~/utils/api'
 import type { UploadResponse, PendingUpload } from '~/types'
 
 const isDragging = ref(false)
@@ -12,6 +12,12 @@ const pendingUploads = ref<PendingUpload[]>([])
 const pendingLoading = ref(false)
 const rerunningId = ref<string | null>(null)
 const rerunResult = ref<{ id: string; success: boolean; message: string } | null>(null)
+
+// --- Upload history (CSV split) ---
+const uploads = ref<any[]>([])
+const uploadsLoading = ref(false)
+const splittingId = ref<string | null>(null)
+const splitResults = ref<Record<string, { success: boolean; message: string }>>({})
 
 function onDragOver(e: DragEvent) {
   e.preventDefault()
@@ -112,8 +118,32 @@ function formatDatetime(iso: string) {
   return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
+async function loadUploads() {
+  uploadsLoading.value = true
+  try {
+    uploads.value = await getUploads()
+  } catch {
+    uploads.value = []
+  } finally {
+    uploadsLoading.value = false
+  }
+}
+
+async function handleSplit(uploadId: string) {
+  splittingId.value = uploadId
+  try {
+    await splitCsv(uploadId)
+    splitResults.value[uploadId] = { success: true, message: '分割完了' }
+  } catch (e) {
+    splitResults.value[uploadId] = { success: false, message: e instanceof Error ? e.message : '失敗' }
+  } finally {
+    splittingId.value = null
+  }
+}
+
 onMounted(() => {
   loadPending()
+  loadUploads()
 })
 </script>
 
@@ -238,6 +268,62 @@ onMounted(() => {
             :loading="rerunningId === item.id"
             :disabled="rerunningId !== null"
             @click="handleRerun(item)"
+          />
+        </div>
+      </div>
+    </UCard>
+
+    <!-- Upload History (CSV Split) -->
+    <UCard>
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-lg font-bold">アップロード履歴 / CSV分割</h3>
+        <UButton
+          icon="i-lucide-refresh-cw"
+          variant="ghost"
+          size="xs"
+          :loading="uploadsLoading"
+          @click="loadUploads"
+        />
+      </div>
+
+      <div v-if="uploadsLoading && uploads.length === 0" class="py-4 text-center text-gray-400 text-sm">
+        読み込み中...
+      </div>
+
+      <div v-else-if="uploads.length === 0" class="py-4 text-center text-gray-400 text-sm">
+        アップロード履歴なし
+      </div>
+
+      <div v-else class="space-y-2">
+        <div
+          v-for="item in uploads"
+          :key="item.id"
+          class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm border dark:border-gray-700"
+        >
+          <UBadge :color="statusColor(item.status)" variant="subtle" size="sm">
+            {{ statusLabel(item.status) }}
+          </UBadge>
+          <span class="font-medium truncate text-xs">{{ item.filename }}</span>
+          <span class="text-xs text-gray-500 shrink-0">{{ formatDatetime(item.created_at) }}</span>
+          <div class="flex-1" />
+          <span
+            v-if="splitResults[item.id]?.success"
+            class="text-xs text-green-600"
+          >{{ splitResults[item.id].message }}</span>
+          <span
+            v-if="splitResults[item.id] && !splitResults[item.id].success"
+            class="text-xs text-red-600"
+          >{{ splitResults[item.id].message }}</span>
+          <UButton
+            v-if="item.status === 'completed'"
+            label="CSV分割"
+            icon="i-lucide-scissors"
+            variant="soft"
+            color="primary"
+            size="xs"
+            :loading="splittingId === item.id"
+            :disabled="splittingId !== null"
+            @click="handleSplit(item.id)"
           />
         </div>
       </div>

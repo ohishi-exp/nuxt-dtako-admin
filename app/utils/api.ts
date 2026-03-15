@@ -358,6 +358,119 @@ export async function recalculateStream(
   }
 }
 
+export async function compareRestraintCsv(file: File): Promise<any[]> {
+  const formData = new FormData()
+  formData.append('file', file)
+  const token = getAccessToken?.()
+  const headers: Record<string, string> = {}
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const res = await fetch(`${apiBase}/api/restraint-report/compare-csv`, {
+    method: 'POST',
+    headers,
+    body: formData,
+  })
+  if (!res.ok) throw new Error(`比較に失敗: ${res.status}`)
+  return res.json()
+}
+
+export async function recalculateDriverStream(
+  year: number,
+  month: number,
+  driverId: string,
+  onProgress: (evt: RecalcProgressEvent) => void,
+): Promise<void> {
+  const url = `${apiBase}/api/recalculate-driver?year=${year}&month=${month}&driver_id=${driverId}`
+
+  const doFetch = async () => {
+    const token = getAccessToken?.()
+    const headers: Record<string, string> = {}
+    if (token) headers['Authorization'] = `Bearer ${token}`
+    return fetch(url, { method: 'POST', headers })
+  }
+
+  let res = await doFetch()
+
+  if (res.status === 401 && tokenRefresher) {
+    try {
+      if (!refreshPromise) {
+        refreshPromise = tokenRefresher().finally(() => { refreshPromise = null })
+      }
+      await refreshPromise
+      res = await doFetch()
+    } catch { /* ignore */ }
+  }
+
+  if (!res.ok) throw new Error(`再計算に失敗: ${res.status}`)
+
+  const reader = res.body?.getReader()
+  if (!reader) throw new Error('No response body')
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    while (buffer.includes('\n\n')) {
+      const idx = buffer.indexOf('\n\n')
+      const message = buffer.slice(0, idx)
+      buffer = buffer.slice(idx + 2)
+      for (const line of message.split('\n')) {
+        if (line.startsWith('data:')) {
+          const data = line.slice(5).trim()
+          if (data) {
+            try { onProgress(JSON.parse(data)) } catch { /* ignore */ }
+          }
+        }
+      }
+    }
+  }
+}
+
+// --- Uploads & CSV Split ---
+
+export async function getUploads(): Promise<any[]> {
+  return request<any[]>('/api/uploads')
+}
+
+export async function splitCsv(uploadId: string): Promise<any> {
+  return request<any>(`/api/split-csv/${uploadId}`, { method: 'POST' })
+}
+
+export async function splitCsvAllStream(
+  onProgress: (evt: any) => void,
+): Promise<void> {
+  const url = `${apiBase}/api/split-csv-all`
+  const token = getAccessToken?.()
+  const headers: Record<string, string> = {}
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const res = await fetch(url, { method: 'POST', headers })
+  if (!res.ok) throw new Error(`分割に失敗: ${res.status}`)
+  const reader = res.body?.getReader()
+  if (!reader) throw new Error('No response body')
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    while (buffer.includes('\n\n')) {
+      const idx = buffer.indexOf('\n\n')
+      const message = buffer.slice(0, idx)
+      buffer = buffer.slice(idx + 2)
+      for (const line of message.split('\n')) {
+        if (line.startsWith('data:')) {
+          const data = line.slice(5).trim()
+          if (data) {
+            try { onProgress(JSON.parse(data)) } catch { /* ignore */ }
+          }
+        }
+      }
+    }
+  }
+}
+
 // --- Members ---
 
 export async function getMembers(): Promise<TenantMember[]> {

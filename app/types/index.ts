@@ -89,6 +89,7 @@ export interface OperationListItem {
   safety_score: number | null
   economy_score: number | null
   total_score: number | null
+  has_kudgivt: boolean
 }
 
 export interface OperationsResponse {

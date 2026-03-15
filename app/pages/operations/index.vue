@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { getOperations, getDrivers, getVehicles } from '~/utils/api'
+import { getOperations, getDrivers, getVehicles, splitCsvAllStream } from '~/utils/api'
 import type { OperationListItem, Driver, Vehicle } from '~/types'
 
 const router = useRouter()
@@ -18,6 +18,8 @@ const total = ref(0)
 const drivers = ref<Driver[]>([])
 const vehicles = ref<Vehicle[]>([])
 const loading = ref(false)
+const splitLoading = ref(false)
+const splitResult = ref('')
 
 // Table columns
 const columns = [
@@ -27,6 +29,7 @@ const columns = [
   { key: 'driver_name', label: 'ドライバー' },
   { key: 'vehicle_name', label: '車両' },
   { key: 'total_distance', label: '走行距離' },
+  { key: 'has_kudgivt', label: 'IVT' },
   { key: 'safety_score', label: '安全' },
   { key: 'economy_score', label: '省エネ' },
   { key: 'total_score', label: '総合' },
@@ -114,11 +117,52 @@ function clearVehicle() {
 function closeVehicleDropdown() {
   setTimeout(() => { vehicleDropdown.value = false }, 200)
 }
+
+const unsplitCount = computed(() => operations.value.filter(op => !op.has_kudgivt).length)
+
+async function splitAll() {
+  splitLoading.value = true
+  splitResult.value = '準備中...'
+  let gotDone = false
+  try {
+    await splitCsvAllStream((evt: any) => {
+      if (evt.event === 'progress') {
+        splitResult.value = `分割中 (${evt.current}/${evt.total}) ${evt.filename || ''}`
+      } else if (evt.event === 'done') {
+        gotDone = true
+        splitResult.value = `完了: ${evt.success}/${evt.total} 成功${evt.failed > 0 ? `, ${evt.failed} 失敗` : ''}`
+        fetchData()
+      } else if (evt.event === 'error') {
+        gotDone = true
+        splitResult.value = evt.message || '失敗'
+      }
+    })
+    if (!gotDone) splitResult.value = '処理中...'
+  } catch (e: any) {
+    splitResult.value = e.message || '失敗'
+  } finally {
+    splitLoading.value = false
+    if (gotDone) setTimeout(() => { splitResult.value = '' }, 10000)
+  }
+}
 </script>
 
 <template>
   <div class="space-y-4">
-    <h2 class="text-xl font-bold">運行一覧</h2>
+    <div class="flex items-center gap-3">
+      <h2 class="text-xl font-bold">運行一覧</h2>
+      <UButton
+        v-if="unsplitCount > 0"
+        :label="`IVT一括分割 (${unsplitCount}件未分割)`"
+        icon="i-lucide-scissors"
+        size="xs"
+        color="warning"
+        variant="outline"
+        :loading="splitLoading"
+        @click="splitAll"
+      />
+      <span v-if="splitResult" class="text-xs text-gray-500">{{ splitResult }}</span>
+    </div>
 
     <!-- Filters -->
     <div class="flex flex-wrap gap-3 items-end">
@@ -197,6 +241,10 @@ function closeVehicleDropdown() {
             <td class="px-4 py-3">{{ op.driver_name || '-' }}</td>
             <td class="px-4 py-3">{{ op.vehicle_name || '-' }}</td>
             <td class="px-4 py-3">{{ formatDistance(op.total_distance) }}</td>
+            <td class="px-4 py-3 text-center">
+              <span v-if="op.has_kudgivt" class="text-green-600">✓</span>
+              <span v-else class="text-red-400">✗</span>
+            </td>
             <td class="px-4 py-3" :class="scoreColor(op.safety_score)">{{ formatScore(op.safety_score) }}</td>
             <td class="px-4 py-3" :class="scoreColor(op.economy_score)">{{ formatScore(op.economy_score) }}</td>
             <td class="px-4 py-3" :class="scoreColor(op.total_score)">{{ formatScore(op.total_score) }}</td>
