@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { getCalendar, triggerScrapeStream, getScrapeHistory } from '~/utils/api'
-import type { ScrapeResult, ScrapeHistoryItem } from '~/types'
+import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl } from '~/utils/api'
+import type { ScrapeResult, ScrapeHistoryItem, PendingUpload, ScrapeStatusEntry } from '~/types'
 import type { ScrapeProgressEvent } from '~/utils/api'
 
 const compIdOptions = [
@@ -22,7 +22,11 @@ const now = new Date()
 const calYear = ref(now.getFullYear())
 const calMonth = ref(now.getMonth() + 1)
 const calLoading = ref(false)
-const fetchedDates = ref<Map<string, number>>(new Map())
+interface FetchedDate {
+  count: number
+  scrapes: ScrapeStatusEntry[]
+}
+const fetchedDates = ref<Map<string, FetchedDate>>(new Map())
 const selectedDates = ref<Set<string>>(new Set())
 
 const weekDays = ['日', '月', '火', '水', '木', '金', '土']
@@ -32,6 +36,7 @@ interface CalendarCell {
   day: number
   inMonth: boolean
   count: number // 0 = no data
+  scrapes: ScrapeStatusEntry[]
 }
 
 const calendarCells = computed<CalendarCell[]>(() => {
@@ -51,6 +56,7 @@ const calendarCells = computed<CalendarCell[]>(() => {
       day: d.getDate(),
       inMonth: false,
       count: 0,
+      scrapes: [],
     })
   }
 
@@ -58,11 +64,13 @@ const calendarCells = computed<CalendarCell[]>(() => {
   for (let day = 1; day <= daysInMonth; day++) {
     const d = new Date(y, m - 1, day)
     const dateStr = fmt(d)
+    const fetched = fetchedDates.value.get(dateStr)
     cells.push({
       date: dateStr,
       day,
       inMonth: true,
-      count: fetchedDates.value.get(dateStr) || 0,
+      count: fetched?.count || 0,
+      scrapes: fetched?.scrapes || [],
     })
   }
 
@@ -74,6 +82,7 @@ const calendarCells = computed<CalendarCell[]>(() => {
       day: d.getDate(),
       inMonth: false,
       count: 0,
+      scrapes: [],
     })
   }
 
@@ -113,9 +122,9 @@ async function loadCalendar() {
   selectedDates.value.clear()
   try {
     const res = await getCalendar(calYear.value, calMonth.value)
-    const map = new Map<string, number>()
+    const map = new Map<string, FetchedDate>()
     for (const d of res.dates) {
-      map.set(d.date, d.count)
+      map.set(d.date, { count: d.count, scrapes: d.scrapes || [] })
     }
     fetchedDates.value = map
   }
@@ -352,6 +361,76 @@ async function handleRerunAllErrors() {
   await loadHistory()
 }
 
+// --- 保留アップロード ---
+
+const pendingUploads = ref<PendingUpload[]>([])
+const pendingLoading = ref(false)
+const pendingError = ref<string | null>(null)
+const rerunningId = ref<string | null>(null)
+const rerunResult = ref<{ id: string; success: boolean; message: string } | null>(null)
+
+async function loadPending() {
+  pendingLoading.value = true
+  pendingError.value = null
+  try {
+    pendingUploads.value = await getPendingUploads()
+  } catch (e) {
+    pendingUploads.value = []
+    pendingError.value = e instanceof Error ? e.message : '取得に失敗しました'
+  } finally {
+    pendingLoading.value = false
+  }
+}
+
+async function handleUploadRerun(upload: PendingUpload, historyItem?: ScrapeHistoryItem) {
+  rerunningId.value = upload.id
+  rerunResult.value = null
+  try {
+    const res = await rerunUpload(upload.id)
+    upload.status = res.status
+    rerunResult.value = {
+      id: upload.id,
+      success: true,
+      message: `${res.operations_count} 件取り込み完了`,
+    }
+    if (historyItem) {
+      historyItem.message = `✅ リラン完了: ${res.operations_count} 件取り込み (upload_id: ${upload.id})`
+    }
+    await loadPending()
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'リランに失敗しました'
+    rerunResult.value = {
+      id: upload.id,
+      success: false,
+      message: msg,
+    }
+    if (historyItem) {
+      historyItem.status = 'error'
+      historyItem.message = `❌ リラン失敗: ${msg}`
+    }
+  } finally {
+    rerunningId.value = null
+  }
+}
+
+function uploadStatusColor(status: string) {
+  switch (status) {
+    case 'completed': return 'success' as const
+    case 'pending_retry': return 'warning' as const
+    case 'failed': return 'error' as const
+    default: return 'neutral' as const
+  }
+}
+
+function uploadStatusLabel(status: string) {
+  switch (status) {
+    case 'completed': return '完了'
+    case 'pending_retry': return '保留中'
+    case 'failed': return '失敗'
+    default: return status
+  }
+}
+
 // --- 履歴 ---
 
 const history = ref<ScrapeHistoryItem[]>([])
@@ -375,12 +454,12 @@ async function handleHistoryRerun(item: ScrapeHistoryItem) {
   isRunning.value = true
 
   // リアルタイムタスクとして追加
-  const task: DayTask = {
+  tasks.value = [{
     date: item.target_date,
     status: 'running',
     results: [],
-  }
-  tasks.value = [task]
+  }]
+  const task = tasks.value[0]  // リアクティブプロキシを参照
 
   try {
     await triggerScrapeStream(
@@ -421,6 +500,12 @@ async function handleHistoryRerun(item: ScrapeHistoryItem) {
   await loadHistory()
 }
 
+function extractUploadId(message: string | null): string | null {
+  if (!message || !message.includes('STORED_FOR_RETRY')) return null
+  const match = message.match(/"upload_id"\s*:\s*"([^"]+)"/)
+  return match ? match[1] : null
+}
+
 function formatDatetime(iso: string): string {
   const d = new Date(iso)
   return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
@@ -433,6 +518,7 @@ const errorCount = computed(() => tasks.value.filter(t => t.status === 'error').
 onMounted(() => {
   loadCalendar()
   loadHistory()
+  loadPending()
 })
 </script>
 
@@ -502,8 +588,10 @@ onMounted(() => {
           class="aspect-square rounded-lg text-sm flex flex-col items-center justify-center transition-all relative"
           :class="[
             !cell.inMonth ? 'text-gray-300 dark:text-gray-700 cursor-default' : 'cursor-pointer hover:ring-2 hover:ring-blue-300',
-            cell.inMonth && cell.count > 0 ? 'bg-green-100 dark:bg-green-900/40 text-green-800 dark:text-green-300' : '',
-            cell.inMonth && cell.count === 0 ? 'bg-gray-50 dark:bg-gray-800/50' : '',
+            cell.inMonth && cell.count > 0 && !cell.scrapes.some(s => s.status !== 'success') ? 'bg-green-100 dark:bg-green-900/40 text-green-800 dark:text-green-300' : '',
+            cell.inMonth && cell.count > 0 && cell.scrapes.some(s => s.status !== 'success') ? 'bg-yellow-100 dark:bg-yellow-900/40 text-yellow-800 dark:text-yellow-300' : '',
+            cell.inMonth && cell.count === 0 && cell.scrapes.some(s => s.status !== 'success') ? 'bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-300' : '',
+            cell.inMonth && cell.count === 0 && !cell.scrapes.some(s => s.status !== 'success') ? 'bg-gray-50 dark:bg-gray-800/50' : '',
             selectedDates.has(cell.date) ? 'ring-2 ring-blue-500 ring-offset-1 dark:ring-offset-gray-900' : '',
           ]"
           @click="toggleDate(cell)"
@@ -512,6 +600,16 @@ onMounted(() => {
           <span v-if="cell.inMonth && cell.count > 0" class="text-[10px] leading-none text-green-600 dark:text-green-400">
             {{ cell.count }}件
           </span>
+          <!-- 企業別ステータスドット -->
+          <div v-if="cell.inMonth && cell.scrapes.length > 0" class="flex gap-0.5 mt-0.5">
+            <span
+              v-for="s in cell.scrapes"
+              :key="s.comp_id"
+              class="w-1.5 h-1.5 rounded-full"
+              :class="s.status === 'success' ? 'bg-green-500' : 'bg-red-500'"
+              :title="`${compIdLabels[s.comp_id] || s.comp_id}: ${s.status}`"
+            />
+          </div>
         </button>
       </div>
 
@@ -683,14 +781,132 @@ onMounted(() => {
             {{ item.message }}
           </span>
           <div class="flex-1" />
+          <span
+            v-if="rerunResult && rerunResult.id === extractUploadId(item.message) && rerunResult.success"
+            class="text-xs text-green-600"
+          >
+            {{ rerunResult.message }}
+          </span>
+          <span
+            v-if="rerunResult && rerunResult.id === extractUploadId(item.message) && !rerunResult.success"
+            class="text-xs text-red-600"
+          >
+            {{ rerunResult.message }}
+          </span>
           <UButton
-            v-if="item.status === 'error' && !isRunning"
+            v-if="extractUploadId(item.message)"
+            icon="i-lucide-download"
+            variant="soft"
+            color="neutral"
+            size="xs"
+            :to="getUploadDownloadUrl(extractUploadId(item.message)!)"
+            target="_blank"
+          />
+          <UButton
+            v-if="extractUploadId(item.message) && !isRunning"
+            label="リラン"
+            icon="i-lucide-upload"
+            variant="soft"
+            color="warning"
+            size="xs"
+            :loading="rerunningId === extractUploadId(item.message)"
+            @click="handleUploadRerun({ id: extractUploadId(item.message)!, status: 'pending_retry' } as PendingUpload, item)"
+          />
+          <UButton
+            v-else-if="item.status === 'error' && !isRunning"
             label="リラン"
             icon="i-lucide-refresh-cw"
             variant="soft"
             color="warning"
             size="xs"
             @click="handleHistoryRerun(item)"
+          />
+        </div>
+      </div>
+    </UCard>
+
+    <!-- Pending Uploads -->
+    <UCard class="mt-6">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-bold">
+          保留中のアップロード
+        </h2>
+        <UButton
+          icon="i-lucide-refresh-cw"
+          variant="ghost"
+          size="xs"
+          :loading="pendingLoading"
+          @click="loadPending"
+        />
+      </div>
+
+      <div v-if="pendingLoading && pendingUploads.length === 0" class="py-6 text-center text-gray-400">
+        <UIcon name="i-lucide-loader-circle" class="animate-spin size-5 inline-block mr-2" />
+        読み込み中...
+      </div>
+
+      <div v-else-if="pendingError" class="py-6 text-center text-red-500 text-sm">
+        {{ pendingError }}
+      </div>
+
+      <div v-else-if="pendingUploads.length === 0" class="py-6 text-center text-gray-400 text-sm">
+        保留中のアップロードはありません
+      </div>
+
+      <div v-else class="space-y-1.5">
+        <div
+          v-for="item in pendingUploads"
+          :key="item.id"
+          class="flex items-center gap-2 px-3 py-2 rounded-lg text-sm border"
+          :class="{
+            'border-green-200 dark:border-green-800 bg-green-50/50 dark:bg-green-950/30': item.status === 'completed',
+            'border-yellow-200 dark:border-yellow-800 bg-yellow-50/50 dark:bg-yellow-950/30': item.status === 'pending_retry',
+            'border-red-200 dark:border-red-800 bg-red-50/50 dark:bg-red-950/30': item.status === 'failed',
+          }"
+        >
+          <UBadge :color="uploadStatusColor(item.status)" variant="subtle" size="sm">
+            {{ uploadStatusLabel(item.status) }}
+          </UBadge>
+          <span class="font-medium truncate">{{ item.filename }}</span>
+          <span class="text-xs text-gray-500 shrink-0">{{ formatDatetime(item.created_at) }}</span>
+          <span
+            v-if="item.error_message"
+            class="text-xs text-red-700 dark:text-red-400 truncate"
+            :title="item.error_message"
+          >
+            {{ item.error_message }}
+          </span>
+          <div class="flex-1" />
+          <span
+            v-if="rerunResult && rerunResult.id === item.id && rerunResult.success"
+            class="text-xs text-green-600"
+          >
+            {{ rerunResult.message }}
+          </span>
+          <span
+            v-if="rerunResult && rerunResult.id === item.id && !rerunResult.success"
+            class="text-xs text-red-600"
+          >
+            {{ rerunResult.message }}
+          </span>
+          <UButton
+            icon="i-lucide-download"
+            variant="soft"
+            color="neutral"
+            size="xs"
+            :to="getUploadDownloadUrl(item.id)"
+            target="_blank"
+          />
+          <UButton
+            v-if="item.status === 'pending_retry' || item.status === 'failed'"
+            label="リラン"
+            icon="i-lucide-refresh-cw"
+            variant="soft"
+            color="warning"
+            size="xs"
+            :loading="rerunningId === item.id"
+            :disabled="rerunningId !== null"
+            @click="handleUploadRerun(item)"
           />
         </div>
       </div>

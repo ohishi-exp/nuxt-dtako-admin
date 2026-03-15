@@ -152,6 +152,15 @@ export interface UploadResponse {
   status: string
 }
 
+export interface PendingUpload {
+  id: string
+  tenant_id: string
+  filename: string
+  status: string
+  error_message: string | null
+  created_at: string
+}
+
 // --- Event Classifications ---
 
 export interface EventClassification {
@@ -246,9 +255,15 @@ export interface ScrapeHistoryItem {
 
 // --- Calendar ---
 
+export interface ScrapeStatusEntry {
+  comp_id: string
+  status: string
+}
+
 export interface CalendarDateEntry {
   date: string
   count: number
+  scrapes?: ScrapeStatusEntry[]
 }
 
 export interface CalendarResponse {

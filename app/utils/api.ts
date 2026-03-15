@@ -2,7 +2,7 @@ import type {
   Driver, Vehicle,
   OperationsResponse, OperationFilter, Operation,
   CsvJsonResponse, CsvType,
-  UploadResponse,
+  UploadResponse, PendingUpload,
   DailyHoursResponse, DailyHoursFilter,
   EventClassification,
   WorkTimesResponse,
@@ -140,6 +140,20 @@ export async function uploadZip(file: File): Promise<UploadResponse> {
   })
 }
 
+export async function getPendingUploads(): Promise<PendingUpload[]> {
+  return request<PendingUpload[]>('/internal/pending')
+}
+
+export async function rerunUpload(uploadId: string): Promise<UploadResponse> {
+  return request<UploadResponse>(`/internal/rerun/${encodeURIComponent(uploadId)}`, {
+    method: 'POST',
+  })
+}
+
+export function getUploadDownloadUrl(uploadId: string): string {
+  return `${apiBase}/internal/download/${encodeURIComponent(uploadId)}`
+}
+
 // --- Event Classifications ---
 
 export async function getEventClassifications(): Promise<EventClassification[]> {
@@ -247,15 +261,32 @@ export async function triggerScrapeStream(
   onEvent: (evt: ScrapeProgressEvent) => void,
 ): Promise<void> {
   const url = `${apiBase}/api/scraper/trigger`
-  const token = getAccessToken?.()
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (token) headers['Authorization'] = `Bearer ${token}`
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(req),
-  })
+  const doFetch = async () => {
+    const token = getAccessToken?.()
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (token) headers['Authorization'] = `Bearer ${token}`
+    return fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(req),
+    })
+  }
+
+  let res = await doFetch()
+
+  // 401 → トークンリフレッシュ → リトライ
+  if (res.status === 401 && tokenRefresher) {
+    try {
+      if (!refreshPromise) {
+        refreshPromise = tokenRefresher().finally(() => { refreshPromise = null })
+      }
+      await refreshPromise
+      res = await doFetch()
+    } catch {
+      // リフレッシュ失敗
+    }
+  }
 
   if (!res.ok) {
     throw new Error(`Scraper error: ${res.status} ${await res.text()}`)
