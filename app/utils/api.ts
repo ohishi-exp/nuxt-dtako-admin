@@ -185,6 +185,179 @@ export async function getRestraintReport(filter: RestraintReportFilter): Promise
   return request<RestraintReportResponse>(`/api/restraint-report${toParams(filter)}`)
 }
 
+// --- Restraint Report PDF ---
+
+export async function downloadRestraintReportPdfSingle(year: number, month: number, driverId: string, driverName: string): Promise<void> {
+  const token = getAccessToken?.()
+  const headers: Record<string, string> = {}
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const res = await fetch(`${apiBase}/api/restraint-report/pdf?year=${year}&month=${month}&driver_id=${driverId}`, { headers })
+  if (!res.ok) throw new Error(`PDF生成に失敗: ${res.status}`)
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `拘束時間管理表_${driverName}_${year}年${String(month).padStart(2, '0')}月.pdf`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+export interface PdfProgressEvent {
+  event: string       // "progress" | "done" | "error"
+  current?: number
+  total?: number
+  driver_name?: string
+  step?: string       // "fetch" | "render" | "save"
+  data?: string       // base64 PDF data (only on "done")
+  message?: string
+}
+
+export async function downloadRestraintReportPdfStream(
+  year: number,
+  month: number,
+  onProgress: (evt: PdfProgressEvent) => void,
+): Promise<void> {
+  const url = `${apiBase}/api/restraint-report/pdf-stream?year=${year}&month=${month}`
+
+  const doFetch = async () => {
+    const token = getAccessToken?.()
+    const headers: Record<string, string> = {}
+    if (token) headers['Authorization'] = `Bearer ${token}`
+    return fetch(url, { headers })
+  }
+
+  let res = await doFetch()
+
+  // 401 → トークンリフレッシュ → リトライ
+  if (res.status === 401 && tokenRefresher) {
+    try {
+      if (!refreshPromise) {
+        refreshPromise = tokenRefresher().finally(() => { refreshPromise = null })
+      }
+      await refreshPromise
+      res = await doFetch()
+    } catch {
+      // リフレッシュ失敗
+    }
+  }
+
+  if (!res.ok) throw new Error(`PDF生成に失敗しました: ${res.status}`)
+
+  const reader = res.body?.getReader()
+  if (!reader) throw new Error('No response body')
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+
+    while (buffer.includes('\n\n')) {
+      const idx = buffer.indexOf('\n\n')
+      const message = buffer.slice(0, idx)
+      buffer = buffer.slice(idx + 2)
+
+      for (const line of message.split('\n')) {
+        if (line.startsWith('data:')) {
+          const data = line.slice(5).trim()
+          if (data) {
+            try {
+              const evt: PdfProgressEvent = JSON.parse(data)
+              onProgress(evt)
+
+              // done イベントの場合、base64をデコードしてダウンロード
+              if (evt.event === 'done' && evt.data) {
+                const binary = atob(evt.data)
+                const bytes = new Uint8Array(binary.length)
+                for (let i = 0; i < binary.length; i++) {
+                  bytes[i] = binary.charCodeAt(i)
+                }
+                const blob = new Blob([bytes], { type: 'application/pdf' })
+                const blobUrl = URL.createObjectURL(blob)
+                const a = document.createElement('a')
+                a.href = blobUrl
+                a.download = `拘束時間管理表_${year}年${String(month).padStart(2, '0')}月.pdf`
+                a.click()
+                URL.revokeObjectURL(blobUrl)
+              }
+            } catch { /* ignore parse errors */ }
+          }
+        }
+      }
+    }
+  }
+}
+
+// --- Recalculate ---
+
+export interface RecalcProgressEvent {
+  event: string
+  current?: number
+  total?: number
+  filename?: string
+  step?: string
+  success?: number
+  failed?: number
+  message?: string
+}
+
+export async function recalculateStream(
+  year: number,
+  month: number,
+  onProgress: (evt: RecalcProgressEvent) => void,
+): Promise<void> {
+  const url = `${apiBase}/api/recalculate?year=${year}&month=${month}`
+
+  const doFetch = async () => {
+    const token = getAccessToken?.()
+    const headers: Record<string, string> = {}
+    if (token) headers['Authorization'] = `Bearer ${token}`
+    return fetch(url, { method: 'POST', headers })
+  }
+
+  let res = await doFetch()
+
+  if (res.status === 401 && tokenRefresher) {
+    try {
+      if (!refreshPromise) {
+        refreshPromise = tokenRefresher().finally(() => { refreshPromise = null })
+      }
+      await refreshPromise
+      res = await doFetch()
+    } catch { /* ignore */ }
+  }
+
+  if (!res.ok) throw new Error(`再計算に失敗: ${res.status}`)
+
+  const reader = res.body?.getReader()
+  if (!reader) throw new Error('No response body')
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    while (buffer.includes('\n\n')) {
+      const idx = buffer.indexOf('\n\n')
+      const message = buffer.slice(0, idx)
+      buffer = buffer.slice(idx + 2)
+      for (const line of message.split('\n')) {
+        if (line.startsWith('data:')) {
+          const data = line.slice(5).trim()
+          if (data) {
+            try { onProgress(JSON.parse(data)) } catch { /* ignore */ }
+          }
+        }
+      }
+    }
+  }
+}
+
 // --- Members ---
 
 export async function getMembers(): Promise<TenantMember[]> {

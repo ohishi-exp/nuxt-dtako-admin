@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { getDrivers, getRestraintReport } from '~/utils/api'
+import { getDrivers, getRestraintReport, downloadRestraintReportPdfStream, downloadRestraintReportPdfSingle, recalculateStream } from '~/utils/api'
+import type { PdfProgressEvent, RecalcProgressEvent } from '~/utils/api'
 import type { Driver, RestraintReportResponse, RestraintDayRow } from '~/types'
 
 const drivers = ref<Driver[]>([])
@@ -62,6 +63,94 @@ const driverName = computed(() => {
   return d?.driver_name || ''
 })
 
+const pdfLoading = ref(false)
+const pdfError = ref('')
+const pdfProgress = ref('')
+
+async function downloadPdf() {
+  if (!selectedMonth.value) return
+  pdfLoading.value = true
+  pdfError.value = ''
+  pdfProgress.value = '準備中...'
+  try {
+    const [y, m] = selectedMonth.value.split('-').map(Number)
+    await downloadRestraintReportPdfStream(y, m, (evt: PdfProgressEvent) => {
+      if (evt.event === 'progress') {
+        if (evt.step === 'fetch') {
+          pdfProgress.value = `データ取得中 (${evt.current}/${evt.total}) ${evt.driver_name || ''}`
+        } else if (evt.step === 'render') {
+          pdfProgress.value = 'PDF生成中...'
+        }
+      } else if (evt.event === 'done') {
+        pdfProgress.value = 'ダウンロード完了'
+      } else if (evt.event === 'error') {
+        pdfError.value = evt.message || 'PDF出力に失敗しました'
+      }
+    })
+  } catch (e: unknown) {
+    pdfError.value = e instanceof Error ? e.message : 'PDF出力に失敗しました'
+  } finally {
+    pdfLoading.value = false
+    setTimeout(() => { pdfProgress.value = '' }, 3000)
+  }
+}
+
+const singlePdfLoading = ref(false)
+
+async function downloadSinglePdf() {
+  if (!selectedDriverId.value || !selectedMonth.value) return
+  singlePdfLoading.value = true
+  try {
+    const [y, m] = selectedMonth.value.split('-').map(Number)
+    await downloadRestraintReportPdfSingle(y, m, selectedDriverId.value, driverName.value)
+  } catch (e: unknown) {
+    pdfError.value = e instanceof Error ? e.message : 'PDF出力に失敗しました'
+  } finally {
+    singlePdfLoading.value = false
+  }
+}
+
+const recalcLoading = ref(false)
+const recalcResult = ref('')
+const recalcError = ref('')
+
+async function runRecalculate() {
+  if (!selectedMonth.value) return
+  const [y, m] = selectedMonth.value.split('-').map(Number)
+  if (!confirm(`${y}年${m}月のデータを再計算します。よろしいですか？`)) return
+  recalcLoading.value = true
+  recalcResult.value = '準備中...'
+  recalcError.value = ''
+  let gotDone = false
+  try {
+    await recalculateStream(y, m, (evt: RecalcProgressEvent) => {
+      if (evt.event === 'progress') {
+        const stepLabel = evt.step === 'download' ? 'DL' : evt.step === 'save' ? '保存' : '処理'
+        recalcResult.value = `再計算中 (${evt.current}/${evt.total}) ${stepLabel}中...`
+      } else if (evt.event === 'done') {
+        gotDone = true
+        recalcResult.value = `完了: ${evt.success}/${evt.total} 成功${evt.failed && evt.failed > 0 ? `, ${evt.failed} 失敗` : ''}`
+      } else if (evt.event === 'error') {
+        gotDone = true
+        recalcResult.value = evt.message || '再計算に失敗しました'
+        recalcError.value = evt.message || '再計算に失敗しました'
+      }
+    })
+    if (!gotDone) {
+      recalcResult.value = 'バックグラウンドで処理中...完了までお待ちください'
+    }
+  } catch (e: unknown) {
+    if (!gotDone) {
+      recalcResult.value = 'バックグラウンドで処理中...完了までお待ちください'
+    }
+  } finally {
+    recalcLoading.value = false
+    if (gotDone) {
+      setTimeout(() => { recalcResult.value = '' }, 10000)
+    }
+  }
+}
+
 const monthLabel = computed(() => {
   if (!selectedMonth.value) return ''
   const [y, m] = selectedMonth.value.split('-').map(Number)
@@ -77,19 +166,23 @@ const monthLabel = computed(() => {
     <div class="flex flex-wrap gap-3 items-end">
       <div>
         <label class="text-xs text-gray-500 block mb-1">ドライバー</label>
-        <select v-model="selectedDriverId" class="border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-900 dark:border-gray-700">
-          <option value="" disabled>選択してください</option>
-          <option v-for="d in drivers" :key="d.id" :value="d.id">{{ d.driver_name }}</option>
-        </select>
+        <DriverSearchSelect v-model="selectedDriverId" :drivers="drivers" placeholder="選択してください" />
       </div>
       <div>
         <label class="text-xs text-gray-500 block mb-1">月</label>
         <input v-model="selectedMonth" type="month" class="border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-900 dark:border-gray-700">
       </div>
       <UButton label="表示" icon="i-lucide-search" size="sm" :loading="loading" :disabled="!selectedDriverId || !selectedMonth" @click="fetchReport" />
+      <UButton label="PDF" icon="i-lucide-file-down" size="sm" color="neutral" variant="outline" :loading="singlePdfLoading" :disabled="!selectedDriverId || !selectedMonth" @click="downloadSinglePdf" />
+      <UButton label="全員PDF" icon="i-lucide-files" size="sm" color="neutral" variant="outline" :loading="pdfLoading" :disabled="!selectedMonth" @click="downloadPdf" />
+      <span v-if="pdfProgress" class="text-xs text-gray-500 self-center">{{ pdfProgress }}</span>
+      <UButton label="再計算" icon="i-lucide-refresh-cw" size="sm" color="warning" variant="outline" :loading="recalcLoading" :disabled="!selectedMonth" @click="runRecalculate" />
+      <span v-if="recalcResult" class="text-xs text-gray-500 self-center">{{ recalcResult }}</span>
     </div>
 
     <UAlert v-if="error" :title="error" color="error" icon="i-lucide-circle-x" variant="subtle" />
+    <UAlert v-if="pdfError" :title="pdfError" color="error" icon="i-lucide-circle-x" variant="subtle" />
+    <UAlert v-if="recalcError" :title="recalcError" color="error" icon="i-lucide-circle-x" variant="subtle" />
 
     <!-- Empty state -->
     <div v-if="!report && !loading && !error" class="text-center text-gray-400 py-12">

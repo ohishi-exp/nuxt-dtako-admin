@@ -92,24 +92,6 @@ function scoreColor(val: number | null): string {
 
 const totalPages = computed(() => Math.ceil(total.value / perPage))
 
-// ドライバー検索
-const driverSearch = ref('')
-const driverDropdown = ref(false)
-const filteredDrivers = computed(() => {
-  const q = driverSearch.value.toLowerCase()
-  if (!q) return drivers.value
-  return drivers.value.filter(d => d.driver_name.toLowerCase().includes(q) || d.driver_cd.includes(q))
-})
-function selectDriver(d: Driver) {
-  selectedDriverCd.value = d.driver_cd
-  driverSearch.value = d.driver_name
-  driverDropdown.value = false
-}
-function clearDriver() {
-  selectedDriverCd.value = ''
-  driverSearch.value = ''
-}
-
 // 車両検索
 const vehicleSearch = ref('')
 const vehicleDropdown = ref(false)
@@ -129,9 +111,6 @@ function clearVehicle() {
 }
 
 // ドロップダウンを閉じる（input の blur で遅延して閉じる）
-function closeDriverDropdown() {
-  setTimeout(() => { driverDropdown.value = false }, 200)
-}
 function closeVehicleDropdown() {
   setTimeout(() => { vehicleDropdown.value = false }, 200)
 }
@@ -151,31 +130,9 @@ function closeVehicleDropdown() {
         <label class="text-xs text-gray-500 block mb-1">終了日</label>
         <input v-model="dateTo" type="date" class="border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-900 dark:border-gray-700">
       </div>
-      <div class="relative">
+      <div>
         <label class="text-xs text-gray-500 block mb-1">ドライバー</label>
-        <input
-          v-model="driverSearch"
-          type="text"
-          placeholder="すべて"
-          class="border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-900 dark:border-gray-700 w-44"
-          @focus="driverDropdown = true"
-          @input="driverDropdown = true"
-          @blur="closeDriverDropdown"
-        >
-        <button v-if="selectedDriverCd" class="absolute right-2 top-7 text-gray-400 hover:text-gray-600" @click="clearDriver">
-          <UIcon name="i-lucide-x" class="size-3.5" />
-        </button>
-        <div v-if="driverDropdown" class="absolute z-10 mt-1 w-56 max-h-48 overflow-auto bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg">
-          <button
-            v-for="d in filteredDrivers"
-            :key="d.id"
-            class="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800"
-            @mousedown.prevent="selectDriver(d)"
-          >
-            {{ d.driver_name }}
-          </button>
-          <div v-if="filteredDrivers.length === 0" class="px-3 py-2 text-xs text-gray-400">該当なし</div>
-        </div>
+        <DriverSearchSelect v-model="selectedDriverCd" :drivers="drivers" value-key="driver_cd" />
       </div>
       <div class="relative">
         <label class="text-xs text-gray-500 block mb-1">車両</label>

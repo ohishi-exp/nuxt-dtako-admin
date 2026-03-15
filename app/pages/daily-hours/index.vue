@@ -113,10 +113,7 @@ function onTabChange() {
     <div class="flex flex-wrap gap-3 items-end">
       <div>
         <label class="text-xs text-gray-500 block mb-1">ドライバー</label>
-        <select v-model="selectedDriverId" class="border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-900 dark:border-gray-700">
-          <option value="">すべて</option>
-          <option v-for="d in drivers" :key="d.id" :value="d.id">{{ d.driver_name }}</option>
-        </select>
+        <DriverSearchSelect v-model="selectedDriverId" :drivers="drivers" />
       </div>
       <div>
         <label class="text-xs text-gray-500 block mb-1">月</label>
