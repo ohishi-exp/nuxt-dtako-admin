@@ -44,6 +44,28 @@ const summary = computed(() => {
   return { total, withDiffs, noSystem }
 })
 
+const batchRecalcRunning = ref(false)
+const batchRecalcProgress = ref('')
+
+async function recalcDiffsOnly() {
+  const driversWithDiffs = results.value.filter((r: any) => r.diffs.length > 0 && r.driver_id)
+  if (driversWithDiffs.length === 0) return
+
+  batchRecalcRunning.value = true
+  let done = 0
+  const total = driversWithDiffs.length
+
+  for (const r of driversWithDiffs) {
+    batchRecalcProgress.value = `${done + 1}/${total} ${r.driver_name}`
+    await recalcDriver(r.driver_id, r.driver_name, r.driver_cd)
+    done++
+  }
+  batchRecalcProgress.value = `${total}名完了 再比較中...`
+  await runCompare()
+  batchRecalcRunning.value = false
+  batchRecalcProgress.value = ''
+}
+
 async function recalcDriver(driverId: string, driverName: string, driverCd: string) {
   // 年月をCSVの日付から推定
   const firstResult = results.value[0]
@@ -88,6 +110,15 @@ async function recalcDriver(driverId: string, driverName: string, driverCd: stri
         <UButton :label="`差分のみ (${summary.withDiffs})`" size="xs" :color="filterMode === 'diff' ? 'primary' : 'neutral'" variant="outline" @click="filterMode = 'diff'" />
         <UButton :label="`全員 (${summary.total})`" size="xs" :color="filterMode === 'all' ? 'primary' : 'neutral'" variant="outline" @click="filterMode = 'all'" />
       </div>
+      <UButton
+        v-if="summary.withDiffs > 0"
+        :label="batchRecalcRunning ? batchRecalcProgress : `差分${summary.withDiffs}名 再計算`"
+        icon="i-lucide-refresh-cw"
+        size="sm"
+        color="warning"
+        :loading="batchRecalcRunning"
+        @click="recalcDiffsOnly"
+      />
       <span v-if="summary.noSystem > 0" class="text-xs text-orange-500 self-center">{{ summary.noSystem }}名 未登録</span>
     </div>
 
