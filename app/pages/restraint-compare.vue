@@ -66,11 +66,12 @@ async function recalcDiffsOnly() {
 
   try {
     await recalculateDriversBatch(year, month, driverIds, (evt: BatchRecalcEvent) => {
-      if (evt.event === 'driver_start') {
-        const name = driverMap[evt.driver_cd || ''] || evt.driver_cd
-        batchRecalcProgress.value = `${evt.current}/${evt.total} ${name}`
+      if (evt.event === 'progress') {
+        const errors = (evt as any).errors || 0
+        batchRecalcProgress.value = `${evt.current}/${evt.total}名${errors > 0 ? ` (${errors}エラー)` : ''}`
       } else if (evt.event === 'batch_done') {
-        batchRecalcProgress.value = `${evt.total}名完了 再比較中...`
+        const errors = (evt as any).errors || 0
+        batchRecalcProgress.value = `${(evt as any).done || evt.total}名完了${errors > 0 ? ` ${errors}エラー` : ''} 再比較中...`
       } else if (evt.event === 'error') {
         batchRecalcProgress.value = evt.message || 'エラー'
       }
