@@ -428,6 +428,75 @@ export async function recalculateDriverStream(
   }
 }
 
+export type BatchRecalcEvent = {
+  event: 'batch_start' | 'progress' | 'driver_start' | 'driver_done' | 'driver_error' | 'batch_done' | 'error'
+  total_drivers?: number
+  current?: number
+  total?: number
+  step?: string
+  driver_cd?: string
+  message?: string
+}
+
+export async function recalculateDriversBatch(
+  year: number,
+  month: number,
+  driverIds: string[],
+  onProgress: (evt: BatchRecalcEvent) => void,
+): Promise<void> {
+  const url = `${apiBase}/api/recalculate-drivers`
+
+  const doFetch = async () => {
+    const token = getAccessToken?.()
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (token) headers['Authorization'] = `Bearer ${token}`
+    return fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ year, month, driver_ids: driverIds }),
+    })
+  }
+
+  let res = await doFetch()
+
+  if (res.status === 401 && tokenRefresher) {
+    try {
+      if (!refreshPromise) {
+        refreshPromise = tokenRefresher().finally(() => { refreshPromise = null })
+      }
+      await refreshPromise
+      res = await doFetch()
+    } catch { /* ignore */ }
+  }
+
+  if (!res.ok) throw new Error(`一括再計算に失敗: ${res.status}`)
+
+  const reader = res.body?.getReader()
+  if (!reader) throw new Error('No response body')
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    while (buffer.includes('\n\n')) {
+      const idx = buffer.indexOf('\n\n')
+      const message = buffer.slice(0, idx)
+      buffer = buffer.slice(idx + 2)
+      for (const line of message.split('\n')) {
+        if (line.startsWith('data:')) {
+          const data = line.slice(5).trim()
+          if (data) {
+            try { onProgress(JSON.parse(data)) } catch { /* ignore */ }
+          }
+        }
+      }
+    }
+  }
+}
+
 // --- Uploads & CSV Split ---
 
 export async function getUploads(): Promise<any[]> {

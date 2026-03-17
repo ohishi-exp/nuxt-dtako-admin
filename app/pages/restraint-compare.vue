@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { compareRestraintCsv, recalculateDriverStream } from '~/utils/api'
-import type { RecalcProgressEvent } from '~/utils/api'
+import { compareRestraintCsv, recalculateDriverStream, recalculateDriversBatch } from '~/utils/api'
+import type { RecalcProgressEvent, BatchRecalcEvent } from '~/utils/api'
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const loading = ref(false)
@@ -51,19 +51,37 @@ async function recalcDiffsOnly() {
   const driversWithDiffs = results.value.filter((r: any) => r.diffs.length > 0 && r.driver_id)
   if (driversWithDiffs.length === 0) return
 
-  batchRecalcRunning.value = true
-  let done = 0
-  const total = driversWithDiffs.length
+  // 年月推定
+  const firstResult = results.value[0]
+  if (!firstResult?.csv?.days?.length) return
+  const dateStr = firstResult.csv.days.find((d: any) => !d.is_holiday)?.date || ''
+  const mMatch = dateStr.match(/(\d+)月/)
+  if (!mMatch) return
+  const month = parseInt(mMatch[1])
+  const year = 2026
 
-  for (const r of driversWithDiffs) {
-    batchRecalcProgress.value = `${done + 1}/${total} ${r.driver_name}`
-    await recalcDriver(r.driver_id, r.driver_name, r.driver_cd)
-    done++
+  batchRecalcRunning.value = true
+  const driverIds = driversWithDiffs.map((r: any) => r.driver_id)
+  const driverMap = Object.fromEntries(driversWithDiffs.map((r: any) => [r.driver_cd, r.driver_name]))
+
+  try {
+    await recalculateDriversBatch(year, month, driverIds, (evt: BatchRecalcEvent) => {
+      if (evt.event === 'driver_start') {
+        const name = driverMap[evt.driver_cd || ''] || evt.driver_cd
+        batchRecalcProgress.value = `${evt.current}/${evt.total} ${name}`
+      } else if (evt.event === 'batch_done') {
+        batchRecalcProgress.value = `${evt.total}名完了 再比較中...`
+      } else if (evt.event === 'error') {
+        batchRecalcProgress.value = evt.message || 'エラー'
+      }
+    })
+    await runCompare()
+  } catch (e: any) {
+    batchRecalcProgress.value = e.message || 'エラー'
+  } finally {
+    batchRecalcRunning.value = false
+    batchRecalcProgress.value = ''
   }
-  batchRecalcProgress.value = `${total}名完了 再比較中...`
-  await runCompare()
-  batchRecalcRunning.value = false
-  batchRecalcProgress.value = ''
 }
 
 async function recalcDriver(driverId: string, driverName: string, driverCd: string) {
