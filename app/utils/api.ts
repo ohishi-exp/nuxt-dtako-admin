@@ -358,13 +358,14 @@ export async function recalculateStream(
   }
 }
 
-export async function compareRestraintCsv(file: File): Promise<any[]> {
+export async function compareRestraintCsv(file: File, driverCd?: string): Promise<any[]> {
   const formData = new FormData()
   formData.append('file', file)
   const token = getAccessToken?.()
   const headers: Record<string, string> = {}
   if (token) headers['Authorization'] = `Bearer ${token}`
-  const res = await fetch(`${apiBase}/api/restraint-report/compare-csv`, {
+  const params = driverCd ? `?driver_cd=${encodeURIComponent(driverCd)}` : ''
+  const res = await fetch(`${apiBase}/api/restraint-report/compare-csv${params}`, {
     method: 'POST',
     headers,
     body: formData,
