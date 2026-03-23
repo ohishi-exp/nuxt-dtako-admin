@@ -1,24 +1,15 @@
 <script setup lang="ts">
 definePageMeta({ layout: 'auth' })
 
-const { handleGoogleCallback } = useAuth()
-const route = useRoute()
+const { handleCallback } = useAuth()
 const error = ref<string | null>(null)
 
-onMounted(async () => {
-  const code = route.query.code as string
-  const state = route.query.state as string
-
-  if (!code || !state) {
-    error.value = '認証パラメータが不足しています'
-    return
-  }
-
-  try {
-    await handleGoogleCallback(code, state)
+onMounted(() => {
+  const success = handleCallback()
+  if (success) {
     navigateTo('/operations')
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : '認証に失敗しました'
+  } else {
+    error.value = '認証に失敗しました。再度ログインしてください。'
   }
 })
 </script>

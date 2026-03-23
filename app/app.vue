@@ -2,13 +2,14 @@
 import { initApi } from '~/utils/api'
 
 const config = useRuntimeConfig()
-const { init, accessToken, refreshAccessToken, isLoading } = useAuth()
+const { init, accessToken, tenantId, isLoading } = useAuth()
 
 onMounted(async () => {
   initApi(
     config.public.apiBase as string,
     () => accessToken.value,
-    () => refreshAccessToken(),
+    undefined,
+    () => tenantId.value,
   )
   await init()
 })

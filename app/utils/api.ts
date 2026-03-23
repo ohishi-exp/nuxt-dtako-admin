@@ -16,6 +16,7 @@ import type {
 
 let apiBase = ''
 let getAccessToken: (() => string | null) | null = null
+let getTenantId: (() => string | null) | null = null
 let tokenRefresher: (() => Promise<void>) | null = null
 
 // 同時リフレッシュ防止用
@@ -25,18 +26,21 @@ export function initApi(
   baseUrl: string,
   tokenGetter?: () => string | null,
   refresher?: () => Promise<void>,
+  tenantIdGetter?: () => string | null,
 ) {
   apiBase = baseUrl.replace(/\/$/, '')
   getAccessToken = tokenGetter || null
   tokenRefresher = refresher || null
+  getTenantId = tenantIdGetter || null
 }
 
-/** 認証ヘッダーを構築 */
+/** 認証ヘッダーを構築 (X-Tenant-ID で認証) */
 function buildAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = {}
-  const token = getAccessToken?.()
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`
+  // auth-worker JWT の org クレームを X-Tenant-ID として送信
+  const tid = getTenantId?.()
+  if (tid) {
+    headers['X-Tenant-ID'] = tid
   }
   return headers
 }
@@ -63,31 +67,6 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
 
   const res = await fetch(`${apiBase}${path}`, { ...options, headers })
-
-  // 401 → トークンリフレッシュ → リトライ (1回のみ)
-  if (res.status === 401 && tokenRefresher && getAccessToken?.()) {
-    try {
-      if (!refreshPromise) {
-        refreshPromise = tokenRefresher().finally(() => { refreshPromise = null })
-      }
-      await refreshPromise
-
-      const retryHeaders: Record<string, string> = {
-        ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
-        ...buildAuthHeaders(),
-        ...(options.headers as Record<string, string> || {}),
-      }
-      const retryRes = await fetch(`${apiBase}${path}`, { ...options, headers: retryHeaders })
-      if (!retryRes.ok) {
-        const body = await retryRes.text().catch(() => '')
-        throw new Error(`API エラー (${retryRes.status}): ${body || retryRes.statusText}`)
-      }
-      if (retryRes.status === 204) return undefined as T
-      return retryRes.json()
-    } catch {
-      // リフレッシュ失敗 → 元のエラーを投げる
-    }
-  }
 
   if (!res.ok) {
     const body = await res.text().catch(() => '')
@@ -141,17 +120,17 @@ export async function uploadZip(file: File): Promise<UploadResponse> {
 }
 
 export async function getPendingUploads(): Promise<PendingUpload[]> {
-  return request<PendingUpload[]>('/internal/pending')
+  return request<PendingUpload[]>('/api/internal/pending')
 }
 
 export async function rerunUpload(uploadId: string): Promise<UploadResponse> {
-  return request<UploadResponse>(`/internal/rerun/${encodeURIComponent(uploadId)}`, {
+  return request<UploadResponse>(`/api/internal/rerun/${encodeURIComponent(uploadId)}`, {
     method: 'POST',
   })
 }
 
 export function getUploadDownloadUrl(uploadId: string): string {
-  return `${apiBase}/internal/download/${encodeURIComponent(uploadId)}`
+  return `${apiBase}/api/internal/download/${encodeURIComponent(uploadId)}`
 }
 
 // --- Event Classifications ---
@@ -190,7 +169,7 @@ export async function getRestraintReport(filter: RestraintReportFilter): Promise
 export async function downloadRestraintReportPdfSingle(year: number, month: number, driverId: string, driverName: string): Promise<void> {
   const token = getAccessToken?.()
   const headers: Record<string, string> = {}
-  if (token) headers['Authorization'] = `Bearer ${token}`
+  const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
   const res = await fetch(`${apiBase}/api/restraint-report/pdf?year=${year}&month=${month}&driver_id=${driverId}`, { headers })
   if (!res.ok) throw new Error(`PDF生成に失敗: ${res.status}`)
   const blob = await res.blob()
@@ -222,7 +201,7 @@ export async function downloadRestraintReportPdfStream(
   const doFetch = async () => {
     const token = getAccessToken?.()
     const headers: Record<string, string> = {}
-    if (token) headers['Authorization'] = `Bearer ${token}`
+    const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
     return fetch(url, { headers })
   }
 
@@ -314,7 +293,7 @@ export async function recalculateStream(
   const doFetch = async () => {
     const token = getAccessToken?.()
     const headers: Record<string, string> = {}
-    if (token) headers['Authorization'] = `Bearer ${token}`
+    const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
     return fetch(url, { method: 'POST', headers })
   }
 
@@ -363,7 +342,7 @@ export async function compareRestraintCsv(file: File, driverCd?: string): Promis
   formData.append('file', file)
   const token = getAccessToken?.()
   const headers: Record<string, string> = {}
-  if (token) headers['Authorization'] = `Bearer ${token}`
+  const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
   const params = driverCd ? `?driver_cd=${encodeURIComponent(driverCd)}` : ''
   const res = await fetch(`${apiBase}/api/restraint-report/compare-csv${params}`, {
     method: 'POST',
@@ -385,7 +364,7 @@ export async function recalculateDriverStream(
   const doFetch = async () => {
     const token = getAccessToken?.()
     const headers: Record<string, string> = {}
-    if (token) headers['Authorization'] = `Bearer ${token}`
+    const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
     return fetch(url, { method: 'POST', headers })
   }
 
@@ -450,7 +429,7 @@ export async function recalculateDriversBatch(
   const doFetch = async () => {
     const token = getAccessToken?.()
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-    if (token) headers['Authorization'] = `Bearer ${token}`
+    const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
     return fetch(url, {
       method: 'POST',
       headers,
@@ -514,7 +493,7 @@ export async function splitCsvAllStream(
   const url = `${apiBase}/api/split-csv-all`
   const token = getAccessToken?.()
   const headers: Record<string, string> = {}
-  if (token) headers['Authorization'] = `Bearer ${token}`
+  const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
   const res = await fetch(url, { method: 'POST', headers })
   if (!res.ok) throw new Error(`分割に失敗: ${res.status}`)
   const reader = res.body?.getReader()
@@ -621,7 +600,7 @@ export async function triggerScrapeStream(
   const doFetch = async () => {
     const token = getAccessToken?.()
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-    if (token) headers['Authorization'] = `Bearer ${token}`
+    const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
     return fetch(url, {
       method: 'POST',
       headers,

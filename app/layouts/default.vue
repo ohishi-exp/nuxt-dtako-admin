@@ -1,5 +1,5 @@
 <script setup lang="ts">
-const { user, logout, tenants, currentTenantName, switchToTenant } = useAuth()
+const { user, logout } = useAuth()
 const route = useRoute()
 
 const navigation = [
@@ -9,22 +9,8 @@ const navigation = [
   { label: '拘束時間管理表', icon: 'i-lucide-shield-check', to: '/restraint-report' },
   { label: 'CSV比較', icon: 'i-lucide-git-compare', to: '/restraint-compare' },
   { label: 'イベント分類', icon: 'i-lucide-settings', to: '/event-classifications' },
-  { label: 'メンバー管理', icon: 'i-lucide-users', to: '/members' },
-  { label: 'APIトークン', icon: 'i-lucide-key', to: '/api-tokens' },
   { label: 'スクレイプ', icon: 'i-lucide-download', to: '/scraper' },
 ]
-
-const tenantOptions = computed(() =>
-  tenants.value.map(t => ({ label: t.tenant_name, value: t.tenant_id })),
-)
-
-const selectedTenantId = computed(() => user.value?.tenant_id || '')
-
-async function onTenantSwitch(tenantId: string) {
-  if (tenantId && tenantId !== user.value?.tenant_id) {
-    await switchToTenant(tenantId)
-  }
-}
 
 async function handleLogout() {
   await logout()
@@ -37,16 +23,7 @@ async function handleLogout() {
     <!-- Sidebar -->
     <aside class="w-60 border-r border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 flex flex-col">
       <div class="p-4 border-b border-gray-200 dark:border-gray-800">
-        <USelect
-          v-if="tenants.length > 1"
-          :model-value="selectedTenantId"
-          :items="tenantOptions"
-          size="sm"
-          @update:model-value="onTenantSwitch"
-        />
-        <h1 v-else class="text-lg font-bold">
-          {{ currentTenantName || 'デジタコ管理' }}
-        </h1>
+        <h1 class="text-lg font-bold">デジタコ管理</h1>
       </div>
 
       <nav class="flex-1 p-2">
