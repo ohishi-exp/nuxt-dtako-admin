@@ -309,11 +309,11 @@ onMounted(() => {
           <span
             v-if="splitResults[item.id]?.success"
             class="text-xs text-green-600"
-          >{{ splitResults[item.id].message }}</span>
+          >{{ splitResults[item.id]!.message }}</span>
           <span
-            v-if="splitResults[item.id] && !splitResults[item.id].success"
+            v-if="splitResults[item.id] && !splitResults[item.id]!.success"
             class="text-xs text-red-600"
-          >{{ splitResults[item.id].message }}</span>
+          >{{ splitResults[item.id]!.message }}</span>
           <UButton
             v-if="item.status === 'completed'"
             label="CSV分割"

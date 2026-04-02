@@ -459,7 +459,7 @@ async function handleHistoryRerun(item: ScrapeHistoryItem) {
     status: 'running',
     results: [],
   }]
-  const task = tasks.value[0]  // リアクティブプロキシを参照
+  const task = tasks.value[0]!  // リアクティブプロキシを参照
 
   try {
     await triggerScrapeStream(
@@ -503,7 +503,7 @@ async function handleHistoryRerun(item: ScrapeHistoryItem) {
 function extractUploadId(message: string | null): string | null {
   if (!message || !message.includes('STORED_FOR_RETRY')) return null
   const match = message.match(/"upload_id"\s*:\s*"([^"]+)"/)
-  return match ? match[1] : null
+  return match ? match[1] ?? null : null
 }
 
 function formatDatetime(iso: string): string {

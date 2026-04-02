@@ -15,7 +15,7 @@ async function fetchReport() {
   loading.value = true
   error.value = ''
   try {
-    const [y, m] = selectedMonth.value.split('-').map(Number)
+    const [y = 0, m = 0] = selectedMonth.value.split('-').map(Number)
     report.value = await getRestraintReport({
       driver_id: selectedDriverId.value,
       year: y,
@@ -73,7 +73,7 @@ async function downloadPdf() {
   pdfError.value = ''
   pdfProgress.value = '準備中...'
   try {
-    const [y, m] = selectedMonth.value.split('-').map(Number)
+    const [y = 0, m = 0] = selectedMonth.value.split('-').map(Number)
     await downloadRestraintReportPdfStream(y, m, (evt: PdfProgressEvent) => {
       if (evt.event === 'progress') {
         if (evt.step === 'fetch') {
@@ -101,7 +101,7 @@ async function downloadSinglePdf() {
   if (!selectedDriverId.value || !selectedMonth.value) return
   singlePdfLoading.value = true
   try {
-    const [y, m] = selectedMonth.value.split('-').map(Number)
+    const [y = 0, m = 0] = selectedMonth.value.split('-').map(Number)
     await downloadRestraintReportPdfSingle(y, m, selectedDriverId.value, driverName.value)
   } catch (e: unknown) {
     pdfError.value = e instanceof Error ? e.message : 'PDF出力に失敗しました'
@@ -116,7 +116,7 @@ const recalcError = ref('')
 
 async function runRecalculate() {
   if (!selectedMonth.value) return
-  const [y, m] = selectedMonth.value.split('-').map(Number)
+  const [y = 0, m = 0] = selectedMonth.value.split('-').map(Number)
   if (!confirm(`${y}年${m}月のデータを再計算します。よろしいですか？`)) return
   recalcLoading.value = true
   recalcResult.value = '準備中...'
@@ -155,7 +155,7 @@ const driverRecalcLoading = ref(false)
 
 async function runDriverRecalculate() {
   if (!selectedMonth.value || !selectedDriverId.value) return
-  const [y, m] = selectedMonth.value.split('-').map(Number)
+  const [y = 0, m = 0] = selectedMonth.value.split('-').map(Number)
   const driverName = drivers.value.find(d => d.id === selectedDriverId.value)?.driver_name || ''
   if (!confirm(`${driverName} の ${y}年${m}月を再計算します。よろしいですか？`)) return
   driverRecalcLoading.value = true
@@ -193,7 +193,7 @@ async function runDriverRecalculate() {
 
 const monthLabel = computed(() => {
   if (!selectedMonth.value) return ''
-  const [y, m] = selectedMonth.value.split('-').map(Number)
+  const [y = 0, m = 0] = selectedMonth.value.split('-').map(Number)
   return `令和${y - 2018}年${m}月分`
 })
 </script>
@@ -305,16 +305,16 @@ const monthLabel = computed(() => {
                   </td>
                   <!-- First operation breakdown -->
                   <td class="px-2 py-1.5 text-right border-r border-gray-200 dark:border-gray-700">
-                    {{ day.operations.length ? fmt(day.operations[0].drive_minutes) : '' }}
+                    {{ day.operations.length ? fmt(day.operations[0]!.drive_minutes) : '' }}
                   </td>
                   <td class="px-2 py-1.5 text-right border-r border-gray-200 dark:border-gray-700">
-                    {{ day.operations.length ? fmt(day.operations[0].cargo_minutes) : '' }}
+                    {{ day.operations.length ? fmt(day.operations[0]!.cargo_minutes) : '' }}
                   </td>
                   <td class="px-2 py-1.5 text-right border-r border-gray-200 dark:border-gray-700">
-                    {{ day.operations.length ? fmt(day.operations[0].break_minutes) : '' }}
+                    {{ day.operations.length ? fmt(day.operations[0]!.break_minutes) : '' }}
                   </td>
                   <td class="px-2 py-1.5 text-right border-r border-gray-200 dark:border-gray-700">
-                    {{ day.operations.length ? fmt(day.operations[0].restraint_minutes) : '' }}
+                    {{ day.operations.length ? fmt(day.operations[0]!.restraint_minutes) : '' }}
                   </td>
                   <td class="px-2 py-1.5 text-right border-r border-gray-200 dark:border-gray-700 font-medium" :rowspan="day.operations.length || 1">
                     {{ fmt(day.restraint_total_minutes) }}
