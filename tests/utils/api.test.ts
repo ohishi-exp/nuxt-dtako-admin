@@ -492,6 +492,11 @@ describe('api', () => {
       await expect(api.recalculateDriverStream(2026, 3, 'D001', () => {})).rejects.toThrow('再計算に失敗: 403')
     })
 
+    it('recalculateDriverStream throws when body is null', async () => {
+      fetchMock.mockResolvedValue({ ok: true, status: 200, body: null })
+      await expect(api.recalculateDriverStream(2026, 3, 'D001', () => {})).rejects.toThrow('No response body')
+    })
+
     it('recalculateDriversBatch sends JSON body and parses SSE', async () => {
       const events = [
         { event: 'batch_start', total_drivers: 2 },
@@ -514,6 +519,16 @@ describe('api', () => {
     it('recalculateDriversBatch throws on non-ok response', async () => {
       fetchMock.mockResolvedValue({ ok: false, status: 500, statusText: 'Error' })
       await expect(api.recalculateDriversBatch(2026, 3, [], () => {})).rejects.toThrow('一括再計算に失敗: 500')
+    })
+
+    it('recalculateDriversBatch throws when body is null', async () => {
+      fetchMock.mockResolvedValue({ ok: true, status: 200, body: null })
+      await expect(api.recalculateDriversBatch(2026, 3, ['D1'], () => {})).rejects.toThrow('No response body')
+    })
+
+    it('triggerScrapeStream throws when body is null', async () => {
+      fetchMock.mockResolvedValue({ ok: true, status: 200, body: null, text: vi.fn().mockResolvedValue('') })
+      await expect(api.triggerScrapeStream({}, () => {})).rejects.toThrow('No response body')
     })
 
     it('triggerScrapeStream parses SSE events', async () => {
@@ -658,6 +673,241 @@ describe('api', () => {
       expect(received).toEqual([{ event: 'done' }])
     })
 
+    it('recalculateDriverStream ignores invalid JSON in data lines', async () => {
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: {bad json}\n\n'))
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ event: 'done' })}\n\n`))
+          controller.close()
+        },
+      })
+      fetchMock.mockResolvedValue(mockStreamResponse(stream))
+
+      const received: unknown[] = []
+      await api.recalculateDriverStream(2026, 3, 'D001', evt => received.push(evt))
+      expect(received).toEqual([{ event: 'done' }])
+    })
+
+    it('recalculateDriversBatch ignores invalid JSON in data lines', async () => {
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: not-valid\n\n'))
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ event: 'batch_done' })}\n\n`))
+          controller.close()
+        },
+      })
+      fetchMock.mockResolvedValue(mockStreamResponse(stream))
+
+      const received: unknown[] = []
+      await api.recalculateDriversBatch(2026, 3, ['D1'], evt => received.push(evt))
+      expect(received).toEqual([{ event: 'batch_done' }])
+    })
+
+    it('triggerScrapeStream ignores invalid JSON in data lines', async () => {
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: <<<invalid\n\n'))
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ event: 'done' })}\n\n`))
+          controller.close()
+        },
+      })
+      fetchMock.mockResolvedValue(mockStreamResponse(stream))
+
+      const received: unknown[] = []
+      await api.triggerScrapeStream({}, evt => received.push(evt))
+      expect(received).toEqual([{ event: 'done' }])
+    })
+
+    it('downloadRestraintReportPdfStream ignores invalid JSON in data lines', async () => {
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: broken-json\n\n'))
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ event: 'progress', current: 1, total: 1 })}\n\n`))
+          controller.close()
+        },
+      })
+      fetchMock.mockResolvedValue(mockStreamResponse(stream))
+
+      const received: unknown[] = []
+      await api.downloadRestraintReportPdfStream(2026, 3, evt => received.push(evt))
+      expect(received).toEqual([{ event: 'progress', current: 1, total: 1 }])
+    })
+
+    it('splitCsvAllStream ignores invalid JSON in data lines', async () => {
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: {nope}\n\n'))
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ event: 'done' })}\n\n`))
+          controller.close()
+        },
+      })
+      fetchMock.mockResolvedValue(mockStreamResponse(stream))
+
+      const received: unknown[] = []
+      await api.splitCsvAllStream(evt => received.push(evt))
+      expect(received).toEqual([{ event: 'done' }])
+    })
+
+    it('recalculateDriverStream handles empty data lines', async () => {
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: \n\n'))
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ event: 'done' })}\n\n`))
+          controller.close()
+        },
+      })
+      fetchMock.mockResolvedValue(mockStreamResponse(stream))
+
+      const received: unknown[] = []
+      await api.recalculateDriverStream(2026, 3, 'D001', evt => received.push(evt))
+      expect(received).toEqual([{ event: 'done' }])
+    })
+
+    it('recalculateDriverStream handles non-data lines', async () => {
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(`event: message\ndata: ${JSON.stringify({ event: 'done' })}\n\n`))
+          controller.close()
+        },
+      })
+      fetchMock.mockResolvedValue(mockStreamResponse(stream))
+
+      const received: unknown[] = []
+      await api.recalculateDriverStream(2026, 3, 'D001', evt => received.push(evt))
+      expect(received).toEqual([{ event: 'done' }])
+    })
+
+    it('recalculateDriversBatch handles empty data lines', async () => {
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: \n\n'))
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ event: 'batch_done' })}\n\n`))
+          controller.close()
+        },
+      })
+      fetchMock.mockResolvedValue(mockStreamResponse(stream))
+
+      const received: unknown[] = []
+      await api.recalculateDriversBatch(2026, 3, ['D1'], evt => received.push(evt))
+      expect(received).toEqual([{ event: 'batch_done' }])
+    })
+
+    it('recalculateDriversBatch handles non-data lines', async () => {
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(`id: 1\ndata: ${JSON.stringify({ event: 'batch_done' })}\n\n`))
+          controller.close()
+        },
+      })
+      fetchMock.mockResolvedValue(mockStreamResponse(stream))
+
+      const received: unknown[] = []
+      await api.recalculateDriversBatch(2026, 3, ['D1'], evt => received.push(evt))
+      expect(received).toEqual([{ event: 'batch_done' }])
+    })
+
+    it('triggerScrapeStream handles empty data lines', async () => {
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: \n\n'))
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ event: 'done' })}\n\n`))
+          controller.close()
+        },
+      })
+      fetchMock.mockResolvedValue(mockStreamResponse(stream))
+
+      const received: unknown[] = []
+      await api.triggerScrapeStream({}, evt => received.push(evt))
+      expect(received).toEqual([{ event: 'done' }])
+    })
+
+    it('triggerScrapeStream handles non-data lines', async () => {
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(`event: msg\ndata: ${JSON.stringify({ event: 'done' })}\n\n`))
+          controller.close()
+        },
+      })
+      fetchMock.mockResolvedValue(mockStreamResponse(stream))
+
+      const received: unknown[] = []
+      await api.triggerScrapeStream({}, evt => received.push(evt))
+      expect(received).toEqual([{ event: 'done' }])
+    })
+
+    it('downloadRestraintReportPdfStream handles empty data lines', async () => {
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: \n\n'))
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ event: 'progress', current: 1, total: 1 })}\n\n`))
+          controller.close()
+        },
+      })
+      fetchMock.mockResolvedValue(mockStreamResponse(stream))
+
+      const received: unknown[] = []
+      await api.downloadRestraintReportPdfStream(2026, 3, evt => received.push(evt))
+      expect(received).toEqual([{ event: 'progress', current: 1, total: 1 }])
+    })
+
+    it('downloadRestraintReportPdfStream handles non-data lines', async () => {
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(`event: msg\ndata: ${JSON.stringify({ event: 'progress', current: 1, total: 1 })}\n\n`))
+          controller.close()
+        },
+      })
+      fetchMock.mockResolvedValue(mockStreamResponse(stream))
+
+      const received: unknown[] = []
+      await api.downloadRestraintReportPdfStream(2026, 3, evt => received.push(evt))
+      expect(received).toEqual([{ event: 'progress', current: 1, total: 1 }])
+    })
+
+    it('splitCsvAllStream handles non-data lines', async () => {
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(`retry: 1000\ndata: ${JSON.stringify({ event: 'done' })}\n\n`))
+          controller.close()
+        },
+      })
+      fetchMock.mockResolvedValue(mockStreamResponse(stream))
+
+      const received: unknown[] = []
+      await api.splitCsvAllStream(evt => received.push(evt))
+      expect(received).toEqual([{ event: 'done' }])
+    })
+
+    it('splitCsvAllStream handles empty data lines', async () => {
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: \n\n'))
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ event: 'done' })}\n\n`))
+          controller.close()
+        },
+      })
+      fetchMock.mockResolvedValue(mockStreamResponse(stream))
+
+      const received: unknown[] = []
+      await api.splitCsvAllStream(evt => received.push(evt))
+      expect(received).toEqual([{ event: 'done' }])
+    })
+
     it('SSE stream handles chunked data across multiple reads', async () => {
       const encoder = new TextEncoder()
       const fullMessage = `data: ${JSON.stringify({ event: 'progress', current: 1 })}\n\n`
@@ -791,6 +1041,42 @@ describe('api', () => {
       await expect(api.recalculateStream(2026, 3, () => {})).rejects.toThrow('再計算に失敗: 401')
     })
 
+    it('recalculateDriverStream handles refresher failure gracefully', async () => {
+      const refresher = vi.fn().mockRejectedValue(new Error('refresh failed'))
+      api.initApi('http://test', () => 'token', refresher, () => 'tid')
+
+      fetchMock.mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })
+
+      await expect(api.recalculateDriverStream(2026, 3, 'D001', () => {})).rejects.toThrow('再計算に失敗: 401')
+    })
+
+    it('recalculateDriversBatch handles refresher failure gracefully', async () => {
+      const refresher = vi.fn().mockRejectedValue(new Error('refresh failed'))
+      api.initApi('http://test', () => 'token', refresher, () => 'tid')
+
+      fetchMock.mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })
+
+      await expect(api.recalculateDriversBatch(2026, 3, ['D1'], () => {})).rejects.toThrow('一括再計算に失敗: 401')
+    })
+
+    it('triggerScrapeStream handles refresher failure gracefully', async () => {
+      const refresher = vi.fn().mockRejectedValue(new Error('refresh failed'))
+      api.initApi('http://test', () => 'token', refresher, () => 'tid')
+
+      fetchMock.mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized', text: vi.fn().mockResolvedValue('Unauthorized') })
+
+      await expect(api.triggerScrapeStream({}, () => {})).rejects.toThrow('Scraper error: 401')
+    })
+
+    it('downloadRestraintReportPdfStream handles refresher failure gracefully', async () => {
+      const refresher = vi.fn().mockRejectedValue(new Error('refresh failed'))
+      api.initApi('http://test', () => 'token', refresher, () => 'tid')
+
+      fetchMock.mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })
+
+      await expect(api.downloadRestraintReportPdfStream(2026, 3, () => {})).rejects.toThrow('PDF生成に失敗しました: 401')
+    })
+
     it('concurrent 401 retries share the same refresh promise', async () => {
       let resolveRefresh: () => void
       const refresher = vi.fn().mockImplementation(() => new Promise<void>((r) => { resolveRefresh = r }))
@@ -811,6 +1097,192 @@ describe('api', () => {
 
       resolveRefresh!()
       await Promise.all([p1, p2])
+    })
+
+    it('concurrent 401 retries share refresh for recalculateDriverStream', async () => {
+      let resolveRefresh: () => void
+      const refresher = vi.fn().mockImplementation(() => new Promise<void>((r) => { resolveRefresh = r }))
+      api.initApi('http://test', () => 'token', refresher, () => 'tid')
+
+      fetchMock.mockResolvedValue({ ok: false, status: 401, statusText: 'Unauthorized' })
+
+      const p1 = api.recalculateDriverStream(2026, 3, 'D001', () => {}).catch(() => {})
+      const p2 = api.recalculateDriverStream(2026, 3, 'D002', () => {}).catch(() => {})
+
+      await new Promise(r => setTimeout(r, 0))
+      expect(refresher).toHaveBeenCalledTimes(1)
+
+      resolveRefresh!()
+      await Promise.all([p1, p2])
+    })
+
+    it('concurrent 401 retries share refresh for recalculateDriversBatch', async () => {
+      let resolveRefresh: () => void
+      const refresher = vi.fn().mockImplementation(() => new Promise<void>((r) => { resolveRefresh = r }))
+      api.initApi('http://test', () => 'token', refresher, () => 'tid')
+
+      fetchMock.mockResolvedValue({ ok: false, status: 401, statusText: 'Unauthorized' })
+
+      const p1 = api.recalculateDriversBatch(2026, 3, ['D1'], () => {}).catch(() => {})
+      const p2 = api.recalculateDriversBatch(2026, 3, ['D2'], () => {}).catch(() => {})
+
+      await new Promise(r => setTimeout(r, 0))
+      expect(refresher).toHaveBeenCalledTimes(1)
+
+      resolveRefresh!()
+      await Promise.all([p1, p2])
+    })
+
+    it('concurrent 401 retries share refresh for downloadRestraintReportPdfStream', async () => {
+      let resolveRefresh: () => void
+      const refresher = vi.fn().mockImplementation(() => new Promise<void>((r) => { resolveRefresh = r }))
+      api.initApi('http://test', () => 'token', refresher, () => 'tid')
+
+      fetchMock.mockResolvedValue({ ok: false, status: 401, statusText: 'Unauthorized' })
+
+      const p1 = api.downloadRestraintReportPdfStream(2026, 3, () => {}).catch(() => {})
+      const p2 = api.downloadRestraintReportPdfStream(2026, 4, () => {}).catch(() => {})
+
+      await new Promise(r => setTimeout(r, 0))
+      expect(refresher).toHaveBeenCalledTimes(1)
+
+      resolveRefresh!()
+      await Promise.all([p1, p2])
+    })
+
+    it('concurrent 401 retries share refresh for triggerScrapeStream', async () => {
+      let resolveRefresh: () => void
+      const refresher = vi.fn().mockImplementation(() => new Promise<void>((r) => { resolveRefresh = r }))
+      api.initApi('http://test', () => 'token', refresher, () => 'tid')
+
+      fetchMock.mockResolvedValue({ ok: false, status: 401, statusText: 'Unauthorized', text: vi.fn().mockResolvedValue('Unauthorized') })
+
+      const p1 = api.triggerScrapeStream({}, () => {}).catch(() => {})
+      const p2 = api.triggerScrapeStream({}, () => {}).catch(() => {})
+
+      await new Promise(r => setTimeout(r, 0))
+      expect(refresher).toHaveBeenCalledTimes(1)
+
+      resolveRefresh!()
+      await Promise.all([p1, p2])
+    })
+  })
+
+  // ===== no tokenGetter / no tenantIdGetter =====
+
+  describe('SSE streaming without tokenGetter or tenantIdGetter', () => {
+    it('recalculateStream works without tokenGetter', async () => {
+      vi.resetModules()
+      api = await import('~/utils/api')
+      api.initApi('http://test')
+
+      const events = [{ event: 'done' }]
+      fetchMock.mockResolvedValue(mockStreamResponse(createSSEStream(events)))
+
+      const received: unknown[] = []
+      await api.recalculateStream(2026, 3, evt => received.push(evt))
+      expect(received).toEqual(events)
+      // No X-Tenant-ID header
+      const headers = fetchMock.mock.calls[0][1].headers
+      expect(headers).not.toHaveProperty('X-Tenant-ID')
+    })
+
+    it('splitCsvAllStream works without tokenGetter or tenantIdGetter', async () => {
+      vi.resetModules()
+      api = await import('~/utils/api')
+      api.initApi('http://test')
+
+      const events = [{ event: 'done' }]
+      fetchMock.mockResolvedValue(mockStreamResponse(createSSEStream(events)))
+
+      const received: unknown[] = []
+      await api.splitCsvAllStream(evt => received.push(evt))
+      expect(received).toEqual(events)
+      const headers = fetchMock.mock.calls[0][1].headers
+      expect(headers).not.toHaveProperty('X-Tenant-ID')
+    })
+
+    it('downloadRestraintReportPdfStream works without tokenGetter', async () => {
+      vi.resetModules()
+      api = await import('~/utils/api')
+      api.initApi('http://test')
+
+      const events = [{ event: 'progress', current: 1, total: 1 }]
+      fetchMock.mockResolvedValue(mockStreamResponse(createSSEStream(events)))
+
+      const received: unknown[] = []
+      await api.downloadRestraintReportPdfStream(2026, 3, evt => received.push(evt))
+      expect(received).toEqual(events)
+    })
+
+    it('triggerScrapeStream works without tokenGetter', async () => {
+      vi.resetModules()
+      api = await import('~/utils/api')
+      api.initApi('http://test')
+
+      const events = [{ event: 'done' }]
+      fetchMock.mockResolvedValue(mockStreamResponse(createSSEStream(events)))
+
+      const received: unknown[] = []
+      await api.triggerScrapeStream({}, evt => received.push(evt))
+      expect(received).toEqual(events)
+    })
+
+    it('recalculateDriverStream works without tokenGetter', async () => {
+      vi.resetModules()
+      api = await import('~/utils/api')
+      api.initApi('http://test')
+
+      const events = [{ event: 'done' }]
+      fetchMock.mockResolvedValue(mockStreamResponse(createSSEStream(events)))
+
+      const received: unknown[] = []
+      await api.recalculateDriverStream(2026, 3, 'D001', evt => received.push(evt))
+      expect(received).toEqual(events)
+    })
+
+    it('recalculateDriversBatch works without tokenGetter', async () => {
+      vi.resetModules()
+      api = await import('~/utils/api')
+      api.initApi('http://test')
+
+      const events = [{ event: 'batch_done' }]
+      fetchMock.mockResolvedValue(mockStreamResponse(createSSEStream(events)))
+
+      const received: unknown[] = []
+      await api.recalculateDriversBatch(2026, 3, ['D1'], evt => received.push(evt))
+      expect(received).toEqual(events)
+    })
+
+    it('compareRestraintCsv works without tokenGetter', async () => {
+      vi.resetModules()
+      api = await import('~/utils/api')
+      api.initApi('http://test')
+
+      fetchMock.mockResolvedValue(mockResponse([]))
+
+      const file = new File(['csv'], 'r.csv')
+      const result = await api.compareRestraintCsv(file)
+      expect(result).toEqual([])
+      const headers = fetchMock.mock.calls[0][1].headers
+      expect(headers).not.toHaveProperty('X-Tenant-ID')
+    })
+
+    it('downloadRestraintReportPdfSingle works without tokenGetter', async () => {
+      vi.resetModules()
+      api = await import('~/utils/api')
+      api.initApi('http://test')
+
+      fetchMock.mockResolvedValue({
+        ok: true,
+        status: 200,
+        blob: vi.fn().mockResolvedValue(new Blob()),
+      })
+      setupDownloadMocks()
+
+      await api.downloadRestraintReportPdfSingle(2026, 3, 'D001', 'Test')
+      const headers = fetchMock.mock.calls[0][1].headers
+      expect(headers).not.toHaveProperty('X-Tenant-ID')
     })
   })
 

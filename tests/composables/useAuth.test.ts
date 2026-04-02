@@ -358,6 +358,99 @@ describe('useAuth', () => {
     })
   })
 
+  describe('SSR (window undefined)', () => {
+    it('init() when window is undefined sets isLoading to false', () => {
+      const originalWindow = globalThis.window
+      vi.stubGlobal('window', undefined)
+
+      const auth = useAuth()
+      auth.init()
+
+      expect(auth.isLoading.value).toBe(false)
+      expect(auth.accessToken.value).toBeNull()
+      expect(auth.user.value).toBeNull()
+
+      vi.stubGlobal('window', originalWindow)
+    })
+
+    it('handleCallback() when window is undefined returns false', () => {
+      const originalWindow = globalThis.window
+      vi.stubGlobal('window', undefined)
+
+      const auth = useAuth()
+      const result = auth.handleCallback()
+
+      expect(result).toBe(false)
+
+      vi.stubGlobal('window', originalWindow)
+    })
+
+    it('logout() when window is undefined clears state but does not touch localStorage', () => {
+      // First set up authenticated state with window available
+      const token = makeValidJwt()
+      localStorage.setItem(TOKEN_KEY, token)
+      const auth = useAuth()
+      auth.init()
+      expect(auth.accessToken.value).toBe(token)
+
+      // Now simulate SSR: window is undefined
+      const originalWindow = globalThis.window
+      vi.stubGlobal('window', undefined)
+
+      auth.logout()
+
+      expect(auth.accessToken.value).toBeNull()
+      expect(auth.user.value).toBeNull()
+      expect(auth.tenantId.value).toBeNull()
+
+      vi.stubGlobal('window', originalWindow)
+      // Token should still be in localStorage since window was "undefined" during logout
+      expect(localStorage.getItem(TOKEN_KEY)).toBe(token)
+    })
+  })
+
+  describe('setToken with decode failure', () => {
+    it('setToken handles decode failure by not setting user', () => {
+      const token = makeValidJwt()
+      // Set token in hash for handleCallback
+      Object.defineProperty(window, 'location', {
+        value: {
+          ...window.location,
+          hash: `#token=${token}`,
+          pathname: '/auth/callback',
+          search: '',
+          origin: 'http://localhost:3000',
+        },
+        writable: true,
+        configurable: true,
+      })
+      vi.spyOn(history, 'replaceState').mockImplementation(() => {})
+
+      // Make atob fail on the second call (setToken's decodeJwt) but succeed on the first (isTokenExpired's decodeJwt)
+      const originalAtob = globalThis.atob
+      let atobCallCount = 0
+      vi.stubGlobal('atob', (s: string) => {
+        atobCallCount++
+        // 1st atob call: isTokenExpired -> decodeJwt -> atob(parts[1])
+        // 2nd atob call: setToken -> decodeJwt -> atob(parts[1])
+        if (atobCallCount >= 2) {
+          throw new Error('simulated atob failure')
+        }
+        return originalAtob(s)
+      })
+
+      const auth = useAuth()
+      const result = auth.handleCallback()
+
+      // handleCallback returns true (token passed isTokenExpired), but setToken's decodeJwt fails
+      expect(result).toBe(true)
+      // user should be null because decodeJwt returned null in setToken
+      expect(auth.user.value).toBeNull()
+
+      vi.stubGlobal('atob', originalAtob)
+    })
+  })
+
   describe('singleton behavior across multiple useAuth() calls', () => {
     it('shares state between multiple useAuth() calls in same module', () => {
       const token = makeValidJwt()
