@@ -2,3 +2,8 @@ name = "dtako-admin"
 compatibility_date = "2025-03-10"
 main = ".output/server/index.mjs"
 assets = { directory = ".output/public/", binding = "ASSETS" }
+
+[env.staging]
+name = "dtako-admin-staging"
+[env.staging.vars]
+NUXT_PUBLIC_API_BASE = "STAGING_API_URL"
