@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, type Mock } from 'vitest'
+import { isLive } from '../helpers/api-test-env'
 
 // SSE helper: creates a ReadableStream emitting SSE-formatted events
 function createSSEStream(events: object[]): ReadableStream<Uint8Array> {
@@ -1428,5 +1429,50 @@ describe('api', () => {
       const headers = fetchMock.mock.calls[0][1].headers
       expect(headers).not.toHaveProperty('X-Tenant-ID')
     })
+  })
+})
+
+// ===========================================================================
+// Live smoke tests (API_BASE_URL が設定されている場合のみ実行)
+// ===========================================================================
+describe.skipIf(!isLive)('live smoke tests', () => {
+  let api: typeof import('~/utils/api')
+
+  beforeAll(async () => {
+    const { setupApi, restoreNativeApis } = await import('../helpers/api-test-env')
+    restoreNativeApis()
+    await setupApi()
+    api = await import('~/utils/api')
+  })
+
+  it('getDrivers returns array', async () => {
+    const result = await api.getDrivers()
+    expect(Array.isArray(result)).toBe(true)
+  })
+
+  it('getVehicles returns array', async () => {
+    const result = await api.getVehicles()
+    expect(Array.isArray(result)).toBe(true)
+  })
+
+  it('getOperations returns paginated response', async () => {
+    const result = await api.getOperations()
+    expect(result).toHaveProperty('operations')
+    expect(result).toHaveProperty('total')
+  })
+
+  it('getEventClassifications returns array', async () => {
+    const result = await api.getEventClassifications()
+    expect(Array.isArray(result)).toBe(true)
+  })
+
+  it('getPendingUploads returns array', async () => {
+    const result = await api.getPendingUploads()
+    expect(Array.isArray(result)).toBe(true)
+  })
+
+  it('getUploads returns array', async () => {
+    const result = await api.getUploads()
+    expect(Array.isArray(result)).toBe(true)
   })
 })

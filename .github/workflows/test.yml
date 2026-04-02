@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+  packages: read
+
 jobs:
   test:
     name: Vitest + Coverage
@@ -40,3 +44,41 @@ jobs:
 
       - run: npm ci
       - run: npx nuxi typecheck
+
+  integration-test:
+    name: API Integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npx nuxt prepare
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Start API + DB containers
+        run: docker compose -f docker-compose.test.yml up -d --wait
+        timeout-minutes: 5
+
+      - name: Run integration tests
+        run: npx vitest run tests/utils/api.test.ts
+        env:
+          API_BASE_URL: http://localhost:18080
+
+      - name: Show API logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.test.yml logs api
+
+      - name: Cleanup containers
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v
