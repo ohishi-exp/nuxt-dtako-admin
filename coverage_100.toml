@@ -1,8 +1,10 @@
-# Lines 100% 達成ファイル登録簿
+# Lines 100% + Branches 100% 達成ファイル登録簿
 # CI でリグレッションを検出する
 
 [[files]]
 path = "app/utils/api.ts"
+branches = true
 
 [[files]]
 path = "app/composables/useAuth.ts"
+branches = true
