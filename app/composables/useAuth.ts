@@ -20,6 +20,7 @@ export interface AuthUser {
   email: string
   name: string
   tenant_id: string
+  role?: string
 }
 
 // シングルトン state

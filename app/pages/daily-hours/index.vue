@@ -24,7 +24,7 @@ function buildFilter() {
   let date_from: string | undefined
   let date_to: string | undefined
   if (selectedMonth.value) {
-    const [y, m] = selectedMonth.value.split('-').map(Number)
+    const [y = 0, m = 0] = selectedMonth.value.split('-').map(Number)
     date_from = `${y}-${String(m).padStart(2, '0')}-01`
     const lastDay = new Date(y, m, 0).getDate()
     date_to = `${y}-${String(m).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`

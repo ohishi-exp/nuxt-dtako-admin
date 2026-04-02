@@ -77,7 +77,7 @@ const activeCrewRole = ref('1')
 // 初期値を最初のグループに合わせる
 watch(crewGroups, (groups) => {
   if (groups.length && !groups.find(g => g.crewRole === activeCrewRole.value)) {
-    activeCrewRole.value = groups[0].crewRole
+    activeCrewRole.value = groups[0]!.crewRole
   }
 }, { immediate: true })
 
@@ -122,7 +122,7 @@ function formatTime(val: string): string {
   if (!val) return ''
   const parts = val.split(' ')
   if (parts.length < 2) return val
-  const dateParts = parts[0].split('/')
+  const dateParts = parts[0]!.split('/')
   if (dateParts.length === 3) {
     return `${dateParts[1]}/${dateParts[2]} ${parts[1]}`
   }

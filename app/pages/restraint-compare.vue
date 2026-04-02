@@ -211,9 +211,9 @@ async function recalcDriver(driverId: string, driverName: string, driverCd: stri
           <span
             v-if="recalcStates[r.driver_cd]?.result && !recalcStates[r.driver_cd]?.loading"
             class="text-xs font-bold"
-            :class="recalcStates[r.driver_cd].result.includes('一致') ? 'text-green-600' : recalcStates[r.driver_cd].result.includes('未知') ? 'text-red-600' : 'text-yellow-600'"
+            :class="recalcStates[r.driver_cd]!.result.includes('一致') ? 'text-green-600' : recalcStates[r.driver_cd]!.result.includes('未知') ? 'text-red-600' : 'text-yellow-600'"
           >
-            {{ recalcStates[r.driver_cd].result }}
+            {{ recalcStates[r.driver_cd]!.result }}
           </span>
         </div>
       </div>
