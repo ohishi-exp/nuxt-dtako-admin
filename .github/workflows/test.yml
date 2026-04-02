@@ -22,7 +22,10 @@ jobs:
       - run: npx nuxt prepare
 
       - name: Run tests with coverage
-        run: npx vitest run --coverage
+        run: npx vitest run --coverage --coverage.reporter=text --coverage.reporter=json-summary --coverage.reporter=json
+
+      - name: Coverage 100% regression check
+        run: node scripts/check_coverage_100.mjs
 
   typecheck:
     name: Type Check

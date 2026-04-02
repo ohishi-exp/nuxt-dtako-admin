@@ -1,0 +1,8 @@
+# Lines 100% 達成ファイル登録簿
+# CI でリグレッションを検出する
+
+[[files]]
+path = "app/utils/api.ts"
+
+[[files]]
+path = "app/composables/useAuth.ts"
