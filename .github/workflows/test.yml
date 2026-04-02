@@ -7,6 +7,23 @@ on:
     branches: [main]
 
 jobs:
+  test:
+    name: Vitest + Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npx nuxt prepare
+
+      - name: Run tests with coverage
+        run: npx vitest run --coverage
+
   typecheck:
     name: Type Check
     runs-on: ubuntu-latest
