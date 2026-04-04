@@ -244,25 +244,24 @@ jobs:
             node -e "
               const path = require('path');
               const s = require('./integration-results.json');
-              const suites = s.numTotalTestSuites || 0;
-              const passed = s.numPassedTestSuites || 0;
+              const results = s.testResults || [];
+              const files = results.length;
+              const filesPassed = results.filter(r => r.status === 'passed').length;
               const tests = s.numTotalTests || 0;
               const testsPassed = s.numPassedTests || 0;
               const failed = s.numFailedTests || 0;
               const out = [];
-              out.push('### Summary');
-              out.push('- Test Files: ' + (failed === 0 ? '✅' : '❌') + ' ' + passed + ' passes · ' + suites + ' total');
-              out.push('- Test Results: ' + (failed === 0 ? '✅' : '❌') + ' ' + testsPassed + ' passes · ' + tests + ' total');
-              if (failed > 0) out.push('- ❌ ' + failed + ' failed');
-              out.push('');
               out.push('| File | Tests | Status |');
               out.push('|------|-------|--------|');
-              for (const suite of (s.testResults || [])) {
+              for (const suite of results) {
                 const rel = path.relative(process.cwd(), suite.name);
                 const icon = suite.status === 'passed' ? '✅' : '❌';
                 const cnt = (suite.assertionResults || []).length;
                 out.push('| ' + rel + ' | ' + cnt + ' | ' + icon + ' |');
               }
+              out.push('');
+              out.push('**Result:** ' + testsPassed + ' / ' + tests + ' tests passed');
+              if (failed > 0) out.push('❌ ' + failed + ' failed');
               console.log(out.join('\n'));
             " >> $GITHUB_STEP_SUMMARY
           fi
