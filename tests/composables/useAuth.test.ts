@@ -22,7 +22,7 @@ function makeValidJwt(overrides: Record<string, unknown> = {}): string {
     sub: 'user-123',
     email: 'test@example.com',
     name: 'Test User',
-    org: 'tenant-456',
+    tenant_id: 'tenant-456',
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 3600,
     ...overrides,
@@ -35,7 +35,7 @@ function makeExpiredJwt(): string {
     sub: 'user-123',
     email: 'test@example.com',
     name: 'Test User',
-    org: 'tenant-456',
+    tenant_id: 'tenant-456',
     iat: Math.floor(Date.now() / 1000) - 7200,
     exp: Math.floor(Date.now() / 1000) - 3600,
   })
@@ -122,7 +122,7 @@ describe('useAuth', () => {
         sub: 'user~>?123',
         email: 'test@example.com',
         name: 'Test User',
-        org: 'tenant-456',
+        tenant_id: 'tenant-456',
         iat: Math.floor(Date.now() / 1000),
         exp: Math.floor(Date.now() / 1000) + 3600,
       }
@@ -160,7 +160,7 @@ describe('useAuth', () => {
         sub: 'user-123',
         email: 'test@example.com',
         name: 'Test User',
-        org: 'tenant-456',
+        tenant_id: 'tenant-456',
       })
       localStorage.setItem(TOKEN_KEY, token)
       const auth = useAuth()
