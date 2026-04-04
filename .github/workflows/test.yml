@@ -26,10 +26,170 @@ jobs:
       - run: npx nuxt prepare
 
       - name: Run tests with coverage
-        run: npx vitest run --coverage --coverage.reporter=text --coverage.reporter=json-summary --coverage.reporter=json
+        run: npx vitest run --coverage --reporter=default --reporter=json --outputFile.json=coverage/test-results.json
 
       - name: Coverage 100% regression check
         run: node scripts/check_coverage_100.mjs
+
+      - name: Job Summary
+        if: always()
+        run: |
+          echo "## Vitest Test Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f coverage/test-results.json ]; then
+            node -e "
+              const s = require('./coverage/test-results.json');
+              const suites = s.numTotalTestSuites || 0;
+              const passed = s.numPassedTestSuites || 0;
+              const tests = s.numTotalTests || 0;
+              const testsPassed = s.numPassedTests || 0;
+              const failed = s.numFailedTests || 0;
+              console.log('### Summary');
+              console.log('- Test Files: ' + (failed === 0 ? '✅' : '❌') + ' ' + passed + ' passes · ' + suites + ' total');
+              console.log('- Test Results: ' + (failed === 0 ? '✅' : '❌') + ' ' + testsPassed + ' passes · ' + tests + ' total');
+              if (failed > 0) console.log('- ❌ ' + failed + ' failed');
+            " >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Coverage セクション (coverage-summary.json or coverage-final.json)
+          if [ -f coverage/coverage-summary.json ] || [ -f coverage/coverage-final.json ]; then
+            node -e "
+              const fs = require('fs');
+              const path = require('path');
+              const cwd = process.cwd();
+              const summaryPath = path.join(cwd, 'coverage', 'coverage-summary.json');
+              const finalPath = path.join(cwd, 'coverage', 'coverage-final.json');
+
+              let summary;
+              if (fs.existsSync(summaryPath)) {
+                summary = require(summaryPath);
+              } else {
+                const final = require(finalPath);
+                summary = { total: { statements: {pct:0}, branches: {pct:0}, functions: {pct:0}, lines: {pct:0} } };
+                let tS=0,cS=0, tB=0,cB=0, tF=0,cF=0, tL=0,cL=0;
+                for (const [fp, fc] of Object.entries(final)) {
+                  const s = fc.s||{}, b = fc.b||{}, f = fc.f||{}, sm = fc.statementMap||{};
+                  let fS=0,fCS=0, fB=0,fCB=0, fF=0,fCF=0;
+                  for (const k of Object.keys(s)) { fS++; if(s[k]>0) fCS++; }
+                  for (const k of Object.keys(b)) { for(const c of b[k]) { fB++; if(c>0) fCB++; } }
+                  for (const k of Object.keys(f)) { fF++; if(f[k]>0) fCF++; }
+                  tS+=fS; cS+=fCS; tB+=fB; cB+=fCB; tF+=fF; cF+=fCF;
+                  // Use statements as proxy for lines
+                  tL+=fS; cL+=fCS;
+                  const pct = (t,c) => t===0 ? 100 : Math.round(c/t*10000)/100;
+                  summary[fp] = {
+                    statements:{pct:pct(fS,fCS)}, branches:{pct:pct(fB,fCB)},
+                    functions:{pct:pct(fF,fCF)}, lines:{pct:pct(fS,fCS)}
+                  };
+                }
+                const pct = (t,c) => t===0 ? 100 : Math.round(c/t*10000)/100;
+                summary.total = {
+                  statements:{pct:pct(tS,cS)}, branches:{pct:pct(tB,cB)},
+                  functions:{pct:pct(tF,cF)}, lines:{pct:pct(tL,cL)}
+                };
+              }
+
+              const t = summary.total;
+              const out = [];
+              out.push('### Coverage');
+              out.push('');
+              out.push('| Category | Stmts | Branch | Funcs | Lines |');
+              out.push('|----------|-------|--------|-------|-------|');
+              out.push('| **Total** | '+t.statements.pct+'% | '+t.branches.pct+'% | '+t.functions.pct+'% | '+t.lines.pct+'% |');
+              out.push('');
+              const files = Object.keys(summary).filter(k => k !== 'total');
+              const full = files.filter(k => summary[k].lines.pct === 100);
+              out.push('**Lines 100%:** '+full.length+' / '+files.length+' files');
+              out.push('');
+              out.push('<details><summary>Lines &lt; 100% ファイル一覧</summary>');
+              out.push('');
+              out.push('| File | Stmts | Branch | Funcs | Lines |');
+              out.push('|------|-------|--------|-------|-------|');
+              for (const k of files) {
+                const e = summary[k];
+                if (e.lines.pct < 100) {
+                  const rel = path.relative(cwd, k);
+                  out.push('| '+rel+' | '+e.statements.pct+'% | '+e.branches.pct+'% | '+e.functions.pct+'% | '+e.lines.pct+'% |');
+                }
+              }
+              out.push('');
+              out.push('</details>');
+              console.log(out.join('\n'));
+            " >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f coverage_100.toml ] && [ -f coverage/coverage-final.json ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Coverage 100% Files" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            node -e "
+              const fs = require('fs');
+              const path = require('path');
+              const toml = fs.readFileSync('coverage_100.toml', 'utf8');
+              const cwd = process.cwd();
+
+              // Load coverage data (summary or final)
+              let summary;
+              const summaryPath = path.join(cwd, 'coverage', 'coverage-summary.json');
+              const finalPath = path.join(cwd, 'coverage', 'coverage-final.json');
+              if (fs.existsSync(summaryPath)) {
+                summary = require(summaryPath);
+              } else {
+                const final = require(finalPath);
+                summary = {};
+                for (const [fp, fc] of Object.entries(final)) {
+                  const s = fc.s || {};
+                  let lT = 0, lC = 0;
+                  for (const k of Object.keys(s)) { lT++; if (s[k] > 0) lC++; }
+                  const b = fc.b || {};
+                  let bT = 0, bC = 0;
+                  for (const k of Object.keys(b)) { for (const c of b[k]) { bT++; if (c > 0) bC++; } }
+                  summary[fp] = {
+                    lines: { pct: lT === 0 ? 100 : (lC / lT) * 100 },
+                    branches: { pct: bT === 0 ? 100 : (bC / bT) * 100 },
+                  };
+                }
+              }
+
+              const entries = [];
+              let cur = null;
+              for (const line of toml.split('\n')) {
+                if (line.trim() === '[[files]]') { cur = { path: '', branches: false }; entries.push(cur); continue; }
+                if (!cur) continue;
+                const pm = line.match(/^path\s*=\s*\"(.+)\"/);
+                if (pm) cur.path = pm[1];
+                const bm = line.match(/^branches\s*=\s*true/);
+                if (bm) cur.branches = true;
+              }
+              let ok = 0, fail = 0;
+              console.log('| File | Lines | Branch | Status |');
+              console.log('|------|-------|--------|--------|');
+              for (const e of entries) {
+                const absPath = path.resolve(cwd, e.path);
+                const s = summary[absPath];
+                if (!s) { console.log('| ' + e.path + ' | - | - | ⚠️ not found |'); fail++; continue; }
+                const linesPct = Math.round(s.lines.pct * 100) / 100;
+                const branchPct = Math.round(s.branches.pct * 100) / 100;
+                const linesOk = linesPct === 100;
+                const branchOk = !e.branches || branchPct === 100;
+                const passed = linesOk && branchOk;
+                if (passed) ok++; else fail++;
+                console.log('| ' + e.path + ' | ' + linesPct + '% | ' + branchPct + '% | ' + (passed ? '✅' : '❌') + ' |');
+              }
+              console.log('');
+              console.log('**Result:** ' + ok + ' passed, ' + fail + ' failed / ' + entries.length + ' registered');
+            " >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 30
 
   typecheck:
     name: Type Check
@@ -82,3 +242,51 @@ jobs:
       - name: Cleanup containers
         if: always()
         run: docker compose -f docker-compose.test.yml down -v
+
+  deploy-staging:
+    name: Deploy Staging
+    if: github.event_name == 'pull_request'
+    needs: [test, typecheck, integration-test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npx nuxt prepare
+
+      - name: Build
+        run: npm run build
+
+      - name: Deploy to Cloudflare Workers (staging)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx wrangler deploy --env staging
+
+  deploy-release:
+    name: Deploy Release
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [test, typecheck]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npx nuxt prepare
+
+      - name: Build
+        run: npm run build
+
+      - name: Deploy to Cloudflare Workers (release)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx wrangler deploy

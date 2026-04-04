@@ -1,4 +1,5 @@
 name = "dtako-admin"
+account_id = "24b45709d060d957340180e995f0d373"
 compatibility_date = "2025-03-10"
 main = ".output/server/index.mjs"
 assets = { directory = ".output/public/", binding = "ASSETS" }

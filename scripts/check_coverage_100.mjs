@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * coverage_100.toml に登録されたファイルが 100% カバレッジを維持しているか検証する。
- * coverage/coverage-summary.json を読み込み、登録ファイルの lines.pct を確認。
+ * coverage/coverage-summary.json または coverage/coverage-final.json を読み込む。
  * branches = true のファイルは branches.pct も 100% を要求する。
  *
  * Usage: node scripts/check_coverage_100.mjs
@@ -15,6 +15,7 @@ import { resolve, join } from 'node:path'
 const ROOT = resolve(import.meta.dirname, '..')
 const TOML_PATH = join(ROOT, 'coverage_100.toml')
 const SUMMARY_PATH = join(ROOT, 'coverage', 'coverage-summary.json')
+const FINAL_PATH = join(ROOT, 'coverage', 'coverage-final.json')
 
 // Parse coverage_100.toml — extract [[files]] entries with optional branches flag
 function parseToml(content) {
@@ -35,6 +36,49 @@ function parseToml(content) {
   return entries.filter(e => e.path)
 }
 
+// Compute summary from coverage-final.json (istanbul format)
+function computeSummaryFromFinal(finalData) {
+  const summary = {}
+  for (const [filePath, fileCoverage] of Object.entries(finalData)) {
+    const lines = { total: 0, covered: 0, pct: 0 }
+    const branches = { total: 0, covered: 0, pct: 0 }
+
+    // Lines: statementMap + s
+    const s = fileCoverage.s || {}
+    for (const key of Object.keys(s)) {
+      lines.total++
+      if (s[key] > 0) lines.covered++
+    }
+    lines.pct = lines.total === 0 ? 100 : (lines.covered / lines.total) * 100
+
+    // Branches: branchMap + b
+    const b = fileCoverage.b || {}
+    for (const key of Object.keys(b)) {
+      for (const count of b[key]) {
+        branches.total++
+        if (count > 0) branches.covered++
+      }
+    }
+    branches.pct = branches.total === 0 ? 100 : (branches.covered / branches.total) * 100
+
+    summary[filePath] = { lines, branches }
+  }
+  return summary
+}
+
+// Load coverage data (prefer summary, fall back to final)
+function loadCoverage() {
+  if (existsSync(SUMMARY_PATH)) {
+    return JSON.parse(readFileSync(SUMMARY_PATH, 'utf-8'))
+  }
+  if (existsSync(FINAL_PATH)) {
+    console.log('Using coverage-final.json (coverage-summary.json not found)')
+    const finalData = JSON.parse(readFileSync(FINAL_PATH, 'utf-8'))
+    return computeSummaryFromFinal(finalData)
+  }
+  return null
+}
+
 // Main
 const tomlContent = readFileSync(TOML_PATH, 'utf-8')
 const registeredFiles = parseToml(tomlContent)
@@ -44,17 +88,17 @@ if (registeredFiles.length === 0) {
   process.exit(0)
 }
 
-if (!existsSync(SUMMARY_PATH)) {
-  console.error(`ERROR: ${SUMMARY_PATH} not found. Run "npm run test:coverage" first.`)
+const summary = loadCoverage()
+if (!summary) {
+  console.error(`ERROR: Neither ${SUMMARY_PATH} nor ${FINAL_PATH} found. Run "npm run test:coverage" first.`)
   process.exit(1)
 }
 
-const summary = JSON.parse(readFileSync(SUMMARY_PATH, 'utf-8'))
 let failed = false
 let branchChecked = 0
 
 for (const { path: filePath, branches: checkBranches } of registeredFiles) {
-  // coverage-summary.json uses absolute paths as keys
+  // coverage data uses absolute paths as keys
   const absPath = resolve(ROOT, filePath)
   const entry = summary[absPath]
 

@@ -8,3 +8,38 @@ branches = true
 [[files]]
 path = "app/composables/useAuth.ts"
 branches = true
+
+[[files]]
+path = "app/middleware/auth.global.ts"
+branches = true
+
+[[files]]
+path = "app/components/CsvDataTable.vue"
+branches = true
+
+[[files]]
+path = "app/components/DriverSearchSelect.vue"
+branches = true
+
+[[files]]
+path = "app/utils/event-data-table.ts"
+branches = true
+
+[[files]]
+path = "app/components/EventDataTable.vue"
+
+[[files]]
+path = "app/components/EventLocationCell.vue"
+branches = true
+
+[[files]]
+path = "app/components/EventCell.vue"
+branches = true
+
+[[files]]
+path = "app/components/EventTableCell.vue"
+branches = true
+
+[[files]]
+path = "app/components/EventCrewPanel.vue"
+branches = true
