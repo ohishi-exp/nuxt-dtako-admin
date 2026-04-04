@@ -94,7 +94,7 @@ export async function callApi(fn: () => Promise<unknown>) {
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
     // API エラー = エンドポイントに到達した (URL は正しい)
-    if (msg.startsWith('API エラー')) return
+    if (msg.startsWith('API エラー') || msg.startsWith('比較に失敗')) return
     throw e // ネットワークエラーは fail
   }
 }
