@@ -17,4 +17,5 @@ jobs:
     with:
       has_integration: true
       post_install_script: 'npx nuxt prepare'
-    secrets: inherit
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
