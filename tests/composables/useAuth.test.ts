@@ -451,6 +451,54 @@ describe('useAuth', () => {
     })
   })
 
+  describe('JWT claim compatibility', () => {
+    it('uses tenant_id claim from rust-alc-api JWT', () => {
+      const token = makeValidJwt({ tenant_id: 'tid-from-api' })
+      localStorage.setItem(TOKEN_KEY, token)
+
+      const auth = useAuth()
+      auth.init()
+
+      expect(auth.tenantId.value).toBe('tid-from-api')
+      expect(auth.user.value?.tenant_id).toBe('tid-from-api')
+    })
+
+    it('falls back to org claim from auth-worker JWT', () => {
+      const token = makeJwt({
+        sub: 'user-123',
+        email: 'test@example.com',
+        name: 'Test User',
+        org: 'tid-from-authworker',
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      })
+      localStorage.setItem(TOKEN_KEY, token)
+
+      const auth = useAuth()
+      auth.init()
+
+      expect(auth.tenantId.value).toBe('tid-from-authworker')
+      expect(auth.user.value?.tenant_id).toBe('tid-from-authworker')
+    })
+
+    it('handles JWT with neither tenant_id nor org', () => {
+      const token = makeJwt({
+        sub: 'user-123',
+        email: 'test@example.com',
+        name: 'Test User',
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      })
+      localStorage.setItem(TOKEN_KEY, token)
+
+      const auth = useAuth()
+      auth.init()
+
+      expect(auth.tenantId.value).toBeNull()
+      expect(auth.user.value?.tenant_id).toBe('')
+    })
+  })
+
   describe('singleton behavior across multiple useAuth() calls', () => {
     it('shares state between multiple useAuth() calls in same module', () => {
       const token = makeValidJwt()
