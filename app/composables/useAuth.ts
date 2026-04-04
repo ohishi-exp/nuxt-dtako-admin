@@ -73,7 +73,7 @@ export function useAuth() {
   /** auth-worker へリダイレクト (Google OAuth) */
   function loginWithGoogleRedirect(): void {
     const callbackUrl = `${window.location.origin}/auth/callback`
-    const authWorkerUrl = 'https://auth.mtamaramu.com'
+    const authWorkerUrl = config.public.authWorkerUrl as string
 
     // state は auth-worker 側で HMAC 生成するので、redirect_uri だけ渡す
     window.location.href = `${authWorkerUrl}/oauth/google/redirect?redirect_uri=${encodeURIComponent(callbackUrl)}`
