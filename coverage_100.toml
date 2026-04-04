@@ -24,3 +24,22 @@ branches = true
 [[files]]
 path = "app/utils/event-data-table.ts"
 branches = true
+
+[[files]]
+path = "app/components/EventDataTable.vue"
+
+[[files]]
+path = "app/components/EventLocationCell.vue"
+branches = true
+
+[[files]]
+path = "app/components/EventCell.vue"
+branches = true
+
+[[files]]
+path = "app/components/EventTableCell.vue"
+branches = true
+
+[[files]]
+path = "app/components/EventCrewPanel.vue"
+branches = true
