@@ -26,10 +26,153 @@ jobs:
       - run: npx nuxt prepare
 
       - name: Run tests with coverage
-        run: npx vitest run --coverage --coverage.reporter=text --coverage.reporter=json-summary --coverage.reporter=json
+        run: npx vitest run --coverage --reporter=default --reporter=json --outputFile.json=coverage/test-results.json
 
       - name: Coverage 100% regression check
         run: node scripts/check_coverage_100.mjs
+
+      - name: Job Summary
+        if: always()
+        run: |
+          echo "## Vitest Test Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f coverage/test-results.json ]; then
+            node -e "
+              const s = require('./coverage/test-results.json');
+              const suites = s.numTotalTestSuites || 0;
+              const passed = s.numPassedTestSuites || 0;
+              const tests = s.numTotalTests || 0;
+              const testsPassed = s.numPassedTests || 0;
+              const failed = s.numFailedTests || 0;
+              console.log('### Summary');
+              console.log('- Test Files: ' + (failed === 0 ? '✅' : '❌') + ' ' + passed + ' passes · ' + suites + ' total');
+              console.log('- Test Results: ' + (failed === 0 ? '✅' : '❌') + ' ' + testsPassed + ' passes · ' + tests + ' total');
+              if (failed > 0) console.log('- ❌ ' + failed + ' failed');
+            " >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f coverage/coverage-summary.json ]; then
+            SUMMARY_FILE=coverage/coverage-summary.json
+          elif [ -f coverage/coverage-final.json ]; then
+            SUMMARY_FILE=coverage/coverage-final.json
+          else
+            SUMMARY_FILE=""
+          fi
+
+          if [ -n "$SUMMARY_FILE" ] && [ -f coverage/coverage-summary.json ]; then
+            echo "### Coverage" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Category | Stmts | Branch | Funcs | Lines |" >> $GITHUB_STEP_SUMMARY
+            echo "|----------|-------|--------|-------|-------|" >> $GITHUB_STEP_SUMMARY
+            node -e "
+              const s = require('./coverage/coverage-summary.json');
+              const t = s.total;
+              console.log('| **Total** | ' + t.statements.pct + '% | ' + t.branches.pct + '% | ' + t.functions.pct + '% | ' + t.lines.pct + '% |');
+            " >> $GITHUB_STEP_SUMMARY
+
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            node -e "
+              const s = require('./coverage/coverage-summary.json');
+              const files = Object.keys(s).filter(k => k !== 'total');
+              const full = files.filter(k => s[k].lines.pct === 100);
+              console.log('**Lines 100%:** ' + full.length + ' / ' + files.length + ' files');
+            " >> $GITHUB_STEP_SUMMARY
+
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            echo "<details><summary>Lines &lt; 100% ファイル一覧</summary>" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| File | Stmts | Branch | Funcs | Lines |" >> $GITHUB_STEP_SUMMARY
+            echo "|------|-------|--------|-------|-------|" >> $GITHUB_STEP_SUMMARY
+            node -e "
+              const path = require('path');
+              const s = require('./coverage/coverage-summary.json');
+              const cwd = process.cwd();
+              Object.keys(s).filter(k => k !== 'total').forEach(k => {
+                const e = s[k];
+                if (e.lines.pct < 100) {
+                  const rel = path.relative(cwd, k);
+                  console.log('| ' + rel + ' | ' + e.statements.pct + '% | ' + e.branches.pct + '% | ' + e.functions.pct + '% | ' + e.lines.pct + '% |');
+                }
+              });
+            " >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "</details>" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f coverage_100.toml ] && [ -f coverage/coverage-final.json ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Coverage 100% Files" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            node -e "
+              const fs = require('fs');
+              const path = require('path');
+              const toml = fs.readFileSync('coverage_100.toml', 'utf8');
+              const cwd = process.cwd();
+
+              // Load coverage data (summary or final)
+              let summary;
+              const summaryPath = path.join(cwd, 'coverage', 'coverage-summary.json');
+              const finalPath = path.join(cwd, 'coverage', 'coverage-final.json');
+              if (fs.existsSync(summaryPath)) {
+                summary = require(summaryPath);
+              } else {
+                const final = require(finalPath);
+                summary = {};
+                for (const [fp, fc] of Object.entries(final)) {
+                  const s = fc.s || {};
+                  let lT = 0, lC = 0;
+                  for (const k of Object.keys(s)) { lT++; if (s[k] > 0) lC++; }
+                  const b = fc.b || {};
+                  let bT = 0, bC = 0;
+                  for (const k of Object.keys(b)) { for (const c of b[k]) { bT++; if (c > 0) bC++; } }
+                  summary[fp] = {
+                    lines: { pct: lT === 0 ? 100 : (lC / lT) * 100 },
+                    branches: { pct: bT === 0 ? 100 : (bC / bT) * 100 },
+                  };
+                }
+              }
+
+              const entries = [];
+              let cur = null;
+              for (const line of toml.split('\n')) {
+                if (line.trim() === '[[files]]') { cur = { path: '', branches: false }; entries.push(cur); continue; }
+                if (!cur) continue;
+                const pm = line.match(/^path\s*=\s*\"(.+)\"/);
+                if (pm) cur.path = pm[1];
+                const bm = line.match(/^branches\s*=\s*true/);
+                if (bm) cur.branches = true;
+              }
+              let ok = 0, fail = 0;
+              console.log('| File | Lines | Branch | Status |');
+              console.log('|------|-------|--------|--------|');
+              for (const e of entries) {
+                const absPath = path.resolve(cwd, e.path);
+                const s = summary[absPath];
+                if (!s) { console.log('| ' + e.path + ' | - | - | ⚠️ not found |'); fail++; continue; }
+                const linesPct = Math.round(s.lines.pct * 100) / 100;
+                const branchPct = Math.round(s.branches.pct * 100) / 100;
+                const linesOk = linesPct === 100;
+                const branchOk = !e.branches || branchPct === 100;
+                const passed = linesOk && branchOk;
+                if (passed) ok++; else fail++;
+                console.log('| ' + e.path + ' | ' + linesPct + '% | ' + branchPct + '% | ' + (passed ? '✅' : '❌') + ' |');
+              }
+              console.log('');
+              console.log('**Result:** ' + ok + ' passed, ' + fail + ' failed / ' + entries.length + ' registered');
+            " >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 30
 
   typecheck:
     name: Type Check
@@ -86,7 +229,7 @@ jobs:
   deploy-staging:
     name: Deploy Staging
     if: github.event_name == 'pull_request'
-    needs: [test, typecheck]
+    needs: [test, typecheck, integration-test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

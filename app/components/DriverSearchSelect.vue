@@ -24,7 +24,7 @@ const filteredDrivers = computed(() => {
   const q = search.value.toLowerCase()
   if (!q) return props.drivers
   return props.drivers.filter(d =>
-    d.driver_name.toLowerCase().includes(q) || d.driver_cd.includes(q),
+    d.driver_name.toLowerCase().includes(q) || d.driver_cd.toLowerCase().includes(q),
   )
 })
 

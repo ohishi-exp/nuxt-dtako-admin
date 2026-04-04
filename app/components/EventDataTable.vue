@@ -1,80 +1,31 @@
 <script setup lang="ts">
 import type { CsvJsonResponse } from '~/types'
+import {
+  colIndex,
+  groupByCrewRole,
+  filterRows,
+  getDisplayColumns,
+  formatCell,
+  eventColorClass,
+  eventRowClass,
+  columnAlignClass,
+  isLocationColumn,
+  getGpsForCell,
+} from '~/utils/event-data-table'
 
 const props = defineProps<{
   data: CsvJsonResponse
   loading?: boolean
 }>()
 
-// ヘッダーから列インデックスを取得
-function colIndex(name: string): number {
-  return props.data.headers.indexOf(name)
-}
+const h = computed(() => props.data.headers)
 
-// イベント固有の表示列
-const eventHeaders = ['開始日時', '終了日時', 'イベントCD', 'イベント名', '区間時間', '区間距離', '開始市町村名', '終了市町村名']
-
-// 走行系イベント（通常はフィルタで除外、トグルで表示）
-const driveEventNames = new Set(['一般道空車', 'アイドリング', '一般道実車', '専用道', '高速道'])
 const showDriveEvents = ref(false)
 
-// 乗務員区分でグループ化
-interface CrewGroup {
-  label: string
-  crewRole: string
-  driverName: string
-  driverCd: string
-  officeName: string
-  vehicleName: string
-  rows: string[][]
-}
-
-const crewGroups = computed<CrewGroup[]>(() => {
-  const { headers, rows } = props.data
-  if (!headers.length) return []
-
-  const roleIdx = colIndex('対象乗務員区分')
-  const driverNameIdx = colIndex('乗務員名１')
-  const driverCdIdx = colIndex('乗務員CD1')
-  const officeIdx = colIndex('事業所名')
-  const vehicleIdx = colIndex('車輌名')
-
-  if (roleIdx < 0) {
-    // 区分列がなければ全データを1グループに
-    return [{
-      label: '乗務員',
-      crewRole: '1',
-      driverName: rows[0]?.[driverNameIdx] ?? '',
-      driverCd: rows[0]?.[driverCdIdx] ?? '',
-      officeName: rows[0]?.[officeIdx] ?? '',
-      vehicleName: rows[0]?.[vehicleIdx] ?? '',
-      rows,
-    }]
-  }
-
-  const map = new Map<string, CrewGroup>()
-  for (const row of rows) {
-    const role = row[roleIdx] ?? '1'
-    if (!map.has(role)) {
-      map.set(role, {
-        label: role === '1' ? '1番乗務員' : `${role}番乗務員`,
-        crewRole: role,
-        driverName: row[driverNameIdx] ?? '',
-        driverCd: row[driverCdIdx] ?? '',
-        officeName: row[officeIdx] ?? '',
-        vehicleName: row[vehicleIdx] ?? '',
-        rows: [],
-      })
-    }
-    map.get(role)!.rows.push(row)
-  }
-
-  return [...map.values()].sort((a, b) => a.crewRole.localeCompare(b.crewRole))
-})
+const crewGroups = computed(() => groupByCrewRole(h.value, props.data.rows))
 
 const activeCrewRole = ref('1')
 
-// 初期値を最初のグループに合わせる
 watch(crewGroups, (groups) => {
   if (groups.length && !groups.find(g => g.crewRole === activeCrewRole.value)) {
     activeCrewRole.value = groups[0]!.crewRole
@@ -83,23 +34,16 @@ watch(crewGroups, (groups) => {
 
 const activeGroup = computed(() => crewGroups.value.find(g => g.crewRole === activeCrewRole.value))
 
-// フィルタ済み行
+const eventNameIdx = computed(() => colIndex(h.value, 'イベント名'))
+
 const filteredRows = computed(() => {
   if (!activeGroup.value) return []
-  const eventNameIdx = colIndex('イベント名')
-  if (eventNameIdx < 0) return activeGroup.value.rows
-  return activeGroup.value.rows.filter(row => {
-    const name = (row[eventNameIdx] ?? '').trim()
-    const isDrive = driveEventNames.has(name)
-    return showDriveEvents.value ? isDrive : !isDrive
-  })
+  return filterRows(activeGroup.value.rows, eventNameIdx.value, showDriveEvents.value)
 })
 
 const driveEventCount = computed(() => {
   if (!activeGroup.value) return 0
-  const eventNameIdx = colIndex('イベント名')
-  if (eventNameIdx < 0) return 0
-  return activeGroup.value.rows.filter(row => driveEventNames.has((row[eventNameIdx] ?? '').trim())).length
+  return filterRows(activeGroup.value.rows, eventNameIdx.value, true).length
 })
 
 const otherEventCount = computed(() => {
@@ -107,133 +51,16 @@ const otherEventCount = computed(() => {
   return activeGroup.value.rows.length - driveEventCount.value
 })
 
-// 表示用のヘッダーとインデックス
-const displayColumns = computed(() => {
-  const cols: { header: string; index: number }[] = []
-  for (const h of eventHeaders) {
-    const idx = colIndex(h)
-    if (idx >= 0) cols.push({ header: h, index: idx })
-  }
-  return cols
-})
+const displayColumns = computed(() => getDisplayColumns(h.value))
 
-// 日時フォーマット (2026/03/07 8:16:22 → 03/07 08:16:22)
-function formatTime(val: string): string {
-  if (!val) return ''
-  const parts = val.split(' ')
-  if (parts.length < 2) return val
-  const dateParts = parts[0]!.split('/')
-  if (dateParts.length === 3) {
-    return `${dateParts[1]}/${dateParts[2]} ${parts[1]}`
-  }
-  return val
-}
-
-// イベント名の色・背景クラス（セル単位）
-const eventCellStyleMap: Record<string, string> = {
-  '休息': 'text-purple-600 dark:text-purple-400 font-medium',
-  '休憩': 'text-teal-600 dark:text-teal-400 font-medium',
-  '積み': 'bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300 font-medium',
-  '降し': 'bg-yellow-100 dark:bg-yellow-900/50 text-yellow-700 dark:text-yellow-300 font-medium',
-}
-// 行全体の背景
-const eventRowStyleMap: Record<string, string> = {
-  '積み': 'bg-green-50/50 dark:bg-green-950/30',
-  '降し': 'bg-yellow-50/50 dark:bg-yellow-950/30',
-  '休息': 'bg-purple-50/50 dark:bg-purple-950/30',
-}
-
-function eventColorClass(row: string[]): string {
-  const idx = colIndex('イベント名')
-  if (idx < 0) return ''
-  const name = (row[idx] ?? '').trim()
-  return eventCellStyleMap[name] ?? ''
-}
-
-function eventRowClass(row: string[]): string {
-  const idx = colIndex('イベント名')
-  if (idx < 0) return ''
-  const name = (row[idx] ?? '').trim()
-  return eventRowStyleMap[name] ?? ''
-}
-
-// 区間時間を分:秒に変換
-function formatDuration(val: string): string {
-  if (!val) return ''
-  const num = parseInt(val)
-  if (isNaN(num)) return val
-  const h = Math.floor(num / 60)
-  const m = num % 60
-  return h > 0 ? `${h}時間${m}分` : `${m}分`
-}
-
-function formatCell(header: string, val: string): string {
-  if (header === '開始日時' || header === '終了日時') return formatTime(val)
-  if (header === '区間時間') return formatDuration(val)
-  if (header === '区間距離') return val || ''
-  return val
-}
-
-// 列ごとの配置クラス
-const centerHeaders = new Set(['イベントCD', 'イベント名'])
-const rightHeaders = new Set(['区間時間', '区間距離'])
-
-function columnAlignClass(header: string): string {
-  if (centerHeaders.has(header)) return 'text-center'
-  if (rightHeaders.has(header)) return 'text-right'
-  return 'text-left'
-}
-
-// GPS列のインデックス
-const gpsColumns = computed(() => ({
-  startLat: colIndex('開始GPS緯度'),
-  startLng: colIndex('開始GPS経度'),
-  startValid: colIndex('開始GPS有効'),
-  endLat: colIndex('終了GPS緯度'),
-  endLng: colIndex('終了GPS経度'),
-  endValid: colIndex('終了GPS有効'),
-}))
-
-// GPS値を緯度経度に変換（度分形式: 32534932 → 32度53.4932分 → 32.891553）
-function toLatLng(raw: string): number | null {
-  if (!raw) return null
-  const n = parseInt(raw)
-  if (isNaN(n) || n === 0) return null
-  const deg = Math.floor(n / 1000000)
-  const min = (n % 1000000) / 10000
-  return deg + min / 60
-}
-
-// 市町村名セルのGPS情報を取得
-function getGpsForCell(row: string[], header: string): { lat: number; lng: number } | null {
-  const g = gpsColumns.value
-  const isStart = header === '開始市町村名'
-  const latIdx = isStart ? g.startLat : g.endLat
-  const lngIdx = isStart ? g.startLng : g.endLng
-  const validIdx = isStart ? g.startValid : g.endValid
-
-  if (latIdx < 0 || lngIdx < 0) return null
-  // GPS有効フラグチェック（ない場合はスキップ）
-  if (validIdx >= 0 && row[validIdx]?.trim() === '0') return null
-
-  const lat = toLatLng(row[latIdx] ?? '')
-  const lng = toLatLng(row[lngIdx] ?? '')
-  if (lat === null || lng === null) return null
-  return { lat, lng }
+function hasGps(row: string[], header: string): boolean {
+  return getGpsForCell(h.value, row, header) !== null
 }
 
 function openGoogleMap(row: string[], header: string) {
-  const gps = getGpsForCell(row, header)
+  const gps = getGpsForCell(h.value, row, header)
   if (!gps) return
   window.open(`https://www.google.com/maps?q=${gps.lat},${gps.lng}`, '_blank')
-}
-
-function isLocationColumn(header: string): boolean {
-  return header === '開始市町村名' || header === '終了市町村名'
-}
-
-function hasGps(row: string[], header: string): boolean {
-  return getGpsForCell(row, header) !== null
 }
 </script>
 
@@ -307,14 +134,14 @@ function hasGps(row: string[], header: string): boolean {
             v-for="(row, ri) in filteredRows"
             :key="ri"
             class="border-t border-gray-100 dark:border-gray-800"
-            :class="eventRowClass(row)"
+            :class="eventRowClass(h, row)"
           >
             <td class="px-3 py-1.5 text-gray-400">{{ ri + 1 }}</td>
             <td
               v-for="col in displayColumns"
               :key="col.header"
               class="px-3 py-1.5 whitespace-nowrap"
-              :class="[columnAlignClass(col.header), col.header === 'イベント名' ? eventColorClass(row) : '']"
+              :class="[columnAlignClass(col.header), col.header === 'イベント名' ? eventColorClass(h, row) : '']"
             >
               <button
                 v-if="isLocationColumn(col.header) && hasGps(row, col.header)"
