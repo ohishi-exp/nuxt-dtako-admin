@@ -1,7 +1,6 @@
 /**
- * auth-worker ベースの認証 composable
- * auth-worker が発行する JWT の `org` クレームを tenant_id として使用
- * rust-alc-api には X-Tenant-ID ヘッダーで転送
+ * rust-alc-api ベースの認証 composable
+ * JWT の `tenant_id` クレームを使用 (auth-worker の `org` クレームもフォールバック)
  */
 
 const TOKEN_KEY = 'dtako_token'
@@ -10,7 +9,8 @@ interface JwtPayload {
   sub: string
   email: string
   name: string
-  org: string  // tenant_id
+  tenant_id?: string
+  org?: string  // auth-worker 互換
   exp: number
   iat: number
 }
@@ -106,12 +106,13 @@ export function useAuth() {
     accessToken.value = token
     const payload = decodeJwt(token)
     if (payload) {
-      tenantId.value = payload.org
+      const tid = payload.tenant_id || payload.org || null
+      tenantId.value = tid
       user.value = {
         id: payload.sub,
         email: payload.email,
         name: payload.name,
-        tenant_id: payload.org,
+        tenant_id: tid ?? '',
       }
     }
   }
