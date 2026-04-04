@@ -5,7 +5,7 @@ vi.mock('#app/nuxt', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>()
   return {
     ...actual,
-    useRuntimeConfig: () => ({ public: { apiBase: 'http://test' } }),
+    useRuntimeConfig: () => ({ public: { apiBase: 'http://test', authWorkerUrl: 'https://auth.mtamaramu.com' } }),
   }
 })
 
