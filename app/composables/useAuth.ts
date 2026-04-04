@@ -70,13 +70,12 @@ export function useAuth() {
     isLoading.value = false
   }
 
-  /** auth-worker へリダイレクト (Google OAuth) */
+  /** rust-alc-api へ直接リダイレクト (Google OAuth) */
   function loginWithGoogleRedirect(): void {
     const callbackUrl = `${window.location.origin}/auth/callback`
-    const authWorkerUrl = config.public.authWorkerUrl as string
+    const apiBase = config.public.apiBase as string
 
-    // state は auth-worker 側で HMAC 生成するので、redirect_uri だけ渡す
-    window.location.href = `${authWorkerUrl}/oauth/google/redirect?redirect_uri=${encodeURIComponent(callbackUrl)}`
+    window.location.href = `${apiBase}/api/auth/google/redirect?redirect_uri=${encodeURIComponent(callbackUrl)}`
   }
 
   /** auth-worker コールバック: URL fragment から JWT を取得 */
