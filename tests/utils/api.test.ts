@@ -186,6 +186,27 @@ describe('api', () => {
       })
     })
 
+    it('includes Authorization header when tokenGetter is provided', async () => {
+      if (isLive) return
+      initApi(API_BASE, () => 'my-token', undefined, () => 'tid')
+      stubOk([])
+      await getDrivers()
+
+      const [, opts] = mockFetch.mock.calls[0]
+      expect(opts.headers['Authorization']).toBe('Bearer my-token')
+      expect(opts.headers['X-Tenant-ID']).toBe('tid')
+    })
+
+    it('omits Authorization header when tokenGetter returns null', async () => {
+      if (isLive) return
+      initApi(API_BASE, () => null, undefined, () => 'tid')
+      stubOk([])
+      await getDrivers()
+
+      const [, opts] = mockFetch.mock.calls[0]
+      expect(opts.headers).not.toHaveProperty('Authorization')
+    })
+
     it('omits X-Tenant-ID when tenantIdGetter returns null', async () => {
       if (isLive) return
       initApi(API_BASE, undefined, undefined, () => null)

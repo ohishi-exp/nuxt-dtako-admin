@@ -1,7 +1,6 @@
 /**
- * auth-worker ベースの認証 composable
- * auth-worker が発行する JWT の `org` クレームを tenant_id として使用
- * rust-alc-api には X-Tenant-ID ヘッダーで転送
+ * rust-alc-api ベースの認証 composable
+ * JWT の `tenant_id` クレームを使用 (auth-worker の `org` クレームもフォールバック)
  */
 
 const TOKEN_KEY = 'dtako_token'
@@ -10,7 +9,8 @@ interface JwtPayload {
   sub: string
   email: string
   name: string
-  org: string  // tenant_id
+  tenant_id?: string
+  org?: string  // auth-worker 互換
   exp: number
   iat: number
 }
@@ -70,13 +70,12 @@ export function useAuth() {
     isLoading.value = false
   }
 
-  /** auth-worker へリダイレクト (Google OAuth) */
+  /** rust-alc-api へ直接リダイレクト (Google OAuth) */
   function loginWithGoogleRedirect(): void {
     const callbackUrl = `${window.location.origin}/auth/callback`
-    const authWorkerUrl = config.public.authWorkerUrl as string
+    const apiBase = config.public.apiBase as string
 
-    // state は auth-worker 側で HMAC 生成するので、redirect_uri だけ渡す
-    window.location.href = `${authWorkerUrl}/oauth/google/redirect?redirect_uri=${encodeURIComponent(callbackUrl)}`
+    window.location.href = `${apiBase}/api/auth/google/redirect?redirect_uri=${encodeURIComponent(callbackUrl)}`
   }
 
   /** auth-worker コールバック: URL fragment から JWT を取得 */
@@ -107,12 +106,13 @@ export function useAuth() {
     accessToken.value = token
     const payload = decodeJwt(token)
     if (payload) {
-      tenantId.value = payload.org
+      const tid = payload.tenant_id || payload.org || null
+      tenantId.value = tid
       user.value = {
         id: payload.sub,
         email: payload.email,
         name: payload.name,
-        tenant_id: payload.org,
+        tenant_id: tid ?? '',
       }
     }
   }

@@ -22,7 +22,7 @@ function makeValidJwt(overrides: Record<string, unknown> = {}): string {
     sub: 'user-123',
     email: 'test@example.com',
     name: 'Test User',
-    org: 'tenant-456',
+    tenant_id: 'tenant-456',
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 3600,
     ...overrides,
@@ -35,7 +35,7 @@ function makeExpiredJwt(): string {
     sub: 'user-123',
     email: 'test@example.com',
     name: 'Test User',
-    org: 'tenant-456',
+    tenant_id: 'tenant-456',
     iat: Math.floor(Date.now() / 1000) - 7200,
     exp: Math.floor(Date.now() / 1000) - 3600,
   })
@@ -122,7 +122,7 @@ describe('useAuth', () => {
         sub: 'user~>?123',
         email: 'test@example.com',
         name: 'Test User',
-        org: 'tenant-456',
+        tenant_id: 'tenant-456',
         iat: Math.floor(Date.now() / 1000),
         exp: Math.floor(Date.now() / 1000) + 3600,
       }
@@ -160,7 +160,7 @@ describe('useAuth', () => {
         sub: 'user-123',
         email: 'test@example.com',
         name: 'Test User',
-        org: 'tenant-456',
+        tenant_id: 'tenant-456',
       })
       localStorage.setItem(TOKEN_KEY, token)
       const auth = useAuth()
@@ -273,7 +273,7 @@ describe('useAuth', () => {
   })
 
   describe('loginWithGoogleRedirect', () => {
-    it('redirects to auth-worker URL with callback', () => {
+    it('redirects to rust-alc-api with callback', () => {
       Object.defineProperty(window, 'location', {
         value: {
           origin: 'http://localhost:3000',
@@ -291,7 +291,7 @@ describe('useAuth', () => {
 
       const expectedCallback = encodeURIComponent('http://localhost:3000/auth/callback')
       expect(window.location.href).toBe(
-        `https://auth.mtamaramu.com/oauth/google/redirect?redirect_uri=${expectedCallback}`,
+        `http://test/api/auth/google/redirect?redirect_uri=${expectedCallback}`,
       )
     })
   })
@@ -448,6 +448,54 @@ describe('useAuth', () => {
       expect(auth.user.value).toBeNull()
 
       vi.stubGlobal('atob', originalAtob)
+    })
+  })
+
+  describe('JWT claim compatibility', () => {
+    it('uses tenant_id claim from rust-alc-api JWT', () => {
+      const token = makeValidJwt({ tenant_id: 'tid-from-api' })
+      localStorage.setItem(TOKEN_KEY, token)
+
+      const auth = useAuth()
+      auth.init()
+
+      expect(auth.tenantId.value).toBe('tid-from-api')
+      expect(auth.user.value?.tenant_id).toBe('tid-from-api')
+    })
+
+    it('falls back to org claim from auth-worker JWT', () => {
+      const token = makeJwt({
+        sub: 'user-123',
+        email: 'test@example.com',
+        name: 'Test User',
+        org: 'tid-from-authworker',
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      })
+      localStorage.setItem(TOKEN_KEY, token)
+
+      const auth = useAuth()
+      auth.init()
+
+      expect(auth.tenantId.value).toBe('tid-from-authworker')
+      expect(auth.user.value?.tenant_id).toBe('tid-from-authworker')
+    })
+
+    it('handles JWT with neither tenant_id nor org', () => {
+      const token = makeJwt({
+        sub: 'user-123',
+        email: 'test@example.com',
+        name: 'Test User',
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      })
+      localStorage.setItem(TOKEN_KEY, token)
+
+      const auth = useAuth()
+      auth.init()
+
+      expect(auth.tenantId.value).toBeNull()
+      expect(auth.user.value?.tenant_id).toBe('')
     })
   })
 

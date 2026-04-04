@@ -34,10 +34,13 @@ export function initApi(
   getTenantId = tenantIdGetter || null
 }
 
-/** 認証ヘッダーを構築 (X-Tenant-ID で認証) */
+/** 認証ヘッダーを構築 (Authorization: Bearer + X-Tenant-ID フォールバック) */
 function buildAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = {}
-  // auth-worker JWT の org クレームを X-Tenant-ID として送信
+  const token = getAccessToken?.()
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
   const tid = getTenantId?.()
   if (tid) {
     headers['X-Tenant-ID'] = tid
