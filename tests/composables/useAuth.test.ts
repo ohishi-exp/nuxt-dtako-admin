@@ -273,7 +273,7 @@ describe('useAuth', () => {
   })
 
   describe('loginWithGoogleRedirect', () => {
-    it('redirects to auth-worker URL with callback', () => {
+    it('redirects to rust-alc-api with callback', () => {
       Object.defineProperty(window, 'location', {
         value: {
           origin: 'http://localhost:3000',
@@ -291,7 +291,7 @@ describe('useAuth', () => {
 
       const expectedCallback = encodeURIComponent('http://localhost:3000/auth/callback')
       expect(window.location.href).toBe(
-        `https://auth.mtamaramu.com/oauth/google/redirect?redirect_uri=${expectedCallback}`,
+        `http://test/api/auth/google/redirect?redirect_uri=${expectedCallback}`,
       )
     })
   })
