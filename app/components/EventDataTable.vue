@@ -36,20 +36,19 @@ const activeGroup = computed(() => crewGroups.value.find(g => g.crewRole === act
 
 const eventNameIdx = computed(() => colIndex(h.value, 'イベント名'))
 
-const filteredRows = computed(() => {
-  if (!activeGroup.value) return []
-  return filterRows(activeGroup.value.rows, eventNameIdx.value, showDriveEvents.value)
-})
+const activeRows = computed(() => activeGroup.value?.rows ?? [])
 
-const driveEventCount = computed(() => {
-  if (!activeGroup.value) return 0
-  return filterRows(activeGroup.value.rows, eventNameIdx.value, true).length
-})
+const filteredRows = computed(() =>
+  filterRows(activeRows.value, eventNameIdx.value, showDriveEvents.value),
+)
 
-const otherEventCount = computed(() => {
-  if (!activeGroup.value) return 0
-  return activeGroup.value.rows.length - driveEventCount.value
-})
+const driveEventCount = computed(() =>
+  filterRows(activeRows.value, eventNameIdx.value, true).length,
+)
+
+const otherEventCount = computed(() =>
+  activeRows.value.length - driveEventCount.value,
+)
 
 const displayColumns = computed(() => getDisplayColumns(h.value))
 

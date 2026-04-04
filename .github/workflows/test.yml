@@ -231,9 +231,29 @@ jobs:
         timeout-minutes: 5
 
       - name: Run integration tests
-        run: npx vitest run tests/utils/api.test.ts
+        run: npx vitest run tests/utils/api.test.ts --reporter=default --reporter=json --outputFile.json=integration-results.json
         env:
           API_BASE_URL: http://localhost:18080
+
+      - name: Job Summary
+        if: always()
+        run: |
+          if [ -f integration-results.json ]; then
+            echo "## API Integration summary" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            node -e "
+              const s = require('./integration-results.json');
+              const suites = s.numTotalTestSuites || 0;
+              const passed = s.numPassedTestSuites || 0;
+              const tests = s.numTotalTests || 0;
+              const testsPassed = s.numPassedTests || 0;
+              const failed = s.numFailedTests || 0;
+              console.log('### Summary');
+              console.log('- Test Files: ' + (failed === 0 ? '✅' : '❌') + ' ' + passed + ' passes · ' + suites + ' total');
+              console.log('- Test Results: ' + (failed === 0 ? '✅' : '❌') + ' ' + testsPassed + ' passes · ' + tests + ' total');
+              if (failed > 0) console.log('- ❌ ' + failed + ' failed');
+            " >> $GITHUB_STEP_SUMMARY
+          fi
 
       - name: Show API logs on failure
         if: failure()
