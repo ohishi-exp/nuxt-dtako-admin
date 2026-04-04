@@ -1,3 +1,4 @@
+/* v8 ignore start */
 /**
  * API テスト共通環境
  *
