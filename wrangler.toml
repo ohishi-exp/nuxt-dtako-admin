@@ -4,6 +4,10 @@ compatibility_date = "2025-03-10"
 main = ".output/server/index.mjs"
 assets = { directory = ".output/public/", binding = "ASSETS" }
 
+[[routes]]
+pattern = "dtako.ippoan.org"
+custom_domain = true
+
 [vars]
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth.mtamaramu.com"
 
