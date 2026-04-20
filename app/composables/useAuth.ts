@@ -70,12 +70,15 @@ export function useAuth() {
     isLoading.value = false
   }
 
-  /** rust-alc-api へ直接リダイレクト (Google OAuth) */
+  /** auth-worker 経由で Google OAuth リダイレクト */
   function loginWithGoogleRedirect(): void {
     const callbackUrl = `${window.location.origin}/auth/callback`
-    const apiBase = config.public.apiBase as string
+    const authWorkerUrl = config.public.authWorkerUrl as string
+    if (!authWorkerUrl) {
+      throw new Error('NUXT_PUBLIC_AUTH_WORKER_URL is not configured')
+    }
 
-    window.location.href = `${apiBase}/api/auth/google/redirect?redirect_uri=${encodeURIComponent(callbackUrl)}`
+    window.location.href = `${authWorkerUrl}/oauth/google/redirect?redirect_uri=${encodeURIComponent(callbackUrl)}`
   }
 
   /** auth-worker コールバック: URL fragment から JWT を取得 */
