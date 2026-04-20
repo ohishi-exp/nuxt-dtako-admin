@@ -9,6 +9,7 @@ pattern = "dtako.ippoan.org"
 custom_domain = true
 
 [vars]
+NUXT_PUBLIC_API_BASE = "https://alc-api.ippoan.org"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth.ippoan.org"
 
 [env.staging]

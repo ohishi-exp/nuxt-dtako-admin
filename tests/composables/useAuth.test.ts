@@ -273,7 +273,7 @@ describe('useAuth', () => {
   })
 
   describe('loginWithGoogleRedirect', () => {
-    it('redirects to rust-alc-api with callback', () => {
+    it('redirects to auth-worker with callback', () => {
       Object.defineProperty(window, 'location', {
         value: {
           origin: 'http://localhost:3000',
@@ -291,8 +291,39 @@ describe('useAuth', () => {
 
       const expectedCallback = encodeURIComponent('http://localhost:3000/auth/callback')
       expect(window.location.href).toBe(
-        `http://test/api/auth/google/redirect?redirect_uri=${expectedCallback}`,
+        `https://auth.mtamaramu.com/oauth/google/redirect?redirect_uri=${expectedCallback}`,
       )
+    })
+
+    it('throws when NUXT_PUBLIC_AUTH_WORKER_URL is not configured', async () => {
+      vi.resetModules()
+      vi.doMock('#app/nuxt', async (importOriginal) => {
+        const actual = await importOriginal<Record<string, unknown>>()
+        return {
+          ...actual,
+          useRuntimeConfig: () => ({ public: { apiBase: 'http://test', authWorkerUrl: '' } }),
+        }
+      })
+      const { useAuth: useAuthNoWorker } = await import('~/composables/useAuth')
+
+      Object.defineProperty(window, 'location', {
+        value: {
+          origin: 'http://localhost:3000',
+          href: 'http://localhost:3000/',
+          pathname: '/',
+          search: '',
+          hash: '',
+        },
+        writable: true,
+        configurable: true,
+      })
+
+      const auth = useAuthNoWorker()
+      expect(() => auth.loginWithGoogleRedirect()).toThrow(
+        'NUXT_PUBLIC_AUTH_WORKER_URL is not configured',
+      )
+
+      vi.doUnmock('#app/nuxt')
     })
   })
 
