@@ -1,11 +1,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
+// Mutable config so individual tests can override (e.g. to simulate missing authWorkerUrl).
+// `vi.hoisted` keeps the reference available inside the hoisted `vi.mock` factory.
+const mockConfig = vi.hoisted(() => ({
+  public: { apiBase: 'http://test', authWorkerUrl: 'https://auth.mtamaramu.com' },
+}))
+
 // Mock useRuntimeConfig - the Nuxt auto-import transform resolves it from #app/nuxt
 vi.mock('#app/nuxt', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>()
   return {
     ...actual,
-    useRuntimeConfig: () => ({ public: { apiBase: 'http://test', authWorkerUrl: 'https://auth.mtamaramu.com' } }),
+    useRuntimeConfig: () => mockConfig,
   }
 })
 
@@ -273,7 +279,7 @@ describe('useAuth', () => {
   })
 
   describe('loginWithGoogleRedirect', () => {
-    it('redirects to rust-alc-api with callback', () => {
+    it('redirects to auth-worker with callback', () => {
       Object.defineProperty(window, 'location', {
         value: {
           origin: 'http://localhost:3000',
@@ -291,8 +297,33 @@ describe('useAuth', () => {
 
       const expectedCallback = encodeURIComponent('http://localhost:3000/auth/callback')
       expect(window.location.href).toBe(
-        `http://test/api/auth/google/redirect?redirect_uri=${expectedCallback}`,
+        `https://auth.mtamaramu.com/oauth/google/redirect?redirect_uri=${expectedCallback}`,
       )
+    })
+
+    it('throws when NUXT_PUBLIC_AUTH_WORKER_URL is not configured', () => {
+      const original = mockConfig.public.authWorkerUrl
+      mockConfig.public.authWorkerUrl = ''
+      try {
+        Object.defineProperty(window, 'location', {
+          value: {
+            origin: 'http://localhost:3000',
+            href: 'http://localhost:3000/',
+            pathname: '/',
+            search: '',
+            hash: '',
+          },
+          writable: true,
+          configurable: true,
+        })
+
+        const auth = useAuth()
+        expect(() => auth.loginWithGoogleRedirect()).toThrow(
+          'NUXT_PUBLIC_AUTH_WORKER_URL is not configured',
+        )
+      } finally {
+        mockConfig.public.authWorkerUrl = original
+      }
     })
   })
 
