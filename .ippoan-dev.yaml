@@ -1,0 +1,5 @@
+# dev-proxy metadata. Must mirror the entry for ippoan/nuxt-dtako-admin in
+# ippoan/dev-proxy/registry.json. Mismatches fail ci/Dev Proxy Validate.
+name: nuxt-dtako-admin
+port: 3013
+cmd: "PORT=$PORT HOST=0.0.0.0 npm run dev"
