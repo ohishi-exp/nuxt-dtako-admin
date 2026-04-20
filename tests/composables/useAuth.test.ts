@@ -1,11 +1,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
+// Mutable config so individual tests can override (e.g. to simulate missing authWorkerUrl).
+// `vi.hoisted` keeps the reference available inside the hoisted `vi.mock` factory.
+const mockConfig = vi.hoisted(() => ({
+  public: { apiBase: 'http://test', authWorkerUrl: 'https://auth.mtamaramu.com' },
+}))
+
 // Mock useRuntimeConfig - the Nuxt auto-import transform resolves it from #app/nuxt
 vi.mock('#app/nuxt', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>()
   return {
     ...actual,
-    useRuntimeConfig: () => ({ public: { apiBase: 'http://test', authWorkerUrl: 'https://auth.mtamaramu.com' } }),
+    useRuntimeConfig: () => mockConfig,
   }
 })
 
@@ -295,35 +301,29 @@ describe('useAuth', () => {
       )
     })
 
-    it('throws when NUXT_PUBLIC_AUTH_WORKER_URL is not configured', async () => {
-      vi.resetModules()
-      vi.doMock('#app/nuxt', async (importOriginal) => {
-        const actual = await importOriginal<Record<string, unknown>>()
-        return {
-          ...actual,
-          useRuntimeConfig: () => ({ public: { apiBase: 'http://test', authWorkerUrl: '' } }),
-        }
-      })
-      const { useAuth: useAuthNoWorker } = await import('~/composables/useAuth')
+    it('throws when NUXT_PUBLIC_AUTH_WORKER_URL is not configured', () => {
+      const original = mockConfig.public.authWorkerUrl
+      mockConfig.public.authWorkerUrl = ''
+      try {
+        Object.defineProperty(window, 'location', {
+          value: {
+            origin: 'http://localhost:3000',
+            href: 'http://localhost:3000/',
+            pathname: '/',
+            search: '',
+            hash: '',
+          },
+          writable: true,
+          configurable: true,
+        })
 
-      Object.defineProperty(window, 'location', {
-        value: {
-          origin: 'http://localhost:3000',
-          href: 'http://localhost:3000/',
-          pathname: '/',
-          search: '',
-          hash: '',
-        },
-        writable: true,
-        configurable: true,
-      })
-
-      const auth = useAuthNoWorker()
-      expect(() => auth.loginWithGoogleRedirect()).toThrow(
-        'NUXT_PUBLIC_AUTH_WORKER_URL is not configured',
-      )
-
-      vi.doUnmock('#app/nuxt')
+        const auth = useAuth()
+        expect(() => auth.loginWithGoogleRedirect()).toThrow(
+          'NUXT_PUBLIC_AUTH_WORKER_URL is not configured',
+        )
+      } finally {
+        mockConfig.public.authWorkerUrl = original
+      }
     })
   })
 
