@@ -29,7 +29,7 @@ export interface SwitchTenantResponse {
   access_token: string
   expires_in: number
   tenant_id: string
-  tenant_name: string
+  tenant_name?: string
 }
 
 // --- Tenant Members ---
