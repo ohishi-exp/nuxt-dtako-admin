@@ -376,7 +376,6 @@ describe('api', () => {
       ['rerunUpload', () => rerunUpload('upload-1'), '/api/internal/rerun/upload-1'],
       ['triggerScrape', () => triggerScrape({ start_date: '2026-01-01' }), '/api/scraper/trigger'],
       ['splitCsv', () => splitCsv('upload-1'), '/api/split-csv/upload-1'],
-      ['switchTenant', () => switchTenant('t2'), '/api/auth/switch-tenant'],
     ] as [string, () => Promise<unknown>, string][])('%s → POST %s', async (_name, fn, expectedPath) => {
       stubOk({})
       await callApi(fn)
@@ -384,6 +383,24 @@ describe('api', () => {
         expect(mockFetch.mock.calls[0][0]).toBe(`${API_BASE}${expectedPath}`)
         expect(mockFetch.mock.calls[0][1].method).toBe('POST')
       })
+    })
+
+    it('switchTenant posts organization_id and maps response', async () => {
+      const expiresAt = Math.floor(Date.now() / 1000) + 3600
+      stubOk({ token: 'new-jwt', expires_at: String(expiresAt), organization_id: 't2' })
+      if (isLive) {
+        await callApi(() => switchTenant('t2'))
+        return
+      }
+      const result = await switchTenant('t2')
+      expect(mockFetch.mock.calls[0][0]).toBe(`${API_BASE}/api/auth/switch-org`)
+      expect(mockFetch.mock.calls[0][1].method).toBe('POST')
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual({ organization_id: 't2' })
+      expect(result.access_token).toBe('new-jwt')
+      expect(result.tenant_id).toBe('t2')
+      expect(result.expires_in).toBeGreaterThanOrEqual(3599)
+      expect(result.expires_in).toBeLessThanOrEqual(3600)
+      expect(result.tenant_name).toBeUndefined()
     })
 
     it('uploadZip', async () => {
@@ -436,13 +453,6 @@ describe('api', () => {
       })
     })
 
-    it('switchTenant sends tenant_id', async () => {
-      stubOk({ access_token: 'new', expires_in: 3600, tenant_id: 't2', tenant_name: 'T2' })
-      await callApi(() => switchTenant('t2'))
-      assertMock(() => {
-        expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual({ tenant_id: 't2' })
-      })
-    })
   })
 
   // ===== PUT/PATCH functions =====

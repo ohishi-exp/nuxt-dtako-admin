@@ -665,9 +665,21 @@ export async function triggerScrapeStream(
 
 // --- Tenant Switching ---
 
+interface SwitchOrgResponse {
+  token: string
+  expires_at: string
+  organization_id: string
+}
+
 export async function switchTenant(tenantId: string): Promise<SwitchTenantResponse> {
-  return request<SwitchTenantResponse>('/api/auth/switch-tenant', {
+  const res = await request<SwitchOrgResponse>('/api/auth/switch-org', {
     method: 'POST',
-    body: JSON.stringify({ tenant_id: tenantId }),
+    body: JSON.stringify({ organization_id: tenantId }),
   })
+  const nowSec = Math.floor(Date.now() / 1000)
+  return {
+    access_token: res.token,
+    expires_in: Math.max(0, Number(res.expires_at) - nowSec),
+    tenant_id: res.organization_id,
+  }
 }
