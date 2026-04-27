@@ -3,7 +3,7 @@ import { useAuth } from '@ippoan/auth-client'
 import { initApi } from '~/utils/api'
 
 const config = useRuntimeConfig()
-const { token, orgId, isLoading } = useAuth()
+const { token, orgId } = useAuth()
 
 onMounted(() => {
   initApi(
@@ -17,10 +17,7 @@ onMounted(() => {
 
 <template>
   <UApp>
-    <div v-if="isLoading" key="auth-loading" class="flex items-center justify-center min-h-screen">
-      <UIcon name="i-lucide-loader-circle" class="animate-spin size-8 text-gray-400" />
-    </div>
-    <NuxtLayout v-else key="layout">
+    <NuxtLayout>
       <NuxtPage />
     </NuxtLayout>
   </UApp>
