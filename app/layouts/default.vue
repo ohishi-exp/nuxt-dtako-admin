@@ -40,7 +40,7 @@ const navigation = [
       <!-- Auth toolbar (Apps / Settings / Logout / user info) -->
       <div class="p-2 border-t border-gray-200 dark:border-gray-800">
         <AuthToolbar
-          class="flex flex-col items-stretch [&>*]:w-full [&>*]:justify-start [&>*]:px-3 [&>*]:py-1.5 [&>*]:text-sm [&>*]:rounded-md [&>button]:hover:bg-gray-100 [&>button]:dark:hover:bg-gray-700"
+          class="flex flex-col items-stretch text-left [&>*]:w-full [&>*]:justify-start [&>*]:text-left [&>*]:px-3 [&>*]:py-1.5 [&>*]:text-sm [&>*]:rounded-md [&>button]:hover:bg-gray-100 [&>button]:dark:hover:bg-gray-700"
           :show-copy-url="false"
           :show-qr="false"
           show-org-slug
