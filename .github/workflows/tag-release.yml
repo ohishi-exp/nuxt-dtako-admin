@@ -9,4 +9,5 @@ permissions:
 jobs:
   release:
     uses: ippoan/ci-workflows/.github/workflows/tag-release.yml@main
-    secrets: inherit
+    secrets:
+      TAG_RELEASE_PAT: ${{ secrets.TAG_RELEASE_PAT }}
