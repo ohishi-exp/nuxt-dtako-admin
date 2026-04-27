@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { useAuth } from '@ippoan/auth-client'
+import { AuthToolbar } from '@ippoan/auth-client'
 
-const { username, logout } = useAuth()
 const route = useRoute()
 
 const navigation = [
@@ -13,10 +12,6 @@ const navigation = [
   { label: 'イベント分類', icon: 'i-lucide-settings', to: '/event-classifications' },
   { label: 'スクレイプ', icon: 'i-lucide-download', to: '/scraper' },
 ]
-
-function handleLogout() {
-  logout()
-}
 </script>
 
 <template>
@@ -42,18 +37,13 @@ function handleLogout() {
         </NuxtLink>
       </nav>
 
-      <!-- User -->
-      <div class="p-4 border-t border-gray-200 dark:border-gray-800">
-        <div class="text-sm text-gray-600 dark:text-gray-400 truncate mb-2">
-          {{ username }}
-        </div>
-        <UButton
-          label="ログアウト"
-          icon="i-lucide-log-out"
-          variant="ghost"
-          size="sm"
-          block
-          @click="handleLogout"
+      <!-- Auth toolbar (Apps / Settings / Logout / user info) -->
+      <div class="p-2 border-t border-gray-200 dark:border-gray-800">
+        <AuthToolbar
+          class="flex flex-col items-stretch [&>*]:w-full [&>*]:justify-start [&>*]:px-3 [&>*]:py-1.5 [&>*]:text-sm [&>*]:rounded-md [&>button]:hover:bg-gray-100 [&>button]:dark:hover:bg-gray-700"
+          :show-copy-url="false"
+          :show-qr="false"
+          show-org-slug
         />
       </div>
     </aside>
