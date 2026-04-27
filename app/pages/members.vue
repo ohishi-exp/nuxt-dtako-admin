@@ -1,8 +1,21 @@
 <script setup lang="ts">
+import { useAuth } from '@ippoan/auth-client'
 import type { TenantMember } from '~/types'
 import { getMembers, inviteMember, updateMemberRole, deleteMember } from '~/utils/api'
 
-const { user } = useAuth()
+const { token } = useAuth()
+const user = computed(() => {
+  if (!token.value) return null
+  try {
+    const payload = JSON.parse(atob(token.value.split('.')[1] ?? '')) as {
+      email?: string
+      role?: string
+    }
+    return { email: payload.email, role: payload.role }
+  } catch {
+    return null
+  }
+})
 
 const members = ref<TenantMember[]>([])
 const loading = ref(false)
@@ -21,6 +34,7 @@ const updatingEmail = ref<string | null>(null)
 const removingEmail = ref<string | null>(null)
 
 const isAdmin = computed(() => user.value?.role === 'admin')
+
 
 const roleOptions = [
   { label: 'Admin', value: 'admin' },

@@ -1,17 +1,17 @@
 <script setup lang="ts">
+import { useAuth } from '@ippoan/auth-client'
 import { initApi } from '~/utils/api'
 
 const config = useRuntimeConfig()
-const { init, accessToken, tenantId, isLoading } = useAuth()
+const { token, orgId, isLoading } = useAuth()
 
-onMounted(async () => {
+onMounted(() => {
   initApi(
     config.public.apiBase as string,
-    () => accessToken.value,
+    () => token.value,
     undefined,
-    () => tenantId.value,
+    () => orgId.value,
   )
-  await init()
 })
 </script>
 

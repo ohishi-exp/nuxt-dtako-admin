@@ -14,6 +14,12 @@ export default defineNuxtConfig({
     preset: 'cloudflare_module',
   },
 
+  vite: {
+    optimizeDeps: {
+      exclude: ['@ippoan/auth-client'],
+    },
+  },
+
   modules: [
     '@nuxt/ui',
   ],

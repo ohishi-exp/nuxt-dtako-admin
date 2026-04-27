@@ -6,10 +6,6 @@ path = "app/utils/api.ts"
 branches = true
 
 [[files]]
-path = "app/composables/useAuth.ts"
-branches = true
-
-[[files]]
 path = "app/middleware/auth.global.ts"
 branches = true
 

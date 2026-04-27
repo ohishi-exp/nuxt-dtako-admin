@@ -1,5 +1,7 @@
 <script setup lang="ts">
-const { user, logout } = useAuth()
+import { useAuth } from '@ippoan/auth-client'
+
+const { username, logout } = useAuth()
 const route = useRoute()
 
 const navigation = [
@@ -12,9 +14,8 @@ const navigation = [
   { label: 'スクレイプ', icon: 'i-lucide-download', to: '/scraper' },
 ]
 
-async function handleLogout() {
-  await logout()
-  navigateTo('/login')
+function handleLogout() {
+  logout()
 }
 </script>
 
@@ -44,7 +45,7 @@ async function handleLogout() {
       <!-- User -->
       <div class="p-4 border-t border-gray-200 dark:border-gray-800">
         <div class="text-sm text-gray-600 dark:text-gray-400 truncate mb-2">
-          {{ user?.name || user?.email }}
+          {{ username }}
         </div>
         <UButton
           label="ログアウト"
