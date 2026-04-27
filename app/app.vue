@@ -17,10 +17,10 @@ onMounted(() => {
 
 <template>
   <UApp>
-    <div v-if="isLoading" class="flex items-center justify-center min-h-screen">
+    <div v-if="isLoading" key="auth-loading" class="flex items-center justify-center min-h-screen">
       <UIcon name="i-lucide-loader-circle" class="animate-spin size-8 text-gray-400" />
     </div>
-    <NuxtLayout v-else>
+    <NuxtLayout v-else key="layout">
       <NuxtPage />
     </NuxtLayout>
   </UApp>
