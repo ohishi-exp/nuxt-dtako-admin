@@ -17,7 +17,7 @@ const navigation = [
 <template>
   <div class="flex min-h-screen">
     <!-- Sidebar -->
-    <aside class="w-60 border-r border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 flex flex-col">
+    <aside class="w-60 border-r border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 flex flex-col sticky top-0 h-screen">
       <div class="p-4 border-b border-gray-200 dark:border-gray-800">
         <h1 class="text-lg font-bold">デジタコ管理</h1>
       </div>
