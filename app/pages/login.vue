@@ -1,7 +1,16 @@
 <script setup lang="ts">
+import { useAuth } from '@ippoan/auth-client'
+
 definePageMeta({ layout: 'auth' })
 
-const { loginWithGoogleRedirect } = useAuth()
+const { redirectToLogin } = useAuth()
+const config = useRuntimeConfig()
+
+onMounted(() => {
+  if (config.public.authWorkerUrl) {
+    redirectToLogin({ provider: 'google', callbackPath: '/auth/callback' })
+  }
+})
 </script>
 
 <template>
@@ -14,7 +23,7 @@ const { loginWithGoogleRedirect } = useAuth()
         icon="i-lucide-log-in"
         size="lg"
         block
-        @click="loginWithGoogleRedirect()"
+        @click="redirectToLogin({ provider: 'google', callbackPath: '/auth/callback' })"
       />
     </div>
   </UCard>

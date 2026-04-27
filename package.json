@@ -12,6 +12,7 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
+    "@ippoan/auth-client": "^0.2.25",
     "@nuxt/ui": "^4.5.1",
     "@nuxtjs/tailwindcss": "^6.14.0",
     "nuxt": "^4.3.1",

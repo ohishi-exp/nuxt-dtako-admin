@@ -1,11 +1,13 @@
 <script setup lang="ts">
+import { useAuth } from '@ippoan/auth-client'
+
 definePageMeta({ layout: 'auth' })
 
-const { handleCallback } = useAuth()
+const { consumeFragment } = useAuth()
 const error = ref<string | null>(null)
 
 onMounted(() => {
-  const success = handleCallback()
+  const success = consumeFragment()
   if (success) {
     navigateTo('/operations')
   } else {

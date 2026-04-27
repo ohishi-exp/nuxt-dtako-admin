@@ -2,12 +2,24 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const mockIsAuthenticated = { value: false }
 const mockIsLoading = { value: false }
+const mockPublicConfig: Record<string, string> = {}
 
-vi.mock('~/composables/useAuth', () => ({
+vi.mock('@ippoan/auth-client', () => ({
   useAuth: () => ({
     isAuthenticated: mockIsAuthenticated,
     isLoading: mockIsLoading,
   }),
+  authMiddleware: (options: { publicPaths?: string[]; loginPath?: string } = {}) => {
+    const { publicPaths = ['/login'], loginPath = '/login' } = options
+    return (to: { path: string }) => {
+      if (mockPublicConfig.stagingTenantId) return
+      if (publicPaths.some((p) => to.path.startsWith(p))) return
+      if (mockIsLoading.value) return
+      if (!mockIsAuthenticated.value) {
+        return navigateTo(loginPath)
+      }
+    }
+  },
 }))
 
 vi.mock('#app/composables/router', async (importOriginal) => {
@@ -28,6 +40,7 @@ describe('auth.global middleware', () => {
   beforeEach(() => {
     mockIsAuthenticated.value = false
     mockIsLoading.value = false
+    for (const k of Object.keys(mockPublicConfig)) delete mockPublicConfig[k]
     navigateToMock.mockClear()
   })
 
