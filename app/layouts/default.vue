@@ -8,6 +8,7 @@ const navigation = [
   { label: '運行一覧', icon: 'i-lucide-truck', to: '/operations' },
   { label: '日別稼働', icon: 'i-lucide-clock', to: '/daily-hours' },
   { label: '拘束時間管理表', icon: 'i-lucide-shield-check', to: '/restraint-report' },
+  { label: 'Y時間 エクスポート', icon: 'i-lucide-file-spreadsheet', to: '/y-time-export' },
   { label: 'CSV比較', icon: 'i-lucide-git-compare', to: '/restraint-compare' },
   { label: 'イベント分類', icon: 'i-lucide-settings', to: '/event-classifications' },
   { label: 'スクレイプ', icon: 'i-lucide-download', to: '/scraper' },
