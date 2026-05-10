@@ -1,17 +1,11 @@
 /**
  * Y時間 Excel 追記エクスポート (Cloudflare Worker 上で実行される Nitro server route)。
  *
- * 1. body から `{ driver_cd, from, to, template_key, preview? }` を受け取る
- * 2a. `preview` が同梱されている → backend GET をスキップして直接使う (async job 経由)
- * 2b. `preview` なし → backend (rust-alc-api) `/api/dtako/y-time-export` を JWT forward
- *     で叩いて JSON 取得 (後方互換、フォールバック用)
+ * 1. body から `{ driver_cd, from, to, template_key }` を受け取る
+ * 2. backend (rust-alc-api) `/api/dtako/y-time-export` を JWT forward で叩いて JSON 取得
  * 3. R2 binding (`env.DTAKO_R2`) でテンプレ xlsx を fetch
  * 4. ExcelJS で Y時間 シートに書き込み
  * 5. xlsx binary を octet-stream で return
- *
- * `preview` 経路の意図: frontend が `useYTimeExportJob` で WebSocket 経由 result を受領
- * したあと、その JSON をそのまま渡してくる。Worker → backend HTTP の長時間保持
- * (13ヶ月 41-107s) を回避できる。
  *
  * R2 binding がない (ローカル `nuxt dev` 等) 環境では明示的に 503 を返す。
  */
@@ -32,8 +26,6 @@ interface RequestBody {
   from: string
   to: string
   template_key: string
-  /** WS 経由で受領済みの compute 結果。あれば backend GET スキップ。 */
-  preview?: YTimeExportResponse
 }
 
 interface R2ObjectMinimal {
@@ -67,41 +59,35 @@ export default defineEventHandler(async (event) => {
     })
   }
 
-  // 1. compute 結果を取得: preview 同梱 → そのまま、無ければ backend GET フォールバック
-  let data: YTimeExportResponse
-  if (body.preview && Array.isArray(body.preview.rows)) {
-    // frontend が useYTimeExportJob で受領した結果 (WS 経由) を流用
-    data = body.preview
-  } else {
-    const config = useRuntimeConfig()
-    const apiBase = (config.public as { apiBase?: string }).apiBase
-      || process.env.NUXT_PUBLIC_API_BASE
-    if (!apiBase) {
-      throw createError({ statusCode: 500, statusMessage: 'apiBase not configured' })
-    }
-
-    const auth = getHeader(event, 'authorization') ?? ''
-    const tenantId = getHeader(event, 'x-tenant-id') ?? ''
-    const headers: Record<string, string> = {}
-    if (auth) headers['authorization'] = auth
-    if (tenantId) headers['x-tenant-id'] = tenantId
-
-    const params = new URLSearchParams({
-      driver_cd: body.driver_cd,
-      from: body.from,
-      to: body.to,
-    })
-    const apiUrl = `${apiBase.replace(/\/$/, '')}/api/dtako/y-time-export?${params.toString()}`
-    const apiRes = await fetch(apiUrl, { headers })
-    if (!apiRes.ok) {
-      const text = await apiRes.text().catch(() => '')
-      throw createError({
-        statusCode: apiRes.status,
-        statusMessage: `backend error: ${text || apiRes.statusText}`,
-      })
-    }
-    data = (await apiRes.json()) as YTimeExportResponse
+  const config = useRuntimeConfig()
+  const apiBase = (config.public as { apiBase?: string }).apiBase
+    || process.env.NUXT_PUBLIC_API_BASE
+  if (!apiBase) {
+    throw createError({ statusCode: 500, statusMessage: 'apiBase not configured' })
   }
+
+  // 1. backend JSON 取得 — 認証ヘッダーをそのまま forward
+  const auth = getHeader(event, 'authorization') ?? ''
+  const tenantId = getHeader(event, 'x-tenant-id') ?? ''
+  const headers: Record<string, string> = {}
+  if (auth) headers['authorization'] = auth
+  if (tenantId) headers['x-tenant-id'] = tenantId
+
+  const params = new URLSearchParams({
+    driver_cd: body.driver_cd,
+    from: body.from,
+    to: body.to,
+  })
+  const apiUrl = `${apiBase.replace(/\/$/, '')}/api/dtako/y-time-export?${params.toString()}`
+  const apiRes = await fetch(apiUrl, { headers })
+  if (!apiRes.ok) {
+    const text = await apiRes.text().catch(() => '')
+    throw createError({
+      statusCode: apiRes.status,
+      statusMessage: `backend error: ${text || apiRes.statusText}`,
+    })
+  }
+  const data = (await apiRes.json()) as YTimeExportResponse
 
   // 2. R2 binding でテンプレ取得
   const r2 = getR2Binding(event)

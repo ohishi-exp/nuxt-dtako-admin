@@ -67,13 +67,6 @@ const uploadStatus = ref('')
 
 const { token, orgId } = useAuth()
 
-// async job (WebSocket 完了通知) クライアント。
-// realtimeBusUrl 未設定なら内部で同期 GET にフォールバックする。
-const yTimeJob = useYTimeExportJob()
-
-// 「ダウンロード」進捗 UI 用ラベル
-const downloadStage = ref<'' | 'computing' | 'building'>('')
-
 /** 分数を `H:MM` または `HH:MM` 形式に整形 (24h 越えも `30:00` 等そのまま 2 桁以上で表示) */
 function fmtMinutes(m: number | null | undefined): string {
   if (m == null) return ''
@@ -278,25 +271,10 @@ async function downloadXlsx() {
   }
 
   loading.value = true
-  downloadStage.value = 'computing'
   error.value = ''
   lastWarnings.value = []
 
   try {
-    // 1. backend で compute (async job + WS 完了通知)。
-    //    rust-alc-api 側の R2 並列 fetch + WS push により、Cloudflare proxy の長時間
-    //    HTTP 保持 (旧フローで 41-107s) を 5-15s 程度に短縮。
-    //    realtimeBusUrl 未設定の環境では内部で同期 GET にフォールバックする。
-    const preview = await yTimeJob.start({
-      driverCd: selectedDriverCd.value,
-      from: dateFrom.value,
-      to: dateTo.value,
-    })
-    lastWarnings.value = preview.warnings ?? []
-
-    // 2. Worker server route で R2 テンプレ + JSZip による xlsx 生成。
-    //    backend GET スキップ (preview 同梱) で server 側は CPU 数百ms。
-    downloadStage.value = 'building'
     const headers: Record<string, string> = {
       'content-type': 'application/json',
     }
@@ -311,7 +289,6 @@ async function downloadXlsx() {
         from: dateFrom.value,
         to: dateTo.value,
         template_key: templateKey.value,
-        preview,
       }),
     })
 
@@ -322,7 +299,6 @@ async function downloadXlsx() {
 
     const warnings = res.headers.get('x-y-time-warnings')
     if (warnings) {
-      // server 側 warnings (主に preview と同内容) で上書き
       lastWarnings.value = decodeURIComponent(warnings).split(' / ')
     }
     const missing = res.headers.get('x-y-time-missing-dates')
@@ -343,7 +319,6 @@ async function downloadXlsx() {
     error.value = e instanceof Error ? e.message : 'ダウンロードに失敗しました'
   } finally {
     loading.value = false
-    downloadStage.value = ''
   }
 }
 </script>
@@ -442,9 +417,7 @@ async function downloadXlsx() {
           :disabled="loading || !selectedDriverCd || !dateFrom || !dateTo"
           @click="downloadXlsx"
         >
-          <span v-if="loading && downloadStage === 'computing'">backend 計算中...</span>
-          <span v-else-if="loading && downloadStage === 'building'">Excel 生成中...</span>
-          <span v-else-if="loading">生成中...</span>
+          <span v-if="loading">生成中...</span>
           <span v-else>ダウンロード</span>
         </button>
       </div>
