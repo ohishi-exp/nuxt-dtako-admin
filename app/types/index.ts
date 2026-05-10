@@ -339,14 +339,26 @@ export interface RestraintReportResponse {
 export interface YTimeRow {
   /** A 列マッチング用 (yyyy-mm-dd) */
   date: string
-  /** F 列: true → `1`、false → 空。1 暦日 2 始業の終業日側で true */
+  /** F 列: true → `1`、false → 空。深夜跨ぎ + 勤務 ≥ 7h の終業日側 / 1 暦日 2 始業の継続側で true */
   previous_day_start: boolean
-  /** G 列の元値: 始業時刻の 0:00 からの分 (0..=1439) */
+  /** G 列: 始業時刻の 0:00 からの分 (0..=1439)。F=1 のときは前日始業時刻 */
   start_minutes_of_day: number
-  /** H 列の元値: 終業時刻の bucket_date 0:00 からの分。24h 越え時は 1440 以上 */
+  /** H 列: 終業時刻の bucket_date 0:00 からの分。24h 越え時は 1440 以上 */
   end_minutes_from_bucket_date: number
-  /** I 列: 休憩時間 (event_cd=301 の duration sum)、分 */
-  rest_minutes: number
+  /** I 列: 前日 5-22 時の休憩時間 (分) */
+  rest_prev_5_22: number
+  /** J 列: 前日 22-0 時の休憩時間 (分) */
+  rest_prev_22_0: number
+  /** K 列: 当日 0-5 時の休憩時間 (分) */
+  rest_today_0_5: number
+  /** L 列: 当日 5-22 時の休憩時間 (分) */
+  rest_today_5_22: number
+  /** M 列: 当日 22-0 時の休憩時間 (分) */
+  rest_today_22_0: number
+  /** N 列: 翌日 0-5 時の休憩時間 (分) */
+  rest_next_0_5: number
+  /** O 列: 翌日 5-22 時の休憩時間 (分) */
+  rest_next_5_22: number
   /** C 列: 自由文 */
   note: string | null
 }

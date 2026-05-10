@@ -12,6 +12,7 @@ import type {
   SwitchTenantResponse,
   ScrapeRequest, ScrapeResponse, ScrapeHistoryItem,
   CalendarResponse,
+  YTimeExportResponse,
 } from '~/types'
 
 let apiBase = ''
@@ -83,6 +84,23 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
 export async function getDrivers(): Promise<Driver[]> {
   return request<Driver[]>('/api/drivers')
+}
+
+// --- Y時間 Export (preview / 計算結果取得) ---
+
+/**
+ * Y時間 集計結果 (xlsx 化前) を取得する。
+ * `/api/y-time-export` (Worker server route → xlsx) と異なり、こちらは
+ * backend (rust-alc-api) の `/api/dtako/y-time-export` を直接叩いて JSON を返す。
+ * R2 binding 不要、xlsx 生成不要。プレビュー画面で使う。
+ */
+export async function getYTimePreview(
+  driverCd: string,
+  from: string,
+  to: string,
+): Promise<YTimeExportResponse> {
+  const params = new URLSearchParams({ driver_cd: driverCd, from, to })
+  return request<YTimeExportResponse>(`/api/dtako/y-time-export?${params.toString()}`)
 }
 
 // --- Vehicles ---
