@@ -107,8 +107,10 @@ export default defineEventHandler(async (event) => {
   }
   const tplBytes = await tplObj.arrayBuffer()
 
-  // 3. xlsx 生成
-  const result = await writeYTimeRows(tplBytes, data.rows)
+  // 3. xlsx 生成 — 期間内の旧データを書き込み前にクリアして、テンプレ汚染を除去する
+  const result = await writeYTimeRows(tplBytes, data.rows, {
+    clearPeriod: { from: body.from, to: body.to },
+  })
 
   if (result.missingDates.length > 0) {
     // dev でデバッグしやすいよう warning header にも入れる (本文 binary なので)
