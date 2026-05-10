@@ -332,3 +332,28 @@ export interface RestraintReportResponse {
   weekly_subtotals: WeeklySubtotal[]
   monthly_total: MonthlyTotal
 }
+
+// --- Y時間 Export (rust-alc-api JSON shape) ---
+
+/** 1 行分 (Y時間 シートの 1 暦日の bucket) */
+export interface YTimeRow {
+  /** A 列マッチング用 (yyyy-mm-dd) */
+  date: string
+  /** F 列: true → `1`、false → 空。1 暦日 2 始業の終業日側で true */
+  previous_day_start: boolean
+  /** G 列の元値: 始業時刻の 0:00 からの分 (0..=1439) */
+  start_minutes_of_day: number
+  /** H 列の元値: 終業時刻の bucket_date 0:00 からの分。24h 越え時は 1440 以上 */
+  end_minutes_from_bucket_date: number
+  /** I 列: 休憩時間 (event_cd=301 の duration sum)、分 */
+  rest_minutes: number
+  /** C 列: 自由文 */
+  note: string | null
+}
+
+export interface YTimeExportResponse {
+  driver: { cd: string; name: string }
+  period: { from: string; to: string }
+  rows: YTimeRow[]
+  warnings: string[]
+}
