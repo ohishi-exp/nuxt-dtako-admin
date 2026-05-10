@@ -109,17 +109,53 @@ export async function writeYTimeRows(
   const idx = buildDateRowIndex(xml, opts.maxScanRows)
   const missingDates: string[] = []
 
-  // 期間内 F-O をクリア (rows ループの前に行う)
-  xml = clearPeriodInXml(xml, idx, opts.clearPeriod)
+  // === 行単位のバッチ変更を集約 ===
+  //
+  // 旧実装: clearCellValue / setCell が毎回 4.8 MB の sheet xml 全体を `.replace()`
+  //   してた → 13ヶ月 * 10 列 ≈ 4000 回 × O(N) = O(N²) で Worker の CPU 30s 制限超過。
+  // 新実装: 全変更を Map<rowNum, RowChange> に集約し、1 回の単一パス regex walk で
+  //   各 row の inner XML を処理する。row inner は 1〜2 KB 程度なので
+  //   実質 O(N + RxK) = ほぼリニア。
+  const rowChanges = new Map<number, RowChange>()
 
+  // 1. clearPeriod: 期間内 row の F-O をクリア対象に登録
+  if (opts.clearPeriod) {
+    const { from, to } = opts.clearPeriod
+    for (const [date, rowNum] of idx.entries()) {
+      if (date < from || date > to) continue
+      const rc = ensureRowChange(rowChanges, rowNum)
+      for (const col of CLEAR_COLS) rc.clearCols.add(col)
+    }
+  }
+
+  // 2. rows: 書き込みセルを登録
   for (const r of rows) {
     const rowNum = idx.get(r.date)
     if (!rowNum) {
       missingDates.push(r.date)
       continue
     }
-    xml = writeRowInXml(xml, rowNum, r)
+    const rc = ensureRowChange(rowChanges, rowNum)
+    if (r.note != null) {
+      rc.writeCells.set(COL_NOTE, { kind: 'inlineStr', value: r.note })
+    }
+    if (r.previous_day_start) {
+      rc.writeCells.set(COL_PREV_DAY, { kind: 'number', value: 1 })
+    }
+    rc.writeCells.set(COL_START, { kind: 'number', value: r.start_minutes_of_day / 1440 })
+    rc.writeCells.set(COL_END, { kind: 'number', value: r.end_minutes_from_bucket_date / 1440 })
+    // I-O: 0 ならテンプレ既存値を尊重 (= clearPeriod 後は self-closing のまま)
+    if (r.rest_prev_5_22 > 0) rc.writeCells.set(COL_REST_PREV_5_22, { kind: 'number', value: r.rest_prev_5_22 / 1440 })
+    if (r.rest_prev_22_0 > 0) rc.writeCells.set(COL_REST_PREV_22_0, { kind: 'number', value: r.rest_prev_22_0 / 1440 })
+    if (r.rest_today_0_5 > 0) rc.writeCells.set(COL_REST_TODAY_0_5, { kind: 'number', value: r.rest_today_0_5 / 1440 })
+    if (r.rest_today_5_22 > 0) rc.writeCells.set(COL_REST_TODAY_5_22, { kind: 'number', value: r.rest_today_5_22 / 1440 })
+    if (r.rest_today_22_0 > 0) rc.writeCells.set(COL_REST_TODAY_22_0, { kind: 'number', value: r.rest_today_22_0 / 1440 })
+    if (r.rest_next_0_5 > 0) rc.writeCells.set(COL_REST_NEXT_0_5, { kind: 'number', value: r.rest_next_0_5 / 1440 })
+    if (r.rest_next_5_22 > 0) rc.writeCells.set(COL_REST_NEXT_5_22, { kind: 'number', value: r.rest_next_5_22 / 1440 })
   }
+
+  // 3. 単一パス apply (xml 全体を 1 回だけ walk、各 row inner は小さいのでほぼ瞬時)
+  xml = applyRowChanges(xml, rowChanges)
 
   zip.file(sheetPath, xml)
 
@@ -259,173 +295,133 @@ function escapeForRegex(s: string): string {
 }
 
 /**
- * 期間内 row の F-O 列をクリア。
- * yyyy-mm-dd の文字列比較は暦順と一致するので、from/to は文字列で安全に比較できる。
+ * 行ごとにまとめた変更内容。`writeYTimeRows` 内で集約して `applyRowChanges` で一括適用。
+ *
+ * 旧実装は xml 全体に対して 1 セルずつ `.replace()` を打っていたため、4.8 MB の
+ * sheet xml × 4000 回 = O(N²) で Worker の CPU 制限を超えていた。集約版では
+ * row 単位で 1 回だけ regex walk し、その内部で小さな row inner に対して操作する。
  */
-function clearPeriodInXml(
-  xml: string,
-  idx: Map<string, number>,
-  clearPeriod: { from: string; to: string } | undefined,
-): string {
-  if (!clearPeriod) return xml
-  const { from, to } = clearPeriod
-  for (const [date, rowNum] of idx.entries()) {
-    if (date < from || date > to) continue
-    for (const col of CLEAR_COLS) {
-      xml = clearCellValue(xml, col, rowNum)
-    }
+interface RowChange {
+  /** クリア対象列 (clearPeriod 由来) */
+  clearCols: Set<string>
+  /** 書き込み対象セル (rows 由来)。clearCols より優先 (上書き) */
+  writeCells: Map<string, CellWrite>
+}
+
+type CellWrite =
+  | { kind: 'number'; value: number }
+  | { kind: 'inlineStr'; value: string }
+
+function ensureRowChange(map: Map<number, RowChange>, rowNum: number): RowChange {
+  let rc = map.get(rowNum)
+  if (!rc) {
+    rc = { clearCols: new Set(), writeCells: new Map() }
+    map.set(rowNum, rc)
   }
-  return xml
+  return rc
 }
 
 /**
- * 既存セルから value 部分を消して self-closing にする。style (`s="N"`) は保持。
+ * sheet xml 全体を 1 回だけ regex walk して、各 row の inner だけに変更を適用する。
+ * 大きな xml に対する重い `.replace()` 連打を避けて O(N) に収める。
+ */
+function applyRowChanges(xml: string, rowChanges: Map<number, RowChange>): string {
+  if (rowChanges.size === 0) return xml
+  return xml.replace(
+    /<row r="(\d+)"([^>]*)>([\s\S]*?)<\/row>/g,
+    (full, rowNumStr: string, rowAttrs: string, rowInner: string) => {
+      const rowNum = parseInt(rowNumStr, 10)
+      const rc = rowChanges.get(rowNum)
+      if (!rc) return full
+
+      let inner = rowInner
+      // クリアを先に実行 (writeCells で上書きされても問題ないし、書き込まないセルは
+      // self-closing のままになる)
+      for (const col of rc.clearCols) {
+        inner = clearCellValueInInner(inner, col, rowNum)
+      }
+      // 書き込みは rowInner 内でセル置換 / 不在なら列順序で挿入
+      for (const [col, op] of rc.writeCells) {
+        inner = setCellInInner(inner, col, rowNum, op)
+      }
+      return `<row r="${rowNumStr}"${rowAttrs}>${inner}</row>`
+    },
+  )
+}
+
+/**
+ * row inner からセルの value 部分を消して self-closing にする。style (`s="N"`) は保持。
  *
  * - `<c r="F7" s="103"><v>1</v></c>` → `<c r="F7" s="103"/>`
  * - `<c r="F7" s="103"/>` (元から空) → no-op
  * - 不在 → no-op
  *
  * 正規表現の `[^>/]*` で `/` を排除して self-closing パターン (`/>`) を誤マッチしない。
- * Excel の cell 属性値に `/` が現れることはまず無い (style index は数値、type は短い文字列)。
  */
-function clearCellValue(xml: string, col: string, rowNum: number): string {
+function clearCellValueInInner(inner: string, col: string, rowNum: number): string {
   const cellRef = `${col}${rowNum}`
   const re = new RegExp(`<c r="${cellRef}"([^>/]*)>[\\s\\S]*?<\\/c>`)
-  return xml.replace(re, (_full, attrs: string) => {
+  return inner.replace(re, (_full, attrs: string) => {
     return `<c r="${cellRef}"${attrs}/>`
   })
 }
 
-/** 1 行分の rows データを書き込み */
-function writeRowInXml(xml: string, rowNum: number, r: YTimeRow): string {
-  if (r.note != null) {
-    xml = setCellInlineString(xml, COL_NOTE, rowNum, r.note)
-  }
-  if (r.previous_day_start) {
-    xml = setCellNumber(xml, COL_PREV_DAY, rowNum, 1)
-  }
-  xml = setCellNumber(xml, COL_START, rowNum, r.start_minutes_of_day / 1440)
-  xml = setCellNumber(xml, COL_END, rowNum, r.end_minutes_from_bucket_date / 1440)
-  // 休憩 7 セル: 0 ならテンプレ既存値を尊重 (clearPeriod 後は self-closing になっているはず)
-  xml = writeRest(xml, COL_REST_PREV_5_22, rowNum, r.rest_prev_5_22)
-  xml = writeRest(xml, COL_REST_PREV_22_0, rowNum, r.rest_prev_22_0)
-  xml = writeRest(xml, COL_REST_TODAY_0_5, rowNum, r.rest_today_0_5)
-  xml = writeRest(xml, COL_REST_TODAY_5_22, rowNum, r.rest_today_5_22)
-  xml = writeRest(xml, COL_REST_TODAY_22_0, rowNum, r.rest_today_22_0)
-  xml = writeRest(xml, COL_REST_NEXT_0_5, rowNum, r.rest_next_0_5)
-  xml = writeRest(xml, COL_REST_NEXT_5_22, rowNum, r.rest_next_5_22)
-  return xml
-}
-
-function writeRest(
-  xml: string,
-  col: string,
-  rowNum: number,
-  minutes: number,
-): string {
-  if (minutes <= 0) return xml
-  return setCellNumber(xml, col, rowNum, minutes / 1440)
-}
-
 /**
- * セルに数値を書き込む。既存セルがあれば値だけ置換 (style 保持)、なければ列順序を
- * 維持して新規挿入。
- */
-function setCellNumber(
-  xml: string,
-  col: string,
-  rowNum: number,
-  num: number,
-): string {
-  return setCell(xml, col, rowNum, (style) => {
-    return `<c r="${col}${rowNum}"${style}><v>${num}</v></c>`
-  })
-}
-
-/**
- * セルに inline string を書き込む。既存セルがあれば値置換 (style 保持)、なければ
- * 列順序を維持して新規挿入。
- */
-function setCellInlineString(
-  xml: string,
-  col: string,
-  rowNum: number,
-  str: string,
-): string {
-  const escaped = escapeXml(str)
-  return setCell(xml, col, rowNum, (style) => {
-    // t="inlineStr" を必ず付ける (style に既に t="..." が混じっていないこと前提)
-    return `<c r="${col}${rowNum}"${style} t="inlineStr"><is><t>${escaped}</t></is></c>`
-  })
-}
-
-/**
- * セルの存在を判定し、buildCell の結果で置換 or 新規挿入。
+ * row inner にセルを書き込む (rowInner-scope の setCell)。
  *
- * - 既存 self-closing `<c r="X{N}" s="N"/>` → そのまま置換 (style 引き継ぎ)
+ * - 既存 self-closing `<c r="X{N}" s="N"/>` → 置換 (style 引き継ぎ)
  * - 既存 with content `<c r="X{N}" s="N">...</c>` → 置換 (style 引き継ぎ、t="..." は除去)
- * - 不在 → row 内のセル列を sort して新規挿入
+ * - 不在 → row inner 内のセル列を sort して新規挿入
  */
-function setCell(
-  xml: string,
+function setCellInInner(
+  inner: string,
   col: string,
   rowNum: number,
-  buildCell: (preservedStyleAttr: string) => string,
+  op: CellWrite,
 ): string {
   const cellRef = `${col}${rowNum}`
+  const buildCell = (preservedStyleAttr: string): string => {
+    if (op.kind === 'number') {
+      return `<c r="${cellRef}"${preservedStyleAttr}><v>${op.value}</v></c>`
+    }
+    // inlineStr
+    const escaped = escapeXml(op.value)
+    return `<c r="${cellRef}"${preservedStyleAttr} t="inlineStr"><is><t>${escaped}</t></is></c>`
+  }
 
-  // 1. 既存セル (self-closing) を先に試す: <c r="X{N}" attrs/>
-  //    with-content regex `[^>]*?>` は `/` も食って self-closing と誤マッチするので、
-  //    self-closing を先に消費する必要がある。
+  // 1. 既存セル (self-closing) を先に試す
   const selfClosingRe = new RegExp(`<c r="${cellRef}"([^>]*?)\\/>`)
-  const selfClosingMatch = selfClosingRe.exec(xml)
+  const selfClosingMatch = selfClosingRe.exec(inner)
   if (selfClosingMatch) {
     const style = preserveStyleAttr(selfClosingMatch[1] ?? '')
-    return xml.replace(selfClosingRe, buildCell(style))
+    return inner.replace(selfClosingRe, buildCell(style))
   }
 
-  // 2. 既存セル (with content): <c r="X{N}" attrs>...</c>
-  const withContentRe = new RegExp(
-    `<c r="${cellRef}"([^>]*?)>[\\s\\S]*?<\\/c>`,
-  )
-  const withContentMatch = withContentRe.exec(xml)
+  // 2. 既存セル (with content)
+  const withContentRe = new RegExp(`<c r="${cellRef}"([^>/]*)>[\\s\\S]*?<\\/c>`)
+  const withContentMatch = withContentRe.exec(inner)
   if (withContentMatch) {
     const style = preserveStyleAttr(withContentMatch[1] ?? '')
-    return xml.replace(withContentRe, buildCell(style))
+    return inner.replace(withContentRe, buildCell(style))
   }
 
-  // 3. 不在 → row 内に挿入
-  return insertCellInRow(xml, col, rowNum, buildCell(''))
+  // 3. 不在 → row inner 内の cells を sort して新規挿入
+  const cellRe = /<c r="([A-Z]+)\d+"[^>]*?(?:\/>|>[\s\S]*?<\/c>)/g
+  const cells: { col: string; xml: string }[] = []
+  for (const m of inner.matchAll(cellRe)) {
+    const c = m[1]
+    if (!c) continue
+    cells.push({ col: c, xml: m[0] })
+  }
+  cells.push({ col, xml: buildCell('') })
+  cells.sort((a, b) => compareColLetters(a.col, b.col))
+  return cells.map((c) => c.xml).join('')
 }
 
 /** attrs から `s="N"` だけ抽出して " s=\"N\"" の形で返す。t="..." 等他の attr は除去 */
 function preserveStyleAttr(attrs: string): string {
   const m = /\bs="(\d+)"/.exec(attrs)
   return m ? ` s="${m[1]}"` : ''
-}
-
-/** row の中にセルを列順序で挿入 (既存セルとの順序維持) */
-function insertCellInRow(
-  xml: string,
-  col: string,
-  rowNum: number,
-  cellXml: string,
-): string {
-  const rowRe = new RegExp(`<row r="${rowNum}"([^>]*)>([\\s\\S]*?)<\\/row>`)
-  return xml.replace(rowRe, (_full, rowAttrs: string, rowInner: string) => {
-    const cellRe = /<c r="([A-Z]+)\d+"[^>]*?(?:\/>|>[\s\S]*?<\/c>)/g
-    type Cell = { col: string; xml: string }
-    const cells: Cell[] = []
-    for (const m of rowInner.matchAll(cellRe)) {
-      const c = m[1]
-      if (!c) continue
-      cells.push({ col: c, xml: m[0] })
-    }
-    cells.push({ col, xml: cellXml })
-    cells.sort((a, b) => compareColLetters(a.col, b.col))
-    const newInner = cells.map((c) => c.xml).join('')
-    return `<row r="${rowNum}"${rowAttrs}>${newInner}</row>`
-  })
 }
 
 /**
