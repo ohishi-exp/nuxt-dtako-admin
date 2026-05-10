@@ -18,6 +18,9 @@ bucket_name = "dtako-uploads"
 [vars]
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth.ippoan.org"
+# notify-realtime-bus Worker (nuxt-notify deploy 済) を共用。Y時間 export job の
+# 完了通知 (kind=y_time_export) を WS で受け取る。auth は同 JWT_SECRET 共有前提。
+NUXT_PUBLIC_REALTIME_BUS_URL = "wss://realtime.notify.ippoan.org"
 
 [env.staging]
 name = "dtako-admin-staging"
@@ -33,3 +36,4 @@ bucket_name = "dtako-uploads"
 [env.staging.vars]
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
+NUXT_PUBLIC_REALTIME_BUS_URL = "wss://realtime.notify-staging.ippoan.org"
