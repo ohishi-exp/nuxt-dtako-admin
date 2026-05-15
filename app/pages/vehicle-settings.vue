@@ -107,6 +107,36 @@ const machineRows = computed<Array<{ label: string; value: string }>>(() => {
     .map(([k, label]) => ({ label, value: String(mi[k]) }))
 })
 
+// 重要設定: 録画系の ON/OFF を最上部に固定セクション化して目立たせる。
+// (録画オフのまま放置されていることが目視で気付きやすいよう、value=0 は赤系で強調)
+const HIGHLIGHTED_KEYS: readonly string[] = [
+  'DVR_INFREC_ENABLE',   // 連続録画有無
+  'DVR_EVTREC_ENABLE',   // イベント録画有無
+  'DVR_PRKREC_ENABLE',   // 駐車監視録画有無
+  'DVR_AUDIO_ENABLE',    // 音声記録有無
+  'DVR_INFCAM0_ENABLE',  // HDカメラ連続録画
+  'DVR_INFCAM1_ENABLE',  // VGAカメラ1連続録画
+  'DVR_INFCAM2_ENABLE',  // VGAカメラ2連続録画
+  'DVR_INFCAM3_ENABLE',  // VGAカメラ3連続録画
+  'DVR_INFCAM4_ENABLE',  // VGAカメラ4連続録画
+  'DVR_EVTCAM0_ENABLE',  // HDカメライベント録画
+  'DVR_EVTCAM1_ENABLE',  // VGAカメラ1Evt録画
+  'DVR_EVTCAM2_ENABLE',  // VGAカメラ2Evt録画
+  'DVR_EVTCAM3_ENABLE',  // VGAカメラ3Evt録画
+  'DVR_EVTCAM4_ENABLE',  // VGAカメラ4Evt録画
+]
+
+const highlightedRows = computed<SettingRow[]>(() => {
+  if (!result.value) return []
+  const out: SettingRow[] = []
+  for (const key of HIGHLIGHTED_KEYS) {
+    const raw = result.value.settings[key]
+    if (raw == null) continue
+    out.push(formatSetting(key, raw))
+  }
+  return out
+})
+
 // settings を prefix で section 分け + search filter + 日本語ラベル化
 interface SettingRow extends FormattedSetting {}
 interface SettingsSection {
@@ -226,6 +256,45 @@ function copyJson() {
         >
           JSON をコピー
         </button>
+      </div>
+
+      <!-- 重要設定 (録画 ON/OFF を最上部にハイライト固定) -->
+      <div
+        v-if="highlightedRows.length > 0"
+        class="bg-amber-50 dark:bg-amber-950/30 border-2 border-amber-300 dark:border-amber-700 p-4 rounded-lg shadow"
+      >
+        <h3 class="font-semibold mb-2 text-amber-900 dark:text-amber-200">
+          ⚠ 重要設定 (録画 / 音声)
+        </h3>
+        <table class="w-full text-sm">
+          <tbody>
+            <tr
+              v-for="row in highlightedRows"
+              :key="row.key"
+              class="border-b border-amber-200 dark:border-amber-800/60 last:border-0"
+            >
+              <td class="py-1 pr-3 align-top w-72">
+                <div class="text-gray-900 dark:text-gray-100">{{ row.label ?? row.key }}</div>
+                <div class="font-mono text-[10px] text-gray-500 dark:text-gray-400">
+                  {{ row.key }}
+                </div>
+              </td>
+              <td class="py-1 align-top">
+                <!-- 録画 ENABLE=0 (=録画しない) は赤強調、ENABLE=1 は緑強調 -->
+                <span
+                  class="font-mono font-bold px-2 py-0.5 rounded"
+                  :class="row.raw === 0
+                    ? 'bg-red-100 dark:bg-red-900/50 text-red-800 dark:text-red-200'
+                    : row.raw === 1
+                      ? 'bg-green-100 dark:bg-green-900/50 text-green-800 dark:text-green-200'
+                      : 'text-gray-800 dark:text-gray-200'"
+                >
+                  {{ row.formatted }}
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
 
       <!-- Machine Info -->
