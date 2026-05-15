@@ -10,6 +10,7 @@ import { resolve } from 'node:path'
 import {
   parseCfg,
   extractVehicleSettingsFromZip,
+  extractVehicleSettingsAndCfgBytes,
 } from '../../app/utils/vehicle-settings-cfg'
 
 const ZIP_FIXTURE = resolve(__dirname, '../fixtures/vehicle-dump-sample.zip')
@@ -83,5 +84,25 @@ describe('extractVehicleSettingsFromZip', () => {
     // CP932 decode が効いていることを日本語値で検証
     expect(result.settings.INPUT1_NAME).toBe('油種')
     expect(result.settings.INPUT3_UNIT).toBe('L')
+  })
+})
+
+describe('extractVehicleSettingsAndCfgBytes', () => {
+  it('parsed と cfg_bytes (CP932 raw) の両方を返し、bytes を decode すると同じ設定値が拾える', async () => {
+    const buf = readFileSync(ZIP_FIXTURE)
+    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
+
+    const { parsed, cfg_bytes } = await extractVehicleSettingsAndCfgBytes(ab)
+
+    expect(parsed.vehicle_cd).toBe('4437')
+    expect(cfg_bytes).toBeInstanceOf(Uint8Array)
+    expect(cfg_bytes.byteLength).toBeGreaterThan(1000)
+
+    // cfg_bytes は CP932 のまま保存される (R2 に原本として置く想定) ので
+    // shift-jis decode → parseCfg で同じ値が取れることを保証する
+    const text = new TextDecoder('shift-jis', { fatal: false }).decode(cfg_bytes)
+    const { settings } = parseCfg(text)
+    expect(settings.BASE_VEHICLECD).toBe(4437)
+    expect(settings.INPUT1_NAME).toBe('油種')
   })
 })
