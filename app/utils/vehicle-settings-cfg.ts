@@ -99,16 +99,15 @@ export function parseCfg(text: string): {
 
 /**
  * NET780 dump zip (ArrayBuffer) から `*.cfg` を見つけ、CP932 decode → parseCfg。
+ * R2 への原本保存に使うため raw bytes (CP932 のまま) も併せて返す。
  *
  * zip 構造想定:
  *   <vehicle_cd>/<dump_dir>/<dump_dir>.cfg
  * (例: `4437/20260514_093253-0-0-4437/20260514_093253-0-0-4437.cfg`)
- *
- * 構造から外れていても `*.cfg` が 1 つあれば抽出する (vehicle_cd / dump_dir は best-effort)。
  */
-export async function extractVehicleSettingsFromZip(
+export async function extractVehicleSettingsAndCfgBytes(
   zipBytes: ArrayBuffer | Uint8Array,
-): Promise<VehicleSettings> {
+): Promise<{ parsed: VehicleSettings; cfg_bytes: Uint8Array }> {
   const zip = await JSZip.loadAsync(zipBytes)
 
   const cfgEntries = Object.values(zip.files).filter(
@@ -123,12 +122,12 @@ export async function extractVehicleSettingsFromZip(
     )
   }
   const cfgFile = cfgEntries[0]!
-  const cfgBytes = await cfgFile.async('uint8array')
+  const cfg_bytes = await cfgFile.async('uint8array')
 
   // CP932 (Shift_JIS) → UTF-8
   // Workers runtime / Node 22+ どちらも 'shift-jis' エイリアスを TextDecoder が受け付ける
   const decoder = new TextDecoder('shift-jis', { fatal: false })
-  const text = decoder.decode(cfgBytes)
+  const text = decoder.decode(cfg_bytes)
 
   const { machine_info, settings } = parseCfg(text)
 
@@ -147,10 +146,23 @@ export async function extractVehicleSettingsFromZip(
         : vehicleCdFromPath
 
   return {
-    vehicle_cd: vehicleCd,
-    dump_dir: dumpDir,
-    cfg_filename: cfgFilename,
-    machine_info,
-    settings,
+    parsed: {
+      vehicle_cd: vehicleCd,
+      dump_dir: dumpDir,
+      cfg_filename: cfgFilename,
+      machine_info,
+      settings,
+    },
+    cfg_bytes,
   }
+}
+
+/**
+ * Backward-compat ラッパ。raw bytes が要らない呼び出し元向け。
+ */
+export async function extractVehicleSettingsFromZip(
+  zipBytes: ArrayBuffer | Uint8Array,
+): Promise<VehicleSettings> {
+  const { parsed } = await extractVehicleSettingsAndCfgBytes(zipBytes)
+  return parsed
 }
