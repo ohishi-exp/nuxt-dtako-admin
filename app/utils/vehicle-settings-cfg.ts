@@ -69,11 +69,12 @@ export function parseCfg(text: string): {
       // `#   MachineID : Lrbn06U06Q` 形式を Machine Infomation 値として吸う
       const m = line.match(/^#\s+([A-Za-z][A-Za-z0-9 _\-]*?)\s*:\s*(.+?)\s*$/)
       if (m) {
-        const rawKey = m[1].trimEnd()
+        const rawKey = m[1]?.trimEnd() ?? ''
+        const rawValue = m[2] ?? ''
         const jsonKey = MACHINE_INFO_KEYS[rawKey]
         if (jsonKey) {
           // バージョン値 "1. 0.93" のように空白入り → "1.0.93" に正規化
-          machine_info[jsonKey] = m[2].replace(/\s+/g, '')
+          machine_info[jsonKey] = rawValue.replace(/\s+/g, '')
         }
       }
       continue
@@ -82,7 +83,8 @@ export function parseCfg(text: string): {
     const m = line.match(/^([A-Z][A-Z0-9_]*)\s*=\s*(.*)$/)
     if (!m) continue
     const key = m[1]
-    const v = m[2].trim()
+    const v = (m[2] ?? '').trim()
+    if (!key) continue
     if (v.startsWith('"') && v.endsWith('"') && v.length >= 2) {
       settings[key] = v.slice(1, -1)
     } else if (/^-?\d+$/.test(v)) {
@@ -120,7 +122,7 @@ export async function extractVehicleSettingsFromZip(
       `zip に .cfg が複数あります (${cfgEntries.length} 件): 1 車輛分の dump のみ受け付けます`,
     )
   }
-  const cfgFile = cfgEntries[0]
+  const cfgFile = cfgEntries[0]!
   const cfgBytes = await cfgFile.async('uint8array')
 
   // CP932 (Shift_JIS) → UTF-8
@@ -133,8 +135,8 @@ export async function extractVehicleSettingsFromZip(
   // path から vehicle_cd / dump_dir を best-effort で取り出す
   const parts = cfgFile.name.split('/').filter(Boolean)
   const cfgFilename = parts[parts.length - 1] ?? cfgFile.name
-  const dumpDir = parts.length >= 2 ? parts[parts.length - 2] : ''
-  const vehicleCdFromPath = parts.length >= 3 ? parts[parts.length - 3] : ''
+  const dumpDir = parts.length >= 2 ? (parts[parts.length - 2] ?? '') : ''
+  const vehicleCdFromPath = parts.length >= 3 ? (parts[parts.length - 3] ?? '') : ''
   // settings 側に BASE_VEHICLECD があればそちらを優先 (path は欠けてても拾える)
   const vehicleCdFromSettings = settings.BASE_VEHICLECD
   const vehicleCd =
