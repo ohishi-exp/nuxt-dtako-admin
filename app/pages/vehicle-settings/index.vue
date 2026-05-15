@@ -1,5 +1,4 @@
-<script setup lang="t
-ogether" /><script setup lang="ts">
+<script setup lang="ts">
 /**
  * 車輛設定 ビューア — NET780 デジタコ dump zip をアップロードして `.cfg` 内容を表示する。
  *
