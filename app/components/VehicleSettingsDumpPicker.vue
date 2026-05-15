@@ -48,6 +48,12 @@ const selectedKey = ref<string | null>(null)
 const loadingDetail = ref(false)
 const detailError = ref('')
 
+// 選択中の item を items から逆引き (バナーに表示する整形済み日時用)
+const selectedItem = computed<HistoryItem | null>(() => {
+  if (!selectedKey.value) return null
+  return items.value.find((i) => i.key === selectedKey.value) ?? null
+})
+
 // datalist の id は同ページで 2 つ使うので一意にしておく
 const datalistId = computed(
   () => `vehicle-cd-options-${props.label.replace(/[^a-zA-Z0-9]/g, '-')}`,
@@ -122,12 +128,41 @@ function onInputChange() {
 </script>
 
 <template>
-  <div class="bg-white dark:bg-gray-900 p-4 rounded-lg shadow space-y-3">
+  <!-- 選択状態が分かるように、card の border を色付け (選択中 = emerald、未選択 = gray) -->
+  <div
+    class="p-4 rounded-lg shadow space-y-3 border-2 transition-colors"
+    :class="selectedKey
+      ? 'bg-white dark:bg-gray-900 border-emerald-400 dark:border-emerald-600'
+      : 'bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800'"
+  >
     <div class="flex justify-between items-baseline">
       <h3 class="font-semibold">{{ label }}</h3>
-      <span v-if="selectedKey" class="font-mono text-xs text-gray-500 dark:text-gray-400">
-        選択中
+      <!-- ステータスバッジ (常時表示): 選択中 = 緑, 未選択 = 灰 -->
+      <span
+        v-if="selectedKey"
+        class="text-xs font-semibold px-2 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/50 text-emerald-800 dark:text-emerald-200"
+      >
+        ✓ 選択中
       </span>
+      <span
+        v-else
+        class="text-xs px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400"
+      >
+        未選択
+      </span>
+    </div>
+
+    <!-- 選択中の dump 情報を分かりやすくバナー表示 -->
+    <div
+      v-if="selectedItem"
+      class="bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-700 p-2 rounded text-xs"
+    >
+      <div class="font-semibold text-emerald-900 dark:text-emerald-200">
+        ✓ {{ vehicleCd }} / {{ formatDate(selectedItem.uploaded_at) }}
+      </div>
+      <div class="font-mono text-emerald-700 dark:text-emerald-400 text-[10px] break-all">
+        {{ selectedItem.dump_dir }}
+      </div>
     </div>
 
     <form class="flex gap-2 items-center" @submit.prevent="loadHistory">
@@ -161,13 +196,17 @@ function onInputChange() {
       {{ itemsError }}
     </div>
 
-    <div v-if="items.length > 1" class="text-xs text-gray-500 dark:text-gray-400">
-      ↓ 行をクリックして dump を選択 ({{ items.length }} 件)
+    <div
+      v-if="items.length > 1 && !selectedKey"
+      class="text-xs text-amber-700 dark:text-amber-400 font-semibold"
+    >
+      ↓ 行をクリックして dump を選択してください ({{ items.length }} 件)
     </div>
     <div v-if="items.length > 0" class="max-h-72 overflow-auto border rounded">
       <table class="w-full text-xs">
         <thead class="bg-gray-50 dark:bg-gray-800 sticky top-0">
           <tr class="text-left text-gray-500 dark:text-gray-400">
+            <th class="px-2 py-1 w-5" />
             <th class="px-2 py-1">アップロード</th>
             <th class="px-2 py-1">Main App</th>
           </tr>
@@ -177,9 +216,18 @@ function onInputChange() {
             v-for="item in items"
             :key="item.key"
             class="border-t border-gray-100 dark:border-gray-800 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/40"
-            :class="selectedKey === item.key ? 'bg-blue-50 dark:bg-blue-950/40' : ''"
+            :class="selectedKey === item.key
+              ? 'bg-emerald-100 dark:bg-emerald-900/40 font-semibold'
+              : ''"
             @click="selectDump(item)"
           >
+            <td class="px-2 py-1 text-center">
+              <span
+                v-if="selectedKey === item.key"
+                class="text-emerald-600 dark:text-emerald-400"
+              >✓</span>
+              <span v-else class="text-gray-300 dark:text-gray-600">○</span>
+            </td>
             <td class="px-2 py-1 font-mono whitespace-nowrap">
               {{ formatDate(item.uploaded_at) }}
             </td>
