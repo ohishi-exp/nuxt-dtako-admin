@@ -6,6 +6,7 @@
  *   1. vehicle_cd を入力 (datalist で R2 にある車輛 cd を autocomplete サジェスト)
  *   2. `GET /api/vehicle-settings/history?vehicle_cd=...` を取得して dump 一覧を表示
  *   3. dump (uploaded_at + dump_dir) を選択 → `GET /api/vehicle-settings/object?key=...` で JSON 取得
+ *      - dump が 1 件しかない場合は自動選択 (ワンクリック節約 + 同一車輛 diff の手間軽減)
  *   4. 完了したら `selected` イベントを発火
  *
  * 使う側 (`/vehicle-settings/diff.vue`) は 左右 2 つこのコンポーネントを並べて
@@ -65,6 +66,10 @@ async function loadHistory() {
     const res = await fetch(`/api/vehicle-settings/history?vehicle_cd=${encodeURIComponent(cd)}`)
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
     items.value = (await res.json()) as HistoryItem[]
+    // dump が 1 件しかなければ自動選択 (UX: 余分なクリックを省く)
+    if (items.value.length === 1) {
+      await selectDump(items.value[0]!)
+    }
   } catch (e) {
     itemsError.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -156,6 +161,9 @@ function onInputChange() {
       {{ itemsError }}
     </div>
 
+    <div v-if="items.length > 1" class="text-xs text-gray-500 dark:text-gray-400">
+      ↓ 行をクリックして dump を選択 ({{ items.length }} 件)
+    </div>
     <div v-if="items.length > 0" class="max-h-72 overflow-auto border rounded">
       <table class="w-full text-xs">
         <thead class="bg-gray-50 dark:bg-gray-800 sticky top-0">
