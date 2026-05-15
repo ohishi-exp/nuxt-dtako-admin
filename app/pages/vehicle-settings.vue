@@ -4,7 +4,15 @@
  *
  * `POST /api/vehicle-settings/extract` に multipart で zip を投げると JSON が返るので
  * それをパネル + 検索付きテーブルで表示する (DB 保存等はせず、その場で投げて表示するだけ)。
+ *
+ * 設定値の日本語化は `app/utils/vehicle-settings-labels.ts` 辞書を経由する:
+ * - cfg key → 日本語項目名 (例: `BASE_VOLUME` → "音量")
+ * - 単位適用 (`30` → `30 秒`)
+ * - スケール適用 (`PULS_SPNUM=800` → `8.00 パルス`)
+ * - enum 値の意味 (`2` → `2 (中)`)
  */
+
+import { formatSetting, type FormattedSetting } from '~/utils/vehicle-settings-labels'
 
 interface MachineInfo {
   machine_id?: string
@@ -99,11 +107,8 @@ const machineRows = computed<Array<{ label: string; value: string }>>(() => {
     .map(([k, label]) => ({ label, value: String(mi[k]) }))
 })
 
-// settings を prefix で section 分け (BASE_ / PULS_ / OPER_ / ...) + search filter
-interface SettingRow {
-  key: string
-  value: string | number
-}
+// settings を prefix で section 分け + search filter + 日本語ラベル化
+interface SettingRow extends FormattedSetting {}
 interface SettingsSection {
   prefix: string
   rows: SettingRow[]
@@ -113,13 +118,15 @@ const settingsSections = computed<SettingsSection[]>(() => {
   const q = search.value.trim().toLowerCase()
   const grouped = new Map<string, SettingRow[]>()
   for (const [key, value] of Object.entries(result.value.settings)) {
+    const formatted = formatSetting(key, value)
     if (q) {
-      const hay = `${key} ${String(value)}`.toLowerCase()
+      // 検索対象: cfg key / 日本語ラベル / 整形後 value のいずれかにマッチ
+      const hay = `${formatted.key} ${formatted.label ?? ''} ${formatted.formatted}`.toLowerCase()
       if (!hay.includes(q)) continue
     }
     const prefix = key.split('_')[0] ?? key
     if (!grouped.has(prefix)) grouped.set(prefix, [])
-    grouped.get(prefix)!.push({ key, value })
+    grouped.get(prefix)!.push(formatted)
   }
   return Array.from(grouped.entries())
     .sort(([a], [b]) => a.localeCompare(b))
@@ -146,8 +153,8 @@ function copyJson() {
     <p class="text-sm text-gray-600 dark:text-gray-400">
       NET780 デジタコ本体から吸い出した運行 dump zip
       (<code>&lt;vehicle_cd&gt;/&lt;YYYYMMDD_HHMMSS-...&gt;/*.cfg</code> を含むもの) を
-      アップロードすると、車輛側の設定値を JSON で表示します。アップロードした zip は
-      保存されません (その場で parse → 返却のみ)。
+      アップロードすると、車輛側の設定値を 日本語項目名 + 単位 + enum 意味 付きで表示します。
+      アップロードした zip は保存されません (その場で parse → 返却のみ)。
     </p>
 
     <!-- アップロード -->
@@ -238,7 +245,7 @@ function copyJson() {
         </table>
       </div>
 
-      <!-- Settings (search + section) -->
+      <!-- Settings (search + section + 日本語ラベル) -->
       <div class="bg-white dark:bg-gray-900 p-4 rounded-lg shadow space-y-3">
         <div class="flex justify-between items-baseline">
           <h3 class="font-semibold">設定値</h3>
@@ -249,7 +256,7 @@ function copyJson() {
         <input
           v-model="search"
           type="text"
-          placeholder="key / value で絞り込み (例: BUTT_, 副免許, 800)"
+          placeholder="cfg key / 日本語項目名 / 値で絞り込み (例: BUTT, 副免許, 音量, 連続運転)"
           class="w-full border rounded px-3 py-2 text-sm bg-white dark:bg-gray-800"
         >
         <div v-if="settingsSections.length === 0" class="text-sm text-gray-500 dark:text-gray-400">
@@ -269,12 +276,28 @@ function copyJson() {
                   :key="row.key"
                   class="border-b border-gray-100 dark:border-gray-800 last:border-0 hover:bg-gray-50 dark:hover:bg-gray-800/40"
                 >
-                  <td class="py-1 pr-4 font-mono text-gray-700 dark:text-gray-300 w-64">
-                    {{ row.key }}
+                  <td class="py-1 pr-3 align-top w-72">
+                    <!-- 日本語ラベル (あれば) / cfg key -->
+                    <div v-if="row.label" class="text-gray-900 dark:text-gray-100">{{ row.label }}</div>
+                    <div
+                      class="font-mono text-[10px]"
+                      :class="row.label ? 'text-gray-400 dark:text-gray-500' : 'text-gray-700 dark:text-gray-300'"
+                    >
+                      {{ row.key }}
+                    </div>
                   </td>
-                  <td class="py-1 font-mono">
-                    <span v-if="typeof row.value === 'number'" class="text-blue-700 dark:text-blue-300">{{ row.value }}</span>
-                    <span v-else class="text-green-700 dark:text-green-400">"{{ row.value }}"</span>
+                  <td class="py-1 align-top">
+                    <!-- 整形済み値: 数値 + 単位 + (enum意味) を formatted に詰めてある -->
+                    <span
+                      v-if="typeof row.raw === 'number'"
+                      class="font-mono"
+                      :class="row.enumMeaning ? 'text-blue-700 dark:text-blue-300' : 'text-gray-800 dark:text-gray-200'"
+                    >
+                      {{ row.formatted }}
+                    </span>
+                    <span v-else class="font-mono text-green-700 dark:text-green-400">
+                      {{ row.formatted }}
+                    </span>
                   </td>
                 </tr>
               </tbody>
