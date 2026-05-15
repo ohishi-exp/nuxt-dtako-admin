@@ -5,9 +5,13 @@
  * - 引数なし `GET /api/vehicle-settings/history` → 全車輛 cd の集計 (件数 / 最新)
  * - vehicle_cd 入力後 `?vehicle_cd=XXXX` → 該当車輛の dump 一覧
  * - 一覧 行クリック → `?key=...` で JSON 取得 → `<VehicleSettingsDisplay>` で表示
+ *
+ * URL の `?vehicle_cd=...` を onMount で拾うようにして、
+ * `/vehicle-settings/unconfirmed` など他ページからディープリンクで飛べるようにしてある。
  */
 
 import { computed, ref, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import VehicleSettingsDisplay from '~/components/VehicleSettingsDisplay.vue'
 import type { VehicleSettings } from '~/utils/vehicle-settings-cfg'
 
@@ -25,6 +29,8 @@ interface HistoryItem {
   machine_id: string | null
   firm_main_app: string | null
 }
+
+const route = useRoute()
 
 const summary = ref<VehicleSummary[]>([])
 const summaryLoading = ref(false)
@@ -109,6 +115,10 @@ function formatDate(iso: string): string {
 
 onMounted(() => {
   loadSummary()
+  // ?vehicle_cd= クエリで初期値セット + 自動ロード (未確認ページからのディープリンク)
+  const q = route.query.vehicle_cd
+  const initialCd = typeof q === 'string' ? q : Array.isArray(q) ? (q[0] ?? '') : ''
+  if (initialCd) loadHistory(initialCd)
 })
 </script>
 
@@ -116,12 +126,20 @@ onMounted(() => {
   <div class="space-y-4">
     <div class="flex justify-between items-center">
       <h2 class="text-2xl font-bold">車輛設定 履歴</h2>
-      <NuxtLink
-        to="/vehicle-settings"
-        class="text-sm text-blue-600 dark:text-blue-400 hover:underline"
-      >
-        ← 抽出に戻る
-      </NuxtLink>
+      <div class="flex gap-3 text-sm">
+        <NuxtLink
+          to="/vehicle-settings"
+          class="text-blue-600 dark:text-blue-400 hover:underline"
+        >
+          ← 抽出に戻る
+        </NuxtLink>
+        <NuxtLink
+          to="/vehicle-settings/unconfirmed"
+          class="text-blue-600 dark:text-blue-400 hover:underline"
+        >
+          未確認車輛 →
+        </NuxtLink>
+      </div>
     </div>
 
     <p class="text-sm text-gray-600 dark:text-gray-400">

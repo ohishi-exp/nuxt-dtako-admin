@@ -73,12 +73,20 @@ async function submit() {
   <div class="space-y-4">
     <div class="flex justify-between items-center">
       <h2 class="text-2xl font-bold">車輛設定 ビューア</h2>
-      <NuxtLink
-        to="/vehicle-settings/history"
-        class="text-sm text-blue-600 dark:text-blue-400 hover:underline"
-      >
-        履歴を見る →
-      </NuxtLink>
+      <div class="flex gap-3 text-sm">
+        <NuxtLink
+          to="/vehicle-settings/history"
+          class="text-blue-600 dark:text-blue-400 hover:underline"
+        >
+          履歴を見る →
+        </NuxtLink>
+        <NuxtLink
+          to="/vehicle-settings/unconfirmed"
+          class="text-blue-600 dark:text-blue-400 hover:underline"
+        >
+          未確認車輛 →
+        </NuxtLink>
+      </div>
     </div>
 
     <p class="text-sm text-gray-600 dark:text-gray-400">
