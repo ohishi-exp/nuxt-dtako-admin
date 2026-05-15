@@ -8,11 +8,10 @@
  */
 
 import { ref } from 'vue'
-import VehicleSettingsDisplay, {
-  type VehicleSettingsLike,
-} from '~/components/VehicleSettingsDisplay.vue'
+import VehicleSettingsDisplay from '~/components/VehicleSettingsDisplay.vue'
+import type { VehicleSettings } from '~/utils/vehicle-settings-cfg'
 
-interface ExtractResult extends VehicleSettingsLike {
+interface ExtractResult extends VehicleSettings {
   saved: { json_key: string; cfg_key: string } | null
   saved_warning: string | null
 }

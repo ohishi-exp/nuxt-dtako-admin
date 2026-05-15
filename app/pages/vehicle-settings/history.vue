@@ -8,9 +8,8 @@
  */
 
 import { computed, ref, onMounted } from 'vue'
-import VehicleSettingsDisplay, {
-  type VehicleSettingsLike,
-} from '~/components/VehicleSettingsDisplay.vue'
+import VehicleSettingsDisplay from '~/components/VehicleSettingsDisplay.vue'
+import type { VehicleSettings } from '~/utils/vehicle-settings-cfg'
 
 interface VehicleSummary {
   vehicle_cd: string
@@ -37,7 +36,7 @@ const itemsLoading = ref(false)
 const itemsError = ref('')
 
 const selectedKey = ref<string | null>(null)
-const detail = ref<VehicleSettingsLike | null>(null)
+const detail = ref<VehicleSettings | null>(null)
 const detailLoading = ref(false)
 const detailError = ref('')
 
@@ -89,7 +88,7 @@ async function loadDetail(key: string) {
   try {
     const res = await fetch(`/api/vehicle-settings/object?key=${encodeURIComponent(key)}`)
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
-    detail.value = (await res.json()) as VehicleSettingsLike
+    detail.value = (await res.json()) as VehicleSettings
   } catch (e) {
     detailError.value = e instanceof Error ? e.message : String(e)
   } finally {

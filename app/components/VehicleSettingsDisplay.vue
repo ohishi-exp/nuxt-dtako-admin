@@ -9,27 +9,9 @@
 
 import { computed, ref } from 'vue'
 import { formatSetting, type FormattedSetting } from '~/utils/vehicle-settings-labels'
+import type { VehicleSettings, MachineInfo } from '~/utils/vehicle-settings-cfg'
 
-interface MachineInfo {
-  machine_id?: string
-  main_app?: string
-  sub_app?: string
-  etc?: string
-  sound?: string
-  u_boot?: string
-  kernel?: string
-  ramdisk?: string
-  userdata?: string
-}
-export interface VehicleSettingsLike {
-  vehicle_cd: string
-  dump_dir: string
-  cfg_filename: string
-  machine_info: MachineInfo
-  settings: Record<string, string | number>
-}
-
-const props = defineProps<{ data: VehicleSettingsLike }>()
+const props = defineProps<{ data: VehicleSettings }>()
 
 const search = ref('')
 
