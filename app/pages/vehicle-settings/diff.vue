@@ -10,6 +10,9 @@
  * 同じ UI で扱う。
  *
  * ディープリンク: `?left=<cd>&right=<cd>` で初期 vehicle_cd を与えられる。
+ *
+ * onMount で R2 に dump がある車輛 cd 一覧を 1 回 fetch して、両ピッカーに
+ * datalist のサジェストとして渡す。
  */
 
 import { computed, ref, onMounted } from 'vue'
@@ -25,6 +28,11 @@ interface Selection {
   key: string
   settings: VehicleSettings
 }
+interface VehicleSummary {
+  vehicle_cd: string
+  count: number
+  latest_uploaded_at: string
+}
 
 const left = ref<Selection | null>(null)
 const right = ref<Selection | null>(null)
@@ -32,15 +40,29 @@ const right = ref<Selection | null>(null)
 const initialLeftCd = ref('')
 const initialRightCd = ref('')
 
+const summary = ref<VehicleSummary[]>([])
+const availableVehicleCds = computed(() => summary.value.map((s) => s.vehicle_cd))
+
 function firstString(v: unknown): string {
   if (typeof v === 'string') return v
   if (Array.isArray(v) && typeof v[0] === 'string') return v[0]
   return ''
 }
 
+async function loadSummary() {
+  try {
+    const res = await fetch('/api/vehicle-settings/history')
+    if (!res.ok) return
+    summary.value = (await res.json()) as VehicleSummary[]
+  } catch {
+    // datalist は補助 UX なので fetch 失敗はサイレントに無視して手動入力にフォールバック
+  }
+}
+
 onMounted(() => {
   initialLeftCd.value = firstString(route.query.left)
   initialRightCd.value = firstString(route.query.right)
+  loadSummary()
 })
 
 function onLeftSelected(payload: Selection | null) {
@@ -97,17 +119,21 @@ function swap() {
     <p class="text-sm text-gray-600 dark:text-gray-400">
       2 つの dump (同一車輛の異なる時点、または異なる車輛の任意の時点) を選んで
       差分を表示します。重要設定 (録画 ENABLE 系) に変化があれば最上部で強調します。
+      車輛 cd 入力欄は R2 に dump がある車輛 ({{ availableVehicleCds.length }} 車輛) を
+      クリックで選べます。
     </p>
 
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
       <VehicleSettingsDumpPicker
         label="左 (Before)"
         :initial-vehicle-cd="initialLeftCd"
+        :available-vehicle-cds="availableVehicleCds"
         @selected="onLeftSelected"
       />
       <VehicleSettingsDumpPicker
         label="右 (After)"
         :initial-vehicle-cd="initialRightCd"
+        :available-vehicle-cds="availableVehicleCds"
         @selected="onRightSelected"
       />
     </div>
