@@ -66,6 +66,12 @@ onMounted(() => {
         >
           履歴へ
         </NuxtLink>
+        <NuxtLink
+          to="/vehicle-settings/diff"
+          class="text-blue-600 dark:text-blue-400 hover:underline"
+        >
+          差分比較へ
+        </NuxtLink>
       </div>
     </div>
 
