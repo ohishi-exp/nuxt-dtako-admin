@@ -81,6 +81,12 @@ async function submit() {
           履歴を見る →
         </NuxtLink>
         <NuxtLink
+          to="/vehicle-settings/diff"
+          class="text-blue-600 dark:text-blue-400 hover:underline"
+        >
+          差分比較 →
+        </NuxtLink>
+        <NuxtLink
           to="/vehicle-settings/unconfirmed"
           class="text-blue-600 dark:text-blue-400 hover:underline"
         >
