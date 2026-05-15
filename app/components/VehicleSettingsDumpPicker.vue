@@ -3,16 +3,18 @@
  * 1 つの dump (R2 の VehicleSettings JSON) を選ぶためのピッカー。
  *
  * フロー:
- *   1. vehicle_cd を入力
+ *   1. vehicle_cd を入力 (datalist で R2 にある車輛 cd を autocomplete サジェスト)
  *   2. `GET /api/vehicle-settings/history?vehicle_cd=...` を取得して dump 一覧を表示
  *   3. dump (uploaded_at + dump_dir) を選択 → `GET /api/vehicle-settings/object?key=...` で JSON 取得
  *   4. 完了したら `selected` イベントを発火
  *
  * 使う側 (`/vehicle-settings/diff.vue`) は 左右 2 つこのコンポーネントを並べて
  * 、両方の selected が揃ったら diff を表示する。
+ * available-vehicle-cds prop で親から datalist を受け取る
+ * (両 picker で共通のサマリ fetch を 1 回だけ走らせるため)。
  */
 
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { VehicleSettings } from '~/utils/vehicle-settings-cfg'
 
 interface HistoryItem {
@@ -28,6 +30,8 @@ interface HistoryItem {
 const props = defineProps<{
   label: string
   initialVehicleCd?: string
+  /** R2 に dump がある vehicle_cd の一覧。datalist のサジェストに使う */
+  availableVehicleCds?: string[]
 }>()
 
 const emit = defineEmits<{
@@ -42,6 +46,11 @@ const itemsError = ref('')
 const selectedKey = ref<string | null>(null)
 const loadingDetail = ref(false)
 const detailError = ref('')
+
+// datalist の id はキンク主体は 受け付ける、同じ ページで 2 つ使うので一意にしておく
+const datalistId = computed(
+  () => `vehicle-cd-options-${props.label.replace(/[^a-zA-Z0-9]/g, '-')}`,
+)
 
 async function loadHistory() {
   const cd = vehicleCd.value.trim()
@@ -96,6 +105,15 @@ watch(
     }
   },
 )
+
+// datalist から選ぶと input の change イベントが発火するので、そのタイミングで
+// 自動的に履歴をロードする。手動入力は Enter またはボタンでトリガー。
+function onInputChange() {
+  const cd = vehicleCd.value.trim()
+  if (cd && props.availableVehicleCds?.includes(cd)) {
+    loadHistory()
+  }
+}
 </script>
 
 <template>
@@ -112,9 +130,18 @@ watch(
       <input
         v-model="vehicleCd"
         type="text"
-        placeholder="例: 4437"
+        :placeholder="availableVehicleCds && availableVehicleCds.length > 0 ? '例: 4437 (クリックで一覧)' : '例: 4437'"
+        :list="datalistId"
         class="border rounded px-3 py-1.5 text-sm bg-white dark:bg-gray-800 flex-1 font-mono"
+        @change="onInputChange"
       >
+      <datalist :id="datalistId">
+        <option
+          v-for="cd in availableVehicleCds ?? []"
+          :key="cd"
+          :value="cd"
+        />
+      </datalist>
       <button
         type="submit"
         class="px-3 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm disabled:opacity-50"
