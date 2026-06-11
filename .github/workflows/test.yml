@@ -18,6 +18,9 @@ jobs:
     uses: ippoan/ci-workflows/.github/workflows/frontend-ci.yml@main
     with:
       has_integration: true
+      # lockfile が ^0.2.55 未満を pin していても manifest に追従して解決する
+      # (org caller template 標準。CCoW からは lockfile を再生成できないため)
+      install_command: 'npm install'
       compat_backend_repo: 'none'   # map 移行 PR の CI 通過用 opt-out (#59 Wave 3)
       post_install_script: 'npx nuxt prepare'
     secrets:
