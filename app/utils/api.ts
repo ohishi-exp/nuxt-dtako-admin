@@ -14,14 +14,20 @@ import type {
   CalendarResponse,
   YTimeExportResponse,
 } from '~/types'
+import { createAuthFetch } from '@ippoan/auth-client'
 
 let apiBase = ''
 let getAccessToken: (() => string | null) | null = null
 let getTenantId: (() => string | null) | null = null
 let tokenRefresher: (() => Promise<void>) | null = null
 
-// 同時リフレッシュ防止用
+// 同時リフレッシュ防止用 (SSE 系関数の 401 retry が使用。JSON 経路の
+// single-flight は createAuthFetch 内部に持つ)
 let refreshPromise: Promise<void> | null = null
+
+// JSON 経路の transport (Authorization/X-Tenant-ID 付与 + 401→refresh→retry)
+// は @ippoan/auth-client の createAuthFetch に集約 (Refs ippoan/auth-worker#257)
+let authFetch: (<T>(path: string, init?: RequestInit) => Promise<T>) | null = null
 
 export function initApi(
   baseUrl: string,
@@ -33,20 +39,15 @@ export function initApi(
   getAccessToken = tokenGetter || null
   tokenRefresher = refresher || null
   getTenantId = tenantIdGetter || null
-}
-
-/** 認証ヘッダーを構築 (Authorization: Bearer + X-Tenant-ID フォールバック) */
-function buildAuthHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {}
-  const token = getAccessToken?.()
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`
-  }
-  const tid = getTenantId?.()
-  if (tid) {
-    headers['X-Tenant-ID'] = tid
-  }
-  return headers
+  authFetch = apiBase
+    ? createAuthFetch({
+        baseUrl: apiBase,
+        tokenGetter: () => getAccessToken?.() ?? null,
+        tenantIdGetter: () => getTenantId?.() ?? null,
+        tokenRefresher: refresher,
+        errorLabel: 'API エラー',
+      })
+    : null
 }
 
 /** フィルタを URLSearchParams に変換 */
@@ -60,24 +61,8 @@ function toParams(filter: object): string {
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  if (!apiBase) throw new Error('API 未初期化: initApi() を呼んでください')
-
-  const isFormData = options.body instanceof FormData
-
-  const headers: Record<string, string> = {
-    ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
-    ...buildAuthHeaders(),
-    ...(options.headers as Record<string, string> || {}),
-  }
-
-  const res = await fetch(`${apiBase}${path}`, { ...options, headers })
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => '')
-    throw new Error(`API エラー (${res.status}): ${body || res.statusText}`)
-  }
-  if (res.status === 204) return undefined as T
-  return res.json()
+  if (!authFetch) throw new Error('API 未初期化: initApi() を呼んでください')
+  return authFetch<T>(path, options)
 }
 
 // --- Drivers ---

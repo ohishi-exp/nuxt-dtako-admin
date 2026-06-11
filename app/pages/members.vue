@@ -1,20 +1,15 @@
 <script setup lang="ts">
-import { useAuth } from '@ippoan/auth-client'
+import { useAuth, decodeJwtPayloadFromToken } from '@ippoan/auth-client'
 import type { TenantMember } from '~/types'
 import { getMembers, inviteMember, updateMemberRole, deleteMember } from '~/utils/api'
 
 const { token } = useAuth()
 const user = computed(() => {
   if (!token.value) return null
-  try {
-    const payload = JSON.parse(atob(token.value.split('.')[1] ?? '')) as {
-      email?: string
-      role?: string
-    }
-    return { email: payload.email, role: payload.role }
-  } catch {
-    return null
-  }
+  // マルチバイト安全な lib decoder (parse 失敗時は {} → email/role undefined)
+  const payload = decodeJwtPayloadFromToken(token.value) as { email?: string; role?: string }
+  if (!payload.email && !payload.role) return null
+  return { email: payload.email, role: payload.role }
 })
 
 const members = ref<TenantMember[]>([])
