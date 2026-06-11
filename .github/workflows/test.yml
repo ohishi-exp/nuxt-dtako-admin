@@ -11,12 +11,14 @@ permissions:
   contents: write
   packages: read
   pull-requests: write
+  id-token: write       # frontend-ci 内蔵 secret-verify が要求 (ci-workflows#38)
 
 jobs:
   ci:
     uses: ippoan/ci-workflows/.github/workflows/frontend-ci.yml@main
     with:
       has_integration: true
+      compat_backend_repo: 'none'   # map 移行 PR の CI 通過用 opt-out (#59 Wave 3)
       post_install_script: 'npx nuxt prepare'
     secrets:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
