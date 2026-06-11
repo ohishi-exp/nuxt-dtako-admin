@@ -25,3 +25,7 @@ jobs:
       post_install_script: 'npx nuxt prepare'
     secrets:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      # cross-org (ohishi-exp → ippoan/ci-workflows) は secrets: inherit が
+      # 効かないため明示渡し (Refs ippoan/ci-workflows#125)
+      CI_APP_ID: ${{ secrets.CI_APP_ID }}
+      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
