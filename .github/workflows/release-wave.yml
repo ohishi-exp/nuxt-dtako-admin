@@ -1,0 +1,36 @@
+name: Release Wave
+
+# Release Wave 機構の caller (薄い wrapper)。
+# ci-dashboard から repository_dispatch で flip / rollback event を受けて、
+# ci-workflows の release-wave-handler.yml reusable に処理を委譲する。
+#
+# 親 issue: ippoan/ci-dashboard#137 / #237
+# Reusable: ippoan/ci-workflows/.github/workflows/release-wave-handler.yml
+# Repo config: ippoan/ci-workflows/config/release-wave-targets.yaml の
+#              `ohishi-exp/nuxt-dtako-admin` entry (platform=cloudflare-workers)
+#
+# 本 repo は ohishi-exp org (cross-org)。ci-workflows は ippoan org なので
+# `secrets: inherit` では secret が渡らない (GitHub 仕様: inherit は同一
+# org/enterprise 内のみ)。CLOUDFLARE_API_TOKEN / RELEASE_WAVE_WEBHOOK_SECRET は
+# 明示渡しする (= test.yml / ci-shape-report.yml と同じ cross-org pattern)。
+
+on:
+  repository_dispatch:
+    types:
+      - release-wave-flip
+      - release-wave-rollback
+      - release-wave-traffic-rollback   # frontend 単独 rollback (cloudflare-workers)
+      - release-wave-backend-rollback    # backend 単独 rollback (cloudrun)
+
+permissions:
+  contents: write     # tag push (stage 時)
+  id-token: write     # WIF (cloudrun path 用、本 repo は CF だが reusable
+                      # parse 時 caller permissions check が要る)
+  packages: read      # @ippoan/* GitHub Packages dep install (npm_scope=@ippoan)
+
+jobs:
+  handler:
+    uses: ippoan/ci-workflows/.github/workflows/release-wave-handler.yml@main
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      RELEASE_WAVE_WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
