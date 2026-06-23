@@ -19,6 +19,11 @@ bucket_name = "dtako-uploads"
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth.ippoan.org"
 
+# secret-verify (frontend-ci) 用の明示宣言。本 Worker は wrangler secret /
+# Secrets Store binding を持たない (API は client JWT forward + R2 binding のみ) ため空。
+[secrets]
+required = []
+
 [env.staging]
 name = "dtako-admin-staging"
 
