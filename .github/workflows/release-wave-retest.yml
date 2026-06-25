@@ -1,0 +1,51 @@
+name: Release Wave Retest
+
+# ci-dashboard の Compatibility グラフの「Re-test」ボタン / backend の no-traffic
+# upload (flip 前 retest, Refs ippoan/ci-dashboard#427) から飛んでくる
+# repository_dispatch (event: release-wave-retest) を受け、payload の
+# backend_image (= ghcr.io/ippoan/rust-alc-api:<sha>) を相手に integration test を
+# 回し直して compat report を送り直す経路 (Refs ippoan/ci-dashboard#157)。
+#
+# これが無いと Re-test ボタンを押しても dispatch は飛ぶが当 repo で CI が走らず
+# 「untested」のまま固まる (alc-app / auth-worker 等 5 consumer は本 file あり)。
+#
+# frontend-ci.yml はこの retest 経路を想定済み:
+#   - report-compatibility job は github.event_name で gate されず、
+#     compat_backend_image (= dispatch payload の image) を優先採用する。
+#   - deploy / auto-merge / pr-limit / publish は event_name が pull_request /
+#     push の時だけ走るので repository_dispatch では skip。has_deploy: false でも止める。
+#
+# 本 repo は ohishi-exp org (cross-org)。ci-workflows は ippoan org なので
+# `secrets: inherit` では secret が渡らない → test.yml と同じく明示渡しする。
+
+on:
+  repository_dispatch:
+    types:
+      - release-wave-retest
+
+permissions:
+  contents: write
+  packages: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  retest:
+    uses: ippoan/ci-workflows/.github/workflows/frontend-ci.yml@main
+    with:
+      has_integration: true
+      has_deploy: false
+      # dispatch payload の backend image を test 相手に明示指定する。
+      # frontend-ci の report-compatibility がこの image をそのまま記録する。
+      compat_backend_repo: 'ippoan/rust-alc-api'
+      compat_backend_image: ${{ github.event.client_payload.backend_image }}
+      compat_backend_image_env: 'API_IMAGE'
+      # 以下は test.yml の ci job と同一 integration 構成。
+      install_command: 'npm install'
+      post_install_script: 'npx nuxt prepare'
+      integration_env: 'API_BASE_URL=http://localhost:18080'
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CI_APP_ID: ${{ secrets.CI_APP_ID }}
+      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      RELEASE_WAVE_WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
