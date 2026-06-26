@@ -65,7 +65,7 @@ const templateFileInput = ref<HTMLInputElement | null>(null)
 const uploading = ref(false)
 const uploadStatus = ref('')
 
-const { token, orgId } = useAuth()
+const { token } = useAuth()
 
 /** 分数を `H:MM` または `HH:MM` 形式に整形 (24h 越えも `30:00` 等そのまま 2 桁以上で表示) */
 function fmtMinutes(m: number | null | undefined): string {
@@ -275,11 +275,12 @@ async function downloadXlsx() {
   lastWarnings.value = []
 
   try {
+    // #434 step 2: X-Tenant-ID は手で載せない (server route が introspect で
+    // 検証済み tenant を注入)。Authorization は introspect 対象として渡す。
     const headers: Record<string, string> = {
       'content-type': 'application/json',
     }
     if (token.value) headers['authorization'] = `Bearer ${token.value}`
-    if (orgId.value) headers['x-tenant-id'] = orgId.value
 
     const res = await fetch('/api/y-time-export', {
       method: 'POST',

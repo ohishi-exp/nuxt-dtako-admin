@@ -4,6 +4,9 @@ export default defineNuxtConfig({
   devtools: { enabled: true },
 
   runtimeConfig: {
+    // /api/proxy が introspect 後に転送する backend (rust-alc-api Cloud Run)。
+    // server-only (public でない) なので client bundle には載らない。
+    alcApiUrl: process.env.NUXT_ALC_API_URL || '',
     public: {
       apiBase: process.env.NUXT_PUBLIC_API_BASE || 'http://localhost:8080',
       authWorkerUrl: process.env.NUXT_PUBLIC_AUTH_WORKER_URL || '',
@@ -15,6 +18,12 @@ export default defineNuxtConfig({
 
   nitro: {
     preset: 'cloudflare_module',
+  },
+
+  // server route (/api/proxy) が import する @ippoan/auth-client/server (.mjs) を
+  // Nitro が解決できるよう transpile 対象に含める。
+  build: {
+    transpile: ['@ippoan/auth-client'],
   },
 
   vite: {

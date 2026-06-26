@@ -14,7 +14,8 @@
  */
 
 import type { H3Event } from 'h3'
-import { defineEventHandler, getHeader, createError } from 'h3'
+import { defineEventHandler, createError } from 'h3'
+import { resolveIdentityHeaders } from '~/server/utils/identity'
 
 const R2_PREFIX = 'vehicle-settings/'
 
@@ -91,18 +92,17 @@ export default defineEventHandler(async (event): Promise<UnconfirmedVehicle[]> =
   }
 
   const config = useRuntimeConfig()
-  const apiBase = (config.public as { apiBase?: string }).apiBase
+  const apiBase = (config.alcApiUrl as string)
+    || (config.public as { apiBase?: string }).apiBase
+    || process.env.NUXT_ALC_API_URL
     || process.env.NUXT_PUBLIC_API_BASE
   if (!apiBase) {
     throw createError({ statusCode: 500, statusMessage: 'apiBase not configured' })
   }
 
-  // backend フェッチと R2 list を並行
-  const auth = getHeader(event, 'authorization') ?? ''
-  const tenantId = getHeader(event, 'x-tenant-id') ?? ''
-  const headers: Record<string, string> = {}
-  if (auth) headers['authorization'] = auth
-  if (tenantId) headers['x-tenant-id'] = tenantId
+  // backend フェッチと R2 list を並行。#434 step 2: 生ヘッダーを forward せず
+  // auth-worker introspect で検証した identity を注入してから backend を叩く。
+  const headers = await resolveIdentityHeaders(event)
 
   const apiUrl = `${apiBase.replace(/\/$/, '')}/api/dtako/vehicles`
 

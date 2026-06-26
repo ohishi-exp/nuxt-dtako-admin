@@ -31,6 +31,7 @@ jobs:
       compat_backend_repo: 'ippoan/rust-alc-api'
       compat_backend_image_env: 'API_IMAGE'
       integration_env: 'API_BASE_URL=http://localhost:18080'
+      use_auth_client_dev: true   # PR 時に @ippoan/auth-client@dev を overlay install (createIdentityProxyHandler 取得、Refs rust-alc-api#434)
       post_install_script: 'npx nuxt prepare'
     secrets:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

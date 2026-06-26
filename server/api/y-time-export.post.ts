@@ -14,12 +14,12 @@ import type { H3Event } from 'h3'
 import {
   defineEventHandler,
   readBody,
-  getHeader,
   createError,
   setResponseHeader,
 } from 'h3'
 import type { YTimeExportResponse } from '~/types'
 import { writeYTimeRows, buildFilename } from '~/utils/y-time-xlsx'
+import { resolveIdentityHeaders } from '~/server/utils/identity'
 
 interface RequestBody {
   driver_cd: string
@@ -60,18 +60,17 @@ export default defineEventHandler(async (event) => {
   }
 
   const config = useRuntimeConfig()
-  const apiBase = (config.public as { apiBase?: string }).apiBase
+  const apiBase = (config.alcApiUrl as string)
+    || (config.public as { apiBase?: string }).apiBase
+    || process.env.NUXT_ALC_API_URL
     || process.env.NUXT_PUBLIC_API_BASE
   if (!apiBase) {
     throw createError({ statusCode: 500, statusMessage: 'apiBase not configured' })
   }
 
-  // 1. backend JSON 取得 — 認証ヘッダーをそのまま forward
-  const auth = getHeader(event, 'authorization') ?? ''
-  const tenantId = getHeader(event, 'x-tenant-id') ?? ''
-  const headers: Record<string, string> = {}
-  if (auth) headers['authorization'] = auth
-  if (tenantId) headers['x-tenant-id'] = tenantId
+  // 1. backend JSON 取得 — #434 step 2: 生の Authorization / X-Tenant-ID を forward
+  //    せず、auth-worker introspect で検証した identity (X-Tenant-ID + X-User-*) を注入。
+  const headers = await resolveIdentityHeaders(event)
 
   const params = new URLSearchParams({
     driver_cd: body.driver_cd,
