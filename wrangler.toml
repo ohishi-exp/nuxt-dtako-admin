@@ -15,14 +15,31 @@ custom_domain = true
 binding = "DTAKO_R2"
 bucket_name = "dtako-uploads"
 
+# auth-worker POST /auth/introspect (#434 step 2) を叩くための共有 secret。
+# /api/proxy/* の forward 前段で browser JWT を introspect 検証 + identity 注入
+# (X-Tenant-ID + X-User-ID/Email/Role) に使う。auth-worker / cc-relay / ref-files /
+# carins / dtako-logs と同じ CF Secrets Store entry を物理共有。GCP cloudsql-sv に
+# 同名 secret が SoT として存在し、frontend-ci の secret-verify が検証する。
+[[secrets_store_secrets]]
+binding = "INTERNAL_SHARED_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "INTERNAL_SHARED_SECRET"
+
+# introspect を公開 HTTP ではなく CF service binding (worker-to-worker, 内部) で叩く。
+[[services]]
+binding = "AUTH_WORKER"
+service = "auth-worker"
+
 [vars]
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth.ippoan.org"
+# /api/proxy が introspect 後に転送する backend (runtimeConfig.alcApiUrl)。
+NUXT_ALC_API_URL = "https://rust-alc-api-566bls5vfq-an.a.run.app"
 
-# secret-verify (frontend-ci) 用の明示宣言。本 Worker は wrangler secret /
-# Secrets Store binding を持たない (API は client JWT forward + R2 binding のみ) ため空。
+# secret-verify (frontend-ci) 用の明示宣言。INTERNAL_SHARED_SECRET binding を
+# 追加したので required に載せる (GCP cloudsql-sv 同名 secret を WIF で検証)。
 [secrets]
-required = []
+required = ["INTERNAL_SHARED_SECRET"]
 
 [env.staging]
 name = "dtako-admin-staging"
@@ -35,6 +52,19 @@ binding = "DTAKO_R2"
 # staging も同じ本番 R2 bucket を read-only で参照 (テンプレは配信のみ)。
 # 専用 staging bucket が必要になったら `dtako-uploads-staging` 等を作って差し替える。
 bucket_name = "dtako-uploads"
+
+# named env は top-level binding を継承しないので再宣言する。
+# staging/prod 統合 entry なので同じ secret_name (auth-worker #189)。
+[[env.staging.secrets_store_secrets]]
+binding = "INTERNAL_SHARED_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "INTERNAL_SHARED_SECRET"
+
+[[env.staging.services]]
+binding = "AUTH_WORKER"
+service = "auth-worker-staging"
+
 [env.staging.vars]
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
+NUXT_ALC_API_URL = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
