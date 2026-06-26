@@ -15,7 +15,7 @@
 
 import type { H3Event } from 'h3'
 import { defineEventHandler, createError } from 'h3'
-import { resolveIdentityHeaders } from '~/server/utils/identity'
+import { resolveIdentityHeaders } from '../../utils/identity'
 
 const R2_PREFIX = 'vehicle-settings/'
 

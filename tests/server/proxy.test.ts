@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { mockNuxtImport } from '@nuxt/test-utils/runtime'
 
 // 転送 + introspect 検証 + identity 注入の本体は @ippoan/auth-client/server の
 // createIdentityProxyHandler に集約 (#434 step 2)。挙動テスト (introspect /
@@ -7,27 +8,24 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 //   1. INTERNAL_SHARED_SECRET binding を resolve して渡す (未設定は 503)
 //   2. AUTH_WORKER service binding / authWorkerUrl / backendUrl / pathPrefix を解決して委譲
 //   3. createIdentityProxyHandler の戻り値で proxy(event) を返す
+//
+// nuxt auto-import (defineEventHandler / createError / useRuntimeConfig) は
+// @nuxt/test-utils の runtime 環境では実体に解決されるため vi.stubGlobal では
+// 差し替えられない。useRuntimeConfig は mockNuxtImport で、createError は実体が
+// throw する H3Error の statusCode をそのまま assert する。
 
-const { createIdentityProxyHandlerMock, proxyFn, createErrorMock } = vi.hoisted(() => {
+const { createIdentityProxyHandlerMock, proxyFn } = vi.hoisted(() => {
   const proxyFn = vi.fn(() => 'PROXY_RESULT')
-  ;(globalThis as Record<string, unknown>).defineEventHandler = (fn: unknown) => fn
-  const createErrorMock = vi.fn((opts: unknown) => {
-    const err = new Error('createError') as Error & { opts?: unknown }
-    err.opts = opts
-    throw err
-  })
-  ;(globalThis as Record<string, unknown>).createError = createErrorMock
   return {
     proxyFn,
     createIdentityProxyHandlerMock: vi.fn((_opts: unknown) => proxyFn),
-    createErrorMock,
   }
 })
 vi.mock('@ippoan/auth-client/server', () => ({
   createIdentityProxyHandler: createIdentityProxyHandlerMock,
 }))
 
-vi.stubGlobal('useRuntimeConfig', () => ({ alcApiUrl: 'https://test-api.example.com' }))
+mockNuxtImport('useRuntimeConfig', () => () => ({ alcApiUrl: 'https://test-api.example.com' }))
 
 import handler from '../../server/api/proxy/[...path]'
 
@@ -45,7 +43,6 @@ describe('proxy handler wiring (createIdentityProxyHandler, #434)', () => {
   beforeEach(() => {
     createIdentityProxyHandlerMock.mockClear()
     proxyFn.mockClear()
-    createErrorMock.mockClear()
   })
 
   it('INTERNAL_SHARED_SECRET があれば委譲し proxy(event) を返す', async () => {
@@ -80,10 +77,7 @@ describe('proxy handler wiring (createIdentityProxyHandler, #434)', () => {
   })
 
   it('INTERNAL_SHARED_SECRET 未設定なら 503 で弾く (委譲しない)', async () => {
-    await expect(call(eventWith({}))).rejects.toThrow()
-    expect(createErrorMock).toHaveBeenCalledWith(
-      expect.objectContaining({ statusCode: 503 }),
-    )
+    await expect(call(eventWith({}))).rejects.toMatchObject({ statusCode: 503 })
     expect(createIdentityProxyHandlerMock).not.toHaveBeenCalled()
   })
 
