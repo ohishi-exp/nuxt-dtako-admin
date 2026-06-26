@@ -36,10 +36,15 @@ NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth.ippoan.org"
 # /api/proxy が introspect 後に転送する backend (runtimeConfig.alcApiUrl)。
 NUXT_ALC_API_URL = "https://rust-alc-api-566bls5vfq-an.a.run.app"
 
-# secret-verify (frontend-ci) 用の明示宣言。INTERNAL_SHARED_SECRET binding を
-# 追加したので required に載せる (GCP cloudsql-sv 同名 secret を WIF で検証)。
+# secret-verify (frontend-ci) 用の明示宣言。**必ず空 `[]` にする**。
+# `secrets.required` は CI secret-verify の監査対象であると同時に **wrangler が
+# 「解決必須の worker secret binding」とみなす**フィールドでもある。ここに
+# INTERNAL_SHARED_SECRET を書くと wrangler deploy が "Secrets Store Secret と
+# Secret bindings に同名 assign / unique 名にせよ" (= secrets_store_secrets と衝突)
+# で fail する。INTERNAL_SHARED_SECRET は上記 secrets_store_secrets (Secrets Store
+# binding) で解決するので required には載せない (nuxt-items / alc-app と同じ)。
 [secrets]
-required = ["INTERNAL_SHARED_SECRET"]
+required = []
 
 [env.staging]
 name = "dtako-admin-staging"
