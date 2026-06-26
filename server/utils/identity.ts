@@ -13,9 +13,34 @@
  */
 import type { H3Event } from 'h3'
 import { getCookie, getHeader, getRequestURL, createError } from 'h3'
-import { introspectToken, buildIdentityHeaders } from '@ippoan/auth-client/server'
+import { introspectToken } from '@ippoan/auth-client/server'
 
 const DEFAULT_COOKIE_NAME = 'logi_auth_token'
+
+interface IntrospectActive {
+  tenant_id: string
+  role: string
+  email: string
+  sub: string
+}
+
+/**
+ * introspect 検証済み結果から `X-Tenant-ID` + `X-User-ID/Email/Role` を組み立てる
+ * (proxyCore.mjs の buildIdentityHeaders と同等)。
+ *
+ * 注: `@ippoan/auth-client/server` の `index.mjs` は `buildIdentityHeaders` を
+ * 再 export しておらず (型宣言には在るが runtime export に無い)、import すると
+ * Nitro の rollup build が MISSING_EXPORT で fail する。trivial な mapping なので
+ * 依存せず inline する。
+ */
+function buildIdentityHeaders(result: IntrospectActive): Record<string, string> {
+  const headers: Record<string, string> = {}
+  if (result.tenant_id) headers['X-Tenant-ID'] = result.tenant_id
+  if (result.sub) headers['X-User-ID'] = result.sub
+  if (result.email) headers['X-User-Email'] = result.email
+  if (result.role) headers['X-User-Role'] = result.role
+  return headers
+}
 
 function cfEnv(event: H3Event): Record<string, unknown> {
   return (event.context.cloudflare as { env?: Record<string, unknown> } | undefined)?.env ?? {}
