@@ -25,6 +25,13 @@ vi.mock('@ippoan/auth-client/server', () => ({
   createIdentityProxyHandler: createIdentityProxyHandlerMock,
 }))
 
+// h3 の defineEventHandler は (h3 v2 の wrap 挙動差を避けるため) identity に差し替える。
+// createError は実体を残し、throw された H3Error の statusCode を assert する。
+vi.mock('h3', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>()
+  return { ...actual, defineEventHandler: (fn: unknown) => fn }
+})
+
 mockNuxtImport('useRuntimeConfig', () => () => ({ alcApiUrl: 'https://test-api.example.com' }))
 
 import handler from '../../server/api/proxy/[...path]'

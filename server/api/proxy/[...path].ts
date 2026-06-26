@@ -19,6 +19,7 @@
  * backend route に一致する (= api.ts の route 文字列を書き換えずに済む)。
  */
 import type { H3Event } from 'h3'
+import { defineEventHandler, createError } from 'h3'
 import { createIdentityProxyHandler } from '@ippoan/auth-client/server'
 
 function cfEnv(event: H3Event): Record<string, unknown> {
