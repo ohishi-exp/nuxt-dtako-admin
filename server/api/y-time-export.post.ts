@@ -2,7 +2,8 @@
  * Y時間 Excel 追記エクスポート (Cloudflare Worker 上で実行される Nitro server route)。
  *
  * 1. body から `{ driver_cd, from, to, template_key }` を受け取る
- * 2. backend (rust-alc-api) `/api/dtako/y-time-export` を JWT forward で叩いて JSON 取得
+ * 2. backend (rust-alc-api) `/api/dtako/y-time-export` を auth-worker `/alc-proxy`
+ *    経由で叩いて JSON 取得 (OIDC mint は auth-worker、Cloud Run IAM lockdown 対応)
  * 3. R2 binding (`env.DTAKO_R2`) でテンプレ xlsx を fetch
  * 4. ExcelJS で Y時間 シートに書き込み
  * 5. xlsx binary を octet-stream で return
@@ -19,7 +20,7 @@ import {
 } from 'h3'
 import type { YTimeExportResponse } from '~/types'
 import { writeYTimeRows, buildFilename } from '~/utils/y-time-xlsx'
-import { resolveIdentityHeaders } from '../utils/identity'
+import { alcProxyFetch } from '../utils/alc-proxy'
 
 interface RequestBody {
   driver_cd: string
@@ -59,26 +60,13 @@ export default defineEventHandler(async (event) => {
     })
   }
 
-  const config = useRuntimeConfig()
-  const apiBase = (config.alcApiUrl as string)
-    || (config.public as { apiBase?: string }).apiBase
-    || process.env.NUXT_ALC_API_URL
-    || process.env.NUXT_PUBLIC_API_BASE
-  if (!apiBase) {
-    throw createError({ statusCode: 500, statusMessage: 'apiBase not configured' })
-  }
-
-  // 1. backend JSON 取得 — #434 step 2: 生の Authorization / X-Tenant-ID を forward
-  //    せず、auth-worker introspect で検証した identity (X-Tenant-ID + X-User-*) を注入。
-  const headers = await resolveIdentityHeaders(event)
-
-  const params = new URLSearchParams({
-    driver_cd: body.driver_cd,
-    from: body.from,
-    to: body.to,
+  // 1. backend JSON 取得 — #434 step 3 (方式 B): rust-alc-api を直叩きせず
+  //    auth-worker `/alc-proxy` に委譲する。introspect / ACL / OIDC mint /
+  //    identity 注入は auth-worker 側で行われ、Cloud Run IAM lockdown 後も通る。
+  const apiRes = await alcProxyFetch(event, {
+    path: '/api/dtako/y-time-export',
+    query: { driver_cd: body.driver_cd, from: body.from, to: body.to },
   })
-  const apiUrl = `${apiBase.replace(/\/$/, '')}/api/dtako/y-time-export?${params.toString()}`
-  const apiRes = await fetch(apiUrl, { headers })
   if (!apiRes.ok) {
     const text = await apiRes.text().catch(() => '')
     throw createError({

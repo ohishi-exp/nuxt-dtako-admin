@@ -3,8 +3,8 @@
  *
  * GET /api/vehicle-settings/unconfirmed
  *
- * 1. backend (rust-alc-api) `/api/dtako/vehicles` を JWT forward でフェッチ
- *    → 全車輛マスタ [{ id, tenant_id, vehicle_cd, vehicle_name }, ...]
+ * 1. backend (rust-alc-api) `/api/dtako/vehicles` を auth-worker `/alc-proxy`
+ *    経由でフェッチ → 全車輛マスタ [{ id, tenant_id, vehicle_cd, vehicle_name }, ...]
  * 2. R2 (`DTAKO_R2`) の `vehicle-settings/` prefix を listing して
  *    dump が存在する vehicle_cd 集合を作る
  * 3. (1) - (2) = 未確認車輛
@@ -15,7 +15,7 @@
 
 import type { H3Event } from 'h3'
 import { defineEventHandler, createError } from 'h3'
-import { resolveIdentityHeaders } from '../../utils/identity'
+import { alcProxyFetch } from '../../utils/alc-proxy'
 
 const R2_PREFIX = 'vehicle-settings/'
 
@@ -91,23 +91,10 @@ export default defineEventHandler(async (event): Promise<UnconfirmedVehicle[]> =
     })
   }
 
-  const config = useRuntimeConfig()
-  const apiBase = (config.alcApiUrl as string)
-    || (config.public as { apiBase?: string }).apiBase
-    || process.env.NUXT_ALC_API_URL
-    || process.env.NUXT_PUBLIC_API_BASE
-  if (!apiBase) {
-    throw createError({ statusCode: 500, statusMessage: 'apiBase not configured' })
-  }
-
-  // backend フェッチと R2 list を並行。#434 step 2: 生ヘッダーを forward せず
-  // auth-worker introspect で検証した identity を注入してから backend を叩く。
-  const headers = await resolveIdentityHeaders(event)
-
-  const apiUrl = `${apiBase.replace(/\/$/, '')}/api/dtako/vehicles`
-
+  // backend フェッチと R2 list を並行。#434 step 3 (方式 B): rust-alc-api を直叩き
+  // せず auth-worker `/alc-proxy` に委譲する (OIDC mint は auth-worker、lockdown 対応)。
   const [vehiclesRes, confirmedCds] = await Promise.all([
-    fetch(apiUrl, { headers }),
+    alcProxyFetch(event, { path: '/api/dtako/vehicles' }),
     listConfirmedVehicleCds(r2),
   ])
 
