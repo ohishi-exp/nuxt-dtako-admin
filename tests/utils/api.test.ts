@@ -26,6 +26,7 @@ import {
   revokeApiToken,
   getCalendar,
   getScrapeHistory,
+  saveScrapeHistory,
   switchTenant,
   getUploads,
   splitCsv,
@@ -422,6 +423,18 @@ describe('api', () => {
       assertMock(() => {
         expect(mockFetch.mock.calls[0][0]).toBe(`${API_BASE}${expectedPath}`)
         expect(mockFetch.mock.calls[0][1].method).toBe('POST')
+      })
+    })
+
+    it('saveScrapeHistory', async () => {
+      stubOk({})
+      const entry = { target_date: '2026-07-01', comp_id: '27324455', status: 'success' }
+      await callApi(() => saveScrapeHistory(entry))
+      assertMock(() => {
+        const [url, opts] = mockFetch.mock.calls[0]
+        expect(url).toBe(`${API_BASE}/api/scraper/history`)
+        expect(opts.method).toBe('POST')
+        expect(JSON.parse(opts.body)).toEqual(entry)
       })
     })
 
@@ -892,6 +905,11 @@ describe('api', () => {
       await expect(triggerScrapeStream({}, () => {})).rejects.toThrow('Scraper error: no token')
     })
 
+    it('rejects when scraper relay is not initialized', async () => {
+      initScraperRelay('')
+      await expect(triggerScrapeStream({}, () => {})).rejects.toThrow('scraper relay 未初期化')
+    })
+
     it('parses WS events and resolves on done', async () => {
       const events = [
         { event: 'progress', comp_id: 'C1', step: 'login' },
@@ -899,14 +917,19 @@ describe('api', () => {
         { event: 'done' },
       ]
       const received: unknown[] = []
-      const promise = triggerScrapeStream({ start_date: '2026-01-01', comp_id: 'C1' }, evt => received.push(evt))
+      const promise = triggerScrapeStream(
+        { start_date: '2026-01-01', end_date: '2026-01-31', comp_id: 'C1', skip_upload: true },
+        evt => received.push(evt),
+      )
 
       const ws = lastWs()
       const url = new URL(ws.url)
       expect(url.pathname).toBe('/ws/scraper')
       expect(url.searchParams.get('token')).toBe('token-abc')
       expect(url.searchParams.get('start_date')).toBe('2026-01-01')
+      expect(url.searchParams.get('end_date')).toBe('2026-01-31')
       expect(url.searchParams.get('comp_id')).toBe('C1')
+      expect(url.searchParams.get('skip_upload')).toBe('true')
       expect(url.searchParams.get('session')).toBeTruthy()
       for (const e of events) wsEmit(ws, e)
       await promise
@@ -1019,6 +1042,23 @@ describe('api', () => {
       expect(received).toEqual([{ event: 'done' }])
     })
 
+    it('triggerScrapeStream rejects if no token remains after refresh', async () => {
+      stubWebSocket()
+      initScraperRelay('ws://relay-test')
+      const refresher = vi.fn().mockResolvedValue(undefined)
+      let token: string | null = 'token'
+      initApi('http://test', () => token, refresher, () => 'tid')
+
+      const promise = triggerScrapeStream({}, () => {})
+
+      const first = lastWs()
+      token = null
+      first.close()
+
+      await expect(promise).rejects.toThrow('Scraper error: no token after refresh')
+      expect(refresher).toHaveBeenCalledTimes(1)
+    })
+
     it('401 without tokenRefresher does not retry', async () => {
       initApi('http://test', () => 'token', undefined, () => 'tid')
 
@@ -1071,6 +1111,18 @@ describe('api', () => {
       const promise = triggerScrapeStream({}, () => {})
       lastWs().close()
       await expect(promise).rejects.toThrow('refresh failed')
+    })
+
+    it('triggerScrapeStream wraps a non-Error rejection from refresh', async () => {
+      stubWebSocket()
+      initScraperRelay('ws://relay-test')
+      // eslint-disable-next-line prefer-promise-reject-errors
+      const refresher = vi.fn().mockRejectedValue('not an error object')
+      initApi('http://test', () => 'token', refresher, () => 'tid')
+
+      const promise = triggerScrapeStream({}, () => {})
+      lastWs().close()
+      await expect(promise).rejects.toThrow('Scraper error: connection failed')
     })
 
     it('concurrent 401 retries share the same refresh promise', async () => {
