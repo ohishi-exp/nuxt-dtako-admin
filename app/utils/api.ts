@@ -10,7 +10,7 @@ import type {
   ApiTokenListItem, CreateApiTokenResponse,
   TenantMember,
   SwitchTenantResponse,
-  ScrapeRequest, ScrapeResponse, ScrapeHistoryItem,
+  ScrapeRequest, ScrapeHistoryItem,
   CalendarResponse,
   YTimeExportResponse,
 } from '~/types'
@@ -20,6 +20,10 @@ let apiBase = ''
 let getAccessToken: (() => string | null) | null = null
 let getTenantId: (() => string | null) | null = null
 let tokenRefresher: (() => Promise<void>) | null = null
+// dtako-scraper-relay (DO) への WS 接続先。front Worker 自身が Cloudflare Tunnel /
+// Workers VPC 経由で dtako-scraper に到達するため、rust-alc-api 経由の旧 SSE 経路
+// (`/api/scraper/trigger`) は使わない。
+let scraperRelayUrl = ''
 
 // 同時リフレッシュ防止用 (SSE 系関数の 401 retry が使用。JSON 経路の
 // single-flight は createAuthFetch 内部に持つ)
@@ -48,6 +52,11 @@ export function initApi(
         errorLabel: 'API エラー',
       })
     : null
+}
+
+/** dtako-scraper-relay の WS 接続先を設定する (app.vue から一度だけ呼ぶ)。 */
+export function initScraperRelay(url: string) {
+  scraperRelayUrl = url.replace(/\/$/, '')
 }
 
 /** フィルタを URLSearchParams に変換 */
@@ -579,10 +588,24 @@ export async function getScrapeHistory(limit = 50): Promise<ScrapeHistoryItem[]>
   return request<ScrapeHistoryItem[]>(`/api/scraper/history?limit=${limit}`)
 }
 
-export async function triggerScrape(req: ScrapeRequest): Promise<ScrapeResponse> {
-  return request<ScrapeResponse>('/api/scraper/trigger', {
+export interface ScrapeHistoryEntry {
+  target_date: string // "YYYY-MM-DD"
+  comp_id: string
+  status: string
+  message?: string
+}
+
+/**
+ * dtako-scraper-relay (front Worker + DO) から結果を受け取った後、履歴を
+ * rust-alc-api に保存する。旧 `/api/scraper/trigger` (SSE 中継 + DB 保存) は
+ * dtako-scraper が Cloud Run から到達不可能になったため廃止し、保存だけを
+ * この経路 (`/api/proxy` 経由、既存の introspect + X-Tenant-ID 注入を再利用) に
+ * 切り出した。
+ */
+export async function saveScrapeHistory(entry: ScrapeHistoryEntry): Promise<void> {
+  await request<void>('/api/scraper/history', {
     method: 'POST',
-    body: JSON.stringify(req),
+    body: JSON.stringify(entry),
   })
 }
 
@@ -594,76 +617,90 @@ export interface ScrapeProgressEvent {
   message?: string
 }
 
+function buildScraperWsUrl(req: ScrapeRequest, token: string): string {
+  const params = new URLSearchParams()
+  params.set('session', crypto.randomUUID())
+  params.set('token', token)
+  if (req.start_date) params.set('start_date', req.start_date)
+  if (req.end_date) params.set('end_date', req.end_date)
+  if (req.comp_id) params.set('comp_id', req.comp_id)
+  if (req.skip_upload) params.set('skip_upload', 'true')
+  return `${scraperRelayUrl}/ws/scraper?${params.toString()}`
+}
+
 /**
- * SSE ストリームでスクレイプ実行。各イベントで onEvent コールバックが呼ばれる。
+ * dtako-scraper-relay (front Worker + DO) への WebSocket でスクレイプ実行。
+ * 各イベントで onEvent コールバックが呼ばれる。イベントの JSON 形式は旧 SSE 版
+ * (`rust-alc-api` 経由) と同一 (`{event, comp_id, step, status, message}`)。
+ *
+ * rust-alc-api の `/api/scraper/trigger` (旧 SSE 中継 + SCRAPER_URL 経路) は
+ * dtako-scraper が Kagoya VPS の localhost にしか bind されておらず Cloud Run
+ * からは到達不可能なため廃止。front Worker (nuxt-dtako-admin) 自身が Cloudflare
+ * Tunnel / Workers VPC binding 経由で直接 dtako-scraper に到達する。
  */
-export async function triggerScrapeStream(
+export function triggerScrapeStream(
   req: ScrapeRequest,
   onEvent: (evt: ScrapeProgressEvent) => void,
 ): Promise<void> {
-  const url = `${apiBase}/api/scraper/trigger`
+  if (!scraperRelayUrl) return Promise.reject(new Error('scraper relay 未初期化'))
 
-  const doFetch = async () => {
-    const token = getAccessToken?.()
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-    const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
-    return fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(req),
+  const connect = (token: string, allowRetry: boolean): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(buildScraperWsUrl(req, token))
+      let gotAnyMessage = false
+      let settled = false
+
+      ws.onmessage = (evt: MessageEvent) => {
+        gotAnyMessage = true
+        if (evt.data === 'pong') return
+        try {
+          const parsed = JSON.parse(evt.data) as ScrapeProgressEvent
+          onEvent(parsed)
+          if (parsed.event === 'done') {
+            settled = true
+            ws.close(1000, 'done')
+            resolve()
+          }
+        }
+        catch { /* ignore parse errors */ }
+      }
+
+      ws.onclose = () => {
+        if (settled) return
+        // ハンドシェイク段階 (メッセージを一度も受け取らずに切断) は認証失敗の
+        // 可能性が高い。tokenRefresher があれば一度だけ再取得してリトライする。
+        if (!gotAnyMessage && allowRetry && tokenRefresher) {
+          settled = true
+          ;(async () => {
+            try {
+              if (!refreshPromise) {
+                refreshPromise = tokenRefresher!().finally(() => { refreshPromise = null })
+              }
+              await refreshPromise
+              const newToken = getAccessToken?.()
+              if (!newToken) throw new Error('Scraper error: no token after refresh')
+              await connect(newToken, false)
+              resolve()
+            }
+            catch (e) {
+              reject(e instanceof Error ? e : new Error('Scraper error: connection failed'))
+            }
+          })()
+          return
+        }
+        settled = true
+        resolve()
+      }
+
+      ws.onerror = () => {
+        // onclose が onerror の後に発火するのでそちらで処理する
+      }
     })
   }
 
-  let res = await doFetch()
-
-  // 401 → トークンリフレッシュ → リトライ
-  if (res.status === 401 && tokenRefresher) {
-    try {
-      if (!refreshPromise) {
-        refreshPromise = tokenRefresher().finally(() => { refreshPromise = null })
-      }
-      await refreshPromise
-      res = await doFetch()
-    } catch {
-      // リフレッシュ失敗
-    }
-  }
-
-  if (!res.ok) {
-    throw new Error(`Scraper error: ${res.status} ${await res.text()}`)
-  }
-
-  const reader = res.body?.getReader()
-  if (!reader) throw new Error('No response body')
-
-  const decoder = new TextDecoder()
-  let buffer = ''
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-
-    buffer += decoder.decode(value, { stream: true })
-
-    // SSE パース: "data: {...}\n\n"
-    while (buffer.includes('\n\n')) {
-      const idx = buffer.indexOf('\n\n')
-      const message = buffer.slice(0, idx)
-      buffer = buffer.slice(idx + 2)
-
-      for (const line of message.split('\n')) {
-        if (line.startsWith('data:')) {
-          const data = line.slice(5).trim()
-          if (data) {
-            try {
-              onEvent(JSON.parse(data))
-            }
-            catch { /* ignore parse errors */ }
-          }
-        }
-      }
-    }
-  }
+  const token = getAccessToken?.()
+  if (!token) return Promise.reject(new Error('Scraper error: no token'))
+  return connect(token, true)
 }
 
 // --- Tenant Switching ---

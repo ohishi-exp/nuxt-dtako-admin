@@ -1,0 +1,16 @@
+{
+  "name": "nuxt-dtako-admin-scraper-relay",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240909.0",
+    "@vitest/coverage-v8": "^4.1.9",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.2",
+    "wrangler": "^4.67.0"
+  }
+}

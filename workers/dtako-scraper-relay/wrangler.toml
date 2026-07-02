@@ -1,0 +1,57 @@
+name = "nuxt-dtako-admin-scraper-relay"
+account_id = "24b45709d060d957340180e995f0d373"
+compatibility_date = "2024-09-19"
+compatibility_flags = ["nodejs_compat"]
+main = "src/index.ts"
+
+[[durable_objects.bindings]]
+name = "RELAY"
+class_name = "DtakoScraperRelayDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DtakoScraperRelayDO"]
+
+[[secrets_store_secrets]]
+binding = "INTERNAL_SHARED_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "INTERNAL_SHARED_SECRET"
+
+# Workers VPC binding (beta) — kagoya_tunnel 経由で dtako-scraper (VPS
+# 127.0.0.1:8081) に到達する。TODO: 実際の記法は
+# https://developers.cloudflare.com/workers-vpc/configuration/tunnel/ を見て
+# 初回 deploy 前に確定させること (beta のため記法が変わる可能性が高い)。
+# 現状はプレースホルダ。対象は kagoya_tunnel に private network route として
+# 登録した VPS 内部 IP:8081 を指す想定。
+[[vpc_services]]
+binding = "DTAKO_SCRAPER_VPC"
+service_id = "TODO_workers_vpc_service_id"
+
+[observability]
+enabled = true
+
+[vars]
+NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth.ippoan.org"
+
+[env.staging]
+name = "nuxt-dtako-admin-scraper-relay-staging"
+
+[[env.staging.durable_objects.bindings]]
+name = "RELAY"
+class_name = "DtakoScraperRelayDO"
+
+[[env.staging.migrations]]
+tag = "v1"
+new_sqlite_classes = ["DtakoScraperRelayDO"]
+
+[[env.staging.secrets_store_secrets]]
+binding = "INTERNAL_SHARED_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "INTERNAL_SHARED_SECRET"
+
+[[env.staging.vpc_services]]
+binding = "DTAKO_SCRAPER_VPC"
+service_id = "TODO_workers_vpc_service_id_staging"
+
+[env.staging.vars]
+NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"

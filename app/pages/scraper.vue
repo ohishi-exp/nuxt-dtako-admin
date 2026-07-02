@@ -1,7 +1,25 @@
 <script setup lang="ts">
-import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl } from '~/utils/api'
+import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl, saveScrapeHistory } from '~/utils/api'
 import type { ScrapeResult, ScrapeHistoryItem, PendingUpload, ScrapeStatusEntry } from '~/types'
 import type { ScrapeProgressEvent } from '~/utils/api'
+
+/**
+ * dtako-scraper-relay (front Worker + DO) から直接受け取った result イベントを
+ * rust-alc-api に保存する。旧 `/api/scraper/trigger` (rust-alc-api 経由 SSE 中継)
+ * は保存も兼ねていたが、front から直接 WS 接続する構成に変えたため、保存だけ
+ * 別途 `/api/proxy` 経由でここから呼ぶ。
+ */
+function recordScrapeResult(targetDate: string, evt: ScrapeProgressEvent) {
+  if (!evt.comp_id) return
+  saveScrapeHistory({
+    target_date: targetDate,
+    comp_id: evt.comp_id,
+    status: evt.status || 'error',
+    message: evt.message,
+  }).catch(() => {
+    // 履歴保存の失敗はユーザー体験をブロックしない (スクレイプ自体は完了している)
+  })
+}
 
 const compIdOptions = [
   { label: '全企業', value: '' },
@@ -218,6 +236,7 @@ async function handleScrape() {
               status: evt.status || 'error',
               message: evt.message || '',
             })
+            recordScrapeResult(task.date, evt)
           }
           else if (evt.event === 'done') {
             task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'
@@ -278,6 +297,7 @@ async function handleRerun(task: DayTask) {
               status: evt.status || 'error',
               message: evt.message || '',
             })
+            recordScrapeResult(task.date, evt)
           }
           else if (evt.event === 'done') {
             task.step = undefined
@@ -337,6 +357,7 @@ async function handleRerunAllErrors() {
                 status: evt.status || 'error',
                 message: evt.message || '',
               })
+              recordScrapeResult(task.date, evt)
             }
             else if (evt.event === 'done') {
               task.step = undefined
@@ -479,6 +500,7 @@ async function handleHistoryRerun(item: ScrapeHistoryItem) {
             status: evt.status || 'error',
             message: evt.message || '',
           })
+          recordScrapeResult(item.target_date, evt)
         }
         else if (evt.event === 'done') {
           task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'

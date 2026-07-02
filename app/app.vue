@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { useAuth } from '@ippoan/auth-client'
-import { initApi } from '~/utils/api'
+import { initApi, initScraperRelay } from '~/utils/api'
 
 const { token } = useAuth()
+const config = useRuntimeConfig()
 
 onMounted(() => {
   // #434 step 2: rust-alc-api を直叩きせず Worker server route /api/proxy 経由にする。
@@ -11,6 +12,10 @@ onMounted(() => {
   // 手で載せない (proxy が上書きするため、信頼境界を proxy に寄せる)。Authorization
   // (Bearer token) だけは proxy が introspect 対象に取れるよう引き続き渡す。
   initApi('/api/proxy', () => token.value)
+  // dtako-scraper-relay (front Worker + DO) への WS 接続先。front Worker 自身が
+  // Cloudflare Tunnel / Workers VPC 経由で dtako-scraper に到達するため、
+  // rust-alc-api 経由の旧 SCRAPER_URL 経路は使わない。
+  initScraperRelay(config.public.scraperRelayUrl as string)
 })
 </script>
 

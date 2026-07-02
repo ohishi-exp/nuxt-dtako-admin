@@ -1,0 +1,67 @@
+name: dtako-scraper-relay DO worker
+
+# nuxt-dtako-admin-scraper-relay は DtakoScraperRelayDO (Durable Object +
+# new_sqlite_classes migration) を定義する独立 worker。app 本体 (nuxt-dtako-admin)
+# は service binding でこの DO を外部から叩き、自身では migration を持たない
+# (= app は no-traffic release を維持する)。nuxt-items/workers/items-sync と同型。
+#
+# DO migration を含む version は `wrangler versions upload` では deploy できない
+# (Cloudflare error 10211: migration は non-versioned deployment 必須)。よって
+# この worker だけは frontend-ci.yml を使わず bespoke に `wrangler deploy` する。
+
+# pull_request: typecheck + test (coverage 100% gate) のみ実行し deploy は skip。
+# push(main/tag) / workflow_dispatch: 上記 gate に加えて deploy を実行。
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'workers/dtako-scraper-relay/**'
+      - '.github/workflows/dtako-scraper-relay-deploy.yml'
+  pull_request:
+    paths:
+      - 'workers/dtako-scraper-relay/**'
+      - '.github/workflows/dtako-scraper-relay-deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers/dtako-scraper-relay
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      # vitest.config.ts の coverage.thresholds=100 で auth-decision.ts が
+      # 100% 未満なら non-zero exit → gate fail。
+      - name: Test (coverage 100% gate)
+        run: npx vitest run --coverage
+
+      # tag push (v*) → prod、それ以外 (main push / workflow_dispatch) → staging。
+      # DO migration があるため versions upload ではなく wrangler deploy を使う。
+      # pull_request では deploy しない (gate のみ)。
+      - name: Deploy (staging)
+        if: github.event_name != 'pull_request' && github.ref_type != 'tag'
+        run: npx wrangler deploy --env staging
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Deploy (production)
+        if: github.event_name != 'pull_request' && github.ref_type == 'tag'
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
