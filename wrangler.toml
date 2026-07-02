@@ -3,8 +3,16 @@ account_id = "24b45709d060d957340180e995f0d373"
 compatibility_date = "2025-03-10"
 # nodejs_compat は ExcelJS が必要とする node:stream / node:buffer 互換のため
 compatibility_flags = ["nodejs_compat"]
-main = ".output/server/index.mjs"
+# Nitro 出力を包む custom worker entry。/ws/scraper を dtako-scraper-relay worker に
+# service binding 経由で転送し、それ以外を Nitro に委譲する (worker/index.ts)。
+# DO 本体は別 worker nuxt-dtako-admin-scraper-relay に分離済み (この worker は DO
+# binding / migration を持たないので `wrangler versions upload` (no-traffic)
+# release が CF error 10211/10061 を踏まない、nuxt-items/items-sync と同型)。
+main = "./worker/index.ts"
 assets = { directory = ".output/public/", binding = "ASSETS" }
+
+[build]
+command = "npm run build"
 
 [[routes]]
 pattern = "dtako.ippoan.org"
@@ -30,11 +38,22 @@ secret_name = "INTERNAL_SHARED_SECRET"
 binding = "AUTH_WORKER"
 service = "auth-worker"
 
+# dtako-scraper-relay (DtakoScraperRelayDO) worker への service binding。
+# DO 本体 + DO binding + migration は別 worker nuxt-dtako-admin-scraper-relay 側が
+# 内包し、app は worker→worker fetch で /ws/scraper を転送するだけ。
+[[services]]
+binding = "SCRAPER_RELAY"
+service = "nuxt-dtako-admin-scraper-relay"
+
 [vars]
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth.ippoan.org"
 # /api/proxy が introspect 後に転送する backend (runtimeConfig.alcApiUrl)。
 NUXT_ALC_API_URL = "https://rust-alc-api-566bls5vfq-an.a.run.app"
+# 自オリジン (dtako.ippoan.org) の DO relay に WS 接続する
+# (front Worker から直接 Cloudflare Tunnel/Workers VPC 経由で dtako-scraper に
+# 到達する構成。rust-alc-api の SCRAPER_URL 経由の旧経路は廃止、Refs #XXX)。
+NUXT_PUBLIC_SCRAPER_RELAY_URL = "wss://dtako.ippoan.org"
 
 # secret-verify (frontend-ci) 用の明示宣言。**必ず空 `[]` にする**。
 # `secrets.required` は CI secret-verify の監査対象であると同時に **wrangler が
@@ -69,7 +88,12 @@ secret_name = "INTERNAL_SHARED_SECRET"
 binding = "AUTH_WORKER"
 service = "auth-worker-staging"
 
+[[env.staging.services]]
+binding = "SCRAPER_RELAY"
+service = "nuxt-dtako-admin-scraper-relay-staging"
+
 [env.staging.vars]
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 NUXT_ALC_API_URL = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
+NUXT_PUBLIC_SCRAPER_RELAY_URL = "wss://dtako-staging.ippoan.org"

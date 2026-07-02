@@ -13,6 +13,10 @@ export default defineNuxtConfig({
       // /wt-quick --auth-skip <tenant_id> で OAuth バイパス。
       // 設定時は @ippoan/auth-client の useAuth/authMiddleware が JWT 不要モードに切替。
       stagingTenantId: process.env.NUXT_PUBLIC_STAGING_TENANT_ID || '',
+      // 自オリジンの dtako-scraper-relay (DO) へ WS 接続する。rust-alc-api 経由の
+      // SCRAPER_URL 旧経路は廃止 (front Worker が直接 Cloudflare Tunnel/Workers VPC
+      // 経由で dtako-scraper に到達する)。
+      scraperRelayUrl: process.env.NUXT_PUBLIC_SCRAPER_RELAY_URL || '',
     },
   },
 

@@ -26,7 +26,7 @@ import {
   revokeApiToken,
   getCalendar,
   getScrapeHistory,
-  triggerScrape,
+  saveScrapeHistory,
   switchTenant,
   getUploads,
   splitCsv,
@@ -37,6 +37,7 @@ import {
   recalculateDriverStream,
   recalculateDriversBatch,
   triggerScrapeStream,
+  initScraperRelay,
   splitCsvAllStream,
 } from '~/utils/api'
 import {
@@ -80,6 +81,45 @@ function mockStreamResponse(stream: ReadableStream<Uint8Array>, status = 200, ok
     body: stream,
     headers: new Headers(),
   } as unknown as Response
+}
+
+// ---------------------------------------------------------------------------
+// Mock-only helpers (dtako-scraper-relay WebSocket)
+// ---------------------------------------------------------------------------
+
+class MockWebSocket {
+  static instances: MockWebSocket[] = []
+  url: string
+  onopen: (() => void) | null = null
+  onmessage: ((e: { data: string }) => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: (() => void) | null = null
+
+  constructor(url: string) {
+    this.url = url
+    MockWebSocket.instances.push(this)
+  }
+
+  send(_data: string) {}
+
+  close(_code?: number, _reason?: string) {
+    this.onclose?.()
+  }
+}
+
+function stubWebSocket() {
+  MockWebSocket.instances = []
+  vi.stubGlobal('WebSocket', MockWebSocket)
+}
+
+function lastWs(): MockWebSocket {
+  const ws = MockWebSocket.instances.at(-1)
+  if (!ws) throw new Error('no WebSocket instance created')
+  return ws
+}
+
+function wsEmit(ws: MockWebSocket, data: unknown) {
+  ws.onmessage?.({ data: typeof data === 'string' ? data : JSON.stringify(data) })
 }
 
 function setupDownloadMocks() {
@@ -376,7 +416,6 @@ describe('api', () => {
   describe('POST functions', () => {
     it.each([
       ['rerunUpload', () => rerunUpload('upload-1'), '/api/internal/rerun/upload-1'],
-      ['triggerScrape', () => triggerScrape({ start_date: '2026-01-01' }), '/api/scraper/trigger'],
       ['splitCsv', () => splitCsv('upload-1'), '/api/split-csv/upload-1'],
     ] as [string, () => Promise<unknown>, string][])('%s → POST %s', async (_name, fn, expectedPath) => {
       stubOk({})
@@ -384,6 +423,18 @@ describe('api', () => {
       assertMock(() => {
         expect(mockFetch.mock.calls[0][0]).toBe(`${API_BASE}${expectedPath}`)
         expect(mockFetch.mock.calls[0][1].method).toBe('POST')
+      })
+    })
+
+    it('saveScrapeHistory', async () => {
+      stubOk({})
+      const entry = { target_date: '2026-07-01', comp_id: '27324455', status: 'success' }
+      await callApi(() => saveScrapeHistory(entry))
+      assertMock(() => {
+        const [url, opts] = mockFetch.mock.calls[0]
+        expect(url).toBe(`${API_BASE}/api/scraper/history`)
+        expect(opts.method).toBe('POST')
+        expect(JSON.parse(opts.body)).toEqual(entry)
       })
     })
 
@@ -444,14 +495,6 @@ describe('api', () => {
       assertMock(() => {
         const body = JSON.parse(mockFetch.mock.calls[0][1].body)
         expect(body.expires_in_days).toBeNull()
-      })
-    })
-
-    it('triggerScrape sends JSON body', async () => {
-      stubOk({ results: [] })
-      await callApi(() => triggerScrape({ start_date: '2026-01-01' }))
-      assertMock(() => {
-        expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual({ start_date: '2026-01-01' })
       })
     })
 
@@ -646,37 +689,8 @@ describe('api', () => {
       await expect(recalculateDriversBatch(2026, 3, ['D1'], () => {})).rejects.toThrow('No response body')
     })
 
-    it('triggerScrapeStream throws when body is null', async () => {
-      mockFetch.mockResolvedValue({ ok: true, status: 200, body: null, text: vi.fn().mockResolvedValue('') })
-      await expect(triggerScrapeStream({}, () => {})).rejects.toThrow('No response body')
-    })
-
-    it('triggerScrapeStream parses SSE events', async () => {
-      const events = [
-        { event: 'progress', comp_id: 'C1', step: 'login' },
-        { event: 'result', comp_id: 'C1', status: 'success' },
-        { event: 'done' },
-      ]
-      mockFetch.mockResolvedValue(mockStreamResponse(createSSEStream(events)))
-
-      const received: unknown[] = []
-      await triggerScrapeStream({ start_date: '2026-01-01' }, evt => received.push(evt))
-
-      expect(received).toEqual(events)
-      const [url, opts] = mockFetch.mock.calls[0]
-      expect(url).toBe('http://test/api/scraper/trigger')
-      expect(opts.method).toBe('POST')
-      expect(JSON.parse(opts.body)).toEqual({ start_date: '2026-01-01' })
-    })
-
-    it('triggerScrapeStream throws on non-ok with body text', async () => {
-      mockFetch.mockResolvedValue({
-        ok: false,
-        status: 422,
-        text: vi.fn().mockResolvedValue('bad input'),
-      })
-      await expect(triggerScrapeStream({}, () => {})).rejects.toThrow('Scraper error: 422 bad input')
-    })
+    // dtako-scraper-relay (front Worker + DO) への WebSocket 中継。SSE ではないため
+    // 別の describe に分離 (下記「scraper WS streaming」)。
 
     it('splitCsvAllStream parses SSE events', async () => {
       const events = [
@@ -792,7 +806,6 @@ describe('api', () => {
     it.each([
       ['recalculateDriverStream', (cb: (e: unknown) => void) => recalculateDriverStream(2026, 3, 'D001', cb)],
       ['recalculateDriversBatch', (cb: (e: unknown) => void) => recalculateDriversBatch(2026, 3, ['D1'], cb)],
-      ['triggerScrapeStream', (cb: (e: unknown) => void) => triggerScrapeStream({}, cb)],
       ['downloadRestraintReportPdfStream', (cb: (e: unknown) => void) => downloadRestraintReportPdfStream(2026, 3, cb)],
       ['splitCsvAllStream', (cb: (e: unknown) => void) => splitCsvAllStream(cb)],
     ] as [string, (cb: (e: unknown) => void) => Promise<void>][])('%s ignores invalid JSON in data lines', async (_name, fn) => {
@@ -815,7 +828,6 @@ describe('api', () => {
     it.each([
       ['recalculateDriverStream', (cb: (e: unknown) => void) => recalculateDriverStream(2026, 3, 'D001', cb)],
       ['recalculateDriversBatch', (cb: (e: unknown) => void) => recalculateDriversBatch(2026, 3, ['D1'], cb)],
-      ['triggerScrapeStream', (cb: (e: unknown) => void) => triggerScrapeStream({}, cb)],
       ['downloadRestraintReportPdfStream', (cb: (e: unknown) => void) => downloadRestraintReportPdfStream(2026, 3, cb)],
       ['splitCsvAllStream', (cb: (e: unknown) => void) => splitCsvAllStream(cb)],
     ] as [string, (cb: (e: unknown) => void) => Promise<void>][])('%s handles empty data lines', async (_name, fn) => {
@@ -838,7 +850,6 @@ describe('api', () => {
     it.each([
       ['recalculateDriverStream', (cb: (e: unknown) => void) => recalculateDriverStream(2026, 3, 'D001', cb)],
       ['recalculateDriversBatch', (cb: (e: unknown) => void) => recalculateDriversBatch(2026, 3, ['D1'], cb)],
-      ['triggerScrapeStream', (cb: (e: unknown) => void) => triggerScrapeStream({}, cb)],
       ['downloadRestraintReportPdfStream', (cb: (e: unknown) => void) => downloadRestraintReportPdfStream(2026, 3, cb)],
       ['splitCsvAllStream', (cb: (e: unknown) => void) => splitCsvAllStream(cb)],
     ] as [string, (cb: (e: unknown) => void) => Promise<void>][])('%s handles non-data lines', async (_name, fn) => {
@@ -877,6 +888,69 @@ describe('api', () => {
       const received: unknown[] = []
       await recalculateStream(2026, 3, evt => received.push(evt))
       expect(received).toEqual([{ event: 'progress', current: 1 }])
+    })
+  })
+
+  // ===== scraper WS streaming (dtako-scraper-relay 経由) =====
+
+  describe.runIf(!isLive)('scraper WS streaming', () => {
+    beforeEach(() => {
+      stubWebSocket()
+      initApi('http://test', () => 'token-abc', undefined, () => 'tid-1')
+      initScraperRelay('ws://relay-test')
+    })
+
+    it('rejects when no token is available', async () => {
+      initApi('http://test', () => null, undefined, () => 'tid-1')
+      await expect(triggerScrapeStream({}, () => {})).rejects.toThrow('Scraper error: no token')
+    })
+
+    it('rejects when scraper relay is not initialized', async () => {
+      initScraperRelay('')
+      await expect(triggerScrapeStream({}, () => {})).rejects.toThrow('scraper relay 未初期化')
+    })
+
+    it('parses WS events and resolves on done', async () => {
+      const events = [
+        { event: 'progress', comp_id: 'C1', step: 'login' },
+        { event: 'result', comp_id: 'C1', status: 'success' },
+        { event: 'done' },
+      ]
+      const received: unknown[] = []
+      const promise = triggerScrapeStream(
+        { start_date: '2026-01-01', end_date: '2026-01-31', comp_id: 'C1', skip_upload: true },
+        evt => received.push(evt),
+      )
+
+      const ws = lastWs()
+      const url = new URL(ws.url)
+      expect(url.pathname).toBe('/ws/scraper')
+      expect(url.searchParams.get('token')).toBe('token-abc')
+      expect(url.searchParams.get('start_date')).toBe('2026-01-01')
+      expect(url.searchParams.get('end_date')).toBe('2026-01-31')
+      expect(url.searchParams.get('comp_id')).toBe('C1')
+      expect(url.searchParams.get('skip_upload')).toBe('true')
+      expect(url.searchParams.get('session')).toBeTruthy()
+      for (const e of events) wsEmit(ws, e)
+      await promise
+
+      expect(received).toEqual(events)
+    })
+
+    it('ignores invalid JSON and pong frames', async () => {
+      const promise = triggerScrapeStream({}, () => {})
+      const ws = lastWs()
+      wsEmit(ws, 'pong')
+      ws.onmessage?.({ data: '{bad json}' })
+      wsEmit(ws, { event: 'done' })
+      await promise
+    })
+
+    it('resolves without throwing when closed early and no refresher is configured', async () => {
+      const promise = triggerScrapeStream({}, () => {})
+      const ws = lastWs()
+      ws.close()
+      await expect(promise).resolves.toBeUndefined()
     })
   })
 
@@ -944,19 +1018,45 @@ describe('api', () => {
       expect(mockFetch).toHaveBeenCalledTimes(2)
     })
 
-    it('triggerScrapeStream retries on 401', async () => {
+    it('triggerScrapeStream retries WS connection after refresh when handshake closes early', async () => {
+      stubWebSocket()
+      initScraperRelay('ws://relay-test')
       const refresher = vi.fn().mockResolvedValue(undefined)
       initApi('http://test', () => 'token', refresher, () => 'tid')
 
-      mockFetch
-        .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })
-        .mockResolvedValueOnce(mockStreamResponse(createSSEStream([{ event: 'done' }])))
-
       const received: unknown[] = []
-      await triggerScrapeStream({}, evt => received.push(evt))
+      const promise = triggerScrapeStream({}, evt => received.push(evt))
 
+      // 1 本目: メッセージを一度も受け取らずに切断 (auth failure 相当)
+      const first = lastWs()
+      first.close()
+      await new Promise(r => setTimeout(r, 0))
       expect(refresher).toHaveBeenCalledTimes(1)
-      expect(mockFetch).toHaveBeenCalledTimes(2)
+
+      // 2 本目: refresh 後の再接続
+      const second = lastWs()
+      expect(second).not.toBe(first)
+      wsEmit(second, { event: 'done' })
+      await promise
+
+      expect(received).toEqual([{ event: 'done' }])
+    })
+
+    it('triggerScrapeStream rejects if no token remains after refresh', async () => {
+      stubWebSocket()
+      initScraperRelay('ws://relay-test')
+      const refresher = vi.fn().mockResolvedValue(undefined)
+      let token: string | null = 'token'
+      initApi('http://test', () => token, refresher, () => 'tid')
+
+      const promise = triggerScrapeStream({}, () => {})
+
+      const first = lastWs()
+      token = null
+      first.close()
+
+      await expect(promise).rejects.toThrow('Scraper error: no token after refresh')
+      expect(refresher).toHaveBeenCalledTimes(1)
     })
 
     it('401 without tokenRefresher does not retry', async () => {
@@ -991,19 +1091,38 @@ describe('api', () => {
     it.each([
       ['recalculateDriverStream', () => recalculateDriverStream(2026, 3, 'D001', () => {}), '再計算に失敗: 401'],
       ['recalculateDriversBatch', () => recalculateDriversBatch(2026, 3, ['D1'], () => {}), '一括再計算に失敗: 401'],
-      ['triggerScrapeStream', () => triggerScrapeStream({}, () => {}), 'Scraper error: 401'],
       ['downloadRestraintReportPdfStream', () => downloadRestraintReportPdfStream(2026, 3, () => {}), 'PDF生成に失敗しました: 401'],
     ] as [string, () => Promise<void>, string][])('%s handles refresher failure gracefully', async (_name, fn, errorMsg) => {
       const refresher = vi.fn().mockRejectedValue(new Error('refresh failed'))
       initApi('http://test', () => 'token', refresher, () => 'tid')
 
       const resp: any = { ok: false, status: 401, statusText: 'Unauthorized' }
-      if (_name === 'triggerScrapeStream') {
-        resp.text = vi.fn().mockResolvedValue('Unauthorized')
-      }
       mockFetch.mockResolvedValueOnce(resp)
 
       await expect(fn()).rejects.toThrow(errorMsg)
+    })
+
+    it('triggerScrapeStream handles refresher failure gracefully', async () => {
+      stubWebSocket()
+      initScraperRelay('ws://relay-test')
+      const refresher = vi.fn().mockRejectedValue(new Error('refresh failed'))
+      initApi('http://test', () => 'token', refresher, () => 'tid')
+
+      const promise = triggerScrapeStream({}, () => {})
+      lastWs().close()
+      await expect(promise).rejects.toThrow('refresh failed')
+    })
+
+    it('triggerScrapeStream wraps a non-Error rejection from refresh', async () => {
+      stubWebSocket()
+      initScraperRelay('ws://relay-test')
+      // eslint-disable-next-line prefer-promise-reject-errors
+      const refresher = vi.fn().mockRejectedValue('not an error object')
+      initApi('http://test', () => 'token', refresher, () => 'tid')
+
+      const promise = triggerScrapeStream({}, () => {})
+      lastWs().close()
+      await expect(promise).rejects.toThrow('Scraper error: connection failed')
     })
 
     it('concurrent 401 retries share the same refresh promise', async () => {
@@ -1044,20 +1163,25 @@ describe('api', () => {
       await Promise.all([p1, p2])
     })
 
-    it('concurrent 401 retries share refresh for triggerScrapeStream', async () => {
+    it('concurrent WS retries share refresh for triggerScrapeStream', async () => {
+      stubWebSocket()
+      initScraperRelay('ws://relay-test')
       let resolveRefresh: () => void
       const refresher = vi.fn().mockImplementation(() => new Promise<void>((r) => { resolveRefresh = r }))
       initApi('http://test', () => 'token', refresher, () => 'tid')
 
-      mockFetch.mockResolvedValue({ ok: false, status: 401, statusText: 'Unauthorized', text: vi.fn().mockResolvedValue('Unauthorized') })
-
       const p1 = triggerScrapeStream({}, () => {}).catch(() => {})
       const p2 = triggerScrapeStream({}, () => {}).catch(() => {})
 
+      // 両方の 1 本目の WS ハンドシェイクを即切断 (auth failure 相当)
+      for (const ws of MockWebSocket.instances) ws.close()
       await new Promise(r => setTimeout(r, 0))
       expect(refresher).toHaveBeenCalledTimes(1)
 
       resolveRefresh!()
+      // refresh 後の再接続 (2 本目) が生成されるまで tick を回す
+      await new Promise(r => setTimeout(r, 0))
+      for (const ws of MockWebSocket.instances.slice(2)) ws.close()
       await Promise.all([p1, p2])
     })
   })
@@ -1156,7 +1280,6 @@ describe('api', () => {
       ['recalculateStream', (cb: (e: unknown) => void) => recalculateStream(2026, 3, cb), 'done'],
       ['recalculateDriverStream', (cb: (e: unknown) => void) => recalculateDriverStream(2026, 3, 'D001', cb), 'done'],
       ['recalculateDriversBatch', (cb: (e: unknown) => void) => recalculateDriversBatch(2026, 3, ['D1'], cb), 'batch_done'],
-      ['triggerScrapeStream', (cb: (e: unknown) => void) => triggerScrapeStream({}, cb), 'done'],
       ['splitCsvAllStream', (cb: (e: unknown) => void) => splitCsvAllStream(cb), 'done'],
       ['downloadRestraintReportPdfStream', (cb: (e: unknown) => void) => downloadRestraintReportPdfStream(2026, 3, cb), 'progress'],
     ] as [string, (cb: (e: unknown) => void) => Promise<void>, string][])('%s works without tokenGetter', async (_name, fn, doneEvent) => {
