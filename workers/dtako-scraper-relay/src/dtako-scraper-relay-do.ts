@@ -39,10 +39,11 @@ export interface RelayEnv {
   /** auth-worker origin (wrangler vars と共有)。 */
   NUXT_PUBLIC_AUTH_WORKER_URL?: string;
   /**
-   * Workers VPC binding (beta) — kagoya_tunnel 経由で dtako-scraper (VPS,
-   * 127.0.0.1:8081) に到達する Fetcher。実際の binding 種別/wrangler 設定は
-   * https://developers.cloudflare.com/workers-vpc/ の GA 前に必ず確認すること
-   * (beta のため wrangler.toml の記法が変わる可能性がある)。
+   * Workers VPC binding (beta) — kagoya_tunnel (Tunnel ID
+   * e690242e-06cb-43a6-b2f5-67dfec95ca46) 経由で dtako-scraper (VPS
+   * 127.0.0.1:8081) に到達する Fetcher。VPC Service `dtako-scraper-relay`
+   * (service_id: 019f20af-c6ac-7dd0-8381-ea22add4bd40) を wrangler.toml の
+   * `vpc_services` binding で参照する。
    */
   DTAKO_SCRAPER_VPC: Fetcher;
 }
