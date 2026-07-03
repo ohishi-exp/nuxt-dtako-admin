@@ -7,9 +7,11 @@
  * 使わない (auth.global.ts の publicPaths に登録、layout も独立)。
  *
  * credential pass-through 設計: パスワードはログイン 1 リクエストの body にだけ載り、
- * サーバー側 (DtakoScraperRelayDO) にも browser にも保存されない。保持されるのは
- * theearth session cookie (DO storage) とランダム token (sessionStorage) のみ。
- * .vdf のデコード (dtako_vid_wasm) はブラウザ内で完結する。
+ * サーバー側 (DtakoScraperRelayDO) にも browser にも保存されない (保存したい人は
+ * ブラウザのパスワードマネージャーに任せる — form は PM が拾える構造にしてある)。
+ * アプリが保持するのは theearth session cookie (DO storage) とランダム token
+ * (localStorage、サーバ側 TTL 8h で失効) のみ。.vdf のデコード (dtako_vid_wasm) は
+ * ブラウザ内で完結する。
  */
 import { decodeVdf, probeVideoDuration } from '~/utils/dtako-vid-wasm'
 import type { VdfTelemetry } from '~/utils/dtako-vid-wasm'
@@ -35,6 +37,11 @@ interface DvrSession {
 }
 
 const SESSION_STORAGE_KEY = 'dvr-viewer-session'
+
+/** 前回ログインした会社ID/ユーザーID (パスワード以外) のプリフィル用。
+ * パスワードマネージャーが覚えるのは username+password の 1 組だけなので、
+ * 会社ID はこちらで補完する。 */
+const LAST_ACCOUNT_KEY = 'dvr-viewer-last-account'
 
 /** ヘッダー右上のログインパネル開閉。未ログインで開くと本文はデータ用に空ける。 */
 const showLoginPanel = ref(false)
@@ -115,6 +122,12 @@ async function doLogin() {
       body: { user_pass: form.userPass },
     })
     persistSession({ compId: form.compId, userName: form.userName, token: res.token })
+    try {
+      localStorage.setItem(LAST_ACCOUNT_KEY, JSON.stringify({ compId: form.compId, userName: form.userName }))
+    }
+    catch {
+      // プリフィルは best-effort
+    }
     form.userPass = ''
     showLoginPanel.value = false
     await loadNotifications()
@@ -258,6 +271,17 @@ onMounted(() => {
   catch {
     session.value = null
   }
+  try {
+    const rawLast = localStorage.getItem(LAST_ACCOUNT_KEY)
+    if (rawLast) {
+      const last = JSON.parse(rawLast) as { compId?: string, userName?: string }
+      form.compId = last.compId ?? ''
+      form.userName = last.userName ?? ''
+    }
+  }
+  catch {
+    // プリフィルは best-effort
+  }
   if (session.value) loadNotifications()
   else showLoginPanel.value = true
 })
@@ -302,15 +326,18 @@ onBeforeUnmount(closeViewer)
           <template #header>
             <span class="font-semibold">theearth (web地球号) にログイン</span>
           </template>
-          <form class="space-y-3" @submit.prevent="doLogin">
+          <!-- name/autocomplete はブラウザのパスワードマネージャーが username+password を
+               保存・自動入力できるようにするためのもの (会社ID は PM の対象外なので
+               localStorage の前回値プリフィルで補完する)。 -->
+          <form method="post" class="space-y-3" @submit.prevent="doLogin">
             <UFormField label="会社ID">
-              <UInput v-model="form.compId" autocomplete="organization" placeholder="例: 27324455" class="w-full" />
+              <UInput v-model="form.compId" name="organization" autocomplete="organization" placeholder="例: 27324455" class="w-full" />
             </UFormField>
             <UFormField label="ユーザーID">
-              <UInput v-model="form.userName" autocomplete="username" class="w-full" />
+              <UInput v-model="form.userName" name="username" autocomplete="username" class="w-full" />
             </UFormField>
             <UFormField label="パスワード">
-              <UInput v-model="form.userPass" type="password" autocomplete="current-password" class="w-full" />
+              <UInput v-model="form.userPass" name="password" type="password" autocomplete="current-password" class="w-full" />
             </UFormField>
             <div v-if="loginError" class="text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
               {{ loginError }}
