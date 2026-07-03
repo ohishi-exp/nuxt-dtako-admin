@@ -63,7 +63,17 @@ export async function callVenusBridgeMethod(
     );
   }
 
-  const json = (await res.json()) as unknown;
+  let json: unknown;
+  try {
+    json = await res.json();
+  } catch (e) {
+    // content-type は json なのに body が JSON として読めない (空 body / BOM 等)。
+    // 生の SyntaxError を上に漏らすと呼び出し側で「予期しないエラー」に潰れるので、
+    // 診断可能な TheearthClientError に変換する。
+    throw new TheearthClientError(
+      `VenusBridge ${methodName} のレスポンスを JSON として parse できませんでした: ${String(e)}`,
+    );
+  }
   if (json === null || typeof json !== "object" || !("d" in json)) {
     throw new TheearthClientError(
       `VenusBridge ${methodName} のレスポンスに "d" フィールドがありません: ${JSON.stringify(json).slice(0, 200)}`,

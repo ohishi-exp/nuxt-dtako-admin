@@ -95,6 +95,16 @@ describe("callVenusBridgeMethod", () => {
     await expect(callVenusBridgeMethod(jar, "SomeMethod", {}, fetchImpl)).rejects.toThrow("unknown");
   });
 
+  it("throws a TheearthClientError when the body is not parseable despite a json content-type", async () => {
+    const fetchImpl = sequenceFetch([
+      new Response("", { status: 200, headers: { "content-type": "application/json" } }),
+    ]);
+    const jar = createCookieJar();
+    await expect(callVenusBridgeMethod(jar, "SomeMethod", {}, fetchImpl)).rejects.toThrow(
+      "JSON として parse できませんでした",
+    );
+  });
+
   it('throws when the JSON response has no "d" field', async () => {
     const fetchImpl = sequenceFetch([jsonResponse({ notD: 1 })]);
     const jar = createCookieJar();

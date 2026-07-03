@@ -78,6 +78,13 @@ function dvrJsonError(status: number, message: string): Response {
   return Response.json({ error: message }, { status });
 }
 
+/** 想定外の例外 (TheearthClientError 以外) を診断可能な 1 行にする。自前 client の
+ * 例外情報のみで credential は含まれない。エラーメッセージと log の両方に出す —
+ * generic 文言に潰すと現場で原因が追えない (Refs #90 staging 実機で実害)。 */
+function describeUnknownError(err: unknown): string {
+  return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+}
+
 /** SecretsStoreSecret (`.get()`) / 文字列 のどちらの binding でも値を取り出す。 */
 async function resolveSecret(binding: unknown): Promise<string> {
   if (typeof binding === "string") return binding;
@@ -465,8 +472,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       });
     } catch (err) {
       // TheearthClientError の message は自前クライアントの説明文 (credential は含まない)。
+      console.error("DVR login error:", err);
       const message =
-        err instanceof TheearthClientError ? err.message : "theearth へのログインに失敗しました";
+        err instanceof TheearthClientError
+          ? err.message
+          : `theearth へのログインに失敗しました (${describeUnknownError(err)})`;
       return dvrJsonError(401, message);
     }
 
@@ -499,8 +509,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         await this.ctx.storage.delete(DVR_SESSION_KEY);
         return dvrJsonError(401, "theearth セッションが切れました。再ログインしてください");
       }
+      console.error("DVR notifications error:", err);
       const message =
-        err instanceof TheearthClientError ? err.message : "DVR 動画通知の取得に失敗しました";
+        err instanceof TheearthClientError
+          ? err.message
+          : `DVR 動画通知の取得に失敗しました (${describeUnknownError(err)})`;
       return dvrJsonError(502, message);
     }
   }
@@ -530,8 +543,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         },
       });
     } catch (err) {
+      console.error("DVR file error:", err);
       const message =
-        err instanceof TheearthClientError ? err.message : "DVR 動画ファイルの取得に失敗しました";
+        err instanceof TheearthClientError
+          ? err.message
+          : `DVR 動画ファイルの取得に失敗しました (${describeUnknownError(err)})`;
       return dvrJsonError(502, message);
     }
   }
