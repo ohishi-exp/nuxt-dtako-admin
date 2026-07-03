@@ -59,9 +59,6 @@ async function loadMasters() {
   mastersError.value = null
   try {
     masters.value = await $fetch<DvrMasters>('/dvr-api/masters', { headers: authHeaders() })
-    if (!branchCode.value && masters.value.branches[0]) {
-      branchCode.value = masters.value.branches[0].code
-    }
   }
   catch (e) {
     if (dvrErrorStatus(e) === 401) {
@@ -75,16 +72,22 @@ async function loadMasters() {
   }
 }
 
-const branchOptions = computed(() =>
-  (masters.value?.branches ?? []).map(b => ({ label: b.name, value: b.code })),
-)
+/** 事業所絞込。"00000000" = 全事業所 (theearth の ddlBranch デフォルトと同値)。 */
+const ALL_BRANCHES = '00000000'
+const BRANCH_STORAGE_KEY = 'dvr-map-branch'
+
+const branchOptions = computed(() => [
+  { label: '全事業所', value: ALL_BRANCHES },
+  ...(masters.value?.branches ?? []).map(b => ({ label: b.name, value: b.code })),
+])
 const vehicleOptions = computed(() =>
   (masters.value?.vehicles ?? []).map(v => ({ label: `${v.code} ${v.name}`, value: v.code })),
 )
 
 // --- 現在地 (VehicleStateTableForBranchEx) ---
 
-const branchCode = ref('')
+// 前回選択した事業所を復元 (無ければ全事業所)。localStorage 不可でも既定にフォールバック。
+const branchCode = ref(ALL_BRANCHES)
 const states = ref<VehicleStatePoint[]>([])
 const statesLoading = ref(false)
 const statesError = ref<string | null>(null)
@@ -116,7 +119,13 @@ async function loadStates() {
   }
 }
 
-watch(branchCode, () => {
+watch(branchCode, (v) => {
+  try {
+    localStorage.setItem(BRANCH_STORAGE_KEY, v)
+  }
+  catch {
+    // 保存不可 (プライベートモード等) でも動作は継続
+  }
   if (statesLoaded.value) loadStates()
 })
 
@@ -315,6 +324,14 @@ watch(session, (s) => {
 
 onMounted(() => {
   restoreSession()
+  // 前回選択した事業所を復元 (無ければ全事業所のまま)。
+  try {
+    const saved = localStorage.getItem(BRANCH_STORAGE_KEY)
+    if (saved) branchCode.value = saved
+  }
+  catch {
+    // 復元不可でも既定 (全事業所) で継続
+  }
   if (session.value) {
     loadMasters().then(() => {
       if (branchCode.value) loadStates()
