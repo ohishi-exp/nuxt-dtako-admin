@@ -176,20 +176,26 @@ dtako 運行ログ (csvdata.zip) の取得トリガー UI。実処理は `nuxt-d
 | `vpc-relay` (デフォルト、既存) | browser → DO → Workers VPC binding → Kagoya VPS の dtako-scraper (`/scrape/ws`、chromiumoxide ヘッドレス Chrome) | DO は薄い中継のみ |
 | `http` (Refs ohishi-exp/dtako-scraper#22) | browser → DO → DO 自身が `theearth-client.ts` で theearth-np.com に素の `fetch()` でログイン + CSV ダウンロード | Chromium 不要。DO を `comp_id` 単位で `idFromName` するため同一企業への並列リクエストが自然に直列化される |
 
-`workers/dtako-scraper-relay/wrangler.toml` の `[vars] SCRAPER_MODE` は未設定
-(= `vpc-relay` のまま)。`http` に切り替えるには以下の運用手順が別途必要:
+`workers/dtako-scraper-relay/wrangler.toml` の `[env.staging.vars] SCRAPER_MODE`
+は `"http"` に設定済み (staging のみ、本番の top-level `[vars]` には未設定 = 本番は
+`vpc-relay` のまま)。`SCRAPER_MODE` 自体は認証情報を含まないため wrangler.toml に
+直接コミットしてよい (secret 扱いの `DTAKO_ACCOUNTS` とは異なる)。
+
+有効化の運用手順:
 
 1. `DTAKO_ACCOUNTS` (dtako-scraper の Rust 版 `DTAKO_ACCOUNTS` env と同一 JSON shape:
    `[{comp_id, user_name, user_pass, tenant_id}, ...]`) は **`wrangler.toml` にも
    Secrets Store にも置かず**、Cloudflare dashboard の Worker
-   (`nuxt-dtako-admin-scraper-relay`) → Settings → Variables and Secrets から
+   (staging: `nuxt-dtako-admin-scraper-relay-staging`、本番:
+   `nuxt-dtako-admin-scraper-relay`) → Settings → Variables and Secrets から
    **plain Environment Variable** (Secret ではなく Variable) として直接追加する。
    値を見ながら設定・確認できることを優先した意図的な選択 (org 標準の Secrets Store
    write-only 運用からの逸脱だが、`wrangler.toml`/git 履歴には平文が残らない)。
    `DtakoScraperRelayDO` の `resolveSecret()` は文字列 binding / Secrets Store
    binding (`.get()`) のどちらでも動く実装のため、この切替に**コード変更は不要**
-2. staging で `SCRAPER_MODE=http` を1社だけ試験し、実際に csvdata.zip が
-   ダウンロードできるか確認してから本番の `comp_id` を広げる
+2. staging (`SCRAPER_MODE=http` 設定済み) で `DTAKO_ACCOUNTS` に1社だけ登録し、
+   実際に csvdata.zip がダウンロードできるか確認してから本番へ展開する
+   (本番展開時は top-level `[vars]` に `SCRAPER_MODE = "http"` を追加する PR を出す)
 3. `theearth-client.ts` の CSV フォーム要素 id (`rdoSelect1`/`rdoDate1`/
    `MainContent_ucStartDate_txtYear` 等) と2段階目ボタン (`btnCsvSvrOutput` /
    `btnCsvOutput`) は theearth-np の実ページ trace (issue #22) に基づく推定。
