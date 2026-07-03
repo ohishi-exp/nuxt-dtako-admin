@@ -189,6 +189,7 @@ function clearSelection() {
 const isRunning = useState('scraper-running', () => false)
 
 const stepLabels: Record<string, string> = {
+  queued: '順番待ち... (同一企業の処理が進行中)',
   login: 'ログイン中...',
   download: 'ダウンロード中...',
   upload: 'アップロード中...',
@@ -238,6 +239,11 @@ async function handleScrape() {
               zipUrl: evt.zip_url,
             })
             recordScrapeResult(task.date, evt)
+          }
+          else if (evt.event === 'error') {
+            // result イベント無しで切断されるケース (account 未検出等の接続レベルエラー)。
+            // result を push しないと done で誤って success 判定されてしまう。
+            task.results.push({ comp_id: evt.comp_id || '', status: 'error', message: evt.message || 'エラーが発生しました' })
           }
           else if (evt.event === 'done') {
             task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'
@@ -301,6 +307,9 @@ async function handleRerun(task: DayTask) {
             })
             recordScrapeResult(task.date, evt)
           }
+          else if (evt.event === 'error') {
+            task.results.push({ comp_id: evt.comp_id || '', status: 'error', message: evt.message || 'エラーが発生しました' })
+          }
           else if (evt.event === 'done') {
             task.step = undefined
           }
@@ -361,6 +370,9 @@ async function handleRerunAllErrors() {
                 zipUrl: evt.zip_url,
               })
               recordScrapeResult(task.date, evt)
+            }
+            else if (evt.event === 'error') {
+              task.results.push({ comp_id: evt.comp_id || '', status: 'error', message: evt.message || 'エラーが発生しました' })
             }
             else if (evt.event === 'done') {
               task.step = undefined
@@ -505,6 +517,9 @@ async function handleHistoryRerun(item: ScrapeHistoryItem) {
             zipUrl: evt.zip_url,
           })
           recordScrapeResult(item.target_date, evt)
+        }
+        else if (evt.event === 'error') {
+          task.results.push({ comp_id: evt.comp_id || '', status: 'error', message: evt.message || 'エラーが発生しました' })
         }
         else if (evt.event === 'done') {
           task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'

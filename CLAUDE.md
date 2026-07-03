@@ -209,12 +209,34 @@ dtako 運行ログ (csvdata.zip) の取得トリガー UI。実処理は `nuxt-d
 無く、requestId (128bit UUID) を知っていること + 単回性 + 短命 TTL が capability-URL
 としての防御 (WS 到達自体は既存の auth-worker introspect で認証済み)。
 
+### rust-alc-api への自動アップロード (`DTAKO_DEVICE_CREDENTIALS`)
+
+`http` モードは zip 取得後、`DTAKO_DEVICE_CREDENTIALS` (dtako-scraper の Rust 版
+`DeviceCredential` map と同一 JSON shape: `{tenant_id: {device_id, device_secret}}`)
+が設定されていれば、dtako-scraper の Rust 版と同じプロトコル
+(`./device-upload.ts`) で rust-alc-api に自動アップロードする:
+
+1. auth-worker `POST /device/token` で device JWT を発行 (応答の `tenant_id` が
+   `DTAKO_ACCOUNTS` 側の `tenant_id` と一致するか必ず確認、不一致は loud fail)
+2. `POST /device-data-proxy/api/upload` (device JWT 付き multipart) で
+   rust-alc-api に転送 (device-data-proxy が JWT の `tenant_id` claim から
+   `X-Tenant-ID` を注入するため client 側は tenant を詐称できない)
+
+進捗は WS の `progress` イベント (`step: "upload"`) で `app/pages/scraper.vue` に
+表示される。`DTAKO_DEVICE_CREDENTIALS` 未設定の間は自動アップロードをスキップし
+zip ダウンロードのみ提供する (fail-closed にはしない、機能低下のみ)。
+`DTAKO_ACCOUNTS` と同様、値に秘密 (`device_secret`) を含むため **dashboard の
+plain Environment Variable**として Worker (staging:
+`nuxt-dtako-admin-scraper-relay-staging`) の Settings → Variables and Secrets
+から追加する。
+
 ### 関連ファイル
 
 | ファイル | 役割 |
 |---|---|
 | `workers/dtako-scraper-relay/src/theearth-client.ts` | ブラウザレス HTTP クライアント (cookie jar / VIEWSTATE 抽出 / 2段階 CSV POST / ZIP magic assert) |
-| `workers/dtako-scraper-relay/src/dtako-scraper-relay-do.ts` | `DtakoScraperRelayDO`。`SCRAPER_MODE` で vpc-relay / http を分岐、comp_id 単位の直列化キュー |
+| `workers/dtako-scraper-relay/src/device-upload.ts` | device credential 経由の rust-alc-api 自動アップロード (`/device/token` + `/device-data-proxy/api/upload`) |
+| `workers/dtako-scraper-relay/src/dtako-scraper-relay-do.ts` | `DtakoScraperRelayDO`。`SCRAPER_MODE` で vpc-relay / http を分岐、comp_id 単位の直列化キュー、アップロード進捗の WS 配信 |
 | `workers/dtako-scraper-relay/src/index.ts` | `comp_id` (http 用) / `session` (vpc-relay 用) で DO へ routing、`/scraper-zip/*` 転送 |
 | `worker/index.ts` | app 本体の entry。`/ws/scraper` と `/scraper-zip/*` を SCRAPER_RELAY service binding に転送 |
 | `app/utils/api.ts` | `triggerScrapeStream()` / `buildScraperZipUrl()` |
