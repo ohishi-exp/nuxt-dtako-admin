@@ -6,16 +6,10 @@
 const props = defineProps<{ title: string }>()
 const emit = defineEmits<{ login: [] }>()
 
-const route = useRoute()
 const { session, loginError, showLoginPanel, lastAccount, login, logout } = useDvrSession()
 
 const form = reactive({ compId: '', userName: '', userPass: '' })
 const loggingIn = ref(false)
-
-const NAV_LINKS = [
-  { to: '/dvr-viewer', label: '動画' },
-  { to: '/dvr-map', label: '位置情報・動態履歴' },
-] as const
 
 async function doLogin() {
   if (!form.compId || !form.userName || !form.userPass) {
@@ -50,19 +44,6 @@ onMounted(() => {
       <h1 class="text-lg font-bold">
         {{ props.title }}
       </h1>
-      <nav class="flex items-center gap-1 ml-4">
-        <NuxtLink
-          v-for="link in NAV_LINKS"
-          :key="link.to"
-          :to="link.to"
-          class="text-sm rounded-full px-3 py-1"
-          :class="route.path === link.to
-            ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300 font-medium'
-            : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800'"
-        >
-          {{ link.label }}
-        </NuxtLink>
-      </nav>
       <div class="flex-1" />
 
       <!-- 右上: ログイン状態表示 + ボタン -->

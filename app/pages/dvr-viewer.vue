@@ -16,8 +16,6 @@
 import { decodeVdf, probeVideoDuration } from '~/utils/dtako-vid-wasm'
 import type { VdfTelemetry } from '~/utils/dtako-vid-wasm'
 
-definePageMeta({ layout: false })
-
 type DvrReceiveState = 'ready' | 'requestable' | 'in_progress' | 'error' | 'unknown'
 
 interface DvrNotification {
@@ -441,7 +439,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="min-h-screen bg-gray-50 dark:bg-gray-950">
+  <!-- default レイアウト (サイドバー) 内。-m-6 で main の p-6 を打ち消しヘッダーを全幅に -->
+  <div class="-m-6">
     <DvrSessionHeader title="DVR 動画ビューア" @login="onLogin" />
 
     <main class="max-w-7xl mx-auto p-6">
