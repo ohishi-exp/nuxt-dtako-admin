@@ -10,9 +10,10 @@
  * TheearthClientError を throw する (200 で HTML エラーページを ZIP として
  * 返してしまう事故を防ぐ)。
  *
- * **CSV ダウンロード段は既知の制約として fetch() では再現できない** (2026-07-03
- * 実機検証で確定、詳細は downloadCsvZip の doc comment 参照)。ログイン段は
- * fetch ベースで問題なく動作する。
+ * CSV ダウンロード段は fetch() だけで実データ入り ZIP を取得できる (2026-07-03
+ * 実機検証で確定、詳細は downloadCsvZip の doc comment 参照)。真因は「2段階目
+ * (btnCsvSvrOutput の POST) に日付範囲フィールドを含めていなかった」ことで、
+ * これを含めれば `SCRAPER_MODE=http` (Chromium 不要) で正常動作する。
  */
 
 export const BASE_URL = "https://theearth-np.com";
@@ -20,6 +21,14 @@ const LOGIN_PATH = "/F-OES1010[Login].aspx";
 const CSV_PATH = "/F-NOS3010[GeneralCsv].aspx";
 
 const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04];
+
+/** ログイン / GET / 確認ページ POST など軽い応答用のタイムアウト (ms)。
+ * サーバが固まった / セッションが hang した時に無限待ちを避けて loud fail する。 */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+/** CSV export (2段階目 = btnCsvSvrOutput POST) 用のタイムアウト (ms)。
+ * サーバ側の ZIP 生成が数十秒〜掛かる (実測 90 秒超のケースあり) ため長めに取る。 */
+export const DEFAULT_EXPORT_TIMEOUT_MS = 150_000;
 
 export class TheearthClientError extends Error {
   constructor(message: string) {
@@ -29,6 +38,23 @@ export class TheearthClientError extends Error {
 }
 
 export type FetchLike = typeof fetch;
+
+/** GET / stage1 (要求応答) と stage2 (CSV export) で別々のタイムアウトを渡すための束。 */
+export interface ScrapeTimeouts {
+  /** ログイン・GET・stage1・確認ページ POST 用 (ms、既定 DEFAULT_REQUEST_TIMEOUT_MS)。 */
+  requestTimeoutMs?: number;
+  /** stage2 (CSV export) 用 (ms、既定 DEFAULT_EXPORT_TIMEOUT_MS)。 */
+  exportTimeoutMs?: number;
+}
+
+/** `AbortSignal.timeout` があれば timeout 用 signal を作る (無い環境では undefined)。
+ * テストの fake fetch は signal を無視するので、この分岐はテスト実行に影響しない。 */
+function makeTimeoutSignal(timeoutMs: number | undefined): AbortSignal | undefined {
+  if (!timeoutMs || typeof AbortSignal === "undefined" || typeof AbortSignal.timeout !== "function") {
+    return undefined;
+  }
+  return AbortSignal.timeout(timeoutMs);
+}
 
 // ---------------------------------------------------------------------------
 // Cookie jar (fetch には無いので自前実装。redirect:"manual" で各ホップの
@@ -76,11 +102,26 @@ export async function fetchWithJar(
   url: string,
   init: RequestInit,
   fetchImpl: FetchLike,
+  timeoutMs?: number,
 ): Promise<Response> {
   const headers = new Headers(init.headers);
   const cookie = cookieHeader(jar);
   if (cookie) headers.set("cookie", cookie);
-  const res = await fetchImpl(url, { ...init, headers, redirect: "manual" });
+  const signal = init.signal ?? makeTimeoutSignal(timeoutMs);
+  let res: Response;
+  try {
+    res = await fetchImpl(url, { ...init, headers, redirect: "manual", signal });
+  } catch (e: unknown) {
+    // timeout (AbortSignal.timeout 発火) を明示的な TheearthClientError に翻訳して
+    // loud fail する。ハングしたセッション / 遅いサーバをそのまま無限待ちしない。
+    if (signal?.aborted) {
+      throw new TheearthClientError(
+        `theearth-np への通信がタイムアウトしました (${timeoutMs}ms) — ` +
+          "サーバ応答が遅い、またはセッションが固まっている可能性があります",
+      );
+    }
+    throw e;
+  }
   ingestSetCookie(jar, res.headers);
   return res;
 }
@@ -199,10 +240,11 @@ export async function login(
   jar: CookieJar,
   params: LoginParams,
   fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
 ): Promise<void> {
   const loginUrl = `${BASE_URL}${LOGIN_PATH}?mode=timeout`;
 
-  const getRes = await fetchWithJar(jar, loginUrl, { method: "GET" }, fetchImpl);
+  const getRes = await fetchWithJar(jar, loginUrl, { method: "GET" }, fetchImpl, timeoutMs);
   const html = await getRes.text();
   const hidden = extractHiddenFields(html);
 
@@ -214,7 +256,7 @@ export async function login(
     btnLogin: "ログイン",
   });
 
-  const postRes = await postForm(jar, loginUrl, body, fetchImpl);
+  const postRes = await postForm(jar, loginUrl, body, fetchImpl, timeoutMs);
 
   // 通常ログイン成功時は Response.Redirect (3xx) で戻ることが多い。
   if (postRes.status >= 300 && postRes.status < 400) {
@@ -225,6 +267,7 @@ export async function login(
         new URL(location, loginUrl).toString(),
         { method: "GET" },
         fetchImpl,
+        timeoutMs,
       );
       await followRes.text();
     }
@@ -265,7 +308,7 @@ export async function login(
       [overlapField.name]: overlapField.value,
       [btnForced.name]: btnForced.value || "ログイン",
     });
-    const forcedRes = await postForm(jar, loginUrl, forcedBody, fetchImpl);
+    const forcedRes = await postForm(jar, loginUrl, forcedBody, fetchImpl, timeoutMs);
     if (forcedRes.status >= 300 && forcedRes.status < 400) return;
     const forcedHtml = await forcedRes.text();
     if (!forcedRes.ok) {
@@ -300,6 +343,7 @@ async function postForm(
   url: string,
   body: URLSearchParams,
   fetchImpl: FetchLike,
+  timeoutMs?: number,
 ): Promise<Response> {
   return fetchWithJar(
     jar,
@@ -310,6 +354,7 @@ async function postForm(
       body: body.toString(),
     },
     fetchImpl,
+    timeoutMs,
   );
 }
 
@@ -397,39 +442,37 @@ export function assertZipMagic(buf: ArrayBuffer): void {
 }
 
 /**
- * **既知の制約 (2026-07-03 実機検証で確定、ohishi-exp/dtako-scraper#22):
- * この関数は本物のブラウザ操作を再現できず、実データ入りの ZIP を取得できない。**
+ * CSV (csvdata.zip) を fetch() だけで取得する。Chromium 不要。
  *
- * 実機 (cdp-relay 経由の実 Chrome) で3段階の検証を行った:
- *   1. 実クリックの `submit` イベントを capture-phase listener で捕捉し、その
- *      body (`FormData(form)`、submitter なし) をそのまま fetch で再送 →
- *      プレーンな HTML 再描画 (ZIP ですらない)
- *   2. 実際の client JS (`J-NOS3010[GeneralCsv].js` の `DateCheck()`) を読んで
- *      判明した「本当に POST されるボタン名は btnCsvSvr (隠しボタン)」を使い、
- *      新鮮な GET 直後・遅延なしで再送 → それでもプレーン HTML 再描画
- *   3. `FormData(form, submitter)` でネイティブ相当の全 36 フィールドを再構築して
- *      再送 → それでもプレーン HTML 再描画
+ * **真因メモ (2026-07-03 実機検証で確定、ohishi-exp/dtako-scraper#22):**
+ * このフローは 2 段階 postback (`btnCsvSvr` → 確認ページ → `btnCsvSvrOutput`) で、
+ * サーバ側の CSV export ハンドラは **2段階目の POST body からも日付範囲を読む**。
+ * 以前の実装は 2段階目に hidden field と出力ボタンしか含めておらず、日付範囲を
+ * 落としていたため「範囲外 = 0 件」の **22 バイトの空 ZIP** (`PK\x05\x06` の EOCD
+ * のみ) が返っていた。実ブラウザのクリックは確認ページの DOM に日付が残ったまま
+ * submit するので成功していた。2段階目にも日付範囲を再送すれば fetch でも実データ
+ * 入りの ZIP が返る (実測 85KB、`PK\x03\x04`)。
  *
- * 一方、実ブラウザで `<input type=submit>` に対し実際に `.click()` した場合は
- * 2回とも実データ入りの ZIP (103KB) が返った。フィールド構成の正確さに関わらず
- * `fetch()` ベースの POST は一度も成功しなかったことから、原因は body の組み立て
- * ミスではなく、**トップレベルナビゲーションを伴う実フォーム送信と `fetch()`/XHR を
- * サーバ (または前段のミドルウェア) が区別している**ことだと考えられる (ブラウザが
- * 自動付与する `Sec-Fetch-Mode`/`Sec-Fetch-Dest` 等、JS からは偽装不能なシグナルが
- * 有力な候補)。Cloudflare Workers 上の `fetch()` も同様にトップレベルナビゲーション
- * を発生させられないため、この制約は回避できない。
+ * 過去に「fetch では原理的に不可能、`Sec-Fetch-Mode` 等 navigation 判定が原因」と
+ * 誤って結論づけた時期があった (PR #101) が、それは 2段階目の日付欠落を見落とした
+ * 誤診だった。navigation の有無は無関係。
  *
- * 結論: CSV ダウンロード段は `vpc-relay` (実 headless Chrome) に留める。この
- * 関数は `SCRAPER_MODE=http` の実験目的でのみ残しており、本番運用には使わない。
+ * hang 対策: サーバの export 生成が遅い (実測 90 秒超) ため 2段階目のみ
+ * `exportTimeoutMs` を長めに取り、その他は `requestTimeoutMs` で短く切る。
+ * 同一 ASP.NET セッションへの **並行リクエストはセッションロックで hang/500 する**
+ * ため、呼び出し側 (DO) は comp_id 単位で直列化すること (この関数は逐次実行前提)。
  */
 export async function downloadCsvZip(
   jar: CookieJar,
   range: CsvDateRange,
   fetchImpl: FetchLike = fetch,
+  timeouts: ScrapeTimeouts = {},
 ): Promise<ArrayBuffer> {
+  const requestTimeoutMs = timeouts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const exportTimeoutMs = timeouts.exportTimeoutMs ?? DEFAULT_EXPORT_TIMEOUT_MS;
   const csvUrl = `${BASE_URL}${CSV_PATH}`;
 
-  const getRes = await fetchWithJar(jar, csvUrl, { method: "GET" }, fetchImpl);
+  const getRes = await fetchWithJar(jar, csvUrl, { method: "GET" }, fetchImpl, requestTimeoutMs);
   const html = await getRes.text();
   const hidden = extractHiddenFields(html);
 
@@ -448,8 +491,10 @@ export async function downloadCsvZip(
   const start = splitJapaneseDate(range.startDate, isWareki);
   const end = splitJapaneseDate(range.endDate, isWareki);
 
-  const stage1Body = new URLSearchParams({
-    ...hidden,
+  // 日付範囲フィールド (rdoSelect1/rdoDate1 の radio + 開始/終了 年月日)。ASP.NET の
+  // field name (`ctl00$MainContent$...`) は GET ページと確認ページで同一なので、
+  // GET から抽出した name を stage1 / stage2 の **両方** で再利用する (真因の修正)。
+  const dateRange: Record<string, string> = {
     [fields.get("rdoSelect1")!.name]: fields.get("rdoSelect1")!.value,
     [fields.get("rdoDate1")!.name]: fields.get("rdoDate1")!.value,
     [fields.get("MainContent_ucStartDate_txtYear")!.name]: start.y,
@@ -458,10 +503,15 @@ export async function downloadCsvZip(
     [fields.get("MainContent_ucEndDate_txtYear")!.name]: end.y,
     [fields.get("MainContent_ucEndDate_txtMonth")!.name]: end.m,
     [fields.get("MainContent_ucEndDate_txtDay")!.name]: end.d,
+  };
+
+  const stage1Body = new URLSearchParams({
+    ...hidden,
+    ...dateRange,
     [fields.get("btnCsvSvr")!.name]: fields.get("btnCsvSvr")!.value,
   });
 
-  const stage1Res = await postForm(jar, csvUrl, stage1Body, fetchImpl);
+  const stage1Res = await postForm(jar, csvUrl, stage1Body, fetchImpl, requestTimeoutMs);
   const stage1ContentType = stage1Res.headers.get("content-type") ?? "";
 
   // 1段階目で直接 ZIP が返るケース (実装差異に備える)
@@ -471,7 +521,8 @@ export async function downloadCsvZip(
     return buf;
   }
 
-  // 2段階目: 1段階目のレスポンス (確認ページ) の hidden field + 出力ボタンで再 POST
+  // 2段階目: 1段階目のレスポンス (確認ページ) の hidden field + **日付範囲** + 出力ボタン
+  // で再 POST。日付範囲を落とすと空 ZIP が返る (このフロー最大の落とし穴、上の doc 参照)。
   const stage1Html = await stage1Res.text();
   const hidden2 = extractHiddenFields(stage1Html);
   const outputButton =
@@ -483,9 +534,10 @@ export async function downloadCsvZip(
   }
   const stage2Body = new URLSearchParams({
     ...hidden2,
+    ...dateRange,
     [outputButton.name]: outputButton.value || "ダウンロード",
   });
-  const stage2Res = await postForm(jar, csvUrl, stage2Body, fetchImpl);
+  const stage2Res = await postForm(jar, csvUrl, stage2Body, fetchImpl, exportTimeoutMs);
   const buf = await stage2Res.arrayBuffer();
   assertZipMagic(buf);
   return buf;
@@ -508,13 +560,15 @@ export type ProgressCallback = (step: "login" | "download" | "done", message?: s
 /**
  * ログイン → CSV ダウンロードを一括で行う。Chromium 不要、素の fetch のみ。
  *
- * **CSV ダウンロード段は既知の制約により失敗する** (downloadCsvZip の doc
- * comment 参照)。`SCRAPER_MODE=http` の実験目的でのみ使う。
+ * hang / セッションロック対策: 各リクエストにタイムアウトを掛ける (downloadCsvZip
+ * の doc 参照)。**同一 comp_id への並行呼び出しは theearth 側のセッションロックで
+ * hang/500 する**ため、呼び出し側 (DO) は comp_id 単位で直列化すること。
  */
 export async function scrapeViaHttp(
   params: ScrapeHttpParams,
   onProgress: ProgressCallback,
   fetchImpl: FetchLike = fetch,
+  timeouts: ScrapeTimeouts = {},
 ): Promise<ArrayBuffer> {
   const jar = createCookieJar();
   onProgress("login");
@@ -522,9 +576,15 @@ export async function scrapeViaHttp(
     jar,
     { compId: params.compId, userName: params.userName, userPass: params.userPass },
     fetchImpl,
+    timeouts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
   );
   onProgress("download");
-  const zip = await downloadCsvZip(jar, { startDate: params.startDate, endDate: params.endDate }, fetchImpl);
+  const zip = await downloadCsvZip(
+    jar,
+    { startDate: params.startDate, endDate: params.endDate },
+    fetchImpl,
+    timeouts,
+  );
   onProgress("done");
   return zip;
 }
