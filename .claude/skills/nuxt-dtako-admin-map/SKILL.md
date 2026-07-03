@@ -1,6 +1,6 @@
 ---
 name: nuxt-dtako-admin-map
-generated-from: nuxt-dtako-admin:448e60577b686692984eb468dec88185d2a99b5b
+generated-from: nuxt-dtako-admin:2b9f72a885a55d6c5f3e9ad73912a04ed7738baa
 paths: [app/, server/]
 description: ippoan/nuxt-dtako-admin (dtako デジタコ運行データ管理画面、Nuxt 4 + Cloudflare Workers) の構造ナビゲーション。rust-alc-api を直 fetch する frontend と、R2 binding が要る Y時間 Excel export、ブラウザ内完結の NET780 ビューア (net780-wasm 経由) の server route / page 配置を 1 枚にまとめる。トリガー:「dtako」「nuxt-dtako-admin」「Y時間 export」「y-time-export」「vehicle-settings」「DTAKO_R2」「運行データ」「dtako.ippoan.org」「net780」「NET780」「net780-wasm」等。
 ---
