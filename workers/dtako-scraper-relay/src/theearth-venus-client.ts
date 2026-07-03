@@ -51,6 +51,16 @@ export async function callVenusBridgeMethod(
   );
 
   if (!res.ok) {
+    // theearth セッションが無効化されると (別の場所での同一アカウントログイン /
+    // アイドルタイムアウト等)、VenusBridge は HTML ではなく **HTTP 500** を返す
+    // (2026-07-03 staging 実機で確認)。再ログインで回復するので、502 に潰さず
+    // VenusSessionExpiredError → 401 に載せ替えて browser に再ログインを促す。
+    if (res.status === 500) {
+      throw new VenusSessionExpiredError(
+        `VenusBridge ${methodName} が HTTP 500 を返しました — theearth セッションが` +
+          "無効化された可能性があります (別の場所での同一アカウントログイン等)。再ログインしてください",
+      );
+    }
     throw new TheearthClientError(`VenusBridge ${methodName} が HTTP ${res.status} を返しました`);
   }
 

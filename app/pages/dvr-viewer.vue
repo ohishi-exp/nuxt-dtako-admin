@@ -276,12 +276,17 @@ function defaultSearchStart(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
+/** USelect (reka-ui) は空文字 value の item を許可しないため、「全事業所」「指定なし」
+ * には sentinel を使う (branch code は "00000001" 形式、CD は数値なので衝突しない)。 */
+const ALL_BRANCHES = '__all__'
+const NOT_SELECTED = '__none__'
+
 const searchForm = reactive({
   start: defaultSearchStart(),
   rangeMinutes: 30,
-  branchCode: '',
-  vehicleCd: '',
-  driverCd: '',
+  branchCode: ALL_BRANCHES,
+  vehicleCd: NOT_SELECTED,
+  driverCd: NOT_SELECTED,
   dvrWarning: true,
   dvrAlways: true,
   dvrEmergency: true,
@@ -298,13 +303,13 @@ const searchError = ref<string | null>(null)
 const searched = ref(false)
 
 const branchOptions = computed(() => [
-  { label: '全事業所', value: '' },
+  { label: '全事業所', value: ALL_BRANCHES },
   ...(masters.value?.branches ?? []).map(b => ({ label: b.name, value: b.code })),
 ])
 
 function masterItemOptions(items: DvrMasterItem[] | undefined): Array<{ label: string, value: string }> {
-  const list = (items ?? []).filter(v => !searchForm.branchCode || v.link === searchForm.branchCode)
-  return [{ label: '指定なし', value: '' }, ...list.map(v => ({ label: `${v.code} ${v.name}`, value: v.code }))]
+  const list = (items ?? []).filter(v => searchForm.branchCode === ALL_BRANCHES || v.link === searchForm.branchCode)
+  return [{ label: '指定なし', value: NOT_SELECTED }, ...list.map(v => ({ label: `${v.code} ${v.name}`, value: v.code }))]
 }
 
 const vehicleOptions = computed(() => masterItemOptions(masters.value?.vehicles))
@@ -312,8 +317,8 @@ const driverOptions = computed(() => masterItemOptions(masters.value?.drivers))
 
 /** 事業所を切り替えたら、絞込に合わない車輌/乗務員選択はリセットする。 */
 watch(() => searchForm.branchCode, () => {
-  if (searchForm.vehicleCd && !vehicleOptions.value.some(o => o.value === searchForm.vehicleCd)) searchForm.vehicleCd = ''
-  if (searchForm.driverCd && !driverOptions.value.some(o => o.value === searchForm.driverCd)) searchForm.driverCd = ''
+  if (!vehicleOptions.value.some(o => o.value === searchForm.vehicleCd)) searchForm.vehicleCd = NOT_SELECTED
+  if (!driverOptions.value.some(o => o.value === searchForm.driverCd)) searchForm.driverCd = NOT_SELECTED
 })
 
 /** ログアウト / セッション切れ時に検索状態を破棄する (マスタはアカウント紐付きのため)。 */
@@ -325,9 +330,12 @@ function resetSearchState() {
   searchError.value = null
 }
 
+const mastersLoading = ref(false)
+
 async function loadMasters() {
   const s = session.value
-  if (!s || masters.value) return
+  if (!s || masters.value || mastersLoading.value) return
+  mastersLoading.value = true
   mastersError.value = null
   try {
     masters.value = await $fetch<DvrMasters>('/dvr-api/masters', { headers: authHeaders(s) })
@@ -338,6 +346,9 @@ async function loadMasters() {
       return
     }
     mastersError.value = fetchErrorMessage(e)
+  }
+  finally {
+    mastersLoading.value = false
   }
 }
 
@@ -355,8 +366,8 @@ async function doSearch() {
       body: {
         start,
         rangeMinutes: Number(searchForm.rangeMinutes),
-        vehicleCds: searchForm.vehicleCd || undefined,
-        driverCds: searchForm.driverCd || undefined,
+        vehicleCds: searchForm.vehicleCd !== NOT_SELECTED ? searchForm.vehicleCd : undefined,
+        driverCds: searchForm.driverCd !== NOT_SELECTED ? searchForm.driverCd : undefined,
         dvrTypes: { warning: searchForm.dvrWarning, always: searchForm.dvrAlways, emergency: searchForm.dvrEmergency },
         runStates: { running: searchForm.runRunning, stopped: searchForm.runStopped },
         roadTypes: { general: searchForm.roadGeneral, highway: searchForm.roadHighway, exclusive: searchForm.roadExclusive },
@@ -386,7 +397,7 @@ async function requestTransferFromSearch(n: DvrSearchRow) {
   requestingKeys.value = new Set(requestingKeys.value).add(key)
   searchError.value = null
   try {
-    const body = searchForm.vehicleCd
+    const body = searchForm.vehicleCd !== NOT_SELECTED
       ? { serials: [n.serialNo], filenames: [n.fileName] }
       : { serial: n.serialNo, filename: n.fileName }
     await $fetch('/dvr-api/transfer', { method: 'POST', headers: authHeaders(s), body })
@@ -671,8 +682,9 @@ onBeforeUnmount(closeViewer)
             </div>
           </template>
 
-          <div v-if="mastersError" class="text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3 mb-3">
-            車輌・乗務員マスタの取得に失敗しました: {{ mastersError }}
+          <div v-if="mastersError" class="flex items-center gap-3 text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3 mb-3">
+            <span class="flex-1">車輌・乗務員マスタの取得に失敗しました: {{ mastersError }}</span>
+            <UButton size="xs" color="neutral" variant="soft" icon="i-lucide-refresh-cw" :loading="mastersLoading" label="再取得" @click="loadMasters" />
           </div>
 
           <form class="space-y-3" @submit.prevent="doSearch">
