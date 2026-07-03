@@ -36,6 +36,9 @@ interface DvrSession {
 
 const SESSION_STORAGE_KEY = 'dvr-viewer-session'
 
+/** ヘッダー右上のログインパネル開閉。未ログインで開くと本文はデータ用に空ける。 */
+const showLoginPanel = ref(false)
+
 /** UTF-8 文字列を base64url (padding 無し) に encode する。relay worker 側の
  * dvr-session.ts の encodeDvrUserB64 と同一形式 (ヘッダに日本語を載せるため)。 */
 function b64urlUtf8(value: string): string {
@@ -80,11 +83,12 @@ function authHeaders(s: DvrSession): Record<string, string> {
 function persistSession(s: DvrSession | null) {
   session.value = s
   try {
-    if (s) sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(s))
-    else sessionStorage.removeItem(SESSION_STORAGE_KEY)
+    // token はブラウザを閉じても保持する (localStorage)。パスワードは保存しない。
+    if (s) localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(s))
+    else localStorage.removeItem(SESSION_STORAGE_KEY)
   }
   catch {
-    // sessionStorage 不可 (プライベートモード等) でも動作は継続する (再読込で再ログイン)
+    // localStorage 不可 (プライベートモード等) でも動作は継続する (再読込で再ログイン)
   }
 }
 
@@ -94,6 +98,7 @@ function expireSession(message: string) {
   closeViewer()
   notifications.value = []
   loginError.value = message
+  showLoginPanel.value = true
 }
 
 async function doLogin() {
@@ -111,6 +116,7 @@ async function doLogin() {
     })
     persistSession({ compId: form.compId, userName: form.userName, token: res.token })
     form.userPass = ''
+    showLoginPanel.value = false
     await loadNotifications()
   }
   catch (e) {
@@ -135,6 +141,7 @@ async function doLogout() {
   closeViewer()
   notifications.value = []
   loginError.value = null
+  showLoginPanel.value = true
 }
 
 // --- DVR 通知一覧 ---
@@ -245,13 +252,14 @@ function onSeek(seconds: number) {
 
 onMounted(() => {
   try {
-    const raw = sessionStorage.getItem(SESSION_STORAGE_KEY)
+    const raw = localStorage.getItem(SESSION_STORAGE_KEY)
     if (raw) session.value = JSON.parse(raw) as DvrSession
   }
   catch {
     session.value = null
   }
   if (session.value) loadNotifications()
+  else showLoginPanel.value = true
 })
 
 onBeforeUnmount(closeViewer)
@@ -259,28 +267,42 @@ onBeforeUnmount(closeViewer)
 
 <template>
   <div class="min-h-screen bg-gray-50 dark:bg-gray-950">
-    <header class="border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
-      <div class="max-w-7xl mx-auto px-6 py-4 flex flex-wrap items-center gap-3">
+    <header class="border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 sticky top-0 z-20">
+      <div class="max-w-7xl mx-auto px-6 py-3 flex flex-wrap items-center gap-3">
         <h1 class="text-lg font-bold">
           DVR 動画ビューア
         </h1>
-        <span class="text-xs text-gray-500">theearth (web地球号) のアカウントでログインして、自社のドラレコ動画を確認できます</span>
         <div class="flex-1" />
+
+        <!-- 右上: ログイン状態表示 + ボタン -->
         <template v-if="session">
-          <span class="text-sm text-gray-500">{{ session.compId }} / {{ session.userName }}</span>
+          <span class="inline-flex items-center gap-1.5 text-sm rounded-full px-3 py-1 bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300">
+            <span class="size-2 rounded-full bg-green-500" />
+            ログイン中: {{ session.compId }} / {{ session.userName }}
+          </span>
           <UButton size="xs" color="neutral" variant="soft" icon="i-lucide-log-out" label="ログアウト" @click="doLogout" />
         </template>
+        <template v-else>
+          <span class="inline-flex items-center gap-1.5 text-sm rounded-full px-3 py-1 bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400">
+            <span class="size-2 rounded-full bg-gray-400" />
+            未ログイン
+          </span>
+          <UButton
+            size="sm"
+            icon="i-lucide-log-in"
+            :label="showLoginPanel ? '閉じる' : 'ログイン'"
+            @click="showLoginPanel = !showLoginPanel"
+          />
+        </template>
       </div>
-    </header>
 
-    <main class="max-w-7xl mx-auto p-6">
-      <!-- ログインフォーム -->
-      <div v-if="!session" class="max-w-md mx-auto mt-10">
-        <UCard>
+      <!-- 右上から出るログインパネル (未ログイン時のみ) -->
+      <div v-if="!session && showLoginPanel" class="absolute right-4 top-full mt-2 w-96 max-w-[calc(100vw-2rem)] z-30">
+        <UCard class="shadow-xl">
           <template #header>
-            <span class="font-semibold">ログイン</span>
+            <span class="font-semibold">theearth (web地球号) にログイン</span>
           </template>
-          <form class="space-y-4" @submit.prevent="doLogin">
+          <form class="space-y-3" @submit.prevent="doLogin">
             <UFormField label="会社ID">
               <UInput v-model="form.compId" autocomplete="organization" placeholder="例: 27324455" class="w-full" />
             </UFormField>
@@ -293,17 +315,28 @@ onBeforeUnmount(closeViewer)
             <div v-if="loginError" class="text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
               {{ loginError }}
             </div>
-            <UButton type="submit" block :loading="loggingIn" label="theearth にログイン" />
+            <UButton type="submit" block :loading="loggingIn" label="ログイン" />
           </form>
-          <p class="text-xs text-gray-400 mt-4">
-            入力した ID / パスワードは theearth (web地球号) へのログインにその場で 1 回だけ使われ、
-            このサービスには保存されません。theearth 側は同一アカウントの同時ログインを許可しないため、
-            他の場所でログイン中のセッションは切断されることがあります。
+          <p class="text-xs text-gray-400 mt-3">
+            入力した ID / パスワードは theearth へのログインにその場で 1 回だけ使われ、
+            このサービスには保存されません。theearth 側は同一アカウントの同時ログインを
+            許可しないため、他の場所でログイン中のセッションは切断されることがあります。
           </p>
         </UCard>
       </div>
+    </header>
 
-      <!-- ログイン後: 通知一覧 + ビューア -->
+    <main class="max-w-7xl mx-auto p-6">
+      <!-- 未ログイン: 本文はプレースホルダのみ (ログインは右上から) -->
+      <div v-if="!session" class="text-center text-gray-500 mt-16">
+        <UIcon name="i-lucide-cctv" class="size-10 inline-block mb-3 opacity-60" />
+        <p class="text-sm">
+          右上の「ログイン」から theearth (web地球号) のアカウントでログインすると、
+          自社の DVR ドラレコ動画がここに表示されます。
+        </p>
+      </div>
+
+      <!-- ログイン後: 取得したデータ (通知一覧 + ビューア) -->
       <template v-else>
         <UCard class="mb-4">
           <template #header>

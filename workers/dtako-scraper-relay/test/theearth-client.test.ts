@@ -52,7 +52,28 @@ const LOGIN_PAGE_HTML = `<html><body><form>
 </form></body></html>`
 
 const LOGIN_SUCCESS_HTML = `<html><body>ようこそ<span id="Button1st_2"></span></body></html>`
-const LOGIN_FAILURE_HTML = `<html><body>ID またはパスワードが正しくありません</body></html>`
+
+// 実ページ同様、__VIEWSTATEENCRYPTED (値は空) を含むログインページ (Refs #90)。
+const LOGIN_PAGE_WITH_ENC_HTML = `<html><body><form>
+  <input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="VS123==" />
+  <input type="hidden" name="__VIEWSTATEENCRYPTED" id="__VIEWSTATEENCRYPTED" value="" />
+  <input type="hidden" name="__EVENTVALIDATION" id="__EVENTVALIDATION" value="EV1" />
+</form></body></html>`
+
+// 認証失敗時はログインページ (txtPass 含む) が 200 で再表示される。実ページは
+// txtOverlapSessionID / btnForced を value 無しの hidden で常時含む (Refs #90)。
+const LOGIN_FAILURE_HTML = `<html><body><form>
+  <input name="txtPass" type="password" id="txtPass" />
+  <input name="txtOverlapSessionID" type="text" id="txtOverlapSessionID" class="hide" />
+  <input type="submit" name="btnForced" value="hide" id="btnForced" class="hide" />
+</form></body></html>`
+
+const UNKNOWN_PAGE_HTML = `<html><head><title>お知らせ</title></head><body>本日のお知らせ</body></html>`
+
+const VIEWSTATE_MAC_ERROR_HTML = `<html><head><title>ランタイム エラー</title></head><body>
+  <script>var x = 1;</script>
+  viewstate MAC の検証が失敗しました。
+</body></html>`
 
 const OVERLAP_SESSION_HTML = `<html><body>
   <input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="VS999" />
@@ -237,10 +258,42 @@ describe('login', () => {
     await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
   })
 
-  it('throws when neither a redirect nor the logged-in marker appears', async () => {
+  it('throws a credential-failure message when the login page is re-rendered (200)', async () => {
+    // 実ページはログインフォームに txtOverlapSessionID / btnForced を **value 無しの
+    // hidden で常時** 含む — これを overlap プロンプトと誤認して強制ログインフローに
+    // 入らないこと (value 非空の時だけ overlap 扱い) も同時に検証する (Refs #90)。
     const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(LOGIN_FAILURE_HTML)])
     const jar = createCookieJar()
-    await expect(login(jar, params, fetchImpl)).rejects.toThrow(TheearthClientError)
+    await expect(login(jar, params, fetchImpl)).rejects.toThrow('ログイン画面に戻されました')
+  })
+
+  it('posts __VIEWSTATEENCRYPTED when the login page has it (viewstate MAC failure guard)', async () => {
+    const bodies: string[] = []
+    let call = 0
+    const fetchImpl = (async (_url, init) => {
+      call += 1
+      if (call === 1) return html(LOGIN_PAGE_WITH_ENC_HTML)
+      bodies.push(String(init?.body ?? ''))
+      return redirect('/F-VOS0010.aspx')
+    }) as FetchLike
+    await login(createCookieJar(), params, fetchImpl)
+    expect(bodies[0]).toContain('__VIEWSTATEENCRYPTED=')
+    expect(bodies[0]).toContain('__EVENTVALIDATION=EV1')
+  })
+
+  it('throws with page diagnostics when the login POST returns a non-2xx status', async () => {
+    const fetchImpl = sequenceFetch([
+      html(LOGIN_PAGE_HTML),
+      new Response(VIEWSTATE_MAC_ERROR_HTML, { status: 500, headers: { 'content-type': 'text/html' } }),
+    ])
+    const jar = createCookieJar()
+    await expect(login(jar, params, fetchImpl)).rejects.toThrow(/HTTP 500.*ランタイム エラー.*viewstate MAC/s)
+  })
+
+  it('treats an unknown 200 page without the login form as success (restricted-account landing)', async () => {
+    const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(UNKNOWN_PAGE_HTML)])
+    const jar = createCookieJar()
+    await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
   })
 
   it('follows the forced-login flow on overlap session and succeeds via redirect', async () => {
@@ -255,10 +308,26 @@ describe('login', () => {
     await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
   })
 
-  it('throws when the forced-login flow does not reach the logged-in page', async () => {
+  it('throws when the forced-login flow lands back on the login form', async () => {
     const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(OVERLAP_SESSION_HTML), html(LOGIN_FAILURE_HTML)])
     const jar = createCookieJar()
     await expect(login(jar, params, fetchImpl)).rejects.toThrow('強制ログインに失敗しました')
+  })
+
+  it('throws with page diagnostics when the forced-login POST returns a non-2xx status', async () => {
+    const fetchImpl = sequenceFetch([
+      html(LOGIN_PAGE_HTML),
+      html(OVERLAP_SESSION_HTML),
+      new Response('server exploded', { status: 500, headers: { 'content-type': 'text/html' } }),
+    ])
+    const jar = createCookieJar()
+    await expect(login(jar, params, fetchImpl)).rejects.toThrow(/強制ログイン POST が HTTP 500.*no title/s)
+  })
+
+  it('treats an unknown 200 page after forced login as success', async () => {
+    const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(OVERLAP_SESSION_HTML), html(UNKNOWN_PAGE_HTML)])
+    const jar = createCookieJar()
+    await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
   })
 
   it('throws when an overlap session form is detected but btnForced is missing', async () => {

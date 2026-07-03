@@ -88,6 +88,10 @@ export async function fetchWithJar(
 const HIDDEN_FIELD_NAMES = [
   "__VIEWSTATE",
   "__VIEWSTATEGENERATOR",
+  // theearth のログインページは viewstate 暗号化が有効で、この field (値は空) を
+  // POST に含めないと ASP.NET が「viewstate MAC の検証が失敗しました」の 500 を返し
+  // ログイン自体が絶対に成功しない (Refs #90 実測、2026-07-03)。
+  "__VIEWSTATEENCRYPTED",
   "__EVENTVALIDATION",
   "__PREVIOUSPAGE",
   "__EVENTTARGET",
@@ -154,8 +158,36 @@ function looksLoggedIn(html: string): boolean {
   return html.includes("Button1st_2") || html.includes("Button1st_7");
 }
 
-function looksLikeOverlapSessionForm(html: string): boolean {
-  return html.includes("txtOverlapSessionID") || html.includes("btnForced");
+/** ページがまだログインフォームか (= txtPass input が居るか)。ログイン失敗時の
+ * 再表示は 200 でログインページに戻るので、これが失敗判定の主シグナル。 */
+function hasLoginForm(html: string): boolean {
+  return findTagById(html, "txtPass") !== null;
+}
+
+/**
+ * セッション重複プロンプトが「実際に発動しているか」。
+ *
+ * 注意: theearth のログインページは txtOverlapSessionID / btnForced を **常時**
+ * hidden で埋めている (Refs #90 実測)。文字列の存在だけで判定すると、ID/パスワード
+ * 誤りの再表示ページまで強制ログインフローに入ってしまう。重複時はサーバが
+ * txtOverlapSessionID に session ID を焼き込む前提で、value が非空の時だけ発動と
+ * みなす (外れた場合は describePage 付きの失敗メッセージから追える)。
+ */
+function overlapSessionActive(html: string): boolean {
+  const field = findFormFieldById(html, "txtOverlapSessionID");
+  return Boolean(field && field.value);
+}
+
+/** 想定外ページの診断用に title + タグ除去済み本文の先頭を 1 行にする
+ * (credential は含まれない。エラーメッセージ / log 用)。 */
+function describePage(html: string): string {
+  const title = html.match(/<title>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, " ").trim() || "(no title)";
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return `title="${title}" 本文先頭: ${text.slice(0, 160)}`;
 }
 
 export async function login(
@@ -196,8 +228,17 @@ export async function login(
 
   const postHtml = await postRes.text();
 
-  // 同一 comp_id の別セッションが既にログイン中の場合、強制ログインフォームが出る。
-  if (looksLikeOverlapSessionForm(postHtml)) {
+  // viewstate MAC 失敗等の ASP.NET エラーは 500 で返る。原因究明できるよう
+  // ページ内容 (title + 本文先頭) を添えて loud fail する (Refs #90)。
+  if (!postRes.ok) {
+    throw new TheearthClientError(
+      `ログイン POST が HTTP ${postRes.status} を返しました (${describePage(postHtml)})`,
+    );
+  }
+
+  // 同一アカウントの別セッションが既にログイン中の場合、強制ログインプロンプトが出る
+  // (txtOverlapSessionID に session ID が焼き込まれる。overlapSessionActive の注意書き参照)。
+  if (overlapSessionActive(postHtml)) {
     const hidden2 = extractHiddenFields(postHtml);
     const btnForced = findFormFieldById(postHtml, "btnForced");
     if (!btnForced) {
@@ -212,17 +253,31 @@ export async function login(
     const forcedRes = await postForm(jar, loginUrl, forcedBody, fetchImpl);
     if (forcedRes.status >= 300 && forcedRes.status < 400) return;
     const forcedHtml = await forcedRes.text();
-    if (!looksLoggedIn(forcedHtml)) {
+    if (!forcedRes.ok) {
+      throw new TheearthClientError(
+        `強制ログイン POST が HTTP ${forcedRes.status} を返しました (${describePage(forcedHtml)})`,
+      );
+    }
+    if (looksLoggedIn(forcedHtml)) return;
+    if (hasLoginForm(forcedHtml)) {
       throw new TheearthClientError("強制ログインに失敗しました");
     }
     return;
   }
 
-  if (!looksLoggedIn(postHtml)) {
+  if (looksLoggedIn(postHtml)) return;
+
+  // 200 でログインページに戻された = 認証失敗 (ID/パスワード誤り) が典型。
+  if (hasLoginForm(postHtml)) {
     throw new TheearthClientError(
-      "ログインに失敗しました (ログイン後の画面を検出できません。ID/パスワード誤り、またはサイト仕様変更の可能性)",
+      "ログインに失敗しました (theearth のログイン画面に戻されました。会社ID / ユーザーID / パスワードを確認してください)",
     );
   }
+
+  // ログインフォームでも既知メニューページでもない 200 ページ。成功マーカー
+  // (Button1st_2/7) は管理者アカウントの実機 trace 由来で、権限が異なるアカウントは
+  // 別ページに着地しうるため、ここは寛容に成功とみなす (後続の VenusBridge / CSV
+  // 取得が実質の検証になり、セッション不成立なら loud fail する)。
 }
 
 async function postForm(
