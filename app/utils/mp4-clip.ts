@@ -27,10 +27,17 @@
  *   ffprobe 解析結果と `tfdt` 実値)。出力する各フラグメントの `tfdt` を
  *   トラックごとに最初に採用したフラグメントの値を基準に 0 起点へ書き換えることで
  *   このギャップを解消する (バイト長が変わらないフィールドなので in-place 書き換えで済む)
+ * - **`mvhd`/`tkhd`/`mdhd` の duration を 0 のままにすると、ネイティブの `<video controls>`
+ *   のシークバーが動かない (総再生時間が不明/0 のため player がシーク不可と判断する)。**
+ *   fragmented mp4 は本来ライブ配信等で総尺が未知な場合に duration=0 のままにする設計だが、
+ *   このアプリでは切り出し区間の総サンプル数が既知なので、`getTrackSamplesInfo()` から
+ *   実際の区間長を計算し、init segment の `mvhd`/`tkhd` (movie timescale) と各トラックの
+ *   `mdhd` (track timescale) に書き込む。これらも FullBox の固定長フィールドなので
+ *   version (0/1) を判定した上で in-place 書き換えで済む
  */
 
 import { createFile, MP4BoxBuffer } from 'mp4box'
-import type { Movie } from 'mp4box'
+import type { Movie, Sample } from 'mp4box'
 
 interface TrackBounds { startNum: number, endNum: number }
 interface BoxLoc { headerSize: number, contentStart: number, contentEnd: number }
@@ -94,6 +101,108 @@ function writeFragmentBaseDecodeTime(view: DataView, tfdt: BoxLoc, newValue: num
   }
 }
 
+/** `start`〜`end` の範囲内に含まれる fourcc の box 位置を全て返す (moov 内の複数 trak 用) */
+function findAllBoxes(view: DataView, start: number, end: number, fourcc: string): BoxLoc[] {
+  const result: BoxLoc[] = []
+  let pos = start
+  while (pos + 8 <= end) {
+    let size = view.getUint32(pos, false)
+    const type = String.fromCharCode(
+      view.getUint8(pos + 4),
+      view.getUint8(pos + 5),
+      view.getUint8(pos + 6),
+      view.getUint8(pos + 7),
+    )
+    let headerSize = 8
+    if (size === 1) {
+      const hi = view.getUint32(pos + 8, false)
+      const lo = view.getUint32(pos + 12, false)
+      size = hi * 2 ** 32 + lo
+      headerSize = 16
+    }
+    else if (size === 0) {
+      size = end - pos
+    }
+    if (size < headerSize || pos + size > end) break
+    if (type === fourcc) result.push({ headerSize, contentStart: pos + headerSize, contentEnd: pos + size })
+    pos += size
+  }
+  return result
+}
+
+/**
+ * mvhd/tkhd/mdhd (いずれも FullBox で `creation_time`/`modification_time`/(tkhd のみ
+ * `track_ID`+`reserved`)/`timescale`(tkhd には無い)/`duration` の並び) の duration
+ * フィールドを書き換える。`preDurationBytesV0`/`V1` は version+flags (4 bytes) の
+ * 直後から duration 直前までのバイト数。
+ */
+function patchTimeBoxDuration(
+  view: DataView,
+  contentStart: number,
+  preDurationBytesV0: number,
+  preDurationBytesV1: number,
+  newValue: number,
+): void {
+  const version = view.getUint8(contentStart)
+  if (version === 1) {
+    const offset = contentStart + 4 + preDurationBytesV1
+    view.setUint32(offset, Math.floor(newValue / 2 ** 32), false)
+    view.setUint32(offset + 4, newValue % 2 ** 32, false)
+  }
+  else {
+    const offset = contentStart + 4 + preDurationBytesV0
+    view.setUint32(offset, newValue, false)
+  }
+}
+
+/** tkhd.track_ID を読み取る (version によらず 4 bytes 固定) */
+function readTkhdTrackId(view: DataView, contentStart: number): number {
+  const version = view.getUint8(contentStart)
+  const offset = contentStart + 4 + (version === 1 ? 16 : 8)
+  return view.getUint32(offset, false)
+}
+
+/**
+ * init segment (ftyp+moov) の `mvhd`/`tkhd`/`mdhd` の duration を、実際に切り出した
+ * サンプル範囲から計算した値へ書き換える。対応する box が見つからない場合は何もしない
+ * (duration=0 のまま = 従来の fragmented mp4 として動作するだけで、致命的にはならない)。
+ */
+function patchInitSegmentDurations(
+  initBuffer: ArrayBuffer,
+  movieTimescale: number,
+  durationByTrack: Map<number, { ticks: number, timescale: number }>,
+): void {
+  const view = new DataView(initBuffer)
+  const moov = findBox(view, 0, initBuffer.byteLength, 'moov')
+  if (!moov) return
+
+  let movieDurationMovieTicks = 0
+  for (const { ticks, timescale } of durationByTrack.values()) {
+    const inMovieTicks = Math.round((ticks / timescale) * movieTimescale)
+    movieDurationMovieTicks = Math.max(movieDurationMovieTicks, inMovieTicks)
+  }
+
+  const mvhd = findBox(view, moov.contentStart, moov.contentEnd, 'mvhd')
+  if (mvhd) patchTimeBoxDuration(view, mvhd.contentStart, 12, 20, movieDurationMovieTicks)
+
+  for (const trak of findAllBoxes(view, moov.contentStart, moov.contentEnd, 'trak')) {
+    const tkhd = findBox(view, trak.contentStart, trak.contentEnd, 'tkhd')
+    if (!tkhd) continue
+    const trackId = readTkhdTrackId(view, tkhd.contentStart)
+    const trackDuration = durationByTrack.get(trackId)
+    if (!trackDuration) continue
+
+    const inMovieTicks = Math.round((trackDuration.ticks / trackDuration.timescale) * movieTimescale)
+    patchTimeBoxDuration(view, tkhd.contentStart, 16, 24, inMovieTicks)
+
+    const mdia = findBox(view, trak.contentStart, trak.contentEnd, 'mdia')
+    if (!mdia) continue
+    const mdhd = findBox(view, mdia.contentStart, mdia.contentEnd, 'mdhd')
+    if (!mdhd) continue
+    patchTimeBoxDuration(view, mdhd.contentStart, 12, 20, trackDuration.ticks)
+  }
+}
+
 /**
  * `startSec`〜`endSec` (秒) の範囲を含む MP4 Blob を返す。
  * 対応できない構造 (トラックなし、フラグメント化失敗等) の場合は例外を投げる —
@@ -108,6 +217,8 @@ export function extractMp4TimeRange(source: ArrayBuffer, startSec: number, endSe
   const prevBoundaryByTrack = new Map<number, number>()
   const boundsByTrack = new Map<number, TrackBounds>()
   const baselineByTrack = new Map<number, number>()
+  const samplesByTrack = new Map<number, Sample[]>()
+  const lastAcceptedNextByTrack = new Map<number, number>()
   let order = 0
   let initBuffer: ArrayBuffer | null = null
   let parseError: string | null = null
@@ -138,6 +249,7 @@ export function extractMp4TimeRange(source: ArrayBuffer, startSec: number, endSe
       boundsByTrack.set(track.id, { startNum, endNum })
       prevBoundaryByTrack.set(track.id, 0)
       segmentsByTrack.set(track.id, [])
+      samplesByTrack.set(track.id, samples)
       mp4boxFile.setSegmentOptions(track.id, track.id, { nbSamples: 1 })
     }
 
@@ -164,11 +276,32 @@ export function extractMp4TimeRange(source: ArrayBuffer, startSec: number, endSe
           }
           writeFragmentBaseDecodeTime(decodeTime.view, decodeTime.tfdt, Math.max(0, decodeTime.value - baseline))
         }
+        // 実際に採用されたフラグメントの末尾サンプル番号を記録 (GOP 単位のため
+        // 名目上の endNum より後ろのサンプルまで含まれることがあり、duration の
+        // 計算は「実際に含んだ範囲」を基準にしないとズレる)
+        lastAcceptedNextByTrack.set(id, nextSample)
         segmentsByTrack.get(id)!.push({ order: order++, buffer })
       }
     }
 
     mp4boxFile.start()
+
+    // 実際に採用したサンプル範囲 (tfdt を 0 起点にした基準と同じ基準) から duration を計算し、
+    // init segment の mvhd/tkhd/mdhd に書き込む。duration=0 のままだと Chrome の
+    // <video controls> のシークバーが動かない (総尺不明としてシーク不可判定になる)
+    const durationByTrack = new Map<number, { ticks: number, timescale: number }>()
+    for (const [id, samples] of samplesByTrack) {
+      const baseline = baselineByTrack.get(id)
+      const lastNext = lastAcceptedNextByTrack.get(id)
+      if (baseline === undefined || lastNext === undefined) continue
+      const lastSample = samples[lastNext - 1]
+      if (!lastSample) continue
+      const ticks = (lastSample.dts + lastSample.duration) - baseline
+      durationByTrack.set(id, { ticks: Math.max(0, ticks), timescale: lastSample.timescale })
+    }
+    if (durationByTrack.size > 0) {
+      patchInitSegmentDurations(initBuffer, info.timescale, durationByTrack)
+    }
   }
 
   const mp4Buffer = MP4BoxBuffer.fromArrayBuffer(source, 0)
