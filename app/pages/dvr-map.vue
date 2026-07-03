@@ -468,12 +468,12 @@ onMounted(() => {
             <template v-if="trackLoaded">
               <p class="text-xs text-gray-400 mb-2">
                 GPS 点数: {{ trackPoints.length }} / {{ track.length }} —
-                行クリック / ↑↓ キーで赤ピンが移動します
+                行クリック / グラフの ←→ キー / 一覧の ↑↓ キーで赤ピンが移動します
               </p>
               <DvrMap :markers="trackMarkers" :track="trackPoints" :current="currentTrackPoint" />
 
               <div class="mt-4">
-                <DvrSpeedChart :points="trackSpeedPoints" :current-ts="currentTrackTs" @seek="onChartSeek" />
+                <DvrSpeedChart :points="trackSpeedPoints" :current-ts="currentTrackTs" @seek="onChartSeek" @step="moveTrackSelection" />
               </div>
 
               <div
