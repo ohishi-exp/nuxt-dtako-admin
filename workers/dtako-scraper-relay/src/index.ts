@@ -6,9 +6,13 @@
 // 10211/10061、nuxt-items/items-sync と同型)。
 export { DtakoScraperRelayDO } from "./dtako-scraper-relay-do";
 import { resolveDvrRouting } from "./dvr-session";
+import { resolveSecretBinding, runScheduledCron } from "./cron";
 
 interface RelayWorkerEnv {
   RELAY: DurableObjectNamespace;
+  SCRAPER_MODE?: string;
+  DTAKO_ACCOUNTS?: unknown;
+  ETC_ACCOUNTS?: unknown;
 }
 
 export default {
@@ -58,5 +62,51 @@ export default {
     return new Response("nuxt-dtako-admin-scraper-relay: durable object worker", {
       status: 404,
     });
+  },
+
+  /**
+   * Cron Triggers (wrangler.toml `[triggers]`) — VPS / GCE cron の Worker 移行
+   * (Refs ohishi-exp/dtako-scraper#22 / ohishi-exp/browser-render-rust#14)。
+   *
+   * - dtako 日次 (`0 16 * * *` UTC = 01:00 JST): DTAKO_ACCOUNTS の各社について
+   *   comp_id 単位 DO の `/cron/dtako` を叩く (SCRAPER_MODE=http の時のみ)。
+   * - ETC (`0 21,22,23,0 * * *` UTC = JST 6,7,8,9 時): ETC_ACCOUNTS の各
+   *   アカウントについて `etc-{user_id}` DO の `/cron/etc` を叩く。
+   *
+   * DO 側は job を受理して即 202 を返す (実処理は DO 内で直列化して走り、
+   * 結果は DO の console log = Workers Observability に出る)。
+   */
+  async scheduled(
+    controller: ScheduledController,
+    env: RelayWorkerEnv,
+    ctx: ExecutionContext,
+  ): Promise<void> {
+    ctx.waitUntil(
+      (async () => {
+        const results = await runScheduledCron(
+          controller.cron,
+          {
+            scraperMode: env.SCRAPER_MODE,
+            dtakoAccountsRaw: await resolveSecretBinding(env.DTAKO_ACCOUNTS),
+            etcAccountsRaw: await resolveSecretBinding(env.ETC_ACCOUNTS),
+          },
+          async (doKey, path, body) => {
+            const id = env.RELAY.idFromName(doKey);
+            const res = await env.RELAY.get(id).fetch(`https://relay.internal${path}`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(body),
+            });
+            return { ok: res.ok, status: res.status, text: await res.text() };
+          },
+          new Date(),
+        );
+        for (const r of results) {
+          const line = JSON.stringify({ scheduled: controller.cron, ...r });
+          if (r.ok) console.log(line);
+          else console.error(line);
+        }
+      })(),
+    );
   },
 };

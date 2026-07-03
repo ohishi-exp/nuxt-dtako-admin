@@ -46,6 +46,13 @@ import {
 } from "./theearth-client";
 import { uploadDtakoZipViaAlcInternalProxy } from "./alc-internal-upload";
 import {
+  EtcMeisaiClientError,
+  EtcMeisaiNoUsageError,
+  EtcMeisaiNotCsvError,
+  scrapeEtcCsv,
+} from "./etc-meisai-client";
+import { etcCsvKey, parseEtcAccounts, type EtcAccountEntry } from "./cron";
+import {
   buildDvrSearchKey,
   dvrDataUrl,
   DvrSearchParamError,
@@ -150,6 +157,19 @@ export interface RelayEnv {
    * WS 経由でその旨をエラー通知する (fail-closed、クラッシュはしない)。
    */
   DTAKO_ACCOUNTS?: unknown;
+  /**
+   * ETC 利用照会サービスのアカウント JSON 配列 (`[{user_id, password}, ...]`、
+   * browser-render-rust の `ETC_ACCOUNTS` env と同一 shape)。DTAKO_ACCOUNTS と
+   * 同じく dashboard の plain Environment Variable として投入する (wrangler.toml
+   * に置かない = git 履歴に平文を残さない、`keep_vars = true` で deploy を
+   * またいで保持)。未設定の間は ETC cron が skip される (Refs
+   * ohishi-exp/browser-render-rust#14)。
+   */
+  ETC_ACCOUNTS?: unknown;
+  /** ETC 明細 CSV の保存先 R2 bucket (dtako-uploads)。 */
+  DTAKO_R2?: R2Bucket;
+  /** ETC CSV の R2 key prefix。staging は `etc-staging` で本番 (`etc`) と分離する。 */
+  ETC_R2_PREFIX?: string;
 }
 
 export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
@@ -214,6 +234,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // WebSocket アップグレードではない通常の GET。
     if (url.pathname.startsWith("/scraper-zip/")) {
       return this.handleZipDownload(url);
+    }
+
+    // Cron Triggers (index.ts の scheduled handler) からの無人実行。外部には
+    // 公開されない (この worker は workers_dev=false + routes 無しで、app の
+    // service binding は /ws/scraper・/scraper-zip/・/dvr-api/ しか転送しない)
+    // ため、追加の認証は持たない。job を受理して即 202 を返し、実処理は
+    // waitUntil + scrapeQueue 直列化で走らせる (結果は console log =
+    // Workers Observability で追う)。
+    if (url.pathname === "/cron/dtako" && request.method === "POST") {
+      return this.handleCronDtako(request);
+    }
+    if (url.pathname === "/cron/etc" && request.method === "POST") {
+      return this.handleCronEtc(request);
     }
 
     if (request.headers.get("Upgrade") !== "websocket") {
@@ -312,12 +345,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  /** 同一 comp_id (= この DO インスタンス) 内でのスクレイプ直列化。DO はシングルスレッド
-   * 実行なので、Promise チェーンで先行タスクの完了を待つだけで安全に直列化できる。 */
-  private async runHttpScrapeJob(
-    server: WebSocket,
-    params: { compId: string; startDate: string; endDate: string },
-  ): Promise<void> {
+  /** この DO インスタンス内でスクレイプ job を直列化する共通キュー。DO は
+   * シングルスレッド実行なので、Promise チェーンで先行タスクの完了を待つだけで
+   * 安全に直列化できる。WS 手動トリガーと cron 無人実行が同一 comp_id /
+   * ETC アカウントに重なっても直列に捌かれる (issue #22 の設計どおり)。 */
+  private async enqueueScrape<T>(job: () => Promise<T>): Promise<T> {
     const myTurn = this.scrapeQueue.catch(() => undefined);
     let release: () => void = () => {};
     this.scrapeQueue = myTurn.then(
@@ -326,14 +358,181 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           release = resolve;
         }),
     );
-
-    this.sendSafely(server, { event: "progress", comp_id: params.compId, step: "queued" });
     await myTurn;
-
     try {
-      await this.executeScrape(server, params);
+      return await job();
     } finally {
       release();
+    }
+  }
+
+  /** 同一 comp_id (= この DO インスタンス) 内でのスクレイプ直列化。 */
+  private async runHttpScrapeJob(
+    server: WebSocket,
+    params: { compId: string; startDate: string; endDate: string },
+  ): Promise<void> {
+    this.sendSafely(server, { event: "progress", comp_id: params.compId, step: "queued" });
+    await this.enqueueScrape(() => this.executeScrape(server, params));
+  }
+
+  // -------------------------------------------------------------------------
+  // Cron (無人実行) — Refs ohishi-exp/dtako-scraper#22 /
+  // ohishi-exp/browser-render-rust#14。VPS / GCE cron からの移行。
+  // -------------------------------------------------------------------------
+
+  /** POST /cron/dtako — body {comp_id, start_date, end_date}。WS 経路の
+   * executeScrape と同じ scrapeViaHttp + alc-internal-proxy アップロードを、
+   * WS なしで実行する。 */
+  private async handleCronDtako(request: Request): Promise<Response> {
+    let body: { comp_id?: unknown; start_date?: unknown; end_date?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return Response.json({ error: "JSON body が必要です" }, { status: 400 });
+    }
+    const compId = typeof body.comp_id === "string" ? body.comp_id : "";
+    const startDate = typeof body.start_date === "string" ? body.start_date : "";
+    const endDate = typeof body.end_date === "string" ? body.end_date : "";
+    if (!compId || !startDate || !endDate) {
+      return Response.json({ error: "comp_id / start_date / end_date が必要です" }, { status: 400 });
+    }
+
+    const account = await this.resolveAccount(compId);
+    if (!account) {
+      return Response.json(
+        { error: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` },
+        { status: 500 },
+      );
+    }
+
+    this.ctx.waitUntil(
+      this.enqueueScrape(() => this.runCronDtakoScrape(account, { startDate, endDate })),
+    );
+    return Response.json({ accepted: true, comp_id: compId }, { status: 202 });
+  }
+
+  private async runCronDtakoScrape(
+    account: DtakoAccountRaw,
+    range: { startDate: string; endDate: string },
+  ): Promise<void> {
+    const logBase = { cron: "dtako", comp_id: account.comp_id, range: `${range.startDate}..${range.endDate}` };
+    try {
+      const zip = await scrapeViaHttp(
+        {
+          compId: account.comp_id,
+          userName: account.user_name,
+          userPass: account.user_pass,
+          startDate: range.startDate,
+          endDate: range.endDate,
+        },
+        (step) => console.log(JSON.stringify({ ...logBase, step })),
+      );
+
+      const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
+      if (!sharedSecret) {
+        console.error(
+          JSON.stringify({ ...logBase, status: "error", message: "INTERNAL_SHARED_SECRET 未設定のためアップロード不能 (zip は破棄)" }),
+        );
+        return;
+      }
+      const uploadBody = await uploadDtakoZipViaAlcInternalProxy(
+        { sharedSecret, tenantId: account.tenant_id, filename: "csvdata.zip", zipBytes: zip },
+        this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER),
+      );
+      console.log(
+        JSON.stringify({ ...logBase, status: "success", zip_bytes: zip.byteLength, upload: uploadBody.slice(0, 200) }),
+      );
+    } catch (err) {
+      const message =
+        err instanceof TheearthClientError ? err.message : describeUnknownError(err);
+      console.error(JSON.stringify({ ...logBase, status: "error", message }));
+    }
+  }
+
+  /** POST /cron/etc — body {user_id}。credential は DO 自身が ETC_ACCOUNTS
+   * から解決する (cron dispatch 側に password を運ばせない)。取得した CSV は
+   * R2 (DTAKO_R2) に保存する。 */
+  private async handleCronEtc(request: Request): Promise<Response> {
+    let body: { user_id?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return Response.json({ error: "JSON body が必要です" }, { status: 400 });
+    }
+    const userId = typeof body.user_id === "string" ? body.user_id : "";
+    if (!userId) {
+      return Response.json({ error: "user_id が必要です" }, { status: 400 });
+    }
+
+    const account = await this.resolveEtcAccount(userId);
+    if (!account) {
+      return Response.json(
+        { error: `user_id=${userId} が ETC_ACCOUNTS に見つかりません` },
+        { status: 500 },
+      );
+    }
+    if (!this.env.DTAKO_R2) {
+      return Response.json(
+        { error: "DTAKO_R2 binding が未設定のため ETC CSV を保存できません" },
+        { status: 500 },
+      );
+    }
+
+    this.ctx.waitUntil(this.enqueueScrape(() => this.runCronEtcScrape(account)));
+    return Response.json({ accepted: true, user_id: userId }, { status: 202 });
+  }
+
+  private async resolveEtcAccount(userId: string): Promise<EtcAccountEntry | null> {
+    const raw = await resolveSecret(this.env.ETC_ACCOUNTS);
+    if (!raw) return null;
+    try {
+      return parseEtcAccounts(raw).find((a) => a.user_id === userId) ?? null;
+    } catch (err) {
+      console.error("DtakoScraperRelayDO: ETC_ACCOUNTS parse error:", describeUnknownError(err));
+      return null;
+    }
+  }
+
+  private async runCronEtcScrape(account: EtcAccountEntry): Promise<void> {
+    const bucket = this.env.DTAKO_R2!;
+    const prefix = this.env.ETC_R2_PREFIX || "etc";
+    const logBase = { cron: "etc", user_id: account.user_id };
+    try {
+      const result = await scrapeEtcCsv(
+        { userId: account.user_id, password: account.password },
+        (step) => console.log(JSON.stringify({ ...logBase, step })),
+      );
+      const key = etcCsvKey(prefix, account.user_id, new Date());
+      await bucket.put(key, result.bytes, {
+        httpMetadata: { contentType: "text/csv; charset=shift_jis" },
+        customMetadata: { filename: result.filename, account_type: result.accountType },
+      });
+      console.log(
+        JSON.stringify({ ...logBase, status: "success", key, csv_bytes: result.bytes.byteLength, filename: result.filename }),
+      );
+    } catch (err) {
+      if (err instanceof EtcMeisaiNoUsageError) {
+        // 明細 0 件は正常系 (VPS 版の NoUsageData skip と同じ扱い)
+        console.log(JSON.stringify({ ...logBase, status: "skipped", message: err.message }));
+        return;
+      }
+      // CSV でない応答は原因調査用に R2 の errors/ 配下へ保存する (「黙って200」対策の
+      // 診断経路。ページ仕様変更 / ログイン失敗の中身をあとから確認できる)
+      if (err instanceof EtcMeisaiNotCsvError) {
+        const errorKey = `${prefix}-errors/${account.user_id}/${Date.now()}.bin`;
+        try {
+          await bucket.put(errorKey, err.responseBytes, {
+            httpMetadata: { contentType: err.contentType || "application/octet-stream" },
+          });
+          console.error(JSON.stringify({ ...logBase, status: "error", message: err.message, error_body_key: errorKey }));
+          return;
+        } catch {
+          // 保存失敗は下の共通 log に落とす
+        }
+      }
+      const message =
+        err instanceof EtcMeisaiClientError ? err.message : describeUnknownError(err);
+      console.error(JSON.stringify({ ...logBase, status: "error", message }));
     }
   }
 
