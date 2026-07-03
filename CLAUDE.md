@@ -74,7 +74,7 @@ fail することが本番で発覚 → revert。
 
 NET780 デジタコの運行単位生データ ZIP (.inf/.spd/.dsd/.gpd/.evd 同梱) を、アップロード
 せずブラウザ内で直接パースして確認する機能。フォーマット解読・パースロジックは
-`ohishi-exp/dtako-scraper` の `crates/net780` (Rust) が SoT。
+`ohishi-exp/net780-wasm` の `core/` (Rust) が SoT。
 
 ### アーキテクチャ
 
@@ -83,33 +83,63 @@ NET780 デジタコの運行単位生データ ZIP (.inf/.spd/.dsd/.gpd/.evd 同
   ZIP ファイルをドラッグ&ドロップ (サーバー送信なし)
   │
   ▼
-net780-wasm (ohishi-exp/net780-wasm、wasm-bindgen)
-  │ crates/net780 (dtako-scraper) を wasm-bindgen で公開
-  │ ZIP 展開 (Rust `zip` crate) + .inf/.spd/.dsd/.gpd/.evd パース
+net780-wasm (ohishi-exp/net780-wasm、core/ + wasm/ の 1 repo workspace)
+  │ core/ (net780 crate) が ZIP 展開 (Rust `zip` crate) + .inf/.spd/.dsd/.gpd/.evd パース
+  │ wasm/ (net780-wasm crate) が wasm-bindgen でラップして公開
   ▼
 { header, inf, distance_total_m, speed[], gps[], events[], warnings[] }
   │
   ▼
-[browser] サマリ / 速度チャート (簡易 SVG) / GPS テーブル / イベントテーブル 表示
+[browser] サマリ / 暦日ごとの速度チャート (クリック/ドラッグでシーク) +
+          GPS 軌跡 Google Map (シーク連動マーカー) / GPS 一覧テーブル /
+          イベントテーブル 表示
 ```
 
-- ロジックは Rust (`net780` crate) 1 箇所にだけ実装し、TypeScript 側での再実装
-  (二重管理) を避ける方針 (`ippoan/fc1200-wasm` と同じ考え方)。
-- `net780-wasm` は独立 repo (`ohishi-exp/net780-wasm`) だが、**`ohishi-exp/dtako-vid-wasm`
+- ロジックは Rust (`net780` crate、`ohishi-exp/net780-wasm` の `core/`) 1 箇所にだけ
+  実装し、TypeScript 側での再実装 (二重管理) を避ける方針 (`ippoan/fc1200-wasm` と
+  同じ考え方)。**旧 `ohishi-exp/dtako-scraper` の `crates/net780` は 2026-07-03 に
+  完全移設済み、dtako-scraper 側にはもう存在しない** (net780-wasm#2)。
+- `net780-wasm` は独立 repo (`ohishi-exp/net780-wasm`) だが、**`ohishi-exp/dtako_vid_wasm`
   と同じ vendoring 方式**で consume する (sibling checkout ではない、2026-07-03 変更)。
   `wasm-pack build --target web` (net780-wasm リポジトリの `./build.sh`) の出力
-  (`pkg/*`) を `vendor/net780-wasm/` にそのままコミットし、`package.json` は
+  (`wasm/pkg/*`) を `vendor/net780-wasm/` にそのままコミットし、`package.json` は
   `"net780-wasm": "file:./vendor/net780-wasm"` で参照する。
-  - **理由**: `net780-wasm` と wasm-bindgen 元の `dtako-scraper` (`crates/net780`)
-    がともに private repo のため、GitHub Actions CI に private repo への git
-    dependency 解決権限を持たせたくない (`ohishi-exp/net780-wasm` 自体も CI で
+  - **理由**: `net780-wasm` は private repo のため、GitHub Actions CI に private repo
+    へのアクセス権限を持たせたくない (`ohishi-exp/net780-wasm` 自体も CI で
     ビルドしない方針、`ohishi-exp/net780-wasm/README.md` 参照)。sibling checkout
     前提だと CI (test job だけでなく **deploy job** も) が実体を得られず、
     `pre_install_script` の空スタブがそのまま staging にデプロイされて
     `mod.default is not a function` 実行時エラーになる事故があった。
   - `net780-wasm` 側で実装を更新した場合は、`./build.sh` を実行して生成された
-    `pkg/*` をこの repo の `vendor/net780-wasm/` に手動で上書きコピーし、PR で
+    `wasm/pkg/*` をこの repo の `vendor/net780-wasm/` に手動で上書きコピーし、PR で
     commit する運用 (= vendored snapshot、自動追従はしない)。
+  - **`.gpd` (GPS) の既知の罠**: 実データでは GPS 位置レコード間に未解読の可変長
+    ブロックが挟まっており、単純な固定長配列読みだと GPS 点が 0 件になる
+    (net780-wasm の `core/src/gpd.rs` で `ff ff` マーカースキャン方式に修正済み、
+    2026-07-03)。今後 `.gpd` のパースを触る時はこの構造を前提にすること。
+
+### 速度チャート・GPS 地図の設計 (2026-07-03)
+
+- **暦日 (JST) 単位で表示を分割する** (`buildDailySpeedCharts` / `buildDailyGpsPoints`、
+  `app/utils/net780.ts`)。1 ZIP に複数日分の運行データが入ることがあり (紙の運行記録計
+  も 1 日 1 行の表示)、1 本の連続チャートにすると日をまたぐ休憩・休息期間 (数時間〜
+  半日) を直線で結んでしまい誤解を招く。各日は 0:00〜24:00 の固定範囲で正規化する。
+- **record 境界の空白期間で折れ線を分割する** (`SPEED_GAP_THRESHOLD_SECS`、
+  `buildSpeedChartData` の `segments`)。.spd は複数レコードの列で、record 境界に
+  実際の空白期間 (停車等) があるとそのまま直線で結んでしまい、存在しない緩やかな
+  減速/加速のような斜め線に見える不具合があった。
+- **間引き (`downsampleSpeed`) は min/max バケット方式**。単純な等間隔インデックス
+  抽出だと、急減速や長い停車 (速度 0 の谷) がバケット内に埋もれて間引かれ、実際には
+  存在しない斜め線として描画されてしまう。バケットごとに最小値・最大値の 2 点を
+  残すことで谷/山を取りこぼさないようにしている。
+- **チャートのクリック/ドラッグでシークでき、`Net780Map.vue` (`VidMap.vue` と同じ
+  パターン) の GPS マーカーが連動する**。currentTime (UNIX epoch 秒) を暦日ごとに
+  保持し、`chartXRatioToTime()` で SVG 上の x 座標比率から絶対時刻に逆変換する。
+- **GPS の `(0,0)` プレースホルダー (GPS 未捕捉時) は `buildDailyGpsPoints` で除外**
+  する (地図表示のノイズになるため)。
+- Google Maps API key の取得は `/vid-check` と同じ `/api/vid-check/map-key`
+  endpoint を共用する (CF Secrets Store binding、endpoint 名は歴史的経緯でこの
+  ままだが net780 専用に複製していない)。
 
 ### CI
 
@@ -127,8 +157,9 @@ net780-wasm (ohishi-exp/net780-wasm、wasm-bindgen)
 
 | ファイル | 役割 |
 |---|---|
-| `app/pages/net780.vue` | UI (ZIP アップロード + サマリ/速度チャート/GPS/イベント表示) |
-| `app/utils/net780.ts` | `parseNet780Zip()` 等 net780-wasm の薄いラッパー + 型定義 |
+| `app/pages/net780.vue` | UI (ZIP アップロード + サマリ/暦日ごとの速度チャート+GPS地図/GPS一覧/イベント表示) |
+| `app/utils/net780.ts` | `parseNet780Zip()` / `buildDailySpeedCharts()` / `buildDailyGpsPoints()` / `chartXRatioToTime()` 等 |
+| `app/components/Net780Map.vue` | GPS 軌跡 Google Map (`VidMap.vue` と同じパターン、シーク連動マーカー) |
 | `vendor/net780-wasm/` | `ohishi-exp/net780-wasm` の `wasm-pack build` 出力を vendor したもの |
 | `tests/mocks/net780-wasm.ts` | vitest 用モック (`__setMockResult`/`__setMockError`) |
 

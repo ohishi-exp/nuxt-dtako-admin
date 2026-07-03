@@ -2,10 +2,13 @@
 import {
   parseNet780Zip,
   buildDailySpeedCharts,
+  buildDailyGpsPoints,
+  chartXRatioToTime,
+  net780DateStartTs,
   net780EventCodeHex,
   formatNet780Ts,
 } from '~/utils/net780'
-import type { Net780ParseResult } from '~/utils/net780'
+import type { Net780ParseResult, Net780GpsPoint } from '~/utils/net780'
 
 const isDragging = ref(false)
 const isParsing = ref(false)
@@ -80,7 +83,10 @@ const summary = computed(() => {
   }
 })
 
-// --- 速度チャート (簡易 SVG polyline、外部ライブラリ非依存) ---
+// --- 速度チャート (簡易 SVG polyline、外部ライブラリ非依存) + GPS 軌跡 (Google Map) ---
+// 暦日ごとに「チャート (クリック/ドラッグでシーク可能)」と「地図 (シーク位置を
+// マーカーで表示)」を左右に並べる。currentTime (UNIX epoch 秒) を暦日ごとに
+// 保持し、チャート上のシーク操作がその日の地図マーカーを連動させる。
 
 const CHART_WIDTH = 800
 const CHART_HEIGHT = 180
@@ -91,8 +97,78 @@ const dailySpeedCharts = computed(() => {
   return buildDailySpeedCharts(result.value.speed, CHART_WIDTH, CHART_HEIGHT, CHART_PADDING)
 })
 
+const dailyGpsPoints = computed(() => {
+  if (!result.value) return []
+  return buildDailyGpsPoints(result.value.gps)
+})
+
+interface DailyView {
+  date: string
+  dayStart: number
+  chart: ReturnType<typeof buildDailySpeedCharts>[number]['chart'] | null
+  gpsPoints: Net780GpsPoint[]
+}
+
+/** 速度チャートと GPS を同じ暦日単位で束ねる (どちらか一方しか無い日も許容する)。 */
+const dailyViews = computed<DailyView[]>(() => {
+  const chartsByDate = new Map(dailySpeedCharts.value.map(d => [d.date, d]))
+  const gpsByDate = new Map(dailyGpsPoints.value.map(d => [d.date, d.points]))
+  const dates = new Set([...chartsByDate.keys(), ...gpsByDate.keys()])
+  return [...dates].sort().map((date) => {
+    const chartEntry = chartsByDate.get(date)
+    return {
+      date,
+      dayStart: chartEntry?.dayStart ?? net780DateStartTs(date),
+      chart: chartEntry?.chart ?? null,
+      gpsPoints: gpsByDate.get(date) ?? [],
+    }
+  })
+})
+
 /** 暦日のチャート x 軸ラベル (0, 6, 12, 18, 24 時)。全日共通 (0:00〜24:00 固定幅)。 */
 const HOUR_TICKS = [0, 6, 12, 18, 24]
+
+/** 日付ごとの現在シーク位置 (UNIX epoch 秒)。未操作時は各日の 00:00 を指す。 */
+const currentTimes = reactive<Record<string, number>>({})
+
+function currentTimeFor(view: DailyView): number {
+  return currentTimes[view.date] ?? view.dayStart
+}
+
+function cursorXFor(view: DailyView): number {
+  const t = currentTimeFor(view)
+  const innerW = CHART_WIDTH - CHART_PADDING * 2
+  const frac = Math.min(1, Math.max(0, (t - view.dayStart) / (24 * 60 * 60)))
+  return CHART_PADDING + frac * innerW
+}
+
+const chartRefs = new Map<string, SVGSVGElement>()
+function setChartRef(date: string, el: Element | null) {
+  if (el instanceof SVGSVGElement) chartRefs.set(date, el)
+  else chartRefs.delete(date)
+}
+
+const seeking = ref<string | null>(null)
+
+function seekFromEvent(view: DailyView, e: MouseEvent) {
+  const svg = chartRefs.get(view.date)
+  if (!svg) return
+  const rect = svg.getBoundingClientRect()
+  if (rect.width <= 0) return
+  const ratio = (e.clientX - rect.left) / rect.width
+  currentTimes[view.date] = chartXRatioToTime(ratio, view.dayStart, CHART_WIDTH, CHART_PADDING)
+}
+
+function onChartPointerDown(view: DailyView, e: MouseEvent) {
+  seeking.value = view.date
+  seekFromEvent(view, e)
+}
+function onChartPointerMove(view: DailyView, e: MouseEvent) {
+  if (seeking.value === view.date) seekFromEvent(view, e)
+}
+function onChartPointerUp() {
+  seeking.value = null
+}
 
 const gpsRows = computed(() => (result.value?.gps ?? []).slice(0, GPS_TABLE_LIMIT))
 const gpsTruncated = computed(() => (result.value?.gps.length ?? 0) > GPS_TABLE_LIMIT)
@@ -209,41 +285,74 @@ function eventLabel(e: Net780ParseResult['events'][number]): string {
         </dl>
       </UCard>
 
-      <!-- Speed chart (暦日ごと、実物の運行記録計と同じ 0〜24時の 1 日 1 行) -->
-      <UCard v-for="daily in dailySpeedCharts" :key="daily.date">
+      <!-- 速度チャート (シーク可能) + GPS 軌跡 (Google Map、シーク連動) — 暦日ごと -->
+      <UCard v-for="daily in dailyViews" :key="daily.date">
         <template #header>
-          <span class="font-bold">速度 (.spd、0.5秒粒度) — {{ daily.date }}</span>
+          <span class="font-bold">{{ daily.date }}</span>
         </template>
-        <svg
-          :viewBox="`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`"
-          class="w-full h-40"
-          preserveAspectRatio="none"
-        >
-          <polyline
-            v-for="(seg, i) in daily.chart.segments"
-            :key="i"
-            :points="seg"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.5"
-            class="text-blue-500"
-          />
-        </svg>
-        <div class="flex justify-between text-[10px] text-gray-400 px-2">
-          <span v-for="h in HOUR_TICKS" :key="h">{{ h }}時</span>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <p class="text-xs text-gray-500 mb-1">速度 (.spd、0.5秒粒度、クリック/ドラッグでシーク)</p>
+            <template v-if="daily.chart">
+              <svg
+                :ref="(el) => setChartRef(daily.date, el as Element | null)"
+                :viewBox="`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`"
+                class="w-full h-40 cursor-crosshair select-none"
+                preserveAspectRatio="none"
+                @mousedown="onChartPointerDown(daily, $event)"
+                @mousemove="onChartPointerMove(daily, $event)"
+                @mouseup="onChartPointerUp"
+                @mouseleave="onChartPointerUp"
+              >
+                <polyline
+                  v-for="(seg, i) in daily.chart.segments"
+                  :key="i"
+                  :points="seg"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  class="text-blue-500"
+                />
+                <line
+                  :x1="cursorXFor(daily)" :x2="cursorXFor(daily)" y1="0" :y2="CHART_HEIGHT"
+                  stroke="currentColor" stroke-width="1.5" stroke-dasharray="4,3"
+                  class="text-gray-400 dark:text-gray-300"
+                />
+              </svg>
+              <div class="flex justify-between text-[10px] text-gray-400 px-2">
+                <span v-for="h in HOUR_TICKS" :key="h">{{ h }}時</span>
+              </div>
+              <p class="text-xs text-gray-500 mt-1">
+                最高速度 {{ daily.chart.maxSpeed.toFixed(1) }} km/h ・ 表示点数 {{ daily.chart.pointCount }}
+                ・ シーク位置 {{ formatNet780Ts(currentTimeFor(daily)) }}
+              </p>
+            </template>
+            <p v-else class="text-sm text-gray-400 h-40 flex items-center justify-center">
+              .spd データがありません
+            </p>
+          </div>
+
+          <div>
+            <p class="text-xs text-gray-500 mb-1">GPS 軌跡 (.gpd) — {{ daily.gpsPoints.length }} 点</p>
+            <Net780Map
+              v-if="daily.gpsPoints.length"
+              :gps="daily.gpsPoints"
+              :current-time="currentTimeFor(daily)"
+            />
+            <p v-else class="text-sm text-gray-400 h-64 flex items-center justify-center">
+              .gpd データがありません
+            </p>
+          </div>
         </div>
-        <p class="text-xs text-gray-500 mt-1">
-          最高速度 {{ daily.chart.maxSpeed.toFixed(1) }} km/h ・ 表示点数 {{ daily.chart.pointCount }}
-        </p>
       </UCard>
-      <p v-if="!dailySpeedCharts.length && result.speed.length === 0" class="text-sm text-gray-400">
-        .spd データがありません
+      <p v-if="!dailyViews.length" class="text-sm text-gray-400">
+        .spd / .gpd データがありません
       </p>
 
-      <!-- GPS -->
+      <!-- GPS 一覧 (テーブル、全日通算) -->
       <UCard>
         <template #header>
-          <span class="font-bold">GPS 軌跡 (.gpd)</span>
+          <span class="font-bold">GPS 一覧 (.gpd)</span>
         </template>
         <p class="text-xs text-gray-500 mb-2">
           {{ result.gps.length }} 点
