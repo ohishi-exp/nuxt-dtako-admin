@@ -91,6 +91,14 @@ function arrowEl(direction: number): HTMLElement {
   return wrap
 }
 
+/** 停車中 (方向不定) の車輌を表す中立マーカー (灰色の丸)。 */
+function dotEl(): HTMLElement {
+  const d = document.createElement('div')
+  d.style.cssText = 'width:12px;height:12px;border-radius:9999px;background:#64748b;'
+    + 'border:2px solid #fff;box-shadow:0 1px 2px rgba(0,0,0,.4);'
+  return d
+}
+
 /** 白背景・青枠の複数行ラベル。 */
 function labelBox(lines: string[]): HTMLElement {
   const box = document.createElement('div')
@@ -105,17 +113,38 @@ function labelBox(lines: string[]): HTMLElement {
   return box
 }
 
-function markerContent(m: DvrMapMarker): HTMLElement | undefined {
-  const lines = m.lines?.filter(Boolean) ?? (m.label ? [m.label] : [])
-  const hasArrow = typeof m.direction === 'number'
-  if (lines.length === 0 && !hasArrow) return undefined
+/** 従来の青 pill 単行ラベル (軌跡の始点/終点用)。 */
+function pillEl(label: string): HTMLElement {
+  const div = document.createElement('div')
+  div.textContent = label
+  div.style.cssText = 'background:#1d4ed8;color:#fff;font-size:11px;padding:2px 6px;'
+    + 'border-radius:9999px;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.4);'
+  return div
+}
 
-  // 矢印 (上) + ラベル (下) を縦に積む。単行 label だけなら従来の pill 見た目に近い。
-  const wrap = document.createElement('div')
-  wrap.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:1px;'
-  if (hasArrow) wrap.appendChild(arrowEl(m.direction as number))
-  if (lines.length > 0) wrap.appendChild(labelBox(lines))
-  return wrap
+function markerContent(m: DvrMapMarker): HTMLElement | undefined {
+  const lines = m.lines?.filter(Boolean) ?? []
+
+  // 現在地マーカー: アイコン (走行中=方向矢印 / 停車中=丸) を常時表示し、
+  // 3 行ラベルは初期非表示 → アイコンクリックで開閉する。
+  if (lines.length > 0) {
+    const wrap = document.createElement('div')
+    wrap.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:1px;cursor:pointer;'
+    wrap.appendChild(typeof m.direction === 'number' ? arrowEl(m.direction) : dotEl())
+    const box = labelBox(lines)
+    box.style.display = 'none'
+    wrap.addEventListener('click', (e) => {
+      e.stopPropagation()
+      box.style.display = box.style.display === 'none' ? '' : 'none'
+    })
+    wrap.appendChild(box)
+    return wrap
+  }
+
+  // 軌跡の始点/終点: 従来どおり青 pill を常時表示。
+  if (m.label) return pillEl(m.label)
+  if (typeof m.direction === 'number') return arrowEl(m.direction)
+  return undefined
 }
 
 function redraw() {

@@ -142,8 +142,8 @@ const stateMarkers = computed<DvrMapMarker[]>(() =>
         v.driverName ?? '',
         v.dataDatetime ?? '',
       ].filter(Boolean),
-      // 停車中 (Speed=0) は GPSDirection が 0 (方向不定) になり全車が北を向くため、
-      // 走行中のみ方向矢印を出す。
+      // 停車中 (Speed=0) は GPSDirection=0 (方向不定) で全車が北を向くため矢印を出さず、
+      // DvrMap 側で丸マーカーにする。走行中のみ方向を渡す。
       direction: v.speed != null && v.speed > 0 ? v.direction : null,
       title: `${v.vehicleName ?? ''} ${v.dataDatetime ?? ''}`,
     })),
