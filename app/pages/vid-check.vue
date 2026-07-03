@@ -84,7 +84,7 @@ function fmtBytes(n: number): string {
 </script>
 
 <template>
-  <div class="max-w-4xl">
+  <div class="max-w-7xl">
     <h1 class="text-2xl font-bold mb-1">
       映像確認 (VDF アップロード)
     </h1>
@@ -141,7 +141,7 @@ function fmtBytes(n: number): string {
         </div>
       </UCard>
 
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
         <UCard>
           <template #header>
             前方映像
@@ -172,29 +172,27 @@ function fmtBytes(n: number): string {
           />
           <p v-else class="text-sm text-gray-400 py-8 text-center">後方映像なし</p>
         </UCard>
-      </div>
-
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
         <UCard>
           <template #header>
             GPS 軌跡
           </template>
           <VidMap :gps="telemetry.gps" :telemetry="telemetry" :current-time="currentTime" />
         </UCard>
-        <UCard>
-          <template #header>
-            Gセンサー・速度・回転数 (クリック/ドラッグでシーク)
-          </template>
-          <VidTelemetryChart
-            :g="telemetry.g"
-            :speed-rpm="telemetry.speed_rpm"
-            :telemetry="telemetry"
-            :duration="duration"
-            :current-time="currentTime"
-            @seek="onSeek"
-          />
-        </UCard>
       </div>
+
+      <UCard class="mb-4">
+        <template #header>
+          Gセンサー・速度・回転数 (クリック/ドラッグでシーク)
+        </template>
+        <VidTelemetryChart
+          :g="telemetry.g"
+          :speed-rpm="telemetry.speed_rpm"
+          :telemetry="telemetry"
+          :duration="duration"
+          :current-time="currentTime"
+          @seek="onSeek"
+        />
+      </UCard>
     </template>
   </div>
 </template>
