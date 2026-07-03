@@ -80,9 +80,19 @@ describe("callVenusBridgeMethod", () => {
   });
 
   it("throws on non-2xx status", async () => {
-    const fetchImpl = sequenceFetch([new Response("err", { status: 500 })]);
+    const fetchImpl = sequenceFetch([new Response("err", { status: 503 })]);
     const jar = createCookieJar();
     await expect(callVenusBridgeMethod(jar, "SomeMethod", {}, fetchImpl)).rejects.toThrow(TheearthClientError);
+  });
+
+  it("maps HTTP 500 to VenusSessionExpiredError (dead ASP.NET session, staging-observed)", async () => {
+    // theearth セッションが別の場所での同一アカウントログイン等で無効化されると
+    // VenusBridge は HTTP 500 を返す。再ログインで回復するので 401 経路に載せる。
+    const fetchImpl = sequenceFetch([new Response("err", { status: 500 })]);
+    const jar = createCookieJar();
+    await expect(callVenusBridgeMethod(jar, "SomeMethod", {}, fetchImpl)).rejects.toThrow(
+      VenusSessionExpiredError,
+    );
   });
 
   it("throws VenusSessionExpiredError when the response is not JSON (silent-200 guard)", async () => {
