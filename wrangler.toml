@@ -33,6 +33,18 @@ binding = "INTERNAL_SHARED_SECRET"
 store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
 secret_name = "INTERNAL_SHARED_SECRET"
 
+# /vid-check の GPS 軌跡表示 (VidMap.vue) 用 Google Maps JS API key。
+# nuxt_dtako_logs とは別に発行した専用キー (HTTP リファラー制限:
+# dtako.ippoan.org / dtako-staging.ippoan.org)。GCP Secret Manager
+# (projects/747065218280/secrets/NUXT_PUBLIC_GOOGLEMAP_KEY) が SoT。
+# client bundle に載る前提の public runtimeConfig 値なので機密性は低いが、
+# 値そのものは secrets-inventory 経由でしか投入しない運用に揃えて
+# Secrets Store binding にしている。
+[[secrets_store_secrets]]
+binding = "NUXT_PUBLIC_GOOGLEMAP_KEY"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "NUXT_PUBLIC_GOOGLEMAP_KEY"
+
 # introspect を公開 HTTP ではなく CF service binding (worker-to-worker, 内部) で叩く。
 [[services]]
 binding = "AUTH_WORKER"
@@ -83,6 +95,11 @@ bucket_name = "dtako-uploads"
 binding = "INTERNAL_SHARED_SECRET"
 store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
 secret_name = "INTERNAL_SHARED_SECRET"
+
+[[env.staging.secrets_store_secrets]]
+binding = "NUXT_PUBLIC_GOOGLEMAP_KEY"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "NUXT_PUBLIC_GOOGLEMAP_KEY"
 
 [[env.staging.services]]
 binding = "AUTH_WORKER"
