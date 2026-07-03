@@ -2,9 +2,8 @@
 /**
  * DVR 動画ビューア (Refs #90)。
  *
- * theearth-np.com のアカウントを持つ利用者が **自分の credential でログイン** して、
- * 自社の DVR ドラレコ動画 (.vdf) を閲覧するページ。管理画面の auth-worker ログインは
- * 使わない (auth.global.ts の publicPaths に登録、layout も独立)。
+ * 管理者 (auth-worker ログイン必須) が theearth-np.com のアカウントでログインして、
+ * 自社の DVR ドラレコ動画 (.vdf) を閲覧するページ。
  *
  * credential pass-through 設計: パスワードはログイン 1 リクエストの body にだけ載り、
  * サーバー側 (DtakoScraperRelayDO) にも browser にも保存されない (保存したい人は
@@ -14,7 +13,7 @@
  * ブラウザ内で完結する。
  */
 import { decodeVdf, probeVideoDuration } from '~/utils/dtako-vid-wasm'
-import type { VdfTelemetry } from '~/utils/dtako-vid-wasm'
+import type { VdfSegment } from '~/components/VdfViewer.vue'
 
 type DvrReceiveState = 'ready' | 'requestable' | 'in_progress' | 'error' | 'unknown'
 
@@ -349,30 +348,25 @@ async function autoRefreshTick() {
   }
 }
 
-// --- ビューア (vid-check.vue の単一ファイル版) ---
+// --- ビューア (VdfViewer 共通部品 = vid-check 基準。Refs #90) ---
+//
+// ダウンロードした .vdf をブラウザ内 wasm でデコードし、VdfSegment (1 ファイル分) に
+// して VdfViewer に渡す。再生 / 前方・後方切替 / 区間ループ / クリップ等の機能は
+// すべて VdfViewer 側 (= vid-check と同一) に共通化されている。
 
 const viewingFileName = ref<string | null>(null)
 const videoLoading = ref(false)
 const videoError = ref<string | null>(null)
-const frontUrl = ref<string | null>(null)
-const rearUrl = ref<string | null>(null)
-const telemetry = ref<VdfTelemetry | null>(null)
-const duration = ref(0)
-const currentTime = ref(0)
-
-const frontVideoEl = ref<HTMLVideoElement | null>(null)
-const rearVideoEl = ref<HTMLVideoElement | null>(null)
+const viewerSegments = ref<VdfSegment[]>([])
 
 function closeViewer() {
-  if (frontUrl.value) URL.revokeObjectURL(frontUrl.value)
-  if (rearUrl.value) URL.revokeObjectURL(rearUrl.value)
-  frontUrl.value = null
-  rearUrl.value = null
-  telemetry.value = null
+  for (const seg of viewerSegments.value) {
+    if (seg.frontUrl) URL.revokeObjectURL(seg.frontUrl)
+    if (seg.rearUrl) URL.revokeObjectURL(seg.rearUrl)
+  }
+  viewerSegments.value = []
   viewingFileName.value = null
   videoError.value = null
-  duration.value = 0
-  currentTime.value = 0
 }
 
 async function openNotification(n: DvrNotification) {
@@ -389,14 +383,22 @@ async function openNotification(n: DvrNotification) {
       headers: authHeaders(),
       responseType: 'arrayBuffer',
     })
+    const fileSize = buf.byteLength
     const result = await decodeVdf(new Uint8Array(buf))
     closeViewer()
-    frontUrl.value = result.hasFront ? URL.createObjectURL(new Blob([result.frontMp4], { type: 'video/mp4' })) : null
-    rearUrl.value = result.hasRear ? URL.createObjectURL(new Blob([result.rearMp4], { type: 'video/mp4' })) : null
-    telemetry.value = result.telemetry
+    const frontUrl = result.hasFront ? URL.createObjectURL(new Blob([result.frontMp4], { type: 'video/mp4' })) : null
+    const rearUrl = result.hasRear ? URL.createObjectURL(new Blob([result.rearMp4], { type: 'video/mp4' })) : null
+    const probeUrl = frontUrl || rearUrl
+    const duration = probeUrl ? await probeVideoDuration(probeUrl) : 0
+    viewerSegments.value = [{
+      fileName: n.fileName ?? '',
+      fileSize,
+      frontUrl,
+      rearUrl,
+      telemetry: result.telemetry,
+      duration,
+    }]
     viewingFileName.value = n.fileName
-    const probeUrl = frontUrl.value || rearUrl.value
-    duration.value = probeUrl ? await probeVideoDuration(probeUrl) : 0
   }
   catch (e) {
     if (dvrErrorStatus(e) === 401) {
@@ -408,17 +410,6 @@ async function openNotification(n: DvrNotification) {
   finally {
     videoLoading.value = false
   }
-}
-
-function onTimeUpdate(e: Event) {
-  currentTime.value = (e.target as HTMLVideoElement).currentTime
-}
-
-function onSeek(seconds: number) {
-  for (const el of [frontVideoEl.value, rearVideoEl.value]) {
-    if (el) el.currentTime = seconds
-  }
-  currentTime.value = seconds
 }
 
 onMounted(() => {
@@ -699,73 +690,13 @@ onBeforeUnmount(() => {
           {{ videoError }}
         </div>
 
-        <!-- ビューア (vid-check.vue の単一ファイル簡易版。デコードはブラウザ内 wasm) -->
-        <template v-if="telemetry">
-          <UCard class="mb-4">
-            <div class="flex flex-wrap gap-6 text-sm">
-              <div><span class="text-gray-500">ファイル:</span> <span class="font-medium">{{ viewingFileName }}</span></div>
-              <div><span class="text-gray-500">車両コード:</span> <span class="font-medium">{{ telemetry.vehicle || '(なし)' }}</span></div>
-              <div><span class="text-gray-500">乗務員コード:</span> <span class="font-medium">{{ telemetry.driver || '(なし)' }}</span></div>
-            </div>
-          </UCard>
-
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-            <UCard>
-              <template #header>
-                前方映像
-              </template>
-              <div class="relative overflow-hidden rounded-lg bg-black">
-                <video
-                  v-if="frontUrl"
-                  ref="frontVideoEl"
-                  :src="frontUrl"
-                  controls
-                  class="w-full h-auto block"
-                  @timeupdate="onTimeUpdate"
-                />
-                <p v-else class="text-sm text-gray-400 py-8 text-center">前方映像なし</p>
-              </div>
-            </UCard>
-
-            <UCard>
-              <template #header>
-                後方映像
-              </template>
-              <div class="relative overflow-hidden rounded-lg bg-black">
-                <video
-                  v-if="rearUrl"
-                  ref="rearVideoEl"
-                  :src="rearUrl"
-                  controls
-                  class="w-full h-auto block"
-                  @timeupdate="onTimeUpdate"
-                />
-                <p v-else class="text-sm text-gray-400 py-8 text-center">後方映像なし</p>
-              </div>
-            </UCard>
-
-            <UCard>
-              <template #header>
-                GPS 軌跡
-              </template>
-              <VidMap :gps="telemetry.gps" :telemetry="telemetry" :current-time="currentTime" />
-            </UCard>
-          </div>
-
-          <UCard>
-            <template #header>
-              Gセンサー・速度・回転数 (クリック/ドラッグでシーク)
-            </template>
-            <VidTelemetryChart
-              :g="telemetry.g"
-              :speed-rpm="telemetry.speed_rpm"
-              :telemetry="telemetry"
-              :duration="duration"
-              :current-time="currentTime"
-              @seek="onSeek"
-            />
-          </UCard>
-        </template>
+        <!-- ビューア (VdfViewer 共通部品 = vid-check と同一機能: 前方/後方切替・
+             結合タイムライン・区間ループ・クリップダウンロード) -->
+        <VdfViewer
+          v-if="viewerSegments.length > 0"
+          :segments="viewerSegments"
+          :file-label="viewingFileName"
+        />
       </template>
     </main>
   </div>
