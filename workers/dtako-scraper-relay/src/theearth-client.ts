@@ -9,6 +9,10 @@
  * 見つからない場合、および ZIP のマジックバイトが一致しない場合は必ず
  * TheearthClientError を throw する (200 で HTML エラーページを ZIP として
  * 返してしまう事故を防ぐ)。
+ *
+ * **CSV ダウンロード段は既知の制約として fetch() では再現できない** (2026-07-03
+ * 実機検証で確定、詳細は downloadCsvZip の doc comment 参照)。ログイン段は
+ * fetch ベースで問題なく動作する。
  */
 
 export const BASE_URL = "https://theearth-np.com";
@@ -367,7 +371,12 @@ const CSV_FORM_IDS = [
   "MainContent_ucEndDate_txtYear",
   "MainContent_ucEndDate_txtMonth",
   "MainContent_ucEndDate_txtDay",
-  "btnCsv",
+  // 表示上の "ダウンロード" ボタン (id=btnCsv) の onclick は
+  // `DateCheck() { $('#btnCsvSvr').click(); return false; }` (J-NOS3010[GeneralCsv].js) —
+  // btnCsv 自身の送信は常にキャンセルされ、実際に POST されるのは隠しボタン
+  // btnCsvSvr の name/value。id=btnCsv を使うと実クリックと異なるフィールド名を
+  // 送ることになる (2026-07-03 実機検証で確認)。
+  "btnCsvSvr",
 ] as const;
 
 /** ZIP のマジックバイト (`PK\x03\x04`) を検証する。「黙って200」対策の要。 */
@@ -387,6 +396,32 @@ export function assertZipMagic(buf: ArrayBuffer): void {
   }
 }
 
+/**
+ * **既知の制約 (2026-07-03 実機検証で確定、ohishi-exp/dtako-scraper#22):
+ * この関数は本物のブラウザ操作を再現できず、実データ入りの ZIP を取得できない。**
+ *
+ * 実機 (cdp-relay 経由の実 Chrome) で3段階の検証を行った:
+ *   1. 実クリックの `submit` イベントを capture-phase listener で捕捉し、その
+ *      body (`FormData(form)`、submitter なし) をそのまま fetch で再送 →
+ *      プレーンな HTML 再描画 (ZIP ですらない)
+ *   2. 実際の client JS (`J-NOS3010[GeneralCsv].js` の `DateCheck()`) を読んで
+ *      判明した「本当に POST されるボタン名は btnCsvSvr (隠しボタン)」を使い、
+ *      新鮮な GET 直後・遅延なしで再送 → それでもプレーン HTML 再描画
+ *   3. `FormData(form, submitter)` でネイティブ相当の全 36 フィールドを再構築して
+ *      再送 → それでもプレーン HTML 再描画
+ *
+ * 一方、実ブラウザで `<input type=submit>` に対し実際に `.click()` した場合は
+ * 2回とも実データ入りの ZIP (103KB) が返った。フィールド構成の正確さに関わらず
+ * `fetch()` ベースの POST は一度も成功しなかったことから、原因は body の組み立て
+ * ミスではなく、**トップレベルナビゲーションを伴う実フォーム送信と `fetch()`/XHR を
+ * サーバ (または前段のミドルウェア) が区別している**ことだと考えられる (ブラウザが
+ * 自動付与する `Sec-Fetch-Mode`/`Sec-Fetch-Dest` 等、JS からは偽装不能なシグナルが
+ * 有力な候補)。Cloudflare Workers 上の `fetch()` も同様にトップレベルナビゲーション
+ * を発生させられないため、この制約は回避できない。
+ *
+ * 結論: CSV ダウンロード段は `vpc-relay` (実 headless Chrome) に留める。この
+ * 関数は `SCRAPER_MODE=http` の実験目的でのみ残しており、本番運用には使わない。
+ */
 export async function downloadCsvZip(
   jar: CookieJar,
   range: CsvDateRange,
@@ -423,7 +458,7 @@ export async function downloadCsvZip(
     [fields.get("MainContent_ucEndDate_txtYear")!.name]: end.y,
     [fields.get("MainContent_ucEndDate_txtMonth")!.name]: end.m,
     [fields.get("MainContent_ucEndDate_txtDay")!.name]: end.d,
-    [fields.get("btnCsv")!.name]: fields.get("btnCsv")!.value,
+    [fields.get("btnCsvSvr")!.name]: fields.get("btnCsvSvr")!.value,
   });
 
   const stage1Res = await postForm(jar, csvUrl, stage1Body, fetchImpl);
@@ -470,7 +505,12 @@ export interface ScrapeHttpParams {
 
 export type ProgressCallback = (step: "login" | "download" | "done", message?: string) => void;
 
-/** ログイン → CSV ダウンロードを一括で行う。Chromium 不要、素の fetch のみ。 */
+/**
+ * ログイン → CSV ダウンロードを一括で行う。Chromium 不要、素の fetch のみ。
+ *
+ * **CSV ダウンロード段は既知の制約により失敗する** (downloadCsvZip の doc
+ * comment 参照)。`SCRAPER_MODE=http` の実験目的でのみ使う。
+ */
 export async function scrapeViaHttp(
   params: ScrapeHttpParams,
   onProgress: ProgressCallback,
@@ -478,7 +518,11 @@ export async function scrapeViaHttp(
 ): Promise<ArrayBuffer> {
   const jar = createCookieJar();
   onProgress("login");
-  await login(jar, { compId: params.compId, userName: params.userName, userPass: params.userPass }, fetchImpl);
+  await login(
+    jar,
+    { compId: params.compId, userName: params.userName, userPass: params.userPass },
+    fetchImpl,
+  );
   onProgress("download");
   const zip = await downloadCsvZip(jar, { startDate: params.startDate, endDate: params.endDate }, fetchImpl);
   onProgress("done");

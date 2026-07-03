@@ -111,7 +111,7 @@ function csvPageHtml(opts: { omit?: string; tableDate?: string } = {}): string {
       '<input type="text" id="MainContent_ucEndDate_txtMonth" name="ctl00$MainContent$ucEndDate$txtMonth" value="" />',
     MainContent_ucEndDate_txtDay:
       '<input type="text" id="MainContent_ucEndDate_txtDay" name="ctl00$MainContent$ucEndDate$txtDay" value="" />',
-    btnCsv: '<input type="submit" id="btnCsv" name="ctl00$MainContent$btnCsvSvr" value="ダウンロード" />',
+    btnCsvSvr: '<input type="submit" id="btnCsvSvr" name="ctl00$MainContent$btnCsvSvr" value="ダウンロード" />',
   }
   if (opts.omit) delete fields[opts.omit]
   return `<html><body><table><tr><td>${tableDate}</td></tr></table>${Object.values(fields).join('\n')}</body></html>`
@@ -402,9 +402,9 @@ describe('downloadCsvZip', () => {
   })
 
   it('throws loudly when a required CSV form field is missing (page structure changed)', async () => {
-    const fetchImpl = sequenceFetch([html(csvPageHtml({ omit: 'btnCsv' }))])
+    const fetchImpl = sequenceFetch([html(csvPageHtml({ omit: 'btnCsvSvr' }))])
     const jar = createCookieJar()
-    await expect(downloadCsvZip(jar, range, fetchImpl)).rejects.toThrow('btnCsv')
+    await expect(downloadCsvZip(jar, range, fetchImpl)).rejects.toThrow('btnCsvSvr')
   })
 
   it('throws loudly when the stage-2 output button is missing', async () => {
