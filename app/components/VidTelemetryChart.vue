@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { GRecord, SpeedRpmRecord, VdfTelemetry } from '~/utils/dtako-vid-wasm'
 import { recordOffsetSeconds } from '~/utils/dtako-vid-wasm'
+import { fmtDuration } from '~/utils/time-format'
 
 const props = defineProps<{
   g: GRecord[]
@@ -8,9 +9,16 @@ const props = defineProps<{
   telemetry: Pick<VdfTelemetry, 'video_start_ts'>
   duration: number
   currentTime: number
+  /** 区間選択バーの選択中区間 (結合後タイムライン上、秒)。未選択時は null。 */
+  rangeStart?: number | null
+  rangeEnd?: number | null
 }>()
 
-const emit = defineEmits<{ seek: [seconds: number] }>()
+const emit = defineEmits<{
+  seek: [seconds: number]
+  'update:rangeStart': [seconds: number | null]
+  'update:rangeEnd': [seconds: number | null]
+}>()
 
 const WIDTH = 1400
 const HEIGHT = 260
@@ -114,6 +122,13 @@ const cursorX = computed(() =>
   props.duration > 0 ? PLOT_LEFT + (props.currentTime / props.duration) * (PLOT_RIGHT - PLOT_LEFT) : PLOT_LEFT,
 )
 
+function timeToPlotX(t: number): number {
+  return props.duration > 0 ? PLOT_LEFT + (t / props.duration) * (PLOT_RIGHT - PLOT_LEFT) : PLOT_LEFT
+}
+
+const rangeStartX = computed(() => (props.rangeStart != null ? timeToPlotX(props.rangeStart) : null))
+const rangeEndX = computed(() => (props.rangeEnd != null ? timeToPlotX(props.rangeEnd) : null))
+
 const svgEl = ref<SVGSVGElement | null>(null)
 const dragging = ref(false)
 
@@ -136,6 +151,75 @@ function onPointerMove(e: MouseEvent) {
 function onPointerUp() {
   dragging.value = false
 }
+
+/**
+ * 区間選択バー (グラフ下の細いトラック)。クロップ中でネイティブのシークバーが
+ * 使えない時でも、ドラッグで区間の開始/終了を直接指定できるようにする。
+ * 空いている場所をドラッグすると新規に区間を作り、既存の端 (ハンドル) を
+ * つまむとその端だけを動かせる。
+ */
+const rangeTrackEl = ref<HTMLDivElement | null>(null)
+const brushStartFrac = ref<number | null>(null)
+const handleDragging = ref<'start' | 'end' | null>(null)
+
+function fracFromEvent(e: MouseEvent): number | null {
+  if (!rangeTrackEl.value) return null
+  const r = rangeTrackEl.value.getBoundingClientRect()
+  if (r.width <= 0) return null
+  return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width))
+}
+
+function beginHandleDrag(which: 'start' | 'end') {
+  handleDragging.value = which
+}
+
+function onTrackPointerDown(e: MouseEvent) {
+  if (props.duration <= 0) return
+  const frac = fracFromEvent(e)
+  if (frac === null) return
+  brushStartFrac.value = frac
+}
+
+function onTrackPointerMove(e: MouseEvent) {
+  if (props.duration <= 0) return
+  const frac = fracFromEvent(e)
+  if (frac === null) return
+  const t = frac * props.duration
+
+  if (handleDragging.value === 'start') {
+    const end = props.rangeEnd ?? props.duration
+    emit('update:rangeStart', Math.min(t, end))
+    return
+  }
+  if (handleDragging.value === 'end') {
+    const start = props.rangeStart ?? 0
+    emit('update:rangeEnd', Math.max(t, start))
+    return
+  }
+  if (brushStartFrac.value === null) return
+  const t0 = Math.min(brushStartFrac.value, frac) * props.duration
+  const t1 = Math.max(brushStartFrac.value, frac) * props.duration
+  emit('update:rangeStart', t0)
+  emit('update:rangeEnd', t1)
+}
+
+function onTrackPointerUp() {
+  brushStartFrac.value = null
+  handleDragging.value = null
+}
+
+function clearRange() {
+  emit('update:rangeStart', null)
+  emit('update:rangeEnd', null)
+}
+
+const positionPct = computed(() => (props.duration > 0 ? (props.currentTime / props.duration) * 100 : 0))
+const startPct = computed(() => (props.rangeStart != null && props.duration > 0 ? (props.rangeStart / props.duration) * 100 : 0))
+const endPct = computed(() => (props.rangeEnd != null && props.duration > 0 ? (props.rangeEnd / props.duration) * 100 : 0))
+const rangeShadeStyle = computed(() => ({
+  left: `${startPct.value}%`,
+  width: `${Math.max(0, endPct.value - startPct.value)}%`,
+}))
 </script>
 
 <template>
@@ -165,6 +249,23 @@ function onPointerUp() {
         :x="PLOT_RIGHT + 4" :y="gl.y" text-anchor="start" dominant-baseline="middle" font-size="20" fill="#9ca3af"
       >{{ gl.label }}</text>
 
+      <!-- 選択区間 (開始/終了バーで指定した範囲) -->
+      <rect
+        v-if="rangeStartX !== null && rangeEndX !== null"
+        :x="rangeStartX" y="0" :width="Math.max(0, rangeEndX - rangeStartX)" :height="HEIGHT"
+        fill="#22c55e" fill-opacity="0.12"
+      />
+      <line
+        v-if="rangeStartX !== null"
+        :x1="rangeStartX" :x2="rangeStartX" y1="0" :y2="HEIGHT"
+        stroke="#34d399" stroke-width="1.5" stroke-dasharray="2,2" vector-effect="non-scaling-stroke"
+      />
+      <line
+        v-if="rangeEndX !== null"
+        :x1="rangeEndX" :x2="rangeEndX" y1="0" :y2="HEIGHT"
+        stroke="#fb7185" stroke-width="1.5" stroke-dasharray="2,2" vector-effect="non-scaling-stroke"
+      />
+
       <polyline
         v-for="s in series"
         :key="s.label"
@@ -184,6 +285,51 @@ function onPointerUp() {
         <span class="inline-block w-3 h-0.5 rounded" :style="{ backgroundColor: s.color }" />
         {{ s.label }}
       </span>
+    </div>
+
+    <!-- 区間選択バー: ドラッグで開始/終了を指定、端をつまんで微調整 -->
+    <div class="flex items-center justify-between text-[11px] text-gray-500 mt-2 mb-1">
+      <span>区間選択 (ドラッグで範囲指定・端をつまんで調整)</span>
+      <div class="flex items-center gap-2">
+        <span v-if="rangeStart != null" class="text-emerald-400">開始 {{ fmtDuration(rangeStart) }}</span>
+        <span v-if="rangeEnd != null" class="text-rose-400">終了 {{ fmtDuration(rangeEnd) }}</span>
+        <UButton
+          v-if="rangeStart != null || rangeEnd != null"
+          size="xs"
+          variant="ghost"
+          color="neutral"
+          icon="i-lucide-x"
+          label="解除"
+          @click="clearRange"
+        />
+      </div>
+    </div>
+    <div
+      ref="rangeTrackEl"
+      class="relative h-4 rounded bg-gray-800 cursor-pointer select-none"
+      @mousedown="onTrackPointerDown"
+      @mousemove="onTrackPointerMove"
+      @mouseup="onTrackPointerUp"
+      @mouseleave="onTrackPointerUp"
+    >
+      <div
+        v-if="rangeStart != null && rangeEnd != null"
+        class="absolute inset-y-0 bg-emerald-500/30"
+        :style="rangeShadeStyle"
+      />
+      <div class="absolute inset-y-0 w-0.5 bg-white/70 pointer-events-none" :style="{ left: `${positionPct}%` }" />
+      <div
+        v-if="rangeStart != null"
+        class="absolute inset-y-0 w-1.5 -ml-[3px] bg-emerald-400 rounded cursor-ew-resize"
+        :style="{ left: `${startPct}%` }"
+        @mousedown.stop="beginHandleDrag('start')"
+      />
+      <div
+        v-if="rangeEnd != null"
+        class="absolute inset-y-0 w-1.5 -ml-[3px] bg-rose-400 rounded cursor-ew-resize"
+        :style="{ left: `${endPct}%` }"
+        @mousedown.stop="beginHandleDrag('end')"
+      />
     </div>
   </div>
 </template>
