@@ -703,6 +703,15 @@ export function triggerScrapeStream(
           return
         }
         settled = true
+        // メッセージを一度も受け取らずに切断 (認証失敗ではない場合を含む。例:
+        // comp_id 不正で WS upgrade 自体が 400 で弾かれるケース) をここで
+        // 黙って resolve() すると、呼び出し側 (scraper.vue) が「event 無し
+        // = 何も起きていない」を success 扱いしてしまう (「黙って成功」)。
+        // リトライ余地が無い/尽きた場合は reject してエラーとして伝播させる。
+        if (!gotAnyMessage) {
+          reject(new Error('Scraper error: WebSocket handshake failed (comp_id 不正 / 認証エラー等)'))
+          return
+        }
         resolve()
       }
 

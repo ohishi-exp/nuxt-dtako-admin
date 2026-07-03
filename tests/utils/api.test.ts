@@ -947,11 +947,11 @@ describe('api', () => {
       await promise
     })
 
-    it('resolves without throwing when closed early and no refresher is configured', async () => {
+    it('rejects (does not silently succeed) when closed early and no refresher is configured', async () => {
       const promise = triggerScrapeStream({}, () => {})
       const ws = lastWs()
       ws.close()
-      await expect(promise).resolves.toBeUndefined()
+      await expect(promise).rejects.toThrow('Scraper error: WebSocket handshake failed')
     })
   })
 
@@ -1041,6 +1041,31 @@ describe('api', () => {
       await promise
 
       expect(received).toEqual([{ event: 'done' }])
+    })
+
+    it('triggerScrapeStream rejects if the retried connection also closes with no message (e.g. comp_id 不正)', async () => {
+      stubWebSocket()
+      initScraperRelay('ws://relay-test')
+      const refresher = vi.fn().mockResolvedValue(undefined)
+      initApi('http://test', () => 'token', refresher, () => 'tid')
+
+      const promise = triggerScrapeStream({}, () => {})
+
+      // 1 本目: メッセージを一度も受け取らずに切断 → refresh + retry
+      const first = lastWs()
+      first.close()
+      await new Promise(r => setTimeout(r, 0))
+      expect(refresher).toHaveBeenCalledTimes(1)
+
+      // 2 本目 (retry、allowRetry=false): これも一切メッセージを受け取らず切断
+      // (トークンの問題ではなく、例えば comp_id 不正で WS upgrade 自体が
+      // 400 で弾かれ続けるケース)。ここで黙って resolve すると呼び出し側が
+      // 「何も起きていない = success」と誤認するため、reject しなければならない。
+      const second = lastWs()
+      expect(second).not.toBe(first)
+      second.close()
+
+      await expect(promise).rejects.toThrow('Scraper error: WebSocket handshake failed')
     })
 
     it('triggerScrapeStream rejects if no token remains after refresh', async () => {
