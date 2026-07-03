@@ -57,6 +57,10 @@ watch([rangeStart, rangeEnd], () => {
   if (rangeStart.value === null || rangeEnd.value === null) loopRange.value = false
 })
 
+/** 区間選択バーで指定した範囲を実時間で録画・ダウンロードする「クリップ」機能の状態。 */
+const clipping = ref(false)
+const clipProgress = ref(0)
+
 const activeSegment = computed<Segment | null>(() => segments.value[activeSegmentIndex.value] ?? null)
 
 const hasFront = computed(() => segments.value.some(s => s.frontUrl))
@@ -86,7 +90,8 @@ const globalCurrentTime = computed(() => (segmentOffsets.value[activeSegmentInde
 function onTimeUpdate() {
   const el = frontVideoEl.value || rearVideoEl.value
   if (el) localCurrentTime.value = el.currentTime
-  if (loopRange.value && rangeEnd.value !== null && globalCurrentTime.value >= rangeEnd.value) {
+  // クリップ (区間の実時間録画) 中はループで巻き戻さない (録画の終端検出と競合するため)
+  if (!clipping.value && loopRange.value && rangeEnd.value !== null && globalCurrentTime.value >= rangeEnd.value) {
     onSeek(rangeStart.value ?? 0)
     // 一部ブラウザはシーク直後に再生を止めることがあるため、再生中なら明示的に再開する
     if (isPlaying.value) {
@@ -171,6 +176,96 @@ function onSeek(globalSeconds: number) {
   }
 }
 
+/**
+ * 区間選択バーで指定した [rangeStart, rangeEnd] を、表示中の映像 (前方/後方の
+ * うち現在レンダリングされているもの) ごとに `captureStream()` + `MediaRecorder`
+ * で実時間録画し、webm としてダウンロードする。MP4 コンテナを直接切り出す
+ * わけではない (デコード済み mp4 バイト列は保持していないため) ので、
+ * 録画時間 = クリップ時間ぶんだけ実際に待つ点に注意。
+ */
+async function clipAndDownload() {
+  if (clipping.value) return
+  const start = rangeStart.value
+  const end = rangeEnd.value
+  if (start === null || end === null || end <= start) return
+
+  const targets: { el: HTMLVideoElement, label: string }[] = []
+  if (frontVideoEl.value) targets.push({ el: frontVideoEl.value, label: 'front' })
+  if (rearVideoEl.value) targets.push({ el: rearVideoEl.value, label: 'rear' })
+  if (targets.length === 0) return
+
+  const wasPlaying = isPlaying.value
+  targets.forEach(t => t.el.pause())
+  onSeek(start)
+  await nextTick()
+
+  clipping.value = true
+  clipProgress.value = 0
+  error.value = null
+
+  try {
+    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+      ? 'video/webm;codecs=vp9'
+      : 'video/webm'
+
+    const recorders = targets.map(({ el, label }) => {
+      const captureStream = (el as HTMLVideoElement & { captureStream?: () => MediaStream }).captureStream
+      if (!captureStream) throw new Error('このブラウザは映像のクリップ書き出しに対応していません (captureStream 未対応)')
+      const stream = captureStream.call(el)
+      const recorder = new MediaRecorder(stream, { mimeType })
+      const chunks: BlobPart[] = []
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data)
+      }
+      return { recorder, chunks, label }
+    })
+
+    recorders.forEach(r => r.recorder.start())
+    targets.forEach(t => t.el.play().catch(() => {}))
+
+    await new Promise<void>((resolve) => {
+      const check = () => {
+        const t = frontVideoEl.value?.currentTime ?? rearVideoEl.value?.currentTime ?? end
+        clipProgress.value = Math.min(1, Math.max(0, (t - start) / (end - start)))
+        if (t >= end || !clipping.value) {
+          resolve()
+          return
+        }
+        requestAnimationFrame(check)
+      }
+      requestAnimationFrame(check)
+    })
+
+    targets.forEach(t => t.el.pause())
+
+    for (const { recorder, chunks, label } of recorders) {
+      await new Promise<void>((resolve) => {
+        recorder.addEventListener('stop', () => resolve(), { once: true })
+        recorder.stop()
+      })
+      const blob = new Blob(chunks, { type: mimeType })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `vid-clip-${label}-${Math.round(start)}s-${Math.round(end)}s.webm`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    }
+  }
+  catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+  finally {
+    clipping.value = false
+    clipProgress.value = 0
+    if (wasPlaying) {
+      targets.forEach(t => t.el.play().catch(() => {}))
+    }
+  }
+}
+
 function revokeAll() {
   for (const seg of segments.value) {
     if (seg.frontUrl) URL.revokeObjectURL(seg.frontUrl)
@@ -183,6 +278,8 @@ function revokeAll() {
   rangeStart.value = null
   rangeEnd.value = null
   loopRange.value = false
+  clipping.value = false
+  clipProgress.value = 0
 }
 
 onBeforeUnmount(revokeAll)
@@ -473,15 +570,27 @@ function fmtBytes(n: number): string {
         <template #header>
           <div class="flex items-center justify-between">
             <span>Gセンサー・速度・回転数 (クリック/ドラッグでシーク)</span>
-            <UButton
-              v-if="rangeStart !== null && rangeEnd !== null"
-              size="xs"
-              variant="soft"
-              :color="loopRange ? 'primary' : 'neutral'"
-              icon="i-lucide-repeat"
-              :label="loopRange ? 'ループ再生中' : 'この区間をループ再生'"
-              @click="loopRange = !loopRange"
-            />
+            <div v-if="rangeStart !== null && rangeEnd !== null" class="flex items-center gap-1">
+              <UButton
+                size="xs"
+                variant="soft"
+                :color="loopRange ? 'primary' : 'neutral'"
+                icon="i-lucide-repeat"
+                :label="loopRange ? 'ループ再生中' : 'この区間をループ再生'"
+                :disabled="clipping"
+                @click="loopRange = !loopRange"
+              />
+              <UButton
+                size="xs"
+                variant="soft"
+                color="neutral"
+                icon="i-lucide-scissors"
+                :loading="clipping"
+                :label="clipping ? `クリップ中... ${Math.round(clipProgress * 100)}%` : 'クリップをダウンロード'"
+                :disabled="clipping"
+                @click="clipAndDownload"
+              />
+            </div>
           </div>
         </template>
         <VidTelemetryChart
