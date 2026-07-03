@@ -2,15 +2,21 @@ import { describe, expect, it, vi } from "vitest";
 import { createCookieJar, TheearthClientError, type FetchLike } from "../src/theearth-client";
 import {
   assertVdfMagic,
+  buildDvrSearchKey,
   callVenusBridgeMethod,
   dvrDataUrl,
+  DvrSearchParamError,
+  getDvrMasters,
   getDvrNotifications,
   openDvrFileStream,
   parseReceiveState,
   requestDvrDownloadPath,
   requestDvrFileTransfer,
+  requestDvrFileTransferMulti,
+  searchDvrData,
   validateVdfMagicStream,
   VenusSessionExpiredError,
+  type DvrSearchParams,
 } from "../src/theearth-venus-client";
 
 const VDF_BYTES = new Uint8Array([0x4e, 0x45, 0x54, 0x37, 0x38, 0x30, 0x01, 0x02]); // "NET780" + payload
@@ -450,5 +456,325 @@ describe("openDvrFileStream", () => {
     await expect(openDvrFileStream(jar, "https://theearth-np.com/dvrData/x", fetchImpl)).rejects.toThrow(
       TheearthClientError,
     );
+  });
+});
+
+// --- 映像検索 (Request_DvrDataList、Refs #90 実ページ J-AAV0100 トレース) ---
+
+/** 実測キーに一致する最小の有効パラメータ (車輌のみ指定)。 */
+function baseSearchParams(overrides: Partial<DvrSearchParams> = {}): DvrSearchParams {
+  return { start: "2026/07/03 18:06", rangeMinutes: 30, vehicleCds: "2131", ...overrides };
+}
+
+describe("buildDvrSearchKey", () => {
+  it("builds the exact key observed on the real page (vehicle-only search)", () => {
+    // 実測: ["2026/07/03 18:06","2026/07/03 18:36","2131","","","","300","1,1,1,1","1,1","1,1,1"]
+    expect(buildDvrSearchKey(baseSearchParams())).toEqual([
+      "2026/07/03 18:06",
+      "2026/07/03 18:36",
+      "2131",
+      "",
+      "",
+      "",
+      "300",
+      "1,1,1,1",
+      "1,1",
+      "1,1,1",
+    ]);
+  });
+
+  it("rolls the end datetime across day boundaries", () => {
+    const key = buildDvrSearchKey(baseSearchParams({ start: "2026/12/31 23:50", rangeMinutes: 30 }));
+    expect(key[0]).toBe("2026/12/31 23:50");
+    expect(key[1]).toBe("2027/01/01 00:20");
+  });
+
+  it("rejects a start datetime that is not in YYYY/MM/DD HH:mm format", () => {
+    expect(() => buildDvrSearchKey(baseSearchParams({ start: "2026-07-03 18:06" }))).toThrow(DvrSearchParamError);
+    expect(() => buildDvrSearchKey(baseSearchParams({ start: "26/07/03 18:06" }))).toThrow("開始日時");
+  });
+
+  it("rejects an impossible calendar date (Date.UTC silently rolls it over)", () => {
+    expect(() => buildDvrSearchKey(baseSearchParams({ start: "2026/02/31 10:00" }))).toThrow(DvrSearchParamError);
+    expect(() => buildDvrSearchKey(baseSearchParams({ start: "2026/07/03 24:00" }))).toThrow(DvrSearchParamError);
+  });
+
+  it("rejects an invalid rangeMinutes (non-integer / below 1 / above 1440)", () => {
+    expect(() => buildDvrSearchKey(baseSearchParams({ rangeMinutes: 30.5 }))).toThrow("範囲 [分]");
+    expect(() => buildDvrSearchKey(baseSearchParams({ rangeMinutes: 0 }))).toThrow(DvrSearchParamError);
+    expect(() => buildDvrSearchKey(baseSearchParams({ rangeMinutes: 1441 }))).toThrow(DvrSearchParamError);
+  });
+
+  it("normalizes comma-separated CD lists (trims spaces, drops empties)", () => {
+    const key = buildDvrSearchKey(baseSearchParams({ vehicleCds: " 2131 , 45 ,", driverCds: "1526" }));
+    expect(key[2]).toBe("2131,45");
+    expect(key[3]).toBe("1526");
+  });
+
+  it("rejects non-numeric CD list entries", () => {
+    expect(() => buildDvrSearchKey(baseSearchParams({ vehicleCds: "abc" }))).toThrow("車輌CD");
+    expect(() => buildDvrSearchKey(baseSearchParams({ driverCds: "1;DROP" }))).toThrow("乗務員CD");
+  });
+
+  it("accepts a driver-only search", () => {
+    const key = buildDvrSearchKey({ start: "2026/07/03 18:06", rangeMinutes: 30, driverCds: "1526" });
+    expect(key[2]).toBe("");
+    expect(key[3]).toBe("1526");
+  });
+
+  it("converts lat/lng degrees to arc-seconds (negative for south/west)", () => {
+    const key = buildDvrSearchKey({
+      start: "2026/07/03 18:06",
+      rangeMinutes: 30,
+      latitude: 32.478749,
+      longitude: -130.098251,
+      radiusM: 500,
+    });
+    expect(key[4]).toBe(String(Math.round(32.478749 * 3600)));
+    expect(key[5]).toBe(String(Math.round(-130.098251 * 3600)));
+    expect(key[6]).toBe("500");
+  });
+
+  it("accepts a lat/lng search where only one axis is zero", () => {
+    const key = buildDvrSearchKey({ start: "2026/07/03 18:06", rangeMinutes: 30, latitude: 0, longitude: 130 });
+    expect(key[4]).toBe("0");
+    expect(key[5]).toBe("468000");
+  });
+
+  it("treats lat=0 lng=0 as not specified (real page sends empty strings)", () => {
+    const key = buildDvrSearchKey(baseSearchParams({ latitude: 0, longitude: 0 }));
+    expect(key[4]).toBe("");
+    expect(key[5]).toBe("");
+  });
+
+  it("rejects a half-specified lat/lng pair", () => {
+    expect(() => buildDvrSearchKey(baseSearchParams({ latitude: 32.5 }))).toThrow("緯度・経度の両方");
+    expect(() => buildDvrSearchKey(baseSearchParams({ longitude: 130.1 }))).toThrow("緯度・経度の両方");
+  });
+
+  it("rejects out-of-range or non-finite lat/lng", () => {
+    expect(() => buildDvrSearchKey(baseSearchParams({ latitude: Number.NaN, longitude: 130 }))).toThrow("範囲外");
+    expect(() => buildDvrSearchKey(baseSearchParams({ latitude: 91, longitude: 130 }))).toThrow("範囲外");
+    expect(() => buildDvrSearchKey(baseSearchParams({ latitude: 32, longitude: Number.NaN }))).toThrow("範囲外");
+    expect(() => buildDvrSearchKey(baseSearchParams({ latitude: 32, longitude: 181 }))).toThrow("範囲外");
+  });
+
+  it("requires at least one of vehicle / driver / lat-lng", () => {
+    expect(() => buildDvrSearchKey({ start: "2026/07/03 18:06", rangeMinutes: 30 })).toThrow(
+      "車輌・乗務員・位置範囲のいずれか",
+    );
+    // lat=0 lng=0 は「未指定」扱いなので、これ単独でも弾かれる
+    expect(() =>
+      buildDvrSearchKey({ start: "2026/07/03 18:06", rangeMinutes: 30, latitude: 0, longitude: 0 }),
+    ).toThrow("車輌・乗務員・位置範囲のいずれか");
+  });
+
+  it("rejects an invalid radiusM", () => {
+    expect(() => buildDvrSearchKey(baseSearchParams({ radiusM: 0 }))).toThrow("位置範囲 [m]");
+    expect(() => buildDvrSearchKey(baseSearchParams({ radiusM: Number.NaN }))).toThrow("位置範囲 [m]");
+  });
+
+  it("encodes partial flag groups (warning flag is duplicated per the real page)", () => {
+    const key = buildDvrSearchKey(
+      baseSearchParams({
+        dvrTypes: { warning: false, always: true, emergency: false },
+        runStates: { running: true, stopped: false },
+        roadTypes: { general: false, highway: true, exclusive: false },
+      }),
+    );
+    expect(key[7]).toBe("0,0,1,0");
+    expect(key[8]).toBe("1,0");
+    expect(key[9]).toBe("0,1,0");
+  });
+
+  it("rejects flag groups where nothing is selected", () => {
+    expect(() =>
+      buildDvrSearchKey(baseSearchParams({ dvrTypes: { warning: false, always: false, emergency: false } })),
+    ).toThrow("映像種別");
+    expect(() =>
+      buildDvrSearchKey(baseSearchParams({ runStates: { running: false, stopped: false } })),
+    ).toThrow("走行状態");
+    expect(() =>
+      buildDvrSearchKey(baseSearchParams({ roadTypes: { general: false, highway: false, exclusive: false } })),
+    ).toThrow("道路種別");
+  });
+
+  it("exposes DvrSearchParamError as a named TheearthClientError subclass", () => {
+    try {
+      buildDvrSearchKey({ start: "bad", rangeMinutes: 30 });
+      expect.unreachable("should have thrown");
+    } catch (e) {
+      expect(e).toBeInstanceOf(TheearthClientError);
+      expect((e as Error).name).toBe("DvrSearchParamError");
+    }
+  });
+});
+
+describe("searchDvrData", () => {
+  it("parses the real theearth shape and maps search-specific columns", async () => {
+    // Refs #90 実データ (Request_DvrDataList): d = ["7", "<行JSON文字列>"]
+    const rows = [
+      {
+        DataType: "常時",
+        DataTypeCD: 12,
+        DriverCD: 1526,
+        DriverName: "陣内　尚仁",
+        DvrDatetime: "2026/07/03 18:32:26",
+        EventType: "",
+        EventTypeCD: 0,
+        EventValue: "0",
+        FileDownload: "",
+        FileName: "20260703_094244-0-0-2131-20260703_183226-I.vdf",
+        FilePath: "",
+        FileReceive: "fa fa-file-video-o fa-icon-green fa-prcs-0-0 fa-lg",
+        Flag: "fa fa-check fa-lg fa-icon-transGreen",
+        Latitude: 32478749,
+        Longitude: 130098251,
+        PlaceName: "長崎県雲仙市愛野町浜",
+        Revo: 670,
+        RoadType: "一般",
+        RowIndex: 0,
+        RunState: "走行",
+        SerialNo: "AX0605008014440",
+        Speed: 24,
+        VehicleCD: 2131,
+        VehicleName: "長崎800か2131",
+      },
+    ];
+    const fetchImpl = sequenceFetch([jsonResponse({ d: ["1", JSON.stringify(rows)] })]);
+    const jar = createCookieJar();
+    const result = await searchDvrData(jar, buildDvrSearchKey(baseSearchParams()), fetchImpl);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      vehicleCd: "2131",
+      vehicleName: "長崎800か2131",
+      serialNo: "AX0605008014440",
+      fileName: "20260703_094244-0-0-2131-20260703_183226-I.vdf",
+      dvrDatetime: "2026/07/03 18:32:26",
+      driverName: "陣内　尚仁",
+      latitude: 32.478749,
+      longitude: 130.098251,
+      receiveState: "requestable",
+      dataType: "常時",
+      runState: "走行",
+      roadType: "一般",
+      placeName: "長崎県雲仙市愛野町浜",
+      speed: 24,
+    });
+  });
+
+  it("coerces a string Speed and null-fills missing search columns", async () => {
+    const rows = [
+      { SerialNo: "SN1", FileName: "f1", Speed: "12.5" },
+      { SerialNo: "SN2", FileName: "f2", Speed: "not-a-number" },
+    ];
+    const fetchImpl = sequenceFetch([jsonResponse({ d: ["2", JSON.stringify(rows)] })]);
+    const jar = createCookieJar();
+    const result = await searchDvrData(jar, buildDvrSearchKey(baseSearchParams()), fetchImpl);
+    expect(result[0]).toMatchObject({ speed: 12.5, dataType: null, runState: null, roadType: null, placeName: null });
+    expect(result[1]).toMatchObject({ speed: null });
+  });
+
+  it("throws when the response shape is not row-like", async () => {
+    const fetchImpl = sequenceFetch([jsonResponse({ d: "unexpected" })]);
+    const jar = createCookieJar();
+    await expect(searchDvrData(jar, buildDvrSearchKey(baseSearchParams()), fetchImpl)).rejects.toThrow(
+      "Request_DvrDataList のレスポンス形式",
+    );
+  });
+});
+
+describe("getDvrMasters", () => {
+  // Refs #90 実データ: d = [事業所JSON, 車輌JSON, 乗務員JSON, 通知件数, 通知行JSON, 設定]
+  const BRANCHES = JSON.stringify([{ code: "00000001", name: "大石運輸倉庫㈱　本社営業所" }]);
+  const VEHICLES = JSON.stringify([{ code: 11, link: "00000007", name: "十勝800か11" }]);
+  const DRIVERS = JSON.stringify([{ code: 1009, link: "00000001", name: "長谷川  明" }]);
+
+  it("parses the real 6-element response into branches/vehicles/drivers", async () => {
+    const fetchImpl = sequenceFetch([jsonResponse({ d: [BRANCHES, VEHICLES, DRIVERS, "4", "[]", ""] })]);
+    const jar = createCookieJar();
+    const masters = await getDvrMasters(jar, fetchImpl);
+    expect(masters).toEqual({
+      branches: [{ code: "00000001", name: "大石運輸倉庫㈱　本社営業所" }],
+      vehicles: [{ code: "11", link: "00000007", name: "十勝800か11" }],
+      drivers: [{ code: "1009", link: "00000001", name: "長谷川  明" }],
+    });
+  });
+
+  it("null-fills missing code/link/name fields", async () => {
+    const fetchImpl = sequenceFetch([
+      jsonResponse({ d: [JSON.stringify([{}]), JSON.stringify([{ code: 5 }]), JSON.stringify([{ name: "x" }])] }),
+    ]);
+    const jar = createCookieJar();
+    const masters = await getDvrMasters(jar, fetchImpl);
+    expect(masters.branches).toEqual([{ code: "", name: "" }]);
+    expect(masters.vehicles).toEqual([{ code: "5", link: null, name: "" }]);
+    expect(masters.drivers).toEqual([{ code: "", link: null, name: "x" }]);
+  });
+
+  it("throws when d is not an array or too short", async () => {
+    const jar = createCookieJar();
+    await expect(getDvrMasters(jar, sequenceFetch([jsonResponse({ d: "x" })]))).rejects.toThrow(
+      "Request_NetDvrFuncInitValue の応答形式",
+    );
+    await expect(getDvrMasters(jar, sequenceFetch([jsonResponse({ d: [BRANCHES, VEHICLES] })]))).rejects.toThrow(
+      "Request_NetDvrFuncInitValue の応答形式",
+    );
+  });
+
+  it("throws when a master element is not a string / not JSON / not an array", async () => {
+    const jar = createCookieJar();
+    await expect(getDvrMasters(jar, sequenceFetch([jsonResponse({ d: [1, VEHICLES, DRIVERS] })]))).rejects.toThrow(
+      "文字列ではありません",
+    );
+    await expect(
+      getDvrMasters(jar, sequenceFetch([jsonResponse({ d: [BRANCHES, "{broken", DRIVERS] })])),
+    ).rejects.toThrow("JSON として parse できませんでした");
+    await expect(
+      getDvrMasters(jar, sequenceFetch([jsonResponse({ d: [BRANCHES, VEHICLES, "{}"] })])),
+    ).rejects.toThrow("配列ではありません");
+  });
+});
+
+describe("requestDvrFileTransferMulti", () => {
+  it("joins serials/filenames with commas and returns the result code", async () => {
+    let requestBody: string | undefined;
+    const fetchImpl: FetchLike = async (_url, init) => {
+      requestBody = init?.body as string;
+      return jsonResponse({ d: [2, "ok"] });
+    };
+    const jar = createCookieJar();
+    const result = await requestDvrFileTransferMulti(jar, ["SN1", "SN2"], ["f1.vdf", "f2.vdf"], fetchImpl);
+    expect(result.code).toBe(2);
+    expect(JSON.parse(requestBody!)).toEqual({ key1: "SN1,SN2", key2: "f1.vdf,f2.vdf" });
+  });
+
+  it("accepts a scalar (non-array) result code", async () => {
+    const jar = createCookieJar();
+    const result = await requestDvrFileTransferMulti(jar, ["SN1"], ["f1"], sequenceFetch([jsonResponse({ d: "3" })]));
+    expect(result.code).toBe(3);
+  });
+
+  it("returns -1 when the result code is not numeric", async () => {
+    const jar = createCookieJar();
+    const result = await requestDvrFileTransferMulti(
+      jar,
+      ["SN1"],
+      ["f1"],
+      sequenceFetch([jsonResponse({ d: ["abc"] })]),
+    );
+    expect(result.code).toBe(-1);
+  });
+
+  it("rejects empty or mismatched serial/filename lists without fetching", async () => {
+    const fetchImpl = vi.fn();
+    const jar = createCookieJar();
+    await expect(requestDvrFileTransferMulti(jar, [], [], fetchImpl as unknown as FetchLike)).rejects.toThrow(
+      DvrSearchParamError,
+    );
+    await expect(
+      requestDvrFileTransferMulti(jar, ["SN1"], ["f1", "f2"], fetchImpl as unknown as FetchLike),
+    ).rejects.toThrow("同数");
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

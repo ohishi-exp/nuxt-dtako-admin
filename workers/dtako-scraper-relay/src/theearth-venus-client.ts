@@ -230,6 +230,322 @@ export async function getDvrNotifications(
   }));
 }
 
+// --- DVR 映像検索 (Request_DvrDataList、Refs #90 実ページ J-AAV0100 の
+// igButton_dvrdata_click / igGrid_dvrdata2_Refresh_callback を cdp トレースして確定) ---
+//
+// 検索キーは string[10]:
+//   [0] 開始日時 "YYYY/MM/DD HH:mm"   [1] 終了日時 (開始 + 範囲分)
+//   [2] 車輌CD (カンマ区切り可)        [3] 乗務員CD (カンマ区切り可)
+//   [4] 緯度 (度×3600 の秒整数、S は負) [5] 経度 (同、W は負)。未指定は両方 ""
+//   [6] 位置範囲 [m]                   [7] 映像種別 "警告,警告,常時,緊急" の 4 フラグ
+//   [8] 走行状態 "走行,停車"           [9] 道路種別 "一般,高速,専用"
+// 実測例: ["2026/07/03 18:06","2026/07/03 18:36","2131","","","","300","1,1,1,1","1,1","1,1,1"]
+// 応答は Monitoring_DvrNotification2 と同じ ["<件数>", "<行JSON文字列>"]。
+
+/** 検索パラメータの検証エラー (呼び出し側で 400 にマップする)。 */
+export class DvrSearchParamError extends TheearthClientError {
+  constructor(message: string) {
+    super(message);
+    this.name = "DvrSearchParamError";
+  }
+}
+
+export interface DvrSearchParams {
+  /** 開始日時 "YYYY/MM/DD HH:mm" (theearth サーバーローカル = JST)。 */
+  start: string;
+  /** 検索範囲 (分)。開始日時 + 範囲 = 終了日時。 */
+  rangeMinutes: number;
+  /** 車輌CD (カンマ区切りで複数可)。車輌/乗務員/位置範囲のいずれか 1 つは必須。 */
+  vehicleCds?: string;
+  /** 乗務員CD (カンマ区切りで複数可)。 */
+  driverCds?: string;
+  /** 位置範囲の中心緯度 (度)。経度とペアで指定。 */
+  latitude?: number | null;
+  /** 位置範囲の中心経度 (度)。 */
+  longitude?: number | null;
+  /** 位置範囲の半径 [m] (既定 300)。 */
+  radiusM?: number;
+  /** 映像種別 (既定: 全て true)。最低 1 つは true。 */
+  dvrTypes?: { warning?: boolean; always?: boolean; emergency?: boolean };
+  /** 走行状態 (既定: 全て true)。最低 1 つは true。 */
+  runStates?: { running?: boolean; stopped?: boolean };
+  /** 道路種別 (既定: 全て true)。最低 1 つは true。 */
+  roadTypes?: { general?: boolean; highway?: boolean; exclusive?: boolean };
+}
+
+const DVR_SEARCH_DATETIME_RE = /^(\d{4})\/(\d{2})\/(\d{2}) (\d{2}):(\d{2})$/;
+
+/** "YYYY/MM/DD HH:mm" を naive な epoch ms に変換する (TZ 変換はしない — theearth
+ * サーバーローカル時刻の算術にだけ使う)。不正な日付 (2026/02/31 等) は null。 */
+function parseSearchDatetime(value: string): number | null {
+  const m = value.match(DVR_SEARCH_DATETIME_RE);
+  if (!m) return null;
+  const t = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]));
+  // Date.UTC は 2026/02/31 のような不正日付を黙って繰り上げる。round-trip して
+  // 入力と一致しなければ不正として弾く。
+  return formatSearchDatetime(t) === value ? t : null;
+}
+
+function formatSearchDatetime(t: number): string {
+  const dt = new Date(t);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${dt.getUTCFullYear()}/${pad(dt.getUTCMonth() + 1)}/${pad(dt.getUTCDate())} ${pad(dt.getUTCHours())}:${pad(dt.getUTCMinutes())}`;
+}
+
+/** カンマ区切りの CD リストを検証・正規化する (空白除去、空要素除去)。 */
+function normalizeCdList(value: string | undefined, label: string): string {
+  if (!value) return "";
+  const parts = value.split(",").map((p) => p.trim()).filter((p) => p !== "");
+  for (const p of parts) {
+    if (!/^\d+$/.test(p)) {
+      throw new DvrSearchParamError(`${label}は数値 (カンマ区切り可) で指定してください: "${p}"`);
+    }
+  }
+  return parts.join(",");
+}
+
+function flag(v: boolean | undefined, fallback: boolean): "0" | "1" {
+  return (v ?? fallback) ? "1" : "0";
+}
+
+/** 検索パラメータから Request_DvrDataList の key (string[10]) を組み立てる。
+ * 実ページと同じ必須条件 (車輌/乗務員/位置範囲のいずれか + 各チェック群最低 1 つ) を
+ * 検証し、満たさなければ DvrSearchParamError を投げる (pure、fetch しない)。 */
+export function buildDvrSearchKey(params: DvrSearchParams): string[] {
+  const startMs = parseSearchDatetime(params.start);
+  if (startMs === null) {
+    throw new DvrSearchParamError(`開始日時は "YYYY/MM/DD HH:mm" 形式で指定してください: "${params.start}"`);
+  }
+  const range = params.rangeMinutes;
+  if (!Number.isInteger(range) || range < 1 || range > 1440) {
+    throw new DvrSearchParamError(`範囲 [分] は 1〜1440 の整数で指定してください: ${range}`);
+  }
+
+  const vehicleCds = normalizeCdList(params.vehicleCds, "車輌CD");
+  const driverCds = normalizeCdList(params.driverCds, "乗務員CD");
+
+  const hasLat = params.latitude != null;
+  const hasLng = params.longitude != null;
+  if (hasLat !== hasLng) {
+    throw new DvrSearchParamError("位置範囲は緯度・経度の両方を指定してください");
+  }
+  let latSec = "";
+  let lngSec = "";
+  if (hasLat && hasLng) {
+    const lat = params.latitude!;
+    const lng = params.longitude!;
+    if (!Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lng) || Math.abs(lng) > 180) {
+      throw new DvrSearchParamError(`緯度経度が範囲外です: ${lat}, ${lng}`);
+    }
+    // 実ページは 度×3600 + 分×60 + 秒 の秒単位整数 (南緯/西経は負) を送る。
+    latSec = String(Math.round(lat * 3600));
+    lngSec = String(Math.round(lng * 3600));
+  }
+  const hasLatLng = latSec !== "" && (latSec !== "0" || lngSec !== "0");
+  if (!hasLatLng) {
+    latSec = "";
+    lngSec = "";
+  }
+
+  if (!vehicleCds && !driverCds && !hasLatLng) {
+    throw new DvrSearchParamError("車輌・乗務員・位置範囲のいずれかは必ず指定してください");
+  }
+
+  const radiusM = params.radiusM ?? 300;
+  if (!Number.isFinite(radiusM) || radiusM < 1) {
+    throw new DvrSearchParamError(`位置範囲 [m] は正の数で指定してください: ${radiusM}`);
+  }
+
+  const w = flag(params.dvrTypes?.warning, true);
+  const a = flag(params.dvrTypes?.always, true);
+  const e = flag(params.dvrTypes?.emergency, true);
+  if (w === "0" && a === "0" && e === "0") {
+    throw new DvrSearchParamError("映像種別はいずれか 1 つ以上を指定してください");
+  }
+  const run = flag(params.runStates?.running, true);
+  const stop = flag(params.runStates?.stopped, true);
+  if (run === "0" && stop === "0") {
+    throw new DvrSearchParamError("走行状態はいずれか 1 つ以上を指定してください");
+  }
+  const general = flag(params.roadTypes?.general, true);
+  const highway = flag(params.roadTypes?.highway, true);
+  const exclusive = flag(params.roadTypes?.exclusive, true);
+  if (general === "0" && highway === "0" && exclusive === "0") {
+    throw new DvrSearchParamError("道路種別はいずれか 1 つ以上を指定してください");
+  }
+
+  return [
+    formatSearchDatetime(startMs),
+    formatSearchDatetime(startMs + range * 60_000),
+    vehicleCds,
+    driverCds,
+    latSec,
+    lngSec,
+    String(radiusM),
+    // 実ページの key[7] は先頭 2 フラグが同値 (警告を 2 回) の 4 要素
+    `${w},${w},${a},${e}`,
+    `${run},${stop}`,
+    `${general},${highway},${exclusive}`,
+  ];
+}
+
+const DVR_DATA_TYPE_CANDIDATES = ["DataType", "data_type"] as const;
+const DVR_RUN_STATE_CANDIDATES = ["RunState", "run_state"] as const;
+const DVR_ROAD_TYPE_CANDIDATES = ["RoadType", "road_type"] as const;
+const DVR_PLACE_NAME_CANDIDATES = ["PlaceName", "place_name"] as const;
+const DVR_SPEED_CANDIDATES = ["Speed", "speed"] as const;
+
+/** 映像検索の結果 1 行。通知一覧 (DvrNotification) と同じ受信/DL フローに乗せられる
+ * よう同フィールドを持ち、検索固有の列 (映像種別/走行/道路/地点/速度) を足したもの。 */
+export interface DvrSearchRow extends DvrNotification {
+  /** 映像種別 (常時/警告/緊急ボタン)。 */
+  dataType: string | null;
+  /** 走行状態 (走行/停車)。 */
+  runState: string | null;
+  /** 道路種別 (一般/高速/専用)。 */
+  roadType: string | null;
+  /** 地点名。 */
+  placeName: string | null;
+  /** 速度 [km/h]。 */
+  speed: number | null;
+}
+
+function pickNumberField(record: Record<string, unknown>, candidates: readonly string[]): number | null {
+  for (const key of candidates) {
+    if (key in record && record[key] != null) {
+      const v = record[key];
+      const n = typeof v === "number" ? v : Number(v);
+      if (!Number.isNaN(n)) return n;
+    }
+  }
+  return null;
+}
+
+/** `Request_DvrDataList(key)` で映像検索する。key は buildDvrSearchKey の戻り値。 */
+export async function searchDvrData(
+  jar: CookieJar,
+  key: string[],
+  fetchImpl: FetchLike = fetch,
+): Promise<DvrSearchRow[]> {
+  const d = await callVenusBridgeMethod(jar, "Request_DvrDataList", { key }, fetchImpl);
+
+  const items = toItemArray(d);
+  if (!items) {
+    throw new TheearthClientError(
+      `Request_DvrDataList のレスポンス形式が想定と異なります: ${JSON.stringify(d).slice(0, 300)}`,
+    );
+  }
+
+  return items.map((raw) => ({
+    raw,
+    vehicleCd: pickStringField(raw, DVR_VEHICLE_CD_CANDIDATES),
+    vehicleName: pickStringField(raw, DVR_VEHICLE_NAME_CANDIDATES),
+    serialNo: pickStringField(raw, DVR_SERIAL_NO_CANDIDATES),
+    fileName: pickStringField(raw, DVR_FILE_NAME_CANDIDATES),
+    filePath: pickStringField(raw, DVR_FILE_PATH_CANDIDATES),
+    eventType: pickStringField(raw, DVR_EVENT_TYPE_CANDIDATES),
+    dvrDatetime: pickStringField(raw, DVR_DATETIME_CANDIDATES),
+    driverName: pickStringField(raw, DVR_DRIVER_NAME_CANDIDATES),
+    latitude: pickDegreeField(raw, DVR_LAT_CANDIDATES),
+    longitude: pickDegreeField(raw, DVR_LNG_CANDIDATES),
+    receiveState: parseReceiveState(pickStringField(raw, DVR_FILE_RECEIVE_CANDIDATES)),
+    dataType: pickStringField(raw, DVR_DATA_TYPE_CANDIDATES),
+    runState: pickStringField(raw, DVR_RUN_STATE_CANDIDATES),
+    roadType: pickStringField(raw, DVR_ROAD_TYPE_CANDIDATES),
+    placeName: pickStringField(raw, DVR_PLACE_NAME_CANDIDATES),
+    speed: pickNumberField(raw, DVR_SPEED_CANDIDATES),
+  }));
+}
+
+// --- 検索フォーム用マスタ (Request_NetDvrFuncInitValue、Refs #90 実 API 検証済み) ---
+//
+// d = [事業所JSON, 車輌JSON, 乗務員JSON, 通知件数, 通知行JSON, 設定] の 6 要素。
+// 車輌/乗務員は {code, link (所属事業所 code), name}。
+
+export interface DvrMasterBranch {
+  code: string;
+  name: string;
+}
+
+export interface DvrMasterItem {
+  code: string;
+  /** 所属事業所の code (branches[].code に対応)。 */
+  link: string | null;
+  name: string;
+}
+
+export interface DvrMasters {
+  branches: DvrMasterBranch[];
+  vehicles: DvrMasterItem[];
+  drivers: DvrMasterItem[];
+}
+
+function parseMasterJson(value: unknown, label: string): Array<Record<string, unknown>> {
+  if (typeof value !== "string") {
+    throw new TheearthClientError(`Request_NetDvrFuncInitValue の${label}マスタが文字列ではありません`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new TheearthClientError(`Request_NetDvrFuncInitValue の${label}マスタを JSON として parse できませんでした`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new TheearthClientError(`Request_NetDvrFuncInitValue の${label}マスタが配列ではありません`);
+  }
+  return keepObjects(parsed);
+}
+
+/** 検索フォームのドロップダウン用に 事業所/車輌/乗務員 マスタを取得する。 */
+export async function getDvrMasters(
+  jar: CookieJar,
+  fetchImpl: FetchLike = fetch,
+): Promise<DvrMasters> {
+  const d = await callVenusBridgeMethod(jar, "Request_NetDvrFuncInitValue", {}, fetchImpl);
+  if (!Array.isArray(d) || d.length < 3) {
+    throw new TheearthClientError(
+      `Request_NetDvrFuncInitValue の応答形式が想定と異なります: ${JSON.stringify(d).slice(0, 200)}`,
+    );
+  }
+
+  const branches = parseMasterJson(d[0], "事業所").map((r) => ({
+    code: r.code != null ? String(r.code) : "",
+    name: r.name != null ? String(r.name) : "",
+  }));
+  const toItem = (r: Record<string, unknown>): DvrMasterItem => ({
+    code: r.code != null ? String(r.code) : "",
+    link: r.link != null ? String(r.link) : null,
+    name: r.name != null ? String(r.name) : "",
+  });
+  return {
+    branches,
+    vehicles: parseMasterJson(d[1], "車輌").map(toItem),
+    drivers: parseMasterJson(d[2], "乗務員").map(toItem),
+  };
+}
+
+/** `Request_DvrFileTransfer_MultiTarget(serialCSV, fileCSV)` で複数の映像ファイル転送を
+ * 一括要求する (映像検索グリッドの「選択行要求」相当。実ページは車輌絞込検索時の単一行
+ * 要求にもこれを使う)。応答の先頭要素を結果コードとして返す (>0 で受理)。 */
+export async function requestDvrFileTransferMulti(
+  jar: CookieJar,
+  serialNos: string[],
+  fileNames: string[],
+  fetchImpl: FetchLike = fetch,
+): Promise<{ code: number; raw: unknown }> {
+  if (serialNos.length === 0 || serialNos.length !== fileNames.length) {
+    throw new DvrSearchParamError("serial と filename は同数で 1 件以上指定してください");
+  }
+  const d = await callVenusBridgeMethod(
+    jar,
+    "Request_DvrFileTransfer_MultiTarget",
+    { key1: serialNos.join(","), key2: fileNames.join(",") },
+    fetchImpl,
+  );
+  const code = Array.isArray(d) ? Number(d[0]) : Number(d);
+  return { code: Number.isNaN(code) ? -1 : code, raw: d };
+}
+
 // --- DVR 動画ファイル (VenusBridge 経由、Refs #90 実ページ検証済み) ---
 //
 // ダウンロードパスは通知行から決定論的に組み立てられない (browser-render-rust#14 の
