@@ -228,14 +228,14 @@ export function buildSpeedChartData(
 /** JST 暦日キー (`YYYY-MM-DD`) を UNIX epoch 秒から求める。
  *  net780 の ts は「JST 壁時計をそのまま UNIX epoch として格納した値」
  *  (formatNet780Ts 参照) なので TZ シフトせず UTC getter で読む。 */
-function net780DateKey(ts: number): string {
+export function net780DateKey(ts: number): string {
   const d = new Date(ts * 1000)
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`
 }
 
 /** JST 暦日キー (`YYYY-MM-DD`) のその日 00:00:00 の UNIX epoch 秒を返す。 */
-function net780DateStartTs(dateKey: string): number {
+export function net780DateStartTs(dateKey: string): number {
   const [y, m, d] = dateKey.split('-').map(Number)
   return Date.UTC(y!, m! - 1, d!) / 1000
 }
@@ -244,6 +244,8 @@ export interface DailySpeedChart {
   /** JST 暦日 (`YYYY-MM-DD`) */
   date: string
   chart: SpeedChartData
+  /** その日 00:00:00 (JST) の UNIX epoch 秒。チャート x 座標の逆算 (シーク) に使う。 */
+  dayStart: number
 }
 
 /**
@@ -289,7 +291,55 @@ export function buildDailySpeedCharts(
       dayStart,
       dayStart + 24 * 60 * 60,
     )
-    if (chart) result.push({ date, chart })
+    if (chart) result.push({ date, chart, dayStart })
   }
   return result
+}
+
+export interface DailyGpsPoints {
+  /** JST 暦日 (`YYYY-MM-DD`) */
+  date: string
+  points: Net780GpsPoint[]
+}
+
+/**
+ * GPS 位置情報を JST 暦日ごとに分割する (buildDailySpeedCharts と同じ日付境界)。
+ * GPS 未捕捉時の `(0,0)` プレースホルダー (lat/lon とも 0) は地図表示上ノイズに
+ * なるだけなので除外する。
+ */
+export function buildDailyGpsPoints(points: Net780GpsPoint[]): DailyGpsPoints[] {
+  const valid = points.filter(p => p.lat !== 0 || p.lon !== 0)
+  if (valid.length === 0) return []
+
+  const byDate = new Map<string, Net780GpsPoint[]>()
+  for (const p of valid) {
+    const date = net780DateKey(p.ts)
+    let arr = byDate.get(date)
+    if (!arr) {
+      arr = []
+      byDate.set(date, arr)
+    }
+    arr.push(p)
+  }
+
+  return [...byDate.keys()].sort().map(date => ({ date, points: byDate.get(date)! }))
+}
+
+/**
+ * 日次チャート上の x 座標比率 (0..1、viewBox 全幅に対する割合) を、その日の
+ * 絶対時刻 (UNIX epoch 秒) に変換する。`buildSpeedChartData` の
+ * `x = padding + ((t - dayStart) / 86400) * innerW` の逆変換 (シーク用)。
+ * `dayStart` 〜 `dayStart + 86400` にクランプする。
+ */
+export function chartXRatioToTime(
+  ratio: number,
+  dayStart: number,
+  chartWidth: number,
+  padding: number,
+): number {
+  const innerW = chartWidth - padding * 2
+  const x = ratio * chartWidth
+  const frac = innerW > 0 ? (x - padding) / innerW : 0
+  const clamped = Math.min(1, Math.max(0, frac))
+  return dayStart + clamped * 24 * 60 * 60
 }

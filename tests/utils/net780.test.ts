@@ -1,6 +1,16 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { parseNet780Zip, net780EventCodeHex, downsampleSpeed, formatNet780Ts, buildSpeedChartData, buildDailySpeedCharts } from '~/utils/net780'
-import type { Net780ParseResult, Net780SpeedPoint } from '~/utils/net780'
+import {
+  parseNet780Zip,
+  net780EventCodeHex,
+  downsampleSpeed,
+  formatNet780Ts,
+  buildSpeedChartData,
+  buildDailySpeedCharts,
+  buildDailyGpsPoints,
+  chartXRatioToTime,
+  net780DateStartTs,
+} from '~/utils/net780'
+import type { Net780ParseResult, Net780SpeedPoint, Net780GpsPoint } from '~/utils/net780'
 import { __setMockResult, __setMockError, __reset } from '../mocks/net780-wasm'
 
 afterEach(() => {
@@ -208,5 +218,53 @@ describe('buildDailySpeedCharts', () => {
     // 24h 固定幅で正規化: 6時 → 25.0 (6/24*100)、0.5 秒後はほぼ同じ位置
     expect(xs[0]).toBeCloseTo(25.0, 1)
     expect(xs[1]).toBeCloseTo(25.0, 1)
+  })
+})
+
+describe('buildDailyGpsPoints', () => {
+  it('点が無ければ空配列を返す', () => {
+    expect(buildDailyGpsPoints([])).toEqual([])
+  })
+
+  it('(0,0) の GPS 未捕捉プレースホルダーを除外する', () => {
+    const day1 = net780DateStartTs('2026-07-01') + 6 * 3600
+    const points: Net780GpsPoint[] = [
+      { ts: day1, lat: 0, lon: 0 },
+      { ts: day1 + 1, lat: 32.75, lon: 129.87 },
+    ]
+    const daily = buildDailyGpsPoints(points)
+    expect(daily).toHaveLength(1)
+    expect(daily[0]!.points).toHaveLength(1)
+    expect(daily[0]!.points[0]!.lat).toBe(32.75)
+  })
+
+  it('JST 暦日ごとに分割し、日付昇順で返す', () => {
+    const day1 = net780DateStartTs('2026-07-01') + 6 * 3600
+    const day2 = net780DateStartTs('2026-07-02') + 6 * 3600
+    const points: Net780GpsPoint[] = [
+      { ts: day2, lat: 33, lon: 130 },
+      { ts: day1, lat: 32, lon: 129 },
+    ]
+    const daily = buildDailyGpsPoints(points)
+    expect(daily.map(d => d.date)).toEqual(['2026-07-01', '2026-07-02'])
+  })
+})
+
+describe('chartXRatioToTime', () => {
+  const dayStart = net780DateStartTs('2026-07-01')
+
+  it('ratio=0 は dayStart、ratio=1 は dayStart+24h になる', () => {
+    expect(chartXRatioToTime(0, dayStart, 800, 8)).toBe(dayStart)
+    expect(chartXRatioToTime(1, dayStart, 800, 8)).toBe(dayStart + 24 * 60 * 60)
+  })
+
+  it('ratio=0.5 は正午 (dayStart+12h) 付近になる', () => {
+    const t = chartXRatioToTime(0.5, dayStart, 800, 8)
+    expect(t).toBeCloseTo(dayStart + 12 * 60 * 60, 0)
+  })
+
+  it('範囲外の ratio は dayStart〜dayStart+24h にクランプされる', () => {
+    expect(chartXRatioToTime(-1, dayStart, 800, 8)).toBe(dayStart)
+    expect(chartXRatioToTime(2, dayStart, 800, 8)).toBe(dayStart + 24 * 60 * 60)
   })
 })
