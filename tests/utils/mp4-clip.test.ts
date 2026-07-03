@@ -105,6 +105,18 @@ describe('extractMp4TimeRange', () => {
     }
   })
 
+  it('duration が 0 のままにならず、切り出した実際の長さを反映する (シークバーが動くために必要)', async () => {
+    // duration=0 のままだと Chrome の <video controls> のシークバーが「総尺不明」として
+    // 動かなくなる (実機で確認済み)。mvhd/tkhd/mdhd に実際の長さを書き込んでいるはず。
+    const blob = extractMp4TimeRange(cloneSource(), 0.5, 1.5)
+    const info = await parseStructure(blob)
+    expect(info.duration).toBeGreaterThan(0)
+    expect(info.duration / info.timescale).toBeGreaterThan(0.5)
+    for (const track of info.tracks) {
+      expect(track.duration).toBeGreaterThan(0)
+    }
+  })
+
   it('MP4 として解釈できないデータには例外を投げる (呼び出し側のフォールバック契機)', () => {
     const garbage = new Uint8Array(64).buffer
     expect(() => extractMp4TimeRange(garbage, 0, 1)).toThrow()
