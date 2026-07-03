@@ -156,6 +156,16 @@ function markerIndexOfState(row: VehicleStatePoint): number | null {
   return idx >= 0 ? idx : null
 }
 
+/** 現在地行のダブルクリック → その車輌の動態履歴 (当日) を検索して履歴タブへ。 */
+function openTrackForVehicle(v: VehicleStatePoint) {
+  if (!v.vehicleCd) return
+  trackForm.vehicleCd = v.vehicleCd
+  trackForm.startDay = todayDateInput()
+  trackForm.endDay = todayDateInput()
+  activeTab.value = 'track'
+  loadTrack()
+}
+
 // --- 動態履歴 (VehicleStateTable) ---
 
 /** date input (YYYY-MM-DD) の既定値 = 今日。 */
@@ -430,7 +440,9 @@ onMounted(() => {
                           selectedStateIndex !== null && selectedStateIndex === markerIndexOfState(v) ? '!bg-blue-100 dark:!bg-blue-950' : '',
                         ]
                       : 'text-gray-400'"
+                    :title="'ダブルクリックで当日の動態履歴を検索'"
                     @click="selectedStateIndex = markerIndexOfState(v)"
+                    @dblclick="openTrackForVehicle(v)"
                   >
                     <td class="py-1 px-2 whitespace-nowrap font-medium border-r border-gray-200 dark:border-gray-800">{{ v.vehicleName ?? '-' }}</td>
                     <td class="py-1 px-2 whitespace-nowrap border-r border-gray-200 dark:border-gray-800">{{ v.driverName ?? '-' }}</td>
@@ -456,7 +468,7 @@ onMounted(() => {
               </p>
             </div>
             <p class="text-xs text-gray-400 mt-2">
-              行をクリックすると地図がその車輌に移動します。
+              行クリックで地図がその車輌に移動、ダブルクリックで当日の動態履歴を検索します。
             </p>
           </UCard>
         </template>
