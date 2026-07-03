@@ -28,6 +28,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { decideRelayAuth, type IntrospectResult } from "./auth-decision";
 import { scrapeViaHttp, TheearthClientError } from "./theearth-client";
+import { uploadDtakoZip, type DeviceCredential } from "./device-upload";
 
 /** `DTAKO_ACCOUNTS` (dtako-scraper の Rust 版と同一 JSON shape) の1エントリ。 */
 interface DtakoAccountRaw {
@@ -35,6 +36,13 @@ interface DtakoAccountRaw {
   user_name: string;
   user_pass: string;
   tenant_id: string;
+}
+
+/** `DTAKO_DEVICE_CREDENTIALS` (dtako-scraper の Rust 版 `DeviceCredential` map と
+ * 同一 JSON shape、`{tenant_id: {device_id, device_secret}}`) の1エントリ。 */
+interface DeviceCredentialRaw {
+  device_id: string;
+  device_secret: string;
 }
 
 interface StoredZip {
@@ -82,6 +90,15 @@ export interface RelayEnv {
    * WS 経由でその旨をエラー通知する (fail-closed、クラッシュはしない)。
    */
   DTAKO_ACCOUNTS?: unknown;
+  /**
+   * dtako-scraper の Rust 版 `DTAKO_DEVICE_CREDENTIALS` と同一 JSON shape
+   * (`{tenant_id: {device_id, device_secret}}`) の CF Secrets Store binding。
+   * 取得した zip を rust-alc-api に自動アップロードするために使う
+   * (auth-worker `/device/token` + `/device-data-proxy/api/upload`、
+   * `./device-upload.ts` 参照)。未設定の間は自動アップロードをスキップし、
+   * 手動ダウンロード用の zip_url だけを返す (fail-closed ではなく機能低下のみ)。
+   */
+  DTAKO_DEVICE_CREDENTIALS?: unknown;
 }
 
 export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
@@ -289,6 +306,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         },
       );
 
+      // 手動ダウンロード用に常に保存 (自動アップロードの成否に関わらず、監査/リトライ用に残す)。
       const requestId = crypto.randomUUID();
       await this.ctx.storage.put<StoredZip>(`zip:${requestId}`, {
         compId: params.compId,
@@ -299,14 +317,43 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       if (currentAlarm === null) {
         await this.ctx.storage.setAlarm(Date.now() + ZIP_TTL_MS);
       }
+      const zipUrl = `/scraper-zip/${encodeURIComponent(params.compId)}/${requestId}`;
+
+      // rust-alc-api への自動アップロード (dtako-scraper の Rust 版と同じ device
+      // credential 経由アップロード)。DTAKO_DEVICE_CREDENTIALS 未設定の間は機能低下
+      // (zip ダウンロードのみ) として扱い、fail-closed にはしない。
+      const deviceCredential = await this.resolveDeviceCredential(account.tenant_id);
+      let resultStatus: "success" | "error" = "success";
+      let resultMessage: string;
+      if (deviceCredential) {
+        this.sendSafely(server, { event: "progress", comp_id: params.compId, step: "upload" });
+        try {
+          const authWorkerUrl = this.env.NUXT_PUBLIC_AUTH_WORKER_URL || "https://auth.ippoan.org";
+          const uploadBody = await uploadDtakoZip(
+            authWorkerUrl,
+            deviceCredential,
+            account.tenant_id,
+            "csvdata.zip",
+            zip,
+          );
+          resultMessage = `アップロード完了: ${uploadBody.slice(0, 300)}`;
+        } catch (err) {
+          resultStatus = "error";
+          resultMessage = `zip取得は成功しましたが自動アップロードに失敗しました: ${
+            err instanceof Error ? err.message : "unknown error"
+          }`;
+        }
+      } else {
+        resultMessage = `${zip.byteLength} bytes (DTAKO_DEVICE_CREDENTIALS 未設定のため自動アップロードはスキップ、手動ダウンロードのみ)`;
+      }
 
       this.sendSafely(server, {
         event: "result",
         comp_id: params.compId,
         step: "done",
-        status: "success",
-        message: `${zip.byteLength} bytes`,
-        zip_url: `/scraper-zip/${encodeURIComponent(params.compId)}/${requestId}`,
+        status: resultStatus,
+        message: resultMessage,
+        zip_url: zipUrl,
       });
       this.sendSafely(server, { event: "done" });
       this.closeSafely(server, 1000, "done");
@@ -329,6 +376,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return null;
     }
     return accounts.find((a) => a.comp_id === compId) ?? null;
+  }
+
+  private async resolveDeviceCredential(tenantId: string): Promise<DeviceCredential | null> {
+    const raw = await resolveSecret(this.env.DTAKO_DEVICE_CREDENTIALS);
+    if (!raw) return null;
+    let map: Record<string, DeviceCredentialRaw>;
+    try {
+      map = JSON.parse(raw);
+    } catch {
+      console.error("DtakoScraperRelayDO: DTAKO_DEVICE_CREDENTIALS is not valid JSON");
+      return null;
+    }
+    const entry = map[tenantId];
+    if (!entry) return null;
+    return { deviceId: entry.device_id, deviceSecret: entry.device_secret };
   }
 
   /** `/scraper-zip/:compId/:requestId` — 1回だけ取得できる zip ダウンロード。 */
