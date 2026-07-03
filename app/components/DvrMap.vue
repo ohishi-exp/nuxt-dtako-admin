@@ -220,9 +220,15 @@ watch(() => [props.markers, props.track], redraw, { deep: true })
 
 watch(() => props.current, updateCurrentMarker)
 
+/** 行クリックで車輌に寄るときのズームレベル (広域表示から一気に街区レベルへ)。 */
+const SELECT_ZOOM = 15
+
 watch(() => props.selectedIndex, (idx) => {
   if (map && idx != null && props.markers[idx]) {
     map.panTo({ lat: props.markers[idx].lat, lng: props.markers[idx].lng })
+    // 全体表示 (広域) のままだとどの車か分からないので、選択時はズームインする。
+    // 既にそれ以上寄っている場合は維持 (ユーザーの手動ズームを壊さない)。
+    if ((map.getZoom() ?? 0) < SELECT_ZOOM) map.setZoom(SELECT_ZOOM)
   }
   // 一覧の行クリックで、その車のラベルだけ開き他は閉じる (排他)。
   showOnlyLabel(idx ?? null)
