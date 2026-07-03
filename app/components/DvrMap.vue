@@ -35,12 +35,22 @@ const loadError = ref<string | null>(null)
 let map: google.maps.Map | null = null
 let markerLib: google.maps.MarkerLibrary | null = null
 let markerObjs: google.maps.marker.AdvancedMarkerElement[] = []
+/** 各マーカーの折りたたみ 3 行ラベル (現在地のみ、他は null)。行選択で排他表示する。 */
+let markerLabelBoxes: (HTMLElement | null)[] = []
 let trackLine: google.maps.Polyline | null = null
 let currentMarker: google.maps.marker.AdvancedMarkerElement | null = null
+
+/** i 番目のマーカーのラベルだけ開き、他は閉じる (排他)。i が null なら全部閉じる。 */
+function showOnlyLabel(i: number | null) {
+  markerLabelBoxes.forEach((box, idx) => {
+    if (box) box.style.display = idx === i ? '' : 'none'
+  })
+}
 
 function clearOverlays() {
   for (const m of markerObjs) m.map = null
   markerObjs = []
+  markerLabelBoxes = []
   if (trackLine) {
     trackLine.setMap(null)
     trackLine = null
@@ -103,8 +113,8 @@ function dotEl(): HTMLElement {
 function labelBox(lines: string[]): HTMLElement {
   const box = document.createElement('div')
   box.style.cssText = 'background:#fff;border:1px solid #1d4ed8;border-radius:4px;'
-    + 'padding:1px 5px;font-size:10px;line-height:1.35;white-space:nowrap;'
-    + 'box-shadow:0 1px 2px rgba(0,0,0,.35);text-align:center;color:#1e293b;'
+    + 'padding:2px 7px;font-size:15px;line-height:1.4;white-space:nowrap;'
+    + 'box-shadow:0 1px 3px rgba(0,0,0,.4);text-align:center;color:#1e293b;'
   for (const line of lines) {
     const row = document.createElement('div')
     row.textContent = line
@@ -122,29 +132,39 @@ function pillEl(label: string): HTMLElement {
   return div
 }
 
-function markerContent(m: DvrMapMarker): HTMLElement | undefined {
+/** マーカーの content HTML と、開閉対象の 3 行ラベル (無ければ null) を返す。 */
+function markerContent(m: DvrMapMarker): { el: HTMLElement | undefined, labelBox: HTMLElement | null } {
   const lines = m.lines?.filter(Boolean) ?? []
 
   // 現在地マーカー: アイコン (走行中=方向矢印 / 停車中=丸) を常時表示し、
-  // 3 行ラベルは初期非表示 → アイコンクリックで開閉する。
+  // 3 行ラベルは初期非表示 → アイコンクリック / 一覧の行クリックで開閉する。
   if (lines.length > 0) {
+    // position:relative の wrap にアイコンを通常配置し、ラベルは absolute で
+    // アイコンの下に浮かせる。こうすると開閉しても wrap の高さ (= マーカーの
+    // アンカー基準) が変わらず、アイコンが GPS 地点からずれない。
     const wrap = document.createElement('div')
-    wrap.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:1px;cursor:pointer;'
+    wrap.style.cssText = 'position:relative;display:flex;flex-direction:column;align-items:center;cursor:pointer;'
     wrap.appendChild(typeof m.direction === 'number' ? arrowEl(m.direction) : dotEl())
     const box = labelBox(lines)
     box.style.display = 'none'
+    box.style.position = 'absolute'
+    box.style.top = '100%'
+    box.style.left = '50%'
+    box.style.transform = 'translateX(-50%)'
+    box.style.marginTop = '2px'
+    box.style.zIndex = '10'
     wrap.addEventListener('click', (e) => {
       e.stopPropagation()
       box.style.display = box.style.display === 'none' ? '' : 'none'
     })
     wrap.appendChild(box)
-    return wrap
+    return { el: wrap, labelBox: box }
   }
 
   // 軌跡の始点/終点: 従来どおり青 pill を常時表示。
-  if (m.label) return pillEl(m.label)
-  if (typeof m.direction === 'number') return arrowEl(m.direction)
-  return undefined
+  if (m.label) return { el: pillEl(m.label), labelBox: null }
+  if (typeof m.direction === 'number') return { el: arrowEl(m.direction), labelBox: null }
+  return { el: undefined, labelBox: null }
 }
 
 function redraw() {
@@ -156,12 +176,14 @@ function redraw() {
 
   for (const m of props.markers) {
     const pos = { lat: m.lat, lng: m.lng }
+    const built = markerContent(m)
     markerObjs.push(new markerLib.AdvancedMarkerElement({
       position: pos,
       map,
       title: m.title,
-      content: markerContent(m),
+      content: built.el,
     }))
+    markerLabelBoxes.push(built.labelBox)
     bounds.extend(pos)
     hasAny = true
   }
@@ -200,6 +222,8 @@ watch(() => props.selectedIndex, (idx) => {
   if (map && idx != null && props.markers[idx]) {
     map.panTo({ lat: props.markers[idx].lat, lng: props.markers[idx].lng })
   }
+  // 一覧の行クリックで、その車のラベルだけ開き他は閉じる (排他)。
+  showOnlyLabel(idx ?? null)
 })
 
 onMounted(async () => {
