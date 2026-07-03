@@ -194,16 +194,31 @@ export interface DvrNotification {
   receiveState: DvrReceiveState;
 }
 
-/** 実データの Latitude/Longitude は度 × 1e6 の整数。度に変換する (既に度なら素通し)。 */
+/**
+ * theearth の緯度経度整数 (NMEA 由来の **DDMM 形式**: 度×1e6 + 分×1e4 + 分の小数×1e4)
+ * を十進度に変換する。実ページ J-GOS0100[MapEvent].js の `ConvertLatLngDDMMtoDD` の移植
+ * (2026-07-03 実機確定 — DVR 行 / 現在地 / 動態履歴すべてこの形式)。
+ * 例: 32478749 → 32°47.8749' → 32.7981。0 (GPS 未捕捉) と非数値は null。
+ * |値| ≤ 180 は既に度とみなして素通しする (DDMM は 1 度以上で必ず 1e6 を超えるため)。
+ */
+export function convertDdmmToDegrees(value: unknown): number | null {
+  const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (Number.isNaN(n) || n === 0) return null;
+  if (Math.abs(n) <= 180) return n;
+  const abs = Math.abs(n);
+  const deg = Math.floor(abs / 1_000_000);
+  const min = Math.floor(abs / 10_000) % 100;
+  const minFrac = (abs % 10_000) / 10_000;
+  const result = deg + (min + minFrac) / 60;
+  return n < 0 ? -result : result;
+}
+
+/** レコードから DDMM 形式の緯度/経度候補フィールドを拾って十進度に変換する。 */
 function pickDegreeField(record: Record<string, unknown>, candidates: readonly string[]): number | null {
   for (const key of candidates) {
     if (key in record) {
-      const v = record[key];
-      const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
-      if (!Number.isNaN(n) && n !== 0) {
-        // |緯度| ≤ 90 / |経度| ≤ 180 を超える大きさは 1e6 スケールとみなす。
-        return Math.abs(n) > 180 ? n / 1e6 : n;
-      }
+      const deg = convertDdmmToDegrees(record[key]);
+      if (deg !== null) return deg;
     }
   }
   return null;
@@ -554,6 +569,109 @@ export async function requestDvrFileTransferMulti(
   );
   const code = Array.isArray(d) ? Number(d[0]) : Number(d);
   return { code: Number.isNaN(code) ? -1 : code, raw: d };
+}
+
+// --- 車輌現在地 / 動態履歴 (2026-07-03 実機確定) ---
+//
+// - `VehicleStateTableForBranchEx(strBranchCD, strScrapCarDisp)` — VenusMain (位置情報)
+//   の車輌一覧。d は `VehicleSetStateData` の素オブジェクト配列 (通知一覧の
+//   [件数, JSON文字列] 形式ではない)。GPSLatitude/GPSLongitude は DDMM 形式。
+// - `VehicleStateTable(VehicleCD, dtmST, dtmED)` — F-DOV0010 (動態履歴) の GPS 軌跡。
+//   日付は "YYYY/MM/DD"。1 日で 150 点前後、各点 DataDateTime ("MM/DD HH:mm") + GPS。
+//
+// nuxt_dtako_logs の theearth-venus-client.ts は同メソッドを推測実装していたが、
+// フィールド名 (GPSLatitude/GPSLongitude) と DDMM スケールはここで確定した。
+
+/** 現在地 / 動態履歴の 1 点 (VehicleSetStateData のうち利用フィールドのみ)。 */
+export interface VehicleStatePoint {
+  vehicleCd: string | null;
+  vehicleName: string | null;
+  branchName: string | null;
+  driverName: string | null;
+  /** 十進度 (DDMM から変換済み)。GPS 未捕捉は null。 */
+  latitude: number | null;
+  longitude: number | null;
+  /** データ時刻 "MM/DD HH:mm" (theearth サーバーローカル)。 */
+  dataDatetime: string | null;
+  /** 通信時刻 "MM/DD HH:mm"。 */
+  comuDatetime: string | null;
+  speed: number | null;
+  revo: number | null;
+  /** 現在作業名 (現在地一覧のみ、履歴では null)。 */
+  currentWorkName: string | null;
+}
+
+const VS_SPEED_CANDIDATES = ["Speed"] as const;
+const VS_REVO_CANDIDATES = ["Revo"] as const;
+
+function mapVehicleStateRow(raw: Record<string, unknown>): VehicleStatePoint {
+  return {
+    vehicleCd: pickStringField(raw, DVR_VEHICLE_CD_CANDIDATES),
+    vehicleName: pickStringField(raw, DVR_VEHICLE_NAME_CANDIDATES),
+    branchName: pickStringField(raw, ["BranchName"]),
+    driverName: pickStringField(raw, DVR_DRIVER_NAME_CANDIDATES),
+    latitude: convertDdmmToDegrees(raw.GPSLatitude),
+    longitude: convertDdmmToDegrees(raw.GPSLongitude),
+    dataDatetime: pickStringField(raw, ["DataDateTime"]),
+    comuDatetime: pickStringField(raw, ["ComuDateTime"]),
+    speed: pickNumberField(raw, VS_SPEED_CANDIDATES),
+    revo: pickNumberField(raw, VS_REVO_CANDIDATES),
+    currentWorkName: pickStringField(raw, ["CurrentWorkName"]),
+  };
+}
+
+function assertVehicleStateArray(d: unknown, methodName: string): Array<Record<string, unknown>> {
+  if (!Array.isArray(d)) {
+    throw new TheearthClientError(
+      `${methodName} のレスポンス形式が想定と異なります (配列ではありません): ${JSON.stringify(d).slice(0, 200)}`,
+    );
+  }
+  return keepObjects(d);
+}
+
+/** 事業所単位の車輌現在地一覧 (`VehicleStateTableForBranchEx`)。branchCd は
+ * getDvrMasters の branches[].code ("00000001" 形式)。 */
+export async function getVehicleStates(
+  jar: CookieJar,
+  branchCd: string,
+  fetchImpl: FetchLike = fetch,
+): Promise<VehicleStatePoint[]> {
+  if (!/^\d+$/.test(branchCd)) {
+    throw new DvrSearchParamError(`事業所コードは数値で指定してください: "${branchCd}"`);
+  }
+  const d = await callVenusBridgeMethod(
+    jar,
+    "VehicleStateTableForBranchEx",
+    // strScrapCarDisp: 廃車表示フラグ (実ページ lblScrapCarDisp の値、通常 "0")
+    { strBranchCD: branchCd, strScrapCarDisp: "0" },
+    fetchImpl,
+  );
+  return assertVehicleStateArray(d, "VehicleStateTableForBranchEx").map(mapVehicleStateRow);
+}
+
+const VEHICLE_LOG_DAY_RE = /^\d{4}\/\d{2}\/\d{2}$/;
+
+/** 車輌 1 台の動態履歴 GPS 軌跡 (`VehicleStateTable`)。日付は "YYYY/MM/DD"。 */
+export async function getVehicleLogTrack(
+  jar: CookieJar,
+  vehicleCd: string,
+  startDay: string,
+  endDay: string,
+  fetchImpl: FetchLike = fetch,
+): Promise<VehicleStatePoint[]> {
+  if (!/^\d+$/.test(vehicleCd)) {
+    throw new DvrSearchParamError(`車輌CDは数値で指定してください: "${vehicleCd}"`);
+  }
+  if (!VEHICLE_LOG_DAY_RE.test(startDay) || !VEHICLE_LOG_DAY_RE.test(endDay)) {
+    throw new DvrSearchParamError('日付は "YYYY/MM/DD" 形式で指定してください');
+  }
+  const d = await callVenusBridgeMethod(
+    jar,
+    "VehicleStateTable",
+    { VehicleCD: vehicleCd, dtmST: startDay, dtmED: endDay },
+    fetchImpl,
+  );
+  return assertVehicleStateArray(d, "VehicleStateTable").map(mapVehicleStateRow);
 }
 
 // --- DVR 動画ファイル (VenusBridge 経由、Refs #90 実ページ検証済み) ---
