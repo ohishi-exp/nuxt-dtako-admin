@@ -180,9 +180,14 @@ dtako 運行ログ (csvdata.zip) の取得トリガー UI。実処理は `nuxt-d
 (= `vpc-relay` のまま)。`http` に切り替えるには以下の運用手順が別途必要:
 
 1. `DTAKO_ACCOUNTS` (dtako-scraper の Rust 版 `DTAKO_ACCOUNTS` env と同一 JSON shape:
-   `[{comp_id, user_name, user_pass, tenant_id}, ...]`) を CF Secrets Store に投入し、
-   `workers/dtako-scraper-relay/wrangler.toml` に `secrets_store_secrets` binding を
-   追加する (`secret-inject` skill 使用、値をコード/会話に出さない)
+   `[{comp_id, user_name, user_pass, tenant_id}, ...]`) は **`wrangler.toml` にも
+   Secrets Store にも置かず**、Cloudflare dashboard の Worker
+   (`nuxt-dtako-admin-scraper-relay`) → Settings → Variables and Secrets から
+   **plain Environment Variable** (Secret ではなく Variable) として直接追加する。
+   値を見ながら設定・確認できることを優先した意図的な選択 (org 標準の Secrets Store
+   write-only 運用からの逸脱だが、`wrangler.toml`/git 履歴には平文が残らない)。
+   `DtakoScraperRelayDO` の `resolveSecret()` は文字列 binding / Secrets Store
+   binding (`.get()`) のどちらでも動く実装のため、この切替に**コード変更は不要**
 2. staging で `SCRAPER_MODE=http` を1社だけ試験し、実際に csvdata.zip が
    ダウンロードできるか確認してから本番の `comp_id` を広げる
 3. `theearth-client.ts` の CSV フォーム要素 id (`rdoSelect1`/`rdoDate1`/
