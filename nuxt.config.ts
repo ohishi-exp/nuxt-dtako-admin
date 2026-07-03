@@ -42,9 +42,11 @@ export default defineNuxtConfig({
 
   vite: {
     optimizeDeps: {
-      // net780-wasm: wasm-bindgen が生成する glue (wasm 初期化) を Vite の
-      // dependency pre-bundling に通すと壊れるため除外 (ippoan/fc1200-wasm consumer と同じ扱い)。
-      exclude: ['@ippoan/auth-client', 'net780-wasm'],
+      // net780-wasm / dtako-vid-wasm: wasm-bindgen が生成する glue (wasm 初期化) を
+      // Vite の dependency pre-bundling に通すと壊れるため除外
+      // (ippoan/fc1200-wasm consumer と同じ扱い。dtako-vid-wasm は pre-bundle 対象に
+      // すると同梱 .wasm が `.vite/deps` キャッシュにコピーされず 404 になる実害あり)。
+      exclude: ['@ippoan/auth-client', 'net780-wasm', 'dtako-vid-wasm'],
     },
     server: {
       // /wt-quick の Cloudflare Quick Tunnel (*.trycloudflare.com) からアクセス許可

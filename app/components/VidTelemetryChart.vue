@@ -14,9 +14,20 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
 
 const WIDTH = 800
 const HEIGHT = 160
+const PAD_LEFT = 28
+const PAD_RIGHT = 34
+const PLOT_LEFT = PAD_LEFT
+const PLOT_RIGHT = WIDTH - PAD_RIGHT
+
+// Gセンサーは物理的に意味のある固定レンジ (-2G〜+2G) を全系列で共有する
+// (min-max 正規化だと「上下=常時+1G付近」のような系列がスケールを潰してしまい、
+// 0G の位置も系列ごとにバラバラで読めなくなるため)。
+const G_MIN = -2
+const G_MAX = 2
 
 interface Point { x: number, y: number }
 interface Series { label: string, color: string, points: Point[] }
+interface GridLine { y: number, label: string, emphasize: boolean }
 
 function minMax(values: number[]): { min: number, max: number } {
   if (values.length === 0) return { min: 0, max: 1 }
@@ -33,6 +44,15 @@ function minMax(values: number[]): { min: number, max: number } {
   return { min, max }
 }
 
+/** データ最大値をキリの良い値 (10刻み) に切り上げる。0 件・0 の時は 10 を返す。 */
+function niceMax(value: number): number {
+  return Math.max(10, Math.ceil(value / 10) * 10)
+}
+
+function scaleY(v: number, min: number, max: number): number {
+  return HEIGHT - ((v - min) / (max - min)) * HEIGHT
+}
+
 function buildSeries<T extends { ts: number, sub_us: number }>(
   records: T[],
   value: (r: T) => number,
@@ -40,33 +60,59 @@ function buildSeries<T extends { ts: number, sub_us: number }>(
   color: string,
   telemetry: Pick<VdfTelemetry, 'video_start_ts'>,
   duration: number,
+  range: { min: number, max: number },
 ): Series {
   const raw = records.map(r => ({ t: recordOffsetSeconds(r, telemetry), v: value(r) }))
-  const { min, max } = minMax(raw.map(r => r.v))
   const dur = duration || 1
   return {
     label,
     color,
     points: raw.map(r => ({
-      x: (r.t / dur) * WIDTH,
-      y: HEIGHT - ((r.v - min) / (max - min)) * HEIGHT,
+      x: PLOT_LEFT + (r.t / dur) * (PLOT_RIGHT - PLOT_LEFT),
+      y: scaleY(r.v, range.min, range.max),
     })),
   }
 }
 
+// 速度・回転数は右軸を共有 (回転数は 0..rpmMax を 0..speedMax の見た目レンジに
+// 合わせて re-scale する。web地球号ビューアの dual-axis 表示と同じ考え方)。
+const speedMax = computed(() => niceMax(minMax(props.speedRpm.map(r => r.speed_kmh)).max))
+const rpmMax = computed(() => niceMax(minMax(props.speedRpm.map(r => r.rpm)).max))
+
 const series = computed<Series[]>(() => [
-  buildSeries(props.g, r => r.g_front_back, 'G前後', '#818cf8', props.telemetry, props.duration),
-  buildSeries(props.g, r => r.g_left_right, 'G左右', '#fb923c', props.telemetry, props.duration),
-  buildSeries(props.g, r => r.g_up_down, 'G上下', '#34d399', props.telemetry, props.duration),
-  buildSeries(props.speedRpm, r => r.speed_kmh, '速度', '#22d3ee', props.telemetry, props.duration),
-  buildSeries(props.speedRpm, r => r.rpm, '回転数', '#f472b6', props.telemetry, props.duration),
+  buildSeries(props.g, r => r.g_front_back, 'G前後', '#818cf8', props.telemetry, props.duration, { min: G_MIN, max: G_MAX }),
+  buildSeries(props.g, r => r.g_left_right, 'G左右', '#fb923c', props.telemetry, props.duration, { min: G_MIN, max: G_MAX }),
+  buildSeries(props.g, r => r.g_up_down, 'G上下', '#34d399', props.telemetry, props.duration, { min: G_MIN, max: G_MAX }),
+  buildSeries(props.speedRpm, r => r.speed_kmh, '速度', '#22d3ee', props.telemetry, props.duration, { min: 0, max: speedMax.value }),
+  buildSeries(props.speedRpm, r => (r.rpm / rpmMax.value) * speedMax.value, '回転数', '#f472b6', props.telemetry, props.duration, { min: 0, max: speedMax.value }),
 ])
+
+// 左軸: G (-2G〜+2G を 1G 刻み)。右軸: 速度 (0〜speedMax を 4 分割)。
+const gGridLines = computed<GridLine[]>(() =>
+  [-2, -1, 0, 1, 2].map(v => ({
+    y: scaleY(v, G_MIN, G_MAX),
+    label: `${v > 0 ? '+' : ''}${v}G`,
+    emphasize: v === 0,
+  })),
+)
+
+const speedGridLines = computed<GridLine[]>(() => {
+  const max = speedMax.value
+  const step = max / 4
+  return [0, 1, 2, 3, 4].map(i => ({
+    y: scaleY(i * step, 0, max),
+    label: `${Math.round(i * step)}`,
+    emphasize: i === 0,
+  }))
+})
 
 function toPolylinePoints(points: Point[]): string {
   return points.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
 }
 
-const cursorX = computed(() => (props.duration > 0 ? (props.currentTime / props.duration) * WIDTH : 0))
+const cursorX = computed(() =>
+  props.duration > 0 ? PLOT_LEFT + (props.currentTime / props.duration) * (PLOT_RIGHT - PLOT_LEFT) : PLOT_LEFT,
+)
 
 const svgEl = ref<SVGSVGElement | null>(null)
 const dragging = ref(false)
@@ -74,7 +120,9 @@ const dragging = ref(false)
 function seekFromEvent(e: MouseEvent) {
   if (!svgEl.value || props.duration <= 0) return
   const rect = svgEl.value.getBoundingClientRect()
-  const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
+  const plotLeftPx = (PLOT_LEFT / WIDTH) * rect.width
+  const plotRightPx = (PLOT_RIGHT / WIDTH) * rect.width
+  const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left - plotLeftPx) / (plotRightPx - plotLeftPx)))
   emit('seek', ratio * props.duration)
 }
 
@@ -102,6 +150,21 @@ function onPointerUp() {
       @mouseup="onPointerUp"
       @mouseleave="onPointerUp"
     >
+      <!-- 左軸: G の補助線 (0G を強調) -->
+      <g v-for="gl in gGridLines" :key="`g-${gl.label}`">
+        <line
+          :x1="PLOT_LEFT" :x2="PLOT_RIGHT" :y1="gl.y" :y2="gl.y"
+          :stroke="gl.emphasize ? '#6b7280' : '#374151'"
+          stroke-width="1" vector-effect="non-scaling-stroke"
+        />
+        <text :x="PLOT_LEFT - 4" :y="gl.y" text-anchor="end" dominant-baseline="middle" font-size="10" fill="#9ca3af">{{ gl.label }}</text>
+      </g>
+      <!-- 右軸: 速度 (km/h) の補助線 -->
+      <text
+        v-for="gl in speedGridLines" :key="`spd-${gl.label}`"
+        :x="PLOT_RIGHT + 4" :y="gl.y" text-anchor="start" dominant-baseline="middle" font-size="10" fill="#9ca3af"
+      >{{ gl.label }}</text>
+
       <polyline
         v-for="s in series"
         :key="s.label"

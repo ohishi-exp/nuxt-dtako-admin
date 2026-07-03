@@ -195,38 +195,6 @@ function fmtBytes(n: number): string {
           />
         </UCard>
       </div>
-
-      <UCard class="mb-4">
-        <template #header>
-          テレメトリ
-        </template>
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-          <div>
-            <h3 class="font-bold mb-1">Gセンサー ({{ telemetry.g.length }}件)</h3>
-            <div v-for="(r, i) in telemetry.g" :key="i" class="py-0.5">
-              前後 {{ r.g_front_back.toFixed(2) }}G / 左右 {{ r.g_left_right.toFixed(2) }}G / 上下 {{ r.g_up_down.toFixed(2) }}G
-            </div>
-          </div>
-          <div>
-            <h3 class="font-bold mb-1">速度・回転数 ({{ telemetry.speed_rpm.length }}件)</h3>
-            <div v-for="(r, i) in telemetry.speed_rpm" :key="i" class="py-0.5">
-              {{ r.speed_kmh.toFixed(2) }} km/h / {{ r.rpm }} rpm
-            </div>
-          </div>
-          <div>
-            <h3 class="font-bold mb-1">GPS ({{ telemetry.gps.length }}件)</h3>
-            <div v-for="(r, i) in telemetry.gps" :key="i" class="py-0.5">
-              [{{ r.fix }}] {{ r.lat.toFixed(6) }}, {{ r.lon.toFixed(6) }} ({{ r.heading_deg }}°)
-            </div>
-          </div>
-          <div>
-            <h3 class="font-bold mb-1">イベント ({{ telemetry.events.length }}件)</h3>
-            <div v-for="(r, i) in telemetry.events" :key="i" class="py-0.5">
-              code={{ r.code }} (ts={{ r.ts }})
-            </div>
-          </div>
-        </div>
-      </UCard>
     </template>
   </div>
 </template>

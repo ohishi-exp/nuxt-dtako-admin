@@ -26,7 +26,15 @@ export default defineEventHandler(async (event) => {
     key = binding
   }
   else if (binding && typeof binding.get === 'function') {
-    key = (await binding.get()) ?? null
+    try {
+      key = (await binding.get()) ?? null
+    }
+    catch {
+      // ローカル `nuxt dev` の miniflare 版 Secrets Store binding は、実値が無いと
+      // undefined ではなく `Secret "..." not found` で reject する。値未設定として
+      // process.env フォールバックに落とす (下と同じ扱い)。
+      key = process.env.NUXT_PUBLIC_GOOGLEMAP_KEY || null
+    }
   }
   else {
     // ローカル開発 (`nuxt dev`、CF binding 無し) 用フォールバック。

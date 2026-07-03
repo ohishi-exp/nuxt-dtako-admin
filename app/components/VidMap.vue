@@ -13,7 +13,7 @@ const mapEl = ref<HTMLDivElement | null>(null)
 const loadError = ref<string | null>(null)
 
 let map: google.maps.Map | null = null
-let marker: google.maps.Marker | null = null
+let marker: google.maps.marker.AdvancedMarkerElement | null = null
 
 interface Point { t: number, lat: number, lng: number }
 
@@ -38,12 +38,15 @@ onMounted(async () => {
     }
     const loader = new Loader({ apiKey: key, version: 'weekly' })
     const { Map } = await loader.importLibrary('maps')
-    const { Marker } = await loader.importLibrary('marker')
+    const { AdvancedMarkerElement } = await loader.importLibrary('marker')
     if (!mapEl.value) return
     const first = points.value[0]!
     map = new Map(mapEl.value, {
       center: { lat: first.lat, lng: first.lng },
       zoom: 16,
+      // AdvancedMarkerElement は有効な mapId を要求する。専用 Map スタイルは
+      // 不要なので Google 提供の DEMO_MAP_ID (Cloud Console 登録不要) を使う。
+      mapId: 'DEMO_MAP_ID',
     })
     new google.maps.Polyline({
       path: points.value.map(p => ({ lat: p.lat, lng: p.lng })),
@@ -52,7 +55,7 @@ onMounted(async () => {
       strokeWeight: 3,
       map,
     })
-    marker = new Marker({ position: { lat: first.lat, lng: first.lng }, map })
+    marker = new AdvancedMarkerElement({ position: { lat: first.lat, lng: first.lng }, map })
   }
   catch (e) {
     loadError.value = e instanceof Error ? e.message : String(e)
@@ -80,7 +83,7 @@ watch(() => props.currentTime, (t) => {
   if (!marker || !map) return
   const pos = interpolatedPosition(t)
   if (!pos) return
-  marker.setPosition(pos)
+  marker.position = pos
   map.panTo(pos)
 })
 </script>
