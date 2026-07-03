@@ -34,6 +34,14 @@
  *   実際の区間長を計算し、init segment の `mvhd`/`tkhd` (movie timescale) と各トラックの
  *   `mdhd` (track timescale) に書き込む。これらも FullBox の固定長フィールドなので
  *   version (0/1) を判定した上で in-place 書き換えで済む
+ * - **複数ファイル (セグメント) をまたぐ範囲の切り出しも `extractMp4TimeRangeMulti` で
+ *   無劣化のまま対応する。** 各セグメントは前方/後方それぞれ別の MP4 ファイル
+ *   (別 `moov`/別 track_ID の可能性がある) なので、単純に moof/mdat を繋げただけでは
+ *   再生できない。最初のセグメントの init segment (moov) を「代表」として全体で使い回し、
+ *   2つ目以降のセグメントは track_ID が一致することを確認した上で、その fragment の
+ *   tfdt をこのセグメント自身の 0 起点からさらに「それまでの累積長」だけシフトして
+ *   連結する (時系列で途切れず連続する 1 本の timeline に見せかける)。track_ID が
+ *   セグメント間で一致しない場合は結合を諦めて例外を投げる (呼び出し側でフォールバック)
  */
 
 import { createFile, MP4BoxBuffer } from 'mp4box'
@@ -203,17 +211,27 @@ function patchInitSegmentDurations(
   }
 }
 
-/**
- * `startSec`〜`endSec` (秒) の範囲を含む MP4 Blob を返す。
- * 対応できない構造 (トラックなし、フラグメント化失敗等) の場合は例外を投げる —
- * 呼び出し側で実時間録画へのフォールバックを想定している。
- */
-export function extractMp4TimeRange(source: ArrayBuffer, startSec: number, endSec: number): Blob {
-  if (!(endSec > startSec)) throw new Error(`mp4box: invalid time range [${startSec}, ${endSec}]`)
+interface SourceExtraction {
+  /** ftyp+moov (fragmented 用)。トラックが1つも無ければ null */
+  initBuffer: ArrayBuffer | null
+  /** track_ID ごとの採用済みフラグメント (tfdt はこのソース自身の 0 起点に書き換え済み) */
+  fragmentsByTrack: Map<number, { order: number, buffer: ArrayBuffer }[]>
+  /** track_ID ごとのこのソース区間の長さ (このソース自身の track timescale 単位) */
+  durationByTrack: Map<number, { ticks: number, timescale: number }>
+  /** movie timescale (mvhd 由来)。durationByTrack の movie 単位への変換に使う */
+  movieTimescale: number
+}
 
+/**
+ * 1つの MP4 ソースから `startSec`〜`endSec` を切り出す共通ロジック。
+ * tfdt は必ずこのソース自身の 0 起点に rebase 済みだが、init segment の
+ * duration はまだ書き込んでいない (複数ソース結合時に合算してから書き込むため、
+ * 単一ソースの `extractMp4TimeRange` はこの直後に自分で書き込む)。
+ */
+function extractSingleSource(source: ArrayBuffer, startSec: number, endSec: number): SourceExtraction {
   const mp4boxFile = createFile()
 
-  const segmentsByTrack = new Map<number, { order: number, buffer: ArrayBuffer }[]>()
+  const fragmentsByTrack = new Map<number, { order: number, buffer: ArrayBuffer }[]>()
   const prevBoundaryByTrack = new Map<number, number>()
   const boundsByTrack = new Map<number, TrackBounds>()
   const baselineByTrack = new Map<number, number>()
@@ -221,6 +239,7 @@ export function extractMp4TimeRange(source: ArrayBuffer, startSec: number, endSe
   const lastAcceptedNextByTrack = new Map<number, number>()
   let order = 0
   let initBuffer: ArrayBuffer | null = null
+  let movieTimescale = 0
   let parseError: string | null = null
 
   mp4boxFile.onError = (module: string, msg: string) => {
@@ -228,6 +247,7 @@ export function extractMp4TimeRange(source: ArrayBuffer, startSec: number, endSe
   }
 
   mp4boxFile.onReady = (info: Movie) => {
+    movieTimescale = info.timescale
     for (const track of info.tracks) {
       const samples = mp4boxFile.getTrackSamplesInfo(track.id)
       if (samples.length === 0) continue
@@ -248,7 +268,7 @@ export function extractMp4TimeRange(source: ArrayBuffer, startSec: number, endSe
 
       boundsByTrack.set(track.id, { startNum, endNum })
       prevBoundaryByTrack.set(track.id, 0)
-      segmentsByTrack.set(track.id, [])
+      fragmentsByTrack.set(track.id, [])
       samplesByTrack.set(track.id, samples)
       mp4boxFile.setSegmentOptions(track.id, track.id, { nbSamples: 1 })
     }
@@ -280,28 +300,11 @@ export function extractMp4TimeRange(source: ArrayBuffer, startSec: number, endSe
         // 名目上の endNum より後ろのサンプルまで含まれることがあり、duration の
         // 計算は「実際に含んだ範囲」を基準にしないとズレる)
         lastAcceptedNextByTrack.set(id, nextSample)
-        segmentsByTrack.get(id)!.push({ order: order++, buffer })
+        fragmentsByTrack.get(id)!.push({ order: order++, buffer })
       }
     }
 
     mp4boxFile.start()
-
-    // 実際に採用したサンプル範囲 (tfdt を 0 起点にした基準と同じ基準) から duration を計算し、
-    // init segment の mvhd/tkhd/mdhd に書き込む。duration=0 のままだと Chrome の
-    // <video controls> のシークバーが動かない (総尺不明としてシーク不可判定になる)
-    const durationByTrack = new Map<number, { ticks: number, timescale: number }>()
-    for (const [id, samples] of samplesByTrack) {
-      const baseline = baselineByTrack.get(id)
-      const lastNext = lastAcceptedNextByTrack.get(id)
-      if (baseline === undefined || lastNext === undefined) continue
-      const lastSample = samples[lastNext - 1]
-      if (!lastSample) continue
-      const ticks = (lastSample.dts + lastSample.duration) - baseline
-      durationByTrack.set(id, { ticks: Math.max(0, ticks), timescale: lastSample.timescale })
-    }
-    if (durationByTrack.size > 0) {
-      patchInitSegmentDurations(initBuffer, info.timescale, durationByTrack)
-    }
   }
 
   const mp4Buffer = MP4BoxBuffer.fromArrayBuffer(source, 0)
@@ -309,12 +312,126 @@ export function extractMp4TimeRange(source: ArrayBuffer, startSec: number, endSe
   mp4boxFile.flush()
 
   if (parseError) throw new Error(parseError)
+
+  const durationByTrack = new Map<number, { ticks: number, timescale: number }>()
+  for (const [id, samples] of samplesByTrack) {
+    const baseline = baselineByTrack.get(id)
+    const lastNext = lastAcceptedNextByTrack.get(id)
+    if (baseline === undefined || lastNext === undefined) continue
+    const lastSample = samples[lastNext - 1]
+    if (!lastSample) continue
+    const ticks = (lastSample.dts + lastSample.duration) - baseline
+    durationByTrack.set(id, { ticks: Math.max(0, ticks), timescale: lastSample.timescale })
+  }
+
+  return { initBuffer, fragmentsByTrack, durationByTrack, movieTimescale }
+}
+
+/**
+ * `startSec`〜`endSec` (秒) の範囲を含む MP4 Blob を返す。
+ * 対応できない構造 (トラックなし、フラグメント化失敗等) の場合は例外を投げる —
+ * 呼び出し側で実時間録画へのフォールバックを想定している。
+ */
+export function extractMp4TimeRange(source: ArrayBuffer, startSec: number, endSec: number): Blob {
+  return extractMp4TimeRangeMulti([{ data: source, startSec, endSec }])
+}
+
+interface SourceRange { data: ArrayBuffer, startSec: number, endSec: number }
+
+/**
+ * 複数の MP4 ソース (前後半で別ファイルに分かれているセグメント境界をまたぐ場合) から
+ * それぞれの区間を切り出し、1本の連続した timeline として無劣化で結合する。
+ * `ranges` の順序がそのまま出力の時系列順になる。
+ *
+ * 最初のソースの init segment (moov) を全体で使い回すため、2つ目以降のソースの
+ * track 構成 (track_ID の集合) が最初のソースと一致しない場合は例外を投げる
+ * (呼び出し側で実時間録画へのフォールバックを想定している)。
+ */
+export function extractMp4TimeRangeMulti(ranges: SourceRange[]): Blob {
+  if (ranges.length === 0) throw new Error('mp4box: no source ranges given')
+  for (const r of ranges) {
+    if (!(r.endSec > r.startSec)) throw new Error(`mp4box: invalid time range [${r.startSec}, ${r.endSec}]`)
+  }
+
+  let initBuffer: ArrayBuffer | null = null
+  let movieTimescale = 0
+  let canonicalTrackIds: number[] | null = null
+  // track_ID ごとの最初のソースで観測した timescale。以降のソースがこれと異なる場合、
+  // 共有する init segment (moov.mdhd.timescale) の解釈と食い違うため結合を諦める
+  const canonicalTimescaleByTrack = new Map<number, number>()
+  // track_ID ごとの「これまでの累積長 (秒、timescale 非依存)」。次のソースの
+  // フラグメントを tfdt でこの秒数だけ後ろにシフトして連結する
+  const accumulatedSeconds = new Map<number, number>()
+  // track_ID ごとの最終的な duration (最初のソースで観測した timescale を単位に固定)
+  const finalDurationByTrack = new Map<number, { ticks: number, timescale: number }>()
+  const allFragments: { order: number, buffer: ArrayBuffer }[] = []
+  let order = 0
+
+  for (let i = 0; i < ranges.length; i++) {
+    const { data, startSec, endSec } = ranges[i]!
+    const extracted = extractSingleSource(data, startSec, endSec)
+    if (extracted.durationByTrack.size === 0) {
+      throw new Error(`mp4box: セグメント ${i} に対応するフラグメントが生成できませんでした`)
+    }
+
+    const theseIds = [...extracted.durationByTrack.keys()].sort((a, b) => a - b)
+    if (i === 0) {
+      if (!extracted.initBuffer) throw new Error('mp4box: moov の解析に失敗しました (トラックが見つかりません)')
+      initBuffer = extracted.initBuffer
+      movieTimescale = extracted.movieTimescale
+      canonicalTrackIds = theseIds
+      for (const [id, d] of extracted.durationByTrack) canonicalTimescaleByTrack.set(id, d.timescale)
+    }
+    else {
+      if (!canonicalTrackIds || theseIds.length !== canonicalTrackIds.length
+        || theseIds.some((id, idx) => id !== canonicalTrackIds![idx])) {
+        throw new Error('mp4box: セグメント間でトラック構成 (track_ID) が一致しないため結合できません')
+      }
+      // 共有する init segment の mdhd.timescale は最初のソース基準で固定済みなので、
+      // 以降のソースの timescale がこれと異なるフラグメントをそのまま繋げると
+      // 再生側が誤った速度でサンプルを解釈してしまう
+      for (const [id, d] of extracted.durationByTrack) {
+        if (d.timescale !== canonicalTimescaleByTrack.get(id)) {
+          throw new Error('mp4box: セグメント間で timescale が一致しないため結合できません')
+        }
+      }
+    }
+
+    for (const [trackId, fragments] of extracted.fragmentsByTrack) {
+      const duration = extracted.durationByTrack.get(trackId)
+      if (!duration || fragments.length === 0) continue
+
+      const offsetSeconds = accumulatedSeconds.get(trackId) ?? 0
+      const offsetTicks = Math.round(offsetSeconds * duration.timescale)
+
+      for (const { buffer } of fragments) {
+        // このソース自身の 0 起点 (extractSingleSource が既に rebase 済み) から
+        // さらに「それまでの累積長」だけ後ろにシフトする
+        if (offsetTicks > 0) {
+          const decodeTime = readFragmentBaseDecodeTime(buffer)
+          if (decodeTime) {
+            writeFragmentBaseDecodeTime(decodeTime.view, decodeTime.tfdt, decodeTime.value + offsetTicks)
+          }
+        }
+        allFragments.push({ order: order++, buffer })
+      }
+
+      accumulatedSeconds.set(trackId, offsetSeconds + duration.ticks / duration.timescale)
+
+      // 最初に観測した timescale を単位に、累積秒数を ticks へ変換して保持
+      const refTimescale = finalDurationByTrack.get(trackId)?.timescale ?? duration.timescale
+      const totalSeconds = accumulatedSeconds.get(trackId)!
+      finalDurationByTrack.set(trackId, { ticks: Math.round(totalSeconds * refTimescale), timescale: refTimescale })
+    }
+  }
+
   if (!initBuffer) throw new Error('mp4box: moov の解析に失敗しました (トラックが見つかりません)')
+  if (allFragments.length === 0) throw new Error('mp4box: 指定範囲に対応するフラグメントが生成できませんでした')
 
-  const all: { order: number, buffer: ArrayBuffer }[] = []
-  for (const chunks of segmentsByTrack.values()) all.push(...chunks)
-  if (all.length === 0) throw new Error('mp4box: 指定範囲に対応するフラグメントが生成できませんでした')
-  all.sort((a, b) => a.order - b.order)
+  if (finalDurationByTrack.size > 0) {
+    patchInitSegmentDurations(initBuffer, movieTimescale, finalDurationByTrack)
+  }
 
-  return new Blob([initBuffer, ...all.map(c => c.buffer)], { type: 'video/mp4' })
+  allFragments.sort((a, b) => a.order - b.order)
+  return new Blob([initBuffer, ...allFragments.map(f => f.buffer)], { type: 'video/mp4' })
 }

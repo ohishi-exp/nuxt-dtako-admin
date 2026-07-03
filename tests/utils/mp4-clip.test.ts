@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createFile } from 'mp4box'
 import type { Movie } from 'mp4box'
-import { extractMp4TimeRange } from '../../app/utils/mp4-clip'
+import { extractMp4TimeRange, extractMp4TimeRangeMulti } from '../../app/utils/mp4-clip'
 
 const FIXTURE_PATH = resolve(__dirname, '../fixtures/mp4-clip-sample.mp4')
 
@@ -124,5 +124,60 @@ describe('extractMp4TimeRange', () => {
 
   it('end <= start のような無効な範囲でも例外を投げる', () => {
     expect(() => extractMp4TimeRange(cloneSource(), 1, 1)).toThrow()
+  })
+})
+
+describe('extractMp4TimeRangeMulti', () => {
+  // 複数ファイル (セグメント) 結合時に、選択区間がセグメント境界をまたぐケース
+  // (例: 前半セグメントの後半 + 後半セグメントの前半) をシミュレートする。
+  // 同一 fixture を2ソースとして渡すことで「別ファイルだが track_ID/timescale が
+  // 一致する」状況を再現できる (このアプリの front/rear MP4 は常に単一 video
+  // track・同一 timescale で生成されるため、実運用と同じ前提)。
+
+  it('2つのソースを結合すると、1本の連続した timeline として再生できる MP4 になる', async () => {
+    const blob = extractMp4TimeRangeMulti([
+      { data: cloneSource(), startSec: 0, endSec: 0.8 },
+      { data: cloneSource(), startSec: 1.2, endSec: 2 },
+    ])
+    expect(blob.type).toBe('video/mp4')
+
+    const info = await parseStructure(blob)
+    expect(info.tracks.length).toBe(2)
+
+    // 先頭サンプルは 0 起点、duration は両ソース分の長さを合算したもの
+    // (fixture は 2s/5fps/GOP=5 なので概ね 0.8 + 0.8 = 1.6s 前後になるはず)
+    expect(info.duration / info.timescale).toBeGreaterThan(1.0)
+    const dtsByTrack = await firstSampleDts(blob)
+    for (const dts of dtsByTrack.values()) {
+      expect(dts).toBe(0)
+    }
+  })
+
+  it('結合後のサンプル総数は各ソースの採用サンプル数の合計になる (ギャップ/重複が無い)', async () => {
+    const soloA = extractMp4TimeRange(cloneSource(), 0, 0.8)
+    const soloB = extractMp4TimeRange(cloneSource(), 1.2, 2)
+    const infoA = await parseStructure(soloA)
+    const infoB = await parseStructure(soloB)
+    const expectedVideoSamples = (infoA.videoTracks[0]?.nb_samples ?? 0) + (infoB.videoTracks[0]?.nb_samples ?? 0)
+
+    const combined = extractMp4TimeRangeMulti([
+      { data: cloneSource(), startSec: 0, endSec: 0.8 },
+      { data: cloneSource(), startSec: 1.2, endSec: 2 },
+    ])
+    const infoCombined = await parseStructure(combined)
+    expect(infoCombined.videoTracks[0]?.nb_samples).toBe(expectedVideoSamples)
+  })
+
+  it('単一ソースのみを渡した場合は extractMp4TimeRange と同じ結果になる', async () => {
+    const single = extractMp4TimeRange(cloneSource(), 0.5, 1.5)
+    const multi = extractMp4TimeRangeMulti([{ data: cloneSource(), startSec: 0.5, endSec: 1.5 }])
+    const infoSingle = await parseStructure(single)
+    const infoMulti = await parseStructure(multi)
+    expect(infoMulti.tracks.length).toBe(infoSingle.tracks.length)
+    expect(infoMulti.duration).toBe(infoSingle.duration)
+  })
+
+  it('範囲が1つも無い場合は例外を投げる', () => {
+    expect(() => extractMp4TimeRangeMulti([])).toThrow()
   })
 })
