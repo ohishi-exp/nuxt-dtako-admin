@@ -321,20 +321,13 @@ describe('etcLogin', () => {
     expect(body.get('p')).toBe('abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKL')
   })
 
-  it('cookie を収集して後続リクエストに載せる', async () => {
-    const topRes = new Response(TOP_HTML, {
-      status: 200,
-      headers: { 'content-type': 'text/html; charset=utf-8', 'set-cookie': 'JSESSIONID=abc123; Path=/' },
-    })
-    const { fetch, calls } = recordingFetch([
-      topRes,
+  it('location 無し 3xx は追跡を打ち切り !ok で loud fail する', async () => {
+    const { fetch } = recordingFetch([
+      html(TOP_HTML),
       html(LOGIN_PAGE_HTML),
       redirect(null), // location 無し 3xx は追跡を打ち切り !ok で throw
     ])
-    const jar = createCookieJar()
-    await expect(etcLogin(jar, params, fetch, 1000)).rejects.toThrow('HTTP 302')
-    const headers = new Headers(calls[1].init.headers)
-    expect(headers.get('cookie')).toBe('JSESSIONID=abc123')
+    await expect(etcLogin(createCookieJar(), params, fetch, 1000)).rejects.toThrow('HTTP 302')
   })
 
   it('ログインリンクが無ければ loud fail する', async () => {
@@ -509,6 +502,15 @@ describe('submitSearch', () => {
     await expect(submitSearch(createCookieJar(), p, recordingFetch([]).fetch, 1000)).rejects.toThrow(
       '検索条件フォーム (sokoKbn) が見つかりません',
     )
+  })
+
+  it('jar に溜まった cookie を後続 POST に載せる', async () => {
+    const { fetch, calls } = recordingFetch([html(RESULT_PAGE_HTML)])
+    const jar = createCookieJar()
+    jar.cookies.set('JSESSIONID', 'abc123')
+    await submitSearch(jar, searchPage, fetch, 1000)
+    const headers = new Headers(calls[0].init.headers)
+    expect(headers.get('cookie')).toBe('JSESSIONID=abc123')
   })
 
   it('action 属性の無い form は現在ページ URL に POST する', async () => {
