@@ -108,6 +108,7 @@ function persistSession(s: DvrSession | null) {
 function expireSession(message: string) {
   persistSession(null)
   closeViewer()
+  stopAutoRefresh()
   notifications.value = []
   resetSearchState()
   loginError.value = message
@@ -159,6 +160,7 @@ async function doLogout() {
   }
   persistSession(null)
   closeViewer()
+  stopAutoRefresh()
   notifications.value = []
   resetSearchState()
   loginError.value = null
@@ -230,8 +232,9 @@ async function requestTransfer(n: DvrNotification) {
       headers: authHeaders(s),
       body: { serial: n.serialNo, filename: n.fileName },
     })
-    // 転送は非同期。少し待ってから一覧を再読込し、receiveState の変化を見せる。
+    // 転送は非同期。一覧を再読込した上で、receiveState の変化を自動更新で追う。
     await loadNotifications()
+    startAutoRefresh('notifications')
   }
   catch (e) {
     if (fetchErrorStatus(e) === 401) {
@@ -402,6 +405,7 @@ async function requestTransferFromSearch(n: DvrSearchRow) {
       : { serial: n.serialNo, filename: n.fileName }
     await $fetch('/dvr-api/transfer', { method: 'POST', headers: authHeaders(s), body })
     await doSearch()
+    startAutoRefresh('search')
   }
   catch (e) {
     if (fetchErrorStatus(e) === 401) {
@@ -414,6 +418,50 @@ async function requestTransferFromSearch(n: DvrSearchRow) {
     const next = new Set(requestingKeys.value)
     next.delete(key)
     requestingKeys.value = next
+  }
+}
+
+// --- 受信進捗の自動更新 ---
+//
+// 「受信」(車両への転送要求) は非同期で、完了は一覧の receiveState 変化でしか
+// 観測できない (実ページも cfg_conn_interval 秒ごとに Refresh_DvrDataList を poll
+// している)。受信要求後に対象一覧を定期再読込し、受信待ちの行が無くなったら止める。
+
+const AUTO_REFRESH_INTERVAL_MS = 15_000
+const AUTO_REFRESH_MAX_MS = 30 * 60_000
+
+const autoRefreshTimer = ref<ReturnType<typeof setInterval> | null>(null)
+const autoRefreshStartedAt = ref(0)
+const autoRefreshTarget = ref<'search' | 'notifications' | null>(null)
+
+function stopAutoRefresh() {
+  if (autoRefreshTimer.value) clearInterval(autoRefreshTimer.value)
+  autoRefreshTimer.value = null
+  autoRefreshTarget.value = null
+}
+
+function startAutoRefresh(target: 'search' | 'notifications') {
+  stopAutoRefresh()
+  autoRefreshTarget.value = target
+  autoRefreshStartedAt.value = Date.now()
+  autoRefreshTimer.value = setInterval(autoRefreshTick, AUTO_REFRESH_INTERVAL_MS)
+}
+
+async function autoRefreshTick() {
+  if (!session.value || Date.now() - autoRefreshStartedAt.value > AUTO_REFRESH_MAX_MS) {
+    stopAutoRefresh()
+    return
+  }
+  if (autoRefreshTarget.value === 'search') {
+    if (searchLoading.value) return
+    await doSearch()
+    // 受信中の行が無くなったら (全て再生可能 / エラーに落ち着いたら) 停止
+    if (!searchRows.value.some(r => r.receiveState === 'in_progress')) stopAutoRefresh()
+  }
+  else if (autoRefreshTarget.value === 'notifications') {
+    if (listLoading.value) return
+    await loadNotifications()
+    if (!notifications.value.some(n => n.receiveState === 'in_progress')) stopAutoRefresh()
   }
 }
 
@@ -517,7 +565,10 @@ onMounted(() => {
   }
 })
 
-onBeforeUnmount(closeViewer)
+onBeforeUnmount(() => {
+  stopAutoRefresh()
+  closeViewer()
+})
 </script>
 
 <template>
@@ -601,6 +652,13 @@ onBeforeUnmount(closeViewer)
             <div class="flex items-center gap-3">
               <span class="font-semibold">DVR 動画通知</span>
               <UButton size="xs" color="neutral" variant="soft" icon="i-lucide-refresh-cw" :loading="listLoading" label="再読込" @click="loadNotifications" />
+              <template v-if="autoRefreshTarget === 'notifications'">
+                <span class="inline-flex items-center gap-1.5 text-xs text-blue-500">
+                  <UIcon name="i-lucide-loader-circle" class="animate-spin size-3.5" />
+                  受信状況を自動更新中 (15秒ごと)
+                </span>
+                <UButton size="xs" color="neutral" variant="ghost" label="停止" @click="stopAutoRefresh" />
+              </template>
             </div>
           </template>
 
@@ -679,6 +737,13 @@ onBeforeUnmount(closeViewer)
             <div class="flex items-center gap-3">
               <UIcon name="i-lucide-search" class="size-4" />
               <span class="font-semibold">映像検索</span>
+              <template v-if="autoRefreshTarget === 'search'">
+                <span class="inline-flex items-center gap-1.5 text-xs text-blue-500">
+                  <UIcon name="i-lucide-loader-circle" class="animate-spin size-3.5" />
+                  受信状況を自動更新中 (15秒ごと)
+                </span>
+                <UButton size="xs" color="neutral" variant="ghost" label="停止" @click="stopAutoRefresh" />
+              </template>
             </div>
           </template>
 
@@ -698,11 +763,24 @@ onBeforeUnmount(closeViewer)
               <UFormField label="事業所">
                 <USelect v-model="searchForm.branchCode" :items="branchOptions" class="w-56" />
               </UFormField>
+              <!-- USelectMenu は検索ボックス内蔵 (車番/CD/名前の手入力で絞り込める) -->
               <UFormField label="車 輌">
-                <USelect v-model="searchForm.vehicleCd" :items="vehicleOptions" class="w-56" />
+                <USelectMenu
+                  v-model="searchForm.vehicleCd"
+                  :items="vehicleOptions"
+                  value-key="value"
+                  :search-input="{ placeholder: '車番/CD で検索...' }"
+                  class="w-56"
+                />
               </UFormField>
               <UFormField label="乗務員">
-                <USelect v-model="searchForm.driverCd" :items="driverOptions" class="w-56" />
+                <USelectMenu
+                  v-model="searchForm.driverCd"
+                  :items="driverOptions"
+                  value-key="value"
+                  :search-input="{ placeholder: '名前/CD で検索...' }"
+                  class="w-56"
+                />
               </UFormField>
             </div>
 
