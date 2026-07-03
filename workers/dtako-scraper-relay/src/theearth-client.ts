@@ -165,7 +165,8 @@ function hasLoginForm(html: string): boolean {
 }
 
 /**
- * セッション重複プロンプトが「実際に発動しているか」。
+ * セッション重複プロンプトが「実際に発動しているか」を判定し、発動時はサーバが
+ * txtOverlapSessionID に焼き込んだ session ID field (name+value) を返す。
  *
  * 注意: theearth のログインページは txtOverlapSessionID / btnForced を **常時**
  * hidden で埋めている (Refs #90 実測)。文字列の存在だけで判定すると、ID/パスワード
@@ -173,9 +174,9 @@ function hasLoginForm(html: string): boolean {
  * txtOverlapSessionID に session ID を焼き込む前提で、value が非空の時だけ発動と
  * みなす (外れた場合は describePage 付きの失敗メッセージから追える)。
  */
-function overlapSessionActive(html: string): boolean {
+function activeOverlapSessionField(html: string): FormFieldRef | null {
   const field = findFormFieldById(html, "txtOverlapSessionID");
-  return Boolean(field && field.value);
+  return field && field.value ? field : null;
 }
 
 /** 想定外ページの診断用に title + タグ除去済み本文の先頭を 1 行にする
@@ -238,7 +239,8 @@ export async function login(
 
   // 同一アカウントの別セッションが既にログイン中の場合、強制ログインプロンプトが出る
   // (txtOverlapSessionID に session ID が焼き込まれる。overlapSessionActive の注意書き参照)。
-  if (overlapSessionActive(postHtml)) {
+  const overlapField = activeOverlapSessionField(postHtml);
+  if (overlapField) {
     const hidden2 = extractHiddenFields(postHtml);
     const btnForced = findFormFieldById(postHtml, "btnForced");
     if (!btnForced) {
@@ -246,8 +248,17 @@ export async function login(
         "セッション重複フォームを検出したが btnForced が見つかりません (ページ仕様変更の可能性)",
       );
     }
+    // 強制ログイン POST は実ブラウザのフォーム送信を再現する必要がある: hidden +
+    // **credential (txtID2/txtID1/txtPass) + サーバが焼いた txtOverlapSessionID の
+    // 値** + btnForced を全て含める。credential / overlap ID を落とすとサーバに
+    // 拒否され「強制ログインに失敗しました」で必ず詰まる (Refs #90、実ページ検証済み)。
+    // btnLogin/btnCancel は押下 submit ではないので送らない。
     const forcedBody = new URLSearchParams({
       ...hidden2,
+      txtID2: params.compId,
+      txtID1: params.userName,
+      txtPass: params.userPass,
+      [overlapField.name]: overlapField.value,
       [btnForced.name]: btnForced.value || "ログイン",
     });
     const forcedRes = await postForm(jar, loginUrl, forcedBody, fetchImpl);
