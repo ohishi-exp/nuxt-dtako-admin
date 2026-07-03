@@ -12,8 +12,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{ seek: [seconds: number] }>()
 
-const WIDTH = 800
-const HEIGHT = 160
+const WIDTH = 1400
+const HEIGHT = 260
 const PAD_LEFT = 28
 const PAD_RIGHT = 34
 const PLOT_LEFT = PAD_LEFT
@@ -144,7 +144,7 @@ function onPointerUp() {
       ref="svgEl"
       :viewBox="`0 0 ${WIDTH} ${HEIGHT}`"
       preserve-aspect-ratio="none"
-      class="w-full h-40 cursor-crosshair select-none rounded-lg bg-gray-900"
+      class="w-full h-64 cursor-crosshair select-none rounded-lg bg-gray-900"
       @mousedown="onPointerDown"
       @mousemove="onPointerMove"
       @mouseup="onPointerUp"
