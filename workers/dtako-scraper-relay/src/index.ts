@@ -5,6 +5,7 @@
 // binding / migration を持たず no-traffic release を維持する (Refs error
 // 10211/10061、nuxt-items/items-sync と同型)。
 export { DtakoScraperRelayDO } from "./dtako-scraper-relay-do";
+import { resolveDvrRouting } from "./dvr-session";
 
 interface RelayWorkerEnv {
   RELAY: DurableObjectNamespace;
@@ -13,6 +14,22 @@ interface RelayWorkerEnv {
 export default {
   async fetch(request: Request, env: RelayWorkerEnv): Promise<Response> {
     const url = new URL(request.url);
+
+    if (url.pathname.startsWith("/dvr-api/")) {
+      // /dvr-viewer (Refs #90) の DVR viewer API。theearth アカウント単位
+      // (`dvr-{comp}:{userB64}`) で DO を引くことで、同一アカウントのセッションを
+      // 1 instance に集約する (theearth は同一アカウント複数セッションを許さない)。
+      // password はヘッダに載らない (login の JSON body のみ) — routing に使うのは
+      // comp_id とユーザー名だけ。
+      const routing = resolveDvrRouting(request.headers);
+      if (!routing) {
+        return new Response("Bad Request: missing/invalid X-Dvr-Comp-Id / X-Dvr-User-B64", {
+          status: 400,
+        });
+      }
+      const id = env.RELAY.idFromName(routing.doKey);
+      return env.RELAY.get(id).fetch(request);
+    }
 
     if (url.pathname === "/ws/scraper") {
       // SCRAPER_MODE=http (Refs ohishi-exp/dtako-scraper#22) は comp_id 単位で

@@ -31,11 +31,18 @@ export default {
     ctx: ExecutionContext,
   ): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/ws/scraper" || url.pathname.startsWith("/scraper-zip/")) {
+    if (
+      url.pathname === "/ws/scraper"
+      || url.pathname.startsWith("/scraper-zip/")
+      || url.pathname.startsWith("/dvr-api/")
+    ) {
       // comp_id/session 抽出と DO routing は relay worker (default fetch) が行う。
       // ここは原 request (WS upgrade + query string、または zip ダウンロード GET) を
       // そのまま転送するだけ。/scraper-zip/* は SCRAPER_MODE=http (Refs
       // ohishi-exp/dtako-scraper#22) が生成する1回限りのダウンロード URL。
+      // /dvr-api/* は /dvr-viewer (Refs #90) の DVR viewer API (login/notifications/
+      // file/logout)。routing ヘッダ (X-Dvr-Comp-Id / X-Dvr-User-B64) の解決も
+      // relay worker 側で行う。
       return env.SCRAPER_RELAY.fetch(request);
     }
     return (nitroApp as NitroHandler).fetch(request, env, ctx);
