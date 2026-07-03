@@ -42,6 +42,26 @@ function parseStructure(blob: Blob): Promise<Movie> {
   }))
 }
 
+/** 各トラックの先頭サンプルの dts (トラック timescale 単位) を返す。 */
+function firstSampleDts(blob: Blob): Promise<Map<number, number>> {
+  return blob.arrayBuffer().then(ab => new Promise<Map<number, number>>((resolve, reject) => {
+    const file = createFile()
+    file.onError = (module: string, msg: string) => reject(new Error(`${module}: ${msg}`))
+    file.onReady = (info: Movie) => {
+      const result = new Map<number, number>()
+      for (const track of info.tracks) {
+        const samples = file.getTrackSamplesInfo(track.id)
+        if (samples.length > 0) result.set(track.id, samples[0]!.dts)
+      }
+      resolve(result)
+    }
+    const buf = ab as ArrayBuffer & { fileStart: number }
+    buf.fileStart = 0
+    file.appendBuffer(buf)
+    file.flush()
+  }))
+}
+
 describe('extractMp4TimeRange', () => {
   it('中間区間を切り出すと video/audio 両トラックを含む有効な MP4 になる', async () => {
     const blob = extractMp4TimeRange(cloneSource(), 0.5, 1.5)
@@ -69,6 +89,20 @@ describe('extractMp4TimeRange', () => {
     const blob = extractMp4TimeRange(cloneSource(), 0, 999)
     const info = await parseStructure(blob)
     expect(info.tracks.length).toBe(2)
+  })
+
+  it('先頭以外の区間を切り出しても各トラックの先頭サンプルの dts が 0 起点になる (tfdt rebase)', async () => {
+    // fixture は 2s/5fps/GOP=5 (video) なのでキーフレームは t=0s と t=1s。
+    // 1.2〜1.9s を切り出すと元動画では先頭サンプルの dts は t=1s 相当 (非ゼロ) になるが、
+    // これをそのまま出力すると tfdt が絶対時刻のままになり、Chrome の <video> が
+    // 再生開始位置 (t=0) に対応フレームが無いとみなして何も表示しない不具合になる
+    // (実機の破損クリップで確認済み)。rebase 後は先頭サンプルの dts が 0 になるはず。
+    const blob = extractMp4TimeRange(cloneSource(), 1.2, 1.9)
+    const dtsByTrack = await firstSampleDts(blob)
+    expect(dtsByTrack.size).toBeGreaterThan(0)
+    for (const dts of dtsByTrack.values()) {
+      expect(dts).toBe(0)
+    }
   })
 
   it('MP4 として解釈できないデータには例外を投げる (呼び出し側のフォールバック契機)', () => {

@@ -206,8 +206,15 @@ function downloadBlob(blob: Blob, filename: string) {
  */
 async function tryClipViaMp4Box(globalStart: number, globalEnd: number): Promise<boolean> {
   try {
-    const segIdx = activeSegmentIndex.value
-    const segStart = segmentOffsets.value[segIdx] ?? 0
+    // globalStart を含むセグメントを探す (`onSeek` と同じ解決ロジック)。
+    // `activeSegmentIndex` (= 現在再生中のセグメント) を直接使うと、選択区間が
+    // 再生位置と異なるセグメントにある複数ファイル結合時に誤って非対応判定になる
+    const offsets = segmentOffsets.value
+    let segIdx = 0
+    for (let i = 0; i < offsets.length; i++) {
+      if (globalStart >= offsets[i]!) segIdx = i
+    }
+    const segStart = offsets[segIdx] ?? 0
     const seg = segments.value[segIdx]
     if (!seg) return false
     const segEnd = segStart + seg.duration
@@ -234,7 +241,9 @@ async function tryClipViaMp4Box(globalStart: number, globalEnd: number): Promise
     }
     return true
   }
-  catch {
+  catch (e) {
+    // ユーザーには「対応していません」としか出さないが、原因調査用にコンソールへは残す
+    console.warn('[vid-check] mp4box.js でのクリップに失敗、実時間録画へフォールバックします:', e)
     return false
   }
 }
