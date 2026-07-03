@@ -89,14 +89,47 @@ export function formatNet780Ts(ts: number): string {
     + `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`
 }
 
-/** 速度時系列をチャート描画用に間引く (点数が多いと SVG 描画が重くなるため)。 */
+/**
+ * 速度時系列をチャート描画用に間引く (点数が多いと SVG 描画が重くなるため)。
+ *
+ * 単純な等間隔インデックス抽出だと、急減速やごく短い一時停止・逆に長い停車
+ * (速度 0 が続く期間) がバケット内に埋もれて間引かれてしまい、実際には
+ * 存在しない緩やかな斜め線 (= 抽出されなかった山/谷を直線で飛び越えた結果)
+ * として描画されてしまう。バケットごとに最小値・最大値の 2 点を残す方式
+ * (簡易 min/max decimation) にすることで、停止 (速度 0 の谷) や急な速度変化の
+ * 山を取りこぼさないようにする。
+ */
 export function downsampleSpeed(points: Net780SpeedPoint[], maxPoints = 600): Net780SpeedPoint[] {
   if (points.length <= maxPoints) return points
-  const step = points.length / maxPoints
+
+  const bucketCount = Math.max(1, Math.floor(maxPoints / 2))
+  const bucketSize = points.length / bucketCount
   const out: Net780SpeedPoint[] = []
-  for (let i = 0; i < maxPoints; i++) {
-    out.push(points[Math.floor(i * step)]!)
+
+  for (let b = 0; b < bucketCount; b++) {
+    const start = Math.floor(b * bucketSize)
+    const end = b === bucketCount - 1 ? points.length : Math.floor((b + 1) * bucketSize)
+    if (end <= start) continue
+
+    let minP = points[start]!
+    let maxP = points[start]!
+    for (let i = start + 1; i < end; i++) {
+      const p = points[i]!
+      if (p.speed_kmh < minP.speed_kmh) minP = p
+      if (p.speed_kmh > maxP.speed_kmh) maxP = p
+    }
+
+    if (minP === maxP) {
+      out.push(minP)
+      continue
+    }
+    // バケット内で時系列順を保つため、時刻が早い方を先に push する。
+    const minTime = minP.record_start_ts + minP.offset_secs
+    const maxTime = maxP.record_start_ts + maxP.offset_secs
+    if (minTime <= maxTime) out.push(minP, maxP)
+    else out.push(maxP, minP)
   }
+
   return out
 }
 

@@ -72,8 +72,31 @@ describe('downsampleSpeed', () => {
     const points = buildPoints(1200)
     const sampled = downsampleSpeed(points, 600)
     expect(sampled.length).toBe(600)
-    // 先頭点は維持される (等間隔サンプリングの起点)
+    // 先頭点は維持される (単調増加なので各バケットの最小値 = バケット先頭点)
     expect(sampled[0]).toEqual(points[0])
+  })
+
+  it('長い停止区間 (速度0が続く) が間引きで消えず、谷として残る (斜め線バグの回帰)', () => {
+    // 高速走行 → 3000点 (1500秒 = 25分) 停止 (速度0) → 高速走行、という時系列。
+    // 単純な等間隔インデックス抽出だと停止区間の大半が飛ばされ、直前の高速と
+    // 直後の高速をほぼ直線で結んでしまい「緩やかに減速したように見える」誤った
+    // 斜め線になる。min/max バケット方式なら停止区間の各バケットが (0,0) を
+    // 残すので、間引き後も速度 0 の谷が維持されるはず。
+    const driving = (offset: number, n: number, speed: number): Net780SpeedPoint[] =>
+      Array.from({ length: n }, (_, i) => ({
+        record_start_ts: 0,
+        offset_secs: offset + i * 0.5,
+        speed_kmh: speed,
+      }))
+    const points = [
+      ...driving(0, 100, 80),
+      ...driving(50, 3000, 0),
+      ...driving(1550, 100, 80),
+    ]
+    const sampled = downsampleSpeed(points, 600)
+    // 停止区間 (速度 0) に対応するサンプルが複数残っていること
+    const zeroCount = sampled.filter(p => p.speed_kmh === 0).length
+    expect(zeroCount).toBeGreaterThan(10)
   })
 })
 
