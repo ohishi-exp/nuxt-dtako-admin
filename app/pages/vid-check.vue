@@ -179,14 +179,19 @@ function onSeek(globalSeconds: number) {
 /**
  * ループ再生を ON にした時、一時停止のままだと見た目に何も起きず「機能していない」
  * ように見えるため、区間の開始位置へシークした上で自動的に再生を始める。
+ *
+ * `togglePlayback()` (一時停止⇔再生の反転) は使わない — `isPlaying` はネイティブ
+ * 操作バー等での再生開始を追従できておらず、既に再生中の状態で反転すると逆に
+ * 一時停止させてしまうため。ここでは常に「再生している状態」を強制する。
  */
 function toggleLoopRange() {
   const turningOn = !loopRange.value
   loopRange.value = turningOn
-  if (turningOn && rangeStart.value !== null) {
-    onSeek(rangeStart.value)
-    if (!isPlaying.value) togglePlayback()
-  }
+  if (!turningOn) return
+  if (rangeStart.value !== null) onSeek(rangeStart.value)
+  const els = [frontVideoEl.value, rearVideoEl.value].filter((el): el is HTMLVideoElement => el !== null)
+  els.forEach(el => el.play().catch(() => {}))
+  isPlaying.value = true
 }
 
 /**
