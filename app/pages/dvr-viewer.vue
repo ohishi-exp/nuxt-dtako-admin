@@ -18,6 +18,8 @@ import type { VdfTelemetry } from '~/utils/dtako-vid-wasm'
 
 definePageMeta({ layout: false })
 
+type DvrReceiveState = 'ready' | 'requestable' | 'in_progress' | 'error' | 'unknown'
+
 interface DvrNotification {
   raw: Record<string, unknown>
   vehicleCd: string | null
@@ -30,6 +32,7 @@ interface DvrNotification {
   driverName: string | null
   latitude: number | null
   longitude: number | null
+  receiveState: DvrReceiveState
 }
 
 interface DvrSession {
@@ -188,8 +191,57 @@ async function loadNotifications() {
   }
 }
 
+/** 通知行の受信状態を、UI で扱いやすいラベル・色に。 */
+const RECEIVE_STATE_META: Record<DvrReceiveState, { label: string, color: string }> = {
+  ready: { label: '再生可能', color: 'success' },
+  requestable: { label: '未受信', color: 'warning' },
+  in_progress: { label: '受信中', color: 'info' },
+  error: { label: 'エラー', color: 'error' },
+  unknown: { label: '不明', color: 'neutral' },
+}
+
 function canView(n: DvrNotification): boolean {
-  return Boolean(n.serialNo && n.vehicleCd && n.fileName)
+  return n.receiveState === 'ready' && Boolean(n.serialNo && n.fileName)
+}
+
+function canRequest(n: DvrNotification): boolean {
+  return n.receiveState === 'requestable' && Boolean(n.serialNo && n.fileName)
+}
+
+// 転送要求 (車両から取得) 中の行 (serialNo+fileName キー)
+const requestingKeys = ref<Set<string>>(new Set())
+function rowKey(n: DvrNotification): string {
+  return `${n.serialNo ?? ''}|${n.fileName ?? ''}`
+}
+
+/** 「受信」= 車両に映像転送を要求する (1段目)。要求後は一覧を再読込して状態を追う。 */
+async function requestTransfer(n: DvrNotification) {
+  const s = session.value
+  if (!s || !canRequest(n)) return
+  const key = rowKey(n)
+  requestingKeys.value = new Set(requestingKeys.value).add(key)
+  listError.value = null
+  try {
+    await $fetch('/dvr-api/transfer', {
+      method: 'POST',
+      headers: authHeaders(s),
+      body: { serial: n.serialNo, filename: n.fileName },
+    })
+    // 転送は非同期。少し待ってから一覧を再読込し、receiveState の変化を見せる。
+    await loadNotifications()
+  }
+  catch (e) {
+    if (fetchErrorStatus(e) === 401) {
+      expireSession(fetchErrorMessage(e))
+      return
+    }
+    listError.value = fetchErrorMessage(e)
+  }
+  finally {
+    const next = new Set(requestingKeys.value)
+    next.delete(key)
+    requestingKeys.value = next
+  }
 }
 
 // --- ビューア (vid-check.vue の単一ファイル版) ---
@@ -225,8 +277,7 @@ async function openNotification(n: DvrNotification) {
   videoError.value = null
   try {
     const params = new URLSearchParams({
-      support_id: n.serialNo!,
-      vehicle_cd: n.vehicleCd!,
+      serial: n.serialNo!,
       filename: n.fileName!,
     })
     const buf = await $fetch<ArrayBuffer>(`/dvr-api/file?${params.toString()}`, {
@@ -388,6 +439,7 @@ onBeforeUnmount(closeViewer)
                   <th class="py-2 pr-4">車両名</th>
                   <th class="py-2 pr-4">イベント</th>
                   <th class="py-2 pr-4">運転者</th>
+                  <th class="py-2 pr-4">状態</th>
                   <th class="py-2">動画</th>
                 </tr>
               </thead>
@@ -403,7 +455,13 @@ onBeforeUnmount(closeViewer)
                   <td class="py-2 pr-4">{{ n.vehicleName ?? '-' }}</td>
                   <td class="py-2 pr-4">{{ n.eventType ?? '-' }}</td>
                   <td class="py-2 pr-4">{{ n.driverName ?? '-' }}</td>
+                  <td class="py-2 pr-4">
+                    <UBadge size="xs" variant="soft" :color="RECEIVE_STATE_META[n.receiveState].color as any">
+                      {{ RECEIVE_STATE_META[n.receiveState].label }}
+                    </UBadge>
+                  </td>
                   <td class="py-2">
+                    <!-- 再生可能 → 表示 (ダウンロード + デコード再生) -->
                     <UButton
                       v-if="canView(n)"
                       size="xs"
@@ -413,6 +471,19 @@ onBeforeUnmount(closeViewer)
                       :disabled="videoLoading"
                       @click="openNotification(n)"
                     />
+                    <!-- 未受信 → 受信 (車両へ映像転送を要求) -->
+                    <UButton
+                      v-else-if="canRequest(n)"
+                      size="xs"
+                      color="warning"
+                      variant="soft"
+                      icon="i-lucide-download-cloud"
+                      label="受信"
+                      :loading="requestingKeys.has(rowKey(n))"
+                      @click="requestTransfer(n)"
+                    />
+                    <!-- 受信中 → 状態のみ (再読込で追う) -->
+                    <span v-else-if="n.receiveState === 'in_progress'" class="text-xs text-gray-400">受信中...</span>
                     <span v-else class="text-gray-400">-</span>
                   </td>
                 </tr>
