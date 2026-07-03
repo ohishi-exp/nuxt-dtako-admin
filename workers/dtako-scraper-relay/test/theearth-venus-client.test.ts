@@ -2,10 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import { createCookieJar, TheearthClientError, type FetchLike } from "../src/theearth-client";
 import {
   assertVdfMagic,
-  buildDvrFileUrl,
   callVenusBridgeMethod,
+  dvrDataUrl,
   getDvrNotifications,
   openDvrFileStream,
+  parseReceiveState,
+  requestDvrDownloadPath,
+  requestDvrFileTransfer,
   validateVdfMagicStream,
   VenusSessionExpiredError,
 } from "../src/theearth-venus-client";
@@ -151,6 +154,7 @@ describe("getDvrNotifications", () => {
         driverName: "山田太郎",
         latitude: null,
         longitude: null,
+        receiveState: "unknown",
       },
     ]);
   });
@@ -185,6 +189,7 @@ describe("getDvrNotifications", () => {
         SerialNo: "AX0605008014180",
         FileName: "20260630_213458-0-0-4228-20260703_015633-E.vdf",
         FilePath: "",
+        FileReceive: "fa fa-play-circle fa-icon-green fa-prcs-3-0 fa-lg",
         EventType: "急減速",
         DvrDatetime: "2026/07/03 01:56:56",
         DriverName: "古賀　好春",
@@ -206,6 +211,7 @@ describe("getDvrNotifications", () => {
       driverName: "古賀　好春",
       latitude: 36.339272,
       longitude: 136.35942,
+      receiveState: "ready",
     });
   });
 
@@ -267,18 +273,99 @@ describe("getDvrNotifications", () => {
   });
 });
 
-describe("buildDvrFileUrl", () => {
-  it("builds the deterministic path", () => {
-    expect(buildDvrFileUrl("27324455", "1", "1318", "20260701_230059-27324455-1-1318-20260702_072616-E")).toBe(
-      "https://theearth-np.com/dvrData/27324455/1/1318/20260701_230059-27324455-1-1318-20260702_072616-E/20260701_230059-27324455-1-1318-20260702_072616-E.vdf",
-    );
+describe("parseReceiveState", () => {
+  it("maps the fa-prcs-X-Y class to a receive state", () => {
+    expect(parseReceiveState("fa fa-play-circle fa-icon-green fa-prcs-3-0 fa-lg")).toBe("ready");
+    expect(parseReceiveState("fa fa-cloud-download fa-prcs-0-0 fa-lg")).toBe("requestable");
+    expect(parseReceiveState("fa fa-prcs-1-0")).toBe("in_progress");
+    expect(parseReceiveState("fa fa-prcs-1-3")).toBe("in_progress");
+    expect(parseReceiveState("fa fa-prcs-2-0")).toBe("in_progress");
+    expect(parseReceiveState("fa fa-prcs-1-1")).toBe("error");
+    expect(parseReceiveState("fa fa-prcs-2-1")).toBe("error");
+    expect(parseReceiveState("fa fa-prcs-3-2")).toBe("error");
   });
 
-  it("rejects segments with path traversal / unsafe characters", () => {
-    expect(() => buildDvrFileUrl("../etc", "1", "1318", "a")).toThrow(TheearthClientError);
-    expect(() => buildDvrFileUrl("27324455", "../etc", "1318", "a")).toThrow(TheearthClientError);
-    expect(() => buildDvrFileUrl("27324455", "1", "13/18", "a")).toThrow(TheearthClientError);
-    expect(() => buildDvrFileUrl("27324455", "1", "1318", "a.vdf")).toThrow(TheearthClientError);
+  it("returns unknown for null / unrecognized classes", () => {
+    expect(parseReceiveState(null)).toBe("unknown");
+    expect(parseReceiveState("fa fa-something-else")).toBe("unknown");
+  });
+});
+
+describe("dvrDataUrl", () => {
+  it("builds an absolute /dvrData/ url", () => {
+    expect(dvrDataUrl("27324455/4/4228/x/x.vdf")).toBe("https://theearth-np.com/dvrData/27324455/4/4228/x/x.vdf");
+  });
+});
+
+describe("requestDvrDownloadPath", () => {
+  const key1 = "AX0605008014180";
+  const key2 = "20260630_213458-0-0-4228-20260703_015633-E.vdf";
+
+  it("resolves the server-provided path and normalizes backslashes", async () => {
+    // 実データ: d = [code, "27324455/4/4228/{dir}\\{file}.vdf", filename, key, err]
+    const rawPath = "27324455/4/4228/20260630_213458-0-0-4228-20260703_015633-E\\20260630_213458-0-0-4228-20260703_015633-E.vdf";
+    const fetchImpl = sequenceFetch([jsonResponse({ d: ["1", rawPath, key2, `${key1};${key2}`, ""] })]);
+    const jar = createCookieJar();
+    const target = await requestDvrDownloadPath(jar, key1, key2, fetchImpl);
+    expect(target.path).toBe(
+      "27324455/4/4228/20260630_213458-0-0-4228-20260703_015633-E/20260630_213458-0-0-4228-20260703_015633-E.vdf",
+    );
+    expect(target.filename).toBe(key2);
+  });
+
+  it("falls back to the requested filename when the server omits it", async () => {
+    const fetchImpl = sequenceFetch([jsonResponse({ d: ["1", "a/b.vdf", "", "k", ""] })]);
+    const jar = createCookieJar();
+    const target = await requestDvrDownloadPath(jar, key1, key2, fetchImpl);
+    expect(target.filename).toBe(key2);
+  });
+
+  it("strips a leading slash on the returned path", async () => {
+    const fetchImpl = sequenceFetch([jsonResponse({ d: ["1", "/a/b.vdf", "b.vdf", "k", ""] })]);
+    const jar = createCookieJar();
+    expect((await requestDvrDownloadPath(jar, key1, key2, fetchImpl)).path).toBe("a/b.vdf");
+  });
+
+  it("throws a receive-needed message when code <= 0 or the path is empty", async () => {
+    const jar = createCookieJar();
+    await expect(
+      requestDvrDownloadPath(jar, key1, key2, sequenceFetch([jsonResponse({ d: ["-1", "", "", ";", "1"] })])),
+    ).rejects.toThrow("車両からの転送");
+    await expect(
+      requestDvrDownloadPath(jar, key1, key2, sequenceFetch([jsonResponse({ d: ["1", "", "", "", ""] })])),
+    ).rejects.toThrow("車両からの転送");
+    // d[1] が文字列でない (数値等) → path 空扱いで同じく receive-needed
+    await expect(
+      requestDvrDownloadPath(jar, key1, key2, sequenceFetch([jsonResponse({ d: ["1", 0, "", "", ""] })])),
+    ).rejects.toThrow("車両からの転送");
+  });
+
+  it("rejects a path-traversal payload", async () => {
+    const jar = createCookieJar();
+    await expect(
+      requestDvrDownloadPath(jar, key1, key2, sequenceFetch([jsonResponse({ d: ["1", "../../etc/passwd", "x", "k", ""] })])),
+    ).rejects.toThrow("不正なダウンロードパス");
+  });
+
+  it("throws when the response is not the expected array shape", async () => {
+    const jar = createCookieJar();
+    await expect(
+      requestDvrDownloadPath(jar, key1, key2, sequenceFetch([jsonResponse({ d: "nope" })])),
+    ).rejects.toThrow(TheearthClientError);
+  });
+});
+
+describe("requestDvrFileTransfer", () => {
+  it("returns code>0 as accepted from an array response", async () => {
+    const fetchImpl = sequenceFetch([jsonResponse({ d: ["1", "ok"] })]);
+    const jar = createCookieJar();
+    expect(await requestDvrFileTransfer(jar, "serial", "file.vdf", fetchImpl)).toEqual({ code: 1, raw: ["1", "ok"] });
+  });
+
+  it("parses a scalar response and coerces non-numeric to -1", async () => {
+    const jar = createCookieJar();
+    expect((await requestDvrFileTransfer(jar, "s", "f", sequenceFetch([jsonResponse({ d: 2 })]))).code).toBe(2);
+    expect((await requestDvrFileTransfer(jar, "s", "f", sequenceFetch([jsonResponse({ d: "x" })]))).code).toBe(-1);
   });
 });
 

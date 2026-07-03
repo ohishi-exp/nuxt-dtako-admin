@@ -46,9 +46,11 @@ import {
 } from "./theearth-client";
 import { uploadDtakoZipViaAlcInternalProxy } from "./alc-internal-upload";
 import {
-  buildDvrFileUrl,
+  dvrDataUrl,
   getDvrNotifications,
   openDvrFileStream,
+  requestDvrDownloadPath,
+  requestDvrFileTransfer,
   VenusSessionExpiredError,
 } from "./theearth-venus-client";
 import {
@@ -480,6 +482,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/dvr-api/notifications" && request.method === "GET") {
       return this.handleDvrNotifications(record!);
     }
+    if (url.pathname === "/dvr-api/transfer" && request.method === "POST") {
+      return this.handleDvrTransfer(record!, request);
+    }
     if (url.pathname === "/dvr-api/file" && request.method === "GET") {
       return this.handleDvrFile(record!, url);
     }
@@ -555,37 +560,86 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
   }
 
-  /** GET /dvr-api/file?support_id=&vehicle_cd=&filename= — `.vdf` をマジックバイト
-   * 検証付きで browser にストリーム素通しする (数十 MB になり得るため buffer しない)。
-   * comp_id はクライアントから受けず、ログイン済みセッションの値を使う (他 comp の
-   * パスを組み立てさせない)。
-   *
-   * NOTE (Refs #90): `.vdf` の実ダウンロードパスは未確定。実データでは通知行の
-   * FilePath は空で、決定論的パス (`/dvrData/{comp}/{support}/{vehicle}/{fn}/{fn}.vdf`)
-   * の候補は 404 だった (device からの「受信」ステップを挟む可能性)。buildDvrFileUrl
-   * が 404 → assertVdfMagic 不一致で loud fail するので、通知一覧の表示は妨げない。
-   * 実際のダウンロード操作をトレースしてパスを確定させるのは follow-up。 */
-  private async handleDvrFile(record: DvrSessionRecord, url: URL): Promise<Response> {
-    const supportId = url.searchParams.get("support_id");
-    const vehicleCd = url.searchParams.get("vehicle_cd");
-    const filename = url.searchParams.get("filename");
-    if (!supportId || !vehicleCd || !filename) {
-      return dvrJsonError(400, "support_id / vehicle_cd / filename がすべて必要です");
+  /** POST /dvr-api/transfer {serial, filename} — 車両 (車載機) に映像ファイルの転送を
+   * 要求する (「車両から取得」の 1 段目、Request_DvrFileTransfer_target)。転送は非同期
+   * なので即 200 を返し、完了は通知一覧の receiveState 変化で観測する。 */
+  private async handleDvrTransfer(record: DvrSessionRecord, request: Request): Promise<Response> {
+    let body: { serial?: unknown; filename?: unknown };
+    try {
+      body = (await request.json()) as { serial?: unknown; filename?: unknown };
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    const serial = typeof body.serial === "string" ? body.serial : "";
+    const filename = typeof body.filename === "string" ? body.filename : "";
+    if (!serial || !filename) {
+      return dvrJsonError(400, "serial / filename が必要です");
     }
 
     const jar: CookieJar = { cookies: new Map(record.cookies) };
     try {
-      const fileUrl = buildDvrFileUrl(record.compId, supportId, vehicleCd, filename);
-      const stream = await openDvrFileStream(jar, fileUrl);
+      const result = await requestDvrFileTransfer(jar, serial, filename);
+      await this.ctx.storage.put<DvrSessionRecord>(DVR_SESSION_KEY, {
+        ...record,
+        cookies: Array.from(jar.cookies.entries()),
+      });
+      // code<=0 は要求が受理されなかったケース (既に転送中 / 対象外等)。UI で判別できるよう
+      // accepted フラグを載せる (エラーにはしない — 状態は通知一覧で再確認する)。
+      return Response.json({ accepted: result.code > 0, code: result.code });
+    } catch (err) {
+      if (err instanceof VenusSessionExpiredError) {
+        await this.ctx.storage.delete(DVR_SESSION_KEY);
+        return dvrJsonError(401, "theearth セッションが切れました。再ログインしてください");
+      }
+      console.error("DVR transfer error:", err);
+      const message =
+        err instanceof TheearthClientError
+          ? err.message
+          : `映像ファイルの転送要求に失敗しました (${describeUnknownError(err)})`;
+      return dvrJsonError(502, message);
+    }
+  }
+
+  /** GET /dvr-api/file?serial=&filename= — `.vdf` をマジックバイト検証付きで browser に
+   * ストリーム素通しする (数十 MB になり得るため buffer しない)。
+   *
+   * ダウンロードは 2 段 (Refs #90 実ページ検証済み): Request_DvrFileDownload で
+   * サーバー生成の実相対パスを解決 → `/dvrData/{path}` を GET。決定論パスは組み立て
+   * られない (実データで 404)。未転送 (receiveState != ready) の場合は
+   * Request_DvrFileDownload が code<=0 を返し、requestDvrDownloadPath が「受信してから」
+   * を促す TheearthClientError を投げる。 */
+  private async handleDvrFile(record: DvrSessionRecord, url: URL): Promise<Response> {
+    const serial = url.searchParams.get("serial");
+    const filename = url.searchParams.get("filename");
+    if (!serial || !filename) {
+      return dvrJsonError(400, "serial / filename が必要です");
+    }
+
+    const jar: CookieJar = { cookies: new Map(record.cookies) };
+    try {
+      const target = await requestDvrDownloadPath(jar, serial, filename);
+      const stream = await openDvrFileStream(jar, dvrDataUrl(target.path));
+      // cookie 更新を書き戻す (セッション延命)。stream 開始後なので await はしない
+      // (ヘッダ送出をブロックしない) — 失敗しても致命的でない。
+      this.ctx.waitUntil(
+        this.ctx.storage.put<DvrSessionRecord>(DVR_SESSION_KEY, {
+          ...record,
+          cookies: Array.from(jar.cookies.entries()),
+        }),
+      );
       return new Response(stream, {
         status: 200,
         headers: {
           "content-type": "application/octet-stream",
-          "content-disposition": `attachment; filename="${filename}.vdf"`,
+          "content-disposition": `attachment; filename="${target.filename}"`,
           "cache-control": "no-store",
         },
       });
     } catch (err) {
+      if (err instanceof VenusSessionExpiredError) {
+        await this.ctx.storage.delete(DVR_SESSION_KEY);
+        return dvrJsonError(401, "theearth セッションが切れました。再ログインしてください");
+      }
       console.error("DVR file error:", err);
       const message =
         err instanceof TheearthClientError
