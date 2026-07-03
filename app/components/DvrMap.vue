@@ -147,11 +147,13 @@ function markerContent(m: DvrMapMarker): { el: HTMLElement | undefined, labelBox
     wrap.appendChild(typeof m.direction === 'number' ? arrowEl(m.direction) : dotEl())
     const box = labelBox(lines)
     box.style.display = 'none'
+    // アイコンの右横に少し離して浮かせる (縦中央そろえ)。絶対配置なので開閉しても
+    // アイコン (マーカーアンカー) は動かない。
     box.style.position = 'absolute'
-    box.style.top = '100%'
-    box.style.left = '50%'
-    box.style.transform = 'translateX(-50%)'
-    box.style.marginTop = '2px'
+    box.style.top = '50%'
+    box.style.left = '100%'
+    box.style.transform = 'translateY(-50%)'
+    box.style.marginLeft = '8px'
     box.style.zIndex = '10'
     wrap.addEventListener('click', (e) => {
       e.stopPropagation()
