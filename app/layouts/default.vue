@@ -13,6 +13,7 @@ const navigation = [
   { label: 'CSV比較', icon: 'i-lucide-git-compare', to: '/restraint-compare' },
   { label: 'イベント分類', icon: 'i-lucide-settings', to: '/event-classifications' },
   { label: 'スクレイプ', icon: 'i-lucide-download', to: '/scraper' },
+  { label: '映像確認', icon: 'i-lucide-video', to: '/vid-check' },
 ]
 </script>
 

@@ -1,0 +1,16 @@
+{
+  "name": "dtako-vid-wasm",
+  "type": "module",
+  "version": "0.1.0",
+  "license": "UNLICENSED",
+  "files": [
+    "dtako_vid_wasm_bg.wasm",
+    "dtako_vid_wasm.js",
+    "dtako_vid_wasm.d.ts"
+  ],
+  "main": "dtako_vid_wasm.js",
+  "types": "dtako_vid_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
