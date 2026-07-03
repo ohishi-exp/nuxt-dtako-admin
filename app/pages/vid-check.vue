@@ -2,7 +2,7 @@
 import { decodeVdf, mergeTelemetrySegments, probeVideoDuration } from '~/utils/dtako-vid-wasm'
 import type { VdfTelemetry } from '~/utils/dtako-vid-wasm'
 import { fmtDuration } from '~/utils/time-format'
-import { extractMp4TimeRange } from '~/utils/mp4-clip'
+import { extractMp4TimeRangeMulti } from '~/utils/mp4-clip'
 
 interface Segment {
   fileName: string
@@ -196,44 +196,54 @@ function downloadBlob(blob: Blob, filename: string) {
 }
 
 /**
- * 区間選択バーで指定した [globalStart, globalEnd] を、現在アクティブなセグメントの
+ * 区間選択バーで指定した [globalStart, globalEnd] に重なる全セグメントの
  * 前方/後方 MP4 (既にデコード済みで Blob として保持済み) からコンテナレベルで
  * 無劣化に切り出す。`fetch(blobUrl)` で元の完全な MP4 バイト列を取り出せるので、
- * 実時間で録画し直す必要はない (`extractMp4TimeRange` / `~/utils/mp4-clip`)。
+ * 実時間で録画し直す必要はない (`extractMp4TimeRangeMulti` / `~/utils/mp4-clip`)。
+ * 複数ファイル結合時にセグメントを跨ぐ範囲でも、各セグメントの該当部分を
+ * 抽出してから1本の連続した timeline として無劣化のまま繋ぎ合わせる。
  *
- * 複数ファイル結合時にセグメントを跨ぐ範囲や、mp4box.js が対応できない構造の
- * 場合は false を返し、呼び出し側が `clipViaMediaRecorder` にフォールバックする。
+ * mp4box.js が対応できない構造 (トラック構成の不一致等) の場合は false を返し、
+ * 呼び出し側が `clipViaMediaRecorder` にフォールバックする。
  */
 async function tryClipViaMp4Box(globalStart: number, globalEnd: number): Promise<boolean> {
   try {
-    // globalStart を含むセグメントを探す (`onSeek` と同じ解決ロジック)。
-    // `activeSegmentIndex` (= 現在再生中のセグメント) を直接使うと、選択区間が
-    // 再生位置と異なるセグメントにある複数ファイル結合時に誤って非対応判定になる
     const offsets = segmentOffsets.value
-    let segIdx = 0
-    for (let i = 0; i < offsets.length; i++) {
-      if (globalStart >= offsets[i]!) segIdx = i
+
+    // [globalStart, globalEnd] に重なる全セグメントを (index, localStart, localEnd) で列挙
+    const overlapping: { seg: Segment, localStart: number, localEnd: number }[] = []
+    for (let i = 0; i < segments.value.length; i++) {
+      const seg = segments.value[i]!
+      const segStart = offsets[i] ?? 0
+      const segEnd = segStart + seg.duration
+      if (globalEnd <= segStart || globalStart >= segEnd) continue // 重なりなし
+      overlapping.push({
+        seg,
+        localStart: Math.max(globalStart, segStart) - segStart,
+        localEnd: Math.min(globalEnd, segEnd) - segStart,
+      })
     }
-    const segStart = offsets[segIdx] ?? 0
-    const seg = segments.value[segIdx]
-    if (!seg) return false
-    const segEnd = segStart + seg.duration
-    if (globalStart < segStart || globalEnd > segEnd) return false // セグメント跨ぎは非対応
+    if (overlapping.length === 0) return false
 
-    const localStart = globalStart - segStart
-    const localEnd = globalEnd - segStart
-
-    const targets: { url: string, label: string }[] = []
-    if (seg.frontUrl) targets.push({ url: seg.frontUrl, label: 'front' })
-    if (seg.rearUrl) targets.push({ url: seg.rearUrl, label: 'rear' })
+    // front/rear それぞれ、重なる全セグメントに URL が揃っている場合のみ対応する
+    // (一部のセグメントだけ前方/後方映像が欠けているとタイムラインに穴が空くため)
+    const labels: { key: 'frontUrl' | 'rearUrl', label: string }[] = [
+      { key: 'frontUrl', label: 'front' },
+      { key: 'rearUrl', label: 'rear' },
+    ]
+    const targets = labels.filter(({ key }) => overlapping.every(o => o.seg[key]))
     if (targets.length === 0) return false
 
     // 全トラック分の Blob を先に用意し、1つでも失敗したら何もダウンロードせず
     // 例外を投げる (フォールバック時の二重ダウンロード防止)
     const results: { blob: Blob, label: string }[] = []
-    for (const { url, label } of targets) {
-      const buf = await fetch(url).then(r => r.arrayBuffer())
-      results.push({ blob: extractMp4TimeRange(buf, localStart, localEnd), label })
+    for (const { key, label } of targets) {
+      const ranges = await Promise.all(overlapping.map(async ({ seg, localStart, localEnd }) => ({
+        data: await fetch(seg[key]!).then(r => r.arrayBuffer()),
+        startSec: localStart,
+        endSec: localEnd,
+      })))
+      results.push({ blob: extractMp4TimeRangeMulti(ranges), label })
     }
 
     for (const { blob, label } of results) {
