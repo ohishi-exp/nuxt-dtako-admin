@@ -95,21 +95,33 @@ net780-wasm (ohishi-exp/net780-wasm、wasm-bindgen)
 
 - ロジックは Rust (`net780` crate) 1 箇所にだけ実装し、TypeScript 側での再実装
   (二重管理) を避ける方針 (`ippoan/fc1200-wasm` と同じ考え方)。
-- `net780-wasm` は独立 repo (`ohishi-exp/net780-wasm`)。`package.json` で
-  `"net780-wasm": "file:../net780-wasm/pkg"` (sibling checkout 前提、`fc1200-wasm`
-  consumer と同じパターン) を参照する。`wasm-pack build --target web` で
-  `net780-wasm/pkg/` に npm パッケージを生成してから `npm install` する必要がある。
+- `net780-wasm` は独立 repo (`ohishi-exp/net780-wasm`) だが、**`ohishi-exp/dtako-vid-wasm`
+  と同じ vendoring 方式**で consume する (sibling checkout ではない、2026-07-03 変更)。
+  `wasm-pack build --target web` (net780-wasm リポジトリの `./build.sh`) の出力
+  (`pkg/*`) を `vendor/net780-wasm/` にそのままコミットし、`package.json` は
+  `"net780-wasm": "file:./vendor/net780-wasm"` で参照する。
+  - **理由**: `net780-wasm` と wasm-bindgen 元の `dtako-scraper` (`crates/net780`)
+    がともに private repo のため、GitHub Actions CI に private repo への git
+    dependency 解決権限を持たせたくない (`ohishi-exp/net780-wasm` 自体も CI で
+    ビルドしない方針、`ohishi-exp/net780-wasm/README.md` 参照)。sibling checkout
+    前提だと CI (test job だけでなく **deploy job** も) が実体を得られず、
+    `pre_install_script` の空スタブがそのまま staging にデプロイされて
+    `mod.default is not a function` 実行時エラーになる事故があった。
+  - `net780-wasm` 側で実装を更新した場合は、`./build.sh` を実行して生成された
+    `pkg/*` をこの repo の `vendor/net780-wasm/` に手動で上書きコピーし、PR で
+    commit する運用 (= vendored snapshot、自動追従はしない)。
 
-### CI (実 wasm パッケージが無くても通す)
+### CI
 
-- `test.yml` の `pre_install_script` が `../net780-wasm/pkg/package.json` の
-  最小スタブを作って `npm install` を通す (`ippoan/fc1200-wasm` consumer と同じ
-  パターン)。実体は vitest では使わない。
+- `vendor/net780-wasm/` を repo に commit 済みのため、CI (`test.yml`) に
+  net780-wasm 用の `pre_install_script` は不要 (typecheck/test/deploy 全 job で
+  素の `npm install` から解決できる)。
 - `vitest.config.ts` の `resolve.alias` で `net780-wasm` → `tests/mocks/net780-wasm.ts`
-  (モック) に差し替える。
-- `app/types/net780-wasm.d.ts` は CI (実 pkg/ 無し) での型解決用スタブ
-  (`declare module 'net780-wasm' { ... }`)。実 pkg/ がある時はそちらの
-  生成済み `.d.ts` が優先される。
+  (モック) に差し替える (wasm バイナリの `fetch()` 初期化が vitest/happy-dom 環境で
+  そのまま動かないため、実体があっても test ではモックを使う)。
+- `app/types/net780-wasm.d.ts` (旧 CI 用型スタブ) は削除済み。`vendor/net780-wasm/`
+  に real `.d.ts` (`declare module` ではない通常の module 宣言) が同梱されている
+  ため型解決に追加のスタブは不要。
 
 ### 関連ファイル
 
@@ -117,7 +129,7 @@ net780-wasm (ohishi-exp/net780-wasm、wasm-bindgen)
 |---|---|
 | `app/pages/net780.vue` | UI (ZIP アップロード + サマリ/速度チャート/GPS/イベント表示) |
 | `app/utils/net780.ts` | `parseNet780Zip()` 等 net780-wasm の薄いラッパー + 型定義 |
-| `app/types/net780-wasm.d.ts` | CI 用型スタブ |
+| `vendor/net780-wasm/` | `ohishi-exp/net780-wasm` の `wasm-pack build` 出力を vendor したもの |
 | `tests/mocks/net780-wasm.ts` | vitest 用モック (`__setMockResult`/`__setMockError`) |
 
 ## テスト
