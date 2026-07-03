@@ -177,6 +177,19 @@ function onSeek(globalSeconds: number) {
 }
 
 /**
+ * ループ再生を ON にした時、一時停止のままだと見た目に何も起きず「機能していない」
+ * ように見えるため、区間の開始位置へシークした上で自動的に再生を始める。
+ */
+function toggleLoopRange() {
+  const turningOn = !loopRange.value
+  loopRange.value = turningOn
+  if (turningOn && rangeStart.value !== null) {
+    onSeek(rangeStart.value)
+    if (!isPlaying.value) togglePlayback()
+  }
+}
+
+/**
  * 区間選択バーで指定した [rangeStart, rangeEnd] を、表示中の映像 (前方/後方の
  * うち現在レンダリングされているもの) ごとに `captureStream()` + `MediaRecorder`
  * で実時間録画し、webm としてダウンロードする。MP4 コンテナを直接切り出す
@@ -578,7 +591,7 @@ function fmtBytes(n: number): string {
                 icon="i-lucide-repeat"
                 :label="loopRange ? 'ループ再生中' : 'この区間をループ再生'"
                 :disabled="clipping"
-                @click="loopRange = !loopRange"
+                @click="toggleLoopRange"
               />
               <UButton
                 size="xs"
