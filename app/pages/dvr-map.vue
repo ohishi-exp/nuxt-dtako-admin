@@ -24,6 +24,21 @@ interface VehicleStatePoint {
   currentWorkName: string | null
 }
 
+/** 動態履歴 1 点 (VehicleDisp テーブル由来、速度・回転数・住所・状態付き)。 */
+interface VehicleLogPoint {
+  dataDatetime: string | null
+  comuDatetime: string | null
+  latitude: number | null
+  longitude: number | null
+  speed: number | null
+  revo: number | null
+  state: string | null
+  roadType: string | null
+  address: string | null
+  driverName: string | null
+  dataType: string | null
+}
+
 interface DvrMasterBranch { code: string, name: string }
 interface DvrMasterItem { code: string, link: string | null, name: string }
 interface DvrMasters { branches: DvrMasterBranch[], vehicles: DvrMasterItem[], drivers: DvrMasterItem[] }
@@ -138,7 +153,7 @@ const trackForm = reactive({
   startDay: todayDateInput(),
   endDay: todayDateInput(),
 })
-const track = ref<VehicleStatePoint[]>([])
+const track = ref<VehicleLogPoint[]>([])
 const trackLoading = ref(false)
 const trackError = ref<string | null>(null)
 const trackLoaded = ref(false)
@@ -231,7 +246,7 @@ async function loadTrack() {
   trackLoading.value = true
   trackError.value = null
   try {
-    const res = await $fetch<{ points: VehicleStatePoint[] }>('/dvr-api/log-track', {
+    const res = await $fetch<{ points: VehicleLogPoint[] }>('/dvr-api/log-track', {
       headers: authHeaders(),
       query: {
         vehicle: trackForm.vehicleCd,
@@ -453,12 +468,12 @@ onMounted(() => {
             <template v-if="trackLoaded">
               <p class="text-xs text-gray-400 mb-2">
                 GPS 点数: {{ trackPoints.length }} / {{ track.length }} —
-                行クリック / ↑↓ キーで赤ピンが移動します
+                行クリック / グラフの ←→ キー / 一覧の ↑↓ キーで赤ピンが移動します
               </p>
               <DvrMap :markers="trackMarkers" :track="trackPoints" :current="currentTrackPoint" />
 
               <div class="mt-4">
-                <DvrSpeedChart :points="trackSpeedPoints" :current-ts="currentTrackTs" @seek="onChartSeek" />
+                <DvrSpeedChart :points="trackSpeedPoints" :current-ts="currentTrackTs" @seek="onChartSeek" @step="moveTrackSelection" />
               </div>
 
               <div
@@ -472,9 +487,11 @@ onMounted(() => {
                   <thead class="sticky top-0 z-10">
                     <tr class="bg-slate-600 text-white dark:bg-slate-700">
                       <th class="py-1.5 px-2 text-center font-medium border-r border-slate-500">データ日時</th>
-                      <th class="py-1.5 px-2 text-center font-medium border-r border-slate-500">通信日時</th>
                       <th class="py-1.5 px-2 text-right font-medium border-r border-slate-500">速度</th>
-                      <th class="py-1.5 px-2 text-left font-medium">座標</th>
+                      <th class="py-1.5 px-2 text-right font-medium border-r border-slate-500">回転数</th>
+                      <th class="py-1.5 px-2 text-center font-medium border-r border-slate-500">状態</th>
+                      <th class="py-1.5 px-2 text-center font-medium border-r border-slate-500">道路</th>
+                      <th class="py-1.5 px-2 text-left font-medium">場所</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -487,12 +504,14 @@ onMounted(() => {
                       @click="selectTrackRow(i)"
                     >
                       <td class="py-1 px-2 whitespace-nowrap text-center border-r border-gray-200 dark:border-gray-800">{{ p.dataDatetime ?? '-' }}</td>
-                      <td class="py-1 px-2 whitespace-nowrap text-center border-r border-gray-200 dark:border-gray-800">{{ p.comuDatetime ?? '-' }}</td>
-                      <td class="py-1 px-2 text-right whitespace-nowrap border-r border-gray-200 dark:border-gray-800" :class="p.speed && p.speed > 0 ? 'text-green-600 dark:text-green-400' : ''">
+                      <td class="py-1 px-2 text-right whitespace-nowrap border-r border-gray-200 dark:border-gray-800" :class="p.speed && p.speed > 0 ? 'text-green-600 dark:text-green-400 font-medium' : ''">
                         {{ p.speed != null ? `${p.speed} km/h` : '-' }}
                       </td>
-                      <td class="py-1 px-2 text-gray-400">
-                        {{ p.latitude != null ? `${p.latitude.toFixed(6)}, ${p.longitude?.toFixed(6)}` : 'GPSなし' }}
+                      <td class="py-1 px-2 text-right whitespace-nowrap border-r border-gray-200 dark:border-gray-800">{{ p.revo != null ? p.revo : '-' }}</td>
+                      <td class="py-1 px-2 text-center whitespace-nowrap border-r border-gray-200 dark:border-gray-800">{{ p.state ?? '-' }}</td>
+                      <td class="py-1 px-2 text-center whitespace-nowrap border-r border-gray-200 dark:border-gray-800">{{ p.roadType ?? '-' }}</td>
+                      <td class="py-1 px-2 whitespace-nowrap">
+                        {{ p.address || (p.latitude != null ? `${p.latitude.toFixed(5)}, ${p.longitude?.toFixed(5)}` : 'GPSなし') }}
                       </td>
                     </tr>
                   </tbody>

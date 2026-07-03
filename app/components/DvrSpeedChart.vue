@@ -20,7 +20,11 @@ const props = defineProps<{
   currentTs?: number | null
 }>()
 
-const emit = defineEmits<{ seek: [ts: number] }>()
+const emit = defineEmits<{
+  seek: [ts: number]
+  /** ←→キーでの前後移動 (親が行選択を 1 つ動かす)。 */
+  step: [delta: number]
+}>()
 
 const CHART_WIDTH = 800
 const CHART_HEIGHT = 160
@@ -109,6 +113,7 @@ function seekFromEvent(e: MouseEvent) {
 
 function onPointerDown(e: MouseEvent) {
   seeking.value = true
+  svgEl.value?.focus() // 以降 ←→ キーで前後移動できるようにする
   seekFromEvent(e)
 }
 function onPointerMove(e: MouseEvent) {
@@ -122,17 +127,20 @@ function onPointerUp() {
 <template>
   <div v-if="segments.length > 0">
     <p class="text-xs text-gray-500 mb-1">
-      速度 (クリック/ドラッグでシーク — 一覧と地図のピンが連動) / 最高 {{ Math.round(maxSpeed) }} km/h
+      速度 (クリック/ドラッグでシーク、←→キーで前後移動 — 一覧と地図のピンが連動) / 最高 {{ Math.round(maxSpeed) }} km/h
     </p>
     <svg
       ref="svgEl"
+      tabindex="0"
       :viewBox="`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`"
-      class="w-full h-40 cursor-crosshair select-none bg-gray-50 dark:bg-gray-900 rounded border border-gray-200 dark:border-gray-800"
+      class="w-full h-40 cursor-crosshair select-none bg-gray-50 dark:bg-gray-900 rounded border border-gray-200 dark:border-gray-800 outline-none focus:ring-2 focus:ring-blue-400"
       preserveAspectRatio="none"
       @mousedown="onPointerDown"
       @mousemove="onPointerMove"
       @mouseup="onPointerUp"
       @mouseleave="onPointerUp"
+      @keydown.left.prevent="emit('step', -1)"
+      @keydown.right.prevent="emit('step', 1)"
     >
       <polyline
         v-for="(seg, i) in segments"
