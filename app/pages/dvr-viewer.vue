@@ -698,11 +698,24 @@ onBeforeUnmount(closeViewer)
               <UFormField label="事業所">
                 <USelect v-model="searchForm.branchCode" :items="branchOptions" class="w-56" />
               </UFormField>
+              <!-- USelectMenu は検索ボックス内蔵 (車番/CD/名前の手入力で絞り込める) -->
               <UFormField label="車 輌">
-                <USelect v-model="searchForm.vehicleCd" :items="vehicleOptions" class="w-56" />
+                <USelectMenu
+                  v-model="searchForm.vehicleCd"
+                  :items="vehicleOptions"
+                  value-key="value"
+                  :search-input="{ placeholder: '車番/CD で検索...' }"
+                  class="w-56"
+                />
               </UFormField>
               <UFormField label="乗務員">
-                <USelect v-model="searchForm.driverCd" :items="driverOptions" class="w-56" />
+                <USelectMenu
+                  v-model="searchForm.driverCd"
+                  :items="driverOptions"
+                  value-key="value"
+                  :search-input="{ placeholder: '名前/CD で検索...' }"
+                  class="w-56"
+                />
               </UFormField>
             </div>
 
