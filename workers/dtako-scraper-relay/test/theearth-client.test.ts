@@ -6,6 +6,7 @@ import {
   detectWareki,
   downloadCsvZip,
   extractHiddenFields,
+  fetchWithJar,
   ingestSetCookie,
   login,
   scrapeViaHttp,
@@ -161,6 +162,28 @@ describe('cookie jar', () => {
     headers.append('set-cookie', 'ok=1')
     ingestSetCookie(jar, headers)
     expect(cookieHeader(jar)).toBe('ok=1')
+  })
+})
+
+describe('fetchWithJar timeout handling', () => {
+  it('translates an aborted fetch into a TheearthClientError timeout message', async () => {
+    const ctrl = new AbortController()
+    ctrl.abort()
+    const fetchImpl = (async () => {
+      throw new DOMException('The operation was aborted', 'AbortError')
+    }) as unknown as FetchLike
+    await expect(
+      fetchWithJar(createCookieJar(), 'https://theearth-np.com/x', { method: 'GET', signal: ctrl.signal }, fetchImpl, 30000),
+    ).rejects.toThrow('タイムアウト')
+  })
+
+  it('rethrows a non-abort fetch error unchanged', async () => {
+    const fetchImpl = (async () => {
+      throw new Error('network boom')
+    }) as unknown as FetchLike
+    await expect(
+      fetchWithJar(createCookieJar(), 'https://theearth-np.com/x', { method: 'GET' }, fetchImpl),
+    ).rejects.toThrow('network boom')
   })
 })
 
@@ -392,6 +415,29 @@ describe('downloadCsvZip', () => {
     const jar = createCookieJar()
     const buf = await downloadCsvZip(jar, range, fetchImpl)
     expect(new Uint8Array(buf).slice(0, 4)).toEqual(new Uint8Array([0x50, 0x4b, 0x03, 0x04]))
+  })
+
+  it('re-sends the date range in the stage-2 (btnCsvSvrOutput) POST body', async () => {
+    // 真因の回帰テスト: 2段階目に日付範囲を落とすと空 ZIP が返る。stage2 の body に
+    // rdoSelect1/rdoDate1 + 開始/終了 年月日 が含まれることを固定する (ohishi-exp/dtako-scraper#22)。
+    const bodies: string[] = []
+    let call = 0
+    const fetchImpl = (async (_url, init) => {
+      call += 1
+      if (call === 1) return html(csvPageHtml()) // GET
+      bodies.push(String(init?.body ?? ''))
+      if (call === 2) return html(STAGE1_CONFIRM_HTML) // stage1 POST
+      return zipResponse() // stage2 POST
+    }) as FetchLike
+    await downloadCsvZip(createCookieJar(), range, fetchImpl)
+    const stage2 = new URLSearchParams(bodies[1])
+    expect(stage2.get('ctl00$MainContent$SelectM')).toBe('rdoSelect1')
+    expect(stage2.get('ctl00$MainContent$SelectD')).toBe('rdoDate1')
+    expect(stage2.get('ctl00$MainContent$ucStartDate$txtYear')).toBe('26')
+    expect(stage2.get('ctl00$MainContent$ucStartDate$txtMonth')).toBe('07')
+    expect(stage2.get('ctl00$MainContent$ucStartDate$txtDay')).toBe('01')
+    expect(stage2.get('ctl00$MainContent$ucEndDate$txtDay')).toBe('02')
+    expect(stage2.get('ctl00$MainContent$btnCsvSvrOutput')).toBe('ダウンロード')
   })
 
   it('downloads directly when stage 1 already returns the ZIP', async () => {

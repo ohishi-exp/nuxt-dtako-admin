@@ -220,16 +220,20 @@ dtako 運行ログ (csvdata.zip) の取得トリガー UI。実処理は `nuxt-d
 
 ### 2経路 (`SCRAPER_MODE`)
 
-**結論 (2026-07-03 実機検証で確定): `http` mode の CSV ダウンロード段は本番導線に
-使えない。** ログイン段は `fetch()` ベースで問題なく動くが、CSV ダウンロード段は
-`fetch()`/XHR では theearth-np.com から実データを取得できないことを確認済み
-(詳細は下の運用手順 3. 内の note を参照)。恒久的に `vpc-relay` (実 headless
-Chrome) を CSV ダウンロードに使い続ける。
+**結論 (2026-07-03 実機検証で確定): `http` mode は CSV ダウンロード段も含めて
+`fetch()` だけで動作する (Chromium 不要)。** 真因は「2段階目 (`btnCsvSvrOutput` の
+POST) に日付範囲フィールドを含めていなかった」ことで、これを含めれば実データ入り
+ZIP (実測 85KB) が返る。詳細は下の運用手順 3. 内の note を参照。
+
+> 一時期 PR #101 で「`fetch()` では原理的に不可能、`Sec-Fetch-Mode` 等の
+> navigation 判定が原因」と誤って結論づけたが、それは 2段階目の日付欠落を見落と
+> した誤診だった (実際は fetch でも 22 バイトの空 ZIP = export 0 件が返っていた
+> だけで、handler には到達していた)。本 note で訂正。
 
 | mode | 経路 | 備考 |
 |---|---|---|
-| `vpc-relay` (デフォルト、既存) | browser → DO → Workers VPC binding → Kagoya VPS の dtako-scraper (`/scrape/ws`、chromiumoxide ヘッドレス Chrome) | DO は薄い中継のみ。CSV ダウンロードはこちらを使い続ける |
-| `http` (Refs ohishi-exp/dtako-scraper#22、CSV ダウンロード段は非推奨) | browser → DO → DO 自身が `theearth-client.ts` で theearth-np.com に素の `fetch()` でログイン + CSV ダウンロード | Chromium 不要だが CSV ダウンロード段は実機検証で恒久的に動作しないことが確定 (下記 note 参照)。ログイン段のみは動作する |
+| `vpc-relay` (デフォルト、既存) | browser → DO → Workers VPC binding → Kagoya VPS の dtako-scraper (`/scrape/ws`、chromiumoxide ヘッドレス Chrome) | DO は薄い中継のみ |
+| `http` (Refs ohishi-exp/dtako-scraper#22) | browser → DO → DO 自身が `theearth-client.ts` で theearth-np.com に素の `fetch()` でログイン + CSV ダウンロード | Chromium 不要。DO を `comp_id` 単位で `idFromName` するため同一企業への並列リクエストが自然に直列化される |
 
 `workers/dtako-scraper-relay/wrangler.toml` の `[env.staging.vars] SCRAPER_MODE`
 は `"http"` に設定済み (staging のみ、本番の top-level `[vars]` には未設定 = 本番は
@@ -269,34 +273,32 @@ Chrome) を CSV ダウンロードに使い続ける。
    サイト仕様が変わった場合は `TheearthClientError` で loud fail するので、
    エラーメッセージを見て `theearth-client.ts` の該当 id を実ページと突き合わせる
 
-   > **CSV ダウンロード段は `fetch()` では再現不可能、恒久的に `vpc-relay` 側に
-   > 留める (実機検証 2026-07-03 で確定、ohishi-exp/dtako-scraper#22)。**
-   > 当初「GET 直後に間を置かず POST するボットらしい速さが弾かれている」と
-   > 疑い `HUMAN_LIKE_DELAY_MS` の遅延を挟んでみたが、実 Cloudflare Workers
-   > (`wrangler deploy --temporary` PoC) で `useDelay: true` を検証しても症状は
-   > 変わらず disprove された。cdp-relay 経由で実 Chrome の `submit` を capture
-   > phase listener で捕捉し、実際に送信された POST body を verbatim に fetch で
-   > 再送する検証を3段階行った:
-   > 1. `FormData(form)` (submitter なし) の body → プレーン HTML 再描画
-   > 2. 実クライアント JS (`J-NOS3010[GeneralCsv].js`) の `DateCheck()` を読んで
-   >    判明した「表示ボタン `btnCsv` の送信は常にキャンセルされ、実際に POST
-   >    されるのは隠しボタン `btnCsvSvr`」を使って新鮮な GET 直後・遅延なしで
-   >    再送 → それでもプレーン HTML 再描画
-   > 3. `FormData(form, submitter)` でネイティブ相当の全フィールドを再構築して
-   >    再送 → それでもプレーン HTML 再描画
+   > **真因: CSV ダウンロード段の「空 ZIP (22 バイト)」は、2段階目
+   > (`btnCsvSvrOutput` の POST) に日付範囲フィールドを含めていなかったのが原因
+   > (実機検証 2026-07-03 で確定、ohishi-exp/dtako-scraper#22)。**
+   > このフローは 2段階 postback (`btnCsvSvr` → 確認ページ → `btnCsvSvrOutput`)
+   > で、サーバの CSV export ハンドラは **2段階目の POST body からも日付範囲を
+   > 読む**。旧実装は 2段階目に hidden field と出力ボタンしか含めておらず日付を
+   > 落としていたため「範囲外 = 0 件」の空 ZIP (`PK\x05\x06` の EOCD のみ) が
+   > 返っていた。実ブラウザのクリックは確認ページの DOM に日付が残ったまま
+   > submit するので成功していた。`downloadCsvZip()` で 2段階目にも日付範囲を
+   > 再送するよう修正済み → fetch でも実データ入り ZIP (実測 85KB、`PK\x03\x04`)
+   > が返る。
    >
-   > 一方、実ブラウザで `<input type=submit>` に対し `.click()` した場合は
-   > 2回とも実データ入りの ZIP (103KB) が返った。フィールド構成の正確さに
-   > 関わらず `fetch()` ベースの POST は一度も成功しなかったことから、原因は
-   > body の組み立てミスではなく、**トップレベルナビゲーションを伴う実フォーム
-   > 送信と `fetch()`/XHR をサーバ (または前段) が区別している**ことだと考え
-   > られる (`Sec-Fetch-Mode`/`Sec-Fetch-Dest` 等、JS からは偽装不能なブラウザ
-   > 自動付与ヘッダが有力な候補)。Cloudflare Workers 上の `fetch()` も同様の
-   > 制約を受けるため、この段だけは headless Chrome (`vpc-relay`) を使い続ける
-   > 必要がある。`theearth-client.ts` の `downloadCsvZip()`/`scrapeViaHttp()` は
-   > 実験目的でコードを残しているが、本番導線には使わない。
-   > なお `btnCsvSvr` (実クリックが実際に送るボタン名) への修正自体は
-   > `CSV_FORM_IDS` に反映済み (誤って `btnCsv` を使っていたバグ)。
+   > 併せて実クライアント JS (`J-NOS3010[GeneralCsv].js` の `DateCheck()`) から
+   > 「表示ボタン `btnCsv` の送信は常にキャンセルされ、実際に POST されるのは
+   > 隠しボタン `btnCsvSvr`」であることも確認し `CSV_FORM_IDS` を `btnCsvSvr` に
+   > 修正済み (旧実装は `btnCsv` で送っていた別バグ)。
+   >
+   > **hang / セッションロック対策**: サーバの export 生成が遅い (実測 90 秒超)
+   > ため 2段階目のみ `DEFAULT_EXPORT_TIMEOUT_MS` (150s)、他は
+   > `DEFAULT_REQUEST_TIMEOUT_MS` (30s) の `AbortSignal.timeout` を掛け、固まった
+   > リクエストは `TheearthClientError` (タイムアウト) で loud fail させる。
+   > **同一 ASP.NET セッションへの並行リクエストはセッションロックで hang/500 する**
+   > ので、`http` モードでは DO を `comp_id` 単位で `idFromName` + DO 内の
+   > `scrapeQueue` で必ず直列化する (並行 fetch を撃たない)。この直列化は
+   > `runHttpScrapeJob` の Promise チェーン + `finally { release() }` で、
+   > タイムアウト/失敗時もキューが解放される。
 
 `http` モード完了時、DO は csvdata.zip を `ctx.storage` に一時保存 (TTL 10分、
 1回だけ取得可能) し、WS の `result` イベントに `zip_url` (`/scraper-zip/{compId}/
