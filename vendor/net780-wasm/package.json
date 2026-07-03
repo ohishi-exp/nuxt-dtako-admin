@@ -3,6 +3,7 @@
   "type": "module",
   "description": "NET780 生データ ZIP をブラウザ内でパースする wasm バインディング",
   "version": "0.1.0",
+  "license": "UNLICENSED",
   "files": [
     "net780_wasm_bg.wasm",
     "net780_wasm.js",
