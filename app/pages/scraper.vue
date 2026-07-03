@@ -27,6 +27,9 @@ const compIdOptions = [
   { label: '75700192 (北海大運)', value: '75700192' },
 ]
 
+/** compIdOptions から「全企業」プレースホルダ (value: '') を除いた実 comp_id 一覧。 */
+const realCompIds = compIdOptions.filter(o => o.value).map(o => o.value)
+
 const compIdLabels: Record<string, string> = {
   '27324455': '大石運輸倉庫',
   '75700192': '北海大運',
@@ -216,50 +219,57 @@ async function handleScrape() {
   }))
   isRunning.value = true
 
+  // 「全企業」(selectedCompId が空) は SCRAPER_MODE=http (DO が comp_id 単位で
+  // idFromName される設計、Refs ohishi-exp/dtako-scraper#22) では comp_id 必須の
+  // ため 400 になる。従来 vpc-relay 経路も comp_id 明示指定と同義に動くため、
+  // フロント側で実 comp_id を1社ずつ順次トリガーする (DO 側の変更は不要)。
+  const compIdsToRun = selectedCompId.value ? [selectedCompId.value] : realCompIds
+
   for (const task of tasks.value) {
     task.status = 'running'
     task.step = undefined
-    try {
-      await triggerScrapeStream(
-        {
-          comp_id: selectedCompId.value || undefined,
-          start_date: task.date,
-          end_date: task.date,
-          skip_upload: skipUpload.value,
-        },
-        (evt: ScrapeProgressEvent) => {
-          if (evt.event === 'progress') {
-            task.step = evt.step
-          }
-          else if (evt.event === 'result') {
-            task.results.push({
-              comp_id: evt.comp_id || '',
-              status: evt.status || 'error',
-              message: evt.message || '',
-              zipUrl: evt.zip_url,
-            })
-            recordScrapeResult(task.date, evt)
-          }
-          else if (evt.event === 'error') {
-            // result イベント無しで切断されるケース (account 未検出等の接続レベルエラー)。
-            // result を push しないと done で誤って success 判定されてしまう。
-            task.results.push({ comp_id: evt.comp_id || '', status: 'error', message: evt.message || 'エラーが発生しました' })
-          }
-          else if (evt.event === 'done') {
-            task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'
-            task.step = undefined
-          }
-        },
-      )
-      // ストリーム終了後、まだ pending なら完了にする
-      if (task.status === 'running') {
-        task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'
+    for (const compId of compIdsToRun) {
+      try {
+        await triggerScrapeStream(
+          {
+            comp_id: compId,
+            start_date: task.date,
+            end_date: task.date,
+            skip_upload: skipUpload.value,
+          },
+          (evt: ScrapeProgressEvent) => {
+            if (evt.event === 'progress') {
+              task.step = evt.step
+            }
+            else if (evt.event === 'result') {
+              task.results.push({
+                comp_id: evt.comp_id || '',
+                status: evt.status || 'error',
+                message: evt.message || '',
+                zipUrl: evt.zip_url,
+              })
+              recordScrapeResult(task.date, evt)
+            }
+            else if (evt.event === 'error') {
+              // result イベント無しで切断されるケース (account 未検出等の接続レベルエラー)。
+              // result を push しないと done で誤って success 判定されてしまう。
+              task.results.push({ comp_id: evt.comp_id || '', status: 'error', message: evt.message || 'エラーが発生しました' })
+            }
+            else if (evt.event === 'done') {
+              task.step = undefined
+            }
+          },
+        )
+      }
+      catch (e) {
+        task.results.push({
+          comp_id: compId,
+          status: 'error',
+          message: e instanceof Error ? e.message : 'エラー',
+        })
       }
     }
-    catch (e) {
-      task.error = e instanceof Error ? e.message : 'エラー'
-      task.status = 'error'
-    }
+    task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'
   }
 
   isRunning.value = false
