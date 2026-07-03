@@ -99,3 +99,45 @@ export function downsampleSpeed(points: Net780SpeedPoint[], maxPoints = 600): Ne
   }
   return out
 }
+
+export interface SpeedChartData {
+  polyline: string
+  maxSpeed: number
+  maxSecs: number
+  pointCount: number
+}
+
+/**
+ * 速度時系列を SVG polyline 用の座標文字列に変換する。
+ *
+ * `.spd` は複数レコードの列で、record が切り替わるたびに `offset_secs` が 0 から
+ * 再スタートする (net780 crate の `SpdRecord::speed_series` 参照)。`offset_secs`
+ * だけを x 軸に使うとレコード境界で x が原点に巻き戻り折れ線がギザギザになるため、
+ * `record_start_ts + offset_secs` の絶対時刻を x 軸に使う。
+ */
+export function buildSpeedChartData(
+  points: Net780SpeedPoint[],
+  chartWidth: number,
+  chartHeight: number,
+  padding: number,
+): SpeedChartData | null {
+  if (points.length < 2) return null
+
+  const times = points.map(p => p.record_start_ts + p.offset_secs)
+  const minTime = Math.min(...times)
+  const maxTime = Math.max(...times)
+  const timeRange = maxTime - minTime || 1
+  const maxSpeed = Math.max(...points.map(p => p.speed_kmh)) || 1
+  const innerW = chartWidth - padding * 2
+  const innerH = chartHeight - padding * 2
+
+  const polyline = points
+    .map((p, i) => {
+      const x = padding + ((times[i]! - minTime) / timeRange) * innerW
+      const y = padding + innerH - (p.speed_kmh / maxSpeed) * innerH
+      return `${x.toFixed(1)},${y.toFixed(1)}`
+    })
+    .join(' ')
+
+  return { polyline, maxSpeed, maxSecs: timeRange, pointCount: points.length }
+}
