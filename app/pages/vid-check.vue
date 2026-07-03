@@ -12,11 +12,34 @@ const frontUrl = ref<string | null>(null)
 const rearUrl = ref<string | null>(null)
 const telemetry = ref<VdfTelemetry | null>(null)
 
+const frontVideoEl = ref<HTMLVideoElement | null>(null)
+const rearVideoEl = ref<HTMLVideoElement | null>(null)
+const currentTime = ref(0)
+const duration = ref(0)
+
+function onTimeUpdate() {
+  const el = frontVideoEl.value || rearVideoEl.value
+  if (el) currentTime.value = el.currentTime
+}
+
+function onLoadedMetadata() {
+  const el = frontVideoEl.value || rearVideoEl.value
+  if (el && Number.isFinite(el.duration)) duration.value = el.duration
+}
+
+function onSeek(seconds: number) {
+  if (frontVideoEl.value) frontVideoEl.value.currentTime = seconds
+  if (rearVideoEl.value) rearVideoEl.value.currentTime = seconds
+  currentTime.value = seconds
+}
+
 function revokeUrls() {
   if (frontUrl.value) URL.revokeObjectURL(frontUrl.value)
   if (rearUrl.value) URL.revokeObjectURL(rearUrl.value)
   frontUrl.value = null
   rearUrl.value = null
+  currentTime.value = 0
+  duration.value = 0
 }
 
 onBeforeUnmount(revokeUrls)
@@ -123,15 +146,53 @@ function fmtBytes(n: number): string {
           <template #header>
             前方映像
           </template>
-          <video v-if="frontUrl" :src="frontUrl" controls class="w-full rounded-lg bg-black" />
+          <video
+            v-if="frontUrl"
+            ref="frontVideoEl"
+            :src="frontUrl"
+            controls
+            class="w-full rounded-lg bg-black"
+            @timeupdate="onTimeUpdate"
+            @loadedmetadata="onLoadedMetadata"
+          />
           <p v-else class="text-sm text-gray-400 py-8 text-center">前方映像なし</p>
         </UCard>
         <UCard>
           <template #header>
             後方映像
           </template>
-          <video v-if="rearUrl" :src="rearUrl" controls class="w-full rounded-lg bg-black" />
+          <video
+            v-if="rearUrl"
+            ref="rearVideoEl"
+            :src="rearUrl"
+            controls
+            class="w-full rounded-lg bg-black"
+            @timeupdate="onTimeUpdate"
+            @loadedmetadata="onLoadedMetadata"
+          />
           <p v-else class="text-sm text-gray-400 py-8 text-center">後方映像なし</p>
+        </UCard>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+        <UCard>
+          <template #header>
+            GPS 軌跡
+          </template>
+          <VidMap :gps="telemetry.gps" :telemetry="telemetry" :current-time="currentTime" />
+        </UCard>
+        <UCard>
+          <template #header>
+            Gセンサー・速度・回転数 (クリック/ドラッグでシーク)
+          </template>
+          <VidTelemetryChart
+            :g="telemetry.g"
+            :speed-rpm="telemetry.speed_rpm"
+            :telemetry="telemetry"
+            :duration="duration"
+            :current-time="currentTime"
+            @seek="onSeek"
+          />
         </UCard>
       </div>
 

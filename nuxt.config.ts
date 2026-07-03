@@ -24,6 +24,16 @@ export default defineNuxtConfig({
     preset: 'cloudflare_module',
   },
 
+  // VidMap.vue が使う `google.maps.*` グローバル型 (@types/google.maps) を
+  // tsconfig の types に追加。
+  typescript: {
+    tsConfig: {
+      compilerOptions: {
+        types: ['google.maps'],
+      },
+    },
+  },
+
   // server route (/api/proxy) が import する @ippoan/auth-client/server (.mjs) を
   // Nitro が解決できるよう transpile 対象に含める。
   build: {

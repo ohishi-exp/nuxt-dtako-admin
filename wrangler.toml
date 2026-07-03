@@ -33,6 +33,24 @@ binding = "INTERNAL_SHARED_SECRET"
 store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
 secret_name = "INTERNAL_SHARED_SECRET"
 
+# /vid-check の GPS 軌跡表示 (VidMap.vue) 用 Google Maps JS API key。
+# nuxt_dtako_logs とは別に発行した専用キー (HTTP リファラー制限:
+# dtako.ippoan.org / dtako-staging.ippoan.org)。GCP Secret Manager
+# (projects/747065218280/secrets/NUXT_PUBLIC_GOOGLEMAP_KEY) が SoT。
+# client bundle に最終的に載る前提の public 値なので機密性は低いが、値の
+# 投入自体は secrets-inventory 経由に揃えて Secrets Store binding にしている。
+# **binding 名を NUXT_PUBLIC_* にしない**こと — Nuxt/Nitro の public
+# runtimeConfig 自動 env 上書きが Secrets Store binding オブジェクト
+# (文字列ではなく `.get()` を持つオブジェクト) をそのまま runtimeConfig に
+# 突っ込み、起動時の deepFreeze が `Uncaught TypeError: Cannot freeze`
+# (code 10021) で fail する (2026-07-03 実害、wrangler deploy 自体が落ちた)。
+# `server/api/vid-check/map-key.get.ts` が `.get()` して plain string を
+# 返す小さな endpoint 経由で client に渡す。
+[[secrets_store_secrets]]
+binding = "GOOGLEMAP_KEY_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "NUXT_PUBLIC_GOOGLEMAP_KEY"
+
 # introspect を公開 HTTP ではなく CF service binding (worker-to-worker, 内部) で叩く。
 [[services]]
 binding = "AUTH_WORKER"
@@ -83,6 +101,11 @@ bucket_name = "dtako-uploads"
 binding = "INTERNAL_SHARED_SECRET"
 store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
 secret_name = "INTERNAL_SHARED_SECRET"
+
+[[env.staging.secrets_store_secrets]]
+binding = "GOOGLEMAP_KEY_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "NUXT_PUBLIC_GOOGLEMAP_KEY"
 
 [[env.staging.services]]
 binding = "AUTH_WORKER"
