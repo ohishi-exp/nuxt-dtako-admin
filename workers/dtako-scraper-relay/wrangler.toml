@@ -46,8 +46,29 @@ service_id = "019f20af-c6ac-7dd0-8381-ea22add4bd40"
 [observability]
 enabled = true
 
+# VPS / GCE cron の Worker 移行 (Refs ohishi-exp/dtako-scraper#22 /
+# ohishi-exp/browser-render-rust#14)。cron 式は src/cron.ts の
+# DTAKO_CRON / ETC_CRON 定数と一致させること (ズレると scheduled handler が
+# 「未知の cron 式」を log して何もしない)。
+# - "0 16 * * *"        = 01:00 JST。dtako 日次 (VPS cron dtako-scraper-daily と同時刻)。
+#                          SCRAPER_MODE=http + DTAKO_ACCOUNTS 設定時のみ実走。
+# - "0 21,22,23,0 * * *" = JST 6,7,8,9 時。ETC 明細 (GCE cron etc-scrape-batch-env と
+#                          同時刻)。ETC_ACCOUNTS (dashboard plain var) 設定時のみ実走。
+[triggers]
+crons = [
+  "0 16 * * *",
+  "0 21,22,23,0 * * *",
+]
+
+# ETC 明細 CSV の保存先 (app 本体の DTAKO_R2 と同じ dtako-uploads bucket)。
+# key は `{ETC_R2_PREFIX}/{user_id}/{YYYY-MM-DD}/{HHMMSS}.csv` (JST)。
+[[r2_buckets]]
+binding = "DTAKO_R2"
+bucket_name = "dtako-uploads"
+
 [vars]
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth.ippoan.org"
+ETC_R2_PREFIX = "etc"
 
 [env.staging]
 name = "nuxt-dtako-admin-scraper-relay-staging"
@@ -75,8 +96,21 @@ service = "auth-worker-staging"
 binding = "DTAKO_SCRAPER_VPC"
 service_id = "019f20af-c6ac-7dd0-8381-ea22add4bd40"
 
+[env.staging.triggers]
+crons = [
+  "0 16 * * *",
+  "0 21,22,23,0 * * *",
+]
+
+# staging も同じ dtako-uploads bucket を使うが、key prefix (`etc-staging/`) で
+# 本番の `etc/` と分離する (ETC_R2_PREFIX 参照)。
+[[env.staging.r2_buckets]]
+binding = "DTAKO_R2"
+bucket_name = "dtako-uploads"
+
 [env.staging.vars]
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 # ohishi-exp/dtako-scraper#22 のブラウザレス化を staging で試験する (DTAKO_ACCOUNTS は
 # 値に秘密を含むため wrangler.toml には置かず、dashboard の plain var で別途投入する)。
 SCRAPER_MODE = "http"
+ETC_R2_PREFIX = "etc-staging"

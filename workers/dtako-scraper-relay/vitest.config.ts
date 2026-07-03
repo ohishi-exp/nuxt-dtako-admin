@@ -18,6 +18,8 @@ export default defineConfig({
         'src/alc-internal-upload.ts',
         'src/theearth-venus-client.ts',
         'src/dvr-session.ts',
+        'src/etc-meisai-client.ts',
+        'src/cron.ts',
       ],
       thresholds: {
         lines: 100,
