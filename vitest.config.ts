@@ -15,8 +15,9 @@ export default defineVitestConfig({
   },
   resolve: {
     alias: {
-      // net780-wasm (file: 依存、CI では stub package.json のみ) は実 wasm を
-      // 読み込まずモックに差し替える (ippoan/fc1200-wasm consumer と同じ扱い)。
+      // net780-wasm (vendor/net780-wasm/ に vendoring 済み) は wasm バイナリの
+      // fetch() 初期化が vitest/happy-dom 環境で動かないため、テストではモックに
+      // 差し替える (ippoan/fc1200-wasm consumer と同じ扱い)。
       'net780-wasm': resolve(import.meta.dirname!, 'tests/mocks/net780-wasm.ts'),
     },
   },

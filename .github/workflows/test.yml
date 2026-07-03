@@ -32,17 +32,6 @@ jobs:
       compat_backend_image_env: 'API_IMAGE'
       integration_env: 'API_BASE_URL=http://localhost:18080'
       use_auth_client_dev: true   # PR 時に @ippoan/auth-client@dev を overlay install (createIdentityProxyHandler 取得、Refs rust-alc-api#434)
-      # net780-wasm (file:../net780-wasm/pkg、ohishi-exp/net780-wasm) は CI に実体が
-      # 無いため、`npm install` が解決できるよう最小 package.json だけのスタブを
-      # 用意する (ippoan/fc1200-wasm consumer の pre_install_script と同じパターン)。
-      # 実体は tests/mocks/net780-wasm.ts (vitest alias) に差し替えて使う。
-      pre_install_script: |
-        mkdir -p ../net780-wasm/pkg
-        echo '{"name":"net780-wasm","version":"0.0.0","main":"net780_wasm.js","types":"net780_wasm.d.ts"}' > ../net780-wasm/pkg/package.json
-        echo 'module.exports = {}' > ../net780-wasm/pkg/net780_wasm.js
-        if [ -f app/types/net780-wasm.d.ts ]; then
-          cp app/types/net780-wasm.d.ts ../net780-wasm/pkg/net780_wasm.d.ts
-        fi
       post_install_script: 'npx nuxt prepare'
     secrets:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

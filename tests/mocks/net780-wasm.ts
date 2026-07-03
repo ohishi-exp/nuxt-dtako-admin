@@ -1,4 +1,6 @@
-// Mock for net780-wasm WASM module (CI has only a stub package.json, no real wasm-pack pkg/)
+// Mock for net780-wasm WASM module (vitest.config.ts alias). vendor/net780-wasm/
+// has the real wasm-pack pkg output, but its wasm binary fetch() init doesn't
+// work under vitest/happy-dom, so tests always use this mock instead.
 
 interface MockParseResult {
   header: unknown

@@ -1,0 +1,16 @@
+{
+  "name": "net780-wasm",
+  "type": "module",
+  "description": "NET780 生データ ZIP をブラウザ内でパースする wasm バインディング",
+  "version": "0.1.0",
+  "files": [
+    "net780_wasm_bg.wasm",
+    "net780_wasm.js",
+    "net780_wasm.d.ts"
+  ],
+  "main": "net780_wasm.js",
+  "types": "net780_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
