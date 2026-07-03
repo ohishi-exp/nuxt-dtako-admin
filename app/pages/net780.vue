@@ -2,6 +2,7 @@
 import {
   parseNet780Zip,
   downsampleSpeed,
+  buildSpeedChartData,
   net780EventCodeHex,
   formatNet780Ts,
 } from '~/utils/net780'
@@ -88,22 +89,7 @@ const CHART_PADDING = 8
 
 const speedChart = computed(() => {
   const points = result.value ? downsampleSpeed(result.value.speed) : []
-  if (points.length < 2) return null
-
-  const maxSecs = Math.max(...points.map(p => p.offset_secs)) || 1
-  const maxSpeed = Math.max(...points.map(p => p.speed_kmh)) || 1
-  const innerW = CHART_WIDTH - CHART_PADDING * 2
-  const innerH = CHART_HEIGHT - CHART_PADDING * 2
-
-  const polyline = points
-    .map((p) => {
-      const x = CHART_PADDING + (p.offset_secs / maxSecs) * innerW
-      const y = CHART_PADDING + innerH - (p.speed_kmh / maxSpeed) * innerH
-      return `${x.toFixed(1)},${y.toFixed(1)}`
-    })
-    .join(' ')
-
-  return { polyline, maxSpeed, maxSecs, pointCount: points.length }
+  return buildSpeedChartData(points, CHART_WIDTH, CHART_HEIGHT, CHART_PADDING)
 })
 
 const gpsRows = computed(() => (result.value?.gps ?? []).slice(0, GPS_TABLE_LIMIT))
