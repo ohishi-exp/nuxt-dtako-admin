@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { decodeVdf, mergeTelemetrySegments, probeVideoDuration } from '~/utils/dtako-vid-wasm'
 import type { VdfTelemetry } from '~/utils/dtako-vid-wasm'
-import { useVideoCrop } from '~/composables/useVideoCrop'
 import { fmtDuration } from '~/utils/time-format'
 
 interface Segment {
@@ -25,8 +24,6 @@ const pendingSeekLocal = ref<number | null>(null)
 
 const frontVideoEl = ref<HTMLVideoElement | null>(null)
 const rearVideoEl = ref<HTMLVideoElement | null>(null)
-const frontContainerEl = ref<HTMLDivElement | null>(null)
-const rearContainerEl = ref<HTMLDivElement | null>(null)
 
 /**
  * 表示モード: 両方 / 前方のみ / 後方のみ。前方のみ・後方のみでも列数は3列のまま
@@ -41,13 +38,9 @@ function toggleRearOnly() {
   displayMode.value = displayMode.value === 'rear' ? 'both' : 'rear'
 }
 
-const frontCrop = useVideoCrop()
-const rearCrop = useVideoCrop()
-
 /**
  * テレメトリグラフ下の区間選択バーで指定する再生区間 (結合後タイムライン上、秒)。
- * クロップ中は映像のネイティブシークバーが使えないため、この区間バー + ループ再生で
- * 特定のイベント区間を繰り返し確認できるようにする。
+ * この区間バー + ループ再生で特定のイベント区間を繰り返し確認できるようにする。
  */
 const rangeStart = ref<number | null>(null)
 const rangeEnd = ref<number | null>(null)
@@ -101,11 +94,7 @@ function onTimeUpdate() {
   }
 }
 
-/**
- * クロップ適用中の映像はネイティブ `controls` を隠す (transform で拡大すると
- * コントロールバーも一緒に拡大されて操作不能になるため)。その代わりに前方/
- * 後方をまとめて再生・一時停止できるボタンを常設する。
- */
+/** 前方/後方をまとめて再生・一時停止できるボタン (2画面同時再生の操作を1つに集約)。 */
 const isPlaying = ref(false)
 
 function togglePlayback() {
@@ -312,6 +301,10 @@ async function handleFileChange(e: Event) {
   revokeAll()
 
   try {
+    // 複数ファイル選択時、ブラウザのファイル選択順 (ダイアログでの選択順) は
+    // 録画日時と一致しないことがあるため、デコード後にヘッダーの video_start_ts
+    // (先頭フレームの絶対撮影時刻) で時系列順に並べ替えてから結合する。
+    const decoded: Segment[] = []
     for (let i = 0; i < files.length; i++) {
       const file = files[i]!
       loadingProgress.value = files.length > 1
@@ -323,7 +316,7 @@ async function handleFileChange(e: Event) {
       const rearUrl = result.hasRear ? URL.createObjectURL(new Blob([result.rearMp4], { type: 'video/mp4' })) : null
       const probeUrl = frontUrl || rearUrl
       const duration = probeUrl ? await probeVideoDuration(probeUrl) : 0
-      segments.value.push({
+      decoded.push({
         fileName: file.name,
         fileSize: file.size,
         frontUrl,
@@ -332,6 +325,8 @@ async function handleFileChange(e: Event) {
         duration,
       })
     }
+    decoded.sort((a, b) => a.telemetry.video_start_ts - b.telemetry.video_start_ts)
+    segments.value = decoded
   }
   catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
@@ -348,6 +343,12 @@ function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+/** video_start_ts (UNIX epoch 秒) を並び替え確認用に表示する。 */
+function fmtDateTime(unixSeconds: number): string {
+  if (!Number.isFinite(unixSeconds) || unixSeconds <= 0) return '(不明)'
+  return new Date(unixSeconds * 1000).toLocaleString('ja-JP')
 }
 </script>
 
@@ -409,7 +410,7 @@ function fmtBytes(n: number): string {
             ? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
             : 'bg-gray-100 text-gray-500 dark:bg-gray-800'"
         >
-          {{ i + 1 }}. {{ seg.fileName }} ({{ fmtBytes(seg.fileSize) }}, {{ fmtDuration(seg.duration) }})
+          {{ i + 1 }}. {{ fmtDateTime(seg.telemetry.video_start_ts) }} {{ seg.fileName }} ({{ fmtBytes(seg.fileSize) }}, {{ fmtDuration(seg.duration) }})
         </span>
       </div>
     </UCard>
@@ -434,7 +435,7 @@ function fmtBytes(n: number): string {
           />
         </div>
         <p class="text-xs text-gray-400 mt-2">
-          クロップ (切り抜き拡大表示) 中の映像はネイティブ操作バーの代わりに上の「再生/一時停止」ボタンと、下のグラフのシークバー・区間選択バーを使ってください。
+          下のグラフのシークバー・区間選択バーでも位置を移動できます。
           区間選択バーをドラッグすると開始/終了を指定でき、端をつまんで微調整・ループ再生もできます。
         </p>
       </UCard>
@@ -444,67 +445,29 @@ function fmtBytes(n: number): string {
           <template #header>
             <div class="flex items-center justify-between">
               <span>前方映像</span>
-              <div class="flex gap-1">
-                <UButton
-                  size="xs"
-                  variant="soft"
-                  :color="displayMode === 'front' ? 'primary' : 'neutral'"
-                  icon="i-lucide-columns-2"
-                  :label="displayMode === 'front' ? '両方表示に戻す' : '前方のみ表示'"
-                  :disabled="!hasFront"
-                  @click="toggleFrontOnly"
-                />
-                <UButton
-                  size="xs"
-                  variant="soft"
-                  :color="frontCrop.selecting.value ? 'primary' : 'neutral'"
-                  icon="i-lucide-crop"
-                  :label="frontCrop.selecting.value ? 'ドラッグで選択...' : 'クロップ'"
-                  @click="frontCrop.toggleSelecting()"
-                />
-                <UButton
-                  v-if="frontCrop.rect.value"
-                  size="xs"
-                  variant="ghost"
-                  color="neutral"
-                  icon="i-lucide-x"
-                  label="解除"
-                  @click="frontCrop.reset()"
-                />
-              </div>
+              <UButton
+                size="xs"
+                variant="soft"
+                :color="displayMode === 'front' ? 'primary' : 'neutral'"
+                icon="i-lucide-columns-2"
+                :label="displayMode === 'front' ? '両方表示に戻す' : '前方のみ表示'"
+                :disabled="!hasFront"
+                @click="toggleFrontOnly"
+              />
             </div>
           </template>
-          <div
-            ref="frontContainerEl"
-            class="relative overflow-hidden rounded-lg bg-black select-none"
-            @mousedown="frontCrop.onPointerDown($event, frontContainerEl)"
-            @mousemove="frontCrop.onPointerMove($event, frontContainerEl)"
-            @mouseup="frontCrop.onPointerUp()"
-            @mouseleave="frontCrop.onPointerUp()"
-          >
+          <div class="relative overflow-hidden rounded-lg bg-black">
             <video
               v-if="activeSegment?.frontUrl"
               ref="frontVideoEl"
               :src="activeSegment.frontUrl"
-              :controls="!frontCrop.rect.value"
+              controls
               class="w-full h-auto block"
-              :style="frontCrop.videoStyle.value"
               @timeupdate="onTimeUpdate"
               @loadedmetadata="onLoadedMetadata"
               @ended="onEnded('front')"
             />
             <p v-else class="text-sm text-gray-400 py-8 text-center">前方映像なし</p>
-            <div
-              v-if="frontCrop.selecting.value && frontCrop.dragBoxStyle.value"
-              class="absolute border-2 border-blue-400 bg-blue-400/20 pointer-events-none"
-              :style="frontCrop.dragBoxStyle.value"
-            />
-            <div
-              v-if="frontCrop.selecting.value"
-              class="absolute inset-0 flex items-center justify-center text-xs text-white bg-black/40 pointer-events-none"
-            >
-              ドラッグしてクロップ範囲を選択
-            </div>
           </div>
         </UCard>
 
@@ -512,67 +475,29 @@ function fmtBytes(n: number): string {
           <template #header>
             <div class="flex items-center justify-between">
               <span>後方映像</span>
-              <div class="flex gap-1">
-                <UButton
-                  size="xs"
-                  variant="soft"
-                  :color="displayMode === 'rear' ? 'primary' : 'neutral'"
-                  icon="i-lucide-columns-2"
-                  :label="displayMode === 'rear' ? '両方表示に戻す' : '後方のみ表示'"
-                  :disabled="!hasRear"
-                  @click="toggleRearOnly"
-                />
-                <UButton
-                  size="xs"
-                  variant="soft"
-                  :color="rearCrop.selecting.value ? 'primary' : 'neutral'"
-                  icon="i-lucide-crop"
-                  :label="rearCrop.selecting.value ? 'ドラッグで選択...' : 'クロップ'"
-                  @click="rearCrop.toggleSelecting()"
-                />
-                <UButton
-                  v-if="rearCrop.rect.value"
-                  size="xs"
-                  variant="ghost"
-                  color="neutral"
-                  icon="i-lucide-x"
-                  label="解除"
-                  @click="rearCrop.reset()"
-                />
-              </div>
+              <UButton
+                size="xs"
+                variant="soft"
+                :color="displayMode === 'rear' ? 'primary' : 'neutral'"
+                icon="i-lucide-columns-2"
+                :label="displayMode === 'rear' ? '両方表示に戻す' : '後方のみ表示'"
+                :disabled="!hasRear"
+                @click="toggleRearOnly"
+              />
             </div>
           </template>
-          <div
-            ref="rearContainerEl"
-            class="relative overflow-hidden rounded-lg bg-black select-none"
-            @mousedown="rearCrop.onPointerDown($event, rearContainerEl)"
-            @mousemove="rearCrop.onPointerMove($event, rearContainerEl)"
-            @mouseup="rearCrop.onPointerUp()"
-            @mouseleave="rearCrop.onPointerUp()"
-          >
+          <div class="relative overflow-hidden rounded-lg bg-black">
             <video
               v-if="activeSegment?.rearUrl"
               ref="rearVideoEl"
               :src="activeSegment.rearUrl"
-              :controls="!rearCrop.rect.value"
+              controls
               class="w-full h-auto block"
-              :style="rearCrop.videoStyle.value"
               @timeupdate="onTimeUpdate"
               @loadedmetadata="onLoadedMetadata"
               @ended="onEnded('rear')"
             />
             <p v-else class="text-sm text-gray-400 py-8 text-center">後方映像なし</p>
-            <div
-              v-if="rearCrop.selecting.value && rearCrop.dragBoxStyle.value"
-              class="absolute border-2 border-blue-400 bg-blue-400/20 pointer-events-none"
-              :style="rearCrop.dragBoxStyle.value"
-            />
-            <div
-              v-if="rearCrop.selecting.value"
-              class="absolute inset-0 flex items-center justify-center text-xs text-white bg-black/40 pointer-events-none"
-            >
-              ドラッグしてクロップ範囲を選択
-            </div>
           </div>
         </UCard>
 
