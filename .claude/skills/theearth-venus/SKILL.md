@@ -133,11 +133,20 @@ commit 前に済ませて loud fail 可能に)。
 `[件数, JSON文字列]` 形式ではない)。GPS は DDMM 形式、0 = 未捕捉。
 
 - **現在地** (VenusMain 位置情報): `VehicleStateTableForBranchEx(strBranchCD,
-  strScrapCarDisp)`。strBranchCD は事業所 code ("00000001")、strScrapCarDisp は
-  廃車表示フラグ (通常 "0")。実フィールド: `VehicleCD`/`VehicleName`/`BranchName`/
-  `DriverName`/`GPSLatitude`/`GPSLongitude`/`DataDateTime`("MM/DD HH:mm")/
-  `ComuDateTime`/`Speed`/`Revo`/`CurrentWorkName` 等 — nuxt_dtako_logs の推測実装
-  (`LAT_FIELD_CANDIDATES`) はこれで確定できる。
+  strScrapCarDisp)`。strBranchCD は事業所 code ("00000001"、**"00000000" = 全事業所**)、
+  strScrapCarDisp は廃車表示フラグ (通常 "0")。実フィールド: `VehicleCD`/`VehicleName`/
+  `BranchName`/`DriverName`/`GPSLatitude`/`GPSLongitude`/`DataDateTime`("MM/DD HH:mm")/
+  `ComuDateTime`/`Speed`/`Revo`/`GPSDirection`(進行方向)/`CurrentWorkName` 等 —
+  nuxt_dtako_logs の推測実装 (`LAT_FIELD_CANDIDATES`) はこれで確定できる。
+  - **地図マーカー** (実ページ `CreateCarMarkerAndLabel`、J-GOS0100): 車番 =
+    `VehicleIconLabelForVehicle` / 日時 = `VehicleIconLabelForDatetime` / 乗務員 =
+    `VehicleIconLabelForDriver` の 3 行ラベル + `GPSDirection` で回転する方向矢印。
+    アイコン本体は状態色別 (`CarMarkerImages[imageIndex]`)。consumer (`DvrMap.vue`) は
+    ラベルは確実に取れる `VehicleName`/`DriverName`/`DataDateTime` を使い、矢印は
+    `GPSDirection` を度として `transform:rotate()` で回している。
+  - **`GPSDirection` は度 (0〜360、北 0 時計回り、小数あり)** で実機確定 (2026-07-03、
+    全事業所 153 台で dirMin=0 / dirMax=345.3)。**停車中 (Speed=0) は 0 になりがち**
+    (方向不定)。度なので `rotate(${dir}deg)` でそのまま使える (方位や 0-255 ではない)。
 - **動態履歴** (F-DOV0010): `VehicleStateTable(VehicleCD, dtmST, dtmED)` API は
   **GPS 軌跡しか返さず速度・回転数が全点 0** (2026-07-03 実機確認)。速度・回転数・住所・
   走行状態・乗務員は **2 段階 postback で返る HTML の `VehicleDisp` テーブルにしか
