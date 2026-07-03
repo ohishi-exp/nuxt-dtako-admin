@@ -221,54 +221,58 @@ async function handleScrape() {
 
   // 「全企業」(selectedCompId が空) は SCRAPER_MODE=http (DO が comp_id 単位で
   // idFromName される設計、Refs ohishi-exp/dtako-scraper#22) では comp_id 必須の
-  // ため 400 になる。従来 vpc-relay 経路も comp_id 明示指定と同義に動くため、
-  // フロント側で実 comp_id を1社ずつ順次トリガーする (DO 側の変更は不要)。
+  // ため 400 になる。フロント側で実 comp_id を明示指定して回す (DO 側の変更は不要)。
   const compIdsToRun = selectedCompId.value ? [selectedCompId.value] : realCompIds
 
   for (const task of tasks.value) {
     task.status = 'running'
     task.step = undefined
-    for (const compId of compIdsToRun) {
-      try {
-        await triggerScrapeStream(
-          {
+    // comp_id は別 DO (idFromName(scraper-comp-<id>)) + 別 theearth アカウント = 別セッション
+    // なので **並列**に走らせて安全 (同一 comp_id への同時実行だけ DO 内キューで直列化される)。
+    // 逐次 await にすると「1社目が done するまで2社目が始まらない/結果が出ない」ため並列化する。
+    await Promise.all(
+      compIdsToRun.map(async (compId) => {
+        try {
+          await triggerScrapeStream(
+            {
+              comp_id: compId,
+              start_date: task.date,
+              end_date: task.date,
+              skip_upload: skipUpload.value,
+            },
+            (evt: ScrapeProgressEvent) => {
+              if (evt.event === 'progress') {
+                task.step = evt.step
+              }
+              else if (evt.event === 'result') {
+                task.results.push({
+                  comp_id: evt.comp_id || '',
+                  status: evt.status || 'error',
+                  message: evt.message || '',
+                  zipUrl: evt.zip_url,
+                })
+                recordScrapeResult(task.date, evt)
+              }
+              else if (evt.event === 'error') {
+                // result イベント無しで切断されるケース (account 未検出等の接続レベルエラー)。
+                // result を push しないと done で誤って success 判定されてしまう。
+                task.results.push({ comp_id: evt.comp_id || '', status: 'error', message: evt.message || 'エラーが発生しました' })
+              }
+              else if (evt.event === 'done') {
+                task.step = undefined
+              }
+            },
+          )
+        }
+        catch (e) {
+          task.results.push({
             comp_id: compId,
-            start_date: task.date,
-            end_date: task.date,
-            skip_upload: skipUpload.value,
-          },
-          (evt: ScrapeProgressEvent) => {
-            if (evt.event === 'progress') {
-              task.step = evt.step
-            }
-            else if (evt.event === 'result') {
-              task.results.push({
-                comp_id: evt.comp_id || '',
-                status: evt.status || 'error',
-                message: evt.message || '',
-                zipUrl: evt.zip_url,
-              })
-              recordScrapeResult(task.date, evt)
-            }
-            else if (evt.event === 'error') {
-              // result イベント無しで切断されるケース (account 未検出等の接続レベルエラー)。
-              // result を push しないと done で誤って success 判定されてしまう。
-              task.results.push({ comp_id: evt.comp_id || '', status: 'error', message: evt.message || 'エラーが発生しました' })
-            }
-            else if (evt.event === 'done') {
-              task.step = undefined
-            }
-          },
-        )
-      }
-      catch (e) {
-        task.results.push({
-          comp_id: compId,
-          status: 'error',
-          message: e instanceof Error ? e.message : 'エラー',
-        })
-      }
-    }
+            status: 'error',
+            message: e instanceof Error ? e.message : 'エラー',
+          })
+        }
+      }),
+    )
     task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'
   }
 
@@ -295,71 +299,9 @@ async function handleRerun(task: DayTask) {
   // failedIds が空（task-level error）の場合は元の comp_id 設定で再実行
   const idsToRetry = failedIds.length > 0 ? failedIds : [selectedCompId.value || undefined]
 
-  for (const compId of idsToRetry) {
-    try {
-      await triggerScrapeStream(
-        {
-          comp_id: compId || undefined,
-          start_date: task.date,
-          end_date: task.date,
-          skip_upload: skipUpload.value,
-        },
-        (evt: ScrapeProgressEvent) => {
-          if (evt.event === 'progress') {
-            task.step = evt.step
-          }
-          else if (evt.event === 'result') {
-            task.results.push({
-              comp_id: evt.comp_id || '',
-              status: evt.status || 'error',
-              message: evt.message || '',
-              zipUrl: evt.zip_url,
-            })
-            recordScrapeResult(task.date, evt)
-          }
-          else if (evt.event === 'error') {
-            task.results.push({ comp_id: evt.comp_id || '', status: 'error', message: evt.message || 'エラーが発生しました' })
-          }
-          else if (evt.event === 'done') {
-            task.step = undefined
-          }
-        },
-      )
-    }
-    catch (e) {
-      task.results.push({
-        comp_id: compId || '',
-        status: 'error',
-        message: e instanceof Error ? e.message : 'エラー',
-      })
-    }
-  }
-
-  task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'
-  isRunning.value = false
-  await loadCalendar()
-  await loadHistory()
-}
-
-async function handleRerunAllErrors() {
-  const errorTasks = tasks.value.filter(t => t.status === 'error')
-  if (errorTasks.length === 0) return
-
-  isRunning.value = true
-  for (const task of errorTasks) {
-    // handleRerun 内で isRunning を管理しないよう、直接ロジックを実行
-    const failedIds = task.results
-      .filter(r => r.status === 'error')
-      .map(r => r.comp_id)
-
-    task.results = task.results.filter(r => r.status !== 'error')
-    task.error = undefined
-    task.status = 'running'
-    task.step = undefined
-
-    const idsToRetry = failedIds.length > 0 ? failedIds : [selectedCompId.value || undefined]
-
-    for (const compId of idsToRetry) {
+  // comp_id ごとに並列 (handleScrape と同じ理由)。
+  await Promise.all(
+    idsToRetry.map(async (compId) => {
       try {
         await triggerScrapeStream(
           {
@@ -397,7 +339,74 @@ async function handleRerunAllErrors() {
           message: e instanceof Error ? e.message : 'エラー',
         })
       }
-    }
+    }),
+  )
+
+  task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'
+  isRunning.value = false
+  await loadCalendar()
+  await loadHistory()
+}
+
+async function handleRerunAllErrors() {
+  const errorTasks = tasks.value.filter(t => t.status === 'error')
+  if (errorTasks.length === 0) return
+
+  isRunning.value = true
+  for (const task of errorTasks) {
+    // handleRerun 内で isRunning を管理しないよう、直接ロジックを実行
+    const failedIds = task.results
+      .filter(r => r.status === 'error')
+      .map(r => r.comp_id)
+
+    task.results = task.results.filter(r => r.status !== 'error')
+    task.error = undefined
+    task.status = 'running'
+    task.step = undefined
+
+    const idsToRetry = failedIds.length > 0 ? failedIds : [selectedCompId.value || undefined]
+
+    await Promise.all(
+      idsToRetry.map(async (compId) => {
+        try {
+          await triggerScrapeStream(
+            {
+              comp_id: compId || undefined,
+              start_date: task.date,
+              end_date: task.date,
+              skip_upload: skipUpload.value,
+            },
+            (evt: ScrapeProgressEvent) => {
+              if (evt.event === 'progress') {
+                task.step = evt.step
+              }
+              else if (evt.event === 'result') {
+                task.results.push({
+                  comp_id: evt.comp_id || '',
+                  status: evt.status || 'error',
+                  message: evt.message || '',
+                  zipUrl: evt.zip_url,
+                })
+                recordScrapeResult(task.date, evt)
+              }
+              else if (evt.event === 'error') {
+                task.results.push({ comp_id: evt.comp_id || '', status: 'error', message: evt.message || 'エラーが発生しました' })
+              }
+              else if (evt.event === 'done') {
+                task.step = undefined
+              }
+            },
+          )
+        }
+        catch (e) {
+          task.results.push({
+            comp_id: compId || '',
+            status: 'error',
+            message: e instanceof Error ? e.message : 'エラー',
+          })
+        }
+      }),
+    )
 
     task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'
   }
