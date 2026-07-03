@@ -46,12 +46,18 @@ import {
 } from "./theearth-client";
 import { uploadDtakoZipViaAlcInternalProxy } from "./alc-internal-upload";
 import {
+  buildDvrSearchKey,
   dvrDataUrl,
+  DvrSearchParamError,
+  getDvrMasters,
   getDvrNotifications,
   openDvrFileStream,
   requestDvrDownloadPath,
   requestDvrFileTransfer,
+  requestDvrFileTransferMulti,
+  searchDvrData,
   VenusSessionExpiredError,
+  type DvrSearchParams,
 } from "./theearth-venus-client";
 import {
   DVR_SESSION_TTL_MS,
@@ -482,6 +488,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/dvr-api/notifications" && request.method === "GET") {
       return this.handleDvrNotifications(record!);
     }
+    if (url.pathname === "/dvr-api/masters" && request.method === "GET") {
+      return this.handleDvrMasters(record!);
+    }
+    if (url.pathname === "/dvr-api/search" && request.method === "POST") {
+      return this.handleDvrSearch(record!, request);
+    }
     if (url.pathname === "/dvr-api/transfer" && request.method === "POST") {
       return this.handleDvrTransfer(record!, request);
     }
@@ -560,25 +572,105 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
   }
 
-  /** POST /dvr-api/transfer {serial, filename} — 車両 (車載機) に映像ファイルの転送を
-   * 要求する (「車両から取得」の 1 段目、Request_DvrFileTransfer_target)。転送は非同期
-   * なので即 200 を返し、完了は通知一覧の receiveState 変化で観測する。 */
-  private async handleDvrTransfer(record: DvrSessionRecord, request: Request): Promise<Response> {
-    let body: { serial?: unknown; filename?: unknown };
+  /** GET /dvr-api/masters — 映像検索フォーム用の 事業所/車輌/乗務員 マスタ
+   * (Request_NetDvrFuncInitValue、Refs #90 実 API 検証済み)。 */
+  private async handleDvrMasters(record: DvrSessionRecord): Promise<Response> {
+    const jar: CookieJar = { cookies: new Map(record.cookies) };
     try {
-      body = (await request.json()) as { serial?: unknown; filename?: unknown };
+      const masters = await getDvrMasters(jar);
+      await this.ctx.storage.put<DvrSessionRecord>(DVR_SESSION_KEY, {
+        ...record,
+        cookies: Array.from(jar.cookies.entries()),
+      });
+      return Response.json(masters);
+    } catch (err) {
+      if (err instanceof VenusSessionExpiredError) {
+        await this.ctx.storage.delete(DVR_SESSION_KEY);
+        return dvrJsonError(401, "theearth セッションが切れました。再ログインしてください");
+      }
+      console.error("DVR masters error:", err);
+      const message =
+        err instanceof TheearthClientError
+          ? err.message
+          : `車輌・乗務員マスタの取得に失敗しました (${describeUnknownError(err)})`;
+      return dvrJsonError(502, message);
+    }
+  }
+
+  /** POST /dvr-api/search — 映像検索 (Request_DvrDataList)。body は DvrSearchParams。
+   * パラメータ不正 (必須条件未達等) は 400、theearth セッション切れは 401。 */
+  private async handleDvrSearch(record: DvrSessionRecord, request: Request): Promise<Response> {
+    let params: DvrSearchParams;
+    try {
+      params = (await request.json()) as DvrSearchParams;
     } catch {
       return dvrJsonError(400, "JSON body が必要です");
     }
-    const serial = typeof body.serial === "string" ? body.serial : "";
-    const filename = typeof body.filename === "string" ? body.filename : "";
-    if (!serial || !filename) {
-      return dvrJsonError(400, "serial / filename が必要です");
+
+    let key: string[];
+    try {
+      key = buildDvrSearchKey(params);
+    } catch (err) {
+      if (err instanceof DvrSearchParamError) {
+        return dvrJsonError(400, err.message);
+      }
+      throw err;
     }
 
     const jar: CookieJar = { cookies: new Map(record.cookies) };
     try {
-      const result = await requestDvrFileTransfer(jar, serial, filename);
+      const rows = await searchDvrData(jar, key);
+      await this.ctx.storage.put<DvrSessionRecord>(DVR_SESSION_KEY, {
+        ...record,
+        cookies: Array.from(jar.cookies.entries()),
+      });
+      return Response.json({ rows });
+    } catch (err) {
+      if (err instanceof VenusSessionExpiredError) {
+        await this.ctx.storage.delete(DVR_SESSION_KEY);
+        return dvrJsonError(401, "theearth セッションが切れました。再ログインしてください");
+      }
+      console.error("DVR search error:", err);
+      const message =
+        err instanceof TheearthClientError
+          ? err.message
+          : `映像検索に失敗しました (${describeUnknownError(err)})`;
+      return dvrJsonError(502, message);
+    }
+  }
+
+  /** POST /dvr-api/transfer — 車両 (車載機) に映像ファイルの転送を要求する
+   * (「車両から取得」の 1 段目)。転送は非同期なので即 200 を返し、完了は一覧の
+   * receiveState 変化で観測する。body は 2 形式:
+   * - {serial, filename} — 通知一覧からの単一要求 (Request_DvrFileTransfer_target)
+   * - {serials: [], filenames: []} — 映像検索からの一括要求
+   *   (Request_DvrFileTransfer_MultiTarget。実ページは車輌絞込検索時の単一行要求にも
+   *   MultiTarget を使うため、検索由来はこちらに寄せる) */
+  private async handleDvrTransfer(record: DvrSessionRecord, request: Request): Promise<Response> {
+    let body: { serial?: unknown; filename?: unknown; serials?: unknown; filenames?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+
+    const isStringArray = (v: unknown): v is string[] =>
+      Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === "string" && x !== "");
+    const multi =
+      isStringArray(body.serials)
+      && isStringArray(body.filenames)
+      && body.serials.length === body.filenames.length;
+    const serial = typeof body.serial === "string" ? body.serial : "";
+    const filename = typeof body.filename === "string" ? body.filename : "";
+    if (!multi && (!serial || !filename)) {
+      return dvrJsonError(400, "serial / filename (または同数の serials / filenames) が必要です");
+    }
+
+    const jar: CookieJar = { cookies: new Map(record.cookies) };
+    try {
+      const result = multi
+        ? await requestDvrFileTransferMulti(jar, body.serials as string[], body.filenames as string[])
+        : await requestDvrFileTransfer(jar, serial, filename);
       await this.ctx.storage.put<DvrSessionRecord>(DVR_SESSION_KEY, {
         ...record,
         cookies: Array.from(jar.cookies.entries()),

@@ -113,9 +113,51 @@ commit 前に済ませて loud fail 可能に)。
 - **ダウンロード (`ready` のみ)**: 上記 2 段。未受信で `Request_DvrFileDownload` を呼ぶと
   `code<=0` が返る → 「受信してから」を促すエラーにする。
 
-その他の VenusBridge メソッド (JS で確認、未実装): `Request_DvrDataPlayback` /
-`Request_DvrFileList` / `Request_DvrFileProtection` / `Request_DvrFileDelete` /
-`Request_DvrDataList` / `VehicleStateTableForBranchEx` (現在地、フィールド名は推測)。
+その他の VenusBridge メソッド (JS で確認、未実装): `Request_DvrDataPlayback`
+(serialNo, fileName, vehicleCD — サイト内蔵プレイヤー用。.vdf を落として wasm decode
+する我々のフローでは不要) / `Request_DvrFileList` / `Request_DvrFileProtection` /
+`Request_DvrFileDelete` / `VehicleStateTableForBranchEx` (現在地、フィールド名は推測)。
+
+## 映像検索: `Request_DvrDataList` (2026-07-03 実機確定、Refs #90 映像検索)
+
+映像検索画面 (F-AAV0001 の 映像→映像検索、実装は J-AAV0100 の `igButton_dvrdata_click`)
+が使うメソッド。body は `{ key: string[10] }`:
+
+| idx | 内容 | 形式 |
+|---|---|---|
+| 0 | 開始日時 | `"YYYY/MM/DD HH:mm"` |
+| 1 | 終了日時 | 開始 + 範囲[分] (同形式) |
+| 2 | 車輌CD | カンマ区切り可、未指定は `""` |
+| 3 | 乗務員CD | 同上 |
+| 4 | 緯度 | **度×3600 の秒単位整数** (S は負)。未指定は `""` |
+| 5 | 経度 | 同 (W は負) |
+| 6 | 位置範囲 [m] | 未指定でも常に送る (既定 `"300"`) |
+| 7 | 映像種別 | `"警告,警告,常時,緊急"` の 4 フラグ (**先頭 2 つは同値**) |
+| 8 | 走行状態 | `"走行,停車"` |
+| 9 | 道路種別 | `"一般,高速,専用"` |
+
+実測例: `["2026/07/03 18:06","2026/07/03 18:36","2131","","","","300","1,1,1,1","1,1","1,1,1"]`
+
+- サーバー側必須条件 (実ページの validation): 車輌/乗務員/位置範囲のいずれか 1 つ +
+  各チェック群 (種別/走行/道路) それぞれ最低 1 つ。
+- 応答は通知一覧と同じ `d = ["<件数>", "<行JSON文字列>"]`。行は通知一覧のフィールドに
+  加えて `DataType`(映像種別) / `RunState`(走行/停車) / `RoadType`(一般/高速/専用) /
+  `PlaceName` / `Speed` / `Revo` / `RowIndex` / `DriverCD` / `DataTypeCD`。
+  `FileReceive` は同じ `fa-prcs-X-Y` class 文字列なので受信状態パースを共用できる。
+- `Refresh_DvrDataList(key)` — 同じ key での再読込 (実ページは interval poll に使用)。
+  `d[0] == "-1"` は取得失敗。
+- **検索結果グリッドからの転送要求**は `Request_DvrFileTransfer_MultiTarget(key1, key2)`
+  (key1=SerialNo CSV / key2=FileName CSV、「選択行要求」ボタン相当)。実ページは
+  **車輌絞込検索時 (`vehicleNarrowFlag`) は単一行でも MultiTarget**、絞込なしは
+  `_target` を使う。
+- ダウンロードは通知一覧と完全に同一 (`Request_DvrFileDownload` → `/dvrData/{path}`)。
+
+## フォーム用マスタ: `Request_NetDvrFuncInitValue` (実機確定)
+
+body `{}` → `d` は 6 要素 `[事業所JSON, 車輌JSON, 乗務員JSON, 通知件数, 通知行JSON, 設定]`。
+事業所は `[{code:"00000001", name}]`、車輌/乗務員は `[{code:数値, link:"事業所code", name}]`
+(いずれも **JSON エンコードされた文字列**、再 parse が必要)。検索フォームの車輌/乗務員
+ドロップダウン (事業所 link で絞込) がこれで作れる。
 
 ## cdp での実機検証手順 (このメモの作り方)
 
