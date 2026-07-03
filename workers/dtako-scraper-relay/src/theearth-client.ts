@@ -423,14 +423,29 @@ async function postForm(
 // ---------------------------------------------------------------------------
 
 export function detectWareki(html: string, now: Date = new Date()): boolean {
-  // 元ソース (dtako-scraper download.rs::detect_wareki) は **テキスト全体が YY/MM/DD の
-  // `<td>` セル** (= データ表の日付セル) の最初のものを見る。生 HTML 全体を broad regex
-  // (`\b\d{2}/\d{2}/\d{2}\b`) で舐めると、版数文字列やヘッダの別の日付を誤検出して令和/
-  // 西暦を取り違えることがある (27324455 で 270KB HTML = 範囲外 0 件になる事象)。ここでも
-  // td セル限定にして元ソースと挙動を揃える。
-  const m = html.match(/<td\b[^>]*>\s*(\d{2})\/\d{2}\/\d{2}\s*<\/td>/i);
-  if (!m) return true; // 日付セルが無ければデフォルトは和暦 (Rust 版に合わせる)
-  const pageYear = parseInt(m[1], 10);
+  // 元ソース (dtako-scraper download.rs::detect_wareki) は td.textContent.trim() が
+  // ^\d{2}/\d{2}/\d{2}$ のセル (= データ表の日付セル) の最初のものを見る。theearth の
+  // 日付セルは実際には <td><span id="...">26/06/30</span></td> のように **内側を <span>
+  // で包む** ため、td の中身から **タグを剥がして** から判定する (textContent 相当)。
+  //   - 単純な <td>DATE</td> regex は span 包みでマッチせず → デフォルト和暦にフォールバック
+  //   - 生 HTML の broad regex (`\b\d{2}/\d{2}/\d{2}\b`) は表より前の別日付 (15/11/15 等) を
+  //     拾って令和/西暦を取り違える
+  // どちらも 27324455 で 08(令和) を送って 270KB HTML (範囲外 0 件) になった。実機確認済み。
+  const tdRe = /<td\b[^>]*>([\s\S]*?)<\/td>/gi;
+  let m: RegExpExecArray | null;
+  let pageYear: number | null = null;
+  while ((m = tdRe.exec(html)) !== null) {
+    const text = m[1]
+      .replace(/<[^>]+>/g, "")
+      .replace(/&nbsp;/gi, " ")
+      .trim();
+    const dm = text.match(/^(\d{2})\/\d{2}\/\d{2}$/);
+    if (dm) {
+      pageYear = parseInt(dm[1], 10);
+      break;
+    }
+  }
+  if (pageYear === null) return true; // 日付セルが無ければデフォルトは和暦 (Rust 版に合わせる)
   const nowYear = now.getUTCFullYear();
   const westernYY = nowYear % 100;
   const reiwaYY = nowYear - 2018;
