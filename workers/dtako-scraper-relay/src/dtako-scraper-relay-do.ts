@@ -51,6 +51,8 @@ import {
   DvrSearchParamError,
   getDvrMasters,
   getDvrNotifications,
+  getVehicleLogTrack,
+  getVehicleStates,
   openDvrFileStream,
   requestDvrDownloadPath,
   requestDvrFileTransfer,
@@ -494,6 +496,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/dvr-api/search" && request.method === "POST") {
       return this.handleDvrSearch(record!, request);
     }
+    if (url.pathname === "/dvr-api/vehicle-states" && request.method === "GET") {
+      return this.handleDvrVehicleStates(record!, url);
+    }
+    if (url.pathname === "/dvr-api/log-track" && request.method === "GET") {
+      return this.handleDvrLogTrack(record!, url);
+    }
     if (url.pathname === "/dvr-api/transfer" && request.method === "POST") {
       return this.handleDvrTransfer(record!, request);
     }
@@ -637,6 +645,58 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           : `映像検索に失敗しました (${describeUnknownError(err)})`;
       return dvrJsonError(502, message);
     }
+  }
+
+  /** venus API 呼び出しの共通ラッパ: cookie 書き戻し + セッション切れ 401 /
+   * パラメータ不正 400 / その他 502 のマッピング (新規 GET endpoint 用)。 */
+  private async callDvrVenus<T>(
+    record: DvrSessionRecord,
+    errorLabel: string,
+    fn: (jar: CookieJar) => Promise<T>,
+  ): Promise<Response> {
+    const jar: CookieJar = { cookies: new Map(record.cookies) };
+    try {
+      const result = await fn(jar);
+      await this.ctx.storage.put<DvrSessionRecord>(DVR_SESSION_KEY, {
+        ...record,
+        cookies: Array.from(jar.cookies.entries()),
+      });
+      return Response.json(result);
+    } catch (err) {
+      if (err instanceof VenusSessionExpiredError) {
+        await this.ctx.storage.delete(DVR_SESSION_KEY);
+        return dvrJsonError(401, "theearth セッションが切れました。再ログインしてください");
+      }
+      if (err instanceof DvrSearchParamError) {
+        return dvrJsonError(400, err.message);
+      }
+      console.error(`DVR ${errorLabel} error:`, err);
+      const message =
+        err instanceof TheearthClientError
+          ? err.message
+          : `${errorLabel}に失敗しました (${describeUnknownError(err)})`;
+      return dvrJsonError(502, message);
+    }
+  }
+
+  /** GET /dvr-api/vehicle-states?branch=<事業所code> — 車輌現在地一覧
+   * (VehicleStateTableForBranchEx、位置情報ページ用)。 */
+  private handleDvrVehicleStates(record: DvrSessionRecord, url: URL): Promise<Response> {
+    const branch = url.searchParams.get("branch") ?? "";
+    return this.callDvrVenus(record, "車輌現在地の取得", async jar => ({
+      vehicles: await getVehicleStates(jar, branch),
+    }));
+  }
+
+  /** GET /dvr-api/log-track?vehicle=<CD>&start=YYYY/MM/DD&end=YYYY/MM/DD —
+   * 車輌 1 台の動態履歴 GPS 軌跡 (VehicleStateTable)。 */
+  private handleDvrLogTrack(record: DvrSessionRecord, url: URL): Promise<Response> {
+    const vehicle = url.searchParams.get("vehicle") ?? "";
+    const start = url.searchParams.get("start") ?? "";
+    const end = url.searchParams.get("end") ?? "";
+    return this.callDvrVenus(record, "動態履歴の取得", async jar => ({
+      points: await getVehicleLogTrack(jar, vehicle, start, end),
+    }));
   }
 
   /** POST /dvr-api/transfer — 車両 (車載機) に映像ファイルの転送を要求する

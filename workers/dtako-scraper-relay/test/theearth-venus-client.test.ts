@@ -12,6 +12,9 @@ import {
   parseReceiveState,
   requestDvrDownloadPath,
   requestDvrFileTransfer,
+  convertDdmmToDegrees,
+  getVehicleLogTrack,
+  getVehicleStates,
   requestDvrFileTransferMulti,
   searchDvrData,
   validateVdfMagicStream,
@@ -195,9 +198,10 @@ describe("getDvrNotifications", () => {
     });
   });
 
-  it("parses the real theearth shape [countString, rowsJsonString] with 1e6-scaled coords", async () => {
+  it("parses the real theearth shape [countString, rowsJsonString] with DDMM coords", async () => {
     // Refs #90 実データ: d = ["4", "<行配列を JSON エンコードした文字列>"]。
-    // 各行は PascalCase、VehicleCD は数値、Latitude/Longitude は度 × 1e6 の整数。
+    // 各行は PascalCase、VehicleCD は数値、Latitude/Longitude は DDMM 形式の整数
+    // (実ページ J-AAV0100 は ConvertLatLngDDMMtoDD で度に変換して地図に描く)。
     const rows = [
       {
         VehicleCD: 4228,
@@ -225,10 +229,11 @@ describe("getDvrNotifications", () => {
       eventType: "急減速",
       dvrDatetime: "2026/07/03 01:56:56",
       driverName: "古賀　好春",
-      latitude: 36.339272,
-      longitude: 136.35942,
       receiveState: "ready",
     });
+    // 36339272 = 36°33.9272' / 136359420 = 136°35.9420'
+    expect(notifications[0]!.latitude).toBeCloseTo(36.565453, 5);
+    expect(notifications[0]!.longitude).toBeCloseTo(136.599033, 5);
   });
 
   it("handles coord fields given as already-degree numbers, numeric strings, and 0/invalid", async () => {
@@ -662,8 +667,6 @@ describe("searchDvrData", () => {
       fileName: "20260703_094244-0-0-2131-20260703_183226-I.vdf",
       dvrDatetime: "2026/07/03 18:32:26",
       driverName: "陣内　尚仁",
-      latitude: 32.478749,
-      longitude: 130.098251,
       receiveState: "requestable",
       dataType: "常時",
       runState: "走行",
@@ -671,6 +674,9 @@ describe("searchDvrData", () => {
       placeName: "長崎県雲仙市愛野町浜",
       speed: 24,
     });
+    // 32478749 = 32°47.8749' / 130098251 = 130°09.8251' (DDMM 形式)
+    expect(result[0]!.latitude).toBeCloseTo(32.797915, 5);
+    expect(result[0]!.longitude).toBeCloseTo(130.163752, 5);
   });
 
   it("coerces a string Speed and null-fills missing search columns", async () => {
@@ -786,5 +792,131 @@ describe("requestDvrFileTransferMulti", () => {
       requestDvrFileTransferMulti(jar, ["SN1"], ["f1", "f2"], fetchImpl as unknown as FetchLike),
     ).rejects.toThrow("同数");
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+// --- 車輌現在地 / 動態履歴 (VehicleStateTableForBranchEx / VehicleStateTable) ---
+
+describe("convertDdmmToDegrees", () => {
+  it("converts DDMM integers (deg*1e6 + min*1e4 + minFrac*1e4) to decimal degrees", () => {
+    // 実データ: 32478749 = 32°47.8749'、130098251 = 130°09.8251'
+    expect(convertDdmmToDegrees(32478749)).toBeCloseTo(32.797915, 6);
+    expect(convertDdmmToDegrees(130098251)).toBeCloseTo(130.163752, 5);
+    expect(convertDdmmToDegrees("36339272")).toBeCloseTo(36.565453, 5);
+  });
+
+  it("passes through values already in degrees (|v| <= 180)", () => {
+    expect(convertDdmmToDegrees(35.68)).toBe(35.68);
+    expect(convertDdmmToDegrees(-130)).toBe(-130);
+  });
+
+  it("negates southern/western DDMM values", () => {
+    expect(convertDdmmToDegrees(-32478749)).toBeCloseTo(-32.797915, 6);
+  });
+
+  it("returns null for 0 (no GPS fix) and non-numeric input", () => {
+    expect(convertDdmmToDegrees(0)).toBeNull();
+    expect(convertDdmmToDegrees("not-a-number")).toBeNull();
+    expect(convertDdmmToDegrees(null)).toBeNull();
+    expect(convertDdmmToDegrees(undefined)).toBeNull();
+  });
+});
+
+/** VehicleStateTableForBranchEx / VehicleStateTable の実応答形 (素オブジェクト配列) の 1 行。 */
+function vehicleStateRaw(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    __type: "VehicleSetStateData:#TerraWebShared",
+    BranchCD: 1,
+    BranchName: "大石運輸倉庫㈱　本社営業所",
+    ComuDateTime: "07/03 09:43",
+    DataDateTime: "07/03 09:42",
+    DriverCD: 0,
+    DriverName: null,
+    GPSLatitude: 32535438,
+    GPSLongitude: 129588335,
+    Speed: 24,
+    Revo: 670,
+    CurrentWorkName: "走行",
+    VehicleCD: 2131,
+    VehicleName: "長崎800か2131",
+    ...overrides,
+  };
+}
+
+describe("getVehicleStates", () => {
+  it("maps the plain-object-array response (not the [count, json] form)", async () => {
+    const fetchImpl = sequenceFetch([jsonResponse({ d: [vehicleStateRaw(), vehicleStateRaw({ GPSLatitude: 0, GPSLongitude: 0, VehicleCD: 72 })] })]);
+    const jar = createCookieJar();
+    const vehicles = await getVehicleStates(jar, "00000001", fetchImpl);
+    expect(vehicles).toHaveLength(2);
+    expect(vehicles[0]).toMatchObject({
+      vehicleCd: "2131",
+      vehicleName: "長崎800か2131",
+      branchName: "大石運輸倉庫㈱　本社営業所",
+      driverName: null,
+      dataDatetime: "07/03 09:42",
+      comuDatetime: "07/03 09:43",
+      speed: 24,
+      revo: 670,
+      currentWorkName: "走行",
+    });
+    expect(vehicles[0]!.latitude).toBeCloseTo(32 + 53.5438 / 60, 5);
+    expect(vehicles[0]!.longitude).toBeCloseTo(129 + 58.8335 / 60, 5);
+    // GPS 未捕捉 (0,0) は null
+    expect(vehicles[1]).toMatchObject({ vehicleCd: "72", latitude: null, longitude: null });
+  });
+
+  it("rejects a non-numeric branch code without fetching", async () => {
+    const fetchImpl = vi.fn();
+    const jar = createCookieJar();
+    await expect(getVehicleStates(jar, "all", fetchImpl as unknown as FetchLike)).rejects.toThrow("事業所コード");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("throws when the response is not an array", async () => {
+    const fetchImpl = sequenceFetch([jsonResponse({ d: "unexpected" })]);
+    const jar = createCookieJar();
+    await expect(getVehicleStates(jar, "00000001", fetchImpl)).rejects.toThrow(
+      "VehicleStateTableForBranchEx のレスポンス形式",
+    );
+  });
+});
+
+describe("getVehicleLogTrack", () => {
+  it("sends VehicleCD/dtmST/dtmED and maps track points", async () => {
+    let requestBody: string | undefined;
+    const fetchImpl: FetchLike = async (_url, init) => {
+      requestBody = init?.body as string;
+      return jsonResponse({ d: [vehicleStateRaw({ CurrentWorkName: null })] });
+    };
+    const jar = createCookieJar();
+    const points = await getVehicleLogTrack(jar, "2131", "2026/07/03", "2026/07/03", fetchImpl);
+    expect(JSON.parse(requestBody!)).toEqual({ VehicleCD: "2131", dtmST: "2026/07/03", dtmED: "2026/07/03" });
+    expect(points).toHaveLength(1);
+    expect(points[0]).toMatchObject({ vehicleCd: "2131", dataDatetime: "07/03 09:42", currentWorkName: null });
+    expect(points[0]!.latitude).toBeCloseTo(32 + 53.5438 / 60, 5);
+  });
+
+  it("rejects invalid vehicle CD / date formats without fetching", async () => {
+    const fetchImpl = vi.fn();
+    const jar = createCookieJar();
+    await expect(
+      getVehicleLogTrack(jar, "x", "2026/07/03", "2026/07/03", fetchImpl as unknown as FetchLike),
+    ).rejects.toThrow("車輌CD");
+    await expect(
+      getVehicleLogTrack(jar, "2131", "2026-07-03", "2026/07/03", fetchImpl as unknown as FetchLike),
+    ).rejects.toThrow('日付は "YYYY/MM/DD"');
+    await expect(
+      getVehicleLogTrack(jar, "2131", "2026/07/03", "0703", fetchImpl as unknown as FetchLike),
+    ).rejects.toThrow('日付は "YYYY/MM/DD"');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("throws when the response is not an array", async () => {
+    const fetchImpl = sequenceFetch([jsonResponse({ d: { rows: [] } })]);
+    const jar = createCookieJar();
+    await expect(getVehicleLogTrack(jar, "2131", "2026/07/03", "2026/07/03", fetchImpl)).rejects.toThrow(
+      "VehicleStateTable のレスポンス形式",
+    );
   });
 });

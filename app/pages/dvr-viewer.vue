@@ -35,137 +35,23 @@ interface DvrNotification {
   receiveState: DvrReceiveState
 }
 
-interface DvrSession {
-  compId: string
-  userName: string
-  token: string
+const { session, authHeaders, restoreSession, showLoginPanel, expireSession } = useDvrSession()
+
+/** ヘッダーでのログイン成功時 (DvrSessionHeader @login)。 */
+function onLogin() {
+  loadNotifications()
+  loadMasters()
 }
 
-const SESSION_STORAGE_KEY = 'dvr-viewer-session'
-
-/** 前回ログインした会社ID/ユーザーID (パスワード以外) のプリフィル用。
- * パスワードマネージャーが覚えるのは username+password の 1 組だけなので、
- * 会社ID はこちらで補完する。 */
-const LAST_ACCOUNT_KEY = 'dvr-viewer-last-account'
-
-/** ヘッダー右上のログインパネル開閉。未ログインで開くと本文はデータ用に空ける。 */
-const showLoginPanel = ref(false)
-
-/** UTF-8 文字列を base64url (padding 無し) に encode する。relay worker 側の
- * dvr-session.ts の encodeDvrUserB64 と同一形式 (ヘッダに日本語を載せるため)。 */
-function b64urlUtf8(value: string): string {
-  const bytes = new TextEncoder().encode(value)
-  let bin = ''
-  for (const b of bytes) bin += String.fromCharCode(b)
-  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
-
-function fetchErrorMessage(e: unknown): string {
-  const data = (e as { data?: { error?: unknown } } | null)?.data
-  if (data && typeof data.error === 'string') return data.error
-  return e instanceof Error ? e.message : String(e)
-}
-
-function fetchErrorStatus(e: unknown): number | null {
-  const status = (e as { status?: unknown } | null)?.status
-  return typeof status === 'number' ? status : null
-}
-
-// --- セッション ---
-
-const session = ref<DvrSession | null>(null)
-const form = reactive({ compId: '', userName: '', userPass: '' })
-const loggingIn = ref(false)
-const loginError = ref<string | null>(null)
-
-function routingHeaders(compId: string, userName: string): Record<string, string> {
-  return {
-    'X-Dvr-Comp-Id': compId,
-    'X-Dvr-User-B64': b64urlUtf8(userName),
+/** ログアウト / セッション切れ (session が null になったら) ページ内データを破棄する。 */
+watch(session, (s) => {
+  if (!s) {
+    closeViewer()
+    stopAutoRefresh()
+    notifications.value = []
+    resetSearchState()
   }
-}
-
-function authHeaders(s: DvrSession): Record<string, string> {
-  return {
-    ...routingHeaders(s.compId, s.userName),
-    'Authorization': `Bearer ${s.token}`,
-  }
-}
-
-function persistSession(s: DvrSession | null) {
-  session.value = s
-  try {
-    // token はブラウザを閉じても保持する (localStorage)。パスワードは保存しない。
-    if (s) localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(s))
-    else localStorage.removeItem(SESSION_STORAGE_KEY)
-  }
-  catch {
-    // localStorage 不可 (プライベートモード等) でも動作は継続する (再読込で再ログイン)
-  }
-}
-
-/** 401 (token/theearth セッション切れ) を受けた時の共通処理。 */
-function expireSession(message: string) {
-  persistSession(null)
-  closeViewer()
-  stopAutoRefresh()
-  notifications.value = []
-  resetSearchState()
-  loginError.value = message
-  showLoginPanel.value = true
-}
-
-async function doLogin() {
-  if (!form.compId || !form.userName || !form.userPass) {
-    loginError.value = '会社ID / ユーザーID / パスワードをすべて入力してください'
-    return
-  }
-  loggingIn.value = true
-  loginError.value = null
-  try {
-    const res = await $fetch<{ token: string }>('/dvr-api/login', {
-      method: 'POST',
-      headers: routingHeaders(form.compId, form.userName),
-      body: { user_pass: form.userPass },
-    })
-    persistSession({ compId: form.compId, userName: form.userName, token: res.token })
-    try {
-      localStorage.setItem(LAST_ACCOUNT_KEY, JSON.stringify({ compId: form.compId, userName: form.userName }))
-    }
-    catch {
-      // プリフィルは best-effort
-    }
-    form.userPass = ''
-    showLoginPanel.value = false
-    await loadNotifications()
-    loadMasters()
-  }
-  catch (e) {
-    loginError.value = fetchErrorMessage(e)
-  }
-  finally {
-    loggingIn.value = false
-  }
-}
-
-async function doLogout() {
-  const s = session.value
-  if (s) {
-    try {
-      await $fetch('/dvr-api/logout', { method: 'POST', headers: authHeaders(s) })
-    }
-    catch {
-      // best-effort (セッションが既に切れていても手元は消す)
-    }
-  }
-  persistSession(null)
-  closeViewer()
-  stopAutoRefresh()
-  notifications.value = []
-  resetSearchState()
-  loginError.value = null
-  showLoginPanel.value = true
-}
+})
 
 // --- DVR 通知一覧 ---
 
@@ -180,16 +66,16 @@ async function loadNotifications() {
   listError.value = null
   try {
     const res = await $fetch<{ notifications: DvrNotification[] }>('/dvr-api/notifications', {
-      headers: authHeaders(s),
+      headers: authHeaders(),
     })
     notifications.value = res.notifications
   }
   catch (e) {
-    if (fetchErrorStatus(e) === 401) {
-      expireSession(fetchErrorMessage(e))
+    if (dvrErrorStatus(e) === 401) {
+      expireSession(dvrErrorMessage(e))
       return
     }
-    listError.value = fetchErrorMessage(e)
+    listError.value = dvrErrorMessage(e)
   }
   finally {
     listLoading.value = false
@@ -229,7 +115,7 @@ async function requestTransfer(n: DvrNotification) {
   try {
     await $fetch('/dvr-api/transfer', {
       method: 'POST',
-      headers: authHeaders(s),
+      headers: authHeaders(),
       body: { serial: n.serialNo, filename: n.fileName },
     })
     // 転送は非同期。一覧を再読込した上で、receiveState の変化を自動更新で追う。
@@ -237,11 +123,11 @@ async function requestTransfer(n: DvrNotification) {
     startAutoRefresh('notifications')
   }
   catch (e) {
-    if (fetchErrorStatus(e) === 401) {
-      expireSession(fetchErrorMessage(e))
+    if (dvrErrorStatus(e) === 401) {
+      expireSession(dvrErrorMessage(e))
       return
     }
-    listError.value = fetchErrorMessage(e)
+    listError.value = dvrErrorMessage(e)
   }
   finally {
     const next = new Set(requestingKeys.value)
@@ -341,14 +227,14 @@ async function loadMasters() {
   mastersLoading.value = true
   mastersError.value = null
   try {
-    masters.value = await $fetch<DvrMasters>('/dvr-api/masters', { headers: authHeaders(s) })
+    masters.value = await $fetch<DvrMasters>('/dvr-api/masters', { headers: authHeaders() })
   }
   catch (e) {
-    if (fetchErrorStatus(e) === 401) {
-      expireSession(fetchErrorMessage(e))
+    if (dvrErrorStatus(e) === 401) {
+      expireSession(dvrErrorMessage(e))
       return
     }
-    mastersError.value = fetchErrorMessage(e)
+    mastersError.value = dvrErrorMessage(e)
   }
   finally {
     mastersLoading.value = false
@@ -365,7 +251,7 @@ async function doSearch() {
     const start = searchForm.start.replaceAll('-', '/').replace('T', ' ')
     const res = await $fetch<{ rows: DvrSearchRow[] }>('/dvr-api/search', {
       method: 'POST',
-      headers: authHeaders(s),
+      headers: authHeaders(),
       body: {
         start,
         rangeMinutes: Number(searchForm.rangeMinutes),
@@ -380,11 +266,11 @@ async function doSearch() {
     searched.value = true
   }
   catch (e) {
-    if (fetchErrorStatus(e) === 401) {
-      expireSession(fetchErrorMessage(e))
+    if (dvrErrorStatus(e) === 401) {
+      expireSession(dvrErrorMessage(e))
       return
     }
-    searchError.value = fetchErrorMessage(e)
+    searchError.value = dvrErrorMessage(e)
   }
   finally {
     searchLoading.value = false
@@ -403,16 +289,16 @@ async function requestTransferFromSearch(n: DvrSearchRow) {
     const body = searchForm.vehicleCd !== NOT_SELECTED
       ? { serials: [n.serialNo], filenames: [n.fileName] }
       : { serial: n.serialNo, filename: n.fileName }
-    await $fetch('/dvr-api/transfer', { method: 'POST', headers: authHeaders(s), body })
+    await $fetch('/dvr-api/transfer', { method: 'POST', headers: authHeaders(), body })
     await doSearch()
     startAutoRefresh('search')
   }
   catch (e) {
-    if (fetchErrorStatus(e) === 401) {
-      expireSession(fetchErrorMessage(e))
+    if (dvrErrorStatus(e) === 401) {
+      expireSession(dvrErrorMessage(e))
       return
     }
-    searchError.value = fetchErrorMessage(e)
+    searchError.value = dvrErrorMessage(e)
   }
   finally {
     const next = new Set(requestingKeys.value)
@@ -502,7 +388,7 @@ async function openNotification(n: DvrNotification) {
       filename: n.fileName!,
     })
     const buf = await $fetch<ArrayBuffer>(`/dvr-api/file?${params.toString()}`, {
-      headers: authHeaders(s),
+      headers: authHeaders(),
       responseType: 'arrayBuffer',
     })
     const result = await decodeVdf(new Uint8Array(buf))
@@ -515,11 +401,11 @@ async function openNotification(n: DvrNotification) {
     duration.value = probeUrl ? await probeVideoDuration(probeUrl) : 0
   }
   catch (e) {
-    if (fetchErrorStatus(e) === 401) {
-      expireSession(fetchErrorMessage(e))
+    if (dvrErrorStatus(e) === 401) {
+      expireSession(dvrErrorMessage(e))
       return
     }
-    videoError.value = fetchErrorMessage(e)
+    videoError.value = dvrErrorMessage(e)
   }
   finally {
     videoLoading.value = false
@@ -538,24 +424,7 @@ function onSeek(seconds: number) {
 }
 
 onMounted(() => {
-  try {
-    const raw = localStorage.getItem(SESSION_STORAGE_KEY)
-    if (raw) session.value = JSON.parse(raw) as DvrSession
-  }
-  catch {
-    session.value = null
-  }
-  try {
-    const rawLast = localStorage.getItem(LAST_ACCOUNT_KEY)
-    if (rawLast) {
-      const last = JSON.parse(rawLast) as { compId?: string, userName?: string }
-      form.compId = last.compId ?? ''
-      form.userName = last.userName ?? ''
-    }
-  }
-  catch {
-    // プリフィルは best-effort
-  }
+  restoreSession()
   if (session.value) {
     loadNotifications()
     loadMasters()
@@ -573,67 +442,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="min-h-screen bg-gray-50 dark:bg-gray-950">
-    <header class="border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 sticky top-0 z-20">
-      <div class="max-w-7xl mx-auto px-6 py-3 flex flex-wrap items-center gap-3">
-        <h1 class="text-lg font-bold">
-          DVR 動画ビューア
-        </h1>
-        <div class="flex-1" />
-
-        <!-- 右上: ログイン状態表示 + ボタン -->
-        <template v-if="session">
-          <span class="inline-flex items-center gap-1.5 text-sm rounded-full px-3 py-1 bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300">
-            <span class="size-2 rounded-full bg-green-500" />
-            ログイン中: {{ session.compId }} / {{ session.userName }}
-          </span>
-          <UButton size="xs" color="neutral" variant="soft" icon="i-lucide-log-out" label="ログアウト" @click="doLogout" />
-        </template>
-        <template v-else>
-          <span class="inline-flex items-center gap-1.5 text-sm rounded-full px-3 py-1 bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400">
-            <span class="size-2 rounded-full bg-gray-400" />
-            未ログイン
-          </span>
-          <UButton
-            size="sm"
-            icon="i-lucide-log-in"
-            :label="showLoginPanel ? '閉じる' : 'ログイン'"
-            @click="showLoginPanel = !showLoginPanel"
-          />
-        </template>
-      </div>
-
-      <!-- 右上から出るログインパネル (未ログイン時のみ) -->
-      <div v-if="!session && showLoginPanel" class="absolute right-4 top-full mt-2 w-96 max-w-[calc(100vw-2rem)] z-30">
-        <UCard class="shadow-xl">
-          <template #header>
-            <span class="font-semibold">theearth (web地球号) にログイン</span>
-          </template>
-          <!-- name/autocomplete はブラウザのパスワードマネージャーが username+password を
-               保存・自動入力できるようにするためのもの (会社ID は PM の対象外なので
-               localStorage の前回値プリフィルで補完する)。 -->
-          <form method="post" class="space-y-3" @submit.prevent="doLogin">
-            <UFormField label="会社ID">
-              <UInput v-model="form.compId" name="organization" autocomplete="organization" placeholder="例: 27324455" class="w-full" />
-            </UFormField>
-            <UFormField label="ユーザーID">
-              <UInput v-model="form.userName" name="username" autocomplete="username" class="w-full" />
-            </UFormField>
-            <UFormField label="パスワード">
-              <UInput v-model="form.userPass" name="password" type="password" autocomplete="current-password" class="w-full" />
-            </UFormField>
-            <div v-if="loginError" class="text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
-              {{ loginError }}
-            </div>
-            <UButton type="submit" block :loading="loggingIn" label="ログイン" />
-          </form>
-          <p class="text-xs text-gray-400 mt-3">
-            入力した ID / パスワードは theearth へのログインにその場で 1 回だけ使われ、
-            このサービスには保存されません。theearth 側は同一アカウントの同時ログインを
-            許可しないため、他の場所でログイン中のセッションは切断されることがあります。
-          </p>
-        </UCard>
-      </div>
-    </header>
+    <DvrSessionHeader title="DVR 動画ビューア" @login="onLogin" />
 
     <main class="max-w-7xl mx-auto p-6">
       <!-- 未ログイン: 本文はプレースホルダのみ (ログインは右上から) -->

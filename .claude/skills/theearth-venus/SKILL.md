@@ -77,7 +77,11 @@ json であること + `d` の存在を検証** (ログイン切れは 200 空 b
 - 行フィールドは **PascalCase**: `VehicleCD`(数値) / `VehicleName` / `SerialNo` /
   `FileName`(.vdf 付) / `FilePath`(通常空) / `EventType` / `DvrDatetime` / `DriverName` /
   `Latitude` / `Longitude` / `FileReceive` / `FileDownload` / `RunState` / `Speed` 等。
-- **緯度経度は度 × 1e6 の整数** (例 `36339272` = `36.339272`)。`|値|>180` なら 1e6 で割る。
+- **緯度経度は NMEA 由来の DDMM 形式整数** (度×1e6 + 分×1e4 + 分小数×1e4。
+  例 `32478749` = 32°47.8749' = 32.7981°)。実ページは `ConvertLatLngDDMMtoDD`
+  (J-GOS0100[MapEvent].js) で度に変換して地図に描く。**「1e6 で割って度」は誤り**
+  (初期実装がこれで数 km ずれていた)。DVR 行 / 現在地 / 動態履歴すべて同形式。
+  0 は GPS 未捕捉。consumer 実装は `theearth-venus-client.ts` の `convertDdmmToDegrees`。
 
 ## DVR 動画ダウンロード (2 段) — 決定論パスは組み立てられない
 
@@ -121,7 +125,23 @@ commit 前に済ませて loud fail 可能に)。
 その他の VenusBridge メソッド (JS で確認、未実装): `Request_DvrDataPlayback`
 (serialNo, fileName, vehicleCD — サイト内蔵プレイヤー用。.vdf を落として wasm decode
 する我々のフローでは不要) / `Request_DvrFileList` / `Request_DvrFileProtection` /
-`Request_DvrFileDelete` / `VehicleStateTableForBranchEx` (現在地、フィールド名は推測)。
+`Request_DvrFileDelete`。
+
+## 現在地 / 動態履歴 (2026-07-03 実機確定、/dvr-map)
+
+いずれも `d` は **`VehicleSetStateData` の素オブジェクト配列** (通知一覧の
+`[件数, JSON文字列]` 形式ではない)。GPS は DDMM 形式、0 = 未捕捉。
+
+- **現在地** (VenusMain 位置情報): `VehicleStateTableForBranchEx(strBranchCD,
+  strScrapCarDisp)`。strBranchCD は事業所 code ("00000001")、strScrapCarDisp は
+  廃車表示フラグ (通常 "0")。実フィールド: `VehicleCD`/`VehicleName`/`BranchName`/
+  `DriverName`/`GPSLatitude`/`GPSLongitude`/`DataDateTime`("MM/DD HH:mm")/
+  `ComuDateTime`/`Speed`/`Revo`/`CurrentWorkName` 等 — nuxt_dtako_logs の推測実装
+  (`LAT_FIELD_CANDIDATES`) はこれで確定できる。
+- **動態履歴** (F-DOV0010): GPS 軌跡は `VehicleStateTable(VehicleCD, dtmST, dtmED)`
+  (日付 "YYYY/MM/DD"、1 日 150 点前後)。**param 名は jsdebug 準拠必須** — 間違うと
+  WCF が HTTP 500 fault を返す (セッション切れ 500 と区別つかないので注意)。
+  作業イベント一覧 (リスト部) は UpdatePanel postback の server-render で未移植。
 
 ## 映像検索: `Request_DvrDataList` (2026-07-03 実機確定、Refs #90 映像検索)
 
