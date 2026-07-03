@@ -11,7 +11,7 @@
  * 返してしまう事故を防ぐ)。
  */
 
-const BASE_URL = "https://theearth-np.com";
+export const BASE_URL = "https://theearth-np.com";
 const LOGIN_PATH = "/F-OES1010[Login].aspx";
 const CSV_PATH = "/F-NOS3010[GeneralCsv].aspx";
 
@@ -67,7 +67,7 @@ export function cookieHeader(jar: CookieJar): string {
     .join("; ");
 }
 
-async function fetchWithJar(
+export async function fetchWithJar(
   jar: CookieJar,
   url: string,
   init: RequestInit,

@@ -36,8 +36,23 @@
  */
 import { DurableObject } from "cloudflare:workers";
 import { decideRelayAuth, type IntrospectResult } from "./auth-decision";
-import { scrapeViaHttp, TheearthClientError } from "./theearth-client";
+import { createCookieJar, login, scrapeViaHttp, TheearthClientError, type CookieJar } from "./theearth-client";
 import { uploadDtakoZipViaAlcInternalProxy } from "./alc-internal-upload";
+import {
+  buildDvrFileUrl,
+  getDvrNotifications,
+  openDvrFileStream,
+  VenusSessionExpiredError,
+} from "./theearth-venus-client";
+import {
+  DVR_SESSION_TTL_MS,
+  extractBearerToken,
+  generateDvrToken,
+  isDvrSessionValid,
+  resolveDvrRouting,
+  type DvrRouting,
+  type DvrSessionRecord,
+} from "./dvr-session";
 
 /** `DTAKO_ACCOUNTS` (dtako-scraper の Rust 版と同一 JSON shape) の1エントリ。 */
 interface DtakoAccountRaw {
@@ -54,6 +69,14 @@ interface StoredZip {
 }
 
 const ZIP_TTL_MS = 10 * 60 * 1000;
+
+/** /dvr-api/* のセッションレコードを置く DO storage キー。この DO instance は
+ * theearth アカウント単位 (`dvr-{comp}:{userB64}`) なので 1 キーで足りる。 */
+const DVR_SESSION_KEY = "dvr:session";
+
+function dvrJsonError(status: number, message: string): Response {
+  return Response.json({ error: message }, { status });
+}
 
 /** SecretsStoreSecret (`.get()`) / 文字列 のどちらの binding でも値を取り出す。 */
 async function resolveSecret(binding: unknown): Promise<string> {
@@ -151,6 +174,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+
+    // /dvr-viewer (Refs #90) の DVR viewer API。scraper 系とは独立した経路で、
+    // 認証は auth-worker introspect ではなく「theearth へのログインそのもの」
+    // (credential pass-through、./dvr-session.ts のヘッダコメント参照)。
+    if (url.pathname.startsWith("/dvr-api/")) {
+      return this.handleDvrApi(request, url);
+    }
 
     // SCRAPER_MODE=http が完了後に生成する、1回だけ取得できる zip ダウンロード URL。
     // WebSocket アップグレードではない通常の GET。
@@ -375,6 +405,135 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return null;
     }
     return accounts.find((a) => a.comp_id === compId) ?? null;
+  }
+
+  // -------------------------------------------------------------------------
+  // /dvr-api/* — DVR viewer (Refs #90)。credential pass-through 設計:
+  // password はログイン 1 リクエストの body にだけ現れ、保存も log 出力もしない。
+  // DO storage に残るのは theearth session cookie + ランダム token のみ。
+  // -------------------------------------------------------------------------
+
+  private async handleDvrApi(request: Request, url: URL): Promise<Response> {
+    const routing = resolveDvrRouting(request.headers);
+    if (!routing) {
+      return dvrJsonError(400, "X-Dvr-Comp-Id / X-Dvr-User-B64 ヘッダが不正です");
+    }
+
+    if (url.pathname === "/dvr-api/login" && request.method === "POST") {
+      return this.handleDvrLogin(request, routing);
+    }
+
+    const record = await this.ctx.storage.get<DvrSessionRecord>(DVR_SESSION_KEY);
+    const token = extractBearerToken(request.headers);
+    if (!isDvrSessionValid(record, token, routing, Date.now())) {
+      return dvrJsonError(401, "セッションが無効か期限切れです。再ログインしてください");
+    }
+
+    if (url.pathname === "/dvr-api/logout" && request.method === "POST") {
+      await this.ctx.storage.delete(DVR_SESSION_KEY);
+      return new Response(null, { status: 204 });
+    }
+    if (url.pathname === "/dvr-api/notifications" && request.method === "GET") {
+      return this.handleDvrNotifications(record!);
+    }
+    if (url.pathname === "/dvr-api/file" && request.method === "GET") {
+      return this.handleDvrFile(record!, url);
+    }
+    return dvrJsonError(404, "Not Found");
+  }
+
+  /** POST /dvr-api/login — theearth にその場でログインし、成功したら session cookie
+   * + token を保存して token を返す。credential はこのメソッドのスコープ外に出さない。 */
+  private async handleDvrLogin(request: Request, routing: DvrRouting): Promise<Response> {
+    let body: { user_pass?: unknown };
+    try {
+      body = (await request.json()) as { user_pass?: unknown };
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    const userPass = typeof body.user_pass === "string" ? body.user_pass : "";
+    if (!userPass) {
+      return dvrJsonError(400, "user_pass が必要です");
+    }
+
+    const jar = createCookieJar();
+    try {
+      await login(jar, {
+        compId: routing.compId,
+        userName: routing.userName,
+        userPass,
+      });
+    } catch (err) {
+      // TheearthClientError の message は自前クライアントの説明文 (credential は含まない)。
+      const message =
+        err instanceof TheearthClientError ? err.message : "theearth へのログインに失敗しました";
+      return dvrJsonError(401, message);
+    }
+
+    const now = Date.now();
+    const record: DvrSessionRecord = {
+      token: generateDvrToken(),
+      compId: routing.compId,
+      userName: routing.userName,
+      cookies: Array.from(jar.cookies.entries()),
+      createdAt: now,
+      expiresAt: now + DVR_SESSION_TTL_MS,
+    };
+    await this.ctx.storage.put(DVR_SESSION_KEY, record);
+    return Response.json({ token: record.token, expires_at: record.expiresAt });
+  }
+
+  /** GET /dvr-api/notifications — VenusBridge の DVR 動画通知一覧。 */
+  private async handleDvrNotifications(record: DvrSessionRecord): Promise<Response> {
+    const jar: CookieJar = { cookies: new Map(record.cookies) };
+    try {
+      const notifications = await getDvrNotifications(jar);
+      // theearth 側が cookie を更新した場合に備えて書き戻す (セッション延命)。
+      await this.ctx.storage.put<DvrSessionRecord>(DVR_SESSION_KEY, {
+        ...record,
+        cookies: Array.from(jar.cookies.entries()),
+      });
+      return Response.json({ notifications });
+    } catch (err) {
+      if (err instanceof VenusSessionExpiredError) {
+        await this.ctx.storage.delete(DVR_SESSION_KEY);
+        return dvrJsonError(401, "theearth セッションが切れました。再ログインしてください");
+      }
+      const message =
+        err instanceof TheearthClientError ? err.message : "DVR 動画通知の取得に失敗しました";
+      return dvrJsonError(502, message);
+    }
+  }
+
+  /** GET /dvr-api/file?support_id=&vehicle_cd=&filename= — `.vdf` をマジックバイト
+   * 検証付きで browser にストリーム素通しする (数十 MB になり得るため buffer しない)。
+   * comp_id はクライアントから受けず、ログイン済みセッションの値を使う (他 comp の
+   * パスを組み立てさせない)。 */
+  private async handleDvrFile(record: DvrSessionRecord, url: URL): Promise<Response> {
+    const supportId = url.searchParams.get("support_id");
+    const vehicleCd = url.searchParams.get("vehicle_cd");
+    const filename = url.searchParams.get("filename");
+    if (!supportId || !vehicleCd || !filename) {
+      return dvrJsonError(400, "support_id / vehicle_cd / filename がすべて必要です");
+    }
+
+    const jar: CookieJar = { cookies: new Map(record.cookies) };
+    try {
+      const fileUrl = buildDvrFileUrl(record.compId, supportId, vehicleCd, filename);
+      const stream = await openDvrFileStream(jar, fileUrl);
+      return new Response(stream, {
+        status: 200,
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-disposition": `attachment; filename="${filename}.vdf"`,
+          "cache-control": "no-store",
+        },
+      });
+    } catch (err) {
+      const message =
+        err instanceof TheearthClientError ? err.message : "DVR 動画ファイルの取得に失敗しました";
+      return dvrJsonError(502, message);
+    }
   }
 
   /** `/scraper-zip/:compId/:requestId` — 1回だけ取得できる zip ダウンロード。 */

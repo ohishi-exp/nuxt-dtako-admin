@@ -12,7 +12,13 @@ export default defineConfig({
       // pure ロジックだけ 100% gate。dtako-scraper-relay-do.ts / index.ts は
       // cloudflare:workers / DurableObject / WebSocket runtime 依存で node vitest
       // からは計測不可 (要 @cloudflare/vitest-pool-workers) のため対象外。
-      include: ['src/auth-decision.ts', 'src/theearth-client.ts', 'src/alc-internal-upload.ts'],
+      include: [
+        'src/auth-decision.ts',
+        'src/theearth-client.ts',
+        'src/alc-internal-upload.ts',
+        'src/theearth-venus-client.ts',
+        'src/dvr-session.ts',
+      ],
       thresholds: {
         lines: 100,
         functions: 100,

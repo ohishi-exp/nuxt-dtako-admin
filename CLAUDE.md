@@ -163,6 +163,55 @@ net780-wasm (ohishi-exp/net780-wasm、core/ + wasm/ の 1 repo workspace)
 | `vendor/net780-wasm/` | `ohishi-exp/net780-wasm` の `wasm-pack build` 出力を vendor したもの |
 | `tests/mocks/net780-wasm.ts` | vitest 用モック (`__setMockResult`/`__setMockError`) |
 
+## DVR 動画ビューア (`/dvr-viewer` ページ + `/dvr-api/*`、Refs #90)
+
+theearth-np.com のアカウントを持つ利用者 (DTAKO_ACCOUNTS に載っていない外部の関係者を
+含む、社内共有・一般公開なし) が、**自分の credential でログイン**して自社の DVR
+ドラレコ動画 (`.vdf`) を閲覧する機能。管理画面の auth-worker ログインは使わない。
+
+### credential pass-through 設計
+
+パスワードは**一切保存しない**。ログイン画面 = theearth へのログインそのもの
+(認証を theearth 本体に委譲し、アプリ独自のユーザー DB / パスワード保存を持たない)。
+
+```
+[browser] /dvr-viewer (auth.global.ts publicPaths、layout: false)
+  │ POST /dvr-api/login (password は body のみ。X-Dvr-Comp-Id / X-Dvr-User-B64
+  │ ヘッダで routing、password はヘッダに載せない)
+  ▼
+[worker/index.ts] /dvr-api/* を SCRAPER_RELAY service binding へ素通し
+  ▼
+[relay worker index.ts] resolveDvrRouting → idFromName(`dvr-{comp}:{userB64}`)
+  │ (theearth アカウント単位で DO を固定 = 同一アカウント複数セッション不可の
+  │  theearth 制約を自然に直列化)
+  ▼
+[DtakoScraperRelayDO /dvr-api/*] theearth にその場でログイン (theearth-client.ts の
+  │ cookie jar / VIEWSTATE ロジック再利用)。credential は破棄し、theearth session
+  │ cookie + ランダム token (64 hex) だけ DO storage に保持 (TTL 8h)
+  ├ GET /dvr-api/notifications — VenusBridge Monitoring_DvrNotification2 (一覧)
+  ├ GET /dvr-api/file — /dvrData/{comp}/{support}/{vehicle}/{file}/{file}.vdf を
+  │   NET780 マジックバイト検証付きで **ストリーム素通し** (数十 MB を buffer しない)
+  └ POST /dvr-api/logout — セッション破棄
+[browser] dtako_vid_wasm で decode → VidMap / VidTelemetryChart 再利用 (vid-check の単一ファイル版)
+```
+
+- VenusBridge クライアントは `ohishi-exp/nuxt_dtako_logs` の `theearth-venus-client.ts`
+  (browser-render-rust#14 実機トレース済み) を relay worker に移植したもの。cookie jar /
+  ログインは `theearth-client.ts` を再利用し二重管理しない
+- theearth セッション切れは VenusBridge が HTML を返すことで検出し
+  (`VenusSessionExpiredError`)、401 → browser 側で再ログインを促す
+- token は browser の sessionStorage のみ (localStorage に永続しない)
+- 新規 DO クラスは増やしていない (既存 `DtakoScraperRelayDO` にハンドラ追加、migration 不要)
+
+### 関連ファイル
+
+| ファイル | 役割 |
+|---|---|
+| `app/pages/dvr-viewer.vue` | ログインフォーム + DVR 通知一覧 + viewer (wasm decode / VidMap / VidTelemetryChart) |
+| `workers/dtako-scraper-relay/src/dvr-session.ts` | セッション pure ロジック (token 生成 / timing-safe 比較 / routing ヘッダ解決、coverage 100% gate) |
+| `workers/dtako-scraper-relay/src/theearth-venus-client.ts` | VenusBridge DVR 通知一覧 + `.vdf` ストリーム (マジック検証、coverage 100% gate) |
+| `workers/dtako-scraper-relay/src/dtako-scraper-relay-do.ts` | `/dvr-api/*` ハンドラ (login / notifications / file / logout) |
+
 ## スクレイパ (`/scraper` ページ + `workers/dtako-scraper-relay/`)
 
 dtako 運行ログ (csvdata.zip) の取得トリガー UI。実処理は `nuxt-dtako-admin-scraper-relay`
