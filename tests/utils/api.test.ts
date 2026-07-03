@@ -953,6 +953,16 @@ describe('api', () => {
       ws.close()
       await expect(promise).rejects.toThrow('Scraper error: WebSocket handshake failed')
     })
+
+    it('resolves (keeping partial results) when closed after at least one message but before done', async () => {
+      const received: unknown[] = []
+      const promise = triggerScrapeStream({}, evt => received.push(evt))
+      const ws = lastWs()
+      wsEmit(ws, { event: 'progress', comp_id: 'C1', step: 'login' })
+      ws.close()
+      await expect(promise).resolves.toBeUndefined()
+      expect(received).toEqual([{ event: 'progress', comp_id: 'C1', step: 'login' }])
+    })
   })
 
   // ===== 401 retry with token refresh =====
