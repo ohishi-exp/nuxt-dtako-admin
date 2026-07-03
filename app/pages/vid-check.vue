@@ -88,6 +88,11 @@ function onTimeUpdate() {
   if (el) localCurrentTime.value = el.currentTime
   if (loopRange.value && rangeEnd.value !== null && globalCurrentTime.value >= rangeEnd.value) {
     onSeek(rangeStart.value ?? 0)
+    // 一部ブラウザはシーク直後に再生を止めることがあるため、再生中なら明示的に再開する
+    if (isPlaying.value) {
+      frontVideoEl.value?.play().catch(() => {})
+      rearVideoEl.value?.play().catch(() => {})
+    }
   }
 }
 
@@ -331,7 +336,7 @@ function fmtBytes(n: number): string {
                   :color="displayMode === 'front' ? 'primary' : 'neutral'"
                   icon="i-lucide-columns-2"
                   :label="displayMode === 'front' ? '両方表示に戻す' : '前方のみ表示'"
-                  :disabled="!hasFront || !hasRear"
+                  :disabled="!hasFront"
                   @click="toggleFrontOnly"
                 />
                 <UButton
@@ -366,7 +371,7 @@ function fmtBytes(n: number): string {
               v-if="activeSegment?.frontUrl"
               ref="frontVideoEl"
               :src="activeSegment.frontUrl"
-              :controls="!frontCrop.selecting.value && !frontCrop.rect.value"
+              :controls="!frontCrop.rect.value"
               class="w-full h-auto block"
               :style="frontCrop.videoStyle.value"
               @timeupdate="onTimeUpdate"
@@ -399,7 +404,7 @@ function fmtBytes(n: number): string {
                   :color="displayMode === 'rear' ? 'primary' : 'neutral'"
                   icon="i-lucide-columns-2"
                   :label="displayMode === 'rear' ? '両方表示に戻す' : '後方のみ表示'"
-                  :disabled="!hasFront || !hasRear"
+                  :disabled="!hasRear"
                   @click="toggleRearOnly"
                 />
                 <UButton
@@ -434,7 +439,7 @@ function fmtBytes(n: number): string {
               v-if="activeSegment?.rearUrl"
               ref="rearVideoEl"
               :src="activeSegment.rearUrl"
-              :controls="!rearCrop.selecting.value && !rearCrop.rect.value"
+              :controls="!rearCrop.rect.value"
               class="w-full h-auto block"
               :style="rearCrop.videoStyle.value"
               @timeupdate="onTimeUpdate"

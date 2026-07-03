@@ -169,8 +169,25 @@ function fracFromEvent(e: MouseEvent): number | null {
   return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width))
 }
 
+/**
+ * ドラッグ中は `window` でグローバルに `mousemove`/`mouseup` を監視する。
+ * トラック要素 (高さ 16px の細いバー) に直接バインドすると、指が少し上下に
+ * ぶれたりドラッグが速いだけでバー外に出て `mousemove`/`mouseup` が届かなく
+ * なり、つまみ調整が「範囲外に出ると切れる」ため。
+ */
+function startGlobalDrag() {
+  window.addEventListener('mousemove', onTrackPointerMove)
+  window.addEventListener('mouseup', onTrackPointerUp)
+}
+
+function stopGlobalDrag() {
+  window.removeEventListener('mousemove', onTrackPointerMove)
+  window.removeEventListener('mouseup', onTrackPointerUp)
+}
+
 function beginHandleDrag(which: 'start' | 'end') {
   handleDragging.value = which
+  startGlobalDrag()
 }
 
 function onTrackPointerDown(e: MouseEvent) {
@@ -178,6 +195,7 @@ function onTrackPointerDown(e: MouseEvent) {
   const frac = fracFromEvent(e)
   if (frac === null) return
   brushStartFrac.value = frac
+  startGlobalDrag()
 }
 
 function onTrackPointerMove(e: MouseEvent) {
@@ -206,7 +224,10 @@ function onTrackPointerMove(e: MouseEvent) {
 function onTrackPointerUp() {
   brushStartFrac.value = null
   handleDragging.value = null
+  stopGlobalDrag()
 }
+
+onBeforeUnmount(stopGlobalDrag)
 
 function clearRange() {
   emit('update:rangeStart', null)
@@ -308,9 +329,6 @@ const rangeShadeStyle = computed(() => ({
       ref="rangeTrackEl"
       class="relative h-4 rounded bg-gray-800 cursor-pointer select-none"
       @mousedown="onTrackPointerDown"
-      @mousemove="onTrackPointerMove"
-      @mouseup="onTrackPointerUp"
-      @mouseleave="onTrackPointerUp"
     >
       <div
         v-if="rangeStart != null && rangeEnd != null"
