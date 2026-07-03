@@ -2,6 +2,7 @@
 import { decodeVdf, mergeTelemetrySegments, probeVideoDuration } from '~/utils/dtako-vid-wasm'
 import type { VdfTelemetry } from '~/utils/dtako-vid-wasm'
 import { fmtDuration } from '~/utils/time-format'
+import { extractMp4TimeRange } from '~/utils/mp4-clip'
 
 interface Segment {
   fileName: string
@@ -183,19 +184,68 @@ function toggleLoopRange() {
   isPlaying.value = true
 }
 
-/**
- * 区間選択バーで指定した [rangeStart, rangeEnd] を、表示中の映像 (前方/後方の
- * うち現在レンダリングされているもの) ごとに `captureStream()` + `MediaRecorder`
- * で実時間録画し、webm としてダウンロードする。MP4 コンテナを直接切り出す
- * わけではない (デコード済み mp4 バイト列は保持していないため) ので、
- * 録画時間 = クリップ時間ぶんだけ実際に待つ点に注意。
- */
-async function clipAndDownload() {
-  if (clipping.value) return
-  const start = rangeStart.value
-  const end = rangeEnd.value
-  if (start === null || end === null || end <= start) return
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
 
+/**
+ * 区間選択バーで指定した [globalStart, globalEnd] を、現在アクティブなセグメントの
+ * 前方/後方 MP4 (既にデコード済みで Blob として保持済み) からコンテナレベルで
+ * 無劣化に切り出す。`fetch(blobUrl)` で元の完全な MP4 バイト列を取り出せるので、
+ * 実時間で録画し直す必要はない (`extractMp4TimeRange` / `~/utils/mp4-clip`)。
+ *
+ * 複数ファイル結合時にセグメントを跨ぐ範囲や、mp4box.js が対応できない構造の
+ * 場合は false を返し、呼び出し側が `clipViaMediaRecorder` にフォールバックする。
+ */
+async function tryClipViaMp4Box(globalStart: number, globalEnd: number): Promise<boolean> {
+  try {
+    const segIdx = activeSegmentIndex.value
+    const segStart = segmentOffsets.value[segIdx] ?? 0
+    const seg = segments.value[segIdx]
+    if (!seg) return false
+    const segEnd = segStart + seg.duration
+    if (globalStart < segStart || globalEnd > segEnd) return false // セグメント跨ぎは非対応
+
+    const localStart = globalStart - segStart
+    const localEnd = globalEnd - segStart
+
+    const targets: { url: string, label: string }[] = []
+    if (seg.frontUrl) targets.push({ url: seg.frontUrl, label: 'front' })
+    if (seg.rearUrl) targets.push({ url: seg.rearUrl, label: 'rear' })
+    if (targets.length === 0) return false
+
+    // 全トラック分の Blob を先に用意し、1つでも失敗したら何もダウンロードせず
+    // 例外を投げる (フォールバック時の二重ダウンロード防止)
+    const results: { blob: Blob, label: string }[] = []
+    for (const { url, label } of targets) {
+      const buf = await fetch(url).then(r => r.arrayBuffer())
+      results.push({ blob: extractMp4TimeRange(buf, localStart, localEnd), label })
+    }
+
+    for (const { blob, label } of results) {
+      downloadBlob(blob, `vid-clip-${label}-${Math.round(globalStart)}s-${Math.round(globalEnd)}s.mp4`)
+    }
+    return true
+  }
+  catch {
+    return false
+  }
+}
+
+/**
+ * mp4box.js での無劣化切り出しが使えない場合のフォールバック。表示中の映像
+ * (前方/後方のうち現在レンダリングされているもの) を `captureStream()` +
+ * `MediaRecorder` で実時間録画し、webm としてダウンロードする。録画時間 =
+ * クリップ時間ぶんだけ実際に待つ点に注意。
+ */
+async function clipViaMediaRecorder(start: number, end: number) {
   const targets: { el: HTMLVideoElement, label: string }[] = []
   if (frontVideoEl.value) targets.push({ el: frontVideoEl.value, label: 'front' })
   if (rearVideoEl.value) targets.push({ el: rearVideoEl.value, label: 'rear' })
@@ -205,10 +255,6 @@ async function clipAndDownload() {
   targets.forEach(t => t.el.pause())
   onSeek(start)
   await nextTick()
-
-  clipping.value = true
-  clipProgress.value = 0
-  error.value = null
 
   try {
     const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
@@ -250,15 +296,41 @@ async function clipAndDownload() {
         recorder.addEventListener('stop', () => resolve(), { once: true })
         recorder.stop()
       })
-      const blob = new Blob(chunks, { type: mimeType })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `vid-clip-${label}-${Math.round(start)}s-${Math.round(end)}s.webm`
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
-      URL.revokeObjectURL(url)
+      downloadBlob(new Blob(chunks, { type: mimeType }), `vid-clip-${label}-${Math.round(start)}s-${Math.round(end)}s.webm`)
+    }
+  }
+  finally {
+    if (wasPlaying) {
+      targets.forEach(t => t.el.play().catch(() => {}))
+    }
+  }
+}
+
+/**
+ * クリップ書き出し。無劣化 (mp4box.js) を優先し、対応できない場合は自動フォールバック
+ * せず、実時間録画 (待機が必要・再エンコードで画質が変わる) で良いかユーザーに確認する。
+ */
+const clipFallbackPending = ref(false)
+const clipFallbackRange = ref<{ start: number, end: number } | null>(null)
+
+async function clipAndDownload() {
+  if (clipping.value) return
+  const start = rangeStart.value
+  const end = rangeEnd.value
+  if (start === null || end === null || end <= start) return
+
+  clipping.value = true
+  clipProgress.value = 0
+  error.value = null
+  clipFallbackPending.value = false
+  clipFallbackRange.value = null
+
+  try {
+    const done = await tryClipViaMp4Box(start, end)
+    if (!done) {
+      clipFallbackPending.value = true
+      clipFallbackRange.value = { start, end }
+      return
     }
   }
   catch (e) {
@@ -267,10 +339,34 @@ async function clipAndDownload() {
   finally {
     clipping.value = false
     clipProgress.value = 0
-    if (wasPlaying) {
-      targets.forEach(t => t.el.play().catch(() => {}))
-    }
   }
+}
+
+/** 無劣化切り出しが使えなかった時、ユーザーが実時間録画での続行を選んだ場合に呼ぶ。 */
+async function confirmClipFallback() {
+  const range = clipFallbackRange.value
+  if (!range) return
+  clipFallbackPending.value = false
+  clipFallbackRange.value = null
+
+  clipping.value = true
+  clipProgress.value = 0
+  error.value = null
+  try {
+    await clipViaMediaRecorder(range.start, range.end)
+  }
+  catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+  finally {
+    clipping.value = false
+    clipProgress.value = 0
+  }
+}
+
+function cancelClipFallback() {
+  clipFallbackPending.value = false
+  clipFallbackRange.value = null
 }
 
 function revokeAll() {
@@ -287,6 +383,8 @@ function revokeAll() {
   loopRange.value = false
   clipping.value = false
   clipProgress.value = 0
+  clipFallbackPending.value = false
+  clipFallbackRange.value = null
 }
 
 onBeforeUnmount(revokeAll)
@@ -536,6 +634,18 @@ function fmtDateTime(unixSeconds: number): string {
             </div>
           </div>
         </template>
+        <div
+          v-if="clipFallbackPending"
+          class="flex flex-wrap items-center justify-between gap-2 mb-3 text-sm bg-amber-50 dark:bg-amber-950 rounded-lg p-3"
+        >
+          <span class="text-amber-700 dark:text-amber-300">
+            この映像は無劣化でのクリップに対応していません。実時間録画 (区間の長さぶん待機・再エンコードで画質が変わります) で続行しますか?
+          </span>
+          <div class="flex gap-2 shrink-0">
+            <UButton size="xs" color="neutral" variant="ghost" label="キャンセル" @click="cancelClipFallback" />
+            <UButton size="xs" color="warning" variant="solid" label="実時間録画で続行" @click="confirmClipFallback" />
+          </div>
+        </div>
         <VidTelemetryChart
           :g="mergedTelemetry.g"
           :speed-rpm="mergedTelemetry.speed_rpm"
