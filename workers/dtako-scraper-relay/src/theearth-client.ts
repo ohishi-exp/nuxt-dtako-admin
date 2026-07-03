@@ -37,6 +37,19 @@ export class TheearthClientError extends Error {
   }
 }
 
+/** ZIP マジックが一致しなかった時の error。原因調査用に **生の応答バイト** を載せる
+ * (呼び出し側 = DO がこれを保存して「ZIP でなくてもダウンロードさせる」ため)。 */
+export class TheearthNotZipError extends TheearthClientError {
+  readonly responseBytes: ArrayBuffer;
+  readonly contentType: string;
+  constructor(message: string, responseBytes: ArrayBuffer, contentType: string) {
+    super(message);
+    this.name = "TheearthNotZipError";
+    this.responseBytes = responseBytes;
+    this.contentType = contentType;
+  }
+}
+
 export type FetchLike = typeof fetch;
 
 /** GET / stage1 (要求応答) と stage2 (CSV export) で別々のタイムアウトを渡すための束。 */
@@ -410,10 +423,14 @@ async function postForm(
 // ---------------------------------------------------------------------------
 
 export function detectWareki(html: string, now: Date = new Date()): boolean {
-  const matches = html.match(/\b(\d{2})\/\d{2}\/\d{2}\b/g);
-  if (!matches || matches.length === 0) return true; // デフォルトは和暦 (Rust版に合わせる)
-  const first = matches[0];
-  const pageYear = parseInt(first.slice(0, 2), 10);
+  // 元ソース (dtako-scraper download.rs::detect_wareki) は **テキスト全体が YY/MM/DD の
+  // `<td>` セル** (= データ表の日付セル) の最初のものを見る。生 HTML 全体を broad regex
+  // (`\b\d{2}/\d{2}/\d{2}\b`) で舐めると、版数文字列やヘッダの別の日付を誤検出して令和/
+  // 西暦を取り違えることがある (27324455 で 270KB HTML = 範囲外 0 件になる事象)。ここでも
+  // td セル限定にして元ソースと挙動を揃える。
+  const m = html.match(/<td\b[^>]*>\s*(\d{2})\/\d{2}\/\d{2}\s*<\/td>/i);
+  if (!m) return true; // 日付セルが無ければデフォルトは和暦 (Rust 版に合わせる)
+  const pageYear = parseInt(m[1], 10);
   const nowYear = now.getUTCFullYear();
   const westernYY = nowYear % 100;
   const reiwaYY = nowYear - 2018;
@@ -471,21 +488,40 @@ const CSV_FORM_IDS = [
   "btnCsvSvr",
 ] as const;
 
-/** ZIP のマジックバイト (`PK\x03\x04`) を検証する。「黙って200」対策の要。 */
-export function assertZipMagic(buf: ArrayBuffer): void {
+/** ZIP のマジックバイト (`PK\x03\x04`) で始まるか。 */
+function zipMagicOk(buf: ArrayBuffer): boolean {
   const bytes = new Uint8Array(buf);
-  const ok =
+  return (
     bytes.length >= 4 &&
     bytes[0] === ZIP_MAGIC[0] &&
     bytes[1] === ZIP_MAGIC[1] &&
     bytes[2] === ZIP_MAGIC[2] &&
-    bytes[3] === ZIP_MAGIC[3];
-  if (!ok) {
-    throw new TheearthClientError(
-      `取得したデータが ZIP ではありません (${bytes.length} bytes) — ` +
-        "ログイン切れ、または theearth-np のページ仕様変更の可能性があります",
-    );
+    bytes[3] === ZIP_MAGIC[3]
+  );
+}
+
+/** ZIP でない時の user 向けメッセージ (assertZipMagic / ensureZip で共用)。 */
+function notZipMessage(buf: ArrayBuffer): string {
+  return (
+    `取得したデータが ZIP ではありません (${buf.byteLength} bytes) — ` +
+    "ログイン切れ、または theearth-np のページ仕様変更の可能性があります"
+  );
+}
+
+/** ZIP のマジックバイト (`PK\x03\x04`) を検証する。「黙って200」対策の要。 */
+export function assertZipMagic(buf: ArrayBuffer): void {
+  if (!zipMagicOk(buf)) {
+    throw new TheearthClientError(notZipMessage(buf));
   }
+}
+
+/** ZIP なら buf をそのまま返し、ZIP でなければ **生バイトを載せた** TheearthNotZipError を
+ * 投げる (呼び出し側が中身をダウンロードして原因調査できるようにする)。 */
+function ensureZip(buf: ArrayBuffer, contentType: string): ArrayBuffer {
+  if (!zipMagicOk(buf)) {
+    throw new TheearthNotZipError(notZipMessage(buf), buf, contentType);
+  }
+  return buf;
 }
 
 /**
@@ -564,8 +600,7 @@ export async function downloadCsvZip(
   // 1段階目で直接 ZIP が返るケース (実装差異に備える)
   if (stage1ContentType.includes("application/octet-stream") || stage1ContentType.includes("zip")) {
     const buf = await stage1Res.arrayBuffer();
-    assertZipMagic(buf);
-    return buf;
+    return ensureZip(buf, stage1ContentType);
   }
 
   // 2段階目: 1段階目のレスポンス (確認ページ) の hidden field + **日付範囲** + 出力ボタン
@@ -586,8 +621,7 @@ export async function downloadCsvZip(
   });
   const stage2Res = await postForm(jar, csvUrl, stage2Body, fetchImpl, exportTimeoutMs);
   const buf = await stage2Res.arrayBuffer();
-  assertZipMagic(buf);
-  return buf;
+  return ensureZip(buf, stage2Res.headers.get("content-type") ?? "");
 }
 
 // ---------------------------------------------------------------------------

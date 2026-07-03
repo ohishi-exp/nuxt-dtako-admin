@@ -770,7 +770,7 @@ onMounted(() => {
                 v-if="r.zipUrl"
                 :href="buildScraperZipUrl(r.zipUrl)"
                 class="ml-1 underline"
-              >zipダウンロード</a>
+              >{{ r.status === 'success' ? 'zipダウンロード' : '応答をダウンロード' }}</a>
             </div>
           </div>
           <div v-if="task.error" class="mt-1 pl-6 text-xs text-red-600">
