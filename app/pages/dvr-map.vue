@@ -143,6 +143,85 @@ const trackLoading = ref(false)
 const trackError = ref<string | null>(null)
 const trackLoaded = ref(false)
 
+// --- 動態履歴の行選択 (クリック / ↑↓キー) → 地図の赤ピン連動 ---
+
+const selectedTrackIndex = ref<number | null>(null)
+const trackTableEl = ref<HTMLDivElement | null>(null)
+
+/** 選択行の地点 (GPS 無し行は null = ピンはその場に留まる)。 */
+const currentTrackPoint = computed(() => {
+  const i = selectedTrackIndex.value
+  const p = i != null ? track.value[i] : null
+  return p && p.latitude != null && p.longitude != null
+    ? { lat: p.latitude, lng: p.longitude }
+    : null
+})
+
+function scrollTrackRowIntoView(i: number) {
+  nextTick(() => {
+    trackTableEl.value?.querySelector(`[data-row="${i}"]`)?.scrollIntoView({ block: 'nearest' })
+  })
+}
+
+function selectTrackRow(i: number) {
+  selectedTrackIndex.value = i
+  // クリック直後から ↑↓ キーが効くようにフォーカスを移す
+  trackTableEl.value?.focus()
+  scrollTrackRowIntoView(i)
+}
+
+function moveTrackSelection(delta: number) {
+  if (track.value.length === 0) return
+  const cur = selectedTrackIndex.value ?? (delta > 0 ? -1 : track.value.length)
+  const next = Math.min(track.value.length - 1, Math.max(0, cur + delta))
+  selectedTrackIndex.value = next
+  scrollTrackRowIntoView(next)
+}
+
+// --- 速度チャート (net780 の暦日チャートと同じシーク操作、DvrSpeedChart) ---
+
+/** "MM/DD HH:mm" を naive epoch 秒に (年は検索範囲から補完。12月→1月の年跨ぎ対応)。 */
+function parseTrackTs(v: string | null): number | null {
+  if (!v) return null
+  const m = v.match(/^(\d{2})\/(\d{2}) (\d{2}):(\d{2})$/)
+  if (!m) return null
+  const startYear = Number(trackForm.startDay.slice(0, 4))
+  const startMonth = Number(trackForm.startDay.slice(5, 7))
+  const month = Number(m[1])
+  const year = month < startMonth ? startYear + 1 : startYear
+  return Date.UTC(year, month - 1, Number(m[2]), Number(m[3]), Number(m[4])) / 1000
+}
+
+/** 各行の naive epoch 秒 (時刻が読めない行は null)。 */
+const trackTimes = computed(() => track.value.map(p => parseTrackTs(p.dataDatetime)))
+
+const trackSpeedPoints = computed(() => {
+  const out: Array<{ ts: number, speed: number, index: number }> = []
+  track.value.forEach((p, i) => {
+    const ts = trackTimes.value[i]
+    if (ts != null && p.speed != null) out.push({ ts, speed: p.speed, index: i })
+  })
+  return out
+})
+
+/** 選択中の行の時刻 (チャートのカーソル線)。 */
+const currentTrackTs = computed(() => {
+  const i = selectedTrackIndex.value
+  return i != null ? trackTimes.value[i] ?? null : null
+})
+
+/** チャートのシーク → 最寄りの点の行を選択する (地図ピン・一覧ハイライトが連動)。 */
+function onChartSeek(ts: number) {
+  const pts = trackSpeedPoints.value
+  if (pts.length === 0) return
+  let best = pts[0]!
+  for (const p of pts) {
+    if (Math.abs(p.ts - ts) < Math.abs(best.ts - ts)) best = p
+  }
+  selectedTrackIndex.value = best.index
+  scrollTrackRowIntoView(best.index)
+}
+
 async function loadTrack() {
   if (!session.value) return
   if (!trackForm.vehicleCd) {
@@ -162,6 +241,7 @@ async function loadTrack() {
     })
     track.value = res.points
     trackLoaded.value = true
+    selectedTrackIndex.value = null
   }
   catch (e) {
     if (dvrErrorStatus(e) === 401) {
@@ -214,6 +294,7 @@ watch(session, (s) => {
     track.value = []
     trackLoaded.value = false
     trackError.value = null
+    selectedTrackIndex.value = null
   }
 })
 
@@ -283,47 +364,59 @@ onMounted(() => {
 
             <DvrMap :markers="stateMarkers" :selected-index="selectedStateIndex" />
 
-            <div class="overflow-x-auto mt-4 max-h-96 overflow-y-auto">
-              <table class="w-full text-sm">
-                <thead class="sticky top-0 bg-white dark:bg-gray-900">
-                  <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-800">
-                    <th class="py-2 pr-4">車輌名</th>
-                    <th class="py-2 pr-4">乗務員</th>
-                    <th class="py-2 pr-4">データ日時</th>
-                    <th class="py-2 pr-4">作業</th>
-                    <th class="py-2 pr-4">速度</th>
-                    <th class="py-2">地図</th>
+            <!-- 元サイト (web金星号) の車輌一覧を参考にしたコンパクト表: 濃色ヘッダー +
+                 罫線 + 縞行 + 行クリックで地図の車輌へ移動 -->
+            <div class="mt-4 max-h-96 overflow-auto rounded border border-gray-300 dark:border-gray-700">
+              <table class="w-full text-xs border-collapse">
+                <thead class="sticky top-0 z-10">
+                  <tr class="bg-slate-600 text-white dark:bg-slate-700">
+                    <th class="py-1.5 px-2 text-left font-medium border-r border-slate-500">車輌名</th>
+                    <th class="py-1.5 px-2 text-left font-medium border-r border-slate-500">乗務員</th>
+                    <th class="py-1.5 px-2 text-center font-medium border-r border-slate-500">データ日時</th>
+                    <th class="py-1.5 px-2 text-left font-medium border-r border-slate-500">作業</th>
+                    <th class="py-1.5 px-2 text-right font-medium border-r border-slate-500">速度</th>
+                    <th class="py-1.5 px-2 text-center font-medium">GPS</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr
                     v-for="(v, i) in states"
                     :key="`${v.vehicleCd ?? ''}-${i}`"
-                    class="border-b border-gray-100 dark:border-gray-900"
+                    class="border-b border-gray-200 dark:border-gray-800 odd:bg-white even:bg-gray-50 dark:odd:bg-gray-900 dark:even:bg-gray-800/60"
+                    :class="markerIndexOfState(v) !== null
+                      ? [
+                          'cursor-pointer hover:bg-blue-50 dark:hover:bg-blue-950',
+                          selectedStateIndex !== null && selectedStateIndex === markerIndexOfState(v) ? '!bg-blue-100 dark:!bg-blue-950' : '',
+                        ]
+                      : 'text-gray-400'"
+                    @click="selectedStateIndex = markerIndexOfState(v)"
                   >
-                    <td class="py-1.5 pr-4 whitespace-nowrap">{{ v.vehicleName ?? '-' }}</td>
-                    <td class="py-1.5 pr-4">{{ v.driverName ?? '-' }}</td>
-                    <td class="py-1.5 pr-4 whitespace-nowrap">{{ v.dataDatetime ?? '-' }}</td>
-                    <td class="py-1.5 pr-4">{{ v.currentWorkName ?? '-' }}</td>
-                    <td class="py-1.5 pr-4">{{ v.speed != null && v.dataDatetime ? `${v.speed} km/h` : '-' }}</td>
-                    <td class="py-1.5">
-                      <UButton
-                        v-if="markerIndexOfState(v) !== null"
-                        size="xs"
-                        color="neutral"
-                        variant="ghost"
-                        icon="i-lucide-locate"
-                        @click="selectedStateIndex = markerIndexOfState(v)"
-                      />
-                      <span v-else class="text-xs text-gray-400">GPSなし</span>
+                    <td class="py-1 px-2 whitespace-nowrap font-medium border-r border-gray-200 dark:border-gray-800">{{ v.vehicleName ?? '-' }}</td>
+                    <td class="py-1 px-2 whitespace-nowrap border-r border-gray-200 dark:border-gray-800">{{ v.driverName ?? '-' }}</td>
+                    <td class="py-1 px-2 whitespace-nowrap text-center border-r border-gray-200 dark:border-gray-800">{{ v.dataDatetime ?? '-' }}</td>
+                    <td class="py-1 px-2 whitespace-nowrap border-r border-gray-200 dark:border-gray-800">
+                      <span v-if="v.currentWorkName" class="inline-block rounded px-1.5 py-0.5 text-[11px]" :class="v.speed && v.speed > 0 ? 'bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'">
+                        {{ v.currentWorkName }}
+                      </span>
+                      <span v-else>-</span>
+                    </td>
+                    <td class="py-1 px-2 text-right whitespace-nowrap border-r border-gray-200 dark:border-gray-800" :class="v.speed && v.speed > 0 ? 'text-green-600 dark:text-green-400 font-medium' : ''">
+                      {{ v.speed != null && v.dataDatetime ? `${v.speed} km/h` : '-' }}
+                    </td>
+                    <td class="py-1 px-2 text-center">
+                      <UIcon v-if="markerIndexOfState(v) !== null" name="i-lucide-map-pin" class="size-3.5 text-blue-500" />
+                      <span v-else class="text-[11px]">なし</span>
                     </td>
                   </tr>
                 </tbody>
               </table>
-              <p v-if="statesLoaded && states.length === 0" class="text-sm text-gray-500 mt-3">
+              <p v-if="statesLoaded && states.length === 0" class="text-sm text-gray-500 p-3">
                 車輌がありません。
               </p>
             </div>
+            <p class="text-xs text-gray-400 mt-2">
+              行をクリックすると地図がその車輌に移動します。
+            </p>
           </UCard>
         </template>
 
@@ -359,36 +452,52 @@ onMounted(() => {
 
             <template v-if="trackLoaded">
               <p class="text-xs text-gray-400 mb-2">
-                GPS 点数: {{ trackPoints.length }} / {{ track.length }}
+                GPS 点数: {{ trackPoints.length }} / {{ track.length }} —
+                行クリック / ↑↓ キーで赤ピンが移動します
               </p>
-              <DvrMap :markers="trackMarkers" :track="trackPoints" />
+              <DvrMap :markers="trackMarkers" :track="trackPoints" :current="currentTrackPoint" />
 
-              <div class="overflow-x-auto mt-4 max-h-96 overflow-y-auto">
-                <table class="w-full text-sm">
-                  <thead class="sticky top-0 bg-white dark:bg-gray-900">
-                    <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-800">
-                      <th class="py-2 pr-4">データ日時</th>
-                      <th class="py-2 pr-4">通信日時</th>
-                      <th class="py-2 pr-4">速度</th>
-                      <th class="py-2">座標</th>
+              <div class="mt-4">
+                <DvrSpeedChart :points="trackSpeedPoints" :current-ts="currentTrackTs" @seek="onChartSeek" />
+              </div>
+
+              <div
+                ref="trackTableEl"
+                tabindex="0"
+                class="mt-4 max-h-96 overflow-auto rounded border border-gray-300 dark:border-gray-700 outline-none focus:ring-2 focus:ring-blue-400"
+                @keydown.up.prevent="moveTrackSelection(-1)"
+                @keydown.down.prevent="moveTrackSelection(1)"
+              >
+                <table class="w-full text-xs border-collapse">
+                  <thead class="sticky top-0 z-10">
+                    <tr class="bg-slate-600 text-white dark:bg-slate-700">
+                      <th class="py-1.5 px-2 text-center font-medium border-r border-slate-500">データ日時</th>
+                      <th class="py-1.5 px-2 text-center font-medium border-r border-slate-500">通信日時</th>
+                      <th class="py-1.5 px-2 text-right font-medium border-r border-slate-500">速度</th>
+                      <th class="py-1.5 px-2 text-left font-medium">座標</th>
                     </tr>
                   </thead>
                   <tbody>
                     <tr
                       v-for="(p, i) in track"
                       :key="i"
-                      class="border-b border-gray-100 dark:border-gray-900"
+                      :data-row="i"
+                      class="border-b border-gray-200 dark:border-gray-800 cursor-pointer odd:bg-white even:bg-gray-50 dark:odd:bg-gray-900 dark:even:bg-gray-800/60 hover:bg-blue-50 dark:hover:bg-blue-950"
+                      :class="selectedTrackIndex === i ? '!bg-blue-100 dark:!bg-blue-950 font-medium' : ''"
+                      @click="selectTrackRow(i)"
                     >
-                      <td class="py-1.5 pr-4 whitespace-nowrap">{{ p.dataDatetime ?? '-' }}</td>
-                      <td class="py-1.5 pr-4 whitespace-nowrap">{{ p.comuDatetime ?? '-' }}</td>
-                      <td class="py-1.5 pr-4">{{ p.speed != null ? `${p.speed} km/h` : '-' }}</td>
-                      <td class="py-1.5 text-xs text-gray-400">
+                      <td class="py-1 px-2 whitespace-nowrap text-center border-r border-gray-200 dark:border-gray-800">{{ p.dataDatetime ?? '-' }}</td>
+                      <td class="py-1 px-2 whitespace-nowrap text-center border-r border-gray-200 dark:border-gray-800">{{ p.comuDatetime ?? '-' }}</td>
+                      <td class="py-1 px-2 text-right whitespace-nowrap border-r border-gray-200 dark:border-gray-800" :class="p.speed && p.speed > 0 ? 'text-green-600 dark:text-green-400' : ''">
+                        {{ p.speed != null ? `${p.speed} km/h` : '-' }}
+                      </td>
+                      <td class="py-1 px-2 text-gray-400">
                         {{ p.latitude != null ? `${p.latitude.toFixed(6)}, ${p.longitude?.toFixed(6)}` : 'GPSなし' }}
                       </td>
                     </tr>
                   </tbody>
                 </table>
-                <p v-if="track.length === 0" class="text-sm text-gray-500 mt-3">
+                <p v-if="track.length === 0" class="text-sm text-gray-500 p-3">
                   指定範囲の動態履歴がありません。
                 </p>
               </div>

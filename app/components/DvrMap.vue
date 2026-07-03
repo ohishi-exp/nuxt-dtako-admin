@@ -21,6 +21,8 @@ const props = defineProps<{
   track?: Array<{ lat: number, lng: number }>
   /** 選択中マーカーの index (地図中心を移す)。 */
   selectedIndex?: number | null
+  /** 選択中の地点 (行選択に連動する赤ピン)。null で消す。 */
+  current?: { lat: number, lng: number } | null
 }>()
 
 const mapEl = ref<HTMLDivElement | null>(null)
@@ -30,6 +32,7 @@ let map: google.maps.Map | null = null
 let markerLib: google.maps.MarkerLibrary | null = null
 let markerObjs: google.maps.marker.AdvancedMarkerElement[] = []
 let trackLine: google.maps.Polyline | null = null
+let currentMarker: google.maps.marker.AdvancedMarkerElement | null = null
 
 function clearOverlays() {
   for (const m of markerObjs) m.map = null
@@ -38,6 +41,41 @@ function clearOverlays() {
     trackLine.setMap(null)
     trackLine = null
   }
+  if (currentMarker) {
+    currentMarker.map = null
+    currentMarker = null
+  }
+}
+
+/** 選択地点の赤ピンを更新し、そこへ地図をパンする (行選択 / ↑↓キー連動)。 */
+function updateCurrentMarker() {
+  if (!map || !markerLib) return
+  const cur = props.current
+  if (!cur) {
+    if (currentMarker) {
+      currentMarker.map = null
+      currentMarker = null
+    }
+    return
+  }
+  const pos = { lat: cur.lat, lng: cur.lng }
+  if (!currentMarker) {
+    const pin = new markerLib.PinElement({
+      background: '#dc2626',
+      borderColor: '#7f1d1d',
+      glyphColor: '#fff',
+    })
+    currentMarker = new markerLib.AdvancedMarkerElement({
+      position: pos,
+      map,
+      content: pin.element,
+      zIndex: 1000,
+    })
+  }
+  else {
+    currentMarker.position = pos
+  }
+  map.panTo(pos)
 }
 
 function markerContent(label: string | undefined): HTMLElement | undefined {
@@ -89,9 +127,14 @@ function redraw() {
     })
     void listener
   }
+
+  // clearOverlays で消えた選択ピンを描き直す
+  updateCurrentMarker()
 }
 
 watch(() => [props.markers, props.track], redraw, { deep: true })
+
+watch(() => props.current, updateCurrentMarker)
 
 watch(() => props.selectedIndex, (idx) => {
   if (map && idx != null && props.markers[idx]) {
@@ -119,6 +162,7 @@ onMounted(async () => {
       mapId: 'DEMO_MAP_ID',
     })
     redraw()
+    updateCurrentMarker()
   }
   catch (e) {
     loadError.value = e instanceof Error ? e.message : String(e)

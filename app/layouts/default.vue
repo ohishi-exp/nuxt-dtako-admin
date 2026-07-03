@@ -18,6 +18,7 @@ const navigation = [
   // 外部利用者向け standalone ページ (theearth credential ログイン、Refs #90)。
   // 管理者が URL を案内する時の入口としてサイドバーにも出しておく。
   { label: 'DVR 動画', icon: 'i-lucide-cctv', to: '/dvr-viewer' },
+  { label: '位置情報・動態履歴', icon: 'i-lucide-map-pin', to: '/dvr-map' },
 ]
 </script>
 
