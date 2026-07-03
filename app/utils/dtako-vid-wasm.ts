@@ -48,6 +48,16 @@ export interface VdfTelemetry {
   events: EventRecord[]
   front_frame_count: number
   rear_frame_count: number
+  /** Absolute capture time (`ts + sub_us/1e6`) of the first video frame. */
+  video_start_ts: number
+}
+
+/** Convert a record's absolute capture time to a MP4 `<video>.currentTime`-relative offset (seconds). */
+export function recordOffsetSeconds(
+  record: { ts: number, sub_us: number },
+  telemetry: Pick<VdfTelemetry, 'video_start_ts'>,
+): number {
+  return record.ts + record.sub_us / 1e6 - telemetry.video_start_ts
 }
 
 export interface VdfDecodeResult {

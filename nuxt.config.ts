@@ -17,11 +17,24 @@ export default defineNuxtConfig({
       // SCRAPER_URL 旧経路は廃止 (front Worker が直接 Cloudflare Tunnel/Workers VPC
       // 経由で dtako-scraper に到達する)。
       scraperRelayUrl: process.env.NUXT_PUBLIC_SCRAPER_RELAY_URL || '',
+      // /vid-check の GPS 軌跡表示。nuxt_dtako_logs と同じ命名 (referrer 制限キー、
+      // client bundle に載る前提の public 値)。未設定時は地図なしで動作する。
+      googlemapKey: process.env.NUXT_PUBLIC_GOOGLEMAP_KEY || '',
     },
   },
 
   nitro: {
     preset: 'cloudflare_module',
+  },
+
+  // VidMap.vue が使う `google.maps.*` グローバル型 (@types/google.maps) を
+  // tsconfig の types に追加。
+  typescript: {
+    tsConfig: {
+      compilerOptions: {
+        types: ['google.maps'],
+      },
+    },
   },
 
   // server route (/api/proxy) が import する @ippoan/auth-client/server (.mjs) を
