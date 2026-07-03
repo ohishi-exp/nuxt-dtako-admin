@@ -2,6 +2,7 @@
 import { decodeVdf, mergeTelemetrySegments, probeVideoDuration } from '~/utils/dtako-vid-wasm'
 import type { VdfTelemetry } from '~/utils/dtako-vid-wasm'
 import { useVideoCrop } from '~/composables/useVideoCrop'
+import { fmtDuration } from '~/utils/time-format'
 
 interface Segment {
   fileName: string
@@ -27,11 +28,34 @@ const rearVideoEl = ref<HTMLVideoElement | null>(null)
 const frontContainerEl = ref<HTMLDivElement | null>(null)
 const rearContainerEl = ref<HTMLDivElement | null>(null)
 
-/** 表示モード: 両方 / 前方のみ / 後方のみ。前方のみ・後方のみは2列 (映像+GPS) にする。 */
+/**
+ * 表示モード: 両方 / 前方のみ / 後方のみ。前方のみ・後方のみでも列数は3列のまま
+ * (映像カードが左2列分の幅を使い、GPS軌跡が右1列に残る)。
+ */
 const displayMode = ref<'both' | 'front' | 'rear'>('both')
+
+function toggleFrontOnly() {
+  displayMode.value = displayMode.value === 'front' ? 'both' : 'front'
+}
+function toggleRearOnly() {
+  displayMode.value = displayMode.value === 'rear' ? 'both' : 'rear'
+}
 
 const frontCrop = useVideoCrop()
 const rearCrop = useVideoCrop()
+
+/**
+ * テレメトリグラフ下の区間選択バーで指定する再生区間 (結合後タイムライン上、秒)。
+ * クロップ中は映像のネイティブシークバーが使えないため、この区間バー + ループ再生で
+ * 特定のイベント区間を繰り返し確認できるようにする。
+ */
+const rangeStart = ref<number | null>(null)
+const rangeEnd = ref<number | null>(null)
+const loopRange = ref(false)
+
+watch([rangeStart, rangeEnd], () => {
+  if (rangeStart.value === null || rangeEnd.value === null) loopRange.value = false
+})
 
 const activeSegment = computed<Segment | null>(() => segments.value[activeSegmentIndex.value] ?? null)
 
@@ -62,6 +86,9 @@ const globalCurrentTime = computed(() => (segmentOffsets.value[activeSegmentInde
 function onTimeUpdate() {
   const el = frontVideoEl.value || rearVideoEl.value
   if (el) localCurrentTime.value = el.currentTime
+  if (loopRange.value && rangeEnd.value !== null && globalCurrentTime.value >= rangeEnd.value) {
+    onSeek(rangeStart.value ?? 0)
+  }
 }
 
 /**
@@ -72,15 +99,14 @@ function onTimeUpdate() {
 const isPlaying = ref(false)
 
 function togglePlayback() {
-  const playing = !frontVideoEl.value?.paused || !rearVideoEl.value?.paused
+  const els = [frontVideoEl.value, rearVideoEl.value].filter((el): el is HTMLVideoElement => el !== null)
+  const playing = els.some(el => !el.paused)
   if (playing) {
-    frontVideoEl.value?.pause()
-    rearVideoEl.value?.pause()
+    els.forEach(el => el.pause())
     isPlaying.value = false
   }
   else {
-    frontVideoEl.value?.play().catch(() => {})
-    rearVideoEl.value?.play().catch(() => {})
+    els.forEach(el => el.play().catch(() => {}))
     isPlaying.value = true
   }
 }
@@ -149,6 +175,9 @@ function revokeAll() {
   activeSegmentIndex.value = 0
   localCurrentTime.value = 0
   pendingSeekLocal.value = null
+  rangeStart.value = null
+  rangeEnd.value = null
+  loopRange.value = false
 }
 
 onBeforeUnmount(revokeAll)
@@ -199,12 +228,6 @@ function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / 1024 / 1024).toFixed(1)} MB`
-}
-
-function fmtDuration(s: number): string {
-  const m = Math.floor(s / 60)
-  const sec = Math.floor(s % 60)
-  return `${m}:${sec.toString().padStart(2, '0')}`
 }
 </script>
 
@@ -281,53 +304,36 @@ function fmtDuration(s: number): string {
             <div><span class="text-gray-500">後方フレーム数:</span> <span class="font-medium">{{ mergedTelemetry.rear_frame_count }}</span></div>
           </div>
 
-          <div class="flex items-center gap-3">
-            <UButton
-              :label="isPlaying ? '一時停止' : '再生'"
-              :icon="isPlaying ? 'i-lucide-pause' : 'i-lucide-play'"
-              size="xs"
-              color="neutral"
-              variant="soft"
-              @click="togglePlayback"
-            />
-            <div class="flex gap-1">
-              <UButton
-                label="両方"
-                size="xs"
-                :variant="displayMode === 'both' ? 'solid' : 'outline'"
-                @click="displayMode = 'both'"
-              />
-              <UButton
-                label="前方のみ"
-                size="xs"
-                :disabled="!hasFront"
-                :variant="displayMode === 'front' ? 'solid' : 'outline'"
-                @click="displayMode = 'front'"
-              />
-              <UButton
-                label="後方のみ"
-                size="xs"
-                :disabled="!hasRear"
-                :variant="displayMode === 'rear' ? 'solid' : 'outline'"
-                @click="displayMode = 'rear'"
-              />
-            </div>
-          </div>
+          <UButton
+            :label="isPlaying ? '一時停止' : '再生'"
+            :icon="isPlaying ? 'i-lucide-pause' : 'i-lucide-play'"
+            size="xs"
+            color="neutral"
+            variant="soft"
+            @click="togglePlayback"
+          />
         </div>
         <p class="text-xs text-gray-400 mt-2">
-          クロップ (切り抜き拡大表示) 中の映像はネイティブ操作バーの代わりに上の「再生/一時停止」ボタンとグラフのシークバーを使ってください。
+          クロップ (切り抜き拡大表示) 中の映像はネイティブ操作バーの代わりに上の「再生/一時停止」ボタンと、下のグラフのシークバー・区間選択バーを使ってください。
+          区間選択バーをドラッグすると開始/終了を指定でき、端をつまんで微調整・ループ再生もできます。
         </p>
       </UCard>
 
-      <div
-        class="grid grid-cols-1 gap-4 mb-4"
-        :class="displayMode === 'both' ? 'md:grid-cols-3' : 'md:grid-cols-2'"
-      >
-        <UCard v-if="displayMode !== 'rear'">
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+        <UCard v-if="displayMode !== 'rear'" :class="displayMode !== 'both' ? 'md:col-span-2' : ''">
           <template #header>
             <div class="flex items-center justify-between">
               <span>前方映像</span>
               <div class="flex gap-1">
+                <UButton
+                  size="xs"
+                  variant="soft"
+                  :color="displayMode === 'front' ? 'primary' : 'neutral'"
+                  icon="i-lucide-columns-2"
+                  :label="displayMode === 'front' ? '両方表示に戻す' : '前方のみ表示'"
+                  :disabled="!hasFront || !hasRear"
+                  @click="toggleFrontOnly"
+                />
                 <UButton
                   size="xs"
                   variant="soft"
@@ -382,11 +388,20 @@ function fmtDuration(s: number): string {
           </div>
         </UCard>
 
-        <UCard v-if="displayMode !== 'front'">
+        <UCard v-if="displayMode !== 'front'" :class="displayMode !== 'both' ? 'md:col-span-2' : ''">
           <template #header>
             <div class="flex items-center justify-between">
               <span>後方映像</span>
               <div class="flex gap-1">
+                <UButton
+                  size="xs"
+                  variant="soft"
+                  :color="displayMode === 'rear' ? 'primary' : 'neutral'"
+                  icon="i-lucide-columns-2"
+                  :label="displayMode === 'rear' ? '両方表示に戻す' : '後方のみ表示'"
+                  :disabled="!hasFront || !hasRear"
+                  @click="toggleRearOnly"
+                />
                 <UButton
                   size="xs"
                   variant="soft"
@@ -451,7 +466,18 @@ function fmtDuration(s: number): string {
 
       <UCard class="mb-4">
         <template #header>
-          Gセンサー・速度・回転数 (クリック/ドラッグでシーク)
+          <div class="flex items-center justify-between">
+            <span>Gセンサー・速度・回転数 (クリック/ドラッグでシーク)</span>
+            <UButton
+              v-if="rangeStart !== null && rangeEnd !== null"
+              size="xs"
+              variant="soft"
+              :color="loopRange ? 'primary' : 'neutral'"
+              icon="i-lucide-repeat"
+              :label="loopRange ? 'ループ再生中' : 'この区間をループ再生'"
+              @click="loopRange = !loopRange"
+            />
+          </div>
         </template>
         <VidTelemetryChart
           :g="mergedTelemetry.g"
@@ -459,7 +485,11 @@ function fmtDuration(s: number): string {
           :telemetry="mergedTelemetry"
           :duration="totalDuration"
           :current-time="globalCurrentTime"
+          :range-start="rangeStart"
+          :range-end="rangeEnd"
           @seek="onSeek"
+          @update:range-start="rangeStart = $event"
+          @update:range-end="rangeEnd = $event"
         />
       </UCard>
     </template>
