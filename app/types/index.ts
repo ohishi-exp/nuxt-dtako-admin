@@ -239,6 +239,9 @@ export interface ScrapeResult {
   comp_id: string
   status: string
   message: string
+  /** SCRAPER_MODE=http (Refs ohishi-exp/dtako-scraper#22) 完了時のみ載る、
+   * csvdata.zip の1回限りダウンロード path。`buildScraperZipUrl()` で絶対 URL 化する。 */
+  zipUrl?: string
 }
 
 export interface ScrapeResponse {

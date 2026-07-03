@@ -132,10 +132,58 @@ net780-wasm (ohishi-exp/net780-wasm、wasm-bindgen)
 | `vendor/net780-wasm/` | `ohishi-exp/net780-wasm` の `wasm-pack build` 出力を vendor したもの |
 | `tests/mocks/net780-wasm.ts` | vitest 用モック (`__setMockResult`/`__setMockError`) |
 
+## スクレイパ (`/scraper` ページ + `workers/dtako-scraper-relay/`)
+
+dtako 運行ログ (csvdata.zip) の取得トリガー UI。実処理は `nuxt-dtako-admin-scraper-relay`
+という別 worker (`DtakoScraperRelayDO`) に service binding で委譲する
+(no-traffic release 維持のため、Refs error 10211/10061)。
+
+### 2経路 (`SCRAPER_MODE`)
+
+| mode | 経路 | 備考 |
+|---|---|---|
+| `vpc-relay` (デフォルト、既存) | browser → DO → Workers VPC binding → Kagoya VPS の dtako-scraper (`/scrape/ws`、chromiumoxide ヘッドレス Chrome) | DO は薄い中継のみ |
+| `http` (Refs ohishi-exp/dtako-scraper#22) | browser → DO → DO 自身が `theearth-client.ts` で theearth-np.com に素の `fetch()` でログイン + CSV ダウンロード | Chromium 不要。DO を `comp_id` 単位で `idFromName` するため同一企業への並列リクエストが自然に直列化される |
+
+`workers/dtako-scraper-relay/wrangler.toml` の `[vars] SCRAPER_MODE` は未設定
+(= `vpc-relay` のまま)。`http` に切り替えるには以下の運用手順が別途必要:
+
+1. `DTAKO_ACCOUNTS` (dtako-scraper の Rust 版 `DTAKO_ACCOUNTS` env と同一 JSON shape:
+   `[{comp_id, user_name, user_pass, tenant_id}, ...]`) を CF Secrets Store に投入し、
+   `workers/dtako-scraper-relay/wrangler.toml` に `secrets_store_secrets` binding を
+   追加する (`secret-inject` skill 使用、値をコード/会話に出さない)
+2. staging で `SCRAPER_MODE=http` を1社だけ試験し、実際に csvdata.zip が
+   ダウンロードできるか確認してから本番の `comp_id` を広げる
+3. `theearth-client.ts` の CSV フォーム要素 id (`rdoSelect1`/`rdoDate1`/
+   `MainContent_ucStartDate_txtYear` 等) と2段階目ボタン (`btnCsvSvrOutput` /
+   `btnCsvOutput`) は theearth-np の実ページ trace (issue #22) に基づく推定。
+   サイト仕様が変わった場合は `TheearthClientError` で loud fail するので、
+   エラーメッセージを見て `theearth-client.ts` の該当 id を実ページと突き合わせる
+
+`http` モード完了時、DO は csvdata.zip を `ctx.storage` に一時保存 (TTL 10分、
+1回だけ取得可能) し、WS の `result` イベントに `zip_url` (`/scraper-zip/{compId}/
+{requestId}`) を載せる。フロントは `buildScraperZipUrl()` で絶対 URL 化して
+「zipダウンロード」リンクを表示する (`app/pages/scraper.vue`)。認証は zip URL 自体には
+無く、requestId (128bit UUID) を知っていること + 単回性 + 短命 TTL が capability-URL
+としての防御 (WS 到達自体は既存の auth-worker introspect で認証済み)。
+
+### 関連ファイル
+
+| ファイル | 役割 |
+|---|---|
+| `workers/dtako-scraper-relay/src/theearth-client.ts` | ブラウザレス HTTP クライアント (cookie jar / VIEWSTATE 抽出 / 2段階 CSV POST / ZIP magic assert) |
+| `workers/dtako-scraper-relay/src/dtako-scraper-relay-do.ts` | `DtakoScraperRelayDO`。`SCRAPER_MODE` で vpc-relay / http を分岐、comp_id 単位の直列化キュー |
+| `workers/dtako-scraper-relay/src/index.ts` | `comp_id` (http 用) / `session` (vpc-relay 用) で DO へ routing、`/scraper-zip/*` 転送 |
+| `worker/index.ts` | app 本体の entry。`/ws/scraper` と `/scraper-zip/*` を SCRAPER_RELAY service binding に転送 |
+| `app/utils/api.ts` | `triggerScrapeStream()` / `buildScraperZipUrl()` |
+
 ## テスト
 
 - ユニット: `npm test` (Vitest、happy-dom)
 - カバレッジ目標: `coverage_100.toml` で管理
+- `workers/dtako-scraper-relay/` は親と別の `vitest.config.ts` を持つ (bespoke deploy
+  pipeline、pure ロジック [`auth-decision.ts`/`theearth-client.ts`] のみ 100% gate。
+  DO/index.ts は cloudflare runtime 依存で node vitest 計測不可)
 
 ## 並行開発 (worktree)
 
