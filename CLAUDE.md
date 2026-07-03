@@ -70,6 +70,56 @@ fail することが本番で発覚 → revert。
 | `app/utils/y-time-xlsx.ts` | JSZip single-pass writer (PR #30) |
 | `app/utils/api.ts` | `getYTimePreview()` (preview ボタン用、sync GET) |
 
+## NET780 ビューア (`/net780` ページ)
+
+NET780 デジタコの運行単位生データ ZIP (.inf/.spd/.dsd/.gpd/.evd 同梱) を、アップロード
+せずブラウザ内で直接パースして確認する機能。フォーマット解読・パースロジックは
+`ohishi-exp/dtako-scraper` の `crates/net780` (Rust) が SoT。
+
+### アーキテクチャ
+
+```
+[browser]
+  ZIP ファイルをドラッグ&ドロップ (サーバー送信なし)
+  │
+  ▼
+net780-wasm (ohishi-exp/net780-wasm、wasm-bindgen)
+  │ crates/net780 (dtako-scraper) を wasm-bindgen で公開
+  │ ZIP 展開 (Rust `zip` crate) + .inf/.spd/.dsd/.gpd/.evd パース
+  ▼
+{ header, inf, distance_total_m, speed[], gps[], events[], warnings[] }
+  │
+  ▼
+[browser] サマリ / 速度チャート (簡易 SVG) / GPS テーブル / イベントテーブル 表示
+```
+
+- ロジックは Rust (`net780` crate) 1 箇所にだけ実装し、TypeScript 側での再実装
+  (二重管理) を避ける方針 (`ippoan/fc1200-wasm` と同じ考え方)。
+- `net780-wasm` は独立 repo (`ohishi-exp/net780-wasm`)。`package.json` で
+  `"net780-wasm": "file:../net780-wasm/pkg"` (sibling checkout 前提、`fc1200-wasm`
+  consumer と同じパターン) を参照する。`wasm-pack build --target web` で
+  `net780-wasm/pkg/` に npm パッケージを生成してから `npm install` する必要がある。
+
+### CI (実 wasm パッケージが無くても通す)
+
+- `test.yml` の `pre_install_script` が `../net780-wasm/pkg/package.json` の
+  最小スタブを作って `npm install` を通す (`ippoan/fc1200-wasm` consumer と同じ
+  パターン)。実体は vitest では使わない。
+- `vitest.config.ts` の `resolve.alias` で `net780-wasm` → `tests/mocks/net780-wasm.ts`
+  (モック) に差し替える。
+- `app/types/net780-wasm.d.ts` は CI (実 pkg/ 無し) での型解決用スタブ
+  (`declare module 'net780-wasm' { ... }`)。実 pkg/ がある時はそちらの
+  生成済み `.d.ts` が優先される。
+
+### 関連ファイル
+
+| ファイル | 役割 |
+|---|---|
+| `app/pages/net780.vue` | UI (ZIP アップロード + サマリ/速度チャート/GPS/イベント表示) |
+| `app/utils/net780.ts` | `parseNet780Zip()` 等 net780-wasm の薄いラッパー + 型定義 |
+| `app/types/net780-wasm.d.ts` | CI 用型スタブ |
+| `tests/mocks/net780-wasm.ts` | vitest 用モック (`__setMockResult`/`__setMockError`) |
+
 ## テスト
 
 - ユニット: `npm test` (Vitest、happy-dom)

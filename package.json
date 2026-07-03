@@ -17,6 +17,7 @@
     "@nuxtjs/tailwindcss": "^6.14.0",
     "dtako-vid-wasm": "file:./vendor/dtako-vid-wasm",
     "exceljs": "^4.4.0",
+    "net780-wasm": "file:../net780-wasm/pkg",
     "nuxt": "^4.3.1",
     "wrangler": "^4.72.0"
   },

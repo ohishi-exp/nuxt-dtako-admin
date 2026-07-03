@@ -14,6 +14,7 @@ const navigation = [
   { label: 'イベント分類', icon: 'i-lucide-settings', to: '/event-classifications' },
   { label: 'スクレイプ', icon: 'i-lucide-download', to: '/scraper' },
   { label: '映像確認', icon: 'i-lucide-video', to: '/vid-check' },
+  { label: 'NET780 ビューア', icon: 'i-lucide-file-archive', to: '/net780' },
 ]
 </script>
 
