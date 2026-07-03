@@ -220,10 +220,16 @@ dtako 運行ログ (csvdata.zip) の取得トリガー UI。実処理は `nuxt-d
 
 ### 2経路 (`SCRAPER_MODE`)
 
+**結論 (2026-07-03 実機検証で確定): `http` mode の CSV ダウンロード段は本番導線に
+使えない。** ログイン段は `fetch()` ベースで問題なく動くが、CSV ダウンロード段は
+`fetch()`/XHR では theearth-np.com から実データを取得できないことを確認済み
+(詳細は下の運用手順 3. 内の note を参照)。恒久的に `vpc-relay` (実 headless
+Chrome) を CSV ダウンロードに使い続ける。
+
 | mode | 経路 | 備考 |
 |---|---|---|
-| `vpc-relay` (デフォルト、既存) | browser → DO → Workers VPC binding → Kagoya VPS の dtako-scraper (`/scrape/ws`、chromiumoxide ヘッドレス Chrome) | DO は薄い中継のみ |
-| `http` (Refs ohishi-exp/dtako-scraper#22) | browser → DO → DO 自身が `theearth-client.ts` で theearth-np.com に素の `fetch()` でログイン + CSV ダウンロード | Chromium 不要。DO を `comp_id` 単位で `idFromName` するため同一企業への並列リクエストが自然に直列化される |
+| `vpc-relay` (デフォルト、既存) | browser → DO → Workers VPC binding → Kagoya VPS の dtako-scraper (`/scrape/ws`、chromiumoxide ヘッドレス Chrome) | DO は薄い中継のみ。CSV ダウンロードはこちらを使い続ける |
+| `http` (Refs ohishi-exp/dtako-scraper#22、CSV ダウンロード段は非推奨) | browser → DO → DO 自身が `theearth-client.ts` で theearth-np.com に素の `fetch()` でログイン + CSV ダウンロード | Chromium 不要だが CSV ダウンロード段は実機検証で恒久的に動作しないことが確定 (下記 note 参照)。ログイン段のみは動作する |
 
 `workers/dtako-scraper-relay/wrangler.toml` の `[env.staging.vars] SCRAPER_MODE`
 は `"http"` に設定済み (staging のみ、本番の top-level `[vars]` には未設定 = 本番は
@@ -262,6 +268,35 @@ dtako 運行ログ (csvdata.zip) の取得トリガー UI。実処理は `nuxt-d
    `btnCsvOutput`) は theearth-np の実ページ trace (issue #22) に基づく推定。
    サイト仕様が変わった場合は `TheearthClientError` で loud fail するので、
    エラーメッセージを見て `theearth-client.ts` の該当 id を実ページと突き合わせる
+
+   > **CSV ダウンロード段は `fetch()` では再現不可能、恒久的に `vpc-relay` 側に
+   > 留める (実機検証 2026-07-03 で確定、ohishi-exp/dtako-scraper#22)。**
+   > 当初「GET 直後に間を置かず POST するボットらしい速さが弾かれている」と
+   > 疑い `HUMAN_LIKE_DELAY_MS` の遅延を挟んでみたが、実 Cloudflare Workers
+   > (`wrangler deploy --temporary` PoC) で `useDelay: true` を検証しても症状は
+   > 変わらず disprove された。cdp-relay 経由で実 Chrome の `submit` を capture
+   > phase listener で捕捉し、実際に送信された POST body を verbatim に fetch で
+   > 再送する検証を3段階行った:
+   > 1. `FormData(form)` (submitter なし) の body → プレーン HTML 再描画
+   > 2. 実クライアント JS (`J-NOS3010[GeneralCsv].js`) の `DateCheck()` を読んで
+   >    判明した「表示ボタン `btnCsv` の送信は常にキャンセルされ、実際に POST
+   >    されるのは隠しボタン `btnCsvSvr`」を使って新鮮な GET 直後・遅延なしで
+   >    再送 → それでもプレーン HTML 再描画
+   > 3. `FormData(form, submitter)` でネイティブ相当の全フィールドを再構築して
+   >    再送 → それでもプレーン HTML 再描画
+   >
+   > 一方、実ブラウザで `<input type=submit>` に対し `.click()` した場合は
+   > 2回とも実データ入りの ZIP (103KB) が返った。フィールド構成の正確さに
+   > 関わらず `fetch()` ベースの POST は一度も成功しなかったことから、原因は
+   > body の組み立てミスではなく、**トップレベルナビゲーションを伴う実フォーム
+   > 送信と `fetch()`/XHR をサーバ (または前段) が区別している**ことだと考え
+   > られる (`Sec-Fetch-Mode`/`Sec-Fetch-Dest` 等、JS からは偽装不能なブラウザ
+   > 自動付与ヘッダが有力な候補)。Cloudflare Workers 上の `fetch()` も同様の
+   > 制約を受けるため、この段だけは headless Chrome (`vpc-relay`) を使い続ける
+   > 必要がある。`theearth-client.ts` の `downloadCsvZip()`/`scrapeViaHttp()` は
+   > 実験目的でコードを残しているが、本番導線には使わない。
+   > なお `btnCsvSvr` (実クリックが実際に送るボタン名) への修正自体は
+   > `CSV_FORM_IDS` に反映済み (誤って `btnCsv` を使っていたバグ)。
 
 `http` モード完了時、DO は csvdata.zip を `ctx.storage` に一時保存 (TTL 10分、
 1回だけ取得可能) し、WS の `result` イベントに `zip_url` (`/scraper-zip/{compId}/
