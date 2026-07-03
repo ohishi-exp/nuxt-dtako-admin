@@ -242,6 +242,18 @@ dtako 運行ログ (csvdata.zip) の取得トリガー UI。実処理は `nuxt-d
    write-only 運用からの逸脱だが、`wrangler.toml`/git 履歴には平文が残らない)。
    `DtakoScraperRelayDO` の `resolveSecret()` は文字列 binding / Secrets Store
    binding (`.get()`) のどちらでも動く実装のため、この切替に**コード変更は不要**
+
+   > **`keep_vars = true` 必須 (wrangler.toml 実装済み)。** この worker は DO
+   > migration を持つため `wrangler versions upload` が使えず、CI
+   > (`dtako-scraper-relay-deploy.yml`) は `workers/dtako-scraper-relay/**` を
+   > 触る PR が merge されるたびに **classic `wrangler deploy`** を実行する。
+   > Wrangler の既定挙動は「config に無い binding は deploy 時に削除」なので、
+   > `keep_vars` 無しだと `DTAKO_ACCOUNTS` (dashboard 専用) が **この worker に
+   > 触れる PR が merge されるたびに毎回消える** (実害: #83 投入直後から
+   > #85/#86/#88/#92 の merge で繰り返し消失し、その都度「comp_id が
+   > DTAKO_ACCOUNTS に見つかりません」で再発覚した)。`keep_vars` は top-level
+   > only (named environment 配下には書けない) なので wrangler.toml の
+   > トップレベルに 1 箇所だけ書けば staging/本番どちらの deploy にも効く。
 2. staging (`SCRAPER_MODE=http` 設定済み) で `DTAKO_ACCOUNTS` に1社だけ登録し、
    実際に csvdata.zip がダウンロードできるか確認してから本番へ展開する
    (本番展開時は top-level `[vars]` に `SCRAPER_MODE = "http"` を追加する PR を出す)
