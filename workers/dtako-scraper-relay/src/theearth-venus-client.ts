@@ -82,15 +82,36 @@ export async function callVenusBridgeMethod(
   return (json as { d: unknown }).d;
 }
 
+/** レスポンスの `d` から行オブジェクト配列を取り出す。theearth VenusBridge は
+ * DVR 通知を **`["<件数>", "<行配列を JSON エンコードした文字列>"]`** という
+ * 2 要素配列で返す (Refs #90、実データで確認)。この形を最優先で剥がしてから、
+ * 素の配列 / `{rows}` ラップ等の一般形にフォールバックする。要素がオブジェクト
+ * でないものは除外する (`"4"` 等のスカラーに `in` 演算子を当てて落ちるのを防ぐ)。 */
 function toItemArray(d: unknown): Array<Record<string, unknown>> | null {
-  if (Array.isArray(d)) return d as Array<Record<string, unknown>>;
+  // theearth 形: [countString, rowsJsonString]
+  if (Array.isArray(d) && d.length === 2 && typeof d[1] === "string") {
+    try {
+      const parsed = JSON.parse(d[1]) as unknown;
+      if (Array.isArray(parsed)) return keepObjects(parsed);
+    } catch {
+      // JSON 文字列でなければ一般形フォールバックに委ねる
+    }
+  }
+  if (Array.isArray(d)) return keepObjects(d);
   if (d && typeof d === "object") {
     const rows = (d as { rows?: unknown }).rows
       ?? (d as { Rows?: unknown }).Rows
       ?? (d as { Table?: unknown }).Table;
-    if (Array.isArray(rows)) return rows as Array<Record<string, unknown>>;
+    if (Array.isArray(rows)) return keepObjects(rows);
   }
   return null;
+}
+
+/** オブジェクト要素だけを残す (スカラー/null/配列を除外)。 */
+function keepObjects(arr: unknown[]): Array<Record<string, unknown>> {
+  return arr.filter(
+    (x): x is Record<string, unknown> => x !== null && typeof x === "object" && !Array.isArray(x),
+  );
 }
 
 function pickStringField(record: Record<string, unknown>, candidates: readonly string[]): string | null {
@@ -102,14 +123,17 @@ function pickStringField(record: Record<string, unknown>, candidates: readonly s
 
 // --- DVR 動画通知 (Monitoring_DvrNotification2、browser-render-rust#14 で実機確認済み) ---
 
-const DVR_VEHICLE_CD_CANDIDATES = ["vehicle_cd", "VehicleCD", "VehicleCd"] as const;
-const DVR_VEHICLE_NAME_CANDIDATES = ["vehicle_name", "VehicleName"] as const;
-const DVR_SERIAL_NO_CANDIDATES = ["serial_no", "SerialNo"] as const;
-const DVR_FILE_NAME_CANDIDATES = ["file_name", "FileName"] as const;
-const DVR_FILE_PATH_CANDIDATES = ["file_path", "FilePath"] as const;
-const DVR_EVENT_TYPE_CANDIDATES = ["event_type", "EventType"] as const;
-const DVR_DATETIME_CANDIDATES = ["dvr_datetime", "DvrDatetime", "DvrDateTime"] as const;
-const DVR_DRIVER_NAME_CANDIDATES = ["driver_name", "DriverName"] as const;
+// 実データ (Refs #90) は PascalCase (VehicleCD 等)。snake_case も念のため候補に残す。
+const DVR_VEHICLE_CD_CANDIDATES = ["VehicleCD", "vehicle_cd", "VehicleCd"] as const;
+const DVR_VEHICLE_NAME_CANDIDATES = ["VehicleName", "vehicle_name"] as const;
+const DVR_SERIAL_NO_CANDIDATES = ["SerialNo", "serial_no"] as const;
+const DVR_FILE_NAME_CANDIDATES = ["FileName", "file_name"] as const;
+const DVR_FILE_PATH_CANDIDATES = ["FilePath", "file_path"] as const;
+const DVR_EVENT_TYPE_CANDIDATES = ["EventType", "event_type"] as const;
+const DVR_DATETIME_CANDIDATES = ["DvrDatetime", "dvr_datetime", "DvrDateTime"] as const;
+const DVR_DRIVER_NAME_CANDIDATES = ["DriverName", "driver_name"] as const;
+const DVR_LAT_CANDIDATES = ["Latitude", "latitude", "GPSLatitude"] as const;
+const DVR_LNG_CANDIDATES = ["Longitude", "longitude", "GPSLongitude"] as const;
 
 export interface DvrNotification {
   raw: Record<string, unknown>;
@@ -121,6 +145,24 @@ export interface DvrNotification {
   eventType: string | null;
   dvrDatetime: string | null;
   driverName: string | null;
+  /** 度単位の緯度経度 (実データは 1e6 倍の整数、例 36339272 = 36.339272)。取れなければ null。 */
+  latitude: number | null;
+  longitude: number | null;
+}
+
+/** 実データの Latitude/Longitude は度 × 1e6 の整数。度に変換する (既に度なら素通し)。 */
+function pickDegreeField(record: Record<string, unknown>, candidates: readonly string[]): number | null {
+  for (const key of candidates) {
+    if (key in record) {
+      const v = record[key];
+      const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
+      if (!Number.isNaN(n) && n !== 0) {
+        // |緯度| ≤ 90 / |経度| ≤ 180 を超える大きさは 1e6 スケールとみなす。
+        return Math.abs(n) > 180 ? n / 1e6 : n;
+      }
+    }
+  }
+  return null;
 }
 
 export async function getDvrNotifications(
@@ -148,6 +190,8 @@ export async function getDvrNotifications(
     eventType: pickStringField(raw, DVR_EVENT_TYPE_CANDIDATES),
     dvrDatetime: pickStringField(raw, DVR_DATETIME_CANDIDATES),
     driverName: pickStringField(raw, DVR_DRIVER_NAME_CANDIDATES),
+    latitude: pickDegreeField(raw, DVR_LAT_CANDIDATES),
+    longitude: pickDegreeField(raw, DVR_LNG_CANDIDATES),
   }));
 }
 
