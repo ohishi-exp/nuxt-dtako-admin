@@ -75,10 +75,12 @@ const VIEWSTATE_MAC_ERROR_HTML = `<html><head><title>ランタイム エラー</
   viewstate MAC の検証が失敗しました。
 </body></html>`
 
+// overlap プロンプト: サーバが txtOverlapSessionID に session ID を焼き込む
+// (value 非空 = overlapSessionActive が発動)。実ページの btnForced value は "hide"。
 const OVERLAP_SESSION_HTML = `<html><body>
   <input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="VS999" />
-  <input type="hidden" name="txtOverlapSessionID" id="txtOverlapSessionID" value="dummy" />
-  <input type="submit" id="btnForced" name="ctl00$MainContent$btnForced" value="強制ログイン" />
+  <input type="text" name="txtOverlapSessionID" id="txtOverlapSessionID" value="SID-abc123" />
+  <input type="submit" id="btnForced" name="ctl00$MainContent$btnForced" value="hide" />
 </body></html>`
 
 const OVERLAP_SESSION_NO_BUTTON_HTML = `<html><body>
@@ -300,6 +302,30 @@ describe('login', () => {
     const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(OVERLAP_SESSION_HTML), redirect('/F-VOS0010.aspx')])
     const jar = createCookieJar()
     await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
+  })
+
+  it('includes credential + the server-issued txtOverlapSessionID value in the forced-login POST', async () => {
+    // 実ブラウザのフォーム送信同様、強制ログイン POST は credential と overlap ID を
+    // 全部含む必要がある (これを落とすとサーバに拒否される、Refs #90 実ページ検証済み)。
+    const bodies: string[] = []
+    let call = 0
+    const fetchImpl = (async (_url, init) => {
+      call += 1
+      if (call === 1) return html(LOGIN_PAGE_HTML)
+      if (call === 2) return html(OVERLAP_SESSION_HTML)
+      bodies.push(String(init?.body ?? ''))
+      return redirect('/F-VOS0010.aspx')
+    }) as FetchLike
+    await login(createCookieJar(), params, fetchImpl)
+    const forced = new URLSearchParams(bodies[0])
+    expect(forced.get('txtID2')).toBe(params.compId)
+    expect(forced.get('txtID1')).toBe(params.userName)
+    expect(forced.get('txtPass')).toBe(params.userPass)
+    expect(forced.get('txtOverlapSessionID')).toBe('SID-abc123')
+    // btnForced は含む / btnLogin・btnCancel は含まない (押下 submit のみ送る)
+    expect(forced.has('ctl00$MainContent$btnForced')).toBe(true)
+    expect(forced.has('btnLogin')).toBe(false)
+    expect(forced.has('btnCancel')).toBe(false)
   })
 
   it('follows the forced-login flow on overlap session and succeeds via logged-in marker', async () => {
