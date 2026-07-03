@@ -1,12 +1,17 @@
 #!/bin/bash
 # ohishi-exp/dtako_vid_wasm (private) を wasm-pack でビルドし、
-# public/wasm/dtako-vid/ に vendor する。
+# vendor/dtako-vid-wasm/ に vendor する (package.json の "dtako-vid-wasm":
+# "file:./vendor/dtako-vid-wasm" 依存として consume される。fc1200-wasm
+# (alc-app) と同じ file: パターン。public/ 配下への生 URL 動的 import は
+# Nitro/Wrangler の server 側 esbuild バンドルが static resolve に失敗するため
+# 使わない)。
 #
 # dtako_vid_wasm は private repo かつ GitHub Actions の課金を避けるため CI を
 # 持たない。ビルドはこのスクリプトで手元 (or CCoW) から手動で行う。
 #
 # Usage:
 #   ./scripts/build-dtako-vid-wasm.sh [path-to-dtako_vid_wasm-checkout]
+#   npm install   # vendor/ の中身が変わったら package-lock.json 更新のため必須
 #
 # 引数省略時は ../dtako_vid_wasm (このリポジトリの親ディレクトリ) を使う。
 # 存在しなければ git clone する (private repo への access が必要)。
@@ -17,7 +22,7 @@
 set -euo pipefail
 
 SRC_DIR="${1:-../dtako_vid_wasm}"
-OUT_DIR="$(cd "$(dirname "$0")/.." && pwd)/public/wasm/dtako-vid"
+OUT_DIR="$(cd "$(dirname "$0")/.." && pwd)/vendor/dtako-vid-wasm"
 
 if [ ! -d "$SRC_DIR" ]; then
   echo "cloning ohishi-exp/dtako_vid_wasm into $SRC_DIR ..."
@@ -36,6 +41,6 @@ cd "$SRC_DIR/wasm"
 wasm-pack build --target web --release --out-dir pkg
 
 mkdir -p "$OUT_DIR"
-cp pkg/dtako_vid_wasm.js pkg/dtako_vid_wasm_bg.wasm pkg/dtako_vid_wasm.d.ts pkg/dtako_vid_wasm_bg.wasm.d.ts "$OUT_DIR/"
+cp pkg/package.json pkg/dtako_vid_wasm.js pkg/dtako_vid_wasm_bg.wasm pkg/dtako_vid_wasm.d.ts pkg/dtako_vid_wasm_bg.wasm.d.ts "$OUT_DIR/"
 
-echo "vendored dtako_vid_wasm build into $OUT_DIR"
+echo "vendored dtako_vid_wasm build into $OUT_DIR — now run 'npm install' to refresh package-lock.json"

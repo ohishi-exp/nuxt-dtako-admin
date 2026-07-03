@@ -2,9 +2,11 @@
  * NET780 (.vdf) ドラレコ映像デコーダの wasm ラッパー。
  *
  * 実体は ohishi-exp/dtako_vid_wasm (private repo) の Rust/wasm-pack ビルド成果物を
- * public/wasm/dtako-vid/ に vendor したもの。ビルドパイプラインが未整備のため
- * npm パッケージ化はせず、静的アセットとして配布している (Refs
- * ohishi-exp/dtako-scraper#20)。
+ * vendor/dtako-vid-wasm/ に vendor し、`dtako-vid-wasm` という file: 依存として
+ * package.json から参照している (alc-app の fc1200-wasm と同じパターン)。
+ * public/ 配下への生 URL 動的 import は Nitro/Wrangler の server 側 esbuild
+ * バンドルが static に解決しようとして `Could not resolve` で fail するため使わない
+ * (Refs ohishi-exp/dtako-scraper#20)。
  */
 
 export interface GRecord {
@@ -69,14 +71,12 @@ interface DtakoVidWasmModule {
   parseVdfToMp4: (data: Uint8Array) => WasmVdfResult
 }
 
-const WASM_JS_URL = '/wasm/dtako-vid/dtako_vid_wasm.js'
-
 let modulePromise: Promise<DtakoVidWasmModule> | null = null
 
 function loadModule(): Promise<DtakoVidWasmModule> {
   if (!modulePromise) {
     modulePromise = (async () => {
-      const mod = (await import(/* @vite-ignore */ WASM_JS_URL)) as DtakoVidWasmModule
+      const mod = (await import('dtako-vid-wasm')) as unknown as DtakoVidWasmModule
       await mod.default()
       return mod
     })().catch((e) => {
