@@ -149,6 +149,8 @@ describe("getDvrNotifications", () => {
         eventType: "alert",
         dvrDatetime: "2026-07-01T23:00:59",
         driverName: "山田太郎",
+        latitude: null,
+        longitude: null,
       },
     ]);
   });
@@ -168,7 +170,76 @@ describe("getDvrNotifications", () => {
       dvrDatetime: null,
       driverName: null,
       filePath: null,
+      latitude: null,
+      longitude: null,
     });
+  });
+
+  it("parses the real theearth shape [countString, rowsJsonString] with 1e6-scaled coords", async () => {
+    // Refs #90 実データ: d = ["4", "<行配列を JSON エンコードした文字列>"]。
+    // 各行は PascalCase、VehicleCD は数値、Latitude/Longitude は度 × 1e6 の整数。
+    const rows = [
+      {
+        VehicleCD: 4228,
+        VehicleName: "長崎100か4228",
+        SerialNo: "AX0605008014180",
+        FileName: "20260630_213458-0-0-4228-20260703_015633-E.vdf",
+        FilePath: "",
+        EventType: "急減速",
+        DvrDatetime: "2026/07/03 01:56:56",
+        DriverName: "古賀　好春",
+        Latitude: 36339272,
+        Longitude: 136359420,
+      },
+    ];
+    const fetchImpl = sequenceFetch([jsonResponse({ d: ["4", JSON.stringify(rows)] })]);
+    const jar = createCookieJar();
+    const notifications = await getDvrNotifications(jar, fetchImpl);
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]).toMatchObject({
+      vehicleCd: "4228",
+      vehicleName: "長崎100か4228",
+      serialNo: "AX0605008014180",
+      fileName: "20260630_213458-0-0-4228-20260703_015633-E.vdf",
+      eventType: "急減速",
+      dvrDatetime: "2026/07/03 01:56:56",
+      driverName: "古賀　好春",
+      latitude: 36.339272,
+      longitude: 136.35942,
+    });
+  });
+
+  it("handles coord fields given as already-degree numbers, numeric strings, and 0/invalid", async () => {
+    const rows = [
+      { VehicleCD: "a", Latitude: 35.68, Longitude: "139.76" }, // 度そのまま / 数値文字列
+      { VehicleCD: "b", Latitude: 0, Longitude: "not-a-number" }, // 0 / 非数 → null
+      { VehicleCD: "c", Latitude: null, Longitude: true }, // key はあるが非数値型 → null
+      { VehicleCD: "d" }, // フィールド不在 → null
+    ];
+    const fetchImpl = sequenceFetch([jsonResponse({ d: ["3", JSON.stringify(rows)] })]);
+    const jar = createCookieJar();
+    const n = await getDvrNotifications(jar, fetchImpl);
+    expect(n[0]).toMatchObject({ latitude: 35.68, longitude: 139.76 });
+    expect(n[1]).toMatchObject({ latitude: null, longitude: null });
+    expect(n[2]).toMatchObject({ latitude: null, longitude: null });
+    expect(n[3]).toMatchObject({ latitude: null, longitude: null });
+  });
+
+  it("treats a non-JSON second element as the fallback array shape", async () => {
+    // [x, "not json"] は theearth 形として剥がせない → 素の配列フォールバックで
+    // オブジェクト要素だけ拾う (スカラーの "x" は除外して in 演算子クラッシュを防ぐ)。
+    const fetchImpl = sequenceFetch([jsonResponse({ d: ["x", "not-json-string"] })]);
+    const jar = createCookieJar();
+    const notifications = await getDvrNotifications(jar, fetchImpl);
+    expect(notifications).toEqual([]);
+  });
+
+  it("drops scalar elements instead of crashing on the 'in' operator", async () => {
+    const fetchImpl = sequenceFetch([jsonResponse({ d: [4, { VehicleCD: "9001" }] })]);
+    const jar = createCookieJar();
+    const notifications = await getDvrNotifications(jar, fetchImpl);
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.vehicleCd).toBe("9001");
   });
 
   it("resolves {Rows:[]} / {Table:[]} wrapped responses", async () => {

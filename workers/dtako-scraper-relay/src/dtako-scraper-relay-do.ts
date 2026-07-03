@@ -558,7 +558,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   /** GET /dvr-api/file?support_id=&vehicle_cd=&filename= — `.vdf` をマジックバイト
    * 検証付きで browser にストリーム素通しする (数十 MB になり得るため buffer しない)。
    * comp_id はクライアントから受けず、ログイン済みセッションの値を使う (他 comp の
-   * パスを組み立てさせない)。 */
+   * パスを組み立てさせない)。
+   *
+   * NOTE (Refs #90): `.vdf` の実ダウンロードパスは未確定。実データでは通知行の
+   * FilePath は空で、決定論的パス (`/dvrData/{comp}/{support}/{vehicle}/{fn}/{fn}.vdf`)
+   * の候補は 404 だった (device からの「受信」ステップを挟む可能性)。buildDvrFileUrl
+   * が 404 → assertVdfMagic 不一致で loud fail するので、通知一覧の表示は妨げない。
+   * 実際のダウンロード操作をトレースしてパスを確定させるのは follow-up。 */
   private async handleDvrFile(record: DvrSessionRecord, url: URL): Promise<Response> {
     const supportId = url.searchParams.get("support_id");
     const vehicleCd = url.searchParams.get("vehicle_cd");

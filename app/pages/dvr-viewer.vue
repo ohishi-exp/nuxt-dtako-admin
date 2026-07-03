@@ -28,6 +28,8 @@ interface DvrNotification {
   eventType: string | null
   dvrDatetime: string | null
   driverName: string | null
+  latitude: number | null
+  longitude: number | null
 }
 
 interface DvrSession {
