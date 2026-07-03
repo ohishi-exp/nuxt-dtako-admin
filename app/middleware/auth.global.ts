@@ -1,7 +1,8 @@
 import { authMiddleware } from '@ippoan/auth-client'
 
 export default defineNuxtRouteMiddleware(
-  // /dvr-viewer /dvr-map は theearth credential でログインする外部利用者向けページ
-  // (Refs #90)。auth-worker のログインは要求しない (認証は theearth 本体に委譲)。
-  authMiddleware({ publicPaths: ['/login', '/auth/callback', '/dvr-viewer', '/dvr-map'] }),
+  // /dvr-viewer /dvr-map (DVR 動画・位置情報) は管理者専用ページ。管理画面 (auth-worker)
+  // ログインを必須にし、その上で theearth credential で DVR データにアクセスする二段構え
+  // (Refs #90)。publicPaths には入れない = 未ログインは login にリダイレクトされる。
+  authMiddleware({ publicPaths: ['/login', '/auth/callback'] }),
 )

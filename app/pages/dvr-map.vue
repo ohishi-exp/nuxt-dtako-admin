@@ -8,7 +8,6 @@
  */
 import type { DvrMapMarker } from '~/components/DvrMap.vue'
 
-definePageMeta({ layout: false })
 
 interface VehicleStatePoint {
   vehicleCd: string | null
@@ -344,7 +343,8 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="min-h-screen bg-gray-50 dark:bg-gray-950">
+  <!-- default レイアウト (サイドバー) 内。-m-6 で main の p-6 を打ち消しヘッダーを全幅に -->
+  <div class="-m-6">
     <DvrSessionHeader title="位置情報・動態履歴" @login="onLogin" />
 
     <main class="max-w-7xl mx-auto p-6">

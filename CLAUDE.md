@@ -165,17 +165,22 @@ net780-wasm (ohishi-exp/net780-wasm、core/ + wasm/ の 1 repo workspace)
 
 ## DVR 動画ビューア (`/dvr-viewer` ページ + `/dvr-api/*`、Refs #90)
 
-theearth-np.com のアカウントを持つ利用者 (DTAKO_ACCOUNTS に載っていない外部の関係者を
-含む、社内共有・一般公開なし) が、**自分の credential でログイン**して自社の DVR
-ドラレコ動画 (`.vdf`) を閲覧する機能。管理画面の auth-worker ログインは使わない。
+**管理者専用ページ** (`/dvr-viewer` 動画 / `/dvr-map` 位置情報・動態履歴)。管理画面
+(auth-worker) ログインを**必須**とし (auth.global.ts の publicPaths に入れない =
+未ログインは login にリダイレクト)、その上で theearth-np.com の credential でログイン
+して自社の DVR ドラレコ動画 (`.vdf`)・車輌現在地・動態履歴を閲覧する二段構え。default
+レイアウト (サイドバー) に載る (かつては layout:false の外部利用者向け standalone
+だったが、管理者専用に変更、Refs #90)。
 
 ### credential pass-through 設計
 
-パスワードは**一切保存しない**。ログイン画面 = theearth へのログインそのもの
+theearth パスワードは**一切保存しない**。ログイン画面 = theearth へのログインそのもの
 (認証を theearth 本体に委譲し、アプリ独自のユーザー DB / パスワード保存を持たない)。
+= 「管理画面ログイン (auth-worker) で誰がアクセスしたか」と「theearth credential で
+どの会社のデータを見るか」を分離。
 
 ```
-[browser] /dvr-viewer (auth.global.ts publicPaths、layout: false)
+[browser] /dvr-viewer (auth-worker ログイン必須、default レイアウト)
   │ POST /dvr-api/login (password は body のみ。X-Dvr-Comp-Id / X-Dvr-User-B64
   │ ヘッダで routing、password はヘッダに載せない)
   ▼
