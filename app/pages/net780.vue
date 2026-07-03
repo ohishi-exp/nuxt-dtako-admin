@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import {
   parseNet780Zip,
-  downsampleSpeed,
-  buildSpeedChartData,
+  buildDailySpeedCharts,
   net780EventCodeHex,
   formatNet780Ts,
 } from '~/utils/net780'
@@ -87,10 +86,13 @@ const CHART_WIDTH = 800
 const CHART_HEIGHT = 180
 const CHART_PADDING = 8
 
-const speedChart = computed(() => {
-  const points = result.value ? downsampleSpeed(result.value.speed) : []
-  return buildSpeedChartData(points, CHART_WIDTH, CHART_HEIGHT, CHART_PADDING)
+const dailySpeedCharts = computed(() => {
+  if (!result.value) return []
+  return buildDailySpeedCharts(result.value.speed, CHART_WIDTH, CHART_HEIGHT, CHART_PADDING)
 })
+
+/** 暦日のチャート x 軸ラベル (0, 6, 12, 18, 24 時)。全日共通 (0:00〜24:00 固定幅)。 */
+const HOUR_TICKS = [0, 6, 12, 18, 24]
 
 const gpsRows = computed(() => (result.value?.gps ?? []).slice(0, GPS_TABLE_LIMIT))
 const gpsTruncated = computed(() => (result.value?.gps.length ?? 0) > GPS_TABLE_LIMIT)
@@ -207,10 +209,10 @@ function eventLabel(e: Net780ParseResult['events'][number]): string {
         </dl>
       </UCard>
 
-      <!-- Speed chart -->
-      <UCard v-if="speedChart">
+      <!-- Speed chart (暦日ごと、実物の運行記録計と同じ 0〜24時の 1 日 1 行) -->
+      <UCard v-for="daily in dailySpeedCharts" :key="daily.date">
         <template #header>
-          <span class="font-bold">速度 (.spd、0.5秒粒度)</span>
+          <span class="font-bold">速度 (.spd、0.5秒粒度) — {{ daily.date }}</span>
         </template>
         <svg
           :viewBox="`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`"
@@ -218,18 +220,23 @@ function eventLabel(e: Net780ParseResult['events'][number]): string {
           preserveAspectRatio="none"
         >
           <polyline
-            :points="speedChart.polyline"
+            v-for="(seg, i) in daily.chart.segments"
+            :key="i"
+            :points="seg"
             fill="none"
             stroke="currentColor"
             stroke-width="1.5"
             class="text-blue-500"
           />
         </svg>
+        <div class="flex justify-between text-[10px] text-gray-400 px-2">
+          <span v-for="h in HOUR_TICKS" :key="h">{{ h }}時</span>
+        </div>
         <p class="text-xs text-gray-500 mt-1">
-          最高速度 {{ speedChart.maxSpeed.toFixed(1) }} km/h ・ 表示点数 {{ speedChart.pointCount }}
+          最高速度 {{ daily.chart.maxSpeed.toFixed(1) }} km/h ・ 表示点数 {{ daily.chart.pointCount }}
         </p>
       </UCard>
-      <p v-else-if="result.speed.length === 0" class="text-sm text-gray-400">
+      <p v-if="!dailySpeedCharts.length && result.speed.length === 0" class="text-sm text-gray-400">
         .spd データがありません
       </p>
 
