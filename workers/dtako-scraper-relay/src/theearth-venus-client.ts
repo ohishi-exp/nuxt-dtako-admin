@@ -598,12 +598,15 @@ export interface VehicleStatePoint {
   comuDatetime: string | null;
   speed: number | null;
   revo: number | null;
+  /** 進行方向 (GPSDirection、度・北 0 時計回り想定。地図の矢印マーカーの回転に使う)。 */
+  direction: number | null;
   /** 現在作業名 (現在地一覧のみ、履歴では null)。 */
   currentWorkName: string | null;
 }
 
 const VS_SPEED_CANDIDATES = ["Speed"] as const;
 const VS_REVO_CANDIDATES = ["Revo"] as const;
+const VS_DIRECTION_CANDIDATES = ["GPSDirection"] as const;
 
 function mapVehicleStateRow(raw: Record<string, unknown>): VehicleStatePoint {
   return {
@@ -617,6 +620,7 @@ function mapVehicleStateRow(raw: Record<string, unknown>): VehicleStatePoint {
     comuDatetime: pickStringField(raw, ["ComuDateTime"]),
     speed: pickNumberField(raw, VS_SPEED_CANDIDATES),
     revo: pickNumberField(raw, VS_REVO_CANDIDATES),
+    direction: pickNumberField(raw, VS_DIRECTION_CANDIDATES),
     currentWorkName: pickStringField(raw, ["CurrentWorkName"]),
   };
 }

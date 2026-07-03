@@ -20,6 +20,7 @@ interface VehicleStatePoint {
   comuDatetime: string | null
   speed: number | null
   revo: number | null
+  direction: number | null
   currentWorkName: string | null
 }
 
@@ -135,7 +136,15 @@ const stateMarkers = computed<DvrMapMarker[]>(() =>
     .map(v => ({
       lat: v.latitude!,
       lng: v.longitude!,
-      label: v.vehicleName ?? v.vehicleCd ?? '',
+      // 元サイト (web金星号) と同じ 車番 / 乗務員 / 日時 の 3 行ラベル + 進行方向矢印。
+      lines: [
+        v.vehicleName ?? v.vehicleCd ?? '',
+        v.driverName ?? '',
+        v.dataDatetime ?? '',
+      ].filter(Boolean),
+      // 停車中 (Speed=0) は GPSDirection が 0 (方向不定) になり全車が北を向くため、
+      // 走行中のみ方向矢印を出す。
+      direction: v.speed != null && v.speed > 0 ? v.direction : null,
       title: `${v.vehicleName ?? ''} ${v.dataDatetime ?? ''}`,
     })),
 )

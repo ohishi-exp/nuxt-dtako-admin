@@ -836,6 +836,7 @@ function vehicleStateRaw(overrides: Record<string, unknown> = {}): Record<string
     GPSLongitude: 129588335,
     Speed: 24,
     Revo: 670,
+    GPSDirection: 135,
     CurrentWorkName: "走行",
     VehicleCD: 2131,
     VehicleName: "長崎800か2131",
@@ -858,6 +859,7 @@ describe("getVehicleStates", () => {
       comuDatetime: "07/03 09:43",
       speed: 24,
       revo: 670,
+      direction: 135,
       currentWorkName: "走行",
     });
     expect(vehicles[0]!.latitude).toBeCloseTo(32 + 53.5438 / 60, 5);

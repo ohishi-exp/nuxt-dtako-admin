@@ -9,8 +9,12 @@ import { Loader } from '@googlemaps/js-api-loader'
 export interface DvrMapMarker {
   lat: number
   lng: number
-  /** マーカー横に常時表示する短いラベル (車番等)。 */
+  /** マーカー横に常時表示する短いラベル (車番等)。lines 指定時は無視。 */
   label?: string
+  /** 複数行ラベル (車番 / 乗務員 / 日時 等)。指定時は label より優先。 */
+  lines?: string[]
+  /** 進行方向 (度・北 0 時計回り)。指定時は方向を向いた矢印を描く。 */
+  direction?: number | null
   /** hover 時の title。 */
   title?: string
 }
@@ -78,13 +82,40 @@ function updateCurrentMarker() {
   map.panTo(pos)
 }
 
-function markerContent(label: string | undefined): HTMLElement | undefined {
-  if (!label) return undefined
-  const div = document.createElement('div')
-  div.textContent = label
-  div.style.cssText
-    = 'background:#1d4ed8;color:#fff;font-size:11px;padding:2px 6px;border-radius:9999px;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.4)'
-  return div
+/** 方向を向いた青い矢印 (△) の SVG。direction 度 (北 0 時計回り) だけ回転する。 */
+function arrowEl(direction: number): HTMLElement {
+  const wrap = document.createElement('div')
+  wrap.style.cssText = `transform:rotate(${direction}deg);line-height:0;`
+  wrap.innerHTML = '<svg width="22" height="22" viewBox="0 0 22 22">'
+    + '<path d="M11 1 L18 19 L11 15 L4 19 Z" fill="#1d4ed8" stroke="#fff" stroke-width="1"/></svg>'
+  return wrap
+}
+
+/** 白背景・青枠の複数行ラベル。 */
+function labelBox(lines: string[]): HTMLElement {
+  const box = document.createElement('div')
+  box.style.cssText = 'background:#fff;border:1px solid #1d4ed8;border-radius:4px;'
+    + 'padding:1px 5px;font-size:10px;line-height:1.35;white-space:nowrap;'
+    + 'box-shadow:0 1px 2px rgba(0,0,0,.35);text-align:center;color:#1e293b;'
+  for (const line of lines) {
+    const row = document.createElement('div')
+    row.textContent = line
+    box.appendChild(row)
+  }
+  return box
+}
+
+function markerContent(m: DvrMapMarker): HTMLElement | undefined {
+  const lines = m.lines?.filter(Boolean) ?? (m.label ? [m.label] : [])
+  const hasArrow = typeof m.direction === 'number'
+  if (lines.length === 0 && !hasArrow) return undefined
+
+  // 矢印 (上) + ラベル (下) を縦に積む。単行 label だけなら従来の pill 見た目に近い。
+  const wrap = document.createElement('div')
+  wrap.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:1px;'
+  if (hasArrow) wrap.appendChild(arrowEl(m.direction as number))
+  if (lines.length > 0) wrap.appendChild(labelBox(lines))
+  return wrap
 }
 
 function redraw() {
@@ -100,7 +131,7 @@ function redraw() {
       position: pos,
       map,
       title: m.title,
-      content: markerContent(m.label),
+      content: markerContent(m),
     }))
     bounds.extend(pos)
     hasAny = true
