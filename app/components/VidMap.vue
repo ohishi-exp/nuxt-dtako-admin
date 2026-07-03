@@ -9,7 +9,6 @@ const props = defineProps<{
   currentTime: number
 }>()
 
-const config = useRuntimeConfig()
 const mapEl = ref<HTMLDivElement | null>(null)
 const loadError = ref<string | null>(null)
 
@@ -25,16 +24,19 @@ const points = computed<Point[]>(() =>
 )
 
 onMounted(async () => {
-  if (!config.public.googlemapKey) {
-    loadError.value = 'Google Maps API key が未設定です (NUXT_PUBLIC_GOOGLEMAP_KEY)'
-    return
-  }
   if (points.value.length === 0) {
     loadError.value = 'GPS データがありません'
     return
   }
   try {
-    const loader = new Loader({ apiKey: config.public.googlemapKey, version: 'weekly' })
+    // GOOGLEMAP_KEY_SECRET は Cloudflare Secrets Store binding (文字列ではない) なので
+    // public runtimeConfig には載せず、server route 経由で解決した文字列を取得する。
+    const { key } = await $fetch('/api/vid-check/map-key')
+    if (!key) {
+      loadError.value = 'Google Maps API key が未設定です (GOOGLEMAP_KEY_SECRET)'
+      return
+    }
+    const loader = new Loader({ apiKey: key, version: 'weekly' })
     const { Map } = await loader.importLibrary('maps')
     const { Marker } = await loader.importLibrary('marker')
     if (!mapEl.value) return
