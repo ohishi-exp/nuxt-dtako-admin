@@ -244,12 +244,21 @@ describe('detectWareki', () => {
     expect(detectWareki(csvPageHtml({ tableDate: '08/07/01' }), new Date('2026-07-03T00:00:00Z'))).toBe(true)
   })
 
-  it('only looks at <td> date cells, ignoring stray dates elsewhere in the HTML', () => {
-    // td セルは西暦 (26/..) だが、script 内に紛らわしい 08/.. がある。td セル限定なので
-    // 西暦判定 (false) にならねばならない (broad regex だと 08 を拾って和暦に誤判定した)。
-    const html = `<html><head><script>var v='08/01/01';</script></head><body>` +
-      `<table><tr><td>26/06/26</td></tr></table></body></html>`
+  it('reads <span>-wrapped date cells (real theearth markup) and ignores stray earlier dates', () => {
+    // 実データ (27324455) の日付セルは <td><span id="...">26/06/30</span></td>。表より前に
+    // 別の日付 (15/11/15 — 旧 broad regex が誤検出して令和判定していたもの) があっても、
+    // td の中身をタグ除去して最初の日付セルを見るので西暦(26)判定 (false) になる。
+    const html =
+      `<html><body><span>15/11/15</span><table><tr>` +
+      `<td>車輌名</td>` + // 日付でない td を跨いで探す
+      `<td><span id="lbl0" style="display:inline-block;width:80px;">26/06/30</span></td>` +
+      `</tr></table></body></html>`
     expect(detectWareki(html, new Date('2026-07-03T00:00:00Z'))).toBe(false)
+  })
+
+  it('strips &nbsp; and inner tags inside a <td> before matching', () => {
+    const html = `<html><body><table><tr><td>&nbsp;<b>08/07/01</b>&nbsp;</td></tr></table></body></html>`
+    expect(detectWareki(html, new Date('2026-07-03T00:00:00Z'))).toBe(true) // 令和8年
   })
 
   it('defaults to wareki when a date appears only outside <td> cells', () => {
