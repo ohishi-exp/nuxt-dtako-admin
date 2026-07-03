@@ -176,13 +176,18 @@ function fracFromEvent(e: MouseEvent): number | null {
  * なり、つまみ調整が「範囲外に出ると切れる」ため。
  */
 function startGlobalDrag() {
+  stopGlobalDrag() // 念のため多重登録を防ぐ (addEventListener 自体は同一関数なら冪等だが明示しておく)
   window.addEventListener('mousemove', onTrackPointerMove)
   window.addEventListener('mouseup', onTrackPointerUp)
+  // alt-tab 等でウィンドウがフォーカスを失うと mouseup が届かずドラッグ状態が
+  // 固着することがあるため、blur でも確実に終了させる
+  window.addEventListener('blur', onTrackPointerUp)
 }
 
 function stopGlobalDrag() {
   window.removeEventListener('mousemove', onTrackPointerMove)
   window.removeEventListener('mouseup', onTrackPointerUp)
+  window.removeEventListener('blur', onTrackPointerUp)
 }
 
 function beginHandleDrag(which: 'start' | 'end') {
