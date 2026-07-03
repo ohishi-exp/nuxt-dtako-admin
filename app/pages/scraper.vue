@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl, saveScrapeHistory } from '~/utils/api'
+import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl, saveScrapeHistory, buildScraperZipUrl } from '~/utils/api'
 import type { ScrapeResult, ScrapeHistoryItem, PendingUpload, ScrapeStatusEntry } from '~/types'
 import type { ScrapeProgressEvent } from '~/utils/api'
 
@@ -235,6 +235,7 @@ async function handleScrape() {
               comp_id: evt.comp_id || '',
               status: evt.status || 'error',
               message: evt.message || '',
+              zipUrl: evt.zip_url,
             })
             recordScrapeResult(task.date, evt)
           }
@@ -296,6 +297,7 @@ async function handleRerun(task: DayTask) {
               comp_id: evt.comp_id || '',
               status: evt.status || 'error',
               message: evt.message || '',
+              zipUrl: evt.zip_url,
             })
             recordScrapeResult(task.date, evt)
           }
@@ -356,6 +358,7 @@ async function handleRerunAllErrors() {
                 comp_id: evt.comp_id || '',
                 status: evt.status || 'error',
                 message: evt.message || '',
+                zipUrl: evt.zip_url,
               })
               recordScrapeResult(task.date, evt)
             }
@@ -499,6 +502,7 @@ async function handleHistoryRerun(item: ScrapeHistoryItem) {
             comp_id: evt.comp_id || '',
             status: evt.status || 'error',
             message: evt.message || '',
+            zipUrl: evt.zip_url,
           })
           recordScrapeResult(item.target_date, evt)
         }
@@ -737,6 +741,11 @@ onMounted(() => {
               :class="r.status === 'success' ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'"
             >
               [{{ r.comp_id }}] {{ r.message }}
+              <a
+                v-if="r.zipUrl"
+                :href="buildScraperZipUrl(r.zipUrl)"
+                class="ml-1 underline"
+              >zipダウンロード</a>
             </div>
           </div>
           <div v-if="task.error" class="mt-1 pl-6 text-xs text-red-600">

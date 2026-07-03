@@ -8,10 +8,11 @@ export default defineConfig({
     include: ['test/**/*.test.ts'],
     coverage: {
       provider: 'v8',
-      // 認可判定の pure ロジックだけ 100% gate。dtako-scraper-relay-do.ts /
-      // index.ts は cloudflare:workers / DurableObject / WebSocket runtime 依存で
-      // node vitest からは計測不可 (要 @cloudflare/vitest-pool-workers) のため対象外。
-      include: ['src/auth-decision.ts'],
+      // 認可判定・theearth-np HTTP クライアントの pure ロジックだけ 100% gate。
+      // dtako-scraper-relay-do.ts / index.ts は cloudflare:workers / DurableObject /
+      // WebSocket runtime 依存で node vitest からは計測不可 (要
+      // @cloudflare/vitest-pool-workers) のため対象外。
+      include: ['src/auth-decision.ts', 'src/theearth-client.ts'],
       thresholds: {
         lines: 100,
         functions: 100,

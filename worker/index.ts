@@ -31,9 +31,11 @@ export default {
     ctx: ExecutionContext,
   ): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/ws/scraper") {
-      // session 抽出と DO routing は relay worker (default fetch) が行う。
-      // ここは原 request (WS upgrade + query string) をそのまま転送するだけ。
+    if (url.pathname === "/ws/scraper" || url.pathname.startsWith("/scraper-zip/")) {
+      // comp_id/session 抽出と DO routing は relay worker (default fetch) が行う。
+      // ここは原 request (WS upgrade + query string、または zip ダウンロード GET) を
+      // そのまま転送するだけ。/scraper-zip/* は SCRAPER_MODE=http (Refs
+      // ohishi-exp/dtako-scraper#22) が生成する1回限りのダウンロード URL。
       return env.SCRAPER_RELAY.fetch(request);
     }
     return (nitroApp as NitroHandler).fetch(request, env, ctx);

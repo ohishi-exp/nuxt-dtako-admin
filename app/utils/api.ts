@@ -610,11 +610,25 @@ export async function saveScrapeHistory(entry: ScrapeHistoryEntry): Promise<void
 }
 
 export interface ScrapeProgressEvent {
-  event: string    // "progress" | "result" | "done"
+  event: string    // "progress" | "result" | "done" | "error"
   comp_id?: string
-  step?: string    // "login" | "download" | "upload" | "done"
+  step?: string    // "login" | "download" | "upload" | "queued" | "done"
   status?: string  // "success" | "error"
   message?: string
+  /**
+   * SCRAPER_MODE=http (Refs ohishi-exp/dtako-scraper#22) 完了時にのみ載る、1回だけ
+   * 取得できる csvdata.zip のダウンロード path (`/scraper-zip/{compId}/{requestId}`)。
+   * `buildScraperZipUrl()` で絶対 URL に変換して使う。
+   */
+  zip_url?: string
+}
+
+/** `zip_url` (relay 相対 path) を、ダウンロード可能な絶対 https URL に変換する。
+ * `scraperRelayUrl` は WS 接続用に `wss://`/`ws://` scheme で保持しているため、
+ * 通常の GET には https/http に変換する必要がある。 */
+export function buildScraperZipUrl(zipPath: string): string {
+  const httpBase = scraperRelayUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
+  return `${httpBase}${zipPath}`
 }
 
 function buildScraperWsUrl(req: ScrapeRequest, token: string): string {

@@ -1,0 +1,373 @@
+import { describe, expect, it } from 'vitest'
+import {
+  assertZipMagic,
+  cookieHeader,
+  createCookieJar,
+  detectWareki,
+  downloadCsvZip,
+  extractHiddenFields,
+  ingestSetCookie,
+  login,
+  scrapeViaHttp,
+  splitJapaneseDate,
+  TheearthClientError,
+  type FetchLike,
+} from '../src/theearth-client'
+
+const ZIP_BYTES = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x01, 0x02, 0x03, 0x04])
+
+function html(body: string): Response {
+  return new Response(body, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } })
+}
+
+/** Content-Type ヘッダを一切持たないレスポンス (自動付与を避けるため body は素の bytes)。 */
+function htmlNoContentType(body: string): Response {
+  return new Response(new TextEncoder().encode(body), { status: 200 })
+}
+
+function redirect(location: string | null): Response {
+  const headers = new Headers()
+  if (location) headers.set('location', location)
+  return new Response(null, { status: 302, headers })
+}
+
+function zipResponse(bytes: Uint8Array = ZIP_BYTES): Response {
+  return new Response(bytes, { status: 200, headers: { 'content-type': 'application/octet-stream' } })
+}
+
+/** 呼び出し順に Response を返す fetch モック。 */
+function sequenceFetch(responses: Response[]): FetchLike {
+  let i = 0
+  return (async () => {
+    const res = responses[i]
+    i += 1
+    if (!res) throw new Error(`unexpected extra fetch call (#${i})`)
+    return res
+  }) as FetchLike
+}
+
+const LOGIN_PAGE_HTML = `<html><body><form>
+  <input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="VS123==" />
+  <input type="hidden" name="__EVENTVALIDATION" id="__EVENTVALIDATION" value="EV1" />
+</form></body></html>`
+
+const LOGIN_SUCCESS_HTML = `<html><body>ようこそ<span id="Button1st_2"></span></body></html>`
+const LOGIN_FAILURE_HTML = `<html><body>ID またはパスワードが正しくありません</body></html>`
+
+const OVERLAP_SESSION_HTML = `<html><body>
+  <input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="VS999" />
+  <input type="hidden" name="txtOverlapSessionID" id="txtOverlapSessionID" value="dummy" />
+  <input type="submit" id="btnForced" name="ctl00$MainContent$btnForced" value="強制ログイン" />
+</body></html>`
+
+const OVERLAP_SESSION_NO_BUTTON_HTML = `<html><body>
+  <input type="hidden" name="txtOverlapSessionID" id="txtOverlapSessionID" value="dummy" />
+</body></html>`
+
+const OVERLAP_SESSION_NO_VALUE_HTML = `<html><body>
+  <input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="VS999" />
+  <input type="hidden" name="txtOverlapSessionID" id="txtOverlapSessionID" value="dummy" />
+  <input type="submit" id="btnForced" name="ctl00$MainContent$btnForced" />
+</body></html>`
+
+function csvPageHtml(opts: { omit?: string; tableDate?: string } = {}): string {
+  const tableDate = opts.tableDate ?? '26/07/01'
+  const fields: Record<string, string> = {
+    __VIEWSTATE: '<input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="CSVVS" />',
+    rdoSelect1: '<input type="radio" id="rdoSelect1" name="ctl00$MainContent$SelectM" value="rdoSelect1" />',
+    rdoDate1: '<input type="radio" id="rdoDate1" name="ctl00$MainContent$SelectD" value="rdoDate1" />',
+    MainContent_ucStartDate_txtYear:
+      '<input type="text" id="MainContent_ucStartDate_txtYear" name="ctl00$MainContent$ucStartDate$txtYear" value="" />',
+    MainContent_ucStartDate_txtMonth:
+      '<input type="text" id="MainContent_ucStartDate_txtMonth" name="ctl00$MainContent$ucStartDate$txtMonth" value="" />',
+    MainContent_ucStartDate_txtDay:
+      '<input type="text" id="MainContent_ucStartDate_txtDay" name="ctl00$MainContent$ucStartDate$txtDay" value="" />',
+    MainContent_ucEndDate_txtYear:
+      '<input type="text" id="MainContent_ucEndDate_txtYear" name="ctl00$MainContent$ucEndDate$txtYear" value="" />',
+    MainContent_ucEndDate_txtMonth:
+      '<input type="text" id="MainContent_ucEndDate_txtMonth" name="ctl00$MainContent$ucEndDate$txtMonth" value="" />',
+    MainContent_ucEndDate_txtDay:
+      '<input type="text" id="MainContent_ucEndDate_txtDay" name="ctl00$MainContent$ucEndDate$txtDay" value="" />',
+    btnCsv: '<input type="submit" id="btnCsv" name="ctl00$MainContent$btnCsvSvr" value="ダウンロード" />',
+  }
+  if (opts.omit) delete fields[opts.omit]
+  return `<html><body><table><tr><td>${tableDate}</td></tr></table>${Object.values(fields).join('\n')}</body></html>`
+}
+
+const STAGE1_CONFIRM_HTML = `<html><body>
+  <input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="STAGE2VS" />
+  <input type="submit" id="btnCsvSvrOutput" name="ctl00$MainContent$btnCsvSvrOutput" value="ダウンロード" />
+</body></html>`
+
+const STAGE1_CONFIRM_NO_OUTPUT_HTML = `<html><body>この日付範囲にはデータがありません</body></html>`
+
+const STAGE1_CONFIRM_NO_VALUE_HTML = `<html><body>
+  <input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="STAGE2VS" />
+  <input type="submit" id="btnCsvSvrOutput" name="ctl00$MainContent$btnCsvSvrOutput" />
+</body></html>`
+
+describe('cookie jar', () => {
+  it('ingests Set-Cookie via getSetCookie() and builds the Cookie header', () => {
+    const jar = createCookieJar()
+    const headers = new Headers()
+    headers.append('set-cookie', 'sid=abc; Path=/; HttpOnly')
+    headers.append('set-cookie', 'lang=ja')
+    ingestSetCookie(jar, headers)
+    expect(cookieHeader(jar)).toBe('sid=abc; lang=ja')
+  })
+
+  it('falls back to a single set-cookie header when getSetCookie is unavailable', () => {
+    const jar = createCookieJar()
+    const fakeHeaders = { get: (name: string) => (name === 'set-cookie' ? 'sid=xyz' : null) } as unknown as Headers
+    ingestSetCookie(jar, fakeHeaders)
+    expect(cookieHeader(jar)).toBe('sid=xyz')
+  })
+
+  it('yields no cookies when there is nothing to fall back to', () => {
+    const jar = createCookieJar()
+    const fakeHeaders = { get: () => null } as unknown as Headers
+    ingestSetCookie(jar, fakeHeaders)
+    expect(cookieHeader(jar)).toBe('')
+  })
+
+  it('skips malformed cookie pairs (no "=") and empty names', () => {
+    const jar = createCookieJar()
+    const headers = new Headers()
+    headers.append('set-cookie', 'noequalsign')
+    headers.append('set-cookie', '=onlyvalue')
+    headers.append('set-cookie', 'ok=1')
+    ingestSetCookie(jar, headers)
+    expect(cookieHeader(jar)).toBe('ok=1')
+  })
+})
+
+describe('extractHiddenFields', () => {
+  it('extracts only the hidden fields present in the page and decodes entities', () => {
+    const fields = extractHiddenFields(
+      `<input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="A&amp;B&lt;&gt;&quot;&#39;" />`,
+    )
+    expect(fields).toEqual({ __VIEWSTATE: `A&B<>"'` })
+  })
+
+  it('omits fields whose tag is absent from the page', () => {
+    expect(extractHiddenFields('<html><body>no hidden fields here</body></html>')).toEqual({})
+  })
+
+  it('omits a field whose tag has no name attribute', () => {
+    expect(extractHiddenFields('<input type="hidden" id="__VIEWSTATE" value="X" />')).toEqual({})
+  })
+
+  it('defaults to an empty string value when the value attribute is absent', () => {
+    expect(extractHiddenFields('<input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" />')).toEqual({
+      __VIEWSTATE: '',
+    })
+  })
+})
+
+describe('detectWareki', () => {
+  it('defaults to wareki when no date pattern is found', () => {
+    expect(detectWareki('<html><body>no dates</body></html>')).toBe(true)
+  })
+
+  it('detects western era dates', () => {
+    expect(detectWareki(csvPageHtml({ tableDate: '26/07/01' }), new Date('2026-07-03T00:00:00Z'))).toBe(false)
+  })
+
+  it('detects wareki (reiwa) dates', () => {
+    expect(detectWareki(csvPageHtml({ tableDate: '08/07/01' }), new Date('2026-07-03T00:00:00Z'))).toBe(true)
+  })
+})
+
+describe('splitJapaneseDate', () => {
+  it('splits a western-era iso date', () => {
+    expect(splitJapaneseDate('2026-07-03', false)).toEqual({ y: '26', m: '07', d: '03' })
+  })
+
+  it('splits a wareki iso date', () => {
+    expect(splitJapaneseDate('2026-07-03', true)).toEqual({ y: '08', m: '07', d: '03' })
+  })
+
+  it('rejects a date with the wrong number of segments', () => {
+    expect(() => splitJapaneseDate('2026/07/03', false)).toThrow(TheearthClientError)
+  })
+
+  it('rejects a date with a non-numeric year', () => {
+    expect(() => splitJapaneseDate('abcd-07-03', false)).toThrow(TheearthClientError)
+  })
+
+  it('rejects a date with an empty month/day segment', () => {
+    expect(() => splitJapaneseDate('2026--03', false)).toThrow(TheearthClientError)
+  })
+})
+
+describe('assertZipMagic', () => {
+  it('accepts a buffer starting with the ZIP magic bytes', () => {
+    expect(() => assertZipMagic(ZIP_BYTES.buffer as ArrayBuffer)).not.toThrow()
+  })
+
+  it('rejects a too-short buffer', () => {
+    expect(() => assertZipMagic(new Uint8Array([0x50, 0x4b]).buffer as ArrayBuffer)).toThrow(TheearthClientError)
+  })
+
+  it('rejects a buffer with the wrong magic bytes', () => {
+    expect(() =>
+      assertZipMagic(new Uint8Array([0x3c, 0x68, 0x74, 0x6d, 0x6c]).buffer as ArrayBuffer),
+    ).toThrow(TheearthClientError)
+  })
+})
+
+describe('login', () => {
+  const params = { compId: '27324455', userName: 'user1', userPass: 'pass1' }
+
+  it('succeeds when the login POST redirects and the location is followed', async () => {
+    const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), redirect('/F-VOS0010.aspx'), html('<html>ok</html>')])
+    const jar = createCookieJar()
+    await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
+  })
+
+  it('succeeds when the login POST redirects with no Location header', async () => {
+    const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), redirect(null)])
+    const jar = createCookieJar()
+    await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
+  })
+
+  it('succeeds when the login POST returns the logged-in page directly (no redirect)', async () => {
+    const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(LOGIN_SUCCESS_HTML)])
+    const jar = createCookieJar()
+    await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
+  })
+
+  it('throws when neither a redirect nor the logged-in marker appears', async () => {
+    const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(LOGIN_FAILURE_HTML)])
+    const jar = createCookieJar()
+    await expect(login(jar, params, fetchImpl)).rejects.toThrow(TheearthClientError)
+  })
+
+  it('follows the forced-login flow on overlap session and succeeds via redirect', async () => {
+    const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(OVERLAP_SESSION_HTML), redirect('/F-VOS0010.aspx')])
+    const jar = createCookieJar()
+    await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
+  })
+
+  it('follows the forced-login flow on overlap session and succeeds via logged-in marker', async () => {
+    const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(OVERLAP_SESSION_HTML), html(LOGIN_SUCCESS_HTML)])
+    const jar = createCookieJar()
+    await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
+  })
+
+  it('throws when the forced-login flow does not reach the logged-in page', async () => {
+    const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(OVERLAP_SESSION_HTML), html(LOGIN_FAILURE_HTML)])
+    const jar = createCookieJar()
+    await expect(login(jar, params, fetchImpl)).rejects.toThrow('強制ログインに失敗しました')
+  })
+
+  it('throws when an overlap session form is detected but btnForced is missing', async () => {
+    const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(OVERLAP_SESSION_NO_BUTTON_HTML)])
+    const jar = createCookieJar()
+    await expect(login(jar, params, fetchImpl)).rejects.toThrow('btnForced')
+  })
+
+  it('falls back to a default caption when btnForced has no value attribute', async () => {
+    const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(OVERLAP_SESSION_NO_VALUE_HTML), redirect('/ok')])
+    const jar = createCookieJar()
+    await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
+  })
+
+  it('sends the accumulated cookie jar on subsequent requests', async () => {
+    // Response の Set-Cookie round-trip はテスト環境 (happy-dom 等) 依存の実装差が
+    // あるため、jar を直接シードして Cookie ヘッダ送信側 (fetchWithJar) だけを
+    // 検証する (Set-Cookie 受信側は ingestSetCookie の直接テストで別途カバー済み)。
+    const jar = createCookieJar()
+    jar.cookies.set('ASP.NET_SessionId', 'abc123')
+    const seenCookieHeaders: Array<string | null> = []
+    const fetchImpl = (async (_url, init) => {
+      seenCookieHeaders.push(new Headers(init?.headers).get('cookie'))
+      return seenCookieHeaders.length === 1 ? html(LOGIN_PAGE_HTML) : html(LOGIN_SUCCESS_HTML)
+    }) as FetchLike
+    await login(jar, params, fetchImpl)
+    expect(seenCookieHeaders).toEqual(['ASP.NET_SessionId=abc123', 'ASP.NET_SessionId=abc123'])
+  })
+})
+
+describe('downloadCsvZip', () => {
+  const range = { startDate: '2026-07-01', endDate: '2026-07-02' }
+
+  it('downloads via the 2-stage POST flow', async () => {
+    const fetchImpl = sequenceFetch([html(csvPageHtml()), html(STAGE1_CONFIRM_HTML), zipResponse()])
+    const jar = createCookieJar()
+    const buf = await downloadCsvZip(jar, range, fetchImpl)
+    expect(new Uint8Array(buf).slice(0, 4)).toEqual(new Uint8Array([0x50, 0x4b, 0x03, 0x04]))
+  })
+
+  it('downloads directly when stage 1 already returns the ZIP', async () => {
+    const fetchImpl = sequenceFetch([html(csvPageHtml()), zipResponse()])
+    const jar = createCookieJar()
+    const buf = await downloadCsvZip(jar, range, fetchImpl)
+    expect(new Uint8Array(buf).slice(0, 4)).toEqual(new Uint8Array([0x50, 0x4b, 0x03, 0x04]))
+  })
+
+  it('throws loudly when a required CSV form field is missing (page structure changed)', async () => {
+    const fetchImpl = sequenceFetch([html(csvPageHtml({ omit: 'btnCsv' }))])
+    const jar = createCookieJar()
+    await expect(downloadCsvZip(jar, range, fetchImpl)).rejects.toThrow('btnCsv')
+  })
+
+  it('throws loudly when the stage-2 output button is missing', async () => {
+    const fetchImpl = sequenceFetch([html(csvPageHtml()), html(STAGE1_CONFIRM_NO_OUTPUT_HTML)])
+    const jar = createCookieJar()
+    await expect(downloadCsvZip(jar, range, fetchImpl)).rejects.toThrow(TheearthClientError)
+  })
+
+  it('throws loudly when the final response is not a real ZIP (silent-200 guard)', async () => {
+    const fetchImpl = sequenceFetch([
+      html(csvPageHtml()),
+      html(STAGE1_CONFIRM_HTML),
+      new Response(new Uint8Array([0x3c, 0x68, 0x74, 0x6d, 0x6c]), {
+        status: 200,
+        headers: { 'content-type': 'application/octet-stream' },
+      }),
+    ])
+    const jar = createCookieJar()
+    await expect(downloadCsvZip(jar, range, fetchImpl)).rejects.toThrow(TheearthClientError)
+  })
+
+  it('treats a stage-1 response with no Content-Type header as an HTML confirmation page', async () => {
+    const fetchImpl = sequenceFetch([html(csvPageHtml()), htmlNoContentType(STAGE1_CONFIRM_HTML), zipResponse()])
+    const jar = createCookieJar()
+    const buf = await downloadCsvZip(jar, range, fetchImpl)
+    expect(new Uint8Array(buf).slice(0, 4)).toEqual(new Uint8Array([0x50, 0x4b, 0x03, 0x04]))
+  })
+
+  it('falls back to a default caption when the stage-2 output button has no value attribute', async () => {
+    const fetchImpl = sequenceFetch([html(csvPageHtml()), html(STAGE1_CONFIRM_NO_VALUE_HTML), zipResponse()])
+    const jar = createCookieJar()
+    const buf = await downloadCsvZip(jar, range, fetchImpl)
+    expect(new Uint8Array(buf).slice(0, 4)).toEqual(new Uint8Array([0x50, 0x4b, 0x03, 0x04]))
+  })
+})
+
+describe('scrapeViaHttp', () => {
+  it('runs login then download and reports progress in order', async () => {
+    const fetchImpl = sequenceFetch([
+      html(LOGIN_PAGE_HTML),
+      html(LOGIN_SUCCESS_HTML),
+      html(csvPageHtml()),
+      html(STAGE1_CONFIRM_HTML),
+      zipResponse(),
+    ])
+    const steps: string[] = []
+    const buf = await scrapeViaHttp(
+      {
+        compId: '27324455',
+        userName: 'user1',
+        userPass: 'pass1',
+        startDate: '2026-07-01',
+        endDate: '2026-07-02',
+      },
+      (step) => steps.push(step),
+      fetchImpl,
+    )
+    expect(steps).toEqual(['login', 'download', 'done'])
+    expect(new Uint8Array(buf).slice(0, 4)).toEqual(new Uint8Array([0x50, 0x4b, 0x03, 0x04]))
+  })
+})

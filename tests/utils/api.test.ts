@@ -38,6 +38,7 @@ import {
   recalculateDriversBatch,
   triggerScrapeStream,
   initScraperRelay,
+  buildScraperZipUrl,
   splitCsvAllStream,
 } from '~/utils/api'
 import {
@@ -1183,6 +1184,22 @@ describe('api', () => {
       await new Promise(r => setTimeout(r, 0))
       for (const ws of MockWebSocket.instances.slice(2)) ws.close()
       await Promise.all([p1, p2])
+    })
+  })
+
+  describe.runIf(!isLive)('buildScraperZipUrl', () => {
+    it('converts a wss:// relay URL to https://', () => {
+      initScraperRelay('wss://dtako.ippoan.org')
+      expect(buildScraperZipUrl('/scraper-zip/27324455/req-1')).toBe(
+        'https://dtako.ippoan.org/scraper-zip/27324455/req-1',
+      )
+    })
+
+    it('converts a ws:// relay URL to http:// (local dev)', () => {
+      initScraperRelay('ws://relay-test')
+      expect(buildScraperZipUrl('/scraper-zip/27324455/req-1')).toBe(
+        'http://relay-test/scraper-zip/27324455/req-1',
+      )
     })
   })
 
