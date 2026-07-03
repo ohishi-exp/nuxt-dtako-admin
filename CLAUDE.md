@@ -209,33 +209,42 @@ dtako 運行ログ (csvdata.zip) の取得トリガー UI。実処理は `nuxt-d
 無く、requestId (128bit UUID) を知っていること + 単回性 + 短命 TTL が capability-URL
 としての防御 (WS 到達自体は既存の auth-worker introspect で認証済み)。
 
-### rust-alc-api への自動アップロード (`DTAKO_DEVICE_CREDENTIALS`)
+### rust-alc-api への自動アップロード (`AUTH_WORKER` service binding + alc-internal-proxy)
 
-`http` モードは zip 取得後、`DTAKO_DEVICE_CREDENTIALS` (dtako-scraper の Rust 版
-`DeviceCredential` map と同一 JSON shape: `{tenant_id: {device_id, device_secret}}`)
-が設定されていれば、dtako-scraper の Rust 版と同じプロトコル
-(`./device-upload.ts`) で rust-alc-api に自動アップロードする:
+`http` モードは zip 取得後、`INTERNAL_SHARED_SECRET` が設定されていれば
+`./alc-internal-upload.ts` で rust-alc-api に自動アップロードする。
 
-1. auth-worker `POST /device/token` で device JWT を発行 (応答の `tenant_id` が
-   `DTAKO_ACCOUNTS` 側の `tenant_id` と一致するか必ず確認、不一致は loud fail)
-2. `POST /device-data-proxy/api/upload` (device JWT 付き multipart) で
-   rust-alc-api に転送 (device-data-proxy が JWT の `tenant_id` claim から
-   `X-Tenant-ID` を注入するため client 側は tenant を詐称できない)
+**device pairing は使わない** (当初 PR #86 で device credential 経由アップロード
+を実装したが再考して撤回、Refs ohishi-exp/dtako-scraper#22)。この DO はブラウザ
+JWT を持たない server-to-server caller で、かつ `comp_id` は複数 tenant に
+またがりうる (`DTAKO_ACCOUNTS` は tenant 横断の1つの JSON 配列、
+`app/pages/scraper.vue` の `compIdOptions` もハードコードされた全社共通リストで、
+ログインしている管理者の tenant とは無関係に任意の comp_id をトリガーできる)。
+よって以下のどちらでもなく:
+
+- `device-data-proxy` (device JWT が要る = Worker が device pairing するのは不自然)
+- `alc-proxy` (browser JWT の tenant_id を逆引き) — トリガーした管理者の tenant
+  と comp_id の tenant が一致するとは限らず、誤 tenant 書き込みの恐れがある
+
+**`alc-internal-proxy` の shared-secret 経路** (email-receiver が
+`/api/dtako/tickets` で使うのと同じ、Refs ippoan/rust-alc-api#434 caller #4) を
+使う。`AUTH_WORKER` service binding (Worker→Worker in-process fetch、introspect
+と共用) 経由で `/alc-internal-proxy/api/upload` を叩き、`X-Alc-Proxy-Secret`
+(= `INTERNAL_SHARED_SECRET`) + `X-Tenant-ID` (= `DTAKO_ACCOUNTS` から解決した
+**account.tenant_id**、comp_id に紐づく正しい tenant) を渡す。OIDC mint / rust
+向け `X-Internal-Shared-Secret` 付与は auth-worker (`alc-internal-proxy.ts`) 側に
+集約されている。
 
 進捗は WS の `progress` イベント (`step: "upload"`) で `app/pages/scraper.vue` に
-表示される。`DTAKO_DEVICE_CREDENTIALS` 未設定の間は自動アップロードをスキップし
+表示される。`INTERNAL_SHARED_SECRET` 未設定の間は自動アップロードをスキップし
 zip ダウンロードのみ提供する (fail-closed にはしない、機能低下のみ)。
-`DTAKO_ACCOUNTS` と同様、値に秘密 (`device_secret`) を含むため **dashboard の
-plain Environment Variable**として Worker (staging:
-`nuxt-dtako-admin-scraper-relay-staging`) の Settings → Variables and Secrets
-から追加する。
 
 ### 関連ファイル
 
 | ファイル | 役割 |
 |---|---|
 | `workers/dtako-scraper-relay/src/theearth-client.ts` | ブラウザレス HTTP クライアント (cookie jar / VIEWSTATE 抽出 / 2段階 CSV POST / ZIP magic assert) |
-| `workers/dtako-scraper-relay/src/device-upload.ts` | device credential 経由の rust-alc-api 自動アップロード (`/device/token` + `/device-data-proxy/api/upload`) |
+| `workers/dtako-scraper-relay/src/alc-internal-upload.ts` | `AUTH_WORKER` service binding 経由の rust-alc-api 自動アップロード (`/alc-internal-proxy/api/upload`、multipart body 手組み) |
 | `workers/dtako-scraper-relay/src/dtako-scraper-relay-do.ts` | `DtakoScraperRelayDO`。`SCRAPER_MODE` で vpc-relay / http を分岐、comp_id 単位の直列化キュー、アップロード進捗の WS 配信 |
 | `workers/dtako-scraper-relay/src/index.ts` | `comp_id` (http 用) / `session` (vpc-relay 用) で DO へ routing、`/scraper-zip/*` 転送 |
 | `worker/index.ts` | app 本体の entry。`/ws/scraper` と `/scraper-zip/*` を SCRAPER_RELAY service binding に転送 |

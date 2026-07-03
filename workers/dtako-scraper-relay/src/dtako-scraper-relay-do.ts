@@ -24,11 +24,20 @@
  * 常に active になる。http 経路は `ctx.waitUntil` でスクレイプ完了まで active を
  * 維持する。browser 側だけ Hibernatable API を使うのは、org 標準の「DO の WS は
  * 必ず Hibernatable API 経由」を満たすため。
+ *
+ * auth-worker 呼び出しは全て `AUTH_WORKER` service binding 経由 (Worker→Worker
+ * in-process fetch、素の公開 fetch より低遅延)。SCRAPER_MODE=http で取得した zip の
+ * rust-alc-api 自動アップロードも、device pairing (device JWT) ではなく
+ * `/alc-internal-proxy/api/upload` (shared-secret 経路、`./alc-internal-upload.ts`)
+ * を使う — この DO はブラウザ JWT を持たない server-to-server caller で、かつ
+ * `comp_id` は複数 tenant にまたがりうるため、tenant は DTAKO_ACCOUNTS (comp_id ->
+ * tenant_id) から解決した値を明示 X-Tenant-ID として渡す (Refs
+ * ohishi-exp/dtako-scraper#22, ippoan/rust-alc-api#434)。
  */
 import { DurableObject } from "cloudflare:workers";
 import { decideRelayAuth, type IntrospectResult } from "./auth-decision";
 import { scrapeViaHttp, TheearthClientError } from "./theearth-client";
-import { uploadDtakoZip, type DeviceCredential } from "./device-upload";
+import { uploadDtakoZipViaAlcInternalProxy } from "./alc-internal-upload";
 
 /** `DTAKO_ACCOUNTS` (dtako-scraper の Rust 版と同一 JSON shape) の1エントリ。 */
 interface DtakoAccountRaw {
@@ -36,13 +45,6 @@ interface DtakoAccountRaw {
   user_name: string;
   user_pass: string;
   tenant_id: string;
-}
-
-/** `DTAKO_DEVICE_CREDENTIALS` (dtako-scraper の Rust 版 `DeviceCredential` map と
- * 同一 JSON shape、`{tenant_id: {device_id, device_secret}}`) の1エントリ。 */
-interface DeviceCredentialRaw {
-  device_id: string;
-  device_secret: string;
 }
 
 interface StoredZip {
@@ -64,10 +66,17 @@ async function resolveSecret(binding: unknown): Promise<string> {
 
 export interface RelayEnv {
   RELAY: DurableObjectNamespace;
-  /** auth-worker introspect 用 shared secret (CF Secrets Store binding)。 */
+  /** auth-worker introspect / alc-internal-proxy 呼び出し用 shared secret
+   * (CF Secrets Store binding、`X-Alc-Proxy-Secret` として consumer worker
+   * proof に使う)。 */
   INTERNAL_SHARED_SECRET?: unknown;
-  /** auth-worker origin (wrangler vars と共有)。 */
+  /** auth-worker origin (wrangler vars と共有)。introspect の絶対 URL 組み立てにのみ使う
+   * (service binding は host を無視するため、値そのものは到達性に影響しない)。 */
   NUXT_PUBLIC_AUTH_WORKER_URL?: string;
+  /** auth-worker への service binding (Worker→Worker in-process fetch)。
+   * `/auth/introspect` と `/alc-internal-proxy/api/upload`
+   * (ohishi-exp/dtako-scraper#22 の自動アップロード) の両方をこれ経由で叩く。 */
+  AUTH_WORKER: Fetcher;
   /**
    * Workers VPC binding (beta) — kagoya_tunnel (Tunnel ID
    * e690242e-06cb-43a6-b2f5-67dfec95ca46) 経由で dtako-scraper (VPS
@@ -90,15 +99,6 @@ export interface RelayEnv {
    * WS 経由でその旨をエラー通知する (fail-closed、クラッシュはしない)。
    */
   DTAKO_ACCOUNTS?: unknown;
-  /**
-   * dtako-scraper の Rust 版 `DTAKO_DEVICE_CREDENTIALS` と同一 JSON shape
-   * (`{tenant_id: {device_id, device_secret}}`) の CF Secrets Store binding。
-   * 取得した zip を rust-alc-api に自動アップロードするために使う
-   * (auth-worker `/device/token` + `/device-data-proxy/api/upload`、
-   * `./device-upload.ts` 参照)。未設定の間は自動アップロードをスキップし、
-   * 手動ダウンロード用の zip_url だけを返す (fail-closed ではなく機能低下のみ)。
-   */
-  DTAKO_DEVICE_CREDENTIALS?: unknown;
 }
 
 export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
@@ -117,8 +117,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /**
-   * auth-worker `/auth/introspect` を直接叩く (DO は h3 context を持たないので
-   * @ippoan/auth-client/server の requireAuth は使えない)。
+   * auth-worker `/auth/introspect` を service binding 経由で叩く (DO は h3 context
+   * を持たないので @ippoan/auth-client/server の requireAuth は使えない)。素の
+   * `fetch()` ではなく `AUTH_WORKER` service binding を使う (Worker→Worker
+   * in-process、公開 fetch より低遅延・DNS/TLS 不要)。
    */
   private async introspect(
     token: string,
@@ -129,7 +131,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const authWorkerUrl =
       this.env.NUXT_PUBLIC_AUTH_WORKER_URL || "https://auth.ippoan.org";
     try {
-      const res = await fetch(`${authWorkerUrl}/auth/introspect`, {
+      const res = await this.env.AUTH_WORKER.fetch(`${authWorkerUrl}/auth/introspect`, {
         method: "POST",
         headers: {
           Authorization: sharedSecret,
@@ -319,22 +321,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       }
       const zipUrl = `/scraper-zip/${encodeURIComponent(params.compId)}/${requestId}`;
 
-      // rust-alc-api への自動アップロード (dtako-scraper の Rust 版と同じ device
-      // credential 経由アップロード)。DTAKO_DEVICE_CREDENTIALS 未設定の間は機能低下
-      // (zip ダウンロードのみ) として扱い、fail-closed にはしない。
-      const deviceCredential = await this.resolveDeviceCredential(account.tenant_id);
+      // rust-alc-api への自動アップロード。auth-worker `/alc-internal-proxy`
+      // (shared-secret 経路、AUTH_WORKER service binding) 経由で account.tenant_id
+      // (DTAKO_ACCOUNTS の comp_id -> tenant_id) を明示 X-Tenant-ID として渡す。
+      // device pairing 不要、INTERNAL_SHARED_SECRET は introspect と共用。
+      const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
       let resultStatus: "success" | "error" = "success";
       let resultMessage: string;
-      if (deviceCredential) {
+      if (sharedSecret) {
         this.sendSafely(server, { event: "progress", comp_id: params.compId, step: "upload" });
         try {
-          const authWorkerUrl = this.env.NUXT_PUBLIC_AUTH_WORKER_URL || "https://auth.ippoan.org";
-          const uploadBody = await uploadDtakoZip(
-            authWorkerUrl,
-            deviceCredential,
-            account.tenant_id,
-            "csvdata.zip",
-            zip,
+          const uploadBody = await uploadDtakoZipViaAlcInternalProxy(
+            { sharedSecret, tenantId: account.tenant_id, filename: "csvdata.zip", zipBytes: zip },
+            this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER),
           );
           resultMessage = `アップロード完了: ${uploadBody.slice(0, 300)}`;
         } catch (err) {
@@ -344,7 +343,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           }`;
         }
       } else {
-        resultMessage = `${zip.byteLength} bytes (DTAKO_DEVICE_CREDENTIALS 未設定のため自動アップロードはスキップ、手動ダウンロードのみ)`;
+        resultMessage = `${zip.byteLength} bytes (INTERNAL_SHARED_SECRET 未設定のため自動アップロードはスキップ、手動ダウンロードのみ)`;
       }
 
       this.sendSafely(server, {
@@ -376,21 +375,6 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return null;
     }
     return accounts.find((a) => a.comp_id === compId) ?? null;
-  }
-
-  private async resolveDeviceCredential(tenantId: string): Promise<DeviceCredential | null> {
-    const raw = await resolveSecret(this.env.DTAKO_DEVICE_CREDENTIALS);
-    if (!raw) return null;
-    let map: Record<string, DeviceCredentialRaw>;
-    try {
-      map = JSON.parse(raw);
-    } catch {
-      console.error("DtakoScraperRelayDO: DTAKO_DEVICE_CREDENTIALS is not valid JSON");
-      return null;
-    }
-    const entry = map[tenantId];
-    if (!entry) return null;
-    return { deviceId: entry.device_id, deviceSecret: entry.device_secret };
   }
 
   /** `/scraper-zip/:compId/:requestId` — 1回だけ取得できる zip ダウンロード。 */
