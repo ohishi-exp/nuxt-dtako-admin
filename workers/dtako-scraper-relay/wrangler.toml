@@ -52,3 +52,6 @@ service_id = "019f20af-c6ac-7dd0-8381-ea22add4bd40"
 
 [env.staging.vars]
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
+# ohishi-exp/dtako-scraper#22 のブラウザレス化を staging で試験する (DTAKO_ACCOUNTS は
+# 値に秘密を含むため wrangler.toml には置かず、dashboard の plain var で別途投入する)。
+SCRAPER_MODE = "http"
