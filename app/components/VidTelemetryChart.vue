@@ -14,8 +14,8 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
 
 const WIDTH = 1400
 const HEIGHT = 260
-const PAD_LEFT = 28
-const PAD_RIGHT = 34
+const PAD_LEFT = 46
+const PAD_RIGHT = 58
 const PLOT_LEFT = PAD_LEFT
 const PLOT_RIGHT = WIDTH - PAD_RIGHT
 
@@ -157,12 +157,12 @@ function onPointerUp() {
           :stroke="gl.emphasize ? '#6b7280' : '#374151'"
           stroke-width="1" vector-effect="non-scaling-stroke"
         />
-        <text :x="PLOT_LEFT - 4" :y="gl.y" text-anchor="end" dominant-baseline="middle" font-size="10" fill="#9ca3af">{{ gl.label }}</text>
+        <text :x="PLOT_LEFT - 4" :y="gl.y" text-anchor="end" dominant-baseline="middle" font-size="20" fill="#9ca3af">{{ gl.label }}</text>
       </g>
       <!-- 右軸: 速度 (km/h) の補助線 -->
       <text
         v-for="gl in speedGridLines" :key="`spd-${gl.label}`"
-        :x="PLOT_RIGHT + 4" :y="gl.y" text-anchor="start" dominant-baseline="middle" font-size="10" fill="#9ca3af"
+        :x="PLOT_RIGHT + 4" :y="gl.y" text-anchor="start" dominant-baseline="middle" font-size="20" fill="#9ca3af"
       >{{ gl.label }}</text>
 
       <polyline
