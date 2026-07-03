@@ -10,6 +10,12 @@ main = "src/index.ts"
 # `keep_vars` は top-level only (named environment 配下には書けない)。
 keep_vars = true
 
+# この worker は app 本体 (nuxt-dtako-admin) からの service binding (SCRAPER_RELAY)
+# 経由でのみアクセスさせる。`workers_dev = false` で `*.workers.dev` の公開ルートを
+# 無効化し、外部から /dvr-api/* 等を直接叩けないようにする (service binding は worker
+# 名で解決するため公開ルート無しでも app 経由アクセスは無傷)。
+workers_dev = false
+
 [[durable_objects.bindings]]
 name = "RELAY"
 class_name = "DtakoScraperRelayDO"
@@ -45,6 +51,8 @@ NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth.ippoan.org"
 
 [env.staging]
 name = "nuxt-dtako-admin-scraper-relay-staging"
+# staging も同様に公開ルートを閉じ、app (service binding) 経由のみにする。
+workers_dev = false
 
 [[env.staging.durable_objects.bindings]]
 name = "RELAY"

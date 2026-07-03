@@ -9,6 +9,7 @@
  */
 import {
   BASE_URL,
+  extractHiddenFields,
   fetchWithJar,
   TheearthClientError,
   type CookieJar,
@@ -651,27 +652,180 @@ export async function getVehicleStates(
 
 const VEHICLE_LOG_DAY_RE = /^\d{4}\/\d{2}\/\d{2}$/;
 
-/** 車輌 1 台の動態履歴 GPS 軌跡 (`VehicleStateTable`)。日付は "YYYY/MM/DD"。 */
+// 動態履歴ページ (F-DOV0010[LogDataDisp].aspx)。VenusBridge の VehicleStateTable は
+// GPS 軌跡しか返さず **速度・回転数が全点 0** になる (2026-07-03 実機確認)。速度・回転数・
+// 住所・走行状態・乗務員は、このページを 2 段階 postback して返る HTML の
+// `VehicleDisp` テーブル (各セル `<span id="lstVehicle_lbl<Field>_<row>">値</span>`) に
+// しか載っていないため、API ではなく postback + span パースで取得する。
+const VEHICLE_LOG_PATH = "/WebVenus/F-DOV0010[LogDataDisp].aspx";
+
+/** 動態履歴 1 点 (VehicleDisp テーブルの 1 行)。VehicleStateTable API と違い速度・
+ * 回転数・住所・走行状態・乗務員まで取れる。 */
+export interface VehicleLogPoint {
+  /** データ日時 "MM/DD HH:mm" (theearth サーバーローカル)。 */
+  dataDatetime: string | null;
+  /** 通信日時 "MM/DD HH:mm"。 */
+  comuDatetime: string | null;
+  /** 十進度 (DDMM から変換済み)。GPS 未捕捉は null。 */
+  latitude: number | null;
+  longitude: number | null;
+  /** 速度 [km/h]。 */
+  speed: number | null;
+  /** エンジン回転数 [rpm]。 */
+  revo: number | null;
+  /** 総合状態 (運転 / 停車 等、lblAllState)。 */
+  state: string | null;
+  /** 道路種別 (高速 / 一般 等、lblState2)。 */
+  roadType: string | null;
+  /** 住所 (lblAddressDispC)。 */
+  address: string | null;
+  /** 乗務員 ("(コード)氏名")。 */
+  driverName: string | null;
+  /** データ種別 (動態 / イベント 等、lblReciveTypeName)。 */
+  dataType: string | null;
+}
+
+/** postback 応答がログイン画面に戻されているか (セッション切れの検出)。 */
+function isLoginRedirect(html: string): boolean {
+  return html.includes("txtPass") || html.includes("F-OES1010");
+}
+
+/** `application/x-www-form-urlencoded` の postback を送る (ASP.NET WebForms)。 */
+function postFormEncoded(
+  jar: CookieJar,
+  url: string,
+  params: URLSearchParams,
+  fetchImpl: FetchLike,
+): Promise<Response> {
+  return fetchWithJar(
+    jar,
+    url,
+    {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" },
+      body: params.toString(),
+    },
+    fetchImpl,
+  );
+}
+
+/** VehicleDisp テーブルの 1 セル `<span id="lstVehicle_<field>_<idx>" ...>値</span>` を
+ * 取り出す (中の入れ子タグは除去、空文字は null)。 */
+function extractLogCell(html: string, field: string, idx: number): string | null {
+  const m = html.match(
+    new RegExp(`id="lstVehicle_${field}_${idx}"[^>]*>([\\s\\S]*?)</span>`),
+  );
+  if (!m) return null;
+  const v = m[1].replace(/<[^>]*>/g, "").trim();
+  return v === "" ? null : v;
+}
+
+function logCellNumber(html: string, field: string, idx: number): number | null {
+  const s = extractLogCell(html, field, idx);
+  if (s === null) return null;
+  const n = Number(s);
+  return Number.isNaN(n) ? null : n;
+}
+
+/** postback 応答 HTML の VehicleDisp テーブルを VehicleLogPoint[] に変換する。 */
+export function parseVehicleLogRows(html: string): VehicleLogPoint[] {
+  // 行 index は GPS 緯度セルの id 列挙で確定する (全行に必ず存在)。
+  const indexes = [...html.matchAll(/id="lstVehicle_lblGPSLatitude_(\d+)"/g)].map((m) => Number(m[1]));
+  return indexes.map((i) => ({
+    dataDatetime: extractLogCell(html, "lblDataDateTime", i),
+    comuDatetime: extractLogCell(html, "lblComuDateTime", i),
+    latitude: convertDdmmToDegrees(extractLogCell(html, "lblGPSLatitude", i)),
+    longitude: convertDdmmToDegrees(extractLogCell(html, "lblGPSLongitude", i)),
+    speed: logCellNumber(html, "lblSpeed", i),
+    revo: logCellNumber(html, "lblRevo", i),
+    state: extractLogCell(html, "lblAllState", i),
+    roadType: extractLogCell(html, "lblState2", i),
+    address: extractLogCell(html, "lblAddressDispC", i),
+    driverName: extractLogCell(html, "lblDriverName", i),
+    dataType: extractLogCell(html, "lblReciveTypeName", i),
+  }));
+}
+
+/**
+ * 車輌 1 台の動態履歴 (速度・回転数・住所・状態付き)。実ページ F-DOV0010 と同じ
+ * **2 段階 postback** で取る (2026-07-03 cdp 実機確定):
+ *   1. GET でページ + hidden (__VIEWSTATE 等) 取得
+ *   2. `btnBranch=絞込` postback で ddlVehicle に車輌一覧をロード (初期ページには
+ *      車輌が入っておらず、ここを飛ばすと event validation で HTTP 500)
+ *   3. `btnDataDisp=動態履歴` postback で VehicleDisp テーブルを取得 → span パース
+ * 各 postback は直前応答の hidden を使う (event validation を通すため)。
+ */
 export async function getVehicleLogTrack(
   jar: CookieJar,
   vehicleCd: string,
   startDay: string,
   endDay: string,
   fetchImpl: FetchLike = fetch,
-): Promise<VehicleStatePoint[]> {
+): Promise<VehicleLogPoint[]> {
   if (!/^\d+$/.test(vehicleCd)) {
     throw new DvrSearchParamError(`車輌CDは数値で指定してください: "${vehicleCd}"`);
   }
   if (!VEHICLE_LOG_DAY_RE.test(startDay) || !VEHICLE_LOG_DAY_RE.test(endDay)) {
     throw new DvrSearchParamError('日付は "YYYY/MM/DD" 形式で指定してください');
   }
-  const d = await callVenusBridgeMethod(
-    jar,
-    "VehicleStateTable",
-    { VehicleCD: vehicleCd, dtmST: startDay, dtmED: endDay },
-    fetchImpl,
-  );
-  return assertVehicleStateArray(d, "VehicleStateTable").map(mapVehicleStateRow);
+  const url = `${BASE_URL}${VEHICLE_LOG_PATH}`;
+  // ddlVehicle の option 値は 10 桁ゼロ埋め (実測 "0000001802")。
+  const ddlVehicleValue = vehicleCd.padStart(10, "0");
+
+  const getRes = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl);
+  if (!getRes.ok) {
+    throw new TheearthClientError(`動態履歴ページの取得が HTTP ${getRes.status} を返しました`);
+  }
+  const html1 = await getRes.text();
+  if (isLoginRedirect(html1)) {
+    throw new VenusSessionExpiredError(
+      "動態履歴ページがログイン画面を返しました — theearth セッションが切れています",
+    );
+  }
+
+  // 1 段目: 全事業所で絞込 → ddlVehicle に全車輌をロード。
+  const branchParams = new URLSearchParams({
+    ...extractHiddenFields(html1),
+    __EVENTTARGET: "",
+    __EVENTARGUMENT: "",
+    __LASTFOCUS: "",
+    ddlBranch: "00000000",
+    txtVehicleCD: "",
+    ddlVehicle: "0000000000",
+    txtStartDate: startDay,
+    txtEndDate: endDay,
+    btnBranch: "絞込",
+  });
+  const branchRes = await postFormEncoded(jar, url, branchParams, fetchImpl);
+  if (!branchRes.ok) {
+    throw new TheearthClientError(`動態履歴の事業所絞込が HTTP ${branchRes.status} を返しました`);
+  }
+  const html2 = await branchRes.text();
+
+  // 2 段目: 車輌 + 日付範囲で動態履歴を表示。
+  const dispParams = new URLSearchParams({
+    ...extractHiddenFields(html2),
+    __EVENTTARGET: "",
+    __EVENTARGUMENT: "",
+    __LASTFOCUS: "",
+    ddlBranch: "00000000",
+    txtVehicleCD: vehicleCd,
+    ddlVehicle: ddlVehicleValue,
+    txtStartDate: startDay,
+    txtEndDate: endDay,
+    btnDataDisp: "動態履歴",
+  });
+  const dispRes = await postFormEncoded(jar, url, dispParams, fetchImpl);
+  if (!dispRes.ok) {
+    throw new TheearthClientError(`動態履歴の表示が HTTP ${dispRes.status} を返しました`);
+  }
+  const html3 = await dispRes.text();
+  if (isLoginRedirect(html3)) {
+    throw new VenusSessionExpiredError(
+      "動態履歴の表示がログイン画面を返しました — theearth セッションが切れています",
+    );
+  }
+  return parseVehicleLogRows(html3);
 }
 
 // --- DVR 動画ファイル (VenusBridge 経由、Refs #90 実ページ検証済み) ---

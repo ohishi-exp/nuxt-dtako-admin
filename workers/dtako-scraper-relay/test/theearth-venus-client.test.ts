@@ -882,19 +882,99 @@ describe("getVehicleStates", () => {
   });
 });
 
+/** 動態履歴 postback 応答の VehicleDisp テーブル HTML (1 行分)。実ページ準拠で
+ * `<span id="lstVehicle_lbl<Field>_<idx>">値</span>` を並べる。 */
+function vehicleDispHtml(rows: Array<Record<string, string>>): string {
+  const cell = (field: string, idx: number, val: string) =>
+    `<span id="lstVehicle_${field}_${idx}" style="text-align:center;">${val}</span>`;
+  const body = rows
+    .map((r, i) =>
+      Object.entries(r)
+        .map(([field, val]) => cell(field, i, val))
+        .join(""),
+    )
+    .join("");
+  return `<table id="VehicleDisp">${body}</table>`;
+}
+
+/** GET (hidden) → 絞込 postback → 動態履歴 postback の 3 応答を順に返す fetch。 */
+function logTrackFetch(finalHtml: string): { fetchImpl: FetchLike, bodies: string[] } {
+  const bodies: string[] = [];
+  const hiddenHtml = '<input type="hidden" id="__VIEWSTATE" value="vs" />'
+    + '<input type="hidden" id="__EVENTVALIDATION" value="ev" />';
+  const responses = [
+    new Response(hiddenHtml, { status: 200 }), // GET
+    new Response(hiddenHtml, { status: 200 }), // 絞込 postback
+    new Response(finalHtml, { status: 200 }), // 動態履歴 postback
+  ];
+  let i = 0;
+  const fetchImpl: FetchLike = async (_url, init) => {
+    if (init?.body) bodies.push(init.body as string);
+    const res = responses[i];
+    i += 1;
+    if (!res) throw new Error(`unexpected extra fetch call (#${i})`);
+    return res;
+  };
+  return { fetchImpl, bodies };
+}
+
 describe("getVehicleLogTrack", () => {
-  it("sends VehicleCD/dtmST/dtmED and maps track points", async () => {
-    let requestBody: string | undefined;
-    const fetchImpl: FetchLike = async (_url, init) => {
-      requestBody = init?.body as string;
-      return jsonResponse({ d: [vehicleStateRaw({ CurrentWorkName: null })] });
-    };
+  it("runs the 2-stage postback and parses speed/revo/address from VehicleDisp", async () => {
+    const html = vehicleDispHtml([
+      {
+        lblGPSLatitude: "34184639",
+        lblGPSLongitude: "132167870",
+        lblDataDateTime: "07/03 00:01",
+        lblComuDateTime: "07/03 00:01",
+        lblSpeed: "82",
+        lblRevo: "1150",
+        lblAllState: "運転",
+        lblState2: "高速",
+        lblAddressDispC: "広島県廿日市市大野",
+        lblDriverName: "(1442)有森　和彦",
+        lblReciveTypeName: "動態",
+      },
+    ]);
+    const { fetchImpl, bodies } = logTrackFetch(html);
     const jar = createCookieJar();
-    const points = await getVehicleLogTrack(jar, "2131", "2026/07/03", "2026/07/03", fetchImpl);
-    expect(JSON.parse(requestBody!)).toEqual({ VehicleCD: "2131", dtmST: "2026/07/03", dtmED: "2026/07/03" });
+    const points = await getVehicleLogTrack(jar, "1802", "2026/07/03", "2026/07/03", fetchImpl);
+
+    // 絞込 postback は btnBranch、表示 postback は btnDataDisp + ddlVehicle(10桁ゼロ埋め)
+    expect(bodies[0]).toContain("btnBranch=");
+    expect(bodies[1]).toContain("btnDataDisp=");
+    expect(bodies[1]).toContain("ddlVehicle=0000001802");
     expect(points).toHaveLength(1);
-    expect(points[0]).toMatchObject({ vehicleCd: "2131", dataDatetime: "07/03 09:42", currentWorkName: null });
-    expect(points[0]!.latitude).toBeCloseTo(32 + 53.5438 / 60, 5);
+    expect(points[0]).toMatchObject({
+      dataDatetime: "07/03 00:01",
+      comuDatetime: "07/03 00:01",
+      speed: 82,
+      revo: 1150,
+      state: "運転",
+      roadType: "高速",
+      address: "広島県廿日市市大野",
+      driverName: "(1442)有森　和彦",
+      dataType: "動態",
+    });
+    // 34184639 = 34°18.4639' (DDMM)
+    expect(points[0]!.latitude).toBeCloseTo(34 + 18.4639 / 60, 5);
+    expect(points[0]!.longitude).toBeCloseTo(132 + 16.787 / 60, 5);
+  });
+
+  it("null-fills empty cells and coerces non-numeric speed/revo to null", async () => {
+    const html = vehicleDispHtml([
+      { lblGPSLatitude: "0", lblGPSLongitude: "0", lblSpeed: "", lblRevo: "---", lblAddressDispC: "" },
+    ]);
+    const { fetchImpl } = logTrackFetch(html);
+    const jar = createCookieJar();
+    const points = await getVehicleLogTrack(jar, "1802", "2026/07/03", "2026/07/03", fetchImpl);
+    expect(points[0]).toMatchObject({
+      latitude: null,
+      longitude: null,
+      speed: null,
+      revo: null,
+      address: null,
+      dataDatetime: null,
+    });
   });
 
   it("rejects invalid vehicle CD / date formats without fetching", async () => {
@@ -912,11 +992,40 @@ describe("getVehicleLogTrack", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("throws when the response is not an array", async () => {
-    const fetchImpl = sequenceFetch([jsonResponse({ d: { rows: [] } })]);
+  it("throws on non-2xx at each postback stage", async () => {
     const jar = createCookieJar();
-    await expect(getVehicleLogTrack(jar, "2131", "2026/07/03", "2026/07/03", fetchImpl)).rejects.toThrow(
-      "VehicleStateTable のレスポンス形式",
-    );
+    const okHidden = () => new Response('<input id="__VIEWSTATE" value="v" />', { status: 200 });
+    await expect(
+      getVehicleLogTrack(jar, "1802", "2026/07/03", "2026/07/03", sequenceFetch([new Response("x", { status: 500 })])),
+    ).rejects.toThrow("動態履歴ページの取得");
+    await expect(
+      getVehicleLogTrack(
+        jar, "1802", "2026/07/03", "2026/07/03",
+        sequenceFetch([okHidden(), new Response("x", { status: 500 })]),
+      ),
+    ).rejects.toThrow("事業所絞込");
+    await expect(
+      getVehicleLogTrack(
+        jar, "1802", "2026/07/03", "2026/07/03",
+        sequenceFetch([okHidden(), okHidden(), new Response("x", { status: 500 })]),
+      ),
+    ).rejects.toThrow("動態履歴の表示");
+  });
+
+  it("maps a login-redirect response to VenusSessionExpiredError (GET and final)", async () => {
+    const jar = createCookieJar();
+    const okHidden = () => new Response('<input id="__VIEWSTATE" value="v" />', { status: 200 });
+    await expect(
+      getVehicleLogTrack(
+        jar, "1802", "2026/07/03", "2026/07/03",
+        sequenceFetch([new Response('<input id="txtPass" />', { status: 200 })]),
+      ),
+    ).rejects.toThrow(VenusSessionExpiredError);
+    await expect(
+      getVehicleLogTrack(
+        jar, "1802", "2026/07/03", "2026/07/03",
+        sequenceFetch([okHidden(), okHidden(), new Response("<html>F-OES1010 login</html>", { status: 200 })]),
+      ),
+    ).rejects.toThrow(VenusSessionExpiredError);
   });
 });

@@ -138,10 +138,25 @@ commit 前に済ませて loud fail 可能に)。
   `DriverName`/`GPSLatitude`/`GPSLongitude`/`DataDateTime`("MM/DD HH:mm")/
   `ComuDateTime`/`Speed`/`Revo`/`CurrentWorkName` 等 — nuxt_dtako_logs の推測実装
   (`LAT_FIELD_CANDIDATES`) はこれで確定できる。
-- **動態履歴** (F-DOV0010): GPS 軌跡は `VehicleStateTable(VehicleCD, dtmST, dtmED)`
-  (日付 "YYYY/MM/DD"、1 日 150 点前後)。**param 名は jsdebug 準拠必須** — 間違うと
-  WCF が HTTP 500 fault を返す (セッション切れ 500 と区別つかないので注意)。
-  作業イベント一覧 (リスト部) は UpdatePanel postback の server-render で未移植。
+- **動態履歴** (F-DOV0010): `VehicleStateTable(VehicleCD, dtmST, dtmED)` API は
+  **GPS 軌跡しか返さず速度・回転数が全点 0** (2026-07-03 実機確認)。速度・回転数・住所・
+  走行状態・乗務員は **2 段階 postback で返る HTML の `VehicleDisp` テーブルにしか
+  無い**ので、API ではなく postback + span パースで取る (`getVehicleLogTrack` を
+  この方式に置換済み):
+  1. `GET /WebVenus/F-DOV0010[LogDataDisp].aspx` (パスは `/WebVenus/` 必須、無いと 404)
+     → hidden (__VIEWSTATE 等)
+  2. `btnBranch=絞込` (ddlBranch=00000000) postback → **ddlVehicle に全車輌がロード**
+     される (初期 GET ページは車輌が空で、ここを飛ばして直接 btnDataDisp すると
+     **event validation で HTTP 500**「無効なポストバックまたはコールバック引数」)
+  3. `btnDataDisp=動態履歴` (txtVehicleCD=CD, ddlVehicle=**10桁ゼロ埋め**, txtStartDate/
+     txtEndDate="YYYY/MM/DD") postback → `VehicleDisp` テーブル
+  - 各 postback は**直前応答の hidden** を使う (event validation を通すため)。ボタン
+    value は日本語だがページが UTF-8 なので `URLSearchParams` でそのまま送れる。
+  - セル: `<span id="lstVehicle_lbl<Field>_<row>">値</span>`。フィールド:
+    `lblSpeed`(km/h) / `lblRevo`(rpm) / `lblGPSLatitude`・`lblGPSLongitude`(DDMM) /
+    `lblDataDateTime`・`lblComuDateTime`("MM/DD HH:mm") / `lblAllState`(運転/停車) /
+    `lblState2`(高速/一般) / `lblAddressDispC`(住所) / `lblDriverName`("(CD)氏名") /
+    `lblReciveTypeName`(動態/イベント)。行 index は `lblGPSLatitude` の id 列挙で確定。
 
 ## 映像検索: `Request_DvrDataList` (2026-07-03 実機確定、Refs #90 映像検索)
 
