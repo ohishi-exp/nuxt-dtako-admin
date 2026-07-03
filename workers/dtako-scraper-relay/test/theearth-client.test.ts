@@ -94,6 +94,26 @@ const OVERLAP_SESSION_NO_VALUE_HTML = `<html><body>
   <input type="submit" id="btnForced" name="ctl00$MainContent$btnForced" />
 </body></html>`
 
+// 単純なセッション重複: サーバは startup script で OverlapDialog(...) を呼ぶだけで
+// txtOverlapSessionID は空のまま (J-OES1010[Login].js 実機確認)。ログインフォーム
+// (txtPass) の再表示 + btnForced を含む。
+const OVERLAP_DIALOG_HTML = `<html><body><form>
+  <input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="VSOVR" />
+  <input name="txtPass" type="password" id="txtPass" />
+  <input type="text" name="txtOverlapSessionID" id="txtOverlapSessionID" value="" />
+  <input type="submit" id="btnForced" name="ctl00$MainContent$btnForced" value="hide" />
+  <script>OverlapDialog('別のセッションでログイン中です。強制ログインしますか?');</script>
+</form></body></html>`
+
+// ライセンス数超過 (定数オーバー): LicenceOverDialog(...) が呼ばれる。ログインフォーム
+// 再表示だが、単純重複と違い kick 対象選択が要るため headless 未対応 → loud fail する。
+const LICENCE_OVER_HTML = `<html><body><form>
+  <input name="txtPass" type="password" id="txtPass" />
+  <input type="text" name="txtOverlapSessionID" id="txtOverlapSessionID" value="" />
+  <input type="submit" id="btnForced" name="ctl00$MainContent$btnForced" value="hide" />
+  <script>LicenceOverDialog('ライセンス数を超過しています', 'T1', 'T2', 'btn');</script>
+</form></body></html>`
+
 function csvPageHtml(opts: { omit?: string; tableDate?: string } = {}): string {
   const tableDate = opts.tableDate ?? '26/07/01'
   const fields: Record<string, string> = {
@@ -355,6 +375,32 @@ describe('login', () => {
     const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(OVERLAP_SESSION_HTML), html(LOGIN_SUCCESS_HTML)])
     const jar = createCookieJar()
     await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
+  })
+
+  it('forced-logs-in on an OverlapDialog() prompt even when txtOverlapSessionID is empty', async () => {
+    // 単純重複 (OverlapDialog → 即 btnForced、txtOverlapSessionID は空) を強制ログインで
+    // 処理できること。旧実装はこれを「ログイン失敗」と誤判定していた (dtako-scraper#22)。
+    const bodies: string[] = []
+    let call = 0
+    const fetchImpl = (async (_url, init) => {
+      call += 1
+      if (call === 1) return html(LOGIN_PAGE_HTML)
+      if (call === 2) return html(OVERLAP_DIALOG_HTML)
+      bodies.push(String(init?.body ?? ''))
+      return redirect('/F-VOS0010.aspx')
+    }) as FetchLike
+    await expect(login(createCookieJar(), params, fetchImpl)).resolves.toBeUndefined()
+    const forced = new URLSearchParams(bodies[0])
+    expect(forced.get('txtID2')).toBe(params.compId)
+    expect(forced.get('txtPass')).toBe(params.userPass)
+    expect(forced.has('ctl00$MainContent$btnForced')).toBe(true)
+    expect(forced.get('txtOverlapSessionID')).toBe('') // 空でも送る
+  })
+
+  it('loud-fails with an actionable message on a LicenceOverDialog() (定数オーバー) prompt', async () => {
+    const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(LICENCE_OVER_HTML)])
+    const jar = createCookieJar()
+    await expect(login(jar, params, fetchImpl)).rejects.toThrow(/ライセンス数超過.*LicenceOverDialog/s)
   })
 
   it('throws when the forced-login flow lands back on the login form', async () => {
