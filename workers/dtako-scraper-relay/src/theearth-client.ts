@@ -210,18 +210,51 @@ function hasLoginForm(html: string): boolean {
 }
 
 /**
- * セッション重複プロンプトが「実際に発動しているか」を判定し、発動時はサーバが
- * txtOverlapSessionID に焼き込んだ session ID field (name+value) を返す。
+ * セッション重複プロンプトが「実際に発動しているか」を判定する。
  *
- * 注意: theearth のログインページは txtOverlapSessionID / btnForced を **常時**
- * hidden で埋めている (Refs #90 実測)。文字列の存在だけで判定すると、ID/パスワード
- * 誤りの再表示ページまで強制ログインフローに入ってしまう。重複時はサーバが
- * txtOverlapSessionID に session ID を焼き込む前提で、value が非空の時だけ発動と
- * みなす (外れた場合は describePage 付きの失敗メッセージから追える)。
+ * theearth は 2 通りで重複を通知する (`J-OES1010[Login].js` 実機確認、2026-07-03):
+ *
+ * 1. **単純なセッション重複** (同一アカウントが別セッションでログイン中):
+ *    サーバが startup script で `OverlapDialog("<message>")` を呼び、JS が
+ *    OK/Cancel ダイアログを出して OK なら `$('#btnForced').click()` する。
+ *    **この経路では txtOverlapSessionID は populate されない** (常に空のまま)。
+ * 2. **ライセンス数超過** (LicenceOver): ユーザー一覧ダイアログで選ばせ、
+ *    `ReturnLicenceOver` が `txtOverlapSessionID` に値を焼いてから btnForced を click。
+ *
+ * 旧実装は (2) の「txtOverlapSessionID に値がある」時だけ強制ログインしていたため、
+ * 圧倒的に多い (1) の経路を「ログイン失敗」と誤判定して throw していた
+ * (ohishi-exp/dtako-scraper#22 で 27324455 が踏んだ)。両経路を検出する。
+ *
+ * 注意: theearth のログインページは txtOverlapSessionID / btnForced を常時 hidden で
+ * 埋めている (Refs #90)。ID/パスワード誤りの再表示は `OverlapDialog(` を含まないので、
+ * 「`OverlapDialog(` の呼び出し」または「txtOverlapSessionID が非空」を重複シグナルと
+ * する (単なる field の存在では判定しない)。
  */
-function activeOverlapSessionField(html: string): FormFieldRef | null {
+function hasOverlapPrompt(html: string): boolean {
+  // OverlapDialog 関数の *定義* は外部 JS (J-OES1010[Login].js) にあり aspx 応答には
+  // 載らないため、aspx 応答中の `OverlapDialog(` は startup script の *呼び出し* に限る。
+  // ※ `LicenceOverDialog(` は "OverlapDialog" を含まないので誤検出しない (別処理)。
+  if (/OverlapDialog\s*\(/.test(html)) return true;
   const field = findFormFieldById(html, "txtOverlapSessionID");
-  return field && field.value ? field : null;
+  return !!(field && field.value);
+}
+
+/**
+ * ライセンス数超過 (定数オーバー) の startup script `LicenceOverDialog(...)` を検出し、
+ * 見つかればその呼び出し文字列 (診断用、credential は含まれない) を返す。
+ *
+ * この経路は単純重複 (OverlapDialog → 即 btnForced) と違い、`F-OSS1010[LoginUserList].aspx`
+ * で既存ログインユーザーを一覧して kick 対象を選び、`ReturnLicenceOver` が
+ * `txtOverlapSessionID = returnNo` を焼いてから btnForced を click する対話が要る
+ * (`J-OES1010[Login].js` 実機確認、2026-07-03)。headless での自動 kick は
+ * LoginUserList の HTML 構造 (returnNo の形式) が必要だが、当該ページは Target1/Target2
+ * を渡さないと `Page_Load` が NullReferenceException を投げる (= 実 license-over
+ * イベントを採取しないと構造が分からない)。よって現状は **検出して loud fail** に留め、
+ * 運用者に既存セッションのログアウトを促す (自動対応は実応答採取後に実装)。
+ */
+function detectLicenceOver(html: string): string | null {
+  const m = html.match(/LicenceOverDialog\s*\([^)]*\)/);
+  return m ? m[0] : null;
 }
 
 /** 想定外ページの診断用に title + タグ除去済み本文の先頭を 1 行にする
@@ -285,9 +318,9 @@ export async function login(
   }
 
   // 同一アカウントの別セッションが既にログイン中の場合、強制ログインプロンプトが出る
-  // (txtOverlapSessionID に session ID が焼き込まれる。overlapSessionActive の注意書き参照)。
-  const overlapField = activeOverlapSessionField(postHtml);
-  if (overlapField) {
+  // (`OverlapDialog(...)` の startup script、または LicenceOver 経路で txtOverlapSessionID
+  // に値が焼かれる。hasOverlapPrompt の注意書き参照)。
+  if (hasOverlapPrompt(postHtml)) {
     const hidden2 = extractHiddenFields(postHtml);
     const btnForced = findFormFieldById(postHtml, "btnForced");
     if (!btnForced) {
@@ -295,19 +328,21 @@ export async function login(
         "セッション重複フォームを検出したが btnForced が見つかりません (ページ仕様変更の可能性)",
       );
     }
-    // 強制ログイン POST は実ブラウザのフォーム送信を再現する必要がある: hidden +
-    // **credential (txtID2/txtID1/txtPass) + サーバが焼いた txtOverlapSessionID の
-    // 値** + btnForced を全て含める。credential / overlap ID を落とすとサーバに
-    // 拒否され「強制ログインに失敗しました」で必ず詰まる (Refs #90、実ページ検証済み)。
-    // btnLogin/btnCancel は押下 submit ではないので送らない。
+    // 強制ログイン POST は実ブラウザのフォーム送信 (`$('#btnForced').click()`) を再現する:
+    // hidden + credential (txtID2/txtID1/txtPass) + btnForced を含める。credential を落とすと
+    // サーバに拒否され「強制ログインに失敗しました」で詰まる (Refs #90、実ページ検証済み)。
+    // btnLogin/btnCancel は押下 submit ではないので送らない。txtOverlapSessionID は
+    // LicenceOver 経路のみ非空になる (単純重複 = OverlapDialog では空)。存在すれば
+    // その値 (空でも可) をそのまま送る。
     const forcedBody = new URLSearchParams({
       ...hidden2,
       txtID2: params.compId,
       txtID1: params.userName,
       txtPass: params.userPass,
-      [overlapField.name]: overlapField.value,
       [btnForced.name]: btnForced.value || "ログイン",
     });
+    const overlapField = findFormFieldById(postHtml, "txtOverlapSessionID");
+    if (overlapField) forcedBody.set(overlapField.name, overlapField.value);
     const forcedRes = await postForm(jar, loginUrl, forcedBody, fetchImpl, timeoutMs);
     if (forcedRes.status >= 300 && forcedRes.status < 400) return;
     const forcedHtml = await forcedRes.text();
@@ -324,6 +359,18 @@ export async function login(
   }
 
   if (looksLoggedIn(postHtml)) return;
+
+  // ライセンス数超過 (定数オーバー): 単純重複と違い kick 対象の選択が要るため
+  // headless 自動対応は未実装。紛らわしい後続エラー (CSV が ZIP でない等) にせず、
+  // ここで actionable に loud fail する (detectLicenceOver の注意書き参照)。
+  const licenceOver = detectLicenceOver(postHtml);
+  if (licenceOver) {
+    throw new TheearthClientError(
+      "ライセンス数超過 (定数オーバー) を検出しました。同一アカウントの同時ログイン数が上限に達しています。" +
+        "既存セッションをログアウトしてから再実行してください " +
+        `(headless での自動セッション整理は未対応)。診断: ${licenceOver}`,
+    );
+  }
 
   // 200 でログインページに戻された = 認証失敗 (ID/パスワード誤り) が典型。
   if (hasLoginForm(postHtml)) {
