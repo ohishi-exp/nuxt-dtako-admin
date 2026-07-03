@@ -36,7 +36,14 @@
  */
 import { DurableObject } from "cloudflare:workers";
 import { decideRelayAuth, type IntrospectResult } from "./auth-decision";
-import { createCookieJar, login, scrapeViaHttp, TheearthClientError, type CookieJar } from "./theearth-client";
+import {
+  createCookieJar,
+  login,
+  scrapeViaHttp,
+  TheearthClientError,
+  TheearthNotZipError,
+  type CookieJar,
+} from "./theearth-client";
 import { uploadDtakoZipViaAlcInternalProxy } from "./alc-internal-upload";
 import {
   buildDvrFileUrl,
@@ -66,6 +73,10 @@ interface StoredZip {
   compId: string;
   createdAt: number;
   bytes: ArrayBuffer;
+  /** 既定 application/zip。ZIP でない応答 (HTML エラーページ等) を原因調査用に保存する時に上書き。 */
+  contentType?: string;
+  /** 既定 csvdata-<compId>.zip。上に同じ。 */
+  filename?: string;
 }
 
 const ZIP_TTL_MS = 10 * 60 * 1000;
@@ -395,7 +406,33 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       this.closeSafely(server, 1000, "done");
     } catch (err) {
       const message = err instanceof TheearthClientError ? err.message : "スクレイプに失敗しました";
-      this.sendSafely(server, { event: "result", comp_id: params.compId, step: "done", status: "error", message });
+      // ZIP でない応答 (HTML エラーページ / ログインページ等) も原因調査用にダウンロード
+      // できるよう保存し、download URL を result に載せる (「でもダウンロードさせろ」対応)。
+      let zipUrl: string | undefined;
+      if (err instanceof TheearthNotZipError) {
+        const requestId = crypto.randomUUID();
+        const isHtml = err.contentType.includes("html");
+        await this.ctx.storage.put<StoredZip>(`zip:${requestId}`, {
+          compId: params.compId,
+          createdAt: Date.now(),
+          bytes: err.responseBytes,
+          contentType: err.contentType || "application/octet-stream",
+          filename: `theearth-response-${params.compId}.${isHtml ? "html" : "bin"}`,
+        });
+        const currentAlarm = await this.ctx.storage.getAlarm();
+        if (currentAlarm === null) {
+          await this.ctx.storage.setAlarm(Date.now() + ZIP_TTL_MS);
+        }
+        zipUrl = `/scraper-zip/${encodeURIComponent(params.compId)}/${requestId}`;
+      }
+      this.sendSafely(server, {
+        event: "result",
+        comp_id: params.compId,
+        step: "done",
+        status: "error",
+        message,
+        zip_url: zipUrl,
+      });
       this.sendSafely(server, { event: "done" });
       this.closeSafely(server, 1011, "scrape failed");
     }
@@ -567,8 +604,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return new Response(record.bytes, {
       status: 200,
       headers: {
-        "content-type": "application/zip",
-        "content-disposition": `attachment; filename="csvdata-${record.compId}.zip"`,
+        "content-type": record.contentType ?? "application/zip",
+        "content-disposition": `attachment; filename="${record.filename ?? `csvdata-${record.compId}.zip`}"`,
       },
     });
   }

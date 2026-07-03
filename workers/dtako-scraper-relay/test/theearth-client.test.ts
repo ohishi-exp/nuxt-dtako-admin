@@ -12,6 +12,7 @@ import {
   scrapeViaHttp,
   splitJapaneseDate,
   TheearthClientError,
+  TheearthNotZipError,
   type FetchLike,
 } from '../src/theearth-client'
 
@@ -241,6 +242,20 @@ describe('detectWareki', () => {
 
   it('detects wareki (reiwa) dates', () => {
     expect(detectWareki(csvPageHtml({ tableDate: '08/07/01' }), new Date('2026-07-03T00:00:00Z'))).toBe(true)
+  })
+
+  it('only looks at <td> date cells, ignoring stray dates elsewhere in the HTML', () => {
+    // td セルは西暦 (26/..) だが、script 内に紛らわしい 08/.. がある。td セル限定なので
+    // 西暦判定 (false) にならねばならない (broad regex だと 08 を拾って和暦に誤判定した)。
+    const html = `<html><head><script>var v='08/01/01';</script></head><body>` +
+      `<table><tr><td>26/06/26</td></tr></table></body></html>`
+    expect(detectWareki(html, new Date('2026-07-03T00:00:00Z'))).toBe(false)
+  })
+
+  it('defaults to wareki when a date appears only outside <td> cells', () => {
+    // td セルに日付が無ければ (script 内だけ) デフォルトの和暦にフォールバックする。
+    const html = `<html><head><script>var v='26/01/01';</script></head><body>no cell</body></html>`
+    expect(detectWareki(html, new Date('2026-07-03T00:00:00Z'))).toBe(true)
   })
 })
 
@@ -505,17 +520,47 @@ describe('downloadCsvZip', () => {
     await expect(downloadCsvZip(jar, range, fetchImpl)).rejects.toThrow(TheearthClientError)
   })
 
-  it('throws loudly when the final response is not a real ZIP (silent-200 guard)', async () => {
+  it('throws a TheearthNotZipError carrying the raw response bytes when stage-2 is not a ZIP', async () => {
+    // 「でもダウンロードさせろ」対応: ZIP でなくても生バイト + content-type を error に載せ、
+    // DO 側で保存 → ダウンロードできるようにする。
+    const bodyBytes = new TextEncoder().encode('<html>not a zip</html>')
     const fetchImpl = sequenceFetch([
       html(csvPageHtml()),
       html(STAGE1_CONFIRM_HTML),
+      new Response(bodyBytes, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } }),
+    ])
+    const jar = createCookieJar()
+    const err = await downloadCsvZip(jar, range, fetchImpl).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(TheearthNotZipError)
+    const notZip = err as TheearthNotZipError
+    expect(notZip).toBeInstanceOf(TheearthClientError) // サブクラスなので従来の catch でも捕まる
+    expect(notZip.contentType).toBe('text/html; charset=utf-8')
+    expect(new Uint8Array(notZip.responseBytes)).toEqual(new Uint8Array(bodyBytes))
+    expect(notZip.message).toContain('ZIP ではありません')
+  })
+
+  it('throws TheearthNotZipError when stage-1 directly returns non-ZIP octet-stream', async () => {
+    const fetchImpl = sequenceFetch([
+      html(csvPageHtml()),
       new Response(new Uint8Array([0x3c, 0x68, 0x74, 0x6d, 0x6c]), {
         status: 200,
         headers: { 'content-type': 'application/octet-stream' },
       }),
     ])
     const jar = createCookieJar()
-    await expect(downloadCsvZip(jar, range, fetchImpl)).rejects.toThrow(TheearthClientError)
+    await expect(downloadCsvZip(jar, range, fetchImpl)).rejects.toThrow(TheearthNotZipError)
+  })
+
+  it('defaults contentType to empty when the stage-2 response has no Content-Type header', async () => {
+    const fetchImpl = sequenceFetch([
+      html(csvPageHtml()),
+      html(STAGE1_CONFIRM_HTML),
+      new Response(new TextEncoder().encode('<html>x</html>'), { status: 200 }), // no content-type
+    ])
+    const jar = createCookieJar()
+    const err = (await downloadCsvZip(jar, range, fetchImpl).catch((e: unknown) => e)) as TheearthNotZipError
+    expect(err).toBeInstanceOf(TheearthNotZipError)
+    expect(err.contentType).toBe('')
   })
 
   it('treats a stage-1 response with no Content-Type header as an HTML confirmation page', async () => {
