@@ -39,6 +39,7 @@ import {
   triggerScrapeStream,
   initScraperRelay,
   buildScraperZipUrl,
+  buildEtcCsvDownloadUrl,
   splitCsvAllStream,
 } from '~/utils/api'
 import {
@@ -1247,6 +1248,14 @@ describe('api', () => {
       initScraperRelay('ws://relay-test')
       expect(buildScraperZipUrl('/scraper-zip/27324455/req-1')).toBe(
         'http://relay-test/scraper-zip/27324455/req-1',
+      )
+    })
+  })
+
+  describe.runIf(!isLive)('buildEtcCsvDownloadUrl', () => {
+    it('builds a same-origin /api/etc-csv/download URL with the R2 key encoded', () => {
+      expect(buildEtcCsvDownloadUrl('etc/u-1/2026-07-04/160900.csv')).toBe(
+        '/api/etc-csv/download?key=etc%2Fu-1%2F2026-07-04%2F160900.csv',
       )
     })
   })

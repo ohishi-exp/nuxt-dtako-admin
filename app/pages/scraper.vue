@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl, saveScrapeHistory, buildScraperZipUrl } from '~/utils/api'
+import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl, saveScrapeHistory, buildScraperZipUrl, buildEtcCsvDownloadUrl } from '~/utils/api'
 import type { ScrapeResult, ScrapeHistoryItem, PendingUpload, ScrapeStatusEntry } from '~/types'
 import type { ScrapeProgressEvent } from '~/utils/api'
 
@@ -51,6 +51,8 @@ const etcRunning = ref(false)
 interface EtcLogLine {
   text: string
   level?: 'info' | 'error'
+  /** 成功時のみ (R2 保存された CSV の `/api/etc-csv/download` URL)。 */
+  downloadUrl?: string
 }
 const etcLog = ref<EtcLogLine[]>([])
 
@@ -69,6 +71,7 @@ async function handleEtcRunAll() {
           etcLog.value.push({
             text: `[結果] ${evt.user_id ?? ''}: ${evt.status === 'success' ? '成功' : '失敗'} ${evt.message ?? ''}`,
             level: evt.status === 'success' ? 'info' : 'error',
+            downloadUrl: evt.key ? buildEtcCsvDownloadUrl(evt.key) : undefined,
           })
         }
         else if (evt.event === 'error') {
@@ -682,6 +685,15 @@ onMounted(() => {
             :class="line.level === 'error' ? 'text-red-500' : ''"
           >
             {{ line.text }}
+            <a
+              v-if="line.downloadUrl"
+              :href="line.downloadUrl"
+              class="text-primary-500 underline ml-1"
+              target="_blank"
+              rel="noopener"
+            >
+              CSVダウンロード
+            </a>
           </div>
         </div>
       </UCard>

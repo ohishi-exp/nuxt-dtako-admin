@@ -635,6 +635,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       step: "done",
       status,
       message: outcome.message,
+      key: outcome.key,
     });
     this.sendSafely(server, { event: "done" });
     this.closeSafely(server, status === "error" ? 1011 : 1000, "done");
@@ -707,6 +708,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
             step: "done",
             status: outcome.status === "error" ? "error" : "success",
             message: outcome.message,
+            key: outcome.key,
           });
         } catch (err) {
           hadError = true;
