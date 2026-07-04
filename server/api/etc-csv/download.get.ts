@@ -83,7 +83,12 @@ export default defineEventHandler(async (event) => {
   if (!obj) {
     throw createError({ statusCode: 404, statusMessage: `not found in R2: ${key}` })
   }
-  const bytes = await obj.arrayBuffer()
+  // h3 の handleHandlerResponse は `val.buffer` を持つ値 (Uint8Array 等) だけを
+  // raw body として送る。素の ArrayBuffer は `.buffer`/`.arrayBuffer()` の
+  // どちらも持たないため JSON.stringify() 経路に落ち、`{}` (2 bytes) を返してしまう
+  // (実害: ダウンロードした CSV の中身が literal "{}" になっていた)。
+  // Uint8Array に包んでから返す。
+  const bytes = new Uint8Array(await obj.arrayBuffer())
 
   // key はここまでで ETC_CSV_KEY_PATTERN 検証済み ([A-Za-z0-9_-] + 固定形式の
   // 日付/時刻のみ) なので、そのまま filename に使っても header injection しない。
