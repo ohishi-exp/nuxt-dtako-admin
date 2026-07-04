@@ -38,6 +38,52 @@ const compIdLabels: Record<string, string> = {
 const selectedCompId = useState('scraper-compId', () => '')
 const skipUpload = useState('scraper-skipUpload', () => false)
 
+// --- ETC 明細スクレイプ (管理タブ、Refs #134) ---
+// dtako と違い ETC_ACCOUNTS の user_id 一覧をフロントから知る手段が無いため、
+// 自由入力で user_id を指定する (dtako の compIdOptions のようなハードコード
+// リストは持たない)。R2 保存まで完了する既存の /cron/etc と同じ経路を
+// `/ws/scraper?kind=etc` (認証済み WS) 経由で手動実行する。
+
+const activeTab = useState<'dtako' | 'etc'>('scraper-active-tab', () => 'dtako')
+const etcUserId = useState('scraper-etc-user-id', () => '')
+const etcRunning = ref(false)
+interface EtcLogLine {
+  text: string
+  level?: 'info' | 'error'
+}
+const etcLog = ref<EtcLogLine[]>([])
+
+async function handleEtcRun() {
+  if (!etcUserId.value || etcRunning.value) return
+  etcRunning.value = true
+  etcLog.value = []
+  try {
+    await triggerScrapeStream(
+      { kind: 'etc', user_id: etcUserId.value },
+      (evt: ScrapeProgressEvent) => {
+        if (evt.event === 'progress') {
+          etcLog.value.push({ text: `[進捗] ${evt.step ?? ''}${evt.message ? `: ${evt.message}` : ''}` })
+        }
+        else if (evt.event === 'result') {
+          etcLog.value.push({
+            text: `[結果] ${evt.status === 'success' ? '成功' : '失敗'}: ${evt.message ?? ''}`,
+            level: evt.status === 'success' ? 'info' : 'error',
+          })
+        }
+        else if (evt.event === 'error') {
+          etcLog.value.push({ text: `[エラー] ${evt.message ?? ''}`, level: 'error' })
+        }
+      },
+    )
+  }
+  catch (e) {
+    etcLog.value.push({ text: `[エラー] ${e instanceof Error ? e.message : 'エラー'}`, level: 'error' })
+  }
+  finally {
+    etcRunning.value = false
+  }
+}
+
 // Calendar state
 const now = new Date()
 const calYear = ref(now.getFullYear())
@@ -585,9 +631,72 @@ onMounted(() => {
 <template>
   <div class="max-w-3xl">
     <h1 class="text-2xl font-bold mb-6">
-      デジタコ スクレイプ
+      スクレイプ
     </h1>
 
+    <!-- 管理タブ (Refs #134): デジタコ (comp_id 単位) / ETC (user_id 単位、手動実行) -->
+    <div class="flex gap-2 mb-4 border-b border-gray-200 dark:border-gray-800">
+      <button
+        type="button"
+        class="px-4 py-2 text-sm font-medium border-b-2 -mb-px"
+        :class="activeTab === 'dtako' ? 'border-primary-500 text-primary-600 dark:text-primary-400' : 'border-transparent text-gray-500'"
+        @click="activeTab = 'dtako'"
+      >
+        デジタコ
+      </button>
+      <button
+        type="button"
+        class="px-4 py-2 text-sm font-medium border-b-2 -mb-px"
+        :class="activeTab === 'etc' ? 'border-primary-500 text-primary-600 dark:text-primary-400' : 'border-transparent text-gray-500'"
+        @click="activeTab = 'etc'"
+      >
+        ETC
+      </button>
+    </div>
+
+    <div v-show="activeTab === 'etc'">
+      <UCard>
+        <h2 class="font-bold mb-1">
+          ETC 明細スクレイプ (手動実行)
+        </h2>
+        <p class="text-xs text-gray-500 mb-3">
+          ETC_ACCOUNTS に設定済みの user_id を指定して、今すぐスクレイプを実行します (cron と同じ /cron/etc 経路、結果は R2 に保存されます)。
+        </p>
+        <div class="flex flex-wrap gap-2 items-end mb-4">
+          <div>
+            <label class="block text-sm font-medium mb-1">user_id</label>
+            <input
+              v-model="etcUserId"
+              type="text"
+              placeholder="ETC_ACCOUNTS の user_id"
+              class="border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-900 dark:border-gray-700"
+              :disabled="etcRunning"
+            >
+          </div>
+          <UButton
+            label="実行"
+            icon="i-lucide-play"
+            :loading="etcRunning"
+            :disabled="!etcUserId || etcRunning"
+            @click="handleEtcRun"
+          />
+        </div>
+        <div
+          v-if="etcLog.length"
+          class="space-y-1 text-sm font-mono bg-gray-50 dark:bg-gray-900 rounded-lg p-3 max-h-64 overflow-y-auto"
+        >
+          <div
+            v-for="(line, i) in etcLog"
+            :key="i"
+            :class="line.level === 'error' ? 'text-red-500' : ''"
+          >
+            {{ line.text }}
+          </div>
+        </div>
+      </UCard>
+    </div>
+
+    <div v-show="activeTab === 'dtako'">
     <!-- Settings -->
     <UCard class="mb-4">
       <div class="flex flex-wrap gap-4 items-end">
@@ -976,5 +1085,6 @@ onMounted(() => {
         </div>
       </div>
     </UCard>
+    </div>
   </div>
 </template>

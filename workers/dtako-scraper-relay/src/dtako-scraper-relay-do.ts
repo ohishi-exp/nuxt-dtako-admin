@@ -98,6 +98,15 @@ interface StoredZip {
 
 const ZIP_TTL_MS = 10 * 60 * 1000;
 
+/** performEtcScrape の結果 (cron ログ出力 / WS result イベントの両方の素になる)。 */
+interface EtcScrapeOutcome {
+  status: "success" | "skipped" | "error";
+  message: string;
+  key?: string;
+  csvBytes?: number;
+  filename?: string;
+}
+
 /** /dvr-api/* のセッションレコードを置く DO storage キー。この DO instance は
  * theearth アカウント単位 (`dvr-{comp}:{userB64}`) なので 1 キーで足りる。 */
 const DVR_SESSION_KEY = "dvr:session";
@@ -261,6 +270,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const decision = decideRelayAuth(result);
     if (decision.status !== 101) {
       return new Response("Invalid or expired token", { status: decision.status });
+    }
+
+    if (url.searchParams.get("kind") === "etc") {
+      // ETC は SCRAPER_MODE (vpc-relay/http) と無関係な別経路 (管理タブ手動実行、Refs #134)。
+      return this.handleEtcScrapeWs(url);
     }
 
     if (this.env.SCRAPER_MODE === "http") {
@@ -493,28 +507,33 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
   }
 
-  private async runCronEtcScrape(account: EtcAccountEntry): Promise<void> {
+  /** ETC スクレイプ本体 (login → 検索 → CSV) + R2 保存。cron (無人実行、waitUntil +
+   * console.log のみ) と手動 WS トリガー (`/ws/scraper?kind=etc`、進捗を browser に
+   * 中継しつつ同じ結果を返す) の両方から共有する。 */
+  private async performEtcScrape(
+    account: EtcAccountEntry,
+    onStep: (step: string, message?: string) => void,
+  ): Promise<EtcScrapeOutcome> {
     const bucket = this.env.DTAKO_R2!;
     const prefix = this.env.ETC_R2_PREFIX || "etc";
-    const logBase = { cron: "etc", user_id: account.user_id };
     try {
-      const result = await scrapeEtcCsv(
-        { userId: account.user_id, password: account.password },
-        (step) => console.log(JSON.stringify({ ...logBase, step })),
-      );
+      const result = await scrapeEtcCsv({ userId: account.user_id, password: account.password }, onStep);
       const key = etcCsvKey(prefix, account.user_id, new Date());
       await bucket.put(key, result.bytes, {
         httpMetadata: { contentType: "text/csv; charset=shift_jis" },
         customMetadata: { filename: result.filename, account_type: result.accountType },
       });
-      console.log(
-        JSON.stringify({ ...logBase, status: "success", key, csv_bytes: result.bytes.byteLength, filename: result.filename }),
-      );
+      return {
+        status: "success",
+        message: `CSV 取得成功 (${result.bytes.byteLength} bytes, ${result.filename})`,
+        key,
+        csvBytes: result.bytes.byteLength,
+        filename: result.filename,
+      };
     } catch (err) {
       if (err instanceof EtcMeisaiNoUsageError) {
         // 明細 0 件は正常系 (VPS 版の NoUsageData skip と同じ扱い)
-        console.log(JSON.stringify({ ...logBase, status: "skipped", message: err.message }));
-        return;
+        return { status: "skipped", message: err.message };
       }
       // CSV でない応答は原因調査用に R2 の errors/ 配下へ保存する (「黙って200」対策の
       // 診断経路。ページ仕様変更 / ログイン失敗の中身をあとから確認できる)
@@ -524,16 +543,87 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           await bucket.put(errorKey, err.responseBytes, {
             httpMetadata: { contentType: err.contentType || "application/octet-stream" },
           });
-          console.error(JSON.stringify({ ...logBase, status: "error", message: err.message, error_body_key: errorKey }));
-          return;
+          return { status: "error", message: err.message, key: errorKey };
         } catch {
-          // 保存失敗は下の共通 log に落とす
+          // 保存失敗は下の共通 return に落とす
         }
       }
       const message =
         err instanceof EtcMeisaiClientError ? err.message : describeUnknownError(err);
-      console.error(JSON.stringify({ ...logBase, status: "error", message }));
+      return { status: "error", message };
     }
+  }
+
+  private async runCronEtcScrape(account: EtcAccountEntry): Promise<void> {
+    const logBase = { cron: "etc", user_id: account.user_id };
+    const outcome = await this.performEtcScrape(account, (step) =>
+      console.log(JSON.stringify({ ...logBase, step })),
+    );
+    const line = JSON.stringify({ ...logBase, ...outcome });
+    if (outcome.status === "error") console.error(line);
+    else console.log(line);
+  }
+
+  /** POST /ws/scraper?kind=etc&user_id=... — 認証 (introspect) 済みの WS 経由で
+   * ETC アカウント単位の手動スクレイプを行う (管理タブ用、Refs #134)。DO は
+   * `etc-{user_id}` で idFromName されるため、cron の無人実行と手動トリガーが
+   * 同一アカウントに重なっても enqueueScrape の直列化キューで捌かれる。 */
+  private async handleEtcScrapeWs(url: URL): Promise<Response> {
+    const userId = url.searchParams.get("user_id");
+    if (!userId) {
+      return new Response("Bad Request: user_id が必須です", { status: 400 });
+    }
+
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    this.ctx.acceptWebSocket(server);
+
+    this.ctx.waitUntil(
+      this.enqueueScrape(() => this.executeEtcScrape(server, userId)).catch((err) => {
+        console.error("DtakoScraperRelayDO handleEtcScrapeWs unexpected error:", err);
+        this.sendSafely(server, { event: "error", user_id: userId, message: "予期しないエラーが発生しました" });
+        this.closeSafely(server, 1011, "unexpected error");
+      }),
+    );
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  private async executeEtcScrape(server: WebSocket, userId: string): Promise<void> {
+    const account = await this.resolveEtcAccount(userId);
+    if (!account) {
+      this.sendSafely(server, {
+        event: "error",
+        user_id: userId,
+        message: `user_id=${userId} が ETC_ACCOUNTS に見つかりません`,
+      });
+      this.closeSafely(server, 1011, "account not found");
+      return;
+    }
+    if (!this.env.DTAKO_R2) {
+      this.sendSafely(server, {
+        event: "error",
+        user_id: userId,
+        message: "DTAKO_R2 binding が未設定のため ETC CSV を保存できません",
+      });
+      this.closeSafely(server, 1011, "r2 not configured");
+      return;
+    }
+
+    const outcome = await this.performEtcScrape(account, (step, message) => {
+      this.sendSafely(server, { event: "progress", user_id: userId, step, message });
+    });
+
+    const status = outcome.status === "error" ? "error" : "success";
+    this.sendSafely(server, {
+      event: "result",
+      user_id: userId,
+      step: "done",
+      status,
+      message: outcome.message,
+    });
+    this.sendSafely(server, { event: "done" });
+    this.closeSafely(server, status === "error" ? 1011 : 1000, "done");
   }
 
   private async executeScrape(

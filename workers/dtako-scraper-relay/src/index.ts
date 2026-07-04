@@ -40,11 +40,22 @@ export default {
       // DO を分けることで同一企業への並列リクエストを自然に直列化する。comp_id が
       // 無い呼び出し (全企業一括トリガー) は従来どおり session 単位で振り分け、
       // vpc-relay 経路 (VPS の dtako-scraper が複数企業を直列処理する) に委ねる。
-      const compId = url.searchParams.get("comp_id");
-      const session = url.searchParams.get("session");
-      const key = compId ? `scraper-comp-${compId}` : session ? `scraper-session-${session}` : null;
+      // kind=etc (管理タブの ETC 手動実行、Refs #134) は user_id 単位で cron と
+      // 同じ DO キー (`etc-{user_id}`) に振り分ける。
+      const kind = url.searchParams.get("kind");
+      const key =
+        kind === "etc"
+          ? (() => {
+              const userId = url.searchParams.get("user_id");
+              return userId ? `etc-${userId}` : null;
+            })()
+          : (() => {
+              const compId = url.searchParams.get("comp_id");
+              const session = url.searchParams.get("session");
+              return compId ? `scraper-comp-${compId}` : session ? `scraper-session-${session}` : null;
+            })();
       if (!key) {
-        return new Response("Bad Request: missing comp_id or session", { status: 400 });
+        return new Response("Bad Request: missing comp_id/user_id or session", { status: 400 });
       }
       const id = env.RELAY.idFromName(key);
       return env.RELAY.get(id).fetch(request);
