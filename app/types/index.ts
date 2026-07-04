@@ -241,6 +241,9 @@ export interface ScrapeRequest {
    */
   kind?: 'etc' | 'etc-all'
   user_id?: string
+  /** `kind: 'etc' | 'etc-all'` の対象月選択 (「今月実行」/「先月実行」ボタン、
+   * Refs #134)。省略時は今月 (dtako-scraper-relay 側の既定と同じ)。 */
+  month?: 'current' | 'previous'
 }
 
 export interface ScrapeResult {

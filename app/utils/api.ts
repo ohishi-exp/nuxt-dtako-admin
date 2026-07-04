@@ -651,6 +651,7 @@ function buildScraperWsUrl(req: ScrapeRequest, token: string): string {
   params.set('token', token)
   if (req.kind) params.set('kind', req.kind)
   if (req.user_id) params.set('user_id', req.user_id)
+  if (req.month) params.set('month', req.month)
   if (req.start_date) params.set('start_date', req.start_date)
   if (req.end_date) params.set('end_date', req.end_date)
   if (req.comp_id) params.set('comp_id', req.comp_id)

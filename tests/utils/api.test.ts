@@ -952,6 +952,20 @@ describe('api', () => {
       await promise
     })
 
+    it('includes month in the WS URL when set, and omits it otherwise (今月/先月 ボタン、Refs #134)', async () => {
+      const promise = triggerScrapeStream({ kind: 'etc-all', month: 'previous' }, () => {})
+      const url = new URL(lastWs().url)
+      expect(url.searchParams.get('kind')).toBe('etc-all')
+      expect(url.searchParams.get('month')).toBe('previous')
+      wsEmit(lastWs(), { event: 'done' })
+      await promise
+
+      const promise2 = triggerScrapeStream({ kind: 'etc-all' }, () => {})
+      expect(new URL(lastWs().url).searchParams.get('month')).toBeNull()
+      wsEmit(lastWs(), { event: 'done' })
+      await promise2
+    })
+
     it('ignores invalid JSON and pong frames', async () => {
       const promise = triggerScrapeStream({}, () => {})
       const ws = lastWs()

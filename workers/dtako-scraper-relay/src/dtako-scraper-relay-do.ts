@@ -49,7 +49,9 @@ import {
   EtcMeisaiClientError,
   EtcMeisaiNoUsageError,
   EtcMeisaiNotCsvError,
+  resolveScrapeMonthAnchor,
   scrapeEtcCsv,
+  type ScrapeMonthTarget,
 } from "./etc-meisai-client";
 import { CronConfigError, etcCsvKey, parseEtcAccounts, type EtcAccountEntry } from "./cron";
 import {
@@ -127,6 +129,20 @@ function dvrJsonError(status: number, message: string): Response {
  * generic 文言に潰すと現場で原因が追えない (Refs #90 staging 実機で実害)。 */
 function describeUnknownError(err: unknown): string {
   return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+}
+
+/** ETC 手動実行 (`/ws/scraper?kind=etc|etc-all`) の「今月/先月」ボタン選択を
+ * URL query (`month=previous`) から読む。`previous` 以外 (未指定含む) は
+ * `undefined` = 今月 (`resolveScrapeMonthAnchor` の既定) にフォールバックする。 */
+function parseScrapeMonthParam(url: URL): ScrapeMonthTarget | undefined {
+  return url.searchParams.get("month") === "previous" ? "previous" : undefined;
+}
+
+/** `resolveScrapeMonthAnchor()` の結果を進捗ログ表示用の `YYYY年MM月` にする
+ * (診断専用、submitSearch() の挙動には影響しない)。 */
+function formatJstYearMonth(date: Date): string {
+  const jst = new Date(date.getTime() + 9 * 3600 * 1000);
+  return `${jst.getUTCFullYear()}年${String(jst.getUTCMonth() + 1).padStart(2, "0")}月`;
 }
 
 /** SecretsStoreSecret (`.get()`) / 文字列 のどちらの binding でも値を取り出す。 */
@@ -295,7 +311,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
     if (kind === "etc-all") {
       // ETC_ACCOUNTS 全件を一括実行 (user_id 手入力を不要にする、Refs #134)。
-      return this.handleEtcScrapeAllWs();
+      return this.handleEtcScrapeAllWs(url);
     }
 
     if (this.env.SCRAPER_MODE === "http") {
@@ -534,10 +550,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   private async performEtcScrape(
     account: EtcAccountEntry,
     onStep: (step: string, message?: string) => void,
+    now: Date = new Date(),
   ): Promise<EtcScrapeOutcome> {
     const bucket = this.env.DTAKO_R2!;
     const prefix = this.env.ETC_R2_PREFIX || "etc";
-    const now = new Date();
     try {
       const result = await scrapeEtcCsv(
         { userId: account.user_id, password: account.password },
@@ -601,13 +617,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!userId) {
       return new Response("Bad Request: user_id が必須です", { status: 400 });
     }
+    const now = resolveScrapeMonthAnchor(parseScrapeMonthParam(url), new Date());
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server);
 
     this.ctx.waitUntil(
-      this.enqueueScrape(() => this.executeEtcScrape(server, userId)).catch((err) => {
+      this.enqueueScrape(() => this.executeEtcScrape(server, userId, now)).catch((err) => {
         console.error("DtakoScraperRelayDO handleEtcScrapeWs unexpected error:", err);
         this.sendSafely(server, { event: "error", user_id: userId, message: "予期しないエラーが発生しました" });
         this.closeSafely(server, 1011, "unexpected error");
@@ -617,7 +634,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  private async executeEtcScrape(server: WebSocket, userId: string): Promise<void> {
+  private async executeEtcScrape(server: WebSocket, userId: string, now: Date): Promise<void> {
     const account = await this.resolveEtcAccount(userId);
     if (!account) {
       this.sendSafely(server, {
@@ -638,9 +655,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return;
     }
 
-    const outcome = await this.performEtcScrape(account, (step, message) => {
-      this.sendSafely(server, { event: "progress", user_id: userId, step, message });
-    });
+    const outcome = await this.performEtcScrape(
+      account,
+      (step, message) => {
+        this.sendSafely(server, { event: "progress", user_id: userId, step, message });
+      },
+      now,
+    );
 
     const status = outcome.status === "error" ? "error" : "success";
     this.sendSafely(server, {
@@ -660,13 +681,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * `etc-{user_id}` DO へ内部 fetch で処理を委譲するため、既存のアカウント単位
    * 直列化 (enqueueScrape) はそのまま保たれつつ、アカウント間は Promise.all で
    * 並列に実行される。 */
-  private async handleEtcScrapeAllWs(): Promise<Response> {
+  private async handleEtcScrapeAllWs(url: URL): Promise<Response> {
+    const now = resolveScrapeMonthAnchor(parseScrapeMonthParam(url), new Date());
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server);
 
     this.ctx.waitUntil(
-      this.executeEtcScrapeAll(server).catch((err) => {
+      this.executeEtcScrapeAll(server, now).catch((err) => {
         console.error("DtakoScraperRelayDO handleEtcScrapeAllWs unexpected error:", err);
         this.sendSafely(server, { event: "error", message: "予期しないエラーが発生しました" });
         this.closeSafely(server, 1011, "unexpected error");
@@ -676,7 +698,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  private async executeEtcScrapeAll(server: WebSocket): Promise<void> {
+  private async executeEtcScrapeAll(server: WebSocket, now: Date): Promise<void> {
     const raw = await resolveSecret(this.env.ETC_ACCOUNTS);
     if (!raw) {
       this.sendSafely(server, { event: "error", message: "ETC_ACCOUNTS が未設定です" });
@@ -701,7 +723,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     this.sendSafely(server, {
       event: "progress",
       step: "start",
-      message: `${accounts.length}件のアカウントを実行します`,
+      message: `${accounts.length}件のアカウントを実行します (対象月: ${formatJstYearMonth(now)})`,
     });
 
     let hadError = false;
@@ -712,7 +734,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           const res = await stub.fetch("https://relay.internal/internal/etc-scrape", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ user_id: account.user_id }),
+            body: JSON.stringify({ user_id: account.user_id, now: now.toISOString() }),
           });
           const outcome = (await res.json()) as EtcScrapeOutcome;
           for (const p of outcome.progressLog ?? []) {
@@ -753,7 +775,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * が各アカウント固有の DO (`etc-{user_id}`) に対して叩く、同期スクレイプ endpoint。
    * `/cron/etc` (202 accepted + waitUntil) とは異なり、結果 JSON を待って返す。 */
   private async handleInternalEtcScrape(request: Request): Promise<Response> {
-    let body: { user_id?: unknown };
+    let body: { user_id?: unknown; now?: unknown };
     try {
       body = (await request.json()) as typeof body;
     } catch {
@@ -763,6 +785,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!userId) {
       return Response.json({ status: "error", message: "user_id が必要です" }, { status: 400 });
     }
+    // `executeEtcScrapeAll` (kind=etc-all ディスパッチャ) が「今月/先月」選択を
+    // 解決済みの Date を渡してくる。パース不能 (壊れた ISO 文字列等) なら
+    // fail-safe で現在時刻に落とす。
+    const parsedNow = typeof body.now === "string" ? new Date(body.now) : null;
+    const now = parsedNow && !Number.isNaN(parsedNow.getTime()) ? parsedNow : new Date();
 
     const account = await this.resolveEtcAccount(userId);
     if (!account) {
@@ -780,9 +807,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
     const progressLog: { step: string; message?: string }[] = [];
     const outcome = await this.enqueueScrape(() =>
-      this.performEtcScrape(account, (step, message) => {
-        progressLog.push({ step, message });
-      }),
+      this.performEtcScrape(
+        account,
+        (step, message) => {
+          progressLog.push({ step, message });
+        },
+        now,
+      ),
     );
     return Response.json({ ...outcome, progressLog });
   }

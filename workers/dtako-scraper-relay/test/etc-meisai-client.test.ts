@@ -18,6 +18,7 @@ import {
   parseJsSubmitArgs,
   parseLinks,
   pickMainForm,
+  resolveScrapeMonthAnchor,
   scrapeEtcCsv,
   scrapeEtcFromCookies,
   sniffCharset,
@@ -412,6 +413,49 @@ describe('withNextfunc / parseCsvFilename / detectAccountType', () => {
     expect(detectAccountType('https://www.etc-meisai.jp/etc_corp_meisai/top')).toBe('corporate')
     expect(detectAccountType('https://www.etc-meisai.jp/etc_user_meisai/top')).toBe('personal')
     expect(detectAccountType('https://www.etc-meisai.jp/somewhere')).toBe('personal')
+  })
+})
+
+describe('resolveScrapeMonthAnchor (「今月/先月」ボタン切り替え)', () => {
+  it('"current" / 省略は actualNow をそのまま返す', () => {
+    const now = new Date('2026-07-04T00:00:00Z')
+    expect(resolveScrapeMonthAnchor('current', now)).toBe(now)
+    expect(resolveScrapeMonthAnchor(undefined, now)).toBe(now)
+  })
+
+  it('"previous" は JST で先月末日を指す Date を返す (同一年内)', () => {
+    // JST 2026-07-04 09:00 (= UTC 2026-07-04T00:00Z) → 先月 = 2026年6月、末日は30日
+    const now = new Date('2026-07-04T00:00:00Z')
+    const anchor = resolveScrapeMonthAnchor('previous', now)
+    // jstDateParts 相当のロジックで検証 (先月末日は JST 2026-06-30 00:00 のはず)
+    const jst = new Date(anchor.getTime() + 9 * 3600 * 1000)
+    expect(jst.getUTCFullYear()).toBe(2026)
+    expect(jst.getUTCMonth() + 1).toBe(6)
+    expect(jst.getUTCDate()).toBe(30)
+  })
+
+  it('"previous" は年をまたぐ (1月 → 前年12月31日)', () => {
+    // JST 2026-01-04 09:00 (= UTC 2026-01-04T00:00Z) → 先月 = 2025年12月、末日は31日
+    const now = new Date('2026-01-04T00:00:00Z')
+    const anchor = resolveScrapeMonthAnchor('previous', now)
+    const jst = new Date(anchor.getTime() + 9 * 3600 * 1000)
+    expect(jst.getUTCFullYear()).toBe(2025)
+    expect(jst.getUTCMonth() + 1).toBe(12)
+    expect(jst.getUTCDate()).toBe(31)
+  })
+
+  it('submitSearch に渡すと先月1日〜末日の範囲 override になる (date-range フィールド型アカウント)', async () => {
+    const now = resolveScrapeMonthAnchor('previous', new Date('2026-07-04T00:00:00Z'))
+    const dateRangePage = page('https://www.etc-meisai.jp/etc/R', DATE_RANGE_SEARCH_PAGE_HTML)
+    const { fetch, calls } = recordingFetch([html(RESULT_PAGE_HTML)])
+    await submitSearch(createCookieJar(), dateRangePage, fetch, 1000, now)
+    const body = bodyParams(calls[0].init)
+    expect(body.get('fromYYYY')).toBe('2026')
+    expect(body.get('fromMM')).toBe('06')
+    expect(body.get('fromDD')).toBe('01')
+    expect(body.get('toYYYY')).toBe('2026')
+    expect(body.get('toMM')).toBe('06')
+    expect(body.get('toDD')).toBe('30')
   })
 })
 

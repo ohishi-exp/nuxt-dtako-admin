@@ -672,6 +672,25 @@ function jstDateParts(date: Date): { yyyy: string; mm: string; dd: string } {
   };
 }
 
+export type ScrapeMonthTarget = "current" | "previous";
+
+/** ETC スクレイプの対象月選択 (「今月」/「先月」ボタン) を、`submitSearch()` に
+ * そのまま渡せる `now` の代替値に変換する。`month="previous"` の場合は
+ * JST で「先月の末日」を指す Date を返す — `submitSearch()` の
+ * `currentRiyouMonthValue()` (YYYYMM) と日付範囲 override (`fromDD="01"` +
+ * `toYYYY/toMM/toDD = jstDateParts(now)`) がどちらもこの1つの Date だけから
+ * 「先月1日 〜 先月末日」を導出できるため、呼び出し側のロジック変更は不要。
+ * `month` 省略 / `"current"` は `actualNow` をそのまま返す。 */
+export function resolveScrapeMonthAnchor(month: ScrapeMonthTarget | undefined, actualNow: Date): Date {
+  if (month !== "previous") return actualNow;
+  const jstNow = new Date(actualNow.getTime() + 9 * 3600 * 1000);
+  // 「shifted domain」(+9h した UTC 値を JST カレンダーとして読む) における
+  // 当月1日の1日前 = 先月末日。Date.UTC(y, m, 0) は月 m (0-indexed) の
+  // day 0 = 月 m-1 の末日を返す JS の挙動を利用する。
+  const lastDayOfPrevMonthShifted = Date.UTC(jstNow.getUTCFullYear(), jstNow.getUTCMonth(), 0);
+  return new Date(lastDayOfPrevMonthShifted - 9 * 3600 * 1000);
+}
+
 /** ページ内の `<input type="submit"|"button" name="...">` を name/value 付きで
  * 列挙する (実機診断専用)。`parseForms()` は `NON_POSTED_INPUT_TYPES`
  * (submit/button/image/reset/file) を意図的に `fields` から除外しており
