@@ -127,6 +127,31 @@ const NO_USAGE_HTML = `<html><body>
 <span class="meisaicaption">当該月のご利用はありません</span>
 </body></html>`
 
+// アカウントによってはログイン直後/検索を経ずに既に利用明細の結果ページへ
+// 着地し、CSV 出力ボタンが直接存在する (ohishi-exp/nuxt-dtako-admin#134 実機調査)。
+const DIRECT_RESULT_HTML = `<html><body>
+<h2>利用明細</h2>
+<form action="/etc/R" method="post">
+  <input type="hidden" name="p" value="DIRECTHIDDEN" />
+</form>
+<input type="submit" onclick="goOutput(false, 'hakkoMeisai', 'frm', '/etc/R?x=novalue', '_blank'); return false;" />
+<input type="submit" value="CSVボタン（onclick無し）" />
+<input type="submit" value="CSV (target無し)" onclick="somethingElse(); return false;" />
+<input type="submit" value="証明書ＰＤＦ" onclick="goOutput(false, 'hakkoMeisai', 'frm', '/etc/R?funccode=1013000000&nextfunc=1013600000', '_blank'); return false;" />
+<input type="submit" value="利用明細ＣＳＶ出力" onclick="goOutput(false, 'hakkoMeisai', 'frm', '/etc/R?funccode=1013000000&nextfunc=1013500000', '_blank'); return false;" />
+</body></html>`
+
+// 検索 POST 直後に挟まる「共通 -確認してください-」等の中間確認ページ
+// (メイン form が hidden の p 1つだけ、onclick="submitPage('frm','<url>')" の
+// 遷移ボタンを持つ)。
+const CONFIRM_PAGE_HTML = `<html><body>
+<h2>共通&nbsp;-確認してください-</h2>
+<form action="/etc/R" method="post">
+  <input type="hidden" name="p" value="CONFIRMHIDDEN" />
+</form>
+<input type="button" value="利用明細検索へ" onclick="submitPage('frm','/etc/R?funccode=1013000000&nextfunc=1032000000'); return false;" />
+</body></html>`
+
 const LOGIN_URL = `https://www.etc-meisai.jp/etc/R?funccode=${ETC_FUNC_LOGIN}&nextfunc=${ETC_FUNC_LOGIN}`
 
 function page(url: string, htmlBody: string): EtcPage {
@@ -474,6 +499,14 @@ describe('navigateToSearchPage', () => {
       '検索条件フォーム (sokoKbn) が見つかりません',
     )
   })
+
+  it('sokoKbn が無くても既に CSV 出力可能な結果ページ (#134) ならそのまま返す', async () => {
+    const { fetch, calls } = recordingFetch([])
+    const s = session('https://www2.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1013000000', DIRECT_RESULT_HTML)
+    const result = await navigateToSearchPage(createCookieJar(), s, fetch, 1000)
+    expect(result.html).toBe(DIRECT_RESULT_HTML)
+    expect(calls).toHaveLength(0)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -528,6 +561,23 @@ describe('submitSearch', () => {
     await expect(submitSearch(createCookieJar(), searchPage, fetch, 1000)).rejects.toBeInstanceOf(
       EtcMeisaiNoUsageError,
     )
+  })
+
+  it('sokoKbn が無くても既に CSV 出力可能な結果ページ (#134) ならそのまま返し POST しない', async () => {
+    const { fetch, calls } = recordingFetch([])
+    const p = page('https://www2.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1013000000', DIRECT_RESULT_HTML)
+    const result = await submitSearch(createCookieJar(), p, fetch, 1000)
+    expect(result.html).toBe(DIRECT_RESULT_HTML)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('検索 POST 直後の「共通 -確認してください-」中間ページを自動で1段階 POST して進む (#134)', async () => {
+    const { fetch, calls } = recordingFetch([html(CONFIRM_PAGE_HTML), html(RESULT_PAGE_HTML)])
+    const result = await submitSearch(createCookieJar(), searchPage, fetch, 1000)
+    expect(result.html).toBe(RESULT_PAGE_HTML)
+    expect(calls).toHaveLength(2)
+    expect(calls[1].url).toBe('https://www.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1032000000')
+    expect(bodyParams(calls[1].init).get('p')).toBe('CONFIRMHIDDEN')
   })
 })
 
@@ -622,6 +672,19 @@ describe('downloadMeisaiCsv', () => {
     const { fetch } = recordingFetch([errRes])
     const err = await downloadMeisaiCsv(createCookieJar(), resultPage, fetch, 1000).catch((e) => e)
     expect((err as EtcMeisaiNotCsvError).message).toContain('HTTP 500')
+  })
+
+  it('CSV 出力ボタンが直接あるページ (#134) は goOutput(...) の遷移先へ POST する', async () => {
+    const p = page('https://www2.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1013000000', DIRECT_RESULT_HTML)
+    const { fetch, calls } = recordingFetch([csvResponse()])
+    const csv = await downloadMeisaiCsv(createCookieJar(), p, fetch, 1000)
+    expect(csv.filename).toBe('meisai_202607.csv')
+
+    const post = calls[0]
+    expect(post.url).toBe('https://www2.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1013500000')
+    const body = bodyParams(post.init)
+    expect(body.get('p')).toBe('DIRECTHIDDEN')
+    expect(body.has('nextfunc')).toBe(false) // goOutput の URL に既に埋め込まれているため override しない
   })
 })
 
