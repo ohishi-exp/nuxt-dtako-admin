@@ -938,6 +938,19 @@ describe('api', () => {
       expect(received).toEqual(events)
     })
 
+    it('includes kind and user_id in the WS URL for ETC manual-run (Refs #134)', async () => {
+      const promise = triggerScrapeStream({ kind: 'etc', user_id: 'u-1' }, () => {})
+
+      const ws = lastWs()
+      const url = new URL(ws.url)
+      expect(url.searchParams.get('kind')).toBe('etc')
+      expect(url.searchParams.get('user_id')).toBe('u-1')
+      expect(url.searchParams.get('comp_id')).toBeNull()
+
+      wsEmit(ws, { event: 'done' })
+      await promise
+    })
+
     it('ignores invalid JSON and pong frames', async () => {
       const promise = triggerScrapeStream({}, () => {})
       const ws = lastWs()
