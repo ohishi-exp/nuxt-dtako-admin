@@ -20,6 +20,16 @@ jobs:
       install_command: 'npm install'
       use_auth_client_dev: true
       post_install_script: 'npx nuxt prepare'
+      # npm cache key (lockfile hash のみ) が ippoan/ci-workflows#152 修正前の
+      # catalog-extract.yml (ts/js extractor、npm install しないのに同じ key で
+      # cache: npm を持っていた) に汚染されていた (cache hit するが中身 ~0 byte、
+      # npm install が毎回フルダウンロードになる)。actions/cache は hit した run
+      # を再保存しないため、汚染源を直しても既存の空キャッシュは lockfile が
+      # 変わるまで居座る。このファイル自身も hash 対象に含めることで cache key を
+      # 強制的に切り替え、汚染されていない新しい cache に乗り換える (Refs #134)。
+      cache_dependency_path: |
+        package-lock.json
+        .github/workflows/preview-deploy.yml
       # preview-deploy.yml の既定 nuxt デプロイコマンドは `npm run build && npx
       # wrangler deploy --env preview` だが、この repo の wrangler.toml は
       # `[build] command = "npm run build"` を持つため、そのままだと wrangler
