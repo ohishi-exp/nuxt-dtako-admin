@@ -361,12 +361,31 @@ export function withNextfunc(actionUrl: string, nextfunc: string): string {
   return u.toString();
 }
 
+/** POST body に override 値を反映する。同名フィールドが複数存在し得る
+ * チェックボックス群 (例: `hyojiCard`) は実ブラウザの form 送信では
+ * `hyojiCard=0&hyojiCard=1&...` のように**同名で複数回**送られるが、単純な
+ * `Record<string,string>` + `URLSearchParams.set()` (= 上書き) では最後の
+ * 1件しか残らない。これにより「全カード選択」のつもりが実際には最後に
+ * 処理した1枚だけの絞り込みになり、他のカードにしか使用実績が無い月を
+ * 「明細0件」と誤判定する実害があった (cdp-relay 実機検証で発覚、Refs #134)。
+ * 値が配列の override は既存の同名 body 値を消してから複数 append する。 */
+function applyOverrides(body: URLSearchParams, overrides: Record<string, string | string[]>): void {
+  for (const [name, value] of Object.entries(overrides)) {
+    if (Array.isArray(value)) {
+      body.delete(name);
+      for (const v of value) body.append(name, v);
+    } else {
+      body.set(name, value);
+    }
+  }
+}
+
 /** ページ内 form を指定 override 付きで POST し、次ページを返す。 */
 async function submitForm(
   jar: CookieJar,
   page: EtcPage,
   form: EtcForm,
-  overrides: Record<string, string>,
+  overrides: Record<string, string | string[]>,
   nextfunc: string | null,
   fetchImpl: FetchLike,
   timeoutMs: number,
@@ -374,7 +393,7 @@ async function submitForm(
   let action = new URL(form.action || page.url, page.url).toString();
   const body = new URLSearchParams();
   for (const [name, value] of form.fields) body.set(name, value);
-  for (const [name, value] of Object.entries(overrides)) body.set(name, value);
+  applyOverrides(body, overrides);
   if (nextfunc !== null) {
     action = withNextfunc(action, nextfunc);
     if (form.fields.has("nextfunc")) body.set("nextfunc", nextfunc);
@@ -401,14 +420,14 @@ async function submitForm(
 async function submitFormToTarget(
   jar: CookieJar,
   form: EtcForm,
-  overrides: Record<string, string>,
+  overrides: Record<string, string | string[]>,
   targetUrl: string,
   fetchImpl: FetchLike,
   timeoutMs: number,
 ): Promise<EtcPage> {
   const body = new URLSearchParams();
   for (const [name, value] of form.fields) body.set(name, value);
-  for (const [name, value] of Object.entries(overrides)) body.set(name, value);
+  applyOverrides(body, overrides);
   const target = new URL(targetUrl);
   const nf = target.searchParams.get("nextfunc");
   if (nf && form.fields.has("nextfunc")) body.set("nextfunc", nf);
@@ -815,7 +834,7 @@ export async function submitSearch(
     );
   }
   const currentYm = currentRiyouMonthValue(now);
-  const overrides: Record<string, string> = { sokoKbn: "0" };
+  const overrides: Record<string, string | string[]> = { sokoKbn: "0" };
   // Refs #134 後続報告の実機再検証用診断ログ (Cloudflare Workers Observability に
   // 出る)。riyouMonth checkbox の実際の name/value/ページ既定チェック状態と、
   // 今回どれを選択したかを毎回記録する — 現地の checkbox 構造が未知数のため、
@@ -864,7 +883,17 @@ export async function submitSearch(
       if (cb.value === currentYm) overrides[cb.name] = cb.value;
       continue;
     }
-    overrides[cb.name] = cb.value;
+    // 同名 checkbox が複数存在する場合 (例: カード選択の `hyojiCard` が
+    // カード枚数分だけ並ぶ) は、実ブラウザの form 送信と同じく全値を保持する
+    // (単純に上書きすると最後の1枚だけの絞り込みになってしまう、Refs #134)。
+    const existing = overrides[cb.name];
+    if (existing === undefined) {
+      overrides[cb.name] = cb.value;
+    } else if (Array.isArray(existing)) {
+      existing.push(cb.value);
+    } else {
+      overrides[cb.name] = [existing, cb.value];
+    }
   }
   // fromYYYY/fromMM/fromDD 〜 toYYYY/toMM/toDD の日付範囲フィールドを持つ
   // アカウント種別 (Refs #134 後続報告4回目) は、今月の月初〜今日の範囲に
