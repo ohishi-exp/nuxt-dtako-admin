@@ -56,13 +56,18 @@ interface EtcLogLine {
 }
 const etcLog = ref<EtcLogLine[]>([])
 
-async function handleEtcRunAll() {
+/** 「今月実行」「先月実行」のどちらが走っているか (ボタンごとに loading 表示を
+ * 分けるため、`etcRunning` とは別に保持する)。 */
+const etcRunningMonth = ref<'current' | 'previous' | null>(null)
+
+async function handleEtcRunAll(month: 'current' | 'previous') {
   if (etcRunning.value) return
   etcRunning.value = true
+  etcRunningMonth.value = month
   etcLog.value = []
   try {
     await triggerScrapeStream(
-      { kind: 'etc-all' },
+      { kind: 'etc-all', month },
       (evt: ScrapeProgressEvent) => {
         if (evt.event === 'progress') {
           etcLog.value.push({
@@ -87,6 +92,7 @@ async function handleEtcRunAll() {
   }
   finally {
     etcRunning.value = false
+    etcRunningMonth.value = null
   }
 }
 
@@ -667,14 +673,23 @@ onMounted(() => {
         </h2>
         <p class="text-xs text-gray-500 mb-3">
           ETC_ACCOUNTS に設定済みの全アカウントを、今すぐ一括でスクレイプ実行します (cron と同じ経路、結果は R2 に保存されます)。
+          「今月実行」は今月1日〜本日、「先月実行」は先月1日〜末日の範囲で絞り込みます。
         </p>
         <div class="flex flex-wrap gap-2 items-end mb-4">
           <UButton
-            label="全アカウント実行"
+            label="今月実行"
             icon="i-lucide-play"
-            :loading="etcRunning"
+            :loading="etcRunningMonth === 'current'"
             :disabled="etcRunning"
-            @click="handleEtcRunAll"
+            @click="handleEtcRunAll('current')"
+          />
+          <UButton
+            label="先月実行"
+            icon="i-lucide-play"
+            color="neutral"
+            :loading="etcRunningMonth === 'previous'"
+            :disabled="etcRunning"
+            @click="handleEtcRunAll('previous')"
           />
         </div>
         <div
