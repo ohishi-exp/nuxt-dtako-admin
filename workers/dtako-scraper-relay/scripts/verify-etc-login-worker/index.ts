@@ -145,11 +145,20 @@ export default {
                 loginPage: pageDiagnostics(session.page),
                 links: Array.from(session.page.html.matchAll(/<A\b[^>]*>([\s\S]*?)<\/A>/gi))
                   .map((m) => ({
-                    onclick: m[0].match(/onclick=["']([^"']*)["']/i)?.[1] ?? null,
+                    // onclick は "submitPage('frm','...')" のように内側に単引用符を
+                    // 含むため、二重引用符区切りで囲み全体を優先的に取る。
+                    onclick: m[0].match(/onclick="([^"]*)"/i)?.[1] ?? m[0].match(/onclick='([^']*)'/i)?.[1] ?? null,
                     href: m[0].match(/href=["']([^"']*)["']/i)?.[1] ?? null,
                     text: m[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim(),
                   }))
                   .filter((l) => l.text !== ""),
+                buttons: Array.from(
+                  session.page.html.matchAll(/<INPUT\b[^>]*type=["']?(?:submit|button)["']?[^>]*>/gi),
+                ).map((m) => ({
+                  value: m[0].match(/value=["']([^"']*)["']/i)?.[1] ?? null,
+                  onclick: m[0].match(/onclick="([^"]*)"/i)?.[1] ?? m[0].match(/onclick='([^']*)'/i)?.[1] ?? null,
+                  name: m[0].match(/name=["']([^"']*)["']/i)?.[1] ?? null,
+                })),
               },
             },
             502,
