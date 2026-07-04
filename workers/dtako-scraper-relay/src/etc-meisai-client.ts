@@ -455,9 +455,66 @@ export async function etcLogin(
 // 検索条件ページへの遷移 → 検索 → CSV
 // ---------------------------------------------------------------------------
 
+/** onclick 属性値を取り出す。値は `submitPage('frm','...')` のように内側に
+ * 単引用符を含み得るため、getAttr() の `[^"']*` (最初の内側引用符で打ち切られる)
+ * では壊れる。実サイトの onclick は二重引用符区切りのみ実測済み (単引用符区切りは
+ * 未観測なので対応しない、見つからなければ空文字)。 */
+function extractOnclick(tag: string): string {
+  return tag.match(/onclick="([^"]*)"/i)?.[1] ?? "";
+}
+
+/** アカウントによってはログイン直後/検索を経ずに既に利用明細の結果ページへ
+ * 着地し、CSV 出力ボタン (`goOutput(...)`) が直接存在する場合がある
+ * (ohishi-exp/nuxt-dtako-admin#134 実機調査で確認。旧 chromiumoxide 版
+ * rust-scraper/src/etc/scraper.rs の Personal/Corporate 分岐に相当)。
+ * その遷移先 URL を返す (無ければ null)。 */
+function findDirectCsvOutputTarget(page: EtcPage): string | null {
+  for (const m of page.html.matchAll(/<input\b[^>]*type=["']?(?:submit|button)["']?[^>]*>/gi)) {
+    const tag = m[0];
+    const value = decodeEntities(getAttr(tag, "value") ?? "");
+    if (!/csv|ＣＳＶ/i.test(value)) continue;
+    const goMatch = extractOnclick(tag).match(/goOutput\([^,]*,[^,]*,[^,]*,\s*'([^']+)'/i);
+    if (goMatch) return new URL(goMatch[1], page.url).toString();
+  }
+  return null;
+}
+
+/** 検索 POST 直後に挟まる「共通 -確認してください-」等の中間確認ページ
+ * (メイン form が hidden の `p` 1つだけで、`onclick="submitPage('frm','<url>')"`
+ * の遷移ボタンを持つ) を1段階だけ POST で進める。navigateToSearchPage が使う
+ * `javascript:submitPage('funccode','nextfunc')` (href、引数は funccode/nextfunc)
+ * とは別の submitPage 呼び出し形 (ボタンの onclick、引数はフォーム名+完全遷移先
+ * URL) なので区別する。メイン form が「p」以外にも field を持つ (= 実データを
+ * 含む本来のページ) 場合や、遷移ボタンが見つからない場合は null。 */
+async function advancePastConfirmationPage(
+  jar: CookieJar,
+  page: EtcPage,
+  fetchImpl: FetchLike,
+  timeoutMs: number,
+): Promise<EtcPage | null> {
+  const mainForm = pickMainForm(parseForms(page.html));
+  if (!mainForm || mainForm.fields.size > 1) return null;
+  const m = page.html.match(/onclick="submitPage\('[^']*',\s*'([^']+)'\)/i);
+  if (!m) return null;
+  const body = new URLSearchParams();
+  for (const [name, value] of mainForm.fields) body.set(name, value);
+  return followToPage(
+    jar,
+    new URL(m[1], page.url).toString(),
+    { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: body.toString() },
+    fetchImpl,
+    timeoutMs,
+  );
+}
+
+/** 確認ページの自動突破を試みる最大回数 (#134 実機検証では2回で結果ページに到達)。 */
+const CONFIRMATION_HOP_LIMIT = 3;
+
 /** ログイン後ページから検索条件フォーム (sokoKbn) のあるページへ遷移する。
- * 既に sokoKbn form があればそのまま返す。「検索条件」リンクが JS ラッパー
- * (`javascript:submitPage(...)`) の場合はメイン form の POST で再現する。 */
+ * 既に sokoKbn form があればそのまま返す。ログイン直後から既に CSV 出力可能な
+ * 結果ページへ着地しているアカウント (#134) もそのまま返す (search 手順が不要)。
+ * 「検索条件」リンクが JS ラッパー (`javascript:submitPage(...)`) の場合は
+ * メイン form の POST で再現する。 */
 export async function navigateToSearchPage(
   jar: CookieJar,
   session: EtcSession,
@@ -466,6 +523,7 @@ export async function navigateToSearchPage(
 ): Promise<EtcPage> {
   const page = session.page;
   if (findFormWithField(parseForms(page.html), "sokoKbn")) return page;
+  if (findDirectCsvOutputTarget(page)) return page;
 
   const link = parseLinks(page.html).find(
     (l) => l.text.includes("検索条件") || l.text.includes("利用明細検索"),
@@ -521,6 +579,9 @@ export async function submitSearch(
 ): Promise<EtcPage> {
   const form = findFormWithField(parseForms(searchPage.html), "sokoKbn");
   if (!form) {
+    // 既に結果ページ (アカウントによっては検索を経ずに直接明細ページへ着地する、
+    // #134 実機調査で確認)。CSV 出力ボタンが無ければ従来通りエラーにする。
+    if (findDirectCsvOutputTarget(searchPage)) return searchPage;
     throw new EtcMeisaiClientError(
       "検索条件フォーム (sokoKbn) が見つかりません — etc-meisai.jp のページ仕様が変更された可能性があります",
     );
@@ -528,7 +589,7 @@ export async function submitSearch(
   const overrides: Record<string, string> = { sokoKbn: "0" };
   for (const cb of form.checkboxes) overrides[cb.name] = cb.value;
 
-  const result = await submitForm(
+  let result = await submitForm(
     jar,
     searchPage,
     form,
@@ -537,6 +598,14 @@ export async function submitSearch(
     fetchImpl,
     timeoutMs,
   );
+  // 検索 POST 直後に「共通 -確認してください-」等の中間確認ページが挟まる
+  // ことがある (#134 実機調査で確認)。最大 CONFIRMATION_HOP_LIMIT 回まで
+  // 自動で1段階ずつ POST して進める。
+  for (let hop = 0; hop < CONFIRMATION_HOP_LIMIT; hop += 1) {
+    const advanced = await advancePastConfirmationPage(jar, result, fetchImpl, timeoutMs);
+    if (!advanced) break;
+    result = advanced;
+  }
   if (result.html.includes("当該月のご利用はありません")) {
     throw new EtcMeisaiNoUsageError();
   }
@@ -570,11 +639,18 @@ export async function downloadMeisaiCsv(
     );
   }
 
-  let action = new URL(form.action || resultPage.url, resultPage.url).toString();
-  action = withNextfunc(action, ETC_FUNC_CSV_OUTPUT);
+  const directTarget = findDirectCsvOutputTarget(resultPage);
   const body = new URLSearchParams();
   for (const [name, value] of form.fields) body.set(name, value);
-  if (form.fields.has("nextfunc")) body.set("nextfunc", ETC_FUNC_CSV_OUTPUT);
+  let action: string;
+  if (directTarget) {
+    // ログイン直後から既に明細ページのアカウント (#134): goOutput(...) の
+    // 遷移先をそのまま POST する (ETC_FUNC_CSV_OUTPUT への override は不要)。
+    action = directTarget;
+  } else {
+    action = withNextfunc(new URL(form.action || resultPage.url, resultPage.url).toString(), ETC_FUNC_CSV_OUTPUT);
+    if (form.fields.has("nextfunc")) body.set("nextfunc", ETC_FUNC_CSV_OUTPUT);
+  }
 
   const res = await fetchEtc(
     jar,
