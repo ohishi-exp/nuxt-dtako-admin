@@ -392,6 +392,41 @@ async function submitForm(
   );
 }
 
+/** ボタンの onclick から解決した絶対 URL (funccode/nextfunc 込み) にそのまま
+ * POST する。`submitForm`/`withNextfunc` は `form.action` (多くの場合 query
+ * 無しの `/etc/R`) を起点に nextfunc だけを query に足す設計のため、
+ * ボタンの遷移先自体が持つ funccode を再現できない (実機検証で判明、
+ * Refs #134)。ボタンの遷移先が分かっている場合はそれを直接 action として
+ * 使う。 */
+async function submitFormToTarget(
+  jar: CookieJar,
+  form: EtcForm,
+  overrides: Record<string, string>,
+  targetUrl: string,
+  fetchImpl: FetchLike,
+  timeoutMs: number,
+): Promise<EtcPage> {
+  const body = new URLSearchParams();
+  for (const [name, value] of form.fields) body.set(name, value);
+  for (const [name, value] of Object.entries(overrides)) body.set(name, value);
+  const target = new URL(targetUrl);
+  const nf = target.searchParams.get("nextfunc");
+  if (nf && form.fields.has("nextfunc")) body.set("nextfunc", nf);
+  const fc = target.searchParams.get("funccode");
+  if (fc && form.fields.has("funccode")) body.set("funccode", fc);
+  return followToPage(
+    jar,
+    target.toString(),
+    {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    },
+    fetchImpl,
+    timeoutMs,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // ログイン
 // ---------------------------------------------------------------------------
@@ -660,6 +695,42 @@ function extractButtonNames(html: string): { name: string; value: string }[] {
   return buttons;
 }
 
+/** onclick 属性値の中の単引用符リテラル引数のうち、URL らしきもの (`/` か
+ * `http` で始まる) を返す。cdp-relay 実機検証 (Refs #134) で
+ * `focusTarget_Save`/`focusTarget` ボタンの onclick が `submitSave(...)`/
+ * `submitKensaku(...)` という、リンクの `submitPage(...)` / CSV ボタンの
+ * `goOutput(...)` とは異なる関数名・異なる引数位置 (`goOutput` は 4/5番目、
+ * `submitSave`/`submitKensaku` は 3番目、`submitPage` は 2番目) で URL を
+ * 渡していることが判明したため、関数名・引数位置に依存せず「URL らしい
+ * 引数」を拾う汎用抽出にする。該当なしは null。 */
+function extractOnclickTargetUrl(onclick: string): string | null {
+  for (const m of onclick.matchAll(/'([^']*)'/g)) {
+    const value = m[1];
+    if (value.startsWith("/") || /^https?:\/\//i.test(value)) return decodeEntities(value);
+  }
+  return null;
+}
+
+/** `name` 属性が一致する submit/button 型ボタンの onclick から、実際の遷移先
+ * URL を抽出する。実機検証 (Refs #134) で `focusTarget_Save`/`focusTarget`
+ * ボタンの onclick は `submitSave(...)`/`submitKensaku(...)` という一見
+ * 専用の JS ラッパーだが、中身は `if (未選択なら confirm) submitPage(
+ * formName, url);` だけで、`url` の `nextfunc` はハードコードした
+ * `ETC_FUNC_SEARCH` (1032000000) とは異なる値 (実機で `1013000000` を確認、
+ * = 「利用明細の表示」と同じエンドポイント) がアカウントによって使われて
+ * いた。ボタンが見つからない/onclick に URL らしき引数が無い場合は null
+ * (呼び出し側は ETC_FUNC_SEARCH に fallback する)。 */
+function findButtonSubmitPageUrl(html: string, buttonName: string): string | null {
+  for (const m of html.matchAll(/<input\b[^>]*>/gi)) {
+    const tag = m[0];
+    const type = (getAttr(tag, "type") ?? "text").toLowerCase();
+    if (type !== "submit" && type !== "button") continue;
+    if (getAttr(tag, "name") !== buttonName) continue;
+    return extractOnclickTargetUrl(extractOnclick(tag));
+  }
+  return null;
+}
+
 /** 検索条件フォームを `sokoKbn=0` (全て) + 利用月以外の全 checkbox 選択
  * (「全選択」相当) + 今月の利用月のみ選択、で POST し、明細一覧ページを返す。
  * 明細 0 件は EtcMeisaiNoUsageError。
@@ -745,6 +816,10 @@ export async function submitSearch(
     // parseForms() は submit/button 型 input を意図的に除外するため、通常の
     // all_field_names には出てこない。
     button_names: extractButtonNames(searchPage.html),
+    // 実機検証 (cdp-relay 経由、Refs #134) で確定: focusTarget ボタンの実際の
+    // 遷移先 nextfunc はハードコードした ETC_FUNC_SEARCH と一致しないアカウント
+    // が実在した。見つかった実際の遷移先を記録する。
+    search_button_url: findButtonSubmitPageUrl(searchPage.html, "focusTarget"),
   });
   // ctx.waitUntil() 内の console.log は Workers Logs / Tail Worker 経由でも
   // 実機で不安定 (Refs #134 後続報告)。onProgress 経由で browser の進捗ログに
@@ -777,15 +852,58 @@ export async function submitSearch(
     overrides.toDD = toDd;
   }
 
-  let result = await submitForm(
-    jar,
-    searchPage,
-    form,
-    overrides,
-    ETC_FUNC_SEARCH,
-    fetchImpl,
-    timeoutMs,
-  );
+  // 「設定保存」ボタン (focusTarget_Save) が実ページに見つかれば、検索を
+  // POST する前に必ず先に POST する。onclick (submitSave) の中身は最終的に
+  // submitPage(formName, url) を呼ぶだけで検索 POST と同じ overrides
+  // (sokoKbn=0 + 全 checkbox 選択 + 今月の riyouMonth) を送るが、これは
+  // **前回セッションで特定車両/カードのみが選択保存されていた場合、それを
+  // 「全て」に上書きするための必須ステップ**(旧 chromiumoxide 版
+  // `rust-scraper/src/etc/scraper.rs` の `download_personal` も同じ2段階
+  // (`focusTarget_Save` → `focusTarget`) を踏んでいた。検索エンドポイント
+  // 自体は当該 POST の overrides をその場では見るが、サーバー側に永続化
+  // されている「表示対象カード/車両」プロファイルは設定保存を経ないと
+  // 更新されない可能性があるため、省略すると過去に保存された絞り込みが
+  // 残ったままになり得る。Refs #134)。 */
+  let workingPage = searchPage;
+  let workingForm = form;
+  const saveButtonUrl = findButtonSubmitPageUrl(workingPage.html, "focusTarget_Save");
+  if (saveButtonUrl) {
+    const resolvedSaveUrl = new URL(saveButtonUrl, workingPage.url).toString();
+    const afterSave = await submitFormToTarget(jar, workingForm, overrides, resolvedSaveUrl, fetchImpl, timeoutMs);
+    onProgress(
+      "search",
+      JSON.stringify({ etc_debug: "focusTargetSave", target: saveButtonUrl, result_html_length: afterSave.html.length }),
+    );
+    // 保存後のページが引き続き検索条件フォームを持っていれば、以降の検索
+    // POST はそちらの hidden field を基準にする (リロードで p 等の値が
+    // 変わっている可能性があるため)。持っていなければ元の searchPage を
+    // そのまま使う (fail-safe、保存ページの構造が想定と違っても検索自体は
+    // 試みる)。
+    const reParsedForm = findFormWithField(parseForms(afterSave.html), "sokoKbn");
+    if (reParsedForm) {
+      workingPage = afterSave;
+      workingForm = reParsedForm;
+    }
+  }
+
+  // 「検索」ボタン (focusTarget) が実ページに見つかれば、その onclick
+  // (submitKensaku → 最終的に submitPage) から実際の遷移先を読み取って使う
+  // (funccode/nextfunc とも解決 URL をそのまま action にする、
+  // submitFormToTarget 参照)。ハードコードした ETC_FUNC_SEARCH は funccode
+  // 体系が異なるアカウントでは誤った nextfunc になり得るため (実機確認済み、
+  // Refs #134)、見つからない場合のみ fallback する。
+  const searchButtonUrl = findButtonSubmitPageUrl(workingPage.html, "focusTarget");
+
+  let result = searchButtonUrl
+    ? await submitFormToTarget(
+        jar,
+        workingForm,
+        overrides,
+        new URL(searchButtonUrl, workingPage.url).toString(),
+        fetchImpl,
+        timeoutMs,
+      )
+    : await submitForm(jar, workingPage, workingForm, overrides, ETC_FUNC_SEARCH, fetchImpl, timeoutMs);
   // 検索 POST 直後に「共通 -確認してください-」等の中間確認ページが挟まる
   // ことがある (#134 実機調査で確認)。最大 CONFIRMATION_HOP_LIMIT 回まで
   // 自動で1段階ずつ POST して進める。
