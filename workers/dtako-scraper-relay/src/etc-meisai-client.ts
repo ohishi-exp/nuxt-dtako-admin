@@ -602,6 +602,7 @@ export async function submitSearch(
   fetchImpl: FetchLike = fetch,
   timeoutMs: number = ETC_REQUEST_TIMEOUT_MS,
   now: Date,
+  onProgress: EtcProgressCallback = () => {},
 ): Promise<EtcPage> {
   const form = findFormWithField(parseForms(searchPage.html), "sokoKbn");
   if (!form) {
@@ -619,17 +620,21 @@ export async function submitSearch(
   // 今回どれを選択したかを毎回記録する — 現地の checkbox 構造が未知数のため、
   // 次回実行時にここから実際の value 形式を確認する。
   const riyouMonthCheckboxes = form.checkboxes.filter((cb) => RIYOU_MONTH_CHECKBOX_PATTERN.test(cb.name));
-  console.log(
-    JSON.stringify({
-      etc_debug: "riyouMonth",
-      current_ym: currentYm,
-      checkboxes: riyouMonthCheckboxes.map((cb) => ({
-        name: cb.name,
-        value: cb.value,
-        default_checked: form.fields.get(cb.name) === cb.value,
-      })),
-    }),
-  );
+  const debugPayload = JSON.stringify({
+    etc_debug: "riyouMonth",
+    current_ym: currentYm,
+    checkboxes: riyouMonthCheckboxes.map((cb) => ({
+      name: cb.name,
+      value: cb.value,
+      default_checked: form.fields.get(cb.name) === cb.value,
+    })),
+  });
+  // ctx.waitUntil() 内の console.log は Workers Logs / Tail Worker 経由でも
+  // 実機で不安定 (Refs #134 後続報告)。onProgress 経由で browser の進捗ログに
+  // 直接載せることで、ログ基盤を介さず実機の checkbox 構造を確認できるように
+  // する (一時的な実機診断用、riyouMonth 絞り込みが確定したら削除して良い)。
+  console.log(debugPayload);
+  onProgress("search", debugPayload);
   for (const cb of form.checkboxes) {
     if (RIYOU_MONTH_CHECKBOX_PATTERN.test(cb.name)) {
       // ページ既定のチェック状態 (古い/未確定の月がチェックされていることが
@@ -784,7 +789,7 @@ export async function scrapeEtcCsv(
 
   onProgress("search");
   const searchPage = await navigateToSearchPage(jar, session, fetchImpl, requestTimeoutMs);
-  const resultPage = await submitSearch(jar, searchPage, fetchImpl, requestTimeoutMs, now);
+  const resultPage = await submitSearch(jar, searchPage, fetchImpl, requestTimeoutMs, now, onProgress);
 
   onProgress("download");
   const csv = await downloadMeisaiCsv(jar, resultPage, fetchImpl, exportTimeoutMs);
@@ -847,7 +852,7 @@ export async function scrapeEtcFromCookies(
 
   onProgress("search");
   const searchPage = await navigateToSearchPage(jar, session, fetchImpl, requestTimeoutMs);
-  const resultPage = await submitSearch(jar, searchPage, fetchImpl, requestTimeoutMs, now);
+  const resultPage = await submitSearch(jar, searchPage, fetchImpl, requestTimeoutMs, now, onProgress);
 
   onProgress("download");
   const csv = await downloadMeisaiCsv(jar, resultPage, fetchImpl, exportTimeoutMs);

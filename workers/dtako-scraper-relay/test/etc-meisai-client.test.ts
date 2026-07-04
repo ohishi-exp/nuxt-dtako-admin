@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createCookieJar, type FetchLike } from '../src/theearth-client'
 import {
   decodeHtml,
@@ -543,6 +543,21 @@ describe('submitSearch', () => {
     )
   })
 
+  it('onProgress 経由で riyouMonth checkbox の実機診断情報を "search" step で通知する (Refs #134 後続報告)', async () => {
+    const { fetch } = recordingFetch([html(RESULT_PAGE_HTML)])
+    const onProgress = vi.fn()
+    await submitSearch(createCookieJar(), searchPage, fetch, 1000, NOW, onProgress)
+    const debugCall = onProgress.mock.calls.find(([step]) => step === 'search')
+    expect(debugCall).toBeDefined()
+    const payload = JSON.parse(debugCall![1] as string)
+    expect(payload.etc_debug).toBe('riyouMonth')
+    expect(payload.current_ym).toBe('202607')
+    expect(payload.checkboxes).toEqual([
+      { name: 'riyouMonth1', value: '202606', default_checked: false },
+      { name: 'riyouMonth2', value: '202607', default_checked: true },
+    ])
+  })
+
   it('jar に溜まった cookie を後続 POST に載せる', async () => {
     const { fetch, calls } = recordingFetch([html(RESULT_PAGE_HTML)])
     const jar = createCookieJar()
@@ -716,7 +731,10 @@ describe('scrapeEtcCsv', () => {
       { requestTimeoutMs: 1000, exportTimeoutMs: 1000 },
       NOW,
     )
-    expect(steps).toEqual(['login', 'search', 'download', 'done'])
+    // 2つ目の 'search' は submitSearch が onProgress 経由で通知する riyouMonth
+    // 診断ログ (Refs #134 後続報告、Tail Worker 経由のログ取得が実機で不安定
+    // だったため browser 進捗ログに直接載せる方式に変更)。
+    expect(steps).toEqual(['login', 'search', 'search', 'download', 'done'])
     expect(result.accountType).toBe('personal')
     expect(result.filename).toBe('meisai_202607.csv')
     expect(result.bytes.byteLength).toBeGreaterThan(0)
@@ -754,7 +772,7 @@ describe('scrapeEtcFromCookies (cookie 委譲)', () => {
       { requestTimeoutMs: 1000, exportTimeoutMs: 1000 },
       NOW,
     )
-    expect(steps).toEqual(['login', 'search', 'download', 'done'])
+    expect(steps).toEqual(['login', 'search', 'search', 'download', 'done'])
     expect(result.accountType).toBe('personal') // startUrl が etc_user_meisai
     expect(result.filename).toBe('meisai_202607.csv')
 
