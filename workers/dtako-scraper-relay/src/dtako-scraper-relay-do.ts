@@ -105,6 +105,13 @@ interface EtcScrapeOutcome {
   key?: string;
   csvBytes?: number;
   filename?: string;
+  /** kind=etc-all 経由 (`handleInternalEtcScrape`) の時だけ載る、途中の onProgress
+   * 通知の記録。dispatcher (`executeEtcScrapeAll`) はこれを受け取った時点で
+   * まとめて "progress" イベントとして再送する — 単発 `/internal/etc-scrape` は
+   * 同期 fetch (WS を持たない) なので、途中経過は response body 経由で運ぶしかない
+   * (Refs #134 後続報告、riyouMonth 診断が etc-all 実行では一切表示されなかった
+   * 根本原因)。 */
+  progressLog?: { step: string; message?: string }[];
 }
 
 /** /dvr-api/* のセッションレコードを置く DO storage キー。この DO instance は
@@ -708,6 +715,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
             body: JSON.stringify({ user_id: account.user_id }),
           });
           const outcome = (await res.json()) as EtcScrapeOutcome;
+          for (const p of outcome.progressLog ?? []) {
+            this.sendSafely(server, {
+              event: "progress",
+              user_id: account.user_id,
+              step: p.step,
+              message: p.message,
+            });
+          }
           if (outcome.status === "error") hadError = true;
           this.sendSafely(server, {
             event: "result",
@@ -763,8 +778,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       });
     }
 
-    const outcome = await this.enqueueScrape(() => this.performEtcScrape(account, () => {}));
-    return Response.json(outcome);
+    const progressLog: { step: string; message?: string }[] = [];
+    const outcome = await this.enqueueScrape(() =>
+      this.performEtcScrape(account, (step, message) => {
+        progressLog.push({ step, message });
+      }),
+    );
+    return Response.json({ ...outcome, progressLog });
   }
 
   private async executeScrape(

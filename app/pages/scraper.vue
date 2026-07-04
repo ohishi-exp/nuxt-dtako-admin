@@ -65,7 +65,9 @@ async function handleEtcRunAll() {
       { kind: 'etc-all' },
       (evt: ScrapeProgressEvent) => {
         if (evt.event === 'progress') {
-          etcLog.value.push({ text: `[進捗] ${evt.step ?? ''}${evt.message ? `: ${evt.message}` : ''}` })
+          etcLog.value.push({
+            text: `[進捗] ${evt.user_id ? `${evt.user_id} ` : ''}${evt.step ?? ''}${evt.message ? `: ${evt.message}` : ''}`,
+          })
         }
         else if (evt.event === 'result') {
           etcLog.value.push({
