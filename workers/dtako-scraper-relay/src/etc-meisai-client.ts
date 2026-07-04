@@ -607,8 +607,26 @@ export async function submitSearch(
   const form = findFormWithField(parseForms(searchPage.html), "sokoKbn");
   if (!form) {
     // 既に結果ページ (アカウントによっては検索を経ずに直接明細ページへ着地する、
-    // #134 実機調査で確認)。CSV 出力ボタンが無ければ従来通りエラーにする。
-    if (findDirectCsvOutputTarget(searchPage)) return searchPage;
+    // #134 実機調査で確認)。この分岐は sokoKbn/riyouMonth の絞り込みロジックを
+    // 一切通らないため、月次絞り込みが効かない実害の真因の可能性がある
+    // (Refs #134 後続報告 2回目)。CSV 出力ボタンが無ければ従来通りエラーにする。
+    const directTarget = findDirectCsvOutputTarget(searchPage);
+    if (directTarget) {
+      onProgress(
+        "search",
+        JSON.stringify({
+          etc_debug: "directResult",
+          html_length: searchPage.html.length,
+          csv_target: directTarget,
+          forms: parseForms(searchPage.html).map((f) => ({
+            action: f.action,
+            field_names: [...f.fields.keys()],
+            checkbox_names: f.checkboxes.map((cb) => cb.name),
+          })),
+        }),
+      );
+      return searchPage;
+    }
     throw new EtcMeisaiClientError(
       "検索条件フォーム (sokoKbn) が見つかりません — etc-meisai.jp のページ仕様が変更された可能性があります",
     );
