@@ -114,6 +114,21 @@ const SEARCH_PAGE_HTML = `<html><body>
 </form>
 </body></html>`
 
+// 実機 (ohishiexp1、Refs #134) と同型: sokoKbn/riyouMonth に加えて、同名
+// checkbox が複数並ぶカード選択 (`hyojiCard`) を持つ検索条件ページ。
+const SEARCH_PAGE_WITH_MULTI_CARD_CHECKBOXES_HTML = `<html><body>
+<form action="/etc/R" method="post">
+  <input type="hidden" name="funccode" value="${ETC_FUNC_SEARCH}" />
+  <input type="hidden" name="nextfunc" value="" />
+  <input type="radio" name="sokoKbn" value="1" checked />
+  <input type="radio" name="sokoKbn" value="0" />
+  <input type="checkbox" name="riyouMonth2" value="202607" checked />
+  <input type="checkbox" name="hyojiCard" value="0" />
+  <input type="checkbox" name="hyojiCard" value="1" checked />
+  <input type="checkbox" name="hyojiCard" value="2" />
+</form>
+</body></html>`
+
 const RESULT_PAGE_HTML = `<html><body>
 <form action="/etc/R" method="post">
   <input type="hidden" name="funccode" value="${ETC_FUNC_SEARCH}" />
@@ -716,6 +731,15 @@ describe('submitSearch', () => {
     expect(body.get('riyouMonth2')).toBe('202607') // ページ既定でチェック済みの月のみ
     expect(body.get('cardAll')).toBe('on') // カード選択等は従来通り全選択
     expect(body.get('nextfunc')).toBe(ETC_FUNC_SEARCH)
+  })
+
+  it('同名の checkbox が複数並ぶカード選択 (hyojiCard) は全値を POST する (単純な上書きだと最後の1枚しか送られず「明細0件」に誤判定される実害の回帰防止、cdp-relay 実機検証、Refs #134)', async () => {
+    const p = page('https://www.etc-meisai.jp/etc/R', SEARCH_PAGE_WITH_MULTI_CARD_CHECKBOXES_HTML)
+    const { fetch, calls } = recordingFetch([html(RESULT_PAGE_HTML)])
+    await submitSearch(createCookieJar(), p, fetch, 1000, NOW)
+    const body = bodyParams(calls[0].init)
+    // ページ既定のチェック状態 (value=1 のみ) に関わらず、全カードが送られる。
+    expect(body.getAll('hyojiCard')).toEqual(['0', '1', '2'])
   })
 
   it('sokoKbn form が無ければ loud fail する', async () => {
