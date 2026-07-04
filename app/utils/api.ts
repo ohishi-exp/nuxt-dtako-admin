@@ -623,6 +623,18 @@ export interface ScrapeProgressEvent {
    * `buildScraperZipUrl()` で絶対 URL に変換して使う。
    */
   zip_url?: string
+  /**
+   * kind: 'etc' / 'etc-all' の成功時にのみ載る、R2 (`DTAKO_R2`) 保存先 key
+   * (`{etc|etc-staging}/{user_id}/{date}/{time}.csv`)。`buildEtcCsvDownloadUrl()`
+   * で `/api/etc-csv/download` の URL に変換して使う。
+   */
+  key?: string
+}
+
+/** ETC CSV の R2 key を、front worker (この app 自身) の R2 binding 経由で
+ * ダウンロードできる相対 URL に変換する (`server/api/etc-csv/download.get.ts`)。 */
+export function buildEtcCsvDownloadUrl(key: string): string {
+  return `/api/etc-csv/download?key=${encodeURIComponent(key)}`
 }
 
 /** `zip_url` (relay 相対 path) を、ダウンロード可能な絶対 https URL に変換する。
