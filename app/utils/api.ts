@@ -612,6 +612,8 @@ export async function saveScrapeHistory(entry: ScrapeHistoryEntry): Promise<void
 export interface ScrapeProgressEvent {
   event: string    // "progress" | "result" | "done" | "error"
   comp_id?: string
+  /** kind: 'etc' の時に comp_id の代わりに載る (Refs #134)。 */
+  user_id?: string
   step?: string    // "login" | "download" | "upload" | "queued" | "done"
   status?: string  // "success" | "error"
   message?: string
@@ -635,6 +637,8 @@ function buildScraperWsUrl(req: ScrapeRequest, token: string): string {
   const params = new URLSearchParams()
   params.set('session', crypto.randomUUID())
   params.set('token', token)
+  if (req.kind) params.set('kind', req.kind)
+  if (req.user_id) params.set('user_id', req.user_id)
   if (req.start_date) params.set('start_date', req.start_date)
   if (req.end_date) params.set('end_date', req.end_date)
   if (req.comp_id) params.set('comp_id', req.comp_id)
