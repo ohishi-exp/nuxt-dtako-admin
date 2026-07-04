@@ -435,22 +435,41 @@ credential が gateway 内で平文復号される。これを避けるため、
    リンク href は絶対 URL で `www2` を指すため、コード側は `page.url` 相対解決のみで host
    を自動追従する。`ETC_BASE_URL` はトップページ GET の 1 箇所にしか使っていない)
 3. `browser_eval(session, "location.href")` → login 後 URL (`startUrl`)
-4. `bun run scripts/verify-etc.ts <cookies_url> <startUrl>` — cookie を jar に注入し
+4. `npx tsx scripts/verify-etc.ts <cookies_url> <startUrl>` — cookie を jar に注入し
    `scrapeEtcFromCookies` で検索→CSV。credential は CCoW に来ない、cookie だけ。
 
 - `src/etc-meisai-client.ts` の `scrapeEtcFromCookies(cookies, startUrl, ...)` が
   login をスキップして cookie で開始する entry (jar は login と分離済みなので薄い)。
-- `scripts/verify-etc.ts` は bun 実行専用 (tsconfig include 外)。cookie value も CSV
-  明細 (個人情報) も出力せず、cookie 名 / 件数 / ヘッダ行 / 成否だけ出す。
+- `scripts/verify-etc.ts` は node/tsx 実行 (bun ではない、下記参照)。cookie value も
+  CSV 明細 (個人情報) も出力せず、cookie 名 / 件数 / ヘッダ行 / 成否だけ出す。
 - **検証範囲の限界**: この経路は `etcLogin` (funccode/hidden POST) を通らないので
   **login 実装自体は検証されない**。login は本番 cron / devtools 観察で別途検証する。
 
+#### cookie 委譲は etc-meisai.jp に対して機能しない — IP バインディングで正規セッションごと破壊される (重大、再試行厳禁)
+
+実機検証 (2026-07-04) で確定: 手元ブラウザで login 後の cookie (`JSESSIONID`) を
+CCoW (別 IP) から送っても、**サーバー側はそのセッションを認識せずログインフォーム
+を返し、`Set-Cookie` で新規セッションを発行する**。これは IP バインディング
+(session fixation 対策で、ログイン確立時の client IP と異なる IP からのアクセスを
+検知するとセッションを無効化する) セキュリティ機構と考えられる。
+
+**さらに悪いことに、この試行後は手元ブラウザ側の元セッションも無効化され、
+ユーザーが再ログインを強いられた** (実害確認済み)。つまり cookie 委譲を
+etc-meisai.jp に試みる行為自体が、ユーザーの正規セッションを破壊する副作用を持つ。
+
+**結論: `scrapeEtcFromCookies` / `browser-cookie-borrow` パターンを etc-meisai.jp
+に対して再度試みないこと。** ETC の full flow (login 含む) 検証は、IP が一貫して
+手元のものになる **手元での直接実行**、または下記の `wrangler deploy --temporary`
+(実 CF colo egress、手元発) に限定する。CCoW からの検証は「cookie 無しで済む GET
+(構造確認)」までに留める。
+
 ### ETC の `wrangler deploy --temporary` 検証 (login 含む full flow、credential は手元のみ)
 
-cookie 委譲 (上記) は login 実装自体を検証しない。**login を含めて丸ごと検証**したい時は
-`scripts/verify-etc-worker/` (本番 relay の DO/migration とは独立の使い捨て Worker) を
-`wrangler deploy --temporary` する。credential は**手元シェルの `--var` としてのみ**渡し、
-CCoW / 会話には一切乗せない (`wrangler-deploy-temporary` skill 参照)。
+cookie 委譲 (上記、**現在は禁止**) は login 実装自体を検証しない上に危険。
+**login を含めて丸ごと検証**したい時は `scripts/verify-etc-worker/` (本番 relay の
+DO/migration とは独立の使い捨て Worker) を `wrangler deploy --temporary` する。
+credential は**手元シェルの `--var` としてのみ**渡し、CCoW / 会話には一切乗せない
+(`wrangler-deploy-temporary` skill 参照)。
 
 ```sh
 cd workers/dtako-scraper-relay
@@ -472,6 +491,20 @@ cdp-relay の実ブラウザ経由 (`browser_navigate` → `browser_eval("docume
 - `scripts/verify-etc-worker/tsconfig.json` — 本体 tsconfig (bun 専用 `verify-etc.ts` を
   除外する既存方針) とは別に、`@cloudflare/workers-types` で型検証する専用 tsconfig。
 - 60分で自動失効、claim しなければ何も恒久化しない。
+
+#### `verify-etc.ts` は node/tsx で動かす (bun は TLS handshake が通らない、実機確認済み)
+
+`node`/`bun` の組み込み `fetch` (undici) は **`www2.etc-meisai.jp` との TLS
+ハンドシェイクで一貫して失敗する** (503 `TLS_error...HANDSHAKE_FAILURE`)。CCoW の
+egress gateway が TLS を再終端する際に runtime が送る ClientHello fingerprint が、
+向こう側の WAF (Envoy 系、エラーメッセージ形式で確認) に弾かれると見られる。同一
+ホストへの `curl` は安定して 200 で通る。よって `scripts/verify-etc.ts` は
+**`curl` をサブプロセスで呼ぶ `FetchLike` アダプタ (`curlFetch`)** を実装し、
+etc-meisai.jp 向けの fetch だけこれに差し替える (cdp-relay 自体への fetch は通常の
+`fetch` のままで良い)。credential/cookie を含み得るヘッダ・body はコマンドライン
+引数ではなく **curl config file (`-K`) 経由**で渡す (`ps` 等でプロセス引数を見ても
+値が出ない)。本番 Cloudflare Workers の `fetch` は別実装なのでこの問題は起きない
+はず (未検証)。
 
 ## テスト
 
