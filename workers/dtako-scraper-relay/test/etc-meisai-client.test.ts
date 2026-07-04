@@ -181,6 +181,24 @@ const SEARCH_PAGE_WITH_REAL_BUTTON_TARGET_HTML = `<html><body>
 </form>
 </body></html>`
 
+// cdp-relay 実機検証 (Refs #134) で発覚した実害の再現用フィクスチャ。実データを
+// 含む本来の「利用明細」結果ページも、hidden の `p` 1個しか form field を
+// 持たないことがある (ナビゲーションは全て `<a onclick="submitPage(...)">` の
+// メニューリンクで表現されるため)。「確認してください」の見出しが無いのに
+// field 数だけで確認ページと誤判定すると、この結果ページのナビメニューリンク
+// (「利用明細の表示」) を誤って踏んでしまい、正しい検索結果 (24件) が
+// 「当該月のご利用はありません」を含む別ページに上書きされる実害があった。
+const REAL_RESULT_PAGE_SINGLE_FIELD_HTML = `<html><body>
+<a onclick="submitPage('frm','/etc/R?funccode=1013000000&nextfunc=1013000000'); return false;" href="JavaScript:void(0);">利用明細の表示</a>
+<h2>利用明細</h2>
+<form action="/etc/R" method="post">
+  <input type="hidden" name="p" value="realresulttoken" />
+</form>
+<p>明細期間 2026年06月01日 ～ 2026年06月30日</p>
+<p>上記期間の 1件目 ～ 10件目 / 全24件</p>
+<table><tr><td>26/06/01</td></tr></table>
+</body></html>`
+
 // 検索ボタンの遷移先 funccode が検索条件フォーム自身の funccode と異なる
 // (= account/画面バリエーションによって funccode 体系ごと切り替わる) ケース。
 const SEARCH_PAGE_WITH_DIFFERENT_FUNCCODE_TARGET_HTML = `<html><body>
@@ -915,6 +933,28 @@ describe('submitSearch', () => {
     expect(calls).toHaveLength(2)
     expect(calls[1].url).toBe('https://www.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1032000000')
     expect(bodyParams(calls[1].init).get('p')).toBe('CONFIRMHIDDEN')
+  })
+
+  it('「p」1個だけの form を持つ本来の結果ページを、確認ページと誤認して踏み越えない (cdp-relay 実機検証で発覚した実害の回帰防止、Refs #134)', async () => {
+    const { fetch, calls } = recordingFetch([html(REAL_RESULT_PAGE_SINGLE_FIELD_HTML)])
+    const result = await submitSearch(createCookieJar(), searchPage, fetch, 1000, NOW)
+    // 「確認してください」が無いので、ナビメニューの submitPage(...) リンクを
+    // 誤って踏まず、実データを含むこの結果ページをそのまま返す。
+    expect(result.html).toBe(REAL_RESULT_PAGE_SINGLE_FIELD_HTML)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('「確認してください」を含んでいても遷移ボタンの onclick が見つからなければ踏み越えない', async () => {
+    const noButtonConfirmHtml = `<html><body>
+<h2>共通&nbsp;-確認してください-</h2>
+<form action="/etc/R" method="post">
+  <input type="hidden" name="p" value="NOBUTTONHIDDEN" />
+</form>
+</body></html>`
+    const { fetch, calls } = recordingFetch([html(noButtonConfirmHtml)])
+    const result = await submitSearch(createCookieJar(), searchPage, fetch, 1000, NOW)
+    expect(result.html).toBe(noButtonConfirmHtml)
+    expect(calls).toHaveLength(1)
   })
 })
 
