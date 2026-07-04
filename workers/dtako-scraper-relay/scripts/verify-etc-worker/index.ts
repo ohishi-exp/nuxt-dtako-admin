@@ -87,8 +87,13 @@ export default {
 
     const steps: string[] = [];
     try {
-      const result = await scrapeEtcFromCookies(cookies, startUrl, (step, msg) =>
-        steps.push(`${step}${msg ? " " + msg : ""}`),
+      const result = await scrapeEtcFromCookies(
+        cookies,
+        startUrl,
+        (step, msg) => steps.push(`${step}${msg ? " " + msg : ""}`),
+        undefined,
+        undefined,
+        new Date(),
       );
       // CSV 明細 (個人情報) は返さない。件数・ヘッダ行・成否だけ。
       const text = new TextDecoder("shift_jis").decode(result.bytes);

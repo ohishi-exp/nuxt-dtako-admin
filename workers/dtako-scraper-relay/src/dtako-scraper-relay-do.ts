@@ -530,9 +530,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   ): Promise<EtcScrapeOutcome> {
     const bucket = this.env.DTAKO_R2!;
     const prefix = this.env.ETC_R2_PREFIX || "etc";
+    const now = new Date();
     try {
-      const result = await scrapeEtcCsv({ userId: account.user_id, password: account.password }, onStep);
-      const key = etcCsvKey(prefix, account.user_id, new Date());
+      const result = await scrapeEtcCsv(
+        { userId: account.user_id, password: account.password },
+        onStep,
+        undefined,
+        undefined,
+        now,
+      );
+      const key = etcCsvKey(prefix, account.user_id, now);
       await bucket.put(key, result.bytes, {
         httpMetadata: { contentType: "text/csv; charset=shift_jis" },
         customMetadata: { filename: result.filename, account_type: result.accountType },

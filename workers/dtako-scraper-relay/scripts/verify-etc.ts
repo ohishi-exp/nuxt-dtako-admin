@@ -142,6 +142,8 @@ async function main() {
       startUrl,
       (step, msg) => console.error(`[step] ${step}${msg ? " " + msg : ""}`),
       curlFetch,
+      undefined,
+      new Date(),
     );
     // CSV 明細は個人情報なので出さない。件数とヘッダ行 (ASCII) だけ。
     const text = new TextDecoder("shift_jis").decode(result.bytes);
