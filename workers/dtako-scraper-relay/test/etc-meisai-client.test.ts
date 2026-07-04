@@ -591,6 +591,34 @@ describe('submitSearch', () => {
     expect(calls).toHaveLength(0)
   })
 
+  it('直接結果ページ分岐でも onProgress 経由で診断情報 (form 構造) を通知する (Refs #134 後続報告2回目)', async () => {
+    const p = page('https://www2.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1013000000', DIRECT_RESULT_HTML)
+    const onProgress = vi.fn()
+    await submitSearch(createCookieJar(), p, recordingFetch([]).fetch, 1000, NOW, onProgress)
+    const debugCall = onProgress.mock.calls.find(([step]) => step === 'search')
+    expect(debugCall).toBeDefined()
+    const payload = JSON.parse(debugCall![1] as string)
+    expect(payload.etc_debug).toBe('directResult')
+    expect(payload.csv_target).toBe('https://www2.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1013500000')
+    expect(payload.forms).toEqual([{ action: '/etc/R', field_names: ['p'], checkbox_names: [] }])
+  })
+
+  it('直接結果ページの form が checkbox を持つ場合は checkbox_names にも含める', async () => {
+    const html = `<html><body>
+<form action="/etc/R" method="post">
+  <input type="hidden" name="p" value="X" />
+  <input type="checkbox" name="cardAll" checked />
+</form>
+<input type="submit" value="利用明細ＣＳＶ出力" onclick="goOutput(false, 'hakkoMeisai', 'frm', '/etc/R?funccode=1013000000&nextfunc=1013500000', '_blank'); return false;" />
+</body></html>`
+    const p = page('https://www2.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1013000000', html)
+    const onProgress = vi.fn()
+    await submitSearch(createCookieJar(), p, recordingFetch([]).fetch, 1000, NOW, onProgress)
+    const debugCall = onProgress.mock.calls.find(([step]) => step === 'search')
+    const payload = JSON.parse(debugCall![1] as string)
+    expect(payload.forms[0].checkbox_names).toEqual(['cardAll'])
+  })
+
   it('検索 POST 直後の「共通 -確認してください-」中間ページを自動で1段階 POST して進む (#134)', async () => {
     const { fetch, calls } = recordingFetch([html(CONFIRM_PAGE_HTML), html(RESULT_PAGE_HTML)])
     const result = await submitSearch(createCookieJar(), searchPage, fetch, 1000, NOW)
