@@ -569,27 +569,39 @@ export async function navigateToSearchPage(
   return next;
 }
 
-/** `riyouMonth{N}` (利用月選択) checkbox の名前パターン。ページ既定でチェック
- * 済みなのは検索対象月 (実機確認では直近月のみ) で、それ以外の月は未チェック。
- * 「全選択」の対象はカード選択等であって利用月ではない (`submitSearch` 参照)。 */
+/** `riyouMonth{N}` (利用月選択) checkbox の名前パターン。 */
 const RIYOU_MONTH_CHECKBOX_PATTERN = /^riyouMonth\d+$/;
 
+/** JST における「今月」を `riyouMonth` checkbox の value 形式 (`YYYYMM`) で返す。 */
+function currentRiyouMonthValue(now: Date): string {
+  const jst = new Date(now.getTime() + 9 * 3600 * 1000);
+  return jst.toISOString().slice(0, 7).replace("-", "");
+}
+
 /** 検索条件フォームを `sokoKbn=0` (全て) + 利用月以外の全 checkbox 選択
- * (「全選択」相当) で POST し、明細一覧ページを返す。明細 0 件は
- * EtcMeisaiNoUsageError。
+ * (「全選択」相当) + 今月の利用月のみ選択、で POST し、明細一覧ページを返す。
+ * 明細 0 件は EtcMeisaiNoUsageError。
  *
- * **`riyouMonth{N}` (利用月選択) checkbox は「全選択」対象から除外する**
- * (Refs #134 後続報告)。ここを含めて全 checkbox を無差別に選択すると、
- * ページ既定でチェックされている検索対象月以外の月まで選択され、1回の
- * スクレイプで数ヶ月〜1年超分の明細が一括取得されてしまう (実害確認済み:
- * 25/04〜26/06 の 14 ヶ月分が1回の CSV に混入)。ページ既定のチェック状態
- * (= 検索対象月のみ) は `form.fields` にそのまま残るので、ここで overrides
- * に足さなければ月の絞り込みは自然に維持される。 */
+ * **`riyouMonth{N}` (利用月選択) checkbox はページ既定のチェック状態を信用
+ * せず、常に一旦クリアしてから今月分だけを明示選択し直す** (Refs #134 後続
+ * 報告、2 回目の実害)。
+ *
+ * 1回目の修正 (「全選択」の対象から riyouMonth を除外するだけ) は不十分
+ * だった — ページ既定でチェックされているのは「検索対象月 (直近月)」では
+ * なく、実機では 2025/4 の未確定分のような古い月がデフォルトでチェック
+ * されていることが確認された (deploy 後の再検証で 2025/4/5-4/10 の古い
+ * データが返り続けた)。ページのデフォルト状態に依存せず、`now` (JST) から
+ * 計算した「今月」の value (`YYYYMM`) に一致する checkbox だけを明示的に
+ * 選択することで、ページ側の初期状態に左右されない確実な絞り込みにする。
+ * 該当する checkbox がページに無い場合は riyouMonth を1つも送らない
+ * (サイト側の挙動は未検証、少なくとも「複数ヶ月〜全期間が混入する」
+ * 従来のバグよりは安全側)。 */
 export async function submitSearch(
   jar: CookieJar,
   searchPage: EtcPage,
   fetchImpl: FetchLike = fetch,
   timeoutMs: number = ETC_REQUEST_TIMEOUT_MS,
+  now: Date,
 ): Promise<EtcPage> {
   const form = findFormWithField(parseForms(searchPage.html), "sokoKbn");
   if (!form) {
@@ -600,9 +612,32 @@ export async function submitSearch(
       "検索条件フォーム (sokoKbn) が見つかりません — etc-meisai.jp のページ仕様が変更された可能性があります",
     );
   }
+  const currentYm = currentRiyouMonthValue(now);
   const overrides: Record<string, string> = { sokoKbn: "0" };
+  // Refs #134 後続報告の実機再検証用診断ログ (Cloudflare Workers Observability に
+  // 出る)。riyouMonth checkbox の実際の name/value/ページ既定チェック状態と、
+  // 今回どれを選択したかを毎回記録する — 現地の checkbox 構造が未知数のため、
+  // 次回実行時にここから実際の value 形式を確認する。
+  const riyouMonthCheckboxes = form.checkboxes.filter((cb) => RIYOU_MONTH_CHECKBOX_PATTERN.test(cb.name));
+  console.log(
+    JSON.stringify({
+      etc_debug: "riyouMonth",
+      current_ym: currentYm,
+      checkboxes: riyouMonthCheckboxes.map((cb) => ({
+        name: cb.name,
+        value: cb.value,
+        default_checked: form.fields.get(cb.name) === cb.value,
+      })),
+    }),
+  );
   for (const cb of form.checkboxes) {
-    if (RIYOU_MONTH_CHECKBOX_PATTERN.test(cb.name)) continue;
+    if (RIYOU_MONTH_CHECKBOX_PATTERN.test(cb.name)) {
+      // ページ既定のチェック状態 (古い/未確定の月がチェックされていることが
+      // ある) を破棄し、今月分だけを明示選択し直す。
+      form.fields.delete(cb.name);
+      if (cb.value === currentYm) overrides[cb.name] = cb.value;
+      continue;
+    }
     overrides[cb.name] = cb.value;
   }
 
@@ -733,6 +768,7 @@ export async function scrapeEtcCsv(
   onProgress: EtcProgressCallback,
   fetchImpl: FetchLike = fetch,
   timeouts: EtcTimeouts = {},
+  now: Date,
 ): Promise<EtcScrapeResult> {
   const requestTimeoutMs = timeouts.requestTimeoutMs ?? ETC_REQUEST_TIMEOUT_MS;
   const exportTimeoutMs = timeouts.exportTimeoutMs ?? ETC_EXPORT_TIMEOUT_MS;
@@ -748,7 +784,7 @@ export async function scrapeEtcCsv(
 
   onProgress("search");
   const searchPage = await navigateToSearchPage(jar, session, fetchImpl, requestTimeoutMs);
-  const resultPage = await submitSearch(jar, searchPage, fetchImpl, requestTimeoutMs);
+  const resultPage = await submitSearch(jar, searchPage, fetchImpl, requestTimeoutMs, now);
 
   onProgress("download");
   const csv = await downloadMeisaiCsv(jar, resultPage, fetchImpl, exportTimeoutMs);
@@ -787,6 +823,7 @@ export async function scrapeEtcFromCookies(
   onProgress: EtcProgressCallback,
   fetchImpl: FetchLike = fetch,
   timeouts: EtcTimeouts = {},
+  now: Date,
 ): Promise<EtcScrapeResult> {
   const requestTimeoutMs = timeouts.requestTimeoutMs ?? ETC_REQUEST_TIMEOUT_MS;
   const exportTimeoutMs = timeouts.exportTimeoutMs ?? ETC_EXPORT_TIMEOUT_MS;
@@ -810,7 +847,7 @@ export async function scrapeEtcFromCookies(
 
   onProgress("search");
   const searchPage = await navigateToSearchPage(jar, session, fetchImpl, requestTimeoutMs);
-  const resultPage = await submitSearch(jar, searchPage, fetchImpl, requestTimeoutMs);
+  const resultPage = await submitSearch(jar, searchPage, fetchImpl, requestTimeoutMs, now);
 
   onProgress("download");
   const csv = await downloadMeisaiCsv(jar, resultPage, fetchImpl, exportTimeoutMs);

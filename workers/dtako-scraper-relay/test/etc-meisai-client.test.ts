@@ -154,6 +154,9 @@ const CONFIRM_PAGE_HTML = `<html><body>
 
 const LOGIN_URL = `https://www.etc-meisai.jp/etc/R?funccode=${ETC_FUNC_LOGIN}&nextfunc=${ETC_FUNC_LOGIN}`
 
+/** テスト用固定日時 (JST 2026-07-04)。SEARCH_PAGE_HTML の riyouMonth2 (202607) と一致させる。 */
+const NOW = new Date('2026-07-04T00:00:00Z')
+
 function page(url: string, htmlBody: string): EtcPage {
   return { url, html: htmlBody }
 }
@@ -518,7 +521,7 @@ describe('submitSearch', () => {
 
   it('sokoKbn=0 (全て) + 利用月以外の全 checkbox 選択で検索 POST する (issue #14 の最重要 gotcha)', async () => {
     const { fetch, calls } = recordingFetch([html(RESULT_PAGE_HTML)])
-    const result = await submitSearch(createCookieJar(), searchPage, fetch, 1000)
+    const result = await submitSearch(createCookieJar(), searchPage, fetch, 1000, NOW)
     expect(result.html).toBe(RESULT_PAGE_HTML)
 
     const post = calls[0]
@@ -535,7 +538,7 @@ describe('submitSearch', () => {
 
   it('sokoKbn form が無ければ loud fail する', async () => {
     const p = page('https://x/', '<html><body></body></html>')
-    await expect(submitSearch(createCookieJar(), p, recordingFetch([]).fetch, 1000)).rejects.toThrow(
+    await expect(submitSearch(createCookieJar(), p, recordingFetch([]).fetch, 1000, NOW)).rejects.toThrow(
       '検索条件フォーム (sokoKbn) が見つかりません',
     )
   })
@@ -544,7 +547,7 @@ describe('submitSearch', () => {
     const { fetch, calls } = recordingFetch([html(RESULT_PAGE_HTML)])
     const jar = createCookieJar()
     jar.cookies.set('JSESSIONID', 'abc123')
-    await submitSearch(jar, searchPage, fetch, 1000)
+    await submitSearch(jar, searchPage, fetch, 1000, NOW)
     const headers = new Headers(calls[0].init.headers)
     expect(headers.get('cookie')).toBe('JSESSIONID=abc123')
   })
@@ -554,13 +557,13 @@ describe('submitSearch', () => {
       <input type="radio" name="sokoKbn" value="1" checked />
     </form></body></html>`
     const { fetch, calls } = recordingFetch([html(RESULT_PAGE_HTML)])
-    await submitSearch(createCookieJar(), page('https://www.etc-meisai.jp/etc/R?funccode=1', noAction), fetch, 1000)
+    await submitSearch(createCookieJar(), page('https://www.etc-meisai.jp/etc/R?funccode=1', noAction), fetch, 1000, NOW)
     expect(calls[0].url).toBe(`https://www.etc-meisai.jp/etc/R?funccode=1&nextfunc=${ETC_FUNC_SEARCH}`)
   })
 
   it('「当該月のご利用はありません」は EtcMeisaiNoUsageError', async () => {
     const { fetch } = recordingFetch([html(NO_USAGE_HTML)])
-    await expect(submitSearch(createCookieJar(), searchPage, fetch, 1000)).rejects.toBeInstanceOf(
+    await expect(submitSearch(createCookieJar(), searchPage, fetch, 1000, NOW)).rejects.toBeInstanceOf(
       EtcMeisaiNoUsageError,
     )
   })
@@ -568,14 +571,14 @@ describe('submitSearch', () => {
   it('sokoKbn が無くても既に CSV 出力可能な結果ページ (#134) ならそのまま返し POST しない', async () => {
     const { fetch, calls } = recordingFetch([])
     const p = page('https://www2.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1013000000', DIRECT_RESULT_HTML)
-    const result = await submitSearch(createCookieJar(), p, fetch, 1000)
+    const result = await submitSearch(createCookieJar(), p, fetch, 1000, NOW)
     expect(result.html).toBe(DIRECT_RESULT_HTML)
     expect(calls).toHaveLength(0)
   })
 
   it('検索 POST 直後の「共通 -確認してください-」中間ページを自動で1段階 POST して進む (#134)', async () => {
     const { fetch, calls } = recordingFetch([html(CONFIRM_PAGE_HTML), html(RESULT_PAGE_HTML)])
-    const result = await submitSearch(createCookieJar(), searchPage, fetch, 1000)
+    const result = await submitSearch(createCookieJar(), searchPage, fetch, 1000, NOW)
     expect(result.html).toBe(RESULT_PAGE_HTML)
     expect(calls).toHaveLength(2)
     expect(calls[1].url).toBe('https://www.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1032000000')
@@ -711,6 +714,7 @@ describe('scrapeEtcCsv', () => {
       (step) => steps.push(step),
       fetch,
       { requestTimeoutMs: 1000, exportTimeoutMs: 1000 },
+      NOW,
     )
     expect(steps).toEqual(['login', 'search', 'download', 'done'])
     expect(result.accountType).toBe('personal')
@@ -720,9 +724,9 @@ describe('scrapeEtcCsv', () => {
 
   it('timeouts 未指定は既定値で動く', async () => {
     const { fetch } = recordingFetch([html('<html><body>MAINTENANCE</body></html>')])
-    await expect(scrapeEtcCsv({ userId: 'u', password: 'p' }, () => {}, fetch)).rejects.toBeInstanceOf(
-      EtcMeisaiClientError,
-    )
+    await expect(
+      scrapeEtcCsv({ userId: 'u', password: 'p' }, () => {}, fetch, undefined, NOW),
+    ).rejects.toBeInstanceOf(EtcMeisaiClientError)
   })
 })
 
@@ -742,10 +746,14 @@ describe('scrapeEtcFromCookies (cookie 委譲)', () => {
       csvResponse(),
     ])
     const steps: string[] = []
-    const result = await scrapeEtcFromCookies(cookies, startUrl, (s) => steps.push(s), fetch, {
-      requestTimeoutMs: 1000,
-      exportTimeoutMs: 1000,
-    })
+    const result = await scrapeEtcFromCookies(
+      cookies,
+      startUrl,
+      (s) => steps.push(s),
+      fetch,
+      { requestTimeoutMs: 1000, exportTimeoutMs: 1000 },
+      NOW,
+    )
     expect(steps).toEqual(['login', 'search', 'download', 'done'])
     expect(result.accountType).toBe('personal') // startUrl が etc_user_meisai
     expect(result.filename).toBe('meisai_202607.csv')
@@ -768,16 +776,18 @@ describe('scrapeEtcFromCookies (cookie 委譲)', () => {
       'https://www.etc-meisai.jp/etc_corp_meisai/top',
       () => {},
       fetch,
+      undefined,
+      NOW,
     )
     expect(result.accountType).toBe('corporate')
   })
 
   it('空 cookies / 不正 startUrl / 不正 cookie エントリを弾く', async () => {
-    await expect(scrapeEtcFromCookies([], startUrl, () => {}, recordingFetch([]).fetch)).rejects.toThrow(
-      'cookies が空です',
-    )
     await expect(
-      scrapeEtcFromCookies(cookies, 'ftp://nope', () => {}, recordingFetch([]).fetch),
+      scrapeEtcFromCookies([], startUrl, () => {}, recordingFetch([]).fetch, undefined, NOW),
+    ).rejects.toThrow('cookies が空です')
+    await expect(
+      scrapeEtcFromCookies(cookies, 'ftp://nope', () => {}, recordingFetch([]).fetch, undefined, NOW),
     ).rejects.toThrow('startUrl は http(s)')
 
     // name/value が不正なエントリは無視されるが、有効なものが1つでもあれば進む
@@ -787,7 +797,7 @@ describe('scrapeEtcFromCookies (cookie 委譲)', () => {
       { name: 'valid', value: 'v' },
       { foo: 'bar' } as never,
     ]
-    const result = await scrapeEtcFromCookies(mixed, startUrl, () => {}, fetch)
+    const result = await scrapeEtcFromCookies(mixed, startUrl, () => {}, fetch, undefined, NOW)
     expect(result.filename).toBe('meisai_202607.csv')
   })
 })
