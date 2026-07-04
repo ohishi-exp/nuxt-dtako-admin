@@ -544,6 +544,16 @@ async function advancePastConfirmationPage(
 ): Promise<EtcPage | null> {
   const mainForm = pickMainForm(parseForms(page.html));
   if (!mainForm || mainForm.fields.size > 1) return null;
+  // 実データを含む本来の結果ページ (「利用明細」一覧) も、hidden の `p` 1個
+  // しか form field を持たないことがある (cdp-relay 実機検証で確認、Refs #134)。
+  // field 数だけでは確認ページと区別できず、ページ内に必ず含まれるナビ
+  // メニューの `submitPage(...)` リンク (「利用明細の表示」等) を誤って
+  // 「確認ページの遷移ボタン」と誤認し、正しい検索結果を上書きしてしまう
+  // 実害があった (「黙って200」の一種 — 明細 0 件へ誤判定される)。確認ページの
+  // 見出しには必ず「確認してください」が入る (実機で複数パターン確認済み:
+  // 「共通 -確認してください-」「利用明細検索 -確認してください-」) ため、
+  // これを追加の判定条件にする。
+  if (!page.html.includes("確認してください")) return null;
   const m = page.html.match(/onclick="submitPage\('[^']*',\s*'([^']+)'\)/i);
   if (!m) return null;
   const body = new URLSearchParams();
