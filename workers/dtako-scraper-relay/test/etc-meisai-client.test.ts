@@ -146,6 +146,22 @@ const NO_USAGE_HTML = `<html><body>
 <span class="meisaicaption">当該月のご利用はありません</span>
 </body></html>`
 
+// 旧 chromiumoxide 版 (rust-scraper/src/etc/scraper.rs) が実ブラウザで踏んでいた
+// 「設定保存 (focusTarget_Save) → 検索 (focusTarget)」の2段階ボタンを持つ検索
+// 条件ページ (Refs #134 後続報告、現行 TS 実装がこの2段階を再現していない
+// 疑いの実機診断用フィクスチャ)。
+const SEARCH_PAGE_WITH_FOCUS_BUTTONS_HTML = `<html><body>
+<form action="/etc/R" method="post">
+  <input type="hidden" name="funccode" value="${ETC_FUNC_SEARCH}" />
+  <input type="hidden" name="nextfunc" value="" />
+  <input type="radio" name="sokoKbn" value="1" checked />
+  <input type="radio" name="sokoKbn" value="0" />
+  <input type="checkbox" name="riyouMonth2" value="202607" checked />
+  <input type="submit" name="focusTarget_Save" value="設定保存" />
+  <input type="submit" name="focusTarget" value="検索" />
+</form>
+</body></html>`
+
 // アカウントによってはログイン直後/検索を経ずに既に利用明細の結果ページへ
 // 着地し、CSV 出力ボタンが直接存在する (ohishi-exp/nuxt-dtako-admin#134 実機調査)。
 const DIRECT_RESULT_HTML = `<html><body>
@@ -650,6 +666,39 @@ describe('submitSearch', () => {
       { name: 'riyouMonth1', value: '202606', default_checked: false },
       { name: 'riyouMonth2', value: '202607', default_checked: true },
     ])
+    // SEARCH_PAGE_HTML に submit/button 型 input は無い (= 旧 chromiumoxide 版の
+    // focusTarget_Save/focusTarget ボタンに相当する要素は無し)。
+    expect(payload.button_names).toEqual([])
+  })
+
+  it('button_names 診断が submit/button 型 input の name/value を検知する (Refs #134、旧 rust-scraper の focusTarget_Save/focusTarget 2段階ボタン検知用、parseForms は submit/button を除外するため既存 all_field_names には出ない盲点への対策)', async () => {
+    const p = page('https://www.etc-meisai.jp/etc/R', SEARCH_PAGE_WITH_FOCUS_BUTTONS_HTML)
+    const onProgress = vi.fn()
+    await submitSearch(createCookieJar(), p, recordingFetch([html(RESULT_PAGE_HTML)]).fetch, 1000, NOW, onProgress)
+    const debugCall = onProgress.mock.calls.find(([step]) => step === 'search')
+    const payload = JSON.parse(debugCall![1] as string)
+    expect(payload.button_names).toEqual([
+      { name: 'focusTarget_Save', value: '設定保存' },
+      { name: 'focusTarget', value: '検索' },
+    ])
+  })
+
+  it('button_names 診断は type 属性/value 属性の無い input も扱う', async () => {
+    const withDefaults = `<html><body>
+<form action="/etc/R" method="post">
+  <input type="hidden" name="funccode" value="${ETC_FUNC_SEARCH}" />
+  <input type="radio" name="sokoKbn" value="1" checked />
+  <input name="implicitText" />
+  <input type="button" name="noValueButton" />
+</form>
+</body></html>`
+    const p = page('https://www.etc-meisai.jp/etc/R', withDefaults)
+    const onProgress = vi.fn()
+    await submitSearch(createCookieJar(), p, recordingFetch([html(RESULT_PAGE_HTML)]).fetch, 1000, NOW, onProgress)
+    const debugCall = onProgress.mock.calls.find(([step]) => step === 'search')
+    const payload = JSON.parse(debugCall![1] as string)
+    // type 無し (= text 既定) は無視、value 無しは空文字で拾う。
+    expect(payload.button_names).toEqual([{ name: 'noValueButton', value: '' }])
   })
 
   it('jar に溜まった cookie を後続 POST に載せる', async () => {

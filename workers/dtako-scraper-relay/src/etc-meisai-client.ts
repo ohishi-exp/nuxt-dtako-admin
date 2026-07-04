@@ -637,6 +637,29 @@ function jstDateParts(date: Date): { yyyy: string; mm: string; dd: string } {
   };
 }
 
+/** ページ内の `<input type="submit"|"button" name="...">` を name/value 付きで
+ * 列挙する (実機診断専用)。`parseForms()` は `NON_POSTED_INPUT_TYPES`
+ * (submit/button/image/reset/file) を意図的に `fields` から除外しており
+ * (JS ラッパー経由の遷移では送信されないため)、この設計により旧
+ * chromiumoxide 版 (`rust-scraper/src/etc/scraper.rs` の `download_personal`)
+ * が実ブラウザで踏んでいた **`input[name='focusTarget_Save']` (設定保存) →
+ * `input[name='focusTarget']` (検索) の2段階ボタンクリック**が現行ページに
+ * 存在するかどうかを、既存の `all_field_names`/`all_checkbox_names` 診断では
+ * 検知できない盲点になっていた (Refs #134)。この関数はその盲点を埋めるための
+ * 診断専用抽出であり、`submitSearch()` の POST 挙動には一切影響しない。 */
+function extractButtonNames(html: string): { name: string; value: string }[] {
+  const buttons: { name: string; value: string }[] = [];
+  for (const m of html.matchAll(/<input\b[^>]*>/gi)) {
+    const tag = m[0];
+    const type = (getAttr(tag, "type") ?? "text").toLowerCase();
+    if (type !== "submit" && type !== "button") continue;
+    const name = getAttr(tag, "name");
+    if (!name) continue;
+    buttons.push({ name, value: decodeEntities(getAttr(tag, "value") ?? "") });
+  }
+  return buttons;
+}
+
 /** 検索条件フォームを `sokoKbn=0` (全て) + 利用月以外の全 checkbox 選択
  * (「全選択」相当) + 今月の利用月のみ選択、で POST し、明細一覧ページを返す。
  * 明細 0 件は EtcMeisaiNoUsageError。
@@ -682,6 +705,7 @@ export async function submitSearch(
             field_names: [...f.fields.keys()],
             checkbox_names: f.checkboxes.map((cb) => cb.name),
           })),
+          button_names: extractButtonNames(searchPage.html),
         }),
       );
       return searchPage;
@@ -715,6 +739,12 @@ export async function submitSearch(
     // (= 絞り込み無しだと何が入っているか) を確認してから正しい override
     // 値の形式 (4桁年/2桁月日か等) を確定する。
     date_range_defaults: DATE_RANGE_FIELDS.map((name) => ({ name, default_value: form.fields.get(name) ?? null })),
+    // 旧 chromiumoxide 版が実ブラウザで踏んでいた「設定保存 (focusTarget_Save)
+    // → 検索 (focusTarget)」の2段階ボタンクリックが現行ページにも存在するか
+    // を確認するための診断 (Refs #134 後続報告、次回引き継ぎの最優先確認事項)。
+    // parseForms() は submit/button 型 input を意図的に除外するため、通常の
+    // all_field_names には出てこない。
+    button_names: extractButtonNames(searchPage.html),
   });
   // ctx.waitUntil() 内の console.log は Workers Logs / Tail Worker 経由でも
   // 実機で不安定 (Refs #134 後続報告)。onProgress 経由で browser の進捗ログに
