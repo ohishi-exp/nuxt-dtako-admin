@@ -129,7 +129,34 @@ export default {
       const session = await etcLogin(jar, { userId, password }, fetch, ETC_REQUEST_TIMEOUT_MS);
 
       steps.push("search");
-      const searchPage = await navigateToSearchPage(jar, session, fetch, ETC_REQUEST_TIMEOUT_MS);
+      let searchPage: EtcPage;
+      try {
+        searchPage = await navigateToSearchPage(jar, session, fetch, ETC_REQUEST_TIMEOUT_MS);
+      } catch (e) {
+        if (e instanceof EtcMeisaiClientError) {
+          // ログイン直後ページの構造だけ診断情報として返す (#134 続報: アカウントに
+          // よって navigateToSearchPage 自体が失敗するケースがあることが判明)。
+          return json(
+            {
+              ok: false,
+              steps,
+              error: e.message,
+              diagnostics: {
+                loginPage: pageDiagnostics(session.page),
+                links: Array.from(session.page.html.matchAll(/<A\b[^>]*>([\s\S]*?)<\/A>/gi))
+                  .map((m) => ({
+                    onclick: m[0].match(/onclick=["']([^"']*)["']/i)?.[1] ?? null,
+                    href: m[0].match(/href=["']([^"']*)["']/i)?.[1] ?? null,
+                    text: m[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim(),
+                  }))
+                  .filter((l) => l.text !== ""),
+              },
+            },
+            502,
+          );
+        }
+        throw e;
+      }
       let resultPage = await submitSearch(jar, searchPage, fetch, ETC_REQUEST_TIMEOUT_MS);
 
       // 「共通 -確認してください-」等の中間確認ページを検出したら最大2回まで
