@@ -26,6 +26,7 @@ import {
   navigateToSearchPage,
   submitSearch,
   downloadMeisaiCsv,
+  followToPage,
   parseForms,
   pickMainForm,
   EtcMeisaiClientError,
@@ -35,7 +36,34 @@ import {
   ETC_EXPORT_TIMEOUT_MS,
   type EtcPage,
 } from "../../src/etc-meisai-client";
-import { createCookieJar } from "../../src/theearth-client";
+import { createCookieJar, type CookieJar } from "../../src/theearth-client";
+
+/** `<input type=button onClick="submitPage('frm','/etc/R?...');">` 形式
+ * (フォーム名 + 完全遷移先 URL) の「共通 -確認してください-」中間ページを
+ * 1 段階だけ POST で進める。navigateToSearchPage の `javascript:submitPage('a','b')`
+ * (funccode, nextfunc 想定) とは引数の意味が異なる、別の submitPage 呼び出し形。
+ * 見つからなければ null (呼び出し側で従来のエラーに fall back させる)。 */
+async function tryAdvanceConfirmationPage(
+  jar: CookieJar,
+  page: EtcPage,
+  fetchImpl: typeof fetch,
+  timeoutMs: number,
+): Promise<EtcPage | null> {
+  const m = page.html.match(/onClick=["']submitPage\('[^']*','([^']+)'\)/i);
+  if (!m) return null;
+  const targetUrl = new URL(m[1], page.url).toString();
+  const mainForm = pickMainForm(parseForms(page.html));
+  if (!mainForm) return null;
+  const body = new URLSearchParams();
+  for (const [name, value] of mainForm.fields) body.set(name, value);
+  return followToPage(
+    jar,
+    targetUrl,
+    { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: body.toString() },
+    fetchImpl,
+    timeoutMs,
+  );
+}
 
 /** resultPage の実データ (個人の利用明細) を一切含めず、構造 (field 名 / button
  * ラベル / キーワード有無) だけを診断用に抜き出す。#134 の続きで download 段が
@@ -102,7 +130,19 @@ export default {
 
       steps.push("search");
       const searchPage = await navigateToSearchPage(jar, session, fetch, ETC_REQUEST_TIMEOUT_MS);
-      const resultPage = await submitSearch(jar, searchPage, fetch, ETC_REQUEST_TIMEOUT_MS);
+      let resultPage = await submitSearch(jar, searchPage, fetch, ETC_REQUEST_TIMEOUT_MS);
+
+      // 「共通 -確認してください-」等の中間確認ページを検出したら最大2回まで
+      // 自動で1段階 POST で進める (#134 続報: submitSearch の直後にこの中間ページが
+      // 挟まることが実機診断で判明した)。
+      for (let hop = 0; hop < 2; hop += 1) {
+        const mainFieldCount = pickMainForm(parseForms(resultPage.html))?.fields.size ?? 0;
+        if (mainFieldCount > 1) break; // 実データを含むフォーム相当まで来たとみなす
+        const advanced = await tryAdvanceConfirmationPage(jar, resultPage, fetch, ETC_REQUEST_TIMEOUT_MS);
+        if (!advanced) break;
+        steps.push(`confirm-hop-${hop + 1}`);
+        resultPage = advanced;
+      }
 
       steps.push("download");
       let result;
