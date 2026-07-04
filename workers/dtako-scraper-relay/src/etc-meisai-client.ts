@@ -578,6 +578,20 @@ function currentRiyouMonthValue(now: Date): string {
   return jst.toISOString().slice(0, 7).replace("-", "");
 }
 
+/** 実機で確認された日付範囲フィールド名 (Refs #134 後続報告4回目、riyouMonth
+ * checkbox の代わりにこちらを持つアカウント種別が実在した)。 */
+const DATE_RANGE_FIELDS = ["fromYYYY", "fromMM", "fromDD", "toYYYY", "toMM", "toDD"] as const;
+
+/** JST の年/月/日を個別に (4桁年・2桁ゼロ埋め月日) 返す。 */
+function jstDateParts(date: Date): { yyyy: string; mm: string; dd: string } {
+  const jst = new Date(date.getTime() + 9 * 3600 * 1000);
+  return {
+    yyyy: String(jst.getUTCFullYear()),
+    mm: String(jst.getUTCMonth() + 1).padStart(2, "0"),
+    dd: String(jst.getUTCDate()).padStart(2, "0"),
+  };
+}
+
 /** 検索条件フォームを `sokoKbn=0` (全て) + 利用月以外の全 checkbox 選択
  * (「全選択」相当) + 今月の利用月のみ選択、で POST し、明細一覧ページを返す。
  * 明細 0 件は EtcMeisaiNoUsageError。
@@ -651,6 +665,11 @@ export async function submitSearch(
     // フォーム全 field (name+value) と全 checkbox 名も併せて出す。
     all_field_names: [...form.fields.keys()],
     all_checkbox_names: form.checkboxes.map((cb) => cb.name),
+    // 実機診断で fromYYYY/fromMM/fromDD 〜 toYYYY/toMM/toDD という日付範囲
+    // フィールドが実在することが判明 (Refs #134 後続報告4回目)。デフォルト値
+    // (= 絞り込み無しだと何が入っているか) を確認してから正しい override
+    // 値の形式 (4桁年/2桁月日か等) を確定する。
+    date_range_defaults: DATE_RANGE_FIELDS.map((name) => ({ name, default_value: form.fields.get(name) ?? null })),
   });
   // ctx.waitUntil() 内の console.log は Workers Logs / Tail Worker 経由でも
   // 実機で不安定 (Refs #134 後続報告)。onProgress 経由で browser の進捗ログに
@@ -667,6 +686,20 @@ export async function submitSearch(
       continue;
     }
     overrides[cb.name] = cb.value;
+  }
+  // fromYYYY/fromMM/fromDD 〜 toYYYY/toMM/toDD の日付範囲フィールドを持つ
+  // アカウント種別 (Refs #134 後続報告4回目) は、今月の月初〜今日の範囲に
+  // 明示 override する。値の形式 (4桁年/2桁ゼロ埋め月日) は実機のページ既定値
+  // 診断 (date_range_defaults) が確定するまでの暫定実装。
+  if (DATE_RANGE_FIELDS.every((f) => form.fields.has(f))) {
+    const { yyyy: fromYyyy, mm: fromMm } = jstDateParts(now);
+    const { yyyy: toYyyy, mm: toMm, dd: toDd } = jstDateParts(now);
+    overrides.fromYYYY = fromYyyy;
+    overrides.fromMM = fromMm;
+    overrides.fromDD = "01";
+    overrides.toYYYY = toYyyy;
+    overrides.toMM = toMm;
+    overrides.toDD = toDd;
   }
 
   let result = await submitForm(

@@ -122,6 +122,25 @@ const RESULT_PAGE_HTML = `<html><body>
 <table><tr><td>2026/07/01</td></tr></table>
 </body></html>`
 
+// riyouMonth checkbox を持たず、代わりに fromYYYY〜toDD の日付範囲フィールドを
+// 持つアカウント種別 (Refs #134 後続報告4回目、実機で確認)。
+const DATE_RANGE_SEARCH_PAGE_HTML = `<html><body>
+<form action="/etc/R" method="post">
+  <input type="hidden" name="funccode" value="${ETC_FUNC_SEARCH}" />
+  <input type="hidden" name="nextfunc" value="" />
+  <input type="hidden" name="p" value="SEARCHHIDDEN" />
+  <input type="radio" name="sokoKbn" value="1" checked />
+  <input type="radio" name="sokoKbn" value="0" />
+  <input type="text" name="fromYYYY" value="2025" />
+  <input type="text" name="fromMM" value="01" />
+  <input type="text" name="fromDD" value="01" />
+  <input type="text" name="toYYYY" value="2026" />
+  <input type="text" name="toMM" value="12" />
+  <input type="text" name="toDD" value="31" />
+  <input type="checkbox" name="hyojiCard" value="0001" checked />
+</form>
+</body></html>`
+
 const NO_USAGE_HTML = `<html><body>
 <form action="/etc/R"><input type="hidden" name="funccode" value="x" /></form>
 <span class="meisaicaption">当該月のご利用はありません</span>
@@ -541,6 +560,35 @@ describe('submitSearch', () => {
     await expect(submitSearch(createCookieJar(), p, recordingFetch([]).fetch, 1000, NOW)).rejects.toThrow(
       '検索条件フォーム (sokoKbn) が見つかりません',
     )
+  })
+
+  it('riyouMonth checkbox を持たないアカウントは fromYYYY〜toDD の日付範囲を今月に override する (Refs #134 後続報告4回目)', async () => {
+    const dateRangePage = page('https://www.etc-meisai.jp/etc/R', DATE_RANGE_SEARCH_PAGE_HTML)
+    const { fetch, calls } = recordingFetch([html(RESULT_PAGE_HTML)])
+    const onProgress = vi.fn()
+    await submitSearch(createCookieJar(), dateRangePage, fetch, 1000, NOW, onProgress)
+
+    const body = bodyParams(calls[0].init)
+    expect(body.get('sokoKbn')).toBe('0')
+    expect(body.get('fromYYYY')).toBe('2026')
+    expect(body.get('fromMM')).toBe('07')
+    expect(body.get('fromDD')).toBe('01')
+    expect(body.get('toYYYY')).toBe('2026')
+    expect(body.get('toMM')).toBe('07')
+    expect(body.get('toDD')).toBe('04')
+    expect(body.get('hyojiCard')).toBe('0001') // 全選択 (カード等) は従来通り
+
+    const debugCall = onProgress.mock.calls.find(([step]) => step === 'search')
+    const payload = JSON.parse(debugCall![1] as string)
+    expect(payload.checkboxes).toEqual([])
+    expect(payload.date_range_defaults).toEqual([
+      { name: 'fromYYYY', default_value: '2025' },
+      { name: 'fromMM', default_value: '01' },
+      { name: 'fromDD', default_value: '01' },
+      { name: 'toYYYY', default_value: '2026' },
+      { name: 'toMM', default_value: '12' },
+      { name: 'toDD', default_value: '31' },
+    ])
   })
 
   it('onProgress 経由で riyouMonth checkbox の実機診断情報を "search" step で通知する (Refs #134 後続報告)', async () => {
