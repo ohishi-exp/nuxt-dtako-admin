@@ -646,6 +646,11 @@ export async function submitSearch(
       value: cb.value,
       default_checked: form.fields.get(cb.name) === cb.value,
     })),
+    // riyouMonth checkbox が0件のページも実機で観測された (Refs #134 後続報告
+    // 3回目)。実際の月選択 UI (select/他 checkbox/text 等) を特定するため、
+    // フォーム全 field (name+value) と全 checkbox 名も併せて出す。
+    all_field_names: [...form.fields.keys()],
+    all_checkbox_names: form.checkboxes.map((cb) => cb.name),
   });
   // ctx.waitUntil() 内の console.log は Workers Logs / Tail Worker 経由でも
   // 実機で不安定 (Refs #134 後続報告)。onProgress 経由で browser の進捗ログに
