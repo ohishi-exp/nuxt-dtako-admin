@@ -20,5 +20,11 @@ jobs:
       install_command: 'npm install'
       use_auth_client_dev: true
       post_install_script: 'npx nuxt prepare'
+      # preview-deploy.yml の既定 nuxt デプロイコマンドは `npm run build && npx
+      # wrangler deploy --env preview` だが、この repo の wrangler.toml は
+      # `[build] command = "npm run build"` を持つため、そのままだと wrangler
+      # 自身の pre-deploy build フックで二重に nuxt build が走る (実測 ~30秒の
+      # 無駄、test.yml と同じ理由)。
+      preview_deploy_script: 'npx wrangler deploy --env preview'
     secrets:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
