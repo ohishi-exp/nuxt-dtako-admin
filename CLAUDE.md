@@ -445,23 +445,26 @@ credential が gateway 内で平文復号される。これを避けるため、
 - **検証範囲の限界**: この経路は `etcLogin` (funccode/hidden POST) を通らないので
   **login 実装自体は検証されない**。login は本番 cron / devtools 観察で別途検証する。
 
-#### cookie 委譲は etc-meisai.jp に対して機能しない — IP バインディングで正規セッションごと破壊される (重大、再試行厳禁)
+#### cookie 委譲を CCoW コンテナ (node/curl) から直接試したら実害が出た — 未検証なのは Worker 経路
 
-実機検証 (2026-07-04) で確定: 手元ブラウザで login 後の cookie (`JSESSIONID`) を
-CCoW (別 IP) から送っても、**サーバー側はそのセッションを認識せずログインフォーム
-を返し、`Set-Cookie` で新規セッションを発行する**。これは IP バインディング
-(session fixation 対策で、ログイン確立時の client IP と異なる IP からのアクセスを
-検知するとセッションを無効化する) セキュリティ機構と考えられる。
+実機検証 (2026-07-04): 手元ブラウザで login 後の cookie (`JSESSIONID`) を、**CCoW
+コンテナ内の node/curl** から `www2.etc-meisai.jp` に送ったところ、サーバーは
+そのセッションを認識せずログインフォームを返し、`Set-Cookie` で新規セッションを
+発行した。その直後、**手元ブラウザ側の元セッションも無効化され、ユーザーが
+再ログインを強いられた** (実害確認済み)。
 
-**さらに悪いことに、この試行後は手元ブラウザ側の元セッションも無効化され、
-ユーザーが再ログインを強いられた** (実害確認済み)。つまり cookie 委譲を
-etc-meisai.jp に試みる行為自体が、ユーザーの正規セッションを破壊する副作用を持つ。
+**ただしこれは「CCoW コンテナから node/curl で fetch した」場合の結果でしかない。**
+本来 `browser_cookies` が想定する用途は **Cloudflare Worker (本番の
+dtako-scraper-relay 等) が cookie を使って fetch する**構成であり、CCoW の egress
+(Anthropic gateway、datacenter IP) と Cloudflare Workers の egress (Workers 固有の
+IP レンジ) は別物。IP バインディング (推測、未確定) だったとしても、Worker からの
+fetch が同様に弾かれるかは **別途検証が必要**であり、まだ確認していない。
 
-**結論: `scrapeEtcFromCookies` / `browser-cookie-borrow` パターンを etc-meisai.jp
-に対して再度試みないこと。** ETC の full flow (login 含む) 検証は、IP が一貫して
-手元のものになる **手元での直接実行**、または下記の `wrangler deploy --temporary`
-(実 CF colo egress、手元発) に限定する。CCoW からの検証は「cookie 無しで済む GET
-(構造確認)」までに留める。
+**当面の運用**: 実害が起きた「CCoW コンテナから直接 node/curl で cookie を使う」
+検証手段 (`scripts/verify-etc.ts` の直接実行) は、原因が切り分くまで控える。
+`scrapeEtcFromCookies` 自体 (本番 DO / Worker 内での使用) を否定するものではない。
+ETC の full flow (login 含む) 検証は、`wrangler deploy --temporary`
+(`scripts/verify-etc-worker/`、実 CF colo egress、手元発) か手元での直接実行を使う。
 
 ### ETC の `wrangler deploy --temporary` 検証 (login 含む full flow、credential は手元のみ)
 
