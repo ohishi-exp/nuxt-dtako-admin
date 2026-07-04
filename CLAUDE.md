@@ -643,6 +643,27 @@ Observability を見ること。**
   pipeline、pure ロジック [`auth-decision.ts`/`theearth-client.ts`] のみ 100% gate。
   DO/index.ts は cloudflare runtime 依存で node vitest 計測不可)
 
+## CI の npm cache (2026-07-04 汚染事故と修正)
+
+`test.yml` / `preview-deploy.yml` の npm install が毎回フルダウンロードで
+遅かった原因は、`ippoan/cap-catalog#5` (ts/js extractor) が未実装で npm
+install を一切行わないにもかかわらず `cap-catalog-extract.yml` が同じ
+lockfile hash ベースの `cache: npm` key を持っていたこと。npm install しない
+job が真っ先に完走してほぼ空の cache (~682B) を save し続け、フル install
+する test.yml / preview-deploy.yml 側は常にこの毒キャッシュを踏んでいた
+(cache hit するが中身が空、Refs #134)。
+
+- 汚染源自体は `ippoan/ci-workflows#152` で修正済み (ts/js extractor path
+  から `cache: npm` を除去)。
+- 既存の毒キャッシュは `actions/cache` が「hit した run は再保存しない」
+  仕様のため lockfile が変わるまで居座る。`cache_dependency_path` に
+  workflow ファイル自身も含めて hash を強制的に変える cache-busting を
+  `test.yml` / `preview-deploy.yml` 両方に適用済み (#154)。
+- 効果: `npm install` が preview deploy で 24s → 15s に短縮 (実測)。
+
+同種の cache 汚染は `catalog-extract.yml` を ts/js で使う他 repo でも
+起きていた可能性がある (`ci-workflows#152` 適用で今後は防止される)。
+
 ## 並行開発 (worktree)
 
 - 必ず `origin/main` ベース worktree を使う
