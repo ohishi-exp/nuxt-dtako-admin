@@ -1,0 +1,18 @@
+# wrangler deploy --temporary 専用の使い捨て config (実ログイン検証版)。
+#
+# 本番 dtako-scraper-relay worker (../../wrangler.toml、DO migration あり) とは
+# 完全に独立。`name` を指定しないと --temporary が一時アカウント側で採番する。
+#
+# credential は wrangler.toml / --var には一切載せない。ブラウザが表示するこの
+# worker 自身の HTML フォームに手元でユーザーID/パスワードを直接入力し、
+# POST /run で top-level navigation として送信する (CCoW / tool call には
+# 一切載らない)。この worker は本番と同じ `scrapeEtcCsv` (= etcLogin() の実 POST
+# チェーン) をその場で実行し、steps・行数・ヘッダのみを返す (CSV 本体・credential
+# は log にも response にも出さない)。
+#
+# 使い方 (workers/dtako-scraper-relay ディレクトリから):
+#   npx wrangler deploy --temporary --config scripts/verify-etc-login-worker/wrangler.toml \
+#     --name verify-etc-login-<好きな名前>
+main = "index.ts"
+compatibility_date = "2025-05-01"
+compatibility_flags = ["nodejs_compat"]

@@ -1,0 +1,160 @@
+/**
+ * 実ログイン検証 (Refs ohishi-exp/nuxt-dtako-admin#134) の
+ * `wrangler deploy --temporary` 検証用 Worker。
+ *
+ * `scrapeEtcFromCookies` (cookie 委譲) はこのサイト特有のステートフルな
+ * ページ遷移仕様により検証手法として信頼できないことが判明した (#134)。
+ * 本番と同じ経路 (`scrapeEtcCsv` = `etcLogin()` の実 POST チェーン) をその場で
+ * 動かして検証するため、この worker 自身が HTML ログインフォームを返し、
+ * ユーザーがブラウザ上で直接 ID/パスワードを入力して top-level navigation で
+ * POST する。credential はブラウザ → この worker (Cloudflare Workers 実行環境)
+ * だけを通り、CCoW / Claude のツール呼び出しには一切載らない。
+ *
+ * デプロイ (credential 不要、--var も無し):
+ *   cd workers/dtako-scraper-relay
+ *   npx wrangler deploy --temporary --config scripts/verify-etc-login-worker/wrangler.toml \
+ *     --name verify-etc-login-<好きな名前>
+ *
+ * 実行:
+ *   1. 表示された worker URL をブラウザで開く (cdp-relay 経由で navigate)
+ *   2. フォームに実際の ETC 利用照会サービスの ID/パスワードを直接入力して送信
+ *   3. この worker が `scrapeEtcCsv` を実行し、steps・行数・ヘッダ行だけを JSON で返す
+ *      (CSV 本体・credential は log にも response にも出さない)
+ */
+import {
+  etcLogin,
+  navigateToSearchPage,
+  submitSearch,
+  downloadMeisaiCsv,
+  parseForms,
+  pickMainForm,
+  EtcMeisaiClientError,
+  EtcMeisaiNoUsageError,
+  EtcMeisaiNotCsvError,
+  ETC_REQUEST_TIMEOUT_MS,
+  ETC_EXPORT_TIMEOUT_MS,
+  type EtcPage,
+} from "../../src/etc-meisai-client";
+import { createCookieJar } from "../../src/theearth-client";
+
+/** resultPage の実データ (個人の利用明細) を一切含めず、構造 (field 名 / button
+ * ラベル / キーワード有無) だけを診断用に抜き出す。#134 の続きで download 段が
+ * 失敗した時、原因を loud に切り分けるための一時ヘルパー。 */
+function pageDiagnostics(page: EtcPage) {
+  const forms = parseForms(page.html);
+  const h2 = page.html.match(/<H2[^>]*>([^<]*)<\/H2>/i)?.[1] ?? null;
+  const buttonLabels = Array.from(
+    page.html.matchAll(/<INPUT[^>]*type=["']?(?:submit|button)["']?[^>]*>/gi),
+  )
+    .map((m) => m[0].match(/value=["']([^"']*)["']/i)?.[1])
+    .filter((v): v is string => typeof v === "string");
+  const keywords = ["検索結果", "利用明細", "CSV", "出力", "ダウンロード", "ご利用はありません", "エラー"];
+  const keywordHits = keywords.filter((k) => page.html.includes(k));
+  return {
+    url: page.url,
+    h2,
+    formCount: forms.length,
+    formFieldNames: forms.map((f) => [...f.fields.keys()]),
+    buttonLabels,
+    keywordHits,
+    htmlLength: page.html.length,
+  };
+}
+
+const FORM_HTML = `<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8"><title>ETC login verify (temporary)</title></head>
+<body>
+<h1>ETC ログイン検証 (一時 worker、60分で失効)</h1>
+<p>入力した credential はこの worker 内でのみ使用され、log や response には出ません。</p>
+<form method="POST" action="/run">
+  <p><label>ユーザーID: <input type="text" name="userId" autocomplete="off"></label></p>
+  <p><label>パスワード: <input type="password" name="password" autocomplete="off"></label></p>
+  <p><button type="submit">実行</button></p>
+</form>
+</body></html>`;
+
+export default {
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/" && request.method === "GET") {
+      return new Response(FORM_HTML, {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }
+
+    if (url.pathname !== "/run" || request.method !== "POST") {
+      return json({ error: "not_found (GET / でフォームを開くこと)" }, 404);
+    }
+
+    const form = await request.formData();
+    const userId = form.get("userId");
+    const password = form.get("password");
+    if (typeof userId !== "string" || typeof password !== "string" || !userId || !password) {
+      return json({ ok: false, error: "userId / password が空です" }, 400);
+    }
+
+    const steps: string[] = [];
+    const jar = createCookieJar();
+    try {
+      steps.push("login");
+      const session = await etcLogin(jar, { userId, password }, fetch, ETC_REQUEST_TIMEOUT_MS);
+
+      steps.push("search");
+      const searchPage = await navigateToSearchPage(jar, session, fetch, ETC_REQUEST_TIMEOUT_MS);
+      const resultPage = await submitSearch(jar, searchPage, fetch, ETC_REQUEST_TIMEOUT_MS);
+
+      steps.push("download");
+      let result;
+      try {
+        result = await downloadMeisaiCsv(jar, resultPage, fetch, ETC_EXPORT_TIMEOUT_MS);
+      } catch (e) {
+        if (e instanceof EtcMeisaiNotCsvError) {
+          // 個人の利用明細本体は含めず、構造だけ診断情報として返す (#134 続報)。
+          return json(
+            {
+              ok: false,
+              steps,
+              error: e.message,
+              diagnostics: {
+                resultPage: pageDiagnostics(resultPage),
+                pickedForm: (() => {
+                  const f = pickMainForm(parseForms(resultPage.html));
+                  return f ? { action: f.action, fieldNames: [...f.fields.keys()] } : null;
+                })(),
+              },
+            },
+            502,
+          );
+        }
+        throw e;
+      }
+
+      steps.push("done");
+      const text = new TextDecoder("shift_jis").decode(result.bytes);
+      const lines = text.split(/\r?\n/).filter((l) => l.trim() !== "");
+      return json({
+        ok: true,
+        steps,
+        accountType: session.accountType,
+        filename: result.filename,
+        bytes: result.bytes.byteLength,
+        rows: lines.length,
+        header: lines[0]?.slice(0, 200) ?? null,
+      });
+    } catch (e) {
+      if (e instanceof EtcMeisaiNoUsageError) {
+        return json({ ok: true, steps, note: "当該月のご利用はありません (0件)" });
+      }
+      const message = e instanceof EtcMeisaiClientError ? e.message : String(e);
+      return json({ ok: false, steps, error: message }, 502);
+    }
+  },
+};
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body, null, 2), {
+    status,
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+  });
+}
