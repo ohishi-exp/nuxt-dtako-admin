@@ -33,6 +33,17 @@ jobs:
       integration_env: 'API_BASE_URL=http://localhost:18080'
       use_auth_client_dev: true   # PR 時に @ippoan/auth-client@dev を overlay install (createIdentityProxyHandler 取得、Refs rust-alc-api#434)
       post_install_script: 'npx nuxt prepare'
+      # npm cache key (lockfile hash のみ) が ippoan/ci-workflows#152 修正前の
+      # catalog-extract.yml (ts/js extractor、npm install しないのに同じ key で
+      # cache: npm を持っていた) に汚染されていた (cache hit するが中身 ~0 byte)。
+      # main branch のキャッシュは全 branch から読める特権があるため、ここを
+      # 直しておくと preview-deploy.yml 側で branch 名が変わる新規 PR でも
+      # main 経由で正常なキャッシュを継承できる。cache_dependency_path にこの
+      # workflow ファイル自身も含めて hash を変え、汚染されていない新しい
+      # cache key に強制的に切り替える (Refs #134)。
+      cache_dependency_path: |
+        package-lock.json
+        .github/workflows/test.yml
     secrets:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       # cross-org (ohishi-exp → ippoan/ci-workflows) は secrets: inherit が
