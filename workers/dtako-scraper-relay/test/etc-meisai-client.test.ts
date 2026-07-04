@@ -19,6 +19,7 @@ import {
   parseLinks,
   pickMainForm,
   scrapeEtcCsv,
+  scrapeEtcFromCookies,
   sniffCharset,
   submitSearch,
   withNextfunc,
@@ -657,5 +658,71 @@ describe('scrapeEtcCsv', () => {
     await expect(scrapeEtcCsv({ userId: 'u', password: 'p' }, () => {}, fetch)).rejects.toBeInstanceOf(
       EtcMeisaiClientError,
     )
+  })
+})
+
+describe('scrapeEtcFromCookies (cookie 委譲)', () => {
+  const cookies = [
+    { name: 'JSESSIONID', value: 'ABC123' },
+    { name: 'csrf', value: 'xyz' },
+  ]
+  const startUrl = 'https://www.etc-meisai.jp/etc_user_meisai/menu'
+
+  it('cookie を jar に注入し login をスキップして検索→CSV を回す', async () => {
+    // startUrl GET (menu) → 検索ページ遷移 POST → 検索 POST → CSV POST
+    const { fetch, calls } = recordingFetch([
+      html(MENU_HTML),
+      html(SEARCH_PAGE_HTML),
+      html(RESULT_PAGE_HTML),
+      csvResponse(),
+    ])
+    const steps: string[] = []
+    const result = await scrapeEtcFromCookies(cookies, startUrl, (s) => steps.push(s), fetch, {
+      requestTimeoutMs: 1000,
+      exportTimeoutMs: 1000,
+    })
+    expect(steps).toEqual(['login', 'search', 'download', 'done'])
+    expect(result.accountType).toBe('personal') // startUrl が etc_user_meisai
+    expect(result.filename).toBe('meisai_202607.csv')
+
+    // 最初の GET は startUrl、cookie が載る (login POST は無い = risLoginId を送らない)
+    expect(calls[0].url).toBe(startUrl)
+    expect(new Headers(calls[0].init.headers).get('cookie')).toBe('JSESSIONID=ABC123; csrf=xyz')
+    expect(JSON.stringify(calls)).not.toContain('risLoginId')
+  })
+
+  it('法人 startUrl は corporate 判定', async () => {
+    const { fetch } = recordingFetch([
+      html(MENU_HTML),
+      html(SEARCH_PAGE_HTML),
+      html(RESULT_PAGE_HTML),
+      csvResponse(),
+    ])
+    const result = await scrapeEtcFromCookies(
+      cookies,
+      'https://www.etc-meisai.jp/etc_corp_meisai/top',
+      () => {},
+      fetch,
+    )
+    expect(result.accountType).toBe('corporate')
+  })
+
+  it('空 cookies / 不正 startUrl / 不正 cookie エントリを弾く', async () => {
+    await expect(scrapeEtcFromCookies([], startUrl, () => {}, recordingFetch([]).fetch)).rejects.toThrow(
+      'cookies が空です',
+    )
+    await expect(
+      scrapeEtcFromCookies(cookies, 'ftp://nope', () => {}, recordingFetch([]).fetch),
+    ).rejects.toThrow('startUrl は http(s)')
+
+    // name/value が不正なエントリは無視されるが、有効なものが1つでもあれば進む
+    const { fetch } = recordingFetch([html(MENU_HTML), html(SEARCH_PAGE_HTML), html(RESULT_PAGE_HTML), csvResponse()])
+    const mixed = [
+      { name: '', value: 'x' } as never,
+      { name: 'valid', value: 'v' },
+      { foo: 'bar' } as never,
+    ]
+    const result = await scrapeEtcFromCookies(mixed, startUrl, () => {}, fetch)
+    expect(result.filename).toBe('meisai_202607.csv')
   })
 })

@@ -125,8 +125,9 @@ export interface EtcPage {
 }
 
 /** 3xx を最大 REDIRECT_LIMIT 回まで手動追跡し、最終ページを charset sniff 付きで
- * デコードして返す。 */
-async function followToPage(
+ * デコードして返す。cookie 委譲経路 (scrapeEtcFromCookies) が login 後 URL を GET
+ * する時にも使うため export する。 */
+export async function followToPage(
   jar: CookieJar,
   url: string,
   init: RequestInit,
@@ -651,6 +652,68 @@ export async function scrapeEtcCsv(
     fetchImpl,
     requestTimeoutMs,
   );
+
+  onProgress("search");
+  const searchPage = await navigateToSearchPage(jar, session, fetchImpl, requestTimeoutMs);
+  const resultPage = await submitSearch(jar, searchPage, fetchImpl, requestTimeoutMs);
+
+  onProgress("download");
+  const csv = await downloadMeisaiCsv(jar, resultPage, fetchImpl, exportTimeoutMs);
+
+  onProgress("done");
+  return { ...csv, accountType: session.accountType };
+}
+
+// ---------------------------------------------------------------------------
+// cookie 委譲経路 (login を手元ブラウザに委譲、CCoW は cookie で認証後操作)
+// ---------------------------------------------------------------------------
+
+/** CDP `Network.getCookies` (cdp-relay `browser_cookies`) が返す cookie の必要 field。 */
+export interface EtcCookie {
+  name: string;
+  value: string;
+}
+
+/**
+ * 手元ブラウザで login 済みの cookie を借りて、login をスキップし検索→CSV だけを
+ * CCoW で回す (Refs ohishi-exp/dtako-scraper#22, ippoan/cdp-relay#69)。
+ *
+ * credential は手元ブラウザ → etc-meisai (手元 egress) だけを通り、CCoW /
+ * Anthropic egress gateway を一切通らない。この関数に来るのは cookie だけ。
+ *
+ * `startUrl` は手元ブラウザの login 後 URL (cdp `browser_eval("location.href")` で
+ * 取得)。cookie 付きで GET してアカウント種別 (個人/法人) を確定し、そのページから
+ * 検索フローに入る。
+ *
+ * **検証範囲の限界**: この関数は `etcLogin` (funccode/hidden/POST チェーン) を
+ * 通らない。login 実装は別途 (本番 cron / devtools 観察) で検証すること。
+ */
+export async function scrapeEtcFromCookies(
+  cookies: EtcCookie[],
+  startUrl: string,
+  onProgress: EtcProgressCallback,
+  fetchImpl: FetchLike = fetch,
+  timeouts: EtcTimeouts = {},
+): Promise<EtcScrapeResult> {
+  const requestTimeoutMs = timeouts.requestTimeoutMs ?? ETC_REQUEST_TIMEOUT_MS;
+  const exportTimeoutMs = timeouts.exportTimeoutMs ?? ETC_EXPORT_TIMEOUT_MS;
+  if (!Array.isArray(cookies) || cookies.length === 0) {
+    throw new EtcMeisaiClientError("cookies が空です (手元ブラウザで login 済みの cookie を渡してください)");
+  }
+  if (typeof startUrl !== "string" || !/^https?:\/\//i.test(startUrl)) {
+    throw new EtcMeisaiClientError("startUrl は http(s) の login 後 URL を指定してください");
+  }
+
+  const jar = createCookieJar();
+  for (const c of cookies) {
+    if (c && typeof c.name === "string" && c.name !== "" && typeof c.value === "string") {
+      jar.cookies.set(c.name, c.value);
+    }
+  }
+
+  onProgress("login"); // 実際は login 済み cookie で開始 (login POST はしない)
+  const startPage = await followToPage(jar, startUrl, { method: "GET" }, fetchImpl, requestTimeoutMs);
+  const session: EtcSession = { page: startPage, accountType: detectAccountType(startPage.url) };
 
   onProgress("search");
   const searchPage = await navigateToSearchPage(jar, session, fetchImpl, requestTimeoutMs);
