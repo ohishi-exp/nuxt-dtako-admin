@@ -302,22 +302,37 @@ export function pickMainForm(forms: EtcForm[]): EtcForm | null {
 export interface EtcLink {
   href: string;
   text: string;
+  /** `onclick="submitPage('frm','<url>'); return false;"` 形式 (Refs #134 後続
+   * 報告5回目、実機で確認)。href が `javascript:void(0)` 等のダミーで、実際の
+   * 遷移先はこちらにしか無いリンクが実在する。 */
+  onclick: string;
 }
 
 export function parseLinks(html: string): EtcLink[] {
   const links: EtcLink[] = [];
-  // href の値は `javascript:submitPage('a','b')` のように **逆側の quote を内包
-  // し得る** ため、開き quote と同種の quote までを 1 つの値として読む
-  // (`["']([^"']*)["']` だと submitPage の第1引数の quote で切れる)。
-  const re = /<a\b[^>]*href=(?:"([^"]*)"|'([^']*)')[^>]*>([\s\S]*?)<\/a>/gi;
+  const re = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(html)) !== null) {
+    const openTag = `<a ${m[1]}>`;
+    // href の値は `javascript:submitPage('a','b')` のように **逆側の quote を
+    // 内包し得る** ため、開き quote と同種の quote までを 1 つの値として読む
+    // (`["']([^"']*)["']` だと submitPage の第1引数の quote で切れる)。
+    const hrefMatch = openTag.match(/href=(?:"([^"]*)"|'([^']*)')/i);
     links.push({
-      href: decodeEntities(m[1] ?? m[2]),
-      text: m[3].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim(),
+      href: decodeEntities(hrefMatch?.[1] ?? hrefMatch?.[2] ?? ""),
+      text: m[2].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim(),
+      onclick: extractOnclick(openTag),
     });
   }
   return links;
+}
+
+/** `onclick="submitPage('frm','<url>'); ..."` から遷移先 URL を取り出す
+ * (`advancePastConfirmationPage` の確認ページボタンと同じ呼び出し規約)。
+ * 該当しなければ null。 */
+function extractOnclickSubmitPageUrl(onclick: string): string | null {
+  const m = onclick.match(/submitPage\('[^']*',\s*'([^']+)'\)/i);
+  return m ? decodeEntities(m[1]) : null;
 }
 
 /** `javascript:submitPage('1032000000','1032000000')` 等の JS ラッパー href から
@@ -511,10 +526,19 @@ async function advancePastConfirmationPage(
 const CONFIRMATION_HOP_LIMIT = 3;
 
 /** ログイン後ページから検索条件フォーム (sokoKbn) のあるページへ遷移する。
- * 既に sokoKbn form があればそのまま返す。ログイン直後から既に CSV 出力可能な
- * 結果ページへ着地しているアカウント (#134) もそのまま返す (search 手順が不要)。
+ * 既に sokoKbn form があればそのまま返す。
+ *
+ * **「検索条件の指定」/「利用明細検索」リンクが存在する限り、必ずそちらへ遷移する**
+ * (Refs #134 後続報告5回目)。ログイン直後から既に CSV 出力可能な結果ページへ着地
+ * しているアカウント (旧実装ではここで即 return していた) でも、実機検証の結果
+ * **「明細ＣＳＶ出力」ボタンは画面上の月選択 (taisyoYM) と無関係に常に全履歴を
+ * 出力する**ことが確定した — 検索条件ページを経由して `sokoKbn=0` + 日付範囲を
+ * 明示 POST する手順を踏まない限り、絞り込みようがない。旧 chromiumoxide 版
+ * (`rust-scraper/src/etc/scraper.rs` の `download_personal`) も「検索条件の指定」
+ * リンクを必ずクリックしてから絞り込む設計だった。
  * 「検索条件」リンクが JS ラッパー (`javascript:submitPage(...)`) の場合は
- * メイン form の POST で再現する。 */
+ * メイン form の POST で再現する。リンク自体が存在しないアカウントのみ、
+ * CSV 出力ボタンで直接結果ページを返す (絞り込み不能、従来の fallback)。 */
 export async function navigateToSearchPage(
   jar: CookieJar,
   session: EtcSession,
@@ -523,20 +547,41 @@ export async function navigateToSearchPage(
 ): Promise<EtcPage> {
   const page = session.page;
   if (findFormWithField(parseForms(page.html), "sokoKbn")) return page;
-  if (findDirectCsvOutputTarget(page)) return page;
 
   const link = parseLinks(page.html).find(
     (l) => l.text.includes("検索条件") || l.text.includes("利用明細検索"),
   );
   if (!link) {
+    if (findDirectCsvOutputTarget(page)) return page;
     throw new EtcMeisaiClientError(
       "「検索条件の指定」リンクが見つかりません — etc-meisai.jp のページ仕様が変更された可能性があります",
     );
   }
 
-  const jsArgs = parseJsSubmitArgs(link.href);
+  const onclickUrl = extractOnclickSubmitPageUrl(link.onclick);
+  const jsArgs = onclickUrl ? null : parseJsSubmitArgs(link.href);
   let next: EtcPage;
-  if (jsArgs === null) {
+  if (onclickUrl) {
+    // 実機で確認された形式 (Refs #134 後続報告5回目): href は
+    // `javascript:void(0)` 等のダミーで、実遷移は onclick の
+    // `submitPage('frm','<フル URL>')` にのみ載る (advancePastConfirmationPage
+    // の確認ページボタンと同じ呼び出し規約)。
+    const mainForm = pickMainForm(parseForms(page.html));
+    if (!mainForm) {
+      throw new EtcMeisaiClientError(
+        "「検索条件の指定」の遷移用 form が見つかりません — etc-meisai.jp のページ仕様が変更された可能性があります",
+      );
+    }
+    const body = new URLSearchParams();
+    for (const [name, value] of mainForm.fields) body.set(name, value);
+    next = await followToPage(
+      jar,
+      new URL(onclickUrl, page.url).toString(),
+      { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: body.toString() },
+      fetchImpl,
+      timeoutMs,
+    );
+  } else if (jsArgs === null) {
     next = await followToPage(
       jar,
       new URL(link.href, page.url).toString(),

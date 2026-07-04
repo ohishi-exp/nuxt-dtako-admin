@@ -160,6 +160,21 @@ const DIRECT_RESULT_HTML = `<html><body>
 <input type="submit" value="利用明細ＣＳＶ出力" onclick="goOutput(false, 'hakkoMeisai', 'frm', '/etc/R?funccode=1013000000&nextfunc=1013500000', '_blank'); return false;" />
 </body></html>`
 
+// ohishiexp1 実機で確認された実際の形 (Refs #134 後続報告5回目): 直接 CSV 出力
+// ボタンと「検索条件の指定」リンクの両方を持つが、リンクの href は
+// `javascript:void(0)` ダミーで実遷移先は onclick の submitPage 第2引数
+// (フル URL) にのみ載る。navigateToSearchPage はこちらを優先すべき
+// (「明細ＣＳＶ出力」は画面上の月選択と無関係に常に全履歴を返すため、検索
+// 条件ページ経由の絞り込みが必須と実機検証で確定)。
+const DIRECT_RESULT_WITH_SEARCH_LINK_HTML = `<html><body>
+<h2>利用明細</h2>
+<form action="/etc/R" method="post">
+  <input type="hidden" name="p" value="DIRECTHIDDEN" />
+</form>
+<a onclick="submitPage('frm','/etc/R?funccode=1014000000&amp;nextfunc=1014000000'); return false;" href="JavaScript:void(0);">検索条件の指定</a>
+<input type="submit" value="利用明細ＣＳＶ出力" onclick="goOutput(false, 'hakkoMeisai', 'frm', '/etc/R?funccode=1013000000&nextfunc=1013500000', '_blank'); return false;" />
+</body></html>`
+
 // 検索 POST 直後に挟まる「共通 -確認してください-」等の中間確認ページ
 // (メイン form が hidden の p 1つだけ、onclick="submitPage('frm','<url>')" の
 // 遷移ボタンを持つ)。
@@ -302,6 +317,12 @@ describe('parseLinks / parseJsSubmitArgs', () => {
   it("シングルクォート属性の href も読める", () => {
     const links = parseLinks(`<a href='javascript:submitPage("1")'>x</a>`)
     expect(links[0].href).toBe('javascript:submitPage("1")')
+  })
+
+  it('href 属性が無いリンクは href が空文字、onclick は抽出される', () => {
+    const links = parseLinks(`<a onclick="submitPage('frm','/x'); return false;">検索条件</a>`)
+    expect(links[0].href).toBe('')
+    expect(links[0].onclick).toBe("submitPage('frm','/x'); return false;")
   })
 
   it('javascript: 以外の href は null', () => {
@@ -522,12 +543,37 @@ describe('navigateToSearchPage', () => {
     )
   })
 
-  it('sokoKbn が無くても既に CSV 出力可能な結果ページ (#134) ならそのまま返す', async () => {
+  it('sokoKbn が無くても既に CSV 出力可能な結果ページ (#134) ならそのまま返す (検索条件リンクが無い場合のみ)', async () => {
     const { fetch, calls } = recordingFetch([])
     const s = session('https://www2.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1013000000', DIRECT_RESULT_HTML)
     const result = await navigateToSearchPage(createCookieJar(), s, fetch, 1000)
     expect(result.html).toBe(DIRECT_RESULT_HTML)
     expect(calls).toHaveLength(0)
+  })
+
+  it('onclick submitPage リンクだが遷移用 form が無ければ loud fail する', async () => {
+    const s = session(
+      'https://x/menu',
+      `<html><body><a onclick="submitPage('frm','/etc/R?nextfunc=1'); return false;" href="javascript:void(0)">検索条件</a></body></html>`,
+    )
+    await expect(navigateToSearchPage(createCookieJar(), s, recordingFetch([]).fetch, 1000)).rejects.toThrow(
+      '遷移用 form が見つかりません',
+    )
+  })
+
+  it('直接 CSV 出力ボタンがあっても「検索条件の指定」リンク (onclick の submitPage) があれば必ずそちらへ遷移する (Refs #134 後続報告5回目)', async () => {
+    const { fetch, calls } = recordingFetch([html(SEARCH_PAGE_HTML)])
+    const s = session(
+      'https://www2.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1013000000',
+      DIRECT_RESULT_WITH_SEARCH_LINK_HTML,
+    )
+    const result = await navigateToSearchPage(createCookieJar(), s, fetch, 1000)
+    expect(findFormWithField(parseForms(result.html), 'sokoKbn')).not.toBeNull()
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].url).toBe('https://www2.etc-meisai.jp/etc/R?funccode=1014000000&nextfunc=1014000000')
+    expect(calls[0].init.method).toBe('POST')
+    expect(bodyParams(calls[0].init).get('p')).toBe('DIRECTHIDDEN')
   })
 })
 
