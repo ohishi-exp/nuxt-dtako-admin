@@ -46,6 +46,13 @@ service_id = "019f20af-c6ac-7dd0-8381-ea22add4bd40"
 [observability]
 enabled = true
 
+# Tail Worker (Refs #134 後続報告)。DtakoScraperRelayDO の ETC 診断ログは
+# ctx.waitUntil() で継続するバックグラウンド処理内で出るため、通常の
+# Workers Logs には反映されない (Cloudflare 公式ドキュメントも waitUntil() での
+# ログ出力には Tail Worker を推奨、実機で未反映を確認済み 2026-07-04)。
+[[tail_consumers]]
+service = "nuxt-dtako-admin-scraper-relay-tail"
+
 # VPS / GCE cron の Worker 移行 (Refs ohishi-exp/dtako-scraper#22 /
 # ohishi-exp/browser-render-rust#14)。cron 式は src/cron.ts の
 # DTAKO_CRON / ETC_CRON 定数と一致させること (ズレると scheduled handler が
@@ -102,6 +109,10 @@ service_id = "019f20af-c6ac-7dd0-8381-ea22add4bd40"
 # になる (実害確認: ETC の riyouMonth 診断ログが staging で全く出なかった、2026-07-04)。
 [env.staging.observability]
 enabled = true
+
+# top-level [[tail_consumers]] も named environment には継承されないので個別宣言。
+[[env.staging.tail_consumers]]
+service = "nuxt-dtako-admin-scraper-relay-tail-staging"
 
 [env.staging.triggers]
 crons = [
