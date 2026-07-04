@@ -47,9 +47,12 @@ async function resolveSecret(binding: unknown): Promise<string | null> {
   return null
 }
 
-/** `{etc|etc-staging}/{user_id}/{YYYY-MM-DD}/{HHmmss}.csv` のみ許可
- * (`etcCsvKey()` の生成形式と一致、セグメント文字種を絞って header injection も防ぐ)。 */
-const ETC_CSV_KEY_PATTERN = /^etc(?:-staging)?\/[A-Za-z0-9_-]+\/\d{4}-\d{2}-\d{2}\/\d{6}\.csv$/
+/** `{etc|etc-staging|etc-preview}/{user_id}/{YYYY-MM-DD}/{HHmmss}.csv` のみ許可
+ * (`etcCsvKey()` の生成形式と一致、セグメント文字種を絞って header injection も防ぐ)。
+ * `wrangler.toml` の `ETC_R2_PREFIX` は本番 `etc` / staging `etc-staging` に
+ * 加えて preview 環境が `etc-preview` を使う (`env.preview` 参照) ため、
+ * 3つとも許可する。 */
+const ETC_CSV_KEY_PATTERN = /^etc(?:-staging|-preview)?\/[A-Za-z0-9_-]+\/\d{4}-\d{2}-\d{2}\/\d{6}\.csv$/
 
 export default defineEventHandler(async (event) => {
   const env = cfEnv(event)
