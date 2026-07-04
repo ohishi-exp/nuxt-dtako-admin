@@ -122,9 +122,83 @@ const RESULT_PAGE_HTML = `<html><body>
 <table><tr><td>2026/07/01</td></tr></table>
 </body></html>`
 
+// riyouMonth checkbox を持たず、代わりに fromYYYY〜toDD の日付範囲フィールドを
+// 持つアカウント種別 (Refs #134 後続報告4回目、実機で確認)。
+const DATE_RANGE_SEARCH_PAGE_HTML = `<html><body>
+<form action="/etc/R" method="post">
+  <input type="hidden" name="funccode" value="${ETC_FUNC_SEARCH}" />
+  <input type="hidden" name="nextfunc" value="" />
+  <input type="hidden" name="p" value="SEARCHHIDDEN" />
+  <input type="radio" name="sokoKbn" value="1" checked />
+  <input type="radio" name="sokoKbn" value="0" />
+  <input type="text" name="fromYYYY" value="2025" />
+  <input type="text" name="fromMM" value="01" />
+  <input type="text" name="fromDD" value="01" />
+  <input type="text" name="toYYYY" value="2026" />
+  <input type="text" name="toMM" value="12" />
+  <input type="text" name="toDD" value="31" />
+  <input type="checkbox" name="hyojiCard" value="0001" checked />
+</form>
+</body></html>`
+
 const NO_USAGE_HTML = `<html><body>
 <form action="/etc/R"><input type="hidden" name="funccode" value="x" /></form>
 <span class="meisaicaption">当該月のご利用はありません</span>
+</body></html>`
+
+// 旧 chromiumoxide 版 (rust-scraper/src/etc/scraper.rs) が実ブラウザで踏んでいた
+// 「設定保存 (focusTarget_Save) → 検索 (focusTarget)」の2段階ボタンを持つ検索
+// 条件ページ (Refs #134 後続報告、現行 TS 実装がこの2段階を再現していない
+// 疑いの実機診断用フィクスチャ)。
+const SEARCH_PAGE_WITH_FOCUS_BUTTONS_HTML = `<html><body>
+<form action="/etc/R" method="post">
+  <input type="hidden" name="funccode" value="${ETC_FUNC_SEARCH}" />
+  <input type="hidden" name="nextfunc" value="" />
+  <input type="radio" name="sokoKbn" value="1" checked />
+  <input type="radio" name="sokoKbn" value="0" />
+  <input type="checkbox" name="riyouMonth2" value="202607" checked />
+  <input type="submit" name="focusTarget_Save" value="設定保存" />
+  <input type="submit" name="focusTarget" value="検索" />
+</form>
+</body></html>`
+
+// cdp-relay 実機検証 (Refs #134) で確認した実際の構造。focusTarget_Save の
+// onclick は submitSave(...)、focusTarget (検索) の onclick は submitKensaku(...)
+// だが、どちらも中身は submitPage(formName, url) を呼ぶだけ (実機の
+// RisRiyoMeisaiKensaku.js で確認済み)。実際の検索ボタンの遷移先
+// (nextfunc=1013000000) はハードコードした ETC_FUNC_SEARCH (1032000000) とは
+// **異なる値**だった — 本 fixture はこの実際の値を再現する。
+const SEARCH_PAGE_WITH_REAL_BUTTON_TARGET_HTML = `<html><body>
+<form action="/etc/R" method="post">
+  <input type="hidden" name="funccode" value="1014000000" />
+  <input type="hidden" name="nextfunc" value="1014000000" />
+  <input type="radio" name="sokoKbn" value="1" checked />
+  <input type="radio" name="sokoKbn" value="0" />
+  <input type="checkbox" name="riyouMonth2" value="202607" checked />
+  <input type="submit" name="focusTarget_Save" value="この条件を記憶する" onclick="submitSave('hyojiCard','frm','/etc/R?funccode=1014000000&amp;nextfunc=1014100000'); return false;" />
+  <input type="submit" name="focusTarget" value="  検索  " onclick="submitKensaku('hyojiCard','frm','/etc/R?funccode=1014000000&amp;nextfunc=1013000000'); return false;" />
+</form>
+</body></html>`
+
+// 検索ボタンの遷移先 funccode が検索条件フォーム自身の funccode と異なる
+// (= account/画面バリエーションによって funccode 体系ごと切り替わる) ケース。
+const SEARCH_PAGE_WITH_DIFFERENT_FUNCCODE_TARGET_HTML = `<html><body>
+<form action="/etc/R" method="post">
+  <input type="hidden" name="funccode" value="1099000000" />
+  <input type="radio" name="sokoKbn" value="1" checked />
+  <input type="radio" name="sokoKbn" value="0" />
+  <input type="submit" name="focusTarget" value="検索" onclick="submitKensaku('hyojiCard','frm','/etc/R?funccode=1013000000&amp;nextfunc=1013000000'); return false;" />
+</form>
+</body></html>`
+
+// フォーム自身が funccode hidden field を持たないケース (submitFormToTarget の
+// 「元 form に funccode field が無ければ body には足さない」分岐の検証用)。
+const SEARCH_PAGE_WITHOUT_FUNCCODE_FIELD_HTML = `<html><body>
+<form action="/etc/R" method="post">
+  <input type="radio" name="sokoKbn" value="1" checked />
+  <input type="radio" name="sokoKbn" value="0" />
+  <input type="submit" name="focusTarget" value="検索" onclick="submitKensaku('hyojiCard','frm','/etc/R?funccode=1013000000&amp;nextfunc=1013000000'); return false;" />
+</form>
 </body></html>`
 
 // アカウントによってはログイン直後/検索を経ずに既に利用明細の結果ページへ
@@ -138,6 +212,21 @@ const DIRECT_RESULT_HTML = `<html><body>
 <input type="submit" value="CSVボタン（onclick無し）" />
 <input type="submit" value="CSV (target無し)" onclick="somethingElse(); return false;" />
 <input type="submit" value="証明書ＰＤＦ" onclick="goOutput(false, 'hakkoMeisai', 'frm', '/etc/R?funccode=1013000000&nextfunc=1013600000', '_blank'); return false;" />
+<input type="submit" value="利用明細ＣＳＶ出力" onclick="goOutput(false, 'hakkoMeisai', 'frm', '/etc/R?funccode=1013000000&nextfunc=1013500000', '_blank'); return false;" />
+</body></html>`
+
+// ohishiexp1 実機で確認された実際の形 (Refs #134 後続報告5回目): 直接 CSV 出力
+// ボタンと「検索条件の指定」リンクの両方を持つが、リンクの href は
+// `javascript:void(0)` ダミーで実遷移先は onclick の submitPage 第2引数
+// (フル URL) にのみ載る。navigateToSearchPage はこちらを優先すべき
+// (「明細ＣＳＶ出力」は画面上の月選択と無関係に常に全履歴を返すため、検索
+// 条件ページ経由の絞り込みが必須と実機検証で確定)。
+const DIRECT_RESULT_WITH_SEARCH_LINK_HTML = `<html><body>
+<h2>利用明細</h2>
+<form action="/etc/R" method="post">
+  <input type="hidden" name="p" value="DIRECTHIDDEN" />
+</form>
+<a onclick="submitPage('frm','/etc/R?funccode=1014000000&amp;nextfunc=1014000000'); return false;" href="JavaScript:void(0);">検索条件の指定</a>
 <input type="submit" value="利用明細ＣＳＶ出力" onclick="goOutput(false, 'hakkoMeisai', 'frm', '/etc/R?funccode=1013000000&nextfunc=1013500000', '_blank'); return false;" />
 </body></html>`
 
@@ -283,6 +372,12 @@ describe('parseLinks / parseJsSubmitArgs', () => {
   it("シングルクォート属性の href も読める", () => {
     const links = parseLinks(`<a href='javascript:submitPage("1")'>x</a>`)
     expect(links[0].href).toBe('javascript:submitPage("1")')
+  })
+
+  it('href 属性が無いリンクは href が空文字、onclick は抽出される', () => {
+    const links = parseLinks(`<a onclick="submitPage('frm','/x'); return false;">検索条件</a>`)
+    expect(links[0].href).toBe('')
+    expect(links[0].onclick).toBe("submitPage('frm','/x'); return false;")
   })
 
   it('javascript: 以外の href は null', () => {
@@ -503,12 +598,37 @@ describe('navigateToSearchPage', () => {
     )
   })
 
-  it('sokoKbn が無くても既に CSV 出力可能な結果ページ (#134) ならそのまま返す', async () => {
+  it('sokoKbn が無くても既に CSV 出力可能な結果ページ (#134) ならそのまま返す (検索条件リンクが無い場合のみ)', async () => {
     const { fetch, calls } = recordingFetch([])
     const s = session('https://www2.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1013000000', DIRECT_RESULT_HTML)
     const result = await navigateToSearchPage(createCookieJar(), s, fetch, 1000)
     expect(result.html).toBe(DIRECT_RESULT_HTML)
     expect(calls).toHaveLength(0)
+  })
+
+  it('onclick submitPage リンクだが遷移用 form が無ければ loud fail する', async () => {
+    const s = session(
+      'https://x/menu',
+      `<html><body><a onclick="submitPage('frm','/etc/R?nextfunc=1'); return false;" href="javascript:void(0)">検索条件</a></body></html>`,
+    )
+    await expect(navigateToSearchPage(createCookieJar(), s, recordingFetch([]).fetch, 1000)).rejects.toThrow(
+      '遷移用 form が見つかりません',
+    )
+  })
+
+  it('直接 CSV 出力ボタンがあっても「検索条件の指定」リンク (onclick の submitPage) があれば必ずそちらへ遷移する (Refs #134 後続報告5回目)', async () => {
+    const { fetch, calls } = recordingFetch([html(SEARCH_PAGE_HTML)])
+    const s = session(
+      'https://www2.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1013000000',
+      DIRECT_RESULT_WITH_SEARCH_LINK_HTML,
+    )
+    const result = await navigateToSearchPage(createCookieJar(), s, fetch, 1000)
+    expect(findFormWithField(parseForms(result.html), 'sokoKbn')).not.toBeNull()
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].url).toBe('https://www2.etc-meisai.jp/etc/R?funccode=1014000000&nextfunc=1014000000')
+    expect(calls[0].init.method).toBe('POST')
+    expect(bodyParams(calls[0].init).get('p')).toBe('DIRECTHIDDEN')
   })
 })
 
@@ -543,6 +663,35 @@ describe('submitSearch', () => {
     )
   })
 
+  it('riyouMonth checkbox を持たないアカウントは fromYYYY〜toDD の日付範囲を今月に override する (Refs #134 後続報告4回目)', async () => {
+    const dateRangePage = page('https://www.etc-meisai.jp/etc/R', DATE_RANGE_SEARCH_PAGE_HTML)
+    const { fetch, calls } = recordingFetch([html(RESULT_PAGE_HTML)])
+    const onProgress = vi.fn()
+    await submitSearch(createCookieJar(), dateRangePage, fetch, 1000, NOW, onProgress)
+
+    const body = bodyParams(calls[0].init)
+    expect(body.get('sokoKbn')).toBe('0')
+    expect(body.get('fromYYYY')).toBe('2026')
+    expect(body.get('fromMM')).toBe('07')
+    expect(body.get('fromDD')).toBe('01')
+    expect(body.get('toYYYY')).toBe('2026')
+    expect(body.get('toMM')).toBe('07')
+    expect(body.get('toDD')).toBe('04')
+    expect(body.get('hyojiCard')).toBe('0001') // 全選択 (カード等) は従来通り
+
+    const debugCall = onProgress.mock.calls.find(([step]) => step === 'search')
+    const payload = JSON.parse(debugCall![1] as string)
+    expect(payload.checkboxes).toEqual([])
+    expect(payload.date_range_defaults).toEqual([
+      { name: 'fromYYYY', default_value: '2025' },
+      { name: 'fromMM', default_value: '01' },
+      { name: 'fromDD', default_value: '01' },
+      { name: 'toYYYY', default_value: '2026' },
+      { name: 'toMM', default_value: '12' },
+      { name: 'toDD', default_value: '31' },
+    ])
+  })
+
   it('onProgress 経由で riyouMonth checkbox の実機診断情報を "search" step で通知する (Refs #134 後続報告)', async () => {
     const { fetch } = recordingFetch([html(RESULT_PAGE_HTML)])
     const onProgress = vi.fn()
@@ -556,6 +705,102 @@ describe('submitSearch', () => {
       { name: 'riyouMonth1', value: '202606', default_checked: false },
       { name: 'riyouMonth2', value: '202607', default_checked: true },
     ])
+    // SEARCH_PAGE_HTML に submit/button 型 input は無い (= 旧 chromiumoxide 版の
+    // focusTarget_Save/focusTarget ボタンに相当する要素は無し)。
+    expect(payload.button_names).toEqual([])
+  })
+
+  it('button_names 診断が submit/button 型 input の name/value を検知する (Refs #134、旧 rust-scraper の focusTarget_Save/focusTarget 2段階ボタン検知用、parseForms は submit/button を除外するため既存 all_field_names には出ない盲点への対策)', async () => {
+    const p = page('https://www.etc-meisai.jp/etc/R', SEARCH_PAGE_WITH_FOCUS_BUTTONS_HTML)
+    const onProgress = vi.fn()
+    await submitSearch(createCookieJar(), p, recordingFetch([html(RESULT_PAGE_HTML)]).fetch, 1000, NOW, onProgress)
+    const debugCall = onProgress.mock.calls.find(([step]) => step === 'search')
+    const payload = JSON.parse(debugCall![1] as string)
+    expect(payload.button_names).toEqual([
+      { name: 'focusTarget_Save', value: '設定保存' },
+      { name: 'focusTarget', value: '検索' },
+    ])
+  })
+
+  it('button_names 診断は type 属性/value 属性の無い input も扱う', async () => {
+    const withDefaults = `<html><body>
+<form action="/etc/R" method="post">
+  <input type="hidden" name="funccode" value="${ETC_FUNC_SEARCH}" />
+  <input type="radio" name="sokoKbn" value="1" checked />
+  <input name="implicitText" />
+  <input type="button" name="noValueButton" />
+</form>
+</body></html>`
+    const p = page('https://www.etc-meisai.jp/etc/R', withDefaults)
+    const onProgress = vi.fn()
+    await submitSearch(createCookieJar(), p, recordingFetch([html(RESULT_PAGE_HTML)]).fetch, 1000, NOW, onProgress)
+    const debugCall = onProgress.mock.calls.find(([step]) => step === 'search')
+    const payload = JSON.parse(debugCall![1] as string)
+    // type 無し (= text 既定) は無視、value 無しは空文字で拾う。
+    expect(payload.button_names).toEqual([{ name: 'noValueButton', value: '' }])
+  })
+
+  it('検索ボタン (focusTarget) の実際の onclick 遷移先を優先し、ハードコードした ETC_FUNC_SEARCH より優先する (cdp-relay 実機検証で確認、Refs #134)', async () => {
+    const p = page('https://www2.etc-meisai.jp/etc/R?funccode=1014000000&nextfunc=1014000000', SEARCH_PAGE_WITH_REAL_BUTTON_TARGET_HTML)
+    // 1回目 = 設定保存 (focusTarget_Save) の POST、2回目 = 検索 (focusTarget) の POST。
+    const { fetch, calls } = recordingFetch([html(SEARCH_PAGE_WITH_REAL_BUTTON_TARGET_HTML), html(RESULT_PAGE_HTML)])
+    const onProgress = vi.fn()
+    const result = await submitSearch(createCookieJar(), p, fetch, 1000, NOW, onProgress)
+    expect(result.html).toBe(RESULT_PAGE_HTML)
+    expect(calls).toHaveLength(2)
+
+    // 1段階目: 設定保存 (nextfunc=1014100000) — 過去に特定車両/カードが保存
+    // されていた場合にそれを「全て」へ上書きするための必須ステップ。
+    expect(calls[0].url).toBe('https://www2.etc-meisai.jp/etc/R?funccode=1014000000&nextfunc=1014100000')
+    expect(bodyParams(calls[0].init).get('sokoKbn')).toBe('0')
+
+    // 2段階目: 実際のボタンが指す nextfunc=1013000000 が使われ、ハードコード
+    // した ETC_FUNC_SEARCH (1032000000) は使われない。
+    expect(calls[1].url).toBe('https://www2.etc-meisai.jp/etc/R?funccode=1014000000&nextfunc=1013000000')
+    const body = bodyParams(calls[1].init)
+    expect(body.get('nextfunc')).toBe('1013000000')
+    expect(body.get('sokoKbn')).toBe('0')
+
+    const debugCalls = onProgress.mock.calls.filter(([step]) => step === 'search')
+    const saveDebug = JSON.parse(debugCalls.find(([, msg]) => JSON.parse(msg as string).etc_debug === 'focusTargetSave')![1] as string)
+    expect(saveDebug.target).toBe('/etc/R?funccode=1014000000&nextfunc=1014100000')
+    const searchDebug = JSON.parse(debugCalls.find(([, msg]) => JSON.parse(msg as string).etc_debug === 'riyouMonth')![1] as string)
+    expect(searchDebug.search_button_url).toBe('/etc/R?funccode=1014000000&nextfunc=1013000000')
+  })
+
+  it('設定保存ステップの応答が検索条件フォームを持たない場合は元の searchPage で検索を続行する (fail-safe)', async () => {
+    const p = page('https://www2.etc-meisai.jp/etc/R?funccode=1014000000&nextfunc=1014000000', SEARCH_PAGE_WITH_REAL_BUTTON_TARGET_HTML)
+    // 設定保存の応答が sokoKbn を持たない想定外ページでも、検索 POST は
+    // 元の searchPage の form を使って試行される。
+    const unexpectedAfterSave = '<html><body><p>設定を保存しました</p></body></html>'
+    const { fetch, calls } = recordingFetch([html(unexpectedAfterSave), html(RESULT_PAGE_HTML)])
+    const result = await submitSearch(createCookieJar(), p, fetch, 1000, NOW)
+    expect(result.html).toBe(RESULT_PAGE_HTML)
+    expect(calls).toHaveLength(2)
+    expect(calls[1].url).toBe('https://www2.etc-meisai.jp/etc/R?funccode=1014000000&nextfunc=1013000000')
+  })
+
+  it('検索ボタンの遷移先 funccode がフォーム自身の funccode と異なる場合は funccode も override する', async () => {
+    const p = page('https://www2.etc-meisai.jp/etc/R?funccode=1099000000', SEARCH_PAGE_WITH_DIFFERENT_FUNCCODE_TARGET_HTML)
+    const { fetch, calls } = recordingFetch([html(RESULT_PAGE_HTML)])
+    await submitSearch(createCookieJar(), p, fetch, 1000, NOW)
+
+    expect(calls[0].url).toBe('https://www2.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1013000000')
+    expect(bodyParams(calls[0].init).get('funccode')).toBe('1013000000')
+  })
+
+  it('元 form が funccode hidden field を持たない場合、遷移先に funccode があっても body には足さない', async () => {
+    const p = page('https://www2.etc-meisai.jp/etc/R', SEARCH_PAGE_WITHOUT_FUNCCODE_FIELD_HTML)
+    const { fetch, calls } = recordingFetch([html(RESULT_PAGE_HTML)])
+    await submitSearch(createCookieJar(), p, fetch, 1000, NOW)
+    expect(calls[0].url).toBe('https://www2.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1013000000')
+    expect(bodyParams(calls[0].init).has('funccode')).toBe(false)
+  })
+
+  it('検索ボタンが見つからない場合はハードコードした ETC_FUNC_SEARCH に fallback する (既存アカウントの後方互換)', async () => {
+    const { fetch, calls } = recordingFetch([html(RESULT_PAGE_HTML)])
+    await submitSearch(createCookieJar(), searchPage, fetch, 1000, NOW)
+    expect(calls[0].url).toBe(`https://www.etc-meisai.jp/etc/R?nextfunc=${ETC_FUNC_SEARCH}`)
   })
 
   it('jar に溜まった cookie を後続 POST に載せる', async () => {
