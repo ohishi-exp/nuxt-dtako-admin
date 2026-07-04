@@ -96,6 +96,13 @@ service = "auth-worker-staging"
 binding = "DTAKO_SCRAPER_VPC"
 service_id = "019f20af-c6ac-7dd0-8381-ea22add4bd40"
 
+# named environment は top-level [observability] を継承しない (wrangler の既定挙動、
+# keep_vars と同種の罠)。これが無いと staging では console.log (Workers Logs) が
+# 一切キャプチャされず、request/websocket のライフサイクルイベントだけが見える状態
+# になる (実害確認: ETC の riyouMonth 診断ログが staging で全く出なかった、2026-07-04)。
+[env.staging.observability]
+enabled = true
+
 [env.staging.triggers]
 crons = [
   "0 16 * * *",
