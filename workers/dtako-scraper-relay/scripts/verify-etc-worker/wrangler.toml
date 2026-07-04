@@ -1,0 +1,13 @@
+# wrangler deploy --temporary 専用の使い捨て config。
+#
+# 本番 dtako-scraper-relay worker (../../wrangler.toml、DO migration あり) とは
+# 完全に独立。`name` を指定しないと --temporary が一時アカウント側で採番する。
+#
+# 使い方 (workers/dtako-scraper-relay ディレクトリから):
+#   npx wrangler deploy --temporary --config scripts/verify-etc-worker/wrangler.toml \
+#     --var ETC_USER:"<実ユーザーID>" --var ETC_PASS:"<実パスワード>"
+#
+# credential は手元シェルの --var としてのみ渡す。CCoW / 会話には出さない。
+main = "index.ts"
+compatibility_date = "2025-05-01"
+compatibility_flags = ["nodejs_compat"]

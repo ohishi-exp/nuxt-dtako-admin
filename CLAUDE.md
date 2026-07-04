@@ -429,8 +429,11 @@ credential が gateway 内で平文復号される。これを避けるため、
 検索→CSV は CCoW** に分ける:
 
 1. cdp-relay で手元ブラウザを pair し、手元で etc-meisai に login する
-2. `browser_cookies(session, ["https://www.etc-meisai.jp"])` → `cookies_url` (cookie
-   生値は context に載らない、`curl -o` で回収)
+2. `browser_cookies(session, ["https://www2.etc-meisai.jp"])` → `cookies_url` (cookie
+   生値は context に載らない、`curl -o` で回収)。**ログイン/検索/CSV の実 host は
+   `www2.etc-meisai.jp`** (トップページのみ `www.etc-meisai.jp`、実機確認済み — 生 HTML の
+   リンク href は絶対 URL で `www2` を指すため、コード側は `page.url` 相対解決のみで host
+   を自動追従する。`ETC_BASE_URL` はトップページ GET の 1 箇所にしか使っていない)
 3. `browser_eval(session, "location.href")` → login 後 URL (`startUrl`)
 4. `bun run scripts/verify-etc.ts <cookies_url> <startUrl>` — cookie を jar に注入し
    `scrapeEtcFromCookies` で検索→CSV。credential は CCoW に来ない、cookie だけ。
@@ -441,6 +444,34 @@ credential が gateway 内で平文復号される。これを避けるため、
   明細 (個人情報) も出力せず、cookie 名 / 件数 / ヘッダ行 / 成否だけ出す。
 - **検証範囲の限界**: この経路は `etcLogin` (funccode/hidden POST) を通らないので
   **login 実装自体は検証されない**。login は本番 cron / devtools 観察で別途検証する。
+
+### ETC の `wrangler deploy --temporary` 検証 (login 含む full flow、credential は手元のみ)
+
+cookie 委譲 (上記) は login 実装自体を検証しない。**login を含めて丸ごと検証**したい時は
+`scripts/verify-etc-worker/` (本番 relay の DO/migration とは独立の使い捨て Worker) を
+`wrangler deploy --temporary` する。credential は**手元シェルの `--var` としてのみ**渡し、
+CCoW / 会話には一切乗せない (`wrangler-deploy-temporary` skill 参照)。
+
+```sh
+cd workers/dtako-scraper-relay
+git pull   # CCoW で書いた最新コードを取り込む
+npx wrangler deploy --temporary --config scripts/verify-etc-worker/wrangler.toml \
+  --name verify-etc-<好きな名前> \
+  --var ETC_USER:"<実ユーザーID>" --var ETC_PASS:"<実パスワード>"
+```
+
+表示された `https://<name>.<random>.workers.dev/verify` を GET すると `scrapeEtcCsv`
+(login→検索→CSV を一括実行) の結果 (`{ ok, steps, accountType, filename, bytes, rows,
+header }`) が JSON で返る。**CSV 明細本体・credential は返さない**。デプロイ URL 自体は
+Cloudflare の JS challenge に守られ `curl` では読めないため、結果を Claude に見せる場合は
+cdp-relay の実ブラウザ経由 (`browser_navigate` → `browser_eval("document.body.innerText")`)
+で読む。
+
+- `scripts/verify-etc-worker/index.ts` — `/` (health) `/verify` (実行) の薄い Worker。
+  `ETC_USER`/`ETC_PASS` 未設定は 400。
+- `scripts/verify-etc-worker/tsconfig.json` — 本体 tsconfig (bun 専用 `verify-etc.ts` を
+  除外する既存方針) とは別に、`@cloudflare/workers-types` で型検証する専用 tsconfig。
+- 60分で自動失効、claim しなければ何も恒久化しない。
 
 ## テスト
 
