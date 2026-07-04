@@ -199,29 +199,35 @@ const currentTrackPoint = computed(() => {
     : null
 })
 
+/** 選択行を固定する位置 (ヘッダー直下、上から何行目に来るか。1 始まり)。 */
+const TRACK_ROW_ANCHOR_POSITION = 3
+
 /**
- * 選択行をテーブル内部だけスクロールして表示する。
+ * 選択行を「ヘッダー直下から `TRACK_ROW_ANCHOR_POSITION` 行目」の固定位置に
+ * 来るよう、テーブル内部だけをスクロールする。
  *
- * 素の `scrollIntoView({ block: 'nearest' })` はコンテナ自体がビューポートに
- * 完全に収まっていない場合、コンテナを可視化するためにページ全体もスクロール
- * してしまう。シークのドラッグ中は `onChartSeek` が高頻度で発火し続けるため、
- * その都度ページが下に流れて画面が安定しない不具合があった。
- * `container.scrollTop` だけを直接操作し、外側のページスクロールには一切
- * 触れないようにする。
+ * シーク中に選択行がテーブル内をあちこち移動すると視線を追いづらいため、
+ * 常に同じ高さに固定して視認性を上げる (先頭付近の行はスクロール可能範囲の
+ * 下限でクランプされ、そのまま表示される)。
+ *
+ * 素の `scrollIntoView` はコンテナ自体がビューポートに完全に収まっていない
+ * 場合、コンテナを可視化するために外側のページもスクロールしてしまう
+ * (シークのドラッグ中は `onChartSeek` が高頻度で発火するため、これが起こると
+ * 画面が下に流れ続けて不安定になる)。`container.scrollTop` だけを直接操作し、
+ * 外側のページスクロールには一切触れないようにする。
  */
 function scrollTrackRowIntoView(i: number) {
   nextTick(() => {
     const container = trackTableEl.value
     const row = container?.querySelector<HTMLElement>(`[data-row="${i}"]`)
     if (!container || !row) return
+    const header = container.querySelector('thead')
+    const headerHeight = header?.getBoundingClientRect().height ?? 0
+    const rowHeight = row.getBoundingClientRect().height
+    const anchorOffset = headerHeight + rowHeight * (TRACK_ROW_ANCHOR_POSITION - 1)
     const containerRect = container.getBoundingClientRect()
     const rowRect = row.getBoundingClientRect()
-    if (rowRect.top < containerRect.top) {
-      container.scrollTop += rowRect.top - containerRect.top
-    }
-    else if (rowRect.bottom > containerRect.bottom) {
-      container.scrollTop += rowRect.bottom - containerRect.bottom
-    }
+    container.scrollTop += rowRect.top - (containerRect.top + anchorOffset)
   })
 }
 
