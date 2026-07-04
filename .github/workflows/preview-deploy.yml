@@ -1,0 +1,24 @@
+name: Preview Deploy
+
+# push するだけで見た目確認できる軽量プレビュー環境 (create-preview skill、
+# Refs ippoan/secrets-inventory#85)。test/typecheck は回さない。main への
+# push/PR は test.yml (frontend-ci.yml) の staging deploy が別途担う。
+# backend は staging をそのまま再利用する (wrangler.toml の [env.preview] 参照)。
+
+on:
+  push:
+    branches-ignore: [main]
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  preview:
+    uses: ippoan/ci-workflows/.github/workflows/preview-deploy.yml@main
+    with:
+      install_command: 'npm install'
+      use_auth_client_dev: true
+      post_install_script: 'npx nuxt prepare'
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

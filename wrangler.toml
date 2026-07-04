@@ -120,3 +120,51 @@ NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 NUXT_ALC_API_URL = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_SCRAPER_RELAY_URL = "wss://dtako-staging.ippoan.org"
+
+# 軽量プレビュー環境 (create-preview skill、main 以外の branch への push ごとに
+# test/typecheck 無しで deploy)。backend は staging をそのまま再利用する
+# (専用 DB / 専用 backend は持たない)。custom_domain route を使うため
+# workers_dev は明示的に無効化する。
+[env.preview]
+name = "dtako-admin-preview"
+workers_dev = false
+
+[[env.preview.routes]]
+pattern = "dtako-preview.ippoan.org"
+custom_domain = true
+
+[[env.preview.r2_buckets]]
+binding = "DTAKO_R2"
+bucket_name = "dtako-uploads"
+
+# named env は top-level binding を継承しないので再宣言する。staging と同じ
+# secret_name (auth-worker #189)。
+[[env.preview.secrets_store_secrets]]
+binding = "INTERNAL_SHARED_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "INTERNAL_SHARED_SECRET"
+
+[[env.preview.secrets_store_secrets]]
+binding = "GOOGLEMAP_KEY_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "NUXT_PUBLIC_GOOGLEMAP_KEY"
+
+[[env.preview.services]]
+binding = "AUTH_WORKER"
+service = "auth-worker-staging"
+
+# scraper-relay も staging をそのまま再利用 (preview 専用の DO worker は持たない)。
+[[env.preview.services]]
+binding = "SCRAPER_RELAY"
+service = "nuxt-dtako-admin-scraper-relay-staging"
+
+[env.preview.vars]
+NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
+NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
+NUXT_ALC_API_URL = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
+NUXT_PUBLIC_SCRAPER_RELAY_URL = "wss://dtako-preview.ippoan.org"
+
+# top-level [secrets] も named environment には継承されない (wrangler が deploy
+# 時に warning を出す、この repo で既出の keep_vars/observability 系と同型の罠)。
+[env.preview.secrets]
+required = []
