@@ -153,10 +153,12 @@ secret_name = "NUXT_PUBLIC_GOOGLEMAP_KEY"
 binding = "AUTH_WORKER"
 service = "auth-worker-staging"
 
-# scraper-relay も staging をそのまま再利用 (preview 専用の DO worker は持たない)。
+# scraper-relay は専用の preview worker (nuxt-dtako-admin-scraper-relay-preview、
+# workers/dtako-scraper-relay/wrangler.toml の [env.preview]) を使う。ETC の
+# 実機診断イテレーションを共有 staging を汚さずに回すため (Refs #134)。
 [[env.preview.services]]
 binding = "SCRAPER_RELAY"
-service = "nuxt-dtako-admin-scraper-relay-staging"
+service = "nuxt-dtako-admin-scraper-relay-preview"
 
 [env.preview.vars]
 NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"

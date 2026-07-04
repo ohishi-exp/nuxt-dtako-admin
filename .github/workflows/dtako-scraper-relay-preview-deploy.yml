@@ -1,0 +1,38 @@
+name: dtako-scraper-relay preview deploy
+
+# main 以外の任意 branch への push のたびに、この worker を preview 環境に
+# deploy する軽量パイプライン (create-preview skill、Refs #134)。ETC の実機
+# 診断イテレーションを共有 staging を汚さずに高速に回すために追加した。
+# test/typecheck は回さない (dtako-scraper-relay-deploy.yml の pull_request
+# トリガーが別途 gate する)。
+
+on:
+  push:
+    branches-ignore: [main]
+    paths:
+      - 'workers/dtako-scraper-relay/**'
+      - '.github/workflows/dtako-scraper-relay-preview-deploy.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers/dtako-scraper-relay
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install deps
+        run: npm install
+
+      - name: Deploy (preview)
+        run: npx wrangler deploy --env preview
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
