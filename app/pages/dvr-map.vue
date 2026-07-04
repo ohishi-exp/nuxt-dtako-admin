@@ -199,9 +199,29 @@ const currentTrackPoint = computed(() => {
     : null
 })
 
+/**
+ * 選択行をテーブル内部だけスクロールして表示する。
+ *
+ * 素の `scrollIntoView({ block: 'nearest' })` はコンテナ自体がビューポートに
+ * 完全に収まっていない場合、コンテナを可視化するためにページ全体もスクロール
+ * してしまう。シークのドラッグ中は `onChartSeek` が高頻度で発火し続けるため、
+ * その都度ページが下に流れて画面が安定しない不具合があった。
+ * `container.scrollTop` だけを直接操作し、外側のページスクロールには一切
+ * 触れないようにする。
+ */
 function scrollTrackRowIntoView(i: number) {
   nextTick(() => {
-    trackTableEl.value?.querySelector(`[data-row="${i}"]`)?.scrollIntoView({ block: 'nearest' })
+    const container = trackTableEl.value
+    const row = container?.querySelector<HTMLElement>(`[data-row="${i}"]`)
+    if (!container || !row) return
+    const containerRect = container.getBoundingClientRect()
+    const rowRect = row.getBoundingClientRect()
+    if (rowRect.top < containerRect.top) {
+      container.scrollTop += rowRect.top - containerRect.top
+    }
+    else if (rowRect.bottom > containerRect.bottom) {
+      container.scrollTop += rowRect.bottom - containerRect.bottom
+    }
   })
 }
 
