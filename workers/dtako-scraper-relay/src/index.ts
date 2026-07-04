@@ -41,7 +41,9 @@ export default {
       // 無い呼び出し (全企業一括トリガー) は従来どおり session 単位で振り分け、
       // vpc-relay 経路 (VPS の dtako-scraper が複数企業を直列処理する) に委ねる。
       // kind=etc (管理タブの ETC 手動実行、Refs #134) は user_id 単位で cron と
-      // 同じ DO キー (`etc-{user_id}`) に振り分ける。
+      // 同じ DO キー (`etc-{user_id}`) に振り分ける。kind=etc-all (ETC_ACCOUNTS
+      // 全件一括実行、user_id 手入力の廃止) は固定キーのディスパッチャ DO に
+      // 振り分け、アカウント一覧の解決・fan-out はその DO 自身が行う。
       const kind = url.searchParams.get("kind");
       const key =
         kind === "etc"
@@ -49,11 +51,13 @@ export default {
               const userId = url.searchParams.get("user_id");
               return userId ? `etc-${userId}` : null;
             })()
-          : (() => {
-              const compId = url.searchParams.get("comp_id");
-              const session = url.searchParams.get("session");
-              return compId ? `scraper-comp-${compId}` : session ? `scraper-session-${session}` : null;
-            })();
+          : kind === "etc-all"
+            ? "etc-admin-all"
+            : (() => {
+                const compId = url.searchParams.get("comp_id");
+                const session = url.searchParams.get("session");
+                return compId ? `scraper-comp-${compId}` : session ? `scraper-session-${session}` : null;
+              })();
       if (!key) {
         return new Response("Bad Request: missing comp_id/user_id or session", { status: 400 });
       }

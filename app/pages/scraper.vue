@@ -39,13 +39,14 @@ const selectedCompId = useState('scraper-compId', () => '')
 const skipUpload = useState('scraper-skipUpload', () => false)
 
 // --- ETC 明細スクレイプ (管理タブ、Refs #134) ---
-// dtako と違い ETC_ACCOUNTS の user_id 一覧をフロントから知る手段が無いため、
-// 自由入力で user_id を指定する (dtako の compIdOptions のようなハードコード
-// リストは持たない)。R2 保存まで完了する既存の /cron/etc と同じ経路を
-// `/ws/scraper?kind=etc` (認証済み WS) 経由で手動実行する。
+// ETC_ACCOUNTS 登録済みの全アカウントを一括実行する (`kind: 'etc-all'`)。
+// user_id をフロントから知る手段が無い (dtako の compIdOptions のような
+// ハードコードリストを持たない) 以上、個別 user_id を手入力させる意味が
+// 無いため、一括実行のみを提供する。DO 側 (`etc-admin-all` ディスパッチャ)
+// が ETC_ACCOUNTS を解決してアカウントごとに並列実行し、アカウント単位の
+// result イベント (user_id 付き) をそのまま WS で中継する。
 
 const activeTab = useState<'dtako' | 'etc'>('scraper-active-tab', () => 'dtako')
-const etcUserId = useState('scraper-etc-user-id', () => '')
 const etcRunning = ref(false)
 interface EtcLogLine {
   text: string
@@ -53,20 +54,20 @@ interface EtcLogLine {
 }
 const etcLog = ref<EtcLogLine[]>([])
 
-async function handleEtcRun() {
-  if (!etcUserId.value || etcRunning.value) return
+async function handleEtcRunAll() {
+  if (etcRunning.value) return
   etcRunning.value = true
   etcLog.value = []
   try {
     await triggerScrapeStream(
-      { kind: 'etc', user_id: etcUserId.value },
+      { kind: 'etc-all' },
       (evt: ScrapeProgressEvent) => {
         if (evt.event === 'progress') {
           etcLog.value.push({ text: `[進捗] ${evt.step ?? ''}${evt.message ? `: ${evt.message}` : ''}` })
         }
         else if (evt.event === 'result') {
           etcLog.value.push({
-            text: `[結果] ${evt.status === 'success' ? '成功' : '失敗'}: ${evt.message ?? ''}`,
+            text: `[結果] ${evt.user_id ?? ''}: ${evt.status === 'success' ? '成功' : '失敗'} ${evt.message ?? ''}`,
             level: evt.status === 'success' ? 'info' : 'error',
           })
         }
@@ -660,25 +661,15 @@ onMounted(() => {
           ETC 明細スクレイプ (手動実行)
         </h2>
         <p class="text-xs text-gray-500 mb-3">
-          ETC_ACCOUNTS に設定済みの user_id を指定して、今すぐスクレイプを実行します (cron と同じ /cron/etc 経路、結果は R2 に保存されます)。
+          ETC_ACCOUNTS に設定済みの全アカウントを、今すぐ一括でスクレイプ実行します (cron と同じ経路、結果は R2 に保存されます)。
         </p>
         <div class="flex flex-wrap gap-2 items-end mb-4">
-          <div>
-            <label class="block text-sm font-medium mb-1">user_id</label>
-            <input
-              v-model="etcUserId"
-              type="text"
-              placeholder="ETC_ACCOUNTS の user_id"
-              class="border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-900 dark:border-gray-700"
-              :disabled="etcRunning"
-            >
-          </div>
           <UButton
-            label="実行"
+            label="全アカウント実行"
             icon="i-lucide-play"
             :loading="etcRunning"
-            :disabled="!etcUserId || etcRunning"
-            @click="handleEtcRun"
+            :disabled="etcRunning"
+            @click="handleEtcRunAll"
           />
         </div>
         <div

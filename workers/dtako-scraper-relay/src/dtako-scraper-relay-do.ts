@@ -51,7 +51,7 @@ import {
   EtcMeisaiNotCsvError,
   scrapeEtcCsv,
 } from "./etc-meisai-client";
-import { etcCsvKey, parseEtcAccounts, type EtcAccountEntry } from "./cron";
+import { CronConfigError, etcCsvKey, parseEtcAccounts, type EtcAccountEntry } from "./cron";
 import {
   buildDvrSearchKey,
   dvrDataUrl,
@@ -258,6 +258,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return this.handleCronEtc(request);
     }
 
+    // ETC 全アカウント一括実行 (kind=etc-all) のディスパッチャ DO インスタンス
+    // (idFromName("etc-admin-all")、index.ts 参照) が、各アカウント固有の DO
+    // (`etc-{user_id}`) に対して叩く同期スクレイプ endpoint。cron/etc と同じく
+    // この worker 自身からしか到達できない (workers_dev=false、app の service
+    // binding は /ws/scraper・/scraper-zip/・/dvr-api/ しか転送しない)。
+    if (url.pathname === "/internal/etc-scrape" && request.method === "POST") {
+      return this.handleInternalEtcScrape(request);
+    }
+
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("Expected WebSocket", { status: 426 });
     }
@@ -272,9 +281,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return new Response("Invalid or expired token", { status: decision.status });
     }
 
-    if (url.searchParams.get("kind") === "etc") {
+    const kind = url.searchParams.get("kind");
+    if (kind === "etc") {
       // ETC は SCRAPER_MODE (vpc-relay/http) と無関係な別経路 (管理タブ手動実行、Refs #134)。
       return this.handleEtcScrapeWs(url);
+    }
+    if (kind === "etc-all") {
+      // ETC_ACCOUNTS 全件を一括実行 (user_id 手入力を不要にする、Refs #134)。
+      return this.handleEtcScrapeAllWs();
     }
 
     if (this.env.SCRAPER_MODE === "http") {
@@ -624,6 +638,124 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     });
     this.sendSafely(server, { event: "done" });
     this.closeSafely(server, status === "error" ? 1011 : 1000, "done");
+  }
+
+  /** POST /ws/scraper?kind=etc-all — ETC_ACCOUNTS 登録済みの全アカウントを
+   * user_id 入力無しで一括実行する (管理タブ用、Refs #134)。account ごとに
+   * `etc-{user_id}` DO へ内部 fetch で処理を委譲するため、既存のアカウント単位
+   * 直列化 (enqueueScrape) はそのまま保たれつつ、アカウント間は Promise.all で
+   * 並列に実行される。 */
+  private async handleEtcScrapeAllWs(): Promise<Response> {
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    this.ctx.acceptWebSocket(server);
+
+    this.ctx.waitUntil(
+      this.executeEtcScrapeAll(server).catch((err) => {
+        console.error("DtakoScraperRelayDO handleEtcScrapeAllWs unexpected error:", err);
+        this.sendSafely(server, { event: "error", message: "予期しないエラーが発生しました" });
+        this.closeSafely(server, 1011, "unexpected error");
+      }),
+    );
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  private async executeEtcScrapeAll(server: WebSocket): Promise<void> {
+    const raw = await resolveSecret(this.env.ETC_ACCOUNTS);
+    if (!raw) {
+      this.sendSafely(server, { event: "error", message: "ETC_ACCOUNTS が未設定です" });
+      this.closeSafely(server, 1011, "no accounts configured");
+      return;
+    }
+    let accounts: EtcAccountEntry[];
+    try {
+      accounts = parseEtcAccounts(raw);
+    } catch (err) {
+      const message = err instanceof CronConfigError ? err.message : describeUnknownError(err);
+      this.sendSafely(server, { event: "error", message });
+      this.closeSafely(server, 1011, "invalid accounts config");
+      return;
+    }
+    if (accounts.length === 0) {
+      this.sendSafely(server, { event: "error", message: "ETC_ACCOUNTS が空です" });
+      this.closeSafely(server, 1011, "no accounts configured");
+      return;
+    }
+
+    this.sendSafely(server, {
+      event: "progress",
+      step: "start",
+      message: `${accounts.length}件のアカウントを実行します`,
+    });
+
+    let hadError = false;
+    await Promise.all(
+      accounts.map(async (account) => {
+        try {
+          const stub = this.env.RELAY.get(this.env.RELAY.idFromName(`etc-${account.user_id}`));
+          const res = await stub.fetch("https://relay.internal/internal/etc-scrape", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ user_id: account.user_id }),
+          });
+          const outcome = (await res.json()) as EtcScrapeOutcome;
+          if (outcome.status === "error") hadError = true;
+          this.sendSafely(server, {
+            event: "result",
+            user_id: account.user_id,
+            step: "done",
+            status: outcome.status === "error" ? "error" : "success",
+            message: outcome.message,
+          });
+        } catch (err) {
+          hadError = true;
+          this.sendSafely(server, {
+            event: "result",
+            user_id: account.user_id,
+            step: "done",
+            status: "error",
+            message: describeUnknownError(err),
+          });
+        }
+      }),
+    );
+
+    this.sendSafely(server, { event: "done" });
+    this.closeSafely(server, hadError ? 1011 : 1000, "done");
+  }
+
+  /** POST /internal/etc-scrape — kind=etc-all のディスパッチャ (`executeEtcScrapeAll`)
+   * が各アカウント固有の DO (`etc-{user_id}`) に対して叩く、同期スクレイプ endpoint。
+   * `/cron/etc` (202 accepted + waitUntil) とは異なり、結果 JSON を待って返す。 */
+  private async handleInternalEtcScrape(request: Request): Promise<Response> {
+    let body: { user_id?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return Response.json({ status: "error", message: "JSON body が必要です" }, { status: 400 });
+    }
+    const userId = typeof body.user_id === "string" ? body.user_id : "";
+    if (!userId) {
+      return Response.json({ status: "error", message: "user_id が必要です" }, { status: 400 });
+    }
+
+    const account = await this.resolveEtcAccount(userId);
+    if (!account) {
+      return Response.json({
+        status: "error",
+        message: `user_id=${userId} が ETC_ACCOUNTS に見つかりません`,
+      });
+    }
+    if (!this.env.DTAKO_R2) {
+      return Response.json({
+        status: "error",
+        message: "DTAKO_R2 binding が未設定のため ETC CSV を保存できません",
+      });
+    }
+
+    const outcome = await this.enqueueScrape(() => this.performEtcScrape(account, () => {}));
+    return Response.json(outcome);
   }
 
   private async executeScrape(

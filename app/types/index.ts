@@ -233,9 +233,13 @@ export interface ScrapeRequest {
   end_date?: string
   comp_id?: string
   skip_upload?: boolean
-  /** 'etc' 指定時は user_id で ETC アカウントを指定した明細スクレイプになり、
-   * comp_id / start_date / end_date / skip_upload は無視される (管理タブ手動実行、Refs #134)。 */
-  kind?: 'etc'
+  /**
+   * 'etc' 指定時は user_id で ETC アカウントを指定した明細スクレイプになり、
+   * 'etc-all' 指定時は ETC_ACCOUNTS 登録済みの全アカウントを一括実行する
+   * (user_id 不要)。いずれも comp_id / start_date / end_date / skip_upload は
+   * 無視される (管理タブ手動実行、Refs #134)。
+   */
+  kind?: 'etc' | 'etc-all'
   user_id?: string
 }
 
