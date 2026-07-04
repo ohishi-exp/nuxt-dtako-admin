@@ -1,0 +1,22 @@
+name = "nuxt-dtako-admin-scraper-relay-tail"
+account_id = "24b45709d060d957340180e995f0d373"
+compatibility_date = "2024-09-19"
+compatibility_flags = ["nodejs_compat"]
+main = "src/index.ts"
+
+# tail worker はイベントの受け口として `tail()` しか持たず、通常の HTTP fetch は
+# 公開しない (Cloudflare の仕様上 workers_dev/routes に関わらず fetch handler が
+# 無ければ何も応答しない)。
+workers_dev = false
+
+[observability]
+enabled = true
+
+[env.staging]
+name = "nuxt-dtako-admin-scraper-relay-tail-staging"
+workers_dev = false
+
+# named environment は top-level [observability] を継承しない (dtako-scraper-relay
+# 本体と同じ罠、CLAUDE.md 参照)。
+[env.staging.observability]
+enabled = true

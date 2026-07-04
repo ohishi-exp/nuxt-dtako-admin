@@ -1,0 +1,59 @@
+name: dtako-scraper-relay-tail worker
+
+# nuxt-dtako-admin-scraper-relay-tail は dtako-scraper-relay (DtakoScraperRelayDO)
+# の Tail Worker consumer。producer 側 wrangler.toml の tail_consumers から
+# 参照される (Refs #134 後続報告 — DO の ctx.waitUntil() 内ログが通常の
+# Workers Logs に反映されないため、Cloudflare 推奨の Tail Worker で拾う)。
+#
+# DO/migration を持たない素の stateless worker なので dtako-scraper-relay-deploy.yml
+# のような classic deploy 縛りは無いが、シンプルさを優先して同じ classic
+# `wrangler deploy` パターンに揃える。
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'workers/dtako-scraper-relay-tail/**'
+      - '.github/workflows/dtako-scraper-relay-tail-deploy.yml'
+  pull_request:
+    paths:
+      - 'workers/dtako-scraper-relay-tail/**'
+      - '.github/workflows/dtako-scraper-relay-tail-deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers/dtako-scraper-relay-tail
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install deps
+        run: npm install
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      # tag push (v*) → prod、それ以外 (main push / workflow_dispatch) → staging。
+      # pull_request では deploy しない (typecheck のみ)。
+      - name: Deploy (staging)
+        if: github.event_name != 'pull_request' && github.ref_type != 'tag'
+        run: npx wrangler deploy --env staging
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Deploy (production)
+        if: github.event_name != 'pull_request' && github.ref_type == 'tag'
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
