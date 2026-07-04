@@ -569,8 +569,22 @@ export async function navigateToSearchPage(
   return next;
 }
 
-/** 検索条件フォームを `sokoKbn=0` (全て) + 全 checkbox 選択 (「全選択」相当) で
- * POST し、明細一覧ページを返す。明細 0 件は EtcMeisaiNoUsageError。 */
+/** `riyouMonth{N}` (利用月選択) checkbox の名前パターン。ページ既定でチェック
+ * 済みなのは検索対象月 (実機確認では直近月のみ) で、それ以外の月は未チェック。
+ * 「全選択」の対象はカード選択等であって利用月ではない (`submitSearch` 参照)。 */
+const RIYOU_MONTH_CHECKBOX_PATTERN = /^riyouMonth\d+$/;
+
+/** 検索条件フォームを `sokoKbn=0` (全て) + 利用月以外の全 checkbox 選択
+ * (「全選択」相当) で POST し、明細一覧ページを返す。明細 0 件は
+ * EtcMeisaiNoUsageError。
+ *
+ * **`riyouMonth{N}` (利用月選択) checkbox は「全選択」対象から除外する**
+ * (Refs #134 後続報告)。ここを含めて全 checkbox を無差別に選択すると、
+ * ページ既定でチェックされている検索対象月以外の月まで選択され、1回の
+ * スクレイプで数ヶ月〜1年超分の明細が一括取得されてしまう (実害確認済み:
+ * 25/04〜26/06 の 14 ヶ月分が1回の CSV に混入)。ページ既定のチェック状態
+ * (= 検索対象月のみ) は `form.fields` にそのまま残るので、ここで overrides
+ * に足さなければ月の絞り込みは自然に維持される。 */
 export async function submitSearch(
   jar: CookieJar,
   searchPage: EtcPage,
@@ -587,7 +601,10 @@ export async function submitSearch(
     );
   }
   const overrides: Record<string, string> = { sokoKbn: "0" };
-  for (const cb of form.checkboxes) overrides[cb.name] = cb.value;
+  for (const cb of form.checkboxes) {
+    if (RIYOU_MONTH_CHECKBOX_PATTERN.test(cb.name)) continue;
+    overrides[cb.name] = cb.value;
+  }
 
   let result = await submitForm(
     jar,

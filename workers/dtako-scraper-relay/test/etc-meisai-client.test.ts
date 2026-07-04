@@ -516,7 +516,7 @@ describe('navigateToSearchPage', () => {
 describe('submitSearch', () => {
   const searchPage = page('https://www.etc-meisai.jp/etc/R', SEARCH_PAGE_HTML)
 
-  it('sokoKbn=0 (全て) + 全 checkbox 選択で検索 POST する (issue #14 の最重要 gotcha)', async () => {
+  it('sokoKbn=0 (全て) + 利用月以外の全 checkbox 選択で検索 POST する (issue #14 の最重要 gotcha)', async () => {
     const { fetch, calls } = recordingFetch([html(RESULT_PAGE_HTML)])
     const result = await submitSearch(createCookieJar(), searchPage, fetch, 1000)
     expect(result.html).toBe(RESULT_PAGE_HTML)
@@ -525,9 +525,11 @@ describe('submitSearch', () => {
     expect(post.url).toBe(`https://www.etc-meisai.jp/etc/R?nextfunc=${ETC_FUNC_SEARCH}`)
     const body = bodyParams(post.init)
     expect(body.get('sokoKbn')).toBe('0') // 初期値 1 を明示 override
-    expect(body.get('riyouMonth1')).toBe('202606') // 全選択
-    expect(body.get('riyouMonth2')).toBe('202607')
-    expect(body.get('cardAll')).toBe('on')
+    // riyouMonth (利用月) はページ既定のチェック状態を維持する (全選択の対象外)。
+    // riyouMonth1 はページ既定で未チェックなので送られない (= 全月選択の回帰防止)。
+    expect(body.has('riyouMonth1')).toBe(false)
+    expect(body.get('riyouMonth2')).toBe('202607') // ページ既定でチェック済みの月のみ
+    expect(body.get('cardAll')).toBe('on') // カード選択等は従来通り全選択
     expect(body.get('nextfunc')).toBe(ETC_FUNC_SEARCH)
   })
 
