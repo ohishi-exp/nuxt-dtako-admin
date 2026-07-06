@@ -15,7 +15,9 @@ permissions:
 
 jobs:
   ci:
-    uses: ippoan/ci-workflows/.github/workflows/frontend-ci.yml@main
+    # EXPERIMENT: node_modules cache 検証のため ci-workflows のブランチに pin
+    # (ippoan/ci-workflows#<node_modules cache PR>)。検証後 @main へ戻す。
+    uses: ippoan/ci-workflows/.github/workflows/frontend-ci.yml@claude/edit-date-endpoint-qt6mlf
     with:
       has_integration: true
       # lockfile が ^0.2.55 未満を pin していても manifest に追従して解決する
