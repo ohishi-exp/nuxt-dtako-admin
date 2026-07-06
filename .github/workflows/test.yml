@@ -53,5 +53,3 @@ jobs:
       # deploy-release の traffic-report (v* tag push) が要求。同じ cross-org
       # 理由で明示渡し (release-wave.yml / ci-shape-report.yml と同 pattern)
       RELEASE_WAVE_WEBHOOK_SECRET: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
-
-# cache-validate: 2026-07-06T01:40:19Z
