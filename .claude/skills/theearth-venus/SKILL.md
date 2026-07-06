@@ -68,6 +68,17 @@ json であること + `d` の存在を検証** (ログイン切れは 200 空 b
 呼び出しは HTML ではなく **HTTP 500** を返す。500 も `VenusSessionExpiredError` → 401
 にマップして再ログインを促すこと (502 に潰すと利用者が回復手段に辿りつけない)。
 
+**ログイン直後から即叩ける・ページ遷移不要 (VenusBridge はセッション単位、2026-07-06 実機確定)**:
+VenusBridge メソッドも aspx の plain GET も、**ログイン直後 (メインメニュー到達直後、対象
+ページに一切遷移していない状態) から即座に 200 が返る**。「動態管理画面を開いてから」等の warm-up
+は不要 — セッション cookie が有効なら**どのページに居るかに関係なく**叩ける (= ページ単位でなく
+セッション単位のスコープ)。メインメニューのまま実測で確認済み:
+`VehicleStateTableForBranchEx("00000000","0")` → `array[197]` (全事業所現在地) /
+`Request_NetDvrFuncInitValue({})` → `array[6]` (マスタ) /
+`Monitoring_DvrNotification2({sort:",,0,100"})` → `[件数, JSON文字列]` /
+`Request_ScoreCalcuType({})` → JSON、いずれも遷移なしで 200。
+Worker (`theearth-client`) は **login → 遷移せず即 VenusBridge POST / config GET** でよい。
+
 ### DVR 通知一覧: `Monitoring_DvrNotification2`
 
 - body: `{ sort: ",,0,100" }` (形式 `fieldName,dir,pageIndex,pageSize`)
@@ -326,6 +337,18 @@ VenusBridge (`.svc`) ではない。関連ページ:
 日報 F-NRS1010 が **読取日(=退社日時 `WorkEndDateTime`)降順**で並ぶ根拠。ソートキー options に
 `WorkEndDateTime:退社日時` も `ReadNo:読取日` もあり、両者は同義 (退社日時=読取日)。既に降順
 設定済みなので、降順前提の from-未満 早期打ち切りハーベスタがそのまま使える。
+
+**Worker からのソート確認は plain GET で足りる (2026-07-06 実機確定)**: `window.open` は
+ブラウザ UI の都合で、**Worker (素の fetch) には無関係**。`DataDisplayConfig()` は
+`DialogArgs=""` = パラメータ無しで開くので、Worker が **`GET /F-GOS0030[DataDisplayConfig].aspx`
+(認証 cookie 付き)** した URL と同一。ソート設定は **VenusBridge でなくサーバーが初期 HTML に
+焼き込んで返す** (J-GOS0030 は VenusBridge を呼ばない) ので、生 GET の HTML を DOM パースして
+`select[id$=ddlOrder0]` の selected value === `ReadNo` かつ `input[id$=rdoDwOrder0]` が checked
+(降順) を確認するだけ。**ユーザー単位のサーバー保存値で、呼び出し元ページ・別窓に依存しない**
+(メインメニューからの GET でも一覧/日報からの GET でも同一結果を実測、113,900 byte)。
+セッション切れは `redirected===true` (finalUrl が `F-OES1010[Login]`) で機械検知 → 再ログイン。
+他ユーザーが並び順を変える可能性があるので **harvest 前に必ずこの GET で確認** (or 日報グリッドの
+退社日時列で単調非増加をランタイム検証) してから早期打ち切りに入る。
 
 ## cdp での実機検証手順 (このメモの作り方)
 
