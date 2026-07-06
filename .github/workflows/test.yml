@@ -33,6 +33,16 @@ jobs:
       integration_env: 'API_BASE_URL=http://localhost:18080'
       use_auth_client_dev: true   # PR 時に @ippoan/auth-client@dev を overlay install (createIdentityProxyHandler 取得、Refs rust-alc-api#434)
       post_install_script: 'npx nuxt prepare'
+      # frontend-ci の nuxt 用既定コマンドは `npm run build && npx wrangler
+      # deploy ...` だが、この repo の wrangler.toml は `[build] command =
+      # "npm run build"` を持つため、そのままだと wrangler 自身の pre-deploy
+      # build フックで nuxt build が二重に走る (実測 ~33s×2、preview-deploy.yml
+      # と同じ理由)。wrangler の custom build に一本化して 1 回にする。
+      # deploy_release_script は release_no_traffic の文字列置換 (`wrangler
+      # deploy` → `wrangler versions upload`) がそのまま適用されるので
+      # no-traffic release の挙動は変わらない。
+      deploy_staging_script: 'npx wrangler deploy --env staging'
+      deploy_release_script: 'npx wrangler deploy'
       # npm cache key (lockfile hash のみ) が ippoan/ci-workflows#152 修正前の
       # catalog-extract.yml (ts/js extractor、npm install しないのに同じ key で
       # cache: npm を持っていた) に汚染されていた (cache hit するが中身 ~0 byte)。
