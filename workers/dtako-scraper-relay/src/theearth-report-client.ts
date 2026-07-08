@@ -100,26 +100,34 @@ function assertNoOtherEditConflict(html: string, actionLabel: string): void {
 // F-DES1012 [運行経費入力] — 給油行 (lstFuel)
 // ---------------------------------------------------------------------------
 
-/** `lstFuel` grid の実 id 形式 (cdp-pair 実機確認、Refs #183、2026-07-08、給油実
- * データ有りの運行で確認)。**`MainContent_` prefix は存在しない**。表示専用の行は
- * `lstFuel_lbl<Field>_<N>` の `<span>` (フォーム要素ではない)。編集ボタン押下の
- * postback 後にだけ `lstFuel_etxt<Field>_<N>` という編集用 `<input>` が現れる
- * (`saveFuelRow` 参照)。全て `lstFuel_<suffix>_<N>` という共通パターン。 */
+/** save パス (`saveFuelRow`) 用の id ビルダ。実機の編集ボタンは
+ * `__doPostBack('lstFuel$ctrl<N>$btnItemEdit')` で、この `lstFuel_<suffix>_<N>` 形式
+ * とは異なる (**編集モードの実 id は cdp-pair 未確認。Refs #188 対象外**)。read パス
+ * (表示 span) は実機準拠の `fuelLabelId` を使う。 */
 function fuelRowId(ctrlIndex: number, suffix: string): string {
   return `lstFuel_${suffix}_${ctrlIndex}`;
 }
 
-/** 表示専用行 (`lstFuel_lbl<Field>_<N>`) の各フィールド id サフィックス。
- * 値側 (右辺) は実 DOM の id をそのまま使うため、原文スペルミス "Quantuty" も
- * そのまま (公開型フィールド名 `quantity` は正しいスペルにしてある)。 */
+/** read パス (表示専用 span) の実 id ビルダ。実機は `lstFuel_ctrl<N>_<suffix>` 形式
+ * (cdp-pair 実機確認、Refs #188、2026-07-08、給油実データ有りの運行で確認)。
+ * `MainContent_` prefix は無い。 */
+function fuelLabelId(ctrlIndex: number, suffix: string): string {
+  return `lstFuel_ctrl${ctrlIndex}_${suffix}`;
+}
+
+/** 表示専用行 (`lstFuel_ctrl<N>_lb*`) の span id サフィックス。実 DOM の綴りを
+ * そのまま使う (theearth 原文は分類 "Suppuly" / 区分 "SuppulyKb" / 種別 "Shu" /
+ * 数量 = 補給量 "HokyuRyou")。名称列 (`...Name`) が既に HTML に存在するため、
+ * 別途 F-GSS0010 マスタを照会せずコード+名称を出せる (Refs #188)。 */
 const FUEL_LABEL_IDS = {
-  operationNo: "lblOperationNo",
-  subNo: "lblSubNo",
-  supplyCategory: "lblSupplyCategory",
-  supplyStation: "lblSupplyStation",
-  supplyType: "lblSupplyType",
-  dateTime: "lblDateTime",
-  quantity: "lblQuantuty",
+  supplyCategory: "lblSuppuly",
+  supplyCategoryName: "lblSuppulyName",
+  supplyStation: "lblSuppulyKb",
+  supplyStationName: "lblSuppulyKbName",
+  supplyType: "lblShu",
+  supplyTypeName: "lblShuName",
+  dateTime: "lblDate",
+  quantity: "lblHokyuRyou",
 } as const;
 
 /** 編集モードの入力欄 (`lstFuel_etxt<Field>_<N>`) の各フィールド id サフィックス。
@@ -141,14 +149,17 @@ function extractSpanTextById(html: string, id: string): string | null {
   return m[1].replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ").trim();
 }
 
-/** 給油行 1 件 (`lstFuel$ctrl<i>$*`)。分類/区分/種別は CD (4桁) のみ。 */
+/** 給油行 1 件 (`lstFuel_ctrl<N>_*`)。分類/区分/種別は CD (コード) と名称の両方を
+ * 持つ (名称列は実 DOM に既存、Refs #188)。表示行に `operationNo`/`subNo` の span は
+ * 無いため保持しない (行の特定は URL の opeNo/startOpe と ctrlIndex で足りる)。 */
 export interface FuelRow {
   ctrlIndex: number;
-  operationNo: string;
-  subNo: string;
   supplyCategory: string;
+  supplyCategoryName: string;
   supplyStation: string;
+  supplyStationName: string;
   supplyType: string;
+  supplyTypeName: string;
   dateTime: string;
   quantity: string;
 }
@@ -160,16 +171,20 @@ export interface ExpenseForm {
 }
 
 function parseFuelRows(html: string): FuelRow[] {
-  const indexes = [...html.matchAll(/id="lstFuel_lblDateTime_(\d+)"/g)].map((m) => Number(m[1]));
+  // 行 index は分類コード span (`lblSuppuly`、給油行なら必ず存在) で検出する。末尾の
+  // `"` により `lblSuppulyName` / `lblSuppulyKb` への誤マッチを防ぐ。給油 0 件の運行は
+  // ヒット 0 = 空配列 (呼び出し元が __VIEWSTATE 有無で構造崩れと切り分ける)。
+  const indexes = [...html.matchAll(/id="lstFuel_ctrl(\d+)_lblSuppuly"/g)].map((m) => Number(m[1]));
   return indexes.map((ctrlIndex) => {
-    const get = (idSuffix: string) => extractSpanTextById(html, fuelRowId(ctrlIndex, idSuffix)) ?? "";
+    const get = (idSuffix: string) => extractSpanTextById(html, fuelLabelId(ctrlIndex, idSuffix)) ?? "";
     return {
       ctrlIndex,
-      operationNo: get(FUEL_LABEL_IDS.operationNo),
-      subNo: get(FUEL_LABEL_IDS.subNo),
       supplyCategory: get(FUEL_LABEL_IDS.supplyCategory),
+      supplyCategoryName: get(FUEL_LABEL_IDS.supplyCategoryName),
       supplyStation: get(FUEL_LABEL_IDS.supplyStation),
+      supplyStationName: get(FUEL_LABEL_IDS.supplyStationName),
       supplyType: get(FUEL_LABEL_IDS.supplyType),
+      supplyTypeName: get(FUEL_LABEL_IDS.supplyTypeName),
       dateTime: get(FUEL_LABEL_IDS.dateTime),
       quantity: get(FUEL_LABEL_IDS.quantity),
     };
