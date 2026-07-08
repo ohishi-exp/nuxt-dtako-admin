@@ -407,6 +407,7 @@ describe("unlockOperation", () => {
     omitCurrentPageMarker?: boolean;
     nextLink?: { target: string; argument: string; text: string };
     moreLink?: { target: string; argument: string; text: string };
+    firstButton?: { disabled?: boolean };
   } = {}): string {
     const rowIndex = opts.rowIndex ?? 0;
     const row = opts.opeNo === null ? "" : `<span id="MainContent_lstOperation_lblOperationNo_${rowIndex}">${opts.opeNo ?? OPE_NO}</span>`;
@@ -428,6 +429,7 @@ describe("unlockOperation", () => {
     ].join("\n");
     return `<html><body><form>
       <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
+      ${opts.firstButton ? firstButtonHtml(opts.firstButton) : ""}
       ${row}
       ${hiddenFields}
       ${button}
@@ -468,6 +470,31 @@ describe("unlockOperation", () => {
     await expect(
       unlockOperation(jar2, { opeNo: OPE_NO, startOpe: START_OPE }, sequenceFetch([html(LOGIN_REDIRECT_HTML)])),
     ).rejects.toThrow(VenusSessionExpiredError);
+  });
+
+  it("resets to the first page via the 最初 submit button before searching (stale page position)", async () => {
+    const jar = createCookieJar();
+    // ページ位置が page 3 に残っている状態で GET すると、その page 3 の HTML が
+    // 返る (実機挙動の再現)。対象行は「最初」に戻った先の page 1 にある。
+    const staleAtPage3 = unlockListHtml({
+      opeNo: "9999999999999999999999",
+      currentPage: 3,
+      firstButton: { disabled: false },
+    });
+    const page1 = unlockListHtml({ currentPage: 1, firstButton: { disabled: true } });
+    const fetchImpl = sequenceFetch([html(staleAtPage3), html(page1), html(page1)]);
+    await expect(
+      unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl),
+    ).resolves.toBeUndefined();
+  });
+
+  it("skips the 最初 reset when the button is disabled (already on page 1)", async () => {
+    const jar = createCookieJar();
+    const page1 = unlockListHtml({ firstButton: { disabled: true } });
+    const fetchImpl = sequenceFetch([html(page1), html(page1)]);
+    await expect(
+      unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl),
+    ).resolves.toBeUndefined();
   });
 
   it("walks to the next numbered page when the target isn't on the first page", async () => {

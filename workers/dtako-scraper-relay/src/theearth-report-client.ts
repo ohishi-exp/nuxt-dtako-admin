@@ -432,6 +432,18 @@ export async function unlockOperation(
     );
   }
 
+  // 前回の list/harvest 呼び出しでページ位置が進んだまま残っている可能性がある
+  // (ASP.NET セッションにページ位置が残る)。探索は前方 (currentPage+1) にしか
+  // 進まないため、まず「最初」へ戻さないと手前のページにある対象行を見失う
+  // (harvestDailyReport と同じ対策、実際にこの不具合で対象行を発見できない事例
+  // が発生した)。「最初」ボタンは1ページ目では disabled になり
+  // findPagerSubmitButton が null を返すので、その場合は既に1ページ目とみなして
+  // スキップする。
+  const firstButton = findPagerSubmitButton(html, "最初");
+  if (firstButton) {
+    html = await postPagerSubmitButton(jar, url, html, firstButton, fetchImpl, timeoutMs);
+  }
+
   let rowIndex = findOperationRowIndex(html, params.opeNo);
   for (let pageCount = 0; rowIndex === null && pageCount < MAX_HARVEST_PAGES; pageCount++) {
     const currentPage = extractCurrentPageNumber(html) ?? 1;
