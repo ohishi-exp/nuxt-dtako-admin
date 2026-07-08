@@ -182,6 +182,12 @@ export async function getExpenseForm(
   return { opeNo, startOpe, fuelRows };
 }
 
+/** postFuelRows が押す postback ボタンの指定。 */
+interface FuelFormButton {
+  id: string;
+  defaultLabel: string;
+}
+
 /** 給油行 1 件を書き換えて全 lstFuel 行を再送する内部ヘルパ。ASP.NET postback は
  * 差分ではなくフォーム全体を要求するため、まず現在の全行を GET で読み直し、
  * 対象行 (ctrlIndex) だけ上書きした状態で送る。 */
@@ -191,8 +197,7 @@ async function postFuelRows(
   html: string,
   rows: FuelRow[],
   edited: FuelRow | null,
-  buttonId: string,
-  defaultButtonLabel: string,
+  button: FuelFormButton,
   fetchImpl: FetchLike,
   timeoutMs: number,
 ): Promise<{ postHtml: string }> {
@@ -205,13 +210,13 @@ async function postFuelRows(
       if (ref) body[ref.name] = String(source[key]);
     }
   }
-  const button = findFormFieldById(html, buttonId);
-  if (!button) {
+  const buttonField = findFormFieldById(html, button.id);
+  if (!buttonField) {
     throw new TheearthClientError(
-      `ボタン (${buttonId}) が見つかりません — theearth-np のページ仕様変更の可能性があります`,
+      `ボタン (${button.id}) が見つかりません — theearth-np のページ仕様変更の可能性があります`,
     );
   }
-  body[button.name] = button.value || defaultButtonLabel;
+  body[buttonField.name] = buttonField.value || button.defaultLabel;
 
   const postRes = await postForm(jar, url, new URLSearchParams(body), fetchImpl, timeoutMs);
   if (!postRes.ok) {
@@ -283,8 +288,7 @@ export async function saveFuelRow(
     html,
     rows,
     edited,
-    "MainContent_btnExpenceEditSetting",
-    "登録",
+    { id: "MainContent_btnExpenceEditSetting", defaultLabel: "登録" },
     fetchImpl,
     timeoutMs,
   );
@@ -329,8 +333,7 @@ export async function recalculateExpense(
     html,
     rows,
     null,
-    "MainContent_btnScore",
-    "評価点再集計",
+    { id: "MainContent_btnScore", defaultLabel: "評価点再集計" },
     fetchImpl,
     timeoutMs,
   );
@@ -503,6 +506,15 @@ function normalizeWorkEndDateTime(workEndRaw: string, startDateTimeFull: string)
   return `${year}/${mm.padStart(2, "0")}/${dd.padStart(2, "0")} ${hh.padStart(2, "0")}:${min}`;
 }
 
+/** 行集合の中で最小の workEndDateTime ("YYYY/MM/DD HH:mm" はゼロ埋めなので
+ * 文字列比較がそのまま時系列比較になる)。空なら null。 */
+function minWorkEndDateTime(rows: DailyReportRow[]): string | null {
+  return rows.reduce<string | null>(
+    (min, r) => (min === null || r.workEndDateTime < min ? r.workEndDateTime : min),
+    null,
+  );
+}
+
 function parseDailyReportRows(html: string): DailyReportRow[] {
   const indexes = [...html.matchAll(/id="MainContent_T1_lstOperation_lblOperationNo_(\d+)"/g)].map((m) =>
     Number(m[1]),
@@ -639,17 +651,14 @@ export async function harvestDailyReport(
 
   for (let pageCount = 0; pageCount < MAX_HARVEST_PAGES; pageCount++) {
     const pageRows = parseDailyReportRows(html);
-    let minWorkEndOnPage: string | null = null;
     for (const row of pageRows) {
       if (prevWorkEnd !== null && row.workEndDateTime > prevWorkEnd) {
         monotonic = false;
       }
       prevWorkEnd = row.workEndDateTime;
-      rows.push(row);
-      if (minWorkEndOnPage === null || row.workEndDateTime < minWorkEndOnPage) {
-        minWorkEndOnPage = row.workEndDateTime;
-      }
     }
+    rows.push(...pageRows);
+    const minWorkEndOnPage = minWorkEndDateTime(pageRows);
 
     if (monotonic && minWorkEndOnPage !== null && minWorkEndOnPage < range.from) {
       break; // 降順が保たれている前提で from 未満に落ちたので打ち切ってよい

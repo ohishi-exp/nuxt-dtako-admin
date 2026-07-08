@@ -307,15 +307,7 @@ async function downloadXlsx() {
       lastWarnings.value.push(`テンプレに日付が無い: ${missing}`)
     }
 
-    const blob = await res.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    const cd = res.headers.get('content-disposition') ?? ''
-    const m = cd.match(/filename="([^"]+)"/)
-    a.download = m ? m[1]! : `y_time_${selectedDriverCd.value}_${dateFrom.value}_${dateTo.value}.xlsx`
-    a.click()
-    URL.revokeObjectURL(url)
+    await downloadBlobResponse(res, `y_time_${selectedDriverCd.value}_${dateFrom.value}_${dateTo.value}.xlsx`)
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : 'ダウンロードに失敗しました'
   } finally {

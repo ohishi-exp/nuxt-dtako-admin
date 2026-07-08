@@ -131,15 +131,7 @@ async function downloadZip() {
       }
       throw new Error(message)
     }
-    const blob = await res.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    const cd = res.headers.get('content-disposition') ?? ''
-    const m = cd.match(/filename="([^"]+)"/)
-    a.download = m ? m[1]! : `csvdata-${s.compId}.zip`
-    a.click()
-    URL.revokeObjectURL(url)
+    await downloadBlobResponse(res, `csvdata-${s.compId}.zip`)
   }
   catch (e) {
     zipError.value = e instanceof Error ? e.message : String(e)
