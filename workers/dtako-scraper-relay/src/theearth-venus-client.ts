@@ -11,24 +11,20 @@ import {
   BASE_URL,
   extractHiddenFields,
   fetchWithJar,
+  hasLoginForm,
+  postForm,
   TheearthClientError,
+  VenusSessionExpiredError,
   type CookieJar,
   type FetchLike,
 } from "./theearth-client";
 
-const VENUS_BRIDGE_PATH = "/Bridge/B-GOS0010[VenusBridgeService].svc";
+/** VenusSessionExpiredError は theearth-client.ts が定義元 (downloadCsvZip も
+ * 使うため)。このファイルの既存 import 元だったコードを壊さないよう re-export
+ * する。 */
+export { VenusSessionExpiredError };
 
-/**
- * VenusBridge が JSON ではなく HTML (ログイン画面等) を返した時に throw する。
- * theearth 側セッション切れの典型症状なので、呼び出し側 (DO) はこれを 401 に
- * マップして browser に再ログインを促す。
- */
-export class VenusSessionExpiredError extends TheearthClientError {
-  constructor(message: string) {
-    super(message);
-    this.name = "VenusSessionExpiredError";
-  }
-}
+const VENUS_BRIDGE_PATH = "/Bridge/B-GOS0010[VenusBridgeService].svc";
 
 /** `POST {VenusBridgeService}/{methodName}` を叩き `{"d": ...}` の `d` を返す。
  * HTML エラーページ (ログイン切れ等) を JSON として誤扱いしないよう、
@@ -689,29 +685,17 @@ export interface VehicleLogPoint {
   dataType: string | null;
 }
 
-/** postback 応答がログイン画面に戻されているか (セッション切れの検出)。 */
-export function isLoginRedirect(html: string): boolean {
-  return html.includes("txtPass") || html.includes("F-OES1010");
-}
-
-/** `application/x-www-form-urlencoded` の postback を送る (ASP.NET WebForms)。 */
-function postFormEncoded(
-  jar: CookieJar,
-  url: string,
-  params: URLSearchParams,
-  fetchImpl: FetchLike,
-): Promise<Response> {
-  return fetchWithJar(
-    jar,
-    url,
-    {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" },
-      body: params.toString(),
-    },
-    fetchImpl,
-  );
-}
+/** postback 応答がログイン画面に戻されているか (セッション切れの検出)。
+ *
+ * `theearth-client.ts` の `hasLoginForm` の別名 (このファイル内での呼び方に
+ * 合わせた薄いエイリアス)。以前はここに `html.includes("txtPass") ||
+ * html.includes("F-OES1010")` という緩い部分文字列一致の独自実装があり、
+ * 共通ヘッダー/メニューにログアウトリンク等で "F-OES1010" という文字列が
+ * 偶然含まれるフルページ (F-NRS1010 / F-GOS0030) で、ログイン中にも
+ * かかわらず「セッション切れ」と誤検知していた (staging 実機で確認、
+ * Refs #169)。判定ロジックを2箇所で持つと再び乖離するため `hasLoginForm`
+ * に一本化した。 */
+export const isLoginRedirect = hasLoginForm;
 
 /** VehicleDisp テーブルの 1 セル `<span id="lstVehicle_<field>_<idx>" ...>値</span>` を
  * 取り出す (中の入れ子タグは除去、空文字は null)。 */
@@ -800,7 +784,7 @@ export async function getVehicleLogTrack(
     txtEndDate: endDay,
     btnBranch: "絞込",
   });
-  const branchRes = await postFormEncoded(jar, url, branchParams, fetchImpl);
+  const branchRes = await postForm(jar, url, branchParams, fetchImpl);
   if (!branchRes.ok) {
     throw new TheearthClientError(`動態履歴の事業所絞込が HTTP ${branchRes.status} を返しました`);
   }
@@ -819,7 +803,7 @@ export async function getVehicleLogTrack(
     txtEndDate: endDay,
     btnDataDisp: "動態履歴",
   });
-  const dispRes = await postFormEncoded(jar, url, dispParams, fetchImpl);
+  const dispRes = await postForm(jar, url, dispParams, fetchImpl);
   if (!dispRes.ok) {
     throw new TheearthClientError(`動態履歴の表示が HTTP ${dispRes.status} を返しました`);
   }

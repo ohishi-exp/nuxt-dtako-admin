@@ -13,6 +13,7 @@ import {
   splitJapaneseDate,
   TheearthClientError,
   TheearthNotZipError,
+  VenusSessionExpiredError,
   type FetchLike,
 } from '../src/theearth-client'
 
@@ -521,6 +522,20 @@ describe('downloadCsvZip', () => {
     const fetchImpl = sequenceFetch([html(csvPageHtml({ omit: 'btnCsvSvr' }))])
     const jar = createCookieJar()
     await expect(downloadCsvZip(jar, range, fetchImpl)).rejects.toThrow('btnCsvSvr')
+  })
+
+  it('maps a login page on the initial GET to VenusSessionExpiredError (Refs #169)', async () => {
+    // 真因の回帰テスト: セッション切れの GET 応答を「フォーム要素が見つからない」
+    // generic error に潰さず、401 で再ログインを促せる形にする。
+    const fetchImpl = sequenceFetch([html('<input id="txtPass" />')])
+    const jar = createCookieJar()
+    await expect(downloadCsvZip(jar, range, fetchImpl)).rejects.toThrow(VenusSessionExpiredError)
+  })
+
+  it('maps a login page on the stage-1 confirmation response to VenusSessionExpiredError (Refs #169)', async () => {
+    const fetchImpl = sequenceFetch([html(csvPageHtml()), html('<input id="txtPass" />')])
+    const jar = createCookieJar()
+    await expect(downloadCsvZip(jar, range, fetchImpl)).rejects.toThrow(VenusSessionExpiredError)
   })
 
   it('throws loudly when the stage-2 output button is missing', async () => {
