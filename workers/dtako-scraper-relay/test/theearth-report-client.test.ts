@@ -3,6 +3,7 @@ import {
   downloadEditedZip,
   getExpenseForm,
   harvestDailyReport,
+  parseExpenseMasters,
   recalculateExpense,
   ReportParamError,
   saveFuelRow,
@@ -146,6 +147,18 @@ describe("getExpenseForm", () => {
     });
   });
 
+  it("ClientInit マスタも同じ応答から抽出して返す", async () => {
+    const jar = createCookieJar();
+    const pageHtml = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
+      ${fuelDisplayRowHtml(0)}
+    </form>${clientInitScript(KUBUN)}</body></html>`;
+    const fetchImpl = sequenceFetch([html(pageHtml)]);
+    const form = await getExpenseForm(jar, OPE_NO, START_OPE, fetchImpl);
+    expect(form.masters.supplyCategory["3"]).toBe("消耗品");
+    expect(form.masters.fuelType["1"]).toBe("軽油");
+  });
+
   it("補給量を小数第 1 位に整形する (35.5 はそのまま / 非数値・空は素通し)", async () => {
     const jar = createCookieJar();
     const rows = [
@@ -204,6 +217,61 @@ describe("getExpenseForm", () => {
     const fetchImpl = sequenceFetch([html(missingNameHtml)]);
     const form = await getExpenseForm(jar, OPE_NO, START_OPE, fetchImpl);
     expect(form.fuelRows[0]?.supplyCategoryName).toBe("");
+  });
+});
+
+// 実機 (cdp-pair, 2026-07-08) の ClientInit マスタ文字列の代表サブセット。
+// 項目区切り `,`・グループ区切り `/n` (リテラル)・`-1` 見出し・給油無関係キー
+// (TOLLSETUKB) をすべて含む。
+const KUBUN =
+  "ADDITIVCLS:-1:添加剤種別,ADDITIVCLS:0:なし,ADDITIVCLS:1:Adblue" +
+  "/nFUELTYPE:-1:燃料種別,FUELTYPE:1:軽油,FUELTYPE:2:ガソリン,FUELTYPE:3:LNG,FUELTYPE:4:電気" +
+  "/nSUPPLYCTGRY:-1:給油点検分類,SUPPLYCTGRY:1:主燃料,SUPPLYCTGRY:2:主添加剤,SUPPLYCTGRY:3:消耗品,SUPPLYCTGRY:4:副燃料,SUPPLYCTGRY:5:副添加剤" +
+  "/nTOLLSETUKB:-1:料金精算区分,TOLLSETUKB:0:コーポレート" +
+  "/nCONSUMABLE:1:オイル" +
+  "/nPUTGASKB:1:自社,PUTGASKB:2:吉田石油,PUTGASKB:3:西日本F";
+
+function clientInitScript(kubun: string): string {
+  return `<script type="text/javascript">//<![CDATA[\nClientInit('', '', '${kubun}', '', '編集_削除_新規_未登録のコードです。');\n//]]></` + `script>`;
+}
+
+describe("parseExpenseMasters", () => {
+  it("ClientInit の kubun を enum キー別 code→name に分解する (実機 _Enum と同じ形)", () => {
+    const masters = parseExpenseMasters(`<html><body>${clientInitScript(KUBUN)}</body></html>`);
+    // 分類 (SUPPLYCTGRY): -1 見出しは落とす
+    expect(masters.supplyCategory).toEqual({
+      "1": "主燃料",
+      "2": "主添加剤",
+      "3": "消耗品",
+      "4": "副燃料",
+      "5": "副添加剤",
+    });
+    // 区分 (PUTGASKB)
+    expect(masters.supplyStation).toEqual({ "1": "自社", "2": "吉田石油", "3": "西日本F" });
+    // 種別マスタ 3 種
+    expect(masters.fuelType).toEqual({ "1": "軽油", "2": "ガソリン", "3": "LNG", "4": "電気" });
+    // ADDITIVCLS は code 0 (なし) を含む 0 始まり
+    expect(masters.additive).toEqual({ "0": "なし", "1": "Adblue" });
+    expect(masters.consumable).toEqual({ "1": "オイル" });
+  });
+
+  it("ClientInit が無い応答 (cold GET / 給油 0 件) では全マップ空", () => {
+    const masters = parseExpenseMasters("<html><body><form></form></body></html>");
+    expect(masters).toEqual({
+      supplyCategory: {},
+      supplyStation: {},
+      fuelType: {},
+      additive: {},
+      consumable: {},
+    });
+  });
+
+  it("3 パート未満の壊れた項目は無視する (name 欠落等)", () => {
+    // "SUPPLYCTGRY:9" は code のみで name が無い (2 パート) → 落とす
+    const masters = parseExpenseMasters(
+      `<html>${clientInitScript("SUPPLYCTGRY:9/nSUPPLYCTGRY:1:主燃料")}</html>`,
+    );
+    expect(masters.supplyCategory).toEqual({ "1": "主燃料" });
   });
 });
 

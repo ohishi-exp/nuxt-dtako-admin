@@ -163,10 +163,68 @@ export interface FuelRow {
   quantity: string;
 }
 
+/** F-DES1012 の給油マスタ (コード→名称)。theearth はページ末尾の
+ * `ClientInit('', '', '<kubun>', ...)` 第 3 引数にマスタ全体を `KEY:code:name`
+ * 形式 (項目区切り `,`、グループ区切り `/n` (リテラル)、`code=-1` は見出し行) で
+ * 埋め込む。給油行 (`lstFuel`) を含む応答には必ず同梱される (cdp-pair 実機確認、
+ * 2026-07-08: 運行ロード済み応答は lstFuel と ClientInit を常に同時に持ち、cold GET
+ * はどちらも持たない)。名称解決は theearth の `FuelChange()` が `_Enum[KEY][code]` を
+ * 引くのと同じで、F-GSS0010 マスタ検索画面は不要。
+ *
+ * 種別 (SupplyType) の参照先は分類コードで分岐する (`FuelChange` の switch と同一):
+ * 分類 1/4 → FUELTYPE、2/5 → ADDITIVCLS、3 → CONSUMABLE。 */
+export interface ExpenseMasters {
+  /** 分類 (SUPPLYCTGRY): 1 主燃料 / 2 主添加剤 / 3 消耗品 / 4 副燃料 / 5 副添加剤 */
+  supplyCategory: Record<string, string>;
+  /** 区分 (PUTGASKB): 1 自社 / 2… (給油所、会社固有) */
+  supplyStation: Record<string, string>;
+  /** 種別 — 分類 1/4 (主燃料/副燃料) 用 (FUELTYPE): 1 軽油 / 2 ガソリン / … */
+  fuelType: Record<string, string>;
+  /** 種別 — 分類 2/5 (主添加剤/副添加剤) 用 (ADDITIVCLS): 0 なし / 1 Adblue */
+  additive: Record<string, string>;
+  /** 種別 — 分類 3 (消耗品) 用 (CONSUMABLE): 1 オイル */
+  consumable: Record<string, string>;
+}
+
 export interface ExpenseForm {
   opeNo: string;
   startOpe: string;
   fuelRows: FuelRow[];
+  masters: ExpenseMasters;
+}
+
+/** ClientInit の第 3 引数 (kubun マスタ文字列) を enum キー別 code→name に分解する。
+ * ClientInit が無い応答 (給油 0 件・cold GET) では全マップ空を返す (frontend は取得時の
+ * 初期名称ラベルにフォールバックする)。kubun は日本語名称のみでシングルクォートを
+ * 含まない (実機確認) ため `'[^']*'` で安全に抜ける。 */
+export function parseExpenseMasters(html: string): ExpenseMasters {
+  const masters: ExpenseMasters = {
+    supplyCategory: {},
+    supplyStation: {},
+    fuelType: {},
+    additive: {},
+    consumable: {},
+  };
+  const m = html.match(/ClientInit\('[^']*',\s*'[^']*',\s*'([^']*)'/);
+  if (!m) return masters;
+  const byKey: Record<string, keyof ExpenseMasters> = {
+    SUPPLYCTGRY: "supplyCategory",
+    PUTGASKB: "supplyStation",
+    FUELTYPE: "fuelType",
+    ADDITIVCLS: "additive",
+    CONSUMABLE: "consumable",
+  };
+  // 項目区切りは `,` またはグループ区切り `/n` (改行ではなくリテラル 2 文字)。
+  for (const item of m[1].split(/,|\/n/)) {
+    const parts = item.split(":");
+    if (parts.length < 3) continue;
+    const target = byKey[parts[0]];
+    if (!target) continue; // TOLLSETUKB / EXPENDSUBJ / FERRYCMPNY 等 給油に無関係なキーは無視
+    const code = Number(parts[1]);
+    if (!(code >= 0)) continue; // `-1` 見出し行・非数値コードを捨てる
+    masters[target][String(code)] = parts.slice(2).join(":");
+  }
+  return masters;
 }
 
 function parseFuelRows(html: string): FuelRow[] {
@@ -223,7 +281,7 @@ export async function getExpenseForm(
       );
     }
   }
-  return { opeNo, startOpe, fuelRows };
+  return { opeNo, startOpe, fuelRows, masters: parseExpenseMasters(html) };
 }
 
 /** hidden field のみを乗せた単純な postback を送る内部ヘルパ (ボタン 1 個押下相当)。
