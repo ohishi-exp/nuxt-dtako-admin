@@ -80,12 +80,12 @@ import {
 } from "./dvr-session";
 import {
   downloadEditedZip,
-  forceUnlockAll,
   getExpenseForm,
   harvestDailyReport,
   recalculateExpense,
   ReportParamError,
   saveFuelRow,
+  unlockOperation,
   verifyReadNoDescending,
   withVehicleNarrow,
   type SaveFuelRowParams,
@@ -1370,8 +1370,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/daily-report-api/zip" && request.method === "GET") {
       return this.handleReportZip(record!, url);
     }
-    if (url.pathname === "/daily-report-api/unlock-all" && request.method === "POST") {
-      return this.handleReportUnlockAll(record!);
+    if (url.pathname === "/daily-report-api/unlock" && request.method === "POST") {
+      return this.handleReportUnlock(record!, request);
     }
     return dvrJsonError(404, "Not Found");
   }
@@ -1574,11 +1574,20 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
   }
 
-  /** POST /daily-report-api/unlock-all — F-DES1010 `btnInitialize` postback で
-   * 残留ロックを全強制解放する。 */
-  private handleReportUnlockAll(record: ReportSessionRecord): Promise<Response> {
+  /** POST /daily-report-api/unlock — F-DES1010 の行選択 + `btnInitialize`
+   * postback で、対象運行 1 件だけの編集ロックを解除する (全ロック一括解放では
+   * ない、cdp-pair 実機確認、Refs #183)。 */
+  private async handleReportUnlock(record: ReportSessionRecord, request: Request): Promise<Response> {
+    let body: { opeNo?: unknown; startOpe?: unknown };
+    try {
+      body = (await request.json()) as { opeNo?: unknown; startOpe?: unknown };
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    const opeNo = typeof body.opeNo === "string" ? body.opeNo : "";
+    const startOpe = typeof body.startOpe === "string" ? body.startOpe : "";
     return this.callReportAction(record, "編集制御解除", async (jar) => {
-      await forceUnlockAll(jar);
+      await unlockOperation(jar, { opeNo, startOpe });
       return { ok: true };
     });
   }
