@@ -55,28 +55,26 @@ function fuelDisplayRowHtml(ctrlIndex: number, v: {
   quantity?: string;
   editButton?: boolean;
 } = {}): string {
-  // save パス用の編集ボタンは fuelRowId (`lstFuel_<suffix>_<N>`) 形式のまま (編集モードの
-  // 実 id は #188 対象外)。read パスの表示 span は実機準拠の `lstFuel_ctrl<N>_<suffix>`。
+  // 表示行 span・編集ボタンとも実機準拠の `lstFuel_<suffix>_<N>` 形式。
   const id = (suffix: string) => `lstFuel_${suffix}_${ctrlIndex}`;
-  const lid = (suffix: string) => `lstFuel_ctrl${ctrlIndex}_${suffix}`;
   return `
     ${
       v.editButton === false
         ? "" // 編集ボタン自体を欠落させる (findFormFieldById が null を返すケースの fixture)
         : `<input type="submit" id="${id("btnEditButton")}" name="lstFuel$ctrl${ctrlIndex}$btnEditButton" value="" />`
     }
-    <span id="${lid("lblSuppuly")}">${v.category ?? "1"}</span>
+    <span id="${id("lblSupplyCategory")}">${v.category ?? "1"}</span>
     ${
       v.categoryName === null
         ? "" // 名称 span 欠落 (extractSpanTextById が null → "" にフォールバックするケース)
-        : `<span id="${lid("lblSuppulyName")}">${v.categoryName ?? "主燃料"}</span>`
+        : `<span id="${id("lblSupplyCategoryName")}">${v.categoryName ?? "主燃料"}</span>`
     }
-    <span id="${lid("lblSuppulyKb")}">${v.station ?? "1"}</span>
-    <span id="${lid("lblSuppulyKbName")}">${v.stationName ?? "自社"}</span>
-    <span id="${lid("lblShu")}">${v.type ?? "1"}</span>
-    <span id="${lid("lblShuName")}">${v.typeName ?? "軽油"}</span>
-    <span id="${lid("lblDate")}">${v.dateTime ?? "26/07/07 10:29"}</span>
-    <span id="${lid("lblHokyuRyou")}">${v.quantity ?? "100"}</span>
+    <span id="${id("lblSupplyStation")}">${v.station ?? "1"}</span>
+    <span id="${id("lblSupplyStationName")}">${v.stationName ?? "自社"}</span>
+    <span id="${id("lblSupplyType")}">${v.type ?? "1"}</span>
+    <span id="${id("lblSupplyTypeName")}">${v.typeName ?? "軽油"}</span>
+    <span id="${id("lblDateTime")}">${v.dateTime ?? "26/07/07 10:29"}</span>
+    <span id="${id("lblQuantuty")}">${v.quantity ?? "100"}</span>
   `;
 }
 
