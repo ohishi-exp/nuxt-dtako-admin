@@ -12,6 +12,9 @@
  *
  * 作業 (Refs #170) / 乗務員 (Refs #171) 編集は本ページの共通基盤 (一覧・zip DL・
  * 編集制御解除) を前提にした差分機能として後続 issue で追加する想定。
+ *
+ * 編集制御解除は行単位 (対象運行 1 件だけ) でしか効かない (cdp-pair 実機確認、
+ * Refs #183)。ロック中の行にだけ表示するボタンから呼ぶ。
  */
 interface DailyReportRow {
   operationNo: string
@@ -161,21 +164,28 @@ async function downloadZip() {
   }
 }
 
-// --- 編集制御解除 (F-DES1010 btnInitialize) ---
+// --- 編集制御解除 (F-DES1010 の行選択 + btnInitialize、対象運行 1 件のみ解除) ---
+// 「編集制御解除」は全ロック一括解放ではない (cdp-pair 実機確認、Refs #183) ため、
+// ロック中の行にだけ表示するボタンから対象運行 1 件を指定して呼ぶ。
 
-const unlockLoading = ref(false)
+const unlockingOperationNo = ref<string | null>(null)
 const unlockError = ref<string | null>(null)
 const unlockMessage = ref<string | null>(null)
 
-async function unlockAll() {
+async function unlockRow(row: DailyReportRow) {
   const s = session.value
   if (!s) return
-  unlockLoading.value = true
+  unlockingOperationNo.value = row.operationNo
   unlockError.value = null
   unlockMessage.value = null
   try {
-    await $fetch('/daily-report-api/unlock-all', { method: 'POST', headers: authHeaders() })
-    unlockMessage.value = '編集制御を解除しました'
+    await $fetch('/daily-report-api/unlock', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: { opeNo: row.operationNo, startOpe: row.startDateTime },
+    })
+    unlockMessage.value = `編集制御を解除しました (${row.operationNo})`
+    await loadList()
   }
   catch (e) {
     if (dailyReportErrorStatus(e) === 401) {
@@ -185,7 +195,7 @@ async function unlockAll() {
     unlockError.value = dailyReportErrorMessage(e)
   }
   finally {
-    unlockLoading.value = false
+    unlockingOperationNo.value = null
   }
 }
 
@@ -348,8 +358,10 @@ onMounted(() => {
             </UFormField>
             <UButton icon="i-lucide-search" label="日報を検索" :loading="listLoading" @click="loadList" />
             <UButton icon="i-lucide-file-archive" label="編集後 csvdata.zip をダウンロード" variant="outline" :loading="zipLoading" @click="downloadZip" />
-            <UButton icon="i-lucide-lock-open" label="編集制御解除" variant="outline" color="warning" :loading="unlockLoading" @click="unlockAll" />
           </div>
+          <p class="mt-2 text-xs text-gray-400">
+            編集制御解除 (ロック解放) は一覧の各行 (赤字表示、ロック中) に表示されるボタンから行ごとに行います。
+          </p>
           <p v-if="vehicleCd.trim()" class="mt-2 text-xs text-gray-400">
             車輌CD 絞込は theearth 側のアカウント共通設定 (表示条件指定) を検索中だけ一時的に書き換えます。
             検索完了後は自動で元の設定に戻ります。
@@ -454,8 +466,18 @@ onMounted(() => {
                   <td class="py-2 pr-4">
                     {{ row.expenseFlag ?? '-' }}
                   </td>
-                  <td class="py-2 pr-4 text-right">
+                  <td class="py-2 pr-4 text-right space-x-2 whitespace-nowrap">
                     <UButton size="xs" variant="outline" icon="i-lucide-fuel" label="経費 (給油) を編集" @click="openExpenseModal(row)" />
+                    <UButton
+                      v-if="row.exclusionFlag"
+                      size="xs"
+                      variant="outline"
+                      color="warning"
+                      icon="i-lucide-lock-open"
+                      label="編集制御解除"
+                      :loading="unlockingOperationNo === row.operationNo"
+                      @click="unlockRow(row)"
+                    />
                   </td>
                 </tr>
               </tbody>

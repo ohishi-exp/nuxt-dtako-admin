@@ -387,32 +387,99 @@ export async function recalculateExpense(
 // F-DES1010 [運行データ入力(一覧)] — 編集制御解除
 // ---------------------------------------------------------------------------
 
-/** `btnInitialize` postback で残留ロックを全強制解放する
- * (SKILL.md「排他ロック」節)。 */
-export async function forceUnlockAll(
+/** id が `MainContent_lstOperation_lblOperationNo_<N>` の span から、値が opeNo と
+ * 一致する行の index (N) を探す (見つからなければ null)。 */
+function findOperationRowIndex(html: string, opeNo: string): number | null {
+  const escaped = opeNo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`id="MainContent_lstOperation_lblOperationNo_(\\d+)"[^>]*>${escaped}<`);
+  const m = html.match(re);
+  return m ? Number(m[1]) : null;
+}
+
+export interface UnlockOperationParams {
+  opeNo: string;
+  startOpe: string;
+}
+
+/** POST 相当: 対象の運行 1 件だけの編集ロックを解除する。**`btnInitialize`
+ * (編集制御解除) は「全ロック一括解放」ではない** (旧実装 `forceUnlockAll` の誤り、
+ * cdp-pair 実機確認、2026-07-08)。実際は F-DES1010 一覧の行クリック
+ * (`RowsClick`) で `txtOperationNo`/`txtStartDateTime`/`txtIndex`/`txtCurrentID`
+ * という hidden field に選択行の値をセットしてから `btnInitialize` を押すと、
+ * **選択した行のロックだけ**が解除される (他行のロックは残る)。`RowsClick` は
+ * この 4 field へ代入するだけの純粋な client 側状態なので、実ブラウザ操作を経ずに
+ * POST body へ直接この値を載せれば同じ効果になる (id/name に `MainContent_`
+ * prefix は無い)。対象行が一覧の何ページ目にあるか呼び出し側は知らないため、
+ * `harvestDailyReport` と同じページ送りで探す。 */
+export async function unlockOperation(
   jar: CookieJar,
+  params: UnlockOperationParams,
   fetchImpl: FetchLike = fetch,
   timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
 ): Promise<void> {
+  validateOpeNo(params.opeNo);
+  validateStartOpe(params.startOpe);
   const url = `${BASE_URL}${OPERATION_LIST_PATH}`;
+
   const getRes = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
   if (!getRes.ok) {
     throw new TheearthClientError(`運行データ入力一覧の取得が HTTP ${getRes.status} を返しました`);
   }
-  const html = await getRes.text();
+  let html = await getRes.text();
   if (isLoginRedirect(html)) {
     throw new VenusSessionExpiredError(
       "運行データ入力一覧がログイン画面を返しました — theearth セッションが切れています",
     );
   }
-  const hidden = extractHiddenFields(html);
-  const button = findFormFieldById(html, "MainContent_btnInitialize");
+
+  let rowIndex = findOperationRowIndex(html, params.opeNo);
+  for (let pageCount = 0; rowIndex === null && pageCount < MAX_HARVEST_PAGES; pageCount++) {
+    const currentPage = extractCurrentPageNumber(html) ?? 1;
+    const nextText = String(currentPage + 1);
+    let nextLink = extractPagerLinks(html).find((l) => l.text === nextText);
+    if (!nextLink) {
+      const moreLink = extractPagerLinks(html).find((l) => l.text === "...");
+      if (!moreLink) break;
+      html = await postPagerLink(jar, url, html, moreLink, fetchImpl, timeoutMs);
+      nextLink = extractPagerLinks(html).find((l) => l.text === nextText);
+      if (!nextLink) break;
+    }
+    html = await postPagerLink(jar, url, html, nextLink, fetchImpl, timeoutMs);
+    rowIndex = findOperationRowIndex(html, params.opeNo);
+  }
+
+  if (rowIndex === null) {
+    throw new TheearthClientError(
+      `運行データ入力一覧に対象の運行 (OpeNo=${params.opeNo}) が見つかりません — ` +
+        "既にロックが解除されているか、一覧の絞込条件 (期間・車輌CD) に含まれていない可能性があります",
+    );
+  }
+
+  const button = findFormFieldById(html, "btnInitialize");
   if (!button) {
     throw new TheearthClientError(
       "編集制御解除ボタン (btnInitialize) が見つかりません — theearth-np のページ仕様変更の可能性があります",
     );
   }
-  const body = new URLSearchParams({ ...hidden, [button.name]: button.value || "編集制御解除" });
+  const opNoField = findFormFieldById(html, "txtOperationNo");
+  const startDtField = findFormFieldById(html, "txtStartDateTime");
+  const indexField = findFormFieldById(html, "txtIndex");
+  const currentIdField = findFormFieldById(html, "txtCurrentID");
+  if (!opNoField || !startDtField || !indexField || !currentIdField) {
+    throw new TheearthClientError(
+      "行選択用の hidden field (txtOperationNo/txtStartDateTime/txtIndex/txtCurrentID) が" +
+        "見つかりません — theearth-np のページ仕様変更の可能性があります",
+    );
+  }
+  const hidden = extractHiddenFields(html);
+  const body = new URLSearchParams({
+    ...hidden,
+    [opNoField.name]: params.opeNo,
+    [startDtField.name]: params.startOpe,
+    [indexField.name]: String(rowIndex),
+    [currentIdField.name]: `MainContent_lstOperation_row_${rowIndex}`,
+    [button.name]: button.value || "編集制御解除",
+  });
   const postRes = await postForm(jar, url, body, fetchImpl, timeoutMs);
   if (!postRes.ok) {
     throw new TheearthClientError(`編集制御解除 POST が HTTP ${postRes.status} を返しました`);

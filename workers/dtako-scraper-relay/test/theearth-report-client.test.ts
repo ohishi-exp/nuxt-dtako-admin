@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   downloadEditedZip,
-  forceUnlockAll,
   getExpenseForm,
   harvestDailyReport,
   recalculateExpense,
   ReportParamError,
   saveFuelRow,
+  unlockOperation,
   verifyReadNoDescending,
   withVehicleNarrow,
 } from "../src/theearth-report-client";
@@ -394,55 +394,175 @@ describe("recalculateExpense", () => {
   });
 });
 
-describe("forceUnlockAll", () => {
-  const listHtml = (opts: { withButton?: boolean } = { withButton: true }) => `<html><body><form>
-    <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
-    ${
-      opts.withButton
-        ? '<input type="submit" id="MainContent_btnInitialize" name="ctl00$MainContent$btnInitialize" value="編集制御解除" />'
-        : ""
-    }
-  </form></body></html>`;
+describe("unlockOperation", () => {
+  // 実 DOM 構造 (cdp-pair 実機確認、Refs #183、2026-07-08): `MainContent_` prefix は
+  // 無い。行選択で txtOperationNo/txtStartDateTime/txtIndex/txtCurrentID が埋まる。
+  function unlockListHtml(opts: {
+    opeNo?: string | null;
+    rowIndex?: number;
+    withButton?: boolean;
+    buttonNoValue?: boolean;
+    withHiddenFields?: boolean;
+    currentPage?: number;
+    omitCurrentPageMarker?: boolean;
+    nextLink?: { target: string; argument: string; text: string };
+    moreLink?: { target: string; argument: string; text: string };
+  } = {}): string {
+    const rowIndex = opts.rowIndex ?? 0;
+    const row = opts.opeNo === null ? "" : `<span id="MainContent_lstOperation_lblOperationNo_${rowIndex}">${opts.opeNo ?? OPE_NO}</span>`;
+    const hiddenFields = opts.withHiddenFields === false
+      ? ""
+      : `
+        <input type="text" id="txtOperationNo" name="ctl00$MainContent$txtOperationNo" class="none" />
+        <input type="text" id="txtStartDateTime" name="ctl00$MainContent$txtStartDateTime" class="none" />
+        <input type="text" id="txtIndex" name="ctl00$MainContent$txtIndex" class="none" />
+        <input type="text" id="txtCurrentID" name="ctl00$MainContent$txtCurrentID" class="none" />
+      `;
+    const buttonValueAttr = opts.buttonNoValue ? "" : ' value="編集制御解除"';
+    const button = opts.withButton === false
+      ? ""
+      : `<input type="submit" id="btnInitialize" name="ctl00$MainContent$btnInitialize"${buttonValueAttr} />`;
+    const links = [
+      opts.nextLink ? pagerLink(opts.nextLink.target, opts.nextLink.argument, opts.nextLink.text) : "",
+      opts.moreLink ? pagerLink(opts.moreLink.target, opts.moreLink.argument, opts.moreLink.text) : "",
+    ].join("\n");
+    return `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
+      ${row}
+      ${hiddenFields}
+      ${button}
+      ${opts.omitCurrentPageMarker ? "" : `<span class="gCurrentPage">${opts.currentPage ?? 1}</span>`}
+      ${links}
+    </form></body></html>`;
+  }
 
-  it("succeeds", async () => {
+  it("unlocks the target operation found on the first page", async () => {
     const jar = createCookieJar();
-    const fetchImpl = sequenceFetch([html(listHtml()), html(listHtml())]);
-    await expect(forceUnlockAll(jar, fetchImpl)).resolves.toBeUndefined();
+    const fetchImpl = sequenceFetch([html(unlockListHtml()), html(unlockListHtml())]);
+    await expect(
+      unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl),
+    ).resolves.toBeUndefined();
   });
 
   it("falls back to a default label when the button has no value attribute", async () => {
     const jar = createCookieJar();
-    const noValueHtml = `<html><body><form>
-      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
-      <input type="submit" id="MainContent_btnInitialize" name="ctl00$MainContent$btnInitialize" />
-    </form></body></html>`;
+    const noValueHtml = unlockListHtml({ buttonNoValue: true });
     const fetchImpl = sequenceFetch([html(noValueHtml), html(noValueHtml)]);
-    await expect(forceUnlockAll(jar, fetchImpl)).resolves.toBeUndefined();
+    await expect(
+      unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rejects malformed OpeNo / StartOpe", async () => {
+    const jar = createCookieJar();
+    await expect(unlockOperation(jar, { opeNo: "bad", startOpe: START_OPE })).rejects.toThrow(ReportParamError);
+    await expect(unlockOperation(jar, { opeNo: OPE_NO, startOpe: "bad" })).rejects.toThrow(ReportParamError);
   });
 
   it("throws on non-ok GET / login redirect on GET", async () => {
     const jar1 = createCookieJar();
-    await expect(forceUnlockAll(jar1, sequenceFetch([status(500)]))).rejects.toThrow(TheearthClientError);
+    await expect(
+      unlockOperation(jar1, { opeNo: OPE_NO, startOpe: START_OPE }, sequenceFetch([status(500)])),
+    ).rejects.toThrow(TheearthClientError);
     const jar2 = createCookieJar();
-    await expect(forceUnlockAll(jar2, sequenceFetch([html(LOGIN_REDIRECT_HTML)]))).rejects.toThrow(
-      VenusSessionExpiredError,
-    );
+    await expect(
+      unlockOperation(jar2, { opeNo: OPE_NO, startOpe: START_OPE }, sequenceFetch([html(LOGIN_REDIRECT_HTML)])),
+    ).rejects.toThrow(VenusSessionExpiredError);
+  });
+
+  it("walks to the next numbered page when the target isn't on the first page", async () => {
+    const jar = createCookieJar();
+    const page1 = unlockListHtml({
+      opeNo: "9999999999999999999999",
+      currentPage: 1,
+      nextLink: link("ctl01$ctl02", "", "2"),
+    });
+    const page2 = unlockListHtml({ currentPage: 2 });
+    const fetchImpl = sequenceFetch([html(page1), html(page2), html(page2)]);
+    await expect(
+      unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl),
+    ).resolves.toBeUndefined();
+  });
+
+  it("falls back to page 1 when no gCurrentPage marker is present (defensive)", async () => {
+    const jar = createCookieJar();
+    const page1 = unlockListHtml({
+      opeNo: "9999999999999999999999",
+      omitCurrentPageMarker: true,
+      nextLink: link("ctl01$ctl02", "", "2"),
+    });
+    const page2 = unlockListHtml({ currentPage: 2 });
+    const fetchImpl = sequenceFetch([html(page1), html(page2), html(page2)]);
+    await expect(
+      unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl),
+    ).resolves.toBeUndefined();
+  });
+
+  it("follows a ... link to cross a pager window, then finds the target page", async () => {
+    const jar = createCookieJar();
+    const page1 = unlockListHtml({
+      opeNo: "9999999999999999999999",
+      currentPage: 1,
+      moreLink: link("ctl01$more", "", "..."),
+    });
+    const windowJump = unlockListHtml({ opeNo: "9999999999999999999999", currentPage: 1, nextLink: link("ctl02$ctl02", "", "2") });
+    const page2 = unlockListHtml({ currentPage: 2 });
+    const fetchImpl = sequenceFetch([html(page1), html(windowJump), html(page2), html(page2)]);
+    await expect(
+      unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl),
+    ).resolves.toBeUndefined();
+  });
+
+  it("throws when the target operation isn't found on any page (no next link at all)", async () => {
+    const jar = createCookieJar();
+    const onlyPage = unlockListHtml({ opeNo: "9999999999999999999999" });
+    const fetchImpl = sequenceFetch([html(onlyPage)]);
+    await expect(
+      unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl),
+    ).rejects.toThrow(/見つかりません/);
+  });
+
+  it("throws when a ... jump doesn't lead to the target either", async () => {
+    const jar = createCookieJar();
+    const page1 = unlockListHtml({
+      opeNo: "9999999999999999999999",
+      currentPage: 1,
+      moreLink: link("ctl01$more", "", "..."),
+    });
+    const windowJumpNoMatch = unlockListHtml({ opeNo: "9999999999999999999999", currentPage: 1 });
+    const fetchImpl = sequenceFetch([html(page1), html(windowJumpNoMatch)]);
+    await expect(
+      unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl),
+    ).rejects.toThrow(/見つかりません/);
   });
 
   it("throws when the button is missing", async () => {
     const jar = createCookieJar();
-    const fetchImpl = sequenceFetch([html(listHtml({ withButton: false }))]);
-    await expect(forceUnlockAll(jar, fetchImpl)).rejects.toThrow(TheearthClientError);
+    const fetchImpl = sequenceFetch([html(unlockListHtml({ withButton: false }))]);
+    await expect(
+      unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl),
+    ).rejects.toThrow(TheearthClientError);
+  });
+
+  it("throws when the row-selection hidden fields are missing", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([html(unlockListHtml({ withHiddenFields: false }))]);
+    await expect(
+      unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl),
+    ).rejects.toThrow(TheearthClientError);
   });
 
   it("throws on non-ok POST / login redirect on POST", async () => {
     const jar1 = createCookieJar();
-    await expect(forceUnlockAll(jar1, sequenceFetch([html(listHtml()), status(500)]))).rejects.toThrow(
-      TheearthClientError,
-    );
+    await expect(
+      unlockOperation(jar1, { opeNo: OPE_NO, startOpe: START_OPE }, sequenceFetch([html(unlockListHtml()), status(500)])),
+    ).rejects.toThrow(TheearthClientError);
     const jar2 = createCookieJar();
     await expect(
-      forceUnlockAll(jar2, sequenceFetch([html(listHtml()), html(LOGIN_REDIRECT_HTML)])),
+      unlockOperation(
+        jar2, { opeNo: OPE_NO, startOpe: START_OPE },
+        sequenceFetch([html(unlockListHtml()), html(LOGIN_REDIRECT_HTML)]),
+      ),
     ).rejects.toThrow(VenusSessionExpiredError);
   });
 });
