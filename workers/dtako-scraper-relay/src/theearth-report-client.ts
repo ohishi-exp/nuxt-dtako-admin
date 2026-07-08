@@ -149,6 +149,14 @@ function extractSpanTextById(html: string, id: string): string | null {
   return m[1].replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ").trim();
 }
 
+/** 補給量を小数第 1 位表記に整える (例 "100" → "100.0"、"35.5" はそのまま)。数値
+ * として解釈できない値 (空文字・非数値) はそのまま返す (0.0 を捏造しない)。 */
+function formatQuantity(raw: string): string {
+  if (raw.trim() === "") return raw;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n.toFixed(1) : raw;
+}
+
 /** 給油行 1 件 (`lstFuel_ctrl<N>_*`)。分類/区分/種別は CD (コード) と名称の両方を
  * 持つ (名称列は実 DOM に既存、Refs #188)。表示行に `operationNo`/`subNo` の span は
  * 無いため保持しない (行の特定は URL の opeNo/startOpe と ctrlIndex で足りる)。 */
@@ -186,7 +194,7 @@ function parseFuelRows(html: string): FuelRow[] {
       supplyType: get(FUEL_LABEL_IDS.supplyType),
       supplyTypeName: get(FUEL_LABEL_IDS.supplyTypeName),
       dateTime: get(FUEL_LABEL_IDS.dateTime),
-      quantity: get(FUEL_LABEL_IDS.quantity),
+      quantity: formatQuantity(get(FUEL_LABEL_IDS.quantity)),
     };
   });
 }

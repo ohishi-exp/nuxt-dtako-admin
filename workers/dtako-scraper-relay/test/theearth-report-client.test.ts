@@ -144,8 +144,25 @@ describe("getExpenseForm", () => {
       supplyCategoryName: "主燃料",
       supplyStationName: "自社",
       supplyTypeName: "軽油",
-      quantity: "100",
+      quantity: "100.0", // 補給量は小数第 1 位表記に整形する
     });
+  });
+
+  it("補給量を小数第 1 位に整形する (35.5 はそのまま / 非数値・空は素通し)", async () => {
+    const jar = createCookieJar();
+    const rows = [
+      fuelDisplayRowHtml(0, { quantity: "40" }),
+      fuelDisplayRowHtml(1, { quantity: "35.5" }),
+      fuelDisplayRowHtml(2, { quantity: "" }),
+      fuelDisplayRowHtml(3, { quantity: "不明" }),
+    ].join("\n");
+    const pageHtml = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
+      ${rows}
+    </form></body></html>`;
+    const fetchImpl = sequenceFetch([html(pageHtml)]);
+    const form = await getExpenseForm(jar, OPE_NO, START_OPE, fetchImpl);
+    expect(form.fuelRows.map((r) => r.quantity)).toEqual(["40.0", "35.5", "", "不明"]);
   });
 
   it("rejects malformed OpeNo / StartOpe", async () => {
