@@ -72,8 +72,6 @@ import {
 } from "./theearth-venus-client";
 import {
   DVR_SESSION_TTL_MS,
-  extractBearerToken,
-  generateDvrToken,
   isDvrSessionValid,
   resolveDvrRouting,
   type DvrRouting,
@@ -97,6 +95,9 @@ import {
   type ReportRouting,
   type ReportSessionRecord,
 } from "./report-session";
+// token 生成 / Bearer token 抽出は dvr/report で共通の theearth-session.ts が
+// 唯一の実装元 (Refs #169、dvr-session.ts から間借りしていたのを整理)。
+import { extractBearerToken, generateSessionToken } from "./theearth-session";
 
 /** `DTAKO_ACCOUNTS` (dtako-scraper の Rust 版と同一 JSON shape) の1エントリ。 */
 interface DtakoAccountRaw {
@@ -147,6 +148,11 @@ const REPORT_SESSION_KEY = "report:session";
 function dvrJsonError(status: number, message: string): Response {
   return Response.json({ error: message }, { status });
 }
+
+/** VenusSessionExpiredError を 401 にマップする時の文言。dvr-api / daily-report-api
+ * の両方で 10 箇所超に同じ文字列がハードコードされていたのを 1 箇所に集約する
+ * (Refs #169 のバグ調査で見つかった重複、文言を直す時に片方だけ直し忘れる事故を防ぐ)。 */
+const THEEARTH_SESSION_EXPIRED_MESSAGE = "theearth セッションが切れました。再ログインしてください";
 
 /** 想定外の例外 (TheearthClientError 以外) を診断可能な 1 行にする。自前 client の
  * 例外情報のみで credential は含まれない。エラーメッセージと log の両方に出す —
@@ -1056,7 +1062,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
     const now = Date.now();
     const record: DvrSessionRecord = {
-      token: generateDvrToken(),
+      token: generateSessionToken(),
       compId: routing.compId,
       userName: routing.userName,
       cookies: Array.from(jar.cookies.entries()),
@@ -1081,7 +1087,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
         await this.ctx.storage.delete(DVR_SESSION_KEY);
-        return dvrJsonError(401, "theearth セッションが切れました。再ログインしてください");
+        return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
       }
       console.error("DVR notifications error:", err);
       const message =
@@ -1106,7 +1112,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
         await this.ctx.storage.delete(DVR_SESSION_KEY);
-        return dvrJsonError(401, "theearth セッションが切れました。再ログインしてください");
+        return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
       }
       console.error("DVR masters error:", err);
       const message =
@@ -1148,7 +1154,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
         await this.ctx.storage.delete(DVR_SESSION_KEY);
-        return dvrJsonError(401, "theearth セッションが切れました。再ログインしてください");
+        return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
       }
       console.error("DVR search error:", err);
       const message =
@@ -1177,7 +1183,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
         await this.ctx.storage.delete(DVR_SESSION_KEY);
-        return dvrJsonError(401, "theearth セッションが切れました。再ログインしてください");
+        return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
       }
       if (err instanceof DvrSearchParamError) {
         return dvrJsonError(400, err.message);
@@ -1253,7 +1259,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
         await this.ctx.storage.delete(DVR_SESSION_KEY);
-        return dvrJsonError(401, "theearth セッションが切れました。再ログインしてください");
+        return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
       }
       console.error("DVR transfer error:", err);
       const message =
@@ -1302,7 +1308,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
         await this.ctx.storage.delete(DVR_SESSION_KEY);
-        return dvrJsonError(401, "theearth セッションが切れました。再ログインしてください");
+        return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
       }
       console.error("DVR file error:", err);
       const message =
@@ -1393,7 +1399,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
     const now = Date.now();
     const record: ReportSessionRecord = {
-      token: generateDvrToken(),
+      token: generateSessionToken(),
       compId: routing.compId,
       userName: routing.userName,
       cookies: Array.from(jar.cookies.entries()),
@@ -1422,7 +1428,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
         await this.ctx.storage.delete(REPORT_SESSION_KEY);
-        return dvrJsonError(401, "theearth セッションが切れました。再ログインしてください");
+        return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
       }
       if (err instanceof ReportParamError) {
         return dvrJsonError(400, err.message);
@@ -1513,7 +1519,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
         await this.ctx.storage.delete(REPORT_SESSION_KEY);
-        return dvrJsonError(401, "theearth セッションが切れました。再ログインしてください");
+        return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
       }
       console.error("Report zip error:", err);
       const message =

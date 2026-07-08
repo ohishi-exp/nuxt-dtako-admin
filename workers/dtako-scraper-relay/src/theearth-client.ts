@@ -50,6 +50,24 @@ export class TheearthNotZipError extends TheearthClientError {
   }
 }
 
+/**
+ * theearth 側セッションが無効化された (ログイン画面に戻された、または
+ * VenusBridge が 500 を返した) 事を表す。呼び出し側 (DO) はこれを 401 に
+ * マップして再ログインを促す (502 に潰すと利用者が回復手段に辿りつけない)。
+ *
+ * 元々 `theearth-venus-client.ts` にあったが、`downloadCsvZip` (この
+ * ファイル内) もセッション切れを検出できるようにするためこちらに移動した
+ * (Refs #169、zip ダウンロード経路だけセッション切れが 502 の generic
+ * error になっていた HIGH バグの修正)。`theearth-venus-client.ts` は
+ * 後方互換のため re-export する。
+ */
+export class VenusSessionExpiredError extends TheearthClientError {
+  constructor(message: string) {
+    super(message);
+    this.name = "VenusSessionExpiredError";
+  }
+}
+
 export type FetchLike = typeof fetch;
 
 /** GET / stage1 (要求応答) と stage2 (CSV export) で別々のタイムアウトを渡すための束。 */
@@ -217,8 +235,17 @@ function looksLoggedIn(html: string): boolean {
 }
 
 /** ページがまだログインフォームか (= txtPass input が居るか)。ログイン失敗時の
- * 再表示は 200 でログインページに戻るので、これが失敗判定の主シグナル。 */
-function hasLoginForm(html: string): boolean {
+ * 再表示は 200 でログインページに戻るので、これが失敗判定の主シグナル。
+ *
+ * theearth の他ページ (VenusBridge postback 系・F-NRS1010/F-GOS0030 等の
+ * フルページ) がセッション切れでログイン画面に戻された事を検出する時にも
+ * **この関数を共通で使う** こと。以前は `theearth-venus-client.ts` に
+ * `html.includes("txtPass") || html.includes("F-OES1010")` という別実装
+ * (雑な部分文字列一致) があり、共通ヘッダー/メニューに "F-OES1010" という
+ * 文字列が偶然含まれるフルページで、ログイン中にもかかわらず「セッション
+ * 切れ」と誤検知していた (staging 実機で確認、Refs #169)。判定ロジックを
+ * 2箇所で持つと再び乖離するので、ここに一本化する。 */
+export function hasLoginForm(html: string): boolean {
   return findTagById(html, "txtPass") !== null;
 }
 
@@ -573,6 +600,15 @@ export async function downloadCsvZip(
 
   const getRes = await fetchWithJar(jar, csvUrl, { method: "GET" }, fetchImpl, requestTimeoutMs);
   const html = await getRes.text();
+  // セッション切れの場合ここでログイン画面が返る。チェックせずに進むと
+  // 「CSV フォームの要素が見つかりません」という誤解を招く generic error に
+  // 化けて 502 に潰れてしまう (呼び出し側が 401 で再ログインを促せない、
+  // Refs #169 — 日報編集の zip DL 経路で顕在化した HIGH バグ)。
+  if (hasLoginForm(html)) {
+    throw new VenusSessionExpiredError(
+      "CSV ダウンロードページがログイン画面を返しました — theearth セッションが切れています",
+    );
+  }
   const hidden = extractHiddenFields(html);
 
   const fields = new Map<string, FormFieldRef>();
@@ -622,6 +658,11 @@ export async function downloadCsvZip(
   // 2段階目: 1段階目のレスポンス (確認ページ) の hidden field + **日付範囲** + 出力ボタン
   // で再 POST。日付範囲を落とすと空 ZIP が返る (このフロー最大の落とし穴、上の doc 参照)。
   const stage1Html = await stage1Res.text();
+  if (hasLoginForm(stage1Html)) {
+    throw new VenusSessionExpiredError(
+      "CSV ダウンロードの確認ページがログイン画面を返しました — theearth セッションが切れています",
+    );
+  }
   const hidden2 = extractHiddenFields(stage1Html);
   const outputButton =
     findFormFieldById(stage1Html, "btnCsvSvrOutput") ?? findFormFieldById(stage1Html, "btnCsvOutput");

@@ -1026,8 +1026,26 @@ describe("getVehicleLogTrack", () => {
     await expect(
       getVehicleLogTrack(
         jar, "1802", "2026/07/03", "2026/07/03",
-        sequenceFetch([okHidden(), okHidden(), new Response("<html>F-OES1010 login</html>", { status: 200 })]),
+        sequenceFetch([okHidden(), okHidden(), new Response('<input id="txtPass" />', { status: 200 })]),
       ),
     ).rejects.toThrow(VenusSessionExpiredError);
+  });
+
+  it("does not false-positive on incidental \"F-OES1010\" text without an actual txtPass field (Refs #169)", async () => {
+    const jar = createCookieJar();
+    const okHidden = () => new Response('<input id="__VIEWSTATE" value="v" />', { status: 200 });
+    // 共通ヘッダー/メニューにログアウトリンク等で "F-OES1010" が含まれる、
+    // ログイン中の正常なフルページを模したレスポンス。
+    const pageWithLogoutLink = () =>
+      new Response(
+        '<input id="__VIEWSTATE" value="v" /><a href="F-OES1010[Login].aspx">ログアウト</a>' +
+          '<span id="lstVehicle_lblGPSLatitude_0">35123456</span>',
+        { status: 200 },
+      );
+    const rows = await getVehicleLogTrack(
+      jar, "1802", "2026/07/03", "2026/07/03",
+      sequenceFetch([pageWithLogoutLink(), okHidden(), pageWithLogoutLink()]),
+    );
+    expect(rows).toHaveLength(1);
   });
 });
