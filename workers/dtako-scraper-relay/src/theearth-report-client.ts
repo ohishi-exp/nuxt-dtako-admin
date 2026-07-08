@@ -100,34 +100,25 @@ function assertNoOtherEditConflict(html: string, actionLabel: string): void {
 // F-DES1012 [運行経費入力] — 給油行 (lstFuel)
 // ---------------------------------------------------------------------------
 
-/** save パス (`saveFuelRow`) 用の id ビルダ。実機の編集ボタンは
- * `__doPostBack('lstFuel$ctrl<N>$btnItemEdit')` で、この `lstFuel_<suffix>_<N>` 形式
- * とは異なる (**編集モードの実 id は cdp-pair 未確認。Refs #188 対象外**)。read パス
- * (表示 span) は実機準拠の `fuelLabelId` を使う。 */
+/** `lstFuel` grid の実 id ビルダ。表示行 span・編集ボタン・編集入力欄すべて
+ * `lstFuel_<suffix>_<N>` 形式 (cdp-pair 実機確認、2026-07-08、`MainContent_` prefix
+ * 無し)。read パス (表示 span) と save パス (btnEditButton / etxt) で共通。 */
 function fuelRowId(ctrlIndex: number, suffix: string): string {
   return `lstFuel_${suffix}_${ctrlIndex}`;
 }
 
-/** read パス (表示専用 span) の実 id ビルダ。実機は `lstFuel_ctrl<N>_<suffix>` 形式
- * (cdp-pair 実機確認、Refs #188、2026-07-08、給油実データ有りの運行で確認)。
- * `MainContent_` prefix は無い。 */
-function fuelLabelId(ctrlIndex: number, suffix: string): string {
-  return `lstFuel_ctrl${ctrlIndex}_${suffix}`;
-}
-
-/** 表示専用行 (`lstFuel_ctrl<N>_lb*`) の span id サフィックス。実 DOM の綴りを
- * そのまま使う (theearth 原文は分類 "Suppuly" / 区分 "SuppulyKb" / 種別 "Shu" /
- * 数量 = 補給量 "HokyuRyou")。名称列 (`...Name`) が既に HTML に存在するため、
- * 別途 F-GSS0010 マスタを照会せずコード+名称を出せる (Refs #188)。 */
+/** 表示専用行 (`lstFuel_lbl<Field>_<N>`) の span id サフィックス。実 DOM の綴りを
+ * そのまま使う (原文スペルミス "Quantuty")。名称列 (`lblSupply*Name`) が既に HTML に
+ * 存在するため、別途 F-GSS0010 マスタを照会せずコード+名称を出せる。 */
 const FUEL_LABEL_IDS = {
-  supplyCategory: "lblSuppuly",
-  supplyCategoryName: "lblSuppulyName",
-  supplyStation: "lblSuppulyKb",
-  supplyStationName: "lblSuppulyKbName",
-  supplyType: "lblShu",
-  supplyTypeName: "lblShuName",
-  dateTime: "lblDate",
-  quantity: "lblHokyuRyou",
+  supplyCategory: "lblSupplyCategory",
+  supplyCategoryName: "lblSupplyCategoryName",
+  supplyStation: "lblSupplyStation",
+  supplyStationName: "lblSupplyStationName",
+  supplyType: "lblSupplyType",
+  supplyTypeName: "lblSupplyTypeName",
+  dateTime: "lblDateTime",
+  quantity: "lblQuantuty",
 } as const;
 
 /** 編集モードの入力欄 (`lstFuel_etxt<Field>_<N>`) の各フィールド id サフィックス。
@@ -157,9 +148,9 @@ function formatQuantity(raw: string): string {
   return Number.isFinite(n) ? n.toFixed(1) : raw;
 }
 
-/** 給油行 1 件 (`lstFuel_ctrl<N>_*`)。分類/区分/種別は CD (コード) と名称の両方を
- * 持つ (名称列は実 DOM に既存、Refs #188)。表示行に `operationNo`/`subNo` の span は
- * 無いため保持しない (行の特定は URL の opeNo/startOpe と ctrlIndex で足りる)。 */
+/** 給油行 1 件 (`lstFuel_<field>_<N>`)。分類/区分/種別は CD (コード) と名称の両方を
+ * 持つ (名称列 `lblSupply*Name` は実 DOM に既存)。`operationNo`/`subNo` の span も
+ * 実在するが frontend で未使用のため保持しない (行の特定は opeNo/startOpe+ctrlIndex)。 */
 export interface FuelRow {
   ctrlIndex: number;
   supplyCategory: string;
@@ -179,12 +170,11 @@ export interface ExpenseForm {
 }
 
 function parseFuelRows(html: string): FuelRow[] {
-  // 行 index は分類コード span (`lblSuppuly`、給油行なら必ず存在) で検出する。末尾の
-  // `"` により `lblSuppulyName` / `lblSuppulyKb` への誤マッチを防ぐ。給油 0 件の運行は
-  // ヒット 0 = 空配列 (呼び出し元が __VIEWSTATE 有無で構造崩れと切り分ける)。
-  const indexes = [...html.matchAll(/id="lstFuel_ctrl(\d+)_lblSuppuly"/g)].map((m) => Number(m[1]));
+  // 行 index は日時 span (`lblDateTime`、給油行なら必ず存在) で検出する。給油 0 件の
+  // 運行はヒット 0 = 空配列 (呼び出し元が __VIEWSTATE 有無で構造崩れと切り分ける)。
+  const indexes = [...html.matchAll(/id="lstFuel_lblDateTime_(\d+)"/g)].map((m) => Number(m[1]));
   return indexes.map((ctrlIndex) => {
-    const get = (idSuffix: string) => extractSpanTextById(html, fuelLabelId(ctrlIndex, idSuffix)) ?? "";
+    const get = (idSuffix: string) => extractSpanTextById(html, fuelRowId(ctrlIndex, idSuffix)) ?? "";
     return {
       ctrlIndex,
       supplyCategory: get(FUEL_LABEL_IDS.supplyCategory),
