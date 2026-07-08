@@ -38,11 +38,12 @@ interface DailyReportRow {
 
 interface FuelRow {
   ctrlIndex: number
-  operationNo: string
-  subNo: string
   supplyCategory: string
+  supplyCategoryName: string
   supplyStation: string
+  supplyStationName: string
   supplyType: string
+  supplyTypeName: string
   dateTime: string
   quantity: string
 }
@@ -509,12 +510,21 @@ onMounted(() => {
                 <div class="grid grid-cols-2 sm:grid-cols-5 gap-2">
                   <UFormField label="分類 (CD)">
                     <UInput v-model="fuelEditForm[row.ctrlIndex]!.supplyCategory" class="w-full" />
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 truncate">
+                      {{ row.supplyCategoryName || '—' }}
+                    </p>
                   </UFormField>
                   <UFormField label="区分 (CD)">
                     <UInput v-model="fuelEditForm[row.ctrlIndex]!.supplyStation" class="w-full" />
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 truncate">
+                      {{ row.supplyStationName || '—' }}
+                    </p>
                   </UFormField>
                   <UFormField label="種別 (CD)">
                     <UInput v-model="fuelEditForm[row.ctrlIndex]!.supplyType" class="w-full" />
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 truncate">
+                      {{ row.supplyTypeName || '—' }}
+                    </p>
                   </UFormField>
                   <UFormField label="日時">
                     <UInput v-model="fuelEditForm[row.ctrlIndex]!.dateTime" class="w-full" />

@@ -45,33 +45,38 @@ const LOGIN_REDIRECT_HTML = `<html><body><form><input id="txtPass" name="txtPass
 // `lstFuel_etxt<Field>_<N>` の編集用 <input> + `lstFuel_btnUpdateButton_<N>` が現れる。
 
 function fuelDisplayRowHtml(ctrlIndex: number, v: {
-  operationNo?: string;
-  subNo?: string | null;
   category?: string;
+  categoryName?: string | null;
   station?: string;
+  stationName?: string;
   type?: string;
+  typeName?: string;
   dateTime?: string;
   quantity?: string;
   editButton?: boolean;
 } = {}): string {
+  // save パス用の編集ボタンは fuelRowId (`lstFuel_<suffix>_<N>`) 形式のまま (編集モードの
+  // 実 id は #188 対象外)。read パスの表示 span は実機準拠の `lstFuel_ctrl<N>_<suffix>`。
   const id = (suffix: string) => `lstFuel_${suffix}_${ctrlIndex}`;
+  const lid = (suffix: string) => `lstFuel_ctrl${ctrlIndex}_${suffix}`;
   return `
     ${
       v.editButton === false
         ? "" // 編集ボタン自体を欠落させる (findFormFieldById が null を返すケースの fixture)
         : `<input type="submit" id="${id("btnEditButton")}" name="lstFuel$ctrl${ctrlIndex}$btnEditButton" value="" />`
     }
-    <span id="${id("lblOperationNo")}">${v.operationNo ?? "2231234567890123456789"}</span>
+    <span id="${lid("lblSuppuly")}">${v.category ?? "1"}</span>
     ${
-      v.subNo === null
-        ? "" // 要素そのものを欠落させる (extractSpanTextById が null を返すケースの fixture)
-        : `<span id="${id("lblSubNo")}">${v.subNo ?? "1"}</span>`
+      v.categoryName === null
+        ? "" // 名称 span 欠落 (extractSpanTextById が null → "" にフォールバックするケース)
+        : `<span id="${lid("lblSuppulyName")}">${v.categoryName ?? "主燃料"}</span>`
     }
-    <span id="${id("lblSupplyCategory")}">${v.category ?? "1"}</span>
-    <span id="${id("lblSupplyStation")}">${v.station ?? "1"}</span>
-    <span id="${id("lblSupplyType")}">${v.type ?? "10"}</span>
-    <span id="${id("lblDateTime")}">${v.dateTime ?? "26/07/07 10:29"}</span>
-    <span id="${id("lblQuantuty")}">${v.quantity ?? "35.5"}</span>
+    <span id="${lid("lblSuppulyKb")}">${v.station ?? "1"}</span>
+    <span id="${lid("lblSuppulyKbName")}">${v.stationName ?? "自社"}</span>
+    <span id="${lid("lblShu")}">${v.type ?? "1"}</span>
+    <span id="${lid("lblShuName")}">${v.typeName ?? "軽油"}</span>
+    <span id="${lid("lblDate")}">${v.dateTime ?? "26/07/07 10:29"}</span>
+    <span id="${lid("lblHokyuRyou")}">${v.quantity ?? "100"}</span>
   `;
 }
 
@@ -82,7 +87,7 @@ function expenseFormHtml(opts: {
   scoreButtonNoValue?: boolean;
 } = {}): string {
   const rowCount = opts.rows ?? 2;
-  const rows = Array.from({ length: rowCount }, (_, i) => fuelDisplayRowHtml(i, { operationNo: `row${i}` })).join("\n");
+  const rows = Array.from({ length: rowCount }, (_, i) => fuelDisplayRowHtml(i, { category: String(i + 1) })).join("\n");
   const linkSysClass = opts.linkSysDisabled === false ? "ButtonCrimson" : "aspNetDisabled ButtonCrimson";
   const scoreValueAttr = opts.scoreButtonNoValue ? "" : ' value="評価点再集計"';
   return `<html><body><form>
@@ -133,7 +138,14 @@ describe("getExpenseForm", () => {
     const form = await getExpenseForm(jar, OPE_NO, START_OPE, fetchImpl);
     expect(form.opeNo).toBe(OPE_NO);
     expect(form.fuelRows).toHaveLength(2);
-    expect(form.fuelRows[0]).toMatchObject({ ctrlIndex: 0, operationNo: "row0", quantity: "35.5" });
+    expect(form.fuelRows[0]).toMatchObject({
+      ctrlIndex: 0,
+      supplyCategory: "1",
+      supplyCategoryName: "主燃料",
+      supplyStationName: "自社",
+      supplyTypeName: "軽油",
+      quantity: "100",
+    });
   });
 
   it("rejects malformed OpeNo / StartOpe", async () => {
@@ -170,13 +182,13 @@ describe("getExpenseForm", () => {
 
   it("defaults a missing field to an empty string instead of throwing", async () => {
     const jar = createCookieJar();
-    const missingSubNoHtml = `<html><body><form>
+    const missingNameHtml = `<html><body><form>
       <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
-      ${fuelDisplayRowHtml(0, { subNo: null })}
+      ${fuelDisplayRowHtml(0, { categoryName: null })}
     </form></body></html>`;
-    const fetchImpl = sequenceFetch([html(missingSubNoHtml)]);
+    const fetchImpl = sequenceFetch([html(missingNameHtml)]);
     const form = await getExpenseForm(jar, OPE_NO, START_OPE, fetchImpl);
-    expect(form.fuelRows[0]?.subNo).toBe("");
+    expect(form.fuelRows[0]?.supplyCategoryName).toBe("");
   });
 });
 
