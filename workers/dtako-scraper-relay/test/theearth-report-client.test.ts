@@ -40,8 +40,11 @@ function sequenceFetch(responses: (Response | (() => Response))[]): FetchLike {
 const LOGIN_REDIRECT_HTML = `<html><body><form><input id="txtPass" name="txtPass" type="password" /></form></body></html>`;
 
 // --- F-DES1012 経費入力フォーム fixture -------------------------------------
+// 実 DOM 構造 (cdp-pair 実機確認、Refs #183、2026-07-08): `MainContent_` prefix は
+// 無い。表示専用行は `lstFuel_lbl<Field>_<N>` の <span>、編集ボタン押下後にだけ
+// `lstFuel_etxt<Field>_<N>` の編集用 <input> + `lstFuel_btnUpdateButton_<N>` が現れる。
 
-function fuelRowHtml(ctrlIndex: number, v: {
+function fuelDisplayRowHtml(ctrlIndex: number, v: {
   operationNo?: string;
   subNo?: string | null;
   category?: string;
@@ -49,35 +52,74 @@ function fuelRowHtml(ctrlIndex: number, v: {
   type?: string;
   dateTime?: string;
   quantity?: string;
+  editButton?: boolean;
 } = {}): string {
-  const prefix = `MainContent_lstFuel_ctrl${ctrlIndex}`;
-  const nprefix = `ctl00$MainContent$lstFuel$ctrl${ctrlIndex}`;
+  const id = (suffix: string) => `lstFuel_${suffix}_${ctrlIndex}`;
   return `
-    <input type="hidden" id="${prefix}_itxtOperationNo" name="${nprefix}$itxtOperationNo" value="${v.operationNo ?? "2231234567890123456789"}" />
+    ${
+      v.editButton === false
+        ? "" // 編集ボタン自体を欠落させる (findFormFieldById が null を返すケースの fixture)
+        : `<input type="submit" id="${id("btnEditButton")}" name="lstFuel$ctrl${ctrlIndex}$btnEditButton" value="" />`
+    }
+    <span id="${id("lblOperationNo")}">${v.operationNo ?? "2231234567890123456789"}</span>
     ${
       v.subNo === null
-        ? "" // 要素そのものを欠落させる (findFormFieldById が null を返すケースの fixture)
-        : `<input type="hidden" id="${prefix}_itxtSubNo" name="${nprefix}$itxtSubNo" value="${v.subNo ?? "1"}" />`
+        ? "" // 要素そのものを欠落させる (extractSpanTextById が null を返すケースの fixture)
+        : `<span id="${id("lblSubNo")}">${v.subNo ?? "1"}</span>`
     }
-    <input type="text" id="${prefix}_itxtSupplyCategory" name="${nprefix}$itxtSupplyCategory" value="${v.category ?? "1"}" />
-    <input type="text" id="${prefix}_itxtSupplyStation" name="${nprefix}$itxtSupplyStation" value="${v.station ?? "1"}" />
-    <input type="text" id="${prefix}_itxtSupplyType" name="${nprefix}$itxtSupplyType" value="${v.type ?? "10"}" />
-    <input type="text" id="${prefix}_itxtDateTime" name="${nprefix}$itxtDateTime" value="${v.dateTime ?? "20260707103000"}" />
-    <input type="text" id="${prefix}_itxtQuantuty" name="${nprefix}$itxtQuantuty" value="${v.quantity ?? "35.5"}" />
+    <span id="${id("lblSupplyCategory")}">${v.category ?? "1"}</span>
+    <span id="${id("lblSupplyStation")}">${v.station ?? "1"}</span>
+    <span id="${id("lblSupplyType")}">${v.type ?? "10"}</span>
+    <span id="${id("lblDateTime")}">${v.dateTime ?? "26/07/07 10:29"}</span>
+    <span id="${id("lblQuantuty")}">${v.quantity ?? "35.5"}</span>
   `;
 }
 
-function expenseFormHtml(opts: { rows?: number; linkSysDisabled?: boolean; recalculated?: boolean } = {}): string {
+function expenseFormHtml(opts: {
+  rows?: number;
+  linkSysDisabled?: boolean;
+  recalculated?: boolean;
+  scoreButtonNoValue?: boolean;
+} = {}): string {
   const rowCount = opts.rows ?? 2;
-  const rows = Array.from({ length: rowCount }, (_, i) => fuelRowHtml(i, { operationNo: `row${i}` })).join("\n");
+  const rows = Array.from({ length: rowCount }, (_, i) => fuelDisplayRowHtml(i, { operationNo: `row${i}` })).join("\n");
   const linkSysClass = opts.linkSysDisabled === false ? "ButtonCrimson" : "aspNetDisabled ButtonCrimson";
+  const scoreValueAttr = opts.scoreButtonNoValue ? "" : ' value="評価点再集計"';
   return `<html><body><form>
     <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
     ${rows}
-    <input type="submit" id="MainContent_btnExpenceEditSetting" name="ctl00$MainContent$btnExpenceEditSetting" value="登録" />
-    <input type="submit" id="MainContent_btnScore" name="ctl00$MainContent$btnScore" value="評価点再集計" />
-    <input type="submit" id="MainContent_btnLinkSys" name="ctl00$MainContent$btnLinkSys" value="システム連動開始" class="${linkSysClass}" />
+    <input type="submit" id="btnScore" name="btnScore"${scoreValueAttr} />
+    <input type="submit" id="btnLinkSys" name="btnLinkSys" value="システム連動開始" class="${linkSysClass}" />
     ${opts.recalculated ? "<div>再集計が終了しました。</div>" : ""}
+  </form></body></html>`;
+}
+
+/** 編集ボタン postback 後の応答 (対象行だけが編集モードになった状態)。 */
+function fuelEditModeHtml(ctrlIndex: number, v: {
+  category?: string;
+  station?: string;
+  type?: string;
+  dateTime?: string;
+  quantity?: string | null;
+  updateButton?: boolean;
+} = {}): string {
+  const id = (suffix: string) => `lstFuel_${suffix}_${ctrlIndex}`;
+  return `<html><body><form>
+    <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-EDIT" />
+    <input type="text" id="${id("etxtSupplyCategory")}" name="lstFuel$ctrl${ctrlIndex}$etxtSupplyCategory" value="${v.category ?? "1"}" />
+    <input type="text" id="${id("etxtSupplyStation")}" name="lstFuel$ctrl${ctrlIndex}$etxtSupplyStation" value="${v.station ?? "1"}" />
+    <input type="text" id="${id("etxtSupplyType")}" name="lstFuel$ctrl${ctrlIndex}$etxtSupplyType" value="${v.type ?? "10"}" />
+    <input type="text" id="${id("etxtDateTime")}" name="lstFuel$ctrl${ctrlIndex}$etxtDateTime" value="${v.dateTime ?? "26/07/07 10:29"}" />
+    ${
+      v.quantity === null
+        ? "" // 要素そのものを欠落させる (defensive skip の fixture)
+        : `<input type="text" id="${id("etxtQuantuty")}" name="lstFuel$ctrl${ctrlIndex}$etxtQuantuty" value="${v.quantity ?? "35.5"}" />`
+    }
+    ${
+      v.updateButton === false
+        ? ""
+        : `<input type="submit" id="${id("btnUpdateButton")}" name="lstFuel$ctrl${ctrlIndex}$btnUpdateButton" value="" />`
+    }
   </form></body></html>`;
 }
 
@@ -130,7 +172,7 @@ describe("getExpenseForm", () => {
     const jar = createCookieJar();
     const missingSubNoHtml = `<html><body><form>
       <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
-      ${fuelRowHtml(0, { subNo: null })}
+      ${fuelDisplayRowHtml(0, { subNo: null })}
     </form></body></html>`;
     const fetchImpl = sequenceFetch([html(missingSubNoHtml)]);
     const form = await getExpenseForm(jar, OPE_NO, START_OPE, fetchImpl);
@@ -146,7 +188,7 @@ describe("saveFuelRow", () => {
     supplyCategory: "2",
     supplyStation: "2",
     supplyType: "20",
-    dateTime: "20260707120000",
+    dateTime: "26/07/07 12:00",
     quantity: "40",
   };
 
@@ -154,6 +196,7 @@ describe("saveFuelRow", () => {
     const jar = createCookieJar();
     const fetchImpl = sequenceFetch([
       html(expenseFormHtml({ rows: 2 })),
+      html(fuelEditModeHtml(0)),
       html(expenseFormHtml({ rows: 2 })),
     ]);
     const result = await saveFuelRow(jar, baseParams, fetchImpl);
@@ -181,29 +224,17 @@ describe("saveFuelRow", () => {
     await expect(saveFuelRow(jar, { ...baseParams, ctrlIndex: 9 }, fetchImpl)).rejects.toThrow(ReportParamError);
   });
 
-  it("throws when the save button is missing", async () => {
+  it("throws when the edit button is missing", async () => {
     const jar = createCookieJar();
     const noButtonHtml = `<html><body><form>
       <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
-      ${fuelRowHtml(0)}
+      ${fuelDisplayRowHtml(0, { editButton: false })}
     </form></body></html>`;
     const fetchImpl = sequenceFetch([html(noButtonHtml)]);
     await expect(saveFuelRow(jar, baseParams, fetchImpl)).rejects.toThrow(TheearthClientError);
   });
 
-  it("falls back to a default label when the save button has no value attribute", async () => {
-    const jar = createCookieJar();
-    const noValueButtonHtml = `<html><body><form>
-      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
-      ${fuelRowHtml(0)}
-      <input type="submit" id="MainContent_btnExpenceEditSetting" name="ctl00$MainContent$btnExpenceEditSetting" />
-    </form></body></html>`;
-    const fetchImpl = sequenceFetch([html(noValueButtonHtml), html(noValueButtonHtml)]);
-    const result = await saveFuelRow(jar, baseParams, fetchImpl);
-    expect(result.fuelRows).toHaveLength(1);
-  });
-
-  it("throws on non-ok POST / login redirect on POST", async () => {
+  it("throws on non-ok POST / login redirect on the edit-start POST", async () => {
     const jar1 = createCookieJar();
     await expect(
       saveFuelRow(jar1, baseParams, sequenceFetch([html(expenseFormHtml({ rows: 1 })), status(500)])),
@@ -214,10 +245,54 @@ describe("saveFuelRow", () => {
     ).rejects.toThrow(VenusSessionExpiredError);
   });
 
-  it("throws when the response indicates a concurrent-edit conflict", async () => {
+  it("throws when the edit-start response indicates a concurrent-edit conflict", async () => {
     const jar = createCookieJar();
     const conflictHtml = `<html><body>他ユーザー編集中のため処理を中止しました。</body></html>`;
     const fetchImpl = sequenceFetch([html(expenseFormHtml({ rows: 1 })), html(conflictHtml)]);
+    await expect(saveFuelRow(jar, baseParams, fetchImpl)).rejects.toThrow(/他ユーザー/);
+  });
+
+  it("throws when the update button is missing (edit-start postback didn't enter edit mode)", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([
+      html(expenseFormHtml({ rows: 1 })),
+      html(fuelEditModeHtml(0, { updateButton: false })),
+    ]);
+    await expect(saveFuelRow(jar, baseParams, fetchImpl)).rejects.toThrow(TheearthClientError);
+  });
+
+  it("skips writing a field whose element is missing from the edit response (defensive, doesn't throw)", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([
+      html(expenseFormHtml({ rows: 1 })),
+      html(fuelEditModeHtml(0, { quantity: null })),
+      html(expenseFormHtml({ rows: 1 })),
+    ]);
+    const result = await saveFuelRow(jar, baseParams, fetchImpl);
+    expect(result.fuelRows).toHaveLength(1);
+  });
+
+  it("throws on non-ok POST / login redirect on the update POST", async () => {
+    const jar1 = createCookieJar();
+    await expect(
+      saveFuelRow(
+        jar1, baseParams,
+        sequenceFetch([html(expenseFormHtml({ rows: 1 })), html(fuelEditModeHtml(0)), status(500)]),
+      ),
+    ).rejects.toThrow(TheearthClientError);
+    const jar2 = createCookieJar();
+    await expect(
+      saveFuelRow(
+        jar2, baseParams,
+        sequenceFetch([html(expenseFormHtml({ rows: 1 })), html(fuelEditModeHtml(0)), html(LOGIN_REDIRECT_HTML)]),
+      ),
+    ).rejects.toThrow(VenusSessionExpiredError);
+  });
+
+  it("throws when the update response indicates a concurrent-edit conflict", async () => {
+    const jar = createCookieJar();
+    const conflictHtml = `<html><body>他ユーザー編集中のため処理を中止しました。</body></html>`;
+    const fetchImpl = sequenceFetch([html(expenseFormHtml({ rows: 1 })), html(fuelEditModeHtml(0)), html(conflictHtml)]);
     await expect(saveFuelRow(jar, baseParams, fetchImpl)).rejects.toThrow(/他ユーザー/);
   });
 });
@@ -247,8 +322,7 @@ describe("recalculateExpense", () => {
     const jar = createCookieJar();
     const noLinkSysHtml = `<html><body><form>
       <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
-      ${fuelRowHtml(0)}
-      <input type="submit" id="MainContent_btnScore" name="ctl00$MainContent$btnScore" value="評価点再集計" />
+      <input type="submit" id="btnScore" name="btnScore" value="評価点再集計" />
       再集計が終了しました。
     </form></body></html>`;
     const fetchImpl = sequenceFetch([html(expenseFormHtml({ rows: 1 })), html(noLinkSysHtml)]);
@@ -256,18 +330,14 @@ describe("recalculateExpense", () => {
     expect(result.linkSysEnabled).toBe(false);
   });
 
-  it("skips writing a field whose element is missing from the page (defensive, doesn't throw)", async () => {
+  it("falls back to a default label when the score button has no value attribute", async () => {
     const jar = createCookieJar();
-    const missingSubNoHtml = `<html><body><form>
-      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
-      ${fuelRowHtml(0, { subNo: null })}
-      <input type="submit" id="MainContent_btnScore" name="ctl00$MainContent$btnScore" value="評価点再集計" />
-      <input type="submit" id="MainContent_btnLinkSys" name="ctl00$MainContent$btnLinkSys" value="システム連動開始" class="ButtonCrimson" />
-      再集計が終了しました。
-    </form></body></html>`;
-    const fetchImpl = sequenceFetch([html(missingSubNoHtml), html(missingSubNoHtml)]);
+    const fetchImpl = sequenceFetch([
+      html(expenseFormHtml({ rows: 1, scoreButtonNoValue: true })),
+      html(expenseFormHtml({ rows: 1, recalculated: true })),
+    ]);
     const result = await recalculateExpense(jar, OPE_NO, START_OPE, fetchImpl);
-    expect(result.linkSysEnabled).toBe(true);
+    expect(result.linkSysEnabled).toBe(false);
   });
 
   it("rejects malformed OpeNo / StartOpe", async () => {
@@ -289,7 +359,7 @@ describe("recalculateExpense", () => {
 
   it("throws when the score button is missing", async () => {
     const jar = createCookieJar();
-    const noButtonHtml = `<html><body><form><input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />${fuelRowHtml(0)}</form></body></html>`;
+    const noButtonHtml = `<html><body><form><input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" /></form></body></html>`;
     const fetchImpl = sequenceFetch([html(noButtonHtml)]);
     await expect(recalculateExpense(jar, OPE_NO, START_OPE, fetchImpl)).rejects.toThrow(TheearthClientError);
   });
