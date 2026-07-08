@@ -43,6 +43,7 @@ import {
   TheearthClientError,
   TheearthNotZipError,
   type CookieJar,
+  type LoginResult,
 } from "./theearth-client";
 import { uploadDtakoZipViaAlcInternalProxy } from "./alc-internal-upload";
 import {
@@ -1044,8 +1045,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
 
     const jar = createCookieJar();
+    let loginResult: LoginResult;
     try {
-      await login(jar, {
+      loginResult = await login(jar, {
         compId: routing.compId,
         userName: routing.userName,
         userPass,
@@ -1070,7 +1072,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       expiresAt: now + DVR_SESSION_TTL_MS,
     };
     await this.ctx.storage.put(DVR_SESSION_KEY, record);
-    return Response.json({ token: record.token, expires_at: record.expiresAt });
+    // handleReportLogin と同型: フロント (DvrSessionHeader.vue) が自動 kick を表示できるよう返す。
+    return Response.json({
+      token: record.token,
+      expires_at: record.expiresAt,
+      kicked: loginResult.kicked,
+      ...(loginResult.kickedUserName ? { kicked_user_name: loginResult.kickedUserName } : {}),
+    });
   }
 
   /** GET /dvr-api/notifications — VenusBridge の DVR 動画通知一覧。 */
@@ -1382,8 +1390,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
 
     const jar = createCookieJar();
+    let loginResult: LoginResult;
     try {
-      await login(jar, {
+      loginResult = await login(jar, {
         compId: routing.compId,
         userName: routing.userName,
         userPass,
@@ -1407,7 +1416,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       expiresAt: now + REPORT_SESSION_TTL_MS,
     };
     await this.ctx.storage.put(REPORT_SESSION_KEY, record);
-    return Response.json({ token: record.token, expires_at: record.expiresAt });
+    // フロント (DailyReportSessionHeader.vue) が「既存セッションを強制ログアウトして
+    // ログインした」ことを表示できるよう、ライセンス超過の自動 kick 結果を返す (Refs #169)。
+    return Response.json({
+      token: record.token,
+      expires_at: record.expiresAt,
+      kicked: loginResult.kicked,
+      ...(loginResult.kickedUserName ? { kicked_user_name: loginResult.kickedUserName } : {}),
+    });
   }
 
   /** report 系 API 呼び出しの共通ラッパ (callDvrVenus と同型): cookie 書き戻し +
