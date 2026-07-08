@@ -52,10 +52,18 @@ export interface TheearthSessionOptions {
   lastAccountStorageKey: string
 }
 
+/** 直前のログインで既存セッションを強制ログアウト (kick) したかどうか。
+ * ライセンス数超過時の自動 kick (worker `theearth-client.ts` の login() 参照) を
+ * フロントで可視化するために使う。 */
+export interface TheearthLoginKick {
+  kickedUserName?: string
+}
+
 export function useTheearthSession(opts: TheearthSessionOptions) {
   const session = useState<TheearthAccountSession | null>(`${opts.stateNamespace}-session`, () => null)
   const loginError = useState<string | null>(`${opts.stateNamespace}-login-error`, () => null)
   const showLoginPanel = useState<boolean>(`${opts.stateNamespace}-login-panel`, () => false)
+  const lastLoginKick = useState<TheearthLoginKick | null>(`${opts.stateNamespace}-login-kick`, () => null)
 
   function routingHeaders(compId: string, userName: string): Record<string, string> {
     return {
@@ -114,7 +122,7 @@ export function useTheearthSession(opts: TheearthSessionOptions) {
 
   /** theearth にログインする。失敗時は throw (呼び出し側で theearthSessionErrorMessage 表示)。 */
   async function login(compId: string, userName: string, userPass: string): Promise<void> {
-    const res = await $fetch<{ token: string }>(`${opts.apiPrefix}/login`, {
+    const res = await $fetch<{ token: string, kicked?: boolean, kicked_user_name?: string }>(`${opts.apiPrefix}/login`, {
       method: 'POST',
       headers: routingHeaders(compId, userName),
       body: { user_pass: userPass },
@@ -128,6 +136,7 @@ export function useTheearthSession(opts: TheearthSessionOptions) {
     }
     loginError.value = null
     showLoginPanel.value = false
+    lastLoginKick.value = res.kicked ? { kickedUserName: res.kicked_user_name } : null
   }
 
   async function logout(): Promise<void> {
@@ -143,6 +152,7 @@ export function useTheearthSession(opts: TheearthSessionOptions) {
     persistSession(null)
     loginError.value = null
     showLoginPanel.value = true
+    lastLoginKick.value = null
   }
 
   /** 401 (token/theearth セッション切れ) を受けた時の共通処理。ページ側のデータ破棄は
@@ -151,12 +161,14 @@ export function useTheearthSession(opts: TheearthSessionOptions) {
     persistSession(null)
     loginError.value = message
     showLoginPanel.value = true
+    lastLoginKick.value = null
   }
 
   return {
     session,
     loginError,
     showLoginPanel,
+    lastLoginKick,
     authHeaders,
     persistSession,
     restoreSession,

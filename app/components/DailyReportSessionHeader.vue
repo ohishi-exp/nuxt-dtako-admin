@@ -6,7 +6,7 @@
 const props = defineProps<{ title: string }>()
 const emit = defineEmits<{ login: [] }>()
 
-const { session, loginError, showLoginPanel, lastAccount, login, logout } = useDailyReportSession()
+const { session, loginError, showLoginPanel, lastLoginKick, lastAccount, login, logout } = useDailyReportSession()
 
 const form = reactive({ compId: '', userName: '', userPass: '' })
 const loggingIn = ref(false)
@@ -66,6 +66,18 @@ onMounted(() => {
           @click="showLoginPanel = !showLoginPanel"
         />
       </template>
+    </div>
+
+    <!-- ライセンス数超過等による自動 kick 通知 (Refs #169、手動で閉じるまで表示) -->
+    <div v-if="lastLoginKick" class="max-w-7xl mx-auto px-6 pb-3">
+      <div class="flex items-center justify-between gap-3 text-sm text-amber-700 bg-amber-50 dark:bg-amber-950 dark:text-amber-300 rounded-lg px-3 py-2">
+        <span>
+          {{ lastLoginKick.kickedUserName
+            ? `ライセンス数超過のため既存セッション (${lastLoginKick.kickedUserName}) を強制ログアウトしてログインしました`
+            : '同一アカウントの別セッションを強制ログアウトしてログインしました' }}
+        </span>
+        <UButton size="xs" color="neutral" variant="ghost" icon="i-lucide-x" @click="lastLoginKick = null" />
+      </div>
     </div>
 
     <!-- 右上から出るログインパネル (未ログイン時のみ) -->

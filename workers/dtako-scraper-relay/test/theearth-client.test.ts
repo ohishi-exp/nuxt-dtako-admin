@@ -107,13 +107,23 @@ const OVERLAP_DIALOG_HTML = `<html><body><form>
   <script>OverlapDialog('別のセッションでログイン中です。強制ログインしますか?');</script>
 </form></body></html>`
 
-// ライセンス数超過 (定数オーバー): LicenceOverDialog(...) が呼ばれる。ログインフォーム
-// 再表示だが、単純重複と違い kick 対象選択が要るため headless 未対応 → loud fail する。
+// ライセンス数超過 (定数オーバー): LicenceOverDialog(message, info1, info2, btnName)
+// が呼ばれる。info1 (session ID CSV) の先頭 = 最初にログインしたセッションを kick して
+// 自動で強制ログインする (cdp-pair 実機トレースで positional pairing を確認済み)。
 const LICENCE_OVER_HTML = `<html><body><form>
   <input name="txtPass" type="password" id="txtPass" />
   <input type="text" name="txtOverlapSessionID" id="txtOverlapSessionID" value="" />
   <input type="submit" id="btnForced" name="ctl00$MainContent$btnForced" value="hide" />
-  <script>LicenceOverDialog('ライセンス数を超過しています', 'T1', 'T2', 'btn');</script>
+  <script>LicenceOverDialog('ライセンス数を超過しています', 'sid-first,sid-second', 'userA,userB', '接続ユーザー確認');</script>
+</form></body></html>`
+
+// LicenceOverDialog( の呼び出し自体は見つかるが、4 引数として厳密パースできない
+// (サイト仕様変更等) 想定のフィクスチャ。自動 kick はできないため loud fail に倒す。
+const LICENCE_OVER_UNPARSEABLE_HTML = `<html><body><form>
+  <input name="txtPass" type="password" id="txtPass" />
+  <input type="text" name="txtOverlapSessionID" id="txtOverlapSessionID" value="" />
+  <input type="submit" id="btnForced" name="ctl00$MainContent$btnForced" value="hide" />
+  <script>LicenceOverDialog('ライセンス数を超過しています', notAString);</script>
 </form></body></html>`
 
 function csvPageHtml(opts: { omit?: string; tableDate?: string } = {}): string {
@@ -313,19 +323,19 @@ describe('login', () => {
   it('succeeds when the login POST redirects and the location is followed', async () => {
     const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), redirect('/F-VOS0010.aspx'), html('<html>ok</html>')])
     const jar = createCookieJar()
-    await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
+    await expect(login(jar, params, fetchImpl)).resolves.toEqual({ kicked: false })
   })
 
   it('succeeds when the login POST redirects with no Location header', async () => {
     const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), redirect(null)])
     const jar = createCookieJar()
-    await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
+    await expect(login(jar, params, fetchImpl)).resolves.toEqual({ kicked: false })
   })
 
   it('succeeds when the login POST returns the logged-in page directly (no redirect)', async () => {
     const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(LOGIN_SUCCESS_HTML)])
     const jar = createCookieJar()
-    await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
+    await expect(login(jar, params, fetchImpl)).resolves.toEqual({ kicked: false })
   })
 
   it('throws a credential-failure message when the login page is re-rendered (200)', async () => {
@@ -363,13 +373,13 @@ describe('login', () => {
   it('treats an unknown 200 page without the login form as success (restricted-account landing)', async () => {
     const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(UNKNOWN_PAGE_HTML)])
     const jar = createCookieJar()
-    await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
+    await expect(login(jar, params, fetchImpl)).resolves.toEqual({ kicked: false })
   })
 
   it('follows the forced-login flow on overlap session and succeeds via redirect', async () => {
     const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(OVERLAP_SESSION_HTML), redirect('/F-VOS0010.aspx')])
     const jar = createCookieJar()
-    await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
+    await expect(login(jar, params, fetchImpl)).resolves.toEqual({ kicked: true })
   })
 
   it('includes credential + the server-issued txtOverlapSessionID value in the forced-login POST', async () => {
@@ -399,7 +409,7 @@ describe('login', () => {
   it('follows the forced-login flow on overlap session and succeeds via logged-in marker', async () => {
     const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(OVERLAP_SESSION_HTML), html(LOGIN_SUCCESS_HTML)])
     const jar = createCookieJar()
-    await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
+    await expect(login(jar, params, fetchImpl)).resolves.toEqual({ kicked: true })
   })
 
   it('forced-logs-in on an OverlapDialog() prompt even when txtOverlapSessionID is empty', async () => {
@@ -414,7 +424,7 @@ describe('login', () => {
       bodies.push(String(init?.body ?? ''))
       return redirect('/F-VOS0010.aspx')
     }) as FetchLike
-    await expect(login(createCookieJar(), params, fetchImpl)).resolves.toBeUndefined()
+    await expect(login(createCookieJar(), params, fetchImpl)).resolves.toEqual({ kicked: true })
     const forced = new URLSearchParams(bodies[0])
     expect(forced.get('txtID2')).toBe(params.compId)
     expect(forced.get('txtPass')).toBe(params.userPass)
@@ -422,10 +432,43 @@ describe('login', () => {
     expect(forced.get('txtOverlapSessionID')).toBe('') // 空でも送る
   })
 
-  it('loud-fails with an actionable message on a LicenceOverDialog() (定数オーバー) prompt', async () => {
-    const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(LICENCE_OVER_HTML)])
+  it('automatically kicks the first (oldest) session and forced-logs-in on a LicenceOverDialog() (定数オーバー) prompt', async () => {
+    const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(LICENCE_OVER_HTML), redirect('/F-VOS0010.aspx')])
     const jar = createCookieJar()
-    await expect(login(jar, params, fetchImpl)).rejects.toThrow(/ライセンス数超過.*LicenceOverDialog/s)
+    // info2 の先頭 (= 最初にログインしたセッションのユーザー名) が kickedUserName に載る。
+    await expect(login(jar, params, fetchImpl)).resolves.toEqual({ kicked: true, kickedUserName: 'userA' })
+  })
+
+  it('sends the first LicenceOverDialog() session ID (not the second) as txtOverlapSessionID', async () => {
+    // info1 (session ID CSV) の先頭 = 最初にログインしたセッションを kick する
+    // (cdp-pair 実機トレースで positional pairing を確認済み、2026-07-08)。
+    const bodies: string[] = []
+    let call = 0
+    const fetchImpl = (async (_url, init) => {
+      call += 1
+      if (call === 1) return html(LOGIN_PAGE_HTML)
+      if (call === 2) return html(LICENCE_OVER_HTML)
+      bodies.push(String(init?.body ?? ''))
+      return redirect('/F-VOS0010.aspx')
+    }) as FetchLike
+    await login(createCookieJar(), params, fetchImpl)
+    const forced = new URLSearchParams(bodies[0])
+    expect(forced.get('txtID2')).toBe(params.compId)
+    expect(forced.get('txtPass')).toBe(params.userPass)
+    expect(forced.get('txtOverlapSessionID')).toBe('sid-first')
+    expect(forced.has('ctl00$MainContent$btnForced')).toBe(true)
+  })
+
+  it('throws a licence-over-specific message when the auto-kick forced login fails', async () => {
+    const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(LICENCE_OVER_HTML), html(LOGIN_FAILURE_HTML)])
+    const jar = createCookieJar()
+    await expect(login(jar, params, fetchImpl)).rejects.toThrow('ライセンス数超過の強制ログインに失敗しました')
+  })
+
+  it('loud-fails with an actionable message when a LicenceOverDialog() prompt cannot be parsed', async () => {
+    const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(LICENCE_OVER_UNPARSEABLE_HTML)])
+    const jar = createCookieJar()
+    await expect(login(jar, params, fetchImpl)).rejects.toThrow(/ライセンス数超過.*解析できず/s)
   })
 
   it('throws when the forced-login flow lands back on the login form', async () => {
@@ -447,7 +490,7 @@ describe('login', () => {
   it('treats an unknown 200 page after forced login as success', async () => {
     const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(OVERLAP_SESSION_HTML), html(UNKNOWN_PAGE_HTML)])
     const jar = createCookieJar()
-    await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
+    await expect(login(jar, params, fetchImpl)).resolves.toEqual({ kicked: true })
   })
 
   it('throws when an overlap session form is detected but btnForced is missing', async () => {
@@ -459,7 +502,7 @@ describe('login', () => {
   it('falls back to a default caption when btnForced has no value attribute', async () => {
     const fetchImpl = sequenceFetch([html(LOGIN_PAGE_HTML), html(OVERLAP_SESSION_NO_VALUE_HTML), redirect('/ok')])
     const jar = createCookieJar()
-    await expect(login(jar, params, fetchImpl)).resolves.toBeUndefined()
+    await expect(login(jar, params, fetchImpl)).resolves.toEqual({ kicked: true })
   })
 
   it('sends the accumulated cookie jar on subsequent requests', async () => {
