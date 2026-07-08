@@ -79,6 +79,24 @@ import {
   type DvrRouting,
   type DvrSessionRecord,
 } from "./dvr-session";
+import {
+  downloadEditedZip,
+  forceUnlockAll,
+  getExpenseForm,
+  harvestDailyReport,
+  recalculateExpense,
+  ReportParamError,
+  saveFuelRow,
+  verifyReadNoDescending,
+  type SaveFuelRowParams,
+} from "./theearth-report-client";
+import {
+  isReportSessionValid,
+  REPORT_SESSION_TTL_MS,
+  resolveReportRouting,
+  type ReportRouting,
+  type ReportSessionRecord,
+} from "./report-session";
 
 /** `DTAKO_ACCOUNTS` (dtako-scraper の Rust 版と同一 JSON shape) の1エントリ。 */
 interface DtakoAccountRaw {
@@ -119,6 +137,12 @@ interface EtcScrapeOutcome {
 /** /dvr-api/* のセッションレコードを置く DO storage キー。この DO instance は
  * theearth アカウント単位 (`dvr-{comp}:{userB64}`) なので 1 キーで足りる。 */
 const DVR_SESSION_KEY = "dvr:session";
+
+/** /daily-report-api/* (日報編集、Refs #169) のセッションレコードを置く DO
+ * storage キー。DVR viewer とは別の theearth ログインセッションを持つため
+ * (DO instance も `report-{comp}:{userB64}` で分離、routing は
+ * ./report-session.ts)、DVR_SESSION_KEY とは別 key を使う。 */
+const REPORT_SESSION_KEY = "report:session";
 
 function dvrJsonError(status: number, message: string): Response {
   return Response.json({ error: message }, { status });
@@ -260,6 +284,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // (credential pass-through、./dvr-session.ts のヘッダコメント参照)。
     if (url.pathname.startsWith("/dvr-api/")) {
       return this.handleDvrApi(request, url);
+    }
+
+    // /daily-report-edit (日報編集、Refs #169) の API。DVR viewer と同型の
+    // credential pass-through だが、theearth ログインセッションは別に持つ
+    // (DO instance も report-{comp}:{userB64} で分離、resolveReportRouting 参照)。
+    if (url.pathname.startsWith("/daily-report-api/")) {
+      return this.handleReportApi(request, url);
     }
 
     // SCRAPER_MODE=http が完了後に生成する、1回だけ取得できる zip ダウンロード URL。
@@ -1280,6 +1311,226 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           : `DVR 動画ファイルの取得に失敗しました (${describeUnknownError(err)})`;
       return dvrJsonError(502, message);
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // /daily-report-api/* — 日報編集 (Refs #169)。credential pass-through 設計は
+  // /dvr-api/* と同じ (password はログイン 1 リクエストの body にだけ現れ、
+  // 保存も log 出力もしない)。DVR viewer とは theearth ログインセッションを
+  // 共有しない (DO instance 自体が report-{comp}:{userB64} で別れる)。
+  // -------------------------------------------------------------------------
+
+  private async handleReportApi(request: Request, url: URL): Promise<Response> {
+    const routing = resolveReportRouting(request.headers);
+    if (!routing) {
+      return dvrJsonError(400, "X-Report-Comp-Id / X-Report-User-B64 ヘッダが不正です");
+    }
+
+    if (url.pathname === "/daily-report-api/login" && request.method === "POST") {
+      return this.handleReportLogin(request, routing);
+    }
+
+    const record = await this.ctx.storage.get<ReportSessionRecord>(REPORT_SESSION_KEY);
+    const token = extractBearerToken(request.headers);
+    if (!isReportSessionValid(record, token, routing, Date.now())) {
+      return dvrJsonError(401, "セッションが無効か期限切れです。再ログインしてください");
+    }
+
+    if (url.pathname === "/daily-report-api/logout" && request.method === "POST") {
+      await this.ctx.storage.delete(REPORT_SESSION_KEY);
+      return new Response(null, { status: 204 });
+    }
+    if (url.pathname === "/daily-report-api/list" && request.method === "GET") {
+      return this.handleReportList(record!, url);
+    }
+    if (url.pathname === "/daily-report-api/expense" && request.method === "GET") {
+      return this.handleReportExpenseForm(record!, url);
+    }
+    if (url.pathname === "/daily-report-api/expense/save" && request.method === "POST") {
+      return this.handleReportExpenseSave(record!, request);
+    }
+    if (url.pathname === "/daily-report-api/expense/recalculate" && request.method === "POST") {
+      return this.handleReportExpenseRecalculate(record!, request);
+    }
+    if (url.pathname === "/daily-report-api/zip" && request.method === "GET") {
+      return this.handleReportZip(record!, url);
+    }
+    if (url.pathname === "/daily-report-api/unlock-all" && request.method === "POST") {
+      return this.handleReportUnlockAll(record!);
+    }
+    return dvrJsonError(404, "Not Found");
+  }
+
+  /** POST /daily-report-api/login — theearth にその場でログインし、成功したら
+   * session cookie + token を保存して token を返す (handleDvrLogin と同型)。 */
+  private async handleReportLogin(request: Request, routing: ReportRouting): Promise<Response> {
+    let body: { user_pass?: unknown };
+    try {
+      body = (await request.json()) as { user_pass?: unknown };
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    const userPass = typeof body.user_pass === "string" ? body.user_pass : "";
+    if (!userPass) {
+      return dvrJsonError(400, "user_pass が必要です");
+    }
+
+    const jar = createCookieJar();
+    try {
+      await login(jar, {
+        compId: routing.compId,
+        userName: routing.userName,
+        userPass,
+      });
+    } catch (err) {
+      console.error("Report login error:", err);
+      const message =
+        err instanceof TheearthClientError
+          ? err.message
+          : `theearth へのログインに失敗しました (${describeUnknownError(err)})`;
+      return dvrJsonError(401, message);
+    }
+
+    const now = Date.now();
+    const record: ReportSessionRecord = {
+      token: generateDvrToken(),
+      compId: routing.compId,
+      userName: routing.userName,
+      cookies: Array.from(jar.cookies.entries()),
+      createdAt: now,
+      expiresAt: now + REPORT_SESSION_TTL_MS,
+    };
+    await this.ctx.storage.put(REPORT_SESSION_KEY, record);
+    return Response.json({ token: record.token, expires_at: record.expiresAt });
+  }
+
+  /** report 系 API 呼び出しの共通ラッパ (callDvrVenus と同型): cookie 書き戻し +
+   * セッション切れ 401 / パラメータ不正 400 / その他 502 のマッピング。 */
+  private async callReportAction<T>(
+    record: ReportSessionRecord,
+    errorLabel: string,
+    fn: (jar: CookieJar) => Promise<T>,
+  ): Promise<Response> {
+    const jar: CookieJar = { cookies: new Map(record.cookies) };
+    try {
+      const result = await fn(jar);
+      await this.ctx.storage.put<ReportSessionRecord>(REPORT_SESSION_KEY, {
+        ...record,
+        cookies: Array.from(jar.cookies.entries()),
+      });
+      return Response.json(result);
+    } catch (err) {
+      if (err instanceof VenusSessionExpiredError) {
+        await this.ctx.storage.delete(REPORT_SESSION_KEY);
+        return dvrJsonError(401, "theearth セッションが切れました。再ログインしてください");
+      }
+      if (err instanceof ReportParamError) {
+        return dvrJsonError(400, err.message);
+      }
+      console.error(`Report ${errorLabel} error:`, err);
+      const message =
+        err instanceof TheearthClientError
+          ? err.message
+          : `${errorLabel}に失敗しました (${describeUnknownError(err)})`;
+      return dvrJsonError(502, message);
+    }
+  }
+
+  /** GET /daily-report-api/list?from=&to= — F-NRS1010 全ページ収集。from/to は
+   * "YYYY/MM/DD HH:mm" 形式 (harvestDailyReport の HarvestRange)。読取日ソートが
+   * 降順設定になっているか (`sortOk`) も併せて返す — false の場合フロント側で
+   * 「表示条件指定を確認してください」の警告を出す想定 (SKILL.md 早期打ち切りの前提)。
+   * 同一 theearth セッションへの並行リクエストはセッションロックで hang/500 する
+   * ため、必ず逐次実行する (Promise.all で並列化しない)。 */
+  private handleReportList(record: ReportSessionRecord, url: URL): Promise<Response> {
+    const from = url.searchParams.get("from") ?? "";
+    const to = url.searchParams.get("to") ?? "";
+    return this.callReportAction(record, "運転日報の取得", async (jar) => {
+      const sortOk = await verifyReadNoDescending(jar);
+      const rows = await harvestDailyReport(jar, { from, to });
+      return { rows, sortOk };
+    });
+  }
+
+  /** GET /daily-report-api/expense?opeNo=&startOpe= — F-DES1012 給油行の現在値。 */
+  private handleReportExpenseForm(record: ReportSessionRecord, url: URL): Promise<Response> {
+    const opeNo = url.searchParams.get("opeNo") ?? "";
+    const startOpe = url.searchParams.get("startOpe") ?? "";
+    return this.callReportAction(record, "経費入力フォームの取得", (jar) => getExpenseForm(jar, opeNo, startOpe));
+  }
+
+  /** POST /daily-report-api/expense/save — `btnExpenceEditSetting` postback で
+   * 給油行 1 件を登録する (body は SaveFuelRowParams)。 */
+  private async handleReportExpenseSave(record: ReportSessionRecord, request: Request): Promise<Response> {
+    let body: SaveFuelRowParams;
+    try {
+      body = (await request.json()) as SaveFuelRowParams;
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    return this.callReportAction(record, "給油行の登録", (jar) => saveFuelRow(jar, body));
+  }
+
+  /** POST /daily-report-api/expense/recalculate — `btnScore` postback で評価点を
+   * 再集計する (body は `{opeNo, startOpe}`)。 */
+  private async handleReportExpenseRecalculate(record: ReportSessionRecord, request: Request): Promise<Response> {
+    let body: { opeNo?: unknown; startOpe?: unknown };
+    try {
+      body = (await request.json()) as { opeNo?: unknown; startOpe?: unknown };
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    const opeNo = typeof body.opeNo === "string" ? body.opeNo : "";
+    const startOpe = typeof body.startOpe === "string" ? body.startOpe : "";
+    return this.callReportAction(record, "評価点再集計", (jar) => recalculateExpense(jar, opeNo, startOpe));
+  }
+
+  /** GET /daily-report-api/zip?from=&to= — F-NOS3010 の編集後 csvdata.zip を
+   * browser にストリーム素通しする (handleDvrFile と同型、JSON でなく binary
+   * body なので callReportAction ではなく専用 handler にしてある)。from/to は
+   * "YYYY-MM-DD" 形式 (downloadCsvZip の CsvDateRange)。 */
+  private async handleReportZip(record: ReportSessionRecord, url: URL): Promise<Response> {
+    const startDate = url.searchParams.get("from") ?? "";
+    const endDate = url.searchParams.get("to") ?? "";
+    const jar: CookieJar = { cookies: new Map(record.cookies) };
+    try {
+      const bytes = await downloadEditedZip(jar, { startDate, endDate });
+      // cookie 書き戻しはヘッダ送出をブロックしない (handleDvrFile と同じ理由)。
+      this.ctx.waitUntil(
+        this.ctx.storage.put<ReportSessionRecord>(REPORT_SESSION_KEY, {
+          ...record,
+          cookies: Array.from(jar.cookies.entries()),
+        }),
+      );
+      return new Response(bytes, {
+        status: 200,
+        headers: {
+          "content-type": "application/zip",
+          "content-disposition": `attachment; filename="csvdata-${record.compId}.zip"`,
+          "cache-control": "no-store",
+        },
+      });
+    } catch (err) {
+      if (err instanceof VenusSessionExpiredError) {
+        await this.ctx.storage.delete(REPORT_SESSION_KEY);
+        return dvrJsonError(401, "theearth セッションが切れました。再ログインしてください");
+      }
+      console.error("Report zip error:", err);
+      const message =
+        err instanceof TheearthClientError
+          ? err.message
+          : `csvdata.zip の取得に失敗しました (${describeUnknownError(err)})`;
+      return dvrJsonError(502, message);
+    }
+  }
+
+  /** POST /daily-report-api/unlock-all — F-DES1010 `btnInitialize` postback で
+   * 残留ロックを全強制解放する。 */
+  private handleReportUnlockAll(record: ReportSessionRecord): Promise<Response> {
+    return this.callReportAction(record, "編集制御解除", async (jar) => {
+      await forceUnlockAll(jar);
+      return { ok: true };
+    });
   }
 
   /** `/scraper-zip/:compId/:requestId` — 1回だけ取得できる zip ダウンロード。 */
