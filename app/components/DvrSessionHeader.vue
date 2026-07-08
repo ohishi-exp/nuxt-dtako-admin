@@ -76,7 +76,7 @@ onMounted(() => {
             ? `ライセンス数超過のため既存セッション (${lastLoginKick.kickedUserName}) を強制ログアウトしてログインしました`
             : '同一アカウントの別セッションを強制ログアウトしてログインしました' }}
         </span>
-        <UButton size="2xs" color="neutral" variant="ghost" icon="i-lucide-x" @click="lastLoginKick = null" />
+        <UButton size="xs" color="neutral" variant="ghost" icon="i-lucide-x" @click="lastLoginKick = null" />
       </div>
     </div>
 
