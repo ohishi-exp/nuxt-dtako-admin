@@ -466,34 +466,32 @@ describe("downloadEditedZip", () => {
   });
 });
 
-// --- F-NRS1010 運転日報 fixture ----------------------------------------------
+// --- F-DES1010 運行データ入力(一覧) fixture -----------------------------------
 
 function reportRowHtml(row: number, v: {
   operationNo?: string;
   startDateTime?: string;
   workEndDateTime?: string;
 } = {}): string {
-  const id = (field: string) => `MainContent_T1_lstOperation_${field}_${row}`;
+  const id = (field: string) => `MainContent_lstOperation_${field}_${row}`;
   return `
     <span id="${id("lblOperationNo")}">${v.operationNo ?? `OPE${row}`}</span>
     <span id="${id("lblStartDateTime")}">${v.startDateTime ?? "2026/07/01 8:00:00"}</span>
+    <span id="${id("lblExclusionFlag")}">0</span>
+    <span id="${id("lblOperationDate")}">26/07/01</span>
+    <span id="${id("lblBranchCD")}">8</span>
+    <span id="${id("lblDisplayName")}">佐賀大石運輸㈱</span>
+    <span id="${id("lblVehicleCD")}">6572</span>
+    <span id="${id("lblVehicleName")}">佐賀100あ6572</span>
+    <span id="${id("lblDriverCD1")}">1405</span>
+    <span id="${id("lblDriverName1")}">松尾　等</span>
     <span id="${id("lblWorkStartDateTime")}">07/01 07:50</span>
     <span id="${id("lblWorkEndDateTime")}">${v.workEndDateTime ?? "07/01 18:00"}</span>
-    <span id="${id("lblOperationStartDateTime")}">2026/07/01 08:00:00</span>
-    <span id="${id("lblOperationEndDateTime")}">2026/07/01 18:00:00</span>
-    <span id="${id("lblDriverState1Min")}">1:00</span>
-    <span id="${id("lblDriverState2Min")}"></span>
-    <span id="${id("lblDriverState3Min")}">0:30</span>
-    <span id="${id("lblDriverState4Min")}">0:15</span>
-    <span id="${id("lblDriverState5Min")}">0:05</span>
+    <span id="${id("lblOperationStartDateTime")}">07/01 08:00</span>
+    <span id="${id("lblOperationEndDateTime")}">07/01 18:00</span>
     <span id="${id("lblTotalRunningDist")}">120</span>
-    <span id="${id("lblStartOdometer")}">1000</span>
-    <span id="${id("lblEndOdometer")}">1120</span>
-    <span id="${id("lblNwayRunningDist")}">80</span>
-    <span id="${id("lblEwayRunningDist")}">40</span>
-    <span id="${id("lblBwayRunningDist")}">0</span>
-    <span id="${id("lblIntankFuel1")}">20</span>
-    <span id="${id("lblSSFuel1")}">0</span>
+    <span id="${id("lblSalesFlag")}">済</span>
+    <span id="${id("lblExpenseFlag")}">未</span>
   `;
 }
 
@@ -506,10 +504,17 @@ function link(target: string, argument: string, text: string): { target: string;
   return { target, argument, text };
 }
 
+/** ページャの「最初」ボタン (`<input type="submit">`)。1ページ目は disabled。 */
+function firstButtonHtml(opts: { disabled?: boolean } = {}): string {
+  const disabledAttr = opts.disabled ? ' disabled="disabled" class="aspNetDisabled Buttonglay"' : ' class="Buttonglay"';
+  return `<input type="submit" name="ctl00$MainContent$dpOperation$ctl00$ctl00" value="最初"${disabledAttr} />`;
+}
+
 function reportPageHtml(opts: {
   rows: { operationNo: string; startDateTime: string; workEndDateTime: string }[];
   currentPage: number;
   links: { target: string; argument: string; text: string }[];
+  firstButton?: { disabled?: boolean };
 }): string {
   const rowsHtml = opts.rows
     .map((r, i) => reportRowHtml(i, { operationNo: r.operationNo, startDateTime: r.startDateTime, workEndDateTime: r.workEndDateTime }))
@@ -517,6 +522,7 @@ function reportPageHtml(opts: {
   const linksHtml = opts.links.map((l) => pagerLink(l.target, l.argument, l.text)).join("\n");
   return `<html><body><form>
     <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-${opts.currentPage}" />
+    ${opts.firstButton ? firstButtonHtml(opts.firstButton) : ""}
     ${rowsHtml}
     <span class="gCurrentPage">${opts.currentPage}</span>
     ${linksHtml}
@@ -564,12 +570,13 @@ describe("harvestDailyReport", () => {
     ).rejects.toThrow(VenusSessionExpiredError);
   });
 
-  it("resets to the first page when a 最初 link is present, then early-breaks once below `from`", async () => {
+  it("resets to the first page via the 最初 submit button, then early-breaks once below `from`", async () => {
     const jar = createCookieJar();
-    const page1WithFirstLink = reportPageHtml({
+    const pageWithFirstButton = reportPageHtml({
       rows: [{ operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" }],
-      currentPage: 1,
-      links: [link("ctl01$first", "", "最初"), link("ctl01$ctl02", "", "2")],
+      currentPage: 2,
+      links: [link("ctl01$ctl02", "", "3")],
+      firstButton: { disabled: false },
     });
     const afterFirst = reportPageHtml({
       rows: [
@@ -578,14 +585,91 @@ describe("harvestDailyReport", () => {
       ],
       currentPage: 1,
       links: [link("ctl01$ctl02", "", "2")],
+      firstButton: { disabled: true },
     });
-    const fetchImpl = sequenceFetch([html(page1WithFirstLink), html(afterFirst)]);
+    const fetchImpl = sequenceFetch([html(pageWithFirstButton), html(afterFirst)]);
     const rows = await harvestDailyReport(
       jar,
       { from: "2026/07/01 00:00", to: "2026/07/07 00:00" },
       fetchImpl,
     );
     expect(rows.map((r) => r.operationNo)).toEqual(["B"]);
+  });
+
+  it("throws on non-ok POST / login redirect on POST while resetting via the 最初 button", async () => {
+    const jar1 = createCookieJar();
+    const pageWithFirstButton = reportPageHtml({
+      rows: [{ operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" }],
+      currentPage: 2,
+      links: [],
+      firstButton: { disabled: false },
+    });
+    await expect(
+      harvestDailyReport(
+        jar1,
+        { from: "2026/07/01 00:00", to: "2026/07/07 00:00" },
+        sequenceFetch([html(pageWithFirstButton), status(500)]),
+      ),
+    ).rejects.toThrow(TheearthClientError);
+    const jar2 = createCookieJar();
+    await expect(
+      harvestDailyReport(
+        jar2,
+        { from: "2026/07/01 00:00", to: "2026/07/07 00:00" },
+        sequenceFetch([html(pageWithFirstButton), html(LOGIN_REDIRECT_HTML)]),
+      ),
+    ).rejects.toThrow(VenusSessionExpiredError);
+  });
+
+  it("skips the 最初 reset when the button is disabled (already on page 1)", async () => {
+    const jar = createCookieJar();
+    const page1 = reportPageHtml({
+      rows: [{ operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" }],
+      currentPage: 1,
+      links: [],
+      firstButton: { disabled: true },
+    });
+    const fetchImpl = sequenceFetch([html(page1)]);
+    const rows = await harvestDailyReport(
+      jar,
+      { from: "2026/07/01 00:00", to: "2026/07/07 00:00" },
+      fetchImpl,
+    );
+    expect(rows.map((r) => r.operationNo)).toEqual(["A"]);
+  });
+
+  it("skips a submit button with no value attribute when scanning for 最初 (defensive)", async () => {
+    const jar = createCookieJar();
+    const page1 = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
+      <input type="submit" name="ctl00$MainContent$btnOther" class="Buttonglay" />
+      ${reportRowHtml(0, { operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" })}
+      <span class="gCurrentPage">1</span>
+    </form></body></html>`;
+    const fetchImpl = sequenceFetch([html(page1)]);
+    const rows = await harvestDailyReport(
+      jar,
+      { from: "2026/07/01 00:00", to: "2026/07/07 00:00" },
+      fetchImpl,
+    );
+    expect(rows.map((r) => r.operationNo)).toEqual(["A"]);
+  });
+
+  it("treats a matching 最初 button with no name attribute as not found (defensive)", async () => {
+    const jar = createCookieJar();
+    const page1 = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
+      <input type="submit" value="最初" class="Buttonglay" />
+      ${reportRowHtml(0, { operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" })}
+      <span class="gCurrentPage">1</span>
+    </form></body></html>`;
+    const fetchImpl = sequenceFetch([html(page1)]);
+    const rows = await harvestDailyReport(
+      jar,
+      { from: "2026/07/01 00:00", to: "2026/07/07 00:00" },
+      fetchImpl,
+    );
+    expect(rows.map((r) => r.operationNo)).toEqual(["A"]);
   });
 
   it("walks to the next numbered page when the current page doesn't reach `from`", async () => {
@@ -692,11 +776,28 @@ describe("harvestDailyReport", () => {
     expect(rows[0]?.workEndDateTime).toBe("2027/01/02 08:00");
   });
 
+  it("normalizes an empty-content cell to null instead of an empty string", async () => {
+    const jar = createCookieJar();
+    const page1 = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
+      ${reportRowHtml(0, { operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" })
+        .replace(/<span id="MainContent_lstOperation_lblBranchCD_0">8<\/span>/, '<span id="MainContent_lstOperation_lblBranchCD_0"></span>')}
+      <span class="gCurrentPage">1</span>
+    </form></body></html>`;
+    const fetchImpl = sequenceFetch([html(page1)]);
+    const rows = await harvestDailyReport(
+      jar,
+      { from: "2026/07/01 00:00", to: "2026/07/07 00:00" },
+      fetchImpl,
+    );
+    expect(rows[0]?.branchCd).toBeNull();
+  });
+
   it("defaults missing grid cells to null/empty instead of throwing", async () => {
     const jar = createCookieJar();
     // lblStartDateTime / lblWorkEndDateTime のセルが (仕様変更等で) 欠落しているケース。
     const partialRowHtml = `
-      <span id="MainContent_T1_lstOperation_lblOperationNo_0">A</span>
+      <span id="MainContent_lstOperation_lblOperationNo_0">A</span>
     `;
     const page1 = `<html><body><form>
       <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
@@ -720,7 +821,7 @@ describe("harvestDailyReport", () => {
     // 自己終端タグは「行としては見つかるが内容は取れない」を再現できる。
     const page1 = `<html><body><form>
       <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
-      <span id="MainContent_T1_lstOperation_lblOperationNo_0" />
+      <span id="MainContent_lstOperation_lblOperationNo_0" />
       <div class="gCurrentPage">1</div>
     </form></body></html>`;
     const fetchImpl = sequenceFetch([html(page1)]);

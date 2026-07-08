@@ -3,8 +3,8 @@
  * 日報編集 (Refs #169)。
  *
  * 管理者 (auth-worker ログイン必須) が theearth-np.com のアカウントでログインして、
- * 運転日報 (F-NRS1010) を期間指定で一覧表示し、運行を選んで経費 (F-DES1012、給油行)
- * を編集 → 評価点再集計 → 編集後の csvdata.zip をダウンロードするページ。
+ * 運行データ入力一覧 (F-DES1010) を期間指定で一覧表示し、運行を選んで経費
+ * (F-DES1012、給油行) を編集 → 評価点再集計 → 編集後の csvdata.zip をダウンロードするページ。
  *
  * credential pass-through 設計は /dvr-viewer と同じ (DvrSessionHeader.vue 参照)。
  * theearth ログインセッションは DVR viewer とは共有しない (useDailyReportSession /
@@ -16,19 +16,21 @@
 interface DailyReportRow {
   operationNo: string
   startDateTime: string
-  workEndDateTime: string
+  exclusionFlag: boolean
+  operationDate: string | null
+  branchCd: string | null
+  branchName: string | null
+  vehicleCd: string | null
+  vehicleName: string | null
+  driverCd1: string | null
+  driverName1: string | null
   workStartDateTime: string | null
+  workEndDateTime: string
   operationStartDateTime: string | null
   operationEndDateTime: string | null
-  driverStateMin: (string | null)[]
   totalRunningDist: string | null
-  startOdometer: string | null
-  endOdometer: string | null
-  nwayRunningDist: string | null
-  ewayRunningDist: string | null
-  bwayRunningDist: string | null
-  intankFuel1: string | null
-  ssFuel1: string | null
+  salesFlag: string | null
+  expenseFlag: string | null
 }
 
 interface FuelRow {
@@ -349,7 +351,7 @@ onMounted(() => {
         <!-- 運転日報一覧 -->
         <UCard>
           <template #header>
-            <span class="font-semibold">運転日報 ({{ rows.length }} 件)</span>
+            <span class="font-semibold">運行データ入力一覧 ({{ rows.length }} 件)</span>
           </template>
           <div v-if="listLoading" class="text-center py-8 text-gray-400">
             読み込み中…
@@ -361,10 +363,20 @@ onMounted(() => {
             <table class="w-full text-sm">
               <thead>
                 <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-800">
-                  <th class="py-2 pr-4">運行No</th>
+                  <th class="py-2 pr-4">運行日</th>
+                  <th class="py-2 pr-4">事業所CD</th>
+                  <th class="py-2 pr-4">事業所名</th>
+                  <th class="py-2 pr-4">車輌CD</th>
+                  <th class="py-2 pr-4">車輌名</th>
+                  <th class="py-2 pr-4">乗務員CD1</th>
+                  <th class="py-2 pr-4">乗務員名1</th>
+                  <th class="py-2 pr-4">出社日時</th>
+                  <th class="py-2 pr-4">退社日時</th>
                   <th class="py-2 pr-4">出庫日時</th>
-                  <th class="py-2 pr-4">退社日時 (読取日)</th>
+                  <th class="py-2 pr-4">帰庫日時</th>
                   <th class="py-2 pr-4">総走行距離</th>
+                  <th class="py-2 pr-4">売上</th>
+                  <th class="py-2 pr-4">経費</th>
                   <th class="py-2 pr-4" />
                 </tr>
               </thead>
@@ -373,18 +385,49 @@ onMounted(() => {
                   v-for="row in rows"
                   :key="row.operationNo"
                   class="border-b border-gray-100 dark:border-gray-900"
+                  :class="{ 'text-red-600 dark:text-red-400': row.exclusionFlag }"
                 >
-                  <td class="py-2 pr-4 font-mono text-xs">
-                    {{ row.operationNo }}
+                  <td class="py-2 pr-4">
+                    {{ row.operationDate ?? '-' }}
                   </td>
                   <td class="py-2 pr-4">
-                    {{ row.startDateTime }}
+                    {{ row.branchCd ?? '-' }}
+                  </td>
+                  <td class="py-2 pr-4">
+                    {{ row.branchName ?? '-' }}
+                  </td>
+                  <td class="py-2 pr-4">
+                    {{ row.vehicleCd ?? '-' }}
+                  </td>
+                  <td class="py-2 pr-4">
+                    {{ row.vehicleName ?? '-' }}
+                  </td>
+                  <td class="py-2 pr-4">
+                    {{ row.driverCd1 ?? '-' }}
+                  </td>
+                  <td class="py-2 pr-4">
+                    {{ row.driverName1 ?? '-' }}
+                  </td>
+                  <td class="py-2 pr-4">
+                    {{ row.workStartDateTime ?? '-' }}
                   </td>
                   <td class="py-2 pr-4">
                     {{ row.workEndDateTime }}
                   </td>
                   <td class="py-2 pr-4">
+                    {{ row.operationStartDateTime ?? '-' }}
+                  </td>
+                  <td class="py-2 pr-4">
+                    {{ row.operationEndDateTime ?? '-' }}
+                  </td>
+                  <td class="py-2 pr-4">
                     {{ row.totalRunningDist ?? '-' }}
+                  </td>
+                  <td class="py-2 pr-4">
+                    {{ row.salesFlag ?? '-' }}
+                  </td>
+                  <td class="py-2 pr-4">
+                    {{ row.expenseFlag ?? '-' }}
                   </td>
                   <td class="py-2 pr-4 text-right">
                     <UButton size="xs" variant="outline" icon="i-lucide-fuel" label="経費 (給油) を編集" @click="openExpenseModal(row)" />

@@ -233,6 +233,75 @@ VenusBridge (`.svc`) ではない。関連ページ:
 | 運転日報 | `F-NRS1010[DailyOperationReport]` | 作業時間の一括取得元 (下記) |
 | 表示条件指定 | `F-GOS0030[DataDisplayConfig]` | 日報の並び順/絞込設定 (別ウィンドウ) |
 
+### F-DES1010 [運行データ入力(一覧)] の実グリッド構造 (2026-07-08 cdp-pair 実機確定)
+
+**日報編集の一覧はここを使う** (F-NRS1010 ではない — 当初 F-NRS1010 を「日報一覧」として
+実装したが誤りだった。F-NRS1010 は「作業時間の一括取得元」という別用途で、編集画面への
+導線 (OpeNo/StartOpe) を持たない。F-DES1010 は行ごとに編集/削除/明細ボタンを持ち、
+OpeNo + StartDateTime が編集画面遷移にそのまま使える形で埋め込まれている)。
+
+title = 「運行データ入力」。行 id は `MainContent_lstOperation_<Field>_<row>`
+(**`T1_` 接頭辞は無い**、F-NRS1010 と紛らわしいので注意):
+
+| Field | 内容 | 実測値の例 |
+|---|---|---|
+| `lblOperationNo` | **運行No (キー、22桁)** | `2607041256390000006572` |
+| `lblStartDateTime` | **編集画面遷移の StartOpe そのもの** (`YYYY/MM/DD H:mm:ss`、**時は1桁のこともある** `2026/07/07 1:03:16`、ゼロ埋めされない) | |
+| `lblExclusionFlag` | 排他ロック中フラグ (`"1"`=ロック中、行が赤字表示) | `"0"` |
+| `lblOperationDate` | 運行日 (`YY/MM/DD`、2桁年) | `26/07/04` |
+| `lblBranchCD` / `lblDisplayName` | 事業所CD / 事業所名 | `8` / `佐賀大石運輸㈱` |
+| `lblVehicleCD` / `lblVehicleName` | 車輌CD / 車輌名 | `6572` / `佐賀100あ6572` |
+| `lblDriverCD1` / `lblDriverName1` | 乗務員CD1 / 乗務員名1 | `1405` / `松尾　等` |
+| `lblWorkStartDateTime` / `lblWorkEndDateTime` | 出社日時 / **退社日時 (=読取日、`MM/DD HH:mm`)** | `07/04 12:56` / `07/08 10:57` |
+| `lblOperationStartDateTime` / `lblOperationEndDateTime` | 出庫日時 / 帰庫日時 (`MM/DD HH:mm`) | |
+| `lblTotalRunningDist` | 総走行距離 | `1890.2` |
+| `lblSalesFlag` / `lblExpenseFlag` | 売上 / 経費 入力状況 (`"未"`/`"済"`) | `未` |
+
+F-NRS1010 に書いた「作業1〜5時間・距離・燃料の詳細」フィールドはこのページには**存在しない**
+(F-NRS1010 固有)。
+
+**編集アイコンの実体** (`J-DES1010[OperationEdit].js` 実機取得済み、`btnClick()` の中身):
+- 鉛筆アイコン `imgEditButton` (`title="運行データの修正を行います。"`) → `CreateOperation(pass)`
+  → `window.open("F-DES1011[OperationRevise].aspx?" + pass)` (別窓)
+- クリップボードアイコン `imgDetailsButton` (`title="運行明細の入力を行います。"`) →
+  `ExpenseEdit(pass)` → `window.open("F-DES1013[OperationWorkEdit].aspx?" + pass)` (別窓)。
+  **F-DES1012 への導線はここに無い** — 実 UI は F-DES1013 を開いてから、その画面内の
+  `btnExpense` ボタンで F-DES1012 へ遷移する想定 (F-DES1010 から直接は行かない)。
+  Worker 実装は URL 直接遷移 (下記) で F-DES1010/F-DES1013 を経由せず F-DES1012 に直接
+  GET できるので、この経路を辿る必要は無い。
+- どちらも `pass = "OpeNo=" + lblOperationNo + "&StartOpe=" + lblStartDateTime` を組み立てる
+  (**URL 直接遷移の OpeNo/StartOpe の値の出どころはこの2フィールドで確定**)。
+- `_msgOtherEdit = "他ユーザー編集中のため処理を中止しました。"` (`ExclusionFlag` チェック時に
+  表示、theearth-report-client.ts の `assertNoOtherEditConflict` の判定文言と一致確認済み)。
+
+**ページャは「最初」「最後」だけ `<input type="submit">` (`__doPostBack` ではない)**:
+```html
+<span id="MainContent_dpOperation">
+  <input type="submit" name="ctl00$MainContent$dpOperation$ctl00$ctl00" value="最初"
+         disabled="disabled" class="aspNetDisabled Buttonglay">  <!-- 1ページ目は disabled -->
+  <span class="gCurrentPage">1</span>
+  <a href="javascript:__doPostBack('ctl00$MainContent$dpOperation$ctl01$ctl01','')">2</a>
+  <a href="javascript:__doPostBack('ctl00$MainContent$dpOperation$ctl01$ctl02','')">3</a>
+  ...
+  <a href="javascript:__doPostBack('ctl00$MainContent$dpOperation$ctl01$ctl05','')">...</a>
+  <input type="submit" name="ctl00$MainContent$dpOperation$ctl02$ctl00" value="最後"
+         class="Buttonglay">
+</span>
+```
+数字ページ・「...」は想定どおり `<a href="javascript:__doPostBack(target,'')">`。
+**「最初」「最後」だけ通常の ASP.NET Button (`<input type="submit" name=… value=…>`)** —
+`__doPostBack` 経路のリンク走査だけでは見つからない。POST body に `name=value` を含める
+通常の postback (`btnScore` 等と同じパターン) で送る必要がある。ページ移動すると
+`class="gCurrentPage"` の数字が現在ページに更新され、「最初」の `disabled` も動的に
+切り替わる (1ページ目のみ disabled、実機確認済み)。
+
+**絞込条件はページ上部に既定値が効いている** (`絞込条件[読取日]:26/04/08〜` のように
+表示される、実機確認)。クエリパラメータなしの単純 GET でこの既定フィルタが適用された
+状態のグリッドが返る (直近3ヶ月程度と見られるがサーバー側の既定値でありクエリでの
+明示指定は今回未検証)。**要求した `from` がこの既定下限より古い場合、取りこぼしても
+気づけない** (サーバー側で既に絞られているため) — 既定の下限より広い範囲が必要なら
+表示条件指定 (F-GOS0030 相当の機構がこのページにもあるかは未検証) を確認すること。
+
 ### URL 直接遷移 (F-DES1011/1012/1013 共通、2026-07-08 実機確定)
 
 3 画面とも `?OpeNo=<22桁>&StartOpe=<YYYY/MM/DD HH:mm:ss>` の URL パラメータで**直接編集

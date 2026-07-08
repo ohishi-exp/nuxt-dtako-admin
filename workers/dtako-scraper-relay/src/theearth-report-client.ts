@@ -35,7 +35,7 @@ import {
 } from "./theearth-client";
 import { isLoginRedirect, VenusSessionExpiredError } from "./theearth-venus-client";
 
-const DAILY_REPORT_PATH = "/F-NRS1010[DailyOperationReport].aspx";
+const DAILY_REPORT_PATH = "/F-DES1010[OperationEdit].aspx";
 const DISPLAY_CONFIG_PATH = "/F-GOS0030[DataDisplayConfig].aspx";
 const OPERATION_LIST_PATH = "/F-DES1010[OperationEdit].aspx";
 const EXPENSE_EDIT_PATH = "/F-DES1012[OperationExpenseEdit].aspx";
@@ -49,7 +49,9 @@ export class ReportParamError extends TheearthClientError {
 }
 
 const OPE_NO_RE = /^\d{22}$/;
-const START_OPE_RE = /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}$/;
+// 時は1桁のこともある (lblStartDateTime の実測値 "2026/07/07 1:03:16"、
+// ゼロ埋めされない。cdp-pair 実機確認、Refs #169)。
+const START_OPE_RE = /^\d{4}\/\d{2}\/\d{2} \d{1,2}:\d{2}:\d{2}$/;
 const RANGE_BOUND_RE = /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}$/;
 
 function validateOpeNo(opeNo: string): void {
@@ -61,7 +63,7 @@ function validateOpeNo(opeNo: string): void {
 function validateStartOpe(startOpe: string): void {
   if (!START_OPE_RE.test(startOpe)) {
     throw new ReportParamError(
-      `出庫日時 (StartOpe) は "YYYY/MM/DD HH:mm:ss" 形式で指定してください: "${startOpe}"`,
+      `出庫日時 (StartOpe) は "YYYY/MM/DD H:mm:ss" 形式で指定してください: "${startOpe}"`,
     );
   }
 }
@@ -449,40 +451,44 @@ export async function verifyReadNoDescending(
 }
 
 // ---------------------------------------------------------------------------
-// F-NRS1010 [運転日報] — 全ページ収集
+// F-DES1010 [運行データ入力(一覧)] — 全ページ収集
+//
+// 日報編集の一覧はここを使う (F-NRS1010 ではない)。F-NRS1010 は「作業時間の
+// 一括取得元」という別用途で、編集画面への導線 (OpeNo/StartOpe) を持たない。
+// F-DES1010 は行ごとに OpeNo (lblOperationNo) + StartOpe (lblStartDateTime、
+// 編集画面遷移にそのまま使える形) を持つ一覧で、cdp-pair での実機確認
+// (2026-07-08、SKILL.md「F-DES1010 の実グリッド構造」節) で確定済み。
 // ---------------------------------------------------------------------------
 
-const DRIVER_STATE_FIELDS = [
-  "lblDriverState1Min",
-  "lblDriverState2Min",
-  "lblDriverState3Min",
-  "lblDriverState4Min",
-  "lblDriverState5Min",
-] as const;
-
 export interface DailyReportRow {
+  /** 運行No (22桁、編集画面遷移の OpeNo)。 */
   operationNo: string;
-  /** 出庫日時、full year 付き "YYYY/MM/DD H:mm:ss"。 */
+  /** 編集画面遷移の StartOpe そのもの ("YYYY/MM/DD H:mm:ss"、時は1桁のことがある)。 */
   startDateTime: string;
+  /** 排他ロック中か (`"1"`)。ロック中の行は他ユーザーが編集中で保存が失敗しうる。 */
+  exclusionFlag: boolean;
+  /** 運行日 ("YY/MM/DD"、2桁年)。 */
+  operationDate: string | null;
+  branchCd: string | null;
+  branchName: string | null;
+  vehicleCd: string | null;
+  vehicleName: string | null;
+  driverCd1: string | null;
+  driverName1: string | null;
+  workStartDateTime: string | null;
   /** 退社日時 (=読取日)。年補正済み "YYYY/MM/DD HH:mm" (ゼロ埋め、辞書順 = 時系列順)。 */
   workEndDateTime: string;
-  workStartDateTime: string | null;
   operationStartDateTime: string | null;
   operationEndDateTime: string | null;
-  /** 作業1〜5時間 ("H:mm"、再集計で変わる本体)。 */
-  driverStateMin: (string | null)[];
   totalRunningDist: string | null;
-  startOdometer: string | null;
-  endOdometer: string | null;
-  nwayRunningDist: string | null;
-  ewayRunningDist: string | null;
-  bwayRunningDist: string | null;
-  intankFuel1: string | null;
-  ssFuel1: string | null;
+  /** 売上入力状況 ("未"/"済")。 */
+  salesFlag: string | null;
+  /** 経費入力状況 ("未"/"済")。 */
+  expenseFlag: string | null;
 }
 
 function extractReportCell(html: string, field: string, row: number): string | null {
-  const m = html.match(new RegExp(`id="MainContent_T1_lstOperation_${field}_${row}"[^>]*>([\\s\\S]*?)</span>`));
+  const m = html.match(new RegExp(`id="MainContent_lstOperation_${field}_${row}"[^>]*>([\\s\\S]*?)</span>`));
   if (!m) return null;
   const v = m[1].replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ").trim();
   return v === "" ? null : v;
@@ -516,7 +522,7 @@ function minWorkEndDateTime(rows: DailyReportRow[]): string | null {
 }
 
 function parseDailyReportRows(html: string): DailyReportRow[] {
-  const indexes = [...html.matchAll(/id="MainContent_T1_lstOperation_lblOperationNo_(\d+)"/g)].map((m) =>
+  const indexes = [...html.matchAll(/id="MainContent_lstOperation_lblOperationNo_(\d+)"/g)].map((m) =>
     Number(m[1]),
   );
   return indexes.map((i) => {
@@ -525,19 +531,21 @@ function parseDailyReportRows(html: string): DailyReportRow[] {
     return {
       operationNo: extractReportCell(html, "lblOperationNo", i) ?? "",
       startDateTime,
-      workEndDateTime: workEndRaw ? normalizeWorkEndDateTime(workEndRaw, startDateTime) : "",
+      exclusionFlag: extractReportCell(html, "lblExclusionFlag", i) === "1",
+      operationDate: extractReportCell(html, "lblOperationDate", i),
+      branchCd: extractReportCell(html, "lblBranchCD", i),
+      branchName: extractReportCell(html, "lblDisplayName", i),
+      vehicleCd: extractReportCell(html, "lblVehicleCD", i),
+      vehicleName: extractReportCell(html, "lblVehicleName", i),
+      driverCd1: extractReportCell(html, "lblDriverCD1", i),
+      driverName1: extractReportCell(html, "lblDriverName1", i),
       workStartDateTime: extractReportCell(html, "lblWorkStartDateTime", i),
+      workEndDateTime: workEndRaw ? normalizeWorkEndDateTime(workEndRaw, startDateTime) : "",
       operationStartDateTime: extractReportCell(html, "lblOperationStartDateTime", i),
       operationEndDateTime: extractReportCell(html, "lblOperationEndDateTime", i),
-      driverStateMin: DRIVER_STATE_FIELDS.map((f) => extractReportCell(html, f, i)),
       totalRunningDist: extractReportCell(html, "lblTotalRunningDist", i),
-      startOdometer: extractReportCell(html, "lblStartOdometer", i),
-      endOdometer: extractReportCell(html, "lblEndOdometer", i),
-      nwayRunningDist: extractReportCell(html, "lblNwayRunningDist", i),
-      ewayRunningDist: extractReportCell(html, "lblEwayRunningDist", i),
-      bwayRunningDist: extractReportCell(html, "lblBwayRunningDist", i),
-      intankFuel1: extractReportCell(html, "lblIntankFuel1", i),
-      ssFuel1: extractReportCell(html, "lblSSFuel1", i),
+      salesFlag: extractReportCell(html, "lblSalesFlag", i),
+      expenseFlag: extractReportCell(html, "lblExpenseFlag", i),
     };
   });
 }
@@ -565,6 +573,52 @@ function extractPagerLinks(html: string): PagerLink[] {
 function extractCurrentPageNumber(html: string): number | null {
   const m = html.match(/class="[^"]*\bgCurrentPage\b[^"]*"[^>]*>\s*(\d+)\s*</i);
   return m ? Number(m[1]) : null;
+}
+
+interface PagerSubmitButton {
+  name: string;
+  value: string;
+}
+
+/** ページャの「最初」「最後」だけは `<a href="__doPostBack">` ではなく通常の
+ * ASP.NET Button (`<input type="submit" name=… value=…>`) (SKILL.md「F-DES1010
+ * の実グリッド構造」節、cdp-pair 実機確認済み)。属性順序に依存しないよう `<input>`
+ * タグ全体を走査し、`disabled` (1ページ目の「最初」等) なら null を返す。 */
+function findPagerSubmitButton(html: string, label: string): PagerSubmitButton | null {
+  const re = /<input\b[^>]*>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const tag = m[0];
+    if (!/\btype="submit"/i.test(tag)) continue;
+    const valueMatch = tag.match(/\bvalue="([^"]*)"/i);
+    if (valueMatch?.[1] !== label) continue;
+    if (/\bdisabled\b/i.test(tag)) return null;
+    const nameMatch = tag.match(/\bname="([^"]*)"/i);
+    return nameMatch ? { name: nameMatch[1], value: label } : null;
+  }
+  return null;
+}
+
+async function postPagerSubmitButton(
+  jar: CookieJar,
+  url: string,
+  html: string,
+  button: PagerSubmitButton,
+  fetchImpl: FetchLike,
+  timeoutMs: number,
+): Promise<string> {
+  const body = new URLSearchParams({ ...extractHiddenFields(html), [button.name]: button.value });
+  const res = await postForm(jar, url, body, fetchImpl, timeoutMs);
+  if (!res.ok) {
+    throw new TheearthClientError(`運行データ入力一覧のページ送りが HTTP ${res.status} を返しました`);
+  }
+  const nextHtml = await res.text();
+  if (isLoginRedirect(nextHtml)) {
+    throw new VenusSessionExpiredError(
+      "運行データ入力一覧のページ送り中にログイン画面が返されました — theearth セッションが切れています",
+    );
+  }
+  return nextHtml;
 }
 
 async function postPagerLink(
@@ -604,16 +658,15 @@ export interface HarvestRange {
 const MAX_HARVEST_PAGES = 500;
 
 /**
- * F-NRS1010 [運転日報] を全ページ収集する。退社日時 (=読取日) の降順を前提に
- * `range.from` 未満に落ちた時点で早期打ち切りするが、途中で降順が崩れている
- * (増加) のを検知したら早期打ち切りを無効化して最終ページまで走査する
+ * F-DES1010 [運行データ入力(一覧)] を全ページ収集する。退社日時 (=読取日) の
+ * 降順を前提に `range.from` 未満に落ちた時点で早期打ち切りするが、途中で降順が
+ * 崩れている (増加) のを検知したら早期打ち切りを無効化して最終ページまで走査する
  * (SKILL.md「早期打ち切りの前提」節、config を信じず実データで守る設計)。
  *
  * ページ送りは async (`X-MicrosoftAjax`/`__ASYNCPOST`) ヘッダを付けない**同期
  * postback** で行う。UpdatePanel は非同期送信時のみ部分レンダリングの差分応答
  * (MS AJAX delta 形式) を返す仕組みで、同期 postback なら常に完全な HTML が
- * 返る (`getVehicleLogTrack` の 2 段階 postback と同じ技法、実データでの
- * 検証は未実施 — 想定外の構造を検知したら loud fail する)。
+ * 返る (`getVehicleLogTrack` の 2 段階 postback と同じ技法)。
  */
 export async function harvestDailyReport(
   jar: CookieJar,
@@ -638,10 +691,12 @@ export async function harvestDailyReport(
   }
 
   // 前回のページ位置が残っている可能性があるため、まず「最初」へ戻す
-  // (SKILL.md「開始前に『最初』へ戻す」節)。リンクが無ければ既に1ページ目。
-  const firstLink = extractPagerLinks(html).find((l) => l.text === "最初");
-  if (firstLink) {
-    html = await postPagerLink(jar, url, html, firstLink, fetchImpl, timeoutMs);
+  // (SKILL.md「開始前に『最初』へ戻す」節)。「最初」ボタンは1ページ目では
+  // disabled になり findPagerSubmitButton が null を返すので、その場合は
+  // 既に1ページ目とみなしてスキップする。
+  const firstButton = findPagerSubmitButton(html, "最初");
+  if (firstButton) {
+    html = await postPagerSubmitButton(jar, url, html, firstButton, fetchImpl, timeoutMs);
   }
 
   const rows: DailyReportRow[] = [];
