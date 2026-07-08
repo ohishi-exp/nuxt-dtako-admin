@@ -220,6 +220,67 @@ export function extractHiddenFields(html: string): Record<string, string> {
   return result;
 }
 
+/**
+ * ページ全体の `<input>`/`<select>` を postback body 用に name→value へ丸ごと
+ * 直列化する。`extractHiddenFields` (固定の hidden 一覧のみ) と違い、text/
+ * checkbox/radio/select を含む**全フィールド**を拾う。多数のフィールドを持つ
+ * 大きな設定フォーム (F-GOS0030 等) で一部だけ変更して postback する時、
+ * **変更しないフィールドも含めて丸ごと送らないと ASP.NET が既定値で上書きして
+ * しまう**ケース向け (手で全フィールド名を書き出すと typo で一部が消える事故の
+ * 方が危険なため、実ページをそのまま読み取って直列化する設計にしてある)。
+ *
+ * - text/hidden input はそのまま value
+ * - checkbox/radio は **checked のものだけ** (value 省略時は "on") — unchecked は
+ *   ブラウザの標準 form submit 同様に含めない
+ * - select は selected な `<option>` の value (無ければ HTML 仕様通り先頭 option)
+ * - submit/button/image/reset/file は含めない (押下 submit は呼び出し側が明示的に足す)
+ */
+export function serializeFormFields(html: string): Record<string, string> {
+  const result: Record<string, string> = {};
+
+  const inputRe = /<input\b([^>]*)>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = inputRe.exec(html)) !== null) {
+    const attrs = m[1];
+    const nameMatch = attrs.match(/\bname=["']([^"']+)["']/i);
+    if (!nameMatch) continue;
+    const typeMatch = attrs.match(/\btype=["']([^"']+)["']/i);
+    const type = (typeMatch?.[1] ?? "text").toLowerCase();
+    if (type === "submit" || type === "button" || type === "image" || type === "reset" || type === "file") continue;
+    if ((type === "checkbox" || type === "radio") && !/\bchecked\b/i.test(attrs)) continue;
+    const valueMatch = attrs.match(/\bvalue=["']([^"']*)["']/i);
+    const fallback = type === "checkbox" || type === "radio" ? "on" : "";
+    result[nameMatch[1]] = valueMatch ? decodeHtmlEntities(valueMatch[1]) : fallback;
+  }
+
+  const selectRe = /<select\b([^>]*)>([\s\S]*?)<\/select>/gi;
+  while ((m = selectRe.exec(html)) !== null) {
+    const nameMatch = m[1].match(/\bname=["']([^"']+)["']/i);
+    if (!nameMatch) continue;
+    const body = m[2];
+    const optionRe = /<option\b([^>]*)>/gi;
+    let om: RegExpExecArray | null;
+    let selectedValue: string | null = null;
+    let firstValue = "";
+    let sawFirst = false;
+    while ((om = optionRe.exec(body)) !== null) {
+      const valueMatch = om[1].match(/\bvalue=["']([^"']*)["']/i);
+      const value = valueMatch ? valueMatch[1] : "";
+      if (!sawFirst) {
+        firstValue = value;
+        sawFirst = true;
+      }
+      if (/\bselected\b/i.test(om[1])) {
+        selectedValue = value;
+        break;
+      }
+    }
+    result[nameMatch[1]] = decodeHtmlEntities(selectedValue ?? firstValue);
+  }
+
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // ログイン
 // ---------------------------------------------------------------------------

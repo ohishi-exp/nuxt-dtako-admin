@@ -10,6 +10,7 @@ import {
   ingestSetCookie,
   login,
   scrapeViaHttp,
+  serializeFormFields,
   splitJapaneseDate,
   TheearthClientError,
   TheearthNotZipError,
@@ -239,6 +240,87 @@ describe('extractHiddenFields', () => {
     expect(extractHiddenFields('<input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" />')).toEqual({
       __VIEWSTATE: '',
     })
+  })
+})
+
+describe('serializeFormFields', () => {
+  it('captures text/hidden input values as-is', () => {
+    const html = `<input type="hidden" name="__VIEWSTATE" value="VS1" />
+      <input type="text" name="txtSVehicle" value="100" />`
+    expect(serializeFormFields(html)).toEqual({ __VIEWSTATE: 'VS1', txtSVehicle: '100' })
+  })
+
+  it('defaults an input with no explicit type attribute to text semantics', () => {
+    expect(serializeFormFields('<input name="txtNoType" value="abc" />')).toEqual({ txtNoType: 'abc' })
+  })
+
+  it('defaults a text input with no value attribute to an empty string', () => {
+    expect(serializeFormFields('<input type="text" name="txtEmpty" />')).toEqual({ txtEmpty: '' })
+  })
+
+  it('skips an input with no name attribute', () => {
+    expect(serializeFormFields('<input type="text" value="noname" />')).toEqual({})
+  })
+
+  it('includes a checked checkbox with its value, and omits an unchecked one', () => {
+    const html = `<input type="checkbox" name="chkOn" value="1" checked="checked" />
+      <input type="checkbox" name="chkOff" value="1" />`
+    expect(serializeFormFields(html)).toEqual({ chkOn: '1' })
+  })
+
+  it('defaults a checked checkbox/radio with no value attribute to "on"', () => {
+    expect(serializeFormFields('<input type="checkbox" name="chkNoValue" checked />')).toEqual({ chkNoValue: 'on' })
+  })
+
+  it('includes only the checked radio from a same-name radio group', () => {
+    const html = `<input type="radio" name="rdoGroup" value="a" />
+      <input type="radio" name="rdoGroup" value="b" checked="checked" />`
+    expect(serializeFormFields(html)).toEqual({ rdoGroup: 'b' })
+  })
+
+  it('excludes submit/button/image/reset/file inputs (pressed-submit only, added explicitly by callers)', () => {
+    const html = `<input type="submit" name="btnGo" value="実行" />
+      <input type="button" name="btnB" value="B" />
+      <input type="image" name="btnI" value="I" />
+      <input type="reset" name="btnR" value="R" />
+      <input type="file" name="fileF" value="F" />`
+    expect(serializeFormFields(html)).toEqual({})
+  })
+
+  it('captures the selected <option> value of a <select>', () => {
+    const html = `<select name="ddlWithSelected">
+      <option value="x">X</option>
+      <option value="y" selected="selected">Y</option>
+    </select>`
+    expect(serializeFormFields(html)).toEqual({ ddlWithSelected: 'y' })
+  })
+
+  it('falls back to the first <option> when none is marked selected (HTML default)', () => {
+    const html = `<select name="ddlNoSelected">
+      <option value="first">First</option>
+      <option value="second">Second</option>
+    </select>`
+    expect(serializeFormFields(html)).toEqual({ ddlNoSelected: 'first' })
+  })
+
+  it('yields an empty string for a <select> with no <option> elements', () => {
+    expect(serializeFormFields('<select name="ddlEmpty"></select>')).toEqual({ ddlEmpty: '' })
+  })
+
+  it('skips a <select> with no name attribute', () => {
+    expect(serializeFormFields('<select><option value="x">X</option></select>')).toEqual({})
+  })
+
+  it('defaults an <option> with no value attribute to an empty string', () => {
+    expect(serializeFormFields('<select name="ddlNoValueAttr"><option selected="selected">No Value</option></select>')).toEqual({
+      ddlNoValueAttr: '',
+    })
+  })
+
+  it('decodes HTML entities in captured values', () => {
+    const html = `<input type="text" name="txtAmp" value="A&amp;B" />
+      <select name="ddlAmp"><option value="C&amp;D" selected="selected">CD</option></select>`
+    expect(serializeFormFields(html)).toEqual({ txtAmp: 'A&B', ddlAmp: 'C&D' })
   })
 })
 

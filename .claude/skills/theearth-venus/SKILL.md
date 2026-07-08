@@ -74,6 +74,41 @@ credential か overlap ID を落とすと拒否され「強制ログインに失
   `lastLoginKick` → `DvrSessionHeader.vue` / `DailyReportSessionHeader.vue` の通知バナーまで
   一気通貫で表示される。
 
+### F-GOS0030 の「車輌」絞込 (`txtSVehicle`/`txtEVehicle`) で F-DES1010 を車番検索する (2026-07-08 実機確定)
+
+日報一覧 (F-DES1010) の車番検索はサーバー側絞込で実現できる。ただし**適用フローが
+3 段階**で、1 つでも欠けると「保存は成功するのに一覧は絞り込まれない」状態になる
+(最初の検証で誤って「効かない」と結論しかけた罠):
+
+**効くフロー** (実測: 6572 指定で全行が車輌CD 6572 のみになった):
+
+1. F-DES1010 を GET して **full form を確保** (btnUpdate postback 用)
+2. F-GOS0030 を GET → full form + `txtSVehicle`/`txtEVehicle` (車輌CD range、8桁数値)
+   を差し替えて **`btnOK` (適用) を押下 submit として POST**。応答の startup script
+   `Return(val)` が成功マーカー (実ブラウザでは `window.opener.ReturnDisplayConfig(val)`
+   → 親の `$('#btnUpdate').click()` が走る、`J-DES1010[OperationEdit].js` 実機取得済み)
+3. **F-DES1010 の `btnUpdate` (`ctl00$MainContent$btnUpdate`、「更新」) を step 1 の
+   full form で postback** — **この応答で初めて一覧が絞り込まれる**
+
+**ハマりどころ (すべて実機で「効かない/壊れる」を確認済み)**:
+
+- `lnkSaveCategory` (絞込条件保存) の `__EVENTTARGET` postback だけでは**一覧に反映
+  されない** (設定の保存のみ。F-GOS0030 再 GET では値が見えるので「効いた」と誤認しやすい)
+- `btnOK` 適用後でも **plain GET では絞込が消える** — btnUpdate postback の応答にしか
+  反映されない。全ページ収集 (harvest) は btnUpdate 応答を 1 ページ目として開始する
+  必要がある (`theearth-report-client.ts` の `harvestDailyReport` の `initialHtml`)
+- btnUpdate を hidden だけの**部分 POST で送ると `ddlRowCount` (1ページ表示件数) が
+  既定の 10 に落ちて残留する** (実機で 30→10 に化けて要復旧だった)。ASP.NET の select は
+  POST に含めないと既定値扱いになるため、**full form 直列化 (`serializeFormFields`) が必須**
+- この設定は theearth アカウント単位で共有される (同一アカウントを複数の担当者が共有
+  している運用実績あり)。検索後は **`btnOK` で元値を適用し直して必ず復元**する
+  (`withVehicleNarrow` が finally 相当で書き戻し、復元失敗は主エラーとして loud fail)
+- 2 ページ目以降のページャ postback で絞込が維持されるかは**未検証** (実データが 1 ページ
+  に収まった)。worker 実装は返す直前に車輌CD range で防御的にフィルタして混入を塞いでいる
+
+Worker 実装: `workers/dtako-scraper-relay/src/theearth-report-client.ts` の
+`withVehicleNarrow()` (`/daily-report-api/list?vehicleFrom=&vehicleTo=` から使用)。
+
 ### 状態判定
 
 - ログインフォームは `txtOverlapSessionID`/`btnForced` を **value 無し hidden で常時含む**。

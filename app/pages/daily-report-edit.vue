@@ -72,6 +72,11 @@ const periodForm = reactive({
   to: defaultDateTimeLocal(0),
 })
 
+/** 車輌CD (8桁以内の数値、theearth 表示条件指定 txtSVehicle/txtEVehicle の形式)。
+ * 空なら車輌絞込なしで検索する。 */
+const vehicleCd = ref('')
+const VEHICLE_CD_RE = /^\d{1,8}$/
+
 const rows = ref<DailyReportRow[]>([])
 const sortOk = ref<boolean | null>(null)
 const listLoading = ref(false)
@@ -86,12 +91,25 @@ function toReportDateTime(value: string): string {
 async function loadList() {
   const s = session.value
   if (!s) return
+  const trimmedVehicleCd = vehicleCd.value.trim()
+  if (trimmedVehicleCd && !VEHICLE_CD_RE.test(trimmedVehicleCd)) {
+    listError.value = '車輌CDは8桁以内の数値で指定してください'
+    return
+  }
   listLoading.value = true
   listError.value = null
   try {
+    const query: Record<string, string> = {
+      from: toReportDateTime(periodForm.from),
+      to: toReportDateTime(periodForm.to),
+    }
+    if (trimmedVehicleCd) {
+      query.vehicleFrom = trimmedVehicleCd
+      query.vehicleTo = trimmedVehicleCd
+    }
     const res = await $fetch<{ rows: DailyReportRow[], sortOk: boolean }>('/daily-report-api/list', {
       headers: authHeaders(),
-      query: { from: toReportDateTime(periodForm.from), to: toReportDateTime(periodForm.to) },
+      query,
     })
     rows.value = res.rows
     sortOk.value = res.sortOk
@@ -325,10 +343,17 @@ onMounted(() => {
             <UFormField label="読取日 (退社日時) 上限">
               <UInput v-model="periodForm.to" type="datetime-local" class="w-56" />
             </UFormField>
+            <UFormField label="車輌CD (絞込、任意)">
+              <UInput v-model="vehicleCd" icon="i-lucide-truck" placeholder="例: 6572" class="w-32" />
+            </UFormField>
             <UButton icon="i-lucide-search" label="日報を検索" :loading="listLoading" @click="loadList" />
             <UButton icon="i-lucide-file-archive" label="編集後 csvdata.zip をダウンロード" variant="outline" :loading="zipLoading" @click="downloadZip" />
             <UButton icon="i-lucide-lock-open" label="編集制御解除" variant="outline" color="warning" :loading="unlockLoading" @click="unlockAll" />
           </div>
+          <p v-if="vehicleCd.trim()" class="mt-2 text-xs text-gray-400">
+            車輌CD 絞込は theearth 側のアカウント共通設定 (表示条件指定) を検索中だけ一時的に書き換えます。
+            検索完了後は自動で元の設定に戻ります。
+          </p>
 
           <div v-if="sortOk === false" class="mt-3 text-sm text-amber-700 bg-amber-50 dark:bg-amber-950 dark:text-amber-300 rounded-lg p-3">
             表示条件指定 (F-GOS0030) の並び順が「読取日 降順」になっていません。早期打ち切りを無効化して

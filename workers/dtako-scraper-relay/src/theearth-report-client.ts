@@ -27,6 +27,7 @@ import {
   findFormFieldById,
   findTagById,
   postForm,
+  serializeFormFields,
   TheearthClientError,
   type CookieJar,
   type CsvDateRange,
@@ -450,6 +451,227 @@ export async function verifyReadNoDescending(
   return orderSelected === "ReadNo" && descChecked;
 }
 
+export interface VehicleNarrowRange {
+  /** 車輌CD 下限 (F-GOS0030 の `txtSVehicle`、8桁以内の数値)。 */
+  from: string;
+  /** 車輌CD 上限 (`txtEVehicle`)。単一車輌に絞る場合は from と同じ値を渡す。 */
+  to: string;
+}
+
+const VEHICLE_CD_RE = /^\d{1,8}$/;
+
+function validateVehicleCd(value: string, label: string): void {
+  if (!VEHICLE_CD_RE.test(value)) {
+    throw new ReportParamError(`車輌CD (${label}) は8桁以内の数値で指定してください: "${value}"`);
+  }
+}
+
+async function fetchDisplayConfigHtml(
+  jar: CookieJar,
+  url: string,
+  fetchImpl: FetchLike,
+  timeoutMs: number,
+): Promise<string> {
+  const res = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
+  if (!res.ok) {
+    throw new TheearthClientError(`表示条件指定ページの取得が HTTP ${res.status} を返しました`);
+  }
+  const html = await res.text();
+  if (isLoginRedirect(html)) {
+    throw new VenusSessionExpiredError(
+      "表示条件指定ページがログイン画面を返しました — theearth セッションが切れています",
+    );
+  }
+  return html;
+}
+
+/** F-DES1010 [運行データ入力(一覧)] を GET して full form HTML を返す (btnUpdate
+ * postback 用)。 */
+async function fetchOperationListHtml(
+  jar: CookieJar,
+  url: string,
+  fetchImpl: FetchLike,
+  timeoutMs: number,
+): Promise<string> {
+  const res = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
+  if (!res.ok) {
+    throw new TheearthClientError(`運行データ入力一覧の取得が HTTP ${res.status} を返しました`);
+  }
+  const html = await res.text();
+  if (isLoginRedirect(html)) {
+    throw new VenusSessionExpiredError(
+      "運行データ入力一覧がログイン画面を返しました — theearth セッションが切れています",
+    );
+  }
+  return html;
+}
+
+/** F-GOS0030 の車輌絞込を `btnOK` (適用) postback で反映する。`lnkSaveCategory`
+ * (絞込条件保存) では**一覧に反映されない** (実機確認、withVehicleNarrow の doc 参照)。 */
+async function applyVehicleNarrowConfig(
+  jar: CookieJar,
+  url: string,
+  baseline: Record<string, string>,
+  fieldNames: { sName: string; eName: string },
+  applyButton: { name: string; value: string },
+  vehicleFrom: string,
+  vehicleTo: string,
+  fetchImpl: FetchLike,
+  timeoutMs: number,
+): Promise<void> {
+  const body = new URLSearchParams({
+    ...baseline,
+    [fieldNames.sName]: vehicleFrom,
+    [fieldNames.eName]: vehicleTo,
+    [applyButton.name]: applyButton.value || "適用",
+  });
+  const res = await postForm(jar, url, body, fetchImpl, timeoutMs);
+  if (!res.ok) {
+    throw new TheearthClientError(`表示条件指定 (車輌絞込) の適用が HTTP ${res.status} を返しました`);
+  }
+  const html = await res.text();
+  if (isLoginRedirect(html)) {
+    throw new VenusSessionExpiredError(
+      "表示条件指定 (車輌絞込) の適用後にログイン画面が返されました — theearth セッションが切れています",
+    );
+  }
+}
+
+/** F-DES1010 の `btnUpdate` (更新) を **full form** で postback し、絞込反映済みの
+ * 1ページ目 HTML を返す。hidden だけの部分 POST だと `ddlRowCount` (表示件数) 等が
+ * 既定値へ落ちる (実機で 30行→10行 に化けた) ため、必ず `serializeFormFields` で
+ * ページ全体を直列化して送る。 */
+async function postOperationListUpdate(
+  jar: CookieJar,
+  url: string,
+  listHtml: string,
+  updateButton: { name: string; value: string },
+  fetchImpl: FetchLike,
+  timeoutMs: number,
+): Promise<string> {
+  const body = new URLSearchParams({
+    ...serializeFormFields(listHtml),
+    [updateButton.name]: updateButton.value || "更新",
+  });
+  const res = await postForm(jar, url, body, fetchImpl, timeoutMs);
+  if (!res.ok) {
+    throw new TheearthClientError(`運行データ入力一覧の更新 (btnUpdate) が HTTP ${res.status} を返しました`);
+  }
+  const html = await res.text();
+  if (isLoginRedirect(html)) {
+    throw new VenusSessionExpiredError(
+      "運行データ入力一覧の更新後にログイン画面が返されました — theearth セッションが切れています",
+    );
+  }
+  return html;
+}
+
+/**
+ * F-GOS0030 の「車輌」絞込条件 (`txtSVehicle`/`txtEVehicle`、車輌CD 範囲) を
+ * 一時的に適用して `fn` を実行し、**成功しても失敗しても必ず元の値へ書き戻す**。
+ *
+ * 実ブラウザの適用フロー (cdp-pair 実機確定、2026-07-08。これ以外の経路は**効かない**):
+ *
+ * 1. 親ページ F-DES1010 を開いた状態で F-GOS0030 (別窓) に車輌CD range を入力
+ * 2. **`btnOK` (適用) postback** — 応答の startup script `Return(val)` が
+ *    `window.opener.ReturnDisplayConfig(val)` を呼ぶ
+ * 3. `ReturnDisplayConfig` は **親ページの `btnUpdate` (更新) を click** (J-DES1010
+ *    実機取得済み) — この **full form の btnUpdate postback 応答で初めて一覧が
+ *    絞り込まれる** (実測: 6572 指定で全行が車輌CD 6572 のみになった)
+ *
+ * ハマりどころ (どれも実機で「効かない」を確認済み):
+ * - `lnkSaveCategory` (絞込条件保存) だけでは一覧に反映されない (保存のみ)
+ * - `btnOK` 適用後でも **plain GET では反映されない** — btnUpdate postback が必須
+ * - btnUpdate を hidden だけの部分 POST で送ると `ddlRowCount` 等が既定値に落ちる
+ *   (30行→10行に化ける) — full form 直列化 (`serializeFormFields`) が必須
+ *
+ * この設定はアカウント単位で共有される (実際に複数の担当者 sakai/honda/k.kodama 等が
+ * 同一アカウントを共有している実績が LicenceOverDialog で確認済み)。書き戻しを怠ると
+ * 他の担当者が web地球号 の画面を直接使った時にも**黙って車輌が絞り込まれたまま**に
+ * なるため、`fn` のエラーより書き戻し失敗の方を運用上深刻として主エラーで throw する
+ * (`fn` のエラーがあれば付記)。btnUpdate が見つからない等の前提不成立は、共有設定を
+ * 触る前 (適用 postback の前) に loud fail する。
+ *
+ * `fn` には絞込反映済みの 1ページ目 HTML を渡す (`harvestDailyReport` の
+ * `initialHtml` にそのまま流し込む用)。
+ */
+export async function withVehicleNarrow<T>(
+  jar: CookieJar,
+  range: VehicleNarrowRange,
+  fn: (jar: CookieJar, firstPageHtml: string) => Promise<T>,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<T> {
+  validateVehicleCd(range.from, "下限");
+  validateVehicleCd(range.to, "上限");
+
+  const listUrl = `${BASE_URL}${OPERATION_LIST_PATH}`;
+  const configUrl = `${BASE_URL}${DISPLAY_CONFIG_PATH}`;
+
+  // 実ブラウザ同様、親ページ (F-DES1010) の full form を先に確保する。btnUpdate が
+  // 見つからない場合は共有設定 (F-GOS0030) を触る前にここで loud fail する。
+  const listHtml = await fetchOperationListHtml(jar, listUrl, fetchImpl, timeoutMs);
+  const updateButton = findFormFieldById(listHtml, "btnUpdate");
+  if (!updateButton) {
+    throw new TheearthClientError(
+      "運行データ入力一覧の更新ボタン (btnUpdate) が見つかりません — theearth-np のページ仕様変更の可能性があります",
+    );
+  }
+
+  const configHtml = await fetchDisplayConfigHtml(jar, configUrl, fetchImpl, timeoutMs);
+  const sField = findFormFieldById(configHtml, "txtSVehicle");
+  const eField = findFormFieldById(configHtml, "txtEVehicle");
+  if (!sField || !eField) {
+    throw new TheearthClientError(
+      "表示条件指定ページの車輌絞込フィールド (txtSVehicle/txtEVehicle) が見つかりません — " +
+        "theearth-np のページ仕様変更の可能性があります",
+    );
+  }
+  const applyButton = findFormFieldById(configHtml, "btnOK");
+  if (!applyButton) {
+    throw new TheearthClientError(
+      "表示条件指定ページの適用ボタン (btnOK) が見つかりません — theearth-np のページ仕様変更の可能性があります",
+    );
+  }
+
+  const baseline = serializeFormFields(configHtml);
+  const fieldNames = { sName: sField.name, eName: eField.name };
+  const originalFrom = baseline[fieldNames.sName] ?? "";
+  const originalTo = baseline[fieldNames.eName] ?? "";
+
+  await applyVehicleNarrowConfig(
+    jar, configUrl, baseline, fieldNames, applyButton, range.from, range.to, fetchImpl, timeoutMs,
+  );
+
+  let result: T | undefined;
+  let fnFailed = false;
+  let fnError: unknown;
+  try {
+    const firstPageHtml = await postOperationListUpdate(jar, listUrl, listHtml, updateButton, fetchImpl, timeoutMs);
+    result = await fn(jar, firstPageHtml);
+  } catch (err) {
+    fnFailed = true;
+    fnError = err;
+  }
+
+  try {
+    await applyVehicleNarrowConfig(
+      jar, configUrl, baseline, fieldNames, applyButton, originalFrom, originalTo, fetchImpl, timeoutMs,
+    );
+  } catch (restoreErr) {
+    const restoreMessage = restoreErr instanceof Error ? restoreErr.message : String(restoreErr);
+    const fnMessage = fnFailed ? (fnError instanceof Error ? fnError.message : String(fnError)) : null;
+    throw new TheearthClientError(
+      `車輌絞込 (F-GOS0030) を元 ("${originalFrom}"〜"${originalTo}") へ戻せませんでした: ${restoreMessage}` +
+        (fnMessage ? ` (元の処理も失敗していました: ${fnMessage})` : "") +
+        " — theearth の表示条件指定を手動で確認してください",
+    );
+  }
+
+  if (fnFailed) throw fnError;
+  return result as T;
+}
+
 // ---------------------------------------------------------------------------
 // F-DES1010 [運行データ入力(一覧)] — 全ページ収集
 //
@@ -667,27 +889,38 @@ const MAX_HARVEST_PAGES = 500;
  * postback** で行う。UpdatePanel は非同期送信時のみ部分レンダリングの差分応答
  * (MS AJAX delta 形式) を返す仕組みで、同期 postback なら常に完全な HTML が
  * 返る (`getVehicleLogTrack` の 2 段階 postback と同じ技法)。
+ *
+ * `initialHtml` を渡すと初回 GET を省略してそれを 1 ページ目として扱う。
+ * 車輌絞込 (`withVehicleNarrow`) は **btnUpdate postback の応答にしか反映されず、
+ * plain GET では絞込が消える** (cdp-pair 実機確認、2026-07-08) ため、絞込ハーベスト
+ * では btnUpdate 応答をここへ流し込むことが必須。
  */
 export async function harvestDailyReport(
   jar: CookieJar,
   range: HarvestRange,
   fetchImpl: FetchLike = fetch,
   timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+  initialHtml?: string,
 ): Promise<DailyReportRow[]> {
   if (!RANGE_BOUND_RE.test(range.from) || !RANGE_BOUND_RE.test(range.to)) {
     throw new ReportParamError('期間は "YYYY/MM/DD HH:mm" 形式で指定してください');
   }
 
   const url = `${BASE_URL}${DAILY_REPORT_PATH}`;
-  const getRes = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
-  if (!getRes.ok) {
-    throw new TheearthClientError(`運転日報ページの取得が HTTP ${getRes.status} を返しました`);
-  }
-  let html = await getRes.text();
-  if (isLoginRedirect(html)) {
-    throw new VenusSessionExpiredError(
-      "運転日報ページがログイン画面を返しました — theearth セッションが切れています",
-    );
+  let html: string;
+  if (initialHtml !== undefined) {
+    html = initialHtml;
+  } else {
+    const getRes = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
+    if (!getRes.ok) {
+      throw new TheearthClientError(`運転日報ページの取得が HTTP ${getRes.status} を返しました`);
+    }
+    html = await getRes.text();
+    if (isLoginRedirect(html)) {
+      throw new VenusSessionExpiredError(
+        "運転日報ページがログイン画面を返しました — theearth セッションが切れています",
+      );
+    }
   }
 
   // 前回のページ位置が残っている可能性があるため、まず「最初」へ戻す
