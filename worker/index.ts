@@ -35,14 +35,16 @@ export default {
       url.pathname === "/ws/scraper"
       || url.pathname.startsWith("/scraper-zip/")
       || url.pathname.startsWith("/dvr-api/")
+      || url.pathname.startsWith("/daily-report-api/")
     ) {
       // comp_id/session 抽出と DO routing は relay worker (default fetch) が行う。
       // ここは原 request (WS upgrade + query string、または zip ダウンロード GET) を
       // そのまま転送するだけ。/scraper-zip/* は SCRAPER_MODE=http (Refs
       // ohishi-exp/dtako-scraper#22) が生成する1回限りのダウンロード URL。
       // /dvr-api/* は /dvr-viewer (Refs #90) の DVR viewer API (login/notifications/
-      // file/logout)。routing ヘッダ (X-Dvr-Comp-Id / X-Dvr-User-B64) の解決も
-      // relay worker 側で行う。
+      // file/logout)。/daily-report-api/* は /daily-report-edit (日報編集、Refs #169)
+      // の API — /dvr-api/* とは別の theearth ログインセッションを持つ
+      // (X-Report-Comp-Id / X-Report-User-B64 routing ヘッダ、relay worker 側で解決)。
       return env.SCRAPER_RELAY.fetch(request);
     }
     return (nitroApp as NitroHandler).fetch(request, env, ctx);

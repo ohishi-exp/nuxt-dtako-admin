@@ -1,0 +1,698 @@
+/**
+ * theearth-np.com の運行データ編集・再集計・日報取得クライアント (日報編集、Refs #169)。
+ *
+ * F-DES1010/1012/F-NRS1010/F-GOS0030 は WCF VenusBridge ではなく全て ASP.NET
+ * WebForms の postback。cookie jar / login / hidden field 抽出は既存の
+ * `./theearth-client` をそのまま再利用する (二重実装しない)。フィールド仕様・
+ * ボタン名・DOM 構造の実機確認結果は `.claude/skills/theearth-venus/SKILL.md`
+ * (「運行データ編集・再集計・連動・日報」節) に集約されている。
+ *
+ * **未検証部分について**: 以下は SKILL.md でも「実機で要確認」と明記されている、
+ * または今回のドキュメント調査からの推測に留まる:
+ * - lstFuel 等の `id` 属性の完全形 (`MainContent_lstFuel_ctrl<i>_<field>` は
+ *   他ページの `MainContent_X_Y` 命名慣習からの推測。POST 用 `name` はページから
+ *   都度読み取るので id さえ一致すれば動く)
+ * - F-NRS1010 ページャの `__doPostBack` target/argument の命名規則
+ * - 保存 (`btnExpenceEditSetting`) postback 後の遷移先・viewstate 更新挙動
+ * これらは「黙って200」を避けるため、期待した要素/文言が見つからない場合は必ず
+ * TheearthClientError (または派生) を throw する設計にしてある。実運用で構造が
+ * 違えば早期に loud fail するので、staging 実機確認で修正する。
+ */
+import {
+  BASE_URL,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  downloadCsvZip,
+  extractHiddenFields,
+  fetchWithJar,
+  findFormFieldById,
+  findTagById,
+  postForm,
+  TheearthClientError,
+  type CookieJar,
+  type CsvDateRange,
+  type FetchLike,
+  type ScrapeTimeouts,
+} from "./theearth-client";
+import { isLoginRedirect, VenusSessionExpiredError } from "./theearth-venus-client";
+
+const DAILY_REPORT_PATH = "/F-NRS1010[DailyOperationReport].aspx";
+const DISPLAY_CONFIG_PATH = "/F-GOS0030[DataDisplayConfig].aspx";
+const OPERATION_LIST_PATH = "/F-DES1010[OperationEdit].aspx";
+const EXPENSE_EDIT_PATH = "/F-DES1012[OperationExpenseEdit].aspx";
+
+/** パラメータ不正 (400 相当)。theearth 側エラーではなく呼び出し元の入力ミス。 */
+export class ReportParamError extends TheearthClientError {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReportParamError";
+  }
+}
+
+const OPE_NO_RE = /^\d{22}$/;
+const START_OPE_RE = /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}$/;
+const RANGE_BOUND_RE = /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}$/;
+
+function validateOpeNo(opeNo: string): void {
+  if (!OPE_NO_RE.test(opeNo)) {
+    throw new ReportParamError(`運行No (OpeNo) は22桁の数値で指定してください: "${opeNo}"`);
+  }
+}
+
+function validateStartOpe(startOpe: string): void {
+  if (!START_OPE_RE.test(startOpe)) {
+    throw new ReportParamError(
+      `出庫日時 (StartOpe) は "YYYY/MM/DD HH:mm:ss" 形式で指定してください: "${startOpe}"`,
+    );
+  }
+}
+
+/** F-DES1011/1012/1013 共通の URL 直接遷移形式。StartOpe の空白だけ `%20` に
+ * 置換する (SKILL.md 実機確認: "2026/07/07 18:31:06" → "2026/07/07%2018:31:06")。
+ * `encodeURIComponent` は `/` `:` も encode してしまい実機の形式と一致しなくなる
+ * ため使わない。 */
+function buildOperationExpenseUrl(opeNo: string, startOpe: string): string {
+  const encodedStartOpe = startOpe.replace(/ /g, "%20");
+  return `${BASE_URL}${EXPENSE_EDIT_PATH}?OpeNo=${opeNo}&StartOpe=${encodedStartOpe}`;
+}
+
+/** 「他ユーザー編集中のため処理を中止しました」(SKILL.md「排他ロック」節、実機確認
+ * 済みの失敗メッセージ)。postback 応答が 200 でも実際には失敗しているケースを
+ * 黙って成功扱いしない。 */
+function assertNoOtherEditConflict(html: string, actionLabel: string): void {
+  if (html.includes("他ユーザー編集中のため処理を中止しました")) {
+    throw new TheearthClientError(
+      `${actionLabel}が失敗しました: 他ユーザーが編集中のため処理を中止しました。時間をおいて再試行するか、` +
+        "「編集制御解除」で残留ロックを解放してください",
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// F-DES1012 [運行経費入力] — 給油行 (lstFuel)
+// ---------------------------------------------------------------------------
+
+/** `lstFuel$ctrl<i>$<field>` の各フィールド id サフィックス。**値側 (右辺) は
+ * theearth の POST 名をそのまま使うため、原文スペルミス "Quantuty" もそのまま**
+ * (公開型フィールド名 `quantity` は正しいスペルにしてある)。 */
+const FUEL_FIELD_IDS = {
+  operationNo: "itxtOperationNo",
+  subNo: "itxtSubNo",
+  supplyCategory: "itxtSupplyCategory",
+  supplyStation: "itxtSupplyStation",
+  supplyType: "itxtSupplyType",
+  dateTime: "itxtDateTime",
+  quantity: "itxtQuantuty",
+} as const;
+
+function fuelFieldId(ctrlIndex: number, idSuffix: string): string {
+  return `MainContent_lstFuel_ctrl${ctrlIndex}_${idSuffix}`;
+}
+
+/** 給油行 1 件 (`lstFuel$ctrl<i>$*`)。分類/区分/種別は CD (4桁) のみ。 */
+export interface FuelRow {
+  ctrlIndex: number;
+  operationNo: string;
+  subNo: string;
+  supplyCategory: string;
+  supplyStation: string;
+  supplyType: string;
+  dateTime: string;
+  quantity: string;
+}
+
+export interface ExpenseForm {
+  opeNo: string;
+  startOpe: string;
+  fuelRows: FuelRow[];
+}
+
+function parseFuelRows(html: string): FuelRow[] {
+  const indexes = [...html.matchAll(/id="MainContent_lstFuel_ctrl(\d+)_itxtDateTime"/g)].map((m) =>
+    Number(m[1]),
+  );
+  return indexes.map((ctrlIndex) => {
+    const get = (idSuffix: string) => findFormFieldById(html, fuelFieldId(ctrlIndex, idSuffix))?.value ?? "";
+    return {
+      ctrlIndex,
+      operationNo: get(FUEL_FIELD_IDS.operationNo),
+      subNo: get(FUEL_FIELD_IDS.subNo),
+      supplyCategory: get(FUEL_FIELD_IDS.supplyCategory),
+      supplyStation: get(FUEL_FIELD_IDS.supplyStation),
+      supplyType: get(FUEL_FIELD_IDS.supplyType),
+      dateTime: get(FUEL_FIELD_IDS.dateTime),
+      quantity: get(FUEL_FIELD_IDS.quantity),
+    };
+  });
+}
+
+/** GET F-DES1012 — 給油行の現在値一覧を取得する (編集フォームの初期表示用)。 */
+export async function getExpenseForm(
+  jar: CookieJar,
+  opeNo: string,
+  startOpe: string,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<ExpenseForm> {
+  validateOpeNo(opeNo);
+  validateStartOpe(startOpe);
+  const url = buildOperationExpenseUrl(opeNo, startOpe);
+  const res = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
+  if (!res.ok) {
+    throw new TheearthClientError(`経費入力ページの取得が HTTP ${res.status} を返しました`);
+  }
+  const html = await res.text();
+  if (isLoginRedirect(html)) {
+    throw new VenusSessionExpiredError(
+      "経費入力ページがログイン画面を返しました — theearth セッションが切れています",
+    );
+  }
+  const fuelRows = parseFuelRows(html);
+  if (fuelRows.length === 0) {
+    // 給油 0 件の運行は実運用上あり得るが、ページ構造自体が想定と違う場合も同じ
+    // 「0件」に見えてしまうため、hidden field (__VIEWSTATE) の有無で「経費入力
+    // ページとして読めているか」だけは切り分ける。
+    const hidden = extractHiddenFields(html);
+    if (!hidden.__VIEWSTATE) {
+      throw new TheearthClientError(
+        "経費入力ページの構造が想定と異なります (__VIEWSTATE が見つかりません) — " +
+          "theearth-np のページ仕様変更の可能性があります",
+      );
+    }
+  }
+  return { opeNo, startOpe, fuelRows };
+}
+
+/** 給油行 1 件を書き換えて全 lstFuel 行を再送する内部ヘルパ。ASP.NET postback は
+ * 差分ではなくフォーム全体を要求するため、まず現在の全行を GET で読み直し、
+ * 対象行 (ctrlIndex) だけ上書きした状態で送る。 */
+async function postFuelRows(
+  jar: CookieJar,
+  url: string,
+  html: string,
+  rows: FuelRow[],
+  edited: FuelRow | null,
+  buttonId: string,
+  defaultButtonLabel: string,
+  fetchImpl: FetchLike,
+  timeoutMs: number,
+): Promise<{ postHtml: string }> {
+  const hidden = extractHiddenFields(html);
+  const body: Record<string, string> = { ...hidden };
+  for (const row of rows) {
+    const source = edited && row.ctrlIndex === edited.ctrlIndex ? edited : row;
+    for (const [key, idSuffix] of Object.entries(FUEL_FIELD_IDS) as [keyof FuelRow, string][]) {
+      const ref = findFormFieldById(html, fuelFieldId(row.ctrlIndex, idSuffix));
+      if (ref) body[ref.name] = String(source[key]);
+    }
+  }
+  const button = findFormFieldById(html, buttonId);
+  if (!button) {
+    throw new TheearthClientError(
+      `ボタン (${buttonId}) が見つかりません — theearth-np のページ仕様変更の可能性があります`,
+    );
+  }
+  body[button.name] = button.value || defaultButtonLabel;
+
+  const postRes = await postForm(jar, url, new URLSearchParams(body), fetchImpl, timeoutMs);
+  if (!postRes.ok) {
+    throw new TheearthClientError(`POST が HTTP ${postRes.status} を返しました`);
+  }
+  const postHtml = await postRes.text();
+  if (isLoginRedirect(postHtml)) {
+    throw new VenusSessionExpiredError(
+      "POST 後にログイン画面が返されました — theearth セッションが切れています",
+    );
+  }
+  return { postHtml };
+}
+
+export interface SaveFuelRowParams {
+  opeNo: string;
+  startOpe: string;
+  ctrlIndex: number;
+  supplyCategory: string;
+  supplyStation: string;
+  supplyType: string;
+  dateTime: string;
+  quantity: string;
+}
+
+export interface SaveFuelRowResult {
+  fuelRows: FuelRow[];
+}
+
+/** POST 相当: `btnExpenceEditSetting` postback で給油行 1 件を登録する
+ * (SKILL.md 実機確認済みの原文スペル "Expence" をボタン名で使う)。 */
+export async function saveFuelRow(
+  jar: CookieJar,
+  params: SaveFuelRowParams,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<SaveFuelRowResult> {
+  validateOpeNo(params.opeNo);
+  validateStartOpe(params.startOpe);
+  const url = buildOperationExpenseUrl(params.opeNo, params.startOpe);
+
+  const getRes = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
+  if (!getRes.ok) {
+    throw new TheearthClientError(`経費入力ページの取得が HTTP ${getRes.status} を返しました`);
+  }
+  const html = await getRes.text();
+  if (isLoginRedirect(html)) {
+    throw new VenusSessionExpiredError(
+      "経費入力ページがログイン画面を返しました — theearth セッションが切れています",
+    );
+  }
+  const rows = parseFuelRows(html);
+  const target = rows.find((r) => r.ctrlIndex === params.ctrlIndex);
+  if (!target) {
+    throw new ReportParamError(`給油行 (ctrlIndex=${params.ctrlIndex}) が見つかりません`);
+  }
+  const edited: FuelRow = {
+    ...target,
+    supplyCategory: params.supplyCategory,
+    supplyStation: params.supplyStation,
+    supplyType: params.supplyType,
+    dateTime: params.dateTime,
+    quantity: params.quantity,
+  };
+
+  const { postHtml } = await postFuelRows(
+    jar,
+    url,
+    html,
+    rows,
+    edited,
+    "MainContent_btnExpenceEditSetting",
+    "登録",
+    fetchImpl,
+    timeoutMs,
+  );
+  assertNoOtherEditConflict(postHtml, "給油行の登録");
+  return { fuelRows: parseFuelRows(postHtml) };
+}
+
+export interface RecalculateExpenseResult {
+  /** 再集計成功後に「システム連動開始」ボタンが enable されたか
+   * (SKILL.md: 再集計成功の副次確認シグナル)。 */
+  linkSysEnabled: boolean;
+}
+
+/** POST 相当: `btnScore` postback で評価点を再集計する (F-DES1013 の「作業時間
+ * 再集計」と物理的に同一ボタン、F-DES1012 では「評価点再集計」ラベル)。 */
+export async function recalculateExpense(
+  jar: CookieJar,
+  opeNo: string,
+  startOpe: string,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<RecalculateExpenseResult> {
+  validateOpeNo(opeNo);
+  validateStartOpe(startOpe);
+  const url = buildOperationExpenseUrl(opeNo, startOpe);
+
+  const getRes = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
+  if (!getRes.ok) {
+    throw new TheearthClientError(`経費入力ページの取得が HTTP ${getRes.status} を返しました`);
+  }
+  const html = await getRes.text();
+  if (isLoginRedirect(html)) {
+    throw new VenusSessionExpiredError(
+      "経費入力ページがログイン画面を返しました — theearth セッションが切れています",
+    );
+  }
+  const rows = parseFuelRows(html);
+
+  const { postHtml } = await postFuelRows(
+    jar,
+    url,
+    html,
+    rows,
+    null,
+    "MainContent_btnScore",
+    "評価点再集計",
+    fetchImpl,
+    timeoutMs,
+  );
+  assertNoOtherEditConflict(postHtml, "評価点再集計");
+
+  // 成功シグナルは「再集計が終了しました。」モーダル文言 (SKILL.md 実機確認済み)。
+  // これが無ければ何が起きたか分からないまま成功扱いにしない。
+  if (!postHtml.includes("再集計が終了しました")) {
+    throw new TheearthClientError(
+      "評価点再集計の完了メッセージ (「再集計が終了しました。」) が確認できませんでした — " +
+        "theearth-np のページ仕様変更、または再集計が失敗した可能性があります",
+    );
+  }
+  const linkSysTag = findTagById(postHtml, "MainContent_btnLinkSys");
+  const linkSysEnabled = !!linkSysTag && !/class=["'][^"']*aspNetDisabled/i.test(linkSysTag);
+  return { linkSysEnabled };
+}
+
+// ---------------------------------------------------------------------------
+// F-DES1010 [運行データ入力(一覧)] — 編集制御解除
+// ---------------------------------------------------------------------------
+
+/** `btnInitialize` postback で残留ロックを全強制解放する
+ * (SKILL.md「排他ロック」節)。 */
+export async function forceUnlockAll(
+  jar: CookieJar,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<void> {
+  const url = `${BASE_URL}${OPERATION_LIST_PATH}`;
+  const getRes = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
+  if (!getRes.ok) {
+    throw new TheearthClientError(`運行データ入力一覧の取得が HTTP ${getRes.status} を返しました`);
+  }
+  const html = await getRes.text();
+  if (isLoginRedirect(html)) {
+    throw new VenusSessionExpiredError(
+      "運行データ入力一覧がログイン画面を返しました — theearth セッションが切れています",
+    );
+  }
+  const hidden = extractHiddenFields(html);
+  const button = findFormFieldById(html, "MainContent_btnInitialize");
+  if (!button) {
+    throw new TheearthClientError(
+      "編集制御解除ボタン (btnInitialize) が見つかりません — theearth-np のページ仕様変更の可能性があります",
+    );
+  }
+  const body = new URLSearchParams({ ...hidden, [button.name]: button.value || "編集制御解除" });
+  const postRes = await postForm(jar, url, body, fetchImpl, timeoutMs);
+  if (!postRes.ok) {
+    throw new TheearthClientError(`編集制御解除 POST が HTTP ${postRes.status} を返しました`);
+  }
+  const postHtml = await postRes.text();
+  if (isLoginRedirect(postHtml)) {
+    throw new VenusSessionExpiredError(
+      "編集制御解除後にログイン画面が返されました — theearth セッションが切れています",
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// F-GOS0030 [表示条件指定] — ソート設定確認
+// ---------------------------------------------------------------------------
+
+/** id が指定 suffix で終わる `<select>` の selected option value を返す。
+ * SKILL.md が `[id$=ddlOrder0]` という suffix セレクタで実機検証した経緯に合わせ、
+ * id の完全形 (真の container 階層) を仮定しない。 */
+function extractSelectedOptionValueBySuffix(html: string, idSuffix: string): string | null {
+  const escaped = idSuffix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const selectRe = new RegExp(`<select\\b[^>]*\\bid=["'][^"']*${escaped}["'][^>]*>([\\s\\S]*?)</select>`, "i");
+  const selectMatch = html.match(selectRe);
+  if (!selectMatch) return null;
+  const optionRe = /<option\b([^>]*)>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = optionRe.exec(selectMatch[1])) !== null) {
+    if (/\bselected\b/i.test(m[1])) {
+      const valueMatch = m[1].match(/\bvalue=["']([^"']*)["']/i);
+      return valueMatch ? valueMatch[1] : null;
+    }
+  }
+  return null;
+}
+
+/** id が指定 suffix で終わる radio `<input>` が checked か。 */
+function isRadioCheckedBySuffix(html: string, idSuffix: string): boolean {
+  const escaped = idSuffix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`<input\\b[^>]*\\bid=["'][^"']*${escaped}["'][^>]*>`, "i");
+  const tag = html.match(re)?.[0];
+  return !!tag && /\bchecked\b/i.test(tag);
+}
+
+/** F-GOS0030 の並び順設定が「読取日 (ReadNo) 降順」か確認する。日報グリッドの
+ * 早期打ち切りハーベストの前提チェック (SKILL.md「表示条件指定」節)。 */
+export async function verifyReadNoDescending(
+  jar: CookieJar,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<boolean> {
+  const url = `${BASE_URL}${DISPLAY_CONFIG_PATH}`;
+  const res = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
+  if (!res.ok) {
+    throw new TheearthClientError(`表示条件指定ページの取得が HTTP ${res.status} を返しました`);
+  }
+  const html = await res.text();
+  if (isLoginRedirect(html)) {
+    throw new VenusSessionExpiredError(
+      "表示条件指定ページがログイン画面を返しました — theearth セッションが切れています",
+    );
+  }
+  const orderSelected = extractSelectedOptionValueBySuffix(html, "ddlOrder0");
+  const descChecked = isRadioCheckedBySuffix(html, "rdoDwOrder0");
+  return orderSelected === "ReadNo" && descChecked;
+}
+
+// ---------------------------------------------------------------------------
+// F-NRS1010 [運転日報] — 全ページ収集
+// ---------------------------------------------------------------------------
+
+const DRIVER_STATE_FIELDS = [
+  "lblDriverState1Min",
+  "lblDriverState2Min",
+  "lblDriverState3Min",
+  "lblDriverState4Min",
+  "lblDriverState5Min",
+] as const;
+
+export interface DailyReportRow {
+  operationNo: string;
+  /** 出庫日時、full year 付き "YYYY/MM/DD H:mm:ss"。 */
+  startDateTime: string;
+  /** 退社日時 (=読取日)。年補正済み "YYYY/MM/DD HH:mm" (ゼロ埋め、辞書順 = 時系列順)。 */
+  workEndDateTime: string;
+  workStartDateTime: string | null;
+  operationStartDateTime: string | null;
+  operationEndDateTime: string | null;
+  /** 作業1〜5時間 ("H:mm"、再集計で変わる本体)。 */
+  driverStateMin: (string | null)[];
+  totalRunningDist: string | null;
+  startOdometer: string | null;
+  endOdometer: string | null;
+  nwayRunningDist: string | null;
+  ewayRunningDist: string | null;
+  bwayRunningDist: string | null;
+  intankFuel1: string | null;
+  ssFuel1: string | null;
+}
+
+function extractReportCell(html: string, field: string, row: number): string | null {
+  const m = html.match(new RegExp(`id="MainContent_T1_lstOperation_${field}_${row}"[^>]*>([\\s\\S]*?)</span>`));
+  if (!m) return null;
+  const v = m[1].replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ").trim();
+  return v === "" ? null : v;
+}
+
+/** 退社日時 "MM/DD HH:mm" (年なし) を、同行の出庫日時 (年あり) を基準に年補正する
+ * (SKILL.md「年跨ぎ補正」節: 退社月<出庫月なら+1年)。zero-pad 済みの
+ * "YYYY/MM/DD HH:mm" は文字列比較がそのまま時系列比較になる。 */
+function normalizeWorkEndDateTime(workEndRaw: string, startDateTimeFull: string): string {
+  const m = workEndRaw.match(/^(\d{1,2})\/(\d{1,2})\s+(\d{1,2}):(\d{2})$/);
+  const startMatch = startDateTimeFull.match(/^(\d{4})\/(\d{1,2})\//);
+  if (!m || !startMatch) {
+    // パース不能な形式はそのまま返す (呼び出し側の単調性検証・範囲比較で弾かれる)。
+    return workEndRaw;
+  }
+  const [, mm, dd, hh, min] = m;
+  const startYear = Number(startMatch[1]);
+  const startMonth = Number(startMatch[2]);
+  const workMonth = Number(mm);
+  const year = workMonth < startMonth ? startYear + 1 : startYear;
+  return `${year}/${mm.padStart(2, "0")}/${dd.padStart(2, "0")} ${hh.padStart(2, "0")}:${min}`;
+}
+
+function parseDailyReportRows(html: string): DailyReportRow[] {
+  const indexes = [...html.matchAll(/id="MainContent_T1_lstOperation_lblOperationNo_(\d+)"/g)].map((m) =>
+    Number(m[1]),
+  );
+  return indexes.map((i) => {
+    const startDateTime = extractReportCell(html, "lblStartDateTime", i) ?? "";
+    const workEndRaw = extractReportCell(html, "lblWorkEndDateTime", i);
+    return {
+      operationNo: extractReportCell(html, "lblOperationNo", i) ?? "",
+      startDateTime,
+      workEndDateTime: workEndRaw ? normalizeWorkEndDateTime(workEndRaw, startDateTime) : "",
+      workStartDateTime: extractReportCell(html, "lblWorkStartDateTime", i),
+      operationStartDateTime: extractReportCell(html, "lblOperationStartDateTime", i),
+      operationEndDateTime: extractReportCell(html, "lblOperationEndDateTime", i),
+      driverStateMin: DRIVER_STATE_FIELDS.map((f) => extractReportCell(html, f, i)),
+      totalRunningDist: extractReportCell(html, "lblTotalRunningDist", i),
+      startOdometer: extractReportCell(html, "lblStartOdometer", i),
+      endOdometer: extractReportCell(html, "lblEndOdometer", i),
+      nwayRunningDist: extractReportCell(html, "lblNwayRunningDist", i),
+      ewayRunningDist: extractReportCell(html, "lblEwayRunningDist", i),
+      bwayRunningDist: extractReportCell(html, "lblBwayRunningDist", i),
+      intankFuel1: extractReportCell(html, "lblIntankFuel1", i),
+      ssFuel1: extractReportCell(html, "lblSSFuel1", i),
+    };
+  });
+}
+
+interface PagerLink {
+  target: string;
+  argument: string;
+  text: string;
+}
+
+/** ページャの `<a href="javascript:__doPostBack('T','A')">TEXT</a>` を全て
+ * 抽出する。target/argument の命名規則 (数値引数か各リンク固有 target か) は
+ * SKILL.md でも実データ未採取のため仮定せず、可視テキストで次ページを探す。 */
+function extractPagerLinks(html: string): PagerLink[] {
+  const links: PagerLink[] = [];
+  const re = /<a\b[^>]*href="javascript:__doPostBack\('([^']*)'\s*,\s*'([^']*)'\)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const text = m[3].replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ").trim();
+    links.push({ target: m[1], argument: m[2], text });
+  }
+  return links;
+}
+
+function extractCurrentPageNumber(html: string): number | null {
+  const m = html.match(/class="[^"]*\bgCurrentPage\b[^"]*"[^>]*>\s*(\d+)\s*</i);
+  return m ? Number(m[1]) : null;
+}
+
+async function postPagerLink(
+  jar: CookieJar,
+  url: string,
+  html: string,
+  link: PagerLink,
+  fetchImpl: FetchLike,
+  timeoutMs: number,
+): Promise<string> {
+  const body = new URLSearchParams({
+    ...extractHiddenFields(html),
+    __EVENTTARGET: link.target,
+    __EVENTARGUMENT: link.argument,
+  });
+  const res = await postForm(jar, url, body, fetchImpl, timeoutMs);
+  if (!res.ok) {
+    throw new TheearthClientError(`運転日報のページ送りが HTTP ${res.status} を返しました`);
+  }
+  const nextHtml = await res.text();
+  if (isLoginRedirect(nextHtml)) {
+    throw new VenusSessionExpiredError(
+      "運転日報のページ送り中にログイン画面が返されました — theearth セッションが切れています",
+    );
+  }
+  return nextHtml;
+}
+
+export interface HarvestRange {
+  /** 退社日時 (=読取日) の下限、"YYYY/MM/DD HH:mm" (含む)。 */
+  from: string;
+  /** 退社日時 (=読取日) の上限、"YYYY/MM/DD HH:mm" (含む)。 */
+  to: string;
+}
+
+/** ページャ誤検出時に無限ループしないための安全弁。 */
+const MAX_HARVEST_PAGES = 500;
+
+/**
+ * F-NRS1010 [運転日報] を全ページ収集する。退社日時 (=読取日) の降順を前提に
+ * `range.from` 未満に落ちた時点で早期打ち切りするが、途中で降順が崩れている
+ * (増加) のを検知したら早期打ち切りを無効化して最終ページまで走査する
+ * (SKILL.md「早期打ち切りの前提」節、config を信じず実データで守る設計)。
+ *
+ * ページ送りは async (`X-MicrosoftAjax`/`__ASYNCPOST`) ヘッダを付けない**同期
+ * postback** で行う。UpdatePanel は非同期送信時のみ部分レンダリングの差分応答
+ * (MS AJAX delta 形式) を返す仕組みで、同期 postback なら常に完全な HTML が
+ * 返る (`getVehicleLogTrack` の 2 段階 postback と同じ技法、実データでの
+ * 検証は未実施 — 想定外の構造を検知したら loud fail する)。
+ */
+export async function harvestDailyReport(
+  jar: CookieJar,
+  range: HarvestRange,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<DailyReportRow[]> {
+  if (!RANGE_BOUND_RE.test(range.from) || !RANGE_BOUND_RE.test(range.to)) {
+    throw new ReportParamError('期間は "YYYY/MM/DD HH:mm" 形式で指定してください');
+  }
+
+  const url = `${BASE_URL}${DAILY_REPORT_PATH}`;
+  const getRes = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
+  if (!getRes.ok) {
+    throw new TheearthClientError(`運転日報ページの取得が HTTP ${getRes.status} を返しました`);
+  }
+  let html = await getRes.text();
+  if (isLoginRedirect(html)) {
+    throw new VenusSessionExpiredError(
+      "運転日報ページがログイン画面を返しました — theearth セッションが切れています",
+    );
+  }
+
+  // 前回のページ位置が残っている可能性があるため、まず「最初」へ戻す
+  // (SKILL.md「開始前に『最初』へ戻す」節)。リンクが無ければ既に1ページ目。
+  const firstLink = extractPagerLinks(html).find((l) => l.text === "最初");
+  if (firstLink) {
+    html = await postPagerLink(jar, url, html, firstLink, fetchImpl, timeoutMs);
+  }
+
+  const rows: DailyReportRow[] = [];
+  let monotonic = true;
+  let prevWorkEnd: string | null = null;
+  let currentPage = extractCurrentPageNumber(html) ?? 1;
+
+  for (let pageCount = 0; pageCount < MAX_HARVEST_PAGES; pageCount++) {
+    const pageRows = parseDailyReportRows(html);
+    let minWorkEndOnPage: string | null = null;
+    for (const row of pageRows) {
+      if (prevWorkEnd !== null && row.workEndDateTime > prevWorkEnd) {
+        monotonic = false;
+      }
+      prevWorkEnd = row.workEndDateTime;
+      rows.push(row);
+      if (minWorkEndOnPage === null || row.workEndDateTime < minWorkEndOnPage) {
+        minWorkEndOnPage = row.workEndDateTime;
+      }
+    }
+
+    if (monotonic && minWorkEndOnPage !== null && minWorkEndOnPage < range.from) {
+      break; // 降順が保たれている前提で from 未満に落ちたので打ち切ってよい
+    }
+
+    const links = extractPagerLinks(html);
+    const nextText = String(currentPage + 1);
+    let nextLink = links.find((l) => l.text === nextText);
+    if (!nextLink) {
+      const moreLink = links.find((l) => l.text === "...");
+      if (moreLink) {
+        html = await postPagerLink(jar, url, html, moreLink, fetchImpl, timeoutMs);
+        currentPage = extractCurrentPageNumber(html) ?? currentPage;
+        nextLink = extractPagerLinks(html).find((l) => l.text === nextText);
+      }
+    }
+    if (!nextLink) {
+      // 「次」リンクが無い = 最終ページに到達したとみなして打ち切る。
+      // 注意: これはページャ構造の想定違いと区別できない (「本当に最終ページ」
+      // と「regex が実際のマークアップに一致していない」を応答内容だけから
+      // 判別する信頼できるシグナルが無いため)。row 数が想定より少なく見える等
+      // 挙動がおかしい場合は staging 実機で pager markup を確認すること。
+      break;
+    }
+    html = await postPagerLink(jar, url, html, nextLink, fetchImpl, timeoutMs);
+    currentPage += 1;
+  }
+
+  return rows.filter((r) => r.workEndDateTime >= range.from && r.workEndDateTime <= range.to);
+}
+
+// ---------------------------------------------------------------------------
+// F-NOS3010 [CSV出力] — 編集後の csvdata.zip
+// ---------------------------------------------------------------------------
+
+/** 編集後の csvdata.zip をダウンロードする。編集は theearth 側 DB に反映される
+ * ため、既存の `downloadCsvZip` をそのまま再利用すれば編集後の値が入った zip が
+ * 取れる (SKILL.md「編集 → 再集計 → zip DL」節)。 */
+export async function downloadEditedZip(
+  jar: CookieJar,
+  range: CsvDateRange,
+  fetchImpl: FetchLike = fetch,
+  timeouts: ScrapeTimeouts = {},
+): Promise<ArrayBuffer> {
+  return downloadCsvZip(jar, range, fetchImpl, timeouts);
+}

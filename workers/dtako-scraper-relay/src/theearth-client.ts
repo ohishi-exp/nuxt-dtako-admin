@@ -165,13 +165,13 @@ function decodeHtmlEntities(value: string): string {
     .replace(/&gt;/g, ">");
 }
 
-function findTagById(html: string, id: string): string | null {
+export function findTagById(html: string, id: string): string | null {
   const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(`<input\\b[^>]*\\bid=["']${escapedId}["'][^>]*>`, "i");
   return html.match(re)?.[0] ?? null;
 }
 
-interface FormFieldRef {
+export interface FormFieldRef {
   name: string;
   value: string;
 }
@@ -180,7 +180,7 @@ interface FormFieldRef {
  * ASP.NET の ClientID (id) と name 属性 (`ctl00$MainContent$...`) は別物なので、
  * id をハードコードした上で name/value は都度ページから読み取る (サイト仕様変更に
  * 対して壊れにくくするため)。 */
-function findFormFieldById(html: string, id: string): FormFieldRef | null {
+export function findFormFieldById(html: string, id: string): FormFieldRef | null {
   const tag = findTagById(html, id);
   if (!tag) return null;
   const nameMatch = tag.match(/\bname=["']([^"']+)["']/i);
@@ -398,7 +398,8 @@ export async function login(
   // 取得が実質の検証になり、セッション不成立なら loud fail する)。
 }
 
-async function postForm(
+/** `application/x-www-form-urlencoded` の postback を送る (ASP.NET WebForms)。 */
+export async function postForm(
   jar: CookieJar,
   url: string,
   body: URLSearchParams,

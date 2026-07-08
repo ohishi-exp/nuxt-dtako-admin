@@ -20,6 +20,8 @@ export default defineConfig({
         'src/dvr-session.ts',
         'src/etc-meisai-client.ts',
         'src/cron.ts',
+        'src/report-session.ts',
+        'src/theearth-report-client.ts',
       ],
       thresholds: {
         lines: 100,

@@ -690,7 +690,7 @@ export interface VehicleLogPoint {
 }
 
 /** postback 応答がログイン画面に戻されているか (セッション切れの検出)。 */
-function isLoginRedirect(html: string): boolean {
+export function isLoginRedirect(html: string): boolean {
   return html.includes("txtPass") || html.includes("F-OES1010");
 }
 
