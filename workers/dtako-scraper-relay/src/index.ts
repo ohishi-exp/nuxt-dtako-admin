@@ -6,6 +6,7 @@
 // 10211/10061、nuxt-items/items-sync と同型)。
 export { DtakoScraperRelayDO } from "./dtako-scraper-relay-do";
 import { resolveDvrRouting } from "./dvr-session";
+import { resolveReportRouting } from "./report-session";
 import { resolveSecretBinding, runScheduledCron } from "./cron";
 
 interface RelayWorkerEnv {
@@ -28,6 +29,20 @@ export default {
       const routing = resolveDvrRouting(request.headers);
       if (!routing) {
         return new Response("Bad Request: missing/invalid X-Dvr-Comp-Id / X-Dvr-User-B64", {
+          status: 400,
+        });
+      }
+      const id = env.RELAY.idFromName(routing.doKey);
+      return env.RELAY.get(id).fetch(request);
+    }
+
+    if (url.pathname.startsWith("/daily-report-api/")) {
+      // /daily-report-edit (日報編集、Refs #169) の API。DVR viewer とは別の
+      // theearth ログインセッションを持つため、DO キーの prefix も `report-`
+      // で分離する (resolveReportRouting)。
+      const routing = resolveReportRouting(request.headers);
+      if (!routing) {
+        return new Response("Bad Request: missing/invalid X-Report-Comp-Id / X-Report-User-B64", {
           status: 400,
         });
       }
