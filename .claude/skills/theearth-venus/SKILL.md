@@ -227,10 +227,126 @@ VenusBridge (`.svc`) ではない。関連ページ:
 | ページ | aspx | 役割 |
 |---|---|---|
 | 運行データ入力 (一覧) | `F-DES1010[OperationEdit]` | 運行一覧 + 編集制御解除 |
-| 作業入力 | `F-DES1013[OperationWorkEdit]` | 作業時間再集計 + システム連動開始 |
-| 経費入力 | `F-DES1012[OperationExpenseEdit]` | 評価点再集計 (= 作業入力と同一 `btnScore`) |
+| 運行データ修正 | `F-DES1011[OperationRevise]` | 乗務員/車両/日時/距離の主要フィールド修正 |
+| 経費入力 | `F-DES1012[OperationExpenseEdit]` | 給油/高速/フェリー/その他経費 + 評価点再集計 |
+| 作業入力 | `F-DES1013[OperationWorkEdit]` | 作業行編集 + 作業時間再集計 + システム連動開始 |
 | 運転日報 | `F-NRS1010[DailyOperationReport]` | 作業時間の一括取得元 (下記) |
 | 表示条件指定 | `F-GOS0030[DataDisplayConfig]` | 日報の並び順/絞込設定 (別ウィンドウ) |
+
+### URL 直接遷移 (F-DES1011/1012/1013 共通、2026-07-08 実機確定)
+
+3 画面とも `?OpeNo=<22桁>&StartOpe=<YYYY/MM/DD HH:mm:ss>` の URL パラメータで**直接編集
+画面に入れる** (F-DES1010 の行クリック postback = `RowsClick` + hidden `#btnRowClick.click()`
+を経由しなくてよい)。code-behind が URL パラメータから運行を解決して viewstate に読み込む。
+
+- **StartOpe は URL エスケープ**: `2026/07/07 18:31:06` → `2026/07/07%2018:31:06`
+- Worker からのアクセスがシンプル: `GET /F-DES1013[OperationWorkEdit].aspx?OpeNo=…&StartOpe=…`
+  → `__VIEWSTATE`/`__EVENTVALIDATION`/`__VIEWSTATEGENERATOR` を hidden から抜き出し、
+  編集した値と `btnRegist1` / `btnScore` を postback する
+- **F-DES1010 の行クリック実装**は参考: `RowsClick(this)` (J-DES1010) が
+  `#txtOperationNo`/`#txtStartDateTime`/`#txtCurrentID`/`#txtIndex` に値をセットしてから
+  hidden `#btnRowClick.click()` を発火 → postback で code-behind が編集画面へ遷移。
+  Worker からは URL パラメータ経路の方が hidden-click を模倣しなくて済む分ラク
+- **排他ロックの挙動は未検証** (実装時に staging で確認、詰まったら F-DES1010 の
+  `btnInitialize` = `ctl00$MainContent$btnInitialize` postback で全解放)
+
+### F-DES1013 [作業入力] の編集フォーム (2026-07-08 実機確定)
+
+`__VIEWSTATE` = 124KB (大)。title = 「作業入力」(空白パディング多数)。
+
+**運行情報 (`txt*`)**:
+- 出庫/帰庫日時: `txtOperationStartDateTime` / `txtOperationEndDateTime` (`YYYY/MM/DD HH:mm:ss`)
+- 出庫/帰庫地点: `txtOperationStart{Place,City}{CD,Name}` / `txtOperationEnd{Place,City}{CD,Name}`
+- 行先/到着: `txtDest{Place,City}{CD,Name}` / `txtArrivalDateTime` / `txtArrivalDateTimeEdit`
+- コース: `txtCourse_1..3`
+
+**作業行 `lstWork` (ctrl0..N 繰り返し)** — 「作業部分の変更」のメイン target:
+| name (`lstWork$ctrl<i>$<field>`) | 意味 |
+|---|---|
+| `itxtStartDateTime` / `intxtStartDateTime` | 開始日時 (表示 / 内部) |
+| `itxtEndDateTime` / `intxtEndDateTime` | 終了日時 |
+| `iddlEventName` (select) | 作業種別 (積み/降ろし/休憩/待機 等、options は業務マスタ由来) |
+| `itxtDriverType` | 運転者区分 |
+| `itxt{Start,End}{Place,City}{CD,Name}` | 出発/到着地点 |
+
+**主要ボタン**:
+- **`btnRegist1`** = 通常保存 postback (name `btnRegist1`)
+- **`btnScore`** = **作業時間再集計** (name `btnScore`、onclick 空 = 純 postback)
+- **`btnLinkSys`** = システム連動開始 (初期 disabled、再集計成功後 enable = **再集計が連動の前提**)
+- **`btnState`/`btnExpense`/`btnSales`/`btnRemarks`** = 別画面遷移 postback (onclick に `notUpdate()`
+  + `WebForm_DoPostBackWithOptions` を含む、= 未保存警告後の遷移)
+- **`btnPro`/`btnNext`** = 前後運行への遷移 (ButtonGreen)
+- **`btnClose`** = `WinClose()` (別ウィンドウなので閉じるだけ)
+- **`btnMultiManEdit`** = 交代データ修正 (`ShowMultiManEdit()`)
+
+### F-DES1012 [運行経費入力] の編集フォーム (2026-07-08 実機確定)
+
+`__VIEWSTATE` = 17KB。title = 「運行経費入力」。**4 つの経費リスト**を持つ:
+
+- **`lstFuel`** = 給油行 ★ 「給油データの登録」のメイン target
+- `lstTollRoad` = 高速道 (通行料)
+- `lstFerry` = フェリー料金
+- `lstOther` = その他経費
+
+**`lstFuel` の給油行フィールド** (name = `lstFuel$ctrl<i>$<field>`):
+| フィールド | maxLen | 意味 |
+|---|---|---|
+| `itxtOperationNo` | — | 運行No (hidden 相当) |
+| `itxtSubNo` | — | サブNo |
+| `itxtSupplyCategory` | 4 | 給油点検分類 (例: 1=主燃料) |
+| `itxtSupplyStation` | 4 | 給油点検区分 (例: 1=自社) |
+| `itxtSupplyType` | 4 | 給油点検種別 (例: 軽油) |
+| `itxtDateTime` | 14 | 日時 |
+| `itxtQuantuty` | 7 | 数量 (**原文スペルミス** "Quantity"→"Quantuty"。誤字をそのまま送る) |
+
+分類/区分/種別の 3 つは **CD (4桁) だけ送る**。名前は表示専用 (UI 側で解決)。
+
+**主要ボタン** (F-DES1013 と共通、`btnScore` のラベルだけ違う):
+- **`btnScore`** = **「評価点再集計」** (F-DES1013 では「作業時間再集計」、**物理的に同一 button**)
+  → **給油だけ編集 → `btnScore` は評価点だけ再計算、作業時間 (DriverState1〜5Min) は変わらない**。
+  作業時間まで再集計するには F-DES1013 に遷移して `btnScore` を追加で押す必要あり
+- **`btnExpenceEditSetting`** = 給油行 1 件モーダルの登録 (**原文スペル "Expence"**)
+- **`btnLinkSys`** = システム連動開始 (disabled 初期状態)
+- **`btnLinkSysEx`** = 連動ファイル作成 (className: none = 非表示)
+- **`btnWork`/`btnState`/`btnSales`/`btnRemarks`** = 別画面遷移 postback
+
+### F-DES1011 [運行データ修正] (2026-07-08 実機確定)
+
+`__VIEWSTATE` = 5.7KB (シンプル)。title = 「運行データ修正」。**主に乗務員変更用のシンプル画面**。
+
+**編集フィールド**:
+- **`txtDriver1`** = 乗務員CD (maxLength=8) ★ 「乗務員登録」のメイン target
+- `txtVehicle` = 車両CD / `txtBranch` = 事業所CD
+- 時刻系 UserControl (年/月/日/時/分の 5 input セット):
+  - `ucStartWork_*` = 出社日時 / `ucEndWork_*` = 退社日時
+  - `ucStartOpe_*` = 出庫日時 / `ucEndOpe_*` = 帰庫日時
+  - `ucOpeDate_*` = 運行日
+- 距離: `txtStartOdo` / `txtEndOdo` / `txtDist` / `txtHaul`(積載) / `txtEway`(高速) / `txtBway`(バイパス)
+
+**ボタン**:
+- **`btnReg`** = 登録 postback (name `btnReg`、className `ButtonBlue`、onclick 空)
+- **`btnCancel`** = `WinClose()` (別窓なので閉じるだけ)
+
+**注意**: URL 直接 GET だと初期値が空。code-behind が JS `PageLoad` (J-DES1011) で埋める設計。
+Worker 実装は「PageLoad を再現するのではなく、実ブラウザと同じ手順を fetch で回す」形が確実
+(GET → hidden とフォームフィールドの初期値を viewstate から読む → 差分だけ変更 → postback)。
+
+### 編集 → 再集計 → zip DL の主要フロー (2026-07-08 実機確定)
+
+「日報編集」のメインユースケース:
+
+1. **一覧**: F-NRS1010 全ページ収集 (期間フィルタ、退社日時 desc 検証)
+2. **編集**: 対象運行を選択 → F-DES1013 (作業行) / F-DES1012 (給油) / F-DES1011 (乗務員) の
+   いずれかに URL パラメータで直接遷移 → フィールドを変更 → 保存 postback (`btnRegist1` /
+   `btnExpenceEditSetting` / `btnReg`)
+3. **再集計** (作業/経費のみ): 保存直後の viewstate で `btnScore` postback
+   - F-DES1013 の `btnScore` = 作業時間再集計 (DriverState1〜5Min が更新)
+   - F-DES1012 の `btnScore` = 評価点再集計 (作業時間は変わらない)
+   - **同じ運行を作業と経費の両方で編集した場合、両方の再集計を回す**
+4. **zip DL**: 期間を指定して `F-NOS3010[GeneralCsv]` の CSV export
+   (`theearth-client.ts` の `downloadCsvZip` 経路を再利用) で csvdata.zip をダウンロード。
+   編集は theearth 側 DB に反映されるため、csvdata.zip も編集後の値が入る
+5. **後始末**: 詰まったら F-DES1010 の `btnInitialize` で残留ロックを全強制解放
 
 ### 「編集日時」タイムスタンプはどこにも無い (確定)
 
