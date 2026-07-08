@@ -328,12 +328,12 @@ onMounted(() => {
   <div>
     <DailyReportSessionHeader title="日報編集" @login="onLogin" />
 
-    <div v-if="!session" class="max-w-7xl mx-auto px-6 py-12 text-center text-gray-400">
+    <div v-if="!session" class="px-6 py-12 text-center text-gray-400">
       右上の「ログイン」から theearth (web地球号) にログインしてください。
     </div>
 
     <template v-else>
-      <div class="max-w-7xl mx-auto px-6 py-6 space-y-6">
+      <div class="px-6 py-6 space-y-6">
         <!-- 期間フィルタ -->
         <UCard>
           <div class="flex flex-wrap items-end gap-3">
