@@ -396,21 +396,13 @@ describe("recalculateExpense", () => {
 
 describe("unlockOperation", () => {
   // 実 DOM 構造 (cdp-pair 実機確認、Refs #183、2026-07-08): `MainContent_` prefix は
-  // 無い。行選択で txtOperationNo/txtStartDateTime/txtIndex/txtCurrentID が埋まる。
+  // 無い。対象行が一覧に現在表示されている必要は無く、txtOperationNo/
+  // txtStartDateTime に対象値を直接書いて送れば解除できる (実機確認済み)。
   function unlockListHtml(opts: {
-    opeNo?: string | null;
-    rowIndex?: number;
     withButton?: boolean;
     buttonNoValue?: boolean;
     withHiddenFields?: boolean;
-    currentPage?: number;
-    omitCurrentPageMarker?: boolean;
-    nextLink?: { target: string; argument: string; text: string };
-    moreLink?: { target: string; argument: string; text: string };
-    firstButton?: { disabled?: boolean };
   } = {}): string {
-    const rowIndex = opts.rowIndex ?? 0;
-    const row = opts.opeNo === null ? "" : `<span id="MainContent_lstOperation_lblOperationNo_${rowIndex}">${opts.opeNo ?? OPE_NO}</span>`;
     const hiddenFields = opts.withHiddenFields === false
       ? ""
       : `
@@ -423,22 +415,14 @@ describe("unlockOperation", () => {
     const button = opts.withButton === false
       ? ""
       : `<input type="submit" id="btnInitialize" name="ctl00$MainContent$btnInitialize"${buttonValueAttr} />`;
-    const links = [
-      opts.nextLink ? pagerLink(opts.nextLink.target, opts.nextLink.argument, opts.nextLink.text) : "",
-      opts.moreLink ? pagerLink(opts.moreLink.target, opts.moreLink.argument, opts.moreLink.text) : "",
-    ].join("\n");
     return `<html><body><form>
       <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
-      ${opts.firstButton ? firstButtonHtml(opts.firstButton) : ""}
-      ${row}
       ${hiddenFields}
       ${button}
-      ${opts.omitCurrentPageMarker ? "" : `<span class="gCurrentPage">${opts.currentPage ?? 1}</span>`}
-      ${links}
     </form></body></html>`;
   }
 
-  it("unlocks the target operation found on the first page", async () => {
+  it("unlocks the target operation", async () => {
     const jar = createCookieJar();
     const fetchImpl = sequenceFetch([html(unlockListHtml()), html(unlockListHtml())]);
     await expect(
@@ -470,97 +454,6 @@ describe("unlockOperation", () => {
     await expect(
       unlockOperation(jar2, { opeNo: OPE_NO, startOpe: START_OPE }, sequenceFetch([html(LOGIN_REDIRECT_HTML)])),
     ).rejects.toThrow(VenusSessionExpiredError);
-  });
-
-  it("resets to the first page via the 最初 submit button before searching (stale page position)", async () => {
-    const jar = createCookieJar();
-    // ページ位置が page 3 に残っている状態で GET すると、その page 3 の HTML が
-    // 返る (実機挙動の再現)。対象行は「最初」に戻った先の page 1 にある。
-    const staleAtPage3 = unlockListHtml({
-      opeNo: "9999999999999999999999",
-      currentPage: 3,
-      firstButton: { disabled: false },
-    });
-    const page1 = unlockListHtml({ currentPage: 1, firstButton: { disabled: true } });
-    const fetchImpl = sequenceFetch([html(staleAtPage3), html(page1), html(page1)]);
-    await expect(
-      unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl),
-    ).resolves.toBeUndefined();
-  });
-
-  it("skips the 最初 reset when the button is disabled (already on page 1)", async () => {
-    const jar = createCookieJar();
-    const page1 = unlockListHtml({ firstButton: { disabled: true } });
-    const fetchImpl = sequenceFetch([html(page1), html(page1)]);
-    await expect(
-      unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl),
-    ).resolves.toBeUndefined();
-  });
-
-  it("walks to the next numbered page when the target isn't on the first page", async () => {
-    const jar = createCookieJar();
-    const page1 = unlockListHtml({
-      opeNo: "9999999999999999999999",
-      currentPage: 1,
-      nextLink: link("ctl01$ctl02", "", "2"),
-    });
-    const page2 = unlockListHtml({ currentPage: 2 });
-    const fetchImpl = sequenceFetch([html(page1), html(page2), html(page2)]);
-    await expect(
-      unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl),
-    ).resolves.toBeUndefined();
-  });
-
-  it("falls back to page 1 when no gCurrentPage marker is present (defensive)", async () => {
-    const jar = createCookieJar();
-    const page1 = unlockListHtml({
-      opeNo: "9999999999999999999999",
-      omitCurrentPageMarker: true,
-      nextLink: link("ctl01$ctl02", "", "2"),
-    });
-    const page2 = unlockListHtml({ currentPage: 2 });
-    const fetchImpl = sequenceFetch([html(page1), html(page2), html(page2)]);
-    await expect(
-      unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl),
-    ).resolves.toBeUndefined();
-  });
-
-  it("follows a ... link to cross a pager window, then finds the target page", async () => {
-    const jar = createCookieJar();
-    const page1 = unlockListHtml({
-      opeNo: "9999999999999999999999",
-      currentPage: 1,
-      moreLink: link("ctl01$more", "", "..."),
-    });
-    const windowJump = unlockListHtml({ opeNo: "9999999999999999999999", currentPage: 1, nextLink: link("ctl02$ctl02", "", "2") });
-    const page2 = unlockListHtml({ currentPage: 2 });
-    const fetchImpl = sequenceFetch([html(page1), html(windowJump), html(page2), html(page2)]);
-    await expect(
-      unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl),
-    ).resolves.toBeUndefined();
-  });
-
-  it("throws when the target operation isn't found on any page (no next link at all)", async () => {
-    const jar = createCookieJar();
-    const onlyPage = unlockListHtml({ opeNo: "9999999999999999999999" });
-    const fetchImpl = sequenceFetch([html(onlyPage)]);
-    await expect(
-      unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl),
-    ).rejects.toThrow(/見つかりません/);
-  });
-
-  it("throws when a ... jump doesn't lead to the target either", async () => {
-    const jar = createCookieJar();
-    const page1 = unlockListHtml({
-      opeNo: "9999999999999999999999",
-      currentPage: 1,
-      moreLink: link("ctl01$more", "", "..."),
-    });
-    const windowJumpNoMatch = unlockListHtml({ opeNo: "9999999999999999999999", currentPage: 1 });
-    const fetchImpl = sequenceFetch([html(page1), html(windowJumpNoMatch)]);
-    await expect(
-      unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl),
-    ).rejects.toThrow(/見つかりません/);
   });
 
   it("throws when the button is missing", async () => {
