@@ -7,13 +7,19 @@
  * ボタン名・DOM 構造の実機確認結果は `.claude/skills/theearth-venus/SKILL.md`
  * (「運行データ編集・再集計・連動・日報」節) に集約されている。
  *
+ * **lstFuel (給油行) の DOM 構造は cdp-pair で実機確認済み** (Refs #183、2026-07-08、
+ * 給油実データ有りの運行で確認)。旧実装は `MainContent_lstFuel_ctrl<i>_itxt<field>`
+ * という id 形式・`btnExpenceEditSetting` という保存ボタンを仮定していたが、
+ * どちらも実在せず (`MainContent_` prefix は無い、保存ボタンという名の要素も無い)、
+ * 給油行が常に 0 件に見える/保存が必ず失敗するバグだった。実際の構造は
+ * `fuelRowId`/`FUEL_LABEL_IDS`/`FUEL_EDIT_FIELD_IDS` の doc comment、および
+ * `saveFuelRow` の doc comment を参照。
+ *
  * **未検証部分について**: 以下は SKILL.md でも「実機で要確認」と明記されている、
  * または今回のドキュメント調査からの推測に留まる:
- * - lstFuel 等の `id` 属性の完全形 (`MainContent_lstFuel_ctrl<i>_<field>` は
- *   他ページの `MainContent_X_Y` 命名慣習からの推測。POST 用 `name` はページから
- *   都度読み取るので id さえ一致すれば動く)
  * - F-NRS1010 ページャの `__doPostBack` target/argument の命名規則
- * - 保存 (`btnExpenceEditSetting`) postback 後の遷移先・viewstate 更新挙動
+ * - `saveFuelRow` の更新 postback 後の遷移先・viewstate 更新挙動 (更新ボタン自体の
+ *   存在・field id は実機確認済みだが、保存成功時の成功シグナルは未確認)
  * これらは「黙って200」を避けるため、期待した要素/文言が見つからない場合は必ず
  * TheearthClientError (または派生) を throw する設計にしてある。実運用で構造が
  * 違えば早期に loud fail するので、staging 実機確認で修正する。
@@ -94,21 +100,45 @@ function assertNoOtherEditConflict(html: string, actionLabel: string): void {
 // F-DES1012 [運行経費入力] — 給油行 (lstFuel)
 // ---------------------------------------------------------------------------
 
-/** `lstFuel$ctrl<i>$<field>` の各フィールド id サフィックス。**値側 (右辺) は
- * theearth の POST 名をそのまま使うため、原文スペルミス "Quantuty" もそのまま**
- * (公開型フィールド名 `quantity` は正しいスペルにしてある)。 */
-const FUEL_FIELD_IDS = {
-  operationNo: "itxtOperationNo",
-  subNo: "itxtSubNo",
-  supplyCategory: "itxtSupplyCategory",
-  supplyStation: "itxtSupplyStation",
-  supplyType: "itxtSupplyType",
-  dateTime: "itxtDateTime",
-  quantity: "itxtQuantuty",
+/** `lstFuel` grid の実 id 形式 (cdp-pair 実機確認、Refs #183、2026-07-08、給油実
+ * データ有りの運行で確認)。**`MainContent_` prefix は存在しない**。表示専用の行は
+ * `lstFuel_lbl<Field>_<N>` の `<span>` (フォーム要素ではない)。編集ボタン押下の
+ * postback 後にだけ `lstFuel_etxt<Field>_<N>` という編集用 `<input>` が現れる
+ * (`saveFuelRow` 参照)。全て `lstFuel_<suffix>_<N>` という共通パターン。 */
+function fuelRowId(ctrlIndex: number, suffix: string): string {
+  return `lstFuel_${suffix}_${ctrlIndex}`;
+}
+
+/** 表示専用行 (`lstFuel_lbl<Field>_<N>`) の各フィールド id サフィックス。
+ * 値側 (右辺) は実 DOM の id をそのまま使うため、原文スペルミス "Quantuty" も
+ * そのまま (公開型フィールド名 `quantity` は正しいスペルにしてある)。 */
+const FUEL_LABEL_IDS = {
+  operationNo: "lblOperationNo",
+  subNo: "lblSubNo",
+  supplyCategory: "lblSupplyCategory",
+  supplyStation: "lblSupplyStation",
+  supplyType: "lblSupplyType",
+  dateTime: "lblDateTime",
+  quantity: "lblQuantuty",
 } as const;
 
-function fuelFieldId(ctrlIndex: number, idSuffix: string): string {
-  return `MainContent_lstFuel_ctrl${ctrlIndex}_${idSuffix}`;
+/** 編集モードの入力欄 (`lstFuel_etxt<Field>_<N>`) の各フィールド id サフィックス。
+ * `saveFuelRow` の更新 POST でのみ使う。 */
+const FUEL_EDIT_FIELD_IDS = {
+  supplyCategory: "etxtSupplyCategory",
+  supplyStation: "etxtSupplyStation",
+  supplyType: "etxtSupplyType",
+  dateTime: "etxtDateTime",
+  quantity: "etxtQuantuty",
+} as const;
+
+/** id が指定 id の `<span>` の中身 (タグ除去済みテキスト) を返す。 */
+function extractSpanTextById(html: string, id: string): string | null {
+  const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`<span\\b[^>]*\\bid=["']${escapedId}["'][^>]*>([\\s\\S]*?)</span>`, "i");
+  const m = html.match(re);
+  if (!m) return null;
+  return m[1].replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ").trim();
 }
 
 /** 給油行 1 件 (`lstFuel$ctrl<i>$*`)。分類/区分/種別は CD (4桁) のみ。 */
@@ -130,20 +160,18 @@ export interface ExpenseForm {
 }
 
 function parseFuelRows(html: string): FuelRow[] {
-  const indexes = [...html.matchAll(/id="MainContent_lstFuel_ctrl(\d+)_itxtDateTime"/g)].map((m) =>
-    Number(m[1]),
-  );
+  const indexes = [...html.matchAll(/id="lstFuel_lblDateTime_(\d+)"/g)].map((m) => Number(m[1]));
   return indexes.map((ctrlIndex) => {
-    const get = (idSuffix: string) => findFormFieldById(html, fuelFieldId(ctrlIndex, idSuffix))?.value ?? "";
+    const get = (idSuffix: string) => extractSpanTextById(html, fuelRowId(ctrlIndex, idSuffix)) ?? "";
     return {
       ctrlIndex,
-      operationNo: get(FUEL_FIELD_IDS.operationNo),
-      subNo: get(FUEL_FIELD_IDS.subNo),
-      supplyCategory: get(FUEL_FIELD_IDS.supplyCategory),
-      supplyStation: get(FUEL_FIELD_IDS.supplyStation),
-      supplyType: get(FUEL_FIELD_IDS.supplyType),
-      dateTime: get(FUEL_FIELD_IDS.dateTime),
-      quantity: get(FUEL_FIELD_IDS.quantity),
+      operationNo: get(FUEL_LABEL_IDS.operationNo),
+      subNo: get(FUEL_LABEL_IDS.subNo),
+      supplyCategory: get(FUEL_LABEL_IDS.supplyCategory),
+      supplyStation: get(FUEL_LABEL_IDS.supplyStation),
+      supplyType: get(FUEL_LABEL_IDS.supplyType),
+      dateTime: get(FUEL_LABEL_IDS.dateTime),
+      quantity: get(FUEL_LABEL_IDS.quantity),
     };
   });
 }
@@ -185,43 +213,22 @@ export async function getExpenseForm(
   return { opeNo, startOpe, fuelRows };
 }
 
-/** postFuelRows が押す postback ボタンの指定。 */
-interface FuelFormButton {
-  id: string;
-  defaultLabel: string;
-}
-
-/** 給油行 1 件を書き換えて全 lstFuel 行を再送する内部ヘルパ。ASP.NET postback は
- * 差分ではなくフォーム全体を要求するため、まず現在の全行を GET で読み直し、
- * 対象行 (ctrlIndex) だけ上書きした状態で送る。 */
-async function postFuelRows(
+/** hidden field のみを乗せた単純な postback を送る内部ヘルパ (ボタン 1 個押下相当)。
+ * `buttonName`/`buttonValue` は呼び出し元が `findFormFieldById` で都度読み取った
+ *実値を渡す。 */
+async function postButton(
   jar: CookieJar,
   url: string,
   html: string,
-  rows: FuelRow[],
-  edited: FuelRow | null,
-  button: FuelFormButton,
+  buttonName: string,
+  buttonValue: string,
   fetchImpl: FetchLike,
   timeoutMs: number,
-): Promise<{ postHtml: string }> {
+  extra: Record<string, string> = {},
+): Promise<string> {
   const hidden = extractHiddenFields(html);
-  const body: Record<string, string> = { ...hidden };
-  for (const row of rows) {
-    const source = edited && row.ctrlIndex === edited.ctrlIndex ? edited : row;
-    for (const [key, idSuffix] of Object.entries(FUEL_FIELD_IDS) as [keyof FuelRow, string][]) {
-      const ref = findFormFieldById(html, fuelFieldId(row.ctrlIndex, idSuffix));
-      if (ref) body[ref.name] = String(source[key]);
-    }
-  }
-  const buttonField = findFormFieldById(html, button.id);
-  if (!buttonField) {
-    throw new TheearthClientError(
-      `ボタン (${button.id}) が見つかりません — theearth-np のページ仕様変更の可能性があります`,
-    );
-  }
-  body[buttonField.name] = buttonField.value || button.defaultLabel;
-
-  const postRes = await postForm(jar, url, new URLSearchParams(body), fetchImpl, timeoutMs);
+  const body = new URLSearchParams({ ...hidden, ...extra, [buttonName]: buttonValue });
+  const postRes = await postForm(jar, url, body, fetchImpl, timeoutMs);
   if (!postRes.ok) {
     throw new TheearthClientError(`POST が HTTP ${postRes.status} を返しました`);
   }
@@ -231,7 +238,7 @@ async function postFuelRows(
       "POST 後にログイン画面が返されました — theearth セッションが切れています",
     );
   }
-  return { postHtml };
+  return postHtml;
 }
 
 export interface SaveFuelRowParams {
@@ -249,8 +256,16 @@ export interface SaveFuelRowResult {
   fuelRows: FuelRow[];
 }
 
-/** POST 相当: `btnExpenceEditSetting` postback で給油行 1 件を登録する
- * (SKILL.md 実機確認済みの原文スペル "Expence" をボタン名で使う)。 */
+/** POST 相当: 給油行 1 件を編集して保存する。**`btnExpenceEditSetting` という
+ * ボタンは実在しない** (旧実装の誤り、cdp-pair 実機確認、Refs #183)。実際は 2 段階
+ * postback:
+ * 1. 対象行の `lstFuel_btnEditButton_<ctrlIndex>` を押す — 応答に編集用入力欄
+ *    `lstFuel_etxt<Field>_<ctrlIndex>` と保存ボタン `lstFuel_btnUpdateButton_<ctrlIndex>`
+ *    が現れる (押す前は存在しない)
+ * 2. `lstFuel_etxt<Field>_<ctrlIndex>` を書き換えて `lstFuel_btnUpdateButton_<ctrlIndex>`
+ *    を押す
+ * `etxtDateTime` の実値は "26/07/07 10:29" 形式 (`maxlength="14"` の生数値ではなく
+ * マスク入力後の表示形式、cdp-pair 実機確認)。呼び出し元はこの形式で `dateTime` を渡すこと。 */
 export async function saveFuelRow(
   jar: CookieJar,
   params: SaveFuelRowParams,
@@ -272,30 +287,46 @@ export async function saveFuelRow(
     );
   }
   const rows = parseFuelRows(html);
-  const target = rows.find((r) => r.ctrlIndex === params.ctrlIndex);
-  if (!target) {
+  if (!rows.some((r) => r.ctrlIndex === params.ctrlIndex)) {
     throw new ReportParamError(`給油行 (ctrlIndex=${params.ctrlIndex}) が見つかりません`);
   }
-  const edited: FuelRow = {
-    ...target,
+
+  // Step 1: 編集ボタン postback で対象行を編集モードにする。
+  const editButtonId = fuelRowId(params.ctrlIndex, "btnEditButton");
+  const editButton = findFormFieldById(html, editButtonId);
+  if (!editButton) {
+    throw new TheearthClientError(
+      `給油行の編集ボタン (${editButtonId}) が見つかりません — theearth-np のページ仕様変更の可能性があります`,
+    );
+  }
+  const editHtml = await postButton(jar, url, html, editButton.name, editButton.value, fetchImpl, timeoutMs);
+  assertNoOtherEditConflict(editHtml, "給油行の編集開始");
+
+  // Step 2: 編集モードの入力欄 (etxt*) を書き換えて更新ボタンで保存する。
+  const updateButtonId = fuelRowId(params.ctrlIndex, "btnUpdateButton");
+  const updateButton = findFormFieldById(editHtml, updateButtonId);
+  if (!updateButton) {
+    throw new TheearthClientError(
+      `給油行の更新ボタン (${updateButtonId}) が見つかりません — ` +
+        "編集開始 postback が想定通りに動かなかった可能性があります (theearth-np のページ仕様変更の可能性)",
+    );
+  }
+  const editedValues: Record<keyof typeof FUEL_EDIT_FIELD_IDS, string> = {
     supplyCategory: params.supplyCategory,
     supplyStation: params.supplyStation,
     supplyType: params.supplyType,
     dateTime: params.dateTime,
     quantity: params.quantity,
   };
-
-  const { postHtml } = await postFuelRows(
-    jar,
-    url,
-    html,
-    rows,
-    edited,
-    { id: "MainContent_btnExpenceEditSetting", defaultLabel: "登録" },
-    fetchImpl,
-    timeoutMs,
+  const fieldValues: Record<string, string> = {};
+  for (const [key, idSuffix] of Object.entries(FUEL_EDIT_FIELD_IDS) as [keyof typeof FUEL_EDIT_FIELD_IDS, string][]) {
+    const ref = findFormFieldById(editHtml, fuelRowId(params.ctrlIndex, idSuffix));
+    if (ref) fieldValues[ref.name] = editedValues[key];
+  }
+  const postHtml = await postButton(
+    jar, url, editHtml, updateButton.name, updateButton.value, fetchImpl, timeoutMs, fieldValues,
   );
-  assertNoOtherEditConflict(postHtml, "給油行の登録");
+  assertNoOtherEditConflict(postHtml, "給油行の更新");
   return { fuelRows: parseFuelRows(postHtml) };
 }
 
@@ -306,7 +337,8 @@ export interface RecalculateExpenseResult {
 }
 
 /** POST 相当: `btnScore` postback で評価点を再集計する (F-DES1013 の「作業時間
- * 再集計」と物理的に同一ボタン、F-DES1012 では「評価点再集計」ラベル)。 */
+ * 再集計」と物理的に同一ボタン、F-DES1012 では「評価点再集計」ラベル)。
+ * `btnScore`/`btnLinkSys` に `MainContent_` prefix は無い (cdp-pair 実機確認、Refs #183)。 */
 export async function recalculateExpense(
   jar: CookieJar,
   opeNo: string,
@@ -328,18 +360,14 @@ export async function recalculateExpense(
       "経費入力ページがログイン画面を返しました — theearth セッションが切れています",
     );
   }
-  const rows = parseFuelRows(html);
 
-  const { postHtml } = await postFuelRows(
-    jar,
-    url,
-    html,
-    rows,
-    null,
-    { id: "MainContent_btnScore", defaultLabel: "評価点再集計" },
-    fetchImpl,
-    timeoutMs,
-  );
+  const button = findFormFieldById(html, "btnScore");
+  if (!button) {
+    throw new TheearthClientError(
+      "評価点再集計ボタン (btnScore) が見つかりません — theearth-np のページ仕様変更の可能性があります",
+    );
+  }
+  const postHtml = await postButton(jar, url, html, button.name, button.value || "評価点再集計", fetchImpl, timeoutMs);
   assertNoOtherEditConflict(postHtml, "評価点再集計");
 
   // 成功シグナルは「再集計が終了しました。」モーダル文言 (SKILL.md 実機確認済み)。
@@ -350,7 +378,7 @@ export async function recalculateExpense(
         "theearth-np のページ仕様変更、または再集計が失敗した可能性があります",
     );
   }
-  const linkSysTag = findTagById(postHtml, "MainContent_btnLinkSys");
+  const linkSysTag = findTagById(postHtml, "btnLinkSys");
   const linkSysEnabled = !!linkSysTag && !/class=["'][^"']*aspNetDisabled/i.test(linkSysTag);
   return { linkSysEnabled };
 }
