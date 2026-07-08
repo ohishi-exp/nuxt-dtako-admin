@@ -87,6 +87,7 @@ import {
   ReportParamError,
   saveFuelRow,
   verifyReadNoDescending,
+  withVehicleNarrow,
   type SaveFuelRowParams,
 } from "./theearth-report-client";
 import {
@@ -1458,17 +1459,44 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
   }
 
-  /** GET /daily-report-api/list?from=&to= — F-NRS1010 全ページ収集。from/to は
-   * "YYYY/MM/DD HH:mm" 形式 (harvestDailyReport の HarvestRange)。読取日ソートが
-   * 降順設定になっているか (`sortOk`) も併せて返す — false の場合フロント側で
-   * 「表示条件指定を確認してください」の警告を出す想定 (SKILL.md 早期打ち切りの前提)。
+  /** GET /daily-report-api/list?from=&to=&vehicleFrom=&vehicleTo= — F-DES1010
+   * 全ページ収集。from/to は "YYYY/MM/DD HH:mm" 形式 (harvestDailyReport の
+   * HarvestRange)。読取日ソートが降順設定になっているか (`sortOk`) も併せて返す —
+   * false の場合フロント側で「表示条件指定を確認してください」の警告を出す想定
+   * (SKILL.md 早期打ち切りの前提)。
+   *
+   * vehicleFrom/vehicleTo (車輌CD、両方揃った時のみ) が指定された場合、
+   * F-GOS0030 の車輌絞込条件を一時的に適用して取得し、取得後は必ず元へ戻す
+   * (`withVehicleNarrow` 参照、アカウント単位の共有設定のため)。絞込は btnUpdate
+   * 応答 (= `firstPageHtml`) にしか反映されないため、それを harvest の 1 ページ目に
+   * 流し込む。2 ページ目以降のページャ postback で絞込が維持されるかは未検証
+   * (実データが 1 ページに収まり確認不能だった) なので、返す直前に車輌CD range で
+   * 防御的にフィルタして「絞れていない行が混ざる」事故を塞ぐ。
+   *
    * 同一 theearth セッションへの並行リクエストはセッションロックで hang/500 する
    * ため、必ず逐次実行する (Promise.all で並列化しない)。 */
   private handleReportList(record: ReportSessionRecord, url: URL): Promise<Response> {
     const from = url.searchParams.get("from") ?? "";
     const to = url.searchParams.get("to") ?? "";
+    const vehicleFrom = url.searchParams.get("vehicleFrom");
+    const vehicleTo = url.searchParams.get("vehicleTo");
     return this.callReportAction(record, "運転日報の取得", async (jar) => {
       const sortOk = await verifyReadNoDescending(jar);
+      if (vehicleFrom && vehicleTo) {
+        const harvested = await withVehicleNarrow(
+          jar,
+          { from: vehicleFrom, to: vehicleTo },
+          (narrowJar, firstPageHtml) =>
+            harvestDailyReport(narrowJar, { from, to }, undefined, undefined, firstPageHtml),
+        );
+        const lo = Number(vehicleFrom);
+        const hi = Number(vehicleTo);
+        const rows = harvested.filter((r) => {
+          const cd = r.vehicleCd === null ? Number.NaN : Number(r.vehicleCd);
+          return cd >= lo && cd <= hi;
+        });
+        return { rows, sortOk };
+      }
       const rows = await harvestDailyReport(jar, { from, to });
       return { rows, sortOk };
     });

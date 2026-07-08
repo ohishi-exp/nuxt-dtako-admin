@@ -8,6 +8,7 @@ import {
   ReportParamError,
   saveFuelRow,
   verifyReadNoDescending,
+  withVehicleNarrow,
 } from "../src/theearth-report-client";
 import { createCookieJar, TheearthClientError, type FetchLike } from "../src/theearth-client";
 import { VenusSessionExpiredError } from "../src/theearth-venus-client";
@@ -445,6 +446,398 @@ describe("verifyReadNoDescending", () => {
   });
 });
 
+describe("withVehicleNarrow", () => {
+  const range = { from: "1000", to: "1000" };
+
+  // F-DES1010 (親一覧ページ)。btnUpdate + select (full form 直列化の検証用) を持つ。
+  function operationListHtml(opts: { missingBtnUpdate?: boolean } = {}): string {
+    return `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-DES" />
+      <select id="MainContent_ddlRowCount" name="ctl00$MainContent$ddlRowCount">
+        <option value="10">10</option><option value="30" selected>30</option>
+      </select>
+      ${opts.missingBtnUpdate ? "" : `<input type="submit" id="btnUpdate" name="ctl00$MainContent$btnUpdate" value="更新" />`}
+    </form></body></html>`;
+  }
+
+  function displayConfigHtml(opts: { sVehicle?: string; eVehicle?: string; missingVehicleFields?: boolean; missingBtnOK?: boolean } = {}): string {
+    if (opts.missingVehicleFields) {
+      return `<html><body><form>
+        <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-GOS" />
+      </form></body></html>`;
+    }
+    return `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-GOS" />
+      <input type="text" id="txtSDriver" name="txtSDriver" value="baseline-driver" />
+      <input type="text" id="txtSVehicle" name="txtSVehicle" value="${opts.sVehicle ?? ""}" />
+      <input type="text" id="txtEVehicle" name="txtEVehicle" value="${opts.eVehicle ?? ""}" />
+      <select id="ddlOrder0" name="ddlOrder0"><option value="ReadNo" selected>読取日</option><option value="OperationDate">運行日</option></select>
+      ${opts.missingBtnOK ? "" : `<input type="submit" id="btnOK" name="btnOK" value="適用" />`}
+    </form></body></html>`;
+  }
+
+  /** 成功系の標準 fetch モック: GET DES → GET GOS → POST 適用 → POST btnUpdate →
+   * POST 復元 の順で応答し、POST body を capture する。 */
+  function narrowFetchMock(opts: { gosHtml?: string; desHtml?: string; firstPage?: string } = {}) {
+    const bodies: string[] = [];
+    let call = 0;
+    const fetchImpl = (async (_url, init) => {
+      call += 1;
+      if (call === 1) return html(opts.desHtml ?? operationListHtml());
+      if (call === 2) return html(opts.gosHtml ?? displayConfigHtml());
+      bodies.push(String(init?.body ?? ""));
+      if (call === 4) return html(opts.firstPage ?? "first-page-html");
+      return html("applied");
+    }) as FetchLike;
+    return { fetchImpl, bodies };
+  }
+
+  it("rejects a non-numeric or over-length vehicle CD before making any request", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([]);
+    await expect(
+      withVehicleNarrow(jar, { from: "abc", to: "1000" }, async () => "ok", fetchImpl),
+    ).rejects.toThrow(ReportParamError);
+    await expect(
+      withVehicleNarrow(jar, { from: "1000", to: "123456789" }, async () => "ok", fetchImpl),
+    ).rejects.toThrow(ReportParamError);
+  });
+
+  it("applies via btnOK, refreshes via full-form btnUpdate, passes the filtered first page to fn, then restores", async () => {
+    const jar = createCookieJar();
+    const { fetchImpl, bodies } = narrowFetchMock({ firstPage: "<html>filtered-first-page</html>" });
+
+    const seen: { jar?: unknown; firstPageHtml?: string } = {};
+    const result = await withVehicleNarrow(
+      jar,
+      range,
+      async (innerJar, firstPageHtml) => {
+        seen.jar = innerJar;
+        seen.firstPageHtml = firstPageHtml;
+        return "fn-result";
+      },
+      fetchImpl,
+    );
+
+    expect(result).toBe("fn-result");
+    expect(seen.jar).toBe(jar);
+    // fn は btnUpdate 応答 (絞込反映済み 1 ページ目) を受け取る
+    expect(seen.firstPageHtml).toBe("<html>filtered-first-page</html>");
+    expect(bodies).toHaveLength(3);
+
+    // 適用 POST: GOS の full form + 車輌CD range + btnOK (lnkSaveCategory ではない)
+    const applyBody = new URLSearchParams(bodies[0]);
+    expect(applyBody.get("txtSVehicle")).toBe("1000");
+    expect(applyBody.get("txtEVehicle")).toBe("1000");
+    expect(applyBody.get("txtSDriver")).toBe("baseline-driver");
+    expect(applyBody.get("__VIEWSTATE")).toBe("VS-GOS");
+    expect(applyBody.get("btnOK")).toBe("適用");
+    expect(applyBody.get("__EVENTTARGET")).toBeNull();
+
+    // btnUpdate POST: DES の full form (select 含む) + btnUpdate
+    const updateBody = new URLSearchParams(bodies[1]);
+    expect(updateBody.get("__VIEWSTATE")).toBe("VS-DES");
+    expect(updateBody.get("ctl00$MainContent$ddlRowCount")).toBe("30");
+    expect(updateBody.get("ctl00$MainContent$btnUpdate")).toBe("更新");
+
+    // 復元 POST: 元値 (空) を btnOK で適用し直す
+    const restoreBody = new URLSearchParams(bodies[2]);
+    expect(restoreBody.get("txtSVehicle")).toBe("");
+    expect(restoreBody.get("txtEVehicle")).toBe("");
+    expect(restoreBody.get("btnOK")).toBe("適用");
+  });
+
+  it("restores a pre-existing non-empty vehicle range instead of blanking it", async () => {
+    const jar = createCookieJar();
+    const { fetchImpl, bodies } = narrowFetchMock({ gosHtml: displayConfigHtml({ sVehicle: "500", eVehicle: "600" }) });
+
+    await withVehicleNarrow(jar, range, async () => undefined, fetchImpl);
+    const restoreBody = new URLSearchParams(bodies[2]);
+    expect(restoreBody.get("txtSVehicle")).toBe("500");
+    expect(restoreBody.get("txtEVehicle")).toBe("600");
+  });
+
+  it("falls back to default button captions when btnOK/btnUpdate have no value attribute", async () => {
+    const jar = createCookieJar();
+    const desNoValue = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-DES" />
+      <input type="submit" id="btnUpdate" name="ctl00$MainContent$btnUpdate" />
+    </form></body></html>`;
+    const gosNoValue = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-GOS" />
+      <input type="text" id="txtSVehicle" name="txtSVehicle" value="" />
+      <input type="text" id="txtEVehicle" name="txtEVehicle" value="" />
+      <input type="submit" id="btnOK" name="btnOK" />
+    </form></body></html>`;
+    const { fetchImpl, bodies } = narrowFetchMock({ desHtml: desNoValue, gosHtml: gosNoValue });
+
+    await withVehicleNarrow(jar, range, async () => undefined, fetchImpl);
+    expect(new URLSearchParams(bodies[0]).get("btnOK")).toBe("適用");
+    expect(new URLSearchParams(bodies[1]).get("ctl00$MainContent$btnUpdate")).toBe("更新");
+  });
+
+  it("restores the original range even when fn throws, then rethrows fn's error", async () => {
+    const jar = createCookieJar();
+    const { fetchImpl, bodies } = narrowFetchMock();
+    await expect(
+      withVehicleNarrow(
+        jar,
+        range,
+        async () => {
+          throw new Error("boom");
+        },
+        fetchImpl,
+      ),
+    ).rejects.toThrow("boom");
+    expect(bodies).toHaveLength(3); // 適用 + btnUpdate + 復元
+  });
+
+  it("propagates a non-ok GET / login redirect of the operation list page without touching the config", async () => {
+    const jar1 = createCookieJar();
+    await expect(
+      withVehicleNarrow(jar1, range, async () => "x", sequenceFetch([status(500)])),
+    ).rejects.toThrow(TheearthClientError);
+    const jar2 = createCookieJar();
+    await expect(
+      withVehicleNarrow(jar2, range, async () => "x", sequenceFetch([html(LOGIN_REDIRECT_HTML)])),
+    ).rejects.toThrow(VenusSessionExpiredError);
+  });
+
+  it("throws when btnUpdate is missing, before touching the shared config", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([html(operationListHtml({ missingBtnUpdate: true }))]);
+    await expect(withVehicleNarrow(jar, range, async () => "x", fetchImpl)).rejects.toThrow("btnUpdate");
+  });
+
+  it("propagates a non-ok GET / login redirect of the display config page", async () => {
+    const jar1 = createCookieJar();
+    await expect(
+      withVehicleNarrow(jar1, range, async () => "x", sequenceFetch([html(operationListHtml()), status(500)])),
+    ).rejects.toThrow(TheearthClientError);
+    const jar2 = createCookieJar();
+    await expect(
+      withVehicleNarrow(
+        jar2, range, async () => "x", sequenceFetch([html(operationListHtml()), html(LOGIN_REDIRECT_HTML)]),
+      ),
+    ).rejects.toThrow(VenusSessionExpiredError);
+  });
+
+  it("throws when the vehicle narrow fields are missing from the config page", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([
+      html(operationListHtml()),
+      html(displayConfigHtml({ missingVehicleFields: true })),
+    ]);
+    await expect(withVehicleNarrow(jar, range, async () => "x", fetchImpl)).rejects.toThrow(
+      "txtSVehicle/txtEVehicle",
+    );
+  });
+
+  it("throws when the btnOK apply button is missing from the config page", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([
+      html(operationListHtml()),
+      html(displayConfigHtml({ missingBtnOK: true })),
+    ]);
+    await expect(withVehicleNarrow(jar, range, async () => "x", fetchImpl)).rejects.toThrow("btnOK");
+  });
+
+  it("defaults the captured original range to an empty string when serializeFormFields omits the field", async () => {
+    // findFormFieldById (id 検索、type 無関係) は見つけるが serializeFormFields
+    // (submit 系 type を除外) は拾わない、という食い違いを意図的に作る fixture。
+    // 実ページでは起こらない想定だが、baseline[name] が undefined になる防御分岐
+    // (`?? ""`) をテストするための contrived fixture。
+    const jar = createCookieJar();
+    const oddGos = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-GOS" />
+      <input type="submit" id="txtSVehicle" name="txtSVehicle" value="999" />
+      <input type="submit" id="txtEVehicle" name="txtEVehicle" value="999" />
+      <input type="submit" id="btnOK" name="btnOK" value="適用" />
+    </form></body></html>`;
+    const { fetchImpl, bodies } = narrowFetchMock({ gosHtml: oddGos });
+
+    await withVehicleNarrow(jar, range, async () => undefined, fetchImpl);
+    const restoreBody = new URLSearchParams(bodies[2]);
+    expect(restoreBody.get("txtSVehicle")).toBe("");
+    expect(restoreBody.get("txtEVehicle")).toBe("");
+  });
+
+  it("propagates a non-ok apply POST without invoking fn (config presumed unchanged)", async () => {
+    const jar = createCookieJar();
+    let fnCalled = false;
+    const fetchImpl = sequenceFetch([html(operationListHtml()), html(displayConfigHtml()), status(500)]);
+    await expect(
+      withVehicleNarrow(
+        jar,
+        range,
+        async () => {
+          fnCalled = true;
+          return "x";
+        },
+        fetchImpl,
+      ),
+    ).rejects.toThrow(TheearthClientError);
+    expect(fnCalled).toBe(false);
+  });
+
+  it("propagates a login redirect on the apply POST", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([
+      html(operationListHtml()),
+      html(displayConfigHtml()),
+      html(LOGIN_REDIRECT_HTML),
+    ]);
+    await expect(withVehicleNarrow(jar, range, async () => "x", fetchImpl)).rejects.toThrow(
+      VenusSessionExpiredError,
+    );
+  });
+
+  it("restores the config when the btnUpdate refresh fails (non-ok), then rethrows", async () => {
+    const jar = createCookieJar();
+    const bodies: string[] = [];
+    let call = 0;
+    let fnCalled = false;
+    const fetchImpl = (async (_url, init) => {
+      call += 1;
+      if (call === 1) return html(operationListHtml());
+      if (call === 2) return html(displayConfigHtml());
+      bodies.push(String(init?.body ?? ""));
+      if (call === 4) return status(500); // btnUpdate が失敗
+      return html("applied");
+    }) as FetchLike;
+    await expect(
+      withVehicleNarrow(
+        jar,
+        range,
+        async () => {
+          fnCalled = true;
+          return "x";
+        },
+        fetchImpl,
+      ),
+    ).rejects.toThrow(/btnUpdate.*HTTP 500/);
+    expect(fnCalled).toBe(false);
+    // 適用済みの絞込は必ず復元される
+    const restoreBody = new URLSearchParams(bodies[2]);
+    expect(restoreBody.get("txtSVehicle")).toBe("");
+  });
+
+  it("maps a login redirect on the btnUpdate refresh to VenusSessionExpiredError (after restore)", async () => {
+    const jar = createCookieJar();
+    let call = 0;
+    const fetchImpl = (async () => {
+      call += 1;
+      if (call === 1) return html(operationListHtml());
+      if (call === 2) return html(displayConfigHtml());
+      if (call === 4) return html(LOGIN_REDIRECT_HTML); // btnUpdate 応答がログイン画面
+      return html("applied");
+    }) as FetchLike;
+    await expect(withVehicleNarrow(jar, range, async () => "x", fetchImpl)).rejects.toThrow(
+      VenusSessionExpiredError,
+    );
+  });
+
+  it("throws a restore-failure error (no fn-failure note) when restore fails but fn succeeded", async () => {
+    const jar = createCookieJar();
+    let call = 0;
+    const fetchImpl = (async () => {
+      call += 1;
+      if (call === 1) return html(operationListHtml());
+      if (call === 2) return html(displayConfigHtml());
+      if (call === 5) return status(500); // 復元 POST が失敗
+      return html("ok");
+    }) as FetchLike;
+    let caught: unknown;
+    try {
+      await withVehicleNarrow(jar, range, async () => "ok", fetchImpl);
+    }
+    catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(TheearthClientError);
+    expect((caught as Error).message).toMatch(/戻せませんでした/);
+    expect((caught as Error).message).not.toMatch(/元の処理も失敗/);
+  });
+
+  it("throws a combined restore+fn failure message when both fail", async () => {
+    const jar = createCookieJar();
+    let call = 0;
+    const fetchImpl = (async () => {
+      call += 1;
+      if (call === 1) return html(operationListHtml());
+      if (call === 2) return html(displayConfigHtml());
+      if (call === 5) return status(500); // 復元 POST が失敗
+      return html("ok");
+    }) as FetchLike;
+    let caught: unknown;
+    try {
+      await withVehicleNarrow(
+        jar,
+        range,
+        async () => {
+          throw new Error("fn-boom");
+        },
+        fetchImpl,
+      );
+    }
+    catch (e) {
+      caught = e;
+    }
+    expect((caught as Error).message).toMatch(/元の処理も失敗していました: fn-boom/);
+  });
+
+  it("stringifies a non-Error thrown fn value in the combined failure message", async () => {
+    const jar = createCookieJar();
+    let call = 0;
+    const fetchImpl = (async () => {
+      call += 1;
+      if (call === 1) return html(operationListHtml());
+      if (call === 2) return html(displayConfigHtml());
+      if (call === 5) return status(500); // 復元 POST が失敗
+      return html("ok");
+    }) as FetchLike;
+    let caught: unknown;
+    try {
+      await withVehicleNarrow(
+        jar,
+        range,
+        async () => {
+          // eslint-disable-next-line @typescript-eslint/no-throw-literal
+          throw "plain-string-error";
+        },
+        fetchImpl,
+      );
+    }
+    catch (e) {
+      caught = e;
+    }
+    expect((caught as Error).message).toMatch(/元の処理も失敗していました: plain-string-error/);
+  });
+
+  it("stringifies a non-Error restore failure", async () => {
+    const jar = createCookieJar();
+    let call = 0;
+    const fetchImpl = (async () => {
+      call += 1;
+      if (call === 1) return html(operationListHtml());
+      if (call === 2) return html(displayConfigHtml());
+      if (call === 5) {
+        // eslint-disable-next-line @typescript-eslint/no-throw-literal
+        throw "raw-restore-failure";
+      }
+      return html("ok");
+    }) as FetchLike;
+    let caught: unknown;
+    try {
+      await withVehicleNarrow(jar, range, async () => "ok", fetchImpl);
+    }
+    catch (e) {
+      caught = e;
+    }
+    expect((caught as Error).message).toMatch(/戻せませんでした: raw-restore-failure/);
+  });
+});
+
 describe("downloadEditedZip", () => {
   it("delegates to downloadCsvZip and returns the zip bytes", async () => {
     const jar = createCookieJar();
@@ -553,6 +946,28 @@ describe("harvestDailyReport", () => {
     await expect(harvestDailyReport(jar, { from: "bad", to: "2026/07/07 00:00" })).rejects.toThrow(
       ReportParamError,
     );
+  });
+
+  it("starts from initialHtml without any GET (vehicle-narrow first page)", async () => {
+    // 車輌絞込は btnUpdate 応答にしか反映されず plain GET では消えるため、
+    // withVehicleNarrow が渡す 1 ページ目 HTML をそのまま使えることを固定する。
+    // sequenceFetch([]) は fetch されると throw するので「GET していない」ことの
+    // 証明になる。
+    const jar = createCookieJar();
+    const page1 = reportPageHtml({
+      rows: [{ operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" }],
+      currentPage: 1,
+      links: [],
+      firstButton: { disabled: true },
+    });
+    const rows = await harvestDailyReport(
+      jar,
+      { from: "2026/07/01 00:00", to: "2026/07/07 00:00" },
+      sequenceFetch([]),
+      undefined,
+      page1,
+    );
+    expect(rows.map((r) => r.operationNo)).toEqual(["A"]);
   });
 
   it("throws on non-ok GET / login redirect on the initial GET", async () => {
