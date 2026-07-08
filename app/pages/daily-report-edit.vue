@@ -48,6 +48,20 @@ interface FuelRow {
   quantity: string
 }
 
+/** 給油マスタ (コード→名称)。worker (theearth-report-client の ExpenseMasters) が
+ * F-DES1012 の ClientInit マスタ文字列から抽出して返す。CD 入力の live 名称解決に使う。 */
+interface ExpenseMasters {
+  supplyCategory: Record<string, string>
+  supplyStation: Record<string, string>
+  fuelType: Record<string, string>
+  additive: Record<string, string>
+  consumable: Record<string, string>
+}
+
+function emptyExpenseMasters(): ExpenseMasters {
+  return { supplyCategory: {}, supplyStation: {}, fuelType: {}, additive: {}, consumable: {} }
+}
+
 const { session, authHeaders, restoreSession, showLoginPanel, expireSession } = useDailyReportSession()
 
 function onLogin() {
@@ -205,6 +219,7 @@ async function unlockRow(row: DailyReportRow) {
 const expenseModalOpen = ref(false)
 const selectedRow = ref<DailyReportRow | null>(null)
 const fuelRows = ref<FuelRow[]>([])
+const expenseMasters = ref<ExpenseMasters>(emptyExpenseMasters())
 const expenseLoading = ref(false)
 const expenseError = ref<string | null>(null)
 const savingCtrlIndex = ref<number | null>(null)
@@ -226,21 +241,61 @@ function syncFuelEditForm() {
   }
 }
 
+// --- CD → 名称の live 解決 (theearth FuelChange と同じマスタ引き) ---
+
+const hasExpenseMasters = computed(() => Object.keys(expenseMasters.value.supplyCategory).length > 0)
+
+/** 種別 (SupplyType) の参照マスタは分類コードで分岐する (theearth `FuelChange` と同一):
+ * 分類 1/4 → 燃料種別、2/5 → 添加剤、3 → 消耗品。それ以外は該当マスタ無し。 */
+function typeMasterFor(categoryCode: string): Record<string, string> {
+  switch (Number(categoryCode)) {
+    case 1:
+    case 4:
+      return expenseMasters.value.fuelType
+    case 2:
+    case 5:
+      return expenseMasters.value.additive
+    case 3:
+      return expenseMasters.value.consumable
+    default:
+      return {}
+  }
+}
+
+/** 入力中の CD から名称を解決する。マスタ未取得時は取得時の初期名称にフォールバック
+ * (名称を空にしない)。マスタ取得済みで未登録コードなら空 (theearth と同じ挙動)。 */
+function liveCategoryName(row: FuelRow): string {
+  if (!hasExpenseMasters.value) return row.supplyCategoryName
+  return expenseMasters.value.supplyCategory[fuelEditForm[row.ctrlIndex]?.supplyCategory ?? ''] ?? ''
+}
+function liveStationName(row: FuelRow): string {
+  if (!hasExpenseMasters.value) return row.supplyStationName
+  return expenseMasters.value.supplyStation[fuelEditForm[row.ctrlIndex]?.supplyStation ?? ''] ?? ''
+}
+function liveTypeName(row: FuelRow): string {
+  if (!hasExpenseMasters.value) return row.supplyTypeName
+  const form = fuelEditForm[row.ctrlIndex]
+  if (!form) return ''
+  return typeMasterFor(form.supplyCategory)[form.supplyType] ?? ''
+}
+
 async function openExpenseModal(row: DailyReportRow) {
   const s = session.value
   if (!s) return
   selectedRow.value = row
   expenseModalOpen.value = true
   fuelRows.value = []
+  expenseMasters.value = emptyExpenseMasters()
   expenseError.value = null
   recalculateResult.value = null
   expenseLoading.value = true
   try {
-    const res = await $fetch<{ opeNo: string, startOpe: string, fuelRows: FuelRow[] }>('/daily-report-api/expense', {
+    const res = await $fetch<{ opeNo: string, startOpe: string, fuelRows: FuelRow[], masters: ExpenseMasters }>('/daily-report-api/expense', {
       headers: authHeaders(),
       query: { opeNo: row.operationNo, startOpe: row.startDateTime },
     })
     fuelRows.value = res.fuelRows
+    expenseMasters.value = res.masters ?? emptyExpenseMasters()
     syncFuelEditForm()
   }
   catch (e) {
@@ -511,19 +566,19 @@ onMounted(() => {
                   <UFormField label="分類 (CD)">
                     <UInput v-model="fuelEditForm[row.ctrlIndex]!.supplyCategory" class="w-full" />
                     <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 truncate">
-                      {{ row.supplyCategoryName || '—' }}
+                      {{ liveCategoryName(row) || '—' }}
                     </p>
                   </UFormField>
                   <UFormField label="区分 (CD)">
                     <UInput v-model="fuelEditForm[row.ctrlIndex]!.supplyStation" class="w-full" />
                     <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 truncate">
-                      {{ row.supplyStationName || '—' }}
+                      {{ liveStationName(row) || '—' }}
                     </p>
                   </UFormField>
                   <UFormField label="種別 (CD)">
                     <UInput v-model="fuelEditForm[row.ctrlIndex]!.supplyType" class="w-full" />
                     <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 truncate">
-                      {{ row.supplyTypeName || '—' }}
+                      {{ liveTypeName(row) || '—' }}
                     </p>
                   </UFormField>
                   <UFormField label="日時">
