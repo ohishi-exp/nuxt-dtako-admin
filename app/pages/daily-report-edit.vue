@@ -95,6 +95,18 @@ interface ReviseForm {
   formFilled: boolean
 }
 
+/** 事業所/車輌/乗務員マスタ (worker の DvrMasters と同型、VenusBridge 由来)。 */
+interface ReportMasterItem {
+  code: string
+  link: string | null
+  name: string
+}
+interface ReportMasters {
+  branches: { code: string, name: string }[]
+  vehicles: ReportMasterItem[]
+  drivers: ReportMasterItem[]
+}
+
 const { session, authHeaders, restoreSession, showLoginPanel, expireSession } = useDailyReportSession()
 
 function onLogin() {
@@ -105,11 +117,39 @@ watch(session, (s) => {
   if (!s) {
     rows.value = []
     sortOk.value = null
+    reportMasters.value = null
     closeExpenseModal()
     closeWorkModal()
     closeReviseModal()
   }
 })
+
+// --- 事業所/車輌/乗務員マスタ (VenusBridge、乗務員CD → 名称の解決に使う) ---
+
+const reportMasters = ref<ReportMasters | null>(null)
+
+/** マスタを 1 セッション 1 回だけ取得する。補助情報 (名称表示) なので取得失敗
+ * しても編集操作自体は止めない (名称が出ないだけ)。 */
+async function ensureReportMasters() {
+  if (reportMasters.value || !session.value) return
+  try {
+    reportMasters.value = await $fetch<ReportMasters>('/daily-report-api/masters', { headers: authHeaders() })
+  }
+  catch (e) {
+    console.warn('乗務員マスタの取得に失敗しました (名称表示のみ影響):', dailyReportErrorMessage(e))
+  }
+}
+
+/** 乗務員CD → 名称 (マスタ未取得・未登録コードは "")。マスタの code は数値由来の
+ * 文字列なので数値比較で "0001" 等のゼロ埋め差を吸収する。 */
+function driverNameByCd(cd: string): string {
+  const m = reportMasters.value
+  const trimmed = cd.trim()
+  if (!m || trimmed === '') return ''
+  const n = Number(trimmed)
+  if (!Number.isFinite(n)) return ''
+  return m.drivers.find(d => Number(d.code) === n)?.name ?? ''
+}
 
 // --- 期間フィルタ + 一覧 (F-NRS1010) ---
 
@@ -134,6 +174,17 @@ const rows = ref<DailyReportRow[]>([])
 const sortOk = ref<boolean | null>(null)
 const listLoading = ref(false)
 const listError = ref<string | null>(null)
+
+/** 乗務員絞込 (CD または名前の部分一致、クライアント側フィルタ)。theearth 側の
+ * 表示条件指定 (F-GOS0030) に乗務員 range フィールドがあるかは実機未確認のため、
+ * 車輌CD のようなサーバー側絞込ではなく取得済み行のフィルタで実現する。 */
+const driverFilter = ref('')
+
+const filteredRows = computed(() => {
+  const q = driverFilter.value.trim()
+  if (!q) return rows.value
+  return rows.value.filter(r => (r.driverCd1 ?? '').includes(q) || (r.driverName1 ?? '').includes(q))
+})
 
 /** datetime-local (YYYY-MM-DDTHH:mm) → theearth 形式 (YYYY/MM/DD HH:mm、
  * harvestDailyReport の HarvestRange)。dvr-viewer.vue の変換パターンと同じ。 */
@@ -657,6 +708,10 @@ const reviseResult = ref<string | null>(null)
 const reviseDriverInput = ref('')
 const DRIVER_CD_RE = /^\d{1,8}$/
 
+/** 入力中の乗務員CD / 現在の乗務員CD の名称 (マスタ live 解決)。 */
+const reviseDriverInputName = computed(() => driverNameByCd(reviseDriverInput.value))
+const reviseCurrentDriverName = computed(() => (reviseForm.value ? driverNameByCd(reviseForm.value.driver1) : ''))
+
 async function openReviseModal(row: DailyReportRow) {
   const s = session.value
   if (!s) return
@@ -667,6 +722,7 @@ async function openReviseModal(row: DailyReportRow) {
   reviseResult.value = null
   reviseDriverInput.value = ''
   reviseLoading.value = true
+  void ensureReportMasters() // 名称解決用 (失敗しても編集は続行できる)
   try {
     const res = await $fetch<ReviseForm>('/daily-report-api/revise', {
       headers: authHeaders(),
@@ -708,7 +764,8 @@ async function saveReviseDriver() {
     reviseError.value = '乗務員CDは8桁以内の数値で指定してください'
     return
   }
-  if (!window.confirm(`乗務員CD を「${driver1}」に変更して登録します。よろしいですか?`)) return
+  const driverName = driverNameByCd(driver1)
+  if (!window.confirm(`乗務員CD を「${driver1}」${driverName ? ` (${driverName})` : ''} に変更して登録します。よろしいですか?`)) return
   reviseSaving.value = true
   reviseError.value = null
   reviseResult.value = null
@@ -765,6 +822,9 @@ onMounted(() => {
             <UFormField label="車輌CD (絞込、任意)">
               <UInput v-model="vehicleCd" icon="i-lucide-truck" placeholder="例: 6572" class="w-32" />
             </UFormField>
+            <UFormField label="乗務員 (CD/名前で絞込、任意)">
+              <UInput v-model="driverFilter" icon="i-lucide-user" placeholder="例: 1405 / 松尾" class="w-44" />
+            </UFormField>
             <UButton icon="i-lucide-search" label="日報を検索" :loading="listLoading" @click="loadList" />
             <UButton icon="i-lucide-file-archive" label="編集後 csvdata.zip をダウンロード" variant="outline" :loading="zipLoading" @click="downloadZip" />
           </div>
@@ -797,12 +857,14 @@ onMounted(() => {
         <!-- 運転日報一覧 -->
         <UCard>
           <template #header>
-            <span class="font-semibold">運行データ入力一覧 ({{ rows.length }} 件)</span>
+            <span class="font-semibold">
+              運行データ入力一覧 ({{ filteredRows.length }} 件<template v-if="filteredRows.length !== rows.length"> / 全 {{ rows.length }} 件</template>)
+            </span>
           </template>
           <div v-if="listLoading" class="text-center py-8 text-gray-400">
             読み込み中…
           </div>
-          <div v-else-if="rows.length === 0" class="text-center py-8 text-gray-400">
+          <div v-else-if="filteredRows.length === 0" class="text-center py-8 text-gray-400">
             該当する運行がありません
           </div>
           <div v-else class="overflow-x-auto">
@@ -828,7 +890,7 @@ onMounted(() => {
               </thead>
               <tbody>
                 <tr
-                  v-for="row in rows"
+                  v-for="row in filteredRows"
                   :key="row.operationNo"
                   class="border-b border-gray-100 dark:border-gray-900"
                   :class="{ 'text-red-600 dark:text-red-400': row.exclusionFlag }"
@@ -1113,7 +1175,11 @@ onMounted(() => {
             </div>
             <template v-else-if="reviseForm">
               <div class="text-sm text-gray-500 dark:text-gray-400 space-y-1">
-                <p>現在の乗務員CD: {{ reviseForm.driver1 || '—' }} (一覧: {{ reviseSelectedRow?.driverName1 ?? '-' }})</p>
+                <p>
+                  現在の乗務員CD: {{ reviseForm.driver1 || '—' }}
+                  <template v-if="reviseCurrentDriverName"> {{ reviseCurrentDriverName }}</template>
+                  (一覧: {{ reviseSelectedRow?.driverName1 ?? '-' }})
+                </p>
                 <p>車両CD: {{ reviseForm.vehicle || '—' }} / 事業所CD: {{ reviseForm.branch || '—' }}</p>
               </div>
 
@@ -1124,6 +1190,9 @@ onMounted(() => {
 
               <UFormField label="乗務員CD (変更後)">
                 <UInput v-model="reviseDriverInput" placeholder="例: 1405" class="w-40" />
+                <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 truncate">
+                  {{ reviseDriverInputName || '—' }}
+                </p>
               </UFormField>
             </template>
 

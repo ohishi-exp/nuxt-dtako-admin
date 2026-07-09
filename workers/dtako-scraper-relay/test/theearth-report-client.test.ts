@@ -5,6 +5,7 @@ import {
   extractLstFuelTextInputs,
   getExpenseForm,
   getReviseForm,
+  getReviseFormPage,
   getWorkForm,
   harvestDailyReport,
   parseExpenseMasters,
@@ -12,7 +13,7 @@ import {
   recalculateWork,
   startSystemLink,
   ReportParamError,
-  saveDriver,
+  saveDriverFromPage,
   saveFuelRow,
   saveWorkRows,
   unlockOperation,
@@ -2367,67 +2368,64 @@ describe("getReviseForm", () => {
   });
 });
 
-describe("saveDriver", () => {
+describe("saveDriverFromPage", () => {
   const baseParams = { opeNo: OPE_NO, startOpe: START_OPE, driver1: "2001" };
 
-  it("posts the full serialized form with the new driver CD", async () => {
+  it("posts the full serialized form (from the fetched page) with the new driver CD", async () => {
     const bodies: string[] = [];
-    const fetchImpl = recordingFetch(
-      [html(reviseFormHtml()), html(reviseFormHtml({ driver1: "2001" }))],
-      bodies,
-    );
+    const fetchImpl = recordingFetch([html(reviseFormHtml({ driver1: "2001" }))], bodies);
     const jar = createCookieJar();
-    const result = await saveDriver(jar, baseParams, fetchImpl);
+    const result = await saveDriverFromPage(jar, reviseFormHtml(), baseParams, fetchImpl);
     expect(result.driver1After).toBe("2001");
-    const sent = new URLSearchParams(bodies[1]);
+    // fetch は postback の 1 回だけ (登録前の fresh GET はしない — 2 回目の GET は
+    // 初期値が空で返る実機挙動のため、取得時ページをそのまま使う)
+    expect(bodies).toHaveLength(1);
+    const sent = new URLSearchParams(bodies[0]);
     expect(sent.get("txtDriver1")).toBe("2001");
     expect(sent.get("txtVehicle")).toBe("6572"); // 変更しないフィールドも丸ごと送る
     expect(sent.get("btnReg")).toBe("登録");
+    expect(sent.get("__VIEWSTATE")).toBe("VS-REVISE"); // 取得時ページの viewstate
   });
 
   it("returns null when the response is not the revise page anymore", async () => {
-    const fetchImpl = sequenceFetch([
-      html(reviseFormHtml()),
-      html("<html><body>登録後の別画面</body></html>"),
-    ]);
+    const fetchImpl = sequenceFetch([html("<html><body>登録後の別画面</body></html>")]);
     const jar = createCookieJar();
-    const result = await saveDriver(jar, baseParams, fetchImpl);
+    const result = await saveDriverFromPage(jar, reviseFormHtml(), baseParams, fetchImpl);
     expect(result.driver1After).toBeNull();
   });
 
   it("throws when the response echoes a different driver CD (theearth 側で拒否)", async () => {
-    const fetchImpl = sequenceFetch([
-      html(reviseFormHtml()),
-      html(reviseFormHtml({ driver1: "1405" })),
-    ]);
+    const fetchImpl = sequenceFetch([html(reviseFormHtml({ driver1: "1405" }))]);
     const jar = createCookieJar();
-    await expect(saveDriver(jar, baseParams, fetchImpl)).rejects.toThrow(/反映されませんでした/);
+    await expect(saveDriverFromPage(jar, reviseFormHtml(), baseParams, fetchImpl)).rejects.toThrow(
+      /反映されませんでした/,
+    );
   });
 
-  it("refuses to save when the form is not filled (既存データを空で上書きしない)", async () => {
+  it("refuses to save when the page is not filled (既存データを空で上書きしない)", async () => {
     const page = reviseFormHtml({ driver1: "", vehicle: "", branch: "", dist: "" });
     const jar = createCookieJar();
-    await expect(saveDriver(jar, baseParams, sequenceFetch([html(page)]))).rejects.toThrow(/初期値が空/);
+    await expect(saveDriverFromPage(jar, page, baseParams, sequenceFetch([]))).rejects.toThrow(/初期値が空/);
   });
 
   it("rejects an invalid driver CD", async () => {
     const jar = createCookieJar();
-    await expect(saveDriver(jar, { ...baseParams, driver1: "abc" }, sequenceFetch([]))).rejects.toThrow(
-      ReportParamError,
-    );
-    await expect(saveDriver(jar, { ...baseParams, driver1: "123456789" }, sequenceFetch([]))).rejects.toThrow(
-      ReportParamError,
-    );
+    await expect(
+      saveDriverFromPage(jar, reviseFormHtml(), { ...baseParams, driver1: "abc" }, sequenceFetch([])),
+    ).rejects.toThrow(ReportParamError);
+    await expect(
+      saveDriverFromPage(jar, reviseFormHtml(), { ...baseParams, driver1: "123456789" }, sequenceFetch([])),
+    ).rejects.toThrow(ReportParamError);
   });
 
-  it("throws when txtDriver1 / btnReg are missing", async () => {
+  it("throws when txtDriver1 / btnReg are missing from the page", async () => {
     const jar1 = createCookieJar();
     await expect(
-      saveDriver(jar1, baseParams, sequenceFetch([html(reviseFormHtml({ driver1: null }))])),
+      saveDriverFromPage(jar1, reviseFormHtml({ driver1: null }), baseParams, sequenceFetch([])),
     ).rejects.toThrow(/txtDriver1/);
     const jar2 = createCookieJar();
     await expect(
-      saveDriver(jar2, baseParams, sequenceFetch([html(reviseFormHtml({ regButton: false }))])),
+      saveDriverFromPage(jar2, reviseFormHtml({ regButton: false }), baseParams, sequenceFetch([])),
     ).rejects.toThrow(/btnReg/);
   });
 
@@ -2435,25 +2433,37 @@ describe("saveDriver", () => {
     const conflictHtml = "<html><body>他ユーザー編集中のため処理を中止しました。</body></html>";
     const jar = createCookieJar();
     await expect(
-      saveDriver(jar, baseParams, sequenceFetch([html(reviseFormHtml()), html(conflictHtml)])),
+      saveDriverFromPage(jar, reviseFormHtml(), baseParams, sequenceFetch([html(conflictHtml)])),
     ).rejects.toThrow(/他ユーザー/);
   });
 
   it("falls back to the 登録 label when btnReg has no value attribute", async () => {
     const page = reviseFormHtml().replace('name="btnReg" value="登録"', 'name="btnReg"');
     const bodies: string[] = [];
-    const fetchImpl = recordingFetch([html(page), html(reviseFormHtml({ driver1: "2001" }))], bodies);
+    const fetchImpl = recordingFetch([html(reviseFormHtml({ driver1: "2001" }))], bodies);
     const jar = createCookieJar();
-    await saveDriver(jar, baseParams, fetchImpl);
-    expect(new URLSearchParams(bodies[1]).get("btnReg")).toBe("登録");
+    await saveDriverFromPage(jar, page, baseParams, fetchImpl);
+    expect(new URLSearchParams(bodies[0]).get("btnReg")).toBe("登録");
   });
 
-  it("throws on non-ok GET / login redirect", async () => {
+  it("throws on non-ok POST / login redirect after POST", async () => {
     const jar1 = createCookieJar();
-    await expect(saveDriver(jar1, baseParams, sequenceFetch([status(500)]))).rejects.toThrow(TheearthClientError);
+    await expect(
+      saveDriverFromPage(jar1, reviseFormHtml(), baseParams, sequenceFetch([status(500)])),
+    ).rejects.toThrow(TheearthClientError);
     const jar2 = createCookieJar();
-    await expect(saveDriver(jar2, baseParams, sequenceFetch([html(LOGIN_REDIRECT_HTML)]))).rejects.toThrow(
-      VenusSessionExpiredError,
-    );
+    await expect(
+      saveDriverFromPage(jar2, reviseFormHtml(), baseParams, sequenceFetch([html(LOGIN_REDIRECT_HTML)])),
+    ).rejects.toThrow(VenusSessionExpiredError);
+  });
+});
+
+describe("getReviseFormPage", () => {
+  it("returns the form together with the fetched page html for postback reuse", async () => {
+    const page = reviseFormHtml();
+    const jar = createCookieJar();
+    const result = await getReviseFormPage(jar, OPE_NO, START_OPE, sequenceFetch([html(page)]));
+    expect(result.form.driver1).toBe("1405");
+    expect(result.pageHtml).toBe(page);
   });
 });
