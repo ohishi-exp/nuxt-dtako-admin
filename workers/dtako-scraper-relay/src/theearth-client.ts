@@ -18,7 +18,7 @@
 
 export const BASE_URL = "https://theearth-np.com";
 const LOGIN_PATH = "/F-OES1010[Login].aspx";
-const CSV_PATH = "/F-NOS3010[GeneralCsv].aspx";
+export const CSV_PATH = "/F-NOS3010[GeneralCsv].aspx";
 
 const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04];
 
@@ -686,7 +686,7 @@ export function assertZipMagic(buf: ArrayBuffer): void {
 
 /** ZIP なら buf をそのまま返し、ZIP でなければ **生バイトを載せた** TheearthNotZipError を
  * 投げる (呼び出し側が中身をダウンロードして原因調査できるようにする)。 */
-function ensureZip(buf: ArrayBuffer, contentType: string): ArrayBuffer {
+export function ensureZip(buf: ArrayBuffer, contentType: string): ArrayBuffer {
   if (!zipMagicOk(buf)) {
     throw new TheearthNotZipError(notZipMessage(buf), buf, contentType);
   }

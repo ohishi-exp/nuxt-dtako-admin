@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   downloadEditedZip,
+  downloadOperationCsvZip,
   extractLstFuelTextInputs,
   getExpenseForm,
   harvestDailyReport,
@@ -1243,6 +1244,194 @@ describe("withVehicleNarrow", () => {
       caught = e;
     }
     expect((caught as Error).message).toMatch(/戻せませんでした: raw-restore-failure/);
+  });
+});
+
+// --- F-NOS3010 運行データ選択モード (単一運行 zip) fixture ---------------------
+// 実 DOM 構造 (cdp-pair 実機確認、2026-07-09、Refs #203): 選択状態は CSS 非表示の
+// text input (`ucDataSelect$txtOperationNo` / `txtStartDateTime`)。stage 2 で
+// `ddlSystem` (連動出力形式) 等のフィールドを落とすと 22 バイトの空 ZIP が返る。
+
+function csvSelectPageHtml(opts: {
+  omit?: "rdoSelect0" | "txtOperationNo" | "txtStartDateTime" | "btnCsvSvr";
+  stage1ButtonValue?: string;
+} = {}): string {
+  return `<html><body><form>
+    <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-CSV" />
+    ${opts.omit === "rdoSelect0" ? "" : `<input type="radio" id="rdoSelect0" name="ctl00$MainContent$SelectM" value="rdoSelect0" checked="checked" />`}
+    <input type="radio" id="rdoSelect1" name="ctl00$MainContent$SelectM" value="rdoSelect1" />
+    ${opts.omit === "txtOperationNo" ? "" : `<input type="text" id="txtOperationNo" name="ctl00$MainContent$ucDataSelect$txtOperationNo" value="" />`}
+    ${opts.omit === "txtStartDateTime" ? "" : `<input type="text" id="txtStartDateTime" name="ctl00$MainContent$ucDataSelect$txtStartDateTime" value="" />`}
+    <select name="ctl00$MainContent$ddlSystem"><option value="0">連動出力形式</option><option value="1" selected="selected">形式1</option></select>
+    ${opts.omit === "btnCsvSvr" ? "" : `<input type="submit" id="btnCsvSvr" name="ctl00$MainContent$btnCsvSvr" value="${opts.stage1ButtonValue ?? "ダウンロード"}" />`}
+  </form></body></html>`;
+}
+
+function csvConfirmPageHtml(opts: {
+  omitOutput?: boolean;
+  outputButtonValue?: string;
+} = {}): string {
+  return `<html><body><form>
+    <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-CONFIRM" />
+    <input type="radio" id="rdoSelect0" name="ctl00$MainContent$SelectM" value="rdoSelect0" checked="checked" />
+    <input type="text" id="txtOperationNo" name="ctl00$MainContent$ucDataSelect$txtOperationNo" value="server-echo" />
+    <input type="text" id="txtStartDateTime" name="ctl00$MainContent$ucDataSelect$txtStartDateTime" value="server-echo" />
+    <select name="ctl00$MainContent$ddlSystem"><option value="0">連動出力形式</option><option value="1" selected="selected">形式1</option></select>
+    ${opts.omitOutput ? "" : `<input type="submit" id="btnCsvSvrOutput" name="ctl00$MainContent$btnCsvSvrOutput" value="${opts.outputButtonValue ?? "ダウンロード"}" />`}
+  </form></body></html>`;
+}
+
+/** EOCD (`PK\x05\x06`) だけの 22 バイト空 ZIP (F-NOS3010 の「該当 0 件」応答の実測形)。 */
+function emptyZipResponse(): Response {
+  const bytes = new Uint8Array(22);
+  bytes.set([0x50, 0x4b, 0x05, 0x06], 0);
+  return new Response(bytes, { status: 200, headers: { "content-type": "application/octet-stream" } });
+}
+
+function binaryResponse(bytes: number[], contentType: string): Response {
+  return new Response(new Uint8Array(bytes), { status: 200, headers: { "content-type": contentType } });
+}
+
+describe("downloadOperationCsvZip", () => {
+  it("runs the 2-stage postback with full form fields and returns the zip bytes", async () => {
+    const jar = createCookieJar();
+    const bodies: string[] = [];
+    const responses = [html(csvSelectPageHtml()), html(csvConfirmPageHtml()), zipResponse()];
+    let call = 0;
+    const fetchImpl: FetchLike = async (_url, init) => {
+      if (init?.body) bodies.push(String(init.body));
+      return responses[call++]!;
+    };
+    const buf = await downloadOperationCsvZip(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl);
+    expect(new Uint8Array(buf).slice(0, 4)).toEqual(new Uint8Array([0x50, 0x4b, 0x03, 0x04]));
+
+    const stage1 = new URLSearchParams(bodies[0]);
+    expect(stage1.get("ctl00$MainContent$SelectM")).toBe("rdoSelect0"); // 運行データ選択モード
+    expect(stage1.get("ctl00$MainContent$ucDataSelect$txtOperationNo")).toBe(OPE_NO);
+    expect(stage1.get("ctl00$MainContent$ucDataSelect$txtStartDateTime")).toBe(START_OPE);
+    expect(stage1.get("ctl00$MainContent$btnCsvSvr")).toBe("ダウンロード");
+
+    // stage 2: 確認ページの全フィールド (ddlSystem 含む) + 選択フィールドの明示上書き。
+    // これを落とすと空 ZIP が返る (2026-07-09 実測、Refs #203)
+    const stage2 = new URLSearchParams(bodies[1]);
+    expect(stage2.get("ctl00$MainContent$ddlSystem")).toBe("1");
+    expect(stage2.get("__VIEWSTATE")).toBe("VS-CONFIRM");
+    expect(stage2.get("ctl00$MainContent$ucDataSelect$txtOperationNo")).toBe(OPE_NO); // server-echo を上書き
+    expect(stage2.get("ctl00$MainContent$ucDataSelect$txtStartDateTime")).toBe(START_OPE);
+    expect(stage2.get("ctl00$MainContent$btnCsvSvrOutput")).toBe("ダウンロード");
+  });
+
+  it("rejects malformed OpeNo / StartOpe", async () => {
+    const jar = createCookieJar();
+    await expect(downloadOperationCsvZip(jar, { opeNo: "bad", startOpe: START_OPE })).rejects.toThrow(ReportParamError);
+    await expect(downloadOperationCsvZip(jar, { opeNo: OPE_NO, startOpe: "bad" })).rejects.toThrow(ReportParamError);
+  });
+
+  it("throws VenusSessionExpiredError when the GET returns the login page", async () => {
+    const jar = createCookieJar();
+    await expect(
+      downloadOperationCsvZip(jar, { opeNo: OPE_NO, startOpe: START_OPE }, sequenceFetch([html(LOGIN_REDIRECT_HTML)])),
+    ).rejects.toThrow(VenusSessionExpiredError);
+  });
+
+  it.each(["rdoSelect0", "txtOperationNo", "txtStartDateTime", "btnCsvSvr"] as const)(
+    "throws when the form element %s is missing",
+    async (omit) => {
+      const jar = createCookieJar();
+      await expect(
+        downloadOperationCsvZip(jar, { opeNo: OPE_NO, startOpe: START_OPE }, sequenceFetch([html(csvSelectPageHtml({ omit }))])),
+      ).rejects.toThrow(/CSV フォームの要素/);
+    },
+  );
+
+  it("returns the zip directly when stage 1 responds with binary (and falls back to a default button label)", async () => {
+    const jar = createCookieJar();
+    const bodies: string[] = [];
+    const responses = [html(csvSelectPageHtml({ stage1ButtonValue: "" })), binaryResponse([0x50, 0x4b, 0x03, 0x04, 9], "application/zip")];
+    let call = 0;
+    const fetchImpl: FetchLike = async (_url, init) => {
+      if (init?.body) bodies.push(String(init.body));
+      return responses[call++]!;
+    };
+    const buf = await downloadOperationCsvZip(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl, {
+      requestTimeoutMs: 1000,
+      exportTimeoutMs: 2000,
+    });
+    expect(buf.byteLength).toBe(5);
+    expect(new URLSearchParams(bodies[0]).get("ctl00$MainContent$btnCsvSvr")).toBe("ダウンロード"); // value="" の fallback
+  });
+
+  it("fails loudly when stage 1 directly returns the empty (0 件) zip", async () => {
+    const jar = createCookieJar();
+    await expect(
+      downloadOperationCsvZip(
+        jar,
+        { opeNo: OPE_NO, startOpe: START_OPE },
+        sequenceFetch([html(csvSelectPageHtml()), emptyZipResponse()]),
+      ),
+    ).rejects.toThrow(/該当 0 件/);
+  });
+
+  it("throws VenusSessionExpiredError when the confirmation page is the login page", async () => {
+    const jar = createCookieJar();
+    await expect(
+      downloadOperationCsvZip(
+        jar,
+        { opeNo: OPE_NO, startOpe: START_OPE },
+        sequenceFetch([html(csvSelectPageHtml()), html(LOGIN_REDIRECT_HTML)]),
+      ),
+    ).rejects.toThrow(VenusSessionExpiredError);
+  });
+
+  it("throws when the confirmation page has no output button", async () => {
+    const jar = createCookieJar();
+    await expect(
+      downloadOperationCsvZip(
+        jar,
+        { opeNo: OPE_NO, startOpe: START_OPE },
+        sequenceFetch([html(csvSelectPageHtml()), html(csvConfirmPageHtml({ omitOutput: true }))]),
+      ),
+    ).rejects.toThrow(/btnCsvSvrOutput/);
+  });
+
+  it("fails loudly when stage 2 returns the empty (0 件) zip, with a fallback output button label", async () => {
+    const jar = createCookieJar();
+    const bodies: string[] = [];
+    const responses = [html(csvSelectPageHtml()), html(csvConfirmPageHtml({ outputButtonValue: "" })), emptyZipResponse()];
+    let call = 0;
+    const fetchImpl: FetchLike = async (_url, init) => {
+      if (init?.body) bodies.push(String(init.body));
+      return responses[call++]!;
+    };
+    await expect(downloadOperationCsvZip(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl)).rejects.toThrow(
+      /該当 0 件/,
+    );
+    expect(new URLSearchParams(bodies[1]).get("ctl00$MainContent$btnCsvSvrOutput")).toBe("ダウンロード");
+  });
+
+  it("tolerates responses without a content-type header (defensive ?? fallback)", async () => {
+    const jar = createCookieJar();
+    // Response に文字列 body を渡すと text/plain が自動付与されるため、header 無しを
+    // 再現するには Uint8Array body を使う (ArrayBufferView は content-type を付けない)。
+    const noCtHtml = new Response(new TextEncoder().encode(csvConfirmPageHtml()), { status: 200 });
+    const noCtZip = new Response(new Uint8Array([0x50, 0x4b, 0x03, 0x04, 7]), { status: 200 });
+    const buf = await downloadOperationCsvZip(
+      jar,
+      { opeNo: OPE_NO, startOpe: START_OPE },
+      sequenceFetch([html(csvSelectPageHtml()), noCtHtml, noCtZip]),
+    );
+    expect(buf.byteLength).toBe(5);
+  });
+
+  it("throws TheearthClientError when stage 2 returns non-zip bytes (magic mismatch, incl. <4 bytes)", async () => {
+    const jar = createCookieJar();
+    await expect(
+      downloadOperationCsvZip(
+        jar,
+        { opeNo: OPE_NO, startOpe: START_OPE },
+        sequenceFetch([html(csvSelectPageHtml()), html(csvConfirmPageHtml()), binaryResponse([0x50, 0x4b], "application/octet-stream")]),
+      ),
+    ).rejects.toThrow(TheearthClientError);
   });
 });
 
