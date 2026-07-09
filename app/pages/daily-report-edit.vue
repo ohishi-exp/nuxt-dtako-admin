@@ -706,6 +706,10 @@ const reviseError = ref<string | null>(null)
 const reviseSaving = ref(false)
 const reviseResult = ref<string | null>(null)
 const reviseDriverInput = ref('')
+// 作業時間再集計 (F-DES1013 btnScore) — 乗務員変更後にそのまま再集計できるよう
+// このモーダルにも置く (作業モーダルの recalculateWorkTime と同じ endpoint)
+const reviseRecalculating = ref(false)
+const reviseRecalculateResult = ref<string | null>(null)
 const DRIVER_CD_RE = /^\d{1,8}$/
 
 /** 入力中の乗務員CD / 現在の乗務員CD の名称 (マスタ live 解決)。 */
@@ -720,6 +724,7 @@ async function openReviseModal(row: DailyReportRow) {
   reviseForm.value = null
   reviseError.value = null
   reviseResult.value = null
+  reviseRecalculateResult.value = null
   reviseDriverInput.value = ''
   reviseLoading.value = true
   void ensureReportMasters() // 名称解決用 (失敗しても編集は続行できる)
@@ -750,6 +755,39 @@ function closeReviseModal() {
   reviseForm.value = null
   reviseError.value = null
   reviseResult.value = null
+  reviseRecalculateResult.value = null
+}
+
+/** 作業時間再集計 (F-DES1013 btnScore) を乗務員変更モーダルから実行する。
+ * 乗務員変更は再集計不要 (DriverCD1 は直接反映) だが、同じ運行の作業時間を
+ * 続けて再集計したい運用があるため並べて置く。フォーム未取得 (500 等) でも
+ * 再集計自体は実行できる (対象は opeNo/startOpe で特定するため)。 */
+async function recalculateWorkFromRevise() {
+  const s = session.value
+  const target = reviseSelectedRow.value
+  if (!s || !target) return
+  reviseRecalculating.value = true
+  reviseError.value = null
+  reviseRecalculateResult.value = null
+  try {
+    await $fetch<{ linkSysEnabled: boolean }>('/daily-report-api/work/recalculate', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: { opeNo: target.operationNo, startOpe: target.startDateTime },
+    })
+    reviseRecalculateResult.value = '作業時間再集計が完了しました'
+  }
+  catch (e) {
+    if (dailyReportErrorStatus(e) === 401) {
+      expireSession(dailyReportErrorMessage(e))
+      reviseModalOpen.value = false
+      return
+    }
+    reviseError.value = dailyReportErrorMessage(e)
+  }
+  finally {
+    reviseRecalculating.value = false
+  }
 }
 
 /** 乗務員CD の登録 (F-DES1011 btnReg)。運行データの本体を書き換える操作のため
@@ -1198,19 +1236,35 @@ onMounted(() => {
 
             <div v-if="reviseError" class="text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
               {{ reviseError }}
+              <p v-if="!reviseForm" class="mt-1 text-xs">
+                theearth 側に編集ロックが残っている可能性があります。一覧を再検索し、赤字表示の行の「編集制御解除」で解放してから開き直してください。
+              </p>
             </div>
             <div v-if="reviseResult" class="text-sm text-green-700 bg-green-50 dark:bg-green-950 dark:text-green-300 rounded-lg p-3">
               {{ reviseResult }}
             </div>
+            <div v-if="reviseRecalculateResult" class="text-sm text-green-700 bg-green-50 dark:bg-green-950 dark:text-green-300 rounded-lg p-3">
+              {{ reviseRecalculateResult }}
+            </div>
 
             <div class="flex justify-between items-center pt-2 border-t border-gray-200 dark:border-gray-800">
-              <UButton
-                icon="i-lucide-user-check"
-                label="登録"
-                :disabled="!reviseForm || !reviseForm.formFilled"
-                :loading="reviseSaving"
-                @click="saveReviseDriver"
-              />
+              <div class="flex gap-2">
+                <UButton
+                  icon="i-lucide-user-check"
+                  label="登録"
+                  :disabled="!reviseForm || !reviseForm.formFilled"
+                  :loading="reviseSaving"
+                  @click="saveReviseDriver"
+                />
+                <UButton
+                  icon="i-lucide-calculator"
+                  label="作業時間再集計"
+                  variant="outline"
+                  :loading="reviseRecalculating"
+                  title="作業1〜5時間 (DriverState1〜5Min) を再計算します (F-DES1013 btnScore)"
+                  @click="recalculateWorkFromRevise"
+                />
+              </div>
               <UButton label="閉じる" variant="ghost" @click="closeReviseModal" />
             </div>
           </div>
