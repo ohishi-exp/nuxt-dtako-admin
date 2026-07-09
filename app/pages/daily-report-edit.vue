@@ -728,7 +728,6 @@ async function saveWorkEdit() {
         destination: editing.destination,
         startDateTime: editing.startDateTime,
         endDateTime: editing.endDateTime,
-        driverType: editing.driverType,
         startPlaceCd: editing.startPlaceCd,
         startPlaceName: editing.startPlaceName,
         startCityCd: editing.startCityCd,
@@ -1123,47 +1122,62 @@ onMounted(() => {
             <div v-else-if="fuelRows.length === 0" class="text-center py-8 text-gray-400">
               給油データがありません
             </div>
-            <div v-else class="space-y-4">
-              <div
-                v-for="row in fuelRows"
-                :key="row.ctrlIndex"
-                class="border border-gray-200 dark:border-gray-800 rounded-lg p-3 space-y-2"
-              >
-                <div class="grid grid-cols-2 sm:grid-cols-6 gap-2">
-                  <UFormField label="分類 (CD)">
-                    <UInput v-model="fuelEditForm[row.ctrlIndex]!.supplyCategory" class="w-full" />
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 truncate">
+            <div v-else class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-800">
+                    <th class="py-2 pr-2">分類CD</th>
+                    <th class="py-2 pr-2">分類名</th>
+                    <th class="py-2 pr-2">区分CD</th>
+                    <th class="py-2 pr-2">区分名</th>
+                    <th class="py-2 pr-2">種別CD</th>
+                    <th class="py-2 pr-2">種別名</th>
+                    <th class="py-2 pr-2">日時</th>
+                    <th class="py-2 pr-2">数量</th>
+                    <th class="py-2 pr-2" />
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="row in fuelRows"
+                    :key="row.ctrlIndex"
+                    class="border-b border-gray-100 dark:border-gray-900"
+                  >
+                    <td class="py-1 pr-2">
+                      <UInput v-model="fuelEditForm[row.ctrlIndex]!.supplyCategory" class="w-16" />
+                    </td>
+                    <td class="py-1 pr-2 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
                       {{ liveCategoryName(row) || '—' }}
-                    </p>
-                  </UFormField>
-                  <UFormField label="区分 (CD)">
-                    <UInput v-model="fuelEditForm[row.ctrlIndex]!.supplyStation" class="w-full" />
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 truncate">
+                    </td>
+                    <td class="py-1 pr-2">
+                      <UInput v-model="fuelEditForm[row.ctrlIndex]!.supplyStation" class="w-16" />
+                    </td>
+                    <td class="py-1 pr-2 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
                       {{ liveStationName(row) || '—' }}
-                    </p>
-                  </UFormField>
-                  <UFormField label="種別 (CD)">
-                    <UInput v-model="fuelEditForm[row.ctrlIndex]!.supplyType" class="w-full" />
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 truncate">
+                    </td>
+                    <td class="py-1 pr-2">
+                      <UInput v-model="fuelEditForm[row.ctrlIndex]!.supplyType" class="w-16" />
+                    </td>
+                    <td class="py-1 pr-2 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
                       {{ liveTypeName(row) || '—' }}
-                    </p>
-                  </UFormField>
-                  <UFormField label="日時" class="col-span-2">
-                    <UInput v-model="fuelEditForm[row.ctrlIndex]!.dateTime" class="w-full" />
-                  </UFormField>
-                  <UFormField label="数量">
-                    <UInput v-model="fuelEditForm[row.ctrlIndex]!.quantity" class="w-full" />
-                  </UFormField>
-                </div>
-                <div class="flex justify-end">
-                  <UButton
-                    size="xs"
-                    label="この行を保存"
-                    :loading="savingCtrlIndex === row.ctrlIndex"
-                    @click="saveFuelRow(row.ctrlIndex)"
-                  />
-                </div>
-              </div>
+                    </td>
+                    <td class="py-1 pr-2">
+                      <UInput v-model="fuelEditForm[row.ctrlIndex]!.dateTime" class="w-40" />
+                    </td>
+                    <td class="py-1 pr-2">
+                      <UInput v-model="fuelEditForm[row.ctrlIndex]!.quantity" class="w-20" />
+                    </td>
+                    <td class="py-1 pr-2 text-right whitespace-nowrap">
+                      <UButton
+                        size="xs"
+                        label="保存"
+                        :loading="savingCtrlIndex === row.ctrlIndex"
+                        @click="saveFuelRow(row.ctrlIndex)"
+                      />
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
 
             <div v-if="expenseError" class="text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
@@ -1225,123 +1239,138 @@ onMounted(() => {
               作業データがありません
             </div>
             <template v-else>
-              <!-- 作業行一覧 (表示) -->
+              <!-- 作業行一覧 (inline 編集、theearth のグリッドと同じ操作感) -->
               <div class="overflow-x-auto">
                 <table class="w-full text-sm">
                   <thead>
                     <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-800">
-                      <th class="py-2 pr-3">作業</th>
-                      <th class="py-2 pr-3">開始日時</th>
-                      <th class="py-2 pr-3">終了日時</th>
-                      <th class="py-2 pr-3">作業時間</th>
-                      <th class="py-2 pr-3">運転者区分</th>
-                      <th class="py-2 pr-3">開始場所</th>
-                      <th class="py-2 pr-3">終了場所</th>
-                      <th class="py-2 pr-3" />
+                      <th class="py-2 pr-2">作業</th>
+                      <th class="py-2 pr-2">行先</th>
+                      <th class="py-2 pr-2">開始日時</th>
+                      <th class="py-2 pr-2">終了日時</th>
+                      <th class="py-2 pr-2">作業時間</th>
+                      <th class="py-2 pr-2">開始場所CD</th>
+                      <th class="py-2 pr-2">開始場所名</th>
+                      <th class="py-2 pr-2">開始市町村CD</th>
+                      <th class="py-2 pr-2">開始市町村名</th>
+                      <th class="py-2 pr-2">終了場所CD</th>
+                      <th class="py-2 pr-2">終了場所名</th>
+                      <th class="py-2 pr-2">終了市町村CD</th>
+                      <th class="py-2 pr-2">終了市町村名</th>
+                      <th class="py-2 pr-2" />
                     </tr>
                   </thead>
                   <tbody>
-                    <tr
-                      v-for="row in workRows"
-                      :key="row.ctrlIndex"
-                      class="border-b border-gray-100 dark:border-gray-900"
-                      :class="{ 'bg-primary-50 dark:bg-primary-950': workEditing?.ctrlIndex === row.ctrlIndex }"
-                    >
-                      <td class="py-2 pr-3 whitespace-nowrap">
-                        {{ row.eventCd }} {{ row.eventName }}
-                      </td>
-                      <td class="py-2 pr-3 whitespace-nowrap">
-                        {{ row.startDateTime }}
-                      </td>
-                      <td class="py-2 pr-3 whitespace-nowrap">
-                        {{ row.endDateTime }}
-                      </td>
-                      <td class="py-2 pr-3 whitespace-nowrap">
-                        {{ row.eventMin }}
-                      </td>
-                      <td class="py-2 pr-3">
-                        {{ row.driverType }}
-                      </td>
-                      <td class="py-2 pr-3">
-                        {{ row.startPlaceName || row.startPlaceCd || '-' }}
-                      </td>
-                      <td class="py-2 pr-3">
-                        {{ row.endPlaceName || row.endPlaceCd || '-' }}
-                      </td>
-                      <td class="py-2 pr-3 text-right whitespace-nowrap">
-                        <UButton
-                          size="xs"
-                          variant="outline"
-                          icon="i-lucide-pencil"
-                          label="編集"
-                          :loading="workEditStarting === row.ctrlIndex"
-                          :disabled="workEditing !== null && workEditing.ctrlIndex !== row.ctrlIndex"
-                          @click="startWorkEdit(row)"
-                        />
-                      </td>
-                    </tr>
+                    <template v-for="row in workRows" :key="row.ctrlIndex">
+                      <!-- 編集モード行 (edit-start 済み、日時はフル形式 "YYYY/MM/DD HH:mm:ss") -->
+                      <tr
+                        v-if="workEditing && workEditing.ctrlIndex === row.ctrlIndex"
+                        class="border-b border-gray-100 dark:border-gray-900 bg-primary-50 dark:bg-primary-950"
+                      >
+                        <td class="py-1 pr-2">
+                          <USelect
+                            v-if="workEventSelectItems.length > 0"
+                            v-model="workEditing.eventCd"
+                            :items="workEventSelectItems"
+                            class="w-32"
+                          />
+                          <UInput v-else v-model="workEditing.eventCd" class="w-20" />
+                        </td>
+                        <td class="py-1 pr-2">
+                          <UCheckbox v-model="workEditing.destination" />
+                        </td>
+                        <td class="py-1 pr-2">
+                          <UInput v-model="workEditing.startDateTime" class="w-44" />
+                        </td>
+                        <td class="py-1 pr-2">
+                          <UInput v-model="workEditing.endDateTime" class="w-44" />
+                        </td>
+                        <td class="py-1 pr-2 whitespace-nowrap">
+                          {{ row.eventMin }}
+                        </td>
+                        <td class="py-1 pr-2">
+                          <UInput v-model="workEditing.startPlaceCd" class="w-24" />
+                        </td>
+                        <td class="py-1 pr-2">
+                          <UInput v-model="workEditing.startPlaceName" class="w-36" />
+                        </td>
+                        <td class="py-1 pr-2">
+                          <UInput v-model="workEditing.startCityCd" class="w-24" />
+                        </td>
+                        <td class="py-1 pr-2">
+                          <UInput v-model="workEditing.startCityName" class="w-36" />
+                        </td>
+                        <td class="py-1 pr-2">
+                          <UInput v-model="workEditing.endPlaceCd" class="w-24" />
+                        </td>
+                        <td class="py-1 pr-2">
+                          <UInput v-model="workEditing.endPlaceName" class="w-36" />
+                        </td>
+                        <td class="py-1 pr-2">
+                          <UInput v-model="workEditing.endCityCd" class="w-24" />
+                        </td>
+                        <td class="py-1 pr-2">
+                          <UInput v-model="workEditing.endCityName" class="w-36" />
+                        </td>
+                        <td class="py-1 pr-2 text-right whitespace-nowrap space-x-1">
+                          <UButton size="xs" label="保存" :loading="workSaving" @click="saveWorkEdit" />
+                          <UButton size="xs" variant="ghost" label="取消" @click="cancelWorkEdit" />
+                        </td>
+                      </tr>
+                      <!-- 表示行 -->
+                      <tr v-else class="border-b border-gray-100 dark:border-gray-900">
+                        <td class="py-2 pr-2 whitespace-nowrap">
+                          {{ row.eventCd }} {{ row.eventName }}
+                        </td>
+                        <td class="py-2 pr-2" />
+                        <td class="py-2 pr-2 whitespace-nowrap">
+                          {{ row.startDateTime }}
+                        </td>
+                        <td class="py-2 pr-2 whitespace-nowrap">
+                          {{ row.endDateTime }}
+                        </td>
+                        <td class="py-2 pr-2 whitespace-nowrap">
+                          {{ row.eventMin }}
+                        </td>
+                        <td class="py-2 pr-2 whitespace-nowrap">
+                          {{ row.startPlaceCd || '-' }}
+                        </td>
+                        <td class="py-2 pr-2 whitespace-nowrap">
+                          {{ row.startPlaceName || '-' }}
+                        </td>
+                        <td class="py-2 pr-2 whitespace-nowrap">
+                          {{ row.startCityCd || '-' }}
+                        </td>
+                        <td class="py-2 pr-2 whitespace-nowrap">
+                          {{ row.startCityName || '-' }}
+                        </td>
+                        <td class="py-2 pr-2 whitespace-nowrap">
+                          {{ row.endPlaceCd || '-' }}
+                        </td>
+                        <td class="py-2 pr-2 whitespace-nowrap">
+                          {{ row.endPlaceName || '-' }}
+                        </td>
+                        <td class="py-2 pr-2 whitespace-nowrap">
+                          {{ row.endCityCd || '-' }}
+                        </td>
+                        <td class="py-2 pr-2 whitespace-nowrap">
+                          {{ row.endCityName || '-' }}
+                        </td>
+                        <td class="py-2 pr-2 text-right whitespace-nowrap">
+                          <UButton
+                            size="xs"
+                            variant="outline"
+                            icon="i-lucide-pencil"
+                            label="編集"
+                            :loading="workEditStarting === row.ctrlIndex"
+                            :disabled="workEditing !== null"
+                            @click="startWorkEdit(row)"
+                          />
+                        </td>
+                      </tr>
+                    </template>
                   </tbody>
                 </table>
-              </div>
-
-              <!-- 編集フォーム (theearth の鉛筆 → 編集モードに対応) -->
-              <div v-if="workEditing" class="border border-primary-300 dark:border-primary-800 rounded-lg p-3 space-y-2">
-                <p class="text-sm font-semibold">
-                  行の編集 (日時は "YYYY/MM/DD HH:mm:ss" 形式)
-                </p>
-                <div class="grid grid-cols-2 sm:grid-cols-6 gap-2">
-                  <UFormField label="作業種別" class="col-span-2">
-                    <USelect
-                      v-if="workEventSelectItems.length > 0"
-                      v-model="workEditing.eventCd"
-                      :items="workEventSelectItems"
-                      class="w-full"
-                    />
-                    <UInput v-else v-model="workEditing.eventCd" class="w-full" />
-                  </UFormField>
-                  <UFormField label="開始日時" class="col-span-2">
-                    <UInput v-model="workEditing.startDateTime" class="w-full" />
-                  </UFormField>
-                  <UFormField label="終了日時" class="col-span-2">
-                    <UInput v-model="workEditing.endDateTime" class="w-full" />
-                  </UFormField>
-                  <UFormField label="運転者区分">
-                    <UInput v-model="workEditing.driverType" class="w-full" />
-                  </UFormField>
-                  <UFormField label="行先">
-                    <UCheckbox v-model="workEditing.destination" label="行先" />
-                  </UFormField>
-                </div>
-                <div class="grid grid-cols-2 sm:grid-cols-8 gap-2">
-                  <UFormField label="開始場所CD">
-                    <UInput v-model="workEditing.startPlaceCd" class="w-full" />
-                  </UFormField>
-                  <UFormField label="開始場所名">
-                    <UInput v-model="workEditing.startPlaceName" class="w-full" />
-                  </UFormField>
-                  <UFormField label="開始市町村CD">
-                    <UInput v-model="workEditing.startCityCd" class="w-full" />
-                  </UFormField>
-                  <UFormField label="開始市町村名">
-                    <UInput v-model="workEditing.startCityName" class="w-full" />
-                  </UFormField>
-                  <UFormField label="終了場所CD">
-                    <UInput v-model="workEditing.endPlaceCd" class="w-full" />
-                  </UFormField>
-                  <UFormField label="終了場所名">
-                    <UInput v-model="workEditing.endPlaceName" class="w-full" />
-                  </UFormField>
-                  <UFormField label="終了市町村CD">
-                    <UInput v-model="workEditing.endCityCd" class="w-full" />
-                  </UFormField>
-                  <UFormField label="終了市町村名">
-                    <UInput v-model="workEditing.endCityName" class="w-full" />
-                  </UFormField>
-                </div>
-                <div class="flex justify-end gap-2">
-                  <UButton size="xs" variant="ghost" label="キャンセル" @click="cancelWorkEdit" />
-                  <UButton size="xs" label="この行を保存" :loading="workSaving" @click="saveWorkEdit" />
-                </div>
               </div>
             </template>
 
