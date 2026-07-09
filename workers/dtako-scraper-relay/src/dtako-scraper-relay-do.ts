@@ -80,6 +80,7 @@ import {
 } from "./dvr-session";
 import {
   downloadEditedZip,
+  downloadOperationCsvZip,
   getExpenseForm,
   harvestDailyReport,
   recalculateExpense,
@@ -1554,16 +1555,23 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return this.callReportAction(record, "システム連動開始", (jar) => startSystemLink(jar, opeNo, startOpe));
   }
 
-  /** GET /daily-report-api/zip?from=&to= — F-NOS3010 の編集後 csvdata.zip を
-   * browser にストリーム素通しする (handleDvrFile と同型、JSON でなく binary
-   * body なので callReportAction ではなく専用 handler にしてある)。from/to は
-   * "YYYY-MM-DD" 形式 (downloadCsvZip の CsvDateRange)。 */
+  /** GET /daily-report-api/zip — F-NOS3010 の編集後 csvdata.zip を browser に
+   * ストリーム素通しする (handleDvrFile と同型、JSON でなく binary body なので
+   * callReportAction ではなく専用 handler にしてある)。2 つの指定方法がある:
+   *
+   * - `?opeNo=&startOpe=` — **単一運行のみ** の zip (運行データ選択モード、Refs #203)
+   * - `?from=&to=` — 日付範囲 ("YYYY-MM-DD"、downloadCsvZip の CsvDateRange) */
   private async handleReportZip(record: ReportSessionRecord, url: URL): Promise<Response> {
+    const opeNo = url.searchParams.get("opeNo") ?? "";
+    const startOpe = url.searchParams.get("startOpe") ?? "";
     const startDate = url.searchParams.get("from") ?? "";
     const endDate = url.searchParams.get("to") ?? "";
     const jar: CookieJar = { cookies: new Map(record.cookies) };
+    const filenameSuffix = opeNo ? opeNo : record.compId;
     try {
-      const bytes = await downloadEditedZip(jar, { startDate, endDate });
+      const bytes = opeNo
+        ? await downloadOperationCsvZip(jar, { opeNo, startOpe })
+        : await downloadEditedZip(jar, { startDate, endDate });
       // cookie 書き戻しはヘッダ送出をブロックしない (handleDvrFile と同じ理由)。
       this.ctx.waitUntil(
         this.ctx.storage.put<ReportSessionRecord>(REPORT_SESSION_KEY, {
@@ -1575,7 +1583,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         status: 200,
         headers: {
           "content-type": "application/zip",
-          "content-disposition": `attachment; filename="csvdata-${record.compId}.zip"`,
+          "content-disposition": `attachment; filename="csvdata-${filenameSuffix}.zip"`,
           "cache-control": "no-store",
         },
       });
@@ -1583,6 +1591,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       if (err instanceof VenusSessionExpiredError) {
         await this.ctx.storage.delete(REPORT_SESSION_KEY);
         return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
+      }
+      if (err instanceof ReportParamError) {
+        return dvrJsonError(400, err.message);
       }
       console.error("Report zip error:", err);
       const message =

@@ -26,8 +26,11 @@
  */
 import {
   BASE_URL,
+  CSV_PATH,
+  DEFAULT_EXPORT_TIMEOUT_MS,
   DEFAULT_REQUEST_TIMEOUT_MS,
   downloadCsvZip,
+  ensureZip,
   extractHiddenFields,
   fetchWithJar,
   findFormFieldById,
@@ -1280,4 +1283,118 @@ export async function downloadEditedZip(
   timeouts: ScrapeTimeouts = {},
 ): Promise<ArrayBuffer> {
   return downloadCsvZip(jar, range, fetchImpl, timeouts);
+}
+
+/** EOCD (`PK\x05\x06`) だけの空 ZIP か。F-NOS3010 は「該当データ 0 件」を
+ * 22 バイトの空 ZIP (200) で返すため、マジックバイト検査 (`PK\x03\x04`) より
+ * 先にこれを識別して原因の分かるメッセージで loud fail する。 */
+function isEmptyZip(buf: ArrayBuffer): boolean {
+  const bytes = new Uint8Array(buf);
+  return bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x05 && bytes[3] === 0x06;
+}
+
+/**
+ * 単一運行だけの csvdata.zip をダウンロードする (F-NOS3010 の「運行データ選択」
+ * モード、cdp-pair 実機確認 2026-07-09、Refs #203)。
+ *
+ * 実ブラウザでは一覧の行クリック (`RowsClick`) → 「ダウンロード」だが、行クリックは
+ * CSS 非表示の text input (`ucDataSelect$txtOperationNo` / `txtStartDateTime`) に
+ * 値をセットするだけなので、**一覧の表示・ソート・ページ位置に関係なく** この
+ * 2 フィールドへ直接値を書いて送ればよい (`unlockOperation` と同じパターン。
+ * 別運行 2 件で実機確認済み)。複数運行はカンマ連結で送れる (`_Multi=1`) が、
+ * この関数は単一運行のみ受け付ける。
+ *
+ * フローは日付範囲モード (`downloadCsvZip`) と同じ 2 段階 postback
+ * (`btnCsvSvr` → 確認ページ → `btnCsvSvrOutput`)。**stage 2 には確認ページの
+ * 全フォームフィールド (select 含む) を忠実に再送する必要がある** —
+ * `ddlSystem` (連動出力形式) 等を落とすと該当 0 件扱いになり 22 バイトの
+ * 空 ZIP が返る (実測。日付範囲モードの「stage 2 で日付欠落 → 空 ZIP」と同じ
+ * 罠の選択モード版)。curated なフィールドリストではなく `serializeFormFields`
+ * で丸ごと直列化する。
+ */
+export async function downloadOperationCsvZip(
+  jar: CookieJar,
+  params: UnlockOperationParams,
+  fetchImpl: FetchLike = fetch,
+  timeouts: ScrapeTimeouts = {},
+): Promise<ArrayBuffer> {
+  validateOpeNo(params.opeNo);
+  validateStartOpe(params.startOpe);
+  const requestTimeoutMs = timeouts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const exportTimeoutMs = timeouts.exportTimeoutMs ?? DEFAULT_EXPORT_TIMEOUT_MS;
+  const csvUrl = `${BASE_URL}${CSV_PATH}`;
+
+  const getRes = await fetchWithJar(jar, csvUrl, { method: "GET" }, fetchImpl, requestTimeoutMs);
+  const html = await getRes.text();
+  if (isLoginRedirect(html)) {
+    throw new VenusSessionExpiredError(
+      "CSV ダウンロードページがログイン画面を返しました — theearth セッションが切れています",
+    );
+  }
+
+  // フィールド名 (`ctl00$MainContent$...`) は実ページの id から都度解決する。
+  const selectModeRadio = findFormFieldById(html, "rdoSelect0"); // 運行データ選択 (ページ既定)
+  const opNoField = findFormFieldById(html, "txtOperationNo");
+  const startDtField = findFormFieldById(html, "txtStartDateTime");
+  const stage1Button = findFormFieldById(html, "btnCsvSvr");
+  if (!selectModeRadio || !opNoField || !startDtField || !stage1Button) {
+    throw new TheearthClientError(
+      "CSV フォームの要素 (rdoSelect0/txtOperationNo/txtStartDateTime/btnCsvSvr) が見つかりません — " +
+        "theearth-np のページ仕様が変更された可能性があります",
+    );
+  }
+
+  const selection: Record<string, string> = {
+    [selectModeRadio.name]: selectModeRadio.value,
+    [opNoField.name]: params.opeNo,
+    [startDtField.name]: params.startOpe,
+  };
+
+  const stage1Body = new URLSearchParams({
+    ...serializeFormFields(html),
+    ...selection,
+    [stage1Button.name]: stage1Button.value || "ダウンロード",
+  });
+  const stage1Res = await postForm(jar, csvUrl, stage1Body, fetchImpl, requestTimeoutMs);
+  const stage1ContentType = stage1Res.headers.get("content-type") ?? "";
+
+  // 1段階目で直接 ZIP が返るケース (downloadCsvZip と同様、実装差異に備える)
+  if (stage1ContentType.includes("application/octet-stream") || stage1ContentType.includes("zip")) {
+    return ensureOperationZip(await stage1Res.arrayBuffer(), stage1ContentType, params.opeNo);
+  }
+
+  const stage1Html = await stage1Res.text();
+  if (isLoginRedirect(stage1Html)) {
+    throw new VenusSessionExpiredError(
+      "CSV ダウンロードの確認ページがログイン画面を返しました — theearth セッションが切れています",
+    );
+  }
+  const outputButton = findFormFieldById(stage1Html, "btnCsvSvrOutput");
+  if (!outputButton) {
+    throw new TheearthClientError(
+      "CSV ダウンロードの2段階目ボタン (btnCsvSvrOutput) が見つかりません — " +
+        "theearth-np のページ仕様が変更された可能性があります",
+    );
+  }
+  // 確認ページは選択フィールドをエコーバックするが、欠落 = 空 ZIP の事故を防ぐ
+  // ため選択フィールドはこちらの値で明示的に上書きする。
+  const stage2Body = new URLSearchParams({
+    ...serializeFormFields(stage1Html),
+    ...selection,
+    [outputButton.name]: outputButton.value || "ダウンロード",
+  });
+  const stage2Res = await postForm(jar, csvUrl, stage2Body, fetchImpl, exportTimeoutMs);
+  const buf = await stage2Res.arrayBuffer();
+  return ensureOperationZip(buf, stage2Res.headers.get("content-type") ?? "", params.opeNo);
+}
+
+/** 空 ZIP (該当 0 件) を明示メッセージで loud fail し、それ以外は ZIP マジックを検証する。 */
+function ensureOperationZip(buf: ArrayBuffer, contentType: string, opeNo: string): ArrayBuffer {
+  if (isEmptyZip(buf)) {
+    throw new TheearthClientError(
+      `運行 ${opeNo} の csvdata.zip が空 (該当 0 件) でした — 運行No/出庫日時の組み合わせが ` +
+        "存在しないか、theearth-np のページ仕様変更でフォームフィールドが欠落した可能性があります",
+    );
+  }
+  return ensureZip(buf, contentType);
 }
