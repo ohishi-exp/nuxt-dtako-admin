@@ -53,9 +53,15 @@ jobs:
 
       # tag push (v*) → prod、それ以外 (main push / workflow_dispatch) → staging。
       # DO migration があるため versions upload ではなく wrangler deploy を使う。
-      # pull_request では deploy しない (gate のみ)。
+      # tag 以外 (main push / workflow_dispatch / pull_request) は staging へ。
+      # ⚠️ pull_request (draft 含む) でも staging deploy する — theearth 実機診断を
+      # ready 化せず回すためのユーザー要望 (Refs #199)。frontend-ci の draft gate と
+      # 異なり、この bespoke worker は PR ごとに共有 staging の scraper-relay を
+      # その PR の版で上書きする (= 同時に複数 PR が触ると最後の push が勝つ)。
+      # 汚染を避けたい変更は preview 環境 (dtako-scraper-relay-preview-deploy.yml) を
+      # 使うこと。
       - name: Deploy (staging)
-        if: github.event_name != 'pull_request' && github.ref_type != 'tag'
+        if: github.ref_type != 'tag'
         run: npx wrangler deploy --env staging
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
