@@ -105,6 +105,25 @@ function assertNoOtherEditConflict(html: string, actionLabel: string): void {
   }
 }
 
+/** GET が非 2xx を返した時に、ASP.NET エラーページの要約を log + メッセージに
+ * 載せて throw する (postback 版の postButton と同じ調査手法、Refs #199)。
+ * F-GOS0030 / F-DES1011 が再ログイン後も HTTP 500 を返し続ける事象 (staging
+ * 2026-07-10) の真因を Tail Worker log から追えるようにする。 */
+async function throwGetError(pageLabel: string, res: { status: number; text: () => Promise<string> }): Promise<never> {
+  let detail = "";
+  try {
+    const rawBody = await res.text();
+    detail = extractErrorSnippet(rawBody);
+    const dump = rawBody.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 600);
+    console.error(`theearth GET failed: HTTP ${res.status} page=${pageLabel} body=${dump}`);
+  } catch {
+    // body が読めなくても HTTP status だけで throw する
+  }
+  throw new TheearthClientError(
+    `${pageLabel}の取得が HTTP ${res.status} を返しました${detail ? ` — ${detail}` : ""}`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // F-DES1012 [運行経費入力] — 給油行 (lstFuel)
 // ---------------------------------------------------------------------------
@@ -485,7 +504,7 @@ async function fetchEditPageHtml(
 ): Promise<string> {
   const res = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
   if (!res.ok) {
-    throw new TheearthClientError(`${pageLabel}の取得が HTTP ${res.status} を返しました`);
+    await throwGetError(pageLabel, res);
   }
   const html = await res.text();
   if (isLoginRedirect(html)) {
@@ -673,7 +692,7 @@ export async function unlockOperation(
 
   const getRes = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
   if (!getRes.ok) {
-    throw new TheearthClientError(`運行データ入力一覧の取得が HTTP ${getRes.status} を返しました`);
+    await throwGetError("運行データ入力一覧", getRes);
   }
   const html = await getRes.text();
   if (isLoginRedirect(html)) {
@@ -760,7 +779,7 @@ export async function verifyReadNoDescending(
   const url = `${BASE_URL}${DISPLAY_CONFIG_PATH}`;
   const res = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
   if (!res.ok) {
-    throw new TheearthClientError(`表示条件指定ページの取得が HTTP ${res.status} を返しました`);
+    await throwGetError("表示条件指定ページ", res);
   }
   const html = await res.text();
   if (isLoginRedirect(html)) {
@@ -796,7 +815,7 @@ async function fetchDisplayConfigHtml(
 ): Promise<string> {
   const res = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
   if (!res.ok) {
-    throw new TheearthClientError(`表示条件指定ページの取得が HTTP ${res.status} を返しました`);
+    await throwGetError("表示条件指定ページ", res);
   }
   const html = await res.text();
   if (isLoginRedirect(html)) {
@@ -817,7 +836,7 @@ async function fetchOperationListHtml(
 ): Promise<string> {
   const res = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
   if (!res.ok) {
-    throw new TheearthClientError(`運行データ入力一覧の取得が HTTP ${res.status} を返しました`);
+    await throwGetError("運行データ入力一覧", res);
   }
   const html = await res.text();
   if (isLoginRedirect(html)) {
@@ -1235,7 +1254,7 @@ export async function harvestDailyReport(
   } else {
     const getRes = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
     if (!getRes.ok) {
-      throw new TheearthClientError(`運転日報ページの取得が HTTP ${getRes.status} を返しました`);
+      await throwGetError("運転日報ページ", getRes);
     }
     html = await getRes.text();
     if (isLoginRedirect(html)) {
@@ -1618,6 +1637,27 @@ function parseWorkRows(html: string): { workRows: WorkRow[]; eventOptions: WorkE
   return { workRows, eventOptions: firstEvent?.options ?? [] };
 }
 
+/** F-DES1013 の lstWork 実 DOM 構造を特定するための診断サマリ (Refs #170)。
+ * staging 実機のスクリーンショット (2026-07-10) から、lstWork は lstFuel と同じ
+ * 「表示行 + 行単位編集 (鉛筆ボタン) + 最下段の新規行テンプレート」構造と
+ * みられ、現在の parse は新規行テンプレートしか拾えていない疑いがある。
+ * 正確な id/name 体系を Tail Worker log から確定するため、lstWork を含むタグの
+ * 構造だけを返す (**値 = 業務データは log に出さない**。長さのみに置換)。
+ * 構造が確定して parse を実装し直したら削除してよい。 */
+export function describeLstWorkStructure(html: string): string[] {
+  const lines: string[] = [];
+  for (const m of html.matchAll(/<(?:input|select|span|a|img|table|tr)\b[^>]*>/gi)) {
+    const tag = m[0];
+    if (!/lstWork/i.test(tag)) continue;
+    lines.push(
+      tag
+        .replace(/\bvalue=["']([^"']*)["']/gi, (_s, v: string) => `value="<len:${v.length}>"`)
+        .replace(/\s+/g, " "),
+    );
+  }
+  return lines;
+}
+
 /** GET F-DES1013 — 作業行の現在値一覧を取得する (編集フォームの初期表示用)。 */
 export async function getWorkForm(
   jar: CookieJar,
@@ -1631,6 +1671,12 @@ export async function getWorkForm(
   const url = buildOperationWorkUrl(opeNo, startOpe);
   const pageHtml = await fetchEditPageHtml(jar, url, "作業入力ページ", fetchImpl, timeoutMs);
   const { workRows, eventOptions } = parseWorkRows(pageHtml);
+  // 実 DOM 構造の観測 log (Refs #170 staging 調査、値は出さない)。
+  const structure = describeLstWorkStructure(pageHtml);
+  console.log(`[work-form] opeNo=${opeNo} parsedRows=${workRows.length} lstWorkTags=${structure.length}`);
+  for (let i = 0; i < structure.length; i += 20) {
+    console.log(`[work-form] tags[${i}..]: ${structure.slice(i, i + 20).join(" | ").slice(0, 4000)}`);
+  }
   if (workRows.length === 0) {
     // 作業行 0 件は実運用上あり得るが、ページ構造の想定違いと区別する
     // (getExpenseForm の給油 0 件と同じ切り分け設計)。
@@ -1703,6 +1749,23 @@ export async function saveWorkRows(
   const url = buildOperationWorkUrl(params.opeNo, params.startOpe);
   const pageHtml = await fetchEditPageHtml(jar, url, "作業入力ページ", fetchImpl, timeoutMs);
   const parsed = parseLstWorkFields(pageHtml);
+
+  // 保護 (Refs #170、staging 実機 2026-07-10): lstWork は「表示行 + 行単位編集 +
+  // 最下段の新規行テンプレート」構造とみられ、現在の parse は値が空の新規行
+  // テンプレートしか拾えていない疑いがある。全行の開始/終了日時が空 (= 既存行の
+  // 実データを取得できていない) 状態で btnRegist1 を送ると意図しない値を書き込む
+  // 恐れがあるため、実構造の parse を実装し直すまで登録を中止する。
+  const anyDateTimeFilled = [...parsed.values()].some(
+    (fields) =>
+      (fields.get(WORK_EDIT_FIELD_SUFFIXES.startDateTime)?.value ?? "") !== ""
+      || (fields.get(WORK_EDIT_FIELD_SUFFIXES.endDateTime)?.value ?? "") !== "",
+  );
+  if (!anyDateTimeFilled) {
+    throw new TheearthClientError(
+      "作業行の初期値が空のため登録を中止しました (既存の作業データを意図しない値で上書きしない" +
+        "ための保護) — 現在の実装は既存行を取得できておらず、実 DOM 構造を調査中です (Refs #170)",
+    );
+  }
 
   const registButton = findFormFieldById(pageHtml, "btnRegist1");
   if (!registButton) {

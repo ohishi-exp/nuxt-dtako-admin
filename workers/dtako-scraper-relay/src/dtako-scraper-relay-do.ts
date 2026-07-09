@@ -1527,7 +1527,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const vehicleFrom = url.searchParams.get("vehicleFrom");
     const vehicleTo = url.searchParams.get("vehicleTo");
     return this.callReportAction(record, "運転日報の取得", async (jar) => {
-      const sortOk = await verifyReadNoDescending(jar);
+      // 並び順チェック (F-GOS0030) は表示用の事前確認に過ぎない (早期打ち切りの
+      // 安全性は harvestDailyReport 側の単調非増加ランタイム検証が守る) ため、
+      // ここが 500 でも一覧取得全体を落とさない (staging 2026-07-10 に F-GOS0030
+      // が HTTP 500 を返し続けて一覧が全滅した事象への対処)。sortOk=null で
+      // 「確認できなかった」をフロントに伝える。セッション切れだけは即 401 に
+      // したいので rethrow する。
+      let sortOk: boolean | null = null;
+      try {
+        sortOk = await verifyReadNoDescending(jar);
+      } catch (err) {
+        if (err instanceof VenusSessionExpiredError) throw err;
+        console.error("Report list sort check error (degraded to sortOk=null):", err);
+      }
       if (vehicleFrom && vehicleTo) {
         const harvested = await withVehicleNarrow(
           jar,
