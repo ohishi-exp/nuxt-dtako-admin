@@ -229,6 +229,16 @@ const recalculateResult = ref<string | null>(null)
 const linkSysEnabled = ref(false)
 const linking = ref(false)
 const linkResult = ref<string | null>(null)
+// この運行の csvdata.zip ダウンロード (モーダル内、読取日 1 日分)
+const opeZipLoading = ref(false)
+
+/** "2026/07/06 5:10:01" / "26/07/06 ..." 等から "YYYY-MM-DD" を取り出す。 */
+function toIsoDate(s: string): string {
+  const m = s.match(/(\d{2,4})\/(\d{1,2})\/(\d{1,2})/)
+  if (!m) return s.slice(0, 10)
+  const year = m[1]!.length === 2 ? `20${m[1]}` : m[1]!
+  return `${year}-${m[2]!.padStart(2, '0')}-${m[3]!.padStart(2, '0')}`
+}
 
 const fuelEditForm = reactive<Record<number, { supplyCategory: string, supplyStation: string, supplyType: string, dateTime: string, quantity: string }>>({})
 
@@ -422,6 +432,39 @@ async function startSystemLink() {
   }
   finally {
     linking.value = false
+  }
+}
+
+/** この運行 (読取日=退社日時 の 1 日分) の編集後 csvdata.zip をダウンロードする。
+ * csvdata.zip は F-NOS3010 の期間 export なので「1 運行だけ」は取れず、その運行の
+ * 読取日 1 日分 (from=to) を取る (一覧の絞込基準と一致)。 */
+async function downloadOperationZip() {
+  const s = session.value
+  const target = selectedRow.value
+  if (!s || !target) return
+  const date = toIsoDate(target.workEndDateTime)
+  opeZipLoading.value = true
+  expenseError.value = null
+  try {
+    const params = new URLSearchParams({ from: date, to: date })
+    const res = await fetch(`/daily-report-api/zip?${params.toString()}`, { headers: authHeaders() })
+    if (!res.ok) {
+      const data = await res.json().catch(() => null) as { error?: string } | null
+      const message = data?.error ?? `csvdata.zip の取得に失敗しました (HTTP ${res.status})`
+      if (res.status === 401) {
+        expireSession(message)
+        expenseModalOpen.value = false
+        return
+      }
+      throw new Error(message)
+    }
+    await downloadBlobResponse(res, `csvdata-${date}.zip`)
+  }
+  catch (e) {
+    expenseError.value = e instanceof Error ? e.message : String(e)
+  }
+  finally {
+    opeZipLoading.value = false
   }
 }
 
@@ -669,6 +712,14 @@ onMounted(() => {
                   :loading="linking"
                   title="評価点再集計の成功後に有効化されます (theearth へデータ連動)"
                   @click="startSystemLink"
+                />
+                <UButton
+                  icon="i-lucide-file-archive"
+                  label="この運行の csvdata.zip"
+                  variant="outline"
+                  :loading="opeZipLoading"
+                  title="この運行の読取日 (退社日時) 1 日分の編集後 csvdata.zip をダウンロード"
+                  @click="downloadOperationZip"
                 />
               </div>
               <UButton label="閉じる" variant="ghost" @click="closeExpenseModal" />
