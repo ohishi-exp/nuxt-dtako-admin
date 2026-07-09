@@ -4,12 +4,17 @@ import {
   downloadOperationCsvZip,
   extractLstFuelTextInputs,
   getExpenseForm,
+  getReviseForm,
+  getWorkForm,
   harvestDailyReport,
   parseExpenseMasters,
   recalculateExpense,
+  recalculateWork,
   startSystemLink,
   ReportParamError,
+  saveDriver,
   saveFuelRow,
+  saveWorkRows,
   unlockOperation,
   verifyReadNoDescending,
   withVehicleNarrow,
@@ -1907,5 +1912,548 @@ describe("harvestDailyReport", () => {
         sequenceFetch([html(page1), html(LOGIN_REDIRECT_HTML)]),
       ),
     ).rejects.toThrow(VenusSessionExpiredError);
+  });
+});
+
+// --- F-DES1013 作業入力フォーム fixture --------------------------------------
+// lstWork のフィールド形式は SKILL.md の 2026-07-08 実機トレース (name =
+// `lstWork$ctrl<i>$<field>`) を primary とし、lstFuel で後から判明した
+// `lstWork_<field>_<i>` (id) 形式もフォールバックで受け付ける (Refs #183/#184 の
+// 経緯)。fixture は両形式を用意する。
+
+interface WorkRowSpec {
+  event?: string;
+  start?: string;
+  intStart?: string | null;
+  end?: string;
+  intEnd?: string | null;
+  driverType?: string;
+  noStart?: boolean;
+}
+
+function workRowInputsHtml(i: number, v: WorkRowSpec = {}): string {
+  const id = (field: string) => `lstWork_ctrl${i}_${field}`;
+  const name = (field: string) => `lstWork$ctrl${i}$${field}`;
+  const start = v.start ?? "26/07/03 10:38";
+  const end = v.end ?? "26/07/03 11:38";
+  return `
+    <select id="${id("iddlEventName")}" name="${name("iddlEventName")}">
+      <option value="1">積み</option>
+      <option value="2"${v.event === "2" ? " selected" : ""}>降ろし</option>
+      <option value="3"${v.event === "3" ? " selected" : ""}>休憩</option>
+    </select>
+    ${v.noStart ? "" : `<input type="text" id="${id("itxtStartDateTime")}" name="${name("itxtStartDateTime")}" value="${start}" />`}
+    ${
+      v.intStart === null
+        ? ""
+        : `<input type="hidden" id="${id("intxtStartDateTime")}" name="${name("intxtStartDateTime")}" value="${v.intStart ?? start.replace(/\D/g, "")}" />`
+    }
+    <input type="text" id="${id("itxtEndDateTime")}" name="${name("itxtEndDateTime")}" value="${end}" />
+    ${
+      v.intEnd === null
+        ? ""
+        : `<input type="hidden" id="${id("intxtEndDateTime")}" name="${name("intxtEndDateTime")}" value="${v.intEnd ?? end.replace(/\D/g, "")}" />`
+    }
+    <input type="text" id="${id("itxtDriverType")}" name="${name("itxtDriverType")}" value="${v.driverType ?? "1"}" />
+    <input type="text" id="${id("itxtStartPlaceCD")}" name="${name("itxtStartPlaceCD")}" value="10" />
+    <input type="text" id="${id("itxtStartPlaceName")}" name="${name("itxtStartPlaceName")}" value="出発地" />
+    <input type="text" id="${id("itxtStartCityCD")}" name="${name("itxtStartCityCD")}" value="41" />
+    <input type="text" id="${id("itxtStartCityName")}" name="${name("itxtStartCityName")}" value="佐賀市" />
+    <input type="text" id="${id("itxtEndPlaceCD")}" name="${name("itxtEndPlaceCD")}" value="20" />
+    <input type="text" id="${id("itxtEndPlaceName")}" name="${name("itxtEndPlaceName")}" value="到着地" />
+    <input type="text" id="${id("itxtEndCityCD")}" name="${name("itxtEndCityCD")}" value="40" />
+    <input type="text" id="${id("itxtEndCityName")}" name="${name("itxtEndCityName")}" value="福岡市" />
+  `;
+}
+
+function workFormHtml(opts: {
+  rows?: string[];
+  registButton?: boolean;
+  scoreButton?: boolean;
+  recalculated?: boolean;
+  linkSysDisabled?: boolean;
+} = {}): string {
+  const rows = opts.rows ?? [workRowInputsHtml(0), workRowInputsHtml(1, { event: "2" })];
+  const linkSysClass = opts.linkSysDisabled === false ? "ButtonCrimson" : "aspNetDisabled ButtonCrimson";
+  return `<html><body><form>
+    <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-WORK" />
+    ${rows.join("\n")}
+    ${opts.registButton === false ? "" : '<input type="submit" id="btnRegist1" name="btnRegist1" value="登録" />'}
+    ${opts.scoreButton === false ? "" : '<input type="submit" id="btnScore" name="btnScore" value="作業時間再集計" />'}
+    <input type="submit" id="btnLinkSys" name="btnLinkSys" value="システム連動開始" class="${linkSysClass}" />
+    ${opts.recalculated ? "<div>再集計が終了しました。</div>" : ""}
+  </form></body></html>`;
+}
+
+/** postback body を記録する fetch モック (URLSearchParams を文字列で保存)。 */
+function recordingFetch(responses: (Response | (() => Response))[], bodies: string[]): FetchLike {
+  let i = 0;
+  return (async (_input: unknown, init?: { body?: unknown }) => {
+    bodies.push(init && init.body !== undefined && init.body !== null ? String(init.body) : "");
+    const entry = responses[i];
+    i += 1;
+    if (!entry) throw new Error(`unexpected extra fetch call (#${i})`);
+    return typeof entry === "function" ? entry() : entry;
+  }) as FetchLike;
+}
+
+describe("getWorkForm", () => {
+  it("parses work rows and event options from the work edit page", async () => {
+    const jar = createCookieJar();
+    const form = await getWorkForm(jar, OPE_NO, START_OPE, sequenceFetch([html(workFormHtml())]));
+    expect(form.workRows).toHaveLength(2);
+    expect(form.workRows[0]).toMatchObject({
+      ctrlIndex: 0,
+      eventCd: "1",
+      eventName: "積み",
+      startDateTime: "26/07/03 10:38",
+      endDateTime: "26/07/03 11:38",
+      driverType: "1",
+      startPlaceCd: "10",
+      startPlaceName: "出発地",
+      startCityCd: "41",
+      startCityName: "佐賀市",
+      endPlaceCd: "20",
+      endPlaceName: "到着地",
+      endCityCd: "40",
+      endCityName: "福岡市",
+    });
+    expect(form.workRows[1].eventCd).toBe("2");
+    expect(form.workRows[1].eventName).toBe("降ろし");
+    expect(form.eventOptions).toEqual([
+      { value: "1", label: "積み" },
+      { value: "2", label: "降ろし" },
+      { value: "3", label: "休憩" },
+    ]);
+  });
+
+  it("accepts the lstWork_<field>_<i> id fallback format", async () => {
+    const page = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS" />
+      <select id="lstWork_iddlEventName_3" name="lstWork_iddlEventName_3">
+        <option value="1" selected>積み</option>
+      </select>
+      <input type="text" id="lstWork_itxtStartDateTime_3" name="lstWork_itxtStartDateTime_3" value="26/07/03 10:38" />
+    </form></body></html>`;
+    const jar = createCookieJar();
+    const form = await getWorkForm(jar, OPE_NO, START_OPE, sequenceFetch([html(page)]));
+    expect(form.workRows).toHaveLength(1);
+    expect(form.workRows[0].ctrlIndex).toBe(3);
+    expect(form.workRows[0].eventCd).toBe("1");
+    expect(form.workRows[0].startDateTime).toBe("26/07/03 10:38");
+  });
+
+  it("skips malformed lstWork-prefixed elements and unnamed selects", async () => {
+    const page = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS" />
+      <input name="lstWorkBroken" />
+      <input name="lstWorkBroken2" id="lstWork_odd" />
+      <input type="submit" name="lstWork$ctrl0$btnSomething" value="x" />
+      <select><option value="z">no name</option></select>
+      <select name="other$field"><option value="z">not lstWork</option></select>
+      <select name="lstWorkBrokenSelect"><option value="z">locate fails</option></select>
+      ${workRowInputsHtml(0)}
+    </form></body></html>`;
+    const jar = createCookieJar();
+    const form = await getWorkForm(jar, OPE_NO, START_OPE, sequenceFetch([html(page)]));
+    expect(form.workRows).toHaveLength(1);
+    expect(form.workRows[0].ctrlIndex).toBe(0);
+  });
+
+  it("handles value-less inputs, select without selected/options and rows without event select", async () => {
+    const page = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS" />
+      <input name="lstWork$ctrl0$itxtStartDateTime" />
+      <select name="lstWork$ctrl0$iddlEventName">
+        <option value="1">積み</option>
+        <option>ラベルのみ</option>
+      </select>
+      <select name="lstWork$ctrl1$iddlEventName"></select>
+      <input type="text" name="lstWork$ctrl2$itxtDriverType" value="2" />
+    </form></body></html>`;
+    const jar = createCookieJar();
+    const form = await getWorkForm(jar, OPE_NO, START_OPE, sequenceFetch([html(page)]));
+    expect(form.workRows).toHaveLength(3);
+    // 行0: value 属性なし input は "" / selected なし select は先頭 option
+    expect(form.workRows[0].startDateTime).toBe("");
+    expect(form.workRows[0].eventCd).toBe("1");
+    // 行1: option 0 件の select は value/label とも ""
+    expect(form.workRows[1].eventCd).toBe("");
+    expect(form.workRows[1].eventName).toBe("");
+    // 行2: event select の無い行
+    expect(form.workRows[2].eventCd).toBe("");
+    expect(form.workRows[2].driverType).toBe("2");
+    expect(form.eventOptions).toEqual([
+      { value: "1", label: "積み" },
+      { value: "", label: "ラベルのみ" },
+    ]);
+  });
+
+  it("rejects invalid opeNo / startOpe", async () => {
+    const jar = createCookieJar();
+    await expect(getWorkForm(jar, "123", START_OPE, sequenceFetch([]))).rejects.toThrow(ReportParamError);
+    await expect(getWorkForm(jar, OPE_NO, "2026-07-03", sequenceFetch([]))).rejects.toThrow(ReportParamError);
+  });
+
+  it("throws on non-ok GET / login redirect", async () => {
+    const jar1 = createCookieJar();
+    await expect(getWorkForm(jar1, OPE_NO, START_OPE, sequenceFetch([status(500)]))).rejects.toThrow(
+      TheearthClientError,
+    );
+    const jar2 = createCookieJar();
+    await expect(getWorkForm(jar2, OPE_NO, START_OPE, sequenceFetch([html(LOGIN_REDIRECT_HTML)]))).rejects.toThrow(
+      VenusSessionExpiredError,
+    );
+  });
+
+  it("throws when the page is not the work edit page (no __VIEWSTATE)", async () => {
+    const jar = createCookieJar();
+    await expect(
+      getWorkForm(jar, OPE_NO, START_OPE, sequenceFetch([html("<html><body>別のページ</body></html>")])),
+    ).rejects.toThrow(/__VIEWSTATE/);
+  });
+
+  it("throws when lstWork exists but in an unrecognized format", async () => {
+    const page = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS" />
+      <span id="lstWork_lblEventName_0">積み</span>
+      <input type="submit" name="lstWork$btnEditButton_0" value="" />
+    </form></body></html>`;
+    const jar = createCookieJar();
+    await expect(getWorkForm(jar, OPE_NO, START_OPE, sequenceFetch([html(page)]))).rejects.toThrow(
+      /フィールド形式が想定/,
+    );
+  });
+
+  it("returns empty rows for a work edit page without any lstWork markup", async () => {
+    const page = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS" />
+    </form></body></html>`;
+    const jar = createCookieJar();
+    const form = await getWorkForm(jar, OPE_NO, START_OPE, sequenceFetch([html(page)]));
+    expect(form.workRows).toEqual([]);
+    expect(form.eventOptions).toEqual([]);
+  });
+});
+
+describe("saveWorkRows", () => {
+  const baseParams = {
+    opeNo: OPE_NO,
+    startOpe: START_OPE,
+    rows: [{ ctrlIndex: 0, eventCd: "3", startDateTime: "26/07/03 09:00" }],
+  };
+
+  it("posts the full serialized form with edited fields and synced internal datetimes", async () => {
+    const bodies: string[] = [];
+    const fetchImpl = recordingFetch(
+      [html(workFormHtml()), html(workFormHtml({ rows: [workRowInputsHtml(0, { event: "3", start: "26/07/03 09:00" })] }))],
+      bodies,
+    );
+    const jar = createCookieJar();
+    const result = await saveWorkRows(jar, baseParams, fetchImpl);
+    expect(result.workRows[0].eventCd).toBe("3");
+    const sent = new URLSearchParams(bodies[1]);
+    expect(sent.get("lstWork$ctrl0$iddlEventName")).toBe("3");
+    expect(sent.get("lstWork$ctrl0$itxtStartDateTime")).toBe("26/07/03 09:00");
+    // intxt は現在値ペアで「数字のみ抽出」則が成立しているので新値にも適用される
+    expect(sent.get("lstWork$ctrl0$intxtStartDateTime")).toBe("2607030900");
+    // 変更していない行・フィールドも full form 直列化で丸ごと送る (Refs #199 の教訓)
+    expect(sent.get("lstWork$ctrl1$iddlEventName")).toBe("2");
+    expect(sent.get("lstWork$ctrl0$itxtEndDateTime")).toBe("26/07/03 11:38");
+    expect(sent.get("btnRegist1")).toBe("登録");
+    expect(sent.get("__VIEWSTATE")).toBe("VS-WORK");
+  });
+
+  it("keeps the current internal datetime when the digits-only rule does not hold", async () => {
+    const bodies: string[] = [];
+    const page = workFormHtml({ rows: [workRowInputsHtml(0, { intStart: "UNKNOWN-FORMAT" })] });
+    const fetchImpl = recordingFetch([html(page), html(page)], bodies);
+    const jar = createCookieJar();
+    await saveWorkRows(jar, baseParams, fetchImpl);
+    const sent = new URLSearchParams(bodies[1]);
+    expect(sent.get("lstWork$ctrl0$itxtStartDateTime")).toBe("26/07/03 09:00");
+    expect(sent.get("lstWork$ctrl0$intxtStartDateTime")).toBe("UNKNOWN-FORMAT");
+  });
+
+  it("tolerates rows without an internal datetime field", async () => {
+    const page = workFormHtml({ rows: [workRowInputsHtml(0, { intStart: null })] });
+    const fetchImpl = sequenceFetch([html(page), html(page)]);
+    const jar = createCookieJar();
+    const result = await saveWorkRows(jar, baseParams, fetchImpl);
+    expect(result.workRows).toHaveLength(1);
+  });
+
+  it("re-reads the form when the save response has no work rows", async () => {
+    const fetchImpl = sequenceFetch([
+      html(workFormHtml()),
+      html('<html><body><form><input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS2" /></form></body></html>'),
+      html(workFormHtml({ rows: [workRowInputsHtml(0, { event: "3" })] })),
+    ]);
+    const jar = createCookieJar();
+    const result = await saveWorkRows(jar, baseParams, fetchImpl);
+    expect(result.workRows).toHaveLength(1);
+    expect(result.workRows[0].eventCd).toBe("3");
+  });
+
+  it("rejects invalid params", async () => {
+    const jar = createCookieJar();
+    await expect(saveWorkRows(jar, { ...baseParams, opeNo: "x" }, sequenceFetch([]))).rejects.toThrow(
+      ReportParamError,
+    );
+    await expect(
+      saveWorkRows(jar, { ...baseParams, rows: undefined as unknown as [] }, sequenceFetch([])),
+    ).rejects.toThrow(ReportParamError);
+    await expect(saveWorkRows(jar, { ...baseParams, rows: [] }, sequenceFetch([]))).rejects.toThrow(
+      ReportParamError,
+    );
+  });
+
+  it("rejects when the target row does not exist", async () => {
+    const jar = createCookieJar();
+    await expect(
+      saveWorkRows(
+        jar,
+        { ...baseParams, rows: [{ ctrlIndex: 9, eventCd: "1" }] },
+        sequenceFetch([html(workFormHtml())]),
+      ),
+    ).rejects.toThrow(/ctrlIndex=9/);
+  });
+
+  it("throws when an edited field is missing from the row", async () => {
+    const page = workFormHtml({ rows: [workRowInputsHtml(0, { noStart: true })] });
+    const jar = createCookieJar();
+    await expect(
+      saveWorkRows(
+        jar,
+        { ...baseParams, rows: [{ ctrlIndex: 0, startDateTime: "26/07/03 09:00" }] },
+        sequenceFetch([html(page)]),
+      ),
+    ).rejects.toThrow(/itxtStartDateTime/);
+  });
+
+  it("throws when btnRegist1 is missing", async () => {
+    const jar = createCookieJar();
+    await expect(
+      saveWorkRows(jar, baseParams, sequenceFetch([html(workFormHtml({ registButton: false }))])),
+    ).rejects.toThrow(/btnRegist1/);
+  });
+
+  it("falls back to the 登録 label when btnRegist1 has no value attribute", async () => {
+    const page = workFormHtml().replace('name="btnRegist1" value="登録"', 'name="btnRegist1"');
+    const bodies: string[] = [];
+    const fetchImpl = recordingFetch([html(page), html(page)], bodies);
+    const jar = createCookieJar();
+    await saveWorkRows(jar, baseParams, fetchImpl);
+    expect(new URLSearchParams(bodies[1]).get("btnRegist1")).toBe("登録");
+  });
+
+  it("throws on the other-user-editing conflict message", async () => {
+    const conflictHtml = "<html><body>他ユーザー編集中のため処理を中止しました。</body></html>";
+    const jar = createCookieJar();
+    await expect(
+      saveWorkRows(jar, baseParams, sequenceFetch([html(workFormHtml()), html(conflictHtml)])),
+    ).rejects.toThrow(/他ユーザー/);
+  });
+
+  it("throws on non-ok GET / login redirect", async () => {
+    const jar1 = createCookieJar();
+    await expect(saveWorkRows(jar1, baseParams, sequenceFetch([status(500)]))).rejects.toThrow(TheearthClientError);
+    const jar2 = createCookieJar();
+    await expect(saveWorkRows(jar2, baseParams, sequenceFetch([html(LOGIN_REDIRECT_HTML)]))).rejects.toThrow(
+      VenusSessionExpiredError,
+    );
+  });
+});
+
+describe("recalculateWork", () => {
+  it("posts btnScore on the work edit page and reports linkSys enablement", async () => {
+    const fetchImpl = sequenceFetch([
+      html(workFormHtml()),
+      html(workFormHtml({ recalculated: true, linkSysDisabled: false })),
+    ]);
+    const jar = createCookieJar();
+    const result = await recalculateWork(jar, OPE_NO, START_OPE, fetchImpl);
+    expect(result.linkSysEnabled).toBe(true);
+  });
+
+  it("rejects invalid opeNo", async () => {
+    const jar = createCookieJar();
+    await expect(recalculateWork(jar, "x", START_OPE, sequenceFetch([]))).rejects.toThrow(ReportParamError);
+  });
+
+  it("throws when the completion message is missing", async () => {
+    const fetchImpl = sequenceFetch([html(workFormHtml()), html(workFormHtml())]);
+    const jar = createCookieJar();
+    await expect(recalculateWork(jar, OPE_NO, START_OPE, fetchImpl)).rejects.toThrow(/再集計が終了しました/);
+  });
+
+  it("throws when btnScore is missing", async () => {
+    const jar = createCookieJar();
+    await expect(
+      recalculateWork(jar, OPE_NO, START_OPE, sequenceFetch([html(workFormHtml({ scoreButton: false }))])),
+    ).rejects.toThrow(/btnScore/);
+  });
+});
+
+// --- F-DES1011 運行データ修正フォーム fixture --------------------------------
+
+function reviseFormHtml(opts: {
+  driver1?: string | null;
+  vehicle?: string | null;
+  branch?: string | null;
+  dist?: string;
+  regButton?: boolean;
+} = {}): string {
+  return `<html><body><form>
+    <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-REVISE" />
+    ${opts.driver1 === null ? "" : `<input type="text" id="txtDriver1" name="txtDriver1" value="${opts.driver1 ?? "1405"}" />`}
+    ${opts.vehicle === null ? "" : `<input type="text" id="txtVehicle" name="txtVehicle" value="${opts.vehicle ?? "6572"}" />`}
+    ${opts.branch === null ? "" : `<input type="text" id="txtBranch" name="txtBranch" value="${opts.branch ?? "8"}" />`}
+    <input type="text" id="txtDist" name="txtDist" value="${opts.dist ?? "1890.2"}" />
+    ${opts.regButton === false ? "" : '<input type="submit" id="btnReg" name="btnReg" value="登録" />'}
+  </form></body></html>`;
+}
+
+describe("getReviseForm", () => {
+  it("parses driver / vehicle / branch and detects a filled form", async () => {
+    const jar = createCookieJar();
+    const form = await getReviseForm(jar, OPE_NO, START_OPE, sequenceFetch([html(reviseFormHtml())]));
+    expect(form).toMatchObject({
+      opeNo: OPE_NO,
+      startOpe: START_OPE,
+      driver1: "1405",
+      vehicle: "6572",
+      branch: "8",
+      formFilled: true,
+    });
+  });
+
+  it("reports formFilled=false when probe fields are all empty (JS PageLoad 依存の未充填フォーム)", async () => {
+    const jar = createCookieJar();
+    const page = reviseFormHtml({ driver1: "", vehicle: "", branch: "", dist: "" });
+    const form = await getReviseForm(jar, OPE_NO, START_OPE, sequenceFetch([html(page)]));
+    expect(form.formFilled).toBe(false);
+    expect(form.driver1).toBe("");
+  });
+
+  it("falls back to empty strings when vehicle / branch fields are absent", async () => {
+    const jar = createCookieJar();
+    const page = reviseFormHtml({ vehicle: null, branch: null });
+    const form = await getReviseForm(jar, OPE_NO, START_OPE, sequenceFetch([html(page)]));
+    expect(form.vehicle).toBe("");
+    expect(form.branch).toBe("");
+    expect(form.formFilled).toBe(true); // txtDist が非空
+  });
+
+  it("throws when txtDriver1 is missing", async () => {
+    const jar = createCookieJar();
+    await expect(
+      getReviseForm(jar, OPE_NO, START_OPE, sequenceFetch([html(reviseFormHtml({ driver1: null }))])),
+    ).rejects.toThrow(/txtDriver1/);
+  });
+
+  it("rejects invalid params and maps GET failures", async () => {
+    const jar = createCookieJar();
+    await expect(getReviseForm(jar, "123", START_OPE, sequenceFetch([]))).rejects.toThrow(ReportParamError);
+    await expect(getReviseForm(jar, OPE_NO, "bad", sequenceFetch([]))).rejects.toThrow(ReportParamError);
+    const jar1 = createCookieJar();
+    await expect(getReviseForm(jar1, OPE_NO, START_OPE, sequenceFetch([status(500)]))).rejects.toThrow(
+      TheearthClientError,
+    );
+    const jar2 = createCookieJar();
+    await expect(getReviseForm(jar2, OPE_NO, START_OPE, sequenceFetch([html(LOGIN_REDIRECT_HTML)]))).rejects.toThrow(
+      VenusSessionExpiredError,
+    );
+  });
+});
+
+describe("saveDriver", () => {
+  const baseParams = { opeNo: OPE_NO, startOpe: START_OPE, driver1: "2001" };
+
+  it("posts the full serialized form with the new driver CD", async () => {
+    const bodies: string[] = [];
+    const fetchImpl = recordingFetch(
+      [html(reviseFormHtml()), html(reviseFormHtml({ driver1: "2001" }))],
+      bodies,
+    );
+    const jar = createCookieJar();
+    const result = await saveDriver(jar, baseParams, fetchImpl);
+    expect(result.driver1After).toBe("2001");
+    const sent = new URLSearchParams(bodies[1]);
+    expect(sent.get("txtDriver1")).toBe("2001");
+    expect(sent.get("txtVehicle")).toBe("6572"); // 変更しないフィールドも丸ごと送る
+    expect(sent.get("btnReg")).toBe("登録");
+  });
+
+  it("returns null when the response is not the revise page anymore", async () => {
+    const fetchImpl = sequenceFetch([
+      html(reviseFormHtml()),
+      html("<html><body>登録後の別画面</body></html>"),
+    ]);
+    const jar = createCookieJar();
+    const result = await saveDriver(jar, baseParams, fetchImpl);
+    expect(result.driver1After).toBeNull();
+  });
+
+  it("throws when the response echoes a different driver CD (theearth 側で拒否)", async () => {
+    const fetchImpl = sequenceFetch([
+      html(reviseFormHtml()),
+      html(reviseFormHtml({ driver1: "1405" })),
+    ]);
+    const jar = createCookieJar();
+    await expect(saveDriver(jar, baseParams, fetchImpl)).rejects.toThrow(/反映されませんでした/);
+  });
+
+  it("refuses to save when the form is not filled (既存データを空で上書きしない)", async () => {
+    const page = reviseFormHtml({ driver1: "", vehicle: "", branch: "", dist: "" });
+    const jar = createCookieJar();
+    await expect(saveDriver(jar, baseParams, sequenceFetch([html(page)]))).rejects.toThrow(/初期値が空/);
+  });
+
+  it("rejects an invalid driver CD", async () => {
+    const jar = createCookieJar();
+    await expect(saveDriver(jar, { ...baseParams, driver1: "abc" }, sequenceFetch([]))).rejects.toThrow(
+      ReportParamError,
+    );
+    await expect(saveDriver(jar, { ...baseParams, driver1: "123456789" }, sequenceFetch([]))).rejects.toThrow(
+      ReportParamError,
+    );
+  });
+
+  it("throws when txtDriver1 / btnReg are missing", async () => {
+    const jar1 = createCookieJar();
+    await expect(
+      saveDriver(jar1, baseParams, sequenceFetch([html(reviseFormHtml({ driver1: null }))])),
+    ).rejects.toThrow(/txtDriver1/);
+    const jar2 = createCookieJar();
+    await expect(
+      saveDriver(jar2, baseParams, sequenceFetch([html(reviseFormHtml({ regButton: false }))])),
+    ).rejects.toThrow(/btnReg/);
+  });
+
+  it("throws on the other-user-editing conflict message", async () => {
+    const conflictHtml = "<html><body>他ユーザー編集中のため処理を中止しました。</body></html>";
+    const jar = createCookieJar();
+    await expect(
+      saveDriver(jar, baseParams, sequenceFetch([html(reviseFormHtml()), html(conflictHtml)])),
+    ).rejects.toThrow(/他ユーザー/);
+  });
+
+  it("falls back to the 登録 label when btnReg has no value attribute", async () => {
+    const page = reviseFormHtml().replace('name="btnReg" value="登録"', 'name="btnReg"');
+    const bodies: string[] = [];
+    const fetchImpl = recordingFetch([html(page), html(reviseFormHtml({ driver1: "2001" }))], bodies);
+    const jar = createCookieJar();
+    await saveDriver(jar, baseParams, fetchImpl);
+    expect(new URLSearchParams(bodies[1]).get("btnReg")).toBe("登録");
+  });
+
+  it("throws on non-ok GET / login redirect", async () => {
+    const jar1 = createCookieJar();
+    await expect(saveDriver(jar1, baseParams, sequenceFetch([status(500)]))).rejects.toThrow(TheearthClientError);
+    const jar2 = createCookieJar();
+    await expect(saveDriver(jar2, baseParams, sequenceFetch([html(LOGIN_REDIRECT_HTML)]))).rejects.toThrow(
+      VenusSessionExpiredError,
+    );
   });
 });

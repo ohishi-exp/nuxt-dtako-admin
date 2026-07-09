@@ -82,15 +82,21 @@ import {
   downloadEditedZip,
   downloadOperationCsvZip,
   getExpenseForm,
+  getReviseForm,
+  getWorkForm,
   harvestDailyReport,
   recalculateExpense,
+  recalculateWork,
   startSystemLink,
   ReportParamError,
+  saveDriver,
   saveFuelRow,
+  saveWorkRows,
   unlockOperation,
   verifyReadNoDescending,
   withVehicleNarrow,
   type SaveFuelRowParams,
+  type SaveWorkRowsParams,
 } from "./theearth-report-client";
 import {
   isReportSessionValid,
@@ -1378,6 +1384,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/daily-report-api/unlock" && request.method === "POST") {
       return this.handleReportUnlock(record!, request);
     }
+    if (url.pathname === "/daily-report-api/work" && request.method === "GET") {
+      return this.handleReportWorkForm(record!, url);
+    }
+    if (url.pathname === "/daily-report-api/work/save" && request.method === "POST") {
+      return this.handleReportWorkSave(record!, request);
+    }
+    if (url.pathname === "/daily-report-api/work/recalculate" && request.method === "POST") {
+      return this.handleReportWorkRecalculate(record!, request);
+    }
+    if (url.pathname === "/daily-report-api/revise" && request.method === "GET") {
+      return this.handleReportReviseForm(record!, url);
+    }
+    if (url.pathname === "/daily-report-api/revise/save" && request.method === "POST") {
+      return this.handleReportReviseSave(record!, request);
+    }
     return dvrJsonError(404, "Not Found");
   }
 
@@ -1620,6 +1641,64 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       await unlockOperation(jar, { opeNo, startOpe });
       return { ok: true };
     });
+  }
+
+  /** GET /daily-report-api/work?opeNo=&startOpe= — F-DES1013 作業行の現在値
+   * (Refs #170)。 */
+  private handleReportWorkForm(record: ReportSessionRecord, url: URL): Promise<Response> {
+    const opeNo = url.searchParams.get("opeNo") ?? "";
+    const startOpe = url.searchParams.get("startOpe") ?? "";
+    return this.callReportAction(record, "作業入力フォームの取得", (jar) => getWorkForm(jar, opeNo, startOpe));
+  }
+
+  /** POST /daily-report-api/work/save — `btnRegist1` postback で作業行を登録する
+   * (body は SaveWorkRowsParams、Refs #170)。 */
+  private async handleReportWorkSave(record: ReportSessionRecord, request: Request): Promise<Response> {
+    let body: SaveWorkRowsParams;
+    try {
+      body = (await request.json()) as SaveWorkRowsParams;
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    return this.callReportAction(record, "作業行の登録", (jar) => saveWorkRows(jar, body));
+  }
+
+  /** POST /daily-report-api/work/recalculate — F-DES1013 の `btnScore` postback で
+   * 作業時間を再集計する (DriverState1〜5Min が更新される。body は `{opeNo, startOpe}`)。 */
+  private async handleReportWorkRecalculate(record: ReportSessionRecord, request: Request): Promise<Response> {
+    let body: { opeNo?: unknown; startOpe?: unknown };
+    try {
+      body = (await request.json()) as { opeNo?: unknown; startOpe?: unknown };
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    const opeNo = typeof body.opeNo === "string" ? body.opeNo : "";
+    const startOpe = typeof body.startOpe === "string" ? body.startOpe : "";
+    return this.callReportAction(record, "作業時間再集計", (jar) => recalculateWork(jar, opeNo, startOpe));
+  }
+
+  /** GET /daily-report-api/revise?opeNo=&startOpe= — F-DES1011 乗務員CD 等の現在値
+   * (Refs #171)。 */
+  private handleReportReviseForm(record: ReportSessionRecord, url: URL): Promise<Response> {
+    const opeNo = url.searchParams.get("opeNo") ?? "";
+    const startOpe = url.searchParams.get("startOpe") ?? "";
+    return this.callReportAction(record, "運行データ修正フォームの取得", (jar) => getReviseForm(jar, opeNo, startOpe));
+  }
+
+  /** POST /daily-report-api/revise/save — `btnReg` postback で乗務員CD を登録する
+   * (body は `{opeNo, startOpe, driver1}`、Refs #171)。フォーム初期値が空 (JS
+   * PageLoad 依存) の場合は theearth-report-client 側が loud fail する。 */
+  private async handleReportReviseSave(record: ReportSessionRecord, request: Request): Promise<Response> {
+    let body: { opeNo?: unknown; startOpe?: unknown; driver1?: unknown };
+    try {
+      body = (await request.json()) as { opeNo?: unknown; startOpe?: unknown; driver1?: unknown };
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    const opeNo = typeof body.opeNo === "string" ? body.opeNo : "";
+    const startOpe = typeof body.startOpe === "string" ? body.startOpe : "";
+    const driver1 = typeof body.driver1 === "string" ? body.driver1 : "";
+    return this.callReportAction(record, "乗務員の登録", (jar) => saveDriver(jar, { opeNo, startOpe, driver1 }));
   }
 
   /** `/scraper-zip/:compId/:requestId` — 1回だけ取得できる zip ダウンロード。 */
