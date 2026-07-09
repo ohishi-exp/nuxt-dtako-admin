@@ -315,7 +315,16 @@ async function postButton(
     // 従来は本文を捨てていて原因が不明だったため、要約を log + エラーメッセージに載せて
     // 保存 500 の真因を追えるようにする (Refs #199、給油保存 500 の調査用)。
     const detail = extractErrorSnippet(await postRes.text());
-    console.error(`theearth postback failed: HTTP ${postRes.status}${detail ? ` — ${detail}` : ""}`);
+    // 送信した非 hidden フィールド (etxt 値等) も log に出す。theearth の
+    // FormatException がどの入力値で起きたか (例: dateTime の桁数/形式) を
+    // 実送信値で確定するため (Refs #199)。hidden field (viewstate 等) は除く。
+    const sent = Object.entries(extra)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(", ");
+    console.error(
+      `theearth postback failed: HTTP ${postRes.status} button=${buttonName}` +
+        `${sent ? ` sent=[${sent}]` : ""}${detail ? ` — ${detail}` : ""}`,
+    );
     throw new TheearthClientError(
       `POST が HTTP ${postRes.status} を返しました${detail ? ` — ${detail}` : ""}`,
     );
