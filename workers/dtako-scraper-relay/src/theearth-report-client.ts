@@ -314,12 +314,16 @@ async function postButton(
     // theearth の postback 500 は ASP.NET 例外 (yellow screen) の詳細を body に持つ。
     // 従来は本文を捨てていて原因が不明だったため、要約を log + エラーメッセージに載せて
     // 保存 500 の真因を追えるようにする (Refs #199、給油保存 500 の調査用)。
-    const detail = extractErrorSnippet(await postRes.text());
-    // 送信した非 hidden フィールド (etxt 値等) も log に出す。theearth の
-    // FormatException がどの入力値で起きたか (例: dateTime の桁数/形式) を
-    // 実送信値で確定するため (Refs #199)。hidden field (viewstate 等) は除く。
-    // 値は frontend 入力由来なので改行/制御文字を escape + 長さ制限して log
-    // injection を防ぐ (偽の log 行注入対策)。
+    const rawBody = await postRes.text();
+    const detail = extractErrorSnippet(rawBody);
+    // ASP.NET エラーページ本文をタグ除去して広めに (1200 字) log に出す。title だけ
+    // だと「入力文字列の形式が正しくありません」までしか分からないが、本文には
+    // 「例外の詳細 / ソース エラー / スタック トレース」があり、**theearth のどの
+    // メソッドが parse に失敗したか** が分かる (= 真の原因フィールド特定)。エラー
+    // ページ本文は viewstate を含まないので広めに出してよい (Refs #199)。
+    const bodyDump = rawBody.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 600);
+    // 送信した非 hidden フィールド (etxt 値等) も log に出す。値は frontend 入力
+    // 由来なので改行/制御文字を escape + 長さ制限して log injection を防ぐ。
     const sanitize = (s: string) =>
       s.replace(/\r/g, "\\r").replace(/\n/g, "\\n").replace(/\t/g, "\\t").slice(0, 100);
     const sent = Object.entries(extra)
@@ -327,7 +331,7 @@ async function postButton(
       .join(", ");
     console.error(
       `theearth postback failed: HTTP ${postRes.status} button=${buttonName}` +
-        `${sent ? ` sent=[${sent}]` : ""}${detail ? ` — ${detail}` : ""}`,
+        `${sent ? ` sent=[${sent}]` : ""} body=${bodyDump}`,
     );
     throw new TheearthClientError(
       `POST が HTTP ${postRes.status} を返しました${detail ? ` — ${detail}` : ""}`,
@@ -340,6 +344,24 @@ async function postButton(
     );
   }
   return postHtml;
+}
+
+/** 編集モード応答から `lstFuel` 系の全テキスト入力 (編集行 `etxt*` + 新規行 `itxt*`)
+ * を name→現在値 で抽出する。theearth の更新 postback は編集行の etxtOperationNo /
+ * etxtSubNo / etxtOldDateTime まで含む全フィールドを要求し、欠落すると code-behind の
+ * `FuelCheck` が空を `int.Parse` して FormatException (HTTP 500) を返す (cdp-pair 実機
+ * 確認、Refs #199)。値は数値・日時のみで HTML entity を含まないため raw のまま使う。 */
+export function extractLstFuelTextInputs(html: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const match of html.matchAll(/<input\b[^>]*>/gi)) {
+    const tag = match[0];
+    if (!/\btype=["']text["']/i.test(tag)) continue;
+    const nameMatch = tag.match(/\bname=["']([^"']*)["']/i);
+    if (!nameMatch || !nameMatch[1].startsWith("lstFuel")) continue;
+    const valueMatch = tag.match(/\bvalue=["']([^"']*)["']/i);
+    result[nameMatch[1]] = valueMatch ? valueMatch[1] : "";
+  }
+  return result;
 }
 
 export interface SaveFuelRowParams {
@@ -419,7 +441,13 @@ export async function saveFuelRow(
     dateTime: params.dateTime,
     quantity: params.quantity,
   };
-  const fieldValues: Record<string, string> = {};
+  // theearth の更新 postback は編集行の **全 etxt フィールド** (etxtOperationNo /
+  // etxtSubNo / etxtOldDateTime を含む) を要求する。5 フィールドしか送らないと
+  // code-behind の `FuelCheck` が欠落フィールドを空のまま `int.Parse` して
+  // FormatException (「入力文字列の形式が正しくありません」= HTTP 500) になる
+  // (cdp-pair 実機確認、Refs #199)。編集モード応答の全 lstFuel テキスト入力を
+  // 現在値でベースに送り、対象行の編集対象フィールドだけ params の新値で上書きする。
+  const fieldValues = extractLstFuelTextInputs(editHtml);
   for (const [key, idSuffix] of Object.entries(FUEL_EDIT_FIELD_IDS) as [keyof typeof FUEL_EDIT_FIELD_IDS, string][]) {
     const ref = findFormFieldById(editHtml, fuelRowId(params.ctrlIndex, idSuffix));
     if (ref) fieldValues[ref.name] = editedValues[key];

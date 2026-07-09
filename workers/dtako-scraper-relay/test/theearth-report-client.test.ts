@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   downloadEditedZip,
+  extractLstFuelTextInputs,
   getExpenseForm,
   harvestDailyReport,
   parseExpenseMasters,
@@ -110,10 +111,13 @@ function fuelEditModeHtml(ctrlIndex: number, v: {
   const id = (suffix: string) => `lstFuel_${suffix}_${ctrlIndex}`;
   return `<html><body><form>
     <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-EDIT" />
+    <input type="text" id="${id("etxtOperationNo")}" name="lstFuel$ctrl${ctrlIndex}$etxtOperationNo" value="26070605100100000040" />
+    <input type="text" id="${id("etxtSubNo")}" name="lstFuel$ctrl${ctrlIndex}$etxtSubNo" value="1" />
     <input type="text" id="${id("etxtSupplyCategory")}" name="lstFuel$ctrl${ctrlIndex}$etxtSupplyCategory" value="${v.category ?? "1"}" />
     <input type="text" id="${id("etxtSupplyStation")}" name="lstFuel$ctrl${ctrlIndex}$etxtSupplyStation" value="${v.station ?? "1"}" />
     <input type="text" id="${id("etxtSupplyType")}" name="lstFuel$ctrl${ctrlIndex}$etxtSupplyType" value="${v.type ?? "10"}" />
     <input type="text" id="${id("etxtDateTime")}" name="lstFuel$ctrl${ctrlIndex}$etxtDateTime" value="${v.dateTime ?? "26/07/07 10:29"}" />
+    <input type="text" id="${id("etxtOldDateTime")}" name="lstFuel$ctrl${ctrlIndex}$etxtOldDateTime" value="2026/07/07 10:29:07" />
     ${
       v.quantity === null
         ? "" // 要素そのものを欠落させる (defensive skip の fixture)
@@ -275,6 +279,27 @@ describe("parseExpenseMasters", () => {
   });
 });
 
+describe("extractLstFuelTextInputs", () => {
+  it("lstFuel の text 入力だけを name→value で抽出する (Refs #199)", () => {
+    const html = `
+      <input type="text" name="lstFuel$ctrl0$etxtOperationNo" value="2607060510" />
+      <input type="text" name="lstFuel$ctrl0$etxtSubNo" value="1" />
+      <input type="text" id="q" name="lstFuel$ctrl0$etxtQuantuty" value="100" />
+      <input type="text" name="lstFuel$ctrl1$itxtQuantuty" />            <!-- value 属性なし → "" -->
+      <input type="hidden" name="lstFuel$ctrl0$etxtHidden" value="x" />  <!-- text でない → 除外 -->
+      <input type="submit" name="lstFuel$ctrl0$btnUpdateButton" value="" /> <!-- text でない → 除外 -->
+      <input type="text" name="lstTollRoad$ctrl0$etxtFoo" value="9" />   <!-- lstFuel 以外 → 除外 -->
+      <input type="text" value="noname" />                              <!-- name 無し → 除外 -->
+    `;
+    expect(extractLstFuelTextInputs(html)).toEqual({
+      "lstFuel$ctrl0$etxtOperationNo": "2607060510",
+      "lstFuel$ctrl0$etxtSubNo": "1",
+      "lstFuel$ctrl0$etxtQuantuty": "100",
+      "lstFuel$ctrl1$itxtQuantuty": "",
+    });
+  });
+});
+
 describe("saveFuelRow", () => {
   const baseParams = {
     opeNo: OPE_NO,
@@ -296,6 +321,31 @@ describe("saveFuelRow", () => {
     ]);
     const result = await saveFuelRow(jar, baseParams, fetchImpl);
     expect(result.fuelRows).toHaveLength(2);
+  });
+
+  it("更新 POST に編集行の全 etxt (OperationNo/SubNo/OldDateTime 含む) を送り、編集値で上書きする (Refs #199)", async () => {
+    const jar = createCookieJar();
+    const bodies: string[] = [];
+    const responses = [
+      html(expenseFormHtml({ rows: 1 })),
+      html(fuelEditModeHtml(0)),
+      html(expenseFormHtml({ rows: 1 })),
+    ];
+    let call = 0;
+    const fetchImpl: FetchLike = async (_url, init) => {
+      if (init?.body) bodies.push(String(init.body));
+      return responses[call++]!;
+    };
+    await saveFuelRow(jar, baseParams, fetchImpl);
+    const updateBody = new URLSearchParams(bodies[1]); // 2 回目の POST = 更新
+    // 欠落していた等の全 etxt が現在値で送られる (FormatException 回避の要)
+    expect(updateBody.get("lstFuel$ctrl0$etxtOperationNo")).toBe("26070605100100000040");
+    expect(updateBody.get("lstFuel$ctrl0$etxtSubNo")).toBe("1");
+    expect(updateBody.get("lstFuel$ctrl0$etxtOldDateTime")).toBe("2026/07/07 10:29:07");
+    // 対象行の編集対象フィールドは params の新値で上書き
+    expect(updateBody.get("lstFuel$ctrl0$etxtSupplyCategory")).toBe("2");
+    expect(updateBody.get("lstFuel$ctrl0$etxtDateTime")).toBe("26/07/07 12:00");
+    expect(updateBody.get("lstFuel$ctrl0$etxtQuantuty")).toBe("40");
   });
 
   it("rejects malformed OpeNo / StartOpe", async () => {
