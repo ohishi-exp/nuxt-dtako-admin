@@ -211,7 +211,7 @@ async function loadList() {
       query.vehicleFrom = trimmedVehicleCd
       query.vehicleTo = trimmedVehicleCd
     }
-    const res = await $fetch<{ rows: DailyReportRow[], sortOk: boolean }>('/daily-report-api/list', {
+    const res = await $fetch<{ rows: DailyReportRow[], sortOk: boolean | null }>('/daily-report-api/list', {
       headers: authHeaders(),
       query,
     })
@@ -297,6 +297,44 @@ async function unlockRow(row: DailyReportRow) {
   }
   finally {
     unlockingOperationNo.value = null
+  }
+}
+
+// 手動指定の編集制御解除 — 一覧の取得自体が失敗している状態 (theearth が 500 を
+// 返し続ける等) でも、運行No/出庫日時を直接指定してロック解放を試せる復旧経路。
+const manualUnlockOpeNo = ref('')
+const manualUnlockStartOpe = ref('')
+const manualUnlocking = ref(false)
+
+async function unlockManual() {
+  const s = session.value
+  if (!s) return
+  const opeNo = manualUnlockOpeNo.value.trim()
+  const startOpe = manualUnlockStartOpe.value.trim()
+  unlockError.value = null
+  unlockMessage.value = null
+  if (!/^\d{22}$/.test(opeNo)) {
+    unlockError.value = '運行Noは22桁の数値で指定してください'
+    return
+  }
+  manualUnlocking.value = true
+  try {
+    await $fetch('/daily-report-api/unlock', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: { opeNo, startOpe },
+    })
+    unlockMessage.value = `編集制御を解除しました (${opeNo})`
+  }
+  catch (e) {
+    if (dailyReportErrorStatus(e) === 401) {
+      expireSession(dailyReportErrorMessage(e))
+      return
+    }
+    unlockError.value = dailyReportErrorMessage(e)
+  }
+  finally {
+    manualUnlocking.value = false
   }
 }
 
@@ -869,6 +907,24 @@ onMounted(() => {
           <p class="mt-2 text-xs text-gray-400">
             編集制御解除 (ロック解放) は一覧の各行 (赤字表示、ロック中) に表示されるボタンから行ごとに行います。
           </p>
+          <!-- 一覧が取得できない状態からの復旧用: 運行No/出庫日時の直接指定でロック解除 -->
+          <div class="mt-2 flex flex-wrap items-end gap-2">
+            <UFormField label="運行No (手動ロック解除)">
+              <UInput v-model="manualUnlockOpeNo" placeholder="22桁の運行No" class="w-56" size="sm" />
+            </UFormField>
+            <UFormField label="出庫日時">
+              <UInput v-model="manualUnlockStartOpe" placeholder="2026/07/03 10:38:50" class="w-48" size="sm" />
+            </UFormField>
+            <UButton
+              size="sm"
+              variant="outline"
+              color="warning"
+              icon="i-lucide-lock-open"
+              label="編集制御解除 (手動指定)"
+              :loading="manualUnlocking"
+              @click="unlockManual"
+            />
+          </div>
           <p v-if="vehicleCd.trim()" class="mt-2 text-xs text-gray-400">
             車輌CD 絞込は theearth 側のアカウント共通設定 (表示条件指定) を検索中だけ一時的に書き換えます。
             検索完了後は自動で元の設定に戻ります。
@@ -877,6 +933,9 @@ onMounted(() => {
           <div v-if="sortOk === false" class="mt-3 text-sm text-amber-700 bg-amber-50 dark:bg-amber-950 dark:text-amber-300 rounded-lg p-3">
             表示条件指定 (F-GOS0030) の並び順が「読取日 降順」になっていません。早期打ち切りを無効化して
             全ページ走査しましたが、theearth 側の表示条件指定を「読取日 降順」に直すことを推奨します。
+          </div>
+          <div v-if="sortOk === null && rows.length > 0" class="mt-3 text-xs text-gray-400">
+            並び順設定 (F-GOS0030) の事前確認に失敗したためスキップしました (取得結果の並びで自動検証しています)。
           </div>
           <div v-if="listError" class="mt-3 text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
             {{ listError }}

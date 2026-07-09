@@ -16,6 +16,7 @@ import {
   saveDriverFromPage,
   saveFuelRow,
   saveWorkRows,
+  describeLstWorkStructure,
   unlockOperation,
   verifyReadNoDescending,
   withVehicleNarrow,
@@ -2465,5 +2466,94 @@ describe("getReviseFormPage", () => {
     const result = await getReviseFormPage(jar, OPE_NO, START_OPE, sequenceFetch([html(page)]));
     expect(result.form.driver1).toBe("1405");
     expect(result.pageHtml).toBe(page);
+  });
+});
+
+describe("describeLstWorkStructure", () => {
+  it("lists lstWork tags with values redacted to lengths (業務データを log に出さない)", () => {
+    const page = `<div>
+      <input type="text" name="lstWork$ctrl0$itxtStartDateTime" value="26/07/03 10:47" />
+      <input type="text" name="other" value="x" />
+      <select name="lstWork$ctrl0$iddlEventName"><option value="1">積み</option></select>
+      <span id="lstWork_lblEventName_0">休憩</span>
+      <input type="submit" name="lstWork$ctrl0$btnSave" />
+    </div>`;
+    const lines = describeLstWorkStructure(page);
+    expect(lines).toHaveLength(4);
+    expect(lines[0]).toContain('value="<len:14>"');
+    expect(lines.join("\n")).not.toContain("26/07/03 10:47");
+    expect(lines.some(l => l.includes("lstWork_lblEventName_0"))).toBe(true);
+    expect(lines.join("\n")).not.toContain('name="other"');
+  });
+});
+
+describe("saveWorkRows guard (既存行が取得できていない状態の保護)", () => {
+  it("refuses to save when every parsed row has empty start/end datetimes", async () => {
+    const page = workFormHtml({ rows: [workRowInputsHtml(0, { start: "", end: "" })] });
+    const jar = createCookieJar();
+    await expect(
+      saveWorkRows(
+        jar,
+        { opeNo: OPE_NO, startOpe: START_OPE, rows: [{ ctrlIndex: 0, eventCd: "1" }] },
+        sequenceFetch([html(page)]),
+      ),
+    ).rejects.toThrow(/初期値が空のため登録を中止/);
+  });
+
+  it("refuses to save when the parsed rows have no datetime fields at all", async () => {
+    const page = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS" />
+      <input type="text" name="lstWork$ctrl0$itxtDriverType" value="1" />
+      <input type="submit" id="btnRegist1" name="btnRegist1" value="登録" />
+    </form></body></html>`;
+    const jar = createCookieJar();
+    await expect(
+      saveWorkRows(
+        jar,
+        { opeNo: OPE_NO, startOpe: START_OPE, rows: [{ ctrlIndex: 0, driverType: "2" }] },
+        sequenceFetch([html(page)]),
+      ),
+    ).rejects.toThrow(/初期値が空のため登録を中止/);
+  });
+
+  it("allows saving when the end datetime is filled even if the start is missing", async () => {
+    const page = workFormHtml({ rows: [workRowInputsHtml(0, { noStart: true })] });
+    const jar = createCookieJar();
+    const result = await saveWorkRows(
+      jar,
+      { opeNo: OPE_NO, startOpe: START_OPE, rows: [{ ctrlIndex: 0, eventCd: "3" }] },
+      sequenceFetch([html(page), html(page)]),
+    );
+    expect(result.workRows).toHaveLength(1);
+  });
+});
+
+describe("throwGetError (GET 失敗時の ASP.NET エラー要約)", () => {
+  it("appends the error snippet from the response body", async () => {
+    const res = new Response("<html><head><title>Runtime Error</title></head><body>x</body></html>", { status: 500 });
+    const jar = createCookieJar();
+    await expect(verifyReadNoDescending(jar, sequenceFetch([res]))).rejects.toThrow(
+      /HTTP 500 を返しました — Runtime Error/,
+    );
+  });
+
+  it("throws with the status alone when the body is empty", async () => {
+    const jar = createCookieJar();
+    await expect(
+      verifyReadNoDescending(jar, sequenceFetch([new Response("", { status: 500 })])),
+    ).rejects.toThrow(/HTTP 500 を返しました$/);
+  });
+
+  it("throws with the status alone when the body cannot be read", async () => {
+    const broken = {
+      ok: false,
+      status: 502,
+      headers: new Headers(),
+      text: () => Promise.reject(new Error("boom")),
+    } as unknown as Response;
+    const jar = createCookieJar();
+    await expect(verifyReadNoDescending(jar, sequenceFetch([broken]))).rejects.toThrow(
+      /HTTP 502 を返しました$/,
+    );
   });
 });
