@@ -284,6 +284,16 @@ export async function getExpenseForm(
   return { opeNo, startOpe, fuelRows, masters: parseExpenseMasters(html) };
 }
 
+/** upstream (theearth) のエラー応答本文から診断用の 1 行要約を取り出す。ASP.NET の
+ * エラーページは `<title>` に概要 (例 "Runtime Error") を持つのでそれを優先し、無ければ
+ * 本文のタグを剥がして先頭を使う。長すぎる本文をそのまま log/UI に流さないよう 200 字で
+ * 切る。値 (viewstate 等) を含み得るため機微だが、内部管理ツールの調査用途に限定する。 */
+function extractErrorSnippet(body: string): string {
+  const title = body.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
+  const text = (title ?? body).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+}
+
 /** hidden field のみを乗せた単純な postback を送る内部ヘルパ (ボタン 1 個押下相当)。
  * `buttonName`/`buttonValue` は呼び出し元が `findFormFieldById` で都度読み取った
  *実値を渡す。 */
@@ -301,7 +311,14 @@ async function postButton(
   const body = new URLSearchParams({ ...hidden, ...extra, [buttonName]: buttonValue });
   const postRes = await postForm(jar, url, body, fetchImpl, timeoutMs);
   if (!postRes.ok) {
-    throw new TheearthClientError(`POST が HTTP ${postRes.status} を返しました`);
+    // theearth の postback 500 は ASP.NET 例外 (yellow screen) の詳細を body に持つ。
+    // 従来は本文を捨てていて原因が不明だったため、要約を log + エラーメッセージに載せて
+    // 保存 500 の真因を追えるようにする (Refs #199、給油保存 500 の調査用)。
+    const detail = extractErrorSnippet(await postRes.text());
+    console.error(`theearth postback failed: HTTP ${postRes.status}${detail ? ` — ${detail}` : ""}`);
+    throw new TheearthClientError(
+      `POST が HTTP ${postRes.status} を返しました${detail ? ` — ${detail}` : ""}`,
+    );
   }
   const postHtml = await postRes.text();
   if (isLoginRedirect(postHtml)) {

@@ -340,6 +340,41 @@ describe("saveFuelRow", () => {
     ).rejects.toThrow(VenusSessionExpiredError);
   });
 
+  it("500 応答の ASP.NET エラー詳細をエラーメッセージに含める (調査用、Refs #199)", async () => {
+    // <title> のある ASP.NET エラーページ → title を要約に採用
+    const jar1 = createCookieJar();
+    const aspErr = new Response(
+      "<html><head><title>Runtime Error</title></head><body>Server Error in '/' Application.</body></html>",
+      { status: 500, headers: { "content-type": "text/html" } },
+    );
+    await expect(
+      saveFuelRow(jar1, baseParams, sequenceFetch([html(expenseFormHtml({ rows: 1 })), aspErr])),
+    ).rejects.toThrow(/POST が HTTP 500 を返しました — Runtime Error/);
+  });
+
+  it("500 応答の本文が空なら詳細サフィックスを付けない (調査用)", async () => {
+    const jar = createCookieJar();
+    const emptyErr = new Response("", { status: 500 });
+    await expect(
+      saveFuelRow(jar, baseParams, sequenceFetch([html(expenseFormHtml({ rows: 1 })), emptyErr])),
+    ).rejects.toThrow(/^POST が HTTP 500 を返しました$/);
+  });
+
+  it("500 応答本文が title 無し・長文なら 200 字で切り詰める (調査用)", async () => {
+    const jar = createCookieJar();
+    const longBody = new Response("x".repeat(500), { status: 500 });
+    let caught: unknown;
+    await saveFuelRow(jar, baseParams, sequenceFetch([html(expenseFormHtml({ rows: 1 })), longBody])).catch(
+      (e: unknown) => {
+        caught = e;
+      },
+    );
+    const message = (caught as Error).message;
+    expect(message).toContain("…");
+    expect(message).toContain("x".repeat(200));
+    expect(message).not.toContain("x".repeat(201));
+  });
+
   it("throws when the edit-start response indicates a concurrent-edit conflict", async () => {
     const jar = createCookieJar();
     const conflictHtml = `<html><body>他ユーザー編集中のため処理を中止しました。</body></html>`;
