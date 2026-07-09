@@ -48,6 +48,11 @@ jobs:
       # `wrangler deploy` を `wrangler versions upload` に自動置換して行われる
       # ので追加設定不要。
       staging_no_traffic: true
+      # draft PR でも staging deploy する (frontend-ci opt-in、Refs #199)。日報編集
+      # の UI (給油保存/評価点再集計/システム連携/zip DL) を draft レビュー中に
+      # 実機確認するため。⚠️ 非 main branch push ごとに共有 staging フロントを
+      # その branch の版で上書きする副作用を許容する。
+      deploy_staging_on_draft: true
       # npm cache key (lockfile hash のみ) が ippoan/ci-workflows#152 修正前の
       # catalog-extract.yml (ts/js extractor、npm install しないのに同じ key で
       # cache: npm を持っていた) に汚染されていた (cache hit するが中身 ~0 byte)。

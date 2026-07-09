@@ -284,6 +284,16 @@ export async function getExpenseForm(
   return { opeNo, startOpe, fuelRows, masters: parseExpenseMasters(html) };
 }
 
+/** upstream (theearth) のエラー応答本文から診断用の 1 行要約を取り出す。ASP.NET の
+ * エラーページは `<title>` に概要 (例 "Runtime Error") を持つのでそれを優先し、無ければ
+ * 本文のタグを剥がして先頭を使う。長すぎる本文をそのまま log/UI に流さないよう 200 字で
+ * 切る。値 (viewstate 等) を含み得るため機微だが、内部管理ツールの調査用途に限定する。 */
+function extractErrorSnippet(body: string): string {
+  const title = body.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
+  const text = (title ?? body).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+}
+
 /** hidden field のみを乗せた単純な postback を送る内部ヘルパ (ボタン 1 個押下相当)。
  * `buttonName`/`buttonValue` は呼び出し元が `findFormFieldById` で都度読み取った
  *実値を渡す。 */
@@ -301,7 +311,31 @@ async function postButton(
   const body = new URLSearchParams({ ...hidden, ...extra, [buttonName]: buttonValue });
   const postRes = await postForm(jar, url, body, fetchImpl, timeoutMs);
   if (!postRes.ok) {
-    throw new TheearthClientError(`POST が HTTP ${postRes.status} を返しました`);
+    // theearth の postback 500 は ASP.NET 例外 (yellow screen) の詳細を body に持つ。
+    // 従来は本文を捨てていて原因が不明だったため、要約を log + エラーメッセージに載せて
+    // 保存 500 の真因を追えるようにする (Refs #199、給油保存 500 の調査用)。
+    const rawBody = await postRes.text();
+    const detail = extractErrorSnippet(rawBody);
+    // ASP.NET エラーページ本文をタグ除去して広めに (1200 字) log に出す。title だけ
+    // だと「入力文字列の形式が正しくありません」までしか分からないが、本文には
+    // 「例外の詳細 / ソース エラー / スタック トレース」があり、**theearth のどの
+    // メソッドが parse に失敗したか** が分かる (= 真の原因フィールド特定)。エラー
+    // ページ本文は viewstate を含まないので広めに出してよい (Refs #199)。
+    const bodyDump = rawBody.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 600);
+    // 送信した非 hidden フィールド (etxt 値等) も log に出す。値は frontend 入力
+    // 由来なので改行/制御文字を escape + 長さ制限して log injection を防ぐ。
+    const sanitize = (s: string) =>
+      s.replace(/\r/g, "\\r").replace(/\n/g, "\\n").replace(/\t/g, "\\t").slice(0, 100);
+    const sent = Object.entries(extra)
+      .map(([k, v]) => `${k}=${sanitize(v)}`)
+      .join(", ");
+    console.error(
+      `theearth postback failed: HTTP ${postRes.status} button=${buttonName}` +
+        `${sent ? ` sent=[${sent}]` : ""} body=${bodyDump}`,
+    );
+    throw new TheearthClientError(
+      `POST が HTTP ${postRes.status} を返しました${detail ? ` — ${detail}` : ""}`,
+    );
   }
   const postHtml = await postRes.text();
   if (isLoginRedirect(postHtml)) {
@@ -310,6 +344,24 @@ async function postButton(
     );
   }
   return postHtml;
+}
+
+/** 編集モード応答から `lstFuel` 系の全テキスト入力 (編集行 `etxt*` + 新規行 `itxt*`)
+ * を name→現在値 で抽出する。theearth の更新 postback は編集行の etxtOperationNo /
+ * etxtSubNo / etxtOldDateTime まで含む全フィールドを要求し、欠落すると code-behind の
+ * `FuelCheck` が空を `int.Parse` して FormatException (HTTP 500) を返す (cdp-pair 実機
+ * 確認、Refs #199)。値は数値・日時のみで HTML entity を含まないため raw のまま使う。 */
+export function extractLstFuelTextInputs(html: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const match of html.matchAll(/<input\b[^>]*>/gi)) {
+    const tag = match[0];
+    if (!/\btype=["']text["']/i.test(tag)) continue;
+    const nameMatch = tag.match(/\bname=["']([^"']*)["']/i);
+    if (!nameMatch || !nameMatch[1].startsWith("lstFuel")) continue;
+    const valueMatch = tag.match(/\bvalue=["']([^"']*)["']/i);
+    result[nameMatch[1]] = valueMatch ? valueMatch[1] : "";
+  }
+  return result;
 }
 
 export interface SaveFuelRowParams {
@@ -389,7 +441,13 @@ export async function saveFuelRow(
     dateTime: params.dateTime,
     quantity: params.quantity,
   };
-  const fieldValues: Record<string, string> = {};
+  // theearth の更新 postback は編集行の **全 etxt フィールド** (etxtOperationNo /
+  // etxtSubNo / etxtOldDateTime を含む) を要求する。5 フィールドしか送らないと
+  // code-behind の `FuelCheck` が欠落フィールドを空のまま `int.Parse` して
+  // FormatException (「入力文字列の形式が正しくありません」= HTTP 500) になる
+  // (cdp-pair 実機確認、Refs #199)。編集モード応答の全 lstFuel テキスト入力を
+  // 現在値でベースに送り、対象行の編集対象フィールドだけ params の新値で上書きする。
+  const fieldValues = extractLstFuelTextInputs(editHtml);
   for (const [key, idSuffix] of Object.entries(FUEL_EDIT_FIELD_IDS) as [keyof typeof FUEL_EDIT_FIELD_IDS, string][]) {
     const ref = findFormFieldById(editHtml, fuelRowId(params.ctrlIndex, idSuffix));
     if (ref) fieldValues[ref.name] = editedValues[key];
@@ -452,6 +510,95 @@ export async function recalculateExpense(
   const linkSysTag = findTagById(postHtml, "btnLinkSys");
   const linkSysEnabled = !!linkSysTag && !/class=["'][^"']*aspNetDisabled/i.test(linkSysTag);
   return { linkSysEnabled };
+}
+
+export interface StartSystemLinkResult {
+  /** 連動が成功したと判定できたか (成功シグナルは未確定のため保守的判定、Refs #199)。 */
+  linked: boolean;
+  /** 前提の再集計 (btnScore) 完了を確認できたか。 */
+  recalcConfirmed: boolean;
+  /** 再集計後に btnLinkSys が enable されたか。 */
+  linkSysWasEnabled: boolean;
+  /** 連動 postback 応答のタグ除去テキスト先頭 (成功シグナル観測用、UI 表示にも使う)。 */
+  message: string;
+}
+
+/** システム連動開始 (btnLinkSys)。skill (theearth-venus) の順序依存に従い、まず
+ * `btnScore` (再集計) → その応答で `btnLinkSys` が disabled→enabled になる → その
+ * viewstate で `btnLinkSys` postback、の連鎖で実行する。**theearth 側にデータを連動
+ * させる本番アクション**。連動完了の成功シグナルは skill 未記載のため、各段階の状態と
+ * 応答本文を log に厚く出して実機で観測できるようにする (判定は後で確定、Refs #199)。 */
+export async function startSystemLink(
+  jar: CookieJar,
+  opeNo: string,
+  startOpe: string,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<StartSystemLinkResult> {
+  validateOpeNo(opeNo);
+  validateStartOpe(startOpe);
+  const url = buildOperationExpenseUrl(opeNo, startOpe);
+  console.log(`[link-sys] start opeNo=${opeNo} startOpe=${startOpe}`);
+
+  // 1. GET (最新 viewstate 取得)
+  const getRes = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
+  console.log(`[link-sys] GET status=${getRes.status}`);
+  if (!getRes.ok) {
+    throw new TheearthClientError(`経費入力ページの取得が HTTP ${getRes.status} を返しました`);
+  }
+  const html = await getRes.text();
+  if (isLoginRedirect(html)) {
+    throw new VenusSessionExpiredError(
+      "経費入力ページがログイン画面を返しました — theearth セッションが切れています",
+    );
+  }
+
+  // 2. 再集計 (btnScore) — システム連動の前提 (順序依存、skill 確定)
+  const scoreButton = findFormFieldById(html, "btnScore");
+  if (!scoreButton) {
+    throw new TheearthClientError("評価点再集計ボタン (btnScore) が見つかりません — 連動の前提が満たせません");
+  }
+  console.log(`[link-sys] POST btnScore name=${scoreButton.name}`);
+  const recalcHtml = await postButton(
+    jar, url, html, scoreButton.name, scoreButton.value || "評価点再集計", fetchImpl, timeoutMs,
+  );
+  assertNoOtherEditConflict(recalcHtml, "システム連動の前提となる再集計");
+  const recalcConfirmed = recalcHtml.includes("再集計が終了しました");
+  console.log(`[link-sys] recalc confirmed=${recalcConfirmed}`);
+  if (!recalcConfirmed) {
+    throw new TheearthClientError(
+      "再集計の完了メッセージ (「再集計が終了しました。」) が確認できませんでした — システム連動の前提が満たせません",
+    );
+  }
+
+  // 3. btnLinkSys が enable されたか (aspNetDisabled class の有無で判定、skill 確定)
+  const linkSysTag = findTagById(recalcHtml, "btnLinkSys");
+  if (!linkSysTag) {
+    throw new TheearthClientError("システム連動開始ボタン (btnLinkSys) が見つかりません");
+  }
+  const linkSysWasEnabled = !/class=["'][^"']*aspNetDisabled/i.test(linkSysTag);
+  console.log(`[link-sys] btnLinkSys enabled=${linkSysWasEnabled} tag=${linkSysTag.slice(0, 200)}`);
+  if (!linkSysWasEnabled) {
+    throw new TheearthClientError(
+      "再集計後もシステム連動開始 (btnLinkSys) が有効になりませんでした — 連動できません",
+    );
+  }
+
+  // 4. btnLinkSys postback (システム連動開始 = 本番アクション)。tag が取れた =
+  // name も取れる (form ボタン) ので `!` で受ける。
+  const linkButton = findFormFieldById(recalcHtml, "btnLinkSys")!;
+  console.log(`[link-sys] POST btnLinkSys name=${linkButton.name} value=${linkButton.value}`);
+  const linkHtml = await postButton(
+    jar, url, recalcHtml, linkButton.name, linkButton.value || "システム連動開始", fetchImpl, timeoutMs,
+  );
+  assertNoOtherEditConflict(linkHtml, "システム連動開始");
+
+  // 5. 成功判定: 連動完了の成功シグナルは skill 未記載のため、応答本文を log に
+  // 厚く出して実機で確定する。暫定判定は「連動〜(開始|完了|終了)しました」文言の有無。
+  const message = linkHtml.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+  const linked = /連動[^。<]{0,6}(開始|完了|終了)しました/.test(linkHtml);
+  console.log(`[link-sys] done linked=${linked} message="${message}"`);
+  return { linked, recalcConfirmed, linkSysWasEnabled, message };
 }
 
 // ---------------------------------------------------------------------------
