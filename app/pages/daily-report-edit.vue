@@ -543,7 +543,7 @@ onMounted(() => {
       </div>
 
       <!-- F-DES1012 給油行編集モーダル -->
-      <UModal v-model:open="expenseModalOpen">
+      <UModal v-model:open="expenseModalOpen" :ui="{ content: 'max-w-4xl' }">
         <template #content>
           <div class="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
             <h3 class="text-lg font-bold">
@@ -562,7 +562,7 @@ onMounted(() => {
                 :key="row.ctrlIndex"
                 class="border border-gray-200 dark:border-gray-800 rounded-lg p-3 space-y-2"
               >
-                <div class="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                <div class="grid grid-cols-2 sm:grid-cols-6 gap-2">
                   <UFormField label="分類 (CD)">
                     <UInput v-model="fuelEditForm[row.ctrlIndex]!.supplyCategory" class="w-full" />
                     <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 truncate">
@@ -581,7 +581,7 @@ onMounted(() => {
                       {{ liveTypeName(row) || '—' }}
                     </p>
                   </UFormField>
-                  <UFormField label="日時">
+                  <UFormField label="日時" class="col-span-2">
                     <UInput v-model="fuelEditForm[row.ctrlIndex]!.dateTime" class="w-full" />
                   </UFormField>
                   <UFormField label="数量">
