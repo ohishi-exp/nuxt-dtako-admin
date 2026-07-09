@@ -91,12 +91,13 @@ import {
   ReportParamError,
   saveDriverFromPage,
   saveFuelRow,
-  saveWorkRows,
+  saveWorkRowFromPage,
+  startWorkRowEdit,
   unlockOperation,
   verifyReadNoDescending,
   withVehicleNarrow,
   type SaveFuelRowParams,
-  type SaveWorkRowsParams,
+  type SaveWorkRowParams,
 } from "./theearth-report-client";
 import {
   isReportSessionValid,
@@ -168,6 +169,20 @@ const REPORT_REVISE_PAGE_TTL_MS = 15 * 60_000;
 interface RevisePageRecord {
   opeNo: string;
   startOpe: string;
+  html: string;
+  savedAt: number;
+}
+
+/** F-DES1013 (作業入力) の編集モードページ HTML を置く DO storage キー。
+ * `startWorkRowEdit` (btnEditButton postback) の応答を保存し、行の保存
+ * (`saveWorkRowFromPage`) はその viewstate からそのまま `btnUpdateButton` を
+ * postback する (実ブラウザの「鉛筆 → 修正 → 保存」の再現、Refs #170)。 */
+const REPORT_WORK_EDIT_PAGE_KEY = "report:work-edit-page";
+
+interface WorkEditPageRecord {
+  opeNo: string;
+  startOpe: string;
+  ctrlIndex: number;
   html: string;
   savedAt: number;
 }
@@ -1404,6 +1419,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/daily-report-api/work" && request.method === "GET") {
       return this.handleReportWorkForm(record!, url);
     }
+    if (url.pathname === "/daily-report-api/work/edit-start" && request.method === "POST") {
+      return this.handleReportWorkEditStart(record!, request);
+    }
     if (url.pathname === "/daily-report-api/work/save" && request.method === "POST") {
       return this.handleReportWorkSave(record!, request);
     }
@@ -1683,16 +1701,55 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return this.callReportAction(record, "作業入力フォームの取得", (jar) => getWorkForm(jar, opeNo, startOpe));
   }
 
-  /** POST /daily-report-api/work/save — `btnRegist1` postback で作業行を登録する
-   * (body は SaveWorkRowsParams、Refs #170)。 */
-  private async handleReportWorkSave(record: ReportSessionRecord, request: Request): Promise<Response> {
-    let body: SaveWorkRowsParams;
+  /** POST /daily-report-api/work/edit-start — 対象行の `btnEditButton` postback で
+   * 編集モードにし、編集モード行の現在値を返す (body は `{opeNo, startOpe,
+   * ctrlIndex}`、Refs #170)。応答ページは storage に保存して保存 postback で再利用。 */
+  private async handleReportWorkEditStart(record: ReportSessionRecord, request: Request): Promise<Response> {
+    let body: { opeNo?: unknown; startOpe?: unknown; ctrlIndex?: unknown };
     try {
-      body = (await request.json()) as SaveWorkRowsParams;
+      body = (await request.json()) as { opeNo?: unknown; startOpe?: unknown; ctrlIndex?: unknown };
     } catch {
       return dvrJsonError(400, "JSON body が必要です");
     }
-    return this.callReportAction(record, "作業行の登録", (jar) => saveWorkRows(jar, body));
+    const opeNo = typeof body.opeNo === "string" ? body.opeNo : "";
+    const startOpe = typeof body.startOpe === "string" ? body.startOpe : "";
+    const ctrlIndex = typeof body.ctrlIndex === "number" ? body.ctrlIndex : -1;
+    return this.callReportAction(record, "作業行の編集開始", async (jar) => {
+      const { row, editHtml } = await startWorkRowEdit(jar, { opeNo, startOpe, ctrlIndex });
+      await this.ctx.storage.put<WorkEditPageRecord>(REPORT_WORK_EDIT_PAGE_KEY, {
+        opeNo,
+        startOpe,
+        ctrlIndex,
+        html: editHtml,
+        savedAt: Date.now(),
+      });
+      return { row };
+    });
+  }
+
+  /** POST /daily-report-api/work/save — 編集モード行の値を書き換えて
+   * `btnUpdateButton` postback で保存する (body は SaveWorkRowParams、Refs #170)。
+   * postback には handleReportWorkEditStart が保存した編集モードページを使う。 */
+  private async handleReportWorkSave(record: ReportSessionRecord, request: Request): Promise<Response> {
+    let body: SaveWorkRowParams;
+    try {
+      body = (await request.json()) as SaveWorkRowParams;
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    const page = await this.ctx.storage.get<WorkEditPageRecord>(REPORT_WORK_EDIT_PAGE_KEY);
+    if (!page || page.opeNo !== body.opeNo || page.startOpe !== body.startOpe || page.ctrlIndex !== body.ctrlIndex) {
+      return dvrJsonError(409, "作業行の編集開始情報がありません — 行の「編集」からやり直してください");
+    }
+    if (Date.now() - page.savedAt > REPORT_REVISE_PAGE_TTL_MS) {
+      await this.ctx.storage.delete(REPORT_WORK_EDIT_PAGE_KEY);
+      return dvrJsonError(409, "作業行の編集開始から時間が経ちすぎています — 行の「編集」からやり直してください");
+    }
+    return this.callReportAction(record, "作業行の更新", async (jar) => {
+      const result = await saveWorkRowFromPage(jar, page.html, body);
+      await this.ctx.storage.delete(REPORT_WORK_EDIT_PAGE_KEY);
+      return result;
+    });
   }
 
   /** POST /daily-report-api/work/recalculate — F-DES1013 の `btnScore` postback で

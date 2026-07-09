@@ -20,8 +20,8 @@
  * - F-NRS1010 ページャの `__doPostBack` target/argument の命名規則
  * - `saveFuelRow` の更新 postback 後の遷移先・viewstate 更新挙動 (更新ボタン自体の
  *   存在・field id は実機確認済みだが、保存成功時の成功シグナルは未確認)
- * - F-DES1013 (作業入力) の lstWork 実フィールド形式・`btnRegist1` 応答の遷移先・
- *   intxt (内部日時) の実フォーマット (Refs #170、`saveWorkRows` の doc comment 参照)
+ * - F-DES1013 (作業入力) の `btnUpdateButton` 応答の遷移先 (作業行を再描画するか。
+ *   Refs #170、`saveWorkRowFromPage` は再描画されないケースを再 GET でカバーする)
  * - F-DES1011 (運行データ修正) は**最初の URL 直接 GET でだけ**運行データが
  *   ロードされる (2 回目以降の GET は初期値が空。staging 実機 2026-07-10 確認、
  *   Refs #171)。`saveDriverFromPage` は取得時ページの再利用が前提で、初期値が
@@ -1451,6 +1451,22 @@ function ensureOperationZip(buf: ArrayBuffer, contentType: string, opeNo: string
 
 // ---------------------------------------------------------------------------
 // F-DES1013 [作業入力] — 作業行 (lstWork) 編集 + 作業時間再集計 (Refs #170)
+//
+// 実 DOM 構造 (cdp-pair 実機確認、2026-07-10。lstFuel と同型):
+// - 表示行: `lstWork_lbl<Field>_<N>` の <span> + 行ごとの編集/削除/挿入ボタン
+//   (`lstWork_btnEditButton_<N>` 等)
+// - 編集モード: `btnEditButton` postback 後にだけ現れる `lstWork_etxt<Field>_<N>`
+//   入力 + `lstWork_eddlEventName_<N>` (作業種別 select、202積み/203降し/204その他/
+//   205待機/301休憩/302休息) + `btnUpdateButton`/`btnCancelButton`。
+//   `etxtStartDateTime` は "YYYY/MM/DD HH:mm:ss" のフル形式 (表示 span の
+//   "YY/MM/DD HH:mm" と違い秒まで持つ) — 編集フォームの初期値は必ず編集モード
+//   応答から読むこと (表示 span から組み立てると秒が失われる)
+// - 最下段に新規行テンプレート (`lstWork$ctrl<行数>$itxt*` / `iddlEventName`) が
+//   常駐する (旧実装が「1 行だけの空フォーム」と誤認していたのはこれ)
+// - **GET は編集ロックを取得する**。別セッションがロック中の運行への GET は
+//   lstWork を一切含まない空ページ + CloseMsg「他のユーザーが前回の編集を完了
+//   していないため、編集できません。…[編集制御解除]…」が返る (同一セッション
+//   内の再 GET は通る)
 // ---------------------------------------------------------------------------
 
 const WORK_EDIT_PATH = "/F-DES1013[OperationWorkEdit].aspx";
@@ -1460,36 +1476,56 @@ function buildOperationWorkUrl(opeNo: string, startOpe: string): string {
   return `${BASE_URL}${WORK_EDIT_PATH}?OpeNo=${opeNo}&StartOpe=${encodedStartOpe}`;
 }
 
-/** 作業行の編集対象フィールド → lstWork name suffix の対応 (SKILL.md
- * 「F-DES1013 [作業入力] の編集フォーム」節、2026-07-08 実機トレース)。 */
-const WORK_EDIT_FIELD_SUFFIXES = {
-  eventCd: "iddlEventName",
-  startDateTime: "itxtStartDateTime",
-  endDateTime: "itxtEndDateTime",
-  driverType: "itxtDriverType",
-  startPlaceCd: "itxtStartPlaceCD",
-  startPlaceName: "itxtStartPlaceName",
-  startCityCd: "itxtStartCityCD",
-  startCityName: "itxtStartCityName",
-  endPlaceCd: "itxtEndPlaceCD",
-  endPlaceName: "itxtEndPlaceName",
-  endCityCd: "itxtEndCityCD",
-  endCityName: "itxtEndCityName",
+/** `lstWork` grid の実 id ビルダ (`lstWork_<suffix>_<N>`、cdp-pair 実機確認
+ * 2026-07-10。`MainContent_` prefix は無い)。 */
+function workRowId(ctrlIndex: number, suffix: string): string {
+  return `lstWork_${suffix}_${ctrlIndex}`;
+}
+
+/** 表示専用行 (`lstWork_lbl<Field>_<N>`) の span id サフィックス。 */
+const WORK_LABEL_IDS = {
+  eventCd: "lblEventCD",
+  eventName: "lblEventName",
+  startDateTime: "lblStartDateTime",
+  endDateTime: "lblEndDateTime",
+  eventMin: "lblEventMin",
+  driverType: "lblDriverType",
+  startPlaceCd: "lblStartPlaceCD",
+  startPlaceName: "lblStartPlaceName",
+  startCityCd: "lblStartCityCD",
+  startCityName: "lblStartCityName",
+  endPlaceCd: "lblEndPlaceCD",
+  endPlaceName: "lblEndPlaceName",
+  endCityCd: "lblEndCityCD",
+  endCityName: "lblEndCityName",
 } as const;
 
-/** itxt (表示用) 日時に対応する intxt (内部) 日時フィールドの suffix。実ブラウザ
- * では JS が itxt→intxt を同期しているとみられるが、intxt の実フォーマットは
- * 未確認 (SKILL.md でも「表示 / 内部」としか分かっていない)。`saveWorkRows` は
- * **現在値ペアで変換則 (数字のみ抽出) が成立している場合に限り**新値にも同じ
- * 変換を適用し、成立しなければ現在値のまま送って log に残す (推測フォーマットを
- * 捏造しない、Refs #188 の教訓)。 */
-const WORK_INTERNAL_DATETIME_SUFFIXES: Record<string, string> = {
-  itxtStartDateTime: "intxtStartDateTime",
-  itxtEndDateTime: "intxtEndDateTime",
-};
+/** 編集モード入力欄 (`lstWork_etxt<Field>_<N>`) の id サフィックス。作業種別は
+ * select (`eddlEventName`) + 同期用 text (`etxtEventCD`) の 2 要素で別扱い。 */
+const WORK_EDIT_FIELD_IDS = {
+  startDateTime: "etxtStartDateTime",
+  endDateTime: "etxtEndDateTime",
+  driverType: "etxtDriverType",
+  startPlaceCd: "etxtStartPlaceCD",
+  startPlaceName: "etxtStartPlaceName",
+  startCityCd: "etxtStartCityCD",
+  startCityName: "etxtStartCityName",
+  endPlaceCd: "etxtEndPlaceCD",
+  endPlaceName: "etxtEndPlaceName",
+  endCityCd: "etxtEndCityCD",
+  endCityName: "etxtEndCityName",
+} as const;
 
-function digitsOnly(value: string): string {
-  return value.replace(/\D/g, "");
+/** ロック中運行への GET 応答か (CloseMsg の実文言、cdp-pair 実機確認 2026-07-10)。
+ * ロック中はページが空 (lstWork 無し) になるため、「作業 0 件」と誤認する前に
+ * ここで loud fail する。 */
+function assertWorkPageNotLocked(html: string): void {
+  if (html.includes("編集を完了していないため、編集できません")) {
+    throw new TheearthClientError(
+      "この運行は編集ロック中のためデータを表示できません — 一覧の「編集制御解除」で" +
+        "ロックを解放してから開き直してください",
+    );
+  }
 }
 
 export interface WorkEventOption {
@@ -1497,97 +1533,55 @@ export interface WorkEventOption {
   label: string;
 }
 
-interface ParsedWorkField {
-  name: string;
-  value: string;
-  /** `<select>` の場合のみ: 全 option と selected option の可視ラベル。 */
-  options?: WorkEventOption[];
-  selectedLabel?: string;
+/** id 指定で `<select>` の selected value と全 option を返す。selected 無しは
+ * HTML 仕様どおり先頭 option (serializeFormFields と同じ規約)。 */
+function parseSelectOptionsById(html: string, id: string): { value: string; options: WorkEventOption[] } | null {
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`<select\\b[^>]*\\bid=["']${escaped}["'][^>]*>([\\s\\S]*?)</select>`, "i");
+  const m = html.match(re);
+  if (!m) return null;
+  const options: WorkEventOption[] = [];
+  let selected: WorkEventOption | null = null;
+  for (const om of m[1].matchAll(/<option\b([^>]*)>([\s\S]*?)<\/option>/gi)) {
+    const valueMatch = om[1].match(/\bvalue=["']([^"']*)["']/i);
+    const option = {
+      value: valueMatch ? valueMatch[1] : "",
+      label: om[2].replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ").trim(),
+    };
+    options.push(option);
+    if (/\bselected\b/i.test(om[1])) selected = option;
+  }
+  return { value: (selected ?? options[0] ?? { value: "", label: "" }).value, options };
 }
 
-type ParsedWorkRows = Map<number, Map<string, ParsedWorkField>>;
-
-/** lstWork 行フィールドの位置 (行 index / field suffix) を name / id の両形式から
- * 解決する。実機トレース (SKILL.md、2026-07-08) では name = `lstWork$ctrl<i>$<field>`
- * だが、同日トレースの lstFuel は後から実 id が `lstFuel_<field>_<i>` 形式だと判明
- * した経緯 (Refs #183/#184) があるため、両形式を受け付けて実 DOM の揺れに耐える。 */
-function locateLstWorkField(name: string, id: string | null): { ctrlIndex: number; suffix: string } | null {
-  const nameMatch = name.match(/^lstWork\$ctrl(\d+)\$(.+)$/);
-  if (nameMatch) return { ctrlIndex: Number(nameMatch[1]), suffix: nameMatch[2] };
-  if (id) {
-    const idMatch = id.match(/^lstWork_(.+)_(\d+)$/);
-    if (idMatch) return { ctrlIndex: Number(idMatch[2]), suffix: idMatch[1] };
-  }
-  return null;
+/** 指定 id の `<select>` から POST 用 name を抽出する (`findFormFieldById` は
+ * `<input>` 専用のため select 用に別実装)。 */
+function findSelectNameById(html: string, id: string): string | null {
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = html.match(new RegExp(`<select\\b[^>]*\\bid=["']${escaped}["'][^>]*>`, "i"));
+  return m ? (m[0].match(/\bname=["']([^"']+)["']/i)?.[1] ?? null) : null;
 }
 
-/** F-DES1013 応答から lstWork 系の全フォームフィールド (`<input>` + `<select>`)
- * を行 index × suffix で抽出する。field 一覧を決め打ちせず実 DOM を丸ごと読む
- * (欠落フィールド起因の FormatException 500 を避ける、Refs #199 と同じ設計)。 */
-function parseLstWorkFields(html: string): ParsedWorkRows {
-  const rows: ParsedWorkRows = new Map();
-  const put = (ctrlIndex: number, suffix: string, field: ParsedWorkField) => {
-    let row = rows.get(ctrlIndex);
-    if (!row) {
-      row = new Map();
-      rows.set(ctrlIndex, row);
-    }
-    row.set(suffix, field);
-  };
-
-  for (const m of html.matchAll(/<input\b([^>]*)>/gi)) {
-    const attrs = m[1];
-    const nameMatch = attrs.match(/\bname=["']([^"']+)["']/i);
-    if (!nameMatch || !nameMatch[1].startsWith("lstWork")) continue;
-    const type = (attrs.match(/\btype=["']([^"']+)["']/i)?.[1] ?? "text").toLowerCase();
-    // 押下 submit は postback body に含めない (serializeFormFields と同じ規約)。
-    if (type === "submit" || type === "button" || type === "image" || type === "reset" || type === "file") continue;
-    const id = attrs.match(/\bid=["']([^"']+)["']/i)?.[1] ?? null;
-    const loc = locateLstWorkField(nameMatch[1], id);
-    if (!loc) continue;
-    const valueMatch = attrs.match(/\bvalue=["']([^"']*)["']/i);
-    put(loc.ctrlIndex, loc.suffix, { name: nameMatch[1], value: valueMatch ? valueMatch[1] : "" });
-  }
-
-  for (const m of html.matchAll(/<select\b([^>]*)>([\s\S]*?)<\/select>/gi)) {
-    const nameMatch = m[1].match(/\bname=["']([^"']+)["']/i);
-    if (!nameMatch || !nameMatch[1].startsWith("lstWork")) continue;
-    const id = m[1].match(/\bid=["']([^"']+)["']/i)?.[1] ?? null;
-    const loc = locateLstWorkField(nameMatch[1], id);
-    if (!loc) continue;
-    const options: WorkEventOption[] = [];
-    let selected: WorkEventOption | null = null;
-    for (const om of m[2].matchAll(/<option\b([^>]*)>([\s\S]*?)<\/option>/gi)) {
-      const valueMatch = om[1].match(/\bvalue=["']([^"']*)["']/i);
-      const option = {
-        value: valueMatch ? valueMatch[1] : "",
-        label: om[2].replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ").trim(),
-      };
-      options.push(option);
-      if (/\bselected\b/i.test(om[1])) selected = option;
-    }
-    // selected 無しは HTML 仕様どおり先頭 option (serializeFormFields と同じ)。
-    const effective = selected ?? options[0] ?? { value: "", label: "" };
-    put(loc.ctrlIndex, loc.suffix, {
-      name: nameMatch[1],
-      value: effective.value,
-      options,
-      selectedLabel: effective.label,
-    });
-  }
-
-  return rows;
+/** 作業種別マスタを新規行テンプレート (`iddlEventName`) または編集モード行
+ * (`eddlEventName`) の select から抽出する。 */
+function parseWorkEventOptions(html: string): WorkEventOption[] {
+  const m = html.match(/\bid=["'](lstWork_(?:i|e)ddlEventName_\d+)["']/);
+  if (!m) return [];
+  return parseSelectOptionsById(html, m[1])?.options ?? [];
 }
 
-/** 作業行 1 件 (フロント表示用の型付きビュー)。実 DOM に無いフィールドは "" を返す
- * (どの suffix が実在するかは staging 実機で確定させる)。 */
+/** 作業行 1 件 (表示行の型付きビュー)。 */
 export interface WorkRow {
   ctrlIndex: number;
-  /** 作業種別 (iddlEventName の selected value / 可視ラベル)。 */
+  /** 作業種別 CD (`lblEventCD`、例 301) / 可視ラベル (`lblEventName`、例 休憩)。 */
   eventCd: string;
   eventName: string;
+  /** 表示行の日時は "YY/MM/DD HH:mm" の短縮形式 (秒なし)。編集には
+   * `startWorkRowEdit` が返すフル形式を使うこと。 */
   startDateTime: string;
   endDateTime: string;
+  /** 作業時間 ("H:mm"、再集計で更新される表示値)。 */
+  eventMin: string;
   driverType: string;
   startPlaceCd: string;
   startPlaceName: string;
@@ -1603,59 +1597,32 @@ export interface WorkForm {
   opeNo: string;
   startOpe: string;
   workRows: WorkRow[];
-  /** 作業種別 (iddlEventName) の選択肢 (業務マスタ由来)。全行共通の select なので
-   * 最初の行から抽出する。 */
+  /** 作業種別 (EventName) の選択肢 (業務マスタ由来)。 */
   eventOptions: WorkEventOption[];
 }
 
-function toWorkRow(ctrlIndex: number, fields: Map<string, ParsedWorkField>): WorkRow {
-  const get = (suffix: string) => fields.get(suffix)?.value ?? "";
-  const event = fields.get(WORK_EDIT_FIELD_SUFFIXES.eventCd);
-  return {
-    ctrlIndex,
-    eventCd: event?.value ?? "",
-    eventName: event?.selectedLabel ?? "",
-    startDateTime: get(WORK_EDIT_FIELD_SUFFIXES.startDateTime),
-    endDateTime: get(WORK_EDIT_FIELD_SUFFIXES.endDateTime),
-    driverType: get(WORK_EDIT_FIELD_SUFFIXES.driverType),
-    startPlaceCd: get(WORK_EDIT_FIELD_SUFFIXES.startPlaceCd),
-    startPlaceName: get(WORK_EDIT_FIELD_SUFFIXES.startPlaceName),
-    startCityCd: get(WORK_EDIT_FIELD_SUFFIXES.startCityCd),
-    startCityName: get(WORK_EDIT_FIELD_SUFFIXES.startCityName),
-    endPlaceCd: get(WORK_EDIT_FIELD_SUFFIXES.endPlaceCd),
-    endPlaceName: get(WORK_EDIT_FIELD_SUFFIXES.endPlaceName),
-    endCityCd: get(WORK_EDIT_FIELD_SUFFIXES.endCityCd),
-    endCityName: get(WORK_EDIT_FIELD_SUFFIXES.endCityName),
-  };
-}
-
-function parseWorkRows(html: string): { workRows: WorkRow[]; eventOptions: WorkEventOption[] } {
-  const parsed = parseLstWorkFields(html);
-  const indexes = [...parsed.keys()].sort((a, b) => a - b);
-  const workRows = indexes.map((i) => toWorkRow(i, parsed.get(i)!));
-  const firstEvent = workRows.length > 0 ? parsed.get(indexes[0])!.get(WORK_EDIT_FIELD_SUFFIXES.eventCd) : undefined;
-  return { workRows, eventOptions: firstEvent?.options ?? [] };
-}
-
-/** F-DES1013 の lstWork 実 DOM 構造を特定するための診断サマリ (Refs #170)。
- * staging 実機のスクリーンショット (2026-07-10) から、lstWork は lstFuel と同じ
- * 「表示行 + 行単位編集 (鉛筆ボタン) + 最下段の新規行テンプレート」構造と
- * みられ、現在の parse は新規行テンプレートしか拾えていない疑いがある。
- * 正確な id/name 体系を Tail Worker log から確定するため、lstWork を含むタグの
- * 構造だけを返す (**値 = 業務データは log に出さない**。長さのみに置換)。
- * 構造が確定して parse を実装し直したら削除してよい。 */
-export function describeLstWorkStructure(html: string): string[] {
-  const lines: string[] = [];
-  for (const m of html.matchAll(/<(?:input|select|span|a|img|table|tr)\b[^>]*>/gi)) {
-    const tag = m[0];
-    if (!/lstWork/i.test(tag)) continue;
-    lines.push(
-      tag
-        .replace(/\bvalue=["']([^"']*)["']/gi, (_s, v: string) => `value="<len:${v.length}>"`)
-        .replace(/\s+/g, " "),
-    );
-  }
-  return lines;
+function parseWorkRows(html: string): WorkRow[] {
+  const indexes = [...html.matchAll(/id="lstWork_lblEventCD_(\d+)"/g)].map((m) => Number(m[1]));
+  return indexes.map((ctrlIndex) => {
+    const get = (suffix: string) => extractSpanTextById(html, workRowId(ctrlIndex, suffix)) ?? "";
+    return {
+      ctrlIndex,
+      eventCd: get(WORK_LABEL_IDS.eventCd),
+      eventName: get(WORK_LABEL_IDS.eventName),
+      startDateTime: get(WORK_LABEL_IDS.startDateTime),
+      endDateTime: get(WORK_LABEL_IDS.endDateTime),
+      eventMin: get(WORK_LABEL_IDS.eventMin),
+      driverType: get(WORK_LABEL_IDS.driverType),
+      startPlaceCd: get(WORK_LABEL_IDS.startPlaceCd),
+      startPlaceName: get(WORK_LABEL_IDS.startPlaceName),
+      startCityCd: get(WORK_LABEL_IDS.startCityCd),
+      startCityName: get(WORK_LABEL_IDS.startCityName),
+      endPlaceCd: get(WORK_LABEL_IDS.endPlaceCd),
+      endPlaceName: get(WORK_LABEL_IDS.endPlaceName),
+      endCityCd: get(WORK_LABEL_IDS.endCityCd),
+      endCityName: get(WORK_LABEL_IDS.endCityName),
+    };
+  });
 }
 
 /** GET F-DES1013 — 作業行の現在値一覧を取得する (編集フォームの初期表示用)。 */
@@ -1670,16 +1637,11 @@ export async function getWorkForm(
   validateStartOpe(startOpe);
   const url = buildOperationWorkUrl(opeNo, startOpe);
   const pageHtml = await fetchEditPageHtml(jar, url, "作業入力ページ", fetchImpl, timeoutMs);
-  const { workRows, eventOptions } = parseWorkRows(pageHtml);
-  // 実 DOM 構造の観測 log (Refs #170 staging 調査、値は出さない)。
-  const structure = describeLstWorkStructure(pageHtml);
-  console.log(`[work-form] opeNo=${opeNo} parsedRows=${workRows.length} lstWorkTags=${structure.length}`);
-  for (let i = 0; i < structure.length; i += 20) {
-    console.log(`[work-form] tags[${i}..]: ${structure.slice(i, i + 20).join(" | ").slice(0, 4000)}`);
-  }
+  assertWorkPageNotLocked(pageHtml);
+  const workRows = parseWorkRows(pageHtml);
   if (workRows.length === 0) {
-    // 作業行 0 件は実運用上あり得るが、ページ構造の想定違いと区別する
-    // (getExpenseForm の給油 0 件と同じ切り分け設計)。
+    // 作業 0 件 (新規行テンプレートだけのページ) は実運用上あり得るが、ページ構造の
+    // 想定違いと区別する (getExpenseForm の給油 0 件と同じ切り分け設計)。
     const hidden = extractHiddenFields(pageHtml);
     if (!hidden.__VIEWSTATE) {
       throw new TheearthClientError(
@@ -1687,20 +1649,111 @@ export async function getWorkForm(
           "theearth-np のページ仕様変更の可能性があります",
       );
     }
-    if (/["']lstWork/.test(pageHtml)) {
+    if (/id="lstWork_lbl/.test(pageHtml)) {
       throw new TheearthClientError(
-        "作業行 (lstWork) は存在しますがフィールド形式が想定 (lstWork$ctrl<i>$<field> / " +
-          "lstWork_<field>_<i>) と異なります — cdp-pair で実 DOM を確認してください",
+        "作業行の表示 span (lstWork_lbl*) は存在しますが行 index を検出できません — " +
+          "theearth-np のページ仕様変更の可能性があります",
       );
     }
   }
-  return { opeNo, startOpe, workRows, eventOptions };
+  return { opeNo, startOpe, workRows, eventOptions: parseWorkEventOptions(pageHtml) };
 }
 
-/** 作業行 1 件分の編集内容。undefined のフィールドは変更しない (現在値のまま送る)。 */
-export interface WorkRowEdit {
+export interface StartWorkRowEditParams {
+  opeNo: string;
+  startOpe: string;
+  ctrlIndex: number;
+}
+
+/** 編集モード行の現在値 (編集フォームの初期値)。日時は "YYYY/MM/DD HH:mm:ss" の
+ * フル形式 (表示 span と違い秒まで保持)。 */
+export interface WorkEditFormRow {
+  ctrlIndex: number;
+  eventCd: string;
+  eventOptions: WorkEventOption[];
+  /** 行先 checkbox (`enchkDestination`)。 */
+  destination: boolean;
+  startDateTime: string;
+  endDateTime: string;
+  driverType: string;
+  startPlaceCd: string;
+  startPlaceName: string;
+  startCityCd: string;
+  startCityName: string;
+  endPlaceCd: string;
+  endPlaceName: string;
+  endCityCd: string;
+  endCityName: string;
+}
+
+/** POST 相当: 対象行の `btnEditButton` を押して編集モードにし、編集モード行の
+ * 現在値と応答ページ HTML を返す。**呼び出し元 (DO) は editHtml を保存して
+ * `saveWorkRowFromPage` に渡すこと** (編集モードの viewstate からそのまま更新
+ * postback する。実ブラウザの「鉛筆 → 修正 → 保存」と同じ流れ)。 */
+export async function startWorkRowEdit(
+  jar: CookieJar,
+  params: StartWorkRowEditParams,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<{ row: WorkEditFormRow; editHtml: string }> {
+  validateOpeNo(params.opeNo);
+  validateStartOpe(params.startOpe);
+  const url = buildOperationWorkUrl(params.opeNo, params.startOpe);
+  const pageHtml = await fetchEditPageHtml(jar, url, "作業入力ページ", fetchImpl, timeoutMs);
+  assertWorkPageNotLocked(pageHtml);
+  const rows = parseWorkRows(pageHtml);
+  if (!rows.some((r) => r.ctrlIndex === params.ctrlIndex)) {
+    throw new ReportParamError(`作業行 (ctrlIndex=${params.ctrlIndex}) が見つかりません`);
+  }
+
+  const editButtonId = workRowId(params.ctrlIndex, "btnEditButton");
+  const editButton = findFormFieldById(pageHtml, editButtonId);
+  if (!editButton) {
+    throw new TheearthClientError(
+      `作業行の編集ボタン (${editButtonId}) が見つかりません — theearth-np のページ仕様変更の可能性があります`,
+    );
+  }
+  const editHtml = await postButton(jar, url, pageHtml, editButton.name, editButton.value, fetchImpl, timeoutMs);
+  assertNoOtherEditConflict(editHtml, "作業行の編集開始");
+
+  const updateButtonId = workRowId(params.ctrlIndex, "btnUpdateButton");
+  if (!findFormFieldById(editHtml, updateButtonId)) {
+    throw new TheearthClientError(
+      `作業行の更新ボタン (${updateButtonId}) が見つかりません — ` +
+        "編集開始 postback が想定通りに動かなかった可能性があります (theearth-np のページ仕様変更の可能性)",
+    );
+  }
+
+  const get = (suffix: string) => findFormFieldById(editHtml, workRowId(params.ctrlIndex, suffix))?.value ?? "";
+  const eventSelect = parseSelectOptionsById(editHtml, workRowId(params.ctrlIndex, "eddlEventName"));
+  const destinationTag = findTagById(editHtml, workRowId(params.ctrlIndex, "enchkDestination"));
+  const row: WorkEditFormRow = {
+    ctrlIndex: params.ctrlIndex,
+    eventCd: eventSelect?.value ?? get("etxtEventCD"),
+    eventOptions: eventSelect?.options ?? [],
+    destination: !!destinationTag && /\bchecked\b/i.test(destinationTag),
+    startDateTime: get(WORK_EDIT_FIELD_IDS.startDateTime),
+    endDateTime: get(WORK_EDIT_FIELD_IDS.endDateTime),
+    driverType: get(WORK_EDIT_FIELD_IDS.driverType),
+    startPlaceCd: get(WORK_EDIT_FIELD_IDS.startPlaceCd),
+    startPlaceName: get(WORK_EDIT_FIELD_IDS.startPlaceName),
+    startCityCd: get(WORK_EDIT_FIELD_IDS.startCityCd),
+    startCityName: get(WORK_EDIT_FIELD_IDS.startCityName),
+    endPlaceCd: get(WORK_EDIT_FIELD_IDS.endPlaceCd),
+    endPlaceName: get(WORK_EDIT_FIELD_IDS.endPlaceName),
+    endCityCd: get(WORK_EDIT_FIELD_IDS.endCityCd),
+    endCityName: get(WORK_EDIT_FIELD_IDS.endCityName),
+  };
+  return { row, editHtml };
+}
+
+/** 作業行 1 件分の保存内容。undefined のフィールドは編集モードの現在値のまま送る。 */
+export interface SaveWorkRowParams {
+  opeNo: string;
+  startOpe: string;
   ctrlIndex: number;
   eventCd?: string;
+  destination?: boolean;
   startDateTime?: string;
   endDateTime?: string;
   driverType?: string;
@@ -1714,111 +1767,87 @@ export interface WorkRowEdit {
   endCityName?: string;
 }
 
-export interface SaveWorkRowsParams {
-  opeNo: string;
-  startOpe: string;
-  rows: WorkRowEdit[];
-}
-
-export interface SaveWorkRowsResult {
+export interface SaveWorkRowResult {
   workRows: WorkRow[];
   eventOptions: WorkEventOption[];
 }
 
-/** POST 相当: 作業行を編集して `btnRegist1` (登録) postback で保存する。
+/** POST 相当: 編集モード行の値を書き換えて `btnUpdateButton` で保存する。
  *
- * F-DES1013 は編集フォームが最初から全行 inline で描画される (lstFuel のような
- * 「編集ボタン → 編集モード」の 2 段階は実機トレースで観測されていない) ため、
- * GET → 全フォーム直列化 → 変更フィールドだけ上書き → `btnRegist1`、の 1 postback。
- * 部分送信は code-behind の FormatException 500 事故 (Refs #199) の温床なので、
- * 必ず `serializeFormFields` でページ全体を丸ごと送る。
- *
- * 保存応答の遷移先 (F-DES1013 に留まるか F-DES1010 へ戻るか) は未確認 (issue #170
- * の未確認事項) のため、応答から作業行を読み直せない場合は再 GET で現在値を返す。 */
-export async function saveWorkRows(
+ * **`editHtml` には `startWorkRowEdit` が返したページをそのまま渡すこと**
+ * (呼び出し元 DO が storage に保持している)。postback body は編集モード応答の
+ * 全フォーム直列化 + 変更フィールドの上書き (部分送信の FormatException 500 を
+ * 避ける、Refs #199 の給油と同じ設計)。作業種別は select (`eddlEventName`) と
+ * 同期用 text (`etxtEventCD`) の両方を書き換える。 */
+export async function saveWorkRowFromPage(
   jar: CookieJar,
-  params: SaveWorkRowsParams,
+  editHtml: string,
+  params: SaveWorkRowParams,
   fetchImpl: FetchLike = fetch,
   timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
-): Promise<SaveWorkRowsResult> {
+): Promise<SaveWorkRowResult> {
   validateOpeNo(params.opeNo);
   validateStartOpe(params.startOpe);
-  if (!Array.isArray(params.rows) || params.rows.length === 0) {
-    throw new ReportParamError("編集する作業行 (rows) を1件以上指定してください");
-  }
   const url = buildOperationWorkUrl(params.opeNo, params.startOpe);
-  const pageHtml = await fetchEditPageHtml(jar, url, "作業入力ページ", fetchImpl, timeoutMs);
-  const parsed = parseLstWorkFields(pageHtml);
 
-  // 保護 (Refs #170、staging 実機 2026-07-10): lstWork は「表示行 + 行単位編集 +
-  // 最下段の新規行テンプレート」構造とみられ、現在の parse は値が空の新規行
-  // テンプレートしか拾えていない疑いがある。全行の開始/終了日時が空 (= 既存行の
-  // 実データを取得できていない) 状態で btnRegist1 を送ると意図しない値を書き込む
-  // 恐れがあるため、実構造の parse を実装し直すまで登録を中止する。
-  const anyDateTimeFilled = [...parsed.values()].some(
-    (fields) =>
-      (fields.get(WORK_EDIT_FIELD_SUFFIXES.startDateTime)?.value ?? "") !== ""
-      || (fields.get(WORK_EDIT_FIELD_SUFFIXES.endDateTime)?.value ?? "") !== "",
-  );
-  if (!anyDateTimeFilled) {
+  const updateButtonId = workRowId(params.ctrlIndex, "btnUpdateButton");
+  const updateButton = findFormFieldById(editHtml, updateButtonId);
+  if (!updateButton) {
     throw new TheearthClientError(
-      "作業行の初期値が空のため登録を中止しました (既存の作業データを意図しない値で上書きしない" +
-        "ための保護) — 現在の実装は既存行を取得できておらず、実 DOM 構造を調査中です (Refs #170)",
+      `作業行の更新ボタン (${updateButtonId}) が見つかりません — 編集開始からやり直してください`,
     );
   }
 
-  const registButton = findFormFieldById(pageHtml, "btnRegist1");
-  if (!registButton) {
-    throw new TheearthClientError(
-      "作業行の登録ボタン (btnRegist1) が見つかりません — theearth-np のページ仕様変更の可能性があります",
-    );
-  }
-
-  const body = serializeFormFields(pageHtml);
-  for (const edit of params.rows) {
-    const rowFields = parsed.get(edit.ctrlIndex);
-    if (!rowFields) {
-      throw new ReportParamError(`作業行 (ctrlIndex=${edit.ctrlIndex}) が見つかりません`);
+  const body = serializeFormFields(editHtml);
+  const setField = (suffix: string, value: string) => {
+    const field = findFormFieldById(editHtml, workRowId(params.ctrlIndex, suffix));
+    if (!field) {
+      throw new TheearthClientError(
+        `作業行 (ctrlIndex=${params.ctrlIndex}) の ${suffix} が見つかりません — ` +
+          "theearth-np のページ仕様変更の可能性があります",
+      );
     }
-    for (const [key, suffix] of Object.entries(WORK_EDIT_FIELD_SUFFIXES) as [keyof typeof WORK_EDIT_FIELD_SUFFIXES, string][]) {
-      const newValue = edit[key];
-      if (newValue === undefined) continue;
-      const field = rowFields.get(suffix);
-      if (!field) {
-        throw new TheearthClientError(
-          `作業行 (ctrlIndex=${edit.ctrlIndex}) の ${suffix} フィールドが見つかりません — ` +
-            "theearth-np のページ仕様変更の可能性があります",
-        );
-      }
-      body[field.name] = newValue;
-      const internalSuffix = WORK_INTERNAL_DATETIME_SUFFIXES[suffix];
-      if (internalSuffix) {
-        const internalField = rowFields.get(internalSuffix);
-        if (internalField && internalField.value === digitsOnly(field.value)) {
-          // 変換則 (数字のみ抽出) が現在値ペアで成立 → 新値にも同じ変換を適用。
-          body[internalField.name] = digitsOnly(newValue);
-        } else if (internalField) {
-          console.log(
-            `[work-save] intxt 同期則 (数字のみ抽出) が現在値で不成立のため ${internalSuffix} は現在値のまま送信します ` +
-              `(ctrlIndex=${edit.ctrlIndex}, itxt="${field.value}", intxt="${internalField.value}")`,
-          );
-        }
-      }
+    body[field.name] = value;
+  };
+  for (const [key, suffix] of Object.entries(WORK_EDIT_FIELD_IDS) as [keyof typeof WORK_EDIT_FIELD_IDS, string][]) {
+    const newValue = params[key];
+    if (newValue !== undefined) setField(suffix, newValue);
+  }
+  if (params.eventCd !== undefined) {
+    const selectId = workRowId(params.ctrlIndex, "eddlEventName");
+    const selectName = findSelectNameById(editHtml, selectId);
+    if (!selectName) {
+      throw new TheearthClientError(
+        `作業行 (ctrlIndex=${params.ctrlIndex}) の eddlEventName が見つかりません — ` +
+          "theearth-np のページ仕様変更の可能性があります",
+      );
+    }
+    body[selectName] = params.eventCd;
+    setField("etxtEventCD", params.eventCd);
+  }
+  if (params.destination !== undefined) {
+    const checkbox = findFormFieldById(editHtml, workRowId(params.ctrlIndex, "enchkDestination"));
+    if (checkbox) {
+      if (params.destination) body[checkbox.name] = checkbox.value || "on";
+      else delete body[checkbox.name];
     }
   }
 
   const postHtml = await postButton(
-    jar, url, pageHtml, registButton.name, registButton.value || "登録", fetchImpl, timeoutMs, body,
+    jar, url, editHtml, updateButton.name, updateButton.value, fetchImpl, timeoutMs, body,
   );
-  assertNoOtherEditConflict(postHtml, "作業行の登録");
+  assertNoOtherEditConflict(postHtml, "作業行の更新");
 
-  const after = parseWorkRows(postHtml);
-  if (after.workRows.length > 0) {
-    return after;
+  let workRows = parseWorkRows(postHtml);
+  let eventOptions = parseWorkEventOptions(postHtml);
+  if (workRows.length === 0) {
+    // 更新応答が一覧を再描画しないケース (未確認) に備えて再 GET で読み直す。
+    const rereadHtml = await fetchEditPageHtml(jar, url, "作業入力ページ", fetchImpl, timeoutMs);
+    assertWorkPageNotLocked(rereadHtml);
+    workRows = parseWorkRows(rereadHtml);
+    eventOptions = parseWorkEventOptions(rereadHtml);
   }
-  // 応答が別画面 (F-DES1010 へ戻る等、未確認事項) の可能性 — 再 GET で現在値を読み直す。
-  const rereadHtml = await fetchEditPageHtml(jar, url, "作業入力ページ", fetchImpl, timeoutMs);
-  return parseWorkRows(rereadHtml);
+  return { workRows, eventOptions };
 }
 
 /** POST 相当: F-DES1013 の `btnScore` postback で作業時間を再集計する

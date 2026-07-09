@@ -62,13 +62,15 @@ function emptyExpenseMasters(): ExpenseMasters {
   return { supplyCategory: {}, supplyStation: {}, fuelType: {}, additive: {}, consumable: {} }
 }
 
-/** F-DES1013 作業行 (worker の theearth-report-client WorkRow と同型)。 */
+/** F-DES1013 作業行の表示ビュー (worker の theearth-report-client WorkRow と同型)。
+ * 日時は "YY/MM/DD HH:mm" の短縮表示。編集には edit-start が返すフル形式を使う。 */
 interface WorkRow {
   ctrlIndex: number
   eventCd: string
   eventName: string
   startDateTime: string
   endDateTime: string
+  eventMin: string
   driverType: string
   startPlaceCd: string
   startPlaceName: string
@@ -83,6 +85,26 @@ interface WorkRow {
 interface WorkEventOption {
   value: string
   label: string
+}
+
+/** 編集モード行の現在値 (worker の WorkEditFormRow と同型)。日時は
+ * "YYYY/MM/DD HH:mm:ss" のフル形式 (theearth の編集入力欄そのまま)。 */
+interface WorkEditFormRow {
+  ctrlIndex: number
+  eventCd: string
+  eventOptions: WorkEventOption[]
+  destination: boolean
+  startDateTime: string
+  endDateTime: string
+  driverType: string
+  startPlaceCd: string
+  startPlaceName: string
+  startCityCd: string
+  startCityName: string
+  endPlaceCd: string
+  endPlaceName: string
+  endCityCd: string
+  endCityName: string
 }
 
 /** F-DES1011 運行データ修正フォーム (worker の ReviseForm と同型)。 */
@@ -584,9 +606,9 @@ async function downloadOperationZip() {
 }
 
 // --- 作業入力 (F-DES1013 lstWork) 編集モーダル (Refs #170) ---
-
-/** 作業行 1 行分の編集フォーム値 (worker の WorkRowEdit に対応)。 */
-type WorkEditFields = Omit<WorkRow, 'ctrlIndex' | 'eventName'>
+// 実 theearth の UX (表示行 → 鉛筆で編集モード → 修正 → 保存) をそのまま再現する:
+// 「編集」で /work/edit-start (btnEditButton postback、フル形式の現在値が返る) →
+// 修正して /work/save (btnUpdateButton postback)。
 
 const workModalOpen = ref(false)
 const workSelectedRow = ref<DailyReportRow | null>(null)
@@ -594,39 +616,23 @@ const workRows = ref<WorkRow[]>([])
 const workEventOptions = ref<WorkEventOption[]>([])
 const workLoading = ref(false)
 const workError = ref<string | null>(null)
-const workSavingCtrlIndex = ref<number | null>(null)
 const workRecalculating = ref(false)
 const workRecalculateResult = ref<string | null>(null)
-
-const workEditForm = reactive<Record<number, WorkEditFields>>({})
-
-function syncWorkEditForm() {
-  for (const key of Object.keys(workEditForm)) delete workEditForm[Number(key)]
-  for (const row of workRows.value) {
-    workEditForm[row.ctrlIndex] = {
-      eventCd: row.eventCd,
-      startDateTime: row.startDateTime,
-      endDateTime: row.endDateTime,
-      driverType: row.driverType,
-      startPlaceCd: row.startPlaceCd,
-      startPlaceName: row.startPlaceName,
-      startCityCd: row.startCityCd,
-      startCityName: row.startCityName,
-      endPlaceCd: row.endPlaceCd,
-      endPlaceName: row.endPlaceName,
-      endCityCd: row.endCityCd,
-      endCityName: row.endCityName,
-    }
-  }
-}
+// 編集モード中の行 (edit-start の応答をそのまま編集する)。null = 編集中でない
+const workEditing = ref<WorkEditFormRow | null>(null)
+const workEditStarting = ref<number | null>(null)
+const workSaving = ref(false)
 
 /** USelect (reka-ui) は空文字 value の item を許可しないため、空 value の option
  * (見出し行等) は除外する。選択肢が取れなかった場合はテキスト入力にフォールバック。 */
-const workEventSelectItems = computed(() =>
-  workEventOptions.value
+const workEventSelectItems = computed(() => {
+  const options = workEditing.value && workEditing.value.eventOptions.length > 0
+    ? workEditing.value.eventOptions
+    : workEventOptions.value
+  return options
     .filter(o => o.value !== '')
-    .map(o => ({ label: `${o.value}: ${o.label}`, value: o.value })),
-)
+    .map(o => ({ label: `${o.value}: ${o.label}`, value: o.value }))
+})
 
 async function openWorkModal(row: DailyReportRow) {
   const s = session.value
@@ -637,6 +643,7 @@ async function openWorkModal(row: DailyReportRow) {
   workEventOptions.value = []
   workError.value = null
   workRecalculateResult.value = null
+  workEditing.value = null
   workLoading.value = true
   try {
     const res = await $fetch<{ opeNo: string, startOpe: string, workRows: WorkRow[], eventOptions: WorkEventOption[] }>('/daily-report-api/work', {
@@ -645,7 +652,6 @@ async function openWorkModal(row: DailyReportRow) {
     })
     workRows.value = res.workRows
     workEventOptions.value = res.eventOptions
-    syncWorkEditForm()
   }
   catch (e) {
     if (dailyReportErrorStatus(e) === 401) {
@@ -667,28 +673,23 @@ function closeWorkModal() {
   workEventOptions.value = []
   workError.value = null
   workRecalculateResult.value = null
+  workEditing.value = null
 }
 
-async function saveWorkRowEdit(ctrlIndex: number) {
+/** 行の「編集」— theearth の鉛筆ボタン相当。編集モードの現在値 (フル形式の日時) が返る。 */
+async function startWorkEdit(row: WorkRow) {
   const s = session.value
   const target = workSelectedRow.value
-  const edited = workEditForm[ctrlIndex]
-  if (!s || !target || !edited) return
-  workSavingCtrlIndex.value = ctrlIndex
+  if (!s || !target) return
+  workEditStarting.value = row.ctrlIndex
   workError.value = null
   try {
-    const res = await $fetch<{ workRows: WorkRow[], eventOptions: WorkEventOption[] }>('/daily-report-api/work/save', {
+    const res = await $fetch<{ row: WorkEditFormRow }>('/daily-report-api/work/edit-start', {
       method: 'POST',
       headers: authHeaders(),
-      body: {
-        opeNo: target.operationNo,
-        startOpe: target.startDateTime,
-        rows: [{ ctrlIndex, ...edited }],
-      },
+      body: { opeNo: target.operationNo, startOpe: target.startDateTime, ctrlIndex: row.ctrlIndex },
     })
-    workRows.value = res.workRows
-    if (res.eventOptions.length > 0) workEventOptions.value = res.eventOptions
-    syncWorkEditForm()
+    workEditing.value = { ...res.row }
   }
   catch (e) {
     if (dailyReportErrorStatus(e) === 401) {
@@ -699,7 +700,59 @@ async function saveWorkRowEdit(ctrlIndex: number) {
     workError.value = dailyReportErrorMessage(e)
   }
   finally {
-    workSavingCtrlIndex.value = null
+    workEditStarting.value = null
+  }
+}
+
+function cancelWorkEdit() {
+  // 編集モードの viewstate は使い捨て (worker 側 storage は次の edit-start で上書きされる)
+  workEditing.value = null
+}
+
+async function saveWorkEdit() {
+  const s = session.value
+  const target = workSelectedRow.value
+  const editing = workEditing.value
+  if (!s || !target || !editing) return
+  workSaving.value = true
+  workError.value = null
+  try {
+    const res = await $fetch<{ workRows: WorkRow[], eventOptions: WorkEventOption[] }>('/daily-report-api/work/save', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: {
+        opeNo: target.operationNo,
+        startOpe: target.startDateTime,
+        ctrlIndex: editing.ctrlIndex,
+        eventCd: editing.eventCd,
+        destination: editing.destination,
+        startDateTime: editing.startDateTime,
+        endDateTime: editing.endDateTime,
+        driverType: editing.driverType,
+        startPlaceCd: editing.startPlaceCd,
+        startPlaceName: editing.startPlaceName,
+        startCityCd: editing.startCityCd,
+        startCityName: editing.startCityName,
+        endPlaceCd: editing.endPlaceCd,
+        endPlaceName: editing.endPlaceName,
+        endCityCd: editing.endCityCd,
+        endCityName: editing.endCityName,
+      },
+    })
+    workRows.value = res.workRows
+    if (res.eventOptions.length > 0) workEventOptions.value = res.eventOptions
+    workEditing.value = null
+  }
+  catch (e) {
+    if (dailyReportErrorStatus(e) === 401) {
+      expireSession(dailyReportErrorMessage(e))
+      workModalOpen.value = false
+      return
+    }
+    workError.value = dailyReportErrorMessage(e)
+  }
+  finally {
+    workSaving.value = false
   }
 }
 
@@ -1171,71 +1224,126 @@ onMounted(() => {
             <div v-else-if="workRows.length === 0" class="text-center py-8 text-gray-400">
               作業データがありません
             </div>
-            <div v-else class="space-y-4">
-              <div
-                v-for="row in workRows"
-                :key="row.ctrlIndex"
-                class="border border-gray-200 dark:border-gray-800 rounded-lg p-3 space-y-2"
-              >
+            <template v-else>
+              <!-- 作業行一覧 (表示) -->
+              <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead>
+                    <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-800">
+                      <th class="py-2 pr-3">作業</th>
+                      <th class="py-2 pr-3">開始日時</th>
+                      <th class="py-2 pr-3">終了日時</th>
+                      <th class="py-2 pr-3">作業時間</th>
+                      <th class="py-2 pr-3">運転者区分</th>
+                      <th class="py-2 pr-3">開始場所</th>
+                      <th class="py-2 pr-3">終了場所</th>
+                      <th class="py-2 pr-3" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="row in workRows"
+                      :key="row.ctrlIndex"
+                      class="border-b border-gray-100 dark:border-gray-900"
+                      :class="{ 'bg-primary-50 dark:bg-primary-950': workEditing?.ctrlIndex === row.ctrlIndex }"
+                    >
+                      <td class="py-2 pr-3 whitespace-nowrap">
+                        {{ row.eventCd }} {{ row.eventName }}
+                      </td>
+                      <td class="py-2 pr-3 whitespace-nowrap">
+                        {{ row.startDateTime }}
+                      </td>
+                      <td class="py-2 pr-3 whitespace-nowrap">
+                        {{ row.endDateTime }}
+                      </td>
+                      <td class="py-2 pr-3 whitespace-nowrap">
+                        {{ row.eventMin }}
+                      </td>
+                      <td class="py-2 pr-3">
+                        {{ row.driverType }}
+                      </td>
+                      <td class="py-2 pr-3">
+                        {{ row.startPlaceName || row.startPlaceCd || '-' }}
+                      </td>
+                      <td class="py-2 pr-3">
+                        {{ row.endPlaceName || row.endPlaceCd || '-' }}
+                      </td>
+                      <td class="py-2 pr-3 text-right whitespace-nowrap">
+                        <UButton
+                          size="xs"
+                          variant="outline"
+                          icon="i-lucide-pencil"
+                          label="編集"
+                          :loading="workEditStarting === row.ctrlIndex"
+                          :disabled="workEditing !== null && workEditing.ctrlIndex !== row.ctrlIndex"
+                          @click="startWorkEdit(row)"
+                        />
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <!-- 編集フォーム (theearth の鉛筆 → 編集モードに対応) -->
+              <div v-if="workEditing" class="border border-primary-300 dark:border-primary-800 rounded-lg p-3 space-y-2">
+                <p class="text-sm font-semibold">
+                  行の編集 (日時は "YYYY/MM/DD HH:mm:ss" 形式)
+                </p>
                 <div class="grid grid-cols-2 sm:grid-cols-6 gap-2">
                   <UFormField label="作業種別" class="col-span-2">
                     <USelect
                       v-if="workEventSelectItems.length > 0"
-                      v-model="workEditForm[row.ctrlIndex]!.eventCd"
+                      v-model="workEditing.eventCd"
                       :items="workEventSelectItems"
                       class="w-full"
                     />
-                    <UInput v-else v-model="workEditForm[row.ctrlIndex]!.eventCd" class="w-full" />
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 truncate">
-                      現在: {{ row.eventName || row.eventCd || '—' }}
-                    </p>
+                    <UInput v-else v-model="workEditing.eventCd" class="w-full" />
                   </UFormField>
                   <UFormField label="開始日時" class="col-span-2">
-                    <UInput v-model="workEditForm[row.ctrlIndex]!.startDateTime" class="w-full" />
+                    <UInput v-model="workEditing.startDateTime" class="w-full" />
                   </UFormField>
                   <UFormField label="終了日時" class="col-span-2">
-                    <UInput v-model="workEditForm[row.ctrlIndex]!.endDateTime" class="w-full" />
+                    <UInput v-model="workEditing.endDateTime" class="w-full" />
                   </UFormField>
                   <UFormField label="運転者区分">
-                    <UInput v-model="workEditForm[row.ctrlIndex]!.driverType" class="w-full" />
+                    <UInput v-model="workEditing.driverType" class="w-full" />
+                  </UFormField>
+                  <UFormField label="行先">
+                    <UCheckbox v-model="workEditing.destination" label="行先" />
                   </UFormField>
                 </div>
                 <div class="grid grid-cols-2 sm:grid-cols-8 gap-2">
                   <UFormField label="開始場所CD">
-                    <UInput v-model="workEditForm[row.ctrlIndex]!.startPlaceCd" class="w-full" />
+                    <UInput v-model="workEditing.startPlaceCd" class="w-full" />
                   </UFormField>
                   <UFormField label="開始場所名">
-                    <UInput v-model="workEditForm[row.ctrlIndex]!.startPlaceName" class="w-full" />
+                    <UInput v-model="workEditing.startPlaceName" class="w-full" />
                   </UFormField>
                   <UFormField label="開始市町村CD">
-                    <UInput v-model="workEditForm[row.ctrlIndex]!.startCityCd" class="w-full" />
+                    <UInput v-model="workEditing.startCityCd" class="w-full" />
                   </UFormField>
                   <UFormField label="開始市町村名">
-                    <UInput v-model="workEditForm[row.ctrlIndex]!.startCityName" class="w-full" />
+                    <UInput v-model="workEditing.startCityName" class="w-full" />
                   </UFormField>
                   <UFormField label="終了場所CD">
-                    <UInput v-model="workEditForm[row.ctrlIndex]!.endPlaceCd" class="w-full" />
+                    <UInput v-model="workEditing.endPlaceCd" class="w-full" />
                   </UFormField>
                   <UFormField label="終了場所名">
-                    <UInput v-model="workEditForm[row.ctrlIndex]!.endPlaceName" class="w-full" />
+                    <UInput v-model="workEditing.endPlaceName" class="w-full" />
                   </UFormField>
                   <UFormField label="終了市町村CD">
-                    <UInput v-model="workEditForm[row.ctrlIndex]!.endCityCd" class="w-full" />
+                    <UInput v-model="workEditing.endCityCd" class="w-full" />
                   </UFormField>
                   <UFormField label="終了市町村名">
-                    <UInput v-model="workEditForm[row.ctrlIndex]!.endCityName" class="w-full" />
+                    <UInput v-model="workEditing.endCityName" class="w-full" />
                   </UFormField>
                 </div>
-                <div class="flex justify-end">
-                  <UButton
-                    size="xs"
-                    label="この行を保存"
-                    :loading="workSavingCtrlIndex === row.ctrlIndex"
-                    @click="saveWorkRowEdit(row.ctrlIndex)"
-                  />
+                <div class="flex justify-end gap-2">
+                  <UButton size="xs" variant="ghost" label="キャンセル" @click="cancelWorkEdit" />
+                  <UButton size="xs" label="この行を保存" :loading="workSaving" @click="saveWorkEdit" />
                 </div>
               </div>
-            </div>
+            </template>
 
             <div v-if="workError" class="text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
               {{ workError }}
