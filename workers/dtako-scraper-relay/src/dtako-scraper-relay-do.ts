@@ -82,14 +82,14 @@ import {
   downloadEditedZip,
   downloadOperationCsvZip,
   getExpenseForm,
-  getReviseForm,
+  getReviseFormPage,
   getWorkForm,
   harvestDailyReport,
   recalculateExpense,
   recalculateWork,
   startSystemLink,
   ReportParamError,
-  saveDriver,
+  saveDriverFromPage,
   saveFuelRow,
   saveWorkRows,
   unlockOperation,
@@ -154,6 +154,23 @@ const DVR_SESSION_KEY = "dvr:session";
  * (DO instance も `report-{comp}:{userB64}` で分離、routing は
  * ./report-session.ts)、DVR_SESSION_KEY とは別 key を使う。 */
 const REPORT_SESSION_KEY = "report:session";
+
+/** F-DES1011 (運行データ修正) の取得時ページ HTML を置く DO storage キー。
+ * F-DES1011 は最初の URL 直接 GET でだけ運行データがロードされる (2 回目の
+ * GET は初期値が空。staging 実機 2026-07-10、Refs #171) ため、フォーム取得時の
+ * ページを保存して登録 postback で再利用する (実ブラウザと同じ「開いたページ
+ * から送信」を再現する)。 */
+const REPORT_REVISE_PAGE_KEY = "report:revise-page";
+
+/** 取得時ページの有効期限。theearth 側セッション/viewstate の寿命より十分短く。 */
+const REPORT_REVISE_PAGE_TTL_MS = 15 * 60_000;
+
+interface RevisePageRecord {
+  opeNo: string;
+  startOpe: string;
+  html: string;
+  savedAt: number;
+}
 
 function dvrJsonError(status: number, message: string): Response {
   return Response.json({ error: message }, { status });
@@ -1399,6 +1416,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/daily-report-api/revise/save" && request.method === "POST") {
       return this.handleReportReviseSave(record!, request);
     }
+    if (url.pathname === "/daily-report-api/masters" && request.method === "GET") {
+      return this.handleReportMasters(record!);
+    }
     return dvrJsonError(404, "Not Found");
   }
 
@@ -1678,16 +1698,29 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /** GET /daily-report-api/revise?opeNo=&startOpe= — F-DES1011 乗務員CD 等の現在値
-   * (Refs #171)。 */
+   * (Refs #171)。取得時のページ HTML を DO storage に保存し、登録 postback で
+   * 再利用する (F-DES1011 は最初の GET でだけ運行データがロードされるため、
+   * 登録時に fresh GET し直すと初期値が空で返る。staging 実機 2026-07-10)。 */
   private handleReportReviseForm(record: ReportSessionRecord, url: URL): Promise<Response> {
     const opeNo = url.searchParams.get("opeNo") ?? "";
     const startOpe = url.searchParams.get("startOpe") ?? "";
-    return this.callReportAction(record, "運行データ修正フォームの取得", (jar) => getReviseForm(jar, opeNo, startOpe));
+    return this.callReportAction(record, "運行データ修正フォームの取得", async (jar) => {
+      const { form, pageHtml } = await getReviseFormPage(jar, opeNo, startOpe);
+      await this.ctx.storage.put<RevisePageRecord>(REPORT_REVISE_PAGE_KEY, {
+        opeNo,
+        startOpe,
+        html: pageHtml,
+        savedAt: Date.now(),
+      });
+      return form;
+    });
   }
 
   /** POST /daily-report-api/revise/save — `btnReg` postback で乗務員CD を登録する
-   * (body は `{opeNo, startOpe, driver1}`、Refs #171)。フォーム初期値が空 (JS
-   * PageLoad 依存) の場合は theearth-report-client 側が loud fail する。 */
+   * (body は `{opeNo, startOpe, driver1}`、Refs #171)。postback には
+   * handleReportReviseForm が保存した取得時ページを使う。無い/古い/別運行の
+   * 場合はフォームの開き直しを促す (fresh GET へのフォールバックはしない —
+   * 初期値が空のページを送って既存データを消す事故を防ぐ)。 */
   private async handleReportReviseSave(record: ReportSessionRecord, request: Request): Promise<Response> {
     let body: { opeNo?: unknown; startOpe?: unknown; driver1?: unknown };
     try {
@@ -1698,7 +1731,28 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const opeNo = typeof body.opeNo === "string" ? body.opeNo : "";
     const startOpe = typeof body.startOpe === "string" ? body.startOpe : "";
     const driver1 = typeof body.driver1 === "string" ? body.driver1 : "";
-    return this.callReportAction(record, "乗務員の登録", (jar) => saveDriver(jar, { opeNo, startOpe, driver1 }));
+
+    const page = await this.ctx.storage.get<RevisePageRecord>(REPORT_REVISE_PAGE_KEY);
+    if (!page || page.opeNo !== opeNo || page.startOpe !== startOpe) {
+      return dvrJsonError(409, "運行データ修正フォームの取得情報がありません — モーダルを開き直してください");
+    }
+    if (Date.now() - page.savedAt > REPORT_REVISE_PAGE_TTL_MS) {
+      await this.ctx.storage.delete(REPORT_REVISE_PAGE_KEY);
+      return dvrJsonError(409, "運行データ修正フォームの取得から時間が経ちすぎています — モーダルを開き直してください");
+    }
+    return this.callReportAction(record, "乗務員の登録", async (jar) => {
+      const result = await saveDriverFromPage(jar, page.html, { opeNo, startOpe, driver1 });
+      // 使用済み viewstate は再利用しない (二重送信・stale postback 防止)。
+      await this.ctx.storage.delete(REPORT_REVISE_PAGE_KEY);
+      return result;
+    });
+  }
+
+  /** GET /daily-report-api/masters — 事業所/車輌/乗務員マスタ (VenusBridge
+   * `Request_NetDvrFuncInitValue`、/dvr-api/masters と同一実装)。乗務員CD →
+   * 名称の live 解決と検索フォーム用 (Refs #171)。 */
+  private handleReportMasters(record: ReportSessionRecord): Promise<Response> {
+    return this.callReportAction(record, "マスタの取得", (jar) => getDvrMasters(jar));
   }
 
   /** `/scraper-zip/:compId/:requestId` — 1回だけ取得できる zip ダウンロード。 */

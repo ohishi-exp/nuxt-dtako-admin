@@ -22,8 +22,10 @@
  *   存在・field id は実機確認済みだが、保存成功時の成功シグナルは未確認)
  * - F-DES1013 (作業入力) の lstWork 実フィールド形式・`btnRegist1` 応答の遷移先・
  *   intxt (内部日時) の実フォーマット (Refs #170、`saveWorkRows` の doc comment 参照)
- * - F-DES1011 (運行データ修正) のフォーム初期値の充填経路 (JS PageLoad 依存とされる。
- *   Refs #171、`saveDriver` は初期値が空のとき登録を拒否する設計)
+ * - F-DES1011 (運行データ修正) は**最初の URL 直接 GET でだけ**運行データが
+ *   ロードされる (2 回目以降の GET は初期値が空。staging 実機 2026-07-10 確認、
+ *   Refs #171)。`saveDriverFromPage` は取得時ページの再利用が前提で、初期値が
+ *   空のときは登録を拒否する設計
  * これらは「黙って200」を避けるため、期待した要素/文言が見つからない場合は必ず
  * TheearthClientError (または派生) を throw する設計にしてある。実運用で構造が
  * 違えば早期に loud fail するので、staging 実機確認で修正する。
@@ -1800,19 +1802,27 @@ export interface ReviseForm {
   /** 車両CD (txtVehicle) / 事業所CD (txtBranch)、表示用。 */
   vehicle: string;
   branch: string;
-  /** フォームにサーバー描画の初期値が入っているか。false の場合 `saveDriver` は
-   * 既存データを空で上書きしないよう登録を拒否する (loud fail)。 */
+  /** フォームにサーバー描画の初期値が入っているか。false の場合
+   * `saveDriverFromPage` は既存データを空で上書きしないよう登録を拒否する
+   * (loud fail)。 */
   formFilled: boolean;
 }
 
-/** GET F-DES1011 — 乗務員CD 等の現在値を取得する (編集フォームの初期表示用)。 */
-export async function getReviseForm(
+/** GET F-DES1011 — 乗務員CD 等の現在値と**取得時のページ HTML** を返す。
+ *
+ * ページ HTML を呼び出し元 (DO) が保存して `saveDriverFromPage` に渡す設計に
+ * している。staging 実機 (2026-07-10) で「モーダルを開いた直後の GET は値が
+ * 入っているのに、登録時にもう一度 GET すると初期値が空で返る」ことを確認した —
+ * F-DES1011 の code-behind は最初の URL 直接 GET でだけ運行データをロードする
+ * (排他ロック取得を伴うとみられる) ため、実ブラウザと同じく**最初に取得した
+ * ページの viewstate からそのまま postback する**必要がある。 */
+export async function getReviseFormPage(
   jar: CookieJar,
   opeNo: string,
   startOpe: string,
   fetchImpl: FetchLike = fetch,
   timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
-): Promise<ReviseForm> {
+): Promise<{ form: ReviseForm; pageHtml: string }> {
   validateOpeNo(opeNo);
   validateStartOpe(startOpe);
   const url = buildOperationReviseUrl(opeNo, startOpe);
@@ -1824,13 +1834,28 @@ export async function getReviseForm(
     );
   }
   return {
-    opeNo,
-    startOpe,
-    driver1: driverField.value,
-    vehicle: findFormFieldById(pageHtml, "txtVehicle")?.value ?? "",
-    branch: findFormFieldById(pageHtml, "txtBranch")?.value ?? "",
-    formFilled: reviseFormLooksFilled(pageHtml),
+    form: {
+      opeNo,
+      startOpe,
+      driver1: driverField.value,
+      vehicle: findFormFieldById(pageHtml, "txtVehicle")?.value ?? "",
+      branch: findFormFieldById(pageHtml, "txtBranch")?.value ?? "",
+      formFilled: reviseFormLooksFilled(pageHtml),
+    },
+    pageHtml,
   };
+}
+
+/** GET F-DES1011 — 乗務員CD 等の現在値のみ (frontend 応答用の薄い wrapper)。 */
+export async function getReviseForm(
+  jar: CookieJar,
+  opeNo: string,
+  startOpe: string,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<ReviseForm> {
+  const { form } = await getReviseFormPage(jar, opeNo, startOpe, fetchImpl, timeoutMs);
+  return form;
 }
 
 const DRIVER_CD_RE = /^\d{1,8}$/;
@@ -1848,12 +1873,22 @@ export interface SaveDriverResult {
 }
 
 /** POST 相当: F-DES1011 の乗務員CD (`txtDriver1`) を変更して `btnReg` (登録)
- * postback で保存する。**フォームの初期値が空 (JS PageLoad 依存、SKILL.md) の
- * 場合は登録せず loud fail する** — 空フォームを丸ごと送ると既存の運行データを
- * 空で上書きする恐れがあるため。staging 実機でサーバー描画の実挙動を確認して
- * から必要なら埋め方を実装する (推測で送らない、Refs #188 の教訓)。 */
-export async function saveDriver(
+ * postback で保存する。
+ *
+ * **`pageHtml` には `getReviseFormPage` が取得したページをそのまま渡すこと**
+ * (呼び出し元 DO が storage に保持している)。登録時に fresh GET し直す設計は
+ * 使えない — staging 実機 (2026-07-10、Refs #171) で「モーダルを開いた直後の
+ * GET は値が入っているのに、登録直前にもう一度 GET すると初期値が空で返る」
+ * ことを確認した。F-DES1011 の code-behind は最初の URL 直接 GET でだけ運行
+ * データをロードするため、実ブラウザと同じく最初に取得したページの viewstate
+ * からそのまま postback する。
+ *
+ * **フォームの初期値が空の場合は登録せず loud fail する** — 空フォームを
+ * 丸ごと送ると既存の運行データを空で上書きする恐れがあるため (Refs #188 の
+ * 「推測で送らない」教訓)。 */
+export async function saveDriverFromPage(
   jar: CookieJar,
+  pageHtml: string,
   params: SaveDriverParams,
   fetchImpl: FetchLike = fetch,
   timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
@@ -1864,7 +1899,6 @@ export async function saveDriver(
     throw new ReportParamError(`乗務員CD は8桁以内の数値で指定してください: "${params.driver1}"`);
   }
   const url = buildOperationReviseUrl(params.opeNo, params.startOpe);
-  const pageHtml = await fetchEditPageHtml(jar, url, "運行データ修正ページ", fetchImpl, timeoutMs);
 
   const driverField = findFormFieldById(pageHtml, "txtDriver1");
   if (!driverField) {
@@ -1880,9 +1914,8 @@ export async function saveDriver(
   }
   if (!reviseFormLooksFilled(pageHtml)) {
     throw new TheearthClientError(
-      "運行データ修正ページの初期値が空のため登録を中止しました — F-DES1011 は JS (PageLoad) が" +
-        "フォームを埋める設計 (実機確認済み) のため、空のまま登録すると既存の運行データを空で" +
-        "上書きする恐れがあります。cdp-pair で実ブラウザのフォーム充填手順を確認してください",
+      "運行データ修正フォームの初期値が空のため登録を中止しました (既存の運行データを空で" +
+        "上書きしないための保護) — モーダルを開き直してからやり直してください",
     );
   }
 
