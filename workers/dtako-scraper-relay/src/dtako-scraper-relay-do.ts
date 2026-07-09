@@ -83,6 +83,7 @@ import {
   getExpenseForm,
   harvestDailyReport,
   recalculateExpense,
+  startSystemLink,
   ReportParamError,
   saveFuelRow,
   unlockOperation,
@@ -1367,6 +1368,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/daily-report-api/expense/recalculate" && request.method === "POST") {
       return this.handleReportExpenseRecalculate(record!, request);
     }
+    if (url.pathname === "/daily-report-api/expense/link-sys" && request.method === "POST") {
+      return this.handleReportSystemLink(record!, request);
+    }
     if (url.pathname === "/daily-report-api/zip" && request.method === "GET") {
       return this.handleReportZip(record!, url);
     }
@@ -1533,6 +1537,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const opeNo = typeof body.opeNo === "string" ? body.opeNo : "";
     const startOpe = typeof body.startOpe === "string" ? body.startOpe : "";
     return this.callReportAction(record, "評価点再集計", (jar) => recalculateExpense(jar, opeNo, startOpe));
+  }
+
+  /** POST /daily-report-api/expense/link-sys — `btnScore` (再集計) → `btnLinkSys`
+   * (システム連動開始) の連鎖 postback (body は `{opeNo, startOpe}`)。theearth 側に
+   * データを連動させる本番アクション。成功シグナル観測のため worker 側で log を厚く出す。 */
+  private async handleReportSystemLink(record: ReportSessionRecord, request: Request): Promise<Response> {
+    let body: { opeNo?: unknown; startOpe?: unknown };
+    try {
+      body = (await request.json()) as { opeNo?: unknown; startOpe?: unknown };
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    const opeNo = typeof body.opeNo === "string" ? body.opeNo : "";
+    const startOpe = typeof body.startOpe === "string" ? body.startOpe : "";
+    return this.callReportAction(record, "システム連動開始", (jar) => startSystemLink(jar, opeNo, startOpe));
   }
 
   /** GET /daily-report-api/zip?from=&to= — F-NOS3010 の編集後 csvdata.zip を

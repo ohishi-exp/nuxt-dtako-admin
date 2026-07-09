@@ -225,6 +225,10 @@ const expenseError = ref<string | null>(null)
 const savingCtrlIndex = ref<number | null>(null)
 const recalculating = ref(false)
 const recalculateResult = ref<string | null>(null)
+// システム連携 (btnLinkSys): 再集計成功で有効化される
+const linkSysEnabled = ref(false)
+const linking = ref(false)
+const linkResult = ref<string | null>(null)
 
 const fuelEditForm = reactive<Record<number, { supplyCategory: string, supplyStation: string, supplyType: string, dateTime: string, quantity: string }>>({})
 
@@ -288,6 +292,8 @@ async function openExpenseModal(row: DailyReportRow) {
   expenseMasters.value = emptyExpenseMasters()
   expenseError.value = null
   recalculateResult.value = null
+  linkSysEnabled.value = false
+  linkResult.value = null
   expenseLoading.value = true
   try {
     const res = await $fetch<{ opeNo: string, startOpe: string, fuelRows: FuelRow[], masters: ExpenseMasters }>('/daily-report-api/expense', {
@@ -317,6 +323,8 @@ function closeExpenseModal() {
   fuelRows.value = []
   expenseError.value = null
   recalculateResult.value = null
+  linkSysEnabled.value = false
+  linkResult.value = null
 }
 
 async function saveFuelRow(ctrlIndex: number) {
@@ -366,6 +374,7 @@ async function recalculateExpense() {
       headers: authHeaders(),
       body: { opeNo: target.operationNo, startOpe: target.startDateTime },
     })
+    linkSysEnabled.value = res.linkSysEnabled
     recalculateResult.value = res.linkSysEnabled
       ? '評価点再集計が完了しました (システム連動開始が有効になりました)'
       : '評価点再集計が完了しました'
@@ -380,6 +389,39 @@ async function recalculateExpense() {
   }
   finally {
     recalculating.value = false
+  }
+}
+
+/** システム連動開始 (btnLinkSys)。theearth 側にデータを連動させる本番アクションのため
+ * 実行前に確認する。worker が btnScore→btnLinkSys の連鎖 postback を行う。 */
+async function startSystemLink() {
+  const s = session.value
+  const target = selectedRow.value
+  if (!s || !target) return
+  if (!window.confirm('システム連動開始 (theearth へのデータ連動) を実行します。よろしいですか?')) return
+  linking.value = true
+  expenseError.value = null
+  linkResult.value = null
+  try {
+    const res = await $fetch<{ linked: boolean, message: string }>('/daily-report-api/expense/link-sys', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: { opeNo: target.operationNo, startOpe: target.startDateTime },
+    })
+    linkResult.value = res.linked
+      ? 'システム連動を開始しました'
+      : `システム連動を実行しました (応答: ${res.message || '確認要'})`
+  }
+  catch (e) {
+    if (dailyReportErrorStatus(e) === 401) {
+      expireSession(dailyReportErrorMessage(e))
+      expenseModalOpen.value = false
+      return
+    }
+    expenseError.value = dailyReportErrorMessage(e)
+  }
+  finally {
+    linking.value = false
   }
 }
 
@@ -605,15 +647,30 @@ onMounted(() => {
             <div v-if="recalculateResult" class="text-sm text-green-700 bg-green-50 dark:bg-green-950 dark:text-green-300 rounded-lg p-3">
               {{ recalculateResult }}
             </div>
+            <div v-if="linkResult" class="text-sm text-blue-700 bg-blue-50 dark:bg-blue-950 dark:text-blue-300 rounded-lg p-3">
+              {{ linkResult }}
+            </div>
 
             <div class="flex justify-between items-center pt-2 border-t border-gray-200 dark:border-gray-800">
-              <UButton
-                icon="i-lucide-calculator"
-                label="評価点再集計"
-                variant="outline"
-                :loading="recalculating"
-                @click="recalculateExpense"
-              />
+              <div class="flex gap-2">
+                <UButton
+                  icon="i-lucide-calculator"
+                  label="評価点再集計"
+                  variant="outline"
+                  :loading="recalculating"
+                  @click="recalculateExpense"
+                />
+                <UButton
+                  icon="i-lucide-link"
+                  label="システム連携"
+                  color="error"
+                  variant="outline"
+                  :disabled="!linkSysEnabled"
+                  :loading="linking"
+                  title="評価点再集計の成功後に有効化されます (theearth へデータ連動)"
+                  @click="startSystemLink"
+                />
+              </div>
               <UButton label="閉じる" variant="ghost" @click="closeExpenseModal" />
             </div>
           </div>

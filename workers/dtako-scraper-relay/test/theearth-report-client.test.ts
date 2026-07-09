@@ -6,6 +6,7 @@ import {
   harvestDailyReport,
   parseExpenseMasters,
   recalculateExpense,
+  startSystemLink,
   ReportParamError,
   saveFuelRow,
   unlockOperation,
@@ -571,6 +572,123 @@ describe("recalculateExpense", () => {
     const jar = createCookieJar();
     const fetchImpl = sequenceFetch([html(expenseFormHtml({ rows: 1 })), html(expenseFormHtml({ rows: 1 }))]);
     await expect(recalculateExpense(jar, OPE_NO, START_OPE, fetchImpl)).rejects.toThrow(/再集計が終了しました/);
+  });
+});
+
+describe("startSystemLink", () => {
+  // btnLinkSys postback (連動) の応答。conflict / 成功文言有無 / btnLinkSys の value を制御。
+  const linkResponseHtml = (v: { linkedMsg?: boolean; conflict?: boolean } = {}): string =>
+    `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-LINK" />
+      ${v.conflict ? "他ユーザー編集中のため処理を中止しました。" : ""}
+      ${v.linkedMsg === false ? "" : "<div>システム連動を開始しました。</div>"}
+    </form></body></html>`;
+  // btnScore postback 後の応答 (再集計完了 + btnLinkSys enable、value 制御可)。
+  const recalcedHtml = (v: { linkSysValue?: string } = {}): string =>
+    `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-EDIT" />
+      <input type="submit" id="btnScore" name="btnScore" value="評価点再集計" />
+      <input type="submit" id="btnLinkSys" name="btnLinkSys" value="${v.linkSysValue ?? "システム連動開始"}" class="ButtonCrimson" />
+      再集計が終了しました。
+    </form></body></html>`;
+
+  it("recalc → btnLinkSys 連鎖で連動し linked=true を返す", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([
+      html(expenseFormHtml({ rows: 1 })),
+      html(recalcedHtml()),
+      html(linkResponseHtml({ linkedMsg: true })),
+    ]);
+    const res = await startSystemLink(jar, OPE_NO, START_OPE, fetchImpl);
+    expect(res).toMatchObject({ linked: true, recalcConfirmed: true, linkSysWasEnabled: true });
+  });
+
+  it("連動応答に成功文言が無ければ linked=false + message を返す", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([
+      html(expenseFormHtml({ rows: 1 })),
+      html(recalcedHtml({ linkSysValue: "" })), // btnLinkSys value 空 → ラベル fallback を通す
+      html(linkResponseHtml({ linkedMsg: false })),
+    ]);
+    const res = await startSystemLink(jar, OPE_NO, START_OPE, fetchImpl);
+    expect(res.linked).toBe(false);
+  });
+
+  it("btnScore の value 無しでもラベル fallback で連鎖する", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([
+      html(expenseFormHtml({ rows: 1, scoreButtonNoValue: true })),
+      html(recalcedHtml()),
+      html(linkResponseHtml({ linkedMsg: true })),
+    ]);
+    const res = await startSystemLink(jar, OPE_NO, START_OPE, fetchImpl);
+    expect(res.linked).toBe(true);
+  });
+
+  it("rejects malformed OpeNo / StartOpe", async () => {
+    const jar = createCookieJar();
+    await expect(startSystemLink(jar, "bad", START_OPE)).rejects.toThrow(ReportParamError);
+    await expect(startSystemLink(jar, OPE_NO, "bad")).rejects.toThrow(ReportParamError);
+  });
+
+  it("throws on non-ok GET / login redirect on GET", async () => {
+    const jar1 = createCookieJar();
+    await expect(startSystemLink(jar1, OPE_NO, START_OPE, sequenceFetch([status(500)]))).rejects.toThrow(TheearthClientError);
+    const jar2 = createCookieJar();
+    await expect(
+      startSystemLink(jar2, OPE_NO, START_OPE, sequenceFetch([html(LOGIN_REDIRECT_HTML)])),
+    ).rejects.toThrow(VenusSessionExpiredError);
+  });
+
+  it("throws when btnScore is missing", async () => {
+    const jar = createCookieJar();
+    const noScoreHtml = `<html><body><form><input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" /></form></body></html>`;
+    await expect(startSystemLink(jar, OPE_NO, START_OPE, sequenceFetch([html(noScoreHtml)]))).rejects.toThrow(TheearthClientError);
+  });
+
+  it("throws when the recalc completion message is missing (連動の前提)", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([html(expenseFormHtml({ rows: 1 })), html(expenseFormHtml({ rows: 1 }))]);
+    await expect(startSystemLink(jar, OPE_NO, START_OPE, fetchImpl)).rejects.toThrow(/再集計/);
+  });
+
+  it("throws when btnLinkSys is absent after recalc", async () => {
+    const jar = createCookieJar();
+    const noLinkSysHtml = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" />
+      <input type="submit" id="btnScore" name="btnScore" value="評価点再集計" />
+      再集計が終了しました。
+    </form></body></html>`;
+    await expect(
+      startSystemLink(jar, OPE_NO, START_OPE, sequenceFetch([html(expenseFormHtml({ rows: 1 })), html(noLinkSysHtml)])),
+    ).rejects.toThrow(/btnLinkSys|見つかりません/);
+  });
+
+  it("throws when btnLinkSys is still disabled after recalc", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([
+      html(expenseFormHtml({ rows: 1 })),
+      html(expenseFormHtml({ rows: 1, linkSysDisabled: true, recalculated: true })),
+    ]);
+    await expect(startSystemLink(jar, OPE_NO, START_OPE, fetchImpl)).rejects.toThrow(/有効になりませんでした/);
+  });
+
+  it("throws on concurrent-edit conflict during recalc", async () => {
+    const jar = createCookieJar();
+    const conflictHtml = `<html><body>他ユーザー編集中のため処理を中止しました。</body></html>`;
+    await expect(
+      startSystemLink(jar, OPE_NO, START_OPE, sequenceFetch([html(expenseFormHtml({ rows: 1 })), html(conflictHtml)])),
+    ).rejects.toThrow(/編集中のため/);
+  });
+
+  it("throws on concurrent-edit conflict during link postback", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([
+      html(expenseFormHtml({ rows: 1 })),
+      html(recalcedHtml()),
+      html(linkResponseHtml({ conflict: true })),
+    ]);
+    await expect(startSystemLink(jar, OPE_NO, START_OPE, fetchImpl)).rejects.toThrow(/編集中のため/);
   });
 });
 

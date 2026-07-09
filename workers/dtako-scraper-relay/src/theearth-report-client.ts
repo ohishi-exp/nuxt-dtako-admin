@@ -512,6 +512,95 @@ export async function recalculateExpense(
   return { linkSysEnabled };
 }
 
+export interface StartSystemLinkResult {
+  /** 連動が成功したと判定できたか (成功シグナルは未確定のため保守的判定、Refs #199)。 */
+  linked: boolean;
+  /** 前提の再集計 (btnScore) 完了を確認できたか。 */
+  recalcConfirmed: boolean;
+  /** 再集計後に btnLinkSys が enable されたか。 */
+  linkSysWasEnabled: boolean;
+  /** 連動 postback 応答のタグ除去テキスト先頭 (成功シグナル観測用、UI 表示にも使う)。 */
+  message: string;
+}
+
+/** システム連動開始 (btnLinkSys)。skill (theearth-venus) の順序依存に従い、まず
+ * `btnScore` (再集計) → その応答で `btnLinkSys` が disabled→enabled になる → その
+ * viewstate で `btnLinkSys` postback、の連鎖で実行する。**theearth 側にデータを連動
+ * させる本番アクション**。連動完了の成功シグナルは skill 未記載のため、各段階の状態と
+ * 応答本文を log に厚く出して実機で観測できるようにする (判定は後で確定、Refs #199)。 */
+export async function startSystemLink(
+  jar: CookieJar,
+  opeNo: string,
+  startOpe: string,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<StartSystemLinkResult> {
+  validateOpeNo(opeNo);
+  validateStartOpe(startOpe);
+  const url = buildOperationExpenseUrl(opeNo, startOpe);
+  console.log(`[link-sys] start opeNo=${opeNo} startOpe=${startOpe}`);
+
+  // 1. GET (最新 viewstate 取得)
+  const getRes = await fetchWithJar(jar, url, { method: "GET" }, fetchImpl, timeoutMs);
+  console.log(`[link-sys] GET status=${getRes.status}`);
+  if (!getRes.ok) {
+    throw new TheearthClientError(`経費入力ページの取得が HTTP ${getRes.status} を返しました`);
+  }
+  const html = await getRes.text();
+  if (isLoginRedirect(html)) {
+    throw new VenusSessionExpiredError(
+      "経費入力ページがログイン画面を返しました — theearth セッションが切れています",
+    );
+  }
+
+  // 2. 再集計 (btnScore) — システム連動の前提 (順序依存、skill 確定)
+  const scoreButton = findFormFieldById(html, "btnScore");
+  if (!scoreButton) {
+    throw new TheearthClientError("評価点再集計ボタン (btnScore) が見つかりません — 連動の前提が満たせません");
+  }
+  console.log(`[link-sys] POST btnScore name=${scoreButton.name}`);
+  const recalcHtml = await postButton(
+    jar, url, html, scoreButton.name, scoreButton.value || "評価点再集計", fetchImpl, timeoutMs,
+  );
+  assertNoOtherEditConflict(recalcHtml, "システム連動の前提となる再集計");
+  const recalcConfirmed = recalcHtml.includes("再集計が終了しました");
+  console.log(`[link-sys] recalc confirmed=${recalcConfirmed}`);
+  if (!recalcConfirmed) {
+    throw new TheearthClientError(
+      "再集計の完了メッセージ (「再集計が終了しました。」) が確認できませんでした — システム連動の前提が満たせません",
+    );
+  }
+
+  // 3. btnLinkSys が enable されたか (aspNetDisabled class の有無で判定、skill 確定)
+  const linkSysTag = findTagById(recalcHtml, "btnLinkSys");
+  if (!linkSysTag) {
+    throw new TheearthClientError("システム連動開始ボタン (btnLinkSys) が見つかりません");
+  }
+  const linkSysWasEnabled = !/class=["'][^"']*aspNetDisabled/i.test(linkSysTag);
+  console.log(`[link-sys] btnLinkSys enabled=${linkSysWasEnabled} tag=${linkSysTag.slice(0, 200)}`);
+  if (!linkSysWasEnabled) {
+    throw new TheearthClientError(
+      "再集計後もシステム連動開始 (btnLinkSys) が有効になりませんでした — 連動できません",
+    );
+  }
+
+  // 4. btnLinkSys postback (システム連動開始 = 本番アクション)。tag が取れた =
+  // name も取れる (form ボタン) ので `!` で受ける。
+  const linkButton = findFormFieldById(recalcHtml, "btnLinkSys")!;
+  console.log(`[link-sys] POST btnLinkSys name=${linkButton.name} value=${linkButton.value}`);
+  const linkHtml = await postButton(
+    jar, url, recalcHtml, linkButton.name, linkButton.value || "システム連動開始", fetchImpl, timeoutMs,
+  );
+  assertNoOtherEditConflict(linkHtml, "システム連動開始");
+
+  // 5. 成功判定: 連動完了の成功シグナルは skill 未記載のため、応答本文を log に
+  // 厚く出して実機で確定する。暫定判定は「連動〜(開始|完了|終了)しました」文言の有無。
+  const message = linkHtml.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+  const linked = /連動[^。<]{0,6}(開始|完了|終了)しました/.test(linkHtml);
+  console.log(`[link-sys] done linked=${linked} message="${message}"`);
+  return { linked, recalcConfirmed, linkSysWasEnabled, message };
+}
+
 // ---------------------------------------------------------------------------
 // F-DES1010 [運行データ入力(一覧)] — 編集制御解除
 // ---------------------------------------------------------------------------
