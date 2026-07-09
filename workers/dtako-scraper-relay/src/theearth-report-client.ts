@@ -318,8 +318,12 @@ async function postButton(
     // 送信した非 hidden フィールド (etxt 値等) も log に出す。theearth の
     // FormatException がどの入力値で起きたか (例: dateTime の桁数/形式) を
     // 実送信値で確定するため (Refs #199)。hidden field (viewstate 等) は除く。
+    // 値は frontend 入力由来なので改行/制御文字を escape + 長さ制限して log
+    // injection を防ぐ (偽の log 行注入対策)。
+    const sanitize = (s: string) =>
+      s.replace(/\r/g, "\\r").replace(/\n/g, "\\n").replace(/\t/g, "\\t").slice(0, 100);
     const sent = Object.entries(extra)
-      .map(([k, v]) => `${k}=${v}`)
+      .map(([k, v]) => `${k}=${sanitize(v)}`)
       .join(", ");
     console.error(
       `theearth postback failed: HTTP ${postRes.status} button=${buttonName}` +
