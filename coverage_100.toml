@@ -47,3 +47,19 @@ branches = true
 [[files]]
 path = "server/api/poi/[region].get.ts"
 branches = true
+
+[[files]]
+path = "app/utils/tariff/calc.ts"
+branches = true
+
+[[files]]
+path = "app/utils/tariff/types.ts"
+branches = true
+
+[[files]]
+path = "app/utils/tariff/data/kyushu.ts"
+branches = true
+
+[[files]]
+path = "app/utils/tariff/data/common.ts"
+branches = true
