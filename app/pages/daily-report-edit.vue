@@ -1293,9 +1293,7 @@ onMounted(() => {
                     <td class="py-1 pr-2 text-right whitespace-nowrap">
                       <UButton
                         size="xs"
-                        variant="outline"
-                        icon="i-lucide-plus"
-                        label="追加"
+                        label="保存"
                         :loading="addingFuelRow"
                         @click="addNewFuelRow"
                       />
