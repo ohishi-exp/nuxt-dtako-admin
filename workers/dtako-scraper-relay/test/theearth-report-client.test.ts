@@ -4,7 +4,7 @@ import {
   downloadOperationCsvZip,
   addFuelRow,
   extractLstFuelTextInputs,
-  extractLstWorkPostFields,
+  findEnclosingUpdatePanelId,
   getExpenseForm,
   getReviseForm,
   getReviseFormPage,
@@ -1974,14 +1974,30 @@ function workFormHtml(opts: {
 } = {}): string {
   const rows = opts.rows ?? [workDisplayRowHtml(0), workDisplayRowHtml(1, { eventCd: "202", eventName: "積み" })];
   const linkSysClass = opts.linkSysDisabled === false ? "ButtonCrimson" : "aspNetDisabled ButtonCrimson";
+  // lstWork は UpdatePanel1 内 (findEnclosingUpdatePanelId が UniqueID を拾えるように)。
   return `<html><body><form>
     <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-WORK" />
+    <input type="hidden" id="__EVENTVALIDATION" name="__EVENTVALIDATION" value="EV-WORK" />
+    <div id="UpdatePanel1">
     ${rows.join("\n")}
     ${opts.template === false ? "" : workTemplateRowHtml(rows.length)}
+    </div>
     ${opts.scoreButton === false ? "" : '<input type="submit" id="btnScore" name="btnScore" value="作業時間再集計" />'}
     <input type="submit" id="btnLinkSys" name="btnLinkSys" value="システム連動開始" class="${linkSysClass}" />
     ${opts.recalculated ? "<div>再集計が終了しました。</div>" : ""}
   </form></body></html>`;
+}
+
+/** HTML を MS AJAX delta 応答形式にラップする (async postback のモック応答用)。
+ * updatePanel セグメント + hidden field セグメントを含める。 */
+function workDelta(panelHtml: string, hidden: Record<string, string> = { __VIEWSTATE: "VS-EDIT", __EVENTVALIDATION: "EV-EDIT" }): string {
+  const hiddenSegs = Object.entries(hidden).map(([k, v]) => `${v.length}|hiddenField|${k}|${v}|`).join("");
+  return `${panelHtml.length}|updatePanel|UpdatePanel1|${panelHtml}|${hiddenSegs}`;
+}
+
+/** 編集モード delta (対象行が編集モードの updatePanel HTML)。 */
+function workEditDelta(i: number, v: Parameters<typeof workEditModeHtml>[1] = {}): string {
+  return workDelta(workEditModeHtml(i, v));
 }
 
 /** ロック中運行への GET 応答 (lstWork 無しの空ページ + CloseMsg、実機確認 2026-07-10)。 */
@@ -2159,11 +2175,16 @@ describe("getWorkForm", () => {
   });
 });
 
+/** startWorkRowEdit が返す envelope (JSON) を直接組み立てる (saveWorkRowFromPage 用)。 */
+function workEnvelope(i: number, v: Parameters<typeof workEditModeHtml>[1] = {}, hidden: Record<string, string> = { __VIEWSTATE: "VS-EDIT", __EVENTVALIDATION: "EV-EDIT" }): string {
+  return JSON.stringify({ v: 2, panelId: "UpdatePanel1", hidden, delta: workDelta(workEditModeHtml(i, v)) });
+}
+
 describe("startWorkRowEdit", () => {
   const baseParams = { opeNo: OPE_NO, startOpe: START_OPE, ctrlIndex: 0 };
 
-  it("posts btnEditButton and returns the edit-mode row values (full datetimes)", async () => {
-    const fetchImpl = sequenceFetch([html(workFormHtml()), html(workEditModeHtml(0, { checkbox: "checked" }))]);
+  it("async-posts btnEditButton and returns the edit-mode row values + envelope", async () => {
+    const fetchImpl = sequenceFetch([html(workFormHtml()), html(workEditDelta(0, { checkbox: "checked" }))]);
     const jar = createCookieJar();
     const { row, editHtml } = await startWorkRowEdit(jar, baseParams, fetchImpl);
     expect(row).toMatchObject({
@@ -2180,13 +2201,29 @@ describe("startWorkRowEdit", () => {
       { value: "202", label: "積み" },
       { value: "301", label: "休憩" },
     ]);
-    expect(editHtml).toContain("VS-EDIT");
+    const env = JSON.parse(editHtml);
+    expect(env.v).toBe(2);
+    expect(env.panelId).toBe("UpdatePanel1");
+    expect(env.hidden.__VIEWSTATE).toBe("VS-EDIT"); // delta 由来の最新 hidden
+    expect(env.delta).toContain("etxtOperationNo");
+  });
+
+  it("sends btnEditButton via async postback (ScriptManager/__ASYNCPOST + all fields)", async () => {
+    const bodies: string[] = [];
+    const fetchImpl = recordingFetch([html(workFormHtml()), html(workEditDelta(0))], bodies);
+    const jar = createCookieJar();
+    await startWorkRowEdit(jar, baseParams, fetchImpl);
+    // bodies[0] は GET ではなく edit postback (GET は body 無し)。edit は 2 回目の fetch。
+    const editBody = new URLSearchParams(bodies[1]);
+    expect(editBody.get("ScriptManager")).toBe("UpdatePanel1|lstWork$ctrl0$btnEditButton");
+    expect(editBody.get("__ASYNCPOST")).toBe("true");
+    expect(editBody.get("lstWork$ctrl0$btnEditButton")).toBe("");
   });
 
   it("reports destination=false for an unchecked checkbox and falls back to etxtEventCD without the select", async () => {
     const fetchImpl = sequenceFetch([
       html(workFormHtml()),
-      html(workEditModeHtml(0, { noEventSelect: true, checkbox: "unchecked" })),
+      html(workEditDelta(0, { noEventSelect: true, checkbox: "unchecked" })),
     ]);
     const jar = createCookieJar();
     const { row } = await startWorkRowEdit(jar, baseParams, fetchImpl);
@@ -2198,7 +2235,7 @@ describe("startWorkRowEdit", () => {
   it("reports destination=false when the checkbox is missing and empty values for missing fields", async () => {
     const fetchImpl = sequenceFetch([
       html(workFormHtml()),
-      html(workEditModeHtml(0, { checkbox: "none", noDriverType: true })),
+      html(workEditDelta(0, { checkbox: "none", noDriverType: true })),
     ]);
     const jar = createCookieJar();
     const { row } = await startWorkRowEdit(jar, baseParams, fetchImpl);
@@ -2206,7 +2243,7 @@ describe("startWorkRowEdit", () => {
     expect(row.driverType).toBe("");
   });
 
-  it("throws when the operation is locked / the target row does not exist / the edit button is missing", async () => {
+  it("throws when locked / target row missing / edit button missing / UpdatePanel missing", async () => {
     const jar1 = createCookieJar();
     await expect(startWorkRowEdit(jar1, baseParams, sequenceFetch([html(WORK_LOCKED_HTML)]))).rejects.toThrow(
       /編集ロック中/,
@@ -2220,19 +2257,25 @@ describe("startWorkRowEdit", () => {
     await expect(startWorkRowEdit(jar3, baseParams, sequenceFetch([html(noEditButton)]))).rejects.toThrow(
       /btnEditButton/,
     );
+    // UpdatePanel が無いページ (div 無し) — 行だけ裸で置く
+    const jar4 = createCookieJar();
+    const noPanel = `<html><body><form><input type="hidden" name="__VIEWSTATE" value="V" />${workDisplayRowHtml(0)}</form></body></html>`;
+    await expect(startWorkRowEdit(jar4, baseParams, sequenceFetch([html(noPanel)]))).rejects.toThrow(
+      /UpdatePanel/,
+    );
   });
 
   it("throws when the update button does not appear after the edit postback", async () => {
-    const fetchImpl = sequenceFetch([html(workFormHtml()), html(workEditModeHtml(0, { updateButton: false }))]);
+    const fetchImpl = sequenceFetch([html(workFormHtml()), html(workEditDelta(0, { updateButton: false }))]);
     const jar = createCookieJar();
     await expect(startWorkRowEdit(jar, baseParams, fetchImpl)).rejects.toThrow(/btnUpdateButton/);
   });
 
   it("throws on the other-user-editing conflict message and rejects invalid params", async () => {
-    const conflictHtml = "<html><body>他ユーザー編集中のため処理を中止しました。</body></html>";
+    const conflictDelta = workDelta("<div>他ユーザー編集中のため処理を中止しました。</div>");
     const jar = createCookieJar();
     await expect(
-      startWorkRowEdit(jar, baseParams, sequenceFetch([html(workFormHtml()), html(conflictHtml)])),
+      startWorkRowEdit(jar, baseParams, sequenceFetch([html(workFormHtml()), html(conflictDelta)])),
     ).rejects.toThrow(/他ユーザー/);
     await expect(startWorkRowEdit(jar, { ...baseParams, opeNo: "x" }, sequenceFetch([]))).rejects.toThrow(
       ReportParamError,
@@ -2243,31 +2286,34 @@ describe("startWorkRowEdit", () => {
 describe("saveWorkRowFromPage", () => {
   const baseParams = { opeNo: OPE_NO, startOpe: START_OPE, ctrlIndex: 0 };
 
-  it("posts the full serialized edit page with the edited fields overlaid", async () => {
+  it("async-posts the full form (disabled incl) with eddl new / etxt original", async () => {
     const bodies: string[] = [];
     const updated = workFormHtml({ rows: [workDisplayRowHtml(0, { eventCd: "202", eventName: "積み" })] });
-    const fetchImpl = recordingFetch([html(updated)], bodies);
+    // 1) async update delta, 2) fresh GET (reread)
+    const fetchImpl = recordingFetch([html(workEditDelta(0)), html(updated)], bodies);
     const jar = createCookieJar();
     const result = await saveWorkRowFromPage(
       jar,
-      workEditModeHtml(0),
+      workEnvelope(0),
       { ...baseParams, eventCd: "202", startDateTime: "2026/07/03 09:00:00", destination: true },
       fetchImpl,
     );
     expect(result.workRows).toHaveLength(1);
     expect(result.workRows[0].eventCd).toBe("202");
-    expect(bodies).toHaveLength(1); // 保存は編集モードページの viewstate から 1 postback (fresh GET しない)
-    const sent = new URLSearchParams(bodies[0]);
+    const sent = new URLSearchParams(bodies[0]); // update postback
+    // 非同期 postback のマーカー
+    expect(sent.get("ScriptManager")).toBe("UpdatePanel1|lstWork$ctrl0$btnUpdateButton");
+    expect(sent.get("__ASYNCPOST")).toBe("true");
+    expect(sent.get("lstWork$ctrl0$btnUpdateButton")).toBe("");
+    // 作業種別: eddl は新値、etxtEventCD は元値のまま (変更検知の基準)
     expect(sent.get("lstWork$ctrl0$eddlEventName")).toBe("202");
-    expect(sent.get("lstWork$ctrl0$etxtEventCD")).toBe("202"); // select と同期用 text の両方
+    expect(sent.get("lstWork$ctrl0$etxtEventCD")).toBe("301");
     expect(sent.get("lstWork$ctrl0$etxtStartDateTime")).toBe("2026/07/03 09:00:00");
     expect(sent.get("lstWork$ctrl0$etxtEndDateTime")).toBe("2026/07/03 11:04:25"); // 未変更は現在値
     expect(sent.get("lstWork$ctrl0$enchkDestination")).toBe("on");
-    expect(sent.get("lstWork$ctrl0$btnUpdateButton")).toBe("");
-    expect(sent.get("__VIEWSTATE")).toBe("VS-EDIT");
-    // lstWork 以外のフォーム (txt* / ddlCourse_*) は送らない — JS が options を
-    // 埋める select への空値 post は event validation 500 になる (staging 実測)
-    expect(sent.get("txtCourse_1")).toBeNull();
+    expect(sent.get("__VIEWSTATE")).toBe("VS-EDIT"); // envelope の hidden
+    // disabled な運行欄 (txtCourse) も送る。空 select (ddlCourse) だけ除外。
+    expect(sent.get("txtCourse_1")).toBe("");
     expect(sent.get("ddlCourse_1")).toBeNull();
   });
 
@@ -2276,9 +2322,9 @@ describe("saveWorkRowFromPage", () => {
     const jar1 = createCookieJar();
     await saveWorkRowFromPage(
       jar1,
-      workEditModeHtml(0, { checkbox: "checked" }),
+      workEnvelope(0, { checkbox: "checked" }),
       { ...baseParams, destination: true },
-      recordingFetch([html(workFormHtml())], bodies1),
+      recordingFetch([html(workEditDelta(0)), html(workFormHtml())], bodies1),
     );
     expect(new URLSearchParams(bodies1[0]).get("lstWork$ctrl0$enchkDestination")).toBe("on");
 
@@ -2286,93 +2332,72 @@ describe("saveWorkRowFromPage", () => {
     const jar2 = createCookieJar();
     await saveWorkRowFromPage(
       jar2,
-      workEditModeHtml(0, { checkbox: "checked" }),
+      workEnvelope(0, { checkbox: "checked" }),
       { ...baseParams, destination: false },
-      recordingFetch([html(workFormHtml())], bodies2),
+      recordingFetch([html(workEditDelta(0)), html(workFormHtml())], bodies2),
     );
     expect(new URLSearchParams(bodies2[0]).get("lstWork$ctrl0$enchkDestination")).toBeNull();
   });
 
-  it("ignores the destination flag when the checkbox is missing from the page", async () => {
+  it("ignores the destination flag when the checkbox is missing from the edit delta", async () => {
     const jar = createCookieJar();
     const result = await saveWorkRowFromPage(
       jar,
-      workEditModeHtml(0, { checkbox: "none" }),
+      workEnvelope(0, { checkbox: "none" }),
       { ...baseParams, destination: true },
-      sequenceFetch([html(workFormHtml())]),
+      sequenceFetch([html(workEditDelta(0, { checkbox: "none" })), html(workFormHtml())]),
     );
     expect(result.workRows.length).toBeGreaterThan(0);
   });
 
-  it("re-reads the page when the save response has no work rows", async () => {
-    const fetchImpl = sequenceFetch([
-      html('<html><body><form><input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS2" /></form></body></html>'),
-      html(workFormHtml({ rows: [workDisplayRowHtml(0, { eventCd: "202", eventName: "積み" })] })),
-    ]);
+  it("throws when the reread GET reports the lock", async () => {
+    const fetchImpl = sequenceFetch([html(workEditDelta(0)), html(WORK_LOCKED_HTML)]);
     const jar = createCookieJar();
-    const result = await saveWorkRowFromPage(jar, workEditModeHtml(0), { ...baseParams, eventCd: "202" }, fetchImpl);
-    expect(result.workRows).toHaveLength(1);
-    expect(result.eventOptions).toHaveLength(3);
+    await expect(saveWorkRowFromPage(jar, workEnvelope(0), baseParams, fetchImpl)).rejects.toThrow(/編集ロック中/);
   });
 
-  it("throws when the re-read page reports the lock", async () => {
-    const fetchImpl = sequenceFetch([
-      html('<html><body><form><input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS2" /></form></body></html>'),
-      html(WORK_LOCKED_HTML),
-    ]);
-    const jar = createCookieJar();
-    await expect(saveWorkRowFromPage(jar, workEditModeHtml(0), baseParams, fetchImpl)).rejects.toThrow(
-      /編集ロック中/,
-    );
-  });
-
-  it("throws when an edited field / the update button is missing from the edit page", async () => {
+  it("throws when an edited field / the update button is missing from the edit delta", async () => {
     const jar1 = createCookieJar();
     await expect(
-      saveWorkRowFromPage(
-        jar1,
-        workEditModeHtml(0, { noDriverType: true }),
-        { ...baseParams, driverType: "2" },
-        sequenceFetch([]),
-      ),
+      saveWorkRowFromPage(jar1, workEnvelope(0, { noDriverType: true }), { ...baseParams, driverType: "2" }, sequenceFetch([])),
     ).rejects.toThrow(/etxtDriverType/);
     const jar2 = createCookieJar();
     await expect(
-      saveWorkRowFromPage(jar2, workEditModeHtml(0, { updateButton: false }), baseParams, sequenceFetch([])),
+      saveWorkRowFromPage(jar2, workEnvelope(0, { updateButton: false }), baseParams, sequenceFetch([])),
     ).rejects.toThrow(/btnUpdateButton/);
   });
 
   it("throws when the event select is missing but eventCd is edited", async () => {
     const jar = createCookieJar();
     await expect(
-      saveWorkRowFromPage(
-        jar,
-        workEditModeHtml(0, { noEventSelect: true }),
-        { ...baseParams, eventCd: "202" },
-        sequenceFetch([]),
-      ),
+      saveWorkRowFromPage(jar, workEnvelope(0, { noEventSelect: true }), { ...baseParams, eventCd: "202" }, sequenceFetch([])),
     ).rejects.toThrow(/eddlEventName/);
   });
 
-  it("throws on the other-user-editing conflict message and rejects invalid params", async () => {
-    const conflictHtml = "<html><body>他ユーザー編集中のため処理を中止しました。</body></html>";
+  it("throws on the other-user-editing conflict message and rejects invalid params / bad envelope", async () => {
+    const conflictDelta = workDelta("<div>他ユーザー編集中のため処理を中止しました。</div>");
     const jar = createCookieJar();
     await expect(
-      saveWorkRowFromPage(jar, workEditModeHtml(0), baseParams, sequenceFetch([html(conflictHtml)])),
+      saveWorkRowFromPage(jar, workEnvelope(0), baseParams, sequenceFetch([html(conflictDelta)])),
     ).rejects.toThrow(/他ユーザー/);
     await expect(
-      saveWorkRowFromPage(jar, workEditModeHtml(0), { ...baseParams, opeNo: "x" }, sequenceFetch([])),
+      saveWorkRowFromPage(jar, workEnvelope(0), { ...baseParams, opeNo: "x" }, sequenceFetch([])),
     ).rejects.toThrow(ReportParamError);
+    // 壊れた/古い envelope
+    await expect(saveWorkRowFromPage(jar, "not-json", baseParams, sequenceFetch([]))).rejects.toThrow(/編集情報が壊れて/);
+    await expect(
+      saveWorkRowFromPage(jar, JSON.stringify({ v: 1 }), baseParams, sequenceFetch([])),
+    ).rejects.toThrow(/形式が想定と異なります/);
   });
 
-  it("throws on non-ok POST / login redirect after POST", async () => {
+  it("throws on non-ok POST / login redirect after the async update", async () => {
     const jar1 = createCookieJar();
     await expect(
-      saveWorkRowFromPage(jar1, workEditModeHtml(0), baseParams, sequenceFetch([status(500)])),
+      saveWorkRowFromPage(jar1, workEnvelope(0), baseParams, sequenceFetch([status(500)])),
     ).rejects.toThrow(TheearthClientError);
     const jar2 = createCookieJar();
     await expect(
-      saveWorkRowFromPage(jar2, workEditModeHtml(0), baseParams, sequenceFetch([html(LOGIN_REDIRECT_HTML)])),
+      saveWorkRowFromPage(jar2, workEnvelope(0), baseParams, sequenceFetch([html(LOGIN_REDIRECT_HTML)])),
     ).rejects.toThrow(VenusSessionExpiredError);
   });
 });
@@ -2611,16 +2636,17 @@ describe("throwGetError (GET 失敗時の ASP.NET エラー要約)", () => {
 
 describe("findSelectNameById 経由の eventCd 上書き (select に name が無いケース)", () => {
   it("throws when the event select has no name attribute", async () => {
-    const page = `<html><body><form>
-      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS" />
+    // 更新ボタンはあるが eddlEventName select に name 属性が無い delta
+    const delta = workDelta(`
       <input type="submit" id="lstWork_btnUpdateButton_0" name="lstWork$ctrl0$btnUpdateButton" value="" />
       <select id="lstWork_eddlEventName_0"><option value="301">休憩</option></select>
-    </form></body></html>`;
+    `);
+    const envelope = JSON.stringify({ v: 2, panelId: "UpdatePanel1", hidden: {}, delta });
     const jar = createCookieJar();
     await expect(
       saveWorkRowFromPage(
         jar,
-        page,
+        envelope,
         { opeNo: OPE_NO, startOpe: START_OPE, ctrlIndex: 0, eventCd: "202" },
         sequenceFetch([]),
       ),
@@ -2641,43 +2667,6 @@ describe("work parse edge cases", () => {
     expect(form.workRows[0].eventCd).toBe("301");
     expect(form.workRows[0].eventName).toBe(""); // span 欠落は "" にフォールバック
     expect(form.eventOptions).toEqual([]); // option 0 件の select
-  });
-});
-
-describe("extractLstWorkPostFields", () => {
-  it("collects lstWork text/hidden/select/checked-checkbox fields only", () => {
-    const page = `<div>
-      <input type="text" name="lstWork$ctrl0$etxtDriverType" value="1" />
-      <input name="lstWork$ctrl0$noType" value="t" />
-      <input type="hidden" name="lstWork$ctrl0$hdn" value="h" />
-      <input type="text" name="lstWork$ctrl0$noValue" />
-      <input type="checkbox" name="lstWork$ctrl0$enchkDestination" checked />
-      <input type="checkbox" name="lstWork$ctrl0$chkOff" />
-      <input type="checkbox" name="lstWork$ctrl0$chkVal" value="1" checked />
-      <input type="submit" name="lstWork$ctrl0$btnUpdateButton" value="" />
-      <input type="text" name="txtCourse_1" value="x" />
-      <select name="ddlCourse_1"><option value="z">z</option></select>
-      <select name="lstWork$ctrl0$eddlEventName">
-        <option value="202">積み</option>
-        <option value="301" selected>休憩</option>
-      </select>
-      <select name="lstWork$ctrl7$iddlEventName"><option value="202">積み</option></select>
-      <select name="lstWork$ctrl8$empty"></select>
-      <select name="lstWork$ctrl9$noValueOpt"><option selected>ラベルのみ</option></select>
-    </div>`;
-    const fields = extractLstWorkPostFields(page);
-    expect(fields).toEqual({
-      "lstWork$ctrl0$etxtDriverType": "1",
-      "lstWork$ctrl0$noType": "t",
-      "lstWork$ctrl0$hdn": "h",
-      "lstWork$ctrl0$noValue": "",
-      "lstWork$ctrl0$enchkDestination": "on",
-      "lstWork$ctrl0$chkVal": "1",
-      "lstWork$ctrl0$eddlEventName": "301",
-      "lstWork$ctrl7$iddlEventName": "202",
-      "lstWork$ctrl8$empty": "",
-      "lstWork$ctrl9$noValueOpt": "",
-    });
   });
 });
 
@@ -2781,5 +2770,27 @@ describe("addFuelRow", () => {
     await expect(addFuelRow(jar2, baseParams, sequenceFetch([html(LOGIN_REDIRECT_HTML)]))).rejects.toThrow(
       VenusSessionExpiredError,
     );
+  });
+});
+
+describe("findEnclosingUpdatePanelId", () => {
+  it("returns the last UpdatePanel appearing before the anchor", () => {
+    const html = `<div id="OuterUpdatePanel"></div><div id="UpdatePanel1"><input id="btn"></div>`;
+    expect(findEnclosingUpdatePanelId(html, "btn")).toBe("UpdatePanel1");
+  });
+
+  it("falls back to the first UpdatePanel when the anchor is not found", () => {
+    const html = `<div id="UpdatePanel1"><input id="other"></div>`;
+    // anchor 'missing' が無い → 全体走査、UpdatePanel が anchor 位置(=末尾)より前なので拾える
+    expect(findEnclosingUpdatePanelId(html, "missing")).toBe("UpdatePanel1");
+  });
+
+  it("falls back to the first UpdatePanel when none precedes the anchor", () => {
+    const html = `<input id="btn"><div id="UpdatePanel1"></div>`;
+    expect(findEnclosingUpdatePanelId(html, "btn")).toBe("UpdatePanel1");
+  });
+
+  it("returns null when there is no UpdatePanel at all", () => {
+    expect(findEnclosingUpdatePanelId(`<input id="btn">`, "btn")).toBeNull();
   });
 });

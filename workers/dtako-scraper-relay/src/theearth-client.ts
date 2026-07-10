@@ -174,7 +174,7 @@ const HIDDEN_FIELD_NAMES = [
   "__EVENTARGUMENT",
 ] as const;
 
-function decodeHtmlEntities(value: string): string {
+export function decodeHtmlEntities(value: string): string {
   return value
     .replace(/&amp;/g, "&")
     .replace(/&quot;/g, '"')

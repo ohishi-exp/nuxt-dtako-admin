@@ -32,6 +32,7 @@
  */
 import {
   BASE_URL,
+  decodeHtmlEntities,
   CSV_PATH,
   DEFAULT_EXPORT_TIMEOUT_MS,
   DEFAULT_REQUEST_TIMEOUT_MS,
@@ -604,6 +605,109 @@ async function fetchEditPageHtml(
     );
   }
   return html;
+}
+
+// ---------------------------------------------------------------------------
+// MS AJAX UpdatePanel 非同期 postback (Refs #170、cdp-pair 実機で生 XHR 捕獲 2026-07-10)
+//
+// F-DES1012/1013 のグリッド行編集ボタン (btnEditButton/btnUpdateButton/
+// btnInsertButton 等) は UpdatePanel 内にあり、**同期 postback では更新コマンドが
+// 一切発火しない** (HTTP 200・エラー無し・旧状態を再描画する無音 no-op になる)。
+// 実ブラウザは XMLHttpRequest で以下を送っている:
+//   - header: `X-MicrosoftAjax: Delta=true` / `X-Requested-With: XMLHttpRequest`
+//   - body に `ScriptManager=<UpdatePanelUniqueID>|<targetUniqueID>` と `__ASYNCPOST=true`
+// 応答は完全 HTML ではなく MS AJAX delta 形式 (`len|type|id|content|…`、hidden は
+// `|hiddenField|NAME|VALUE|`)。この関数はその XHR を fetch で再現する。
+// ---------------------------------------------------------------------------
+
+/** delta 応答から hidden postback field (`|hiddenField|NAME|VALUE|`) を抽出する。 */
+function parseDeltaHiddenFields(delta: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  const re = /\|hiddenField\|([^|]+)\|([^|]*)\|/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(delta)) !== null) {
+    result[m[1]] = decodeHtmlEntities(m[2]);
+  }
+  return result;
+}
+
+/** 指定 anchor id を含む `<div id="…UpdatePanel…">` の UniqueID を推定する。
+ * MS AJAX の UpdatePanel は ClientID と UniqueID が (名前空間無しページでは) 一致
+ * するため id 属性をそのまま UniqueID として使える。anchor より前に現れる最後の
+ * UpdatePanel を「囲っている panel」とみなす (div のネストを正確に辿らない heuristic
+ * だが F-DES1012/1013 は panel が 1〜2 個で十分特定できる、実機確認 2026-07-10)。 */
+export function findEnclosingUpdatePanelId(html: string, anchorId: string): string | null {
+  const anchorPos = html.indexOf(`id="${anchorId}"`);
+  const search = anchorPos >= 0 ? html.slice(0, anchorPos) : html;
+  const ids = [...search.matchAll(/id="([^"]*UpdatePanel[^"]*)"/gi)].map((m) => m[1]);
+  if (ids.length > 0) return ids[ids.length - 1];
+  // anchor より前に無ければ全体から最初の UpdatePanel を使う (fallback)
+  const first = html.match(/id="([^"]*UpdatePanel[^"]*)"/i);
+  return first ? first[1] : null;
+}
+
+/** MS AJAX UpdatePanel 非同期 postback を実行し delta 応答テキストを返す。
+ * `bodyFields` は既に組み立て済みの postback body (hidden + フォーム値)。この関数が
+ * `ScriptManager`/`__ASYNCPOST` を足し、AJAX ヘッダを付けて送る。 */
+async function asyncPostback(
+  jar: CookieJar,
+  url: string,
+  updatePanelId: string,
+  targetName: string,
+  bodyFields: Record<string, string>,
+  pageLabel: string,
+  fetchImpl: FetchLike,
+  timeoutMs: number,
+): Promise<string> {
+  const body = new URLSearchParams(bodyFields);
+  body.set("ScriptManager", `${updatePanelId}|${targetName}`);
+  body.set("__ASYNCPOST", "true");
+  // submitter (押下ボタン) を form collection に含める (実測どおり値は空)。呼び出し元が
+  // 既に入れていれば残す。
+  if (body.get(targetName) === null) body.set(targetName, "");
+  const res = await fetchWithJar(
+    jar,
+    url,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded; charset=utf-8",
+        "X-MicrosoftAjax": "Delta=true",
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      body: body.toString(),
+    },
+    fetchImpl,
+    timeoutMs,
+  );
+  if (!res.ok) {
+    await throwGetError(`${pageLabel}の非同期更新`, res);
+  }
+  const delta = await res.text();
+  // async 応答のセッション切れは `pageRedirect` delta (ログイン画面 URL) で返る。
+  if (isLoginRedirect(delta) || /\|pageRedirect\|[^|]*F-OES1010/.test(delta)) {
+    throw new VenusSessionExpiredError(
+      `${pageLabel}の非同期更新でログイン画面が返されました — theearth セッションが切れています`,
+    );
+  }
+  return delta;
+}
+
+/** postback body 用に**全フォームフィールド (disabled 含む) を直列化**する。
+ * `serializeFormFields` (既存、disabled も含め全 input/select を拾う) を土台に、
+ * **option が 0 件の `<select>` (`ddlCourse_*` 等、JS が options を埋める) だけ除去**
+ * する — 空値を post すると ASP.NET の event validation が 500 で弾くため。
+ *
+ * MS AJAX の UpdatePanel 更新は実ブラウザが disabled フィールド (テンプレート行・
+ * 運行ヘッダの検索欄) も含めて送っており、これらを省くと ItemUpdating がサーバー側で
+ * 無音 no-op になる (cdp-pair 実機で確定、2026-07-10)。 */
+function serializeAllFieldsSkippingEmptySelects(html: string): Record<string, string> {
+  const fields = serializeFormFields(html);
+  for (const m of html.matchAll(/<select\b([^>]*)>([\s\S]*?)<\/select>/gi)) {
+    const name = m[1].match(/\bname=["']([^"']+)["']/i)?.[1];
+    if (name && [...m[2].matchAll(/<option\b/gi)].length === 0) delete fields[name];
+  }
+  return fields;
 }
 
 /** `btnScore` postback の共通実装。F-DES1012 (評価点再集計) と F-DES1013
@@ -1692,44 +1796,6 @@ export interface WorkForm {
   eventOptions: WorkEventOption[];
 }
 
-/** 編集モード応答から postback に載せる lstWork 系フィールドを抽出する:
- * text/hidden input (etxt・entxt・itxt・intxt 系) + select (eddl/iddl の selected) +
- * checked な checkbox。**lstWork 以外のフォーム (txt* / ddlCourse_* 等) は送らない**
- * (実ブラウザの全フォーム submit と違い、JS が options を埋める select に空値を
- * post すると event validation で 500 になるため。給油の
- * `extractLstFuelTextInputs` と同じ「対象リストだけ送る」方式)。 */
-export function extractLstWorkPostFields(html: string): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const m of html.matchAll(/<input\b([^>]*)>/gi)) {
-    const attrs = m[1];
-    const nameMatch = attrs.match(/\bname=["']([^"']+)["']/i);
-    if (!nameMatch || !nameMatch[1].startsWith("lstWork")) continue;
-    const type = (attrs.match(/\btype=["']([^"']+)["']/i)?.[1] ?? "text").toLowerCase();
-    const valueMatch = attrs.match(/\bvalue=["']([^"']*)["']/i);
-    if (type === "text" || type === "hidden") {
-      result[nameMatch[1]] = valueMatch ? valueMatch[1] : "";
-    } else if (type === "checkbox" && /\bchecked\b/i.test(attrs)) {
-      result[nameMatch[1]] = valueMatch?.[1] || "on";
-    }
-    // submit/image 等の押下ボタンは呼び出し側が明示的に足す
-  }
-  for (const m of html.matchAll(/<select\b([^>]*)>([\s\S]*?)<\/select>/gi)) {
-    const nameMatch = m[1].match(/\bname=["']([^"']+)["']/i);
-    if (!nameMatch || !nameMatch[1].startsWith("lstWork")) continue;
-    let selected: string | null = null;
-    let first: string | null = null;
-    for (const om of m[2].matchAll(/<option\b([^>]*)>/gi)) {
-      const value = om[1].match(/\bvalue=["']([^"']*)["']/i)?.[1] ?? "";
-      if (first === null) first = value;
-      if (/\bselected\b/i.test(om[1])) {
-        selected = value;
-        break;
-      }
-    }
-    result[nameMatch[1]] = selected ?? first ?? "";
-  }
-  return result;
-}
 
 function parseWorkRows(html: string): WorkRow[] {
   const indexes = [...html.matchAll(/id="lstWork_lblEventCD_(\d+)"/g)].map((m) => Number(m[1]));
@@ -1816,10 +1882,20 @@ export interface WorkEditFormRow {
   endCityName: string;
 }
 
-/** POST 相当: 対象行の `btnEditButton` を押して編集モードにし、編集モード行の
- * 現在値と応答ページ HTML を返す。**呼び出し元 (DO) は editHtml を保存して
- * `saveWorkRowFromPage` に渡すこと** (編集モードの viewstate からそのまま更新
- * postback する。実ブラウザの「鉛筆 → 修正 → 保存」と同じ流れ)。 */
+/** 編集モードの delta に含まれる __VIEWSTATE 等の hidden を、初回 GET の hidden に
+ * マージした「更新 postback 用の hidden セット」を作る。delta は変わった hidden
+ * だけ返すので、GET 由来の hidden をベースに delta 由来で上書きする。 */
+function mergeHidden(base: Record<string, string>, delta: string): Record<string, string> {
+  return { ...base, ...parseDeltaHiddenFields(delta) };
+}
+
+/** POST 相当: 対象行の `btnEditButton` を **MS AJAX 非同期 postback** で押して編集
+ * モードにし、編集モード行の現在値と、更新 postback に必要な情報 (編集モード delta・
+ * GET 由来 hidden・UpdatePanel id) を返す。**呼び出し元 (DO) はこれを保存して
+ * `saveWorkRowFromPage` に渡すこと** (実ブラウザの「鉛筆 → 修正 → 保存」と同じ流れ)。
+ *
+ * 同期 postback では更新コマンドが発火しないため async 必須 (cdp-pair 実機で確定、
+ * 2026-07-10。`asyncPostback` の doc comment 参照)。 */
 export async function startWorkRowEdit(
   jar: CookieJar,
   params: StartWorkRowEditParams,
@@ -1843,20 +1919,39 @@ export async function startWorkRowEdit(
       `作業行の編集ボタン (${editButtonId}) が見つかりません — theearth-np のページ仕様変更の可能性があります`,
     );
   }
-  const editHtml = await postButton(jar, url, pageHtml, editButton.name, editButton.value, fetchImpl, timeoutMs);
-  assertNoOtherEditConflict(editHtml, "作業行の編集開始");
+  const panelId = findEnclosingUpdatePanelId(pageHtml, editButtonId);
+  if (!panelId) {
+    throw new TheearthClientError(
+      "作業入力ページの UpdatePanel が見つかりません — theearth-np のページ仕様変更の可能性があります",
+    );
+  }
+  // 編集開始も async postback (同期だと編集モードに入らない)。body は全フィールド。
+  const editBody = serializeAllFieldsSkippingEmptySelects(pageHtml);
+  editBody[editButton.name] = editButton.value;
+  const editDelta = await asyncPostback(jar, url, panelId, editButton.name, editBody, "作業入力ページ", fetchImpl, timeoutMs);
+  assertNoOtherEditConflict(editDelta, "作業行の編集開始");
 
   const updateButtonId = workRowId(params.ctrlIndex, "btnUpdateButton");
-  if (!findFormFieldById(editHtml, updateButtonId)) {
+  if (!findFormFieldById(editDelta, updateButtonId)) {
     throw new TheearthClientError(
       `作業行の更新ボタン (${updateButtonId}) が見つかりません — ` +
         "編集開始 postback が想定通りに動かなかった可能性があります (theearth-np のページ仕様変更の可能性)",
     );
   }
 
-  const get = (suffix: string) => findFormFieldById(editHtml, workRowId(params.ctrlIndex, suffix))?.value ?? "";
-  const eventSelect = parseSelectOptionsById(editHtml, workRowId(params.ctrlIndex, "eddlEventName"));
-  const destinationTag = findTagById(editHtml, workRowId(params.ctrlIndex, "enchkDestination"));
+  // 更新 postback に必要な情報を editHtml (JSON) に詰めて DO に持たせる。delta は
+  // 完全 HTML ではないので、初回 GET の hidden を土台に delta hidden で上書きする。
+  const baseHidden = extractHiddenFields(pageHtml);
+  const editHtmlEnvelope = JSON.stringify({
+    v: 2,
+    panelId,
+    hidden: mergeHidden(baseHidden, editDelta),
+    delta: editDelta,
+  });
+
+  const get = (suffix: string) => findFormFieldById(editDelta, workRowId(params.ctrlIndex, suffix))?.value ?? "";
+  const eventSelect = parseSelectOptionsById(editDelta, workRowId(params.ctrlIndex, "eddlEventName"));
+  const destinationTag = findTagById(editDelta, workRowId(params.ctrlIndex, "enchkDestination"));
   const row: WorkEditFormRow = {
     ctrlIndex: params.ctrlIndex,
     eventCd: eventSelect?.value ?? get("etxtEventCD"),
@@ -1874,7 +1969,7 @@ export async function startWorkRowEdit(
     endCityCd: get(WORK_EDIT_FIELD_IDS.endCityCd),
     endCityName: get(WORK_EDIT_FIELD_IDS.endCityName),
   };
-  return { row, editHtml };
+  return { row, editHtml: editHtmlEnvelope };
 }
 
 /** 作業行 1 件分の保存内容。undefined のフィールドは編集モードの現在値のまま送る。 */
@@ -1902,17 +1997,41 @@ export interface SaveWorkRowResult {
   eventOptions: WorkEventOption[];
 }
 
-/** POST 相当: 編集モード行の値を書き換えて `btnUpdateButton` で保存する。
+interface WorkEditEnvelope {
+  v: number;
+  panelId: string;
+  hidden: Record<string, string>;
+  delta: string;
+}
+
+function parseWorkEditEnvelope(editHtml: string): WorkEditEnvelope {
+  let env: unknown;
+  try {
+    env = JSON.parse(editHtml);
+  } catch {
+    throw new TheearthClientError("作業行の編集情報が壊れています — 行の「編集」からやり直してください");
+  }
+  const e = env as Partial<WorkEditEnvelope>;
+  if (!e || e.v !== 2 || typeof e.panelId !== "string" || typeof e.delta !== "string" || typeof e.hidden !== "object") {
+    throw new TheearthClientError("作業行の編集情報の形式が想定と異なります — 行の「編集」からやり直してください");
+  }
+  return e as WorkEditEnvelope;
+}
+
+/** POST 相当: 編集モード行の値を書き換えて `btnUpdateButton` を **MS AJAX 非同期
+ * postback** で送り保存する。
  *
- * **`editHtml` には `startWorkRowEdit` が返したページをそのまま渡すこと**
- * (呼び出し元 DO が storage に保持している)。postback body は
- * **hidden + lstWork 系フィールドのみ** (`extractLstWorkPostFields`) + 変更
- * フィールドの上書き。全フォーム直列化 (`serializeFormFields`) は使わない —
- * JS が options を埋める DropDownList (`ddlCourse_*` 等) に空値を post すると
- * ASP.NET の event validation が「無効なポストバック」(HTTP 500) で弾く
- * (staging 実測 2026-07-10)。lstWork 内は全フィールド送る (部分送信の
- * FormatException 500 を避ける、Refs #199 の給油と同じ設計)。作業種別は
- * select (`eddlEventName`) と同期用 text (`etxtEventCD`) の両方を書き換える。 */
+ * **`editHtml` には `startWorkRowEdit` が返した envelope (JSON) をそのまま渡すこと**
+ * (呼び出し元 DO が storage に保持している)。実ブラウザの生 XHR を捕獲して確定した
+ * 保存の要件 (cdp-pair 実機、2026-07-10):
+ *
+ * 1. **非同期 postback 必須** — 同期だと更新コマンドが無音 no-op (200・不発火)。
+ * 2. **全フォームフィールド (disabled 含む) を送る** (`serializeAllFieldsSkippingEmptySelects`)。
+ *    運行ヘッダ/テンプレート行 (disabled) を省くと ItemUpdating が確定しない。
+ *    空 select (`ddlCourse_*`) だけは event validation 500 になるので除外。
+ * 3. **作業種別は `eddlEventName` にだけ新値を入れ、`etxtEventCD` は元値のまま**にする。
+ *    サーバーは両者の差分で変更を検知するため、両方新値にすると「変更なし」と
+ *    判定され黙って無視される (これが「UI は OK だが DB 反映されない」の真因だった)。 */
 export async function saveWorkRowFromPage(
   jar: CookieJar,
   editHtml: string,
@@ -1923,18 +2042,21 @@ export async function saveWorkRowFromPage(
   validateOpeNo(params.opeNo);
   validateStartOpe(params.startOpe);
   const url = buildOperationWorkUrl(params.opeNo, params.startOpe);
+  const env = parseWorkEditEnvelope(editHtml);
+  const delta = env.delta;
 
   const updateButtonId = workRowId(params.ctrlIndex, "btnUpdateButton");
-  const updateButton = findFormFieldById(editHtml, updateButtonId);
+  const updateButton = findFormFieldById(delta, updateButtonId);
   if (!updateButton) {
     throw new TheearthClientError(
       `作業行の更新ボタン (${updateButtonId}) が見つかりません — 編集開始からやり直してください`,
     );
   }
 
-  const body = extractLstWorkPostFields(editHtml);
+  // 全フィールド (disabled 含む、空 select 除外) + 編集 delta の最新 hidden。
+  const body = { ...serializeAllFieldsSkippingEmptySelects(delta), ...env.hidden };
   const setField = (suffix: string, value: string) => {
-    const field = findFormFieldById(editHtml, workRowId(params.ctrlIndex, suffix));
+    const field = findFormFieldById(delta, workRowId(params.ctrlIndex, suffix));
     if (!field) {
       throw new TheearthClientError(
         `作業行 (ctrlIndex=${params.ctrlIndex}) の ${suffix} が見つかりません — ` +
@@ -1948,40 +2070,35 @@ export async function saveWorkRowFromPage(
     if (newValue !== undefined) setField(suffix, newValue);
   }
   if (params.eventCd !== undefined) {
-    const selectId = workRowId(params.ctrlIndex, "eddlEventName");
-    const selectName = findSelectNameById(editHtml, selectId);
+    const selectName = findSelectNameById(delta, workRowId(params.ctrlIndex, "eddlEventName"));
     if (!selectName) {
       throw new TheearthClientError(
         `作業行 (ctrlIndex=${params.ctrlIndex}) の eddlEventName が見つかりません — ` +
           "theearth-np のページ仕様変更の可能性があります",
       );
     }
+    // eddlEventName にだけ新値。etxtEventCD は元値のまま (変更検知の基準)。
     body[selectName] = params.eventCd;
-    setField("etxtEventCD", params.eventCd);
   }
   if (params.destination !== undefined) {
-    const checkbox = findFormFieldById(editHtml, workRowId(params.ctrlIndex, "enchkDestination"));
+    const checkbox = findFormFieldById(delta, workRowId(params.ctrlIndex, "enchkDestination"));
     if (checkbox) {
       if (params.destination) body[checkbox.name] = checkbox.value || "on";
       else delete body[checkbox.name];
     }
   }
 
-  const postHtml = await postButton(
-    jar, url, editHtml, updateButton.name, updateButton.value, fetchImpl, timeoutMs, body,
+  const updateDelta = await asyncPostback(
+    jar, url, env.panelId, updateButton.name, body, "作業入力ページ", fetchImpl, timeoutMs,
   );
-  assertNoOtherEditConflict(postHtml, "作業行の更新");
+  assertNoOtherEditConflict(updateDelta, "作業行の更新");
 
-  let workRows = parseWorkRows(postHtml);
-  let eventOptions = parseWorkEventOptions(postHtml);
-  if (workRows.length === 0) {
-    // 更新応答が一覧を再描画しないケース (未確認) に備えて再 GET で読み直す。
-    const rereadHtml = await fetchEditPageHtml(jar, url, "作業入力ページ", fetchImpl, timeoutMs);
-    assertWorkPageNotLocked(rereadHtml);
-    workRows = parseWorkRows(rereadHtml);
-    eventOptions = parseWorkEventOptions(rereadHtml);
-  }
-  return { workRows, eventOptions };
+  // 更新後は fresh GET で確定値を読み直す (delta は編集セッションの再描画で、DB
+  // 反映確認には別セッションの GET が確実)。GET はロックを取り直すが、同一 jar なら
+  // 直後の一覧表示までで解放される想定。
+  const rereadHtml = await fetchEditPageHtml(jar, url, "作業入力ページ", fetchImpl, timeoutMs);
+  assertWorkPageNotLocked(rereadHtml);
+  return { workRows: parseWorkRows(rereadHtml), eventOptions: parseWorkEventOptions(rereadHtml) };
 }
 
 /** POST 相当: F-DES1013 の `btnScore` postback で作業時間を再集計する
