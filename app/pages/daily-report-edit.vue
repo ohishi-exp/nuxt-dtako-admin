@@ -707,6 +707,12 @@ const workLoading = ref(false)
 const workError = ref<string | null>(null)
 const workRecalculating = ref(false)
 const workRecalculateResult = ref<string | null>(null)
+// システム連携 (btnLinkSys): 作業時間再集計成功で有効化される。expense モーダルの
+// linkSysEnabled と対の per-modal 状態 (同時に開くモーダルは 1 つだが、各モーダルで
+// 独立した再集計 → 連携のライフサイクルを持たせる)
+const workLinkSysEnabled = ref(false)
+const workLinking = ref(false)
+const workLinkResult = ref<string | null>(null)
 // 編集モード中の行 (edit-start の応答をそのまま編集する)。null = 編集中でない
 const workEditing = ref<WorkEditFormRow | null>(null)
 const workEditStarting = ref<number | null>(null)
@@ -732,6 +738,8 @@ async function openWorkModal(row: DailyReportRow) {
   workEventOptions.value = []
   workError.value = null
   workRecalculateResult.value = null
+  workLinkSysEnabled.value = false
+  workLinkResult.value = null
   workEditing.value = null
   workLoading.value = true
   try {
@@ -762,6 +770,8 @@ function closeWorkModal() {
   workEventOptions.value = []
   workError.value = null
   workRecalculateResult.value = null
+  workLinkSysEnabled.value = false
+  workLinkResult.value = null
   workEditing.value = null
 }
 
@@ -853,12 +863,14 @@ async function recalculateWorkTime() {
   workRecalculating.value = true
   workError.value = null
   workRecalculateResult.value = null
+  workLinkResult.value = null
   try {
     const res = await $fetch<{ linkSysEnabled: boolean }>('/daily-report-api/work/recalculate', {
       method: 'POST',
       headers: authHeaders(),
       body: { opeNo: target.operationNo, startOpe: target.startDateTime },
     })
+    workLinkSysEnabled.value = res.linkSysEnabled
     workRecalculateResult.value = res.linkSysEnabled
       ? '作業時間再集計が完了しました (システム連動開始が有効になりました)'
       : '作業時間再集計が完了しました'
@@ -876,6 +888,42 @@ async function recalculateWorkTime() {
   }
 }
 
+/** システム連動開始 (btnLinkSys) を作業モーダルから実行する。expense モーダルの
+ * `startSystemLink` と同じく `/daily-report-api/expense/link-sys` を叩く
+ * (theearth の連動アクションは per-operation で、どの form から postback しても
+ * 同じ運行に対して 1 回の連動が走る。DO 側は btnScore→btnLinkSys の連鎖を
+ * F-DES1012 で行う実装で、UI クリック元に依らず結果は同じ)。 */
+async function startWorkLink() {
+  const s = session.value
+  const target = workSelectedRow.value
+  if (!s || !target) return
+  if (!window.confirm('システム連動開始 (theearth へのデータ連動) を実行します。よろしいですか?')) return
+  workLinking.value = true
+  workError.value = null
+  workLinkResult.value = null
+  try {
+    const res = await $fetch<{ linked: boolean, message: string }>('/daily-report-api/expense/link-sys', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: { opeNo: target.operationNo, startOpe: target.startDateTime },
+    })
+    workLinkResult.value = res.linked
+      ? 'システム連動を開始しました'
+      : `システム連動を実行しました (応答: ${res.message || '確認要'})`
+  }
+  catch (e) {
+    if (dailyReportErrorStatus(e) === 401) {
+      expireSession(dailyReportErrorMessage(e))
+      workModalOpen.value = false
+      return
+    }
+    workError.value = dailyReportErrorMessage(e)
+  }
+  finally {
+    workLinking.value = false
+  }
+}
+
 // --- 乗務員変更 (F-DES1011 運行データ修正) モーダル (Refs #171) ---
 
 const reviseModalOpen = ref(false)
@@ -890,6 +938,11 @@ const reviseDriverInput = ref('')
 // このモーダルにも置く (作業モーダルの recalculateWorkTime と同じ endpoint)
 const reviseRecalculating = ref(false)
 const reviseRecalculateResult = ref<string | null>(null)
+// システム連携 (btnLinkSys): 乗務員変更モーダルからも再集計 → 連携できるように
+// per-modal 状態を持たせる (expense / work モーダルと対)
+const reviseLinkSysEnabled = ref(false)
+const reviseLinking = ref(false)
+const reviseLinkResult = ref<string | null>(null)
 const DRIVER_CD_RE = /^\d{1,8}$/
 
 /** 入力中の乗務員CD / 現在の乗務員CD の名称 (マスタ live 解決)。 */
@@ -905,6 +958,8 @@ async function openReviseModal(row: DailyReportRow) {
   reviseError.value = null
   reviseResult.value = null
   reviseRecalculateResult.value = null
+  reviseLinkSysEnabled.value = false
+  reviseLinkResult.value = null
   reviseDriverInput.value = ''
   reviseLoading.value = true
   void ensureReportMasters() // 名称解決用 (失敗しても編集は続行できる)
@@ -936,6 +991,8 @@ function closeReviseModal() {
   reviseError.value = null
   reviseResult.value = null
   reviseRecalculateResult.value = null
+  reviseLinkSysEnabled.value = false
+  reviseLinkResult.value = null
 }
 
 /** 作業時間再集計 (F-DES1013 btnScore) を乗務員変更モーダルから実行する。
@@ -949,13 +1006,17 @@ async function recalculateWorkFromRevise() {
   reviseRecalculating.value = true
   reviseError.value = null
   reviseRecalculateResult.value = null
+  reviseLinkResult.value = null
   try {
-    await $fetch<{ linkSysEnabled: boolean }>('/daily-report-api/work/recalculate', {
+    const res = await $fetch<{ linkSysEnabled: boolean }>('/daily-report-api/work/recalculate', {
       method: 'POST',
       headers: authHeaders(),
       body: { opeNo: target.operationNo, startOpe: target.startDateTime },
     })
-    reviseRecalculateResult.value = '作業時間再集計が完了しました'
+    reviseLinkSysEnabled.value = res.linkSysEnabled
+    reviseRecalculateResult.value = res.linkSysEnabled
+      ? '作業時間再集計が完了しました (システム連動開始が有効になりました)'
+      : '作業時間再集計が完了しました'
   }
   catch (e) {
     if (dailyReportErrorStatus(e) === 401) {
@@ -967,6 +1028,40 @@ async function recalculateWorkFromRevise() {
   }
   finally {
     reviseRecalculating.value = false
+  }
+}
+
+/** システム連動開始 (btnLinkSys) を乗務員変更モーダルから実行する。
+ * `/daily-report-api/expense/link-sys` を再利用 (連動は per-operation で form 非依存、
+ * startWorkLink と同じ理由)。 */
+async function startReviseLink() {
+  const s = session.value
+  const target = reviseSelectedRow.value
+  if (!s || !target) return
+  if (!window.confirm('システム連動開始 (theearth へのデータ連動) を実行します。よろしいですか?')) return
+  reviseLinking.value = true
+  reviseError.value = null
+  reviseLinkResult.value = null
+  try {
+    const res = await $fetch<{ linked: boolean, message: string }>('/daily-report-api/expense/link-sys', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: { opeNo: target.operationNo, startOpe: target.startDateTime },
+    })
+    reviseLinkResult.value = res.linked
+      ? 'システム連動を開始しました'
+      : `システム連動を実行しました (応答: ${res.message || '確認要'})`
+  }
+  catch (e) {
+    if (dailyReportErrorStatus(e) === 401) {
+      expireSession(dailyReportErrorMessage(e))
+      reviseModalOpen.value = false
+      return
+    }
+    reviseError.value = dailyReportErrorMessage(e)
+  }
+  finally {
+    reviseLinking.value = false
   }
 }
 
@@ -1501,16 +1596,31 @@ onMounted(() => {
             <div v-if="workRecalculateResult" class="text-sm text-green-700 bg-green-50 dark:bg-green-950 dark:text-green-300 rounded-lg p-3">
               {{ workRecalculateResult }}
             </div>
+            <div v-if="workLinkResult" class="text-sm text-blue-700 bg-blue-50 dark:bg-blue-950 dark:text-blue-300 rounded-lg p-3">
+              {{ workLinkResult }}
+            </div>
 
             <div class="flex justify-between items-center pt-2 border-t border-gray-200 dark:border-gray-800">
-              <UButton
-                icon="i-lucide-calculator"
-                label="作業時間再集計"
-                variant="outline"
-                :loading="workRecalculating"
-                title="作業1〜5時間 (DriverState1〜5Min) を再計算します"
-                @click="recalculateWorkTime"
-              />
+              <div class="flex gap-2">
+                <UButton
+                  icon="i-lucide-calculator"
+                  label="作業時間再集計"
+                  variant="outline"
+                  :loading="workRecalculating"
+                  title="作業1〜5時間 (DriverState1〜5Min) を再計算します"
+                  @click="recalculateWorkTime"
+                />
+                <UButton
+                  icon="i-lucide-link"
+                  label="システム連携"
+                  color="error"
+                  variant="outline"
+                  :disabled="!workLinkSysEnabled"
+                  :loading="workLinking"
+                  title="作業時間再集計の成功後に有効化されます (theearth へデータ連動)"
+                  @click="startWorkLink"
+                />
+              </div>
               <UButton label="閉じる" variant="ghost" @click="closeWorkModal" />
             </div>
           </div>
@@ -1563,6 +1673,9 @@ onMounted(() => {
             <div v-if="reviseRecalculateResult" class="text-sm text-green-700 bg-green-50 dark:bg-green-950 dark:text-green-300 rounded-lg p-3">
               {{ reviseRecalculateResult }}
             </div>
+            <div v-if="reviseLinkResult" class="text-sm text-blue-700 bg-blue-50 dark:bg-blue-950 dark:text-blue-300 rounded-lg p-3">
+              {{ reviseLinkResult }}
+            </div>
 
             <div class="flex justify-between items-center pt-2 border-t border-gray-200 dark:border-gray-800">
               <div class="flex gap-2">
@@ -1580,6 +1693,16 @@ onMounted(() => {
                   :loading="reviseRecalculating"
                   title="作業1〜5時間 (DriverState1〜5Min) を再計算します (F-DES1013 btnScore)"
                   @click="recalculateWorkFromRevise"
+                />
+                <UButton
+                  icon="i-lucide-link"
+                  label="システム連携"
+                  color="error"
+                  variant="outline"
+                  :disabled="!reviseLinkSysEnabled"
+                  :loading="reviseLinking"
+                  title="作業時間再集計の成功後に有効化されます (theearth へデータ連動)"
+                  @click="startReviseLink"
                 />
               </div>
               <UButton label="閉じる" variant="ghost" @click="closeReviseModal" />
