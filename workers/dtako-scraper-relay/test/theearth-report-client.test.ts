@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   downloadEditedZip,
   downloadOperationCsvZip,
+  addFuelRow,
   extractLstFuelTextInputs,
+  extractLstWorkPostFields,
   getExpenseForm,
   getReviseForm,
   getReviseFormPage,
@@ -2000,6 +2002,8 @@ function workEditModeHtml(i: number, v: {
   const checkbox = v.checkbox ?? "unchecked";
   return `<html><body><form>
     <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-EDIT" />
+    <input type="text" id="txtCourse_1" name="txtCourse_1" value="" />
+    <select id="ddlCourse_1" name="ddlCourse_1"></select>
     ${v.updateButton === false ? "" : `<input type="submit" id="${id("btnUpdateButton")}" name="${name("btnUpdateButton")}" value="" />`}
     <input type="text" id="${id("etxtOperationNo")}" name="${name("etxtOperationNo")}" value="2607031038500000003037" />
     <input type="text" id="${id("etxtEventCD")}" name="${name("etxtEventCD")}" value="${v.eventCd ?? "301"}" />
@@ -2261,6 +2265,10 @@ describe("saveWorkRowFromPage", () => {
     expect(sent.get("lstWork$ctrl0$enchkDestination")).toBe("on");
     expect(sent.get("lstWork$ctrl0$btnUpdateButton")).toBe("");
     expect(sent.get("__VIEWSTATE")).toBe("VS-EDIT");
+    // lstWork 以外のフォーム (txt* / ddlCourse_*) は送らない — JS が options を
+    // 埋める select への空値 post は event validation 500 になる (staging 実測)
+    expect(sent.get("txtCourse_1")).toBeNull();
+    expect(sent.get("ddlCourse_1")).toBeNull();
   });
 
   it("keeps the checked checkbox value and can also uncheck it", async () => {
@@ -2633,5 +2641,145 @@ describe("work parse edge cases", () => {
     expect(form.workRows[0].eventCd).toBe("301");
     expect(form.workRows[0].eventName).toBe(""); // span 欠落は "" にフォールバック
     expect(form.eventOptions).toEqual([]); // option 0 件の select
+  });
+});
+
+describe("extractLstWorkPostFields", () => {
+  it("collects lstWork text/hidden/select/checked-checkbox fields only", () => {
+    const page = `<div>
+      <input type="text" name="lstWork$ctrl0$etxtDriverType" value="1" />
+      <input name="lstWork$ctrl0$noType" value="t" />
+      <input type="hidden" name="lstWork$ctrl0$hdn" value="h" />
+      <input type="text" name="lstWork$ctrl0$noValue" />
+      <input type="checkbox" name="lstWork$ctrl0$enchkDestination" checked />
+      <input type="checkbox" name="lstWork$ctrl0$chkOff" />
+      <input type="checkbox" name="lstWork$ctrl0$chkVal" value="1" checked />
+      <input type="submit" name="lstWork$ctrl0$btnUpdateButton" value="" />
+      <input type="text" name="txtCourse_1" value="x" />
+      <select name="ddlCourse_1"><option value="z">z</option></select>
+      <select name="lstWork$ctrl0$eddlEventName">
+        <option value="202">積み</option>
+        <option value="301" selected>休憩</option>
+      </select>
+      <select name="lstWork$ctrl7$iddlEventName"><option value="202">積み</option></select>
+      <select name="lstWork$ctrl8$empty"></select>
+      <select name="lstWork$ctrl9$noValueOpt"><option selected>ラベルのみ</option></select>
+    </div>`;
+    const fields = extractLstWorkPostFields(page);
+    expect(fields).toEqual({
+      "lstWork$ctrl0$etxtDriverType": "1",
+      "lstWork$ctrl0$noType": "t",
+      "lstWork$ctrl0$hdn": "h",
+      "lstWork$ctrl0$noValue": "",
+      "lstWork$ctrl0$enchkDestination": "on",
+      "lstWork$ctrl0$chkVal": "1",
+      "lstWork$ctrl0$eddlEventName": "301",
+      "lstWork$ctrl7$iddlEventName": "202",
+      "lstWork$ctrl8$empty": "",
+      "lstWork$ctrl9$noValueOpt": "",
+    });
+  });
+});
+
+// --- F-DES1012 給油 新規行テンプレート fixture ---------------------------------
+
+function fuelTemplateRowHtml(ctrlIndex: number | null, v: { insertButton?: boolean; noQuantity?: boolean } = {}): string {
+  const name = (field: string) => (ctrlIndex === null ? `lstFuel$${field}` : `lstFuel$ctrl${ctrlIndex}$${field}`);
+  return `
+    ${v.insertButton === false ? "" : `<input type="submit" name="${name("btnInsertButton")}" value="" />`}
+    <input type="text" name="${name("itxtSupplyCategory")}" value="" />
+    <input type="text" name="${name("itxtSupplyStation")}" value="" />
+    <input type="text" name="${name("itxtSupplyType")}" value="" />
+    <input type="text" name="${name("itxtDateTime")}" value="" />
+    ${v.noQuantity ? "" : `<input type="text" name="${name("itxtQuantuty")}" value="" />`}
+  `;
+}
+
+describe("addFuelRow", () => {
+  const baseParams = {
+    opeNo: OPE_NO,
+    startOpe: START_OPE,
+    supplyCategory: "1",
+    supplyStation: "1",
+    supplyType: "1",
+    dateTime: "26/07/07 10:29",
+    quantity: "100.0",
+  };
+
+  function pageWithTemplate(rows: number, tpl: string): string {
+    const rowHtml = Array.from({ length: rows }, (_, i) => fuelDisplayRowHtml(i)).join("\n");
+    return `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-FUEL" />
+      ${rowHtml}
+      ${tpl}
+    </form></body></html>`;
+  }
+
+  it("posts the template fields with btnInsertButton (ctrl-indexed name form)", async () => {
+    const bodies: string[] = [];
+    const page = pageWithTemplate(0, fuelTemplateRowHtml(2));
+    const fetchImpl = recordingFetch([html(page), html(pageWithTemplate(1, fuelTemplateRowHtml(2)))], bodies);
+    const jar = createCookieJar();
+    const result = await addFuelRow(jar, baseParams, fetchImpl);
+    expect(result.fuelRows).toHaveLength(1);
+    const sent = new URLSearchParams(bodies[1]);
+    expect(sent.get("lstFuel$ctrl2$itxtSupplyCategory")).toBe("1");
+    expect(sent.get("lstFuel$ctrl2$itxtDateTime")).toBe("26/07/07 10:29");
+    expect(sent.get("lstFuel$ctrl2$itxtQuantuty")).toBe("100.0");
+    expect(sent.get("lstFuel$ctrl2$btnInsertButton")).toBe("");
+    expect(sent.get("__VIEWSTATE")).toBe("VS-FUEL");
+  });
+
+  it("accepts the index-less template name form", async () => {
+    const bodies: string[] = [];
+    const page = pageWithTemplate(0, fuelTemplateRowHtml(null));
+    const fetchImpl = recordingFetch([html(page), html(pageWithTemplate(1, fuelTemplateRowHtml(null)))], bodies);
+    const jar = createCookieJar();
+    await addFuelRow(jar, baseParams, fetchImpl);
+    expect(new URLSearchParams(bodies[1]).get("lstFuel$itxtSupplyCategory")).toBe("1");
+  });
+
+  it("re-reads the page when the insert response has no fuel rows and fails loudly when still empty", async () => {
+    const page = pageWithTemplate(0, fuelTemplateRowHtml(0));
+    const jar1 = createCookieJar();
+    const result = await addFuelRow(
+      jar1,
+      baseParams,
+      sequenceFetch([html(page), html(page), html(pageWithTemplate(1, fuelTemplateRowHtml(1)))]),
+    );
+    expect(result.fuelRows).toHaveLength(1);
+    const jar2 = createCookieJar();
+    await expect(
+      addFuelRow(jar2, baseParams, sequenceFetch([html(page), html(page), html(page)])),
+    ).rejects.toThrow(/追加後も給油行を確認できませんでした/);
+  });
+
+  it("throws when the insert button / a template field is missing", async () => {
+    const jar1 = createCookieJar();
+    await expect(
+      addFuelRow(jar1, baseParams, sequenceFetch([html(pageWithTemplate(0, fuelTemplateRowHtml(0, { insertButton: false })))])),
+    ).rejects.toThrow(/btnInsertButton/);
+    const jar2 = createCookieJar();
+    await expect(
+      addFuelRow(jar2, baseParams, sequenceFetch([html(pageWithTemplate(0, fuelTemplateRowHtml(0, { noQuantity: true })))])),
+    ).rejects.toThrow(/itxtQuantuty/);
+  });
+
+  it("throws on the other-user-editing conflict message and rejects invalid params", async () => {
+    const conflictHtml = "<html><body>他ユーザー編集中のため処理を中止しました。</body></html>";
+    const jar = createCookieJar();
+    await expect(
+      addFuelRow(jar, baseParams, sequenceFetch([html(pageWithTemplate(0, fuelTemplateRowHtml(0))), html(conflictHtml)])),
+    ).rejects.toThrow(/他ユーザー/);
+    await expect(addFuelRow(jar, { ...baseParams, opeNo: "x" }, sequenceFetch([]))).rejects.toThrow(ReportParamError);
+  });
+
+  it("throws on non-ok GET / login redirect", async () => {
+    const jar1 = createCookieJar();
+    await expect(addFuelRow(jar1, baseParams, sequenceFetch([status(500)]))).rejects.toThrow(TheearthClientError);
+    const jar2 = createCookieJar();
+    await expect(addFuelRow(jar2, baseParams, sequenceFetch([html(LOGIN_REDIRECT_HTML)]))).rejects.toThrow(
+      VenusSessionExpiredError,
+    );
   });
 });

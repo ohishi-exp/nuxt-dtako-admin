@@ -79,6 +79,7 @@ import {
   type DvrSessionRecord,
 } from "./dvr-session";
 import {
+  addFuelRow,
   downloadEditedZip,
   downloadOperationCsvZip,
   getExpenseForm,
@@ -96,6 +97,7 @@ import {
   unlockOperation,
   verifyReadNoDescending,
   withVehicleNarrow,
+  type AddFuelRowParams,
   type SaveFuelRowParams,
   type SaveWorkRowParams,
 } from "./theearth-report-client";
@@ -1404,6 +1406,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/daily-report-api/expense/save" && request.method === "POST") {
       return this.handleReportExpenseSave(record!, request);
     }
+    if (url.pathname === "/daily-report-api/expense/add" && request.method === "POST") {
+      return this.handleReportExpenseAdd(record!, request);
+    }
     if (url.pathname === "/daily-report-api/expense/recalculate" && request.method === "POST") {
       return this.handleReportExpenseRecalculate(record!, request);
     }
@@ -1595,6 +1600,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return dvrJsonError(400, "JSON body が必要です");
     }
     return this.callReportAction(record, "給油行の登録", (jar) => saveFuelRow(jar, body));
+  }
+
+  /** POST /daily-report-api/expense/add — 新規行テンプレート (`itxt*`) +
+   * `btnInsertButton` postback で給油行を 1 件追加する (body は AddFuelRowParams、
+   * 給油 0 件の運行でも追加できる)。 */
+  private async handleReportExpenseAdd(record: ReportSessionRecord, request: Request): Promise<Response> {
+    let body: AddFuelRowParams;
+    try {
+      body = (await request.json()) as AddFuelRowParams;
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    return this.callReportAction(record, "給油行の追加", (jar) => addFuelRow(jar, body));
   }
 
   /** POST /daily-report-api/expense/recalculate — `btnScore` postback で評価点を
