@@ -63,3 +63,11 @@ branches = true
 [[files]]
 path = "app/utils/tariff/data/common.ts"
 branches = true
+
+[[files]]
+path = "server/utils/tariff-lookup.ts"
+branches = true
+
+[[files]]
+path = "server/api/tariff/fare.get.ts"
+branches = true
