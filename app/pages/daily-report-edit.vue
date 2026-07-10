@@ -192,6 +192,25 @@ const periodForm = reactive({
 const vehicleCd = ref('')
 const VEHICLE_CD_RE = /^\d{1,8}$/
 
+/** 検索条件を sessionStorage に保持する (リロードで毎回消えるのは面倒、という
+ * ユーザー要望)。タブを閉じれば消える (localStorage にはしない)。 */
+const SEARCH_STORAGE_KEY = 'daily-report-edit:search'
+
+function restoreSearchForm() {
+  try {
+    const raw = sessionStorage.getItem(SEARCH_STORAGE_KEY)
+    if (!raw) return
+    const saved = JSON.parse(raw) as Partial<{ from: string, to: string, vehicleCd: string, driverFilter: string }>
+    if (typeof saved.from === 'string' && saved.from) periodForm.from = saved.from
+    if (typeof saved.to === 'string' && saved.to) periodForm.to = saved.to
+    if (typeof saved.vehicleCd === 'string') vehicleCd.value = saved.vehicleCd
+    if (typeof saved.driverFilter === 'string') driverFilter.value = saved.driverFilter
+  }
+  catch {
+    // 壊れた保存値は無視して既定値で開く
+  }
+}
+
 const rows = ref<DailyReportRow[]>([])
 const sortOk = ref<boolean | null>(null)
 const listLoading = ref(false)
@@ -206,6 +225,20 @@ const filteredRows = computed(() => {
   const q = driverFilter.value.trim()
   if (!q) return rows.value
   return rows.value.filter(r => (r.driverCd1 ?? '').includes(q) || (r.driverName1 ?? '').includes(q))
+})
+
+watch([() => periodForm.from, () => periodForm.to, vehicleCd, driverFilter], () => {
+  try {
+    sessionStorage.setItem(SEARCH_STORAGE_KEY, JSON.stringify({
+      from: periodForm.from,
+      to: periodForm.to,
+      vehicleCd: vehicleCd.value,
+      driverFilter: driverFilter.value,
+    }))
+  }
+  catch {
+    // ストレージが使えない環境では保持しないだけ
+  }
 })
 
 /** datetime-local (YYYY-MM-DDTHH:mm) → theearth 形式 (YYYY/MM/DD HH:mm、
@@ -440,6 +473,7 @@ async function openExpenseModal(row: DailyReportRow) {
   expenseMasters.value = emptyExpenseMasters()
   expenseError.value = null
   recalculateResult.value = null
+  resetNewFuelRow()
   linkSysEnabled.value = false
   linkResult.value = null
   expenseLoading.value = true
@@ -473,6 +507,61 @@ function closeExpenseModal() {
   recalculateResult.value = null
   linkSysEnabled.value = false
   linkResult.value = null
+}
+
+// 新規給油行 (テーブル最下段の入力行、theearth の最下段テンプレート行と同じ操作感)。
+// 給油 0 件の運行でも追加できる。
+const newFuelRow = reactive({ supplyCategory: '', supplyStation: '', supplyType: '', dateTime: '', quantity: '' })
+const addingFuelRow = ref(false)
+
+function resetNewFuelRow() {
+  newFuelRow.supplyCategory = ''
+  newFuelRow.supplyStation = ''
+  newFuelRow.supplyType = ''
+  newFuelRow.dateTime = ''
+  newFuelRow.quantity = ''
+}
+
+const newFuelCategoryName = computed(() => expenseMasters.value.supplyCategory[newFuelRow.supplyCategory.trim()] ?? '')
+const newFuelStationName = computed(() => expenseMasters.value.supplyStation[newFuelRow.supplyStation.trim()] ?? '')
+const newFuelTypeName = computed(() => typeMasterFor(newFuelRow.supplyCategory)[newFuelRow.supplyType.trim()] ?? '')
+
+async function addNewFuelRow() {
+  const s = session.value
+  const target = selectedRow.value
+  if (!s || !target) return
+  addingFuelRow.value = true
+  expenseError.value = null
+  try {
+    const res = await $fetch<{ fuelRows: FuelRow[], masters: ExpenseMasters }>('/daily-report-api/expense/add', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: {
+        opeNo: target.operationNo,
+        startOpe: target.startDateTime,
+        supplyCategory: newFuelRow.supplyCategory.trim(),
+        supplyStation: newFuelRow.supplyStation.trim(),
+        supplyType: newFuelRow.supplyType.trim(),
+        dateTime: newFuelRow.dateTime.trim(),
+        quantity: newFuelRow.quantity.trim(),
+      },
+    })
+    fuelRows.value = res.fuelRows
+    if (res.masters && Object.keys(res.masters.supplyCategory).length > 0) expenseMasters.value = res.masters
+    syncFuelEditForm()
+    resetNewFuelRow()
+  }
+  catch (e) {
+    if (dailyReportErrorStatus(e) === 401) {
+      expireSession(dailyReportErrorMessage(e))
+      expenseModalOpen.value = false
+      return
+    }
+    expenseError.value = dailyReportErrorMessage(e)
+  }
+  finally {
+    addingFuelRow.value = false
+  }
 }
 
 async function saveFuelRow(ctrlIndex: number) {
@@ -681,6 +770,7 @@ async function startWorkEdit(row: WorkRow) {
   const s = session.value
   const target = workSelectedRow.value
   if (!s || !target) return
+  if (workEditing.value || workEditStarting.value !== null) return // 編集中は他行クリックを無視
   workEditStarting.value = row.ctrlIndex
   workError.value = null
   try {
@@ -922,6 +1012,7 @@ async function saveReviseDriver() {
 }
 
 onMounted(() => {
+  restoreSearchForm()
   restoreSession()
   if (session.value) loadList()
   else showLoginPanel.value = true
@@ -1119,9 +1210,6 @@ onMounted(() => {
             <div v-if="expenseLoading" class="text-center py-8 text-gray-400">
               読み込み中…
             </div>
-            <div v-else-if="fuelRows.length === 0" class="text-center py-8 text-gray-400">
-              給油データがありません
-            </div>
             <div v-else class="overflow-x-auto">
               <table class="w-full text-sm">
                 <thead>
@@ -1173,6 +1261,43 @@ onMounted(() => {
                         label="保存"
                         :loading="savingCtrlIndex === row.ctrlIndex"
                         @click="saveFuelRow(row.ctrlIndex)"
+                      />
+                    </td>
+                  </tr>
+                  <!-- 新規行 (theearth の最下段テンプレート行と同じ。給油 0 件でも追加できる) -->
+                  <tr class="border-t border-gray-200 dark:border-gray-800">
+                    <td class="py-1 pr-2">
+                      <UInput v-model="newFuelRow.supplyCategory" placeholder="分類" class="w-16" />
+                    </td>
+                    <td class="py-1 pr-2 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                      {{ newFuelCategoryName || '—' }}
+                    </td>
+                    <td class="py-1 pr-2">
+                      <UInput v-model="newFuelRow.supplyStation" placeholder="区分" class="w-16" />
+                    </td>
+                    <td class="py-1 pr-2 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                      {{ newFuelStationName || '—' }}
+                    </td>
+                    <td class="py-1 pr-2">
+                      <UInput v-model="newFuelRow.supplyType" placeholder="種別" class="w-16" />
+                    </td>
+                    <td class="py-1 pr-2 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                      {{ newFuelTypeName || '—' }}
+                    </td>
+                    <td class="py-1 pr-2">
+                      <UInput v-model="newFuelRow.dateTime" placeholder="26/07/07 10:29" class="w-40" />
+                    </td>
+                    <td class="py-1 pr-2">
+                      <UInput v-model="newFuelRow.quantity" placeholder="100.0" class="w-20" />
+                    </td>
+                    <td class="py-1 pr-2 text-right whitespace-nowrap">
+                      <UButton
+                        size="xs"
+                        variant="outline"
+                        icon="i-lucide-plus"
+                        label="追加"
+                        :loading="addingFuelRow"
+                        @click="addNewFuelRow"
                       />
                     </td>
                   </tr>
@@ -1317,8 +1442,13 @@ onMounted(() => {
                           <UButton size="xs" variant="ghost" label="取消" @click="cancelWorkEdit" />
                         </td>
                       </tr>
-                      <!-- 表示行 -->
-                      <tr v-else class="border-b border-gray-100 dark:border-gray-900">
+                      <!-- 表示行 (行クリックで編集開始 = theearth の鉛筆ボタン相当) -->
+                      <tr
+                        v-else
+                        class="border-b border-gray-100 dark:border-gray-900"
+                        :class="workEditing ? 'opacity-60' : workEditStarting === row.ctrlIndex ? 'opacity-50 animate-pulse' : 'cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-900'"
+                        @click="startWorkEdit(row)"
+                      >
                         <td class="py-2 pr-2 whitespace-nowrap">
                           {{ row.eventCd }} {{ row.eventName }}
                         </td>
@@ -1356,22 +1486,15 @@ onMounted(() => {
                         <td class="py-2 pr-2 whitespace-nowrap">
                           {{ row.endCityName || '-' }}
                         </td>
-                        <td class="py-2 pr-2 text-right whitespace-nowrap">
-                          <UButton
-                            size="xs"
-                            variant="outline"
-                            icon="i-lucide-pencil"
-                            label="編集"
-                            :loading="workEditStarting === row.ctrlIndex"
-                            :disabled="workEditing !== null"
-                            @click="startWorkEdit(row)"
-                          />
-                        </td>
+                        <td class="py-2 pr-2" />
                       </tr>
                     </template>
                   </tbody>
                 </table>
               </div>
+              <p class="text-xs text-gray-400">
+                行をクリックすると編集できます (theearth の鉛筆ボタンと同じ)。
+              </p>
             </template>
 
             <div v-if="workError" class="text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">

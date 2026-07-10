@@ -487,6 +487,97 @@ export async function saveFuelRow(
   return { fuelRows: parseFuelRows(postHtml) };
 }
 
+/** 新規行テンプレートのフィールド名を name パターンで解決する。lstFuel の
+ * テンプレート行の name は `lstFuel$ctrl<N>$<field>` (lstWork と同型) と
+ * `lstFuel$<field>` (index 無し) の両形式に耐性を持たせる (テンプレート行の
+ * 実 name 形式は staging で確定させる。見つからなければ loud fail)。 */
+function findFuelTemplateFieldName(html: string, field: string): string | null {
+  const re = new RegExp(`^lstFuel(?:\\$ctrl\\d+)?\\$${field}$`);
+  for (const m of html.matchAll(/<input\b([^>]*)>/gi)) {
+    const nameMatch = m[1].match(/\bname=["']([^"']+)["']/i);
+    if (nameMatch && re.test(nameMatch[1])) return nameMatch[1];
+  }
+  return null;
+}
+
+/** 新規給油行の入力フィールド (テンプレート行の itxt*)。原文スペルミス
+ * "Quantuty" をそのまま使う。 */
+const FUEL_NEW_FIELD_SUFFIXES = {
+  supplyCategory: "itxtSupplyCategory",
+  supplyStation: "itxtSupplyStation",
+  supplyType: "itxtSupplyType",
+  dateTime: "itxtDateTime",
+  quantity: "itxtQuantuty",
+} as const;
+
+export interface AddFuelRowParams {
+  opeNo: string;
+  startOpe: string;
+  supplyCategory: string;
+  supplyStation: string;
+  supplyType: string;
+  /** "26/07/07 10:29" 形式 (etxtDateTime と同じマスク表示形式)。 */
+  dateTime: string;
+  quantity: string;
+}
+
+export interface AddFuelRowResult {
+  fuelRows: FuelRow[];
+  masters: ExpenseMasters;
+}
+
+/** POST 相当: 給油行を 1 件追加する (新規行テンプレートの `itxt*` に値を入れて
+ * `btnInsertButton` postback。給油 0 件の運行でもテンプレート行は常駐するため
+ * 追加できる)。postback body は hidden + lstFuel 系フィールドのみ
+ * (`extractLstFuelTextInputs`、event validation 対策は saveWorkRowFromPage の
+ * doc comment 参照)。 */
+export async function addFuelRow(
+  jar: CookieJar,
+  params: AddFuelRowParams,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<AddFuelRowResult> {
+  validateOpeNo(params.opeNo);
+  validateStartOpe(params.startOpe);
+  const url = buildOperationExpenseUrl(params.opeNo, params.startOpe);
+  const pageHtml = await fetchEditPageHtml(jar, url, "経費入力ページ", fetchImpl, timeoutMs);
+
+  const insertButtonName = findFuelTemplateFieldName(pageHtml, "btnInsertButton");
+  if (!insertButtonName) {
+    throw new TheearthClientError(
+      "給油の新規行ボタン (btnInsertButton) が見つかりません — theearth-np のページ仕様変更の可能性があります",
+    );
+  }
+  const body = extractLstFuelTextInputs(pageHtml);
+  for (const [key, suffix] of Object.entries(FUEL_NEW_FIELD_SUFFIXES) as [keyof typeof FUEL_NEW_FIELD_SUFFIXES, string][]) {
+    const fieldName = findFuelTemplateFieldName(pageHtml, suffix);
+    if (!fieldName) {
+      throw new TheearthClientError(
+        `給油の新規行フィールド (${suffix}) が見つかりません — theearth-np のページ仕様変更の可能性があります`,
+      );
+    }
+    body[fieldName] = params[key];
+  }
+
+  const postHtml = await postButton(jar, url, pageHtml, insertButtonName, "", fetchImpl, timeoutMs, body);
+  assertNoOtherEditConflict(postHtml, "給油行の追加");
+
+  let fuelRows = parseFuelRows(postHtml);
+  let mastersHtml = postHtml;
+  if (fuelRows.length === 0) {
+    // 追加後の応答が一覧を再描画しないケースに備えて再 GET で読み直す。
+    const rereadHtml = await fetchEditPageHtml(jar, url, "経費入力ページ", fetchImpl, timeoutMs);
+    fuelRows = parseFuelRows(rereadHtml);
+    mastersHtml = rereadHtml;
+    if (fuelRows.length === 0) {
+      throw new TheearthClientError(
+        "給油行の追加後も給油行を確認できませんでした — theearth 側で追加が受け付けられなかった可能性があります",
+      );
+    }
+  }
+  return { fuelRows, masters: parseExpenseMasters(mastersHtml) };
+}
+
 export interface RecalculateExpenseResult {
   /** 再集計成功後に「システム連動開始」ボタンが enable されたか
    * (SKILL.md: 再集計成功の副次確認シグナル)。 */
@@ -1601,6 +1692,45 @@ export interface WorkForm {
   eventOptions: WorkEventOption[];
 }
 
+/** 編集モード応答から postback に載せる lstWork 系フィールドを抽出する:
+ * text/hidden input (etxt・entxt・itxt・intxt 系) + select (eddl/iddl の selected) +
+ * checked な checkbox。**lstWork 以外のフォーム (txt* / ddlCourse_* 等) は送らない**
+ * (実ブラウザの全フォーム submit と違い、JS が options を埋める select に空値を
+ * post すると event validation で 500 になるため。給油の
+ * `extractLstFuelTextInputs` と同じ「対象リストだけ送る」方式)。 */
+export function extractLstWorkPostFields(html: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const m of html.matchAll(/<input\b([^>]*)>/gi)) {
+    const attrs = m[1];
+    const nameMatch = attrs.match(/\bname=["']([^"']+)["']/i);
+    if (!nameMatch || !nameMatch[1].startsWith("lstWork")) continue;
+    const type = (attrs.match(/\btype=["']([^"']+)["']/i)?.[1] ?? "text").toLowerCase();
+    const valueMatch = attrs.match(/\bvalue=["']([^"']*)["']/i);
+    if (type === "text" || type === "hidden") {
+      result[nameMatch[1]] = valueMatch ? valueMatch[1] : "";
+    } else if (type === "checkbox" && /\bchecked\b/i.test(attrs)) {
+      result[nameMatch[1]] = valueMatch?.[1] || "on";
+    }
+    // submit/image 等の押下ボタンは呼び出し側が明示的に足す
+  }
+  for (const m of html.matchAll(/<select\b([^>]*)>([\s\S]*?)<\/select>/gi)) {
+    const nameMatch = m[1].match(/\bname=["']([^"']+)["']/i);
+    if (!nameMatch || !nameMatch[1].startsWith("lstWork")) continue;
+    let selected: string | null = null;
+    let first: string | null = null;
+    for (const om of m[2].matchAll(/<option\b([^>]*)>/gi)) {
+      const value = om[1].match(/\bvalue=["']([^"']*)["']/i)?.[1] ?? "";
+      if (first === null) first = value;
+      if (/\bselected\b/i.test(om[1])) {
+        selected = value;
+        break;
+      }
+    }
+    result[nameMatch[1]] = selected ?? first ?? "";
+  }
+  return result;
+}
+
 function parseWorkRows(html: string): WorkRow[] {
   const indexes = [...html.matchAll(/id="lstWork_lblEventCD_(\d+)"/g)].map((m) => Number(m[1]));
   return indexes.map((ctrlIndex) => {
@@ -1775,10 +1905,14 @@ export interface SaveWorkRowResult {
 /** POST 相当: 編集モード行の値を書き換えて `btnUpdateButton` で保存する。
  *
  * **`editHtml` には `startWorkRowEdit` が返したページをそのまま渡すこと**
- * (呼び出し元 DO が storage に保持している)。postback body は編集モード応答の
- * 全フォーム直列化 + 変更フィールドの上書き (部分送信の FormatException 500 を
- * 避ける、Refs #199 の給油と同じ設計)。作業種別は select (`eddlEventName`) と
- * 同期用 text (`etxtEventCD`) の両方を書き換える。 */
+ * (呼び出し元 DO が storage に保持している)。postback body は
+ * **hidden + lstWork 系フィールドのみ** (`extractLstWorkPostFields`) + 変更
+ * フィールドの上書き。全フォーム直列化 (`serializeFormFields`) は使わない —
+ * JS が options を埋める DropDownList (`ddlCourse_*` 等) に空値を post すると
+ * ASP.NET の event validation が「無効なポストバック」(HTTP 500) で弾く
+ * (staging 実測 2026-07-10)。lstWork 内は全フィールド送る (部分送信の
+ * FormatException 500 を避ける、Refs #199 の給油と同じ設計)。作業種別は
+ * select (`eddlEventName`) と同期用 text (`etxtEventCD`) の両方を書き換える。 */
 export async function saveWorkRowFromPage(
   jar: CookieJar,
   editHtml: string,
@@ -1798,7 +1932,7 @@ export async function saveWorkRowFromPage(
     );
   }
 
-  const body = serializeFormFields(editHtml);
+  const body = extractLstWorkPostFields(editHtml);
   const setField = (suffix: string, value: string) => {
     const field = findFormFieldById(editHtml, workRowId(params.ctrlIndex, suffix));
     if (!field) {
