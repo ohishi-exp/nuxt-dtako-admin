@@ -420,6 +420,32 @@ title = 「作業入力」(空白パディング多数)。
   `btnUpdateButton_<N>` postback (**編集モード応答の全フォーム直列化で送る**。
   worker 実装 = `startWorkRowEdit` + `saveWorkRowFromPage`)
 
+**★ 行編集の保存は fetch では 3 つの条件を満たさないと DB に反映されない (2026-07-10、
+実ブラウザの生 XHR を cdp-pair で捕獲して確定)**。どれか 1 つでも欠けると
+**HTTP 200・エラー無し・UI 上は更新されたように見えるのに DB に一切書かれない**
+(「無音 no-op」)。3 度の PR で表面症状 (500) だけ潰しても保存されなかった真因:
+
+1. **MS AJAX 非同期 postback 必須**。`lstWork` は `UpdatePanel1` 内。同期 postback
+   (通常の form POST) では更新コマンドが発火しない。実ブラウザは XHR で送る:
+   - header `X-MicrosoftAjax: Delta=true` / `X-Requested-With: XMLHttpRequest`
+   - body に `ScriptManager=UpdatePanel1|lstWork$ctrl0$btnUpdateButton` と `__ASYNCPOST=true`
+   - 応答は完全 HTML でなく delta 形式 (`len|updatePanel|UpdatePanel1|<html>|` +
+     hidden は `len|hiddenField|NAME|VALUE|`)。**編集開始 (`btnEditButton`) も同じく async**。
+2. **全フォームフィールド (disabled 含む) を送る**。実ブラウザは 65 フィールド送信 =
+   編集中の行 (`etxt*`/`eddl*`/`entxt*`) + **disabled な運行ヘッダ (`txtOperationStart/
+   EndDateTime`/`txtDest*`/`txtCourse_*`) とテンプレート行 (ctrl7) も全部**。MS AJAX は
+   disabled も直列化する。省くと ItemUpdating が無音 no-op。**唯一の例外は option が
+   0 件の空 `<select>` (`ddlCourse_*`、JS が options を後入れ)** — これだけは空値 post が
+   event validation 500 になるので**除外**する。
+3. **★決定打: 作業種別は `eddlEventName`(新値) にだけ入れ、`etxtEventCD`(元値) は
+   そのまま**にする。サーバーは**両者の差分で「変更あり」を判定**しており、両方を
+   新値にすると「変更なし」とみなして黙って無視する。両方新値にしていたのが
+   「UI は OK だが DB 反映されない」の最終的な真因だった。
+
+worker 実装: `startWorkRowEdit`(async btnEditButton→delta を envelope 化して DO 保存) +
+`saveWorkRowFromPage`(envelope から async btnUpdateButton) + `asyncPostback` /
+`serializeAllFieldsSkippingEmptySelects` / `findEnclosingUpdatePanelId` ヘルパ。
+
 **運行情報 (`txt*`)**:
 - 出庫/帰庫日時: `txtOperationStartDateTime` / `txtOperationEndDateTime` (`YYYY/MM/DD HH:mm:ss`)
 - 出庫/帰庫地点: `txtOperationStart{Place,City}{CD,Name}` / `txtOperationEnd{Place,City}{CD,Name}`
