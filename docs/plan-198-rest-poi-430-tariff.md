@@ -144,4 +144,19 @@ POI マップ / 430 / 見積もり UI は並行トラックとして進められ
 ## 進捗
 
 - Phase 0 (POI パイプライン PoC): **完了** — PR #218 (2026-07-10 merge)
-- Phase 1 以降: 未着手。各フェーズ 1 PR 以上に分割する
+- 最終ゴール定義の計画追記: **完了** — PR #219 (2026-07-10 merge)
+- Phase 1 (休憩ポイントマップ UI): **完了** — PR #220 (2026-07-10 merge)
+- Phase 4 (標準的運賃 告示209号 データ化 + 計算ロジック、九州ブロック): **完了** — PR #221 (2026-07-10 merge)
+- Phase 3/5 (全ト協 Supabase lookup + snapshot fallback + 検算ゴールデン): **完了** — PR #222 (2026-07-10 merge)
+- Phase 7a (一番星 unchin_candidates に車輌C+車輌H 車番を追加): **完了** — ohishi-exp/rust-ichibanboshi#73 (2026-07-10 merge)
+- Phase 8a (rust-alc-api の dtako 実運行一覧に vehicle_cd を追加 + internal_router 新設): **完了** —
+  ippoan/rust-alc-api#561, #562 (2026-07-10 merge)。合わせて ippoan/auth-worker#362
+  (`/alc-internal-proxy` の `/api/internal/operations` allowlist 追加) も完了
+- Phase 8b (本 repo に service-binding 用 `/api/tariff/dtako-operations` 配信 route を追加):
+  **完了** — 本 PR。nuxt-ichibanboshi が `INTERNAL_SHARED_SECRET` + `tenant_id` で
+  dtako 実運行 (`unkoNo`/`vehicleCd`/`date`/`distanceKm`) を取得できるようになった
+- Phase 8c (nuxt-ichibanboshi 側の呼び出し実装 + 一番星売上明細との突合ロジック): **未着手**。
+  nuxt-ichibanboshi に `INTERNAL_SHARED_SECRET` binding + 本 repo への service binding
+  (`wrangler.toml`) を追加し、Phase 8 の突合キー (車番+運行日+積地卸地) で
+  join した上で `/api/tariff/fare` (Phase 4/5) を呼んで標準的運賃と比較する
+- Phase 2 (OSRM ルーティング) / Phase 6 (見積もり UI) / Phase 8 比較ダッシュボード本体: 未着手
