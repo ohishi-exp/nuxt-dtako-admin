@@ -39,3 +39,11 @@ branches = true
 [[files]]
 path = "app/components/EventCrewPanel.vue"
 branches = true
+
+[[files]]
+path = "app/utils/poi.ts"
+branches = true
+
+[[files]]
+path = "server/api/poi/[region].get.ts"
+branches = true
