@@ -713,6 +713,8 @@ const workRecalculateResult = ref<string | null>(null)
 const workLinkSysEnabled = ref(false)
 const workLinking = ref(false)
 const workLinkResult = ref<string | null>(null)
+// この運行の csvdata.zip ダウンロード (作業モーダル内、単一運行のみ)
+const workOpeZipLoading = ref(false)
 // 編集モード中の行 (edit-start の応答をそのまま編集する)。null = 編集中でない
 const workEditing = ref<WorkEditFormRow | null>(null)
 const workEditStarting = ref<number | null>(null)
@@ -924,6 +926,37 @@ async function startWorkLink() {
   }
 }
 
+/** この運行の csvdata.zip ダウンロード (作業モーダル版)。expense モーダルの
+ * `downloadOperationZip` と同じ endpoint (`/daily-report-api/zip`) を叩く。 */
+async function downloadWorkOperationZip() {
+  const s = session.value
+  const target = workSelectedRow.value
+  if (!s || !target) return
+  workOpeZipLoading.value = true
+  workError.value = null
+  try {
+    const params = new URLSearchParams({ opeNo: target.operationNo, startOpe: target.startDateTime })
+    const res = await fetch(`/daily-report-api/zip?${params.toString()}`, { headers: authHeaders() })
+    if (!res.ok) {
+      const data = await res.json().catch(() => null) as { error?: string } | null
+      const message = data?.error ?? `csvdata.zip の取得に失敗しました (HTTP ${res.status})`
+      if (res.status === 401) {
+        expireSession(message)
+        workModalOpen.value = false
+        return
+      }
+      throw new Error(message)
+    }
+    await downloadBlobResponse(res, `csvdata-${target.operationNo}.zip`)
+  }
+  catch (e) {
+    workError.value = e instanceof Error ? e.message : String(e)
+  }
+  finally {
+    workOpeZipLoading.value = false
+  }
+}
+
 // --- 乗務員変更 (F-DES1011 運行データ修正) モーダル (Refs #171) ---
 
 const reviseModalOpen = ref(false)
@@ -943,6 +976,8 @@ const reviseRecalculateResult = ref<string | null>(null)
 const reviseLinkSysEnabled = ref(false)
 const reviseLinking = ref(false)
 const reviseLinkResult = ref<string | null>(null)
+// この運行の csvdata.zip ダウンロード (乗務員モーダル内、単一運行のみ)
+const reviseOpeZipLoading = ref(false)
 const DRIVER_CD_RE = /^\d{1,8}$/
 
 /** 入力中の乗務員CD / 現在の乗務員CD の名称 (マスタ live 解決)。 */
@@ -1062,6 +1097,37 @@ async function startReviseLink() {
   }
   finally {
     reviseLinking.value = false
+  }
+}
+
+/** この運行の csvdata.zip ダウンロード (乗務員モーダル版)。expense モーダルの
+ * `downloadOperationZip` と同じ endpoint (`/daily-report-api/zip`) を叩く。 */
+async function downloadReviseOperationZip() {
+  const s = session.value
+  const target = reviseSelectedRow.value
+  if (!s || !target) return
+  reviseOpeZipLoading.value = true
+  reviseError.value = null
+  try {
+    const params = new URLSearchParams({ opeNo: target.operationNo, startOpe: target.startDateTime })
+    const res = await fetch(`/daily-report-api/zip?${params.toString()}`, { headers: authHeaders() })
+    if (!res.ok) {
+      const data = await res.json().catch(() => null) as { error?: string } | null
+      const message = data?.error ?? `csvdata.zip の取得に失敗しました (HTTP ${res.status})`
+      if (res.status === 401) {
+        expireSession(message)
+        reviseModalOpen.value = false
+        return
+      }
+      throw new Error(message)
+    }
+    await downloadBlobResponse(res, `csvdata-${target.operationNo}.zip`)
+  }
+  catch (e) {
+    reviseError.value = e instanceof Error ? e.message : String(e)
+  }
+  finally {
+    reviseOpeZipLoading.value = false
   }
 }
 
@@ -1620,6 +1686,14 @@ onMounted(() => {
                   title="作業時間再集計の成功後に有効化されます (theearth へデータ連動)"
                   @click="startWorkLink"
                 />
+                <UButton
+                  icon="i-lucide-file-archive"
+                  label="この運行の csvdata.zip"
+                  variant="outline"
+                  :loading="workOpeZipLoading"
+                  title="この運行 1 件だけの編集後 csvdata.zip をダウンロード"
+                  @click="downloadWorkOperationZip"
+                />
               </div>
               <UButton label="閉じる" variant="ghost" @click="closeWorkModal" />
             </div>
@@ -1703,6 +1777,14 @@ onMounted(() => {
                   :loading="reviseLinking"
                   title="作業時間再集計の成功後に有効化されます (theearth へデータ連動)"
                   @click="startReviseLink"
+                />
+                <UButton
+                  icon="i-lucide-file-archive"
+                  label="この運行の csvdata.zip"
+                  variant="outline"
+                  :loading="reviseOpeZipLoading"
+                  title="この運行 1 件だけの編集後 csvdata.zip をダウンロード"
+                  @click="downloadReviseOperationZip"
                 />
               </div>
               <UButton label="閉じる" variant="ghost" @click="closeReviseModal" />
