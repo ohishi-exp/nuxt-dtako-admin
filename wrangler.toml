@@ -10,6 +10,13 @@ compatibility_flags = ["nodejs_compat"]
 # release が CF error 10211/10061 を踏まない、nuxt-items/items-sync と同型)。
 main = "./worker/index.ts"
 assets = { directory = ".output/public/", binding = "ASSETS" }
+# release tag の `wrangler versions upload` (no-traffic) が version ごとの
+# preview URL (`<hash>-dtako-admin.<subdomain>.workers.dev`) を出力するよう
+# opt-in する (auth-worker と同型)。frontend-ci がこの URL を pending-release
+# webhook で ci-dashboard に報告し、/release-wave の Pending releases と
+# preview-dtako.ippoan.org router (flip 前 E2E) が使う。production traffic
+# は下の custom domain route のままで独立 (Refs ippoan/ci-dashboard#472)。
+preview_urls = true
 
 [build]
 command = "npm run build"
