@@ -71,3 +71,11 @@ branches = true
 [[files]]
 path = "server/api/tariff/fare.get.ts"
 branches = true
+
+[[files]]
+path = "server/utils/alc-internal-proxy.ts"
+branches = true
+
+[[files]]
+path = "server/api/tariff/dtako-operations.get.ts"
+branches = true
