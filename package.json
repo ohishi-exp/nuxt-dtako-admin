@@ -9,7 +9,8 @@
     "preview": "nuxt preview",
     "deploy": "nuxt build && wrangler deploy",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "poi:build": "node scripts/poi/build-poi.ts"
   },
   "dependencies": {
     "@googlemaps/js-api-loader": "^1.16.8",
