@@ -721,13 +721,16 @@ const workEditStarting = ref<number | null>(null)
 const workSaving = ref(false)
 
 /** 作業種別ごとの行スタイル (theearth-np 実ページの明細行色分けを再現、2026-07-11
- * 実機確認)。積み/降しは行の背景色、休憩/休息は文字色で区別される。 */
+ * 実機確認)。積み/降しは行の背景色、休憩/休息は文字色で区別される。
+ * dark mode の背景色はページ背景 (rgb(15,23,43)、輝度約22.7) と同じ輝度になるよう
+ * HSL で明度を揃えた値 (#091a1e / #1e1709) を使う — 単純に Tailwind の 900/950 系を
+ * 使うとページ背景より明るくなってしまう (彩度がある分、同じ明度でも輝度が上がるため)。 */
 function workRowClass(eventCd: string): string {
   switch (eventCd) {
-    case '202': return 'bg-cyan-50 dark:bg-cyan-950' // 積み
-    case '203': return 'bg-yellow-50 dark:bg-yellow-950' // 降し
-    case '301': return 'text-blue-600 dark:text-blue-400' // 休憩
-    case '302': return 'text-red-600 dark:text-red-400' // 休息
+    case '202': return 'bg-cyan-50 dark:bg-[#091a1e]' // 積み
+    case '203': return 'bg-yellow-50 dark:bg-[#1e1709]' // 降し
+    case '301': return 'text-blue-600 dark:text-blue-500' // 休憩
+    case '302': return 'text-red-600 dark:text-red-500' // 休息
     default: return ''
   }
 }
