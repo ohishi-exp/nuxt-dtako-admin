@@ -724,8 +724,8 @@ const workSaving = ref(false)
  * 実機確認)。積み/降しは行の背景色、休憩/休息は文字色で区別される。 */
 function workRowClass(eventCd: string): string {
   switch (eventCd) {
-    case '202': return 'bg-cyan-50 dark:bg-cyan-900/70' // 積み
-    case '203': return 'bg-yellow-50 dark:bg-yellow-900/70' // 降し
+    case '202': return 'bg-cyan-50 dark:bg-cyan-950' // 積み
+    case '203': return 'bg-yellow-50 dark:bg-yellow-950' // 降し
     case '301': return 'text-blue-600 dark:text-blue-400' // 休憩
     case '302': return 'text-red-600 dark:text-red-400' // 休息
     default: return ''
