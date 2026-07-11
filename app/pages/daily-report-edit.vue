@@ -720,6 +720,18 @@ const workEditing = ref<WorkEditFormRow | null>(null)
 const workEditStarting = ref<number | null>(null)
 const workSaving = ref(false)
 
+/** 作業種別ごとの行スタイル (theearth-np 実ページの明細行色分けを再現、2026-07-11
+ * 実機確認)。積み/降しは行の背景色、休憩/休息は文字色で区別される。 */
+function workRowClass(eventCd: string): string {
+  switch (eventCd) {
+    case '202': return 'bg-cyan-50 dark:bg-cyan-950/40' // 積み
+    case '203': return 'bg-yellow-50 dark:bg-yellow-950/40' // 降し
+    case '301': return 'text-blue-600 dark:text-blue-400' // 休憩
+    case '302': return 'text-red-600 dark:text-red-400' // 休息
+    default: return ''
+  }
+}
+
 /** USelect (reka-ui) は空文字 value の item を許可しないため、空 value の option
  * (見出し行等) は除外する。選択肢が取れなかった場合はテキスト入力にフォールバック。 */
 const workEventSelectItems = computed(() => {
@@ -1605,7 +1617,10 @@ onMounted(() => {
                       <tr
                         v-else
                         class="border-b border-gray-100 dark:border-gray-900"
-                        :class="workEditing ? 'opacity-60' : workEditStarting === row.ctrlIndex ? 'opacity-50 animate-pulse' : 'cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-900'"
+                        :class="[
+                          workRowClass(row.eventCd),
+                          workEditing ? 'opacity-60' : workEditStarting === row.ctrlIndex ? 'opacity-50 animate-pulse' : 'cursor-pointer hover:brightness-95 dark:hover:brightness-125',
+                        ]"
                         @click="startWorkEdit(row)"
                       >
                         <td class="py-2 pr-2 whitespace-nowrap">
