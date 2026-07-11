@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   downloadEditedZip,
   downloadOperationCsvZip,
@@ -2269,31 +2269,6 @@ describe("startWorkRowEdit", () => {
     const fetchImpl = sequenceFetch([html(workFormHtml()), html(workEditDelta(0, { updateButton: false }))]);
     const jar = createCookieJar();
     await expect(startWorkRowEdit(jar, baseParams, fetchImpl)).rejects.toThrow(/btnUpdateButton/);
-  });
-
-  it("logs a diag warning when the async postback response content-length header mismatches the actual body (Refs ohishi-exp/nuxt-dtako-admin#224)", async () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const editBody = workEditDelta(0, { checkbox: "checked" });
-    const mismatchedResponse = new Response(editBody, {
-      status: 200,
-      headers: { "content-type": "text/html; charset=utf-8", "content-length": String(editBody.length + 500) },
-    });
-    const fetchImpl = sequenceFetch([html(workFormHtml()), mismatchedResponse]);
-    const jar = createCookieJar();
-    await startWorkRowEdit(jar, baseParams, fetchImpl);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("content-length mismatch"));
-    errorSpy.mockRestore();
-  });
-
-  it("diag log picks up other rows' update button indexes when the target row's is missing (Refs ohishi-exp/nuxt-dtako-admin#224)", async () => {
-    // 対象行 (ctrl0) の btnUpdateButton は無いが、他行 (ctrl5) のものは delta に含まれる —
-    // 診断ログの foundUpdateButtonIndexes 抽出ロジック (matchAll コールバック) を実行させる。
-    const deltaWithOtherRow = workDelta(
-      `${workEditModeHtml(0, { updateButton: false })}<input type="submit" id="lstWork_btnUpdateButton_5" name="lstWork$ctrl5$btnUpdateButton" value="" />`,
-    );
-    const fetchImpl = sequenceFetch([html(workFormHtml()), html(deltaWithOtherRow)]);
-    const jar = createCookieJar();
-    await expect(startWorkRowEdit(jar, baseParams, fetchImpl)).rejects.toThrow(/btnUpdateButton_0/);
   });
 
   it("throws on the other-user-editing conflict message and rejects invalid params", async () => {

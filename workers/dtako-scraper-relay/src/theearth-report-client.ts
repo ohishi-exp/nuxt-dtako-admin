@@ -684,14 +684,6 @@ async function asyncPostback(
     await throwGetError(`${pageLabel}の非同期更新`, res);
   }
   const delta = await res.text();
-  // 診断ログ (Refs ohishi-exp/nuxt-dtako-admin#224): Content-Length と実受信長が
-  // 食い違えば「受信データが欠落している」ことの直接証拠になる。一時計測。
-  const contentLengthHeader = res.headers.get("content-length");
-  if (contentLengthHeader && Number(contentLengthHeader) !== delta.length) {
-    console.error(
-      `[asyncPostback diag] ${pageLabel} content-length mismatch: header=${contentLengthHeader} actualTextLen=${delta.length}`,
-    );
-  }
   // async 応答のセッション切れは `pageRedirect` delta (ログイン画面 URL) で返る。
   if (isLoginRedirect(delta) || /\|pageRedirect\|[^|]*F-OES1010/.test(delta)) {
     throw new VenusSessionExpiredError(
@@ -1941,16 +1933,6 @@ export async function startWorkRowEdit(
 
   const updateButtonId = workRowId(params.ctrlIndex, "btnUpdateButton");
   if (!findFormFieldById(editDelta, updateButtonId)) {
-    // 診断ログ (Refs ohishi-exp/nuxt-dtako-admin#224): 大規模運行 (作業行数が多い)
-    // で受信データが欠落しているのか、送信データの問題かを切り分けるための一時計測。
-    const foundUpdateButtonIndexes = [...editDelta.matchAll(/id="lstWork_btnUpdateButton_(\d+)"/g)].map((m) =>
-      Number(m[1]),
-    );
-    console.error(
-      `[work-edit-start diag] ctrlIndex=${params.ctrlIndex} pageHtmlLen=${pageHtml.length} rowsParsed=${rows.length} ` +
-        `editDeltaLen=${editDelta.length} foundUpdateButtonIndexes=${JSON.stringify(foundUpdateButtonIndexes)} ` +
-        `editDeltaTail=${JSON.stringify(editDelta.slice(-200))}`,
-    );
     throw new TheearthClientError(
       `作業行の更新ボタン (${updateButtonId}) が見つかりません — ` +
         "編集開始 postback が想定通りに動かなかった可能性があります (theearth-np のページ仕様変更の可能性)",
