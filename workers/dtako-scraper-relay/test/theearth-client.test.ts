@@ -220,6 +220,33 @@ describe('fetchWithJar timeout handling', () => {
   })
 })
 
+describe('fetchWithJar User-Agent (Refs ohishi-exp/nuxt-dtako-admin#224)', () => {
+  it('sets a default User-Agent when the caller does not specify one', async () => {
+    let sentHeaders: Headers | undefined
+    const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+      sentHeaders = init?.headers as Headers
+      return new Response('ok', { status: 200 })
+    }) as unknown as FetchLike
+    await fetchWithJar(createCookieJar(), 'https://theearth-np.com/x', { method: 'GET' }, fetchImpl)
+    expect(sentHeaders?.get('user-agent')).toContain('Mozilla/5.0')
+  })
+
+  it('keeps the caller-specified User-Agent as-is', async () => {
+    let sentHeaders: Headers | undefined
+    const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+      sentHeaders = init?.headers as Headers
+      return new Response('ok', { status: 200 })
+    }) as unknown as FetchLike
+    await fetchWithJar(
+      createCookieJar(),
+      'https://theearth-np.com/x',
+      { method: 'GET', headers: { 'user-agent': 'custom-ua/1.0' } },
+      fetchImpl,
+    )
+    expect(sentHeaders?.get('user-agent')).toBe('custom-ua/1.0')
+  })
+})
+
 describe('extractHiddenFields', () => {
   it('extracts only the hidden fields present in the page and decodes entities', () => {
     const fields = extractHiddenFields(

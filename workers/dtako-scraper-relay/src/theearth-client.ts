@@ -128,6 +128,16 @@ export function cookieHeader(jar: CookieJar): string {
     .join("; ");
 }
 
+/** theearth-np (ASP.NET) の `Request.Browser` (User-Agent 解析によるブラウザ機能
+ * 判定) 対策。User-Agent 無しだと `ScriptManager.SupportsPartialRendering` が false
+ * と判定され、MS AJAX 非同期 postback (UpdatePanel) が
+ * 「ページは非同期ポストバックを実行していますが、ScriptManager.SupportsPartialRendering
+ * プロパティが false に設定されています」の HTTP 500 を返す (cdp-pair + preview worker
+ * 実機確認、2026-07-11、Refs ohishi-exp/nuxt-dtako-admin#224)。作業行数の多い運行に
+ * 限らず、UpdatePanel 経由の postback 全般 (lstFuel/lstWork の編集ボタン等) に影響する。 */
+const DEFAULT_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
 export async function fetchWithJar(
   jar: CookieJar,
   url: string,
@@ -138,6 +148,7 @@ export async function fetchWithJar(
   const headers = new Headers(init.headers);
   const cookie = cookieHeader(jar);
   if (cookie) headers.set("cookie", cookie);
+  if (!headers.has("user-agent")) headers.set("user-agent", DEFAULT_USER_AGENT);
   const signal = init.signal ?? makeTimeoutSignal(timeoutMs);
   let res: Response;
   try {
