@@ -1509,9 +1509,9 @@ onMounted(() => {
       </UModal>
 
       <!-- F-DES1013 作業行編集モーダル (Refs #170) -->
-      <UModal v-model:open="workModalOpen" :ui="{ content: 'max-w-6xl' }">
+      <UModal v-model:open="workModalOpen" fullscreen>
         <template #content>
-          <div class="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
+          <div class="p-6 space-y-4 h-full overflow-y-auto">
             <h3 class="text-lg font-bold">
               作業入力 — {{ workSelectedRow?.operationNo }}
             </h3>
@@ -1524,7 +1524,7 @@ onMounted(() => {
             </div>
             <template v-else>
               <!-- 作業行一覧 (inline 編集、theearth のグリッドと同じ操作感) -->
-              <div class="overflow-x-auto">
+              <div>
                 <table class="w-full text-sm">
                   <thead>
                     <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-800">
