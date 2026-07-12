@@ -71,13 +71,18 @@ import {
   VenusSessionExpiredError,
   type DvrSearchParams,
 } from "./theearth-venus-client";
+// theearth ログインセッション (dvr-api / daily-report-api 共通、Refs #233):
+// routing 解決・レコード検証・token 生成 / Bearer token 抽出は theearth-session.ts
+// が唯一の実装元 (かつての dvr-session.ts / report-session.ts ラッパーは統合済み)。
 import {
-  DVR_SESSION_TTL_MS,
-  isDvrSessionValid,
-  resolveDvrRouting,
-  type DvrRouting,
-  type DvrSessionRecord,
-} from "./dvr-session";
+  extractBearerToken,
+  generateSessionToken,
+  isTheearthSessionValid,
+  resolveTheearthRouting,
+  THEEARTH_SESSION_TTL_MS,
+  type TheearthRouting,
+  type TheearthSessionRecord,
+} from "./theearth-session";
 import {
   addFuelRow,
   downloadEditedZip,
@@ -101,16 +106,6 @@ import {
   type SaveFuelRowParams,
   type SaveWorkRowParams,
 } from "./theearth-report-client";
-import {
-  isReportSessionValid,
-  REPORT_SESSION_TTL_MS,
-  resolveReportRouting,
-  type ReportRouting,
-  type ReportSessionRecord,
-} from "./report-session";
-// token 生成 / Bearer token 抽出は dvr/report で共通の theearth-session.ts が
-// 唯一の実装元 (Refs #169、dvr-session.ts から間借りしていたのを整理)。
-import { extractBearerToken, generateSessionToken } from "./theearth-session";
 
 /** `DTAKO_ACCOUNTS` (dtako-scraper の Rust 版と同一 JSON shape) の1エントリ。 */
 interface DtakoAccountRaw {
@@ -148,15 +143,10 @@ interface EtcScrapeOutcome {
   progressLog?: { step: string; message?: string }[];
 }
 
-/** /dvr-api/* のセッションレコードを置く DO storage キー。この DO instance は
- * theearth アカウント単位 (`dvr-{comp}:{userB64}`) なので 1 キーで足りる。 */
-const DVR_SESSION_KEY = "dvr:session";
-
-/** /daily-report-api/* (日報編集、Refs #169) のセッションレコードを置く DO
- * storage キー。DVR viewer とは別の theearth ログインセッションを持つため
- * (DO instance も `report-{comp}:{userB64}` で分離、routing は
- * ./report-session.ts)、DVR_SESSION_KEY とは別 key を使う。 */
-const REPORT_SESSION_KEY = "report:session";
+/** theearth ログインセッションレコードを置く DO storage キー。/dvr-api/* と
+ * /daily-report-api/* で共有する (Refs #233)。この DO instance は theearth
+ * アカウント単位 (`theearth-{comp}:{userB64}`) なので 1 キーで足りる。 */
+const THEEARTH_SESSION_KEY = "theearth:session";
 
 /** F-DES1011 (運行データ修正) の取得時ページ HTML を置く DO storage キー。
  * F-DES1011 は最初の URL 直接 GET でだけ運行データがロードされる (2 回目の
@@ -329,16 +319,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
-    // /dvr-viewer (Refs #90) の DVR viewer API。scraper 系とは独立した経路で、
+    // /dvr-viewer 系 (Refs #90) の DVR viewer API。scraper 系とは独立した経路で、
     // 認証は auth-worker introspect ではなく「theearth へのログインそのもの」
-    // (credential pass-through、./dvr-session.ts のヘッダコメント参照)。
+    // (credential pass-through、./theearth-session.ts のヘッダコメント参照)。
     if (url.pathname.startsWith("/dvr-api/")) {
       return this.handleDvrApi(request, url);
     }
 
     // /daily-report-edit (日報編集、Refs #169) の API。DVR viewer と同型の
-    // credential pass-through だが、theearth ログインセッションは別に持つ
-    // (DO instance も report-{comp}:{userB64} で分離、resolveReportRouting 参照)。
+    // credential pass-through で、theearth ログインセッションも共有する
+    // (同一 DO instance `theearth-{comp}:{userB64}` + 同一レコード、Refs #233)。
     if (url.pathname.startsWith("/daily-report-api/")) {
       return this.handleReportApi(request, url);
     }
@@ -1030,23 +1020,23 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   // -------------------------------------------------------------------------
 
   private async handleDvrApi(request: Request, url: URL): Promise<Response> {
-    const routing = resolveDvrRouting(request.headers);
+    const routing = resolveTheearthRouting(request.headers);
     if (!routing) {
-      return dvrJsonError(400, "X-Dvr-Comp-Id / X-Dvr-User-B64 ヘッダが不正です");
+      return dvrJsonError(400, "X-Theearth-Comp-Id / X-Theearth-User-B64 ヘッダが不正です");
     }
 
     if (url.pathname === "/dvr-api/login" && request.method === "POST") {
-      return this.handleDvrLogin(request, routing);
+      return this.handleTheearthLogin(request, routing);
     }
 
-    const record = await this.ctx.storage.get<DvrSessionRecord>(DVR_SESSION_KEY);
+    const record = await this.ctx.storage.get<TheearthSessionRecord>(THEEARTH_SESSION_KEY);
     const token = extractBearerToken(request.headers);
-    if (!isDvrSessionValid(record, token, routing, Date.now())) {
+    if (!isTheearthSessionValid(record, token, routing, Date.now())) {
       return dvrJsonError(401, "セッションが無効か期限切れです。再ログインしてください");
     }
 
     if (url.pathname === "/dvr-api/logout" && request.method === "POST") {
-      await this.ctx.storage.delete(DVR_SESSION_KEY);
+      await this.ctx.storage.delete(THEEARTH_SESSION_KEY);
       return new Response(null, { status: 204 });
     }
     if (url.pathname === "/dvr-api/notifications" && request.method === "GET") {
@@ -1073,9 +1063,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return dvrJsonError(404, "Not Found");
   }
 
-  /** POST /dvr-api/login — theearth にその場でログインし、成功したら session cookie
-   * + token を保存して token を返す。credential はこのメソッドのスコープ外に出さない。 */
-  private async handleDvrLogin(request: Request, routing: DvrRouting): Promise<Response> {
+  /** POST /dvr-api/login・/daily-report-api/login (共通、Refs #233) — theearth に
+   * その場でログインし、成功したら session cookie + token を保存して token を返す。
+   * credential はこのメソッドのスコープ外に出さない。 */
+  private async handleTheearthLogin(request: Request, routing: TheearthRouting): Promise<Response> {
     let body: { user_pass?: unknown };
     try {
       body = (await request.json()) as { user_pass?: unknown };
@@ -1097,7 +1088,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       });
     } catch (err) {
       // TheearthClientError の message は自前クライアントの説明文 (credential は含まない)。
-      console.error("DVR login error:", err);
+      console.error("theearth login error:", err);
       const message =
         err instanceof TheearthClientError
           ? err.message
@@ -1106,16 +1097,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
 
     const now = Date.now();
-    const record: DvrSessionRecord = {
+    const record: TheearthSessionRecord = {
       token: generateSessionToken(),
       compId: routing.compId,
       userName: routing.userName,
       cookies: Array.from(jar.cookies.entries()),
       createdAt: now,
-      expiresAt: now + DVR_SESSION_TTL_MS,
+      expiresAt: now + THEEARTH_SESSION_TTL_MS,
     };
-    await this.ctx.storage.put(DVR_SESSION_KEY, record);
-    // handleReportLogin と同型: フロント (DvrSessionHeader.vue) が自動 kick を表示できるよう返す。
+    await this.ctx.storage.put(THEEARTH_SESSION_KEY, record);
+    // フロント (TheearthSessionHeader.vue) がライセンス超過の自動 kick を表示できるよう返す (Refs #169)。
     return Response.json({
       token: record.token,
       expires_at: record.expiresAt,
@@ -1125,19 +1116,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /** GET /dvr-api/notifications — VenusBridge の DVR 動画通知一覧。 */
-  private async handleDvrNotifications(record: DvrSessionRecord): Promise<Response> {
+  private async handleDvrNotifications(record: TheearthSessionRecord): Promise<Response> {
     const jar: CookieJar = { cookies: new Map(record.cookies) };
     try {
       const notifications = await getDvrNotifications(jar);
       // theearth 側が cookie を更新した場合に備えて書き戻す (セッション延命)。
-      await this.ctx.storage.put<DvrSessionRecord>(DVR_SESSION_KEY, {
+      await this.ctx.storage.put<TheearthSessionRecord>(THEEARTH_SESSION_KEY, {
         ...record,
         cookies: Array.from(jar.cookies.entries()),
       });
       return Response.json({ notifications });
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
-        await this.ctx.storage.delete(DVR_SESSION_KEY);
+        await this.ctx.storage.delete(THEEARTH_SESSION_KEY);
         return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
       }
       console.error("DVR notifications error:", err);
@@ -1151,18 +1142,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   /** GET /dvr-api/masters — 映像検索フォーム用の 事業所/車輌/乗務員 マスタ
    * (Request_NetDvrFuncInitValue、Refs #90 実 API 検証済み)。 */
-  private async handleDvrMasters(record: DvrSessionRecord): Promise<Response> {
+  private async handleDvrMasters(record: TheearthSessionRecord): Promise<Response> {
     const jar: CookieJar = { cookies: new Map(record.cookies) };
     try {
       const masters = await getDvrMasters(jar);
-      await this.ctx.storage.put<DvrSessionRecord>(DVR_SESSION_KEY, {
+      await this.ctx.storage.put<TheearthSessionRecord>(THEEARTH_SESSION_KEY, {
         ...record,
         cookies: Array.from(jar.cookies.entries()),
       });
       return Response.json(masters);
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
-        await this.ctx.storage.delete(DVR_SESSION_KEY);
+        await this.ctx.storage.delete(THEEARTH_SESSION_KEY);
         return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
       }
       console.error("DVR masters error:", err);
@@ -1176,7 +1167,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   /** POST /dvr-api/search — 映像検索 (Request_DvrDataList)。body は DvrSearchParams。
    * パラメータ不正 (必須条件未達等) は 400、theearth セッション切れは 401。 */
-  private async handleDvrSearch(record: DvrSessionRecord, request: Request): Promise<Response> {
+  private async handleDvrSearch(record: TheearthSessionRecord, request: Request): Promise<Response> {
     let params: DvrSearchParams;
     try {
       params = (await request.json()) as DvrSearchParams;
@@ -1197,14 +1188,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const jar: CookieJar = { cookies: new Map(record.cookies) };
     try {
       const rows = await searchDvrData(jar, key);
-      await this.ctx.storage.put<DvrSessionRecord>(DVR_SESSION_KEY, {
+      await this.ctx.storage.put<TheearthSessionRecord>(THEEARTH_SESSION_KEY, {
         ...record,
         cookies: Array.from(jar.cookies.entries()),
       });
       return Response.json({ rows });
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
-        await this.ctx.storage.delete(DVR_SESSION_KEY);
+        await this.ctx.storage.delete(THEEARTH_SESSION_KEY);
         return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
       }
       console.error("DVR search error:", err);
@@ -1219,21 +1210,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   /** venus API 呼び出しの共通ラッパ: cookie 書き戻し + セッション切れ 401 /
    * パラメータ不正 400 / その他 502 のマッピング (新規 GET endpoint 用)。 */
   private async callDvrVenus<T>(
-    record: DvrSessionRecord,
+    record: TheearthSessionRecord,
     errorLabel: string,
     fn: (jar: CookieJar) => Promise<T>,
   ): Promise<Response> {
     const jar: CookieJar = { cookies: new Map(record.cookies) };
     try {
       const result = await fn(jar);
-      await this.ctx.storage.put<DvrSessionRecord>(DVR_SESSION_KEY, {
+      await this.ctx.storage.put<TheearthSessionRecord>(THEEARTH_SESSION_KEY, {
         ...record,
         cookies: Array.from(jar.cookies.entries()),
       });
       return Response.json(result);
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
-        await this.ctx.storage.delete(DVR_SESSION_KEY);
+        await this.ctx.storage.delete(THEEARTH_SESSION_KEY);
         return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
       }
       if (err instanceof DvrSearchParamError) {
@@ -1250,7 +1241,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   /** GET /dvr-api/vehicle-states?branch=<事業所code> — 車輌現在地一覧
    * (VehicleStateTableForBranchEx、位置情報ページ用)。 */
-  private handleDvrVehicleStates(record: DvrSessionRecord, url: URL): Promise<Response> {
+  private handleDvrVehicleStates(record: TheearthSessionRecord, url: URL): Promise<Response> {
     const branch = url.searchParams.get("branch") ?? "";
     return this.callDvrVenus(record, "車輌現在地の取得", async jar => ({
       vehicles: await getVehicleStates(jar, branch),
@@ -1259,7 +1250,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   /** GET /dvr-api/log-track?vehicle=<CD>&start=YYYY/MM/DD&end=YYYY/MM/DD —
    * 車輌 1 台の動態履歴 GPS 軌跡 (VehicleStateTable)。 */
-  private handleDvrLogTrack(record: DvrSessionRecord, url: URL): Promise<Response> {
+  private handleDvrLogTrack(record: TheearthSessionRecord, url: URL): Promise<Response> {
     const vehicle = url.searchParams.get("vehicle") ?? "";
     const start = url.searchParams.get("start") ?? "";
     const end = url.searchParams.get("end") ?? "";
@@ -1275,7 +1266,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * - {serials: [], filenames: []} — 映像検索からの一括要求
    *   (Request_DvrFileTransfer_MultiTarget。実ページは車輌絞込検索時の単一行要求にも
    *   MultiTarget を使うため、検索由来はこちらに寄せる) */
-  private async handleDvrTransfer(record: DvrSessionRecord, request: Request): Promise<Response> {
+  private async handleDvrTransfer(record: TheearthSessionRecord, request: Request): Promise<Response> {
     let body: { serial?: unknown; filename?: unknown; serials?: unknown; filenames?: unknown };
     try {
       body = (await request.json()) as typeof body;
@@ -1300,7 +1291,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       const result = multi
         ? await requestDvrFileTransferMulti(jar, body.serials as string[], body.filenames as string[])
         : await requestDvrFileTransfer(jar, serial, filename);
-      await this.ctx.storage.put<DvrSessionRecord>(DVR_SESSION_KEY, {
+      await this.ctx.storage.put<TheearthSessionRecord>(THEEARTH_SESSION_KEY, {
         ...record,
         cookies: Array.from(jar.cookies.entries()),
       });
@@ -1309,7 +1300,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return Response.json({ accepted: result.code > 0, code: result.code });
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
-        await this.ctx.storage.delete(DVR_SESSION_KEY);
+        await this.ctx.storage.delete(THEEARTH_SESSION_KEY);
         return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
       }
       console.error("DVR transfer error:", err);
@@ -1329,7 +1320,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * られない (実データで 404)。未転送 (receiveState != ready) の場合は
    * Request_DvrFileDownload が code<=0 を返し、requestDvrDownloadPath が「受信してから」
    * を促す TheearthClientError を投げる。 */
-  private async handleDvrFile(record: DvrSessionRecord, url: URL): Promise<Response> {
+  private async handleDvrFile(record: TheearthSessionRecord, url: URL): Promise<Response> {
     const serial = url.searchParams.get("serial");
     const filename = url.searchParams.get("filename");
     if (!serial || !filename) {
@@ -1343,7 +1334,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       // cookie 更新を書き戻す (セッション延命)。stream 開始後なので await はしない
       // (ヘッダ送出をブロックしない) — 失敗しても致命的でない。
       this.ctx.waitUntil(
-        this.ctx.storage.put<DvrSessionRecord>(DVR_SESSION_KEY, {
+        this.ctx.storage.put<TheearthSessionRecord>(THEEARTH_SESSION_KEY, {
           ...record,
           cookies: Array.from(jar.cookies.entries()),
         }),
@@ -1358,7 +1349,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       });
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
-        await this.ctx.storage.delete(DVR_SESSION_KEY);
+        await this.ctx.storage.delete(THEEARTH_SESSION_KEY);
         return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
       }
       console.error("DVR file error:", err);
@@ -1373,28 +1364,28 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   // -------------------------------------------------------------------------
   // /daily-report-api/* — 日報編集 (Refs #169)。credential pass-through 設計は
   // /dvr-api/* と同じ (password はログイン 1 リクエストの body にだけ現れ、
-  // 保存も log 出力もしない)。DVR viewer とは theearth ログインセッションを
-  // 共有しない (DO instance 自体が report-{comp}:{userB64} で別れる)。
+  // 保存も log 出力もしない)。theearth ログインセッションは DVR viewer と共有する
+  // (同一 DO instance `theearth-{comp}:{userB64}` + 同一レコード、Refs #233)。
   // -------------------------------------------------------------------------
 
   private async handleReportApi(request: Request, url: URL): Promise<Response> {
-    const routing = resolveReportRouting(request.headers);
+    const routing = resolveTheearthRouting(request.headers);
     if (!routing) {
-      return dvrJsonError(400, "X-Report-Comp-Id / X-Report-User-B64 ヘッダが不正です");
+      return dvrJsonError(400, "X-Theearth-Comp-Id / X-Theearth-User-B64 ヘッダが不正です");
     }
 
     if (url.pathname === "/daily-report-api/login" && request.method === "POST") {
-      return this.handleReportLogin(request, routing);
+      return this.handleTheearthLogin(request, routing);
     }
 
-    const record = await this.ctx.storage.get<ReportSessionRecord>(REPORT_SESSION_KEY);
+    const record = await this.ctx.storage.get<TheearthSessionRecord>(THEEARTH_SESSION_KEY);
     const token = extractBearerToken(request.headers);
-    if (!isReportSessionValid(record, token, routing, Date.now())) {
+    if (!isTheearthSessionValid(record, token, routing, Date.now())) {
       return dvrJsonError(401, "セッションが無効か期限切れです。再ログインしてください");
     }
 
     if (url.pathname === "/daily-report-api/logout" && request.method === "POST") {
-      await this.ctx.storage.delete(REPORT_SESSION_KEY);
+      await this.ctx.storage.delete(THEEARTH_SESSION_KEY);
       return new Response(null, { status: 204 });
     }
     if (url.pathname === "/daily-report-api/list" && request.method === "GET") {
@@ -1445,75 +1436,24 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return dvrJsonError(404, "Not Found");
   }
 
-  /** POST /daily-report-api/login — theearth にその場でログインし、成功したら
-   * session cookie + token を保存して token を返す (handleDvrLogin と同型)。 */
-  private async handleReportLogin(request: Request, routing: ReportRouting): Promise<Response> {
-    let body: { user_pass?: unknown };
-    try {
-      body = (await request.json()) as { user_pass?: unknown };
-    } catch {
-      return dvrJsonError(400, "JSON body が必要です");
-    }
-    const userPass = typeof body.user_pass === "string" ? body.user_pass : "";
-    if (!userPass) {
-      return dvrJsonError(400, "user_pass が必要です");
-    }
-
-    const jar = createCookieJar();
-    let loginResult: LoginResult;
-    try {
-      loginResult = await login(jar, {
-        compId: routing.compId,
-        userName: routing.userName,
-        userPass,
-      });
-    } catch (err) {
-      console.error("Report login error:", err);
-      const message =
-        err instanceof TheearthClientError
-          ? err.message
-          : `theearth へのログインに失敗しました (${describeUnknownError(err)})`;
-      return dvrJsonError(401, message);
-    }
-
-    const now = Date.now();
-    const record: ReportSessionRecord = {
-      token: generateSessionToken(),
-      compId: routing.compId,
-      userName: routing.userName,
-      cookies: Array.from(jar.cookies.entries()),
-      createdAt: now,
-      expiresAt: now + REPORT_SESSION_TTL_MS,
-    };
-    await this.ctx.storage.put(REPORT_SESSION_KEY, record);
-    // フロント (DailyReportSessionHeader.vue) が「既存セッションを強制ログアウトして
-    // ログインした」ことを表示できるよう、ライセンス超過の自動 kick 結果を返す (Refs #169)。
-    return Response.json({
-      token: record.token,
-      expires_at: record.expiresAt,
-      kicked: loginResult.kicked,
-      ...(loginResult.kickedUserName ? { kicked_user_name: loginResult.kickedUserName } : {}),
-    });
-  }
-
   /** report 系 API 呼び出しの共通ラッパ (callDvrVenus と同型): cookie 書き戻し +
    * セッション切れ 401 / パラメータ不正 400 / その他 502 のマッピング。 */
   private async callReportAction<T>(
-    record: ReportSessionRecord,
+    record: TheearthSessionRecord,
     errorLabel: string,
     fn: (jar: CookieJar) => Promise<T>,
   ): Promise<Response> {
     const jar: CookieJar = { cookies: new Map(record.cookies) };
     try {
       const result = await fn(jar);
-      await this.ctx.storage.put<ReportSessionRecord>(REPORT_SESSION_KEY, {
+      await this.ctx.storage.put<TheearthSessionRecord>(THEEARTH_SESSION_KEY, {
         ...record,
         cookies: Array.from(jar.cookies.entries()),
       });
       return Response.json(result);
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
-        await this.ctx.storage.delete(REPORT_SESSION_KEY);
+        await this.ctx.storage.delete(THEEARTH_SESSION_KEY);
         return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
       }
       if (err instanceof ReportParamError) {
@@ -1544,7 +1484,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    *
    * 同一 theearth セッションへの並行リクエストはセッションロックで hang/500 する
    * ため、必ず逐次実行する (Promise.all で並列化しない)。 */
-  private handleReportList(record: ReportSessionRecord, url: URL): Promise<Response> {
+  private handleReportList(record: TheearthSessionRecord, url: URL): Promise<Response> {
     const from = url.searchParams.get("from") ?? "";
     const to = url.searchParams.get("to") ?? "";
     const vehicleFrom = url.searchParams.get("vehicleFrom");
@@ -1584,7 +1524,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /** GET /daily-report-api/expense?opeNo=&startOpe= — F-DES1012 給油行の現在値。 */
-  private handleReportExpenseForm(record: ReportSessionRecord, url: URL): Promise<Response> {
+  private handleReportExpenseForm(record: TheearthSessionRecord, url: URL): Promise<Response> {
     const opeNo = url.searchParams.get("opeNo") ?? "";
     const startOpe = url.searchParams.get("startOpe") ?? "";
     return this.callReportAction(record, "経費入力フォームの取得", (jar) => getExpenseForm(jar, opeNo, startOpe));
@@ -1592,7 +1532,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   /** POST /daily-report-api/expense/save — `btnExpenceEditSetting` postback で
    * 給油行 1 件を登録する (body は SaveFuelRowParams)。 */
-  private async handleReportExpenseSave(record: ReportSessionRecord, request: Request): Promise<Response> {
+  private async handleReportExpenseSave(record: TheearthSessionRecord, request: Request): Promise<Response> {
     let body: SaveFuelRowParams;
     try {
       body = (await request.json()) as SaveFuelRowParams;
@@ -1605,7 +1545,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   /** POST /daily-report-api/expense/add — 新規行テンプレート (`itxt*`) +
    * `btnInsertButton` postback で給油行を 1 件追加する (body は AddFuelRowParams、
    * 給油 0 件の運行でも追加できる)。 */
-  private async handleReportExpenseAdd(record: ReportSessionRecord, request: Request): Promise<Response> {
+  private async handleReportExpenseAdd(record: TheearthSessionRecord, request: Request): Promise<Response> {
     let body: AddFuelRowParams;
     try {
       body = (await request.json()) as AddFuelRowParams;
@@ -1617,7 +1557,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   /** POST /daily-report-api/expense/recalculate — `btnScore` postback で評価点を
    * 再集計する (body は `{opeNo, startOpe}`)。 */
-  private async handleReportExpenseRecalculate(record: ReportSessionRecord, request: Request): Promise<Response> {
+  private async handleReportExpenseRecalculate(record: TheearthSessionRecord, request: Request): Promise<Response> {
     let body: { opeNo?: unknown; startOpe?: unknown };
     try {
       body = (await request.json()) as { opeNo?: unknown; startOpe?: unknown };
@@ -1632,7 +1572,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   /** POST /daily-report-api/expense/link-sys — `btnScore` (再集計) → `btnLinkSys`
    * (システム連動開始) の連鎖 postback (body は `{opeNo, startOpe}`)。theearth 側に
    * データを連動させる本番アクション。成功シグナル観測のため worker 側で log を厚く出す。 */
-  private async handleReportSystemLink(record: ReportSessionRecord, request: Request): Promise<Response> {
+  private async handleReportSystemLink(record: TheearthSessionRecord, request: Request): Promise<Response> {
     let body: { opeNo?: unknown; startOpe?: unknown };
     try {
       body = (await request.json()) as { opeNo?: unknown; startOpe?: unknown };
@@ -1650,7 +1590,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    *
    * - `?opeNo=&startOpe=` — **単一運行のみ** の zip (運行データ選択モード、Refs #203)
    * - `?from=&to=` — 日付範囲 ("YYYY-MM-DD"、downloadCsvZip の CsvDateRange) */
-  private async handleReportZip(record: ReportSessionRecord, url: URL): Promise<Response> {
+  private async handleReportZip(record: TheearthSessionRecord, url: URL): Promise<Response> {
     const opeNo = url.searchParams.get("opeNo") ?? "";
     const startOpe = url.searchParams.get("startOpe") ?? "";
     const startDate = url.searchParams.get("from") ?? "";
@@ -1663,7 +1603,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         : await downloadEditedZip(jar, { startDate, endDate });
       // cookie 書き戻しはヘッダ送出をブロックしない (handleDvrFile と同じ理由)。
       this.ctx.waitUntil(
-        this.ctx.storage.put<ReportSessionRecord>(REPORT_SESSION_KEY, {
+        this.ctx.storage.put<TheearthSessionRecord>(THEEARTH_SESSION_KEY, {
           ...record,
           cookies: Array.from(jar.cookies.entries()),
         }),
@@ -1678,7 +1618,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       });
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
-        await this.ctx.storage.delete(REPORT_SESSION_KEY);
+        await this.ctx.storage.delete(THEEARTH_SESSION_KEY);
         return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
       }
       if (err instanceof ReportParamError) {
@@ -1696,7 +1636,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   /** POST /daily-report-api/unlock — F-DES1010 の行選択 + `btnInitialize`
    * postback で、対象運行 1 件だけの編集ロックを解除する (全ロック一括解放では
    * ない、cdp-pair 実機確認、Refs #183)。 */
-  private async handleReportUnlock(record: ReportSessionRecord, request: Request): Promise<Response> {
+  private async handleReportUnlock(record: TheearthSessionRecord, request: Request): Promise<Response> {
     let body: { opeNo?: unknown; startOpe?: unknown };
     try {
       body = (await request.json()) as { opeNo?: unknown; startOpe?: unknown };
@@ -1713,7 +1653,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   /** GET /daily-report-api/work?opeNo=&startOpe= — F-DES1013 作業行の現在値
    * (Refs #170)。 */
-  private handleReportWorkForm(record: ReportSessionRecord, url: URL): Promise<Response> {
+  private handleReportWorkForm(record: TheearthSessionRecord, url: URL): Promise<Response> {
     const opeNo = url.searchParams.get("opeNo") ?? "";
     const startOpe = url.searchParams.get("startOpe") ?? "";
     return this.callReportAction(record, "作業入力フォームの取得", (jar) => getWorkForm(jar, opeNo, startOpe));
@@ -1722,7 +1662,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   /** POST /daily-report-api/work/edit-start — 対象行の `btnEditButton` postback で
    * 編集モードにし、編集モード行の現在値を返す (body は `{opeNo, startOpe,
    * ctrlIndex}`、Refs #170)。応答ページは storage に保存して保存 postback で再利用。 */
-  private async handleReportWorkEditStart(record: ReportSessionRecord, request: Request): Promise<Response> {
+  private async handleReportWorkEditStart(record: TheearthSessionRecord, request: Request): Promise<Response> {
     let body: { opeNo?: unknown; startOpe?: unknown; ctrlIndex?: unknown };
     try {
       body = (await request.json()) as { opeNo?: unknown; startOpe?: unknown; ctrlIndex?: unknown };
@@ -1748,7 +1688,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   /** POST /daily-report-api/work/save — 編集モード行の値を書き換えて
    * `btnUpdateButton` postback で保存する (body は SaveWorkRowParams、Refs #170)。
    * postback には handleReportWorkEditStart が保存した編集モードページを使う。 */
-  private async handleReportWorkSave(record: ReportSessionRecord, request: Request): Promise<Response> {
+  private async handleReportWorkSave(record: TheearthSessionRecord, request: Request): Promise<Response> {
     let body: SaveWorkRowParams;
     try {
       body = (await request.json()) as SaveWorkRowParams;
@@ -1772,7 +1712,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   /** POST /daily-report-api/work/recalculate — F-DES1013 の `btnScore` postback で
    * 作業時間を再集計する (DriverState1〜5Min が更新される。body は `{opeNo, startOpe}`)。 */
-  private async handleReportWorkRecalculate(record: ReportSessionRecord, request: Request): Promise<Response> {
+  private async handleReportWorkRecalculate(record: TheearthSessionRecord, request: Request): Promise<Response> {
     let body: { opeNo?: unknown; startOpe?: unknown };
     try {
       body = (await request.json()) as { opeNo?: unknown; startOpe?: unknown };
@@ -1788,7 +1728,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * (Refs #171)。取得時のページ HTML を DO storage に保存し、登録 postback で
    * 再利用する (F-DES1011 は最初の GET でだけ運行データがロードされるため、
    * 登録時に fresh GET し直すと初期値が空で返る。staging 実機 2026-07-10)。 */
-  private handleReportReviseForm(record: ReportSessionRecord, url: URL): Promise<Response> {
+  private handleReportReviseForm(record: TheearthSessionRecord, url: URL): Promise<Response> {
     const opeNo = url.searchParams.get("opeNo") ?? "";
     const startOpe = url.searchParams.get("startOpe") ?? "";
     return this.callReportAction(record, "運行データ修正フォームの取得", async (jar) => {
@@ -1808,7 +1748,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * handleReportReviseForm が保存した取得時ページを使う。無い/古い/別運行の
    * 場合はフォームの開き直しを促す (fresh GET へのフォールバックはしない —
    * 初期値が空のページを送って既存データを消す事故を防ぐ)。 */
-  private async handleReportReviseSave(record: ReportSessionRecord, request: Request): Promise<Response> {
+  private async handleReportReviseSave(record: TheearthSessionRecord, request: Request): Promise<Response> {
     let body: { opeNo?: unknown; startOpe?: unknown; driver1?: unknown };
     try {
       body = (await request.json()) as { opeNo?: unknown; startOpe?: unknown; driver1?: unknown };
@@ -1838,7 +1778,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   /** GET /daily-report-api/masters — 事業所/車輌/乗務員マスタ (VenusBridge
    * `Request_NetDvrFuncInitValue`、/dvr-api/masters と同一実装)。乗務員CD →
    * 名称の live 解決と検索フォーム用 (Refs #171)。 */
-  private handleReportMasters(record: ReportSessionRecord): Promise<Response> {
+  private handleReportMasters(record: TheearthSessionRecord): Promise<Response> {
     return this.callReportAction(record, "マスタの取得", (jar) => getDvrMasters(jar));
   }
 

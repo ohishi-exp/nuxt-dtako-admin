@@ -1,22 +1,39 @@
 /**
- * theearth-np.com credential pass-through セッションの汎用 composable factory。
- * `useDvrSession.ts` (Refs #90) と `useDailyReportSession.ts` (Refs #169) は
- * 別々の theearth ログインセッションを持つ (worker 側 DO instance も
- * `dvr-{comp}:{userB64}` / `report-{comp}:{userB64}` で分離される) が、
- * ロジック自体はヘッダ名・API prefix・保存キーが違うだけの完全な重複だった。
- * rule-of-two (同じロジックの3個目のコピーを作らない) に沿って、この factory
- * を土台に両者を薄いラッパーとして具体化する。
+ * theearth-np.com credential pass-through セッションの共有 composable。
+ * DVR viewer 系 (`/dvr-api`) と日報編集 (`/daily-report-api`) は **同一の
+ * theearth ログインセッションを共有する** (Refs #233。かつては Refs #169 の
+ * 設計で localStorage キー・useState namespace・ルーティングヘッダ・worker 側
+ * DO instance まで別々だったが、theearth が同一アカウントの同時ログインを
+ * 許さないため、ページを移動するたびに互いのセッションを kick し合い再ログイン
+ * になる実害があった)。
  *
  * - パスワードはログイン 1 リクエストの body にだけ載り、どこにも保存しない
  * - token は localStorage に保持 (サーバ側 DO の TTL 8h で失効)
- * - リクエストは `{headerPrefix}-Comp-Id` / `{headerPrefix}-User-B64` ヘッダで
- *   theearth アカウント単位の DtakoScraperRelayDO に routing される
+ * - リクエストは `X-Theearth-Comp-Id` / `X-Theearth-User-B64` ヘッダで
+ *   theearth アカウント単位の DtakoScraperRelayDO (`theearth-{comp}:{userB64}`)
+ *   に routing される
  */
 export interface TheearthAccountSession {
   compId: string
   userName: string
   token: string
 }
+
+/** routing ヘッダの prefix。worker 側は旧 `X-Dvr-*` / `X-Report-*` も受理する
+ * (デプロイ順 skew 対応) が、フロントは統合後この 1 系統だけを送る。 */
+const HEADER_PREFIX = 'X-Theearth'
+/** `useState` の名前空間。dvr / daily-report の全ページで共有する。 */
+const STATE_NAMESPACE = 'theearth'
+/** セッション本体を保存する localStorage key (全ページ共有)。 */
+const STORAGE_KEY = 'theearth-session'
+/** 前回ログインした会社ID/ユーザーIDのプリフィル用 localStorage key。 */
+const LAST_ACCOUNT_STORAGE_KEY = 'theearth-last-account'
+/** 統合前 (Refs #169) の per-ページ プリフィルキー。読み取り fallback 専用 —
+ * 書き込みは新キーのみ。 */
+const LEGACY_LAST_ACCOUNT_STORAGE_KEYS = [
+  'dvr-viewer-last-account',
+  'daily-report-edit-last-account',
+]
 
 /** UTF-8 文字列を base64url (padding 無し) に encode する。relay worker 側の
  * `workers/dtako-scraper-relay/src/theearth-session.ts` の encodeUserB64 と
@@ -39,19 +56,6 @@ export function theearthSessionErrorStatus(e: unknown): number | null {
   return typeof status === 'number' ? status : null
 }
 
-export interface TheearthSessionOptions {
-  /** API のベースパス (例 `/dvr-api`、`/daily-report-api`)。login/logout はこの下。 */
-  apiPrefix: string
-  /** routing ヘッダの prefix (例 `X-Dvr`、`X-Report`)。 */
-  headerPrefix: string
-  /** `useState` の名前空間 (例 `dvr`、`daily-report`)。他の composable と衝突しない値にする。 */
-  stateNamespace: string
-  /** セッション本体を保存する localStorage key。 */
-  storageKey: string
-  /** 前回ログインした会社ID/ユーザーIDのプリフィル用 localStorage key。 */
-  lastAccountStorageKey: string
-}
-
 /** 直前のログインで既存セッションを強制ログアウト (kick) したかどうか。
  * ライセンス数超過時の自動 kick (worker `theearth-client.ts` の login() 参照) を
  * フロントで可視化するために使う。 */
@@ -59,16 +63,21 @@ export interface TheearthLoginKick {
   kickedUserName?: string
 }
 
-export function useTheearthSession(opts: TheearthSessionOptions) {
-  const session = useState<TheearthAccountSession | null>(`${opts.stateNamespace}-session`, () => null)
-  const loginError = useState<string | null>(`${opts.stateNamespace}-login-error`, () => null)
-  const showLoginPanel = useState<boolean>(`${opts.stateNamespace}-login-panel`, () => false)
-  const lastLoginKick = useState<TheearthLoginKick | null>(`${opts.stateNamespace}-login-kick`, () => null)
+/**
+ * @param apiPrefix login/logout を叩く API のベースパス (例 `/dvr-api`、
+ * `/daily-report-api`)。worker 側でどちらの login/logout も同一 DO・同一
+ * セッションレコードに落ちるため、セッション状態はどの prefix 経由でも共有される。
+ */
+export function useTheearthSession(apiPrefix: string) {
+  const session = useState<TheearthAccountSession | null>(`${STATE_NAMESPACE}-session`, () => null)
+  const loginError = useState<string | null>(`${STATE_NAMESPACE}-login-error`, () => null)
+  const showLoginPanel = useState<boolean>(`${STATE_NAMESPACE}-login-panel`, () => false)
+  const lastLoginKick = useState<TheearthLoginKick | null>(`${STATE_NAMESPACE}-login-kick`, () => null)
 
   function routingHeaders(compId: string, userName: string): Record<string, string> {
     return {
-      [`${opts.headerPrefix}-Comp-Id`]: compId,
-      [`${opts.headerPrefix}-User-B64`]: b64urlUtf8(userName),
+      [`${HEADER_PREFIX}-Comp-Id`]: compId,
+      [`${HEADER_PREFIX}-User-B64`]: b64urlUtf8(userName),
     }
   }
 
@@ -86,8 +95,8 @@ export function useTheearthSession(opts: TheearthSessionOptions) {
     session.value = s
     try {
       // token はブラウザを閉じても保持する (localStorage)。パスワードは保存しない。
-      if (s) localStorage.setItem(opts.storageKey, JSON.stringify(s))
-      else localStorage.removeItem(opts.storageKey)
+      if (s) localStorage.setItem(STORAGE_KEY, JSON.stringify(s))
+      else localStorage.removeItem(STORAGE_KEY)
     }
     catch {
       // localStorage 不可 (プライベートモード等) でも動作は継続する (再読込で再ログイン)
@@ -97,7 +106,7 @@ export function useTheearthSession(opts: TheearthSessionOptions) {
   /** localStorage から前回セッションを復元する (ページの onMounted で呼ぶ)。 */
   function restoreSession() {
     try {
-      const raw = localStorage.getItem(opts.storageKey)
+      const raw = localStorage.getItem(STORAGE_KEY)
       if (raw) session.value = JSON.parse(raw) as TheearthAccountSession
     }
     catch {
@@ -107,29 +116,31 @@ export function useTheearthSession(opts: TheearthSessionOptions) {
 
   /** 前回ログインした会社ID/ユーザーID (ログインフォームのプリフィル用)。 */
   function lastAccount(): { compId: string, userName: string } {
-    try {
-      const raw = localStorage.getItem(opts.lastAccountStorageKey)
-      if (raw) {
-        const last = JSON.parse(raw) as { compId?: string, userName?: string }
-        return { compId: last.compId ?? '', userName: last.userName ?? '' }
+    for (const key of [LAST_ACCOUNT_STORAGE_KEY, ...LEGACY_LAST_ACCOUNT_STORAGE_KEYS]) {
+      try {
+        const raw = localStorage.getItem(key)
+        if (raw) {
+          const last = JSON.parse(raw) as { compId?: string, userName?: string }
+          return { compId: last.compId ?? '', userName: last.userName ?? '' }
+        }
       }
-    }
-    catch {
-      // プリフィルは best-effort
+      catch {
+        // プリフィルは best-effort
+      }
     }
     return { compId: '', userName: '' }
   }
 
   /** theearth にログインする。失敗時は throw (呼び出し側で theearthSessionErrorMessage 表示)。 */
   async function login(compId: string, userName: string, userPass: string): Promise<void> {
-    const res = await $fetch<{ token: string, kicked?: boolean, kicked_user_name?: string }>(`${opts.apiPrefix}/login`, {
+    const res = await $fetch<{ token: string, kicked?: boolean, kicked_user_name?: string }>(`${apiPrefix}/login`, {
       method: 'POST',
       headers: routingHeaders(compId, userName),
       body: { user_pass: userPass },
     })
     persistSession({ compId, userName, token: res.token })
     try {
-      localStorage.setItem(opts.lastAccountStorageKey, JSON.stringify({ compId, userName }))
+      localStorage.setItem(LAST_ACCOUNT_STORAGE_KEY, JSON.stringify({ compId, userName }))
     }
     catch {
       // プリフィルは best-effort
@@ -143,7 +154,7 @@ export function useTheearthSession(opts: TheearthSessionOptions) {
     const s = session.value
     if (s) {
       try {
-        await $fetch(`${opts.apiPrefix}/logout`, { method: 'POST', headers: authHeaders() })
+        await $fetch(`${apiPrefix}/logout`, { method: 'POST', headers: authHeaders() })
       }
       catch {
         // best-effort (セッションが既に切れていても手元は消す)

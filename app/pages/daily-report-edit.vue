@@ -6,9 +6,9 @@
  * 運行データ入力一覧 (F-DES1010) を期間指定で一覧表示し、運行を選んで経費
  * (F-DES1012、給油行) を編集 → 評価点再集計 → 編集後の csvdata.zip をダウンロードするページ。
  *
- * credential pass-through 設計は /dvr-viewer と同じ (DvrSessionHeader.vue 参照)。
- * theearth ログインセッションは DVR viewer とは共有しない (useDailyReportSession /
- * workers/dtako-scraper-relay/src/report-session.ts で別セッション)。
+ * credential pass-through 設計は /dvr-viewer と同じ (TheearthSessionHeader.vue 参照)。
+ * theearth ログインセッションは DVR viewer と共有する (useTheearthSession /
+ * workers/dtako-scraper-relay/src/theearth-session.ts、Refs #233)。
  *
  * 作業 (F-DES1013、Refs #170) / 乗務員 (F-DES1011、Refs #171) 編集も本ページの
  * モーダルとして実装している (経費モーダルと同型)。
@@ -1206,7 +1206,7 @@ onMounted(() => {
 
 <template>
   <div>
-    <DailyReportSessionHeader title="日報編集" @login="onLogin" />
+    <TheearthSessionHeader title="日報編集" api-prefix="/daily-report-api" wide @login="onLogin" />
 
     <div v-if="!session" class="px-6 py-12 text-center text-gray-400">
       右上の「ログイン」から theearth (web地球号) にログインしてください。

@@ -34,7 +34,7 @@ interface DvrNotification {
 
 const { session, authHeaders, restoreSession, showLoginPanel, expireSession } = useDvrSession()
 
-/** ヘッダーでのログイン成功時 (DvrSessionHeader @login)。 */
+/** ヘッダーでのログイン成功時 (TheearthSessionHeader @login)。 */
 function onLogin() {
   loadNotifications()
   loadMasters()
@@ -432,7 +432,7 @@ onBeforeUnmount(() => {
 <template>
   <!-- default レイアウト (サイドバー) 内。-m-6 で main の p-6 を打ち消しヘッダーを全幅に -->
   <div class="-m-6">
-    <DvrSessionHeader title="DVR 動画ビューア" @login="onLogin" />
+    <TheearthSessionHeader title="DVR 動画ビューア" api-prefix="/dvr-api" @login="onLogin" />
 
     <main class="max-w-7xl mx-auto p-6">
       <!-- 未ログイン: 本文はプレースホルダのみ (ログインは右上から) -->
