@@ -1,12 +1,21 @@
 <script setup lang="ts">
 /**
- * /dvr-viewer 系ページ共通のヘッダー (タイトル + ページ間ナビ + theearth ログイン
- * バッジ/パネル)。セッション状態は useDvrSession (useState) で全ページ共有。
+ * theearth ログインバッジ/パネル付きのページヘッダー (タイトル + ログイン状態)。
+ * /dvr-viewer 系ページと /daily-report-edit で共有する (Refs #233。かつての
+ * DvrSessionHeader.vue / DailyReportSessionHeader.vue は完全な重複だった)。
+ * セッション状態は useTheearthSession (useState) で全ページ共有。
  */
-const props = defineProps<{ title: string }>()
+const props = defineProps<{
+  title: string
+  /** login/logout を叩く API のベースパス (例 `/dvr-api`)。どの prefix でも
+   * worker 側は同一セッションレコードに落ちる (useTheearthSession 参照)。 */
+  apiPrefix: string
+  /** true でコンテンツ幅の上限 (max-w-7xl) を外す (日報編集のような全幅ページ用)。 */
+  wide?: boolean
+}>()
 const emit = defineEmits<{ login: [] }>()
 
-const { session, loginError, showLoginPanel, lastLoginKick, lastAccount, login, logout } = useDvrSession()
+const { session, loginError, showLoginPanel, lastLoginKick, lastAccount, login, logout } = useTheearthSession(props.apiPrefix)
 
 const form = reactive({ compId: '', userName: '', userPass: '' })
 const loggingIn = ref(false)
@@ -24,7 +33,7 @@ async function doLogin() {
     emit('login')
   }
   catch (e) {
-    loginError.value = dvrErrorMessage(e)
+    loginError.value = theearthSessionErrorMessage(e)
   }
   finally {
     loggingIn.value = false
@@ -40,7 +49,7 @@ onMounted(() => {
 
 <template>
   <header class="border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 sticky top-0 z-20">
-    <div class="max-w-7xl mx-auto px-6 py-3 flex flex-wrap items-center gap-3">
+    <div class="px-6 py-3 flex flex-wrap items-center gap-3" :class="props.wide ? '' : 'max-w-7xl mx-auto'">
       <h1 class="text-lg font-bold">
         {{ props.title }}
       </h1>
@@ -69,7 +78,7 @@ onMounted(() => {
     </div>
 
     <!-- ライセンス数超過等による自動 kick 通知 (Refs #169、手動で閉じるまで表示) -->
-    <div v-if="lastLoginKick" class="max-w-7xl mx-auto px-6 pb-3">
+    <div v-if="lastLoginKick" class="px-6 pb-3" :class="props.wide ? '' : 'max-w-7xl mx-auto'">
       <div class="flex items-center justify-between gap-3 text-sm text-amber-700 bg-amber-50 dark:bg-amber-950 dark:text-amber-300 rounded-lg px-3 py-2">
         <span>
           {{ lastLoginKick.kickedUserName

@@ -2,9 +2,10 @@
 /**
  * 車輌の位置情報 (現在地) + 動態履歴 (GPS 軌跡) ページ (Refs #90)。
  *
- * theearth の VenusMain (位置情報) / F-DOV0010 (動態履歴) 相当。認証は /dvr-viewer と
- * 同じ credential pass-through (useDvrSession で共有、DO も同一 = theearth 単一
- * セッションを共用する)。座標は relay 側で DDMM → 十進度に変換済み。
+ * theearth の VenusMain (位置情報) / F-DOV0010 (動態履歴) 相当。認証は /dvr-viewer /
+ * /daily-report-edit と同じ credential pass-through (useTheearthSession で共有、
+ * DO も同一 = theearth 単一セッションを全ページで共用する、Refs #233)。座標は
+ * relay 側で DDMM → 十進度に変換済み。
  */
 import type { DvrMapMarker } from '~/components/DvrMap.vue'
 
@@ -390,7 +391,7 @@ onMounted(() => {
 <template>
   <!-- default レイアウト (サイドバー) 内。-m-6 で main の p-6 を打ち消しヘッダーを全幅に -->
   <div class="-m-6">
-    <DvrSessionHeader title="位置情報・動態履歴" @login="onLogin" />
+    <TheearthSessionHeader title="位置情報・動態履歴" api-prefix="/dvr-api" @login="onLogin" />
 
     <main class="max-w-7xl mx-auto p-6">
       <!-- 未ログイン: プレースホルダのみ (ログインは右上から) -->

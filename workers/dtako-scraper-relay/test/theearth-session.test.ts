@@ -5,6 +5,9 @@ import {
   encodeUserB64,
   extractBearerToken,
   generateSessionToken,
+  isTheearthSessionValid,
+  resolveTheearthRouting,
+  THEEARTH_SESSION_TTL_MS,
   timingSafeEqualStr,
   type TheearthSessionRecord,
 } from "../src/theearth-session";
@@ -145,5 +148,63 @@ describe("createTheearthSession", () => {
       expect(session.isSessionValid(record({ compId: "other" }), "tok-1", routing, 2_000)).toBe(false);
       expect(session.isSessionValid(record({ userName: "other" }), "tok-1", routing, 2_000)).toBe(false);
     });
+  });
+});
+
+// /dvr-api/* と /daily-report-api/* が共有する統合ルーティング (Refs #233)。
+// どのヘッダ世代で来ても DO キーは `theearth-{comp}:{userB64}` の 1 系統に
+// 収束することが要点 (別キーに解決されると theearth セッションが分裂し、
+// 同時ログイン不可制約で互いに kick し合う元のバグに戻る)。
+describe("resolveTheearthRouting", () => {
+  const userB64 = encodeUserB64("山田太郎");
+  const expected = {
+    compId: "27324455",
+    userName: "山田太郎",
+    doKey: `theearth-27324455:${userB64}`,
+  };
+
+  it("resolves the unified X-Theearth-* headers", () => {
+    expect(
+      resolveTheearthRouting(headers({ "X-Theearth-Comp-Id": "27324455", "X-Theearth-User-B64": userB64 })),
+    ).toEqual(expected);
+  });
+
+  it("resolves legacy X-Dvr-* headers to the same DO key", () => {
+    expect(
+      resolveTheearthRouting(headers({ "X-Dvr-Comp-Id": "27324455", "X-Dvr-User-B64": userB64 })),
+    ).toEqual(expected);
+  });
+
+  it("resolves legacy X-Report-* headers to the same DO key", () => {
+    expect(
+      resolveTheearthRouting(headers({ "X-Report-Comp-Id": "27324455", "X-Report-User-B64": userB64 })),
+    ).toEqual(expected);
+  });
+
+  it("prefers the unified headers when multiple generations are present", () => {
+    expect(
+      resolveTheearthRouting(
+        headers({
+          "X-Theearth-Comp-Id": "27324455",
+          "X-Theearth-User-B64": userB64,
+          "X-Dvr-Comp-Id": "999",
+          "X-Dvr-User-B64": encodeUserB64("other"),
+        }),
+      ),
+    ).toEqual(expected);
+  });
+
+  it("returns null when no header generation matches", () => {
+    expect(resolveTheearthRouting(headers({}))).toBeNull();
+    expect(resolveTheearthRouting(headers({ "X-Theearth-Comp-Id": "1" }))).toBeNull();
+  });
+});
+
+describe("isTheearthSessionValid (unified export)", () => {
+  const routing = { compId: "27324455", userName: "user1" };
+
+  it("accepts a matching, unexpired session and rejects an expired one", () => {
+    expect(isTheearthSessionValid(record(), "tok-1", routing, 2_000)).toBe(true);
+    expect(isTheearthSessionValid(record(), "tok-1", routing, 1_000 + THEEARTH_SESSION_TTL_MS)).toBe(false);
   });
 });

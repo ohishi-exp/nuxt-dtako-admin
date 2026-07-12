@@ -71,8 +71,7 @@ credential か overlap ID を落とすと拒否され「強制ログインに失
 - kick したかどうか (`kicked`) と kick 対象ユーザー名 (`kickedUserName`、判明時のみ) は
   `LoginResult` として `login()` の戻り値に載り、`/dvr-api/login` `/daily-report-api/login`
   の JSON レスポンス (`kicked` / `kicked_user_name`) → `useTheearthSession.ts` の
-  `lastLoginKick` → `DvrSessionHeader.vue` / `DailyReportSessionHeader.vue` の通知バナーまで
-  一気通貫で表示される。
+  `lastLoginKick` → `TheearthSessionHeader.vue` の通知バナーまで一気通貫で表示される。
 
 ### F-GOS0030 の「車輌」絞込 (`txtSVehicle`/`txtEVehicle`) で F-DES1010 を車番検索する (2026-07-08 実機確定)
 

@@ -22,7 +22,7 @@ dtako (デジタコ運行データ) 管理画面。Nuxt 4 + Nitro `cloudflare_mo
 | **pages (時間集計)** | `app/pages/{daily-hours/index,restraint-compare,restraint-report,y-time-export}.vue` | 日別時間 / 拘束時間 比較・レポート / Y時間 export UI |
 | **pages (車両設定)** | `app/pages/vehicle-settings/{index,diff,history,unconfirmed}.vue` | デジタコ車両設定の閲覧・差分・履歴・未確認 |
 | **pages (管理/認証)** | `app/pages/{members,api-tokens,event-classifications,login}.vue` `auth/callback.vue` | メンバ / API トークン / イベント分類 / login |
-| **pages (外部利用者)** | `app/pages/dvr-viewer.vue` | DVR 動画ビューア (Refs #90)。theearth credential pass-through ログイン (auth-worker 不要、`auth.global.ts` の publicPaths + `layout: false`、サイドバー「DVR 動画」タブからも遷移可)。`/dvr-api/*` は worker/index.ts → SCRAPER_RELAY service binding → `workers/dtako-scraper-relay` の DO (`dvr-session.ts` / `theearth-venus-client.ts`) |
+| **pages (外部利用者)** | `app/pages/dvr-viewer.vue` | DVR 動画ビューア (Refs #90)。theearth credential pass-through ログイン (auth-worker 不要、`auth.global.ts` の publicPaths + `layout: false`、サイドバー「DVR 動画」タブからも遷移可)。`/dvr-api/*` は worker/index.ts → SCRAPER_RELAY service binding → `workers/dtako-scraper-relay` の DO (`theearth-session.ts` / `theearth-venus-client.ts`) |
 | **components** | `app/components/Event*.vue` `VehicleSettings*.vue` `CsvDataTable.vue` `DriverSearchSelect.vue` | イベント表 / 車両設定 表示・diff / CSV テーブル |
 | **server/api (proxy)** | `server/api/proxy/[...path].ts` `server/utils/alc-proxy.ts` | `/api/proxy/*` → auth-worker `/alc-proxy/*` (introspect / ACL / OIDC mint / identity 注入を集約) → rust-alc-api `/api/*` (createAuthWorkerProxyHandler、#434 step 3 方式 B)。consumer は AUTH_WORKER service binding に X-Alc-Proxy-Secret + browser JWT を thin-forward するだけ。`alc-proxy.ts` の `alcProxyFetch` は R2 が要る route が同じ `/alc-proxy` 経由で backend を叩き Response を受け取るヘルパ (lockdown 後も OIDC 不要で通る。旧 `identity.ts` の直叩き+resolveIdentityHeaders を置換、#434 caller #2) |
 | **server/api (Y時間)** | `server/api/y-time-export.post.ts` `y-time-template.{get,put}.ts` | backend GET→R2 テンプレ→ExcelJS xlsx 生成 (R2 が要るので Worker 側)。backend GET は `alcProxyFetch` で /alc-proxy 経由 |
@@ -268,14 +268,16 @@ theearth パスワードは**一切保存しない**。ログイン画面 = thee
 
 ```
 [browser] /dvr-viewer (auth-worker ログイン必須、default レイアウト)
-  │ POST /dvr-api/login (password は body のみ。X-Dvr-Comp-Id / X-Dvr-User-B64
-  │ ヘッダで routing、password はヘッダに載せない)
+  │ POST /dvr-api/login (password は body のみ。X-Theearth-Comp-Id /
+  │ X-Theearth-User-B64 ヘッダで routing、password はヘッダに載せない。worker は
+  │ 旧 X-Dvr-* / X-Report-* も受理 = デプロイ順 skew 対応、Refs #233)
   ▼
 [worker/index.ts] /dvr-api/* を SCRAPER_RELAY service binding へ素通し
   ▼
-[relay worker index.ts] resolveDvrRouting → idFromName(`dvr-{comp}:{userB64}`)
+[relay worker index.ts] resolveTheearthRouting → idFromName(`theearth-{comp}:{userB64}`)
   │ (theearth アカウント単位で DO を固定 = 同一アカウント複数セッション不可の
-  │  theearth 制約を自然に直列化)
+  │  theearth 制約を自然に直列化。/daily-report-api/* も同じ DO・同じセッション
+  │  レコードを共有する — 分離すると互いに kick し合う、Refs #233)
   ▼
 [DtakoScraperRelayDO /dvr-api/*] theearth にその場でログイン (theearth-client.ts の
   │ cookie jar / VIEWSTATE ロジック再利用)。credential は破棄し、theearth session
@@ -318,10 +320,10 @@ theearth パスワードは**一切保存しない**。ログイン画面 = thee
 |---|---|
 | `app/pages/dvr-viewer.vue` | DVR 通知一覧 + 映像検索 + viewer (wasm decode / VidMap / VidTelemetryChart) |
 | `app/pages/dvr-map.vue` | 車輌現在地 + 動態履歴 GPS 軌跡 (theearth VenusMain / F-DOV0010 相当) |
-| `app/composables/useDvrSession.ts` | theearth セッション (token/localStorage/ログイン) の 2 ページ共有 |
-| `app/components/DvrSessionHeader.vue` | 共通ヘッダー (ページ間ナビ + ログインパネル) |
+| `app/composables/useTheearthSession.ts` | theearth セッション (token/localStorage/ログイン)。dvr 系 + daily-report-edit の全ページで単一セッションを共有 (Refs #233)。`useDvrSession` / `useDailyReportSession` は apiPrefix だけ違う薄いラッパー |
+| `app/components/TheearthSessionHeader.vue` | 共通ヘッダー (ログインバッジ/パネル)。dvr 系 + daily-report-edit で共用 |
 | `app/components/DvrMap.vue` | 現在地マーカー / 軌跡ポリラインの Google Map |
-| `workers/dtako-scraper-relay/src/dvr-session.ts` | セッション pure ロジック (token 生成 / timing-safe 比較 / routing ヘッダ解決、coverage 100% gate) |
+| `workers/dtako-scraper-relay/src/theearth-session.ts` | セッション pure ロジック (token 生成 / timing-safe 比較 / routing ヘッダ解決 (新旧ヘッダ)、coverage 100% gate) |
 | `workers/dtako-scraper-relay/src/theearth-venus-client.ts` | VenusBridge クライアント (通知/検索/マスタ/現在地/軌跡 + `.vdf` ストリーム、coverage 100% gate)。**座標は DDMM 形式 → convertDdmmToDegrees で度に変換** (詳細は theearth-venus skill) |
 | `workers/dtako-scraper-relay/src/dtako-scraper-relay-do.ts` | `/dvr-api/*` ハンドラ |
 

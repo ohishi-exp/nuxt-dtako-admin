@@ -1,16 +1,15 @@
 /**
- * theearth-np.com credential pass-through セッション/routing の汎用実装 (pure、
- * cloudflare 非依存)。`/dvr-api/*` (`dvr-session.ts`) と `/daily-report-api/*`
- * (`report-session.ts`) が別々の theearth ログインセッション (DO instance も
- * 別) を持つよう、header prefix / DO key prefix だけを変えた**薄いラッパー**
- * として、この factory を土台に具体化する (rule-of-two: 同じロジックの3個目の
- * コピーを作らない。dvr-session.ts / report-session.ts が既に2個目のコピーに
- * なっていたのを、Refs #169 の一連のバグ調査を機に統合した)。
+ * theearth-np.com credential pass-through セッション/routing の実装 (pure、
+ * cloudflare 非依存)。`/dvr-api/*` と `/daily-report-api/*` は **同一の theearth
+ * ログインセッションを共有する** (Refs #233。かつては Refs #169 の設計で DO
+ * instance ごと `dvr-` / `report-` に分離していたが、theearth が同一アカウントの
+ * 同時ログインを許さない (ライセンス数超過で既存セッションを kick する) ため、
+ * 片方のページでログインするともう片方の theearth cookie が失効し、ページを
+ * 移動するたびに再ログインになる実害があった)。
  *
- * 設計 (dvr/report 共通): 利用者が入力した theearth credential はログイン
- * 1 回にだけ使い、**どこにも保存しない**。DO storage に残るのは theearth
- * session cookie とランダム token のみ。password はヘッダに載せない
- * (login の JSON body のみ)。
+ * 設計: 利用者が入力した theearth credential はログイン 1 回にだけ使い、
+ * **どこにも保存しない**。DO storage に残るのは theearth session cookie と
+ * ランダム token のみ。password はヘッダに載せない (login の JSON body のみ)。
  */
 
 /** DO storage に置くセッションレコード。credential (password) は含まない。 */
@@ -128,3 +127,34 @@ export function createTheearthSession(headerPrefix: string, doKeyPrefix: string)
 
   return { resolveRouting, isSessionValid };
 }
+
+/** theearth ログインセッションの TTL (dvr / daily-report 共通)。theearth 側
+ * cookie が先に切れた場合は各 client が VenusSessionExpiredError 相当 → 401 に
+ * マップして再ログインを促す。 */
+export const THEEARTH_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+
+// /dvr-api/* と /daily-report-api/* は同一の theearth ログインセッションを共有
+// する (Refs #233)。DO キーは経路によらず `theearth-{comp}:{userB64}` の 1 系統。
+const unifiedSession = createTheearthSession("x-theearth", "theearth");
+// 旧フロント (X-Dvr-* / X-Report-* を送る) は本番タグリリースまで残るため、旧
+// ヘッダも受理して**同じ** DO キーに解決する (relay worker は main merge で先に
+// デプロイされるデプロイ順 skew 対応)。旧ヘッダの撤去は Refs #233 の後続整理で。
+const legacyDvrHeaders = createTheearthSession("x-dvr", "theearth");
+const legacyReportHeaders = createTheearthSession("x-report", "theearth");
+
+/** `X-Theearth-Comp-Id` / `X-Theearth-User-B64` (fallback: 旧 `X-Dvr-*` /
+ * `X-Report-*`) から DO routing を解決する。どのヘッダで来ても DO キーは
+ * `theearth-{comp}:{userB64}` に正規化される。不正は null (呼び出し側で 400)。 */
+export function resolveTheearthRouting(headers: {
+  get(name: string): string | null;
+}): TheearthRouting | null {
+  return (
+    unifiedSession.resolveRouting(headers) ??
+    legacyDvrHeaders.resolveRouting(headers) ??
+    legacyReportHeaders.resolveRouting(headers)
+  );
+}
+
+/** セッションレコードの有効性判定。record 不在 / token 不一致 / 期限切れ /
+ * アカウント不一致 (異常系、DO キー構成上は起こらないはず) はすべて false。 */
+export const isTheearthSessionValid = unifiedSession.isSessionValid;
