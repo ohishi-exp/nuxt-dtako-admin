@@ -304,6 +304,39 @@ describe('api', () => {
       const url = getUploadDownloadUrl('upload/with spaces')
       expect(url).toBe(`${API_BASE}/api/internal/download/upload%2Fwith%20spaces`)
     })
+
+    it('calls onUnauthorized on 401 when no refresher is configured', async () => {
+      if (isLive) return
+      const onUnauthorized = vi.fn()
+      initApi(API_BASE, () => 'token', undefined, () => 'tid', onUnauthorized)
+      stubResponse(errResponse(401, 'Unauthorized'))
+      await expect(getDrivers()).rejects.toThrow('API エラー (401)')
+      expect(onUnauthorized).toHaveBeenCalledTimes(1)
+    })
+
+    it('calls onUnauthorized when refresh does not clear the 401 (login 切れ)', async () => {
+      if (isLive) return
+      const onUnauthorized = vi.fn()
+      const refresher = vi.fn().mockResolvedValue(undefined)
+      initApi(API_BASE, () => 'token', refresher, () => 'tid', onUnauthorized)
+      stubResponse(errResponse(401, 'Unauthorized'))
+      stubResponse(errResponse(401, 'still unauthorized'))
+      await expect(getDrivers()).rejects.toThrow('API エラー (401)')
+      expect(refresher).toHaveBeenCalledTimes(1)
+      expect(onUnauthorized).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not call onUnauthorized once refresh clears the 401', async () => {
+      if (isLive) return
+      const onUnauthorized = vi.fn()
+      const refresher = vi.fn().mockResolvedValue(undefined)
+      initApi(API_BASE, () => 'token', refresher, () => 'tid', onUnauthorized)
+      stubResponse(errResponse(401, 'Unauthorized'))
+      stubOk([])
+      await getDrivers()
+      expect(refresher).toHaveBeenCalledTimes(1)
+      expect(onUnauthorized).not.toHaveBeenCalled()
+    })
   })
 
   // ===== Simple GET functions =====
