@@ -21,6 +21,7 @@ export default defineConfig({
         'src/cron.ts',
         'src/theearth-report-client.ts',
         'src/theearth-session.ts',
+        'src/promise-queue.ts',
       ],
       thresholds: {
         lines: 100,

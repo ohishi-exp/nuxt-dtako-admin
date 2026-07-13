@@ -36,6 +36,7 @@
  */
 import { DurableObject } from "cloudflare:workers";
 import { decideRelayAuth, type IntrospectResult } from "./auth-decision";
+import { PromiseQueue } from "./promise-queue";
 import {
   createCookieJar,
   login,
@@ -275,6 +276,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 直列化するための待ち行列。DO はシングルスレッド実行なのでロックは不要、
    * Promise チェーンで先行タスクの完了を待つだけで十分。 */
   private scrapeQueue: Promise<unknown> = Promise.resolve();
+  /** dvr-api / daily-report-api の theearth セッション (cookie) を読み書きする
+   * 処理を直列化する待ち行列。同一 DO 内で複数リクエストが並行すると
+   * storage.get → theearth への実 HTTP コール → storage.put がインターリーブし、
+   * 片方の書き戻しがもう片方の新しい cookie を古いスナップショットで上書きする
+   * lost update が起き、theearth 側セッションが即座に無効化される (Refs #237、
+   * dvr-viewer.vue の loadNotifications+loadMasters 並列発火で顕在化)。
+   * `PromiseQueue` (pure、node vitest でテスト可) 実装を利用する。 */
+  private theearthQueue = new PromiseQueue();
 
   constructor(ctx: DurableObjectState, env: RelayEnv) {
     super(ctx, env);
@@ -1024,7 +1033,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!routing) {
       return dvrJsonError(400, "X-Theearth-Comp-Id / X-Theearth-User-B64 ヘッダが不正です");
     }
+    // record の read → theearth への実 HTTP コール → write を丸ごとキューで直列化
+    // する (Refs #237)。login/logout も同じキューに乗せ、cookie の lost update を防ぐ。
+    return this.theearthQueue.enqueue(() => this.dispatchDvrApi(request, url, routing));
+  }
 
+  private async dispatchDvrApi(request: Request, url: URL, routing: TheearthRouting): Promise<Response> {
     if (url.pathname === "/dvr-api/login" && request.method === "POST") {
       return this.handleTheearthLogin(request, routing);
     }
@@ -1373,7 +1387,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!routing) {
       return dvrJsonError(400, "X-Theearth-Comp-Id / X-Theearth-User-B64 ヘッダが不正です");
     }
+    // record の read → theearth への実 HTTP コール → write を丸ごとキューで直列化
+    // する (Refs #237)。dvr-api と同じ DO 内 theearthQueue を共有するため、
+    // dvr-api / daily-report-api をまたいだ並行アクセスも直列化される。
+    return this.theearthQueue.enqueue(() => this.dispatchReportApi(request, url, routing));
+  }
 
+  private async dispatchReportApi(request: Request, url: URL, routing: TheearthRouting): Promise<Response> {
     if (url.pathname === "/daily-report-api/login" && request.method === "POST") {
       return this.handleTheearthLogin(request, routing);
     }

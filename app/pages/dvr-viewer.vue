@@ -34,10 +34,12 @@ interface DvrNotification {
 
 const { session, authHeaders, restoreSession, showLoginPanel, expireSession } = useDvrSession()
 
-/** ヘッダーでのログイン成功時 (TheearthSessionHeader @login)。 */
+/** ヘッダーでのログイン成功時 (TheearthSessionHeader @login)。
+ * notifications/masters を並列発火すると同一 DO 内で theearth cookie の
+ * read-modify-write がインターリーブし lost update でセッションが即座に
+ * 無効化されるため、dvr-map.vue と同様に直列で呼ぶ (Refs #237)。 */
 function onLogin() {
-  loadNotifications()
-  loadMasters()
+  loadNotifications().then(() => loadMasters())
 }
 
 /** ログアウト / セッション切れ (session が null になったら) ページ内データを破棄する。 */
@@ -415,8 +417,7 @@ async function openNotification(n: DvrNotification) {
 onMounted(() => {
   restoreSession()
   if (session.value) {
-    loadNotifications()
-    loadMasters()
+    loadNotifications().then(() => loadMasters())
   }
   else {
     showLoginPanel.value = true
