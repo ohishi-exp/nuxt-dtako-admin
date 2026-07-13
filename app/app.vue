@@ -2,7 +2,7 @@
 import { useAuth } from '@ippoan/auth-client'
 import { initApi, initScraperRelay } from '~/utils/api'
 
-const { token } = useAuth()
+const { token, clearAuth } = useAuth()
 const config = useRuntimeConfig()
 
 onMounted(() => {
@@ -11,7 +11,12 @@ onMounted(() => {
   // X-Tenant-ID + X-User-ID/Email/Role として注入する。client は X-Tenant-ID を
   // 手で載せない (proxy が上書きするため、信頼境界を proxy に寄せる)。Authorization
   // (Bearer token) だけは proxy が introspect 対象に取れるよう引き続き渡す。
-  initApi('/api/proxy', () => token.value)
+  // refresh も失敗した (= ログイン切れ) 場合は認証状態を破棄して /login へ誘導する
+  // (Refs #235、以前は onUnauthorized 未配線で 401 エラー文言のまま止まっていた)。
+  initApi('/api/proxy', () => token.value, undefined, undefined, () => {
+    clearAuth()
+    navigateTo('/login')
+  })
   // dtako-scraper-relay (front Worker + DO) への WS 接続先。front Worker 自身が
   // Cloudflare Tunnel / Workers VPC 経由で dtako-scraper に到達するため、
   // rust-alc-api 経由の旧 SCRAPER_URL 経路は使わない。

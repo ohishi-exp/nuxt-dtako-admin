@@ -38,6 +38,7 @@ export function initApi(
   tokenGetter?: () => string | null,
   refresher?: () => Promise<void>,
   tenantIdGetter?: () => string | null,
+  onUnauthorized?: () => void,
 ) {
   apiBase = baseUrl.replace(/\/$/, '')
   getAccessToken = tokenGetter || null
@@ -49,6 +50,7 @@ export function initApi(
         tokenGetter: () => getAccessToken?.() ?? null,
         tenantIdGetter: () => getTenantId?.() ?? null,
         tokenRefresher: refresher,
+        onUnauthorized,
         errorLabel: 'API エラー',
       })
     : null
