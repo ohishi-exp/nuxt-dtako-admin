@@ -1,10 +1,11 @@
 /**
  * Promise チェーンによる直列化キュー (pure、cloudflare 非依存)。DO はシングル
  * スレッド実行なので、先行タスクの完了を待つだけでロック無しに安全に直列化
- * できる。`DtakoScraperRelayDO` の theearthQueue (Refs #237) が使う — dvr-api /
- * daily-report-api の並列リクエストで、同一 DO 内の storage.get → theearth
- * への実 HTTP コール → storage.put がインターリーブし、cookie の lost update
- * でセッションが即座に無効化されるバグの修正。
+ * できる。`DtakoScraperRelayDO` の `scrapeQueue` (SCRAPER_MODE=http のスクレイプ
+ * 直列化) と `theearthQueue` (Refs #237、dvr-api/daily-report-api の theearth
+ * cookie read-modify-write 直列化) の共通実装元。両者は同型ロジックだった
+ * ため、片方だけ pure module に切り出して他方は inline のまま残す状態を避け、
+ * 単一実装に統合してある (rule of two)。
  */
 export class PromiseQueue {
   private tail: Promise<unknown> = Promise.resolve();

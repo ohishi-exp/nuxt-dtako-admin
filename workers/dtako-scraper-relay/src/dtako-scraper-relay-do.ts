@@ -273,16 +273,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   /** 上流 (dtako-scraper) への WebSocket。plain socket なので DO を active に保つ。 */
   private upstream: WebSocket | null = null;
   /** SCRAPER_MODE=http 時、同一 comp_id (= この DO インスタンス) 内でスクレイプを
-   * 直列化するための待ち行列。DO はシングルスレッド実行なのでロックは不要、
-   * Promise チェーンで先行タスクの完了を待つだけで十分。 */
-  private scrapeQueue: Promise<unknown> = Promise.resolve();
+   * 直列化するための待ち行列。`PromiseQueue` (pure、node vitest でテスト可) 実装
+   * を利用する。 */
+  private scrapeQueue = new PromiseQueue();
   /** dvr-api / daily-report-api の theearth セッション (cookie) を読み書きする
    * 処理を直列化する待ち行列。同一 DO 内で複数リクエストが並行すると
    * storage.get → theearth への実 HTTP コール → storage.put がインターリーブし、
    * 片方の書き戻しがもう片方の新しい cookie を古いスナップショットで上書きする
    * lost update が起き、theearth 側セッションが即座に無効化される (Refs #237、
    * dvr-viewer.vue の loadNotifications+loadMasters 並列発火で顕在化)。
-   * `PromiseQueue` (pure、node vitest でテスト可) 実装を利用する。 */
+   * scrapeQueue と同じ `PromiseQueue` 実装を利用する。 */
   private theearthQueue = new PromiseQueue();
 
   constructor(ctx: DurableObjectState, env: RelayEnv) {
@@ -476,25 +476,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  /** この DO インスタンス内でスクレイプ job を直列化する共通キュー。DO は
-   * シングルスレッド実行なので、Promise チェーンで先行タスクの完了を待つだけで
-   * 安全に直列化できる。WS 手動トリガーと cron 無人実行が同一 comp_id /
-   * ETC アカウントに重なっても直列に捌かれる (issue #22 の設計どおり)。 */
+  /** この DO インスタンス内でスクレイプ job を直列化する共通キュー。WS 手動
+   * トリガーと cron 無人実行が同一 comp_id / ETC アカウントに重なっても直列に
+   * 捌かれる (issue #22 の設計どおり)。`scrapeQueue` (`PromiseQueue`) への薄い
+   * delegator (Refs #237、theearthQueue と実装元を統合)。 */
   private async enqueueScrape<T>(job: () => Promise<T>): Promise<T> {
-    const myTurn = this.scrapeQueue.catch(() => undefined);
-    let release: () => void = () => {};
-    this.scrapeQueue = myTurn.then(
-      () =>
-        new Promise<void>((resolve) => {
-          release = resolve;
-        }),
-    );
-    await myTurn;
-    try {
-      return await job();
-    } finally {
-      release();
-    }
+    return this.scrapeQueue.enqueue(job);
   }
 
   /** 同一 comp_id (= この DO インスタンス) 内でのスクレイプ直列化。 */
