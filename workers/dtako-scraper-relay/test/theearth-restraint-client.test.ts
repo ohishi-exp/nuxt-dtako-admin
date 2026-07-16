@@ -1,10 +1,22 @@
 import { describe, expect, it } from 'vitest'
 import {
+  appendHistoryJsonl,
   downloadRestraintCsv,
   isNoDataResponse,
   parseHmmToMinutes,
   parseRestraintCsv,
+  parseRestraintVersionTimestamp,
+  pickSupersededVersionKeys,
+  RESTRAINT_HISTORY_MAX_LINES,
+  RESTRAINT_VERSION_RETENTION_MS,
+  restraintDriverRangeLabel,
+  restraintHistoryLine,
+  restraintR2Paths,
   RestraintParamError,
+  restraintVersionTimestamp,
+  restraintYearCandidates,
+  stableNoDataSummaryBody,
+  stableSummaryBody,
   summarizeRestraintDriver,
   validateRestraintParams,
   type RestraintCsvParams,
@@ -63,6 +75,12 @@ const RESTRAINT_PAGE_HTML = `<html><body><form>
 const RESTRAINT_PAGE_EMPTY_BTN_HTML = RESTRAINT_PAGE_HTML.replace(
   'name="ctl00$btnOutputCsv" id="btnOutputCsv" value="CSV"',
   'name="ctl00$btnOutputCsv" id="btnOutputCsv" value=""',
+)
+
+/** 和暦入力モード hint (`chkUseEra` checked) のページ。 */
+const RESTRAINT_PAGE_ERA_HTML = RESTRAINT_PAGE_HTML.replace(
+  '<input type="text" name="ctl00$ucMonthDate$txtYear"',
+  '<input type="checkbox" name="ctl00$ucMonthDate$chkUseEra" id="ucMonthDate_chkUseEra" checked="checked" />\n  <input type="text" name="ctl00$ucMonthDate$txtYear"',
 )
 
 const LOGIN_FORM_HTML = `<html><body><form>
@@ -193,9 +211,48 @@ describe('downloadRestraintCsv', () => {
     )
   })
 
-  it('「該当データがありません」の HTML は null を返す (エラーではない)', async () => {
-    const fetchImpl = sequenceFetch([html(RESTRAINT_PAGE_HTML), html(NO_DATA_HTML)])
+  it('全候補 (4桁西暦 → 令和2桁) が「該当データがありません」なら null (エラーではない)', async () => {
+    const captured = { body: [] as string[] }
+    const fetchImpl = capturingFetch(
+      [html(RESTRAINT_PAGE_HTML), html(NO_DATA_HTML), html(RESTRAINT_PAGE_HTML), html(NO_DATA_HTML)],
+      captured,
+    )
     await expect(downloadRestraintCsv(createCookieJar(), VALID_PARAMS, fetchImpl)).resolves.toBeNull()
+    // 4桁西暦 → 令和2桁ゼロ埋めの順に試す (企業の和暦/西暦設定に依存しないため)
+    expect(new URLSearchParams(captured.body[0]!).get('ctl00$ucMonthDate$txtYear')).toBe('2025')
+    expect(new URLSearchParams(captured.body[1]!).get('ctl00$ucMonthDate$txtYear')).toBe('07')
+  })
+
+  it('4桁西暦が該当なしでも令和2桁のリトライで取れれば成功', async () => {
+    const captured = { body: [] as string[] }
+    const fetchImpl = capturingFetch(
+      [html(RESTRAINT_PAGE_HTML), html(NO_DATA_HTML), html(RESTRAINT_PAGE_HTML), sjisCsvResponse(' tail')],
+      captured,
+    )
+    const result = await downloadRestraintCsv(createCookieJar(), VALID_PARAMS, fetchImpl)
+    expect(result).not.toBeNull()
+    expect(new URLSearchParams(captured.body[1]!).get('ctl00$ucMonthDate$txtYear')).toBe('07')
+  })
+
+  it('chkUseEra が checked のページでは令和2桁を先に試す', async () => {
+    const captured = { body: [] as string[] }
+    const fetchImpl = capturingFetch([html(RESTRAINT_PAGE_ERA_HTML), sjisCsvResponse(' tail')], captured)
+    await downloadRestraintCsv(createCookieJar(), VALID_PARAMS, fetchImpl)
+    expect(new URLSearchParams(captured.body[0]!).get('ctl00$ucMonthDate$txtYear')).toBe('07')
+  })
+
+  it('令和にならない年 (2018 以前) は 4 桁西暦しか試さない', async () => {
+    const fetchImpl = sequenceFetch([html(RESTRAINT_PAGE_HTML), html(NO_DATA_HTML)])
+    await expect(
+      downloadRestraintCsv(createCookieJar(), { ...VALID_PARAMS, year: 2018 }, fetchImpl),
+    ).resolves.toBeNull()
+  })
+
+  it('リトライの再 GET がログイン画面なら VenusSessionExpiredError', async () => {
+    const fetchImpl = sequenceFetch([html(RESTRAINT_PAGE_HTML), html(NO_DATA_HTML), html(LOGIN_FORM_HTML)])
+    await expect(downloadRestraintCsv(createCookieJar(), VALID_PARAMS, fetchImpl)).rejects.toThrow(
+      VenusSessionExpiredError,
+    )
   })
 
   it('postback がログイン画面 (HTML) なら VenusSessionExpiredError', async () => {
@@ -223,6 +280,146 @@ describe('downloadRestraintCsv', () => {
     await expect(downloadRestraintCsv(createCookieJar(), VALID_PARAMS, fetchImpl)).rejects.toThrow(
       /拘束時間管理表 CSV ではありません.*\(none\)/,
     )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// restraintYearCandidates
+// ---------------------------------------------------------------------------
+
+describe('restraintYearCandidates', () => {
+  it('既定 (chkUseEra なし/unchecked) は 4桁西暦 → 令和2桁ゼロ埋め', () => {
+    expect(restraintYearCandidates(2025, RESTRAINT_PAGE_HTML)).toEqual(['2025', '07'])
+    expect(restraintYearCandidates(2026, '<html></html>')).toEqual(['2026', '08'])
+  })
+
+  it('chkUseEra checked のページは令和2桁を先に', () => {
+    expect(restraintYearCandidates(2026, RESTRAINT_PAGE_ERA_HTML)).toEqual(['08', '2026'])
+  })
+
+  it('令和にならない年は 4 桁西暦のみ', () => {
+    expect(restraintYearCandidates(2018, RESTRAINT_PAGE_HTML)).toEqual(['2018'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// R2 アーカイブ key / バージョン管理ヘルパ
+// ---------------------------------------------------------------------------
+
+describe('restraintR2Paths / restraintDriverRangeLabel', () => {
+  const paths = restraintR2Paths('restraint', 'COMP1', 2025, 4, '9901-9901')
+
+  it('CSV / サマリの key を組み立てる', () => {
+    expect(paths.csvDir).toBe('restraint/COMP1/2025-04/csv/9901-9901')
+    expect(paths.csvLatest).toBe('restraint/COMP1/2025-04/csv/9901-9901/latest.csv')
+    expect(paths.csvVersion('20260716T183000')).toBe(
+      'restraint/COMP1/2025-04/csv/9901-9901/v-20260716T183000.csv',
+    )
+    expect(paths.summaryDir('9901')).toBe('restraint/COMP1/2025-04/summary/9901')
+    expect(paths.summaryLatest('9901')).toBe('restraint/COMP1/2025-04/summary/9901/latest.json')
+    expect(paths.summaryVersion('9901', '20260716T183000')).toBe(
+      'restraint/COMP1/2025-04/summary/9901/v-20260716T183000.json',
+    )
+  })
+
+  it('乗務員CD 空はサマリ key を unknown に落とす', () => {
+    expect(paths.summaryLatest('')).toBe('restraint/COMP1/2025-04/summary/unknown/latest.json')
+    expect(paths.summaryVersion('', 'T')).toBe('restraint/COMP1/2025-04/summary/unknown/v-T.json')
+  })
+
+  it('range ラベル: 指定あり / 全乗務員', () => {
+    expect(restraintDriverRangeLabel({ year: 2025, month: 4, driverFrom: '1', driverTo: '2' })).toBe('1-2')
+    expect(restraintDriverRangeLabel({ year: 2025, month: 4, driverFrom: '', driverTo: '' })).toBe('all')
+  })
+})
+
+describe('restraintVersionTimestamp / parseRestraintVersionTimestamp', () => {
+  it('JST の YYYYMMDDTHHmmss を生成し、round-trip できる', () => {
+    const now = new Date('2026-07-16T09:30:15Z') // JST 18:30:15
+    const ts = restraintVersionTimestamp(now)
+    expect(ts).toBe('20260716T183015')
+    expect(parseRestraintVersionTimestamp(ts)).toBe(now.getTime())
+  })
+
+  it('形式不一致は null', () => {
+    expect(parseRestraintVersionTimestamp('latest')).toBeNull()
+    expect(parseRestraintVersionTimestamp('2026-07-16T18:30:15')).toBeNull()
+  })
+})
+
+describe('pickSupersededVersionKeys', () => {
+  const base = 'restraint/COMP1/2025-04/csv/all'
+  const now = new Date('2026-07-16T09:00:00Z')
+  const key = (ts: string) => `${base}/v-${ts}.csv`
+
+  it('最新版は常に残し、後継版の出現から 7 日過ぎた旧版だけ選ぶ', () => {
+    const oldV = key('20260601T000000') // 後継 (07-01) の出現から 7 日超 → 削除
+    const midV = key('20260701T000000') // 後継 (07-15) の出現から 7 日未満 → 残す
+    const newV = key('20260715T000000') // 最新 → 残す
+    expect(pickSupersededVersionKeys([newV, oldV, midV], now)).toEqual([oldV])
+  })
+
+  it('retention を明示指定できる (0 なら旧版すべて)', () => {
+    const keys = [key('20260101T000000'), key('20260201T000000')]
+    expect(pickSupersededVersionKeys(keys, now, 0)).toEqual([key('20260101T000000')])
+  })
+
+  it('タイムスタンプを読めない key は安全側で残す・空/1件は何も選ばない', () => {
+    expect(pickSupersededVersionKeys([`${base}/latest.csv`, key('20260101T000000')], now)).toEqual([])
+    expect(pickSupersededVersionKeys([], now)).toEqual([])
+    expect(pickSupersededVersionKeys([key('20260101T000000')], now)).toEqual([])
+  })
+
+  it('既定 retention は 7 日', () => {
+    expect(RESTRAINT_VERSION_RETENTION_MS).toBe(7 * 24 * 60 * 60 * 1000)
+  })
+})
+
+describe('restraintHistoryLine / appendHistoryJsonl', () => {
+  it('new-version / unchanged は sha256 + bytes 付き、no-data は無し', () => {
+    expect(JSON.parse(restraintHistoryLine('20260716T183000', 'new-version', 'abc', 100))).toEqual({
+      ts: '20260716T183000',
+      result: 'new-version',
+      sha256: 'abc',
+      bytes: 100,
+    })
+    expect(JSON.parse(restraintHistoryLine('20260716T183000', 'unchanged', 'abc', 100)).result).toBe('unchanged')
+    expect(JSON.parse(restraintHistoryLine('20260716T183000', 'no-data', null, null))).toEqual({
+      ts: '20260716T183000',
+      result: 'no-data',
+    })
+  })
+
+  it('JSONL に追記し、空行を除去して末尾改行を付ける', () => {
+    const first = appendHistoryJsonl(null, '{"a":1}')
+    expect(first).toBe('{"a":1}\n')
+    const second = appendHistoryJsonl(first, '{"b":2}')
+    expect(second).toBe('{"a":1}\n{"b":2}\n')
+  })
+
+  it('maxLines を超えたら古い行から捨てる (既定 1000)', () => {
+    const trimmed = appendHistoryJsonl('l1\nl2\nl3\n', 'l4', 3)
+    expect(trimmed).toBe('l2\nl3\nl4\n')
+    expect(RESTRAINT_HISTORY_MAX_LINES).toBe(1000)
+  })
+})
+
+describe('stableNoDataSummaryBody', () => {
+  it('noData マーカーの決定論 JSON', () => {
+    const a = stableNoDataSummaryBody('COMP1', 2025, 4, '9901')
+    expect(a).toBe(stableNoDataSummaryBody('COMP1', 2025, 4, '9901'))
+    expect(JSON.parse(a)).toEqual({ compId: 'COMP1', year: 2025, month: 4, driverCd: '9901', noData: true })
+  })
+})
+
+describe('stableSummaryBody', () => {
+  it('同じ内容なら常に同一バイト列 (SHA-256 変化検知の前提)', () => {
+    const report = parseRestraintCsv(SAMPLE_CSV)
+    const s = summarizeRestraintDriver(report.drivers[0]!)
+    const a = stableSummaryBody('COMP1', 2025, 4, s)
+    const b = stableSummaryBody('COMP1', 2025, 4, summarizeRestraintDriver(report.drivers[0]!))
+    expect(a).toBe(b)
+    expect(JSON.parse(a)).toMatchObject({ compId: 'COMP1', year: 2025, month: 4, driverCd: '9901' })
   })
 })
 

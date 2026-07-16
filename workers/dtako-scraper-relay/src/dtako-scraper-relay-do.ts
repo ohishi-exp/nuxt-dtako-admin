@@ -85,12 +85,21 @@ import {
   type TheearthSessionRecord,
 } from "./theearth-session";
 import {
+  appendHistoryJsonl,
   downloadRestraintCsv,
   parseRestraintCsv,
+  pickSupersededVersionKeys,
+  restraintDriverRangeLabel,
+  restraintHistoryLine,
+  restraintR2Paths,
   RestraintParamError,
+  restraintVersionTimestamp,
+  stableNoDataSummaryBody,
+  stableSummaryBody,
   summarizeRestraintDriver,
   validateRestraintParams,
   type RestraintCsvParams,
+  type RestraintDriverSummary,
 } from "./theearth-restraint-client";
 import {
   addFuelRow,
@@ -271,10 +280,16 @@ export interface RelayEnv {
    * ohishi-exp/browser-render-rust#14)。
    */
   ETC_ACCOUNTS?: unknown;
-  /** ETC 明細 CSV の保存先 R2 bucket (dtako-uploads)。 */
+  /** ETC 明細 CSV の保存先 R2 bucket (dtako-uploads)。拘束時間管理表 CSV
+   * (`/restraint-api/*`、Refs #241) のアーカイブ先も兼ねる。 */
   DTAKO_R2?: R2Bucket;
   /** ETC CSV の R2 key prefix。staging は `etc-staging` で本番 (`etc`) と分離する。 */
   ETC_R2_PREFIX?: string;
+  /** 拘束時間管理表 CSV / サマリ JSON の R2 key prefix (`restraint` /
+   * `restraint-staging` / `restraint-preview`)。key 設計とバージョン管理
+   * (latest + 内容が変わった時だけ `v-{ts}` 追加、SHA-256 変化検知) は
+   * `theearth-restraint-client.ts` の `restraintR2Paths` の doc 参照。 */
+  RESTRAINT_R2_PREFIX?: string;
 }
 
 export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
@@ -1509,6 +1524,186 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return dvrJsonError(404, "Not Found");
   }
 
+  /** SHA-256 の hex digest (R2 アーカイブの変化検知用)。 */
+  private async sha256Hex(bytes: ArrayBuffer | Uint8Array): Promise<string> {
+    const digest = await crypto.subtle.digest(
+      "SHA-256",
+      bytes instanceof Uint8Array ? (bytes as unknown as ArrayBuffer) : bytes,
+    );
+    return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  /** `latest` の customMetadata.sha256 と比較するバージョン管理 put:
+   *
+   * - **内容不変** → latest の `lastVerifiedAt` だけ今回時刻に更新して false を
+   *   返す (version は増やさない)。「元の CSV は最終形が確定するまで変わりうる」
+   *   ため、**いつの時点までこの値が合っていたか** を latest が常に持つ。
+   * - **内容が変わった** → latest を上書き (fetchedAt = 今回) + `v-{ts}` 版を
+   *   追加して true を返す。置き換えられた旧版はこの時点から
+   *   RESTRAINT_VERSION_RETENTION_MS (7 日) 後に削除対象になる
+   *   (pruneRestraintVersions)。 */
+  private async putVersionedR2(
+    bucket: R2Bucket,
+    latestKey: string,
+    versionKey: string,
+    body: ArrayBuffer | string,
+    contentType: string,
+    fetchedAt: string,
+  ): Promise<{ changed: boolean; sha256: string }> {
+    const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body;
+    const hash = await this.sha256Hex(bytes);
+    const latest = await bucket.head(latestKey);
+    if (latest?.customMetadata?.sha256 === hash) {
+      await bucket.put(latestKey, bytes, {
+        httpMetadata: { contentType },
+        customMetadata: { ...latest.customMetadata, lastVerifiedAt: fetchedAt },
+      });
+      return { changed: false, sha256: hash };
+    }
+    const options = {
+      httpMetadata: { contentType },
+      customMetadata: { sha256: hash, fetchedAt, lastVerifiedAt: fetchedAt },
+    };
+    await bucket.put(latestKey, bytes, options);
+    await bucket.put(versionKey, bytes, options);
+    return { changed: true, sha256: hash };
+  }
+
+  /** 確認履歴 (history.jsonl) に 1 行追記する。「unchanged」「no-data」も残す —
+   * latest の lastVerifiedAt (最新値のみ) と違い、確認の時系列が全部残る。 */
+  private async appendRestraintHistory(
+    bucket: R2Bucket,
+    historyKey: string,
+    line: string,
+  ): Promise<void> {
+    const existing = await bucket.get(historyKey);
+    const text = existing ? await existing.text() : null;
+    await bucket.put(historyKey, appendHistoryJsonl(text, line), {
+      httpMetadata: { contentType: "application/x-ndjson" },
+    });
+  }
+
+  /** 新しい版を書いた後の掃除: `{dir}/v-*` を list して、後継版の出現から
+   * 7 日を過ぎた旧版を削除する (最新版は常に残る、選定は pure な
+   * pickSupersededVersionKeys)。 */
+  private async pruneRestraintVersions(bucket: R2Bucket, dir: string): Promise<void> {
+    const listed = await bucket.list({ prefix: `${dir}/v-` });
+    const stale = pickSupersededVersionKeys(listed.objects.map((o) => o.key), new Date());
+    for (const key of stale) {
+      await bucket.delete(key);
+    }
+    if (stale.length > 0) {
+      console.log(JSON.stringify({ restraint_r2: "pruned", dir, deleted: stale.length }));
+    }
+  }
+
+  /** 取得できた拘束時間管理表 CSV (Shift_JIS 生バイト) + 乗務員別サマリ JSON を
+   * R2 にバージョン管理付きで保存する (Refs #241、key 設計は restraintR2Paths の
+   * doc 参照)。waitUntil 前提の best-effort — 保存失敗でユーザーへの応答は落とさ
+   * ない (console.error → Workers Observability / Tail Worker で追う)。 */
+  private async saveRestraintToR2(
+    compId: string,
+    params: RestraintCsvParams,
+    csvBytes: ArrayBuffer,
+    summaries: RestraintDriverSummary[],
+  ): Promise<void> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return; // R2 未 binding の環境ではアーカイブなし (取得自体は成功させる)
+    const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
+    const range = restraintDriverRangeLabel(params);
+    const paths = restraintR2Paths(prefix, compId, params.year, params.month, range);
+    const ts = restraintVersionTimestamp(new Date());
+    try {
+      const csvResult = await this.putVersionedR2(
+        bucket,
+        paths.csvLatest,
+        paths.csvVersion(ts),
+        csvBytes,
+        "text/csv; charset=Shift_JIS",
+        ts,
+      );
+      if (csvResult.changed) await this.pruneRestraintVersions(bucket, paths.csvDir);
+      await this.appendRestraintHistory(
+        bucket,
+        paths.csvHistory,
+        restraintHistoryLine(
+          ts,
+          csvResult.changed ? "new-version" : "unchanged",
+          csvResult.sha256,
+          csvBytes.byteLength,
+        ),
+      );
+      let summariesWrote = 0;
+      for (const summary of summaries) {
+        const body = stableSummaryBody(compId, params.year, params.month, summary);
+        const wrote = await this.putVersionedR2(
+          bucket,
+          paths.summaryLatest(summary.driverCd),
+          paths.summaryVersion(summary.driverCd, ts),
+          body,
+          "application/json",
+          ts,
+        );
+        if (wrote.changed) {
+          summariesWrote++;
+          await this.pruneRestraintVersions(bucket, paths.summaryDir(summary.driverCd));
+        }
+      }
+      console.log(
+        JSON.stringify({
+          restraint_r2: "done",
+          key: paths.csvLatest,
+          csv_new_version: csvResult.changed,
+          summaries_total: summaries.length,
+          summaries_new_version: summariesWrote,
+        }),
+      );
+    } catch (err) {
+      console.error(
+        JSON.stringify({ restraint_r2: "error", key: paths.csvLatest, error: describeUnknownError(err) }),
+      );
+    }
+  }
+
+  /** 「該当データがありません」だった確認も R2 に残す (Refs #241 — 途中入社・
+   * 休職・未集計などで正当にありうる状態。未取得と区別するため、確認履歴に
+   * `no-data` 行を追記し、乗務員単体取得なら summary 側にも noData マーカーを
+   * 版管理付きで置く)。waitUntil 前提の best-effort。 */
+  private async saveRestraintNoDataToR2(compId: string, params: RestraintCsvParams): Promise<void> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return;
+    const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
+    const range = restraintDriverRangeLabel(params);
+    const paths = restraintR2Paths(prefix, compId, params.year, params.month, range);
+    const ts = restraintVersionTimestamp(new Date());
+    try {
+      await this.appendRestraintHistory(
+        bucket,
+        paths.csvHistory,
+        restraintHistoryLine(ts, "no-data", null, null),
+      );
+      // 乗務員単体 (from=to) なら summary にも noData マーカーを残す (全乗務員
+      // 取得では「誰が居なかったか」を列挙できないため履歴のみ)
+      if (params.driverFrom !== "" && params.driverFrom === params.driverTo) {
+        const body = stableNoDataSummaryBody(compId, params.year, params.month, params.driverFrom);
+        const wrote = await this.putVersionedR2(
+          bucket,
+          paths.summaryLatest(params.driverFrom),
+          paths.summaryVersion(params.driverFrom, ts),
+          body,
+          "application/json",
+          ts,
+        );
+        if (wrote.changed) await this.pruneRestraintVersions(bucket, paths.summaryDir(params.driverFrom));
+      }
+      console.log(JSON.stringify({ restraint_r2: "no-data", key: paths.csvHistory }));
+    } catch (err) {
+      console.error(
+        JSON.stringify({ restraint_r2: "error", key: paths.csvHistory, error: describeUnknownError(err) }),
+      );
+    }
+  }
+
   /** GET /restraint-api/report?year=&month=&driverFrom=&driverTo= — F-ERS2010 の
    * CSV を取得してパース済み JSON で返す。「該当データがありません」(未集計月・
    * 在籍しない乗務員CD) は 200 の `{no_data: true}` (エラーではない)。フロントは
@@ -1524,13 +1719,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
     return this.callReportAction(record, "拘束時間管理表の取得", async (jar) => {
       const csv = await downloadRestraintCsv(jar, params);
-      if (csv === null) return { no_data: true };
+      if (csv === null) {
+        // 「データなし」も確認結果として R2 に残す (途中入社・休職と正当にありうる)
+        this.ctx.waitUntil(this.saveRestraintNoDataToR2(record.compId, params));
+        return { no_data: true };
+      }
       const report = parseRestraintCsv(csv.text);
-      return {
-        no_data: false,
-        report,
-        summaries: report.drivers.map(summarizeRestraintDriver),
-      };
+      const summaries = report.drivers.map(summarizeRestraintDriver);
+      // 生 CSV + 乗務員別サマリを R2 にバージョン管理付きで保存 (応答をブロックしない)
+      this.ctx.waitUntil(this.saveRestraintToR2(record.compId, params, csv.bytes, summaries));
+      return { no_data: false, report, summaries };
     });
   }
 
@@ -1556,8 +1754,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         }),
       );
       if (csv === null) {
+        this.ctx.waitUntil(this.saveRestraintNoDataToR2(record.compId, params));
         return dvrJsonError(404, "該当データがありません (未集計の年月、または該当乗務員なし)");
       }
+      // 生 CSV 素通し経路でもサマリを抽出してアーカイブする (パース失敗は
+      // アーカイブ側の縮退のみ — ユーザーへの CSV 応答は落とさない)
+      let archiveSummaries: RestraintDriverSummary[] = [];
+      try {
+        archiveSummaries = parseRestraintCsv(csv.text).drivers.map(summarizeRestraintDriver);
+      } catch (err) {
+        console.error(JSON.stringify({ restraint_r2: "parse-skip", error: describeUnknownError(err) }));
+      }
+      this.ctx.waitUntil(this.saveRestraintToR2(record.compId, params, csv.bytes, archiveSummaries));
       const range = params.driverFrom ? `${params.driverFrom}-${params.driverTo}` : "all";
       const month = String(params.month).padStart(2, "0");
       return new Response(csv.bytes, {
