@@ -283,6 +283,34 @@ const archiveRanges = computed(() => {
   }))
 })
 
+const resummarizing = ref(false)
+const resummarizeMessage = ref('')
+
+/** R2 の生 CSV からサマリを再計算する (theearth 非依存。summary v2 への移行や
+ * サマリ欠落月の復元に使う)。 */
+async function resummarize() {
+  if (!session.value || !month.value) return
+  resummarizing.value = true
+  resummarizeMessage.value = ''
+  pageError.value = ''
+  try {
+    const res = await $fetch<{ csv_processed: number, summaries_written: number, summaries_new_version: number, errors: string[] }>(
+      '/restraint-api/archive/resummarize',
+      { method: 'POST', headers: authHeaders(), query: { month: month.value } },
+    )
+    resummarizeMessage.value
+      = `CSV ${res.csv_processed} 件からサマリ ${res.summaries_written} 名分を再計算 (更新 ${res.summaries_new_version} 件)`
+      + (res.errors.length ? ` / エラー ${res.errors.length} 件` : '')
+    await loadArchive()
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+  finally {
+    resummarizing.value = false
+  }
+}
+
 async function toggleHistory(range: string) {
   if (archiveHistory.value[range]) {
     const { [range]: _removed, ...rest } = archiveHistory.value
@@ -546,9 +574,22 @@ watch([activeTab, month, session], () => {
               <span class="font-semibold">アーカイブ ({{ month }})</span>
               <span class="text-xs text-gray-500">summary {{ archiveSummaryCount }} 名 / データなし {{ archiveNoData.length }} 名</span>
               <div class="flex-1" />
+              <UButton
+                size="xs"
+                variant="soft"
+                icon="i-lucide-calculator"
+                label="サマリを CSV から再計算"
+                title="R2 に保存済みの生 CSV からサマリを作り直します (theearth には接続しません)"
+                :loading="resummarizing"
+                :disabled="!archiveRanges.length"
+                @click="resummarize"
+              />
               <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" :loading="loadingArchive" @click="loadArchive" />
             </div>
           </template>
+          <p v-if="resummarizeMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2 mb-3">
+            {{ resummarizeMessage }}
+          </p>
           <p v-if="!archiveRanges.length && !loadingArchive" class="text-sm text-gray-500">
             この月のアーカイブはありません (/restraint-fetch で取得するとここに貯まります)
           </p>
