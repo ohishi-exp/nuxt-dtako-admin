@@ -1,2 +1,38 @@
 @import "tailwindcss";
 @import "@nuxt/ui";
+
+/* 印刷はダークモード中でもライト配色に固定する (暗い背景の PDF 防止)。
+   JS で .dark class を外す方式だと印刷ダイアログ中に画面がちらつくため CSS のみで行う。
+   ダーク配色は 2 経路で当たっており、両方を打ち消す:
+   1. ページ側の dark:* utility → dark variant 自体を print 以外に限定して無効化 */
+@custom-variant dark {
+  @media not print {
+    &:where(.dark, .dark *) {
+      @slot;
+    }
+  }
+}
+
+/* 2. Nuxt UI のテーマ変数は variant を通らない素の .dark セレクタ
+   (@nuxt/ui dist/runtime/index.css の @layer theme) で当たるため、print では
+   同ファイル `.light,:host,:root` ブロックのライト値で上書きする。
+   @nuxt/ui 更新時は変数の増減をこの一覧に追従させること。 */
+@media print {
+  .dark {
+    --ui-text-dimmed: var(--ui-color-neutral-400);
+    --ui-text-muted: var(--ui-color-neutral-500);
+    --ui-text-toned: var(--ui-color-neutral-600);
+    --ui-text: var(--ui-color-neutral-700);
+    --ui-text-highlighted: var(--ui-color-neutral-900);
+    --ui-text-inverted: #fff;
+    --ui-bg: #fff;
+    --ui-bg-muted: var(--ui-color-neutral-50);
+    --ui-bg-elevated: var(--ui-color-neutral-100);
+    --ui-bg-accented: var(--ui-color-neutral-200);
+    --ui-bg-inverted: var(--ui-color-neutral-900);
+    --ui-border: var(--ui-color-neutral-200);
+    --ui-border-muted: var(--ui-color-neutral-200);
+    --ui-border-accented: var(--ui-color-neutral-300);
+    --ui-border-inverted: var(--ui-color-neutral-900);
+  }
+}
