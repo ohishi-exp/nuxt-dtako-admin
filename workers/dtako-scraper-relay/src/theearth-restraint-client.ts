@@ -531,6 +531,10 @@ export interface RestraintR2Paths {
   csvLatest: string;
   /** 生 CSV の版 (内容が変わった取得時のみ追加)。 */
   csvVersion(ts: string): string;
+  /** 取得ごとの確認履歴 (JSONL、1 取得 = 1 行)。「変わっていなかった」という
+   * 結果も残す — `lastVerifiedAt` (最新値のみ) と違い、いつ確認して
+   * unchanged / new-version だったかの時系列が全部残る。 */
+  csvHistory: string;
   /** 乗務員別サマリ JSON のディレクトリ。 */
   summaryDir(driverCd: string): string;
   /** 乗務員別サマリ JSON の最新。 */
@@ -553,10 +557,60 @@ export function restraintR2Paths(
     csvDir: `${base}/csv/${driverRange}`,
     csvLatest: `${base}/csv/${driverRange}/latest.csv`,
     csvVersion: (ts) => `${base}/csv/${driverRange}/v-${ts}.csv`,
+    csvHistory: `${base}/csv/${driverRange}/history.jsonl`,
     summaryDir,
     summaryLatest: (driverCd) => `${summaryDir(driverCd)}/latest.json`,
     summaryVersion: (driverCd, ts) => `${summaryDir(driverCd)}/v-${ts}.json`,
   };
+}
+
+/** 確認履歴 (history.jsonl) の保持行数上限 (直近のみ。肥大化防止)。 */
+export const RESTRAINT_HISTORY_MAX_LINES = 1000;
+
+/** 確認履歴の結果種別。
+ * - `new-version`: 内容が変わった (版を追加した)
+ * - `unchanged`: 確認したが同一内容だった (「この時点まで値が合っていた」の証跡)
+ * - `no-data`: 確認したが「該当データがありません」だった (途中入社・休職・
+ *   未集計などで正当にありうる — 未取得とは区別して残す) */
+export type RestraintHistoryResult = "new-version" | "unchanged" | "no-data";
+
+/** 確認履歴の 1 行 (JSONL)。no-data は sha256/bytes を持たない。 */
+export function restraintHistoryLine(
+  ts: string,
+  result: RestraintHistoryResult,
+  sha256: string | null,
+  bytes: number | null,
+): string {
+  return JSON.stringify({
+    ts,
+    result,
+    ...(sha256 !== null ? { sha256 } : {}),
+    ...(bytes !== null ? { bytes } : {}),
+  });
+}
+
+/** 乗務員単体取得 (from=to) で「該当データなし」だった時の summary マーカー body
+ * (決定論 JSON — 何度確認しても同一バイト列なので、版管理上は unchanged 扱いで
+ * lastVerifiedAt だけ進む。後にデータが現れたら通常の summary が新しい版になる)。 */
+export function stableNoDataSummaryBody(
+  compId: string,
+  year: number,
+  month: number,
+  driverCd: string,
+): string {
+  return JSON.stringify({ compId, year, month, driverCd, noData: true });
+}
+
+/** JSONL に 1 行追記して直近 maxLines に丸める (R2 は append 不可のため
+ * read-modify-write。DO 側の theearthQueue 直列化が競合を防ぐ)。 */
+export function appendHistoryJsonl(
+  existing: string | null,
+  line: string,
+  maxLines: number = RESTRAINT_HISTORY_MAX_LINES,
+): string {
+  const lines = existing ? existing.split("\n").filter((l) => l.trim() !== "") : [];
+  lines.push(line);
+  return lines.slice(-maxLines).join("\n") + "\n";
 }
 
 /** 置き換えられた旧版の保持期間 (7 日)。後継版の出現時刻からこの期間を過ぎた版を

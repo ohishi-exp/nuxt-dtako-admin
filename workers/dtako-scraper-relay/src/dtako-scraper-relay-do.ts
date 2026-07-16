@@ -85,13 +85,16 @@ import {
   type TheearthSessionRecord,
 } from "./theearth-session";
 import {
+  appendHistoryJsonl,
   downloadRestraintCsv,
   parseRestraintCsv,
   pickSupersededVersionKeys,
   restraintDriverRangeLabel,
+  restraintHistoryLine,
   restraintR2Paths,
   RestraintParamError,
   restraintVersionTimestamp,
+  stableNoDataSummaryBody,
   stableSummaryBody,
   summarizeRestraintDriver,
   validateRestraintParams,
@@ -1546,7 +1549,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     body: ArrayBuffer | string,
     contentType: string,
     fetchedAt: string,
-  ): Promise<boolean> {
+  ): Promise<{ changed: boolean; sha256: string }> {
     const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body;
     const hash = await this.sha256Hex(bytes);
     const latest = await bucket.head(latestKey);
@@ -1555,7 +1558,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         httpMetadata: { contentType },
         customMetadata: { ...latest.customMetadata, lastVerifiedAt: fetchedAt },
       });
-      return false;
+      return { changed: false, sha256: hash };
     }
     const options = {
       httpMetadata: { contentType },
@@ -1563,7 +1566,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     };
     await bucket.put(latestKey, bytes, options);
     await bucket.put(versionKey, bytes, options);
-    return true;
+    return { changed: true, sha256: hash };
+  }
+
+  /** 確認履歴 (history.jsonl) に 1 行追記する。「unchanged」「no-data」も残す —
+   * latest の lastVerifiedAt (最新値のみ) と違い、確認の時系列が全部残る。 */
+  private async appendRestraintHistory(
+    bucket: R2Bucket,
+    historyKey: string,
+    line: string,
+  ): Promise<void> {
+    const existing = await bucket.get(historyKey);
+    const text = existing ? await existing.text() : null;
+    await bucket.put(historyKey, appendHistoryJsonl(text, line), {
+      httpMetadata: { contentType: "application/x-ndjson" },
+    });
   }
 
   /** 新しい版を書いた後の掃除: `{dir}/v-*` を list して、後継版の出現から
@@ -1597,7 +1614,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const paths = restraintR2Paths(prefix, compId, params.year, params.month, range);
     const ts = restraintVersionTimestamp(new Date());
     try {
-      const csvWrote = await this.putVersionedR2(
+      const csvResult = await this.putVersionedR2(
         bucket,
         paths.csvLatest,
         paths.csvVersion(ts),
@@ -1605,7 +1622,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         "text/csv; charset=Shift_JIS",
         ts,
       );
-      if (csvWrote) await this.pruneRestraintVersions(bucket, paths.csvDir);
+      if (csvResult.changed) await this.pruneRestraintVersions(bucket, paths.csvDir);
+      await this.appendRestraintHistory(
+        bucket,
+        paths.csvHistory,
+        restraintHistoryLine(
+          ts,
+          csvResult.changed ? "new-version" : "unchanged",
+          csvResult.sha256,
+          csvBytes.byteLength,
+        ),
+      );
       let summariesWrote = 0;
       for (const summary of summaries) {
         const body = stableSummaryBody(compId, params.year, params.month, summary);
@@ -1617,7 +1644,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           "application/json",
           ts,
         );
-        if (wrote) {
+        if (wrote.changed) {
           summariesWrote++;
           await this.pruneRestraintVersions(bucket, paths.summaryDir(summary.driverCd));
         }
@@ -1626,7 +1653,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         JSON.stringify({
           restraint_r2: "done",
           key: paths.csvLatest,
-          csv_new_version: csvWrote,
+          csv_new_version: csvResult.changed,
           summaries_total: summaries.length,
           summaries_new_version: summariesWrote,
         }),
@@ -1634,6 +1661,45 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       console.error(
         JSON.stringify({ restraint_r2: "error", key: paths.csvLatest, error: describeUnknownError(err) }),
+      );
+    }
+  }
+
+  /** 「該当データがありません」だった確認も R2 に残す (Refs #241 — 途中入社・
+   * 休職・未集計などで正当にありうる状態。未取得と区別するため、確認履歴に
+   * `no-data` 行を追記し、乗務員単体取得なら summary 側にも noData マーカーを
+   * 版管理付きで置く)。waitUntil 前提の best-effort。 */
+  private async saveRestraintNoDataToR2(compId: string, params: RestraintCsvParams): Promise<void> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return;
+    const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
+    const range = restraintDriverRangeLabel(params);
+    const paths = restraintR2Paths(prefix, compId, params.year, params.month, range);
+    const ts = restraintVersionTimestamp(new Date());
+    try {
+      await this.appendRestraintHistory(
+        bucket,
+        paths.csvHistory,
+        restraintHistoryLine(ts, "no-data", null, null),
+      );
+      // 乗務員単体 (from=to) なら summary にも noData マーカーを残す (全乗務員
+      // 取得では「誰が居なかったか」を列挙できないため履歴のみ)
+      if (params.driverFrom !== "" && params.driverFrom === params.driverTo) {
+        const body = stableNoDataSummaryBody(compId, params.year, params.month, params.driverFrom);
+        const wrote = await this.putVersionedR2(
+          bucket,
+          paths.summaryLatest(params.driverFrom),
+          paths.summaryVersion(params.driverFrom, ts),
+          body,
+          "application/json",
+          ts,
+        );
+        if (wrote.changed) await this.pruneRestraintVersions(bucket, paths.summaryDir(params.driverFrom));
+      }
+      console.log(JSON.stringify({ restraint_r2: "no-data", key: paths.csvHistory }));
+    } catch (err) {
+      console.error(
+        JSON.stringify({ restraint_r2: "error", key: paths.csvHistory, error: describeUnknownError(err) }),
       );
     }
   }
@@ -1653,7 +1719,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
     return this.callReportAction(record, "拘束時間管理表の取得", async (jar) => {
       const csv = await downloadRestraintCsv(jar, params);
-      if (csv === null) return { no_data: true };
+      if (csv === null) {
+        // 「データなし」も確認結果として R2 に残す (途中入社・休職と正当にありうる)
+        this.ctx.waitUntil(this.saveRestraintNoDataToR2(record.compId, params));
+        return { no_data: true };
+      }
       const report = parseRestraintCsv(csv.text);
       const summaries = report.drivers.map(summarizeRestraintDriver);
       // 生 CSV + 乗務員別サマリを R2 にバージョン管理付きで保存 (応答をブロックしない)
@@ -1684,6 +1754,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         }),
       );
       if (csv === null) {
+        this.ctx.waitUntil(this.saveRestraintNoDataToR2(record.compId, params));
         return dvrJsonError(404, "該当データがありません (未集計の年月、または該当乗務員なし)");
       }
       // 生 CSV 素通し経路でもサマリを抽出してアーカイブする (パース失敗は

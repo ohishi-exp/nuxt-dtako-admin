@@ -1,17 +1,21 @@
 import { describe, expect, it } from 'vitest'
 import {
+  appendHistoryJsonl,
   downloadRestraintCsv,
   isNoDataResponse,
   parseHmmToMinutes,
   parseRestraintCsv,
   parseRestraintVersionTimestamp,
   pickSupersededVersionKeys,
+  RESTRAINT_HISTORY_MAX_LINES,
   RESTRAINT_VERSION_RETENTION_MS,
   restraintDriverRangeLabel,
+  restraintHistoryLine,
   restraintR2Paths,
   RestraintParamError,
   restraintVersionTimestamp,
   restraintYearCandidates,
+  stableNoDataSummaryBody,
   stableSummaryBody,
   summarizeRestraintDriver,
   validateRestraintParams,
@@ -368,6 +372,43 @@ describe('pickSupersededVersionKeys', () => {
 
   it('既定 retention は 7 日', () => {
     expect(RESTRAINT_VERSION_RETENTION_MS).toBe(7 * 24 * 60 * 60 * 1000)
+  })
+})
+
+describe('restraintHistoryLine / appendHistoryJsonl', () => {
+  it('new-version / unchanged は sha256 + bytes 付き、no-data は無し', () => {
+    expect(JSON.parse(restraintHistoryLine('20260716T183000', 'new-version', 'abc', 100))).toEqual({
+      ts: '20260716T183000',
+      result: 'new-version',
+      sha256: 'abc',
+      bytes: 100,
+    })
+    expect(JSON.parse(restraintHistoryLine('20260716T183000', 'unchanged', 'abc', 100)).result).toBe('unchanged')
+    expect(JSON.parse(restraintHistoryLine('20260716T183000', 'no-data', null, null))).toEqual({
+      ts: '20260716T183000',
+      result: 'no-data',
+    })
+  })
+
+  it('JSONL に追記し、空行を除去して末尾改行を付ける', () => {
+    const first = appendHistoryJsonl(null, '{"a":1}')
+    expect(first).toBe('{"a":1}\n')
+    const second = appendHistoryJsonl(first, '{"b":2}')
+    expect(second).toBe('{"a":1}\n{"b":2}\n')
+  })
+
+  it('maxLines を超えたら古い行から捨てる (既定 1000)', () => {
+    const trimmed = appendHistoryJsonl('l1\nl2\nl3\n', 'l4', 3)
+    expect(trimmed).toBe('l2\nl3\nl4\n')
+    expect(RESTRAINT_HISTORY_MAX_LINES).toBe(1000)
+  })
+})
+
+describe('stableNoDataSummaryBody', () => {
+  it('noData マーカーの決定論 JSON', () => {
+    const a = stableNoDataSummaryBody('COMP1', 2025, 4, '9901')
+    expect(a).toBe(stableNoDataSummaryBody('COMP1', 2025, 4, '9901'))
+    expect(JSON.parse(a)).toEqual({ compId: 'COMP1', year: 2025, month: 4, driverCd: '9901', noData: true })
   })
 })
 

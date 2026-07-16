@@ -350,7 +350,11 @@ theearth (web地球号) の **F-ERS2010[RestraintDataReport] (乗務員拘束時
   (`.../summary/{乗務員CD}/`) を waitUntil でバージョン管理保存。`latest` は
   `sha256`/`fetchedAt`/`lastVerifiedAt` (**いつの時点まで同じ値だったか**) を
   customMetadata に持ち、内容が変わった時だけ `v-{ts}` 版を追加。置き換えられた
-  旧版は後継版の出現から 7 日で自動削除 (`pickSupersededVersionKeys`)
+  旧版は後継版の出現から 7 日で自動削除 (`pickSupersededVersionKeys`)。
+  `csv/{range}/history.jsonl` に取得のたび 1 行追記 (`new-version`/`unchanged`/
+  `no-data`) — **unchanged (変わっていなかった) と no-data (途中入社・休職・未集計)
+  も確認結果として時系列で残る**。乗務員単体取得の no-data は summary 側にも
+  `{noData:true}` マーカーを置く
 - **CSV は theearth 側で集計済みの月しか出ない** (未集計月は該当データなし)。集計
   実行 (F-ERS2012) の自動化は未実装 — 必要なら theearth 画面から手動で 集計 を回す
 

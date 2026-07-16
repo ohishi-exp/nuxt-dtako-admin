@@ -93,6 +93,9 @@ const monthTo = ref('')
 const running = ref(false)
 const progress = ref<ProgressItem[]>([])
 const results = ref<ResultRow[]>([])
+/** 「該当データなし」だった乗務員×月 (途中入社・休職・未集計)。取得結果の一部と
+ * して明細・集計 CSV にも残す (未取得との区別)。 */
+const noDataItems = ref<Array<{ ym: string, driverCd: string }>>([])
 const fetchError = ref('')
 const expandedKey = ref<string | null>(null)
 
@@ -111,6 +114,7 @@ watch(session, (s) => {
   if (!s) {
     results.value = []
     progress.value = []
+    noDataItems.value = []
   }
 })
 
@@ -156,6 +160,7 @@ async function run() {
   running.value = true
   fetchError.value = ''
   results.value = []
+  noDataItems.value = []
   expandedKey.value = null
 
   // 乗務員 × 月の逐次実行 (theearth は同一セッションへの並行リクエストを
@@ -183,11 +188,12 @@ async function run() {
           headers: authHeaders(),
           query: { year: job.year, month: job.month, driverFrom: job.from, driverTo: job.to },
         })
+        const ym = `${job.year}-${String(job.month).padStart(2, '0')}`
         if (res.no_data || !res.report) {
           item.status = 'no-data'
+          if (job.from) noDataItems.value.push({ ym, driverCd: job.from })
           continue
         }
-        const ym = `${job.year}-${String(job.month).padStart(2, '0')}`
         for (let d = 0; d < res.report.drivers.length; d++) {
           results.value.push({
             ym,
@@ -293,6 +299,10 @@ function downloadAggregateCsv() {
       fmt(s.overtimeMinutes),
       fmt(s.fiscalCumulativeMinutes),
     ].map(v => /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v).join(','))
+  }
+  // 「該当データなし」も行として残す (途中入社・休職・未集計を未取得と区別する)
+  for (const nd of noDataItems.value) {
+    lines.push([nd.ym, nd.driverCd, '(該当データなし)', '', '', '', '', '', '', '', '', ''].join(','))
   }
   const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' })
   triggerDownload(blob, `拘束時間集計_${monthFrom.value}_${monthTo.value}.csv`)
@@ -431,7 +441,7 @@ function triggerDownload(blob: Blob, filename: string) {
       </UCard>
 
       <!-- 明細 (乗務員 × 月) -->
-      <UCard v-if="results.length">
+      <UCard v-if="results.length || noDataItems.length">
         <template #header>
           <span class="font-semibold">明細 (乗務員 × 月)</span>
         </template>
@@ -533,6 +543,12 @@ function triggerDownload(blob: Blob, filename: string) {
                   </td>
                 </tr>
               </template>
+              <!-- 該当データなし (途中入社・休職・未集計) も明細に残す -->
+              <tr v-for="nd in noDataItems" :key="`nd:${nd.ym}:${nd.driverCd}`" class="border-b border-gray-100 dark:border-gray-800 text-gray-400">
+                <td class="px-2 py-1.5">{{ nd.ym }}</td>
+                <td class="px-2 py-1.5">{{ nd.driverCd }}</td>
+                <td class="px-2 py-1.5" colspan="11">該当データなし (途中入社・休職・未集計 等)</td>
+              </tr>
             </tbody>
           </table>
         </div>
