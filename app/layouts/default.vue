@@ -21,6 +21,7 @@ const navigation = [
   { label: '位置情報・動態履歴', icon: 'i-lucide-map-pin', to: '/dvr-map' },
   { label: '休憩ポイント', icon: 'i-lucide-map', to: '/rest-map' },
   { label: '日報編集', icon: 'i-lucide-file-edit', to: '/daily-report-edit' },
+  { label: '拘束CSV取得', icon: 'i-lucide-timer', to: '/restraint-fetch' },
 ]
 </script>
 

@@ -36,6 +36,7 @@ export default {
       || url.pathname.startsWith("/scraper-zip/")
       || url.pathname.startsWith("/dvr-api/")
       || url.pathname.startsWith("/daily-report-api/")
+      || url.pathname.startsWith("/restraint-api/")
     ) {
       // comp_id/session 抽出と DO routing は relay worker (default fetch) が行う。
       // ここは原 request (WS upgrade + query string、または zip ダウンロード GET) を

@@ -20,6 +20,7 @@ export default defineConfig({
         'src/etc-meisai-client.ts',
         'src/cron.ts',
         'src/theearth-report-client.ts',
+        'src/theearth-restraint-client.ts',
         'src/theearth-session.ts',
         'src/promise-queue.ts',
       ],

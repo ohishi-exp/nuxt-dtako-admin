@@ -85,6 +85,14 @@ import {
   type TheearthSessionRecord,
 } from "./theearth-session";
 import {
+  downloadRestraintCsv,
+  parseRestraintCsv,
+  RestraintParamError,
+  summarizeRestraintDriver,
+  validateRestraintParams,
+  type RestraintCsvParams,
+} from "./theearth-restraint-client";
+import {
   addFuelRow,
   downloadEditedZip,
   downloadOperationCsvZip,
@@ -340,6 +348,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // (同一 DO instance `theearth-{comp}:{userB64}` + 同一レコード、Refs #233)。
     if (url.pathname.startsWith("/daily-report-api/")) {
       return this.handleReportApi(request, url);
+    }
+
+    // /restraint-fetch (拘束時間管理表 CSV 取得、Refs #241) の API。日報編集と
+    // 同型の credential pass-through + theearth ログインセッション共有。
+    if (url.pathname.startsWith("/restraint-api/")) {
+      return this.handleRestraintApi(request, url);
     }
 
     // SCRAPER_MODE=http が完了後に生成する、1回だけ取得できる zip ダウンロード URL。
@@ -1441,6 +1455,131 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return this.handleReportMasters(record!);
     }
     return dvrJsonError(404, "Not Found");
+  }
+
+  // -------------------------------------------------------------------------
+  // /restraint-api/* — 拘束時間管理表 CSV 取得 (F-ERS2010、Refs #241)。
+  // credential pass-through / theearth セッション共有は daily-report-api と同じ。
+  // 実機確定知見は ./theearth-restraint-client.ts のヘッダコメント参照。
+  // -------------------------------------------------------------------------
+
+  private async handleRestraintApi(request: Request, url: URL): Promise<Response> {
+    const routing = resolveTheearthRouting(request.headers);
+    if (!routing) {
+      return dvrJsonError(400, "X-Theearth-Comp-Id / X-Theearth-User-B64 ヘッダが不正です");
+    }
+    // theearth への実 HTTP コールを cookie の read→write ごと直列化する (Refs #237)。
+    // dvr-api / daily-report-api と同じキューなので、ページをまたいだ並行アクセス
+    // も直列化される (同一 ASP.NET セッションへの並行リクエストは hang/500 する)。
+    return this.theearthQueue.enqueue(() => this.dispatchRestraintApi(request, url, routing));
+  }
+
+  /** URL query から RestraintCsvParams を組み立てる。検証は呼び出し側で
+   * validateRestraintParams (RestraintParamError → 400)。 */
+  private parseRestraintQuery(url: URL): RestraintCsvParams {
+    return {
+      year: Number(url.searchParams.get("year") ?? ""),
+      month: Number(url.searchParams.get("month") ?? ""),
+      driverFrom: url.searchParams.get("driverFrom") ?? "",
+      driverTo: url.searchParams.get("driverTo") ?? "",
+    };
+  }
+
+  private async dispatchRestraintApi(request: Request, url: URL, routing: TheearthRouting): Promise<Response> {
+    if (url.pathname === "/restraint-api/login" && request.method === "POST") {
+      return this.handleTheearthLogin(request, routing);
+    }
+
+    const record = await this.ctx.storage.get<TheearthSessionRecord>(THEEARTH_SESSION_KEY);
+    const token = extractBearerToken(request.headers);
+    if (!isTheearthSessionValid(record, token, routing, Date.now())) {
+      return dvrJsonError(401, "セッションが無効か期限切れです。再ログインしてください");
+    }
+
+    if (url.pathname === "/restraint-api/logout" && request.method === "POST") {
+      await this.ctx.storage.delete(THEEARTH_SESSION_KEY);
+      return new Response(null, { status: 204 });
+    }
+    if (url.pathname === "/restraint-api/report" && request.method === "GET") {
+      return this.handleRestraintReport(record!, url);
+    }
+    if (url.pathname === "/restraint-api/csv" && request.method === "GET") {
+      return this.handleRestraintCsv(record!, url);
+    }
+    return dvrJsonError(404, "Not Found");
+  }
+
+  /** GET /restraint-api/report?year=&month=&driverFrom=&driverTo= — F-ERS2010 の
+   * CSV を取得してパース済み JSON で返す。「該当データがありません」(未集計月・
+   * 在籍しない乗務員CD) は 200 の `{no_data: true}` (エラーではない)。フロントは
+   * 乗務員×月のループでこれを逐次呼ぶ (並列化しない — theearthQueue が直列化する
+   * が、順序と進捗表示のためフロントも直列で呼ぶ想定)。 */
+  private async handleRestraintReport(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const params = this.parseRestraintQuery(url);
+    try {
+      validateRestraintParams(params);
+    } catch (err) {
+      if (err instanceof RestraintParamError) return dvrJsonError(400, err.message);
+      throw err;
+    }
+    return this.callReportAction(record, "拘束時間管理表の取得", async (jar) => {
+      const csv = await downloadRestraintCsv(jar, params);
+      if (csv === null) return { no_data: true };
+      const report = parseRestraintCsv(csv.text);
+      return {
+        no_data: false,
+        report,
+        summaries: report.drivers.map(summarizeRestraintDriver),
+      };
+    });
+  }
+
+  /** GET /restraint-api/csv?year=&month=&driverFrom=&driverTo= — F-ERS2010 の
+   * 生 CSV (Shift_JIS) を素通しダウンロードする (handleReportZip と同型)。
+   * 該当データ無しは 404。 */
+  private async handleRestraintCsv(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const params = this.parseRestraintQuery(url);
+    try {
+      validateRestraintParams(params);
+    } catch (err) {
+      if (err instanceof RestraintParamError) return dvrJsonError(400, err.message);
+      throw err;
+    }
+    const jar: CookieJar = { cookies: new Map(record.cookies) };
+    try {
+      const csv = await downloadRestraintCsv(jar, params);
+      // cookie 書き戻しはヘッダ送出をブロックしない (handleDvrFile と同じ理由)。
+      this.ctx.waitUntil(
+        this.ctx.storage.put<TheearthSessionRecord>(THEEARTH_SESSION_KEY, {
+          ...record,
+          cookies: Array.from(jar.cookies.entries()),
+        }),
+      );
+      if (csv === null) {
+        return dvrJsonError(404, "該当データがありません (未集計の年月、または該当乗務員なし)");
+      }
+      const range = params.driverFrom ? `${params.driverFrom}-${params.driverTo}` : "all";
+      const month = String(params.month).padStart(2, "0");
+      return new Response(csv.bytes, {
+        status: 200,
+        headers: {
+          "content-type": "text/csv; charset=Shift_JIS",
+          "content-disposition": `attachment; filename="restraint_${params.year}${month}_${range}.csv"`,
+          "cache-control": "no-store",
+        },
+      });
+    } catch (err) {
+      if (err instanceof VenusSessionExpiredError) {
+        await this.ctx.storage.delete(THEEARTH_SESSION_KEY);
+        return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
+      }
+      console.error("Restraint csv error:", err);
+      const message =
+        err instanceof TheearthClientError
+          ? err.message
+          : `拘束時間管理表 CSV の取得に失敗しました (${describeUnknownError(err)})`;
+      return dvrJsonError(502, message);
+    }
   }
 
   /** report 系 API 呼び出しの共通ラッパ (callDvrVenus と同型): cookie 書き戻し +

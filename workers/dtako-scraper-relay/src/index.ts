@@ -19,8 +19,13 @@ export default {
   async fetch(request: Request, env: RelayWorkerEnv): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname.startsWith("/dvr-api/") || url.pathname.startsWith("/daily-report-api/")) {
-      // DVR viewer (Refs #90) と日報編集 (Refs #169) の theearth API。theearth
+    if (
+      url.pathname.startsWith("/dvr-api/")
+      || url.pathname.startsWith("/daily-report-api/")
+      || url.pathname.startsWith("/restraint-api/")
+    ) {
+      // DVR viewer (Refs #90)・日報編集 (Refs #169)・拘束時間管理表 CSV 取得
+      // (Refs #241) の theearth API。theearth
       // アカウント単位 (`theearth-{comp}:{userB64}`) で DO を引くことで、同一
       // アカウントのセッションを両ページ共有の 1 instance に集約する (theearth は
       // 同一アカウント複数セッションを許さないため、経路ごとに分けるとログインの
