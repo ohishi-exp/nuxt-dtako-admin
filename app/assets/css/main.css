@@ -18,6 +18,12 @@
    同ファイル `.light,:host,:root` ブロックのライト値で上書きする。
    @nuxt/ui 更新時は変数の増減をこの一覧に追従させること。 */
 @media print {
+  /* コンテンツ領域 (layouts の <main>) は画面ではライトモードでも bg-gray-50 の
+     薄いグレー。印刷は紙面なので白に固定する (unlayered なので utility 層に勝つ)。 */
+  main {
+    background-color: #fff;
+  }
+
   .dark {
     --ui-text-dimmed: var(--ui-color-neutral-400);
     --ui-text-muted: var(--ui-color-neutral-500);
