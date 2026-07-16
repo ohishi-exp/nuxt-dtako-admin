@@ -33,6 +33,7 @@ import {
   VenusSessionExpiredError,
   fetchWithJar,
   findFormFieldById,
+  findTagById,
   hasLoginForm,
   postForm,
   serializeFormFields,
@@ -118,38 +119,42 @@ export interface RestraintCsvResult {
 }
 
 /**
- * F-ERS2010 から拘束時間管理表 CSV を 1 回の postback で取得する。
+ * 年フィールドに試す値の候補を、優先順に返す。
  *
- * - 戻り値 `null` = 「該当データがありません」(異常ではない — 未集計月・
- *   その月に在籍しない乗務員CD など)。
- * - full-form 直列化 (`serializeFormFields`) で送る: 出力基準 radio
- *   (`ctl00$RangeType`、既定 = 令和6年4月改正基準)・絞込条件・優先項目は
- *   ページの現在値をそのまま維持する (一部だけ送ると ASP.NET が既定値に
- *   落とす罠は F-DES1010 で実証済み)。
+ * 実機確定 (2026-07-16): 検証した企業アカウントでは **4 桁西暦だけが常に成功**し、
+ * 2 桁は "25" (西暦のつもり) も "07" (令和のつもり) も「該当データがありません」に
+ * なった。一方 **別の企業アカウントでは年入力が "08" (= 令和8年) 表示**になる
+ * (和暦設定の企業が存在する) ため、4 桁西暦が全企業で通る保証は無い。
+ *
+ * → 候補を順に試して「該当データがありません」ならフォールバックする:
+ * - 既定: [4桁西暦, 令和2桁ゼロ埋め]
+ * - ページの `ucMonthDate_chkUseEra` が checked (和暦入力モードの hint) なら逆順
+ * - 令和にならない年 (2018 以前) は 4 桁西暦のみ
  */
-export async function downloadRestraintCsv(
+export function restraintYearCandidates(year: number, pageHtml: string): string[] {
+  const western = String(year);
+  const reiwa = year - 2018;
+  if (reiwa < 1) return [western];
+  const wareki = String(reiwa).padStart(2, "0");
+  const eraTag = findTagById(pageHtml, "ucMonthDate_chkUseEra");
+  const eraChecked = eraTag !== null && /\bchecked\b/i.test(eraTag);
+  return eraChecked ? [wareki, western] : [western, wareki];
+}
+
+/** 1 つの年表現で GET → btnOutputCsv postback を 1 回試す。null = 該当データなし。 */
+async function attemptRestraintCsv(
   jar: CookieJar,
   params: RestraintCsvParams,
-  fetchImpl: FetchLike = fetch,
-  timeouts: ScrapeTimeouts = {},
+  yearValue: string,
+  pageHtml: string,
+  fetchImpl: FetchLike,
+  exportTimeoutMs: number,
 ): Promise<RestraintCsvResult | null> {
-  validateRestraintParams(params);
-  const requestTimeoutMs = timeouts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-  const exportTimeoutMs = timeouts.exportTimeoutMs ?? DEFAULT_EXPORT_TIMEOUT_MS;
   const pageUrl = `${BASE_URL}${RESTRAINT_PATH}`;
-
-  const getRes = await fetchWithJar(jar, pageUrl, { method: "GET" }, fetchImpl, requestTimeoutMs);
-  const html = await getRes.text();
-  if (hasLoginForm(html)) {
-    throw new VenusSessionExpiredError(
-      "拘束時間管理表ページがログイン画面を返しました — theearth セッションが切れています",
-    );
-  }
-
-  const fields = serializeFormFields(html);
+  const fields = serializeFormFields(pageHtml);
   const refs = new Map<string, { name: string; value: string }>();
   for (const id of RESTRAINT_FORM_IDS) {
-    const ref = findFormFieldById(html, id);
+    const ref = findFormFieldById(pageHtml, id);
     if (!ref) {
       throw new TheearthClientError(
         `拘束時間管理表フォームの要素 (id=${id}) が見つかりません — theearth-np のページ仕様が変更された可能性があります`,
@@ -158,7 +163,7 @@ export async function downloadRestraintCsv(
     refs.set(id, ref);
   }
 
-  fields[refs.get("ucMonthDate_txtYear")!.name] = String(params.year);
+  fields[refs.get("ucMonthDate_txtYear")!.name] = yearValue;
   fields[refs.get("ucMonthDate_txtMonth")!.name] = String(params.month);
   fields[refs.get("txtStartDriver")!.name] = params.driverFrom;
   fields[refs.get("txtEndDriver")!.name] = params.driverTo;
@@ -182,15 +187,15 @@ export async function downloadRestraintCsv(
   if (contentType.includes("text/html")) {
     // aspx の HTML 応答は UTF-8 (CSV 本体だけが Shift_JIS)。ここを Shift_JIS で
     // デコードすると「該当データがありません」マーカーが文字化けして判定不能になる。
-    const pageHtml = new TextDecoder("utf-8").decode(buf);
-    if (hasLoginForm(pageHtml)) {
+    const pageHtml2 = new TextDecoder("utf-8").decode(buf);
+    if (hasLoginForm(pageHtml2)) {
       throw new VenusSessionExpiredError(
         "拘束時間管理表 CSV の postback がログイン画面を返しました — theearth セッションが切れています",
       );
     }
-    if (isNoDataResponse(pageHtml)) return null;
+    if (isNoDataResponse(pageHtml2)) return null;
     throw new TheearthClientError(
-      `拘束時間管理表 CSV の postback が想定外の HTML を返しました (${describeHtml(pageHtml)})`,
+      `拘束時間管理表 CSV の postback が想定外の HTML を返しました (${describeHtml(pageHtml2)})`,
     );
   }
 
@@ -203,6 +208,46 @@ export async function downloadRestraintCsv(
     );
   }
   return { bytes: buf, text };
+}
+
+/**
+ * F-ERS2010 から拘束時間管理表 CSV を取得する。
+ *
+ * - 戻り値 `null` = 「該当データがありません」(異常ではない — 未集計月・
+ *   その月に在籍しない乗務員CD など)。
+ * - full-form 直列化 (`serializeFormFields`) で送る: 出力基準 radio
+ *   (`ctl00$RangeType`、既定 = 令和6年4月改正基準)・絞込条件・優先項目は
+ *   ページの現在値をそのまま維持する (一部だけ送ると ASP.NET が既定値に
+ *   落とす罠は F-DES1010 で実証済み)。
+ * - 年は企業の和暦/西暦設定に依存するため、`restraintYearCandidates` の順に
+ *   試して「該当データがありません」なら次の表現でリトライする (各試行とも
+ *   ページを GET し直す)。全候補が該当なしなら null。
+ */
+export async function downloadRestraintCsv(
+  jar: CookieJar,
+  params: RestraintCsvParams,
+  fetchImpl: FetchLike = fetch,
+  timeouts: ScrapeTimeouts = {},
+): Promise<RestraintCsvResult | null> {
+  validateRestraintParams(params);
+  const requestTimeoutMs = timeouts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const exportTimeoutMs = timeouts.exportTimeoutMs ?? DEFAULT_EXPORT_TIMEOUT_MS;
+  const pageUrl = `${BASE_URL}${RESTRAINT_PATH}`;
+
+  let candidates: string[] | null = null;
+  for (let i = 0; candidates === null || i < candidates.length; i++) {
+    const getRes = await fetchWithJar(jar, pageUrl, { method: "GET" }, fetchImpl, requestTimeoutMs);
+    const html = await getRes.text();
+    if (hasLoginForm(html)) {
+      throw new VenusSessionExpiredError(
+        "拘束時間管理表ページがログイン画面を返しました — theearth セッションが切れています",
+      );
+    }
+    candidates ??= restraintYearCandidates(params.year, html);
+    const result = await attemptRestraintCsv(jar, params, candidates[i], html, fetchImpl, exportTimeoutMs);
+    if (result !== null) return result;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -455,6 +500,141 @@ export function parseRestraintCsv(text: string): RestraintReport {
     throw new TheearthClientError("拘束時間管理表 CSV に乗務員ブロックが見つかりません (パース不能)");
   }
   return report;
+}
+
+// ---------------------------------------------------------------------------
+// R2 アーカイブの key 設計 (pure — R2 I/O は DO 側)
+// ---------------------------------------------------------------------------
+
+/**
+ * 拘束時間管理表の R2 アーカイブ key 群 (Refs #241)。
+ *
+ * 取得パターンは「乗務員別 × 1 年分 (12 回)」「全員 × 1 ヶ月 (1 回)」等さまざま
+ * なので、**生 CSV は取得単位 (年月 × 乗務員range)**、**サマリは乗務員 × 年月**
+ * に正規化して保存する。theearth 側の再集計・編集で同じ年月の値が変わりうる
+ * (CSV は最終形が確定するまで動く) ため、次のバージョン管理を行う:
+ *
+ * - `latest` = 常に最新。customMetadata に `sha256` / `fetchedAt` (この内容を
+ *   最初に取得した時刻) / `lastVerifiedAt` (最後に同一内容を確認した時刻) を持つ。
+ *   再取得で内容不変なら `lastVerifiedAt` だけ更新 — **「いつの時点までこの値が
+ *   合っていたか」** が分かる。
+ * - `v-{取得時刻}` = 内容が変わった取得の時だけ追加される版。各版の有効期間は
+ *   「自身の fetchedAt 〜 次の版の fetchedAt」。
+ * - **新しい版に置き換えられた旧版は、後継版の出現から
+ *   `RESTRAINT_VERSION_RETENTION_MS` (7 日) 経過後に削除**する (保存時に
+ *   `pickSupersededVersionKeys` で選定。最新版と latest は常に残る)。
+ */
+export interface RestraintR2Paths {
+  /** 生 CSV のディレクトリ (版一覧の list 用)。 */
+  csvDir: string;
+  /** 生 CSV の最新スナップショット。 */
+  csvLatest: string;
+  /** 生 CSV の版 (内容が変わった取得時のみ追加)。 */
+  csvVersion(ts: string): string;
+  /** 乗務員別サマリ JSON のディレクトリ。 */
+  summaryDir(driverCd: string): string;
+  /** 乗務員別サマリ JSON の最新。 */
+  summaryLatest(driverCd: string): string;
+  /** 乗務員別サマリ JSON の版。 */
+  summaryVersion(driverCd: string, ts: string): string;
+}
+
+export function restraintR2Paths(
+  prefix: string,
+  compId: string,
+  year: number,
+  month: number,
+  driverRange: string,
+): RestraintR2Paths {
+  const ym = `${year}-${String(month).padStart(2, "0")}`;
+  const base = `${prefix}/${compId}/${ym}`;
+  const summaryDir = (driverCd: string) => `${base}/summary/${driverCd || "unknown"}`;
+  return {
+    csvDir: `${base}/csv/${driverRange}`,
+    csvLatest: `${base}/csv/${driverRange}/latest.csv`,
+    csvVersion: (ts) => `${base}/csv/${driverRange}/v-${ts}.csv`,
+    summaryDir,
+    summaryLatest: (driverCd) => `${summaryDir(driverCd)}/latest.json`,
+    summaryVersion: (driverCd, ts) => `${summaryDir(driverCd)}/v-${ts}.json`,
+  };
+}
+
+/** 置き換えられた旧版の保持期間 (7 日)。後継版の出現時刻からこの期間を過ぎた版を
+ * 削除対象にする。 */
+export const RESTRAINT_VERSION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** `restraintVersionTimestamp` (JST `YYYYMMDDTHHmmss`) を epoch ms に戻す。
+ * 形式不一致は null (削除対象の選定から除外 = 安全側で消さない)。 */
+export function parseRestraintVersionTimestamp(ts: string): number | null {
+  const m = ts.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})$/);
+  if (!m) return null;
+  return (
+    Date.UTC(
+      parseInt(m[1], 10),
+      parseInt(m[2], 10) - 1,
+      parseInt(m[3], 10),
+      parseInt(m[4], 10),
+      parseInt(m[5], 10),
+      parseInt(m[6], 10),
+    ) -
+    9 * 3600 * 1000
+  );
+}
+
+/**
+ * `v-{ts}` 版 key の一覧から「新しい版に置き換えられ、retention を過ぎたもの」を
+ * 選ぶ (削除フラグ相当。R2 に per-object TTL が無いため保存時に掃除する)。
+ *
+ * - 最新版は常に残す (置き換えられていない = 現役)
+ * - i 番目の版は i+1 番目の版の fetchedAt 時点で superseded とみなし、
+ *   そこから `retentionMs` 経過していたら削除対象
+ * - タイムスタンプを読めない key は安全側で残す
+ */
+export function pickSupersededVersionKeys(
+  keys: string[],
+  now: Date,
+  retentionMs: number = RESTRAINT_VERSION_RETENTION_MS,
+): string[] {
+  const entries: Array<{ key: string; at: number }> = [];
+  for (const key of keys) {
+    const m = key.match(/v-(\d{8}T\d{6})(\.[A-Za-z0-9]+)?$/);
+    const at = m ? parseRestraintVersionTimestamp(m[1]) : null;
+    if (at !== null) entries.push({ key, at });
+  }
+  entries.sort((a, b) => a.at - b.at);
+  const stale: string[] = [];
+  for (let i = 0; i < entries.length - 1; i++) {
+    const supersededAt = entries[i + 1].at;
+    if (now.getTime() - supersededAt >= retentionMs) stale.push(entries[i].key);
+  }
+  return stale;
+}
+
+/** RestraintCsvParams の乗務員 range を R2 key 用に正規化する (未指定 = 全乗務員)。 */
+export function restraintDriverRangeLabel(params: RestraintCsvParams): string {
+  return params.driverFrom ? `${params.driverFrom}-${params.driverTo}` : "all";
+}
+
+/** R2 の版 suffix 用タイムスタンプ (JST、`YYYYMMDDTHHmmss`)。 */
+export function restraintVersionTimestamp(now: Date): string {
+  const jst = new Date(now.getTime() + 9 * 3600 * 1000);
+  const p = (n: number, w = 2) => String(n).padStart(w, "0");
+  return (
+    `${jst.getUTCFullYear()}${p(jst.getUTCMonth() + 1)}${p(jst.getUTCDate())}` +
+    `T${p(jst.getUTCHours())}${p(jst.getUTCMinutes())}${p(jst.getUTCSeconds())}`
+  );
+}
+
+/** 乗務員別サマリの R2 保存 body (決定論 JSON)。取得時刻等の揮発情報は
+ * customMetadata 側に置き、body は**内容が同じなら常に同一バイト列**になる —
+ * SHA-256 の変化検知がそのまま「データが変わったか」になる。 */
+export function stableSummaryBody(
+  compId: string,
+  year: number,
+  month: number,
+  summary: RestraintDriverSummary,
+): string {
+  return JSON.stringify({ compId, year, month, ...summary });
 }
 
 // ---------------------------------------------------------------------------

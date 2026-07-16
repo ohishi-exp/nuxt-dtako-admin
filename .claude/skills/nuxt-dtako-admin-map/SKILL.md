@@ -338,12 +338,19 @@ theearth (web地球号) の **F-ERS2010[RestraintDataReport] (乗務員拘束時
   同一 (`useRestraintSession` = `useTheearthSession('/restraint-api')`、同一 DO
   `theearth-{comp}:{userB64}`、Refs #233)
 - worker 側は `workers/dtako-scraper-relay/src/theearth-restraint-client.ts` (pure、
-  100% gate)。**年は 4 桁西暦で POST する** (maxLength=2 は UI 制限。2 桁は企業の
-  和暦/西暦設定で解釈がぶれる — 実機確定)。「該当データがありません」HTML (UTF-8) と
+  100% gate)。**年は [4桁西暦, 令和2桁] を順に試すフォールバック** (企業の和暦/西暦
+  設定で解釈がぶれる — 検証企業は 4 桁西暦のみ成功、別企業は `08`=令和 表示。
+  `chkUseEra` checked なら令和を先に)。「該当データがありません」HTML (UTF-8) と
   CSV (Shift_JIS) の判別・デコード分岐が要 (詳細は theearth-venus skill の F-ERS2010 節)
 - DO routes: `/restraint-api/login|logout` (共通 theearth login)、
   `GET /restraint-api/report?year=&month=&driverFrom=&driverTo=` (パース済み JSON、
   no_data フラグ)、`GET /restraint-api/csv?...` (生 Shift_JIS CSV 素通し)
+- **R2 アーカイブ (DTAKO_R2、`RESTRAINT_R2_PREFIX`)**: 取得成功時に生 CSV
+  (`{prefix}/{comp}/{YYYY-MM}/csv/{range}/`) と乗務員別サマリ JSON
+  (`.../summary/{乗務員CD}/`) を waitUntil でバージョン管理保存。`latest` は
+  `sha256`/`fetchedAt`/`lastVerifiedAt` (**いつの時点まで同じ値だったか**) を
+  customMetadata に持ち、内容が変わった時だけ `v-{ts}` 版を追加。置き換えられた
+  旧版は後継版の出現から 7 日で自動削除 (`pickSupersededVersionKeys`)
 - **CSV は theearth 側で集計済みの月しか出ない** (未集計月は該当データなし)。集計
   実行 (F-ERS2012) の自動化は未実装 — 必要なら theearth 画面から手動で 集計 を回す
 

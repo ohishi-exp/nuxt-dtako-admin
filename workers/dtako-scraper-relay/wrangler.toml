@@ -76,6 +76,9 @@ bucket_name = "dtako-uploads"
 [vars]
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth.ippoan.org"
 ETC_R2_PREFIX = "etc"
+# 拘束時間管理表 CSV / サマリ JSON のアーカイブ prefix (Refs #241)。key 設計と
+# バージョン管理 (latest + v-{ts}、7日 retention) は theearth-restraint-client.ts 参照。
+RESTRAINT_R2_PREFIX = "restraint"
 
 [env.staging]
 name = "nuxt-dtako-admin-scraper-relay-staging"
@@ -132,6 +135,7 @@ NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 # 値に秘密を含むため wrangler.toml には置かず、dashboard の plain var で別途投入する)。
 SCRAPER_MODE = "http"
 ETC_R2_PREFIX = "etc-staging"
+RESTRAINT_R2_PREFIX = "restraint-staging"
 
 # 軽量プレビュー環境 (create-preview skill、main 以外の branch への push ごとに
 # test/typecheck 無しで deploy)。ETC riyouMonth 診断イテレーションを staging を
@@ -181,3 +185,4 @@ bucket_name = "dtako-uploads"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 SCRAPER_MODE = "http"
 ETC_R2_PREFIX = "etc-preview"
+RESTRAINT_R2_PREFIX = "restraint-preview"
