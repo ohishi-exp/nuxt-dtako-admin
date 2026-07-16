@@ -1559,6 +1559,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/archive/history" && request.method === "GET") {
       return this.handleArchiveHistory(record!, url);
     }
+    if (url.pathname === "/restraint-api/archive/resummarize" && request.method === "POST") {
+      return this.handleArchiveResummarize(record!, url);
+    }
     // ---- 賃金計算 (月指定、R2 summary + マスタから。Refs #244) ----
     if (url.pathname === "/restraint-api/wage-report" && request.method === "GET") {
       return this.handleWageReport(record!, url);
@@ -1828,6 +1831,70 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         }
       });
     return Response.json({ month: parsed.ym, range, entries });
+  }
+
+  /** POST /restraint-api/archive/resummarize?month=YYYY-MM — R2 に保存済みの
+   * 生 CSV (`csv/{range}/latest.csv`) からサマリを再計算して保存し直す
+   * (theearth には触らない)。summary スキーマの更新 (v1 → v2 の日別データ・
+   * 派生指標追加など) を過去アーカイブへ適用する経路。
+   *
+   * **CSV 側の lastVerifiedAt / 確認履歴は更新しない** — theearth で内容を
+   * 確認したわけではないため。書くのは summary の latest + 版だけ (内容が
+   * 変わらなければ putVersionedR2 が版を増やさず lastVerifiedAt だけ進むが、
+   * これは「保存済み CSV から同じサマリが再現された」ことの記録として正しい)。 */
+  private async handleArchiveResummarize(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
+    const parsed = this.parseMonthParam(url);
+    if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
+    const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
+    const base = `${prefix}/${record.compId}/${parsed.ym}/csv/`;
+    const objects = await this.listAllR2(bucket, base);
+    const latests = objects.filter((o) => o.key.endsWith("/latest.csv"));
+    const ts = restraintVersionTimestamp(new Date());
+    let csvCount = 0;
+    let summariesWritten = 0;
+    let newVersions = 0;
+    const errors: string[] = [];
+    for (const meta of latests) {
+      const obj = await bucket.get(meta.key);
+      if (!obj) continue;
+      try {
+        const text = new TextDecoder("shift_jis").decode(await obj.arrayBuffer());
+        const report = parseRestraintCsv(text);
+        const limit = report.maxRestraintHours !== null ? report.maxRestraintHours * 60 : null;
+        const range = meta.key.slice(base.length, meta.key.length - "/latest.csv".length);
+        const paths = restraintR2Paths(prefix, record.compId, parsed.year, parsed.month, range);
+        for (const block of report.drivers) {
+          const summary = summarizeRestraintDriver(block, limit);
+          const body = stableSummaryBody(record.compId, parsed.year, parsed.month, summary);
+          const wrote = await this.putVersionedR2(
+            bucket,
+            paths.summaryLatest(summary.driverCd),
+            paths.summaryVersion(summary.driverCd, ts),
+            body,
+            "application/json",
+            ts,
+          );
+          summariesWritten++;
+          if (wrote.changed) {
+            newVersions++;
+            await this.pruneRestraintVersions(bucket, paths.summaryDir(summary.driverCd));
+          }
+        }
+        csvCount++;
+      } catch (err) {
+        errors.push(`${meta.key}: ${describeUnknownError(err)}`);
+        console.error(JSON.stringify({ restraint_resummarize: "error", key: meta.key, error: describeUnknownError(err) }));
+      }
+    }
+    return Response.json({
+      month: parsed.ym,
+      csv_processed: csvCount,
+      summaries_written: summariesWritten,
+      summaries_new_version: newVersions,
+      errors,
+    });
   }
 
   /** GET /restraint-api/wage-report?month=YYYY-MM — R2 の summary + マスタから
