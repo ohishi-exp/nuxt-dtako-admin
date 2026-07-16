@@ -19,7 +19,7 @@ dtako (デジタコ運行データ) 管理画面。Nuxt 4 + Nitro `cloudflare_mo
 | 区画 | 主要ファイル | 役割 |
 |---|---|---|
 | **pages (運行系)** | `app/pages/{index,upload,scraper,net780}.vue` `operations/{index,[unko_no]}.vue` | 運行一覧 / アップロード / スクレイパ / NET780 生データビューア / 運行詳細 |
-| **pages (時間集計)** | `app/pages/{daily-hours/index,restraint-compare,restraint-report,y-time-export}.vue` | 日別時間 / 拘束時間 比較・レポート / Y時間 export UI |
+| **pages (時間集計)** | `app/pages/{daily-hours/index,restraint-compare,restraint-report,restraint-fetch,y-time-export}.vue` | 日別時間 / 拘束時間 比較・レポート / 拘束CSV取得 (theearth F-ERS2010、下記) / Y時間 export UI |
 | **pages (車両設定)** | `app/pages/vehicle-settings/{index,diff,history,unconfirmed}.vue` | デジタコ車両設定の閲覧・差分・履歴・未確認 |
 | **pages (管理/認証)** | `app/pages/{members,api-tokens,event-classifications,login}.vue` `auth/callback.vue` | メンバ / API トークン / イベント分類 / login |
 | **pages (外部利用者)** | `app/pages/dvr-viewer.vue` | DVR 動画ビューア (Refs #90)。theearth credential pass-through ログイン (auth-worker 不要、`auth.global.ts` の publicPaths + `layout: false`、サイドバー「DVR 動画」タブからも遷移可)。`/dvr-api/*` は worker/index.ts → SCRAPER_RELAY service binding → `workers/dtako-scraper-relay` の DO (`theearth-session.ts` / `theearth-venus-client.ts`) |
@@ -326,6 +326,32 @@ theearth パスワードは**一切保存しない**。ログイン画面 = thee
 | `workers/dtako-scraper-relay/src/theearth-session.ts` | セッション pure ロジック (token 生成 / timing-safe 比較 / routing ヘッダ解決 (新旧ヘッダ)、coverage 100% gate) |
 | `workers/dtako-scraper-relay/src/theearth-venus-client.ts` | VenusBridge クライアント (通知/検索/マスタ/現在地/軌跡 + `.vdf` ストリーム、coverage 100% gate)。**座標は DDMM 形式 → convertDdmmToDegrees で度に変換** (詳細は theearth-venus skill) |
 | `workers/dtako-scraper-relay/src/dtako-scraper-relay-do.ts` | `/dvr-api/*` ハンドラ |
+
+## 拘束時間管理表 CSV 取得 (`/restraint-fetch` ページ + `/restraint-api/*`、Refs #241)
+
+theearth (web地球号) の **F-ERS2010[RestraintDataReport] (乗務員拘束時間管理表)** から
+対象乗務員 (複数) × 対象年月 (範囲) の CSV を **1 名 × 1 月ずつ逐次** 取得し、
+パース済みサマリを集計表示するページ。全乗務員一括 export は重い (実測 112 名
+378KB / 数十秒) ため乗務員CD を列挙して回すのが既定の使い方。
+
+- credential pass-through / theearth セッション共有は /dvr-viewer・/daily-report-edit と
+  同一 (`useRestraintSession` = `useTheearthSession('/restraint-api')`、同一 DO
+  `theearth-{comp}:{userB64}`、Refs #233)
+- worker 側は `workers/dtako-scraper-relay/src/theearth-restraint-client.ts` (pure、
+  100% gate)。**年は 4 桁西暦で POST する** (maxLength=2 は UI 制限。2 桁は企業の
+  和暦/西暦設定で解釈がぶれる — 実機確定)。「該当データがありません」HTML (UTF-8) と
+  CSV (Shift_JIS) の判別・デコード分岐が要 (詳細は theearth-venus skill の F-ERS2010 節)
+- DO routes: `/restraint-api/login|logout` (共通 theearth login)、
+  `GET /restraint-api/report?year=&month=&driverFrom=&driverTo=` (パース済み JSON、
+  no_data フラグ)、`GET /restraint-api/csv?...` (生 Shift_JIS CSV 素通し)
+- **CSV は theearth 側で集計済みの月しか出ない** (未集計月は該当データなし)。集計
+  実行 (F-ERS2012) の自動化は未実装 — 必要なら theearth 画面から手動で 集計 を回す
+
+| ファイル | 役割 |
+|---|---|
+| `app/pages/restraint-fetch.vue` | 取得条件 (年月範囲 + 乗務員CD 複数) / 逐次取得進捗 / 乗務員別合計・明細・日別詳細 / 集計CSV・生CSV ダウンロード |
+| `app/composables/useRestraintSession.ts` | `/restraint-api` prefix の thin ラッパー |
+| `workers/dtako-scraper-relay/src/theearth-restraint-client.ts` | F-ERS2010 クライアント + CSV パーサ + サマリ集計 (pure、100% gate) |
 
 ## スクレイパ (`/scraper` ページ + `workers/dtako-scraper-relay/`)
 
