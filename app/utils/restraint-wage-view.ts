@@ -127,5 +127,5 @@ export function fmtArchiveTs(ts: string | null | undefined): string {
 /** "YYYY-MM" → "YYYY年M月"。 */
 export function fmtYm(ym: string): string {
   const m = ym.match(/^(\d{4})-(\d{2})$/)
-  return m ? `${m[1]}年${parseInt(m[2], 10)}月` : ym
+  return m ? `${m[1]}年${parseInt(m[2]!, 10)}月` : ym
 }
