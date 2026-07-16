@@ -104,12 +104,12 @@ export const HISTORY_RESULT_LABEL: Record<string, string> = {
   'no-data': '該当データなし',
 }
 
-/** 分 → "H:mm" (null は "-")。 */
+/** 分 → "XhYYm" (null は "-")。コロン区切りは時刻と紛らわしいため h m 表記 (Refs #251)。 */
 export function fmtMinutes(minutes: number | null | undefined): string {
   if (minutes == null) return '-'
   const h = Math.floor(minutes / 60)
   const m = minutes % 60
-  return `${h}:${String(m).padStart(2, '0')}`
+  return `${h}h${String(m).padStart(2, '0')}m`
 }
 
 /** 円 (null は "-")。 */
