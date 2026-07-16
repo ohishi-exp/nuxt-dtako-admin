@@ -386,9 +386,16 @@ R2 アーカイブ (上記 /restraint-fetch) の summary を素材に、theearth
   `POST wage-master/csv` (upsert 取込)、`GET archive/{summaries|csv-list|csv|history}`、
   `GET wage-report?month=` (前月 tail 込みの計算行)
 
+- 対象月は「年セレクタ + 月タブ」(`GET archive/months` でアーカイブ存在月を列挙、
+  無い月は薄表示)。サマリ再計算は単月/全月一括 (`POST archive/resummarize?month=`、
+  R2 の生 CSV から再計算 — theearth 非依存、**CSV の lastVerifiedAt/確認履歴は
+  更新しない**)。一括印刷は月範囲 × 乗務員CD範囲 → 月毎改ページの印刷プレビュー
+
 | ファイル | 役割 |
 |---|---|
-| `app/pages/restraint-wage.vue` | 4 タブ UI + 印刷 CSS |
+| `app/pages/restraint-wage.vue` | 4 タブ UI + 年月タブ + 一括再計算/一括印刷 + 印刷 CSS |
+| `app/components/RestraintWageMonthlyTable.vue` | 月次テーブル (単月表示と一括印刷で共用) |
+| `app/utils/restraint-wage-view.ts` | 共有型 + WAGE_COLUMNS + 表示ヘルパ |
 | `workers/dtako-scraper-relay/src/restraint-wage.ts` | 賃金計算 pure (100% gate) |
 | `workers/dtako-scraper-relay/src/theearth-restraint-client.ts` | summary v2 (日別 + 派生指標) |
 

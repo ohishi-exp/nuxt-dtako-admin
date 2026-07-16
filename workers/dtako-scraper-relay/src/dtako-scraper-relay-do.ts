@@ -1562,6 +1562,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/archive/resummarize" && request.method === "POST") {
       return this.handleArchiveResummarize(record!, url);
     }
+    if (url.pathname === "/restraint-api/archive/months" && request.method === "GET") {
+      return this.handleArchiveMonths(record!);
+    }
     // ---- 賃金計算 (月指定、R2 summary + マスタから。Refs #244) ----
     if (url.pathname === "/restraint-api/wage-report" && request.method === "GET") {
       return this.handleWageReport(record!, url);
@@ -1831,6 +1834,28 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         }
       });
     return Response.json({ month: parsed.ym, range, entries });
+  }
+
+  /** GET /restraint-api/archive/months — アーカイブが存在する月 (YYYY-MM) の
+   * 一覧 (降順)。年月タブ UI と一括再計算・一括印刷の対象列挙に使う。R2 の
+   * delimited list で月ディレクトリだけ拾う (wage-master 等の非月 prefix は除外)。 */
+  private async handleArchiveMonths(record: TheearthSessionRecord): Promise<Response> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
+    const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
+    const base = `${prefix}/${record.compId}/`;
+    const months: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const res: R2Objects = await bucket.list({ prefix: base, delimiter: "/", cursor });
+      for (const p of res.delimitedPrefixes) {
+        const m = p.slice(base.length).match(/^(\d{4}-\d{2})\/$/);
+        if (m) months.push(m[1]);
+      }
+      cursor = res.truncated ? res.cursor : undefined;
+    } while (cursor);
+    months.sort((a, b) => b.localeCompare(a));
+    return Response.json({ months });
   }
 
   /** POST /restraint-api/archive/resummarize?month=YYYY-MM — R2 に保存済みの
