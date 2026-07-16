@@ -29,7 +29,7 @@ dtako (デジタコ運行データ) 管理画面。Nuxt 4 + Nitro `cloudflare_mo
 | **server/api (車両設定)** | `server/api/vehicle-settings/{extract.post,history.get,object.get,unconfirmed.get}.ts` | 車両設定 抽出・履歴・取得。unconfirmed は backend `/api/dtako/vehicles` を `alcProxyFetch` (/alc-proxy 経由) で叩く |
 | **utils** | `app/utils/{api,event-data-table,y-time-xlsx,vehicle-settings-*,net780}.ts` | API ラッパ / 表整形 / JSZip writer / 車両設定 cfg・diff・labels / net780-wasm ラッパー |
 | **middleware** | `app/middleware/auth.global.ts` | 全 page の JWT gate |
-| **assets** | `app/assets/css/main.css` | Tailwind/Nuxt UI entry。印刷はダークモードでもライト配色に固定 (dark variant を `@media not print` に限定 + Nuxt UI `--ui-*` 変数の print 上書き。後者は @nuxt/ui 更新時に追従が必要) |
+| **assets** | `app/assets/css/main.css` | Tailwind/Nuxt UI entry。印刷はダークモードでもライト配色に固定 (dark variant を `@media not print` に限定 + Nuxt UI `--ui-*` 変数の print 上書き。後者は @nuxt/ui 更新時に追従が必要)。`<main>` の bg-gray-50 も印刷では白固定 |
 
 ## NET780 ビューア (`/net780`、Refs dtako-scraper#18)
 
