@@ -364,6 +364,34 @@ theearth (web地球号) の **F-ERS2010[RestraintDataReport] (乗務員拘束時
 | `app/composables/useRestraintSession.ts` | `/restraint-api` prefix の thin ラッパー |
 | `workers/dtako-scraper-relay/src/theearth-restraint-client.ts` | F-ERS2010 クライアント + CSV パーサ + サマリ集計 (pure、100% gate) |
 
+## 拘束×賃金 (`/restraint-wage` ページ + `/restraint-api/wage-*`・`archive/*`、Refs #244)
+
+R2 アーカイブ (上記 /restraint-fetch) の summary を素材に、theearth に触らず賃金計算・
+印刷・アーカイブ閲覧を行う。⓪アーカイブ閲覧 (生CSV/版/確認履歴) ①月次集計・印刷
+(theearth プレビュー形式 + 給与様式の法定区分列、**時間給内訳は展開トグル**、
+`@media print` A4横) ②最低賃金チェック (換算時給 vs 県別最低賃金)
+③単価マスタ (適用開始日つき履歴、一括変更、CSV 1行=1履歴 upsert)。
+
+- 決定事項: 法定休日=日曜・法定外休日=土曜既定 (wage-config で変更可)、
+  **週40h は日曜起算で「週の終端が属する月」に計上、月初跨ぎ週は前月 summary の
+  days を含めて計算** (前月アーカイブが無い月は warning + 当月分のみで近似)。
+  「休出」列は保留。実給与 CSV 比較は形式確定後 (Refs #244)
+- 計算 pure module: `workers/dtako-scraper-relay/src/restraint-wage.ts` (100% gate) —
+  単価/最低賃金の適用開始日 lookup・法定区分分類・週40h・金額 (円未満四捨五入)。
+  summary v2 (theearth-restraint-client.ts) が日別データ + 派生指標
+  (当月超過/15h超過日数/平均運転9h超過回数、上限は CSV 注記パース) を供給する
+- マスタは R2 `restraint/{compId}/{wage-master|min-wage|wage-config}/latest.json`
+  (putVersionedR2 の版管理を再利用 — 一括変更 = PUT 1 回 = 1 版)
+- DO routes: `GET/PUT /restraint-api/{wage-master|min-wage|wage-config}`、
+  `POST wage-master/csv` (upsert 取込)、`GET archive/{summaries|csv-list|csv|history}`、
+  `GET wage-report?month=` (前月 tail 込みの計算行)
+
+| ファイル | 役割 |
+|---|---|
+| `app/pages/restraint-wage.vue` | 4 タブ UI + 印刷 CSS |
+| `workers/dtako-scraper-relay/src/restraint-wage.ts` | 賃金計算 pure (100% gate) |
+| `workers/dtako-scraper-relay/src/theearth-restraint-client.ts` | summary v2 (日別 + 派生指標) |
+
 ## スクレイパ (`/scraper` ページ + `workers/dtako-scraper-relay/`)
 
 dtako 運行ログ (csvdata.zip) の取得トリガー UI。実処理は `nuxt-dtako-admin-scraper-relay`

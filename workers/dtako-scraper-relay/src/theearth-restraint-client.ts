@@ -287,6 +287,14 @@ export interface RestraintDayRow {
   workingMinutes: number | null;
   /** 時間外時間 (分)。 */
   overtimeMinutes: number | null;
+  /** 深夜時間 (分)。 */
+  nightMinutes: number | null;
+  /** 時間外深夜時間 (分)。 */
+  overtimeNightMinutes: number | null;
+  /** 前運転平均 (分、2日平均運転 9h 規制の判定値)。 */
+  avgDrivingBeforeMinutes: number | null;
+  /** 後運転平均 (分)。 */
+  avgDrivingAfterMinutes: number | null;
   /** 摘要 (摘要1/摘要2 の非空のみ)。 */
   notes: string[];
   /** ヘッダと同順の生カラム (フロントで全列表示する用)。 */
@@ -304,6 +312,8 @@ export interface RestraintDriverTotals {
   restMinutes: number | null;
   workingMinutes: number | null;
   overtimeMinutes: number | null;
+  nightMinutes: number | null;
+  overtimeNightMinutes: number | null;
 }
 
 export interface RestraintDriverBlock {
@@ -329,6 +339,9 @@ export interface RestraintReport {
   month: number;
   /** 2 行目の注記そのまま。 */
   maxRestraintNote: string;
+  /** 注記「※当月の最大拘束時間 : 275 時間（...）」から読んだ月間拘束上限
+   * (時間)。読めなければ null (超過時間の計算は行わない)。 */
+  maxRestraintHours: number | null;
   drivers: RestraintDriverBlock[];
 }
 
@@ -374,11 +387,14 @@ export function parseRestraintCsv(text: string): RestraintReport {
     throw new TheearthClientError(`拘束時間管理表 CSV のタイトルから年月を読めません: ${lines[0]}`);
   }
 
+  const maxRestraintNote = lines[1] ?? "";
+  const limitMatch = maxRestraintNote.match(/最大拘束時間\s*[:：]\s*(\d+)\s*時間/);
   const report: RestraintReport = {
     title: lines[0],
     year: parseInt(titleMatch[1], 10),
     month: parseInt(titleMatch[2], 10),
-    maxRestraintNote: lines[1] ?? "",
+    maxRestraintNote,
+    maxRestraintHours: limitMatch ? parseInt(limitMatch[1], 10) : null,
     drivers: [],
   };
 
@@ -433,6 +449,10 @@ export function parseRestraintCsv(text: string): RestraintReport {
         rest: col(cols, "休息時間"),
         working: col(cols, "実働時間"),
         overtime: col(cols, "時間外時間"),
+        night: col(cols, "深夜時間"),
+        overtimeNight: col(cols, "時間外深夜時間"),
+        avgBefore: col(cols, "前運転平均"),
+        avgAfter: col(cols, "後運転平均"),
         notes1: col(cols, "摘要1"),
       };
       continue;
@@ -450,6 +470,8 @@ export function parseRestraintCsv(text: string): RestraintReport {
         restMinutes: parseHmmToMinutes(at(cols, h?.rest ?? -1)),
         workingMinutes: parseHmmToMinutes(at(cols, h?.working ?? -1)),
         overtimeMinutes: parseHmmToMinutes(at(cols, h?.overtime ?? -1)),
+        nightMinutes: parseHmmToMinutes(at(cols, h?.night ?? -1)),
+        overtimeNightMinutes: parseHmmToMinutes(at(cols, h?.overtimeNight ?? -1)),
       };
       continue;
     }
@@ -488,6 +510,10 @@ export function parseRestraintCsv(text: string): RestraintReport {
         restMinutes: parseHmmToMinutes(at(cols, h?.rest ?? -1)),
         workingMinutes: parseHmmToMinutes(at(cols, h?.working ?? -1)),
         overtimeMinutes: parseHmmToMinutes(at(cols, h?.overtime ?? -1)),
+        nightMinutes: parseHmmToMinutes(at(cols, h?.night ?? -1)),
+        overtimeNightMinutes: parseHmmToMinutes(at(cols, h?.overtimeNight ?? -1)),
+        avgDrivingBeforeMinutes: parseHmmToMinutes(at(cols, h?.avgBefore ?? -1)),
+        avgDrivingAfterMinutes: parseHmmToMinutes(at(cols, h?.avgAfter ?? -1)),
         notes,
         columns: cols,
       });
@@ -695,6 +721,18 @@ export function stableSummaryBody(
 // 集計サマリ
 // ---------------------------------------------------------------------------
 
+/** summary に載せる日別のコンパクト行 (賃金計算・週40h・法定区分分類の素材)。
+ * 日付は day (1-31) のみ持ち、曜日は year/month から消費側で導出する。 */
+export interface RestraintSummaryDay {
+  day: number;
+  isRestDay: boolean;
+  restraintMinutes: number | null;
+  workingMinutes: number | null;
+  overtimeMinutes: number | null;
+  nightMinutes: number | null;
+  overtimeNightMinutes: number | null;
+}
+
 export interface RestraintDriverSummary {
   driverCd: string;
   driverName: string;
@@ -705,16 +743,39 @@ export interface RestraintDriverSummary {
   /** 月間拘束時間 (分、合計行由来。無ければ日別 restraintMinutes の和)。 */
   restraintMinutes: number | null;
   drivingMinutes: number | null;
+  loadingMinutes: number | null;
+  breakMinutes: number | null;
   workingMinutes: number | null;
   overtimeMinutes: number | null;
+  /** 深夜時間 合計 (分)。 */
+  nightMinutes: number | null;
+  /** 時間外深夜時間 合計 (分)。 */
+  overtimeNightMinutes: number | null;
   /** 日別の最大拘束時間 (分)。 */
   maxDailyRestraintMinutes: number | null;
   /** 年度累計拘束時間 (分、当月分含まず — CSV の「4月～M月 累計拘束時間」)。 */
   fiscalCumulativeMinutes: number | null;
+  /** 月間拘束上限 (分、CSV 注記の「最大拘束時間」× 60。注記が読めなければ null)。 */
+  restraintLimitMinutes: number | null;
+  /** 当月拘束の上限超過分 (分)。上限 or 拘束が不明なら null。 */
+  excessRestraintMinutes: number | null;
+  /** 日別拘束が 15 時間を超えた日数 (改善基準: 1 日の拘束 15h 超は週 2 回まで)。 */
+  over15hDays: number;
+  /** 2 日平均運転 9 時間超過の回数 (日別の 前運転平均 / 後運転平均 それぞれで
+   * 9:00 超をカウント。theearth プレビューの「平均運転9時間超過回数」に対応する
+   * 想定 — 実プレビュー値との突合は staging 検証項目)。 */
+  avgDriving9hOverCount: number;
+  /** 日別のコンパクト行 (賃金計算用)。 */
+  days: RestraintSummaryDay[];
 }
 
-/** 乗務員ブロック 1 件をサマリに畳む (フロントの一覧テーブル用)。 */
-export function summarizeRestraintDriver(block: RestraintDriverBlock): RestraintDriverSummary {
+/** 乗務員ブロック 1 件をサマリに畳む (フロントの一覧テーブル + 賃金計算の素材)。
+ * `restraintLimitMinutes` は CSV 注記由来の月間拘束上限 (parseRestraintCsv の
+ * maxRestraintHours × 60) を渡す。 */
+export function summarizeRestraintDriver(
+  block: RestraintDriverBlock,
+  restraintLimitMinutes: number | null = null,
+): RestraintDriverSummary {
   const workRows = block.days.filter((d) => !d.isRestDay);
   const dailyRestraints = block.days
     .map((d) => d.restraintMinutes)
@@ -723,21 +784,54 @@ export function summarizeRestraintDriver(block: RestraintDriverBlock): Restraint
     const present = values.filter((v): v is number => v !== null);
     return present.length > 0 ? present.reduce((a, b) => a + b, 0) : null;
   };
+  const restraintMinutes =
+    block.totals?.restraintMinutes ?? sumOrNull(block.days.map((d) => d.restraintMinutes));
+  const NINE_HOURS = 9 * 60;
+  const avgDriving9hOverCount = block.days.reduce(
+    (count, d) =>
+      count +
+      (d.avgDrivingBeforeMinutes !== null && d.avgDrivingBeforeMinutes > NINE_HOURS ? 1 : 0) +
+      (d.avgDrivingAfterMinutes !== null && d.avgDrivingAfterMinutes > NINE_HOURS ? 1 : 0),
+    0,
+  );
   return {
     driverCd: block.driverCd,
     driverName: block.driverName,
     branchName: block.branchName,
     workDays: workRows.length,
     restDays: block.days.length - workRows.length,
-    restraintMinutes:
-      block.totals?.restraintMinutes ?? sumOrNull(block.days.map((d) => d.restraintMinutes)),
+    restraintMinutes,
     drivingMinutes:
       block.totals?.drivingMinutes ?? sumOrNull(block.days.map((d) => d.drivingMinutes)),
+    loadingMinutes:
+      block.totals?.loadingMinutes ?? sumOrNull(block.days.map((d) => d.loadingMinutes)),
+    breakMinutes:
+      block.totals?.breakMinutes ?? sumOrNull(block.days.map((d) => d.breakMinutes)),
     workingMinutes:
       block.totals?.workingMinutes ?? sumOrNull(block.days.map((d) => d.workingMinutes)),
     overtimeMinutes:
       block.totals?.overtimeMinutes ?? sumOrNull(block.days.map((d) => d.overtimeMinutes)),
+    nightMinutes:
+      block.totals?.nightMinutes ?? sumOrNull(block.days.map((d) => d.nightMinutes)),
+    overtimeNightMinutes:
+      block.totals?.overtimeNightMinutes ?? sumOrNull(block.days.map((d) => d.overtimeNightMinutes)),
     maxDailyRestraintMinutes: dailyRestraints.length > 0 ? Math.max(...dailyRestraints) : null,
     fiscalCumulativeMinutes: block.fiscalCumulativeMinutes,
+    restraintLimitMinutes,
+    excessRestraintMinutes:
+      restraintLimitMinutes !== null && restraintMinutes !== null
+        ? Math.max(0, restraintMinutes - restraintLimitMinutes)
+        : null,
+    over15hDays: dailyRestraints.filter((v) => v > 15 * 60).length,
+    avgDriving9hOverCount,
+    days: block.days.map((d) => ({
+      day: d.day ?? 0,
+      isRestDay: d.isRestDay,
+      restraintMinutes: d.restraintMinutes,
+      workingMinutes: d.workingMinutes,
+      overtimeMinutes: d.overtimeMinutes,
+      nightMinutes: d.nightMinutes,
+      overtimeNightMinutes: d.overtimeNightMinutes,
+    })),
   };
 }

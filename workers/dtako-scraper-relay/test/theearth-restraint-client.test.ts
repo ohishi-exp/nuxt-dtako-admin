@@ -465,8 +465,8 @@ const SAMPLE_CSV = [
   '事業所,テスト運輸　第一営業所,乗務員分類1,テスト1班,乗務員分類2,2,乗務員分類3,テスト課,乗務員分類4,未設定,乗務員分類5,',
   '氏名,試験　太郎,乗務員コード,9901',
   HEADER_LINE,
-  '4月1日,8:00,21:30,5:00,1:00,3:00,0:30,1:00,,,,12:30,1:00,13:30,13:30,,4:00,10:30,9:00,,,,4/1帰着:テスト積地,',
-  '4月2日,5:00,20:00,10:00,,4:00,,,,,,15:00,,15:00,28:30,,9:00,9:00,15:00,7:00,,,4/2出発,',
+  '4月1日,8:00,21:30,5:00,1:00,3:00,0:30,1:00,,,,12:30,1:00,13:30,13:30,,4:00,10:30,9:00,,0:30,0:10,4/1帰着:テスト積地,',
+  '4月2日,5:00,20:00,10:00,,4:00,,,,,,15:00,,15:00,28:30,9:30,9:00,9:00,15:00,7:00,,,4/2出発,',
   '4月6日,休,',
   '合計,,,15:00,,7:00,,1:00,,,,28:30,,,,,,19:30,24:00,7:00,1:00,0:30,,',
   '4月～ 月 累計拘束時間, 時間   分,',
@@ -518,6 +518,10 @@ describe('parseRestraintCsv', () => {
     expect(day1.restMinutes).toBe(10 * 60 + 30)
     expect(day1.workingMinutes).toBe(540)
     expect(day1.overtimeMinutes).toBeNull()
+    expect(day1.nightMinutes).toBe(30)
+    expect(day1.overtimeNightMinutes).toBe(10)
+    expect(day1.avgDrivingBeforeMinutes).toBeNull()
+    expect(day1.avgDrivingAfterMinutes).toBe(240)
     expect(day1.notes).toEqual(['4/1帰着:テスト積地'])
   })
 
@@ -535,6 +539,14 @@ describe('parseRestraintCsv', () => {
     expect(totals.drivingMinutes).toBe(15 * 60)
     expect(totals.workingMinutes).toBe(24 * 60)
     expect(totals.overtimeMinutes).toBe(7 * 60)
+    expect(totals.nightMinutes).toBe(60)
+    expect(totals.overtimeNightMinutes).toBe(30)
+  })
+
+  it('注記から月間拘束上限 (時間) を読む / 読めなければ null', () => {
+    expect(report.maxRestraintHours).toBe(275)
+    const noLimit = parseRestraintCsv('拘束時間管理表 (2025年 4月分)\n注記\n事業所,X\n氏名,Y')
+    expect(noLimit.maxRestraintHours).toBeNull()
   })
 
   it('年度累計 (空欄 = null / 値あり = 分)・年度拘束時間をパースする', () => {
@@ -631,6 +643,37 @@ describe('summarizeRestraintDriver', () => {
     expect(s.restraintMinutes).toBe(28 * 60 + 30)
     expect(s.maxDailyRestraintMinutes).toBe(15 * 60)
     expect(s.fiscalCumulativeMinutes).toBeNull()
+    expect(s.nightMinutes).toBe(60)
+    expect(s.overtimeNightMinutes).toBe(30)
+    expect(s.loadingMinutes).toBe(7 * 60)
+    expect(s.breakMinutes).toBe(60)
+  })
+
+  it('v2 派生指標: 上限超過・15h超過日数・平均運転9h超過回数・日別配列', () => {
+    // 上限 1,000 分 → 超過 710 分。日別拘束は 810 / 900 (=15:00 ちょうどは超過に数えない)
+    const s = summarizeRestraintDriver(report.drivers[0]!, 1000)
+    expect(s.restraintLimitMinutes).toBe(1000)
+    expect(s.excessRestraintMinutes).toBe(1710 - 1000)
+    expect(s.over15hDays).toBe(0)
+    // 前運転平均 9:30 (>9h) の 1 回のみ。後運転平均 9:00 ちょうどは数えない
+    expect(s.avgDriving9hOverCount).toBe(1)
+    expect(s.days).toHaveLength(3)
+    expect(s.days[0]).toEqual({
+      day: 1,
+      isRestDay: false,
+      restraintMinutes: 13 * 60 + 30,
+      workingMinutes: 540,
+      overtimeMinutes: null,
+      nightMinutes: 30,
+      overtimeNightMinutes: 10,
+    })
+    expect(s.days[2]!.isRestDay).toBe(true)
+    // 上限未指定 (既定 null) では超過も null
+    const noLimit = summarizeRestraintDriver(report.drivers[0]!)
+    expect(noLimit.restraintLimitMinutes).toBeNull()
+    expect(noLimit.excessRestraintMinutes).toBeNull()
+    // 15h 超過日数: 上限を跨ぐ日別データで正しく数える
+    expect(summarizeRestraintDriver(report.drivers[1]!).over15hDays).toBe(0)
   })
 
   it('合計行が無い時は日別行の和にフォールバックする', () => {
@@ -641,6 +684,21 @@ describe('summarizeRestraintDriver', () => {
     const s = summarizeRestraintDriver(block)
     expect(s.restraintMinutes).toBe((13 * 60 + 30) + (15 * 60))
     expect(s.drivingMinutes).toBe(300 + 600)
+  })
+
+  it('15h 超の日別拘束は over15hDays に数え、day 欠落は 0 に落とす', () => {
+    const block: RestraintDriverBlock = {
+      ...report.drivers[0]!,
+      totals: null,
+      days: [
+        { ...report.drivers[0]!.days[0]!, day: null, restraintMinutes: 950, avgDrivingAfterMinutes: 600 },
+      ],
+    }
+    const s = summarizeRestraintDriver(block)
+    expect(s.over15hDays).toBe(1)
+    expect(s.days[0]!.day).toBe(0)
+    // 後運転平均 10:00 (>9h) も超過回数に数える
+    expect(s.avgDriving9hOverCount).toBe(1)
   })
 
   it('日別行が全て null の指標は null (0 にしない)', () => {
@@ -665,6 +723,10 @@ describe('summarizeRestraintDriver', () => {
           restMinutes: null,
           workingMinutes: null,
           overtimeMinutes: null,
+          nightMinutes: null,
+          overtimeNightMinutes: null,
+          avgDrivingBeforeMinutes: null,
+          avgDrivingAfterMinutes: null,
           notes: [],
           columns: [],
         },
