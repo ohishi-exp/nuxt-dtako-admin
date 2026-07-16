@@ -85,6 +85,17 @@ import {
   type TheearthSessionRecord,
 } from "./theearth-session";
 import {
+  computeWageRow,
+  normalizeMinWageMaster,
+  normalizeWageConfig,
+  normalizeWageMaster,
+  upsertWageMasterFromCsv,
+  WageMasterError,
+  type MinWageMaster,
+  type WageConfig,
+  type WageMaster,
+} from "./restraint-wage";
+import {
   appendHistoryJsonl,
   downloadRestraintCsv,
   parseRestraintCsv,
@@ -100,6 +111,7 @@ import {
   validateRestraintParams,
   type RestraintCsvParams,
   type RestraintDriverSummary,
+  type RestraintSummaryDay,
 } from "./theearth-restraint-client";
 import {
   addFuelRow,
@@ -1521,7 +1533,364 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/csv" && request.method === "GET") {
       return this.handleRestraintCsv(record!, url);
     }
+    // ---- 賃金マスタ / 計算設定 (R2、theearth には触らない。Refs #244) ----
+    if (url.pathname === "/restraint-api/wage-master") {
+      return this.handleWageMasterRoute(record!, request, "wage-master", (raw) => normalizeWageMaster(raw));
+    }
+    if (url.pathname === "/restraint-api/min-wage") {
+      return this.handleWageMasterRoute(record!, request, "min-wage", (raw) => normalizeMinWageMaster(raw));
+    }
+    if (url.pathname === "/restraint-api/wage-config") {
+      return this.handleWageMasterRoute(record!, request, "wage-config", (raw) => normalizeWageConfig(raw));
+    }
+    if (url.pathname === "/restraint-api/wage-master/csv" && request.method === "POST") {
+      return this.handleWageMasterCsvImport(record!, request);
+    }
+    // ---- アーカイブ閲覧 (R2 読み出しのみ。Refs #244) ----
+    if (url.pathname === "/restraint-api/archive/summaries" && request.method === "GET") {
+      return this.handleArchiveSummaries(record!, url);
+    }
+    if (url.pathname === "/restraint-api/archive/csv-list" && request.method === "GET") {
+      return this.handleArchiveCsvList(record!, url);
+    }
+    if (url.pathname === "/restraint-api/archive/csv" && request.method === "GET") {
+      return this.handleArchiveCsvDownload(record!, url);
+    }
+    if (url.pathname === "/restraint-api/archive/history" && request.method === "GET") {
+      return this.handleArchiveHistory(record!, url);
+    }
+    // ---- 賃金計算 (月指定、R2 summary + マスタから。Refs #244) ----
+    if (url.pathname === "/restraint-api/wage-report" && request.method === "GET") {
+      return this.handleWageReport(record!, url);
+    }
     return dvrJsonError(404, "Not Found");
+  }
+
+  // -------------------------------------------------------------------------
+  // /restraint-api の賃金マスタ・アーカイブ閲覧・賃金計算 (Refs #244)
+  // いずれも theearth には触らず R2 だけを読み書きする。
+  // -------------------------------------------------------------------------
+
+  /** マスタ類の R2 配置 (comp 単位、月に依らない)。 */
+  private wageMasterR2Paths(compId: string, name: "wage-master" | "min-wage" | "wage-config") {
+    const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
+    const dir = `${prefix}/${compId}/${name}`;
+    return { dir, latest: `${dir}/latest.json`, version: (ts: string) => `${dir}/v-${ts}.json` };
+  }
+
+  /** R2 list を cursor で全件回す (versions が増えると 1 回の list に収まらないため)。 */
+  private async listAllR2(bucket: R2Bucket, prefix: string): Promise<R2Object[]> {
+    const out: R2Object[] = [];
+    let cursor: string | undefined;
+    do {
+      // `include` はランタイムでは実装済みだが、この workers-types バージョンの
+      // R2ListOptions に型が無いため cast する (customMetadata を list 結果に含める)。
+      const res: R2Objects = await bucket.list({
+        prefix,
+        cursor,
+        include: ["customMetadata"],
+      } as unknown as R2ListOptions);
+      out.push(...res.objects);
+      cursor = res.truncated ? res.cursor : undefined;
+    } while (cursor);
+    return out;
+  }
+
+  /** GET/PUT /restraint-api/{wage-master|min-wage|wage-config} — マスタ JSON の
+   * 読み書き。PUT は normalize (構造検証) 後に putVersionedR2 で版管理保存する
+   * (一括変更 = PUT 1 回 = 1 版)。 */
+  private async handleWageMasterRoute(
+    record: TheearthSessionRecord,
+    request: Request,
+    name: "wage-master" | "min-wage" | "wage-config",
+    normalize: (raw: unknown) => unknown,
+  ): Promise<Response> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定のためマスタを保存できません");
+    const paths = this.wageMasterR2Paths(record.compId, name);
+    if (request.method === "GET") {
+      const obj = await bucket.get(paths.latest);
+      if (!obj) return Response.json({ exists: false, data: null });
+      try {
+        const data = normalize(JSON.parse(await obj.text()));
+        return Response.json({
+          exists: true,
+          data,
+          updated_at: obj.customMetadata?.fetchedAt ?? null,
+        });
+      } catch (err) {
+        console.error(`wage master ${name} read error:`, err);
+        return dvrJsonError(502, `${name} の保存データが壊れています (${describeUnknownError(err)})`);
+      }
+    }
+    if (request.method === "PUT") {
+      let raw: unknown;
+      try {
+        raw = await request.json();
+      } catch {
+        return dvrJsonError(400, "JSON body が必要です");
+      }
+      let normalized: unknown;
+      try {
+        normalized = normalize(raw);
+      } catch (err) {
+        if (err instanceof WageMasterError) return dvrJsonError(400, err.message);
+        throw err;
+      }
+      const ts = restraintVersionTimestamp(new Date());
+      const result = await this.putVersionedR2(
+        bucket,
+        paths.latest,
+        paths.version(ts),
+        JSON.stringify(normalized),
+        "application/json",
+        ts,
+      );
+      if (result.changed) await this.pruneRestraintVersions(bucket, paths.dir);
+      return Response.json({ saved: true, changed: result.changed, data: normalized });
+    }
+    return dvrJsonError(405, "Method Not Allowed");
+  }
+
+  /** POST /restraint-api/wage-master/csv — 単価 CSV (1 行 = 1 履歴) を現在の
+   * マスタへ upsert して保存する (Excel 編集 → 再取込の一括変更経路)。body は
+   * text/plain の CSV そのもの。 */
+  private async handleWageMasterCsvImport(record: TheearthSessionRecord, request: Request): Promise<Response> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定のためマスタを保存できません");
+    const csvText = await request.text();
+    const paths = this.wageMasterR2Paths(record.compId, "wage-master");
+    let base: WageMaster = { drivers: {} };
+    const existing = await bucket.get(paths.latest);
+    if (existing) {
+      try {
+        base = normalizeWageMaster(JSON.parse(await existing.text()));
+      } catch (err) {
+        console.error("wage-master csv import: base read error:", err);
+        return dvrJsonError(502, `既存の単価マスタが壊れています (${describeUnknownError(err)})`);
+      }
+    }
+    let merged: WageMaster;
+    try {
+      merged = upsertWageMasterFromCsv(base, csvText);
+    } catch (err) {
+      if (err instanceof WageMasterError) return dvrJsonError(400, err.message);
+      throw err;
+    }
+    const ts = restraintVersionTimestamp(new Date());
+    const result = await this.putVersionedR2(
+      bucket,
+      paths.latest,
+      paths.version(ts),
+      JSON.stringify(merged),
+      "application/json",
+      ts,
+    );
+    if (result.changed) await this.pruneRestraintVersions(bucket, paths.dir);
+    return Response.json({ saved: true, changed: result.changed, data: merged });
+  }
+
+  /** month クエリ ("YYYY-MM") を検証して {year, month, ym} を返す。不正は null。 */
+  private parseMonthParam(url: URL): { year: number; month: number; ym: string } | null {
+    const m = (url.searchParams.get("month") ?? "").match(/^(\d{4})-(\d{2})$/);
+    if (!m) return null;
+    const year = parseInt(m[1], 10);
+    const month = parseInt(m[2], 10);
+    if (month < 1 || month > 12) return null;
+    return { year, month, ym: `${m[1]}-${m[2]}` };
+  }
+
+  /** 指定月の summary latest 一覧を R2 から読む (wage-report と archive/summaries
+   * の共通処理)。noData マーカーは summaries から分離して返す。 */
+  private async loadMonthSummaries(
+    bucket: R2Bucket,
+    compId: string,
+    ym: string,
+  ): Promise<{
+    summaries: Array<{ data: RestraintDriverSummary; fetchedAt: string | null; lastVerifiedAt: string | null }>;
+    noDataDrivers: string[];
+  }> {
+    const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
+    const objects = await this.listAllR2(bucket, `${prefix}/${compId}/${ym}/summary/`);
+    const latests = objects.filter((o) => o.key.endsWith("/latest.json"));
+    const summaries: Array<{ data: RestraintDriverSummary; fetchedAt: string | null; lastVerifiedAt: string | null }> = [];
+    const noDataDrivers: string[] = [];
+    for (const meta of latests) {
+      const obj = await bucket.get(meta.key);
+      if (!obj) continue; // list 後に消えた場合はスキップ
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await obj.text());
+      } catch {
+        console.error(JSON.stringify({ restraint_archive: "broken-summary", key: meta.key }));
+        continue;
+      }
+      const record = parsed as { noData?: unknown; driverCd?: unknown };
+      if (record.noData === true) {
+        noDataDrivers.push(typeof record.driverCd === "string" ? record.driverCd : "");
+        continue;
+      }
+      // v1 summary (days なし) も読めるよう防御的に補完する
+      const summary = parsed as RestraintDriverSummary & { days?: unknown };
+      summaries.push({
+        data: { ...summary, days: Array.isArray(summary.days) ? (summary.days as RestraintSummaryDay[]) : [] },
+        fetchedAt: meta.customMetadata?.fetchedAt ?? null,
+        lastVerifiedAt: meta.customMetadata?.lastVerifiedAt ?? null,
+      });
+    }
+    summaries.sort((a, b) => a.data.driverCd.localeCompare(b.data.driverCd, undefined, { numeric: true }));
+    return { summaries, noDataDrivers };
+  }
+
+  /** GET /restraint-api/archive/summaries?month=YYYY-MM — R2 の summary latest 一覧。 */
+  private async handleArchiveSummaries(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
+    const parsed = this.parseMonthParam(url);
+    if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
+    const { summaries, noDataDrivers } = await this.loadMonthSummaries(bucket, record.compId, parsed.ym);
+    return Response.json({ month: parsed.ym, summaries, no_data_drivers: noDataDrivers });
+  }
+
+  /** GET /restraint-api/archive/csv-list?month=YYYY-MM — 生 CSV (latest/版/履歴) の一覧。 */
+  private async handleArchiveCsvList(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
+    const parsed = this.parseMonthParam(url);
+    if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
+    const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
+    const base = `${prefix}/${record.compId}/${parsed.ym}/csv/`;
+    const objects = await this.listAllR2(bucket, base);
+    const entries = objects.map((o) => {
+      const rel = o.key.slice(base.length); // "{range}/latest.csv" 等
+      const [range, file] = [rel.slice(0, rel.lastIndexOf("/")), rel.slice(rel.lastIndexOf("/") + 1)];
+      const kind = file === "latest.csv" ? "latest" : file === "history.jsonl" ? "history" : "version";
+      return {
+        key: o.key,
+        range,
+        file,
+        kind,
+        size: o.size,
+        fetched_at: o.customMetadata?.fetchedAt ?? null,
+        last_verified_at: o.customMetadata?.lastVerifiedAt ?? null,
+      };
+    });
+    return Response.json({ month: parsed.ym, entries });
+  }
+
+  /** GET /restraint-api/archive/csv?key= — R2 の生 CSV 素通しダウンロード。
+   * key は自 comp の csv 配下のみ許可する (他社 prefix・summary 等は 400)。 */
+  private async handleArchiveCsvDownload(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
+    const key = url.searchParams.get("key") ?? "";
+    const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
+    const allowed = `${prefix}/${record.compId}/`;
+    if (!key.startsWith(allowed) || !key.includes("/csv/") || key.includes("..") || !key.endsWith(".csv")) {
+      return dvrJsonError(400, "key が不正です (自社の拘束 CSV アーカイブのみ取得できます)");
+    }
+    const obj = await bucket.get(key);
+    if (!obj) return dvrJsonError(404, "指定の CSV が見つかりません");
+    const filename = key.slice(allowed.length).replace(/[^A-Za-z0-9._-]/g, "_");
+    return new Response(obj.body, {
+      status: 200,
+      headers: {
+        "content-type": "text/csv; charset=Shift_JIS",
+        "content-disposition": `attachment; filename="${filename}"`,
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  /** GET /restraint-api/archive/history?month=YYYY-MM&range= — 確認履歴 (JSONL) の閲覧。 */
+  private async handleArchiveHistory(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
+    const parsed = this.parseMonthParam(url);
+    if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
+    const range = url.searchParams.get("range") ?? "all";
+    if (!/^(all|\d{1,8}-\d{1,8})$/.test(range)) {
+      return dvrJsonError(400, "range は all または {from}-{to} で指定してください");
+    }
+    const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
+    const key = `${prefix}/${record.compId}/${parsed.ym}/csv/${range}/history.jsonl`;
+    const obj = await bucket.get(key);
+    if (!obj) return Response.json({ month: parsed.ym, range, entries: [] });
+    const text = await obj.text();
+    const entries = text
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .map((l) => {
+        try {
+          return JSON.parse(l) as unknown;
+        } catch {
+          return { raw: l };
+        }
+      });
+    return Response.json({ month: parsed.ym, range, entries });
+  }
+
+  /** GET /restraint-api/wage-report?month=YYYY-MM — R2 の summary + マスタから
+   * 時間給計算行を返す (Refs #244)。週40h の月初跨ぎ週のため前月 summary の
+   * days も読み込む (無ければ跨ぎ週は当月分のみで近似し warning を返す)。 */
+  private async handleWageReport(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
+    const parsed = this.parseMonthParam(url);
+    if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
+    const { year, month, ym } = parsed;
+
+    const loadMaster = async <T>(
+      name: "wage-master" | "min-wage" | "wage-config",
+      normalize: (raw: unknown) => T,
+      fallback: T,
+    ): Promise<T> => {
+      const obj = await bucket.get(this.wageMasterR2Paths(record.compId, name).latest);
+      if (!obj) return fallback;
+      try {
+        return normalize(JSON.parse(await obj.text()));
+      } catch (err) {
+        console.error(`wage-report ${name} read error:`, err);
+        return fallback;
+      }
+    };
+    const wageMaster: WageMaster = await loadMaster("wage-master", normalizeWageMaster, { drivers: {} });
+    const minWageMaster: MinWageMaster = await loadMaster("min-wage", normalizeMinWageMaster, {
+      prefectures: {},
+      branchToPrefecture: {},
+    });
+    const config: WageConfig = await loadMaster("wage-config", normalizeWageConfig, normalizeWageConfig(null));
+
+    const { summaries, noDataDrivers } = await this.loadMonthSummaries(bucket, record.compId, ym);
+    const prevYear = month === 1 ? year - 1 : year;
+    const prevMonth = month === 1 ? 12 : month - 1;
+    const prevYm = `${prevYear}-${String(prevMonth).padStart(2, "0")}`;
+    const prev = await this.loadMonthSummaries(bucket, record.compId, prevYm);
+    const prevDaysByDriver = new Map<string, RestraintSummaryDay[]>(
+      prev.summaries.map((s) => [s.data.driverCd, s.data.days]),
+    );
+
+    const warnings: string[] = [];
+    if (summaries.length > 0 && prev.summaries.length === 0) {
+      warnings.push(
+        `前月 (${prevYm}) の summary がアーカイブに無いため、月初の跨ぎ週の週40h計算は当月分のみで近似しています`,
+      );
+    }
+    const rows = summaries.map((s) => ({
+      summary: s.data,
+      fetched_at: s.fetchedAt,
+      last_verified_at: s.lastVerifiedAt,
+      wage: computeWageRow(
+        s.data,
+        year,
+        month,
+        wageMaster,
+        minWageMaster,
+        config,
+        prevDaysByDriver.get(s.data.driverCd) ?? [],
+      ),
+    }));
+    return Response.json({ month: ym, rows, no_data_drivers: noDataDrivers, warnings, config });
   }
 
   /** SHA-256 の hex digest (R2 アーカイブの変化検知用)。 */
@@ -1725,7 +2094,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         return { no_data: true };
       }
       const report = parseRestraintCsv(csv.text);
-      const summaries = report.drivers.map(summarizeRestraintDriver);
+      const limitMinutes = report.maxRestraintHours !== null ? report.maxRestraintHours * 60 : null;
+      const summaries = report.drivers.map((d) => summarizeRestraintDriver(d, limitMinutes));
       // 生 CSV + 乗務員別サマリを R2 にバージョン管理付きで保存 (応答をブロックしない)
       this.ctx.waitUntil(this.saveRestraintToR2(record.compId, params, csv.bytes, summaries));
       return { no_data: false, report, summaries };
@@ -1761,7 +2131,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       // アーカイブ側の縮退のみ — ユーザーへの CSV 応答は落とさない)
       let archiveSummaries: RestraintDriverSummary[] = [];
       try {
-        archiveSummaries = parseRestraintCsv(csv.text).drivers.map(summarizeRestraintDriver);
+        const archiveReport = parseRestraintCsv(csv.text);
+        const archiveLimit =
+          archiveReport.maxRestraintHours !== null ? archiveReport.maxRestraintHours * 60 : null;
+        archiveSummaries = archiveReport.drivers.map((d) => summarizeRestraintDriver(d, archiveLimit));
       } catch (err) {
         console.error(JSON.stringify({ restraint_r2: "parse-skip", error: describeUnknownError(err) }));
       }
