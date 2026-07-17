@@ -165,8 +165,22 @@ export function normalizeWageMaster(raw: unknown): WageMaster {
 // 給与明細 CSV 比較の支給項目区分 (Refs #253)
 // ---------------------------------------------------------------------------
 
-/** 支給項目を賃金比較でどちらの束に入れるか。base = 基本給、overtime = 残業。 */
-export type SalaryItemCategory = "base" | "overtime";
+/** 支給項目の区分 (Refs #278)。割増賃金の基礎 (労基法37条) × 最低賃金の対象
+ * (最低賃金法4条3項) の 2 軸の組合せで 5 区分。base = 両方算入 (基本給・職務手当等)、
+ * overtime = 割増そのもの (残業・深夜・休日出勤)、minwage-only = 最低賃金のみ算入
+ * (住宅・別居・子女教育)、premium-base-only = 割増基礎のみ算入 (精皆勤)、
+ * excluded = 両方除外 (通勤・家族・臨時・賞与)。'base'/'overtime' は旧 2 区分の
+ * 保存済み設定と同じ値・同じ意味 (後方互換)。集計の意味論はフロント
+ * (app/utils/salary-compare.ts の SALARY_CATEGORY_FLAGS) が持つ。 */
+export type SalaryItemCategory = "base" | "overtime" | "minwage-only" | "premium-base-only" | "excluded";
+
+const SALARY_ITEM_CATEGORIES: ReadonlySet<string> = new Set([
+  "base",
+  "overtime",
+  "minwage-only",
+  "premium-base-only",
+  "excluded",
+]);
 
 /** 支給項目名 (NFKC 正規化 + trim 済みのヘッダーラベル) → 区分。
  * 貼り付けられた給与 CSV 本文は保存しない — 保存するのはこの区分設定だけ。 */
@@ -189,12 +203,12 @@ export function normalizeSalaryItemConfig(raw: unknown): SalaryItemConfig {
     if (!key) {
       throw new WageMasterError("salary-item-config.items に空の項目名があります");
     }
-    if (category !== "base" && category !== "overtime") {
+    if (typeof category !== "string" || !SALARY_ITEM_CATEGORIES.has(category)) {
       throw new WageMasterError(
-        `salary-item-config.items[${key}] は "base" | "overtime" が必要です (${String(category)})`,
+        `salary-item-config.items[${key}] は "base" | "overtime" | "minwage-only" | "premium-base-only" | "excluded" が必要です (${String(category)})`,
       );
     }
-    out.items[key] = category;
+    out.items[key] = category as SalaryItemCategory;
   }
   return out;
 }

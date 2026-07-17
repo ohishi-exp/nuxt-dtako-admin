@@ -159,6 +159,19 @@ describe('normalizeSalaryItemConfig', () => {
     })
   })
 
+  it('5 区分 (割増基礎 × 最低賃金の 2 軸、Refs #278) を受け付ける', () => {
+    const out = normalizeSalaryItemConfig({
+      items: {
+        住宅手当: 'minwage-only',
+        精勤手当: 'premium-base-only',
+        通勤手当: 'excluded',
+      },
+    })
+    expect(out).toEqual({
+      items: { 住宅手当: 'minwage-only', 精勤手当: 'premium-base-only', 通勤手当: 'excluded' },
+    })
+  })
+
   it('空の items を受け付ける', () => {
     expect(normalizeSalaryItemConfig({ items: {} })).toEqual({ items: {} })
   })
@@ -179,8 +192,9 @@ describe('normalizeSalaryItemConfig', () => {
     expect(() => normalizeSalaryItemConfig({ items: { '   ': 'base' } })).toThrow('空の項目名')
   })
 
-  it('base / overtime 以外の区分を拒否する', () => {
-    expect(() => normalizeSalaryItemConfig({ items: { 基本給: 'bonus' } })).toThrow('"base" | "overtime"')
+  it('5 区分以外の値を拒否する', () => {
+    expect(() => normalizeSalaryItemConfig({ items: { 基本給: 'bonus' } }))
+      .toThrow('"base" | "overtime" | "minwage-only" | "premium-base-only" | "excluded"')
     expect(() => normalizeSalaryItemConfig({ items: { 基本給: 1 } })).toThrow(WageMasterError)
   })
 })

@@ -10,6 +10,7 @@ import { describe, it, expect } from 'vitest'
 import type { WageReportRow } from '../../app/utils/restraint-wage-view'
 import {
   compareSalaryMonth,
+  computeOvertimePayAtRate,
   effectiveCategory,
   mergeParsedSalaryCsv,
   normalizeNameKey,
@@ -73,15 +74,36 @@ describe('suggestCategory / effectiveCategory', () => {
     expect(suggestCategory('休日出勤手当')).toBe('overtime')
   })
 
-  it('それ以外は基本給を推定する', () => {
-    expect(suggestCategory('基本給')).toBe('base')
-    expect(suggestCategory('無事故手当')).toBe('base')
+  it('住宅・別居・子女教育は最低賃金のみ算入を推定する (Refs #278)', () => {
+    expect(suggestCategory('住宅手当')).toBe('minwage-only')
+    expect(suggestCategory('別居手当')).toBe('minwage-only')
+    expect(suggestCategory('子女教育手当')).toBe('minwage-only')
   })
 
-  it('effectiveCategory は設定があれば設定を、無ければ推定を返す', () => {
-    const config: SalaryItemConfig = { items: { 無事故手当: 'overtime' } }
+  it('精勤・皆勤は割増基礎のみ算入を推定する', () => {
+    expect(suggestCategory('精勤手当')).toBe('premium-base-only')
+    expect(suggestCategory('皆勤手当')).toBe('premium-base-only')
+  })
+
+  it('通勤・家族・賞与・臨時は両方除外を推定する', () => {
+    expect(suggestCategory('通勤手当')).toBe('excluded')
+    expect(suggestCategory('家族手当')).toBe('excluded')
+    expect(suggestCategory('賞与')).toBe('excluded')
+    expect(suggestCategory('臨時給与')).toBe('excluded')
+  })
+
+  it('それ以外 (職務・無事故手当等) は基本給を推定する (割増基礎に算入必須)', () => {
+    expect(suggestCategory('基本給')).toBe('base')
+    expect(suggestCategory('無事故手当')).toBe('base')
+    expect(suggestCategory('職務手当')).toBe('base')
+  })
+
+  it('effectiveCategory は設定があれば設定を、無ければ推定を返す (旧 2 区分の保存値も有効)', () => {
+    const config: SalaryItemConfig = { items: { 無事故手当: 'overtime', 通勤手当: 'base' } }
     expect(effectiveCategory('無事故手当', config)).toBe('overtime')
     expect(effectiveCategory('基本給', config)).toBe('base')
+    // 旧 2 区分時代に 'base' 保存済みの項目は推定 (excluded) より設定が勝つ
+    expect(effectiveCategory('通勤手当', config)).toBe('base')
   })
 })
 
@@ -296,6 +318,7 @@ function reportRow(
     overtimeNightMinutes?: number | null
     breakMinutes?: number | null
     drivingMinutes?: number | null
+    statutoryMinutes?: number
   } = {},
 ): WageReportRow {
   return {
@@ -309,9 +332,10 @@ function reportRow(
       drivingMinutes: over.drivingMinutes === undefined ? 0 : over.drivingMinutes,
     },
     // 残業(最低賃金) 列の素材 (wage-report の wage 側)。単体テストでは最低賃金
-    // 未設定 (null) を既定とし、実データ相当の値は共有 fixture テスト
+    // 未設定 (null)・法定内 0 分を既定とし、実データ相当の値は共有 fixture テスト
     // (salary-compare-fixture.test.ts) が golden 経由で検証する。
     wage: {
+      minutes: { statutory: over.statutoryMinutes ?? 0 },
       overtimeMinutes: over.overtimeMinutes ?? 0,
       nightOvertimeMinutes: over.overtimeNightMinutes ?? 0,
       minWageOvertimePay: null,
@@ -321,19 +345,54 @@ function reportRow(
 }
 
 describe('sumByCategory', () => {
-  it('実効区分で基本給と残業に集計し、内訳を積む', () => {
+  it('実効区分で 5 区分に集計し、内訳を積む', () => {
     const config: SalaryItemConfig = { items: { 基本給: 'base', 残業手当: 'overtime' } }
-    expect(sumByCategory(csvRow(), config)).toEqual({
-      base: 80000,
-      overtime: 30000,
-      baseItems: [{ label: '基本給', amount: 80000 }],
-      overtimeItems: [{ label: '残業手当', amount: 30000 }],
-    })
+    const out = sumByCategory(csvRow(), config)
+    expect(out.buckets['base']).toEqual({ total: 80000, items: [{ label: '基本給', amount: 80000 }] })
+    expect(out.buckets['overtime']).toEqual({ total: 30000, items: [{ label: '残業手当', amount: 30000 }] })
+    expect(out.buckets['minwage-only']).toEqual({ total: 0, items: [] })
+    expect(out.total).toBe(110000)
   })
 
   it('設定が無い項目は推定区分で集計する', () => {
-    expect(sumByCategory(csvRow(), { items: {} }).base).toBe(80000)
-    expect(sumByCategory(csvRow(), { items: {} }).overtime).toBe(30000)
+    expect(sumByCategory(csvRow(), { items: {} }).buckets['base'].total).toBe(80000)
+    expect(sumByCategory(csvRow(), { items: {} }).buckets['overtime'].total).toBe(30000)
+  })
+
+  it('割増基礎 = base + premium-base-only、最低賃金 = base + minwage-only、支給計は excluded 含む全項目', () => {
+    const row = csvRow({
+      amounts: { 基本給: 100000, 精勤手当: 10000, 住宅手当: 20000, 通勤手当: 5000, 残業手当: 30000 },
+    })
+    const out = sumByCategory(row, { items: {} })
+    expect(out.premiumBase).toEqual({
+      total: 110000,
+      items: [{ label: '基本給', amount: 100000 }, { label: '精勤手当', amount: 10000 }],
+    })
+    expect(out.minWageEligible).toEqual({
+      total: 120000,
+      items: [{ label: '基本給', amount: 100000 }, { label: '住宅手当', amount: 20000 }],
+    })
+    expect(out.buckets['excluded'].total).toBe(5000)
+    expect(out.total).toBe(165000)
+  })
+})
+
+describe('computeOvertimePayAtRate (労基法37条、worker computeMinWageOvertimePay と同一ロジック)', () => {
+  it('月60h 以内は 1.25 倍', () => {
+    expect(computeOvertimePayAtRate(20 * 60, 0, 1000)).toBe(25000)
+  })
+
+  it('月60h 超過分は 1.5 倍に切り替わる', () => {
+    expect(computeOvertimePayAtRate(100 * 60, 0, 1000)).toBe(60 * 1250 + 40 * 1500) // 135,000
+  })
+
+  it('深夜分は 60h 判定と独立に常時 +0.25 倍を上乗せする', () => {
+    // 70h 全部が深夜: 時間外軸 60h×1.25 + 10h×1.5、深夜軸 70h×0.25
+    expect(computeOvertimePayAtRate(70 * 60, 70 * 60, 1000)).toBe(75000 + 15000 + 17500)
+  })
+
+  it('円未満は四捨五入する', () => {
+    expect(computeOvertimePayAtRate(90, 0, 1401)).toBe(Math.round(1.5 * 1401 * 1.25)) // 2,627
   })
 })
 
@@ -501,6 +560,31 @@ describe('compareSalaryMonth', () => {
     expect(r.minWageOvertimeMinutes).toBe(90)
     expect(r.minWageOvertimePay).toBeNull()
     expect(r.diffCsvVsMinWageOvertime).toBeNull()
+  })
+
+  it('基礎単価(実績) と 残業(基礎単価) は最低賃金設定と独立に明細+法定内時間から出る (Refs #278)', () => {
+    const out = compareSalaryMonth(
+      [csvRow()], // 基本給 80000 (base) + 残業手当 30000 (overtime)
+      [reportRow('1239', '城田 秀幸', { statutoryMinutes: 160 * 60, overtimeMinutes: 20 * 60 })],
+      config,
+    )
+    const r = out.rows[0]!
+    expect(r.statutoryMinutes).toBe(160 * 60)
+    expect(r.baseRateActual).toBe(500) // 80000 ÷ 160h
+    expect(r.baseRateOvertimePay).toBe(12500) // 20h × 500 × 1.25
+    expect(r.diffCsvVsBaseRateOvertime).toBe(30000 - 12500)
+  })
+
+  it('法定内時間が 0 (v1 アーカイブ等) の行は 基礎単価(実績) 系が null (算出不可)', () => {
+    const out = compareSalaryMonth(
+      [csvRow()],
+      [reportRow('1239', '城田 秀幸', { overtimeMinutes: 20 * 60 })],
+      config,
+    )
+    const r = out.rows[0]!
+    expect(r.baseRateActual).toBeNull()
+    expect(r.baseRateOvertimePay).toBeNull()
+    expect(r.diffCsvVsBaseRateOvertime).toBeNull()
   })
 
   it('CSV 側の重複乗務員は後勝ち + 警告する', () => {

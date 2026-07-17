@@ -573,9 +573,13 @@ const salaryConfigLoaded = ref(false)
 const savingSalaryConfig = ref(false)
 const salaryConfigMessage = ref('')
 
-const SALARY_CATEGORY_OPTIONS = [
-  { label: '基本給として計算', value: 'base' },
-  { label: '残業として計算', value: 'overtime' },
+/** 支給項目の 5 区分 (割増基礎 (労基法37条) × 最低賃金 (4条3項) の 2 軸、Refs #278)。 */
+const SALARY_CATEGORY_OPTIONS: Array<{ label: string, value: SalaryItemCategory }> = [
+  { label: '基本給・算入手当 (割増基礎○ / 最低賃金○)', value: 'base' },
+  { label: '割増 (残業・深夜・休日出勤)', value: 'overtime' },
+  { label: '最低賃金のみ算入 (住宅・別居・子女教育)', value: 'minwage-only' },
+  { label: '割増基礎のみ算入 (精皆勤)', value: 'premium-base-only' },
+  { label: '両方除外 (通勤・家族・臨時・賞与)', value: 'excluded' },
 ]
 
 async function loadSalaryItemConfig() {
@@ -815,6 +819,11 @@ const salaryComparison = computed<SalaryComparison | null>(() => {
 function selectSalaryMonth(ym: string) {
   selectedYear.value = parseInt(ym.slice(0, 4), 10)
   selectedMonthNo.value = parseInt(ym.slice(5, 7), 10)
+}
+
+/** 基礎単価(実績) の表示 (円/h、整数丸め。null は "-")。 */
+function fmtRatePerHour(v: number | null): string {
+  return v == null ? '-' : Math.round(v).toLocaleString('ja-JP')
 }
 
 /** 差額表示 (0 は "±0"、正負は符号つき)。 */
@@ -1668,8 +1677,11 @@ watch([activeTab, month, session], () => {
                       <th class="px-2 py-2 text-right">残業計(給与)</th>
                       <th class="px-2 py-2 text-right" title="給与明細の残業単価 (時給) × システム計算の時間外+時間外深夜">残業(計算)</th>
                       <th class="px-2 py-2 text-right">差</th>
-                      <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="最低賃金を基礎額とみなした割増残業代の理論値 (単価マスタは使わず、デジタコ拘束時間データ×最低賃金で算出)">残業(最低賃金)</th>
-                      <th class="px-2 py-2 text-right" title="残業計(給与) − 残業(最低賃金)。負なら実際に支払われた残業代が最低賃金換算の理論値を下回っている">差</th>
+                      <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="割増基礎に算入する支給項目の合計 ÷ デジタコ法定内時間 (円/h)。単価マスタの時給との検算にもなる">基礎単価(実績)</th>
+                      <th class="px-2 py-2 text-right" title="基礎単価(実績) を基礎額とした割増残業代の理論値 (労基法37条。月60時間までは1.25倍・超過分は1.5倍・深夜分は常時+0.25倍)">残業(基礎単価)</th>
+                      <th class="px-2 py-2 text-right" title="残業計(給与) − 残業(基礎単価)。負なら実際の基礎単価に対する法定割増 (37条) を下回っている — 主判定">差</th>
+                      <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="最低賃金を基礎額とみなした割増残業代の理論値 (単価マスタは使わず、デジタコ拘束時間データ×最低賃金で算出)。絶対下限として併記">残業(最低賃金)</th>
+                      <th class="px-2 py-2 text-right" title="残業計(給与) − 残業(最低賃金)。負なら実際に支払われた残業代が最低賃金換算の絶対下限すら下回っている">差</th>
                       <th class="px-2 py-2 text-right">支給計(給与)</th>
                       <th class="px-2 py-2 text-right">合計(計算)</th>
                       <th class="px-2 py-2 text-right">差</th>
@@ -1705,6 +1717,23 @@ watch([activeTab, month, session], () => {
                       <td class="px-2 py-1.5 text-right" :class="(row.diffOvertime ?? 0) !== 0 ? 'text-red-600 font-medium' : 'text-gray-400'">
                         {{ fmtDiff(row.diffOvertime) }}
                       </td>
+                      <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700" :title="`割増基礎算入計 ${fmtYen(row.csvPremiumBase)}円 (${fmtItemsTitle(row.csvPremiumBaseItems)}) ÷ 法定内 ${fmtMinutes(row.statutoryMinutes)}`">
+                        <template v-if="row.baseRateActual !== null">
+                          <div>{{ fmtRatePerHour(row.baseRateActual) }}</div>
+                          <div class="text-xs text-gray-500">÷ {{ fmtMinutes(row.statutoryMinutes) }}</div>
+                        </template>
+                        <span v-else class="text-xs text-gray-500">算出不可</span>
+                      </td>
+                      <td class="px-2 py-1.5 text-right">
+                        <template v-if="row.baseRateOvertimePay !== null">
+                          <div>{{ fmtYen(row.baseRateOvertimePay) }}</div>
+                          <div class="text-xs text-gray-500">{{ fmtMinutes(row.minWageOvertimeMinutes) }}</div>
+                        </template>
+                        <span v-else class="text-xs text-gray-500">算出不可</span>
+                      </td>
+                      <td class="px-2 py-1.5 text-right" :class="(row.diffCsvVsBaseRateOvertime ?? 0) < 0 ? 'text-red-600 font-bold' : 'text-gray-400'">
+                        {{ fmtDiff(row.diffCsvVsBaseRateOvertime) }}
+                      </td>
                       <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700">
                         <template v-if="row.minWageOvertimePay !== null">
                           <div>{{ fmtYen(row.minWageOvertimePay) }}</div>
@@ -1732,8 +1761,11 @@ watch([activeTab, month, session], () => {
                 残業単価 (時給) × システム時間外。給与明細に単価が無い行は「単価なし」(独自の按分計算はしません)。
                 基本給計/残業計にカーソルを合わせると支給項目の内訳を表示します。
                 * は 支給合計額 列と支給項目の合算が一致しない行。<br>
-                残業(最低賃金) = 最低賃金を基礎額とみなした割増残業代の理論値 (時間外+時間外深夜+週40超過、月60時間までは1.25倍・超過分は1.5倍・深夜分は常時+0.25倍)。
-                <b>これは実際に支払われた「残業計(給与)」と直接比較する、支払い実績の最低賃金チェックです</b> — 単価マスタ設定の妥当性チェックである「最低賃金チェック」タブとは異なります。
+                基礎単価(実績) = 割増基礎に算入する支給項目 (支給項目区分タブで「割増基礎○」の区分) の合計 ÷ デジタコ法定内時間。
+                残業(基礎単価) = 基礎単価(実績) を基礎額とした割増残業代の理論値 (時間外+時間外深夜+週40超過、月60時間までは1.25倍・超過分は1.5倍・深夜分は常時+0.25倍)。
+                <b>「残業計(給与) − 残業(基礎単価)」が労基法37条の主判定です</b> — 負なら実際の基礎単価に対する法定割増を下回っています。
+                残業(最低賃金) は同じ計算を最低賃金を基礎額として行った絶対下限の併記で、単価マスタ設定の妥当性チェックである「最低賃金チェック」タブとは異なります。<br>
+                注: 週40超過分は summary v2 の日別データ (days) からの自前計算のため、旧形式 (v1、days なし) のアーカイブ月は週40超過が計算できません — 対象月をアーカイブタブで再計算 (resummarize) してから使ってください。
               </p>
               <p v-if="salaryComparison.reportOnly.length" class="text-xs text-amber-600 dark:text-amber-400 mt-1">
                 システム計算のみ (給与明細なし): {{ salaryComparison.reportOnly.map(d => `${d.driverCd} ${d.driverName}`).join(', ') }}
@@ -1801,7 +1833,7 @@ watch([activeTab, month, session], () => {
           <UCard>
             <template #header>
               <div class="flex flex-wrap items-center gap-3">
-                <span class="font-semibold">支給項目の区分 (基本給 / 残業)</span>
+                <span class="font-semibold">支給項目の区分 (割増基礎 × 最低賃金の 2 軸、5 区分)</span>
                 <span class="text-xs text-gray-500">この区分設定だけがサーバーに保存されます</span>
                 <div class="flex-1" />
                 <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" :loading="!salaryConfigLoaded" @click="loadSalaryItemConfig" />
@@ -1826,11 +1858,17 @@ watch([activeTab, month, session], () => {
                   :model-value="row.category"
                   :items="SALARY_CATEGORY_OPTIONS"
                   size="xs"
-                  class="w-40 shrink-0"
+                  class="w-72 shrink-0"
                   @update:model-value="(v: unknown) => setSalaryItemCategory(row.label, v as SalaryItemCategory)"
                 />
               </div>
             </div>
+            <p class="text-xs text-gray-500 mt-3">
+              区分は法令上の 2 軸の組合せです:
+              <b>割増賃金の基礎</b> (労基法37条5項・施行規則21条 — 除外できるのは家族・通勤・別居・子女教育・住宅手当、臨時の賃金、1ヶ月超ごとの賃金の限定列挙 7 種のみ。職務手当・無事故手当等は算入必須) と
+              <b>最低賃金の対象賃金</b> (最低賃金法4条3項 — 臨時・賞与・割増賃金・精皆勤/通勤/家族手当を除外)。
+              「割増基礎○」の項目の合計が給与比較タブの 基礎単価(実績) の分子、「最低賃金○」の項目の合計が最低賃金の法定チェックの分子になります (Refs #278)。
+            </p>
           </UCard>
         </template>
 
