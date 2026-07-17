@@ -37,8 +37,9 @@ const LEGACY_LAST_ACCOUNT_STORAGE_KEYS = [
 
 /** UTF-8 文字列を base64url (padding 無し) に encode する。relay worker 側の
  * `workers/dtako-scraper-relay/src/theearth-session.ts` の encodeUserB64 と
- * 同一形式 (ヘッダに日本語を載せるため)。 */
-function b64urlUtf8(value: string): string {
+ * 同一形式 (ヘッダに日本語を載せるため)。restraint-wage の閲覧モード (Refs #272)
+ * が viewer ヘッダの組み立てにも使うため export。 */
+export function b64urlUtf8(value: string): string {
   const bytes = new TextEncoder().encode(value)
   let bin = ''
   for (const b of bytes) bin += String.fromCharCode(b)

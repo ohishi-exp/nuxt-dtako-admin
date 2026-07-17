@@ -61,6 +61,14 @@ export function initScraperRelay(url: string) {
   scraperRelayUrl = url.replace(/\/$/, '')
 }
 
+/** 現在の auth-worker access token (未初期化/未ログインは null)。
+ * restraint-wage の閲覧モード (Refs #272) が viewer ヘッダの Authorization に使う。
+ * createAuthFetch を通らない素の $fetch 呼び出し向けなので、401 時の自動
+ * refresh は無い — 呼び出し側は 401 をエラー表示で扱う。 */
+export function currentAccessToken(): string | null {
+  return getAccessToken?.() ?? null
+}
+
 /** フィルタを URLSearchParams に変換 */
 function toParams(filter: object): string {
   const params = new URLSearchParams()

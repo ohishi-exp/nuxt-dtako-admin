@@ -31,7 +31,52 @@ import type {
   SalaryItemConfig,
 } from '~/utils/salary-compare'
 
-const { session, authHeaders, restoreSession, showLoginPanel, expireSession } = useRestraintSession()
+const {
+  session: theearthSession,
+  authHeaders: theearthHeaders,
+  restoreSession,
+  expireSession: theearthExpireSession,
+  lastAccount,
+} = useRestraintSession()
+
+// 閲覧モード (Refs #272): このページの全タブは R2-only (worker は theearth に
+// 触らない) ので、theearth ログインが無くても auth-worker JWT + 会社ID の
+// viewer 経路で読める (worker 側 PR #273)。theearth セッションが有効なら従来
+// どおりそのヘッダを使う (後方互換)。会社ID は theearth ログイン履歴 or 手入力。
+const VIEWER_COMP_STORAGE_KEY = 'restraint-viewer-comp'
+const viewerComp = ref('')
+const viewerCompInput = ref('')
+
+const session = computed<{ compId: string, userName: string } | null>(() =>
+  theearthSession.value
+  ?? (viewerComp.value ? { compId: viewerComp.value, userName: '閲覧' } : null))
+
+function authHeaders(): Record<string, string> {
+  if (theearthSession.value) return theearthHeaders()
+  const token = currentAccessToken()
+  return {
+    'X-Theearth-Comp-Id': viewerComp.value,
+    'X-Theearth-User-B64': b64urlUtf8('viewer'),
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  }
+}
+
+/** 401 の扱い: theearth セッション時は従来の失効フロー、viewer 時は
+ * 「comp が不許可 (DTAKO_ACCOUNTS 未登録) or JWT 失効」なのでエラー表示のみ。 */
+function expireSession(message: string) {
+  if (theearthSession.value) {
+    theearthExpireSession(message)
+    return
+  }
+  pageError.value = `閲覧できません: ${message} (会社IDの許可設定 または 再ログインを確認してください)`
+}
+
+function startViewer() {
+  const comp = viewerCompInput.value.trim()
+  if (!comp) return
+  viewerComp.value = comp
+  if (import.meta.client) localStorage.setItem(VIEWER_COMP_STORAGE_KEY, comp)
+}
 
 const TABS = [
   { key: 'archive', label: 'アーカイブ' },
@@ -102,8 +147,13 @@ onMounted(() => {
   }
   restoreSalaryImports()
   restoreSession()
-  if (!session.value) showLoginPanel.value = true
-  else loadArchiveMonths()
+  // theearth 未ログインなら閲覧モードを準備: 前回の閲覧 comp → theearth ログイン
+  // 履歴の comp の順で prefill。どちらも無ければ会社ID入力パネルが出る。
+  if (!theearthSession.value) {
+    viewerComp.value = localStorage.getItem(VIEWER_COMP_STORAGE_KEY) || lastAccount().compId
+    viewerCompInput.value = viewerComp.value
+  }
+  if (session.value) loadArchiveMonths()
 })
 
 watch(activeTab, (tab) => {
@@ -1115,6 +1165,22 @@ watch([activeTab, month, session], () => {
         <p v-if="pageError" class="text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
           {{ pageError }}
         </p>
+
+        <!-- 閲覧モードの会社ID選択 (Refs #272): このページは保存済みデータ (R2) の
+             閲覧・設定のみで theearth ログイン不要。 -->
+        <UCard v-if="!session" class="max-w-md">
+          <template #header>
+            <span class="font-medium">閲覧する会社IDを指定</span>
+          </template>
+          <div class="flex items-center gap-2">
+            <UInput v-model="viewerCompInput" placeholder="会社ID (例: 1000)" class="w-40" @keyup.enter="startViewer" />
+            <UButton label="閲覧開始" :disabled="!viewerCompInput.trim()" @click="startViewer" />
+          </div>
+          <p class="text-xs text-gray-500 mt-2">
+            このページは取得済みアーカイブ・単価マスタ・給与比較の閲覧/設定のみで、theearth ログインは不要です
+            (アーカイブの新規取得は /restraint-fetch で行います)。
+          </p>
+        </UCard>
 
         <!-- ⓪ アーカイブ閲覧 -->
         <template v-if="activeTab === 'archive'">
