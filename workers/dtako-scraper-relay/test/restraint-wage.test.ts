@@ -8,6 +8,7 @@ import {
   emptyCategoryMinutes,
   minWageForBranch,
   normalizeMinWageMaster,
+  normalizeSalaryCdMap,
   normalizeSalaryItemConfig,
   normalizeWageConfig,
   normalizeWageMaster,
@@ -177,6 +178,43 @@ describe('normalizeSalaryItemConfig', () => {
   it('base / overtime 以外の区分を拒否する', () => {
     expect(() => normalizeSalaryItemConfig({ items: { 基本給: 'bonus' } })).toThrow('"base" | "overtime"')
     expect(() => normalizeSalaryItemConfig({ items: { 基本給: 1 } })).toThrow(WageMasterError)
+  })
+})
+
+describe('normalizeSalaryCdMap', () => {
+  it('正常な突合マスタを受け付け、キーを NFKC + trim 正規化する', () => {
+    const out = normalizeSalaryCdMap({
+      entries: { '1427|中村一由': '1412', ' １４２７|柳井亮祐 ': '1587' },
+    })
+    expect(out).toEqual({
+      entries: { '1427|中村一由': '1412', '1427|柳井亮祐': '1587' },
+    })
+  })
+
+  it('空の entries を受け付ける', () => {
+    expect(normalizeSalaryCdMap({ entries: {} })).toEqual({ entries: {} })
+  })
+
+  it('オブジェクトでない入力を拒否する', () => {
+    expect(() => normalizeSalaryCdMap(null)).toThrow(WageMasterError)
+    expect(() => normalizeSalaryCdMap([])).toThrow(WageMasterError)
+    expect(() => normalizeSalaryCdMap('x')).toThrow(WageMasterError)
+  })
+
+  it('entries が無い / オブジェクトでない入力を拒否する', () => {
+    expect(() => normalizeSalaryCdMap({})).toThrow(WageMasterError)
+    expect(() => normalizeSalaryCdMap({ entries: [] })).toThrow(WageMasterError)
+    expect(() => normalizeSalaryCdMap({ entries: 3 })).toThrow(WageMasterError)
+  })
+
+  it('"給与コード|氏名" 形式でないキーを拒否する', () => {
+    expect(() => normalizeSalaryCdMap({ entries: { '中村一由': '1412' } })).toThrow('給与コード|氏名')
+    expect(() => normalizeSalaryCdMap({ entries: { '1427|': '1412' } })).toThrow('給与コード|氏名')
+  })
+
+  it('乗務員CDが数字でない値を拒否する', () => {
+    expect(() => normalizeSalaryCdMap({ entries: { '1427|中村一由': 'abc' } })).toThrow('乗務員CD')
+    expect(() => normalizeSalaryCdMap({ entries: { '1427|中村一由': 1412 } })).toThrow(WageMasterError)
   })
 })
 

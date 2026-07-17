@@ -254,11 +254,68 @@ export function mergeParsedSalaryCsv(parsedList: ParsedSalaryCsv[]): ParsedSalar
 }
 
 // ---------------------------------------------------------------------------
+// 社員コード突合マスタ (給与コード|氏名 → 乗務員CD、Refs #253)
+// 給与システムの社員コードは会社毎に別体系で乗務員CDと一致しないことがある。
+// ---------------------------------------------------------------------------
+
+/** worker 側 normalizeSalaryCdMap と同型。key は salaryCdMapKey の形式。 */
+export interface SalaryCdMap { entries: Record<string, string> }
+
+/** 氏名の突合用正規化 (NFKC + 空白全除去)。 */
+export function normalizeNameKey(name: string): string {
+  return name.normalize('NFKC').replace(/\s+/g, '')
+}
+
+/** 突合マスタのキー: "給与コード(前ゼロ除去)|氏名(空白除去)"。会社毎にコード体系が
+ * 分かれて衝突しうるため、コード単独ではなく氏名も含めて引き当てる。 */
+export function salaryCdMapKey(payrollCd: string, name: string): string {
+  return `${String(Number(payrollCd))}|${normalizeNameKey(name)}`
+}
+
+/** CSV 行の突合キー (マスタにあれば引き当てた乗務員CD、無ければ給与コードをそのまま)。 */
+export function resolveCdKey(row: SalaryCsvRow, cdMap: SalaryCdMap): string {
+  const mapped = cdMap.entries[salaryCdMapKey(row.driverCd, row.driverName)]
+  return mapped !== undefined ? String(Number(mapped)) : row.cdKey
+}
+
+/**
+ * 乗務員CDで突合できなかった CSV 行に対し、氏名の完全一致 (両側で一意) で
+ * 乗務員CDを自動提案する。戻り値は salary-cd-map の entries に merge できる形。
+ */
+export function suggestCdMapEntries(
+  csvRows: SalaryCsvRow[],
+  reportRows: WageReportRow[],
+  cdMap: SalaryCdMap,
+): Record<string, string> {
+  const reportCds = new Set(reportRows.map(r => String(Number(r.summary.driverCd))))
+  // 氏名 → 乗務員CD 群 (一意な氏名だけ提案に使う)
+  const byName = new Map<string, string[]>()
+  for (const r of reportRows) {
+    const key = normalizeNameKey(r.summary.driverName)
+    byName.set(key, [...(byName.get(key) ?? []), r.summary.driverCd])
+  }
+  const out: Record<string, string> = {}
+  const seen = new Set<string>()
+  for (const row of csvRows) {
+    const mapKey = salaryCdMapKey(row.driverCd, row.driverName)
+    if (seen.has(mapKey)) continue
+    seen.add(mapKey)
+    // 既にマスタ登録済み / コードがそのまま一致する行は提案不要
+    if (cdMap.entries[mapKey] !== undefined || reportCds.has(row.cdKey)) continue
+    const candidates = byName.get(normalizeNameKey(row.driverName))
+    if (candidates && candidates.length === 1) out[mapKey] = candidates[0]!
+  }
+  return out
+}
+
+// ---------------------------------------------------------------------------
 // wage-report との突合
 // ---------------------------------------------------------------------------
 
 export interface SalaryComparisonRow {
   driverCd: string
+  /** 突合マスタで引き当てた乗務員CD (マスタ経由の時だけ非 null)。 */
+  mappedDriverCd: string | null
   driverName: string
   /** CSV 側: 基本給扱い項目の合計 / 残業扱い項目の合計 / 全支給項目の合計。 */
   csvBase: number
@@ -298,20 +355,23 @@ export function sumByCategory(row: SalaryCsvRow, config: SalaryItemConfig): { ba
 
 /**
  * 対象月の CSV 行と wage-report を乗務員CD (数値同値) で突合する。
- * 同一乗務員の行が重複していたら後勝ち + 警告。
+ * 給与コードが乗務員CDと別体系の乗務員は cdMap (給与コード|氏名 → 乗務員CD) で
+ * 引き当てる。同一乗務員の行が重複していたら後勝ち + 警告。
  */
 export function compareSalaryMonth(
   csvRows: SalaryCsvRow[],
   reportRows: WageReportRow[],
   config: SalaryItemConfig,
+  cdMap: SalaryCdMap = { entries: {} },
 ): SalaryComparison {
   const warnings: string[] = []
   const byCd = new Map<string, SalaryCsvRow>()
   for (const row of csvRows) {
-    if (byCd.has(row.cdKey)) {
+    const key = resolveCdKey(row, cdMap)
+    if (byCd.has(key)) {
       warnings.push(`乗務員 ${row.driverCd} の行が重複しています (後の行を採用)`)
     }
-    byCd.set(row.cdKey, row)
+    byCd.set(key, row)
   }
 
   const rows: SalaryComparisonRow[] = []
@@ -332,6 +392,7 @@ export function compareSalaryMonth(
     const sysOvertime = sysBase !== null && sysTotal !== null ? sysTotal - sysBase : null
     rows.push({
       driverCd: csv.driverCd,
+      mappedDriverCd: csv.cdKey === cdKey ? null : report.summary.driverCd,
       driverName: csv.driverName,
       csvBase: base,
       csvOvertime: overtime,
@@ -347,8 +408,8 @@ export function compareSalaryMonth(
   }
 
   const csvOnly: SalaryComparison['csvOnly'] = []
-  for (const row of byCd.values()) {
-    if (!matched.has(row.cdKey)) {
+  for (const [key, row] of byCd.entries()) {
+    if (!matched.has(key)) {
       csvOnly.push({ driverCd: row.driverCd, driverName: row.driverName })
     }
   }
