@@ -579,6 +579,75 @@ export async function addFuelRow(
   return { fuelRows, masters: parseExpenseMasters(mastersHtml) };
 }
 
+export interface DeleteFuelRowParams {
+  opeNo: string;
+  startOpe: string;
+  ctrlIndex: number;
+}
+
+export interface DeleteFuelRowResult {
+  fuelRows: FuelRow[];
+}
+
+/** POST 相当: 給油行 1 件を削除する (`lstFuel_btnDeleteButton_<ctrlIndex>` postback)。
+ *
+ * ボタン id は lstWork (F-DES1013) の行ボタン `btnDeleteButton_<N>` (cdp-pair 実機
+ * 確定、SKILL.md「作業行 lstWork の実構造 (lstFuel と同型)」) からの同型推測で、
+ * **lstFuel 側は実機未検証** (Refs #280)。実在しなければ loud fail する。
+ *
+ * postback は save/add と同じ同期 form POST (lstFuel は sync で insert が永続化する
+ * 実績あり)。ただし F-DES1013 で「HTTP 200 でも DB に書かれない無音 no-op」の前例が
+ * あるため、削除後は行数が 1 減ったことを必ず検証する: postback 応答で減っていなければ
+ * 再 GET で読み直し、それでも減っていなければ throw する (黙って成功扱いしない)。 */
+export async function deleteFuelRow(
+  jar: CookieJar,
+  params: DeleteFuelRowParams,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<DeleteFuelRowResult> {
+  validateOpeNo(params.opeNo);
+  validateStartOpe(params.startOpe);
+  const url = buildOperationExpenseUrl(params.opeNo, params.startOpe);
+  const pageHtml = await fetchEditPageHtml(jar, url, "経費入力ページ", fetchImpl, timeoutMs);
+
+  const rowsBefore = parseFuelRows(pageHtml);
+  if (!rowsBefore.some((r) => r.ctrlIndex === params.ctrlIndex)) {
+    throw new ReportParamError(`給油行 (ctrlIndex=${params.ctrlIndex}) が見つかりません`);
+  }
+
+  const deleteButtonId = fuelRowId(params.ctrlIndex, "btnDeleteButton");
+  const deleteButton = findFormFieldById(pageHtml, deleteButtonId);
+  if (!deleteButton) {
+    throw new TheearthClientError(
+      `給油行の削除ボタン (${deleteButtonId}) が見つかりません — theearth-np のページ仕様変更、` +
+        "または lstFuel には行削除ボタンが無い可能性があります",
+    );
+  }
+
+  // body は add と同じく hidden + 全 lstFuel テキスト入力 (欠落フィールドを code-behind が
+  // 空のまま int.Parse して 500 になる FuelCheck の前例 (Refs #199) を踏まないため)。
+  const body = extractLstFuelTextInputs(pageHtml);
+  const postHtml = await postButton(
+    jar, url, pageHtml, deleteButton.name, deleteButton.value, fetchImpl, timeoutMs, body,
+  );
+  assertNoOtherEditConflict(postHtml, "給油行の削除");
+
+  const expectedCount = rowsBefore.length - 1;
+  let fuelRows = parseFuelRows(postHtml);
+  if (fuelRows.length !== expectedCount) {
+    // 削除応答が一覧を再描画しないケースに備えて再 GET で読み直す。
+    const rereadHtml = await fetchEditPageHtml(jar, url, "経費入力ページ", fetchImpl, timeoutMs);
+    fuelRows = parseFuelRows(rereadHtml);
+    if (fuelRows.length !== expectedCount) {
+      throw new TheearthClientError(
+        `給油行の削除後も行数が減っていません (${rowsBefore.length}件のまま) — ` +
+          "theearth 側で削除が受け付けられなかった可能性があります (無音 no-op、Refs #280)",
+      );
+    }
+  }
+  return { fuelRows };
+}
+
 export interface RecalculateExpenseResult {
   /** 再集計成功後に「システム連動開始」ボタンが enable されたか
    * (SKILL.md: 再集計成功の副次確認シグナル)。 */

@@ -3,6 +3,7 @@ import {
   downloadEditedZip,
   downloadOperationCsvZip,
   addFuelRow,
+  deleteFuelRow,
   extractLstFuelTextInputs,
   findEnclosingUpdatePanelId,
   getExpenseForm,
@@ -67,6 +68,7 @@ function fuelDisplayRowHtml(ctrlIndex: number, v: {
   dateTime?: string;
   quantity?: string;
   editButton?: boolean;
+  deleteButton?: boolean;
 } = {}): string {
   // 表示行 span・編集ボタンとも実機準拠の `lstFuel_<suffix>_<N>` 形式。
   const id = (suffix: string) => `lstFuel_${suffix}_${ctrlIndex}`;
@@ -75,6 +77,11 @@ function fuelDisplayRowHtml(ctrlIndex: number, v: {
       v.editButton === false
         ? "" // 編集ボタン自体を欠落させる (findFormFieldById が null を返すケースの fixture)
         : `<input type="submit" id="${id("btnEditButton")}" name="lstFuel$ctrl${ctrlIndex}$btnEditButton" value="" />`
+    }
+    ${
+      v.deleteButton === false
+        ? "" // 削除ボタン欠落 (lstFuel に削除ボタンが無い可能性の fixture、Refs #280)
+        : `<input type="submit" id="${id("btnDeleteButton")}" name="lstFuel$ctrl${ctrlIndex}$btnDeleteButton" value="" />`
     }
     <span id="${id("lblSupplyCategory")}">${v.category ?? "1"}</span>
     ${
@@ -2795,6 +2802,85 @@ describe("addFuelRow", () => {
     await expect(addFuelRow(jar2, baseParams, sequenceFetch([html(LOGIN_REDIRECT_HTML)]))).rejects.toThrow(
       VenusSessionExpiredError,
     );
+  });
+});
+
+describe("deleteFuelRow", () => {
+  const baseParams = { opeNo: OPE_NO, startOpe: START_OPE, ctrlIndex: 0 };
+
+  function fuelPage(rows: number, opts: { deleteButton?: boolean } = {}): string {
+    const rowHtml = Array.from({ length: rows }, (_, i) => fuelDisplayRowHtml(i, { deleteButton: opts.deleteButton })).join("\n");
+    return `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-FUEL" />
+      ${rowHtml}
+      ${fuelTemplateRowHtml(rows)}
+    </form></body></html>`;
+  }
+
+  it("posts btnDeleteButton with the lstFuel text inputs and returns the refreshed rows", async () => {
+    const bodies: string[] = [];
+    const fetchImpl = recordingFetch([html(fuelPage(2)), html(fuelPage(1))], bodies);
+    const jar = createCookieJar();
+    const result = await deleteFuelRow(jar, baseParams, fetchImpl);
+    expect(result.fuelRows).toHaveLength(1);
+    const sent = new URLSearchParams(bodies[1]);
+    expect(sent.get("lstFuel$ctrl0$btnDeleteButton")).toBe("");
+    expect(sent.get("__VIEWSTATE")).toBe("VS-FUEL");
+    // テンプレート行 (itxt*) も body に含む (欠落フィールドの FuelCheck 500 回避、Refs #199)
+    expect(sent.get("lstFuel$ctrl2$itxtQuantuty")).toBe("");
+  });
+
+  it("re-reads the page when the delete response doesn't re-render, and fails loudly when the count didn't decrease", async () => {
+    // 再 GET で減っているケース → 成功
+    const jar1 = createCookieJar();
+    const result = await deleteFuelRow(
+      jar1,
+      baseParams,
+      sequenceFetch([html(fuelPage(2)), html(fuelPage(2)), html(fuelPage(1))]),
+    );
+    expect(result.fuelRows).toHaveLength(1);
+    // 再 GET でも減っていないケース → 無音 no-op として loud fail
+    const jar2 = createCookieJar();
+    await expect(
+      deleteFuelRow(jar2, baseParams, sequenceFetch([html(fuelPage(2)), html(fuelPage(2)), html(fuelPage(2))])),
+    ).rejects.toThrow(/行数が減っていません/);
+  });
+
+  it("rejects malformed params and an unknown ctrlIndex", async () => {
+    const jar = createCookieJar();
+    await expect(deleteFuelRow(jar, { ...baseParams, opeNo: "x" }, sequenceFetch([]))).rejects.toThrow(ReportParamError);
+    await expect(deleteFuelRow(jar, { ...baseParams, startOpe: "x" }, sequenceFetch([]))).rejects.toThrow(ReportParamError);
+    await expect(
+      deleteFuelRow(jar, { ...baseParams, ctrlIndex: 5 }, sequenceFetch([html(fuelPage(2))])),
+    ).rejects.toThrow(/ctrlIndex=5/);
+  });
+
+  it("throws when the delete button is missing", async () => {
+    const jar = createCookieJar();
+    await expect(
+      deleteFuelRow(jar, baseParams, sequenceFetch([html(fuelPage(2, { deleteButton: false }))])),
+    ).rejects.toThrow(/btnDeleteButton/);
+  });
+
+  it("throws on the other-user-editing conflict message", async () => {
+    const conflictHtml = "<html><body>他ユーザー編集中のため処理を中止しました。</body></html>";
+    const jar = createCookieJar();
+    await expect(
+      deleteFuelRow(jar, baseParams, sequenceFetch([html(fuelPage(2)), html(conflictHtml)])),
+    ).rejects.toThrow(/他ユーザー/);
+  });
+
+  it("throws on non-ok GET / login redirect / non-ok POST", async () => {
+    const jar1 = createCookieJar();
+    await expect(deleteFuelRow(jar1, baseParams, sequenceFetch([status(500)]))).rejects.toThrow(TheearthClientError);
+    const jar2 = createCookieJar();
+    await expect(deleteFuelRow(jar2, baseParams, sequenceFetch([html(LOGIN_REDIRECT_HTML)]))).rejects.toThrow(
+      VenusSessionExpiredError,
+    );
+    const jar3 = createCookieJar();
+    await expect(
+      deleteFuelRow(jar3, baseParams, sequenceFetch([html(fuelPage(2)), status(500)])),
+    ).rejects.toThrow(TheearthClientError);
   });
 });
 

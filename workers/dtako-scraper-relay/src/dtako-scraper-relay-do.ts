@@ -118,6 +118,7 @@ import {
 } from "./theearth-restraint-client";
 import {
   addFuelRow,
+  deleteFuelRow,
   downloadEditedZip,
   downloadOperationCsvZip,
   getExpenseForm,
@@ -136,6 +137,7 @@ import {
   verifyReadNoDescending,
   withVehicleNarrow,
   type AddFuelRowParams,
+  type DeleteFuelRowParams,
   type SaveFuelRowParams,
   type SaveWorkRowParams,
 } from "./theearth-report-client";
@@ -1460,6 +1462,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/daily-report-api/expense/add" && request.method === "POST") {
       return this.handleReportExpenseAdd(record!, request);
     }
+    if (url.pathname === "/daily-report-api/expense/delete" && request.method === "POST") {
+      return this.handleReportExpenseDelete(record!, request);
+    }
     if (url.pathname === "/daily-report-api/expense/recalculate" && request.method === "POST") {
       return this.handleReportExpenseRecalculate(record!, request);
     }
@@ -2442,6 +2447,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return dvrJsonError(400, "JSON body が必要です");
     }
     return this.callReportAction(record, "給油行の追加", (jar) => addFuelRow(jar, body));
+  }
+
+  /** POST /daily-report-api/expense/delete — `lstFuel_btnDeleteButton_<N>` postback で
+   * 給油行 1 件を削除する (body は DeleteFuelRowParams、Refs #280)。 */
+  private async handleReportExpenseDelete(record: TheearthSessionRecord, request: Request): Promise<Response> {
+    let body: DeleteFuelRowParams;
+    try {
+      body = (await request.json()) as DeleteFuelRowParams;
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    return this.callReportAction(record, "給油行の削除", (jar) => deleteFuelRow(jar, body));
   }
 
   /** POST /daily-report-api/expense/recalculate — `btnScore` postback で評価点を
