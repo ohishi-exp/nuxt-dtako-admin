@@ -1111,6 +1111,8 @@ watch([activeTab, month, session], () => {
   if (!session.value || !month.value) return
   if (activeTab.value === 'monthly' || activeTab.value === 'minwage') {
     if (!report.value || report.value.month !== month.value) loadWageReport()
+    // 最低賃金 (法定下限) の設定カードは minwage タブに同居 (Refs #268 PR-E)
+    if (activeTab.value === 'minwage' && !minWageMasterLoaded.value) loadMinWageMaster()
   }
   else if (activeTab.value === 'salary') {
     if (!report.value || report.value.month !== month.value) loadWageReport()
@@ -1125,7 +1127,6 @@ watch([activeTab, month, session], () => {
   }
   else if (activeTab.value === 'master') {
     if (Object.keys(master.value.drivers).length === 0) loadMaster()
-    if (!minWageMasterLoaded.value) loadMinWageMaster()
   }
 }, { immediate: false })
 </script>
@@ -1409,7 +1410,7 @@ watch([activeTab, month, session], () => {
                     <th class="px-2 py-2">乗務員CD</th>
                     <th class="px-2 py-2">氏名</th>
                     <th class="px-2 py-2 text-right">実働</th>
-                    <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="法定時間内賃金 (深夜・残業等の割増区分を含まない基本部分)。「給与比較」タブの基本給(計算)と同じ値">基本給(法定内)<br><span class="font-normal text-xs">(単価マスタ換算 / 最低賃金換算 / 差)</span></th>
+                    <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="法定時間内賃金 (深夜・残業等の割増区分を含まない基本部分)。対象時間 = 実働 − 時間外 − 時間外深夜。「給与比較」タブの基本給(計算)と同じ値">基本給(法定内)<br><span class="font-normal text-xs">(対象時間 / 単価マスタ換算 / 最低賃金換算 / 差)</span></th>
                     <th class="px-2 py-2 text-right" title="残業ではない通常勤務中の深夜加算分 (0.25倍、基本給とは別枠の上乗せ)">深夜(通常)<br><span class="font-normal text-xs">(単価マスタ換算 / 最低賃金換算 / 差)</span></th>
                     <th class="px-2 py-2 text-right">時給<br><span class="font-normal text-xs">(単価マスタ換算 / 最低 / 差)</span></th>
                     <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700">残業時間<br><span class="font-normal text-xs">(時間外 / 週40超過)</span></th>
@@ -1433,6 +1434,7 @@ watch([activeTab, month, session], () => {
                     <td class="px-2 py-1.5">{{ row.summary.driverName }}</td>
                     <td class="px-2 py-1.5 text-right">{{ fmtMinutes(row.summary.workingMinutes) }}</td>
                     <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700">
+                      <div class="text-xs text-gray-500">{{ fmtMinutes(row.wage.minutes.statutory) }}</div>
                       <div class="font-medium">{{ fmtYen(row.wage.amounts?.statutory ?? null) }}</div>
                       <div class="text-xs text-gray-500">{{ fmtYen(row.wage.minWageStatutoryPay) }}</div>
                       <div class="text-xs" :class="(statutoryDiff(row.wage) ?? 0) < 0 ? 'text-red-600 font-bold' : 'text-gray-400'">
@@ -1502,16 +1504,69 @@ watch([activeTab, month, session], () => {
               <p class="text-xs text-amber-600 dark:text-amber-400 mb-2">
                 ⚠ この表は「単価マスタに登録した単価」と「最低賃金」を、デジタコの拘束時間データで換算して比較する<b>レート設定の事前チェック</b>です。
                 実際に支払われた給与 (振込額) を検証するものではありません。支払い済み金額と最低賃金の比較は「給与比較」タブをご利用ください。
+                単価は「単価マスタ」タブ、最低賃金 (法定下限、全社共通) は下の設定欄で管理します。
               </p>
               <p class="text-xs text-gray-500 mt-2">
                 基本給・深夜・時給・残業代・合計(計算)の各列は「単価マスタ換算 (太字) / 最低賃金換算 (グレー) / 差」の3段表示。差が負の場合は赤字 (最低賃金換算を下回っている)。
                 合計(計算) = 基本給+深夜+残業代合計 (全区分合計、「給与比較」タブの合計(計算)と同じ値)。<br>
                 換算時給 = 単価マスタ換算の時間給合計 ÷ 実働時間。単価未設定の乗務員は計算されません。<br>
+                基本給(法定内) の対象時間 = 実働 − 時間外 − 時間外深夜 (時間外の基礎1.0は残業代の1.25側にのみ含まれる)。
+                合計は「実働全体 × 基礎単価 + 割増分 (時間外0.25 / 時間外深夜0.5 / 深夜0.25)」と恒等で、基礎の2重計上はありません。<br>
                 残業は「残業 (時間外+週40超過)」と「深夜残業 (時間外深夜)」の2列に分けて表示。月60時間の時間外割増判定はこの2つを合算した時間で行うが、
                 60時間の枠は残業列から先に消費する扱いとして按分している (表示上の割り振りであり、順序を変えても2列合計の理論値は変わらない)。<br>
                 残業単価・深夜残業単価は「基礎時給 + 割増加算分」を合成した実額按分平均 (換算理論値 ÷ 時間) — 基礎部分も含む金額であることに注意 (深夜残業単価は基礎1.0倍を含むため、60時間超過が絡まない月は基礎単価×1.5 に一致する)。
               </p>
             </div>
+          </UCard>
+
+          <!-- 最低賃金 (全社共通 1 本の履歴、Refs #253):
+               乗務員の基本時間単価は会社が決めた支給額。最低賃金は国が定める
+               法定の下限で、それとは別に設定が必要 (都道府県別マッピングまではせず
+               全社共通の 1 履歴として扱う)。 -->
+          <UCard v-if="activeTab === 'minwage'">
+            <template #header>
+              <div class="flex flex-wrap items-center gap-3">
+                <span class="font-semibold">最低賃金</span>
+                <span class="text-xs text-gray-500">基本時間単価 (会社が決めた支給額) とは別に、法定の下限として全社共通で設定します</span>
+                <div class="flex-1" />
+                <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" :loading="!minWageMasterLoaded" @click="loadMinWageMaster" />
+                <UButton size="xs" icon="i-lucide-save" label="保存" :loading="savingMinWage" @click="saveMinWageMaster" />
+              </div>
+            </template>
+            <p v-if="minWageMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2 mb-3">
+              {{ minWageMessage }}
+            </p>
+            <div class="flex flex-wrap items-end gap-3 mb-3">
+              <UFormField label="最低賃金 (円)">
+                <UInput v-model="newMinWageRate" size="sm" type="number" class="w-28" />
+              </UFormField>
+              <UFormField label="適用開始日">
+                <UInput v-model="newMinWageFrom" size="sm" type="date" />
+              </UFormField>
+              <UButton size="sm" variant="soft" icon="i-lucide-plus" label="追加" :disabled="!newMinWageRate || !newMinWageFrom" @click="addMinWageRate" />
+            </div>
+            <table v-if="minWageRows.length" class="w-full text-sm">
+              <thead>
+                <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
+                  <th class="px-2 py-1.5">適用開始日</th>
+                  <th class="px-2 py-1.5 text-right">最低賃金 (円)</th>
+                  <th class="px-2 py-1.5 w-12" />
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(rate, i) in minWageRows" :key="rate.effectiveFrom" class="border-b border-gray-100 dark:border-gray-800">
+                  <td class="px-2 py-1.5">
+                    {{ rate.effectiveFrom }}
+                    <span v-if="i === 0" class="text-xs text-green-600 dark:text-green-400">(現行)</span>
+                  </td>
+                  <td class="px-2 py-1.5 text-right font-medium">{{ fmtYen(rate.rate) }}</td>
+                  <td class="px-2 py-1.5 text-right">
+                    <UButton size="xs" variant="ghost" icon="i-lucide-trash-2" @click="removeMinWageRate(rate.effectiveFrom)" />
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-else class="text-sm text-gray-500">未設定です。上の欄から追加してください。</p>
           </UCard>
         </template>
 
@@ -1876,55 +1931,9 @@ watch([activeTab, month, session], () => {
             </p>
           </UCard>
 
-          <!-- 最低賃金 (全社共通 1 本の履歴、Refs #253):
-               乗務員の基本時間単価は会社が決めた支給額。最低賃金は国が定める
-               法定の下限で、それとは別に設定が必要 (都道府県別マッピングまではせず
-               全社共通の 1 履歴として扱う)。 -->
-          <UCard>
-            <template #header>
-              <div class="flex flex-wrap items-center gap-3">
-                <span class="font-semibold">最低賃金</span>
-                <span class="text-xs text-gray-500">基本時間単価 (会社が決めた支給額) とは別に、法定の下限として全社共通で設定します</span>
-                <div class="flex-1" />
-                <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" :loading="!minWageMasterLoaded" @click="loadMinWageMaster" />
-                <UButton size="xs" icon="i-lucide-save" label="保存" :loading="savingMinWage" @click="saveMinWageMaster" />
-              </div>
-            </template>
-            <p v-if="minWageMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2 mb-3">
-              {{ minWageMessage }}
-            </p>
-            <div class="flex flex-wrap items-end gap-3 mb-3">
-              <UFormField label="最低賃金 (円)">
-                <UInput v-model="newMinWageRate" size="sm" type="number" class="w-28" />
-              </UFormField>
-              <UFormField label="適用開始日">
-                <UInput v-model="newMinWageFrom" size="sm" type="date" />
-              </UFormField>
-              <UButton size="sm" variant="soft" icon="i-lucide-plus" label="追加" :disabled="!newMinWageRate || !newMinWageFrom" @click="addMinWageRate" />
-            </div>
-            <table v-if="minWageRows.length" class="w-full text-sm">
-              <thead>
-                <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
-                  <th class="px-2 py-1.5">適用開始日</th>
-                  <th class="px-2 py-1.5 text-right">最低賃金 (円)</th>
-                  <th class="px-2 py-1.5 w-12" />
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="(rate, i) in minWageRows" :key="rate.effectiveFrom" class="border-b border-gray-100 dark:border-gray-800">
-                  <td class="px-2 py-1.5">
-                    {{ rate.effectiveFrom }}
-                    <span v-if="i === 0" class="text-xs text-green-600 dark:text-green-400">(現行)</span>
-                  </td>
-                  <td class="px-2 py-1.5 text-right font-medium">{{ fmtYen(rate.rate) }}</td>
-                  <td class="px-2 py-1.5 text-right">
-                    <UButton size="xs" variant="ghost" icon="i-lucide-trash-2" @click="removeMinWageRate(rate.effectiveFrom)" />
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-            <p v-else class="text-sm text-gray-500">未設定です。上の欄から追加してください。</p>
-          </UCard>
+          <p class="text-xs text-gray-500">
+            最低賃金 (法定下限、全社共通) の設定は「最低賃金チェック」タブに移動しました — 単価マスタは会社が決めた支給単価のみを管理します (Refs #268)。
+          </p>
 
           <!-- 単価履歴モーダル (Refs #253) -->
           <UModal v-model:open="rateHistoryOpen" :ui="{ content: 'max-w-lg' }">
