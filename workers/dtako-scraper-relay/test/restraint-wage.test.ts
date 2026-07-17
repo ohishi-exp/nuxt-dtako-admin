@@ -8,6 +8,7 @@ import {
   emptyCategoryMinutes,
   minWageForBranch,
   normalizeMinWageMaster,
+  normalizeSalaryItemConfig,
   normalizeWageConfig,
   normalizeWageMaster,
   rateForMonth,
@@ -140,6 +141,42 @@ describe('normalizeMinWageMaster', () => {
     expect(() => normalizeMinWageMaster({ prefectures: { 佐賀: [{ effectiveFrom: '2025-10-01', rate: -1 }] } })).toThrow(/rate/)
     expect(() => normalizeMinWageMaster({ branchToPrefecture: [] })).toThrow(/branchToPrefecture/)
     expect(() => normalizeMinWageMaster({ branchToPrefecture: { A: 1 } })).toThrow(/文字列/)
+  })
+})
+
+describe('normalizeSalaryItemConfig', () => {
+  it('正常な設定を受け付け、項目名を NFKC + trim 正規化する', () => {
+    const out = normalizeSalaryItemConfig({
+      items: { '基本給  ': 'base', '残業手当': 'overtime', 'ｸﾚｰﾝ手当': 'base' },
+    })
+    expect(out).toEqual({
+      items: { 基本給: 'base', 残業手当: 'overtime', クレーン手当: 'base' },
+    })
+  })
+
+  it('空の items を受け付ける', () => {
+    expect(normalizeSalaryItemConfig({ items: {} })).toEqual({ items: {} })
+  })
+
+  it('オブジェクトでない入力を拒否する', () => {
+    expect(() => normalizeSalaryItemConfig(null)).toThrow(WageMasterError)
+    expect(() => normalizeSalaryItemConfig([])).toThrow(WageMasterError)
+    expect(() => normalizeSalaryItemConfig('x')).toThrow(WageMasterError)
+  })
+
+  it('items が無い / オブジェクトでない入力を拒否する', () => {
+    expect(() => normalizeSalaryItemConfig({})).toThrow(WageMasterError)
+    expect(() => normalizeSalaryItemConfig({ items: [] })).toThrow(WageMasterError)
+    expect(() => normalizeSalaryItemConfig({ items: 3 })).toThrow(WageMasterError)
+  })
+
+  it('空の項目名を拒否する', () => {
+    expect(() => normalizeSalaryItemConfig({ items: { '   ': 'base' } })).toThrow('空の項目名')
+  })
+
+  it('base / overtime 以外の区分を拒否する', () => {
+    expect(() => normalizeSalaryItemConfig({ items: { 基本給: 'bonus' } })).toThrow('"base" | "overtime"')
+    expect(() => normalizeSalaryItemConfig({ items: { 基本給: 1 } })).toThrow(WageMasterError)
   })
 })
 

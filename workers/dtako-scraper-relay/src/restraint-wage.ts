@@ -151,6 +151,44 @@ export function normalizeWageMaster(raw: unknown): WageMaster {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// 給与明細 CSV 比較の支給項目区分 (Refs #253)
+// ---------------------------------------------------------------------------
+
+/** 支給項目を賃金比較でどちらの束に入れるか。base = 基本給、overtime = 残業。 */
+export type SalaryItemCategory = "base" | "overtime";
+
+/** 支給項目名 (NFKC 正規化 + trim 済みのヘッダーラベル) → 区分。
+ * 貼り付けられた給与 CSV 本文は保存しない — 保存するのはこの区分設定だけ。 */
+export interface SalaryItemConfig {
+  items: Record<string, SalaryItemCategory>;
+}
+
+/** salary-item-config JSON を検証・正規化する。 */
+export function normalizeSalaryItemConfig(raw: unknown): SalaryItemConfig {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new WageMasterError("salary-item-config は {items: {...}} の JSON オブジェクトが必要です");
+  }
+  const items = (raw as { items?: unknown }).items;
+  if (!items || typeof items !== "object" || Array.isArray(items)) {
+    throw new WageMasterError("salary-item-config.items がオブジェクトではありません");
+  }
+  const out: SalaryItemConfig = { items: {} };
+  for (const [label, category] of Object.entries(items as Record<string, unknown>)) {
+    const key = label.normalize("NFKC").trim();
+    if (!key) {
+      throw new WageMasterError("salary-item-config.items に空の項目名があります");
+    }
+    if (category !== "base" && category !== "overtime") {
+      throw new WageMasterError(
+        `salary-item-config.items[${key}] は "base" | "overtime" が必要です (${String(category)})`,
+      );
+    }
+    out.items[key] = category;
+  }
+  return out;
+}
+
 /** min-wage JSON を検証・正規化する。 */
 export function normalizeMinWageMaster(raw: unknown): MinWageMaster {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
