@@ -189,6 +189,41 @@ export function normalizeSalaryItemConfig(raw: unknown): SalaryItemConfig {
   return out;
 }
 
+/**
+ * 給与社員コード → 乗務員CD の突合マスタ (Refs #253)。
+ * 給与システムの社員コードは会社毎に別体系で乗務員CDと一致しないため、
+ * 「給与コード|氏名 (空白除去)」をキーに乗務員CDへ引き当てる。
+ * キーの正規化はフロント (salaryCdMapKey) と同一規則。
+ */
+export interface SalaryCdMap {
+  entries: Record<string, string>;
+}
+
+const CD_MAP_KEY_RE = /^\d+\|\S+$/;
+
+/** salary-cd-map JSON を検証・正規化する。 */
+export function normalizeSalaryCdMap(raw: unknown): SalaryCdMap {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new WageMasterError("salary-cd-map は {entries: {...}} の JSON オブジェクトが必要です");
+  }
+  const entries = (raw as { entries?: unknown }).entries;
+  if (!entries || typeof entries !== "object" || Array.isArray(entries)) {
+    throw new WageMasterError("salary-cd-map.entries がオブジェクトではありません");
+  }
+  const out: SalaryCdMap = { entries: {} };
+  for (const [key, driverCd] of Object.entries(entries as Record<string, unknown>)) {
+    const normKey = key.normalize("NFKC").trim();
+    if (!CD_MAP_KEY_RE.test(normKey)) {
+      throw new WageMasterError(`salary-cd-map.entries のキーは "給与コード|氏名" 形式が必要です (${key})`);
+    }
+    if (typeof driverCd !== "string" || !/^\d{1,8}$/.test(driverCd)) {
+      throw new WageMasterError(`salary-cd-map.entries[${normKey}] は乗務員CD (数字) が必要です (${String(driverCd)})`);
+    }
+    out.entries[normKey] = driverCd;
+  }
+  return out;
+}
+
 /** min-wage JSON を検証・正規化する。 */
 export function normalizeMinWageMaster(raw: unknown): MinWageMaster {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {

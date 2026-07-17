@@ -12,10 +12,15 @@ import {
   compareSalaryMonth,
   effectiveCategory,
   mergeParsedSalaryCsv,
+  normalizeNameKey,
   parseSalaryCsv,
+  resolveCdKey,
+  salaryCdMapKey,
   splitDelimitedLine,
   suggestCategory,
+  suggestCdMapEntries,
   sumByCategory,
+  type SalaryCdMap,
   type SalaryCsvRow,
   type SalaryItemConfig,
 } from '../../app/utils/salary-compare'
@@ -281,6 +286,47 @@ describe('sumByCategory', () => {
   })
 })
 
+describe('salaryCdMapKey / normalizeNameKey / resolveCdKey', () => {
+  it('前ゼロ除去 + 氏名の空白全除去でキーを作る', () => {
+    expect(salaryCdMapKey('01427', '中村　一由')).toBe('1427|中村一由')
+    expect(normalizeNameKey(' 城田  秀幸 ')).toBe('城田秀幸')
+  })
+
+  it('resolveCdKey はマスタ命中時に引き当て、無ければ給与コードのまま', () => {
+    const cdMap: SalaryCdMap = { entries: { '1427|中村一由': '01412' } }
+    expect(resolveCdKey(csvRow({ driverCd: '1427', cdKey: '1427', driverName: '中村 一由' }), cdMap)).toBe('1412')
+    expect(resolveCdKey(csvRow(), cdMap)).toBe('1239')
+  })
+})
+
+describe('suggestCdMapEntries', () => {
+  const reports = [
+    reportRow('1412', '中村 一由', 1, 2),
+    reportRow('1587', '柳井 亮祐', 1, 2),
+    reportRow('1601', '佐藤 太郎', 1, 2),
+    reportRow('1602', '佐藤 太郎', 1, 2), // 同姓同名 → 提案しない
+    reportRow('1239', '城田 秀幸', 1, 2),
+  ]
+
+  it('未突合行を氏名の一意一致で提案する (重複行は 1 回だけ)', () => {
+    const rows = [
+      csvRow({ driverCd: '1427', cdKey: '1427', driverName: '中村　一由' }),
+      csvRow({ driverCd: '1427', cdKey: '1427', driverName: '中村　一由' }), // 同一人物の別月行
+      csvRow({ driverCd: '1710', cdKey: '1710', driverName: '佐藤 太郎' }), // 同姓同名 2 名 → 提案不可
+      csvRow({ driverCd: '1800', cdKey: '1800', driverName: '該当 なし' }), // 名前不一致
+      csvRow(), // 1239 はコード直接一致 → 提案不要
+    ]
+    const out = suggestCdMapEntries(rows, reports, { entries: {} })
+    expect(out).toEqual({ '1427|中村一由': '1412' })
+  })
+
+  it('マスタ登録済みの行は提案しない', () => {
+    const rows = [csvRow({ driverCd: '1427', cdKey: '1427', driverName: '中村 一由' })]
+    const out = suggestCdMapEntries(rows, reports, { entries: { '1427|中村一由': '9999' } })
+    expect(out).toEqual({})
+  })
+})
+
 describe('compareSalaryMonth', () => {
   const config: SalaryItemConfig = { items: {} }
 
@@ -337,6 +383,26 @@ describe('compareSalaryMonth', () => {
     expect(out.rows).toHaveLength(1)
     expect(out.csvOnly).toEqual([{ driverCd: '9999', driverName: '給与のみ' }])
     expect(out.reportOnly).toEqual([{ driverCd: '1021', driverName: '計算のみ' }])
+  })
+
+  it('突合マスタで給与コード ≠ 乗務員CD の乗務員を引き当てる', () => {
+    const cdMap: SalaryCdMap = { entries: { '1427|中村一由': '1412' } }
+    const out = compareSalaryMonth(
+      [csvRow({ driverCd: '1427', cdKey: '1427', driverName: '中村　一由' })],
+      [reportRow('1412', '中村 一由', 75000, 100000)],
+      config,
+      cdMap,
+    )
+    expect(out.rows).toHaveLength(1)
+    expect(out.rows[0]!.driverCd).toBe('1427')
+    expect(out.rows[0]!.mappedDriverCd).toBe('1412')
+    expect(out.csvOnly).toEqual([])
+    expect(out.reportOnly).toEqual([])
+  })
+
+  it('直接一致した行は mappedDriverCd を null にする', () => {
+    const out = compareSalaryMonth([csvRow()], [reportRow('1239', '城田 秀幸', 1, 2)], config)
+    expect(out.rows[0]!.mappedDriverCd).toBeNull()
   })
 
   it('CSV 側の重複乗務員は後勝ち + 警告する', () => {

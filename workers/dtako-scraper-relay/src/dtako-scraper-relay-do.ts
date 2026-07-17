@@ -87,6 +87,7 @@ import {
 import {
   computeWageRow,
   normalizeMinWageMaster,
+  normalizeSalaryCdMap,
   normalizeSalaryItemConfig,
   normalizeWageConfig,
   normalizeWageMaster,
@@ -1549,6 +1550,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/salary-item-config") {
       return this.handleWageMasterRoute(record!, request, "salary-item-config", (raw) => normalizeSalaryItemConfig(raw));
     }
+    // 給与社員コード → 乗務員CD の突合マスタ (Refs #253)。
+    if (url.pathname === "/restraint-api/salary-cd-map") {
+      return this.handleWageMasterRoute(record!, request, "salary-cd-map", (raw) => normalizeSalaryCdMap(raw));
+    }
     if (url.pathname === "/restraint-api/wage-master/csv" && request.method === "POST") {
       return this.handleWageMasterCsvImport(record!, request);
     }
@@ -1584,7 +1589,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   // -------------------------------------------------------------------------
 
   /** マスタ類の R2 配置 (comp 単位、月に依らない)。 */
-  private wageMasterR2Paths(compId: string, name: "wage-master" | "min-wage" | "wage-config" | "salary-item-config") {
+  private wageMasterR2Paths(compId: string, name: "wage-master" | "min-wage" | "wage-config" | "salary-item-config" | "salary-cd-map") {
     const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
     const dir = `${prefix}/${compId}/${name}`;
     return { dir, latest: `${dir}/latest.json`, version: (ts: string) => `${dir}/v-${ts}.json` };
@@ -1614,7 +1619,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   private async handleWageMasterRoute(
     record: TheearthSessionRecord,
     request: Request,
-    name: "wage-master" | "min-wage" | "wage-config" | "salary-item-config",
+    name: "wage-master" | "min-wage" | "wage-config" | "salary-item-config" | "salary-cd-map",
     normalize: (raw: unknown) => unknown,
   ): Promise<Response> {
     const bucket = this.env.DTAKO_R2;

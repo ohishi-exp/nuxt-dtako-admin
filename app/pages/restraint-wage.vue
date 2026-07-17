@@ -23,6 +23,7 @@ import type {
 } from '~/utils/restraint-wage-view'
 import type {
   ParsedSalaryCsv,
+  SalaryCdMap,
   SalaryComparison,
   SalaryItemCategory,
   SalaryItemConfig,
@@ -96,6 +97,7 @@ watch(session, (s) => {
     // 貼り付け中の給与データはメモリ上にしか無い — ログアウトで破棄する
     clearSalaryPaste()
     salaryConfigLoaded.value = false
+    salaryCdMapLoaded.value = false
   }
   else {
     loadArchiveMonths()
@@ -540,13 +542,98 @@ async function saveSalaryItemConfig() {
   }
 }
 
+// ---- 社員コード突合マスタ (給与コード|氏名 → 乗務員CD、Refs #253) ----
+// 給与システムの社員コードは会社毎に別体系で乗務員CDと一致しないため、
+// マスタ (R2 版管理) で引き当てる。氏名一致による自動提案つき。
+
+const salaryCdMap = ref<SalaryCdMap>({ entries: {} })
+const salaryCdMapLoaded = ref(false)
+const savingSalaryCdMap = ref(false)
+const salaryCdMapMessage = ref('')
+
+async function loadSalaryCdMap() {
+  if (!session.value) return
+  try {
+    const res = await $fetch<{ exists: boolean, data: SalaryCdMap | null }>(
+      '/restraint-api/salary-cd-map',
+      { headers: authHeaders() },
+    )
+    salaryCdMap.value = res.data ?? { entries: {} }
+    salaryCdMapLoaded.value = true
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+}
+
+async function saveSalaryCdMap() {
+  if (!session.value) return
+  savingSalaryCdMap.value = true
+  pageError.value = ''
+  try {
+    const res = await $fetch<{ changed: boolean, data: SalaryCdMap }>('/restraint-api/salary-cd-map', {
+      method: 'PUT',
+      headers: authHeaders(),
+      body: salaryCdMap.value,
+    })
+    salaryCdMap.value = res.data
+    salaryCdMapMessage.value = res.changed ? '突合マスタを保存しました (新しい版を作成)' : '突合マスタを保存しました (内容は前回と同一)'
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+  finally {
+    savingSalaryCdMap.value = false
+  }
+}
+
+/** 氏名の完全一致 (両側で一意) から未突合行の乗務員CDを一括提案して設定する。 */
+function autoSuggestCdMap() {
+  if (!report.value) return
+  const suggested = suggestCdMapEntries(salaryMonthRows.value, report.value.rows, salaryCdMap.value)
+  const count = Object.keys(suggested).length
+  if (count === 0) {
+    salaryCdMapMessage.value = '氏名一致で自動設定できる行はありませんでした'
+    return
+  }
+  salaryCdMap.value = { entries: { ...salaryCdMap.value.entries, ...suggested } }
+  salaryCdMapMessage.value = `${count} 名を氏名一致で自動設定しました。「マスタを保存」で確定します`
+}
+
+function setCdMapEntry(payrollCd: string, name: string, driverCd: string) {
+  salaryCdMap.value = {
+    entries: { ...salaryCdMap.value.entries, [salaryCdMapKey(payrollCd, name)]: driverCd },
+  }
+  salaryCdMapMessage.value = ''
+}
+
+function removeCdMapEntry(key: string) {
+  const { [key]: _removed, ...rest } = salaryCdMap.value.entries
+  salaryCdMap.value = { entries: rest }
+}
+
+/** 乗務員CD選択肢 (wage-report の乗務員、CD 昇順)。 */
+const salaryCdOptions = computed(() =>
+  [...(report.value?.rows ?? [])]
+    .sort((a, b) => a.summary.driverCd.localeCompare(b.summary.driverCd, undefined, { numeric: true }))
+    .map(r => ({ label: `${r.summary.driverCd} ${r.summary.driverName}`, value: r.summary.driverCd })))
+
+/** 登録済み突合マスタの表示行。 */
+const salaryCdMapRows = computed(() =>
+  Object.entries(salaryCdMap.value.entries)
+    .map(([key, driverCd]) => {
+      const [payrollCd = '', name = ''] = key.split('|')
+      return { key, payrollCd, name, driverCd }
+    })
+    .sort((a, b) => a.payrollCd.localeCompare(b.payrollCd, undefined, { numeric: true })))
+
 /** 選択中の月の CSV 行。 */
 const salaryMonthRows = computed(() =>
   (salaryParsed.value?.rows ?? []).filter(r => r.month === month.value))
 
 const salaryComparison = computed<SalaryComparison | null>(() => {
   if (!salaryParsed.value || !report.value || report.value.month !== month.value) return null
-  return compareSalaryMonth(salaryMonthRows.value, report.value.rows, salaryItemConfig.value)
+  return compareSalaryMonth(salaryMonthRows.value, report.value.rows, salaryItemConfig.value, salaryCdMap.value)
 })
 
 function selectSalaryMonth(ym: string) {
@@ -736,6 +823,7 @@ watch([activeTab, month, session], () => {
   else if (activeTab.value === 'salary') {
     if (!report.value || report.value.month !== month.value) loadWageReport()
     if (!salaryConfigLoaded.value) loadSalaryItemConfig()
+    if (!salaryCdMapLoaded.value) loadSalaryCdMap()
   }
   else if (activeTab.value === 'archive') {
     loadArchive()
@@ -1183,7 +1271,10 @@ watch([activeTab, month, session], () => {
                       :key="row.driverCd"
                       class="border-b border-gray-100 dark:border-gray-800"
                     >
-                      <td class="px-2 py-1.5">{{ row.driverCd }}</td>
+                      <td class="px-2 py-1.5">
+                        {{ row.driverCd }}
+                        <span v-if="row.mappedDriverCd" class="text-xs text-gray-500" title="社員コード突合マスタで引き当て">→ {{ row.mappedDriverCd }}</span>
+                      </td>
                       <td class="px-2 py-1.5">{{ row.driverName }}</td>
                       <td class="px-2 py-1.5 text-right">{{ fmtYen(row.csvBase) }}</td>
                       <td class="px-2 py-1.5 text-right">{{ fmtYen(row.sysBase) }}</td>
@@ -1211,13 +1302,64 @@ watch([activeTab, month, session], () => {
                 差 = 給与明細 − システム計算。* は 支給合計額 列と支給項目の合算が一致しない行。
                 単価マスタ未設定の乗務員は計算列が「-」になります。
               </p>
-              <p v-if="salaryComparison.csvOnly.length" class="text-xs text-amber-600 dark:text-amber-400 mt-1">
-                給与明細のみ (システム計算なし): {{ salaryComparison.csvOnly.map(d => `${d.driverCd} ${d.driverName}`).join(', ') }}
-              </p>
               <p v-if="salaryComparison.reportOnly.length" class="text-xs text-amber-600 dark:text-amber-400 mt-1">
                 システム計算のみ (給与明細なし): {{ salaryComparison.reportOnly.map(d => `${d.driverCd} ${d.driverName}`).join(', ') }}
               </p>
             </template>
+          </UCard>
+
+          <!-- 社員コード突合マスタ (給与コード|氏名 → 乗務員CD) -->
+          <UCard v-if="salaryComparison && (salaryComparison.csvOnly.length || salaryCdMapRows.length)">
+            <template #header>
+              <div class="flex flex-wrap items-center gap-3">
+                <span class="font-semibold">社員コード突合マスタ</span>
+                <span class="text-xs text-gray-500">給与システムの社員コードは会社毎に別体系のため、氏名つきで乗務員CDへ引き当てます</span>
+                <div class="flex-1" />
+                <UButton
+                  size="xs"
+                  variant="soft"
+                  icon="i-lucide-wand-sparkles"
+                  label="氏名一致で自動設定"
+                  :disabled="!salaryComparison.csvOnly.length"
+                  @click="autoSuggestCdMap"
+                />
+                <UButton size="xs" icon="i-lucide-save" label="マスタを保存" :loading="savingSalaryCdMap" @click="saveSalaryCdMap" />
+              </div>
+            </template>
+
+            <p v-if="salaryCdMapMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2 mb-3">
+              {{ salaryCdMapMessage }}
+            </p>
+
+            <template v-if="salaryComparison.csvOnly.length">
+              <p class="text-sm font-medium mb-1">未突合の給与明細 ({{ salaryComparison.csvOnly.length }} 名) — 乗務員CDを選択:</p>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5 mb-3">
+                <div v-for="d in salaryComparison.csvOnly" :key="`${d.driverCd}|${d.driverName}`" class="flex items-center gap-2 text-sm">
+                  <span class="flex-1 truncate">{{ d.driverCd }} {{ d.driverName }}</span>
+                  <USelect
+                    model-value=""
+                    :items="salaryCdOptions"
+                    size="xs"
+                    class="w-48 shrink-0"
+                    placeholder="乗務員CDを選択"
+                    @update:model-value="(v: unknown) => setCdMapEntry(d.driverCd, d.driverName, String(v))"
+                  />
+                </div>
+              </div>
+            </template>
+
+            <template v-if="salaryCdMapRows.length">
+              <p class="text-sm font-medium mb-1">登録済み ({{ salaryCdMapRows.length }} 件):</p>
+              <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-1">
+                <div v-for="row in salaryCdMapRows" :key="row.key" class="flex items-center gap-2 text-sm">
+                  <span class="flex-1 truncate">{{ row.payrollCd }} {{ row.name }} → {{ row.driverCd }}</span>
+                  <UButton size="xs" variant="ghost" icon="i-lucide-x" @click="removeCdMapEntry(row.key)" />
+                </div>
+              </div>
+            </template>
+            <p class="text-xs text-gray-500 mt-2">
+              設定は即座に比較へ反映されます (「マスタを保存」でサーバーに確定)。給与明細の内容自体は保存されません。
+            </p>
           </UCard>
         </template>
 
