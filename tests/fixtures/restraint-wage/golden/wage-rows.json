@@ -32,8 +32,8 @@
       "hourlyEquivalent": 1456,
       "minWage": {
         "rate": 956,
-        "prefecture": "佐賀",
-        "mapped": true
+        "prefecture": "全社共通",
+        "mapped": false
       },
       "minWageDiff": 500,
       "minWageTotalPay": 172080,
@@ -85,8 +85,8 @@
       "hourlyEquivalent": 900,
       "minWage": {
         "rate": 956,
-        "prefecture": "佐賀",
-        "mapped": true
+        "prefecture": "全社共通",
+        "mapped": false
       },
       "minWageDiff": -56,
       "minWageTotalPay": 152960,
@@ -138,8 +138,8 @@
       "hourlyEquivalent": 1093,
       "minWage": {
         "rate": 956,
-        "prefecture": "佐賀",
-        "mapped": true
+        "prefecture": "全社共通",
+        "mapped": false
       },
       "minWageDiff": 137,
       "minWageTotalPay": 172080,
@@ -181,8 +181,8 @@
       "hourlyEquivalent": null,
       "minWage": {
         "rate": 956,
-        "prefecture": "佐賀",
-        "mapped": true
+        "prefecture": "全社共通",
+        "mapped": false
       },
       "minWageDiff": null,
       "minWageTotalPay": 152960,

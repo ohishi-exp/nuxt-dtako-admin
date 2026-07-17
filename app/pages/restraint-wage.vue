@@ -608,6 +608,30 @@ function importSalaryPaste() {
   }
 }
 
+/** ローカル mock (seed:local) 専用のデモ明細読込を出すか。import.meta.dev は
+ * 本番ビルドで false 定数になり、下の分岐ごと dead-code として消える。 */
+const isDevMode = import.meta.dev
+
+/** ローカル mock 専用 (Refs #268): 共有 fixture の給与明細 CSV (seed:local と同じ
+ * 4 乗務員 + 9999) をワンクリックで取り込む — 毎回の手貼り付けを省く。 */
+async function importDemoSalaryCsv() {
+  if (!import.meta.dev) return
+  salaryParseError.value = ''
+  salaryConfigMessage.value = ''
+  try {
+    const raw = (await import('../../tests/fixtures/restraint-wage/salary-2026-07.csv?raw')).default
+    salaryImports.value = [...salaryImports.value, {
+      id: ++salaryImportSeq,
+      name: 'fixture: salary-2026-07.csv',
+      text: raw,
+      parsed: parseSalaryCsv(raw),
+    }]
+  }
+  catch (e) {
+    salaryParseError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
 const salaryFileInput = ref<HTMLInputElement | null>(null)
 
 /** 給与明細ファイル (XLS/XLSX/CSV/TSV、複数選択可) をブラウザ内で読み込んで取り込む。 */
@@ -1512,6 +1536,7 @@ watch([activeTab, month, session], () => {
                   <UButton size="xs" icon="i-lucide-file-up" label="ファイル読み込み" @click="salaryFileInput?.click()" />
                 </label>
                 <UButton size="xs" variant="soft" icon="i-lucide-file-plus" label="貼り付けを取り込み" :disabled="!salaryPaste.trim()" @click="importSalaryPaste" />
+                <UButton v-if="isDevMode" size="xs" variant="soft" color="warning" icon="i-lucide-flask-conical" label="デモ明細を読み込み (fixture)" @click="importDemoSalaryCsv" />
               </div>
             </template>
             <UTextarea
