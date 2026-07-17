@@ -73,6 +73,18 @@ export interface WageRateEntry { effectiveFrom: string, hourlyRate: number }
 export interface WageMasterDriver { name?: string, rates: WageRateEntry[], retiredAt?: string }
 export interface WageMaster { drivers: Record<string, WageMasterDriver> }
 
+/** 最低賃金 (単価マスタタブ内、全社共通 1 本の履歴、Refs #253)。
+ * worker 側の MinWageMaster (prefectures/branchToPrefecture) と互換の形で
+ * 保存するが、フロントは単一の履歴だけを編集する (都道府県別マッピングはしない)。 */
+export interface MinWageEntry { effectiveFrom: string, rate: number }
+export interface MinWageMaster {
+  prefectures: Record<string, MinWageEntry[]>
+  branchToPrefecture: Record<string, string>
+  defaultPrefecture?: string
+}
+/** minWageMaster.prefectures / defaultPrefecture に使う固定キー。 */
+export const MIN_WAGE_DEFAULT_KEY = '全社共通'
+
 export interface ArchiveCsvEntry {
   key: string
   range: string

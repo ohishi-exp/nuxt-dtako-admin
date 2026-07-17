@@ -16,11 +16,13 @@
 import type {
   ArchiveCsvEntry,
   ArchiveHistoryEntry,
+  MinWageMaster,
   RestraintDriverSummary,
   WageMaster,
   WageReportResponse,
   WageReportRow,
 } from '~/utils/restraint-wage-view'
+import { MIN_WAGE_DEFAULT_KEY } from '~/utils/restraint-wage-view'
 import type {
   ParsedSalaryCsv,
   SalaryCdMap,
@@ -121,6 +123,7 @@ watch(session, (s) => {
     clearSalaryPaste()
     salaryConfigLoaded.value = false
     salaryCdMapLoaded.value = false
+    minWageMasterLoaded.value = false
   }
   else {
     loadArchiveMonths()
@@ -914,6 +917,92 @@ function triggerDownload(blob: Blob, filename: string) {
   URL.revokeObjectURL(url)
 }
 
+// ---------------------------------------------------------------------------
+// 最低賃金 (単価マスタタブ内、全社共通 1 本の履歴、Refs #253)
+// 乗務員の基本時間単価 (会社が決めた支給額) とは別に、法定の下限である
+// 最低賃金 (国が都道府県ごとに定める) が要る。都道府県別マッピングまではせず、
+// 全社共通の 1 履歴として単価マスタと同じタブで管理する。
+// ---------------------------------------------------------------------------
+
+const minWageMaster = ref<MinWageMaster>({ prefectures: {}, branchToPrefecture: {} })
+const minWageMasterLoaded = ref(false)
+const savingMinWage = ref(false)
+const minWageMessage = ref('')
+const newMinWageRate = ref('')
+const newMinWageFrom = ref('')
+
+async function loadMinWageMaster() {
+  if (!session.value) return
+  try {
+    const res = await $fetch<{ exists: boolean, data: MinWageMaster | null }>(
+      '/restraint-api/min-wage',
+      { headers: authHeaders() },
+    )
+    minWageMaster.value = res.data ?? { prefectures: {}, branchToPrefecture: {} }
+    minWageMasterLoaded.value = true
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+}
+
+/** 全社共通の履歴 (新しい順)。 */
+const minWageRows = computed(() =>
+  [...(minWageMaster.value.prefectures[MIN_WAGE_DEFAULT_KEY] ?? [])].sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom)))
+
+function addMinWageRate() {
+  if (!newMinWageRate.value || !newMinWageFrom.value) return
+  const rate = Number(newMinWageRate.value)
+  if (!Number.isFinite(rate) || rate < 0) {
+    minWageMessage.value = '最低賃金が不正です'
+    return
+  }
+  const entries = [...(minWageMaster.value.prefectures[MIN_WAGE_DEFAULT_KEY] ?? [])]
+  const existing = entries.findIndex(e => e.effectiveFrom === newMinWageFrom.value)
+  if (existing >= 0) entries[existing] = { effectiveFrom: newMinWageFrom.value, rate }
+  else entries.push({ effectiveFrom: newMinWageFrom.value, rate })
+  entries.sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom))
+  minWageMaster.value = {
+    prefectures: { [MIN_WAGE_DEFAULT_KEY]: entries },
+    branchToPrefecture: {},
+    defaultPrefecture: MIN_WAGE_DEFAULT_KEY,
+  }
+  newMinWageRate.value = ''
+  minWageMessage.value = ''
+}
+
+function removeMinWageRate(effectiveFrom: string) {
+  const entries = (minWageMaster.value.prefectures[MIN_WAGE_DEFAULT_KEY] ?? []).filter(e => e.effectiveFrom !== effectiveFrom)
+  minWageMaster.value = {
+    prefectures: { [MIN_WAGE_DEFAULT_KEY]: entries },
+    branchToPrefecture: {},
+    defaultPrefecture: entries.length ? MIN_WAGE_DEFAULT_KEY : undefined,
+  }
+  minWageMessage.value = `${effectiveFrom} の最低賃金を削除しました。「保存」で確定します`
+}
+
+async function saveMinWageMaster() {
+  if (!session.value) return
+  savingMinWage.value = true
+  pageError.value = ''
+  try {
+    const res = await $fetch<{ changed: boolean, data: MinWageMaster }>('/restraint-api/min-wage', {
+      method: 'PUT',
+      headers: authHeaders(),
+      body: minWageMaster.value,
+    })
+    minWageMaster.value = res.data
+    minWageMessage.value = res.changed ? '最低賃金を保存しました (新しい版を作成)' : '最低賃金を保存しました (内容は前回と同一)'
+    reportCache.clear()
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+  finally {
+    savingMinWage.value = false
+  }
+}
+
 watch([activeTab, month, session], () => {
   if (!session.value || !month.value) return
   if (activeTab.value === 'monthly' || activeTab.value === 'minwage') {
@@ -932,6 +1021,7 @@ watch([activeTab, month, session], () => {
   }
   else if (activeTab.value === 'master') {
     if (Object.keys(master.value.drivers).length === 0) loadMaster()
+    if (!minWageMasterLoaded.value) loadMinWageMaster()
   }
 }, { immediate: false })
 </script>
@@ -1577,6 +1667,56 @@ watch([activeTab, month, session], () => {
             <p v-if="!masterRows.length && !loadingMaster" class="text-sm text-gray-500">
               マスタが空です。対象月の summary がアーカイブにあれば「再読込」で乗務員一覧を自動補完します
             </p>
+          </UCard>
+
+          <!-- 最低賃金 (全社共通 1 本の履歴、Refs #253):
+               乗務員の基本時間単価は会社が決めた支給額。最低賃金は国が定める
+               法定の下限で、それとは別に設定が必要 (都道府県別マッピングまではせず
+               全社共通の 1 履歴として扱う)。 -->
+          <UCard>
+            <template #header>
+              <div class="flex flex-wrap items-center gap-3">
+                <span class="font-semibold">最低賃金</span>
+                <span class="text-xs text-gray-500">基本時間単価 (会社が決めた支給額) とは別に、法定の下限として全社共通で設定します</span>
+                <div class="flex-1" />
+                <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" :loading="!minWageMasterLoaded" @click="loadMinWageMaster" />
+                <UButton size="xs" icon="i-lucide-save" label="保存" :loading="savingMinWage" @click="saveMinWageMaster" />
+              </div>
+            </template>
+            <p v-if="minWageMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2 mb-3">
+              {{ minWageMessage }}
+            </p>
+            <div class="flex flex-wrap items-end gap-3 mb-3">
+              <UFormField label="最低賃金 (円)">
+                <UInput v-model="newMinWageRate" size="sm" type="number" class="w-28" />
+              </UFormField>
+              <UFormField label="適用開始日">
+                <UInput v-model="newMinWageFrom" size="sm" type="date" />
+              </UFormField>
+              <UButton size="sm" variant="soft" icon="i-lucide-plus" label="追加" :disabled="!newMinWageRate || !newMinWageFrom" @click="addMinWageRate" />
+            </div>
+            <table v-if="minWageRows.length" class="w-full text-sm">
+              <thead>
+                <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
+                  <th class="px-2 py-1.5">適用開始日</th>
+                  <th class="px-2 py-1.5 text-right">最低賃金 (円)</th>
+                  <th class="px-2 py-1.5 w-12" />
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(rate, i) in minWageRows" :key="rate.effectiveFrom" class="border-b border-gray-100 dark:border-gray-800">
+                  <td class="px-2 py-1.5">
+                    {{ rate.effectiveFrom }}
+                    <span v-if="i === 0" class="text-xs text-green-600 dark:text-green-400">(現行)</span>
+                  </td>
+                  <td class="px-2 py-1.5 text-right font-medium">{{ fmtYen(rate.rate) }}</td>
+                  <td class="px-2 py-1.5 text-right">
+                    <UButton size="xs" variant="ghost" icon="i-lucide-trash-2" @click="removeMinWageRate(rate.effectiveFrom)" />
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-else class="text-sm text-gray-500">未設定です。上の欄から追加してください。</p>
           </UCard>
 
           <!-- 単価履歴モーダル (Refs #253) -->
