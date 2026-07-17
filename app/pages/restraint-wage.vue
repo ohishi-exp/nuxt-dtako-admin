@@ -924,6 +924,9 @@ watch([activeTab, month, session], () => {
     if (!salaryConfigLoaded.value) loadSalaryItemConfig()
     if (!salaryCdMapLoaded.value) loadSalaryCdMap()
   }
+  else if (activeTab.value === 'items') {
+    if (!salaryConfigLoaded.value) loadSalaryItemConfig()
+  }
   else if (activeTab.value === 'archive') {
     loadArchive()
   }
@@ -1294,36 +1297,6 @@ watch([activeTab, month, session], () => {
             </template>
           </UCard>
 
-          <UCard v-if="salaryItemRows.length">
-            <template #header>
-              <div class="flex flex-wrap items-center gap-3">
-                <span class="font-semibold">支給項目の区分 (基本給 / 残業)</span>
-                <span class="text-xs text-gray-500">この区分設定だけがサーバーに保存されます</span>
-                <div class="flex-1" />
-                <UButton size="xs" icon="i-lucide-save" label="区分を保存" :loading="savingSalaryConfig" @click="saveSalaryItemConfig" />
-              </div>
-            </template>
-            <p v-if="salaryConfigMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2 mb-3">
-              {{ salaryConfigMessage }}
-            </p>
-            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-1.5">
-              <div v-for="row in salaryItemRows" :key="row.label" class="flex items-center gap-2 text-sm">
-                <span class="flex-1 truncate" :class="row.inCsv ? '' : 'text-gray-400'" :title="row.label">
-                  {{ row.label }}
-                  <span v-if="!row.inCsv" class="text-xs">(貼り付けに無い項目)</span>
-                </span>
-                <span v-if="!row.saved" class="text-xs text-amber-600 dark:text-amber-400 shrink-0" title="保存済みの区分が無いため項目名からの推定値を表示しています">未保存</span>
-                <USelect
-                  :model-value="row.category"
-                  :items="SALARY_CATEGORY_OPTIONS"
-                  size="xs"
-                  class="w-40 shrink-0"
-                  @update:model-value="(v: unknown) => setSalaryItemCategory(row.label, v as SalaryItemCategory)"
-                />
-              </div>
-            </div>
-          </UCard>
-
           <UCard v-if="salaryParsed">
             <template #header>
               <div class="flex flex-wrap items-center gap-3">
@@ -1468,6 +1441,44 @@ watch([activeTab, month, session], () => {
             <p class="text-xs text-gray-500 mt-2">
               設定は即座に比較へ反映されます (「マスタを保存」でサーバーに確定)。給与明細の内容自体は保存されません。
             </p>
+          </UCard>
+        </template>
+
+        <!-- ⑤ 支給項目区分 (Refs #253) -->
+        <template v-else-if="activeTab === 'items'">
+          <UCard>
+            <template #header>
+              <div class="flex flex-wrap items-center gap-3">
+                <span class="font-semibold">支給項目の区分 (基本給 / 残業)</span>
+                <span class="text-xs text-gray-500">この区分設定だけがサーバーに保存されます</span>
+                <div class="flex-1" />
+                <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" :loading="!salaryConfigLoaded" @click="loadSalaryItemConfig" />
+                <UButton size="xs" icon="i-lucide-save" label="区分を保存" :disabled="!salaryItemRows.length" :loading="savingSalaryConfig" @click="saveSalaryItemConfig" />
+              </div>
+            </template>
+            <p v-if="salaryConfigMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2 mb-3">
+              {{ salaryConfigMessage }}
+            </p>
+            <p v-if="!salaryItemRows.length" class="text-sm text-gray-500">
+              まだ項目がありません。給与比較タブで CSV/ファイルを取り込むと支給項目が自動検出されます
+              (すでに保存済みの区分があればここに一覧表示されます)。
+            </p>
+            <div v-else class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-1.5">
+              <div v-for="row in salaryItemRows" :key="row.label" class="flex items-center gap-2 text-sm">
+                <span class="flex-1 truncate" :class="row.inCsv ? '' : 'text-gray-400'" :title="row.label">
+                  {{ row.label }}
+                  <span v-if="!row.inCsv" class="text-xs">(貼り付けに無い項目)</span>
+                </span>
+                <span v-if="!row.saved" class="text-xs text-amber-600 dark:text-amber-400 shrink-0" title="保存済みの区分が無いため項目名からの推定値を表示しています">未保存</span>
+                <USelect
+                  :model-value="row.category"
+                  :items="SALARY_CATEGORY_OPTIONS"
+                  size="xs"
+                  class="w-40 shrink-0"
+                  @update:model-value="(v: unknown) => setSalaryItemCategory(row.label, v as SalaryItemCategory)"
+                />
+              </div>
+            </div>
           </UCard>
         </template>
 
