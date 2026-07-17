@@ -36,6 +36,7 @@ const TABS = [
   { key: 'monthly', label: '月次集計・印刷' },
   { key: 'minwage', label: '最低賃金チェック' },
   { key: 'salary', label: '給与比較' },
+  { key: 'items', label: '支給項目区分' },
   { key: 'master', label: '単価マスタ' },
 ] as const
 type TabKey = typeof TABS[number]['key']
@@ -1324,12 +1325,22 @@ watch([activeTab, month, session], () => {
                       </td>
                       <td class="px-2 py-1.5">{{ row.driverName }}</td>
                       <td class="px-2 py-1.5 text-right">{{ fmtYen(row.csvBase) }}</td>
-                      <td class="px-2 py-1.5 text-right" :title="`基本単価 × 稼働 ${row.sysWorkDays} 日`">{{ fmtYen(row.sysBase) }}</td>
+                      <td class="px-2 py-1.5 text-right" :title="row.baseMode === 'rate' ? `基本単価 × 稼働 ${row.sysWorkDays} 日` : '基本単価なし = 月給制のため計算対象外'">
+                        <template v-if="row.baseMode === 'rate'">{{ fmtYen(row.sysBase) }}</template>
+                        <span v-else class="text-xs text-gray-500">月給</span>
+                      </td>
                       <td class="px-2 py-1.5 text-right" :class="(row.diffBase ?? 0) !== 0 ? 'text-red-600 font-medium' : 'text-gray-400'">
                         {{ fmtDiff(row.diffBase) }}
                       </td>
                       <td class="px-2 py-1.5 text-right">{{ fmtYen(row.csvOvertime) }}</td>
-                      <td class="px-2 py-1.5 text-right" :title="`残業単価 × 時間外 ${fmtMinutes(row.sysOvertimeMinutes)}`">{{ fmtYen(row.sysOvertime) }}</td>
+                      <td
+                        class="px-2 py-1.5 text-right"
+                        :title="row.overtimeMode === 'rate'
+                          ? `残業単価 ${fmtYen(row.overtimeRateUsed)}円 × 時間外 ${fmtMinutes(row.sysOvertimeMinutes)}`
+                          : `残業単価なし → 月給 ${fmtYen(row.overtimeMonthlySalary)}円 ÷ (残業+休憩+運転 ${fmtMinutes(row.overtimeDivisorMinutes)}) = 時給 ${fmtYen(row.overtimeRateUsed)}円 × 時間外 ${fmtMinutes(row.sysOvertimeMinutes)}`">
+                        {{ fmtYen(row.sysOvertime) }}
+                        <span v-if="row.overtimeMode === 'derived'" class="text-xs text-amber-600 dark:text-amber-400">※</span>
+                      </td>
                       <td class="px-2 py-1.5 text-right" :class="(row.diffOvertime ?? 0) !== 0 ? 'text-red-600 font-medium' : 'text-gray-400'">
                         {{ fmtDiff(row.diffOvertime) }}
                       </td>
@@ -1346,8 +1357,9 @@ watch([activeTab, month, session], () => {
                 </table>
               </div>
               <p class="text-xs text-gray-500 mt-2">
-                差 = 給与明細 − 計算。計算 = 給与明細【 補助 】の 基本単価 (日額) × システム稼働日数、
-                残業単価 (時給) × システム時間外 (+時間外深夜)。給与明細に単価が無い行は「-」。
+                差 = 給与明細 − 計算。基本給(計算) = 基本単価 (日額) × システム稼働日数 (基本単価が無い月給制は「月給」表示で計算対象外)。
+                残業(計算) = 残業単価 (時給) × システム時間外。<span class="text-amber-600 dark:text-amber-400">※</span> は残業単価が無いため
+                月給 (基本給+役職手当+新愛社手当+無事故手当+けん引手当) ÷ (残業+休憩+運転時間) で時給を算出した行。
                 * は 支給合計額 列と支給項目の合算が一致しない行。最低賃金チェックは従来どおり単価マスタで別計算です。
               </p>
               <p v-if="salaryComparison.reportOnly.length" class="text-xs text-amber-600 dark:text-amber-400 mt-1">
