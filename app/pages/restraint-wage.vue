@@ -407,8 +407,15 @@ async function downloadArchiveCsv(entry: ArchiveCsvEntry) {
 // ---------------------------------------------------------------------------
 
 const salaryPaste = ref('')
-const salaryParsed = ref<ParsedSalaryCsv | null>(null)
+/** 取り込み済み CSV (複数可、Refs #253)。メモリ上にのみ保持しサーバーへは送らない。 */
+const salaryImports = ref<Array<{ id: number, parsed: ParsedSalaryCsv }>>([])
+let salaryImportSeq = 0
 const salaryParseError = ref('')
+/** 全取り込みを合算した解析結果 (行連結・項目名の和集合)。 */
+const salaryParsed = computed<ParsedSalaryCsv | null>(() =>
+  salaryImports.value.length
+    ? mergeParsedSalaryCsv(salaryImports.value.map(i => i.parsed))
+    : null)
 const salaryItemConfig = ref<SalaryItemConfig>({ items: {} })
 const salaryConfigLoaded = ref(false)
 const savingSalaryConfig = ref(false)
@@ -434,22 +441,37 @@ async function loadSalaryItemConfig() {
   }
 }
 
-function parseSalaryPaste() {
+function importSalaryPaste() {
   salaryParseError.value = ''
   salaryConfigMessage.value = ''
   try {
-    salaryParsed.value = parseSalaryCsv(salaryPaste.value)
+    const parsed = parseSalaryCsv(salaryPaste.value)
+    salaryImports.value = [...salaryImports.value, { id: ++salaryImportSeq, parsed }]
+    // 取り込んだら入力欄を空にして次の CSV の貼り付けを受け付ける
+    salaryPaste.value = ''
   }
   catch (e) {
-    salaryParsed.value = null
     salaryParseError.value = e instanceof Error ? e.message : String(e)
   }
 }
 
+function removeSalaryImport(id: number) {
+  salaryImports.value = salaryImports.value.filter(i => i.id !== id)
+}
+
 function clearSalaryPaste() {
   salaryPaste.value = ''
-  salaryParsed.value = null
+  salaryImports.value = []
   salaryParseError.value = ''
+}
+
+/** 取り込み 1 件の見出し (行数・月範囲)。 */
+function salaryImportLabel(parsed: ParsedSalaryCsv): string {
+  const months = parsed.months
+  const range = months.length === 0
+    ? '月なし'
+    : months.length === 1 ? fmtYm(months[0]!) : `${fmtYm(months[0]!)}〜${fmtYm(months[months.length - 1]!)}`
+  return `${parsed.rows.length} 行 / 支給項目 ${parsed.itemLabels.length} 件 / ${range}`
 }
 
 /** 区分設定の対象項目 (貼り付けから検出した項目 ∪ 保存済み設定のキー)。 */
@@ -1008,22 +1030,34 @@ watch([activeTab, month, session], () => {
                 <span class="font-semibold">給与明細の貼り付け</span>
                 <span class="text-xs text-gray-500">貼り付けたデータはブラウザ内でのみ比較され、サーバーへ送信・保存されません</span>
                 <div class="flex-1" />
-                <UButton size="xs" variant="soft" icon="i-lucide-eraser" label="クリア" :disabled="!salaryPaste" @click="clearSalaryPaste" />
-                <UButton size="xs" icon="i-lucide-scan-line" label="解析" :disabled="!salaryPaste.trim()" @click="parseSalaryPaste" />
+                <UButton size="xs" variant="soft" icon="i-lucide-eraser" label="全てクリア" :disabled="!salaryPaste && !salaryImports.length" @click="clearSalaryPaste" />
+                <UButton size="xs" icon="i-lucide-file-plus" label="取り込み" :disabled="!salaryPaste.trim()" @click="importSalaryPaste" />
               </div>
             </template>
             <UTextarea
               v-model="salaryPaste"
               :rows="6"
               class="w-full font-mono"
-              placeholder="給与システムの給与明細一覧 (ヘッダー行を含む) を Excel からコピーするか、CSV の中身をそのまま貼り付けてください"
+              placeholder="給与システムの給与明細一覧 (ヘッダー行を含む) を Excel からコピーするか、CSV の中身をそのまま貼り付けてください。「取り込み」後に別の CSV (年度違い等) を続けて貼り付けて追加できます"
             />
             <p v-if="salaryParseError" class="text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-2 mt-2">
               {{ salaryParseError }}
             </p>
+            <!-- 取り込み済み CSV の一覧 (複数可) -->
+            <div v-for="(imp, idx) in salaryImports" :key="imp.id" class="border border-gray-200 dark:border-gray-800 rounded-lg p-2 mt-2">
+              <div class="flex flex-wrap items-center gap-2 text-sm">
+                <span class="font-medium">取り込み {{ idx + 1 }}</span>
+                <span class="text-xs text-gray-500">{{ salaryImportLabel(imp.parsed) }}</span>
+                <div class="flex-1" />
+                <UButton size="xs" variant="ghost" icon="i-lucide-trash-2" label="削除" @click="removeSalaryImport(imp.id)" />
+              </div>
+              <ul v-if="imp.parsed.warnings.length" class="text-xs text-amber-600 dark:text-amber-400 mt-1 space-y-0.5 max-h-32 overflow-y-auto">
+                <li v-for="(w, i) in imp.parsed.warnings" :key="i">⚠ {{ w }}</li>
+              </ul>
+            </div>
             <template v-if="salaryParsed">
               <p class="text-sm text-gray-600 dark:text-gray-300 mt-2">
-                {{ salaryParsed.rows.length }} 行 / 支給項目 {{ salaryParsed.itemLabels.length }} 件を検出しました
+                合計 {{ salaryParsed.rows.length }} 行 / 支給項目 {{ salaryParsed.itemLabels.length }} 件を検出しました
               </p>
               <div class="flex flex-wrap items-center gap-1 mt-1">
                 <span class="text-xs text-gray-500">検出した月 (クリックで比較対象月を切替):</span>
@@ -1036,9 +1070,6 @@ watch([activeTab, month, session], () => {
                   @click="selectSalaryMonth(ym)"
                 />
               </div>
-              <ul v-if="salaryParsed.warnings.length" class="text-xs text-amber-600 dark:text-amber-400 mt-2 space-y-0.5 max-h-32 overflow-y-auto">
-                <li v-for="(w, i) in salaryParsed.warnings" :key="i">⚠ {{ w }}</li>
-              </ul>
             </template>
           </UCard>
 
