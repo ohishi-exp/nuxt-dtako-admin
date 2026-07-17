@@ -21,6 +21,12 @@ import type {
   WageReportResponse,
   WageReportRow,
 } from '~/utils/restraint-wage-view'
+import type {
+  ParsedSalaryCsv,
+  SalaryComparison,
+  SalaryItemCategory,
+  SalaryItemConfig,
+} from '~/utils/salary-compare'
 
 const { session, authHeaders, restoreSession, showLoginPanel, expireSession } = useRestraintSession()
 
@@ -28,6 +34,7 @@ const TABS = [
   { key: 'archive', label: 'アーカイブ' },
   { key: 'monthly', label: '月次集計・印刷' },
   { key: 'minwage', label: '最低賃金チェック' },
+  { key: 'salary', label: '給与比較' },
   { key: 'master', label: '単価マスタ' },
 ] as const
 type TabKey = typeof TABS[number]['key']
@@ -86,6 +93,9 @@ watch(session, (s) => {
     archiveEntries.value = []
     archiveHistory.value = {}
     printBatch.value = null
+    // 貼り付け中の給与データはメモリ上にしか無い — ログアウトで破棄する
+    clearSalaryPaste()
+    salaryConfigLoaded.value = false
   }
   else {
     loadArchiveMonths()
@@ -391,6 +401,122 @@ async function downloadArchiveCsv(entry: ArchiveCsvEntry) {
 }
 
 // ---------------------------------------------------------------------------
+// ④ 給与比較 (Refs #253)
+// 貼り付けた給与明細 CSV はブラウザ内でのみ解析・比較する (サーバーへ送信・
+// 保存しない)。サーバーに保存するのは支給項目 → 基本給/残業 の区分設定だけ。
+// ---------------------------------------------------------------------------
+
+const salaryPaste = ref('')
+const salaryParsed = ref<ParsedSalaryCsv | null>(null)
+const salaryParseError = ref('')
+const salaryItemConfig = ref<SalaryItemConfig>({ items: {} })
+const salaryConfigLoaded = ref(false)
+const savingSalaryConfig = ref(false)
+const salaryConfigMessage = ref('')
+
+const SALARY_CATEGORY_OPTIONS = [
+  { label: '基本給として計算', value: 'base' },
+  { label: '残業として計算', value: 'overtime' },
+]
+
+async function loadSalaryItemConfig() {
+  if (!session.value) return
+  try {
+    const res = await $fetch<{ exists: boolean, data: SalaryItemConfig | null }>(
+      '/restraint-api/salary-item-config',
+      { headers: authHeaders() },
+    )
+    salaryItemConfig.value = res.data ?? { items: {} }
+    salaryConfigLoaded.value = true
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+}
+
+function parseSalaryPaste() {
+  salaryParseError.value = ''
+  salaryConfigMessage.value = ''
+  try {
+    salaryParsed.value = parseSalaryCsv(salaryPaste.value)
+  }
+  catch (e) {
+    salaryParsed.value = null
+    salaryParseError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+function clearSalaryPaste() {
+  salaryPaste.value = ''
+  salaryParsed.value = null
+  salaryParseError.value = ''
+}
+
+/** 区分設定の対象項目 (貼り付けから検出した項目 ∪ 保存済み設定のキー)。 */
+const salaryItemRows = computed(() => {
+  const labels = [...(salaryParsed.value?.itemLabels ?? [])]
+  for (const label of Object.keys(salaryItemConfig.value.items)) {
+    if (!labels.includes(label)) labels.push(label)
+  }
+  return labels.map(label => ({
+    label,
+    category: effectiveCategory(label, salaryItemConfig.value),
+    saved: label in salaryItemConfig.value.items,
+    inCsv: salaryParsed.value?.itemLabels.includes(label) ?? false,
+  }))
+})
+
+function setSalaryItemCategory(label: string, category: SalaryItemCategory) {
+  salaryItemConfig.value = { items: { ...salaryItemConfig.value.items, [label]: category } }
+  salaryConfigMessage.value = ''
+}
+
+async function saveSalaryItemConfig() {
+  if (!session.value) return
+  savingSalaryConfig.value = true
+  pageError.value = ''
+  try {
+    // 表示中の全項目の実効区分を明示保存する (未設定項目の推定既定値も確定させる)
+    const items: Record<string, SalaryItemCategory> = { ...salaryItemConfig.value.items }
+    for (const row of salaryItemRows.value) items[row.label] = row.category
+    const res = await $fetch<{ changed: boolean, data: SalaryItemConfig }>('/restraint-api/salary-item-config', {
+      method: 'PUT',
+      headers: authHeaders(),
+      body: { items },
+    })
+    salaryItemConfig.value = res.data
+    salaryConfigMessage.value = res.changed ? '項目区分を保存しました (新しい版を作成)' : '項目区分を保存しました (内容は前回と同一)'
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+  finally {
+    savingSalaryConfig.value = false
+  }
+}
+
+/** 選択中の月の CSV 行。 */
+const salaryMonthRows = computed(() =>
+  (salaryParsed.value?.rows ?? []).filter(r => r.month === month.value))
+
+const salaryComparison = computed<SalaryComparison | null>(() => {
+  if (!salaryParsed.value || !report.value || report.value.month !== month.value) return null
+  return compareSalaryMonth(salaryMonthRows.value, report.value.rows, salaryItemConfig.value)
+})
+
+function selectSalaryMonth(ym: string) {
+  selectedYear.value = parseInt(ym.slice(0, 4), 10)
+  selectedMonthNo.value = parseInt(ym.slice(5, 7), 10)
+}
+
+/** 差額表示 (0 は "±0"、正負は符号つき)。 */
+function fmtDiff(v: number | null): string {
+  if (v == null) return '-'
+  if (v === 0) return '±0'
+  return (v > 0 ? '+' : '') + v.toLocaleString('ja-JP')
+}
+
+// ---------------------------------------------------------------------------
 // ③ 単価マスタ
 // ---------------------------------------------------------------------------
 
@@ -561,6 +687,10 @@ watch([activeTab, month, session], () => {
   if (!session.value || !month.value) return
   if (activeTab.value === 'monthly' || activeTab.value === 'minwage') {
     if (!report.value || report.value.month !== month.value) loadWageReport()
+  }
+  else if (activeTab.value === 'salary') {
+    if (!report.value || report.value.month !== month.value) loadWageReport()
+    if (!salaryConfigLoaded.value) loadSalaryItemConfig()
   }
   else if (activeTab.value === 'archive') {
     loadArchive()
@@ -867,6 +997,162 @@ watch([activeTab, month, session], () => {
                 換算時給 = 時間給合計 ÷ 実働時間。単価未設定の乗務員は計算されません。
               </p>
             </div>
+          </UCard>
+        </template>
+
+        <!-- ④ 給与比較 (Refs #253) -->
+        <template v-else-if="activeTab === 'salary'">
+          <UCard>
+            <template #header>
+              <div class="flex flex-wrap items-center gap-3">
+                <span class="font-semibold">給与明細の貼り付け</span>
+                <span class="text-xs text-gray-500">貼り付けたデータはブラウザ内でのみ比較され、サーバーへ送信・保存されません</span>
+                <div class="flex-1" />
+                <UButton size="xs" variant="soft" icon="i-lucide-eraser" label="クリア" :disabled="!salaryPaste" @click="clearSalaryPaste" />
+                <UButton size="xs" icon="i-lucide-scan-line" label="解析" :disabled="!salaryPaste.trim()" @click="parseSalaryPaste" />
+              </div>
+            </template>
+            <UTextarea
+              v-model="salaryPaste"
+              :rows="6"
+              class="w-full font-mono"
+              placeholder="給与システムの給与明細一覧 (ヘッダー行を含む) を Excel からコピーするか、CSV の中身をそのまま貼り付けてください"
+            />
+            <p v-if="salaryParseError" class="text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-2 mt-2">
+              {{ salaryParseError }}
+            </p>
+            <template v-if="salaryParsed">
+              <p class="text-sm text-gray-600 dark:text-gray-300 mt-2">
+                {{ salaryParsed.rows.length }} 行 / 支給項目 {{ salaryParsed.itemLabels.length }} 件を検出しました
+              </p>
+              <div class="flex flex-wrap items-center gap-1 mt-1">
+                <span class="text-xs text-gray-500">検出した月 (クリックで比較対象月を切替):</span>
+                <UButton
+                  v-for="ym in salaryParsed.months"
+                  :key="ym"
+                  size="xs"
+                  :variant="ym === month ? 'solid' : 'soft'"
+                  :label="fmtYm(ym)"
+                  @click="selectSalaryMonth(ym)"
+                />
+              </div>
+              <ul v-if="salaryParsed.warnings.length" class="text-xs text-amber-600 dark:text-amber-400 mt-2 space-y-0.5 max-h-32 overflow-y-auto">
+                <li v-for="(w, i) in salaryParsed.warnings" :key="i">⚠ {{ w }}</li>
+              </ul>
+            </template>
+          </UCard>
+
+          <UCard v-if="salaryItemRows.length">
+            <template #header>
+              <div class="flex flex-wrap items-center gap-3">
+                <span class="font-semibold">支給項目の区分 (基本給 / 残業)</span>
+                <span class="text-xs text-gray-500">この区分設定だけがサーバーに保存されます</span>
+                <div class="flex-1" />
+                <UButton size="xs" icon="i-lucide-save" label="区分を保存" :loading="savingSalaryConfig" @click="saveSalaryItemConfig" />
+              </div>
+            </template>
+            <p v-if="salaryConfigMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2 mb-3">
+              {{ salaryConfigMessage }}
+            </p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-1.5">
+              <div v-for="row in salaryItemRows" :key="row.label" class="flex items-center gap-2 text-sm">
+                <span class="flex-1 truncate" :class="row.inCsv ? '' : 'text-gray-400'" :title="row.label">
+                  {{ row.label }}
+                  <span v-if="!row.inCsv" class="text-xs">(貼り付けに無い項目)</span>
+                </span>
+                <span v-if="!row.saved" class="text-xs text-amber-600 dark:text-amber-400 shrink-0" title="保存済みの区分が無いため項目名からの推定値を表示しています">未保存</span>
+                <USelect
+                  :model-value="row.category"
+                  :items="SALARY_CATEGORY_OPTIONS"
+                  size="xs"
+                  class="w-40 shrink-0"
+                  @update:model-value="(v: unknown) => setSalaryItemCategory(row.label, v as SalaryItemCategory)"
+                />
+              </div>
+            </div>
+          </UCard>
+
+          <UCard v-if="salaryParsed">
+            <template #header>
+              <div class="flex flex-wrap items-center gap-3">
+                <span class="font-semibold">比較結果 ({{ fmtYm(month) }})</span>
+                <span class="text-xs text-gray-500">CSV の区分集計 vs システム計算 (法定内 = 法定時間内額、割増 = 合計 − 法定内)</span>
+                <div class="flex-1" />
+                <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再計算" :loading="loadingReport" @click="loadWageReport" />
+              </div>
+            </template>
+
+            <p v-if="!salaryMonthRows.length" class="text-sm text-gray-500">
+              貼り付けデータに {{ fmtYm(month) }} の行がありません (上の「検出した月」から切り替えてください)
+            </p>
+            <p v-else-if="loadingReport" class="text-sm text-gray-500">
+              システム計算 (wage-report) を読み込み中...
+            </p>
+            <p v-else-if="!salaryComparison" class="text-sm text-gray-500">
+              この月の summary がアーカイブにありません (/restraint-fetch で取得するか、アーカイブタブで再計算してください)
+            </p>
+            <template v-else>
+              <ul v-if="salaryComparison.warnings.length" class="text-xs text-amber-600 dark:text-amber-400 mb-2 space-y-0.5">
+                <li v-for="(w, i) in salaryComparison.warnings" :key="i">⚠ {{ w }}</li>
+              </ul>
+              <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead>
+                    <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
+                      <th class="px-2 py-2">乗務員CD</th>
+                      <th class="px-2 py-2">氏名</th>
+                      <th class="px-2 py-2 text-right">基本給計(給与)</th>
+                      <th class="px-2 py-2 text-right">法定内(計算)</th>
+                      <th class="px-2 py-2 text-right">差</th>
+                      <th class="px-2 py-2 text-right">残業計(給与)</th>
+                      <th class="px-2 py-2 text-right">割増(計算)</th>
+                      <th class="px-2 py-2 text-right">差</th>
+                      <th class="px-2 py-2 text-right">支給計(給与)</th>
+                      <th class="px-2 py-2 text-right">合計(計算)</th>
+                      <th class="px-2 py-2 text-right">差</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="row in salaryComparison.rows"
+                      :key="row.driverCd"
+                      class="border-b border-gray-100 dark:border-gray-800"
+                    >
+                      <td class="px-2 py-1.5">{{ row.driverCd }}</td>
+                      <td class="px-2 py-1.5">{{ row.driverName }}</td>
+                      <td class="px-2 py-1.5 text-right">{{ fmtYen(row.csvBase) }}</td>
+                      <td class="px-2 py-1.5 text-right">{{ fmtYen(row.sysBase) }}</td>
+                      <td class="px-2 py-1.5 text-right" :class="(row.diffBase ?? 0) !== 0 ? 'text-red-600 font-medium' : 'text-gray-400'">
+                        {{ fmtDiff(row.diffBase) }}
+                      </td>
+                      <td class="px-2 py-1.5 text-right">{{ fmtYen(row.csvOvertime) }}</td>
+                      <td class="px-2 py-1.5 text-right">{{ fmtYen(row.sysOvertime) }}</td>
+                      <td class="px-2 py-1.5 text-right" :class="(row.diffOvertime ?? 0) !== 0 ? 'text-red-600 font-medium' : 'text-gray-400'">
+                        {{ fmtDiff(row.diffOvertime) }}
+                      </td>
+                      <td class="px-2 py-1.5 text-right" :title="row.csvReportedTotal != null && row.csvReportedTotal !== row.csvTotal ? `支給合計額列は ${fmtYen(row.csvReportedTotal)} 円 (項目計と不一致)` : undefined">
+                        {{ fmtYen(row.csvTotal) }}
+                        <span v-if="row.csvReportedTotal != null && row.csvReportedTotal !== row.csvTotal" class="text-amber-600">*</span>
+                      </td>
+                      <td class="px-2 py-1.5 text-right">{{ fmtYen(row.sysTotal) }}</td>
+                      <td class="px-2 py-1.5 text-right" :class="(row.diffTotal ?? 0) !== 0 ? 'text-red-600 font-medium' : 'text-gray-400'">
+                        {{ fmtDiff(row.diffTotal) }}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="text-xs text-gray-500 mt-2">
+                差 = 給与明細 − システム計算。* は 支給合計額 列と支給項目の合算が一致しない行。
+                単価マスタ未設定の乗務員は計算列が「-」になります。
+              </p>
+              <p v-if="salaryComparison.csvOnly.length" class="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                給与明細のみ (システム計算なし): {{ salaryComparison.csvOnly.map(d => `${d.driverCd} ${d.driverName}`).join(', ') }}
+              </p>
+              <p v-if="salaryComparison.reportOnly.length" class="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                システム計算のみ (給与明細なし): {{ salaryComparison.reportOnly.map(d => `${d.driverCd} ${d.driverName}`).join(', ') }}
+              </p>
+            </template>
           </UCard>
         </template>
 
