@@ -485,6 +485,8 @@ describe('computeWageRow', () => {
     const row = computeWageRow(baseSummary, 2025, 4, wageMaster, noMinWage, DEFAULT_WAGE_CONFIG)
     expect(row.minWage.rate).toBeNull()
     expect(row.minWageTotalPay).toBeNull()
+    expect(row.minWageStatutoryPay).toBeNull()
+    expect(row.minWageNightPay).toBeNull()
     expect(row.totalPayDiff).toBeNull()
     expect(row.minWageOvertimePay).toBeNull()
     expect(row.minWageOvertimeRate).toBeNull()

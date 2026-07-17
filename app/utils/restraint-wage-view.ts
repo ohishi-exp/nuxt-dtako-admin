@@ -54,6 +54,8 @@ export interface WageRow {
   minWage: { rate: number | null, prefecture: string | null, mapped: boolean }
   minWageDiff: number | null
   minWageTotalPay: number | null
+  minWageStatutoryPay: number | null
+  minWageNightPay: number | null
   totalPayDiff: number | null
   overtimeMinutes: number
   minWageOvertimeRate: number | null

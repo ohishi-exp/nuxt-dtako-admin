@@ -545,6 +545,12 @@ export interface WageRow {
   minWageDiff: number | null;
   /** 最低賃金 × hourlyBasis の時間 (支給見込みの最低賃金換算値)。分母 0 や最低賃金なしは null。 */
   minWageTotalPay: number | null;
+  /** 法定時間内賃金の最低賃金換算 (最低賃金 × statutory 時間)。UI の「基本給(法定内)」
+   * 列の比較対象。最低賃金なしは null。 */
+  minWageStatutoryPay: number | null;
+  /** 通常勤務中の深夜加算 (night 区分、残業ではない深夜) の最低賃金換算
+   * (最低賃金 × night 時間 × night 係数 0.25 — 加算分のみ)。最低賃金なしは null。 */
+  minWageNightPay: number | null;
   /** totalAmount − minWageTotalPay (どちらか欠けたら null。負 = 支給見込みが最低賃金換算を下回る)。 */
   totalPayDiff: number | null;
   /** 通常残業 (時間外 + 週40超過) の合計時間 (分)。時間外深夜は含まない (nightOvertimeMinutes)。 */
@@ -692,6 +698,12 @@ export function computeWageRow(
     minWage.rate !== null && basisMinutes !== null && basisMinutes > 0
       ? Math.round(minWage.rate * (basisMinutes / 60))
       : null;
+  const minWageStatutoryPay =
+    minWage.rate !== null ? Math.round(minWage.rate * (minutes.statutory / 60)) : null;
+  const minWageNightPay =
+    minWage.rate !== null
+      ? Math.round(minWage.rate * (minutes.night / 60) * config.rates.night)
+      : null;
   const overtimeMinutes = minutes.overtime + minutes.weekly40Excess;
   const nightOvertimeMinutes = minutes.overtimeNight;
   let minWageOvertimePay: number | null = null;
@@ -729,6 +741,8 @@ export function computeWageRow(
     minWageDiff:
       hourlyEquivalent !== null && minWage.rate !== null ? hourlyEquivalent - minWage.rate : null,
     minWageTotalPay,
+    minWageStatutoryPay,
+    minWageNightPay,
     totalPayDiff:
       totalAmount !== null && minWageTotalPay !== null ? totalAmount - minWageTotalPay : null,
     overtimeMinutes,

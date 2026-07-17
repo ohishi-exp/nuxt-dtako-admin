@@ -9,7 +9,6 @@
 //
 // 給与比較の計算側 (sysBase/sysOvertime) は**給与明細の【 補助 】単価基準**で
 // 単価マスタを参照しない (タブ責務分離、docs/plan-268-wage-tab-separation.md)。
-import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   compareSalaryMonth,
@@ -19,8 +18,9 @@ import {
 import type { WageReportRow } from '../../app/utils/restraint-wage-view'
 import summaries from '../fixtures/restraint-wage/summaries.json'
 import golden from '../fixtures/restraint-wage/golden/wage-rows.json'
-
-const csvText = readFileSync(new URL('../fixtures/restraint-wage/salary-2026-07.csv', import.meta.url), 'utf8')
+// happy-dom 環境では import.meta.url が file: URL にならず readFileSync が使えない
+// ため、CSV は Vite の ?raw import で読む。
+import csvText from '../fixtures/restraint-wage/salary-2026-07.csv?raw'
 
 /** 共有 fixture から wage-report 相当の行を組み立てる (wage は golden = 本物の計算出力)。 */
 const reportRows: WageReportRow[] = summaries.map(s => ({

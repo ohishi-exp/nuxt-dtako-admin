@@ -30,9 +30,6 @@ import type {
   SalaryItemCategory,
   SalaryItemConfig,
 } from '~/utils/salary-compare'
-// 最低賃金チェックタブの区分別表示 (基本給・深夜等) の係数に使う。wage-report
-// レスポンスは config を含まないため、既定値をここで直接参照する。
-import { DEFAULT_WAGE_CONFIG } from '../../workers/dtako-scraper-relay/src/restraint-wage'
 
 const { session, authHeaders, restoreSession, showLoginPanel, expireSession } = useRestraintSession()
 
@@ -185,32 +182,18 @@ function ratePerHour(pay: number | null, minutes: number): number | null {
   return Math.round(pay / (minutes / 60))
 }
 
-/** 法定時間内賃金の最低賃金換算 (最低賃金 × 法定時間内の時間)。「給与比較」タブの
- * sysBase (amounts.statutory) と対になる値。最低賃金なしは null。 */
-function minWageStatutoryPay(wage: WageReportRow['wage']): number | null {
-  if (wage.minWage.rate === null) return null
-  return Math.round(wage.minWage.rate * (wage.minutes.statutory / 60))
-}
-
-/** amounts.statutory − minWageStatutoryPay。どちらか欠けたら null。 */
+/** amounts.statutory − wage.minWageStatutoryPay (法定内の最低賃金換算は worker が
+ * wage-report に含めて返す)。どちらか欠けたら null。 */
 function statutoryDiff(wage: WageReportRow['wage']): number | null {
   const actual = wage.amounts?.statutory ?? null
-  const minWage = minWageStatutoryPay(wage)
-  return actual == null || minWage == null ? null : actual - minWage
+  return actual == null || wage.minWageStatutoryPay == null ? null : actual - wage.minWageStatutoryPay
 }
 
-/** 通常勤務中の深夜加算 (残業ではない深夜、night 区分) の最低賃金換算。
- * night は「加算分のみ」係数 (0.25) — 法定内 1.0 とは別枠の上乗せ。 */
-function minWageNightPay(wage: WageReportRow['wage']): number | null {
-  if (wage.minWage.rate === null) return null
-  return Math.round(wage.minWage.rate * (wage.minutes.night / 60) * DEFAULT_WAGE_CONFIG.rates.night)
-}
-
-/** amounts.night − minWageNightPay。どちらか欠けたら null。 */
+/** amounts.night − wage.minWageNightPay (深夜(通常) の最低賃金換算、worker 供給)。
+ * どちらか欠けたら null。 */
 function nightDiff(wage: WageReportRow['wage']): number | null {
   const actual = wage.amounts?.night ?? null
-  const minWage = minWageNightPay(wage)
-  return actual == null || minWage == null ? null : actual - minWage
+  return actual == null || wage.minWageNightPay == null ? null : actual - wage.minWageNightPay
 }
 
 /** null 許容の加算 (両方 null なら null、片方だけ null は 0 扱い)。
@@ -1361,14 +1344,14 @@ watch([activeTab, month, session], () => {
                     <td class="px-2 py-1.5 text-right">{{ fmtMinutes(row.summary.workingMinutes) }}</td>
                     <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700">
                       <div class="font-medium">{{ fmtYen(row.wage.amounts?.statutory ?? null) }}</div>
-                      <div class="text-xs text-gray-500">{{ fmtYen(minWageStatutoryPay(row.wage)) }}</div>
+                      <div class="text-xs text-gray-500">{{ fmtYen(row.wage.minWageStatutoryPay) }}</div>
                       <div class="text-xs" :class="(statutoryDiff(row.wage) ?? 0) < 0 ? 'text-red-600 font-bold' : 'text-gray-400'">
                         {{ fmtDiff(statutoryDiff(row.wage)) }}
                       </div>
                     </td>
                     <td class="px-2 py-1.5 text-right">
                       <div class="font-medium">{{ fmtYen(row.wage.amounts?.night ?? null) }}</div>
-                      <div class="text-xs text-gray-500">{{ fmtYen(minWageNightPay(row.wage)) }}</div>
+                      <div class="text-xs text-gray-500">{{ fmtYen(row.wage.minWageNightPay) }}</div>
                       <div class="text-xs" :class="(nightDiff(row.wage) ?? 0) < 0 ? 'text-red-600 font-bold' : 'text-gray-400'">
                         {{ fmtDiff(nightDiff(row.wage)) }}
                       </div>
