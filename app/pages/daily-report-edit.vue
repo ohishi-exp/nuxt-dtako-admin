@@ -411,6 +411,8 @@ const linkResult = ref<string | null>(null)
 // この運行の csvdata.zip ダウンロード (モーダル内、単一運行のみ)
 const opeZipLoading = ref(false)
 
+const deletingCtrlIndex = ref<number | null>(null)
+
 const fuelEditForm = reactive<Record<number, { supplyCategory: string, supplyStation: string, supplyType: string, dateTime: string, quantity: string }>>({})
 
 function syncFuelEditForm() {
@@ -595,6 +597,39 @@ async function saveFuelRow(ctrlIndex: number) {
   }
   finally {
     savingCtrlIndex.value = null
+  }
+}
+
+async function deleteFuelRow(ctrlIndex: number) {
+  const s = session.value
+  const target = selectedRow.value
+  if (!s || !target) return
+  if (!window.confirm('この給油行を削除しますか？削除は theearth 側にも反映されます。')) return
+  deletingCtrlIndex.value = ctrlIndex
+  expenseError.value = null
+  try {
+    const res = await $fetch<{ fuelRows: FuelRow[] }>('/daily-report-api/expense/delete', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: {
+        opeNo: target.operationNo,
+        startOpe: target.startDateTime,
+        ctrlIndex,
+      },
+    })
+    fuelRows.value = res.fuelRows
+    syncFuelEditForm()
+  }
+  catch (e) {
+    if (dailyReportErrorStatus(e) === 401) {
+      expireSession(dailyReportErrorMessage(e))
+      expenseModalOpen.value = false
+      return
+    }
+    expenseError.value = dailyReportErrorMessage(e)
+  }
+  finally {
+    deletingCtrlIndex.value = null
   }
 }
 
@@ -1446,6 +1481,15 @@ onMounted(() => {
                         label="保存"
                         :loading="savingCtrlIndex === row.ctrlIndex"
                         @click="saveFuelRow(row.ctrlIndex)"
+                      />
+                      <UButton
+                        size="xs"
+                        color="error"
+                        variant="outline"
+                        label="削除"
+                        class="ml-1"
+                        :loading="deletingCtrlIndex === row.ctrlIndex"
+                        @click="deleteFuelRow(row.ctrlIndex)"
                       />
                     </td>
                   </tr>
