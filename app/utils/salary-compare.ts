@@ -3,8 +3,8 @@
  * 拘束×賃金 wage-report との乗務員別突合 (Refs #253)。
  *
  * 貼り付けデータは**ブラウザ内でのみ**解析・比較し、サーバーへ送信・保存しない。
- * サーバー (R2 版管理) に保存されるのは支給項目 → 基本給/残業 の区分設定
- * (/restraint-api/salary-item-config) だけ。
+ * サーバー (R2 版管理) に保存されるのは支給項目 → 区分 (SalaryItemCategory の
+ * 5 区分、Refs #278) の設定 (/restraint-api/salary-item-config) だけ。
  *
  * フォーマット (2025/2026 様式で確認):
  *   社員コード,社員名,給与・賞与名,【 勤怠 】,...,【 支給 】,基本給,...,支給合計額,課税支給額,【 控除 】,...
@@ -15,7 +15,32 @@
 
 import type { WageReportRow } from './restraint-wage-view'
 
-export type SalaryItemCategory = 'base' | 'overtime'
+/**
+ * 支給項目の区分 (Refs #278)。法令上の除外集合は 2 軸で別物のため、
+ * 割増賃金の基礎 (労基法37条5項・施行規則21条: 除外は限定列挙 7 種) と
+ * 最低賃金の対象賃金 (最低賃金法4条3項) の組合せで 5 区分にする:
+ *
+ * | 区分               | 代表例                     | 割増基礎 | 最低賃金 |
+ * |--------------------|----------------------------|----------|----------|
+ * | base               | 基本給・職務・無事故手当   | ○        | ○        |
+ * | overtime           | 残業・深夜・休日出勤手当   | —        | ×        |
+ * | minwage-only       | 住宅・別居・子女教育手当   | ×        | ○        |
+ * | premium-base-only  | 精皆勤手当                 | ○        | ×        |
+ * | excluded           | 通勤・家族手当、臨時・賞与 | ×        | ×        |
+ *
+ * 'base' / 'overtime' は旧 2 区分時代の保存済み設定と同じ値・同じ意味 (後方互換)。
+ */
+export type SalaryItemCategory = 'base' | 'overtime' | 'minwage-only' | 'premium-base-only' | 'excluded'
+
+/** 区分 → 各集計軸に算入するか。overtime (割増そのもの) はどちらの基礎にも入らず、
+ * 支払残業代の束として別扱いする。 */
+export const SALARY_CATEGORY_FLAGS: Record<SalaryItemCategory, { premiumBase: boolean, minWage: boolean }> = {
+  'base': { premiumBase: true, minWage: true },
+  'overtime': { premiumBase: false, minWage: false },
+  'minwage-only': { premiumBase: false, minWage: true },
+  'premium-base-only': { premiumBase: true, minWage: false },
+  'excluded': { premiumBase: false, minWage: false },
+}
 
 /** 支給項目名 (NFKC + trim 済み) → 区分。worker 側 normalizeSalaryItemConfig と同型。 */
 export interface SalaryItemConfig { items: Record<string, SalaryItemCategory> }
@@ -101,9 +126,13 @@ function parseAmount(cell: string): number | null {
   return Number.isFinite(v) ? v : null
 }
 
-/** 支給項目名から区分の初期候補を推定する (未設定項目の既定値)。 */
+/** 支給項目名から区分の初期候補を推定する (未設定項目の既定値、Refs #278)。 */
 export function suggestCategory(label: string): SalaryItemCategory {
-  return /残業|時間外|深夜|休日出勤/.test(label) ? 'overtime' : 'base'
+  if (/残業|時間外|深夜|休日出勤/.test(label)) return 'overtime'
+  if (/住宅|別居|子女教育/.test(label)) return 'minwage-only'
+  if (/精勤|皆勤/.test(label)) return 'premium-base-only'
+  if (/通勤|家族|賞与|臨時/.test(label)) return 'excluded'
+  return 'base'
 }
 
 /** 設定に無い項目は suggestCategory で補完した実効区分。 */
@@ -359,6 +388,29 @@ export interface SalaryComparisonRow {
   diffBase: number | null
   diffOvertime: number | null
   diffTotal: number | null
+  /** 割増基礎に算入する支給項目の合計 (base + premium-base-only、Refs #278)。 */
+  csvPremiumBase: number
+  /** csvPremiumBase の内訳。 */
+  csvPremiumBaseItems: SalaryItemAmount[]
+  /** 最低賃金の対象賃金に算入する支給項目の合計 (base + minwage-only)。
+   * 最低賃金の法定チェックの分子はこちらを使う — 通勤・家族手当等 (excluded) を
+   * 混入させない (割れ見逃し方向の誤りを防ぐ、Refs #278)。 */
+  csvMinWageEligible: number
+  /** csvMinWageEligible の内訳。 */
+  csvMinWageEligibleItems: SalaryItemAmount[]
+  /** デジタコ法定内時間 (wage-report の minutes.statutory、分)。 */
+  statutoryMinutes: number
+  /** 基礎単価(実績) = csvPremiumBase ÷ 法定内時間 (円/h、丸めなし)。
+   * 法定内時間 0 や割増基礎算入分 0 の行は null (算出不可)。
+   * 単価マスタの時給との検算にもなる (Refs #278)。 */
+  baseRateActual: number | null
+  /** 基礎単価(実績) を基礎額とした割増残業代の理論値 (労基法37条、
+   * computeOvertimePayAtRate)。baseRateActual が null なら null。 */
+  baseRateOvertimePay: number | null
+  /** csvOvertime (支払残業代) − baseRateOvertimePay。負 = 実際の基礎単価に
+   * 対する法定割増を下回っている (**主判定・37条**)。残業(最低賃金) は
+   * 絶対下限の併記に回る (Refs #278)。 */
+  diffCsvVsBaseRateOvertime: number | null
   /** minWageOvertimePay の計算対象時間 (通常残業+深夜残業、wage-report の
    * overtimeMinutes+nightOvertimeMinutes)。sysOvertimeMinutes (時間外+時間外深夜)
    * と異なり週40超過分も含む。 */
@@ -383,27 +435,75 @@ export interface SalaryComparison {
   warnings: string[]
 }
 
-/** CSV 1 行を区分設定で 基本給/残業 の 2 束に集計する (内訳つき)。 */
-export function sumByCategory(row: SalaryCsvRow, config: SalaryItemConfig): {
-  base: number
-  overtime: number
-  baseItems: SalaryItemAmount[]
-  overtimeItems: SalaryItemAmount[]
-} {
-  let base = 0
-  let overtime = 0
-  const baseItems: SalaryItemAmount[] = []
-  const overtimeItems: SalaryItemAmount[] = []
-  for (const [label, amount] of Object.entries(row.amounts)) {
-    if (effectiveCategory(label, config) === 'overtime') {
-      overtime += amount
-      overtimeItems.push({ label, amount })
-    } else {
-      base += amount
-      baseItems.push({ label, amount })
-    }
+/** 区分 1 束の集計 (合計 + 内訳)。 */
+export interface CategorySum { total: number, items: SalaryItemAmount[] }
+
+export interface SalaryCategorySums {
+  /** 5 区分それぞれの束。 */
+  buckets: Record<SalaryItemCategory, CategorySum>
+  /** 割増賃金の基礎 (37条): base + premium-base-only。 */
+  premiumBase: CategorySum
+  /** 最低賃金の対象賃金 (4条3項): base + minwage-only。 */
+  minWageEligible: CategorySum
+  /** 全支給項目の合計 (excluded 含む — 支給合計額列との検算用)。 */
+  total: number
+}
+
+/** CSV 1 行を区分設定で 5 区分に集計する (内訳つき、Refs #278)。 */
+export function sumByCategory(row: SalaryCsvRow, config: SalaryItemConfig): SalaryCategorySums {
+  const buckets: Record<SalaryItemCategory, CategorySum> = {
+    'base': { total: 0, items: [] },
+    'overtime': { total: 0, items: [] },
+    'minwage-only': { total: 0, items: [] },
+    'premium-base-only': { total: 0, items: [] },
+    'excluded': { total: 0, items: [] },
   }
-  return { base, overtime, baseItems, overtimeItems }
+  const premiumBase: CategorySum = { total: 0, items: [] }
+  const minWageEligible: CategorySum = { total: 0, items: [] }
+  let total = 0
+  for (const [label, amount] of Object.entries(row.amounts)) {
+    const category = effectiveCategory(label, config)
+    const item = { label, amount }
+    buckets[category].total += amount
+    buckets[category].items.push(item)
+    const flags = SALARY_CATEGORY_FLAGS[category]
+    if (flags.premiumBase) {
+      premiumBase.total += amount
+      premiumBase.items.push(item)
+    }
+    if (flags.minWage) {
+      minWageEligible.total += amount
+      minWageEligible.items.push(item)
+    }
+    total += amount
+  }
+  return { buckets, premiumBase, minWageEligible, total }
+}
+
+/** 月の時間外割増の法定上限 (worker computeMinWageOvertimePay と同じ閾値)。 */
+const MONTHLY_OVERTIME_THRESHOLD_MINUTES = 60 * 60
+
+/**
+ * rate を基礎額とした割増残業代の理論値 (労基法37条、Refs #278)。
+ * worker の computeMinWageOvertimePay と同一ロジック — 時間外軸 (月60hまで
+ * 1.25倍・超過分1.5倍) と深夜軸 (常時+0.25倍) の独立加算。係数は既定値固定
+ * (rate に給与明細由来の基礎単価を渡すため、ブラウザ内で完結して計算する)。
+ *
+ * @param overtimeMinutes 時間外 + 時間外深夜 + 週40超過 の合計 (分、月60h判定の対象)
+ * @param overtimeNightMinutes うち時間外深夜 (分、深夜加算 0.25 の対象)
+ */
+export function computeOvertimePayAtRate(
+  overtimeMinutes: number,
+  overtimeNightMinutes: number,
+  rate: number,
+): number {
+  const under = Math.min(overtimeMinutes, MONTHLY_OVERTIME_THRESHOLD_MINUTES)
+  const over = Math.max(0, overtimeMinutes - MONTHLY_OVERTIME_THRESHOLD_MINUTES)
+  return Math.round(
+    (under / 60) * rate * 1.25
+    + (over / 60) * rate * 1.5
+    + (overtimeNightMinutes / 60) * rate * 0.25,
+  )
 }
 
 /**
@@ -439,7 +539,9 @@ export function compareSalaryMonth(
       continue
     }
     matched.add(cdKey)
-    const { base, overtime, baseItems, overtimeItems } = sumByCategory(csv, config)
+    const sums = sumByCategory(csv, config)
+    const base = sums.buckets['base'].total
+    const overtime = sums.buckets['overtime'].total
     const workDays = report.summary.workDays
     const overtimeMinutes = (report.summary.overtimeMinutes ?? 0) + (report.summary.overtimeNightMinutes ?? 0)
 
@@ -458,15 +560,26 @@ export function compareSalaryMonth(
         ? report.wage.minWageOvertimePay + report.wage.minWageNightOvertimePay
         : null
 
+    // 基礎単価(実績) = 割増基礎算入分 ÷ デジタコ法定内時間 と、それを基礎額に
+    // した割増残業代の理論値 (労基法37条の主判定、Refs #278)。時間軸は
+    // 残業(最低賃金) と同じ — 週40超過分を含む。
+    const statutoryMinutes = report.wage.minutes.statutory
+    const baseRateActual = statutoryMinutes > 0 && sums.premiumBase.total > 0
+      ? sums.premiumBase.total / (statutoryMinutes / 60)
+      : null
+    const baseRateOvertimePay = baseRateActual !== null
+      ? computeOvertimePayAtRate(minWageOvertimeMinutes, report.wage.nightOvertimeMinutes, baseRateActual)
+      : null
+
     rows.push({
       driverCd: csv.driverCd,
       mappedDriverCd: csv.cdKey === cdKey ? null : report.summary.driverCd,
       driverName: csv.driverName,
       csvBase: base,
-      csvBaseItems: baseItems,
+      csvBaseItems: sums.buckets['base'].items,
       csvOvertime: overtime,
-      csvOvertimeItems: overtimeItems,
-      csvTotal: base + overtime,
+      csvOvertimeItems: sums.buckets['overtime'].items,
+      csvTotal: sums.total,
       csvReportedTotal: csv.reportedTotal,
       sysBase,
       sysOvertime,
@@ -475,7 +588,15 @@ export function compareSalaryMonth(
       sysOvertimeMinutes: overtimeMinutes,
       diffBase: sysBase === null ? null : base - sysBase,
       diffOvertime: sysOvertime === null ? null : overtime - sysOvertime,
-      diffTotal: sysTotal === null ? null : base + overtime - sysTotal,
+      diffTotal: sysTotal === null ? null : sums.total - sysTotal,
+      csvPremiumBase: sums.premiumBase.total,
+      csvPremiumBaseItems: sums.premiumBase.items,
+      csvMinWageEligible: sums.minWageEligible.total,
+      csvMinWageEligibleItems: sums.minWageEligible.items,
+      statutoryMinutes,
+      baseRateActual,
+      baseRateOvertimePay,
+      diffCsvVsBaseRateOvertime: baseRateOvertimePay === null ? null : overtime - baseRateOvertimePay,
       minWageOvertimeMinutes,
       minWageOvertimePay,
       diffCsvVsMinWageOvertime: minWageOvertimePay === null ? null : overtime - minWageOvertimePay,
