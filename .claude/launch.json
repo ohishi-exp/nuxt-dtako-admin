@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "restraint-relay-local",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "wrangler", "dev",
+        "-c", "workers/dtako-scraper-relay/wrangler.toml",
+        "--persist-to", ".wrangler-local",
+        "--var", "RESTRAINT_DEV_VIEWER_COMP:local",
+        "--port", "8787"
+      ],
+      "port": 8787
+    },
+    {
+      "name": "restraint-wage-local",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 3000
+    }
+  ]
+}

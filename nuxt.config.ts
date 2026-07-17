@@ -22,6 +22,12 @@ export default defineNuxtConfig({
 
   nitro: {
     preset: 'cloudflare_module',
+    // ローカル dev 専用 (Refs #268 PR-D): /restraint-api を wrangler dev の relay
+    // (127.0.0.1:8787) へ転送する。デプロイでは front worker が service binding で
+    // 処理するため devProxy は使われない。起動手順は docs/plan-268 参照。
+    devProxy: {
+      '/restraint-api': { target: 'http://127.0.0.1:8787/restraint-api' },
+    },
   },
 
   // VidMap.vue が使う `google.maps.*` グローバル型 (@types/google.maps) を

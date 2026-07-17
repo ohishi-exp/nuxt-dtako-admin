@@ -1536,9 +1536,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     routing: TheearthRouting,
     url: URL,
   ): Promise<TheearthSessionRecord | null> {
-    if (!token) return null;
     const viewerRecord = (): TheearthSessionRecord => ({
-      token,
+      token: token ?? "viewer",
       compId: routing.compId,
       userName: routing.userName,
       cookies: [],
@@ -1546,9 +1545,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       expiresAt: Date.now(),
     });
     // ローカル開発専用の短絡 (Env.RESTRAINT_DEV_VIEWER_COMP のコメント参照)。
+    // nuxt dev は stagingTenantId バイパスで auth セッションを持たないため、
+    // JWT 無しでも許可する (token 必須チェックより先に判定)。
     if (this.env.RESTRAINT_DEV_VIEWER_COMP) {
       return this.env.RESTRAINT_DEV_VIEWER_COMP === routing.compId ? viewerRecord() : null;
     }
+    if (!token) return null;
     const result = await this.introspect(token, `https://${url.host}`);
     if (!result.active || !result.tenant_id) return null;
     let accounts: DtakoAccountEntry[];
