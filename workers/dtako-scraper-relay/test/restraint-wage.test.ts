@@ -7,12 +7,14 @@ import {
   DEFAULT_WAGE_CONFIG,
   emptyCategoryMinutes,
   minWageForBranch,
+  normalizeDateCell,
   normalizeMinWageMaster,
   normalizeSalaryCdMap,
   normalizeSalaryItemConfig,
   normalizeWageConfig,
   normalizeWageMaster,
   rateForMonth,
+  splitCsvCells,
   upsertWageMasterFromCsv,
   WAGE_MASTER_CSV_HEADER,
   wageMasterToCsv,
@@ -527,7 +529,33 @@ describe('wageMasterToCsv / upsertWageMasterFromCsv', () => {
     expect(() => upsertWageMasterFromCsv(master, '')).toThrow(/空/)
     expect(() => upsertWageMasterFromCsv(master, 'abc,名前,1000,2025-01-01')).toThrow(/乗務員CD/)
     expect(() => upsertWageMasterFromCsv(master, '9901,名前,x,2025-01-01')).toThrow(/単価/)
-    expect(() => upsertWageMasterFromCsv(master, '9901,名前,1000,2025/01/01')).toThrow(/適用開始日/)
+    expect(() => upsertWageMasterFromCsv(master, '9901,名前,1000,2025年1月1日')).toThrow(/適用開始日/)
     expect(() => upsertWageMasterFromCsv(master, '9901')).toThrow(/適用開始日/)
+  })
+
+  it('Excel で開いて保存し直した CSV (日付 2025/10/4・"1,430" 単価・全角) を受け付ける', () => {
+    const merged = upsertWageMasterFromCsv({ drivers: {} }, [
+      '9901,試験　太郎,"1,430",2025/10/4', // Excel の日付書式 + 桁区切りクォート
+      '9902,試験　次郎,1050,2025-1-4', // ゼロ埋めなしハイフン
+      '9903,試験　三郎,980,２０２５/１０/０４', // 全角数字
+    ].join('\r\n'))
+    expect(merged.drivers['9901']!.rates).toEqual([{ effectiveFrom: '2025-10-04', hourlyRate: 1430 }])
+    expect(merged.drivers['9902']!.rates).toEqual([{ effectiveFrom: '2025-01-04', hourlyRate: 1050 }])
+    expect(merged.drivers['9903']!.rates).toEqual([{ effectiveFrom: '2025-10-04', hourlyRate: 980 }])
+  })
+})
+
+describe('splitCsvCells / normalizeDateCell', () => {
+  it('ダブルクォート内のカンマと "" エスケープを扱う', () => {
+    expect(splitCsvCells('a,"b,c","d""e"')).toEqual(['a', 'b,c', 'd"e'])
+    expect(splitCsvCells('x')).toEqual(['x'])
+  })
+
+  it('normalizeDateCell は各種表記を YYYY-MM-DD に正規化し、不正は null', () => {
+    expect(normalizeDateCell('2025-10-04')).toBe('2025-10-04')
+    expect(normalizeDateCell('2025/10/4')).toBe('2025-10-04')
+    expect(normalizeDateCell(' 2025/1/4 ')).toBe('2025-01-04')
+    expect(normalizeDateCell('2025年1月1日')).toBeNull()
+    expect(normalizeDateCell('')).toBeNull()
   })
 })

@@ -613,8 +613,51 @@ export function wageMasterToCsv(master: WageMaster): string {
   return lines.join("\r\n") + "\r\n";
 }
 
+/** CSV 1 行をダブルクォート ("" エスケープ) 対応で分割する。Excel が桁区切り
+ * 表示のセルを `"1,430"` として保存するケースに耐えるため、素の split(",") に
+ * しない。 */
+export function splitCsvCells(line: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cur += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ",") {
+      out.push(cur);
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+/** Excel が書き換えた日付表記 (2025/10/4・2025-1-4・全角数字) を YYYY-MM-DD に
+ * 正規化する。解釈できなければ null。 */
+export function normalizeDateCell(cell: string): string | null {
+  const m = cell.normalize("NFKC").trim().match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
+  if (!m) return null;
+  return `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
+}
+
 /** CSV を wage-master へ upsert する (乗務員CD × 適用開始日 がキー。同キーは
- * 上書き、新キーは追加。既存マスタに無い行を消すことはしない)。 */
+ * 上書き、新キーは追加。既存マスタに無い行を消すことはしない)。
+ * Excel で開いて保存し直した CSV (日付が 2025/10/4 形式・金額が "1,430" 等) も
+ * 受け付ける。 */
 export function upsertWageMasterFromCsv(base: WageMaster, csvText: string): WageMaster {
   const lines = csvText.split(/\r\n|\n/).filter((l) => l.trim() !== "");
   if (lines.length === 0) {
@@ -626,18 +669,25 @@ export function upsertWageMasterFromCsv(base: WageMaster, csvText: string): Wage
   }
   const startIdx = lines[0].startsWith("乗務員CD") ? 1 : 0;
   for (let i = startIdx; i < lines.length; i++) {
-    const cols = lines[i].split(",").map((c) => c.trim());
-    // split は必ず 1 要素以上返すので cols[0] は常に存在する
-    const [cd, name, rateStr, effectiveFrom] = [cols[0], cols[1] ?? "", cols[2] ?? "", cols[3] ?? ""];
+    const cols = splitCsvCells(lines[i]).map((c) => c.trim());
+    // NFKC は CD・単価・日付セルだけに適用する (氏名の全角スペースは原文保持)。
+    // splitCsvCells は必ず 1 要素以上返すので cols[0] は常に存在する
+    const cd = cols[0].normalize("NFKC");
+    const name = cols[1] ?? "";
+    const rateStr = (cols[2] ?? "").normalize("NFKC");
+    const effectiveFromRaw = cols[3] ?? "";
     if (!/^\d{1,8}$/.test(cd)) {
       throw new WageMasterError(`単価 CSV ${i + 1} 行目: 乗務員CD が不正です (${cd})`);
     }
-    const hourlyRate = Number(rateStr);
+    const hourlyRate = Number(rateStr.replace(/,/g, ""));
     if (!Number.isFinite(hourlyRate) || hourlyRate < 0) {
       throw new WageMasterError(`単価 CSV ${i + 1} 行目: 基本時間単価が不正です (${rateStr})`);
     }
-    if (!DATE_RE.test(effectiveFrom)) {
-      throw new WageMasterError(`単価 CSV ${i + 1} 行目: 適用開始日は YYYY-MM-DD が必要です (${effectiveFrom})`);
+    const effectiveFrom = normalizeDateCell(effectiveFromRaw);
+    if (effectiveFrom === null) {
+      throw new WageMasterError(
+        `単価 CSV ${i + 1} 行目: 適用開始日は YYYY-MM-DD (または 2025/10/4 形式) が必要です (${effectiveFromRaw})`,
+      );
     }
     const driver = out.drivers[cd] ?? { rates: [] };
     if (name) driver.name = name;
