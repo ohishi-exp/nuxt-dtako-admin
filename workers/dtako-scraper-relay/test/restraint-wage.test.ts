@@ -487,18 +487,31 @@ describe('wageMasterToCsv / upsertWageMasterFromCsv', () => {
     },
   }
 
-  it('export: 乗務員CD 順 × 履歴新しい順の 1 行 1 履歴', () => {
+  it('export: 適用開始日 降順 → 乗務員CD 昇順の 1 行 1 履歴', () => {
     const csv = wageMasterToCsv(master)
     expect(csv.split('\r\n')).toEqual([
       WAGE_MASTER_CSV_HEADER,
       '9901,試験　太郎,1200,2025-10-01',
-      '9901,試験　太郎,1100,2024-04-01',
       '9902,試験　次郎,1000,2025-01-01',
+      '9901,試験　太郎,1100,2024-04-01',
       '',
     ])
     // name 無しは空欄
     expect(wageMasterToCsv({ drivers: { 1: { rates: [{ effectiveFrom: '2025-01-01', hourlyRate: 900 }] } } }))
       .toContain('1,,900,2025-01-01')
+  })
+
+  it('export: 同一適用開始日は乗務員CD の数値昇順に並ぶ', () => {
+    const csv = wageMasterToCsv({
+      drivers: {
+        10: { rates: [{ effectiveFrom: '2025-10-04', hourlyRate: 1010 }] },
+        2: { rates: [{ effectiveFrom: '2025-10-04', hourlyRate: 1020 }] },
+      },
+    })
+    expect(csv.split('\r\n').slice(1, 3)).toEqual([
+      '2,,1020,2025-10-04',
+      '10,,1010,2025-10-04',
+    ])
   })
 
   it('import: 同キー (CD × 適用開始日) は上書き、新キーは追加。既存は消さない', () => {

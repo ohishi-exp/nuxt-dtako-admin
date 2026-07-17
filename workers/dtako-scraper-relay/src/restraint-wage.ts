@@ -598,17 +598,24 @@ export function computeWageRow(
 
 export const WAGE_MASTER_CSV_HEADER = "乗務員CD,乗務員名,基本時間単価,適用開始日";
 
-/** wage-master を CSV (1 行 = 1 履歴) に直列化する。 */
+/** wage-master を CSV (1 行 = 1 履歴) に直列化する。
+ * 並びは 適用開始日 降順 → 乗務員CD 昇順 (最新の改定グループが上、
+ * frontend の exportMasterCsv と同じ並び)。 */
 export function wageMasterToCsv(master: WageMaster): string {
   const lines = [WAGE_MASTER_CSV_HEADER];
-  const cds = Object.keys(master.drivers).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  for (const cd of cds) {
-    const driver = master.drivers[cd];
-    // 新しい履歴を上に (Excel で見た時に現行単価が先頭)
-    const rates = [...driver.rates].sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom));
-    for (const rate of rates) {
-      lines.push([cd, driver.name ?? "", String(rate.hourlyRate), rate.effectiveFrom].join(","));
+  const flat: Array<{ cd: string; name: string; rate: WageRateEntry }> = [];
+  for (const [cd, driver] of Object.entries(master.drivers)) {
+    for (const rate of driver.rates) {
+      flat.push({ cd, name: driver.name ?? "", rate });
     }
+  }
+  flat.sort(
+    (a, b) =>
+      b.rate.effectiveFrom.localeCompare(a.rate.effectiveFrom) ||
+      a.cd.localeCompare(b.cd, undefined, { numeric: true }),
+  );
+  for (const r of flat) {
+    lines.push([r.cd, r.name, String(r.rate.hourlyRate), r.rate.effectiveFrom].join(","));
   }
   return lines.join("\r\n") + "\r\n";
 }

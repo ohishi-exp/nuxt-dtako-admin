@@ -729,6 +729,27 @@ const masterRows = computed(() =>
     })
     .sort((a, b) => a.cd.localeCompare(b.cd, undefined, { numeric: true })))
 
+// ---- 単価履歴モーダル (Refs #253) ----
+
+/** 履歴モーダルの対象乗務員CD (null = 閉)。 */
+const rateHistoryCd = ref<string | null>(null)
+const rateHistoryOpen = computed({
+  get: () => rateHistoryCd.value !== null,
+  set: (open: boolean) => {
+    if (!open) rateHistoryCd.value = null
+  },
+})
+const rateHistoryRow = computed(() =>
+  rateHistoryCd.value === null ? null : masterRows.value.find(r => r.cd === rateHistoryCd.value) ?? null)
+
+/** 履歴 1 件をローカル削除する (「保存」で確定)。 */
+function removeRateEntry(cd: string, effectiveFrom: string) {
+  const driver = master.value.drivers[cd]
+  if (!driver) return
+  driver.rates = driver.rates.filter(r => r.effectiveFrom !== effectiveFrom)
+  masterMessage.value = `乗務員 ${cd} の ${effectiveFrom} の単価履歴を削除しました。「保存」で確定します`
+}
+
 function addRate(cd: string) {
   const input = newRates.value[cd]
   if (!input || !input.rate || !input.from) return
@@ -795,10 +816,14 @@ async function saveMaster() {
 
 function exportMasterCsv() {
   const lines = ['乗務員CD,乗務員名,基本時間単価,適用開始日']
-  for (const row of masterRows.value) {
-    for (const rate of row.history) {
-      lines.push([row.cd, row.driver.name ?? '', String(rate.hourlyRate), rate.effectiveFrom].join(','))
-    }
+  const flat = masterRows.value.flatMap(row =>
+    row.history.map(rate => ({ cd: row.cd, name: row.driver.name ?? '', rate })))
+  // 適用開始日 降順 → 乗務員CD 昇順 (最新の改定グループが上に並ぶ)
+  flat.sort((a, b) =>
+    b.rate.effectiveFrom.localeCompare(a.rate.effectiveFrom)
+    || a.cd.localeCompare(b.cd, undefined, { numeric: true }))
+  for (const r of flat) {
+    lines.push([r.cd, r.name, String(r.rate.hourlyRate), r.rate.effectiveFrom].join(','))
   }
   triggerDownload(new Blob(['﻿' + lines.join('\r\n') + '\r\n'], { type: 'text/csv;charset=utf-8' }), '単価マスタ.csv')
 }
@@ -1445,8 +1470,15 @@ watch([activeTab, month, session], () => {
                     </td>
                     <td class="px-2 py-1.5 text-right font-medium">{{ row.current ? fmtYen(row.current.hourlyRate) : '未設定' }}</td>
                     <td class="px-2 py-1.5">{{ row.current?.effectiveFrom ?? '-' }}</td>
-                    <td class="px-2 py-1.5 text-xs text-gray-500">
-                      {{ row.history.length > 1 ? row.history.slice(1).map(r => `${r.effectiveFrom}: ${fmtYen(r.hourlyRate)}円`).join(' / ') : '-' }}
+                    <td class="px-2 py-1.5">
+                      <UButton
+                        size="xs"
+                        variant="soft"
+                        icon="i-lucide-history"
+                        :label="`履歴 (${row.history.length})`"
+                        :disabled="!row.history.length"
+                        @click="rateHistoryCd = row.cd"
+                      />
                     </td>
                     <td class="px-2 py-1.5">
                       <div class="flex items-center gap-1.5">
@@ -1475,6 +1507,47 @@ watch([activeTab, month, session], () => {
               マスタが空です。対象月の summary がアーカイブにあれば「再読込」で乗務員一覧を自動補完します
             </p>
           </UCard>
+
+          <!-- 単価履歴モーダル (Refs #253) -->
+          <UModal v-model:open="rateHistoryOpen" :ui="{ content: 'max-w-lg' }">
+            <template #content>
+              <div class="p-6 space-y-3 max-h-[80vh] overflow-y-auto">
+                <h3 class="text-lg font-bold">
+                  単価履歴 — {{ rateHistoryCd }} {{ rateHistoryRow?.driver.name ?? '' }}
+                </h3>
+                <p class="text-xs text-gray-500">新しい順。削除はローカル反映のみ — マスタの「保存」で確定します</p>
+                <table class="w-full text-sm">
+                  <thead>
+                    <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
+                      <th class="px-2 py-1.5">適用開始日</th>
+                      <th class="px-2 py-1.5 text-right">基本時間単価 (円)</th>
+                      <th class="px-2 py-1.5 w-12" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="(rate, i) in rateHistoryRow?.history ?? []"
+                      :key="rate.effectiveFrom"
+                      class="border-b border-gray-100 dark:border-gray-800"
+                    >
+                      <td class="px-2 py-1.5">
+                        {{ rate.effectiveFrom }}
+                        <span v-if="i === 0" class="text-xs text-green-600 dark:text-green-400">(現行)</span>
+                      </td>
+                      <td class="px-2 py-1.5 text-right font-medium">{{ fmtYen(rate.hourlyRate) }}</td>
+                      <td class="px-2 py-1.5 text-right">
+                        <UButton size="xs" variant="ghost" icon="i-lucide-trash-2" @click="removeRateEntry(rateHistoryCd!, rate.effectiveFrom)" />
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <p v-if="!rateHistoryRow?.history.length" class="text-sm text-gray-500">履歴がありません</p>
+                <div class="flex justify-end">
+                  <UButton size="sm" variant="soft" label="閉じる" @click="rateHistoryOpen = false" />
+                </div>
+              </div>
+            </template>
+          </UModal>
         </template>
       </div>
     </template>
