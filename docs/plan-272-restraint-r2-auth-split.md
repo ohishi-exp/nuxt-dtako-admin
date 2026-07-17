@@ -26,8 +26,8 @@
 | PR | 内容 | 状態 |
 |---|---|---|
 | **F1 (worker)** | `restraint-viewer-auth.ts` (pure、100% gate: R2-only 判定 + tenant→comp 逆引き) + DO の dispatchRestraintApi に viewer フォールバック + introspect の tenant_id 透過 | 本 PR |
-| **F2 (app)** | R2-only 呼び出し (給与系タブ・アーカイブ閲覧) を app の auth-worker セッション JWT + comp 指定に切替。theearth ログインパネルの要求を実取得系のみに縮小 | 未着手 |
-| **(任意) F3** | R2-only ハンドラを DO から worker 直 (`index.ts`) の stateless module に抽出 — 閲覧経路が theearth-{comp}:{userB64} DO を経由しなくなる。F1/F2 が安定してから | 未着手 |
+| **F2 (app)** | `/restraint-wage` は**全タブ R2-only** と判明 (theearth ルート呼び出しゼロ、取得系は /restraint-fetch) → ページから theearth ログイン要求を撤去し、viewer ヘッダ (auth-worker JWT + 会社ID) に切替。theearth セッションが有効なら従来ヘッダを使う後方互換。会社ID は前回閲覧 → theearth ログイン履歴 → 手入力の順で prefill | 本 PR |
+| **F3 (見送り)** | R2-only ハンドラの DO からの worker 直抽出は**やらない** — (1) `listAllR2`/`putVersionedR2` 等のヘルパを取得系 (theearth 必須側) と共有しており抽出は分割か重複を生む (2) マスタ PUT / resummarize の R2 書き込みが DO 単位で直列化される利点を失う (3) DO hop は同 colo 内で実質コストなし | 不採用 |
 | **#268 PR-D** | seed:local + wrangler dev local + launch.json (F1 の dev 短絡を利用) | 未着手 |
 
 ## viewer 経路の合成レコード
@@ -36,9 +36,12 @@ R2-only ハンドラは `record.compId` しか参照しないため、viewer 認
 cookies を持たない合成 `TheearthSessionRecord` を渡す。theearth ハンドラ
 (login/report/csv) には流れない (isR2OnlyRestraintPath で先に分岐済み)。
 
-## F2 の論点 (次 PR)
+## F2 の実装メモ
 
-- app 側の auth-worker JWT の取り出し方 (@ippoan/auth-client のセッション) と
-  `X-Theearth-Comp-Id` の供給元 (テナント設定 or 既定 comp)
-- 給与系タブを theearth 未ログインで開けるようにするページ状態遷移
-  (`showLoginPanel` の条件分岐)
+- JWT は `app/utils/api.ts` の `currentAccessToken()` (initApi に渡された
+  tokenGetter をそのまま返す)。素の `$fetch` 経路なので 401 自動 refresh は
+  無い — viewer の 401 は「comp 不許可 or JWT 失効」としてエラー表示
+- viewer の `X-Theearth-User-B64` は固定 `viewer` — 同一 comp の閲覧者は同一
+  DO instance に集約され、マスタ PUT の直列化が per-comp で保たれる
+- ページヘッダ (TheearthSessionHeader) は共有コンポーネントのため無改変 —
+  theearth ログイン自体は引き続き可能 (ログインすれば従来ヘッダに戻る)

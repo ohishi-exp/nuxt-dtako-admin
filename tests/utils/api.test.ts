@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest'
 import {
+  currentAccessToken,
   initApi,
   getDrivers,
   getVehicles,
@@ -248,6 +249,16 @@ describe('api', () => {
 
       const [, opts] = mockFetch.mock.calls[0]
       expect(opts.headers).not.toHaveProperty('Authorization')
+    })
+
+    it('currentAccessToken は tokenGetter の値をそのまま返す (viewer 経路、Refs #272)', () => {
+      if (isLive) return
+      initApi(API_BASE, () => 'viewer-jwt')
+      expect(currentAccessToken()).toBe('viewer-jwt')
+      initApi(API_BASE, () => null)
+      expect(currentAccessToken()).toBeNull()
+      initApi(API_BASE) // tokenGetter 未指定
+      expect(currentAccessToken()).toBeNull()
     })
 
     it('omits X-Tenant-ID when tenantIdGetter returns null', async () => {
