@@ -408,7 +408,7 @@ async function downloadArchiveCsv(entry: ArchiveCsvEntry) {
 
 const salaryPaste = ref('')
 /** 取り込み済み CSV (複数可、Refs #253)。メモリ上にのみ保持しサーバーへは送らない。 */
-const salaryImports = ref<Array<{ id: number, parsed: ParsedSalaryCsv }>>([])
+const salaryImports = ref<Array<{ id: number, name?: string, parsed: ParsedSalaryCsv }>>([])
 let salaryImportSeq = 0
 const salaryParseError = ref('')
 /** 全取り込みを合算した解析結果 (行連結・項目名の和集合)。 */
@@ -453,6 +453,29 @@ function importSalaryPaste() {
   catch (e) {
     salaryParseError.value = e instanceof Error ? e.message : String(e)
   }
+}
+
+const salaryFileInput = ref<HTMLInputElement | null>(null)
+
+/** 給与明細ファイル (XLS/XLSX/CSV/TSV、複数選択可) をブラウザ内で読み込んで取り込む。 */
+async function importSalaryFiles(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = [...(input.files ?? [])]
+  salaryParseError.value = ''
+  salaryConfigMessage.value = ''
+  const errors: string[] = []
+  for (const file of files) {
+    try {
+      const text = salaryFileToText(new Uint8Array(await file.arrayBuffer()))
+      const parsed = parseSalaryCsv(text)
+      salaryImports.value = [...salaryImports.value, { id: ++salaryImportSeq, name: file.name, parsed }]
+    }
+    catch (e) {
+      errors.push(`${file.name}: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+  if (errors.length) salaryParseError.value = errors.join(' / ')
+  input.value = ''
 }
 
 function removeSalaryImport(id: number) {
@@ -1031,7 +1054,18 @@ watch([activeTab, month, session], () => {
                 <span class="text-xs text-gray-500">貼り付けたデータはブラウザ内でのみ比較され、サーバーへ送信・保存されません</span>
                 <div class="flex-1" />
                 <UButton size="xs" variant="soft" icon="i-lucide-eraser" label="全てクリア" :disabled="!salaryPaste && !salaryImports.length" @click="clearSalaryPaste" />
-                <UButton size="xs" icon="i-lucide-file-plus" label="取り込み" :disabled="!salaryPaste.trim()" @click="importSalaryPaste" />
+                <label class="inline-flex">
+                  <input
+                    ref="salaryFileInput"
+                    type="file"
+                    accept=".csv,.tsv,.txt,.xls,.xlsx"
+                    multiple
+                    class="hidden"
+                    @change="importSalaryFiles"
+                  >
+                  <UButton size="xs" icon="i-lucide-file-up" label="ファイル読み込み" @click="salaryFileInput?.click()" />
+                </label>
+                <UButton size="xs" variant="soft" icon="i-lucide-file-plus" label="貼り付けを取り込み" :disabled="!salaryPaste.trim()" @click="importSalaryPaste" />
               </div>
             </template>
             <UTextarea
@@ -1046,7 +1080,7 @@ watch([activeTab, month, session], () => {
             <!-- 取り込み済み CSV の一覧 (複数可) -->
             <div v-for="(imp, idx) in salaryImports" :key="imp.id" class="border border-gray-200 dark:border-gray-800 rounded-lg p-2 mt-2">
               <div class="flex flex-wrap items-center gap-2 text-sm">
-                <span class="font-medium">取り込み {{ idx + 1 }}</span>
+                <span class="font-medium">{{ imp.name ?? `貼り付け ${idx + 1}` }}</span>
                 <span class="text-xs text-gray-500">{{ salaryImportLabel(imp.parsed) }}</span>
                 <div class="flex-1" />
                 <UButton size="xs" variant="ghost" icon="i-lucide-trash-2" label="削除" @click="removeSalaryImport(imp.id)" />

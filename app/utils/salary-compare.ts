@@ -174,6 +174,9 @@ export function parseSalaryCsv(text: string): ParsedSalaryCsv {
   const rows: SalaryCsvRow[] = []
   const warnings: string[] = []
   const months = new Set<string>()
+  /** 年月形式でない 給与・賞与名 のスキップ行 (給与合計・賞与合計・賞与等) は
+   * 実ファイルで乗務員ごとに数十行出るため、名前×件数に集約して 1 警告にする。 */
+  const skippedPayNames = new Map<string, number>()
 
   for (let li = 1; li < lines.length; li++) {
     // splitDelimitedLine は必ず 1 要素以上返すので cells[0] は常に存在する
@@ -186,7 +189,7 @@ export function parseSalaryCsv(text: string): ParsedSalaryCsv {
     const payName = cells[payNameIdx] ?? ''
     const ym = payName.match(/^(\d{4})年\s*(\d{1,2})月$/)
     if (!ym) {
-      warnings.push(`${li + 1} 行目: 給与・賞与名「${payName}」が年月形式でないためスキップしました (賞与等)`)
+      skippedPayNames.set(payName || '空', (skippedPayNames.get(payName || '空') ?? 0) + 1)
       continue
     }
     const month = `${ym[1]}-${ym[2]!.padStart(2, '0')}`
@@ -217,6 +220,12 @@ export function parseSalaryCsv(text: string): ParsedSalaryCsv {
       amounts,
       reportedTotal,
     })
+  }
+
+  if (skippedPayNames.size > 0) {
+    const total = [...skippedPayNames.values()].reduce((a, b) => a + b, 0)
+    const detail = [...skippedPayNames.entries()].map(([name, count]) => `${name} ×${count}`).join(', ')
+    warnings.push(`給与・賞与名が年月形式でない ${total} 行をスキップしました (${detail})`)
   }
 
   return { rows, itemLabels, months: [...months].sort((a, b) => a.localeCompare(b)), warnings }
