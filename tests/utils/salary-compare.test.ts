@@ -308,6 +308,15 @@ function reportRow(
       breakMinutes: over.breakMinutes === undefined ? 0 : over.breakMinutes,
       drivingMinutes: over.drivingMinutes === undefined ? 0 : over.drivingMinutes,
     },
+    // 残業(最低賃金) 列の素材 (wage-report の wage 側)。単体テストでは最低賃金
+    // 未設定 (null) を既定とし、実データ相当の値は共有 fixture テスト
+    // (salary-compare-fixture.test.ts) が golden 経由で検証する。
+    wage: {
+      overtimeMinutes: over.overtimeMinutes ?? 0,
+      nightOvertimeMinutes: over.overtimeNightMinutes ?? 0,
+      minWageOvertimePay: null,
+      minWageNightOvertimePay: null,
+    },
   } as unknown as WageReportRow
 }
 
@@ -480,6 +489,18 @@ describe('compareSalaryMonth', () => {
   it('直接一致した行は mappedDriverCd を null にする', () => {
     const out = compareSalaryMonth([csvRow()], [reportRow('1239', '城田 秀幸')], config)
     expect(out.rows[0]!.mappedDriverCd).toBeNull()
+  })
+
+  it('最低賃金が引けない乗務員は 残業(最低賃金) 系が null (時間軸は出る)', () => {
+    const out = compareSalaryMonth(
+      [csvRow()],
+      [reportRow('1239', '城田 秀幸', { overtimeMinutes: 60, overtimeNightMinutes: 30 })],
+      config,
+    )
+    const r = out.rows[0]!
+    expect(r.minWageOvertimeMinutes).toBe(90)
+    expect(r.minWageOvertimePay).toBeNull()
+    expect(r.diffCsvVsMinWageOvertime).toBeNull()
   })
 
   it('CSV 側の重複乗務員は後勝ち + 警告する', () => {
