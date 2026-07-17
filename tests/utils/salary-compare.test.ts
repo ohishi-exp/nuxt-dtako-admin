@@ -312,13 +312,19 @@ function reportRow(
 }
 
 describe('sumByCategory', () => {
-  it('実効区分で基本給と残業に集計する', () => {
+  it('実効区分で基本給と残業に集計し、内訳を積む', () => {
     const config: SalaryItemConfig = { items: { 基本給: 'base', 残業手当: 'overtime' } }
-    expect(sumByCategory(csvRow(), config)).toEqual({ base: 80000, overtime: 30000 })
+    expect(sumByCategory(csvRow(), config)).toEqual({
+      base: 80000,
+      overtime: 30000,
+      baseItems: [{ label: '基本給', amount: 80000 }],
+      overtimeItems: [{ label: '残業手当', amount: 30000 }],
+    })
   })
 
   it('設定が無い項目は推定区分で集計する', () => {
-    expect(sumByCategory(csvRow(), { items: {} })).toEqual({ base: 80000, overtime: 30000 })
+    expect(sumByCategory(csvRow(), { items: {} }).base).toBe(80000)
+    expect(sumByCategory(csvRow(), { items: {} }).overtime).toBe(30000)
   })
 })
 
@@ -411,66 +417,38 @@ describe('compareSalaryMonth', () => {
     expect(out.rows[0]!.sysBase).toBe(36790)
   })
 
-  it('基本単価が無い行は月給制として基本給(計算)を出さない (baseMode=monthly)', () => {
-    // 稼働時間が 0 なので残業も算出不能 → null
-    const out = compareSalaryMonth([csvRow()], [reportRow('1239', '城田 秀幸', { workDays: 22 })], config)
+  it('基本単価・残業単価が無い行は独自の按分計算をせず null にする (「単価なし」)', () => {
+    const out = compareSalaryMonth([csvRow()], [reportRow('1239', '城田 秀幸', { workDays: 22, overtimeMinutes: 60 * 60 })], config)
     const r = out.rows[0]!
-    expect(r.baseMode).toBe('monthly')
     expect(r.sysBase).toBeNull()
     expect(r.diffBase).toBeNull()
-    expect(r.overtimeMode).toBe('derived')
-    expect(r.overtimeRateUsed).toBeNull() // 分母 0
     expect(r.sysOvertime).toBeNull()
+    expect(r.diffOvertime).toBeNull()
     expect(r.sysTotal).toBeNull()
+    expect(r.diffTotal).toBeNull()
   })
 
-  it('残業単価が無い行は 月給(5項目) ÷ (残業+休憩+運転) で時給を算出する', () => {
+  it('基本単価だけ無い行は基本給(計算)のみ null、残業単価があれば残業(計算)は出る', () => {
     const out = compareSalaryMonth(
-      [csvRow({
-        rates: { base: null, overtime: null },
-        amounts: { 基本給: 300000, 役職手当: 10000, 新愛社手当: 5000, 無事故手当: 3000, けん引手当: 2000, 残業手当: 50000 },
-      })],
-      // 残業 20h + 休憩 10h + 運転 70h = 100h、時間外は 20h
-      [reportRow('1239', '城田 秀幸', { workDays: 22, overtimeMinutes: 20 * 60, breakMinutes: 10 * 60, drivingMinutes: 70 * 60 })],
+      [csvRow({ rates: { base: null, overtime: 1430 } })],
+      [reportRow('1239', '城田 秀幸', { overtimeMinutes: 90 })], // 1.5h
       config,
     )
     const r = out.rows[0]!
-    expect(r.baseMode).toBe('monthly')
     expect(r.sysBase).toBeNull()
-    expect(r.overtimeMode).toBe('derived')
-    expect(r.overtimeMonthlySalary).toBe(320000) // 5 項目合計
-    expect(r.overtimeDivisorMinutes).toBe(100 * 60)
-    expect(r.overtimeRateUsed).toBe(3200) // 320000 ÷ 100h
-    expect(r.sysOvertime).toBe(3200 * 20) // 時給 × 時間外 20h = 64,000
-    expect(r.sysTotal).toBeNull() // 基本給が月給制で null のため合計も null
-    expect(r.diffOvertime).toBe(50000 - 64000)
+    expect(r.sysOvertime).toBe(2145) // 1430 × 1.5h
+    expect(r.sysTotal).toBeNull() // 片方 null なら合計も null
   })
 
-  it('残業単価が無く 休憩/運転が null の月は 0 として分母に加える', () => {
+  it('csvBaseItems / csvOvertimeItems に区分ごとの支給項目内訳を積む', () => {
     const out = compareSalaryMonth(
-      [csvRow({ rates: { base: null, overtime: null }, amounts: { 基本給: 120000 } })],
-      // 休憩・運転が null、残業のみ 60h → 分母 = 60h
-      [reportRow('1239', '城田 秀幸', { overtimeMinutes: 60 * 60, breakMinutes: null, drivingMinutes: null })],
+      [csvRow({ amounts: { 基本給: 80000, 無事故手当: 5000, 残業手当: 20000, '60H超過残業': 10000 } })],
+      [reportRow('1239', '城田 秀幸')],
       config,
     )
     const r = out.rows[0]!
-    expect(r.overtimeDivisorMinutes).toBe(60 * 60)
-    expect(r.overtimeRateUsed).toBe(2000) // 120000 ÷ 60h
-    expect(r.sysOvertime).toBe(2000 * 60)
-  })
-
-  it('残業単価がある行は算出でなく単価を使う (overtimeMode=rate)', () => {
-    const out = compareSalaryMonth(
-      [csvRow({ rates: { base: 3679, overtime: 1430 } })],
-      [reportRow('1239', '城田 秀幸', { workDays: 22, overtimeMinutes: 90, breakMinutes: 600, drivingMinutes: 4200 })],
-      config,
-    )
-    const r = out.rows[0]!
-    expect(r.baseMode).toBe('rate')
-    expect(r.sysBase).toBe(80938)
-    expect(r.overtimeMode).toBe('rate')
-    expect(r.overtimeRateUsed).toBe(1430)
-    expect(r.sysOvertime).toBe(2145) // 1430 × 1.5h、月給按分は使わない
+    expect(r.csvBaseItems).toEqual([{ label: '基本給', amount: 80000 }, { label: '無事故手当', amount: 5000 }])
+    expect(r.csvOvertimeItems).toEqual([{ label: '残業手当', amount: 20000 }, { label: '60H超過残業', amount: 10000 }])
   })
 
   it('片側にしかいない乗務員を csvOnly / reportOnly に分ける', () => {
