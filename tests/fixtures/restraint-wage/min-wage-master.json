@@ -1,14 +1,12 @@
 {
   "prefectures": {
-    "佐賀": [
+    "全社共通": [
       {
         "effectiveFrom": "2020-01-01",
         "rate": 956
       }
     ]
   },
-  "branchToPrefecture": {
-    "テスト運輸　第一営業所": "佐賀"
-  },
-  "defaultPrefecture": "佐賀"
+  "branchToPrefecture": {},
+  "defaultPrefecture": "全社共通"
 }
