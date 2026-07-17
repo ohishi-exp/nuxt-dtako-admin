@@ -378,9 +378,17 @@ R2 アーカイブ (上記 /restraint-fetch) の summary を素材に、theearth
   days を含めて計算** (前月アーカイブが無い月は warning + 当月分のみで近似)。
   「休出」列は保留。実給与 CSV 比較は形式確定後 (Refs #244)
 - 計算 pure module: `workers/dtako-scraper-relay/src/restraint-wage.ts` (100% gate) —
-  単価/最低賃金の適用開始日 lookup・法定区分分類・週40h・金額 (円未満四捨五入)。
+  単価/最低賃金の適用開始日 lookup・法定区分分類・週40h・金額 (円未満四捨五入)、
+  最低賃金ベース残業代 (月60h超 1.5 倍の時間外軸 + 深夜軸 0.25 の独立加算、
+  `computeMinWageOvertimePay`/`splitMinWageOvertimePay`、Refs #268)。
   summary v2 (theearth-restraint-client.ts) が日別データ + 派生指標
   (当月超過/15h超過日数/平均運転9h超過回数、上限は CSV 注記パース) を供給する
+- 共有 fixture + golden: `tests/fixtures/restraint-wage/` (入力 4 乗務員シナリオ +
+  `golden/wage-rows.json`)。golden は
+  `workers/dtako-scraper-relay/test/restraint-wage-golden.test.ts` が突合、再生成は
+  `UPDATE_GOLDEN=1` (作法は fixture README)。最低賃金チェック/給与比較の両タブの
+  テストが同一 fixture を使う (org 方針: `local-first-testing` skill、計画:
+  `docs/plan-268-wage-tab-separation.md`)
 - マスタは R2 `restraint/{compId}/{wage-master|min-wage|wage-config}/latest.json`
   (putVersionedR2 の版管理を再利用 — 一括変更 = PUT 1 回 = 1 版)
 - DO routes: `GET/PUT /restraint-api/{wage-master|min-wage|wage-config}`、
