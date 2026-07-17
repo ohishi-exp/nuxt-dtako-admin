@@ -10,7 +10,8 @@
     "deploy": "nuxt build && wrangler deploy",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "poi:build": "node scripts/poi/build-poi.ts"
+    "poi:build": "node scripts/poi/build-poi.ts",
+    "seed:local": "node scripts/seed-restraint-local.mjs"
   },
   "dependencies": {
     "@googlemaps/js-api-loader": "^1.16.8",
