@@ -10,8 +10,15 @@
 # トリガーしないため、PR の CI が新 commit で再走しなくなる)。
 name: regen-lockfile
 
+# workflow_dispatch は default branch に file が乗るまで API から起動できない
+# (GitHub の仕様: workflow 登録は default branch 基準)。feature branch 上で
+# 即実行できるよう、この workflow ファイル自体の push でも起動する
+# (main は除外 — merge 時に main へ直 push しないため)。
 on:
   workflow_dispatch:
+  push:
+    branches-ignore: [main]
+    paths: ['.github/workflows/regen-lockfile.yml']
 
 permissions:
   contents: write
