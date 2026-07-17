@@ -55,7 +55,8 @@ import {
   scrapeEtcCsv,
   type ScrapeMonthTarget,
 } from "./etc-meisai-client";
-import { CronConfigError, etcCsvKey, parseEtcAccounts, type EtcAccountEntry } from "./cron";
+import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
+import { isR2OnlyRestraintPath, viewerCompIdsForTenant } from "./restraint-viewer-auth";
 import {
   buildDvrSearchKey,
   dvrDataUrl,
@@ -286,6 +287,12 @@ export interface RelayEnv {
    */
   DTAKO_ACCOUNTS?: unknown;
   /**
+   * ローカル開発専用: restraint viewer 経路 (Refs #272) の introspect を短絡して
+   * この comp を許可する。`wrangler dev --var RESTRAINT_DEV_VIEWER_COMP:<comp>`
+   * でのみ渡す — デプロイ環境 (wrangler.toml / dashboard) には置かない。
+   */
+  RESTRAINT_DEV_VIEWER_COMP?: string;
+  /**
    * ETC 利用照会サービスのアカウント JSON 配列 (`[{user_id, password}, ...]`、
    * browser-render-rust の `ETC_ACCOUNTS` env と同一 shape)。DTAKO_ACCOUNTS と
    * 同じく dashboard の plain Environment Variable として投入する (wrangler.toml
@@ -356,7 +363,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       if (!res.ok) return { active: false };
       const data = (await res.json()) as Record<string, unknown>;
       if (!data || data.active !== true) return { active: false };
-      return { active: true };
+      return {
+        active: true,
+        tenant_id: typeof data.tenant_id === "string" ? data.tenant_id : undefined,
+      };
     } catch {
       return { active: false };
     }
@@ -1514,14 +1524,61 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     };
   }
 
+  /**
+   * R2-only ルートの viewer 認可 (Refs #272): auth-worker introspect で JWT を検証し、
+   * DTAKO_ACCOUNTS (comp_id→tenant_id) の逆引きで routing の compId がその tenant の
+   * ものだと確認できた時だけ、閲覧用の合成レコードを返す。合成レコードは cookies を
+   * 持たない — R2-only ハンドラは record.compId しか参照しないため十分。
+   * DTAKO_ACCOUNTS 未設定/不正・introspect 不成立は null (fail-closed)。
+   */
+  private async authorizeRestraintViewer(
+    token: string | null,
+    routing: TheearthRouting,
+    url: URL,
+  ): Promise<TheearthSessionRecord | null> {
+    if (!token) return null;
+    const viewerRecord = (): TheearthSessionRecord => ({
+      token,
+      compId: routing.compId,
+      userName: routing.userName,
+      cookies: [],
+      createdAt: Date.now(),
+      expiresAt: Date.now(),
+    });
+    // ローカル開発専用の短絡 (Env.RESTRAINT_DEV_VIEWER_COMP のコメント参照)。
+    if (this.env.RESTRAINT_DEV_VIEWER_COMP) {
+      return this.env.RESTRAINT_DEV_VIEWER_COMP === routing.compId ? viewerRecord() : null;
+    }
+    const result = await this.introspect(token, `https://${url.host}`);
+    if (!result.active || !result.tenant_id) return null;
+    let accounts: DtakoAccountEntry[];
+    try {
+      accounts = parseDtakoAccounts((await resolveSecretBinding(this.env.DTAKO_ACCOUNTS)) || undefined);
+    } catch {
+      return null; // DTAKO_ACCOUNTS 不正は fail-closed (viewer 経路のみ閉じる)
+    }
+    return viewerCompIdsForTenant(accounts, result.tenant_id).has(routing.compId)
+      ? viewerRecord()
+      : null;
+  }
+
   private async dispatchRestraintApi(request: Request, url: URL, routing: TheearthRouting): Promise<Response> {
     if (url.pathname === "/restraint-api/login" && request.method === "POST") {
       return this.handleTheearthLogin(request, routing);
     }
 
-    const record = await this.ctx.storage.get<TheearthSessionRecord>(THEEARTH_SESSION_KEY);
+    const stored = await this.ctx.storage.get<TheearthSessionRecord>(THEEARTH_SESSION_KEY);
     const token = extractBearerToken(request.headers);
-    if (!isTheearthSessionValid(record, token, routing, Date.now())) {
+    let record: TheearthSessionRecord | null = isTheearthSessionValid(stored, token, routing, Date.now())
+      ? stored!
+      : null;
+    // R2-only ルート (賃金マスタ・アーカイブ閲覧・wage-report 等) は theearth
+    // セッションが無くても auth-worker JWT (viewer 経路) で認可する (Refs #272)。
+    // theearth を実際に触る login/logout/report/csv は従来どおりセッション必須。
+    if (!record && isR2OnlyRestraintPath(url.pathname)) {
+      record = await this.authorizeRestraintViewer(token, routing, url);
+    }
+    if (!record) {
       return dvrJsonError(401, "セッションが無効か期限切れです。再ログインしてください");
     }
 

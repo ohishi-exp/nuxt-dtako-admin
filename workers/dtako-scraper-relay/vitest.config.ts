@@ -22,6 +22,7 @@ export default defineConfig({
         'src/theearth-report-client.ts',
         'src/theearth-restraint-client.ts',
         'src/restraint-wage.ts',
+        'src/restraint-viewer-auth.ts',
         'src/theearth-session.ts',
         'src/promise-queue.ts',
       ],

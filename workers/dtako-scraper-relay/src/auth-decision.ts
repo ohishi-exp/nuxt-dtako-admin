@@ -10,6 +10,10 @@
 /** auth-worker `/auth/introspect` 応答の必要 field。 */
 export interface IntrospectResult {
   active: boolean
+  /** active:true の時に introspect が返す tenant。restraint viewer 経路 (Refs #272)
+   * の comp スコープ判定 (DTAKO_ACCOUNTS 逆引き) に使う。WS ハンドシェイク判定
+   * (decideRelayAuth) は従来どおり active しか見ない。 */
+  tenant_id?: string
 }
 
 /** ハンドシェイク判定結果。`status === 101` の時だけ accept する。 */
