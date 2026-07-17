@@ -1,0 +1,66 @@
+# package-lock.json を CI 上で再生成して同じ branch に push する (Refs #257)。
+#
+# 背景: CCoW セッションは GitHub Packages (@ippoan/*) の integrity を解決できない
+# (NODE_AUTH_TOKEN 無しで 401) ため、file: フォールバックが lock に commit 混入
+# すると CCoW からは修復できない。この workflow_dispatch を対象 branch で実行
+# すると、registry 解決で lock を作り直し、`npm ci` で再現性を検証してから
+# 差分を同じ branch に commit / push する。
+#
+# push には CI_APP_* の app token を使う (GITHUB_TOKEN の push は後続 workflow を
+# トリガーしないため、PR の CI が新 commit で再走しなくなる)。
+name: regen-lockfile
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  regen:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create app token (push が CI をトリガーするように)
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app.outputs.token }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Regenerate package-lock.json (registry 解決)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm install --package-lock-only --no-audit --no-fund
+
+      - name: Guard - lock に container ローカル file 参照が残っていないか
+        run: |
+          if grep -n 'file:/home/user' package-lock.json; then
+            echo '::error::package-lock.json に file:/home/user 参照が残っています'
+            exit 1
+          fi
+
+      - name: Verify - クリーン環境で npm ci が通るか (Refs #257 完了条件)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm ci --no-audit --no-fund
+
+      - name: Commit & push (差分がある時だけ)
+        run: |
+          if git diff --quiet -- package-lock.json; then
+            echo 'package-lock.json に差分なし — 何もしません'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package-lock.json
+          git commit -m 'chore: package-lock.json を registry 解決で再生成 (Refs #257)'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
