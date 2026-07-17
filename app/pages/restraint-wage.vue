@@ -82,10 +82,31 @@ async function loadArchiveMonths() {
   }
 }
 
+// タブ・対象月はリロードで失われないよう sessionStorage に保持する (Refs #253)。
+// localStorage でなく sessionStorage — ブラウザを閉じたら既定 (月次集計・当月) に戻す。
+const TAB_STORE_KEY = 'restraint-wage:tab'
+const MONTH_STORE_KEY = 'restraint-wage:month'
+
 onMounted(() => {
+  const savedTab = sessionStorage.getItem(TAB_STORE_KEY)
+  if (savedTab && TABS.some(t => t.key === savedTab)) {
+    activeTab.value = savedTab as TabKey
+  }
+  const savedMonth = sessionStorage.getItem(MONTH_STORE_KEY)?.match(/^(\d{4})-(\d{2})$/) ?? null
+  if (savedMonth) {
+    selectedYear.value = parseInt(savedMonth[1]!, 10)
+    selectedMonthNo.value = parseInt(savedMonth[2]!, 10)
+  }
   restoreSession()
   if (!session.value) showLoginPanel.value = true
   else loadArchiveMonths()
+})
+
+watch(activeTab, (tab) => {
+  if (import.meta.client) sessionStorage.setItem(TAB_STORE_KEY, tab)
+})
+watch(month, (ym) => {
+  if (import.meta.client) sessionStorage.setItem(MONTH_STORE_KEY, ym)
 })
 
 watch(session, (s) => {
