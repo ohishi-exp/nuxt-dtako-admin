@@ -32,6 +32,9 @@ export interface SalaryCsvRow {
   amounts: Record<string, number>
   /** 支給合計額 列の値 (列が無ければ null)。 */
   reportedTotal: number | null
+  /** 【 補助 】セクションの単価。base = 基本単価 (日額)、overtime = 残業単価 (時給)。
+   * 列が無い・0 の場合は null (その行の計算列は出せない)。 */
+  rates: { base: number | null, overtime: number | null }
 }
 
 export interface ParsedSalaryCsv {
@@ -146,6 +149,10 @@ export function parseSalaryCsv(text: string): ParsedSalaryCsv {
     throw new Error('ヘッダーに【 支給 】セクションがありません')
   }
 
+  // 【 補助 】セクションの単価列 (基本単価 = 日額 / 残業単価 = 時給)。無ければ -1
+  const baseRateCol = header.indexOf('基本単価')
+  const overtimeRateCol = header.indexOf('残業単価')
+
   // 支給項目列: 合計系 (支給合計額・課税支給額) は項目から除外し、支給合計額は突合用に保持
   const TOTAL_LABELS = new Set(['支給合計額', '課税支給額'])
   let totalIdx = -1
@@ -210,6 +217,13 @@ export function parseSalaryCsv(text: string): ParsedSalaryCsv {
     }
     const reportedTotal = totalIdx >= 0 ? parseAmount(cells[totalIdx] ?? '') : null
 
+    // 単価 (0 や非数値は「単価なし」として null)
+    const rateAt = (col: number): number | null => {
+      if (col < 0) return null
+      const v = parseAmount(cells[col] ?? '')
+      return v !== null && v > 0 ? v : null
+    }
+
     months.add(month)
     rows.push({
       driverCd: cd,
@@ -219,6 +233,7 @@ export function parseSalaryCsv(text: string): ParsedSalaryCsv {
       month,
       amounts,
       reportedTotal,
+      rates: { base: rateAt(baseRateCol), overtime: rateAt(overtimeRateCol) },
     })
   }
 
@@ -323,10 +338,15 @@ export interface SalaryComparisonRow {
   csvTotal: number
   /** CSV の 支給合計額 列 (無ければ null、項目合計との検算用)。 */
   csvReportedTotal: number | null
-  /** システム側: 法定時間内額 / 割増額 (合計 − 法定時間内) / 合計。単価未設定は null。 */
+  /** 計算側は CSV の【 補助 】単価 × システム集計で出す (単価マスタは使わない):
+   * sysBase = 基本単価 (日額) × 稼働日数、sysOvertime = 残業単価 (時給) ×
+   * (時間外 + 時間外深夜)。CSV に単価が無い行は null。 */
   sysBase: number | null
   sysOvertime: number | null
   sysTotal: number | null
+  /** 計算根拠の表示用: システム稼働日数と時間外(+深夜) 分。 */
+  sysWorkDays: number
+  sysOvertimeMinutes: number
   /** CSV − システム (システム側が null なら null)。 */
   diffBase: number | null
   diffOvertime: number | null
@@ -387,9 +407,12 @@ export function compareSalaryMonth(
     }
     matched.add(cdKey)
     const { base, overtime } = sumByCategory(csv, config)
-    const sysBase = report.wage.amounts?.statutory ?? null
-    const sysTotal = report.wage.totalAmount
-    const sysOvertime = sysBase !== null && sysTotal !== null ? sysTotal - sysBase : null
+    // 計算側: CSV の単価 × システム集計 (基本単価は日額、残業単価は時給)
+    const workDays = report.summary.workDays
+    const overtimeMinutes = (report.summary.overtimeMinutes ?? 0) + (report.summary.overtimeNightMinutes ?? 0)
+    const sysBase = csv.rates.base !== null ? Math.round(csv.rates.base * workDays) : null
+    const sysOvertime = csv.rates.overtime !== null ? Math.round((csv.rates.overtime * overtimeMinutes) / 60) : null
+    const sysTotal = sysBase !== null && sysOvertime !== null ? sysBase + sysOvertime : null
     rows.push({
       driverCd: csv.driverCd,
       mappedDriverCd: csv.cdKey === cdKey ? null : report.summary.driverCd,
@@ -401,6 +424,8 @@ export function compareSalaryMonth(
       sysBase,
       sysOvertime,
       sysTotal,
+      sysWorkDays: workDays,
+      sysOvertimeMinutes: overtimeMinutes,
       diffBase: sysBase === null ? null : base - sysBase,
       diffOvertime: sysOvertime === null ? null : overtime - sysOvertime,
       diffTotal: sysTotal === null ? null : base + overtime - sysTotal,

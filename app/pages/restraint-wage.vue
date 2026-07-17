@@ -612,11 +612,12 @@ function removeCdMapEntry(key: string) {
   salaryCdMap.value = { entries: rest }
 }
 
-/** 乗務員CD選択肢 (wage-report の乗務員、CD 昇順)。 */
+/** 乗務員CD選択肢 (未突合 = システム計算のみ の乗務員だけ、CD 昇順)。
+ * 突合済みは除外する — 付け替えたい時は登録済みから削除して選び直す。 */
 const salaryCdOptions = computed(() =>
-  [...(report.value?.rows ?? [])]
-    .sort((a, b) => a.summary.driverCd.localeCompare(b.summary.driverCd, undefined, { numeric: true }))
-    .map(r => ({ label: `${r.summary.driverCd} ${r.summary.driverName}`, value: r.summary.driverCd })))
+  [...(salaryComparison.value?.reportOnly ?? [])]
+    .sort((a, b) => a.driverCd.localeCompare(b.driverCd, undefined, { numeric: true }))
+    .map(d => ({ label: `${d.driverCd} ${d.driverName}`, value: d.driverCd })))
 
 /** 登録済み突合マスタの表示行。 */
 const salaryCdMapRows = computed(() =>
@@ -1229,7 +1230,7 @@ watch([activeTab, month, session], () => {
             <template #header>
               <div class="flex flex-wrap items-center gap-3">
                 <span class="font-semibold">比較結果 ({{ fmtYm(month) }})</span>
-                <span class="text-xs text-gray-500">CSV の区分集計 vs システム計算 (法定内 = 法定時間内額、割増 = 合計 − 法定内)</span>
+                <span class="text-xs text-gray-500">給与明細の区分集計 vs 給与明細の単価 × システム集計 (基本単価×稼働日数 / 残業単価×時間外)</span>
                 <div class="flex-1" />
                 <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再計算" :loading="loadingReport" @click="loadWageReport" />
               </div>
@@ -1255,10 +1256,10 @@ watch([activeTab, month, session], () => {
                       <th class="px-2 py-2">乗務員CD</th>
                       <th class="px-2 py-2">氏名</th>
                       <th class="px-2 py-2 text-right">基本給計(給与)</th>
-                      <th class="px-2 py-2 text-right">法定内(計算)</th>
+                      <th class="px-2 py-2 text-right" title="給与明細の基本単価 (日額) × システム計算の稼働日数">基本給(計算)</th>
                       <th class="px-2 py-2 text-right">差</th>
                       <th class="px-2 py-2 text-right">残業計(給与)</th>
-                      <th class="px-2 py-2 text-right">割増(計算)</th>
+                      <th class="px-2 py-2 text-right" title="給与明細の残業単価 (時給) × システム計算の時間外+時間外深夜">残業(計算)</th>
                       <th class="px-2 py-2 text-right">差</th>
                       <th class="px-2 py-2 text-right">支給計(給与)</th>
                       <th class="px-2 py-2 text-right">合計(計算)</th>
@@ -1277,12 +1278,12 @@ watch([activeTab, month, session], () => {
                       </td>
                       <td class="px-2 py-1.5">{{ row.driverName }}</td>
                       <td class="px-2 py-1.5 text-right">{{ fmtYen(row.csvBase) }}</td>
-                      <td class="px-2 py-1.5 text-right">{{ fmtYen(row.sysBase) }}</td>
+                      <td class="px-2 py-1.5 text-right" :title="`基本単価 × 稼働 ${row.sysWorkDays} 日`">{{ fmtYen(row.sysBase) }}</td>
                       <td class="px-2 py-1.5 text-right" :class="(row.diffBase ?? 0) !== 0 ? 'text-red-600 font-medium' : 'text-gray-400'">
                         {{ fmtDiff(row.diffBase) }}
                       </td>
                       <td class="px-2 py-1.5 text-right">{{ fmtYen(row.csvOvertime) }}</td>
-                      <td class="px-2 py-1.5 text-right">{{ fmtYen(row.sysOvertime) }}</td>
+                      <td class="px-2 py-1.5 text-right" :title="`残業単価 × 時間外 ${fmtMinutes(row.sysOvertimeMinutes)}`">{{ fmtYen(row.sysOvertime) }}</td>
                       <td class="px-2 py-1.5 text-right" :class="(row.diffOvertime ?? 0) !== 0 ? 'text-red-600 font-medium' : 'text-gray-400'">
                         {{ fmtDiff(row.diffOvertime) }}
                       </td>
@@ -1299,8 +1300,9 @@ watch([activeTab, month, session], () => {
                 </table>
               </div>
               <p class="text-xs text-gray-500 mt-2">
-                差 = 給与明細 − システム計算。* は 支給合計額 列と支給項目の合算が一致しない行。
-                単価マスタ未設定の乗務員は計算列が「-」になります。
+                差 = 給与明細 − 計算。計算 = 給与明細【 補助 】の 基本単価 (日額) × システム稼働日数、
+                残業単価 (時給) × システム時間外 (+時間外深夜)。給与明細に単価が無い行は「-」。
+                * は 支給合計額 列と支給項目の合算が一致しない行。最低賃金チェックは従来どおり単価マスタで別計算です。
               </p>
               <p v-if="salaryComparison.reportOnly.length" class="text-xs text-amber-600 dark:text-amber-400 mt-1">
                 システム計算のみ (給与明細なし): {{ salaryComparison.reportOnly.map(d => `${d.driverCd} ${d.driverName}`).join(', ') }}

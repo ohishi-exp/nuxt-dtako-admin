@@ -36,11 +36,12 @@ const HEADER_2026 = [
   '【 支給 】  ', '基本給', '無事故手当  ', 'ｸﾚｰﾝ手当    ', '残業手当    ',
   '休日出勤手当', '残業手当', '60H超過残業', '支給合計額  ', '課税支給額  ',
   '【 控除 】  ', '健康保険    ',
+  '【 補助 】  ', '残業単価    ', '基本単価    ',
   '【 合計 】  ', '差引支給額  ',
 ].join(',')
 
 function row2026(cd: string, name: string, payName: string, amounts: number[], total: number, taxable = 0): string {
-  return [cd, name, payName, '0.0', '22.0', '91.0', '0.0', ...amounts.map(String), String(total), String(taxable), '0.0', '24600.0', '0.0', '316589.0'].join(',')
+  return [cd, name, payName, '0.0', '22.0', '91.0', '0.0', ...amounts.map(String), String(total), String(taxable), '0.0', '24600.0', '0.0', '1430', '3679', '0.0', '316589.0'].join(',')
 }
 
 // 支給項目列: 基本給, 無事故手当, ｸﾚｰﾝ手当, 残業手当(1), 休日出勤手当, 残業手当(2), 60H超過残業
@@ -110,6 +111,26 @@ describe('parseSalaryCsv (2026 様式 CSV)', () => {
   it('月一覧を昇順で返し、警告は無い', () => {
     expect(parsed.months).toEqual(['2026-01', '2026-02'])
     expect(parsed.warnings).toEqual([])
+  })
+
+  it('【 補助 】の基本単価・残業単価を読み取る', () => {
+    expect(parsed.rows[0]!.rates).toEqual({ base: 3679, overtime: 1430 })
+  })
+})
+
+describe('parseSalaryCsv (単価列)', () => {
+  it('単価列が無い様式は null、0 の単価も null にする', () => {
+    const noRates = parseSalaryCsv([
+      '社員コード,給与・賞与名,【 支給 】,基本給,【 控除 】',
+      '1,2026年 1月,,100',
+    ].join('\n'))
+    expect(noRates.rows[0]!.rates).toEqual({ base: null, overtime: null })
+
+    const zeroRate = parseSalaryCsv([
+      '社員コード,給与・賞与名,【 支給 】,基本給,【 控除 】,健康保険,【 補助 】,残業単価,基本単価',
+      '1,2026年 1月,,100,,0,,0,3679',
+    ].join('\n'))
+    expect(zeroRate.rows[0]!.rates).toEqual({ base: 3679, overtime: null })
   })
 })
 
@@ -261,16 +282,23 @@ function csvRow(over: Partial<SalaryCsvRow> = {}): SalaryCsvRow {
     month: '2026-01',
     amounts: { 基本給: 80000, 残業手当: 30000 },
     reportedTotal: 110000,
+    rates: { base: null, overtime: null },
     ...over,
   }
 }
 
-function reportRow(cd: string, name: string, statutory: number | null, total: number | null): WageReportRow {
+function reportRow(
+  cd: string,
+  name: string,
+  over: { workDays?: number, overtimeMinutes?: number | null, overtimeNightMinutes?: number | null } = {},
+): WageReportRow {
   return {
-    summary: { driverCd: cd, driverName: name },
-    wage: {
-      amounts: statutory === null ? null : { statutory },
-      totalAmount: total,
+    summary: {
+      driverCd: cd,
+      driverName: name,
+      workDays: over.workDays ?? 0,
+      overtimeMinutes: over.overtimeMinutes === undefined ? 0 : over.overtimeMinutes,
+      overtimeNightMinutes: over.overtimeNightMinutes === undefined ? 0 : over.overtimeNightMinutes,
     },
   } as unknown as WageReportRow
 }
@@ -301,11 +329,11 @@ describe('salaryCdMapKey / normalizeNameKey / resolveCdKey', () => {
 
 describe('suggestCdMapEntries', () => {
   const reports = [
-    reportRow('1412', '中村 一由', 1, 2),
-    reportRow('1587', '柳井 亮祐', 1, 2),
-    reportRow('1601', '佐藤 太郎', 1, 2),
-    reportRow('1602', '佐藤 太郎', 1, 2), // 同姓同名 → 提案しない
-    reportRow('1239', '城田 秀幸', 1, 2),
+    reportRow('1412', '中村 一由'),
+    reportRow('1587', '柳井 亮祐'),
+    reportRow('1601', '佐藤 太郎'),
+    reportRow('1602', '佐藤 太郎'), // 同姓同名 → 提案しない
+    reportRow('1239', '城田 秀幸'),
   ]
 
   it('未突合行を氏名の一意一致で提案する (重複行は 1 回だけ)', () => {
@@ -330,10 +358,12 @@ describe('suggestCdMapEntries', () => {
 describe('compareSalaryMonth', () => {
   const config: SalaryItemConfig = { items: {} }
 
-  it('乗務員CD (前ゼロ・数値同値) で突合し差額を計算する', () => {
+  it('乗務員CD (前ゼロ・数値同値) で突合し、給与明細の単価 × システム集計で差額を計算する', () => {
     const out = compareSalaryMonth(
-      [csvRow({ driverCd: '01239', cdKey: '1239' })],
-      [reportRow('1239', '城田 秀幸', 75000, 100000)],
+      // 基本単価 3679 円/日、残業単価 1430 円/h (実データの城田氏の単価)
+      [csvRow({ driverCd: '01239', cdKey: '1239', rates: { base: 3679, overtime: 1430 } })],
+      // 稼働 22 日、時間外 90h + 時間外深夜 2h
+      [reportRow('1239', '城田 秀幸', { workDays: 22, overtimeMinutes: 90 * 60, overtimeNightMinutes: 120 })],
       config,
     )
     expect(out.rows).toHaveLength(1)
@@ -341,19 +371,40 @@ describe('compareSalaryMonth', () => {
     expect(r.csvBase).toBe(80000)
     expect(r.csvOvertime).toBe(30000)
     expect(r.csvTotal).toBe(110000)
-    expect(r.sysBase).toBe(75000)
-    expect(r.sysOvertime).toBe(25000)
-    expect(r.sysTotal).toBe(100000)
-    expect(r.diffBase).toBe(5000)
-    expect(r.diffOvertime).toBe(5000)
-    expect(r.diffTotal).toBe(10000)
+    expect(r.sysWorkDays).toBe(22)
+    expect(r.sysOvertimeMinutes).toBe(92 * 60)
+    expect(r.sysBase).toBe(3679 * 22) // 80,938
+    expect(r.sysOvertime).toBe(1430 * 92) // 131,560
+    expect(r.sysTotal).toBe(80938 + 131560)
+    expect(r.diffBase).toBe(80000 - 80938)
+    expect(r.diffOvertime).toBe(30000 - 131560)
+    expect(r.diffTotal).toBe(110000 - 212498)
     expect(out.csvOnly).toEqual([])
     expect(out.reportOnly).toEqual([])
     expect(out.warnings).toEqual([])
   })
 
-  it('単価未設定 (amounts null) の乗務員は計算側を null にする', () => {
-    const out = compareSalaryMonth([csvRow()], [reportRow('1239', '城田 秀幸', null, null)], config)
+  it('分単位の残業は時給を按分して円未満を四捨五入する', () => {
+    const out = compareSalaryMonth(
+      [csvRow({ rates: { base: null, overtime: 1430 } })],
+      [reportRow('1239', '城田 秀幸', { overtimeMinutes: 90 })], // 1.5h
+      config,
+    )
+    expect(out.rows[0]!.sysOvertime).toBe(2145) // 1430 × 1.5
+  })
+
+  it('summary の時間外が null でも 0 として扱う', () => {
+    const out = compareSalaryMonth(
+      [csvRow({ rates: { base: 3679, overtime: 1430 } })],
+      [reportRow('1239', '城田 秀幸', { workDays: 10, overtimeMinutes: null, overtimeNightMinutes: null })],
+      config,
+    )
+    expect(out.rows[0]!.sysOvertime).toBe(0)
+    expect(out.rows[0]!.sysBase).toBe(36790)
+  })
+
+  it('給与明細に単価が無い行は計算側を null にする', () => {
+    const out = compareSalaryMonth([csvRow()], [reportRow('1239', '城田 秀幸', { workDays: 22 })], config)
     const r = out.rows[0]!
     expect(r.sysBase).toBeNull()
     expect(r.sysOvertime).toBeNull()
@@ -363,13 +414,17 @@ describe('compareSalaryMonth', () => {
     expect(r.diffTotal).toBeNull()
   })
 
-  it('法定内額はあるが合計が無い場合は割増・合計の差を null にする', () => {
-    const out = compareSalaryMonth([csvRow()], [reportRow('1239', '城田 秀幸', 75000, null)], config)
+  it('基本単価だけある行は残業・合計を null にする', () => {
+    const out = compareSalaryMonth(
+      [csvRow({ rates: { base: 3679, overtime: null } })],
+      [reportRow('1239', '城田 秀幸', { workDays: 22 })],
+      config,
+    )
     const r = out.rows[0]!
-    expect(r.sysBase).toBe(75000)
+    expect(r.sysBase).toBe(80938)
     expect(r.sysOvertime).toBeNull()
     expect(r.sysTotal).toBeNull()
-    expect(r.diffBase).toBe(5000)
+    expect(r.diffBase).toBe(80000 - 80938)
     expect(r.diffOvertime).toBeNull()
     expect(r.diffTotal).toBeNull()
   })
@@ -377,7 +432,7 @@ describe('compareSalaryMonth', () => {
   it('片側にしかいない乗務員を csvOnly / reportOnly に分ける', () => {
     const out = compareSalaryMonth(
       [csvRow(), csvRow({ driverCd: '9999', cdKey: '9999', driverName: '給与のみ' })],
-      [reportRow('1239', '城田 秀幸', 1, 2), reportRow('1021', '計算のみ', 1, 2)],
+      [reportRow('1239', '城田 秀幸'), reportRow('1021', '計算のみ')],
       config,
     )
     expect(out.rows).toHaveLength(1)
@@ -389,7 +444,7 @@ describe('compareSalaryMonth', () => {
     const cdMap: SalaryCdMap = { entries: { '1427|中村一由': '1412' } }
     const out = compareSalaryMonth(
       [csvRow({ driverCd: '1427', cdKey: '1427', driverName: '中村　一由' })],
-      [reportRow('1412', '中村 一由', 75000, 100000)],
+      [reportRow('1412', '中村 一由', { workDays: 22 })],
       config,
       cdMap,
     )
@@ -401,14 +456,14 @@ describe('compareSalaryMonth', () => {
   })
 
   it('直接一致した行は mappedDriverCd を null にする', () => {
-    const out = compareSalaryMonth([csvRow()], [reportRow('1239', '城田 秀幸', 1, 2)], config)
+    const out = compareSalaryMonth([csvRow()], [reportRow('1239', '城田 秀幸')], config)
     expect(out.rows[0]!.mappedDriverCd).toBeNull()
   })
 
   it('CSV 側の重複乗務員は後勝ち + 警告する', () => {
     const out = compareSalaryMonth(
       [csvRow({ amounts: { 基本給: 1 } }), csvRow({ amounts: { 基本給: 2 } })],
-      [reportRow('1239', '城田 秀幸', 0, 0)],
+      [reportRow('1239', '城田 秀幸')],
       config,
     )
     expect(out.warnings).toHaveLength(1)
