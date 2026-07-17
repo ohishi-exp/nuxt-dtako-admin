@@ -346,8 +346,9 @@ export interface SalaryComparisonRow {
   /** CSV の 支給合計額 列 (無ければ null、項目合計との検算用)。 */
   csvReportedTotal: number | null
   /** 計算側は CSV の【 補助 】単価 (基本単価=日額、残業単価=時給) ×
-   * システム集計で出す (単価マスタは使わない)。単価が無い行は null
-   * (「単価なし」— 独自の按分計算はしない。最低賃金比較は別タブで行う)。 */
+   * システム集計で出す (**単価マスタは使わない** — 単価マスタとの比較は
+   * 「最低賃金チェック」タブの責務、Refs #268)。単価が無い行は null
+   * (「単価なし」— 独自の按分計算はしない)。 */
   sysBase: number | null
   sysOvertime: number | null
   sysTotal: number | null
@@ -358,6 +359,19 @@ export interface SalaryComparisonRow {
   diffBase: number | null
   diffOvertime: number | null
   diffTotal: number | null
+  /** minWageOvertimePay の計算対象時間 (通常残業+深夜残業、wage-report の
+   * overtimeMinutes+nightOvertimeMinutes)。sysOvertimeMinutes (時間外+時間外深夜)
+   * と異なり週40超過分も含む。 */
+  minWageOvertimeMinutes: number
+  /** 残業の最低賃金換算理論値 (wage-report の minWageOvertimePay+
+   * minWageNightOvertimePay)。単価マスタとは独立で、最低賃金未設定等で
+   * どちらか欠ければ null。「最低賃金チェック」タブの最低賃金換算と同じ理論値。 */
+  minWageOvertimePay: number | null
+  /** csvOvertime (実際の給与明細の残業代、真の支払い実績) − minWageOvertimePay。
+   * 負 = 実際に支払われた残業代が最低賃金換算の理論値を下回っている。
+   * 「最低賃金チェック」タブが単価マスタ設定の事前チェックなのに対し、
+   * こちらは支払い実績の事後チェック (Refs #268)。 */
+  diffCsvVsMinWageOvertime: number | null
 }
 
 export interface SalaryComparison {
@@ -435,6 +449,15 @@ export function compareSalaryMonth(
     const sysBase = csv.rates.base !== null ? Math.round(csv.rates.base * workDays) : null
     const sysOvertime = csv.rates.overtime !== null ? Math.round((csv.rates.overtime * overtimeMinutes) / 60) : null
     const sysTotal = sysBase !== null && sysOvertime !== null ? sysBase + sysOvertime : null
+
+    // 支払い実績 (csvOvertime) と直接比較する最低賃金理論値。時間軸は
+    // 「最低賃金チェック」タブと同じ (時間外+時間外深夜+週40超過)。
+    const minWageOvertimeMinutes = report.wage.overtimeMinutes + report.wage.nightOvertimeMinutes
+    const minWageOvertimePay
+      = report.wage.minWageOvertimePay !== null && report.wage.minWageNightOvertimePay !== null
+        ? report.wage.minWageOvertimePay + report.wage.minWageNightOvertimePay
+        : null
+
     rows.push({
       driverCd: csv.driverCd,
       mappedDriverCd: csv.cdKey === cdKey ? null : report.summary.driverCd,
@@ -453,6 +476,9 @@ export function compareSalaryMonth(
       diffBase: sysBase === null ? null : base - sysBase,
       diffOvertime: sysOvertime === null ? null : overtime - sysOvertime,
       diffTotal: sysTotal === null ? null : base + overtime - sysTotal,
+      minWageOvertimeMinutes,
+      minWageOvertimePay,
+      diffCsvVsMinWageOvertime: minWageOvertimePay === null ? null : overtime - minWageOvertimePay,
     })
   }
 

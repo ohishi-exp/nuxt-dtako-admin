@@ -6,10 +6,11 @@
 
 | ファイル | 中身 | 消費者 |
 |---|---|---|
-| `summaries.json` | 拘束サマリ 4 乗務員 (2026-07 平日20日): 9901 正常 / 9902 時給が最低賃金割れ / 9903 月60h超の残業代割れ / 9904 単価未設定 | golden テスト、(予定) 給与比較テスト、seed:local |
+| `summaries.json` | 拘束サマリ 4 乗務員 (2026-07 平日20日): 9901 正常 / 9902 時給が最低賃金割れ / 9903 月60h超の残業代割れ / 9904 単価未設定 | golden テスト、給与比較テスト、(予定) seed:local |
 | `wage-master.json` | 単価マスタ (9904 は意図的に未登録) | 同上 |
 | `min-wage-master.json` | 最低賃金マスタ (佐賀 956 円、全社共通) | 同上 |
-| `golden/wage-rows.json` | `computeWageRow` の出力 golden — **手で編集しない** | `workers/dtako-scraper-relay/test/restraint-wage-golden.test.ts` |
+| `salary-2026-07.csv` | 給与明細 CSV (同 4 乗務員 + 給与のみの 9999)。9901 は golden の理論値どおり支払済み / 9903 は残業代が最低賃金理論値割れ / 9904 は【 補助 】単価なし | `tests/utils/salary-compare-fixture.test.ts` |
+| `golden/wage-rows.json` | `computeWageRow` の出力 golden — **手で編集しない** | `workers/dtako-scraper-relay/test/restraint-wage-golden.test.ts`、給与比較テスト (wage-report 側の入力として) |
 
 ## golden の再生成 (意図したロジック変更のとき)
 
