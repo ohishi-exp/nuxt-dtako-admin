@@ -11,6 +11,7 @@ import type { WageReportRow } from '../../app/utils/restraint-wage-view'
 import {
   compareSalaryMonth,
   effectiveCategory,
+  mergeParsedSalaryCsv,
   parseSalaryCsv,
   splitDelimitedLine,
   suggestCategory,
@@ -203,6 +204,41 @@ describe('parseSalaryCsv (構造エラー)', () => {
   it('支給項目列が 1 つも無いヘッダーを拒否する', () => {
     expect(() => parseSalaryCsv('社員コード,給与・賞与名,【 支給 】,支給合計額,【 控除 】\n1,2026年 1月,,0'))
       .toThrow('支給項目列がありません')
+  })
+})
+
+describe('mergeParsedSalaryCsv (複数取り込み)', () => {
+  it('年度違いの様式を行連結・項目の初出順和集合・月の昇順ユニークで合算する', () => {
+    // 2025 様式: 家畜運搬調整 あり / 60H超過残業 なし
+    const a = parseSalaryCsv([
+      '社員コード,給与・賞与名,【 支給 】,基本給,家畜運搬調整,残業手当,支給合計額,【 控除 】',
+      '1239,2025年 12月,,70000,5000,20000,95000',
+      '1240,2025年 11月,,60000,0,10000,70000',
+    ].join('\n'))
+    // 2026 様式: 家畜運搬調整 なし / 60H超過残業 あり
+    const b = parseSalaryCsv([
+      '社員コード,給与・賞与名,【 支給 】,基本給,残業手当,60H超過残業,支給合計額,【 控除 】',
+      '1239,2026年 1月,,80000,30000,1000,111000',
+    ].join('\n'))
+    const merged = mergeParsedSalaryCsv([a, b])
+    expect(merged.rows).toHaveLength(3)
+    expect(merged.rows.map(r => r.month)).toEqual(['2025-12', '2025-11', '2026-01'])
+    expect(merged.itemLabels).toEqual(['基本給', '家畜運搬調整', '残業手当', '60H超過残業'])
+    expect(merged.months).toEqual(['2025-11', '2025-12', '2026-01'])
+    expect(merged.warnings).toEqual([])
+  })
+
+  it('各取り込みの警告を連結する', () => {
+    const a = parseSalaryCsv([
+      '社員コード,給与・賞与名,【 支給 】,基本給,【 控除 】',
+      'x,2026年 1月,,1',
+    ].join('\n'))
+    const merged = mergeParsedSalaryCsv([a, a])
+    expect(merged.warnings).toHaveLength(2)
+  })
+
+  it('空リストは空の結果を返す', () => {
+    expect(mergeParsedSalaryCsv([])).toEqual({ rows: [], itemLabels: [], months: [], warnings: [] })
   })
 })
 

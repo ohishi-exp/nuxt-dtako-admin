@@ -222,6 +222,28 @@ export function parseSalaryCsv(text: string): ParsedSalaryCsv {
   return { rows, itemLabels, months: [...months].sort((a, b) => a.localeCompare(b)), warnings }
 }
 
+/**
+ * 複数回取り込んだ解析結果を 1 つにまとめる (Refs #253 複数取り込み対応)。
+ * 年度で様式 (支給項目の構成) が違っても、項目名は初出順の和集合になる。
+ * 行は取り込み順に連結する (同一乗務員 × 同一月の重複は compareSalaryMonth が
+ * 後勝ち + 警告で扱う)。
+ */
+export function mergeParsedSalaryCsv(parsedList: ParsedSalaryCsv[]): ParsedSalaryCsv {
+  const rows: SalaryCsvRow[] = []
+  const itemLabels: string[] = []
+  const months = new Set<string>()
+  const warnings: string[] = []
+  for (const parsed of parsedList) {
+    rows.push(...parsed.rows)
+    for (const label of parsed.itemLabels) {
+      if (!itemLabels.includes(label)) itemLabels.push(label)
+    }
+    for (const ym of parsed.months) months.add(ym)
+    warnings.push(...parsed.warnings)
+  }
+  return { rows, itemLabels, months: [...months].sort((a, b) => a.localeCompare(b)), warnings }
+}
+
 // ---------------------------------------------------------------------------
 // wage-report との突合
 // ---------------------------------------------------------------------------
