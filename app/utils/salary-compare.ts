@@ -327,6 +327,9 @@ export function suggestCdMapEntries(
 // wage-report との突合
 // ---------------------------------------------------------------------------
 
+/** 支給項目 1 件の内訳表示用 (項目名 + 金額)。 */
+export interface SalaryItemAmount { label: string, amount: number }
+
 export interface SalaryComparisonRow {
   driverCd: string
   /** 突合マスタで引き当てた乗務員CD (マスタ経由の時だけ非 null)。 */
@@ -334,27 +337,20 @@ export interface SalaryComparisonRow {
   driverName: string
   /** CSV 側: 基本給扱い項目の合計 / 残業扱い項目の合計 / 全支給項目の合計。 */
   csvBase: number
+  /** csvBase の内訳 (区分設定で基本給扱いになった支給項目、ヘッダー出現順)。 */
+  csvBaseItems: SalaryItemAmount[]
   csvOvertime: number
+  /** csvOvertime の内訳。 */
+  csvOvertimeItems: SalaryItemAmount[]
   csvTotal: number
   /** CSV の 支給合計額 列 (無ければ null、項目合計との検算用)。 */
   csvReportedTotal: number | null
-  /** 計算側は CSV の【 補助 】単価 × システム集計で出す (単価マスタは使わない):
-   * sysBase = 基本単価 (日額) × 稼働日数、sysOvertime = 残業単価 (時給) ×
-   * (時間外 + 時間外深夜)。単価が無い行は下記のフォールバック。 */
+  /** 計算側は CSV の【 補助 】単価 (基本単価=日額、残業単価=時給) ×
+   * システム集計で出す (単価マスタは使わない)。単価が無い行は null
+   * (「単価なし」— 独自の按分計算はしない。最低賃金比較は別タブで行う)。 */
   sysBase: number | null
   sysOvertime: number | null
   sysTotal: number | null
-  /** 基本給(計算)の方式: 'rate' = 基本単価×稼働日数、'monthly' = 基本単価が
-   * 無い (月給制) ため計算しない (sysBase は null)。 */
-  baseMode: 'rate' | 'monthly'
-  /** 残業(計算)の方式: 'rate' = 給与明細の残業単価、'derived' = 残業単価が無いので
-   * 月給 (5 項目合計) ÷ (残業+休憩+運転時間) で時給を算出。 */
-  overtimeMode: 'rate' | 'derived'
-  /** 実際に残業(計算)へ使った時給 (derived の場合は算出値)。分母 0 等で出せなければ null。 */
-  overtimeRateUsed: number | null
-  /** derived 時の月給 (5 項目合計) と時給算出の分母 (分)。表示・検算用。 */
-  overtimeMonthlySalary: number
-  overtimeDivisorMinutes: number
   /** 計算根拠の表示用: システム稼働日数と時間外(+深夜) 分。 */
   sysWorkDays: number
   sysOvertimeMinutes: number
@@ -373,26 +369,27 @@ export interface SalaryComparison {
   warnings: string[]
 }
 
-/** 残業単価が無い乗務員の「1 ヶ月分の給料」とみなす支給項目 (Refs #253)。
- * 給与明細に該当カラムが無ければ 0。項目名は NFKC + trim 済みで突合する。 */
-export const MONTHLY_SALARY_LABELS = ['基本給', '役職手当', '新愛社手当', '無事故手当', 'けん引手当'] as const
-
-/** 月給 (上記 5 項目の合計) を CSV 行から取り出す (無いカラムは 0)。 */
-export function monthlySalaryOf(row: SalaryCsvRow): number {
-  let sum = 0
-  for (const label of MONTHLY_SALARY_LABELS) sum += row.amounts[label] ?? 0
-  return sum
-}
-
-/** CSV 1 行を区分設定で 基本給/残業 の 2 束に集計する。 */
-export function sumByCategory(row: SalaryCsvRow, config: SalaryItemConfig): { base: number, overtime: number } {
+/** CSV 1 行を区分設定で 基本給/残業 の 2 束に集計する (内訳つき)。 */
+export function sumByCategory(row: SalaryCsvRow, config: SalaryItemConfig): {
+  base: number
+  overtime: number
+  baseItems: SalaryItemAmount[]
+  overtimeItems: SalaryItemAmount[]
+} {
   let base = 0
   let overtime = 0
+  const baseItems: SalaryItemAmount[] = []
+  const overtimeItems: SalaryItemAmount[] = []
   for (const [label, amount] of Object.entries(row.amounts)) {
-    if (effectiveCategory(label, config) === 'overtime') overtime += amount
-    else base += amount
+    if (effectiveCategory(label, config) === 'overtime') {
+      overtime += amount
+      overtimeItems.push({ label, amount })
+    } else {
+      base += amount
+      baseItems.push({ label, amount })
+    }
   }
-  return { base, overtime }
+  return { base, overtime, baseItems, overtimeItems }
 }
 
 /**
@@ -428,50 +425,29 @@ export function compareSalaryMonth(
       continue
     }
     matched.add(cdKey)
-    const { base, overtime } = sumByCategory(csv, config)
+    const { base, overtime, baseItems, overtimeItems } = sumByCategory(csv, config)
     const workDays = report.summary.workDays
     const overtimeMinutes = (report.summary.overtimeMinutes ?? 0) + (report.summary.overtimeNightMinutes ?? 0)
 
-    // 基本給(計算): 基本単価があれば 日額 × 稼働日数。無ければ月給制とみなし計算しない。
-    const baseMode: 'rate' | 'monthly' = csv.rates.base !== null ? 'rate' : 'monthly'
+    // 計算側: CSV の単価 × システム集計 (基本単価は日額、残業単価は時給)。
+    // 単価が無い行は独自の按分計算をせず null (「単価なし」— 最低賃金比較は
+    // 既存の最低賃金チェックタブに任せる、Refs #253)。
     const sysBase = csv.rates.base !== null ? Math.round(csv.rates.base * workDays) : null
-
-    // 残業(計算): 残業単価があればそれで計算。無ければ月給 (5 項目合計) を
-    // (残業 + 休憩 + 運転時間) で割った時給を算出して使う。
-    const overtimeMode: 'rate' | 'derived' = csv.rates.overtime !== null ? 'rate' : 'derived'
-    const overtimeMonthlySalary = monthlySalaryOf(csv)
-    const overtimeDivisorMinutes = overtimeMinutes
-      + (report.summary.breakMinutes ?? 0)
-      + (report.summary.drivingMinutes ?? 0)
-    let overtimeRateUsed: number | null
-    if (csv.rates.overtime !== null) {
-      overtimeRateUsed = csv.rates.overtime
-    } else {
-      overtimeRateUsed = overtimeDivisorMinutes > 0
-        ? overtimeMonthlySalary / (overtimeDivisorMinutes / 60)
-        : null
-    }
-    const sysOvertime = overtimeRateUsed !== null
-      ? Math.round((overtimeRateUsed * overtimeMinutes) / 60)
-      : null
-
+    const sysOvertime = csv.rates.overtime !== null ? Math.round((csv.rates.overtime * overtimeMinutes) / 60) : null
     const sysTotal = sysBase !== null && sysOvertime !== null ? sysBase + sysOvertime : null
     rows.push({
       driverCd: csv.driverCd,
       mappedDriverCd: csv.cdKey === cdKey ? null : report.summary.driverCd,
       driverName: csv.driverName,
       csvBase: base,
+      csvBaseItems: baseItems,
       csvOvertime: overtime,
+      csvOvertimeItems: overtimeItems,
       csvTotal: base + overtime,
       csvReportedTotal: csv.reportedTotal,
       sysBase,
       sysOvertime,
       sysTotal,
-      baseMode,
-      overtimeMode,
-      overtimeRateUsed,
-      overtimeMonthlySalary,
-      overtimeDivisorMinutes,
       sysWorkDays: workDays,
       sysOvertimeMinutes: overtimeMinutes,
       diffBase: sysBase === null ? null : base - sysBase,

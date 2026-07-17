@@ -98,6 +98,7 @@ onMounted(() => {
     selectedYear.value = parseInt(savedMonth[1]!, 10)
     selectedMonthNo.value = parseInt(savedMonth[2]!, 10)
   }
+  restoreSalaryImports()
   restoreSession()
   if (!session.value) showLoginPanel.value = true
   else loadArchiveMonths()
@@ -431,9 +432,53 @@ async function downloadArchiveCsv(entry: ArchiveCsvEntry) {
 // ---------------------------------------------------------------------------
 
 const salaryPaste = ref('')
-/** 取り込み済み CSV (複数可、Refs #253)。メモリ上にのみ保持しサーバーへは送らない。 */
-const salaryImports = ref<Array<{ id: number, name?: string, parsed: ParsedSalaryCsv }>>([])
+/** 取り込み済み CSV (複数可、Refs #253)。サーバーへは送らず、タブを閉じるまで
+ * (sessionStorage) 保持する — リロードしても再取り込み不要にする。 */
+const salaryImports = ref<Array<{ id: number, name?: string, text: string, parsed: ParsedSalaryCsv }>>([])
 let salaryImportSeq = 0
+const SALARY_IMPORTS_STORE_KEY = 'restraint-wage:salary-imports'
+
+/** 現在の取り込み一覧 (原文 CSV/TSV テキストのみ) を sessionStorage に保存する。
+ * 解析結果はテキストから再現できるので保存しない。 */
+function persistSalaryImports() {
+  if (!import.meta.client) return
+  try {
+    const stored = salaryImports.value.map(i => ({ id: i.id, name: i.name, text: i.text }))
+    sessionStorage.setItem(SALARY_IMPORTS_STORE_KEY, JSON.stringify(stored))
+  }
+  catch {
+    // 容量超過等で保存できなくても致命的ではない (メモリ上のデータはそのまま使える)
+  }
+}
+
+/** sessionStorage から取り込み済み CSV を復元し、原文を再解析する。 */
+function restoreSalaryImports() {
+  if (!import.meta.client) return
+  const raw = sessionStorage.getItem(SALARY_IMPORTS_STORE_KEY)
+  if (!raw) return
+  let stored: Array<{ id: number, name?: string, text: string }>
+  try {
+    stored = JSON.parse(raw)
+  }
+  catch {
+    return
+  }
+  const restored: typeof salaryImports.value = []
+  let maxId = 0
+  for (const item of stored) {
+    try {
+      restored.push({ id: item.id, name: item.name, text: item.text, parsed: parseSalaryCsv(item.text) })
+      maxId = Math.max(maxId, item.id)
+    }
+    catch {
+      // 保存後に内容が壊れて再解析できない場合はスキップ (他の取り込みは維持)
+    }
+  }
+  salaryImports.value = restored
+  salaryImportSeq = maxId
+}
+
+watch(salaryImports, persistSalaryImports)
 const salaryParseError = ref('')
 /** 全取り込みを合算した解析結果 (行連結・項目名の和集合)。 */
 const salaryParsed = computed<ParsedSalaryCsv | null>(() =>
@@ -469,8 +514,9 @@ function importSalaryPaste() {
   salaryParseError.value = ''
   salaryConfigMessage.value = ''
   try {
-    const parsed = parseSalaryCsv(salaryPaste.value)
-    salaryImports.value = [...salaryImports.value, { id: ++salaryImportSeq, parsed }]
+    const text = salaryPaste.value
+    const parsed = parseSalaryCsv(text)
+    salaryImports.value = [...salaryImports.value, { id: ++salaryImportSeq, text, parsed }]
     // 取り込んだら入力欄を空にして次の CSV の貼り付けを受け付ける
     salaryPaste.value = ''
   }
@@ -492,7 +538,7 @@ async function importSalaryFiles(event: Event) {
     try {
       const text = salaryFileToText(new Uint8Array(await file.arrayBuffer()))
       const parsed = parseSalaryCsv(text)
-      salaryImports.value = [...salaryImports.value, { id: ++salaryImportSeq, name: file.name, parsed }]
+      salaryImports.value = [...salaryImports.value, { id: ++salaryImportSeq, name: file.name, text, parsed }]
     }
     catch (e) {
       errors.push(`${file.name}: ${e instanceof Error ? e.message : String(e)}`)
@@ -669,6 +715,11 @@ function fmtDiff(v: number | null): string {
   if (v == null) return '-'
   if (v === 0) return '±0'
   return (v > 0 ? '+' : '') + v.toLocaleString('ja-JP')
+}
+
+/** 基本給計/残業計の内訳ツールチップ ("項目名: 金額円 / 項目名: 金額円")。 */
+function fmtItemsTitle(items: Array<{ label: string, amount: number }>): string {
+  return items.map(i => `${i.label}: ${fmtYen(i.amount)}円`).join(' / ')
 }
 
 // ---------------------------------------------------------------------------
@@ -1324,22 +1375,18 @@ watch([activeTab, month, session], () => {
                         <span v-if="row.mappedDriverCd" class="text-xs text-gray-500" title="社員コード突合マスタで引き当て">→ {{ row.mappedDriverCd }}</span>
                       </td>
                       <td class="px-2 py-1.5">{{ row.driverName }}</td>
-                      <td class="px-2 py-1.5 text-right">{{ fmtYen(row.csvBase) }}</td>
-                      <td class="px-2 py-1.5 text-right" :title="row.baseMode === 'rate' ? `基本単価 × 稼働 ${row.sysWorkDays} 日` : '基本単価なし = 月給制のため計算対象外'">
-                        <template v-if="row.baseMode === 'rate'">{{ fmtYen(row.sysBase) }}</template>
-                        <span v-else class="text-xs text-gray-500">月給</span>
+                      <td class="px-2 py-1.5 text-right" :title="fmtItemsTitle(row.csvBaseItems)">{{ fmtYen(row.csvBase) }}</td>
+                      <td class="px-2 py-1.5 text-right" :title="row.sysBase !== null ? `基本単価 × 稼働 ${row.sysWorkDays} 日` : undefined">
+                        <template v-if="row.sysBase !== null">{{ fmtYen(row.sysBase) }}</template>
+                        <span v-else class="text-xs text-gray-500">単価なし</span>
                       </td>
                       <td class="px-2 py-1.5 text-right" :class="(row.diffBase ?? 0) !== 0 ? 'text-red-600 font-medium' : 'text-gray-400'">
                         {{ fmtDiff(row.diffBase) }}
                       </td>
-                      <td class="px-2 py-1.5 text-right">{{ fmtYen(row.csvOvertime) }}</td>
-                      <td
-                        class="px-2 py-1.5 text-right"
-                        :title="row.overtimeMode === 'rate'
-                          ? `残業単価 ${fmtYen(row.overtimeRateUsed)}円 × 時間外 ${fmtMinutes(row.sysOvertimeMinutes)}`
-                          : `残業単価なし → 月給 ${fmtYen(row.overtimeMonthlySalary)}円 ÷ (残業+休憩+運転 ${fmtMinutes(row.overtimeDivisorMinutes)}) = 時給 ${fmtYen(row.overtimeRateUsed)}円 × 時間外 ${fmtMinutes(row.sysOvertimeMinutes)}`">
-                        {{ fmtYen(row.sysOvertime) }}
-                        <span v-if="row.overtimeMode === 'derived'" class="text-xs text-amber-600 dark:text-amber-400">※</span>
+                      <td class="px-2 py-1.5 text-right" :title="fmtItemsTitle(row.csvOvertimeItems)">{{ fmtYen(row.csvOvertime) }}</td>
+                      <td class="px-2 py-1.5 text-right" :title="row.sysOvertime !== null ? `残業単価 × 時間外 ${fmtMinutes(row.sysOvertimeMinutes)}` : undefined">
+                        <template v-if="row.sysOvertime !== null">{{ fmtYen(row.sysOvertime) }}</template>
+                        <span v-else class="text-xs text-gray-500">単価なし</span>
                       </td>
                       <td class="px-2 py-1.5 text-right" :class="(row.diffOvertime ?? 0) !== 0 ? 'text-red-600 font-medium' : 'text-gray-400'">
                         {{ fmtDiff(row.diffOvertime) }}
@@ -1357,10 +1404,11 @@ watch([activeTab, month, session], () => {
                 </table>
               </div>
               <p class="text-xs text-gray-500 mt-2">
-                差 = 給与明細 − 計算。基本給(計算) = 基本単価 (日額) × システム稼働日数 (基本単価が無い月給制は「月給」表示で計算対象外)。
-                残業(計算) = 残業単価 (時給) × システム時間外。<span class="text-amber-600 dark:text-amber-400">※</span> は残業単価が無いため
-                月給 (基本給+役職手当+新愛社手当+無事故手当+けん引手当) ÷ (残業+休憩+運転時間) で時給を算出した行。
-                * は 支給合計額 列と支給項目の合算が一致しない行。最低賃金チェックは従来どおり単価マスタで別計算です。
+                差 = 給与明細 − 計算。計算 = 給与明細【 補助 】の 基本単価 (日額) × システム稼働日数、
+                残業単価 (時給) × システム時間外。給与明細に単価が無い行は「単価なし」(独自の按分計算はしません)。
+                基本給計/残業計にカーソルを合わせると支給項目の内訳を表示します。
+                * は 支給合計額 列と支給項目の合算が一致しない行。単価が無い乗務員の妥当性確認は
+                「最低賃金チェック」タブ (単価マスタ基準の換算時給 vs 最低賃金) をご利用ください。
               </p>
               <p v-if="salaryComparison.reportOnly.length" class="text-xs text-amber-600 dark:text-amber-400 mt-1">
                 システム計算のみ (給与明細なし): {{ salaryComparison.reportOnly.map(d => `${d.driverCd} ${d.driverName}`).join(', ') }}
