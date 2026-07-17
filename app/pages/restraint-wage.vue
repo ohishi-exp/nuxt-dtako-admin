@@ -98,6 +98,7 @@ onMounted(() => {
     selectedYear.value = parseInt(savedMonth[1]!, 10)
     selectedMonthNo.value = parseInt(savedMonth[2]!, 10)
   }
+  restoreSalaryImports()
   restoreSession()
   if (!session.value) showLoginPanel.value = true
   else loadArchiveMonths()
@@ -431,9 +432,53 @@ async function downloadArchiveCsv(entry: ArchiveCsvEntry) {
 // ---------------------------------------------------------------------------
 
 const salaryPaste = ref('')
-/** 取り込み済み CSV (複数可、Refs #253)。メモリ上にのみ保持しサーバーへは送らない。 */
-const salaryImports = ref<Array<{ id: number, name?: string, parsed: ParsedSalaryCsv }>>([])
+/** 取り込み済み CSV (複数可、Refs #253)。サーバーへは送らず、タブを閉じるまで
+ * (sessionStorage) 保持する — リロードしても再取り込み不要にする。 */
+const salaryImports = ref<Array<{ id: number, name?: string, text: string, parsed: ParsedSalaryCsv }>>([])
 let salaryImportSeq = 0
+const SALARY_IMPORTS_STORE_KEY = 'restraint-wage:salary-imports'
+
+/** 現在の取り込み一覧 (原文 CSV/TSV テキストのみ) を sessionStorage に保存する。
+ * 解析結果はテキストから再現できるので保存しない。 */
+function persistSalaryImports() {
+  if (!import.meta.client) return
+  try {
+    const stored = salaryImports.value.map(i => ({ id: i.id, name: i.name, text: i.text }))
+    sessionStorage.setItem(SALARY_IMPORTS_STORE_KEY, JSON.stringify(stored))
+  }
+  catch {
+    // 容量超過等で保存できなくても致命的ではない (メモリ上のデータはそのまま使える)
+  }
+}
+
+/** sessionStorage から取り込み済み CSV を復元し、原文を再解析する。 */
+function restoreSalaryImports() {
+  if (!import.meta.client) return
+  const raw = sessionStorage.getItem(SALARY_IMPORTS_STORE_KEY)
+  if (!raw) return
+  let stored: Array<{ id: number, name?: string, text: string }>
+  try {
+    stored = JSON.parse(raw)
+  }
+  catch {
+    return
+  }
+  const restored: typeof salaryImports.value = []
+  let maxId = 0
+  for (const item of stored) {
+    try {
+      restored.push({ id: item.id, name: item.name, text: item.text, parsed: parseSalaryCsv(item.text) })
+      maxId = Math.max(maxId, item.id)
+    }
+    catch {
+      // 保存後に内容が壊れて再解析できない場合はスキップ (他の取り込みは維持)
+    }
+  }
+  salaryImports.value = restored
+  salaryImportSeq = maxId
+}
+
+watch(salaryImports, persistSalaryImports)
 const salaryParseError = ref('')
 /** 全取り込みを合算した解析結果 (行連結・項目名の和集合)。 */
 const salaryParsed = computed<ParsedSalaryCsv | null>(() =>
@@ -469,8 +514,9 @@ function importSalaryPaste() {
   salaryParseError.value = ''
   salaryConfigMessage.value = ''
   try {
-    const parsed = parseSalaryCsv(salaryPaste.value)
-    salaryImports.value = [...salaryImports.value, { id: ++salaryImportSeq, parsed }]
+    const text = salaryPaste.value
+    const parsed = parseSalaryCsv(text)
+    salaryImports.value = [...salaryImports.value, { id: ++salaryImportSeq, text, parsed }]
     // 取り込んだら入力欄を空にして次の CSV の貼り付けを受け付ける
     salaryPaste.value = ''
   }
@@ -492,7 +538,7 @@ async function importSalaryFiles(event: Event) {
     try {
       const text = salaryFileToText(new Uint8Array(await file.arrayBuffer()))
       const parsed = parseSalaryCsv(text)
-      salaryImports.value = [...salaryImports.value, { id: ++salaryImportSeq, name: file.name, parsed }]
+      salaryImports.value = [...salaryImports.value, { id: ++salaryImportSeq, name: file.name, text, parsed }]
     }
     catch (e) {
       errors.push(`${file.name}: ${e instanceof Error ? e.message : String(e)}`)
