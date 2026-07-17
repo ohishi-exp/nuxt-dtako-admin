@@ -1,0 +1,31 @@
+{
+  "drivers": {
+    "9901": {
+      "name": "試験　太郎（正常）",
+      "rates": [
+        {
+          "effectiveFrom": "2020-01-01",
+          "hourlyRate": 1400
+        }
+      ]
+    },
+    "9902": {
+      "name": "試験　次郎（時給が最低賃金割れ）",
+      "rates": [
+        {
+          "effectiveFrom": "2020-01-01",
+          "hourlyRate": 900
+        }
+      ]
+    },
+    "9903": {
+      "name": "試験　三郎（月60h超の残業代が最低賃金割れ）",
+      "rates": [
+        {
+          "effectiveFrom": "2020-01-01",
+          "hourlyRate": 960
+        }
+      ]
+    }
+  }
+}

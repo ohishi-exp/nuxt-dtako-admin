@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   classifyMonth,
+  computeMinWageOvertimePay,
   computeWageAmounts,
   computeWageRow,
   dayOfWeek,
@@ -15,6 +16,7 @@ import {
   normalizeWageMaster,
   rateForMonth,
   splitCsvCells,
+  splitMinWageOvertimePay,
   upsertWageMasterFromCsv,
   WAGE_MASTER_CSV_HEADER,
   wageMasterToCsv,
@@ -466,6 +468,77 @@ describe('computeWageRow', () => {
       { ...DEFAULT_WAGE_CONFIG, hourlyBasis: 'restraint' },
     )
     expect(restraintBasis.hourlyEquivalent).toBe(Math.round(restraintBasis.totalAmount! / 50))
+  })
+
+  it('実働 0 分 (null でなく 0) は換算時給・最低賃金換算とも null', () => {
+    const row = computeWageRow(
+      summary({ workingMinutes: 0, days: [day(1, { workingMinutes: 600 })] }),
+      2025, 4, wageMaster, MIN_WAGE, DEFAULT_WAGE_CONFIG,
+    )
+    expect(row.hourlyEquivalent).toBeNull()
+    expect(row.minWageTotalPay).toBeNull()
+    expect(row.totalPayDiff).toBeNull()
+  })
+
+  it('最低賃金が引けない事業所 (未マッピング + default なし) は minWage 系がすべて null', () => {
+    const noMinWage: MinWageMaster = { prefectures: {}, branchToPrefecture: {} }
+    const row = computeWageRow(baseSummary, 2025, 4, wageMaster, noMinWage, DEFAULT_WAGE_CONFIG)
+    expect(row.minWage.rate).toBeNull()
+    expect(row.minWageTotalPay).toBeNull()
+    expect(row.totalPayDiff).toBeNull()
+    expect(row.minWageOvertimePay).toBeNull()
+    expect(row.minWageOvertimeRate).toBeNull()
+    expect(row.minWageNightOvertimePay).toBeNull()
+    expect(row.minWageNightOvertimeRate).toBeNull()
+    expect(row.overtimePayDiff).toBeNull()
+    expect(row.nightOvertimePayDiff).toBeNull()
+    // 単価マスタ側の金額は最低賃金と独立に出る
+    expect(row.actualOvertimePay).not.toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 最低賃金ベース残業代 (月60h超 1.5 倍 + 深夜軸の独立加算)
+// ---------------------------------------------------------------------------
+
+describe('computeMinWageOvertimePay', () => {
+  it('月60h以下は overtime 係数のみ (深夜なし)', () => {
+    // 20h = 1200 分。1000 円 × 20h × 1.25
+    expect(computeMinWageOvertimePay(1200, 0, 1000, DEFAULT_WAGE_CONFIG)).toBe(25000)
+  })
+
+  it('月60h超は超過分だけ overtimeOver60h 係数 (1.5) に切り替わる', () => {
+    // 100h: 60h × 1.25 + 40h × 1.5 = 75h + 60h = 135h 分
+    expect(computeMinWageOvertimePay(100 * 60, 0, 1000, DEFAULT_WAGE_CONFIG)).toBe(135000)
+  })
+
+  it('深夜軸 (+0.25) は 60h 判定と独立に常時加算される', () => {
+    // 70h 全部深夜: 時間外軸 60×1.25+10×1.5=90h、深夜軸 70×0.25=17.5h
+    expect(computeMinWageOvertimePay(70 * 60, 70 * 60, 1000, DEFAULT_WAGE_CONFIG))
+      .toBe(90000 + 17500)
+  })
+})
+
+describe('splitMinWageOvertimePay', () => {
+  it('通常+深夜の合計は computeMinWageOvertimePay と一致する (按分は表示上の慣行)', () => {
+    for (const [normal, night] of [[20 * 60, 0], [50 * 60, 20 * 60], [70 * 60, 10 * 60], [0, 70 * 60]] as const) {
+      const { normalPay, nightPay } = splitMinWageOvertimePay(normal, night, 1000, DEFAULT_WAGE_CONFIG)
+      expect(normalPay + nightPay).toBe(computeMinWageOvertimePay(normal + night, night, 1000, DEFAULT_WAGE_CONFIG))
+    }
+  })
+
+  it('60h 枠は通常残業から先に消費する (通常 50h + 深夜 20h → 深夜の 10h が 1.5 倍)', () => {
+    const { normalPay, nightPay } = splitMinWageOvertimePay(50 * 60, 20 * 60, 1000, DEFAULT_WAGE_CONFIG)
+    expect(normalPay).toBe(Math.round(50 * 1000 * 1.25))
+    // 深夜: 10h × 1.25 + 10h × 1.5 + 20h × 0.25 (深夜軸)
+    expect(nightPay).toBe(Math.round((10 * 1.25 + 10 * 1.5 + 20 * 0.25) * 1000))
+  })
+
+  it('通常残業だけで 60h を超えると通常側にも 1.5 倍が乗る', () => {
+    const { normalPay, nightPay } = splitMinWageOvertimePay(70 * 60, 60, 1000, DEFAULT_WAGE_CONFIG)
+    expect(normalPay).toBe(Math.round((60 * 1.25 + 10 * 1.5) * 1000))
+    // 深夜 1h は全量 60h 超 (1.5) + 深夜軸 0.25
+    expect(nightPay).toBe(Math.round((1 * 1.5 + 1 * 0.25) * 1000))
   })
 })
 

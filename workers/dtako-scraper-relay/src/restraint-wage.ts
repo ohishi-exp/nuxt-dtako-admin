@@ -13,6 +13,13 @@
  *
  * 時間の出どころ: 深夜系 (深夜/時間外深夜) と時間外は theearth CSV の日別値を
  * 採用し、法定内 (= 実働 − 時間外 − 時間外深夜)・休日区分・週40h は自前分類。
+ *
+ * 注意 (WageRow の `actual*` 系フィールドについて): これは「単価マスタ (会社が
+ * 登録した基本時間単価) × デジタコ拘束時間」で計算した**理論値**であり、実際に
+ * 振り込まれた給与額 (支払い実績) ではない。実際の支払い実績は給与明細 CSV
+ * (app/utils/salary-compare.ts の SalaryCsvRow) が持つ — このファイルの計算値は
+ * 「単価マスタの設定自体が最低賃金水準を満たしているか」を事前チェックするための
+ * 理論値同士の比較に使う (fable 相談、2026-07-17)。
  */
 
 import { TheearthClientError } from "./theearth-client";
@@ -75,6 +82,8 @@ export interface WageConfig {
     legalHoliday: number;
     legalHolidayNight: number;
     weekly40Excess: number;
+    /** 最低賃金ベース残業代の月60h超過分の係数 (改正労基法、中小企業も2023-04〜適用)。 */
+    overtimeOver60h: number;
   };
   /** 法定休日の曜日 (0=日曜)。 */
   legalHolidayWeekday: number;
@@ -97,6 +106,7 @@ export const DEFAULT_WAGE_CONFIG: WageConfig = {
     legalHoliday: 1.35,
     legalHolidayNight: 1.6,
     weekly40Excess: 1.25,
+    overtimeOver60h: 1.5,
   },
   legalHolidayWeekday: 0,
   nonLegalHolidayWeekdays: [6],
@@ -533,6 +543,106 @@ export interface WageRow {
   minWage: MinWageLookup;
   /** 換算時給 − 最低賃金 (どちらか欠けたら null。負 = 最低賃金割れ)。 */
   minWageDiff: number | null;
+  /** 最低賃金 × hourlyBasis の時間 (支給見込みの最低賃金換算値)。分母 0 や最低賃金なしは null。 */
+  minWageTotalPay: number | null;
+  /** totalAmount − minWageTotalPay (どちらか欠けたら null。負 = 支給見込みが最低賃金換算を下回る)。 */
+  totalPayDiff: number | null;
+  /** 通常残業 (時間外 + 週40超過) の合計時間 (分)。時間外深夜は含まない (nightOvertimeMinutes)。 */
+  overtimeMinutes: number;
+  /** 通常残業の代表単価 (最低賃金ベース、円/h)。実額按分平均 (minWageOvertimePay ÷
+   * overtimeMinutes) — 月60h超が絡む月は 1.25〜1.5 の間の値になる。時間が 0 の月は
+   * minWage.rate × overtime 係数にフォールバック。minWage.rate が無ければ null。 */
+  minWageOvertimeRate: number | null;
+  /** 通常残業の最低賃金換算理論値 (月60hまで overtime 係数、超過分は overtimeOver60h
+   * 係数)。時間外深夜分は含まない (minWageNightOvertimePay を参照)。60h 枠は通常残業
+   * から先に消費する扱いだが、これは表示上の按分に過ぎず合計額 (+ nightOvertimePay)
+   * は按分順序に依存しない。minWage.rate が無ければ null。 */
+  minWageOvertimePay: number | null;
+  /** 単価マスタの実単価で計算した通常残業代 (時間外+週40超過の金額)。hourlyRate が無ければ null。 */
+  actualOvertimePay: number | null;
+  /** actualOvertimePay − minWageOvertimePay (どちらか欠けたら null。負 = 最低賃金ベースの残業代を下回る)。 */
+  overtimePayDiff: number | null;
+  /** 時間外深夜の時間 (分)。minutes.overtimeNight と同じ値。 */
+  nightOvertimeMinutes: number;
+  /** 深夜残業の代表単価 (最低賃金ベース、円/h)。実額按分平均 (minWageNightOvertimePay ÷
+   * nightOvertimeMinutes) — 深夜加算 0.25 を常時含むため通常時は概ね 1.5 倍、月60h超が
+   * 絡む月は 1.5〜1.75 の間の値になる。時間が 0 の月は minWage.rate × overtimeNight
+   * 係数にフォールバック。minWage.rate が無ければ null。 */
+  minWageNightOvertimeRate: number | null;
+  /** 深夜残業の最低賃金換算理論値。時間外軸 (60hまで1.25倍・超過1.5倍、通常残業と
+   * 合算した月60h判定のうち通常残業消費後の残り枠を充てる) と深夜軸 (常時+0.25倍)
+   * を独立加算する。minWage.rate が無ければ null。 */
+  minWageNightOvertimePay: number | null;
+  /** 単価マスタの実単価で計算した深夜残業代 (時間外深夜の金額)。hourlyRate が無ければ null。 */
+  actualNightOvertimePay: number | null;
+  /** actualNightOvertimePay − minWageNightOvertimePay (どちらか欠けたら null。負 = 最低賃金ベースの深夜残業代を下回る)。 */
+  nightOvertimePayDiff: number | null;
+}
+
+/** 月の時間外割増の法定上限 (これを超えると overtimeOver60h 係数に切り替わる)。 */
+const MONTHLY_OVERTIME_THRESHOLD_MINUTES = 60 * 60;
+
+/**
+ * 最低賃金を基礎額とみなした場合の割増残業代。
+ *
+ * 労基法37条の割増は時間外軸 (月60hまで1.25倍・超過分1.5倍) と深夜軸 (常時+0.25倍)
+ * が独立して加算される。時間外深夜の時間は月60h判定の対象 (時間外労働) に含めつつ、
+ * 深夜加算 0.25 は 60h 超過の有無に関係なく常時上乗せする (60h超の深夜残業は
+ * 1.5+0.25=1.75 相当になり、単純な合成係数の切替では表せない)。
+ *
+ * @param overtimeMinutes 時間外 + 時間外深夜 + 週40超過 の合計時間 (分、月60h判定の対象)
+ * @param overtimeNightMinutes うち時間外深夜の時間 (分、深夜加算 0.25 を常時上乗せする対象)
+ */
+export function computeMinWageOvertimePay(
+  overtimeMinutes: number,
+  overtimeNightMinutes: number,
+  minWageRate: number,
+  config: WageConfig,
+): number {
+  const under = Math.min(overtimeMinutes, MONTHLY_OVERTIME_THRESHOLD_MINUTES);
+  const over = Math.max(0, overtimeMinutes - MONTHLY_OVERTIME_THRESHOLD_MINUTES);
+  return Math.round(
+    (under / 60) * minWageRate * config.rates.overtime
+    + (over / 60) * minWageRate * config.rates.overtimeOver60h
+    + (overtimeNightMinutes / 60) * minWageRate * config.rates.night,
+  );
+}
+
+/**
+ * computeMinWageOvertimePay の合計理論値を「通常残業 (時間外+週40超過)」と
+ * 「深夜残業 (時間外深夜)」の表示用 2 列に按分する。
+ *
+ * 60h 枠は通常残業から先に消費する順序で割り振るが、これは表示上の慣行に過ぎない。
+ * 改正労基法の月60h超判定は「月の時間外労働合計」に対する一律ルールであり、個々の
+ * 区分がどちらの60h枠を消費したかを定める法的根拠は無い。normalUnder+nightUnder=under、
+ * normalOver+nightOver=over が常に成り立つため、按分順序を変えても
+ * `normalPay + nightPay` の合計 (= computeMinWageOvertimePay の返り値) は不変。
+ */
+export function splitMinWageOvertimePay(
+  normalMinutes: number,
+  nightMinutes: number,
+  minWageRate: number,
+  config: WageConfig,
+): { normalPay: number; nightPay: number } {
+  const totalMinutes = normalMinutes + nightMinutes;
+  const under = Math.min(totalMinutes, MONTHLY_OVERTIME_THRESHOLD_MINUTES);
+  const over = Math.max(0, totalMinutes - MONTHLY_OVERTIME_THRESHOLD_MINUTES);
+
+  const normalUnder = Math.min(normalMinutes, under);
+  const normalOver = normalMinutes - normalUnder;
+  const nightUnder = under - normalUnder;
+  const nightOver = nightMinutes - nightUnder;
+
+  const normalPay = Math.round(
+    (normalUnder / 60) * minWageRate * config.rates.overtime
+    + (normalOver / 60) * minWageRate * config.rates.overtimeOver60h,
+  );
+  const nightPay = Math.round(
+    (nightUnder / 60) * minWageRate * config.rates.overtime
+    + (nightOver / 60) * minWageRate * config.rates.overtimeOver60h
+    + (nightMinutes / 60) * minWageRate * config.rates.night,
+  );
+  return { normalPay, nightPay };
 }
 
 export function computeWageAmounts(
@@ -564,6 +674,9 @@ export function computeWageRow(
   const minutes = classifyMonth(summary.days, year, month, config, prevMonthDays);
   const minWage = minWageForBranch(minWageMaster, summary.branchName, year, month);
 
+  const basisMinutes =
+    config.hourlyBasis === "working" ? summary.workingMinutes : summary.restraintMinutes;
+
   let amounts: WageCategoryAmounts | null = null;
   let totalAmount: number | null = null;
   let hourlyEquivalent: number | null = null;
@@ -571,12 +684,38 @@ export function computeWageRow(
     const computed = computeWageAmounts(minutes, hourlyRate, config);
     amounts = computed.amounts;
     totalAmount = computed.total;
-    const basisMinutes =
-      config.hourlyBasis === "working" ? summary.workingMinutes : summary.restraintMinutes;
     if (basisMinutes !== null && basisMinutes > 0) {
       hourlyEquivalent = Math.round(totalAmount / (basisMinutes / 60));
     }
   }
+  const minWageTotalPay =
+    minWage.rate !== null && basisMinutes !== null && basisMinutes > 0
+      ? Math.round(minWage.rate * (basisMinutes / 60))
+      : null;
+  const overtimeMinutes = minutes.overtime + minutes.weekly40Excess;
+  const nightOvertimeMinutes = minutes.overtimeNight;
+  let minWageOvertimePay: number | null = null;
+  let minWageNightOvertimePay: number | null = null;
+  if (minWage.rate !== null) {
+    const split = splitMinWageOvertimePay(overtimeMinutes, nightOvertimeMinutes, minWage.rate, config);
+    minWageOvertimePay = split.normalPay;
+    minWageNightOvertimePay = split.nightPay;
+  }
+  const minWageOvertimeRate =
+    minWageOvertimePay !== null && overtimeMinutes > 0
+      ? Math.round(minWageOvertimePay / (overtimeMinutes / 60))
+      : minWage.rate !== null
+        ? Math.round(minWage.rate * config.rates.overtime)
+        : null;
+  const minWageNightOvertimeRate =
+    minWageNightOvertimePay !== null && nightOvertimeMinutes > 0
+      ? Math.round(minWageNightOvertimePay / (nightOvertimeMinutes / 60))
+      : minWage.rate !== null
+        ? Math.round(minWage.rate * config.rates.overtimeNight)
+        : null;
+  const actualOvertimePay = amounts !== null ? amounts.overtime + amounts.weekly40Excess : null;
+  const actualNightOvertimePay = amounts !== null ? amounts.overtimeNight : null;
+
   return {
     driverCd: summary.driverCd,
     driverName: summary.driverName,
@@ -589,6 +728,25 @@ export function computeWageRow(
     minWage,
     minWageDiff:
       hourlyEquivalent !== null && minWage.rate !== null ? hourlyEquivalent - minWage.rate : null,
+    minWageTotalPay,
+    totalPayDiff:
+      totalAmount !== null && minWageTotalPay !== null ? totalAmount - minWageTotalPay : null,
+    overtimeMinutes,
+    minWageOvertimeRate,
+    minWageOvertimePay,
+    actualOvertimePay,
+    overtimePayDiff:
+      actualOvertimePay !== null && minWageOvertimePay !== null
+        ? actualOvertimePay - minWageOvertimePay
+        : null,
+    nightOvertimeMinutes,
+    minWageNightOvertimeRate,
+    minWageNightOvertimePay,
+    actualNightOvertimePay,
+    nightOvertimePayDiff:
+      actualNightOvertimePay !== null && minWageNightOvertimePay !== null
+        ? actualNightOvertimePay - minWageNightOvertimePay
+        : null,
   };
 }
 

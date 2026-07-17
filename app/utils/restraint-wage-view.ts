@@ -53,6 +53,18 @@ export interface WageRow {
   hourlyEquivalent: number | null
   minWage: { rate: number | null, prefecture: string | null, mapped: boolean }
   minWageDiff: number | null
+  minWageTotalPay: number | null
+  totalPayDiff: number | null
+  overtimeMinutes: number
+  minWageOvertimeRate: number | null
+  minWageOvertimePay: number | null
+  actualOvertimePay: number | null
+  overtimePayDiff: number | null
+  nightOvertimeMinutes: number
+  minWageNightOvertimeRate: number | null
+  minWageNightOvertimePay: number | null
+  actualNightOvertimePay: number | null
+  nightOvertimePayDiff: number | null
 }
 
 export interface WageReportRow {

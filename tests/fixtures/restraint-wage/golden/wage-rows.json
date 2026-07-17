@@ -1,0 +1,196 @@
+[
+  {
+    "driverCd": "9901",
+    "wage": {
+      "driverCd": "9901",
+      "driverName": "試験　太郎（正常）",
+      "branchName": "テスト運輸　第一営業所",
+      "hourlyRate": 1400,
+      "minutes": {
+        "statutory": 9480,
+        "overtime": 1200,
+        "night": 300,
+        "overtimeNight": 120,
+        "nonLegalHoliday": 0,
+        "nonLegalHolidayNight": 0,
+        "legalHoliday": 0,
+        "legalHolidayNight": 0,
+        "weekly40Excess": 0
+      },
+      "amounts": {
+        "statutory": 221200,
+        "overtime": 35000,
+        "night": 1750,
+        "overtimeNight": 4200,
+        "nonLegalHoliday": 0,
+        "nonLegalHolidayNight": 0,
+        "legalHoliday": 0,
+        "legalHolidayNight": 0,
+        "weekly40Excess": 0
+      },
+      "totalAmount": 262150,
+      "hourlyEquivalent": 1456,
+      "minWage": {
+        "rate": 956,
+        "prefecture": "佐賀",
+        "mapped": true
+      },
+      "minWageDiff": 500,
+      "minWageTotalPay": 172080,
+      "totalPayDiff": 90070,
+      "overtimeMinutes": 1200,
+      "minWageOvertimeRate": 1195,
+      "minWageOvertimePay": 23900,
+      "actualOvertimePay": 35000,
+      "overtimePayDiff": 11100,
+      "nightOvertimeMinutes": 120,
+      "minWageNightOvertimeRate": 1434,
+      "minWageNightOvertimePay": 2868,
+      "actualNightOvertimePay": 4200,
+      "nightOvertimePayDiff": 1332
+    }
+  },
+  {
+    "driverCd": "9902",
+    "wage": {
+      "driverCd": "9902",
+      "driverName": "試験　次郎（時給が最低賃金割れ）",
+      "branchName": "テスト運輸　第一営業所",
+      "hourlyRate": 900,
+      "minutes": {
+        "statutory": 9600,
+        "overtime": 0,
+        "night": 0,
+        "overtimeNight": 0,
+        "nonLegalHoliday": 0,
+        "nonLegalHolidayNight": 0,
+        "legalHoliday": 0,
+        "legalHolidayNight": 0,
+        "weekly40Excess": 0
+      },
+      "amounts": {
+        "statutory": 144000,
+        "overtime": 0,
+        "night": 0,
+        "overtimeNight": 0,
+        "nonLegalHoliday": 0,
+        "nonLegalHolidayNight": 0,
+        "legalHoliday": 0,
+        "legalHolidayNight": 0,
+        "weekly40Excess": 0
+      },
+      "totalAmount": 144000,
+      "hourlyEquivalent": 900,
+      "minWage": {
+        "rate": 956,
+        "prefecture": "佐賀",
+        "mapped": true
+      },
+      "minWageDiff": -56,
+      "minWageTotalPay": 152960,
+      "totalPayDiff": -8960,
+      "overtimeMinutes": 0,
+      "minWageOvertimeRate": 1195,
+      "minWageOvertimePay": 0,
+      "actualOvertimePay": 0,
+      "overtimePayDiff": 0,
+      "nightOvertimeMinutes": 0,
+      "minWageNightOvertimeRate": 1434,
+      "minWageNightOvertimePay": 0,
+      "actualNightOvertimePay": 0,
+      "nightOvertimePayDiff": 0
+    }
+  },
+  {
+    "driverCd": "9903",
+    "wage": {
+      "driverCd": "9903",
+      "driverName": "試験　三郎（月60h超の残業代が最低賃金割れ）",
+      "branchName": "テスト運輸　第一営業所",
+      "hourlyRate": 960,
+      "minutes": {
+        "statutory": 4800,
+        "overtime": 6000,
+        "night": 0,
+        "overtimeNight": 0,
+        "nonLegalHoliday": 0,
+        "nonLegalHolidayNight": 0,
+        "legalHoliday": 0,
+        "legalHolidayNight": 0,
+        "weekly40Excess": 0
+      },
+      "amounts": {
+        "statutory": 76800,
+        "overtime": 120000,
+        "night": 0,
+        "overtimeNight": 0,
+        "nonLegalHoliday": 0,
+        "nonLegalHolidayNight": 0,
+        "legalHoliday": 0,
+        "legalHolidayNight": 0,
+        "weekly40Excess": 0
+      },
+      "totalAmount": 196800,
+      "hourlyEquivalent": 1093,
+      "minWage": {
+        "rate": 956,
+        "prefecture": "佐賀",
+        "mapped": true
+      },
+      "minWageDiff": 137,
+      "minWageTotalPay": 172080,
+      "totalPayDiff": 24720,
+      "overtimeMinutes": 6000,
+      "minWageOvertimeRate": 1291,
+      "minWageOvertimePay": 129060,
+      "actualOvertimePay": 120000,
+      "overtimePayDiff": -9060,
+      "nightOvertimeMinutes": 0,
+      "minWageNightOvertimeRate": 1434,
+      "minWageNightOvertimePay": 0,
+      "actualNightOvertimePay": 0,
+      "nightOvertimePayDiff": 0
+    }
+  },
+  {
+    "driverCd": "9904",
+    "wage": {
+      "driverCd": "9904",
+      "driverName": "試験　四郎（単価未設定）",
+      "branchName": "テスト運輸　第一営業所",
+      "hourlyRate": null,
+      "minutes": {
+        "statutory": 9600,
+        "overtime": 0,
+        "night": 0,
+        "overtimeNight": 0,
+        "nonLegalHoliday": 0,
+        "nonLegalHolidayNight": 0,
+        "legalHoliday": 0,
+        "legalHolidayNight": 0,
+        "weekly40Excess": 0
+      },
+      "amounts": null,
+      "totalAmount": null,
+      "hourlyEquivalent": null,
+      "minWage": {
+        "rate": 956,
+        "prefecture": "佐賀",
+        "mapped": true
+      },
+      "minWageDiff": null,
+      "minWageTotalPay": 152960,
+      "totalPayDiff": null,
+      "overtimeMinutes": 0,
+      "minWageOvertimeRate": 1195,
+      "minWageOvertimePay": 0,
+      "actualOvertimePay": null,
+      "overtimePayDiff": null,
+      "nightOvertimeMinutes": 0,
+      "minWageNightOvertimeRate": 1434,
+      "minWageNightOvertimePay": 0,
+      "actualNightOvertimePay": null,
+      "nightOvertimePayDiff": null
+    }
+  }
+]
