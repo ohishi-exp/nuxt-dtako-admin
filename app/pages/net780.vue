@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   parseNet780Zip,
+  extractSingleOperationZip,
   buildDailySpeedCharts,
   buildDailyGpsPoints,
   chartXRatioToTime,
@@ -41,6 +42,8 @@ const searchRows = ref<Net780Row[]>([])
 const selectedOperationNos = ref<Set<string>>(new Set())
 const downloading = ref(false)
 const downloadError = ref('')
+/** 現在「解析して表示」中の運行No (二重クリック防止 + ボタンのローディング表示用)。 */
+const viewingOperationNo = ref<string | null>(null)
 
 onMounted(() => {
   restoreNet780Session()
@@ -211,6 +214,41 @@ async function handleFile(file: File) {
     error.value = e instanceof Error ? e.message : 'パースに失敗しました'
   }
   finally {
+    isParsing.value = false
+  }
+}
+
+/** 検索結果の1行を theearth からダウンロードし、再アップロードなしでそのまま
+ * 下のビューアに解析結果を表示する。一括ダウンロード zip は複数運行を含みうる
+ * 1階層ネスト構造 (theearth-venus skill 参照) なので `extractSingleOperationZip`
+ * で対象運行だけを取り出してから既存の `parseNet780Zip` に渡す。 */
+async function viewNet780Row(row: Net780Row) {
+  if (viewingOperationNo.value || !net780Session.value) return
+  error.value = null
+  result.value = null
+  fileName.value = `${row.vehicleName ?? row.operationNo} (${row.operationDate ?? ''})`
+  viewingOperationNo.value = row.operationNo
+  isParsing.value = true
+  try {
+    const blob = await $fetch<Blob>('/net780-api/download', {
+      method: 'POST',
+      headers: net780AuthHeaders(),
+      body: { targets: [{ operationNo: row.operationNo, startDateTime: row.startDateTime }] },
+      responseType: 'blob',
+    })
+    const bulkBytes = new Uint8Array(await blob.arrayBuffer())
+    const singleBytes = await extractSingleOperationZip(bulkBytes)
+    result.value = await parseNet780Zip(singleBytes)
+  }
+  catch (e) {
+    if (net780ErrorStatus(e) === 401) {
+      expireNet780Session(net780ErrorMessage(e))
+      return
+    }
+    error.value = e instanceof Error ? e.message : '取得・パースに失敗しました'
+  }
+  finally {
+    viewingOperationNo.value = null
     isParsing.value = false
   }
 }
@@ -404,6 +442,7 @@ function eventLabel(e: Net780ParseResult['events'][number]): string {
                   <th class="px-2 py-2">乗務員CD</th>
                   <th class="px-2 py-2">乗務員名</th>
                   <th class="px-2 py-2">行先市町村名</th>
+                  <th class="px-2 py-2" />
                 </tr>
               </thead>
               <tbody>
@@ -422,6 +461,17 @@ function eventLabel(e: Net780ParseResult['events'][number]): string {
                   <td class="px-2 py-1.5">{{ row.driverCd1 ?? '-' }}</td>
                   <td class="px-2 py-1.5">{{ row.driverName1 ?? '-' }}</td>
                   <td class="px-2 py-1.5">{{ row.cityName ?? '-' }}</td>
+                  <td class="px-2 py-1.5 whitespace-nowrap">
+                    <UButton
+                      size="xs"
+                      variant="soft"
+                      icon="i-lucide-eye"
+                      label="表示"
+                      :loading="viewingOperationNo === row.operationNo"
+                      :disabled="viewingOperationNo !== null && viewingOperationNo !== row.operationNo"
+                      @click.stop="viewNet780Row(row)"
+                    />
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -432,11 +482,12 @@ function eventLabel(e: Net780ParseResult['events'][number]): string {
 
     <div class="max-w-4xl mx-auto p-6 pt-0 space-y-6">
       <h2 class="text-xl font-bold">
-        NET780 生データビューア (単一ファイル)
+        NET780 生データビューア
       </h2>
       <p class="text-sm text-gray-500">
-        NET780 デジタコの運行単位 ZIP (.inf/.spd/.dsd/.gpd/.evd 同梱) をブラウザ内で直接パースして
-        内容を確認する (アップロード・サーバー送信なし)。
+        上の検索結果で「表示」を押すか、NET780 デジタコの運行単位 ZIP
+        (.inf/.spd/.dsd/.gpd/.evd 同梱) を直接ドラッグ＆ドロップして、ブラウザ内で
+        内容を確認する (theearth からのダウンロード以外はサーバー送信なし)。
       </p>
 
       <!-- Drop zone -->

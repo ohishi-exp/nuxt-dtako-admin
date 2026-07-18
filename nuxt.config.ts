@@ -25,8 +25,11 @@ export default defineNuxtConfig({
     // ローカル dev 専用 (Refs #268 PR-D): /restraint-api を wrangler dev の relay
     // (127.0.0.1:8787) へ転送する。デプロイでは front worker が service binding で
     // 処理するため devProxy は使われない。起動手順は docs/plan-268 参照。
+    // /net780-api (Refs #302) も同じ relay worker (dtako-scraper-relay) が
+    // 処理するため同一ポートへ転送する。
     devProxy: {
       '/restraint-api': { target: 'http://127.0.0.1:8787/restraint-api' },
+      '/net780-api': { target: 'http://127.0.0.1:8787/net780-api' },
     },
   },
 
