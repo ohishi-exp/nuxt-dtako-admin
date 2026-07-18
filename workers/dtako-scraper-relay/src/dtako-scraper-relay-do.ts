@@ -2436,10 +2436,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
   }
 
-  /** POST /net780-api/download — body `{targets: {operationNo, startDateTime}[]}`
-   * を選択した運行の NET780 生データ zip をそのままストリーム素通しする
-   * (`handleReportZip` と同型)。ダウンロード postback は HTTP 503 の再現性が
-   * 高い (theearth-net780-client.ts ヘッダコメント参照) ため、数回リトライする。 */
+  /** POST /net780-api/download — body `{targets: [{operationNo, startDateTime}]}`
+   * (常に1件) を選択した運行の NET780 生データ zip をそのままストリーム素通し
+   * する (`handleReportZip` と同型)。複数運行の一括ダウンロードは、後から
+   * 個別運行を安全に取り出せない ZIP (`operationCount > 1`) を生んでしまう
+   * ため廃止した — フロント側で選択件数分この endpoint を順に呼ぶ (Refs #299)。
+   * ダウンロード postback は HTTP 503 の再現性が高い (theearth-net780-client.ts
+   * ヘッダコメント参照) ため、数回リトライする。 */
   private async handleNet780Download(record: TheearthSessionRecord, request: Request): Promise<Response> {
     let body: { targets?: unknown };
     try {
@@ -2448,6 +2451,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return dvrJsonError(400, "JSON body が必要です");
     }
     const targets = Array.isArray(body.targets) ? (body.targets as Net780DownloadTarget[]) : [];
+    if (targets.length !== 1) {
+      return dvrJsonError(
+        400,
+        `NET780 ダウンロードは1件ずつ実行してください (受領: ${targets.length}件) — ` +
+          "個別運行の再取得を保証するため一括ダウンロードは廃止しました",
+      );
+    }
     try {
       validateNet780DownloadTargets(targets);
     } catch (err) {
@@ -2473,7 +2483,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         return new Response(zip, {
           headers: {
             "content-type": "application/zip",
-            "content-disposition": `attachment; filename="net780-${targets.length}件.zip"`,
+            "content-disposition": `attachment; filename="net780-${targets[0]!.operationNo}.zip"`,
             "cache-control": "no-store",
           },
         });
@@ -2500,10 +2510,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return dvrJsonError(502, message);
   }
 
-  /** ダウンロードできた NET780 一括 ZIP を R2 にアーカイブする (Refs #302 続き)。
-   * ZIP 本体は内容の SHA-256 で dedup 保存し、含まれる各 operationNo から
-   * その ZIP を指すポインタ index を (常に上書きで) 書く — NET780 生データは
-   * 過去の運行記録で内容が変わらないため、restraint 系のような版管理は不要。
+  /** ダウンロードできた NET780 ZIP (常に単一運行、Refs #299) を R2 にアーカイブ
+   * する。ZIP 本体は内容の SHA-256 で dedup 保存し、operationNo からその ZIP を
+   * 指すポインタ index を (常に上書きで) 書く — NET780 生データは過去の運行
+   * 記録で内容が変わらないため、restraint 系のような版管理は不要。
    * waitUntil 前提の best-effort — 保存失敗でユーザーへの応答は落とさない。 */
   private async saveNet780ToR2(
     compId: string,
@@ -2549,10 +2559,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * ダウンロード済みの operationNo なら theearth に再アクセスせず R2
    * アーカイブから ZIP をそのまま返す (`extractSingleOperationZip` +
    * `parseNet780Zip` はフロント側で従来どおり実行、フォーマットは
-   * ダウンロード直後の ZIP と同一)。`operationCount > 1` (複数選択の一括
-   * ダウンロードで archive された zip) は安全に対象運行だけを取り出せない
-   * (Net780R2Index のコメント参照) ため 404 と同様にフォールバックさせる。
-   * 未アーカイブも 404 — 呼び出し側は通常の /net780-api/download に
+   * ダウンロード直後の ZIP と同一)。`operationCount > 1` は Refs #299 で
+   * ダウンロードを1件ずつに変更する前 (旧 handleNet780Download) が複数選択を
+   * 一括で archive していた名残 — そうした旧 archive は安全に対象運行だけを
+   * 取り出せない (Net780R2Index のコメント参照) ため 404 と同様にフォールバック
+   * させる。未アーカイブも 404 — 呼び出し側は通常の /net780-api/download に
    * フォールバックすること。 */
   private async handleNet780R2View(compId: string, url: URL): Promise<Response> {
     const operationNo = url.searchParams.get("operationNo") ?? "";

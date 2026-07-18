@@ -108,16 +108,10 @@ async function runNet780Search() {
   }
 }
 
-/** 選択件数が多い場合に備え、チャンク分割してダウンロードする
- * (現状は theearth 側の実質上限が未検証のため NET780_DOWNLOAD_CHUNK_SIZE = 30
- * 固定。上限が判明したら合わせて調整する)。 */
-const NET780_DOWNLOAD_CHUNK_SIZE = 30
-
-function chunks<T>(items: T[], size: number): T[][] {
-  const out: T[][] = []
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
-  return out
-}
+/** 選択した運行を1件ずつダウンロードする。複数運行を1回の postback にまとめると
+ * 個別運行を安全に取り出せない ZIP (`operationCount > 1`) が archive されて
+ * しまうため、選択件数分このループで順に呼ぶ (Refs #299)。 */
+const downloadProgress = ref<{ done: number; total: number } | null>(null)
 
 async function downloadSelectedNet780() {
   if (downloading.value || !net780Session.value) return
@@ -125,18 +119,17 @@ async function downloadSelectedNet780() {
   if (selected.length === 0) return
   downloadError.value = ''
   downloading.value = true
+  downloadProgress.value = { done: 0, total: selected.length }
   try {
-    const batches = chunks(selected, NET780_DOWNLOAD_CHUNK_SIZE)
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i]!
+    for (const row of selected) {
       const blob = await $fetch<Blob>('/net780-api/download', {
         method: 'POST',
         headers: net780AuthHeaders(),
-        body: { targets: batch.map(r => ({ operationNo: r.operationNo, startDateTime: r.startDateTime })) },
+        body: { targets: [{ operationNo: row.operationNo, startDateTime: row.startDateTime }] },
         responseType: 'blob',
       })
-      const suffix = batches.length > 1 ? `_${i + 1}` : ''
-      triggerNet780Download(blob, `net780${suffix}.zip`)
+      triggerNet780Download(blob, `net780-${row.operationNo}.zip`)
+      downloadProgress.value = { done: downloadProgress.value.done + 1, total: selected.length }
     }
   }
   catch (e) {
@@ -148,6 +141,7 @@ async function downloadSelectedNet780() {
   }
   finally {
     downloading.value = false
+    downloadProgress.value = null
   }
 }
 
@@ -436,7 +430,7 @@ function eventLabel(e: Net780ParseResult['events'][number]): string {
             <UButton
               icon="i-lucide-download"
               size="sm"
-              :label="downloading ? 'ダウンロード中...' : `選択した${selectedOperationNos.size}件をダウンロード`"
+              :label="downloading ? `ダウンロード中... (${downloadProgress?.done ?? 0}/${downloadProgress?.total ?? 0}件)` : `選択した${selectedOperationNos.size}件をダウンロード`"
               :loading="downloading"
               :disabled="selectedOperationNos.size === 0"
               @click="downloadSelectedNet780"
