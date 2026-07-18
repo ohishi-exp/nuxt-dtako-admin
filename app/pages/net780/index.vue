@@ -59,15 +59,16 @@ onMounted(() => {
   const initialOperationNo = queryString(route.query.operationNo)
   if (initialOperationNo) viewByOperationNo(initialOperationNo)
   // /operations/{unko_no} の NET780 タブ (未アーカイブ時) からの遷移で
-  // ?operationDate= が付いていれば、読取日(から/まで)の初期値にする。運行日と
-  // 読取日は一致するとは限らないが、この画面自体の検索基準 (読取日) とは
-  // 別に「この運行が行われた日」を起点にするのが実用上妥当 (Refs #299)。
+  // ?readingDate= が付いていれば、読取日(から/まで)の初期値にする。この画面の
+  // NET780 検索は読取日 (ReadNo) 基準に固定されている (Refs #311) ため、遷移元も
+  // 読取日を渡す (運行日を渡すと1日ズレて 0 件になるケースがある、Refs #316)。
   // まで を空のままにすると上限なし (以降すべて) になり想定より大量にヒット
-  // するため、から と同じ日付で単日に絞る。
-  const initialOperationDate = queryString(route.query.operationDate)
-  if (initialOperationDate) {
-    searchOperationDateFrom.value = initialOperationDate
-    searchOperationDateTo.value = initialOperationDate
+  // するため、から と同じ日付で単日に絞る。?operationDate= は旧リンク互換
+  // (Refs #313 時点の遷移元・ブックマーク) のフォールバック。
+  const initialReadingDate = queryString(route.query.readingDate) || queryString(route.query.operationDate)
+  if (initialReadingDate) {
+    searchOperationDateFrom.value = initialReadingDate
+    searchOperationDateTo.value = initialReadingDate
   }
   // 同じ遷移元から車輌CD・乗務員CDも分かっていれば初期値にする (Refs #299)。
   const initialVehicleCd = queryString(route.query.vehicleCd)

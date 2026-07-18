@@ -12,19 +12,19 @@ import type { Net780Summary } from '~/utils/net780'
 
 const props = defineProps<{
   operationNo: string
-  operationDate?: string | null
+  readingDate?: string | null
   vehicleCd?: string | null
   driverCd?: string | null
 }>()
 
-/** 未アーカイブ時に /net780 へ渡す検索の初期値。運行日 (operation_date) を
- * 使う — この運行のものなので、/net780 自体の検索基準 (読取日) とは別に、
- * ここでは「この運行が行われた日」を渡すのが実用上妥当 (Refs #299)。車輌CD・
- * 乗務員CD も分かっていれば渡し、より絞り込んだ状態で検索フォームを開ける
- * ようにする。 */
+/** 未アーカイブ時に /net780 へ渡す検索の初期値。/net780 の NET780 検索は
+ * 読取日 (ReadNo) 基準に固定されている (Refs #311) ため、運行日 (operation_date)
+ * ではなく読取日 (reading_date) を渡す。運行日と読取日は1日ズレることがあり、
+ * 運行日を渡すと 0 件になる (Refs #316)。車輌CD・乗務員CD も分かっていれば渡し、
+ * より絞り込んだ状態で検索フォームを開けるようにする。 */
 const net780SearchLink = computed(() => {
   const params = new URLSearchParams()
-  if (props.operationDate) params.set('operationDate', props.operationDate)
+  if (props.readingDate) params.set('readingDate', props.readingDate)
   if (props.vehicleCd) params.set('vehicleCd', props.vehicleCd)
   if (props.driverCd) params.set('driverCd', props.driverCd)
   const q = params.toString()

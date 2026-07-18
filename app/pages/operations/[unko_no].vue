@@ -175,7 +175,7 @@ function formatDatetime(val: string | null): string {
         <Net780OperationSummary
           v-if="activeTab === 'net780'"
           :operation-no="unkoNo"
-          :operation-date="primary.operation_date ?? primary.reading_date"
+          :reading-date="primary.reading_date"
           :vehicle-cd="net780VehicleCd"
           :driver-cd="net780DriverCd"
         />
