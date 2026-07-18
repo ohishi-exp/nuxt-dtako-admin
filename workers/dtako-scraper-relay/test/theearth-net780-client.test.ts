@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   downloadNet780Zip,
+  net780R2IndexBody,
+  net780R2Paths,
   Net780ParamError,
   NET780_DOWNLOAD_MAX_ROWS,
   parseNet780Rows,
@@ -696,5 +698,28 @@ describe('downloadNet780Zip', () => {
   it('選択件数バリデーションを通ってから fetch する (0件は fetch を1回も呼ばない)', async () => {
     const fetchImpl = sequenceFetch([])
     await expect(downloadNet780Zip({ cookies: new Map() }, [], fetchImpl)).rejects.toThrow(Net780ParamError)
+  })
+})
+
+describe('net780R2Paths / net780R2IndexBody', () => {
+  it('prefix/compId 配下に zipObject (ハッシュ dedup) と indexObject (operationNo ごと) の key を組み立てる', () => {
+    const paths = net780R2Paths('net780', 'comp1')
+    expect(paths.zipObject('abcd1234')).toBe('net780/comp1/zips/abcd1234.zip')
+    expect(paths.indexObject('2607041256390000006572')).toBe('net780/comp1/by-operation/2607041256390000006572.json')
+  })
+
+  it('net780R2IndexBody は決定論 JSON を返す', () => {
+    const body = net780R2IndexBody({
+      zipKey: 'net780/comp1/zips/abcd1234.zip',
+      startDateTime: '2026-07-04 12:56:39',
+      fetchedAt: '2026-07-18T00:00:00.000Z',
+      operationCount: 1,
+    })
+    expect(JSON.parse(body)).toEqual({
+      zipKey: 'net780/comp1/zips/abcd1234.zip',
+      startDateTime: '2026-07-04 12:56:39',
+      fetchedAt: '2026-07-18T00:00:00.000Z',
+      operationCount: 1,
+    })
   })
 })

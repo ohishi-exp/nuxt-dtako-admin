@@ -79,6 +79,10 @@ ETC_R2_PREFIX = "etc"
 # 拘束時間管理表 CSV / サマリ JSON のアーカイブ prefix (Refs #241)。key 設計と
 # バージョン管理 (latest + v-{ts}、7日 retention) は theearth-restraint-client.ts 参照。
 RESTRAINT_R2_PREFIX = "restraint"
+# NET780 生データ一括ダウンロード ZIP のアーカイブ prefix (Refs #302 続き)。
+# key 設計 (内容ハッシュ dedup + operationNo ポインタ index) は
+# theearth-net780-client.ts の net780R2Paths 参照。
+NET780_R2_PREFIX = "net780"
 
 [env.staging]
 name = "nuxt-dtako-admin-scraper-relay-staging"
@@ -136,6 +140,7 @@ NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 SCRAPER_MODE = "http"
 ETC_R2_PREFIX = "etc-staging"
 RESTRAINT_R2_PREFIX = "restraint-staging"
+NET780_R2_PREFIX = "net780-staging"
 
 # 軽量プレビュー環境 (create-preview skill、main 以外の branch への push ごとに
 # test/typecheck 無しで deploy)。ETC riyouMonth 診断イテレーションを staging を
@@ -186,3 +191,4 @@ NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 SCRAPER_MODE = "http"
 ETC_R2_PREFIX = "etc-preview"
 RESTRAINT_R2_PREFIX = "restraint-preview"
+NET780_R2_PREFIX = "net780-preview"

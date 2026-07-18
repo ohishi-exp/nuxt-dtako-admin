@@ -143,6 +143,8 @@ import {
 } from "./theearth-report-client";
 import {
   downloadNet780Zip,
+  net780R2IndexBody,
+  net780R2Paths,
   Net780ParamError,
   searchNet780,
   validateNet780DownloadTargets,
@@ -321,6 +323,11 @@ export interface RelayEnv {
    * (latest + 内容が変わった時だけ `v-{ts}` 追加、SHA-256 変化検知) は
    * `theearth-restraint-client.ts` の `restraintR2Paths` の doc 参照。 */
   RESTRAINT_R2_PREFIX?: string;
+  /** NET780 生データ一括ダウンロード ZIP の R2 key prefix (`net780` /
+   * `net780-staging` / `net780-preview`)。key 設計 (内容ハッシュで dedup +
+   * operationNo ごとのポインタ index) は `theearth-net780-client.ts` の
+   * `net780R2Paths` の doc 参照 (Refs #302)。 */
+  NET780_R2_PREFIX?: string;
 }
 
 export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
@@ -2384,6 +2391,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/net780-api/download" && request.method === "POST") {
       return this.handleNet780Download(record, request);
     }
+    if (url.pathname === "/net780-api/r2-view" && request.method === "GET") {
+      return this.handleNet780R2View(record.compId, url);
+    }
     return dvrJsonError(404, "不明なエンドポイントです");
   }
 
@@ -2457,6 +2467,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
             cookies: Array.from(jar.cookies.entries()),
           }),
         );
+        // ダウンロードできた ZIP をそのまま R2 にアーカイブする (Refs #302 続き)。
+        // 応答をブロックしない best-effort — 保存失敗はログのみ。
+        this.ctx.waitUntil(this.saveNet780ToR2(record.compId, targets, zip));
         return new Response(zip, {
           headers: {
             "content-type": "application/zip",
@@ -2485,6 +2498,92 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         ? lastErr.message
         : `NET780 ダウンロードに失敗しました (${describeUnknownError(lastErr)})`;
     return dvrJsonError(502, message);
+  }
+
+  /** ダウンロードできた NET780 一括 ZIP を R2 にアーカイブする (Refs #302 続き)。
+   * ZIP 本体は内容の SHA-256 で dedup 保存し、含まれる各 operationNo から
+   * その ZIP を指すポインタ index を (常に上書きで) 書く — NET780 生データは
+   * 過去の運行記録で内容が変わらないため、restraint 系のような版管理は不要。
+   * waitUntil 前提の best-effort — 保存失敗でユーザーへの応答は落とさない。 */
+  private async saveNet780ToR2(
+    compId: string,
+    targets: Net780DownloadTarget[],
+    zipBytes: ArrayBuffer,
+  ): Promise<void> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return; // R2 未 binding の環境ではアーカイブなし (ダウンロード自体は成功させる)
+    const prefix = this.env.NET780_R2_PREFIX || "net780";
+    const paths = net780R2Paths(prefix, compId);
+    const fetchedAt = new Date().toISOString();
+    try {
+      const sha256 = await this.sha256Hex(zipBytes);
+      const zipKey = paths.zipObject(sha256);
+      const existing = await bucket.head(zipKey);
+      if (!existing) {
+        await bucket.put(zipKey, zipBytes, {
+          httpMetadata: { contentType: "application/zip" },
+          customMetadata: { sha256, fetchedAt },
+        });
+      }
+      for (const target of targets) {
+        await bucket.put(
+          paths.indexObject(target.operationNo),
+          net780R2IndexBody({
+            zipKey,
+            startDateTime: target.startDateTime,
+            fetchedAt,
+            operationCount: targets.length,
+          }),
+          { httpMetadata: { contentType: "application/json" } },
+        );
+      }
+      console.log(
+        JSON.stringify({ net780_r2: "done", zipKey, operations: targets.length, dedup: !!existing }),
+      );
+    } catch (err) {
+      console.error(JSON.stringify({ net780_r2: "error", error: describeUnknownError(err) }));
+    }
+  }
+
+  /** GET /net780-api/r2-view?operationNo= — 過去に**単一運行として**
+   * ダウンロード済みの operationNo なら theearth に再アクセスせず R2
+   * アーカイブから ZIP をそのまま返す (`extractSingleOperationZip` +
+   * `parseNet780Zip` はフロント側で従来どおり実行、フォーマットは
+   * ダウンロード直後の ZIP と同一)。`operationCount > 1` (複数選択の一括
+   * ダウンロードで archive された zip) は安全に対象運行だけを取り出せない
+   * (Net780R2Index のコメント参照) ため 404 と同様にフォールバックさせる。
+   * 未アーカイブも 404 — 呼び出し側は通常の /net780-api/download に
+   * フォールバックすること。 */
+  private async handleNet780R2View(compId: string, url: URL): Promise<Response> {
+    const operationNo = url.searchParams.get("operationNo") ?? "";
+    if (!/^\d{22}$/.test(operationNo)) {
+      return dvrJsonError(400, "operationNo は22桁の数値で指定してください");
+    }
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
+    const prefix = this.env.NET780_R2_PREFIX || "net780";
+    const paths = net780R2Paths(prefix, compId);
+    const indexObj = await bucket.get(paths.indexObject(operationNo));
+    if (!indexObj) {
+      return dvrJsonError(404, "R2 にアーカイブがありません (まだダウンロードされていません)");
+    }
+    const index = (await indexObj.json()) as { zipKey: string; operationCount: number };
+    if (index.operationCount > 1) {
+      return dvrJsonError(
+        404,
+        "R2 アーカイブは複数運行の一括ダウンロードのため、この運行単体では安全に取り出せません",
+      );
+    }
+    const zipObj = await bucket.get(index.zipKey);
+    if (!zipObj) {
+      return dvrJsonError(404, "R2 のアーカイブ本体が見つかりません (index との不整合)");
+    }
+    return new Response(zipObj.body, {
+      headers: {
+        "content-type": "application/zip",
+        "cache-control": "no-store",
+      },
+    });
   }
 
   /** report 系 API 呼び出しの共通ラッパ (callDvrVenus と同型): cookie 書き戻し +
