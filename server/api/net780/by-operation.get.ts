@@ -93,5 +93,9 @@ export default defineEventHandler(async (event) => {
   }
 
   setResponseHeader(event, 'content-type', obj.httpMetadata?.contentType ?? 'application/zip')
-  return await obj.arrayBuffer()
+  // H3 (Nitro) のハンドラが生の ArrayBuffer をそのまま return すると、バイナリ
+  // 応答としてではなく JSON シリアライズされ `{}` (2 バイト) になってしまう
+  // (実害: 2026-07-19、ZIP が2バイトの空応答になり net780-wasm 側で
+  // "Corrupted zip" エラーになった)。Buffer でラップしてバイナリ応答にする。
+  return Buffer.from(await obj.arrayBuffer())
 })
