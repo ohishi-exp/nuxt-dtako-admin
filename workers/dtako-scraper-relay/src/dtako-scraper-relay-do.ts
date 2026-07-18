@@ -2553,7 +2553,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           }),
           { httpMetadata: { contentType: "application/json" } },
         );
-        this.ctx.waitUntil(this.upsertNet780Catalog(compId, target, zipKey, fetchedAt));
+        this.ctx.waitUntil(this.upsertNet780Catalog(compId, target, zipKey, fetchedAt, targets.length));
       }
       console.log(
         JSON.stringify({ net780_r2: "done", zipKey, operations: targets.length, dedup: !!existing }),
@@ -2568,14 +2568,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * (`lblVehicleName` のみ、車輌CD自体は無い) ため NULL のまま — 検索は
    * vehicle_name の部分一致 + driver_cd1 の完全一致で行う想定。comp_id
    * (theearth 会社ID) で書き込み、検索側も必ずこれで絞り込んでテナント間の
-   * 混在を防ぐ。D1 はあくまで再構築可能なインデックスなので、binding 未設定や
-   * 書き込み失敗はログのみで応答・R2保存には影響させない (best-effort、
-   * waitUntil 前提)。 */
+   * 混在を防ぐ。`operationCount` も書き込み、`operation_count !== 1` の行は
+   * by-operation.get.ts (Nitro、`/operations` タブ用) が個別抽出不可として
+   * 拒否する — r2-view (この DO) 側の同種ガードと揃える (実害: 2026-07-18、
+   * 複数運行 archive の zip を由来不明のまま返し parse エラーになった)。
+   * D1 はあくまで再構築可能なインデックスなので、binding 未設定や書き込み
+   * 失敗はログのみで応答・R2保存には影響させない (best-effort、waitUntil 前提)。 */
   private async upsertNet780Catalog(
     compId: string,
     target: Net780DownloadTarget,
     zipKey: string,
     fetchedAt: string,
+    operationCount: number,
   ): Promise<void> {
     const db = this.env.DTAKO_DB;
     if (!db) return;
@@ -2583,8 +2587,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       await db
         .prepare(
           `INSERT INTO dtako_uploads
-             (dataset, schema_version, comp_id, vehicle_name, driver_cd1, driver_name1, operation_no, start_datetime, r2_key, uploaded_at)
-           VALUES ('net780', '1', ?, ?, ?, ?, ?, ?, ?, ?)
+             (dataset, schema_version, comp_id, vehicle_name, driver_cd1, driver_name1, operation_no, start_datetime, r2_key, uploaded_at, operation_count)
+           VALUES ('net780', '1', ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(dataset, operation_no) WHERE operation_no IS NOT NULL DO UPDATE SET
              comp_id = excluded.comp_id,
              vehicle_name = excluded.vehicle_name,
@@ -2592,7 +2596,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
              driver_name1 = excluded.driver_name1,
              start_datetime = excluded.start_datetime,
              r2_key = excluded.r2_key,
-             uploaded_at = excluded.uploaded_at`,
+             uploaded_at = excluded.uploaded_at,
+             operation_count = excluded.operation_count`,
         )
         .bind(
           compId,
@@ -2603,6 +2608,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           target.startDateTime,
           zipKey,
           fetchedAt,
+          operationCount,
         )
         .run();
     } catch (err) {
