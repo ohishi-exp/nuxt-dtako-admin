@@ -6,7 +6,9 @@
  * 乗務員別の基本時間単価 (適用開始日つき履歴) × 区分係数で金額を出す。
  *
  * 決定事項 (Refs #244):
- * - 法定休日 = 日曜 (wage-config で変更可)。法定外休日 = 土曜を既定 (要確認)
+ * - 法定休日 = 日曜 (wage-config で変更可)。法定外休日は既定で使わない
+ *   (土曜は平日扱い、2026-07-18 user 決定 Refs #282。必要になったら wage-config の
+ *   nonLegalHolidayWeekdays で指定)
  * - 週40h 超過は日曜起算。**週はその終端 (起算+6日) が属する月に計上**し、
  *   月初の跨ぎ週は前月末日の実働を含めて計算する (前月 summary の days を渡す)
  * - 「休出」列は保留
@@ -87,7 +89,8 @@ export interface WageConfig {
   };
   /** 法定休日の曜日 (0=日曜)。 */
   legalHolidayWeekday: number;
-  /** 法定外休日 (所定休日) の曜日群。既定 [6]=土曜 (会社カレンダー未対応の近似)。 */
+  /** 法定外休日 (所定休日) の曜日群。既定 [] = 使わない (土曜も平日扱い、
+   * 2026-07-18 決定 Refs #282)。 */
   nonLegalHolidayWeekdays: number[];
   /** 週40h の起算曜日 (0=日曜 — 決定事項)。 */
   weekStartsOn: number;
@@ -109,7 +112,7 @@ export const DEFAULT_WAGE_CONFIG: WageConfig = {
     overtimeOver60h: 1.5,
   },
   legalHolidayWeekday: 0,
-  nonLegalHolidayWeekdays: [6],
+  nonLegalHolidayWeekdays: [],
   weekStartsOn: 0,
   hourlyBasis: "working",
 };
@@ -459,7 +462,8 @@ function classifyDayRow(
  *   (法定時間内の 1.0 とは別枠で加算)。時間外/時間外深夜は theearth の日別値。
  * - 法定休日 (日曜): 時間外の概念なし — 実働すべてを 法定休日 (深夜分は
  *   法定休日深夜) に計上する。
- * - 法定外休日 (既定 土曜): 実働すべてを 法定外休日 (深夜分は 法定外休日深夜)。
+ * - 法定外休日 (wage-config で指定した曜日のみ、既定なし): 実働すべてを
+ *   法定外休日 (深夜分は 法定外休日深夜)。
  * - 週40超過: 週 (weekStartsOn 起算、**終端が当月に属する週のみ**) の実働合計
  *   (法定休日を除く) − 40h − その週で既に割増計上済みの分 (時間外・時間外深夜・
  *   法定外休日) を正の範囲で計上。月初の跨ぎ週は prevMonthDays (前月 summary の

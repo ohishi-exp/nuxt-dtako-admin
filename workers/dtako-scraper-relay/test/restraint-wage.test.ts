@@ -345,8 +345,21 @@ describe('classifyMonth (2025-04: 1日=火, 5日=土, 6日=日)', () => {
     expect(m.statutory).toBe(0)
   })
 
-  it('法定外休日 (土曜既定): 実働すべてを法定外休日 (+深夜) に計上', () => {
-    const m = classifyMonth([day(5, { workingMinutes: 300, nightMinutes: 20 })], 2025, 4, config)
+  it('土曜は既定で平日扱い (法定外休日は使わない — Refs #282)', () => {
+    const m = classifyMonth(
+      [day(5, { workingMinutes: 300, overtimeMinutes: 60, nightMinutes: 20 })],
+      2025, 4, config,
+    )
+    expect(m.statutory).toBe(240)
+    expect(m.overtime).toBe(60)
+    expect(m.night).toBe(20)
+    expect(m.nonLegalHoliday).toBe(0)
+    expect(m.nonLegalHolidayNight).toBe(0)
+  })
+
+  it('法定外休日 (wage-config で土曜を指定した場合): 実働すべてを法定外休日 (+深夜) に計上', () => {
+    const saturdayOff = normalizeWageConfig({ nonLegalHolidayWeekdays: [6] })
+    const m = classifyMonth([day(5, { workingMinutes: 300, nightMinutes: 20 })], 2025, 4, saturdayOff)
     expect(m.nonLegalHoliday).toBe(280)
     expect(m.nonLegalHolidayNight).toBe(20)
   })
@@ -377,14 +390,26 @@ describe('classifyMonth (2025-04: 1日=火, 5日=土, 6日=日)', () => {
   })
 
   it('週40超過: 既に割増計上済みの分 (時間外・法定外休日) は差し引く', () => {
+    const saturdayOff = normalizeWageConfig({ nonLegalHolidayWeekdays: [6] })
     const days = [
       ...[7, 8, 9, 10].map(d => day(d, { workingMinutes: 9 * 60 })),
       day(11, { workingMinutes: 9 * 60, overtimeMinutes: 120, overtimeNightMinutes: 30 }),
       day(12, { workingMinutes: 60 }), // 土曜 = 法定外休日 (週の実働には入るが premium として除外)
     ]
-    const m = classifyMonth(days, 2025, 4, DEFAULT_WAGE_CONFIG)
+    const m = classifyMonth(days, 2025, 4, saturdayOff)
     // 週実働 46h − 40h − (時間外 2h + 時間外深夜 0.5h + 法定外休日 1h) = 2.5h
     expect(m.weekly40Excess).toBe(2.5 * 60)
+  })
+
+  it('週40超過: 既定 (土曜=平日) では土曜実働も通常の週40h算定に入る', () => {
+    const days = [
+      ...[7, 8, 9, 10].map(d => day(d, { workingMinutes: 9 * 60 })),
+      day(11, { workingMinutes: 9 * 60, overtimeMinutes: 120, overtimeNightMinutes: 30 }),
+      day(12, { workingMinutes: 60 }), // 土曜 = 平日扱い (既定)
+    ]
+    const m = classifyMonth(days, 2025, 4, DEFAULT_WAGE_CONFIG)
+    // 週実働 46h − 40h − (時間外 2h + 時間外深夜 0.5h) = 3.5h
+    expect(m.weekly40Excess).toBe(3.5 * 60)
   })
 
   it('週40超過: 法定休日 (日曜) の実働は週の算定から除外する', () => {
