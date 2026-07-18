@@ -55,13 +55,13 @@ export class Net780ParamError extends TheearthClientError {
 }
 
 export interface Net780SearchParams {
-  /** 運行日 range ("YYYY-MM-DD"、両方指定するか両方省略)。 */
+  /** 運行日 range ("YYYY-MM-DD"。from のみ指定可、to のみは不可)。 */
   operationDateFrom?: string;
   operationDateTo?: string;
-  /** 乗務員CD range (両方指定するか両方省略)。 */
+  /** 乗務員CD range (from のみ指定可、to のみは不可)。 */
   driverCdFrom?: string;
   driverCdTo?: string;
-  /** 車輌CD range (両方指定するか両方省略)。 */
+  /** 車輌CD range (from のみ指定可、to のみは不可)。 */
   vehicleCdFrom?: string;
   vehicleCdTo?: string;
 }
@@ -69,6 +69,11 @@ export interface Net780SearchParams {
 const CD_RE = /^\d{1,8}$/;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+/**
+ * from/to のペアを検証する。from のみの指定は許可する (to 側は空のまま
+ * theearth に送られ、F-GOS0030 側で上限なしとして扱われる — buildConfigOverrides
+ * 参照)。to のみの指定 (from 省略) は意味が曖昧なため不可とする。
+ */
 function validateRangePair(
   label: string,
   from: string | undefined,
@@ -78,8 +83,8 @@ function validateRangePair(
 ): void {
   const hasFrom = from !== undefined && from !== "";
   const hasTo = to !== undefined && to !== "";
-  if (hasFrom !== hasTo) {
-    throw new Net780ParamError(`${label} は from/to を両方指定するか両方省略してください`);
+  if (hasTo && !hasFrom) {
+    throw new Net780ParamError(`${label} は from を指定してください (to のみの指定はできません)`);
   }
   for (const [side, value] of [
     ["from", from],
