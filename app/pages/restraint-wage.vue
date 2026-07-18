@@ -818,22 +818,26 @@ const salaryCdMapRows = computed(() =>
     })
     .sort((a, b) => a.payrollCd.localeCompare(b.payrollCd, undefined, { numeric: true })))
 
-/** 選択中の月の CSV 行。 */
+/** 選択中の勤務月に対応する CSV 行。CSV の「給与・賞与名」の年月は**支給月**ラベル
+ * (月末締め・翌月払い → 勤務月 + 1) なので、翌月ラベルの行を突合する (Refs #282)。 */
 const salaryMonthRows = computed(() =>
-  (salaryParsed.value?.rows ?? []).filter(r => r.month === month.value))
+  (salaryParsed.value?.rows ?? []).filter(r => r.month === nextYm(month.value)))
 
 const salaryComparison = computed<SalaryComparison | null>(() => {
   if (!salaryParsed.value || !report.value || report.value.month !== month.value) return null
   return compareSalaryMonth(salaryMonthRows.value, report.value.rows, salaryItemConfig.value, salaryCdMap.value)
 })
 
+/** CSV の支給月ラベルをクリック → 対応する勤務月 (前月) を選択する。 */
 function selectSalaryMonth(ym: string) {
-  selectedYear.value = parseInt(ym.slice(0, 4), 10)
-  selectedMonthNo.value = parseInt(ym.slice(5, 7), 10)
+  const work = prevYm(ym)
+  selectedYear.value = parseInt(work.slice(0, 4), 10)
+  selectedMonthNo.value = parseInt(work.slice(5, 7), 10)
 }
 
 /** 乗務員CD (正規化キー) → 給与明細 CSV の支払い実績 (基本給扱い / 割増扱いの合計)。
- * 給与比較タブで取り込んだ CSV の当月分から引く — 未取り込みの月は空 (Refs #282)。 */
+ * 給与比較タブで取り込んだ CSV から引く (支給月ラベル = 勤務月+1 の行、
+ * salaryMonthRows 参照) — 未取り込みの月は空 (Refs #282)。 */
 const paidByDriver = computed(() => {
   const map = new Map<string, { base: number, overtime: number }>()
   for (const r of salaryComparison.value?.rows ?? []) {
@@ -846,13 +850,22 @@ function paidFor(driverCd: string): { base: number, overtime: number } | null {
   return paidByDriver.value.get(String(Number(driverCd))) ?? null
 }
 
-/** 翌月 "YYYY-MM" (月末締め・翌月払いの支給月表示用、Refs #282)。 */
+/** 翌月 "YYYY-MM" (月末締め・翌月払いの支給月表示・CSV 突合用、Refs #282)。 */
 function nextYm(ym: string): string {
   const m = ym.match(/^(\d{4})-(\d{2})$/)
   if (!m) return ym
   const y = parseInt(m[1]!, 10)
   const mo = parseInt(m[2]!, 10)
   return mo === 12 ? `${y + 1}-01` : `${y}-${String(mo + 1).padStart(2, '0')}`
+}
+
+/** 前月 "YYYY-MM" (支給月ラベル → 勤務月の逆引き)。 */
+function prevYm(ym: string): string {
+  const m = ym.match(/^(\d{4})-(\d{2})$/)
+  if (!m) return ym
+  const y = parseInt(m[1]!, 10)
+  const mo = parseInt(m[2]!, 10)
+  return mo === 1 ? `${y - 1}-12` : `${y}-${String(mo - 1).padStart(2, '0')}`
 }
 
 /** 基礎単価(実績) の表示 (円/h、整数丸め。null は "-")。 */
@@ -1452,15 +1465,15 @@ watch([activeTab, month, session], () => {
                     <th class="px-2 py-2">氏名</th>
                     <th class="px-2 py-2 text-right">実働</th>
                     <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="法定時間内賃金 (深夜・残業等の割増区分を含まない基本部分)。対象時間 = 実働 − 時間外 − 時間外深夜 − 週40超過 − 法定休日実働。「給与比較」タブの基本給(計算)と同じ値">基本給(法定内)<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
-                    <th class="px-2 py-2 text-right" title="支払い済み給与: 給与比較タブで取り込んだ給与明細 CSV (当月分) の基本給扱い項目の合計。未取り込みの月は「-」">基本給(給与)<br><span class="font-normal text-xs">(支払い実績)</span></th>
                     <th class="px-2 py-2 text-right" title="残業ではない通常勤務中の深夜加算分 (0.25倍、基本給とは別枠の上乗せ)。@ は計算単価 (加算分 0.25 倍のみ)">深夜(通常)<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
                     <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="対象時間 = 時間外 + 週40超過 (2段表示)。@ は残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)。月60時間超過は時間が橙色">残業代<br><span class="font-normal text-xs">(時間外 / 週40超過 / @単価 / 金額)</span></th>
                     <th class="px-2 py-2 text-right" title="対象時間 = 時間外深夜。@ は深夜残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)">深夜残業代<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
                     <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="法定休日 (既定 日曜) の実働すべて (1.35倍、深夜分は1.6倍)。@ は通常+深夜合算の実額按分">法定休日<br><span class="font-normal text-xs">(通常 / 深夜 / @単価 / 金額)</span></th>
                     <th class="px-2 py-2 text-right" title="実働 − (法定内 + 時間外 + 時間外深夜 + 法定休日の通常+深夜)。0 以外 = 表に出ていない区分へ分類された時間がある (法定外休日設定・休日フラグ日の実働・日別データ不整合など) — 検算用">差分<br><span class="font-normal text-xs">(実働 − 表合計)</span></th>
                     <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700">残業代合計<br><span class="font-normal text-xs">(残業+深夜残業)</span></th>
-                    <th class="px-2 py-2 text-right" title="支払い済み給与: 給与比較タブで取り込んだ給与明細 CSV (当月分) の割増扱い項目 (残業・深夜・休日出勤) の合計。未取り込みの月は「-」">残業代(給与)<br><span class="font-normal text-xs">(支払い実績)</span></th>
                     <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700">合計(計算)<br><span class="font-normal text-xs">(全区分合計)</span></th>
+                    <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="支払い済み給与: 給与比較タブで取り込んだ給与明細 CSV の基本給扱い項目の合計。CSV の年月は支給月ラベルのため勤務月+1 の行を突合 (月末締め・翌月払い)。未取り込みの月は「-」">基本給(給与)<br><span class="font-normal text-xs">(支払い実績)</span></th>
+                    <th class="px-2 py-2 text-right" title="支払い済み給与: 給与比較タブで取り込んだ給与明細 CSV の割増扱い項目 (残業・深夜・休日出勤) の合計。CSV の年月は支給月ラベルのため勤務月+1 の行を突合 (月末締め・翌月払い)。未取り込みの月は「-」">残業代(給与)<br><span class="font-normal text-xs">(支払い実績)</span></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1476,9 +1489,6 @@ watch([activeTab, month, session], () => {
                       <div class="text-xs text-gray-500">{{ fmtMinutes(row.wage.minutes.statutory) }}</div>
                       <div class="text-xs text-gray-400">{{ fmtAtRate(row.wage.amounts?.statutory ?? null, row.wage.minutes.statutory) }}</div>
                       <div class="font-medium">{{ fmtYen(row.wage.amounts?.statutory ?? null) }}</div>
-                    </td>
-                    <td class="px-2 py-1.5 text-right">
-                      <div class="font-medium">{{ fmtYen(paidFor(row.summary.driverCd)?.base ?? null) }}</div>
                     </td>
                     <td class="px-2 py-1.5 text-right">
                       <div class="text-xs text-gray-500">{{ fmtMinutes(row.wage.minutes.night) }}</div>
@@ -1510,11 +1520,14 @@ watch([activeTab, month, session], () => {
                     <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700">
                       <div class="font-medium">{{ fmtYen(sumNullable(row.wage.actualOvertimePay, row.wage.actualNightOvertimePay)) }}</div>
                     </td>
-                    <td class="px-2 py-1.5 text-right">
-                      <div class="font-medium">{{ fmtYen(paidFor(row.summary.driverCd)?.overtime ?? null) }}</div>
-                    </td>
                     <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700">
                       <div class="font-medium">{{ fmtYen(row.wage.totalAmount) }}</div>
+                    </td>
+                    <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700">
+                      <div class="font-medium">{{ fmtYen(paidFor(row.summary.driverCd)?.base ?? null) }}</div>
+                    </td>
+                    <td class="px-2 py-1.5 text-right">
+                      <div class="font-medium">{{ fmtYen(paidFor(row.summary.driverCd)?.overtime ?? null) }}</div>
                     </td>
                   </tr>
                 </tbody>
@@ -1526,7 +1539,7 @@ watch([activeTab, month, session], () => {
               </p>
               <p class="text-xs text-gray-500 mt-2">
                 合計(計算) = 基本給 + 深夜 + 残業代合計 + 法定休日 (全区分合計、「給与比較」タブの合計(計算)と同じ値)。<br>
-                基本給(給与)・残業代(給与) は<b>支払い済み給与の実績</b> — 給与比較タブで取り込んだ給与明細 CSV (当月勤務分) の基本給扱い / 割増扱い項目の合計。
+                基本給(給与)・残業代(給与) は<b>支払い済み給与の実績</b> — 給与比較タブで取り込んだ給与明細 CSV の基本給扱い / 割増扱い項目の合計。CSV の年月ラベルは支給月なので、勤務月+1 (翌月支給) の行を突合している。
                 月末締め・翌月払いのため実際の支給は翌月 (ヘッダの支給月表示)。CSV 未取り込みの月は「-」。項目の区分は「支給項目区分」の設定に従う。<br>
                 <b>実働 = 基本給(法定内)の対象時間 + 時間外 + 週40超過 + 時間外深夜 + 法定休日(通常+深夜)</b>。
                 深夜(通常) だけは上記の<b>内数</b> (0.25 加算のための別枠計上) なので、実働の足し算には含めない。
@@ -1644,12 +1657,12 @@ watch([activeTab, month, session], () => {
                 合計 {{ salaryParsed.rows.length }} 行 / 支給項目 {{ salaryParsed.itemLabels.length }} 件を検出しました
               </p>
               <div class="flex flex-wrap items-center gap-1 mt-1">
-                <span class="text-xs text-gray-500">検出した月 (クリックで比較対象月を切替):</span>
+                <span class="text-xs text-gray-500">検出した支給月 (クリックで対応する勤務月 = 前月に切替):</span>
                 <UButton
                   v-for="ym in salaryParsed.months"
                   :key="ym"
                   size="xs"
-                  :variant="ym === month ? 'solid' : 'soft'"
+                  :variant="month && ym === nextYm(month) ? 'solid' : 'soft'"
                   :label="fmtYm(ym)"
                   @click="selectSalaryMonth(ym)"
                 />
