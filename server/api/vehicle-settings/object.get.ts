@@ -13,8 +13,7 @@
 
 import type { H3Event } from 'h3'
 import { defineEventHandler, getQuery, createError, setResponseHeader } from 'h3'
-
-const R2_PREFIX = 'vehicle-settings/'
+import { VEHICLE_SETTINGS_R2_PREFIX } from '~/utils/vehicle-settings-r2'
 
 interface R2Object {
   body: ReadableStream<Uint8Array> | null
@@ -40,10 +39,10 @@ export default defineEventHandler(async (event) => {
   if (typeof key !== 'string' || !key) {
     throw createError({ statusCode: 400, statusMessage: 'key (string) is required' })
   }
-  if (!key.startsWith(R2_PREFIX)) {
+  if (!key.startsWith(VEHICLE_SETTINGS_R2_PREFIX)) {
     throw createError({
       statusCode: 400,
-      statusMessage: `key must start with \"${R2_PREFIX}\"`,
+      statusMessage: `key must start with \"${VEHICLE_SETTINGS_R2_PREFIX}\"`,
     })
   }
   // path traversal 系をシャットアウト

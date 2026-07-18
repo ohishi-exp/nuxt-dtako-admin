@@ -14,8 +14,7 @@
 
 import type { H3Event } from 'h3'
 import { defineEventHandler, getQuery, createError } from 'h3'
-
-const R2_PREFIX = 'vehicle-settings/'
+import { VEHICLE_SETTINGS_R2_PREFIX, parseVehicleSettingsR2Key } from '~/utils/vehicle-settings-r2'
 
 interface R2Object {
   key: string
@@ -65,20 +64,6 @@ function toIso(d: Date | string): string {
   return typeof d === 'string' ? d : d.toISOString()
 }
 
-// `vehicle-settings/4437/20260514_093253-0-0-4437.json` → '4437'
-// `vehicle-settings/4437/20260514_093253-0-0-4437.json` → 'json' (拡張子)
-function parseKey(key: string): { vehicle_cd: string; dump_dir: string; ext: string } | null {
-  if (!key.startsWith(R2_PREFIX)) return null
-  const rest = key.slice(R2_PREFIX.length)
-  const slash = rest.indexOf('/')
-  if (slash <= 0) return null
-  const vehicle_cd = rest.slice(0, slash)
-  const file = rest.slice(slash + 1)
-  const dot = file.lastIndexOf('.')
-  if (dot <= 0) return null
-  return { vehicle_cd, dump_dir: file.slice(0, dot), ext: file.slice(dot + 1) }
-}
-
 export interface HistoryItem {
   key: string
   vehicle_cd: string
@@ -114,10 +99,10 @@ export default defineEventHandler(
           statusMessage: 'vehicle_cd は英数 / _ / - のみ',
         })
       }
-      const objects = await listAll(r2, `${R2_PREFIX}${vehicle_cd}/`)
+      const objects = await listAll(r2, `${VEHICLE_SETTINGS_R2_PREFIX}${vehicle_cd}/`)
       const items: HistoryItem[] = []
       for (const o of objects) {
-        const parsed = parseKey(o.key)
+        const parsed = parseVehicleSettingsR2Key(o.key)
         if (!parsed || parsed.ext !== 'json') continue
         items.push({
           key: o.key,
@@ -135,10 +120,10 @@ export default defineEventHandler(
     }
 
     // 全車輛集計: 全 prefix を listing して vehicle_cd 別に count + latest を計算
-    const objects = await listAll(r2, R2_PREFIX)
+    const objects = await listAll(r2, VEHICLE_SETTINGS_R2_PREFIX)
     const summary = new Map<string, { count: number; latest: string }>()
     for (const o of objects) {
-      const parsed = parseKey(o.key)
+      const parsed = parseVehicleSettingsR2Key(o.key)
       if (!parsed || parsed.ext !== 'json') continue
       const uploadedAt = o.customMetadata?.uploaded_at ?? toIso(o.uploaded)
       const cur = summary.get(parsed.vehicle_cd)
