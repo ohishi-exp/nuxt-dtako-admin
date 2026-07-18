@@ -6,7 +6,9 @@
  * ⓪ アーカイブ閲覧 (生 CSV / 版 / 確認履歴、サマリ再計算 — 単月/全月一括)
  * ① 月次集計・印刷 (theearth プレビュー形式 + 時間給の法定区分列、展開トグル、
  *    月範囲 × 乗務員範囲の一括印刷 = 月毎改ページ)
- * ② 最低賃金チェック (換算時給 vs 県別最低賃金)
+ * ② 最低賃金チェック (単価マスタ換算の理論値一覧。単価マスタ = 最低賃金の運用
+ *    (2026-07-18) のため最低賃金換算との差分表示は持たない — Refs #282。
+ *    最低賃金の設定カードは給与比較タブの 残業(最低賃金) 列のために同居)
  * ③ 単価マスタ (適用開始日つき履歴、一括変更、CSV 入出力)
  *
  * 対象月は「年セレクタ + 月タブ」で選ぶ (アーカイブが存在する月だけ活性、
@@ -242,20 +244,6 @@ function fmtAtRate(pay: number | null, minutes: number): string {
   return fmtAt(ratePerHour(pay, minutes))
 }
 
-/** amounts.statutory − wage.minWageStatutoryPay (法定内の最低賃金換算は worker が
- * wage-report に含めて返す)。どちらか欠けたら null。 */
-function statutoryDiff(wage: WageReportRow['wage']): number | null {
-  const actual = wage.amounts?.statutory ?? null
-  return actual == null || wage.minWageStatutoryPay == null ? null : actual - wage.minWageStatutoryPay
-}
-
-/** amounts.night − wage.minWageNightPay (深夜(通常) の最低賃金換算、worker 供給)。
- * どちらか欠けたら null。 */
-function nightDiff(wage: WageReportRow['wage']): number | null {
-  const actual = wage.amounts?.night ?? null
-  return actual == null || wage.minWageNightPay == null ? null : actual - wage.minWageNightPay
-}
-
 /** null 許容の加算 (両方 null なら null、片方だけ null は 0 扱い)。
  * 給与明細の「残業代」は通常残業+深夜残業をまとめた 1 項目のため、
  * 実データとの比較用に合計を出す。 */
@@ -265,12 +253,6 @@ function sumNullable(a: number | null, b: number | null): number | null {
 }
 
 const missingRateRows = computed(() => (report.value?.rows ?? []).filter(r => r.wage.hourlyRate === null))
-/** 合計(計算) が最低賃金換算を下回る行 (割増込み換算時給 vs 最低賃金の比較は
- * 意味がないため廃止 — Refs #282)。 */
-const belowMinWageRows = computed(() =>
-  (report.value?.rows ?? []).filter(r => r.wage.totalPayDiff !== null && r.wage.totalPayDiff < 0))
-const belowMinWageOvertimeRows = computed(() =>
-  (report.value?.rows ?? []).filter(r => r.wage.overtimePayDiff !== null && r.wage.overtimePayDiff < 0))
 
 /** 月次集計テーブルを CSV (UTF-8 BOM) で保存する (全列)。 */
 function downloadMonthlyCsv() {
@@ -1419,26 +1401,20 @@ watch([activeTab, month, session], () => {
             />
 
             <div v-else-if="activeTab === 'minwage' && report?.rows.length" class="overflow-x-auto">
-              <p v-if="belowMinWageRows.length" class="text-sm text-red-600 font-medium mb-1">
-                最低賃金割れ (合計): {{ belowMinWageRows.length }} 名
-              </p>
-              <p v-if="belowMinWageOvertimeRows.length" class="text-sm text-red-600 font-medium mb-2">
-                最低賃金割れ (残業代): {{ belowMinWageOvertimeRows.length }} 名
-              </p>
               <table class="w-full text-sm">
                 <thead>
                   <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
                     <th class="px-2 py-2">乗務員CD</th>
                     <th class="px-2 py-2">氏名</th>
                     <th class="px-2 py-2 text-right">実働</th>
-                    <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="法定時間内賃金 (深夜・残業等の割増区分を含まない基本部分)。対象時間 = 実働 − 時間外 − 時間外深夜。「給与比較」タブの基本給(計算)と同じ値">基本給(法定内)<br><span class="font-normal text-xs">(対象時間 / 単価マスタ換算 / 最低賃金換算 / 差)</span></th>
-                    <th class="px-2 py-2 text-right" title="残業ではない通常勤務中の深夜加算分 (0.25倍、基本給とは別枠の上乗せ)。@ は計算単価 (加算分 0.25 倍のみ)">深夜(通常)<br><span class="font-normal text-xs">(対象時間 / 単価マスタ換算 / 最低賃金換算 / 差)</span></th>
+                    <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="法定時間内賃金 (深夜・残業等の割増区分を含まない基本部分)。対象時間 = 実働 − 時間外 − 時間外深夜。「給与比較」タブの基本給(計算)と同じ値">基本給(法定内)<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
+                    <th class="px-2 py-2 text-right" title="残業ではない通常勤務中の深夜加算分 (0.25倍、基本給とは別枠の上乗せ)。@ は計算単価 (加算分 0.25 倍のみ)">深夜(通常)<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
                     <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700">残業時間<br><span class="font-normal text-xs">(時間外 / 週40超過)</span></th>
-                    <th class="px-2 py-2 text-right" title="@ は残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)">残業代<br><span class="font-normal text-xs">(単価マスタ換算 / 最低賃金換算 / 差)</span></th>
+                    <th class="px-2 py-2 text-right" title="@ は残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)">残業代<br><span class="font-normal text-xs">(@単価 / 金額)</span></th>
                     <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700">深夜残業時間<br><span class="font-normal">(時間外深夜)</span></th>
-                    <th class="px-2 py-2 text-right" title="@ は深夜残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)">深夜残業代<br><span class="font-normal text-xs">(単価マスタ換算 / 最低賃金換算 / 差)</span></th>
-                    <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700">残業代合計<br><span class="font-normal text-xs">(残業+深夜残業、単価マスタ換算 / 最低賃金換算 / 差)</span></th>
-                    <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700">合計(計算)<br><span class="font-normal text-xs">(単価マスタ換算 / 最低賃金換算 / 差、全区分合計)</span></th>
+                    <th class="px-2 py-2 text-right" title="@ は深夜残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)">深夜残業代<br><span class="font-normal text-xs">(@単価 / 金額)</span></th>
+                    <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700">残業代合計<br><span class="font-normal text-xs">(残業+深夜残業)</span></th>
+                    <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700">合計(計算)<br><span class="font-normal text-xs">(全区分合計)</span></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1446,7 +1422,6 @@ watch([activeTab, month, session], () => {
                     v-for="row in report.rows"
                     :key="row.summary.driverCd"
                     class="border-b border-gray-100 dark:border-gray-800"
-                    :class="(row.wage.totalPayDiff ?? 0) < 0 ? 'bg-red-50 dark:bg-red-950/40' : ''"
                   >
                     <td class="px-2 py-1.5">{{ row.summary.driverCd }}</td>
                     <td class="px-2 py-1.5">{{ row.summary.driverName }}</td>
@@ -1455,21 +1430,11 @@ watch([activeTab, month, session], () => {
                       <div class="text-xs text-gray-500">{{ fmtMinutes(row.wage.minutes.statutory) }}</div>
                       <div class="text-xs text-gray-400">{{ fmtAtRate(row.wage.amounts?.statutory ?? null, row.wage.minutes.statutory) }}</div>
                       <div class="font-medium">{{ fmtYen(row.wage.amounts?.statutory ?? null) }}</div>
-                      <div class="text-xs text-gray-400">{{ fmtAtRate(row.wage.minWageStatutoryPay, row.wage.minutes.statutory) }}</div>
-                      <div class="text-xs text-gray-500">{{ fmtYen(row.wage.minWageStatutoryPay) }}</div>
-                      <div class="text-xs" :class="(statutoryDiff(row.wage) ?? 0) < 0 ? 'text-red-600 font-bold' : 'text-gray-400'">
-                        {{ fmtDiff(statutoryDiff(row.wage)) }}
-                      </div>
                     </td>
                     <td class="px-2 py-1.5 text-right">
                       <div class="text-xs text-gray-500">{{ fmtMinutes(row.wage.minutes.night) }}</div>
                       <div class="text-xs text-gray-400">{{ fmtAtRate(row.wage.amounts?.night ?? null, row.wage.minutes.night) }}</div>
                       <div class="font-medium">{{ fmtYen(row.wage.amounts?.night ?? null) }}</div>
-                      <div class="text-xs text-gray-400">{{ fmtAtRate(row.wage.minWageNightPay, row.wage.minutes.night) }}</div>
-                      <div class="text-xs text-gray-500">{{ fmtYen(row.wage.minWageNightPay) }}</div>
-                      <div class="text-xs" :class="(nightDiff(row.wage) ?? 0) < 0 ? 'text-red-600 font-bold' : 'text-gray-400'">
-                        {{ fmtDiff(nightDiff(row.wage)) }}
-                      </div>
                     </td>
                     <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700" :class="row.wage.overtimeMinutes > 60 * 60 ? 'text-amber-600 font-medium' : ''">
                       <div class="font-medium">{{ fmtMinutes(row.wage.minutes.overtime) }}</div>
@@ -1478,11 +1443,6 @@ watch([activeTab, month, session], () => {
                     <td class="px-2 py-1.5 text-right">
                       <div class="text-xs text-gray-400">{{ fmtAtRate(row.wage.actualOvertimePay, row.wage.overtimeMinutes) }}</div>
                       <div class="font-medium">{{ fmtYen(row.wage.actualOvertimePay) }}</div>
-                      <div class="text-xs text-gray-400">{{ fmtAt(row.wage.minWageOvertimeRate) }}</div>
-                      <div class="text-xs text-gray-500">{{ fmtYen(row.wage.minWageOvertimePay) }}</div>
-                      <div class="text-xs" :class="(row.wage.overtimePayDiff ?? 0) < 0 ? 'text-red-600 font-bold' : 'text-gray-400'">
-                        {{ row.wage.overtimePayDiff == null ? '-' : (row.wage.overtimePayDiff >= 0 ? '+' : '') + fmtYen(row.wage.overtimePayDiff) }}
-                      </div>
                     </td>
                     <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700">
                       {{ fmtMinutes(row.wage.nightOvertimeMinutes) }}
@@ -1490,36 +1450,22 @@ watch([activeTab, month, session], () => {
                     <td class="px-2 py-1.5 text-right">
                       <div class="text-xs text-gray-400">{{ fmtAtRate(row.wage.actualNightOvertimePay, row.wage.nightOvertimeMinutes) }}</div>
                       <div class="font-medium">{{ fmtYen(row.wage.actualNightOvertimePay) }}</div>
-                      <div class="text-xs text-gray-400">{{ fmtAt(row.wage.minWageNightOvertimeRate) }}</div>
-                      <div class="text-xs text-gray-500">{{ fmtYen(row.wage.minWageNightOvertimePay) }}</div>
-                      <div class="text-xs" :class="(row.wage.nightOvertimePayDiff ?? 0) < 0 ? 'text-red-600 font-bold' : 'text-gray-400'">
-                        {{ row.wage.nightOvertimePayDiff == null ? '-' : (row.wage.nightOvertimePayDiff >= 0 ? '+' : '') + fmtYen(row.wage.nightOvertimePayDiff) }}
-                      </div>
                     </td>
                     <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700">
                       <div class="font-medium">{{ fmtYen(sumNullable(row.wage.actualOvertimePay, row.wage.actualNightOvertimePay)) }}</div>
-                      <div class="text-xs text-gray-500">{{ fmtYen(sumNullable(row.wage.minWageOvertimePay, row.wage.minWageNightOvertimePay)) }}</div>
-                      <div class="text-xs" :class="(sumNullable(row.wage.overtimePayDiff, row.wage.nightOvertimePayDiff) ?? 0) < 0 ? 'text-red-600 font-bold' : 'text-gray-400'">
-                        {{ fmtDiff(sumNullable(row.wage.overtimePayDiff, row.wage.nightOvertimePayDiff)) }}
-                      </div>
                     </td>
                     <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700">
                       <div class="font-medium">{{ fmtYen(row.wage.totalAmount) }}</div>
-                      <div class="text-xs text-gray-500">{{ fmtYen(row.wage.minWageTotalPay) }}</div>
-                      <div class="text-xs" :class="(row.wage.totalPayDiff ?? 0) < 0 ? 'text-red-600 font-bold' : 'text-gray-400'">
-                        {{ row.wage.totalPayDiff == null ? '-' : (row.wage.totalPayDiff >= 0 ? '+' : '') + fmtYen(row.wage.totalPayDiff) }}
-                      </div>
                     </td>
                   </tr>
                 </tbody>
               </table>
               <p class="text-xs text-amber-600 dark:text-amber-400 mb-2">
-                ⚠ この表は「単価マスタに登録した単価」と「最低賃金」を、デジタコの拘束時間データで換算して比較する<b>レート設定の事前チェック</b>です。
-                実際に支払われた給与 (振込額) を検証するものではありません。支払い済み金額と最低賃金の比較は「給与比較」タブをご利用ください。
-                単価は「単価マスタ」タブ、最低賃金 (法定下限、全社共通) は下の設定欄で管理します。
+                ⚠ この表は「単価マスタに登録した単価」をデジタコの拘束時間データで換算した<b>理論値</b>です。
+                実際に支払われた給与 (振込額) を検証するものではありません。支払い済み金額の検証は「給与比較」タブをご利用ください。
+                単価は「単価マスタ」タブで管理します。
               </p>
               <p class="text-xs text-gray-500 mt-2">
-                基本給・深夜・残業代・合計(計算)の各列は「単価マスタ換算 (太字) / 最低賃金換算 (グレー) / 差」の3段表示。差が負の場合は赤字 (最低賃金換算を下回っている)。
                 合計(計算) = 基本給+深夜+残業代合計 (全区分合計、「給与比較」タブの合計(計算)と同じ値)。<br>
                 各金額の上の @ は計算単価 (円/h、金額 ÷ 対象時間の実額按分)。基本給の @ は基礎単価そのもの、深夜(通常) の @ は加算分 0.25 倍のみの単価。単価未設定の乗務員は計算されません。<br>
                 基本給(法定内) の対象時間 = 実働 − 時間外 − 時間外深夜 (時間外の基礎1.0は残業代の1.25側にのみ含まれる)。
