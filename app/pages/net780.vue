@@ -469,7 +469,7 @@ function eventLabel(e: Net780ParseResult['events'][number]): string {
                   @click="toggleRow(row)"
                 >
                   <td class="px-2 py-1.5" @click.stop="toggleRow(row)">
-                    <input type="checkbox" :checked="selectedOperationNos.has(rowKeyOf(row))" @change="toggleRow(row)">
+                    <input type="checkbox" :checked="selectedOperationNos.has(rowKeyOf(row))">
                   </td>
                   <td class="px-2 py-1.5">{{ row.operationDate ?? '-' }}</td>
                   <td class="px-2 py-1.5">{{ row.vehicleName ?? '-' }}</td>
