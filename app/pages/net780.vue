@@ -108,6 +108,20 @@ async function runNet780Search() {
   }
 }
 
+/** 検索結果の1行を、D1 検索カタログ (Refs #299) 用の表示メタ込みで
+ * ダウンロード target に変換する。theearth への postback には
+ * operationNo/startDateTime だけが使われ、残りはカタログ書き込み専用。 */
+function net780RowToTarget(row: Net780Row) {
+  return {
+    operationNo: row.operationNo,
+    startDateTime: row.startDateTime,
+    vehicleName: row.vehicleName,
+    driverCd1: row.driverCd1,
+    driverName1: row.driverName1,
+    operationDate: row.operationDate,
+  }
+}
+
 /** 選択した運行を1件ずつダウンロードする。複数運行を1回の postback にまとめると
  * 個別運行を安全に取り出せない ZIP (`operationCount > 1`) が archive されて
  * しまうため、選択件数分このループで順に呼ぶ (Refs #299)。 */
@@ -125,7 +139,7 @@ async function downloadSelectedNet780() {
       const blob = await $fetch<Blob>('/net780-api/download', {
         method: 'POST',
         headers: net780AuthHeaders(),
-        body: { targets: [{ operationNo: row.operationNo, startDateTime: row.startDateTime }] },
+        body: { targets: [net780RowToTarget(row)] },
         responseType: 'blob',
       })
       triggerNet780Download(blob, `net780-${row.operationNo}.zip`)
@@ -229,7 +243,7 @@ async function fetchNet780Blob(row: Net780Row): Promise<Blob> {
   return await $fetch<Blob>('/net780-api/download', {
     method: 'POST',
     headers: net780AuthHeaders(),
-    body: { targets: [{ operationNo: row.operationNo, startDateTime: row.startDateTime }] },
+    body: { targets: [net780RowToTarget(row)] },
     responseType: 'blob',
   })
 }

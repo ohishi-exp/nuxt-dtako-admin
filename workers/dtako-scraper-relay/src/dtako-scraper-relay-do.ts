@@ -328,6 +328,10 @@ export interface RelayEnv {
    * operationNo ごとのポインタ index) は `theearth-net780-client.ts` の
    * `net780R2Paths` の doc 参照 (Refs #302)。 */
   NET780_R2_PREFIX?: string;
+  /** NET780 / vehicle-settings アップロードデータの検索カタログ D1 (Refs #299)。
+   * R2 が正、D1 は車番/乗務員CD/運行No 検索用の再構築可能インデックス。未
+   * binding の環境では検索カタログへの書き込みを best-effort でスキップする。 */
+  DTAKO_DB?: D1Database;
 }
 
 export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
@@ -2546,12 +2550,55 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           }),
           { httpMetadata: { contentType: "application/json" } },
         );
+        this.ctx.waitUntil(this.upsertNet780Catalog(target, zipKey, fetchedAt));
       }
       console.log(
         JSON.stringify({ net780_r2: "done", zipKey, operations: targets.length, dedup: !!existing }),
       );
     } catch (err) {
       console.error(JSON.stringify({ net780_r2: "error", error: describeUnknownError(err) }));
+    }
+  }
+
+  /** D1 検索カタログ (`dtako_uploads`、Refs #299) に NET780 の1行を upsert する。
+   * 車番 (vehicle_cd) は theearth F-VOS3020 の検索結果グリッドに含まれない
+   * (`lblVehicleName` のみ、車輌CD自体は無い) ため NULL のまま — 検索は
+   * vehicle_name の部分一致 + driver_cd1 の完全一致で行う想定。D1 はあくまで
+   * 再構築可能なインデックスなので、binding 未設定や書き込み失敗はログのみで
+   * 応答・R2保存には影響させない (best-effort、waitUntil 前提)。 */
+  private async upsertNet780Catalog(
+    target: Net780DownloadTarget,
+    zipKey: string,
+    fetchedAt: string,
+  ): Promise<void> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return;
+    try {
+      await db
+        .prepare(
+          `INSERT INTO dtako_uploads
+             (dataset, schema_version, vehicle_name, driver_cd1, driver_name1, operation_no, start_datetime, r2_key, uploaded_at)
+           VALUES ('net780', '1', ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(dataset, operation_no) WHERE operation_no IS NOT NULL DO UPDATE SET
+             vehicle_name = excluded.vehicle_name,
+             driver_cd1 = excluded.driver_cd1,
+             driver_name1 = excluded.driver_name1,
+             start_datetime = excluded.start_datetime,
+             r2_key = excluded.r2_key,
+             uploaded_at = excluded.uploaded_at`,
+        )
+        .bind(
+          target.vehicleName ?? null,
+          target.driverCd1 ?? null,
+          target.driverName1 ?? null,
+          target.operationNo,
+          target.startDateTime,
+          zipKey,
+          fetchedAt,
+        )
+        .run();
+    } catch (err) {
+      console.error(JSON.stringify({ net780_d1: "error", error: describeUnknownError(err) }));
     }
   }
 
