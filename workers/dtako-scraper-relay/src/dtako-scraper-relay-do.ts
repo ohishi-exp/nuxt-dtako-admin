@@ -2360,7 +2360,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   // /net780-api/* — theearth F-VOS3020 検索 + NET780 生データ一括ダウンロード
   // (Refs #302)。credential pass-through / theearth セッション共有は
   // /restraint-api と同じ。実機確定知見は ./theearth-net780-client.ts のヘッダ
-  // コメントおよび theearth-venus skill 参照。
+  // コメントおよび theearth-venus skill の「3要素解析データ (NET780 生データ)
+  // ダウンロード F-VOS3020[VehicleComDataDownLoad]」節参照。
   // -------------------------------------------------------------------------
 
   private async handleNet780Api(request: Request, url: URL): Promise<Response> {

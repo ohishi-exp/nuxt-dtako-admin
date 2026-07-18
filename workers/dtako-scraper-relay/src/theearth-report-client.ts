@@ -848,7 +848,8 @@ export interface StartSystemLinkResult {
   message: string;
 }
 
-/** システム連動開始 (btnLinkSys)。skill (theearth-venus) の順序依存に従い、まず
+/** システム連動開始 (btnLinkSys)。theearth-venus skill の「作業時間再集計 →
+ * システム連動開始 の連鎖 (実機で観測)」節の順序依存に従い、まず
  * `btnScore` (再集計) → その応答で `btnLinkSys` が disabled→enabled になる → その
  * viewstate で `btnLinkSys` postback、の連鎖で実行する。**theearth 側にデータを連動
  * させる本番アクション**。連動完了の成功シグナルは skill 未記載のため、各段階の状態と

@@ -2,7 +2,9 @@
  * theearth-np.com F-VOS3020[VehicleComDataDownLoad] (3要素解析データダウンロード) の
  * ブラウザレス検索 + NET780 生データ zip 一括ダウンロード (Refs #302)。
  *
- * 実機確定知見 (2026-07-18、詳細は theearth-venus skill 参照):
+ * 実機確定知見 (2026-07-18、詳細は theearth-venus skill の「3要素解析データ (NET780
+ * 生データ) ダウンロード F-VOS3020[VehicleComDataDownLoad]」節・「表示条件指定
+ * (F-GOS0030[DataDisplayConfig]) — 絞込 + ソート優先設定」節参照):
  * - 表示条件 (F-GOS0030) の絞込適用は `Return(val)` → `window.opener.ReturnDisplayConfig(val)`
  *   → `{ if (val != undefined) { $('#btnUpdate').click(); } }`。F-VOS3020 側の
  *   反映ボタンは id="btnUpdate" (name: ctl00$MainContent$ucDataSelect$btnUpdate)、
@@ -222,7 +224,8 @@ function dateFieldValues(iso: string | undefined): { y: string; m: string; d: st
 
 /** F-GOS0030 の日付種別 select (`ddlSortDay1`) の値。実機確定オプション:
  * `OperationDate`(運行日) / `ReadNo`(読取日) / `OperationStartDateTime`(出庫日) /
- * `OperationEndDateTime`(帰庫日) (theearth-venus skill 参照)。NET780 の検索は
+ * `OperationEndDateTime`(帰庫日) (theearth-venus skill の「表示条件指定
+ * (F-GOS0030[DataDisplayConfig]) — 絞込 + ソート優先設定」節参照)。NET780 の検索は
  * 読取日 (=退社日時、データが確定した日) 基準で絞り込む方針 (Refs #299)。 */
 const DATE_FILTER_TYPE_READ_NO = "ReadNo";
 
@@ -248,7 +251,9 @@ function buildConfigOverrides(
 }
 
 /** F-GOS0030 の絞込を `btnOK` (適用) postback で反映する。`lnkSaveCategory`
- * (絞込条件保存) では一覧に反映されない (F-DES1010 と同じ罠、theearth-venus skill 参照)。 */
+ * (絞込条件保存) では一覧に反映されない (F-DES1010 と同じ罠、theearth-venus skill の
+ * 「F-GOS0030 の『車輌』絞込 (`txtSVehicle`/`txtEVehicle`) で F-DES1010 を車番検索する」
+ * 節参照)。 */
 async function applyConfig(
   jar: CookieJar,
   configHtml: string,
@@ -422,7 +427,8 @@ export interface Net780DownloadTarget {
 }
 
 /** ダウンロード対象の行数上限 (暫定値。POST body 長の実質上限は未検証、
- * theearth-venus skill の「未検証・要確認」参照)。 */
+ * theearth-venus skill の「3要素解析データ (NET780 生データ) ダウンロード
+ * F-VOS3020[VehicleComDataDownLoad]」節の「未検証・要確認」参照)。 */
 export const NET780_DOWNLOAD_MAX_ROWS = 30;
 
 /** ダウンロード対象を検証する (1件以上、上限件数、運行No形式)。 */
@@ -549,7 +555,9 @@ export function net780R2Paths(prefix: string, compId: string): Net780R2Paths {
  * `operationCount` はその zipKey に含まれる運行数 (=保存時の targets.length)。
  * ダウンロード ZIP は `{車輌CD}/{タイムスタンプ}-0-0-{車輌CD}/` というフォルダで
  * 運行ごとに分かれているが、フォルダ名は運行No (operationNo) ではなく車輌CD+
- * タイムスタンプ由来 (theearth-venus skill 参照、対応関係未検証) のため、
+ * タイムスタンプ由来 (theearth-venus skill の「3要素解析データ (NET780 生データ)
+ * ダウンロード F-VOS3020[VehicleComDataDownLoad]」節の「未検証・要確認」参照、
+ * 対応関係未検証) のため、
  * **2件以上の運行を含む ZIP からは「どのフォルダが要求された operationNo か」を
  * 安全に特定できない**。Refs #299 でダウンロードを1件ずつに変更したため新規
  * archive の `operationCount` は常に 1 になるが、フィールド自体と r2-view 側の

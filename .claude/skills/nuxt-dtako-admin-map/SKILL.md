@@ -66,6 +66,10 @@ vitest は `resolve.alias` で `tests/mocks/net780-wasm.ts` に差し替える (
 - `auth-worker-map` — JWT 発行元 (`@ippoan/auth-client` の認証先)
 - `nuxt-vitest` — composable/utils のテスト (`coverage_100.toml` で 100% 管理)
 - `cross-repo-symbol-index` `ippoan-infra-map` — 横断 symbol / 基盤地図
+- `theearth-venus` — theearth-np.com 実機知見。コード⇔doc は双方向アンカー規約
+  (コード側は節見出し名まで、doc 側は各節冒頭に `consumer:` 行) で対応させている。
+  概念語 (読取日/運行日等) → 実フィールド名の対応表と、横断検索用 `scripts/xref.sh`
+  も同 skill の「検索の入口」節を参照。
 
 ## CLAUDE.md から移設 (2026-07-06)
 
