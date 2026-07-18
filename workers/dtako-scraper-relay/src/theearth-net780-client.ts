@@ -394,6 +394,16 @@ export async function searchNet780(
 export interface Net780DownloadTarget {
   operationNo: string;
   startDateTime: string;
+  /**
+   * D1 検索カタログ (`dtako_uploads`、Refs #299) 用の表示メタ。theearth への
+   * postback には使わない (downloadNet780Zip はこれらのフィールドを無視する)。
+   * フロント側が検索結果の Net780Row から素通しで渡す想定、値が無くても
+   * ダウンロード自体は成立する (カタログ行が検索性の低いものになるだけ)。
+   */
+  vehicleName?: string | null;
+  driverCd1?: string | null;
+  driverName1?: string | null;
+  operationDate?: string | null;
 }
 
 /** ダウンロード対象の行数上限 (暫定値。POST body 長の実質上限は未検証、
