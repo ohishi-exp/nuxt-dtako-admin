@@ -234,6 +234,17 @@ net780-wasm (ohishi-exp/net780-wasm、core/ + wasm/ の 1 repo workspace)
   飛ぶ異常座標 79 点中 78 点が通信断区間内の記録だった、Refs 実機調査 2026-07-18)。
   区間抽出は `extractCommOutageRanges()`。対応する `0xB9` が無い場合は記録終端まで
   通信断継続とみなし `end: Infinity` にする。
+- **通信断イベントと無関係に発生する GPS ジャンプは `filterImplausibleGpsJumps()`
+  (速度ベース) で除外する** (Refs 実機調査 2026-07-19)。イベントコード
+  (`0x11`/`0x21` 作業状態 ON/OFF 等) の時間窓との相関を試したが運行ごとに一致率が
+  低く実効性が無かった (0x11/0x21 前後 120 秒除外でもジャンプ 14 件中 12 件残存)。
+  直前の「採用済み」点との実装速度が `MAX_PLAUSIBLE_SPEED_KMH` (150km/h) を超え、
+  かつ `MIN_JUMP_DIST_KM` (0.3km) 以上移動していたら物理的にありえないジャンプと
+  みなしてその点を除外する (直前の生の点ではなく採用済み点と比較することで、
+  異常座標が複数点連続する = ワープ先でしばらく記録され続けるケースも連鎖的に
+  除外できる)。実データ 2 運行 (07-03/07-04・07-17/07-18) で検出ジャンプが
+  17 件/14 件から 0 件になることを確認済み。`buildDailyGpsPoints` は通信断除外の
+  あとにこのフィルタを適用する (主防御線)。
 - Google Maps API key の取得は `/vid-check` と同じ `/api/vid-check/map-key`
   endpoint を共用する (CF Secrets Store binding、endpoint 名は歴史的経緯でこの
   ままだが net780 専用に複製していない)。

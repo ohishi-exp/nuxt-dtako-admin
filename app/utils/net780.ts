@@ -394,18 +394,72 @@ function isWithinRanges(ts: number, ranges: Array<{ start: number, end: number }
   return ranges.some(r => ts >= r.start && ts <= r.end)
 }
 
+/** 2 点間の距離 (km、Haversine 公式)。 */
+function haversineDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371
+  const toRad = (d: number) => d * Math.PI / 180
+  const dLat = toRad(lat2 - lat1)
+  const dLon = toRad(lon2 - lon1)
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2
+  return 2 * R * Math.asin(Math.sqrt(a))
+}
+
+/** この実装速度 (km/h) を超え、かつ MIN_JUMP_DIST_KM 以上移動していたら物理的にありえないジャンプとみなす。 */
+const MAX_PLAUSIBLE_SPEED_KMH = 150
+/** 至近距離の GPS ノイズ (揺らぎ) を誤検出しないための最小距離しきい値 (km)。 */
+const MIN_JUMP_DIST_KM = 0.3
+
+/**
+ * 時系列順の GPS 点列から、直前の「採用済み」点との実装速度が物理的にありえない
+ * (`MAX_PLAUSIBLE_SPEED_KMH` 超) ジャンプを検出し、そのジャンプ先の点を除外する。
+ *
+ * 通信断 (0xB8/0xB9) や作業状態 ON/OFF (0x11/0x21) 付近で GPS モジュールが実座標と
+ * 無関係な位置 (海上・市街地外等) を記録することがあるが、イベントコードとの
+ * 時間窓ベースの相関は運行ごとに一致しないケースが多く実効性が低かった
+ * (実データ検証: 0x11/0x21 前後 120 秒を除外しても 14 件中 12 件のジャンプが残存)。
+ * 座標そのものの物理的整合性を見るこの方式なら原因コードによらず直接検出できる
+ * (実データ検証: 07-03/07-04・07-17/07-18 の両運行で検出ジャンプが 17 件/14 件から
+ * 0 件になった)。
+ *
+ * 直前の「生の」点ではなく「採用済み」点と比較することで、異常座標が複数点
+ * 連続するケース (ワープ先でしばらく記録され続ける) でも、ワープ先の点同士は
+ * 採用されず、実座標に復帰した時点で正しく採用が再開される。
+ */
+export function filterImplausibleGpsJumps(points: Net780GpsPoint[]): Net780GpsPoint[] {
+  if (points.length === 0) return []
+  const kept: Net780GpsPoint[] = [points[0]!]
+  let last = points[0]!
+  for (let i = 1; i < points.length; i++) {
+    const p = points[i]!
+    const dtSec = p.ts - last.ts
+    if (dtSec <= 0) {
+      kept.push(p)
+      continue
+    }
+    const distKm = haversineDistanceKm(last.lat, last.lon, p.lat, p.lon)
+    const speedKmh = distKm / (dtSec / 3600)
+    if (speedKmh > MAX_PLAUSIBLE_SPEED_KMH && distKm > MIN_JUMP_DIST_KM) continue
+    kept.push(p)
+    last = p
+  }
+  return kept
+}
+
 /**
  * GPS 位置情報を JST 暦日ごとに分割する (buildDailySpeedCharts と同じ日付境界)。
  * GPS 未捕捉時の `(0,0)` プレースホルダー (lat/lon とも 0) は地図表示上ノイズに
  * なるだけなので除外する。
  *
  * `events` を渡すと、通信断 (0xB8) 〜 通信復帰 (0xB9) の区間内に記録された GPS 点も
- * あわせて除外する (実データ検証: 異常座標としてトンネル区間の海上ピン等に飛んだ
- * 79 点中 78 点が通信断区間内の記録だった)。
+ * あわせて除外する。さらに、残った点列に対して `filterImplausibleGpsJumps` で
+ * 物理的にありえない移動ジャンプを検出・除外する (通信断と無関係に発生する GPS
+ * 異常もカバーするための主防御線、詳細は同関数のコメント参照)。
  */
 export function buildDailyGpsPoints(points: Net780GpsPoint[], events: Net780EventSummary[] = []): DailyGpsPoints[] {
   const outageRanges = extractCommOutageRanges(events)
-  const valid = points.filter(p => (p.lat !== 0 || p.lon !== 0) && !isWithinRanges(p.ts, outageRanges))
+  const valid = filterImplausibleGpsJumps(
+    points.filter(p => (p.lat !== 0 || p.lon !== 0) && !isWithinRanges(p.ts, outageRanges)),
+  )
   if (valid.length === 0) return []
 
   const byDate = new Map<string, Net780GpsPoint[]>()
