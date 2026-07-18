@@ -353,6 +353,24 @@ describe('filterImplausibleGpsJumps', () => {
     ]
     expect(filterImplausibleGpsJumps(points)).toEqual(points)
   })
+
+  it('異常クラスタに長時間留まり経過時間で計算上の速度が下がっても採用しない (ヒステリシス回帰テスト)', () => {
+    // 基準点との距離は一定 (~44.5km) のまま経過時間だけが伸びると、単純な
+    // 「直前の採用済み点」比較では速度が下がって見え誤採用されるバグがあった。
+    // 直前の「生」の点からほぼ動いていない (同じ異常クラスタ内) 限りは、
+    // 基準点との計算上の速度に関わらず除外し続けることを検証する。
+    const points: Net780GpsPoint[] = [
+      { ts: 0, lat: 43.0, lon: 143.0 }, // 基準点
+      { ts: 60, lat: 42.6, lon: 144.2 }, // ジャンプ (除外、60秒 ≒ 2670km/h)
+      // 3000 秒 (50分) 経過後も同じ異常クラスタ内 (前の生点から 0.3km 未満)。
+      // 基準点からの計算上速度は 44.5km/(3000/3600)h ≒ 53km/h で単純比較では
+      // 妥当に見えてしまうが、ヒステリシスにより依然除外されるべき。
+      { ts: 3000, lat: 42.601, lon: 144.201 },
+      { ts: 3060, lat: 43.02, lon: 143.02 }, // クラスタを離れ実座標へ復帰 (採用)
+    ]
+    const result = filterImplausibleGpsJumps(points)
+    expect(result).toEqual([points[0], points[3]])
+  })
 })
 
 describe('extractCommOutageRanges', () => {
