@@ -3,7 +3,9 @@
  *
  * - multipart/form-data の `file` フィールドに zip を入れて POST
  * - 抽出に成功したら R2 (`DTAKO_R2` バケット) の `vehicle-settings/<vehicle_cd>/<dump_dir>.json`
- *   と `.cfg` (CP932 のまま原本) に保存する。
+ *   と `.cfg` (CP932 のまま原本) に保存する。R2 保存成功時は D1 検索カタログ
+ *   (`dtako_uploads`、Refs #299) にも upsert し、車番横断検索できるようにする
+ *   (D1 書き込みは best-effort — 失敗しても R2 保存・応答には影響しない)。
  * - R2 binding が無い環境 (vitest / dev で binding 未設定 等) や vehicle_cd / dump_dir が
  *   path から取れなかった場合は `saved_warning` を返して成功扱い (UX 互換)。
  * - parse 本体は `app/utils/vehicle-settings-cfg.ts` (pure)
@@ -30,10 +32,53 @@ interface R2BucketLite {
     options?: R2PutOptions,
   ): Promise<unknown>
 }
+interface D1PreparedStatementLite {
+  bind(...values: unknown[]): D1PreparedStatementLite
+  run(): Promise<unknown>
+}
+interface D1DatabaseLite {
+  prepare(sql: string): D1PreparedStatementLite
+}
 
 function getR2Binding(event: H3Event): R2BucketLite | null {
   const ctx = event.context as { cloudflare?: { env?: { DTAKO_R2?: R2BucketLite } } }
   return ctx.cloudflare?.env?.DTAKO_R2 ?? null
+}
+
+function getD1Binding(event: H3Event): D1DatabaseLite | null {
+  const ctx = event.context as { cloudflare?: { env?: { DTAKO_DB?: D1DatabaseLite } } }
+  return ctx.cloudflare?.env?.DTAKO_DB ?? null
+}
+
+/** D1 検索カタログ (`dtako_uploads`、Refs #299) へ vehicle-settings の1行を
+ * upsert する。R2 保存が正、D1 はあくまで車番検索用の再構築可能インデックス
+ * なので、binding 未設定・書き込み失敗は無視する (R2 保存の成否には影響しない、
+ * best-effort)。 */
+async function upsertVehicleSettingsCatalog(
+  event: H3Event,
+  vehicleCd: string,
+  dumpDir: string,
+  jsonKey: string,
+  uploadedAt: string,
+): Promise<void> {
+  const db = getD1Binding(event)
+  if (!db) return
+  try {
+    await db
+      .prepare(
+        `INSERT INTO dtako_uploads
+           (dataset, schema_version, vehicle_cd, dump_dir, r2_key, uploaded_at)
+         VALUES ('vehicle_settings', '1', ?, ?, ?, ?)
+         ON CONFLICT(dataset, r2_key) DO UPDATE SET
+           vehicle_cd = excluded.vehicle_cd,
+           dump_dir = excluded.dump_dir,
+           uploaded_at = excluded.uploaded_at`,
+      )
+      .bind(vehicleCd, dumpDir, jsonKey, uploadedAt)
+      .run()
+  } catch (e) {
+    console.error(JSON.stringify({ vehicle_settings_d1: 'error', error: e instanceof Error ? e.message : String(e) }))
+  }
 }
 
 export interface ExtractResponse extends VehicleSettings {
@@ -109,6 +154,7 @@ export default defineEventHandler(async (event): Promise<ExtractResponse> => {
           customMetadata: meta,
         })
         saved = { json_key, cfg_key }
+        await upsertVehicleSettingsCatalog(event, parsed.vehicle_cd, parsed.dump_dir, json_key, meta.uploaded_at!)
       } catch (e) {
         saved_warning = `R2 保存に失敗しました: ${e instanceof Error ? e.message : String(e)}`
       }
