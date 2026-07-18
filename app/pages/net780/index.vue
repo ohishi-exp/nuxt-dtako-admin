@@ -48,7 +48,7 @@ const viewingOperationNo = ref<string | null>(null)
 
 const route = useRoute()
 
-function queryString(value: string | string[] | undefined): string {
+function queryString(value: string | (string | null)[] | null | undefined): string {
   return typeof value === 'string' ? value : Array.isArray(value) ? (value[0] ?? '') : ''
 }
 
