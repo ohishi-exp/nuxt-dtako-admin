@@ -30,6 +30,15 @@ custom_domain = true
 binding = "DTAKO_R2"
 bucket_name = "dtako-uploads"
 
+# NET780 / vehicle-settings アップロードデータの検索カタログ (Refs #299)。
+# R2 (DTAKO_R2) が正、D1 は車番/乗務員CD/運行No 検索用の再構築可能インデックス。
+# R2 と同じく本番/staging/preview 共用 (named env で再宣言、専用DBが要れば分ける)。
+[[d1_databases]]
+binding = "DTAKO_DB"
+database_name = "dtako-admin-uploads-catalog"
+database_id = "81dd4136-b5c8-4c1b-93c8-28fdafbe1a8d"
+migrations_dir = "migrations"
+
 # auth-worker POST /auth/introspect (#434 step 2) を叩くための共有 secret。
 # /api/proxy/* の forward 前段で browser JWT を introspect 検証 + identity 注入
 # (X-Tenant-ID + X-User-ID/Email/Role) に使う。auth-worker / cc-relay / ref-files /
@@ -102,6 +111,13 @@ binding = "DTAKO_R2"
 # 専用 staging bucket が必要になったら `dtako-uploads-staging` 等を作って差し替える。
 bucket_name = "dtako-uploads"
 
+# named env は top-level binding を継承しないので再宣言する。R2 と同じく本番と共用。
+[[env.staging.d1_databases]]
+binding = "DTAKO_DB"
+database_name = "dtako-admin-uploads-catalog"
+database_id = "81dd4136-b5c8-4c1b-93c8-28fdafbe1a8d"
+migrations_dir = "migrations"
+
 # named env は top-level binding を継承しないので再宣言する。
 # staging/prod 統合 entry なので同じ secret_name (auth-worker #189)。
 [[env.staging.secrets_store_secrets]]
@@ -143,6 +159,13 @@ custom_domain = true
 [[env.preview.r2_buckets]]
 binding = "DTAKO_R2"
 bucket_name = "dtako-uploads"
+
+# named env は top-level binding を継承しないので再宣言する。R2 と同じく本番と共用。
+[[env.preview.d1_databases]]
+binding = "DTAKO_DB"
+database_name = "dtako-admin-uploads-catalog"
+database_id = "81dd4136-b5c8-4c1b-93c8-28fdafbe1a8d"
+migrations_dir = "migrations"
 
 # named env は top-level binding を継承しないので再宣言する。staging と同じ
 # secret_name (auth-worker #189)。
