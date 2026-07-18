@@ -12,7 +12,9 @@
  * GET /api/net780/by-operation?operationNo=2607141234560000001726
  *   200 — ZIP バイナリ (extractSingleOperationZip + parseNet780Zip はフロント側)
  *   400 — operationNo 形式不正
- *   404 — カタログ未登録 または R2 オブジェクト欠落
+ *   404 — カタログ未登録・R2 オブジェクト欠落・または operation_count !== 1
+ *         (複数運行まとめて archive された zip は個別運行を安全に取り出せない
+ *         — DO 側の handleNet780R2View と同じガード、Refs #299 実害修正)
  *   503 — DTAKO_DB / DTAKO_R2 binding 未設定
  */
 
@@ -59,13 +61,26 @@ export default defineEventHandler(async (event) => {
   }
 
   const row = await db
-    .prepare(`SELECT r2_key FROM dtako_uploads WHERE dataset = 'net780' AND operation_no = ? LIMIT 1`)
+    .prepare(
+      `SELECT r2_key, operation_count FROM dtako_uploads WHERE dataset = 'net780' AND operation_no = ? LIMIT 1`,
+    )
     .bind(operationNo)
-    .first<{ r2_key: string }>()
+    .first<{ r2_key: string; operation_count: number | null }>()
   if (!row) {
     throw createError({
       statusCode: 404,
       statusMessage: 'この運行の NET780 データはまだアーカイブされていません',
+    })
+  }
+  // operation_count が 1 でない (旧データで不明 = null 含む) 場合、その zip から
+  // この operationNo のフォルダだけを安全に取り出せる保証が無い (r2-view の
+  // 同種ガードと同じ理由)。無理に返して呼び出し側の parse エラーに繋げるより
+  // 404 として明示的にフォールバックさせる。
+  if (row.operation_count !== 1) {
+    throw createError({
+      statusCode: 404,
+      statusMessage:
+        '複数運行がまとめてアーカイブされているため、この運行だけを安全に表示できません。NET780 検索から再ダウンロードしてください',
     })
   }
 
