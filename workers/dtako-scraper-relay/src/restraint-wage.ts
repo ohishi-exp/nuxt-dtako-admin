@@ -458,8 +458,9 @@ function classifyDayRow(
 /**
  * 月内の日別データを法定区分の時間に分類する。
  *
- * - 平日: 法定時間内 = 実働 − 時間外 − 時間外深夜。深夜は 0.25 加算の対象分数
- *   (法定時間内の 1.0 とは別枠で加算)。時間外/時間外深夜は theearth の日別値。
+ * - 平日: 法定時間内 = 実働 − 時間外 − 時間外深夜 (さらに月末に週40超過分を控除、
+ *   下記)。深夜は 0.25 加算の対象分数 (法定時間内の 1.0 とは別枠で加算)。
+ *   時間外/時間外深夜は theearth の日別値。
  * - 法定休日 (日曜): 時間外の概念なし — 実働すべてを 法定休日 (深夜分は
  *   法定休日深夜) に計上する。
  * - 法定外休日 (wage-config で指定した曜日のみ、既定なし): 実働すべてを
@@ -468,6 +469,10 @@ function classifyDayRow(
  *   (法定休日を除く) − 40h − その週で既に割増計上済みの分 (時間外・時間外深夜・
  *   法定外休日) を正の範囲で計上。月初の跨ぎ週は prevMonthDays (前月 summary の
  *   days) を含めて計算する。
+ * - **週40超過分は法定時間内から控除する** (2026-07-18 案B 決定 Refs #282):
+ *   週40超過の時間は日次では法定時間内に積まれているため、そのままだと
+ *   基礎 1.0 (statutory) + 1.25 (weekly40Excess) の 2.25 倍で二重計上になる。
+ *   控除して「法定内 = 割増の付かない時間だけ / 週40超過 = 1.25 フル」に揃える。
  */
 export function classifyMonth(
   days: RestraintSummaryDay[],
@@ -537,6 +542,10 @@ export function classifyMonth(
     if (!week.endsInMonth) continue;
     out.weekly40Excess += Math.max(0, week.working - FORTY_HOURS - week.premium);
   }
+  // 週40超過分の基礎 1.0 は日次集計で法定時間内に積まれている — 二重計上を防ぐため
+  // 控除する (週40超過は 1.25 フルで払う、案B Refs #282)。clamp は日次 max(0) との
+  // 端数不整合への防御。
+  out.statutory = Math.max(0, out.statutory - out.weekly40Excess);
   return out;
 }
 
