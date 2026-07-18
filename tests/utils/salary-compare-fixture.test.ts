@@ -35,9 +35,9 @@ const NO_CONFIG: SalaryItemConfig = { items: {} }
 describe('parseSalaryCsv (共有 fixture)', () => {
   const parsed = parseSalaryCsv(csvText)
 
-  it('5 行 (乗務員 4 + 給与のみ 1) を 2026-07 として読む。警告なし', () => {
+  it('5 行 (乗務員 4 + 給与のみ 1) を 2026-08 (支給月ラベル = 勤務月 2026-07 の翌月) として読む。警告なし', () => {
     expect(parsed.rows.map(r => r.driverCd)).toEqual(['9901', '9902', '9903', '9904', '9999'])
-    expect(parsed.months).toEqual(['2026-07'])
+    expect(parsed.months).toEqual(['2026-08'])
     expect(parsed.warnings).toEqual([])
     expect(parsed.itemLabels).toEqual(['基本給', '残業手当', '深夜手当', '通勤手当', '住宅手当'])
   })
