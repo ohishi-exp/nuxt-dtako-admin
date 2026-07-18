@@ -15,9 +15,9 @@ import {
   extractVehicleSettingsAndCfgBytes,
   type VehicleSettings,
 } from '~/utils/vehicle-settings-cfg'
+import { vehicleSettingsR2Paths } from '~/utils/vehicle-settings-r2'
 
 const MAX_BYTES = 5 * 1024 * 1024 // 5MB — NET780 dump zip は 50KB 程度なので余裕の上限
-const R2_PREFIX = 'vehicle-settings/'
 
 interface R2PutOptions {
   httpMetadata?: { contentType?: string }
@@ -89,9 +89,9 @@ export default defineEventHandler(async (event): Promise<ExtractResponse> => {
     if (!r2) {
       saved_warning = 'R2 binding (DTAKO_R2) が無いため保存をスキップしました'
     } else {
-      const baseKey = `${R2_PREFIX}${parsed.vehicle_cd}/${parsed.dump_dir}`
-      const json_key = `${baseKey}.json`
-      const cfg_key = `${baseKey}.cfg`
+      const paths = vehicleSettingsR2Paths(parsed.vehicle_cd)
+      const json_key = paths.jsonObject(parsed.dump_dir)
+      const cfg_key = paths.cfgObject(parsed.dump_dir)
       const meta: Record<string, string> = {
         uploaded_at: new Date().toISOString(),
         vehicle_cd: parsed.vehicle_cd,
