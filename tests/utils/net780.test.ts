@@ -8,6 +8,7 @@ import {
   buildDailySpeedCharts,
   buildDailyGpsPoints,
   extractCommOutageRanges,
+  filterImplausibleGpsJumps,
   chartXRatioToTime,
   net780DateStartTs,
 } from '~/utils/net780'
@@ -264,7 +265,7 @@ describe('buildDailyGpsPoints', () => {
     const points: Net780GpsPoint[] = [
       { ts: day1, lat: 43.0, lon: 143.0 }, // 通信断前 (正常)
       { ts: day1 + 60, lat: 42.6, lon: 144.2 }, // 通信断中 (異常、除外対象)
-      { ts: day1 + 120, lat: 43.05, lon: 143.05 }, // 通信復帰後 (正常)
+      { ts: day1 + 600, lat: 43.05, lon: 143.05 }, // 通信復帰後、十分な時間を空けて移動 (正常)
     ]
     const events = [commEvent(day1 + 30, 0xB8), commEvent(day1 + 90, 0xB9)]
     const daily = buildDailyGpsPoints(points, events)
@@ -289,6 +290,68 @@ describe('buildDailyGpsPoints', () => {
     const points: Net780GpsPoint[] = [{ ts: day1, lat: 42.6, lon: 144.2 }]
     const daily = buildDailyGpsPoints(points)
     expect(daily[0]!.points).toHaveLength(1)
+  })
+
+  it('物理的にありえない速度のジャンプ先を除外する (通信断イベントが無くても)', () => {
+    const day1 = net780DateStartTs('2026-07-01') + 6 * 3600
+    const points: Net780GpsPoint[] = [
+      { ts: day1, lat: 43.0, lon: 143.0 }, // 正常
+      { ts: day1 + 60, lat: 42.6, lon: 144.2 }, // 60 秒で 44km 移動 (物理的にありえない、除外対象)
+      { ts: day1 + 600, lat: 43.05, lon: 143.05 }, // 十分な時間を空けて正常に復帰
+    ]
+    const daily = buildDailyGpsPoints(points)
+    expect(daily[0]!.points).toHaveLength(2)
+    expect(daily[0]!.points.map(p => p.lat)).toEqual([43.0, 43.05])
+  })
+})
+
+describe('filterImplausibleGpsJumps', () => {
+  it('空配列を渡すと空配列を返す', () => {
+    expect(filterImplausibleGpsJumps([])).toEqual([])
+  })
+
+  it('速度が妥当な範囲なら全点を残す', () => {
+    const points: Net780GpsPoint[] = [
+      { ts: 0, lat: 43.0, lon: 143.0 },
+      { ts: 60, lat: 43.01, lon: 143.01 }, // 60 秒で ~1.2km ≒ 72km/h
+    ]
+    expect(filterImplausibleGpsJumps(points)).toEqual(points)
+  })
+
+  it('物理的にありえない速度のジャンプ先を除外する', () => {
+    const points: Net780GpsPoint[] = [
+      { ts: 0, lat: 43.0, lon: 143.0 },
+      { ts: 60, lat: 42.6, lon: 144.2 }, // 60 秒で ~44.5km ≒ 2670km/h (除外対象)
+      { ts: 120, lat: 43.01, lon: 143.01 },
+    ]
+    expect(filterImplausibleGpsJumps(points)).toEqual([points[0], points[2]])
+  })
+
+  it('直前の「採用済み」点と比較する (ジャンプ先で複数点続いても連鎖除外する)', () => {
+    const points: Net780GpsPoint[] = [
+      { ts: 0, lat: 43.0, lon: 143.0 },
+      { ts: 60, lat: 42.6, lon: 144.2 }, // ジャンプ (除外)
+      { ts: 120, lat: 42.601, lon: 144.201 }, // ジャンプ先付近に留まる (採用済み点=最初の点との比較で依然ジャンプなので除外)
+      { ts: 3720, lat: 43.02, lon: 143.02 }, // 62 分後に実座標へ復帰 (妥当な速度なので採用)
+    ]
+    const result = filterImplausibleGpsJumps(points)
+    expect(result).toEqual([points[0], points[3]])
+  })
+
+  it('至近距離の揺らぎ (0.3km 未満) は速度が高くても除外しない', () => {
+    const points: Net780GpsPoint[] = [
+      { ts: 0, lat: 43.0, lon: 143.0 },
+      { ts: 1, lat: 43.001, lon: 143.0 }, // 1 秒で ~0.11km ≒ 400km/h だが距離が小さいので許容
+    ]
+    expect(filterImplausibleGpsJumps(points)).toEqual(points)
+  })
+
+  it('同時刻・逆順の点はそのまま残す (dt<=0 はスキップ判定しない)', () => {
+    const points: Net780GpsPoint[] = [
+      { ts: 100, lat: 43.0, lon: 143.0 },
+      { ts: 100, lat: 42.6, lon: 144.2 }, // dt=0
+    ]
+    expect(filterImplausibleGpsJumps(points)).toEqual(points)
   })
 })
 
