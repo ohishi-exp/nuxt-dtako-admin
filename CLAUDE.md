@@ -7,6 +7,7 @@ dtako (デジタコ運行データ) 管理画面。Nuxt 4 + Cloudflare Workers (
 - 本番 `dtako.ippoan.org` (`v*` タグ) / staging (`main` push) / preview (main 以外 push)。タグリリース (`/tag-release patch`) で CI 自動デプロイ。
 - `npm test` (Vitest、happy-dom)。カバレッジ目標 `coverage_100.toml`。`workers/dtako-scraper-relay/` は別 `vitest.config.ts` (pure ロジックのみ 100% gate)。
 - `[vars]`: `NUXT_PUBLIC_API_BASE` / `NUXT_PUBLIC_AUTH_WORKER_URL`。`DTAKO_R2` → `dtako-uploads` (本番/staging 共用 read-only、Y時間 テンプレ配信)。
+- `scripts/xref.sh <語>` でコード+skills+docs を横断検索できる。
 
 ## 規範 (必ず守る)
 
