@@ -20,7 +20,13 @@ const csvTabs = [
   { key: 'ferries' as CsvType, label: 'フェリー' },
   { key: 'speed' as CsvType, label: '速度' },
 ]
-const activeTab = ref<CsvType>('events')
+/** NET780 タブは CSV エンドポイント (getOperationCsv) を経由しないため
+ * CsvType には含めず、表示切替専用の別値として扱う (Refs #299)。 */
+const allTabs: { key: CsvType | 'net780'; label: string }[] = [
+  ...csvTabs,
+  { key: 'net780', label: 'NET780' },
+]
+const activeTab = ref<CsvType | 'net780'>('events')
 const csvData = ref<Record<string, CsvJsonResponse>>({})
 const csvLoading = ref(false)
 
@@ -33,7 +39,7 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
-  await loadCsv(activeTab.value)
+  if (activeTab.value !== 'net780') await loadCsv(activeTab.value)
 })
 
 async function loadCsv(csvType: CsvType) {
@@ -49,7 +55,9 @@ async function loadCsv(csvType: CsvType) {
   }
 }
 
-watch(activeTab, (tab) => loadCsv(tab))
+watch(activeTab, (tab) => {
+  if (tab !== 'net780') loadCsv(tab)
+})
 
 const primary = computed(() => operations.value[0])
 
@@ -139,7 +147,7 @@ function formatDatetime(val: string | null): string {
       <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">
         <div class="border-b border-gray-200 dark:border-gray-800 flex">
           <button
-            v-for="tab in csvTabs"
+            v-for="tab in allTabs"
             :key="tab.key"
             class="px-4 py-3 text-sm font-medium transition-colors border-b-2"
             :class="activeTab === tab.key
@@ -150,8 +158,9 @@ function formatDatetime(val: string | null): string {
             {{ tab.label }}
           </button>
         </div>
+        <Net780OperationSummary v-if="activeTab === 'net780'" :operation-no="unkoNo" />
         <EventDataTable
-          v-if="activeTab === 'events'"
+          v-else-if="activeTab === 'events'"
           :data="csvData[activeTab] || { headers: [], rows: [] }"
           :loading="csvLoading && !csvData[activeTab]"
         />
