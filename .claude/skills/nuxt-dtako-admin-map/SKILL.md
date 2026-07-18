@@ -844,6 +844,21 @@ waitUntil していた。実機検証で、R2 書き込み (`await` で直列化
 try/catch して呼び出し元に例外を伝播させない (best-effort) ので、
 `await this.upsertNet780Catalog(...)` に変えても失敗時の応答への影響は無い。
 
+### H3 (Nitro) ハンドラで生の ArrayBuffer を return すると `{}` (2 バイト) にシリアライズされる — `Buffer.from()` でラップ必須 (2026-07-19)
+
+`server/api/net780/by-operation.get.ts` (D1/R2 に直接アクセスして NET780 ZIP を
+返す Nitro route、上の D1 upsert 修正の直後に実機検証中に発覚) が
+`return await obj.arrayBuffer()` としていたところ、実際のレスポンスが
+ちょうど2バイトの `{}` になり、フロント側の net780-wasm が
+`"Corrupted zip"` エラーで落ちた。H3 のハンドラが返した値がバイナリ
+(Buffer/ReadableStream) と認識されないと、デフォルトの JSON serializer に
+渡り `ArrayBuffer` はプレーンオブジェクトとして `JSON.stringify` され
+`{}` になる (TypedArray/ArrayBuffer の既知の挙動)。**Nitro route から
+バイナリ応答を返す時は必ず `Buffer.from(arrayBuffer)` でラップすること** —
+`Content-Type` ヘッダを正しく設定していても、body 自体が JSON
+シリアライズされる問題は防げない。同種のパターンを他の Nitro route
+(`y-time-export.post.ts` 等) に書く時も要注意。
+
 ## テスト
 
 - ユニット: `npm test` (Vitest、happy-dom)
