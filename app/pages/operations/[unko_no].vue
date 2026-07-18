@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { getOperation, getOperationCsv, deleteOperation } from '~/utils/api'
+import { getOperation, getOperationCsv, deleteOperation, getDrivers, getVehicles } from '~/utils/api'
 import type { Operation, CsvJsonResponse, CsvType } from '~/types'
 
 const route = useRoute()
@@ -55,8 +55,29 @@ async function loadCsv(csvType: CsvType) {
   }
 }
 
+/** NET780 検索 (/net780) の車輌CD/乗務員CD 事前入力用。Operation は
+ * vehicle_id/driver_id (rust-alc-api の内部ID) しか持たず、CD 自体は
+ * Driver/Vehicle の一覧から id で引く必要がある (Refs #299)。NET780 タブを
+ * 開いた時だけ遅延取得する (他タブしか見ないユーザーには不要な取得)。 */
+const net780VehicleCd = ref<string | null>(null)
+const net780DriverCd = ref<string | null>(null)
+let net780CdsRequested = false
+
+async function loadNet780Cds() {
+  if (net780CdsRequested || !primary.value) return
+  net780CdsRequested = true
+  try {
+    const [drivers, vehicles] = await Promise.all([getDrivers(), getVehicles()])
+    net780DriverCd.value = drivers.find(d => d.id === primary.value?.driver_id)?.driver_cd ?? null
+    net780VehicleCd.value = vehicles.find(v => v.id === primary.value?.vehicle_id)?.vehicle_cd ?? null
+  } catch (e) {
+    console.error('Failed to load driver/vehicle cd for NET780 tab:', e)
+  }
+}
+
 watch(activeTab, (tab) => {
-  if (tab !== 'net780') loadCsv(tab)
+  if (tab === 'net780') loadNet780Cds()
+  else loadCsv(tab)
 })
 
 const primary = computed(() => operations.value[0])
@@ -162,6 +183,8 @@ function formatDatetime(val: string | null): string {
           v-if="activeTab === 'net780'"
           :operation-no="unkoNo"
           :operation-date="primary.operation_date ?? primary.reading_date"
+          :vehicle-cd="net780VehicleCd"
+          :driver-cd="net780DriverCd"
         />
         <EventDataTable
           v-else-if="activeTab === 'events'"
