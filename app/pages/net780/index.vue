@@ -45,8 +45,15 @@ const downloadError = ref('')
 /** 現在「解析して表示」中の運行No (二重クリック防止 + ボタンのローディング表示用)。 */
 const viewingOperationNo = ref<string | null>(null)
 
+const route = useRoute()
+
 onMounted(() => {
   restoreNet780Session()
+  // /net780/history からの遷移で ?operationNo= が付いていれば、検索なしで
+  // 該当運行を直接表示する (Refs #299)。
+  const q = route.query.operationNo
+  const initialOperationNo = typeof q === 'string' ? q : Array.isArray(q) ? (q[0] ?? '') : ''
+  if (initialOperationNo) viewByOperationNo(initialOperationNo)
 })
 
 watch(net780Session, (s) => {
@@ -277,6 +284,43 @@ async function viewNet780Row(row: Net780Row) {
   }
 }
 
+/** `/net780/history` からの `?operationNo=` 遷移用。検索結果行を経由せず、
+ * 既に R2 にアーカイブ済みの運行を operationNo だけで直接表示する。未
+ * アーカイブ (404) の場合は theearth への再ダウンロードができない
+ * (startDateTime が無い) ため、検索からのやり直しを促すエラーにする
+ * (Refs #299)。 */
+async function viewByOperationNo(operationNo: string) {
+  if (viewingOperationNo.value || !net780Session.value) return
+  error.value = null
+  result.value = null
+  fileName.value = operationNo
+  viewingOperationNo.value = operationNo
+  isParsing.value = true
+  try {
+    const blob = await $fetch<Blob>('/net780-api/r2-view', {
+      headers: net780AuthHeaders(),
+      query: { operationNo },
+      responseType: 'blob',
+    })
+    const bulkBytes = new Uint8Array(await blob.arrayBuffer())
+    const singleBytes = await extractSingleOperationZip(bulkBytes)
+    result.value = await parseNet780Zip(singleBytes)
+  }
+  catch (e) {
+    if (net780ErrorStatus(e) === 401) {
+      expireNet780Session(net780ErrorMessage(e))
+      return
+    }
+    error.value = net780ErrorStatus(e) === 404
+      ? 'この運行はまだアーカイブされていません。上の検索からダウンロードし直してください。'
+      : (e instanceof Error ? e.message : '取得・パースに失敗しました')
+  }
+  finally {
+    viewingOperationNo.value = null
+    isParsing.value = false
+  }
+}
+
 // --- 表示用 computed ---
 
 const summary = computed(() => {
@@ -396,6 +440,12 @@ function eventLabel(e: Net780ParseResult['events'][number]): string {
     <TheearthSessionHeader title="NET780 一括ダウンロード (web地球号)" api-prefix="/net780-api" wide />
 
     <div class="max-w-4xl mx-auto p-6 space-y-6">
+      <div class="flex justify-end">
+        <NuxtLink to="/net780/history" class="text-sm text-blue-600 dark:text-blue-400 hover:underline">
+          過去にダウンロード済みの運行を検索 →
+        </NuxtLink>
+      </div>
+
       <!-- theearth 検索・一括ダウンロード -->
       <UCard>
         <template #header>

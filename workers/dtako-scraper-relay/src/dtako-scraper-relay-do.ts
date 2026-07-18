@@ -2398,6 +2398,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/net780-api/r2-view" && request.method === "GET") {
       return this.handleNet780R2View(record.compId, url);
     }
+    if (url.pathname === "/net780-api/history" && request.method === "GET") {
+      return this.handleNet780History(record.compId, url);
+    }
     return dvrJsonError(404, "不明なエンドポイントです");
   }
 
@@ -2550,7 +2553,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           }),
           { httpMetadata: { contentType: "application/json" } },
         );
-        this.ctx.waitUntil(this.upsertNet780Catalog(target, zipKey, fetchedAt));
+        this.ctx.waitUntil(this.upsertNet780Catalog(compId, target, zipKey, fetchedAt));
       }
       console.log(
         JSON.stringify({ net780_r2: "done", zipKey, operations: targets.length, dedup: !!existing }),
@@ -2563,10 +2566,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   /** D1 検索カタログ (`dtako_uploads`、Refs #299) に NET780 の1行を upsert する。
    * 車番 (vehicle_cd) は theearth F-VOS3020 の検索結果グリッドに含まれない
    * (`lblVehicleName` のみ、車輌CD自体は無い) ため NULL のまま — 検索は
-   * vehicle_name の部分一致 + driver_cd1 の完全一致で行う想定。D1 はあくまで
-   * 再構築可能なインデックスなので、binding 未設定や書き込み失敗はログのみで
-   * 応答・R2保存には影響させない (best-effort、waitUntil 前提)。 */
+   * vehicle_name の部分一致 + driver_cd1 の完全一致で行う想定。comp_id
+   * (theearth 会社ID) で書き込み、検索側も必ずこれで絞り込んでテナント間の
+   * 混在を防ぐ。D1 はあくまで再構築可能なインデックスなので、binding 未設定や
+   * 書き込み失敗はログのみで応答・R2保存には影響させない (best-effort、
+   * waitUntil 前提)。 */
   private async upsertNet780Catalog(
+    compId: string,
     target: Net780DownloadTarget,
     zipKey: string,
     fetchedAt: string,
@@ -2577,9 +2583,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       await db
         .prepare(
           `INSERT INTO dtako_uploads
-             (dataset, schema_version, vehicle_name, driver_cd1, driver_name1, operation_no, start_datetime, r2_key, uploaded_at)
-           VALUES ('net780', '1', ?, ?, ?, ?, ?, ?, ?)
+             (dataset, schema_version, comp_id, vehicle_name, driver_cd1, driver_name1, operation_no, start_datetime, r2_key, uploaded_at)
+           VALUES ('net780', '1', ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(dataset, operation_no) WHERE operation_no IS NOT NULL DO UPDATE SET
+             comp_id = excluded.comp_id,
              vehicle_name = excluded.vehicle_name,
              driver_cd1 = excluded.driver_cd1,
              driver_name1 = excluded.driver_name1,
@@ -2588,6 +2595,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
              uploaded_at = excluded.uploaded_at`,
         )
         .bind(
+          compId,
           target.vehicleName ?? null,
           target.driverCd1 ?? null,
           target.driverName1 ?? null,
@@ -2599,6 +2607,49 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         .run();
     } catch (err) {
       console.error(JSON.stringify({ net780_d1: "error", error: describeUnknownError(err) }));
+    }
+  }
+
+  /** GET /net780-api/history?vehicleName=&driverCd1= — D1 検索カタログ
+   * (`dtako_uploads`、Refs #299) から過去にダウンロード済みの運行を検索する。
+   * vehicleName は部分一致、driverCd1 は完全一致。両方省略時は直近200件を返す。
+   * comp_id (theearth 会社ID) で必ず絞り込み、他社データが混在しないようにする。
+   * D1 未 binding は 503 (検索機能そのものが使えないので、R2/theearth 側の
+   * 動作には影響しない)。 */
+  private async handleNet780History(compId: string, url: URL): Promise<Response> {
+    const db = this.env.DTAKO_DB;
+    if (!db) {
+      return dvrJsonError(503, "検索カタログ (DTAKO_DB) が未設定です");
+    }
+    const vehicleName = url.searchParams.get("vehicleName")?.trim() || null;
+    const driverCd1 = url.searchParams.get("driverCd1")?.trim() || null;
+
+    const conditions = ["dataset = 'net780'", "comp_id = ?"];
+    const params: unknown[] = [compId];
+    if (vehicleName) {
+      conditions.push("vehicle_name LIKE ? ESCAPE '\\'");
+      params.push(`%${vehicleName.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+    }
+    if (driverCd1) {
+      conditions.push("driver_cd1 = ?");
+      params.push(driverCd1);
+    }
+
+    try {
+      const result = await db
+        .prepare(
+          `SELECT operation_no, vehicle_name, driver_cd1, driver_name1, start_datetime, r2_key, uploaded_at
+           FROM dtako_uploads
+           WHERE ${conditions.join(" AND ")}
+           ORDER BY uploaded_at DESC
+           LIMIT 200`,
+        )
+        .bind(...params)
+        .all();
+      return Response.json({ rows: result.results ?? [] });
+    } catch (err) {
+      console.error(JSON.stringify({ net780_history: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "検索カタログの取得に失敗しました");
     }
   }
 
