@@ -2522,7 +2522,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * する。ZIP 本体は内容の SHA-256 で dedup 保存し、operationNo からその ZIP を
    * 指すポインタ index を (常に上書きで) 書く — NET780 生データは過去の運行
    * 記録で内容が変わらないため、restraint 系のような版管理は不要。
-   * waitUntil 前提の best-effort — 保存失敗でユーザーへの応答は落とさない。 */
+   * waitUntil 前提の best-effort — 保存失敗でユーザーへの応答は落とさない。
+   *
+   * **既知の罠 (実害確認済み、2026-07-19)**: `upsertNet780Catalog` (D1 書き込み)
+   * は以前この関数内部でさらに `this.ctx.waitUntil(...)` を呼ぶ二重ネスト構造
+   * だった。この関数自体が既に呼び出し元 (`handleNet780Download`) の
+   * `this.ctx.waitUntil(this.saveNet780ToR2(...))` で実行される非同期処理なので、
+   * 内部でさらに `waitUntil` に登録すると、この関数の Promise が resolve した
+   * 時点でまだ内側の D1 書き込みが完了していない可能性があり、その場合 DO
+   * インスタンスが処理を打ち切ってしまう。実機で確認したところ R2 書き込み
+   * (`await` で直列化済み) は毎回成功するのに D1 書き込みだけが消えるという
+   * 症状が実際に発生した (`dtako_uploads` に対象 operation_no の行が一切
+   * 作られない)。`await` で直列化し、この関数自体の完了を D1 書き込み完了まで
+   * 待つようにして解消した。 */
   private async saveNet780ToR2(
     compId: string,
     targets: Net780DownloadTarget[],
@@ -2554,7 +2566,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           }),
           { httpMetadata: { contentType: "application/json" } },
         );
-        this.ctx.waitUntil(this.upsertNet780Catalog(compId, target, zipKey, fetchedAt, targets.length));
+        await this.upsertNet780Catalog(compId, target, zipKey, fetchedAt, targets.length);
       }
       console.log(
         JSON.stringify({ net780_r2: "done", zipKey, operations: targets.length, dedup: !!existing }),
@@ -2574,7 +2586,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 拒否する — r2-view (この DO) 側の同種ガードと揃える (実害: 2026-07-18、
    * 複数運行 archive の zip を由来不明のまま返し parse エラーになった)。
    * D1 はあくまで再構築可能なインデックスなので、binding 未設定や書き込み
-   * 失敗はログのみで応答・R2保存には影響させない (best-effort、waitUntil 前提)。 */
+   * 失敗は内部で catch してログのみに留め、呼び出し元 (`saveNet780ToR2`) には
+   * 例外を伝播させない (best-effort)。呼び出し元はこの完了を `await` する
+   * (二重 `waitUntil` ネストで完了が保証されない不具合があったため、Refs
+   * `saveNet780ToR2` のコメント)。 */
   private async upsertNet780Catalog(
     compId: string,
     target: Net780DownloadTarget,
