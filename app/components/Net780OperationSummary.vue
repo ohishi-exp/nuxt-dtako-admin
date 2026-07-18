@@ -10,7 +10,15 @@
 import { extractSingleOperationZip, parseNet780Zip, buildNet780Summary } from '~/utils/net780'
 import type { Net780Summary } from '~/utils/net780'
 
-const props = defineProps<{ operationNo: string }>()
+const props = defineProps<{ operationNo: string; operationDate?: string | null }>()
+
+/** 未アーカイブ時に /net780 へ渡す検索の初期値。運行日 (operation_date) を
+ * 使う — この運行のものなので、/net780 自体の検索基準 (読取日) とは別に、
+ * ここでは「この運行が行われた日」を渡すのが実用上妥当 (Refs #299)。 */
+const net780SearchLink = computed(() => {
+  const q = props.operationDate ? `?operationDate=${encodeURIComponent(props.operationDate)}` : ''
+  return `/net780${q}`
+})
 
 const loading = ref(false)
 const notFound = ref(false)
@@ -59,7 +67,7 @@ watch(() => props.operationNo, (v) => { if (v) load(v) }, { immediate: true })
 
     <div v-else-if="notFound" class="text-sm text-gray-500 space-y-2">
       <p>この運行の NET780 生データはまだダウンロード・アーカイブされていません。</p>
-      <NuxtLink to="/net780" class="text-blue-600 dark:text-blue-400 hover:underline">
+      <NuxtLink :to="net780SearchLink" class="text-blue-600 dark:text-blue-400 hover:underline">
         NET780 一括ダウンロードで検索する →
       </NuxtLink>
     </div>

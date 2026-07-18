@@ -48,13 +48,22 @@ const viewingOperationNo = ref<string | null>(null)
 
 const route = useRoute()
 
+function queryString(value: string | string[] | undefined): string {
+  return typeof value === 'string' ? value : Array.isArray(value) ? (value[0] ?? '') : ''
+}
+
 onMounted(() => {
   restoreNet780Session()
   // /net780/history からの遷移で ?operationNo= が付いていれば、検索なしで
   // 該当運行を直接表示する (Refs #299)。
-  const q = route.query.operationNo
-  const initialOperationNo = typeof q === 'string' ? q : Array.isArray(q) ? (q[0] ?? '') : ''
+  const initialOperationNo = queryString(route.query.operationNo)
   if (initialOperationNo) viewByOperationNo(initialOperationNo)
+  // /operations/{unko_no} の NET780 タブ (未アーカイブ時) からの遷移で
+  // ?operationDate= が付いていれば、読取日(から)の初期値にする。運行日と
+  // 読取日は一致するとは限らないが、この画面自体の検索基準 (読取日) とは
+  // 別に「この運行が行われた日」を起点にするのが実用上妥当 (Refs #299)。
+  const initialOperationDate = queryString(route.query.operationDate)
+  if (initialOperationDate) searchOperationDateFrom.value = initialOperationDate
 })
 
 watch(net780Session, (s) => {
@@ -473,10 +482,10 @@ function eventLabel(e: Net780ParseResult['events'][number]): string {
           <span class="font-semibold">theearth から検索して一括ダウンロード</span>
         </template>
         <div class="flex flex-wrap items-end gap-4">
-          <UFormField label="運行日 (から)">
+          <UFormField label="読取日 (から)">
             <UInput v-model="searchOperationDateFrom" type="date" />
           </UFormField>
-          <UFormField label="運行日 (まで)">
+          <UFormField label="読取日 (まで)">
             <UInput v-model="searchOperationDateTo" type="date" />
           </UFormField>
           <UFormField label="乗務員CD (から)">
@@ -500,7 +509,7 @@ function eventLabel(e: Net780ParseResult['events'][number]): string {
           />
         </div>
         <p class="text-xs text-gray-500 mt-2">
-          運行日・乗務員CD・車輌CD のいずれか1つ以上を指定してください (無条件の全件検索はできません)。
+          読取日・乗務員CD・車輌CD のいずれか1つ以上を指定してください (無条件の全件検索はできません)。
         </p>
         <p v-if="searchError" class="text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3 mt-3">
           {{ searchError }}

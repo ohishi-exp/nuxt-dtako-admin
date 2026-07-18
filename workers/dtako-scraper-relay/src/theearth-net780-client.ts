@@ -55,7 +55,9 @@ export class Net780ParamError extends TheearthClientError {
 }
 
 export interface Net780SearchParams {
-  /** 運行日 range ("YYYY-MM-DD"。from のみ指定可、to のみは不可)。 */
+  /** 読取日 range ("YYYY-MM-DD"。from のみ指定可、to のみは不可)。F-GOS0030 の
+   * 日付種別 select (`ddlSortDay1`) を "ReadNo"(読取日) に固定して絞り込む
+   * (運行日ではない、Refs #299 — buildConfigOverrides 参照)。 */
   operationDateFrom?: string;
   operationDateTo?: string;
   /** 乗務員CD range (from のみ指定可、to のみは不可)。 */
@@ -106,7 +108,7 @@ export function validateNet780SearchParams(params: Net780SearchParams): void {
   const hasAny = !!params.operationDateFrom || !!params.driverCdFrom || !!params.vehicleCdFrom;
   if (!hasAny) {
     throw new Net780ParamError(
-      "運行日・乗務員CD・車輌CD のいずれか1つ以上を指定してください (無条件の全件検索はできません)",
+      "読取日・乗務員CD・車輌CD のいずれか1つ以上を指定してください (無条件の全件検索はできません)",
     );
   }
 }
@@ -187,6 +189,7 @@ const CONFIG_FIELD_IDS = [
   "txtEDriver",
   "txtSVehicle",
   "txtEVehicle",
+  "ddlSortDay1",
   "ucStartDate1_txtYear",
   "ucStartDate1_txtMonth",
   "ucStartDate1_txtDay",
@@ -217,6 +220,12 @@ function dateFieldValues(iso: string | undefined): { y: string; m: string; d: st
   return splitJapaneseDate(iso, false);
 }
 
+/** F-GOS0030 の日付種別 select (`ddlSortDay1`) の値。実機確定オプション:
+ * `OperationDate`(運行日) / `ReadNo`(読取日) / `OperationStartDateTime`(出庫日) /
+ * `OperationEndDateTime`(帰庫日) (theearth-venus skill 参照)。NET780 の検索は
+ * 読取日 (=退社日時、データが確定した日) 基準で絞り込む方針 (Refs #299)。 */
+const DATE_FILTER_TYPE_READ_NO = "ReadNo";
+
 function buildConfigOverrides(
   refs: Record<ConfigFieldId, FormFieldRef>,
   params: Net780SearchParams,
@@ -228,6 +237,7 @@ function buildConfigOverrides(
     [refs.txtEDriver.name]: params.driverCdTo ?? "",
     [refs.txtSVehicle.name]: params.vehicleCdFrom ?? "",
     [refs.txtEVehicle.name]: params.vehicleCdTo ?? "",
+    [refs.ddlSortDay1.name]: DATE_FILTER_TYPE_READ_NO,
     [refs.ucStartDate1_txtYear.name]: from.y,
     [refs.ucStartDate1_txtMonth.name]: from.m,
     [refs.ucStartDate1_txtDay.name]: from.d,

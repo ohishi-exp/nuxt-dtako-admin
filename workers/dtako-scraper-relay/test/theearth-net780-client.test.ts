@@ -129,6 +129,12 @@ function configHtml(overrides: Partial<Record<string, string>> = {}): string {
   <input type="text" name="ctl00$txtEDriver" id="txtEDriver" value="${v('txtEDriver', '')}" />
   <input type="text" name="ctl00$txtSVehicle" id="txtSVehicle" value="${v('txtSVehicle', '')}" />
   <input type="text" name="ctl00$txtEVehicle" id="txtEVehicle" value="${v('txtEVehicle', '')}" />
+  <select name="ctl00$ddlSortDay1" id="ddlSortDay1">
+    <option value="OperationDate"${v('ddlSortDay1', '') === '' ? ' selected' : ''}>運行日</option>
+    <option value="ReadNo"${v('ddlSortDay1', '') === 'ReadNo' ? ' selected' : ''}>読取日</option>
+    <option value="OperationStartDateTime">出庫日</option>
+    <option value="OperationEndDateTime">帰庫日</option>
+  </select>
   <input type="text" name="ctl00$ucStartDate1$txtYear" id="ucStartDate1_txtYear" value="${v('ucStartDate1_txtYear', '')}" />
   <input type="text" name="ctl00$ucStartDate1$txtMonth" id="ucStartDate1_txtMonth" value="${v('ucStartDate1_txtMonth', '')}" />
   <input type="text" name="ctl00$ucStartDate1$txtDay" id="ucStartDate1_txtDay" value="${v('ucStartDate1_txtDay', '')}" />
@@ -315,6 +321,32 @@ describe('searchNet780', () => {
     expect(applyBody).toContain('ucStartDate1$txtMonth=07')
     expect(applyBody).toContain('ucStartDate1$txtDay=01')
     expect(applyBody).toContain('ucEndDate1$txtDay=18')
+  })
+
+  it('日付種別 select (ddlSortDay1) を読取日 (ReadNo) に固定して送る (運行日ではなく読取日で絞り込む、Refs #299)', async () => {
+    const captured = { body: [] as string[] }
+    const fetchImpl = capturingFetch(
+      [
+        html(LIST_HTML_EMPTY),
+        html(CONFIG_HTML), // GET config (既定は OperationDate=運行日)
+        html(CONFIG_HTML), // POST config apply
+        html(LIST_HTML_EMPTY),
+        html(LIST_HTML_EMPTY),
+        html(CONFIG_HTML), // GET config (restore)
+        html(CONFIG_HTML), // POST config apply (restore)
+      ],
+      captured,
+    )
+    await searchNet780(
+      { cookies: new Map() },
+      { operationDateFrom: '2026-07-01' },
+      fetchImpl,
+    )
+    const applyBody = decodeURIComponent(captured.body[0])
+    expect(applyBody).toContain('ddlSortDay1=ReadNo')
+    // 復元 (最後の呼び出し) は元の選択 (OperationDate=運行日) に戻す。
+    const restoreBody = decodeURIComponent(captured.body[captured.body.length - 1])
+    expect(restoreBody).toContain('ddlSortDay1=OperationDate')
   })
 
   it('一覧ページに btnUpdate が無ければ TheearthClientError (絞込を触る前に loud fail)', async () => {
