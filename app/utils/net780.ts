@@ -417,30 +417,55 @@ const MIN_JUMP_DIST_KM = 0.3
  * 無関係な位置 (海上・市街地外等) を記録することがあるが、イベントコードとの
  * 時間窓ベースの相関は運行ごとに一致しないケースが多く実効性が低かった
  * (実データ検証: 0x11/0x21 前後 120 秒を除外しても 14 件中 12 件のジャンプが残存)。
- * 座標そのものの物理的整合性を見るこの方式なら原因コードによらず直接検出できる
- * (実データ検証: 07-03/07-04・07-17/07-18 の両運行で検出ジャンプが 17 件/14 件から
- * 0 件になった)。
+ * 座標そのものの物理的整合性を見るこの方式なら原因コードによらず直接検出できる。
  *
- * 直前の「生の」点ではなく「採用済み」点と比較することで、異常座標が複数点
- * 連続するケース (ワープ先でしばらく記録され続ける) でも、ワープ先の点同士は
- * 採用されず、実座標に復帰した時点で正しく採用が再開される。
+ * 直前の「採用済み」点だけを基準にする単純な貪欲法には抜け穴があった: 異常座標が
+ * 同じ場所に長時間 (数十分) 留まり続けるケースでは、経過時間が伸びるにつれ
+ * 同じ距離でも計算上の速度が下がっていき、いずれ `MAX_PLAUSIBLE_SPEED_KMH` を
+ * 下回って誤って採用されてしまう (実データ検証で発覚、採用された瞬間にその点が
+ * 新しい基準点になり、以降の異常クラスタも道連れで誤採用され続けた)。これを防ぐ
+ * ため、直前の「生の」点との距離もあわせて追跡するヒステリシス方式にした:
+ * 直前の生の点が異常判定されていて、かつ現在の点がその生の点から
+ * `MIN_JUMP_DIST_KM` 未満しか離れていない (= 同じ異常クラスタに留まっている) 場合は、
+ * 基準点との計算上の速度に関わらず異常判定を継続する。クラスタから実際に離れる
+ * (生の点間の距離が動く) までは採用を再開しない。
+ * 実データ検証: 07-03/07-04・07-17/07-18 の両運行で異常座標が完全に (0 件まで) 除去された。
  */
 export function filterImplausibleGpsJumps(points: Net780GpsPoint[]): Net780GpsPoint[] {
   if (points.length === 0) return []
   const kept: Net780GpsPoint[] = [points[0]!]
-  let last = points[0]!
+  let anchor = points[0]!
+  let prevRaw = points[0]!
+  let prevRawAnomalous = false
   for (let i = 1; i < points.length; i++) {
     const p = points[i]!
-    const dtSec = p.ts - last.ts
-    if (dtSec <= 0) {
-      kept.push(p)
+
+    const distFromPrevRawKm = haversineDistanceKm(prevRaw.lat, prevRaw.lon, p.lat, p.lon)
+    if (prevRawAnomalous && distFromPrevRawKm < MIN_JUMP_DIST_KM) {
+      // 直前の異常クラスタに留まったまま: 経過時間で速度が下がって見えても採用しない
+      prevRaw = p
       continue
     }
-    const distKm = haversineDistanceKm(last.lat, last.lon, p.lat, p.lon)
-    const speedKmh = distKm / (dtSec / 3600)
-    if (speedKmh > MAX_PLAUSIBLE_SPEED_KMH && distKm > MIN_JUMP_DIST_KM) continue
+
+    const dtSec = p.ts - anchor.ts
+    if (dtSec <= 0) {
+      kept.push(p)
+      anchor = p
+      prevRaw = p
+      prevRawAnomalous = false
+      continue
+    }
+    const distFromAnchorKm = haversineDistanceKm(anchor.lat, anchor.lon, p.lat, p.lon)
+    const speedKmh = distFromAnchorKm / (dtSec / 3600)
+    if (speedKmh > MAX_PLAUSIBLE_SPEED_KMH && distFromAnchorKm > MIN_JUMP_DIST_KM) {
+      prevRaw = p
+      prevRawAnomalous = true
+      continue
+    }
     kept.push(p)
-    last = p
+    anchor = p
+    prevRaw = p
+    prevRawAnomalous = false
   }
   return kept
 }
