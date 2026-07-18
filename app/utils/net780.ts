@@ -3,6 +3,8 @@
 // ブラウザ内完結パースするための薄いラッパー。フォーマット仕様・パースロジックは
 // dtako-scraper の crates/net780 (Rust) 側が SoT。
 
+import JSZip from 'jszip'
+
 export interface Net780HeaderSummary {
   device_id: string
   vehicle_code: number
@@ -69,6 +71,36 @@ function loadModule() {
 export async function parseNet780Zip(bytes: Uint8Array): Promise<Net780ParseResult> {
   const mod = await loadModule()
   return mod.parse_net780_zip(bytes) as Net780ParseResult
+}
+
+/**
+ * theearth F-VOS3020 の一括ダウンロード ZIP (`{車輌CD}/{タイムスタンプ}-0-0-
+ * {車輌CD}/*.{cfg,dsd,evd,gpd,inf,rvd,spd,fin}` の1階層ネスト構造、複数運行を
+ * 含みうる) から、単一運行分のサブフォルダだけを取り出し、`parseNet780Zip` が
+ * 読める形 (`.inf/.spd/.dsd/.gpd/.evd` がトップレベル直下) の ZIP に組み直す。
+ *
+ * 複数運行が含まれる ZIP を渡した場合は先頭の1件のみを対象にする (呼び出し側は
+ * 単一運行を選んだ時だけこの関数を呼ぶ想定)。
+ */
+export async function extractSingleOperationZip(bulkZipBytes: Uint8Array): Promise<Uint8Array> {
+  const bulkZip = await JSZip.loadAsync(bulkZipBytes)
+  const files = Object.values(bulkZip.files).filter(f => !f.dir)
+  if (files.length === 0) {
+    throw new Error('ZIP 内にファイルが見つかりません')
+  }
+  const firstPath = files[0]!.name
+  const lastSlash = firstPath.lastIndexOf('/')
+  const prefix = lastSlash >= 0 ? firstPath.slice(0, lastSlash + 1) : ''
+
+  const out = new JSZip()
+  for (const file of files) {
+    if (prefix && !file.name.startsWith(prefix)) continue
+    const basename = file.name.slice(prefix.length)
+    if (!basename) continue
+    const content = await file.async('uint8array')
+    out.file(basename, content)
+  }
+  return out.generateAsync({ type: 'uint8array' })
 }
 
 /** イベントコードを `0xXX` 形式の16進表示にする。 */
