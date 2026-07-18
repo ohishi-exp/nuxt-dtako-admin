@@ -218,10 +218,31 @@ async function handleFile(file: File) {
   }
 }
 
-/** 検索結果の1行を theearth からダウンロードし、再アップロードなしでそのまま
- * 下のビューアに解析結果を表示する。一括ダウンロード zip は複数運行を含みうる
- * 1階層ネスト構造 (theearth-venus skill 参照) なので `extractSingleOperationZip`
- * で対象運行だけを取り出してから既存の `parseNet780Zip` に渡す。 */
+/** R2 に既にアーカイブ済みなら theearth に再アクセスせずそこから取得する
+ * (`/net780-api/r2-view`)。未アーカイブ (404) なら通常の theearth
+ * ダウンロードにフォールバックする (Refs #302 続き)。 */
+async function fetchNet780Blob(row: Net780Row): Promise<Blob> {
+  try {
+    return await $fetch<Blob>('/net780-api/r2-view', {
+      headers: net780AuthHeaders(),
+      query: { operationNo: row.operationNo },
+      responseType: 'blob',
+    })
+  }
+  catch (e) {
+    if (net780ErrorStatus(e) !== 404) throw e
+  }
+  return await $fetch<Blob>('/net780-api/download', {
+    method: 'POST',
+    headers: net780AuthHeaders(),
+    body: { targets: [{ operationNo: row.operationNo, startDateTime: row.startDateTime }] },
+    responseType: 'blob',
+  })
+}
+
+/** 検索結果の1行を取得し、再アップロードなしでそのまま下のビューアに解析結果を
+ * 表示する。過去にダウンロード済みの運行は R2 アーカイブからそのまま表示する
+ * (theearth 側の負荷・503 再現性を避けられる)。 */
 async function viewNet780Row(row: Net780Row) {
   if (viewingOperationNo.value || !net780Session.value) return
   error.value = null
@@ -230,12 +251,7 @@ async function viewNet780Row(row: Net780Row) {
   viewingOperationNo.value = row.operationNo
   isParsing.value = true
   try {
-    const blob = await $fetch<Blob>('/net780-api/download', {
-      method: 'POST',
-      headers: net780AuthHeaders(),
-      body: { targets: [{ operationNo: row.operationNo, startDateTime: row.startDateTime }] },
-      responseType: 'blob',
-    })
+    const blob = await fetchNet780Blob(row)
     const bulkBytes = new Uint8Array(await blob.arrayBuffer())
     const singleBytes = await extractSingleOperationZip(bulkBytes)
     result.value = await parseNet780Zip(singleBytes)

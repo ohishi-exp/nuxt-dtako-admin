@@ -487,3 +487,56 @@ export async function downloadNet780Zip(
 
   return ensureZip(buf, contentType);
 }
+
+// ---------------------------------------------------------------------------
+// R2 アーカイブの key 設計 (pure — R2 I/O は DO 側、Refs #302 続き)
+// ---------------------------------------------------------------------------
+
+/**
+ * NET780 生データ ZIP の R2 アーカイブ key 群。
+ *
+ * 一括ダウンロード ZIP (1 postback で複数 operationNo を含みうる) は
+ * **内容の SHA-256 でそのまま dedup 保存** (`zipObject`) し、運行単位の
+ * 「どの ZIP に入っているか」だけを `indexObject` (operationNo ごとの小さな
+ * ポインタ JSON) に持たせる。NET780 生データは取得後に内容が変わることが
+ * ない (過去の運行記録) ため、restraint 系のような版管理・retention は不要
+ * — index は常に上書きで良い (再取得しても同じ zipKey を指すだけ)。
+ */
+export interface Net780R2Paths {
+  /** 一括ダウンロード ZIP 本体 (内容ハッシュで dedup)。 */
+  zipObject(sha256: string): string;
+  /** operationNo → zipObject の場所を指すポインタ JSON。 */
+  indexObject(operationNo: string): string;
+}
+
+export function net780R2Paths(prefix: string, compId: string): Net780R2Paths {
+  const base = `${prefix}/${compId}`;
+  return {
+    zipObject: (sha256) => `${base}/zips/${sha256}.zip`,
+    indexObject: (operationNo) => `${base}/by-operation/${operationNo}.json`,
+  };
+}
+
+/**
+ * `indexObject` の body (決定論 JSON)。
+ *
+ * `operationCount` はその zipKey に含まれる運行数 (=保存時の targets.length)。
+ * 一括ダウンロード ZIP は `{車輌CD}/{タイムスタンプ}-0-0-{車輌CD}/` という
+ * フォルダで運行ごとに分かれているが、フォルダ名は運行No (operationNo) では
+ * なく車輌CD+タイムスタンプ由来 (theearth-venus skill 参照、対応関係未検証)
+ * のため、**2件以上の運行を含む ZIP からは「どのフォルダが要求された
+ * operationNo か」を安全に特定できない**。単一運行ダウンロード
+ * (`operationCount === 1`) の archive だけを R2 view 経由の再利用対象にする —
+ * さもないと `extractSingleOperationZip` の「先頭フォルダのみ」抽出が別運行の
+ * データを黙って返しかねない (呼び出し側は operationCount > 1 を拒否すること)。
+ */
+export interface Net780R2Index {
+  zipKey: string;
+  startDateTime: string;
+  fetchedAt: string;
+  operationCount: number;
+}
+
+export function net780R2IndexBody(index: Net780R2Index): string {
+  return JSON.stringify(index);
+}
