@@ -103,6 +103,34 @@ export async function extractSingleOperationZip(bulkZipBytes: Uint8Array): Promi
   return out.generateAsync({ type: 'uint8array' })
 }
 
+export interface Net780Summary {
+  vehicleCode: number | null
+  driverCode: number | null
+  startAt: string | null
+  endAt: string | null
+  distanceKm: number | null
+  distanceTotalM: number | null
+  storagePath: string | null
+  deviceId: string | null
+}
+
+/** パース結果からサマリ情報を組み立てる (`/net780` ビューアと `/operations/*`
+ * の NET780 タブで共用、Refs #299)。header/inf のどちらか埋まっている方を使う。 */
+export function buildNet780Summary(result: Net780ParseResult): Net780Summary {
+  const inf = result.inf
+  const header = result.header
+  return {
+    vehicleCode: inf?.vehicle_code ?? header?.vehicle_code ?? null,
+    driverCode: inf?.driver_code ?? header?.driver_code ?? null,
+    startAt: inf?.start_at ?? header?.start_at ?? null,
+    endAt: inf?.end_at ?? header?.end_at ?? null,
+    distanceKm: inf?.distance_km ?? header?.distance_km ?? null,
+    distanceTotalM: result.distance_total_m,
+    storagePath: inf?.storage_path ?? null,
+    deviceId: header?.device_id ?? null,
+  }
+}
+
 /** イベントコードを `0xXX` 形式の16進表示にする。 */
 export function net780EventCodeHex(code: number): string {
   return `0x${code.toString(16).toUpperCase().padStart(2, '0')}`

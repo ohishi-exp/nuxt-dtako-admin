@@ -4,6 +4,7 @@ import {
   extractSingleOperationZip,
   buildDailySpeedCharts,
   buildDailyGpsPoints,
+  buildNet780Summary,
   chartXRatioToTime,
   net780DateStartTs,
   net780EventCodeHex,
@@ -279,22 +280,7 @@ async function viewNet780Row(row: Net780Row) {
 
 // --- 表示用 computed ---
 
-const summary = computed(() => {
-  const r = result.value
-  if (!r) return null
-  const inf = r.inf
-  const header = r.header
-  return {
-    vehicleCode: inf?.vehicle_code ?? header?.vehicle_code ?? null,
-    driverCode: inf?.driver_code ?? header?.driver_code ?? null,
-    startAt: inf?.start_at ?? header?.start_at ?? null,
-    endAt: inf?.end_at ?? header?.end_at ?? null,
-    distanceKm: inf?.distance_km ?? header?.distance_km ?? null,
-    distanceTotalM: r.distance_total_m,
-    storagePath: inf?.storage_path ?? null,
-    deviceId: header?.device_id ?? null,
-  }
-})
+const summary = computed(() => (result.value ? buildNet780Summary(result.value) : null))
 
 // --- 速度チャート (簡易 SVG polyline、外部ライブラリ非依存) + GPS 軌跡 (Google Map) ---
 // 暦日ごとに「チャート (クリック/ドラッグでシーク可能)」と「地図 (シーク位置を
