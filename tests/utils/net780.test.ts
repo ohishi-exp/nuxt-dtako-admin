@@ -7,10 +7,11 @@ import {
   buildSpeedChartData,
   buildDailySpeedCharts,
   buildDailyGpsPoints,
+  extractCommOutageRanges,
   chartXRatioToTime,
   net780DateStartTs,
 } from '~/utils/net780'
-import type { Net780ParseResult, Net780SpeedPoint, Net780GpsPoint } from '~/utils/net780'
+import type { Net780ParseResult, Net780SpeedPoint, Net780GpsPoint, Net780EventSummary } from '~/utils/net780'
 import { __setMockResult, __setMockError, __reset } from '../mocks/net780-wasm'
 
 afterEach(() => {
@@ -221,6 +222,15 @@ describe('buildDailySpeedCharts', () => {
   })
 })
 
+const commEvent = (ts: number, code: number): Net780EventSummary => ({
+  ts,
+  code,
+  subcode: 0,
+  description: null,
+  payload_ascii: null,
+  payload_len: 0,
+})
+
 describe('buildDailyGpsPoints', () => {
   it('点が無ければ空配列を返す', () => {
     expect(buildDailyGpsPoints([])).toEqual([])
@@ -247,6 +257,64 @@ describe('buildDailyGpsPoints', () => {
     ]
     const daily = buildDailyGpsPoints(points)
     expect(daily.map(d => d.date)).toEqual(['2026-07-01', '2026-07-02'])
+  })
+
+  it('通信断 (0xB8) 〜 通信復帰 (0xB9) 区間内の GPS 点を除外する', () => {
+    const day1 = net780DateStartTs('2026-07-01') + 6 * 3600
+    const points: Net780GpsPoint[] = [
+      { ts: day1, lat: 43.0, lon: 143.0 }, // 通信断前 (正常)
+      { ts: day1 + 60, lat: 42.6, lon: 144.2 }, // 通信断中 (異常、除外対象)
+      { ts: day1 + 120, lat: 43.05, lon: 143.05 }, // 通信復帰後 (正常)
+    ]
+    const events = [commEvent(day1 + 30, 0xB8), commEvent(day1 + 90, 0xB9)]
+    const daily = buildDailyGpsPoints(points, events)
+    expect(daily[0]!.points).toHaveLength(2)
+    expect(daily[0]!.points.map(p => p.lat)).toEqual([43.0, 43.05])
+  })
+
+  it('対応する通信復帰が無い場合は記録終端まで通信断とみなし除外する', () => {
+    const day1 = net780DateStartTs('2026-07-01') + 6 * 3600
+    const points: Net780GpsPoint[] = [
+      { ts: day1, lat: 43.0, lon: 143.0 },
+      { ts: day1 + 3600, lat: 42.6, lon: 144.2 },
+    ]
+    const events = [commEvent(day1 + 30, 0xB8)]
+    const daily = buildDailyGpsPoints(points, events)
+    expect(daily[0]!.points).toHaveLength(1)
+    expect(daily[0]!.points[0]!.lat).toBe(43.0)
+  })
+
+  it('events を渡さない場合は従来通りフィルタしない', () => {
+    const day1 = net780DateStartTs('2026-07-01') + 6 * 3600
+    const points: Net780GpsPoint[] = [{ ts: day1, lat: 42.6, lon: 144.2 }]
+    const daily = buildDailyGpsPoints(points)
+    expect(daily[0]!.points).toHaveLength(1)
+  })
+})
+
+describe('extractCommOutageRanges', () => {
+  it('0xB8 → 0xB9 のペアを区間として抽出する', () => {
+    const events = [commEvent(100, 0xB8), commEvent(200, 0xB9)]
+    expect(extractCommOutageRanges(events)).toEqual([{ start: 100, end: 200 }])
+  })
+
+  it('未整列のイベント列でも時系列順に処理する', () => {
+    const events = [commEvent(200, 0xB9), commEvent(100, 0xB8)]
+    expect(extractCommOutageRanges(events)).toEqual([{ start: 100, end: 200 }])
+  })
+
+  it('対応する 0xB9 が無い 0xB8 は end=Infinity の区間にする', () => {
+    const events = [commEvent(100, 0xB8)]
+    expect(extractCommOutageRanges(events)).toEqual([{ start: 100, end: Infinity }])
+  })
+
+  it('通信断/復帰以外のイベントは無視する', () => {
+    const events = [commEvent(50, 0xA0), commEvent(100, 0xB8), commEvent(200, 0xB9)]
+    expect(extractCommOutageRanges(events)).toEqual([{ start: 100, end: 200 }])
+  })
+
+  it('イベントが無ければ空配列を返す', () => {
+    expect(extractCommOutageRanges([])).toEqual([])
   })
 })
 

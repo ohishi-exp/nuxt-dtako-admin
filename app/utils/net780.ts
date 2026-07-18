@@ -362,13 +362,50 @@ export interface DailyGpsPoints {
   points: Net780GpsPoint[]
 }
 
+/** イベントコード: 通信断 / 通信復帰 (net780-wasm の evd description と対応)。 */
+const EVENT_CODE_COMM_LOST = 0xB8
+const EVENT_CODE_COMM_RESTORED = 0xB9
+
+/**
+ * イベント列から「通信断 (0xB8) 〜 通信復帰 (0xB9)」の時間区間を抽出する。
+ * 通信断中は測位が収束せず、実座標と無関係な位置 (無線基地局や直前ロック位置
+ * 付近をふらつく等) を記録し続けることがあり、GPS 軌跡が海上・市街地外など
+ * ありえない場所へ直線的に飛んで見える原因になる。対応する通信復帰が無い
+ * (ZIP の記録範囲が通信断中で終わっている) 場合は `end` を `Infinity` にし、
+ * 記録終端まで通信断が continuing しているとみなす。
+ */
+export function extractCommOutageRanges(events: Net780EventSummary[]): Array<{ start: number, end: number }> {
+  const sorted = [...events].sort((a, b) => a.ts - b.ts)
+  const ranges: Array<{ start: number, end: number }> = []
+  let openTs: number | null = null
+  for (const e of sorted) {
+    if (e.code === EVENT_CODE_COMM_LOST) {
+      openTs = e.ts
+    } else if (e.code === EVENT_CODE_COMM_RESTORED && openTs !== null) {
+      ranges.push({ start: openTs, end: e.ts })
+      openTs = null
+    }
+  }
+  if (openTs !== null) ranges.push({ start: openTs, end: Infinity })
+  return ranges
+}
+
+function isWithinRanges(ts: number, ranges: Array<{ start: number, end: number }>): boolean {
+  return ranges.some(r => ts >= r.start && ts <= r.end)
+}
+
 /**
  * GPS 位置情報を JST 暦日ごとに分割する (buildDailySpeedCharts と同じ日付境界)。
  * GPS 未捕捉時の `(0,0)` プレースホルダー (lat/lon とも 0) は地図表示上ノイズに
  * なるだけなので除外する。
+ *
+ * `events` を渡すと、通信断 (0xB8) 〜 通信復帰 (0xB9) の区間内に記録された GPS 点も
+ * あわせて除外する (実データ検証: 異常座標としてトンネル区間の海上ピン等に飛んだ
+ * 79 点中 78 点が通信断区間内の記録だった)。
  */
-export function buildDailyGpsPoints(points: Net780GpsPoint[]): DailyGpsPoints[] {
-  const valid = points.filter(p => p.lat !== 0 || p.lon !== 0)
+export function buildDailyGpsPoints(points: Net780GpsPoint[], events: Net780EventSummary[] = []): DailyGpsPoints[] {
+  const outageRanges = extractCommOutageRanges(events)
+  const valid = points.filter(p => (p.lat !== 0 || p.lon !== 0) && !isWithinRanges(p.ts, outageRanges))
   if (valid.length === 0) return []
 
   const byDate = new Map<string, Net780GpsPoint[]>()
