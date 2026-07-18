@@ -382,11 +382,13 @@ describe('classifyMonth (2025-04: 1日=火, 5日=土, 6日=日)', () => {
     expect(m.overtime).toBe(120)
   })
 
-  it('週40超過: 日曜起算の週 (4/6〜4/12) で実働 45h・割増なし → 5h', () => {
+  it('週40超過: 日曜起算の週 (4/6〜4/12) で実働 45h・割増なし → 5h。法定内から控除 (案B)', () => {
     // 月〜金 (4/7〜4/11) 各 9h
     const days = [7, 8, 9, 10, 11].map(d => day(d, { workingMinutes: 9 * 60 }))
     const m = classifyMonth(days, 2025, 4, DEFAULT_WAGE_CONFIG)
     expect(m.weekly40Excess).toBe(5 * 60)
+    // 週40超過の 5h は法定内から除外される (基礎 1.0 の二重計上防止 — 週40超過側で 1.25 フル)
+    expect(m.statutory).toBe(40 * 60)
   })
 
   it('週40超過: 既に割増計上済みの分 (時間外・法定外休日) は差し引く', () => {
@@ -434,8 +436,8 @@ describe('classifyMonth (2025-04: 1日=火, 5日=土, 6日=日)', () => {
     expect(classifyMonth(days, 2025, 4, DEFAULT_WAGE_CONFIG, prevDays).weekly40Excess).toBe(6 * 60)
     // 前月分が無ければ当月分のみ (36h) → 超過なし
     expect(classifyMonth(days, 2025, 4, DEFAULT_WAGE_CONFIG).weekly40Excess).toBe(0)
-    // 前月由来の日の区分時間は当月に計上されない
-    expect(classifyMonth(days, 2025, 4, DEFAULT_WAGE_CONFIG, prevDays).statutory).toBe(4 * 9 * 60)
+    // 前月由来の日の区分時間は当月に計上されない (36h)。週40超過 6h は法定内から控除 (案B)
+    expect(classifyMonth(days, 2025, 4, DEFAULT_WAGE_CONFIG, prevDays).statutory).toBe(4 * 9 * 60 - 6 * 60)
   })
 
   it('1 月の跨ぎ週は前年 12 月として曜日を解決する', () => {
