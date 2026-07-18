@@ -823,6 +823,27 @@ Tail Worker 自身 (`nuxt-dtako-admin-scraper-relay-tail[-staging]`) の Workers
 に確実に記録される。**診断ログを見る時は producer ではなく Tail Worker 側の
 Observability を見ること。**
 
+### `ctx.waitUntil()` の二重ネストは内側の完了を保証しない — NET780 D1 upsert が消える実害 (2026-07-19)
+
+NET780 保存 (`saveNet780ToR2`、Refs #299) は `handleNet780Download` から
+`this.ctx.waitUntil(this.saveNet780ToR2(...))` として呼ばれる非同期処理だが、
+その内部でさらに D1 書き込み (`upsertNet780Catalog`) を
+`this.ctx.waitUntil(this.upsertNet780Catalog(...))` と**二重にネストして**
+waitUntil していた。実機検証で、R2 書き込み (`await` で直列化済み) は毎回
+成功するのに **D1 (`dtako_uploads`) には対象 operation_no の行が一切作られない**
+という実害が発生した (`/operations/{unko_no}` の NET780 タブが保存後もずっと
+「まだアーカイブされていません」のまま)。
+
+外側の `saveNet780ToR2` の Promise が resolve した時点で、内側の
+`upsertNet780Catalog` の waitUntil 登録がまだ完了保証されないタイミング競合が
+原因と見られる (確証は D1 に直接クエリして「R2 にはあるが D1 に無い」不整合を
+確認した実機観測ベース)。**同一 event context 内で `waitUntil` の中からさらに
+`waitUntil` を呼ぶ場合、内側の完了を外側の Promise が待つとは限らない** —
+内側の非同期処理を確実に完了させたいなら `await` で直列化し、外側の
+`waitUntil` 1 箇所だけに任せること。`upsertNet780Catalog` 自体は内部で
+try/catch して呼び出し元に例外を伝播させない (best-effort) ので、
+`await this.upsertNet780Catalog(...)` に変えても失敗時の応答への影響は無い。
+
 ## テスト
 
 - ユニット: `npm test` (Vitest、happy-dom)
