@@ -278,6 +278,7 @@ net780-wasm (ohishi-exp/net780-wasm、core/ + wasm/ の 1 repo workspace)
 | `app/pages/net780.vue` | UI (ZIP アップロード + サマリ/暦日ごとの速度チャート+GPS地図/GPS一覧/イベント表示) |
 | `app/utils/net780.ts` | `parseNet780Zip()` / `buildDailySpeedCharts()` / `buildDailyGpsPoints()` / `chartXRatioToTime()` 等 |
 | `app/components/Net780Map.vue` | GPS 軌跡 Google Map (`VidMap.vue` と同じパターン、シーク連動マーカー) |
+| `app/components/Net780OperationSummary.vue` | `/operations/{unko_no}` の NET780 タブ本体。D1 (`dtako_uploads`) を運行No で引き、サマリ + 暦日ごとの速度チャート+GPS地図を埋め込み表示する (`net780/index.vue` の dailyViews ロジックを移植、2026-07-19) |
 | `vendor/net780-wasm/` | `ohishi-exp/net780-wasm` の `wasm-pack build` 出力を vendor したもの |
 | `tests/mocks/net780-wasm.ts` | vitest 用モック (`__setMockResult`/`__setMockError`) |
 
