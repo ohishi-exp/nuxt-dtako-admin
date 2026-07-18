@@ -37,6 +37,7 @@ export default {
       || url.pathname.startsWith("/dvr-api/")
       || url.pathname.startsWith("/daily-report-api/")
       || url.pathname.startsWith("/restraint-api/")
+      || url.pathname.startsWith("/net780-api/")
     ) {
       // comp_id/session 抽出と DO routing は relay worker (default fetch) が行う。
       // ここは原 request (WS upgrade + query string、または zip ダウンロード GET) を

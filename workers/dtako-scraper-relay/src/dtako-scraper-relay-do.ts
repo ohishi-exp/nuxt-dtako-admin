@@ -141,6 +141,14 @@ import {
   type SaveFuelRowParams,
   type SaveWorkRowParams,
 } from "./theearth-report-client";
+import {
+  downloadNet780Zip,
+  Net780ParamError,
+  searchNet780,
+  validateNet780DownloadTargets,
+  type Net780DownloadTarget,
+  type Net780SearchParams,
+} from "./theearth-net780-client";
 
 /** `DTAKO_ACCOUNTS` (dtako-scraper の Rust 版と同一 JSON shape) の1エントリ。 */
 interface DtakoAccountRaw {
@@ -395,6 +403,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 同型の credential pass-through + theearth ログインセッション共有。
     if (url.pathname.startsWith("/restraint-api/")) {
       return this.handleRestraintApi(request, url);
+    }
+
+    // /net780 (theearth F-VOS3020 検索・NET780 生データ一括ダウンロード、Refs #302)
+    // の API。他の theearth 系エンドポイントと同型の credential pass-through +
+    // theearth ログインセッション共有。
+    if (url.pathname.startsWith("/net780-api/")) {
+      return this.handleNet780Api(request, url);
     }
 
     // SCRAPER_MODE=http が完了後に生成する、1回だけ取得できる zip ダウンロード URL。
@@ -2328,6 +2343,148 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           : `拘束時間管理表 CSV の取得に失敗しました (${describeUnknownError(err)})`;
       return dvrJsonError(502, message);
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // /net780-api/* — theearth F-VOS3020 検索 + NET780 生データ一括ダウンロード
+  // (Refs #302)。credential pass-through / theearth セッション共有は
+  // /restraint-api と同じ。実機確定知見は ./theearth-net780-client.ts のヘッダ
+  // コメントおよび theearth-venus skill 参照。
+  // -------------------------------------------------------------------------
+
+  private async handleNet780Api(request: Request, url: URL): Promise<Response> {
+    const routing = resolveTheearthRouting(request.headers);
+    if (!routing) {
+      return dvrJsonError(400, "X-Theearth-Comp-Id / X-Theearth-User-B64 ヘッダが不正です");
+    }
+    // 同一 ASP.NET セッションへの並行リクエストはセッションロックで hang/500 する
+    // ため、他の theearth 系エンドポイントと同じキューで直列化する。
+    return this.theearthQueue.enqueue(() => this.dispatchNet780Api(request, url, routing));
+  }
+
+  private async dispatchNet780Api(request: Request, url: URL, routing: TheearthRouting): Promise<Response> {
+    if (url.pathname === "/net780-api/login" && request.method === "POST") {
+      return this.handleTheearthLogin(request, routing);
+    }
+
+    const stored = await this.ctx.storage.get<TheearthSessionRecord>(THEEARTH_SESSION_KEY);
+    const token = extractBearerToken(request.headers);
+    const record = isTheearthSessionValid(stored, token, routing, Date.now()) ? stored! : null;
+    if (!record) {
+      return dvrJsonError(401, "セッションが無効か期限切れです。再ログインしてください");
+    }
+
+    if (url.pathname === "/net780-api/logout" && request.method === "POST") {
+      await this.ctx.storage.delete(THEEARTH_SESSION_KEY);
+      return new Response(null, { status: 204 });
+    }
+    if (url.pathname === "/net780-api/search" && request.method === "GET") {
+      return this.handleNet780Search(record, url);
+    }
+    if (url.pathname === "/net780-api/download" && request.method === "POST") {
+      return this.handleNet780Download(record, request);
+    }
+    return dvrJsonError(404, "不明なエンドポイントです");
+  }
+
+  /** GET /net780-api/search?operationDateFrom=&operationDateTo=&driverCdFrom=&
+   * driverCdTo=&vehicleCdFrom=&vehicleCdTo= — F-GOS0030 の絞込を適用して
+   * F-VOS3020 の一覧 (最大30件) を取得する。 */
+  private async handleNet780Search(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const params: Net780SearchParams = {
+      operationDateFrom: url.searchParams.get("operationDateFrom") || undefined,
+      operationDateTo: url.searchParams.get("operationDateTo") || undefined,
+      driverCdFrom: url.searchParams.get("driverCdFrom") || undefined,
+      driverCdTo: url.searchParams.get("driverCdTo") || undefined,
+      vehicleCdFrom: url.searchParams.get("vehicleCdFrom") || undefined,
+      vehicleCdTo: url.searchParams.get("vehicleCdTo") || undefined,
+    };
+    const jar: CookieJar = { cookies: new Map(record.cookies) };
+    try {
+      const rows = await searchNet780(jar, params);
+      this.ctx.waitUntil(
+        this.ctx.storage.put<TheearthSessionRecord>(THEEARTH_SESSION_KEY, {
+          ...record,
+          cookies: Array.from(jar.cookies.entries()),
+        }),
+      );
+      return Response.json({ rows });
+    } catch (err) {
+      if (err instanceof VenusSessionExpiredError) {
+        await this.ctx.storage.delete(THEEARTH_SESSION_KEY);
+        return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
+      }
+      if (err instanceof Net780ParamError) {
+        return dvrJsonError(400, err.message);
+      }
+      console.error("Net780 search error:", err);
+      const message =
+        err instanceof TheearthClientError
+          ? err.message
+          : `NET780 検索に失敗しました (${describeUnknownError(err)})`;
+      return dvrJsonError(502, message);
+    }
+  }
+
+  /** POST /net780-api/download — body `{targets: {operationNo, startDateTime}[]}`
+   * を選択した運行の NET780 生データ zip をそのままストリーム素通しする
+   * (`handleReportZip` と同型)。ダウンロード postback は HTTP 503 の再現性が
+   * 高い (theearth-net780-client.ts ヘッダコメント参照) ため、数回リトライする。 */
+  private async handleNet780Download(record: TheearthSessionRecord, request: Request): Promise<Response> {
+    let body: { targets?: unknown };
+    try {
+      body = (await request.json()) as { targets?: unknown };
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    const targets = Array.isArray(body.targets) ? (body.targets as Net780DownloadTarget[]) : [];
+    try {
+      validateNet780DownloadTargets(targets);
+    } catch (err) {
+      if (err instanceof Net780ParamError) return dvrJsonError(400, err.message);
+      throw err;
+    }
+
+    const jar: CookieJar = { cookies: new Map(record.cookies) };
+    const maxAttempts = 3;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const zip = await downloadNet780Zip(jar, targets);
+        this.ctx.waitUntil(
+          this.ctx.storage.put<TheearthSessionRecord>(THEEARTH_SESSION_KEY, {
+            ...record,
+            cookies: Array.from(jar.cookies.entries()),
+          }),
+        );
+        return new Response(zip, {
+          headers: {
+            "content-type": "application/zip",
+            "content-disposition": `attachment; filename="net780-${targets.length}件.zip"`,
+            "cache-control": "no-store",
+          },
+        });
+      } catch (err) {
+        lastErr = err;
+        if (err instanceof VenusSessionExpiredError) {
+          await this.ctx.storage.delete(THEEARTH_SESSION_KEY);
+          return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
+        }
+        // HTTP 503 等の一時的な不安定さ (theearth-net780-client.ts 実機確定) は
+        // 間隔を空けてリトライする。それ以外のエラーは即座に諦める。
+        if (attempt < maxAttempts && err instanceof TheearthClientError) {
+          await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+          continue;
+        }
+        break;
+      }
+    }
+    console.error("Net780 download error:", lastErr);
+    const message =
+      lastErr instanceof TheearthClientError
+        ? lastErr.message
+        : `NET780 ダウンロードに失敗しました (${describeUnknownError(lastErr)})`;
+    return dvrJsonError(502, message);
   }
 
   /** report 系 API 呼び出しの共通ラッパ (callDvrVenus と同型): cookie 書き戻し +
