@@ -194,9 +194,12 @@ export function decodeHtmlEntities(value: string): string {
     .replace(/&gt;/g, ">");
 }
 
+/** `<input>` に加え `<select>` の開始タグも拾う (`ddlXxx` のような select
+ * 要素の name 解決に使う、Refs #299)。開始タグの属性だけが欲しいので `<select>`
+ * の中身/閉じタグは対象外で構わない。 */
 export function findTagById(html: string, id: string): string | null {
   const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`<input\\b[^>]*\\bid=["']${escapedId}["'][^>]*>`, "i");
+  const re = new RegExp(`<(?:input|select)\\b[^>]*\\bid=["']${escapedId}["'][^>]*>`, "i");
   return html.match(re)?.[0] ?? null;
 }
 

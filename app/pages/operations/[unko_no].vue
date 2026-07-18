@@ -158,7 +158,11 @@ function formatDatetime(val: string | null): string {
             {{ tab.label }}
           </button>
         </div>
-        <Net780OperationSummary v-if="activeTab === 'net780'" :operation-no="unkoNo" />
+        <Net780OperationSummary
+          v-if="activeTab === 'net780'"
+          :operation-no="unkoNo"
+          :operation-date="primary.operation_date ?? primary.reading_date"
+        />
         <EventDataTable
           v-else-if="activeTab === 'events'"
           :data="csvData[activeTab] || { headers: [], rows: [] }"
