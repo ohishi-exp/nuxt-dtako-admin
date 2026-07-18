@@ -15,6 +15,7 @@ const navigation = [
   { label: 'スクレイプ', icon: 'i-lucide-download', to: '/scraper' },
   { label: '映像確認', icon: 'i-lucide-video', to: '/vid-check' },
   { label: 'NET780 ビューア', icon: 'i-lucide-file-archive', to: '/net780' },
+  { label: 'NET780 履歴', icon: 'i-lucide-history', to: '/net780/history' },
   // 外部利用者向け standalone ページ (theearth credential ログイン、Refs #90)。
   // 管理者が URL を案内する時の入口としてサイドバーにも出しておく。
   { label: 'DVR 動画', icon: 'i-lucide-cctv', to: '/dvr-viewer' },

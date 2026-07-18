@@ -84,6 +84,26 @@ function toggleRow(row: Net780Row) {
   selectedOperationNos.value = next
 }
 
+/** 検索結果の各行が既にR2にアーカイブ済み (保存済み) かどうか。保存済みなら
+ * 行ボタンを「表示」、未保存なら「保存」にする (Refs #299)。 */
+const archivedOperationNos = ref<Set<string>>(new Set())
+
+/** D1 検索カタログ (`/net780-api/history`) を引いて、既にアーカイブ済みの
+ * operationNo 集合を更新する。最大200件までしか見ないため、古い保存分は
+ * 「未保存」と誤判定されうる — その場合クリックで再保存されるだけで実害はない。 */
+async function refreshArchivedStatus() {
+  try {
+    const res = await $fetch<{ rows: { operation_no: string }[] }>('/net780-api/history', {
+      headers: net780AuthHeaders(),
+    })
+    archivedOperationNos.value = new Set(res.rows.map(r => r.operation_no))
+  }
+  catch {
+    // 検索カタログの取得失敗はボタン表示に影響するだけなので無視する
+    // (保存済みでも「保存」表示になり、押すと再保存されるだけ)。
+  }
+}
+
 async function runNet780Search() {
   if (searching.value || !net780Session.value) return
   searchError.value = ''
@@ -103,6 +123,7 @@ async function runNet780Search() {
       },
     })
     searchRows.value = res.rows
+    refreshArchivedStatus()
   }
   catch (e) {
     if (net780ErrorStatus(e) === 401) {
@@ -130,9 +151,11 @@ function net780RowToTarget(row: Net780Row) {
   }
 }
 
-/** 選択した運行を1件ずつダウンロードする。複数運行を1回の postback にまとめると
- * 個別運行を安全に取り出せない ZIP (`operationCount > 1`) が archive されて
- * しまうため、選択件数分このループで順に呼ぶ (Refs #299)。 */
+/** 選択した運行を1件ずつ R2 に保存 (アーカイブ) する。複数運行を1回の
+ * postback にまとめると個別運行を安全に取り出せない ZIP (`operationCount > 1`)
+ * が archive されてしまうため、選択件数分このループで順に呼ぶ (Refs #299)。
+ * ブラウザへのファイルダウンロードは行わない — 保存が目的で、見るときは
+ * 各行の「表示」ボタンを使う。 */
 const downloadProgress = ref<{ done: number; total: number } | null>(null)
 
 async function downloadSelectedNet780() {
@@ -144,13 +167,13 @@ async function downloadSelectedNet780() {
   downloadProgress.value = { done: 0, total: selected.length }
   try {
     for (const row of selected) {
-      const blob = await $fetch<Blob>('/net780-api/download', {
+      await $fetch('/net780-api/download', {
         method: 'POST',
         headers: net780AuthHeaders(),
         body: { targets: [net780RowToTarget(row)] },
         responseType: 'blob',
       })
-      triggerNet780Download(blob, `net780-${row.operationNo}.zip`)
+      archivedOperationNos.value = new Set(archivedOperationNos.value).add(row.operationNo)
       downloadProgress.value = { done: downloadProgress.value.done + 1, total: selected.length }
     }
   }
@@ -165,15 +188,6 @@ async function downloadSelectedNet780() {
     downloading.value = false
     downloadProgress.value = null
   }
-}
-
-function triggerNet780Download(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +282,7 @@ async function viewNet780Row(row: Net780Row) {
   isParsing.value = true
   try {
     const blob = await fetchNet780Blob(row)
+    archivedOperationNos.value = new Set(archivedOperationNos.value).add(row.operationNo)
     const bulkBytes = new Uint8Array(await blob.arrayBuffer())
     const singleBytes = await extractSingleOperationZip(bulkBytes)
     result.value = await parseNet780Zip(singleBytes)
@@ -478,9 +493,9 @@ function eventLabel(e: Net780ParseResult['events'][number]): string {
             <span class="text-sm text-gray-500">{{ searchRows.length }} 件中 {{ selectedOperationNos.size }} 件選択</span>
             <div class="flex-1" />
             <UButton
-              icon="i-lucide-download"
+              icon="i-lucide-save"
               size="sm"
-              :label="downloading ? `ダウンロード中... (${downloadProgress?.done ?? 0}/${downloadProgress?.total ?? 0}件)` : `選択した${selectedOperationNos.size}件をダウンロード`"
+              :label="downloading ? `保存中... (${downloadProgress?.done ?? 0}/${downloadProgress?.total ?? 0}件)` : `選択した${selectedOperationNos.size}件を保存`"
               :loading="downloading"
               :disabled="selectedOperationNos.size === 0"
               @click="downloadSelectedNet780"
@@ -525,8 +540,8 @@ function eventLabel(e: Net780ParseResult['events'][number]): string {
                     <UButton
                       size="xs"
                       variant="soft"
-                      icon="i-lucide-eye"
-                      label="表示"
+                      :icon="archivedOperationNos.has(row.operationNo) ? 'i-lucide-eye' : 'i-lucide-save'"
+                      :label="archivedOperationNos.has(row.operationNo) ? '表示' : '保存'"
                       :loading="viewingOperationNo === row.operationNo"
                       :disabled="viewingOperationNo !== null && viewingOperationNo !== row.operationNo"
                       @click.stop="viewNet780Row(row)"
