@@ -10,14 +10,25 @@
 import { extractSingleOperationZip, parseNet780Zip, buildNet780Summary } from '~/utils/net780'
 import type { Net780Summary } from '~/utils/net780'
 
-const props = defineProps<{ operationNo: string; operationDate?: string | null }>()
+const props = defineProps<{
+  operationNo: string
+  operationDate?: string | null
+  vehicleCd?: string | null
+  driverCd?: string | null
+}>()
 
 /** 未アーカイブ時に /net780 へ渡す検索の初期値。運行日 (operation_date) を
  * 使う — この運行のものなので、/net780 自体の検索基準 (読取日) とは別に、
- * ここでは「この運行が行われた日」を渡すのが実用上妥当 (Refs #299)。 */
+ * ここでは「この運行が行われた日」を渡すのが実用上妥当 (Refs #299)。車輌CD・
+ * 乗務員CD も分かっていれば渡し、より絞り込んだ状態で検索フォームを開ける
+ * ようにする。 */
 const net780SearchLink = computed(() => {
-  const q = props.operationDate ? `?operationDate=${encodeURIComponent(props.operationDate)}` : ''
-  return `/net780${q}`
+  const params = new URLSearchParams()
+  if (props.operationDate) params.set('operationDate', props.operationDate)
+  if (props.vehicleCd) params.set('vehicleCd', props.vehicleCd)
+  if (props.driverCd) params.set('driverCd', props.driverCd)
+  const q = params.toString()
+  return `/net780${q ? `?${q}` : ''}`
 })
 
 const loading = ref(false)

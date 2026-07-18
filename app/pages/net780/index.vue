@@ -59,11 +59,27 @@ onMounted(() => {
   const initialOperationNo = queryString(route.query.operationNo)
   if (initialOperationNo) viewByOperationNo(initialOperationNo)
   // /operations/{unko_no} の NET780 タブ (未アーカイブ時) からの遷移で
-  // ?operationDate= が付いていれば、読取日(から)の初期値にする。運行日と
+  // ?operationDate= が付いていれば、読取日(から/まで)の初期値にする。運行日と
   // 読取日は一致するとは限らないが、この画面自体の検索基準 (読取日) とは
   // 別に「この運行が行われた日」を起点にするのが実用上妥当 (Refs #299)。
+  // まで を空のままにすると上限なし (以降すべて) になり想定より大量にヒット
+  // するため、から と同じ日付で単日に絞る。
   const initialOperationDate = queryString(route.query.operationDate)
-  if (initialOperationDate) searchOperationDateFrom.value = initialOperationDate
+  if (initialOperationDate) {
+    searchOperationDateFrom.value = initialOperationDate
+    searchOperationDateTo.value = initialOperationDate
+  }
+  // 同じ遷移元から車輌CD・乗務員CDも分かっていれば初期値にする (Refs #299)。
+  const initialVehicleCd = queryString(route.query.vehicleCd)
+  if (initialVehicleCd) {
+    searchVehicleCdFrom.value = initialVehicleCd
+    searchVehicleCdTo.value = initialVehicleCd
+  }
+  const initialDriverCd = queryString(route.query.driverCd)
+  if (initialDriverCd) {
+    searchDriverCdFrom.value = initialDriverCd
+    searchDriverCdTo.value = initialDriverCd
+  }
 })
 
 watch(net780Session, (s) => {
