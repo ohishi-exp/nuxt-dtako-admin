@@ -10,6 +10,157 @@ import {
 } from '~/utils/net780'
 import type { Net780ParseResult, Net780GpsPoint } from '~/utils/net780'
 
+// ---------------------------------------------------------------------------
+// theearth からの検索・一括ダウンロード (F-VOS3020、Refs #302)
+// ---------------------------------------------------------------------------
+
+/** worker (theearth-net780-client.ts) の Net780Row と同型。 */
+interface Net780Row {
+  operationNo: string
+  startDateTime: string
+  operationDate: string | null
+  vehicleName: string | null
+  branchName: string | null
+  driverCd1: string | null
+  driverName1: string | null
+  driverName2: string | null
+  cityName: string | null
+}
+
+const { session: net780Session, authHeaders: net780AuthHeaders, restoreSession: restoreNet780Session, expireSession: expireNet780Session } = useNet780Session()
+
+const searchOperationDateFrom = ref('')
+const searchOperationDateTo = ref('')
+const searchDriverCdFrom = ref('')
+const searchDriverCdTo = ref('')
+const searchVehicleCdFrom = ref('')
+const searchVehicleCdTo = ref('')
+const searching = ref(false)
+const searchError = ref('')
+const searchRows = ref<Net780Row[]>([])
+const selectedOperationNos = ref<Set<string>>(new Set())
+const downloading = ref(false)
+const downloadError = ref('')
+
+onMounted(() => {
+  restoreNet780Session()
+})
+
+watch(net780Session, (s) => {
+  if (!s) {
+    searchRows.value = []
+    selectedOperationNos.value = new Set()
+  }
+})
+
+function rowKeyOf(row: Net780Row): string {
+  return row.operationNo
+}
+
+const allSelected = computed(() => searchRows.value.length > 0 && selectedOperationNos.value.size === searchRows.value.length)
+
+function toggleSelectAll() {
+  selectedOperationNos.value = allSelected.value
+    ? new Set()
+    : new Set(searchRows.value.map(rowKeyOf))
+}
+
+function toggleRow(row: Net780Row) {
+  const next = new Set(selectedOperationNos.value)
+  const key = rowKeyOf(row)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  selectedOperationNos.value = next
+}
+
+async function runNet780Search() {
+  if (searching.value || !net780Session.value) return
+  searchError.value = ''
+  searchRows.value = []
+  selectedOperationNos.value = new Set()
+  searching.value = true
+  try {
+    const res = await $fetch<{ rows: Net780Row[] }>('/net780-api/search', {
+      headers: net780AuthHeaders(),
+      query: {
+        operationDateFrom: searchOperationDateFrom.value || undefined,
+        operationDateTo: searchOperationDateTo.value || undefined,
+        driverCdFrom: searchDriverCdFrom.value || undefined,
+        driverCdTo: searchDriverCdTo.value || undefined,
+        vehicleCdFrom: searchVehicleCdFrom.value || undefined,
+        vehicleCdTo: searchVehicleCdTo.value || undefined,
+      },
+    })
+    searchRows.value = res.rows
+  }
+  catch (e) {
+    if (net780ErrorStatus(e) === 401) {
+      expireNet780Session(net780ErrorMessage(e))
+      return
+    }
+    searchError.value = net780ErrorMessage(e)
+  }
+  finally {
+    searching.value = false
+  }
+}
+
+/** 選択件数が多い場合に備え、チャンク分割してダウンロードする
+ * (現状は theearth 側の実質上限が未検証のため NET780_DOWNLOAD_CHUNK_SIZE = 30
+ * 固定。上限が判明したら合わせて調整する)。 */
+const NET780_DOWNLOAD_CHUNK_SIZE = 30
+
+function chunks<T>(items: T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
+  return out
+}
+
+async function downloadSelectedNet780() {
+  if (downloading.value || !net780Session.value) return
+  const selected = searchRows.value.filter(r => selectedOperationNos.value.has(rowKeyOf(r)))
+  if (selected.length === 0) return
+  downloadError.value = ''
+  downloading.value = true
+  try {
+    const batches = chunks(selected, NET780_DOWNLOAD_CHUNK_SIZE)
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i]!
+      const blob = await $fetch<Blob>('/net780-api/download', {
+        method: 'POST',
+        headers: net780AuthHeaders(),
+        body: { targets: batch.map(r => ({ operationNo: r.operationNo, startDateTime: r.startDateTime })) },
+        responseType: 'blob',
+      })
+      const suffix = batches.length > 1 ? `_${i + 1}` : ''
+      triggerNet780Download(blob, `net780${suffix}.zip`)
+    }
+  }
+  catch (e) {
+    if (net780ErrorStatus(e) === 401) {
+      expireNet780Session(net780ErrorMessage(e))
+      return
+    }
+    downloadError.value = net780ErrorMessage(e)
+  }
+  finally {
+    downloading.value = false
+  }
+}
+
+function triggerNet780Download(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+// ---------------------------------------------------------------------------
+// 単一ファイル手動アップロード解析 (既存機能、ブラウザ内完結)
+// ---------------------------------------------------------------------------
+
 const isDragging = ref(false)
 const isParsing = ref(false)
 const error = ref<string | null>(null)
@@ -179,16 +330,116 @@ function eventLabel(e: Net780ParseResult['events'][number]): string {
 </script>
 
 <template>
-  <div class="max-w-4xl mx-auto space-y-6">
-    <h2 class="text-xl font-bold">
-      NET780 生データビューア
-    </h2>
-    <p class="text-sm text-gray-500">
-      NET780 デジタコの運行単位 ZIP (.inf/.spd/.dsd/.gpd/.evd 同梱) をブラウザ内で直接パースして
-      内容を確認する (アップロード・サーバー送信なし)。
-    </p>
+  <div>
+    <TheearthSessionHeader title="NET780 一括ダウンロード (web地球号)" api-prefix="/net780-api" wide />
 
-    <!-- Drop zone -->
+    <div class="max-w-4xl mx-auto p-6 space-y-6">
+      <!-- theearth 検索・一括ダウンロード -->
+      <UCard>
+        <template #header>
+          <span class="font-semibold">theearth から検索して一括ダウンロード</span>
+        </template>
+        <div class="flex flex-wrap items-end gap-4">
+          <UFormField label="運行日 (から)">
+            <UInput v-model="searchOperationDateFrom" type="date" />
+          </UFormField>
+          <UFormField label="運行日 (まで)">
+            <UInput v-model="searchOperationDateTo" type="date" />
+          </UFormField>
+          <UFormField label="乗務員CD (から)">
+            <UInput v-model="searchDriverCdFrom" placeholder="例: 1726" />
+          </UFormField>
+          <UFormField label="乗務員CD (まで)">
+            <UInput v-model="searchDriverCdTo" placeholder="例: 1726" />
+          </UFormField>
+          <UFormField label="車輌CD (から)">
+            <UInput v-model="searchVehicleCdFrom" placeholder="例: 3071" />
+          </UFormField>
+          <UFormField label="車輌CD (まで)">
+            <UInput v-model="searchVehicleCdTo" placeholder="例: 3071" />
+          </UFormField>
+          <UButton
+            icon="i-lucide-search"
+            :label="searching ? '検索中...' : '検索'"
+            :loading="searching"
+            :disabled="!net780Session"
+            @click="runNet780Search"
+          />
+        </div>
+        <p class="text-xs text-gray-500 mt-2">
+          運行日・乗務員CD・車輌CD のいずれか1つ以上を指定してください (無条件の全件検索はできません)。
+        </p>
+        <p v-if="searchError" class="text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3 mt-3">
+          {{ searchError }}
+        </p>
+
+        <!-- 検索結果 -->
+        <div v-if="searchRows.length" class="mt-4 space-y-3">
+          <div class="flex items-center gap-3">
+            <UButton size="xs" variant="soft" :label="allSelected ? '選択解除' : '全選択'" @click="toggleSelectAll" />
+            <span class="text-sm text-gray-500">{{ searchRows.length }} 件中 {{ selectedOperationNos.size }} 件選択</span>
+            <div class="flex-1" />
+            <UButton
+              icon="i-lucide-download"
+              size="sm"
+              :label="downloading ? 'ダウンロード中...' : `選択した${selectedOperationNos.size}件をダウンロード`"
+              :loading="downloading"
+              :disabled="selectedOperationNos.size === 0"
+              @click="downloadSelectedNet780"
+            />
+          </div>
+          <p v-if="downloadError" class="text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
+            {{ downloadError }}
+          </p>
+          <div class="overflow-x-auto max-h-96 overflow-y-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
+                  <th class="px-2 py-2">
+                    <input type="checkbox" :checked="allSelected" @change="toggleSelectAll">
+                  </th>
+                  <th class="px-2 py-2">運行日</th>
+                  <th class="px-2 py-2">車輌名</th>
+                  <th class="px-2 py-2">事業所</th>
+                  <th class="px-2 py-2">乗務員CD</th>
+                  <th class="px-2 py-2">乗務員名</th>
+                  <th class="px-2 py-2">行先市町村名</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="row in searchRows"
+                  :key="rowKeyOf(row)"
+                  class="border-b border-gray-100 dark:border-gray-800 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50"
+                  @click="toggleRow(row)"
+                >
+                  <td class="px-2 py-1.5" @click.stop="toggleRow(row)">
+                    <input type="checkbox" :checked="selectedOperationNos.has(rowKeyOf(row))" @change="toggleRow(row)">
+                  </td>
+                  <td class="px-2 py-1.5">{{ row.operationDate ?? '-' }}</td>
+                  <td class="px-2 py-1.5">{{ row.vehicleName ?? '-' }}</td>
+                  <td class="px-2 py-1.5">{{ row.branchName ?? '-' }}</td>
+                  <td class="px-2 py-1.5">{{ row.driverCd1 ?? '-' }}</td>
+                  <td class="px-2 py-1.5">{{ row.driverName1 ?? '-' }}</td>
+                  <td class="px-2 py-1.5">{{ row.cityName ?? '-' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </UCard>
+    </div>
+
+    <div class="max-w-4xl mx-auto p-6 pt-0 space-y-6">
+      <h2 class="text-xl font-bold">
+        NET780 生データビューア (単一ファイル)
+      </h2>
+      <p class="text-sm text-gray-500">
+        NET780 デジタコの運行単位 ZIP (.inf/.spd/.dsd/.gpd/.evd 同梱) をブラウザ内で直接パースして
+        内容を確認する (アップロード・サーバー送信なし)。
+      </p>
+
+      <!-- Drop zone -->
     <div
       class="border-2 border-dashed rounded-xl p-12 text-center transition-colors cursor-pointer"
       :class="isDragging
@@ -419,5 +670,6 @@ function eventLabel(e: Net780ParseResult['events'][number]): string {
         </p>
       </UCard>
     </template>
+    </div>
   </div>
 </template>
