@@ -850,24 +850,6 @@ function paidFor(driverCd: string): { base: number, overtime: number } | null {
   return paidByDriver.value.get(String(Number(driverCd))) ?? null
 }
 
-/** 翌月 "YYYY-MM" (月末締め・翌月払いの支給月表示・CSV 突合用、Refs #282)。 */
-function nextYm(ym: string): string {
-  const m = ym.match(/^(\d{4})-(\d{2})$/)
-  if (!m) return ym
-  const y = parseInt(m[1]!, 10)
-  const mo = parseInt(m[2]!, 10)
-  return mo === 12 ? `${y + 1}-01` : `${y}-${String(mo + 1).padStart(2, '0')}`
-}
-
-/** 前月 "YYYY-MM" (支給月ラベル → 勤務月の逆引き)。 */
-function prevYm(ym: string): string {
-  const m = ym.match(/^(\d{4})-(\d{2})$/)
-  if (!m) return ym
-  const y = parseInt(m[1]!, 10)
-  const mo = parseInt(m[2]!, 10)
-  return mo === 1 ? `${y - 1}-12` : `${y}-${String(mo - 1).padStart(2, '0')}`
-}
-
 /** 基礎単価(実績) の表示 (円/h、整数丸め。null は "-")。 */
 function fmtRatePerHour(v: number | null): string {
   return v == null ? '-' : Math.round(v).toLocaleString('ja-JP')

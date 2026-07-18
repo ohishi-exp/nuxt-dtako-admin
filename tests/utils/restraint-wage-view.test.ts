@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { fmtMinutes, fmtYen, fmtArchiveTs, fmtYm } from '../../app/utils/restraint-wage-view'
+import { fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, nextYm, prevYm } from '../../app/utils/restraint-wage-view'
 
 describe('fmtMinutes', () => {
   it('時間+分を "XhYYm" 表記にする', () => {
@@ -65,5 +65,36 @@ describe('fmtYm', () => {
 
   it('形式不一致はそのまま返す', () => {
     expect(fmtYm('2025/04')).toBe('2025/04')
+  })
+})
+
+describe('nextYm / prevYm (支給月 ⇄ 勤務月、月末締め・翌月払い Refs #282)', () => {
+  it('nextYm: 通常月は +1', () => {
+    expect(nextYm('2026-06')).toBe('2026-07')
+    expect(nextYm('2026-01')).toBe('2026-02')
+  })
+
+  it('nextYm: 12月は翌年1月へ繰り上がる (年跨ぎ)', () => {
+    expect(nextYm('2026-12')).toBe('2027-01')
+  })
+
+  it('prevYm: 通常月は -1', () => {
+    expect(prevYm('2026-07')).toBe('2026-06')
+    expect(prevYm('2026-12')).toBe('2026-11')
+  })
+
+  it('prevYm: 1月は前年12月へ繰り下がる (年跨ぎ)', () => {
+    expect(prevYm('2027-01')).toBe('2026-12')
+  })
+
+  it('往復で元に戻る (12月/1月境界含む)', () => {
+    for (const ym of ['2026-01', '2026-06', '2026-12']) {
+      expect(prevYm(nextYm(ym))).toBe(ym)
+    }
+  })
+
+  it('形式不一致はそのまま返す', () => {
+    expect(nextYm('2026/12')).toBe('2026/12')
+    expect(prevYm('bad')).toBe('bad')
   })
 })

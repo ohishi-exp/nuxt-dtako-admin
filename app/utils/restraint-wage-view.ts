@@ -150,6 +150,25 @@ export function fmtArchiveTs(ts: string | null | undefined): string {
   return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}` : ts
 }
 
+/** 翌月 "YYYY-MM" (月末締め・翌月払いの支給月表示・給与 CSV 突合用、Refs #282)。
+ * 12月は翌年1月へ繰り上がる。形式不正はそのまま返す。 */
+export function nextYm(ym: string): string {
+  const m = ym.match(/^(\d{4})-(\d{2})$/)
+  if (!m) return ym
+  const y = parseInt(m[1]!, 10)
+  const mo = parseInt(m[2]!, 10)
+  return mo === 12 ? `${y + 1}-01` : `${y}-${String(mo + 1).padStart(2, '0')}`
+}
+
+/** 前月 "YYYY-MM" (支給月ラベル → 勤務月の逆引き)。1月は前年12月へ繰り下がる。 */
+export function prevYm(ym: string): string {
+  const m = ym.match(/^(\d{4})-(\d{2})$/)
+  if (!m) return ym
+  const y = parseInt(m[1]!, 10)
+  const mo = parseInt(m[2]!, 10)
+  return mo === 1 ? `${y - 1}-12` : `${y}-${String(mo - 1).padStart(2, '0')}`
+}
+
 /** "YYYY-MM" → "YYYY年M月"。 */
 export function fmtYm(ym: string): string {
   const m = ym.match(/^(\d{4})-(\d{2})$/)
