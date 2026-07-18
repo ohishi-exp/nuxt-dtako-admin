@@ -184,8 +184,13 @@ describe('validateNet780SearchParams', () => {
     expect(() => validateNet780SearchParams({})).toThrow(/いずれか1つ以上/)
   })
 
-  it('driverCdFrom / driverCdTo の片方だけ指定は Net780ParamError', () => {
-    expect(() => validateNet780SearchParams({ driverCdFrom: '1726' })).toThrow(Net780ParamError)
+  it('driverCdFrom のみ (driverCdTo 省略) は通る (from のみの絞込)', () => {
+    expect(() => validateNet780SearchParams({ driverCdFrom: '1726' })).not.toThrow()
+  })
+
+  it('driverCdTo のみ (driverCdFrom 省略) は Net780ParamError', () => {
+    expect(() => validateNet780SearchParams({ driverCdTo: '1726' })).toThrow(Net780ParamError)
+    expect(() => validateNet780SearchParams({ driverCdTo: '1726' })).toThrow(/from を指定/)
   })
 
   it('乗務員CD が数値でないと Net780ParamError', () => {
@@ -202,8 +207,17 @@ describe('validateNet780SearchParams', () => {
     ).toThrow(/operationDate/)
   })
 
-  it('運行日の片方だけ指定は Net780ParamError', () => {
-    expect(() => validateNet780SearchParams({ operationDateFrom: '2026-07-01' })).toThrow(Net780ParamError)
+  it('operationDateFrom のみ (operationDateTo 省略) は通る (from のみの絞込)', () => {
+    expect(() => validateNet780SearchParams({ operationDateFrom: '2026-07-01' })).not.toThrow()
+  })
+
+  it('operationDateTo のみ (operationDateFrom 省略) は Net780ParamError', () => {
+    expect(() => validateNet780SearchParams({ operationDateTo: '2026-07-18' })).toThrow(Net780ParamError)
+    expect(() => validateNet780SearchParams({ operationDateTo: '2026-07-18' })).toThrow(/from を指定/)
+  })
+
+  it('vehicleCdFrom のみ (vehicleCdTo 省略) は通る (from のみの絞込)', () => {
+    expect(() => validateNet780SearchParams({ vehicleCdFrom: '3071' })).not.toThrow()
   })
 })
 

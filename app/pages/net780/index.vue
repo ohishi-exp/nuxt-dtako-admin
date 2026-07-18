@@ -199,6 +199,20 @@ const isParsing = ref(false)
 const error = ref<string | null>(null)
 const result = ref<Net780ParseResult | null>(null)
 const fileName = ref('')
+/** 現在表示中の運行の単一運行 ZIP (parseNet780Zip に渡したのと同じ bytes)。
+ * 運行サマリの「ダウンロード」ボタン用に保持する。 */
+const resultZipBytes = ref<Uint8Array | null>(null)
+
+function downloadResultZip() {
+  if (!resultZipBytes.value) return
+  const blob = new Blob([resultZipBytes.value.slice()], { type: 'application/zip' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `net780-${fileName.value || 'unknown'}.zip`.replace(/[/\\?%*:|"<>]/g, '_')
+  a.click()
+  URL.revokeObjectURL(url)
+}
 
 const GPS_TABLE_LIMIT = 300
 
@@ -233,12 +247,14 @@ async function handleFile(file: File) {
 
   error.value = null
   result.value = null
+  resultZipBytes.value = null
   fileName.value = file.name
   isParsing.value = true
 
   try {
     const bytes = new Uint8Array(await file.arrayBuffer())
     result.value = await parseNet780Zip(bytes)
+    resultZipBytes.value = bytes
   }
   catch (e) {
     error.value = e instanceof Error ? e.message : 'パースに失敗しました'
@@ -277,6 +293,7 @@ async function viewNet780Row(row: Net780Row) {
   if (viewingOperationNo.value || !net780Session.value) return
   error.value = null
   result.value = null
+  resultZipBytes.value = null
   fileName.value = `${row.vehicleName ?? row.operationNo} (${row.operationDate ?? ''})`
   viewingOperationNo.value = row.operationNo
   isParsing.value = true
@@ -286,6 +303,7 @@ async function viewNet780Row(row: Net780Row) {
     const bulkBytes = new Uint8Array(await blob.arrayBuffer())
     const singleBytes = await extractSingleOperationZip(bulkBytes)
     result.value = await parseNet780Zip(singleBytes)
+    resultZipBytes.value = singleBytes
   }
   catch (e) {
     if (net780ErrorStatus(e) === 401) {
@@ -309,6 +327,7 @@ async function viewByOperationNo(operationNo: string) {
   if (viewingOperationNo.value || !net780Session.value) return
   error.value = null
   result.value = null
+  resultZipBytes.value = null
   fileName.value = operationNo
   viewingOperationNo.value = operationNo
   isParsing.value = true
@@ -321,6 +340,7 @@ async function viewByOperationNo(operationNo: string) {
     const bulkBytes = new Uint8Array(await blob.arrayBuffer())
     const singleBytes = await extractSingleOperationZip(bulkBytes)
     result.value = await parseNet780Zip(singleBytes)
+    resultZipBytes.value = singleBytes
   }
   catch (e) {
     if (net780ErrorStatus(e) === 401) {
@@ -623,7 +643,17 @@ function eventLabel(e: Net780ParseResult['events'][number]): string {
       <!-- Summary -->
       <UCard v-if="summary">
         <template #header>
-          <span class="font-bold">運行サマリ</span>
+          <div class="flex items-center justify-between">
+            <span class="font-bold">運行サマリ</span>
+            <UButton
+              v-if="resultZipBytes"
+              icon="i-lucide-download"
+              size="xs"
+              variant="soft"
+              label="ダウンロード"
+              @click="downloadResultZip"
+            />
+          </div>
         </template>
         <dl class="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2 text-sm">
           <div>
