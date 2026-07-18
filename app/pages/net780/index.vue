@@ -403,7 +403,7 @@ const dailySpeedCharts = computed(() => {
 
 const dailyGpsPoints = computed(() => {
   if (!result.value) return []
-  return buildDailyGpsPoints(result.value.gps)
+  return buildDailyGpsPoints(result.value.gps, result.value.events)
 })
 
 interface DailyView {

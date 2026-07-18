@@ -229,6 +229,11 @@ net780-wasm (ohishi-exp/net780-wasm、core/ + wasm/ の 1 repo workspace)
   保持し、`chartXRatioToTime()` で SVG 上の x 座標比率から絶対時刻に逆変換する。
 - **GPS の `(0,0)` プレースホルダー (GPS 未捕捉時) は `buildDailyGpsPoints` で除外**
   する (地図表示のノイズになるため)。
+- **通信断 (`0xB8`) 〜 通信復帰 (`0xB9`) 区間の GPS 点も `buildDailyGpsPoints` で除外
+  する** (実データ検証: トンネル区間等で測位が収束せず海上・市街地外へ直線的に
+  飛ぶ異常座標 79 点中 78 点が通信断区間内の記録だった、Refs 実機調査 2026-07-18)。
+  区間抽出は `extractCommOutageRanges()`。対応する `0xB9` が無い場合は記録終端まで
+  通信断継続とみなし `end: Infinity` にする。
 - Google Maps API key の取得は `/vid-check` と同じ `/api/vid-check/map-key`
   endpoint を共用する (CF Secrets Store binding、endpoint 名は歴史的経緯でこの
   ままだが net780 専用に複製していない)。
