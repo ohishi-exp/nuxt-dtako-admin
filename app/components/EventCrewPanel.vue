@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import type { CrewGroup } from '~/utils/event-data-table'
+import type { CrewGroup, EventCategory } from '~/utils/event-data-table'
 import {
-  filterRows,
   colIndex,
   getDisplayColumns,
   eventRowClass,
   columnAlignClass,
   selectedRowsTimeRange,
-  filterOverspeedRows,
-  countOverspeedRows,
+  filterRowsByCategory,
+  countRowsByCategory,
+  EVENT_CATEGORY_ORDER,
+  EVENT_CATEGORY_LABELS,
 } from '~/utils/event-data-table'
 
 const props = defineProps<{
@@ -20,27 +21,22 @@ const emit = defineEmits<{
   'update:selectedRange': [range: { fromTs: number, toTs: number } | null]
 }>()
 
-const showDriveEvents = ref(false)
-const showOverspeed = ref(true)
+/** イベント/走行/アイドリング/速度超過 の4タブ (排他選択)。 */
+const activeCategory = ref<EventCategory>('event')
 
 const eventNameIdx = computed(() => colIndex(props.headers, 'イベント名'))
 
-const filteredRows = computed(() => {
-  const base = filterRows(props.group.rows, eventNameIdx.value, showDriveEvents.value)
-  return filterOverspeedRows(base, eventNameIdx.value, showOverspeed.value)
+const filteredRows = computed(() =>
+  filterRowsByCategory(props.group.rows, eventNameIdx.value, activeCategory.value),
+)
+
+const categoryCounts = computed(() => {
+  const counts = {} as Record<EventCategory, number>
+  for (const cat of EVENT_CATEGORY_ORDER) {
+    counts[cat] = countRowsByCategory(props.group.rows, eventNameIdx.value, cat)
+  }
+  return counts
 })
-
-const driveEventCount = computed(() =>
-  filterRows(props.group.rows, eventNameIdx.value, true).length,
-)
-
-const otherEventCount = computed(() =>
-  props.group.rows.length - driveEventCount.value,
-)
-
-const overspeedCount = computed(() =>
-  countOverspeedRows(props.group.rows, eventNameIdx.value),
-)
 
 const displayColumns = computed(() => getDisplayColumns(props.headers))
 
@@ -51,11 +47,10 @@ function clearSelection() {
   if (selectedRows.value.size > 0) selectedRows.value = new Set()
 }
 
-// filteredRows の並びが変わる (乗務員切替・イベント/走行フィルタ切替) と選択index が
+// filteredRows の並びが変わる (乗務員切替・タブ切替) と選択index が
 // 別の行を指してしまうため、その都度クリアする。
 watch(() => props.group, clearSelection)
-watch(showDriveEvents, clearSelection)
-watch(showOverspeed, clearSelection)
+watch(activeCategory, clearSelection)
 
 function toggleRow(ri: number) {
   const next = new Set(selectedRows.value)
@@ -77,27 +72,16 @@ watch(selectedRows, (rows) => {
     <span>{{ group.driverCd }} {{ group.driverName }}</span>
     <div class="ml-auto flex items-center gap-2">
       <button
+        v-for="cat in EVENT_CATEGORY_ORDER"
+        :key="cat"
         class="px-2 py-1 rounded text-xs transition-colors"
-        :class="!showDriveEvents
+        :class="activeCategory === cat
           ? 'bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300'
           : 'text-gray-400 hover:text-gray-600'"
-        @click="showDriveEvents = false"
+        @click="activeCategory = cat"
       >
-        イベント ({{ otherEventCount }})
+        {{ EVENT_CATEGORY_LABELS[cat] }} ({{ categoryCounts[cat] }})
       </button>
-      <button
-        class="px-2 py-1 rounded text-xs transition-colors"
-        :class="showDriveEvents
-          ? 'bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300'
-          : 'text-gray-400 hover:text-gray-600'"
-        @click="showDriveEvents = true"
-      >
-        走行 ({{ driveEventCount }})
-      </button>
-      <label class="flex items-center gap-1 cursor-pointer select-none pl-2 border-l border-gray-200 dark:border-gray-700">
-        <input v-model="showOverspeed" type="checkbox" class="cursor-pointer">
-        速度超過を表示<span v-if="overspeedCount > 0">（{{ overspeedCount }}）</span>
-      </label>
     </div>
   </div>
 
