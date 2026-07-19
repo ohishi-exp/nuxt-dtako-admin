@@ -180,7 +180,7 @@ describe('fetchVehicleDailySlips', () => {
     vi.unstubAllGlobals()
   })
 
-  it('/api/ichiban/sales/vehicle-daily を叩き camelCase の配列を返す', async () => {
+  it('/api/ichiban/api/sales/vehicle-daily を叩き camelCase の配列を返す', async () => {
     fetchMock.mockResolvedValue({
       source_table: '運転日報明細',
       data: [{
@@ -200,7 +200,7 @@ describe('fetchVehicleDailySlips', () => {
 
     const result = await fetchVehicleDailySlips('8504', '2026-06-01', '2026-07-01')
 
-    expect(fetchMock).toHaveBeenCalledWith('/api/ichiban/sales/vehicle-daily', {
+    expect(fetchMock).toHaveBeenCalledWith('/api/ichiban/api/sales/vehicle-daily', {
       query: { vehicle: '8504', from: '2026-06-01', to: '2026-07-01' },
     })
     expect(result).toHaveLength(1)
