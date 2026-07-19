@@ -13,8 +13,8 @@
  * unit test 対象外のため、ロジックを持ち込まないことでテスト可能な範囲を保つ)。
  */
 import { Loader } from '@googlemaps/js-api-loader'
-import { formatNet780Ts } from '~/utils/net780'
-import type { SpeedColoredSegment } from '~/utils/net780'
+import { formatNet780Ts, buildSpeedChartData } from '~/utils/net780'
+import type { SpeedColoredSegment, Net780SpeedPoint } from '~/utils/net780'
 import type { Net780DataStatus } from '~/composables/useNet780OperationData'
 
 const props = defineProps<{
@@ -23,8 +23,31 @@ const props = defineProps<{
   /** status==='not-found' 時、/net780 検索への導線。 */
   net780SearchLink?: string
   segments: SpeedColoredSegment[]
+  /** 選択範囲内の .spd サンプル (呼び出し側で時刻範囲フィルタ済み)。Map の下に
+   * 速度チャートを表示するのに使う (`/net780` ビューア・NET780タブと同じ
+   * `buildSpeedChartData` を選択範囲固定で利用)。 */
+  speedPoints: Net780SpeedPoint[]
   range: { fromTs: number, toTs: number } | null
 }>()
+
+// --- 速度チャート (Map の下、`Net780OperationSummary.vue` と同じ描画ロジックを
+// 選択範囲固定 (fixedMinTime/fixedMaxTime) で利用。シーク操作はここでは不要)。
+const CHART_WIDTH = 380
+const CHART_HEIGHT = 96
+const CHART_PADDING = 6
+
+const chartData = computed(() => {
+  if (!props.range) return null
+  return buildSpeedChartData(
+    props.speedPoints,
+    CHART_WIDTH,
+    CHART_HEIGHT,
+    CHART_PADDING,
+    300,
+    props.range.fromTs,
+    props.range.toTs,
+  )
+})
 
 const emit = defineEmits<{ close: [] }>()
 
@@ -179,6 +202,33 @@ const overlayKind = computed<OverlayKind>(() => {
           </p>
         </div>
       </div>
+    </div>
+
+    <div v-if="status === 'ready'" class="px-3 py-2 border-t border-gray-100 dark:border-gray-800">
+      <p class="text-[10px] text-gray-500 mb-1">速度 (.spd、0.5秒粒度)</p>
+      <template v-if="chartData">
+        <svg
+          :viewBox="`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`"
+          class="w-full h-24"
+          preserveAspectRatio="none"
+        >
+          <polyline
+            v-for="(seg, i) in chartData.segments"
+            :key="i"
+            :points="seg"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            class="text-blue-500"
+          />
+        </svg>
+        <p class="text-[10px] text-gray-500 mt-1">
+          最高速度 {{ chartData.maxSpeed.toFixed(1) }} km/h ・ 表示点数 {{ chartData.pointCount }}
+        </p>
+      </template>
+      <p v-else class="text-xs text-gray-400 h-24 flex items-center justify-center">
+        速度データがありません
+      </p>
     </div>
 
     <div

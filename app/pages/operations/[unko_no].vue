@@ -101,6 +101,17 @@ const eventMapSegments = computed(() => {
   return buildSpeedColoredSegments(ranged, result.speed)
 })
 
+/** 選択範囲内の .spd サンプル。EventSpeedMapPanel の Map 下の速度チャートに渡す。 */
+const eventMapSpeedPoints = computed(() => {
+  const result = net780Data.result.value
+  const range = selectedEventRange.value
+  if (!result || !range) return []
+  return result.speed.filter((p) => {
+    const t = p.record_start_ts + p.offset_secs
+    return t >= range.fromTs && t <= range.toTs
+  })
+})
+
 const net780SearchLink = computed(() => buildNet780SearchLink({
   readingDate: primary.value?.reading_date,
   vehicleCd: net780VehicleCd.value,
@@ -236,6 +247,7 @@ function formatDatetime(val: string | null): string {
       :error-message="net780Data.error.value"
       :net780-search-link="net780SearchLink"
       :segments="eventMapSegments"
+      :speed-points="eventMapSpeedPoints"
       :range="selectedEventRange"
       @close="selectedEventRange = null"
     />
