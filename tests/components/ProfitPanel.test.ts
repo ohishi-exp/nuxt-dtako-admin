@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import ProfitPanel from '~/components/ProfitPanel.vue'
 import type { SelectedRowsSummary } from '~/utils/event-data-table'
 import type { VehicleDailySlip } from '~/utils/ichiban'
@@ -52,6 +53,7 @@ function createWrapper(props: Partial<InstanceType<typeof ProfitPanel>['$props']
   return mount(ProfitPanel, {
     props: {
       vehicleCode: '8504',
+      unkoNo: 'unko-1',
       range: { fromTs: 0, toTs: 3600 },
       location: { originCity: '長崎市', destCity: '北九州市' },
       summary: summary(),
@@ -62,8 +64,18 @@ function createWrapper(props: Partial<InstanceType<typeof ProfitPanel>['$props']
 }
 
 describe('ProfitPanel', () => {
+  const fetchMock = vi.fn()
+
   beforeEach(() => {
     fetchVehicleDailySlipsMock.mockReset()
+    // /api/profit/snapshot 用の global $fetch。デフォルトは「未保存」(reject) とし、
+    // 既存の suggested ベースのテストが影響を受けないようにする。
+    fetchMock.mockReset().mockRejectedValue(new Error('404'))
+    vi.stubGlobal('$fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
   })
 
   it('vehicleCode が無ければ突合不能メッセージを表示し fetch しない', async () => {
@@ -274,5 +286,95 @@ describe('ProfitPanel', () => {
     const wrapper = createWrapper()
     await flushPromises()
     expect(wrapper.text()).toContain('雑貨 (@500)')
+  })
+
+  it('保存済みスナップショットがあれば suggested 判定より優先して確認状態を復元する', async () => {
+    // suggested=false になる伝票 (地域が一致しない) を、スナップショットで確認済みとして復元する
+    fetchVehicleDailySlipsMock.mockResolvedValue([
+      slip({ rowId: 'restored-1', originAreaName: '東京都', destAreaName: '大阪府' }),
+    ])
+    fetchMock.mockResolvedValue({
+      schemaVersion: 1,
+      confirmedSlips: [{ rowId: 'restored-1' }],
+    })
+    const wrapper = createWrapper()
+    await flushPromises()
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/profit/snapshot', {
+      query: { ym: '1970-01', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' },
+    })
+    expect((wrapper.find('input[type="checkbox"]').element as HTMLInputElement).checked).toBe(true)
+  })
+
+  it('保存ボタンをクリックするとスナップショットをPOSTし「保存しました」を表示する', async () => {
+    fetchVehicleDailySlipsMock.mockResolvedValue([slip()])
+    fetchMock.mockImplementation((url: string, opts?: { method?: string }) => {
+      if (opts?.method === 'POST') return Promise.resolve({ saved: true, changed: true, savedAt: '2026-07-19T00:00:00.000Z' })
+      return Promise.reject(new Error('404'))
+    })
+    const wrapper = createWrapper()
+    await flushPromises()
+
+    await wrapper.find('button.bg-blue-600').trigger('click')
+    await flushPromises()
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/profit/snapshot', expect.objectContaining({
+      method: 'POST',
+      body: expect.objectContaining({ vehicleCode: '8504', unkoNo: 'unko-1', confirmedAmount: 65000 }),
+    }))
+    expect(wrapper.text()).toContain('保存しました')
+  })
+
+  it('チェック変更後は保存ステータスが idle に戻る (再保存を促す)', async () => {
+    fetchVehicleDailySlipsMock.mockResolvedValue([slip()])
+    fetchMock.mockImplementation((url: string, opts?: { method?: string }) => {
+      if (opts?.method === 'POST') return Promise.resolve({ saved: true, changed: true, savedAt: 'x' })
+      return Promise.reject(new Error('404'))
+    })
+    const wrapper = createWrapper()
+    await flushPromises()
+
+    await wrapper.find('button.bg-blue-600').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('保存しました')
+
+    await wrapper.find('tbody tr').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('保存しました')
+  })
+
+  it('保存に失敗したら「保存に失敗しました」を表示する', async () => {
+    fetchVehicleDailySlipsMock.mockResolvedValue([slip()])
+    fetchMock.mockImplementation((url: string, opts?: { method?: string }) => {
+      if (opts?.method === 'POST') return Promise.reject(new Error('network error'))
+      return Promise.reject(new Error('404'))
+    })
+    const wrapper = createWrapper()
+    await flushPromises()
+
+    await wrapper.find('button.bg-blue-600').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('保存に失敗しました')
+  })
+
+  it('保存中はボタンが disabled になり「保存中...」を表示する', async () => {
+    fetchVehicleDailySlipsMock.mockResolvedValue([slip()])
+    let resolvePost: (() => void) | undefined
+    fetchMock.mockImplementation((url: string, opts?: { method?: string }) => {
+      if (opts?.method === 'POST') return new Promise((resolve) => { resolvePost = () => resolve({ saved: true, changed: true, savedAt: 'x' }) })
+      return Promise.reject(new Error('404'))
+    })
+    const wrapper = createWrapper()
+    await flushPromises()
+
+    const clickPromise = wrapper.find('button.bg-blue-600').trigger('click')
+    await nextTick()
+    expect(wrapper.text()).toContain('保存中...')
+    expect((wrapper.find('button.bg-blue-600').element as HTMLButtonElement).disabled).toBe(true)
+
+    resolvePost?.()
+    await clickPromise
+    await flushPromises()
   })
 })
