@@ -28,6 +28,11 @@ function slip(overrides: Partial<VehicleDailySlip> = {}): VehicleDailySlip {
     dest: '福岡県北九州市',
     isSubcontracted: false,
     amount: 65000,
+    itemCode: '',
+    itemName: '',
+    quantity: 0,
+    unitPrice: 0,
+    unit: '',
     rowId: 'row-1',
     ...overrides,
   }
@@ -223,5 +228,51 @@ describe('ProfitPanel', () => {
     await flushPromises()
     expect((wrapper.find('input[type="checkbox"]').element as HTMLInputElement).checked).toBe(false)
     expect(wrapper.text()).toContain('部分一致')
+  })
+
+  it('品名が空なら品名列は「-」表示 (数量/単価が入力されていても)', async () => {
+    fetchVehicleDailySlipsMock.mockResolvedValue([
+      slip({ rowId: 'no-item', itemName: '', quantity: 5, unitPrice: 1000 }),
+    ])
+    const wrapper = createWrapper()
+    await flushPromises()
+    expect(wrapper.text()).toContain('-')
+  })
+
+  it('品名・数量・単価がすべて揃っていれば「品名 (数量単位 @単価)」で表示する (同一日でも単価が異なりうることの目視確認用)', async () => {
+    fetchVehicleDailySlipsMock.mockResolvedValue([
+      slip({ rowId: 'full-item', itemName: '冷凍食品', quantity: 10.5, unitPrice: 6190, unit: '個' }),
+    ])
+    const wrapper = createWrapper()
+    await flushPromises()
+    expect(wrapper.text()).toContain('冷凍食品 (10.5個 @6,190)')
+  })
+
+  it('品名はあるが数量・単価が未入力 (0) なら品名のみ表示する', async () => {
+    fetchVehicleDailySlipsMock.mockResolvedValue([
+      slip({ rowId: 'item-only', itemName: '雑貨', quantity: 0, unitPrice: 0 }),
+    ])
+    const wrapper = createWrapper()
+    await flushPromises()
+    expect(wrapper.text()).toContain('雑貨')
+    expect(wrapper.text()).not.toContain('雑貨 (')
+  })
+
+  it('数量のみ入力 (単価0) なら数量だけ括弧内に表示する', async () => {
+    fetchVehicleDailySlipsMock.mockResolvedValue([
+      slip({ rowId: 'qty-only', itemName: '雑貨', quantity: 3, unit: '個', unitPrice: 0 }),
+    ])
+    const wrapper = createWrapper()
+    await flushPromises()
+    expect(wrapper.text()).toContain('雑貨 (3個)')
+  })
+
+  it('単価のみ入力 (数量0) なら単価だけ括弧内に表示する', async () => {
+    fetchVehicleDailySlipsMock.mockResolvedValue([
+      slip({ rowId: 'price-only', itemName: '雑貨', quantity: 0, unitPrice: 500 }),
+    ])
+    const wrapper = createWrapper()
+    await flushPromises()
+    expect(wrapper.text()).toContain('雑貨 (@500)')
   })
 })
