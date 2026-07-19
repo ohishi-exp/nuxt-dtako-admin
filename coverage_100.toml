@@ -103,3 +103,19 @@ branches = true
 [[files]]
 path = "app/components/ProfitPanel.vue"
 branches = true
+
+[[files]]
+path = "app/utils/profit-r2.ts"
+branches = true
+
+[[files]]
+path = "server/utils/profit-r2-io.ts"
+branches = true
+
+[[files]]
+path = "server/api/profit/snapshot.post.ts"
+branches = true
+
+[[files]]
+path = "server/api/profit/snapshot.get.ts"
+branches = true

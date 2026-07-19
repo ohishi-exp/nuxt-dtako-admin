@@ -73,7 +73,8 @@ export function mapVehicleDailyApiRow(row: VehicleDailyApiRow): VehicleDailySlip
 // --- 選択区間 (epoch秒、JST壁時計をそのまま読む net780/event-data-table と同じ規約) →
 //     API の from/to (YYYY-MM-DD、半開区間) ---
 
-function epochToYmd(ts: number): string {
+/** JST壁時計をそのまま読む epoch 秒 → YYYY-MM-DD (`app/utils/profit-r2.ts` の月キー算出でも使う)。 */
+export function epochToYmd(ts: number): string {
   const d = new Date(ts * 1000)
   const y = d.getUTCFullYear()
   const m = String(d.getUTCMonth() + 1).padStart(2, '0')

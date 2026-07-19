@@ -281,6 +281,7 @@ function formatDatetime(val: string | null): string {
     <ProfitPanel
       v-if="activeTab === 'events' && selectedEventSummary && !profitPanelDismissed"
       :vehicle-code="net780VehicleCd"
+      :unko-no="unkoNo"
       :range="selectedEventRange"
       :location="selectedEventLocation"
       :summary="selectedEventSummary"

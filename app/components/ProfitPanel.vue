@@ -17,9 +17,11 @@ import {
   calcProfitEfficiency,
   type ScoredVehicleDailySlip,
 } from '~/utils/ichiban'
+import { segmentId as buildSegmentId, profitYm, buildProfitSnapshot, type ProfitSnapshot } from '~/utils/profit-r2'
 
 const props = defineProps<{
   vehicleCode: string | null
+  unkoNo: string
   range: { fromTs: number, toTs: number } | null
   location: SelectedRowsLocationRange | null
   summary: SelectedRowsSummary
@@ -28,11 +30,34 @@ const props = defineProps<{
 defineEmits<{ close: [] }>()
 
 type FetchStatus = 'idle' | 'loading' | 'ready' | 'error' | 'no-vehicle'
+type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 
 const status = ref<FetchStatus>('idle')
 const errorMessage = ref<string | null>(null)
 const scoredSlips = ref<ScoredVehicleDailySlip[]>([])
 const confirmedRowIds = ref<Set<string>>(new Set())
+const saveStatus = ref<SaveStatus>('idle')
+
+/** 保存済みスナップショットがあれば確認状態を復元する。無ければ (404) 何もしない
+ * (呼び出し元が suggested ベースの自動チェックにフォールバックする)。load() からしか
+ * 呼ばれず、その時点で vehicleCode/range は非null が保証されている。 */
+async function restoreConfirmedFromSnapshot(): Promise<boolean> {
+  try {
+    const snapshot = await $fetch<ProfitSnapshot>('/api/profit/snapshot', {
+      query: {
+        ym: profitYm(props.range!.fromTs),
+        vehicle: props.vehicleCode!,
+        unkoNo: props.unkoNo,
+        segmentId: buildSegmentId(props.range!.fromTs, props.range!.toTs),
+      },
+    })
+    confirmedRowIds.value = new Set(snapshot.confirmedSlips.map(s => s.rowId))
+    return true
+  }
+  catch {
+    return false
+  }
+}
 
 async function load() {
   if (!props.vehicleCode || !props.range) {
@@ -43,6 +68,7 @@ async function load() {
   }
   status.value = 'loading'
   errorMessage.value = null
+  saveStatus.value = 'idle'
   try {
     const { from, to } = vehicleDailyDateRange(props.range.fromTs, props.range.toTs)
     const slips = await fetchVehicleDailySlips(props.vehicleCode, from, to)
@@ -52,7 +78,10 @@ async function load() {
       slips,
     )
     scoredSlips.value = scored
-    confirmedRowIds.value = new Set(scored.filter(s => s.suggested).map(s => s.slip.rowId))
+    const restored = await restoreConfirmedFromSnapshot()
+    if (!restored) {
+      confirmedRowIds.value = new Set(scored.filter(s => s.suggested).map(s => s.slip.rowId))
+    }
     status.value = 'ready'
   }
   catch (e) {
@@ -68,6 +97,7 @@ function toggleConfirmed(rowId: string) {
   if (next.has(rowId)) next.delete(rowId)
   else next.add(rowId)
   confirmedRowIds.value = next
+  saveStatus.value = 'idle'
 }
 
 const confirmedAmount = computed(() =>
@@ -82,6 +112,32 @@ const efficiency = computed(() => calcProfitEfficiency(
   props.summary.durationMin,
   props.summary.byCategory.drive,
 ))
+
+/** 現在の確認状態を検証スナップショットとして R2 に保存する (Refs #330 PR3)。 */
+/** 保存ボタンは status==='ready' の時しか描画されず、その時点で load() により
+ * vehicleCode/range は非null が保証されている (template の v-else-if 参照)。 */
+async function saveSnapshot() {
+  saveStatus.value = 'saving'
+  try {
+    const snapshot = buildProfitSnapshot({
+      vehicleCode: props.vehicleCode!,
+      unkoNo: props.unkoNo,
+      range: props.range!,
+      location: props.location,
+      summary: props.summary,
+      scoredSlips: scoredSlips.value,
+      confirmedRowIds: confirmedRowIds.value,
+      confirmedAmount: confirmedAmount.value,
+      efficiency: efficiency.value,
+      savedAt: '', // server 側で実行時刻に上書きする
+    })
+    await $fetch('/api/profit/snapshot', { method: 'POST', body: snapshot })
+    saveStatus.value = 'saved'
+  }
+  catch {
+    saveStatus.value = 'error'
+  }
+}
 
 function formatYen(v: number | null): string {
   return v === null ? '-' : Math.round(v).toLocaleString('ja-JP')
@@ -185,6 +241,18 @@ const matchBadgeLabel: Record<string, string> = { exact: '完全一致', partial
           <span class="text-gray-500 block">円/時間 (拘束 / 運転)</span>
           <span class="text-sm font-semibold">{{ formatYen(efficiency.yenPerHourBound) }} / {{ formatYen(efficiency.yenPerHourDrive) }}</span>
         </div>
+      </div>
+
+      <div class="px-3 py-2 border-t border-gray-100 dark:border-gray-800 flex items-center justify-end gap-2">
+        <span v-if="saveStatus === 'saved'" class="text-xs text-green-600 dark:text-green-400">保存しました</span>
+        <span v-else-if="saveStatus === 'error'" class="text-xs text-red-600 dark:text-red-400">保存に失敗しました</span>
+        <button
+          class="text-xs px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white"
+          :disabled="saveStatus === 'saving'"
+          @click="saveSnapshot"
+        >
+          {{ saveStatus === 'saving' ? '保存中...' : '検証結果を保存' }}
+        </button>
       </div>
     </template>
   </div>

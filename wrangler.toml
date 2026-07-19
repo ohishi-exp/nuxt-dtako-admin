@@ -30,6 +30,12 @@ custom_domain = true
 binding = "DTAKO_R2"
 bucket_name = "dtako-uploads"
 
+# 一番星マッチ率検証結果の保存 (Refs #330)。書き込みデータのため DTAKO_R2 と異なり
+# 本番は staging/preview と分離 (staging の実験保存で本番検証データを汚染しないため)。
+[[r2_buckets]]
+binding = "PROFIT_R2"
+bucket_name = "dtako-ichiban-verify"
+
 # NET780 / vehicle-settings アップロードデータの検索カタログ (Refs #299)。
 # R2 (DTAKO_R2) が正、D1 は車番/乗務員CD/運行No 検索用の再構築可能インデックス。
 # R2 と同じく本番/staging/preview 共用 (named env で再宣言、専用DBが要れば分ける)。
@@ -129,6 +135,10 @@ binding = "DTAKO_R2"
 # 専用 staging bucket が必要になったら `dtako-uploads-staging` 等を作って差し替える。
 bucket_name = "dtako-uploads"
 
+[[env.staging.r2_buckets]]
+binding = "PROFIT_R2"
+bucket_name = "dtako-ichiban-verify-staging"
+
 # named env は top-level binding を継承しないので再宣言する。R2 と同じく本番と共用。
 [[env.staging.d1_databases]]
 binding = "DTAKO_DB"
@@ -185,6 +195,10 @@ custom_domain = true
 [[env.preview.r2_buckets]]
 binding = "DTAKO_R2"
 bucket_name = "dtako-uploads"
+
+[[env.preview.r2_buckets]]
+binding = "PROFIT_R2"
+bucket_name = "dtako-ichiban-verify-staging"
 
 # named env は top-level binding を継承しないので再宣言する。R2 と同じく本番と共用。
 [[env.preview.d1_databases]]
