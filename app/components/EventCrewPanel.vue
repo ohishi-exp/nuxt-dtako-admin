@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { CrewGroup, EventCategory, SelectedRowsSummary } from '~/utils/event-data-table'
+import type { CrewGroup, EventCategory, SelectedRowsSummary, SelectedRowsLocationRange } from '~/utils/event-data-table'
 import {
   colIndex,
   getDisplayColumns,
@@ -7,6 +7,7 @@ import {
   columnAlignClass,
   selectedRowsTimeRange,
   summarizeSelectedRows,
+  selectedRowsLocationRange,
   filterRowsByCategory,
   countRowsByCategory,
   EVENT_CATEGORY_ORDER,
@@ -21,6 +22,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:selectedRange': [range: { fromTs: number, toTs: number } | null]
   'update:selectedSummary': [summary: SelectedRowsSummary | null]
+  'update:selectedLocation': [location: SelectedRowsLocationRange | null]
 }>()
 
 /** イベント/走行/アイドリング/速度超過 の4タブ (排他選択)。 */
@@ -65,6 +67,7 @@ watch(selectedRows, (rows) => {
   const range = selectedRowsTimeRange(props.headers, filteredRows.value, rows)
   emit('update:selectedRange', range)
   emit('update:selectedSummary', rows.size > 0 ? summarizeSelectedRows(props.headers, filteredRows.value, rows) : null)
+  emit('update:selectedLocation', selectedRowsLocationRange(props.headers, filteredRows.value, rows))
 })
 </script>
 

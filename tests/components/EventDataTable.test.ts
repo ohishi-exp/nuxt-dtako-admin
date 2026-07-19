@@ -100,4 +100,16 @@ describe('EventDataTable', () => {
     const last = emitted![emitted!.length - 1]![0] as { distanceKm: number, durationMin: number } | null
     expect(last).toMatchObject({ distanceKm: 3, durationMin: 10 })
   })
+
+  it('EventCrewPanel の update:selected-location をそのまま relay する (実体の EventCrewPanel を使用)', async () => {
+    const wrapper = mount(EventDataTable, {
+      props: { data: { headers: fullHeaders, rows: [makeRow({ '開始市町村名': '長崎市', '終了市町村名': '福岡市' })] }, loading: false },
+      global: { stubs: { UIcon: UIconStub } },
+    })
+    await wrapper.find('tbody tr').trigger('click')
+    const emitted = wrapper.emitted('update:selectedLocation')
+    expect(emitted).toBeTruthy()
+    const last = emitted![emitted!.length - 1]![0] as { originCity: string, destCity: string } | null
+    expect(last).toEqual({ originCity: '長崎市', destCity: '福岡市' })
+  })
 })

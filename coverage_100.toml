@@ -95,3 +95,11 @@ branches = true
 [[files]]
 path = "app/utils/salary-file.ts"
 branches = true
+
+[[files]]
+path = "app/utils/ichiban.ts"
+branches = true
+
+[[files]]
+path = "app/components/ProfitPanel.vue"
+branches = true
