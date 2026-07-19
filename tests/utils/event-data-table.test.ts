@@ -14,6 +14,7 @@ import {
   getDisplayColumns,
   parseEventDatetimeToTs,
   selectedRowsTimeRange,
+  selectedRowsLocationRange,
   isOverspeedEventName,
   classifyEventName,
   filterRowsByCategory,
@@ -534,6 +535,58 @@ describe('selectedRowsTimeRange', () => {
       fromTs: parseEventDatetimeToTs('2026/07/03 08:00:00'),
       toTs: parseEventDatetimeToTs('2026/07/03 09:00:00'),
     })
+  })
+})
+
+describe('selectedRowsLocationRange', () => {
+  const headers = ['開始日時', '終了日時', 'イベント名', '開始市町村名', '終了市町村名']
+  const rows = [
+    ['2026/07/03 08:00:00', '2026/07/03 08:10:00', 'A', '長崎市', '諫早市'],
+    ['2026/07/03 09:00:00', '2026/07/03 09:30:00', 'B', '諫早市', '福岡市'],
+    ['2026/07/03 07:00:00', '2026/07/03 07:05:00', 'C', '佐世保市', '長崎市'],
+  ]
+
+  it('最も早い開始日時の行の開始市町村名・最も遅い終了日時の行の終了市町村名を返す', () => {
+    const result = selectedRowsLocationRange(headers, rows, [0, 1, 2])
+    // 最小開始 = index2 (07:00 佐世保市→長崎市)、最大終了 = index1 (09:30 諫早市→福岡市)
+    expect(result).toEqual({ originCity: '佐世保市', destCity: '福岡市' })
+  })
+
+  it('1行だけ選択した場合はその行の開始・終了市町村名になる', () => {
+    expect(selectedRowsLocationRange(headers, rows, [0])).toEqual({ originCity: '長崎市', destCity: '諫早市' })
+  })
+
+  it('選択が空なら null を返す', () => {
+    expect(selectedRowsLocationRange(headers, rows, [])).toBeNull()
+  })
+
+  it('開始日時/終了日時列が無ければ null を返す', () => {
+    expect(selectedRowsLocationRange(['イベント名'], [['A']], [0])).toBeNull()
+  })
+
+  it('市町村名列が無ければ空文字を返す (日時列はあるので range 自体は算出される)', () => {
+    const headersNoCity = ['開始日時', '終了日時', 'イベント名']
+    const rowsNoCity = [['2026/07/03 08:00:00', '2026/07/03 08:10:00', 'A']]
+    expect(selectedRowsLocationRange(headersNoCity, rowsNoCity, [0])).toEqual({ originCity: '', destCity: '' })
+  })
+
+  it('市町村名セルが undefined (行が短い) 場合は空文字にフォールバックする', () => {
+    const shortRow = ['2026/07/03 08:00:00', '2026/07/03 08:10:00']
+    expect(selectedRowsLocationRange(headers, [shortRow], [0])).toEqual({ originCity: '', destCity: '' })
+  })
+
+  it('開始日時/終了日時セル自体が undefined (行が空) の場合も ?? \'\' フォールバックしパース失敗として扱う', () => {
+    expect(selectedRowsLocationRange(headers, [[]], [0])).toBeNull()
+  })
+
+  it('パース失敗行のみ選択されている場合は null を返す', () => {
+    const badRows = [['invalid', 'invalid', 'A', '長崎市', '諫早市']]
+    expect(selectedRowsLocationRange(headers, badRows, [0])).toBeNull()
+  })
+
+  it('存在しない index はスキップする', () => {
+    const result = selectedRowsLocationRange(headers, rows, [0, 99])
+    expect(result).toEqual({ originCity: '長崎市', destCity: '諫早市' })
   })
 })
 

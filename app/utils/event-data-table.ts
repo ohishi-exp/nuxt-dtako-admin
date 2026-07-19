@@ -265,6 +265,54 @@ export function selectedRowsTimeRange(
   return lo <= hi ? { fromTs: lo, toTs: hi } : { fromTs: hi, toTs: lo }
 }
 
+export interface SelectedRowsLocationRange {
+  /** 最も早い `開始日時` の行の `開始市町村名` (欠損は空文字)。 */
+  originCity: string
+  /** 最も遅い `終了日時` の行の `終了市町村名` (欠損は空文字)。 */
+  destCity: string
+}
+
+/**
+ * 選択行のうち、`開始日時` が最小の行の `開始市町村名` と `終了日時` が最大の行の
+ * `終了市町村名` を返す (一番星の伝票候補との突合キー、Refs #330 PR4)。
+ * `selectedRowsTimeRange` と同じ「最小開始/最大終了」の考え方で、その時刻を
+ * 持つ行の市町村名を採用する。パース失敗行はスキップ、有効行が無ければ null。
+ */
+export function selectedRowsLocationRange(
+  headers: string[],
+  rows: string[][],
+  selectedIdx: Iterable<number>,
+): SelectedRowsLocationRange | null {
+  const startIdx = colIndex(headers, '開始日時')
+  const endIdx = colIndex(headers, '終了日時')
+  const originCityIdx = colIndex(headers, '開始市町村名')
+  const destCityIdx = colIndex(headers, '終了市町村名')
+  if (startIdx < 0 || endIdx < 0) return null
+
+  let minStart: number | null = null
+  let maxEnd: number | null = null
+  let originCity = ''
+  let destCity = ''
+
+  for (const idx of selectedIdx) {
+    const row = rows[idx]
+    if (!row) continue
+    const start = parseEventDatetimeToTs(row[startIdx] ?? '')
+    const end = parseEventDatetimeToTs(row[endIdx] ?? '')
+    if (start !== null && (minStart === null || start < minStart)) {
+      minStart = start
+      originCity = originCityIdx >= 0 ? (row[originCityIdx] ?? '') : ''
+    }
+    if (end !== null && (maxEnd === null || end > maxEnd)) {
+      maxEnd = end
+      destCity = destCityIdx >= 0 ? (row[destCityIdx] ?? '') : ''
+    }
+  }
+
+  if (minStart === null && maxEnd === null) return null
+  return { originCity, destCity }
+}
+
 // --- 選択行 → 距離・時間内訳の集計 (運行詳細の収支パネル、Refs #330 PR3) ---
 
 /** 収支パネルの時間内訳区分。`classifyEventName` の表示タブ分類 (event/drive/idle/

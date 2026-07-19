@@ -2,7 +2,7 @@
 import { getOperation, getOperationCsv, deleteOperation } from '~/utils/api'
 import type { Operation, CsvJsonResponse, CsvType } from '~/types'
 import { filterValidGpsPoints, filterPointsByRange, buildSpeedColoredSegments, buildNet780SearchLink } from '~/utils/net780'
-import type { SelectedRowsSummary } from '~/utils/event-data-table'
+import type { SelectedRowsSummary, SelectedRowsLocationRange } from '~/utils/event-data-table'
 
 const route = useRoute()
 const router = useRouter()
@@ -84,11 +84,15 @@ const net780DriverCd = computed(() =>
 const net780Data = useNet780OperationData(() => unkoNo)
 const selectedEventRange = ref<{ fromTs: number, toTs: number } | null>(null)
 const selectedEventSummary = ref<SelectedRowsSummary | null>(null)
+const selectedEventLocation = ref<SelectedRowsLocationRange | null>(null)
+/** ProfitPanel だけを閉じる (デジタコ実績パネルとは独立、選択が変わったら再表示する)。 */
+const profitPanelDismissed = ref(false)
 
 watch(activeTab, (tab) => {
   if (tab !== 'events') {
     selectedEventRange.value = null
     selectedEventSummary.value = null
+    selectedEventLocation.value = null
   }
 })
 
@@ -99,6 +103,11 @@ function onSelectedRangeChange(range: { fromTs: number, toTs: number } | null) {
 
 function onSelectedSummaryChange(summary: SelectedRowsSummary | null) {
   selectedEventSummary.value = summary
+  profitPanelDismissed.value = false
+}
+
+function onSelectedLocationChange(location: SelectedRowsLocationRange | null) {
+  selectedEventLocation.value = location
 }
 
 const eventMapSegments = computed(() => {
@@ -237,6 +246,7 @@ function formatDatetime(val: string | null): string {
           :loading="csvLoading && !csvData[activeTab]"
           @update:selected-range="onSelectedRangeChange"
           @update:selected-summary="onSelectedSummaryChange"
+          @update:selected-location="onSelectedLocationChange"
         />
         <CsvDataTable
           v-else
@@ -266,6 +276,15 @@ function formatDatetime(val: string | null): string {
       v-if="activeTab === 'events' && selectedEventSummary"
       :summary="selectedEventSummary"
       @close="selectedEventSummary = null"
+    />
+
+    <ProfitPanel
+      v-if="activeTab === 'events' && selectedEventSummary && !profitPanelDismissed"
+      :vehicle-code="net780VehicleCd"
+      :range="selectedEventRange"
+      :location="selectedEventLocation"
+      :summary="selectedEventSummary"
+      @close="profitPanelDismissed = true"
     />
 
     <!-- Delete confirmation modal -->

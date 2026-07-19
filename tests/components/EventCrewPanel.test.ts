@@ -119,6 +119,24 @@ describe('EventCrewPanel', () => {
       expect(wrapper.text()).toContain('1行選択中')
     })
 
+    it('行選択で update:selectedLocation も emit する (開始/終了市町村名)', async () => {
+      const wrapper = createWrapper(makeGroup([makeRow('休憩')]))
+      await wrapper.find('tbody tr').trigger('click')
+      const emitted = wrapper.emitted('update:selectedLocation')
+      expect(emitted).toBeTruthy()
+      const last = emitted![emitted!.length - 1]![0] as { originCity: string, destCity: string } | null
+      expect(last).toEqual({ originCity: '東京都', destCity: '千葉市' })
+    })
+
+    it('選択解除で update:selectedLocation に null を emit する', async () => {
+      const wrapper = createWrapper(makeGroup([makeRow('休憩')]))
+      const row = wrapper.find('tbody tr')
+      await row.trigger('click')
+      await row.trigger('click')
+      const emitted = wrapper.emitted('update:selectedLocation')!
+      expect(emitted[emitted.length - 1]![0]).toBeNull()
+    })
+
     it('チェックボックス列のセル (input 以外の余白部分) クリックでも選択できる', async () => {
       const wrapper = createWrapper(makeGroup([makeRow('休憩')]))
       await wrapper.find('tbody td').trigger('click')
