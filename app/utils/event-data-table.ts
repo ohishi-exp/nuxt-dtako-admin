@@ -166,6 +166,24 @@ export function filterRows(
   })
 }
 
+export const OVERSPEED_EVENT_NAME = '速度超過'
+
+/** `show=false` の時だけ「速度超過」イベント行を除外する (それ以外はそのまま返す)。 */
+export function filterOverspeedRows(
+  rows: string[][],
+  eventNameIdx: number,
+  show: boolean,
+): string[][] {
+  if (show || eventNameIdx < 0) return rows
+  return rows.filter(row => (row[eventNameIdx] ?? '').trim() !== OVERSPEED_EVENT_NAME)
+}
+
+/** 選択対象の行群から「速度超過」イベントの件数を数える (表示件数バッジ用)。 */
+export function countOverspeedRows(rows: string[][], eventNameIdx: number): number {
+  if (eventNameIdx < 0) return 0
+  return rows.filter(row => (row[eventNameIdx] ?? '').trim() === OVERSPEED_EVENT_NAME).length
+}
+
 export function getDisplayColumns(headers: string[]): { header: string; index: number }[] {
   const cols: { header: string; index: number }[] = []
   for (const h of eventHeaders) {

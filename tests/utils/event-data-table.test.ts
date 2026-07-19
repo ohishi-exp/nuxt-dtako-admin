@@ -15,6 +15,8 @@ import {
   getDisplayColumns,
   parseEventDatetimeToTs,
   selectedRowsTimeRange,
+  filterOverspeedRows,
+  countOverspeedRows,
 } from '~/utils/event-data-table'
 
 describe('colIndex', () => {
@@ -473,6 +475,46 @@ describe('selectedRowsTimeRange', () => {
       fromTs: parseEventDatetimeToTs('2026/07/03 08:00:00'),
       toTs: parseEventDatetimeToTs('2026/07/03 09:00:00'),
     })
+  })
+})
+
+describe('filterOverspeedRows', () => {
+  const evtHeaders = ['イベント名']
+  const rows = [['速度超過'], ['一般道空車'], ['速度超過']]
+
+  it('show=true の時はそのまま返す (除外しない)', () => {
+    expect(filterOverspeedRows(rows, 0, true)).toEqual(rows)
+  })
+
+  it('show=false の時は「速度超過」行を除外する', () => {
+    expect(filterOverspeedRows(rows, 0, false)).toEqual([['一般道空車']])
+  })
+
+  it('eventNameIdx が -1 なら (show=false でも) そのまま返す', () => {
+    expect(filterOverspeedRows(rows, -1, false)).toEqual(rows)
+  })
+
+  it('セル値が undefined の行は "速度超過" と一致しないため残る (show=false)', () => {
+    expect(filterOverspeedRows([[]], 0, false)).toEqual([[]])
+  })
+})
+
+describe('countOverspeedRows', () => {
+  it('「速度超過」の件数を数える', () => {
+    const rows = [['速度超過'], ['一般道空車'], ['速度超過']]
+    expect(countOverspeedRows(rows, 0)).toBe(2)
+  })
+
+  it('該当が無ければ 0', () => {
+    expect(countOverspeedRows([['一般道空車']], 0)).toBe(0)
+  })
+
+  it('eventNameIdx が -1 なら 0 を返す', () => {
+    expect(countOverspeedRows([['速度超過']], -1)).toBe(0)
+  })
+
+  it('セル値が undefined の行はカウントしない', () => {
+    expect(countOverspeedRows([[]], 0)).toBe(0)
   })
 })
 

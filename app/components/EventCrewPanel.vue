@@ -7,6 +7,8 @@ import {
   eventRowClass,
   columnAlignClass,
   selectedRowsTimeRange,
+  filterOverspeedRows,
+  countOverspeedRows,
 } from '~/utils/event-data-table'
 
 const props = defineProps<{
@@ -19,12 +21,14 @@ const emit = defineEmits<{
 }>()
 
 const showDriveEvents = ref(false)
+const showOverspeed = ref(true)
 
 const eventNameIdx = computed(() => colIndex(props.headers, 'イベント名'))
 
-const filteredRows = computed(() =>
-  filterRows(props.group.rows, eventNameIdx.value, showDriveEvents.value),
-)
+const filteredRows = computed(() => {
+  const base = filterRows(props.group.rows, eventNameIdx.value, showDriveEvents.value)
+  return filterOverspeedRows(base, eventNameIdx.value, showOverspeed.value)
+})
 
 const driveEventCount = computed(() =>
   filterRows(props.group.rows, eventNameIdx.value, true).length,
@@ -32,6 +36,10 @@ const driveEventCount = computed(() =>
 
 const otherEventCount = computed(() =>
   props.group.rows.length - driveEventCount.value,
+)
+
+const overspeedCount = computed(() =>
+  countOverspeedRows(props.group.rows, eventNameIdx.value),
 )
 
 const displayColumns = computed(() => getDisplayColumns(props.headers))
@@ -47,6 +55,7 @@ function clearSelection() {
 // 別の行を指してしまうため、その都度クリアする。
 watch(() => props.group, clearSelection)
 watch(showDriveEvents, clearSelection)
+watch(showOverspeed, clearSelection)
 
 function toggleRow(ri: number) {
   const next = new Set(selectedRows.value)
@@ -85,6 +94,10 @@ watch(selectedRows, (rows) => {
       >
         走行 ({{ driveEventCount }})
       </button>
+      <label class="flex items-center gap-1 cursor-pointer select-none pl-2 border-l border-gray-200 dark:border-gray-700">
+        <input v-model="showOverspeed" type="checkbox" class="cursor-pointer">
+        速度超過を表示<span v-if="overspeedCount > 0">（{{ overspeedCount }}）</span>
+      </label>
     </div>
   </div>
 
