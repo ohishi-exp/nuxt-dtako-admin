@@ -168,14 +168,19 @@ export function calcProfitEfficiency(
 
 // --- fetch ---
 
-/** `/api/ichiban/sales/vehicle-daily` (proxy 経由、CF Access は server route 側で付与) を叩く。 */
+/**
+ * `/api/ichiban/api/sales/vehicle-daily` (proxy 経由、CF Access は server route 側で付与) を叩く。
+ * proxy (`server/api/ichiban/[...path].get.ts`) はパスをそのまま upstream に転送する thin
+ * passthrough で、rust-ichibanboshi 側の実エンドポイントは axum で `/api` 配下に nest されて
+ * いる (`/api/sales/vehicle-daily`) ため、client 側も `api/` を含めて呼ぶ必要がある。
+ */
 export async function fetchVehicleDailySlips(
   vehicle: string,
   from: string,
   to: string,
 ): Promise<VehicleDailySlip[]> {
   const res = await $fetch<{ source_table: string, data: VehicleDailyApiRow[] }>(
-    '/api/ichiban/sales/vehicle-daily',
+    '/api/ichiban/api/sales/vehicle-daily',
     { query: { vehicle, from, to } },
   )
   return res.data.map(mapVehicleDailyApiRow)
