@@ -371,6 +371,22 @@ describe('filterImplausibleGpsJumps', () => {
     const result = filterImplausibleGpsJumps(points)
     expect(result).toEqual([points[0], points[3]])
   })
+
+  it('ジャンプ後も実走行が続く (移動クラスタ) 場合はトレンド確定で全点を採用し直す (回帰テスト)', () => {
+    // 記録欠落等でタイムスタンプ上 2 分の間に実位置が ~34km 飛び、その後
+    // 実走行 (~50km/h、60 秒サンプリング) がそのまま続くケース。旧実装は
+    // ヒステリシス (静止クラスタ用) が効かず stale な基準点との速度比較に
+    // 落ち続け、経過時間による速度減衰後の任意の途中点を誤採用して長い直線
+    // セグメントを描き、それまでの実在の点を全て捨てていた。
+    const points: Net780GpsPoint[] = [
+      { ts: 0, lat: 43.0, lon: 143.0 },
+      { ts: 120, lat: 43.0, lon: 143.42 }, // ~34km ジャンプ (≒1030km/h、トレンド起点として保留)
+      { ts: 180, lat: 43.0, lon: 143.43 }, // 以降 60 秒ごとに ~0.8km ≒ 49km/h の自己整合トレンド
+      { ts: 240, lat: 43.0, lon: 143.44 }, // ここで累積移動 ~1.6km ≥ 1km → トレンド確定
+      { ts: 300, lat: 43.0, lon: 143.45 },
+    ]
+    expect(filterImplausibleGpsJumps(points)).toEqual(points)
+  })
 })
 
 describe('extractCommOutageRanges', () => {
