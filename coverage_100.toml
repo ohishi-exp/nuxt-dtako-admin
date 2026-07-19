@@ -89,6 +89,10 @@ path = "server/api/ichiban/[...path].get.ts"
 branches = true
 
 [[files]]
+path = "server/utils/ichiban-upstream.ts"
+branches = true
+
+[[files]]
 path = "app/utils/salary-compare.ts"
 branches = true
 
@@ -118,4 +122,8 @@ branches = true
 
 [[files]]
 path = "server/api/profit/snapshot.get.ts"
+branches = true
+
+[[files]]
+path = "server/api/profit/monthly.get.ts"
 branches = true
