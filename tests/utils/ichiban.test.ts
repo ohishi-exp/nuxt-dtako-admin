@@ -69,6 +69,10 @@ describe('normalizeLocationName', () => {
   it('全角英数を NFKC で半角化する (将来の混在データ対策)', () => {
     expect(normalizeLocationName('ＡＢＣ')).toBe('ABC')
   })
+  it('null/undefined は空文字扱い (API がフィールド未提供の場合にクラッシュしない、実際に発生した回帰)', () => {
+    expect(normalizeLocationName(undefined)).toBe('')
+    expect(normalizeLocationName(null)).toBe('')
+  })
 })
 
 describe('matchLocationLevel', () => {
@@ -90,6 +94,9 @@ describe('matchLocationLevel', () => {
   it('どちらかが空文字なら none (判定不能)', () => {
     expect(matchLocationLevel('', '福岡県北九州市')).toBe('none')
     expect(matchLocationLevel('北九州市', '')).toBe('none')
+  })
+  it('一番星側が undefined (API にフィールドが無い) でも none で判定不能扱いになりクラッシュしない', () => {
+    expect(matchLocationLevel('北九州市', undefined)).toBe('none')
   })
 })
 
