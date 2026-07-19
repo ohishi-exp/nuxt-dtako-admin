@@ -24,6 +24,7 @@ const navigation = [
   { label: '日報編集', icon: 'i-lucide-file-edit', to: '/daily-report-edit' },
   { label: '拘束CSV取得', icon: 'i-lucide-timer', to: '/restraint-fetch' },
   { label: '拘束×賃金', icon: 'i-lucide-japanese-yen', to: '/restraint-wage' },
+  { label: '一番星マッチ率検証', icon: 'i-lucide-scale', to: '/profit/monthly' },
 ]
 </script>
 
