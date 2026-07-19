@@ -67,6 +67,23 @@ binding = "GOOGLEMAP_KEY_SECRET"
 store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
 secret_name = "NUXT_PUBLIC_GOOGLEMAP_KEY"
 
+# 一番星 (rust-ichibanboshi、CAPE#01) への CF Access Service Token (Refs #330)。
+# `/api/ichiban/*` (server/api/ichiban/[...path].get.ts) が CF-Access-Client-Id/Secret
+# ヘッダとして付与し、CF Tunnel 越しの rust-ichiban.mtamaramu.com を叩く。
+# **値の投入は別手順** — rust-ichibanboshi 側 (CF Access アプリ + Service Token 発行)
+# がまだ無ければ先にそちらを用意し、secrets-inventory 経由でこの binding に投入する。
+# staging/preview も同一トークン・同一ホストを共用 (一番星は単一インスタンス、
+# GOOGLEMAP_KEY_SECRET と同型)。
+[[secrets_store_secrets]]
+binding = "ICHIBAN_ACCESS_CLIENT_ID"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "ICHIBAN_ACCESS_CLIENT_ID"
+
+[[secrets_store_secrets]]
+binding = "ICHIBAN_ACCESS_CLIENT_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "ICHIBAN_ACCESS_CLIENT_SECRET"
+
 # introspect を公開 HTTP ではなく CF service binding (worker-to-worker, 内部) で叩く。
 [[services]]
 binding = "AUTH_WORKER"
@@ -88,6 +105,8 @@ NUXT_ALC_API_URL = "https://rust-alc-api-566bls5vfq-an.a.run.app"
 # (front Worker から直接 Cloudflare Tunnel/Workers VPC 経由で dtako-scraper に
 # 到達する構成。rust-alc-api の SCRAPER_URL 経由の旧経路は廃止、Refs #XXX)。
 NUXT_PUBLIC_SCRAPER_RELAY_URL = "wss://dtako.ippoan.org"
+# /api/ichiban/* が転送する rust-ichibanboshi (CAPE#01) の CF Tunnel hostname (Refs #330)。
+NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
 
 # secret-verify (frontend-ci) 用の明示宣言。**必ず空 `[]` にする**。
 # `secrets.required` は CI secret-verify の監査対象であると同時に **wrangler が
@@ -130,6 +149,17 @@ binding = "GOOGLEMAP_KEY_SECRET"
 store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
 secret_name = "NUXT_PUBLIC_GOOGLEMAP_KEY"
 
+# 一番星は staging も本番と同一インスタンス・同一トークンを共用 (Refs #330)。
+[[env.staging.secrets_store_secrets]]
+binding = "ICHIBAN_ACCESS_CLIENT_ID"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "ICHIBAN_ACCESS_CLIENT_ID"
+
+[[env.staging.secrets_store_secrets]]
+binding = "ICHIBAN_ACCESS_CLIENT_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "ICHIBAN_ACCESS_CLIENT_SECRET"
+
 [[env.staging.services]]
 binding = "AUTH_WORKER"
 service = "auth-worker-staging"
@@ -143,6 +173,7 @@ NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 NUXT_ALC_API_URL = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_SCRAPER_RELAY_URL = "wss://dtako-staging.ippoan.org"
+NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
 
 # 軽量プレビュー環境 (create-preview skill、main 以外の branch への push ごとに
 # test/typecheck 無しで deploy)。backend は staging をそのまま再利用する
@@ -179,6 +210,16 @@ binding = "GOOGLEMAP_KEY_SECRET"
 store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
 secret_name = "NUXT_PUBLIC_GOOGLEMAP_KEY"
 
+[[env.preview.secrets_store_secrets]]
+binding = "ICHIBAN_ACCESS_CLIENT_ID"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "ICHIBAN_ACCESS_CLIENT_ID"
+
+[[env.preview.secrets_store_secrets]]
+binding = "ICHIBAN_ACCESS_CLIENT_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "ICHIBAN_ACCESS_CLIENT_SECRET"
+
 [[env.preview.services]]
 binding = "AUTH_WORKER"
 service = "auth-worker-staging"
@@ -195,6 +236,7 @@ NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 NUXT_ALC_API_URL = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_SCRAPER_RELAY_URL = "wss://dtako-preview.ippoan.org"
+NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
 
 # top-level [secrets] も named environment には継承されない (wrangler が deploy
 # 時に warning を出す、この repo で既出の keep_vars/observability 系と同型の罠)。

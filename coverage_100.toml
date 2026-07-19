@@ -81,6 +81,10 @@ path = "server/api/tariff/dtako-operations.get.ts"
 branches = true
 
 [[files]]
+path = "server/api/ichiban/[...path].get.ts"
+branches = true
+
+[[files]]
 path = "app/utils/salary-compare.ts"
 branches = true
 
