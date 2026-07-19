@@ -408,6 +408,14 @@ function haversineDistanceKm(lat1: number, lon1: number, lat2: number, lon2: num
 const MAX_PLAUSIBLE_SPEED_KMH = 150
 /** 至近距離の GPS ノイズ (揺らぎ) を誤検出しないための最小距離しきい値 (km)。 */
 const MIN_JUMP_DIST_KM = 0.3
+/** 異常判定中の隣接生点間の連続性チェックが有効な最大時間差 (秒)。.gpd の
+ *  サンプリングは概ね 60 秒間隔で、これを大きく超える間隔では低速に見えても
+ *  連続走行の根拠にならない (長時間経過すれば任意の 2 点間が低速に見えるため)。 */
+const TREND_MAX_GAP_SECS = 180
+/** 異常判定中に保留した点列を「再開した実走行トレンド」として採用し直すのに
+ *  必要な、トレンド起点からの累積移動距離 (km)。静止した異常クラスタ (移動
+ *  しないので隣接点間速度は常に妥当に見える) を誤ってトレンド認定しないための下限。 */
+const TREND_MIN_TRAVEL_KM = 1.0
 
 /**
  * 時系列順の GPS 点列から、直前の「採用済み」点との実装速度が物理的にありえない
@@ -430,6 +438,20 @@ const MIN_JUMP_DIST_KM = 0.3
  * 基準点との計算上の速度に関わらず異常判定を継続する。クラスタから実際に離れる
  * (生の点間の距離が動く) までは採用を再開しない。
  * 実データ検証: 07-03/07-04・07-17/07-18 の両運行で異常座標が完全に (0 件まで) 除去された。
+ *
+ * さらに別の失敗モードも見つかった: ジャンプ後のクラスタが静止せず「移動し続ける」
+ * ケース (記録欠落等でタイムスタンプ上わずかな間に実位置が大きく飛び、その後
+ * 実走行がそのまま続くデータ)。各生点は毎ステップ `MIN_JUMP_DIST_KM` 以上動くため
+ * 上記ヒステリシスは効かず、毎回 stale な基準点との比較に落ちる。基準点が固定の
+ * まま経過時間だけが伸びるので、実距離が大きいままでも計算上の速度がいずれ
+ * `MAX_PLAUSIBLE_SPEED_KMH` を下回り、軌跡の途中の任意の 1 点が誤って新基準点として
+ * 採用される (それまでの実在の点は全て捨てられる)。結果、古い基準点からその途中点へ
+ * 一直線の長い偽セグメントが描画されていた。対策として、異常判定中は点列を保留
+ * (pending) に積み、隣接生点間の速度が妥当 (`TREND_MAX_GAP_SECS` 以内かつ
+ * `MAX_PLAUSIBLE_SPEED_KMH` 以下) なまま累積 `TREND_MIN_TRAVEL_KM` 以上実移動したら
+ * 「再開した実走行トレンド」と確定し、保留分をまとめて採用して基準点をトレンドの
+ * 現在点へ再同期する。静止クラスタは累積移動が増えないのでトレンド認定されず、
+ * 従来どおり除外され続ける。
  */
 export function filterImplausibleGpsJumps(points: Net780GpsPoint[]): Net780GpsPoint[] {
   if (points.length === 0) return []
@@ -437,14 +459,43 @@ export function filterImplausibleGpsJumps(points: Net780GpsPoint[]): Net780GpsPo
   let anchor = points[0]!
   let prevRaw = points[0]!
   let prevRawAnomalous = false
+  /** 異常判定中に保留している点列 (トレンド確定時にまとめて採用する)。 */
+  let pending: Net780GpsPoint[] = []
   for (let i = 1; i < points.length; i++) {
     const p = points[i]!
 
     const distFromPrevRawKm = haversineDistanceKm(prevRaw.lat, prevRaw.lon, p.lat, p.lon)
     if (prevRawAnomalous && distFromPrevRawKm < MIN_JUMP_DIST_KM) {
-      // 直前の異常クラスタに留まったまま: 経過時間で速度が下がって見えても採用しない
+      // 直前の異常クラスタに留まったまま: 経過時間で速度が下がって見えても採用しない。
+      // ただし移動トレンドの一時停止 (信号待ち等) の可能性もあるため保留には積んでおく
+      // (静止のままなら累積移動が増えず、トレンド確定には至らない)。
+      pending.push(p)
       prevRaw = p
       continue
+    }
+
+    if (prevRawAnomalous) {
+      // 異常判定中に prevRaw から実際に移動した: 隣接生点間の速度が妥当なら
+      // 「ジャンプ後に再開した実走行トレンド」の候補として保留を継続する。
+      const dtPrevSec = p.ts - prevRaw.ts
+      const pairwisePlausible = dtPrevSec > 0
+        && dtPrevSec <= TREND_MAX_GAP_SECS
+        && distFromPrevRawKm / (dtPrevSec / 3600) <= MAX_PLAUSIBLE_SPEED_KMH
+      if (pairwisePlausible) {
+        pending.push(p)
+        prevRaw = p
+        const trendStart = pending[0]!
+        if (haversineDistanceKm(trendStart.lat, trendStart.lon, p.lat, p.lon) >= TREND_MIN_TRAVEL_KM) {
+          // トレンド確定: 保留分を採用し、基準点を現在点へ再同期する。
+          kept.push(...pending)
+          pending = []
+          anchor = p
+          prevRawAnomalous = false
+        }
+        continue
+      }
+      // トレンド不成立 (大きく飛んだ / 時間が空きすぎた): 保留を破棄し基準点判定へ。
+      pending = []
     }
 
     const dtSec = p.ts - anchor.ts
@@ -460,12 +511,14 @@ export function filterImplausibleGpsJumps(points: Net780GpsPoint[]): Net780GpsPo
     if (speedKmh > MAX_PLAUSIBLE_SPEED_KMH && distFromAnchorKm > MIN_JUMP_DIST_KM) {
       prevRaw = p
       prevRawAnomalous = true
+      pending = [p]
       continue
     }
     kept.push(p)
     anchor = p
     prevRaw = p
     prevRawAnomalous = false
+    pending = []
   }
   return kept
 }
