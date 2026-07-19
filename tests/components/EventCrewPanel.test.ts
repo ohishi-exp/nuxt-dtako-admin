@@ -115,7 +115,7 @@ describe('EventCrewPanel', () => {
 
     it('チェックボックスの直接クリックでも選択できる', async () => {
       const wrapper = createWrapper(makeGroup([makeRow('休憩')]))
-      await wrapper.find('input[type="checkbox"]').trigger('click')
+      await wrapper.find('tbody input[type="checkbox"]').trigger('click')
       expect(wrapper.text()).toContain('1行選択中')
     })
 
@@ -174,6 +174,51 @@ describe('EventCrewPanel', () => {
       await toggleButtons[1]!.trigger('click')
       await nextTick()
       expect(wrapper.text()).not.toContain('行選択中')
+    })
+  })
+
+  describe('速度超過フィルター', () => {
+    it('既定 (チェック済み) では速度超過行も表示される', () => {
+      const wrapper = createWrapper(makeGroup([makeRow('休憩'), makeRow('速度超過')]))
+      expect(wrapper.findAll('tbody tr').length).toBe(2)
+      expect(wrapper.text()).toContain('速度超過を表示（1）')
+    })
+
+    it('チェックを外すと速度超過行が除外される', async () => {
+      const wrapper = createWrapper(makeGroup([makeRow('休憩'), makeRow('速度超過')]))
+      await wrapper.find('label input[type="checkbox"]').setValue(false)
+      expect(wrapper.findAll('tbody tr').length).toBe(1)
+      expect(wrapper.find('tbody').text()).not.toContain('速度超過')
+    })
+
+    it('速度超過が無い場合は件数バッジを表示しない', () => {
+      const wrapper = createWrapper(makeGroup([makeRow('休憩')]))
+      expect(wrapper.text()).toContain('速度超過を表示')
+      expect(wrapper.text()).not.toContain('速度超過を表示（')
+    })
+
+    it('速度超過フィルター切替でも選択がクリアされる', async () => {
+      const wrapper = createWrapper(makeGroup([makeRow('休憩'), makeRow('速度超過')]))
+      await wrapper.find('tbody tr').trigger('click')
+      expect(wrapper.text()).toContain('1行選択中')
+
+      await wrapper.find('label input[type="checkbox"]').setValue(false)
+      expect(wrapper.text()).not.toContain('行選択中')
+    })
+
+    it('走行フィルターと併用しても速度超過を除外できる', async () => {
+      const wrapper = createWrapper(makeGroup([makeRow('一般道空車'), makeRow('速度超過')]))
+      const toggleButtons = wrapper.findAll('div.ml-auto button')
+      await toggleButtons[1]!.trigger('click') // 走行タブへ
+      await nextTick()
+      expect(wrapper.findAll('tbody tr').length).toBe(1)
+
+      await toggleButtons[0]!.trigger('click') // イベントタブへ戻す (速度超過はこちら)
+      await nextTick()
+      expect(wrapper.findAll('tbody tr').length).toBe(1)
+
+      await wrapper.find('label input[type="checkbox"]').setValue(false)
+      expect(wrapper.text()).toContain('データがありません')
     })
   })
 })
