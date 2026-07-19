@@ -24,6 +24,11 @@ describe('mapVehicleDailyApiRow', () => {
       dest: '福岡県北九州市',
       is_subcontracted: false,
       amount: 65000,
+      item_code: '0001',
+      item_name: '冷凍食品',
+      quantity: 10.5,
+      unit_price: 6190.47,
+      unit: '個',
       row_id: '20260621-1001',
     }
     expect(mapVehicleDailyApiRow(row)).toEqual({
@@ -37,8 +42,35 @@ describe('mapVehicleDailyApiRow', () => {
       dest: '福岡県北九州市',
       isSubcontracted: false,
       amount: 65000,
+      itemCode: '0001',
+      itemName: '冷凍食品',
+      quantity: 10.5,
+      unitPrice: 6190.47,
+      unit: '個',
       rowId: '20260621-1001',
     })
+  })
+
+  it('品名/数量/単価/単位が応答に無い場合 (rust-ichibanboshi#78 未デプロイ) は既定値で埋める', () => {
+    const row: VehicleDailyApiRow = {
+      sale_date: '2026-06-20',
+      vehicle_number: '8504',
+      customer_code: '000002',
+      customer_name: '',
+      origin_area_name: '',
+      dest_area_name: '',
+      origin: '',
+      dest: '',
+      is_subcontracted: true,
+      amount: 40000,
+      row_id: '20260620-1002',
+    }
+    const slip = mapVehicleDailyApiRow(row)
+    expect(slip.itemCode).toBe('')
+    expect(slip.itemName).toBe('')
+    expect(slip.quantity).toBe(0)
+    expect(slip.unitPrice).toBe(0)
+    expect(slip.unit).toBe('')
   })
 })
 
@@ -113,6 +145,11 @@ describe('scoreVehicleDailySlips', () => {
       dest: '',
       isSubcontracted: false,
       amount: 10000,
+      itemCode: '',
+      itemName: '',
+      quantity: 0,
+      unitPrice: 0,
+      unit: '',
       rowId: 'row-1',
       ...overrides,
     }

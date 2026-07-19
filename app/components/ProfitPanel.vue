@@ -87,6 +87,16 @@ function formatYen(v: number | null): string {
   return v === null ? '-' : Math.round(v).toLocaleString('ja-JP')
 }
 
+/** 品名N/数量/単価をまとめて1列に表示するための整形。同一日でも複数明細で単価が
+ * 異なりうることを一目で確認できるようにする (Refs #330 実データ検証)。 */
+function formatItem(slip: ScoredVehicleDailySlip['slip']): string {
+  if (!slip.itemName) return '-'
+  const qty = slip.quantity > 0 ? `${slip.quantity}${slip.unit}` : ''
+  const price = slip.unitPrice > 0 ? `@${formatYen(slip.unitPrice)}` : ''
+  const detail = [qty, price].filter(Boolean).join(' ')
+  return detail ? `${slip.itemName} (${detail})` : slip.itemName
+}
+
 const matchBadgeClass: Record<string, string> = {
   exact: 'bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300',
   partial: 'bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300',
@@ -116,14 +126,15 @@ const matchBadgeLabel: Record<string, string> = { exact: '完全一致', partial
       {{ errorMessage }}
     </div>
     <template v-else-if="status === 'ready'">
-      <div class="max-h-64 overflow-y-auto">
-        <table v-if="scoredSlips.length" class="w-full text-xs">
+      <div class="max-h-64 overflow-y-auto overflow-x-auto">
+        <table v-if="scoredSlips.length" class="w-full text-xs min-w-[640px]">
           <thead class="bg-gray-50 dark:bg-gray-800 sticky top-0">
             <tr>
               <th class="w-8" />
               <th class="text-left px-2 py-1.5 font-medium text-gray-500">日付</th>
               <th class="text-left px-2 py-1.5 font-medium text-gray-500">得意先</th>
               <th class="text-left px-2 py-1.5 font-medium text-gray-500">積地→卸地</th>
+              <th class="text-left px-2 py-1.5 font-medium text-gray-500">品名 (数量@単価)</th>
               <th class="text-right px-2 py-1.5 font-medium text-gray-500">金額</th>
               <th class="text-center px-2 py-1.5 font-medium text-gray-500">根拠</th>
             </tr>
@@ -142,6 +153,7 @@ const matchBadgeLabel: Record<string, string> = { exact: '完全一致', partial
               <td class="px-2 py-1.5 whitespace-nowrap">{{ s.slip.saleDate }}</td>
               <td class="px-2 py-1.5">{{ s.slip.customerName || '-' }}</td>
               <td class="px-2 py-1.5">{{ s.slip.originAreaName || s.slip.origin || '?' }} → {{ s.slip.destAreaName || s.slip.dest || '?' }}</td>
+              <td class="px-2 py-1.5 whitespace-nowrap">{{ formatItem(s.slip) }}</td>
               <td class="px-2 py-1.5 text-right whitespace-nowrap">{{ formatYen(s.slip.amount) }}</td>
               <td class="px-2 py-1.5 text-center">
                 <span class="px-1.5 py-0.5 rounded text-[10px]" :class="matchBadgeClass[s.score > 0 ? (s.originMatch !== 'none' && s.destMatch !== 'none' ? 'exact' : 'partial') : 'none']">

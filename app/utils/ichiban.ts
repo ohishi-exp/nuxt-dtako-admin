@@ -20,6 +20,13 @@ export interface VehicleDailyApiRow {
   dest: string
   is_subcontracted: boolean
   amount: number
+  /** 品名C。rust-ichibanboshi#78 未デプロイの間は応答に含まれずundefinedになりうる。 */
+  item_code?: string
+  /** 品名N。同一日でも複数明細で単価が異なりうるため、突合の妥当性判断に使う。 */
+  item_name?: string
+  quantity?: number
+  unit_price?: number
+  unit?: string
   row_id: string
 }
 
@@ -34,6 +41,11 @@ export interface VehicleDailySlip {
   dest: string
   isSubcontracted: boolean
   amount: number
+  itemCode: string
+  itemName: string
+  quantity: number
+  unitPrice: number
+  unit: string
   rowId: string
 }
 
@@ -49,6 +61,11 @@ export function mapVehicleDailyApiRow(row: VehicleDailyApiRow): VehicleDailySlip
     dest: row.dest,
     isSubcontracted: row.is_subcontracted,
     amount: row.amount,
+    itemCode: row.item_code ?? '',
+    itemName: row.item_name ?? '',
+    quantity: row.quantity ?? 0,
+    unitPrice: row.unit_price ?? 0,
+    unit: row.unit ?? '',
     rowId: row.row_id,
   }
 }
