@@ -103,6 +103,26 @@ export async function extractSingleOperationZip(bulkZipBytes: Uint8Array): Promi
   return out.generateAsync({ type: 'uint8array' })
 }
 
+/**
+ * `/net780` (一括ダウンロード検索) への遷移リンクを組み立てる。読取日 (ReadNo) 基準
+ * 固定 (Refs #311、運行日を渡すと1日ズレて0件になることがある、Refs #316) で、
+ * 車輌CD・乗務員CD が分かっていればあわせて渡し絞り込んだ状態で開けるようにする。
+ * `Net780OperationSummary.vue` (NET780タブ未アーカイブ時) と運行詳細ページのイベント
+ * タブ (速度カラー Map 未アーカイブ時) の両方で共用する。
+ */
+export function buildNet780SearchLink(params: {
+  readingDate?: string | null
+  vehicleCd?: string | null
+  driverCd?: string | null
+}): string {
+  const search = new URLSearchParams()
+  if (params.readingDate) search.set('readingDate', params.readingDate)
+  if (params.vehicleCd) search.set('vehicleCd', params.vehicleCd)
+  if (params.driverCd) search.set('driverCd', params.driverCd)
+  const q = search.toString()
+  return `/net780${q ? `?${q}` : ''}`
+}
+
 export interface Net780Summary {
   vehicleCode: number | null
   driverCode: number | null
@@ -524,6 +544,18 @@ export function filterImplausibleGpsJumps(points: Net780GpsPoint[]): Net780GpsPo
 }
 
 /**
+ * GPS 点列から (0,0) プレースホルダー・通信断区間・物理的にありえないジャンプを
+ * 除外した有効点列を返す (暦日分割なし版)。`buildDailyGpsPoints` の除外ロジックを
+ * 抽出したもの (SoT 一本化、イベント行選択の速度カラー Map でも共用する)。
+ */
+export function filterValidGpsPoints(points: Net780GpsPoint[], events: Net780EventSummary[] = []): Net780GpsPoint[] {
+  const outageRanges = extractCommOutageRanges(events)
+  return filterImplausibleGpsJumps(
+    points.filter(p => (p.lat !== 0 || p.lon !== 0) && !isWithinRanges(p.ts, outageRanges)),
+  )
+}
+
+/**
  * GPS 位置情報を JST 暦日ごとに分割する (buildDailySpeedCharts と同じ日付境界)。
  * GPS 未捕捉時の `(0,0)` プレースホルダー (lat/lon とも 0) は地図表示上ノイズに
  * なるだけなので除外する。
@@ -534,10 +566,7 @@ export function filterImplausibleGpsJumps(points: Net780GpsPoint[]): Net780GpsPo
  * 異常もカバーするための主防御線、詳細は同関数のコメント参照)。
  */
 export function buildDailyGpsPoints(points: Net780GpsPoint[], events: Net780EventSummary[] = []): DailyGpsPoints[] {
-  const outageRanges = extractCommOutageRanges(events)
-  const valid = filterImplausibleGpsJumps(
-    points.filter(p => (p.lat !== 0 || p.lon !== 0) && !isWithinRanges(p.ts, outageRanges)),
-  )
+  const valid = filterValidGpsPoints(points, events)
   if (valid.length === 0) return []
 
   const byDate = new Map<string, Net780GpsPoint[]>()
@@ -571,4 +600,129 @@ export function chartXRatioToTime(
   const frac = innerW > 0 ? (x - padding) / innerW : 0
   const clamped = Math.min(1, Math.max(0, frac))
   return dayStart + clamped * 24 * 60 * 60
+}
+
+// --- 運行詳細ページ「イベント」タブ: 行選択 → 速度カラー GPS Map ---
+
+/** `ts` を持つ時刻昇順の点列を [fromTs, toTs] (両端含む) で絞り込む。 */
+export function filterPointsByRange<T extends { ts: number }>(
+  points: T[],
+  fromTs: number,
+  toTs: number,
+): T[] {
+  return points.filter(p => p.ts >= fromTs && p.ts <= toTs)
+}
+
+export interface SpeedColoredSegment {
+  from: Net780GpsPoint
+  to: Net780GpsPoint
+  /** 区間平均速度。算出不能 (フォールバックの許容範囲も超えて .spd サンプルが無い) 場合は null。 */
+  speedKmh: number | null
+  color: string
+}
+
+/** .spd サンプルを区間内平均で探す際、区間内に1件もサンプルが無い場合にだけ許容する
+ *  最寄りサンプルとの時間差 (秒)。.gpd は概ね60秒間隔なので、それより余裕を持たせる。 */
+const SPEED_MATCH_TOLERANCE_SECS = 90
+
+/** ts 昇順の配列から `ts >= target` になる最小indexを二分探索で返す。 */
+function lowerBoundByTs(samples: Array<{ ts: number }>, target: number): number {
+  let lo = 0
+  let hi = samples.length
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (samples[mid]!.ts < target) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
+/**
+ * 隣接 GPS 点ペアごとに、その区間 [from.ts, to.ts] に収まる .spd サンプルの平均速度で
+ * セグメントを色分けする (GPS 1点への最寄りspeedスナップではなく区間平均にすることで
+ * 0.5秒粒度の速度情報を活かし、急加減速でも色が飛ばないようにする)。
+ *
+ * GPS (`.gpd`、約60秒間隔) と speed (`.spd`、0.5秒粒度) は別サンプリングだが同一時間基底
+ * (どちらも「JST壁時計をそのままUNIX epochとして格納した値」、`formatNet780Ts` 参照) の
+ * ため絶対時刻で直接突き合わせられる。
+ *
+ * 区間内に .spd サンプルが1件も無い場合のみ、区間中央に最も近いサンプルを
+ * `SPEED_MATCH_TOLERANCE_SECS` 以内であればフォールバックとして採用する。それも無ければ
+ * `speedKmh: null` (呼び出し側はグレー描画する、`speedToColor` 参照)。
+ *
+ * `gps` は時刻昇順であること (`filterValidGpsPoints` + `filterPointsByRange` の出力を想定)。
+ */
+export function buildSpeedColoredSegments(
+  gps: Net780GpsPoint[],
+  speed: Net780SpeedPoint[],
+): SpeedColoredSegment[] {
+  if (gps.length < 2) return []
+
+  const samples = speed
+    .map(p => ({ ts: p.record_start_ts + p.offset_secs, speed_kmh: p.speed_kmh }))
+    .sort((a, b) => a.ts - b.ts)
+
+  function averageInWindow(fromTs: number, toTs: number): number | null {
+    const startIdx = lowerBoundByTs(samples, fromTs)
+    let sum = 0
+    let count = 0
+    for (let i = startIdx; i < samples.length && samples[i]!.ts <= toTs; i++) {
+      sum += samples[i]!.speed_kmh
+      count++
+    }
+    if (count > 0) return sum / count
+
+    // フォールバック: 区間の直前・直後で最も近いサンプルを比較する。
+    const mid = (fromTs + toTs) / 2
+    const before = samples[startIdx - 1]
+    const after = samples[startIdx]
+    const beforeDiff = before ? Math.abs(before.ts - mid) : Infinity
+    const afterDiff = after ? Math.abs(after.ts - mid) : Infinity
+    const nearest = beforeDiff <= afterDiff ? before : after
+    const nearestDiff = Math.min(beforeDiff, afterDiff)
+    if (nearest && nearestDiff <= SPEED_MATCH_TOLERANCE_SECS) return nearest.speed_kmh
+    return null
+  }
+
+  const segments: SpeedColoredSegment[] = []
+  for (let i = 0; i < gps.length - 1; i++) {
+    const from = gps[i]!
+    const to = gps[i + 1]!
+    const speedKmh = averageInWindow(from.ts, to.ts)
+    segments.push({ from, to, speedKmh, color: speedToColor(speedKmh) })
+  }
+  return segments
+}
+
+/** 速度カラー勾配のアンカー点 (km/h → HSL色相)。0-20は緑のまま、20-50で緑→黄、
+ *  50-80で黄→赤に線形補間し、80以上は赤に固定する。 */
+const SPEED_COLOR_STOPS: Array<{ kmh: number, hue: number }> = [
+  { kmh: 0, hue: 120 },
+  { kmh: 20, hue: 120 },
+  { kmh: 50, hue: 60 },
+  { kmh: 80, hue: 0 },
+]
+
+/** 速度不明を表すグレー。 */
+const SPEED_COLOR_UNKNOWN = '#9ca3af'
+
+/** 速度 (km/h) を HSL グラデーション色に変換する。`null`/`NaN` はグレー
+ *  (`SPEED_COLOR_UNKNOWN`)。 */
+export function speedToColor(kmh: number | null): string {
+  if (kmh === null || Number.isNaN(kmh)) return SPEED_COLOR_UNKNOWN
+
+  const first = SPEED_COLOR_STOPS[0]!
+  const last = SPEED_COLOR_STOPS[SPEED_COLOR_STOPS.length - 1]!
+  const clamped = Math.max(first.kmh, Math.min(last.kmh, kmh))
+
+  for (let i = 0; i < SPEED_COLOR_STOPS.length - 1; i++) {
+    const a = SPEED_COLOR_STOPS[i]!
+    const b = SPEED_COLOR_STOPS[i + 1]!
+    if (clamped >= a.kmh && clamped <= b.kmh) {
+      const ratio = b.kmh === a.kmh ? 0 : (clamped - a.kmh) / (b.kmh - a.kmh)
+      const hue = a.hue + (b.hue - a.hue) * ratio
+      return `hsl(${hue.toFixed(0)}, 85%, 45%)`
+    }
+  }
+  return SPEED_COLOR_UNKNOWN
 }

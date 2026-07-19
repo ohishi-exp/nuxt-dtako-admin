@@ -7,6 +7,10 @@ const props = defineProps<{
   loading?: boolean
 }>()
 
+const emit = defineEmits<{
+  'update:selectedRange': [range: { fromTs: number, toTs: number } | null]
+}>()
+
 const crewGroups = computed(() => groupByCrewRole(props.data.headers, props.data.rows))
 
 const activeCrewRole = ref('1')
@@ -47,6 +51,7 @@ const activeGroup = computed(() => crewGroups.value.find(g => g.crewRole === act
         v-if="activeGroup"
         :group="activeGroup"
         :headers="data.headers"
+        @update:selected-range="emit('update:selectedRange', $event)"
       />
     </template>
 

@@ -7,16 +7,15 @@
  */
 
 import {
-  extractSingleOperationZip,
-  parseNet780Zip,
   buildNet780Summary,
+  buildNet780SearchLink,
   buildDailySpeedCharts,
   buildDailyGpsPoints,
   chartXRatioToTime,
   net780DateStartTs,
   formatNet780Ts,
 } from '~/utils/net780'
-import type { Net780Summary, Net780ParseResult, Net780GpsPoint } from '~/utils/net780'
+import type { Net780GpsPoint } from '~/utils/net780'
 
 const props = defineProps<{
   operationNo: string
@@ -30,50 +29,19 @@ const props = defineProps<{
  * ではなく読取日 (reading_date) を渡す。運行日と読取日は1日ズレることがあり、
  * 運行日を渡すと 0 件になる (Refs #316)。車輌CD・乗務員CD も分かっていれば渡し、
  * より絞り込んだ状態で検索フォームを開けるようにする。 */
-const net780SearchLink = computed(() => {
-  const params = new URLSearchParams()
-  if (props.readingDate) params.set('readingDate', props.readingDate)
-  if (props.vehicleCd) params.set('vehicleCd', props.vehicleCd)
-  if (props.driverCd) params.set('driverCd', props.driverCd)
-  const q = params.toString()
-  return `/net780${q ? `?${q}` : ''}`
-})
+const net780SearchLink = computed(() => buildNet780SearchLink({
+  readingDate: props.readingDate,
+  vehicleCd: props.vehicleCd,
+  driverCd: props.driverCd,
+}))
 
-const loading = ref(false)
-const notFound = ref(false)
-const error = ref<string | null>(null)
-const result = ref<Net780ParseResult | null>(null)
+const net780Data = useNet780OperationData(() => props.operationNo)
+const { result } = net780Data
+const loading = computed(() => net780Data.status.value === 'idle' || net780Data.status.value === 'loading')
+const notFound = computed(() => net780Data.status.value === 'not-found')
+const error = net780Data.error
 
-async function load(operationNo: string) {
-  loading.value = true
-  notFound.value = false
-  error.value = null
-  result.value = null
-  try {
-    const blob = await $fetch<Blob>('/api/net780/by-operation', {
-      query: { operationNo },
-      responseType: 'blob',
-    })
-    const bulkBytes = new Uint8Array(await blob.arrayBuffer())
-    const singleBytes = await extractSingleOperationZip(bulkBytes)
-    result.value = await parseNet780Zip(singleBytes)
-  }
-  catch (e) {
-    const status = (e as { statusCode?: number; response?: { status?: number } })?.statusCode
-      ?? (e as { response?: { status?: number } })?.response?.status
-    if (status === 404) {
-      notFound.value = true
-    }
-    else {
-      error.value = e instanceof Error ? e.message : 'NET780 データの取得に失敗しました'
-    }
-  }
-  finally {
-    loading.value = false
-  }
-}
-
-watch(() => props.operationNo, (v) => { if (v) load(v) }, { immediate: true })
+watch(() => props.operationNo, (v) => { if (v) net780Data.ensureLoaded() }, { immediate: true })
 
 const summary = computed(() => (result.value ? buildNet780Summary(result.value) : null))
 
