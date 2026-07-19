@@ -81,8 +81,12 @@ export function vehicleDailyDateRange(fromTs: number, toTs: number): { from: str
 
 export type LocationMatchLevel = 'exact' | 'partial' | 'none'
 
-export function normalizeLocationName(s: string): string {
-  return s.normalize('NFKC').trim()
+/**
+ * API 応答は境界を越えるため `string` 型注釈があっても実際には null/undefined が
+ * 来うる (rust-ichibanboshi の未マージフィールドで実際に発生、Refs #330)。
+ */
+export function normalizeLocationName(s: string | null | undefined): string {
+  return (s ?? '').normalize('NFKC').trim()
 }
 
 /**
@@ -90,7 +94,7 @@ export function normalizeLocationName(s: string): string {
  * 完全一致 (正規化後) は `exact`、どちらかがもう片方を部分文字列として含むなら
  * `partial` (dtako「北九州市」⊂ 一番星「福岡県北九州市」等)。
  */
-export function matchLocationLevel(dtakoName: string, ichibanName: string): LocationMatchLevel {
+export function matchLocationLevel(dtakoName: string | null | undefined, ichibanName: string | null | undefined): LocationMatchLevel {
   const a = normalizeLocationName(dtakoName)
   const b = normalizeLocationName(ichibanName)
   if (!a || !b) return 'none'
