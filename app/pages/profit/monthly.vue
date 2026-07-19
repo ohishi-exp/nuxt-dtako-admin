@@ -7,7 +7,7 @@
  * マッチ率検証の集計結果を見るための画面)。集計本体は
  * `server/api/profit/monthly.get.ts` + `app/utils/profit-r2.ts::summarizeMonthly`。
  */
-import type { MonthlySummary } from '~/utils/profit-r2'
+import type { MonthlySummary, SnapshotListItem } from '~/utils/profit-r2'
 
 function currentYm(): string {
   const now = new Date()
@@ -38,6 +38,40 @@ async function search() {
   }
 }
 
+// --- 保存済み検証スナップショット一覧 (Refs #330、車輌・月を先に決めなくても
+//     保存したものから検索・閲覧できるようにする要望) ---
+
+type SnapshotListStatus = 'idle' | 'loading' | 'ready' | 'error'
+const snapshotListStatus = ref<SnapshotListStatus>('idle')
+const snapshotListError = ref<string | null>(null)
+const snapshotItems = ref<SnapshotListItem[]>([])
+const snapshotFilterVehicle = ref('')
+const snapshotFilterYm = ref('')
+
+async function loadSnapshotList() {
+  snapshotListStatus.value = 'loading'
+  snapshotListError.value = null
+  try {
+    const query: Record<string, string> = {}
+    if (snapshotFilterVehicle.value) query.vehicle = snapshotFilterVehicle.value
+    if (snapshotFilterYm.value) query.ym = snapshotFilterYm.value
+    const res = await $fetch<{ items: SnapshotListItem[], total: number }>('/api/profit/snapshots', { query })
+    snapshotItems.value = res.items
+    snapshotListStatus.value = 'ready'
+  }
+  catch (e) {
+    snapshotListError.value = e instanceof Error ? e.message : String(e)
+    snapshotListStatus.value = 'error'
+  }
+}
+
+onMounted(loadSnapshotList)
+
+function matchLevelLabel(item: SnapshotListItem): string {
+  const { exact, partial, none } = item.matchCounts
+  return `完全${exact} / 部分${partial} / 根拠なし${none}`
+}
+
 function formatYen(v: number): string {
   return Math.round(v).toLocaleString('ja-JP')
 }
@@ -54,7 +88,83 @@ function pct(count: number): string {
 </script>
 
 <template>
-  <div class="max-w-3xl mx-auto p-6">
+  <div class="max-w-5xl mx-auto p-6">
+    <h2 class="text-lg font-bold mb-1">保存済み検証一覧</h2>
+    <p class="text-xs text-gray-500 mb-3">
+      運行詳細の収支パネルで保存した検証結果を新しい順に表示します。行をクリックすると元の運行詳細に移動します。
+    </p>
+
+    <div class="flex items-end gap-3 mb-3">
+      <div>
+        <label class="text-xs text-gray-500 block mb-1">車輌CD (絞り込み)</label>
+        <input
+          v-model="snapshotFilterVehicle"
+          type="text"
+          placeholder="例: 8504"
+          class="border border-gray-300 dark:border-gray-700 rounded px-2 py-1.5 text-sm bg-white dark:bg-gray-900"
+          @keyup.enter="loadSnapshotList"
+        >
+      </div>
+      <div>
+        <label class="text-xs text-gray-500 block mb-1">年月 (絞り込み)</label>
+        <input
+          v-model="snapshotFilterYm"
+          type="month"
+          class="border border-gray-300 dark:border-gray-700 rounded px-2 py-1.5 text-sm bg-white dark:bg-gray-900"
+        >
+      </div>
+      <button
+        class="text-sm px-4 py-1.5 rounded bg-gray-600 hover:bg-gray-700 disabled:opacity-50 text-white"
+        :disabled="snapshotListStatus === 'loading'"
+        @click="loadSnapshotList"
+      >
+        {{ snapshotListStatus === 'loading' ? '検索中...' : '検索' }}
+      </button>
+    </div>
+
+    <p v-if="snapshotListStatus === 'error'" class="text-sm text-red-600 dark:text-red-400 mb-6">
+      {{ snapshotListError }}
+    </p>
+    <p v-else-if="snapshotListStatus === 'ready' && snapshotItems.length === 0" class="text-xs text-gray-400 mb-6">
+      条件に一致する保存済みスナップショットはありません
+    </p>
+    <div v-else-if="snapshotItems.length > 0" class="border border-gray-200 dark:border-gray-800 rounded-lg overflow-x-auto mb-8">
+      <table class="w-full text-xs min-w-[720px]">
+        <thead class="bg-gray-50 dark:bg-gray-800">
+          <tr>
+            <th class="text-left px-3 py-2 font-medium text-gray-500">保存日時</th>
+            <th class="text-left px-3 py-2 font-medium text-gray-500">車輌CD</th>
+            <th class="text-left px-3 py-2 font-medium text-gray-500">運行日</th>
+            <th class="text-left px-3 py-2 font-medium text-gray-500">得意先</th>
+            <th class="text-right px-3 py-2 font-medium text-gray-500">確定金額</th>
+            <th class="text-left px-3 py-2 font-medium text-gray-500">マッチレベル</th>
+          </tr>
+        </thead>
+        <tbody>
+          <NuxtLink
+            v-for="item in snapshotItems"
+            :key="`${item.vehicleCode}-${item.unkoNo}-${item.segmentId}`"
+            :to="`/operations/${item.unkoNo}`"
+            custom
+          >
+            <template #default="{ navigate }">
+              <tr
+                class="border-t border-gray-100 dark:border-gray-800 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50"
+                @click="navigate"
+              >
+                <td class="px-3 py-2 whitespace-nowrap">{{ item.savedAt.slice(0, 16).replace('T', ' ') }}</td>
+                <td class="px-3 py-2 whitespace-nowrap">{{ item.vehicleCode }}</td>
+                <td class="px-3 py-2 whitespace-nowrap">{{ item.saleDateFrom }}{{ item.saleDateFrom !== item.saleDateTo ? ` 〜 ${item.saleDateTo}` : '' }}</td>
+                <td class="px-3 py-2">{{ item.customerNames.join(', ') || '-' }}</td>
+                <td class="px-3 py-2 text-right whitespace-nowrap">{{ formatYen(item.confirmedAmount) }} 円</td>
+                <td class="px-3 py-2 whitespace-nowrap text-gray-500">{{ matchLevelLabel(item) }}</td>
+              </tr>
+            </template>
+          </NuxtLink>
+        </tbody>
+      </table>
+    </div>
+
     <h1 class="text-xl font-bold mb-1">一番星マッチ率検証 (月次)</h1>
     <p class="text-xs text-gray-500 mb-4">
       運行詳細の収支パネルで保存した検証スナップショットを車輌・月単位で集計し、

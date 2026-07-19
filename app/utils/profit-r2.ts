@@ -202,7 +202,7 @@ export interface MonthlySummary {
 }
 
 /** 積地・卸地の突合レベルを1つに統合する。片方でも none なら根拠なし、両方 exact のみ exact、それ以外 partial。 */
-function combinedMatchLevel(originMatch: LocationMatchLevel, destMatch: LocationMatchLevel): LocationMatchLevel {
+export function combinedMatchLevel(originMatch: LocationMatchLevel, destMatch: LocationMatchLevel): LocationMatchLevel {
   if (originMatch === 'none' || destMatch === 'none') return 'none'
   if (originMatch === 'exact' && destMatch === 'exact') return 'exact'
   return 'partial'
@@ -228,4 +228,50 @@ export function summarizeMonthly(ichibanRows: VehicleDailySlip[], snapshots: Pro
     matchCounts,
     snapshotCount: snapshots.length,
   }
+}
+
+// --- 保存済みスナップショット一覧 (Refs #330、「マッチ率よりまず保存したやつから検索したい」要望) ---
+
+export interface SnapshotListItem {
+  vehicleCode: string
+  unkoNo: string
+  segmentId: string
+  ym: string
+  savedAt: string
+  confirmedAmount: number
+  slipCount: number
+  /** 確認済み伝票の得意先名 (重複除去)。 */
+  customerNames: string[]
+  /** 確認済み伝票の売上年月日の最小/最大 (区間の目安表示用)。伝票が無ければ空文字。 */
+  saleDateFrom: string
+  saleDateTo: string
+  matchCounts: MonthlyMatchCounts
+}
+
+/** 保存済みスナップショット1件を一覧表示用に要約する。 */
+export function toSnapshotListItem(snapshot: ProfitSnapshot): SnapshotListItem {
+  const customerNames = [...new Set(snapshot.confirmedSlips.map(s => s.customerName).filter(Boolean))]
+  const saleDates = snapshot.confirmedSlips.map(s => s.saleDate).filter(Boolean).sort()
+  const matchCounts: MonthlyMatchCounts = { exact: 0, partial: 0, none: 0 }
+  for (const slip of snapshot.confirmedSlips) {
+    matchCounts[combinedMatchLevel(slip.originMatch, slip.destMatch)]++
+  }
+  return {
+    vehicleCode: snapshot.vehicleCode,
+    unkoNo: snapshot.unkoNo,
+    segmentId: snapshot.segmentId,
+    ym: snapshot.ym,
+    savedAt: snapshot.savedAt,
+    confirmedAmount: snapshot.confirmedAmount,
+    slipCount: snapshot.confirmedSlips.length,
+    customerNames,
+    saleDateFrom: saleDates[0] ?? '',
+    saleDateTo: saleDates[saleDates.length - 1] ?? '',
+    matchCounts,
+  }
+}
+
+/** 保存日時 (savedAt、ISO8601文字列) の新しい順に並べる。破壊的変更を避けるため新しい配列を返す。 */
+export function sortSnapshotListBySavedAtDesc(items: SnapshotListItem[]): SnapshotListItem[] {
+  return [...items].sort((a, b) => b.savedAt.localeCompare(a.savedAt))
 }
