@@ -154,6 +154,7 @@ function seekFromEvent(view: DailyView, e: MouseEvent) {
 
 function onChartPointerDown(view: DailyView, e: MouseEvent) {
   seeking.value = view.date
+  chartRefs.get(view.date)?.focus() // 以降 ←→ キーで前後移動できるようにする
   seekFromEvent(view, e)
 }
 function onChartPointerMove(view: DailyView, e: MouseEvent) {
@@ -161,6 +162,25 @@ function onChartPointerMove(view: DailyView, e: MouseEvent) {
 }
 function onChartPointerUp() {
   seeking.value = null
+}
+
+/** ←→キーでの前後移動 (dvr-map.vue と同じ操作感)。GPS 軌跡の点を一覧に見立て、
+ * 現在のシーク位置に最も近い点から ±1 点分だけ移動し、地図のピンに反映する。 */
+function stepSeek(view: DailyView, delta: number) {
+  const points = view.gpsPoints
+  if (!points.length) return
+  const t = currentTimeFor(view)
+  let idx = 0
+  let bestDiff = Infinity
+  for (let i = 0; i < points.length; i++) {
+    const diff = Math.abs(points[i]!.ts - t)
+    if (diff < bestDiff) {
+      bestDiff = diff
+      idx = i
+    }
+  }
+  const newIdx = Math.min(points.length - 1, Math.max(0, idx + delta))
+  currentTimes[view.date] = points[newIdx]!.ts
 }
 </script>
 
@@ -219,17 +239,22 @@ function onChartPointerUp() {
         </template>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <p class="text-xs text-gray-500 mb-1">速度 (.spd、0.5秒粒度、クリック/ドラッグでシーク)</p>
+            <p class="text-xs text-gray-500 mb-1">
+              速度 (.spd、0.5秒粒度、クリック/ドラッグでシーク、←→キーで前後移動 — 地図のピンが連動)
+            </p>
             <template v-if="daily.chart">
               <svg
                 :ref="(el) => setChartRef(daily.date, el as Element | null)"
+                tabindex="0"
                 :viewBox="`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`"
-                class="w-full h-40 cursor-crosshair select-none"
+                class="w-full h-40 cursor-crosshair select-none outline-none focus:ring-2 focus:ring-blue-400"
                 preserveAspectRatio="none"
                 @mousedown="onChartPointerDown(daily, $event)"
                 @mousemove="onChartPointerMove(daily, $event)"
                 @mouseup="onChartPointerUp"
                 @mouseleave="onChartPointerUp"
+                @keydown.left.prevent="stepSeek(daily, -1)"
+                @keydown.right.prevent="stepSeek(daily, 1)"
               >
                 <polyline
                   v-for="(seg, i) in daily.chart.segments"
