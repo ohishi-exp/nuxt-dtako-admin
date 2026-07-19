@@ -2,6 +2,7 @@
 import { getOperation, getOperationCsv, deleteOperation } from '~/utils/api'
 import type { Operation, CsvJsonResponse, CsvType } from '~/types'
 import { filterValidGpsPoints, filterPointsByRange, buildSpeedColoredSegments, buildNet780SearchLink } from '~/utils/net780'
+import type { SelectedRowsSummary } from '~/utils/event-data-table'
 
 const route = useRoute()
 const router = useRouter()
@@ -82,14 +83,22 @@ const net780DriverCd = computed(() =>
  * NET780 タブと dedup する)。 */
 const net780Data = useNet780OperationData(() => unkoNo)
 const selectedEventRange = ref<{ fromTs: number, toTs: number } | null>(null)
+const selectedEventSummary = ref<SelectedRowsSummary | null>(null)
 
 watch(activeTab, (tab) => {
-  if (tab !== 'events') selectedEventRange.value = null
+  if (tab !== 'events') {
+    selectedEventRange.value = null
+    selectedEventSummary.value = null
+  }
 })
 
 function onSelectedRangeChange(range: { fromTs: number, toTs: number } | null) {
   selectedEventRange.value = range
   if (range) net780Data.ensureLoaded()
+}
+
+function onSelectedSummaryChange(summary: SelectedRowsSummary | null) {
+  selectedEventSummary.value = summary
 }
 
 const eventMapSegments = computed(() => {
@@ -227,6 +236,7 @@ function formatDatetime(val: string | null): string {
           :data="csvData[activeTab] || { headers: [], rows: [] }"
           :loading="csvLoading && !csvData[activeTab]"
           @update:selected-range="onSelectedRangeChange"
+          @update:selected-summary="onSelectedSummaryChange"
         />
         <CsvDataTable
           v-else
@@ -250,6 +260,12 @@ function formatDatetime(val: string | null): string {
       :speed-points="eventMapSpeedPoints"
       :range="selectedEventRange"
       @close="selectedEventRange = null"
+    />
+
+    <EventSelectionSummaryPanel
+      v-if="activeTab === 'events' && selectedEventSummary"
+      :summary="selectedEventSummary"
+      @close="selectedEventSummary = null"
     />
 
     <!-- Delete confirmation modal -->

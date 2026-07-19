@@ -153,6 +153,38 @@ describe('EventCrewPanel', () => {
       expect(emitted[emitted.length - 1]![0]).toBeNull()
     })
 
+    it('行選択で update:selectedSummary も emit する (距離・時間・区分内訳)', async () => {
+      const rows = [
+        ['2026/03/07 08:00:00', '2026/03/07 08:30:00', '01', '積み', '30', '5'],
+        ['2026/03/07 08:30:00', '2026/03/07 09:00:00', '01', '休憩', '30', '0'],
+      ]
+      const wrapper = createWrapper(makeGroup(rows))
+      const trs = wrapper.findAll('tbody tr')
+      await trs[0]!.trigger('click')
+      await trs[1]!.trigger('click')
+      const emitted = wrapper.emitted('update:selectedSummary')!
+      const last = emitted[emitted.length - 1]![0] as {
+        distanceKm: number
+        durationMin: number
+        byCategory: Record<string, number>
+        rowCount: number
+      }
+      expect(last.distanceKm).toBe(5)
+      expect(last.durationMin).toBe(60)
+      expect(last.byCategory.loading).toBe(30)
+      expect(last.byCategory.rest).toBe(30)
+      expect(last.rowCount).toBe(2)
+    })
+
+    it('選択解除で update:selectedSummary に null を emit する', async () => {
+      const wrapper = createWrapper(makeGroup([makeRow('積み')]))
+      const row = wrapper.find('tbody tr')
+      await row.trigger('click')
+      await row.trigger('click')
+      const emitted = wrapper.emitted('update:selectedSummary')!
+      expect(emitted[emitted.length - 1]![0]).toBeNull()
+    })
+
     it('乗務員 (group) が切り替わると選択がクリアされる', async () => {
       const group1 = makeGroup([makeRow('休憩')])
       const wrapper = createWrapper(group1)

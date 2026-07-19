@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { CsvJsonResponse } from '~/types'
+import type { SelectedRowsSummary } from '~/utils/event-data-table'
 import { groupByCrewRole } from '~/utils/event-data-table'
 
 const props = defineProps<{
@@ -9,6 +10,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:selectedRange': [range: { fromTs: number, toTs: number } | null]
+  'update:selectedSummary': [summary: SelectedRowsSummary | null]
 }>()
 
 const crewGroups = computed(() => groupByCrewRole(props.data.headers, props.data.rows))
@@ -52,6 +54,7 @@ const activeGroup = computed(() => crewGroups.value.find(g => g.crewRole === act
         :group="activeGroup"
         :headers="data.headers"
         @update:selected-range="emit('update:selectedRange', $event)"
+        @update:selected-summary="emit('update:selectedSummary', $event)"
       />
     </template>
 
