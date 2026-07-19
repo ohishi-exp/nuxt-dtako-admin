@@ -6,7 +6,10 @@ import {
   profitVersionTimestamp,
   appendProfitHistoryJsonl,
   buildProfitSnapshot,
+  monthRange,
+  summarizeMonthly,
   type ProfitSnapshotSlip,
+  type ProfitSnapshot,
 } from '~/utils/profit-r2'
 import type { ScoredVehicleDailySlip, VehicleDailySlip } from '~/utils/ichiban'
 
@@ -142,5 +145,142 @@ describe('buildProfitSnapshot', () => {
     })
     expect(snapshot.location).toEqual({ originCity: '', destCity: '' })
     expect(snapshot.confirmedSlips).toEqual([])
+  })
+})
+
+describe('monthRange', () => {
+  it('通常月は同年内の翌月1日を to にする', () => {
+    expect(monthRange('2026-06')).toEqual({ from: '2026-06-01', to: '2026-07-01' })
+  })
+
+  it('12月は年またぎで翌年1月1日を to にする', () => {
+    expect(monthRange('2026-12')).toEqual({ from: '2026-12-01', to: '2027-01-01' })
+  })
+})
+
+function snapshotSlip(overrides: Partial<ProfitSnapshotSlip> = {}): ProfitSnapshotSlip {
+  return {
+    rowId: 'row-1',
+    saleDate: '2026-06-21',
+    customerCode: '000001',
+    customerName: '㈱田浦畜産',
+    originAreaName: '長崎県長崎市',
+    destAreaName: '福岡県北九州市',
+    origin: '釧路',
+    dest: '福岡県北九州市',
+    isSubcontracted: false,
+    amount: 65000,
+    itemCode: '0001',
+    itemName: '冷凍食品',
+    quantity: 10.5,
+    unitPrice: 6190,
+    unit: '個',
+    originMatch: 'exact',
+    destMatch: 'exact',
+    ...overrides,
+  }
+}
+
+function profitSnapshot(overrides: Partial<ProfitSnapshot> = {}): ProfitSnapshot {
+  return {
+    schemaVersion: 1,
+    vehicleCode: '8504',
+    unkoNo: 'unko-1',
+    segmentId: '0-3600',
+    ym: '2026-06',
+    range: { fromTs: 0, toTs: 3600 },
+    location: { originCity: '長崎市', destCity: '北九州市' },
+    dtakoSummary: { distanceKm: 100, durationMin: 480, byCategory: { drive: 300, loading: 60, unloading: 60, rest: 60, idle: 0, other: 0 }, rowCount: 2 },
+    confirmedSlips: [snapshotSlip()],
+    confirmedAmount: 65000,
+    efficiency: { yenPerKm: 650, yenPerHourBound: 8125, yenPerHourDrive: 13000 },
+    savedAt: '2026-07-19T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function ichibanSlip(overrides: Partial<VehicleDailySlip> = {}): VehicleDailySlip {
+  return {
+    saleDate: '2026-06-21',
+    vehicleNumber: '8504',
+    customerCode: '000001',
+    customerName: '㈱田浦畜産',
+    originAreaName: '長崎県長崎市',
+    destAreaName: '福岡県北九州市',
+    origin: '釧路',
+    dest: '福岡県北九州市',
+    isSubcontracted: false,
+    amount: 65000,
+    itemCode: '',
+    itemName: '',
+    quantity: 0,
+    unitPrice: 0,
+    unit: '',
+    rowId: 'row-1',
+    ...overrides,
+  }
+}
+
+describe('summarizeMonthly', () => {
+  it('一番星月計 (全伝票合算) と確認済み合計・差額を計算する', () => {
+    const ichibanRows = [ichibanSlip({ amount: 65000 }), ichibanSlip({ rowId: 'row-2', amount: 20000 })]
+    const snapshots = [profitSnapshot({ confirmedAmount: 65000 })]
+    const result = summarizeMonthly(ichibanRows, snapshots)
+    expect(result.ichibanTotal).toBe(85000)
+    expect(result.confirmedTotal).toBe(65000)
+    expect(result.diff).toBe(20000)
+    expect(result.snapshotCount).toBe(1)
+  })
+
+  it('両方 exact なら exact に集計する', () => {
+    const snapshots = [profitSnapshot({ confirmedSlips: [snapshotSlip({ originMatch: 'exact', destMatch: 'exact' })] })]
+    const result = summarizeMonthly([], snapshots)
+    expect(result.matchCounts).toEqual({ exact: 1, partial: 0, none: 0 })
+  })
+
+  it('片方でも partial なら partial に集計する', () => {
+    const snapshots = [profitSnapshot({ confirmedSlips: [snapshotSlip({ originMatch: 'exact', destMatch: 'partial' })] })]
+    const result = summarizeMonthly([], snapshots)
+    expect(result.matchCounts).toEqual({ exact: 0, partial: 1, none: 0 })
+  })
+
+  it('destMatch が none なら none に集計する (originMatch が partial でも none 優先)', () => {
+    const snapshots = [profitSnapshot({ confirmedSlips: [snapshotSlip({ originMatch: 'partial', destMatch: 'none' })] })]
+    const result = summarizeMonthly([], snapshots)
+    expect(result.matchCounts).toEqual({ exact: 0, partial: 0, none: 1 })
+  })
+
+  it('originMatch が none なら none に集計する', () => {
+    const snapshots = [profitSnapshot({ confirmedSlips: [snapshotSlip({ originMatch: 'none', destMatch: 'exact' })] })]
+    const result = summarizeMonthly([], snapshots)
+    expect(result.matchCounts).toEqual({ exact: 0, partial: 0, none: 1 })
+  })
+
+  it('originMatch が exact でも destMatch が exact でなければ partial (AND の左辺true・右辺false)', () => {
+    const snapshots = [profitSnapshot({ confirmedSlips: [snapshotSlip({ originMatch: 'exact', destMatch: 'partial' })] })]
+    const result = summarizeMonthly([], snapshots)
+    expect(result.matchCounts).toEqual({ exact: 0, partial: 1, none: 0 })
+  })
+
+  it('originMatch が exact でなければ destMatch が exact でも partial (AND の左辺false)', () => {
+    const snapshots = [profitSnapshot({ confirmedSlips: [snapshotSlip({ originMatch: 'partial', destMatch: 'exact' })] })]
+    const result = summarizeMonthly([], snapshots)
+    expect(result.matchCounts).toEqual({ exact: 0, partial: 1, none: 0 })
+  })
+
+  it('スナップショット・一番星行がどちらも空でも壊れない', () => {
+    const result = summarizeMonthly([], [])
+    expect(result).toEqual({ ichibanTotal: 0, confirmedTotal: 0, diff: 0, matchCounts: { exact: 0, partial: 0, none: 0 }, snapshotCount: 0 })
+  })
+
+  it('複数スナップショット・複数伝票を横断して集計する', () => {
+    const snapshots = [
+      profitSnapshot({ confirmedAmount: 65000, confirmedSlips: [snapshotSlip({ rowId: 'a', originMatch: 'exact', destMatch: 'exact' })] }),
+      profitSnapshot({ confirmedAmount: 20000, confirmedSlips: [snapshotSlip({ rowId: 'b', originMatch: 'none', destMatch: 'none' })] }),
+    ]
+    const result = summarizeMonthly([ichibanSlip({ amount: 100000 })], snapshots)
+    expect(result.confirmedTotal).toBe(85000)
+    expect(result.matchCounts).toEqual({ exact: 1, partial: 0, none: 1 })
+    expect(result.snapshotCount).toBe(2)
   })
 })
