@@ -7,6 +7,7 @@ import {
   scoreVehicleDailySlips,
   calcProfitEfficiency,
   fetchVehicleDailySlips,
+  searchVehicleDailySlips,
   type VehicleDailyApiRow,
   type VehicleDailySlip,
 } from '~/utils/ichiban'
@@ -250,5 +251,77 @@ describe('fetchVehicleDailySlips', () => {
     expect(result).toHaveLength(1)
     expect(result[0]!.vehicleNumber).toBe('8504')
     expect(result[0]!.rowId).toBe('20260621-1001')
+  })
+})
+
+describe('searchVehicleDailySlips', () => {
+  const fetchMock = vi.fn()
+
+  beforeEach(() => {
+    fetchMock.mockReset()
+    vi.stubGlobal('$fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('vehicle を指定せず customer/origin/dest だけでも検索できる (Refs #330 PR5)', async () => {
+    fetchMock.mockResolvedValue({ source_table: '運転日報明細', data: [] })
+
+    await searchVehicleDailySlips({
+      from: '2026-06-01',
+      to: '2026-07-01',
+      customer: '000001',
+      origin: '長崎',
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/ichiban/api/sales/vehicle-daily', {
+      query: {
+        from: '2026-06-01',
+        to: '2026-07-01',
+        customer: '000001',
+        origin: '長崎',
+      },
+    })
+  })
+
+  it('複数車輌の伝票を camelCase にマップして返す', async () => {
+    fetchMock.mockResolvedValue({
+      source_table: '運転日報明細',
+      data: [
+        {
+          sale_date: '2026-06-21',
+          vehicle_number: '8504',
+          customer_code: '000001',
+          customer_name: '㈱田浦畜産',
+          origin_area_name: '長崎県',
+          dest_area_name: '福岡県',
+          origin: '',
+          dest: '',
+          is_subcontracted: false,
+          amount: 65000,
+          row_id: '20260621-1001',
+        },
+        {
+          sale_date: '2026-06-22',
+          vehicle_number: '9012',
+          customer_code: '000001',
+          customer_name: '㈱田浦畜産',
+          origin_area_name: '長崎県佐世保市',
+          dest_area_name: '東京都',
+          origin: '',
+          dest: '',
+          is_subcontracted: false,
+          amount: 80000,
+          row_id: '20260622-1003',
+        },
+      ],
+    })
+
+    const result = await searchVehicleDailySlips({ from: '2026-06-01', to: '2026-07-01', customer: '000001' })
+
+    expect(result).toHaveLength(2)
+    expect(result.map(s => s.vehicleNumber)).toEqual(['8504', '9012'])
   })
 })
