@@ -41,6 +41,10 @@ path = "app/components/EventCrewPanel.vue"
 branches = true
 
 [[files]]
+path = "app/components/EventSelectionSummaryPanel.vue"
+branches = true
+
+[[files]]
 path = "app/utils/poi.ts"
 branches = true
 

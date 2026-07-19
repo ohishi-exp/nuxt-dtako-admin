@@ -264,3 +264,94 @@ export function selectedRowsTimeRange(
   const hi = toTs ?? fromTs!
   return lo <= hi ? { fromTs: lo, toTs: hi } : { fromTs: hi, toTs: lo }
 }
+
+// --- 選択行 → 距離・時間内訳の集計 (運行詳細の収支パネル、Refs #330 PR3) ---
+
+/** 収支パネルの時間内訳区分。`classifyEventName` の表示タブ分類 (event/drive/idle/
+ * overspeed) とは目的が異なり、「積み」「降し」「休憩・休息」を運転・アイドリングと
+ * 並ぶ独立区分として分けて表示する (円/時間 等の効率指標算出の元になるため)。 */
+export type OperationTimeCategory = 'drive' | 'loading' | 'unloading' | 'rest' | 'idle' | 'other'
+
+export const OPERATION_TIME_CATEGORY_ORDER: OperationTimeCategory[] = [
+  'drive', 'loading', 'unloading', 'rest', 'idle', 'other',
+]
+
+export const OPERATION_TIME_CATEGORY_LABELS: Record<OperationTimeCategory, string> = {
+  drive: '運転',
+  loading: '積み',
+  unloading: '降し',
+  rest: '休憩・休息',
+  idle: 'アイドリング',
+  other: 'その他',
+}
+
+const LOADING_EVENT_NAME = '積み'
+const UNLOADING_EVENT_NAME = '降し'
+const REST_EVENT_NAMES = new Set(['休憩', '休息'])
+
+export function classifyTimeCategory(name: string): OperationTimeCategory {
+  const trimmed = name.trim()
+  if (driveEventNames.has(trimmed)) return 'drive'
+  if (trimmed === LOADING_EVENT_NAME) return 'loading'
+  if (trimmed === UNLOADING_EVENT_NAME) return 'unloading'
+  if (REST_EVENT_NAMES.has(trimmed)) return 'rest'
+  if (trimmed === IDLE_EVENT_NAME) return 'idle'
+  return 'other'
+}
+
+export interface SelectedRowsSummary {
+  /** Σ区間距離 (km)。数値化できない行は加算しない。 */
+  distanceKm: number
+  /** Σ区間時間 (分)。数値化できない行は加算しない。 */
+  durationMin: number
+  /** 区分別 Σ区間時間 (分)。 */
+  byCategory: Record<OperationTimeCategory, number>
+  /** 選択行数 (対象範囲に存在した行のみ、存在しない index は含まない)。 */
+  rowCount: number
+}
+
+function emptyByCategory(): Record<OperationTimeCategory, number> {
+  return { drive: 0, loading: 0, unloading: 0, rest: 0, idle: 0, other: 0 }
+}
+
+/**
+ * 選択行 (`selectedIdx`、`rows` に対する index) の区間距離・区間時間を集計する。
+ * 区間距離・区間時間はそれぞれ独立に数値化を試み、片方が欠損/不正 (空文字・NaN) でも
+ * もう片方は加算する (休憩・休息イベント等は区間距離が空欄になりうるため)。
+ */
+export function summarizeSelectedRows(
+  headers: string[],
+  rows: string[][],
+  selectedIdx: Iterable<number>,
+): SelectedRowsSummary {
+  const distIdx = colIndex(headers, '区間距離')
+  const durIdx = colIndex(headers, '区間時間')
+  const nameIdx = colIndex(headers, 'イベント名')
+
+  const byCategory = emptyByCategory()
+  let distanceKm = 0
+  let durationMin = 0
+  let rowCount = 0
+
+  for (const idx of selectedIdx) {
+    const row = rows[idx]
+    if (!row) continue
+    rowCount++
+
+    if (distIdx >= 0) {
+      const dist = Number.parseFloat(row[distIdx] ?? '')
+      if (Number.isFinite(dist)) distanceKm += dist
+    }
+
+    if (durIdx >= 0) {
+      const dur = Number.parseInt(row[durIdx] ?? '', 10)
+      if (Number.isFinite(dur)) {
+        durationMin += dur
+        const name = nameIdx >= 0 ? (row[nameIdx] ?? '') : ''
+        byCategory[classifyTimeCategory(name)] += dur
+      }
+    }
+  }
+
+  return { distanceKm, durationMin, byCategory, rowCount }
+}

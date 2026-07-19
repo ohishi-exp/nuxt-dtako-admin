@@ -88,4 +88,16 @@ describe('EventDataTable', () => {
     // crewGroups has 1 group but no displayColumns → panel still renders
     expect(wrapper.find('.crew-panel').exists()).toBe(true)
   })
+
+  it('EventCrewPanel の update:selected-summary をそのまま relay する (実体の EventCrewPanel を使用)', async () => {
+    const wrapper = mount(EventDataTable, {
+      props: { data: { headers: fullHeaders, rows: [makeRow({ 'イベント名': '積み', '区間時間': '10', '区間距離': '3' })] }, loading: false },
+      global: { stubs: { UIcon: UIconStub } },
+    })
+    await wrapper.find('tbody tr').trigger('click')
+    const emitted = wrapper.emitted('update:selectedSummary')
+    expect(emitted).toBeTruthy()
+    const last = emitted![emitted!.length - 1]![0] as { distanceKm: number, durationMin: number } | null
+    expect(last).toMatchObject({ distanceKm: 3, durationMin: 10 })
+  })
 })

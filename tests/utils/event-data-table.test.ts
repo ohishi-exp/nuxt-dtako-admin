@@ -18,6 +18,8 @@ import {
   classifyEventName,
   filterRowsByCategory,
   countRowsByCategory,
+  classifyTimeCategory,
+  summarizeSelectedRows,
 } from '~/utils/event-data-table'
 
 describe('colIndex', () => {
@@ -550,6 +552,135 @@ describe('isOverspeedEventName', () => {
     expect(isOverspeedEventName('速度オーバー注意')).toBe(false)
     expect(isOverspeedEventName('一般道空車')).toBe(false)
     expect(isOverspeedEventName('')).toBe(false)
+  })
+})
+
+describe('classifyTimeCategory', () => {
+  it('走行系イベント名は drive に分類する', () => {
+    expect(classifyTimeCategory('一般道空車')).toBe('drive')
+    expect(classifyTimeCategory('一般道実車')).toBe('drive')
+    expect(classifyTimeCategory('専用道')).toBe('drive')
+    expect(classifyTimeCategory('高速道')).toBe('drive')
+  })
+  it('積みは loading に分類する', () => {
+    expect(classifyTimeCategory('積み')).toBe('loading')
+  })
+  it('降しは unloading に分類する', () => {
+    expect(classifyTimeCategory('降し')).toBe('unloading')
+  })
+  it('休憩・休息はどちらも rest に分類する', () => {
+    expect(classifyTimeCategory('休憩')).toBe('rest')
+    expect(classifyTimeCategory('休息')).toBe('rest')
+  })
+  it('アイドリングは idle に分類する', () => {
+    expect(classifyTimeCategory('アイドリング')).toBe('idle')
+  })
+  it('上記以外は other に分類する', () => {
+    expect(classifyTimeCategory('一般道速度オーバー')).toBe('other')
+    expect(classifyTimeCategory('未知イベント')).toBe('other')
+  })
+  it('前後の空白は無視する', () => {
+    expect(classifyTimeCategory(' 積み ')).toBe('loading')
+  })
+})
+
+describe('summarizeSelectedRows', () => {
+  const headers = ['開始日時', '終了日時', 'イベント名', '区間時間', '区間距離']
+
+  function row(name: string, durationMin: string, distanceKm: string): string[] {
+    return ['2026/07/03 08:00:00', '2026/07/03 08:30:00', name, durationMin, distanceKm]
+  }
+
+  it('区間距離・区間時間を合算する', () => {
+    const rows = [row('一般道実車', '30', '12.5'), row('積み', '10', '0')]
+    const result = summarizeSelectedRows(headers, rows, [0, 1])
+    expect(result.distanceKm).toBeCloseTo(12.5)
+    expect(result.durationMin).toBe(40)
+    expect(result.rowCount).toBe(2)
+  })
+
+  it('区分別の時間内訳を集計する (運転/積み/降し/休憩・休息/アイドリング)', () => {
+    const rows = [
+      row('一般道実車', '20', '5'),
+      row('積み', '10', '0'),
+      row('降し', '15', '0'),
+      row('休憩', '30', '0'),
+      row('休息', '480', '0'),
+      row('アイドリング', '5', '0'),
+    ]
+    const result = summarizeSelectedRows(headers, rows, [0, 1, 2, 3, 4, 5])
+    expect(result.byCategory).toEqual({
+      drive: 20,
+      loading: 10,
+      unloading: 15,
+      rest: 510,
+      idle: 5,
+      other: 0,
+    })
+  })
+
+  it('区間距離が空文字/不正な行はスキップして距離に加算しない (時間は加算する)', () => {
+    const rows = [row('休憩', '30', ''), row('積み', '10', 'N/A')]
+    const result = summarizeSelectedRows(headers, rows, [0, 1])
+    expect(result.distanceKm).toBe(0)
+    expect(result.durationMin).toBe(40)
+  })
+
+  it('区間時間が空文字/不正な行は時間・時間内訳に加算しない (距離は加算する)', () => {
+    const rows = [row('一般道実車', '', '5.5'), row('積み', 'abc', '1')]
+    const result = summarizeSelectedRows(headers, rows, [0, 1])
+    expect(result.durationMin).toBe(0)
+    expect(result.byCategory.drive).toBe(0)
+    expect(result.distanceKm).toBeCloseTo(6.5)
+  })
+
+  it('存在しない index はスキップし rowCount に含めない', () => {
+    const rows = [row('積み', '10', '1')]
+    const result = summarizeSelectedRows(headers, rows, [0, 5])
+    expect(result.rowCount).toBe(1)
+  })
+
+  it('選択が空なら全て 0 を返す', () => {
+    const result = summarizeSelectedRows(headers, [row('積み', '10', '1')], [])
+    expect(result).toEqual({
+      distanceKm: 0,
+      durationMin: 0,
+      byCategory: { drive: 0, loading: 0, unloading: 0, rest: 0, idle: 0, other: 0 },
+      rowCount: 0,
+    })
+  })
+
+  it('区間距離/区間時間の列が無いヘッダーでは加算せず rowCount のみ数える', () => {
+    const headersNoCols = ['開始日時', '終了日時', 'イベント名']
+    const rows = [['2026/07/03 08:00:00', '2026/07/03 08:30:00', '積み']]
+    const result = summarizeSelectedRows(headersNoCols, rows, [0])
+    expect(result.distanceKm).toBe(0)
+    expect(result.durationMin).toBe(0)
+    expect(result.rowCount).toBe(1)
+  })
+
+  it('イベント名列が無いヘッダーでも区間時間は other として集計する', () => {
+    const headersNoName = ['開始日時', '終了日時', '区間時間', '区間距離']
+    const rows = [['2026/07/03 08:00:00', '2026/07/03 08:30:00', '30', '5']]
+    const result = summarizeSelectedRows(headersNoName, rows, [0])
+    expect(result.durationMin).toBe(30)
+    expect(result.byCategory.other).toBe(30)
+  })
+
+  it('区間時間セルが undefined (行が短い) の場合は距離だけ加算する (?? \'\' フォールバック)', () => {
+    const rowWithHoleAtDuration: string[] = ['2026/07/03 08:00:00', '2026/07/03 08:30:00', '積み', undefined as unknown as string, '5']
+    const result = summarizeSelectedRows(headers, [rowWithHoleAtDuration], [0])
+    expect(result.durationMin).toBe(0)
+    expect(result.distanceKm).toBe(5)
+  })
+
+  it('イベント名セルが undefined でも (区間時間は有効) other として集計する (?? \'\' フォールバック)', () => {
+    // headers 上は「イベント名」列があるが、そのセルだけ undefined な行 (欠損データ想定)。
+    // 区間時間セル (index 3) は有効なので durationMin には加算される。
+    const rowWithHoleAtName: string[] = ['2026/07/03 08:00:00', '2026/07/03 08:30:00', undefined as unknown as string, '15']
+    const result = summarizeSelectedRows(headers, [rowWithHoleAtName], [0])
+    expect(result.durationMin).toBe(15)
+    expect(result.byCategory.other).toBe(15)
   })
 })
 

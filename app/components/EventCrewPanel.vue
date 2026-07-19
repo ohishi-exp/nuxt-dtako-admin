@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import type { CrewGroup, EventCategory } from '~/utils/event-data-table'
+import type { CrewGroup, EventCategory, SelectedRowsSummary } from '~/utils/event-data-table'
 import {
   colIndex,
   getDisplayColumns,
   eventRowClass,
   columnAlignClass,
   selectedRowsTimeRange,
+  summarizeSelectedRows,
   filterRowsByCategory,
   countRowsByCategory,
   EVENT_CATEGORY_ORDER,
@@ -19,6 +20,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:selectedRange': [range: { fromTs: number, toTs: number } | null]
+  'update:selectedSummary': [summary: SelectedRowsSummary | null]
 }>()
 
 /** イベント/走行/アイドリング/速度超過 の4タブ (排他選択)。 */
@@ -62,6 +64,7 @@ function toggleRow(ri: number) {
 watch(selectedRows, (rows) => {
   const range = selectedRowsTimeRange(props.headers, filteredRows.value, rows)
   emit('update:selectedRange', range)
+  emit('update:selectedSummary', rows.size > 0 ? summarizeSelectedRows(props.headers, filteredRows.value, rows) : null)
 })
 </script>
 
