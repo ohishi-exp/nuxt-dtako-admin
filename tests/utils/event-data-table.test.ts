@@ -441,5 +441,38 @@ describe('selectedRowsTimeRange', () => {
       toTs: parseEventDatetimeToTs('2026/07/03 08:10:00'),
     })
   })
+
+  it('開始日時列が欠けている行 (undefined セル) はフォールバックしつつスキップされる', () => {
+    // ヘッダー数より短い行 → row[startIdx]/row[endIdx] が undefined → `?? ''` フォールバック
+    const shortRows = [[], ['2026/07/03 08:00:00', '2026/07/03 08:10:00', 'B']]
+    const range = selectedRowsTimeRange(headers, shortRows, [0, 1])
+    expect(range).toEqual({
+      fromTs: parseEventDatetimeToTs('2026/07/03 08:00:00'),
+      toTs: parseEventDatetimeToTs('2026/07/03 08:10:00'),
+    })
+  })
+
+  it('終了日時だけパース成功する行では fromTs が null のまま toTs を採用する', () => {
+    const endOnlyRows = [['invalid', '2026/07/03 08:10:00', 'B']]
+    const range = selectedRowsTimeRange(headers, endOnlyRows, [0])
+    const toTs = parseEventDatetimeToTs('2026/07/03 08:10:00')
+    expect(range).toEqual({ fromTs: toTs, toTs })
+  })
+
+  it('開始日時だけパース成功する行では toTs が null のまま fromTs を採用する', () => {
+    const startOnlyRows = [['2026/07/03 08:00:00', 'invalid', 'B']]
+    const range = selectedRowsTimeRange(headers, startOnlyRows, [0])
+    const fromTs = parseEventDatetimeToTs('2026/07/03 08:00:00')
+    expect(range).toEqual({ fromTs, toTs: fromTs })
+  })
+
+  it('終了日時が開始日時より前 (異常データ) の場合は fromTs/toTs を入れ替えて正規化する', () => {
+    const invertedRows = [['2026/07/03 09:00:00', '2026/07/03 08:00:00', 'B']]
+    const range = selectedRowsTimeRange(headers, invertedRows, [0])
+    expect(range).toEqual({
+      fromTs: parseEventDatetimeToTs('2026/07/03 08:00:00'),
+      toTs: parseEventDatetimeToTs('2026/07/03 09:00:00'),
+    })
+  })
 })
 

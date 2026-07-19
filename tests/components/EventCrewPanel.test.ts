@@ -88,4 +88,92 @@ describe('EventCrewPanel', () => {
     const row = wrapper.find('tbody tr')
     expect(row.classes().join(' ')).toContain('bg-green')
   })
+
+  describe('行選択 → 速度カラー Map 用の selectedRange emit', () => {
+    it('行クリックで選択され、開始日時/終了日時から算出した range を emit する', async () => {
+      const wrapper = createWrapper(makeGroup([makeRow('休憩')]))
+      await wrapper.find('tbody tr').trigger('click')
+      const emitted = wrapper.emitted('update:selectedRange')
+      expect(emitted).toBeTruthy()
+      const last = emitted![emitted!.length - 1]![0] as { fromTs: number, toTs: number } | null
+      expect(last).toEqual({
+        fromTs: Date.UTC(2026, 2, 7, 8, 0, 0) / 1000,
+        toTs: Date.UTC(2026, 2, 7, 8, 30, 0) / 1000,
+      })
+      expect(wrapper.text()).toContain('1行選択中')
+    })
+
+    it('選択済みの行を再クリックすると解除され null を emit する', async () => {
+      const wrapper = createWrapper(makeGroup([makeRow('休憩')]))
+      const row = wrapper.find('tbody tr')
+      await row.trigger('click')
+      await row.trigger('click')
+      const emitted = wrapper.emitted('update:selectedRange')!
+      expect(emitted[emitted.length - 1]![0]).toBeNull()
+      expect(wrapper.text()).not.toContain('行選択中')
+    })
+
+    it('チェックボックスの直接クリックでも選択できる', async () => {
+      const wrapper = createWrapper(makeGroup([makeRow('休憩')]))
+      await wrapper.find('input[type="checkbox"]').trigger('click')
+      expect(wrapper.text()).toContain('1行選択中')
+    })
+
+    it('チェックボックス列のセル (input 以外の余白部分) クリックでも選択できる', async () => {
+      const wrapper = createWrapper(makeGroup([makeRow('休憩')]))
+      await wrapper.find('tbody td').trigger('click')
+      expect(wrapper.text()).toContain('1行選択中')
+    })
+
+    it('複数行選択すると開始日時の最小・終了日時の最大が range になる', async () => {
+      const rows = [
+        ['2026/03/07 09:00:00', '2026/03/07 09:30:00', '01', '休憩'],
+        ['2026/03/07 08:00:00', '2026/03/07 08:10:00', '01', '休憩'],
+      ]
+      const wrapper = createWrapper(makeGroup(rows))
+      const trs = wrapper.findAll('tbody tr')
+      await trs[0]!.trigger('click')
+      await trs[1]!.trigger('click')
+      const emitted = wrapper.emitted('update:selectedRange')!
+      const last = emitted[emitted.length - 1]![0] as { fromTs: number, toTs: number }
+      expect(last).toEqual({
+        fromTs: Date.UTC(2026, 2, 7, 8, 0, 0) / 1000,
+        toTs: Date.UTC(2026, 2, 7, 9, 30, 0) / 1000,
+      })
+      expect(wrapper.text()).toContain('2行選択中')
+    })
+
+    it('「選択解除」ボタンで選択をクリアし null を emit する', async () => {
+      const wrapper = createWrapper(makeGroup([makeRow('休憩')]))
+      await wrapper.find('tbody tr').trigger('click')
+      expect(wrapper.text()).toContain('1行選択中')
+      await wrapper.find('button.text-blue-600').trigger('click')
+      expect(wrapper.text()).not.toContain('行選択中')
+      const emitted = wrapper.emitted('update:selectedRange')!
+      expect(emitted[emitted.length - 1]![0]).toBeNull()
+    })
+
+    it('乗務員 (group) が切り替わると選択がクリアされる', async () => {
+      const group1 = makeGroup([makeRow('休憩')])
+      const wrapper = createWrapper(group1)
+      await wrapper.find('tbody tr').trigger('click')
+      expect(wrapper.text()).toContain('1行選択中')
+
+      const group2 = { ...makeGroup([makeRow('積み')]), crewRole: '2' }
+      await wrapper.setProps({ group: group2 })
+      await nextTick()
+      expect(wrapper.text()).not.toContain('行選択中')
+    })
+
+    it('走行/イベント表示切替でも選択がクリアされる', async () => {
+      const wrapper = createWrapper(makeGroup([makeRow('休憩'), makeRow('一般道空車')]))
+      await wrapper.find('tbody tr').trigger('click')
+      expect(wrapper.text()).toContain('1行選択中')
+
+      const toggleButtons = wrapper.findAll('div.ml-auto button')
+      await toggleButtons[1]!.trigger('click')
+      await nextTick()
+      expect(wrapper.text()).not.toContain('行選択中')
+    })
+  })
 })
