@@ -8,6 +8,8 @@ import {
   buildProfitSnapshot,
   monthRange,
   summarizeMonthly,
+  toSnapshotListItem,
+  sortSnapshotListBySavedAtDesc,
   type ProfitSnapshotSlip,
   type ProfitSnapshot,
 } from '~/utils/profit-r2'
@@ -282,5 +284,69 @@ describe('summarizeMonthly', () => {
     expect(result.confirmedTotal).toBe(85000)
     expect(result.matchCounts).toEqual({ exact: 1, partial: 0, none: 1 })
     expect(result.snapshotCount).toBe(2)
+  })
+})
+
+describe('toSnapshotListItem', () => {
+  it('確認済み伝票から一覧表示用の要約を作る', () => {
+    const snapshot = profitSnapshot({
+      confirmedSlips: [
+        snapshotSlip({ rowId: 'a', saleDate: '2026-06-21', customerName: 'A社', originMatch: 'exact', destMatch: 'exact' }),
+        snapshotSlip({ rowId: 'b', saleDate: '2026-06-20', customerName: 'B社', originMatch: 'partial', destMatch: 'exact' }),
+      ],
+    })
+    const item = toSnapshotListItem(snapshot)
+    expect(item.vehicleCode).toBe('8504')
+    expect(item.unkoNo).toBe('unko-1')
+    expect(item.slipCount).toBe(2)
+    expect(item.customerNames).toEqual(['A社', 'B社'])
+    expect(item.saleDateFrom).toBe('2026-06-20')
+    expect(item.saleDateTo).toBe('2026-06-21')
+    expect(item.matchCounts).toEqual({ exact: 1, partial: 1, none: 0 })
+  })
+
+  it('得意先名の重複は除去する', () => {
+    const snapshot = profitSnapshot({
+      confirmedSlips: [
+        snapshotSlip({ rowId: 'a', customerName: 'A社' }),
+        snapshotSlip({ rowId: 'b', customerName: 'A社' }),
+      ],
+    })
+    const item = toSnapshotListItem(snapshot)
+    expect(item.customerNames).toEqual(['A社'])
+  })
+
+  it('確認済み伝票が0件なら日付・得意先は空になる', () => {
+    const snapshot = profitSnapshot({ confirmedSlips: [] })
+    const item = toSnapshotListItem(snapshot)
+    expect(item.customerNames).toEqual([])
+    expect(item.saleDateFrom).toBe('')
+    expect(item.saleDateTo).toBe('')
+    expect(item.slipCount).toBe(0)
+  })
+
+  it('得意先名が空文字の伝票は customerNames から除外する', () => {
+    const snapshot = profitSnapshot({ confirmedSlips: [snapshotSlip({ customerName: '' })] })
+    const item = toSnapshotListItem(snapshot)
+    expect(item.customerNames).toEqual([])
+  })
+})
+
+describe('sortSnapshotListBySavedAtDesc', () => {
+  it('savedAt の新しい順に並べ替える', () => {
+    const items = [
+      toSnapshotListItem(profitSnapshot({ unkoNo: 'old', savedAt: '2026-07-01T00:00:00.000Z' })),
+      toSnapshotListItem(profitSnapshot({ unkoNo: 'new', savedAt: '2026-07-19T00:00:00.000Z' })),
+      toSnapshotListItem(profitSnapshot({ unkoNo: 'mid', savedAt: '2026-07-10T00:00:00.000Z' })),
+    ]
+    const sorted = sortSnapshotListBySavedAtDesc(items)
+    expect(sorted.map(i => i.unkoNo)).toEqual(['new', 'mid', 'old'])
+  })
+
+  it('元の配列を破壊しない', () => {
+    const items = [toSnapshotListItem(profitSnapshot({ unkoNo: 'a' })), toSnapshotListItem(profitSnapshot({ unkoNo: 'b' }))]
+    const original = [...items]
+    sortSnapshotListBySavedAtDesc(items)
+    expect(items).toEqual(original)
   })
 })
