@@ -49,14 +49,14 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
     vi.unstubAllGlobals()
   })
 
-  it('ICHIBAN_ACCESS_CLIENT_ID/SECRET が両方あれば upstream に CF-Access ヘッダ付きで転送する', async () => {
+  it('NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID/SECRET が両方あれば upstream に CF-Access ヘッダ付きで転送する', async () => {
     fetchMock.mockResolvedValue(new Response('{"ok":true}', {
       status: 200,
       headers: { 'content-type': 'application/json' },
     }))
     const event = eventWith({
-      ICHIBAN_ACCESS_CLIENT_ID: 'client-id-x',
-      ICHIBAN_ACCESS_CLIENT_SECRET: 'client-secret-x',
+      NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'client-id-x',
+      ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'client-secret-x',
     })
 
     const body = await call(event)
@@ -75,8 +75,8 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
   it('NUXT_ICHIBAN_API_URL が設定されていればそちらを base に使う', async () => {
     fetchMock.mockResolvedValue(new Response('ok', { status: 200 }))
     const event = eventWith({
-      ICHIBAN_ACCESS_CLIENT_ID: 'a',
-      ICHIBAN_ACCESS_CLIENT_SECRET: 'b',
+      NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a',
+      ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b',
       NUXT_ICHIBAN_API_URL: 'https://ichiban-staging.example.com',
     })
 
@@ -89,8 +89,8 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
   it('Secrets Store binding (.get()) 形式でも解決する', async () => {
     fetchMock.mockResolvedValue(new Response('ok', { status: 200 }))
     const event = eventWith({
-      ICHIBAN_ACCESS_CLIENT_ID: { get: async () => 'from-store-id' },
-      ICHIBAN_ACCESS_CLIENT_SECRET: { get: async () => 'from-store-secret' },
+      NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: { get: async () => 'from-store-id' },
+      ICHIBAN_CF_ACCESS_CLIENT_SECRET: { get: async () => 'from-store-secret' },
     })
 
     await call(event)
@@ -100,22 +100,22 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
     expect((init.headers as Record<string, string>)['CF-Access-Client-Secret']).toBe('from-store-secret')
   })
 
-  it('ICHIBAN_ACCESS_CLIENT_ID 未設定なら 503 で弾き fetch しない', async () => {
-    const event = eventWith({ ICHIBAN_ACCESS_CLIENT_SECRET: 'b' })
+  it('NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID 未設定なら 503 で弾き fetch しない', async () => {
+    const event = eventWith({ ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' })
     await expect(call(event)).rejects.toMatchObject({ statusCode: 503 })
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('ICHIBAN_ACCESS_CLIENT_SECRET 未設定なら 503 で弾き fetch しない', async () => {
-    const event = eventWith({ ICHIBAN_ACCESS_CLIENT_ID: 'a' })
+  it('ICHIBAN_CF_ACCESS_CLIENT_SECRET 未設定なら 503 で弾き fetch しない', async () => {
+    const event = eventWith({ NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a' })
     await expect(call(event)).rejects.toMatchObject({ statusCode: 503 })
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('Secrets Store binding.get() が reject する場合も未設定として 503', async () => {
     const event = eventWith({
-      ICHIBAN_ACCESS_CLIENT_ID: { get: async () => { throw new Error('not found') } },
-      ICHIBAN_ACCESS_CLIENT_SECRET: 'b',
+      NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: { get: async () => { throw new Error('not found') } },
+      ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b',
     })
     await expect(call(event)).rejects.toMatchObject({ statusCode: 503 })
     expect(fetchMock).not.toHaveBeenCalled()
@@ -126,7 +126,7 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
       status: 400,
       headers: { 'content-type': 'application/json' },
     }))
-    const event = eventWith({ ICHIBAN_ACCESS_CLIENT_ID: 'a', ICHIBAN_ACCESS_CLIENT_SECRET: 'b' })
+    const event = eventWith({ NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a', ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' })
 
     const body = await call(event)
 
@@ -136,14 +136,14 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
 
   it('fetch 自体が失敗 (tunnel down 等) したら 502 を返す', async () => {
     fetchMock.mockRejectedValue(new Error('network down'))
-    const event = eventWith({ ICHIBAN_ACCESS_CLIENT_ID: 'a', ICHIBAN_ACCESS_CLIENT_SECRET: 'b' })
+    const event = eventWith({ NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a', ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' })
 
     await expect(call(event)).rejects.toMatchObject({ statusCode: 502 })
   })
 
   it('fetch が Error でない値で reject しても 502 (String() でメッセージ化)', async () => {
     fetchMock.mockRejectedValue('connection refused')
-    const event = eventWith({ ICHIBAN_ACCESS_CLIENT_ID: 'a', ICHIBAN_ACCESS_CLIENT_SECRET: 'b' })
+    const event = eventWith({ NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a', ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' })
 
     await expect(call(event)).rejects.toMatchObject({
       statusCode: 502,
@@ -158,8 +158,8 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
 
   it('Secrets Store binding.get() が空値解決 (undefined) の場合も未設定として 503', async () => {
     const event = eventWith({
-      ICHIBAN_ACCESS_CLIENT_ID: { get: async () => undefined as unknown as string },
-      ICHIBAN_ACCESS_CLIENT_SECRET: 'b',
+      NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: { get: async () => undefined as unknown as string },
+      ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b',
     })
     await expect(call(event)).rejects.toMatchObject({ statusCode: 503 })
     expect(fetchMock).not.toHaveBeenCalled()
@@ -168,7 +168,7 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
   it('path パラメータが無ければ base の root に転送する', async () => {
     fetchMock.mockResolvedValue(new Response('ok', { status: 200 }))
     const event = eventWith(
-      { ICHIBAN_ACCESS_CLIENT_ID: 'a', ICHIBAN_ACCESS_CLIENT_SECRET: 'b' },
+      { NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a', ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' },
       { path: undefined as unknown as string, url: 'https://dtako.ippoan.org/api/ichiban' },
     )
     event.context.params = {} as unknown as { path: string }
@@ -183,7 +183,7 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
     // body なし応答は Response が Content-Type を自動付与しない (文字列 body だと
     // text/plain;charset=UTF-8 が自動で付くため、意図的に body なしにする)。
     fetchMock.mockResolvedValue(new Response(null, { status: 204 }))
-    const event = eventWith({ ICHIBAN_ACCESS_CLIENT_ID: 'a', ICHIBAN_ACCESS_CLIENT_SECRET: 'b' })
+    const event = eventWith({ NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a', ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' })
 
     await call(event)
 

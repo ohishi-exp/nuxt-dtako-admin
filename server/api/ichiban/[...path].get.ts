@@ -3,8 +3,11 @@
  *
  * GET /api/ichiban/** → <NUXT_ICHIBAN_API_URL>/** (CF Tunnel rust-ichiban.mtamaramu.com)
  * に CF Access Service Token (CF-Access-Client-Id/Secret ヘッダ) を付与して転送する。
- * Service Token は Secrets Store binding (ICHIBAN_ACCESS_CLIENT_ID/SECRET) から解決し、
- * wrangler.toml / git には平文を置かない (値の投入は secrets-inventory 経由の別手順)。
+ * Service Token は nuxt-ichibanboshi/nuxt-ichibanboshi-seikyu と共有する既存のもの
+ * (`824a8b3c...`) を再利用する (新規発行しない)。client_id は公開識別子なので
+ * `NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID` var、client_secret は Secrets Store binding
+ * (`ICHIBAN_CF_ACCESS_CLIENT_SECRET`、secret_name="CF_ACCESS_CLIENT_SECRET" を
+ * 物理共有) から解決する。追加の secrets-inventory 投入作業は不要 (wrangler.toml 参照)。
  *
  * upstream の応答 (status/body) はそのまま passthrough する — 400 等の API 側エラーも
  * 呼び出し元がそのまま受け取れるようにするための thin proxy であり、意味づけはしない。
@@ -38,13 +41,13 @@ const DEFAULT_ICHIBAN_API_URL = 'https://rust-ichiban.mtamaramu.com'
 export default defineEventHandler(async (event) => {
   const env = cfEnv(event)
   const [clientId, clientSecret] = await Promise.all([
-    resolveSecret(env.ICHIBAN_ACCESS_CLIENT_ID),
-    resolveSecret(env.ICHIBAN_ACCESS_CLIENT_SECRET),
+    resolveSecret(env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID),
+    resolveSecret(env.ICHIBAN_CF_ACCESS_CLIENT_SECRET),
   ])
   if (!clientId || !clientSecret) {
     throw createError({
       statusCode: 503,
-      statusMessage: 'ICHIBAN_ACCESS_CLIENT_ID/ICHIBAN_ACCESS_CLIENT_SECRET binding が未設定です',
+      statusMessage: 'NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID/ICHIBAN_CF_ACCESS_CLIENT_SECRET binding が未設定です',
     })
   }
 
