@@ -11,6 +11,10 @@ import {
   filterImplausibleGpsJumps,
   chartXRatioToTime,
   net780DateStartTs,
+  filterValidGpsPoints,
+  filterPointsByRange,
+  buildSpeedColoredSegments,
+  speedToColor,
 } from '~/utils/net780'
 import type { Net780ParseResult, Net780SpeedPoint, Net780GpsPoint, Net780EventSummary } from '~/utils/net780'
 import { __setMockResult, __setMockError, __reset } from '../mocks/net780-wasm'
@@ -431,5 +435,120 @@ describe('chartXRatioToTime', () => {
   it('範囲外の ratio は dayStart〜dayStart+24h にクランプされる', () => {
     expect(chartXRatioToTime(-1, dayStart, 800, 8)).toBe(dayStart)
     expect(chartXRatioToTime(2, dayStart, 800, 8)).toBe(dayStart + 24 * 60 * 60)
+  })
+})
+
+describe('filterValidGpsPoints', () => {
+  it('(0,0) プレースホルダー・通信断区間・物理的ジャンプを除外する (buildDailyGpsPoints と同じ結果)', () => {
+    const day1 = net780DateStartTs('2026-07-01') + 6 * 3600
+    const points: Net780GpsPoint[] = [
+      { ts: day1, lat: 0, lon: 0 },
+      { ts: day1 + 1, lat: 32.75, lon: 129.87 },
+      { ts: day1 + 61, lat: 32.9, lon: 130.5 }, // 60 秒で大きく移動 (物理的にありえない、除外対象)
+    ]
+    const valid = filterValidGpsPoints(points)
+    expect(valid).toHaveLength(1)
+    expect(valid[0]!.lat).toBe(32.75)
+  })
+
+  it('events を渡さなければ通信断フィルタは効かない', () => {
+    const points: Net780GpsPoint[] = [{ ts: 100, lat: 32.75, lon: 129.87 }]
+    expect(filterValidGpsPoints(points)).toEqual(points)
+  })
+})
+
+describe('filterPointsByRange', () => {
+  const points = [{ ts: 100 }, { ts: 200 }, { ts: 300 }]
+
+  it('[fromTs, toTs] の範囲内 (両端含む) だけを返す', () => {
+    expect(filterPointsByRange(points, 100, 200)).toEqual([{ ts: 100 }, { ts: 200 }])
+  })
+
+  it('範囲外は全除外する', () => {
+    expect(filterPointsByRange(points, 1000, 2000)).toEqual([])
+  })
+
+  it('空配列を渡すと空配列を返す', () => {
+    expect(filterPointsByRange([], 0, 100)).toEqual([])
+  })
+})
+
+describe('speedToColor', () => {
+  it('null / NaN はグレーを返す', () => {
+    expect(speedToColor(null)).toBe('#9ca3af')
+    expect(speedToColor(NaN)).toBe('#9ca3af')
+  })
+
+  it('0-20km/h は緑 (hue 120)', () => {
+    expect(speedToColor(0)).toBe('hsl(120, 85%, 45%)')
+    expect(speedToColor(20)).toBe('hsl(120, 85%, 45%)')
+  })
+
+  it('50km/h は黄 (hue 60)', () => {
+    expect(speedToColor(50)).toBe('hsl(60, 85%, 45%)')
+  })
+
+  it('80km/h 以上は赤 (hue 0) に固定される', () => {
+    expect(speedToColor(80)).toBe('hsl(0, 85%, 45%)')
+    expect(speedToColor(150)).toBe('hsl(0, 85%, 45%)')
+  })
+
+  it('20-50 の間は緑→黄へ線形補間される', () => {
+    expect(speedToColor(35)).toBe('hsl(90, 85%, 45%)')
+  })
+})
+
+describe('buildSpeedColoredSegments', () => {
+  function gpsPoint(ts: number, lat: number, lon: number): Net780GpsPoint {
+    return { ts, lat, lon }
+  }
+  function speedPoint(ts: number, speed_kmh: number): Net780SpeedPoint {
+    return { record_start_ts: ts, offset_secs: 0, speed_kmh }
+  }
+
+  it('GPS 点が2点未満なら空配列を返す', () => {
+    expect(buildSpeedColoredSegments([gpsPoint(100, 32, 130)], [])).toEqual([])
+    expect(buildSpeedColoredSegments([], [])).toEqual([])
+  })
+
+  it('区間内の .spd サンプル平均で色付けする', () => {
+    const gps = [gpsPoint(100, 32.0, 130.0), gpsPoint(160, 32.1, 130.1)]
+    const speed = [speedPoint(110, 10), speedPoint(130, 30), speedPoint(150, 50)]
+    const segs = buildSpeedColoredSegments(gps, speed)
+    expect(segs).toHaveLength(1)
+    expect(segs[0]!.speedKmh).toBe(30) // (10+30+50)/3
+    expect(segs[0]!.color).toBe(speedToColor(30))
+    expect(segs[0]!.from).toBe(gps[0])
+    expect(segs[0]!.to).toBe(gps[1])
+  })
+
+  it('区間内にサンプルが無ければ許容範囲内の最寄りサンプルにフォールバックする', () => {
+    const gps = [gpsPoint(1000, 32.0, 130.0), gpsPoint(1060, 32.1, 130.1)]
+    const speed = [speedPoint(1050, 40)] // 区間 [1000,1060] の直前 (差10秒、許容範囲内)
+    const segs = buildSpeedColoredSegments(gps, speed)
+    expect(segs[0]!.speedKmh).toBe(40)
+  })
+
+  it('許容範囲を超えるとフォールバックせず null (グレー) になる', () => {
+    const gps = [gpsPoint(1000, 32.0, 130.0), gpsPoint(1060, 32.1, 130.1)]
+    const speed = [speedPoint(500, 40)] // 区間中央 (1030) から 530 秒差、許容 90 秒を超過
+    const segs = buildSpeedColoredSegments(gps, speed)
+    expect(segs[0]!.speedKmh).toBeNull()
+    expect(segs[0]!.color).toBe('#9ca3af')
+  })
+
+  it('.spd が空なら全区間 null になる', () => {
+    const gps = [gpsPoint(100, 32.0, 130.0), gpsPoint(160, 32.1, 130.1)]
+    const segs = buildSpeedColoredSegments(gps, [])
+    expect(segs[0]!.speedKmh).toBeNull()
+  })
+
+  it('3点の GPS から2セグメント生成する', () => {
+    const gps = [gpsPoint(100, 32, 130), gpsPoint(160, 32.1, 130.1), gpsPoint(220, 32.2, 130.2)]
+    const speed = [speedPoint(130, 20), speedPoint(190, 60)]
+    const segs = buildSpeedColoredSegments(gps, speed)
+    expect(segs).toHaveLength(2)
+    expect(segs[0]!.speedKmh).toBe(20)
+    expect(segs[1]!.speedKmh).toBe(60)
   })
 })

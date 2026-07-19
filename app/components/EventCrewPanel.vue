@@ -6,11 +6,16 @@ import {
   getDisplayColumns,
   eventRowClass,
   columnAlignClass,
+  selectedRowsTimeRange,
 } from '~/utils/event-data-table'
 
 const props = defineProps<{
   group: CrewGroup
   headers: string[]
+}>()
+
+const emit = defineEmits<{
+  'update:selectedRange': [range: { fromTs: number, toTs: number } | null]
 }>()
 
 const showDriveEvents = ref(false)
@@ -30,6 +35,30 @@ const otherEventCount = computed(() =>
 )
 
 const displayColumns = computed(() => getDisplayColumns(props.headers))
+
+/** 選択行 index (filteredRows 基準)。地図パネル (速度カラー) に渡す時刻レンジの元。 */
+const selectedRows = ref<Set<number>>(new Set())
+
+function clearSelection() {
+  if (selectedRows.value.size > 0) selectedRows.value = new Set()
+}
+
+// filteredRows の並びが変わる (乗務員切替・イベント/走行フィルタ切替) と選択index が
+// 別の行を指してしまうため、その都度クリアする。
+watch(() => props.group, clearSelection)
+watch(showDriveEvents, clearSelection)
+
+function toggleRow(ri: number) {
+  const next = new Set(selectedRows.value)
+  if (next.has(ri)) next.delete(ri)
+  else next.add(ri)
+  selectedRows.value = next
+}
+
+watch(selectedRows, (rows) => {
+  const range = selectedRowsTimeRange(props.headers, filteredRows.value, rows)
+  emit('update:selectedRange', range)
+})
 </script>
 
 <template>
@@ -59,9 +88,17 @@ const displayColumns = computed(() => getDisplayColumns(props.headers))
     </div>
   </div>
 
+  <p v-if="selectedRows.size > 0" class="px-4 pt-2 text-xs text-gray-500">
+    {{ selectedRows.size }}行選択中
+    <button class="ml-2 text-blue-600 dark:text-blue-400 hover:underline" @click="clearSelection">
+      選択解除
+    </button>
+  </p>
+
   <table v-if="displayColumns.length" class="w-full text-xs">
     <thead class="bg-gray-50 dark:bg-gray-800">
       <tr>
+        <th class="text-left px-3 py-2 font-medium text-gray-500 whitespace-nowrap w-8" />
         <th class="text-left px-3 py-2 font-medium text-gray-500 whitespace-nowrap">#</th>
         <th
           v-for="col in displayColumns"
@@ -77,9 +114,13 @@ const displayColumns = computed(() => getDisplayColumns(props.headers))
       <tr
         v-for="(row, ri) in filteredRows"
         :key="ri"
-        class="border-t border-gray-100 dark:border-gray-800"
-        :class="eventRowClass(headers, row)"
+        class="border-t border-gray-100 dark:border-gray-800 cursor-pointer"
+        :class="[eventRowClass(headers, row), selectedRows.has(ri) ? 'bg-blue-50 dark:bg-blue-950/40' : '']"
+        @click="toggleRow(ri)"
       >
+        <td class="px-3 py-1.5" @click.stop="toggleRow(ri)">
+          <input type="checkbox" :checked="selectedRows.has(ri)" class="cursor-pointer" @click.stop="toggleRow(ri)">
+        </td>
         <td class="px-3 py-1.5 text-gray-400">{{ ri + 1 }}</td>
         <td
           v-for="col in displayColumns"
@@ -96,7 +137,7 @@ const displayColumns = computed(() => getDisplayColumns(props.headers))
         </td>
       </tr>
       <tr v-if="filteredRows.length === 0">
-        <td :colspan="displayColumns.length + 1" class="px-3 py-8 text-center text-gray-400">
+        <td :colspan="displayColumns.length + 2" class="px-3 py-8 text-center text-gray-400">
           データがありません
         </td>
       </tr>

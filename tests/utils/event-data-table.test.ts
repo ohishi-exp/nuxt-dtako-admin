@@ -13,6 +13,8 @@ import {
   groupByCrewRole,
   filterRows,
   getDisplayColumns,
+  parseEventDatetimeToTs,
+  selectedRowsTimeRange,
 } from '~/utils/event-data-table'
 
 describe('colIndex', () => {
@@ -358,6 +360,119 @@ describe('getDisplayColumns', () => {
 
   it('returns empty for no matching headers', () => {
     expect(getDisplayColumns(['不要A', '不要B'])).toEqual([])
+  })
+})
+
+describe('parseEventDatetimeToTs', () => {
+  it('ゼロ埋めされた日時を net780 の ts 規約 (Date.UTC、TZシフトなし) で epoch 化する', () => {
+    expect(parseEventDatetimeToTs('2026/07/03 08:15:00')).toBe(Date.UTC(2026, 6, 3, 8, 15, 0) / 1000)
+  })
+
+  it('ゼロ埋めされていない時刻部分も許容する (実データ例)', () => {
+    expect(parseEventDatetimeToTs('2026/03/07 8:16:22')).toBe(Date.UTC(2026, 2, 7, 8, 16, 22) / 1000)
+  })
+
+  it('空文字列は null を返す', () => {
+    expect(parseEventDatetimeToTs('')).toBeNull()
+  })
+
+  it('区切りが不正な文字列は null を返す', () => {
+    expect(parseEventDatetimeToTs('2026-07-03 08:15:00')).toBeNull()
+  })
+
+  it('前後の空白は許容する', () => {
+    expect(parseEventDatetimeToTs(' 2026/07/03 08:15:00 ')).toBe(Date.UTC(2026, 6, 3, 8, 15, 0) / 1000)
+  })
+})
+
+describe('selectedRowsTimeRange', () => {
+  const headers = ['開始日時', '終了日時', 'イベント名']
+  const rows = [
+    ['2026/07/03 08:00:00', '2026/07/03 08:10:00', 'A'],
+    ['2026/07/03 09:00:00', '2026/07/03 09:30:00', 'B'],
+    ['2026/07/03 07:00:00', '2026/07/03 07:05:00', 'C'],
+  ]
+
+  it('選択行の開始日時の最小・終了日時の最大を返す', () => {
+    const range = selectedRowsTimeRange(headers, rows, [0, 1])
+    expect(range).toEqual({
+      fromTs: parseEventDatetimeToTs('2026/07/03 08:00:00'),
+      toTs: parseEventDatetimeToTs('2026/07/03 09:30:00'),
+    })
+  })
+
+  it('3行選択すると全体の最小〜最大になる', () => {
+    const range = selectedRowsTimeRange(headers, rows, [0, 1, 2])
+    expect(range).toEqual({
+      fromTs: parseEventDatetimeToTs('2026/07/03 07:00:00'),
+      toTs: parseEventDatetimeToTs('2026/07/03 09:30:00'),
+    })
+  })
+
+  it('選択が空なら null を返す', () => {
+    expect(selectedRowsTimeRange(headers, rows, [])).toBeNull()
+  })
+
+  it('開始日時/終了日時列が無ければ null を返す', () => {
+    expect(selectedRowsTimeRange(['イベント名'], [['A']], [0])).toBeNull()
+  })
+
+  it('存在しない index はスキップする', () => {
+    const range = selectedRowsTimeRange(headers, rows, [0, 99])
+    expect(range).toEqual({
+      fromTs: parseEventDatetimeToTs('2026/07/03 08:00:00'),
+      toTs: parseEventDatetimeToTs('2026/07/03 08:10:00'),
+    })
+  })
+
+  it('パース失敗行のみ選択されている場合は null を返す', () => {
+    const badRows = [['invalid', 'invalid', 'A']]
+    expect(selectedRowsTimeRange(headers, badRows, [0])).toBeNull()
+  })
+
+  it('パース失敗行と正常行が混在する場合は正常行だけで算出する', () => {
+    const mixedRows = [
+      ['invalid', 'invalid', 'A'],
+      ['2026/07/03 08:00:00', '2026/07/03 08:10:00', 'B'],
+    ]
+    const range = selectedRowsTimeRange(headers, mixedRows, [0, 1])
+    expect(range).toEqual({
+      fromTs: parseEventDatetimeToTs('2026/07/03 08:00:00'),
+      toTs: parseEventDatetimeToTs('2026/07/03 08:10:00'),
+    })
+  })
+
+  it('開始日時列が欠けている行 (undefined セル) はフォールバックしつつスキップされる', () => {
+    // ヘッダー数より短い行 → row[startIdx]/row[endIdx] が undefined → `?? ''` フォールバック
+    const shortRows = [[], ['2026/07/03 08:00:00', '2026/07/03 08:10:00', 'B']]
+    const range = selectedRowsTimeRange(headers, shortRows, [0, 1])
+    expect(range).toEqual({
+      fromTs: parseEventDatetimeToTs('2026/07/03 08:00:00'),
+      toTs: parseEventDatetimeToTs('2026/07/03 08:10:00'),
+    })
+  })
+
+  it('終了日時だけパース成功する行では fromTs が null のまま toTs を採用する', () => {
+    const endOnlyRows = [['invalid', '2026/07/03 08:10:00', 'B']]
+    const range = selectedRowsTimeRange(headers, endOnlyRows, [0])
+    const toTs = parseEventDatetimeToTs('2026/07/03 08:10:00')
+    expect(range).toEqual({ fromTs: toTs, toTs })
+  })
+
+  it('開始日時だけパース成功する行では toTs が null のまま fromTs を採用する', () => {
+    const startOnlyRows = [['2026/07/03 08:00:00', 'invalid', 'B']]
+    const range = selectedRowsTimeRange(headers, startOnlyRows, [0])
+    const fromTs = parseEventDatetimeToTs('2026/07/03 08:00:00')
+    expect(range).toEqual({ fromTs, toTs: fromTs })
+  })
+
+  it('終了日時が開始日時より前 (異常データ) の場合は fromTs/toTs を入れ替えて正規化する', () => {
+    const invertedRows = [['2026/07/03 09:00:00', '2026/07/03 08:00:00', 'B']]
+    const range = selectedRowsTimeRange(headers, invertedRows, [0])
+    expect(range).toEqual({
+      fromTs: parseEventDatetimeToTs('2026/07/03 08:00:00'),
+      toTs: parseEventDatetimeToTs('2026/07/03 09:00:00'),
+    })
   })
 })
 

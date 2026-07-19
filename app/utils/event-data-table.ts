@@ -174,3 +174,53 @@ export function getDisplayColumns(headers: string[]): { header: string; index: n
   }
   return cols
 }
+
+// --- 行選択 → 速度カラー Map (NET780) 用の時刻レンジ算出 ---
+
+// 時刻部分は "8:00:00" のようにゼロ埋めされていない実データがあるため 1-2 桁を許容する
+// (formatTime のテストフィクスチャ `'2026/03/07 8:16:22'` 参照)。
+const EVENT_DATETIME_RE = /^(\d{4})\/(\d{1,2})\/(\d{1,2}) (\d{1,2}):(\d{1,2}):(\d{1,2})$/
+
+/**
+ * イベントCSVの `開始日時`/`終了日時` (`"YYYY/MM/DD HH:MM:SS"`) を、net780 の `ts` と
+ * 同じ規約 (JST壁時計の数字をそのまま UNIX epoch として読む、TZシフトしない) で
+ * epoch秒に変換する。`new Date(val).getTime()` はブラウザのローカルTZで解釈されて
+ * ズレる (このプロジェクトはDDMM座標変換等でTZ絡みのズレ事故を繰り返し踏んでいる)
+ * ため使わない。パースできない場合は null。
+ */
+export function parseEventDatetimeToTs(val: string): number | null {
+  const m = EVENT_DATETIME_RE.exec(val.trim())
+  if (!m) return null
+  const [, y, mo, d, h, mi, s] = m.map(Number) as unknown as [number, number, number, number, number, number, number]
+  return Date.UTC(y, mo - 1, d, h, mi, s) / 1000
+}
+
+/**
+ * 選択行 (`selectedIdx`、`rows` に対するindex) の `開始日時`→最小、`終了日時`→最大で
+ * 時刻レンジを算出する。パース失敗行はスキップする。有効行が1件も無ければ null。
+ */
+export function selectedRowsTimeRange(
+  headers: string[],
+  rows: string[][],
+  selectedIdx: Iterable<number>,
+): { fromTs: number, toTs: number } | null {
+  const startIdx = colIndex(headers, '開始日時')
+  const endIdx = colIndex(headers, '終了日時')
+  if (startIdx < 0 || endIdx < 0) return null
+
+  let fromTs: number | null = null
+  let toTs: number | null = null
+  for (const idx of selectedIdx) {
+    const row = rows[idx]
+    if (!row) continue
+    const start = parseEventDatetimeToTs(row[startIdx] ?? '')
+    const end = parseEventDatetimeToTs(row[endIdx] ?? '')
+    if (start !== null && (fromTs === null || start < fromTs)) fromTs = start
+    if (end !== null && (toTs === null || end > toTs)) toTs = end
+  }
+
+  if (fromTs === null && toTs === null) return null
+  const lo = fromTs ?? toTs!
+  const hi = toTs ?? fromTs!
+  return lo <= hi ? { fromTs: lo, toTs: hi } : { fromTs: hi, toTs: lo }
+}

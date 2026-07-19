@@ -19,7 +19,7 @@ function openMap() {
   <button
     v-if="gps"
     class="text-blue-500 hover:text-blue-700 hover:underline cursor-pointer inline-flex items-center gap-0.5"
-    @click="openMap"
+    @click.stop="openMap"
   >
     {{ value }}
     <UIcon name="i-lucide-map-pin" class="size-3" />
