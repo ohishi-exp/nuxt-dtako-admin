@@ -11,12 +11,13 @@ import {
   getGpsForCell,
   isLocationColumn,
   groupByCrewRole,
-  filterRows,
   getDisplayColumns,
   parseEventDatetimeToTs,
   selectedRowsTimeRange,
-  filterOverspeedRows,
-  countOverspeedRows,
+  isOverspeedEventName,
+  classifyEventName,
+  filterRowsByCategory,
+  countRowsByCategory,
 } from '~/utils/event-data-table'
 
 describe('colIndex', () => {
@@ -314,38 +315,94 @@ describe('groupByCrewRole', () => {
   })
 })
 
-describe('filterRows', () => {
-  it('returns all rows when eventNameIdx is -1', () => {
-    const rows = [['a'], ['b']]
-    expect(filterRows(rows, -1, false)).toBe(rows)
+describe('classifyEventName', () => {
+  it('走行 (一般道/専用道/高速道の実移動) を drive に分類する', () => {
+    expect(classifyEventName('一般道空車')).toBe('drive')
+    expect(classifyEventName('一般道実車')).toBe('drive')
+    expect(classifyEventName('専用道')).toBe('drive')
+    expect(classifyEventName('高速道')).toBe('drive')
   })
 
-  it('excludes drive events when showDrive=false', () => {
-    const rows = [['休憩'], ['一般道空車'], ['積み'], ['アイドリング']]
-    const result = filterRows(rows, 0, false)
+  it('アイドリングは走行と別の idle に分類する', () => {
+    expect(classifyEventName('アイドリング')).toBe('idle')
+  })
+
+  it('「○○速度オーバー」は overspeed に分類する (走行イベントより優先)', () => {
+    expect(classifyEventName('一般道速度オーバー')).toBe('overspeed')
+    expect(classifyEventName('高速道速度オーバー')).toBe('overspeed')
+  })
+
+  it('それ以外は event に分類する', () => {
+    expect(classifyEventName('休憩')).toBe('event')
+    expect(classifyEventName('積み')).toBe('event')
+    expect(classifyEventName('未知のイベント')).toBe('event')
+  })
+
+  it('前後の空白は無視する', () => {
+    expect(classifyEventName(' 一般道空車 ')).toBe('drive')
+  })
+})
+
+describe('filterRowsByCategory', () => {
+  it('returns all rows when eventNameIdx is -1', () => {
+    const rows = [['a'], ['b']]
+    expect(filterRowsByCategory(rows, -1, 'event')).toBe(rows)
+  })
+
+  it('event カテゴリ: 走行・アイドリング・速度超過以外を返す', () => {
+    const rows = [['休憩'], ['一般道空車'], ['積み'], ['アイドリング'], ['一般道速度オーバー']]
+    const result = filterRowsByCategory(rows, 0, 'event')
     expect(result).toHaveLength(2)
     expect(result[0]![0]).toBe('休憩')
     expect(result[1]![0]).toBe('積み')
   })
 
-  it('shows only drive events when showDrive=true', () => {
-    const rows = [['休憩'], ['一般道空車'], ['積み'], ['高速道']]
-    const result = filterRows(rows, 0, true)
+  it('drive カテゴリ: 走行のみ返す (アイドリング・速度超過は含まない)', () => {
+    const rows = [['休憩'], ['一般道空車'], ['積み'], ['高速道'], ['アイドリング'], ['一般道速度オーバー']]
+    const result = filterRowsByCategory(rows, 0, 'drive')
     expect(result).toHaveLength(2)
     expect(result[0]![0]).toBe('一般道空車')
     expect(result[1]![0]).toBe('高速道')
   })
 
+  it('idle カテゴリ: アイドリングのみ返す', () => {
+    const rows = [['一般道空車'], ['アイドリング'], ['休憩']]
+    expect(filterRowsByCategory(rows, 0, 'idle')).toEqual([['アイドリング']])
+  })
+
+  it('overspeed カテゴリ: 「○○速度オーバー」のみ返す', () => {
+    const rows = [['一般道空車'], ['一般道速度オーバー'], ['高速道速度オーバー'], ['休憩']]
+    expect(filterRowsByCategory(rows, 0, 'overspeed')).toEqual([['一般道速度オーバー'], ['高速道速度オーバー']])
+  })
+
   it('handles undefined row value', () => {
     const rows: string[][] = [[undefined as unknown as string]]
-    const result = filterRows(rows, 0, false)
+    const result = filterRowsByCategory(rows, 0, 'event')
     expect(result).toHaveLength(1)
   })
 
   it('trims whitespace in event name', () => {
     const rows = [[' 一般道空車 ']]
-    expect(filterRows(rows, 0, true)).toHaveLength(1)
-    expect(filterRows(rows, 0, false)).toHaveLength(0)
+    expect(filterRowsByCategory(rows, 0, 'drive')).toHaveLength(1)
+    expect(filterRowsByCategory(rows, 0, 'event')).toHaveLength(0)
+  })
+})
+
+describe('countRowsByCategory', () => {
+  it('eventNameIdx が -1 なら 0 を返す', () => {
+    expect(countRowsByCategory([['一般道空車']], -1, 'drive')).toBe(0)
+  })
+
+  it('カテゴリごとの件数を数える', () => {
+    const rows = [['休憩'], ['一般道空車'], ['高速道'], ['アイドリング'], ['一般道速度オーバー'], ['高速道速度オーバー']]
+    expect(countRowsByCategory(rows, 0, 'event')).toBe(1)
+    expect(countRowsByCategory(rows, 0, 'drive')).toBe(2)
+    expect(countRowsByCategory(rows, 0, 'idle')).toBe(1)
+    expect(countRowsByCategory(rows, 0, 'overspeed')).toBe(2)
+  })
+
+  it('セル値が undefined の行は event として数える', () => {
+    expect(countRowsByCategory([[]], 0, 'event')).toBe(1)
   })
 })
 
@@ -478,43 +535,21 @@ describe('selectedRowsTimeRange', () => {
   })
 })
 
-describe('filterOverspeedRows', () => {
-  const evtHeaders = ['イベント名']
-  const rows = [['速度超過'], ['一般道空車'], ['速度超過']]
-
-  it('show=true の時はそのまま返す (除外しない)', () => {
-    expect(filterOverspeedRows(rows, 0, true)).toEqual(rows)
+describe('isOverspeedEventName', () => {
+  it('道路種別+「速度オーバー」の実データ名を検出する', () => {
+    expect(isOverspeedEventName('一般道速度オーバー')).toBe(true)
+    expect(isOverspeedEventName('専用道速度オーバー')).toBe(true)
+    expect(isOverspeedEventName('高速道速度オーバー')).toBe(true)
   })
 
-  it('show=false の時は「速度超過」行を除外する', () => {
-    expect(filterOverspeedRows(rows, 0, false)).toEqual([['一般道空車']])
+  it('前後の空白は無視する', () => {
+    expect(isOverspeedEventName(' 一般道速度オーバー ')).toBe(true)
   })
 
-  it('eventNameIdx が -1 なら (show=false でも) そのまま返す', () => {
-    expect(filterOverspeedRows(rows, -1, false)).toEqual(rows)
-  })
-
-  it('セル値が undefined の行は "速度超過" と一致しないため残る (show=false)', () => {
-    expect(filterOverspeedRows([[]], 0, false)).toEqual([[]])
-  })
-})
-
-describe('countOverspeedRows', () => {
-  it('「速度超過」の件数を数える', () => {
-    const rows = [['速度超過'], ['一般道空車'], ['速度超過']]
-    expect(countOverspeedRows(rows, 0)).toBe(2)
-  })
-
-  it('該当が無ければ 0', () => {
-    expect(countOverspeedRows([['一般道空車']], 0)).toBe(0)
-  })
-
-  it('eventNameIdx が -1 なら 0 を返す', () => {
-    expect(countOverspeedRows([['速度超過']], -1)).toBe(0)
-  })
-
-  it('セル値が undefined の行はカウントしない', () => {
-    expect(countOverspeedRows([[]], 0)).toBe(0)
+  it('接尾辞として一致しない (前方一致のみ等) 場合は false', () => {
+    expect(isOverspeedEventName('速度オーバー注意')).toBe(false)
+    expect(isOverspeedEventName('一般道空車')).toBe(false)
+    expect(isOverspeedEventName('')).toBe(false)
   })
 })
 

@@ -177,48 +177,54 @@ describe('EventCrewPanel', () => {
     })
   })
 
-  describe('速度超過フィルター', () => {
-    it('既定 (チェック済み) では速度超過行も表示される', () => {
-      const wrapper = createWrapper(makeGroup([makeRow('休憩'), makeRow('速度超過')]))
-      expect(wrapper.findAll('tbody tr').length).toBe(2)
-      expect(wrapper.text()).toContain('速度超過を表示（1）')
+  describe('4タブ (イベント/走行/アイドリング/速度超過)', () => {
+    it('タブごとの件数を表示する', () => {
+      const wrapper = createWrapper(makeGroup([
+        makeRow('休憩'), makeRow('一般道空車'), makeRow('アイドリング'), makeRow('一般道速度オーバー'),
+      ]))
+      expect(wrapper.text()).toContain('イベント (1)')
+      expect(wrapper.text()).toContain('走行 (1)')
+      expect(wrapper.text()).toContain('アイドリング (1)')
+      expect(wrapper.text()).toContain('速度超過 (1)')
     })
 
-    it('チェックを外すと速度超過行が除外される', async () => {
-      const wrapper = createWrapper(makeGroup([makeRow('休憩'), makeRow('速度超過')]))
-      await wrapper.find('label input[type="checkbox"]').setValue(false)
+    it('走行タブにはアイドリングが含まれない', async () => {
+      const wrapper = createWrapper(makeGroup([makeRow('一般道空車'), makeRow('アイドリング')]))
+      const toggleButtons = wrapper.findAll('div.ml-auto button')
+      await toggleButtons[1]!.trigger('click') // 走行
+      await nextTick()
       expect(wrapper.findAll('tbody tr').length).toBe(1)
-      expect(wrapper.find('tbody').text()).not.toContain('速度超過')
+      expect(wrapper.find('tbody').text()).toContain('一般道空車')
     })
 
-    it('速度超過が無い場合は件数バッジを表示しない', () => {
-      const wrapper = createWrapper(makeGroup([makeRow('休憩')]))
-      expect(wrapper.text()).toContain('速度超過を表示')
-      expect(wrapper.text()).not.toContain('速度超過を表示（')
+    it('アイドリングタブを選択するとアイドリング行だけ表示する', async () => {
+      const wrapper = createWrapper(makeGroup([makeRow('一般道空車'), makeRow('アイドリング')]))
+      const toggleButtons = wrapper.findAll('div.ml-auto button')
+      await toggleButtons[2]!.trigger('click') // アイドリング
+      await nextTick()
+      expect(wrapper.findAll('tbody tr').length).toBe(1)
+      expect(wrapper.find('tbody').text()).toContain('アイドリング')
     })
 
-    it('速度超過フィルター切替でも選択がクリアされる', async () => {
-      const wrapper = createWrapper(makeGroup([makeRow('休憩'), makeRow('速度超過')]))
+    it('速度超過タブを選択すると「○○速度オーバー」行だけ表示する (道路種別が混在しても)', async () => {
+      const wrapper = createWrapper(makeGroup([
+        makeRow('一般道空車'), makeRow('一般道速度オーバー'), makeRow('高速道速度オーバー'),
+      ]))
+      const toggleButtons = wrapper.findAll('div.ml-auto button')
+      await toggleButtons[3]!.trigger('click') // 速度超過
+      await nextTick()
+      expect(wrapper.findAll('tbody tr').length).toBe(2)
+    })
+
+    it('タブ切替でも選択がクリアされる', async () => {
+      const wrapper = createWrapper(makeGroup([makeRow('休憩'), makeRow('アイドリング')]))
       await wrapper.find('tbody tr').trigger('click')
       expect(wrapper.text()).toContain('1行選択中')
 
-      await wrapper.find('label input[type="checkbox"]').setValue(false)
-      expect(wrapper.text()).not.toContain('行選択中')
-    })
-
-    it('走行フィルターと併用しても速度超過を除外できる', async () => {
-      const wrapper = createWrapper(makeGroup([makeRow('一般道空車'), makeRow('速度超過')]))
       const toggleButtons = wrapper.findAll('div.ml-auto button')
-      await toggleButtons[1]!.trigger('click') // 走行タブへ
+      await toggleButtons[2]!.trigger('click') // アイドリング
       await nextTick()
-      expect(wrapper.findAll('tbody tr').length).toBe(1)
-
-      await toggleButtons[0]!.trigger('click') // イベントタブへ戻す (速度超過はこちら)
-      await nextTick()
-      expect(wrapper.findAll('tbody tr').length).toBe(1)
-
-      await wrapper.find('label input[type="checkbox"]').setValue(false)
-      expect(wrapper.text()).toContain('データがありません')
+      expect(wrapper.text()).not.toContain('行選択中')
     })
   })
 })

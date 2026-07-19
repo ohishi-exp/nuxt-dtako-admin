@@ -10,7 +10,9 @@ export interface CrewGroup {
 
 export const eventHeaders = ['開始日時', '終了日時', 'イベントCD', 'イベント名', '区間時間', '区間距離', '開始市町村名', '終了市町村名']
 
-export const driveEventNames = new Set(['一般道空車', 'アイドリング', '一般道実車', '専用道', '高速道'])
+export const driveEventNames = new Set(['一般道空車', '一般道実車', '専用道', '高速道'])
+
+export const IDLE_EVENT_NAME = 'アイドリング'
 
 export const eventCellStyleMap: Record<string, string> = {
   '休息': 'text-purple-600 dark:text-purple-400 font-medium',
@@ -153,35 +155,55 @@ export function groupByCrewRole(headers: string[], rows: string[][]): CrewGroup[
   return [...map.values()].sort((a, b) => a.crewRole.localeCompare(b.crewRole))
 }
 
-export function filterRows(
+/** 速度超過イベント名は道路種別 (一般道/専用道/高速道) ごとに
+ * `「○○速度オーバー」` という接尾辞付きの名前で記録される (例: 「一般道速度オーバー」、
+ * イベントCD 405)。単一の固定文字列と完全一致させると実データを取りこぼすため、
+ * この接尾辞での判定にする。 */
+export const OVERSPEED_EVENT_SUFFIX = '速度オーバー'
+
+export function isOverspeedEventName(name: string): boolean {
+  return name.trim().endsWith(OVERSPEED_EVENT_SUFFIX)
+}
+
+/** イベント表の表示タブ分類。走行 (一般道/専用道/高速道の実移動) とアイドリングは
+ * 見た目が近いイベントCDでも運行実態が異なる (Refs ユーザーからの実データ指摘:
+ * 走行タブにアイドリングが混在していた) ため別タブに分ける。速度超過も走行中の
+ * 異常イベントとして別タブで確認できるようにする。 */
+export type EventCategory = 'event' | 'drive' | 'idle' | 'overspeed'
+
+export const EVENT_CATEGORY_ORDER: EventCategory[] = ['event', 'drive', 'idle', 'overspeed']
+
+export const EVENT_CATEGORY_LABELS: Record<EventCategory, string> = {
+  event: 'イベント',
+  drive: '走行',
+  idle: 'アイドリング',
+  overspeed: '速度超過',
+}
+
+export function classifyEventName(name: string): EventCategory {
+  const trimmed = name.trim()
+  if (isOverspeedEventName(trimmed)) return 'overspeed'
+  if (trimmed === IDLE_EVENT_NAME) return 'idle'
+  if (driveEventNames.has(trimmed)) return 'drive'
+  return 'event'
+}
+
+export function filterRowsByCategory(
   rows: string[][],
   eventNameIdx: number,
-  showDrive: boolean,
+  category: EventCategory,
 ): string[][] {
   if (eventNameIdx < 0) return rows
-  return rows.filter((row) => {
-    const name = (row[eventNameIdx] ?? '').trim()
-    const isDrive = driveEventNames.has(name)
-    return showDrive ? isDrive : !isDrive
-  })
+  return rows.filter(row => classifyEventName(row[eventNameIdx] ?? '') === category)
 }
 
-export const OVERSPEED_EVENT_NAME = '速度超過'
-
-/** `show=false` の時だけ「速度超過」イベント行を除外する (それ以外はそのまま返す)。 */
-export function filterOverspeedRows(
+export function countRowsByCategory(
   rows: string[][],
   eventNameIdx: number,
-  show: boolean,
-): string[][] {
-  if (show || eventNameIdx < 0) return rows
-  return rows.filter(row => (row[eventNameIdx] ?? '').trim() !== OVERSPEED_EVENT_NAME)
-}
-
-/** 選択対象の行群から「速度超過」イベントの件数を数える (表示件数バッジ用)。 */
-export function countOverspeedRows(rows: string[][], eventNameIdx: number): number {
+  category: EventCategory,
+): number {
   if (eventNameIdx < 0) return 0
-  return rows.filter(row => (row[eventNameIdx] ?? '').trim() === OVERSPEED_EVENT_NAME).length
+  return rows.filter(row => classifyEventName(row[eventNameIdx] ?? '') === category).length
 }
 
 export function getDisplayColumns(headers: string[]): { header: string; index: number }[] {
