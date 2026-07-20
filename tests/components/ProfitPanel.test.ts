@@ -343,6 +343,87 @@ describe('ProfitPanel', () => {
     expect(wrapper.text()).not.toContain('保存しました')
   })
 
+  it('候補を非表示にすると一覧から消え、非表示件数と「元に戻す」リンクが出る', async () => {
+    fetchVehicleDailySlipsMock.mockResolvedValue([slip()])
+    const wrapper = createWrapper()
+    await flushPromises()
+
+    await wrapper.find('button[title="この候補を一覧から隠す"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('tbody tr').exists()).toBe(false)
+    expect(wrapper.text()).toContain('非表示 1件')
+    expect(wrapper.text()).toContain('元に戻す')
+  })
+
+  it('確認済みの候補を非表示にすると確定売上からも外れる (見えない伝票が金額に紛れ込まない)', async () => {
+    fetchVehicleDailySlipsMock.mockResolvedValue([slip()])
+    const wrapper = createWrapper()
+    await flushPromises()
+    expect(wrapper.text()).toContain('65,000')
+
+    await wrapper.find('button[title="この候補を一覧から隠す"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('0 円')
+  })
+
+  it('確認済みでない候補を非表示にしても toggleConfirmed は呼ばれない (確定売上は変化しない)', async () => {
+    fetchVehicleDailySlipsMock.mockResolvedValue([slip()])
+    const wrapper = createWrapper({ location: null }) // suggested=false → 自動チェックされない
+    await flushPromises()
+    expect(wrapper.text()).toContain('0 円')
+
+    await wrapper.find('button[title="この候補を一覧から隠す"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('すべての候補を非表示にしました')
+    expect(wrapper.text()).toContain('0 円')
+  })
+
+  it('「元に戻す」で非表示にした候補が再表示される', async () => {
+    fetchVehicleDailySlipsMock.mockResolvedValue([slip()])
+    const wrapper = createWrapper()
+    await flushPromises()
+
+    await wrapper.find('button[title="この候補を一覧から隠す"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('tbody tr').exists()).toBe(false)
+
+    await wrapper.find('button.text-blue-600').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('tbody tr').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('非表示')
+  })
+
+  it('全候補を非表示にすると「すべての候補を非表示にしました」を表示する (伝票自体は0件ではない)', async () => {
+    fetchVehicleDailySlipsMock.mockResolvedValue([slip()])
+    const wrapper = createWrapper()
+    await flushPromises()
+
+    await wrapper.find('button[title="この候補を一覧から隠す"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('すべての候補を非表示にしました')
+  })
+
+  it('range が変わって再取得すると非表示状態はリセットされる', async () => {
+    fetchVehicleDailySlipsMock.mockResolvedValue([slip()])
+    const wrapper = createWrapper()
+    await flushPromises()
+
+    await wrapper.find('button[title="この候補を一覧から隠す"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('非表示 1件')
+
+    await wrapper.setProps({ range: { fromTs: 100, toTs: 200 } })
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('非表示')
+    expect(wrapper.find('tbody tr').exists()).toBe(true)
+  })
+
   it('保存に失敗したら「保存に失敗しました」を表示する', async () => {
     fetchVehicleDailySlipsMock.mockResolvedValue([slip()])
     fetchMock.mockImplementation((url: string, opts?: { method?: string }) => {

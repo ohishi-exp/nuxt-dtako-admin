@@ -91,6 +91,40 @@ function downloadSnapshotListJson() {
   URL.revokeObjectURL(url)
 }
 
+// --- 保存済みスナップショットの削除 (「保存が増えすぎたので消せるように」要望) ---
+
+const deleteConfirmOpen = ref(false)
+const deleteTarget = ref<SnapshotListItem | null>(null)
+const deleting = ref(false)
+const deleteError = ref<string | null>(null)
+
+function requestDeleteSnapshot(item: SnapshotListItem) {
+  deleteTarget.value = item
+  deleteError.value = null
+  deleteConfirmOpen.value = true
+}
+
+async function confirmDeleteSnapshot() {
+  const item = deleteTarget.value
+  if (!item) return
+  deleting.value = true
+  deleteError.value = null
+  try {
+    await $fetch('/api/profit/snapshot', {
+      method: 'DELETE',
+      query: { ym: item.ym, vehicle: item.vehicleCode, unkoNo: item.unkoNo, segmentId: item.segmentId },
+    })
+    snapshotItems.value = snapshotItems.value.filter(i => i !== item)
+    deleteConfirmOpen.value = false
+  }
+  catch (e) {
+    deleteError.value = e instanceof Error ? e.message : String(e)
+  }
+  finally {
+    deleting.value = false
+  }
+}
+
 function matchLevelLabel(item: SnapshotListItem): string {
   const { exact, partial, none } = item.matchCounts
   return `完全${exact} / 部分${partial} / 根拠なし${none}`
@@ -170,6 +204,7 @@ function pct(count: number): string {
             <th class="text-right px-3 py-2 font-medium text-gray-500">確定金額</th>
             <th class="text-left px-3 py-2 font-medium text-gray-500">マッチレベル</th>
             <th class="text-left px-3 py-2 font-medium text-gray-500">類似運行</th>
+            <th class="text-left px-3 py-2 font-medium text-gray-500" />
           </tr>
         </thead>
         <tbody>
@@ -198,6 +233,14 @@ function pct(count: number): string {
                   >
                     比較 →
                   </NuxtLink>
+                </td>
+                <td class="px-3 py-2 whitespace-nowrap">
+                  <button
+                    class="text-red-600 dark:text-red-400 hover:underline"
+                    @click.stop="requestDeleteSnapshot(item)"
+                  >
+                    削除
+                  </button>
                 </td>
               </tr>
             </template>
@@ -273,5 +316,23 @@ function pct(count: number): string {
         </div>
       </div>
     </template>
+
+    <!-- Delete confirmation modal -->
+    <UModal v-model:open="deleteConfirmOpen">
+      <template #content>
+        <div class="p-6 space-y-4">
+          <h3 class="text-lg font-bold">検証スナップショットの削除</h3>
+          <p class="text-gray-600 dark:text-gray-400 text-sm">
+            車輌{{ deleteTarget?.vehicleCode }} / {{ deleteTarget?.saleDateFrom }}<template v-if="deleteTarget && deleteTarget.saleDateFrom !== deleteTarget.saleDateTo"> 〜 {{ deleteTarget?.saleDateTo }}</template> /
+            {{ deleteTarget?.customerNames.join(', ') || '-' }} の検証スナップショットを削除しますか？この操作は取り消せません。
+          </p>
+          <p v-if="deleteError" class="text-sm text-red-600 dark:text-red-400">{{ deleteError }}</p>
+          <div class="flex justify-end gap-2">
+            <UButton label="キャンセル" variant="outline" @click="deleteConfirmOpen = false" />
+            <UButton label="削除" color="error" :loading="deleting" @click="confirmDeleteSnapshot" />
+          </div>
+        </div>
+      </template>
+    </UModal>
   </div>
 </template>

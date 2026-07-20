@@ -37,6 +37,22 @@ const errorMessage = ref<string | null>(null)
 const scoredSlips = ref<ScoredVehicleDailySlip[]>([])
 const confirmedRowIds = ref<Set<string>>(new Set())
 const saveStatus = ref<SaveStatus>('idle')
+/** 検索窓 (前後1〜2日) に混ざる無関係な伝票候補をこのパネル表示中だけ隠す
+ * (「見た目の整理」目的、範囲が変われば load() でリセットされる、保存はしない)。 */
+const hiddenRowIds = ref<Set<string>>(new Set())
+const visibleSlips = computed(() => scoredSlips.value.filter(s => !hiddenRowIds.value.has(s.slip.rowId)))
+
+function hideSlip(rowId: string) {
+  const next = new Set(hiddenRowIds.value)
+  next.add(rowId)
+  hiddenRowIds.value = next
+  // 非表示にした伝票が確定金額に紛れ込まないよう、確認済みだった場合は外す。
+  if (confirmedRowIds.value.has(rowId)) toggleConfirmed(rowId)
+}
+
+function unhideAllSlips() {
+  hiddenRowIds.value = new Set()
+}
 
 /** 保存済みスナップショットがあれば確認状態を復元する。無ければ (404) 何もしない
  * (呼び出し元が suggested ベースの自動チェックにフォールバックする)。load() からしか
@@ -69,6 +85,7 @@ async function load() {
   status.value = 'loading'
   errorMessage.value = null
   saveStatus.value = 'idle'
+  hiddenRowIds.value = new Set()
   try {
     const { from, to } = vehicleDailyDateRange(props.range.fromTs, props.range.toTs)
     const slips = await fetchVehicleDailySlips(props.vehicleCode, from, to)
@@ -183,7 +200,7 @@ const matchBadgeLabel: Record<string, string> = { exact: '完全一致', partial
     </div>
     <template v-else-if="status === 'ready'">
       <div class="max-h-64 overflow-y-auto overflow-x-auto">
-        <table v-if="scoredSlips.length" class="w-full text-xs min-w-[640px]">
+        <table v-if="visibleSlips.length" class="w-full text-xs min-w-[640px]">
           <thead class="bg-gray-50 dark:bg-gray-800 sticky top-0">
             <tr>
               <th class="w-8" />
@@ -193,11 +210,12 @@ const matchBadgeLabel: Record<string, string> = { exact: '完全一致', partial
               <th class="text-left px-2 py-1.5 font-medium text-gray-500">品名 (数量@単価)</th>
               <th class="text-right px-2 py-1.5 font-medium text-gray-500">金額</th>
               <th class="text-center px-2 py-1.5 font-medium text-gray-500">根拠</th>
+              <th class="w-8" />
             </tr>
           </thead>
           <tbody>
             <tr
-              v-for="s in scoredSlips"
+              v-for="s in visibleSlips"
               :key="s.slip.rowId"
               class="border-t border-gray-100 dark:border-gray-800 cursor-pointer"
               :class="confirmedRowIds.has(s.slip.rowId) ? 'bg-blue-50 dark:bg-blue-950/40' : ''"
@@ -216,12 +234,28 @@ const matchBadgeLabel: Record<string, string> = { exact: '完全一致', partial
                   {{ s.suggested ? matchBadgeLabel.exact : (s.score > 0 ? matchBadgeLabel.partial : matchBadgeLabel.none) }}
                 </span>
               </td>
+              <td class="px-2 py-1.5 text-center">
+                <button
+                  class="text-gray-400 hover:text-red-500"
+                  title="この候補を一覧から隠す"
+                  @click.stop="hideSlip(s.slip.rowId)"
+                >
+                  <UIcon name="i-lucide-x" class="size-3.5" />
+                </button>
+              </td>
             </tr>
           </tbody>
         </table>
-        <p v-else class="px-4 py-6 text-xs text-gray-400 text-center">
+        <p v-else-if="scoredSlips.length === 0" class="px-4 py-6 text-xs text-gray-400 text-center">
           この車輌・期間の伝票が見つかりませんでした
         </p>
+        <p v-else class="px-4 py-6 text-xs text-gray-400 text-center">
+          すべての候補を非表示にしました
+        </p>
+      </div>
+      <div v-if="hiddenRowIds.size > 0" class="px-3 py-1 border-t border-gray-100 dark:border-gray-800 text-[10px] text-gray-400 text-right">
+        非表示 {{ hiddenRowIds.size }}件
+        <button class="text-blue-600 dark:text-blue-400 hover:underline ml-1" @click="unhideAllSlips">元に戻す</button>
       </div>
 
       <div class="px-3 py-2 border-t border-gray-100 dark:border-gray-800 grid grid-cols-2 gap-3 text-xs">
