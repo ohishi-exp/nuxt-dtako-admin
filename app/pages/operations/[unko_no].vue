@@ -110,6 +110,21 @@ function onSelectedLocationChange(location: SelectedRowsLocationRange | null) {
   selectedEventLocation.value = location
 }
 
+/** 選択区間の積地・卸地で `/profit/compare` (類似運行検索) に飛ぶためのクエリ。
+ * 車輌は含めない (「似た運行」は他車輌も含めて探したいため)。積地・卸地とも
+ * 空なら (市町村名が取れない選択) リンク自体を出さない。 */
+const similarOperationsQuery = computed(() => {
+  const loc = selectedEventLocation.value
+  if (!loc) return null
+  const origin = loc.originCity.trim()
+  const dest = loc.destCity.trim()
+  if (!origin && !dest) return null
+  const query: Record<string, string> = {}
+  if (origin) query.origin = origin
+  if (dest) query.dest = dest
+  return query
+})
+
 const eventMapSegments = computed(() => {
   const result = net780Data.result.value
   const range = selectedEventRange.value
@@ -232,6 +247,13 @@ function formatDatetime(val: string | null): string {
           >
             {{ tab.label }}
           </button>
+          <NuxtLink
+            v-if="activeTab === 'events' && similarOperationsQuery"
+            :to="{ path: '/profit/compare', query: similarOperationsQuery }"
+            class="ml-auto self-center mr-4 text-xs text-blue-600 dark:text-blue-400 hover:underline whitespace-nowrap"
+          >
+            類似運行を探す →
+          </NuxtLink>
         </div>
         <Net780OperationSummary
           v-if="activeTab === 'net780'"

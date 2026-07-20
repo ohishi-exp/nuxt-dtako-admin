@@ -203,6 +203,16 @@ function downloadCsv() {
   URL.revokeObjectURL(url)
 }
 
+function downloadJson() {
+  const blob = new Blob([JSON.stringify(sortedRows.value, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `類似運行比較_${from.value}_${to.value}.json`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 // --- 表示整形 ---
 
 function formatYen(v: number | null): string {
@@ -271,6 +281,13 @@ function goToOperation(r: CompareRowView) {
         @click="downloadCsv"
       >
         CSV出力
+      </button>
+      <button
+        v-if="rows.length > 0"
+        class="text-sm px-4 py-1.5 rounded bg-gray-600 hover:bg-gray-700 text-white"
+        @click="downloadJson"
+      >
+        JSON出力
       </button>
     </div>
 
