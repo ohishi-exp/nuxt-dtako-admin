@@ -1,4 +1,4 @@
-import { matchLocationLevel } from './ichiban'
+import { matchLocationLevel, epochToYmd } from './ichiban'
 
 export interface CrewGroup {
   label: string
@@ -426,7 +426,9 @@ export function summarizeSelectedRows(
  * 降し行は読み飛ばして次を探すが、実データがあって明確に不一致な降し行に当たったら
  * 「この積みに対応する降しは無い」と判断してそこで打ち切る (無関係な遠くの降しまで
  * 探しにいかない)。こうして集まった組すべてを union (最小 fromTs 〜 最大 toTs) して
- * 返し、`legCount` で何組見つかったかを呼び出し側に伝える (2以上ならUIで通知する)。
+ * 返すのに加え、個々の組を `legs` (fromTs昇順) でも返す。呼び出し側は `legs.length`
+ * で何組見つかったかをUIに通知したり (2以上なら)、`groupLegsByDate` で日付ごとに
+ * 再グループ化して伝票を日付単位で保存する、といった使い方ができる。
  * 一致する組が1つも見つからなければ null (この場合は従来通り手動選択が必要)。
  */
 export function proposeEventRowRange(
@@ -434,7 +436,7 @@ export function proposeEventRowRange(
   rows: string[][],
   originCity: string,
   destCity: string,
-): { fromTs: number, toTs: number, legCount: number } | null {
+): { fromTs: number, toTs: number, legs: { fromTs: number, toTs: number }[] } | null {
   if (!originCity.trim() || !destCity.trim()) return null
 
   const nameIdx = colIndex(headers, 'イベント名')
@@ -471,8 +473,36 @@ export function proposeEventRowRange(
   return {
     fromTs: Math.min(...pairs.map(p => p.fromTs)),
     toTs: Math.max(...pairs.map(p => p.toTs)),
-    legCount: pairs.length,
+    legs: [...pairs].sort((a, b) => a.fromTs - b.fromTs),
   }
+}
+
+export interface EventLegDateGroup {
+  /** レグの開始日時から `epochToYmd` で求めた日付 (YYYY-MM-DD)。 */
+  date: string
+  fromTs: number
+  toTs: number
+}
+
+/**
+ * `proposeEventRowRange` が返す `legs` を日付 (レグの開始日時、`epochToYmd` と同じ規約)
+ * でグループ化する。同じ日付に複数レグがある場合 (同日往復2回以上、実運用回帰 #356)
+ * は日付内で union する — 日付をまたぐレグだけを分けて日付ごとの保存に使う想定
+ * (同日内のレグをさらに個々に割り振る signal は無い、issue #356 の設計判断を踏襲)。
+ * 日付昇順で返す。
+ */
+export function groupLegsByDate(legs: { fromTs: number, toTs: number }[]): EventLegDateGroup[] {
+  const byDate = new Map<string, { fromTs: number, toTs: number }>()
+  for (const leg of legs) {
+    const date = epochToYmd(leg.fromTs)
+    const existing = byDate.get(date)
+    byDate.set(date, existing
+      ? { fromTs: Math.min(existing.fromTs, leg.fromTs), toTs: Math.max(existing.toTs, leg.toTs) }
+      : { fromTs: leg.fromTs, toTs: leg.toTs })
+  }
+  return [...byDate.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, range]) => ({ date, ...range }))
 }
 
 /**

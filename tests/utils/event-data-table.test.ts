@@ -22,6 +22,7 @@ import {
   classifyTimeCategory,
   summarizeSelectedRows,
   proposeEventRowRange,
+  groupLegsByDate,
   rowIndicesInTimeRange,
   eventHeaders,
 } from '~/utils/event-data-table'
@@ -758,7 +759,10 @@ describe('proposeEventRowRange', () => {
     expect(range).toEqual({
       fromTs: parseEventDatetimeToTs('2026/07/01 11:02:54'),
       toTs: parseEventDatetimeToTs('2026/07/01 13:32:53'),
-      legCount: 1,
+      legs: [{
+        fromTs: parseEventDatetimeToTs('2026/07/01 11:02:54'),
+        toTs: parseEventDatetimeToTs('2026/07/01 13:32:53'),
+      }],
     })
   })
 
@@ -802,7 +806,10 @@ describe('proposeEventRowRange', () => {
     expect(range).toEqual({
       fromTs: parseEventDatetimeToTs('2026/07/01 11:02:54'),
       toTs: parseEventDatetimeToTs('2026/07/01 13:32:53'),
-      legCount: 1,
+      legs: [{
+        fromTs: parseEventDatetimeToTs('2026/07/01 11:02:54'),
+        toTs: parseEventDatetimeToTs('2026/07/01 13:32:53'),
+      }],
     })
   })
 
@@ -820,7 +827,10 @@ describe('proposeEventRowRange', () => {
     expect(range).toEqual({
       fromTs: parseEventDatetimeToTs('2026/07/01 11:02:54'),
       toTs: parseEventDatetimeToTs('2026/07/01 13:00:00'),
-      legCount: 1,
+      legs: [{
+        fromTs: parseEventDatetimeToTs('2026/07/01 11:02:54'),
+        toTs: parseEventDatetimeToTs('2026/07/01 13:00:00'),
+      }],
     })
   })
 
@@ -851,11 +861,14 @@ describe('proposeEventRowRange', () => {
     expect(range).toEqual({
       fromTs: parseEventDatetimeToTs('2026/07/01 11:15:12'),
       toTs: parseEventDatetimeToTs('2026/07/01 13:35:11'),
-      legCount: 1,
+      legs: [{
+        fromTs: parseEventDatetimeToTs('2026/07/01 11:15:12'),
+        toTs: parseEventDatetimeToTs('2026/07/01 13:35:11'),
+      }],
     })
   })
 
-  it('同じ得意先・同じ区間への配送が同日に往復2回ある場合、両方のレグを union した区間を返し legCount で2件と伝える (実運用回帰 #356: 従来は最短区間の1本目しか提案されず、2本目のレグの売上・時間が集計から漏れていた)', () => {
+  it('同じ得意先・同じ区間への配送が同日に往復2回ある場合、両方のレグを union した区間を返し legs で2件と伝える (実運用回帰 #356: 従来は最短区間の1本目しか提案されず、2本目のレグの売上・時間が集計から漏れていた)', () => {
     const rowsRoundTrip = [
       // レグ1: 積み 11:15:12 〜 降し 13:35:11
       row('2026/07/01 11:15:12', '2026/07/01 11:51:23', '積み', '北海道釧路市西港', '北海道釧路市西港'),
@@ -872,8 +885,50 @@ describe('proposeEventRowRange', () => {
     expect(range).toEqual({
       fromTs: parseEventDatetimeToTs('2026/07/01 11:15:12'),
       toTs: parseEventDatetimeToTs('2026/07/01 17:14:28'),
-      legCount: 2,
+      legs: [
+        { fromTs: parseEventDatetimeToTs('2026/07/01 11:15:12'), toTs: parseEventDatetimeToTs('2026/07/01 13:35:11') },
+        { fromTs: parseEventDatetimeToTs('2026/07/01 14:37:01'), toTs: parseEventDatetimeToTs('2026/07/01 17:14:28') },
+      ],
     })
+  })
+})
+
+describe('groupLegsByDate', () => {
+  it('同日の複数レグは union して1グループにまとめる', () => {
+    const groups = groupLegsByDate([
+      { fromTs: parseEventDatetimeToTs('2026/07/01 11:15:12')!, toTs: parseEventDatetimeToTs('2026/07/01 13:35:11')! },
+      { fromTs: parseEventDatetimeToTs('2026/07/01 14:37:01')!, toTs: parseEventDatetimeToTs('2026/07/01 17:14:28')! },
+    ])
+    expect(groups).toEqual([
+      {
+        date: '2026-07-01',
+        fromTs: parseEventDatetimeToTs('2026/07/01 11:15:12'),
+        toTs: parseEventDatetimeToTs('2026/07/01 17:14:28'),
+      },
+    ])
+  })
+
+  it('日付が異なるレグは別グループに分け、日付昇順で返す', () => {
+    const groups = groupLegsByDate([
+      { fromTs: parseEventDatetimeToTs('2026/07/02 04:00:00')!, toTs: parseEventDatetimeToTs('2026/07/02 06:00:00')! },
+      { fromTs: parseEventDatetimeToTs('2026/07/01 11:15:12')!, toTs: parseEventDatetimeToTs('2026/07/01 13:35:11')! },
+    ])
+    expect(groups).toEqual([
+      {
+        date: '2026-07-01',
+        fromTs: parseEventDatetimeToTs('2026/07/01 11:15:12'),
+        toTs: parseEventDatetimeToTs('2026/07/01 13:35:11'),
+      },
+      {
+        date: '2026-07-02',
+        fromTs: parseEventDatetimeToTs('2026/07/02 04:00:00'),
+        toTs: parseEventDatetimeToTs('2026/07/02 06:00:00'),
+      },
+    ])
+  })
+
+  it('空配列を渡せば空配列を返す', () => {
+    expect(groupLegsByDate([])).toEqual([])
   })
 })
 

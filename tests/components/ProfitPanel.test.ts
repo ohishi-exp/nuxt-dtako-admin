@@ -4,6 +4,7 @@ import { nextTick } from 'vue'
 import ProfitPanel from '~/components/ProfitPanel.vue'
 import type { SelectedRowsSummary } from '~/utils/event-data-table'
 import type { VehicleDailySlip } from '~/utils/ichiban'
+import { segmentId as buildSegmentId, profitYm, type ProfitPanelLegGroup } from '~/utils/profit-r2'
 import { UIconStub } from '../helpers/stubs'
 
 const { fetchVehicleDailySlipsMock } = vi.hoisted(() => ({
@@ -457,5 +458,248 @@ describe('ProfitPanel', () => {
     resolvePost?.()
     await clickPromise
     await flushPromises()
+  })
+
+  describe('legGroups (日付をまたぐ複数レグの分割保存、Refs #356 派生)', () => {
+    function legGroup(overrides: Partial<ProfitPanelLegGroup> = {}): ProfitPanelLegGroup {
+      return {
+        date: '2026-06-21',
+        range: { fromTs: 0, toTs: 3600 },
+        summary: summary(),
+        ...overrides,
+      }
+    }
+
+    it('legGroups が1件以下なら従来通りの単一保存UIのままになる (回帰防止)', async () => {
+      fetchVehicleDailySlipsMock.mockResolvedValue([slip()])
+      const wrapper = createWrapper({ legGroups: [legGroup()] })
+      await flushPromises()
+
+      expect(wrapper.find('button.bg-blue-600').exists()).toBe(true)
+      expect(wrapper.text()).not.toContain('日付をまたぐ複数のレグ')
+    })
+
+    it('legGroups が2件以上なら日付ごとにグループ化して表示する', async () => {
+      fetchVehicleDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'row-1', saleDate: '2026-06-21', amount: 10000 }),
+        slip({ rowId: 'row-2', saleDate: '2026-06-22', amount: 20000 }),
+      ])
+      const wrapper = createWrapper({
+        legGroups: [
+          legGroup({ date: '2026-06-21', range: { fromTs: 0, toTs: 3600 } }),
+          legGroup({ date: '2026-06-22', range: { fromTs: 100000, toTs: 103600 } }),
+        ],
+      })
+      await flushPromises()
+
+      expect(wrapper.text()).toContain('日付をまたぐ複数のレグ')
+      expect(wrapper.text()).toContain('2026-06-21')
+      expect(wrapper.text()).toContain('2026-06-22')
+      expect(wrapper.findAll('button').filter(b => b.text() === 'この日付を保存')).toHaveLength(2)
+    })
+
+    it('日付ごとの確定金額は同じ日付の伝票だけを合算する', async () => {
+      fetchVehicleDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'row-1', saleDate: '2026-06-21', amount: 10000 }),
+        slip({ rowId: 'row-2', saleDate: '2026-06-22', amount: 20000 }),
+      ])
+      const wrapper = createWrapper({
+        legGroups: [
+          legGroup({ date: '2026-06-21', range: { fromTs: 0, toTs: 3600 } }),
+          legGroup({ date: '2026-06-22', range: { fromTs: 100000, toTs: 103600 } }),
+        ],
+      })
+      await flushPromises()
+
+      expect(wrapper.text()).toContain('確定 10,000 円')
+      expect(wrapper.text()).toContain('確定 20,000 円')
+    })
+
+    it('「この日付を保存」はその日付の確認済み伝票だけを対応するレグ自身の区間・実績で保存する', async () => {
+      fetchVehicleDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'row-1', saleDate: '2026-06-21', amount: 10000 }),
+        slip({ rowId: 'row-2', saleDate: '2026-06-22', amount: 20000 }),
+      ])
+      fetchMock.mockImplementation((url: string, opts?: { method?: string }) => {
+        if (opts?.method === 'POST') return Promise.resolve({ saved: true, changed: true, savedAt: 'x' })
+        return Promise.reject(new Error('404'))
+      })
+      const group1 = legGroup({ date: '2026-06-21', range: { fromTs: 0, toTs: 3600 }, summary: summary({ distanceKm: 10 }) })
+      const group2 = legGroup({ date: '2026-06-22', range: { fromTs: 100000, toTs: 103600 }, summary: summary({ distanceKm: 20 }) })
+      const wrapper = createWrapper({ legGroups: [group1, group2] })
+      await flushPromises()
+
+      const saveButtons = wrapper.findAll('button').filter(b => b.text() === 'この日付を保存')
+      await saveButtons[0]!.trigger('click')
+      await flushPromises()
+
+      expect(fetchMock).toHaveBeenCalledWith('/api/profit/snapshot', expect.objectContaining({
+        method: 'POST',
+        body: expect.objectContaining({
+          range: group1.range,
+          confirmedAmount: 10000,
+          confirmedSlips: [expect.objectContaining({ rowId: 'row-1' })],
+        }),
+      }))
+    })
+
+    it('どのレグの日付にも一致しない伝票は「対応するレグが見つかりません」に表示され保存ボタンは出ない', async () => {
+      fetchVehicleDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'row-1', saleDate: '2026-06-21', amount: 10000 }),
+        slip({ rowId: 'row-orphan', saleDate: '2026-06-30', amount: 5000 }),
+      ])
+      const wrapper = createWrapper({
+        legGroups: [
+          legGroup({ date: '2026-06-21', range: { fromTs: 0, toTs: 3600 } }),
+          legGroup({ date: '2026-06-22', range: { fromTs: 100000, toTs: 103600 } }),
+        ],
+      })
+      await flushPromises()
+
+      expect(wrapper.text()).toContain('対応するレグが見つかりません')
+      expect(wrapper.text()).toContain('2026-06-30')
+      expect(wrapper.findAll('button').filter(b => b.text() === 'この日付を保存')).toHaveLength(1)
+    })
+
+    it('日付ごとに個別に保存済みスナップショットを復元し、未保存の日付は suggested ベースにフォールバックする', async () => {
+      fetchVehicleDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'row-1', saleDate: '2026-06-21', originAreaName: '東京都', destAreaName: '大阪府', amount: 10000 }),
+        slip({ rowId: 'row-2', saleDate: '2026-06-22', originAreaName: '東京都', destAreaName: '大阪府', amount: 20000 }),
+      ])
+      const group1 = legGroup({ date: '2026-06-21', range: { fromTs: 0, toTs: 3600 } })
+      const group2 = legGroup({ date: '2026-06-22', range: { fromTs: 100000, toTs: 103600 } })
+      fetchMock.mockImplementation((url: string, opts?: { query?: Record<string, string> }) => {
+        if (opts?.query?.segmentId === buildSegmentId(group1.range.fromTs, group1.range.toTs)) {
+          return Promise.resolve({ schemaVersion: 1, confirmedSlips: [{ rowId: 'row-1' }] })
+        }
+        return Promise.reject(new Error('404'))
+      })
+      const wrapper = createWrapper({ legGroups: [group1, group2] })
+      await flushPromises()
+
+      // row-1 は保存済みスナップショットから復元 (suggested=false でもチェックされる)
+      // row-2 は未保存 → suggested=false (地域が一致しない) なのでチェックされない
+      const checkboxes = wrapper.findAll('input[type="checkbox"]')
+      expect((checkboxes[0]!.element as HTMLInputElement).checked).toBe(true)
+      expect((checkboxes[1]!.element as HTMLInputElement).checked).toBe(false)
+      expect(fetchMock).toHaveBeenCalledWith('/api/profit/snapshot', expect.objectContaining({
+        query: expect.objectContaining({ ym: profitYm(group1.range.fromTs), segmentId: buildSegmentId(group1.range.fromTs, group1.range.toTs) }),
+      }))
+      expect(fetchMock).toHaveBeenCalledWith('/api/profit/snapshot', expect.objectContaining({
+        query: expect.objectContaining({ ym: profitYm(group2.range.fromTs), segmentId: buildSegmentId(group2.range.fromTs, group2.range.toTs) }),
+      }))
+    })
+
+    it('日付グループ内でも行クリックで確認/解除でき、確定金額に反映される', async () => {
+      fetchVehicleDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'row-1', saleDate: '2026-06-21', amount: 10000 }),
+        slip({ rowId: 'row-2', saleDate: '2026-06-22', amount: 20000 }),
+      ])
+      const wrapper = createWrapper({
+        legGroups: [
+          legGroup({ date: '2026-06-21', range: { fromTs: 0, toTs: 3600 } }),
+          legGroup({ date: '2026-06-22', range: { fromTs: 100000, toTs: 103600 } }),
+        ],
+      })
+      await flushPromises()
+      expect(wrapper.text()).toContain('確定 10,000 円')
+
+      await wrapper.find('tbody tr').trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).toContain('確定 0 円')
+
+      await wrapper.find('tbody input[type="checkbox"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).toContain('確定 10,000 円')
+
+      await wrapper.find('tbody td').trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).toContain('確定 0 円')
+    })
+
+    it('日付を保存できずエラーになったらその日付だけ「保存に失敗しました」を表示する', async () => {
+      fetchVehicleDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'row-1', saleDate: '2026-06-21', amount: 10000 }),
+        slip({ rowId: 'row-2', saleDate: '2026-06-22', amount: 20000 }),
+      ])
+      fetchMock.mockImplementation((url: string, opts?: { method?: string }) => {
+        if (opts?.method === 'POST') return Promise.reject(new Error('network error'))
+        return Promise.reject(new Error('404'))
+      })
+      const wrapper = createWrapper({
+        legGroups: [
+          legGroup({ date: '2026-06-21', range: { fromTs: 0, toTs: 3600 } }),
+          legGroup({ date: '2026-06-22', range: { fromTs: 100000, toTs: 103600 } }),
+        ],
+      })
+      await flushPromises()
+
+      const saveButtons = wrapper.findAll('button').filter(b => b.text() === 'この日付を保存')
+      await saveButtons[0]!.trigger('click')
+      await flushPromises()
+
+      expect(wrapper.text()).toContain('保存に失敗しました')
+    })
+
+    it('対応するレグが無い伝票も非表示にできる', async () => {
+      fetchVehicleDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'row-1', saleDate: '2026-06-21', amount: 10000 }),
+        slip({ rowId: 'row-orphan', saleDate: '2026-06-30', amount: 5000 }),
+      ])
+      const wrapper = createWrapper({
+        legGroups: [
+          legGroup({ date: '2026-06-21', range: { fromTs: 0, toTs: 3600 } }),
+          legGroup({ date: '2026-06-22', range: { fromTs: 100000, toTs: 103600 } }),
+        ],
+      })
+      await flushPromises()
+      expect(wrapper.text()).toContain('2026-06-30')
+
+      const hideButtons = wrapper.findAll('button[title="この候補を一覧から隠す"]')
+      await hideButtons[hideButtons.length - 1]!.trigger('click')
+      await flushPromises()
+
+      expect(wrapper.text()).not.toContain('対応するレグが見つかりません')
+    })
+
+    it('日付グループ内・対応レグ無し欄とも得意先名が空文字なら「-」表示になる', async () => {
+      fetchVehicleDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'row-1', saleDate: '2026-06-21', customerName: '', originAreaName: '', origin: '', destAreaName: '', dest: '', amount: 10000 }),
+        slip({ rowId: 'row-orphan', saleDate: '2026-06-30', customerName: '', amount: 5000 }),
+      ])
+      const wrapper = createWrapper({
+        legGroups: [
+          legGroup({ date: '2026-06-21', range: { fromTs: 0, toTs: 3600 } }),
+          legGroup({ date: '2026-06-22', range: { fromTs: 100000, toTs: 103600 } }),
+        ],
+      })
+      await flushPromises()
+
+      const cells = wrapper.findAll('td')
+      expect(cells.some(c => c.text() === '-')).toBe(true)
+      expect(cells.some(c => c.text() === '? → ?')).toBe(true)
+    })
+
+    it('日付グループ内でも非表示ボタンが機能する', async () => {
+      fetchVehicleDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'row-1', saleDate: '2026-06-21', amount: 10000 }),
+        slip({ rowId: 'row-2', saleDate: '2026-06-22', amount: 20000 }),
+      ])
+      const wrapper = createWrapper({
+        legGroups: [
+          legGroup({ date: '2026-06-21', range: { fromTs: 0, toTs: 3600 } }),
+          legGroup({ date: '2026-06-22', range: { fromTs: 100000, toTs: 103600 } }),
+        ],
+      })
+      await flushPromises()
+
+      const hideButtons = wrapper.findAll('button[title="この候補を一覧から隠す"]')
+      await hideButtons[0]!.trigger('click')
+      await flushPromises()
+
+      expect(wrapper.text()).not.toContain('2026-06-21')
+      expect(wrapper.text()).toContain('2026-06-22')
+      expect(wrapper.text()).toContain('非表示 1件')
+    })
   })
 })

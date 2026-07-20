@@ -95,6 +95,19 @@ export interface ProfitSnapshotSlip {
   destMatch: LocationMatchLevel
 }
 
+/**
+ * 一番星の伝票から複数レグ (往復2回以上、日付をまたぐ等) を提案した際、日付ごとの
+ * デジタコ実績 (距離・時間) を ProfitPanel に伝えるための単位 (Refs #356 派生要望:
+ * 「日付が違う部分を分けて別々に登録したい」)。`date` は `groupLegsByDate` の
+ * `EventLegDateGroup.date` と同じ規約 (YYYY-MM-DD)。ProfitPanel はこれを使って
+ * 伝票候補を日付ごとにグループ化し、日付単位で個別に検証結果を保存できるようにする。
+ */
+export interface ProfitPanelLegGroup {
+  date: string
+  range: { fromTs: number, toTs: number }
+  summary: SelectedRowsSummary
+}
+
 export interface ProfitSnapshot {
   schemaVersion: 1
   vehicleCode: string
