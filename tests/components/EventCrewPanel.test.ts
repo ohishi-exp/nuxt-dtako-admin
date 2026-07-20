@@ -155,7 +155,14 @@ describe('EventCrewPanel', () => {
       })
     })
 
-    it('proposedRange が null なら何もしない (初期状態のまま)', () => {
+    it('proposedRange が (再) 提案なしで null になった場合は選択状態を変更しない', async () => {
+      const wrapper = createWrapper(makeGroup([makeRow('休憩')]))
+      await wrapper.setProps({ proposedRange: null })
+      expect(wrapper.find('tbody input[type="checkbox"]').element.checked).toBe(false)
+      expect(wrapper.emitted('update:selectedRange')).toBeFalsy()
+    })
+
+    it('proposedRange が未指定 (prop 自体を渡さない) なら何もしない (初期状態のまま)', () => {
       const wrapper = createWrapper(makeGroup([makeRow('休憩')]))
       expect(wrapper.find('tbody input[type="checkbox"]').element.checked).toBe(false)
       expect(wrapper.emitted('update:selectedRange')).toBeFalsy()
