@@ -1,3 +1,5 @@
+import { matchLocationLevel } from './ichiban'
+
 export interface CrewGroup {
   label: string
   crewRole: string
@@ -402,4 +404,73 @@ export function summarizeSelectedRows(
   }
 
   return { distanceKm, durationMin, byCategory, rowCount }
+}
+
+// --- 一番星の伝票 (積地・卸地) から対応するイベント行範囲を提案 (Refs #330 実運用
+//     フィードバック: 「同じ得意先ならだいたい同じ売上・同じ積み降し区間になるのだから、
+//     提案してユーザーは確認するだけでいいはず」) ---
+
+/**
+ * 積み (`開始市町村名` が `originCity` に一致) 〜 それ以降で最初に現れる、卸地
+ * (`終了市町村名` が `destCity` に一致) の降しまでの時刻レンジを提案する。
+ * 一番星の伝票 (`originAreaName`/`destAreaName` または `origin`/`dest`) をそのまま
+ * 渡せば、ユーザーが手動でイベント行を1つずつ探して選択する手間を省ける。
+ * 一致する積み/降しの組が見つからなければ null (この場合は従来通り手動選択が必要)。
+ */
+export function proposeEventRowRange(
+  headers: string[],
+  rows: string[][],
+  originCity: string,
+  destCity: string,
+): { fromTs: number, toTs: number } | null {
+  if (!originCity.trim() || !destCity.trim()) return null
+
+  const nameIdx = colIndex(headers, 'イベント名')
+  const startIdx = colIndex(headers, '開始日時')
+  const endIdx = colIndex(headers, '終了日時')
+  const startCityIdx = colIndex(headers, '開始市町村名')
+  const endCityIdx = colIndex(headers, '終了市町村名')
+  if (nameIdx < 0 || startIdx < 0 || endIdx < 0 || startCityIdx < 0 || endCityIdx < 0) return null
+
+  let loadIdx = -1
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]!
+    if (classifyTimeCategory(row[nameIdx] ?? '') !== 'loading') continue
+    if (matchLocationLevel(row[startCityIdx] ?? '', originCity) === 'none') continue
+    loadIdx = i
+    break
+  }
+  if (loadIdx < 0) return null
+
+  let unloadIdx = -1
+  for (let j = loadIdx + 1; j < rows.length; j++) {
+    const row = rows[j]!
+    if (classifyTimeCategory(row[nameIdx] ?? '') !== 'unloading') continue
+    if (matchLocationLevel(row[endCityIdx] ?? '', destCity) === 'none') continue
+    unloadIdx = j
+    break
+  }
+  if (unloadIdx < 0) return null
+
+  const fromTs = parseEventDatetimeToTs(rows[loadIdx]![startIdx] ?? '')
+  const toTs = parseEventDatetimeToTs(rows[unloadIdx]![endIdx] ?? '')
+  if (fromTs === null || toTs === null) return null
+  return { fromTs, toTs }
+}
+
+/**
+ * `開始日時` が `[fromTs, toTs]` (両端含む) に収まる行の index 一覧を返す
+ * (`rows` 全体が対象、EventCrewPanel のタブ絞り込み後の `filteredRows` とは異なり
+ * カテゴリを跨いだ提案区間全体をカバーできる)。`summarizeSelectedRows`/
+ * `selectedRowsLocationRange` にそのまま渡せる。
+ */
+export function rowIndicesInTimeRange(headers: string[], rows: string[][], fromTs: number, toTs: number): number[] {
+  const startIdx = colIndex(headers, '開始日時')
+  if (startIdx < 0) return []
+  const result: number[] = []
+  rows.forEach((row, i) => {
+    const start = parseEventDatetimeToTs(row[startIdx] ?? '')
+    if (start !== null && start >= fromTs && start <= toTs) result.push(i)
+  })
+  return result
 }

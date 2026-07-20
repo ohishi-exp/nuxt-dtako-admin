@@ -21,6 +21,9 @@ import {
   countRowsByCategory,
   classifyTimeCategory,
   summarizeSelectedRows,
+  proposeEventRowRange,
+  rowIndicesInTimeRange,
+  eventHeaders,
 } from '~/utils/event-data-table'
 
 describe('colIndex', () => {
@@ -734,6 +737,141 @@ describe('summarizeSelectedRows', () => {
     const result = summarizeSelectedRows(headers, [rowWithHoleAtName], [0])
     expect(result.durationMin).toBe(15)
     expect(result.byCategory.other).toBe(15)
+  })
+})
+
+describe('proposeEventRowRange', () => {
+  function row(start: string, end: string, name: string, startCity: string, endCity: string): string[] {
+    return [start, end, '999', name, '30', '5', startCity, endCity]
+  }
+
+  const rows = [
+    row('2026/07/01 08:45:20', '2026/07/01 09:20:49', '運転', '北海道河東郡上士幌町', '北海道河東郡上士幌町'),
+    row('2026/07/01 09:20:49', '2026/07/01 11:02:54', '運転', '北海道河東郡上士幌町', '北海道釧路市西港2'),
+    row('2026/07/01 11:02:54', '2026/07/01 11:38:18', '積み', '北海道釧路市西港2', '北海道釧路市西港2'),
+    row('2026/07/01 11:38:18', '2026/07/01 12:46:17', '運転', '北海道釧路市西港1', '北海道川上郡標茶町多和'),
+    row('2026/07/01 12:46:17', '2026/07/01 13:32:53', '降し', '北海道川上郡標茶町多和', '北海道川上郡標茶町多和'),
+  ]
+
+  it('積み(開始市町村名が一致)〜降し(終了市町村名が一致)の時刻レンジを返す', () => {
+    const range = proposeEventRowRange(eventHeaders, rows, '釧路市西港', '標茶町多和')
+    expect(range).toEqual({
+      fromTs: parseEventDatetimeToTs('2026/07/01 11:02:54'),
+      toTs: parseEventDatetimeToTs('2026/07/01 13:32:53'),
+    })
+  })
+
+  it('一致する積みが無ければ null', () => {
+    expect(proposeEventRowRange(eventHeaders, rows, '存在しない地名', '標茶町多和')).toBeNull()
+  })
+
+  it('積みは一致するが後続に一致する降しが無ければ null', () => {
+    expect(proposeEventRowRange(eventHeaders, rows, '釧路市西港', '存在しない地名')).toBeNull()
+  })
+
+  it('積地・卸地のどちらかが空文字なら null (判定不能)', () => {
+    expect(proposeEventRowRange(eventHeaders, rows, '', '標茶町多和')).toBeNull()
+    expect(proposeEventRowRange(eventHeaders, rows, '釧路市西港', '')).toBeNull()
+  })
+
+  it('必要な列 (開始市町村名/終了市町村名等) が無いヘッダーでは null', () => {
+    const headersNoCity = ['開始日時', '終了日時', 'イベントCD', 'イベント名', '区間時間', '区間距離']
+    expect(proposeEventRowRange(headersNoCity, rows, '釧路市西港', '標茶町多和')).toBeNull()
+  })
+
+  it('日時がパースできない行がヒットしても null (積み側)', () => {
+    const badRows = [row('invalid', '2026/07/01 11:38:18', '積み', '釧路市西港', '釧路市西港')]
+    expect(proposeEventRowRange(eventHeaders, badRows, '釧路市西港', '釧路市西港')).toBeNull()
+  })
+
+  it('積みは正常だが降しの終了日時がパースできなければ null', () => {
+    const badRows = [
+      row('2026/07/01 11:02:54', '2026/07/01 11:38:18', '積み', '釧路市西港', '釧路市西港'),
+      row('2026/07/01 11:38:18', 'invalid', '降し', '釧路市西港', '釧路市西港'),
+    ]
+    expect(proposeEventRowRange(eventHeaders, badRows, '釧路市西港', '釧路市西港')).toBeNull()
+  })
+
+  it('積み探索中にイベント名/開始市町村名列が無い (行が短い) 行があってもスキップして継続する (?? \'\' フォールバック)', () => {
+    // イベント名列 (index 3) すら無い行 → line 438 の `?? ''` を経由して 'other' 扱いになりスキップ
+    const holeMissingName = ['2026/07/01 10:00:00', '2026/07/01 10:10:00', '999']
+    // イベント名はあるが開始市町村名列 (index 6) が無い行 → line 439 の `?? ''` を経由してスキップ
+    const holeMissingStartCity = ['2026/07/01 10:10:00', '2026/07/01 10:20:00', '999', '積み']
+    const range = proposeEventRowRange(eventHeaders, [holeMissingName, holeMissingStartCity, ...rows], '釧路市西港', '標茶町多和')
+    expect(range).toEqual({
+      fromTs: parseEventDatetimeToTs('2026/07/01 11:02:54'),
+      toTs: parseEventDatetimeToTs('2026/07/01 13:32:53'),
+    })
+  })
+
+  it('降し探索中にイベント名/終了市町村名列が無い行があってもスキップして継続する (?? \'\' フォールバック)', () => {
+    const loadRow = row('2026/07/01 11:02:54', '2026/07/01 11:38:18', '積み', '北海道釧路市西港2', '北海道釧路市西港2')
+    const holeMissingName = ['2026/07/01 11:38:18', '2026/07/01 12:00:00', '999']
+    const holeMissingEndCity = ['2026/07/01 12:00:00', '2026/07/01 12:30:00', '999', '降し']
+    const unloadRow = row('2026/07/01 12:30:00', '2026/07/01 13:00:00', '降し', '北海道川上郡標茶町多和', '北海道川上郡標茶町多和')
+    const range = proposeEventRowRange(
+      eventHeaders,
+      [loadRow, holeMissingName, holeMissingEndCity, unloadRow],
+      '釧路市西港',
+      '標茶町多和',
+    )
+    expect(range).toEqual({
+      fromTs: parseEventDatetimeToTs('2026/07/01 11:02:54'),
+      toTs: parseEventDatetimeToTs('2026/07/01 13:00:00'),
+    })
+  })
+
+  it('マッチした積み行の開始日時セルが undefined でも安全に処理し null を返す (?? \'\' フォールバック)', () => {
+    const loadRowNoDate: string[] = [undefined as unknown as string, '2026/07/01 11:38:18', '999', '積み', '30', '5', '北海道釧路市西港2', '北海道釧路市西港2']
+    const unloadRow = row('2026/07/01 11:38:18', '2026/07/01 12:46:17', '降し', '北海道川上郡標茶町多和', '北海道川上郡標茶町多和')
+    expect(proposeEventRowRange(eventHeaders, [loadRowNoDate, unloadRow], '釧路市西港', '標茶町多和')).toBeNull()
+  })
+
+  it('マッチした降し行の終了日時セルが undefined でも安全に処理し null を返す (?? \'\' フォールバック)', () => {
+    const loadRow = row('2026/07/01 11:02:54', '2026/07/01 11:38:18', '積み', '北海道釧路市西港2', '北海道釧路市西港2')
+    const unloadRowNoDate: string[] = ['2026/07/01 11:38:18', undefined as unknown as string, '999', '降し', '30', '5', '北海道川上郡標茶町多和', '北海道川上郡標茶町多和']
+    expect(proposeEventRowRange(eventHeaders, [loadRow, unloadRowNoDate], '釧路市西港', '標茶町多和')).toBeNull()
+  })
+})
+
+describe('rowIndicesInTimeRange', () => {
+  const headers = ['開始日時', '終了日時']
+  const rows = [
+    ['2026/07/01 08:00:00', '2026/07/01 08:30:00'],
+    ['2026/07/01 09:00:00', '2026/07/01 09:30:00'],
+    ['2026/07/01 10:00:00', '2026/07/01 10:30:00'],
+  ]
+
+  it('開始日時が範囲内 (両端含む) の行の index を返す', () => {
+    const from = parseEventDatetimeToTs('2026/07/01 09:00:00')!
+    const to = parseEventDatetimeToTs('2026/07/01 10:00:00')!
+    expect(rowIndicesInTimeRange(headers, rows, from, to)).toEqual([1, 2])
+  })
+
+  it('範囲より前の行は含めない', () => {
+    const from = parseEventDatetimeToTs('2026/07/01 09:00:00')!
+    const to = parseEventDatetimeToTs('2026/07/01 09:00:00')!
+    expect(rowIndicesInTimeRange(headers, rows, from, to)).toEqual([1])
+  })
+
+  it('範囲より後の行は含めない', () => {
+    const from = parseEventDatetimeToTs('2026/07/01 08:00:00')!
+    const to = parseEventDatetimeToTs('2026/07/01 09:00:00')!
+    expect(rowIndicesInTimeRange(headers, rows, from, to)).toEqual([0, 1])
+  })
+
+  it('開始日時列が無いヘッダーでは空配列', () => {
+    expect(rowIndicesInTimeRange(['終了日時'], rows, 0, 9999999999)).toEqual([])
+  })
+
+  it('日時がパースできない行はスキップする', () => {
+    const badRows = [['invalid', '2026/07/01 08:30:00']]
+    expect(rowIndicesInTimeRange(headers, badRows, 0, 9999999999)).toEqual([])
+  })
+
+  it('開始日時セルが undefined (行が短い) 行はスキップする (?? \'\' フォールバック)', () => {
+    const shortRow: string[] = []
+    expect(rowIndicesInTimeRange(headers, [shortRow], 0, 9999999999)).toEqual([])
   })
 })
 
