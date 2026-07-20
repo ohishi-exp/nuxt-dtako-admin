@@ -6,11 +6,37 @@ import {
   buildCompareRowView,
   defaultCompareDateRange,
   compareRowsToCsvLines,
+  savedSnapshotKey,
+  uniqueVehicleYmPairs,
   type CompareRow,
   type CompareRowView,
 } from '~/utils/profit-compare'
 import type { VehicleDailySlip } from '~/utils/ichiban'
+import type { ProfitSnapshot } from '~/utils/profit-r2'
 import type { OperationListItem } from '~/types'
+
+function snapshot(overrides: Partial<ProfitSnapshot> = {}): ProfitSnapshot {
+  return {
+    schemaVersion: 1,
+    vehicleCode: '8504',
+    unkoNo: '2607030428090000001109',
+    segmentId: '1750000000-1750010000',
+    ym: '2026-06',
+    range: { fromTs: 1750000000, toTs: 1750010000 },
+    location: { originCity: '長崎県', destCity: '福岡県北九州市' },
+    dtakoSummary: {
+      distanceKm: 90,
+      durationMin: 420,
+      byCategory: { drive: 280, loading: 50, unloading: 50, rest: 40, idle: 0, other: 0 },
+      rowCount: 8,
+    },
+    confirmedSlips: [],
+    confirmedAmount: 60000,
+    efficiency: { yenPerKm: 666.67, yenPerHourBound: 8571.43, yenPerHourDrive: 12857.14 },
+    savedAt: '2026-06-22T10:00:00.000Z',
+    ...overrides,
+  }
+}
 
 function slip(overrides: Partial<VehicleDailySlip> = {}): VehicleDailySlip {
   return {
@@ -128,17 +154,21 @@ describe('pickOperationForDate', () => {
 })
 
 describe('buildCompareRowView', () => {
-  it('運行・CSV集計が揃っていれば距離・時間・効率指標を全て埋める', () => {
+  function baseGroup() {
+    return {
+      vehicleNumber: '8504',
+      saleDate: '2026-06-21',
+      customerName: '㈱田浦畜産',
+      originLabel: '長崎県',
+      destLabel: '福岡県北九州市',
+      amount: 65000,
+      rowIds: ['row-1'],
+    }
+  }
+
+  it('運行・CSV集計が揃っていれば距離・時間・効率指標を全て埋める (isSavedはfalse)', () => {
     const row: CompareRow = {
-      group: {
-        vehicleNumber: '8504',
-        saleDate: '2026-06-21',
-        customerName: '㈱田浦畜産',
-        originLabel: '長崎県',
-        destLabel: '福岡県北九州市',
-        amount: 65000,
-        rowIds: ['row-1'],
-      },
+      group: baseGroup(),
       operation: operation(),
       segment: {
         distanceKm: 100,
@@ -146,6 +176,7 @@ describe('buildCompareRowView', () => {
         byCategory: { drive: 300, loading: 60, unloading: 60, rest: 60, idle: 0, other: 0 },
         rowCount: 10,
       },
+      snapshot: null,
     }
     const view = buildCompareRowView(row)
     expect(view.unkoNo).toBe('2607030428090000001109')
@@ -153,24 +184,19 @@ describe('buildCompareRowView', () => {
     expect(view.distanceKm).toBe(100)
     expect(view.boundMin).toBe(480)
     expect(view.driveMin).toBe(300)
+    expect(view.amount).toBe(65000)
     expect(view.efficiency.yenPerKm).toBeCloseTo(650)
     expect(view.efficiency.yenPerHourBound).toBeCloseTo(65000 / 8)
     expect(view.efficiency.yenPerHourDrive).toBeCloseTo(65000 / 5)
+    expect(view.isSaved).toBe(false)
   })
 
   it('運行が見つからなければ距離・時間・乗務員が全て null/未確定になる (ゼロ除算ガードで効率指標も null)', () => {
     const row: CompareRow = {
-      group: {
-        vehicleNumber: '8504',
-        saleDate: '2026-06-21',
-        customerName: '㈱田浦畜産',
-        originLabel: '長崎県',
-        destLabel: '福岡県北九州市',
-        amount: 65000,
-        rowIds: ['row-1'],
-      },
+      group: baseGroup(),
       operation: null,
       segment: null,
+      snapshot: null,
     }
     const view = buildCompareRowView(row)
     expect(view.unkoNo).toBeNull()
@@ -181,25 +207,43 @@ describe('buildCompareRowView', () => {
     expect(view.efficiency.yenPerKm).toBeNull()
     expect(view.efficiency.yenPerHourBound).toBeNull()
     expect(view.efficiency.yenPerHourDrive).toBeNull()
+    expect(view.isSaved).toBe(false)
   })
 
   it('運行はあるが CSV 集計が無ければ距離・時間は null のまま', () => {
     const row: CompareRow = {
-      group: {
-        vehicleNumber: '8504',
-        saleDate: '2026-06-21',
-        customerName: '㈱田浦畜産',
-        originLabel: '長崎県',
-        destLabel: '福岡県北九州市',
-        amount: 65000,
-        rowIds: ['row-1'],
-      },
+      group: baseGroup(),
       operation: operation(),
       segment: null,
+      snapshot: null,
     }
     const view = buildCompareRowView(row)
     expect(view.unkoNo).toBe('2607030428090000001109')
     expect(view.distanceKm).toBeNull()
+  })
+
+  it('保存済みスナップショットがあれば CSV集計/伝票合算より優先し isSaved=true になる', () => {
+    const row: CompareRow = {
+      group: baseGroup(), // amount=65000 (全伝票の単純合算)
+      operation: operation(),
+      segment: {
+        // CSV全行集計 (スナップショットが無ければこちらが採用される値)
+        distanceKm: 999,
+        durationMin: 9999,
+        byCategory: { drive: 9999, loading: 0, unloading: 0, rest: 0, idle: 0, other: 0 },
+        rowCount: 99,
+      },
+      snapshot: snapshot({ confirmedAmount: 60000 }), // ユーザーが手動確認した金額 (一部の伝票のみ確定)
+    }
+    const view = buildCompareRowView(row)
+    // group.amount (65000、全伝票合算) ではなく snapshot.confirmedAmount (60000、確認済みのみ) を使う
+    expect(view.amount).toBe(60000)
+    // segment (CSV全行集計) ではなく snapshot.dtakoSummary (手動選択区間) を使う
+    expect(view.distanceKm).toBe(90)
+    expect(view.boundMin).toBe(420)
+    expect(view.driveMin).toBe(280)
+    expect(view.efficiency).toEqual(snapshot().efficiency)
+    expect(view.isSaved).toBe(true)
   })
 })
 
@@ -260,5 +304,53 @@ describe('compareRowsToCsvLines', () => {
 
   it('空配列でもヘッダー行のみ返す', () => {
     expect(compareRowsToCsvLines([])).toHaveLength(1)
+  })
+})
+
+describe('savedSnapshotKey', () => {
+  it('車輌+運行番号から一意なキーを作る', () => {
+    expect(savedSnapshotKey('8504', '2607030428090000001109'))
+      .toBe(savedSnapshotKey('8504', '2607030428090000001109'))
+  })
+
+  it('車輌または運行番号が異なれば別キーになる', () => {
+    const a = savedSnapshotKey('8504', 'unko-1')
+    const b = savedSnapshotKey('9012', 'unko-1')
+    const c = savedSnapshotKey('8504', 'unko-2')
+    expect(a).not.toBe(b)
+    expect(a).not.toBe(c)
+  })
+})
+
+describe('uniqueVehicleYmPairs', () => {
+  it('同一車輌・同一年月の行は1組にまとめる', () => {
+    const rows = [
+      { vehicleNumber: '8504', saleDate: '2026-06-21' },
+      { vehicleNumber: '8504', saleDate: '2026-06-28' },
+    ]
+    expect(uniqueVehicleYmPairs(rows)).toEqual([{ vehicle: '8504', ym: '2026-06' }])
+  })
+
+  it('車輌または年月が異なれば別組になる', () => {
+    const rows = [
+      { vehicleNumber: '8504', saleDate: '2026-06-21' },
+      { vehicleNumber: '9012', saleDate: '2026-06-21' },
+      { vehicleNumber: '8504', saleDate: '2026-07-01' },
+    ]
+    expect(uniqueVehicleYmPairs(rows)).toEqual([
+      { vehicle: '8504', ym: '2026-06' },
+      { vehicle: '9012', ym: '2026-06' },
+      { vehicle: '8504', ym: '2026-07' },
+    ])
+  })
+
+  it('運行未解決の伝票グループ (SlipGroup 相当、unkoNo が無くても) 含めて列挙する', () => {
+    // 運行解決前の伝票グループ段階で呼ぶため、unkoNo という概念自体が無い形でも動く必要がある
+    const rows = [{ vehicleNumber: '8504', saleDate: '2026-06-21' }]
+    expect(uniqueVehicleYmPairs(rows)).toEqual([{ vehicle: '8504', ym: '2026-06' }])
+  })
+
+  it('空配列なら空配列', () => {
+    expect(uniqueVehicleYmPairs([])).toEqual([])
   })
 })
