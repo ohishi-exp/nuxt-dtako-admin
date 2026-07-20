@@ -8,6 +8,20 @@
  * `server/api/profit/monthly.get.ts` + `app/utils/profit-r2.ts::summarizeMonthly`。
  */
 import type { MonthlySummary, SnapshotListItem } from '~/utils/profit-r2'
+import { shiftYmd } from '~/utils/profit-compare'
+
+/** 保存済み検証スナップショットの車輌・期間で `/profit/compare` (類似運行検索) に
+ * 遷移するためのクエリを組み立てる (Refs #330 PR5)。`to` は半開区間なので
+ * `saleDateTo` の翌日にする。伝票が確認されていないスナップショットは
+ * saleDateFrom/To が空文字になりうるため、その場合は車輌のみで絞り込む。 */
+function compareLinkQuery(item: SnapshotListItem): Record<string, string> {
+  const query: Record<string, string> = { vehicle: item.vehicleCode }
+  if (item.saleDateFrom) {
+    query.from = item.saleDateFrom
+    query.to = shiftYmd(item.saleDateTo || item.saleDateFrom, 1)
+  }
+  return query
+}
 
 function currentYm(): string {
   const now = new Date()
@@ -138,6 +152,7 @@ function pct(count: number): string {
             <th class="text-left px-3 py-2 font-medium text-gray-500">得意先</th>
             <th class="text-right px-3 py-2 font-medium text-gray-500">確定金額</th>
             <th class="text-left px-3 py-2 font-medium text-gray-500">マッチレベル</th>
+            <th class="text-left px-3 py-2 font-medium text-gray-500">類似運行</th>
           </tr>
         </thead>
         <tbody>
@@ -158,6 +173,15 @@ function pct(count: number): string {
                 <td class="px-3 py-2">{{ item.customerNames.join(', ') || '-' }}</td>
                 <td class="px-3 py-2 text-right whitespace-nowrap">{{ formatYen(item.confirmedAmount) }} 円</td>
                 <td class="px-3 py-2 whitespace-nowrap text-gray-500">{{ matchLevelLabel(item) }}</td>
+                <td class="px-3 py-2 whitespace-nowrap">
+                  <NuxtLink
+                    :to="{ path: '/profit/compare', query: compareLinkQuery(item) }"
+                    class="text-blue-600 dark:text-blue-400 hover:underline"
+                    @click.stop
+                  >
+                    比較 →
+                  </NuxtLink>
+                </td>
               </tr>
             </template>
           </NuxtLink>
