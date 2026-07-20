@@ -129,7 +129,7 @@ function onSelectedLocationChange(location: SelectedRowsLocationRange | null) {
 //     EventCrewPanel に渡し、対応する filteredRows のチェックボックスにも反映する
 //     (以前はページ側の ref だけ更新してチェックボックスが連動しない実運用回帰があった)。
 
-type ProposeStatus = 'idle' | 'loading' | 'done' | 'not-found' | 'error'
+type ProposeStatus = 'idle' | 'loading' | 'done' | 'not-found' | 'error' | 'ambiguous'
 const proposeStatus = ref<ProposeStatus>('idle')
 /** 直近の提案で union した積み/降しペアの件数 (Refs #356: 同日往復2回等で2以上に
  * なる場合、レグを1本しか提案できていないと誤解されないよう画面に通知する)。 */
@@ -145,6 +145,17 @@ const proposedEventRange = ref<{ fromTs: number, toTs: number } | null>(null)
  * (同日往復のみ、または通常の単一レグ) 空配列にし、ProfitPanel は従来通りの
  * 単一保存フローのままにする。 */
 const proposedLegGroups = ref<ProfitPanelLegGroup[]>([])
+
+interface ProposeCandidate {
+  originCity: string
+  destCity: string
+  range: { fromTs: number, toTs: number, legs: { fromTs: number, toTs: number }[] }
+}
+/** 複数の別得意先向け配送が同じ運行に混在し、それぞれ独立に区間が見つかった場合の
+ * 候補一覧 (実運用回帰: 標茶町向けと上士幌町向けが同一運行にあり、最初にマッチした
+ * 伝票の配送先をそのまま採用すると無関係な配送まで union してしまっていた)。
+ * 2件以上あれば自動適用せず、ユーザーにどちらを反映するか選ばせる。 */
+const proposeCandidates = ref<ProposeCandidate[]>([])
 
 function applyProposedRange(headers: string[], rows: string[][], range: { fromTs: number, toTs: number }) {
   const idx = rowIndicesInTimeRange(headers, rows, range.fromTs, range.toTs)
@@ -168,11 +179,30 @@ function buildLegGroups(headers: string[], rows: string[][], legs: { fromTs: num
   }))
 }
 
+/** 提案の適用本体。区間・レグ日付グループを反映し `proposeStatus` を確定させる。
+ * 候補が1件だけの通常ケースと、複数候補からユーザーが選んだケースの両方から呼ぶ。 */
+function applyProposeCandidate(headers: string[], rows: string[][], candidate: ProposeCandidate) {
+  applyProposedRange(headers, rows, candidate.range)
+  activeTab.value = 'events'
+  proposedLegCount.value = candidate.range.legs.length
+  proposedLegGroups.value = buildLegGroups(headers, rows, candidate.range.legs)
+  proposeCandidates.value = []
+  proposeStatus.value = 'done'
+}
+
+/** 複数候補の中からユーザーが選んだ配送先を適用する。 */
+function selectProposeCandidate(candidate: ProposeCandidate) {
+  const csv = csvData.value.events
+  if (!csv) return
+  applyProposeCandidate(csv.headers, csv.rows, candidate)
+}
+
 async function proposeFromSlips() {
   const vehicleCode = net780VehicleCd.value
   const opDate = primary.value?.operation_date ?? primary.value?.reading_date
   if (!vehicleCode || !opDate) return
   proposeStatus.value = 'loading'
+  proposeCandidates.value = []
   try {
     await loadCsv('events')
     const csv = csvData.value.events
@@ -184,20 +214,30 @@ async function proposeFromSlips() {
     // ずれうる (翌朝読み取り等、profit-compare.ts の operationSearchDateRange と同じ
     // 理由) ため前後1日を広げて検索する。
     const slips = await fetchVehicleDailySlips(vehicleCode, shiftYmd(opDate, -1), shiftYmd(opDate, 2))
+    // 同じ運行に複数の別得意先向け配送が混在することがある (実運用回帰: 標茶町向けと
+    // 上士幌町向け)。伝票を1件見つけた時点で確定せず、積地・卸地の組ごとに重複を
+    // 除いた上で全件試し、複数の別配送が見つかった場合はユーザーに選ばせる。
+    const seenRoutes = new Set<string>()
+    const candidates: ProposeCandidate[] = []
     for (const slip of slips) {
       const originCity = slip.originAreaName || slip.origin
       const destCity = slip.destAreaName || slip.dest
+      const routeKey = `${originCity} ${destCity}`
+      if (seenRoutes.has(routeKey)) continue
+      seenRoutes.add(routeKey)
       const range = proposeEventRowRange(csv.headers, csv.rows, originCity, destCity)
-      if (range) {
-        applyProposedRange(csv.headers, csv.rows, range)
-        activeTab.value = 'events'
-        proposedLegCount.value = range.legs.length
-        proposedLegGroups.value = buildLegGroups(csv.headers, csv.rows, range.legs)
-        proposeStatus.value = 'done'
-        return
-      }
+      if (range) candidates.push({ originCity, destCity, range })
     }
-    proposeStatus.value = 'not-found'
+    if (candidates.length === 0) {
+      proposeStatus.value = 'not-found'
+      return
+    }
+    if (candidates.length === 1) {
+      applyProposeCandidate(csv.headers, csv.rows, candidates[0]!)
+      return
+    }
+    proposeCandidates.value = candidates
+    proposeStatus.value = 'ambiguous'
   }
   catch {
     proposeStatus.value = 'error'
@@ -364,6 +404,17 @@ function formatDatetime(val: string | null): string {
             <span v-else-if="proposeStatus === 'error'" class="text-xs text-red-500">提案に失敗しました</span>
             <span v-else-if="proposeStatus === 'done' && proposedLegCount > 1" class="text-xs text-amber-600 dark:text-amber-400">
               同一区間のレグが{{ proposedLegCount }}件見つかったため全て選択範囲に含めました
+            </span>
+            <span v-else-if="proposeStatus === 'ambiguous'" class="text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1.5 flex-wrap">
+              複数の配送先候補が見つかりました:
+              <button
+                v-for="c in proposeCandidates"
+                :key="`${c.originCity}-${c.destCity}`"
+                class="px-1.5 py-0.5 rounded border border-amber-400 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-950/40"
+                @click="selectProposeCandidate(c)"
+              >
+                {{ c.originCity }} → {{ c.destCity }} ({{ c.range.legs.length }}レグ)
+              </button>
             </span>
             <NuxtLink
               v-if="similarOperationsQuery"
