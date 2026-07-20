@@ -10,6 +10,7 @@ import {
   selectedRowsLocationRange,
   filterRowsByCategory,
   countRowsByCategory,
+  rowIndicesInTimeRange,
   EVENT_CATEGORY_ORDER,
   EVENT_CATEGORY_LABELS,
 } from '~/utils/event-data-table'
@@ -17,6 +18,10 @@ import {
 const props = defineProps<{
   group: CrewGroup
   headers: string[]
+  /** 一番星の伝票から提案された区間 (Refs proposeFromSlips)。値が変わるたびに
+   * filteredRows 内で対応する行をチェック状態にする。手動選択とは独立した
+   * 「外部からの選択指示」チャネルとして扱う (null は「指示なし」で無視する)。 */
+  proposedRange?: { fromTs: number, toTs: number } | null
 }>()
 
 const emit = defineEmits<{
@@ -55,6 +60,16 @@ function clearSelection() {
 // 別の行を指してしまうため、その都度クリアする。
 watch(() => props.group, clearSelection)
 watch(activeCategory, clearSelection)
+
+// 一番星の伝票から区間が提案されたら、対応する filteredRows のチェックボックスに
+// 反映する (以前は提案区間がページ側の ref だけを更新し、テーブルのチェックボックス
+// が一切連動しない実運用回帰があった)。積み/降し/運転は既定の 'event' カテゴリに
+// 含まれるため、通常はカテゴリ切替不要でそのまま一致する。
+watch(() => props.proposedRange, (range) => {
+  if (!range) return
+  const idx = rowIndicesInTimeRange(props.headers, filteredRows.value, range.fromTs, range.toTs)
+  selectedRows.value = new Set(idx)
+})
 
 function toggleRow(ri: number) {
   const next = new Set(selectedRows.value)

@@ -112,4 +112,19 @@ describe('EventDataTable', () => {
     const last = emitted![emitted!.length - 1]![0] as { originCity: string, destCity: string } | null
     expect(last).toEqual({ originCity: '長崎市', destCity: '福岡市' })
   })
+
+  it('proposedRange prop を EventCrewPanel にそのまま中継する (実体の EventCrewPanel を使用)', async () => {
+    const wrapper = mount(EventDataTable, {
+      props: { data: { headers: fullHeaders, rows: [makeRow()] }, loading: false },
+      global: { stubs: { UIcon: UIconStub } },
+    })
+    expect(wrapper.find('tbody input[type="checkbox"]').element.checked).toBe(false)
+    await wrapper.setProps({
+      proposedRange: {
+        fromTs: Date.UTC(2026, 2, 7, 8, 0, 0) / 1000,
+        toTs: Date.UTC(2026, 2, 7, 8, 30, 0) / 1000,
+      },
+    })
+    expect(wrapper.find('tbody input[type="checkbox"]').element.checked).toBe(true)
+  })
 })

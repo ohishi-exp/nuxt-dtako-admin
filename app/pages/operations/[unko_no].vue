@@ -123,18 +123,24 @@ function onSelectedLocationChange(location: SelectedRowsLocationRange | null) {
 //     「同じ得意先ならだいたい同じ売上・同じ区間になるのだから、提案してユーザーは
 //     確認するだけでいいはず」)。イベント表を手動で1行ずつ探して選択する代わりに、
 //     この運行の車輌・日付で一番星の伝票を検索し、伝票の積地・卸地に対応する
-//     イベント行区間を自動検出して選択状態に反映する。EventCrewPanel の
-//     チェックボックス (タブ絞り込み後の filteredRows 基準) には反映されない
-//     (提案区間はカテゴリを跨ぐため) が、選択区間としては全く同じように機能する。
+//     イベント行区間を自動検出して選択状態に反映する。`proposedEventRange` を
+//     EventCrewPanel に渡し、対応する filteredRows のチェックボックスにも反映する
+//     (以前はページ側の ref だけ更新してチェックボックスが連動しない実運用回帰があった)。
 
 type ProposeStatus = 'idle' | 'loading' | 'done' | 'not-found' | 'error'
 const proposeStatus = ref<ProposeStatus>('idle')
+/** EventCrewPanel へ「この区間を選択状態にして」と伝える外部指示チャネル。
+ * `selectedEventRange` (EventCrewPanel からの emit で更新される、下流表示用) とは
+ * 別に持つ — 同じ ref を双方向に使うと EventCrewPanel 側の emit が上書きし合い
+ * 無限ループ/競合の元になる。 */
+const proposedEventRange = ref<{ fromTs: number, toTs: number } | null>(null)
 
 function applyProposedRange(headers: string[], rows: string[][], range: { fromTs: number, toTs: number }) {
   const idx = rowIndicesInTimeRange(headers, rows, range.fromTs, range.toTs)
   selectedEventRange.value = range
   selectedEventSummary.value = summarizeSelectedRows(headers, rows, idx)
   selectedEventLocation.value = selectedRowsLocationRange(headers, rows, idx)
+  proposedEventRange.value = range
   profitPanelDismissed.value = false
   net780Data.ensureLoaded()
 }
@@ -340,6 +346,7 @@ function formatDatetime(val: string | null): string {
           v-else-if="activeTab === 'events'"
           :data="csvData[activeTab] || { headers: [], rows: [] }"
           :loading="csvLoading && !csvData[activeTab]"
+          :proposed-range="proposedEventRange"
           @update:selected-range="onSelectedRangeChange"
           @update:selected-summary="onSelectedSummaryChange"
           @update:selected-location="onSelectedLocationChange"
