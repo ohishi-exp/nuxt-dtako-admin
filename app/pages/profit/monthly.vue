@@ -81,6 +81,16 @@ async function loadSnapshotList() {
 
 onMounted(loadSnapshotList)
 
+function downloadSnapshotListJson() {
+  const blob = new Blob([JSON.stringify(snapshotItems.value, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `保存済み検証一覧_${snapshotFilterYm.value || 'all'}.json`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 function matchLevelLabel(item: SnapshotListItem): string {
   const { exact, partial, none } = item.matchCounts
   return `完全${exact} / 部分${partial} / 根拠なし${none}`
@@ -133,6 +143,13 @@ function pct(count: number): string {
         @click="loadSnapshotList"
       >
         {{ snapshotListStatus === 'loading' ? '検索中...' : '検索' }}
+      </button>
+      <button
+        v-if="snapshotItems.length > 0"
+        class="text-sm px-4 py-1.5 rounded bg-gray-600 hover:bg-gray-700 text-white"
+        @click="downloadSnapshotListJson"
+      >
+        JSON出力
       </button>
     </div>
 
