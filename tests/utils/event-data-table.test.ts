@@ -758,6 +758,7 @@ describe('proposeEventRowRange', () => {
     expect(range).toEqual({
       fromTs: parseEventDatetimeToTs('2026/07/01 11:02:54'),
       toTs: parseEventDatetimeToTs('2026/07/01 13:32:53'),
+      legCount: 1,
     })
   })
 
@@ -801,6 +802,7 @@ describe('proposeEventRowRange', () => {
     expect(range).toEqual({
       fromTs: parseEventDatetimeToTs('2026/07/01 11:02:54'),
       toTs: parseEventDatetimeToTs('2026/07/01 13:32:53'),
+      legCount: 1,
     })
   })
 
@@ -818,6 +820,7 @@ describe('proposeEventRowRange', () => {
     expect(range).toEqual({
       fromTs: parseEventDatetimeToTs('2026/07/01 11:02:54'),
       toTs: parseEventDatetimeToTs('2026/07/01 13:00:00'),
+      legCount: 1,
     })
   })
 
@@ -848,6 +851,28 @@ describe('proposeEventRowRange', () => {
     expect(range).toEqual({
       fromTs: parseEventDatetimeToTs('2026/07/01 11:15:12'),
       toTs: parseEventDatetimeToTs('2026/07/01 13:35:11'),
+      legCount: 1,
+    })
+  })
+
+  it('同じ得意先・同じ区間への配送が同日に往復2回ある場合、両方のレグを union した区間を返し legCount で2件と伝える (実運用回帰 #356: 従来は最短区間の1本目しか提案されず、2本目のレグの売上・時間が集計から漏れていた)', () => {
+    const rowsRoundTrip = [
+      // レグ1: 積み 11:15:12 〜 降し 13:35:11
+      row('2026/07/01 11:15:12', '2026/07/01 11:51:23', '積み', '北海道釧路市西港', '北海道釧路市西港'),
+      row('2026/07/01 11:51:23', '2026/07/01 13:34:00', '運転', '北海道釧路市西港', '北海道川上郡標茶町多和'),
+      row('2026/07/01 13:34:00', '2026/07/01 13:35:11', '降し', '北海道川上郡標茶町多和', '北海道川上郡標茶町多和'),
+      // 復路 (2本目の積地へ戻る運転)
+      row('2026/07/01 13:35:11', '2026/07/01 14:37:01', '運転', '北海道川上郡標茶町多和', '北海道釧路市西港'),
+      // レグ2: 積み 14:37:01 〜 降し 17:14:28
+      row('2026/07/01 14:37:01', '2026/07/01 14:50:00', '積み', '北海道釧路市西港', '北海道釧路市西港'),
+      row('2026/07/01 14:50:00', '2026/07/01 17:13:00', '運転', '北海道釧路市西港', '北海道川上郡標茶町多和'),
+      row('2026/07/01 17:13:00', '2026/07/01 17:14:28', '降し', '北海道川上郡標茶町多和', '北海道川上郡標茶町多和'),
+    ]
+    const range = proposeEventRowRange(eventHeaders, rowsRoundTrip, '釧路市西港', '標茶町多和')
+    expect(range).toEqual({
+      fromTs: parseEventDatetimeToTs('2026/07/01 11:15:12'),
+      toTs: parseEventDatetimeToTs('2026/07/01 17:14:28'),
+      legCount: 2,
     })
   })
 })

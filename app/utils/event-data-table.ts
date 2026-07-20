@@ -412,21 +412,29 @@ export function summarizeSelectedRows(
 
 /**
  * 積み (`開始市町村名` が `originCity` に一致) 〜 それぞれの積みの直後に現れる、卸地
- * (`終了市町村名` が `destCity` に一致) の降しまでの時刻レンジを提案する。同日に同じ
- * 市町村への積みが複数回ある運行では、最初に見つかった積みをそのまま採用すると
- * 無関係な別レグまで巻き込んで区間が過大になる (実運用回帰: 同日複数積地の運行で
- * 選択区間が本来の配送レグより大幅に広くなり、距離/時間集計が実態と乖離した) ため、
- * 候補となる積み/降しの組すべてを列挙し、区間が最も短い (= 最も個々の配送レグに近い)
- * 組を採用する。一番星の伝票 (`originAreaName`/`destAreaName` または `origin`/`dest`)
- * をそのまま渡せば、ユーザーが手動でイベント行を1つずつ探して選択する手間を省ける。
- * 一致する積み/降しの組が見つからなければ null (この場合は従来通り手動選択が必要)。
+ * (`終了市町村名` が `destCity` に一致) の降しまでの時刻レンジを提案する。一番星の
+ * 伝票 (`originAreaName`/`destAreaName` または `origin`/`dest`) をそのまま渡せば、
+ * ユーザーが手動でイベント行を1つずつ探して選択する手間を省ける。
+ *
+ * 同じ (originCity, destCity) にマッチする積み/降しの組が同日に複数見つかる場合が
+ * 2通りある:
+ * - 同じ得意先・区間への配送が同日に往復2回以上ある (実運用回帰 #356) → どちらも
+ *   実在する正しい組なので、両方を選択範囲に含めたい
+ * - 積みに対応する降しがたまたま見つからず、後続の無関係な別レグの降しまで誤って
+ *   拾ってしまう (実運用回帰 #348、区間が過大になる) → これは除外したい
+ * この2つを区別するため、各積みの直後に現れる `終了市町村名` が空 (欠損データ) の
+ * 降し行は読み飛ばして次を探すが、実データがあって明確に不一致な降し行に当たったら
+ * 「この積みに対応する降しは無い」と判断してそこで打ち切る (無関係な遠くの降しまで
+ * 探しにいかない)。こうして集まった組すべてを union (最小 fromTs 〜 最大 toTs) して
+ * 返し、`legCount` で何組見つかったかを呼び出し側に伝える (2以上ならUIで通知する)。
+ * 一致する組が1つも見つからなければ null (この場合は従来通り手動選択が必要)。
  */
 export function proposeEventRowRange(
   headers: string[],
   rows: string[][],
   originCity: string,
   destCity: string,
-): { fromTs: number, toTs: number } | null {
+): { fromTs: number, toTs: number, legCount: number } | null {
   if (!originCity.trim() || !destCity.trim()) return null
 
   const nameIdx = colIndex(headers, 'イベント名')
@@ -436,8 +444,7 @@ export function proposeEventRowRange(
   const endCityIdx = colIndex(headers, '終了市町村名')
   if (nameIdx < 0 || startIdx < 0 || endIdx < 0 || startCityIdx < 0 || endCityIdx < 0) return null
 
-  let best: { fromTs: number, toTs: number } | null = null
-  let bestDuration = Number.POSITIVE_INFINITY
+  const pairs: { fromTs: number, toTs: number }[] = []
 
   for (let i = 0; i < rows.length; i++) {
     const loadRow = rows[i]!
@@ -449,18 +456,23 @@ export function proposeEventRowRange(
     for (let j = i + 1; j < rows.length; j++) {
       const unloadRow = rows[j]!
       if (classifyTimeCategory(unloadRow[nameIdx] ?? '') !== 'unloading') continue
-      if (matchLocationLevel(unloadRow[endCityIdx] ?? '', destCity) === 'none') continue
+      const endCity = (unloadRow[endCityIdx] ?? '').trim()
+      if (!endCity) continue
+      if (matchLocationLevel(endCity, destCity) === 'none') break
       const toTs = parseEventDatetimeToTs(unloadRow[endIdx] ?? '')
-      if (toTs !== null && toTs - fromTs < bestDuration) {
-        bestDuration = toTs - fromTs
-        best = { fromTs, toTs }
-      }
+      if (toTs !== null) pairs.push({ fromTs, toTs })
       // この積みに対応する降しは (パース失敗も含め) 直後の最初の一致行のみを見る。
       break
     }
   }
 
-  return best
+  if (pairs.length === 0) return null
+
+  return {
+    fromTs: Math.min(...pairs.map(p => p.fromTs)),
+    toTs: Math.max(...pairs.map(p => p.toTs)),
+    legCount: pairs.length,
+  }
 }
 
 /**

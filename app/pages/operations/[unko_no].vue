@@ -129,6 +129,9 @@ function onSelectedLocationChange(location: SelectedRowsLocationRange | null) {
 
 type ProposeStatus = 'idle' | 'loading' | 'done' | 'not-found' | 'error'
 const proposeStatus = ref<ProposeStatus>('idle')
+/** 直近の提案で union した積み/降しペアの件数 (Refs #356: 同日往復2回等で2以上に
+ * なる場合、レグを1本しか提案できていないと誤解されないよう画面に通知する)。 */
+const proposedLegCount = ref(0)
 /** EventCrewPanel へ「この区間を選択状態にして」と伝える外部指示チャネル。
  * `selectedEventRange` (EventCrewPanel からの emit で更新される、下流表示用) とは
  * 別に持つ — 同じ ref を双方向に使うと EventCrewPanel 側の emit が上書きし合い
@@ -168,6 +171,7 @@ async function proposeFromSlips() {
       if (range) {
         applyProposedRange(csv.headers, csv.rows, range)
         activeTab.value = 'events'
+        proposedLegCount.value = range.legCount
         proposeStatus.value = 'done'
         return
       }
@@ -326,6 +330,9 @@ function formatDatetime(val: string | null): string {
             </button>
             <span v-if="proposeStatus === 'not-found'" class="text-xs text-gray-400">一致する伝票が見つかりませんでした</span>
             <span v-else-if="proposeStatus === 'error'" class="text-xs text-red-500">提案に失敗しました</span>
+            <span v-else-if="proposeStatus === 'done' && proposedLegCount > 1" class="text-xs text-amber-600 dark:text-amber-400">
+              同一区間のレグが{{ proposedLegCount }}件見つかったため全て選択範囲に含めました
+            </span>
             <NuxtLink
               v-if="similarOperationsQuery"
               :to="{ path: '/profit/compare', query: similarOperationsQuery }"
