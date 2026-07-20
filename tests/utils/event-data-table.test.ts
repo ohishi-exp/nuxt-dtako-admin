@@ -842,21 +842,49 @@ describe('rowIndicesInTimeRange', () => {
     ['2026/07/01 10:00:00', '2026/07/01 10:30:00'],
   ]
 
-  it('開始日時が範囲内 (両端含む) の行の index を返す', () => {
+  it('開始日時が範囲内 (両端含む)、かつ終了日時も範囲内の行の index を返す', () => {
+    const from = parseEventDatetimeToTs('2026/07/01 09:00:00')!
+    const to = parseEventDatetimeToTs('2026/07/01 10:30:00')!
+    expect(rowIndicesInTimeRange(headers, rows, from, to)).toEqual([1, 2])
+  })
+
+  it('開始日時は範囲内でも終了日時が toTs を超える行は除外する (提案区間直後の復路等が丸ごと積算されるのを防ぐ、実運用回帰)', () => {
     const from = parseEventDatetimeToTs('2026/07/01 09:00:00')!
     const to = parseEventDatetimeToTs('2026/07/01 10:00:00')!
-    expect(rowIndicesInTimeRange(headers, rows, from, to)).toEqual([1, 2])
+    expect(rowIndicesInTimeRange(headers, rows, from, to)).toEqual([1])
+  })
+
+  it('終了日時列が無いヘッダーでは開始日時のみで判定する (フォールバック)', () => {
+    const startOnlyHeaders = ['開始日時']
+    const startOnlyRows = [['2026/07/01 09:00:00'], ['2026/07/01 10:00:00']]
+    const from = parseEventDatetimeToTs('2026/07/01 09:00:00')!
+    const to = parseEventDatetimeToTs('2026/07/01 10:00:00')!
+    expect(rowIndicesInTimeRange(startOnlyHeaders, startOnlyRows, from, to)).toEqual([0, 1])
+  })
+
+  it('終了日時列はあるがその行の値がパースできない場合は開始日時のみで判定する (フォールバック)', () => {
+    const rowsWithBadEnd = [['2026/07/01 09:00:00', 'invalid']]
+    const from = parseEventDatetimeToTs('2026/07/01 09:00:00')!
+    const to = parseEventDatetimeToTs('2026/07/01 09:00:00')!
+    expect(rowIndicesInTimeRange(headers, rowsWithBadEnd, from, to)).toEqual([0])
+  })
+
+  it('終了日時セルが undefined (行が短い) 場合も開始日時のみで判定する (?? \'\' フォールバック)', () => {
+    const shortRow = ['2026/07/01 09:00:00']
+    const from = parseEventDatetimeToTs('2026/07/01 09:00:00')!
+    const to = parseEventDatetimeToTs('2026/07/01 09:00:00')!
+    expect(rowIndicesInTimeRange(headers, [shortRow], from, to)).toEqual([0])
   })
 
   it('範囲より前の行は含めない', () => {
     const from = parseEventDatetimeToTs('2026/07/01 09:00:00')!
-    const to = parseEventDatetimeToTs('2026/07/01 09:00:00')!
+    const to = parseEventDatetimeToTs('2026/07/01 09:30:00')!
     expect(rowIndicesInTimeRange(headers, rows, from, to)).toEqual([1])
   })
 
   it('範囲より後の行は含めない', () => {
     const from = parseEventDatetimeToTs('2026/07/01 08:00:00')!
-    const to = parseEventDatetimeToTs('2026/07/01 09:00:00')!
+    const to = parseEventDatetimeToTs('2026/07/01 09:30:00')!
     expect(rowIndicesInTimeRange(headers, rows, from, to)).toEqual([0, 1])
   })
 

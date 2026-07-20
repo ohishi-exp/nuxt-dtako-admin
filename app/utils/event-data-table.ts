@@ -459,18 +459,27 @@ export function proposeEventRowRange(
 }
 
 /**
- * `開始日時` が `[fromTs, toTs]` (両端含む) に収まる行の index 一覧を返す
- * (`rows` 全体が対象、EventCrewPanel のタブ絞り込み後の `filteredRows` とは異なり
- * カテゴリを跨いだ提案区間全体をカバーできる)。`summarizeSelectedRows`/
- * `selectedRowsLocationRange` にそのまま渡せる。
+ * `開始日時` が `[fromTs, toTs]` (両端含む) に収まり、かつ `終了日時` が toTs を
+ * 超えない行の index 一覧を返す (`rows` 全体が対象、EventCrewPanel のタブ絞り込み後の
+ * `filteredRows` とは異なりカテゴリを跨いだ提案区間全体をカバーできる)。
+ * `summarizeSelectedRows`/`selectedRowsLocationRange` にそのまま渡せる。
+ *
+ * 終了日時チェックが無いと、toTs ちょうどに始まって範囲外まで続く行 (提案区間の
+ * 降し直後に始まる復路の運転行等) が丸ごと積算され、区間の距離/時間が実態より
+ * 大きく膨張する (Refs proposeEventRowRange 実運用での区間過大化バグ)。
+ * `終了日時` 列が無い/パース不能な行は開始日時のみで判定する (フォールバック)。
  */
 export function rowIndicesInTimeRange(headers: string[], rows: string[][], fromTs: number, toTs: number): number[] {
   const startIdx = colIndex(headers, '開始日時')
+  const endIdx = colIndex(headers, '終了日時')
   if (startIdx < 0) return []
   const result: number[] = []
   rows.forEach((row, i) => {
     const start = parseEventDatetimeToTs(row[startIdx] ?? '')
-    if (start !== null && start >= fromTs && start <= toTs) result.push(i)
+    if (start === null || start < fromTs || start > toTs) return
+    const end = endIdx >= 0 ? parseEventDatetimeToTs(row[endIdx] ?? '') : null
+    if (end !== null && end > toTs) return
+    result.push(i)
   })
   return result
 }

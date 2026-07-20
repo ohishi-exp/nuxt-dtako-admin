@@ -142,19 +142,11 @@ function applyProposedRange(headers: string[], rows: string[][], range: { fromTs
 async function proposeFromSlips() {
   const vehicleCode = net780VehicleCd.value
   const opDate = primary.value?.operation_date ?? primary.value?.reading_date
-  // eslint-disable-next-line no-console
-  console.log('[propose-debug] entry', { vehicleCode, opDate, primary: primary.value })
-  if (!vehicleCode || !opDate) {
-    // eslint-disable-next-line no-console
-    console.log('[propose-debug] early-return: vehicleCode/opDate missing')
-    return
-  }
+  if (!vehicleCode || !opDate) return
   proposeStatus.value = 'loading'
   try {
     await loadCsv('events')
     const csv = csvData.value.events
-    // eslint-disable-next-line no-console
-    console.log('[propose-debug] csv loaded', { rowCount: csv?.rows.length })
     if (!csv || csv.rows.length === 0) {
       proposeStatus.value = 'not-found'
       return
@@ -163,31 +155,21 @@ async function proposeFromSlips() {
     // ずれうる (翌朝読み取り等、profit-compare.ts の operationSearchDateRange と同じ
     // 理由) ため前後1日を広げて検索する。
     const slips = await fetchVehicleDailySlips(vehicleCode, shiftYmd(opDate, -1), shiftYmd(opDate, 2))
-    // eslint-disable-next-line no-console
-    console.log('[propose-debug] slips fetched', { count: slips.length, slips })
     for (const slip of slips) {
       const originCity = slip.originAreaName || slip.origin
       const destCity = slip.destAreaName || slip.dest
       const range = proposeEventRowRange(csv.headers, csv.rows, originCity, destCity)
-      // eslint-disable-next-line no-console
-      console.log('[propose-debug] slip tried', { rowId: slip.rowId, originCity, destCity, range })
       if (range) {
         applyProposedRange(csv.headers, csv.rows, range)
         activeTab.value = 'events'
         proposeStatus.value = 'done'
-        // eslint-disable-next-line no-console
-        console.log('[propose-debug] success', { range })
         return
       }
     }
     proposeStatus.value = 'not-found'
-    // eslint-disable-next-line no-console
-    console.log('[propose-debug] not-found: no slip matched')
   }
-  catch (e) {
+  catch {
     proposeStatus.value = 'error'
-    // eslint-disable-next-line no-console
-    console.log('[propose-debug] error', e)
   }
 }
 
