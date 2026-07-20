@@ -131,6 +131,18 @@ describe('matchLocationLevel', () => {
   it('一番星側が undefined (API にフィールドが無い) でも none で判定不能扱いになりクラッシュしない', () => {
     expect(matchLocationLevel('北九州市', undefined)).toBe('none')
   })
+
+  it('dtako 側が郡を含むフル表記でも一番星側の郡省略表記と partial 一致する (Refs #348)', () => {
+    expect(matchLocationLevel('北海道川上郡標茶町多和星空の黒牛加工・直売所', '北海道標茶町')).toBe('partial')
+  })
+  it('郡除去の対象は複数の市町村パターンで機能する (中部飼料/大石畜産の実データ、Refs #348)', () => {
+    expect(matchLocationLevel('北海道河東郡士幌町中士幌', '北海道士幌町')).toBe('partial')
+    expect(matchLocationLevel('北海道河東郡上士幌町上士幌東２線', '北海道上士幌町')).toBe('partial')
+  })
+  it('郡を含まない市 (政令市等) の突合は郡除去の影響を受けない', () => {
+    expect(matchLocationLevel('北海道釧路市西港２-101-1', '北海道釧路市')).toBe('partial')
+    expect(matchLocationLevel('福岡県北九州市', '北九州市')).toBe('partial')
+  })
 })
 
 describe('scoreVehicleDailySlips', () => {
