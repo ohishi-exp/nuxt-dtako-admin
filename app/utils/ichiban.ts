@@ -220,6 +220,7 @@ export async function fetchVehicleDailySlips(
  * のいずれか1つ以上必須に緩和された)。
  */
 export interface VehicleDailySearchCriteria {
+  [key: string]: string | undefined
   from: string
   to: string
   vehicle?: string
