@@ -2,7 +2,16 @@
 import { getOperation, getOperationCsv, deleteOperation } from '~/utils/api'
 import type { Operation, CsvJsonResponse, CsvType } from '~/types'
 import { filterValidGpsPoints, filterPointsByRange, buildSpeedColoredSegments, buildNet780SearchLink } from '~/utils/net780'
-import type { SelectedRowsSummary, SelectedRowsLocationRange } from '~/utils/event-data-table'
+import {
+  summarizeSelectedRows,
+  selectedRowsLocationRange,
+  proposeEventRowRange,
+  rowIndicesInTimeRange,
+  type SelectedRowsSummary,
+  type SelectedRowsLocationRange,
+} from '~/utils/event-data-table'
+import { fetchVehicleDailySlips } from '~/utils/ichiban'
+import { shiftYmd } from '~/utils/profit-compare'
 
 const route = useRoute()
 const router = useRouter()
@@ -108,6 +117,57 @@ function onSelectedSummaryChange(summary: SelectedRowsSummary | null) {
 
 function onSelectedLocationChange(location: SelectedRowsLocationRange | null) {
   selectedEventLocation.value = location
+}
+
+// --- 一番星の伝票から積み〜降し区間を提案 (Refs #330 実運用フィードバック:
+//     「同じ得意先ならだいたい同じ売上・同じ区間になるのだから、提案してユーザーは
+//     確認するだけでいいはず」)。イベント表を手動で1行ずつ探して選択する代わりに、
+//     この運行の車輌・日付で一番星の伝票を検索し、伝票の積地・卸地に対応する
+//     イベント行区間を自動検出して選択状態に反映する。EventCrewPanel の
+//     チェックボックス (タブ絞り込み後の filteredRows 基準) には反映されない
+//     (提案区間はカテゴリを跨ぐため) が、選択区間としては全く同じように機能する。
+
+type ProposeStatus = 'idle' | 'loading' | 'done' | 'not-found' | 'error'
+const proposeStatus = ref<ProposeStatus>('idle')
+
+function applyProposedRange(headers: string[], rows: string[][], range: { fromTs: number, toTs: number }) {
+  const idx = rowIndicesInTimeRange(headers, rows, range.fromTs, range.toTs)
+  selectedEventRange.value = range
+  selectedEventSummary.value = summarizeSelectedRows(headers, rows, idx)
+  selectedEventLocation.value = selectedRowsLocationRange(headers, rows, idx)
+  profitPanelDismissed.value = false
+  net780Data.ensureLoaded()
+}
+
+async function proposeFromSlips() {
+  const vehicleCode = net780VehicleCd.value
+  const opDate = primary.value?.operation_date ?? primary.value?.reading_date
+  if (!vehicleCode || !opDate) return
+  proposeStatus.value = 'loading'
+  try {
+    await loadCsv('events')
+    const csv = csvData.value.events
+    if (!csv || csv.rows.length === 0) {
+      proposeStatus.value = 'not-found'
+      return
+    }
+    const slips = await fetchVehicleDailySlips(vehicleCode, opDate, shiftYmd(opDate, 1))
+    for (const slip of slips) {
+      const originCity = slip.originAreaName || slip.origin
+      const destCity = slip.destAreaName || slip.dest
+      const range = proposeEventRowRange(csv.headers, csv.rows, originCity, destCity)
+      if (range) {
+        applyProposedRange(csv.headers, csv.rows, range)
+        activeTab.value = 'events'
+        proposeStatus.value = 'done'
+        return
+      }
+    }
+    proposeStatus.value = 'not-found'
+  }
+  catch {
+    proposeStatus.value = 'error'
+  }
 }
 
 /** 選択区間の積地・卸地で `/profit/compare` (類似運行検索) に飛ぶためのクエリ。
@@ -247,13 +307,24 @@ function formatDatetime(val: string | null): string {
           >
             {{ tab.label }}
           </button>
-          <NuxtLink
-            v-if="activeTab === 'events' && similarOperationsQuery"
-            :to="{ path: '/profit/compare', query: similarOperationsQuery }"
-            class="ml-auto self-center mr-4 text-xs text-blue-600 dark:text-blue-400 hover:underline whitespace-nowrap"
-          >
-            類似運行を探す →
-          </NuxtLink>
+          <div v-if="activeTab === 'events'" class="ml-auto self-center mr-4 flex items-center gap-3 whitespace-nowrap">
+            <button
+              class="text-xs text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-50 disabled:no-underline"
+              :disabled="proposeStatus === 'loading'"
+              @click="proposeFromSlips"
+            >
+              {{ proposeStatus === 'loading' ? '提案中...' : '一番星の伝票から区間を提案' }}
+            </button>
+            <span v-if="proposeStatus === 'not-found'" class="text-xs text-gray-400">一致する伝票が見つかりませんでした</span>
+            <span v-else-if="proposeStatus === 'error'" class="text-xs text-red-500">提案に失敗しました</span>
+            <NuxtLink
+              v-if="similarOperationsQuery"
+              :to="{ path: '/profit/compare', query: similarOperationsQuery }"
+              class="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+            >
+              類似運行を探す →
+            </NuxtLink>
+          </div>
         </div>
         <Net780OperationSummary
           v-if="activeTab === 'net780'"
