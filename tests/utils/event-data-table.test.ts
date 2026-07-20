@@ -862,6 +862,13 @@ describe('rowIndicesInTimeRange', () => {
     expect(rowIndicesInTimeRange(startOnlyHeaders, startOnlyRows, from, to)).toEqual([0, 1])
   })
 
+  it('終了日時列はあるがその行の値がパースできない場合は開始日時のみで判定する (フォールバック)', () => {
+    const rowsWithBadEnd = [['2026/07/01 09:00:00', 'invalid']]
+    const from = parseEventDatetimeToTs('2026/07/01 09:00:00')!
+    const to = parseEventDatetimeToTs('2026/07/01 09:00:00')!
+    expect(rowIndicesInTimeRange(headers, rowsWithBadEnd, from, to)).toEqual([0])
+  })
+
   it('範囲より前の行は含めない', () => {
     const from = parseEventDatetimeToTs('2026/07/01 09:00:00')!
     const to = parseEventDatetimeToTs('2026/07/01 09:30:00')!
