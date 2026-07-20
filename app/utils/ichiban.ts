@@ -108,13 +108,23 @@ export function normalizeLocationName(s: string | null | undefined): string {
 }
 
 /**
+ * 郡名 (「川上郡」等) を除去する。一番星の地域マスタ由来の `dest_area_name` は郡を
+ * 省略した表記 (「北海道標茶町」) を返す一方、デジタコ側 (KUDGIVT.csv 由来) は郡を
+ * 含むフル表記 (「北海道川上郡標茶町…」) を返すため、郡の有無だけで不一致になるのを
+ * 突合の直前に防ぐ (Refs #348)。「市」は郡を持たないため無関係で影響しない。
+ */
+function stripGun(s: string): string {
+  return s.replace(/(都|道|府|県)[^都道府県市区町村]{1,6}郡/, '$1')
+}
+
+/**
  * dtako の市町村名と一番星側の地名を突合する。どちらかが空文字なら判定不能 (`none`)。
  * 完全一致 (正規化後) は `exact`、どちらかがもう片方を部分文字列として含むなら
  * `partial` (dtako「北九州市」⊂ 一番星「福岡県北九州市」等)。
  */
 export function matchLocationLevel(dtakoName: string | null | undefined, ichibanName: string | null | undefined): LocationMatchLevel {
-  const a = normalizeLocationName(dtakoName)
-  const b = normalizeLocationName(ichibanName)
+  const a = stripGun(normalizeLocationName(dtakoName))
+  const b = stripGun(normalizeLocationName(ichibanName))
   if (!a || !b) return 'none'
   if (a === b) return 'exact'
   if (a.includes(b) || b.includes(a)) return 'partial'
