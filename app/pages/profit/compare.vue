@@ -18,10 +18,13 @@ import {
   buildCompareRowView,
   defaultCompareDateRange,
   compareRowsToCsvLines,
+  savedSnapshotKey,
+  uniqueVehicleYmPairs,
   type SlipGroup,
   type CompareRow,
   type CompareRowView,
 } from '~/utils/profit-compare'
+import type { ProfitSnapshot, SnapshotListItem } from '~/utils/profit-r2'
 import type { OperationListItem } from '~/types'
 
 /** クエリの値を trim して空文字なら undefined 扱いにする (route.query は string|string[]|null も来うる)。 */
@@ -45,12 +48,47 @@ type Status = 'idle' | 'loading' | 'ready' | 'error'
 const status = ref<Status>('idle')
 const errorMessage = ref<string | null>(null)
 const rows = ref<CompareRowView[]>([])
+const router = useRouter()
 
 function hasAnyFilter(): boolean {
   return !!(vehicle.value.trim() || customer.value.trim() || origin.value.trim() || dest.value.trim())
 }
 
-async function resolveCompareRow(group: SlipGroup): Promise<CompareRow> {
+/** 検索結果に含まれる (車輌, 年月) ごとに保存済みスナップショット一覧を先に引き、
+ * 「車輌+運行番号」→ 一覧項目 (`segmentId` 等) のインデックスを作る。運行解決前の
+ * 伝票グループ段階で必要な (車輌, 年月) を確定できるため、行の組み立てより先に呼ぶ。
+ * 1件でも失敗しても他の (車輌, 年月) の結果は活かす (該当運行だけスナップショット
+ * 無し扱いになり、CSV全行集計にフォールバックする)。 */
+async function loadSnapshotIndex(groups: SlipGroup[]): Promise<Map<string, SnapshotListItem>> {
+  const pairs = uniqueVehicleYmPairs(groups)
+  const results = await Promise.allSettled(
+    pairs.map(p => $fetch<{ items: SnapshotListItem[] }>('/api/profit/snapshots', { query: p })),
+  )
+  const index = new Map<string, SnapshotListItem>()
+  for (const res of results) {
+    if (res.status !== 'fulfilled') continue
+    for (const item of res.value.items) {
+      const key = savedSnapshotKey(item.vehicleCode, item.unkoNo)
+      // 一覧は保存日時の新しい順で返る (sortSnapshotListBySavedAtDesc) ため、
+      // 同一運行に複数保存があっても最初に見つかったもの (最新) を採用する。
+      if (!index.has(key)) index.set(key, item)
+    }
+  }
+  return index
+}
+
+async function fetchFullSnapshot(item: SnapshotListItem): Promise<ProfitSnapshot | null> {
+  try {
+    return await $fetch<ProfitSnapshot>('/api/profit/snapshot', {
+      query: { ym: item.ym, vehicle: item.vehicleCode, unkoNo: item.unkoNo, segmentId: item.segmentId },
+    })
+  }
+  catch {
+    return null
+  }
+}
+
+async function resolveCompareRow(group: SlipGroup, snapshotIndex: Map<string, SnapshotListItem>): Promise<CompareRow> {
   const { date_from, date_to } = operationSearchDateRange(group.saleDate)
   let operation: OperationListItem | null = null
   try {
@@ -61,8 +99,16 @@ async function resolveCompareRow(group: SlipGroup): Promise<CompareRow> {
     // 運行検索失敗は「運行データなし」行として表示する (issue #330 リスク表: 欠損は隠さない)
   }
 
+  // 既に ProfitPanel で確認・保存済みならそちらを信頼する (手動確認済みのため CSV
+  // 全行集計より正確。実運用フィードバック: 「イベントで選択した行が使われず無駄」)。
+  let snapshot: ProfitSnapshot | null = null
+  if (operation) {
+    const item = snapshotIndex.get(savedSnapshotKey(group.vehicleNumber, operation.unko_no))
+    if (item) snapshot = await fetchFullSnapshot(item)
+  }
+
   let segment: SelectedRowsSummary | null = null
-  if (operation?.has_kudgivt) {
+  if (!snapshot && operation?.has_kudgivt) {
     try {
       const csv = await getOperationCsv(operation.unko_no, 'events')
       segment = summarizeSelectedRows(csv.headers, csv.rows, csv.rows.keys())
@@ -72,7 +118,7 @@ async function resolveCompareRow(group: SlipGroup): Promise<CompareRow> {
     }
   }
 
-  return { group, operation, segment }
+  return { group, operation, segment, snapshot }
 }
 
 async function search() {
@@ -94,7 +140,8 @@ async function search() {
       dest: dest.value.trim() || undefined,
     })
     const groups = groupSlipsByVehicleDate(slips)
-    const resolved = await Promise.all(groups.map(resolveCompareRow))
+    const snapshotIndex = await loadSnapshotIndex(groups)
+    const resolved = await Promise.all(groups.map(g => resolveCompareRow(g, snapshotIndex)))
     rows.value = resolved.map(buildCompareRowView)
     status.value = 'ready'
   }
@@ -171,6 +218,10 @@ function formatMin(v: number | null): string {
   const h = Math.floor(v / 60)
   const m = v % 60
   return h > 0 ? `${h}時間${m}分` : `${m}分`
+}
+
+function goToOperation(r: CompareRowView) {
+  if (r.unkoNo) router.push(`/operations/${r.unkoNo}`)
 }
 </script>
 
@@ -255,34 +306,32 @@ function formatMin(v: number | null): string {
               <th class="text-right px-3 py-2 font-medium text-gray-500 cursor-pointer select-none" @click="toggleSort('yenPerHourBound')">
                 円/時間(拘束) <span v-if="sortKey === 'yenPerHourBound'">{{ sortDesc ? '▼' : '▲' }}</span>
               </th>
+              <th class="text-center px-3 py-2 font-medium text-gray-500">保存済み</th>
             </tr>
           </thead>
           <tbody>
-            <NuxtLink
+            <tr
               v-for="r in sortedRows"
               :key="`${r.vehicleNumber}-${r.saleDate}`"
-              :to="r.unkoNo ? `/operations/${r.unkoNo}` : undefined"
-              custom
+              class="border-t border-gray-100 dark:border-gray-800"
+              :class="r.unkoNo ? 'cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50' : ''"
+              @click="goToOperation(r)"
             >
-              <template #default="{ navigate }">
-                <tr
-                  class="border-t border-gray-100 dark:border-gray-800"
-                  :class="r.unkoNo ? 'cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50' : ''"
-                  @click="r.unkoNo && navigate()"
-                >
-                  <td class="px-3 py-2 whitespace-nowrap">{{ r.saleDate }}</td>
-                  <td class="px-3 py-2 whitespace-nowrap">{{ r.vehicleNumber }}</td>
-                  <td class="px-3 py-2 whitespace-nowrap">{{ r.driverName ?? '-' }}</td>
-                  <td class="px-3 py-2">{{ r.customerName || '-' }}</td>
-                  <td class="px-3 py-2">{{ r.originLabel || '?' }} → {{ r.destLabel || '?' }}</td>
-                  <td class="px-3 py-2 text-right whitespace-nowrap">{{ formatYen(r.amount) }}</td>
-                  <td class="px-3 py-2 text-right whitespace-nowrap">{{ formatKm(r.distanceKm) }}</td>
-                  <td class="px-3 py-2 text-right whitespace-nowrap">{{ formatMin(r.boundMin) }} / {{ formatMin(r.driveMin) }}</td>
-                  <td class="px-3 py-2 text-right whitespace-nowrap">{{ formatYen(r.efficiency.yenPerKm) }}</td>
-                  <td class="px-3 py-2 text-right whitespace-nowrap">{{ formatYen(r.efficiency.yenPerHourBound) }}</td>
-                </tr>
-              </template>
-            </NuxtLink>
+              <td class="px-3 py-2 whitespace-nowrap">{{ r.saleDate }}</td>
+              <td class="px-3 py-2 whitespace-nowrap">{{ r.vehicleNumber }}</td>
+              <td class="px-3 py-2 whitespace-nowrap">{{ r.driverName ?? '-' }}</td>
+              <td class="px-3 py-2">{{ r.customerName || '-' }}</td>
+              <td class="px-3 py-2">{{ r.originLabel || '?' }} → {{ r.destLabel || '?' }}</td>
+              <td class="px-3 py-2 text-right whitespace-nowrap">{{ formatYen(r.amount) }}</td>
+              <td class="px-3 py-2 text-right whitespace-nowrap">{{ formatKm(r.distanceKm) }}</td>
+              <td class="px-3 py-2 text-right whitespace-nowrap">{{ formatMin(r.boundMin) }} / {{ formatMin(r.driveMin) }}</td>
+              <td class="px-3 py-2 text-right whitespace-nowrap">{{ formatYen(r.efficiency.yenPerKm) }}</td>
+              <td class="px-3 py-2 text-right whitespace-nowrap">{{ formatYen(r.efficiency.yenPerHourBound) }}</td>
+              <td class="px-3 py-2 text-center whitespace-nowrap">
+                <span v-if="r.isSaved" class="text-green-600 dark:text-green-400" title="ProfitPanel で確認・保存済み (この行の距離・時間・売上はスナップショットの値)">✓</span>
+                <span v-else class="text-gray-300 dark:text-gray-700">-</span>
+              </td>
+            </tr>
           </tbody>
         </table>
       </div>

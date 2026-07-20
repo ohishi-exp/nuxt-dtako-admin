@@ -9,6 +9,7 @@
 import type { VehicleDailySlip } from './ichiban'
 import { calcProfitEfficiency, epochToYmd, type ProfitEfficiency } from './ichiban'
 import type { SelectedRowsSummary } from './event-data-table'
+import type { ProfitSnapshot } from './profit-r2'
 import type { OperationListItem } from '~/types'
 
 // --- 伝票のグルーピング (車番+売上年月日、同日複数伝票は運行に集約) ---
@@ -85,14 +86,49 @@ export function pickOperationForDate(
   return operations.find(op => (op.operation_date ?? op.reading_date) === saleDate) ?? null
 }
 
+// --- 保存済み検証スナップショットの有無判定 ---
+
+/** 保存済みスナップショット (ProfitPanel で保存、`SnapshotListItem`) の車輌+運行番号を
+ * 比較行の車輌+運行番号と突き合わせるためのキー。区切りに使う制御文字はどちらの値にも
+ * 現れないコード体系のため単純結合で衝突しない。 */
+export function savedSnapshotKey(vehicleCode: string, unkoNo: string): string {
+  return `${vehicleCode} ${unkoNo}`
+}
+
+/** 年月 (`YYYY-MM`) をキーに、(車輌, 年月) の組み合わせを重複なく列挙する。保存済み
+ * スナップショット一覧 (`GET /api/profit/snapshots?vehicle=&ym=`) を年月単位でしか
+ * 効率的に絞り込めないため、伝票グループ (運行解決前、`vehicleNumber`/`saleDate` を
+ * 持つ最小限の形なら `SlipGroup` にも `CompareRowView` にも使える) から検索対象を
+ * 事前に列挙するのに使う。 */
+export function uniqueVehicleYmPairs(
+  rows: { vehicleNumber: string, saleDate: string }[],
+): { vehicle: string, ym: string }[] {
+  const seen = new Set<string>()
+  const pairs: { vehicle: string, ym: string }[] = []
+  for (const r of rows) {
+    const ym = r.saleDate.slice(0, 7)
+    const key = `${r.vehicleNumber} ${ym}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    pairs.push({ vehicle: r.vehicleNumber, ym })
+  }
+  return pairs
+}
+
 // --- 比較行の組み立て ---
 
 export interface CompareRow {
   group: SlipGroup
   /** 一致する dtako 運行 (見つからなければ null = 「運行データなし」)。 */
   operation: OperationListItem | null
-  /** 該当運行のイベントCSV全体を集計した距離・時間内訳 (CSV未取得/取得失敗なら null)。 */
+  /** 該当運行のイベントCSV全体を集計した距離・時間内訳 (`snapshot` が無い場合のみ使う
+   * フォールバック。CSV未取得/取得失敗なら null)。 */
   segment: SelectedRowsSummary | null
+  /** 該当運行に対して ProfitPanel で既に確認・保存済みのスナップショット (無ければ null)。
+   * 存在する場合、距離・時間・売上・効率指標は全て CSV 全行集計ではなくこちらを優先する
+   * (ユーザーが手動で選択・確認した区間・伝票の方が正確なため。Refs #330 実運用フィードバック:
+   * 「イベントで選択した行が使われず無駄」)。 */
+  snapshot: ProfitSnapshot | null
 }
 
 export interface CompareRowView {
@@ -108,26 +144,33 @@ export interface CompareRowView {
   boundMin: number | null
   driveMin: number | null
   efficiency: ProfitEfficiency
+  /** ProfitPanel で確認済みのスナップショットがあるか (一覧での「保存済み」表示用)。 */
+  isSaved: boolean
 }
 
-/** `CompareRow` (グループ+運行+CSV集計) から表示用の1行を組み立てる。 */
+/** `CompareRow` (グループ+運行+CSV集計 or 保存済みスナップショット) から表示用の1行を
+ * 組み立てる。`snapshot` があればそちらを優先し (手動確認済みのため信頼度が高い)、
+ * 無ければ CSV 全行集計 (`segment`) + 伝票金額の単純合算にフォールバックする。 */
 export function buildCompareRowView(row: CompareRow): CompareRowView {
-  const distanceKm = row.segment?.distanceKm ?? null
-  const boundMin = row.segment?.durationMin ?? null
-  const driveMin = row.segment?.byCategory.drive ?? null
+  const distanceKm = row.snapshot?.dtakoSummary.distanceKm ?? row.segment?.distanceKm ?? null
+  const boundMin = row.snapshot?.dtakoSummary.durationMin ?? row.segment?.durationMin ?? null
+  const driveMin = row.snapshot?.dtakoSummary.byCategory.drive ?? row.segment?.byCategory.drive ?? null
+  const amount = row.snapshot?.confirmedAmount ?? row.group.amount
   return {
     vehicleNumber: row.group.vehicleNumber,
     saleDate: row.group.saleDate,
     customerName: row.group.customerName,
     originLabel: row.group.originLabel,
     destLabel: row.group.destLabel,
-    amount: row.group.amount,
+    amount,
     unkoNo: row.operation?.unko_no ?? null,
     driverName: row.operation?.driver_name ?? null,
     distanceKm,
     boundMin,
     driveMin,
-    efficiency: calcProfitEfficiency(row.group.amount, distanceKm ?? 0, boundMin ?? 0, driveMin ?? 0),
+    efficiency: row.snapshot?.efficiency
+      ?? calcProfitEfficiency(amount, distanceKm ?? 0, boundMin ?? 0, driveMin ?? 0),
+    isSaved: row.snapshot !== null,
   }
 }
 
