@@ -151,7 +151,10 @@ async function proposeFromSlips() {
       proposeStatus.value = 'not-found'
       return
     }
-    const slips = await fetchVehicleDailySlips(vehicleCode, opDate, shiftYmd(opDate, 1))
+    // reading_date/operation_date (タコグラフ読取日) は一番星の売上年月日と1日前後
+    // ずれうる (翌朝読み取り等、profit-compare.ts の operationSearchDateRange と同じ
+    // 理由) ため前後1日を広げて検索する。
+    const slips = await fetchVehicleDailySlips(vehicleCode, shiftYmd(opDate, -1), shiftYmd(opDate, 2))
     for (const slip of slips) {
       const originCity = slip.originAreaName || slip.origin
       const destCity = slip.destAreaName || slip.dest
