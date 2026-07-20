@@ -6,10 +6,12 @@ import {
   summarizeSelectedRows,
   selectedRowsLocationRange,
   proposeEventRowRange,
+  groupLegsByDate,
   rowIndicesInTimeRange,
   type SelectedRowsSummary,
   type SelectedRowsLocationRange,
 } from '~/utils/event-data-table'
+import type { ProfitPanelLegGroup } from '~/utils/profit-r2'
 import { fetchVehicleDailySlips } from '~/utils/ichiban'
 import { shiftYmd } from '~/utils/profit-compare'
 
@@ -137,6 +139,12 @@ const proposedLegCount = ref(0)
  * 別に持つ — 同じ ref を双方向に使うと EventCrewPanel 側の emit が上書きし合い
  * 無限ループ/競合の元になる。 */
 const proposedEventRange = ref<{ fromTs: number, toTs: number } | null>(null)
+/** 日付をまたぐレグがある場合の日付ごとのデジタコ実績 (Refs #356 派生要望:
+ * 「日付が違う部分を分けて別々に登録したい」)。ProfitPanel に渡し、伝票候補を
+ * 日付ごとにグループ化して個別に保存できるようにする。日付が1つしか無ければ
+ * (同日往復のみ、または通常の単一レグ) 空配列にし、ProfitPanel は従来通りの
+ * 単一保存フローのままにする。 */
+const proposedLegGroups = ref<ProfitPanelLegGroup[]>([])
 
 function applyProposedRange(headers: string[], rows: string[][], range: { fromTs: number, toTs: number }) {
   const idx = rowIndicesInTimeRange(headers, rows, range.fromTs, range.toTs)
@@ -146,6 +154,18 @@ function applyProposedRange(headers: string[], rows: string[][], range: { fromTs
   proposedEventRange.value = range
   profitPanelDismissed.value = false
   net780Data.ensureLoaded()
+}
+
+/** `プロポーズしたレグを日付ごとに union し、それぞれの区間のデジタコ実績を計算する。
+ * 日付が1つだけなら (同日往復のみ) 分割保存の余地が無いため空配列を返す。 */
+function buildLegGroups(headers: string[], rows: string[][], legs: { fromTs: number, toTs: number }[]): ProfitPanelLegGroup[] {
+  const dateGroups = groupLegsByDate(legs)
+  if (dateGroups.length <= 1) return []
+  return dateGroups.map(({ date, fromTs, toTs }) => ({
+    date,
+    range: { fromTs, toTs },
+    summary: summarizeSelectedRows(headers, rows, rowIndicesInTimeRange(headers, rows, fromTs, toTs)),
+  }))
 }
 
 async function proposeFromSlips() {
@@ -171,7 +191,8 @@ async function proposeFromSlips() {
       if (range) {
         applyProposedRange(csv.headers, csv.rows, range)
         activeTab.value = 'events'
-        proposedLegCount.value = range.legCount
+        proposedLegCount.value = range.legs.length
+        proposedLegGroups.value = buildLegGroups(csv.headers, csv.rows, range.legs)
         proposeStatus.value = 'done'
         return
       }
@@ -182,6 +203,17 @@ async function proposeFromSlips() {
     proposeStatus.value = 'error'
   }
 }
+
+/** ProfitPanel に渡す日付グループ。手動でイベント選択を変えた後は提案時のレグ
+ * 情報が現在の選択と対応しなくなるため (提案区間そのままの間だけ有効)、
+ * `selectedEventRange` が `proposedEventRange` と一致する間だけ渡す。 */
+const profitPanelLegGroups = computed(() => {
+  const proposed = proposedEventRange.value
+  const selected = selectedEventRange.value
+  if (!proposed || !selected) return []
+  if (proposed.fromTs !== selected.fromTs || proposed.toTs !== selected.toTs) return []
+  return proposedLegGroups.value
+})
 
 /** 選択区間の積地・卸地で `/profit/compare` (類似運行検索) に飛ぶためのクエリ。
  * 車輌は含めない (「似た運行」は他車輌も含めて探したいため)。積地・卸地とも
@@ -395,6 +427,7 @@ function formatDatetime(val: string | null): string {
       :range="selectedEventRange"
       :location="selectedEventLocation"
       :summary="selectedEventSummary"
+      :leg-groups="profitPanelLegGroups"
       @close="profitPanelDismissed = true"
     />
 
