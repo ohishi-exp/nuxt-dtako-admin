@@ -135,3 +135,7 @@ branches = true
 [[files]]
 path = "server/api/profit/snapshots.get.ts"
 branches = true
+
+[[files]]
+path = "server/api/profit/snapshot.delete.ts"
+branches = true

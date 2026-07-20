@@ -37,6 +37,11 @@ class FakeR2Bucket implements R2BucketLite {
     return {}
   }
 
+  async delete(key: string) {
+    this.store.delete(key)
+    return {}
+  }
+
   async list(options?: { prefix?: string, cursor?: string }) {
     const prefix = options?.prefix ?? ''
     const objects: R2ObjectLite[] = [...this.store.keys()]

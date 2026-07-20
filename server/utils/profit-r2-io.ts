@@ -31,6 +31,7 @@ export interface R2BucketLite {
   head(key: string): Promise<{ customMetadata?: Record<string, string> } | null>
   put(key: string, value: ArrayBuffer | Uint8Array | string, options?: R2PutOptions): Promise<unknown>
   list(options?: R2ListOptionsLite): Promise<R2ListResultLite>
+  delete(key: string): Promise<unknown>
 }
 
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
