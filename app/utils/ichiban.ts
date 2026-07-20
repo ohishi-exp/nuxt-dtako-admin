@@ -196,14 +196,41 @@ export function calcProfitEfficiency(
  * passthrough で、rust-ichibanboshi 側の実エンドポイントは axum で `/api` 配下に nest されて
  * いる (`/api/sales/vehicle-daily`) ため、client 側も `api/` を含めて呼ぶ必要がある。
  */
+async function fetchVehicleDailyRows(
+  query: Record<string, string | undefined>,
+): Promise<VehicleDailySlip[]> {
+  const res = await $fetch<{ source_table: string, data: VehicleDailyApiRow[] }>(
+    '/api/ichiban/api/sales/vehicle-daily',
+    { query },
+  )
+  return res.data.map(mapVehicleDailyApiRow)
+}
+
 export async function fetchVehicleDailySlips(
   vehicle: string,
   from: string,
   to: string,
 ): Promise<VehicleDailySlip[]> {
-  const res = await $fetch<{ source_table: string, data: VehicleDailyApiRow[] }>(
-    '/api/ichiban/api/sales/vehicle-daily',
-    { query: { vehicle, from, to } },
-  )
-  return res.data.map(mapVehicleDailyApiRow)
+  return fetchVehicleDailyRows({ vehicle, from, to })
+}
+
+/**
+ * 類似運行検索 (Refs #330 PR5) 用。`vehicle` を必須とせず、積地・卸地/得意先だけで
+ * 車輌を横断して検索できる (rust-ichibanboshi#79 で `vehicle`/`customer`/`origin`/`dest`
+ * のいずれか1つ以上必須に緩和された)。
+ */
+export interface VehicleDailySearchCriteria {
+  [key: string]: string | undefined
+  from: string
+  to: string
+  vehicle?: string
+  customer?: string
+  origin?: string
+  dest?: string
+}
+
+export async function searchVehicleDailySlips(
+  criteria: VehicleDailySearchCriteria,
+): Promise<VehicleDailySlip[]> {
+  return fetchVehicleDailyRows(criteria)
 }
