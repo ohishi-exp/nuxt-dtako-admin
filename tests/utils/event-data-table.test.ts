@@ -869,6 +869,13 @@ describe('rowIndicesInTimeRange', () => {
     expect(rowIndicesInTimeRange(headers, rowsWithBadEnd, from, to)).toEqual([0])
   })
 
+  it('終了日時セルが undefined (行が短い) 場合も開始日時のみで判定する (?? \'\' フォールバック)', () => {
+    const shortRow = ['2026/07/01 09:00:00']
+    const from = parseEventDatetimeToTs('2026/07/01 09:00:00')!
+    const to = parseEventDatetimeToTs('2026/07/01 09:00:00')!
+    expect(rowIndicesInTimeRange(headers, [shortRow], from, to)).toEqual([0])
+  })
+
   it('範囲より前の行は含めない', () => {
     const from = parseEventDatetimeToTs('2026/07/01 09:00:00')!
     const to = parseEventDatetimeToTs('2026/07/01 09:30:00')!
