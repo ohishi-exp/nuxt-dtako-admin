@@ -411,10 +411,14 @@ export function summarizeSelectedRows(
 //     提案してユーザーは確認するだけでいいはず」) ---
 
 /**
- * 積み (`開始市町村名` が `originCity` に一致) 〜 それ以降で最初に現れる、卸地
- * (`終了市町村名` が `destCity` に一致) の降しまでの時刻レンジを提案する。
- * 一番星の伝票 (`originAreaName`/`destAreaName` または `origin`/`dest`) をそのまま
- * 渡せば、ユーザーが手動でイベント行を1つずつ探して選択する手間を省ける。
+ * 積み (`開始市町村名` が `originCity` に一致) 〜 それぞれの積みの直後に現れる、卸地
+ * (`終了市町村名` が `destCity` に一致) の降しまでの時刻レンジを提案する。同日に同じ
+ * 市町村への積みが複数回ある運行では、最初に見つかった積みをそのまま採用すると
+ * 無関係な別レグまで巻き込んで区間が過大になる (実運用回帰: 同日複数積地の運行で
+ * 選択区間が本来の配送レグより大幅に広くなり、距離/時間集計が実態と乖離した) ため、
+ * 候補となる積み/降しの組すべてを列挙し、区間が最も短い (= 最も個々の配送レグに近い)
+ * 組を採用する。一番星の伝票 (`originAreaName`/`destAreaName` または `origin`/`dest`)
+ * をそのまま渡せば、ユーザーが手動でイベント行を1つずつ探して選択する手間を省ける。
  * 一致する積み/降しの組が見つからなければ null (この場合は従来通り手動選択が必要)。
  */
 export function proposeEventRowRange(
@@ -432,30 +436,31 @@ export function proposeEventRowRange(
   const endCityIdx = colIndex(headers, '終了市町村名')
   if (nameIdx < 0 || startIdx < 0 || endIdx < 0 || startCityIdx < 0 || endCityIdx < 0) return null
 
-  let loadIdx = -1
+  let best: { fromTs: number, toTs: number } | null = null
+  let bestDuration = Number.POSITIVE_INFINITY
+
   for (let i = 0; i < rows.length; i++) {
-    const row = rows[i]!
-    if (classifyTimeCategory(row[nameIdx] ?? '') !== 'loading') continue
-    if (matchLocationLevel(row[startCityIdx] ?? '', originCity) === 'none') continue
-    loadIdx = i
-    break
-  }
-  if (loadIdx < 0) return null
+    const loadRow = rows[i]!
+    if (classifyTimeCategory(loadRow[nameIdx] ?? '') !== 'loading') continue
+    if (matchLocationLevel(loadRow[startCityIdx] ?? '', originCity) === 'none') continue
+    const fromTs = parseEventDatetimeToTs(loadRow[startIdx] ?? '')
+    if (fromTs === null) continue
 
-  let unloadIdx = -1
-  for (let j = loadIdx + 1; j < rows.length; j++) {
-    const row = rows[j]!
-    if (classifyTimeCategory(row[nameIdx] ?? '') !== 'unloading') continue
-    if (matchLocationLevel(row[endCityIdx] ?? '', destCity) === 'none') continue
-    unloadIdx = j
-    break
+    for (let j = i + 1; j < rows.length; j++) {
+      const unloadRow = rows[j]!
+      if (classifyTimeCategory(unloadRow[nameIdx] ?? '') !== 'unloading') continue
+      if (matchLocationLevel(unloadRow[endCityIdx] ?? '', destCity) === 'none') continue
+      const toTs = parseEventDatetimeToTs(unloadRow[endIdx] ?? '')
+      if (toTs !== null && toTs - fromTs < bestDuration) {
+        bestDuration = toTs - fromTs
+        best = { fromTs, toTs }
+      }
+      // この積みに対応する降しは (パース失敗も含め) 直後の最初の一致行のみを見る。
+      break
+    }
   }
-  if (unloadIdx < 0) return null
 
-  const fromTs = parseEventDatetimeToTs(rows[loadIdx]![startIdx] ?? '')
-  const toTs = parseEventDatetimeToTs(rows[unloadIdx]![endIdx] ?? '')
-  if (fromTs === null || toTs === null) return null
-  return { fromTs, toTs }
+  return best
 }
 
 /**
