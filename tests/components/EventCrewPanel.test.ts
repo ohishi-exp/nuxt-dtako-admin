@@ -137,6 +137,30 @@ describe('EventCrewPanel', () => {
       expect(emitted[emitted.length - 1]![0]).toBeNull()
     })
 
+    it('proposedRange prop が渡されると対応する行のチェックボックスが自動で入る (一番星の伝票から区間を提案、実運用回帰: 以前はページ側の状態だけ更新されテーブルのチェックボックスが連動しなかった)', async () => {
+      const wrapper = createWrapper(makeGroup([makeRow('休憩')]))
+      expect(wrapper.find('tbody input[type="checkbox"]').element.checked).toBe(false)
+      await wrapper.setProps({
+        proposedRange: {
+          fromTs: Date.UTC(2026, 2, 7, 8, 0, 0) / 1000,
+          toTs: Date.UTC(2026, 2, 7, 8, 30, 0) / 1000,
+        },
+      })
+      expect(wrapper.find('tbody input[type="checkbox"]').element.checked).toBe(true)
+      expect(wrapper.text()).toContain('1行選択中')
+      const emitted = wrapper.emitted('update:selectedRange')!
+      expect(emitted[emitted.length - 1]![0]).toEqual({
+        fromTs: Date.UTC(2026, 2, 7, 8, 0, 0) / 1000,
+        toTs: Date.UTC(2026, 2, 7, 8, 30, 0) / 1000,
+      })
+    })
+
+    it('proposedRange が null なら何もしない (初期状態のまま)', () => {
+      const wrapper = createWrapper(makeGroup([makeRow('休憩')]))
+      expect(wrapper.find('tbody input[type="checkbox"]').element.checked).toBe(false)
+      expect(wrapper.emitted('update:selectedRange')).toBeFalsy()
+    })
+
     it('チェックボックス列のセル (input 以外の余白部分) クリックでも選択できる', async () => {
       const wrapper = createWrapper(makeGroup([makeRow('休憩')]))
       await wrapper.find('tbody td').trigger('click')

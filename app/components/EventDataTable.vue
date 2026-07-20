@@ -6,6 +6,7 @@ import { groupByCrewRole } from '~/utils/event-data-table'
 const props = defineProps<{
   data: CsvJsonResponse
   loading?: boolean
+  proposedRange?: { fromTs: number, toTs: number } | null
 }>()
 
 const emit = defineEmits<{
@@ -54,6 +55,7 @@ const activeGroup = computed(() => crewGroups.value.find(g => g.crewRole === act
         v-if="activeGroup"
         :group="activeGroup"
         :headers="data.headers"
+        :proposed-range="proposedRange"
         @update:selected-range="emit('update:selectedRange', $event)"
         @update:selected-summary="emit('update:selectedSummary', $event)"
         @update:selected-location="emit('update:selectedLocation', $event)"
