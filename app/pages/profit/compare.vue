@@ -24,13 +24,22 @@ import {
 } from '~/utils/profit-compare'
 import type { OperationListItem } from '~/types'
 
+/** クエリの値を trim して空文字なら undefined 扱いにする (route.query は string|string[]|null も来うる)。 */
+function queryString(v: unknown): string | undefined {
+  const s = Array.isArray(v) ? v[0] : v
+  return typeof s === 'string' && s.trim() ? s.trim() : undefined
+}
+
+const route = useRoute()
 const defaultRange = defaultCompareDateRange(Math.floor(Date.now() / 1000))
-const from = ref(defaultRange.from)
-const to = ref(defaultRange.to)
-const vehicle = ref('')
-const customer = ref('')
-const origin = ref('')
-const dest = ref('')
+// `/profit/monthly` の保存済み検証一覧から「この車輌・期間で比較」遷移してきた場合、
+// クエリ (vehicle/customer/origin/dest/from/to) をそのまま検索条件の初期値にする。
+const from = ref(queryString(route.query.from) ?? defaultRange.from)
+const to = ref(queryString(route.query.to) ?? defaultRange.to)
+const vehicle = ref(queryString(route.query.vehicle) ?? '')
+const customer = ref(queryString(route.query.customer) ?? '')
+const origin = ref(queryString(route.query.origin) ?? '')
+const dest = ref(queryString(route.query.dest) ?? '')
 
 type Status = 'idle' | 'loading' | 'ready' | 'error'
 const status = ref<Status>('idle')
@@ -94,6 +103,9 @@ async function search() {
     status.value = 'error'
   }
 }
+
+// クエリ付きで遷移してきた場合 (保存済み検証一覧からの「比較」リンク等) は自動検索する
+if (hasAnyFilter()) search()
 
 // --- ソート ---
 
