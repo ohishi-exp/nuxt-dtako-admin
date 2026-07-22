@@ -105,6 +105,10 @@ path = "app/utils/ichiban.ts"
 branches = true
 
 [[files]]
+path = "app/utils/kyuyo-fetch.ts"
+branches = true
+
+[[files]]
 path = "app/utils/ichiban-health.ts"
 branches = true
 
