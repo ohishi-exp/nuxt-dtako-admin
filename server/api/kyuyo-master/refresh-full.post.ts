@@ -40,14 +40,22 @@ export default defineEventHandler(async (event) => {
     : []
 
   const now = new Date().toISOString()
-  for (const entry of companies) {
-    const row = entry as { company?: unknown, name?: unknown, years?: unknown }
-    if (typeof row.company !== 'string' || row.company === '') continue
-    const years = Array.isArray(row.years)
-      ? row.years.filter((y): y is number => typeof y === 'number')
-      : []
-    const name = typeof row.name === 'string' ? row.name : ''
-    await upsertKyuyoCompany(db, row.company, name, years, now)
+  try {
+    for (const entry of companies) {
+      const row = entry as { company?: unknown, name?: unknown, years?: unknown }
+      if (typeof row.company !== 'string' || row.company === '') continue
+      const years = Array.isArray(row.years)
+        ? row.years.filter((y): y is number => typeof y === 'number')
+        : []
+      const name = typeof row.name === 'string' ? row.name : ''
+      await upsertKyuyoCompany(db, row.company, name, years, now)
+    }
+  }
+  catch (e: unknown) {
+    throw createError({
+      statusCode: 500,
+      statusMessage: `kyuyo_companies の更新に失敗: ${e instanceof Error ? e.message : String(e)}`,
+    })
   }
 
   return {
