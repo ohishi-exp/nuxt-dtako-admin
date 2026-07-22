@@ -567,7 +567,8 @@ describe('compareSalaryMonth', () => {
     expect(r.csvOvertimeItems).toEqual([{ label: '残業手当', amount: 20000 }, { label: '60H超過残業', amount: 10000 }])
   })
 
-  it('片側にしかいない乗務員を csvOnly / reportOnly に分ける', () => {
+  it('片側にしかいない乗務員を csvOnly / reportOnly に分ける (未確認の行のみ csvOnly に出る)', () => {
+    // 9999 は突合マスタ未登録・直接一致もしない (未確認) → csvOnly に出る側。
     const out = compareSalaryMonth(
       [csvRow(), csvRow({ driverCd: '9999', cdKey: '9999', driverName: '給与のみ' })],
       [reportRow('1239', '城田 秀幸'), reportRow('1021', '計算のみ')],
@@ -576,6 +577,36 @@ describe('compareSalaryMonth', () => {
     expect(out.rows).toHaveLength(1)
     expect(out.csvOnly).toEqual([{ driverCd: '9999', driverName: '給与のみ', company: '' }])
     expect(out.reportOnly).toEqual([{ driverCd: '1021', driverName: '計算のみ' }])
+  })
+
+  it('乗務員CDが確定済み (登録済み) でも今月の wage-report に本人がいない行は csvOnly にも rows にも出さず消える (Refs #253)', () => {
+    // 実例: 突合マスタに「1699 仲里剛 → 1672」が登録済みだが、退職等でこの月の
+    // wage-report に driverCd 1672 がいない — 比較対象が無いだけで人が確認する
+    // 対象ではないので、csvOnly の「乗務員CDを選択」ドロップダウンに出してはいけない。
+    const cdMap: SalaryCdMap = { entries: { '1699|仲里剛': '1672' } }
+    const out = compareSalaryMonth(
+      [csvRow({ driverCd: '1699', cdKey: '1699', driverName: '仲里 剛' })],
+      [reportRow('1021', '計算のみ')], // 1672 は今月の wage-report に不在
+      config,
+      cdMap,
+    )
+    expect(out.rows).toEqual([])
+    expect(out.csvOnly).toEqual([])
+    expect(out.conflicts).toEqual([])
+    expect(out.reportOnly).toEqual([{ driverCd: '1021', driverName: '計算のみ' }])
+  })
+
+  it('同じ乗務員が今月の wage-report にいれば普通に rows へ出る (対照ケース)', () => {
+    const cdMap: SalaryCdMap = { entries: { '1699|仲里剛': '1672' } }
+    const out = compareSalaryMonth(
+      [csvRow({ driverCd: '1699', cdKey: '1699', driverName: '仲里 剛' })],
+      [reportRow('1672', '仲里 剛')],
+      config,
+      cdMap,
+    )
+    expect(out.rows).toHaveLength(1)
+    expect(out.rows[0]!.driverName).toBe('仲里 剛')
+    expect(out.csvOnly).toEqual([])
   })
 
   it('突合マスタで給与コード ≠ 乗務員CD の乗務員を引き当てる', () => {
@@ -661,9 +692,11 @@ describe('compareSalaryMonth', () => {
     expect(out.rows[0]!.csvBase).toBe(2)
   })
 
-  it('別会社の給与コードが同じ乗務員CDへ解決されたら conflicts に隔離し、サイレント上書きしない (Refs #253)', () => {
-    // kabu 社の 0222 = 城田秀幸 (乗務員CD 222 と直接一致)、
-    // yuu 社の 0222 = 別人の金原敏雄 (会社が違うだけで社員コードが偶然一致)
+  it('給与コードが乗務員CDと偶然数字一致しただけ (氏名不一致) の行は衝突にせず、単なる未突合にする (Refs #253)', () => {
+    // kabu 社の 0222 = 城田秀幸 (乗務員CD 222 と数字・氏名の両方一致 = 本当の直接一致)、
+    // yuu 社の 0222 = 別人の金原敏雄 (会社が違うので社員コードが偶然一致しただけ、氏名は不一致)。
+    // 金原敏雄はまだ誰にも確認されていないので、衝突として人に聞くのではなく
+    // 普通の未突合として扱う — 相手が見つからないだけの行を衝突扱いしない。
     const out = compareSalaryMonth(
       [
         csvRow({ company: '株式会社', driverCd: '0222', cdKey: '222', driverName: '城田 秀幸' }),
@@ -672,16 +705,36 @@ describe('compareSalaryMonth', () => {
       [reportRow('222', '城田 秀幸')],
       config,
     )
-    // 会社が違う 2 人が同じ乗務員CDに解決された行はどちらも rows/csvOnly に出ない
+    expect(out.conflicts).toEqual([])
+    expect(out.rows).toHaveLength(1)
+    expect(out.rows[0]!.driverName).toBe('城田 秀幸')
+    expect(out.csvOnly).toEqual([{ driverCd: '0222', driverName: '金原 敏雄', company: '有限会社' }])
+    expect(out.reportOnly).toEqual([])
+  })
+
+  it('突合マスタの登録ミス等で複数の確認済み行が同じ乗務員CDに来たら conflicts に隔離する (Refs #253)', () => {
+    // 株式会社の 1523 (坂本孝一) と 有限会社の 1547 (宮﨑浩二) が、どちらも
+    // (誤って) cdMap で乗務員CD 1523 に登録されてしまっているケース。
+    const cdMap: SalaryCdMap = {
+      entries: { '株式会社|1523|坂本孝一': '1523', '有限会社|1547|宮﨑浩二': '1523' },
+    }
+    const out = compareSalaryMonth(
+      [
+        csvRow({ company: '株式会社', driverCd: '1523', cdKey: '1523', driverName: '坂本 孝一' }),
+        csvRow({ company: '有限会社', driverCd: '1547', cdKey: '1547', driverName: '宮﨑 浩二' }),
+      ],
+      [reportRow('1523', '宮﨑 浩二')],
+      config,
+      cdMap,
+    )
     expect(out.rows).toEqual([])
     expect(out.csvOnly).toEqual([])
-    expect(out.reportOnly).toEqual([{ driverCd: '222', driverName: '城田 秀幸' }])
     expect(out.conflicts).toEqual([
       {
-        driverCd: '222',
+        driverCd: '1523',
         entries: [
-          { company: '株式会社', driverCd: '0222', driverName: '城田 秀幸' },
-          { company: '有限会社', driverCd: '0222', driverName: '金原 敏雄' },
+          { company: '株式会社', driverCd: '1523', driverName: '坂本 孝一' },
+          { company: '有限会社', driverCd: '1547', driverName: '宮﨑 浩二' },
         ],
       },
     ])
@@ -690,15 +743,19 @@ describe('compareSalaryMonth', () => {
   })
 
   it('衝突エントリの会社ラベルが空の場合は警告で「会社未設定」と表示する', () => {
+    const cdMap: SalaryCdMap = {
+      entries: { '1523|坂本孝一': '1523', '有限会社|1547|宮﨑浩二': '1523' },
+    }
     const out = compareSalaryMonth(
       [
-        csvRow({ company: '', driverCd: '0222', cdKey: '222', driverName: '城田 秀幸' }),
-        csvRow({ company: '有限会社', driverCd: '0222', cdKey: '222', driverName: '金原 敏雄' }),
+        csvRow({ company: '', driverCd: '1523', cdKey: '1523', driverName: '坂本 孝一' }),
+        csvRow({ company: '有限会社', driverCd: '1547', cdKey: '1547', driverName: '宮﨑 浩二' }),
       ],
-      [reportRow('222', '城田 秀幸')],
+      [reportRow('1523', '宮﨑 浩二')],
       config,
+      cdMap,
     )
-    expect(out.warnings[0]).toContain('会社未設定:0222 城田 秀幸')
+    expect(out.warnings[0]).toContain('会社未設定:1523 坂本 孝一')
   })
 
   it('突合マスタで会社ごとに引き当て直せば conflicts は解消される', () => {
