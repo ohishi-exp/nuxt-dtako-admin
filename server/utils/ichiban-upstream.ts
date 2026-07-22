@@ -36,8 +36,11 @@ export class IchibanUpstreamError extends Error {
  * `<NUXT_ICHIBAN_API_URL>/{path}{search}` に CF Access Service Token 付きで GET する。
  * upstream の応答 (2xx/非2xx問わず) はそのまま `Response` として返す — 意味づけ
  * (passthrough か JSON parse して検証するか) は呼び出し元の責務。
+ *
+ * `extraHeaders` は CF Access ヘッダに追加で付与する (kyuyo proxy がユーザー JWT の
+ * `Authorization` を素通し転送するために使う。Refs #369)。
  */
-export async function fetchIchiban(env: Record<string, unknown>, path: string, search: string): Promise<Response> {
+export async function fetchIchiban(env: Record<string, unknown>, path: string, search: string, extraHeaders: Record<string, string> = {}): Promise<Response> {
   const [clientId, clientSecret] = await Promise.all([
     resolveSecret(env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID),
     resolveSecret(env.ICHIBAN_CF_ACCESS_CLIENT_SECRET),
@@ -54,6 +57,7 @@ export async function fetchIchiban(env: Record<string, unknown>, path: string, s
     return await fetch(upstreamUrl, {
       method: 'GET',
       headers: {
+        ...extraHeaders,
         'CF-Access-Client-Id': clientId,
         'CF-Access-Client-Secret': clientSecret,
         Accept: 'application/json',
