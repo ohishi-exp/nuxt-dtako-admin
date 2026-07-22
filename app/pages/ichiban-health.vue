@@ -68,7 +68,18 @@ async function runAll() {
   running.value = true
   rows.value = buildHealthChecks(payrollMonth.value).map(check => ({ check, state: 'pending' }))
   try {
-    await Promise.all(rows.value.map(row => runOne(row)))
+    // kyuyo 系 (needsAuth) は直列実行 — upstream の OHKEN 接続プールは 2 本しか
+    // なく (給与大臣 PC が非力なため)、5 並列で叩くと後発がプール空き待ちの
+    // タイムアウト (15s) で偽の 503 NG になる (本番初回実行で実際に発生)。
+    // 既存 API 系 (CAPE#01) は並列のまま
+    const parallel = rows.value.filter(row => !row.check.needsAuth)
+    const serial = rows.value.filter(row => row.check.needsAuth)
+    await Promise.all([
+      Promise.all(parallel.map(row => runOne(row))),
+      (async () => {
+        for (const row of serial) await runOne(row)
+      })(),
+    ])
     lastRunAt.value = new Date().toLocaleString('ja-JP')
   }
   finally {
