@@ -475,6 +475,14 @@ describe('suggestCdMapEntries', () => {
     const out = suggestCdMapEntries(rows, reports, { entries: { '1427|中村一由': '9999' } })
     expect(out).toEqual({})
   })
+
+  it('給与コードが実在の乗務員CDと偶然一致していても氏名が違えば提案する (Refs #253)', () => {
+    // 1412 は中村一由の乗務員CD。別会社の給与コード 1412 がたまたま同じ数字だが
+    // 本人は柳井亮祐 (別人) — コードの一致だけを見て「提案不要」にしてはいけない。
+    const rows = [csvRow({ company: '有限会社', driverCd: '1412', cdKey: '1412', driverName: '柳井 亮祐' })]
+    const out = suggestCdMapEntries(rows, reports, { entries: {} })
+    expect(out).toEqual({ '有限会社|1412|柳井亮祐': '1587' })
+  })
 })
 
 describe('compareSalaryMonth', () => {

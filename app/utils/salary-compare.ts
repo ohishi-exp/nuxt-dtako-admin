@@ -350,12 +350,16 @@ export function suggestCdMapEntries(
   reportRows: WageReportRow[],
   cdMap: SalaryCdMap,
 ): Record<string, string> {
-  const reportCds = new Set(reportRows.map(r => String(Number(r.summary.driverCd))))
+  // 乗務員CD (前ゼロ除去) → 氏名の正規化キー。コードがそのまま一致していても
+  // 氏名まで一致していなければ「本当の直接一致」ではない (会社を跨いだ偶然の
+  // コード衝突、Refs #253) — その場合は生コードへ逃げず氏名一致で提案する。
+  const reportNameByCd = new Map<string, string>()
   // 氏名 → 乗務員CD 群 (一意な氏名だけ提案に使う)
   const byName = new Map<string, string[]>()
   for (const r of reportRows) {
-    const key = normalizeNameKey(r.summary.driverName)
-    byName.set(key, [...(byName.get(key) ?? []), r.summary.driverCd])
+    const nameKey = normalizeNameKey(r.summary.driverName)
+    reportNameByCd.set(String(Number(r.summary.driverCd)), nameKey)
+    byName.set(nameKey, [...(byName.get(nameKey) ?? []), r.summary.driverCd])
   }
   const out: Record<string, string> = {}
   const seen = new Set<string>()
@@ -363,11 +367,15 @@ export function suggestCdMapEntries(
     const mapKey = salaryCdMapKey(row.driverCd, row.driverName, row.company)
     if (seen.has(mapKey)) continue
     seen.add(mapKey)
-    // 既にマスタ登録済み (会社スコープ / 旧形式のどちらか) / コードがそのまま
-    // 一致する行は提案不要
+    // 既にマスタ登録済み (会社スコープ / 旧形式のどちらか) の行は提案不要
     const legacyKey = row.company ? salaryCdMapKey(row.driverCd, row.driverName) : mapKey
-    if (cdMap.entries[mapKey] !== undefined || cdMap.entries[legacyKey] !== undefined || reportCds.has(row.cdKey)) continue
-    const candidates = byName.get(normalizeNameKey(row.driverName))
+    if (cdMap.entries[mapKey] !== undefined || cdMap.entries[legacyKey] !== undefined) continue
+    const rowNameKey = normalizeNameKey(row.driverName)
+    // コードがそのまま driverCd と一致し、かつ氏名も一致するなら本当の直接
+    // 一致なので提案不要。氏名が違えば偶然のコード衝突 (Refs #253) なので
+    // 生コードへ逃げず、下の氏名一意一致で正しい乗務員CDを提案する。
+    if (reportNameByCd.get(row.cdKey) === rowNameKey) continue
+    const candidates = byName.get(rowNameKey)
     if (candidates && candidates.length === 1) out[mapKey] = candidates[0]!
   }
   return out

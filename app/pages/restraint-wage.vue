@@ -576,16 +576,14 @@ function restoreSalaryImports() {
   salaryImportSeq = maxId
 }
 
-/** 取り込み 1 件の会社ラベルを変更し、その取り込みだけ再解析する (Refs #253)。 */
+/** 取り込み 1 件の会社ラベルを変更する (Refs #253)。テキストは変わらないので
+ * CSV を再パースし直さず、既に解析済みの行へ会社ラベルを付け替えるだけにする
+ * (大きい CSV だと再パースが重く、入力のたびに全文字で走らせるとタイピングが
+ * 詰まる — テンプレート側でも @change (blur/確定時) でしか呼ばない)。 */
 function setImportCompany(id: number, company: string) {
   salaryImports.value = salaryImports.value.map((i) => {
     if (i.id !== id) return i
-    try {
-      return { ...i, company, parsed: parseSalaryCsv(i.text, company) }
-    }
-    catch {
-      return { ...i, company }
-    }
+    return { ...i, company, parsed: { ...i.parsed, rows: i.parsed.rows.map(r => ({ ...r, company })) } }
   })
 }
 
@@ -1731,7 +1729,7 @@ watch([activeTab, month, session], () => {
                   class="w-40"
                   placeholder="会社名 (例: 株式会社)"
                   title="社員コードは会社毎に別体系のため、複数社を取り込む時は会社名を設定してください (Refs #253)"
-                  @update:model-value="(v: string | number) => setImportCompany(imp.id, String(v))"
+                  @change="(e: Event) => setImportCompany(imp.id, (e.target as HTMLInputElement).value)"
                 />
                 <div class="flex-1" />
                 <UButton size="xs" variant="ghost" icon="i-lucide-trash-2" label="削除" @click="removeSalaryImport(imp.id)" />
@@ -1906,9 +1904,11 @@ watch([activeTab, month, session], () => {
               <p class="text-xs text-gray-500 mb-1">乗務員CD {{ c.driverCd }} へ解決:</p>
               <div v-for="e in c.entries" :key="`${e.company}|${e.driverCd}|${e.driverName}`" class="flex items-center gap-2 text-sm mb-1">
                 <span class="flex-1 truncate">{{ e.company || '会社未設定' }}: {{ e.driverCd }} {{ e.driverName }}</span>
-                <USelect
+                <USelectMenu
                   model-value=""
+                  value-key="value"
                   :items="salaryCdOptions"
+                  :search-input="{ placeholder: '乗務員CD・氏名で検索' }"
                   size="xs"
                   class="w-48 shrink-0"
                   placeholder="正しい乗務員CDを選択"
@@ -1946,9 +1946,11 @@ watch([activeTab, month, session], () => {
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5 mb-3">
                 <div v-for="d in salaryComparison.csvOnly" :key="`${d.company}|${d.driverCd}|${d.driverName}`" class="flex items-center gap-2 text-sm">
                   <span class="flex-1 truncate">{{ d.company ? `${d.company}: ` : '' }}{{ d.driverCd }} {{ d.driverName }}</span>
-                  <USelect
+                  <USelectMenu
                     model-value=""
+                    value-key="value"
                     :items="salaryCdOptions"
+                    :search-input="{ placeholder: '乗務員CD・氏名で検索' }"
                     size="xs"
                     class="w-48 shrink-0"
                     placeholder="乗務員CDを選択"
