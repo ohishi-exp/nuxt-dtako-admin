@@ -681,6 +681,18 @@ describe('compareSalaryMonth', () => {
     expect(out.warnings[0]).toContain('複数の会社の給与コードが解決されました')
   })
 
+  it('衝突エントリの会社ラベルが空の場合は警告で「会社未設定」と表示する', () => {
+    const out = compareSalaryMonth(
+      [
+        csvRow({ company: '', driverCd: '0222', cdKey: '222', driverName: '城田 秀幸' }),
+        csvRow({ company: '有限会社', driverCd: '0222', cdKey: '222', driverName: '金原 敏雄' }),
+      ],
+      [reportRow('222', '城田 秀幸')],
+      config,
+    )
+    expect(out.warnings[0]).toContain('会社未設定:0222 城田 秀幸')
+  })
+
   it('突合マスタで会社ごとに引き当て直せば conflicts は解消される', () => {
     const cdMap: SalaryCdMap = { entries: { '有限会社|222|金原敏雄': '1601' } }
     const out = compareSalaryMonth(
