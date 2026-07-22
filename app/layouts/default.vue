@@ -27,6 +27,7 @@ const navigation = [
   { label: '一番星マッチ率検証', icon: 'i-lucide-scale', to: '/profit/monthly' },
   { label: '類似運行検索・比較', icon: 'i-lucide-search', to: '/profit/compare' },
   { label: '一番星ヘルスチェック', icon: 'i-lucide-heart-pulse', to: '/ichiban-health' },
+  { label: '給与DB取得', icon: 'i-lucide-database', to: '/kyuyo-fetch' },
 ]
 </script>
 
