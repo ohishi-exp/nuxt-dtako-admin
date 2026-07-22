@@ -131,6 +131,17 @@ interface ReportMasters {
 
 const { session, authHeaders, restoreSession, showLoginPanel, expireSession } = useDailyReportSession()
 
+/** 非同期処理 (fetch) の開始後にモーダルが別の運行に切り替わっていないかを判定する。
+ * 経費/作業/乗務員の各モーダルは「選択中の運行 (selectedRow 系 ref)」を共有 state
+ * (fuelRows/workRows/reviseForm 等) に書き込む作りのため、応答が返ってくる前に
+ * ユーザーが別行の編集を開始する (モーダルを閉じて別行を開く/連続クリックする) と、
+ * 古い運行への応答が新しい運行の表示中データを上書きしてしまう (Refs #362:
+ * 「前の運行のデータが残って消せない」)。opeNo で比較し、一致しなければ古い
+ * 応答として無視する。 */
+function isStaleOperationResponse(target: DailyReportRow, current: DailyReportRow | null): boolean {
+  return current?.operationNo !== target.operationNo
+}
+
 function onLogin() {
   loadList()
 }
@@ -478,12 +489,19 @@ async function openExpenseModal(row: DailyReportRow) {
   resetNewFuelRow()
   linkSysEnabled.value = false
   linkResult.value = null
+  // 前の運行編集中の進行状態 (保存/削除/追加中フラグ) を持ち越さない
+  savingCtrlIndex.value = null
+  deletingCtrlIndex.value = null
+  addingFuelRow.value = false
+  recalculating.value = false
+  linking.value = false
   expenseLoading.value = true
   try {
     const res = await $fetch<{ opeNo: string, startOpe: string, fuelRows: FuelRow[], masters: ExpenseMasters }>('/daily-report-api/expense', {
       headers: authHeaders(),
       query: { opeNo: row.operationNo, startOpe: row.startDateTime },
     })
+    if (isStaleOperationResponse(row, selectedRow.value)) return // 別行に切り替え済み、古い応答は破棄
     fuelRows.value = res.fuelRows
     expenseMasters.value = res.masters ?? emptyExpenseMasters()
     syncFuelEditForm()
@@ -494,10 +512,11 @@ async function openExpenseModal(row: DailyReportRow) {
       expenseModalOpen.value = false
       return
     }
+    if (isStaleOperationResponse(row, selectedRow.value)) return
     expenseError.value = dailyReportErrorMessage(e)
   }
   finally {
-    expenseLoading.value = false
+    if (!isStaleOperationResponse(row, selectedRow.value)) expenseLoading.value = false
   }
 }
 
@@ -548,6 +567,7 @@ async function addNewFuelRow() {
         quantity: newFuelRow.quantity.trim(),
       },
     })
+    if (isStaleOperationResponse(target, selectedRow.value)) return
     fuelRows.value = res.fuelRows
     if (res.masters && Object.keys(res.masters.supplyCategory).length > 0) expenseMasters.value = res.masters
     syncFuelEditForm()
@@ -559,6 +579,7 @@ async function addNewFuelRow() {
       expenseModalOpen.value = false
       return
     }
+    if (isStaleOperationResponse(target, selectedRow.value)) return
     expenseError.value = dailyReportErrorMessage(e)
   }
   finally {
@@ -584,6 +605,7 @@ async function saveFuelRow(ctrlIndex: number) {
         ...edited,
       },
     })
+    if (isStaleOperationResponse(target, selectedRow.value)) return
     fuelRows.value = res.fuelRows
     syncFuelEditForm()
   }
@@ -593,6 +615,7 @@ async function saveFuelRow(ctrlIndex: number) {
       expenseModalOpen.value = false
       return
     }
+    if (isStaleOperationResponse(target, selectedRow.value)) return
     expenseError.value = dailyReportErrorMessage(e)
   }
   finally {
@@ -617,6 +640,7 @@ async function deleteFuelRow(ctrlIndex: number) {
         ctrlIndex,
       },
     })
+    if (isStaleOperationResponse(target, selectedRow.value)) return
     fuelRows.value = res.fuelRows
     syncFuelEditForm()
   }
@@ -626,6 +650,7 @@ async function deleteFuelRow(ctrlIndex: number) {
       expenseModalOpen.value = false
       return
     }
+    if (isStaleOperationResponse(target, selectedRow.value)) return
     expenseError.value = dailyReportErrorMessage(e)
   }
   finally {
@@ -646,6 +671,7 @@ async function recalculateExpense() {
       headers: authHeaders(),
       body: { opeNo: target.operationNo, startOpe: target.startDateTime },
     })
+    if (isStaleOperationResponse(target, selectedRow.value)) return
     linkSysEnabled.value = res.linkSysEnabled
     recalculateResult.value = res.linkSysEnabled
       ? '評価点再集計が完了しました (システム連動開始が有効になりました)'
@@ -657,6 +683,7 @@ async function recalculateExpense() {
       expenseModalOpen.value = false
       return
     }
+    if (isStaleOperationResponse(target, selectedRow.value)) return
     expenseError.value = dailyReportErrorMessage(e)
   }
   finally {
@@ -680,6 +707,7 @@ async function startSystemLink() {
       headers: authHeaders(),
       body: { opeNo: target.operationNo, startOpe: target.startDateTime },
     })
+    if (isStaleOperationResponse(target, selectedRow.value)) return
     linkResult.value = res.linked
       ? 'システム連動を開始しました'
       : `システム連動を実行しました (応答: ${res.message || '確認要'})`
@@ -690,6 +718,7 @@ async function startSystemLink() {
       expenseModalOpen.value = false
       return
     }
+    if (isStaleOperationResponse(target, selectedRow.value)) return
     expenseError.value = dailyReportErrorMessage(e)
   }
   finally {
@@ -802,12 +831,18 @@ async function openWorkModal(row: DailyReportRow) {
   workLinkSysEnabled.value = false
   workLinkResult.value = null
   workEditing.value = null
+  // 前の運行編集中の進行状態を持ち越さない (Refs #362)
+  workEditStarting.value = null
+  workSaving.value = false
+  workRecalculating.value = false
+  workLinking.value = false
   workLoading.value = true
   try {
     const res = await $fetch<{ opeNo: string, startOpe: string, workRows: WorkRow[], eventOptions: WorkEventOption[] }>('/daily-report-api/work', {
       headers: authHeaders(),
       query: { opeNo: row.operationNo, startOpe: row.startDateTime },
     })
+    if (isStaleOperationResponse(row, workSelectedRow.value)) return
     workRows.value = res.workRows
     workEventOptions.value = res.eventOptions
   }
@@ -817,10 +852,11 @@ async function openWorkModal(row: DailyReportRow) {
       workModalOpen.value = false
       return
     }
+    if (isStaleOperationResponse(row, workSelectedRow.value)) return
     workError.value = dailyReportErrorMessage(e)
   }
   finally {
-    workLoading.value = false
+    if (!isStaleOperationResponse(row, workSelectedRow.value)) workLoading.value = false
   }
 }
 
@@ -850,6 +886,7 @@ async function startWorkEdit(row: WorkRow) {
       headers: authHeaders(),
       body: { opeNo: target.operationNo, startOpe: target.startDateTime, ctrlIndex: row.ctrlIndex },
     })
+    if (isStaleOperationResponse(target, workSelectedRow.value)) return
     workEditing.value = { ...res.row }
   }
   catch (e) {
@@ -858,6 +895,7 @@ async function startWorkEdit(row: WorkRow) {
       workModalOpen.value = false
       return
     }
+    if (isStaleOperationResponse(target, workSelectedRow.value)) return
     workError.value = dailyReportErrorMessage(e)
   }
   finally {
@@ -899,6 +937,7 @@ async function saveWorkEdit() {
         endCityName: editing.endCityName,
       },
     })
+    if (isStaleOperationResponse(target, workSelectedRow.value)) return
     workRows.value = res.workRows
     if (res.eventOptions.length > 0) workEventOptions.value = res.eventOptions
     workEditing.value = null
@@ -909,6 +948,7 @@ async function saveWorkEdit() {
       workModalOpen.value = false
       return
     }
+    if (isStaleOperationResponse(target, workSelectedRow.value)) return
     workError.value = dailyReportErrorMessage(e)
   }
   finally {
@@ -931,6 +971,7 @@ async function recalculateWorkTime() {
       headers: authHeaders(),
       body: { opeNo: target.operationNo, startOpe: target.startDateTime },
     })
+    if (isStaleOperationResponse(target, workSelectedRow.value)) return
     workLinkSysEnabled.value = res.linkSysEnabled
     workRecalculateResult.value = res.linkSysEnabled
       ? '作業時間再集計が完了しました (システム連動開始が有効になりました)'
@@ -942,6 +983,7 @@ async function recalculateWorkTime() {
       workModalOpen.value = false
       return
     }
+    if (isStaleOperationResponse(target, workSelectedRow.value)) return
     workError.value = dailyReportErrorMessage(e)
   }
   finally {
@@ -968,6 +1010,7 @@ async function startWorkLink() {
       headers: authHeaders(),
       body: { opeNo: target.operationNo, startOpe: target.startDateTime },
     })
+    if (isStaleOperationResponse(target, workSelectedRow.value)) return
     workLinkResult.value = res.linked
       ? 'システム連動を開始しました'
       : `システム連動を実行しました (応答: ${res.message || '確認要'})`
@@ -978,6 +1021,7 @@ async function startWorkLink() {
       workModalOpen.value = false
       return
     }
+    if (isStaleOperationResponse(target, workSelectedRow.value)) return
     workError.value = dailyReportErrorMessage(e)
   }
   finally {
@@ -1055,6 +1099,10 @@ async function openReviseModal(row: DailyReportRow) {
   reviseLinkSysEnabled.value = false
   reviseLinkResult.value = null
   reviseDriverInput.value = ''
+  // 前の運行編集中の進行状態を持ち越さない (Refs #362)
+  reviseRecalculating.value = false
+  reviseLinking.value = false
+  reviseSaving.value = false
   reviseLoading.value = true
   void ensureReportMasters() // 名称解決用 (失敗しても編集は続行できる)
   try {
@@ -1062,6 +1110,7 @@ async function openReviseModal(row: DailyReportRow) {
       headers: authHeaders(),
       query: { opeNo: row.operationNo, startOpe: row.startDateTime },
     })
+    if (isStaleOperationResponse(row, reviseSelectedRow.value)) return
     reviseForm.value = res
     reviseDriverInput.value = res.driver1
   }
@@ -1071,10 +1120,11 @@ async function openReviseModal(row: DailyReportRow) {
       reviseModalOpen.value = false
       return
     }
+    if (isStaleOperationResponse(row, reviseSelectedRow.value)) return
     reviseError.value = dailyReportErrorMessage(e)
   }
   finally {
-    reviseLoading.value = false
+    if (!isStaleOperationResponse(row, reviseSelectedRow.value)) reviseLoading.value = false
   }
 }
 
@@ -1107,6 +1157,7 @@ async function recalculateWorkFromRevise() {
       headers: authHeaders(),
       body: { opeNo: target.operationNo, startOpe: target.startDateTime },
     })
+    if (isStaleOperationResponse(target, reviseSelectedRow.value)) return
     reviseLinkSysEnabled.value = res.linkSysEnabled
     reviseRecalculateResult.value = res.linkSysEnabled
       ? '作業時間再集計が完了しました (システム連動開始が有効になりました)'
@@ -1118,6 +1169,7 @@ async function recalculateWorkFromRevise() {
       reviseModalOpen.value = false
       return
     }
+    if (isStaleOperationResponse(target, reviseSelectedRow.value)) return
     reviseError.value = dailyReportErrorMessage(e)
   }
   finally {
@@ -1142,6 +1194,7 @@ async function startReviseLink() {
       headers: authHeaders(),
       body: { opeNo: target.operationNo, startOpe: target.startDateTime },
     })
+    if (isStaleOperationResponse(target, reviseSelectedRow.value)) return
     reviseLinkResult.value = res.linked
       ? 'システム連動を開始しました'
       : `システム連動を実行しました (応答: ${res.message || '確認要'})`
@@ -1152,6 +1205,7 @@ async function startReviseLink() {
       reviseModalOpen.value = false
       return
     }
+    if (isStaleOperationResponse(target, reviseSelectedRow.value)) return
     reviseError.value = dailyReportErrorMessage(e)
   }
   finally {
@@ -1213,9 +1267,11 @@ async function saveReviseDriver() {
       headers: authHeaders(),
       body: { opeNo: target.operationNo, startOpe: target.startDateTime, driver1 },
     })
-    reviseResult.value = res.driver1After
-      ? `乗務員CD を「${res.driver1After}」に登録しました`
-      : '登録 postback を送信しました (応答から値を読み直せなかったため、一覧の再検索で反映を確認してください)'
+    if (!isStaleOperationResponse(target, reviseSelectedRow.value)) {
+      reviseResult.value = res.driver1After
+        ? `乗務員CD を「${res.driver1After}」に登録しました`
+        : '登録 postback を送信しました (応答から値を読み直せなかったため、一覧の再検索で反映を確認してください)'
+    }
     await loadList()
   }
   catch (e) {
@@ -1224,6 +1280,7 @@ async function saveReviseDriver() {
       reviseModalOpen.value = false
       return
     }
+    if (isStaleOperationResponse(target, reviseSelectedRow.value)) return
     reviseError.value = dailyReportErrorMessage(e)
   }
   finally {
