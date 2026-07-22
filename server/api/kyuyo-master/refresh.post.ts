@@ -57,35 +57,55 @@ export default defineEventHandler(async (event) => {
     fresh.set(parsed.company, years)
   }
 
-  const current = await listKyuyoCompanies(db)
+  let current
+  try {
+    current = await listKyuyoCompanies(db)
+  }
+  catch (e: unknown) {
+    throw createError({
+      statusCode: 503,
+      statusMessage: `kyuyo_companies を読めません (migration 0005 適用済みか確認): ${e instanceof Error ? e.message : String(e)}`,
+    })
+  }
   const currentByCompany = new Map(current.map(row => [row.company, row]))
   const now = new Date().toISOString()
 
-  const added: string[] = []
+  // 差分更新は **D1 に既にある会社の年度更新のみ**。D1 に無いコード (廃業済み
+  // 0500/0900 や本当に新しい会社) はここでは挿入しない — name が無く NOT NULL
+  // 制約に当たる (本番 500 の実害) だけでなく、対象会社の権威は rust 側
+  // ALLOWED_COMPANIES (フル更新経由) にあるため。新出コードは ignored で報告し、
+  // 本当に新会社ならフル更新 (+ rust 側の対応) で取り込む
   const updated: string[] = []
+  const ignored: string[] = []
   let unchanged = 0
-  for (const [company, yearsRaw] of fresh) {
-    const years = [...new Set(yearsRaw)].sort((a, b) => a - b)
-    const existing = currentByCompany.get(company)
-    if (!existing) {
-      // 新出の会社は name 空で登録 (フル更新で埋める)
-      await upsertKyuyoCompany(db, company, null, years, now)
-      added.push(company)
+  try {
+    for (const [company, yearsRaw] of fresh) {
+      const years = [...new Set(yearsRaw)].sort((a, b) => a - b)
+      const existing = currentByCompany.get(company)
+      if (!existing) {
+        ignored.push(company)
+      }
+      else if (JSON.stringify(existing.years) !== JSON.stringify(years)) {
+        await upsertKyuyoCompany(db, company, null, years, now)
+        updated.push(company)
+      }
+      else {
+        unchanged++
+      }
     }
-    else if (JSON.stringify(existing.years) !== JSON.stringify(years)) {
-      await upsertKyuyoCompany(db, company, null, years, now)
-      updated.push(company)
-    }
-    else {
-      unchanged++
-    }
+  }
+  catch (e: unknown) {
+    throw createError({
+      statusCode: 500,
+      statusMessage: `kyuyo_companies の更新に失敗: ${e instanceof Error ? e.message : String(e)}`,
+    })
   }
   // D1 にあるが upstream から消えた会社 (DB ごと削除された等) は消さずに報告のみ
   const missing = current.map(row => row.company).filter(company => !fresh.has(company))
 
   return {
-    added,
     updated,
+    ignored,
     unchanged,
     missing,
     companies: await listKyuyoCompanies(db),

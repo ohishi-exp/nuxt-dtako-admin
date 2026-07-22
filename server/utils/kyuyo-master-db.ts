@@ -61,7 +61,9 @@ export async function listKyuyoCompanies(db: D1DatabaseLite): Promise<KyuyoCompa
   }))
 }
 
-/** upsert (company 単位)。name は null なら既存値を維持する。 */
+/** upsert (company 単位)。name は null なら「既存値を維持 (新規行なら空文字)」。
+ * INSERT 側は COALESCE で NOT NULL 制約を満たす — null をそのまま挿すと
+ * SQLITE_CONSTRAINT_NOTNULL で落ちる (本番 500 の実害、#369)。 */
 export async function upsertKyuyoCompany(
   db: D1DatabaseLite,
   company: string,
@@ -71,7 +73,7 @@ export async function upsertKyuyoCompany(
 ): Promise<void> {
   await db
     .prepare(
-      'INSERT INTO kyuyo_companies (company, name, years, updated_at) VALUES (?1, ?2, ?3, ?4) '
+      'INSERT INTO kyuyo_companies (company, name, years, updated_at) VALUES (?1, COALESCE(?2, \'\'), ?3, ?4) '
       + 'ON CONFLICT(company) DO UPDATE SET '
       + 'name = CASE WHEN ?2 IS NULL THEN kyuyo_companies.name ELSE ?2 END, '
       + 'years = ?3, updated_at = ?4',

@@ -128,12 +128,15 @@ async function refreshList(full: boolean) {
       refreshResult.value = `フル更新完了${warnings.length ? ` / warnings: ${warnings.join(' / ')}` : ''}`
     }
     else {
-      const added = (body?.added as string[] | undefined) ?? []
       const updated = (body?.updated as string[] | undefined) ?? []
+      const ignored = (body?.ignored as string[] | undefined) ?? []
       const missing = (body?.missing as string[] | undefined) ?? []
-      refreshResult.value = added.length + updated.length === 0
-        ? `差分なし${missing.length ? ` (upstream に無い会社: ${missing.join(',')})` : ''}`
-        : `追加 ${added.join(',') || 'なし'} / 年度更新 ${updated.join(',') || 'なし'}`
+      const notes = [
+        ignored.length ? `対象外DB: ${ignored.join(',')}` : '',
+        missing.length ? `upstream に無い会社: ${missing.join(',')}` : '',
+      ].filter(Boolean).join(' / ')
+      refreshResult.value = (updated.length === 0 ? '差分なし' : `年度更新: ${updated.join(',')}`)
+        + (notes ? ` (${notes})` : '')
     }
     companies.value = (body?.companies as CompanyRow[] | undefined) ?? companies.value
   }
