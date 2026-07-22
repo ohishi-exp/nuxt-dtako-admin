@@ -234,6 +234,19 @@ describe('normalizeSalaryCdMap', () => {
     expect(() => normalizeSalaryCdMap({ entries: { '1427|中村一由': 'abc' } })).toThrow('乗務員CD')
     expect(() => normalizeSalaryCdMap({ entries: { '1427|中村一由': 1412 } })).toThrow(WageMasterError)
   })
+
+  it('"会社|給与コード|氏名" の 3 部キー (会社スコープ、Refs #253) を受け付ける', () => {
+    const out = normalizeSalaryCdMap({
+      entries: { ' 株式会社|1427|中村一由 ': '1412', '有限会社|０２２２|金原敏雄': '1601' },
+    })
+    expect(out).toEqual({
+      entries: { '株式会社|1427|中村一由': '1412', '有限会社|0222|金原敏雄': '1601' },
+    })
+  })
+
+  it('会社が空の 3 部キー (先頭が | から始まる) は拒否する', () => {
+    expect(() => normalizeSalaryCdMap({ entries: { '|1427|中村一由': '1412' } })).toThrow('給与コード|氏名')
+  })
 })
 
 describe('normalizeWageConfig', () => {

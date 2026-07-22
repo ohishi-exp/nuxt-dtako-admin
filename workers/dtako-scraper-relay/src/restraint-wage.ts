@@ -219,14 +219,20 @@ export function normalizeSalaryItemConfig(raw: unknown): SalaryItemConfig {
 /**
  * 給与社員コード → 乗務員CD の突合マスタ (Refs #253)。
  * 給与システムの社員コードは会社毎に別体系で乗務員CDと一致しないため、
- * 「給与コード|氏名 (空白除去)」をキーに乗務員CDへ引き当てる。
+ * 「給与コード|氏名 (空白除去)」(会社ラベル無し、旧形式) または
+ * 「会社|給与コード|氏名」(会社スコープ、会社ラベル導入後) をキーに乗務員CDへ
+ * 引き当てる。同じ給与コードが会社間で偶然衝突しうるため、会社ラベルが分かる
+ * 取り込みは 3 部キーで保存する — 2 部キーは会社ラベル導入前に保存された既存
+ * データをそのまま読めるようにする後方互換 (会社を強制的に付け直させない)。
  * キーの正規化はフロント (salaryCdMapKey) と同一規則。
  */
 export interface SalaryCdMap {
   entries: Record<string, string>;
 }
 
-const CD_MAP_KEY_RE = /^\d+\|\S+$/;
+// 2 部 (旧形式): "給与コード|氏名"。3 部 (会社スコープ): "会社|給与コード|氏名"
+// (会社ラベルは | を含まない任意の非空文字列)。
+const CD_MAP_KEY_RE = /^(?:\d+\|\S+|[^|]+\|\d+\|\S+)$/;
 
 /** salary-cd-map JSON を検証・正規化する。 */
 export function normalizeSalaryCdMap(raw: unknown): SalaryCdMap {
@@ -241,7 +247,9 @@ export function normalizeSalaryCdMap(raw: unknown): SalaryCdMap {
   for (const [key, driverCd] of Object.entries(entries as Record<string, unknown>)) {
     const normKey = key.normalize("NFKC").trim();
     if (!CD_MAP_KEY_RE.test(normKey)) {
-      throw new WageMasterError(`salary-cd-map.entries のキーは "給与コード|氏名" 形式が必要です (${key})`);
+      throw new WageMasterError(
+        `salary-cd-map.entries のキーは "給与コード|氏名" または "会社|給与コード|氏名" 形式が必要です (${key})`,
+      );
     }
     if (typeof driverCd !== "string" || !/^\d{1,8}$/.test(driverCd)) {
       throw new WageMasterError(`salary-cd-map.entries[${normKey}] は乗務員CD (数字) が必要です (${String(driverCd)})`);
