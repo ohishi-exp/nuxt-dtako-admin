@@ -26,6 +26,7 @@ const navigation = [
   { label: '拘束×賃金', icon: 'i-lucide-japanese-yen', to: '/restraint-wage' },
   { label: '一番星マッチ率検証', icon: 'i-lucide-scale', to: '/profit/monthly' },
   { label: '類似運行検索・比較', icon: 'i-lucide-search', to: '/profit/compare' },
+  { label: '一番星ヘルスチェック', icon: 'i-lucide-heart-pulse', to: '/ichiban-health' },
 ]
 </script>
 
