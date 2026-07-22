@@ -331,14 +331,18 @@ export function salaryCdMapKey(payrollCd: string, name: string, company = ''): s
  * 会社スコープのキーで引けなければ、会社ラベル導入前に保存された旧形式 (会社無し)
  * のキーも試す — 既存の突合マスタを消さずに会社スコープへ移行できるようにする。
  */
-export function resolveCdKey(row: SalaryCsvRow, cdMap: SalaryCdMap): string {
+function lookupCdMap(row: SalaryCsvRow, cdMap: SalaryCdMap): string | undefined {
   const scoped = cdMap.entries[salaryCdMapKey(row.driverCd, row.driverName, row.company)]
   if (scoped !== undefined) return String(Number(scoped))
   if (row.company) {
     const legacy = cdMap.entries[salaryCdMapKey(row.driverCd, row.driverName)]
     if (legacy !== undefined) return String(Number(legacy))
   }
-  return row.cdKey
+  return undefined
+}
+
+export function resolveCdKey(row: SalaryCsvRow, cdMap: SalaryCdMap): string {
+  return lookupCdMap(row, cdMap) ?? row.cdKey
 }
 
 /**
@@ -457,7 +461,11 @@ export interface SalaryComparisonRow {
 
 export interface SalaryComparison {
   rows: SalaryComparisonRow[]
-  /** CSV にいるが wage-report にいない乗務員 (突合マスタ登録用に会社ラベルを持つ)。 */
+  /** まだ乗務員CDを確認できていない給与明細行 (突合マスタ未登録かつ、給与コードの
+   * 直接一致も取れない行)。乗務員CDが確定済みだが今月の wage-report にその
+   * 乗務員がいないだけの行 (退職・休職等) はここに出さない — 比較対象が無い
+   * だけで人が何か確認する必要はないため (Refs #253)。会社ラベルは突合マスタ
+   * 登録用。 */
   csvOnly: Array<{ driverCd: string, driverName: string, company: string }>
   /** wage-report にいるが CSV にいない乗務員。 */
   reportOnly: Array<{ driverCd: string, driverName: string }>
@@ -552,13 +560,34 @@ export function compareSalaryMonth(
 ): SalaryComparison {
   const warnings: string[] = []
 
-  // 解決キー (乗務員CD) ごとに 識別子 (会社+氏名) → 行 でグループ化する。
-  // 同一識別子の重複行は従来どおり後勝ち + 警告。複数の識別子が同じキーに解決された
-  // 場合は、別会社の給与コードが偶然衝突した (Refs #253) ものとして conflicts に
-  // 隔離する — 機械的にどちらが本人か決められないので、突合対象からは外す。
+  // 乗務員CD (前ゼロ除去) → 氏名の正規化キー。デジタコの乗務員一覧を正として、
+  // 給与コードは氏名で照合してから初めて信用する (Refs #253)。生の給与コードが
+  // 乗務員CDと数字だけ一致していても、氏名まで一致しなければ「その人だと確認
+  // できた」ことにはならない — 会社が違えば給与コードの体系は無関係なので、
+  // 数字の一致は単なる偶然でしかありえない。
+  const reportNameByCd = new Map<string, string>()
+  for (const r of reportRows) {
+    reportNameByCd.set(String(Number(r.summary.driverCd)), normalizeNameKey(r.summary.driverName))
+  }
+
+  // 「確認済み」の行だけを乗務員CDごとにグループ化する。確認済み = ①突合
+  // マスタに明示登録済み (氏名一致の自動設定 or 手動登録を保存済み)、または
+  // ②生の給与コードが乗務員CDと数字・氏名の両方一致 (本当の直接一致)。
+  // どちらの確認も取れない行は最初からキーの取り合いに参加させず、単なる
+  // 未突合 (csvOnly) へ回す — 当てずっぽうの数字一致を突合の当事者にしない。
+  // 同一識別子 (会社+氏名) の重複行は従来どおり後勝ち + 警告。複数の異なる
+  // 確認済み行が同じキーに来るのは、登録ミス等で機械的に決められない本当の
+  // 衝突なので conflicts に隔離する。
   const byKey = new Map<string, Map<string, SalaryCsvRow>>()
+  const unverified: SalaryCsvRow[] = []
   for (const row of csvRows) {
-    const key = resolveCdKey(row, cdMap)
+    const mapped = lookupCdMap(row, cdMap)
+    const directVerified = reportNameByCd.get(row.cdKey) === normalizeNameKey(row.driverName)
+    const key = mapped ?? (directVerified ? row.cdKey : null)
+    if (key === null) {
+      unverified.push(row)
+      continue
+    }
     const identity = `${row.company}|${normalizeNameKey(row.driverName)}`
     const byIdentity = byKey.get(key) ?? new Map<string, SalaryCsvRow>()
     if (byIdentity.has(identity)) {
@@ -588,7 +617,6 @@ export function compareSalaryMonth(
 
   const rows: SalaryComparisonRow[] = []
   const reportOnly: SalaryComparison['reportOnly'] = []
-  const matched = new Set<string>()
 
   for (const report of reportRows) {
     const cdKey = String(Number(report.summary.driverCd))
@@ -597,7 +625,6 @@ export function compareSalaryMonth(
       reportOnly.push({ driverCd: report.summary.driverCd, driverName: report.summary.driverName })
       continue
     }
-    matched.add(cdKey)
     const sums = sumByCategory(csv, config)
     const base = sums.buckets['base'].total
     const overtime = sums.buckets['overtime'].total
@@ -662,12 +689,12 @@ export function compareSalaryMonth(
     })
   }
 
-  const csvOnly: SalaryComparison['csvOnly'] = []
-  for (const [key, row] of byCd.entries()) {
-    if (!matched.has(key)) {
-      csvOnly.push({ driverCd: row.driverCd, driverName: row.driverName, company: row.company })
-    }
-  }
+  // csvOnly は「乗務員CDが未確認」の行だけ。乗務員CDが確定済み (byCd) でも
+  // 今月の wage-report にその乗務員がいないだけの行 (退職・休職等) は、比較
+  // 対象が無いだけで人が確認する対象ではないので、ここにもどこにも出さない。
+  const csvOnly: SalaryComparison['csvOnly'] = unverified.map(row => ({
+    driverCd: row.driverCd, driverName: row.driverName, company: row.company,
+  }))
 
   return { rows, csvOnly, reportOnly, conflicts, warnings }
 }
