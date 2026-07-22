@@ -1851,16 +1851,23 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const latests = objects.filter((o) => o.key.endsWith("/latest.json"));
     const summaries: Array<{ data: RestraintDriverSummary; fetchedAt: string | null; lastVerifiedAt: string | null }> = [];
     const noDataDrivers: string[] = [];
-    for (const meta of latests) {
-      const obj = await bucket.get(meta.key);
-      if (!obj) continue; // list 後に消えた場合はスキップ
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(await obj.text());
-      } catch {
-        console.error(JSON.stringify({ restraint_archive: "broken-summary", key: meta.key }));
-        continue;
-      }
+    // 乗務員ごとの latest.json は並列に読む — 逐次 GET だと乗務員数 × RTT で
+    // 月表示が数秒かかる (同時接続数は runtime が自動で絞る)
+    const loaded = await Promise.all(
+      latests.map(async (meta) => {
+        const obj = await bucket.get(meta.key);
+        if (!obj) return null; // list 後に消えた場合はスキップ
+        try {
+          return { meta, parsed: JSON.parse(await obj.text()) as unknown };
+        } catch {
+          console.error(JSON.stringify({ restraint_archive: "broken-summary", key: meta.key }));
+          return null;
+        }
+      }),
+    );
+    for (const entry of loaded) {
+      if (!entry) continue;
+      const { meta, parsed } = entry;
       const record = parsed as { noData?: unknown; driverCd?: unknown };
       if (record.noData === true) {
         noDataDrivers.push(typeof record.driverCd === "string" ? record.driverCd : "");
@@ -2076,18 +2083,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         return fallback;
       }
     };
-    const wageMaster: WageMaster = await loadMaster("wage-master", normalizeWageMaster, { drivers: {} });
-    const minWageMaster: MinWageMaster = await loadMaster("min-wage", normalizeMinWageMaster, {
-      prefectures: {},
-      branchToPrefecture: {},
-    });
-    const config: WageConfig = await loadMaster("wage-config", normalizeWageConfig, normalizeWageConfig(null));
-
-    const { summaries, noDataDrivers } = await this.loadMonthSummaries(bucket, record.compId, ym);
     const prevYear = month === 1 ? year - 1 : year;
     const prevMonth = month === 1 ? 12 : month - 1;
     const prevYm = `${prevYear}-${String(prevMonth).padStart(2, "0")}`;
-    const prev = await this.loadMonthSummaries(bucket, record.compId, prevYm);
+    // マスタ 3 種と当月・前月 summary は互いに独立なので一括並列で読む (月切替の体感に直結)
+    const [wageMaster, minWageMaster, config, current, prev] = await Promise.all([
+      loadMaster<WageMaster>("wage-master", normalizeWageMaster, { drivers: {} }),
+      loadMaster<MinWageMaster>("min-wage", normalizeMinWageMaster, {
+        prefectures: {},
+        branchToPrefecture: {},
+      }),
+      loadMaster<WageConfig>("wage-config", normalizeWageConfig, normalizeWageConfig(null)),
+      this.loadMonthSummaries(bucket, record.compId, ym),
+      this.loadMonthSummaries(bucket, record.compId, prevYm),
+    ]);
+    const { summaries, noDataDrivers } = current;
     const prevDaysByDriver = new Map<string, RestraintSummaryDay[]>(
       prev.summaries.map((s) => [s.data.driverCd, s.data.days]),
     );
