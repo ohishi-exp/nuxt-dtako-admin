@@ -135,6 +135,12 @@ describe('parseSalaryCsv (2026 様式 CSV)', () => {
     expect(parsed.warnings).toEqual([])
   })
 
+  it('company 引数を渡すと全行にその会社ラベルをスタンプする (省略時は空文字、Refs #253)', () => {
+    expect(parsed.rows.every(r => r.company === '')).toBe(true)
+    const withCompany = parseSalaryCsv(CSV_2026, '株式会社')
+    expect(withCompany.rows.every(r => r.company === '株式会社')).toBe(true)
+  })
+
   it('【 補助 】の基本単価・残業単価を読み取る', () => {
     expect(parsed.rows[0]!.rates).toEqual({ base: 3679, overtime: 1430 })
   })
@@ -300,6 +306,7 @@ function csvRow(over: Partial<SalaryCsvRow> = {}): SalaryCsvRow {
   return {
     driverCd: '1239',
     cdKey: '1239',
+    company: '',
     driverName: '城田 秀幸',
     month: '2026-01',
     amounts: { 基本給: 80000, 残業手当: 30000 },
@@ -402,10 +409,31 @@ describe('salaryCdMapKey / normalizeNameKey / resolveCdKey', () => {
     expect(normalizeNameKey(' 城田  秀幸 ')).toBe('城田秀幸')
   })
 
+  it('会社ラベルがあれば先頭に付与した 3 部キーになる (Refs #253)', () => {
+    expect(salaryCdMapKey('01427', '中村　一由', '株式会社')).toBe('株式会社|1427|中村一由')
+    // 会社ラベル省略時は旧形式 (2 部) と完全に同じ文字列 — 後方互換
+    expect(salaryCdMapKey('01427', '中村　一由', '')).toBe(salaryCdMapKey('01427', '中村　一由'))
+  })
+
   it('resolveCdKey はマスタ命中時に引き当て、無ければ給与コードのまま', () => {
     const cdMap: SalaryCdMap = { entries: { '1427|中村一由': '01412' } }
     expect(resolveCdKey(csvRow({ driverCd: '1427', cdKey: '1427', driverName: '中村 一由' }), cdMap)).toBe('1412')
     expect(resolveCdKey(csvRow(), cdMap)).toBe('1239')
+  })
+
+  it('会社スコープの 3 部キーを優先し、無ければ旧形式 (会社無し) の 2 部キーへ落ちる', () => {
+    const cdMap: SalaryCdMap = {
+      entries: {
+        '株式会社|1427|中村一由': '01412',
+        '1600|佐藤太郎': '01700', // 会社ラベル導入前に保存された旧形式のエントリ
+      },
+    }
+    // 3 部キーが命中
+    expect(resolveCdKey(csvRow({ driverCd: '1427', cdKey: '1427', driverName: '中村 一由', company: '株式会社' }), cdMap)).toBe('1412')
+    // 3 部キーは無いが会社ラベル込みの行 → 旧形式 (会社無し) キーへフォールバックして命中
+    expect(resolveCdKey(csvRow({ driverCd: '1600', cdKey: '1600', driverName: '佐藤 太郎', company: '有限会社' }), cdMap)).toBe('1700')
+    // どちらのキーにも無ければ生の給与コードのまま
+    expect(resolveCdKey(csvRow({ driverCd: '9999', cdKey: '9999', driverName: '該当なし', company: '株式会社' }), cdMap)).toBe('9999')
   })
 })
 
@@ -432,6 +460,18 @@ describe('suggestCdMapEntries', () => {
 
   it('マスタ登録済みの行は提案しない', () => {
     const rows = [csvRow({ driverCd: '1427', cdKey: '1427', driverName: '中村 一由' })]
+    const out = suggestCdMapEntries(rows, reports, { entries: { '1427|中村一由': '9999' } })
+    expect(out).toEqual({})
+  })
+
+  it('会社ラベルがある行は会社スコープの 3 部キーで提案する (Refs #253)', () => {
+    const rows = [csvRow({ company: '株式会社', driverCd: '1427', cdKey: '1427', driverName: '中村　一由' })]
+    const out = suggestCdMapEntries(rows, reports, { entries: {} })
+    expect(out).toEqual({ '株式会社|1427|中村一由': '1412' })
+  })
+
+  it('旧形式 (会社無し) のキーで既にマスタ登録済みなら会社スコープでも提案しない', () => {
+    const rows = [csvRow({ company: '株式会社', driverCd: '1427', cdKey: '1427', driverName: '中村 一由' })]
     const out = suggestCdMapEntries(rows, reports, { entries: { '1427|中村一由': '9999' } })
     expect(out).toEqual({})
   })
@@ -526,7 +566,7 @@ describe('compareSalaryMonth', () => {
       config,
     )
     expect(out.rows).toHaveLength(1)
-    expect(out.csvOnly).toEqual([{ driverCd: '9999', driverName: '給与のみ' }])
+    expect(out.csvOnly).toEqual([{ driverCd: '9999', driverName: '給与のみ', company: '' }])
     expect(out.reportOnly).toEqual([{ driverCd: '1021', driverName: '計算のみ' }])
   })
 
@@ -596,5 +636,64 @@ describe('compareSalaryMonth', () => {
     expect(out.warnings).toHaveLength(1)
     expect(out.warnings[0]).toContain('重複')
     expect(out.rows[0]!.csvBase).toBe(2)
+  })
+
+  it('同一人物の同月重複 (会社・氏名が同じ) は従来どおり後勝ち + 通常警告 (conflicts には出ない)', () => {
+    const out = compareSalaryMonth(
+      [
+        csvRow({ company: '株式会社', amounts: { 基本給: 1 } }),
+        csvRow({ company: '株式会社', amounts: { 基本給: 2 } }),
+      ],
+      [reportRow('1239', '城田 秀幸')],
+      config,
+    )
+    expect(out.conflicts).toEqual([])
+    expect(out.warnings).toHaveLength(1)
+    expect(out.warnings[0]).toContain('重複')
+    expect(out.rows[0]!.csvBase).toBe(2)
+  })
+
+  it('別会社の給与コードが同じ乗務員CDへ解決されたら conflicts に隔離し、サイレント上書きしない (Refs #253)', () => {
+    // kabu 社の 0222 = 城田秀幸 (乗務員CD 222 と直接一致)、
+    // yuu 社の 0222 = 別人の金原敏雄 (会社が違うだけで社員コードが偶然一致)
+    const out = compareSalaryMonth(
+      [
+        csvRow({ company: '株式会社', driverCd: '0222', cdKey: '222', driverName: '城田 秀幸' }),
+        csvRow({ company: '有限会社', driverCd: '0222', cdKey: '222', driverName: '金原 敏雄' }),
+      ],
+      [reportRow('222', '城田 秀幸')],
+      config,
+    )
+    // 会社が違う 2 人が同じ乗務員CDに解決された行はどちらも rows/csvOnly に出ない
+    expect(out.rows).toEqual([])
+    expect(out.csvOnly).toEqual([])
+    expect(out.reportOnly).toEqual([{ driverCd: '222', driverName: '城田 秀幸' }])
+    expect(out.conflicts).toEqual([
+      {
+        driverCd: '222',
+        entries: [
+          { company: '株式会社', driverCd: '0222', driverName: '城田 秀幸' },
+          { company: '有限会社', driverCd: '0222', driverName: '金原 敏雄' },
+        ],
+      },
+    ])
+    expect(out.warnings).toHaveLength(1)
+    expect(out.warnings[0]).toContain('複数の会社の給与コードが解決されました')
+  })
+
+  it('突合マスタで会社ごとに引き当て直せば conflicts は解消される', () => {
+    const cdMap: SalaryCdMap = { entries: { '有限会社|222|金原敏雄': '1601' } }
+    const out = compareSalaryMonth(
+      [
+        csvRow({ company: '株式会社', driverCd: '0222', cdKey: '222', driverName: '城田 秀幸' }),
+        csvRow({ company: '有限会社', driverCd: '0222', cdKey: '222', driverName: '金原 敏雄' }),
+      ],
+      [reportRow('222', '城田 秀幸'), reportRow('1601', '金原 敏雄')],
+      config,
+      cdMap,
+    )
+    expect(out.conflicts).toEqual([])
+    expect(out.rows).toHaveLength(2)
+    expect(out.rows.map(r => r.driverName).sort()).toEqual(['城田 秀幸', '金原 敏雄'])
   })
 })

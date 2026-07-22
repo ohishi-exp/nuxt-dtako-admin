@@ -1705,7 +1705,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   /** GET/PUT /restraint-api/{wage-master|min-wage|wage-config} — マスタ JSON の
    * 読み書き。PUT は normalize (構造検証) 後に putVersionedR2 で版管理保存する
-   * (一括変更 = PUT 1 回 = 1 版)。 */
+   * (一括変更 = PUT 1 回 = 1 版)。
+   *
+   * 楽観排他 (Refs #253): GET は latest の sha256 を `version` として返す。PUT の
+   * body に `baseVersion` (GET で受け取った version) があれば、保存直前の
+   * latest.sha256 と突き合わせる。不一致 = 自分が読んだ後に他の保存が入った ⇒
+   * 409 + 現在のサーバ内容を返す (上書きせず、クライアント側でマージしてから
+   * 再送させる)。baseVersion 省略時は従来通り無条件保存 (他マスタとの後方互換)。 */
   private async handleWageMasterRoute(
     record: TheearthSessionRecord,
     request: Request,
@@ -1717,13 +1723,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const paths = this.wageMasterR2Paths(record.compId, name);
     if (request.method === "GET") {
       const obj = await bucket.get(paths.latest);
-      if (!obj) return Response.json({ exists: false, data: null });
+      if (!obj) return Response.json({ exists: false, data: null, version: null });
       try {
         const data = normalize(JSON.parse(await obj.text()));
         return Response.json({
           exists: true,
           data,
           updated_at: obj.customMetadata?.fetchedAt ?? null,
+          version: obj.customMetadata?.sha256 ?? null,
         });
       } catch (err) {
         console.error(`wage master ${name} read error:`, err);
@@ -1737,12 +1744,34 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       } catch {
         return dvrJsonError(400, "JSON body が必要です");
       }
+      const baseVersion =
+        raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as { baseVersion?: unknown }).baseVersion : undefined;
+      if (baseVersion !== undefined && typeof baseVersion !== "string") {
+        return dvrJsonError(400, "baseVersion は文字列が必要です");
+      }
       let normalized: unknown;
       try {
         normalized = normalize(raw);
       } catch (err) {
         if (err instanceof WageMasterError) return dvrJsonError(400, err.message);
         throw err;
+      }
+      if (typeof baseVersion === "string") {
+        const currentHead = await bucket.head(paths.latest);
+        const currentSha = currentHead?.customMetadata?.sha256 ?? null;
+        if (currentSha !== null && currentSha !== baseVersion) {
+          const currentObj = await bucket.get(paths.latest);
+          let currentData: unknown = null;
+          try {
+            currentData = currentObj ? normalize(JSON.parse(await currentObj.text())) : null;
+          } catch {
+            currentData = null;
+          }
+          return Response.json(
+            { error: "conflict", current: { data: currentData, version: currentSha } },
+            { status: 409 },
+          );
+        }
       }
       const ts = restraintVersionTimestamp(new Date());
       const result = await this.putVersionedR2(
@@ -1754,7 +1783,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         ts,
       );
       if (result.changed) await this.pruneRestraintVersions(bucket, paths.dir);
-      return Response.json({ saved: true, changed: result.changed, data: normalized });
+      return Response.json({ saved: true, changed: result.changed, data: normalized, version: result.sha256 });
     }
     return dvrJsonError(405, "Method Not Allowed");
   }

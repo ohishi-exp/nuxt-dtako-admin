@@ -50,6 +50,10 @@ export interface SalaryCsvRow {
   driverCd: string
   /** 前ゼロを除いた突合キー (wage-report の driverCd と数値同値で突合)。 */
   cdKey: string
+  /** 取り込み元の会社ラベル (parseSalaryCsv は関与しないファイル単位の属性、
+   * 呼び出し側が付与する。空文字 = 未設定/単一会社)。社員コードは会社毎に
+   * 別体系のため、複数社の CSV を合算すると番号が衝突しうる (Refs #253)。 */
+  company: string
   driverName: string
   /** "YYYY-MM"。 */
   month: string
@@ -143,8 +147,9 @@ export function effectiveCategory(label: string, config: SalaryItemConfig): Sala
 /**
  * 貼り付けテキストを解析する。構造がフォーマットと合わない場合は Error を投げる。
  * 行単位の不正 (社員コードなし・賞与行・数値でないセル) はスキップ + warnings。
+ * company は呼び出し側 (1 ファイル = 1 社) が付与する会社ラベル (省略時は未設定)。
  */
-export function parseSalaryCsv(text: string): ParsedSalaryCsv {
+export function parseSalaryCsv(text: string, company = ''): ParsedSalaryCsv {
   const lines = text.replace(/\uFEFF/g, '').split(/\r\n|\r|\n/).filter(l => l.trim() !== '')
   if (lines.length === 0) {
     throw new Error('貼り付けデータが空です')
@@ -257,6 +262,7 @@ export function parseSalaryCsv(text: string): ParsedSalaryCsv {
     rows.push({
       driverCd: cd,
       cdKey: String(Number(cd)),
+      company,
       // 年月チェックを通過した時点で cells.length > payNameIdx >= 1 なので cells[1] は存在する
       driverName: cells[1]!,
       month,
@@ -310,16 +316,29 @@ export function normalizeNameKey(name: string): string {
   return name.normalize('NFKC').replace(/\s+/g, '')
 }
 
-/** 突合マスタのキー: "給与コード(前ゼロ除去)|氏名(空白除去)"。会社毎にコード体系が
- * 分かれて衝突しうるため、コード単独ではなく氏名も含めて引き当てる。 */
-export function salaryCdMapKey(payrollCd: string, name: string): string {
-  return `${String(Number(payrollCd))}|${normalizeNameKey(name)}`
+/** 突合マスタのキー: "給与コード(前ゼロ除去)|氏名(空白除去)" (会社ラベル無し)、
+ * 会社ラベルがあれば先頭に付与した "会社|給与コード|氏名"。会社毎にコード体系が
+ * 分かれて衝突しうるため、コード単独ではなく氏名 (と会社) も含めて引き当てる。
+ * company 省略時は旧形式 (2 部) と完全に同じ文字列になる — 会社ラベル導入前に
+ * 保存された突合マスタ (R2) をそのまま読めるようにするための後方互換 (Refs #253)。 */
+export function salaryCdMapKey(payrollCd: string, name: string, company = ''): string {
+  const base = `${String(Number(payrollCd))}|${normalizeNameKey(name)}`
+  return company ? `${norm(company)}|${base}` : base
 }
 
-/** CSV 行の突合キー (マスタにあれば引き当てた乗務員CD、無ければ給与コードをそのまま)。 */
+/**
+ * CSV 行の突合キー (マスタにあれば引き当てた乗務員CD、無ければ給与コードをそのまま)。
+ * 会社スコープのキーで引けなければ、会社ラベル導入前に保存された旧形式 (会社無し)
+ * のキーも試す — 既存の突合マスタを消さずに会社スコープへ移行できるようにする。
+ */
 export function resolveCdKey(row: SalaryCsvRow, cdMap: SalaryCdMap): string {
-  const mapped = cdMap.entries[salaryCdMapKey(row.driverCd, row.driverName)]
-  return mapped !== undefined ? String(Number(mapped)) : row.cdKey
+  const scoped = cdMap.entries[salaryCdMapKey(row.driverCd, row.driverName, row.company)]
+  if (scoped !== undefined) return String(Number(scoped))
+  if (row.company) {
+    const legacy = cdMap.entries[salaryCdMapKey(row.driverCd, row.driverName)]
+    if (legacy !== undefined) return String(Number(legacy))
+  }
+  return row.cdKey
 }
 
 /**
@@ -341,11 +360,13 @@ export function suggestCdMapEntries(
   const out: Record<string, string> = {}
   const seen = new Set<string>()
   for (const row of csvRows) {
-    const mapKey = salaryCdMapKey(row.driverCd, row.driverName)
+    const mapKey = salaryCdMapKey(row.driverCd, row.driverName, row.company)
     if (seen.has(mapKey)) continue
     seen.add(mapKey)
-    // 既にマスタ登録済み / コードがそのまま一致する行は提案不要
-    if (cdMap.entries[mapKey] !== undefined || reportCds.has(row.cdKey)) continue
+    // 既にマスタ登録済み (会社スコープ / 旧形式のどちらか) / コードがそのまま
+    // 一致する行は提案不要
+    const legacyKey = row.company ? salaryCdMapKey(row.driverCd, row.driverName) : mapKey
+    if (cdMap.entries[mapKey] !== undefined || cdMap.entries[legacyKey] !== undefined || reportCds.has(row.cdKey)) continue
     const candidates = byName.get(normalizeNameKey(row.driverName))
     if (candidates && candidates.length === 1) out[mapKey] = candidates[0]!
   }
@@ -428,10 +449,14 @@ export interface SalaryComparisonRow {
 
 export interface SalaryComparison {
   rows: SalaryComparisonRow[]
-  /** CSV にいるが wage-report にいない乗務員。 */
-  csvOnly: Array<{ driverCd: string, driverName: string }>
+  /** CSV にいるが wage-report にいない乗務員 (突合マスタ登録用に会社ラベルを持つ)。 */
+  csvOnly: Array<{ driverCd: string, driverName: string, company: string }>
   /** wage-report にいるが CSV にいない乗務員。 */
   reportOnly: Array<{ driverCd: string, driverName: string }>
+  /** 別会社の給与コードが同じ乗務員CDへ解決され、どちらが本人か機械的に決められない
+   * 行 (Refs #253 会社スコープ)。rows/csvOnly には出さない — 突合マスタで会社ごとに
+   * 引き当て直すまで比較対象から外れる。 */
+  conflicts: Array<{ driverCd: string, entries: Array<{ company: string, driverCd: string, driverName: string }> }>
   warnings: string[]
 }
 
@@ -518,13 +543,39 @@ export function compareSalaryMonth(
   cdMap: SalaryCdMap = { entries: {} },
 ): SalaryComparison {
   const warnings: string[] = []
-  const byCd = new Map<string, SalaryCsvRow>()
+
+  // 解決キー (乗務員CD) ごとに 識別子 (会社+氏名) → 行 でグループ化する。
+  // 同一識別子の重複行は従来どおり後勝ち + 警告。複数の識別子が同じキーに解決された
+  // 場合は、別会社の給与コードが偶然衝突した (Refs #253) ものとして conflicts に
+  // 隔離する — 機械的にどちらが本人か決められないので、突合対象からは外す。
+  const byKey = new Map<string, Map<string, SalaryCsvRow>>()
   for (const row of csvRows) {
     const key = resolveCdKey(row, cdMap)
-    if (byCd.has(key)) {
+    const identity = `${row.company}|${normalizeNameKey(row.driverName)}`
+    const byIdentity = byKey.get(key) ?? new Map<string, SalaryCsvRow>()
+    if (byIdentity.has(identity)) {
       warnings.push(`乗務員 ${row.driverCd} の行が重複しています (後の行を採用)`)
     }
-    byCd.set(key, row)
+    byIdentity.set(identity, row)
+    byKey.set(key, byIdentity)
+  }
+
+  const byCd = new Map<string, SalaryCsvRow>()
+  const conflicts: SalaryComparison['conflicts'] = []
+  for (const [key, byIdentity] of byKey.entries()) {
+    if (byIdentity.size === 1) {
+      byCd.set(key, [...byIdentity.values()][0]!)
+      continue
+    }
+    const entries = [...byIdentity.values()].map(row => ({
+      company: row.company, driverCd: row.driverCd, driverName: row.driverName,
+    }))
+    conflicts.push({ driverCd: key, entries })
+    warnings.push(
+      `乗務員CD ${key} に複数の会社の給与コードが解決されました `
+      + `(${entries.map(e => `${e.company || '会社未設定'}:${e.driverCd} ${e.driverName}`).join(' / ')}) `
+      + '— 突合マスタで会社ごとに引き当て直してください',
+    )
   }
 
   const rows: SalaryComparisonRow[] = []
@@ -606,9 +657,9 @@ export function compareSalaryMonth(
   const csvOnly: SalaryComparison['csvOnly'] = []
   for (const [key, row] of byCd.entries()) {
     if (!matched.has(key)) {
-      csvOnly.push({ driverCd: row.driverCd, driverName: row.driverName })
+      csvOnly.push({ driverCd: row.driverCd, driverName: row.driverName, company: row.company })
     }
   }
 
-  return { rows, csvOnly, reportOnly, warnings }
+  return { rows, csvOnly, reportOnly, conflicts, warnings }
 }
