@@ -1,0 +1,30 @@
+name = "nuxt-dtako-admin-kyuyo-mcp"
+account_id = "24b45709d060d957340180e995f0d373"
+main = "src/index.ts"
+compatibility_date = "2025-05-01"
+# Hono / MCP SDK が node builtins を参照するため必要 (cf-access-mcp / gmail-mcp と同じ理由)。
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+# 給与比較 (拘束時間×賃金計算) の R2 アーカイブ。既存 workers/dtako-scraper-relay と
+# 同じ dtako-uploads bucket を read-only で bind する (書き込みは行わない)。
+[[r2_buckets]]
+binding = "DTAKO_R2"
+bucket_name = "dtako-uploads"
+
+[vars]
+# AUTH_WORKER_ORIGIN は staging を AS に指す (cf-access-mcp / gmail-mcp と同じ規約 —
+# single-env (staging = prod) の MCP worker は staging auth に向けることで、
+# auth-worker の PR merge → staging deploy 即時で allowlist 等が反映される)。
+AUTH_WORKER_ORIGIN = "https://auth-staging.ippoan.org"
+# workers/dtako-scraper-relay/wrangler.toml と同じ prefix (Refs #241)。
+RESTRAINT_R2_PREFIX = "restraint"
+
+# custom domain (single-env、staging = prod、cf-access-mcp / gmail-mcp と同じ形)。
+# ルート有効化・実 deploy はコード実装後に別途判断 (account owner の手動作業含む)。
+[[routes]]
+pattern = "kyuyo-mcp.ippoan.org"
+custom_domain = true

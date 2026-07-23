@@ -1,0 +1,70 @@
+name: kyuyo-mcp worker
+
+# 給与比較データを read-only MCP tool として公開する worker (Refs #374)。
+# cf-access-mcp / gmail-mcp と同じ single-env (staging = prod、AUTH_WORKER_ORIGIN
+# は auth-staging を指す) 構成なので、dtako-scraper-relay-tail のような
+# staging/prod 分岐は無く `wrangler deploy` 一本。
+#
+# pull_request: typecheck + test (coverage 100% gate) のみ、deploy は skip。
+# push(main/tag) / workflow_dispatch: 上記 gate に加えて deploy を実行。
+#
+# ロジックが依存する dtako-scraper-relay の pure ロジック (restraint-wage.ts /
+# theearth-restraint-client.ts) の変更でも再デプロイされるよう path filter に含める。
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'workers/kyuyo-mcp/**'
+      - 'workers/dtako-scraper-relay/src/restraint-wage.ts'
+      - 'workers/dtako-scraper-relay/src/theearth-restraint-client.ts'
+      - '.github/workflows/kyuyo-mcp-deploy.yml'
+  pull_request:
+    paths:
+      - 'workers/kyuyo-mcp/**'
+      - 'workers/dtako-scraper-relay/src/restraint-wage.ts'
+      - 'workers/dtako-scraper-relay/src/theearth-restraint-client.ts'
+      - '.github/workflows/kyuyo-mcp-deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers/kyuyo-mcp
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@ippoan'
+
+      # npm ci でなく npm install (dtako-scraper-relay-tail-deploy.yml と同じ) —
+      # @ippoan/mcp-cf-workers は GitHub Packages (public repo) 経由なので
+      # secrets.GITHUB_TOKEN で読める (ippoan/ci-workflows/frontend-ci.yml と同じ
+      # トークン)。ローカル開発では GitHub Packages 認証が通らない環境があるため
+      # (NODE_AUTH_TOKEN 未設定)、lockfile の当該 entry がずれていても npm install
+      # は自己修復するが npm ci は失敗する。
+      - name: Install deps
+        run: npm install
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Test (coverage 100% gate)
+        run: npx vitest run --coverage
+
+      # single-env (staging = prod)。手動 wrangler deploy は禁止、この CI 経由のみ。
+      - name: Deploy
+        if: github.event_name != 'pull_request'
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
