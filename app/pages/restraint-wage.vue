@@ -27,11 +27,11 @@ import type {
 import { MIN_WAGE_DEFAULT_KEY } from '~/utils/restraint-wage-view'
 import type {
   ParsedSalaryCsv,
-  SalaryCdMap,
   SalaryComparison,
   SalaryItemCategory,
   SalaryItemConfig,
 } from '~/utils/salary-compare'
+import type { EmployeeMasterEntry, EmployeeMasterGetResponse } from '~/utils/employee-master'
 
 const {
   session: theearthSession,
@@ -174,7 +174,7 @@ watch(session, (s) => {
     // 貼り付け中の給与データはメモリ上にしか無い — ログアウトで破棄する
     clearSalaryPaste()
     salaryConfigLoaded.value = false
-    salaryCdMapLoaded.value = false
+    employeeMasterLoaded.value = false
     minWageMasterLoaded.value = false
   }
   else {
@@ -748,125 +748,104 @@ async function saveSalaryItemConfig() {
   }
 }
 
-// ---- 社員コード突合マスタ (会社|給与コード|氏名 → 乗務員CD、Refs #253) ----
+// ---- 社員マスタ (D1、給与コード×会社 → 乗務員CD、Refs #367) ----
 // 給与システムの社員コードは会社毎に別体系で乗務員CDと一致しないため、
-// マスタ (R2 版管理) で引き当てる。氏名一致による自動提案つき。
+// マスタ (D1) で引き当てる。氏名一致による自動提案つき。突合ロジック本体
+// (compareSalaryMonth/suggestCdMapEntries) は変更していない — employeeMaster
+// (D1 の生データ) から buildCdMapEntries() で従来の SalaryCdMap 形へ変換して
+// 橋渡しする。
 //
-// 永続化の堅牢化 (Refs #253):
-// - 自動設定/手動登録はローカル ref を即座に変えるだけで、リロードすると
-//   「マスタを保存」前の編集は消える。sessionStorage にドラフトを退避し、
-//   次回ロード時にサーバ版とマージして復元する。
-// - サーバの PUT は全置換のため、他の端末/タブが先に保存していると気付かず
-//   上書きしうる。GET/PUT の version (R2 latest の sha256) で楽観排他し、
-//   競合 (409) 時はサーバ最新 + 自分のローカル編集をマージして再保存を促す。
+// D1 行単位 upsert のため、旧 R2 版が持っていた楽観排他 (baseVersion) /
+// sessionStorage ドラフト退避 / beforeunload 警告は不要 (last-write-wins、
+// Refs #367 決定事項)。
 
-const salaryCdMap = ref<SalaryCdMap>({ entries: {} })
-/** サーバから読み込んだ (または直近保存に成功した) entries のスナップショット。
- * salaryCdMap との差分が「未保存の編集」。 */
-const salaryCdMapBaseline = ref<Record<string, string>>({})
-/** 直近ロード/保存時の R2 latest の版 (sha256)。楽観排他の baseVersion に使う。 */
-const salaryCdMapVersion = ref<string | null>(null)
-const salaryCdMapLoaded = ref(false)
-const savingSalaryCdMap = ref(false)
-const salaryCdMapMessage = ref('')
-const SALARY_CDMAP_DRAFT_KEY = 'restraint-wage:salary-cd-map-draft'
+const employeeMaster = ref<EmployeeMasterEntry[]>([])
+/** R2 に旧突合マスタ (salary-cd-map) が残っていて未取り込みか (Refs #367)。 */
+const employeeMasterMigratable = ref(false)
+const employeeMasterLoaded = ref(false)
+const savingEmployeeMaster = ref(false)
+const importingCdMap = ref(false)
+const employeeMasterMessage = ref('')
 
-/** salaryCdMap.entries が baseline (サーバ最終確認版) と異なるか。 */
-const salaryCdMapDirty = computed(() =>
-  JSON.stringify(salaryCdMap.value.entries) !== JSON.stringify(salaryCdMapBaseline.value))
+/** 突合ロジックが読む SalaryCdMap 形 (driverCd 未設定の行は除外)。 */
+const salaryCdMap = computed(() => buildCdMapEntries(employeeMaster.value))
 
-function persistSalaryCdMapDraft() {
-  if (!import.meta.client) return
-  try {
-    if (salaryCdMapDirty.value) sessionStorage.setItem(SALARY_CDMAP_DRAFT_KEY, JSON.stringify(salaryCdMap.value.entries))
-    else sessionStorage.removeItem(SALARY_CDMAP_DRAFT_KEY)
-  }
-  catch {
-    // 容量超過等で保存できなくても致命的ではない (メモリ上のデータはそのまま使える)
-  }
-}
-
-watch(salaryCdMap, persistSalaryCdMapDraft, { deep: true })
-
-if (import.meta.client) {
-  window.addEventListener('beforeunload', (e) => {
-    if (!salaryCdMapDirty.value) return
-    e.preventDefault()
-    e.returnValue = ''
-  })
-}
-
-async function loadSalaryCdMap() {
+async function loadEmployeeMaster() {
   if (!session.value) return
   try {
-    const res = await $fetch<{ exists: boolean, data: SalaryCdMap | null, version: string | null }>(
-      '/restraint-api/salary-cd-map',
-      { headers: authHeaders() },
-    )
-    const serverEntries = res.data?.entries ?? {}
-    salaryCdMapBaseline.value = serverEntries
-    salaryCdMapVersion.value = res.version
-    let draft: Record<string, string> | null = null
-    if (import.meta.client) {
-      const raw = sessionStorage.getItem(SALARY_CDMAP_DRAFT_KEY)
-      if (raw) {
-        try {
-          draft = JSON.parse(raw)
-        }
-        catch {
-          // 壊れたドラフトは無視 (サーバ版をそのまま使う)
-        }
-      }
-    }
-    if (draft && JSON.stringify(draft) !== JSON.stringify(serverEntries)) {
-      salaryCdMap.value = { entries: { ...serverEntries, ...draft } }
-      salaryCdMapMessage.value = '未保存の変更を復元しました。内容を確認して「マスタを保存」してください'
-    }
-    else {
-      salaryCdMap.value = { entries: serverEntries }
-    }
-    salaryCdMapLoaded.value = true
+    const res = await $fetch<EmployeeMasterGetResponse>('/restraint-api/employee-master', { headers: authHeaders() })
+    employeeMaster.value = res.employees
+    employeeMasterMigratable.value = res.migratable
+    employeeMasterLoaded.value = true
   }
   catch (e) {
     handleApiError(e)
   }
 }
 
-async function saveSalaryCdMap() {
+/** company+payrollCd が一致する行を更新、無ければ新規追加する (ローカル即時反映)。 */
+function upsertEmployeeMasterEntry(company: string, payrollCd: string, name: string, driverCd: string | null) {
+  const idx = employeeMaster.value.findIndex(e => e.company === company && e.payrollCd === payrollCd)
+  if (idx === -1) {
+    employeeMaster.value = [...employeeMaster.value, { company, payrollCd, name, driverCd, attrs: [] }]
+  }
+  else {
+    employeeMaster.value = employeeMaster.value.map((e, i) => (i === idx ? { ...e, name, driverCd } : e))
+  }
+}
+
+/** 現在の employeeMaster 全件を PUT する (upsert のみ・冪等なので全件送って問題ない)。 */
+async function saveEmployeeMaster(message: string) {
   if (!session.value) return
-  savingSalaryCdMap.value = true
+  savingEmployeeMaster.value = true
   pageError.value = ''
   try {
-    const res = await $fetch<{ changed: boolean, data: SalaryCdMap, version: string }>('/restraint-api/salary-cd-map', {
-      method: 'PUT',
-      headers: authHeaders(),
-      body: { ...salaryCdMap.value, baseVersion: salaryCdMapVersion.value },
-    })
-    salaryCdMap.value = res.data
-    salaryCdMapBaseline.value = res.data.entries
-    salaryCdMapVersion.value = res.version
-    if (import.meta.client) sessionStorage.removeItem(SALARY_CDMAP_DRAFT_KEY)
-    salaryCdMapMessage.value = res.changed ? '突合マスタを保存しました (新しい版を作成)' : '突合マスタを保存しました (内容は前回と同一)'
+    const employees = employeeMaster.value.map(e => ({ company: e.company, payrollCd: e.payrollCd, name: e.name, driverCd: e.driverCd }))
+    await $fetch('/restraint-api/employee-master', { method: 'PUT', headers: authHeaders(), body: { employees } })
+    employeeMasterMessage.value = message
   }
   catch (e) {
-    // 楽観排他の競合 (Refs #253): 他の保存が先に入っていた。サーバ最新 + 自分の
-    // ローカル編集をマージして再提示する (上書きも破棄もしない)。
-    if (restraintErrorStatus(e) === 409) {
-      const current = (e as { data?: { current?: { data?: SalaryCdMap, version?: string } } }).data?.current
-      if (current?.data) {
-        const serverEntries = current.data.entries
-        salaryCdMap.value = { entries: { ...serverEntries, ...salaryCdMap.value.entries } }
-        salaryCdMapBaseline.value = serverEntries
-        salaryCdMapVersion.value = current.version ?? null
-        salaryCdMapMessage.value = '他の変更と競合したためマージしました。内容を確認して再度「マスタを保存」してください'
-        return
-      }
-    }
     handleApiError(e)
   }
   finally {
-    savingSalaryCdMap.value = false
+    savingEmployeeMaster.value = false
   }
+}
+
+/** R2 の旧突合マスタ (salary-cd-map) を社員マスタへ取り込む (Refs #367)。 */
+async function importFromCdMap() {
+  if (!session.value) return
+  importingCdMap.value = true
+  pageError.value = ''
+  try {
+    const res = await $fetch<{ imported: number }>('/restraint-api/employee-master/import-cd-map', {
+      method: 'POST',
+      headers: authHeaders(),
+    })
+    employeeMasterMessage.value = `R2 の旧突合マスタから ${res.imported} 件を取り込みました`
+    await loadEmployeeMaster()
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+  finally {
+    importingCdMap.value = false
+  }
+}
+
+/** 給与明細 CSV に現れた行のうち、社員マスタにまだ (会社・給与コード) が
+ * 存在しない = 一度も登録されたことがない行 (Refs #367)。 */
+const unregisteredEmployees = computed(() => findUnregistered(salaryParsed.value?.rows ?? [], employeeMaster.value))
+
+/** 未登録行をマスタへ一括登録する。送るのはコード・氏名・会社のみ (乗務員CD
+ * 突合はまだ付けない — 金額は一切送信しない)。 */
+async function registerUnregistered() {
+  if (!session.value || !unregisteredEmployees.value.length) return
+  // unregisteredEmployees は computed — upsert 後は再評価されて 0 になるため、
+  // メッセージ用の件数は upsert 前にスナップショットしておく (Refs #367 実機検証)
+  const targets = unregisteredEmployees.value
+  for (const u of targets) upsertEmployeeMasterEntry(u.company, u.payrollCd, u.name, null)
+  await saveEmployeeMaster(`${targets.length} 名をマスタへ登録しました (コード・氏名・会社のみ、金額は送信しません)`)
 }
 
 /** 氏名の完全一致 (両側で一意) から未突合行の乗務員CDを一括提案して設定する。 */
@@ -875,23 +854,28 @@ function autoSuggestCdMap() {
   const suggested = suggestCdMapEntries(salaryMonthRows.value, report.value.rows, salaryCdMap.value)
   const count = Object.keys(suggested).length
   if (count === 0) {
-    salaryCdMapMessage.value = '氏名一致で自動設定できる行はありませんでした'
+    employeeMasterMessage.value = '氏名一致で自動設定できる行はありませんでした'
     return
   }
-  salaryCdMap.value = { entries: { ...salaryCdMap.value.entries, ...suggested } }
-  salaryCdMapMessage.value = `${count} 名を氏名一致で自動設定しました。「マスタを保存」で確定します`
+  for (const [key, driverCd] of Object.entries(suggested)) {
+    const parsed = splitCdMapKey(key)
+    upsertEmployeeMasterEntry(parsed.company, parsed.payrollCd, parsed.name, driverCd)
+  }
+  employeeMasterMessage.value = `${count} 名を氏名一致で自動設定しました。「マスタを保存」で確定します`
 }
 
 function setCdMapEntry(payrollCd: string, name: string, driverCd: string, company = '') {
-  salaryCdMap.value = {
-    entries: { ...salaryCdMap.value.entries, [salaryCdMapKey(payrollCd, name, company)]: driverCd },
-  }
-  salaryCdMapMessage.value = ''
+  upsertEmployeeMasterEntry(company, payrollCd, name, driverCd)
+  employeeMasterMessage.value = ''
 }
 
+/** key は "会社|給与コード" (salaryCdMapRows が組み立てる表示用キー)。乗務員CD
+ * 突合だけを解除する — 社員としての識別情報 (会社・給与コード・氏名) 自体は
+ * 消さない (取り消しても社員マスタの登録は残す)。 */
 function removeCdMapEntry(key: string) {
-  const { [key]: _removed, ...rest } = salaryCdMap.value.entries
-  salaryCdMap.value = { entries: rest }
+  const [company, payrollCd] = key.split('|')
+  employeeMaster.value = employeeMaster.value.map(e =>
+    (e.company === company && e.payrollCd === payrollCd ? { ...e, driverCd: null } : e))
 }
 
 /** 乗務員CD選択肢 (未突合 = システム計算のみ の乗務員だけ、CD 昇順)。
@@ -901,17 +885,12 @@ const salaryCdOptions = computed(() =>
     .sort((a, b) => a.driverCd.localeCompare(b.driverCd, undefined, { numeric: true }))
     .map(d => ({ label: `${d.driverCd} ${d.driverName}`, value: d.driverCd })))
 
-/** 登録済み突合マスタの表示行。キーは会社スコープ導入前 (2 部: 給与コード|氏名) と
- * 導入後 (3 部: 会社|給与コード|氏名) が混在しうる (Refs #253)。 */
+/** 登録済み (乗務員CD突合済み) の社員マスタ表示行。key は "会社|給与コード"
+ * (removeCdMapEntry に渡す)。 */
 const salaryCdMapRows = computed(() =>
-  Object.entries(salaryCdMap.value.entries)
-    .map(([key, driverCd]) => {
-      const parts = key.split('|')
-      const [company, payrollCd, name] = parts.length >= 3
-        ? [parts[0]!, parts[1]!, parts.slice(2).join('|')]
-        : ['', parts[0] ?? '', parts[1] ?? '']
-      return { key, company, payrollCd, name, driverCd }
-    })
+  employeeMaster.value
+    .filter(e => e.driverCd)
+    .map(e => ({ key: `${e.company}|${e.payrollCd}`, company: e.company, payrollCd: e.payrollCd, name: e.name, driverCd: e.driverCd! }))
     .sort((a, b) => a.payrollCd.localeCompare(b.payrollCd, undefined, { numeric: true })))
 
 /** 選択中の勤務月に対応する CSV 行。CSV の「給与・賞与名」の年月は**支給月**ラベル
@@ -1249,12 +1228,12 @@ watch([activeTab, month, session], () => {
     if (activeTab.value === 'minwage' && !minWageMasterLoaded.value) loadMinWageMaster()
     // 支払い実績 (給与) 列の分類・突合に使う (Refs #282)
     if (activeTab.value === 'minwage' && !salaryConfigLoaded.value) loadSalaryItemConfig()
-    if (activeTab.value === 'minwage' && !salaryCdMapLoaded.value) loadSalaryCdMap()
+    if (activeTab.value === 'minwage' && !employeeMasterLoaded.value) loadEmployeeMaster()
   }
   else if (activeTab.value === 'salary') {
     if (!report.value || report.value.month !== month.value) loadWageReport()
     if (!salaryConfigLoaded.value) loadSalaryItemConfig()
-    if (!salaryCdMapLoaded.value) loadSalaryCdMap()
+    if (!employeeMasterLoaded.value) loadEmployeeMaster()
   }
   else if (activeTab.value === 'items') {
     if (!salaryConfigLoaded.value) loadSalaryItemConfig()
@@ -1918,7 +1897,25 @@ watch([activeTab, month, session], () => {
             </div>
           </UCard>
 
-          <!-- 社員コード突合マスタ (会社|給与コード|氏名 → 乗務員CD、Refs #253) -->
+          <!-- R2 の旧突合マスタ (salary-cd-map) が未取り込みの時だけ表示 (Refs #367) -->
+          <UCard v-if="employeeMasterMigratable" class="border-amber-300 dark:border-amber-800">
+            <div class="flex flex-wrap items-center gap-3">
+              <span class="text-sm">R2 に旧突合マスタ (社員コード↔乗務員CD) が残っています。社員マスタ (D1) へ取り込めます。</span>
+              <div class="flex-1" />
+              <UButton size="xs" icon="i-lucide-download" label="R2突合マスタから取り込み" :loading="importingCdMap" @click="importFromCdMap" />
+            </div>
+          </UCard>
+
+          <!-- 未登録の給与明細行 (社員マスタに会社+給与コードが無い、Refs #367) -->
+          <UCard v-if="unregisteredEmployees.length" class="border-blue-300 dark:border-blue-800">
+            <div class="flex flex-wrap items-center gap-3">
+              <span class="text-sm">給与明細に社員マスタ未登録の社員が {{ unregisteredEmployees.length }} 名います (コード・氏名・会社のみ登録、金額は送信しません)。</span>
+              <div class="flex-1" />
+              <UButton size="xs" icon="i-lucide-user-plus" :label="`未登録 ${unregisteredEmployees.length} 名をマスタへ登録`" :loading="savingEmployeeMaster" @click="registerUnregistered" />
+            </div>
+          </UCard>
+
+          <!-- 社員コード突合マスタ (会社|給与コード|氏名 → 乗務員CD、Refs #367) -->
           <UCard v-if="salaryComparison && (salaryComparison.csvOnly.length || salaryCdMapRows.length)">
             <template #header>
               <div class="flex flex-wrap items-center gap-3">
@@ -1933,12 +1930,12 @@ watch([activeTab, month, session], () => {
                   :disabled="!salaryComparison.csvOnly.length"
                   @click="autoSuggestCdMap"
                 />
-                <UButton size="xs" icon="i-lucide-save" label="マスタを保存" :loading="savingSalaryCdMap" @click="saveSalaryCdMap" />
+                <UButton size="xs" icon="i-lucide-save" label="マスタを保存" :loading="savingEmployeeMaster" @click="saveEmployeeMaster('突合マスタを保存しました')" />
               </div>
             </template>
 
-            <p v-if="salaryCdMapMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2 mb-3">
-              {{ salaryCdMapMessage }}
+            <p v-if="employeeMasterMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2 mb-3">
+              {{ employeeMasterMessage }}
             </p>
 
             <template v-if="salaryComparison.csvOnly.length">
