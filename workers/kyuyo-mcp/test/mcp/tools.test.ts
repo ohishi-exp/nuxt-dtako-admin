@@ -73,14 +73,22 @@ describe("r2Prefix fallback", () => {
 });
 
 describe("listCompaniesTool", () => {
-  it("returns 4-digit company codes found under the prefix", async () => {
+  it("returns numeric company codes found under the prefix", async () => {
     const env = makeEnv({
       "restraint/0100/2026-07/summary/1/latest.json": { value: "{}" },
       "restraint/0200/2026-07/summary/1/latest.json": { value: "{}" },
-      "restraint/wage-master/latest.json": { value: "{}" }, // 非 company prefix (4桁でない) は除外
+      "restraint/wage-master/latest.json": { value: "{}" }, // 非 company prefix (数字でない) は除外
     });
     const res = (await listCompaniesTool.execute(env)) as { companies: string[] };
     expect(res.companies).toEqual(["0100", "0200"]);
+  });
+
+  it("returns company codes whose digit count differs from the 4-digit 給与 code (デジタコ compId は1対多で桁数不定、実例: 8桁)", async () => {
+    const env = makeEnv({
+      "restraint/27324455/2026-07/summary/1/latest.json": { value: "{}" },
+    });
+    const res = (await listCompaniesTool.execute(env)) as { companies: string[] };
+    expect(res.companies).toEqual(["27324455"]);
   });
 
   it("returns an empty list when nothing is archived", async () => {
@@ -100,6 +108,14 @@ describe("listMonthsTool", () => {
     });
     const res = (await listMonthsTool.execute(env, { company: "0100" })) as { months: string[] };
     expect(res.months).toEqual(["2026-07", "2026-06"]);
+  });
+
+  it("works for a non-4-digit (8桁) company code", async () => {
+    const env = makeEnv({
+      "restraint/27324455/2026-06/summary/1/latest.json": { value: "{}" },
+    });
+    const res = (await listMonthsTool.execute(env, { company: "27324455" })) as { months: string[] };
+    expect(res.months).toEqual(["2026-06"]);
   });
 });
 

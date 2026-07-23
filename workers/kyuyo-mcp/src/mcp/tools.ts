@@ -37,10 +37,16 @@ const noArgs = z.object({}).strict();
 
 // ===== list_companies ========================================================
 
+/** デジタコ (theearth) の会社コード。給与 (給与大臣) 側の4桁会社コードとは別体系
+ *  (1対多) で、桁数も固定ではない (実例: 本番テナントで8桁 "27324455")。
+ *  R2 の compId ディレクトリ名を "会社コード" として素通しするだけなので、
+ *  数字であること以外は決め打ちしない。 */
+const COMP_ID_PATTERN = /^\d{1,20}$/;
+
 export const listCompaniesTool = {
   name: "list_companies",
   description:
-    "給与比較アーカイブに存在する会社コード (4桁) の一覧を返す。" +
+    "給与比較アーカイブに存在する会社コード (デジタコ側の数値ID。桁数は会社により異なる) の一覧を返す。" +
     "list_months / get_wage_report / get_restraint_summary の company 引数に使う。",
   inputSchema: noArgs,
   execute: async (env: Env) => {
@@ -48,7 +54,7 @@ export const listCompaniesTool = {
     const base = companiesListPrefix(r2Prefix(env));
     const companies = prefixes
       .map((p) => p.slice(base.length).replace(/\/$/, ""))
-      .filter((c) => /^\d{4}$/.test(c))
+      .filter((c) => COMP_ID_PATTERN.test(c))
       .sort();
     return { companies };
   },
@@ -57,7 +63,7 @@ export const listCompaniesTool = {
 // ===== list_months ===========================================================
 
 const listMonthsArgs = z
-  .object({ company: z.string().regex(/^\d{4}$/).describe("会社コード (4桁、list_companies から取得)") })
+  .object({ company: z.string().regex(COMP_ID_PATTERN).describe("会社コード (デジタコ側の数値ID、list_companies から取得)") })
   .strict();
 
 export const listMonthsTool = {
@@ -129,7 +135,7 @@ function parseYm(ym: string): { year: number; month: number } | null {
 }
 
 const monthArgsShape = {
-  company: z.string().regex(/^\d{4}$/).describe("会社コード (4桁、list_companies から取得)"),
+  company: z.string().regex(COMP_ID_PATTERN).describe("会社コード (デジタコ側の数値ID、list_companies から取得)"),
   month: z.string().regex(/^\d{4}-\d{2}$/).describe("対象年月 (YYYY-MM、list_months から取得)"),
 };
 
