@@ -1,0 +1,27 @@
+{
+  "name": "nuxt-dtako-admin-kyuyo-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "給与比較 (拘束時間×賃金計算) データを読み取り専用 MCP tool として公開する Worker (Refs #374)。",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run --coverage",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ippoan/mcp-cf-workers": "git+https://github.com/ippoan/mcp-cf-workers.git#ed59854caee787697f3583a23cdcd9b6dc1d3076",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "hono": "^4.12.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260721.1",
+    "@vitest/coverage-v8": "^4.1.9",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.2",
+    "wrangler": "^4.67.0"
+  }
+}
