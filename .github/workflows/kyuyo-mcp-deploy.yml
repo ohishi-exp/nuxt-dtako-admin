@@ -60,8 +60,10 @@ jobs:
         run: npx vitest run --coverage
 
       # single-env (staging = prod)。手動 wrangler deploy は禁止、この CI 経由のみ。
+      # --var GIT_SHA:... で commit SHA を注入し、/healthz で「今動いているのは
+      # どの commit か」を確認できるようにする (Refs #374)。
       - name: Deploy
         if: github.event_name != 'pull_request'
-        run: npx wrangler deploy
+        run: npx wrangler deploy --var GIT_SHA:${{ github.sha }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
