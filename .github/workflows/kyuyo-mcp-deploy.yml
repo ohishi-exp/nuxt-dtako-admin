@@ -42,19 +42,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          registry-url: 'https://npm.pkg.github.com'
-          scope: '@ippoan'
 
-      # npm ci でなく npm install (dtako-scraper-relay-tail-deploy.yml と同じ) —
-      # @ippoan/mcp-cf-workers は GitHub Packages (public repo) 経由なので
-      # secrets.GITHUB_TOKEN で読める (ippoan/ci-workflows/frontend-ci.yml と同じ
-      # トークン)。ローカル開発では GitHub Packages 認証が通らない環境があるため
-      # (NODE_AUTH_TOKEN 未設定)、lockfile の当該 entry がずれていても npm install
-      # は自己修復するが npm ci は失敗する。
+      # @ippoan/mcp-cf-workers は GitHub Packages でなく public repo への git
+      # 依存 (package.json 参照)。GitHub Packages 経由だと ohishi-exp → ippoan の
+      # cross-org になり `secrets.GITHUB_TOKEN` では 403 (Permission installation
+      # not allowed to Read organization package、Refs ippoan/ci-workflows#125 と
+      # 同種の cross-org 制約) になるため回避した。public repo の git clone は
+      # 認証不要 (SSH key 無しでも動作確認済み)。npm ci でなく npm install
+      # (dtako-scraper-relay-tail-deploy.yml と同じ)。
       - name: Install deps
         run: npm install
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Typecheck
         run: npx tsc --noEmit
