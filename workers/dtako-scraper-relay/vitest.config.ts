@@ -26,6 +26,7 @@ export default defineConfig({
         'src/restraint-viewer-auth.ts',
         'src/theearth-session.ts',
         'src/promise-queue.ts',
+        'src/employee-master.ts',
       ],
       thresholds: {
         lines: 100,

@@ -95,9 +95,20 @@ import {
   upsertWageMasterFromCsv,
   WageMasterError,
   type MinWageMaster,
+  type SalaryCdMap,
   type WageConfig,
   type WageMaster,
 } from "./restraint-wage";
+import {
+  buildEmployeeMasterImportStatements,
+  buildEmployeeMasterResponse,
+  buildEmployeeMasterWriteStatements,
+  cdMapEntriesToEmployees,
+  EmployeeMasterError,
+  normalizeEmployeeMasterPutBody,
+  type EmployeeAttrD1Row,
+  type EmployeeD1Row,
+} from "./employee-master";
 import {
   appendHistoryJsonl,
   downloadRestraintCsv,
@@ -1647,6 +1658,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/wage-master/csv" && request.method === "POST") {
       return this.handleWageMasterCsvImport(record!, request);
     }
+    // ---- 社員マスタ (D1、金額は持たない。Refs #367) ----
+    if (url.pathname === "/restraint-api/employee-master" && request.method === "GET") {
+      return this.handleEmployeeMasterGet(record!);
+    }
+    if (url.pathname === "/restraint-api/employee-master" && request.method === "PUT") {
+      return this.handleEmployeeMasterPut(request);
+    }
+    if (url.pathname === "/restraint-api/employee-master/import-cd-map" && request.method === "POST") {
+      return this.handleEmployeeMasterImportCdMap(record!, url);
+    }
     // ---- アーカイブ閲覧 (R2 読み出しのみ。Refs #244) ----
     if (url.pathname === "/restraint-api/archive/summaries" && request.method === "GET") {
       return this.handleArchiveSummaries(record!, url);
@@ -1824,6 +1845,111 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     );
     if (result.changed) await this.pruneRestraintVersions(bucket, paths.dir);
     return Response.json({ saved: true, changed: result.changed, data: merged });
+  }
+
+  // ---------------------------------------------------------------------------
+  // 社員マスタ (D1、Refs #367)。給与コード×会社を主キーに乗務員CD・所属/給与体系
+  // の履歴を持つ。金額・明細は持たない。company は theearth compId ではなく給与
+  // 会社ラベル (「株」「有」等、取り込みUIと同じ自由文字列) — 1 theearth テナント
+  // 内で複数の給与会社が混在する運用実績がある (Refs #364-366) ため、GET は
+  // compId で絞らず全件返す (kyuyo_companies と同じくテナント非スコープ)。
+  // ---------------------------------------------------------------------------
+
+  /** R2 に salary-cd-map (旧突合マスタ) が存在するか (migratable フラグ判定用)。
+   * DTAKO_R2 未設定なら false (R2 が無ければ移行対象も無い)。 */
+  private async hasSalaryCdMap(compId: string): Promise<boolean> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return false;
+    const paths = this.wageMasterR2Paths(compId, "salary-cd-map");
+    return (await bucket.head(paths.latest)) !== null;
+  }
+
+  /** GET /restraint-api/employee-master — 社員マスタ全件 + migratable フラグ。
+   * D1 (DTAKO_DB) 未 binding は 503。 */
+  private async handleEmployeeMasterGet(record: TheearthSessionRecord): Promise<Response> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return dvrJsonError(503, "社員マスタ (DTAKO_DB) が未設定です");
+    try {
+      const [employeeResult, attrResult] = await Promise.all([
+        db.prepare(`SELECT company, payroll_cd, name, driver_cd FROM employees`).all<EmployeeD1Row>(),
+        db
+          .prepare(`SELECT company, payroll_cd, effective_from, branch, pay_scheme FROM employee_attrs`)
+          .all<EmployeeAttrD1Row>(),
+      ]);
+      const employeeRows = employeeResult.results ?? [];
+      const migratable = employeeRows.length === 0 && (await this.hasSalaryCdMap(record.compId));
+      return Response.json(buildEmployeeMasterResponse(employeeRows, attrResult.results ?? [], migratable));
+    } catch (err) {
+      console.error(JSON.stringify({ employee_master_get: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "社員マスタの取得に失敗しました");
+    }
+  }
+
+  /** PUT /restraint-api/employee-master — 差分 upsert/削除。last-write-wins
+   * (楽観排他なし — R2 版マスタと異なり D1 行単位 upsert のため不要、Refs #367)。 */
+  private async handleEmployeeMasterPut(request: Request): Promise<Response> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return dvrJsonError(503, "社員マスタ (DTAKO_DB) が未設定です");
+    let raw: unknown;
+    try {
+      raw = await request.json();
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    let body: ReturnType<typeof normalizeEmployeeMasterPutBody>;
+    try {
+      body = normalizeEmployeeMasterPutBody(raw);
+    } catch (err) {
+      if (err instanceof EmployeeMasterError) return dvrJsonError(400, err.message);
+      throw err;
+    }
+    const statements = buildEmployeeMasterWriteStatements(body, new Date().toISOString());
+    if (statements.length === 0) return Response.json({ saved: true, changed: 0 });
+    try {
+      await db.batch(statements.map((s) => db.prepare(s.sql).bind(...s.params)));
+    } catch (err) {
+      console.error(JSON.stringify({ employee_master_put: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "社員マスタの保存に失敗しました");
+    }
+    return Response.json({ saved: true, changed: statements.length });
+  }
+
+  /** POST /restraint-api/employee-master/import-cd-map?company=<会社ラベル> —
+   * R2 突合マスタ (salary-cd-map) を社員マスタへ取り込む (冪等、INSERT OR IGNORE)。
+   * `?company=` は会社ラベルの無い旧2部キーだけに補う値として必須にする —
+   * 3部キー (会社スコープ) はキー自身の会社ラベルを使うため影響を受けない。
+   * 表記揺れで別会社に誤登録される事故を避けるため、省略時は推測せず 400 にする
+   * (issue #367 の API 節はこのパラメータに触れていないが、2部キーは会社ラベルを
+   * 持たないため何らかの形で呼び出し側から補う必要があり、ここで明示的に要求する
+   * ことにした)。 */
+  private async handleEmployeeMasterImportCdMap(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return dvrJsonError(503, "社員マスタ (DTAKO_DB) が未設定です");
+    const fallbackCompany = (url.searchParams.get("company") ?? "").normalize("NFKC").trim();
+    if (!fallbackCompany) {
+      return dvrJsonError(400, "会社ラベル無しの旧形式キー用に ?company= が必要です");
+    }
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定のため突合マスタを読めません");
+    const paths = this.wageMasterR2Paths(record.compId, "salary-cd-map");
+    const obj = await bucket.get(paths.latest);
+    if (!obj) return dvrJsonError(404, "R2 に突合マスタ (salary-cd-map) がありません");
+    let cdMap: SalaryCdMap;
+    try {
+      cdMap = normalizeSalaryCdMap(JSON.parse(await obj.text()));
+    } catch (err) {
+      return dvrJsonError(502, `突合マスタが壊れています (${describeUnknownError(err)})`);
+    }
+    const employees = cdMapEntriesToEmployees(cdMap.entries, fallbackCompany);
+    const statements = buildEmployeeMasterImportStatements(employees, new Date().toISOString());
+    if (statements.length === 0) return Response.json({ imported: 0 });
+    try {
+      await db.batch(statements.map((s) => db.prepare(s.sql).bind(...s.params)));
+    } catch (err) {
+      console.error(JSON.stringify({ employee_master_import: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "突合マスタの取り込みに失敗しました");
+    }
+    return Response.json({ imported: statements.length });
   }
 
   /** month クエリ ("YYYY-MM") を検証して {year, month, ym} を返す。不正は null。 */
