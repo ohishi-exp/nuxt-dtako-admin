@@ -286,25 +286,24 @@ function parseCdMapKey(key: string): ParsedCdMapKey | null {
 
 /**
  * salary-cd-map の `entries` (2部/3部キー → 乗務員CD) を employees 行に変換する。
- * 2部キー (会社ラベル無し) は `fallbackCompany` を会社として補う — 呼び出し元
- * (import-cd-map ルート) は R2 (compId 単位) から読んだ 1 会社分の salary-cd-map
- * だけを対象にするため、`fallbackCompany` には取り込み UI で使われている実際の
- * 会社ラベル (「株」「有」等、compId ではない) を渡す責務が呼び出し側にある。
- * 3部キーはキー先頭の会社ラベルをそのまま使い `fallbackCompany` は無視する。
+ *
+ * **2部キー (会社ラベル無し、旧形式) は無条件でスキップする** — 会社ラベルを
+ * 補う手段が無い (取り込み UI 側でも決め打てない) ため、推測で別会社に誤登録
+ * する事故を避ける。試験運用段階の判断であり、実データ投入前なので旧2部キーの
+ * 救済は考えない (必要になれば運用開始後に別途作り直す、2026-07-23 決定)。
+ * 3部キー (会社スコープ済み) のみキー先頭の会社ラベルで変換する。
  *
  * salary-cd-map は正規化済み氏名 (空白除去済み) しか保持していない — 原文の氏名
  * は失われているため、変換後の `name` は正規化済み文字列をそのまま使う (取り込み
  * 後、社員マスタタブで手直しできる)。
  */
-export function cdMapEntriesToEmployees(entries: Record<string, string>, fallbackCompany: string): EmployeeInput[] {
+export function cdMapEntriesToEmployees(entries: Record<string, string>): EmployeeInput[] {
   const out: EmployeeInput[] = [];
   for (const [key, driverCd] of Object.entries(entries)) {
     const parsed = parseCdMapKey(key);
-    if (!parsed) continue;
-    const company = parsed.company ?? fallbackCompany;
-    if (!company) continue;
+    if (!parsed || !parsed.company) continue;
     out.push({
-      company,
+      company: parsed.company,
       payrollCd: String(Number(parsed.payrollCd)),
       name: parsed.nameKey,
       driverCd: String(Number(driverCd)),

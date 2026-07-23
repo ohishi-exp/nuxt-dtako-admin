@@ -1666,7 +1666,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return this.handleEmployeeMasterPut(request);
     }
     if (url.pathname === "/restraint-api/employee-master/import-cd-map" && request.method === "POST") {
-      return this.handleEmployeeMasterImportCdMap(record!, url);
+      return this.handleEmployeeMasterImportCdMap(record!);
     }
     // ---- アーカイブ閲覧 (R2 読み出しのみ。Refs #244) ----
     if (url.pathname === "/restraint-api/archive/summaries" && request.method === "GET") {
@@ -1916,19 +1916,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   /** POST /restraint-api/employee-master/import-cd-map?company=<会社ラベル> —
    * R2 突合マスタ (salary-cd-map) を社員マスタへ取り込む (冪等、INSERT OR IGNORE)。
-   * `?company=` は会社ラベルの無い旧2部キーだけに補う値として必須にする —
-   * 3部キー (会社スコープ) はキー自身の会社ラベルを使うため影響を受けない。
-   * 表記揺れで別会社に誤登録される事故を避けるため、省略時は推測せず 400 にする
-   * (issue #367 の API 節はこのパラメータに触れていないが、2部キーは会社ラベルを
-   * 持たないため何らかの形で呼び出し側から補う必要があり、ここで明示的に要求する
-   * ことにした)。 */
-  private async handleEmployeeMasterImportCdMap(record: TheearthSessionRecord, url: URL): Promise<Response> {
+   * **3部キー (会社スコープ済み) だけを対象にし、会社ラベルの無い旧2部キーは
+   * 無条件でスキップする** (`cdMapEntriesToEmployees` 参照)。表記揺れで別会社に
+   * 誤登録する事故を避けるため — 試験運用段階 (実データ投入前) の判断であり、
+   * 旧2部キーの救済は考えない (2026-07-23 決定)。 */
+  private async handleEmployeeMasterImportCdMap(record: TheearthSessionRecord): Promise<Response> {
     const db = this.env.DTAKO_DB;
     if (!db) return dvrJsonError(503, "社員マスタ (DTAKO_DB) が未設定です");
-    const fallbackCompany = (url.searchParams.get("company") ?? "").normalize("NFKC").trim();
-    if (!fallbackCompany) {
-      return dvrJsonError(400, "会社ラベル無しの旧形式キー用に ?company= が必要です");
-    }
     const bucket = this.env.DTAKO_R2;
     if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定のため突合マスタを読めません");
     const paths = this.wageMasterR2Paths(record.compId, "salary-cd-map");
@@ -1940,7 +1934,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       return dvrJsonError(502, `突合マスタが壊れています (${describeUnknownError(err)})`);
     }
-    const employees = cdMapEntriesToEmployees(cdMap.entries, fallbackCompany);
+    const employees = cdMapEntriesToEmployees(cdMap.entries);
     const statements = buildEmployeeMasterImportStatements(employees, new Date().toISOString());
     if (statements.length === 0) return Response.json({ imported: 0 });
     try {

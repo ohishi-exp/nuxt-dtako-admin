@@ -189,32 +189,30 @@ describe('buildEmployeeMasterImportStatements', () => {
 
 describe('cdMapEntriesToEmployees', () => {
   it('3部キー (会社スコープ) はキー自身の会社ラベルを使う', () => {
-    const out = cdMapEntriesToEmployees({ '有|007|山田太郎': '99' }, '株')
+    const out = cdMapEntriesToEmployees({ '有|007|山田太郎': '99' })
     expect(out).toEqual([{ company: '有', payrollCd: '7', name: '山田太郎', driverCd: '99' }])
   })
 
-  it('2部キー (旧形式) は fallbackCompany を補う', () => {
-    const out = cdMapEntriesToEmployees({ '007|山田太郎': '0099' }, '株')
-    expect(out).toEqual([{ company: '株', payrollCd: '7', name: '山田太郎', driverCd: '99' }])
+  it('2部キー (旧形式、会社ラベル無し) は無条件でスキップする (試験段階の判断、救済しない)', () => {
+    expect(cdMapEntriesToEmployees({ '007|山田太郎': '0099' })).toEqual([])
   })
 
-  it('fallbackCompany が空で会社ラベルが解決できないキーは除外する', () => {
-    expect(cdMapEntriesToEmployees({ '007|山田太郎': '99' }, '')).toEqual([])
+  it('3部キーと2部キーが混在していても3部キーだけ変換する', () => {
+    const out = cdMapEntriesToEmployees({ '007|山田太郎': '99', '有|008|鈴木花子': '100' })
+    expect(out).toEqual([{ company: '有', payrollCd: '8', name: '鈴木花子', driverCd: '100' }])
   })
 
   it('不正なキー形式 (2部/3部以外・給与コードが数字でない・氏名欠如) は除外する', () => {
     expect(
-      cdMapEntriesToEmployees(
-        {
-          '007': '99', // 1部
-          '株|007|山田太郎|余分': '99', // 4部
-          'abc|山田太郎': '99', // 給与コードが数字でない
-          '007|': '99', // 氏名が空
-          '株||山田太郎': '99', // 3部だが給与コードが空
-          '|007|山田太郎': '99', // 3部だが会社ラベルが空
-        },
-        '株',
-      ),
+      cdMapEntriesToEmployees({
+        '007': '99', // 1部
+        '株|007|山田太郎|余分': '99', // 4部
+        'abc|山田太郎': '99', // 給与コードが数字でない (2部、いずれにせよスキップ対象)
+        '株|abc|山田太郎': '99', // 給与コードが数字でない (3部)
+        '株|007|': '99', // 3部だが氏名が空
+        '株||山田太郎': '99', // 3部だが給与コードが空
+        '|007|山田太郎': '99', // 3部だが会社ラベルが空
+      }),
     ).toEqual([])
   })
 })
