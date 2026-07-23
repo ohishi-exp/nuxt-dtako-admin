@@ -432,7 +432,32 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   (putVersionedR2 の版管理を再利用 — 一括変更 = PUT 1 回 = 1 版)
 - DO routes: `GET/PUT /restraint-api/{wage-master|min-wage|wage-config}`、
   `POST wage-master/csv` (upsert 取込)、`GET archive/{summaries|csv-list|csv|history}`、
-  `GET wage-report?month=` (前月 tail 込みの計算行)
+  `GET wage-report?month=` (前月 tail 込みの計算行)、社員マスタ (下記) は
+  `GET/PUT /restraint-api/employee-master` + `POST .../import-cd-map`
+
+### 社員マスタ (D1、給与コード×会社 → 乗務員CD、Refs #367)
+
+給与コード↔乗務員CD の突合を D1 (`employees`/`employee_attrs`、migration 0006) で
+持つ。旧 R2 版 (`salary-cd-map`、楽観排他 baseVersion + sessionStorage ドラフト
+退避) から置き換え — D1 行単位 upsert (last-write-wins) のため排他制御・ドラフト
+復元は不要になった。突合ロジック本体 (`compareSalaryMonth`/`suggestCdMapEntries`、
+`app/utils/salary-compare.ts`) は無変更 — `app/utils/employee-master.ts` の
+`buildCdMapEntries()` で従来の `SalaryCdMap` 形へ変換して橋渡しする
+(worker 側の同名ロジックは import 不可のため実装が2箇所になる、Refs #268 の教訓)。
+
+- **`import-cd-map`** (R2 突合マスタの取り込み) は**3部キー (会社スコープ済み)
+  だけを対象にし、会社ラベルの無い旧2部キーは無条件でスキップする** (試験運用
+  段階の判断、2026-07-23)。パラメータは無し (`?company=` 等の補完は無い)
+- **「未登録 N 名をマスタへ登録」** ボタン (`findUnregistered`): 給与明細 CSV に
+  現れたが社員マスタに (会社, 給与コード) が無い行を一括登録する。送るのは
+  コード・氏名・会社のみ (乗務員CD 突合・金額は一切送信しない)
+- 所属/給与体系の適用開始日つき履歴 (`employee_attrs`、月末解決の `resolveAttrsAt`)
+  と社員マスタ専用タブ・CSV列追加は未実装 (PR-C 予定、Refs #367)
+
+| ファイル | 役割 |
+|---|---|
+| `app/utils/employee-master.ts` | 型 + `buildCdMapEntries`/`findUnregistered`/`resolveAttrsAt`/`splitCdMapKey` (pure、100% gate) |
+| `workers/dtako-scraper-relay/src/employee-master.ts` | PUT検証・D1文組み立て・R2 cd-map変換・月末解決 (pure、100% gate) |
 
 - 対象月は「年セレクタ + 月タブ」(`GET archive/months` でアーカイブ存在月を列挙、
   無い月は薄表示)。サマリ再計算は単月/全月一括 (`POST archive/resummarize?month=`、

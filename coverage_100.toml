@@ -97,6 +97,10 @@ path = "app/utils/salary-compare.ts"
 branches = true
 
 [[files]]
+path = "app/utils/employee-master.ts"
+branches = true
+
+[[files]]
 path = "app/utils/salary-file.ts"
 branches = true
 
