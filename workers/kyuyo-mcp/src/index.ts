@@ -24,7 +24,19 @@ type Variables = { bindingJwt: BindingJwtClaims };
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 // /healthz は binding_jwt より先に置き、認証なしで疎通確認できるようにする。
-app.get("/healthz", (c) => c.json({ ok: true, service: "kyuyo-mcp" }));
+// git_sha (deploy workflow が --var で注入する commit SHA) と cf_version
+// (Cloudflare 側の version_metadata binding) の両方を返し、「最新の PR/commit が
+// 実際に deploy 済みか」を CI 経由でも実機からでも確認できるようにする (Refs #374)。
+app.get("/healthz", (c) =>
+  c.json({
+    ok: true,
+    service: "kyuyo-mcp",
+    git_sha: c.env.GIT_SHA ?? "unknown",
+    cf_version: c.env.CF_VERSION_METADATA
+      ? { id: c.env.CF_VERSION_METADATA.id, tag: c.env.CF_VERSION_METADATA.tag }
+      : null,
+  }),
+);
 
 // claude.ai fresh connector の OAuth discovery を auth-staging に proxy する
 // (認証なし。`src/discovery.ts`)。SDK 非依存なので遅延 import 不要。
