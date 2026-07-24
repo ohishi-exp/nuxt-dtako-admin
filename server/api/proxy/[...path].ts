@@ -16,7 +16,7 @@
  */
 import type { H3Event } from 'h3'
 import { defineEventHandler, createError } from 'h3'
-import { createAuthWorkerProxyHandler } from '@ippoan/auth-client/server'
+import { createAuthWorkerProxyHandler, parseDevLoginWriteAllowlist } from '@ippoan/auth-client/server'
 
 function cfEnv(event: H3Event): Record<string, unknown> {
   return (event.context.cloudflare as { env?: Record<string, unknown> } | undefined)?.env ?? {}
@@ -55,6 +55,14 @@ export default defineEventHandler(async (event) => {
     // issue ippoan/auth-worker#423/#425: env.dev (DEV_LOGIN="true") のみ、通常
     // cookie が無い時に logi_auth_token_dev をフォールバックで拾う。他 env は無効。
     devLoginEnabled: env.DEV_LOGIN === 'true',
+    // issue ippoan/auth-worker#423: DEV_LOGIN_BACKEND="prod" (AUTH_WORKER
+    // binding を prod に向けている印) の時だけ、DEV_LOGIN_PROD_WRITE_ALLOWLIST
+    // に無い非GETを auth-client 側で403にする。staging backend (通常運用) は
+    // undefined を渡すため無制限のまま (devLoginWriteAllowlist 未指定 = 非破壊)。
+    devLoginWriteAllowlist:
+      env.DEV_LOGIN === 'true' && env.DEV_LOGIN_BACKEND === 'prod'
+        ? parseDevLoginWriteAllowlist(env.DEV_LOGIN_PROD_WRITE_ALLOWLIST)
+        : undefined,
   })
   return proxy(event)
 })

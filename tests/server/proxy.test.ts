@@ -13,15 +13,28 @@ import { mockNuxtImport } from '@nuxt/test-utils/runtime'
 // runtime 環境では実体に解決されるため vi.stubGlobal では差し替えられない。
 // createError は実体が throw する H3Error の statusCode をそのまま assert する。
 
-const { createAuthWorkerProxyHandlerMock, proxyFn } = vi.hoisted(() => {
-  const proxyFn = vi.fn(() => 'PROXY_RESULT')
-  return {
-    proxyFn,
-    createAuthWorkerProxyHandlerMock: vi.fn((_opts: unknown) => proxyFn),
-  }
-})
+const { createAuthWorkerProxyHandlerMock, proxyFn, parseDevLoginWriteAllowlistMock } = vi.hoisted(
+  () => {
+    const proxyFn = vi.fn(() => 'PROXY_RESULT')
+    return {
+      proxyFn,
+      createAuthWorkerProxyHandlerMock: vi.fn((_opts: unknown) => proxyFn),
+      // @ippoan/auth-client の実装と同じ pure ロジック (issue #429、テストの
+      // ためだけに複製 — 実体は packages/auth-client 側で 100% テスト済み)。
+      parseDevLoginWriteAllowlistMock: vi.fn((raw: unknown) =>
+        typeof raw === 'string' && raw.trim()
+          ? raw
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : [],
+      ),
+    }
+  },
+)
 vi.mock('@ippoan/auth-client/server', () => ({
   createAuthWorkerProxyHandler: createAuthWorkerProxyHandlerMock,
+  parseDevLoginWriteAllowlist: parseDevLoginWriteAllowlistMock,
 }))
 
 // h3 の defineEventHandler は (h3 v2 の wrap 挙動差を避けるため) identity に差し替える。
@@ -92,5 +105,58 @@ describe('proxy handler wiring (createAuthWorkerProxyHandler, #434 step 3)', () 
       statusCode: 503,
     })
     expect(createAuthWorkerProxyHandlerMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('dev-login prod backend write allowlist wiring (issue ippoan/auth-worker#423/#429)', () => {
+  // 実際の allow/deny 判定 (GET常時許可・prefix境界等) は @ippoan/auth-client
+  // の createAuthWorkerProxyHandler(devLoginWriteAllowlist) 側の責務であり、
+  // packages/auth-client/test/devLoginCore.test.ts (isDevLoginWriteAllowed)
+  // で検証済み。ここでは consumer 側が正しいオプションを渡しているかだけを見る。
+  beforeEach(() => {
+    createAuthWorkerProxyHandlerMock.mockClear()
+    proxyFn.mockClear()
+    parseDevLoginWriteAllowlistMock.mockClear()
+  })
+
+  const BASE_ENV = { INTERNAL_SHARED_SECRET: 'x', AUTH_WORKER: { fetch: vi.fn() } }
+
+  interface ProxyWiringWithAllowlist {
+    devLoginWriteAllowlist?: string[]
+  }
+
+  it('DEV_LOGIN_BACKEND が prod でなければ (staging/未設定) devLoginWriteAllowlist は undefined', async () => {
+    await call(eventWith({ ...BASE_ENV, DEV_LOGIN: 'true' }))
+    const opts = createAuthWorkerProxyHandlerMock.mock.calls[0]![0] as ProxyWiringWithAllowlist
+    expect(opts.devLoginWriteAllowlist).toBeUndefined()
+    expect(parseDevLoginWriteAllowlistMock).not.toHaveBeenCalled()
+  })
+
+  it('DEV_LOGIN が true でなければ prod backend でも devLoginWriteAllowlist は undefined (通常運用に影響しない)', async () => {
+    await call(eventWith({ ...BASE_ENV, DEV_LOGIN_BACKEND: 'prod' }))
+    const opts = createAuthWorkerProxyHandlerMock.mock.calls[0]![0] as ProxyWiringWithAllowlist
+    expect(opts.devLoginWriteAllowlist).toBeUndefined()
+  })
+
+  it('DEV_LOGIN=true かつ DEV_LOGIN_BACKEND=prod: DEV_LOGIN_PROD_WRITE_ALLOWLIST を parseDevLoginWriteAllowlist でパースして渡す', async () => {
+    await call(
+      eventWith({
+        ...BASE_ENV,
+        DEV_LOGIN: 'true',
+        DEV_LOGIN_BACKEND: 'prod',
+        DEV_LOGIN_PROD_WRITE_ALLOWLIST: 'api/vehicle-settings/extract, api/y-time-export',
+      }),
+    )
+    expect(parseDevLoginWriteAllowlistMock).toHaveBeenCalledWith(
+      'api/vehicle-settings/extract, api/y-time-export',
+    )
+    const opts = createAuthWorkerProxyHandlerMock.mock.calls[0]![0] as ProxyWiringWithAllowlist
+    expect(opts.devLoginWriteAllowlist).toEqual(['api/vehicle-settings/extract', 'api/y-time-export'])
+  })
+
+  it('DEV_LOGIN_PROD_WRITE_ALLOWLIST 未設定でも prod backend + dev-login なら空配列を渡す (非GET全拒否は auth-client 側の挙動)', async () => {
+    await call(eventWith({ ...BASE_ENV, DEV_LOGIN: 'true', DEV_LOGIN_BACKEND: 'prod' }))
+    const opts = createAuthWorkerProxyHandlerMock.mock.calls[0]![0] as ProxyWiringWithAllowlist
+    expect(opts.devLoginWriteAllowlist).toEqual([])
   })
 })
