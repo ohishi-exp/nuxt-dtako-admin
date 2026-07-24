@@ -263,8 +263,10 @@ required = []
 # dev JWT は logi_auth_token と同じ JWT_SECRET (HS256) で署名されており prod
 # auth-worker の /alc-proxy でもそのまま検証を通る (issue #423 が「残存リスク
 # (受容)」として明記した「dev tokenの本番持ち込み」を意図的に有効化している構成)。
-# **token_kind=dev の read-only enforcement は未実装** — このリスクを承知の上で
-# 実データ確認のため prod を選択している。read-only enforcement 実装後は再検討する。
+# token_kind=dev の read-only enforcement は auth-worker `/alc-proxy` 側で実装済み
+# (ippoan/auth-worker#433、非GET/HEAD/OPTIONSをserver側で拒否)。consumer側の
+# write allowlist (旧 DEV_LOGIN_BACKEND/DEV_LOGIN_PROD_WRITE_ALLOWLIST) は
+# 二重管理を避けるため撤去した (#385) — auth-worker側が唯一のsource of truth。
 [env.dev]
 name = "dtako-admin-dev"
 
@@ -313,17 +315,6 @@ NUXT_PUBLIC_SCRAPER_RELAY_URL = "wss://dtako-staging.ippoan.org"
 NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
 NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"
 DEV_LOGIN = "true"
-# 上の [[env.dev.services]] AUTH_WORKER が prod ("auth-worker") を向いている印。
-# server/api/proxy/[...path].ts の write allowlist ガードはこれが "prod" の時だけ
-# 有効になる (staging を指す通常運用ではガード無し、常にフル権限)。この2つは
-# セットで変更すること — service だけ prod に変えて DEV_LOGIN_BACKEND を
-# "staging" のままにすると write ガードが働かないまま prod に書き込める。
-DEV_LOGIN_BACKEND = "prod"
-# GET/HEAD/OPTIONS 以外で prod backend への到達を許す path prefix (カンマ区切り、
-# 例 "api/vehicle-settings/extract,api/y-time-export")。空 = 非GET全拒否。
-# 検証したい POST/PUT/DELETE だけ都度ここに足して `wrangler dev` を再起動する
-# (issue ippoan/auth-worker#423 の残存リスクを、起動時の明示登録で絞る運用)。
-DEV_LOGIN_PROD_WRITE_ALLOWLIST = ""
 
 [env.dev.secrets]
 required = []
