@@ -119,6 +119,35 @@ Environment Variable であり、wrangler.toml には無い (git 履歴に平文
 - `DTAKO_R2` → `dtako-uploads` バケット — Y時間 テンプレ xlsx の配置先 (`templates/...`)。
   本番 / staging 共用 (read-only)。
 
+## D1 binding と migration (Refs #367)
+
+- `DTAKO_DB` → `dtako-admin-uploads-catalog` (`81dd4136-…`)。**app 本体と
+  `workers/dtako-scraper-relay` の両 worker・全 env が同じ database_id** を指す
+  (staging / preview / 本番で DB は 1 つ)。新規 env を足しても binding 宣言は
+  済んでいるので wrangler.toml の変更は要らない (Refs #299)
+
+| テーブル | 由来 | 正 (source of truth) |
+|---|---|---|
+| `dtako_uploads` | 0001〜0004 | **R2 が正**、D1 は再構築可能な検索インデックス |
+| `kyuyo_companies` | 0005 (#369) | D1 (会社×年度リスト、金額は持たない) |
+| `employees` / `employee_attrs` | 0006 (#367) | **D1 が正** (唯一の保存場所。識別情報+属性のみ、金額は持たない) |
+
+- migration は repo 直下の **共有 `migrations/`** (relay の wrangler.toml が
+  `migrations_dir = "../../migrations"` で参照)
+- **適用は CI が行う — 手動適用は禁止** (CLAUDE.md の規範)。
+  `dtako-scraper-relay-deploy.yml` が `pull_request` 以外 (main push / tag /
+  workflow_dispatch) で `wrangler d1 migrations apply --remote` を deploy 前に
+  実行する。PR では実行しない (未レビューのスキーマ変更を共有 DB に当てない)
+- **`scripts/d1/bootstrap-d1-migrations.sql`** (冪等): 本番 D1 は元々手作業運用で
+  wrangler の記帳テーブル `d1_migrations` が無かった。そのまま apply すると 0001 から
+  再実行され **0003 の `ALTER TABLE ADD COLUMN comp_id` が duplicate column で落ちる**
+  ため、0001〜0005 を `INSERT OR IGNORE` で記帳してから apply する。
+  2026-07-25 の main push run で本番適用完了 (0001〜0005 = 記帳、0006 = 実適用)
+- **罠**: この repo は auto-tag で merge 直後に本番まで出る。**スキーマ依存のコードと
+  migration を別 PR に割ると、migration 適用前にコードが本番へ出る** — 実際 #367 の
+  PR-B/PR-C が本番 D1 に `employees` が無い状態で 2 日間動き、給与比較・月次集計タブが
+  502 になっていた (2026-07-23〜25)。migration を含む PR を先に merge すること
+
 ## Y時間 エクスポート (`/y-time-export` ページ)
 
 京都ソフト案件などの拘束時間管理 Excel テンプレに、KUDGIVT.csv 由来の日別始業/終業/休憩を
@@ -534,14 +563,9 @@ ZIP (実測 85KB) が返る。詳細は下の運用手順 3. 内の note を参�
    > only (named environment 配下には書けない) なので wrangler.toml の
    > トップレベルに 1 箇所だけ書けば staging/本番どちらの deploy にも効く。
 
-   > **D1 migration (`migrations/`) もこの workflow が適用する** (Refs #367)。
-   > `wrangler d1 migrations apply --remote` を pull_request 以外 (main push /
-   > tag / workflow_dispatch) で実行する — staging と本番は**同一 D1** なので
-   > main merge の時点で当てる。本番 D1 は元々手作業運用で記帳テーブル
-   > `d1_migrations` が無く、そのまま apply すると 0001 から再実行されて 0003 の
-   > `ALTER TABLE ADD COLUMN` が duplicate column で落ちるため、
-   > `scripts/d1/bootstrap-d1-migrations.sql` (INSERT OR IGNORE、冪等) で
-   > 0001〜0005 を適用済みとして記帳してから apply する。
+   > **D1 migration (`migrations/`) もこの workflow が適用する** — 詳細は上の
+   > 「D1 binding と migration」節 (trigger paths に `migrations/**` /
+   > `scripts/d1/**` を含む、Refs #367)。
 2. staging (`SCRAPER_MODE=http` 設定済み) で `DTAKO_ACCOUNTS` に1社だけ登録し、
    実際に csvdata.zip がダウンロードできるか確認してから本番へ展開する
    (本番展開時は top-level `[vars]` に `SCRAPER_MODE = "http"` を追加する PR を出す)
