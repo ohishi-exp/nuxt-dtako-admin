@@ -34,6 +34,12 @@ export interface EmployeeMasterGetResponse {
   migratable: boolean
 }
 
+/** PUT の `attrs` 要素 (属性行 + 所属先の社員キー)。 */
+export interface EmployeeAttrPutRow extends EmployeeAttrRow {
+  company: string
+  payrollCd: string
+}
+
 const YEAR_MONTH_RE = /^(\d{4})-(\d{2})$/
 
 /** "YYYY-MM" の末日を "YYYY-MM-DD" で返す。不正な形式は null。 */
@@ -123,4 +129,74 @@ export function findUnregistered(
     out.push({ company: row.company, payrollCd: row.cdKey, name: row.driverName })
   }
   return out
+}
+
+// ---------------------------------------------------------------------------
+// 社員マスタタブ (一覧・属性履歴の編集、Refs #367 PR-C)
+// ---------------------------------------------------------------------------
+
+/**
+ * 属性履歴に 1 行を追加する (同じ `effectiveFrom` の行があれば置換)。
+ * 返り値は `effectiveFrom` 昇順の新しい配列 — 元配列は変更しない
+ * (Vue の ref に代入して差し替える前提)。
+ */
+export function upsertAttrRow(attrs: EmployeeAttrRow[], row: EmployeeAttrRow): EmployeeAttrRow[] {
+  const next = attrs.filter(a => a.effectiveFrom !== row.effectiveFrom)
+  next.push(row)
+  next.sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom))
+  return next
+}
+
+/** 属性履歴から `effectiveFrom` の行を除いた新しい配列を返す。 */
+export function removeAttrRow(attrs: EmployeeAttrRow[], effectiveFrom: string): EmployeeAttrRow[] {
+  return attrs.filter(a => a.effectiveFrom !== effectiveFrom)
+}
+
+/**
+ * 全社員の属性履歴を PUT の `attrs` 形 (社員キー込みの平坦な配列) に展開する。
+ * PUT は upsert (last-write-wins) なので全件送っても冪等 (Refs #367)。
+ */
+export function collectAttrRows(employees: EmployeeMasterEntry[]): EmployeeAttrPutRow[] {
+  return employees.flatMap(e =>
+    e.attrs.map(a => ({ company: e.company, payrollCd: e.payrollCd, ...a })))
+}
+
+/**
+ * 乗務員CD の突合キー。マスタ側は保存時に前ゼロ除去済み (`String(Number(cd))`)
+ * だが、wage-report の `summary.driverCd` は theearth 由来の原文なので、両者を
+ * 同じ規則へ寄せてから引き当てる。数字でない値はそのまま返す (fail-soft)。
+ */
+export function normalizeDriverCdKey(driverCd: string): string {
+  const trimmed = driverCd.trim()
+  return /^\d+$/.test(trimmed) ? String(Number(trimmed)) : trimmed
+}
+
+/**
+ * 乗務員CD → 対象月末時点の属性 (所属・給与体系) の逆引き表を作る
+ * (月次集計 CSV の `所属(マスタ)`・`給与体系` 列用、Refs #367)。
+ *
+ * `driverCd` 未突合の社員と、対象月末時点で有効な属性行が無い社員は表に載せない
+ * (= CSV 側は空欄)。同一 `driverCd` に複数の社員が突合されている場合 (会社跨ぎの
+ * 誤登録など) は**先勝ち** — 後勝ちにすると社員の並び順で結果が変わるため。
+ */
+export function buildDriverAttrIndex(
+  employees: EmployeeMasterEntry[],
+  yearMonth: string,
+): Map<string, EmployeeAttrRow> {
+  const index = new Map<string, EmployeeAttrRow>()
+  for (const e of employees) {
+    if (!e.driverCd) continue
+    const key = normalizeDriverCdKey(e.driverCd)
+    if (index.has(key)) continue
+    const resolved = resolveAttrsAt(e, yearMonth)
+    if (resolved) index.set(key, resolved)
+  }
+  return index
+}
+
+/** 社員マスタ一覧の表示順 (会社ラベル昇順 → 給与コード数値昇順)。 */
+export function sortEmployeeEntries(employees: EmployeeMasterEntry[]): EmployeeMasterEntry[] {
+  return [...employees].sort((a, b) =>
+    a.company.localeCompare(b.company, 'ja')
+    || a.payrollCd.localeCompare(b.payrollCd, undefined, { numeric: true }))
 }
