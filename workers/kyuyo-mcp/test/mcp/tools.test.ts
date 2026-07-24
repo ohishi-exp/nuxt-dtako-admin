@@ -54,6 +54,7 @@ function makeEnv(entries: Record<string, MockR2Entry>): Env {
     DTAKO_R2: createMockR2(entries),
     RESTRAINT_R2_PREFIX: "restraint",
     AUTH_WORKER_ORIGIN: "https://auth-staging.ippoan.org",
+    AUTH_WORKER: { fetch: async () => new Response(null, { status: 501 }) } as unknown as Fetcher,
   };
 }
 
