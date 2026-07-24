@@ -52,6 +52,9 @@ export default defineEventHandler(async (event) => {
     sharedSecret,
     authWorkerFetch: () => authWorker.fetch.bind(authWorker),
     pathPrefix: '/',
+    // issue ippoan/auth-worker#423/#425: env.dev (DEV_LOGIN="true") のみ、通常
+    // cookie が無い時に logi_auth_token_dev をフォールバックで拾う。他 env は無効。
+    devLoginEnabled: env.DEV_LOGIN === 'true',
   })
   return proxy(event)
 })

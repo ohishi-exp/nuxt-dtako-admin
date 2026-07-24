@@ -247,3 +247,60 @@ NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"
 # 時に warning を出す、この repo で既出の keep_vars/observability 系と同型の罠)。
 [env.preview.secrets]
 required = []
+
+# ローカル `wrangler dev --remote -e dev` 専用 (issue ippoan/auth-worker#423/#425)。
+# `wrangler deploy` の対象にはしない (custom_domain route を持たせない = デプロイ
+# しても workers.dev に何も出ない・本番影響ゼロ)。backend は staging を再利用する
+# (専用リソースは持たない、preview と同じ考え方)。DEV_LOGIN="true" はこの env
+# にしか無く、server/routes/__dev/callback.get.ts のガードがこれを見て 404 を分岐する。
+[env.dev]
+name = "dtako-admin-dev"
+
+[[env.dev.r2_buckets]]
+binding = "DTAKO_R2"
+bucket_name = "dtako-uploads"
+
+[[env.dev.r2_buckets]]
+binding = "PROFIT_R2"
+bucket_name = "dtako-ichiban-verify-staging"
+
+[[env.dev.d1_databases]]
+binding = "DTAKO_DB"
+database_name = "dtako-admin-uploads-catalog"
+database_id = "81dd4136-b5c8-4c1b-93c8-28fdafbe1a8d"
+migrations_dir = "migrations"
+
+[[env.dev.secrets_store_secrets]]
+binding = "INTERNAL_SHARED_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "INTERNAL_SHARED_SECRET"
+
+[[env.dev.secrets_store_secrets]]
+binding = "GOOGLEMAP_KEY_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "NUXT_PUBLIC_GOOGLEMAP_KEY"
+
+[[env.dev.secrets_store_secrets]]
+binding = "ICHIBAN_CF_ACCESS_CLIENT_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "CF_ACCESS_CLIENT_SECRET"
+
+[[env.dev.services]]
+binding = "AUTH_WORKER"
+service = "auth-worker-staging"
+
+[[env.dev.services]]
+binding = "SCRAPER_RELAY"
+service = "nuxt-dtako-admin-scraper-relay-staging"
+
+[env.dev.vars]
+NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
+NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
+NUXT_ALC_API_URL = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
+NUXT_PUBLIC_SCRAPER_RELAY_URL = "wss://dtako-staging.ippoan.org"
+NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
+NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"
+DEV_LOGIN = "true"
+
+[env.dev.secrets]
+required = []
