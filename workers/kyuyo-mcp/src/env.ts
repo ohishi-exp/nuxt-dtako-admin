@@ -12,6 +12,8 @@ export interface Env {
   RESTRAINT_R2_PREFIX?: string;
   /** binding_jwt introspect / discovery proxy 先 (auth-worker)。例: https://auth-staging.ippoan.org */
   AUTH_WORKER_ORIGIN: string;
+  /** auth-worker への Service Binding (`/mcp/introspect` 呼び出し用、Refs #387)。 */
+  AUTH_WORKER: Fetcher;
   /** deploy 元の commit SHA (`kyuyo-mcp-deploy.yml` が `wrangler deploy --var
    *  GIT_SHA:${{ github.sha }}` で注入、Refs #374)。/healthz で「今動いているのは
    *  どの commit か」を確認するため。wrangler.toml の既定値 "unknown" はローカル

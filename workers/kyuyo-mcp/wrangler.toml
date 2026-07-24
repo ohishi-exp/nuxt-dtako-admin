@@ -23,9 +23,16 @@ bucket_name = "dtako-uploads"
 # AUTH_WORKER_ORIGIN は staging を AS に指す (cf-access-mcp / gmail-mcp と同じ規約 —
 # single-env (staging = prod) の MCP worker は staging auth に向けることで、
 # auth-worker の PR merge → staging deploy 即時で allowlist 等が反映される)。
+# introspect自体は下のAUTH_WORKER service binding経由 (Refs ippoan/auth-worker#435 /
+# ippoan/mcp-cf-workers#60,#63)。このvarはWWW-Authenticateのresource_metadata
+# 表示用に維持。
 AUTH_WORKER_ORIGIN = "https://auth-staging.ippoan.org"
 # workers/dtako-scraper-relay/wrangler.toml と同じ prefix (Refs #241)。
 RESTRAINT_R2_PREFIX = "restraint"
+
+[[services]]
+binding = "AUTH_WORKER"
+service = "auth-worker-staging"
 # deploy 済み commit を /healthz で確認できるようにする (Refs #374)。実際の値は
 # kyuyo-mcp-deploy.yml が `wrangler deploy --var GIT_SHA:${{ github.sha }}` で
 # 上書きする。"unknown" はローカル (`wrangler dev` 等、CI 外) 実行時の既定値。
