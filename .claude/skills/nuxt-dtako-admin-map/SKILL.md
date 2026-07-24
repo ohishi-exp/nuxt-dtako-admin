@@ -410,7 +410,8 @@ R2 アーカイブ (上記 /restraint-fetch) の summary を素材に、theearth
 労基法37条主判定 + 残業(最低賃金) の絶対下限併記**、Refs #278)
 ⑤支給項目区分 (**割増基礎 (37条) × 最低賃金 (4条3項) の 2 軸 5 区分**:
 base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存値は
-後方互換。集計意味論は `app/utils/salary-compare.ts` の `SALARY_CATEGORY_FLAGS`)。
+後方互換。集計意味論は `app/utils/salary-compare.ts` の `SALARY_CATEGORY_FLAGS`)
+⑥社員マスタ (D1、下記)。
 
 - 決定事項: 法定休日=日曜・法定外休日=土曜既定 (wage-config で変更可)、
   **週40h は日曜起算で「週の終端が属する月」に計上、月初跨ぎ週は前月 summary の
@@ -451,12 +452,19 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
 - **「未登録 N 名をマスタへ登録」** ボタン (`findUnregistered`): 給与明細 CSV に
   現れたが社員マスタに (会社, 給与コード) が無い行を一括登録する。送るのは
   コード・氏名・会社のみ (乗務員CD 突合・金額は一切送信しない)
-- 所属/給与体系の適用開始日つき履歴 (`employee_attrs`、月末解決の `resolveAttrsAt`)
-  と社員マスタ専用タブ・CSV列追加は未実装 (PR-C 予定、Refs #367)
+- **社員マスタタブ** (単価マスタの隣、⑥): 一覧 + 氏名/乗務員CD の手直し + 所属・
+  給与体系の**適用開始日つき履歴** (`employee_attrs`) の追加/履歴モーダル削除 +
+  社員行の削除。単価マスタと同じ作法で**ローカル編集 → 「保存」で確定** (PUT に
+  `employees`/`attrs`/`deleteAttrs`/`deleteEmployees` を同送 — worker は
+  upsert→削除の順に実行するので同キーは削除が勝つ)
+- **月次集計 CSV の `所属(マスタ)`・`給与体系` 列**: 乗務員CD で逆引き
+  (`buildDriverAttrIndex`) → **対象月の末日時点**で効いている行 (`resolveAttrsAt`)。
+  未突合・未設定は空欄。dtako 由来の `事業所` 列は別ソースなので残す。月次タブでも
+  社員マスタを load する (CSV 列が空になるのを避ける)
 
 | ファイル | 役割 |
 |---|---|
-| `app/utils/employee-master.ts` | 型 + `buildCdMapEntries`/`findUnregistered`/`resolveAttrsAt`/`splitCdMapKey` (pure、100% gate) |
+| `app/utils/employee-master.ts` | 型 + `buildCdMapEntries`/`findUnregistered`/`resolveAttrsAt`/`splitCdMapKey` + タブ用 `upsertAttrRow`/`removeAttrRow`/`collectAttrRows`/`buildDriverAttrIndex`/`normalizeDriverCdKey`/`sortEmployeeEntries` (pure、100% gate) |
 | `workers/dtako-scraper-relay/src/employee-master.ts` | PUT検証・D1文組み立て・R2 cd-map変換・月末解決 (pure、100% gate) |
 
 - 対象月は「年セレクタ + 月タブ」(`GET archive/months` でアーカイブ存在月を列挙、
@@ -466,7 +474,7 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
 
 | ファイル | 役割 |
 |---|---|
-| `app/pages/restraint-wage.vue` | 6 タブ UI + 年月タブ + 一括再計算/一括印刷 + 印刷 CSS |
+| `app/pages/restraint-wage.vue` | 7 タブ UI + 年月タブ + 一括再計算/一括印刷 + 印刷 CSS |
 | `app/components/RestraintWageMonthlyTable.vue` | 月次テーブル (単月表示と一括印刷で共用) |
 | `app/utils/restraint-wage-view.ts` | 共有型 + WAGE_COLUMNS + 表示ヘルパ |
 | `app/utils/salary-compare.ts` | 給与明細 CSV 解析 + 5 区分集計 + 突合 + 37条チェック (pure) |

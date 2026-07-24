@@ -10,6 +10,8 @@
  *    (2026-07-18) のため最低賃金換算との差分表示は持たない — Refs #282。
  *    最低賃金の設定カードは給与比較タブの 残業(最低賃金) 列のために同居)
  * ③ 単価マスタ (適用開始日つき履歴、一括変更、CSV 入出力)
+ * ⑥ 社員マスタ (D1、会社×給与コード → 乗務員CD + 所属/給与体系の適用開始日つき
+ *    履歴。月次集計 CSV の `所属(マスタ)`・`給与体系` 列の供給元、Refs #367)
  *
  * 対象月は「年セレクタ + 月タブ」で選ぶ (アーカイブが存在する月だけ活性、
  * GET /restraint-api/archive/months)。theearth ログインセッションは
@@ -87,6 +89,7 @@ const TABS = [
   { key: 'salary', label: '給与比較' },
   { key: 'items', label: '支給項目区分' },
   { key: 'master', label: '単価マスタ' },
+  { key: 'employees', label: '社員マスタ' },
 ] as const
 type TabKey = typeof TABS[number]['key']
 const activeTab = ref<TabKey>('monthly')
@@ -271,11 +274,16 @@ function sumNullable(a: number | null, b: number | null): number | null {
 
 const missingRateRows = computed(() => (report.value?.rows ?? []).filter(r => r.wage.hourlyRate === null))
 
-/** 月次集計テーブルを CSV (UTF-8 BOM) で保存する (全列)。 */
+/** 月次集計テーブルを CSV (UTF-8 BOM) で保存する (全列)。
+ *
+ * `所属(マスタ)`・`給与体系` は社員マスタ (D1) 由来 — 乗務員CD で逆引きし、
+ * **対象月の末日時点**で効いている属性行を採る (`buildDriverAttrIndex`、Refs #367)。
+ * 未突合・未設定は空欄。dtako 由来の `事業所` 列は別ソース (summary) なので残す。 */
 function downloadMonthlyCsv() {
   if (!report.value) return
+  const attrIndex = buildDriverAttrIndex(employeeMaster.value, report.value.month)
   const header = [
-    '年月', '乗務員CD', '氏名', '事業所', '稼働日数', '休日数',
+    '年月', '乗務員CD', '氏名', '事業所', '所属(マスタ)', '給与体系', '稼働日数', '休日数',
     '運転', '荷役', '休憩', '拘束合計', '年度累計(前月まで)', '当月超過', '15時間超過日数', '平均運転9h超過回数',
     '実働', '時間外', '深夜', '時間外深夜', '単価',
     ...WAGE_COLUMNS.map(c => `${c.label}(円)`), '合計(円)', '換算時給', '最低賃金', '最低賃金差',
@@ -284,8 +292,11 @@ function downloadMonthlyCsv() {
   for (const row of report.value.rows) {
     const s = row.summary
     const w = row.wage
+    const attrs = attrIndex.get(normalizeDriverCdKey(s.driverCd))
     lines.push([
-      report.value.month, s.driverCd, s.driverName, s.branchName, String(s.workDays), String(s.restDays),
+      report.value.month, s.driverCd, s.driverName, s.branchName,
+      attrs?.branch ?? '', attrs?.payScheme ?? '',
+      String(s.workDays), String(s.restDays),
       fmtMinutes(s.drivingMinutes), fmtMinutes(s.loadingMinutes), fmtMinutes(s.breakMinutes), fmtMinutes(s.restraintMinutes),
       fmtMinutes(s.fiscalCumulativeMinutes), fmtMinutes(s.excessRestraintMinutes), String(s.over15hDays), String(s.avgDriving9hOverCount),
       fmtMinutes(s.workingMinutes), fmtMinutes(s.overtimeMinutes), fmtMinutes(s.nightMinutes), fmtMinutes(s.overtimeNightMinutes),
@@ -766,6 +777,9 @@ const employeeMasterLoaded = ref(false)
 const savingEmployeeMaster = ref(false)
 const importingCdMap = ref(false)
 const employeeMasterMessage = ref('')
+/** 社員マスタタブでローカル削除した属性行・社員行 (「保存」で確定、Refs #367)。 */
+const pendingAttrDeletes = ref<Array<{ company: string, payrollCd: string, effectiveFrom: string }>>([])
+const pendingEmployeeDeletes = ref<Array<{ company: string, payrollCd: string }>>([])
 
 /** 突合ロジックが読む SalaryCdMap 形 (driverCd 未設定の行は除外)。 */
 const salaryCdMap = computed(() => buildCdMapEntries(employeeMaster.value))
@@ -794,14 +808,27 @@ function upsertEmployeeMasterEntry(company: string, payrollCd: string, name: str
   }
 }
 
-/** 現在の employeeMaster 全件を PUT する (upsert のみ・冪等なので全件送って問題ない)。 */
+/** 現在の employeeMaster 全件 + 属性履歴を PUT する (upsert のみ・冪等なので全件
+ * 送って問題ない)。ローカルで消した属性行・社員行は削除指示として同送する
+ * (worker 側は upsert → 削除の順に実行するので、同じキーがあれば削除が勝つ)。 */
 async function saveEmployeeMaster(message: string) {
   if (!session.value) return
   savingEmployeeMaster.value = true
   pageError.value = ''
   try {
     const employees = employeeMaster.value.map(e => ({ company: e.company, payrollCd: e.payrollCd, name: e.name, driverCd: e.driverCd }))
-    await $fetch('/restraint-api/employee-master', { method: 'PUT', headers: authHeaders(), body: { employees } })
+    await $fetch('/restraint-api/employee-master', {
+      method: 'PUT',
+      headers: authHeaders(),
+      body: {
+        employees,
+        attrs: collectAttrRows(employeeMaster.value),
+        deleteAttrs: pendingAttrDeletes.value,
+        deleteEmployees: pendingEmployeeDeletes.value,
+      },
+    })
+    pendingAttrDeletes.value = []
+    pendingEmployeeDeletes.value = []
     employeeMasterMessage.value = message
   }
   catch (e) {
@@ -892,6 +919,90 @@ const salaryCdMapRows = computed(() =>
     .filter(e => e.driverCd)
     .map(e => ({ key: `${e.company}|${e.payrollCd}`, company: e.company, payrollCd: e.payrollCd, name: e.name, driverCd: e.driverCd! }))
     .sort((a, b) => a.payrollCd.localeCompare(b.payrollCd, undefined, { numeric: true })))
+
+// ---- 社員マスタタブ (一覧・乗務員CD 編集・所属/給与体系の履歴、Refs #367) ----
+// 単価マスタと同じ操作感: ローカル編集 → 「保存」でサーバー確定。属性 (所属・
+// 給与体系) は適用開始日つき履歴で、対象月の**末日時点**で効いている行が
+// 月次集計 CSV の 所属(マスタ)/給与体系 列になる (resolveAttrsAt)。
+
+/** 属性の新規入力欄 (キー = "会社|給与コード")。 */
+const newAttrInputs = ref<Record<string, { from: string, branch: string, payScheme: string }>>({})
+
+/** 一覧行 (会社→給与コード順、対象月末時点の現行属性 + 履歴は新しい順)。 */
+const employeeMasterRows = computed(() =>
+  sortEmployeeEntries(employeeMaster.value).map(e => ({
+    key: `${e.company}|${e.payrollCd}`,
+    entry: e,
+    current: resolveAttrsAt(e, month.value),
+    history: [...e.attrs].sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom)),
+  })))
+
+/** 属性履歴モーダルの対象 (key = "会社|給与コード"、null = 閉)。 */
+const attrHistoryKey = ref<string | null>(null)
+const attrHistoryOpen = computed({
+  get: () => attrHistoryKey.value !== null,
+  set: (open: boolean) => {
+    if (!open) attrHistoryKey.value = null
+  },
+})
+const attrHistoryRow = computed(() =>
+  attrHistoryKey.value === null ? null : employeeMasterRows.value.find(r => r.key === attrHistoryKey.value) ?? null)
+
+/** 社員 1 件をローカル更新する (key = "会社|給与コード")。 */
+function patchEmployeeEntry(key: string, patch: Partial<EmployeeMasterEntry>) {
+  employeeMaster.value = employeeMaster.value.map(e =>
+    (`${e.company}|${e.payrollCd}` === key ? { ...e, ...patch } : e))
+}
+
+/** 乗務員CD の手入力 (空 = 突合解除)。数字以外は弾く (worker 側の検証と同一規則)。 */
+function setEmployeeDriverCd(key: string, value: string) {
+  const trimmed = value.trim()
+  if (trimmed && !/^\d{1,8}$/.test(trimmed)) {
+    employeeMasterMessage.value = `乗務員CD は数字 (最大8桁) で入力してください (${trimmed})`
+    return
+  }
+  patchEmployeeEntry(key, { driverCd: trimmed ? String(Number(trimmed)) : null })
+  employeeMasterMessage.value = ''
+}
+
+/** 氏名の手直し (R2 突合マスタ由来の行は正規化済み氏名しか持たない、Refs #367)。 */
+function setEmployeeName(key: string, value: string) {
+  const trimmed = value.trim()
+  if (!trimmed) return
+  patchEmployeeEntry(key, { name: trimmed })
+}
+
+/** 新規入力欄の値で属性履歴を 1 行 upsert する (「保存」で確定)。 */
+function addEmployeeAttr(key: string) {
+  const input = newAttrInputs.value[key]
+  if (!input?.from) return
+  const row = { effectiveFrom: input.from, branch: input.branch.trim() || null, payScheme: input.payScheme.trim() || null }
+  const entry = employeeMaster.value.find(e => `${e.company}|${e.payrollCd}` === key)
+  if (!entry) return
+  patchEmployeeEntry(key, { attrs: upsertAttrRow(entry.attrs, row) })
+  // 適用開始日は連続入力しやすいよう残す (単価マスタの addRate と同じ作法)
+  newAttrInputs.value = { ...newAttrInputs.value, [key]: { from: input.from, branch: '', payScheme: '' } }
+  employeeMasterMessage.value = `${entry.name} に ${row.effectiveFrom} からの所属/体系を設定しました。「保存」で確定します`
+}
+
+/** 属性履歴 1 件をローカル削除する (「保存」で D1 からも消える)。 */
+function removeEmployeeAttr(key: string, effectiveFrom: string) {
+  const entry = employeeMaster.value.find(e => `${e.company}|${e.payrollCd}` === key)
+  if (!entry) return
+  patchEmployeeEntry(key, { attrs: removeAttrRow(entry.attrs, effectiveFrom) })
+  pendingAttrDeletes.value = [...pendingAttrDeletes.value, { company: entry.company, payrollCd: entry.payrollCd, effectiveFrom }]
+  employeeMasterMessage.value = `${entry.name} の ${effectiveFrom} の履歴を削除しました。「保存」で確定します`
+}
+
+/** 社員 1 件をローカル削除する (属性履歴ごと。「保存」で D1 からも消える)。 */
+function removeEmployeeEntry(key: string) {
+  const entry = employeeMaster.value.find(e => `${e.company}|${e.payrollCd}` === key)
+  if (!entry) return
+  employeeMaster.value = employeeMaster.value.filter(e => `${e.company}|${e.payrollCd}` !== key)
+  pendingEmployeeDeletes.value = [...pendingEmployeeDeletes.value, { company: entry.company, payrollCd: entry.payrollCd }]
+  if (attrHistoryKey.value === key) attrHistoryKey.value = null
+  employeeMasterMessage.value = `${entry.company} ${entry.payrollCd} ${entry.name} を削除しました。「保存」で確定します`
+}
 
 /** 選択中の勤務月に対応する CSV 行。CSV の「給与・賞与名」の年月は**支給月**ラベル
  * (月末締め・翌月払い → 勤務月 + 1) なので、翌月ラベルの行を突合する (Refs #282)。 */
@@ -1228,7 +1339,8 @@ watch([activeTab, month, session], () => {
     if (activeTab.value === 'minwage' && !minWageMasterLoaded.value) loadMinWageMaster()
     // 支払い実績 (給与) 列の分類・突合に使う (Refs #282)
     if (activeTab.value === 'minwage' && !salaryConfigLoaded.value) loadSalaryItemConfig()
-    if (activeTab.value === 'minwage' && !employeeMasterLoaded.value) loadEmployeeMaster()
+    // minwage は突合 (支払い実績列)、monthly は CSV の 所属(マスタ)/給与体系 列で使う
+    if (!employeeMasterLoaded.value) loadEmployeeMaster()
   }
   else if (activeTab.value === 'salary') {
     if (!report.value || report.value.month !== month.value) loadWageReport()
@@ -1243,6 +1355,9 @@ watch([activeTab, month, session], () => {
   }
   else if (activeTab.value === 'master') {
     if (Object.keys(master.value.drivers).length === 0) loadMaster()
+  }
+  else if (activeTab.value === 'employees') {
+    if (!employeeMasterLoaded.value) loadEmployeeMaster()
   }
 }, { immediate: false })
 </script>
@@ -2153,6 +2268,169 @@ watch([activeTab, month, session], () => {
                 <p v-if="!rateHistoryRow?.history.length" class="text-sm text-gray-500">履歴がありません</p>
                 <div class="flex justify-end">
                   <UButton size="sm" variant="soft" label="閉じる" @click="rateHistoryOpen = false" />
+                </div>
+              </div>
+            </template>
+          </UModal>
+        </template>
+
+        <!-- ⑥ 社員マスタ (D1、Refs #367) -->
+        <template v-else-if="activeTab === 'employees'">
+          <!-- R2 の旧突合マスタ (salary-cd-map) が未取り込みの時だけ表示 -->
+          <UCard v-if="employeeMasterMigratable" class="border-amber-300 dark:border-amber-800">
+            <div class="flex flex-wrap items-center gap-3">
+              <span class="text-sm">R2 に旧突合マスタ (社員コード↔乗務員CD) が残っています。社員マスタ (D1) へ取り込めます。</span>
+              <div class="flex-1" />
+              <UButton size="xs" icon="i-lucide-download" label="R2突合マスタから取り込み" :loading="importingCdMap" @click="importFromCdMap" />
+            </div>
+          </UCard>
+
+          <UCard>
+            <template #header>
+              <div class="flex flex-wrap items-center gap-3">
+                <span class="font-semibold">社員マスタ ({{ employeeMasterRows.length }} 名)</span>
+                <span class="text-xs text-gray-500">所属・給与体系は「{{ fmtYm(month) }} の末日時点」で解決した値を表示しています</span>
+                <div class="flex-1" />
+                <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" @click="loadEmployeeMaster" />
+                <UButton size="xs" icon="i-lucide-save" label="保存" :loading="savingEmployeeMaster" @click="saveEmployeeMaster('社員マスタを保存しました')" />
+              </div>
+            </template>
+
+            <p v-if="employeeMasterMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2 mb-3">
+              {{ employeeMasterMessage }}
+            </p>
+            <p v-if="pendingAttrDeletes.length || pendingEmployeeDeletes.length" class="text-sm text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950 rounded-lg p-2 mb-3">
+              未保存の削除があります (履歴 {{ pendingAttrDeletes.length }} 件 / 社員 {{ pendingEmployeeDeletes.length }} 名) — 「保存」で確定します
+            </p>
+
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
+                    <th class="px-2 py-2">会社</th>
+                    <th class="px-2 py-2">給与コード</th>
+                    <th class="px-2 py-2">氏名</th>
+                    <th class="px-2 py-2">乗務員CD</th>
+                    <th class="px-2 py-2">所属 ({{ fmtYm(month) }})</th>
+                    <th class="px-2 py-2">給与体系</th>
+                    <th class="px-2 py-2">適用開始日</th>
+                    <th class="px-2 py-2">履歴</th>
+                    <th class="px-2 py-2">所属 / 給与体系 / 適用開始日 を追加</th>
+                    <th class="px-2 py-2 w-10" />
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in employeeMasterRows" :key="row.key" class="border-b border-gray-100 dark:border-gray-800">
+                    <td class="px-2 py-1.5">{{ row.entry.company }}</td>
+                    <td class="px-2 py-1.5">{{ row.entry.payrollCd }}</td>
+                    <td class="px-2 py-1.5">
+                      <UInput
+                        :model-value="row.entry.name"
+                        size="xs"
+                        class="w-32"
+                        @change="(e: Event) => setEmployeeName(row.key, (e.target as HTMLInputElement).value)"
+                      />
+                    </td>
+                    <td class="px-2 py-1.5">
+                      <UInput
+                        :model-value="row.entry.driverCd ?? ''"
+                        size="xs"
+                        class="w-24"
+                        placeholder="未突合"
+                        @change="(e: Event) => setEmployeeDriverCd(row.key, (e.target as HTMLInputElement).value)"
+                      />
+                    </td>
+                    <td class="px-2 py-1.5">{{ row.current?.branch ?? '-' }}</td>
+                    <td class="px-2 py-1.5">{{ row.current?.payScheme ?? '-' }}</td>
+                    <td class="px-2 py-1.5">{{ row.current?.effectiveFrom ?? '-' }}</td>
+                    <td class="px-2 py-1.5">
+                      <UButton
+                        size="xs"
+                        variant="soft"
+                        icon="i-lucide-history"
+                        :label="`履歴 (${row.history.length})`"
+                        :disabled="!row.history.length"
+                        @click="attrHistoryKey = row.key"
+                      />
+                    </td>
+                    <td class="px-2 py-1.5">
+                      <div class="flex items-center gap-1.5">
+                        <UInput
+                          :model-value="newAttrInputs[row.key]?.branch ?? ''"
+                          size="xs"
+                          placeholder="所属"
+                          class="w-28"
+                          @update:model-value="(v: string | number) => newAttrInputs = { ...newAttrInputs, [row.key]: { from: newAttrInputs[row.key]?.from ?? '', branch: String(v), payScheme: newAttrInputs[row.key]?.payScheme ?? '' } }"
+                        />
+                        <UInput
+                          :model-value="newAttrInputs[row.key]?.payScheme ?? ''"
+                          size="xs"
+                          placeholder="給与体系"
+                          class="w-28"
+                          @update:model-value="(v: string | number) => newAttrInputs = { ...newAttrInputs, [row.key]: { from: newAttrInputs[row.key]?.from ?? '', branch: newAttrInputs[row.key]?.branch ?? '', payScheme: String(v) } }"
+                        />
+                        <UInput
+                          :model-value="newAttrInputs[row.key]?.from ?? ''"
+                          size="xs"
+                          type="date"
+                          @update:model-value="(v: string | number) => newAttrInputs = { ...newAttrInputs, [row.key]: { from: String(v), branch: newAttrInputs[row.key]?.branch ?? '', payScheme: newAttrInputs[row.key]?.payScheme ?? '' } }"
+                        />
+                        <UButton size="xs" variant="ghost" icon="i-lucide-plus" :disabled="!newAttrInputs[row.key]?.from" @click="addEmployeeAttr(row.key)" />
+                      </div>
+                    </td>
+                    <td class="px-2 py-1.5 text-right">
+                      <UButton size="xs" variant="ghost" icon="i-lucide-trash-2" @click="removeEmployeeEntry(row.key)" />
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p v-if="!employeeMasterRows.length" class="text-sm text-gray-500">
+              社員マスタが空です。給与比較タブで給与明細 CSV を取り込み「未登録 N 名をマスタへ登録」するか、R2 の旧突合マスタから取り込んでください
+            </p>
+            <p class="text-xs text-gray-500 mt-2">
+              保存されるのは識別情報 (会社・給与コード・氏名・乗務員CD) と所属/給与体系だけです — 支給金額・明細は送信しません。
+              所属・給与体系は月次集計 CSV の「所属(マスタ)」「給与体系」列になります (対象月の末日時点で効いている行)。
+            </p>
+          </UCard>
+
+          <!-- 所属/給与体系の履歴モーダル (Refs #367) -->
+          <UModal v-model:open="attrHistoryOpen" :ui="{ content: 'max-w-lg' }">
+            <template #content>
+              <div class="p-6 space-y-3 max-h-[80vh] overflow-y-auto">
+                <h3 class="text-lg font-bold">
+                  所属・給与体系の履歴 — {{ attrHistoryRow?.entry.company }} {{ attrHistoryRow?.entry.payrollCd }} {{ attrHistoryRow?.entry.name }}
+                </h3>
+                <p class="text-xs text-gray-500">新しい順。削除はローカル反映のみ — 「保存」で確定します</p>
+                <table class="w-full text-sm">
+                  <thead>
+                    <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
+                      <th class="px-2 py-1.5">適用開始日</th>
+                      <th class="px-2 py-1.5">所属</th>
+                      <th class="px-2 py-1.5">給与体系</th>
+                      <th class="px-2 py-1.5 w-12" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="attr in attrHistoryRow?.history ?? []"
+                      :key="attr.effectiveFrom"
+                      class="border-b border-gray-100 dark:border-gray-800"
+                    >
+                      <td class="px-2 py-1.5">
+                        {{ attr.effectiveFrom }}
+                        <span v-if="attrHistoryRow?.current?.effectiveFrom === attr.effectiveFrom" class="text-xs text-green-600 dark:text-green-400">({{ fmtYm(month) }} 適用)</span>
+                      </td>
+                      <td class="px-2 py-1.5">{{ attr.branch ?? '-' }}</td>
+                      <td class="px-2 py-1.5">{{ attr.payScheme ?? '-' }}</td>
+                      <td class="px-2 py-1.5 text-right">
+                        <UButton size="xs" variant="ghost" icon="i-lucide-trash-2" @click="removeEmployeeAttr(attrHistoryKey!, attr.effectiveFrom)" />
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div class="flex justify-end">
+                  <UButton size="sm" variant="soft" label="閉じる" @click="attrHistoryOpen = false" />
                 </div>
               </div>
             </template>

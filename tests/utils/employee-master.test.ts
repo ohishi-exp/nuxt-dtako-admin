@@ -5,9 +5,15 @@
 import { describe, it, expect } from 'vitest'
 import {
   buildCdMapEntries,
+  buildDriverAttrIndex,
+  collectAttrRows,
   findUnregistered,
+  normalizeDriverCdKey,
+  removeAttrRow,
   resolveAttrsAt,
+  sortEmployeeEntries,
   splitCdMapKey,
+  upsertAttrRow,
   type EmployeeMasterEntry,
 } from '../../app/utils/employee-master'
 import type { SalaryCsvRow } from '../../app/utils/salary-compare'
@@ -130,5 +136,130 @@ describe('findUnregistered', () => {
 
   it('company が未設定 (空文字) の行は除外する (D1 の PK は company 非空必須)', () => {
     expect(findUnregistered([csvRow({ company: '', cdKey: '7', driverName: '山田太郎' })], [])).toEqual([])
+  })
+})
+
+describe('upsertAttrRow', () => {
+  const base = [
+    { effectiveFrom: '2025-04-01', branch: '支社', payScheme: 'B' },
+    { effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' },
+  ]
+
+  it('新しい適用開始日を追加し昇順に並べ替える', () => {
+    const out = upsertAttrRow(base, { effectiveFrom: '2025-10-01', branch: '営業所', payScheme: 'C' })
+    expect(out.map(a => a.effectiveFrom)).toEqual(['2025-04-01', '2025-10-01', '2026-04-01'])
+  })
+
+  it('同じ適用開始日の行は置換する', () => {
+    const out = upsertAttrRow(base, { effectiveFrom: '2026-04-01', branch: '本社2', payScheme: null })
+    expect(out).toHaveLength(2)
+    expect(out[1]).toEqual({ effectiveFrom: '2026-04-01', branch: '本社2', payScheme: null })
+  })
+
+  it('元の配列は変更しない', () => {
+    const attrs = [...base]
+    upsertAttrRow(attrs, { effectiveFrom: '2027-01-01', branch: null, payScheme: null })
+    expect(attrs).toHaveLength(2)
+  })
+})
+
+describe('removeAttrRow', () => {
+  it('指定した適用開始日の行だけ除く', () => {
+    const out = removeAttrRow(
+      [
+        { effectiveFrom: '2025-04-01', branch: '支社', payScheme: null },
+        { effectiveFrom: '2026-04-01', branch: '本社', payScheme: null },
+      ],
+      '2025-04-01',
+    )
+    expect(out.map(a => a.effectiveFrom)).toEqual(['2026-04-01'])
+  })
+
+  it('一致する行が無ければそのまま', () => {
+    expect(removeAttrRow([], '2025-04-01')).toEqual([])
+  })
+})
+
+describe('collectAttrRows', () => {
+  it('全社員の属性履歴を社員キー込みの平坦な配列へ展開する', () => {
+    const out = collectAttrRows([
+      entry({ company: '株', payrollCd: '7', attrs: [{ effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' }] }),
+      entry({ company: '有', payrollCd: '1', attrs: [] }),
+    ])
+    expect(out).toEqual([
+      { company: '株', payrollCd: '7', effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' },
+    ])
+  })
+
+  it('社員が居なければ空配列', () => {
+    expect(collectAttrRows([])).toEqual([])
+  })
+})
+
+describe('normalizeDriverCdKey', () => {
+  it('数字は前ゼロを落とす', () => {
+    expect(normalizeDriverCdKey('007')).toBe('7')
+    expect(normalizeDriverCdKey(' 12 ')).toBe('12')
+  })
+
+  it('数字でない値はそのまま (fail-soft)', () => {
+    expect(normalizeDriverCdKey('A7')).toBe('A7')
+    expect(normalizeDriverCdKey('')).toBe('')
+  })
+})
+
+describe('buildDriverAttrIndex', () => {
+  it('乗務員CD → 対象月末時点の属性 を引ける (前ゼロ差を吸収)', () => {
+    const index = buildDriverAttrIndex(
+      [entry({
+        driverCd: '007',
+        attrs: [
+          { effectiveFrom: '2025-04-01', branch: '支社', payScheme: 'B' },
+          { effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' },
+        ],
+      })],
+      '2026-07',
+    )
+    expect(index.get('7')).toEqual({ effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' })
+  })
+
+  it('driverCd 未突合・対象月末時点で有効な行が無い社員は載せない', () => {
+    const index = buildDriverAttrIndex(
+      [
+        entry({ payrollCd: '1', driverCd: null, attrs: [{ effectiveFrom: '2020-01-01', branch: '本社', payScheme: null }] }),
+        entry({ payrollCd: '2', driverCd: '50', attrs: [{ effectiveFrom: '2030-01-01', branch: '本社', payScheme: null }] }),
+        entry({ payrollCd: '3', driverCd: '51', attrs: [] }),
+      ],
+      '2026-07',
+    )
+    expect(index.size).toBe(0)
+  })
+
+  it('同一 driverCd に複数社員が突合されていたら先勝ち', () => {
+    const index = buildDriverAttrIndex(
+      [
+        entry({ company: '株', payrollCd: '1', driverCd: '9', attrs: [{ effectiveFrom: '2020-01-01', branch: '先', payScheme: null }] }),
+        entry({ company: '有', payrollCd: '2', driverCd: '9', attrs: [{ effectiveFrom: '2021-01-01', branch: '後', payScheme: null }] }),
+      ],
+      '2026-07',
+    )
+    expect(index.get('9')?.branch).toBe('先')
+  })
+})
+
+describe('sortEmployeeEntries', () => {
+  it('会社ラベル昇順 → 給与コード数値昇順に並べる', () => {
+    const out = sortEmployeeEntries([
+      entry({ company: '有', payrollCd: '2' }),
+      entry({ company: '株', payrollCd: '10' }),
+      entry({ company: '株', payrollCd: '9' }),
+    ])
+    expect(out.map(e => `${e.company}|${e.payrollCd}`)).toEqual(['株|9', '株|10', '有|2'])
+  })
+
+  it('元の配列は変更しない', () => {
+    const employees = [entry({ company: '有', payrollCd: '2' }), entry({ company: '株', payrollCd: '1' })]
+    sortEmployeeEntries(employees)
+    expect(employees[0]!.company).toBe('有')
   })
 })
