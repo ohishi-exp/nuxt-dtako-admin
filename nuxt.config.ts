@@ -30,6 +30,13 @@ export default defineNuxtConfig({
     devProxy: {
       '/restraint-api': { target: 'http://127.0.0.1:8787/restraint-api' },
       '/net780-api': { target: 'http://127.0.0.1:8787/net780-api' },
+      // hybrid dev (dev-login-local-verify skill): AUTH_WORKER binding 依存の
+      // /api/proxy と dev-login callback (/__dev) を並走中の wrangler dev
+      // (front worker, :8787) へ転送し、UI は nuxt dev の HMR で回す。
+      // 編集→反映 90秒 (nuxt build) → 0.1秒 (実測 106ms, 2026-07-25)。
+      // 起動は setup-dev-env.sh --hybrid (skill 同梱) が全自動で行う。
+      '/api/proxy': { target: 'http://127.0.0.1:8787/api/proxy' },
+      '/__dev': { target: 'http://127.0.0.1:8787/__dev' },
     },
   },
 
