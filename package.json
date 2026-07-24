@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@googlemaps/js-api-loader": "^1.16.8",
-    "@ippoan/auth-client": "^0.2.135",
+    "@ippoan/auth-client": "^0.2.148",
     "@nuxt/ui": "^4.5.1",
     "@nuxtjs/tailwindcss": "^6.14.0",
     "dtako-vid-wasm": "file:./vendor/dtako-vid-wasm",
