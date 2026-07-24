@@ -12,6 +12,9 @@ dtako (デジタコ運行データ) 管理画面。Nuxt 4 + Cloudflare Workers (
 ## 規範 (必ず守る)
 
 - **手動 `wrangler deploy` は禁止** (タグリリースの CI 経由のみ)。
+- **D1 migration も手動適用は禁止** — `migrations/` に追加すれば main merge 時に
+  `dtako-scraper-relay-deploy.yml` が `d1 migrations apply --remote` で適用する
+  (記帳は `d1_migrations`。本番は手作業運用だったため `scripts/d1/bootstrap-d1-migrations.sql` で 0001〜0005 を記帳済み扱いにしている)。
 - **開発は必ず `origin/main` ベース worktree**。メイン wt ではソース編集しない。
 - **`DTAKO_ACCOUNTS` / `ETC_ACCOUNTS` は秘密 → wrangler.toml / git に置かず** dashboard の plain Environment Variable で投入し **`keep_vars = true` 必須** (無いと deploy 毎に消える)。未設定時は fail-closed で skip。
 - **Y時間 は async job 化しない (sync HTTP)** — Cloud Run CPU throttling で `tokio::spawn` が完走しない。

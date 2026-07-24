@@ -533,6 +533,15 @@ ZIP (実測 85KB) が返る。詳細は下の運用手順 3. 内の note を参�
    > DTAKO_ACCOUNTS に見つかりません」で再発覚した)。`keep_vars` は top-level
    > only (named environment 配下には書けない) なので wrangler.toml の
    > トップレベルに 1 箇所だけ書けば staging/本番どちらの deploy にも効く。
+
+   > **D1 migration (`migrations/`) もこの workflow が適用する** (Refs #367)。
+   > `wrangler d1 migrations apply --remote` を pull_request 以外 (main push /
+   > tag / workflow_dispatch) で実行する — staging と本番は**同一 D1** なので
+   > main merge の時点で当てる。本番 D1 は元々手作業運用で記帳テーブル
+   > `d1_migrations` が無く、そのまま apply すると 0001 から再実行されて 0003 の
+   > `ALTER TABLE ADD COLUMN` が duplicate column で落ちるため、
+   > `scripts/d1/bootstrap-d1-migrations.sql` (INSERT OR IGNORE、冪等) で
+   > 0001〜0005 を適用済みとして記帳してから apply する。
 2. staging (`SCRAPER_MODE=http` 設定済み) で `DTAKO_ACCOUNTS` に1社だけ登録し、
    実際に csvdata.zip がダウンロードできるか確認してから本番へ展開する
    (本番展開時は top-level `[vars]` に `SCRAPER_MODE = "http"` を追加する PR を出す)
