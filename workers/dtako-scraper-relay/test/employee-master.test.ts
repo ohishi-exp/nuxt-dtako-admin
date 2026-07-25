@@ -1,10 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildCompMapResponse,
-  buildEmployeeMasterImportStatements,
   buildEmployeeMasterResponse,
   buildEmployeeMasterWriteStatements,
-  cdMapEntriesToEmployees,
   EmployeeMasterError,
   normalizeEmployeeMasterPutBody,
   normalizeNameKey,
@@ -188,57 +186,6 @@ describe('buildEmployeeMasterWriteStatements', () => {
   })
 })
 
-describe('buildEmployeeMasterImportStatements', () => {
-  it('INSERT OR IGNORE 文を組み立てる (comp_id つき)', () => {
-    const statements = buildEmployeeMasterImportStatements(
-      [{ company: '株', payrollCd: '7', name: '山田太郎', driverCd: '99' }],
-      '2026-07-23T00:00:00.000Z',
-      '27324455',
-    )
-    expect(statements).toHaveLength(1)
-    expect(statements[0]!.sql).toMatch(/INSERT OR IGNORE INTO employees/)
-    expect(statements[0]!.params).toEqual([
-      '27324455',
-      '株',
-      '7',
-      '山田太郎',
-      '山田太郎',
-      '99',
-      '2026-07-23T00:00:00.000Z',
-    ])
-  })
-})
-
-describe('cdMapEntriesToEmployees', () => {
-  it('3部キー (会社スコープ) はキー自身の会社ラベルを使う', () => {
-    const out = cdMapEntriesToEmployees({ '有|007|山田太郎': '99' })
-    expect(out).toEqual([{ company: '有', payrollCd: '7', name: '山田太郎', driverCd: '99' }])
-  })
-
-  it('2部キー (旧形式、会社ラベル無し) は無条件でスキップする (試験段階の判断、救済しない)', () => {
-    expect(cdMapEntriesToEmployees({ '007|山田太郎': '0099' })).toEqual([])
-  })
-
-  it('3部キーと2部キーが混在していても3部キーだけ変換する', () => {
-    const out = cdMapEntriesToEmployees({ '007|山田太郎': '99', '有|008|鈴木花子': '100' })
-    expect(out).toEqual([{ company: '有', payrollCd: '8', name: '鈴木花子', driverCd: '100' }])
-  })
-
-  it('不正なキー形式 (2部/3部以外・給与コードが数字でない・氏名欠如) は除外する', () => {
-    expect(
-      cdMapEntriesToEmployees({
-        '007': '99', // 1部
-        '株|007|山田太郎|余分': '99', // 4部
-        'abc|山田太郎': '99', // 給与コードが数字でない (2部、いずれにせよスキップ対象)
-        '株|abc|山田太郎': '99', // 給与コードが数字でない (3部)
-        '株|007|': '99', // 3部だが氏名が空
-        '株||山田太郎': '99', // 3部だが給与コードが空
-        '|007|山田太郎': '99', // 3部だが会社ラベルが空
-      }),
-    ).toEqual([])
-  })
-})
-
 describe('buildEmployeeMasterResponse', () => {
   it('employees + attrs を company|payrollCd で結合し、attrs は effectiveFrom 昇順にする', () => {
     const employeeRows: EmployeeD1Row[] = [
@@ -249,8 +196,7 @@ describe('buildEmployeeMasterResponse', () => {
       { company: '株', payroll_cd: '7', effective_from: '2026-04-01', branch: '本社', pay_scheme: 'A' },
       { company: '株', payroll_cd: '7', effective_from: '2025-04-01', branch: '支社', pay_scheme: 'B' },
     ]
-    const res = buildEmployeeMasterResponse(employeeRows, attrRows, false)
-    expect(res.migratable).toBe(false)
+    const res = buildEmployeeMasterResponse(employeeRows, attrRows)
     expect(res.employees).toEqual([
       {
         company: '株',
@@ -266,8 +212,8 @@ describe('buildEmployeeMasterResponse', () => {
     ])
   })
 
-  it('employees が空でも migratable をそのまま反映する', () => {
-    expect(buildEmployeeMasterResponse([], [], true)).toEqual({ employees: [], migratable: true })
+  it('行が無ければ空配列を返す', () => {
+    expect(buildEmployeeMasterResponse([], [])).toEqual({ employees: [] })
   })
 })
 

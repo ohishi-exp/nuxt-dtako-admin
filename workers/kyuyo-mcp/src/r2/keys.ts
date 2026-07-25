@@ -9,12 +9,7 @@
  */
 export { restraintR2Paths } from "../../../dtako-scraper-relay/src/theearth-restraint-client";
 
-export type WageMasterName =
-  | "wage-master"
-  | "min-wage"
-  | "wage-config"
-  | "salary-item-config"
-  | "salary-cd-map";
+export type WageMasterName = "wage-master" | "min-wage" | "wage-config" | "salary-item-config";
 
 /** `dtako-scraper-relay-do.ts::wageMasterR2Paths` と同一ロジック (prefix を引数化)。 */
 export function wageMasterR2Paths(

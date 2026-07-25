@@ -24,7 +24,7 @@ describe("wageMasterR2Paths", () => {
   });
 
   it("works for every WageMasterName variant", () => {
-    for (const name of ["wage-master", "min-wage", "wage-config", "salary-item-config", "salary-cd-map"] as const) {
+    for (const name of ["wage-master", "min-wage", "wage-config", "salary-item-config"] as const) {
       expect(wageMasterR2Paths("restraint", "0100", name).latest).toBe(`restraint/0100/${name}/latest.json`);
     }
   });

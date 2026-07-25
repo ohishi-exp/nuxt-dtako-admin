@@ -3,8 +3,8 @@
  *
  * 保存先は D1 (`employees` / `employee_attrs`、migration 0006)。金額・明細は持たない
  * (識別情報+属性のみ、「支給金額はブラウザから出さない」方針は不変)。R2 突合マスタ
- * (`salary-cd-map`、restraint-wage.ts の normalizeSalaryCdMap) はこのテーブルに吸収する
- * (`cdMapEntriesToEmployees` + `buildEmployeeMasterImportStatements`)。
+ * (`salary-cd-map`) はこのテーブルへ吸収済みで、移行経路は本番確認後に撤去した
+ * (2026-07-25)。
  *
  * D1 行単位 upsert のため、R2 版マスタ (wage-master 等) が持つ楽観排他
  * (baseVersion) / sessionStorage ドラフト退避は不要 (Refs #367 決定事項、廃止)。
@@ -255,81 +255,6 @@ export function buildEmployeeMasterWriteStatements(
   return statements;
 }
 
-/**
- * R2 突合マスタ取り込み (`POST .../import-cd-map`) 用の書き込み文。冪等
- * (`INSERT OR IGNORE`) — 既存の社員マスタ行は上書きしない (取り込みボタンを
- * 何度押しても安全、Refs #367 API 節)。
- */
-export function buildEmployeeMasterImportStatements(
-  employees: EmployeeInput[],
-  nowIso: string,
-  compId: string,
-): D1Statement[] {
-  return employees.map((e) => ({
-    sql: `INSERT OR IGNORE INTO employees (comp_id, company, payroll_cd, name, name_key, driver_cd, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    params: [compId, e.company, e.payrollCd, e.name, normalizeNameKey(e.name), e.driverCd, nowIso],
-  }));
-}
-
-// ---------------------------------------------------------------------------
-// R2 salary-cd-map → employees 行変換 (Refs #367 のマスタ吸収)
-// ---------------------------------------------------------------------------
-
-interface ParsedCdMapKey {
-  /** 3部キーの会社ラベル。2部キー (旧形式、会社ラベル無し) は null。 */
-  company: string | null;
-  payrollCd: string;
-  nameKey: string;
-}
-
-/**
- * "給与コード|氏名" (2部、旧形式) または "会社|給与コード|氏名" (3部) を分解する。
- * restraint-wage.ts の `CD_MAP_KEY_RE` と同じ形式を前提とする。不正な形式は null。
- */
-function parseCdMapKey(key: string): ParsedCdMapKey | null {
-  const parts = key.split("|");
-  if (parts.length === 2) {
-    const [payrollCd, nameKey] = parts;
-    if (!payrollCd || !/^\d+$/.test(payrollCd) || !nameKey) return null;
-    return { company: null, payrollCd, nameKey };
-  }
-  if (parts.length === 3) {
-    const [company, payrollCd, nameKey] = parts;
-    if (!company || !payrollCd || !/^\d+$/.test(payrollCd) || !nameKey) return null;
-    return { company, payrollCd, nameKey };
-  }
-  return null;
-}
-
-/**
- * salary-cd-map の `entries` (2部/3部キー → 乗務員CD) を employees 行に変換する。
- *
- * **2部キー (会社ラベル無し、旧形式) は無条件でスキップする** — 会社ラベルを
- * 補う手段が無い (取り込み UI 側でも決め打てない) ため、推測で別会社に誤登録
- * する事故を避ける。試験運用段階の判断であり、実データ投入前なので旧2部キーの
- * 救済は考えない (必要になれば運用開始後に別途作り直す、2026-07-23 決定)。
- * 3部キー (会社スコープ済み) のみキー先頭の会社ラベルで変換する。
- *
- * salary-cd-map は正規化済み氏名 (空白除去済み) しか保持していない — 原文の氏名
- * は失われているため、変換後の `name` は正規化済み文字列をそのまま使う (取り込み
- * 後、社員マスタタブで手直しできる)。
- */
-export function cdMapEntriesToEmployees(entries: Record<string, string>): EmployeeInput[] {
-  const out: EmployeeInput[] = [];
-  for (const [key, driverCd] of Object.entries(entries)) {
-    const parsed = parseCdMapKey(key);
-    if (!parsed || !parsed.company) continue;
-    out.push({
-      company: parsed.company,
-      payrollCd: String(Number(parsed.payrollCd)),
-      name: parsed.nameKey,
-      driverCd: String(Number(driverCd)),
-    });
-  }
-  return out;
-}
-
 // ---------------------------------------------------------------------------
 // GET 応答の組み立て (pure)
 // ---------------------------------------------------------------------------
@@ -350,7 +275,6 @@ export interface EmployeeMasterEntry {
 
 export interface EmployeeMasterGetResponse {
   employees: EmployeeMasterEntry[];
-  migratable: boolean;
 }
 
 /** D1 `employees` テーブルの生行 (snake_case、`SELECT *` そのまま)。 */
@@ -379,7 +303,6 @@ export interface EmployeeAttrD1Row {
 export function buildEmployeeMasterResponse(
   employeeRows: EmployeeD1Row[],
   attrRows: EmployeeAttrD1Row[],
-  migratable: boolean,
 ): EmployeeMasterGetResponse {
   const attrsByKey = new Map<string, EmployeeAttrRow[]>();
   for (const r of attrRows) {
@@ -396,7 +319,7 @@ export function buildEmployeeMasterResponse(
     driverCd: r.driver_cd,
     attrs: attrsByKey.get(`${r.company}|${r.payroll_cd}`) ?? [],
   }));
-  return { employees, migratable };
+  return { employees };
 }
 
 // ---------------------------------------------------------------------------

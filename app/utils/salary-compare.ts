@@ -308,7 +308,9 @@ export function mergeParsedSalaryCsv(parsedList: ParsedSalaryCsv[]): ParsedSalar
 // 給与システムの社員コードは会社毎に別体系で乗務員CDと一致しないことがある。
 // ---------------------------------------------------------------------------
 
-/** worker 側 normalizeSalaryCdMap と同型。key は salaryCdMapKey の形式。 */
+/** 突合ロジックが読む「キー → 乗務員CD」の索引。key は salaryCdMapKey の形式。
+ * 実体は社員マスタ (D1) から `buildCdMapEntries()` が組み立てる — 旧 R2 マスタ
+ * (`salary-cd-map`) は 2026-07-25 に撤去済みで、この形はもう永続化されない。 */
 export interface SalaryCdMap { entries: Record<string, string> }
 
 /** 氏名の突合用正規化 (NFKC + 空白全除去)。 */
@@ -347,7 +349,7 @@ export function resolveCdKey(row: SalaryCsvRow, cdMap: SalaryCdMap): string {
 
 /**
  * 乗務員CDで突合できなかった CSV 行に対し、氏名の完全一致 (両側で一意) で
- * 乗務員CDを自動提案する。戻り値は salary-cd-map の entries に merge できる形。
+ * 乗務員CDを自動提案する。戻り値は `SalaryCdMap.entries` に merge できる形。
  */
 export function suggestCdMapEntries(
   csvRows: SalaryCsvRow[],
