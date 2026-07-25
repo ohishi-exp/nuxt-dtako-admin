@@ -830,6 +830,13 @@ const compMap = ref<CompMapEntry[]>([])
 const importPayrollCompany = ref('')
 const importingPayroll = ref(false)
 
+// ---- 一番星社員ﾏｽﾀからの突合 (Refs #403) ----
+// 乗務員CD は一番星 [社員ﾏｽﾀ].社員C と同一体系なので、未突合行を氏名で照合して
+// 埋められる。金額は一切関与しない (`GET /api/employees` は社員C/社員N/社員R だけ)。
+const matchingIchiban = ref(false)
+/** 直前の突合で決められなかった行 (人が判断する分)。 */
+const ichibanUnresolved = ref<IchibanMatchPlan | null>(null)
+
 async function loadCompMap() {
   if (!session.value) return
   try {
@@ -855,6 +862,41 @@ watch(importPayrollOptions, (options) => {
     importPayrollCompany.value = options[0]?.value ?? ''
   }
 }, { immediate: true })
+
+/**
+ * 一番星社員ﾏｽﾀで未突合行の社員CD を埋める (ローカル反映 → 「保存」で確定、Refs #403)。
+ *
+ * proxy の base に `/api` が含まれないため `/api/ichiban/api/employees` と二重に書く
+ * (`/api/ichiban/health` だけは rust 側が root ルートなので例外)。
+ */
+async function matchFromIchiban() {
+  const compId = importTargetComp.value
+  if (!compId) return
+  matchingIchiban.value = true
+  pageError.value = ''
+  try {
+    const res = await $fetch<{ data: IchibanEmployeeRow[] }>('/api/ichiban/api/employees')
+    const entries = employeeMasterByComp.value[compId] ?? []
+    const plan = planIchibanMatch(res.data ?? [], entries)
+    const personCdByKey = new Map(plan.matched.map(m => [`${m.company}|${m.payrollCd}`, m.personCd]))
+    setEmployeeMasterEntries(compId, entries.map((e) => {
+      const personCd = personCdByKey.get(`${e.company}|${e.payrollCd}`)
+      return personCd ? { ...e, driverCd: personCd } : e
+    }))
+
+    ichibanUnresolved.value = plan.ambiguous.length || plan.notFound.length ? plan : null
+    employeeMasterMessage.value
+      = `一番星の社員ﾏｽﾀから ${plan.matched.length} 名の社員CD を埋めました `
+        + `(同名複数 ${plan.ambiguous.length} 名 / 一番星に無し ${plan.notFound.length} 名 は手入力してください)。`
+        + '「保存」で確定します'
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+  finally {
+    matchingIchiban.value = false
+  }
+}
 
 /** 給与DBの社員一覧を社員マスタへ取り込む (ローカル反映 → 「保存」で確定)。 */
 async function importFromPayrollDb() {
@@ -1133,7 +1175,7 @@ function patchEmployeeEntry(key: string, patch: Partial<EmployeeMasterEntry>) {
 function setEmployeeDriverCd(key: string, value: string) {
   const trimmed = value.trim()
   if (trimmed && !/^\d{1,8}$/.test(trimmed)) {
-    employeeMasterMessage.value = `乗務員CD は数字 (最大8桁) で入力してください (${trimmed})`
+    employeeMasterMessage.value = `社員CD は数字 (最大8桁) で入力してください (${trimmed})`
     return
   }
   patchEmployeeEntry(key, { driverCd: trimmed ? String(Number(trimmed)) : null })
@@ -2503,6 +2545,49 @@ watch([activeTab, month, session], () => {
             </p>
           </UCard>
 
+          <!-- 一番星社員ﾏｽﾀから社員CD を埋める (Refs #403) -->
+          <UCard class="border-sky-300 dark:border-sky-800">
+            <div class="flex flex-wrap items-center gap-3">
+              <span class="text-sm font-medium">一番星から突合</span>
+              <span class="text-xs text-gray-500">社員CD が空の行を氏名で照合します</span>
+              <div class="flex-1" />
+              <UButton
+                size="xs"
+                icon="i-lucide-link"
+                label="一番星から突合"
+                :loading="matchingIchiban"
+                :disabled="!importTargetComp"
+                @click="matchFromIchiban"
+              />
+            </div>
+            <p class="text-xs text-gray-500 mt-2">
+              社員CD は一番星の <code>社員ﾏｽﾀ.社員C</code> と同じ番号体系なので、非乗務員 (役員・事務員・作業員) も突合できます。
+              取得するのは社員C・氏名だけです (金額は API の応答に含まれません)。
+              <b>氏名が一意に決まる行だけ</b>自動で埋めます — 同名が複数いる行と一番星に無い行は下に一覧で出すので手入力してください。
+              既に社員CD が入っている行は上書きしません。取り込み後「保存」で確定してください。
+            </p>
+            <div v-if="ichibanUnresolved" class="mt-3 text-xs space-y-2">
+              <div v-if="ichibanUnresolved.ambiguous.length">
+                <p class="font-medium text-amber-700 dark:text-amber-400">
+                  同名が複数いて決められません ({{ ichibanUnresolved.ambiguous.length }} 名) — 候補から選んで手入力してください
+                </p>
+                <ul class="list-disc list-inside text-gray-600 dark:text-gray-300">
+                  <li v-for="a in ichibanUnresolved.ambiguous" :key="`${a.company}|${a.payrollCd}`">
+                    {{ a.company }} {{ a.payrollCd }} {{ a.name }} → 候補 {{ a.candidates.join(' / ') }}
+                  </li>
+                </ul>
+              </div>
+              <div v-if="ichibanUnresolved.notFound.length">
+                <p class="font-medium text-gray-600 dark:text-gray-300">
+                  一番星に見つかりません ({{ ichibanUnresolved.notFound.length }} 名) — 異体字・カタカナ表記の違い、または一番星未登録
+                </p>
+                <p class="text-gray-500">
+                  {{ ichibanUnresolved.notFound.map(n => `${n.company} ${n.payrollCd} ${n.name}`).join('、') }}
+                </p>
+              </div>
+            </div>
+          </UCard>
+
           <UCard>
             <template #header>
               <div class="flex flex-wrap items-center gap-3">
@@ -2537,7 +2622,7 @@ watch([activeTab, month, session], () => {
                     <th class="px-2 py-2">会社</th>
                     <th class="px-2 py-2">給与コード</th>
                     <th class="px-2 py-2">氏名</th>
-                    <th class="px-2 py-2">乗務員CD</th>
+                    <th class="px-2 py-2" title="一番星 社員ﾏｽﾀ.社員C と同一体系。乗務員以外にも番号がある">社員CD</th>
                     <th class="px-2 py-2">所属 ({{ fmtYm(month) }})</th>
                     <th class="px-2 py-2">給与体系</th>
                     <th class="px-2 py-2">適用開始日</th>
@@ -2617,7 +2702,7 @@ watch([activeTab, month, session], () => {
               社員マスタが空です。上の「給与DBから取り込み」で登録するか、給与比較タブで給与明細 CSV を取り込み「未登録 N 名をマスタへ登録」してください
             </p>
             <p class="text-xs text-gray-500 mt-2">
-              保存されるのは識別情報 (会社・給与コード・氏名・乗務員CD) と所属/給与体系だけです — 支給金額・明細は送信しません。
+              保存されるのは識別情報 (会社・給与コード・氏名・社員CD) と所属/給与体系だけです — 支給金額・明細は送信しません。
               所属・給与体系は月次集計 CSV の「所属(マスタ)」「給与体系」列になります (対象月の末日時点で効いている行)。
               社員マスタは**会社ID (dtako) ごと**に保存され、「全社」表示では権限のある会社をまとめて編集できます — 保存は会社ごとに分けて送られます。
             </p>

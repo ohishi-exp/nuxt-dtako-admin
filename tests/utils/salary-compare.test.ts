@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest'
 import type { WageReportRow } from '../../app/utils/restraint-wage-view'
 import {
+  compareCompanyLabel,
   compareSalaryMonth,
   mergeSalaryCsvRows,
   computeOvertimePayAtRate,
@@ -780,6 +781,16 @@ describe('compareSalaryMonth', () => {
 // 複数会社の給与行の合算 (1 人 = 社員C に複数の給与社員CD、Refs #403)
 // ---------------------------------------------------------------------------
 
+describe('compareCompanyLabel', () => {
+  it('コードポイント順で比較する (locale に依らない)', () => {
+    // 有 U+6709 (26377) < 株 U+682A (26666)。ICU の 'ja' 照合とは順が違うが、
+    // 環境で結果が変わらないことを優先する (CI Linux と開発機 Windows で逆転した)
+    expect(compareCompanyLabel('有', '株')).toBe(-1)
+    expect(compareCompanyLabel('株', '有')).toBe(1)
+    expect(compareCompanyLabel('株', '株')).toBe(0)
+  })
+})
+
 describe('mergeSalaryCsvRows', () => {
   it('1 件ならその行をそのまま返す', () => {
     const row = csvRow({ amounts: { 基本給: 100 } })
@@ -847,7 +858,8 @@ describe('compareSalaryMonth — 複数会社の合算 (Refs #403)', () => {
     expect(out.rows).toHaveLength(1)
     expect(out.rows[0]!.csvBase).toBe(300000)
     expect(out.rows[0]!.csvOvertime).toBe(50000)
-    // 会社ラベル昇順で内訳を持つ (入力順に依らない)
+    // 会社ラベル昇順 (コードポイント順: 大 U+5927 < 有 U+6709) で内訳を持つ。
+    // 入力順に依らない — localeCompare だと CI と開発機で順が逆になる
     expect(out.rows[0]!.mergedFrom).toEqual([
       { company: '大石運輸倉庫', driverCd: '1644' },
       { company: '有限会社', driverCd: '1649' },

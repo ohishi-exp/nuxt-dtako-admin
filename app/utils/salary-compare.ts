@@ -554,6 +554,19 @@ export function computeOvertimePayAtRate(
 }
 
 /**
+ * 会社ラベルの**決定的な**比較 (コードポイント順)。
+ *
+ * `localeCompare` は使わない — ICU の照合順が環境で違い、`株` と `有` の順が
+ * Windows と CI (Linux) で逆になる。合算の内訳順や属性の連結順が環境依存に
+ * なると「不定性を消す」という目的自体が壊れるため、ここは locale を持ち込まない。
+ * 人向けの表示順 (社員マスタ一覧) は `sortEmployeeEntries` が `'ja'` で行う。
+ */
+export function compareCompanyLabel(a: string, b: string): number {
+  if (a < b) return -1
+  return a > b ? 1 : 0
+}
+
+/**
  * 同一人物 (氏名一致) の複数会社の給与行を 1 行に合算する (Refs #403)。
  * 呼び出し側は会社ラベル昇順に並べた配列を渡す (結果を決定的にするため)。
  *
@@ -676,7 +689,7 @@ export function compareSalaryMonth(
       byCd.set(key, { row: grouped[0]!, mergedFrom: null })
       continue
     }
-    const sorted = [...grouped].sort((a, b) => a.company.localeCompare(b.company))
+    const sorted = [...grouped].sort((a, b) => compareCompanyLabel(a.company, b.company))
     const merged = mergeSalaryCsvRows(sorted)
     byCd.set(key, { row: merged, mergedFrom: sorted.map(r => ({ company: r.company, driverCd: r.driverCd })) })
     const rateNote = merged.rates.base === null || merged.rates.overtime === null

@@ -539,11 +539,32 @@ N:1 が現実に存在する (本番で 5 件、うち社員C 1619 鵜瀬裕一�
   以前は複数会社が同じ乗務員CDに解決されるだけで隔離し、`rows`/`csvOnly` の
   両方から落としていたため**乗務員が最低賃金チェックから消えていた**
 - **列は増やしていない** — 社員C 専用列 (`person_cd`) は作らず `driver_cd` を全社員に
-  流用する (#403 で案 A 採用、migration なし)。画面ラベルは「社員CD」
+  流用する (#403 で案 A 採用、migration なし)。社員マスタタブの列見出しは「社員CD」
+  (月次集計・給与比較の「乗務員CD」は dtako 乗務員の意味なのでそのまま)
+
+#### 「一番星から突合」(社員マスタタブ)
+
+未突合行の社員CD を一番星社員ﾏｽﾀから氏名で埋める (`planIchibanMatch`、pure)。
+読み取りは `GET /api/employees` (rust-ichibanboshi #74、社員C/社員N/社員R のみ =
+**金額は応答に含まれない**)。
+
+- **fetch パスは `/api/ichiban/api/employees`** — proxy の base に `/api` が
+  含まれないので**二重に書く**。`/api/ichiban/health` だけは rust 側が root
+  ルートなので例外。列一覧は `/api/ichiban/api/schema/columns?table=社員ﾏｽﾀ`
+- **氏名が一意な行だけ**自動で埋める。同名複数・一番星に無しは画面に一覧表示して
+  手入力に回す。**既に社員CD が入っている行は上書きしない**
+- **番号帯で一番星の行を落としてはいけない** — 9000 番台は拠点 (`9101` 佐賀(営)、
+  `9107` 帯広(営)、`9109` 釧路営業所)・法人 (`9102` 佐賀大石、`9997` 大石畜産)・
+  集計枠 (`9998` フリー、`9999` 収支用) と**実在社員 (`9001` 加納和広北海大運)** の
+  混成。落とすのは `×` 始まりの無効行だけで、**`×` は社員N と社員R で付き方が
+  揃っていない** (`9903` は社員N が `×松江隆` で社員R は `松江隆`) ので両方見る
+- 一番星社員ﾏｽﾀに**給与コード列は無い**ため突合鍵は氏名だけ。NFKC は異体字を
+  統合しないので `鵜瀬/鵜瀨`・`入口六冶/六治` は取りこぼす — **手入力で運用する**
+  方針 (#403、件数が増えたら `normalizeNameKey` に対応表を入れる)
 
 | ファイル | 役割 |
 |---|---|
-| `app/utils/employee-master.ts` | 型 + `buildCdMapEntries`/`findUnregistered`/`resolveAttrsAt`/`splitCdMapKey` + タブ用 `upsertAttrRow`/`removeAttrRow`/`collectAttrRows`/`buildDriverAttrIndex`/`joinDriverAttr`/`normalizeDriverCdKey`/`sortEmployeeEntries` (pure、100% gate) |
+| `app/utils/employee-master.ts` | 型 + `buildCdMapEntries`/`findUnregistered`/`resolveAttrsAt`/`splitCdMapKey` + タブ用 `upsertAttrRow`/`removeAttrRow`/`collectAttrRows`/`buildDriverAttrIndex`/`joinDriverAttr`/`normalizeDriverCdKey`/`sortEmployeeEntries` + 取り込み `planPayrollDbImport`/`planIchibanMatch` (pure、100% gate) |
 | `workers/dtako-scraper-relay/src/employee-master.ts` | PUT検証・D1文組み立て・月末解決 (pure、100% gate) |
 
 - 対象月は「年セレクタ + 月タブ」(`GET archive/months` でアーカイブ存在月を列挙、
