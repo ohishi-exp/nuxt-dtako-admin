@@ -105,9 +105,11 @@ import {
 import {
   MHLW_NATIONAL_LIST_URL,
   MinWageImportError,
+  PREFECTURES,
   mergeMinWageRows,
   parseMhlwNationalList,
 } from "./min-wage-import";
+import { resolveBranchPrefecture, suggestBranchGroups } from "./branch-prefecture";
 import {
   buildCompMapResponse,
   buildEmployeeMasterResponse,
@@ -1687,6 +1689,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/min-wage/import-mhlw" && request.method === "POST") {
       return this.handleMinWageImport(record!, request);
     }
+    if (url.pathname === "/restraint-api/min-wage/branches" && request.method === "GET") {
+      return this.handleMinWageBranches(record!);
+    }
     if (url.pathname === "/restraint-api/wage-config") {
       return this.handleWageMasterRoute(record!, request, "wage-config", (raw) => normalizeWageConfig(raw));
     }
@@ -1943,6 +1948,76 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       unchanged: merged.unchanged,
       data: merged.master,
       version: result.sha256,
+    });
+  }
+
+  /**
+   * GET /restraint-api/min-wage/branches — 社員マスタの所属を拠点候補にまとめ、
+   * 現在の都道府県マッピングと突き合わせて返す (Refs #409 Phase 2)。
+   *
+   * 画面はこれを描くだけでよく、拠点のまとめ方 (空白揺れ・前方一致) の知識を
+   * フロントに持たせない。**都道府県は推定しない** — `prefecture` が null の
+   * グループは未設定のまま返し、人が選ぶ。
+   */
+  private async handleMinWageBranches(record: TheearthSessionRecord): Promise<Response> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return dvrJsonError(503, "社員マスタ (DTAKO_DB) が未設定です");
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定のためマスタを読めません");
+
+    let master: MinWageMaster = { prefectures: {}, branchToPrefecture: {} };
+    const obj = await bucket.get(this.wageMasterR2Paths(record.compId, "min-wage").latest);
+    if (obj) {
+      try {
+        master = normalizeMinWageMaster(JSON.parse(await obj.text()));
+      } catch (err) {
+        return dvrJsonError(502, `min-wage の保存データが壊れています (${describeUnknownError(err)})`);
+      }
+    }
+
+    let attrRows: EmployeeAttrD1Row[];
+    try {
+      const result = await db
+        .prepare(
+          `SELECT company, payroll_cd, effective_from, branch, pay_scheme FROM employee_attrs WHERE comp_id = ?`,
+        )
+        .bind(record.compId)
+        .all<EmployeeAttrD1Row>();
+      attrRows = result.results ?? [];
+    } catch (err) {
+      console.error(JSON.stringify({ min_wage_branches: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "社員マスタの取得に失敗しました");
+    }
+
+    // 所属ごとの人数 (同じ社員が履歴を複数持つので社員単位で数える)
+    const employeesByBranch = new Map<string, Set<string>>();
+    for (const row of attrRows) {
+      if (!row.branch) continue;
+      const set = employeesByBranch.get(row.branch) ?? new Set<string>();
+      set.add(`${row.company}|${row.payroll_cd}`);
+      employeesByBranch.set(row.branch, set);
+    }
+
+    const groups = suggestBranchGroups([...employeesByBranch.keys()]).map((group) => {
+      const employees = new Set<string>();
+      for (const branch of group.branches) {
+        for (const id of employeesByBranch.get(branch) ?? []) employees.add(id);
+      }
+      const lookup = resolveBranchPrefecture(master.branchToPrefecture, group.prefix);
+      return {
+        prefix: group.prefix,
+        branches: group.branches,
+        employees: employees.size,
+        prefecture: lookup.prefecture,
+        matchedKey: lookup.matchedKey,
+      };
+    });
+
+    return Response.json({
+      groups,
+      unmapped: groups.filter((g) => g.prefecture === null).length,
+      prefectures: PREFECTURES,
+      minWagePrefectures: Object.keys(master.prefectures).length,
     });
   }
 
