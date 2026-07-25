@@ -54,10 +54,39 @@ export function devViewerCompIds(raw: string): Set<string> {
   );
 }
 
+/** 全会社を見られる role。auth-worker の introspect が JWT の `role` claim を
+ * そのまま返す (`{active, tenant_id, role, email, sub, exp}`)。
+ *
+ * dtako の admin はグループ全体の管理者 1 人だけで、別テナント側に admin を
+ * 増やす予定は無い (2026-07-25 ユーザー確認) ため、role だけで全社許可にする。
+ * これが変わる時は「全社を許可する tenant_id の allowlist」に切り替えること。 */
+export const VIEWER_ADMIN_ROLE = "admin";
+
+/** viewer 経路で触れる comp_id 集合。
+ * admin は **DTAKO_ACCOUNTS に載っている会社すべて** (載っていない comp は不可 —
+ * ヘッダ偽装で未登録の会社を触らせない)、それ以外は自 tenant の会社のみ。 */
+export function allowedViewerComps(
+  accounts: DtakoAccountEntry[],
+  tenantId: string,
+  role: string | undefined,
+): Set<string> {
+  if (role === VIEWER_ADMIN_ROLE) {
+    return new Set(accounts.map((a) => a.comp_id).filter((c): c is string => !!c));
+  }
+  return viewerCompIdsForTenant(accounts, tenantId);
+}
+
 /** `compId` と同じ tenant に属する comp_id 集合 (自分自身を含む)。
  * 社員マスタの会社横断表示・会社対応表 (comp-map) を「同じテナントの会社だけ」に
  * 絞るために使う (Refs #367)。DTAKO_ACCOUNTS に無い comp は空集合 (fail-closed)。 */
-export function compIdsInSameTenant(accounts: DtakoAccountEntry[], compId: string): Set<string> {
+export function compIdsInSameTenant(
+  accounts: DtakoAccountEntry[],
+  compId: string,
+  role?: string,
+): Set<string> {
+  if (role === VIEWER_ADMIN_ROLE) {
+    return new Set(accounts.map((a) => a.comp_id).filter((c): c is string => !!c));
+  }
   const tenantId = accounts.find((a) => a.comp_id === compId)?.tenant_id ?? "";
   return viewerCompIdsForTenant(accounts, tenantId);
 }

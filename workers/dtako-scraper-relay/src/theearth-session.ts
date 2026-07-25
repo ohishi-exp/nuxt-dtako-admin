@@ -21,6 +21,11 @@ export interface TheearthSessionRecord {
   cookies: Array<[string, string]>;
   createdAt: number;
   expiresAt: number;
+  /** viewer 経路 (auth-worker JWT) で認可した時の role。`admin` はグループ全社を
+   * 見られる (Refs #367)。theearth ログイン由来のセッションでは undefined。
+   * DO storage に保存されるのは theearth セッションだけで、viewer は毎リクエスト
+   * 組み立てるため永続化されない。 */
+  viewerRole?: string;
 }
 
 export interface TheearthRouting {
