@@ -201,41 +201,55 @@ export interface D1Statement {
 /**
  * 検証済み PUT body を D1 `batch()` に渡す prepared statement 列に変換する。
  * last-write-wins (楽観排他なし、Refs #367)。
+ *
+ * 全文が `comp_id` (dtako テナント) を含む — 社員マスタはテナント跨ぎで
+ * 見えてはいけない (migration 0007、Refs #367)。呼び出し側は必ず
+ * セッションの compId を渡すこと (クライアント入力を信用しない)。
  */
-export function buildEmployeeMasterWriteStatements(body: EmployeeMasterPutBody, nowIso: string): D1Statement[] {
+export function buildEmployeeMasterWriteStatements(
+  body: EmployeeMasterPutBody,
+  nowIso: string,
+  compId: string,
+): D1Statement[] {
   const statements: D1Statement[] = [];
   for (const e of body.employees) {
     statements.push({
-      sql: `INSERT INTO employees (company, payroll_cd, name, name_key, driver_cd, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(company, payroll_cd) DO UPDATE SET
+      sql: `INSERT INTO employees (comp_id, company, payroll_cd, name, name_key, driver_cd, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(comp_id, company, payroll_cd) DO UPDATE SET
               name = excluded.name,
               name_key = excluded.name_key,
               driver_cd = excluded.driver_cd,
               updated_at = excluded.updated_at`,
-      params: [e.company, e.payrollCd, e.name, normalizeNameKey(e.name), e.driverCd, nowIso],
+      params: [compId, e.company, e.payrollCd, e.name, normalizeNameKey(e.name), e.driverCd, nowIso],
     });
   }
   for (const a of body.attrs) {
     statements.push({
-      sql: `INSERT INTO employee_attrs (company, payroll_cd, effective_from, branch, pay_scheme)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(company, payroll_cd, effective_from) DO UPDATE SET
+      sql: `INSERT INTO employee_attrs (comp_id, company, payroll_cd, effective_from, branch, pay_scheme)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(comp_id, company, payroll_cd, effective_from) DO UPDATE SET
               branch = excluded.branch,
               pay_scheme = excluded.pay_scheme`,
-      params: [a.company, a.payrollCd, a.effectiveFrom, a.branch, a.payScheme],
+      params: [compId, a.company, a.payrollCd, a.effectiveFrom, a.branch, a.payScheme],
     });
   }
   for (const k of body.deleteAttrs) {
     statements.push({
-      sql: `DELETE FROM employee_attrs WHERE company = ? AND payroll_cd = ? AND effective_from = ?`,
-      params: [k.company, k.payrollCd, k.effectiveFrom],
+      sql: `DELETE FROM employee_attrs WHERE comp_id = ? AND company = ? AND payroll_cd = ? AND effective_from = ?`,
+      params: [compId, k.company, k.payrollCd, k.effectiveFrom],
     });
   }
   for (const k of body.deleteEmployees) {
     statements.push(
-      { sql: `DELETE FROM employee_attrs WHERE company = ? AND payroll_cd = ?`, params: [k.company, k.payrollCd] },
-      { sql: `DELETE FROM employees WHERE company = ? AND payroll_cd = ?`, params: [k.company, k.payrollCd] },
+      {
+        sql: `DELETE FROM employee_attrs WHERE comp_id = ? AND company = ? AND payroll_cd = ?`,
+        params: [compId, k.company, k.payrollCd],
+      },
+      {
+        sql: `DELETE FROM employees WHERE comp_id = ? AND company = ? AND payroll_cd = ?`,
+        params: [compId, k.company, k.payrollCd],
+      },
     );
   }
   return statements;
@@ -246,11 +260,15 @@ export function buildEmployeeMasterWriteStatements(body: EmployeeMasterPutBody, 
  * (`INSERT OR IGNORE`) — 既存の社員マスタ行は上書きしない (取り込みボタンを
  * 何度押しても安全、Refs #367 API 節)。
  */
-export function buildEmployeeMasterImportStatements(employees: EmployeeInput[], nowIso: string): D1Statement[] {
+export function buildEmployeeMasterImportStatements(
+  employees: EmployeeInput[],
+  nowIso: string,
+  compId: string,
+): D1Statement[] {
   return employees.map((e) => ({
-    sql: `INSERT OR IGNORE INTO employees (company, payroll_cd, name, name_key, driver_cd, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?)`,
-    params: [e.company, e.payrollCd, e.name, normalizeNameKey(e.name), e.driverCd, nowIso],
+    sql: `INSERT OR IGNORE INTO employees (comp_id, company, payroll_cd, name, name_key, driver_cd, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    params: [compId, e.company, e.payrollCd, e.name, normalizeNameKey(e.name), e.driverCd, nowIso],
   }));
 }
 

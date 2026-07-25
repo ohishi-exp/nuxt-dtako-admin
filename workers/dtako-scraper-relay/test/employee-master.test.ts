@@ -153,37 +153,58 @@ describe('buildEmployeeMasterWriteStatements', () => {
       deleteAttrs: [{ company: '有', payrollCd: '1', effectiveFrom: '2025-01-01' }],
       deleteEmployees: [{ company: '有', payrollCd: '2' }],
     })
-    const statements = buildEmployeeMasterWriteStatements(body, '2026-07-23T00:00:00.000Z')
+    const statements = buildEmployeeMasterWriteStatements(body, '2026-07-23T00:00:00.000Z', '27324455')
     expect(statements).toHaveLength(5)
     expect(statements[0]!.sql).toMatch(/INSERT INTO employees/)
-    expect(statements[0]!.params).toEqual(['株', '7', '山田 太郎', '山田太郎', '99', '2026-07-23T00:00:00.000Z'])
+    expect(statements[0]!.params).toEqual(['27324455', '株', '7', '山田 太郎', '山田太郎', '99', '2026-07-23T00:00:00.000Z'])
     expect(statements[1]!.sql).toMatch(/INSERT INTO employee_attrs/)
-    expect(statements[1]!.params).toEqual(['株', '7', '2026-04-01', '本社', 'A'])
-    expect(statements[2]!.sql).toMatch(/DELETE FROM employee_attrs WHERE company/)
-    expect(statements[2]!.params).toEqual(['有', '1', '2025-01-01'])
+    expect(statements[1]!.params).toEqual(['27324455', '株', '7', '2026-04-01', '本社', 'A'])
+    expect(statements[2]!.sql).toMatch(/DELETE FROM employee_attrs WHERE comp_id/)
+    expect(statements[2]!.params).toEqual(['27324455', '有', '1', '2025-01-01'])
     // deleteEmployees は attrs → employees の順で 2 文
-    expect(statements[3]!.sql).toMatch(/DELETE FROM employee_attrs WHERE company = \? AND payroll_cd = \?$/)
-    expect(statements[3]!.params).toEqual(['有', '2'])
+    expect(statements[3]!.sql).toMatch(/DELETE FROM employee_attrs WHERE comp_id = \? AND company = \? AND payroll_cd = \?$/)
+    expect(statements[3]!.params).toEqual(['27324455', '有', '2'])
     expect(statements[4]!.sql).toMatch(/DELETE FROM employees/)
-    expect(statements[4]!.params).toEqual(['有', '2'])
+    expect(statements[4]!.params).toEqual(['27324455', '有', '2'])
+  })
+
+  it('全文が comp_id をバインドする (テナント跨ぎで書かない、Refs #367)', () => {
+    const body = normalizeEmployeeMasterPutBody({
+      employees: [{ company: '株', payrollCd: '7', name: '山田太郎', driverCd: null }],
+      attrs: [{ company: '株', payrollCd: '7', effectiveFrom: '2026-04-01', branch: null, payScheme: null }],
+      deleteAttrs: [{ company: '有', payrollCd: '1', effectiveFrom: '2025-01-01' }],
+      deleteEmployees: [{ company: '有', payrollCd: '2' }],
+    })
+    const statements = buildEmployeeMasterWriteStatements(body, '2026-07-23T00:00:00.000Z', '75700192')
+    expect(statements.every(s => s.sql.includes('comp_id'))).toBe(true)
+    expect(statements.every(s => s.params[0] === '75700192')).toBe(true)
   })
 
   it('空 body は空配列', () => {
-    expect(buildEmployeeMasterWriteStatements(normalizeEmployeeMasterPutBody({}), '2026-01-01T00:00:00.000Z')).toEqual(
-      [],
-    )
+    expect(
+      buildEmployeeMasterWriteStatements(normalizeEmployeeMasterPutBody({}), '2026-01-01T00:00:00.000Z', '27324455'),
+    ).toEqual([])
   })
 })
 
 describe('buildEmployeeMasterImportStatements', () => {
-  it('INSERT OR IGNORE 文を組み立てる', () => {
+  it('INSERT OR IGNORE 文を組み立てる (comp_id つき)', () => {
     const statements = buildEmployeeMasterImportStatements(
       [{ company: '株', payrollCd: '7', name: '山田太郎', driverCd: '99' }],
       '2026-07-23T00:00:00.000Z',
+      '27324455',
     )
     expect(statements).toHaveLength(1)
     expect(statements[0]!.sql).toMatch(/INSERT OR IGNORE INTO employees/)
-    expect(statements[0]!.params).toEqual(['株', '7', '山田太郎', '山田太郎', '99', '2026-07-23T00:00:00.000Z'])
+    expect(statements[0]!.params).toEqual([
+      '27324455',
+      '株',
+      '7',
+      '山田太郎',
+      '山田太郎',
+      '99',
+      '2026-07-23T00:00:00.000Z',
+    ])
   })
 })
 

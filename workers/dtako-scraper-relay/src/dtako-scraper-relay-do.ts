@@ -1663,7 +1663,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return this.handleEmployeeMasterGet(record!);
     }
     if (url.pathname === "/restraint-api/employee-master" && request.method === "PUT") {
-      return this.handleEmployeeMasterPut(request);
+      return this.handleEmployeeMasterPut(request, record!);
     }
     if (url.pathname === "/restraint-api/employee-master/import-cd-map" && request.method === "POST") {
       return this.handleEmployeeMasterImportCdMap(record!);
@@ -1865,15 +1865,25 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /** GET /restraint-api/employee-master — 社員マスタ全件 + migratable フラグ。
-   * D1 (DTAKO_DB) 未 binding は 503。 */
+   * D1 (DTAKO_DB) 未 binding は 503。
+   *
+   * **comp スコープ必須** (migration 0007、Refs #367): dtako テナントは複数あり
+   * (27324455 = 給与DB 0100/0200/0300、75700192 = 0400)、社員の識別情報を
+   * テナント跨ぎで見せてはいけない。comp はセッション record から取る。 */
   private async handleEmployeeMasterGet(record: TheearthSessionRecord): Promise<Response> {
     const db = this.env.DTAKO_DB;
     if (!db) return dvrJsonError(503, "社員マスタ (DTAKO_DB) が未設定です");
     try {
       const [employeeResult, attrResult] = await Promise.all([
-        db.prepare(`SELECT company, payroll_cd, name, driver_cd FROM employees`).all<EmployeeD1Row>(),
         db
-          .prepare(`SELECT company, payroll_cd, effective_from, branch, pay_scheme FROM employee_attrs`)
+          .prepare(`SELECT company, payroll_cd, name, driver_cd FROM employees WHERE comp_id = ?`)
+          .bind(record.compId)
+          .all<EmployeeD1Row>(),
+        db
+          .prepare(
+            `SELECT company, payroll_cd, effective_from, branch, pay_scheme FROM employee_attrs WHERE comp_id = ?`,
+          )
+          .bind(record.compId)
           .all<EmployeeAttrD1Row>(),
       ]);
       const employeeRows = employeeResult.results ?? [];
@@ -1886,8 +1896,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /** PUT /restraint-api/employee-master — 差分 upsert/削除。last-write-wins
-   * (楽観排他なし — R2 版マスタと異なり D1 行単位 upsert のため不要、Refs #367)。 */
-  private async handleEmployeeMasterPut(request: Request): Promise<Response> {
+   * (楽観排他なし — R2 版マスタと異なり D1 行単位 upsert のため不要、Refs #367)。
+   * 書き込み先の comp はセッション record から取る (body の値は見ない)。 */
+  private async handleEmployeeMasterPut(request: Request, record: TheearthSessionRecord): Promise<Response> {
     const db = this.env.DTAKO_DB;
     if (!db) return dvrJsonError(503, "社員マスタ (DTAKO_DB) が未設定です");
     let raw: unknown;
@@ -1903,7 +1914,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       if (err instanceof EmployeeMasterError) return dvrJsonError(400, err.message);
       throw err;
     }
-    const statements = buildEmployeeMasterWriteStatements(body, new Date().toISOString());
+    const statements = buildEmployeeMasterWriteStatements(body, new Date().toISOString(), record.compId);
     if (statements.length === 0) return Response.json({ saved: true, changed: 0 });
     try {
       await db.batch(statements.map((s) => db.prepare(s.sql).bind(...s.params)));
@@ -1935,7 +1946,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return dvrJsonError(502, `突合マスタが壊れています (${describeUnknownError(err)})`);
     }
     const employees = cdMapEntriesToEmployees(cdMap.entries);
-    const statements = buildEmployeeMasterImportStatements(employees, new Date().toISOString());
+    const statements = buildEmployeeMasterImportStatements(employees, new Date().toISOString(), record.compId);
     if (statements.length === 0) return Response.json({ imported: 0 });
     try {
       await db.batch(statements.map((s) => db.prepare(s.sql).bind(...s.params)));
