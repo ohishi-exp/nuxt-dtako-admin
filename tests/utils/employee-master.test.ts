@@ -8,10 +8,12 @@ import {
   buildDriverAttrIndex,
   collectAttrRows,
   findUnregistered,
+  joinDriverAttr,
   normalizeAttrText,
   normalizeCompanyLabel,
   normalizeDriverCdKey,
   payScheme,
+  planIchibanMatch,
   planPayrollDbImport,
   removeAttrRow,
   resolveAttrsAt,
@@ -226,7 +228,9 @@ describe('buildDriverAttrIndex', () => {
       })],
       '2026-07',
     )
-    expect(index.get('7')).toEqual({ effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' })
+    expect(index.get('7')).toEqual([
+      { company: '株', attrs: { effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' } },
+    ])
   })
 
   it('driverCd 未突合・対象月末時点で有効な行が無い社員は載せない', () => {
@@ -241,15 +245,175 @@ describe('buildDriverAttrIndex', () => {
     expect(index.size).toBe(0)
   })
 
-  it('同一 driverCd に複数社員が突合されていたら先勝ち', () => {
+  it('同一 driverCd に複数会社が紐づいたら潰さず会社ラベル昇順で全部返す (Refs #403)', () => {
+    // 並びはコードポイント順 (有 U+6709 < 株 U+682A)。localeCompare は ICU の
+    // 照合順が環境で違い CI と開発機で逆になるため使わない。
     const index = buildDriverAttrIndex(
       [
-        entry({ company: '株', payrollCd: '1', driverCd: '9', attrs: [{ effectiveFrom: '2020-01-01', branch: '先', payScheme: null }] }),
-        entry({ company: '有', payrollCd: '2', driverCd: '9', attrs: [{ effectiveFrom: '2021-01-01', branch: '後', payScheme: null }] }),
+        entry({ company: '株', payrollCd: '1', driverCd: '9', attrs: [{ effectiveFrom: '2020-01-01', branch: '本社 乗務員', payScheme: 'A' }] }),
+        entry({ company: '有', payrollCd: '2', driverCd: '9', attrs: [{ effectiveFrom: '2021-01-01', branch: '帯広 乗務員', payScheme: 'B' }] }),
       ],
       '2026-07',
     )
-    expect(index.get('9')?.branch).toBe('先')
+    expect(index.get('9')).toEqual([
+      { company: '有', attrs: { effectiveFrom: '2021-01-01', branch: '帯広 乗務員', payScheme: 'B' } },
+      { company: '株', attrs: { effectiveFrom: '2020-01-01', branch: '本社 乗務員', payScheme: 'A' } },
+    ])
+  })
+
+  it('同じ会社の複数行が同じ driverCd に紐づいても落とさない', () => {
+    const index = buildDriverAttrIndex(
+      [
+        entry({ company: '株', payrollCd: '1', driverCd: '9', attrs: [{ effectiveFrom: '2020-01-01', branch: '本社', payScheme: null }] }),
+        entry({ company: '株', payrollCd: '2', driverCd: '9', attrs: [{ effectiveFrom: '2020-01-01', branch: '諸富', payScheme: null }] }),
+      ],
+      '2026-07',
+    )
+    expect(index.get('9')).toHaveLength(2)
+  })
+
+  it('入力の並び順が違っても結果が同じ (D1 の SELECT 順に依存しない)', () => {
+    const rows = [
+      entry({ company: '株', payrollCd: '1', driverCd: '9', attrs: [{ effectiveFrom: '2020-01-01', branch: '本社', payScheme: null }] }),
+      entry({ company: '有', payrollCd: '2', driverCd: '9', attrs: [{ effectiveFrom: '2020-01-01', branch: '帯広', payScheme: null }] }),
+    ]
+    const forward = buildDriverAttrIndex(rows, '2026-07').get('9')
+    const reversed = buildDriverAttrIndex([...rows].reverse(), '2026-07').get('9')
+    expect(forward).toEqual(reversed)
+  })
+})
+
+describe('joinDriverAttr', () => {
+  const entries = [
+    { company: '株', attrs: { effectiveFrom: '2026-01-01', branch: '本社 乗務員', payScheme: '体系1' } },
+    { company: '有', attrs: { effectiveFrom: '2026-01-01', branch: '帯広 乗務員', payScheme: '体系2' } },
+  ]
+
+  it('複数会社の値を " / " で連結する', () => {
+    expect(joinDriverAttr(entries, 'branch')).toBe('本社 乗務員 / 帯広 乗務員')
+    expect(joinDriverAttr(entries, 'payScheme')).toBe('体系1 / 体系2')
+  })
+
+  it('会社が違っても同値なら 1 つに畳む (従来の 1 値出力と同じになる)', () => {
+    expect(joinDriverAttr([
+      { company: '株', attrs: { effectiveFrom: '2026-01-01', branch: '本社 乗務員', payScheme: null } },
+      { company: '有', attrs: { effectiveFrom: '2026-01-01', branch: '本社 乗務員', payScheme: null } },
+    ], 'branch')).toBe('本社 乗務員')
+  })
+
+  it('未設定 (null・空文字) の値は落とす', () => {
+    expect(joinDriverAttr([
+      { company: '株', attrs: { effectiveFrom: '2026-01-01', branch: null, payScheme: '' } },
+      { company: '有', attrs: { effectiveFrom: '2026-01-01', branch: '帯広', payScheme: '体系2' } },
+    ], 'branch')).toBe('帯広')
+    expect(joinDriverAttr([
+      { company: '株', attrs: { effectiveFrom: '2026-01-01', branch: null, payScheme: '' } },
+    ], 'payScheme')).toBe('')
+  })
+
+  it('該当なし (undefined・空配列) は空文字', () => {
+    expect(joinDriverAttr(undefined, 'branch')).toBe('')
+    expect(joinDriverAttr([], 'branch')).toBe('')
+  })
+})
+
+describe('planIchibanMatch', () => {
+  // 実データ形状: 社員R が表示名、社員N が氏名。両方をキーにする。
+  const ichiban = [
+    { employee_code: '1018', employee_name: '金原　敏雄', employee_r: '金原敏雄' },
+    { employee_code: '1729', employee_name: '石坂　彰', employee_r: '石坂　彰' },
+    { employee_code: '1101', employee_name: '大石　勉', employee_r: '大石　勉' },
+    { employee_code: '9989', employee_name: '大石　勉', employee_r: '大石　勉' },
+  ]
+
+  it('氏名が一意なら社員C を提案する (前ゼロは除去)', () => {
+    const plan = planIchibanMatch(
+      [...ichiban, { employee_code: '0249', employee_name: '植木信彦', employee_r: '植木信彦' }],
+      [entry({ company: '有', payrollCd: '222', name: '金原 敏雄', driverCd: null }),
+        entry({ company: '有', payrollCd: '900', name: '植木 信彦', driverCd: null })],
+    )
+    expect(plan.matched).toEqual([
+      { company: '有', payrollCd: '222', name: '金原 敏雄', personCd: '1018' },
+      { company: '有', payrollCd: '900', name: '植木 信彦', personCd: '249' },
+    ])
+    expect(plan.ambiguous).toEqual([])
+    expect(plan.notFound).toEqual([])
+  })
+
+  it('同名が複数なら提案せず候補を返す (大石 勉 → 1101 / 9989)', () => {
+    const plan = planIchibanMatch(ichiban, [entry({ company: '有', payrollCd: '941', name: '大石 勉', driverCd: null })])
+    expect(plan.matched).toEqual([])
+    expect(plan.ambiguous).toEqual([
+      { company: '有', payrollCd: '941', name: '大石 勉', candidates: ['1101', '9989'] },
+    ])
+  })
+
+  it('一番星に無い氏名は notFound に回す', () => {
+    const plan = planIchibanMatch(ichiban, [entry({ company: '株', payrollCd: '1773', name: 'イスラムエムディリドイ', driverCd: null })])
+    expect(plan.matched).toEqual([])
+    expect(plan.notFound).toEqual([{ company: '株', payrollCd: '1773', name: 'イスラムエムディリドイ' }])
+  })
+
+  it('社員CD が既に入っている行は触らない (手入力を上書きしない)', () => {
+    const plan = planIchibanMatch(ichiban, [entry({ company: '株', payrollCd: '1767', name: '石坂 彰', driverCd: '1729' })])
+    expect(plan).toEqual({ matched: [], ambiguous: [], notFound: [] })
+  })
+
+  it('× 始まりの無効行は 社員N のみ・社員R のみ・両方 の 3 パターンとも除外する', () => {
+    const voided = [
+      // 9903 実データ形状: 社員N だけに × が付く
+      { employee_code: '9903', employee_name: '×松江隆', employee_r: '松江隆' },
+      // 社員R だけに × が付く
+      { employee_code: '9909', employee_name: '松本俊之', employee_r: '×松本' },
+      // 両方
+      { employee_code: '1137', employee_name: '×大石和也', employee_r: '×大石' },
+    ]
+    const plan = planIchibanMatch(voided, [
+      entry({ company: '有', payrollCd: '1', name: '松江 隆', driverCd: null }),
+      entry({ company: '有', payrollCd: '2', name: '松本 俊之', driverCd: null }),
+      entry({ company: '有', payrollCd: '3', name: '大石 和也', driverCd: null }),
+    ])
+    expect(plan.matched).toEqual([])
+    expect(plan.notFound).toHaveLength(3)
+  })
+
+  it('9000 番台でも実在社員は落とさない (北海大運、Refs #403)', () => {
+    // 一番星の 9000 番台は拠点・法人・集計枠と実在社員の混成。番号帯で切ると
+    // 北海大運の乗務員が突合できなくなる。
+    const plan = planIchibanMatch(
+      [
+        { employee_code: '9001', employee_name: '加納和広北海大運', employee_r: '加納和広' },
+        { employee_code: '9101', employee_name: '佐賀(営)', employee_r: '佐賀(営)' },
+        { employee_code: '9999', employee_name: '収支用', employee_r: '収支用' },
+      ],
+      [entry({ company: '有', payrollCd: '10', name: '加納 和広', driverCd: null })],
+    )
+    expect(plan.matched).toEqual([
+      { company: '有', payrollCd: '10', name: '加納 和広', personCd: '9001' },
+    ])
+  })
+
+  it('氏名が空の一番星行はキーにしない', () => {
+    const plan = planIchibanMatch(
+      [{ employee_code: '5000', employee_name: '', employee_r: '' }],
+      [entry({ company: '有', payrollCd: '1', name: '金原 敏雄', driverCd: null })],
+    )
+    expect(plan.notFound).toHaveLength(1)
+  })
+
+  it('提案は会社ラベル昇順 → 給与コード数値昇順 (入力順に依らない)', () => {
+    // コードポイント順 (有 U+6709 < 株 U+682A)。同一会社内は給与コードの数値順。
+    const employees = [
+      entry({ company: '株', payrollCd: '9', name: '石坂 彰', driverCd: null }),
+      entry({ company: '有', payrollCd: '10', name: '金原 敏雄', driverCd: null }),
+      entry({ company: '株', payrollCd: '2', name: '大石 和也', driverCd: null }),
+    ]
+    const forward = planIchibanMatch(ichiban, employees)
+    const reversed = planIchibanMatch(ichiban, [...employees].reverse())
+    expect(forward).toEqual(reversed)
+    expect(forward.matched.map(m => `${m.company}|${m.payrollCd}`)).toEqual(['有|10', '株|9'])
+    // 大石 和也 は一番星に居ないので notFound。同一会社内の数値順を確認する
+    expect(forward.notFound.map(n => `${n.company}|${n.payrollCd}`)).toEqual(['株|2'])
   })
 })
 

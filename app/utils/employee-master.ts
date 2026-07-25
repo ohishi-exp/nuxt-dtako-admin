@@ -13,7 +13,7 @@
  * `SalaryCdMap` 形へ変換して橋渡しする。
  */
 import type { SalaryCdMap, SalaryCsvRow } from './salary-compare'
-import { salaryCdMapKey } from './salary-compare'
+import { compareCompanyLabel, normalizeNameKey, salaryCdMapKey } from './salary-compare'
 
 export interface EmployeeAttrRow {
   effectiveFrom: string
@@ -170,27 +170,58 @@ export function normalizeDriverCdKey(driverCd: string): string {
   return /^\d+$/.test(trimmed) ? String(Number(trimmed)) : trimmed
 }
 
+/** 1 人 (乗務員CD = 一番星社員C) に紐づく 1 会社ぶんの属性。 */
+export interface DriverAttrEntry {
+  /** 給与会社ラベル。 */
+  company: string
+  attrs: EmployeeAttrRow
+}
+
 /**
  * 乗務員CD → 対象月末時点の属性 (所属・給与体系) の逆引き表を作る
  * (月次集計 CSV の `所属(マスタ)`・`給与体系` 列用、Refs #367)。
  *
  * `driverCd` 未突合の社員と、対象月末時点で有効な属性行が無い社員は表に載せない
- * (= CSV 側は空欄)。同一 `driverCd` に複数の社員が突合されている場合 (会社跨ぎの
- * 誤登録など) は**先勝ち** — 後勝ちにすると社員の並び順で結果が変わるため。
+ * (= CSV 側は空欄)。
+ *
+ * **1 つの乗務員CD に複数会社の行が紐づくのは異常ではなく事実** — 同一人物が
+ * 複数の給与会社から支給される運用が実在する (Refs #403、本番実測で 5 件)。
+ * 以前は先勝ちで 1 件に潰していたが、渡される配列順が D1 の `SELECT` 順
+ * (`ORDER BY` なし) なのでどの会社の値が残るか不定だった。**会社ラベル昇順の
+ * 配列を返して呼び出し側に全部渡す**ことで、不定性を消しつつ情報も捨てない。
  */
 export function buildDriverAttrIndex(
   employees: EmployeeMasterEntry[],
   yearMonth: string,
-): Map<string, EmployeeAttrRow> {
-  const index = new Map<string, EmployeeAttrRow>()
+): Map<string, DriverAttrEntry[]> {
+  const index = new Map<string, DriverAttrEntry[]>()
   for (const e of employees) {
     if (!e.driverCd) continue
-    const key = normalizeDriverCdKey(e.driverCd)
-    if (index.has(key)) continue
     const resolved = resolveAttrsAt(e, yearMonth)
-    if (resolved) index.set(key, resolved)
+    if (!resolved) continue
+    const key = normalizeDriverCdKey(e.driverCd)
+    const list = index.get(key) ?? []
+    list.push({ company: e.company, attrs: resolved })
+    index.set(key, list)
   }
+  for (const list of index.values()) list.sort((a, b) => compareCompanyLabel(a.company, b.company))
   return index
+}
+
+/**
+ * 月次集計 CSV の 1 セル用に属性を連結する (`所属(マスタ)`・`給与体系`、Refs #403)。
+ *
+ * 複数会社に在籍する人は `本社 乗務員 / 帯広 乗務員` のように並べる。**同値は
+ * 1 つに畳む**ので、会社が違っても所属が同じなら従来と同じ 1 値になる。
+ * 該当なし・値が全て未設定なら空文字 (CSV 側は空欄)。
+ */
+export function joinDriverAttr(
+  entries: DriverAttrEntry[] | undefined,
+  field: 'branch' | 'payScheme',
+): string {
+  if (!entries) return ''
+  const values = entries.map(e => e.attrs[field]).filter((v): v is string => v !== null && v !== '')
+  return [...new Set(values)].join(' / ')
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +325,100 @@ export function planPayrollDbImport(
     if (active?.branch === branch && active?.payScheme === scheme) continue
     if (branch === null && scheme === null && !active) continue
     plan.attrs.push({ company, payrollCd, effectiveFrom, branch, payScheme: scheme })
+  }
+  return plan
+}
+
+// ---------------------------------------------------------------------------
+// 一番星 社員ﾏｽﾀ からの突合 (Refs #403)
+// ---------------------------------------------------------------------------
+// **dtako 乗務員CD と一番星 `[社員ﾏｽﾀ].社員C` は同一の番号体系** (2026-07-25 に
+// 本番実データで確認。石坂彰 給与1767 → 乗務員CD 1729 = 社員C 1729 ほか全件一致)。
+// 一番星は非乗務員 (役員・事務員・作業員) にも番号を振っているため、社員マスタの
+// 未突合行をここから埋められる。
+//
+// 一番星社員ﾏｽﾀに**給与コード列は無い**ので、突合鍵は**氏名だけ**になる。
+
+/** `GET /api/employees` (rust-ichibanboshi) の 1 行。 */
+export interface IchibanEmployeeRow {
+  /** 社員C。dtako 乗務員CD と同一体系。 */
+  employee_code: string
+  /** 社員N (氏名)。 */
+  employee_name: string
+  /** 社員R (表示名)。 */
+  employee_r: string
+}
+
+/** 一番星突合の提案 (どれも「保存」まではローカル)。 */
+export interface IchibanMatchPlan {
+  /** 氏名が一意に決まった行 — 社員C を埋めてよい。 */
+  matched: Array<{ company: string, payrollCd: string, name: string, personCd: string }>
+  /** 同名が複数いて機械的に決められない行 — 人が選ぶ。 */
+  ambiguous: Array<{ company: string, payrollCd: string, name: string, candidates: string[] }>
+  /** 一番星に居ない行。 */
+  notFound: Array<{ company: string, payrollCd: string, name: string }>
+}
+
+/**
+ * 一番星の氏名が無効行 (`×` 始まり) か。
+ *
+ * 一番星は無効な社員を氏名の先頭 `×` で表す慣習を持つ (`1005 ×俵坂`、
+ * `1137 ×大石和也` 等)。**社員N と社員R で付き方が揃っていない** —
+ * `9903` は社員N が `×松江隆` なのに社員R は `松江隆` なので、
+ * **両フィールドを見ないと落とせない**。
+ */
+function isVoidedIchibanRow(row: IchibanEmployeeRow): boolean {
+  return normalizeNameKey(row.employee_name).startsWith('×') || normalizeNameKey(row.employee_r).startsWith('×')
+}
+
+/**
+ * 一番星社員ﾏｽﾀと社員マスタの未突合行を氏名で照合する (Refs #403)。
+ *
+ * **乗務員CD が既に入っている行は触らない** — 手で直した値を上書きしないため。
+ *
+ * **番号帯で一番星の行を落としてはいけない** — 9000 番台には拠点 (`9101` 佐賀(営)、
+ * `9107` 帯広(営)、`9109` 釧路営業所)・法人 (`9102` 佐賀大石、`9997` 大石畜産)・
+ * 集計枠 (`9998` フリー、`9999` 収支用) が混ざるが、**`9001` 加納和広北海大運 の
+ * ような実在社員も居る**。これらは給与側に同名が存在しないため照合で自然に外れる。
+ * 機械的に落とすのは `×` 始まりの無効行だけ。
+ */
+export function planIchibanMatch(
+  ichiban: IchibanEmployeeRow[],
+  employees: EmployeeMasterEntry[],
+): IchibanMatchPlan {
+  const byName = new Map<string, Set<string>>()
+  for (const row of ichiban) {
+    if (isVoidedIchibanRow(row)) continue
+    for (const raw of [row.employee_r, row.employee_name]) {
+      const key = normalizeNameKey(raw)
+      if (!key) continue
+      const codes = byName.get(key) ?? new Set<string>()
+      codes.add(row.employee_code.trim())
+      byName.set(key, codes)
+    }
+  }
+
+  // 表示順は `sortEmployeeEntries` ('ja' 照合) ではなく決定的な順にする —
+  // 提案結果が環境で入れ替わるとテストも人の確認もあてにならないため。
+  const ordered = [...employees].sort((a, b) =>
+    compareCompanyLabel(a.company, b.company)
+    || Number(a.payrollCd) - Number(b.payrollCd))
+
+  const plan: IchibanMatchPlan = { matched: [], ambiguous: [], notFound: [] }
+  for (const e of ordered) {
+    if (e.driverCd) continue
+    const where = { company: e.company, payrollCd: e.payrollCd, name: e.name }
+    const codes = byName.get(normalizeNameKey(e.name))
+    if (!codes) {
+      plan.notFound.push(where)
+      continue
+    }
+    const candidates = [...codes]
+    if (candidates.length > 1) {
+      plan.ambiguous.push({ ...where, candidates })
+      continue
+    }
+    plan.matched.push({ ...where, personCd: String(Number(candidates[0])) })
   }
   return plan
 }

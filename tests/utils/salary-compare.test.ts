@@ -9,7 +9,9 @@
 import { describe, it, expect } from 'vitest'
 import type { WageReportRow } from '../../app/utils/restraint-wage-view'
 import {
+  compareCompanyLabel,
   compareSalaryMonth,
+  mergeSalaryCsvRows,
   computeOvertimePayAtRate,
   effectiveCategory,
   mergeParsedSalaryCsv,
@@ -739,7 +741,7 @@ describe('compareSalaryMonth', () => {
       },
     ])
     expect(out.warnings).toHaveLength(1)
-    expect(out.warnings[0]).toContain('複数の会社の給与コードが解決されました')
+    expect(out.warnings[0]).toContain('氏名の異なる複数の給与コードが解決されました')
   })
 
   it('衝突エントリの会社ラベルが空の場合は警告で「会社未設定」と表示する', () => {
@@ -772,5 +774,170 @@ describe('compareSalaryMonth', () => {
     expect(out.conflicts).toEqual([])
     expect(out.rows).toHaveLength(2)
     expect(out.rows.map(r => r.driverName).sort()).toEqual(['城田 秀幸', '金原 敏雄'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 複数会社の給与行の合算 (1 人 = 社員C に複数の給与社員CD、Refs #403)
+// ---------------------------------------------------------------------------
+
+describe('compareCompanyLabel', () => {
+  it('コードポイント順で比較する (locale に依らない)', () => {
+    // 有 U+6709 (26377) < 株 U+682A (26666)。ICU の 'ja' 照合とは順が違うが、
+    // 環境で結果が変わらないことを優先する (CI Linux と開発機 Windows で逆転した)
+    expect(compareCompanyLabel('有', '株')).toBe(-1)
+    expect(compareCompanyLabel('株', '有')).toBe(1)
+    expect(compareCompanyLabel('株', '株')).toBe(0)
+  })
+})
+
+describe('mergeSalaryCsvRows', () => {
+  it('1 件ならその行をそのまま返す', () => {
+    const row = csvRow({ amounts: { 基本給: 100 } })
+    expect(mergeSalaryCsvRows([row])).toBe(row)
+  })
+
+  it('支給項目を項目名ごとに合算し、会社ラベルを連結する', () => {
+    const out = mergeSalaryCsvRows([
+      csvRow({ company: '有限会社 大石運輸', driverCd: '1649', amounts: { 基本給: 100, 残業手当: 10 } }),
+      csvRow({ company: '大石運輸倉庫株式会社', driverCd: '1644', amounts: { 基本給: 200, 住宅手当: 5 } }),
+    ])
+    expect(out.company).toBe('有限会社 大石運輸 / 大石運輸倉庫株式会社')
+    expect(out.amounts).toEqual({ 基本給: 300, 残業手当: 10, 住宅手当: 5 })
+  })
+
+  it('支給合計額は全行が値を持つ時だけ合算し、欠損があれば null', () => {
+    expect(mergeSalaryCsvRows([
+      csvRow({ reportedTotal: 100 }),
+      csvRow({ company: '有', reportedTotal: 200 }),
+    ]).reportedTotal).toBe(300)
+    expect(mergeSalaryCsvRows([
+      csvRow({ reportedTotal: 100 }),
+      csvRow({ company: '有', reportedTotal: null }),
+    ]).reportedTotal).toBeNull()
+  })
+
+  it('単価は全行で同値なら採用、異なれば null (按分しない)', () => {
+    expect(mergeSalaryCsvRows([
+      csvRow({ rates: { base: 12000, overtime: 1500 } }),
+      csvRow({ company: '有', rates: { base: 12000, overtime: 1500 } }),
+    ]).rates).toEqual({ base: 12000, overtime: 1500 })
+
+    expect(mergeSalaryCsvRows([
+      csvRow({ rates: { base: 12000, overtime: 1500 } }),
+      csvRow({ company: '有', rates: { base: 9000, overtime: 1500 } }),
+    ]).rates).toEqual({ base: null, overtime: 1500 })
+
+    expect(mergeSalaryCsvRows([
+      csvRow({ rates: { base: null, overtime: null } }),
+      csvRow({ company: '有', rates: { base: null, overtime: null } }),
+    ]).rates).toEqual({ base: null, overtime: null })
+  })
+})
+
+describe('compareSalaryMonth — 複数会社の合算 (Refs #403)', () => {
+  const config: SalaryItemConfig = { items: {} }
+  // 実データの社員C 1619 鵜瀬裕一: 有限会社 1649 (鵜瀨) と 大石運輸倉庫 1644 (鵜瀬)
+  // の 2 社に給与行がある乗務員。従来は conflicts に隔離され最低賃金チェックから
+  // 落ちていた。
+  const cdMap: SalaryCdMap = {
+    entries: { '有限会社|1649|鵜瀬裕一': '1619', '大石運輸倉庫|1644|鵜瀬裕一': '1619' },
+  }
+
+  it('氏名が一致する複数会社の行は 1 人として合算する', () => {
+    const out = compareSalaryMonth(
+      [
+        csvRow({ company: '大石運輸倉庫', driverCd: '1644', cdKey: '1644', driverName: '鵜瀬 裕一', amounts: { 基本給: 200000, 残業手当: 30000 } }),
+        csvRow({ company: '有限会社', driverCd: '1649', cdKey: '1649', driverName: '鵜瀬 裕一', amounts: { 基本給: 100000, 残業手当: 20000 } }),
+      ],
+      [reportRow('1619', '鵜瀬 裕一')],
+      config,
+      cdMap,
+    )
+    expect(out.conflicts).toEqual([])
+    expect(out.rows).toHaveLength(1)
+    expect(out.rows[0]!.csvBase).toBe(300000)
+    expect(out.rows[0]!.csvOvertime).toBe(50000)
+    // 会社ラベル昇順 (コードポイント順: 大 U+5927 < 有 U+6709) で内訳を持つ。
+    // 入力順に依らない — localeCompare だと CI と開発機で順が逆になる
+    expect(out.rows[0]!.mergedFrom).toEqual([
+      { company: '大石運輸倉庫', driverCd: '1644' },
+      { company: '有限会社', driverCd: '1649' },
+    ])
+    expect(out.warnings).toHaveLength(1)
+    expect(out.warnings[0]).toContain('1 人として合算しました')
+  })
+
+  it('3 社ぶんも合算する (実データの社員C 1132 相当)', () => {
+    const out = compareSalaryMonth(
+      [
+        csvRow({ company: '有限会社', driverCd: '1202', cdKey: '1202', driverName: '大石 和也', amounts: { 基本給: 100 } }),
+        csvRow({ company: '大石運輸倉庫', driverCd: '1202', cdKey: '1202', driverName: '大石 和也', amounts: { 基本給: 200 } }),
+        csvRow({ company: '佐賀大石', driverCd: '41', cdKey: '41', driverName: '大石 和也', amounts: { 基本給: 400 } }),
+      ],
+      [reportRow('1132', '大石 和也')],
+      config,
+      {
+        entries: {
+          '有限会社|1202|大石和也': '1132',
+          '大石運輸倉庫|1202|大石和也': '1132',
+          '佐賀大石|41|大石和也': '1132',
+        },
+      },
+    )
+    expect(out.rows).toHaveLength(1)
+    expect(out.rows[0]!.csvBase).toBe(700)
+    expect(out.rows[0]!.mergedFrom).toHaveLength(3)
+  })
+
+  it('単一会社の行は mergedFrom が null (従来の挙動)', () => {
+    const out = compareSalaryMonth(
+      [csvRow({ driverCd: '0222', cdKey: '222', driverName: '金原 敏雄' })],
+      [reportRow('222', '金原 敏雄')],
+      config,
+    )
+    expect(out.rows[0]!.mergedFrom).toBeNull()
+    expect(out.warnings).toEqual([])
+  })
+
+  it('会社ごとに単価が違う合算は計算列が「単価なし」になり警告に明記される', () => {
+    const out = compareSalaryMonth(
+      [
+        csvRow({ company: '有限会社', driverCd: '1649', cdKey: '1649', driverName: '鵜瀬 裕一', rates: { base: 12000, overtime: 1500 } }),
+        csvRow({ company: '大石運輸倉庫', driverCd: '1644', cdKey: '1644', driverName: '鵜瀬 裕一', rates: { base: 9000, overtime: 1500 } }),
+      ],
+      [reportRow('1619', '鵜瀬 裕一')],
+      config,
+      cdMap,
+    )
+    expect(out.rows[0]!.sysBase).toBeNull()
+    expect(out.warnings[0]).toContain('会社ごとに単価が異なるため')
+  })
+
+  it('単価が全社同値の合算は計算列が出る (警告に単価の注記は付かない)', () => {
+    const out = compareSalaryMonth(
+      [
+        csvRow({ company: '有限会社', driverCd: '1649', cdKey: '1649', driverName: '鵜瀬 裕一', rates: { base: 12000, overtime: 1500 } }),
+        csvRow({ company: '大石運輸倉庫', driverCd: '1644', cdKey: '1644', driverName: '鵜瀬 裕一', rates: { base: 12000, overtime: 1500 } }),
+      ],
+      [reportRow('1619', '鵜瀬 裕一')],
+      config,
+      cdMap,
+    )
+    expect(out.rows[0]!.sysBase).not.toBeNull()
+    expect(out.warnings[0]).not.toContain('単価が異なる')
+  })
+
+  it('合算行の会社ラベルが空でも警告は「会社未設定」で出る', () => {
+    const out = compareSalaryMonth(
+      [
+        csvRow({ company: '', driverCd: '1649', cdKey: '1649', driverName: '鵜瀬 裕一' }),
+        csvRow({ company: '大石運輸倉庫', driverCd: '1644', cdKey: '1644', driverName: '鵜瀬 裕一' }),
+      ],
+      [reportRow('1619', '鵜瀬 裕一')],
+      config,
+      { entries: { '1649|鵜瀬裕一': '1619', '大石運輸倉庫|1644|鵜瀬裕一': '1619' } },
+    )
+    expect(out.warnings[0]).toContain('会社未設定:1649')
   })
 })
