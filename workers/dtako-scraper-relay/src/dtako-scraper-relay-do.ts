@@ -56,7 +56,12 @@ import {
   type ScrapeMonthTarget,
 } from "./etc-meisai-client";
 import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
-import { devViewerCompIds, isR2OnlyRestraintPath, viewerCompIdsForTenant } from "./restraint-viewer-auth";
+import {
+  compIdsInSameTenant,
+  devViewerCompIds,
+  isR2OnlyRestraintPath,
+  viewerCompIdsForTenant,
+} from "./restraint-viewer-auth";
 import {
   buildDvrSearchKey,
   dvrDataUrl,
@@ -100,12 +105,14 @@ import {
   type WageMaster,
 } from "./restraint-wage";
 import {
+  buildCompMapResponse,
   buildEmployeeMasterImportStatements,
   buildEmployeeMasterResponse,
   buildEmployeeMasterWriteStatements,
   cdMapEntriesToEmployees,
   EmployeeMasterError,
   normalizeEmployeeMasterPutBody,
+  type CompPayrollMapD1Row,
   type EmployeeAttrD1Row,
   type EmployeeD1Row,
 } from "./employee-master";
@@ -1672,6 +1679,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/employee-master/import-cd-map" && request.method === "POST") {
       return this.handleEmployeeMasterImportCdMap(record!);
     }
+    if (url.pathname === "/restraint-api/comp-map" && request.method === "GET") {
+      return this.handleCompMap(record!);
+    }
     // ---- アーカイブ閲覧 (R2 読み出しのみ。Refs #244) ----
     if (url.pathname === "/restraint-api/archive/summaries" && request.method === "GET") {
       return this.handleArchiveSummaries(record!, url);
@@ -1896,6 +1906,34 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       console.error(JSON.stringify({ employee_master_get: "error", error: describeUnknownError(err) }));
       return dvrJsonError(502, "社員マスタの取得に失敗しました");
+    }
+  }
+
+  /** GET /restraint-api/comp-map — dtako 会社ID ↔ 給与大臣の会社コード対応
+   * (migration 0008)。**同じ tenant の会社だけ**返す — 会社名・会社IDを別テナントに
+   * 見せない (Refs #367)。DTAKO_ACCOUNTS 未設定・自 comp が未登録なら空配列
+   * (fail-closed)。 */
+  private async handleCompMap(record: TheearthSessionRecord): Promise<Response> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return dvrJsonError(503, "会社対応表 (DTAKO_DB) が未設定です");
+    let allowed = new Set<string>([record.compId]);
+    try {
+      const accounts = parseDtakoAccounts((await resolveSecretBinding(this.env.DTAKO_ACCOUNTS)) || undefined);
+      const sameTenant = compIdsInSameTenant(accounts, record.compId);
+      if (sameTenant.size > 0) allowed = sameTenant;
+    } catch {
+      // DTAKO_ACCOUNTS 不正時は自 comp のみ (fail-closed)
+    }
+    try {
+      const result = await db
+        .prepare(
+          `SELECT comp_id, comp_label, payroll_company, legacy_label, sort_order FROM comp_payroll_map`,
+        )
+        .all<CompPayrollMapD1Row>();
+      return Response.json({ comps: buildCompMapResponse(result.results ?? [], allowed) });
+    } catch (err) {
+      console.error(JSON.stringify({ comp_map_get: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "会社対応表の取得に失敗しました");
     }
   }
 

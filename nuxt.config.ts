@@ -1,4 +1,9 @@
 // https://nuxt.com/docs/api/configuration/nuxt-config
+/** wrangler dev のポート (dev-login-local-verify skill)。relay と front worker を
+ * 同時に立てる時だけ NUXT_DEV_FRONT_PORT で分ける。 */
+const relayPort = process.env.NUXT_DEV_RELAY_PORT || '8787'
+const frontPort = process.env.NUXT_DEV_FRONT_PORT || '8787'
+
 export default defineNuxtConfig({
   compatibilityDate: '2025-07-15',
   devtools: { enabled: true },
@@ -28,15 +33,22 @@ export default defineNuxtConfig({
     // /net780-api (Refs #302) も同じ relay worker (dtako-scraper-relay) が
     // 処理するため同一ポートへ転送する。
     devProxy: {
-      '/restraint-api': { target: 'http://127.0.0.1:8787/restraint-api' },
-      '/net780-api': { target: 'http://127.0.0.1:8787/net780-api' },
+      // relay worker (dtako-scraper-relay) と front worker (この worker) は
+      // どちらも wrangler dev で並走しうる。既定は両方 :8787 (単体起動の従来手順)
+      // で、両方同時に要る検証だけ NUXT_DEV_FRONT_PORT=8788 のように分ける
+      // (dev-login-local-verify skill 参照)。
+      '/restraint-api': { target: `http://127.0.0.1:${relayPort}/restraint-api` },
+      '/net780-api': { target: `http://127.0.0.1:${relayPort}/net780-api` },
       // hybrid dev (dev-login-local-verify skill): AUTH_WORKER binding 依存の
       // /api/proxy と dev-login callback (/__dev) を並走中の wrangler dev
-      // (front worker, :8787) へ転送し、UI は nuxt dev の HMR で回す。
+      // (front worker) へ転送し、UI は nuxt dev の HMR で回す。
       // 編集→反映 90秒 (nuxt build) → 0.1秒 (実測 106ms, 2026-07-25)。
       // 起動は setup-dev-env.sh --hybrid (skill 同梱) が全自動で行う。
-      '/api/proxy': { target: 'http://127.0.0.1:8787/api/proxy' },
-      '/__dev': { target: 'http://127.0.0.1:8787/__dev' },
+      '/api/proxy': { target: `http://127.0.0.1:${frontPort}/api/proxy` },
+      '/__dev': { target: `http://127.0.0.1:${frontPort}/__dev` },
+      // 給与大臣読み取り (Refs #367) も ICHIBAN_CF_ACCESS_* (Secrets Store binding)
+      // 依存なので front worker 経由でないと 503 になる。
+      '/api/kyuyo': { target: `http://127.0.0.1:${frontPort}/api/kyuyo` },
     },
   },
 

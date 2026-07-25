@@ -400,6 +400,56 @@ export function buildEmployeeMasterResponse(
 }
 
 // ---------------------------------------------------------------------------
+// 会社対応表 (dtako 会社ID ↔ 給与大臣の会社コード、migration 0008)
+// ---------------------------------------------------------------------------
+
+/** D1 `comp_payroll_map` の生行。 */
+export interface CompPayrollMapD1Row {
+  comp_id: string;
+  comp_label: string;
+  payroll_company: string;
+  legacy_label: string | null;
+  sort_order: number;
+}
+
+export interface CompPayrollEntry {
+  /** 給与大臣の会社コード 4 桁。 */
+  payrollCompany: string;
+  /** 移行前の会社ラベル ("有"/"株")。統合済み・不要なら null。 */
+  legacyLabel: string | null;
+}
+
+export interface CompMapEntry {
+  compId: string;
+  compLabel: string;
+  payrollCompanies: CompPayrollEntry[];
+}
+
+/**
+ * `comp_payroll_map` の生行を会社単位に畳んで応答形にする。
+ *
+ * `allowed` (呼び出し元と同じ tenant の comp 集合) に無い会社は落とす —
+ * 会社名や会社IDを別テナントに見せないため (Refs #367)。並びは comp_id 昇順 →
+ * `sort_order` 昇順 → 会社コード昇順で安定させる。
+ */
+export function buildCompMapResponse(rows: CompPayrollMapD1Row[], allowed: Set<string>): CompMapEntry[] {
+  const byComp = new Map<string, CompMapEntry>();
+  const sorted = [...rows].sort(
+    (a, b) =>
+      a.comp_id.localeCompare(b.comp_id) ||
+      a.sort_order - b.sort_order ||
+      a.payroll_company.localeCompare(b.payroll_company),
+  );
+  for (const r of sorted) {
+    if (!allowed.has(r.comp_id)) continue;
+    const entry = byComp.get(r.comp_id) ?? { compId: r.comp_id, compLabel: r.comp_label, payrollCompanies: [] };
+    entry.payrollCompanies.push({ payrollCompany: r.payroll_company, legacyLabel: r.legacy_label });
+    byComp.set(r.comp_id, entry);
+  }
+  return [...byComp.values()];
+}
+
+// ---------------------------------------------------------------------------
 // 月末解決 (「対象月の末日時点で効いている値」、Refs #367)
 // ---------------------------------------------------------------------------
 

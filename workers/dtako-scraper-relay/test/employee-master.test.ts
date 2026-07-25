@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildCompMapResponse,
   buildEmployeeMasterImportStatements,
   buildEmployeeMasterResponse,
   buildEmployeeMasterWriteStatements,
@@ -309,5 +310,41 @@ describe('resolveAttrsAt', () => {
       { effectiveFrom: '2025-04-01', branch: '支社', payScheme: 'B' },
     ]
     expect(resolveAttrsAt(unsorted, '2026-12')).toEqual(unsorted[0])
+  })
+})
+
+describe('buildCompMapResponse', () => {
+  const rows = [
+    { comp_id: '27324455', comp_label: '大石運輸倉庫', payroll_company: '0200', legacy_label: '株', sort_order: 2 },
+    { comp_id: '27324455', comp_label: '大石運輸倉庫', payroll_company: '0100', legacy_label: '有', sort_order: 1 },
+    { comp_id: '75700192', comp_label: '北海大運', payroll_company: '0400', legacy_label: null, sort_order: 1 },
+  ]
+
+  it('会社単位に畳み、sort_order 昇順で並べる', () => {
+    const out = buildCompMapResponse(rows, new Set(['27324455', '75700192']))
+    expect(out).toHaveLength(2)
+    expect(out[0]!.compId).toBe('27324455')
+    expect(out[0]!.compLabel).toBe('大石運輸倉庫')
+    expect(out[0]!.payrollCompanies.map(p => p.payrollCompany)).toEqual(['0100', '0200'])
+    expect(out[0]!.payrollCompanies[0]!.legacyLabel).toBe('有')
+    expect(out[1]!.payrollCompanies).toEqual([{ payrollCompany: '0400', legacyLabel: null }])
+  })
+
+  it('allowed に無い会社は落とす (別テナントへ会社名を見せない)', () => {
+    const out = buildCompMapResponse(rows, new Set(['75700192']))
+    expect(out.map(c => c.compId)).toEqual(['75700192'])
+  })
+
+  it('allowed が空なら空配列', () => {
+    expect(buildCompMapResponse(rows, new Set())).toEqual([])
+  })
+
+  it('同一 sort_order は会社コード昇順で安定する', () => {
+    const tied = [
+      { comp_id: 'c', comp_label: 'C', payroll_company: '0200', legacy_label: null, sort_order: 1 },
+      { comp_id: 'c', comp_label: 'C', payroll_company: '0100', legacy_label: null, sort_order: 1 },
+    ]
+    const out = buildCompMapResponse(tied, new Set(['c']))
+    expect(out[0]!.payrollCompanies.map(p => p.payrollCompany)).toEqual(['0100', '0200'])
   })
 })

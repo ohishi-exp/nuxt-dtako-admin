@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { devViewerCompIds, isR2OnlyRestraintPath, viewerCompIdsForTenant } from '../src/restraint-viewer-auth'
+import {
+  compIdsInSameTenant,
+  devViewerCompIds,
+  isR2OnlyRestraintPath,
+  viewerCompIdsForTenant,
+} from '../src/restraint-viewer-auth'
 import type { DtakoAccountEntry } from '../src/cron'
 
 describe('isR2OnlyRestraintPath', () => {
@@ -68,5 +73,21 @@ describe('devViewerCompIds', () => {
   it('単一指定も従来どおり効く', () => {
     expect(devViewerCompIds('local').has('local')).toBe(true)
     expect(devViewerCompIds('local').has('other')).toBe(false)
+  })
+})
+
+describe('compIdsInSameTenant', () => {
+  const accounts = [
+    { comp_id: '100', tenant_id: 't-1', user_id: 'u', password: 'p' },
+    { comp_id: '200', tenant_id: 't-1', user_id: 'u', password: 'p' },
+    { comp_id: '300', tenant_id: 't-2', user_id: 'u', password: 'p' },
+  ]
+
+  it('同じ tenant の comp を全部返す (自分を含む)', () => {
+    expect([...compIdsInSameTenant(accounts, '100')].sort()).toEqual(['100', '200'])
+  })
+
+  it('DTAKO_ACCOUNTS に無い comp は空集合 (fail-closed)', () => {
+    expect(compIdsInSameTenant(accounts, '999').size).toBe(0)
   })
 })

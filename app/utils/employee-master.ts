@@ -194,6 +194,111 @@ export function buildDriverAttrIndex(
   return index
 }
 
+// ---------------------------------------------------------------------------
+// 給与DB (rust-ichibanboshi GET /api/kyuyo/employees) からの取り込み、Refs #367
+// ---------------------------------------------------------------------------
+
+/** `/api/kyuyo/employees` の 1 行 (identity only — 金額は含まれない)。 */
+export interface KyuyoEmployeeRow {
+  employee_code: string
+  /** 前ゼロ除去済みの突合キー (= 社員マスタの payrollCd)。 */
+  employee_code_key: string
+  employee_name: string
+  /** 所属 (SHOZOKU.SNAME)。 */
+  department: string
+  /** 給与体系コード (SHOZOKU.TAIKEI)。 */
+  taikei: number
+  retired: boolean
+}
+
+export interface KyuyoEmployeesResponse {
+  company: string
+  /** KYCOMSTD.CONAME1 (会社ラベルに使う)。 */
+  company_name: string
+  month: string
+  database: string
+  employees: KyuyoEmployeeRow[]
+  warnings: string[]
+}
+
+export interface PayrollImportPlan {
+  employees: Array<{ company: string, payrollCd: string, name: string, driverCd: string | null }>
+  attrs: EmployeeAttrPutRow[]
+  /** 旧ラベルから統合した (= 削除する) 社員行。 */
+  deleteEmployees: Array<{ company: string, payrollCd: string }>
+  /** 新規に社員マスタへ載る人数。 */
+  added: number
+  /** 旧ラベル行から乗務員CD突合を引き継いだ人数。 */
+  merged: number
+}
+
+/** 会社ラベルの正規化 (worker 側 PUT の normalizeCompany と同一規則: NFKC + trim)。
+ * ローカル状態とサーバー保存値がズレないよう、取り込み時も同じ規則を通す。 */
+export function normalizeCompanyLabel(name: string): string {
+  return name.normalize('NFKC').trim()
+}
+
+/** 属性テキスト (所属・給与体系) の正規化。worker 側 PUT の normalizeOptionalText と
+ * 同一規則 (NFKC + trim、空は null)。**取り込み時にも通すこと** — 通さないと
+ * 給与DB由来の全角スペースが保存時だけ半角化され、次回の取り込みで毎回
+ * 「変更あり」と誤判定して履歴が汚れる (実機で 51 件の偽差分が出た、Refs #367)。 */
+export function normalizeAttrText(raw: string | null): string | null {
+  if (raw === null) return null
+  const trimmed = raw.normalize('NFKC').trim()
+  return trimmed || null
+}
+
+/** 給与体系コード → 表示用ラベル。0 (未設定) は null。 */
+export function payScheme(taikei: number): string | null {
+  return taikei > 0 ? `体系${taikei}` : null
+}
+
+/**
+ * 給与DBの社員一覧を社員マスタへ反映する計画を作る (Refs #367)。
+ *
+ * - 会社ラベルは `company_name` (KYCOMSTD.CONAME1) を正規化したもの
+ * - `legacyLabel` (R2 突合マスタ由来の "有"/"株") の行が同じ給与コードで存在したら、
+ *   **乗務員CDの突合を引き継いで旧行を削除する** (二重登録を作らない)
+ * - 所属・給与体系は「取り込む月の初日」を適用開始日にする。ただし**その月末時点で
+ *   既に同じ値が効いているなら履歴を増やさない** (毎月押しても履歴が汚れない)
+ * - 退職者も含める — 過去月の突合に要るため (`retired` は保存しない)
+ * - `employee_code_key` が空の行は捨てる (社員番号が無い行)
+ */
+export function planPayrollDbImport(
+  res: KyuyoEmployeesResponse,
+  existing: EmployeeMasterEntry[],
+  yearMonth: string,
+  legacyLabel: string | null,
+): PayrollImportPlan {
+  const company = normalizeCompanyLabel(res.company_name)
+  const byKey = new Map(existing.map(e => [`${e.company}|${e.payrollCd}`, e]))
+  const plan: PayrollImportPlan = { employees: [], attrs: [], deleteEmployees: [], added: 0, merged: 0 }
+  const effectiveFrom = `${yearMonth}-01`
+
+  for (const row of res.employees) {
+    const payrollCd = row.employee_code_key.trim()
+    if (!payrollCd) continue
+    const current = byKey.get(`${company}|${payrollCd}`)
+    const legacy = legacyLabel ? byKey.get(`${legacyLabel}|${payrollCd}`) : undefined
+    const driverCd = current?.driverCd ?? legacy?.driverCd ?? null
+
+    if (!current) plan.added += 1
+    if (!current && legacy) {
+      plan.merged += 1
+      plan.deleteEmployees.push({ company: legacyLabel!, payrollCd })
+    }
+    plan.employees.push({ company, payrollCd, name: row.employee_name, driverCd })
+
+    const branch = normalizeAttrText(row.department)
+    const scheme = normalizeAttrText(payScheme(row.taikei))
+    const active = current ? resolveAttrsAt(current, yearMonth) : null
+    if (active?.branch === branch && active?.payScheme === scheme) continue
+    if (branch === null && scheme === null && !active) continue
+    plan.attrs.push({ company, payrollCd, effectiveFrom, branch, payScheme: scheme })
+  }
+  return plan
+}
+
 /** 社員マスタ一覧の表示順 (会社ラベル昇順 → 給与コード数値昇順)。 */
 export function sortEmployeeEntries(employees: EmployeeMasterEntry[]): EmployeeMasterEntry[] {
   return [...employees].sort((a, b) =>
