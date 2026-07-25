@@ -212,6 +212,17 @@ function handleApiError(e: unknown): void {
 const report = ref<WageReportResponse | null>(null)
 const loadingReport = ref(false)
 const expandWage = ref(false)
+
+/**
+ * 取得中なのに前回の行を表示している状態 (= 画面の数字が「取得前のもの」)。
+ *
+ * 月タブを切り替えた直後や「再計算」中に、前の月の表がそのまま残るのが見間違いの
+ * もとになっていた (2026-07-25 指摘)。行を消すとスクロール位置と列幅を失うので
+ * 消さずに薄くし、表の上にスピナーを出して「これは今の値ではない」と分かるようにする。
+ */
+const staleReport = computed(() => loadingReport.value && (report.value?.rows.length ?? 0) > 0)
+/** 古い数字だと分かるように薄くし、誤操作も止める。 */
+const STALE_CLASS = 'opacity-40 pointer-events-none select-none'
 /** 月別 wage-report のキャッシュ (一括印刷で再利用)。 */
 const reportCache = new Map<string, WageReportResponse>()
 
@@ -2331,13 +2342,31 @@ watch([activeTab, month, session], () => {
               この月の summary がアーカイブにありません (/restraint-fetch で取得するか、アーカイブタブで再計算してください)
             </p>
 
+            <!-- 更新中は「古い数字を今の値として読ませない」(2026-07-25 指摘)。
+                 スピナーがボタン側だけだと、月を切り替えた直後や再取得中に前の月の表が
+                 そのまま残っていることに気付けず、見間違いのもとになる。表を薄くして
+                 スピナーを重ね、操作も止める (行を消すと位置を失うので消さずに薄くする)。
+                 給与比較タブは元から読み込み中は表を出さない実装なので対象外。 -->
+            <div
+              v-if="staleReport"
+              class="sticky top-0 z-10 mb-1 flex items-center justify-center gap-2 rounded bg-amber-50/95 dark:bg-amber-950/95 py-2"
+            >
+              <UIcon name="i-lucide-loader-circle" class="size-5 animate-spin text-primary" />
+              <span class="text-sm font-medium">更新中 — 表示中の数字は取得前のものです</span>
+            </div>
+
             <RestraintWageMonthlyTable
               v-if="activeTab === 'monthly' && report?.rows.length"
               :rows="report.rows"
               :expand-wage="expandWage"
+              :class="staleReport ? STALE_CLASS : ''"
             />
 
-            <div v-else-if="activeTab === 'minwage' && report?.rows.length" class="overflow-x-auto">
+            <div
+              v-else-if="activeTab === 'minwage' && report?.rows.length"
+              class="overflow-x-auto"
+              :class="staleReport ? STALE_CLASS : ''"
+            >
               <table class="w-full text-sm">
                 <thead>
                   <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
