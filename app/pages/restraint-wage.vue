@@ -1945,6 +1945,11 @@ watch([activeTab, month, session], () => {
     if (!report.value || report.value.month !== month.value) loadWageReport()
     if (!salaryConfigLoaded.value) loadSalaryItemConfig()
     if (!employeeMasterLoaded.value) loadEmployeeMaster()
+    // 「給与DBから読み込み」ボタンの活殺は compMap 由来 (importPayrollOptions =
+    // 対象 comp の給与会社行) なので、このタブでも読む。無いとリロード直後は
+    // ボタンが disabled のままで、社員マスタ/単価マスタタブを一度開くまで押せない
+    // (それらのタブだけが loadCompMap していた)
+    if (!compMap.value.length) loadCompMap()
   }
   else if (activeTab.value === 'items') {
     if (!salaryConfigLoaded.value) loadSalaryItemConfig()
