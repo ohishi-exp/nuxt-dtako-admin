@@ -18,6 +18,48 @@ export interface DtakoComp {
   label: string
 }
 
+/** 会社対応表 (`GET /restraint-api/comp-map`、D1 `comp_payroll_map`) の 1 会社。
+ * dtako 会社ID ↔ 給与大臣の会社コードの対応は**サーバー (D1) が正** — 会社が
+ * 増えてもデプロイ不要にするため、フロントは取得結果をそのまま使う (Refs #367)。 */
+export interface CompMapEntry {
+  compId: string
+  compLabel: string
+  payrollCompanies: Array<{
+    /** 給与大臣の会社コード 4 桁。 */
+    payrollCompany: string
+    /** 移行前の会社ラベル ("有"/"株")。統合済み・不要なら null。 */
+    legacyLabel: string | null
+  }>
+}
+
+/** `GET /restraint-api/comp-map` の応答を検証して取り出す。
+ * 壊れた応答は空配列 (呼び出し側は `DTAKO_COMPS` にフォールバックする)。 */
+export function parseCompMap(raw: unknown): CompMapEntry[] {
+  const comps = (raw as { comps?: unknown } | null)?.comps
+  if (!Array.isArray(comps)) return []
+  const out: CompMapEntry[] = []
+  for (const c of comps) {
+    const compId = (c as { compId?: unknown }).compId
+    const compLabel = (c as { compLabel?: unknown }).compLabel
+    const list = (c as { payrollCompanies?: unknown }).payrollCompanies
+    if (typeof compId !== 'string' || !compId) continue
+    out.push({
+      compId,
+      compLabel: typeof compLabel === 'string' && compLabel ? compLabel : compId,
+      payrollCompanies: (Array.isArray(list) ? list : [])
+        .filter((p): p is { payrollCompany: string, legacyLabel?: unknown } =>
+          typeof (p as { payrollCompany?: unknown })?.payrollCompany === 'string')
+        .map(p => ({
+          payrollCompany: p.payrollCompany,
+          legacyLabel: typeof p.legacyLabel === 'string' && p.legacyLabel ? p.legacyLabel : null,
+        })),
+    })
+  }
+  return out
+}
+
+/** サーバー (D1) から会社対応表が取れない時のフォールバック。scraper ページの
+ * 会社セレクタもこれを使う (スクレイプ対象は給与DBと無関係のため対応表は不要)。 */
 export const DTAKO_COMPS: DtakoComp[] = [
   { compId: '27324455', label: '大石運輸倉庫' },
   { compId: '75700192', label: '北海大運' },

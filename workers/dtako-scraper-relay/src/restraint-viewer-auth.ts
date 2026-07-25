@@ -53,3 +53,11 @@ export function devViewerCompIds(raw: string): Set<string> {
       .filter((s) => s.length > 0),
   );
 }
+
+/** `compId` と同じ tenant に属する comp_id 集合 (自分自身を含む)。
+ * 社員マスタの会社横断表示・会社対応表 (comp-map) を「同じテナントの会社だけ」に
+ * 絞るために使う (Refs #367)。DTAKO_ACCOUNTS に無い comp は空集合 (fail-closed)。 */
+export function compIdsInSameTenant(accounts: DtakoAccountEntry[], compId: string): Set<string> {
+  const tenantId = accounts.find((a) => a.comp_id === compId)?.tenant_id ?? "";
+  return viewerCompIdsForTenant(accounts, tenantId);
+}

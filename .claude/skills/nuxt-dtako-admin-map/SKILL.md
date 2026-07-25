@@ -489,6 +489,16 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   PUT を分ける — worker はセッションの会社IDでしか書かないため。触れる会社の
   判定は `viewerCompIdsForTenant` (DTAKO_ACCOUNTS 逆引き) が正で、フロントの
   リストは表示順とラベルだけ
+- **給与DBからの取り込み** (Refs #367): 社員マスタタブの「給与DBから取り込み」は
+  rust-ichibanboshi の identity-only API (`GET /api/kyuyo/employees`、
+  ohishi-exp/rust-ichibanboshi#92) を叩き、社員番号・氏名・所属・給与体系だけを
+  取る (**金額は API の応答にも含まれない**)。会社ラベルは `KYCOMSTD.CONAME1`。
+  dtako 会社ID → 給与大臣の会社コードの対応は D1 `comp_payroll_map`
+  (migration 0008) が正で、`GET /restraint-api/comp-map` が**同じ tenant の会社
+  だけ**返す。取り込みロジックは `planPayrollDbImport` (pure): 旧ラベル
+  ("有"/"株") の行は乗務員CD突合を引き継いで統合、所属/給与体系は取り込む月の
+  初日を適用開始日にし**月末時点で同値なら履歴を増やさない** (同値判定は保存側と
+  同じ NFKC 正規化を通す — 通さないと全角スペース差で毎回偽差分が出る)
 - **社員マスタタブ** (単価マスタの隣、⑥): 一覧 + 氏名/乗務員CD の手直し + 所属・
   給与体系の**適用開始日つき履歴** (`employee_attrs`) の追加/履歴モーダル削除 +
   社員行の削除。単価マスタと同じ作法で**ローカル編集 → 「保存」で確定** (PUT に

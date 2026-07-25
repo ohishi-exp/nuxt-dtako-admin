@@ -825,19 +825,112 @@ async function loadEmployeeMaster(compId?: string) {
   }
 }
 
+// ---- 給与DBからの社員取り込み (Refs #367) ----
+// 会社対応表 (dtako 会社ID → 給与大臣の会社コード) は D1 が正 —
+// `GET /restraint-api/comp-map` で取る (同じテナントの会社だけ返る)。
+// 取り込み自体は rust-ichibanboshi の identity-only API
+// (`/api/kyuyo/employees`) で、**金額は一切ブラウザに来ない**。
+
+const compMap = ref<CompMapEntry[]>([])
+const importPayrollCompany = ref('')
+const importingPayroll = ref(false)
+
+async function loadCompMap() {
+  if (!session.value) return
+  try {
+    compMap.value = parseCompMap(await $fetch('/restraint-api/comp-map', { headers: authHeaders() }))
+  }
+  catch {
+    compMap.value = [] // 取れなければ取り込みカードを出さない (fail-soft)
+  }
+}
+
+/** いま社員マスタタブで編集対象にしている会社 (全社表示なら閲覧中の会社)。 */
+const importTargetComp = computed(() =>
+  (employeeMasterScope.value === 'all' ? session.value?.compId : employeeMasterScope.value) ?? '')
+
+/** 取り込み元に選べる給与DB会社 (対象 comp の対応行)。 */
+const importPayrollOptions = computed(() => {
+  const entry = compMap.value.find(c => c.compId === importTargetComp.value)
+  return (entry?.payrollCompanies ?? []).map(p => ({ label: p.payrollCompany, value: p.payrollCompany }))
+})
+
+watch(importPayrollOptions, (options) => {
+  if (!options.some(o => o.value === importPayrollCompany.value)) {
+    importPayrollCompany.value = options[0]?.value ?? ''
+  }
+}, { immediate: true })
+
+/** 給与DBの社員一覧を社員マスタへ取り込む (ローカル反映 → 「保存」で確定)。 */
+async function importFromPayrollDb() {
+  const compId = importTargetComp.value
+  const payrollCompany = importPayrollCompany.value
+  if (!compId || !payrollCompany) return
+  importingPayroll.value = true
+  pageError.value = ''
+  try {
+    const token = currentAccessToken()
+    const res = await $fetch<KyuyoEmployeesResponse>('/api/kyuyo/employees', {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      query: { company: payrollCompany, month: month.value },
+    })
+    const legacyLabel = compMap.value
+      .find(c => c.compId === compId)?.payrollCompanies
+      .find(p => p.payrollCompany === payrollCompany)?.legacyLabel ?? null
+    const plan = planPayrollDbImport(res, employeeMasterByComp.value[compId] ?? [], month.value, legacyLabel)
+
+    let entries = employeeMasterByComp.value[compId] ?? []
+    // 旧ラベル行は統合済みなのでローカルから除き、削除指示に積む
+    for (const d of plan.deleteEmployees) {
+      entries = entries.filter(e => !(e.company === d.company && e.payrollCd === d.payrollCd))
+      pendingEmployeeDeletes.value = [...pendingEmployeeDeletes.value, { compId, ...d }]
+    }
+    for (const emp of plan.employees) {
+      const idx = entries.findIndex(e => e.company === emp.company && e.payrollCd === emp.payrollCd)
+      entries = idx === -1
+        ? [...entries, { ...emp, attrs: [] }]
+        : entries.map((e, i) => (i === idx ? { ...e, name: emp.name, driverCd: emp.driverCd } : e))
+    }
+    for (const attr of plan.attrs) {
+      const idx = entries.findIndex(e => e.company === attr.company && e.payrollCd === attr.payrollCd)
+      if (idx === -1) continue
+      const { effectiveFrom, branch, payScheme } = attr
+      entries = entries.map((e, i) =>
+        (i === idx ? { ...e, attrs: upsertAttrRow(e.attrs, { effectiveFrom, branch, payScheme }) } : e))
+    }
+    setEmployeeMasterEntries(compId, entries)
+
+    const warn = res.warnings.length ? ` / warnings: ${res.warnings.join(' / ')}` : ''
+    employeeMasterMessage.value
+      = `給与DB (${payrollCompany} ${res.company_name}) から ${plan.employees.length} 名を取り込みました `
+        + `(新規 ${plan.added} 名 / 旧ラベルから統合 ${plan.merged} 名 / 所属・体系の更新 ${plan.attrs.length} 件)。`
+        + `「保存」で確定します${warn}`
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+  finally {
+    importingPayroll.value = false
+  }
+}
+
 /** 社員マスタタブの表示範囲 ('all' = 全社)。空文字は使わない —
  * Nuxt UI の USelect は value が空文字の項目を拒否する (実機で 500、Refs #367)。 */
 const employeeMasterScope = ref('all')
 
-/** 全社表示に必要な会社を読む (現在の会社は読み込み済みでもそのまま使う)。 */
-async function loadEmployeeMasterScope() {
+/** 表示範囲に必要な会社を読む。
+ * `force` = false (タブ切替時) は**読み込み済みの会社をそのまま使う** —
+ * 未保存のローカル編集を消さないため。`force` = true (「再読込」ボタン) は
+ * 範囲内の全会社をサーバーから取り直す。 */
+async function loadEmployeeMasterScope(force = false) {
   if (!session.value) return
-  if (!employeeMasterLoaded.value) await loadEmployeeMaster()
+  const current = session.value.compId
+  if (force || !employeeMasterLoaded.value) await loadEmployeeMaster()
   if (employeeMasterScope.value !== 'all') {
-    if (employeeMasterScope.value !== session.value.compId) await loadEmployeeMaster(employeeMasterScope.value)
+    if (employeeMasterScope.value !== current) await loadEmployeeMaster(employeeMasterScope.value)
     return
   }
-  const others = DTAKO_COMPS.map(c => c.compId).filter(id => id !== session.value?.compId)
+  const others = DTAKO_COMPS.map(c => c.compId).filter(id => id !== current)
   await Promise.all(others.map(id => loadEmployeeMaster(id)))
 }
 
@@ -1471,6 +1564,7 @@ watch([activeTab, month, session], () => {
   else if (activeTab.value === 'employees') {
     // 会社横断表示のため、選択中の範囲に必要な会社をまとめて読む (Refs #367)
     loadEmployeeMasterScope()
+    if (!compMap.value.length) loadCompMap()
   }
 }, { immediate: false })
 </script>
@@ -2405,6 +2499,37 @@ watch([activeTab, month, session], () => {
             </div>
           </UCard>
 
+          <!-- 給与DBから社員を取り込む (CSV 不要、金額は来ない、Refs #367) -->
+          <UCard v-if="importPayrollOptions.length" class="border-emerald-300 dark:border-emerald-800">
+            <div class="flex flex-wrap items-center gap-3">
+              <span class="text-sm font-medium">給与DBから取り込み</span>
+              <span class="text-xs text-gray-500">
+                {{ dtakoCompLabel(importTargetComp) }} ← 給与大臣の会社
+              </span>
+              <USelect
+                v-model="importPayrollCompany"
+                :items="importPayrollOptions"
+                value-key="value"
+                size="xs"
+                class="w-32"
+              />
+              <span class="text-xs text-gray-500">対象月: {{ fmtYm(month) }} の年度DB</span>
+              <div class="flex-1" />
+              <UButton
+                size="xs"
+                icon="i-lucide-database"
+                label="社員を取り込み"
+                :loading="importingPayroll"
+                :disabled="!importPayrollCompany"
+                @click="importFromPayrollDb"
+              />
+            </div>
+            <p class="text-xs text-gray-500 mt-2">
+              社員番号・氏名・所属・給与体系だけを取得します (金額は API の応答にも含まれません)。
+              旧ラベル ("有"/"株") の行があれば乗務員CD突合を引き継いで統合します。取り込み後「保存」で確定してください。
+            </p>
+          </UCard>
+
           <UCard>
             <template #header>
               <div class="flex flex-wrap items-center gap-3">
@@ -2417,9 +2542,9 @@ watch([activeTab, month, session], () => {
                   value-key="value"
                   size="xs"
                   class="w-56"
-                  @update:model-value="loadEmployeeMasterScope"
+                  @update:model-value="() => loadEmployeeMasterScope()"
                 />
-                <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" @click="loadEmployeeMasterScope" />
+                <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" @click="loadEmployeeMasterScope(true)" />
                 <UButton size="xs" icon="i-lucide-save" label="保存" :loading="savingEmployeeMaster" @click="saveEmployeeMaster('社員マスタを保存しました')" />
               </div>
             </template>
