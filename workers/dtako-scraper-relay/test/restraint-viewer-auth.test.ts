@@ -77,10 +77,10 @@ describe('devViewerCompIds', () => {
 })
 
 describe('compIdsInSameTenant', () => {
-  const accounts = [
-    { comp_id: '100', tenant_id: 't-1', user_id: 'u', password: 'p' },
-    { comp_id: '200', tenant_id: 't-1', user_id: 'u', password: 'p' },
-    { comp_id: '300', tenant_id: 't-2', user_id: 'u', password: 'p' },
+  const accounts: DtakoAccountEntry[] = [
+    { comp_id: '100', user_name: 'a', user_pass: 'x', tenant_id: 't-1' },
+    { comp_id: '200', user_name: 'b', user_pass: 'x', tenant_id: 't-1' },
+    { comp_id: '300', user_name: 'c', user_pass: 'x', tenant_id: 't-2' },
   ]
 
   it('同じ tenant の comp を全部返す (自分を含む)', () => {
