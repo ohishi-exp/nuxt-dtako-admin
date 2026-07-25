@@ -33,7 +33,8 @@
       "minWage": {
         "rate": 956,
         "prefecture": "全社共通",
-        "mapped": false
+        "mapped": false,
+        "rateEffectiveFrom": "2020-01-01"
       },
       "minWageDiff": 500,
       "minWageTotalPay": 172080,
@@ -86,7 +87,8 @@
       "minWage": {
         "rate": 956,
         "prefecture": "全社共通",
-        "mapped": false
+        "mapped": false,
+        "rateEffectiveFrom": "2020-01-01"
       },
       "minWageDiff": -56,
       "minWageTotalPay": 152960,
@@ -139,7 +141,8 @@
       "minWage": {
         "rate": 956,
         "prefecture": "全社共通",
-        "mapped": false
+        "mapped": false,
+        "rateEffectiveFrom": "2020-01-01"
       },
       "minWageDiff": 137,
       "minWageTotalPay": 172080,
@@ -182,7 +185,8 @@
       "minWage": {
         "rate": 956,
         "prefecture": "全社共通",
-        "mapped": false
+        "mapped": false,
+        "rateEffectiveFrom": "2020-01-01"
       },
       "minWageDiff": null,
       "minWageTotalPay": 152960,

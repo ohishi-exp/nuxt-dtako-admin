@@ -1826,10 +1826,12 @@ interface MinWageApplyItem {
   branch: string
   prefecture: string | null
   rate: number | null
+  /** その県の最低賃金の発効日 (厚労省が定めた日 = そのまま適用開始日にする)。 */
+  rateEffectiveFrom: string | null
   status: 'add' | 'overwrite' | 'keep' | 'unmapped' | 'no-rate'
 }
 interface MinWageApplyResult {
-  effectiveFrom: string
+  asOf: string
   added: number
   overwritten: number
   kept: number
@@ -1839,20 +1841,35 @@ interface MinWageApplyResult {
   changed: boolean
 }
 
-const applyFrom = ref('')
+
 const applyOverwrite = ref(false)
 const applyPreview = ref<MinWageApplyResult | null>(null)
 const applyingMinWage = ref(false)
 
+/** プレビューを県ごとにまとめる。発効日が県ごとに違うので、何がいつから入るのかを
+ * 一覧で確認できるようにする (Refs #409)。 */
+const applyPreviewByPrefecture = computed(() => {
+  const map = new Map<string, { prefecture: string, rate: number, effectiveFrom: string, count: number }>()
+  for (const it of applyPreview.value?.items ?? []) {
+    if (!it.prefecture || it.rate == null || !it.rateEffectiveFrom) continue
+    const cur = map.get(it.prefecture)
+    if (cur) cur.count += 1
+    else map.set(it.prefecture, { prefecture: it.prefecture, rate: it.rate, effectiveFrom: it.rateEffectiveFrom, count: 1 })
+  }
+  return [...map.values()].sort((a, b) => (a.effectiveFrom < b.effectiveFrom ? -1 : a.effectiveFrom > b.effectiveFrom ? 1 : 0))
+})
+
 async function runApplyMinWage(dryRun: boolean) {
-  if (!session.value || !applyFrom.value) return
+  if (!session.value) return
   applyingMinWage.value = true
   pageError.value = ''
   try {
     const res = await $fetch<MinWageApplyResult>('/restraint-api/min-wage/apply-to-wage-master', {
       method: 'POST',
       headers: authHeaders(),
-      body: { effectiveFrom: applyFrom.value, overwrite: applyOverwrite.value, dryRun },
+      // asOf は「どの版の最低賃金か」と「所属を引く月」を決めるだけ。
+      // 適用開始日は厚労省が定めた県ごとの発効日をそのまま使う
+      body: { asOf: `${month.value}-01`, overwrite: applyOverwrite.value, dryRun },
     })
     if (dryRun) {
       applyPreview.value = res
@@ -1860,7 +1877,7 @@ async function runApplyMinWage(dryRun: boolean) {
     }
     else {
       applyPreview.value = null
-      minWageMessage.value = `単価マスタへ ${res.added} 名を新規設定しました`
+      minWageMessage.value = `単価マスタへ ${res.added} 名を新規設定しました (適用開始日は県ごとの発効日)`
         + (res.overwritten ? ` / ${res.overwritten} 名を上書き` : '')
         + (res.kept ? ` (既存単価あり ${res.kept} 名は据え置き)` : '')
       reportCache.clear()
@@ -2375,23 +2392,39 @@ watch([activeTab, month, session], () => {
               <div v-if="branchGroups.length" class="mt-4 pt-3 border-t border-gray-200 dark:border-gray-700">
                 <div class="flex flex-wrap items-end gap-3">
                   <span class="font-semibold text-sm self-center">単価マスタへ一括設定</span>
-                  <UFormField label="適用開始日">
-                    <UInput v-model="applyFrom" size="sm" type="date" />
-                  </UFormField>
                   <UCheckbox v-model="applyOverwrite" label="既存の単価も上書きする" class="self-center" />
                   <UButton
                     size="sm" variant="soft" icon="i-lucide-list-checks"
-                    label="プレビュー" :disabled="!applyFrom" :loading="applyingMinWage"
+                    label="プレビュー" :loading="applyingMinWage"
                     @click="runApplyMinWage(true)"
                   />
                 </div>
                 <p class="text-xs text-gray-500 mt-1">
-                  拠点の最低賃金を乗務員の基本時間単価として入れます。<b>既に単価がある人は既定で据え置き</b>です。
+                  拠点の最低賃金を乗務員の基本時間単価として入れます。<b>適用開始日は厚労省が定めた県ごとの発効日</b>をそのまま使います
+                  ({{ fmtYm(month) }} 時点で有効な額)。<b>既に単価がある人は既定で据え置き</b>です。
                 </p>
 
                 <div v-if="applyPreview" class="mt-3 rounded-lg bg-gray-50 dark:bg-gray-900 p-3">
+                  <!-- 県ごとに発効日が違うので、何がいつから入るのかを一覧で見せる -->
+                  <table v-if="applyPreviewByPrefecture.length" class="text-sm mb-2">
+                    <thead>
+                      <tr class="text-left text-gray-500">
+                        <th class="pr-4 py-1">都道府県</th>
+                        <th class="pr-4 py-1 text-right">最低賃金</th>
+                        <th class="pr-4 py-1">発効日 (= 適用開始日)</th>
+                        <th class="py-1 text-right">人数</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="p in applyPreviewByPrefecture" :key="p.prefecture">
+                        <td class="pr-4 py-0.5">{{ p.prefecture }}</td>
+                        <td class="pr-4 py-0.5 text-right">{{ fmtYen(p.rate) }}</td>
+                        <td class="pr-4 py-0.5">{{ p.effectiveFrom }}</td>
+                        <td class="py-0.5 text-right">{{ p.count }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
                   <p class="text-sm">
-                    <b>{{ applyPreview.effectiveFrom }}</b> 適用:
                     新規 <b>{{ applyPreview.added }}</b> 名
                     <span v-if="applyPreview.overwritten"> / 上書き <b>{{ applyPreview.overwritten }}</b> 名</span>
                     <span v-if="applyPreview.kept"> / 既存単価あり (据え置き) {{ applyPreview.kept }} 名</span>
@@ -2400,7 +2433,7 @@ watch([activeTab, month, session], () => {
                     </span>
                   </p>
                   <p v-if="applyPreview.unresolved" class="text-xs text-amber-700 dark:text-amber-400 mt-1">
-                    引けなかった分は拠点の都道府県が未設定か、その日時点の額が無い県です。
+                    引けなかった分は拠点の都道府県が未設定か、{{ fmtYm(month) }} 時点の額が無い県です。
                   </p>
                   <div class="flex items-center gap-2 mt-2">
                     <UButton

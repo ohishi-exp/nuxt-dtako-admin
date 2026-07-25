@@ -1960,7 +1960,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * POST /restraint-api/min-wage/apply-to-wage-master — 拠点の最低賃金を単価マスタへ
    * 一括で入れる (「単価マスタ = 最低賃金」運用、Refs #282 / #409 Phase 4)。
    *
-   * body: `{ effectiveFrom, sites?, overwrite?, dryRun? }`
+   * body: `{ asOf, sites?, overwrite?, dryRun? }`
+   *
+   * **単価の適用開始日は厚労省が定めた県ごとの発効日**をそのまま使う (2026-07-25 決定)。
+   * `asOf` はどの版の最低賃金かと所属を引く月を決めるだけで、適用日には使わない。
    *
    * **`dryRun` を既定にはしない**が、画面は必ず dryRun でプレビューしてから確定させる。
    * 既に単価がある乗務員は `overwrite` を明示しない限り触らない — 会社が決めた支給単価を
@@ -1973,15 +1976,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const bucket = this.env.DTAKO_R2;
     if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定のためマスタを保存できません");
 
-    let body: { effectiveFrom?: unknown; sites?: unknown; overwrite?: unknown; dryRun?: unknown };
+    let body: { asOf?: unknown; sites?: unknown; overwrite?: unknown; dryRun?: unknown };
     try {
       body = (await request.json()) as typeof body;
     } catch {
       return dvrJsonError(400, "JSON body が必要です");
     }
-    const effectiveFrom = body?.effectiveFrom;
-    if (typeof effectiveFrom !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) {
-      return dvrJsonError(400, "effectiveFrom は YYYY-MM-DD が必要です");
+    // 参照時点。この日で「どの版の最低賃金か」と「所属を引く月」が決まる。
+    // 単価の適用開始日には使わない — 書き込むのは厚労省が定めた県ごとの発効日
+    const asOf = body?.asOf;
+    if (typeof asOf !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) {
+      return dvrJsonError(400, "asOf は YYYY-MM-DD が必要です");
     }
     if (body.sites !== undefined && (!Array.isArray(body.sites) || body.sites.some((s) => typeof s !== "string"))) {
       return dvrJsonError(400, "sites は文字列の配列が必要です");
@@ -2007,7 +2012,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return dvrJsonError(502, "マスタの保存データが壊れています");
     }
 
-    const ym = effectiveFrom.slice(0, 7);
+    const ym = asOf.slice(0, 7);
     const { branches, names } = await this.branchByDriverCd(record.compId, ym);
     if (branches.size === 0) {
       return dvrJsonError(400, "社員マスタに乗務員CDつきの所属が見つかりません (社員マスタタブで取り込んでください)");
@@ -2015,7 +2020,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
     let result;
     try {
-      result = applyMinWageToWageMaster(wageMaster, minWageMaster, branches, effectiveFrom, {
+      result = applyMinWageToWageMaster(wageMaster, minWageMaster, branches, asOf, {
         overwrite,
         sites,
         namesByDriverCd: names,
@@ -2026,7 +2031,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
 
     const summary = {
-      effectiveFrom,
+      asOf,
       dryRun,
       added: result.added,
       overwritten: result.overwritten,

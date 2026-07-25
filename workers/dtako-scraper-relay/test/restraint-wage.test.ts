@@ -267,14 +267,14 @@ describe('rateForMonth', () => {
 describe('minWageForBranch', () => {
   it('事業所 → 県 → 対象月の最低賃金 (mapped=true)', () => {
     const r = minWageForBranch(MIN_WAGE, 'テスト運輸　第一営業所', 2025, 11)
-    expect(r).toEqual({ rate: 1030, prefecture: '佐賀', mapped: true })
+    expect(r).toEqual({ rate: 1030, prefecture: '佐賀', mapped: true, rateEffectiveFrom: '2025-10-01' })
     // 改定前の月は旧額
     expect(minWageForBranch(MIN_WAGE, 'テスト運輸　第一営業所', 2025, 9).rate).toBe(956)
   })
 
   it('未マッピング事業所は default 県で近似 (mapped=false)', () => {
     const r = minWageForBranch(MIN_WAGE, '未知の営業所', 2025, 11)
-    expect(r).toEqual({ rate: 1030, prefecture: '佐賀', mapped: false })
+    expect(r).toEqual({ rate: 1030, prefecture: '佐賀', mapped: false, rateEffectiveFrom: '2025-10-01' })
   })
 
   it('default も無ければ比較不能 / 県に履歴が無ければ rate null', () => {
@@ -623,7 +623,7 @@ describe('computeWageRow', () => {
     expect(row.amounts!.overtime).toBe(Math.round((120 / 60) * 1200 * 1.25))
     expect(row.totalAmount).toBe(row.amounts!.statutory + row.amounts!.overtime)
     expect(row.hourlyEquivalent).toBe(Math.round(row.totalAmount! / 40))
-    expect(row.minWage).toEqual({ rate: 956, prefecture: '佐賀', mapped: true })
+    expect(row.minWage).toEqual({ rate: 956, prefecture: '佐賀', mapped: true, rateEffectiveFrom: '2024-10-01' })
     expect(row.minWageDiff).toBe(row.hourlyEquivalent! - 956)
   })
 
