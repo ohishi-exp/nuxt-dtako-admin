@@ -103,6 +103,12 @@ import {
   type WageMaster,
 } from "./restraint-wage";
 import {
+  MHLW_NATIONAL_LIST_URL,
+  MinWageImportError,
+  mergeMinWageRows,
+  parseMhlwNationalList,
+} from "./min-wage-import";
+import {
   buildCompMapResponse,
   buildEmployeeMasterResponse,
   buildEmployeeMasterWriteStatements,
@@ -1678,6 +1684,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/min-wage") {
       return this.handleWageMasterRoute(record!, request, "min-wage", (raw) => normalizeMinWageMaster(raw));
     }
+    if (url.pathname === "/restraint-api/min-wage/import-mhlw" && request.method === "POST") {
+      return this.handleMinWageImport(record!, request);
+    }
     if (url.pathname === "/restraint-api/wage-config") {
       return this.handleWageMasterRoute(record!, request, "wage-config", (raw) => normalizeWageConfig(raw));
     }
@@ -1838,6 +1847,103 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return Response.json({ saved: true, changed: result.changed, data: normalized, version: result.sha256 });
     }
     return dvrJsonError(405, "Method Not Allowed");
+  }
+
+  /**
+   * POST /restraint-api/min-wage/import-mhlw — 厚労省「地域別最低賃金の全国一覧」
+   * を取り込んで min-wage マスタへマージする。
+   *
+   * body に `{ html }` があればそれを使い、無ければ厚労省サイトを fetch する。
+   * 貼り付け経路を残しているのは、Workers からの外向き fetch が先方に弾かれた
+   * 時の逃げ道 — パーサは同じものを通るので結果は変わらない。
+   *
+   * **47 件揃わなければ何も書かない** (parseMhlwNationalList が throw する)。
+   * 部分結果でマスタを更新すると、欠けた県が「最低賃金なし」に化けて最低賃金
+   * 割れを見逃す。
+   */
+  private async handleMinWageImport(
+    record: TheearthSessionRecord,
+    request: Request,
+  ): Promise<Response> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定のためマスタを保存できません");
+
+    let pastedHtml: string | null = null;
+    if ((request.headers.get("content-type") ?? "").includes("application/json")) {
+      try {
+        const body = (await request.json()) as { html?: unknown };
+        if (typeof body?.html === "string" && body.html.trim() !== "") pastedHtml = body.html;
+      } catch {
+        return dvrJsonError(400, "JSON body が不正です");
+      }
+    }
+
+    let html: string;
+    let source: string;
+    if (pastedHtml !== null) {
+      html = pastedHtml;
+      source = "paste";
+    } else {
+      source = MHLW_NATIONAL_LIST_URL;
+      let res: Response;
+      try {
+        res = await fetch(MHLW_NATIONAL_LIST_URL, {
+          headers: { "User-Agent": "nuxt-dtako-admin/min-wage-import (+https://dtako.ippoan.org)" },
+        });
+      } catch (err) {
+        return dvrJsonError(
+          502,
+          `厚労省サイトへ接続できませんでした (${describeUnknownError(err)})。ページのソースを貼り付けて取り込むこともできます`,
+        );
+      }
+      if (!res.ok) {
+        return dvrJsonError(502, `厚労省サイトが ${res.status} を返しました (${source})`);
+      }
+      html = await res.text();
+    }
+
+    let rows;
+    try {
+      rows = parseMhlwNationalList(html);
+    } catch (err) {
+      if (err instanceof MinWageImportError) return dvrJsonError(400, err.message);
+      throw err;
+    }
+
+    const paths = this.wageMasterR2Paths(record.compId, "min-wage");
+    let current: MinWageMaster = { prefectures: {}, branchToPrefecture: {} };
+    const obj = await bucket.get(paths.latest);
+    if (obj) {
+      try {
+        current = normalizeMinWageMaster(JSON.parse(await obj.text()));
+      } catch (err) {
+        return dvrJsonError(502, `min-wage の保存データが壊れています (${describeUnknownError(err)})`);
+      }
+    }
+
+    const merged = mergeMinWageRows(current, rows);
+    const ts = restraintVersionTimestamp(new Date());
+    const result = await this.putVersionedR2(
+      bucket,
+      paths.latest,
+      paths.version(ts),
+      JSON.stringify(merged.master),
+      "application/json",
+      ts,
+    );
+    if (result.changed) await this.pruneRestraintVersions(bucket, paths.dir);
+
+    return Response.json({
+      saved: true,
+      changed: result.changed,
+      source,
+      prefectures: rows.length,
+      added: merged.added,
+      updated: merged.updated,
+      unchanged: merged.unchanged,
+      data: merged.master,
+      version: result.sha256,
+    });
   }
 
   /** POST /restraint-api/wage-master/csv — 単価 CSV (1 行 = 1 履歴) を現在の
