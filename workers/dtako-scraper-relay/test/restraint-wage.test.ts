@@ -408,6 +408,34 @@ describe('applyMinWageToWageMaster', () => {
     expect(r.master.drivers['1018']!.name).toBe('登録済み')
   })
 
+  it('据え置きでも、金額が一致する行には根拠県を後から注記する', () => {
+    // 初期版が根拠県を残さずに入れた行を、再実行で識別できるようにする (金額は触らない)
+    const wm: WageMaster = { drivers: { 1018: { rates: [{ effectiveFrom: '2025-10-01', hourlyRate: 1030 }] } } }
+    const r = applyMinWageToWageMaster(wm, MASTER, branches, '2025-10-01')
+    expect(r.kept).toBe(1)
+    expect(r.master.drivers['1018']!.rates).toEqual([
+      { effectiveFrom: '2025-10-01', hourlyRate: 1030, prefecture: '佐賀' },
+    ])
+  })
+
+  it('金額が違う行 (手入力の単価) には注記しない', () => {
+    const wm: WageMaster = { drivers: { 1018: { rates: [{ effectiveFrom: '2025-10-01', hourlyRate: 1500 }] } } }
+    const r = applyMinWageToWageMaster(wm, MASTER, branches, '2025-10-01')
+    expect(r.master.drivers['1018']!.rates).toEqual([{ effectiveFrom: '2025-10-01', hourlyRate: 1500 }])
+  })
+
+  it('既に根拠県がある行は触らない', () => {
+    const wm: WageMaster = { drivers: { 1018: { rates: [{ effectiveFrom: '2025-10-01', hourlyRate: 1030, prefecture: '旧県' }] } } }
+    const r = applyMinWageToWageMaster(wm, MASTER, branches, '2025-10-01')
+    expect(r.master.drivers['1018']!.rates[0]!.prefecture).toBe('旧県')
+  })
+
+  it('適用開始日が違う行には注記しない', () => {
+    const wm: WageMaster = { drivers: { 1018: { rates: [{ effectiveFrom: '2024-04-01', hourlyRate: 1030 }] } } }
+    const r = applyMinWageToWageMaster(wm, MASTER, branches, '2025-10-01')
+    expect(r.master.drivers['1018']!.rates).toEqual([{ effectiveFrom: '2024-04-01', hourlyRate: 1030 }])
+  })
+
   it('根拠にした都道府県を履歴に残す', () => {
     const r = applyMinWageToWageMaster({ drivers: {} }, MASTER, branches, '2025-10-01')
     expect(r.master.drivers['1030']!.rates[0]!.prefecture).toBe('北海道')
