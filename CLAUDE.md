@@ -11,26 +11,10 @@ dtako (デジタコ運行データ) 管理画面。Nuxt 4 + Cloudflare Workers (
 
 ## 規範 (必ず守る)
 
-- **画面 / server route を変えたら PR 前に dev で実機確認する** (バグ早期検知、2026-07-25 方針)。
-  `bash .claude/skills/dev-login-local-verify/setup-dev-env.sh --here --hybrid` で
-  自分のブランチが本番 backend に対して立つ。**型検査もテストも通るのに実機で壊れる**
-  欠陥 (ボタンが disabled のまま / `SelectItem` の value 空で 500) を同じ日に 2 件
-  取り逃している (#419 / #420)。PR には「何を叩いてどう応答したか」を書く。
-  **この dev は front worker + 画面だけ** — relay (`workers/dtako-scraper-relay`) は
-  service binding で本番に飛ぶので、relay / `migrations/` の変更は
-  `wrangler dev --local` + `d1 migrations apply --local` + `npm run seed:local` の
-  別経路で確認する (`--remote` は DO を持つ worker では使えない)。
-- **手動 `wrangler deploy` は禁止** (タグリリースの CI 経由のみ)。
-- **D1 migration も手動適用は禁止** — `migrations/` に追加すれば main merge 時に
-  `dtako-scraper-relay-deploy.yml` が `d1 migrations apply --remote` で適用する
-  (記帳は `d1_migrations`。本番は手作業運用だったため `scripts/d1/bootstrap-d1-migrations.sql` で 0001〜0005 を記帳済み扱いにしている)。
+- **画面/server route を変えたら PR 前に dev で実機確認**、結果を PR に書く (型検査もテストも通るのに実機で壊れる欠陥を #419/#420 で 2 件取り逃した)。**dev は front のみ** — relay/`migrations/` は別経路。手順は `dev-login-local-verify` skill。
+- **手動 `wrangler deploy` / 手動 D1 migration 適用は禁止** (どちらも CI 経由。詳細は map skill)。
 - **開発は必ず `origin/main` ベース worktree**。メイン wt ではソース編集しない。
-- **`DTAKO_ACCOUNTS` は relay の KV (`dtako-relay-config` の `dtako_accounts`) が正**
-  — dashboard の plain 変数は `keep_vars` があっても本番から消え、viewer 認可が
-  全社 401 になった (2026-07-25)。**投入は 1 回だけ・CI もデプロイも書き換えない**
-  (毎回投入するなら消える変数と同じ)。CI は存在検証で落とすだけ。
-  `ETC_ACCOUNTS` は従来どおり dashboard の plain Environment Variable + `keep_vars = true`。
-  いずれも未設定時は fail-closed。
+- **`DTAKO_ACCOUNTS` は relay の KV が正・投入は 1 回だけ** (CI もデプロイも書き換えない)。`ETC_ACCOUNTS` は dashboard の plain 変数 + `keep_vars = true`。いずれも未設定時は fail-closed。
 - **Y時間 は async job 化しない (sync HTTP)** — Cloud Run CPU throttling で `tokio::spawn` が完走しない。
 - **ETC 検索は `sokoKbn=0` を明示必須** (無いと明細欠落)。**`riyouMonth{N}` は `now` (JST) 当月のみ明示選択し直す** (ページ既定を信用しない)。
 - **cron 式は `wrangler.toml [triggers]` と `src/cron.ts` 定数を必ず一致**させる。
