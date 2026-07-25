@@ -26,6 +26,7 @@ describe('normalizeEmployeeMasterPutBody', () => {
       attrs: [],
       deleteAttrs: [],
       deleteEmployees: [],
+      payrollCompanyName: null,
     })
   })
 
@@ -183,6 +184,44 @@ describe('buildEmployeeMasterWriteStatements', () => {
     expect(
       buildEmployeeMasterWriteStatements(normalizeEmployeeMasterPutBody({}), '2026-01-01T00:00:00.000Z', '27324455'),
     ).toEqual([])
+  })
+
+  it('payrollCompanyName があれば comp_payroll_map の表示名を更新する (Refs #405)', () => {
+    const body = normalizeEmployeeMasterPutBody({
+      payrollCompanyName: { payrollCompany: '0100', name: ' 有限会社　大石運輸 ' },
+    })
+    const statements = buildEmployeeMasterWriteStatements(body, '2026-01-01T00:00:00.000Z', '27324455')
+    expect(statements).toHaveLength(1)
+    expect(statements[0]!.sql).toMatch(/UPDATE comp_payroll_map SET payroll_company_name/)
+    // NFKC + trim を通す (全角スペースは残す — 会社名の一部でありうる)
+    expect(statements[0]!.params).toEqual(['有限会社 大石運輸', '27324455', '0100'])
+  })
+})
+
+describe('normalizeEmployeeMasterPutBody — payrollCompanyName (Refs #405)', () => {
+  it('省略・null は null', () => {
+    expect(normalizeEmployeeMasterPutBody({}).payrollCompanyName).toBeNull()
+    expect(normalizeEmployeeMasterPutBody({ payrollCompanyName: null }).payrollCompanyName).toBeNull()
+  })
+
+  it('会社名が空文字なら null (未取得扱い、表示専用なので落として良い)', () => {
+    expect(normalizeEmployeeMasterPutBody({
+      payrollCompanyName: { payrollCompany: '0100', name: '   ' },
+    }).payrollCompanyName).toBeNull()
+    expect(normalizeEmployeeMasterPutBody({
+      payrollCompanyName: { payrollCompany: '0100' },
+    }).payrollCompanyName).toBeNull()
+  })
+
+  it('オブジェクトでなければ 400 相当のエラー', () => {
+    expect(() => normalizeEmployeeMasterPutBody({ payrollCompanyName: 'x' })).toThrow(EmployeeMasterError)
+    expect(() => normalizeEmployeeMasterPutBody({ payrollCompanyName: [] })).toThrow(EmployeeMasterError)
+  })
+
+  it('payrollCompany が空なら 400 相当のエラー', () => {
+    expect(() => normalizeEmployeeMasterPutBody({
+      payrollCompanyName: { payrollCompany: '', name: 'x' },
+    })).toThrow(EmployeeMasterError)
   })
 })
 

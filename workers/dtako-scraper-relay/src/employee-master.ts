@@ -75,6 +75,9 @@ export interface EmployeeMasterPutBody {
   attrs: EmployeeAttrInput[];
   deleteAttrs: EmployeeAttrDeleteKey[];
   deleteEmployees: EmployeeDeleteKey[];
+  /** 給与DB取り込み時に得た会社名 (CONAME1) の書き戻し (Refs #405)。
+   * **表示専用**で突合には使わない — 突合キーは会社コード。省略可 (手編集の保存では来ない)。 */
+  payrollCompanyName: { payrollCompany: string; name: string } | null;
 }
 
 function normalizeCompany(raw: unknown, field: string): string {
@@ -186,7 +189,21 @@ export function normalizeEmployeeMasterPutBody(raw: unknown): EmployeeMasterPutB
     attrs: normalizeArray(obj.attrs, "attrs", normalizeAttrInput),
     deleteAttrs: normalizeArray(obj.deleteAttrs, "deleteAttrs", normalizeAttrDeleteKey),
     deleteEmployees: normalizeArray(obj.deleteEmployees, "deleteEmployees", normalizeDeleteKey),
+    payrollCompanyName: normalizePayrollCompanyName(obj.payrollCompanyName),
   };
+}
+
+/** `payrollCompanyName` (省略可) を検証する。会社名は自由文字列なので NFKC + trim
+ * だけ通す (表示専用のため空文字は「未取得」= null 扱い)。 */
+function normalizePayrollCompanyName(raw: unknown): { payrollCompany: string; name: string } | null {
+  if (raw == null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new EmployeeMasterError("payrollCompanyName はオブジェクトが必要です");
+  }
+  const obj = raw as Record<string, unknown>;
+  const payrollCompany = normalizeCompany(obj.payrollCompany, "payrollCompanyName.payrollCompany");
+  const name = typeof obj.name === "string" ? obj.name.normalize("NFKC").trim() : "";
+  return name ? { payrollCompany, name } : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +229,15 @@ export function buildEmployeeMasterWriteStatements(
   compId: string,
 ): D1Statement[] {
   const statements: D1Statement[] = [];
+  // 会社名 (CONAME1) の書き戻しは表示専用。対応表に無い会社なら 0 行更新で無害
+  // (会社の追加自体は comp_payroll_map の管理作業であってここでは作らない)。
+  if (body.payrollCompanyName) {
+    statements.push({
+      sql: `UPDATE comp_payroll_map SET payroll_company_name = ?
+            WHERE comp_id = ? AND payroll_company = ?`,
+      params: [body.payrollCompanyName.name, compId, body.payrollCompanyName.payrollCompany],
+    });
+  }
   for (const e of body.employees) {
     statements.push({
       sql: `INSERT INTO employees (comp_id, company, payroll_cd, name, name_key, driver_cd, updated_at)

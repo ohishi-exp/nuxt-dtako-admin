@@ -785,6 +785,9 @@ const employeeMasterByComp = ref<Record<string, EmployeeMasterEntry[]>>({})
 const employeeMasterLoaded = ref(false)
 const savingEmployeeMaster = ref(false)
 const employeeMasterMessage = ref('')
+/** 給与DB取り込みで得た会社名 (CONAME1) の書き戻し待ち (compId → {payrollCompany, name})。
+ * **表示専用**で突合には使わない (突合キーは会社コード、Refs #405)。「保存」で送る。 */
+const pendingPayrollCompanyNames = ref<Record<string, { payrollCompany: string, name: string }>>({})
 /** 社員マスタタブでローカル削除した属性行・社員行 (「保存」で確定、Refs #367)。 */
 const pendingAttrDeletes = ref<Array<{ compId: string, company: string, payrollCd: string, effectiveFrom: string }>>([])
 const pendingEmployeeDeletes = ref<Array<{ compId: string, company: string, payrollCd: string }>>([])
@@ -850,6 +853,25 @@ async function loadCompMap() {
 /** いま社員マスタタブで編集対象にしている会社 (全社表示なら閲覧中の会社)。 */
 const importTargetComp = computed(() =>
   (employeeMasterScope.value === 'all' ? session.value?.compId : employeeMasterScope.value) ?? '')
+
+/**
+ * 給与明細 CSV 取り込みの会社選択肢 (Refs #405)。
+ *
+ * 会社は突合キー `会社|給与コード|氏名` の一部なので、自由入力だと表記揺れで
+ * キーが分裂する。社員マスタが保持しているのと同じ**給与大臣の会社コード**を
+ * 選ばせる (表示は会社名つき)。未選択 (空文字) は「会社未設定」のまま許容する —
+ * 1 社しか扱わない運用では会社無しでも突合できるため (旧 2 部キー)。
+ */
+const salaryImportCompanyOptions = computed(() => {
+  const entry = compMap.value.find(c => c.compId === (session.value?.compId ?? ''))
+  return [
+    { label: '(会社未設定)', value: '' },
+    ...(entry?.payrollCompanies ?? []).map(p => ({
+      label: p.payrollCompanyName ? `${p.payrollCompany} (${p.payrollCompanyName})` : p.payrollCompany,
+      value: p.payrollCompany,
+    })),
+  ]
+})
 
 /** 取り込み元に選べる給与DB会社 (対象 comp の対応行)。 */
 const importPayrollOptions = computed(() => {
@@ -940,6 +962,12 @@ async function importFromPayrollDb() {
     }
     setEmployeeMasterEntries(compId, entries)
 
+    // 会社名 (CONAME1) は表示専用として対応表へ書き戻す (Refs #405)
+    pendingPayrollCompanyNames.value = {
+      ...pendingPayrollCompanyNames.value,
+      [compId]: { payrollCompany, name: res.company_name },
+    }
+
     const warn = res.warnings.length ? ` / warnings: ${res.warnings.join(' / ')}` : ''
     employeeMasterMessage.value
       = `給与DB (${payrollCompany} ${res.company_name}) から ${plan.employees.length} 名を取り込みました `
@@ -1023,11 +1051,14 @@ async function saveEmployeeMaster(message: string) {
           attrs: collectAttrRows(entries),
           deleteAttrs: deleteAttrs.map(({ company, payrollCd, effectiveFrom }) => ({ company, payrollCd, effectiveFrom })),
           deleteEmployees: deleteEmployees.map(({ company, payrollCd }) => ({ company, payrollCd })),
+          payrollCompanyName: pendingPayrollCompanyNames.value[compId] ?? null,
         },
       })
     }
     pendingAttrDeletes.value = []
     pendingEmployeeDeletes.value = []
+    pendingPayrollCompanyNames.value = {}
+    await loadCompMap() // 会社名を書き戻したので表示用の対応表を取り直す
     employeeMasterMessage.value = message
   }
   catch (e) {
@@ -2059,13 +2090,17 @@ watch([activeTab, month, session], () => {
               <div class="flex flex-wrap items-center gap-2 text-sm">
                 <span class="font-medium">{{ imp.name ?? `貼り付け ${idx + 1}` }}</span>
                 <span class="text-xs text-gray-500">{{ salaryImportLabel(imp.parsed) }}</span>
-                <UInput
+                <!-- 会社は突合キーそのもの。自由入力だと表記揺れでキーが分裂するため
+                     会社対応表 (comp-map) 由来の選択式にする (Refs #405) -->
+                <USelect
                   :model-value="imp.company"
+                  :items="salaryImportCompanyOptions"
+                  value-key="value"
                   size="xs"
-                  class="w-40"
-                  placeholder="会社名 (例: 株式会社)"
-                  title="社員コードは会社毎に別体系のため、複数社を取り込む時は会社名を設定してください (Refs #253)"
-                  @change="(e: Event) => setImportCompany(imp.id, (e.target as HTMLInputElement).value)"
+                  class="w-56"
+                  placeholder="会社を選択"
+                  title="社員コードは会社毎に別体系のため、取り込みごとに会社を選んでください (Refs #253/#405)"
+                  @update:model-value="(v: unknown) => setImportCompany(imp.id, String(v))"
                 />
                 <div class="flex-1" />
                 <UButton size="xs" variant="ghost" icon="i-lucide-trash-2" label="削除" @click="removeSalaryImport(imp.id)" />

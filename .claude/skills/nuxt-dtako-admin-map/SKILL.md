@@ -505,6 +505,15 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
 `salaryCdMapKey` / `buildCdMapEntries` / `compareSalaryMonth` は**無変更** — キーに
 入る文字列が変わるだけ。
 
+会社名の書き戻しは `PUT /restraint-api/employee-master` の**任意フィールド**
+`payrollCompanyName: {payrollCompany, name}` で行う (給与DB取り込みの後に「保存」を
+押した時だけ載る)。対応表に無い会社なら 0 行更新で無害 — 会社の追加自体は
+`comp_payroll_map` の管理作業であってこの経路では作らない。
+
+**給与明細 CSV 取り込みの会社入力も選択式**にした (自由入力を廃止)。会社は突合キーの
+一部なので、手入力を許すと表記揺れでキーが分裂する。選択肢は comp-map 由来で、
+「(会社未設定)」も選べる — 1 社しか扱わない運用では会社無しでも旧 2 部キーで突合できる。
+
 - **会社 (comp) スコープ** (migration 0007): `employees`/`employee_attrs` は
   `comp_id` を PK に含み、DO は必ずセッションの `record.compId` で絞る。dtako
   テナントは複数ある (27324455 = 給与DB 0100/0200/0300、75700192 = 0400)。
