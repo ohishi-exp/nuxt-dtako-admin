@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isR2OnlyRestraintPath, viewerCompIdsForTenant } from '../src/restraint-viewer-auth'
+import { devViewerCompIds, isR2OnlyRestraintPath, viewerCompIdsForTenant } from '../src/restraint-viewer-auth'
 import type { DtakoAccountEntry } from '../src/cron'
 
 describe('isR2OnlyRestraintPath', () => {
@@ -57,5 +57,16 @@ describe('viewerCompIdsForTenant', () => {
     expect(viewerCompIdsForTenant(accounts, 't-9').size).toBe(0)
     expect(viewerCompIdsForTenant(accounts, '').size).toBe(0)
     expect(viewerCompIdsForTenant([], 't-1').size).toBe(0)
+  })
+})
+
+describe('devViewerCompIds', () => {
+  it('カンマ区切りを集合にする (前後空白・空要素は落とす)', () => {
+    expect([...devViewerCompIds('local, other ,,')].sort()).toEqual(['local', 'other'])
+  })
+
+  it('単一指定も従来どおり効く', () => {
+    expect(devViewerCompIds('local').has('local')).toBe(true)
+    expect(devViewerCompIds('local').has('other')).toBe(false)
   })
 })

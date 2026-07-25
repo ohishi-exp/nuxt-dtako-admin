@@ -21,19 +21,18 @@ function recordScrapeResult(targetDate: string, evt: ScrapeProgressEvent) {
   })
 }
 
+// 会社一覧は `app/utils/dtako-comps.ts` に集約 (拘束×賃金の社員マスタと共有、Refs #367)
 const compIdOptions = [
   { label: '全企業', value: '' },
-  { label: '27324455 (大石運輸倉庫)', value: '27324455' },
-  { label: '75700192 (北海大運)', value: '75700192' },
+  ...DTAKO_COMPS.map(c => ({ label: dtakoCompDisplay(c.compId), value: c.compId })),
 ]
 
 /** compIdOptions から「全企業」プレースホルダ (value: '') を除いた実 comp_id 一覧。 */
 const realCompIds = compIdOptions.filter(o => o.value).map(o => o.value)
 
-const compIdLabels: Record<string, string> = {
-  '27324455': '大石運輸倉庫',
-  '75700192': '北海大運',
-}
+const compIdLabels: Record<string, string> = Object.fromEntries(
+  DTAKO_COMPS.map(c => [c.compId, c.label]),
+)
 
 const selectedCompId = useState('scraper-compId', () => '')
 const skipUpload = useState('scraper-skipUpload', () => false)

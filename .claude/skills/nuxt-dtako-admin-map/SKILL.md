@@ -481,6 +481,14 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
 - **「未登録 N 名をマスタへ登録」** ボタン (`findUnregistered`): 給与明細 CSV に
   現れたが社員マスタに (会社, 給与コード) が無い行を一括登録する。送るのは
   コード・氏名・会社のみ (乗務員CD 突合・金額は一切送信しない)
+- **会社 (comp) スコープ** (migration 0007): `employees`/`employee_attrs` は
+  `comp_id` を PK に含み、DO は必ずセッションの `record.compId` で絞る。dtako
+  テナントは複数ある (27324455 = 給与DB 0100/0200/0300、75700192 = 0400)。
+  一方、**社員マスタタブだけは会社横断で表示・編集できる** (管理者が両社を見る、
+  会社リストは `app/utils/dtako-comps.ts` = scraper.vue と共有)。保存は会社ごとに
+  PUT を分ける — worker はセッションの会社IDでしか書かないため。触れる会社の
+  判定は `viewerCompIdsForTenant` (DTAKO_ACCOUNTS 逆引き) が正で、フロントの
+  リストは表示順とラベルだけ
 - **社員マスタタブ** (単価マスタの隣、⑥): 一覧 + 氏名/乗務員CD の手直し + 所属・
   給与体系の**適用開始日つき履歴** (`employee_attrs`) の追加/履歴モーダル削除 +
   社員行の削除。単価マスタと同じ作法で**ローカル編集 → 「保存」で確定** (PUT に

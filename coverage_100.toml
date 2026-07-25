@@ -101,6 +101,10 @@ path = "app/utils/employee-master.ts"
 branches = true
 
 [[files]]
+path = "app/utils/dtako-comps.ts"
+branches = true
+
+[[files]]
 path = "app/utils/salary-file.ts"
 branches = true
 

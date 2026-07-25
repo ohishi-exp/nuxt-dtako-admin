@@ -41,3 +41,15 @@ export function viewerCompIdsForTenant(
   }
   return out;
 }
+
+/** ローカル開発専用の短絡 (`RESTRAINT_DEV_VIEWER_COMP`) が許可する comp_id 集合。
+ * カンマ区切りで複数指定できる — 社員マスタの会社横断表示 (Refs #367) を
+ * ローカルで検証するため。空要素・前後空白は落とす。 */
+export function devViewerCompIds(raw: string): Set<string> {
+  return new Set(
+    raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0),
+  );
+}

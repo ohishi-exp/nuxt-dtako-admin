@@ -55,11 +55,14 @@ const session = computed<{ compId: string, userName: string } | null>(() =>
   theearthSession.value
   ?? (viewerComp.value ? { compId: viewerComp.value, userName: '閲覧' } : null))
 
-function authHeaders(): Record<string, string> {
+/** `compId` を明示すると閲覧モードでその会社に対して投げる (社員マスタの会社横断、
+ * Refs #367)。触れるかどうかの判定は worker 側 (`viewerCompIdsForTenant`) が
+ * DTAKO_ACCOUNTS の逆引きで行うため、ここで会社を絞る必要はない。 */
+function authHeaders(compId?: string): Record<string, string> {
   if (theearthSession.value) return theearthHeaders()
   const token = currentAccessToken()
   return {
-    'X-Theearth-Comp-Id': viewerComp.value,
+    'X-Theearth-Comp-Id': compId ?? viewerComp.value,
     'X-Theearth-User-B64': b64urlUtf8('viewer'),
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   }
@@ -178,6 +181,8 @@ watch(session, (s) => {
     clearSalaryPaste()
     salaryConfigLoaded.value = false
     employeeMasterLoaded.value = false
+    // 他社分も含めて破棄する (会社横断表示、Refs #367)
+    employeeMasterByComp.value = {}
     minWageMasterLoaded.value = false
   }
   else {
@@ -770,7 +775,12 @@ async function saveSalaryItemConfig() {
 // sessionStorage ドラフト退避 / beforeunload 警告は不要 (last-write-wins、
 // Refs #367 決定事項)。
 
-const employeeMaster = ref<EmployeeMasterEntry[]>([])
+// 社員マスタは D1 で **会社ID (comp) スコープ**に保存される (migration 0007)。
+// 給与比較・月次集計は「今開いている会社」の分だけを使うが、社員マスタタブは
+// 管理者が両社をまとめて面倒を見るため**会社横断で表示・編集**できる
+// (Refs #367)。そのため保持は comp_id をキーにした辞書にし、
+// `employeeMaster` (= 現在の会社の分) は そこから引く computed にする。
+const employeeMasterByComp = ref<Record<string, EmployeeMasterEntry[]>>({})
 /** R2 に旧突合マスタ (salary-cd-map) が残っていて未取り込みか (Refs #367)。 */
 const employeeMasterMigratable = ref(false)
 const employeeMasterLoaded = ref(false)
@@ -778,55 +788,111 @@ const savingEmployeeMaster = ref(false)
 const importingCdMap = ref(false)
 const employeeMasterMessage = ref('')
 /** 社員マスタタブでローカル削除した属性行・社員行 (「保存」で確定、Refs #367)。 */
-const pendingAttrDeletes = ref<Array<{ company: string, payrollCd: string, effectiveFrom: string }>>([])
-const pendingEmployeeDeletes = ref<Array<{ company: string, payrollCd: string }>>([])
+const pendingAttrDeletes = ref<Array<{ compId: string, company: string, payrollCd: string, effectiveFrom: string }>>([])
+const pendingEmployeeDeletes = ref<Array<{ compId: string, company: string, payrollCd: string }>>([])
+
+/** 現在開いている会社の社員マスタ (給与比較・月次集計 CSV が読む)。 */
+const employeeMaster = computed<EmployeeMasterEntry[]>(() =>
+  (session.value ? employeeMasterByComp.value[session.value.compId] : undefined) ?? [])
 
 /** 突合ロジックが読む SalaryCdMap 形 (driverCd 未設定の行は除外)。 */
 const salaryCdMap = computed(() => buildCdMapEntries(employeeMaster.value))
 
-async function loadEmployeeMaster() {
+function setEmployeeMasterEntries(compId: string, entries: EmployeeMasterEntry[]) {
+  employeeMasterByComp.value = { ...employeeMasterByComp.value, [compId]: entries }
+}
+
+/** 1 会社分を読む。`compId` 省略時は今開いている会社 (migratable も更新する)。
+ * 他社の読み込みは fail-soft — テナントが許可されていない会社は 401/403 に
+ * なるが、それは「見えないのが正しい」ので画面全体のエラーにはしない。 */
+async function loadEmployeeMaster(compId?: string) {
   if (!session.value) return
+  const target = compId ?? session.value.compId
+  const isCurrent = target === session.value.compId
   try {
-    const res = await $fetch<EmployeeMasterGetResponse>('/restraint-api/employee-master', { headers: authHeaders() })
-    employeeMaster.value = res.employees
-    employeeMasterMigratable.value = res.migratable
-    employeeMasterLoaded.value = true
+    const res = await $fetch<EmployeeMasterGetResponse>('/restraint-api/employee-master', {
+      headers: authHeaders(target),
+    })
+    setEmployeeMasterEntries(target, res.employees)
+    if (isCurrent) {
+      employeeMasterMigratable.value = res.migratable
+      employeeMasterLoaded.value = true
+    }
   }
   catch (e) {
-    handleApiError(e)
+    if (isCurrent) handleApiError(e)
+    else setEmployeeMasterEntries(target, [])
   }
 }
 
-/** company+payrollCd が一致する行を更新、無ければ新規追加する (ローカル即時反映)。 */
-function upsertEmployeeMasterEntry(company: string, payrollCd: string, name: string, driverCd: string | null) {
-  const idx = employeeMaster.value.findIndex(e => e.company === company && e.payrollCd === payrollCd)
-  if (idx === -1) {
-    employeeMaster.value = [...employeeMaster.value, { company, payrollCd, name, driverCd, attrs: [] }]
+/** 社員マスタタブの表示範囲 ('all' = 全社)。空文字は使わない —
+ * Nuxt UI の USelect は value が空文字の項目を拒否する (実機で 500、Refs #367)。 */
+const employeeMasterScope = ref('all')
+
+/** 全社表示に必要な会社を読む (現在の会社は読み込み済みでもそのまま使う)。 */
+async function loadEmployeeMasterScope() {
+  if (!session.value) return
+  if (!employeeMasterLoaded.value) await loadEmployeeMaster()
+  if (employeeMasterScope.value !== 'all') {
+    if (employeeMasterScope.value !== session.value.compId) await loadEmployeeMaster(employeeMasterScope.value)
+    return
   }
-  else {
-    employeeMaster.value = employeeMaster.value.map((e, i) => (i === idx ? { ...e, name, driverCd } : e))
-  }
+  const others = DTAKO_COMPS.map(c => c.compId).filter(id => id !== session.value?.compId)
+  await Promise.all(others.map(id => loadEmployeeMaster(id)))
 }
 
-/** 現在の employeeMaster 全件 + 属性履歴を PUT する (upsert のみ・冪等なので全件
- * 送って問題ない)。ローカルで消した属性行・社員行は削除指示として同送する
- * (worker 側は upsert → 削除の順に実行するので、同じキーがあれば削除が勝つ)。 */
+/** company+payrollCd が一致する行を更新、無ければ新規追加する (ローカル即時反映)。
+ * `compId` 省略時は今開いている会社。 */
+function upsertEmployeeMasterEntry(
+  company: string,
+  payrollCd: string,
+  name: string,
+  driverCd: string | null,
+  compId?: string,
+) {
+  if (!session.value) return
+  const target = compId ?? session.value.compId
+  const entries = employeeMasterByComp.value[target] ?? []
+  const idx = entries.findIndex(e => e.company === company && e.payrollCd === payrollCd)
+  setEmployeeMasterEntries(
+    target,
+    idx === -1
+      ? [...entries, { company, payrollCd, name, driverCd, attrs: [] }]
+      : entries.map((e, i) => (i === idx ? { ...e, name, driverCd } : e)),
+  )
+}
+
+/** 読み込み済みの会社ごとに PUT する (upsert のみ・冪等なので全件送って問題ない)。
+ * ローカルで消した属性行・社員行は所属会社の PUT に削除指示として同送する
+ * (worker 側は upsert → 削除の順に実行するので、同じキーがあれば削除が勝つ)。
+ * **会社をまたぐ 1 回の PUT は無い** — worker はセッションの会社IDでしか
+ * 書かないため、会社ごとにヘッダを変えて投げる必要がある。 */
 async function saveEmployeeMaster(message: string) {
   if (!session.value) return
   savingEmployeeMaster.value = true
   pageError.value = ''
+  const targets = new Set<string>([
+    ...Object.keys(employeeMasterByComp.value),
+    ...pendingAttrDeletes.value.map(d => d.compId),
+    ...pendingEmployeeDeletes.value.map(d => d.compId),
+  ])
   try {
-    const employees = employeeMaster.value.map(e => ({ company: e.company, payrollCd: e.payrollCd, name: e.name, driverCd: e.driverCd }))
-    await $fetch('/restraint-api/employee-master', {
-      method: 'PUT',
-      headers: authHeaders(),
-      body: {
-        employees,
-        attrs: collectAttrRows(employeeMaster.value),
-        deleteAttrs: pendingAttrDeletes.value,
-        deleteEmployees: pendingEmployeeDeletes.value,
-      },
-    })
+    for (const compId of targets) {
+      const entries = employeeMasterByComp.value[compId] ?? []
+      const deleteAttrs = pendingAttrDeletes.value.filter(d => d.compId === compId)
+      const deleteEmployees = pendingEmployeeDeletes.value.filter(d => d.compId === compId)
+      if (!entries.length && !deleteAttrs.length && !deleteEmployees.length) continue
+      await $fetch('/restraint-api/employee-master', {
+        method: 'PUT',
+        headers: authHeaders(compId),
+        body: {
+          employees: entries.map(e => ({ company: e.company, payrollCd: e.payrollCd, name: e.name, driverCd: e.driverCd })),
+          attrs: collectAttrRows(entries),
+          deleteAttrs: deleteAttrs.map(({ company, payrollCd, effectiveFrom }) => ({ company, payrollCd, effectiveFrom })),
+          deleteEmployees: deleteEmployees.map(({ company, payrollCd }) => ({ company, payrollCd })),
+        },
+      })
+    }
     pendingAttrDeletes.value = []
     pendingEmployeeDeletes.value = []
     employeeMasterMessage.value = message
@@ -900,9 +966,13 @@ function setCdMapEntry(payrollCd: string, name: string, driverCd: string, compan
  * 突合だけを解除する — 社員としての識別情報 (会社・給与コード・氏名) 自体は
  * 消さない (取り消しても社員マスタの登録は残す)。 */
 function removeCdMapEntry(key: string) {
+  if (!session.value) return
   const [company, payrollCd] = key.split('|')
-  employeeMaster.value = employeeMaster.value.map(e =>
-    (e.company === company && e.payrollCd === payrollCd ? { ...e, driverCd: null } : e))
+  setEmployeeMasterEntries(
+    session.value.compId,
+    employeeMaster.value.map(e =>
+      (e.company === company && e.payrollCd === payrollCd ? { ...e, driverCd: null } : e)),
+  )
 }
 
 /** 乗務員CD選択肢 (未突合 = システム計算のみ の乗務員だけ、CD 昇順)。
@@ -925,19 +995,37 @@ const salaryCdMapRows = computed(() =>
 // 給与体系) は適用開始日つき履歴で、対象月の**末日時点**で効いている行が
 // 月次集計 CSV の 所属(マスタ)/給与体系 列になる (resolveAttrsAt)。
 
-/** 属性の新規入力欄 (キー = "会社|給与コード")。 */
+/** 属性の新規入力欄 (キー = "会社ID|会社|給与コード")。 */
 const newAttrInputs = ref<Record<string, { from: string, branch: string, payScheme: string }>>({})
 
-/** 一覧行 (会社→給与コード順、対象月末時点の現行属性 + 履歴は新しい順)。 */
-const employeeMasterRows = computed(() =>
-  sortEmployeeEntries(employeeMaster.value).map(e => ({
-    key: `${e.company}|${e.payrollCd}`,
-    entry: e,
-    current: resolveAttrsAt(e, month.value),
-    history: [...e.attrs].sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom)),
-  })))
+/** 社員マスタタブの会社セレクタ (全社 + 既知の会社 + 閲覧中の会社)。 */
+const employeeMasterScopeOptions = computed(() => {
+  const known = DTAKO_COMPS.map(c => c.compId)
+  const current = session.value?.compId
+  const ids = current && !known.includes(current) ? [...known, current] : known
+  return [{ label: '全社', value: 'all' }, ...ids.map(id => ({ label: dtakoCompDisplay(id), value: id }))]
+})
 
-/** 属性履歴モーダルの対象 (key = "会社|給与コード"、null = 閉)。 */
+/** 表示対象の会社ID (全社なら読み込み済みの全会社)。 */
+const employeeMasterScopeComps = computed(() =>
+  (employeeMasterScope.value === 'all'
+    ? Object.keys(employeeMasterByComp.value).sort()
+    : [employeeMasterScope.value]))
+
+/** 一覧行 (会社ID → 会社 → 給与コード順、対象月末時点の現行属性 + 履歴は新しい順)。
+ * key は "会社ID|会社|給与コード" — 会社横断で一意にするため会社IDを含める。 */
+const employeeMasterRows = computed(() =>
+  employeeMasterScopeComps.value.flatMap(compId =>
+    sortEmployeeEntries(employeeMasterByComp.value[compId] ?? []).map(e => ({
+      key: `${compId}|${e.company}|${e.payrollCd}`,
+      compId,
+      compLabel: dtakoCompLabel(compId),
+      entry: e,
+      current: resolveAttrsAt(e, month.value),
+      history: [...e.attrs].sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom)),
+    }))))
+
+/** 属性履歴モーダルの対象 (key = "会社ID|会社|給与コード"、null = 閉)。 */
 const attrHistoryKey = ref<string | null>(null)
 const attrHistoryOpen = computed({
   get: () => attrHistoryKey.value !== null,
@@ -948,10 +1036,26 @@ const attrHistoryOpen = computed({
 const attrHistoryRow = computed(() =>
   attrHistoryKey.value === null ? null : employeeMasterRows.value.find(r => r.key === attrHistoryKey.value) ?? null)
 
-/** 社員 1 件をローカル更新する (key = "会社|給与コード")。 */
+/** 一覧行の key を (会社ID, 会社, 給与コード) に分解する。会社ラベルに `|` は
+ * 入らない前提 (worker 側で NFKC + trim 済みの自由文字列)。 */
+function splitEmployeeRowKey(key: string): { compId: string, company: string, payrollCd: string } {
+  const [compId = '', company = '', payrollCd = ''] = key.split('|')
+  return { compId, company, payrollCd }
+}
+
+function findEmployeeByRowKey(key: string): EmployeeMasterEntry | undefined {
+  const { compId, company, payrollCd } = splitEmployeeRowKey(key)
+  return (employeeMasterByComp.value[compId] ?? []).find(e => e.company === company && e.payrollCd === payrollCd)
+}
+
+/** 社員 1 件をローカル更新する (key = "会社ID|会社|給与コード")。 */
 function patchEmployeeEntry(key: string, patch: Partial<EmployeeMasterEntry>) {
-  employeeMaster.value = employeeMaster.value.map(e =>
-    (`${e.company}|${e.payrollCd}` === key ? { ...e, ...patch } : e))
+  const { compId, company, payrollCd } = splitEmployeeRowKey(key)
+  setEmployeeMasterEntries(
+    compId,
+    (employeeMasterByComp.value[compId] ?? []).map(e =>
+      (e.company === company && e.payrollCd === payrollCd ? { ...e, ...patch } : e)),
+  )
 }
 
 /** 乗務員CD の手入力 (空 = 突合解除)。数字以外は弾く (worker 側の検証と同一規則)。 */
@@ -977,7 +1081,7 @@ function addEmployeeAttr(key: string) {
   const input = newAttrInputs.value[key]
   if (!input?.from) return
   const row = { effectiveFrom: input.from, branch: input.branch.trim() || null, payScheme: input.payScheme.trim() || null }
-  const entry = employeeMaster.value.find(e => `${e.company}|${e.payrollCd}` === key)
+  const entry = findEmployeeByRowKey(key)
   if (!entry) return
   patchEmployeeEntry(key, { attrs: upsertAttrRow(entry.attrs, row) })
   // 適用開始日は連続入力しやすいよう残す (単価マスタの addRate と同じ作法)
@@ -987,21 +1091,29 @@ function addEmployeeAttr(key: string) {
 
 /** 属性履歴 1 件をローカル削除する (「保存」で D1 からも消える)。 */
 function removeEmployeeAttr(key: string, effectiveFrom: string) {
-  const entry = employeeMaster.value.find(e => `${e.company}|${e.payrollCd}` === key)
+  const entry = findEmployeeByRowKey(key)
   if (!entry) return
+  const { compId } = splitEmployeeRowKey(key)
   patchEmployeeEntry(key, { attrs: removeAttrRow(entry.attrs, effectiveFrom) })
-  pendingAttrDeletes.value = [...pendingAttrDeletes.value, { company: entry.company, payrollCd: entry.payrollCd, effectiveFrom }]
+  pendingAttrDeletes.value = [
+    ...pendingAttrDeletes.value,
+    { compId, company: entry.company, payrollCd: entry.payrollCd, effectiveFrom },
+  ]
   employeeMasterMessage.value = `${entry.name} の ${effectiveFrom} の履歴を削除しました。「保存」で確定します`
 }
 
 /** 社員 1 件をローカル削除する (属性履歴ごと。「保存」で D1 からも消える)。 */
 function removeEmployeeEntry(key: string) {
-  const entry = employeeMaster.value.find(e => `${e.company}|${e.payrollCd}` === key)
+  const entry = findEmployeeByRowKey(key)
   if (!entry) return
-  employeeMaster.value = employeeMaster.value.filter(e => `${e.company}|${e.payrollCd}` !== key)
-  pendingEmployeeDeletes.value = [...pendingEmployeeDeletes.value, { company: entry.company, payrollCd: entry.payrollCd }]
+  const { compId, company, payrollCd } = splitEmployeeRowKey(key)
+  setEmployeeMasterEntries(
+    compId,
+    (employeeMasterByComp.value[compId] ?? []).filter(e => !(e.company === company && e.payrollCd === payrollCd)),
+  )
+  pendingEmployeeDeletes.value = [...pendingEmployeeDeletes.value, { compId, company, payrollCd }]
   if (attrHistoryKey.value === key) attrHistoryKey.value = null
-  employeeMasterMessage.value = `${entry.company} ${entry.payrollCd} ${entry.name} を削除しました。「保存」で確定します`
+  employeeMasterMessage.value = `${dtakoCompLabel(compId)} ${company} ${payrollCd} ${entry.name} を削除しました。「保存」で確定します`
 }
 
 /** 選択中の勤務月に対応する CSV 行。CSV の「給与・賞与名」の年月は**支給月**ラベル
@@ -1357,7 +1469,8 @@ watch([activeTab, month, session], () => {
     if (Object.keys(master.value.drivers).length === 0) loadMaster()
   }
   else if (activeTab.value === 'employees') {
-    if (!employeeMasterLoaded.value) loadEmployeeMaster()
+    // 会社横断表示のため、選択中の範囲に必要な会社をまとめて読む (Refs #367)
+    loadEmployeeMasterScope()
   }
 }, { immediate: false })
 </script>
@@ -2298,7 +2411,15 @@ watch([activeTab, month, session], () => {
                 <span class="font-semibold">社員マスタ ({{ employeeMasterRows.length }} 名)</span>
                 <span class="text-xs text-gray-500">所属・給与体系は「{{ fmtYm(month) }} の末日時点」で解決した値を表示しています</span>
                 <div class="flex-1" />
-                <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" @click="loadEmployeeMaster" />
+                <USelect
+                  v-model="employeeMasterScope"
+                  :items="employeeMasterScopeOptions"
+                  value-key="value"
+                  size="xs"
+                  class="w-56"
+                  @update:model-value="loadEmployeeMasterScope"
+                />
+                <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" @click="loadEmployeeMasterScope" />
                 <UButton size="xs" icon="i-lucide-save" label="保存" :loading="savingEmployeeMaster" @click="saveEmployeeMaster('社員マスタを保存しました')" />
               </div>
             </template>
@@ -2314,6 +2435,7 @@ watch([activeTab, month, session], () => {
               <table class="w-full text-sm">
                 <thead>
                   <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
+                    <th v-if="employeeMasterScope === 'all'" class="px-2 py-2">会社ID</th>
                     <th class="px-2 py-2">会社</th>
                     <th class="px-2 py-2">給与コード</th>
                     <th class="px-2 py-2">氏名</th>
@@ -2328,6 +2450,7 @@ watch([activeTab, month, session], () => {
                 </thead>
                 <tbody>
                   <tr v-for="row in employeeMasterRows" :key="row.key" class="border-b border-gray-100 dark:border-gray-800">
+                    <td v-if="employeeMasterScope === 'all'" class="px-2 py-1.5 whitespace-nowrap">{{ row.compLabel }}</td>
                     <td class="px-2 py-1.5">{{ row.entry.company }}</td>
                     <td class="px-2 py-1.5">{{ row.entry.payrollCd }}</td>
                     <td class="px-2 py-1.5">
@@ -2398,6 +2521,7 @@ watch([activeTab, month, session], () => {
             <p class="text-xs text-gray-500 mt-2">
               保存されるのは識別情報 (会社・給与コード・氏名・乗務員CD) と所属/給与体系だけです — 支給金額・明細は送信しません。
               所属・給与体系は月次集計 CSV の「所属(マスタ)」「給与体系」列になります (対象月の末日時点で効いている行)。
+              社員マスタは**会社ID (dtako) ごと**に保存され、「全社」表示では権限のある会社をまとめて編集できます — 保存は会社ごとに分けて送られます。
             </p>
           </UCard>
 
