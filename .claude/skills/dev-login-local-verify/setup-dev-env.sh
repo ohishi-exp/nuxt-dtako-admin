@@ -80,27 +80,38 @@ if [ -L "$WT/node_modules" ] && [ ! -e "$WT/node_modules" ]; then
   rm "$WT/node_modules"
 fi
 if [ ! -e "$WT/node_modules" ]; then
+  # donor は **package.json が origin/main と一致するものだけ**採る。
+  # 「実体があるものを先着で使う」だと古い依存の worktree を引いて、build が
+  # `"createDevLoginCallbackHandler" is not exported by @ippoan/auth-client` のような
+  # 分かりにくい rollup エラーで落ちる (2026-07-25 実害。以前は warn するだけだった)。
   DONOR=""
+  MAIN_PKG=$(mktemp)
+  git -C "$ROOT" show origin/main:package.json > "$MAIN_PKG" 2>/dev/null || true
   for c in "$ROOT" "$ROOT"/.claude/worktrees/*; do
     [ "$c" = "$WT" ] && continue
-    if [ -d "$c/node_modules" ] && [ ! -L "$c/node_modules" ]; then
+    [ -d "$c/node_modules" ] && [ ! -L "$c/node_modules" ] || continue
+    if diff -q "$MAIN_PKG" "$c/package.json" > /dev/null 2>&1; then
       DONOR="$c"
       break
     fi
+    echo "   donor 候補 $c は package.json が origin/main と違うので使わない"
   done
+  rm -f "$MAIN_PKG"
   if [ -n "$DONOR" ]; then
-    cmd //c mklink /J "$(cygpath -w "$WT/node_modules")" "$(cygpath -w "$DONOR/node_modules")" > /dev/null
-    echo "   junction -> $DONOR/node_modules"
-    if ! diff -q <(git -C "$ROOT" show origin/main:package.json) "$DONOR/package.json" > /dev/null 2>&1; then
-      echo "   !! donor の package.json が origin/main と異なる (auth-client bump 等)。"
-      echo "   !! 必要なら donor で npm install してから再実行するか、junction を消して"
-      echo "   !! このスクリプトを再実行 (npm install パスに落ちる)"
-    fi
+    # `cmd //c mklink /J` は使わない — MSYS の引数変換で `/J` が潰れ
+    # 「無効なスイッチです」で失敗する (2026-07-25 実害)。PowerShell の
+    # New-Item -ItemType Junction は引数変換の影響を受けない。
+    powershell -NoProfile -Command \
+      "New-Item -ItemType Junction -Path '$(cygpath -w "$WT/node_modules")' -Target '$(cygpath -w "$DONOR/node_modules")' | Out-Null" \
+      || { echo "!! junction 作成に失敗した ($DONOR/node_modules)"; exit 1; }
+    echo "   junction -> $DONOR/node_modules (package.json は origin/main と一致)"
   else
     echo "   donor なし -> npm install (gh auth token で GH Packages 認証)"
     NPMRC=$(mktemp)
     printf '//npm.pkg.github.com/:_authToken=%s\n' "$(gh auth token)" > "$NPMRC"
-    (cd "$WT" && NPM_CONFIG_USERCONFIG="$NPMRC" npm install --no-audit --no-fund)
+    # `--no-save` 必須: 検証用の install が package-lock.json を書き換えてしまい、
+    # 検証中のブランチに無関係な lockfile 差分が混ざる (2026-07-25 実害)。
+    (cd "$WT" && NPM_CONFIG_USERCONFIG="$NPMRC" npm install --no-save --no-audit --no-fund)
     rm -f "$NPMRC"
   fi
 fi
