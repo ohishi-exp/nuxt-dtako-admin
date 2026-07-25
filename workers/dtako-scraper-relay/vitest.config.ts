@@ -28,6 +28,7 @@ export default defineConfig({
         'src/promise-queue.ts',
         'src/employee-master.ts',
         'src/work-schedule.ts',
+        'src/timecard-summary.ts',
         'src/min-wage-import.ts',
         'src/branch-prefecture.ts',
       ],
