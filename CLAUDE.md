@@ -16,7 +16,12 @@ dtako (デジタコ運行データ) 管理画面。Nuxt 4 + Cloudflare Workers (
   `dtako-scraper-relay-deploy.yml` が `d1 migrations apply --remote` で適用する
   (記帳は `d1_migrations`。本番は手作業運用だったため `scripts/d1/bootstrap-d1-migrations.sql` で 0001〜0005 を記帳済み扱いにしている)。
 - **開発は必ず `origin/main` ベース worktree**。メイン wt ではソース編集しない。
-- **`DTAKO_ACCOUNTS` / `ETC_ACCOUNTS` は秘密 → wrangler.toml / git に置かず** dashboard の plain Environment Variable で投入し **`keep_vars = true` 必須** (無いと deploy 毎に消える)。未設定時は fail-closed で skip。
+- **`DTAKO_ACCOUNTS` は relay の KV (`dtako-relay-config` の `dtako_accounts`) が正**
+  — dashboard の plain 変数は `keep_vars` があっても本番から消え、viewer 認可が
+  全社 401 になった (2026-07-25)。**投入は 1 回だけ・CI もデプロイも書き換えない**
+  (毎回投入するなら消える変数と同じ)。CI は存在検証で落とすだけ。
+  `ETC_ACCOUNTS` は従来どおり dashboard の plain Environment Variable + `keep_vars = true`。
+  いずれも未設定時は fail-closed。
 - **Y時間 は async job 化しない (sync HTTP)** — Cloud Run CPU throttling で `tokio::spawn` が完走しない。
 - **ETC 検索は `sokoKbn=0` を明示必須** (無いと明細欠落)。**`riyouMonth{N}` は `now` (JST) 当月のみ明示選択し直す** (ページ既定を信用しない)。
 - **cron 式は `wrangler.toml [triggers]` と `src/cron.ts` 定数を必ず一致**させる。

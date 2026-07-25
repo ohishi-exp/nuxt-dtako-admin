@@ -55,7 +55,7 @@ import {
   scrapeEtcCsv,
   type ScrapeMonthTarget,
 } from "./etc-meisai-client";
-import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
+import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveDtakoAccountsRaw, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
 import {
   compIdsInSameTenant,
   devViewerCompIds,
@@ -317,6 +317,13 @@ export interface RelayEnv {
    */
   DTAKO_ACCOUNTS?: unknown;
   /**
+   * relay の設定 KV (`dtako-relay-config`)。`dtako_accounts` キーに
+   * `DTAKO_ACCOUNTS` の JSON を置く — dashboard の plain 変数は deploy で消えて
+   * viewer 認可が全社 401 になる事故があったため、KV を正とする (Refs #367)。
+   * 投入は CI (`dtako-scraper-relay-deploy.yml`)。
+   */
+  DTAKO_CONFIG_KV?: unknown;
+  /**
    * ローカル開発専用: restraint viewer 経路 (Refs #272) の introspect を短絡して
    * この comp を許可する。`wrangler dev --var RESTRAINT_DEV_VIEWER_COMP:<comp>`
    * でのみ渡す — デプロイ環境 (wrangler.toml / dashboard) には置かない。
@@ -385,6 +392,23 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * `fetch()` ではなく `AUTH_WORKER` service binding を使う (Worker→Worker
    * in-process、公開 fetch より低遅延・DNS/TLS 不要)。
    */
+  /** DTAKO_ACCOUNTS の生 JSON。KV (`DTAKO_CONFIG_KV`) が正、無ければ binding。
+   * **空なら loud fail** — 空のまま viewer 認可へ進むと全会社 401 になり、画面には
+   * 「セッションが無効か期限切れです」としか出ないため原因が追えない
+   * (2026-07-25 に本番で実際に起きた)。 */
+  private async dtakoAccountsRaw(): Promise<string> {
+    const raw = await resolveDtakoAccountsRaw(this.env.DTAKO_CONFIG_KV, this.env.DTAKO_ACCOUNTS);
+    if (!raw) {
+      console.error(
+        JSON.stringify({
+          dtako_accounts: "missing",
+          detail: "KV(dtako_accounts) も binding も空 — viewer 認可は全 comp で拒否されます",
+        }),
+      );
+    }
+    return raw;
+  }
+
   private async introspect(
     token: string,
     origin: string,
@@ -1608,7 +1632,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!result.active || !result.tenant_id) return null;
     let accounts: DtakoAccountEntry[];
     try {
-      accounts = parseDtakoAccounts((await resolveSecretBinding(this.env.DTAKO_ACCOUNTS)) || undefined);
+      accounts = parseDtakoAccounts((await this.dtakoAccountsRaw()) || undefined);
     } catch {
       return null; // DTAKO_ACCOUNTS 不正は fail-closed (viewer 経路のみ閉じる)
     }
@@ -1918,7 +1942,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!db) return dvrJsonError(503, "会社対応表 (DTAKO_DB) が未設定です");
     let allowed = new Set<string>([record.compId]);
     try {
-      const accounts = parseDtakoAccounts((await resolveSecretBinding(this.env.DTAKO_ACCOUNTS)) || undefined);
+      const accounts = parseDtakoAccounts((await this.dtakoAccountsRaw()) || undefined);
       const sameTenant = compIdsInSameTenant(accounts, record.compId);
       if (sameTenant.size > 0) allowed = sameTenant;
     } catch {

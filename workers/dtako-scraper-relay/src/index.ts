@@ -6,12 +6,15 @@
 // 10211/10061、nuxt-items/items-sync と同型)。
 export { DtakoScraperRelayDO } from "./dtako-scraper-relay-do";
 import { resolveTheearthRouting } from "./theearth-session";
-import { resolveSecretBinding, runScheduledCron } from "./cron";
+import { resolveDtakoAccountsRaw, resolveSecretBinding, runScheduledCron } from "./cron";
 
 interface RelayWorkerEnv {
   RELAY: DurableObjectNamespace;
   SCRAPER_MODE?: string;
   DTAKO_ACCOUNTS?: unknown;
+  /** relay の設定 KV (`dtako-relay-config`)。`dtako_accounts` が DTAKO_ACCOUNTS の正
+   * — dashboard の plain 変数は deploy で消える (Refs #367)。 */
+  DTAKO_CONFIG_KV?: unknown;
   ETC_ACCOUNTS?: unknown;
 }
 
@@ -110,7 +113,7 @@ export default {
           controller.cron,
           {
             scraperMode: env.SCRAPER_MODE,
-            dtakoAccountsRaw: await resolveSecretBinding(env.DTAKO_ACCOUNTS),
+            dtakoAccountsRaw: await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS),
             etcAccountsRaw: await resolveSecretBinding(env.ETC_ACCOUNTS),
           },
           async (doKey, path, body) => {

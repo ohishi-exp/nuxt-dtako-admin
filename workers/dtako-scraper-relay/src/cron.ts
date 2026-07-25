@@ -97,6 +97,38 @@ export async function resolveSecretBinding(binding: unknown): Promise<string> {
   return "";
 }
 
+/** KV binding の最小形 (cloudflare:workers の型に依存しないための構造的型)。 */
+export interface DtakoConfigKvBinding {
+  get(key: string): Promise<string | null>;
+}
+
+/** `DTAKO_ACCOUNTS` を置く KV のキー名。 */
+export const DTAKO_ACCOUNTS_KV_KEY = "dtako_accounts";
+
+/**
+ * `DTAKO_ACCOUNTS` (comp_id → tenant_id / theearth 認証情報) の解決。
+ *
+ * **KV (`DTAKO_CONFIG_KV` の `dtako_accounts`) が正**で、無ければ従来の binding
+ * (dashboard の plain 環境変数 / Secrets Store) にフォールバックする。
+ *
+ * KV へ移した理由 (2026-07-25 実害): dashboard の plain 環境変数は deploy で
+ * 消えることがあり (`keep_vars` があっても本番から消えていた)、消えると viewer
+ * 認可 (`viewerCompIdsForTenant`) が fail-closed で**全会社 401** になり、
+ * 拘束×賃金の全タブが「セッションが無効か期限切れです」で閲覧不能になる。
+ * **KV の値が唯一の正で、投入は最初の 1 回だけ** — CI もデプロイも書き換えない
+ * (毎回書き直すなら「消える変数」と同じで、値の持ち主がパイプラインになって
+ * しまう)。CI は `dtako-scraper-relay-deploy.yml` で**存在を検証して落とす**だけ。
+ * 空だった時に黙って全社 401 になるのが今回の事故なので、呼び出し側は
+ * loud fail (console.error) すること。
+ */
+export async function resolveDtakoAccountsRaw(kv: unknown, binding: unknown): Promise<string> {
+  if (kv && typeof (kv as DtakoConfigKvBinding).get === "function") {
+    const value = await (kv as DtakoConfigKvBinding).get(DTAKO_ACCOUNTS_KV_KEY);
+    if (value) return value;
+  }
+  return resolveSecretBinding(binding);
+}
+
 /** scheduled handler から注入される DO 呼び出し。doKey は `idFromName` に渡す
  * キー、path は DO 内部 route (`/cron/dtako` 等)、body は JSON。 */
 export type CronDoCall = (
