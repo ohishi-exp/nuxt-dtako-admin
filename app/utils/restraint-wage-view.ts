@@ -175,3 +175,27 @@ export function fmtYm(ym: string): string {
   const m = ym.match(/^(\d{4})-(\d{2})$/)
   return m ? `${m[1]}年${parseInt(m[2]!, 10)}月` : ym
 }
+
+/** 期間取得の上限 (給与DB は 1 社 10〜20 秒 × 会社数 × 月数 なので取り過ぎを防ぐ)。 */
+export const MONTH_RANGE_MAX = 24
+
+/**
+ * `from`〜`to` (どちらも "YYYY-MM"、両端含む) の月を昇順で並べる。
+ *
+ * 逆順に指定されても入れ替えて扱う (画面で から/まで を逆に選べてしまうため)。
+ * `max` 件で打ち切る — 給与DB の期間取得は 1 社 10〜20 秒かかるので、うっかり
+ * 数年分を指定した時に何十分も走らせない。形式不正はどちらも空配列
+ * (呼び出し側で「指定なし」として扱う)。
+ */
+export function monthRange(from: string, to: string, max = MONTH_RANGE_MAX): string[] {
+  const valid = (ym: string) => /^\d{4}-(0[1-9]|1[0-2])$/.test(ym)
+  if (!valid(from) || !valid(to)) return []
+  const [lo, hi] = from <= to ? [from, to] : [to, from]
+  const out: string[] = []
+  let cur = lo
+  while (cur <= hi && out.length < max) {
+    out.push(cur)
+    cur = nextYm(cur)
+  }
+  return out
+}
