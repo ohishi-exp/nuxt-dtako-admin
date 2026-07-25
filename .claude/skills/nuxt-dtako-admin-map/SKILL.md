@@ -130,7 +130,7 @@ Environment Variable であり、wrangler.toml には無い (git 履歴に平文
 |---|---|---|
 | `dtako_uploads` | 0001〜0004 | **R2 が正**、D1 は再構築可能な検索インデックス |
 | `kyuyo_companies` | 0005 (#369) | D1 (会社×年度リスト、金額は持たない) |
-| `employees` / `employee_attrs` | 0006 (#367) | **D1 が正** (唯一の保存場所。識別情報+属性のみ、金額は持たない) |
+| `employees` / `employee_attrs` | 0006 (#367)、0010 で所属コード/営業所名/職種名 (#409) | **D1 が正** (唯一の保存場所。識別情報+属性のみ、金額は持たない) |
 
 - migration は repo 直下の **共有 `migrations/`** (relay の wrangler.toml が
   `migrations_dir = "../../migrations"` で参照)
@@ -536,7 +536,10 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   だけ**返す。取り込みロジックは `planPayrollDbImport` (pure): 旧ラベル
   ("有"/"株") の行は乗務員CD突合を引き継いで統合、所属/給与体系は取り込む月の
   初日を適用開始日にし**月末時点で同値なら履歴を増やさない** (同値判定は保存側と
-  同じ NFKC 正規化を通す — 通さないと全角スペース差で毎回偽差分が出る)
+  同じ NFKC 正規化を通す — 通さないと全角スペース差で毎回偽差分が出る)。
+  所属は表示名 (`SNAME`) に加えて**所属コード (`INCODE`) / 営業所名 (`NAME1`) /
+  職種名 (`NAME2`)** も取り込む (rust-ichibanboshi#98、Refs #409)。3 列は任意扱い —
+  古い API 版が返さなくても取り込みは落とさず、拠点は表示名から引く
 - **社員マスタタブ** (単価マスタの隣、⑥): 一覧 + 氏名/乗務員CD の手直し + 所属・
   給与体系の**適用開始日つき履歴** (`employee_attrs`) の追加/履歴モーダル削除 +
   社員行の削除。単価マスタと同じ作法で**ローカル編集 → 「保存」で確定** (PUT に
@@ -546,6 +549,33 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   (`buildDriverAttrIndex`) → **対象月の末日時点**で効いている行 (`resolveAttrsAt`)。
   未突合・未設定は空欄。dtako 由来の `事業所` 列は別ソースなので残す。月次タブでも
   社員マスタを load する (CSV 列が空になるのを避ける)
+
+### 最低賃金は都道府県別 — 拠点は給与大臣の営業所名が正 (Refs #409)
+
+最低賃金は**就業地の都道府県**で決まる。本番の拠点は長崎・佐賀・福岡・大阪・北海道・
+広島に散り、令和7年度で最大 147 円開くので全社共通 1 本 (#253) では判定が成立しない。
+
+- **原資**: 厚労省に公式 API は無い (提供は PDF/Excel/HTML のみ)。
+  `POST /restraint-api/min-wage/import-mhlw` が `saiteichingin.mhlw.go.jp` の HTML
+  テーブルを取り込む (pure パーサ = `min-wage-import.ts`、貼り付けフォールバックあり)
+- **拠点 → 都道府県**は R2 `min-wage` の `branchToPrefecture`。**県は推定しない** —
+  「本社」が長崎県であるように拠点名から県は決まらないので、必ず画面で選ばせ、
+  未設定は未設定のまま警告する (誤った県で判定するより判定しないほうを選ぶ)
+- **拠点の正は `employee_attrs.branch_name` (`SHOZOKU.NAME1`)、並びは
+  `branch_code` (`SHOZOKU.INCODE`)** (migration 0010)。給与大臣は営業所名と職種名を
+  別列で持ち、`SNAME` (`本社　乗務員`) はその結合済み文字列なので割り直す必要が無い。
+  以前は `SNAME` を正規化して前方一致でまとめ、並びも営業所名の**文字コード順**
+  (`佐賀` U+4F50 < `本社` U+672C) だった
+- **表示名からの推定は残してある** (`suggestBranchGroups`、`branch-prefecture.ts`) —
+  営業所名を持たない行 (再取り込み前・theearth 事業所名の旧キー) 用。
+  `buildBranchGroups` が「営業所名がある行はそのまま / 無い行だけ推定」に振り分ける。
+  `resolveBranchPrefecture` の**前方一致自体も残す** (職種が増えても再設定が要らない)
+- DO routes: `GET /restraint-api/min-wage/branches` (拠点候補 + 現在の県 + 人数、
+  所属コード順)、`POST /restraint-api/min-wage/apply-to-wage-master` (単価マスタへの
+  一括設定 = 「単価マスタ = 最低賃金」運用 (#282) の出口。プレビュー→確定の 2 段、
+  適用開始日は**厚労省の発効日**で県ごとに違う)
+- 乗務員 → 拠点は `branchByDriverCdAt` (月末時点の所属)。theearth の事業所名
+  (`大石運輸倉庫㈱　本社営業所`) は拠点キーと噛み合わないのでフォールバック扱い
 
 ### 給与明細の取得元は 2 つ (貼り付け / 給与DB 直読み、Refs #369)
 

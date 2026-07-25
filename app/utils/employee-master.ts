@@ -17,8 +17,16 @@ import { compareCompanyLabel, normalizeNameKey, salaryCdMapKey } from './salary-
 
 export interface EmployeeAttrRow {
   effectiveFrom: string
+  /** 所属の表示名 (`SHOZOKU.SNAME` = `本社　乗務員`)。 */
   branch: string | null
   payScheme: string | null
+  /** 所属コード (`SHOZOKU.INCODE`)。**並べ替えの基準** (Refs #409)。
+   * migration 0010 以前に取り込んだ行は null。 */
+  branchCode: number | null
+  /** 営業所名 (`SHOZOKU.NAME1`)。拠点 = 最低賃金を引く単位。 */
+  branchName: string | null
+  /** 職種名 (`SHOZOKU.NAME2`)。 */
+  jobName: string | null
 }
 
 export interface EmployeeMasterEntry {
@@ -234,8 +242,17 @@ export interface KyuyoEmployeeRow {
   /** 前ゼロ除去済みの突合キー (= 社員マスタの payrollCd)。 */
   employee_code_key: string
   employee_name: string
-  /** 所属 (SHOZOKU.SNAME)。 */
+  /** 所属の表示名 (SHOZOKU.SNAME)。 */
   department: string
+  // 以下 3 列は rust-ichibanboshi#98 で足したもの。**任意** にしてあるのは、
+  // それ以前の版が本番に居る (ロールバック等) 場合でも取り込みを落とさないため —
+  // 欠けていれば所属コード無しの行として扱い、拠点は表示名から引く。
+  /** 所属コード (SHOZOKU.INCODE)。給与大臣が持つ所属の並び順 (Refs #409)。 */
+  department_code?: number
+  /** 営業所名 (SHOZOKU.NAME1)。拠点はこれをそのまま使う。 */
+  branch_name?: string
+  /** 職種名 (SHOZOKU.NAME2)。 */
+  job_name?: string
   /** 給与体系コード (SHOZOKU.TAIKEI)。 */
   taikei: number
   retired: boolean
@@ -283,6 +300,14 @@ export function payScheme(taikei: number): string | null {
   return taikei > 0 ? `体系${taikei}` : null
 }
 
+/** 所属コードの正規化 (worker 側 PUT の normalizeBranchCode と同一規則)。
+ * `0` は給与大臣側の「未設定」なので null。整数でない値も fail-soft に null —
+ * これは並べ替えのヒントであって識別情報ではないため。 */
+export function normalizeBranchCode(raw: unknown): number | null {
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw <= 0) return null
+  return raw
+}
+
 /**
  * 給与DBの社員一覧を社員マスタへ反映する計画を作る (Refs #367)。
  *
@@ -324,10 +349,17 @@ export function planPayrollDbImport(
 
     const branch = normalizeAttrText(row.department)
     const scheme = normalizeAttrText(payScheme(row.taikei))
+    const branchCode = normalizeBranchCode(row.department_code)
+    const branchName = normalizeAttrText(row.branch_name ?? null)
+    const jobName = normalizeAttrText(row.job_name ?? null)
     const active = current ? resolveAttrsAt(current, yearMonth) : null
-    if (active?.branch === branch && active?.payScheme === scheme) continue
-    if (branch === null && scheme === null && !active) continue
-    plan.attrs.push({ company, payrollCd, effectiveFrom, branch, payScheme: scheme })
+    // 所属コード・営業所名・職種名 (Refs #409) も差分判定に入れる — 既存行は
+    // これらが null なので、再取り込みで同じ `effective_from` の行が埋まる。
+    if (active?.branch === branch && active?.payScheme === scheme
+      && active?.branchCode === branchCode && active?.branchName === branchName
+      && active?.jobName === jobName) continue
+    if (branch === null && scheme === null && branchName === null && !active) continue
+    plan.attrs.push({ company, payrollCd, effectiveFrom, branch, payScheme: scheme, branchCode, branchName, jobName })
   }
   return plan
 }

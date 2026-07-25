@@ -2,8 +2,13 @@
  * 所属 (営業所) → 都道府県の解決 (pure、Refs #409 Phase 2)。
  *
  * 最低賃金は就業地の都道府県で決まるので、乗務員がどの拠点に属するかを都道府県へ
- * 落とす必要がある。社員マスタ (`employee_attrs.branch`) は「拠点 職種」形式で、
- * 本番には 31 種ある (`本社  乗務員` / `帯広 乗務員(トレーラ-)` / `北九州営業所乗務員`)。
+ * 落とす必要がある。
+ *
+ * **拠点は給与大臣の営業所名 (`SHOZOKU.NAME1`) が正** (`employee_attrs.branch_name`、
+ * migration 0010)。給与大臣は営業所名と職種名を別列で持っており、表示名
+ * (`SNAME` = `本社　乗務員`) はその結合済み文字列なので、割り直す必要が無い。
+ * 営業所名をまだ持たない行 (再取り込み前・theearth 事業所名の旧キー) のために、
+ * 表示名からの推定 (`suggestBranchGroups`) と前方一致は残してある。
  *
  * **キーは前方一致で引く。** `本社` を 1 つ登録すれば `本社 乗務員`・`本社 修理`・
  * 今後増える職種まで覆える。職種が増えるたびに未マッピングが生まれて最低賃金の
@@ -65,6 +70,13 @@ export function resolveBranchPrefecture(
   return { prefecture, matchedKey };
 }
 
+/** 拠点キーとして使う値。営業所名 (`SHOZOKU.NAME1`) があればそれが正 — 表示名
+ * (`SNAME` = `本社　乗務員`) から切り出す必要が無い (Refs #409)。まだ取り込んで
+ * いない行 (migration 0010 以前) は表示名にフォールバックする。 */
+export function branchKeyOf(attr: { branch: string | null; branchName?: string | null }): string | null {
+  return attr.branchName || attr.branch || null;
+}
+
 /**
  * 乗務員CD → その月に適用する所属 (社員マスタ、月末時点) の対応を作る。
  *
@@ -72,19 +84,23 @@ export function resolveBranchPrefecture(
  * 正とする (Refs #409 Phase 3)。theearth 側の事業所名 (`大石運輸倉庫㈱　本社営業所`) は
  * 拠点キー (`本社`) と噛み合わないため、これが無いと最低賃金を引けない。
  *
+ * 値は `branchKeyOf` — 営業所名が入っている行は `本社`、まだ無い行は `本社  乗務員`
+ * が入る。どちらも `branchToPrefecture` の前方一致で同じ県に落ちる。
+ *
  * 乗務員CD が未設定の社員と、月末時点で所属履歴が無い社員は落とす。
  */
 export function branchByDriverCdAt<A extends { effectiveFrom: string; branch: string | null }>(
   employees: readonly { driverCd: string | null; attrs: A[] }[],
   yearMonth: string,
-  resolveAt: (attrs: A[], ym: string) => { branch: string | null } | null,
+  resolveAt: (attrs: A[], ym: string) => { branch: string | null; branchName?: string | null } | null,
 ): Map<string, string> {
   const out = new Map<string, string>();
   for (const e of employees) {
     if (!e.driverCd) continue;
     const attr = resolveAt(e.attrs, yearMonth);
-    if (!attr?.branch) continue;
-    out.set(e.driverCd, attr.branch);
+    const key = attr ? branchKeyOf(attr) : null;
+    if (!key) continue;
+    out.set(e.driverCd, key);
   }
   return out;
 }
@@ -171,4 +187,82 @@ export function suggestBranchGroups(branches: readonly string[]): BranchGroupSug
   return [...groups.entries()]
     .map(([prefix, set]) => ({ prefix, branches: [...set].sort(compareText) }))
     .sort((a, b) => compareText(a.prefix, b.prefix));
+}
+
+/** 拠点グループの元になる 1 行 (社員マスタの属性履歴 1 行ぶん)。 */
+export interface BranchAttrRow {
+  /** 所属の表示名 (`SHOZOKU.SNAME`)。 */
+  branch: string | null;
+  /** 営業所名 (`SHOZOKU.NAME1`)。migration 0010 以前の行は null。 */
+  branchName?: string | null;
+  /** 所属コード (`SHOZOKU.INCODE`)。並べ替えの基準。 */
+  branchCode?: number | null;
+}
+
+export interface BranchGroup extends BranchGroupSuggestion {
+  /** この拠点の所属コードのうち最小値 (給与大臣の所属順)。推定グループは null。 */
+  branchCode: number | null;
+}
+
+/**
+ * 属性履歴の行から拠点グループを作る (Refs #409)。
+ *
+ * **営業所名 (`NAME1`) がある行は、それをそのまま拠点キーにする** — 表示名から
+ * 切り出す推定 (`suggestBranchGroups`) を通さない。給与大臣が営業所と職種を別列で
+ * 持っているのだから、結合済み文字列を割り直す必要が無い。
+ *
+ * 営業所名がまだ無い行 (migration 0010 以前の取り込み・theearth 事業所名で登録した
+ * 旧キー) だけ従来経路へ回す。まず既に立っている営業所キーへ前方一致で寄せ、
+ * それでも残ったものを `suggestBranchGroups` で推定する。**この経路を残すのは、
+ * 再取り込みするまで既存 182 件が営業所名を持たないため** — 消すと本番の最低賃金
+ * 判定がその間だけ静かに止まる。
+ *
+ * 並びは所属コード昇順 (= 給与大臣の所属順) → コード無しを後ろ → 名前順。
+ * 文字コード順で `佐賀` が `本社` より前に来ていたのを直すのがこの関数の主目的。
+ */
+export function buildBranchGroups(rows: readonly BranchAttrRow[]): BranchGroup[] {
+  const named = new Map<string, { branches: Set<string>; code: number | null }>();
+  const legacy: string[] = [];
+
+  for (const row of rows) {
+    const label = row.branch || row.branchName || null;
+    if (!label) continue;
+    const name = row.branchName ? normalizeBranchLabel(row.branchName) : "";
+    if (!name) {
+      legacy.push(label);
+      continue;
+    }
+    const group = named.get(name) ?? { branches: new Set<string>(), code: null };
+    group.branches.add(label);
+    const code = row.branchCode ?? null;
+    if (code !== null && (group.code === null || code < group.code)) group.code = code;
+    named.set(name, group);
+  }
+
+  // 営業所名の無い行: 既に立っている営業所キー配下なら寄せる (最長一致)
+  const pool: string[] = [];
+  for (const label of legacy) {
+    let best: string | null = null;
+    for (const name of named.keys()) {
+      if (isBranchUnder(name, label) && (best === null || name.length > best.length)) best = name;
+    }
+    if (best !== null) named.get(best)!.branches.add(label);
+    else pool.push(label);
+  }
+
+  const groups: BranchGroup[] = [...named.entries()].map(([prefix, g]) => ({
+    prefix,
+    branches: [...g.branches].sort(compareText),
+    branchCode: g.code,
+  }));
+  for (const suggestion of suggestBranchGroups(pool)) {
+    groups.push({ ...suggestion, branchCode: null });
+  }
+
+  return groups.sort(
+    (a, b) =>
+      (a.branchCode === null ? 1 : 0) - (b.branchCode === null ? 1 : 0)
+      || (a.branchCode ?? 0) - (b.branchCode ?? 0)
+      || compareText(a.prefix, b.prefix),
+  );
 }

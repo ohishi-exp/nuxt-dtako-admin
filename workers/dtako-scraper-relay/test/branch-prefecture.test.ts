@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   branchByDriverCdAt,
+  branchKeyOf,
+  buildBranchGroups,
   compareText,
   normalizeBranchLabel,
   resolveBranchPrefecture,
@@ -169,6 +171,125 @@ describe("branchByDriverCdAt", () => {
 
   it("社員が居なければ空", () => {
     expect(branchByDriverCdAt([], "2026-06", resolveAt).size).toBe(0);
+  });
+
+  it("営業所名 (NAME1) があればそれを拠点キーにする (Refs #409)", () => {
+    // 表示名からの切り出しを経由しない — 給与大臣が営業所名を別列で持っている
+    const resolveWithName = (
+      attrs: { effectiveFrom: string; branch: string | null; branchName?: string | null }[],
+      ym: string,
+    ) => resolveAt(attrs, ym) as { branch: string | null; branchName?: string | null } | null;
+    const employees = [
+      { driverCd: "1018", attrs: [{ effectiveFrom: "2020-01-01", branch: "本社  乗務員", branchName: "本社" }] },
+      // 再取り込み前の行は営業所名が無いので表示名にフォールバックする
+      { driverCd: "1021", attrs: [{ effectiveFrom: "2020-01-01", branch: "帯広 乗務員", branchName: null }] },
+    ];
+    const map = branchByDriverCdAt(employees, "2026-06", resolveWithName);
+    expect(map.get("1018")).toBe("本社");
+    expect(map.get("1021")).toBe("帯広 乗務員");
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// branchKeyOf
+// ══════════════════════════════════════════════════════════════
+
+describe("branchKeyOf", () => {
+  it("営業所名を優先し、無ければ表示名、どちらも無ければ null", () => {
+    expect(branchKeyOf({ branch: "本社  乗務員", branchName: "本社" })).toBe("本社");
+    expect(branchKeyOf({ branch: "本社  乗務員", branchName: null })).toBe("本社  乗務員");
+    expect(branchKeyOf({ branch: "本社  乗務員" })).toBe("本社  乗務員");
+    expect(branchKeyOf({ branch: null, branchName: "本社" })).toBe("本社");
+    expect(branchKeyOf({ branch: null, branchName: null })).toBeNull();
+    // 空文字は「未設定」と同じ扱い (D1 の NULL と原文の空を区別しない)
+    expect(branchKeyOf({ branch: "", branchName: "" })).toBeNull();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// buildBranchGroups
+// ══════════════════════════════════════════════════════════════
+
+describe("buildBranchGroups", () => {
+  /** 給与大臣の SHOZOKU 相当。INCODE の実値は本番依存なので、ここでは順序だけが要点。 */
+  const rows = [
+    { branch: "本社  乗務員", branchName: "本社", branchCode: 14 },
+    { branch: "本社  事務員", branchName: "本社", branchCode: 16 },
+    { branch: "佐賀 乗務員", branchName: "佐賀", branchCode: 31 },
+    { branch: "帯広 乗務員", branchName: "帯広", branchCode: 51 },
+  ];
+
+  it("営業所名をそのまま拠点キーにし、所属コード順に並べる", () => {
+    // これが本題 — 文字コード順では `佐賀` (U+4F50) が `本社` (U+672C) より先に来ていた
+    expect(buildBranchGroups(rows).map(g => [g.prefix, g.branchCode])).toEqual([
+      ["本社", 14],
+      ["佐賀", 31],
+      ["帯広", 51],
+    ]);
+  });
+
+  it("同じ営業所の職種違いを 1 グループに畳み、コードは最小値を採る", () => {
+    const [honsha] = buildBranchGroups(rows);
+    expect(honsha!.branches).toEqual(["本社  事務員", "本社  乗務員"].sort(compareText));
+    expect(honsha!.branchCode).toBe(14);
+  });
+
+  it("営業所名の空白揺れを正規化して同じ拠点に寄せる", () => {
+    const g = buildBranchGroups([
+      { branch: "本社  乗務員", branchName: " 本社 ", branchCode: 14 },
+      { branch: "本社 事務員", branchName: "本社", branchCode: 16 },
+    ]);
+    expect(g).toHaveLength(1);
+    expect(g[0]!.prefix).toBe("本社");
+  });
+
+  it("営業所名が無い行は表示名から推定し、コード無しとして後ろに並ぶ", () => {
+    // migration 0010 以前に取り込んだ行 (本番 182 件) がこの経路を通る。
+    // 消すと再取り込みまで最低賃金の判定が静かに止まるので残してある
+    const g = buildBranchGroups([
+      { branch: "帯広 乗務員", branchName: "帯広", branchCode: 51 },
+      { branch: "諸富 乗務員", branchName: null, branchCode: null },
+      { branch: "諸富 事務員", branchName: null, branchCode: null },
+    ]);
+    expect(g.map(x => [x.prefix, x.branchCode])).toEqual([["帯広", 51], ["諸富", null]]);
+    expect(g[1]!.branches).toEqual(["諸富 事務員", "諸富 乗務員"].sort(compareText));
+  });
+
+  it("営業所名が無い行は、既に立っている営業所キー配下なら最長一致でそこへ寄せる", () => {
+    const g = buildBranchGroups([
+      { branch: "本社 乗務員", branchName: "本社", branchCode: 14 },
+      { branch: "本社別館 事務員", branchName: "本社別館", branchCode: 20 },
+      // 旧行: 営業所名を持たないが `本社別館` 配下 → 新グループを作らない
+      { branch: "本社別館作業員", branchName: null, branchCode: null },
+    ]);
+    expect(g).toHaveLength(2);
+    expect(g.find(x => x.prefix === "本社別館")!.branches).toEqual(["本社別館 事務員", "本社別館作業員"]);
+  });
+
+  it("所属コードが無い行だけの営業所は null コードで残り、名前順で安定する", () => {
+    const g = buildBranchGroups([
+      { branch: "広島 事務員", branchName: "広島", branchCode: null },
+      { branch: "大阪 乗務員", branchName: "大阪", branchCode: null },
+    ]);
+    expect(g.map(x => x.prefix)).toEqual(["大阪", "広島"].sort(compareText));
+  });
+
+  it("所属がまったく無い行・空の入力は落ちる", () => {
+    expect(buildBranchGroups([])).toEqual([]);
+    expect(buildBranchGroups([{ branch: null, branchName: null, branchCode: 14 }])).toEqual([]);
+    expect(buildBranchGroups([{ branch: null, branchName: "" }])).toEqual([]);
+  });
+
+  it("branchName / branchCode を持たない行 (旧形式) も受ける", () => {
+    expect(buildBranchGroups([{ branch: "本社 乗務員" }])).toEqual([
+      { prefix: "本社", branches: ["本社 乗務員"], branchCode: null },
+    ]);
+  });
+
+  it("表示名が無く営業所名だけの行は営業所名をラベルにする", () => {
+    expect(buildBranchGroups([{ branch: null, branchName: "本社", branchCode: 14 }])).toEqual([
+      { prefix: "本社", branches: ["本社"], branchCode: 14 },
+    ]);
   });
 });
 

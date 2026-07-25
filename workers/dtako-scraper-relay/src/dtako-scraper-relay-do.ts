@@ -110,7 +110,7 @@ import {
   mergeMinWageRows,
   parseMhlwNationalList,
 } from "./min-wage-import";
-import { branchByDriverCdAt, resolveBranchPrefecture, suggestBranchGroups } from "./branch-prefecture";
+import { branchByDriverCdAt, buildBranchGroups, resolveBranchPrefecture } from "./branch-prefecture";
 import {
   buildCompMapResponse,
   buildEmployeeMasterResponse,
@@ -2076,7 +2076,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           .all<EmployeeD1Row>(),
         db
           .prepare(
-            `SELECT company, payroll_cd, effective_from, branch, pay_scheme FROM employee_attrs WHERE comp_id = ?`,
+            `SELECT company, payroll_cd, effective_from, branch, pay_scheme, branch_code, branch_name, job_name FROM employee_attrs WHERE comp_id = ?`,
           )
           .bind(compId)
           .all<EmployeeAttrD1Row>(),
@@ -2098,10 +2098,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /**
-   * GET /restraint-api/min-wage/branches — 社員マスタの所属を拠点候補にまとめ、
+   * GET /restraint-api/min-wage/branches — 社員マスタの所属を拠点ごとにまとめ、
    * 現在の都道府県マッピングと突き合わせて返す (Refs #409 Phase 2)。
    *
-   * 画面はこれを描くだけでよく、拠点のまとめ方 (空白揺れ・前方一致) の知識を
+   * 拠点は**営業所名 (`SHOZOKU.NAME1`) がそのままキー**になり、並びは所属コード
+   * (`INCODE`) 順 = 給与大臣の所属順。営業所名をまだ持たない行だけ表示名からの
+   * 推定へ回る (buildBranchGroups)。画面はこれを描くだけでよく、まとめ方の知識を
    * フロントに持たせない。**都道府県は推定しない** — `prefecture` が null の
    * グループは未設定のまま返し、人が選ぶ。
    */
@@ -2125,7 +2127,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     try {
       const result = await db
         .prepare(
-          `SELECT company, payroll_cd, effective_from, branch, pay_scheme FROM employee_attrs WHERE comp_id = ?`,
+          `SELECT company, payroll_cd, effective_from, branch, pay_scheme, branch_code, branch_name, job_name FROM employee_attrs WHERE comp_id = ?`,
         )
         .bind(record.compId)
         .all<EmployeeAttrD1Row>();
@@ -2135,16 +2137,23 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return dvrJsonError(502, "社員マスタの取得に失敗しました");
     }
 
-    // 所属ごとの人数 (同じ社員が履歴を複数持つので社員単位で数える)
+    // 所属ごとの人数 (同じ社員が履歴を複数持つので社員単位で数える)。
+    // キーは buildBranchGroups が `branches` に入れるラベルと同じ規則で取る。
     const employeesByBranch = new Map<string, Set<string>>();
     for (const row of attrRows) {
-      if (!row.branch) continue;
-      const set = employeesByBranch.get(row.branch) ?? new Set<string>();
+      const label = row.branch || row.branch_name;
+      if (!label) continue;
+      const set = employeesByBranch.get(label) ?? new Set<string>();
       set.add(`${row.company}|${row.payroll_cd}`);
-      employeesByBranch.set(row.branch, set);
+      employeesByBranch.set(label, set);
     }
 
-    const groups = suggestBranchGroups([...employeesByBranch.keys()]).map((group) => {
+    const rows = attrRows.map((r) => ({
+      branch: r.branch,
+      branchName: r.branch_name,
+      branchCode: r.branch_code,
+    }));
+    const groups = buildBranchGroups(rows).map((group) => {
       const employees = new Set<string>();
       for (const branch of group.branches) {
         for (const id of employeesByBranch.get(branch) ?? []) employees.add(id);
@@ -2152,6 +2161,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       const lookup = resolveBranchPrefecture(master.branchToPrefecture, group.prefix);
       return {
         prefix: group.prefix,
+        /** 給与大臣の所属コード (`SHOZOKU.INCODE`)。並び順の根拠として画面に出す。 */
+        branchCode: group.branchCode,
         branches: group.branches,
         employees: employees.size,
         prefecture: lookup.prefecture,
@@ -2230,7 +2241,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           .all<EmployeeD1Row>(),
         db
           .prepare(
-            `SELECT company, payroll_cd, effective_from, branch, pay_scheme FROM employee_attrs WHERE comp_id = ?`,
+            `SELECT company, payroll_cd, effective_from, branch, pay_scheme, branch_code, branch_name, job_name FROM employee_attrs WHERE comp_id = ?`,
           )
           .bind(record.compId)
           .all<EmployeeAttrD1Row>(),
