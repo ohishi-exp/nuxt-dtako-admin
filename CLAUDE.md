@@ -11,6 +11,15 @@ dtako (デジタコ運行データ) 管理画面。Nuxt 4 + Cloudflare Workers (
 
 ## 規範 (必ず守る)
 
+- **画面 / server route を変えたら PR 前に dev で実機確認する** (バグ早期検知、2026-07-25 方針)。
+  `bash .claude/skills/dev-login-local-verify/setup-dev-env.sh --here --hybrid` で
+  自分のブランチが本番 backend に対して立つ。**型検査もテストも通るのに実機で壊れる**
+  欠陥 (ボタンが disabled のまま / `SelectItem` の value 空で 500) を同じ日に 2 件
+  取り逃している (#419 / #420)。PR には「何を叩いてどう応答したか」を書く。
+  **この dev は front worker + 画面だけ** — relay (`workers/dtako-scraper-relay`) は
+  service binding で本番に飛ぶので、relay / `migrations/` の変更は
+  `wrangler dev --local` + `d1 migrations apply --local` + `npm run seed:local` の
+  別経路で確認する (`--remote` は DO を持つ worker では使えない)。
 - **手動 `wrangler deploy` は禁止** (タグリリースの CI 経由のみ)。
 - **D1 migration も手動適用は禁止** — `migrations/` に追加すれば main merge 時に
   `dtako-scraper-relay-deploy.yml` が `d1 migrations apply --remote` で適用する
