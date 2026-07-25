@@ -57,10 +57,10 @@ import {
 } from "./etc-meisai-client";
 import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveDtakoAccountsRaw, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
 import {
+  allowedViewerComps,
   compIdsInSameTenant,
   devViewerCompIds,
   isR2OnlyRestraintPath,
-  viewerCompIdsForTenant,
 } from "./restraint-viewer-auth";
 import {
   buildDvrSearchKey,
@@ -433,6 +433,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return {
         active: true,
         tenant_id: typeof data.tenant_id === "string" ? data.tenant_id : undefined,
+        role: typeof data.role === "string" ? data.role : undefined,
       };
     } catch {
       return { active: false };
@@ -1613,7 +1614,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     routing: TheearthRouting,
     url: URL,
   ): Promise<TheearthSessionRecord | null> {
-    const viewerRecord = (): TheearthSessionRecord => ({
+    const viewerRecord = (role?: string): TheearthSessionRecord => ({
+      viewerRole: role,
       token: token ?? "viewer",
       compId: routing.compId,
       userName: routing.userName,
@@ -1636,8 +1638,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch {
       return null; // DTAKO_ACCOUNTS 不正は fail-closed (viewer 経路のみ閉じる)
     }
-    return viewerCompIdsForTenant(accounts, result.tenant_id).has(routing.compId)
-      ? viewerRecord()
+    // admin は DTAKO_ACCOUNTS に載っている全会社を見られる (グループ管理者、
+    // Refs #367)。それ以外は従来どおり自 tenant の会社のみ。
+    return allowedViewerComps(accounts, result.tenant_id, result.role).has(routing.compId)
+      ? viewerRecord(result.role)
       : null;
   }
 
@@ -1943,7 +1947,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     let allowed = new Set<string>([record.compId]);
     try {
       const accounts = parseDtakoAccounts((await this.dtakoAccountsRaw()) || undefined);
-      const sameTenant = compIdsInSameTenant(accounts, record.compId);
+      const sameTenant = compIdsInSameTenant(accounts, record.compId, record.viewerRole);
       if (sameTenant.size > 0) allowed = sameTenant;
     } catch {
       // DTAKO_ACCOUNTS 不正時は自 comp のみ (fail-closed)

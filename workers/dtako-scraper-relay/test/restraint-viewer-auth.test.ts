@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  allowedViewerComps,
   compIdsInSameTenant,
   devViewerCompIds,
   isR2OnlyRestraintPath,
@@ -89,5 +90,41 @@ describe('compIdsInSameTenant', () => {
 
   it('DTAKO_ACCOUNTS に無い comp は空集合 (fail-closed)', () => {
     expect(compIdsInSameTenant(accounts, '999').size).toBe(0)
+  })
+})
+
+describe('allowedViewerComps (admin は全社)', () => {
+  const accounts: DtakoAccountEntry[] = [
+    { comp_id: '100', user_name: 'a', user_pass: 'x', tenant_id: 't-1' },
+    { comp_id: '200', user_name: 'b', user_pass: 'x', tenant_id: 't-2' },
+    { comp_id: '', user_name: 'c', user_pass: 'x', tenant_id: 't-2' },
+  ]
+
+  it('admin は DTAKO_ACCOUNTS の全会社 (空 comp_id は除外)', () => {
+    expect([...allowedViewerComps(accounts, 't-1', 'admin')].sort()).toEqual(['100', '200'])
+  })
+
+  it('admin でも DTAKO_ACCOUNTS に無い会社は許可しない (ヘッダ偽装対策)', () => {
+    expect(allowedViewerComps(accounts, 't-1', 'admin').has('999')).toBe(false)
+  })
+
+  it('admin 以外は自 tenant の会社のみ', () => {
+    expect([...allowedViewerComps(accounts, 't-1', 'member')]).toEqual(['100'])
+    expect([...allowedViewerComps(accounts, 't-1', undefined)]).toEqual(['100'])
+  })
+})
+
+describe('compIdsInSameTenant (role つき)', () => {
+  const accounts: DtakoAccountEntry[] = [
+    { comp_id: '100', user_name: 'a', user_pass: 'x', tenant_id: 't-1' },
+    { comp_id: '200', user_name: 'b', user_pass: 'x', tenant_id: 't-2' },
+  ]
+
+  it('admin は会社対応表も全社ぶん見られる', () => {
+    expect([...compIdsInSameTenant(accounts, '100', 'admin')].sort()).toEqual(['100', '200'])
+  })
+
+  it('admin 以外は自 tenant のみ (従来どおり)', () => {
+    expect([...compIdsInSameTenant(accounts, '100', 'member')]).toEqual(['100'])
   })
 })
