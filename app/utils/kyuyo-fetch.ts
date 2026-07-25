@@ -7,6 +7,7 @@
  *
  * fetch / sessionStorage 操作はページ側の責務 — ここは判定と変換のみ。
  */
+import type { ParsedSalaryCsv, SalaryCsvRow } from './salary-compare'
 
 /** 月範囲の上限 (会社数と掛け算になるため控えめに)。 */
 export const MAX_RANGE_MONTHS = 12
@@ -130,4 +131,87 @@ export function summarizeStored(
       }]
     })
     .sort((a, b) => a.company.localeCompare(b.company) || a.month.localeCompare(b.month))
+}
+
+// ── 給与比較への橋渡し (Refs #369 PR-B2) ─────────────────────
+
+/**
+ * `/api/kyuyo/payroll` の 1 行 (rust-ichibanboshi#94 以降)。
+ *
+ * **`payments` と `deductions` は分かれている** — 以前の `amounts` は支給と控除が
+ * 混在しており、そのまま給与比較へ流すと健康保険料・所得税が支給項目として
+ * 集計され支給合計が過大になった (Refs rust-ichibanboshi#93)。
+ */
+export interface KyuyoPayrollRow {
+  /** 社員番号 (原文、前ゼロあり)。 */
+  employee_code: string
+  /** 前ゼロ除去済みの突合キー。 */
+  employee_code_key: string
+  employee_name: string
+  /** 支給日 ("YYYY-MM-DD")。給与明細 CSV の「給与・賞与名」の年月に相当する。 */
+  pay_date: string
+  /** **支給**項目名 → 金額 (円)。 */
+  payments: Record<string, number>
+  /** 基本単価 (日額)。取れなければ null。 */
+  base_rate: number | null
+  /** 残業単価 (時給)。取れなければ null。 */
+  overtime_rate: number | null
+  /** `SHUKEI1` の計算済み合計。無い月は null。 */
+  totals: { soshikyu: number } | null
+}
+
+const PAY_DATE_RE = /^(\d{4})-(\d{2})-\d{2}$/
+
+/**
+ * 給与DB の取得結果を給与比較の `ParsedSalaryCsv` 形へ変換する (Refs #369 PR-B2)。
+ *
+ * 貼り付け CSV と同じ形に寄せることで、突合・比較計算 (`compareSalaryMonth`) を
+ * 一切変更せずに DB 由来のデータを流せる。
+ *
+ * - **`company` は給与大臣の会社コード** — 社員マスタの突合キーと同じ体系
+ *   (Refs #405。CONAME1 は表記揺れするうえ payroll 応答に無い)
+ * - **月は `pay_date` から採る** (支給月)。給与比較は「勤務月の翌月に支給」で
+ *   突合するため、賃金期間ではなく支給日が正しい
+ * - **控除は載せない** — API が `payments` / `deductions` を分けているので支給だけ使う
+ * - 支給項目が 1 つも無い行 (全額 0 等) と `pay_date` が壊れた行は落として warning
+ */
+export function payrollToParsedSalary(
+  rows: KyuyoPayrollRow[],
+  company: string,
+): ParsedSalaryCsv {
+  const warnings: string[] = []
+  const itemLabels: string[] = []
+  const seenLabel = new Set<string>()
+  const months = new Set<string>()
+  const out: SalaryCsvRow[] = []
+
+  for (const row of rows) {
+    const matched = PAY_DATE_RE.exec(row.pay_date)
+    if (!matched) {
+      warnings.push(`社員 ${row.employee_code}: 支給日が不正なため除外しました (${row.pay_date || '空'})`)
+      continue
+    }
+    const month = `${matched[1]}-${matched[2]}`
+    const amounts: Record<string, number> = {}
+    for (const [label, amount] of Object.entries(row.payments)) {
+      amounts[label] = amount
+      if (!seenLabel.has(label)) {
+        seenLabel.add(label)
+        itemLabels.push(label)
+      }
+    }
+    months.add(month)
+    out.push({
+      driverCd: row.employee_code,
+      cdKey: row.employee_code_key,
+      company,
+      driverName: row.employee_name,
+      month,
+      amounts,
+      reportedTotal: row.totals?.soshikyu ?? null,
+      rates: { base: row.base_rate, overtime: row.overtime_rate },
+    })
+  }
+
+  return { rows: out, itemLabels, months: [...months].sort(), warnings }
 }

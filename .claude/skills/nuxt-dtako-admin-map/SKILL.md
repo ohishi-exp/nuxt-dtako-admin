@@ -547,6 +547,28 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   未突合・未設定は空欄。dtako 由来の `事業所` 列は別ソースなので残す。月次タブでも
   社員マスタを load する (CSV 列が空になるのを避ける)
 
+### 給与明細の取得元は 2 つ (貼り付け / 給与DB 直読み、Refs #369)
+
+給与比較タブは**貼り付け CSV と給与DB 直読みを併存**させる (取得元をユーザーが選べる
+状態を保つ、#369 決定 4)。`salaryParsed` が両方の `ParsedSalaryCsv` を
+`mergeParsedSalaryCsv` で束ねるので、突合・比較計算 (`compareSalaryMonth`) は
+どちらから来たかを知らない。
+
+- **給与DB 直読み**: `GET /api/kyuyo/payroll?company=&month=` (rust-ichibanboshi)。
+  変換は `payrollToParsedSalary` (`app/utils/kyuyo-fetch.ts`、pure)
+- **`payments` だけを使う** — API は `payments`/`deductions` を分けて返す
+  (rust-ichibanboshi#94)。以前の `amounts` は支給と控除が混在しており、そのまま
+  流すと健康保険料・所得税が支給項目として集計され支給合計が過大になった
+- **月は `pay_date` から採る** (支給月)。給与比較は「勤務月の翌月に支給」で突合する
+  ため、賃金期間 (`month` パラメータ = 勤務月) ではなく支給日が正しい
+- **会社は給与大臣の会社コード** (`payroll.company` をそのまま)。社員マスタの突合キーと
+  同じ体系なので変換不要 (Refs #405)
+- 単価は `base_rate`/`overtime_rate` (`MEISAI=1` 項目由来、÷100 済み)
+- **sessionStorage は `/kyuyo-fetch` と共有**する (`kyuyo-payroll:{会社}:{月}`) —
+  一度取れば両画面で使い回せ、キャッシュが二重にならない。1 社 10〜20 秒かかるのは
+  給与大臣 PC が古く AUTO_CLOSE で都度 DB を開くためで異常ではない。サーバー側
+  `KyuyoLimiter` が同時 1 本なので**直列**で回す
+
 ### 1 人 = 複数の給与社員CD (N:1、Refs #403)
 
 **乗務員CD (= `employees.driver_cd`) は一番星 `[社員ﾏｽﾀ].社員C` と同一番号体系**で、
@@ -593,6 +615,7 @@ N:1 が現実に存在する (本番で 5 件、うち社員C 1619 鵜瀬裕一�
 
 | ファイル | 役割 |
 |---|---|
+| `app/utils/kyuyo-fetch.ts` | 給与DB取得の pure ロジック + `payrollToParsedSalary` (給与比較への変換、100% gate) |
 | `app/utils/employee-master.ts` | 型 + `buildCdMapEntries`/`findUnregistered`/`resolveAttrsAt`/`splitCdMapKey` + タブ用 `upsertAttrRow`/`removeAttrRow`/`collectAttrRows`/`buildDriverAttrIndex`/`joinDriverAttr`/`normalizeDriverCdKey`/`sortEmployeeEntries` + 取り込み `planPayrollDbImport`/`planIchibanMatch` (pure、100% gate) |
 | `workers/dtako-scraper-relay/src/employee-master.ts` | PUT検証・D1文組み立て・月末解決 (pure、100% gate) |
 
