@@ -468,6 +468,14 @@ export function applyMinWageToWageMaster(
     const at = entries.findIndex((e) => e.effectiveFrom === effectiveFrom);
     const hasAny = entries.length > 0;
     if (hasAny && !opts.overwrite) {
+      // 据え置きでも、同じ適用開始日で**金額まで一致**する行に根拠県が無ければ
+      // 注記だけ入れる。金額は触らないので手入力の単価を潰す心配が無く、この機能で
+      // 入れた既存行 (根拠県を持たない古い版) を後から識別できるようになる
+      // entries は drivers[driverCd].rates そのもの (先頭で複製済み) なので、
+      // ここでの差し替えがそのまま反映される
+      if (at >= 0 && entries[at]!.hourlyRate === lookup.rate && !entries[at]!.prefecture) {
+        entries[at] = { ...entries[at]!, prefecture };
+      }
       items.push({ driverCd, branch, prefecture, rate: lookup.rate, status: "keep" });
       continue;
     }

@@ -2929,8 +2929,10 @@ watch([activeTab, month, session], () => {
                     <td class="px-2 py-1.5 text-right font-medium">{{ row.current ? fmtYen(row.current.hourlyRate) : '未設定' }}</td>
                     <td class="px-2 py-1.5">{{ row.current?.effectiveFrom ?? '-' }}</td>
                     <td class="px-2 py-1.5 text-xs">
+                      <!-- 根拠県が無い = 一括設定より前に入った単価。手入力とは
+                           限らない (この機能の初期版が根拠を残していなかった) ので
+                           断定はしない -->
                       <span v-if="row.current?.prefecture" class="text-gray-500">{{ row.current.prefecture }} 最低賃金</span>
-                      <span v-else-if="row.current" class="text-gray-400">手入力</span>
                       <span v-else class="text-gray-400">-</span>
                     </td>
                     <td class="px-2 py-1.5">
