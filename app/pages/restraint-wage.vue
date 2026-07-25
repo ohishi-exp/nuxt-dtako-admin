@@ -1933,8 +1933,10 @@ watch([activeTab, month, session], () => {
   }
   else if (activeTab.value === 'master') {
     if (Object.keys(master.value.drivers).length === 0) loadMaster()
-    // 会社フィルタ・所属列・営業所順の並べ替えに使う (Refs #409)
+    // 会社フィルタ・所属列・営業所順の並べ替えに使う (Refs #409)。
+    // compMap も要る — 無いと会社コード (0200) が会社名に直らず生のまま出る
     if (!employeeMasterLoaded.value) loadEmployeeMaster()
+    if (!compMap.value.length) loadCompMap()
   }
   else if (activeTab.value === 'employees') {
     // 会社横断表示のため、選択中の範囲に必要な会社をまとめて読む (Refs #367)
