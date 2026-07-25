@@ -487,8 +487,13 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   一方、**社員マスタタブだけは会社横断で表示・編集できる** (管理者が両社を見る、
   会社リストは `app/utils/dtako-comps.ts` = scraper.vue と共有)。保存は会社ごとに
   PUT を分ける — worker はセッションの会社IDでしか書かないため。触れる会社の
-  判定は `viewerCompIdsForTenant` (DTAKO_ACCOUNTS 逆引き) が正で、フロントの
-  リストは表示順とラベルだけ
+  判定は `allowedViewerComps` (DTAKO_ACCOUNTS 逆引き) が正で、フロントの
+  リストは表示順とラベルだけ。**`role: admin` (introspect が JWT の claim を返す) は
+  DTAKO_ACCOUNTS の全会社を見られる** — dtako の 2 社は別 tenant
+  (27324455 と 75700192) で、グループ管理者が両方を 1 画面で見る要件があるため
+  (2026-07-25)。admin でも DTAKO_ACCOUNTS に無い会社は不可 (ヘッダ偽装対策)。
+  別テナント側に admin を増やす時は「全社を許可する tenant_id の allowlist」へ
+  切り替えること
 - **給与DBからの取り込み** (Refs #367): 社員マスタタブの「給与DBから取り込み」は
   rust-ichibanboshi の identity-only API (`GET /api/kyuyo/employees`、
   ohishi-exp/rust-ichibanboshi#92) を叩き、社員番号・氏名・所属・給与体系だけを

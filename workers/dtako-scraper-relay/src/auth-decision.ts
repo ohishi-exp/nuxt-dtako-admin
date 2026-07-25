@@ -14,6 +14,10 @@ export interface IntrospectResult {
    * の comp スコープ判定 (DTAKO_ACCOUNTS 逆引き) に使う。WS ハンドシェイク判定
    * (decideRelayAuth) は従来どおり active しか見ない。 */
   tenant_id?: string
+  /** active:true の時に introspect が返す JWT の role claim。restraint viewer 経路
+   * で「admin は全会社」を判定するのに使う (Refs #367)。WS ハンドシェイク判定
+   * (decideRelayAuth) は従来どおり active しか見ない。 */
+  role?: string
 }
 
 /** ハンドシェイク判定結果。`status === 101` の時だけ accept する。 */
