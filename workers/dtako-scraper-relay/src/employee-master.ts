@@ -469,7 +469,10 @@ export function buildCompMapResponse(rows: CompPayrollMapD1Row[], allowed: Set<s
 const YEAR_MONTH_RE = /^(\d{4})-(\d{2})$/;
 
 /** "YYYY-MM" の末日を "YYYY-MM-DD" で返す。不正な形式は null。 */
-function lastDayOfMonth(yearMonth: string): string | null {
+/** "YYYY-MM" → その月の末日 "YYYY-MM-DD"。不正な形式は null。
+ * 履歴マスタの「対象月の末日時点で効いている行」解決に使う共通ヘルパ
+ * (work-schedule.ts の所定マスタも同じ規則なのでここから import する)。 */
+export function lastDayOfMonth(yearMonth: string): string | null {
   const m = YEAR_MONTH_RE.exec(yearMonth);
   if (!m) return null;
   const year = Number(m[1]);

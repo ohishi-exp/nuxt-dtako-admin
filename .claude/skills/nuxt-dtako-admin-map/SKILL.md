@@ -440,7 +440,7 @@ R2 アーカイブ (上記 /restraint-fetch) の summary を素材に、theearth
 ⑤支給項目区分 (**割増基礎 (37条) × 最低賃金 (4条3項) の 2 軸 5 区分**:
 base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存値は
 後方互換。集計意味論は `app/utils/salary-compare.ts` の `SALARY_CATEGORY_FLAGS`)
-⑥社員マスタ (D1、下記)。
+⑥社員マスタ (D1、下記) ⑦勤務設定 (D1、下記)。
 
 - 決定事項: 法定休日=日曜・法定外休日=土曜既定 (wage-config で変更可)、
   **週40h は日曜起算で「週の終端が属する月」に計上、月初跨ぎ週は前月 summary の
@@ -463,7 +463,36 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
 - DO routes: `GET/PUT /restraint-api/{wage-master|min-wage|wage-config}`、
   `POST wage-master/csv` (upsert 取込)、`GET archive/{summaries|csv-list|csv|history}`、
   `GET wage-report?month=` (前月 tail 込みの計算行)、社員マスタ (下記) は
-  `GET/PUT /restraint-api/employee-master`
+  `GET/PUT /restraint-api/employee-master`、勤務設定 (下記) は
+  `GET/PUT /restraint-api/{work-schedule|holiday-work}`
+
+### 勤務設定 (D1、所定労働時間 + 休日出勤の承認、Refs #424 PR-C)
+
+タイムカード (社内 CakePHP `yhonda-ohishi/nginx`) 由来の勤務を法定区分へ振り分ける
+ための入力。**デジタコ (theearth) 由来の乗務員には効かない** — 時間外は拘束時間 CSV
+がそのまま持っているため。pure module は
+`workers/dtako-scraper-relay/src/work-schedule.ts` (100% gate)。
+
+- **所定労働時間** (`work_schedules`、migration 0011): 実働がこれを超えた分が時間外。
+  スコープ列 `branch_code`/`job_name` で所属×職種ごとに上書きできるが、運用はまず
+  **全社既定 1 行**だけ (ユーザー判断「基本会社でいい、今後必要なら拡張」)。列を最初
+  から持たせているので拡張時に migration が要らない。
+  解決は `resolveWorkScheduleAt` — 適用開始日が月末以前の行のうち**具体度が最優先**
+  (拠点+職種 > 拠点 > 職種 > 全社既定)、同じ具体度なら適用開始日が新しい行。
+  **具体度を日付より先に見る**のは、全社既定を後から更新した時に拠点別の設定が
+  消える事故を防ぐため
+- **休憩は持たない**: 事務員は昼休憩で打刻を切っているので、休憩は打刻の中抜けギャップ
+  と 12:00-13:00 の**和集合**から出す (和集合なのは中抜けが昼を跨ぐと二重控除になる
+  ため)。固定値マスタは実データ検証の結果**不要と判断して落とした**
+- **休日出勤の承認** (`holiday_work_approvals`、migration 0012): 休日の打刻のうち
+  **この表に載っている日だけ**が割増賃金の対象 (= 休日出勤)。載っていない日は
+  **自主出勤**として賃金計算から外すが**時間は記録・表示する** — 後から日付を足せば
+  昇格する (実態が指揮命令下なら労働時間と評価されうるため「消さない」設計)。
+  突合キーは `driver_cd` (= 乗務員CD = 一番星社員C = CakePHP `drivers.id`)
+- **NULL をスコープの「全体」に使わない**: SQLite (D1) の UNIQUE/PK は NULL 同士を
+  異なる値として扱うため、NULL を PK に含めると `ON CONFLICT DO UPDATE` が一致せず
+  同じ行が二重に入る。番兵値 (`branch_code = -1` / `job_name = ''`) を使い、
+  アプリ側の型は `number | null` / `string | null` のまま SQL 境界で変換する
 
 ### 社員マスタ (D1、給与コード×会社 → 乗務員CD、Refs #367)
 
