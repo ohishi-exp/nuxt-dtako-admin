@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { DTAKO_COMPS, dtakoCompDisplay, dtakoCompLabel, parseCompMap } from '../../app/utils/dtako-comps'
+import { DTAKO_COMPS, dtakoCompDisplay, dtakoCompLabel, parseCompMap, payrollCompanyLabel } from '../../app/utils/dtako-comps'
 
 describe('DTAKO_COMPS', () => {
   it('会社IDは重複しない (社員マスタの会社横断表示がキー衝突しない前提)', () => {
@@ -38,7 +38,7 @@ describe('parseCompMap', () => {
         compId: '27324455',
         compLabel: '大石運輸倉庫',
         payrollCompanies: [
-          { payrollCompany: '0100', legacyLabel: '有' },
+          { payrollCompany: '0100', legacyLabel: '有', payrollCompanyName: '有限会社 大石運輸' },
           { payrollCompany: '0300', legacyLabel: null },
         ],
       }],
@@ -47,8 +47,8 @@ describe('parseCompMap', () => {
       compId: '27324455',
       compLabel: '大石運輸倉庫',
       payrollCompanies: [
-        { payrollCompany: '0100', legacyLabel: '有' },
-        { payrollCompany: '0300', legacyLabel: null },
+        { payrollCompany: '0100', legacyLabel: '有', payrollCompanyName: '有限会社 大石運輸' },
+        { payrollCompany: '0300', legacyLabel: null, payrollCompanyName: null },
       ],
     }])
   })
@@ -73,5 +73,34 @@ describe('parseCompMap', () => {
     expect(parseCompMap(null)).toEqual([])
     expect(parseCompMap({})).toEqual([])
     expect(parseCompMap({ comps: 'x' })).toEqual([])
+  })
+})
+
+describe('payrollCompanyLabel', () => {
+  // 社員マスタの company は給与大臣の会社コードを保持する (Refs #405)。
+  // 会社名は表示専用で、取れていなければコードだけを出す。
+  const comps = parseCompMap({
+    comps: [{
+      compId: '27324455',
+      compLabel: '大石運輸倉庫',
+      payrollCompanies: [
+        { payrollCompany: '0100', legacyLabel: null, payrollCompanyName: '有限会社 大石運輸' },
+        { payrollCompany: '0300', legacyLabel: null },
+      ],
+    }],
+  })
+
+  it('会社名があれば「コード (会社名)」にする', () => {
+    expect(payrollCompanyLabel(comps, '27324455', '0100')).toBe('0100 (有限会社 大石運輸)')
+  })
+
+  it('会社名が未取得ならコードだけを返す', () => {
+    expect(payrollCompanyLabel(comps, '27324455', '0300')).toBe('0300')
+  })
+
+  it('対応表に無い会社・comp はコードだけを返す (fail-soft)', () => {
+    expect(payrollCompanyLabel(comps, '27324455', '0999')).toBe('0999')
+    expect(payrollCompanyLabel(comps, '75700192', '0400')).toBe('0400')
+    expect(payrollCompanyLabel([], '27324455', '0100')).toBe('0100')
   })
 })

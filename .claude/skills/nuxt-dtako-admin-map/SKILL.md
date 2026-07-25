@@ -485,6 +485,26 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
 - **「未登録 N 名をマスタへ登録」** ボタン (`findUnregistered`): 給与明細 CSV に
   現れたが社員マスタに (会社, 給与コード) が無い行を一括登録する。送るのは
   コード・氏名・会社のみ (乗務員CD 突合・金額は一切送信しない)
+#### 突合キーの会社部分は「給与大臣の会社コード」(Refs #405)
+
+`employees.company` / `employee_attrs.company` が保持するのは **給与大臣の会社コード
+(`0100`/`0200`/`0300`/`0400`)** であって会社名ではない (migration 0009 で CONAME1 から
+置換)。理由は 2 つ:
+
+- 会社ラベルは自由文字列で**表記揺れがキー分裂を生む** (#367 の留意点そのもの)
+- **`/api/kyuyo/payroll` は CONAME1 を返さない** ため、給与比較の DB 直読み (#369)
+  から会社ラベルを引き当てられなかった。会社コードなら payroll 応答の `company` を
+  そのまま突合キーに使える
+
+会社名 (CONAME1) は **`comp_payroll_map.payroll_company_name` に表示専用**で持ち、
+`GET /restraint-api/comp-map` が `payrollCompanyName` として返す。画面表示は
+`payrollCompanyLabel()` (`app/utils/dtako-comps.ts`) が `0100 (有限会社 大石運輸)`
+形式に整える — **名前が無くてもコードだけで機能は成立する**(突合はコードで行う)。
+
+`planPayrollDbImport` は `res.company` (コード) を company に入れる。
+`salaryCdMapKey` / `buildCdMapEntries` / `compareSalaryMonth` は**無変更** — キーに
+入る文字列が変わるだけ。
+
 - **会社 (comp) スコープ** (migration 0007): `employees`/`employee_attrs` は
   `comp_id` を PK に含み、DO は必ずセッションの `record.compId` で絞る。dtako
   テナントは複数ある (27324455 = 給与DB 0100/0200/0300、75700192 = 0400)。

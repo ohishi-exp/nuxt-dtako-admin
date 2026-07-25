@@ -332,6 +332,9 @@ export interface CompPayrollMapD1Row {
   comp_label: string;
   payroll_company: string;
   legacy_label: string | null;
+  /** 給与DB の会社名 (KYCOMSTD.CONAME1)。**表示専用** — 突合キーには使わない
+   * (Refs #405。突合は会社コードで行う)。未取り込みなら null。 */
+  payroll_company_name: string | null;
   sort_order: number;
 }
 
@@ -340,6 +343,8 @@ export interface CompPayrollEntry {
   payrollCompany: string;
   /** 移行前の会社ラベル ("有"/"株")。統合済み・不要なら null。 */
   legacyLabel: string | null;
+  /** 給与DB の会社名 (CONAME1)。**表示専用** (Refs #405)。 */
+  payrollCompanyName: string | null;
 }
 
 export interface CompMapEntry {
@@ -366,7 +371,11 @@ export function buildCompMapResponse(rows: CompPayrollMapD1Row[], allowed: Set<s
   for (const r of sorted) {
     if (!allowed.has(r.comp_id)) continue;
     const entry = byComp.get(r.comp_id) ?? { compId: r.comp_id, compLabel: r.comp_label, payrollCompanies: [] };
-    entry.payrollCompanies.push({ payrollCompany: r.payroll_company, legacyLabel: r.legacy_label });
+    entry.payrollCompanies.push({
+      payrollCompany: r.payroll_company,
+      legacyLabel: r.legacy_label,
+      payrollCompanyName: r.payroll_company_name,
+    });
     byComp.set(r.comp_id, entry);
   }
   return [...byComp.values()];

@@ -25,10 +25,13 @@ export interface CompMapEntry {
   compId: string
   compLabel: string
   payrollCompanies: Array<{
-    /** 給与大臣の会社コード 4 桁。 */
+    /** 給与大臣の会社コード 4 桁。**社員マスタの突合キーはこれ** (Refs #405)。 */
     payrollCompany: string
     /** 移行前の会社ラベル ("有"/"株")。統合済み・不要なら null。 */
     legacyLabel: string | null
+    /** 給与DB の会社名 (KYCOMSTD.CONAME1)。**表示専用** — 突合には使わない。
+     * 自由文字列で表記揺れがあるため、キーには会社コードを使う (Refs #405)。 */
+    payrollCompanyName: string | null
   }>
 }
 
@@ -49,10 +52,14 @@ export function parseCompMap(raw: unknown): CompMapEntry[] {
       payrollCompanies: (Array.isArray(list) ? list : [])
         .filter((p): p is { payrollCompany: string, legacyLabel?: unknown } =>
           typeof (p as { payrollCompany?: unknown })?.payrollCompany === 'string')
-        .map(p => ({
-          payrollCompany: p.payrollCompany,
-          legacyLabel: typeof p.legacyLabel === 'string' && p.legacyLabel ? p.legacyLabel : null,
-        })),
+        .map((p) => {
+          const name = (p as { payrollCompanyName?: unknown }).payrollCompanyName
+          return {
+            payrollCompany: p.payrollCompany,
+            legacyLabel: typeof p.legacyLabel === 'string' && p.legacyLabel ? p.legacyLabel : null,
+            payrollCompanyName: typeof name === 'string' && name ? name : null,
+          }
+        }),
     })
   }
   return out
@@ -68,6 +75,24 @@ export const DTAKO_COMPS: DtakoComp[] = [
 /** 会社ID → 会社名。未登録の ID はそのまま返す (閲覧モードの手入力・ローカル検証用)。 */
 export function dtakoCompLabel(compId: string): string {
   return DTAKO_COMPS.find(c => c.compId === compId)?.label ?? compId
+}
+
+/**
+ * 給与大臣の会社コードの表示用ラベル (`0100 (有限会社 大石運輸)`、Refs #405)。
+ *
+ * 社員マスタの `company` はコードを保持するので、そのまま出すと読めない。
+ * 会社名 (CONAME1) が未取得なら**コードだけ**を返す — 名前は表示専用で、
+ * 無くても機能は成立する (突合はコードで行う)。
+ */
+export function payrollCompanyLabel(
+  comps: CompMapEntry[],
+  compId: string,
+  payrollCompany: string,
+): string {
+  const name = comps
+    .find(c => c.compId === compId)?.payrollCompanies
+    .find(p => p.payrollCompany === payrollCompany)?.payrollCompanyName
+  return name ? `${payrollCompany} (${name})` : payrollCompany
 }
 
 /** 「27324455 (大石運輸倉庫)」形式の表示名。 */

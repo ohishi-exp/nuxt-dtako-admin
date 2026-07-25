@@ -470,15 +470,15 @@ describe('planPayrollDbImport', () => {
     warnings: [],
   })
 
-  it('新規社員は employees + attrs を作り、会社ラベルは CONAME1 の正規化', () => {
+  it('新規社員は employees + attrs を作り、会社は給与大臣の会社コード (Refs #405)', () => {
     const plan = planPayrollDbImport(res([kyuyoRow()]), [], '2026-07', null)
     expect(plan.added).toBe(1)
     expect(plan.merged).toBe(0)
     expect(plan.employees).toEqual([
-      { company: '有限会社 大石運輸', payrollCd: '7', name: '山田　太郎', driverCd: null },
+      { company: '0100', payrollCd: '7', name: '山田　太郎', driverCd: null },
     ])
     expect(plan.attrs).toEqual([
-      { company: '有限会社 大石運輸', payrollCd: '7', effectiveFrom: '2026-07-01', branch: '本社 乗務員', payScheme: '体系1' },
+      { company: '0100', payrollCd: '7', effectiveFrom: '2026-07-01', branch: '本社 乗務員', payScheme: '体系1' },
     ])
     expect(plan.deleteEmployees).toEqual([])
   })
@@ -492,7 +492,7 @@ describe('planPayrollDbImport', () => {
   })
 
   it('既に新ラベルで登録済みなら added に数えず、乗務員CDを保つ', () => {
-    const current = entry({ company: '有限会社 大石運輸', payrollCd: '7', name: '旧氏名', driverCd: '9902' })
+    const current = entry({ company: '0100', payrollCd: '7', name: '旧氏名', driverCd: '9902' })
     const plan = planPayrollDbImport(res([kyuyoRow()]), [current], '2026-07', '有')
     expect(plan.added).toBe(0)
     expect(plan.merged).toBe(0)
@@ -502,7 +502,7 @@ describe('planPayrollDbImport', () => {
 
   it('対象月末時点で同じ所属/体系が効いているなら履歴を増やさない', () => {
     const current = entry({
-      company: '有限会社 大石運輸',
+      company: '0100',
       payrollCd: '7',
       driverCd: null,
       attrs: [{ effectiveFrom: '2026-04-01', branch: '本社 乗務員', payScheme: '体系1' }],
@@ -513,20 +513,20 @@ describe('planPayrollDbImport', () => {
 
   it('所属が変わっていれば当月初の履歴を足す', () => {
     const current = entry({
-      company: '有限会社 大石運輸',
+      company: '0100',
       payrollCd: '7',
       driverCd: null,
       attrs: [{ effectiveFrom: '2026-04-01', branch: '支社', payScheme: '体系1' }],
     })
     const plan = planPayrollDbImport(res([kyuyoRow()]), [current], '2026-07', null)
     expect(plan.attrs).toEqual([
-      { company: '有限会社 大石運輸', payrollCd: '7', effectiveFrom: '2026-07-01', branch: '本社 乗務員', payScheme: '体系1' },
+      { company: '0100', payrollCd: '7', effectiveFrom: '2026-07-01', branch: '本社 乗務員', payScheme: '体系1' },
     ])
   })
 
   it('保存側の NFKC 正規化と同値なら履歴を増やさない (全角スペース差で誤検知しない)', () => {
     const current = entry({
-      company: '有限会社 大石運輸',
+      company: '0100',
       payrollCd: '7',
       driverCd: null,
       attrs: [{ effectiveFrom: '2026-04-01', branch: '本社 乗務員', payScheme: '体系1' }],

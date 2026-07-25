@@ -300,7 +300,10 @@ export function planPayrollDbImport(
   yearMonth: string,
   legacyLabel: string | null,
 ): PayrollImportPlan {
-  const company = normalizeCompanyLabel(res.company_name)
+  // 突合キーの会社部分は**給与大臣の会社コード** (0100 等)。CONAME1 は自由文字列で
+  // 表記揺れがキー分裂を生むうえ、`/api/kyuyo/payroll` が返さないため給与比較の
+  // DB 直読み (#369) から引けなかった (Refs #405)。会社名は表示専用で別に持つ。
+  const company = normalizeCompanyLabel(res.company)
   const byKey = new Map(existing.map(e => [`${e.company}|${e.payrollCd}`, e]))
   const plan: PayrollImportPlan = { employees: [], attrs: [], deleteEmployees: [], added: 0, merged: 0 }
   const effectiveFrom = `${yearMonth}-01`
