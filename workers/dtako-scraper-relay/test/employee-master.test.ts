@@ -261,9 +261,9 @@ describe('resolveAttrsAt', () => {
 
 describe('buildCompMapResponse', () => {
   const rows = [
-    { comp_id: '27324455', comp_label: '大石運輸倉庫', payroll_company: '0200', legacy_label: '株', sort_order: 2 },
-    { comp_id: '27324455', comp_label: '大石運輸倉庫', payroll_company: '0100', legacy_label: '有', sort_order: 1 },
-    { comp_id: '75700192', comp_label: '北海大運', payroll_company: '0400', legacy_label: null, sort_order: 1 },
+    { comp_id: '27324455', comp_label: '大石運輸倉庫', payroll_company: '0200', legacy_label: '株', payroll_company_name: '大石運輸倉庫株式会社', sort_order: 2 },
+    { comp_id: '27324455', comp_label: '大石運輸倉庫', payroll_company: '0100', legacy_label: '有', payroll_company_name: '有限会社 大石運輸', sort_order: 1 },
+    { comp_id: '75700192', comp_label: '北海大運', payroll_company: '0400', legacy_label: null, payroll_company_name: null, sort_order: 1 },
   ]
 
   it('会社単位に畳み、sort_order 昇順で並べる', () => {
@@ -273,7 +273,10 @@ describe('buildCompMapResponse', () => {
     expect(out[0]!.compLabel).toBe('大石運輸倉庫')
     expect(out[0]!.payrollCompanies.map(p => p.payrollCompany)).toEqual(['0100', '0200'])
     expect(out[0]!.payrollCompanies[0]!.legacyLabel).toBe('有')
-    expect(out[1]!.payrollCompanies).toEqual([{ payrollCompany: '0400', legacyLabel: null }])
+    expect(out[0]!.payrollCompanies[0]!.payrollCompanyName).toBe('有限会社 大石運輸')
+    expect(out[1]!.payrollCompanies).toEqual([
+      { payrollCompany: '0400', legacyLabel: null, payrollCompanyName: null },
+    ])
   })
 
   it('allowed に無い会社は落とす (別テナントへ会社名を見せない)', () => {
@@ -287,8 +290,8 @@ describe('buildCompMapResponse', () => {
 
   it('同一 sort_order は会社コード昇順で安定する', () => {
     const tied = [
-      { comp_id: 'c', comp_label: 'C', payroll_company: '0200', legacy_label: null, sort_order: 1 },
-      { comp_id: 'c', comp_label: 'C', payroll_company: '0100', legacy_label: null, sort_order: 1 },
+      { comp_id: 'c', comp_label: 'C', payroll_company: '0200', legacy_label: null, payroll_company_name: null, sort_order: 1 },
+      { comp_id: 'c', comp_label: 'C', payroll_company: '0100', legacy_label: null, payroll_company_name: null, sort_order: 1 },
     ]
     const out = buildCompMapResponse(tied, new Set(['c']))
     expect(out[0]!.payrollCompanies.map(p => p.payrollCompany)).toEqual(['0100', '0200'])

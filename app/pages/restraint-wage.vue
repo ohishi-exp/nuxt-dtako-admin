@@ -854,7 +854,10 @@ const importTargetComp = computed(() =>
 /** 取り込み元に選べる給与DB会社 (対象 comp の対応行)。 */
 const importPayrollOptions = computed(() => {
   const entry = compMap.value.find(c => c.compId === importTargetComp.value)
-  return (entry?.payrollCompanies ?? []).map(p => ({ label: p.payrollCompany, value: p.payrollCompany }))
+  return (entry?.payrollCompanies ?? []).map(p => ({
+    label: p.payrollCompanyName ? `${p.payrollCompany} (${p.payrollCompanyName})` : p.payrollCompany,
+    value: p.payrollCompany,
+  }))
 })
 
 watch(importPayrollOptions, (options) => {
@@ -1133,6 +1136,9 @@ const employeeMasterRows = computed(() =>
       key: `${compId}|${e.company}|${e.payrollCd}`,
       compId,
       compLabel: dtakoCompLabel(compId),
+      // 会社は突合キーとして給与大臣の会社コードを保持しているので、表示は
+      // 会社名つきに直す (Refs #405)。名前が未取得ならコードのまま。
+      companyLabel: payrollCompanyLabel(compMap.value, compId, e.company),
       entry: e,
       current: resolveAttrsAt(e, month.value),
       history: [...e.attrs].sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom)),
@@ -2634,7 +2640,7 @@ watch([activeTab, month, session], () => {
                 <tbody>
                   <tr v-for="row in employeeMasterRows" :key="row.key" class="border-b border-gray-100 dark:border-gray-800">
                     <td v-if="employeeMasterScope === 'all'" class="px-2 py-1.5 whitespace-nowrap">{{ row.compLabel }}</td>
-                    <td class="px-2 py-1.5">{{ row.entry.company }}</td>
+                    <td class="px-2 py-1.5">{{ row.companyLabel }}</td>
                     <td class="px-2 py-1.5">{{ row.entry.payrollCd }}</td>
                     <td class="px-2 py-1.5">
                       <UInput
@@ -2713,7 +2719,7 @@ watch([activeTab, month, session], () => {
             <template #content>
               <div class="p-6 space-y-3 max-h-[80vh] overflow-y-auto">
                 <h3 class="text-lg font-bold">
-                  所属・給与体系の履歴 — {{ attrHistoryRow?.entry.company }} {{ attrHistoryRow?.entry.payrollCd }} {{ attrHistoryRow?.entry.name }}
+                  所属・給与体系の履歴 — {{ attrHistoryRow?.companyLabel }} {{ attrHistoryRow?.entry.payrollCd }} {{ attrHistoryRow?.entry.name }}
                 </h3>
                 <p class="text-xs text-gray-500">新しい順。削除はローカル反映のみ — 「保存」で確定します</p>
                 <table class="w-full text-sm">

@@ -1933,7 +1933,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     try {
       const result = await db
         .prepare(
-          `SELECT comp_id, comp_label, payroll_company, legacy_label, sort_order FROM comp_payroll_map`,
+          `SELECT comp_id, comp_label, payroll_company, legacy_label, payroll_company_name, sort_order FROM comp_payroll_map`,
         )
         .all<CompPayrollMapD1Row>();
       return Response.json({ comps: buildCompMapResponse(result.results ?? [], allowed) });
