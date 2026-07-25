@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, nextYm, prevYm } from '../../app/utils/restraint-wage-view'
+import { fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, monthRange, MONTH_RANGE_MAX, nextYm, prevYm } from '../../app/utils/restraint-wage-view'
 
 describe('fmtMinutes', () => {
   it('時間+分を "XhYYm" 表記にする', () => {
@@ -96,5 +96,36 @@ describe('nextYm / prevYm (支給月 ⇄ 勤務月、月末締め・翌月払い
   it('形式不一致はそのまま返す', () => {
     expect(nextYm('2026/12')).toBe('2026/12')
     expect(prevYm('bad')).toBe('bad')
+  })
+})
+
+describe('monthRange', () => {
+  it('両端を含めて昇順に並べる', () => {
+    expect(monthRange('2026-05', '2026-08')).toEqual(['2026-05', '2026-06', '2026-07', '2026-08'])
+  })
+
+  it('同じ月なら 1 件', () => {
+    expect(monthRange('2026-07', '2026-07')).toEqual(['2026-07'])
+  })
+
+  it('年を跨ぐ', () => {
+    expect(monthRange('2025-11', '2026-02')).toEqual(['2025-11', '2025-12', '2026-01', '2026-02'])
+  })
+
+  it('逆順に指定されても入れ替えて扱う (画面で から/まで を逆に選べる)', () => {
+    expect(monthRange('2026-08', '2026-05')).toEqual(['2026-05', '2026-06', '2026-07', '2026-08'])
+  })
+
+  it('上限で打ち切る (給与DB は 1 社 10〜20 秒 かかるため)', () => {
+    expect(monthRange('2020-01', '2030-12')).toHaveLength(MONTH_RANGE_MAX)
+    expect(monthRange('2026-01', '2026-12', 3)).toEqual(['2026-01', '2026-02', '2026-03'])
+  })
+
+  it('形式不正・範囲外の月は空配列 (呼び出し側は「指定なし」として扱う)', () => {
+    expect(monthRange('', '2026-07')).toEqual([])
+    expect(monthRange('2026-07', '')).toEqual([])
+    expect(monthRange('2026/07', '2026-08')).toEqual([])
+    expect(monthRange('2026-13', '2026-14')).toEqual([])
+    expect(monthRange('2026-00', '2026-01')).toEqual([])
   })
 })

@@ -625,6 +625,7 @@ const dbImports = ref<Array<{ company: string, month: string, parsed: ParsedSala
 const loadingPayrollDb = ref(false)
 const payrollDbMessage = ref('')
 
+
 const salaryParsed = computed<ParsedSalaryCsv | null>(() => {
   const parsed = [...salaryImports.value.map(i => i.parsed), ...dbImports.value.map(i => i.parsed)]
   return parsed.length ? mergeParsedSalaryCsv(parsed) : null
@@ -906,6 +907,50 @@ watch(importPayrollOptions, (options) => {
   }
 }, { immediate: true })
 
+// ---- 給与DB取得の期間指定 (上部バー) ----
+// 指定する月は**勤務月** — 画面の月タブと同じ基準で、`/api/kyuyo/payroll?month=`
+// もこれを取る。応答行は支給日 (勤務月+1) で自己ラベルされるので、突合側
+// (salaryMonthRows) はそのままで良い。から/まで が同じ月なら従来の 1 ヶ月動作。
+const payrollRangeFrom = ref('')
+const payrollRangeTo = ref('')
+
+// 既定は「選択中の月だけ」= 従来の 1 ヶ月動作。月タブを切り替えたら期間もそこへ
+// 戻す — 6月の範囲指定を残したまま 1月へ移ると、何を取るのか分からなくなる。
+watch(month, (ym) => {
+  payrollRangeFrom.value = ym
+  payrollRangeTo.value = ym
+}, { immediate: true })
+
+/** 期間セレクタの選択肢 (前年1月〜選択年12月の勤務月)。
+ * **空文字の option は作らない** — Reka UI の `SelectItem` は value に空文字を
+ * 取れず、描画が 500 になる (2026-07-25 にローカルで踏んだ)。「1 ヶ月だけ」は
+ * から/まで を同じ月にすることで表す。 */
+const payrollMonthOptions = computed(() => {
+  const items: Array<{ label: string, value: string }> = []
+  for (const year of [selectedYear.value - 1, selectedYear.value]) {
+    for (let m = 1; m <= 12; m++) {
+      const ym = `${year}-${String(m).padStart(2, '0')}`
+      items.push({ label: fmtYm(ym), value: ym })
+    }
+  }
+  return items
+})
+
+/** 取得する勤務月の一覧。期間が未指定 (片方だけでも) なら選択中の月だけ。 */
+const payrollTargetMonths = computed(() => {
+  const range = monthRange(payrollRangeFrom.value, payrollRangeTo.value)
+  return range.length ? range : [month.value]
+})
+
+/** 上部バーに出す「何を取るか」の説明 (支給月ベース = 給与大臣側の見え方)。 */
+const payrollRangeHint = computed(() => {
+  const months = payrollTargetMonths.value
+  const first = fmtYm(nextYm(months[0]!))
+  const last = fmtYm(nextYm(months[months.length - 1]!))
+  const span = months.length > 1 ? `${first}〜${last} 支給分 (${months.length} ヶ月)` : `${first} 支給分`
+  return `${span} × ${importPayrollOptions.value.length} 社`
+})
+
 /**
  * 一番星社員ﾏｽﾀで未突合行の社員CD を埋める (ローカル反映 → 「保存」で確定、Refs #403)。
  *
@@ -956,45 +1001,61 @@ async function loadPayrollFromDb() {
   if (!compId) return
   const companies = compMap.value.find(c => c.compId === compId)?.payrollCompanies ?? []
   if (!companies.length) return
-  const payMonth = nextYm(month.value)
+  const workMonths = payrollTargetMonths.value
   loadingPayrollDb.value = true
   payrollDbMessage.value = ''
   pageError.value = ''
   const loaded: typeof dbImports.value = []
+  const totalFetches = workMonths.length * companies.length
+  let done = 0
   try {
     const token = currentAccessToken()
-    for (const { payrollCompany } of companies) {
-      const key = payrollStorageKey(payrollCompany, payMonth)
-      let stored: StoredPayroll | null = null
-      const cached = import.meta.client ? sessionStorage.getItem(key) : null
-      if (cached) {
-        try {
-          stored = JSON.parse(cached) as StoredPayroll
+    for (const workMonth of workMonths) {
+      const payMonth = nextYm(workMonth)
+      for (const { payrollCompany } of companies) {
+        done += 1
+        const key = payrollStorageKey(payrollCompany, payMonth)
+        let stored: StoredPayroll | null = null
+        const cached = import.meta.client ? sessionStorage.getItem(key) : null
+        if (cached) {
+          try {
+            stored = JSON.parse(cached) as StoredPayroll
+          }
+          catch {
+            stored = null // 壊れていたら取り直す
+          }
         }
-        catch {
-          stored = null // 壊れていたら取り直す
-        }
-      }
-      if (!stored) {
-        payrollDbMessage.value = `${payrollCompany} を取得しています… (1 社あたり 10〜20 秒)`
-        const body = await $fetch(`/api/kyuyo/payroll`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-          query: { company: payrollCompany, month: month.value },
-        })
-        stored = toStoredPayroll(body, new Date().toISOString())
         if (!stored) {
-          payrollDbMessage.value = `${payrollCompany} の応答形式が想定外でした`
-          continue
+          // 取得済みの月は sessionStorage から返るので、期間を伸ばしても
+          // 既に取った分は待たされない (キーは会社×支給月)
+          payrollDbMessage.value = totalFetches > 1
+            ? `${done}/${totalFetches} ${payrollCompany} / ${fmtYm(payMonth)} 支給分 を取得しています… (1 社あたり 10〜20 秒)`
+            : `${payrollCompany} を取得しています… (1 社あたり 10〜20 秒)`
+          const body = await $fetch(`/api/kyuyo/payroll`, {
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+            query: { company: payrollCompany, month: workMonth },
+          })
+          stored = toStoredPayroll(body, new Date().toISOString())
+          if (!stored) {
+            payrollDbMessage.value = `${payrollCompany} / ${fmtYm(payMonth)} の応答形式が想定外でした`
+            continue
+          }
+          if (import.meta.client) sessionStorage.setItem(key, JSON.stringify(stored))
         }
-        if (import.meta.client) sessionStorage.setItem(key, JSON.stringify(stored))
+        const parsed = payrollToParsedSalary(stored.rows as KyuyoPayrollRow[], payrollCompany)
+        loaded.push({ company: payrollCompany, month: payMonth, parsed })
       }
-      const parsed = payrollToParsedSalary(stored.rows as KyuyoPayrollRow[], payrollCompany)
-      loaded.push({ company: payrollCompany, month: payMonth, parsed })
     }
-    dbImports.value = loaded
+    // 今回取った (会社, 支給月) だけ差し替え、それ以外の既取得分は残す —
+    // 月を切り替えながら押しても前の月が消えない (突合は月で絞るので混ざらない)
+    const replaced = new Set(loaded.map(i => `${i.company}|${i.month}`))
+    dbImports.value = [...dbImports.value.filter(i => !replaced.has(`${i.company}|${i.month}`)), ...loaded]
     const total = loaded.reduce((n, i) => n + i.parsed.rows.length, 0)
+    const payLabel = loaded.length
+      ? `${fmtYm(nextYm(workMonths[0]!))}${workMonths.length > 1 ? `〜${fmtYm(nextYm(workMonths[workMonths.length - 1]!))}` : ''} 支給分`
+      : ''
     payrollDbMessage.value = loaded.length
-      ? `給与DB から ${loaded.length} 社 / ${total} 行を読み込みました (${fmtYm(payMonth)} 支給分)`
+      ? `給与DB から ${companies.length} 社 / ${workMonths.length} ヶ月 / ${total} 行を読み込みました (${payLabel})`
       : '給与DB から読み込める明細がありませんでした'
   }
   catch (e) {
@@ -1930,6 +1991,9 @@ function setBranchPrefecture(prefix: string, prefecture: string | null) {
 
 watch([activeTab, month, session], () => {
   if (!session.value || !month.value) return
+  // 上部バーの「給与DBから読み込み」はどのタブからでも押せるようにしている。
+  // ボタンの活殺は compMap 由来 (importPayrollOptions) なので、タブに関係なく読む
+  if (!compMap.value.length) loadCompMap()
   if (activeTab.value === 'monthly' || activeTab.value === 'minwage') {
     if (!report.value || report.value.month !== month.value) loadWageReport()
     // 最低賃金 (法定下限) の設定カードは minwage タブに同居 (Refs #268 PR-E)
@@ -1945,11 +2009,6 @@ watch([activeTab, month, session], () => {
     if (!report.value || report.value.month !== month.value) loadWageReport()
     if (!salaryConfigLoaded.value) loadSalaryItemConfig()
     if (!employeeMasterLoaded.value) loadEmployeeMaster()
-    // 「給与DBから読み込み」ボタンの活殺は compMap 由来 (importPayrollOptions =
-    // 対象 comp の給与会社行) なので、このタブでも読む。無いとリロード直後は
-    // ボタンが disabled のままで、社員マスタ/単価マスタタブを一度開くまで押せない
-    // (それらのタブだけが loadCompMap していた)
-    if (!compMap.value.length) loadCompMap()
   }
   else if (activeTab.value === 'items') {
     if (!salaryConfigLoaded.value) loadSalaryItemConfig()
@@ -1959,15 +2018,12 @@ watch([activeTab, month, session], () => {
   }
   else if (activeTab.value === 'master') {
     if (Object.keys(master.value.drivers).length === 0) loadMaster()
-    // 会社フィルタ・所属列・営業所順の並べ替えに使う (Refs #409)。
-    // compMap も要る — 無いと会社コード (0200) が会社名に直らず生のまま出る
+    // 会社フィルタ・所属列・営業所順の並べ替えに使う (Refs #409)
     if (!employeeMasterLoaded.value) loadEmployeeMaster()
-    if (!compMap.value.length) loadCompMap()
   }
   else if (activeTab.value === 'employees') {
     // 会社横断表示のため、選択中の範囲に必要な会社をまとめて読む (Refs #367)
     loadEmployeeMasterScope()
-    if (!compMap.value.length) loadCompMap()
   }
 }, { immediate: false })
 </script>
@@ -2029,6 +2085,45 @@ watch([activeTab, month, session], () => {
             />
           </div>
           <span class="text-xs text-gray-500 ml-auto">薄い月はアーカイブなし</span>
+        </div>
+
+        <!-- 給与DBから読み込み: 全タブ共通の上部バー (2026-07-25 要望)。
+             読み込んだ明細は最低賃金チェックの「基本給(給与)/残業代(給与)」列と
+             給与比較タブの両方が使うので、タブを移動せずここで取れるようにする。
+             期間は**勤務月**で指定する (画面の月タブと同じ基準)。 -->
+        <div v-if="session" class="flex flex-wrap items-center gap-2 border border-sky-200 dark:border-sky-900 rounded-lg p-2">
+          <span class="text-sm font-medium">給与DB</span>
+          <USelect
+            v-model="payrollRangeFrom"
+            :items="payrollMonthOptions"
+            size="xs"
+            class="w-36"
+            :aria-label="'給与DB取得の勤務月 (から)'"
+          />
+          <span class="text-xs text-gray-500">〜</span>
+          <USelect
+            v-model="payrollRangeTo"
+            :items="payrollMonthOptions"
+            size="xs"
+            class="w-36"
+            :aria-label="'給与DB取得の勤務月 (まで)'"
+          />
+          <UButton
+            size="xs"
+            icon="i-lucide-database"
+            label="給与DBから読み込み"
+            :loading="loadingPayrollDb"
+            :disabled="!importPayrollOptions.length"
+            :title="importPayrollOptions.length
+              ? '給与大臣から支給明細を直接取得します (支給項目のみ・サーバーには保存しません)'
+              : '会社対応表 (comp_payroll_map) にこの会社の給与会社が登録されていないため取得できません'"
+            @click="loadPayrollFromDb"
+          />
+          <span class="text-xs text-gray-500">{{ payrollRangeHint }}</span>
+          <span
+            v-if="payrollDbMessage"
+            class="text-xs ml-auto" :class="dbImports.length ? 'text-green-700 dark:text-green-400' : 'text-gray-500'"
+          >{{ payrollDbMessage }}</span>
         </div>
 
         <p v-if="pageError" class="text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
@@ -2530,25 +2625,16 @@ watch([activeTab, month, session], () => {
             {{ employeeMasterMessage }}
           </p>
 
+          <!-- 取得ボタンは全タブ共通の上部バーへ移した (2026-07-25)。ここは
+               「何が取れるのか」の説明だけ残す — ボタンが 2 箇所にあると
+               どちらを押したか分からなくなるため。 -->
           <UCard class="border-sky-300 dark:border-sky-800 mb-3">
             <div class="flex flex-wrap items-center gap-3">
               <span class="text-sm font-medium">給与DBから読み込み</span>
               <span class="text-xs text-gray-500">
-                {{ fmtYm(nextYm(month)) }} 支給分を給与大臣から直接取得します (Excel コピペ不要)
+                <b>上部の「給与DB」バー</b>から取得します (期間指定も可)。この画面では {{ fmtYm(nextYm(month)) }} 支給分を突合します
               </span>
-              <div class="flex-1" />
-              <UButton
-                size="xs"
-                icon="i-lucide-database"
-                label="給与DBから読み込み"
-                :loading="loadingPayrollDb"
-                :disabled="!importPayrollOptions.length"
-                @click="loadPayrollFromDb"
-              />
             </div>
-            <p v-if="payrollDbMessage" class="text-sm mt-2" :class="dbImports.length ? 'text-green-700 dark:text-green-400' : 'text-gray-500'">
-              {{ payrollDbMessage }}
-            </p>
             <p class="text-xs text-gray-500 mt-2">
               取得するのは<b>支給項目だけ</b>です (控除は API 側で分離済み)。1 社あたり 10〜20 秒かかります —
               給与大臣 PC が古く DB を都度開くためで、異常ではありません。
