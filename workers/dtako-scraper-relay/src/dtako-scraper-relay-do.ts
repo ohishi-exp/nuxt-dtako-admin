@@ -91,6 +91,7 @@ import {
   type TheearthSessionRecord,
 } from "./theearth-session";
 import {
+  applyMinWageToWageMaster,
   computeWageRow,
   normalizeMinWageMaster,
   normalizeSalaryItemConfig,
@@ -109,13 +110,14 @@ import {
   mergeMinWageRows,
   parseMhlwNationalList,
 } from "./min-wage-import";
-import { resolveBranchPrefecture, suggestBranchGroups } from "./branch-prefecture";
+import { branchByDriverCdAt, resolveBranchPrefecture, suggestBranchGroups } from "./branch-prefecture";
 import {
   buildCompMapResponse,
   buildEmployeeMasterResponse,
   buildEmployeeMasterWriteStatements,
   EmployeeMasterError,
   normalizeEmployeeMasterPutBody,
+  resolveAttrsAt,
   type CompPayrollMapD1Row,
   type EmployeeAttrD1Row,
   type EmployeeD1Row,
@@ -1692,6 +1694,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/min-wage/branches" && request.method === "GET") {
       return this.handleMinWageBranches(record!);
     }
+    if (url.pathname === "/restraint-api/min-wage/apply-to-wage-master" && request.method === "POST") {
+      return this.handleApplyMinWageToWageMaster(record!, request);
+    }
     if (url.pathname === "/restraint-api/wage-config") {
       return this.handleWageMasterRoute(record!, request, "wage-config", (raw) => normalizeWageConfig(raw));
     }
@@ -1949,6 +1954,130 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       data: merged.master,
       version: result.sha256,
     });
+  }
+
+  /**
+   * POST /restraint-api/min-wage/apply-to-wage-master — 拠点の最低賃金を単価マスタへ
+   * 一括で入れる (「単価マスタ = 最低賃金」運用、Refs #282 / #409 Phase 4)。
+   *
+   * body: `{ effectiveFrom, sites?, overwrite?, dryRun? }`
+   *
+   * **`dryRun` を既定にはしない**が、画面は必ず dryRun でプレビューしてから確定させる。
+   * 既に単価がある乗務員は `overwrite` を明示しない限り触らない — 会社が決めた支給単価を
+   * 最低賃金で潰さないため。
+   */
+  private async handleApplyMinWageToWageMaster(
+    record: TheearthSessionRecord,
+    request: Request,
+  ): Promise<Response> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定のためマスタを保存できません");
+
+    let body: { effectiveFrom?: unknown; sites?: unknown; overwrite?: unknown; dryRun?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    const effectiveFrom = body?.effectiveFrom;
+    if (typeof effectiveFrom !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) {
+      return dvrJsonError(400, "effectiveFrom は YYYY-MM-DD が必要です");
+    }
+    if (body.sites !== undefined && (!Array.isArray(body.sites) || body.sites.some((s) => typeof s !== "string"))) {
+      return dvrJsonError(400, "sites は文字列の配列が必要です");
+    }
+    const sites = (body.sites as string[] | undefined) ?? null;
+    const overwrite = body.overwrite === true;
+    const dryRun = body.dryRun === true;
+
+    const readMaster = async <T>(name: "wage-master" | "min-wage", normalize: (raw: unknown) => T, fallback: T): Promise<T | null> => {
+      const obj = await bucket.get(this.wageMasterR2Paths(record.compId, name).latest);
+      if (!obj) return fallback;
+      try {
+        return normalize(JSON.parse(await obj.text()));
+      } catch {
+        return null;
+      }
+    };
+    const [wageMaster, minWageMaster] = await Promise.all([
+      readMaster<WageMaster>("wage-master", normalizeWageMaster, { drivers: {} }),
+      readMaster<MinWageMaster>("min-wage", normalizeMinWageMaster, { prefectures: {}, branchToPrefecture: {} }),
+    ]);
+    if (!wageMaster || !minWageMaster) {
+      return dvrJsonError(502, "マスタの保存データが壊れています");
+    }
+
+    const ym = effectiveFrom.slice(0, 7);
+    const branches = await this.branchByDriverCd(record.compId, ym);
+    if (branches.size === 0) {
+      return dvrJsonError(400, "社員マスタに乗務員CDつきの所属が見つかりません (社員マスタタブで取り込んでください)");
+    }
+
+    let result;
+    try {
+      result = applyMinWageToWageMaster(wageMaster, minWageMaster, branches, effectiveFrom, { overwrite, sites });
+    } catch (err) {
+      if (err instanceof WageMasterError) return dvrJsonError(400, err.message);
+      throw err;
+    }
+
+    const summary = {
+      effectiveFrom,
+      dryRun,
+      added: result.added,
+      overwritten: result.overwritten,
+      kept: result.kept,
+      unresolved: result.unresolved,
+      items: result.items,
+    };
+    if (dryRun) return Response.json({ ...summary, saved: false, changed: false });
+
+    const paths = this.wageMasterR2Paths(record.compId, "wage-master");
+    const ts = restraintVersionTimestamp(new Date());
+    const saved = await this.putVersionedR2(
+      bucket,
+      paths.latest,
+      paths.version(ts),
+      JSON.stringify(result.master),
+      "application/json",
+      ts,
+    );
+    if (saved.changed) await this.pruneRestraintVersions(bucket, paths.dir);
+    return Response.json({ ...summary, saved: true, changed: saved.changed, version: saved.sha256 });
+  }
+
+  /**
+   * 乗務員CD → その月に適用する所属 (社員マスタ、月末時点)。
+   *
+   * D1 が未 binding / 読めない場合は**空 Map を返して黙って続行する** — 最低賃金が
+   * 引けなくなるだけで、拘束時間集計そのものは落とさない (この経路は #409 で
+   * 後から足した補助情報であって、月次集計の必須依存ではない)。
+   */
+  private async branchByDriverCd(compId: string, ym: string): Promise<Map<string, string>> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return new Map();
+    try {
+      const [employeeResult, attrResult] = await Promise.all([
+        db
+          .prepare(`SELECT company, payroll_cd, name, driver_cd FROM employees WHERE comp_id = ?`)
+          .bind(compId)
+          .all<EmployeeD1Row>(),
+        db
+          .prepare(
+            `SELECT company, payroll_cd, effective_from, branch, pay_scheme FROM employee_attrs WHERE comp_id = ?`,
+          )
+          .bind(compId)
+          .all<EmployeeAttrD1Row>(),
+      ]);
+      const { employees } = buildEmployeeMasterResponse(
+        employeeResult.results ?? [],
+        attrResult.results ?? [],
+      );
+      return branchByDriverCdAt(employees, ym, resolveAttrsAt);
+    } catch (err) {
+      console.error(JSON.stringify({ branch_by_driver_cd: "error", error: describeUnknownError(err) }));
+      return new Map();
+    }
   }
 
   /**
@@ -2443,6 +2572,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         `前月 (${prevYm}) の summary がアーカイブに無いため、月初の跨ぎ週の週40h計算は当月分のみで近似しています`,
       );
     }
+    // 最低賃金の県は theearth の事業所名ではなく社員マスタの所属 (月末時点) で引く
+    // (Refs #409 Phase 3)。D1 が無い / 読めない場合は空のまま = 従来どおり
+    // theearth 事業所名 + defaultPrefecture のフォールバックで動く
+    const employeeBranches = await this.branchByDriverCd(record.compId, ym);
+
     const rows = summaries.map((s) => ({
       summary: s.data,
       fetched_at: s.fetchedAt,
@@ -2455,6 +2589,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         minWageMaster,
         config,
         prevDaysByDriver.get(s.data.driverCd) ?? [],
+        employeeBranches.get(s.data.driverCd) ?? null,
       ),
     }));
     return Response.json({ month: ym, rows, no_data_drivers: noDataDrivers, warnings, config });

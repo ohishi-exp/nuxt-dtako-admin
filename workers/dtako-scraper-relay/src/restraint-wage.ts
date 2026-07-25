@@ -26,6 +26,7 @@
 
 import { TheearthClientError } from "./theearth-client";
 import type { RestraintDriverSummary, RestraintSummaryDay } from "./theearth-restraint-client";
+import { compareText, isBranchUnder, resolveBranchPrefecture } from "./branch-prefecture";
 
 // ---------------------------------------------------------------------------
 // マスタの型と検証
@@ -332,17 +333,33 @@ export interface MinWageLookup {
   mapped: boolean;
 }
 
-/** 事業所名から都道府県 → 対象月に有効な最低賃金を引く。 */
+/**
+ * 所属/事業所名から都道府県 → 対象月に有効な最低賃金を引く。
+ *
+ * 引く順序 (Refs #409 Phase 3):
+ * 1. **社員マスタの所属** (`employeeBranch`) — 最低賃金は就業地の県で決まるので、
+ *    theearth の事業所名より社員マスタの所属を正とする
+ * 2. theearth の事業所名 (`branchName`) — 社員マスタに居ない乗務員のフォールバック
+ * 3. `defaultPrefecture` — どちらも引けない場合の近似 (`mapped: false` で警告表示)
+ *
+ * 1・2 とも**前方一致**で引く (`本社` キーが `本社 乗務員` を覆う)。完全一致も前方一致の
+ * 一種なので、theearth 事業所名で登録済みの旧キー (Refs #253) はそのまま効く。
+ */
 export function minWageForBranch(
   master: MinWageMaster,
   branchName: string,
   year: number,
   month: number,
+  employeeBranch?: string | null,
 ): MinWageLookup {
-  const mapped = Object.prototype.hasOwnProperty.call(master.branchToPrefecture, branchName);
-  const prefecture = mapped
-    ? master.branchToPrefecture[branchName]
-    : master.defaultPrefecture ?? null;
+  const hit = employeeBranch
+    ? resolveBranchPrefecture(master.branchToPrefecture, employeeBranch)
+    : { prefecture: null, matchedKey: null };
+  const fallback = hit.prefecture === null
+    ? resolveBranchPrefecture(master.branchToPrefecture, branchName)
+    : hit;
+  const mapped = fallback.prefecture !== null;
+  const prefecture = mapped ? fallback.prefecture : master.defaultPrefecture ?? null;
   if (!prefecture) return { rate: null, prefecture: null, mapped: false };
   const anchor = monthAnchor(year, month);
   let best: MinWageEntry | null = null;
@@ -352,6 +369,105 @@ export function minWageForBranch(
     }
   }
   return { rate: best ? best.rate : null, prefecture, mapped };
+}
+
+// ---------------------------------------------------------------------------
+// 最低賃金 → 単価マスタへの一括設定 (Refs #409 Phase 4)
+// ---------------------------------------------------------------------------
+
+/** 一括設定 1 件の結果。 */
+export interface MinWageApplyItem {
+  driverCd: string;
+  /** 社員マスタの所属 (原文)。 */
+  branch: string;
+  prefecture: string | null;
+  rate: number | null;
+  /**
+   * - `add` 新規に単価を入れる / `overwrite` 既存を上書きする
+   * - `keep` 既に単価があるので触らない (既定)
+   * - `unmapped` 拠点に都道府県が未設定 / `no-rate` その県にその日時点の額が無い
+   */
+  status: "add" | "overwrite" | "keep" | "unmapped" | "no-rate";
+}
+
+export interface MinWageApplyResult {
+  master: WageMaster;
+  items: MinWageApplyItem[];
+  added: number;
+  overwritten: number;
+  kept: number;
+  unresolved: number;
+}
+
+/**
+ * 最低賃金を単価マスタへ一括で入れる (「単価マスタ = 最低賃金」運用、Refs #282)。
+ *
+ * 月次集計に `⚠ 単価未設定` が並ぶと時間給が計算できないので、拠点の最低賃金を
+ * 既定値として流し込めるようにする。
+ *
+ * **既に単価がある乗務員は既定で触らない** (`overwrite` で明示的に指定した時だけ
+ * 上書きする)。会社が決めた支給単価を最低賃金で潰さないため。
+ *
+ * `sites` を渡すと、その拠点キーに前方一致する所属の乗務員だけを対象にする。
+ */
+export function applyMinWageToWageMaster(
+  wageMaster: WageMaster,
+  minWageMaster: MinWageMaster,
+  branchByDriverCd: ReadonlyMap<string, string>,
+  effectiveFrom: string,
+  opts: { overwrite?: boolean; sites?: readonly string[] | null } = {},
+): MinWageApplyResult {
+  if (!DATE_RE.test(effectiveFrom)) {
+    throw new WageMasterError("適用開始日は YYYY-MM-DD が必要です");
+  }
+  const year = Number(effectiveFrom.slice(0, 4));
+  const month = Number(effectiveFrom.slice(5, 7));
+  const sites = opts.sites && opts.sites.length > 0 ? opts.sites : null;
+
+  const drivers: Record<string, WageMasterDriver> = {};
+  for (const [cd, d] of Object.entries(wageMaster.drivers)) {
+    drivers[cd] = { ...d, rates: [...d.rates] };
+  }
+
+  const items: MinWageApplyItem[] = [];
+  for (const [driverCd, branch] of [...branchByDriverCd].sort((a, b) => compareText(a[0], b[0]))) {
+    if (sites && !sites.some((s) => isBranchUnder(s, branch))) {
+      continue;
+    }
+    // 最低賃金は就業地の県で決まるので所属だけで引く (theearth 事業所名は使わない)
+    const lookup = minWageForBranch(minWageMaster, "", year, month, branch);
+    const prefecture = lookup.mapped ? lookup.prefecture : null;
+    if (prefecture === null) {
+      items.push({ driverCd, branch, prefecture: null, rate: null, status: "unmapped" });
+      continue;
+    }
+    if (lookup.rate === null) {
+      items.push({ driverCd, branch, prefecture, rate: null, status: "no-rate" });
+      continue;
+    }
+    const entries = drivers[driverCd]?.rates ?? [];
+    const at = entries.findIndex((e) => e.effectiveFrom === effectiveFrom);
+    const hasAny = entries.length > 0;
+    if (hasAny && !opts.overwrite) {
+      items.push({ driverCd, branch, prefecture, rate: lookup.rate, status: "keep" });
+      continue;
+    }
+    const next = { effectiveFrom, hourlyRate: lookup.rate };
+    if (at >= 0) entries[at] = next;
+    else entries.push(next);
+    entries.sort((a, b) => compareText(a.effectiveFrom, b.effectiveFrom));
+    drivers[driverCd] = { ...(drivers[driverCd] ?? {}), rates: entries };
+    items.push({ driverCd, branch, prefecture, rate: lookup.rate, status: hasAny ? "overwrite" : "add" });
+  }
+
+  return {
+    master: { ...wageMaster, drivers },
+    items,
+    added: items.filter((i) => i.status === "add").length,
+    overwritten: items.filter((i) => i.status === "overwrite").length,
+    kept: items.filter((i) => i.status === "keep").length,
+    unresolved: items.filter((i) => i.status === "unmapped" || i.status === "no-rate").length,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -672,10 +788,12 @@ export function computeWageRow(
   minWageMaster: MinWageMaster,
   config: WageConfig,
   prevMonthDays: RestraintSummaryDay[] = [],
+  /** 社員マスタ由来の所属 (月末時点)。最低賃金の県はこちらを優先する (Refs #409)。 */
+  employeeBranch: string | null = null,
 ): WageRow {
   const hourlyRate = rateForMonth(wageMaster.drivers[summary.driverCd]?.rates ?? [], year, month);
   const minutes = classifyMonth(summary.days, year, month, config, prevMonthDays);
-  const minWage = minWageForBranch(minWageMaster, summary.branchName, year, month);
+  const minWage = minWageForBranch(minWageMaster, summary.branchName, year, month, employeeBranch);
 
   const basisMinutes =
     config.hourlyBasis === "working" ? summary.workingMinutes : summary.restraintMinutes;
