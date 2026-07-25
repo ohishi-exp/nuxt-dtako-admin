@@ -2910,11 +2910,11 @@ watch([activeTab, month, session], () => {
               </UFormField>
               <UFormField label="並べ替え">
                 <USelect
-                  v-model="masterSortKey" size="sm" class="w-40"
+                  v-model="masterSortKey" size="sm" class="w-56"
                   :items="[
                     { label: '乗務員CD 順', value: 'cd' },
-                    { label: '所属 (営業所) 順', value: 'branch' },
-                    { label: '単価の高い順', value: 'rate' },
+                    { label: '所属 (営業所) 順 → 乗務員CD', value: 'branch' },
+                    { label: '単価の高い順 → 乗務員CD', value: 'rate' },
                   ]"
                 />
               </UFormField>

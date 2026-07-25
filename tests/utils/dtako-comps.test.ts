@@ -90,8 +90,9 @@ describe('payrollCompanyLabel', () => {
     }],
   })
 
-  it('会社名があれば「コード (会社名)」にする', () => {
-    expect(payrollCompanyLabel(comps, '27324455', '0100')).toBe('0100 (有限会社 大石運輸)')
+  it('会社名があれば「会社名 (コード)」にする', () => {
+    // 読み手が探すのは会社名なので前に出す (2026-07-25)
+    expect(payrollCompanyLabel(comps, '27324455', '0100')).toBe('有限会社 大石運輸 (0100)')
   })
 
   it('会社名が未取得ならコードだけを返す', () => {
