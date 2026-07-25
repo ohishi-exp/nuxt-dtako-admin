@@ -44,6 +44,9 @@ export class WageMasterError extends TheearthClientError {
 export interface WageRateEntry {
   effectiveFrom: string;
   hourlyRate: number;
+  /** 最低賃金の一括設定で入れた場合、根拠にした都道府県 (Refs #409)。
+   * 手入力の単価には付かないので、後から見て出どころが区別できる。 */
+  prefecture?: string;
 }
 
 export interface WageMasterDriver {
@@ -146,14 +149,18 @@ export function normalizeWageMaster(raw: unknown): WageMaster {
       throw new WageMasterError(`wage-master.drivers[${cd}].rates が配列ではありません`);
     }
     const rates: WageRateEntry[] = entry.rates.map((r: unknown, i: number) => {
-      const rr = r as { effectiveFrom?: unknown; hourlyRate?: unknown };
+      const rr = r as { effectiveFrom?: unknown; hourlyRate?: unknown; prefecture?: unknown };
       if (typeof rr?.effectiveFrom !== "string" || !DATE_RE.test(rr.effectiveFrom)) {
         throw new WageMasterError(`drivers[${cd}].rates[${i}].effectiveFrom は YYYY-MM-DD が必要です`);
       }
       if (!isFiniteNumber(rr.hourlyRate) || rr.hourlyRate < 0) {
         throw new WageMasterError(`drivers[${cd}].rates[${i}].hourlyRate は 0 以上の数値が必要です`);
       }
-      return { effectiveFrom: rr.effectiveFrom, hourlyRate: rr.hourlyRate };
+      return {
+        effectiveFrom: rr.effectiveFrom,
+        hourlyRate: rr.hourlyRate,
+        ...(typeof rr.prefecture === "string" && rr.prefecture !== "" ? { prefecture: rr.prefecture } : {}),
+      };
     });
     rates.sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom));
     out.drivers[cd] = {
@@ -415,7 +422,12 @@ export function applyMinWageToWageMaster(
   minWageMaster: MinWageMaster,
   branchByDriverCd: ReadonlyMap<string, string>,
   effectiveFrom: string,
-  opts: { overwrite?: boolean; sites?: readonly string[] | null } = {},
+  opts: {
+    overwrite?: boolean;
+    sites?: readonly string[] | null;
+    /** 乗務員CD → 氏名 (社員マスタ由来)。単価マスタの氏名表示に使う。 */
+    namesByDriverCd?: ReadonlyMap<string, string>;
+  } = {},
 ): MinWageApplyResult {
   if (!DATE_RE.test(effectiveFrom)) {
     throw new WageMasterError("適用開始日は YYYY-MM-DD が必要です");
@@ -434,6 +446,13 @@ export function applyMinWageToWageMaster(
     if (sites && !sites.some((s) => isBranchUnder(s, branch))) {
       continue;
     }
+    // 氏名は単価の追加可否と関係なく補完する (新規行を氏名なしで作ってしまった
+    // 分を後追いの再実行で埋められるように)
+    const name = opts.namesByDriverCd?.get(driverCd);
+    if (name && !drivers[driverCd]?.name) {
+      drivers[driverCd] = { ...(drivers[driverCd] ?? { rates: [] }), name };
+    }
+
     // 最低賃金は就業地の県で決まるので所属だけで引く (theearth 事業所名は使わない)
     const lookup = minWageForBranch(minWageMaster, "", year, month, branch);
     const prefecture = lookup.mapped ? lookup.prefecture : null;
@@ -452,7 +471,8 @@ export function applyMinWageToWageMaster(
       items.push({ driverCd, branch, prefecture, rate: lookup.rate, status: "keep" });
       continue;
     }
-    const next = { effectiveFrom, hourlyRate: lookup.rate };
+    // どの県の最低賃金を当てたかを履歴に残す (後から見て根拠が分かるように)
+    const next = { effectiveFrom, hourlyRate: lookup.rate, prefecture };
     if (at >= 0) entries[at] = next;
     else entries.push(next);
     entries.sort((a, b) => compareText(a.effectiveFrom, b.effectiveFrom));

@@ -94,6 +94,11 @@ const TABS = [
   { key: 'master', label: '単価マスタ' },
   { key: 'employees', label: '社員マスタ' },
 ] as const
+
+/** 対象月が効くタブ。ここに無いタブでは年月バーを出さない (Refs #409)。
+ * 単価マスタは選択月時点の単価を出すので対象に含む。 */
+const MONTH_AWARE_TABS: string[] = ['archive', 'monthly', 'minwage', 'salary', 'master']
+
 type TabKey = typeof TABS[number]['key']
 const activeTab = ref<TabKey>('monthly')
 
@@ -1443,13 +1448,73 @@ async function loadMaster() {
   }
 }
 
-const masterRows = computed(() =>
-  Object.entries(master.value.drivers)
-    .map(([cd, driver]) => {
-      const sorted = [...driver.rates].sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom))
-      return { cd, driver, current: sorted[0] ?? null, history: sorted }
+/** 乗務員CD → 社員マスタの会社/所属 (選択月時点)。単価マスタの絞り込みと
+ * 並べ替えに使う (Refs #409)。 */
+const employeeByDriverCd = computed(() => {
+  const map = new Map<string, { company: string, companyLabel: string, branch: string }>()
+  for (const row of employeeMasterRows.value) {
+    const cd = row.entry.driverCd
+    if (!cd) continue
+    map.set(cd, {
+      company: row.entry.company,
+      companyLabel: row.companyLabel,
+      branch: row.current?.branch ?? '',
     })
-    .sort((a, b) => a.cd.localeCompare(b.cd, undefined, { numeric: true })))
+  }
+  return map
+})
+
+/** 単価マスタの会社フィルタ ('all' = 全社)。 */
+const masterCompanyFilter = ref('all')
+/** 単価マスタの並べ替えキー。 */
+const masterSortKey = ref<'cd' | 'branch' | 'rate'>('cd')
+
+const masterCompanyOptions = computed(() => {
+  const seen = new Map<string, string>()
+  for (const v of employeeByDriverCd.value.values()) {
+    if (v.company && !seen.has(v.company)) seen.set(v.company, v.companyLabel || v.company)
+  }
+  return [
+    { label: '全社', value: 'all' },
+    ...[...seen].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([value, label]) => ({ label, value })),
+  ]
+})
+
+/** 単価マスタの一覧。`current` は**選択中の年月時点**で有効な単価 (Refs #409)。
+ * 以前は常に最新の 1 件を出していたため、1月を選んでいるのに 6月適用の単価が
+ * 出て混乱した (2026-07-25 指摘)。月次集計の単価列と同じ基準に揃える。 */
+const masterRows = computed(() => {
+  const anchor = `${selectedYear.value}-${String(selectedMonthNo.value).padStart(2, '0')}-01`
+  const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
+  const rows = Object.entries(master.value.drivers)
+    .map(([cd, driver]) => {
+      const sorted = [...driver.rates].sort((a, b) => cmp(b.effectiveFrom, a.effectiveFrom))
+      const emp = employeeByDriverCd.value.get(cd)
+      return {
+        cd,
+        driver,
+        current: sorted.find(r => r.effectiveFrom <= anchor) ?? null,
+        history: sorted,
+        company: emp?.company ?? '',
+        companyLabel: emp?.companyLabel ?? '',
+        branch: emp?.branch ?? '',
+      }
+    })
+    .filter(r => masterCompanyFilter.value === 'all' || r.company === masterCompanyFilter.value)
+  // localeCompare は ICU の照合順が OS 間で揺れるので、数値順が要る乗務員CD 以外は
+  // 単純な大小比較で並べる
+  return rows.sort((a, b) => {
+    if (masterSortKey.value === 'branch') {
+      return cmp(a.branch, b.branch) || a.cd.localeCompare(b.cd, undefined, { numeric: true })
+    }
+    if (masterSortKey.value === 'rate') {
+      const av = a.current?.hourlyRate ?? -1
+      const bv = b.current?.hourlyRate ?? -1
+      return bv - av || a.cd.localeCompare(b.cd, undefined, { numeric: true })
+    }
+    return a.cd.localeCompare(b.cd, undefined, { numeric: true })
+  })
+})
 
 // ---- 単価履歴モーダル (Refs #253) ----
 
@@ -1851,6 +1916,8 @@ watch([activeTab, month, session], () => {
   }
   else if (activeTab.value === 'master') {
     if (Object.keys(master.value.drivers).length === 0) loadMaster()
+    // 会社フィルタ・所属列・営業所順の並べ替えに使う (Refs #409)
+    if (!employeeMasterLoaded.value) loadEmployeeMaster()
   }
   else if (activeTab.value === 'employees') {
     // 会社横断表示のため、選択中の範囲に必要な会社をまとめて読む (Refs #367)
@@ -1894,8 +1961,11 @@ watch([activeTab, month, session], () => {
           />
         </div>
 
-        <!-- 対象月: 年セレクタ + 月タブ -->
-        <div class="flex flex-wrap items-center gap-2 border border-gray-200 dark:border-gray-800 rounded-lg p-2">
+        <!-- 対象月: 年セレクタ + 月タブ。
+             月が効かないタブ (支給項目区分・社員マスタ) では出さない — 選んでも
+             何も変わらないのに操作できると、単価マスタで「1月を選んだのに 6月適用の
+             単価が出る」ように誤解を招く (2026-07-25 指摘)。 -->
+        <div v-if="MONTH_AWARE_TABS.includes(activeTab)" class="flex flex-wrap items-center gap-2 border border-gray-200 dark:border-gray-800 rounded-lg p-2">
           <USelect
             v-model="selectedYear"
             :items="yearOptions.map(y => ({ label: `${y}年`, value: y }))"
@@ -2798,6 +2868,24 @@ watch([activeTab, month, session], () => {
               {{ masterMessage }}
             </p>
 
+            <!-- 絞り込み・並べ替え (Refs #409)。会社と所属は社員マスタから引く。 -->
+            <div class="flex flex-wrap items-center gap-3 mb-3">
+              <UFormField label="会社">
+                <USelect v-model="masterCompanyFilter" :items="masterCompanyOptions" size="sm" class="w-56" />
+              </UFormField>
+              <UFormField label="並べ替え">
+                <USelect
+                  v-model="masterSortKey" size="sm" class="w-40"
+                  :items="[
+                    { label: '乗務員CD 順', value: 'cd' },
+                    { label: '所属 (営業所) 順', value: 'branch' },
+                    { label: '単価の高い順', value: 'rate' },
+                  ]"
+                />
+              </UFormField>
+              <span class="text-xs text-gray-500 self-end pb-1">{{ masterRows.length }} 名</span>
+            </div>
+
             <div class="flex flex-wrap items-end gap-3 border border-gray-200 dark:border-gray-800 rounded-lg p-3 mb-4">
               <span class="text-sm font-medium">一括変更 (選択 {{ selectedCds.size }} 名):</span>
               <UFormField label="基本時間単価 (円)">
@@ -2817,8 +2905,11 @@ watch([activeTab, month, session], () => {
                     <th class="px-2 py-2 w-8" />
                     <th class="px-2 py-2">乗務員CD</th>
                     <th class="px-2 py-2">乗務員名</th>
-                    <th class="px-2 py-2 text-right">現行単価 (円)</th>
-                    <th class="px-2 py-2">適用開始日 (現行)</th>
+                    <th class="px-2 py-2">会社</th>
+                    <th class="px-2 py-2">所属 (社員マスタ)</th>
+                    <th class="px-2 py-2 text-right">単価 ({{ fmtYm(month) }}時点)</th>
+                    <th class="px-2 py-2">適用開始日</th>
+                    <th class="px-2 py-2">根拠</th>
                     <th class="px-2 py-2">履歴</th>
                     <th class="px-2 py-2">新規単価 / 適用開始日</th>
                   </tr>
@@ -2833,8 +2924,15 @@ watch([activeTab, month, session], () => {
                       {{ row.driver.name ?? '' }}
                       <span v-if="row.driver.retiredAt" class="text-xs">({{ row.driver.retiredAt }} 退職)</span>
                     </td>
+                    <td class="px-2 py-1.5 text-xs">{{ row.companyLabel || '-' }}</td>
+                    <td class="px-2 py-1.5 text-xs">{{ row.branch || '-' }}</td>
                     <td class="px-2 py-1.5 text-right font-medium">{{ row.current ? fmtYen(row.current.hourlyRate) : '未設定' }}</td>
                     <td class="px-2 py-1.5">{{ row.current?.effectiveFrom ?? '-' }}</td>
+                    <td class="px-2 py-1.5 text-xs">
+                      <span v-if="row.current?.prefecture" class="text-gray-500">{{ row.current.prefecture }} 最低賃金</span>
+                      <span v-else-if="row.current" class="text-gray-400">手入力</span>
+                      <span v-else class="text-gray-400">-</span>
+                    </td>
                     <td class="px-2 py-1.5">
                       <UButton
                         size="xs"
