@@ -179,6 +179,8 @@ watch(session, (s) => {
     printBatch.value = null
     // 貼り付け中の給与データはメモリ上にしか無い — ログアウトで破棄する
     clearSalaryPaste()
+    dbImports.value = []
+    payrollDbMessage.value = ''
     salaryConfigLoaded.value = false
     employeeMasterLoaded.value = false
     // 他社分も含めて破棄する (会社横断表示、Refs #367)
@@ -607,10 +609,21 @@ function setImportCompany(id: number, company: string) {
 watch(salaryImports, persistSalaryImports)
 const salaryParseError = ref('')
 /** 全取り込みを合算した解析結果 (行連結・項目名の和集合)。 */
-const salaryParsed = computed<ParsedSalaryCsv | null>(() =>
-  salaryImports.value.length
-    ? mergeParsedSalaryCsv(salaryImports.value.map(i => i.parsed))
-    : null)
+/**
+ * 給与DB (`/api/kyuyo/payroll`) から読み込んだ明細 (Refs #369 PR-B2)。
+ *
+ * 貼り付け CSV と**併存**させる — 取得元をユーザーが選べる状態を保つ (#369 決定 4)。
+ * 保存先は `/kyuyo-fetch` と同じ sessionStorage (`kyuyo-payroll:{会社}:{月}`) を
+ * 共有するので、キャッシュが二重にならない。
+ */
+const dbImports = ref<Array<{ company: string, month: string, parsed: ParsedSalaryCsv }>>([])
+const loadingPayrollDb = ref(false)
+const payrollDbMessage = ref('')
+
+const salaryParsed = computed<ParsedSalaryCsv | null>(() => {
+  const parsed = [...salaryImports.value.map(i => i.parsed), ...dbImports.value.map(i => i.parsed)]
+  return parsed.length ? mergeParsedSalaryCsv(parsed) : null
+})
 const salaryItemConfig = ref<SalaryItemConfig>({ items: {} })
 const salaryConfigLoaded = ref(false)
 const savingSalaryConfig = ref(false)
@@ -920,6 +933,70 @@ async function matchFromIchiban() {
   }
   finally {
     matchingIchiban.value = false
+  }
+}
+
+/**
+ * 給与DB から対象月の明細を読み込み、給与比較へ流す (Refs #369 PR-B2)。
+ *
+ * 対象は「今開いている会社に対応する給与大臣の会社」全部 × **支給月** (勤務月の翌月)。
+ * サーバー側 `KyuyoLimiter` が同時 1 本なので**直列**で回す (1 件 12〜16 秒かかるのは
+ * 古い PC + AUTO_CLOSE のため正常)。
+ *
+ * 取得済みデータは `/kyuyo-fetch` と**同じ sessionStorage キー**を共有する —
+ * 一度取れば両方の画面で使い回せ、キャッシュが二重にならない。
+ */
+async function loadPayrollFromDb() {
+  const compId = session.value?.compId
+  if (!compId) return
+  const companies = compMap.value.find(c => c.compId === compId)?.payrollCompanies ?? []
+  if (!companies.length) return
+  const payMonth = nextYm(month.value)
+  loadingPayrollDb.value = true
+  payrollDbMessage.value = ''
+  pageError.value = ''
+  const loaded: typeof dbImports.value = []
+  try {
+    const token = currentAccessToken()
+    for (const { payrollCompany } of companies) {
+      const key = payrollStorageKey(payrollCompany, payMonth)
+      let stored: StoredPayroll | null = null
+      const cached = import.meta.client ? sessionStorage.getItem(key) : null
+      if (cached) {
+        try {
+          stored = JSON.parse(cached) as StoredPayroll
+        }
+        catch {
+          stored = null // 壊れていたら取り直す
+        }
+      }
+      if (!stored) {
+        payrollDbMessage.value = `${payrollCompany} を取得しています… (1 社あたり 10〜20 秒)`
+        const body = await $fetch(`/api/kyuyo/payroll`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          query: { company: payrollCompany, month: month.value },
+        })
+        stored = toStoredPayroll(body, new Date().toISOString())
+        if (!stored) {
+          payrollDbMessage.value = `${payrollCompany} の応答形式が想定外でした`
+          continue
+        }
+        if (import.meta.client) sessionStorage.setItem(key, JSON.stringify(stored))
+      }
+      const parsed = payrollToParsedSalary(stored.rows as KyuyoPayrollRow[], payrollCompany)
+      loaded.push({ company: payrollCompany, month: payMonth, parsed })
+    }
+    dbImports.value = loaded
+    const total = loaded.reduce((n, i) => n + i.parsed.rows.length, 0)
+    payrollDbMessage.value = loaded.length
+      ? `給与DB から ${loaded.length} 社 / ${total} 行を読み込みました (${fmtYm(payMonth)} 支給分)`
+      : '給与DB から読み込める明細がありませんでした'
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+  finally {
+    loadingPayrollDb.value = false
   }
 }
 
@@ -2053,6 +2130,33 @@ watch([activeTab, month, session], () => {
           <p v-if="employeeMasterMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2">
             {{ employeeMasterMessage }}
           </p>
+
+          <UCard class="border-sky-300 dark:border-sky-800 mb-3">
+            <div class="flex flex-wrap items-center gap-3">
+              <span class="text-sm font-medium">給与DBから読み込み</span>
+              <span class="text-xs text-gray-500">
+                {{ fmtYm(nextYm(month)) }} 支給分を給与大臣から直接取得します (Excel コピペ不要)
+              </span>
+              <div class="flex-1" />
+              <UButton
+                size="xs"
+                icon="i-lucide-database"
+                label="給与DBから読み込み"
+                :loading="loadingPayrollDb"
+                :disabled="!importPayrollOptions.length"
+                @click="loadPayrollFromDb"
+              />
+            </div>
+            <p v-if="payrollDbMessage" class="text-sm mt-2" :class="dbImports.length ? 'text-green-700 dark:text-green-400' : 'text-gray-500'">
+              {{ payrollDbMessage }}
+            </p>
+            <p class="text-xs text-gray-500 mt-2">
+              取得するのは<b>支給項目だけ</b>です (控除は API 側で分離済み)。1 社あたり 10〜20 秒かかります —
+              給与大臣 PC が古く DB を都度開くためで、異常ではありません。
+              取得結果はタブを閉じるまで保持され、<code>/kyuyo-fetch</code> と共有されます (サーバーには保存しません)。
+              下の貼り付けと<b>併用できます</b> — 両方あれば合算して突合します。
+            </p>
+          </UCard>
 
           <UCard>
             <template #header>

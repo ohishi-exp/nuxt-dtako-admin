@@ -8,8 +8,10 @@ import {
   expandMonthRange,
   parsePayrollStorageKey,
   payrollStorageKey,
+  payrollToParsedSalary,
   shouldPurgeSession,
   summarizeStored,
+  type KyuyoPayrollRow,
   toStoredPayroll,
   type StoredPayroll,
 } from '~/utils/kyuyo-fetch'
@@ -135,5 +137,86 @@ describe('summarizeStored', () => {
       '0200:2026-05',
     ])
     expect(summaries[1]?.rowCount).toBe(53)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 給与DB → 給与比較への変換 (Refs #369 PR-B2)
+// ---------------------------------------------------------------------------
+
+describe('payrollToParsedSalary', () => {
+  const row = (over: Partial<KyuyoPayrollRow> = {}): KyuyoPayrollRow => ({
+    employee_code: '01771',
+    employee_code_key: '1771',
+    employee_name: '鵜瀬 裕一',
+    pay_date: '2026-07-15',
+    payments: { 基本給: 83_418, 残業手当: 77_762 },
+    base_rate: 3_679,
+    overtime_rate: 1_318,
+    totals: { soshikyu: 404_045 },
+    ...over,
+  })
+
+  it('支給項目・単価・支給合計を SalaryCsvRow 形へ移す', () => {
+    const out = payrollToParsedSalary([row()], '0100')
+    expect(out.rows).toEqual([{
+      driverCd: '01771',
+      cdKey: '1771',
+      // 突合キーの会社部分は給与大臣の会社コード (Refs #405)
+      company: '0100',
+      driverName: '鵜瀬 裕一',
+      // 月は支給日から採る (勤務月ではなく支給月)
+      month: '2026-07',
+      amounts: { 基本給: 83_418, 残業手当: 77_762 },
+      reportedTotal: 404_045,
+      rates: { base: 3_679, overtime: 1_318 },
+    }])
+    expect(out.itemLabels).toEqual(['基本給', '残業手当'])
+    expect(out.months).toEqual(['2026-07'])
+    expect(out.warnings).toEqual([])
+  })
+
+  it('項目ラベルは初出順で重複しない', () => {
+    const out = payrollToParsedSalary(
+      [
+        row({ payments: { 基本給: 1, 住宅手当: 2 } }),
+        row({ employee_code_key: '1772', payments: { 住宅手当: 3, 無事故手当: 4 } }),
+      ],
+      '0100',
+    )
+    expect(out.itemLabels).toEqual(['基本給', '住宅手当', '無事故手当'])
+  })
+
+  it('単価・支給合計が無ければ null (計算列は「単価なし」になる)', () => {
+    const out = payrollToParsedSalary(
+      [row({ base_rate: null, overtime_rate: null, totals: null })],
+      '0100',
+    )
+    expect(out.rows[0]!.rates).toEqual({ base: null, overtime: null })
+    expect(out.rows[0]!.reportedTotal).toBeNull()
+  })
+
+  it('支給日が不正な行は落として warning を出す', () => {
+    const out = payrollToParsedSalary(
+      [row({ pay_date: '' }), row({ employee_code: 'x', pay_date: '2026/07/15' }), row()],
+      '0100',
+    )
+    expect(out.rows).toHaveLength(1)
+    expect(out.warnings).toHaveLength(2)
+    expect(out.warnings[0]).toContain('支給日が不正')
+  })
+
+  it('複数月が混ざっても月は昇順ユニークになる', () => {
+    const out = payrollToParsedSalary(
+      [row({ pay_date: '2026-08-15' }), row({ pay_date: '2026-07-15' })],
+      '0100',
+    )
+    expect(out.months).toEqual(['2026-07', '2026-08'])
+  })
+
+  it('空配列は空の結果', () => {
+    expect(payrollToParsedSalary([], '0100')).toEqual({
+      rows: [], itemLabels: [], months: [], warnings: [],
+    })
   })
 })
