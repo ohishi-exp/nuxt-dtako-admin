@@ -1781,6 +1781,15 @@ watch([activeTab, month, session], () => {
 
         <!-- ④ 給与比較 (Refs #253) -->
         <template v-else-if="activeTab === 'salary'">
+          <!-- 社員マスタの操作結果 (取り込み・保存・自動設定)。「社員コード突合マスタ」
+               カードは給与明細 CSV を取り込むまで描画されないため、メッセージはタブ
+               直下に独立して置く — でないと CSV 未取り込みで「R2突合マスタから取り込み」
+               を押した時に成功した実感が何も出ない (Refs #367、本番移行時に実際に
+               「何も起きなかった」ように見えた) -->
+          <p v-if="employeeMasterMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2">
+            {{ employeeMasterMessage }}
+          </p>
+
           <UCard>
             <template #header>
               <div class="flex flex-wrap items-center gap-3">
@@ -2049,9 +2058,7 @@ watch([activeTab, month, session], () => {
               </div>
             </template>
 
-            <p v-if="employeeMasterMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2 mb-3">
-              {{ employeeMasterMessage }}
-            </p>
+            <!-- 操作結果メッセージはタブ直下に 1 箇所だけ置く (このカード内には出さない) -->
 
             <template v-if="salaryComparison.csvOnly.length">
               <p class="text-sm font-medium mb-1">未突合の給与明細 ({{ salaryComparison.csvOnly.length }} 名) — 乗務員CDを選択:</p>
