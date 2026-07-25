@@ -8,6 +8,7 @@ import {
   buildDriverAttrIndex,
   collectAttrRows,
   findUnregistered,
+  joinDriverAttr,
   normalizeAttrText,
   normalizeCompanyLabel,
   normalizeDriverCdKey,
@@ -226,7 +227,9 @@ describe('buildDriverAttrIndex', () => {
       })],
       '2026-07',
     )
-    expect(index.get('7')).toEqual({ effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' })
+    expect(index.get('7')).toEqual([
+      { company: '株', attrs: { effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' } },
+    ])
   })
 
   it('driverCd 未突合・対象月末時点で有効な行が無い社員は載せない', () => {
@@ -241,15 +244,62 @@ describe('buildDriverAttrIndex', () => {
     expect(index.size).toBe(0)
   })
 
-  it('同一 driverCd に複数社員が突合されていたら先勝ち', () => {
+  it('同一 driverCd に複数会社が紐づいたら潰さず会社ラベル昇順で全部返す (Refs #403)', () => {
     const index = buildDriverAttrIndex(
       [
-        entry({ company: '株', payrollCd: '1', driverCd: '9', attrs: [{ effectiveFrom: '2020-01-01', branch: '先', payScheme: null }] }),
-        entry({ company: '有', payrollCd: '2', driverCd: '9', attrs: [{ effectiveFrom: '2021-01-01', branch: '後', payScheme: null }] }),
+        entry({ company: '有', payrollCd: '2', driverCd: '9', attrs: [{ effectiveFrom: '2021-01-01', branch: '帯広 乗務員', payScheme: 'B' }] }),
+        entry({ company: '株', payrollCd: '1', driverCd: '9', attrs: [{ effectiveFrom: '2020-01-01', branch: '本社 乗務員', payScheme: 'A' }] }),
       ],
       '2026-07',
     )
-    expect(index.get('9')?.branch).toBe('先')
+    expect(index.get('9')).toEqual([
+      { company: '株', attrs: { effectiveFrom: '2020-01-01', branch: '本社 乗務員', payScheme: 'A' } },
+      { company: '有', attrs: { effectiveFrom: '2021-01-01', branch: '帯広 乗務員', payScheme: 'B' } },
+    ])
+  })
+
+  it('入力の並び順が違っても結果が同じ (D1 の SELECT 順に依存しない)', () => {
+    const rows = [
+      entry({ company: '株', payrollCd: '1', driverCd: '9', attrs: [{ effectiveFrom: '2020-01-01', branch: '本社', payScheme: null }] }),
+      entry({ company: '有', payrollCd: '2', driverCd: '9', attrs: [{ effectiveFrom: '2020-01-01', branch: '帯広', payScheme: null }] }),
+    ]
+    const forward = buildDriverAttrIndex(rows, '2026-07').get('9')
+    const reversed = buildDriverAttrIndex([...rows].reverse(), '2026-07').get('9')
+    expect(forward).toEqual(reversed)
+  })
+})
+
+describe('joinDriverAttr', () => {
+  const entries = [
+    { company: '株', attrs: { effectiveFrom: '2026-01-01', branch: '本社 乗務員', payScheme: '体系1' } },
+    { company: '有', attrs: { effectiveFrom: '2026-01-01', branch: '帯広 乗務員', payScheme: '体系2' } },
+  ]
+
+  it('複数会社の値を " / " で連結する', () => {
+    expect(joinDriverAttr(entries, 'branch')).toBe('本社 乗務員 / 帯広 乗務員')
+    expect(joinDriverAttr(entries, 'payScheme')).toBe('体系1 / 体系2')
+  })
+
+  it('会社が違っても同値なら 1 つに畳む (従来の 1 値出力と同じになる)', () => {
+    expect(joinDriverAttr([
+      { company: '株', attrs: { effectiveFrom: '2026-01-01', branch: '本社 乗務員', payScheme: null } },
+      { company: '有', attrs: { effectiveFrom: '2026-01-01', branch: '本社 乗務員', payScheme: null } },
+    ], 'branch')).toBe('本社 乗務員')
+  })
+
+  it('未設定 (null・空文字) の値は落とす', () => {
+    expect(joinDriverAttr([
+      { company: '株', attrs: { effectiveFrom: '2026-01-01', branch: null, payScheme: '' } },
+      { company: '有', attrs: { effectiveFrom: '2026-01-01', branch: '帯広', payScheme: '体系2' } },
+    ], 'branch')).toBe('帯広')
+    expect(joinDriverAttr([
+      { company: '株', attrs: { effectiveFrom: '2026-01-01', branch: null, payScheme: '' } },
+    ], 'payScheme')).toBe('')
+  })
+
+  it('該当なし (undefined・空配列) は空文字', () => {
+    expect(joinDriverAttr(undefined, 'branch')).toBe('')
+    expect(joinDriverAttr([], 'branch')).toBe('')
   })
 })
 

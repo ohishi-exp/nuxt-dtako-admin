@@ -399,6 +399,9 @@ export interface SalaryComparisonRow {
   /** 突合マスタで引き当てた乗務員CD (マスタ経由の時だけ非 null)。 */
   mappedDriverCd: string | null
   driverName: string
+  /** 複数会社の給与行を 1 人として合算した場合の内訳 (会社ラベル昇順)。
+   * 単一行なら null (従来の挙動と区別できるようにする、Refs #403)。 */
+  mergedFrom: Array<{ company: string, driverCd: string }> | null
   /** CSV 側: 基本給扱い項目の合計 / 残業扱い項目の合計 / 全支給項目の合計。 */
   csvBase: number
   /** csvBase の内訳 (区分設定で基本給扱いになった支給項目、ヘッダー出現順)。 */
@@ -471,9 +474,10 @@ export interface SalaryComparison {
   csvOnly: Array<{ driverCd: string, driverName: string, company: string }>
   /** wage-report にいるが CSV にいない乗務員。 */
   reportOnly: Array<{ driverCd: string, driverName: string }>
-  /** 別会社の給与コードが同じ乗務員CDへ解決され、どちらが本人か機械的に決められない
-   * 行 (Refs #253 会社スコープ)。rows/csvOnly には出さない — 突合マスタで会社ごとに
-   * 引き当て直すまで比較対象から外れる。 */
+  /** 同じ乗務員CDへ解決された行のうち**氏名が一致しない**もの (Refs #253 会社スコープ)。
+   * 氏名が一致する複数会社の行は同一人物として `rows` で合算するため、ここには
+   * 「同名別人・登録ミスの疑い」だけが残る (Refs #403)。rows/csvOnly には出さない —
+   * 社員マスタで引き当て直すまで比較対象から外れる。 */
   conflicts: Array<{ driverCd: string, entries: Array<{ company: string, driverCd: string, driverName: string }> }>
   warnings: string[]
 }
@@ -550,9 +554,58 @@ export function computeOvertimePayAtRate(
 }
 
 /**
+ * 同一人物 (氏名一致) の複数会社の給与行を 1 行に合算する (Refs #403)。
+ * 呼び出し側は会社ラベル昇順に並べた配列を渡す (結果を決定的にするため)。
+ *
+ * - 支給項目 (`amounts`) は**項目名ごとに合算**する
+ * - `reportedTotal` (支給合計額列) は**全行が値を持つ時だけ合算**する — 欠損が
+ *   あると検算にならないため null にする
+ * - 単価 (`rates`) は**全行で同値の時だけ採用**する。会社ごとに単価が違う場合、
+ *   合算後の日額/時給を機械的に決める根拠が無いので null (=「単価なし」) にする。
+ *   独自の按分計算はしない (Refs #253 の方針と同じ)
+ * - `company` は会社ラベルを ` / ` で連結する (表示用)
+ *
+ * 1 件だけならその行をそのまま返す。
+ */
+export function mergeSalaryCsvRows(rows: SalaryCsvRow[]): SalaryCsvRow {
+  const first = rows[0]!
+  if (rows.length === 1) return first
+
+  const amounts: Record<string, number> = {}
+  for (const row of rows) {
+    for (const [label, amount] of Object.entries(row.amounts)) {
+      amounts[label] = (amounts[label] ?? 0) + amount
+    }
+  }
+  // 1 行でも欠けていたら検算にならないので null にする (0 で埋めない)
+  let reportedTotal: number | null = 0
+  for (const row of rows) {
+    if (row.reportedTotal === null) {
+      reportedTotal = null
+      break
+    }
+    reportedTotal += row.reportedTotal
+  }
+  const uniformRate = (pick: (r: SalaryCsvRow) => number | null): number | null => {
+    const value = pick(first)
+    return rows.every(r => pick(r) === value) ? value : null
+  }
+  return {
+    ...first,
+    company: rows.map(r => r.company).join(' / '),
+    amounts,
+    reportedTotal,
+    rates: { base: uniformRate(r => r.rates.base), overtime: uniformRate(r => r.rates.overtime) },
+  }
+}
+
+/**
  * 対象月の CSV 行と wage-report を乗務員CD (数値同値) で突合する。
  * 給与コードが乗務員CDと別体系の乗務員は cdMap (給与コード|氏名 → 乗務員CD) で
  * 引き当てる。同一乗務員の行が重複していたら後勝ち + 警告。
+ *
+ * 同じ乗務員CD に**複数会社の氏名一致行**が来たら同一人物として合算する
+ * (Refs #403)。氏名が一致しない行だけを `conflicts` に隔離する。
  */
 export function compareSalaryMonth(
   csvRows: SalaryCsvRow[],
@@ -599,21 +652,39 @@ export function compareSalaryMonth(
     byKey.set(key, byIdentity)
   }
 
-  const byCd = new Map<string, SalaryCsvRow>()
+  // 同じ乗務員CD に複数の会社の行が来た時、**氏名が一致すれば同一人物**として
+  // 合算する (Refs #403 — 有限会社と株式会社の両方から支給される乗務員が実在し、
+  // 従来は conflicts に隔離されて最低賃金チェックから落ちていた)。氏名が一致
+  // しないのは同名別人か登録ミスなので、合算せず conflicts へ隔離する。
+  const byCd = new Map<string, { row: SalaryCsvRow, mergedFrom: SalaryComparisonRow['mergedFrom'] }>()
   const conflicts: SalaryComparison['conflicts'] = []
   for (const [key, byIdentity] of byKey.entries()) {
-    if (byIdentity.size === 1) {
-      byCd.set(key, [...byIdentity.values()][0]!)
+    const grouped = [...byIdentity.values()]
+    if (new Set(grouped.map(row => normalizeNameKey(row.driverName))).size > 1) {
+      const entries = grouped.map(row => ({
+        company: row.company, driverCd: row.driverCd, driverName: row.driverName,
+      }))
+      conflicts.push({ driverCd: key, entries })
+      warnings.push(
+        `乗務員CD ${key} に氏名の異なる複数の給与コードが解決されました `
+        + `(${entries.map(e => `${e.company || '会社未設定'}:${e.driverCd} ${e.driverName}`).join(' / ')}) `
+        + '— 同名別人か登録ミスの可能性があります。社員マスタで引き当て直してください',
+      )
       continue
     }
-    const entries = [...byIdentity.values()].map(row => ({
-      company: row.company, driverCd: row.driverCd, driverName: row.driverName,
-    }))
-    conflicts.push({ driverCd: key, entries })
+    if (grouped.length === 1) {
+      byCd.set(key, { row: grouped[0]!, mergedFrom: null })
+      continue
+    }
+    const sorted = [...grouped].sort((a, b) => a.company.localeCompare(b.company))
+    const merged = mergeSalaryCsvRows(sorted)
+    byCd.set(key, { row: merged, mergedFrom: sorted.map(r => ({ company: r.company, driverCd: r.driverCd })) })
+    const rateNote = merged.rates.base === null || merged.rates.overtime === null
+      ? ' — 会社ごとに単価が異なるため計算列は「単価なし」になります'
+      : ''
     warnings.push(
-      `乗務員CD ${key} に複数の会社の給与コードが解決されました `
-      + `(${entries.map(e => `${e.company || '会社未設定'}:${e.driverCd} ${e.driverName}`).join(' / ')}) `
-      + '— 突合マスタで会社ごとに引き当て直してください',
+      `乗務員CD ${key} は複数会社の給与行を 1 人として合算しました `
+      + `(${sorted.map(r => `${r.company || '会社未設定'}:${r.driverCd}`).join(' / ')})${rateNote}`,
     )
   }
 
@@ -622,11 +693,12 @@ export function compareSalaryMonth(
 
   for (const report of reportRows) {
     const cdKey = String(Number(report.summary.driverCd))
-    const csv = byCd.get(cdKey)
-    if (!csv) {
+    const hit = byCd.get(cdKey)
+    if (!hit) {
       reportOnly.push({ driverCd: report.summary.driverCd, driverName: report.summary.driverName })
       continue
     }
+    const csv = hit.row
     const sums = sumByCategory(csv, config)
     const base = sums.buckets['base'].total
     const overtime = sums.buckets['overtime'].total
@@ -663,6 +735,7 @@ export function compareSalaryMonth(
       driverCd: csv.driverCd,
       mappedDriverCd: csv.cdKey === cdKey ? null : report.summary.driverCd,
       driverName: csv.driverName,
+      mergedFrom: hit.mergedFrom,
       csvBase: base,
       csvBaseItems: sums.buckets['base'].items,
       csvOvertime: overtime,

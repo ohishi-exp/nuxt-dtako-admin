@@ -283,7 +283,8 @@ const missingRateRows = computed(() => (report.value?.rows ?? []).filter(r => r.
  *
  * `所属(マスタ)`・`給与体系` は社員マスタ (D1) 由来 — 乗務員CD で逆引きし、
  * **対象月の末日時点**で効いている属性行を採る (`buildDriverAttrIndex`、Refs #367)。
- * 未突合・未設定は空欄。dtako 由来の `事業所` 列は別ソース (summary) なので残す。 */
+ * 未突合・未設定は空欄。dtako 由来の `事業所` 列は別ソース (summary) なので残す。
+ * 複数会社に在籍する人は `joinDriverAttr` で連結表示する (Refs #403)。 */
 function downloadMonthlyCsv() {
   if (!report.value) return
   const attrIndex = buildDriverAttrIndex(employeeMaster.value, report.value.month)
@@ -300,7 +301,7 @@ function downloadMonthlyCsv() {
     const attrs = attrIndex.get(normalizeDriverCdKey(s.driverCd))
     lines.push([
       report.value.month, s.driverCd, s.driverName, s.branchName,
-      attrs?.branch ?? '', attrs?.payScheme ?? '',
+      joinDriverAttr(attrs, 'branch'), joinDriverAttr(attrs, 'payScheme'),
       String(s.workDays), String(s.restDays),
       fmtMinutes(s.drivingMinutes), fmtMinutes(s.loadingMinutes), fmtMinutes(s.breakMinutes), fmtMinutes(s.restraintMinutes),
       fmtMinutes(s.fiscalCumulativeMinutes), fmtMinutes(s.excessRestraintMinutes), String(s.over15hDays), String(s.avgDriving9hOverCount),
@@ -2102,7 +2103,19 @@ watch([activeTab, month, session], () => {
                         {{ row.driverCd }}
                         <span v-if="row.mappedDriverCd" class="text-xs text-gray-500" title="社員コード突合マスタで引き当て">→ {{ row.mappedDriverCd }}</span>
                       </td>
-                      <td class="px-2 py-1.5">{{ row.driverName }}</td>
+                      <td class="px-2 py-1.5">
+                        {{ row.driverName }}
+                        <!-- 複数会社の給与行を 1 人として合算した行 (Refs #403) -->
+                        <UBadge
+                          v-if="row.mergedFrom"
+                          size="sm"
+                          color="warning"
+                          variant="subtle"
+                          :title="`${row.mergedFrom.length} 社の給与行を合算: ${row.mergedFrom.map(m => `${m.company || '会社未設定'} ${m.driverCd}`).join(' / ')}`"
+                        >
+                          {{ row.mergedFrom.length }} 社合算
+                        </UBadge>
+                      </td>
                       <td class="px-2 py-1.5 text-right" :title="fmtItemsTitle(row.csvBaseItems)">{{ fmtYen(row.csvBase) }}</td>
                       <td class="px-2 py-1.5 text-right" :title="row.sysBase !== null ? `基本単価 × 稼働 ${row.sysWorkDays} 日` : undefined">
                         <template v-if="row.sysBase !== null">{{ fmtYen(row.sysBase) }}</template>
@@ -2178,14 +2191,15 @@ watch([activeTab, month, session], () => {
             </template>
           </UCard>
 
-          <!-- 別会社の給与コード衝突 (Refs #253) -->
+          <!-- 同名別人の疑い (氏名不一致で同じ乗務員CDに解決、Refs #253/#403) -->
           <UCard v-if="salaryComparison && salaryComparison.conflicts.length" class="border-red-300 dark:border-red-800">
             <template #header>
-              <span class="font-semibold text-red-600 dark:text-red-400">給与コードの衝突 ({{ salaryComparison.conflicts.length }} 件)</span>
+              <span class="font-semibold text-red-600 dark:text-red-400">同名別人の疑い ({{ salaryComparison.conflicts.length }} 件)</span>
             </template>
             <p class="text-sm text-gray-600 dark:text-gray-300 mb-3">
-              同じ乗務員CDに複数の会社の給与コードが解決されました。社員コードは会社毎に別体系のため偶然の一致です。
-              どちらが本人か機械的に決められないので比較対象から外しています — 下から会社ごとに正しい乗務員CDを選び直してください。
+              同じ乗務員CDに<b>氏名の異なる</b>給与コードが解決されました。社員コードは会社毎に別体系なので偶然の一致か登録ミスです。
+              機械的に決められないので比較対象から外しています — 下から会社ごとに正しい乗務員CDを選び直してください。<br>
+              <span class="text-xs">氏名が一致する複数会社の行は同一人物として自動で合算するため、ここには出ません (一覧の「N 社合算」バッジで確認できます)。</span>
             </p>
             <div v-for="c in salaryComparison.conflicts" :key="c.driverCd" class="border border-red-200 dark:border-red-900 rounded-lg p-2 mb-2">
               <p class="text-xs text-gray-500 mb-1">乗務員CD {{ c.driverCd }} へ解決:</p>

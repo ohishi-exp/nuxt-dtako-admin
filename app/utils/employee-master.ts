@@ -170,27 +170,58 @@ export function normalizeDriverCdKey(driverCd: string): string {
   return /^\d+$/.test(trimmed) ? String(Number(trimmed)) : trimmed
 }
 
+/** 1 人 (乗務員CD = 一番星社員C) に紐づく 1 会社ぶんの属性。 */
+export interface DriverAttrEntry {
+  /** 給与会社ラベル。 */
+  company: string
+  attrs: EmployeeAttrRow
+}
+
 /**
  * 乗務員CD → 対象月末時点の属性 (所属・給与体系) の逆引き表を作る
  * (月次集計 CSV の `所属(マスタ)`・`給与体系` 列用、Refs #367)。
  *
  * `driverCd` 未突合の社員と、対象月末時点で有効な属性行が無い社員は表に載せない
- * (= CSV 側は空欄)。同一 `driverCd` に複数の社員が突合されている場合 (会社跨ぎの
- * 誤登録など) は**先勝ち** — 後勝ちにすると社員の並び順で結果が変わるため。
+ * (= CSV 側は空欄)。
+ *
+ * **1 つの乗務員CD に複数会社の行が紐づくのは異常ではなく事実** — 同一人物が
+ * 複数の給与会社から支給される運用が実在する (Refs #403、本番実測で 5 件)。
+ * 以前は先勝ちで 1 件に潰していたが、渡される配列順が D1 の `SELECT` 順
+ * (`ORDER BY` なし) なのでどの会社の値が残るか不定だった。**会社ラベル昇順の
+ * 配列を返して呼び出し側に全部渡す**ことで、不定性を消しつつ情報も捨てない。
  */
 export function buildDriverAttrIndex(
   employees: EmployeeMasterEntry[],
   yearMonth: string,
-): Map<string, EmployeeAttrRow> {
-  const index = new Map<string, EmployeeAttrRow>()
+): Map<string, DriverAttrEntry[]> {
+  const index = new Map<string, DriverAttrEntry[]>()
   for (const e of employees) {
     if (!e.driverCd) continue
-    const key = normalizeDriverCdKey(e.driverCd)
-    if (index.has(key)) continue
     const resolved = resolveAttrsAt(e, yearMonth)
-    if (resolved) index.set(key, resolved)
+    if (!resolved) continue
+    const key = normalizeDriverCdKey(e.driverCd)
+    const list = index.get(key) ?? []
+    list.push({ company: e.company, attrs: resolved })
+    index.set(key, list)
   }
+  for (const list of index.values()) list.sort((a, b) => a.company.localeCompare(b.company))
   return index
+}
+
+/**
+ * 月次集計 CSV の 1 セル用に属性を連結する (`所属(マスタ)`・`給与体系`、Refs #403)。
+ *
+ * 複数会社に在籍する人は `本社 乗務員 / 帯広 乗務員` のように並べる。**同値は
+ * 1 つに畳む**ので、会社が違っても所属が同じなら従来と同じ 1 値になる。
+ * 該当なし・値が全て未設定なら空文字 (CSV 側は空欄)。
+ */
+export function joinDriverAttr(
+  entries: DriverAttrEntry[] | undefined,
+  field: 'branch' | 'payScheme',
+): string {
+  if (!entries) return ''
+  const values = entries.map(e => e.attrs[field]).filter((v): v is string => v !== null && v !== '')
+  return [...new Set(values)].join(' / ')
 }
 
 // ---------------------------------------------------------------------------

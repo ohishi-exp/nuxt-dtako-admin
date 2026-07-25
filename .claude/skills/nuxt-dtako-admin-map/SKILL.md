@@ -471,9 +471,10 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
 持つ。旧 R2 版 (`salary-cd-map`、楽観排他 baseVersion + sessionStorage ドラフト
 退避) から置き換え — D1 行単位 upsert (last-write-wins) のため排他制御・ドラフト
 復元は不要になった。突合ロジック本体 (`compareSalaryMonth`/`suggestCdMapEntries`、
-`app/utils/salary-compare.ts`) は無変更 — `app/utils/employee-master.ts` の
+`app/utils/salary-compare.ts`) への入口は変えていない — `app/utils/employee-master.ts` の
 `buildCdMapEntries()` で従来の `SalaryCdMap` 形へ変換して橋渡しする
 (worker 側の同名ロジックは import 不可のため実装が2箇所になる、Refs #268 の教訓)。
+`compareSalaryMonth` の内部は N:1 の合算のため #403 で変更した (下記)。
 
 - **R2 `salary-cd-map` 経路は撤去済み** (2026-07-25): ルート
   `GET/PUT /restraint-api/salary-cd-map`・移行用 `POST .../import-cd-map`・
@@ -517,9 +518,32 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   未突合・未設定は空欄。dtako 由来の `事業所` 列は別ソースなので残す。月次タブでも
   社員マスタを load する (CSV 列が空になるのを避ける)
 
+### 1 人 = 複数の給与社員CD (N:1、Refs #403)
+
+**乗務員CD (= `employees.driver_cd`) は一番星 `[社員ﾏｽﾀ].社員C` と同一番号体系**で、
+非乗務員 (役員・事務員・作業員) にも番号がある (本番実測: 石坂彰 給与1767 →
+乗務員CD 1729 = 社員C 1729)。そのため**同一人物が複数の給与会社から支給される**
+N:1 が現実に存在する (本番で 5 件、うち社員C 1619 鵜瀬裕一は乗務員)。
+
+- **`buildDriverAttrIndex` は 1 人 → 属性の配列を返す** (`DriverAttrEntry[]`、
+  **会社ラベル昇順**)。以前は先勝ちで 1 件に潰していたが、渡される配列は D1 の
+  `SELECT` 順 (`ORDER BY` なし) なのでどの会社の値が残るか**不定**だった。
+  CSV セルへの落とし込みは `joinDriverAttr(entries, 'branch'|'payScheme')` —
+  ` / ` 連結・**同値は 1 つに畳む**ので単一会社の出力は従来と同じ
+- **`compareSalaryMonth` は氏名一致の複数会社行を合算する** (`mergeSalaryCsvRows`)。
+  支給項目は項目名ごとに合算、`reportedTotal` は全行が値を持つ時だけ合算、
+  **単価 (`rates`) は全行同値の時だけ採用** (異なれば null =「単価なし」。按分計算は
+  しない)。合算行は `SalaryComparisonRow.mergedFrom` に内訳を持ち、画面に
+  「N 社合算」バッジが出る
+- **`conflicts` は「氏名不一致」だけ**に用途を限定した (同名別人・登録ミスの疑い)。
+  以前は複数会社が同じ乗務員CDに解決されるだけで隔離し、`rows`/`csvOnly` の
+  両方から落としていたため**乗務員が最低賃金チェックから消えていた**
+- **列は増やしていない** — 社員C 専用列 (`person_cd`) は作らず `driver_cd` を全社員に
+  流用する (#403 で案 A 採用、migration なし)。画面ラベルは「社員CD」
+
 | ファイル | 役割 |
 |---|---|
-| `app/utils/employee-master.ts` | 型 + `buildCdMapEntries`/`findUnregistered`/`resolveAttrsAt`/`splitCdMapKey` + タブ用 `upsertAttrRow`/`removeAttrRow`/`collectAttrRows`/`buildDriverAttrIndex`/`normalizeDriverCdKey`/`sortEmployeeEntries` (pure、100% gate) |
+| `app/utils/employee-master.ts` | 型 + `buildCdMapEntries`/`findUnregistered`/`resolveAttrsAt`/`splitCdMapKey` + タブ用 `upsertAttrRow`/`removeAttrRow`/`collectAttrRows`/`buildDriverAttrIndex`/`joinDriverAttr`/`normalizeDriverCdKey`/`sortEmployeeEntries` (pure、100% gate) |
 | `workers/dtako-scraper-relay/src/employee-master.ts` | PUT検証・D1文組み立て・月末解決 (pure、100% gate) |
 
 - 対象月は「年セレクタ + 月タブ」(`GET archive/months` でアーカイブ存在月を列挙、
