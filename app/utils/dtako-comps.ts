@@ -92,7 +92,8 @@ export function payrollCompanyLabel(
   const name = comps
     .find(c => c.compId === compId)?.payrollCompanies
     .find(p => p.payrollCompany === payrollCompany)?.payrollCompanyName
-  return name ? `${payrollCompany} (${name})` : payrollCompany
+  // 読み手が探すのは会社名なので名前を先に出す。コードは突合キーなので括弧で併記
+  return name ? `${name} (${payrollCompany})` : payrollCompany
 }
 
 /** 「27324455 (大石運輸倉庫)」形式の表示名。 */
