@@ -1752,6 +1752,65 @@ async function importMinWageFromMhlw() {
   }
 }
 
+// 最低賃金を単価マスタへ一括設定する (「単価マスタ = 最低賃金」運用 Refs #282 / #409)。
+// 月次集計に ⚠ 単価未設定 が並ぶと時間給が計算できないので、拠点の最低賃金を
+// 既定値として流し込む。既に単価がある乗務員は既定で触らない。
+
+interface MinWageApplyItem {
+  driverCd: string
+  branch: string
+  prefecture: string | null
+  rate: number | null
+  status: 'add' | 'overwrite' | 'keep' | 'unmapped' | 'no-rate'
+}
+interface MinWageApplyResult {
+  effectiveFrom: string
+  added: number
+  overwritten: number
+  kept: number
+  unresolved: number
+  items: MinWageApplyItem[]
+  saved: boolean
+  changed: boolean
+}
+
+const applyFrom = ref('')
+const applyOverwrite = ref(false)
+const applyPreview = ref<MinWageApplyResult | null>(null)
+const applyingMinWage = ref(false)
+
+async function runApplyMinWage(dryRun: boolean) {
+  if (!session.value || !applyFrom.value) return
+  applyingMinWage.value = true
+  pageError.value = ''
+  try {
+    const res = await $fetch<MinWageApplyResult>('/restraint-api/min-wage/apply-to-wage-master', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: { effectiveFrom: applyFrom.value, overwrite: applyOverwrite.value, dryRun },
+    })
+    if (dryRun) {
+      applyPreview.value = res
+      minWageMessage.value = ''
+    }
+    else {
+      applyPreview.value = null
+      minWageMessage.value = `単価マスタへ ${res.added} 名を新規設定しました`
+        + (res.overwritten ? ` / ${res.overwritten} 名を上書き` : '')
+        + (res.kept ? ` (既存単価あり ${res.kept} 名は据え置き)` : '')
+      reportCache.clear()
+      await loadMaster()
+      if (report.value) await loadWageReport()
+    }
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+  finally {
+    applyingMinWage.value = false
+  }
+}
+
 /** 拠点に都道府県を割り当てる (保存は「保存」ボタン)。 */
 function setBranchPrefecture(prefix: string, prefecture: string | null) {
   const next = { ...minWageMaster.value.branchToPrefecture }
@@ -2239,6 +2298,52 @@ watch([activeTab, month, session], () => {
               <p v-else-if="branchGroupsLoaded" class="text-sm text-gray-500">
                 社員マスタに所属が登録されていません。先に「社員マスタ」タブで取り込んでください。
               </p>
+
+              <!-- 単価マスタへの一括設定 (単価マスタ = 最低賃金の運用、Refs #282 / #409)。
+                   既に単価がある乗務員は既定で触らない — 会社が決めた支給単価を
+                   最低賃金で潰さないため。必ずプレビューしてから確定させる。 -->
+              <div v-if="branchGroups.length" class="mt-4 pt-3 border-t border-gray-200 dark:border-gray-700">
+                <div class="flex flex-wrap items-end gap-3">
+                  <span class="font-semibold text-sm self-center">単価マスタへ一括設定</span>
+                  <UFormField label="適用開始日">
+                    <UInput v-model="applyFrom" size="sm" type="date" />
+                  </UFormField>
+                  <UCheckbox v-model="applyOverwrite" label="既存の単価も上書きする" class="self-center" />
+                  <UButton
+                    size="sm" variant="soft" icon="i-lucide-list-checks"
+                    label="プレビュー" :disabled="!applyFrom" :loading="applyingMinWage"
+                    @click="runApplyMinWage(true)"
+                  />
+                </div>
+                <p class="text-xs text-gray-500 mt-1">
+                  拠点の最低賃金を乗務員の基本時間単価として入れます。<b>既に単価がある人は既定で据え置き</b>です。
+                </p>
+
+                <div v-if="applyPreview" class="mt-3 rounded-lg bg-gray-50 dark:bg-gray-900 p-3">
+                  <p class="text-sm">
+                    <b>{{ applyPreview.effectiveFrom }}</b> 適用:
+                    新規 <b>{{ applyPreview.added }}</b> 名
+                    <span v-if="applyPreview.overwritten"> / 上書き <b>{{ applyPreview.overwritten }}</b> 名</span>
+                    <span v-if="applyPreview.kept"> / 既存単価あり (据え置き) {{ applyPreview.kept }} 名</span>
+                    <span v-if="applyPreview.unresolved" class="text-amber-700 dark:text-amber-400">
+                      / 引けなかった {{ applyPreview.unresolved }} 名
+                    </span>
+                  </p>
+                  <p v-if="applyPreview.unresolved" class="text-xs text-amber-700 dark:text-amber-400 mt-1">
+                    引けなかった分は拠点の都道府県が未設定か、その日時点の額が無い県です。
+                  </p>
+                  <div class="flex items-center gap-2 mt-2">
+                    <UButton
+                      size="sm" icon="i-lucide-check"
+                      :label="`確定 (${applyPreview.added + applyPreview.overwritten} 名に反映)`"
+                      :disabled="applyPreview.added + applyPreview.overwritten === 0"
+                      :loading="applyingMinWage"
+                      @click="runApplyMinWage(false)"
+                    />
+                    <UButton size="sm" variant="ghost" label="やめる" @click="applyPreview = null" />
+                  </div>
+                </div>
+              </div>
             </div>
             <p v-if="minWageMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2 mb-3">
               {{ minWageMessage }}

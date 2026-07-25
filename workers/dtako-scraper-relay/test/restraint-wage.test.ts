@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  applyMinWageToWageMaster,
   classifyMonth,
   computeMinWageOvertimePay,
   computeWageAmounts,
@@ -265,6 +266,117 @@ describe('minWageForBranch', () => {
       .toEqual({ rate: null, prefecture: null, mapped: false })
     expect(minWageForBranch({ prefectures: {}, branchToPrefecture: { X: '大阪' } }, 'X', 2025, 1))
       .toEqual({ rate: null, prefecture: '大阪', mapped: true })
+  })
+
+  // Refs #409 Phase 3: 最低賃金は就業地の県で決まるので、theearth の事業所名より
+  // 社員マスタの所属を正とする
+  it('社員マスタの所属を theearth 事業所名より優先する', () => {
+    const master = {
+      prefectures: MIN_WAGE.prefectures,
+      branchToPrefecture: { ...MIN_WAGE.branchToPrefecture, 帯広: '北海道' },
+    }
+    // theearth 側は「テスト運輸　第一営業所」(=佐賀) だが、社員マスタでは帯広所属
+    const r = minWageForBranch(master, 'テスト運輸　第一営業所', 2025, 11, '帯広 乗務員')
+    expect(r.prefecture).toBe('北海道')
+    expect(r.mapped).toBe(true)
+  })
+
+  it('拠点キーは前方一致で職種違いをまとめて覆う', () => {
+    const master = { prefectures: MIN_WAGE.prefectures, branchToPrefecture: { 本社: '佐賀' } }
+    expect(minWageForBranch(master, '不明', 2025, 11, '本社  乗務員(トレーラ)').rate).toBe(1030)
+  })
+
+  it('社員マスタに所属が無ければ theearth 事業所名へ落ちる', () => {
+    expect(minWageForBranch(MIN_WAGE, 'テスト運輸　第一営業所', 2025, 11, null).prefecture).toBe('佐賀')
+    // 所属はあるが未マッピングなら、事業所名 → default の順に落ちる
+    expect(minWageForBranch(MIN_WAGE, 'テスト運輸　第一営業所', 2025, 11, '未登録拠点 乗務員').mapped).toBe(true)
+    expect(minWageForBranch(MIN_WAGE, '未知の営業所', 2025, 11, '未登録拠点 乗務員').mapped).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 最低賃金 → 単価マスタへの一括設定 (Refs #409 Phase 4)
+// ---------------------------------------------------------------------------
+
+describe('applyMinWageToWageMaster', () => {
+  const MASTER: MinWageMaster = {
+    prefectures: MIN_WAGE.prefectures,
+    branchToPrefecture: { 本社: '佐賀', 帯広: '北海道' },
+  }
+  const branches = new Map([
+    ['1018', '本社  乗務員'],
+    ['1021', '本社 乗務員(トレーラ)'],
+    ['1030', '帯広 乗務員'],
+    ['1040', '広島 事務員'],
+  ])
+
+  it('単価未設定の乗務員に拠点の最低賃金を入れる', () => {
+    const r = applyMinWageToWageMaster({ drivers: {} }, MASTER, branches, '2025-10-01')
+    expect(r.added).toBe(3)
+    expect(r.unresolved).toBe(1) // 広島は県が未設定
+    expect(r.master.drivers['1018']!.rates).toEqual([{ effectiveFrom: '2025-10-01', hourlyRate: 1030 }])
+    expect(r.master.drivers['1030']!.rates).toEqual([{ effectiveFrom: '2025-10-01', hourlyRate: 1080 }])
+    expect(r.master.drivers['1040']).toBeUndefined()
+    expect(r.items.find(i => i.driverCd === '1040')).toMatchObject({ status: 'unmapped', prefecture: null })
+  })
+
+  it('既に単価がある乗務員は既定で触らない', () => {
+    // 会社が決めた支給単価を最低賃金で潰さない
+    const wm: WageMaster = { drivers: { 1018: { rates: [{ effectiveFrom: '2024-04-01', hourlyRate: 1500 }] } } }
+    const r = applyMinWageToWageMaster(wm, MASTER, branches, '2025-10-01')
+    expect(r.kept).toBe(1)
+    expect(r.added).toBe(2)
+    expect(r.master.drivers['1018']!.rates).toEqual([{ effectiveFrom: '2024-04-01', hourlyRate: 1500 }])
+  })
+
+  it('overwrite を明示すると上書きする', () => {
+    const wm: WageMaster = { drivers: { 1018: { rates: [{ effectiveFrom: '2024-04-01', hourlyRate: 1500 }] } } }
+    const r = applyMinWageToWageMaster(wm, MASTER, branches, '2025-10-01', { overwrite: true })
+    expect(r.overwritten).toBe(1)
+    expect(r.master.drivers['1018']!.rates).toEqual([
+      { effectiveFrom: '2024-04-01', hourlyRate: 1500 },
+      { effectiveFrom: '2025-10-01', hourlyRate: 1030 },
+    ])
+  })
+
+  it('同じ適用開始日は差し替える (履歴を重複させない)', () => {
+    const wm: WageMaster = { drivers: { 1018: { rates: [{ effectiveFrom: '2025-10-01', hourlyRate: 900 }] } } }
+    const r = applyMinWageToWageMaster(wm, MASTER, branches, '2025-10-01', { overwrite: true })
+    expect(r.master.drivers['1018']!.rates).toEqual([{ effectiveFrom: '2025-10-01', hourlyRate: 1030 }])
+  })
+
+  it('sites で拠点を絞れる (前方一致)', () => {
+    const r = applyMinWageToWageMaster({ drivers: {} }, MASTER, branches, '2025-10-01', { sites: ['帯広'] })
+    expect(r.items.map(i => i.driverCd)).toEqual(['1030'])
+    expect(r.added).toBe(1)
+  })
+
+  it('その日時点で額が無い県は no-rate', () => {
+    // 北海道の履歴は 2025-10-01 開始なので、それ以前は引けない
+    const r = applyMinWageToWageMaster({ drivers: {} }, MASTER, branches, '2025-01-01', { sites: ['帯広'] })
+    expect(r.items[0]).toMatchObject({ status: 'no-rate', prefecture: '北海道', rate: null })
+    expect(r.added).toBe(0)
+  })
+
+  it('元の単価マスタを破壊しない', () => {
+    const wm: WageMaster = { drivers: { 1018: { rates: [] } } }
+    applyMinWageToWageMaster(wm, MASTER, branches, '2025-10-01')
+    expect(wm.drivers['1018']!.rates).toEqual([])
+  })
+
+  it('適用開始日が YYYY-MM-DD でなければ WageMasterError', () => {
+    expect(() => applyMinWageToWageMaster({ drivers: {} }, MASTER, branches, '2025/10/01'))
+      .toThrow(WageMasterError)
+  })
+
+  it('乗務員CD 順に並ぶ', () => {
+    const r = applyMinWageToWageMaster({ drivers: {} }, MASTER, branches, '2025-10-01')
+    expect(r.items.map(i => i.driverCd)).toEqual(['1018', '1021', '1030', '1040'])
+  })
+
+  it('空の sites は絞り込みなしとして扱う', () => {
+    const r = applyMinWageToWageMaster({ drivers: {} }, MASTER, branches, '2025-10-01', { sites: [] })
+    expect(r.items).toHaveLength(4)
   })
 })
 

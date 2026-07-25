@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  branchByDriverCdAt,
   compareText,
   normalizeBranchLabel,
   resolveBranchPrefecture,
@@ -114,6 +115,60 @@ describe("resolveBranchPrefecture", () => {
 
   it("前方一致であって部分一致ではない", () => {
     expect(resolveBranchPrefecture({ 乗務員: "長崎県" }, "本社 乗務員").prefecture).toBeNull();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// branchByDriverCdAt
+// ══════════════════════════════════════════════════════════════
+
+describe("branchByDriverCdAt", () => {
+  /** resolveAttrsAt (employee-master.ts) と同じ「月末時点で最新の履歴」を返す簡易版。 */
+  const resolveAt = (attrs: { effectiveFrom: string; branch: string | null }[], ym: string) => {
+    const end = `${ym}-31`;
+    let best: { effectiveFrom: string; branch: string | null } | null = null;
+    for (const a of attrs) {
+      if (a.effectiveFrom > end) continue;
+      if (!best || a.effectiveFrom > best.effectiveFrom) best = a;
+    }
+    return best;
+  };
+
+  it("乗務員CD → 月末時点の所属を引く", () => {
+    const employees = [
+      { driverCd: "1018", attrs: [{ effectiveFrom: "2020-01-01", branch: "本社 乗務員" }] },
+      { driverCd: "1021", attrs: [{ effectiveFrom: "2020-01-01", branch: "帯広 乗務員" }] },
+    ];
+    const map = branchByDriverCdAt(employees, "2026-06", resolveAt);
+    expect(map.get("1018")).toBe("本社 乗務員");
+    expect(map.get("1021")).toBe("帯広 乗務員");
+    expect(map.size).toBe(2);
+  });
+
+  it("転勤は履歴で追える (対象月より後の異動は効かない)", () => {
+    const employees = [{
+      driverCd: "1018",
+      attrs: [
+        { effectiveFrom: "2020-01-01", branch: "本社 乗務員" },
+        { effectiveFrom: "2026-07-01", branch: "大阪 乗務員" },
+      ],
+    }];
+    expect(branchByDriverCdAt(employees, "2026-06", resolveAt).get("1018")).toBe("本社 乗務員");
+    expect(branchByDriverCdAt(employees, "2026-07", resolveAt).get("1018")).toBe("大阪 乗務員");
+  });
+
+  it("乗務員CD 未設定・所属なしの社員は落とす", () => {
+    const employees = [
+      { driverCd: null, attrs: [{ effectiveFrom: "2020-01-01", branch: "本社 事務員" }] },
+      { driverCd: "1030", attrs: [] },
+      { driverCd: "1031", attrs: [{ effectiveFrom: "2020-01-01", branch: null }] },
+      { driverCd: "1032", attrs: [{ effectiveFrom: "2027-01-01", branch: "本社 乗務員" }] },
+    ];
+    expect(branchByDriverCdAt(employees, "2026-06", resolveAt).size).toBe(0);
+  });
+
+  it("社員が居なければ空", () => {
+    expect(branchByDriverCdAt([], "2026-06", resolveAt).size).toBe(0);
   });
 });
 

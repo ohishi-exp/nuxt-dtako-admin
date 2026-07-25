@@ -30,6 +30,12 @@ export function compareText(a: string, b: string): number {
   return 0;
 }
 
+/** `branch` が拠点キー `prefix` の配下か (空白揺れを正規化した前方一致)。 */
+export function isBranchUnder(prefix: string, branch: string): boolean {
+  const key = normalizeBranchLabel(prefix);
+  return key !== "" && normalizeBranchLabel(branch).startsWith(key);
+}
+
 export interface BranchPrefectureLookup {
   /** 引けた都道府県。未マッピングなら null。 */
   prefecture: string | null;
@@ -57,6 +63,30 @@ export function resolveBranchPrefecture(
     }
   }
   return { prefecture, matchedKey };
+}
+
+/**
+ * 乗務員CD → その月に適用する所属 (社員マスタ、月末時点) の対応を作る。
+ *
+ * 最低賃金は就業地の県で決まるので、theearth の事業所名ではなく**社員マスタの所属**を
+ * 正とする (Refs #409 Phase 3)。theearth 側の事業所名 (`大石運輸倉庫㈱　本社営業所`) は
+ * 拠点キー (`本社`) と噛み合わないため、これが無いと最低賃金を引けない。
+ *
+ * 乗務員CD が未設定の社員と、月末時点で所属履歴が無い社員は落とす。
+ */
+export function branchByDriverCdAt<A extends { effectiveFrom: string; branch: string | null }>(
+  employees: readonly { driverCd: string | null; attrs: A[] }[],
+  yearMonth: string,
+  resolveAt: (attrs: A[], ym: string) => { branch: string | null } | null,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const e of employees) {
+    if (!e.driverCd) continue;
+    const attr = resolveAt(e.attrs, yearMonth);
+    if (!attr?.branch) continue;
+    out.set(e.driverCd, attr.branch);
+  }
+  return out;
 }
 
 export interface BranchGroupSuggestion {
