@@ -28,7 +28,6 @@ describe('isR2OnlyRestraintPath', () => {
       '/restraint-api/min-wage',
       '/restraint-api/wage-config',
       '/restraint-api/salary-item-config',
-      '/restraint-api/salary-cd-map',
       '/restraint-api/archive/months',
       '/restraint-api/archive/summaries',
       '/restraint-api/archive/csv-list',

@@ -781,11 +781,8 @@ async function saveSalaryItemConfig() {
 // (Refs #367)。そのため保持は comp_id をキーにした辞書にし、
 // `employeeMaster` (= 現在の会社の分) は そこから引く computed にする。
 const employeeMasterByComp = ref<Record<string, EmployeeMasterEntry[]>>({})
-/** R2 に旧突合マスタ (salary-cd-map) が残っていて未取り込みか (Refs #367)。 */
-const employeeMasterMigratable = ref(false)
 const employeeMasterLoaded = ref(false)
 const savingEmployeeMaster = ref(false)
-const importingCdMap = ref(false)
 const employeeMasterMessage = ref('')
 /** 社員マスタタブでローカル削除した属性行・社員行 (「保存」で確定、Refs #367)。 */
 const pendingAttrDeletes = ref<Array<{ compId: string, company: string, payrollCd: string, effectiveFrom: string }>>([])
@@ -802,7 +799,7 @@ function setEmployeeMasterEntries(compId: string, entries: EmployeeMasterEntry[]
   employeeMasterByComp.value = { ...employeeMasterByComp.value, [compId]: entries }
 }
 
-/** 1 会社分を読む。`compId` 省略時は今開いている会社 (migratable も更新する)。
+/** 1 会社分を読む。`compId` 省略時は今開いている会社。
  * 他社の読み込みは fail-soft — テナントが許可されていない会社は 401/403 に
  * なるが、それは「見えないのが正しい」ので画面全体のエラーにはしない。 */
 async function loadEmployeeMaster(compId?: string) {
@@ -814,10 +811,7 @@ async function loadEmployeeMaster(compId?: string) {
       headers: authHeaders(target),
     })
     setEmployeeMasterEntries(target, res.employees)
-    if (isCurrent) {
-      employeeMasterMigratable.value = res.migratable
-      employeeMasterLoaded.value = true
-    }
+    if (isCurrent) employeeMasterLoaded.value = true
   }
   catch (e) {
     if (isCurrent) handleApiError(e)
@@ -998,26 +992,9 @@ async function saveEmployeeMaster(message: string) {
   }
 }
 
-/** R2 の旧突合マスタ (salary-cd-map) を社員マスタへ取り込む (Refs #367)。 */
-async function importFromCdMap() {
-  if (!session.value) return
-  importingCdMap.value = true
-  pageError.value = ''
-  try {
-    const res = await $fetch<{ imported: number }>('/restraint-api/employee-master/import-cd-map', {
-      method: 'POST',
-      headers: authHeaders(),
-    })
-    employeeMasterMessage.value = `R2 の旧突合マスタから ${res.imported} 件を取り込みました`
-    await loadEmployeeMaster()
-  }
-  catch (e) {
-    handleApiError(e)
-  }
-  finally {
-    importingCdMap.value = false
-  }
-}
+// R2 の旧突合マスタ (salary-cd-map) からの取り込みボタンは、本番移行の完了を
+// 確認したうえで撤去した (2026-07-25、Refs #367)。社員の登録経路は
+// 「給与DBから取り込み」と給与明細 CSV の「未登録 N 名をマスタへ登録」の 2 本。
 
 /** 給与明細 CSV に現れた行のうち、社員マスタにまだ (会社・給与コード) が
  * 存在しない = 一度も登録されたことがない行 (Refs #367)。 */
@@ -2228,15 +2205,6 @@ watch([activeTab, month, session], () => {
             </div>
           </UCard>
 
-          <!-- R2 の旧突合マスタ (salary-cd-map) が未取り込みの時だけ表示 (Refs #367) -->
-          <UCard v-if="employeeMasterMigratable" class="border-amber-300 dark:border-amber-800">
-            <div class="flex flex-wrap items-center gap-3">
-              <span class="text-sm">R2 に旧突合マスタ (社員コード↔乗務員CD) が残っています。社員マスタ (D1) へ取り込めます。</span>
-              <div class="flex-1" />
-              <UButton size="xs" icon="i-lucide-download" label="R2突合マスタから取り込み" :loading="importingCdMap" @click="importFromCdMap" />
-            </div>
-          </UCard>
-
           <!-- 未登録の給与明細行 (社員マスタに会社+給与コードが無い、Refs #367) -->
           <UCard v-if="unregisteredEmployees.length" class="border-blue-300 dark:border-blue-800">
             <div class="flex flex-wrap items-center gap-3">
@@ -2490,15 +2458,6 @@ watch([activeTab, month, session], () => {
 
         <!-- ⑥ 社員マスタ (D1、Refs #367) -->
         <template v-else-if="activeTab === 'employees'">
-          <!-- R2 の旧突合マスタ (salary-cd-map) が未取り込みの時だけ表示 -->
-          <UCard v-if="employeeMasterMigratable" class="border-amber-300 dark:border-amber-800">
-            <div class="flex flex-wrap items-center gap-3">
-              <span class="text-sm">R2 に旧突合マスタ (社員コード↔乗務員CD) が残っています。社員マスタ (D1) へ取り込めます。</span>
-              <div class="flex-1" />
-              <UButton size="xs" icon="i-lucide-download" label="R2突合マスタから取り込み" :loading="importingCdMap" @click="importFromCdMap" />
-            </div>
-          </UCard>
-
           <!-- 給与DBから社員を取り込む (CSV 不要、金額は来ない、Refs #367) -->
           <UCard v-if="importPayrollOptions.length" class="border-emerald-300 dark:border-emerald-800">
             <div class="flex flex-wrap items-center gap-3">
@@ -2641,7 +2600,7 @@ watch([activeTab, month, session], () => {
               </table>
             </div>
             <p v-if="!employeeMasterRows.length" class="text-sm text-gray-500">
-              社員マスタが空です。給与比較タブで給与明細 CSV を取り込み「未登録 N 名をマスタへ登録」するか、R2 の旧突合マスタから取り込んでください
+              社員マスタが空です。上の「給与DBから取り込み」で登録するか、給与比較タブで給与明細 CSV を取り込み「未登録 N 名をマスタへ登録」してください
             </p>
             <p class="text-xs text-gray-500 mt-2">
               保存されるのは識別情報 (会社・給与コード・氏名・乗務員CD) と所属/給与体系だけです — 支給金額・明細は送信しません。

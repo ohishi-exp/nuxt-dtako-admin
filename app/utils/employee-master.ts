@@ -31,7 +31,6 @@ export interface EmployeeMasterEntry {
 
 export interface EmployeeMasterGetResponse {
   employees: EmployeeMasterEntry[]
-  migratable: boolean
 }
 
 /** PUT の `attrs` 要素 (属性行 + 所属先の社員キー)。 */
