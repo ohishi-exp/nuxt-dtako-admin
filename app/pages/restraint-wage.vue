@@ -1038,9 +1038,10 @@ async function importFromPayrollDb() {
     for (const attr of plan.attrs) {
       const idx = entries.findIndex(e => e.company === attr.company && e.payrollCd === attr.payrollCd)
       if (idx === -1) continue
-      const { effectiveFrom, branch, payScheme } = attr
-      entries = entries.map((e, i) =>
-        (i === idx ? { ...e, attrs: upsertAttrRow(e.attrs, { effectiveFrom, branch, payScheme }) } : e))
+      const { effectiveFrom, branch, payScheme, branchCode, branchName, jobName } = attr
+      entries = entries.map((e, i) => (i === idx
+        ? { ...e, attrs: upsertAttrRow(e.attrs, { effectiveFrom, branch, payScheme, branchCode, branchName, jobName }) }
+        : e))
     }
     setEmployeeMasterEntries(compId, entries)
 
@@ -1312,7 +1313,16 @@ function setEmployeeName(key: string, value: string) {
 function addEmployeeAttr(key: string) {
   const input = newAttrInputs.value[key]
   if (!input?.from) return
-  const row = { effectiveFrom: input.from, branch: input.branch.trim() || null, payScheme: input.payScheme.trim() || null }
+  // 手入力の行は所属コード・営業所名・職種名を持たない (給与大臣由来ではないため)。
+  // null のままにすると拠点は表示名からの前方一致で引かれる (Refs #409)。
+  const row = {
+    effectiveFrom: input.from,
+    branch: input.branch.trim() || null,
+    payScheme: input.payScheme.trim() || null,
+    branchCode: null,
+    branchName: null,
+    jobName: null,
+  }
   const entry = findEmployeeByRowKey(key)
   if (!entry) return
   patchEmployeeEntry(key, { attrs: upsertAttrRow(entry.attrs, row) })
@@ -1451,7 +1461,7 @@ async function loadMaster() {
 /** 乗務員CD → 社員マスタの会社/所属 (選択月時点)。単価マスタの絞り込みと
  * 並べ替えに使う (Refs #409)。 */
 const employeeByDriverCd = computed(() => {
-  const map = new Map<string, { company: string, companyLabel: string, branch: string }>()
+  const map = new Map<string, { company: string, companyLabel: string, branch: string, branchCode: number | null }>()
   for (const row of employeeMasterRows.value) {
     const cd = row.entry.driverCd
     if (!cd) continue
@@ -1459,6 +1469,8 @@ const employeeByDriverCd = computed(() => {
       company: row.entry.company,
       companyLabel: row.companyLabel,
       branch: row.current?.branch ?? '',
+      // 所属コード (SHOZOKU.INCODE) = 給与大臣の所属順。並べ替えの基準 (Refs #409)
+      branchCode: row.current?.branchCode ?? null,
     })
   }
   return map
@@ -1498,6 +1510,7 @@ const masterRows = computed(() => {
         company: emp?.company ?? '',
         companyLabel: emp?.companyLabel ?? '',
         branch: emp?.branch ?? '',
+        branchCode: emp?.branchCode ?? null,
       }
     })
     .filter(r => masterCompanyFilter.value === 'all' || r.company === masterCompanyFilter.value)
@@ -1505,7 +1518,13 @@ const masterRows = computed(() => {
   // 単純な大小比較で並べる
   return rows.sort((a, b) => {
     if (masterSortKey.value === 'branch') {
-      return cmp(a.branch, b.branch) || a.cd.localeCompare(b.cd, undefined, { numeric: true })
+      // 所属コード (INCODE) 順 = 給与大臣が持つ所属の並び (Refs #409)。以前は所属名の
+      // 文字コード順だったので `佐賀` が `本社` より先に来ていた。コード未取得の行
+      // (再取り込み前・手入力) は後ろに寄せて名前順にする
+      return (a.branchCode === null ? 1 : 0) - (b.branchCode === null ? 1 : 0)
+        || (a.branchCode ?? 0) - (b.branchCode ?? 0)
+        || cmp(a.branch, b.branch)
+        || a.cd.localeCompare(b.cd, undefined, { numeric: true })
     }
     if (masterSortKey.value === 'rate') {
       const av = a.current?.hourlyRate ?? -1
@@ -1748,6 +1767,8 @@ async function saveMinWageMaster() {
 
 interface MinWageBranchGroup {
   prefix: string
+  /** 所属コード (SHOZOKU.INCODE)。並びの根拠。表示名から推定したグループは null。 */
+  branchCode: number | null
   branches: string[]
   employees: number
   prefecture: string | null
@@ -2357,7 +2378,8 @@ watch([activeTab, month, session], () => {
               <table v-if="branchGroups.length" class="w-full text-sm">
                 <thead>
                   <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
-                    <th class="px-2 py-1.5">拠点</th>
+                    <th class="px-2 py-1.5 text-right">所属CD</th>
+                    <th class="px-2 py-1.5">拠点 (営業所)</th>
                     <th class="px-2 py-1.5 text-right">人数</th>
                     <th class="px-2 py-1.5">都道府県</th>
                     <th class="px-2 py-1.5">含まれる所属 (社員マスタ)</th>
@@ -2369,6 +2391,7 @@ watch([activeTab, month, session], () => {
                     class="border-b border-gray-100 dark:border-gray-800"
                     :class="group.prefecture === null ? 'bg-amber-50 dark:bg-amber-950/40' : ''"
                   >
+                    <td class="px-2 py-1.5 text-right text-xs text-gray-500">{{ group.branchCode ?? '-' }}</td>
                     <td class="px-2 py-1.5 font-medium">{{ group.prefix }}</td>
                     <td class="px-2 py-1.5 text-right">{{ group.employees }}</td>
                     <td class="px-2 py-1.5">
@@ -2384,6 +2407,10 @@ watch([activeTab, month, session], () => {
                   </tr>
                 </tbody>
               </table>
+              <p v-if="branchGroups.length" class="mt-1 text-xs text-gray-500">
+                並びは給与大臣の所属コード (SHOZOKU.INCODE) 順です。拠点は営業所名 (NAME1) をそのまま使います。
+                所属CD が空の拠点は所属の表示名から推定したもの — 「社員マスタ」タブで給与DBから取り込み直すとコードと営業所名が入ります。
+              </p>
               <p v-else-if="branchGroupsLoaded" class="text-sm text-gray-500">
                 社員マスタに所属が登録されていません。先に「社員マスタ」タブで取り込んでください。
               </p>
@@ -3195,7 +3222,12 @@ watch([activeTab, month, session], () => {
                         @change="(e: Event) => setEmployeeDriverCd(row.key, (e.target as HTMLInputElement).value)"
                       />
                     </td>
-                    <td class="px-2 py-1.5">{{ row.current?.branch ?? '-' }}</td>
+                    <!-- 所属CD (INCODE) を並記する — 取り込みでコードと営業所名が
+                         入ったかを画面で確かめられるようにする (Refs #409) -->
+                    <td class="px-2 py-1.5">
+                      {{ row.current?.branch ?? '-' }}
+                      <span v-if="row.current?.branchCode" class="ml-1 text-xs text-gray-500">({{ row.current.branchCode }})</span>
+                    </td>
                     <td class="px-2 py-1.5">{{ row.current?.payScheme ?? '-' }}</td>
                     <td class="px-2 py-1.5">{{ row.current?.effectiveFrom ?? '-' }}</td>
                     <td class="px-2 py-1.5">

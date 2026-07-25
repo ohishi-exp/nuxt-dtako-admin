@@ -55,8 +55,15 @@ export interface EmployeeAttrInput {
   payrollCd: string;
   /** YYYY-MM-DD */
   effectiveFrom: string;
+  /** 所属の表示名 (`SHOZOKU.SNAME` = `本社　乗務員`)。 */
   branch: string | null;
   payScheme: string | null;
+  /** 所属コード (`SHOZOKU.INCODE`)。**並べ替えの基準** (Refs #409)。 */
+  branchCode: number | null;
+  /** 営業所名 (`SHOZOKU.NAME1`)。拠点 = 最低賃金を引く単位。 */
+  branchName: string | null;
+  /** 職種名 (`SHOZOKU.NAME2`)。 */
+  jobName: string | null;
 }
 
 export interface EmployeeDeleteKey {
@@ -110,6 +117,19 @@ function normalizeOptionalText(raw: unknown): string | null {
   return trimmed || null;
 }
 
+/**
+ * 所属コード (`SHOZOKU.INCODE`) の正規化。
+ *
+ * **fail-soft (不正値は null)** — 他の必須項目と違いこれは*並べ替えのヒント*で
+ * あって識別情報ではない。壊れた値で PUT 全体を 400 にするより、コード無しの
+ * 行として受けて表示名順にフォールバックするほうが運用が止まらない。
+ * `0` は給与大臣側の「未設定」なので null に倒す。
+ */
+function normalizeBranchCode(raw: unknown): number | null {
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw <= 0) return null;
+  return raw;
+}
+
 function normalizeEmployeeInput(raw: unknown, index: number): EmployeeInput {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new EmployeeMasterError(`employees[${index}] がオブジェクトではありません`);
@@ -140,6 +160,9 @@ function normalizeAttrInput(raw: unknown, index: number): EmployeeAttrInput {
     effectiveFrom: obj.effectiveFrom,
     branch: normalizeOptionalText(obj.branch),
     payScheme: normalizeOptionalText(obj.payScheme),
+    branchCode: normalizeBranchCode(obj.branchCode),
+    branchName: normalizeOptionalText(obj.branchName),
+    jobName: normalizeOptionalText(obj.jobName),
   };
 }
 
@@ -252,12 +275,26 @@ export function buildEmployeeMasterWriteStatements(
   }
   for (const a of body.attrs) {
     statements.push({
-      sql: `INSERT INTO employee_attrs (comp_id, company, payroll_cd, effective_from, branch, pay_scheme)
-            VALUES (?, ?, ?, ?, ?, ?)
+      sql: `INSERT INTO employee_attrs
+              (comp_id, company, payroll_cd, effective_from, branch, pay_scheme, branch_code, branch_name, job_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(comp_id, company, payroll_cd, effective_from) DO UPDATE SET
               branch = excluded.branch,
-              pay_scheme = excluded.pay_scheme`,
-      params: [compId, a.company, a.payrollCd, a.effectiveFrom, a.branch, a.payScheme],
+              pay_scheme = excluded.pay_scheme,
+              branch_code = excluded.branch_code,
+              branch_name = excluded.branch_name,
+              job_name = excluded.job_name`,
+      params: [
+        compId,
+        a.company,
+        a.payrollCd,
+        a.effectiveFrom,
+        a.branch,
+        a.payScheme,
+        a.branchCode,
+        a.branchName,
+        a.jobName,
+      ],
     });
   }
   for (const k of body.deleteAttrs) {
@@ -289,6 +326,12 @@ export interface EmployeeAttrRow {
   effectiveFrom: string;
   branch: string | null;
   payScheme: string | null;
+  /** 所属コード (`SHOZOKU.INCODE`)。migration 0010 以前の行は null。 */
+  branchCode: number | null;
+  /** 営業所名 (`SHOZOKU.NAME1`)。migration 0010 以前の行は null。 */
+  branchName: string | null;
+  /** 職種名 (`SHOZOKU.NAME2`)。migration 0010 以前の行は null。 */
+  jobName: string | null;
 }
 
 export interface EmployeeMasterEntry {
@@ -318,6 +361,10 @@ export interface EmployeeAttrD1Row {
   effective_from: string;
   branch: string | null;
   pay_scheme: string | null;
+  /** migration 0010 で追加。取り込み前の行は NULL。 */
+  branch_code: number | null;
+  branch_name: string | null;
+  job_name: string | null;
 }
 
 /**
@@ -334,7 +381,15 @@ export function buildEmployeeMasterResponse(
   for (const r of attrRows) {
     const key = `${r.company}|${r.payroll_cd}`;
     const list = attrsByKey.get(key) ?? [];
-    list.push({ effectiveFrom: r.effective_from, branch: r.branch, payScheme: r.pay_scheme });
+    list.push({
+      effectiveFrom: r.effective_from,
+      branch: r.branch,
+      payScheme: r.pay_scheme,
+      // D1 の未設定は NULL だが、SQLite の型は緩いので undefined 相当に倒しておく
+      branchCode: r.branch_code ?? null,
+      branchName: r.branch_name ?? null,
+      jobName: r.job_name ?? null,
+    });
     attrsByKey.set(key, list);
   }
   for (const list of attrsByKey.values()) list.sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom));

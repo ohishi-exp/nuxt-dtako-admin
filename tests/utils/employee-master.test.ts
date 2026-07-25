@@ -10,6 +10,7 @@ import {
   findUnregistered,
   joinDriverAttr,
   normalizeAttrText,
+  normalizeBranchCode,
   normalizeCompanyLabel,
   normalizeDriverCdKey,
   payScheme,
@@ -20,6 +21,7 @@ import {
   sortEmployeeEntries,
   splitCdMapKey,
   upsertAttrRow,
+  type EmployeeAttrRow,
   type EmployeeMasterEntry,
   type KyuyoEmployeeRow,
   type KyuyoEmployeesResponse,
@@ -28,6 +30,12 @@ import type { SalaryCsvRow } from '../../app/utils/salary-compare'
 
 function entry(over: Partial<EmployeeMasterEntry> = {}): EmployeeMasterEntry {
   return { company: '株', payrollCd: '7', name: '山田太郎', driverCd: '99', attrs: [], ...over }
+}
+
+/** 属性履歴 1 行。所属コード・営業所名・職種名 (Refs #409) は既定 null —
+ * migration 0010 以前に取り込んだ行と同じ状態で、必要なテストだけ上書きする。 */
+function attr(over: Partial<EmployeeAttrRow> & { effectiveFrom: string }): EmployeeAttrRow {
+  return { branch: null, payScheme: null, branchCode: null, branchName: null, jobName: null, ...over }
 }
 
 function csvRow(over: Partial<SalaryCsvRow> = {}): SalaryCsvRow {
@@ -47,8 +55,8 @@ function csvRow(over: Partial<SalaryCsvRow> = {}): SalaryCsvRow {
 describe('resolveAttrsAt', () => {
   const e = entry({
     attrs: [
-      { effectiveFrom: '2025-04-01', branch: '支社', payScheme: 'B' },
-      { effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' },
+      attr({ effectiveFrom: '2025-04-01', branch: '支社', payScheme: 'B' }),
+      attr({ effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' }),
     ],
   })
 
@@ -58,7 +66,7 @@ describe('resolveAttrsAt', () => {
   })
 
   it('全て未来なら null', () => {
-    expect(resolveAttrsAt(entry({ attrs: [{ effectiveFrom: '2026-04-01', branch: null, payScheme: null }] }), '2025-01')).toBeNull()
+    expect(resolveAttrsAt(entry({ attrs: [attr({ effectiveFrom: '2026-04-01', branch: null, payScheme: null })] }), '2025-01')).toBeNull()
   })
 
   it('attrs が空なら null', () => {
@@ -73,8 +81,8 @@ describe('resolveAttrsAt', () => {
   it('未整列でも有効な最新行を正しく選ぶ', () => {
     const unsorted = entry({
       attrs: [
-        { effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' },
-        { effectiveFrom: '2025-04-01', branch: '支社', payScheme: 'B' },
+        attr({ effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' }),
+        attr({ effectiveFrom: '2025-04-01', branch: '支社', payScheme: 'B' }),
       ],
     })
     expect(resolveAttrsAt(unsorted, '2026-12')).toEqual(unsorted.attrs[0])
@@ -149,24 +157,24 @@ describe('findUnregistered', () => {
 
 describe('upsertAttrRow', () => {
   const base = [
-    { effectiveFrom: '2025-04-01', branch: '支社', payScheme: 'B' },
-    { effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' },
+    attr({ effectiveFrom: '2025-04-01', branch: '支社', payScheme: 'B' }),
+    attr({ effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' }),
   ]
 
   it('新しい適用開始日を追加し昇順に並べ替える', () => {
-    const out = upsertAttrRow(base, { effectiveFrom: '2025-10-01', branch: '営業所', payScheme: 'C' })
+    const out = upsertAttrRow(base, attr({ effectiveFrom: '2025-10-01', branch: '営業所', payScheme: 'C' }))
     expect(out.map(a => a.effectiveFrom)).toEqual(['2025-04-01', '2025-10-01', '2026-04-01'])
   })
 
   it('同じ適用開始日の行は置換する', () => {
-    const out = upsertAttrRow(base, { effectiveFrom: '2026-04-01', branch: '本社2', payScheme: null })
+    const out = upsertAttrRow(base, attr({ effectiveFrom: '2026-04-01', branch: '本社2', payScheme: null }))
     expect(out).toHaveLength(2)
-    expect(out[1]).toEqual({ effectiveFrom: '2026-04-01', branch: '本社2', payScheme: null })
+    expect(out[1]).toEqual(attr({ effectiveFrom: '2026-04-01', branch: '本社2', payScheme: null }))
   })
 
   it('元の配列は変更しない', () => {
     const attrs = [...base]
-    upsertAttrRow(attrs, { effectiveFrom: '2027-01-01', branch: null, payScheme: null })
+    upsertAttrRow(attrs, attr({ effectiveFrom: '2027-01-01', branch: null, payScheme: null }))
     expect(attrs).toHaveLength(2)
   })
 })
@@ -175,8 +183,8 @@ describe('removeAttrRow', () => {
   it('指定した適用開始日の行だけ除く', () => {
     const out = removeAttrRow(
       [
-        { effectiveFrom: '2025-04-01', branch: '支社', payScheme: null },
-        { effectiveFrom: '2026-04-01', branch: '本社', payScheme: null },
+        attr({ effectiveFrom: '2025-04-01', branch: '支社', payScheme: null }),
+        attr({ effectiveFrom: '2026-04-01', branch: '本社', payScheme: null }),
       ],
       '2025-04-01',
     )
@@ -191,11 +199,11 @@ describe('removeAttrRow', () => {
 describe('collectAttrRows', () => {
   it('全社員の属性履歴を社員キー込みの平坦な配列へ展開する', () => {
     const out = collectAttrRows([
-      entry({ company: '株', payrollCd: '7', attrs: [{ effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' }] }),
+      entry({ company: '株', payrollCd: '7', attrs: [attr({ effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' })] }),
       entry({ company: '有', payrollCd: '1', attrs: [] }),
     ])
     expect(out).toEqual([
-      { company: '株', payrollCd: '7', effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' },
+      { company: '株', payrollCd: '7', effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A', branchCode: null, branchName: null, jobName: null },
     ])
   })
 
@@ -222,22 +230,22 @@ describe('buildDriverAttrIndex', () => {
       [entry({
         driverCd: '007',
         attrs: [
-          { effectiveFrom: '2025-04-01', branch: '支社', payScheme: 'B' },
-          { effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' },
+          attr({ effectiveFrom: '2025-04-01', branch: '支社', payScheme: 'B' }),
+          attr({ effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' }),
         ],
       })],
       '2026-07',
     )
     expect(index.get('7')).toEqual([
-      { company: '株', attrs: { effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' } },
+      { company: '株', attrs: attr({ effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' }) },
     ])
   })
 
   it('driverCd 未突合・対象月末時点で有効な行が無い社員は載せない', () => {
     const index = buildDriverAttrIndex(
       [
-        entry({ payrollCd: '1', driverCd: null, attrs: [{ effectiveFrom: '2020-01-01', branch: '本社', payScheme: null }] }),
-        entry({ payrollCd: '2', driverCd: '50', attrs: [{ effectiveFrom: '2030-01-01', branch: '本社', payScheme: null }] }),
+        entry({ payrollCd: '1', driverCd: null, attrs: [attr({ effectiveFrom: '2020-01-01', branch: '本社', payScheme: null })] }),
+        entry({ payrollCd: '2', driverCd: '50', attrs: [attr({ effectiveFrom: '2030-01-01', branch: '本社', payScheme: null })] }),
         entry({ payrollCd: '3', driverCd: '51', attrs: [] }),
       ],
       '2026-07',
@@ -250,22 +258,22 @@ describe('buildDriverAttrIndex', () => {
     // 照合順が環境で違い CI と開発機で逆になるため使わない。
     const index = buildDriverAttrIndex(
       [
-        entry({ company: '株', payrollCd: '1', driverCd: '9', attrs: [{ effectiveFrom: '2020-01-01', branch: '本社 乗務員', payScheme: 'A' }] }),
-        entry({ company: '有', payrollCd: '2', driverCd: '9', attrs: [{ effectiveFrom: '2021-01-01', branch: '帯広 乗務員', payScheme: 'B' }] }),
+        entry({ company: '株', payrollCd: '1', driverCd: '9', attrs: [attr({ effectiveFrom: '2020-01-01', branch: '本社 乗務員', payScheme: 'A' })] }),
+        entry({ company: '有', payrollCd: '2', driverCd: '9', attrs: [attr({ effectiveFrom: '2021-01-01', branch: '帯広 乗務員', payScheme: 'B' })] }),
       ],
       '2026-07',
     )
     expect(index.get('9')).toEqual([
-      { company: '有', attrs: { effectiveFrom: '2021-01-01', branch: '帯広 乗務員', payScheme: 'B' } },
-      { company: '株', attrs: { effectiveFrom: '2020-01-01', branch: '本社 乗務員', payScheme: 'A' } },
+      { company: '有', attrs: attr({ effectiveFrom: '2021-01-01', branch: '帯広 乗務員', payScheme: 'B' }) },
+      { company: '株', attrs: attr({ effectiveFrom: '2020-01-01', branch: '本社 乗務員', payScheme: 'A' }) },
     ])
   })
 
   it('同じ会社の複数行が同じ driverCd に紐づいても落とさない', () => {
     const index = buildDriverAttrIndex(
       [
-        entry({ company: '株', payrollCd: '1', driverCd: '9', attrs: [{ effectiveFrom: '2020-01-01', branch: '本社', payScheme: null }] }),
-        entry({ company: '株', payrollCd: '2', driverCd: '9', attrs: [{ effectiveFrom: '2020-01-01', branch: '諸富', payScheme: null }] }),
+        entry({ company: '株', payrollCd: '1', driverCd: '9', attrs: [attr({ effectiveFrom: '2020-01-01', branch: '本社', payScheme: null })] }),
+        entry({ company: '株', payrollCd: '2', driverCd: '9', attrs: [attr({ effectiveFrom: '2020-01-01', branch: '諸富', payScheme: null })] }),
       ],
       '2026-07',
     )
@@ -274,8 +282,8 @@ describe('buildDriverAttrIndex', () => {
 
   it('入力の並び順が違っても結果が同じ (D1 の SELECT 順に依存しない)', () => {
     const rows = [
-      entry({ company: '株', payrollCd: '1', driverCd: '9', attrs: [{ effectiveFrom: '2020-01-01', branch: '本社', payScheme: null }] }),
-      entry({ company: '有', payrollCd: '2', driverCd: '9', attrs: [{ effectiveFrom: '2020-01-01', branch: '帯広', payScheme: null }] }),
+      entry({ company: '株', payrollCd: '1', driverCd: '9', attrs: [attr({ effectiveFrom: '2020-01-01', branch: '本社', payScheme: null })] }),
+      entry({ company: '有', payrollCd: '2', driverCd: '9', attrs: [attr({ effectiveFrom: '2020-01-01', branch: '帯広', payScheme: null })] }),
     ]
     const forward = buildDriverAttrIndex(rows, '2026-07').get('9')
     const reversed = buildDriverAttrIndex([...rows].reverse(), '2026-07').get('9')
@@ -285,8 +293,8 @@ describe('buildDriverAttrIndex', () => {
 
 describe('joinDriverAttr', () => {
   const entries = [
-    { company: '株', attrs: { effectiveFrom: '2026-01-01', branch: '本社 乗務員', payScheme: '体系1' } },
-    { company: '有', attrs: { effectiveFrom: '2026-01-01', branch: '帯広 乗務員', payScheme: '体系2' } },
+    { company: '株', attrs: attr({ effectiveFrom: '2026-01-01', branch: '本社 乗務員', payScheme: '体系1' }) },
+    { company: '有', attrs: attr({ effectiveFrom: '2026-01-01', branch: '帯広 乗務員', payScheme: '体系2' }) },
   ]
 
   it('複数会社の値を " / " で連結する', () => {
@@ -296,18 +304,18 @@ describe('joinDriverAttr', () => {
 
   it('会社が違っても同値なら 1 つに畳む (従来の 1 値出力と同じになる)', () => {
     expect(joinDriverAttr([
-      { company: '株', attrs: { effectiveFrom: '2026-01-01', branch: '本社 乗務員', payScheme: null } },
-      { company: '有', attrs: { effectiveFrom: '2026-01-01', branch: '本社 乗務員', payScheme: null } },
+      { company: '株', attrs: attr({ effectiveFrom: '2026-01-01', branch: '本社 乗務員', payScheme: null }) },
+      { company: '有', attrs: attr({ effectiveFrom: '2026-01-01', branch: '本社 乗務員', payScheme: null }) },
     ], 'branch')).toBe('本社 乗務員')
   })
 
   it('未設定 (null・空文字) の値は落とす', () => {
     expect(joinDriverAttr([
-      { company: '株', attrs: { effectiveFrom: '2026-01-01', branch: null, payScheme: '' } },
-      { company: '有', attrs: { effectiveFrom: '2026-01-01', branch: '帯広', payScheme: '体系2' } },
+      { company: '株', attrs: attr({ effectiveFrom: '2026-01-01', branch: null, payScheme: '' }) },
+      { company: '有', attrs: attr({ effectiveFrom: '2026-01-01', branch: '帯広', payScheme: '体系2' }) },
     ], 'branch')).toBe('帯広')
     expect(joinDriverAttr([
-      { company: '株', attrs: { effectiveFrom: '2026-01-01', branch: null, payScheme: '' } },
+      { company: '株', attrs: attr({ effectiveFrom: '2026-01-01', branch: null, payScheme: '' }) },
     ], 'payScheme')).toBe('')
   })
 
@@ -449,6 +457,17 @@ describe('normalizeCompanyLabel / payScheme', () => {
     expect(payScheme(1)).toBe('体系1')
     expect(payScheme(0)).toBeNull()
   })
+
+  it('所属コードは正の整数だけ通す (worker の PUT 検証と同一規則、Refs #409)', () => {
+    expect(normalizeBranchCode(14)).toBe(14)
+    // 0 は給与大臣側の「未設定」
+    expect(normalizeBranchCode(0)).toBeNull()
+    expect(normalizeBranchCode(-1)).toBeNull()
+    expect(normalizeBranchCode(1.5)).toBeNull()
+    expect(normalizeBranchCode('14')).toBeNull()
+    expect(normalizeBranchCode(null)).toBeNull()
+    expect(normalizeBranchCode(undefined)).toBeNull()
+  })
 })
 
 describe('planPayrollDbImport', () => {
@@ -457,6 +476,9 @@ describe('planPayrollDbImport', () => {
     employee_code_key: '7',
     employee_name: '山田　太郎',
     department: '本社　乗務員',
+    department_code: 14,
+    branch_name: '本社',
+    job_name: '乗務員',
     taikei: 1,
     retired: false,
     ...over,
@@ -478,7 +500,16 @@ describe('planPayrollDbImport', () => {
       { company: '0100', payrollCd: '7', name: '山田　太郎', driverCd: null },
     ])
     expect(plan.attrs).toEqual([
-      { company: '0100', payrollCd: '7', effectiveFrom: '2026-07-01', branch: '本社 乗務員', payScheme: '体系1' },
+      {
+        company: '0100',
+        payrollCd: '7',
+        effectiveFrom: '2026-07-01',
+        branch: '本社 乗務員',
+        payScheme: '体系1',
+        branchCode: 14,
+        branchName: '本社',
+        jobName: '乗務員',
+      },
     ])
     expect(plan.deleteEmployees).toEqual([])
   })
@@ -505,10 +536,62 @@ describe('planPayrollDbImport', () => {
       company: '0100',
       payrollCd: '7',
       driverCd: null,
-      attrs: [{ effectiveFrom: '2026-04-01', branch: '本社 乗務員', payScheme: '体系1' }],
+      attrs: [attr({
+        effectiveFrom: '2026-04-01',
+        branch: '本社 乗務員',
+        payScheme: '体系1',
+        branchCode: 14,
+        branchName: '本社',
+        jobName: '乗務員',
+      })],
     })
     const plan = planPayrollDbImport(res([kyuyoRow()]), [current], '2026-07', null)
     expect(plan.attrs).toEqual([])
+  })
+
+  it('所属コードだけ未取得の既存行は、再取り込みで埋める (Refs #409)', () => {
+    // migration 0010 以前に取り込んだ本番 182 件がこの状態。所属名は同じでも
+    // 所属コード・営業所名・職種名が空なので差分として拾い、履歴行を更新する
+    const current = entry({
+      company: '0100',
+      payrollCd: '7',
+      driverCd: null,
+      attrs: [attr({ effectiveFrom: '2026-07-01', branch: '本社 乗務員', payScheme: '体系1' })],
+    })
+    const plan = planPayrollDbImport(res([kyuyoRow()]), [current], '2026-07', null)
+    // 同じ effectiveFrom なので D1 側は UPDATE になり、履歴は増えない
+    expect(plan.attrs).toEqual([
+      {
+        company: '0100',
+        payrollCd: '7',
+        effectiveFrom: '2026-07-01',
+        branch: '本社 乗務員',
+        payScheme: '体系1',
+        branchCode: 14,
+        branchName: '本社',
+        jobName: '乗務員',
+      },
+    ])
+  })
+
+  it('所属コード列を返さない古い API 応答でも取り込める (rust-ichibanboshi#98 以前)', () => {
+    const row = kyuyoRow()
+    delete row.department_code
+    delete row.branch_name
+    delete row.job_name
+    const plan = planPayrollDbImport(res([row]), [], '2026-07', null)
+    expect(plan.attrs[0]).toMatchObject({
+      branch: '本社 乗務員',
+      branchCode: null,
+      branchName: null,
+      jobName: null,
+    })
+  })
+
+  it('所属コードが 0 (給与大臣側の未設定) なら null にする', () => {
+    const plan = planPayrollDbImport(
+      res([kyuyoRow({ department_code: 0, branch_name: '  ', job_name: '' })]), [], '2026-07', null)
+    expect(plan.attrs[0]).toMatchObject({ branchCode: null, branchName: null, jobName: null })
   })
 
   it('所属が変わっていれば当月初の履歴を足す', () => {
@@ -516,11 +599,20 @@ describe('planPayrollDbImport', () => {
       company: '0100',
       payrollCd: '7',
       driverCd: null,
-      attrs: [{ effectiveFrom: '2026-04-01', branch: '支社', payScheme: '体系1' }],
+      attrs: [attr({ effectiveFrom: '2026-04-01', branch: '支社', payScheme: '体系1' })],
     })
     const plan = planPayrollDbImport(res([kyuyoRow()]), [current], '2026-07', null)
     expect(plan.attrs).toEqual([
-      { company: '0100', payrollCd: '7', effectiveFrom: '2026-07-01', branch: '本社 乗務員', payScheme: '体系1' },
+      {
+        company: '0100',
+        payrollCd: '7',
+        effectiveFrom: '2026-07-01',
+        branch: '本社 乗務員',
+        payScheme: '体系1',
+        branchCode: 14,
+        branchName: '本社',
+        jobName: '乗務員',
+      },
     ])
   })
 
@@ -529,14 +621,23 @@ describe('planPayrollDbImport', () => {
       company: '0100',
       payrollCd: '7',
       driverCd: null,
-      attrs: [{ effectiveFrom: '2026-04-01', branch: '本社 乗務員', payScheme: '体系1' }],
+      attrs: [attr({
+        effectiveFrom: '2026-04-01',
+        branch: '本社 乗務員',
+        payScheme: '体系1',
+        branchCode: 14,
+        branchName: '本社',
+        jobName: '乗務員',
+      })],
     })
     const plan = planPayrollDbImport(res([kyuyoRow({ department: '本社　乗務員' })]), [current], '2026-07', null)
     expect(plan.attrs).toEqual([])
   })
 
   it('所属も体系も無い新規社員は属性行を作らない', () => {
-    const plan = planPayrollDbImport(res([kyuyoRow({ department: '  ', taikei: 0 })]), [], '2026-07', null)
+    const plan = planPayrollDbImport(
+      res([kyuyoRow({ department: '  ', taikei: 0, department_code: 0, branch_name: '  ', job_name: '  ' })]),
+      [], '2026-07', null)
     expect(plan.employees).toHaveLength(1)
     expect(plan.attrs).toEqual([])
   })
