@@ -581,6 +581,15 @@ ZIP (実測 85KB) が返る。詳細は下の運用手順 3. 内の note を参�
    > only (named environment 配下には書けない) なので wrangler.toml の
    > トップレベルに 1 箇所だけ書けば staging/本番どちらの deploy にも効く。
 
+   > **`DTAKO_ACCOUNTS` は KV (`dtako-relay-config` の `dtako_accounts`) が正**
+   > (Refs #367)。dashboard の plain 変数は `keep_vars = true` があっても本番から
+   > 消えた実績があり (2026-07-25)、消えると `viewerCompIdsForTenant` が
+   > fail-closed になって **/restraint-api/* が全会社 401** (画面には
+   > 「セッションが無効か期限切れです」としか出ない) + dtako cron も skip する。
+   > 解決順は KV → 従来 binding のフォールバック (`resolveDtakoAccountsRaw`)、
+   > 空なら DO が `dtako_accounts: "missing"` を console.error する。
+   > **投入は 1 回だけで CI は書かない** — CI は存在検証で deploy を落とす。
+   >
    > **D1 migration (`migrations/`) もこの workflow が適用する** — 詳細は上の
    > 「D1 binding と migration」節 (trigger paths に `migrations/**` /
    > `scripts/d1/**` を含む、Refs #367)。

@@ -6,7 +6,9 @@ import {
   etcCsvKey,
   parseDtakoAccounts,
   parseEtcAccounts,
+  resolveDtakoAccountsRaw,
   resolveSecretBinding,
+  DTAKO_ACCOUNTS_KV_KEY,
   runScheduledCron,
   yesterdayJst,
   type CronDoCall,
@@ -187,5 +189,32 @@ describe('runScheduledCron: 未知の cron 式', () => {
     expect(results[0].kind).toBe('none')
     expect(results[0].ok).toBe(false)
     expect(results[0].detail).toContain('未知の cron 式')
+  })
+})
+
+describe('resolveDtakoAccountsRaw', () => {
+  const kv = (value: string | null) => ({ get: async (key: string) => (key === DTAKO_ACCOUNTS_KV_KEY ? value : null) })
+
+  it('KV に値があれば KV が勝つ (binding より優先)', async () => {
+    expect(await resolveDtakoAccountsRaw(kv('[{"comp_id":"1"}]'), '[{"comp_id":"old"}]')).toBe('[{"comp_id":"1"}]')
+  })
+
+  it('KV が空なら binding にフォールバックする', async () => {
+    expect(await resolveDtakoAccountsRaw(kv(null), '[{"comp_id":"old"}]')).toBe('[{"comp_id":"old"}]')
+    expect(await resolveDtakoAccountsRaw(kv(''), '[{"comp_id":"old"}]')).toBe('[{"comp_id":"old"}]')
+  })
+
+  it('KV binding 自体が無ければ binding だけを見る', async () => {
+    expect(await resolveDtakoAccountsRaw(undefined, '[{"comp_id":"old"}]')).toBe('[{"comp_id":"old"}]')
+    expect(await resolveDtakoAccountsRaw({}, '[{"comp_id":"old"}]')).toBe('[{"comp_id":"old"}]')
+  })
+
+  it('どちらも無ければ空文字 (呼び出し側が loud fail する)', async () => {
+    expect(await resolveDtakoAccountsRaw(kv(null), undefined)).toBe('')
+  })
+
+  it('Secrets Store binding (get() 引数なし) にもフォールバックできる', async () => {
+    const secretsStore = { get: async () => '[{"comp_id":"secret"}]' }
+    expect(await resolveDtakoAccountsRaw(undefined, secretsStore)).toBe('[{"comp_id":"secret"}]')
   })
 })
