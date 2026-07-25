@@ -93,11 +93,12 @@ const TABS = [
   { key: 'items', label: '支給項目区分' },
   { key: 'master', label: '単価マスタ' },
   { key: 'employees', label: '社員マスタ' },
+  { key: 'schedule', label: '勤務設定' },
 ] as const
 
 /** 対象月が効くタブ。ここに無いタブでは年月バーを出さない (Refs #409)。
  * 単価マスタは選択月時点の単価を出すので対象に含む。 */
-const MONTH_AWARE_TABS: string[] = ['archive', 'monthly', 'minwage', 'salary', 'master']
+const MONTH_AWARE_TABS: string[] = ['archive', 'monthly', 'minwage', 'salary', 'master', 'schedule']
 
 type TabKey = typeof TABS[number]['key']
 const activeTab = ref<TabKey>('monthly')
@@ -2000,6 +2001,162 @@ function setBranchPrefecture(prefix: string, prefecture: string | null) {
   minWageMessage.value = '「保存」で確定します'
 }
 
+// ---------------------------------------------------------------------------
+// 勤務設定 — 所定労働時間 + 休日出勤の承認 (Refs #424 PR-C)
+// ---------------------------------------------------------------------------
+// どちらもタイムカード (社内 CakePHP) 由来の勤務を法定区分へ振り分けるための入力で、
+// デジタコ (theearth) 由来の乗務員には効かない — 時間外は拘束時間 CSV がそのまま
+// 持っているため。所定労働時間は「実働がこれを超えた分 = 時間外」の基準、休日出勤の
+// 承認は「休日の打刻を割増対象にするか (= 休日出勤) / 賃金計算から外すか (= 自主出勤)」
+// の判定に使う。
+//
+// **休憩の所定値は持たない** — 事務員は昼休憩で打刻を切っているため、休憩は打刻の
+// 中抜けギャップと 12:00-13:00 の和集合から算出する (取り込み側の責務)。
+
+interface WorkScheduleRow {
+  effectiveFrom: string
+  /** null = 全拠点 */
+  branchCode: number | null
+  /** null = 全職種 */
+  jobName: string | null
+  dailyWorkMinutes: number
+}
+interface HolidayWorkEntry { driverCd: string, workDate: string, reason: string | null }
+
+const workSchedules = ref<WorkScheduleRow[]>([])
+const workScheduleLoaded = ref(false)
+const savingWorkSchedule = ref(false)
+const workScheduleMessage = ref('')
+const scheduleForm = ref({ effectiveFrom: '', branchCode: '', jobName: '', dailyWorkMinutes: '480' })
+
+const holidayWorks = ref<HolidayWorkEntry[]>([])
+const holidayWorkLoaded = ref(false)
+const savingHolidayWork = ref(false)
+const holidayWorkMessage = ref('')
+const holidayForm = ref({ driverCd: '', workDate: '', reason: '' })
+
+/** 分 → 「8.0 時間」表示 (入力は分だが、人が読むのは時間のため併記する)。 */
+function fmtWorkHours(minutes: number): string {
+  return `${(minutes / 60).toFixed(1)} 時間`
+}
+
+async function loadWorkSchedule() {
+  if (!session.value) return
+  try {
+    const res = await $fetch<{ schedules: WorkScheduleRow[] }>('/restraint-api/work-schedule', {
+      headers: authHeaders(),
+    })
+    workSchedules.value = res.schedules
+    workScheduleLoaded.value = true
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+}
+
+async function loadHolidayWork() {
+  if (!session.value || !month.value) return
+  try {
+    const res = await $fetch<{ approvals: HolidayWorkEntry[] }>('/restraint-api/holiday-work', {
+      headers: authHeaders(),
+      query: { month: month.value },
+    })
+    holidayWorks.value = res.approvals
+    holidayWorkLoaded.value = true
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+}
+
+async function putWorkSchedule(body: Record<string, unknown>, message: string) {
+  if (!session.value) return
+  savingWorkSchedule.value = true
+  pageError.value = ''
+  try {
+    await $fetch('/restraint-api/work-schedule', { method: 'PUT', headers: authHeaders(), body })
+    workScheduleMessage.value = message
+    await loadWorkSchedule()
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+  finally {
+    savingWorkSchedule.value = false
+  }
+}
+
+async function addWorkSchedule() {
+  const minutes = Number(scheduleForm.value.dailyWorkMinutes)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(scheduleForm.value.effectiveFrom)) {
+    pageError.value = '適用開始日は YYYY-MM-DD で入力してください'
+    return
+  }
+  if (!Number.isInteger(minutes) || minutes <= 0 || minutes > 1440) {
+    pageError.value = '所定労働時間は 1〜1440 の整数 (分) で入力してください'
+    return
+  }
+  await putWorkSchedule({
+    schedules: [{
+      effectiveFrom: scheduleForm.value.effectiveFrom,
+      branchCode: scheduleForm.value.branchCode ? Number(scheduleForm.value.branchCode) : null,
+      jobName: scheduleForm.value.jobName || null,
+      dailyWorkMinutes: minutes,
+    }],
+  }, '所定労働時間を保存しました')
+}
+
+async function deleteWorkSchedule(row: WorkScheduleRow) {
+  await putWorkSchedule({
+    deleteSchedules: [{
+      effectiveFrom: row.effectiveFrom,
+      branchCode: row.branchCode,
+      jobName: row.jobName,
+    }],
+  }, '所定労働時間の設定を削除しました')
+}
+
+async function putHolidayWork(body: Record<string, unknown>, message: string) {
+  if (!session.value) return
+  savingHolidayWork.value = true
+  pageError.value = ''
+  try {
+    await $fetch('/restraint-api/holiday-work', { method: 'PUT', headers: authHeaders(), body })
+    holidayWorkMessage.value = message
+    await loadHolidayWork()
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+  finally {
+    savingHolidayWork.value = false
+  }
+}
+
+async function addHolidayWork() {
+  if (!/^\d{1,8}$/.test(holidayForm.value.driverCd.trim())) {
+    pageError.value = '乗務員CD は数字 (最大8桁) で入力してください'
+    return
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(holidayForm.value.workDate)) {
+    pageError.value = '出勤日は YYYY-MM-DD で入力してください'
+    return
+  }
+  await putHolidayWork({
+    approvals: [{
+      driverCd: holidayForm.value.driverCd.trim(),
+      workDate: holidayForm.value.workDate,
+      reason: holidayForm.value.reason || null,
+    }],
+  }, '休日出勤を承認しました')
+}
+
+async function deleteHolidayWork(entry: HolidayWorkEntry) {
+  await putHolidayWork({
+    deleteApprovals: [{ driverCd: entry.driverCd, workDate: entry.workDate }],
+  }, '休日出勤の承認を取り消しました (この日は自主出勤に戻ります)')
+}
+
 watch([activeTab, month, session], () => {
   if (!session.value || !month.value) return
   // 上部バーの「給与DBから読み込み」はどのタブからでも押せるようにしている。
@@ -2035,6 +2192,11 @@ watch([activeTab, month, session], () => {
   else if (activeTab.value === 'employees') {
     // 会社横断表示のため、選択中の範囲に必要な会社をまとめて読む (Refs #367)
     loadEmployeeMasterScope()
+  }
+  else if (activeTab.value === 'schedule') {
+    // 所定は履歴全件なので 1 回だけ。承認簿は月で絞るので月が変わるたびに引き直す
+    if (!workScheduleLoaded.value) loadWorkSchedule()
+    loadHolidayWork()
   }
 }, { immediate: false })
 </script>
@@ -3443,6 +3605,136 @@ watch([activeTab, month, session], () => {
               </div>
             </template>
           </UModal>
+        </template>
+
+        <!-- ⑤ 勤務設定 (所定労働時間 + 休日出勤の承認、Refs #424 PR-C) -->
+        <template v-else-if="activeTab === 'schedule'">
+          <UCard>
+            <template #header>
+              <div class="flex flex-wrap items-center gap-3">
+                <span class="font-semibold">所定労働時間</span>
+                <span class="text-xs text-gray-500">タイムカード由来の勤務で「実働がこれを超えた分 = 時間外」の基準</span>
+                <div class="flex-1" />
+                <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" :loading="savingWorkSchedule" @click="loadWorkSchedule" />
+              </div>
+            </template>
+
+            <p v-if="workScheduleMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2 mb-3">
+              {{ workScheduleMessage }}
+            </p>
+
+            <div class="flex flex-wrap items-end gap-2 mb-4">
+              <UFormField label="適用開始日" size="xs">
+                <UInput v-model="scheduleForm.effectiveFrom" type="date" size="xs" class="w-40" />
+              </UFormField>
+              <UFormField label="所定 (分)" size="xs" :help="`= ${fmtWorkHours(Number(scheduleForm.dailyWorkMinutes) || 0)}`">
+                <UInput v-model="scheduleForm.dailyWorkMinutes" type="number" min="1" max="1440" size="xs" class="w-28" />
+              </UFormField>
+              <UFormField label="拠点コード" size="xs" help="空欄 = 全拠点">
+                <UInput v-model="scheduleForm.branchCode" type="number" min="1" size="xs" class="w-28" placeholder="全拠点" />
+              </UFormField>
+              <UFormField label="職種" size="xs" help="空欄 = 全職種">
+                <UInput v-model="scheduleForm.jobName" size="xs" class="w-36" placeholder="全職種" />
+              </UFormField>
+              <UButton size="xs" icon="i-lucide-plus" label="追加・更新" :loading="savingWorkSchedule" @click="addWorkSchedule" />
+            </div>
+
+            <p v-if="!workSchedules.length" class="text-sm text-gray-500">
+              まだ所定労働時間が設定されていません。まずは拠点・職種を空欄にした<b>全社の既定値</b>を 1 行入れてください
+              (例: 適用開始日 = 運用開始月の 1 日、所定 = 480 分)。
+            </p>
+            <table v-else class="w-full text-sm">
+              <thead class="bg-gray-50 dark:bg-gray-800">
+                <tr>
+                  <th class="px-2 py-2 text-left">適用開始日</th>
+                  <th class="px-2 py-2 text-left">拠点</th>
+                  <th class="px-2 py-2 text-left">職種</th>
+                  <th class="px-2 py-2 text-right">所定労働時間</th>
+                  <th class="px-2 py-2" />
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in workSchedules" :key="`${row.effectiveFrom}|${row.branchCode ?? ''}|${row.jobName ?? ''}`" class="border-t border-gray-200 dark:border-gray-700">
+                  <td class="px-2 py-1">{{ row.effectiveFrom }}</td>
+                  <td class="px-2 py-1">{{ row.branchCode ?? '全拠点' }}</td>
+                  <td class="px-2 py-1">{{ row.jobName ?? '全職種' }}</td>
+                  <td class="px-2 py-1 text-right">{{ row.dailyWorkMinutes }} 分<span class="text-xs text-gray-500 ml-1">({{ fmtWorkHours(row.dailyWorkMinutes) }})</span></td>
+                  <td class="px-2 py-1 text-right">
+                    <UButton size="xs" color="error" variant="ghost" icon="i-lucide-trash-2" :loading="savingWorkSchedule" @click="deleteWorkSchedule(row)" />
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+
+            <p class="text-xs text-gray-500 mt-3">
+              対象月に効く行は「<b>適用開始日が月末以前</b>」のうち<b>最も具体的なスコープ</b>のもの
+              (拠点+職種 &gt; 拠点 &gt; 職種 &gt; 全社既定)。具体度が同じなら適用開始日が新しい行が勝ちます。
+              具体度を先に見るのは、全社既定を後から更新した時に拠点別の設定が消えないようにするためです。<br>
+              <b>休憩は設定しません</b> — 打刻の中抜けと 12:00〜13:00 の和集合を休憩として実働から差し引きます
+              (事務員は昼休憩で打刻を切っているため、固定値より実態に合います)。<br>
+              デジタコ (theearth) 由来の乗務員には影響しません。時間外は拘束時間 CSV の値をそのまま使うためです。
+            </p>
+          </UCard>
+
+          <UCard class="mt-4">
+            <template #header>
+              <div class="flex flex-wrap items-center gap-3">
+                <span class="font-semibold">休日出勤の承認 ({{ fmtYm(month) }})</span>
+                <span class="text-xs text-gray-500">ここに登録した日だけが割増賃金の対象になります</span>
+                <div class="flex-1" />
+                <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" :loading="savingHolidayWork" @click="loadHolidayWork" />
+              </div>
+            </template>
+
+            <p v-if="holidayWorkMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2 mb-3">
+              {{ holidayWorkMessage }}
+            </p>
+
+            <div class="flex flex-wrap items-end gap-2 mb-4">
+              <UFormField label="乗務員CD" size="xs">
+                <UInput v-model="holidayForm.driverCd" size="xs" class="w-28" />
+              </UFormField>
+              <UFormField label="出勤日" size="xs" help="日跨ぎ勤務は始業日">
+                <UInput v-model="holidayForm.workDate" type="date" size="xs" class="w-40" />
+              </UFormField>
+              <UFormField label="理由・備考" size="xs">
+                <UInput v-model="holidayForm.reason" size="xs" class="w-64" placeholder="任意" />
+              </UFormField>
+              <UButton size="xs" icon="i-lucide-plus" label="承認を追加" :loading="savingHolidayWork" @click="addHolidayWork" />
+            </div>
+
+            <p v-if="!holidayWorks.length" class="text-sm text-gray-500">
+              {{ fmtYm(month) }} に承認済みの休日出勤はありません
+              (この月の休日の打刻はすべて<b>自主出勤</b>として賃金計算から外れ、時間だけが記録されます)。
+            </p>
+            <table v-else class="w-full text-sm">
+              <thead class="bg-gray-50 dark:bg-gray-800">
+                <tr>
+                  <th class="px-2 py-2 text-left">乗務員CD</th>
+                  <th class="px-2 py-2 text-left">出勤日</th>
+                  <th class="px-2 py-2 text-left">理由・備考</th>
+                  <th class="px-2 py-2" />
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="entry in holidayWorks" :key="`${entry.driverCd}|${entry.workDate}`" class="border-t border-gray-200 dark:border-gray-700">
+                  <td class="px-2 py-1">{{ entry.driverCd }}</td>
+                  <td class="px-2 py-1">{{ entry.workDate }}</td>
+                  <td class="px-2 py-1">{{ entry.reason ?? '' }}</td>
+                  <td class="px-2 py-1 text-right">
+                    <UButton size="xs" color="error" variant="ghost" icon="i-lucide-trash-2" :loading="savingHolidayWork" @click="deleteHolidayWork(entry)" />
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+
+            <p class="text-xs text-gray-500 mt-3">
+              休日 (法定休日 = 日曜 / 法定外休日 = 指定休・祝日) に打刻がある日のうち、<b>この表に載っている日だけ</b>が
+              休日出勤として割増賃金の対象になります。載っていない日は<b>自主出勤</b>として賃金計算から外れますが、
+              <b>時間は記録され画面にも出ます</b> — 後からこの表に日付を足せば休日出勤へ昇格します。<br>
+              休日出勤は運用上ほとんど発生しない前提のため、日付を明示登録する方式にしています。
+            </p>
+          </UCard>
         </template>
       </div>
     </template>

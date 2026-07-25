@@ -123,6 +123,17 @@ import {
   type EmployeeD1Row,
 } from "./employee-master";
 import {
+  buildHolidayWorkResponse,
+  buildHolidayWorkWriteStatements,
+  buildWorkScheduleResponse,
+  buildWorkScheduleWriteStatements,
+  normalizeHolidayWorkPutBody,
+  normalizeWorkSchedulePutBody,
+  WorkScheduleError,
+  type HolidayWorkD1Row,
+  type WorkScheduleD1Row,
+} from "./work-schedule";
+import {
   appendHistoryJsonl,
   downloadRestraintCsv,
   parseRestraintCsv,
@@ -1718,6 +1729,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/comp-map" && request.method === "GET") {
       return this.handleCompMap(record!);
     }
+    // ---- 所定労働時間マスタ / 休日出勤の承認簿 (Refs #424 PR-C) ----
+    if (url.pathname === "/restraint-api/work-schedule" && request.method === "GET") {
+      return this.handleWorkScheduleGet(record!);
+    }
+    if (url.pathname === "/restraint-api/work-schedule" && request.method === "PUT") {
+      return this.handleWorkSchedulePut(request, record!);
+    }
+    if (url.pathname === "/restraint-api/holiday-work" && request.method === "GET") {
+      return this.handleHolidayWorkGet(record!, url);
+    }
+    if (url.pathname === "/restraint-api/holiday-work" && request.method === "PUT") {
+      return this.handleHolidayWorkPut(request, record!);
+    }
     // ---- アーカイブ閲覧 (R2 読み出しのみ。Refs #244) ----
     if (url.pathname === "/restraint-api/archive/summaries" && request.method === "GET") {
       return this.handleArchiveSummaries(record!, url);
@@ -2307,6 +2331,111 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       console.error(JSON.stringify({ employee_master_put: "error", error: describeUnknownError(err) }));
       return dvrJsonError(502, "社員マスタの保存に失敗しました");
+    }
+    return Response.json({ saved: true, changed: statements.length });
+  }
+
+  /** GET /restraint-api/work-schedule — 所定労働時間マスタ全件 (Refs #424 PR-C)。
+   *
+   * タイムカード由来の勤務で「実働が所定を超えた分 = 時間外」を出すための入力。
+   * デジタコ (theearth) 由来の乗務員は CSV が時間外をそのまま持つので無関係。
+   * 社員マスタと同じく **comp スコープ必須** (テナント跨ぎで見せない、Refs #367)。 */
+  private async handleWorkScheduleGet(record: TheearthSessionRecord): Promise<Response> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return dvrJsonError(503, "所定マスタ (DTAKO_DB) が未設定です");
+    try {
+      const result = await db
+        .prepare(
+          `SELECT effective_from, branch_code, job_name, daily_work_minutes FROM work_schedules WHERE comp_id = ?`,
+        )
+        .bind(record.compId)
+        .all<WorkScheduleD1Row>();
+      return Response.json({ schedules: buildWorkScheduleResponse(result.results ?? []) });
+    } catch (err) {
+      console.error(JSON.stringify({ work_schedule_get: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "所定マスタの取得に失敗しました");
+    }
+  }
+
+  /** PUT /restraint-api/work-schedule — 差分 upsert/削除 (last-write-wins)。
+   * 書き込み先の comp はセッション record から取る (body の値は見ない)。 */
+  private async handleWorkSchedulePut(request: Request, record: TheearthSessionRecord): Promise<Response> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return dvrJsonError(503, "所定マスタ (DTAKO_DB) が未設定です");
+    let raw: unknown;
+    try {
+      raw = await request.json();
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    let body: ReturnType<typeof normalizeWorkSchedulePutBody>;
+    try {
+      body = normalizeWorkSchedulePutBody(raw);
+    } catch (err) {
+      if (err instanceof WorkScheduleError) return dvrJsonError(400, err.message);
+      throw err;
+    }
+    const statements = buildWorkScheduleWriteStatements(body, new Date().toISOString(), record.compId);
+    if (statements.length === 0) return Response.json({ saved: true, changed: 0 });
+    try {
+      await db.batch(statements.map((s) => db.prepare(s.sql).bind(...s.params)));
+    } catch (err) {
+      console.error(JSON.stringify({ work_schedule_put: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "所定マスタの保存に失敗しました");
+    }
+    return Response.json({ saved: true, changed: statements.length });
+  }
+
+  /** GET /restraint-api/holiday-work[?month=YYYY-MM] — 承認済み休日出勤の一覧。
+   *
+   * ここに載っている日だけが「休日出勤」として割増賃金の対象になる。載っていない
+   * 休日の打刻は「自主出勤」として賃金計算から外す (時間は記録・表示する)。
+   * `month` は任意 — 指定時はその月だけに絞る (画面は月単位で引く)。 */
+  private async handleHolidayWorkGet(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return dvrJsonError(503, "休日出勤の承認簿 (DTAKO_DB) が未設定です");
+    const month = url.searchParams.get("month");
+    if (month !== null && !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+      return dvrJsonError(400, "month は YYYY-MM で指定してください");
+    }
+    const sql = `SELECT driver_cd, work_date, reason FROM holiday_work_approvals WHERE comp_id = ?`;
+    try {
+      const stmt =
+        month === null
+          ? db.prepare(sql).bind(record.compId)
+          : db.prepare(`${sql} AND work_date LIKE ?`).bind(record.compId, `${month}-%`);
+      const result = await stmt.all<HolidayWorkD1Row>();
+      return Response.json({ approvals: buildHolidayWorkResponse(result.results ?? []) });
+    } catch (err) {
+      console.error(JSON.stringify({ holiday_work_get: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "休日出勤の承認簿の取得に失敗しました");
+    }
+  }
+
+  /** PUT /restraint-api/holiday-work — 差分 upsert/削除 (last-write-wins)。 */
+  private async handleHolidayWorkPut(request: Request, record: TheearthSessionRecord): Promise<Response> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return dvrJsonError(503, "休日出勤の承認簿 (DTAKO_DB) が未設定です");
+    let raw: unknown;
+    try {
+      raw = await request.json();
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    let body: ReturnType<typeof normalizeHolidayWorkPutBody>;
+    try {
+      body = normalizeHolidayWorkPutBody(raw);
+    } catch (err) {
+      if (err instanceof WorkScheduleError) return dvrJsonError(400, err.message);
+      throw err;
+    }
+    const statements = buildHolidayWorkWriteStatements(body, new Date().toISOString(), record.compId);
+    if (statements.length === 0) return Response.json({ saved: true, changed: 0 });
+    try {
+      await db.batch(statements.map((s) => db.prepare(s.sql).bind(...s.params)));
+    } catch (err) {
+      console.error(JSON.stringify({ holiday_work_put: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "休日出勤の承認簿の保存に失敗しました");
     }
     return Response.json({ saved: true, changed: statements.length });
   }

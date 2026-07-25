@@ -27,6 +27,7 @@ export default defineConfig({
         'src/theearth-session.ts',
         'src/promise-queue.ts',
         'src/employee-master.ts',
+        'src/work-schedule.ts',
         'src/min-wage-import.ts',
         'src/branch-prefecture.ts',
       ],
