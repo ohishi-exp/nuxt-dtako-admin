@@ -56,7 +56,7 @@ import {
   type ScrapeMonthTarget,
 } from "./etc-meisai-client";
 import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
-import { isR2OnlyRestraintPath, viewerCompIdsForTenant } from "./restraint-viewer-auth";
+import { devViewerCompIds, isR2OnlyRestraintPath, viewerCompIdsForTenant } from "./restraint-viewer-auth";
 import {
   buildDvrSearchKey,
   dvrDataUrl,
@@ -313,6 +313,10 @@ export interface RelayEnv {
    * ローカル開発専用: restraint viewer 経路 (Refs #272) の introspect を短絡して
    * この comp を許可する。`wrangler dev --var RESTRAINT_DEV_VIEWER_COMP:<comp>`
    * でのみ渡す — デプロイ環境 (wrangler.toml / dashboard) には置かない。
+   *
+   * **カンマ区切りで複数指定できる** (`--var RESTRAINT_DEV_VIEWER_COMP:a,b`) —
+   * 社員マスタの会社横断表示 (Refs #367) をローカルで検証するために必要
+   * (本番は DTAKO_ACCOUNTS の tenant 逆引きで複数 comp が許可される)。
    */
   RESTRAINT_DEV_VIEWER_COMP?: string;
   /**
@@ -1590,7 +1594,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // nuxt dev は stagingTenantId バイパスで auth セッションを持たないため、
     // JWT 無しでも許可する (token 必須チェックより先に判定)。
     if (this.env.RESTRAINT_DEV_VIEWER_COMP) {
-      return this.env.RESTRAINT_DEV_VIEWER_COMP === routing.compId ? viewerRecord() : null;
+      return devViewerCompIds(this.env.RESTRAINT_DEV_VIEWER_COMP).has(routing.compId) ? viewerRecord() : null;
     }
     if (!token) return null;
     const result = await this.introspect(token, `https://${url.host}`);
