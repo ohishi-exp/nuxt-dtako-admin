@@ -1670,12 +1670,110 @@ async function saveMinWageMaster() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 都道府県別の最低賃金 (Refs #409)
+//
+// 全社共通 1 本 (Refs #253) では拠点をまたぐ実態を表せない — 本番の拠点は
+// 長崎・佐賀・福岡・大阪・北海道・広島に散っており、令和7年度で最大 147 円
+// 開く。厚労省から 47 都道府県を取り込み、拠点ごとに県を割り当てる。
+//
+// **県は推定しない。** 「本社」が長崎県であるように拠点名から県は決まらない
+// ため、初期値は入れず必ず人が選ぶ。未設定は未設定のまま警告する。
+// ---------------------------------------------------------------------------
+
+interface MinWageBranchGroup {
+  prefix: string
+  branches: string[]
+  employees: number
+  prefecture: string | null
+  matchedKey: string | null
+}
+
+const branchGroups = ref<MinWageBranchGroup[]>([])
+const branchGroupsLoaded = ref(false)
+const prefectureOptions = ref<string[]>([])
+const minWagePrefectureCount = ref(0)
+const importingMinWage = ref(false)
+const loadingBranchGroups = ref(false)
+
+async function loadBranchGroups() {
+  if (!session.value) return
+  loadingBranchGroups.value = true
+  try {
+    const res = await $fetch<{
+      groups: MinWageBranchGroup[]
+      unmapped: number
+      prefectures: string[]
+      minWagePrefectures: number
+    }>('/restraint-api/min-wage/branches', { headers: authHeaders() })
+    branchGroups.value = res.groups
+    prefectureOptions.value = res.prefectures
+    minWagePrefectureCount.value = res.minWagePrefectures
+    branchGroupsLoaded.value = true
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+  finally {
+    loadingBranchGroups.value = false
+  }
+}
+
+/** 都道府県が未設定の拠点 (この分は最低賃金を引けない)。 */
+const unmappedBranchGroups = computed(() => branchGroups.value.filter(g => g.prefecture === null))
+
+async function importMinWageFromMhlw() {
+  if (!session.value) return
+  importingMinWage.value = true
+  pageError.value = ''
+  minWageMessage.value = ''
+  try {
+    const res = await $fetch<{
+      changed: boolean
+      prefectures: number
+      added: number
+      updated: number
+      unchanged: number
+      data: MinWageMaster
+    }>('/restraint-api/min-wage/import-mhlw', { method: 'POST', headers: authHeaders() })
+    minWageMaster.value = res.data
+    minWagePrefectureCount.value = Object.keys(res.data.prefectures).length
+    minWageMessage.value = res.changed
+      ? `厚労省から ${res.prefectures} 都道府県を取り込みました (新規 ${res.added} / 更新 ${res.updated})`
+      : `厚労省から ${res.prefectures} 都道府県を確認しました (改定なし)`
+    reportCache.clear()
+    await loadBranchGroups()
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+  finally {
+    importingMinWage.value = false
+  }
+}
+
+/** 拠点に都道府県を割り当てる (保存は「保存」ボタン)。 */
+function setBranchPrefecture(prefix: string, prefecture: string | null) {
+  const next = { ...minWageMaster.value.branchToPrefecture }
+  if (prefecture) next[prefix] = prefecture
+  else delete next[prefix]
+  minWageMaster.value = { ...minWageMaster.value, branchToPrefecture: next }
+  const group = branchGroups.value.find(g => g.prefix === prefix)
+  if (group) {
+    group.prefecture = prefecture
+    group.matchedKey = prefecture ? prefix : null
+  }
+  minWageMessage.value = '「保存」で確定します'
+}
+
 watch([activeTab, month, session], () => {
   if (!session.value || !month.value) return
   if (activeTab.value === 'monthly' || activeTab.value === 'minwage') {
     if (!report.value || report.value.month !== month.value) loadWageReport()
     // 最低賃金 (法定下限) の設定カードは minwage タブに同居 (Refs #268 PR-E)
     if (activeTab.value === 'minwage' && !minWageMasterLoaded.value) loadMinWageMaster()
+    // 拠点 → 都道府県の割り当て表 (Refs #409)
+    if (activeTab.value === 'minwage' && !branchGroupsLoaded.value) loadBranchGroups()
     // 支払い実績 (給与) 列の分類・突合に使う (Refs #282)
     if (activeTab.value === 'minwage' && !salaryConfigLoaded.value) loadSalaryItemConfig()
     // minwage は突合 (支払い実績列)、monthly は CSV の 所属(マスタ)/給与体系 列で使う
@@ -2083,6 +2181,65 @@ watch([activeTab, month, session], () => {
                 <UButton size="xs" icon="i-lucide-save" label="保存" :loading="savingMinWage" @click="saveMinWageMaster" />
               </div>
             </template>
+
+            <!-- 都道府県別 (Refs #409)。全社共通 1 本では拠点をまたぐ実態を表せない
+                 ため、厚労省から 47 都道府県を取り込んで拠点ごとに割り当てる。
+                 最低賃金には公的な API が無く、提供は PDF / Excel / HTML のみ。 -->
+            <div class="mb-4 rounded-lg border border-gray-200 dark:border-gray-700 p-3">
+              <div class="flex flex-wrap items-center gap-3 mb-2">
+                <span class="font-semibold text-sm">都道府県別</span>
+                <span v-if="minWagePrefectureCount" class="text-xs text-gray-500">
+                  {{ minWagePrefectureCount }} 都道府県ぶん取り込み済み
+                </span>
+                <span v-else class="text-xs text-amber-600 dark:text-amber-400">未取り込み</span>
+                <div class="flex-1" />
+                <UButton
+                  size="xs" variant="soft" icon="i-lucide-download"
+                  label="厚労省から取り込む" :loading="importingMinWage"
+                  @click="importMinWageFromMhlw"
+                />
+                <UButton size="xs" variant="ghost" icon="i-lucide-refresh-cw" label="拠点を再読込" :loading="loadingBranchGroups" @click="loadBranchGroups" />
+              </div>
+
+              <p v-if="unmappedBranchGroups.length" class="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950 rounded p-2 mb-2">
+                都道府県が未設定の拠点が {{ unmappedBranchGroups.length }} 件あります。設定するまでこの拠点の乗務員には最低賃金を適用しません
+                (誤った県で判定するより、判定しないほうが安全なため)。<b>拠点名から県は推測できません</b> — 実際の就業地で選んでください。
+              </p>
+
+              <table v-if="branchGroups.length" class="w-full text-sm">
+                <thead>
+                  <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
+                    <th class="px-2 py-1.5">拠点</th>
+                    <th class="px-2 py-1.5 text-right">人数</th>
+                    <th class="px-2 py-1.5">都道府県</th>
+                    <th class="px-2 py-1.5">含まれる所属 (社員マスタ)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="group in branchGroups" :key="group.prefix"
+                    class="border-b border-gray-100 dark:border-gray-800"
+                    :class="group.prefecture === null ? 'bg-amber-50 dark:bg-amber-950/40' : ''"
+                  >
+                    <td class="px-2 py-1.5 font-medium">{{ group.prefix }}</td>
+                    <td class="px-2 py-1.5 text-right">{{ group.employees }}</td>
+                    <td class="px-2 py-1.5">
+                      <USelectMenu
+                        :model-value="group.prefecture ?? ''"
+                        :items="prefectureOptions"
+                        :search-input="{ placeholder: '都道府県で検索' }"
+                        size="xs" class="w-36" placeholder="未設定"
+                        @update:model-value="(v: unknown) => setBranchPrefecture(group.prefix, v ? String(v) : null)"
+                      />
+                    </td>
+                    <td class="px-2 py-1.5 text-xs text-gray-500">{{ group.branches.join('、') }}</td>
+                  </tr>
+                </tbody>
+              </table>
+              <p v-else-if="branchGroupsLoaded" class="text-sm text-gray-500">
+                社員マスタに所属が登録されていません。先に「社員マスタ」タブで取り込んでください。
+              </p>
+            </div>
             <p v-if="minWageMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2 mb-3">
               {{ minWageMessage }}
             </p>

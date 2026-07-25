@@ -28,6 +28,7 @@ export default defineConfig({
         'src/promise-queue.ts',
         'src/employee-master.ts',
         'src/min-wage-import.ts',
+        'src/branch-prefecture.ts',
       ],
       thresholds: {
         lines: 100,
