@@ -2008,14 +2008,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
 
     const ym = effectiveFrom.slice(0, 7);
-    const branches = await this.branchByDriverCd(record.compId, ym);
+    const { branches, names } = await this.branchByDriverCd(record.compId, ym);
     if (branches.size === 0) {
       return dvrJsonError(400, "社員マスタに乗務員CDつきの所属が見つかりません (社員マスタタブで取り込んでください)");
     }
 
     let result;
     try {
-      result = applyMinWageToWageMaster(wageMaster, minWageMaster, branches, effectiveFrom, { overwrite, sites });
+      result = applyMinWageToWageMaster(wageMaster, minWageMaster, branches, effectiveFrom, {
+        overwrite,
+        sites,
+        namesByDriverCd: names,
+      });
     } catch (err) {
       if (err instanceof WageMasterError) return dvrJsonError(400, err.message);
       throw err;
@@ -2053,9 +2057,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 引けなくなるだけで、拘束時間集計そのものは落とさない (この経路は #409 で
    * 後から足した補助情報であって、月次集計の必須依存ではない)。
    */
-  private async branchByDriverCd(compId: string, ym: string): Promise<Map<string, string>> {
+  private async branchByDriverCd(
+    compId: string,
+    ym: string,
+  ): Promise<{ branches: Map<string, string>; names: Map<string, string> }> {
     const db = this.env.DTAKO_DB;
-    if (!db) return new Map();
+    if (!db) return { branches: new Map(), names: new Map() };
     try {
       const [employeeResult, attrResult] = await Promise.all([
         db
@@ -2073,10 +2080,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         employeeResult.results ?? [],
         attrResult.results ?? [],
       );
-      return branchByDriverCdAt(employees, ym, resolveAttrsAt);
+      const branches = branchByDriverCdAt(employees, ym, resolveAttrsAt);
+      const names = new Map<string, string>();
+      for (const e of employees) {
+        if (e.driverCd && e.name && branches.has(e.driverCd)) names.set(e.driverCd, e.name);
+      }
+      return { branches, names };
     } catch (err) {
       console.error(JSON.stringify({ branch_by_driver_cd: "error", error: describeUnknownError(err) }));
-      return new Map();
+      return { branches: new Map(), names: new Map() };
     }
   }
 
@@ -2575,7 +2587,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 最低賃金の県は theearth の事業所名ではなく社員マスタの所属 (月末時点) で引く
     // (Refs #409 Phase 3)。D1 が無い / 読めない場合は空のまま = 従来どおり
     // theearth 事業所名 + defaultPrefecture のフォールバックで動く
-    const employeeBranches = await this.branchByDriverCd(record.compId, ym);
+    const { branches: employeeBranches } = await this.branchByDriverCd(record.compId, ym);
 
     const rows = summaries.map((s) => ({
       summary: s.data,

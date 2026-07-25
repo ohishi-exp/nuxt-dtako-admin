@@ -83,7 +83,8 @@ export interface WageReportResponse {
   warnings: string[]
 }
 
-export interface WageRateEntry { effectiveFrom: string, hourlyRate: number }
+/** `prefecture` は最低賃金の一括設定で入った場合の根拠県 (手入力には付かない、Refs #409)。 */
+export interface WageRateEntry { effectiveFrom: string, hourlyRate: number, prefecture?: string }
 export interface WageMasterDriver { name?: string, rates: WageRateEntry[], retiredAt?: string }
 export interface WageMaster { drivers: Record<string, WageMasterDriver> }
 

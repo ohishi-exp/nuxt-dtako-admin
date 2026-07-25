@@ -105,6 +105,22 @@ describe('normalizeWageMaster', () => {
     expect(m.drivers['9902']!.name).toBeUndefined()
   })
 
+  it('prefecture (最低賃金の根拠県、Refs #409) は文字列のときだけ残す', () => {
+    const m = normalizeWageMaster({
+      drivers: {
+        9901: {
+          rates: [
+            { effectiveFrom: '2025-10-01', hourlyRate: 1030, prefecture: '佐賀県' },
+            { effectiveFrom: '2025-11-01', hourlyRate: 1200, prefecture: '' },
+            { effectiveFrom: '2025-12-01', hourlyRate: 1300, prefecture: 123 },
+            { effectiveFrom: '2026-01-01', hourlyRate: 1400 },
+          ],
+        },
+      },
+    })
+    expect(m.drivers['9901']!.rates.map(r => r.prefecture)).toEqual(['佐賀県', undefined, undefined, undefined])
+  })
+
   it('構造不正は WageMasterError', () => {
     expect(() => normalizeWageMaster(null)).toThrow(WageMasterError)
     expect(() => normalizeWageMaster([])).toThrow(WageMasterError)
@@ -314,8 +330,8 @@ describe('applyMinWageToWageMaster', () => {
     const r = applyMinWageToWageMaster({ drivers: {} }, MASTER, branches, '2025-10-01')
     expect(r.added).toBe(3)
     expect(r.unresolved).toBe(1) // 広島は県が未設定
-    expect(r.master.drivers['1018']!.rates).toEqual([{ effectiveFrom: '2025-10-01', hourlyRate: 1030 }])
-    expect(r.master.drivers['1030']!.rates).toEqual([{ effectiveFrom: '2025-10-01', hourlyRate: 1080 }])
+    expect(r.master.drivers['1018']!.rates).toEqual([{ effectiveFrom: '2025-10-01', hourlyRate: 1030, prefecture: '佐賀' }])
+    expect(r.master.drivers['1030']!.rates).toEqual([{ effectiveFrom: '2025-10-01', hourlyRate: 1080, prefecture: '北海道' }])
     expect(r.master.drivers['1040']).toBeUndefined()
     expect(r.items.find(i => i.driverCd === '1040')).toMatchObject({ status: 'unmapped', prefecture: null })
   })
@@ -335,14 +351,14 @@ describe('applyMinWageToWageMaster', () => {
     expect(r.overwritten).toBe(1)
     expect(r.master.drivers['1018']!.rates).toEqual([
       { effectiveFrom: '2024-04-01', hourlyRate: 1500 },
-      { effectiveFrom: '2025-10-01', hourlyRate: 1030 },
+      { effectiveFrom: '2025-10-01', hourlyRate: 1030, prefecture: '佐賀' },
     ])
   })
 
   it('同じ適用開始日は差し替える (履歴を重複させない)', () => {
     const wm: WageMaster = { drivers: { 1018: { rates: [{ effectiveFrom: '2025-10-01', hourlyRate: 900 }] } } }
     const r = applyMinWageToWageMaster(wm, MASTER, branches, '2025-10-01', { overwrite: true })
-    expect(r.master.drivers['1018']!.rates).toEqual([{ effectiveFrom: '2025-10-01', hourlyRate: 1030 }])
+    expect(r.master.drivers['1018']!.rates).toEqual([{ effectiveFrom: '2025-10-01', hourlyRate: 1030, prefecture: '佐賀' }])
   })
 
   it('sites で拠点を絞れる (前方一致)', () => {
@@ -372,6 +388,29 @@ describe('applyMinWageToWageMaster', () => {
   it('乗務員CD 順に並ぶ', () => {
     const r = applyMinWageToWageMaster({ drivers: {} }, MASTER, branches, '2025-10-01')
     expect(r.items.map(i => i.driverCd)).toEqual(['1018', '1021', '1030', '1040'])
+  })
+
+  it('氏名を補完する — 単価の追加可否と関係なく', () => {
+    // 一括設定で新規に作った行が氏名なしになるバグを踏んだ (2026-07-25)。
+    // 後追いの再実行で埋められるよう、keep の行でも氏名だけは入れる
+    const names = new Map([['1018', '金原　敏雄'], ['1030', '一瀬　道広']])
+    const wm: WageMaster = { drivers: { 1018: { rates: [{ effectiveFrom: '2024-04-01', hourlyRate: 1500 }] } } }
+    const r = applyMinWageToWageMaster(wm, MASTER, branches, '2025-10-01', { namesByDriverCd: names })
+    expect(r.master.drivers['1018']!.name).toBe('金原　敏雄') // keep でも氏名は入る
+    expect(r.master.drivers['1030']!.name).toBe('一瀬　道広') // add でも入る
+    expect(r.master.drivers['1021']!.name).toBeUndefined() // 氏名が無ければ付けない
+  })
+
+  it('既に氏名がある行は上書きしない', () => {
+    const names = new Map([['1018', '別名']])
+    const wm: WageMaster = { drivers: { 1018: { name: '登録済み', rates: [] } } }
+    const r = applyMinWageToWageMaster(wm, MASTER, branches, '2025-10-01', { namesByDriverCd: names })
+    expect(r.master.drivers['1018']!.name).toBe('登録済み')
+  })
+
+  it('根拠にした都道府県を履歴に残す', () => {
+    const r = applyMinWageToWageMaster({ drivers: {} }, MASTER, branches, '2025-10-01')
+    expect(r.master.drivers['1030']!.rates[0]!.prefecture).toBe('北海道')
   })
 
   it('空の sites は絞り込みなしとして扱う', () => {
