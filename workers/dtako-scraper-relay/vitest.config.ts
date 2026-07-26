@@ -31,6 +31,7 @@ export default defineConfig({
         'src/timecard-summary.ts',
         'src/min-wage-import.ts',
         'src/branch-prefecture.ts',
+        'src/restraint-d1.ts',
       ],
       thresholds: {
         lines: 100,
