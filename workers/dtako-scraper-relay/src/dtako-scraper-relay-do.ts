@@ -154,6 +154,12 @@ import {
 import { buildRestraintD1Statements, type RestraintD1Entry } from "./restraint-d1";
 import { buildRestraintPushBodies } from "./restraint-push";
 import {
+  isWageSourceResponse,
+  wageSourceMonthToSummaries,
+  type WageSourceMonthWire,
+  type WageSourceResponseWire,
+} from "./restraint-wage-source";
+import {
   appendHistoryJsonl,
   downloadRestraintCsv,
   parseRestraintCsv,
@@ -3047,6 +3053,108 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     });
   }
 
+  /** wage-report の素材 (当月+前月 × theearth+timecard のサマリ) を読む
+   * (Refs #452 / rust-ichibanboshi#106 Phase 3c)。
+   *
+   * まず ichiban の `GET /api/restraint/wage-source` を 1 fetch — Phase 3b の
+   * push が溜めた写しで、従来の R2 GET 約300本 (fan-out) を置き換える。
+   * フォールバックは 2 段:
+   *
+   * - fetch 自体の失敗 / 未設定環境 → 全部 R2 (従来経路そのまま)
+   * - fetch は成功したが特定の (source, 月) が未 push (`synced_at` null) →
+   *   その piece だけ R2 から読む (push が追い付くまでの過渡期・新月の初回)
+   */
+  private async loadWageReportSource(
+    bucket: R2Bucket,
+    compId: string,
+    ym: string,
+    prevYm: string,
+    kintaiPrefix: string,
+  ): Promise<{
+    current: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
+    prev: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
+    kintaiCurrent: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
+    kintaiPrev: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
+  }> {
+    const fromR2 = {
+      current: () => this.loadMonthSummaries(bucket, compId, ym),
+      prev: () => this.loadMonthSummaries(bucket, compId, prevYm),
+      kintaiCurrent: () => this.loadMonthSummaries(bucket, compId, ym, kintaiPrefix),
+      kintaiPrev: () => this.loadMonthSummaries(bucket, compId, prevYm, kintaiPrefix),
+    };
+    const allR2 = async () => {
+      const [current, prev, kintaiCurrent, kintaiPrev] = await Promise.all([
+        fromR2.current(),
+        fromR2.prev(),
+        fromR2.kintaiCurrent(),
+        fromR2.kintaiPrev(),
+      ]);
+      return { current, prev, kintaiCurrent, kintaiPrev };
+    };
+
+    const apiUrl = (this.env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
+    const clientId = this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
+    let clientSecret = "";
+    try {
+      clientSecret = await resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
+    } catch {
+      // secret 不調は push 側で別途 log 済み — ここは R2 に落ちるだけで良い
+    }
+    if (!apiUrl || !clientId || !clientSecret) {
+      console.log(JSON.stringify({ wage_report_source: "r2-not-configured", comp_id: compId, ym }));
+      return allR2();
+    }
+
+    let wire: WageSourceResponseWire;
+    try {
+      const res = await fetch(
+        `${apiUrl}/api/restraint/wage-source?comp=${encodeURIComponent(compId)}&month=${encodeURIComponent(ym)}`,
+        {
+          headers: {
+            "CF-Access-Client-Id": clientId,
+            "CF-Access-Client-Secret": clientSecret,
+          },
+        },
+      );
+      if (!res.ok) {
+        console.error(
+          JSON.stringify({ wage_report_source: "upstream-error", comp_id: compId, ym, status: res.status }),
+        );
+        return allR2();
+      }
+      const raw: unknown = await res.json();
+      if (!isWageSourceResponse(raw)) {
+        console.error(JSON.stringify({ wage_report_source: "bad-shape", comp_id: compId, ym }));
+        return allR2();
+      }
+      wire = raw;
+    } catch (err) {
+      console.error(
+        JSON.stringify({ wage_report_source: "fetch-error", comp_id: compId, ym, error: describeUnknownError(err) }),
+      );
+      return allR2();
+    }
+
+    // 未 push (synced_at null) の piece だけ R2 へ (過渡期・新月初回)
+    const pick = async (
+      month: WageSourceMonthWire,
+      fallback: () => ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>,
+      label: string,
+    ) => {
+      if (month.synced_at !== null) return wageSourceMonthToSummaries(month);
+      console.log(JSON.stringify({ wage_report_source: "r2-piece-fallback", comp_id: compId, piece: label }));
+      return fallback();
+    };
+    const [current, prev, kintaiCurrent, kintaiPrev] = await Promise.all([
+      pick(wire.current_theearth, fromR2.current, `theearth:${ym}`),
+      pick(wire.prev_theearth, fromR2.prev, `theearth:${prevYm}`),
+      pick(wire.current_timecard, fromR2.kintaiCurrent, `timecard:${ym}`),
+      pick(wire.prev_timecard, fromR2.kintaiPrev, `timecard:${prevYm}`),
+    ]);
+    console.log(JSON.stringify({ wage_report_source: "ichiban", comp_id: compId, ym }));
+    return { current, prev, kintaiCurrent, kintaiPrev };
+  }
+
   /** GET /restraint-api/wage-report?month=YYYY-MM — R2 の summary + マスタから
    * 時間給計算行を返す (Refs #244)。週40h の月初跨ぎ週のため前月 summary の
    * days も読み込む (無ければ跨ぎ週は当月分のみで近似し warning を返す)。
@@ -3084,7 +3192,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 乗らない人はここからしか出てこない (Refs #424 PR-D)
     const kintaiPrefix = this.env.KINTAI_R2_PREFIX || "kintai";
     // マスタ 3 種と当月・前月 summary は互いに独立なので一括並列で読む (月切替の体感に直結)
-    const [wageMaster, minWageMaster, config, current, prev, kintaiCurrent, kintaiPrev] =
+    const [wageMaster, minWageMaster, config, { current, prev, kintaiCurrent, kintaiPrev }] =
       await Promise.all([
         loadMaster<WageMaster>("wage-master", normalizeWageMaster, { drivers: {} }),
         loadMaster<MinWageMaster>("min-wage", normalizeMinWageMaster, {
@@ -3092,10 +3200,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           branchToPrefecture: {},
         }),
         loadMaster<WageConfig>("wage-config", normalizeWageConfig, normalizeWageConfig(null)),
-        this.loadMonthSummaries(bucket, record.compId, ym),
-        this.loadMonthSummaries(bucket, record.compId, prevYm),
-        this.loadMonthSummaries(bucket, record.compId, ym, kintaiPrefix),
-        this.loadMonthSummaries(bucket, record.compId, prevYm, kintaiPrefix),
+        this.loadWageReportSource(bucket, record.compId, ym, prevYm, kintaiPrefix),
       ]);
     const { noDataDrivers } = current;
     // 同じ乗務員CD が両方に居たら theearth を採る (乗務員は従来どおり)
