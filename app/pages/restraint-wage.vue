@@ -261,20 +261,31 @@ async function fetchWageReport(ym: string): Promise<WageReportResponse> {
   return res
 }
 
+/** loadWageReport の世代。タブ/月の切り替え連打で in-flight が複数になった時、
+ * **最後に発火した読み込みだけ**が画面に触れる (latest-wins、Refs #456)。
+ * ガード無しだと遅く返った古い月の応答が新しい月の表を上書きする。 */
+let reportEpoch = 0
+
 async function loadWageReport() {
   if (!session.value || !month.value) return
+  const epoch = ++reportEpoch
+  const ym = month.value
   loadingReport.value = true
   pageError.value = ''
   try {
-    reportCache.delete(month.value) // 再計算ボタンは常に最新を取り直す
-    report.value = await fetchWageReport(month.value)
+    reportCache.delete(ym) // 再計算ボタンは常に最新を取り直す
+    const res = await fetchWageReport(ym)
+    if (epoch !== reportEpoch) return // 選択が変わった後に届いた古い応答は捨てる
+    report.value = res
   }
   catch (e) {
+    if (epoch !== reportEpoch) return
     report.value = null
     handleApiError(e)
   }
   finally {
-    loadingReport.value = false
+    // 新しい読み込みが走っている間はスピナーを消さない
+    if (epoch === reportEpoch) loadingReport.value = false
   }
 }
 
@@ -699,30 +710,37 @@ const archiveSummaryCount = ref(0)
 const loadingArchive = ref(false)
 const archiveHistory = ref<Record<string, ArchiveHistoryEntry[]>>({})
 
+/** loadArchive の世代 (latest-wins、Refs #456。reportEpoch と同じ理由)。 */
+let archiveEpoch = 0
+
 async function loadArchive() {
   if (!session.value || !month.value) return
+  const epoch = ++archiveEpoch
+  const ym = month.value
   loadingArchive.value = true
   pageError.value = ''
   try {
     const csvList = await $fetch<{ entries: ArchiveCsvEntry[] }>('/restraint-api/archive/csv-list', {
       headers: authHeaders(),
-      query: { month: month.value },
+      query: { month: ym },
     })
     const summaries = await $fetch<{ summaries: unknown[], no_data_drivers: string[] }>('/restraint-api/archive/summaries', {
       headers: authHeaders(),
-      query: { month: month.value },
+      query: { month: ym },
     })
+    if (epoch !== archiveEpoch) return // 古い月の応答は捨てる
     archiveEntries.value = csvList.entries
     archiveSummaryCount.value = summaries.summaries.length
     archiveNoData.value = summaries.no_data_drivers
     archiveHistory.value = {}
   }
   catch (e) {
+    if (epoch !== archiveEpoch) return
     archiveEntries.value = []
     handleApiError(e)
   }
   finally {
-    loadingArchive.value = false
+    if (epoch === archiveEpoch) loadingArchive.value = false
   }
 }
 
@@ -2461,17 +2479,24 @@ async function loadWorkSchedule() {
   }
 }
 
+/** loadHolidayWork の世代 (latest-wins、Refs #456。reportEpoch と同じ理由)。 */
+let holidayWorkEpoch = 0
+
 async function loadHolidayWork() {
   if (!session.value || !month.value) return
+  const epoch = ++holidayWorkEpoch
+  const ym = month.value
   try {
     const res = await $fetch<{ approvals: HolidayWorkEntry[] }>('/restraint-api/holiday-work', {
       headers: authHeaders(),
-      query: { month: month.value },
+      query: { month: ym },
     })
+    if (epoch !== holidayWorkEpoch) return // 古い月の応答は捨てる
     holidayWorks.value = res.approvals
     holidayWorkLoaded.value = true
   }
   catch (e) {
+    if (epoch !== holidayWorkEpoch) return
     handleApiError(e)
   }
 }
