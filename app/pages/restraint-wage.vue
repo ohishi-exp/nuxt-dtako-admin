@@ -303,6 +303,77 @@ const timecardNeedsRefetch = computed(() =>
   && timecardRows.value.every(r => r.summary.days.every(d => !d.sessions?.length)),
 )
 
+// ---- 勤怠 (タイムカード) の取り込み (Refs #433) ----
+// ルート自体は #424 PR-A で作ったが**画面から叩く導線が無かった**ため、
+// 打刻エラー判定・公休の取り込みといった後続の変更を入れても、誰も再取り込みできず
+// 古いサマリが表示され続けていた。期間指定は給与DB バーと同じ作法。
+
+const kintaiRangeFrom = ref('')
+const kintaiRangeTo = ref('')
+const fetchingKintai = ref(false)
+const kintaiMessage = ref('')
+
+// 既定は選択中の月だけ。月タブを移ったら期間もそこへ戻す (給与DB バーと同じ理由)
+watch(month, (ym) => {
+  kintaiRangeFrom.value = ym
+  kintaiRangeTo.value = ym
+}, { immediate: true })
+
+/** 取り込む勤務月の一覧。期間が不正なら選択中の月だけ。 */
+const kintaiTargetMonths = computed(() => {
+  const range = monthRange(kintaiRangeFrom.value, kintaiRangeTo.value)
+  return range.length ? range : [month.value]
+})
+
+interface KintaiFetchResult {
+  month: string
+  rows: number
+  drivers: number
+  summaries_updated: number
+  warnings?: string[]
+}
+
+/**
+ * 勤怠を取り込む。**冪等** — 同じ内容なら R2 の版は増えず lastVerifiedAt だけ進む。
+ * 複数月は逐次に投げる (per-comp DO で直列化されるので並列にしても速くならない)。
+ */
+async function fetchKintai() {
+  if (!session.value) return
+  const months = kintaiTargetMonths.value
+  fetchingKintai.value = true
+  kintaiMessage.value = ''
+  pageError.value = ''
+  const done: KintaiFetchResult[] = []
+  try {
+    for (const ym of months) {
+      kintaiMessage.value = months.length > 1
+        ? `${fmtYm(ym)} を取り込んでいます… (${done.length + 1}/${months.length})`
+        : `${fmtYm(ym)} を取り込んでいます…`
+      const res = await $fetch<KintaiFetchResult>('/restraint-api/kintai/fetch', {
+        method: 'POST',
+        headers: authHeaders(),
+        query: { month: ym },
+      })
+      done.push(res)
+    }
+    const rows = done.reduce((n, r) => n + r.rows, 0)
+    const updated = done.reduce((n, r) => n + r.summaries_updated, 0)
+    const warnings = done.flatMap(r => r.warnings ?? [])
+    kintaiMessage.value
+      = `${months.length} ヶ月 / ${rows} 行を取り込みました (サマリ更新 ${updated} 件)`
+        + (warnings.length ? ` — 警告 ${warnings.length} 件: ${warnings.slice(0, 3).join(' / ')}` : '')
+    // 表は wage-report 由来なので取り込み後に読み直す
+    await loadWageReport()
+  }
+  catch (e) {
+    handleApiError(e)
+    kintaiMessage.value = ''
+  }
+  finally {
+    fetchingKintai.value = false
+  }
+}
+
 /** 計算単価の表示 ("@1,206")。null は空文字 (空 div は高さ 0 で潰れる)。 */
 function fmtAt(rate: number | null): string {
   return rate == null ? '' : `@${fmtYen(rate)}`
@@ -4002,6 +4073,27 @@ watch([activeTab, month, session], () => {
                   placeholder="乗務員CD (空欄=全員)"
                 />
                 <UButton size="xs" variant="soft" icon="i-lucide-printer" label="印刷" @click="printNow" />
+              </div>
+              <!-- 勤怠の取り込み (Refs #433)。ルートは #424 PR-A からあったが導線が無く、
+                   打刻エラー判定・公休の追加を入れても誰も再取り込みできなかった -->
+              <div class="mt-2 flex flex-wrap items-center gap-2 print:hidden">
+                <span class="text-xs text-gray-500">勤怠取り込み</span>
+                <USelect v-model="kintaiRangeFrom" size="xs" class="w-32" :items="payrollMonthOptions" />
+                <span class="text-xs text-gray-500">〜</span>
+                <USelect v-model="kintaiRangeTo" size="xs" class="w-32" :items="payrollMonthOptions" />
+                <UButton
+                  size="xs"
+                  icon="i-lucide-download"
+                  label="タイムカードを取り込み"
+                  :loading="fetchingKintai"
+                  :disabled="fetchingKintai"
+                  @click="fetchKintai"
+                />
+                <span class="text-xs text-gray-500">
+                  {{ kintaiTargetMonths.length > 1 ? `${fmtYm(kintaiTargetMonths[0]!)}〜${fmtYm(kintaiTargetMonths[kintaiTargetMonths.length - 1]!)} (${kintaiTargetMonths.length} ヶ月)` : fmtYm(kintaiTargetMonths[0]!) }}
+                  の打刻を社内タイムカードから取り直します (同じ内容なら版は増えません)
+                </span>
+                <span v-if="kintaiMessage" class="text-xs text-green-700 dark:text-green-400">{{ kintaiMessage }}</span>
               </div>
             </template>
 
