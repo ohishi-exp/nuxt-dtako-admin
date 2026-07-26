@@ -138,6 +138,7 @@ import {
 } from "./work-schedule";
 import {
   kintaiR2Paths,
+  mergeSummarySources,
   stableTimecardSummaryBody,
   summarizeTimecardMonth,
   type TimecardDailyRow,
@@ -2706,16 +2707,20 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /** 指定月の summary latest 一覧を R2 から読む (wage-report と archive/summaries
-   * の共通処理)。noData マーカーは summaries から分離して返す。 */
+   * の共通処理)。noData マーカーは summaries から分離して返す。
+   *
+   * `prefix` 省略時は theearth 由来 (`restraint/`)。タイムカード由来は同じ形の
+   * サマリを別 prefix (`kintai/`) に置いてあるので、そちらを読む時だけ指定する
+   * (Refs #424 PR-D)。 */
   private async loadMonthSummaries(
     bucket: R2Bucket,
     compId: string,
     ym: string,
+    prefix: string = this.env.RESTRAINT_R2_PREFIX || "restraint",
   ): Promise<{
     summaries: Array<{ data: RestraintDriverSummary; fetchedAt: string | null; lastVerifiedAt: string | null }>;
     noDataDrivers: string[];
   }> {
-    const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
     const objects = await this.listAllR2(bucket, `${prefix}/${compId}/${ym}/summary/`);
     const latests = objects.filter((o) => o.key.endsWith("/latest.json"));
     const summaries: Array<{ data: RestraintDriverSummary; fetchedAt: string | null; lastVerifiedAt: string | null }> = [];
@@ -2930,7 +2935,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   /** GET /restraint-api/wage-report?month=YYYY-MM — R2 の summary + マスタから
    * 時間給計算行を返す (Refs #244)。週40h の月初跨ぎ週のため前月 summary の
-   * days も読み込む (無ければ跨ぎ週は当月分のみで近似し warning を返す)。 */
+   * days も読み込む (無ければ跨ぎ週は当月分のみで近似し warning を返す)。
+   *
+   * **theearth (デジタコ) と timecard (タイムカード) の両方を読んで合流する**
+   * (Refs #424 PR-D) — デジタコに乗らない本社事務員等はタイムカード側からしか
+   * 出てこない。行には `source` が付く。`computeWageRow` / `classifyMonth` /
+   * `compareSalaryMonth` はどちらの由来でも同じものを使う (タイムカード側が
+   * `RestraintDriverSummary` 互換の形で保存されているため)。 */
   private async handleWageReport(record: TheearthSessionRecord, url: URL): Promise<Response> {
     const bucket = this.env.DTAKO_R2;
     if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
@@ -2955,24 +2966,34 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const prevYear = month === 1 ? year - 1 : year;
     const prevMonth = month === 1 ? 12 : month - 1;
     const prevYm = `${prevYear}-${String(prevMonth).padStart(2, "0")}`;
+    // タイムカード由来 (本社事務員等) のサマリは別 prefix に置いてある — デジタコに
+    // 乗らない人はここからしか出てこない (Refs #424 PR-D)
+    const kintaiPrefix = this.env.KINTAI_R2_PREFIX || "kintai";
     // マスタ 3 種と当月・前月 summary は互いに独立なので一括並列で読む (月切替の体感に直結)
-    const [wageMaster, minWageMaster, config, current, prev] = await Promise.all([
-      loadMaster<WageMaster>("wage-master", normalizeWageMaster, { drivers: {} }),
-      loadMaster<MinWageMaster>("min-wage", normalizeMinWageMaster, {
-        prefectures: {},
-        branchToPrefecture: {},
-      }),
-      loadMaster<WageConfig>("wage-config", normalizeWageConfig, normalizeWageConfig(null)),
-      this.loadMonthSummaries(bucket, record.compId, ym),
-      this.loadMonthSummaries(bucket, record.compId, prevYm),
-    ]);
-    const { summaries, noDataDrivers } = current;
+    const [wageMaster, minWageMaster, config, current, prev, kintaiCurrent, kintaiPrev] =
+      await Promise.all([
+        loadMaster<WageMaster>("wage-master", normalizeWageMaster, { drivers: {} }),
+        loadMaster<MinWageMaster>("min-wage", normalizeMinWageMaster, {
+          prefectures: {},
+          branchToPrefecture: {},
+        }),
+        loadMaster<WageConfig>("wage-config", normalizeWageConfig, normalizeWageConfig(null)),
+        this.loadMonthSummaries(bucket, record.compId, ym),
+        this.loadMonthSummaries(bucket, record.compId, prevYm),
+        this.loadMonthSummaries(bucket, record.compId, ym, kintaiPrefix),
+        this.loadMonthSummaries(bucket, record.compId, prevYm, kintaiPrefix),
+      ]);
+    const { noDataDrivers } = current;
+    // 同じ乗務員CD が両方に居たら theearth を採る (乗務員は従来どおり)
+    const { merged, warnings } = mergeSummarySources(current.summaries, kintaiCurrent.summaries);
+    // 前月 days (週40h の月初跨ぎ週用) も同じ優先順で合流する — 当月と別の source を
+    // 混ぜると跨ぎ週の実働が二重に積まれる
+    const { merged: prevMerged } = mergeSummarySources(prev.summaries, kintaiPrev.summaries);
     const prevDaysByDriver = new Map<string, RestraintSummaryDay[]>(
-      prev.summaries.map((s) => [s.data.driverCd, s.data.days]),
+      prevMerged.map((m) => [m.entry.data.driverCd, m.entry.data.days]),
     );
 
-    const warnings: string[] = [];
-    if (summaries.length > 0 && prev.summaries.length === 0) {
+    if (merged.length > 0 && prevMerged.length === 0) {
       warnings.push(
         `前月 (${prevYm}) の summary がアーカイブに無いため、月初の跨ぎ週の週40h計算は当月分のみで近似しています`,
       );
@@ -2982,19 +3003,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // theearth 事業所名 + defaultPrefecture のフォールバックで動く
     const { branches: employeeBranches } = await this.branchByDriverCd(record.compId, ym);
 
-    const rows = summaries.map((s) => ({
-      summary: s.data,
-      fetched_at: s.fetchedAt,
-      last_verified_at: s.lastVerifiedAt,
+    const rows = merged.map(({ entry, source }) => ({
+      summary: entry.data,
+      /** 'theearth' (デジタコ) | 'timecard' (タイムカード)。画面のバッジ用 (PR-E)。 */
+      source,
+      fetched_at: entry.fetchedAt,
+      last_verified_at: entry.lastVerifiedAt,
       wage: computeWageRow(
-        s.data,
+        entry.data,
         year,
         month,
         wageMaster,
         minWageMaster,
         config,
-        prevDaysByDriver.get(s.data.driverCd) ?? [],
-        employeeBranches.get(s.data.driverCd) ?? null,
+        prevDaysByDriver.get(entry.data.driverCd) ?? [],
+        employeeBranches.get(entry.data.driverCd) ?? null,
       ),
     }));
     return Response.json({ month: ym, rows, no_data_drivers: noDataDrivers, warnings, config });

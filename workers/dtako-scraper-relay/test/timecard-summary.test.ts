@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   kintaiR2Paths,
+  mergeSummarySources,
   LUNCH_FROM_HOUR,
   LUNCH_TO_HOUR,
   mergeIntervals,
@@ -319,13 +320,16 @@ describe('summarizeTimecardMonth', () => {
     expect(summaries[0]!.voluntaryMinutes).toBe(0)
   })
 
-  it('法定外休日の承認済み休日出勤は warning を出す (割増が未適用のため)', () => {
-    const { warnings } = summarizeTimecardMonth(
+  it('法定外休日の承認済み休日出勤は warning を出さない (holidayKind を classifyMonth が見る)', () => {
+    const { summaries, warnings } = summarizeTimecardMonth(
       [row('2026-06-15', [['08:00:00', '17:00:00']], 'non_legal')],
       opts(['1670|2026-06-15']),
     )
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toMatch(/法定外休日/)
+    // PR-D で classifyMonth が holidayKind を優先するようになったので、
+    // 「曜日指定でしか法定外休日を拾えない」という限界は無くなった
+    expect(warnings).toEqual([])
+    expect(summaries[0]!.days[0]!.holidayKind).toBe('non_legal')
+    expect(summaries[0]!.days[0]!.isRestDay).toBe(false)
   })
 
   it('法定休日の承認済みは warning を出さない (日曜は classifyMonth が拾う)', () => {
@@ -379,6 +383,35 @@ describe('summarizeTimecardMonth', () => {
 
   it('空入力は空サマリ', () => {
     expect(summarizeTimecardMonth([], opts())).toEqual({ summaries: [], warnings: [] })
+  })
+})
+
+describe('mergeSummarySources', () => {
+  const entry = (driverCd: string) => ({ data: { driverCd } })
+
+  it('両方を乗務員CD の数値順に並べ、source を付ける', () => {
+    const { merged, warnings } = mergeSummarySources(
+      [entry('1029'), entry('1670')],
+      [entry('205'), entry('1800')],
+    )
+    expect(merged.map(m => m.entry.data.driverCd)).toEqual(['205', '1029', '1670', '1800'])
+    expect(merged.map(m => m.source)).toEqual(['timecard', 'theearth', 'theearth', 'timecard'])
+    expect(warnings).toEqual([])
+  })
+
+  it('同じ乗務員CD が両方に居たら theearth を採り warning を出す', () => {
+    const theearth = entry('1670')
+    const { merged, warnings } = mergeSummarySources([theearth], [entry('1670'), entry('205')])
+    expect(merged.map(m => m.entry.data.driverCd)).toEqual(['205', '1670'])
+    expect(merged.find(m => m.entry.data.driverCd === '1670')!.entry).toBe(theearth)
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toMatch(/1670/)
+  })
+
+  it('片方が空でも通る (乗務員だけ / 事務員だけの月)', () => {
+    expect(mergeSummarySources([entry('1')], []).merged.map(m => m.source)).toEqual(['theearth'])
+    expect(mergeSummarySources([], [entry('1')]).merged.map(m => m.source)).toEqual(['timecard'])
+    expect(mergeSummarySources([], []).merged).toEqual([])
   })
 })
 
