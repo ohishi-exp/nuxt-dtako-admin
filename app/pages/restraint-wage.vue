@@ -136,6 +136,40 @@ function monthHasArchive(year: number, monthNo: number): boolean {
   return archiveMonths.value.includes(`${year}-${String(monthNo).padStart(2, '0')}`)
 }
 
+// ---- 月タブの取り込み済みバッジ (Refs #460) ----
+// タイムカード = R2 kintai アーカイブの月一覧 (archive/months が同時に返す)。
+// 給与 = ichiban の kyuyo_sync_state (どの会社かは問わず「その月に給与が 1 社でも
+// 取り込み済みか」で表示 — 月タブは会社を跨いだ作業状況の目安のため)。
+
+/** タイムカード取り込み済みの月 (YYYY-MM)。 */
+const kintaiMonths = ref<string[]>([])
+/** 給与取り込み済みの月 (YYYY-MM、会社不問)。 */
+const kyuyoSyncedMonths = ref<Set<string>>(new Set())
+
+function monthHasKintai(year: number, monthNo: number): boolean {
+  return kintaiMonths.value.includes(`${year}-${String(monthNo).padStart(2, '0')}`)
+}
+
+function monthHasKyuyo(year: number, monthNo: number): boolean {
+  return kyuyoSyncedMonths.value.has(`${year}-${String(monthNo).padStart(2, '0')}`)
+}
+
+/** 給与の sync 済み月を ichiban から引く。バッジ表示専用なので**失敗しても静かに
+ * 空のまま** (endpoint 未デプロイ・障害でページを壊さない)。 */
+async function loadKyuyoSyncedMonths() {
+  try {
+    const token = currentAccessToken()
+    if (!token) return
+    const res = await $fetch<{ entries: Array<{ month: string }> }>('/api/kyuyo/synced-months', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    kyuyoSyncedMonths.value = new Set(res.entries.map(e => e.month))
+  }
+  catch {
+    // バッジが出ないだけ — エラー表示はしない
+  }
+}
+
 /** loadArchiveMonths の in-flight ガード (Refs #451)。onMounted (restoreSession 直後、同期) と
  * watch(session) (同 flush の microtask) がほぼ同時に呼ぶため、走行中の再入は捨てる。 */
 let archiveMonthsLoading = false
@@ -144,8 +178,12 @@ async function loadArchiveMonths() {
   if (!session.value || archiveMonthsLoading) return
   archiveMonthsLoading = true
   try {
-    const res = await $fetch<{ months: string[] }>('/restraint-api/archive/months', { headers: authHeaders() })
+    const res = await $fetch<{ months: string[], kintai_months?: string[] }>('/restraint-api/archive/months', { headers: authHeaders() })
     archiveMonths.value = res.months
+    // タイムカード取り込み済み月 (relay 旧版は返さない — その間はバッジ非表示)
+    kintaiMonths.value = res.kintai_months ?? []
+    // 給与バッジも同じタイミングで更新 (失敗は静かに無視)
+    void loadKyuyoSyncedMonths()
     // 初期選択: アーカイブのある最新月
     if (res.months.length > 0 && !monthHasArchive(selectedYear.value, selectedMonthNo.value)) {
       const latest = res.months[0]!
@@ -2828,17 +2866,35 @@ watch([activeTab, month, session, archiveMonthsLoaded], () => {
             class="w-28"
           />
           <div class="flex flex-wrap gap-1">
-            <UButton
-              v-for="m in 12"
-              :key="m"
-              size="xs"
-              :variant="selectedMonthNo === m ? 'solid' : monthHasArchive(selectedYear, m) ? 'soft' : 'ghost'"
-              :class="!monthHasArchive(selectedYear, m) && selectedMonthNo !== m ? 'opacity-40' : ''"
-              :label="`${m}月`"
-              @click="selectedMonthNo = m"
-            />
+            <!-- 各月の下に取り込み済みバッジ (Refs #460): ● タイムカード / ● 給与。
+                 月を開かずに「どの月が作業済みか」を判断できるようにする -->
+            <div v-for="m in 12" :key="m" class="flex flex-col items-center gap-0.5">
+              <UButton
+                size="xs"
+                :variant="selectedMonthNo === m ? 'solid' : monthHasArchive(selectedYear, m) ? 'soft' : 'ghost'"
+                :class="!monthHasArchive(selectedYear, m) && selectedMonthNo !== m ? 'opacity-40' : ''"
+                :label="`${m}月`"
+                @click="selectedMonthNo = m"
+              />
+              <span class="flex gap-0.5 h-1.5">
+                <span
+                  v-if="monthHasKintai(selectedYear, m)"
+                  class="w-1.5 h-1.5 rounded-full bg-sky-500"
+                  title="タイムカード取り込み済み"
+                />
+                <span
+                  v-if="monthHasKyuyo(selectedYear, m)"
+                  class="w-1.5 h-1.5 rounded-full bg-amber-500"
+                  title="給与取り込み済み"
+                />
+              </span>
+            </div>
           </div>
-          <span class="text-xs text-gray-500 ml-auto">薄い月はアーカイブなし</span>
+          <span class="text-xs text-gray-500 ml-auto">
+            薄い月はアーカイブなし ・
+            <span class="inline-block w-1.5 h-1.5 rounded-full bg-sky-500 align-middle" /> タイムカード
+            <span class="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 align-middle ml-1" /> 給与 取り込み済み
+          </span>
         </div>
 
         <!-- 給与DBから読み込み: 全タブ共通の上部バー (2026-07-25 要望)。
