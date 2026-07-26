@@ -484,7 +484,7 @@ describe('buildTimecardSummary — 期間サマリー印刷の一覧行 (Refs #4
         day({ day: 6, isRestDay: true, leaves: ['公休'] }),
       ],
       leaveCounts: { publicHoliday: 8, paidLeave: 1.5, absence: 2, specialLeave: 1, late: 3, earlyLeave: 4 },
-    })], new Map())
+    })], 2026, 6, new Map())
 
     expect(row).toMatchObject({
       driverCd: '1706',
@@ -495,23 +495,26 @@ describe('buildTimecardSummary — 期間サマリー印刷の一覧行 (Refs #4
       leaves: { publicHoliday: 8, paidLeave: 1.5, absence: 2, specialLeave: 1, late: 3, earlyLeave: 4 },
     })
     expect(row!.counts).toMatchObject({ normal: 1, overtime: 1, holidayWork: 1, voluntary: 1, punchError: 1 })
-    // 出勤 = 通常 + 残業 + 打刻エラー (押し忘れただけで出勤はしている)。
-    // 休日出勤・自主出勤は承認の有無で扱いが変わる別枠なので足さない
-    expect(row!.attendanceDays).toBe(3)
+    // 出勤 = 月日数 − 公休 − 有休 − 欠勤 (タイムカード表の「出勤日数 (拘束)」と同じ、
+    // Refs #441)。内訳の足し算にすると、タイムカードに行自体が無い日を数え損ねる
+    expect(row!.attendanceDays).toBe(30 - 8 - 1.5 - 2)
   })
 
   it('leaveCounts / 時間が無い行は 0 で埋める (古いサマリ)', () => {
-    const [row] = buildTimecardSummary([reportRow({ driverCd: '1048' })], new Map())
+    const [row] = buildTimecardSummary([reportRow({ driverCd: '1048' })], 2026, 6, new Map())
     expect(row).toMatchObject({
       workingMinutes: 0,
       overtimeMinutes: 0,
       leaves: { publicHoliday: 0, paidLeave: 0, absence: 0, specialLeave: 0, late: 0, earlyLeave: 0 },
+      // 休暇が 1 日も無ければ全日出勤扱い (打刻の無い日も「来ていない」とは確定しない)
+      attendanceDays: 30,
     })
   })
 
   it('給与明細の残業手当は乗務員CDを数値正規化して引く (未取り込みは null)', () => {
     const rows = buildTimecardSummary(
       [reportRow({ driverCd: '0065' }), reportRow({ driverCd: '1707' })],
+      2026, 6,
       new Map([['65', 30000]]),
     )
     expect(rows.map(r => r.salaryOvertime)).toEqual([30000, null])

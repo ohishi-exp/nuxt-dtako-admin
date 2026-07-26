@@ -312,16 +312,14 @@ export interface TimecardSummaryRow {
   /** 出勤・自主出勤・打刻エラーの日数 (日別から数える)。 */
   counts: WorkKindCounts
   /**
-   * 出勤日数 = 通常 + 残業 + **打刻エラー**。
+   * 出勤日数 = **月日数 − 公休 − 有休 − 欠勤**。
    *
-   * 給与明細の「出勤日数」と突き合わせる列なので、
-   * - **残業の有無で分けない** — 残業した日も出勤 1 日 (2026-07-26 指摘)
-   * - **打刻エラーの日も出勤に数える** (2026-07-26 指摘) — 終業を押し忘れただけで
-   *   出勤したこと自体は疑いようがない。`countWorkKinds` が打刻エラーをどの区分にも
-   *   入れないのは**その日の時間が信用できない**からで (Refs #433)、出勤したか
-   *   どうかとは別の話。時間の列 (実働・残業) からは従来どおり外れている
+   * タイムカード表の「出勤日数 (拘束)」と同じ数え方 (Refs #441) — 給与明細の
+   * 出勤日数と一致することが実測で確認されている (30日 − 公休5日 = 25日)。
    *
-   * 休日出勤・自主出勤は別列 (承認の有無で扱いが変わる別枠なので合算しない)。
+   * **内訳の足し算 (通常 + 残業 + 休日出勤 + 打刻エラー) にはしない**。それだと
+   * タイムカードに行自体が無い日を出勤に数え損ねる。総日数からの逆算なら、
+   * 残業の有無でも打刻エラー (押し忘れただけで出勤はしている) でも数が動かない。
    */
   attendanceDays: number
   /** 休暇日数。**worker が数えた `leaveCounts` をそのまま使う** (下記)。 */
@@ -345,22 +343,28 @@ const EMPTY_LEAVES = { publicHoliday: 0, paidLeave: 0, absence: 0, specialLeave:
  * **休暇日数は日別から数え直さず `summary.leaveCounts` を使う** — 半休の数え方や
  * どの区分を公休に入れるかは worker の `countLeaves` が正で、画面側に 2 つ目の
  * 規則を置くと worker を変えた時に静かに食い違う (`buildAttendanceDays` と同じ理由)。
+ * 出勤日数もその `leaves` から逆算するので、画面上で
+ * **出勤 + 公休 + 有休 + 欠勤 = 月日数** が常に成り立つ。
  *
  * `salaryOvertimeByDriver` は乗務員CD (数値正規化キー) → 給与明細の残業手当。
  * その月の明細を取り込んでいなければ空の Map を渡す (列は空欄になる)。
  */
 export function buildTimecardSummary(
   rows: readonly WageReportRow[],
+  year: number,
+  month: number,
   salaryOvertimeByDriver: ReadonlyMap<string, number>,
 ): TimecardSummaryRow[] {
+  const last = daysInMonth(year, month)
   return rows.map((r) => {
     const counts = countWorkKinds(r.summary.days)
+    const leaves = r.summary.leaveCounts ?? EMPTY_LEAVES
     return {
       driverCd: r.summary.driverCd,
       driverName: r.summary.driverName,
       counts,
-      attendanceDays: counts.normal + counts.overtime + counts.punchError,
-      leaves: r.summary.leaveCounts ?? EMPTY_LEAVES,
+      attendanceDays: last - leaves.publicHoliday - leaves.paidLeave - leaves.absence,
+      leaves,
       workingMinutes: r.summary.workingMinutes ?? 0,
       overtimeMinutes: (r.summary.overtimeMinutes ?? 0) + (r.summary.overtimeNightMinutes ?? 0),
       salaryOvertime: salaryOvertimeByDriver.get(String(Number(r.summary.driverCd))) ?? null,
