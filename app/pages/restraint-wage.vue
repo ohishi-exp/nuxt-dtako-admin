@@ -1763,6 +1763,43 @@ const salaryComparison = computed<SalaryComparison | null>(() => {
   return compareSalaryMonth(salaryMonthRows.value, report.value.rows, salaryItemConfig.value, salaryCdMap.value)
 })
 
+// ---- 給与比較の絞り込み・並べ替え (Refs #449) ----
+// 単価マスタ・社員マスタと同じ作法。100 人超を素の並びで読むのは無理で、
+// 見たいのは「37条を下回っている人」なので**差の小さい順**を既定の武器にする。
+
+const salaryFilterText = ref('')
+const salaryOnlyShortfall = ref(false)
+const salarySortKey = ref<'cd' | 'shortfall' | 'overtime' | 'name'>('cd')
+
+/** 表示する比較行 (絞り込み → 並べ替え)。 */
+const salaryComparisonRows = computed(() => {
+  const all = salaryComparison.value?.rows ?? []
+  const q = salaryFilterText.value.normalize('NFKC').trim()
+  const rows = all.filter((r) => {
+    // 37条の差が負 = 実際の基礎単価に対する法定割増を下回っている人だけ
+    if (salaryOnlyShortfall.value && !((r.diffCsvVsBaseRateOvertime ?? 0) < 0)) return false
+    if (!q) return true
+    // 乗務員CD と氏名のどちらでも引ける (総務は名前で探す)
+    return `${r.driverCd} ${r.mappedDriverCd ?? ''} ${r.driverName}`.normalize('NFKC').includes(q)
+  })
+  const cd = (r: SalaryComparison['rows'][number]) =>
+    String(r.mappedDriverCd ?? r.driverCd)
+  const byCd = (a: SalaryComparison['rows'][number], b: SalaryComparison['rows'][number]) =>
+    cd(a).localeCompare(cd(b), undefined, { numeric: true })
+  return [...rows].sort((a, b) => {
+    if (salarySortKey.value === 'shortfall') {
+      // **下回りが大きい順** (負の絶対値が大きい順)。判定できない行 (基礎単価が
+      // 出せない = null) は後ろへ — 0 扱いにすると健全な行に紛れる
+      const av = a.diffCsvVsBaseRateOvertime
+      const bv = b.diffCsvVsBaseRateOvertime
+      return (av === null ? 1 : 0) - (bv === null ? 1 : 0) || (av ?? 0) - (bv ?? 0) || byCd(a, b)
+    }
+    if (salarySortKey.value === 'overtime') return b.sysOvertimeMinutes - a.sysOvertimeMinutes || byCd(a, b)
+    if (salarySortKey.value === 'name') return a.driverName.localeCompare(b.driverName, 'ja') || byCd(a, b)
+    return byCd(a, b)
+  })
+})
+
 /** CSV の支給月ラベルをクリック → 対応する勤務月 (前月) を選択する。 */
 function selectSalaryMonth(ym: string) {
   const work = prevYm(ym)
@@ -3426,6 +3463,32 @@ watch([activeTab, month, session], () => {
               この月の summary がアーカイブにありません (/restraint-fetch で取得するか、アーカイブタブで再計算してください)
             </p>
             <template v-else>
+              <!-- 絞り込み・並べ替え (Refs #449)。単価マスタ・社員マスタと同じ作法 -->
+              <div class="flex flex-wrap items-center gap-3 mb-3">
+                <UFormField label="絞り込み">
+                  <UInput v-model="salaryFilterText" size="sm" class="w-56" placeholder="乗務員CD / 氏名" />
+                </UFormField>
+                <UFormField label="並べ替え">
+                  <USelect
+                    v-model="salarySortKey" size="sm" class="w-64"
+                    :items="[
+                      { label: '乗務員CD 順', value: 'cd' },
+                      { label: '37条の下回りが大きい順', value: 'shortfall' },
+                      { label: '残業時間の長い順', value: 'overtime' },
+                      { label: '氏名順', value: 'name' },
+                    ]"
+                  />
+                </UFormField>
+                <UCheckbox
+                  v-model="salaryOnlyShortfall"
+                  label="37条を下回る人だけ"
+                  class="self-end pb-1"
+                />
+                <span class="text-xs text-gray-500 self-end pb-1">
+                  {{ salaryComparisonRows.length }} / {{ salaryComparison.rows.length }} 名
+                </span>
+              </div>
+
               <ul v-if="salaryComparison.warnings.length" class="text-xs text-amber-600 dark:text-amber-400 mb-2 space-y-0.5">
                 <li v-for="(w, i) in salaryComparison.warnings" :key="i">⚠ {{ w }}</li>
               </ul>
@@ -3439,8 +3502,8 @@ watch([activeTab, month, session], () => {
                       <th class="px-2 py-2 text-right" title="給与明細の基本単価 (日額) × システム計算の稼働日数">基本給(計算)</th>
                       <th class="px-2 py-2 text-right">差</th>
                       <th class="px-2 py-2 text-right">残業計(給与)</th>
-                      <th class="px-2 py-2 text-right" title="給与明細の残業単価 (時給) × システム計算の時間外+時間外深夜">残業(計算)</th>
-                      <th class="px-2 py-2 text-right">差</th>
+                      <th class="px-2 py-2 text-right" title="給与明細の残業単価 (時給) × システム計算の時間外+時間外深夜。固定残業 (月給者) には当てはまらない">残業(計算)</th>
+                      <th class="px-2 py-2 text-right" title="残業計(給与) − 残業(計算)。固定残業 (月給者) は定額なので差に意味が無く「固定」と出す — 判定は右の 37条 の差を見る">差</th>
                       <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="割増基礎に算入する支給項目の合計 ÷ デジタコ法定内時間 (円/h)。単価マスタの時給との検算にもなる">基礎単価(実績)</th>
                       <th class="px-2 py-2 text-right" title="基礎単価(実績) を基礎額とした割増残業代の理論値 (労基法37条。月60時間までは1.25倍・超過分は1.5倍・深夜分は常時+0.25倍)">残業(基礎単価)</th>
                       <th class="px-2 py-2 text-right" title="残業計(給与) − 残業(基礎単価)。負なら実際の基礎単価に対する法定割増 (37条) を下回っている — 主判定">差</th>
@@ -3461,7 +3524,7 @@ watch([activeTab, month, session], () => {
                   </thead>
                   <tbody>
                     <tr
-                      v-for="row in salaryComparison.rows"
+                      v-for="row in salaryComparisonRows"
                       :key="row.driverCd"
                       class="border-b border-gray-100 dark:border-gray-800"
                     >
@@ -3498,7 +3561,14 @@ watch([activeTab, month, session], () => {
                         </template>
                         <span v-else class="text-xs text-gray-500">単価なし</span>
                       </td>
-                      <td class="px-2 py-1.5 text-right" :class="(row.diffOvertime ?? 0) !== 0 ? 'text-red-600 font-medium' : 'text-gray-400'">
+                      <!-- 固定残業 (月給者) は定額 × 時間ではないので差を出さない (Refs #449)。
+                           正の差を「多く払っている = 問題なし」と読まれるのを止める -->
+                      <td
+                        v-if="row.overtimeFixed"
+                        class="px-2 py-1.5 text-right text-xs text-gray-500"
+                        title="月給者 = 固定残業とみなしています。定額と「単価×時間」の差は判定に使えないので出しません。労基法37条の判定は右の「残業(基礎単価)」との差を見てください"
+                      >固定</td>
+                      <td v-else class="px-2 py-1.5 text-right" :class="(row.diffOvertime ?? 0) !== 0 ? 'text-red-600 font-medium' : 'text-gray-400'">
                         {{ fmtDiff(row.diffOvertime) }}
                       </td>
                       <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700" :title="`割増基礎算入計 ${fmtYen(row.csvPremiumBase)}円 (${fmtItemsTitle(row.csvPremiumBaseItems)}) ÷ 法定内 ${fmtMinutes(row.statutoryMinutes)}`">
