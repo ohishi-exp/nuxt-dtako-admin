@@ -139,9 +139,11 @@ import {
   type WorkScheduleD1Row,
   scopeByDriverCdAt,
   buildHolidayWorkIndex,
+  buildNightShiftIndex,
   resolveWorkScheduleAt,
 } from "./work-schedule";
 import {
+  isClericalJob,
   kintaiR2Paths,
   mergeSummarySources,
   stableTimecardSummaryBody,
@@ -2590,17 +2592,22 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return dvrJsonError(502, "勤怠 API の取得に失敗しました");
     }
 
-    // 2) 所定労働時間・休日出勤の承認・社員のスコープを D1 から引く
-    const { schedules, approved, scopes } = await this.loadKintaiInputs(record.compId, ym);
+    // 2) 所定労働時間・休日出勤の承認・社員のスコープ・夜勤者を D1 から引く
+    const { schedules, approved, scopes, nightShift } = await this.loadKintaiInputs(record.compId, ym);
+    const scopeOf = (driverCd: string) => scopes.get(driverCd) ?? { branchCode: null, jobName: null };
     const { summaries, warnings } = summarizeTimecardMonth(rows, {
       yearMonth: ym,
       dailyWorkMinutesFor: (driverCd) => {
-        const scope = scopes.get(driverCd) ?? { branchCode: null, jobName: null };
+        const scope = scopeOf(driverCd);
         return (
           resolveWorkScheduleAt(schedules, ym, scope.branchCode, scope.jobName)?.dailyWorkMinutes ?? null
         );
       },
       approvedHolidayWork: approved,
+      // 職種は社員マスタの `employee_attrs.job_name` (対象月末時点)。未取り込みの社員は
+      // null → 非事務職として扱われ、自主出勤の隔離も打刻エラーの判定も掛からない
+      isClerical: (driverCd) => isClericalJob(scopeOf(driverCd).jobName),
+      isNightShift: (driverCd) => nightShift.has(driverCd),
     });
 
     // 3) R2 へバージョン管理付きで保存
@@ -2657,19 +2664,24 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     });
   }
 
-  /** 勤怠サマリ計算の入力 (所定マスタ・休日出勤の承認・社員のスコープ) を D1 から読む。
+  /** 勤怠サマリ計算の入力 (所定マスタ・休日出勤の承認・社員のスコープ・夜勤者) を
+   * D1 から読む。
+   *
    * D1 未 binding / 読めない時は空で返す — 所定が引けない社員は時間外が出ないだけで、
-   * 取り込み自体は成功させる (fail-soft)。 */
+   * 取り込み自体は成功させる (fail-soft)。**夜勤者が空になる側に倒れる**のは
+   * 「事務職の日跨ぎが全部エラーに見える」= 目に付く壊れ方なので、黙って賃金が
+   * 変わるより気付きやすい。 */
   private async loadKintaiInputs(compId: string, ym: string) {
     const empty = {
       schedules: [] as ReturnType<typeof buildWorkScheduleResponse>,
       approved: new Set<string>(),
       scopes: new Map<string, { branchCode: number | null; jobName: string | null }>(),
+      nightShift: new Set<string>(),
     };
     const db = this.env.DTAKO_DB;
     if (!db) return empty;
     try {
-      const [scheduleResult, holidayResult, employeeResult, attrResult] = await Promise.all([
+      const [scheduleResult, holidayResult, employeeResult, attrResult, nightResult] = await Promise.all([
         db
           .prepare(
             `SELECT effective_from, branch_code, job_name, daily_work_minutes FROM work_schedules WHERE comp_id = ?`,
@@ -2692,6 +2704,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           )
           .bind(compId)
           .all<EmployeeAttrD1Row>(),
+        // 夜勤者は履歴全件を読む — 対象月の末日時点での解決は buildNightShiftIndex が行う
+        db
+          .prepare(`SELECT driver_cd, effective_from, is_night FROM night_shift_workers WHERE comp_id = ?`)
+          .bind(compId)
+          .all<NightShiftD1Row>(),
       ]);
       const { employees } = buildEmployeeMasterResponse(
         employeeResult.results ?? [],
@@ -2701,6 +2718,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         schedules: buildWorkScheduleResponse(scheduleResult.results ?? []),
         approved: buildHolidayWorkIndex(buildHolidayWorkResponse(holidayResult.results ?? [])),
         scopes: scopeByDriverCdAt(employees, ym, resolveAttrsAt),
+        nightShift: buildNightShiftIndex(buildNightShiftResponse(nightResult.results ?? []), ym),
       };
     } catch (err) {
       console.error(JSON.stringify({ kintai_inputs: "error", error: describeUnknownError(err) }));
