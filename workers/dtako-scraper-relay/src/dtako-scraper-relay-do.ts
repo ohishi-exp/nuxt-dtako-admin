@@ -152,6 +152,7 @@ import {
   type WageReportSource,
 } from "./timecard-summary";
 import { buildRestraintD1Statements, type RestraintD1Entry } from "./restraint-d1";
+import { buildRestraintPushBodies } from "./restraint-push";
 import {
   appendHistoryJsonl,
   downloadRestraintCsv,
@@ -2671,6 +2672,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         });
       }
       await this.upsertRestraintSummariesD1(record.compId, "timecard", ym, d1Entries);
+      await this.pushRestraintSummariesToIchiban(record.compId, "timecard", ym, d1Entries);
     } catch (err) {
       console.error(JSON.stringify({ kintai_fetch: "r2-error", error: describeUnknownError(err) }));
       return dvrJsonError(502, "勤怠データの保存に失敗しました");
@@ -3035,6 +3037,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       }
     }
     await this.upsertRestraintSummariesD1(record.compId, "theearth", parsed.ym, d1Entries);
+    await this.pushRestraintSummariesToIchiban(record.compId, "theearth", parsed.ym, d1Entries);
     return Response.json({
       month: parsed.ym,
       csv_processed: csvCount,
@@ -3183,6 +3186,66 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return { changed: true, sha256: hash, fetchedAt };
   }
 
+  /** サマリ写しを rust-ichibanboshi (restraint_local.sqlite) へ push する
+   * (Refs #452 / rust-ichibanboshi#106 Phase 3b)。best-effort — 到達不能・非 2xx でも
+   * 取り込み自体は成功させる (R2 が正。欠けは resummarize の再実行で追い付ける)。
+   * wage-report の読みは Phase 3c でこの写し (wage-source) に切り替わる。 */
+  private async pushRestraintSummariesToIchiban(
+    compId: string,
+    source: WageReportSource,
+    ym: string,
+    entries: RestraintD1Entry[],
+  ): Promise<void> {
+    if (entries.length === 0) return;
+    const apiUrl = (this.env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
+    const clientId = this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
+    let clientSecret = "";
+    try {
+      clientSecret = await resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
+    } catch (err) {
+      console.error(JSON.stringify({ restraint_push: "secret-error", error: describeUnknownError(err) }));
+    }
+    if (!apiUrl || !clientId || !clientSecret) {
+      // 未設定環境 (ローカル dev 等) では push なしで動く — wage-source 側は
+      // synced_at null になり、読みは R2 フォールバックのまま
+      console.log(JSON.stringify({ restraint_push: "skipped-not-configured", comp_id: compId, source, ym }));
+      return;
+    }
+    try {
+      for (const body of buildRestraintPushBodies(compId, source, ym, entries)) {
+        const res = await fetch(`${apiUrl}/api/restraint/summaries`, {
+          method: "PUT",
+          headers: {
+            "content-type": "application/json",
+            "CF-Access-Client-Id": clientId,
+            "CF-Access-Client-Secret": clientSecret,
+          },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          console.error(
+            JSON.stringify({
+              restraint_push: "upstream-error",
+              comp_id: compId,
+              source,
+              ym,
+              status: res.status,
+              body: (await res.text()).slice(0, 200),
+            }),
+          );
+          return; // 同一 push 内の続きは諦める (次の取り込み/resummarize で追い付く)
+        }
+      }
+      console.log(
+        JSON.stringify({ restraint_push: "done", comp_id: compId, source, ym, entries: entries.length }),
+      );
+    } catch (err) {
+      console.error(
+        JSON.stringify({ restraint_push: "error", comp_id: compId, source, ym, error: describeUnknownError(err) }),
+      );
+    }
+  }
+
   /** サマリ写しを D1 (restraint_driver_month + restraint_daily) へ upsert する
    * (Refs #452 PR-A)。best-effort — D1 未 binding・書き込み失敗でも取り込み自体は
    * 成功させる (R2 が正。欠けた分は PR-B のバックフィルで追い付ける)。
@@ -3314,6 +3377,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       }
       const ym = `${params.year}-${String(params.month).padStart(2, "0")}`;
       await this.upsertRestraintSummariesD1(compId, "theearth", ym, d1Entries);
+      await this.pushRestraintSummariesToIchiban(compId, "theearth", ym, d1Entries);
       console.log(
         JSON.stringify({
           restraint_r2: "done",
@@ -3361,13 +3425,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         );
         if (wrote.changed) await this.pruneRestraintVersions(bucket, paths.summaryDir(params.driverFrom));
         const ym = `${params.year}-${String(params.month).padStart(2, "0")}`;
-        await this.upsertRestraintSummariesD1(compId, "theearth", ym, [
+        const noDataEntries: RestraintD1Entry[] = [
           {
             kind: "no-data",
             driverCd: params.driverFrom,
             meta: { sha256: wrote.sha256, fetchedAt: wrote.fetchedAt, lastVerifiedAt: ts },
           },
-        ]);
+        ];
+        await this.upsertRestraintSummariesD1(compId, "theearth", ym, noDataEntries);
+        await this.pushRestraintSummariesToIchiban(compId, "theearth", ym, noDataEntries);
       }
       console.log(JSON.stringify({ restraint_r2: "no-data", key: paths.csvHistory }));
     } catch (err) {
