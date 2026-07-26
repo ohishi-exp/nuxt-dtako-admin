@@ -24,6 +24,11 @@ export interface RestraintSummaryDay {
   voluntaryMinutes?: number
   /** その日の打刻区間 (中抜けがあれば 2 つ以上)。タイムカード由来のみ。 */
   sessions?: TimecardSession[]
+  /** 打刻エラー (事務職・非夜勤の日跨ぎ) として賃金計算から外した拘束 (分)。
+   * タイムカード由来のみ。0 より大きければその日は打刻エラー (Refs #433)。 */
+  punchErrorMinutes?: number
+  /** その日の休暇区分 (原文、公休 / 有休 / …)。タイムカード由来のみ (Refs #433)。 */
+  leaves?: string[]
 }
 
 export interface RestraintDriverSummary {
