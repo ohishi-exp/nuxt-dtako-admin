@@ -490,6 +490,16 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   昇格する (実態が指揮命令下なら労働時間と評価されうるため「消さない」設計)。
   突合キーは `driver_cd` (= 乗務員CD = 一番星社員C = CakePHP `drivers.id`)
 - **タイムカード → サマリの変換** (`workers/dtako-scraper-relay/src/timecard-summary.ts`、100% gate、Refs #424 PR-B): 日別 JSON を `RestraintDriverSummary` 互換に畳むので `computeWageRow`/`classifyMonth`/`compareSalaryMonth` は無変更で事務員を計算できる。実働 = 打刻 − (中抜け ∪ 12:00-13:00)、時間外 = 実働 − 所定 (終わり側から取り深夜帯と重ねる)、自主出勤は `isRestDay: true` + 各時間 0 + `voluntaryMinutes`。**時刻は秒で保持して最後に分へ丸める** — 先に分へ丸めると上流の `restraint_minutes` と 1 分ずれる。fixture は実機応答 (`tests/fixtures/restraint-wage/timecard-daily-2026-06.json`) + golden
+- **取り込み** (`POST /restraint-api/kintai/fetch?month=`、Refs #424 PR-A): rust-ichibanboshi の
+  `/api/kintai/daily` を CF Access Service Token で叩き、**上流応答を解釈せず生のまま**
+  `kintai/{compId}/{ym}/raw/` へ versioned 保存 (theearth の `restraint/` とは別 prefix —
+  同じ月・同じ乗務員CD で両方存在しうるため)。併せて所定マスタ・休日出勤の承認・社員の
+  スコープを D1 から引いて `summarizeTimecardMonth` を回し、社員別サマリも保存する。
+  `GET /restraint-api/kintai/archive?month=` で版一覧と確認履歴を見る。**冪等** —
+  内容が同じなら版は増えず `summaries_updated: 0` になる
+- **Secrets Store binding は解決できないと `get()` が throw する** — 宣言はあるが entry が
+  無い/改名された時に素通しすると生のスタック付き 500 になる。try/catch で「未設定」と
+  同じ 503 に倒すこと (2026-07-26 に dev で実際に踏んだ)
 - **NULL をスコープの「全体」に使わない**: SQLite (D1) の UNIQUE/PK は NULL 同士を
   異なる値として扱うため、NULL を PK に含めると `ON CONFLICT DO UPDATE` が一致せず
   同じ行が二重に入る。番兵値 (`branch_code = -1` / `job_name = ''`) を使い、

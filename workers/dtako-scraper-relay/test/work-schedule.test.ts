@@ -11,6 +11,7 @@ import {
   normalizeHolidayWorkPutBody,
   normalizeWorkSchedulePutBody,
   resolveWorkScheduleAt,
+  scopeByDriverCdAt,
   WorkScheduleError,
   type HolidayWorkD1Row,
   type WorkScheduleD1Row,
@@ -418,5 +419,42 @@ describe('buildHolidayWorkIndex / isHolidayWorkApproved', () => {
 
   it('空の承認簿ならすべて false (= 休日出勤は自主出勤へ倒れる)', () => {
     expect(isHolidayWorkApproved(buildHolidayWorkIndex([]), '18', '2026-06-07')).toBe(false)
+  })
+})
+
+describe('scopeByDriverCdAt', () => {
+  interface Attr { effectiveFrom: string, branchCode: number | null, jobName: string | null }
+  const resolveAt = (attrs: Attr[], ym: string) =>
+    attrs.filter(a => a.effectiveFrom <= `${ym}-31`).sort((a, b) => (a.effectiveFrom < b.effectiveFrom ? 1 : -1))[0] ?? null
+
+  it('乗務員CD → 月末時点のスコープを引ける', () => {
+    const map = scopeByDriverCdAt(
+      [{ driverCd: '18', attrs: [
+        { effectiveFrom: '2026-04-01', branchCode: 10, jobName: '事務' },
+        { effectiveFrom: '2026-06-01', branchCode: 20, jobName: '運転' },
+      ] }],
+      '2026-06',
+      resolveAt,
+    )
+    expect(map.get('18')).toEqual({ branchCode: 20, jobName: '運転' })
+  })
+
+  it('乗務員CD が無い社員は飛ばす', () => {
+    const map = scopeByDriverCdAt([{ driverCd: null, attrs: [] }], '2026-06', resolveAt)
+    expect(map.size).toBe(0)
+  })
+
+  it('属性が解決できなければ全社既定 (null/null) に倒す', () => {
+    const map = scopeByDriverCdAt([{ driverCd: '18', attrs: [] }], '2026-06', resolveAt)
+    expect(map.get('18')).toEqual({ branchCode: null, jobName: null })
+  })
+
+  it('属性はあるがコード/職種が未設定なら null に倒す', () => {
+    const map = scopeByDriverCdAt(
+      [{ driverCd: '18', attrs: [{ effectiveFrom: '2026-04-01', branchCode: null, jobName: null }] }],
+      '2026-06',
+      resolveAt,
+    )
+    expect(map.get('18')).toEqual({ branchCode: null, jobName: null })
   })
 })
