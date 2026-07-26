@@ -612,6 +612,42 @@ export function sumByCategory(row: SalaryCsvRow, config: SalaryItemConfig): Sala
   return { buckets, premiumBase, minWageEligible, total }
 }
 
+/**
+ * 残業の「時間」比較 (タイムカード表示用、Refs #441)。
+ *
+ * 拘束時間上の残業 (打刻から計算した時間) と、給与明細に計上された残業代を
+ * **基礎単価(実績) で時間へ逆算した値**を並べる。**逆算は法定割増
+ * (1.25/1.5倍・深夜0.25倍) を戻さない単純な「金額 ÷ 基礎単価」** — 円ベースの
+ * 主判定 (`diffCsvVsBaseRateOvertime`) の理論値とは別の、時間の桁感を掴むための
+ * 簡易換算であることに注意 (割増が乗っている分、実際の残業時間より大きく出る)。
+ *
+ * 基礎単価(実績) が無ければ (`baseRateActual` が null か 0 以下) 支給側は
+ * 計算不能 = null (独自の按分計算はしない、Refs #253 の方針と同じ)。
+ */
+export interface OvertimeHoursComparison {
+  /** 拘束時間上の残業 (分、時間外+時間外深夜+週40超過)。`sysOvertimeMinutes` と同じ。 */
+  restraintMinutes: number
+  /** 給与の残業計上額 ÷ 基礎単価(実績) を時間へ逆算した値 (分)。計算不能なら null。 */
+  paidMinutes: number | null
+  /** 拘束時間上の残業 − 支給分の残業 (分)。正 = 打刻の方が多い (未払いの疑い)。
+   * `paidMinutes` が null なら null。 */
+  diffMinutes: number | null
+}
+
+export function overtimeHoursComparison(
+  row: Pick<SalaryComparisonRow, 'sysOvertimeMinutes' | 'csvOvertime' | 'baseRateActual'>,
+): OvertimeHoursComparison {
+  const restraintMinutes = row.sysOvertimeMinutes
+  const paidMinutes = row.baseRateActual !== null && row.baseRateActual > 0
+    ? Math.round((row.csvOvertime / row.baseRateActual) * 60)
+    : null
+  return {
+    restraintMinutes,
+    paidMinutes,
+    diffMinutes: paidMinutes === null ? null : restraintMinutes - paidMinutes,
+  }
+}
+
 /** 月の時間外割増の法定上限 (worker computeMinWageOvertimePay と同じ閾値)。 */
 const MONTHLY_OVERTIME_THRESHOLD_MINUTES = 60 * 60
 

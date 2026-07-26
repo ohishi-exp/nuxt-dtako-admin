@@ -27,8 +27,9 @@ import type {
   WageReportRow,
 } from '~/utils/restraint-wage-view'
 import { MIN_WAGE_DEFAULT_KEY } from '~/utils/restraint-wage-view'
-import { buildTimecardTable, countWorkKinds } from '~/utils/timecard-view'
+import { buildTimecardTable, countWorkKinds, daysInMonth } from '~/utils/timecard-view'
 import type {
+  OvertimeHoursComparison,
   ParsedSalaryCsv,
   SalaryComparison,
   SalaryItemCategory,
@@ -286,12 +287,38 @@ const timecardSheets = computed(() => {
   const [year, monthNo] = [selectedYear.value, selectedMonthNo.value]
   return timecardRows.value
     .filter(r => !filter.length || filter.includes(String(Number(r.summary.driverCd))))
-    .map(r => ({
-      driverCd: r.summary.driverCd,
-      driverName: r.summary.driverName,
-      rows: buildTimecardTable(r.summary.days, year, monthNo),
-      counts: countWorkKinds(r.summary.days),
-    }))
+    .map(r => {
+      // 拘束時間上の残業・勤怠日数は summary から常に出せる。給与側 (基礎単価・
+      // 残業計上額・勤怠日数) は給与比較タブで CSV を取り込んでいる時だけ埋まる
+      // (Refs #441)
+      const driverKey = String(Number(r.summary.driverCd))
+      const paid = paidOvertimeByDriver.value.get(driverKey) ?? null
+      const paidAttendance = paidAttendanceByDriver.value.get(driverKey) ?? null
+      const counts = countWorkKinds(r.summary.days)
+      // 出勤日数 (拘束側) は「公休・有休・欠勤以外は出勤」で数える — 給与明細の
+      // 出勤日数と同じ数え方 (実測: 30日 − 公休5日 = 25日で一致)。打刻エラーの日や
+      // 打刻が全く無い日 (upstream に行自体が無い日) も出勤から引かない — 賃金計算
+      // から外れているだけで、来ていないと確定したわけではないため (Refs #441)。
+      // `counts` の内訳合計 (normal+overtime+holidayWork+punchError) だとタイムカードに
+      // 行自体が無い日を出勤に数え損ねる。総日数からの逆算なら常に給与明細と揃う。
+      const workDaysSys = daysInMonth(year, monthNo) - counts.publicHoliday - counts.paidLeave - counts.absence
+      return {
+        driverCd: r.summary.driverCd,
+        driverName: r.summary.driverName,
+        rows: buildTimecardTable(r.summary.days, year, monthNo),
+        counts,
+        overtimeCompare: overtimeHoursComparison({
+          sysOvertimeMinutes: (r.summary.overtimeMinutes ?? 0) + (r.summary.overtimeNightMinutes ?? 0),
+          csvOvertime: paid?.csvOvertime ?? 0,
+          baseRateActual: paid?.baseRateActual ?? null,
+        }),
+        attendanceCompare: {
+          work: { sys: workDaysSys, csv: paidAttendance?.work ?? null },
+          holidayWork: { sys: counts.holidayWork, csv: null },
+          publicHoliday: { sys: counts.publicHoliday, csv: paidAttendance?.publicHoliday ?? null },
+        },
+      }
+    })
 })
 
 /**
@@ -1579,6 +1606,35 @@ const paidByDriver = computed(() => {
 function paidFor(driverCd: string): { base: number, overtime: number } | null {
   return paidByDriver.value.get(String(Number(driverCd))) ?? null
 }
+
+/** 乗務員CD (正規化キー) → 給与明細の残業計上額 + 基礎単価(実績) (タイムカード表の
+ * 残業「時間」比較用、Refs #441)。salaryComparison が無くても拘束側の時間は
+ * summary から常に出せるので、ここが空でも「支給分」欄だけが "-" になる。 */
+const paidOvertimeByDriver = computed(() => {
+  const map = new Map<string, { csvOvertime: number, baseRateActual: number | null }>()
+  for (const r of salaryComparison.value?.rows ?? []) {
+    map.set(String(Number(r.mappedDriverCd ?? r.driverCd)), {
+      csvOvertime: r.csvOvertime,
+      baseRateActual: r.baseRateActual,
+    })
+  }
+  return map
+})
+
+/** 乗務員CD (正規化キー) → 給与明細【勤怠】セクションの出勤日数・公休日数
+ * (タイムカード表の勤怠日数比較用、Refs #441)。欄が無ければ undefined のまま
+ * (`SalaryComparisonRow.attendanceDays.csv` と同じ規則)。休日出勤日数は給与明細の
+ * 様式に列が無いため突合しない (常に "-")。 */
+const paidAttendanceByDriver = computed(() => {
+  const map = new Map<string, { work?: number, publicHoliday?: number }>()
+  for (const r of salaryComparison.value?.rows ?? []) {
+    map.set(String(Number(r.mappedDriverCd ?? r.driverCd)), {
+      work: r.attendanceDays.csv.work,
+      publicHoliday: r.attendanceDays.csv.publicHoliday,
+    })
+  }
+  return map
+})
 
 /** 基礎単価(実績) の表示 (円/h、整数丸め。null は "-")。 */
 function fmtRatePerHour(v: number | null): string {
@@ -4126,6 +4182,8 @@ watch([activeTab, month, session], () => {
                 :month="month"
                 :rows="sheet.rows"
                 :counts="sheet.counts"
+                :overtime-compare="sheet.overtimeCompare"
+                :attendance-compare="sheet.attendanceCompare"
               />
             </div>
           </UCard>
