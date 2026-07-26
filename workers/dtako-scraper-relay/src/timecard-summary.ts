@@ -33,15 +33,19 @@
  *   実働分は `voluntaryMinutes` に退避する。既存の賃金ロジックに手を入れずに
  *   「残業としてつけない」を実現でき、時間は画面と CSV に残る
  *
- * ## 既知の限界 (PR-D で解消する)
+ * ## 休日区分の権威 (PR-D で解消済み)
  *
- * `classifyMonth` の法定外休日は **wage-config の曜日指定** (既定は空) で判定するため、
- * **祝日・会社指定休の承認済み休日出勤は今のところ平日として計算される** (1.25 倍が
- * 付かない)。日別に `holidayKind` を持たせてあるので、PR-D で `classifyMonth` 側が
- * これを見るようにすれば解消する。該当日があれば `warnings` に出す。
+ * 日別の `holidayKind` は CakePHP の判定 (日曜 + 祝日 + 会社指定休) をそのまま運び、
+ * `classifyMonth` はそれがある日を**曜日判定より優先**する。これで祝日・指定休の
+ * 承認済み休日出勤に法定外休日の 1.25 倍が付く。theearth 由来の日別行には
+ * `holidayKind` が無いので、乗務員側の計算は従来どおり wage-config の曜日指定で動く。
  */
 
-import type { RestraintDriverSummary, RestraintSummaryDay } from "./theearth-restraint-client";
+import type {
+  RestraintDriverSummary,
+  RestraintHolidayKind,
+  RestraintSummaryDay,
+} from "./theearth-restraint-client";
 import { TheearthClientError } from "./theearth-client";
 
 /** 入力の構造不正 (呼び出し側で 502 相当にマップする — 上流 JSON が壊れている)。 */
@@ -52,8 +56,10 @@ export class TimecardSummaryError extends TheearthClientError {
   }
 }
 
-/** 休日区分 (CakePHP 側が日曜 / 指定休+祝日 / それ以外で判定して返す)。 */
-export type TimecardHolidayKind = "legal" | "non_legal" | "weekday";
+/** 休日区分 (CakePHP 側が日曜 / 指定休+祝日 / それ以外で判定して返す)。
+ * 実体は `RestraintHolidayKind` — `classifyMonth` が日別行から直接読むため、
+ * 型の置き場は共通の `RestraintSummaryDay` 側に移した (Refs #424 PR-D)。 */
+export type TimecardHolidayKind = RestraintHolidayKind;
 
 export interface TimecardSession {
   /** "YYYY-MM-DD HH:MM:SS" */
@@ -378,12 +384,6 @@ export function summarizeTimecardMonth(
       continue;
     }
     const approved = opts.approvedHolidayWork.has(`${driverCd}|${row.date}`);
-    if (row.holiday === "non_legal" && approved) {
-      warnings.push(
-        `${row.date} の乗務員 ${driverCd} は法定外休日 (指定休・祝日) の承認済み休日出勤ですが、`
-        + `法定外休日の割増は wage-config の曜日指定でしか効かないため平日として計算されます`,
-      );
-    }
     const day = summarizeTimecardDay(row, {
       dailyWorkMinutes: opts.dailyWorkMinutesFor(driverCd),
       approved,
@@ -432,6 +432,56 @@ export function summarizeTimecardMonth(
   }
   summaries.sort((a, b) => Number(a.driverCd) - Number(b.driverCd));
   return { summaries, warnings };
+}
+
+// ---------------------------------------------------------------------------
+// wage-report での合流 (Refs #424 PR-D)
+// ---------------------------------------------------------------------------
+
+/** 賃金行の出どころ。 */
+export type WageReportSource = "theearth" | "timecard";
+
+export interface MergedSummaryEntry<T> {
+  entry: T;
+  source: WageReportSource;
+}
+
+/**
+ * theearth (デジタコ) と timecard (タイムカード) のサマリを 1 本の行列に合流する。
+ *
+ * **同じ乗務員CD が両方に居たら theearth を採る** — デジタコに乗る乗務員は拘束時間
+ * CSV が時間外まで持っており、打刻からの再計算より情報量が多い。落とした側は
+ * warnings に出す (人によっては両方に痕跡が残りうるので、黙って消さない)。
+ *
+ * 並びは乗務員CD の数値順。`localeCompare` を使わないのは ICU の照合順が Windows と
+ * Linux (CI) で食い違い、決定的な順序という目的自体が壊れるため (Refs #403)。
+ */
+export function mergeSummarySources<T extends { data: { driverCd: string } }>(
+  theearth: readonly T[],
+  timecard: readonly T[],
+): { merged: MergedSummaryEntry<T>[]; warnings: string[] } {
+  const fromTheearth = new Set(theearth.map((s) => s.data.driverCd));
+  const merged: MergedSummaryEntry<T>[] = theearth.map((entry) => ({
+    entry,
+    source: "theearth" as const,
+  }));
+  const duplicated: string[] = [];
+  for (const entry of timecard) {
+    if (fromTheearth.has(entry.data.driverCd)) {
+      duplicated.push(entry.data.driverCd);
+      continue;
+    }
+    merged.push({ entry, source: "timecard" });
+  }
+  merged.sort((a, b) => Number(a.entry.data.driverCd) - Number(b.entry.data.driverCd));
+  const warnings: string[] = [];
+  if (duplicated.length > 0) {
+    warnings.push(
+      `乗務員CD ${duplicated.join(", ")} は デジタコ と タイムカード の両方にサマリがあるため、`
+      + `デジタコ側を採用しました`,
+    );
+  }
+  return { merged, warnings };
 }
 
 /**

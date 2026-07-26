@@ -723,6 +723,16 @@ export function stableSummaryBody(
 
 /** summary に載せる日別のコンパクト行 (賃金計算・週40h・法定区分分類の素材)。
  * 日付は day (1-31) のみ持ち、曜日は year/month から消費側で導出する。 */
+/**
+ * その日の休日区分。**タイムカード由来のサマリにだけ入る** (CakePHP 側が日曜 =
+ * `legal` / 祝日・会社指定休 = `non_legal` / それ以外 = `weekday` と判定して返す)。
+ *
+ * theearth (デジタコ) 由来の日別行は暦を持たないので `undefined` のままで、
+ * `classifyMonth` は従来どおり wage-config の曜日指定で法定区分を決める
+ * (Refs #424 PR-D)。
+ */
+export type RestraintHolidayKind = "legal" | "non_legal" | "weekday";
+
 export interface RestraintSummaryDay {
   day: number;
   isRestDay: boolean;
@@ -731,6 +741,8 @@ export interface RestraintSummaryDay {
   overtimeMinutes: number | null;
   nightMinutes: number | null;
   overtimeNightMinutes: number | null;
+  /** 休日区分 (タイムカード由来のみ。無ければ曜日から判定する)。 */
+  holidayKind?: RestraintHolidayKind;
 }
 
 export interface RestraintDriverSummary {

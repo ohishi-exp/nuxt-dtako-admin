@@ -505,6 +505,49 @@ describe('classifyMonth (2025-04: 1日=火, 5日=土, 6日=日)', () => {
     expect(m.nonLegalHolidayNight).toBe(20)
   })
 
+  // --- holidayKind (タイムカード由来) は曜日判定より優先する (Refs #424 PR-D) ---
+
+  it("holidayKind='non_legal' は平日 (水曜) でも法定外休日に計上する", () => {
+    // 2025-04-09 は水曜。曜日判定なら平日だが、CakePHP が祝日・指定休と判定した日
+    const m = classifyMonth(
+      [day(9, { workingMinutes: 300, nightMinutes: 20, holidayKind: 'non_legal' })],
+      2025, 4, config,
+    )
+    expect(m.nonLegalHoliday).toBe(280)
+    expect(m.nonLegalHolidayNight).toBe(20)
+    expect(m.statutory).toBe(0)
+  })
+
+  it("holidayKind='legal' は平日 (水曜) でも法定休日に計上し時間外を消す", () => {
+    const m = classifyMonth(
+      [day(9, { workingMinutes: 480, overtimeMinutes: 60, nightMinutes: 60, overtimeNightMinutes: 30, holidayKind: 'legal' })],
+      2025, 4, config,
+    )
+    expect(m.legalHolidayNight).toBe(90)
+    expect(m.legalHoliday).toBe(480 - 90)
+    expect(m.overtime).toBe(0)
+    expect(m.statutory).toBe(0)
+  })
+
+  it("holidayKind='weekday' は日曜でも平日として計算する (曜日判定を上書きする)", () => {
+    // 2025-04-06 は日曜 = 既定の法定休日。CakePHP が weekday と判定したらそちらが正
+    const m = classifyMonth(
+      [day(6, { workingMinutes: 480, overtimeMinutes: 60, holidayKind: 'weekday' })],
+      2025, 4, config,
+    )
+    expect(m.legalHoliday).toBe(0)
+    expect(m.statutory).toBe(420)
+    expect(m.overtime).toBe(60)
+  })
+
+  it('holidayKind が無い日 (theearth 由来) は従来どおり曜日で決まる', () => {
+    const withKind = classifyMonth([day(6, { workingMinutes: 480, holidayKind: 'weekday' })], 2025, 4, config)
+    const withoutKind = classifyMonth([day(6, { workingMinutes: 480 })], 2025, 4, config)
+    expect(withKind.statutory).toBe(480)
+    expect(withoutKind.statutory).toBe(0)
+    expect(withoutKind.legalHoliday).toBe(480) // 日曜 = 法定休日
+  })
+
   it('休日行・実働 0・null は計上しない (防御)', () => {
     const m = classifyMonth(
       [

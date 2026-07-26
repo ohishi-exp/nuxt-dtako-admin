@@ -577,6 +577,12 @@ function classifyDayRow(
 ): ClassifiedDay {
   const dow = dayOfWeek(year, month, d.day);
   const working = d.isRestDay ? 0 : d.workingMinutes ?? 0;
+  // タイムカード由来の日は CakePHP の休日判定 (日曜 + 祝日 + 会社指定休) を持って
+  // いるので、**曜日判定より優先する** (Refs #424 PR-D)。これが無いと祝日・指定休の
+  // 承認済み休日出勤が平日として計算され、法定外休日の 1.25 倍が付かない。
+  // theearth (デジタコ) 由来の日別行は暦を持たず undefined なので、乗務員側は
+  // 従来どおり wage-config の曜日指定で決まる = 既存挙動は変わらない。
+  const kind = d.holidayKind;
   return {
     day: d.day,
     dow,
@@ -585,8 +591,11 @@ function classifyDayRow(
     overtime: d.isRestDay ? 0 : d.overtimeMinutes ?? 0,
     night: d.isRestDay ? 0 : d.nightMinutes ?? 0,
     overtimeNight: d.isRestDay ? 0 : d.overtimeNightMinutes ?? 0,
-    isLegalHoliday: dow === config.legalHolidayWeekday,
-    isNonLegalHoliday: dow !== config.legalHolidayWeekday && config.nonLegalHolidayWeekdays.includes(dow),
+    isLegalHoliday: kind === undefined ? dow === config.legalHolidayWeekday : kind === "legal",
+    isNonLegalHoliday:
+      kind === undefined
+        ? dow !== config.legalHolidayWeekday && config.nonLegalHolidayWeekdays.includes(dow)
+        : kind === "non_legal",
   };
 }
 
@@ -600,6 +609,9 @@ function classifyDayRow(
  *   法定休日深夜) に計上する。
  * - 法定外休日 (wage-config で指定した曜日のみ、既定なし): 実働すべてを
  *   法定外休日 (深夜分は 法定外休日深夜)。
+ * - **日別行が `holidayKind` を持つ場合はそれが優先**される (タイムカード由来。
+ *   CakePHP が日曜 + 祝日 + 会社指定休を判定済み)。曜日では拾えない祝日・指定休の
+ *   休日出勤に法定外休日の割増が付く (Refs #424 PR-D)。
  * - 週40超過: 週 (weekStartsOn 起算、**終端が当月に属する週のみ**) の実働合計
  *   (法定休日を除く) − 40h − その週で既に割増計上済みの分 (時間外・時間外深夜・
  *   法定外休日) を正の範囲で計上。月初の跨ぎ週は prevMonthDays (前月 summary の
