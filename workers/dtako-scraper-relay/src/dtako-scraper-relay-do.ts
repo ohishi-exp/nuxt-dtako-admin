@@ -2573,12 +2573,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     let rawText: string;
     let rows: TimecardDailyRow[];
     try {
-      const upstream = await fetch(`${apiUrl}/api/kintai/daily?month=${encodeURIComponent(ym)}`, {
-        headers: {
-          "CF-Access-Client-Id": clientId,
-          "CF-Access-Client-Secret": clientSecret,
+      // refresh=1 で ichiban の derived store を飛ばして CakePHP から引き直す
+      // (rust-ichibanboshi#106 Phase 2)。取り込みは「今の打刻」を取るのが目的なので
+      // キャッシュ命中で古い当月を掴まない
+      const upstream = await fetch(
+        `${apiUrl}/api/kintai/daily?month=${encodeURIComponent(ym)}&refresh=1`,
+        {
+          headers: {
+            "CF-Access-Client-Id": clientId,
+            "CF-Access-Client-Secret": clientSecret,
+          },
         },
-      });
+      );
       rawText = await upstream.text();
       if (!upstream.ok) {
         console.error(JSON.stringify({ kintai_fetch: "upstream-error", status: upstream.status }));
@@ -2589,6 +2595,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         return dvrJsonError(502, "勤怠 API の応答に rows 配列がありません");
       }
       rows = body.rows as TimecardDailyRow[];
+      // ichiban が足すキャッシュメタ (source / synced_at) は取得ごとに値が変わる。
+      // R2 原本に残すと内容不変でも sha256 が毎回変わり raw の版が際限なく増える
+      // ため、正規化して除いてから版管理に載せる (キー順は JSON.parse の挿入順 =
+      // 上流の出現順が保存されるので、データ不変なら byte 不変)
+      delete (body as Record<string, unknown>).source;
+      delete (body as Record<string, unknown>).synced_at;
+      rawText = JSON.stringify(body);
     } catch (err) {
       console.error(JSON.stringify({ kintai_fetch: "error", error: describeUnknownError(err) }));
       return dvrJsonError(502, "勤怠 API の取得に失敗しました");
