@@ -612,6 +612,40 @@ export function mergeSalaryCsvRows(rows: SalaryCsvRow[]): SalaryCsvRow {
   }
 }
 
+/** 給与区分 (`SHAIN3.KKUBUN`)。給与大臣の社員情報画面「2 給与区分」の並び順。 */
+export const PAY_KUBUN_MONTHLY = 1
+export const PAY_KUBUN_DAILY = 2
+export const PAY_KUBUN_HOURLY = 3
+
+/**
+ * 「基本給(計算)」= 給与明細の【補助】基本単価 × システム集計。**単価の単位が
+ * 給与区分で変わる**ので掛ける相手を変える (Refs #429)。
+ *
+ * | 区分 | 計算 |
+ * |---|---|
+ * | 2 日給 | 日額 × 稼働日数 |
+ * | 3 時給 | 時給 × 実働時間 |
+ * | 1 月給 / 4 その他 / 不明 | **null (「単価なし」)** |
+ *
+ * 月給を null にするのは、月額に稼働日数を掛けても実額に対応しないため。実額
+ * (`csvBase`) 側だけが残り、意味のない差が出なくなる。**不明も null に倒す**のが
+ * 要点で、既定を日給にすると月給者へ日額計算を掛ける今回の壊れ方が再発する。
+ *
+ * 時給の実働時間はタイムカード由来なら「拘束 − 中抜け − 昼休憩」(Refs #424 PR-B)、
+ * デジタコ由来なら CSV の実働がそのまま入る。
+ */
+export function computeSysBase(
+  baseRate: number | null,
+  payKubun: number | null,
+  workDays: number,
+  workingMinutes: number,
+): number | null {
+  if (baseRate === null) return null
+  if (payKubun === PAY_KUBUN_DAILY) return Math.round(baseRate * workDays)
+  if (payKubun === PAY_KUBUN_HOURLY) return Math.round((baseRate * workingMinutes) / 60)
+  return null
+}
+
 /**
  * 対象月の CSV 行と wage-report を乗務員CD (数値同値) で突合する。
  * 給与コードが乗務員CDと別体系の乗務員は cdMap (給与コード|氏名 → 乗務員CD) で
@@ -716,12 +750,17 @@ export function compareSalaryMonth(
     const base = sums.buckets['base'].total
     const overtime = sums.buckets['overtime'].total
     const workDays = report.summary.workDays
+    const workingMinutes = report.summary.workingMinutes ?? 0
     const overtimeMinutes = (report.summary.overtimeMinutes ?? 0) + (report.summary.overtimeNightMinutes ?? 0)
 
-    // 計算側: CSV の単価 × システム集計 (基本単価は日額、残業単価は時給)。
-    // 単価が無い行は独自の按分計算をせず null (「単価なし」— 最低賃金比較は
-    // 既存の最低賃金チェックタブに任せる、Refs #253)。
-    const sysBase = csv.rates.base !== null ? Math.round(csv.rates.base * workDays) : null
+    // 計算側: CSV の単価 × システム集計。単価が無い行は独自の按分計算をせず null
+    // (「単価なし」— 最低賃金比較は既存の最低賃金チェックタブに任せる、Refs #253)。
+    //
+    // **基本単価の掛け方は給与区分で変わる** (Refs #429)。以前は全員を日給者と
+    // みなして `単価 × 稼働日数` にしていたため、月給者では桁が 1 つ以上ずれた値が
+    // 「差」として並んでいた (実データで基本給 165,000 の月給者に 2,640,000)。
+    // 残業側は区分に関わらず時給単価なので従来どおり。
+    const sysBase = computeSysBase(csv.rates.base, report.pay_kubun ?? null, workDays, workingMinutes)
     const sysOvertime = csv.rates.overtime !== null ? Math.round((csv.rates.overtime * overtimeMinutes) / 60) : null
     const sysTotal = sysBase !== null && sysOvertime !== null ? sysBase + sysOvertime : null
 

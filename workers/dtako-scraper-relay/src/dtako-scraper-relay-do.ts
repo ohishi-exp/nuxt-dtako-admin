@@ -117,6 +117,7 @@ import {
   buildEmployeeMasterWriteStatements,
   EmployeeMasterError,
   normalizeEmployeeMasterPutBody,
+  payKubunByDriverCdAt,
   resolveAttrsAt,
   type CompPayrollMapD1Row,
   type EmployeeAttrD1Row,
@@ -2107,18 +2108,23 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /**
-   * 乗務員CD → その月に適用する所属 (社員マスタ、月末時点)。
+   * 乗務員CD → その月に適用する所属・給与区分 (社員マスタ、月末時点)。
    *
    * D1 が未 binding / 読めない場合は**空 Map を返して黙って続行する** — 最低賃金が
    * 引けなくなるだけで、拘束時間集計そのものは落とさない (この経路は #409 で
-   * 後から足した補助情報であって、月次集計の必須依存ではない)。
+   * 後から足した補助情報であって、月次集計の必須依存ではない)。給与区分
+   * (Refs #429) も同じ — 引けなければ給与比較が基本給(計算)を出さないだけ。
    */
   private async branchByDriverCd(
     compId: string,
     ym: string,
-  ): Promise<{ branches: Map<string, string>; names: Map<string, string> }> {
+  ): Promise<{
+    branches: Map<string, string>;
+    names: Map<string, string>;
+    payKubun: Map<string, number>;
+  }> {
     const db = this.env.DTAKO_DB;
-    if (!db) return { branches: new Map(), names: new Map() };
+    if (!db) return { branches: new Map(), names: new Map(), payKubun: new Map() };
     try {
       const [employeeResult, attrResult] = await Promise.all([
         db
@@ -2127,7 +2133,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           .all<EmployeeD1Row>(),
         db
           .prepare(
-            `SELECT company, payroll_cd, effective_from, branch, pay_scheme, branch_code, branch_name, job_name FROM employee_attrs WHERE comp_id = ?`,
+            `SELECT company, payroll_cd, effective_from, branch, pay_scheme, branch_code, branch_name, job_name, pay_kubun FROM employee_attrs WHERE comp_id = ?`,
           )
           .bind(compId)
           .all<EmployeeAttrD1Row>(),
@@ -2141,10 +2147,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       for (const e of employees) {
         if (e.driverCd && e.name && branches.has(e.driverCd)) names.set(e.driverCd, e.name);
       }
-      return { branches, names };
+      return { branches, names, payKubun: payKubunByDriverCdAt(employees, ym, resolveAttrsAt) };
     } catch (err) {
       console.error(JSON.stringify({ branch_by_driver_cd: "error", error: describeUnknownError(err) }));
-      return { branches: new Map(), names: new Map() };
+      return { branches: new Map(), names: new Map(), payKubun: new Map() };
     }
   }
 
@@ -2292,7 +2298,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           .all<EmployeeD1Row>(),
         db
           .prepare(
-            `SELECT company, payroll_cd, effective_from, branch, pay_scheme, branch_code, branch_name, job_name FROM employee_attrs WHERE comp_id = ?`,
+            `SELECT company, payroll_cd, effective_from, branch, pay_scheme, branch_code, branch_name, job_name, pay_kubun FROM employee_attrs WHERE comp_id = ?`,
           )
           .bind(record.compId)
           .all<EmployeeAttrD1Row>(),
@@ -2624,7 +2630,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           .all<EmployeeD1Row>(),
         db
           .prepare(
-            `SELECT company, payroll_cd, effective_from, branch, pay_scheme, branch_code, branch_name, job_name FROM employee_attrs WHERE comp_id = ?`,
+            `SELECT company, payroll_cd, effective_from, branch, pay_scheme, branch_code, branch_name, job_name, pay_kubun FROM employee_attrs WHERE comp_id = ?`,
           )
           .bind(compId)
           .all<EmployeeAttrD1Row>(),
@@ -3001,12 +3007,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 最低賃金の県は theearth の事業所名ではなく社員マスタの所属 (月末時点) で引く
     // (Refs #409 Phase 3)。D1 が無い / 読めない場合は空のまま = 従来どおり
     // theearth 事業所名 + defaultPrefecture のフォールバックで動く
-    const { branches: employeeBranches } = await this.branchByDriverCd(record.compId, ym);
+    const { branches: employeeBranches, payKubun } = await this.branchByDriverCd(record.compId, ym);
 
     const rows = merged.map(({ entry, source }) => ({
       summary: entry.data,
       /** 'theearth' (デジタコ) | 'timecard' (タイムカード)。画面のバッジ用 (PR-E)。 */
       source,
+      /** 給与区分 (1=月給 / 2=日給 / 3=時給 / 4=その他)。社員マスタに無ければ null。
+       * 給与比較が「基本給(計算)」の単価の掛け方を決めるのに使う (Refs #429)。 */
+      pay_kubun: payKubun.get(entry.data.driverCd) ?? null,
       fetched_at: entry.fetchedAt,
       last_verified_at: entry.lastVerifiedAt,
       wage: computeWageRow(

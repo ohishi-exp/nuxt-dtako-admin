@@ -27,6 +27,12 @@ export interface EmployeeAttrRow {
   branchName: string | null
   /** 職種名 (`SHOZOKU.NAME2`)。 */
   jobName: string | null
+  /** 給与区分 (`SHAIN3.KKUBUN`): 1=月給 / 2=日給 / 3=時給 / 4=その他。
+   *
+   * `payScheme` (= `SHOZOKU.TAIKEI` の「体系N」) とは**独立した軸** — 同じ体系の
+   * 乗務員でも月給/日給/時給が混在する (Refs #429)。migration 0013 以前に
+   * 取り込んだ行は null。 */
+  payKubun: number | null
 }
 
 export interface EmployeeMasterEntry {
@@ -253,8 +259,11 @@ export interface KyuyoEmployeeRow {
   branch_name?: string
   /** 職種名 (SHOZOKU.NAME2)。 */
   job_name?: string
-  /** 給与体系コード (SHOZOKU.TAIKEI)。 */
+  /** 給与体系コード (SHOZOKU.TAIKEI)。**部署の体系**であって給与区分ではない。 */
   taikei: number
+  /** 給与区分 (SHAIN3.KKUBUN): 1=月給 / 2=日給 / 3=時給 / 4=その他、0=未設定。
+   * rust-ichibanboshi#101 で追加。古い応答には無いので optional。 */
+  kkubun?: number
   retired: boolean
 }
 
@@ -298,6 +307,19 @@ export function normalizeAttrText(raw: string | null): string | null {
 /** 給与体系コード → 表示用ラベル。0 (未設定) は null。 */
 export function payScheme(taikei: number): string | null {
   return taikei > 0 ? `体系${taikei}` : null
+}
+
+/**
+ * 給与区分 (`SHAIN3.KKUBUN`) の正規化: **1=月給 / 2=日給 / 3=時給 / 4=その他**。
+ * worker 側 PUT の `normalizePayKubun` と同一規則。
+ *
+ * 範囲外・`0` (給与大臣側の未設定)・未取得 (古い API 応答) はすべて null。
+ * **知らない値を既定区分へ寄せない** — 寄せると消費側が「日給」と誤認して
+ * 単価 × 稼働日数を掛け、今回直したい壊れ方がそのまま残る (Refs #429)。
+ */
+export function normalizePayKubun(raw: unknown): number | null {
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1 || raw > 4) return null
+  return raw
 }
 
 /** 所属コードの正規化 (worker 側 PUT の normalizeBranchCode と同一規則)。
@@ -352,14 +374,16 @@ export function planPayrollDbImport(
     const branchCode = normalizeBranchCode(row.department_code)
     const branchName = normalizeAttrText(row.branch_name ?? null)
     const jobName = normalizeAttrText(row.job_name ?? null)
+    const payKubun = normalizePayKubun(row.kkubun)
     const active = current ? resolveAttrsAt(current, yearMonth) : null
-    // 所属コード・営業所名・職種名 (Refs #409) も差分判定に入れる — 既存行は
-    // これらが null なので、再取り込みで同じ `effective_from` の行が埋まる。
+    // 所属コード・営業所名・職種名 (Refs #409)・給与区分 (Refs #429) も差分判定に
+    // 入れる — 既存行はこれらが null なので、再取り込みで同じ `effective_from` の
+    // 行が埋まる。
     if (active?.branch === branch && active?.payScheme === scheme
       && active?.branchCode === branchCode && active?.branchName === branchName
-      && active?.jobName === jobName) continue
-    if (branch === null && scheme === null && branchName === null && !active) continue
-    plan.attrs.push({ company, payrollCd, effectiveFrom, branch, payScheme: scheme, branchCode, branchName, jobName })
+      && active?.jobName === jobName && active?.payKubun === payKubun) continue
+    if (branch === null && scheme === null && branchName === null && payKubun === null && !active) continue
+    plan.attrs.push({ company, payrollCd, effectiveFrom, branch, payScheme: scheme, branchCode, branchName, jobName, payKubun })
   }
   return plan
 }

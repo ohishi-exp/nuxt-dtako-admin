@@ -22,11 +22,16 @@ import golden from '../fixtures/restraint-wage/golden/wage-rows.json'
 // ため、CSV は Vite の ?raw import で読む。
 import csvText from '../fixtures/restraint-wage/salary-2026-07.csv?raw'
 
-/** 共有 fixture から wage-report 相当の行を組み立てる (wage は golden = 本物の計算出力)。 */
+/** 共有 fixture から wage-report 相当の行を組み立てる (wage は golden = 本物の計算出力)。
+ *
+ * `pay_kubun` は**日給 (2)** — この fixture は乗務員 4 名で、基本給(計算)を
+ * `日額 × 稼働日数` で検算するのがこのテストの主眼だから (Refs #429)。月給・時給・
+ * 不明の分岐は salary-compare.test.ts の computeSysBase テストが持つ。 */
 const reportRows: WageReportRow[] = summaries.map(s => ({
   summary: s as unknown as WageReportRow['summary'],
   fetched_at: null,
   last_verified_at: null,
+  pay_kubun: 2,
   wage: golden.find(g => g.driverCd === s.driverCd)!.wage as unknown as WageReportRow['wage'],
 }))
 

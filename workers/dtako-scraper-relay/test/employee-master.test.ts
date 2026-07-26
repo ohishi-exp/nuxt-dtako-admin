@@ -6,6 +6,7 @@ import {
   EmployeeMasterError,
   normalizeEmployeeMasterPutBody,
   normalizeNameKey,
+  payKubunByDriverCdAt,
   resolveAttrsAt,
   type EmployeeAttrD1Row,
   type EmployeeAttrRow,
@@ -54,7 +55,7 @@ describe('normalizeEmployeeMasterPutBody', () => {
       attrs: [{ company: '株', payrollCd: '7', effectiveFrom: '2026-04-01', branch: ' 本社 ', payScheme: 'A' }],
     })
     expect(body.attrs).toEqual([
-      { company: '株', payrollCd: '7', effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A', branchCode: null, branchName: null, jobName: null },
+      { company: '株', payrollCd: '7', effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A', branchCode: null, branchName: null, jobName: null, payKubun: null },
     ])
   })
 
@@ -74,6 +75,7 @@ describe('normalizeEmployeeMasterPutBody', () => {
       branchCode: null,
       branchName: null,
       jobName: null,
+      payKubun: null,
     })
     expect(body.attrs[1]).toEqual({
       company: '株',
@@ -84,7 +86,19 @@ describe('normalizeEmployeeMasterPutBody', () => {
       branchCode: null,
       branchName: null,
       jobName: null,
+      payKubun: null,
     })
+  })
+
+  it('attrs.payKubun は 1〜4 の整数だけ通し、範囲外・0・非数値は null にする (Refs #429)', () => {
+    const attrOf = (payKubun: unknown) => ({
+      company: '株', payrollCd: '1', effectiveFrom: '2026-01-01', payKubun,
+    })
+    const body = normalizeEmployeeMasterPutBody({
+      attrs: [attrOf(1), attrOf(4), attrOf(0), attrOf(5), attrOf(-1), attrOf(2.5), attrOf('2'), attrOf(undefined)],
+    })
+    // 知らない値を既定区分へ寄せない — 寄せると月給者に日額計算を掛ける壊れ方が残る
+    expect(body.attrs.map(a => a.payKubun)).toEqual([1, 4, null, null, null, null, null, null])
   })
 
   it('attrs.branchCode/branchName/jobName を検証・正規化する (Refs #409)', () => {
@@ -109,6 +123,7 @@ describe('normalizeEmployeeMasterPutBody', () => {
       branchCode: 14,
       branchName: '本社',
       jobName: '乗務員',
+      payKubun: null,
     })
   })
 
@@ -200,7 +215,7 @@ describe('buildEmployeeMasterWriteStatements', () => {
     expect(statements[0]!.sql).toMatch(/INSERT INTO employees/)
     expect(statements[0]!.params).toEqual(['27324455', '株', '7', '山田 太郎', '山田太郎', '99', '2026-07-23T00:00:00.000Z'])
     expect(statements[1]!.sql).toMatch(/INSERT INTO employee_attrs/)
-    expect(statements[1]!.params).toEqual(['27324455', '株', '7', '2026-04-01', '本社', 'A', null, null, null])
+    expect(statements[1]!.params).toEqual(['27324455', '株', '7', '2026-04-01', '本社', 'A', null, null, null, null])
     expect(statements[2]!.sql).toMatch(/DELETE FROM employee_attrs WHERE comp_id/)
     expect(statements[2]!.params).toEqual(['27324455', '有', '1', '2025-01-01'])
     // deleteEmployees は attrs → employees の順で 2 文
@@ -222,7 +237,7 @@ describe('buildEmployeeMasterWriteStatements', () => {
     expect(statements.every(s => s.params[0] === '75700192')).toBe(true)
   })
 
-  it('attrs の upsert は所属コード・営業所名・職種名も更新する (Refs #409)', () => {
+  it('attrs の upsert は所属コード・営業所名・職種名・給与区分も更新する (Refs #409 #429)', () => {
     const body = normalizeEmployeeMasterPutBody({
       attrs: [{
         company: '0100',
@@ -233,15 +248,17 @@ describe('buildEmployeeMasterWriteStatements', () => {
         branchCode: 14,
         branchName: '本社',
         jobName: '乗務員',
+        payKubun: 2,
       }],
     })
     const [stmt] = buildEmployeeMasterWriteStatements(body, '2026-07-25T00:00:00.000Z', '27324455')
     expect(stmt!.sql).toMatch(/branch_code = excluded\.branch_code/)
     expect(stmt!.sql).toMatch(/branch_name = excluded\.branch_name/)
     expect(stmt!.sql).toMatch(/job_name = excluded\.job_name/)
-    // 既存行 (migration 0010 以前) は同じ effective_from で UPDATE され、3 列が埋まる
+    expect(stmt!.sql).toMatch(/pay_kubun = excluded\.pay_kubun/)
+    // 既存行 (migration 0010/0013 以前) は同じ effective_from で UPDATE され、列が埋まる
     expect(stmt!.params).toEqual([
-      '27324455', '0100', '7', '2026-06-01', '本社 乗務員', '体系1', 14, '本社', '乗務員',
+      '27324455', '0100', '7', '2026-06-01', '本社 乗務員', '体系1', 14, '本社', '乗務員', 2,
     ])
   })
 
@@ -297,8 +314,9 @@ describe('buildEmployeeMasterResponse', () => {
       { company: '有', payroll_cd: '1', name: '鈴木花子', driver_cd: null },
     ]
     const attrRows = [
-      { company: '株', payroll_cd: '7', effective_from: '2026-04-01', branch: '本社', pay_scheme: 'A', branch_code: 14, branch_name: '本社', job_name: '乗務員' },
-      { company: '株', payroll_cd: '7', effective_from: '2025-04-01', branch: '支社', pay_scheme: 'B', branch_code: null, branch_name: null, job_name: null },
+      { company: '株', payroll_cd: '7', effective_from: '2026-04-01', branch: '本社', pay_scheme: 'A', branch_code: 14, branch_name: '本社', job_name: '乗務員', pay_kubun: 2 },
+      // migration 0013 以前に取り込んだ行は pay_kubun が NULL のまま
+      { company: '株', payroll_cd: '7', effective_from: '2025-04-01', branch: '支社', pay_scheme: 'B', branch_code: null, branch_name: null, job_name: null, pay_kubun: null },
     ]
     const res = buildEmployeeMasterResponse(employeeRows, attrRows)
     expect(res.employees).toEqual([
@@ -308,8 +326,8 @@ describe('buildEmployeeMasterResponse', () => {
         name: '山田太郎',
         driverCd: '99',
         attrs: [
-          { effectiveFrom: '2025-04-01', branch: '支社', payScheme: 'B', branchCode: null, branchName: null, jobName: null },
-          { effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A', branchCode: 14, branchName: '本社', jobName: '乗務員' },
+          { effectiveFrom: '2025-04-01', branch: '支社', payScheme: 'B', branchCode: null, branchName: null, jobName: null, payKubun: null },
+          { effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A', branchCode: 14, branchName: '本社', jobName: '乗務員', payKubun: 2 },
         ],
       },
       { company: '有', payrollCd: '1', name: '鈴木花子', driverCd: null, attrs: [] },
@@ -323,8 +341,8 @@ describe('buildEmployeeMasterResponse', () => {
 
 describe('resolveAttrsAt', () => {
   const attrs: EmployeeAttrRow[] = [
-    { effectiveFrom: '2025-04-01', branch: '支社', payScheme: 'B', branchCode: null, branchName: null, jobName: null },
-    { effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A', branchCode: null, branchName: null, jobName: null },
+    { effectiveFrom: '2025-04-01', branch: '支社', payScheme: 'B', branchCode: null, branchName: null, jobName: null, payKubun: null },
+    { effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A', branchCode: null, branchName: null, jobName: null, payKubun: null },
   ]
 
   it('対象月の末日時点で最新の行を返す', () => {
@@ -349,17 +367,47 @@ describe('resolveAttrsAt', () => {
   })
 
   it('うるう年 2 月の末日 (29 日) を正しく解決する', () => {
-    const feb: EmployeeAttrRow[] = [{ effectiveFrom: '2024-02-29', branch: null, payScheme: null, branchCode: null, branchName: null, jobName: null }]
+    const feb: EmployeeAttrRow[] = [{ effectiveFrom: '2024-02-29', branch: null, payScheme: null, branchCode: null, branchName: null, jobName: null, payKubun: null }]
     expect(resolveAttrsAt(feb, '2024-02')).toEqual(feb[0])
     expect(resolveAttrsAt(feb, '2023-02')).toBeNull()
   })
 
   it('未整列 (新しい日付が先) でも有効な最新行を正しく選ぶ', () => {
     const unsorted: EmployeeAttrRow[] = [
-      { effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A', branchCode: null, branchName: null, jobName: null },
-      { effectiveFrom: '2025-04-01', branch: '支社', payScheme: 'B', branchCode: null, branchName: null, jobName: null },
+      { effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A', branchCode: null, branchName: null, jobName: null, payKubun: null },
+      { effectiveFrom: '2025-04-01', branch: '支社', payScheme: 'B', branchCode: null, branchName: null, jobName: null, payKubun: null },
     ]
     expect(resolveAttrsAt(unsorted, '2026-12')).toEqual(unsorted[0])
+  })
+})
+
+describe('payKubunByDriverCdAt', () => {
+  const attr = (effectiveFrom: string, payKubun: number | null) => ({ effectiveFrom, payKubun })
+
+  it('乗務員CD → 月末時点の給与区分を引く', () => {
+    const employees = [
+      { driverCd: '99', attrs: [attr('2025-04-01', 2), attr('2026-04-01', 1)] },
+      { driverCd: '100', attrs: [attr('2025-04-01', 3)] },
+    ]
+    const at2025 = payKubunByDriverCdAt(employees, '2025-06', resolveAttrsAt as never)
+    expect(at2025.get('99')).toBe(2)
+    // 履歴が切り替わったあとの月は新しい区分
+    const at2026 = payKubunByDriverCdAt(employees, '2026-06', resolveAttrsAt as never)
+    expect(at2026.get('99')).toBe(1)
+    expect(at2026.get('100')).toBe(3)
+  })
+
+  it('乗務員CD 無し・履歴なし・区分 null は Map に入れない (呼び出し側が「不明」に倒せる)', () => {
+    const employees = [
+      { driverCd: null, attrs: [attr('2025-04-01', 2)] },
+      // 月末より後の履歴しか無い
+      { driverCd: '1', attrs: [attr('2030-01-01', 2)] },
+      // migration 0013 以前の行 (pay_kubun が NULL)
+      { driverCd: '2', attrs: [attr('2025-04-01', null)] },
+      { driverCd: '3', attrs: [] },
+    ]
+    const map = payKubunByDriverCdAt(employees, '2026-06', resolveAttrsAt as never)
+    expect(map.size).toBe(0)
   })
 })
 

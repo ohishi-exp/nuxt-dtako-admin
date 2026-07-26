@@ -1111,9 +1111,9 @@ async function importFromPayrollDb() {
     for (const attr of plan.attrs) {
       const idx = entries.findIndex(e => e.company === attr.company && e.payrollCd === attr.payrollCd)
       if (idx === -1) continue
-      const { effectiveFrom, branch, payScheme, branchCode, branchName, jobName } = attr
+      const { effectiveFrom, branch, payScheme, branchCode, branchName, jobName, payKubun } = attr
       entries = entries.map((e, i) => (i === idx
-        ? { ...e, attrs: upsertAttrRow(e.attrs, { effectiveFrom, branch, payScheme, branchCode, branchName, jobName }) }
+        ? { ...e, attrs: upsertAttrRow(e.attrs, { effectiveFrom, branch, payScheme, branchCode, branchName, jobName, payKubun }) }
         : e))
     }
     setEmployeeMasterEntries(compId, entries)
@@ -1388,6 +1388,9 @@ function addEmployeeAttr(key: string) {
   if (!input?.from) return
   // 手入力の行は所属コード・営業所名・職種名を持たない (給与大臣由来ではないため)。
   // null のままにすると拠点は表示名からの前方一致で引かれる (Refs #409)。
+  // 給与区分 (payKubun) は手入力しない — 給与大臣の `SHAIN3.KKUBUN` が正で、
+  // 「給与DBから取り込み」でのみ埋まる (Refs #429)。手入力で埋めると次回の
+  // 取り込みで上書きされ、その間だけ基本給(計算)が違う式で出る。
   const row = {
     effectiveFrom: input.from,
     branch: input.branch.trim() || null,
@@ -1395,6 +1398,7 @@ function addEmployeeAttr(key: string) {
     branchCode: null,
     branchName: null,
     jobName: null,
+    payKubun: null,
   }
   const entry = findEmployeeByRowKey(key)
   if (!entry) return
