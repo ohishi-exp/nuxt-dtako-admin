@@ -3473,7 +3473,7 @@ watch([activeTab, month, session], () => {
                     v-model="salarySortKey" size="sm" class="w-64"
                     :items="[
                       { label: '乗務員CD 順', value: 'cd' },
-                      { label: '37条の下回りが大きい順', value: 'shortfall' },
+                      { label: '見直し優先度順 (37条との差が大きい順)', value: 'shortfall' },
                       { label: '残業時間の長い順', value: 'overtime' },
                       { label: '氏名順', value: 'name' },
                     ]"
@@ -3481,8 +3481,9 @@ watch([activeTab, month, session], () => {
                 </UFormField>
                 <UCheckbox
                   v-model="salaryOnlyShortfall"
-                  label="37条を下回る人だけ"
+                  label="見直し候補だけ"
                   class="self-end pb-1"
+                  title="残業計(給与) が 残業(基礎単価) に届いていない人。違反の検出ではなく、割増基礎 (基本給+算入手当) と固定残業の配分を見直す対象を絞るための絞り込みです"
                 />
                 <span class="text-xs text-gray-500 self-end pb-1">
                   {{ salaryComparisonRows.length }} / {{ salaryComparison.rows.length }} 名
@@ -3635,6 +3636,9 @@ watch([activeTab, month, session], () => {
                 基礎単価(実績) = 割増基礎に算入する支給項目 (支給項目区分タブで「割増基礎○」の区分) の合計 ÷ デジタコ法定内時間。
                 残業(基礎単価) = 基礎単価(実績) を基礎額とした割増残業代の理論値 (時間外+時間外深夜+週40超過、月60時間までは1.25倍・超過分は1.5倍・深夜分は常時+0.25倍)。
                 <b>「残業計(給与) − 残業(基礎単価)」が労基法37条の主判定です</b> — 負なら実際の基礎単価に対する法定割増を下回っています。
+                <b>これは違反の検出ではなく、賃金の内訳を見直すための材料です</b> — 割増基礎 (基本給 + 算入手当) が高いほど理論値も上がるため、
+                最低賃金を満たしていても差は負に出ます。支給総額を変えずに基本給と固定残業の配分を見直すと差は縮みます
+                (「見直し候補だけ」の絞り込みと「見直し優先度順」はそのための導線です)。
                 残業(最低賃金) は同じ計算を最低賃金を基礎額として行った絶対下限の併記で、単価マスタ設定の妥当性チェックである「最低賃金チェック」タブとは異なります。<br>
                 注: 週40超過分は summary v2 の日別データ (days) からの自前計算のため、旧形式 (v1、days なし) のアーカイブ月は週40超過が計算できません — 対象月をアーカイブタブで再計算 (resummarize) してから使ってください。
               </p>
