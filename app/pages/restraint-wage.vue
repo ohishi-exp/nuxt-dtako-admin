@@ -115,6 +115,11 @@ const pageError = ref('')
 
 /** アーカイブが存在する月 (YYYY-MM、降順)。 */
 const archiveMonths = ref<string[]>([])
+/** archive/months が解決するまでタブ連動のデータ読み込みを止めるフラグ (Refs #451)。
+ * 解決前に読むと、既定月 (アーカイブが無い当月) で wage-report が走り、応答が来た頃に
+ * 最新アーカイブ月へ付け替わって読み直し = R2 GET 約300本の fan-out が丸ごと1回無駄になる。
+ * 失敗時も true にする (エラー表示した上で従来どおり既定月で動かす — ページを殺さない)。 */
+const archiveMonthsLoaded = ref(false)
 const selectedYear = ref(new Date().getFullYear())
 const selectedMonthNo = ref(new Date().getMonth() + 1)
 
@@ -131,8 +136,13 @@ function monthHasArchive(year: number, monthNo: number): boolean {
   return archiveMonths.value.includes(`${year}-${String(monthNo).padStart(2, '0')}`)
 }
 
+/** loadArchiveMonths の in-flight ガード (Refs #451)。onMounted (restoreSession 直後、同期) と
+ * watch(session) (同 flush の microtask) がほぼ同時に呼ぶため、走行中の再入は捨てる。 */
+let archiveMonthsLoading = false
+
 async function loadArchiveMonths() {
-  if (!session.value) return
+  if (!session.value || archiveMonthsLoading) return
+  archiveMonthsLoading = true
   try {
     const res = await $fetch<{ months: string[] }>('/restraint-api/archive/months', { headers: authHeaders() })
     archiveMonths.value = res.months
@@ -145,6 +155,10 @@ async function loadArchiveMonths() {
   }
   catch (e) {
     handleApiError(e)
+  }
+  finally {
+    archiveMonthsLoading = false
+    archiveMonthsLoaded.value = true
   }
 }
 
@@ -171,6 +185,9 @@ onMounted(() => {
     viewerComp.value = localStorage.getItem(VIEWER_COMP_STORAGE_KEY) || lastAccount().compId
     viewerCompInput.value = viewerComp.value
   }
+  // watch(session) 側も同 flush で呼ぶが、in-flight ガードで 1 本に潰れる (Refs #451)。
+  // ここを消して watcher に全寄せしない — session が変化しない再マウント経路
+  // (localStorage 不調で restoreSession が no-op の時) で archive が読めなくなる
   if (session.value) loadArchiveMonths()
 })
 
@@ -196,6 +213,8 @@ watch(session, (s) => {
     // 他社分も含めて破棄する (会社横断表示、Refs #367)
     employeeMasterByComp.value = {}
     minWageMasterLoaded.value = false
+    // 再ログイン時に archive/months の解決を待ち直す (Refs #451)
+    archiveMonthsLoaded.value = false
   }
   else {
     loadArchiveMonths()
@@ -2641,8 +2660,13 @@ async function deleteNightShift(entry: NightShiftEntry) {
   }, '履歴の行を削除しました')
 }
 
-watch([activeTab, month, session], () => {
+watch([activeTab, month, session, archiveMonthsLoaded], () => {
   if (!session.value || !month.value) return
+  // archive/months の解決前は撃たない — 既定月 (アーカイブ無し) で wage-report が走る
+  // 捨てフェッチと、その裏の R2 GET fan-out が同一 DO 上で他リクエストと競合するのを防ぐ。
+  // 解決時に archiveMonthsLoaded が true へ変わり (月の付け替えも同 flush)、ここが一度だけ
+  // 正しい月で発火する (Refs #451)
+  if (!archiveMonthsLoaded.value) return
   // 上部バーの「給与DBから読み込み」はどのタブからでも押せるようにしている。
   // ボタンの活殺は compMap 由来 (importPayrollOptions) なので、タブに関係なく読む
   if (!compMap.value.length) loadCompMap()
