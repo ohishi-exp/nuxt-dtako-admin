@@ -64,6 +64,9 @@ export interface EmployeeAttrInput {
   branchName: string | null;
   /** 職種名 (`SHOZOKU.NAME2`)。 */
   jobName: string | null;
+  /** 給与区分 (`SHAIN3.KKUBUN`): 1=月給 / 2=日給 / 3=時給 / 4=その他。null = 不明。
+   * `payScheme` (= `SHOZOKU.TAIKEI` の「体系N」) とは**独立した軸** (Refs #429)。 */
+  payKubun: number | null;
 }
 
 export interface EmployeeDeleteKey {
@@ -130,6 +133,19 @@ function normalizeBranchCode(raw: unknown): number | null {
   return raw;
 }
 
+/**
+ * 給与区分 (`SHAIN3.KKUBUN`) の正規化: **1=月給 / 2=日給 / 3=時給 / 4=その他**。
+ *
+ * 範囲外・非整数・`0` (給与大臣側の未設定) はすべて null に倒す。branchCode と
+ * 同じく fail-soft だが、こちらは**金額計算の分岐に効く**ので範囲を明示的に
+ * 絞る — 知らない値を通すと、消費側が「日給」と誤認して単価 × 稼働日数を
+ * 掛けてしまう。null なら「不明 = 基本給(計算)を出さない」安全側に倒れる。
+ */
+function normalizePayKubun(raw: unknown): number | null {
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1 || raw > 4) return null;
+  return raw;
+}
+
 function normalizeEmployeeInput(raw: unknown, index: number): EmployeeInput {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new EmployeeMasterError(`employees[${index}] がオブジェクトではありません`);
@@ -163,6 +179,7 @@ function normalizeAttrInput(raw: unknown, index: number): EmployeeAttrInput {
     branchCode: normalizeBranchCode(obj.branchCode),
     branchName: normalizeOptionalText(obj.branchName),
     jobName: normalizeOptionalText(obj.jobName),
+    payKubun: normalizePayKubun(obj.payKubun),
   };
 }
 
@@ -276,14 +293,15 @@ export function buildEmployeeMasterWriteStatements(
   for (const a of body.attrs) {
     statements.push({
       sql: `INSERT INTO employee_attrs
-              (comp_id, company, payroll_cd, effective_from, branch, pay_scheme, branch_code, branch_name, job_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              (comp_id, company, payroll_cd, effective_from, branch, pay_scheme, branch_code, branch_name, job_name, pay_kubun)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(comp_id, company, payroll_cd, effective_from) DO UPDATE SET
               branch = excluded.branch,
               pay_scheme = excluded.pay_scheme,
               branch_code = excluded.branch_code,
               branch_name = excluded.branch_name,
-              job_name = excluded.job_name`,
+              job_name = excluded.job_name,
+              pay_kubun = excluded.pay_kubun`,
       params: [
         compId,
         a.company,
@@ -294,6 +312,7 @@ export function buildEmployeeMasterWriteStatements(
         a.branchCode,
         a.branchName,
         a.jobName,
+        a.payKubun,
       ],
     });
   }
@@ -332,6 +351,8 @@ export interface EmployeeAttrRow {
   branchName: string | null;
   /** 職種名 (`SHOZOKU.NAME2`)。migration 0010 以前の行は null。 */
   jobName: string | null;
+  /** 給与区分 (`SHAIN3.KKUBUN`)。migration 0013 以前 / 未取り込みの行は null。 */
+  payKubun: number | null;
 }
 
 export interface EmployeeMasterEntry {
@@ -365,6 +386,8 @@ export interface EmployeeAttrD1Row {
   branch_code: number | null;
   branch_name: string | null;
   job_name: string | null;
+  /** migration 0013 で追加 (`SHAIN3.KKUBUN`)。取り込み前の行は NULL。 */
+  pay_kubun: number | null;
 }
 
 /**
@@ -389,6 +412,7 @@ export function buildEmployeeMasterResponse(
       branchCode: r.branch_code ?? null,
       branchName: r.branch_name ?? null,
       jobName: r.job_name ?? null,
+      payKubun: r.pay_kubun ?? null,
     });
     attrsByKey.set(key, list);
   }
@@ -497,4 +521,31 @@ export function resolveAttrsAt(attrs: EmployeeAttrRow[], yearMonth: string): Emp
     if (!resolved || a.effectiveFrom > resolved.effectiveFrom) resolved = a;
   }
   return resolved;
+}
+
+/**
+ * 乗務員CD → その月に適用する給与区分 (社員マスタ、月末時点) の対応を作る
+ * (`branchByDriverCdAt` と同型、Refs #429)。
+ *
+ * 給与比較の「基本給(計算)」は `【補助】基本単価 × 稼働日数` で出しており、単価を
+ * **日額と仮定**している。月給者・時給者ではこの式が成立しないので、消費側が
+ * 単価の掛け方を変えるためにこの対応が要る。
+ *
+ * **区分が引けない社員は Map に入れない** — 呼び出し側で undefined = 不明として
+ * 「基本給(計算)を出さない」安全側に倒せる。知らない値を既定区分へ寄せると、
+ * 月給者に日額計算を掛けるという今回直したい壊れ方がそのまま残る。
+ */
+export function payKubunByDriverCdAt<A extends { effectiveFrom: string }>(
+  employees: readonly { driverCd: string | null; attrs: A[] }[],
+  yearMonth: string,
+  resolveAt: (attrs: A[], ym: string) => { payKubun?: number | null } | null,
+): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const e of employees) {
+    if (!e.driverCd) continue;
+    const kubun = resolveAt(e.attrs, yearMonth)?.payKubun;
+    if (typeof kubun !== "number") continue;
+    out.set(e.driverCd, kubun);
+  }
+  return out;
 }

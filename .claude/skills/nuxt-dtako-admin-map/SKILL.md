@@ -686,8 +686,15 @@ N:1 が現実に存在する (本番で 5 件、うち社員C 1619 鵜瀬裕一�
 | ファイル | 役割 |
 |---|---|
 | `app/utils/kyuyo-fetch.ts` | 給与DB取得の pure ロジック + `payrollToParsedSalary` (給与比較への変換、100% gate) |
-| `app/utils/employee-master.ts` | 型 + `buildCdMapEntries`/`findUnregistered`/`resolveAttrsAt`/`splitCdMapKey` + タブ用 `upsertAttrRow`/`removeAttrRow`/`collectAttrRows`/`buildDriverAttrIndex`/`joinDriverAttr`/`normalizeDriverCdKey`/`sortEmployeeEntries` + 取り込み `planPayrollDbImport`/`planIchibanMatch` (pure、100% gate) |
-| `workers/dtako-scraper-relay/src/employee-master.ts` | PUT検証・D1文組み立て・月末解決 (pure、100% gate) |
+| `app/utils/employee-master.ts` | 型 + `buildCdMapEntries`/`findUnregistered`/`resolveAttrsAt`/`splitCdMapKey` + タブ用 `upsertAttrRow`/`removeAttrRow`/`collectAttrRows`/`buildDriverAttrIndex`/`joinDriverAttr`/`normalizeDriverCdKey`/`sortEmployeeEntries` + 取り込み `planPayrollDbImport`/`planIchibanMatch` + `normalizePayKubun` (pure、100% gate) |
+| `workers/dtako-scraper-relay/src/employee-master.ts` | PUT検証・D1文組み立て・月末解決 + `payKubunByDriverCdAt` (pure、100% gate) |
+
+**給与区分 (`pay_kubun`、migration 0013、Refs #429)**: 社員属性が持つ
+`SHAIN3.KKUBUN` = **1=月給 / 2=日給 / 3=時給 / 4=その他**。給与比較の「基本給(計算)」が
+単価の掛け方を決めるのに使う。**`pay_scheme` (「体系N」= `SHOZOKU.TAIKEI`) とは別物**で、
+体系は部署に紐づく軸なので給与区分の判定には使えない — 同じ体系の乗務員でも月給/日給/
+時給が混在し、事務員の体系にも時給者がいる (実機調査で確認)。`wage-report` の各行に
+`pay_kubun` として載り、社員マスタに無ければ null (= 不明)。
 
 - 対象月は「年セレクタ + 月タブ」(`GET archive/months` でアーカイブ存在月を列挙、
   無い月は薄表示)。サマリ再計算は単月/全月一括 (`POST archive/resummarize?month=`、
@@ -699,7 +706,7 @@ N:1 が現実に存在する (本番で 5 件、うち社員C 1619 鵜瀬裕一�
 | `app/pages/restraint-wage.vue` | 7 タブ UI + 年月タブ + 一括再計算/一括印刷 + 印刷 CSS |
 | `app/components/RestraintWageMonthlyTable.vue` | 月次テーブル (単月表示と一括印刷で共用) |
 | `app/utils/restraint-wage-view.ts` | 共有型 + WAGE_COLUMNS + 表示ヘルパ |
-| `app/utils/salary-compare.ts` | 給与明細 CSV 解析 + 5 区分集計 + 突合 + 37条チェック (pure) |
+| `app/utils/salary-compare.ts` | 給与明細 CSV 解析 + 5 区分集計 + 突合 + 37条チェック + `computeSysBase` (給与区分で単価の掛け方を分岐) (pure) |
 | `workers/dtako-scraper-relay/src/restraint-wage.ts` | 賃金計算 pure (100% gate) |
 | `workers/dtako-scraper-relay/src/theearth-restraint-client.ts` | summary v2 (日別 + 派生指標) |
 

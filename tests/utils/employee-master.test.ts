@@ -32,10 +32,11 @@ function entry(over: Partial<EmployeeMasterEntry> = {}): EmployeeMasterEntry {
   return { company: '株', payrollCd: '7', name: '山田太郎', driverCd: '99', attrs: [], ...over }
 }
 
-/** 属性履歴 1 行。所属コード・営業所名・職種名 (Refs #409) は既定 null —
- * migration 0010 以前に取り込んだ行と同じ状態で、必要なテストだけ上書きする。 */
+/** 属性履歴 1 行。所属コード・営業所名・職種名 (Refs #409)・給与区分 (Refs #429) は
+ * 既定 null — migration 0010/0013 以前に取り込んだ行と同じ状態で、必要なテストだけ
+ * 上書きする。 */
 function attr(over: Partial<EmployeeAttrRow> & { effectiveFrom: string }): EmployeeAttrRow {
-  return { branch: null, payScheme: null, branchCode: null, branchName: null, jobName: null, ...over }
+  return { branch: null, payScheme: null, branchCode: null, branchName: null, jobName: null, payKubun: null, ...over }
 }
 
 function csvRow(over: Partial<SalaryCsvRow> = {}): SalaryCsvRow {
@@ -203,7 +204,7 @@ describe('collectAttrRows', () => {
       entry({ company: '有', payrollCd: '1', attrs: [] }),
     ])
     expect(out).toEqual([
-      { company: '株', payrollCd: '7', effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A', branchCode: null, branchName: null, jobName: null },
+      { company: '株', payrollCd: '7', effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A', branchCode: null, branchName: null, jobName: null, payKubun: null },
     ])
   })
 
@@ -480,6 +481,8 @@ describe('planPayrollDbImport', () => {
     branch_name: '本社',
     job_name: '乗務員',
     taikei: 1,
+    // 給与区分は体系とは独立 (Refs #429)。既定は日給者 = 2
+    kkubun: 2,
     retired: false,
     ...over,
   })
@@ -509,6 +512,7 @@ describe('planPayrollDbImport', () => {
         branchCode: 14,
         branchName: '本社',
         jobName: '乗務員',
+        payKubun: 2,
       },
     ])
     expect(plan.deleteEmployees).toEqual([])
@@ -543,15 +547,16 @@ describe('planPayrollDbImport', () => {
         branchCode: 14,
         branchName: '本社',
         jobName: '乗務員',
+        payKubun: 2,
       })],
     })
     const plan = planPayrollDbImport(res([kyuyoRow()]), [current], '2026-07', null)
     expect(plan.attrs).toEqual([])
   })
 
-  it('所属コードだけ未取得の既存行は、再取り込みで埋める (Refs #409)', () => {
-    // migration 0010 以前に取り込んだ本番 182 件がこの状態。所属名は同じでも
-    // 所属コード・営業所名・職種名が空なので差分として拾い、履歴行を更新する
+  it('所属コード・給与区分だけ未取得の既存行は、再取り込みで埋める (Refs #409 #429)', () => {
+    // migration 0010/0013 以前に取り込んだ本番 182 件がこの状態。所属名は同じでも
+    // 所属コード・営業所名・職種名・給与区分が空なので差分として拾い、履歴行を更新する
     const current = entry({
       company: '0100',
       payrollCd: '7',
@@ -570,8 +575,41 @@ describe('planPayrollDbImport', () => {
         branchCode: 14,
         branchName: '本社',
         jobName: '乗務員',
+        payKubun: 2,
       },
     ])
+  })
+
+  it('給与区分だけが変わったら差分として拾う (Refs #429)', () => {
+    // 日給 → 月給 のような区分変更は、所属が同じでも基本給(計算)の意味を変える
+    const current = entry({
+      company: '0100',
+      payrollCd: '7',
+      driverCd: null,
+      attrs: [attr({
+        effectiveFrom: '2026-07-01',
+        branch: '本社 乗務員',
+        payScheme: '体系1',
+        branchCode: 14,
+        branchName: '本社',
+        jobName: '乗務員',
+        payKubun: 2,
+      })],
+    })
+    const plan = planPayrollDbImport(res([kyuyoRow({ kkubun: 1 })]), [current], '2026-07', null)
+    expect(plan.attrs).toHaveLength(1)
+    expect(plan.attrs[0]!.payKubun).toBe(1)
+  })
+
+  it('給与区分が 0 (給与大臣側の未設定) / 範囲外なら null にする', () => {
+    expect(planPayrollDbImport(res([kyuyoRow({ kkubun: 0 })]), [], '2026-07', null).attrs[0]!.payKubun).toBeNull()
+    expect(planPayrollDbImport(res([kyuyoRow({ kkubun: 9 })]), [], '2026-07', null).attrs[0]!.payKubun).toBeNull()
+  })
+
+  it('給与区分を返さない古い API 応答でも取り込める (rust-ichibanboshi#101 以前)', () => {
+    const row = kyuyoRow()
+    delete row.kkubun
+    expect(planPayrollDbImport(res([row]), [], '2026-07', null).attrs[0]!.payKubun).toBeNull()
   })
 
   it('所属コード列を返さない古い API 応答でも取り込める (rust-ichibanboshi#98 以前)', () => {
@@ -612,6 +650,7 @@ describe('planPayrollDbImport', () => {
         branchCode: 14,
         branchName: '本社',
         jobName: '乗務員',
+        payKubun: 2,
       },
     ])
   })
@@ -628,15 +667,16 @@ describe('planPayrollDbImport', () => {
         branchCode: 14,
         branchName: '本社',
         jobName: '乗務員',
+        payKubun: 2,
       })],
     })
     const plan = planPayrollDbImport(res([kyuyoRow({ department: '本社　乗務員' })]), [current], '2026-07', null)
     expect(plan.attrs).toEqual([])
   })
 
-  it('所属も体系も無い新規社員は属性行を作らない', () => {
+  it('所属も体系も給与区分も無い新規社員は属性行を作らない', () => {
     const plan = planPayrollDbImport(
-      res([kyuyoRow({ department: '  ', taikei: 0, department_code: 0, branch_name: '  ', job_name: '  ' })]),
+      res([kyuyoRow({ department: '  ', taikei: 0, department_code: 0, branch_name: '  ', job_name: '  ', kkubun: 0 })]),
       [], '2026-07', null)
     expect(plan.employees).toHaveLength(1)
     expect(plan.attrs).toEqual([])

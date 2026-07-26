@@ -74,6 +74,12 @@ export interface WageReportRow {
   fetched_at: string | null
   last_verified_at: string | null
   wage: WageRow
+  /** 行の出どころ (Refs #424 PR-D)。古い応答には無いので optional。 */
+  source?: 'theearth' | 'timecard'
+  /** 給与区分 (`SHAIN3.KKUBUN`): 1=月給 / 2=日給 / 3=時給 / 4=その他 (Refs #429)。
+   * 社員マスタに無い / 未取り込みなら null。給与比較が「基本給(計算)」の
+   * 単価の掛け方を決めるのに使う。 */
+  pay_kubun?: number | null
 }
 
 export interface WageReportResponse {
