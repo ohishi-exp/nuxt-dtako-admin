@@ -29,6 +29,16 @@ binding = "INTERNAL_SHARED_SECRET"
 store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
 secret_name = "INTERNAL_SHARED_SECRET"
 
+# 一番星 (rust-ichibanboshi) への CF Access Service Token (Refs #424 PR-A)。
+# 勤怠 (タイムカード) の中継 `/api/kintai/daily` を叩くために使う。
+# **既存の Service Token を再利用** — app 本体 (nuxt-dtako-admin/wrangler.toml) が
+# 使っているのと同じ Secrets Store entry (secret_name="CF_ACCESS_CLIENT_SECRET") を
+# binding するだけ。secrets-inventory への新規投入作業は不要。
+[[secrets_store_secrets]]
+binding = "ICHIBAN_CF_ACCESS_CLIENT_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "CF_ACCESS_CLIENT_SECRET"
+
 # auth-worker への service binding。/auth/introspect と
 # /alc-internal-proxy/api/upload (ohishi-exp/dtako-scraper#22 の自動アップロード)
 # の両方をこれ経由で叩く (Worker→Worker in-process fetch、公開 fetch より低遅延)。
@@ -100,6 +110,12 @@ RESTRAINT_R2_PREFIX = "restraint"
 # theearth-net780-client.ts の net780R2Paths 参照。
 NET780_R2_PREFIX = "net780"
 
+# 勤怠 (タイムカード) の取得先 (Refs #424 PR-A)。rust-ichibanboshi が同一ホストの
+# CakePHP を loopback で引いて中継する。client_id は公開識別子なので secret ではなく var
+# (app 本体 wrangler.toml の同名 var と同値・同トークン共用)。
+NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
+NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"
+
 [env.staging]
 name = "nuxt-dtako-admin-scraper-relay-staging"
 # staging も同様に公開ルートを閉じ、app (service binding) 経由のみにする。
@@ -117,6 +133,16 @@ new_sqlite_classes = ["DtakoScraperRelayDO"]
 binding = "INTERNAL_SHARED_SECRET"
 store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
 secret_name = "INTERNAL_SHARED_SECRET"
+
+# 一番星 (rust-ichibanboshi) への CF Access Service Token (Refs #424 PR-A)。
+# 勤怠 (タイムカード) の中継 `/api/kintai/daily` を叩くために使う。
+# **既存の Service Token を再利用** — app 本体 (nuxt-dtako-admin/wrangler.toml) が
+# 使っているのと同じ Secrets Store entry (secret_name="CF_ACCESS_CLIENT_SECRET") を
+# binding するだけ。secrets-inventory への新規投入作業は不要。
+[[env.staging.secrets_store_secrets]]
+binding = "ICHIBAN_CF_ACCESS_CLIENT_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "CF_ACCESS_CLIENT_SECRET"
 
 [[env.staging.services]]
 binding = "AUTH_WORKER"
@@ -171,6 +197,12 @@ ETC_R2_PREFIX = "etc-staging"
 RESTRAINT_R2_PREFIX = "restraint-staging"
 NET780_R2_PREFIX = "net780-staging"
 
+# 勤怠 (タイムカード) の取得先 (Refs #424 PR-A)。rust-ichibanboshi が同一ホストの
+# CakePHP を loopback で引いて中継する。client_id は公開識別子なので secret ではなく var
+# (app 本体 wrangler.toml の同名 var と同値・同トークン共用)。
+NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
+NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"
+
 # 軽量プレビュー環境 (create-preview skill、main 以外の branch への push ごとに
 # test/typecheck 無しで deploy)。ETC riyouMonth 診断イテレーションを staging を
 # 汚さず高速に回すために追加 (Refs #134)。この worker は service binding 経由
@@ -192,6 +224,16 @@ new_sqlite_classes = ["DtakoScraperRelayDO"]
 binding = "INTERNAL_SHARED_SECRET"
 store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
 secret_name = "INTERNAL_SHARED_SECRET"
+
+# 一番星 (rust-ichibanboshi) への CF Access Service Token (Refs #424 PR-A)。
+# 勤怠 (タイムカード) の中継 `/api/kintai/daily` を叩くために使う。
+# **既存の Service Token を再利用** — app 本体 (nuxt-dtako-admin/wrangler.toml) が
+# 使っているのと同じ Secrets Store entry (secret_name="CF_ACCESS_CLIENT_SECRET") を
+# binding するだけ。secrets-inventory への新規投入作業は不要。
+[[env.preview.secrets_store_secrets]]
+binding = "ICHIBAN_CF_ACCESS_CLIENT_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "CF_ACCESS_CLIENT_SECRET"
 
 [[env.preview.services]]
 binding = "AUTH_WORKER"
@@ -232,3 +274,9 @@ SCRAPER_MODE = "http"
 ETC_R2_PREFIX = "etc-preview"
 RESTRAINT_R2_PREFIX = "restraint-preview"
 NET780_R2_PREFIX = "net780-preview"
+
+# 勤怠 (タイムカード) の取得先 (Refs #424 PR-A)。rust-ichibanboshi が同一ホストの
+# CakePHP を loopback で引いて中継する。client_id は公開識別子なので secret ではなく var
+# (app 本体 wrangler.toml の同名 var と同値・同トークン共用)。
+NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
+NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"

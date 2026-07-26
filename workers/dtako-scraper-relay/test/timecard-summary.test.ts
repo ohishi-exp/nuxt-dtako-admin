@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  kintaiR2Paths,
   LUNCH_FROM_HOUR,
   LUNCH_TO_HOUR,
   mergeIntervals,
@@ -406,5 +407,30 @@ describe('定数', () => {
   it('昼休憩と深夜帯の窓', () => {
     expect([LUNCH_FROM_HOUR, LUNCH_TO_HOUR]).toEqual([12, 13])
     expect([NIGHT_FROM_HOUR, NIGHT_TO_HOUR]).toEqual([22, 29])
+  })
+})
+
+describe('kintaiR2Paths', () => {
+  const p = kintaiR2Paths('kintai', '27324455', 2026, 6)
+
+  it('theearth 由来と別 prefix に置く (混ぜると版管理が互いを踏む)', () => {
+    expect(p.rawLatest).toBe('kintai/27324455/2026-06/raw/latest.json')
+    expect(p.rawDir).toBe('kintai/27324455/2026-06/raw')
+    expect(p.rawVersion('20260726T010203')).toBe('kintai/27324455/2026-06/raw/v-20260726T010203.json')
+    expect(p.rawHistory).toBe('kintai/27324455/2026-06/raw/history.jsonl')
+  })
+
+  it('月は 0 埋めする', () => {
+    expect(kintaiR2Paths('kintai', 'c', 2026, 1).rawLatest).toBe('kintai/c/2026-01/raw/latest.json')
+  })
+
+  it('社員別サマリのキー', () => {
+    expect(p.summaryDir('1670')).toBe('kintai/27324455/2026-06/summary/1670')
+    expect(p.summaryLatest('1670')).toBe('kintai/27324455/2026-06/summary/1670/latest.json')
+    expect(p.summaryVersion('1670', 'T1')).toBe('kintai/27324455/2026-06/summary/1670/v-T1.json')
+  })
+
+  it('乗務員CD が空でも key が壊れない', () => {
+    expect(p.summaryLatest('')).toBe('kintai/27324455/2026-06/summary/unknown/latest.json')
   })
 })

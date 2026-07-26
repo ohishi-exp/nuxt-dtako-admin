@@ -434,6 +434,48 @@ export function summarizeTimecardMonth(
   return { summaries, warnings };
 }
 
+/**
+ * タイムカード由来データの R2 キー設計 (`restraintR2Paths` と同型)。
+ *
+ * theearth 由来 (`restraint/...`) とは**別 prefix に置く** — 同じ月・同じ乗務員CD で
+ * 両方が存在しうるので、混ぜると resummarize や版管理が互いを踏む。合流は読み出し側
+ * (wage-report) で行う。
+ */
+export interface KintaiR2Paths {
+  /** 生 JSON のディレクトリ (版一覧の list 用)。 */
+  rawDir: string;
+  /** 上流応答の最新スナップショット。 */
+  rawLatest: string;
+  /** 上流応答の版 (内容が変わった取得時のみ追加)。 */
+  rawVersion(ts: string): string;
+  /** 取得ごとの確認履歴 (JSONL)。 */
+  rawHistory: string;
+  /** 社員別サマリ JSON のディレクトリ。 */
+  summaryDir(driverCd: string): string;
+  summaryLatest(driverCd: string): string;
+  summaryVersion(driverCd: string, ts: string): string;
+}
+
+export function kintaiR2Paths(
+  prefix: string,
+  compId: string,
+  year: number,
+  month: number,
+): KintaiR2Paths {
+  const ym = `${year}-${String(month).padStart(2, "0")}`;
+  const base = `${prefix}/${compId}/${ym}`;
+  const summaryDir = (driverCd: string) => `${base}/summary/${driverCd || "unknown"}`;
+  return {
+    rawDir: `${base}/raw`,
+    rawLatest: `${base}/raw/latest.json`,
+    rawVersion: (ts) => `${base}/raw/v-${ts}.json`,
+    rawHistory: `${base}/raw/history.jsonl`,
+    summaryDir,
+    summaryLatest: (driverCd) => `${summaryDir(driverCd)}/latest.json`,
+    summaryVersion: (driverCd, ts) => `${summaryDir(driverCd)}/v-${ts}.json`,
+  };
+}
+
 /** R2 保存 body (決定論 JSON、theearth 側 `stableSummaryBody` と同じ作法)。 */
 export function stableTimecardSummaryBody(
   compId: string,

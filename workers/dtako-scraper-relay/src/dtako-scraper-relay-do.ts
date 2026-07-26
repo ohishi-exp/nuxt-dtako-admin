@@ -132,7 +132,16 @@ import {
   WorkScheduleError,
   type HolidayWorkD1Row,
   type WorkScheduleD1Row,
+  scopeByDriverCdAt,
+  buildHolidayWorkIndex,
+  resolveWorkScheduleAt,
 } from "./work-schedule";
+import {
+  kintaiR2Paths,
+  stableTimecardSummaryBody,
+  summarizeTimecardMonth,
+  type TimecardDailyRow,
+} from "./timecard-summary";
 import {
   appendHistoryJsonl,
   downloadRestraintCsv,
@@ -359,6 +368,16 @@ export interface RelayEnv {
    * ohishi-exp/browser-render-rust#14)。
    */
   ETC_ACCOUNTS?: unknown;
+  /** 勤怠 (タイムカード) の取得先 = rust-ichibanboshi の CF Tunnel hostname
+   * (Refs #424 PR-A)。未設定なら `/restraint-api/kintai/fetch` は 503。 */
+  NUXT_ICHIBAN_API_URL?: string;
+  /** 一番星 CF Access Service Token の client_id (公開識別子)。 */
+  NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID?: string;
+  /** 同 client_secret (Secrets Store binding。app 本体と同じ entry を物理共有)。 */
+  ICHIBAN_CF_ACCESS_CLIENT_SECRET?: unknown;
+  /** 勤怠アーカイブの R2 prefix (既定 `kintai`)。theearth 由来 (`restraint`) とは
+   * 別に置く — 同じ月・同じ乗務員CD で両方存在しうるため。 */
+  KINTAI_R2_PREFIX?: string;
   /** ETC 明細 CSV の保存先 R2 bucket (dtako-uploads)。拘束時間管理表 CSV
    * (`/restraint-api/*`、Refs #241) のアーカイブ先も兼ねる。 */
   DTAKO_R2?: R2Bucket;
@@ -1742,6 +1761,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/holiday-work" && request.method === "PUT") {
       return this.handleHolidayWorkPut(request, record!);
     }
+    // ---- 勤怠 (タイムカード) の取得とアーカイブ (Refs #424 PR-A) ----
+    if (url.pathname === "/restraint-api/kintai/fetch" && request.method === "POST") {
+      return this.handleKintaiFetch(record!, url);
+    }
+    if (url.pathname === "/restraint-api/kintai/archive" && request.method === "GET") {
+      return this.handleKintaiArchive(record!, url);
+    }
     // ---- アーカイブ閲覧 (R2 読み出しのみ。Refs #244) ----
     if (url.pathname === "/restraint-api/archive/summaries" && request.method === "GET") {
       return this.handleArchiveSummaries(record!, url);
@@ -2438,6 +2464,228 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return dvrJsonError(502, "休日出勤の承認簿の保存に失敗しました");
     }
     return Response.json({ saved: true, changed: statements.length });
+  }
+
+  /**
+   * POST /restraint-api/kintai/fetch?month=YYYY-MM — 勤怠 (タイムカード) の取り込み
+   * (Refs #424 PR-A)。
+   *
+   * 経路: CakePHP (LAN, loopback) ← rust-ichibanboshi (同一ホスト) ← ここ (CF Access
+   * Service Token)。**上流応答は解釈せず生のまま**バージョン管理付きで R2 に保存し、
+   * 併せて社員別サマリ (`summarizeTimecardMonth`) も保存する。wage-report はこの
+   * サマリを読む (PR-D)。
+   *
+   * 冪等: 同じ内容なら latest の lastVerifiedAt だけ進み版は増えない
+   * (`putVersionedR2` の sha256 比較。theearth の CSV 取得と同じ作法)。
+   */
+  private async handleKintaiFetch(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
+    const parsed = this.parseMonthParam(url);
+    if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
+    const { year, month, ym } = parsed;
+
+    const apiUrl = (this.env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
+    const clientId = this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
+    // Secrets Store binding は「宣言はあるが解決できない」時に get() が throw する
+    // (ローカル dev や entry の消失・改名)。素通しすると生のスタック付き 500 になり
+    // 原因が読めないので、未設定と同じ 503 に倒す (2026-07-26 に dev で実際に踏んだ)
+    let clientSecret = "";
+    try {
+      clientSecret = await resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
+    } catch (err) {
+      console.error(JSON.stringify({ kintai_fetch: "secret-error", error: describeUnknownError(err) }));
+    }
+    if (!apiUrl || !clientId || !clientSecret) {
+      return dvrJsonError(503, "勤怠の取得先 (NUXT_ICHIBAN_*) が未設定です");
+    }
+
+    // 1) 上流から生 JSON を取る
+    let rawText: string;
+    let rows: TimecardDailyRow[];
+    try {
+      const upstream = await fetch(`${apiUrl}/api/kintai/daily?month=${encodeURIComponent(ym)}`, {
+        headers: {
+          "CF-Access-Client-Id": clientId,
+          "CF-Access-Client-Secret": clientSecret,
+        },
+      });
+      rawText = await upstream.text();
+      if (!upstream.ok) {
+        console.error(JSON.stringify({ kintai_fetch: "upstream-error", status: upstream.status }));
+        return dvrJsonError(502, `勤怠 API が ${upstream.status} を返しました: ${rawText.slice(0, 200)}`);
+      }
+      const body = JSON.parse(rawText) as { rows?: unknown };
+      if (!Array.isArray(body.rows)) {
+        return dvrJsonError(502, "勤怠 API の応答に rows 配列がありません");
+      }
+      rows = body.rows as TimecardDailyRow[];
+    } catch (err) {
+      console.error(JSON.stringify({ kintai_fetch: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "勤怠 API の取得に失敗しました");
+    }
+
+    // 2) 所定労働時間・休日出勤の承認・社員のスコープを D1 から引く
+    const { schedules, approved, scopes } = await this.loadKintaiInputs(record.compId, ym);
+    const { summaries, warnings } = summarizeTimecardMonth(rows, {
+      yearMonth: ym,
+      dailyWorkMinutesFor: (driverCd) => {
+        const scope = scopes.get(driverCd) ?? { branchCode: null, jobName: null };
+        return (
+          resolveWorkScheduleAt(schedules, ym, scope.branchCode, scope.jobName)?.dailyWorkMinutes ?? null
+        );
+      },
+      approvedHolidayWork: approved,
+    });
+
+    // 3) R2 へバージョン管理付きで保存
+    const prefix = this.env.KINTAI_R2_PREFIX || "kintai";
+    const paths = kintaiR2Paths(prefix, record.compId, year, month);
+    const ts = restraintVersionTimestamp(new Date());
+    let summariesWrote = 0;
+    try {
+      const rawResult = await this.putVersionedR2(
+        bucket,
+        paths.rawLatest,
+        paths.rawVersion(ts),
+        rawText,
+        "application/json; charset=utf-8",
+        ts,
+      );
+      if (rawResult.changed) await this.pruneRestraintVersions(bucket, paths.rawDir);
+      await this.appendRestraintHistory(
+        bucket,
+        paths.rawHistory,
+        restraintHistoryLine(
+          ts,
+          rawResult.changed ? "new-version" : "unchanged",
+          rawResult.sha256,
+          new TextEncoder().encode(rawText).byteLength,
+        ),
+      );
+      for (const summary of summaries) {
+        const wrote = await this.putVersionedR2(
+          bucket,
+          paths.summaryLatest(summary.driverCd),
+          paths.summaryVersion(summary.driverCd, ts),
+          stableTimecardSummaryBody(record.compId, year, month, summary),
+          "application/json; charset=utf-8",
+          ts,
+        );
+        if (wrote.changed) {
+          summariesWrote += 1;
+          await this.pruneRestraintVersions(bucket, paths.summaryDir(summary.driverCd));
+        }
+      }
+    } catch (err) {
+      console.error(JSON.stringify({ kintai_fetch: "r2-error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "勤怠データの保存に失敗しました");
+    }
+
+    return Response.json({
+      month: ym,
+      rows: rows.length,
+      drivers: summaries.length,
+      summaries_updated: summariesWrote,
+      fetched_at: ts,
+      warnings,
+    });
+  }
+
+  /** 勤怠サマリ計算の入力 (所定マスタ・休日出勤の承認・社員のスコープ) を D1 から読む。
+   * D1 未 binding / 読めない時は空で返す — 所定が引けない社員は時間外が出ないだけで、
+   * 取り込み自体は成功させる (fail-soft)。 */
+  private async loadKintaiInputs(compId: string, ym: string) {
+    const empty = {
+      schedules: [] as ReturnType<typeof buildWorkScheduleResponse>,
+      approved: new Set<string>(),
+      scopes: new Map<string, { branchCode: number | null; jobName: string | null }>(),
+    };
+    const db = this.env.DTAKO_DB;
+    if (!db) return empty;
+    try {
+      const [scheduleResult, holidayResult, employeeResult, attrResult] = await Promise.all([
+        db
+          .prepare(
+            `SELECT effective_from, branch_code, job_name, daily_work_minutes FROM work_schedules WHERE comp_id = ?`,
+          )
+          .bind(compId)
+          .all<WorkScheduleD1Row>(),
+        db
+          .prepare(
+            `SELECT driver_cd, work_date, reason FROM holiday_work_approvals WHERE comp_id = ? AND work_date LIKE ?`,
+          )
+          .bind(compId, `${ym}-%`)
+          .all<HolidayWorkD1Row>(),
+        db
+          .prepare(`SELECT company, payroll_cd, name, driver_cd FROM employees WHERE comp_id = ?`)
+          .bind(compId)
+          .all<EmployeeD1Row>(),
+        db
+          .prepare(
+            `SELECT company, payroll_cd, effective_from, branch, pay_scheme, branch_code, branch_name, job_name FROM employee_attrs WHERE comp_id = ?`,
+          )
+          .bind(compId)
+          .all<EmployeeAttrD1Row>(),
+      ]);
+      const { employees } = buildEmployeeMasterResponse(
+        employeeResult.results ?? [],
+        attrResult.results ?? [],
+      );
+      return {
+        schedules: buildWorkScheduleResponse(scheduleResult.results ?? []),
+        approved: buildHolidayWorkIndex(buildHolidayWorkResponse(holidayResult.results ?? [])),
+        scopes: scopeByDriverCdAt(employees, ym, resolveAttrsAt),
+      };
+    } catch (err) {
+      console.error(JSON.stringify({ kintai_inputs: "error", error: describeUnknownError(err) }));
+      return empty;
+    }
+  }
+
+  /** GET /restraint-api/kintai/archive?month=YYYY-MM — 生 JSON の版一覧と確認履歴
+   * (theearth 側の archive/csv-list + archive/history と同じ役割)。 */
+  private async handleKintaiArchive(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
+    const parsed = this.parseMonthParam(url);
+    if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
+    const prefix = this.env.KINTAI_R2_PREFIX || "kintai";
+    const paths = kintaiR2Paths(prefix, record.compId, parsed.year, parsed.month);
+    try {
+      const [objects, historyObj] = await Promise.all([
+        this.listAllR2(bucket, `${paths.rawDir}/`),
+        bucket.get(paths.rawHistory),
+      ]);
+      const history = historyObj ? (await historyObj.text()).split("\n").filter(Boolean) : [];
+      const latest = objects.find((o) => o.key === paths.rawLatest);
+      return Response.json({
+        month: parsed.ym,
+        latest: latest
+          ? {
+              key: latest.key,
+              size: latest.size,
+              fetched_at: latest.customMetadata?.fetchedAt ?? null,
+              last_verified_at: latest.customMetadata?.lastVerifiedAt ?? null,
+              sha256: latest.customMetadata?.sha256 ?? null,
+            }
+          : null,
+        versions: objects
+          .filter((o) => o.key.includes("/v-"))
+          .map((o) => ({ key: o.key, size: o.size }))
+          .sort((a, b) => (a.key < b.key ? 1 : -1)),
+        history: history.map((line) => {
+          try {
+            return JSON.parse(line) as unknown;
+          } catch {
+            return { raw: line };
+          }
+        }),
+      });
+    } catch (err) {
+      console.error(JSON.stringify({ kintai_archive: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "勤怠アーカイブの取得に失敗しました");
+    }
   }
 
   // R2 突合マスタ (salary-cd-map) → 社員マスタの取り込み

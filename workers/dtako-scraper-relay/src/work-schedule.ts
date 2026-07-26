@@ -402,6 +402,36 @@ export function resolveWorkScheduleAt(
   return best;
 }
 
+/** 乗務員CD → 所定マスタのスコープ (対象月末時点の所属コード・職種名)。 */
+export interface WorkScheduleScope {
+  branchCode: number | null;
+  jobName: string | null;
+}
+
+/**
+ * 社員マスタから「乗務員CD → 対象月末時点のスコープ」を引ける Map を作る
+ * (`branchByDriverCdAt` と同型。所定マスタの解決に食わせる)。
+ *
+ * 属性履歴の解決は呼び出し側の `resolveAttrsAt` を注入する — このモジュールを
+ * employee-master へ依存させないため (テストも注入で完結する)。
+ */
+export function scopeByDriverCdAt<A extends { effectiveFrom: string }>(
+  employees: readonly { driverCd: string | null; attrs: A[] }[],
+  yearMonth: string,
+  resolveAt: (attrs: A[], ym: string) => { branchCode?: number | null; jobName?: string | null } | null,
+): Map<string, WorkScheduleScope> {
+  const out = new Map<string, WorkScheduleScope>();
+  for (const e of employees) {
+    if (!e.driverCd) continue;
+    const attr = resolveAt(e.attrs, yearMonth);
+    out.set(e.driverCd, {
+      branchCode: attr?.branchCode ?? null,
+      jobName: attr?.jobName ?? null,
+    });
+  }
+  return out;
+}
+
 /** 承認済み休日出勤の判定用インデックス (`{driverCd}|{workDate}` の集合)。 */
 export function buildHolidayWorkIndex(entries: HolidayWorkEntry[]): Set<string> {
   return new Set(entries.map((e) => `${e.driverCd}|${e.workDate}`));
