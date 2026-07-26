@@ -107,12 +107,29 @@ describe('timecard-summary golden (実機 fixture 2026-06)', () => {
     expect(approved.voluntaryMinutes).toBe(0)
   })
 
-  it('中抜けのある日は sessionCount が 2 以上で、休憩が中抜け分だけ増える', () => {
-    const split = result.summaries.flatMap(s => s.days).filter(d => d.sessionCount > 1)
+  it('中抜けのある日は sessions が 2 本以上で、休憩が中抜け分だけ増える', () => {
+    const split = result.summaries.flatMap(s => s.days).filter(d => d.sessions.length > 1)
     expect(split.length).toBeGreaterThan(0)
     for (const d of split) {
       expect((d.restraintMinutes ?? 0) - (d.workingMinutes ?? 0)).toBeGreaterThan(0)
     }
+  })
+
+  it('勤務日の sessions は実データの打刻がそのまま入る (タイムカード表の素材)', () => {
+    const matsunaga = result.summaries.find(s => s.driverCd === '1670')!
+    // 松永 2026-06-11: 07:44:15 → 11:41:10 / 13:14:38 → 16:49:11 (中抜けが昼をまたぐ日)
+    const d11 = matsunaga.days.find(d => d.day === 11)!
+    expect(d11.sessions).toEqual([
+      { start: '2026-06-11 07:44:15', end: '2026-06-11 11:41:10' },
+      { start: '2026-06-11 13:14:38', end: '2026-06-11 16:49:11' },
+    ])
+  })
+
+  it('自主出勤の日も打刻を残す (賃金計算からは外すが表には出す)', () => {
+    const tomita = result.summaries.find(s => s.driverCd === '1029')!
+    const voluntary = tomita.days.filter(d => d.isRestDay && d.voluntaryMinutes > 0)
+    expect(voluntary.length).toBeGreaterThan(0)
+    for (const d of voluntary) expect(d.sessions.length).toBeGreaterThan(0)
   })
 
   it('法定外休日の承認が無いので warning は出ない', () => {
