@@ -9,7 +9,11 @@
  * 印刷では 3 人が横に並ぶ (親の grid が担当)。ここは 1 人分だけを描く。
  */
 import { fmtMinutes } from '~/utils/restraint-wage-view'
+import type { OvertimeHoursComparison } from '~/utils/salary-compare'
 import type { TimecardTableRow, WorkKindCounts } from '~/utils/timecard-view'
+
+/** 拘束 (打刻) 側と給与明細側、日数 1 項目分。給与側が引けなければ null (Refs #441)。 */
+interface DayCountPair { sys: number, csv: number | null }
 
 const props = defineProps<{
   driverCd: string
@@ -19,21 +23,53 @@ const props = defineProps<{
   rows: TimecardTableRow[]
   /** 勤務区分ごとの日数。 */
   counts: WorkKindCounts
+  /** 残業の「拘束時間 vs 給与換算時間」比較 (Refs #441)。null なら非表示。 */
+  overtimeCompare?: OvertimeHoursComparison | null
+  /** 出勤・休日出勤・公休の日数比較 (拘束 vs 給与明細、Refs #441)。休日出勤は
+   * 給与明細の様式に列が無いため csv は常に null。null なら非表示。 */
+  attendanceCompare?: {
+    work: DayCountPair
+    holidayWork: DayCountPair
+    publicHoliday: DayCountPair
+  } | null
 }>()
 
-/** 0 の区分は出さない (毎行 "休日出勤 0" が並ぶと通常日の把握が鈍る)。
- * 打刻エラーだけは別枠で赤く出すのでここには入れない。 */
+/** 分の符号付き表示 ("+2h13m" / "-2h13m")。0 は符号無し。 */
+function fmtSignedMinutes(minutes: number): string {
+  if (minutes === 0) return fmtMinutes(0)
+  const sign = minutes > 0 ? '+' : '-'
+  return `${sign}${fmtMinutes(Math.abs(minutes))}`
+}
+
+/** "拘束 5日 / 給与 5日" (csv が無ければ "拘束 5日" のみ)。 */
+function fmtDayPair(pair: DayCountPair): string {
+  return pair.csv == null ? `拘束${pair.sys}日` : `拘束${pair.sys}日/給与${pair.csv}日`
+}
+
+/** 出勤・休日出勤・公休の日数比較を 1 行にまとめる (Refs #441)。全部 0 の月は出さない。 */
+const attendanceSummary = computed(() => {
+  const a = props.attendanceCompare
+  if (!a) return ''
+  return [
+    ['出勤', a.work],
+    ['休日出勤', a.holidayWork],
+    ['公休', a.publicHoliday],
+  ]
+    .filter(([, pair]) => (pair as DayCountPair).sys > 0 || ((pair as DayCountPair).csv ?? 0) > 0)
+    .map(([label, pair]) => `${label} ${fmtDayPair(pair as DayCountPair)}`)
+    .join(' ・ ')
+})
+
+/** 有休・欠勤・自主出勤の日数 (0 の区分は出さない)。打刻エラーだけは別枠で赤く出すので
+ * ここには入れない。出勤・休日出勤・公休は上の attendanceSummary (拘束/給与比較) が
+ * 担当するのでここでは重複させない (Refs #441)。 */
 const kindSummary = computed(() => {
   const c = props.counts
   return [
-    ['通常', c.normal],
-    ['残業', c.overtime],
-    ['休日出勤', c.holidayWork],
     ['自主出勤', c.voluntary],
-    ['公休', c.publicHoliday],
     ['有休', c.paidLeave],
     ['欠勤', c.absence],
-  ].filter(([, n]) => (n as number) > 0).map(([label, n]) => `${label} ${n}`).join(' / ')
+  ].filter(([, n]) => (n as number) > 0).map(([label, n]) => `${label} ${n}日`).join(' / ')
 })
 </script>
 
@@ -46,10 +82,28 @@ const kindSummary = computed(() => {
       </div>
       <div class="text-gray-500">{{ month.replace('-', '年') }}月</div>
     </div>
+    <!-- 出勤・休日出勤・公休の日数 (拘束/打刻 vs 給与明細、Refs #441) -->
+    <div v-if="attendanceSummary" class="py-0.5 text-gray-500">{{ attendanceSummary }}</div>
     <div v-if="kindSummary" class="py-0.5 text-gray-500">{{ kindSummary }}</div>
     <!-- 打刻エラーは総務が CakePHP 側で直す必要があるので、区分サマリに埋めずに立てる -->
     <div v-if="counts.punchError > 0" class="py-0.5 font-semibold text-red-600 dark:text-red-400">
       打刻エラー {{ counts.punchError }} 日 ({{ fmtMinutes(counts.punchErrorMinutes) }})
+    </div>
+    <!-- 残業の「拘束時間 vs 給与換算時間」比較 (Refs #441)。給与側は基礎単価(実績) が
+         無い (給与比較タブで CSV 未取り込み等) と "-" になる -->
+    <div
+      v-if="overtimeCompare && (overtimeCompare.restraintMinutes > 0 || (overtimeCompare.paidMinutes ?? 0) > 0)"
+      class="py-0.5 text-gray-500"
+      title="給与換算 = 給与明細の残業計上額 ÷ 基礎単価(実績)。法定割増 (1.25/1.5倍等) を戻していない簡易換算のため、正常な月でも給与換算の方が大きく出ます"
+    >
+      残業: 拘束 {{ fmtMinutes(overtimeCompare.restraintMinutes) }}
+      / 給与換算 {{ overtimeCompare.paidMinutes != null ? fmtMinutes(overtimeCompare.paidMinutes) : '-' }}
+      <span
+        v-if="overtimeCompare.diffMinutes != null"
+        :class="overtimeCompare.diffMinutes > 0 ? 'text-amber-600 dark:text-amber-400' : ''"
+      >
+        (差 {{ fmtSignedMinutes(overtimeCompare.diffMinutes) }})
+      </span>
     </div>
 
     <table class="w-full border-collapse tabular-nums">
