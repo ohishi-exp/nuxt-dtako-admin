@@ -21,7 +21,8 @@ const props = defineProps<{
   counts: WorkKindCounts
 }>()
 
-/** 0 の区分は出さない (毎行 "休日出勤 0" が並ぶと通常日の把握が鈍る)。 */
+/** 0 の区分は出さない (毎行 "休日出勤 0" が並ぶと通常日の把握が鈍る)。
+ * 打刻エラーだけは別枠で赤く出すのでここには入れない。 */
 const kindSummary = computed(() => {
   const c = props.counts
   return [
@@ -29,6 +30,9 @@ const kindSummary = computed(() => {
     ['残業', c.overtime],
     ['休日出勤', c.holidayWork],
     ['自主出勤', c.voluntary],
+    ['公休', c.publicHoliday],
+    ['有休', c.paidLeave],
+    ['欠勤', c.absence],
   ].filter(([, n]) => (n as number) > 0).map(([label, n]) => `${label} ${n}`).join(' / ')
 })
 </script>
@@ -43,6 +47,10 @@ const kindSummary = computed(() => {
       <div class="text-gray-500">{{ month.replace('-', '年') }}月</div>
     </div>
     <div v-if="kindSummary" class="py-0.5 text-gray-500">{{ kindSummary }}</div>
+    <!-- 打刻エラーは総務が CakePHP 側で直す必要があるので、区分サマリに埋めずに立てる -->
+    <div v-if="counts.punchError > 0" class="py-0.5 font-semibold text-red-600 dark:text-red-400">
+      打刻エラー {{ counts.punchError }} 日 ({{ fmtMinutes(counts.punchErrorMinutes) }})
+    </div>
 
     <table class="w-full border-collapse tabular-nums">
       <thead>
@@ -64,6 +72,8 @@ const kindSummary = computed(() => {
           :class="[
             r.isSunday ? 'bg-gray-100 dark:bg-gray-800/60' : '',
             r.isVoluntary ? 'text-amber-600 dark:text-amber-400' : '',
+            r.isPunchError ? 'font-semibold text-red-600 dark:text-red-400' : '',
+            r.isAfterPunchError ? 'text-red-500/80 dark:text-red-400/70' : '',
           ]"
         >
           <td class="py-0.5 text-right">{{ r.day }}</td>
@@ -81,6 +91,11 @@ const kindSummary = computed(() => {
     <!-- 自主出勤は賃金計算に入らないので、合計を別枠で必ず見せる (Refs #424 の法的注記) -->
     <div v-if="counts.voluntaryMinutes > 0" class="mt-1 text-amber-600 dark:text-amber-400">
       自主出勤 合計 {{ fmtMinutes(counts.voluntaryMinutes) }} (賃金計算には入っていません)
+    </div>
+    <!-- 打刻エラーは「直せば数字が変わる」ので、何をすればよいかまで書く (Refs #433) -->
+    <div v-if="counts.punchError > 0" class="mt-1 text-red-600 dark:text-red-400">
+      赤い日は打刻が翌日にまたがっています (終業の押し忘れ)。時間は賃金計算に入れていません。
+      タイムカード側で打刻を直してから勤怠を再取り込みしてください。
     </div>
   </div>
 </template>

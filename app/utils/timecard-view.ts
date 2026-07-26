@@ -32,12 +32,17 @@ export interface TimecardTableRow {
   out2: string | null
   /** 打刻計算の残業 (分、時間外 + 時間外深夜)。0 なら表示しない。 */
   overtimeMinutes: number
-  /** 備考 (勤務区分 + 3 回以上の打刻の件数)。無ければ空文字。 */
+  /** 備考 (休暇区分 + 勤務区分 + 打刻エラー + 3 回以上の打刻の件数)。無ければ空文字。 */
   note: string
   /** 日曜 (網掛けの対象)。 */
   isSunday: boolean
   /** 打刻はあるが賃金計算から外した日 (自主出勤)。画面で色を変える。 */
   isVoluntary: boolean
+  /** 打刻エラーの日 (事務職・非夜勤の日跨ぎ)。画面で赤くする (Refs #433)。 */
+  isPunchError: boolean
+  /** 前日が打刻エラーの日。前日の終業がこの日の打刻と組まれて行ごと消えている
+   * 可能性があるので、空欄の理由として出す (Refs #433)。 */
+  isAfterPunchError: boolean
 }
 
 const DOW_LABELS = ['日', '月', '火', '水', '木', '金', '土']
@@ -68,8 +73,19 @@ export function formatPunch(ts: string | undefined, baseDate: string): string | 
   return date === baseDate ? hhmm : `翌 ${hhmm}`
 }
 
-/** 日別サマリ 1 件の勤務区分ラベル。通常勤務は空文字。 */
+/** その日が打刻エラーか (事務職・非夜勤の日跨ぎ、Refs #433)。 */
+export function isPunchErrorDay(d: RestraintSummaryDay | undefined): boolean {
+  return (d?.punchErrorMinutes ?? 0) > 0
+}
+
+/**
+ * 日別サマリ 1 件の勤務区分ラベル。通常勤務は空文字。
+ *
+ * **打刻エラーが最優先** — その日の時間はすべて信用できないので、休日出勤や
+ * 自主出勤として説明してはいけない。
+ */
 export function dayKindLabel(d: RestraintSummaryDay): string {
+  if (isPunchErrorDay(d)) return '打刻エラー'
   const kind = d.holidayKind
   if (d.isRestDay) {
     // 打刻はあるが賃金計算から外した日 = 自主出勤 (休みの日は空欄のまま)
@@ -101,9 +117,16 @@ export function buildTimecardTable(
     const d = byDay.get(day)
     const sessions = d?.sessions ?? []
     const baseDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+    const punchError = isPunchErrorDay(d)
+    // 前日の終業を押し忘れると、その打刻がこの日の打刻と組まれて**この日の行ごと消える**
+    // (実データで確認)。空欄の理由が分かるように出す
+    const afterPunchError = isPunchErrorDay(byDay.get(day - 1))
     const notes: string[] = []
+    // 休暇区分 (公休 / 有休 / 遅刻 …) は CakePHP の PDF と同じく原文をそのまま出す
+    notes.push(...(d?.leaves ?? []))
     const kind = d ? dayKindLabel(d) : ''
     if (kind) notes.push(kind)
+    if (afterPunchError) notes.push('前日の打刻エラーの影響')
     // 3 回以上の打刻は 出勤2/退社2 の列に収まらないので件数だけ残す
     if (sessions.length > 2) notes.push(`打刻 ${sessions.length} 回`)
 
@@ -119,6 +142,8 @@ export function buildTimecardTable(
       note: notes.join(' / '),
       isSunday: dow === 0,
       isVoluntary: Boolean(d?.isRestDay && (d.voluntaryMinutes ?? 0) > 0),
+      isPunchError: punchError,
+      isAfterPunchError: afterPunchError,
     })
   }
   return rows
@@ -136,7 +161,31 @@ export interface WorkKindCounts {
   voluntary: number
   /** 自主出勤の実働合計 (分)。 */
   voluntaryMinutes: number
+  /** 打刻エラーの日 (賃金計算からは外れている、Refs #433)。 */
+  punchError: number
+  /** 打刻エラーとして外した拘束の合計 (分)。 */
+  punchErrorMinutes: number
+  /** 公休日数 (公休 / 泊休 / 積置泊休 / 指休)。 */
+  publicHoliday: number
+  /** 有休日数 (有休 = 1.0、前休 / 後休 = 0.5)。 */
+  paidLeave: number
+  /** 欠勤日数。 */
+  absence: number
 }
+
+/** 1 日 1.0 と数える休暇 → 集計軸。worker 側 `countLeaves` と同一規則
+ * (worker を app から import できないため実装は 2 箇所になる。変える時は両方)。 */
+const LEAVE_FULL_DAY: Record<string, 'publicHoliday' | 'paidLeave' | 'absence'> = {
+  公休: 'publicHoliday',
+  泊休: 'publicHoliday',
+  積置泊休: 'publicHoliday',
+  指休: 'publicHoliday',
+  有休: 'paidLeave',
+  欠勤: 'absence',
+}
+
+/** 0.5 日と数える休暇 (半休)。 */
+const LEAVE_HALF_DAY = new Set(['前休', '後休', '前休作', '後休作'])
 
 /**
  * 日別サマリから勤務区分の日数を数える。
@@ -144,10 +193,34 @@ export interface WorkKindCounts {
  * theearth 由来の日 (`holidayKind` を持たない) は休日出勤の判定ができないので、
  * 残業の有無だけで normal / overtime に分かれる。タイムカード由来と混ぜて数えない
  * ように、呼び出し側は source で絞ること。
+ *
+ * **打刻エラーは他のどの区分にも入れない** (Refs #433) — その日の時間は信用できず、
+ * 休日出勤とも自主出勤とも言えないため。
  */
 export function countWorkKinds(days: readonly RestraintSummaryDay[]): WorkKindCounts {
-  const out: WorkKindCounts = { normal: 0, overtime: 0, holidayWork: 0, voluntary: 0, voluntaryMinutes: 0 }
+  const out: WorkKindCounts = {
+    normal: 0,
+    overtime: 0,
+    holidayWork: 0,
+    voluntary: 0,
+    voluntaryMinutes: 0,
+    punchError: 0,
+    punchErrorMinutes: 0,
+    publicHoliday: 0,
+    paidLeave: 0,
+    absence: 0,
+  }
   for (const d of days) {
+    for (const detail of d.leaves ?? []) {
+      const full = LEAVE_FULL_DAY[detail]
+      if (full) out[full] += 1
+      else if (LEAVE_HALF_DAY.has(detail)) out.paidLeave += 0.5
+    }
+    if (isPunchErrorDay(d)) {
+      out.punchError += 1
+      out.punchErrorMinutes += d.punchErrorMinutes ?? 0
+      continue
+    }
     const voluntary = d.voluntaryMinutes ?? 0
     if (d.isRestDay) {
       if (voluntary > 0) {

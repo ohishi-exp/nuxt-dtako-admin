@@ -196,6 +196,7 @@ describe('countWorkKinds', () => {
     ])
     expect(counts).toEqual({
       normal: 1, overtime: 2, holidayWork: 2, voluntary: 1, voluntaryMinutes: 300,
+      punchError: 0, punchErrorMinutes: 0, publicHoliday: 0, paidLeave: 0, absence: 0,
     })
   })
 
@@ -217,6 +218,141 @@ describe('countWorkKinds', () => {
   it('空入力はすべて 0', () => {
     expect(countWorkKinds([])).toEqual({
       normal: 0, overtime: 0, holidayWork: 0, voluntary: 0, voluntaryMinutes: 0,
+      punchError: 0, punchErrorMinutes: 0, publicHoliday: 0, paidLeave: 0, absence: 0,
     })
+  })
+})
+
+describe('打刻エラーの表示 (Refs #433)', () => {
+  it('打刻エラーの日は備考が「打刻エラー」で赤くなり、時刻は残る', () => {
+    // 実データ: 佐藤 泰弘 2026-06-08 07:14 → 06-09 18:52
+    const rows = buildTimecardTable([day({
+      day: 8,
+      isRestDay: true,
+      restraintMinutes: 0,
+      workingMinutes: 0,
+      punchErrorMinutes: 2138,
+      sessions: [{ start: '2026-06-08 07:14:08', end: '2026-06-09 18:52:15' }],
+    })], 2026, 6)
+    expect(rows[7]).toMatchObject({
+      note: '打刻エラー',
+      isPunchError: true,
+      in1: '07:14',
+      out1: '翌 18:52',
+    })
+  })
+
+  it('打刻エラーは自主出勤・休日出勤より優先して表示する', () => {
+    const rows = buildTimecardTable([day({
+      day: 7,
+      holidayKind: 'legal',
+      isRestDay: true,
+      voluntaryMinutes: 300,
+      punchErrorMinutes: 2000,
+      sessions: [{ start: '2026-06-07 07:00:00', end: '2026-06-08 19:00:00' }],
+    })], 2026, 6)
+    expect(rows[6]!.note).toBe('打刻エラー')
+  })
+
+  it('エラーの翌日は空欄の理由を出す (前日の終業と組まれて行ごと消えるため)', () => {
+    const rows = buildTimecardTable([day({
+      day: 8,
+      isRestDay: true,
+      punchErrorMinutes: 2138,
+      sessions: [{ start: '2026-06-08 07:14:08', end: '2026-06-09 18:52:15' }],
+    })], 2026, 6)
+    expect(rows[8]).toMatchObject({
+      day: 9,
+      note: '前日の打刻エラーの影響',
+      isAfterPunchError: true,
+      in1: null,
+    })
+    // エラー日そのものは「翌日の影響」ではない
+    expect(rows[7]!.isAfterPunchError).toBe(false)
+    // さらに翌々日には波及しない
+    expect(rows[9]!.isAfterPunchError).toBe(false)
+  })
+
+  it('1 日の行がエラーでも 前月へは波及しない (day 0 を見に行かない)', () => {
+    const rows = buildTimecardTable([day({ day: 1, isRestDay: true, punchErrorMinutes: 100 })], 2026, 6)
+    expect(rows[0]!.isPunchError).toBe(true)
+    expect(rows[0]!.isAfterPunchError).toBe(false)
+  })
+
+  it('theearth 由来の日 (punchErrorMinutes を持たない) はエラーにしない', () => {
+    const rows = buildTimecardTable([day({ day: 1 })], 2026, 6)
+    expect(rows[0]).toMatchObject({ isPunchError: false, isAfterPunchError: false })
+  })
+})
+
+describe('休暇の表示 (Refs #433)', () => {
+  it('休暇区分は原文のまま備考に出る', () => {
+    const rows = buildTimecardTable([
+      day({ day: 7, isRestDay: true, leaves: ['公休'] }),
+      day({ day: 10, leaves: ['遅刻'], sessions: [{ start: '2026-06-10 09:30:00', end: '2026-06-10 17:00:00' }] }),
+    ], 2026, 6)
+    expect(rows[6]!.note).toBe('公休')
+    expect(rows[9]!.note).toBe('遅刻')
+  })
+
+  it('1 日に複数区分あれば全部並べる', () => {
+    const rows = buildTimecardTable([day({ day: 1, isRestDay: true, leaves: ['前休', '遅刻'] })], 2026, 6)
+    expect(rows[0]!.note).toBe('前休 / 遅刻')
+  })
+
+  it('休暇と勤務区分は併記される', () => {
+    const rows = buildTimecardTable([day({
+      day: 7,
+      holidayKind: 'legal',
+      leaves: ['公休'],
+      sessions: [{ start: '2026-06-07 08:00:00', end: '2026-06-07 17:00:00' }],
+    })], 2026, 6)
+    expect(rows[6]!.note).toBe('公休 / 休日出勤 (法定)')
+  })
+
+  it('leaves を持たない日 (theearth 由来) は備考が空のまま', () => {
+    expect(buildTimecardTable([day({ day: 1 })], 2026, 6)[0]!.note).toBe('')
+  })
+})
+
+describe('countWorkKinds — 打刻エラーと休暇 (Refs #433)', () => {
+  it('打刻エラーは他のどの区分にも入れず、日数と分を別に数える', () => {
+    const counts = countWorkKinds([
+      day({ day: 1 }),
+      day({ day: 8, isRestDay: true, punchErrorMinutes: 2138 }),
+      day({ day: 25, isRestDay: true, punchErrorMinutes: 2194 }),
+    ])
+    expect(counts).toMatchObject({
+      normal: 1, overtime: 0, holidayWork: 0, voluntary: 0, voluntaryMinutes: 0,
+      punchError: 2, punchErrorMinutes: 2138 + 2194,
+    })
+  })
+
+  it('打刻エラーの日に休日区分が付いていても休日出勤に数えない', () => {
+    const counts = countWorkKinds([day({ day: 7, holidayKind: 'legal', isRestDay: true, punchErrorMinutes: 2000 })])
+    expect(counts).toMatchObject({ punchError: 1, holidayWork: 0, voluntary: 0 })
+  })
+
+  it('休暇を worker 側と同じ軸で数える (公休 / 有休 / 欠勤、半休は 0.5)', () => {
+    const counts = countWorkKinds([
+      day({ day: 1, isRestDay: true, leaves: ['公休'] }),
+      day({ day: 2, isRestDay: true, leaves: ['泊休'] }),
+      day({ day: 3, isRestDay: true, leaves: ['指休'] }),
+      day({ day: 4, isRestDay: true, leaves: ['有休'] }),
+      day({ day: 5, isRestDay: true, leaves: ['前休'] }),
+      day({ day: 6, isRestDay: true, leaves: ['後休'] }),
+      day({ day: 9, isRestDay: true, leaves: ['欠勤'] }),
+    ])
+    expect(counts).toMatchObject({ publicHoliday: 3, paidLeave: 2, absence: 1 })
+  })
+
+  it('カウント対象外の区分 (短時・仮乗務) は数えない', () => {
+    const counts = countWorkKinds([day({ day: 1, isRestDay: true, leaves: ['短時', '仮乗務'] })])
+    expect(counts).toMatchObject({ publicHoliday: 0, paidLeave: 0, absence: 0 })
+  })
+
+  it('打刻のある日に付いた休暇 (遅刻) も数え、勤務区分は通常のまま', () => {
+    const counts = countWorkKinds([day({ day: 1, leaves: ['遅刻'] })])
+    expect(counts).toMatchObject({ normal: 1, publicHoliday: 0, paidLeave: 0, absence: 0 })
   })
 })
