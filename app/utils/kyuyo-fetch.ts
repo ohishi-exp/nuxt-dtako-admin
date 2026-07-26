@@ -210,6 +210,9 @@ export function payrollToParsedSalary(
       amounts,
       reportedTotal: row.totals?.soshikyu ?? null,
       rates: { base: row.base_rate, overtime: row.overtime_rate },
+      // 給与DB は支給項目 (MONEY 列) しか返さないので勤怠日数は空。貼り付け CSV の
+      // 【勤怠】セクション経由でのみ入る (Refs #433)
+      attendance: {},
     })
   }
 

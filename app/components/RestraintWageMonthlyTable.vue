@@ -10,6 +10,16 @@ defineProps<{
   rows: WageReportRow[]
   expandWage: boolean
 }>()
+
+/**
+ * 日数の表示 (Refs #433)。**0 も「-」にする** — 休暇データを持たない
+ * デジタコ由来の行 (undefined) と「その月は 0 日だった」を、この列では区別しても
+ * 意味がないため。半休で 0.5 が出るので小数は 1 桁まで残す。
+ */
+function fmtDays(n: number | undefined): string {
+  if (!n) return '-'
+  return Number.isInteger(n) ? String(n) : n.toFixed(1)
+}
 </script>
 
 <template>
@@ -27,6 +37,12 @@ defineProps<{
           <th class="px-1.5 py-1.5 text-right">当月<br>超過</th>
           <th class="px-1.5 py-1.5 text-right">15h超<br>日数</th>
           <th class="px-1.5 py-1.5 text-right">平均運転<br>9h超</th>
+          <!-- 勤怠 (Refs #433)。打刻から数えた日数なのでタイムカード由来の行にだけ入る。
+               デジタコ由来の乗務員は休暇データを持たないので「-」 -->
+          <th class="px-1.5 py-1.5 text-right kintai-col" title="打刻から数えた公休日数 (公休 / 泊休 / 積置泊休 / 指休)。デジタコ由来の乗務員は休暇データを持たないため「-」">公休</th>
+          <th class="px-1.5 py-1.5 text-right kintai-col" title="打刻から数えた有休日数 (有休 = 1.0、前休 / 後休 = 0.5)">有休</th>
+          <th class="px-1.5 py-1.5 text-right kintai-col" title="打刻から数えた欠勤日数">欠勤</th>
+          <th class="px-1.5 py-1.5 text-right kintai-col" title="打刻が翌日にまたがっていた日数 (終業の押し忘れ)。この日の時間は賃金計算から外れている">打刻<br>エラー</th>
           <th class="px-1.5 py-1.5 text-right">実働</th>
           <th class="px-1.5 py-1.5 text-right">時間外</th>
           <th class="px-1.5 py-1.5 text-right">深夜</th>
@@ -54,6 +70,15 @@ defineProps<{
           </td>
           <td class="px-1.5 py-1 text-right">{{ row.summary.over15hDays }}</td>
           <td class="px-1.5 py-1 text-right">{{ row.summary.avgDriving9hOverCount }}</td>
+          <td class="px-1.5 py-1 text-right kintai-col">{{ fmtDays(row.summary.leaveCounts?.publicHoliday) }}</td>
+          <td class="px-1.5 py-1 text-right kintai-col">{{ fmtDays(row.summary.leaveCounts?.paidLeave) }}</td>
+          <td class="px-1.5 py-1 text-right kintai-col">{{ fmtDays(row.summary.leaveCounts?.absence) }}</td>
+          <td
+            class="px-1.5 py-1 text-right kintai-col"
+            :class="(row.summary.punchErrorDays ?? 0) > 0 ? 'text-red-600 font-bold dark:text-red-400' : ''"
+          >
+            {{ fmtDays(row.summary.punchErrorDays) }}
+          </td>
           <td class="px-1.5 py-1 text-right">{{ fmtMinutes(row.summary.workingMinutes) }}</td>
           <td class="px-1.5 py-1 text-right">{{ fmtMinutes(row.summary.overtimeMinutes) }}</td>
           <td class="px-1.5 py-1 text-right">{{ fmtMinutes(row.summary.nightMinutes) }}</td>

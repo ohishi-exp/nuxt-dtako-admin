@@ -52,6 +52,18 @@ export interface RestraintDriverSummary {
   over15hDays: number
   avgDriving9hOverCount: number
   days: RestraintSummaryDay[]
+  /** 打刻エラーの日数。タイムカード由来のみ (Refs #433)。 */
+  punchErrorDays?: number
+  /** 休暇の日数集計。タイムカード由来のみ。半休 (前休・後休) があるので
+   * `paidLeave` は整数とは限らない (Refs #433)。 */
+  leaveCounts?: {
+    publicHoliday: number
+    paidLeave: number
+    absence: number
+    specialLeave: number
+    late: number
+    earlyLeave: number
+  }
 }
 
 export type WageCategoryKey =

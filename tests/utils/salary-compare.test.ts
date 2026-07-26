@@ -333,6 +333,10 @@ function reportRow(
     /** 給与区分 (Refs #429)。**既定は日給 (2)** — 従来の `単価 × 稼働日数` を
      * 前提にしている既存ケースの意図をそのまま保つため。 */
     payKubun?: number | null
+    /** 休暇の日数集計 (Refs #433)。タイムカード由来の行だけが持つ。 */
+    leaveCounts?: WageReportRow['summary']['leaveCounts']
+    /** 打刻エラーの日数 (Refs #433)。 */
+    punchErrorDays?: number
   } = {},
 ): WageReportRow {
   return {
@@ -345,6 +349,8 @@ function reportRow(
       overtimeNightMinutes: over.overtimeNightMinutes === undefined ? 0 : over.overtimeNightMinutes,
       breakMinutes: over.breakMinutes === undefined ? 0 : over.breakMinutes,
       drivingMinutes: over.drivingMinutes === undefined ? 0 : over.drivingMinutes,
+      leaveCounts: over.leaveCounts,
+      punchErrorDays: over.punchErrorDays,
     },
     pay_kubun: over.payKubun === undefined ? 2 : over.payKubun,
     // 残業(最低賃金) 列の素材 (wage-report の wage 側)。単体テストでは最低賃金
@@ -1012,5 +1018,109 @@ describe('compareSalaryMonth — 複数会社の合算 (Refs #403)', () => {
       { entries: { '1649|鵜瀬裕一': '1619', '大石運輸倉庫|1644|鵜瀬裕一': '1619' } },
     )
     expect(out.warnings[0]).toContain('会社未設定:1649')
+  })
+})
+
+describe('parseSalaryCsv — 【 勤怠 】セクション (Refs #433)', () => {
+  const HEADER = '社員コード,社員名,給与・賞与名,【 勤怠 】,出勤日数,公休日数,有休日数,欠勤日数,【 支給 】,基本給,支給合計額,【 補助 】,基本単価'
+
+  it('勤怠の日数を項目名つきで取り込み、支給項目には混ぜない', () => {
+    const parsed = parseSalaryCsv(`${HEADER}\n1065,佐藤　泰弘,2026年 7月,,21,5,0,0,,220000,220000,,11000`)
+    expect(parsed.rows[0]!.attendance).toEqual({ 出勤日数: 21, 公休日数: 5, 有休日数: 0, 欠勤日数: 0 })
+    expect(parsed.itemLabels).toEqual(['基本給'])
+  })
+
+  it('半休の 0.5 も数値として読む', () => {
+    const parsed = parseSalaryCsv(`${HEADER}\n1621,西山　珠里,2026年 7月,,20,4,3.5,0,,180000,180000,,9000`)
+    expect(parsed.rows[0]!.attendance!['有休日数']).toBe(3.5)
+  })
+
+  it('数値でない欄は載せない (「0 日」と「欄が無い」を混同しない)', () => {
+    const parsed = parseSalaryCsv(`${HEADER}\n1065,佐藤　泰弘,2026年 7月,,21,,-,0,,220000,220000,,11000`)
+    const a = parsed.rows[0]!.attendance!
+    expect(a['出勤日数']).toBe(21)
+    // 空欄は 0 として読む (給与明細の「0 日」と同じ扱い)
+    expect(a['公休日数']).toBe(0)
+    // '-' は数値でないので項目ごと落とす
+    expect('有休日数' in a).toBe(false)
+  })
+
+  it('【 勤怠 】セクションが無い様式でも壊れない (空オブジェクト)', () => {
+    const parsed = parseSalaryCsv(
+      '社員コード,社員名,給与・賞与名,【 支給 】,基本給,支給合計額\n1065,佐藤　泰弘,2026年 7月,,220000,220000',
+    )
+    expect(parsed.rows[0]!.attendance).toEqual({})
+  })
+
+  it('勤怠の空セル (様式のパディング) は項目にしない', () => {
+    const parsed = parseSalaryCsv([
+      '社員コード,社員名,給与・賞与名,【 勤怠 】,出勤日数,,【 支給 】,基本給,支給合計額',
+      '1065,佐藤　泰弘,2026年 7月,,21,,,220000,220000',
+    ].join('\n'))
+    expect(parsed.rows[0]!.attendance).toEqual({ 出勤日数: 21 })
+  })
+
+  it('行が勤怠列より短くても落ちない (欠けた欄は 0)', () => {
+    const parsed = parseSalaryCsv([
+      '社員コード,社員名,給与・賞与名,【 勤怠 】,出勤日数,公休日数,【 支給 】,基本給,支給合計額',
+      '1065,佐藤　泰弘,2026年 7月,,21',
+    ].join('\n'))
+    expect(parsed.rows[0]!.attendance).toEqual({ 出勤日数: 21, 公休日数: 0 })
+  })
+
+  it('実データ様式 (2026) の勤怠も読める', () => {
+    const parsed = parseSalaryCsv(CSV_2026)
+    expect(parsed.rows[0]!.attendance).toEqual({ 出勤日数: 22, 残業時間: 91 })
+  })
+})
+
+describe('compareSalaryMonth — 勤怠日数の突合 (Refs #433)', () => {
+  it('計算側は summary の leaveCounts / punchErrorDays をそのまま使う', () => {
+    const result = compareSalaryMonth(
+      [csvRow({
+        cdKey: '1065',
+        driverCd: '1065',
+        driverName: '佐藤 泰弘',
+        attendance: { 出勤日数: 22, 公休日数: 5, 欠勤日数: 0 },
+      })],
+      [reportRow('1065', '佐藤 泰弘', {
+        workDays: 21,
+        leaveCounts: { publicHoliday: 5, paidLeave: 1.5, absence: 0, specialLeave: 0, late: 0, earlyLeave: 0 },
+        punchErrorDays: 2,
+      })],
+      { items: {} },
+    )
+    expect(result.rows[0]!.attendanceDays).toEqual({
+      sys: { work: 21, publicHoliday: 5, paidLeave: 1.5, absence: 0, punchError: 2 },
+      csv: { work: 22, publicHoliday: 5, absence: 0 },
+    })
+  })
+
+  it('デジタコ由来の行 (leaveCounts なし) は休暇 0・打刻エラー 0', () => {
+    const result = compareSalaryMonth(
+      [csvRow({ cdKey: '1029', driverCd: '1029', driverName: '冨田 竜' })],
+      [reportRow('1029', '冨田 竜', { workDays: 18 })],
+      { items: {} },
+    )
+    expect(result.rows[0]!.attendanceDays.sys).toEqual({
+      work: 18, publicHoliday: 0, paidLeave: 0, absence: 0, punchError: 0,
+    })
+    expect(result.rows[0]!.attendanceDays.csv).toEqual({})
+  })
+
+  it('給与DB 由来 (attendance 未設定) でも落ちない', () => {
+    const row = csvRow({ cdKey: '1065', driverCd: '1065', driverName: '佐藤 泰弘' })
+    delete (row as { attendance?: unknown }).attendance
+    const result = compareSalaryMonth([row], [reportRow('1065', '佐藤 泰弘', { workDays: 21 })], { items: {} })
+    expect(result.rows[0]!.attendanceDays.csv).toEqual({})
+  })
+
+  it('給与明細に無い軸だけが欠ける (出勤だけある様式)', () => {
+    const result = compareSalaryMonth(
+      [csvRow({ cdKey: '1065', driverCd: '1065', driverName: '佐藤 泰弘', attendance: { 出勤日数: 22 } })],
+      [reportRow('1065', '佐藤 泰弘', { workDays: 21 })],
+      { items: {} },
+    )
+    expect(result.rows[0]!.attendanceDays.csv).toEqual({ work: 22 })
   })
 })

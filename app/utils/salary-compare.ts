@@ -64,6 +64,17 @@ export interface SalaryCsvRow {
   /** 【 補助 】セクションの単価。base = 基本単価 (日額)、overtime = 残業単価 (時給)。
    * 列が無い・0 の場合は null (その行の計算列は出せない)。 */
   rates: { base: number | null, overtime: number | null }
+  /**
+   * 【 勤怠 】セクションの日数 (項目名 → 値)。出勤日数・公休日数・有休日数・欠勤日数 等
+   * (Refs #433)。**セクションが無ければ空オブジェクト**。
+   *
+   * 給与DB 経由 (`payrollToParsedSalary`) では常に空 — rust-ichibanboshi の
+   * `/api/kyuyo/payroll` が支給項目 (MONEY 列) しか返さないため。
+   *
+   * **optional** — この項目より前に取り込んでタブに残っている解析結果 (画面は
+   * 取り込み結果をタブを閉じるまで保持する) にも無いので、読む側は `?? {}` する。
+   */
+  attendance?: Record<string, number>
 }
 
 export interface ParsedSalaryCsv {
@@ -187,6 +198,20 @@ export function parseSalaryCsv(text: string, company = ''): ParsedSalaryCsv {
   const baseRateCol = header.indexOf('基本単価')
   const overtimeRateCol = header.indexOf('残業単価')
 
+  // 【 勤怠 】セクションの日数列 (出勤日数・公休日数 等、Refs #433)。
+  // 支給と同じ作法で見出しの次〜次セクションの手前を拾う。**無くてもよい** —
+  // 様式によっては勤怠を出さない設定があるので、その場合は空のまま進む
+  const attendanceCols = new Map<string, number>()
+  for (let i = 0; i < header.length; i++) {
+    if (sectionName(header[i]!) !== '勤怠') continue
+    for (let j = i + 1; j < header.length && sectionName(header[j]!) === null; j++) {
+      // 空セル (様式のパディング) は項目にしない。同名列が 2 つ来る想定は無い
+      // (勤怠は 1 項目 1 列) ので、来たら後勝ちで構わない
+      if (header[j]!) attendanceCols.set(header[j]!, j)
+    }
+    break
+  }
+
   // 支給項目列: 合計系 (支給合計額・課税支給額) は項目から除外し、支給合計額は突合用に保持
   const TOTAL_LABELS = new Set(['支給合計額', '課税支給額'])
   let totalIdx = -1
@@ -258,6 +283,14 @@ export function parseSalaryCsv(text: string, company = ''): ParsedSalaryCsv {
       return v !== null && v > 0 ? v : null
     }
 
+    // 勤怠の日数。空欄・非数値は「その項目は無い」として載せない — 0 を入れると
+    // 「公休 0 日」と「公休の欄が無い」が画面で区別できなくなる
+    const attendance: Record<string, number> = {}
+    for (const [label, col] of attendanceCols) {
+      const v = parseAmount(cells[col] ?? '')
+      if (v !== null) attendance[label] = v
+    }
+
     months.add(month)
     rows.push({
       driverCd: cd,
@@ -269,6 +302,7 @@ export function parseSalaryCsv(text: string, company = ''): ParsedSalaryCsv {
       amounts,
       reportedTotal,
       rates: { base: rateAt(baseRateCol), overtime: rateAt(overtimeRateCol) },
+      attendance,
     })
   }
 
@@ -462,6 +496,57 @@ export interface SalaryComparisonRow {
    * 「最低賃金チェック」タブが単価マスタ設定の事前チェックなのに対し、
    * こちらは支払い実績の事後チェック (Refs #268)。 */
   diffCsvVsMinWageOvertime: number | null
+  /**
+   * 勤怠日数の突合 (Refs #433)。`sys` は打刻から数えた日数
+   * (`countWorkKinds` 相当、タイムカード由来の行だけ非ゼロ)、`csv` は給与明細の
+   * 【 勤怠 】セクションの値 (欄が無ければ undefined)。
+   *
+   * **差の判定はしない** — 事務員は実残業をつけていない運用があるように、
+   * 日数の付け方も運用差がある。並べて見せるのが目的で、異常扱いはしない
+   * (Refs #424 の「差は出るのが前提」と同じ方針)。
+   */
+  attendanceDays: {
+    sys: { work: number, publicHoliday: number, paidLeave: number, absence: number, punchError: number }
+    csv: { work?: number, publicHoliday?: number, paidLeave?: number, absence?: number }
+  }
+}
+
+/** 給与明細の【 勤怠 】項目名 → 突合する軸 (Refs #433)。給与大臣の様式に合わせた
+ * 名前で、無い様式もあるので**引けなければ undefined のまま**にする。 */
+const CSV_ATTENDANCE_LABELS = {
+  work: '出勤日数',
+  publicHoliday: '公休日数',
+  paidLeave: '有休日数',
+  absence: '欠勤日数',
+} as const
+
+/**
+ * 勤怠日数の突合セル (Refs #433)。
+ *
+ * `sys` の休暇日数は**サマリの `leaveCounts`** (worker が `countLeaves` で出した値) を
+ * そのまま使う — 画面側で日別から数え直すと worker と規則がずれた時に静かに食い違う。
+ * theearth 由来の行は `leaveCounts` を持たないので 0 になる (打刻が無いので当然)。
+ */
+function buildAttendanceDays(
+  report: WageReportRow,
+  csv: SalaryCsvRow,
+): SalaryComparisonRow['attendanceDays'] {
+  const leaves = report.summary.leaveCounts
+  const csvDays: SalaryComparisonRow['attendanceDays']['csv'] = {}
+  for (const [key, label] of Object.entries(CSV_ATTENDANCE_LABELS)) {
+    const v = (csv.attendance ?? {})[label]
+    if (v !== undefined) csvDays[key as keyof typeof CSV_ATTENDANCE_LABELS] = v
+  }
+  return {
+    sys: {
+      work: report.summary.workDays,
+      publicHoliday: leaves?.publicHoliday ?? 0,
+      paidLeave: leaves?.paidLeave ?? 0,
+      absence: leaves?.absence ?? 0,
+      punchError: report.summary.punchErrorDays ?? 0,
+    },
+    csv: csvDays,
+  }
 }
 
 export interface SalaryComparison {
@@ -813,6 +898,7 @@ export function compareSalaryMonth(
       minWageOvertimeMinutes,
       minWageOvertimePay,
       diffCsvVsMinWageOvertime: minWageOvertimePay === null ? null : overtime - minWageOvertimePay,
+      attendanceDays: buildAttendanceDays(report, csv),
     })
   }
 
