@@ -149,7 +149,9 @@ import {
   stableTimecardSummaryBody,
   summarizeTimecardMonth,
   type TimecardDailyRow,
+  type WageReportSource,
 } from "./timecard-summary";
+import { buildRestraintD1Statements, type RestraintD1Entry } from "./restraint-d1";
 import {
   appendHistoryJsonl,
   downloadRestraintCsv,
@@ -2635,6 +2637,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           new TextEncoder().encode(rawText).byteLength,
         ),
       );
+      const d1Entries: RestraintD1Entry[] = [];
       for (const summary of summaries) {
         const wrote = await this.putVersionedR2(
           bucket,
@@ -2648,7 +2651,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           summariesWrote += 1;
           await this.pruneRestraintVersions(bucket, paths.summaryDir(summary.driverCd));
         }
+        d1Entries.push({
+          kind: "summary",
+          summary,
+          meta: { sha256: wrote.sha256, fetchedAt: wrote.fetchedAt, lastVerifiedAt: ts },
+        });
       }
+      await this.upsertRestraintSummariesD1(record.compId, "timecard", ym, d1Entries);
     } catch (err) {
       console.error(JSON.stringify({ kintai_fetch: "r2-error", error: describeUnknownError(err) }));
       return dvrJsonError(502, "勤怠データの保存に失敗しました");
@@ -2974,6 +2983,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     let summariesWritten = 0;
     let newVersions = 0;
     const errors: string[] = [];
+    const d1Entries: RestraintD1Entry[] = [];
     for (const meta of latests) {
       const obj = await bucket.get(meta.key);
       if (!obj) continue;
@@ -2999,6 +3009,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
             newVersions++;
             await this.pruneRestraintVersions(bucket, paths.summaryDir(summary.driverCd));
           }
+          d1Entries.push({
+            kind: "summary",
+            summary,
+            meta: { sha256: wrote.sha256, fetchedAt: wrote.fetchedAt, lastVerifiedAt: ts },
+          });
         }
         csvCount++;
       } catch (err) {
@@ -3006,6 +3021,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         console.error(JSON.stringify({ restraint_resummarize: "error", key: meta.key, error: describeUnknownError(err) }));
       }
     }
+    await this.upsertRestraintSummariesD1(record.compId, "theearth", parsed.ym, d1Entries);
     return Response.json({
       month: parsed.ym,
       csv_processed: csvCount,
@@ -3133,7 +3149,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     body: ArrayBuffer | string,
     contentType: string,
     fetchedAt: string,
-  ): Promise<{ changed: boolean; sha256: string }> {
+  ): Promise<{ changed: boolean; sha256: string; fetchedAt: string }> {
     const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body;
     const hash = await this.sha256Hex(bytes);
     const latest = await bucket.head(latestKey);
@@ -3142,7 +3158,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         httpMetadata: { contentType },
         customMetadata: { ...latest.customMetadata, lastVerifiedAt: fetchedAt },
       });
-      return { changed: false, sha256: hash };
+      // 内容不変なら fetchedAt は据え置き (D1 写しにも同じ値を流す)
+      return { changed: false, sha256: hash, fetchedAt: latest.customMetadata?.fetchedAt ?? fetchedAt };
     }
     const options = {
       httpMetadata: { contentType },
@@ -3150,7 +3167,50 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     };
     await bucket.put(latestKey, bytes, options);
     await bucket.put(versionKey, bytes, options);
-    return { changed: true, sha256: hash };
+    return { changed: true, sha256: hash, fetchedAt };
+  }
+
+  /** サマリ写しを D1 (restraint_driver_month + restraint_daily) へ upsert する
+   * (Refs #452 PR-A)。best-effort — D1 未 binding・書き込み失敗でも取り込み自体は
+   * 成功させる (R2 が正。欠けた分は PR-B のバックフィルで追い付ける)。
+   *
+   * batch は 1 乗務員分のステートメントを跨いで分割しない (DELETE→INSERT の
+   * 総入れ替えが途中で切れると日別行が欠けたまま残るため)。 */
+  private async upsertRestraintSummariesD1(
+    compId: string,
+    source: WageReportSource,
+    ym: string,
+    entries: RestraintD1Entry[],
+  ): Promise<void> {
+    const db = this.env.DTAKO_DB;
+    if (!db || entries.length === 0) return;
+    try {
+      // 1 乗務員 ≈ 8 statement (delete + month + 日別 6 行 ×6)。乗務員単位を保った
+      // まま 1 batch ≤ 40 statement 程度に畳む
+      let buf: Array<{ sql: string; params: Array<string | number | null> }> = [];
+      const flush = async () => {
+        if (buf.length === 0) return;
+        await db.batch(buf.map((s) => db.prepare(s.sql).bind(...s.params)));
+        buf = [];
+      };
+      for (const entry of entries) {
+        const statements = buildRestraintD1Statements(compId, source, ym, [entry]);
+        if (buf.length > 0 && buf.length + statements.length > 40) await flush();
+        buf.push(...statements);
+      }
+      await flush();
+    } catch (err) {
+      console.error(
+        JSON.stringify({
+          restraint_d1: "error",
+          comp_id: compId,
+          source,
+          ym,
+          entries: entries.length,
+          error: describeUnknownError(err),
+        }),
+      );
+    }
   }
 
   /** 確認履歴 (history.jsonl) に 1 行追記する。「unchanged」「no-data」も残す —
@@ -3218,6 +3278,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         ),
       );
       let summariesWrote = 0;
+      const d1Entries: RestraintD1Entry[] = [];
       for (const summary of summaries) {
         const body = stableSummaryBody(compId, params.year, params.month, summary);
         const wrote = await this.putVersionedR2(
@@ -3232,7 +3293,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           summariesWrote++;
           await this.pruneRestraintVersions(bucket, paths.summaryDir(summary.driverCd));
         }
+        d1Entries.push({
+          kind: "summary",
+          summary,
+          meta: { sha256: wrote.sha256, fetchedAt: wrote.fetchedAt, lastVerifiedAt: ts },
+        });
       }
+      const ym = `${params.year}-${String(params.month).padStart(2, "0")}`;
+      await this.upsertRestraintSummariesD1(compId, "theearth", ym, d1Entries);
       console.log(
         JSON.stringify({
           restraint_r2: "done",
@@ -3279,6 +3347,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           ts,
         );
         if (wrote.changed) await this.pruneRestraintVersions(bucket, paths.summaryDir(params.driverFrom));
+        const ym = `${params.year}-${String(params.month).padStart(2, "0")}`;
+        await this.upsertRestraintSummariesD1(compId, "theearth", ym, [
+          {
+            kind: "no-data",
+            driverCd: params.driverFrom,
+            meta: { sha256: wrote.sha256, fetchedAt: wrote.fetchedAt, lastVerifiedAt: ts },
+          },
+        ]);
       }
       console.log(JSON.stringify({ restraint_r2: "no-data", key: paths.csvHistory }));
     } catch (err) {
