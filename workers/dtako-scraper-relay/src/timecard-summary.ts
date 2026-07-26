@@ -26,16 +26,20 @@
  * 時間外深夜に回す。`classifyMonth` の契約に合わせ、深夜 (通常) と時間外深夜は
  * **排他** (`statutory = 実働 − 時間外 − 時間外深夜`) にする。
  *
- * ## 休日 — 事務職と非事務職で扱いが違う (Refs #433)
+ * ## 休日 — 夜勤者・事務職・非事務職で扱いが違う (Refs #433)
  *
  * - **承認済み休日出勤** (`holiday_work_approvals` に日付がある) … 職種によらず
  *   通常どおり時間を出す (法定 1.35 / 法定外 1.25)
- * - **事務職の未承認の休日打刻 = 自主出勤** … `isRestDay: true` + 各時間 0 で出し、
- *   実働分は `voluntaryMinutes` に退避する。既存の賃金ロジックに手を入れずに
+ * - **夜勤者の未承認の休日打刻** … 自主出勤にも休日出勤にもせず、`holidayKind` を
+ *   `weekday` へ落として**通常計上する**。夜勤ローテーションでは日曜も祝日も通常の
+ *   勤務日で、曜日が勤務の性質を表さないため。**職種は問わない** (2026-07-26
+ *   ユーザー決定 — 同じ日曜夜勤を事務職と作業員で違う単価にしない)
+ * - **事務職 (非夜勤) の未承認の休日打刻 = 自主出勤** … `isRestDay: true` + 各時間 0
+ *   で出し、実働分は `voluntaryMinutes` に退避する。既存の賃金ロジックに手を入れずに
  *   「残業としてつけない」を実現でき、時間は画面と CSV に残る
- * - **非事務職の未承認の休日打刻** … 自主出勤にせず**通常どおり計上する**。ただし
- *   **法定外休日 (祝日・指定休) の割増はつけない** — `holidayKind` を `weekday` へ
- *   落として平日として計算する (2026-07-26 ユーザー決定)。法定休日 (日曜) は
+ * - **非事務職 (非夜勤) の未承認の休日打刻** … 自主出勤にせず**通常どおり計上する**。
+ *   ただし**法定外休日 (祝日・指定休) の割増はつけない** — `holidayKind` を `weekday`
+ *   へ落として平日として計算する (2026-07-26 ユーザー決定)。法定休日 (日曜) は
  *   未承認でも 1.35 を付ける (労基法 35 条の休日労働そのものなので)
  *
  * ## 打刻エラー (Refs #433)
@@ -423,7 +427,8 @@ export interface TimecardDayOptions {
   approved: boolean;
   /** 事務職か (`isClericalJob`)。自主出勤の隔離と打刻エラーの判定はここが true の人だけ。 */
   clerical: boolean;
-  /** 夜勤者か (`night_shift_workers`)。true なら日跨ぎを打刻エラーにしない。 */
+  /** 夜勤者か (`night_shift_workers`)。true なら日跨ぎを打刻エラーにせず、
+   * 未承認の休日打刻も自主出勤にせず平日として通常計上する (職種は問わない)。 */
   nightShift: boolean;
 }
 
@@ -493,17 +498,23 @@ export function summarizeTimecardDay(row: TimecardDailyRow, opts: TimecardDayOpt
     return restDay(dayNo, row.holiday, sessions, leaves, { punchErrorMinutes: restraintMinutes });
   }
 
-  // 事務職の未承認の休日打刻は自主出勤 — 賃金計算には一切入れず、時間だけ残す
-  if (opts.clerical && row.holiday !== "weekday" && !opts.approved) {
+  // 事務職 (非夜勤) の未承認の休日打刻は自主出勤 — 賃金計算には一切入れず、時間だけ残す
+  if (opts.clerical && !opts.nightShift && row.holiday !== "weekday" && !opts.approved) {
     return restDay(dayNo, row.holiday, sessions, leaves, { voluntaryMinutes: workingMinutes });
   }
 
-  // 非事務職の未承認の法定外休日 (祝日・指定休) は平日として計算する = 1.25 を付けない
-  // (2026-07-26 ユーザー決定)。法定休日 (日曜) は未承認でも 1.35 のまま。
-  // classifyMonth は日別行の holidayKind を曜日判定より優先するので、ここで落とせば
-  // 下流のロジックは無変更で済む
+  // 未承認の休日打刻を平日として計算する = 割増を付けない (classifyMonth は日別行の
+  // holidayKind を曜日判定より優先するので、ここで落とせば下流は無変更で済む):
+  //
+  // - **夜勤者はすべての休日** … 夜勤ローテーションでは日曜も祝日も通常の勤務日で、
+  //   曜日は勤務の性質を表さない。**職種は問わない** (2026-07-26 ユーザー決定 —
+  //   同じ日曜夜勤を事務職と作業員で違う単価にしない)
+  // - **非事務職は法定外休日 (祝日・指定休) のみ** … 法定休日 (日曜) は未承認でも
+  //   1.35 のまま (労基法 35 条の休日労働そのものなので)
   const holidayKind: TimecardHolidayKind =
-    row.holiday === "non_legal" && !opts.approved && !opts.clerical ? "weekday" : row.holiday;
+    !opts.approved && (opts.nightShift || (row.holiday === "non_legal" && !opts.clerical))
+      ? "weekday"
+      : row.holiday;
 
   const nightWindows = dailyWindows(span, NIGHT_FROM_HOUR, NIGHT_TO_HOUR);
 

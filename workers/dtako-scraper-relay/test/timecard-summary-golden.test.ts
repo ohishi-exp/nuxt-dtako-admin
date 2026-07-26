@@ -13,7 +13,8 @@
 //   1621 西山　珠里 … 非事務職。中抜けなし・休日出勤なしの素直な形
 //   1663 松山　裕己 … 一般管理事務。中抜け 1 日 (昼をまたがない = 両方引く)
 //   1670 松永　寿乃 … 一般管理事務。中抜け 1 日 (昼をまたぐ = 二重控除してはいけない)
-//   1706 山根　幸数 … 一般管理事務・**夜勤者**。日跨ぎ 15 日だがエラーにしない (Refs #433)
+//   1706 山根　幸数 … 一般管理事務・**夜勤者**。日跨ぎ 15 日だがエラーにせず、日曜の
+//                     未承認出勤 2 日も自主出勤にせず通常計上する (Refs #433)
 import { describe, expect, it } from 'vitest'
 import { isClericalJob, summarizeTimecardMonth, type TimecardDailyRow } from '../src/timecard-summary'
 import daily from '../../../tests/fixtures/restraint-wage/timecard-daily-2026-06.json'
@@ -23,7 +24,7 @@ import golden from '../../../tests/fixtures/restraint-wage/golden/timecard-summa
 const DAILY_WORK_MINUTES = 480
 
 /** 承認済み休日出勤。1029 が出勤した日曜 (6/14・6/21・6/28) のうち **6/14 だけ**を
- * 承認し、残り 2 日が自主出勤 (事務職) / 休日出勤 (非事務職) へ分かれることを固定する。 */
+ * 承認し、承認あり / 未承認 (非事務職なので 1.35 で計上) の分岐を固定する。 */
 const APPROVED = new Set(['1029|2026-06-14'])
 
 /** 本番 D1 の `employee_attrs.job_name` 実測値。`isClericalJob` に通して事務職判定にする。 */
@@ -118,16 +119,24 @@ describe('timecard-summary golden (実機 fixture 2026-06)', () => {
     expect(tomita.voluntaryMinutes).toBe(0)
   })
 
-  it('事務職の未承認の休日出勤は従来どおり自主出勤へ落ちる (実データ: 山根 6/14・6/28)', () => {
+  it('夜勤者の未承認の日曜出勤は自主出勤にせず通常計上する (実データ: 山根 6/14・6/28、Refs #433)', () => {
+    // 夜勤ローテーションでは日曜も通常の勤務日。割増も付けない (holidayKind = weekday)
     const yamane = result.summaries.find(s => s.driverCd === '1706')!
-    const voluntary = yamane.days.filter(d => d.isRestDay && d.voluntaryMinutes > 0)
-    expect(voluntary.map(d => d.day)).toEqual([14, 28])
-    for (const d of voluntary) {
-      expect(d.workingMinutes).toBe(0)
-      // 自主出勤の日も打刻は残す
-      expect(d.sessions.length).toBeGreaterThan(0)
+    const sundays = yamane.days.filter(d => d.day === 14 || d.day === 28)
+    expect(sundays.length).toBe(2)
+    for (const d of sundays) {
+      expect(d.isRestDay).toBe(false)
+      expect(d.voluntaryMinutes).toBe(0)
+      expect(d.holidayKind).toBe('weekday')
+      expect(d.workingMinutes).toBeGreaterThan(0)
     }
-    expect(yamane.voluntaryMinutes).toBe(voluntary.reduce((s, d) => s + d.voluntaryMinutes, 0))
+    expect(yamane.voluntaryMinutes).toBe(0)
+  })
+
+  it('この fixture に自主出勤は 1 件も出ない (休日打刻を持つのが 1029 非事務職 と 1706 夜勤者だけのため)', () => {
+    // 自主出勤 = 事務職**かつ非夜勤**の未承認休日打刻。実データ 6 名にその組み合わせが
+    // 居ないので golden では 0 になる — 隔離そのものの検証は timecard-summary.test.ts 側
+    expect(result.summaries.every(s => s.voluntaryMinutes === 0)).toBe(true)
   })
 
   it('承認済みの日曜出勤は勤務日として時間が出る', () => {
@@ -157,11 +166,11 @@ describe('timecard-summary golden (実機 fixture 2026-06)', () => {
   it('夜勤者の日跨ぎは 15 日すべてエラーにしない (実データ: 山根)', () => {
     const yamane = result.summaries.find(s => s.driverCd === '1706')!
     expect(yamane.punchErrorDays).toBe(0)
-    // 15 日すべて日跨ぎ (19:43 → 翌 00:02)。うち 13 日が勤務日、
-    // 残り 2 日は日曜の未承認出勤なので自主出勤 (打刻エラーではない)
+    // 15 日すべて日跨ぎ (19:43 → 翌 00:02)。日曜の 2 日も自主出勤にせず計上するので
+    // 15 日すべてが勤務日 (Refs #433)
     expect(yamane.days.length).toBe(15)
     expect(yamane.days.every(d => d.sessions.some(s => s.start.slice(0, 10) !== s.end.slice(0, 10)))).toBe(true)
-    expect(yamane.workDays).toBe(13)
+    expect(yamane.workDays).toBe(15)
   })
 
   it('非事務職 (乗務員) の日跨ぎは 1 件もエラーにならない', () => {

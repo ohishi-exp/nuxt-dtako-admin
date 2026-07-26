@@ -51,14 +51,14 @@ function row(
 }
 
 /**
- * 既定の日別 opts = **事務職かつ夜勤者**・承認なし。
+ * 既定の日別 opts = **事務職かつ非夜勤**・承認なし = 自主出勤の隔離が効く組み合わせ。
  *
- * `clerical: true` は自主出勤の隔離 (元からの挙動) を効かせるため。
- * `nightShift: true` にしてあるのは、既存ケースに日跨ぎ勤務の時間計算
- * (深夜帯・恒等式) が多く、打刻エラーの隔離が先に挟まると計算そのものを
- * 検証できなくなるため。打刻エラーは専用の describe で見る。
+ * 夜勤者は打刻エラーだけでなく**自主出勤の隔離も外れる** (Refs #433) ので、
+ * 既定を `nightShift: true` にすると休日の既存ケースが通常計上へ倒れてしまう。
+ * 日跨ぎ勤務の時間計算 (深夜帯・恒等式) を見るケースだけ、打刻エラーの隔離を
+ * 避けるために `nightShift: true` を明示する。
  */
-const NO_APPROVAL = { dailyWorkMinutes: 480, approved: false, clerical: true, nightShift: true }
+const NO_APPROVAL = { dailyWorkMinutes: 480, approved: false, clerical: true, nightShift: false }
 
 describe('timestampToSeconds', () => {
   it('秒あり・秒なし・T 区切りを読める', () => {
@@ -195,7 +195,10 @@ describe('summarizeTimecardDay — 時間外と深夜', () => {
   it('深夜帯にかかる残業は時間外深夜へ回り、深夜(通常)と排他になる', () => {
     // 08:00 → 24:00、実働 = 16h − 1h = 900 分、所定 480 → 時間外 420
     // 深夜 22:00-24:00 = 120 分。時間外は終わり側 420 分 = 17:00-24:00 なので全部含む
-    const d = summarizeTimecardDay(row('2026-06-01', [['08:00:00', '2026-06-02 00:00:00']]), NO_APPROVAL)
+    const d = summarizeTimecardDay(
+      row('2026-06-01', [['08:00:00', '2026-06-02 00:00:00']]),
+      { ...NO_APPROVAL, nightShift: true }, // 日跨ぎなので打刻エラーの隔離を外す
+    )
     expect(d.workingMinutes).toBe(900)
     expect(d.overtimeNightMinutes).toBe(120)
     expect(d.overtimeMinutes).toBe(300)
@@ -293,14 +296,14 @@ describe('summarizeTimecardDay — 壊れた入力', () => {
 })
 
 describe('summarizeTimecardMonth', () => {
-  // 既定は NO_APPROVAL と同じく「事務職かつ夜勤者」— 自主出勤の隔離は効かせつつ、
-  // 日跨ぎのケースが打刻エラーへ倒れないようにする
+  // 既定は NO_APPROVAL と同じく「事務職かつ非夜勤」= 自主出勤の隔離が効く組み合わせ
+  // (この describe に日跨ぎの行は無いので打刻エラーには倒れない)
   const opts = (approved: string[] = [], minutes: number | null = 480) => ({
     yearMonth: '2026-06',
     dailyWorkMinutesFor: () => minutes,
     approvedHolidayWork: new Set(approved),
     isClerical: () => true,
-    isNightShift: () => true,
+    isNightShift: () => false,
   })
 
   it('乗務員ごとに畳み、乗務員CD の数値順に並べる', () => {
@@ -658,6 +661,71 @@ describe('summarizeTimecardDay — 非事務職の休日打刻 (Refs #433)', () 
     expect(d.isRestDay).toBe(true)
     expect(d.holidayKind).toBe('non_legal')
     expect(d.voluntaryMinutes).toBe(480)
+  })
+})
+
+describe('summarizeTimecardDay — 夜勤者の休日打刻 (Refs #433)', () => {
+  // 実データ (2026-06): 1706 山根 (事務職・夜勤) は日曜 18:46 始業、1196 副島
+  // (作業員・夜勤) は日曜 23:45 始業。同じ日曜夜勤なので同じ扱いにする
+  const NIGHT_CLERICAL = { dailyWorkMinutes: 480, approved: false, clerical: true, nightShift: true }
+  const NIGHT_WORKER = { ...NIGHT_CLERICAL, clerical: false }
+
+  it('事務職の夜勤者は自主出勤にならず通常計上される (山根 6/14・6/28)', () => {
+    const d = summarizeTimecardDay(row('2026-06-14', [['18:46:00', '23:46:00']], 'legal'), NIGHT_CLERICAL)
+    expect(d.isRestDay).toBe(false)
+    expect(d.voluntaryMinutes).toBe(0)
+    expect(d.workingMinutes).toBe(300)
+  })
+
+  it('法定休日 (日曜) でも割増を付けない = holidayKind は weekday', () => {
+    const d = summarizeTimecardDay(row('2026-06-14', [['18:46:00', '23:46:00']], 'legal'), NIGHT_CLERICAL)
+    expect(d.holidayKind).toBe('weekday')
+  })
+
+  it('法定外休日 (祝日・指定休) も weekday へ落とす', () => {
+    const d = summarizeTimecardDay(row('2026-05-04', [['18:46:00', '23:46:00']], 'non_legal'), NIGHT_CLERICAL)
+    expect(d.holidayKind).toBe('weekday')
+    expect(d.isRestDay).toBe(false)
+  })
+
+  it('非事務職の夜勤者も同じ扱い — 法定休日の 1.35 が付かなくなる (副島 1196)', () => {
+    // 職種で扱いを変えない (2026-07-26 ユーザー決定)。非夜勤の非事務職なら legal のまま
+    const night = summarizeTimecardDay(row('2026-06-07', [['23:45:00', '2026-06-08 00:33:00']], 'legal'), NIGHT_WORKER)
+    const notNight = summarizeTimecardDay(
+      row('2026-06-07', [['23:45:00', '2026-06-08 00:33:00']], 'legal'),
+      { ...NIGHT_WORKER, nightShift: false },
+    )
+    expect(night.holidayKind).toBe('weekday')
+    expect(notNight.holidayKind).toBe('legal')
+  })
+
+  it('承認済みの休日出勤は夜勤者でも割増のまま (承認が明示の意思表示なので優先する)', () => {
+    const d = summarizeTimecardDay(row('2026-06-14', [['18:46:00', '23:46:00']], 'legal'), {
+      ...NIGHT_CLERICAL,
+      approved: true,
+    })
+    expect(d.holidayKind).toBe('legal')
+    expect(d.isRestDay).toBe(false)
+  })
+
+  it('月次でも夜勤者に自主出勤が出ない (voluntaryMinutes 0・勤務日として数える)', () => {
+    const { summaries } = summarizeTimecardMonth(
+      [
+        row('2026-06-14', [['18:46:00', '23:46:00']], 'legal'),
+        row('2026-06-28', [['18:46:00', '23:46:00']], 'legal'),
+      ],
+      {
+        yearMonth: '2026-06',
+        dailyWorkMinutesFor: () => 480,
+        approvedHolidayWork: new Set<string>(),
+        isClerical: () => true,
+        isNightShift: () => true,
+      },
+    )
+    const s = summaries[0]!
+    expect(s.voluntaryMinutes).toBe(0)
+    expect(s.restDays).toBe(0)
+    expect(s.workDays).toBe(2)
   })
 })
 
