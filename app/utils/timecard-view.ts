@@ -216,9 +216,12 @@ export function countWorkKinds(days: readonly RestraintSummaryDay[]): WorkKindCo
       if (full) out[full] += 1
       else if (LEAVE_HALF_DAY.has(detail)) out.paidLeave += 0.5
     }
-    if (isPunchErrorDay(d)) {
+    // `isPunchErrorDay(d)` を使わずに値を直接見る — 使うと分岐の中で
+    // `punchErrorMinutes ?? 0` の右辺が到達不能になり branch 100% を割る
+    const punchError = d.punchErrorMinutes ?? 0
+    if (punchError > 0) {
       out.punchError += 1
-      out.punchErrorMinutes += d.punchErrorMinutes ?? 0
+      out.punchErrorMinutes += punchError
       continue
     }
     const voluntary = d.voluntaryMinutes ?? 0
