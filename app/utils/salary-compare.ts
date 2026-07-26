@@ -464,8 +464,20 @@ export interface SalaryComparisonRow {
   /** 計算根拠の表示用: システム稼働日数と時間外(+深夜) 分。 */
   sysWorkDays: number
   sysOvertimeMinutes: number
+  /**
+   * **固定残業 (みなし残業) の人か** (給与区分 = 月給、Refs #449)。
+   *
+   * 月給者の残業扱い項目は役職手当のような**定額**で、「残業単価 × 実残業時間」で
+   * 払われたものではない。そのため `diffOvertime` (残業計(給与) − 残業(計算)) は
+   * 「単価×時間より定額が大きい」以上の意味を持たず、**正の差を「多く払っている
+   * = 問題なし」と読むと誤る** (2026-07-26 指摘)。この人たちの判定は
+   * `diffCsvVsBaseRateOvertime` (労基法37条) だけが効く。
+   */
+  overtimeFixed: boolean
   /** CSV − システム (システム側が null なら null)。 */
   diffBase: number | null
+  /** `overtimeFixed` の人は **null** — 定額と単価×時間の差に意味が無いため
+   * (画面に出すと誤読される)。 */
   diffOvertime: number | null
   diffTotal: number | null
   /** 割増基礎に算入する支給項目の合計 (base + premium-base-only、Refs #278)。 */
@@ -901,6 +913,8 @@ export function compareSalaryMonth(
     // 残業側は区分に関わらず時給単価なので従来どおり。
     const sysBase = computeSysBase(csv.rates.base, report.pay_kubun ?? null, workDays, workingMinutes)
     const sysOvertime = csv.rates.overtime !== null ? Math.round((csv.rates.overtime * overtimeMinutes) / 60) : null
+    // 月給者 = 固定残業とみなす (Refs #449)。定額と「単価×時間」の差は判定に使えない
+    const overtimeFixed = (report.pay_kubun ?? null) === PAY_KUBUN_MONTHLY
     const sysTotal = sysBase !== null && sysOvertime !== null ? sysBase + sysOvertime : null
 
     // 支払い実績 (csvOvertime) と直接比較する最低賃金理論値。時間軸は
@@ -939,8 +953,9 @@ export function compareSalaryMonth(
       sysTotal,
       sysWorkDays: workDays,
       sysOvertimeMinutes: overtimeMinutes,
+      overtimeFixed,
       diffBase: sysBase === null ? null : base - sysBase,
-      diffOvertime: sysOvertime === null ? null : overtime - sysOvertime,
+      diffOvertime: sysOvertime === null || overtimeFixed ? null : overtime - sysOvertime,
       diffTotal: sysTotal === null ? null : sums.total - sysTotal,
       csvPremiumBase: sums.premiumBase.total,
       csvPremiumBaseItems: sums.premiumBase.items,

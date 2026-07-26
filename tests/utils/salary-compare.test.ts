@@ -57,6 +57,33 @@ const CSV_2026 = [
   row2026('1240', '山田 太郎', '2026年 2月', [70000, 0, 0, 20000, 0, 50000, 0], 140000),
 ].join('\r\n')
 
+describe('overtimeFixed — 固定残業の人は残業(計算)との差を出さない (Refs #449)', () => {
+  it('月給者は overtimeFixed が立ち diffOvertime を出さない', () => {
+    const cmp = compareSalaryMonth(
+      [csvRow({ driverCd: '1', cdKey: '1', driverName: '甲', amounts: { 残業手当: 130000 }, rates: { base: null, overtime: 806 } })],
+      [reportRow('1', '甲', { payKubun: 1, overtimeMinutes: 4760 })],
+      { items: { 残業手当: 'overtime' } },
+      { entries: {} },
+    )
+    expect(cmp.rows[0]).toMatchObject({ overtimeFixed: true, diffOvertime: null })
+    // 金額そのもの (単価×時間) は残す — 桁感の目安としては読めるため
+    expect(cmp.rows[0]!.sysOvertime).not.toBeNull()
+  })
+
+  it('日給・時給・区分なしは従来どおり差を出す', () => {
+    for (const payKubun of [2, 3, null]) {
+      const cmp = compareSalaryMonth(
+        [csvRow({ driverCd: '1', cdKey: '1', driverName: '甲', amounts: { 残業手当: 130000 }, rates: { base: null, overtime: 806 } })],
+        [reportRow('1', '甲', { payKubun, overtimeMinutes: 4760 })],
+        { items: { 残業手当: 'overtime' } },
+        { entries: {} },
+      )
+      expect(cmp.rows[0]).toMatchObject({ overtimeFixed: false })
+      expect(cmp.rows[0]!.diffOvertime).not.toBeNull()
+    }
+  })
+})
+
 describe('csvOvertimeHoursOf (Refs #447)', () => {
   const row = (attendance?: Record<string, number>): SalaryCsvRow => ({
     driverCd: '007', cdKey: '7', company: '株', driverName: '甲', month: '2026-07',
