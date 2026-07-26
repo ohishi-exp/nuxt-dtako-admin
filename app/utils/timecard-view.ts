@@ -311,6 +311,10 @@ export interface TimecardSummaryRow {
   driverName: string
   /** 出勤・自主出勤・打刻エラーの日数 (日別から数える)。 */
   counts: WorkKindCounts
+  /** 出勤日数 = 通常 + 残業。**残業の有無で分けない** — 給与明細の「出勤日数」と
+   * 突き合わせる列なので、残業した日も出勤 1 日として数える (2026-07-26 指摘)。
+   * 休日出勤は別列 (承認の要る別枠なので合算しない)。 */
+  attendanceDays: number
   /** 休暇日数。**worker が数えた `leaveCounts` をそのまま使う** (下記)。 */
   leaves: { publicHoliday: number, paidLeave: number, absence: number, specialLeave: number, late: number, earlyLeave: number }
   /** 実働 (分)。 */
@@ -340,13 +344,17 @@ export function buildTimecardSummary(
   rows: readonly WageReportRow[],
   salaryOvertimeByDriver: ReadonlyMap<string, number>,
 ): TimecardSummaryRow[] {
-  return rows.map(r => ({
-    driverCd: r.summary.driverCd,
-    driverName: r.summary.driverName,
-    counts: countWorkKinds(r.summary.days),
-    leaves: r.summary.leaveCounts ?? EMPTY_LEAVES,
-    workingMinutes: r.summary.workingMinutes ?? 0,
-    overtimeMinutes: (r.summary.overtimeMinutes ?? 0) + (r.summary.overtimeNightMinutes ?? 0),
-    salaryOvertime: salaryOvertimeByDriver.get(String(Number(r.summary.driverCd))) ?? null,
-  }))
+  return rows.map((r) => {
+    const counts = countWorkKinds(r.summary.days)
+    return {
+      driverCd: r.summary.driverCd,
+      driverName: r.summary.driverName,
+      counts,
+      attendanceDays: counts.normal + counts.overtime,
+      leaves: r.summary.leaveCounts ?? EMPTY_LEAVES,
+      workingMinutes: r.summary.workingMinutes ?? 0,
+      overtimeMinutes: (r.summary.overtimeMinutes ?? 0) + (r.summary.overtimeNightMinutes ?? 0),
+      salaryOvertime: salaryOvertimeByDriver.get(String(Number(r.summary.driverCd))) ?? null,
+    }
+  })
 }

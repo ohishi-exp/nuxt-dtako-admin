@@ -387,7 +387,10 @@ async function fetchKintai() {
 
 const summaryFrom = ref('')
 const summaryTo = ref('')
-const summaryBatch = ref<Array<{ ym: string, rows: TimecardSummaryRow[] }> | null>(null)
+/** `reports` は一覧の行を作った元の wage-report 行 (タイムカード由来のみ)。
+ * 行クリックで日別表を出すのに日別サマリが要るので、一覧と一緒に持っておく
+ * (再取得すると、見ている一覧と中身がずれうる)。 */
+const summaryBatch = ref<Array<{ ym: string, rows: TimecardSummaryRow[], reports: WageReportRow[] }> | null>(null)
 const summaryProgress = ref('')
 const buildingSummary = ref(false)
 
@@ -435,12 +438,12 @@ async function openTimecardSummary() {
   pageError.value = ''
   try {
     const months = summaryTargetMonths.value
-    const batch: Array<{ ym: string, rows: TimecardSummaryRow[] }> = []
+    const batch: Array<{ ym: string, rows: TimecardSummaryRow[], reports: WageReportRow[] }> = []
     for (const ym of months) {
       summaryProgress.value = `${fmtYm(ym)} を集計中... (${batch.length + 1}/${months.length})`
       const res = await fetchWageReport(ym)
       const timecard = res.rows.filter(r => r.source === 'timecard' && matchesTimecardFilter(r.summary.driverCd))
-      batch.push({ ym, rows: buildTimecardSummary(timecard, salaryOvertimeMapFor(ym, res.rows)) })
+      batch.push({ ym, rows: buildTimecardSummary(timecard, salaryOvertimeMapFor(ym, res.rows)), reports: timecard })
     }
     summaryBatch.value = batch
     summaryProgress.value = ''
@@ -453,6 +456,35 @@ async function openTimecardSummary() {
     buildingSummary.value = false
   }
 }
+
+// ---- 一覧の行クリック → その人のその月の日別表 (2026-07-26 要望) ----
+// 一覧の数字が腑に落ちない時 (打刻エラー 2 日、有休 1.5 等) に、タブへ戻って月を
+// 選び直さずその場で根拠を見られるようにする。**印刷には出さない** — 一覧を
+// 印刷するための画面なので、開いたまま印刷しても紙は一覧のままにする。
+
+const summaryDetail = ref<{ ym: string, driverCd: string } | null>(null)
+const summaryDetailOpen = computed({
+  get: () => summaryDetail.value !== null,
+  set: (v: boolean) => { if (!v) summaryDetail.value = null },
+})
+
+/** 開いている日別表 (1 人分)。対象が見つからなければ null。 */
+const summaryDetailSheet = computed(() => {
+  const target = summaryDetail.value
+  if (!target) return null
+  const page = summaryBatch.value?.find(p => p.ym === target.ym)
+  const row = page?.reports.find(r => r.summary.driverCd === target.driverCd)
+  if (!row) return null
+  const year = Number(target.ym.slice(0, 4))
+  const monthNo = Number(target.ym.slice(5, 7))
+  return {
+    ym: target.ym,
+    driverCd: row.summary.driverCd,
+    driverName: row.summary.driverName,
+    rows: buildTimecardTable(row.summary.days, year, monthNo),
+    counts: countWorkKinds(row.summary.days),
+  }
+})
 
 /** 計算単価の表示 ("@1,206")。null は空文字 (空 div は高さ 0 で潰れる)。 */
 function fmtAt(rate: number | null): string {
@@ -2525,12 +2557,31 @@ watch([activeTab, month, session], () => {
         <span class="font-semibold">期間サマリー ({{ summaryBatch.length }} ヶ月)</span>
         <UButton size="xs" icon="i-lucide-printer" label="印刷" @click="printNow" />
         <UButton size="xs" variant="soft" icon="i-lucide-x" label="閉じる" @click="summaryBatch = null" />
+        <span class="text-xs text-gray-500">行をクリックすると、その人の日別表 (打刻) を開いて数字の根拠を確かめられます</span>
       </div>
       <section v-for="page in summaryBatch" :key="page.ym" class="print-month-page mb-8">
         <h1 class="text-lg font-bold mb-2">タイムカード集計表 ({{ fmtYm(page.ym) }})</h1>
         <p v-if="!page.rows.length" class="text-sm text-gray-500">この月にタイムカード由来の勤務がありません</p>
-        <TimecardSummaryTable v-else :rows="page.rows" />
+        <TimecardSummaryTable v-else :rows="page.rows" @select="cd => summaryDetail = { ym: page.ym, driverCd: cd }" />
       </section>
+
+      <!-- 行クリックで開く日別表。印刷対象にしない (紙は一覧のまま) -->
+      <UModal v-model:open="summaryDetailOpen" :ui="{ content: 'max-w-2xl' }" class="print:hidden">
+        <template #content>
+          <div v-if="summaryDetailSheet" class="p-6 max-h-[85vh] overflow-y-auto">
+            <TimecardTable
+              :driver-cd="summaryDetailSheet.driverCd"
+              :driver-name="summaryDetailSheet.driverName"
+              :month="summaryDetailSheet.ym"
+              :rows="summaryDetailSheet.rows"
+              :counts="summaryDetailSheet.counts"
+            />
+            <div class="mt-3 flex justify-end">
+              <UButton size="sm" variant="soft" label="閉じる" @click="summaryDetail = null" />
+            </div>
+          </div>
+        </template>
+      </UModal>
     </div>
 
     <template v-else>

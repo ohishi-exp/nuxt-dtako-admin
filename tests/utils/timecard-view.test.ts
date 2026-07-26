@@ -495,6 +495,8 @@ describe('buildTimecardSummary — 期間サマリー印刷の一覧行 (Refs #4
       leaves: { publicHoliday: 8, paidLeave: 1.5, absence: 2, specialLeave: 1, late: 3, earlyLeave: 4 },
     })
     expect(row!.counts).toMatchObject({ normal: 1, overtime: 1, holidayWork: 1, voluntary: 1, punchError: 1 })
+    // 出勤 = 通常 + 残業。休日出勤・自主出勤・打刻エラーは足さない
+    expect(row!.attendanceDays).toBe(2)
   })
 
   it('leaveCounts / 時間が無い行は 0 で埋める (古いサマリ)', () => {
