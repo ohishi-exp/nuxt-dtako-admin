@@ -60,22 +60,72 @@ export function dayOfWeek(year: number, month: number, day: number): number {
 
 const TS_RE = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/
 
-/**
- * "YYYY-MM-DD HH:MM:SS" → "HH:MM"。**その日の日付と違えば「翌 HH:MM」**を返す
- * (日跨ぎ勤務の退社時刻が前日の時刻に見えてしまうのを防ぐ)。読めない形式は null。
- */
-export function formatPunch(ts: string | undefined, baseDate: string): string | null {
+/** "YYYY-MM-DD HH:MM:SS" → "HH:MM"。読めない形式は null。
+ *
+ * **「翌 HH:MM」は返さない** — 打刻は必ず**押された日の行**に出す方針になったため
+ * (下記 `carriedPunchOuts`)。日をまたぐ表示そのものが表から無くなった。 */
+export function formatPunch(ts: string | undefined): string | null {
   if (!ts) return null
   const m = TS_RE.exec(ts)
-  if (!m) return null
-  const hhmm = `${m[4]}:${m[5]}`
-  const date = `${m[1]}-${m[2]}-${m[3]}`
-  return date === baseDate ? hhmm : `翌 ${hhmm}`
+  return m ? `${m[4]}:${m[5]}` : null
 }
 
 /** その日が打刻エラーか (事務職・非夜勤の日跨ぎ、Refs #433)。 */
 export function isPunchErrorDay(d: RestraintSummaryDay | undefined): boolean {
   return (d?.punchErrorMinutes ?? 0) > 0
+}
+
+/** "YYYY-MM-DD HH:MM:SS" の日 (1-31)。読めなければ 0。 */
+function dayOfTimestamp(ts: string): number {
+  const m = TS_RE.exec(ts)
+  return m ? Number(m[3]) : 0
+}
+
+/** 前の日から持ち越された退勤打刻。 */
+export interface CarriedPunchOut {
+  /** "HH:MM" (押された日の時刻なので「翌」は付かない)。 */
+  time: string
+  /** 持ち越し元が打刻エラーの日か。true の日だけ赤くして理由を出す。 */
+  fromError: boolean
+}
+
+/**
+ * 日をまたいで終わった打刻の退勤を、**実際に押された日**へ移す (Refs #433)。
+ *
+ * タイムカードは「その日に何を押したか」の記録なので、**打刻は押された日の行に
+ * 出す**。日をまたいだ退勤を始業日の行に「翌 13:51」と出すと、
+ *
+ * - 押した日 (翌日) の行が空欄のままになり、何も押していないように見える
+ * - 押し忘れ (打刻エラー) の場合は、翌日に押された退勤があたかもその日の退社で
+ *   あるかのように読めてしまう — これは端的に嘘
+ *
+ * 移したあとは「1日は出勤だけ / 2日は退勤だけ」と並び、実際の打刻がそのまま読める。
+ * 日をまたぐ勤務そのものは正常 (夜勤・長距離) なので、**エラーかどうかで扱いは
+ * 変えない** — 変えるのは色と備考だけ。
+ *
+ * 月をまたいでずれ込んだ分は表に出す行が無いので落とす。
+ */
+export function carriedPunchOuts(
+  days: readonly RestraintSummaryDay[],
+  year: number,
+  month: number,
+): Map<number, CarriedPunchOut> {
+  const out = new Map<number, CarriedPunchOut>()
+  const last = daysInMonth(year, month)
+  for (const d of days) {
+    const fromError = isPunchErrorDay(d)
+    for (const s of d.sessions ?? []) {
+      // 日と時刻を 1 回のマッチで取る (別々に解析すると、片方だけ失敗する分岐が
+      // 実際には起こり得ないのに残ってしまう)
+      const m = TS_RE.exec(s.end)
+      if (!m) continue
+      const endDay = Number(m[3])
+      // 同じ日に終わっている打刻はずれ込んでいない。月をまたいだ分は行が無い
+      if (endDay === d.day || endDay > last) continue
+      out.set(endDay, { time: `${m[4]}:${m[5]}`, fromError })
+    }
+  }
+  return out
 }
 
 /**
@@ -112,15 +162,18 @@ export function buildTimecardTable(
 
   const rows: TimecardTableRow[] = []
   const last = daysInMonth(year, month)
+  // 押し忘れでずれ込んだ退勤を、実際に打刻された日へ返す (Refs #433)
+  const carried = carriedPunchOuts(days, year, month)
   for (let day = 1; day <= last; day++) {
     const dow = dayOfWeek(year, month, day)
     const d = byDay.get(day)
     const sessions = d?.sessions ?? []
-    const baseDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
     const punchError = isPunchErrorDay(d)
-    // 前日の終業を押し忘れると、その打刻がこの日の打刻と組まれて**この日の行ごと消える**
-    // (実データで確認)。空欄の理由が分かるように出す
-    const afterPunchError = isPunchErrorDay(byDay.get(day - 1))
+    const carriedOut = carried.get(day) ?? null
+    // 前日の終業を押し忘れると、その打刻がこの日の退勤と組まれて**この日の行ごと消える**
+    // (実データで確認)。空欄の理由が分かるように出す。**正常な日跨ぎ (夜勤・長距離) で
+    // 退勤が持ち越された日は対象外** — そちらは異常ではないので色も備考も付けない
+    const afterPunchError = carriedOut?.fromError === true
     const notes: string[] = []
     // 休暇区分 (公休 / 有休 / 遅刻 …) は CakePHP の PDF と同じく原文をそのまま出す
     notes.push(...(d?.leaves ?? []))
@@ -130,14 +183,23 @@ export function buildTimecardTable(
     // 3 回以上の打刻は 出勤2/退社2 の列に収まらないので件数だけ残す
     if (sessions.length > 2) notes.push(`打刻 ${sessions.length} 回`)
 
+    // **日をまたいだ退勤はこの行に出さない** — その打刻は翌日に押されたものなので、
+    // 押された日の行に出す (`carriedPunchOuts`)。始業は必ずこの日なので対象外
+    const punchOut = (index: number): string | null => {
+      const end = sessions[index]?.end
+      if (end && dayOfTimestamp(end) !== day) return null
+      return formatPunch(end)
+    }
+
     rows.push({
       day,
       dow,
       dowLabel: DOW_LABELS[dow]!,
-      in1: formatPunch(sessions[0]?.start, baseDate),
-      out1: formatPunch(sessions[0]?.end, baseDate),
-      in2: formatPunch(sessions[1]?.start, baseDate),
-      out2: formatPunch(sessions[1]?.end, baseDate),
+      in1: formatPunch(sessions[0]?.start),
+      // 自分の打刻が無く前日から持ち越された退勤だけがある日は、それを退社に出す
+      out1: punchOut(0) ?? (sessions.length === 0 ? (carriedOut?.time ?? null) : null),
+      in2: formatPunch(sessions[1]?.start),
+      out2: punchOut(1),
       overtimeMinutes: (d?.overtimeMinutes ?? 0) + (d?.overtimeNightMinutes ?? 0),
       note: notes.join(' / '),
       isSunday: dow === 0,
