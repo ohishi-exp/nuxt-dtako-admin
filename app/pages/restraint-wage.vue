@@ -27,6 +27,7 @@ import type {
   WageReportRow,
 } from '~/utils/restraint-wage-view'
 import { MIN_WAGE_DEFAULT_KEY } from '~/utils/restraint-wage-view'
+import { buildTimecardTable, countWorkKinds } from '~/utils/timecard-view'
 import type {
   ParsedSalaryCsv,
   SalaryComparison,
@@ -94,11 +95,12 @@ const TABS = [
   { key: 'master', label: '単価マスタ' },
   { key: 'employees', label: '社員マスタ' },
   { key: 'schedule', label: '勤務設定' },
+  { key: 'timecard', label: 'タイムカード' },
 ] as const
 
 /** 対象月が効くタブ。ここに無いタブでは年月バーを出さない (Refs #409)。
  * 単価マスタは選択月時点の単価を出すので対象に含む。 */
-const MONTH_AWARE_TABS: string[] = ['archive', 'monthly', 'minwage', 'salary', 'master', 'schedule']
+const MONTH_AWARE_TABS: string[] = ['archive', 'monthly', 'minwage', 'salary', 'master', 'schedule', 'timecard']
 
 type TabKey = typeof TABS[number]['key']
 const activeTab = ref<TabKey>('monthly')
@@ -260,6 +262,46 @@ function ratePerHour(pay: number | null, minutes: number): number | null {
   if (pay == null || minutes <= 0) return null
   return Math.round(pay / (minutes / 60))
 }
+
+// ---------------------------------------------------------------------------
+// タイムカード表 (Refs #424 PR-E)
+// ---------------------------------------------------------------------------
+// 打刻を持つのは**タイムカード由来の行だけ** (theearth の拘束 CSV に打刻は無い)。
+// wage-report は既に読んでいるので、そこから source で絞って表に畳む。
+
+/** タイムカード由来の行 (乗務員CD の数値順)。 */
+const timecardRows = computed(() =>
+  (report.value?.rows ?? []).filter(r => r.source === 'timecard'),
+)
+
+/** 表示対象の乗務員CD (空 = 全員)。カンマ区切りで絞れる。 */
+const timecardFilter = ref('')
+
+const timecardSheets = computed(() => {
+  const filter = timecardFilter.value
+    .split(/[,、\s]+/)
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(s => String(Number(s)))
+  const [year, monthNo] = [selectedYear.value, selectedMonthNo.value]
+  return timecardRows.value
+    .filter(r => !filter.length || filter.includes(String(Number(r.summary.driverCd))))
+    .map(r => ({
+      driverCd: r.summary.driverCd,
+      driverName: r.summary.driverName,
+      rows: buildTimecardTable(r.summary.days, year, monthNo),
+      counts: countWorkKinds(r.summary.days),
+    }))
+})
+
+/**
+ * 打刻を 1 つも持たない = **サマリが sessions を持つ前より前に取り込まれたまま**。
+ * 表が全部空欄になるので、再取り込みが要ることを画面から言う (Refs #424 PR-E 1/2)。
+ */
+const timecardNeedsRefetch = computed(() =>
+  timecardRows.value.length > 0
+  && timecardRows.value.every(r => r.summary.days.every(d => !d.sessions?.length)),
+)
 
 /** 計算単価の表示 ("@1,206")。null は空文字 (空 div は高さ 0 で潰れる)。 */
 function fmtAt(rate: number | null): string {
@@ -2185,6 +2227,12 @@ watch([activeTab, month, session], () => {
   else if (activeTab.value === 'items') {
     if (!salaryConfigLoaded.value) loadSalaryItemConfig()
   }
+  // タイムカード表は wage-report の timecard 由来の行だけを使う (Refs #424 PR-E)。
+  // **ここで読み込まないとタブを直接開いた時に空表になる** — 月次集計を先に開いて
+  // いれば report が残っているので気付きにくい (dev の実機確認で踏んだ)
+  else if (activeTab.value === 'timecard') {
+    if (!report.value || report.value.month !== month.value) loadWageReport()
+  }
   else if (activeTab.value === 'archive') {
     loadArchive()
   }
@@ -3740,6 +3788,55 @@ watch([activeTab, month, session], () => {
             </p>
           </UCard>
         </template>
+
+        <!-- タイムカード (Refs #424 PR-E) -->
+        <template v-else-if="activeTab === 'timecard'">
+          <UCard>
+            <template #header>
+              <div class="flex flex-wrap items-center gap-2 print:hidden">
+                <span class="font-semibold">タイムカード ({{ fmtYm(month) }})</span>
+                <span class="text-xs text-gray-500">
+                  打刻から作った勤務表。社内の既存 PDF と同じ 8 列
+                </span>
+                <div class="flex-1" />
+                <UInput
+                  v-model="timecardFilter"
+                  size="xs"
+                  class="w-48"
+                  placeholder="乗務員CD (空欄=全員)"
+                />
+                <UButton size="xs" variant="soft" icon="i-lucide-printer" label="印刷" @click="printNow" />
+              </div>
+            </template>
+
+            <UAlert
+              v-if="timecardNeedsRefetch"
+              color="warning"
+              variant="soft"
+              class="mb-3 print:hidden"
+              icon="i-lucide-alert-triangle"
+              title="打刻が保存されていません"
+              description="この月のサマリは打刻区間を持つ前に取り込まれたものです。勤怠を再取り込みすると表に時刻が入ります。"
+            />
+
+            <p v-if="!timecardRows.length" class="text-sm text-gray-500">
+              この月にタイムカード由来の勤務がありません。デジタコ (拘束時間 CSV) 由来の乗務員は打刻を持たないため、
+              この表には出ません。
+            </p>
+
+            <div v-else class="grid gap-4 print:grid-cols-3 md:grid-cols-2 xl:grid-cols-3">
+              <TimecardTable
+                v-for="sheet in timecardSheets"
+                :key="sheet.driverCd"
+                :driver-cd="sheet.driverCd"
+                :driver-name="sheet.driverName"
+                :month="month"
+                :rows="sheet.rows"
+                :counts="sheet.counts"
+              />
+            </div>
+          </UCard>
+        </template>
       </div>
     </template>
   </div>
@@ -3755,5 +3852,10 @@ watch([activeTab, month, session], () => {
   .print-month-page { break-after: page; }
   .print-month-page:last-child { break-after: auto; }
   @page { size: A4 landscape; margin: 8mm; }
+
+  /* タイムカードは既存 PDF と同じく 3 人横並び。1 人分の表が途中で割れないように
+     break-inside を止める (Refs #424 PR-E)。 */
+  .timecard-sheet { font-size: 8px; }
+  .timecard-sheet td, .timecard-sheet th { padding: 0 2px; }
 }
 </style>

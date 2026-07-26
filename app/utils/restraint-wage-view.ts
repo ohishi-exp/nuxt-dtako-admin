@@ -4,6 +4,12 @@
  * の応答と同型。
  */
 
+/** 打刻区間 ("YYYY-MM-DD HH:MM:SS")。タイムカード由来の日にだけ入る (Refs #424 PR-E)。 */
+export interface TimecardSession {
+  start: string
+  end: string
+}
+
 export interface RestraintSummaryDay {
   day: number
   isRestDay: boolean
@@ -12,6 +18,12 @@ export interface RestraintSummaryDay {
   overtimeMinutes: number | null
   nightMinutes: number | null
   overtimeNightMinutes: number | null
+  /** 休日区分。タイムカード由来のみ (theearth 由来は暦を持たないので undefined)。 */
+  holidayKind?: 'legal' | 'non_legal' | 'weekday'
+  /** 自主出勤として賃金計算から外した実働 (分)。タイムカード由来のみ。 */
+  voluntaryMinutes?: number
+  /** その日の打刻区間 (中抜けがあれば 2 つ以上)。タイムカード由来のみ。 */
+  sessions?: TimecardSession[]
 }
 
 export interface RestraintDriverSummary {
