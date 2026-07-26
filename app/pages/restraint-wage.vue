@@ -2203,6 +2203,25 @@ async function deleteHolidayWork(entry: HolidayWorkEntry) {
   }, '休日出勤の承認を取り消しました (この日は自主出勤に戻ります)')
 }
 
+// ---- 勤怠日数の突合列 (Refs #433 PR-E) ----
+// 上段 = 打刻から数えた日数、下段 = 給与明細【勤怠】の日数。**差の判定はしない** —
+// 事務員が実残業をつけていない運用があるのと同じで、日数の付け方にも運用差がある。
+// 並べて見せるのが目的なので、色も警告も付けない (#424 の「差は出るのが前提」と同方針)。
+
+const ATTENDANCE_COLUMNS = [
+  { key: 'work' },
+  { key: 'publicHoliday' },
+  { key: 'paidLeave' },
+  { key: 'absence' },
+] as const
+
+/** 日数の表示。**0 も「-」**にする — データを持たない行と 0 日をこの列で区別しても
+ * 意味がないため。半休の 0.5 があるので小数は 1 桁残す。 */
+function fmtDays(n: number | undefined): string {
+  if (!n) return '-'
+  return Number.isInteger(n) ? String(n) : n.toFixed(1)
+}
+
 // ---- 夜勤者マスタ (Refs #433 PR-A) ----
 // 日跨ぎ打刻を「打刻エラー」とみなす判定からの除外リスト。事務職の打刻が翌日に
 // またがるのは通常 終業の押し忘れだが、夜勤者は正常に日をまたぐ。
@@ -3084,6 +3103,14 @@ watch([activeTab, month, session], () => {
                       <th class="px-2 py-2 text-right">支給計(給与)</th>
                       <th class="px-2 py-2 text-right">合計(計算)</th>
                       <th class="px-2 py-2 text-right">差</th>
+                      <!-- 勤怠日数 (Refs #433)。上段 = 打刻から数えた日数、下段 = 給与明細の
+                           【勤怠】欄。**差は判定しない** — 日数の付け方には運用差があり、
+                           並べて見せるのが目的 -->
+                      <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="上: 打刻から数えた出勤日数 / 下: 給与明細【勤怠】の出勤日数。差は異常判定しません">出勤<br><span class="font-normal text-xs">(計算 / 給与)</span></th>
+                      <th class="px-2 py-2 text-right" title="上: 打刻から数えた公休日数 (公休/泊休/積置泊休/指休) / 下: 給与明細【勤怠】の公休日数">公休<br><span class="font-normal text-xs">(計算 / 給与)</span></th>
+                      <th class="px-2 py-2 text-right" title="上: 打刻から数えた有休日数 (有休=1.0、前休/後休=0.5) / 下: 給与明細【勤怠】の有休日数">有休<br><span class="font-normal text-xs">(計算 / 給与)</span></th>
+                      <th class="px-2 py-2 text-right" title="上: 打刻から数えた欠勤日数 / 下: 給与明細【勤怠】の欠勤日数">欠勤<br><span class="font-normal text-xs">(計算 / 給与)</span></th>
+                      <th class="px-2 py-2 text-right" title="打刻が翌日にまたがっていた日数 (終業の押し忘れ)。この日の時間は賃金計算から外れているので、上の金額の差もその分ずれる">打刻<br>エラー</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -3162,6 +3189,23 @@ watch([activeTab, month, session], () => {
                       <td class="px-2 py-1.5 text-right">{{ fmtYen(row.sysTotal) }}</td>
                       <td class="px-2 py-1.5 text-right" :class="(row.diffTotal ?? 0) !== 0 ? 'text-red-600 font-medium' : 'text-gray-400'">
                         {{ fmtDiff(row.diffTotal) }}
+                      </td>
+                      <!-- 勤怠日数 (Refs #433)。上段 = 計算 (打刻)、下段 = 給与明細。
+                           色は付けない — 差が出るのは前提で、異常ではない -->
+                      <td
+                        v-for="col in ATTENDANCE_COLUMNS"
+                        :key="col.key"
+                        class="px-2 py-1.5 text-right"
+                        :class="col.key === 'work' ? 'border-l border-gray-200 dark:border-gray-700' : ''"
+                      >
+                        <div>{{ fmtDays(row.attendanceDays.sys[col.key]) }}</div>
+                        <div class="text-xs text-gray-500">{{ fmtDays(row.attendanceDays.csv[col.key]) }}</div>
+                      </td>
+                      <td
+                        class="px-2 py-1.5 text-right"
+                        :class="row.attendanceDays.sys.punchError > 0 ? 'text-red-600 font-bold dark:text-red-400' : 'text-gray-400'"
+                      >
+                        {{ fmtDays(row.attendanceDays.sys.punchError) }}
                       </td>
                     </tr>
                   </tbody>

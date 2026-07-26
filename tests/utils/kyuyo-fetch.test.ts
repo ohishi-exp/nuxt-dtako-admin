@@ -170,6 +170,8 @@ describe('payrollToParsedSalary', () => {
       amounts: { 基本給: 83_418, 残業手当: 77_762 },
       reportedTotal: 404_045,
       rates: { base: 3_679, overtime: 1_318 },
+      // 給与DB は支給項目しか返さないので勤怠日数は空 (Refs #433)
+      attendance: {},
     }])
     expect(out.itemLabels).toEqual(['基本給', '残業手当'])
     expect(out.months).toEqual(['2026-07'])
