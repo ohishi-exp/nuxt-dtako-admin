@@ -4529,18 +4529,33 @@ watch([activeTab, month, session, archiveMonthsLoaded], () => {
               description="この月のサマリは打刻区間を持つ前に取り込まれたものです。勤怠を再取り込みすると表に時刻が入ります。"
             />
 
+            <!-- 月切替で見出しだけ先に新しい月へ変わり、下の表が前の月のまま残る
+                 (Refs #456 追加報告 2026-07-27)。月次集計と同じ「更新中」帯 + 薄化で
+                 「表示中の表は前の月のもの」と分かるようにし、誤操作も止める -->
+            <div
+              v-if="staleReport"
+              class="sticky top-0 z-10 mb-1 flex items-center justify-center gap-2 rounded bg-amber-50/95 dark:bg-amber-950/95 py-2"
+            >
+              <UIcon name="i-lucide-loader-circle" class="size-5 animate-spin text-primary" />
+              <span class="text-sm font-medium">更新中 — 表示中のタイムカードは切り替え前の月のものです</span>
+            </div>
+
             <p v-if="!timecardRows.length" class="text-sm text-gray-500">
               この月にタイムカード由来の勤務がありません。デジタコ (拘束時間 CSV) 由来の乗務員は打刻を持たないため、
               この表には出ません。
             </p>
 
-            <div v-else class="grid gap-4 print:grid-cols-3 md:grid-cols-2 xl:grid-cols-3">
+            <div
+              v-else
+              class="grid gap-4 print:grid-cols-3 md:grid-cols-2 xl:grid-cols-3"
+              :class="staleReport ? STALE_CLASS : ''"
+            >
               <TimecardTable
                 v-for="sheet in timecardSheets"
                 :key="sheet.driverCd"
                 :driver-cd="sheet.driverCd"
                 :driver-name="sheet.driverName"
-                :month="month"
+                :month="report?.month ?? month"
                 :rows="sheet.rows"
                 :counts="sheet.counts"
                 :overtime-compare="sheet.overtimeCompare"
