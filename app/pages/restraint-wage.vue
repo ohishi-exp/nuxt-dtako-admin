@@ -27,7 +27,7 @@ import type {
   WageReportRow,
 } from '~/utils/restraint-wage-view'
 import { MIN_WAGE_DEFAULT_KEY } from '~/utils/restraint-wage-view'
-import { buildTimecardSummary, buildTimecardTable, countWorkKinds, daysInMonth } from '~/utils/timecard-view'
+import { buildTimecardSummary, buildTimecardTable, countWorkKinds, employedDaysInMonth } from '~/utils/timecard-view'
 import type { TimecardSummaryRow } from '~/utils/timecard-view'
 import type {
   OvertimeHoursComparison,
@@ -307,8 +307,14 @@ const timecardSheets = computed(() => {
       // 打刻が全く無い日 (upstream に行自体が無い日) も出勤から引かない — 賃金計算
       // から外れているだけで、来ていないと確定したわけではないため (Refs #441)。
       // `counts` の内訳合計 (normal+overtime+holidayWork+punchError) だとタイムカードに
-      // 行自体が無い日を出勤に数え損ねる。総日数からの逆算なら常に給与明細と揃う。
-      const workDaysSys = daysInMonth(year, monthNo) - counts.publicHoliday - counts.paidLeave - counts.absence
+      // 行自体が無い日を出勤に数え損ねる。
+      //
+      // 引く元は月日数ではなく**在籍日数** (Refs #445) — 途中入社・途中退職の人は
+      // 在籍していない日まで出勤に数えられていた。入社日が未取り込みの社員は
+      // employedDaysInMonth が月日数を返すので、従来と同じ値のまま
+      const employed = employedDaysInMonth(year, monthNo, employmentByDriver.value.get(driverKey)
+        ?? { hireDate: null, retireDate: null })
+      const workDaysSys = employed - counts.publicHoliday - counts.paidLeave - counts.absence
       return {
         driverCd: r.summary.driverCd,
         driverName: r.summary.driverName,
@@ -480,6 +486,7 @@ async function openTimecardSummary() {
         Number(ym.slice(0, 4)),
         Number(ym.slice(5, 7)),
         salaryOvertimeMapFor(ym, res.rows),
+        employmentByDriver.value,
       )
       batch.push({ ym, rows, reports: timecard })
     }
@@ -1093,6 +1100,30 @@ const employeeMaster = computed<EmployeeMasterEntry[]>(() =>
 /** 突合ロジックが読む SalaryCdMap 形 (driverCd 未設定の行は除外)。 */
 const salaryCdMap = computed(() => buildCdMapEntries(employeeMaster.value))
 
+/**
+ * 乗務員CD → 在籍期間 (入社日/退社日、Refs #445)。
+ *
+ * 同じ人が複数会社に在籍しうる (Refs #403) ので、**入社日は最も古い方・退社日は
+ * 最も新しい方**を採る。グループ内の異動で在籍が途切れていない人を、片方の会社の
+ * 入社日だけで途中入社扱いにしないため。
+ */
+const employmentByDriver = computed(() => {
+  const map = new Map<string, { hireDate: string | null, retireDate: string | null }>()
+  for (const e of employeeMaster.value) {
+    if (!e.driverCd) continue
+    const key = normalizeDriverCdKey(e.driverCd)
+    const cur = map.get(key)
+    const hire = e.hireDate ?? null
+    const retire = e.retireDate ?? null
+    map.set(key, {
+      hireDate: cur?.hireDate && (!hire || cur.hireDate < hire) ? cur.hireDate : hire,
+      // 片方でも「在籍中 (null)」なら在籍中として扱う
+      retireDate: !cur ? retire : (cur.retireDate === null || retire === null ? null : (cur.retireDate > retire ? cur.retireDate : retire)),
+    })
+  }
+  return map
+})
+
 function setEmployeeMasterEntries(compId: string, entries: EmployeeMasterEntry[]) {
   employeeMasterByComp.value = { ...employeeMasterByComp.value, [compId]: entries }
 }
@@ -1369,7 +1400,17 @@ async function importFromPayrollDb() {
       const idx = entries.findIndex(e => e.company === emp.company && e.payrollCd === emp.payrollCd)
       entries = idx === -1
         ? [...entries, { ...emp, attrs: [] }]
-        : entries.map((e, i) => (i === idx ? { ...e, name: emp.name, driverCd: emp.driverCd } : e))
+        // 入社日は上流が返した時だけ上書きする (古い rust なら null で来るので、
+        // 取り込み済みの値を消さない — worker の COALESCE と同じ理由、Refs #445)
+        : entries.map((e, i) => (i === idx
+          ? {
+              ...e,
+              name: emp.name,
+              driverCd: emp.driverCd,
+              hireDate: emp.hireDate ?? e.hireDate ?? null,
+              retireDate: emp.retireDate ?? e.retireDate ?? null,
+            }
+          : e))
     }
     for (const attr of plan.attrs) {
       const idx = entries.findIndex(e => e.company === attr.company && e.payrollCd === attr.payrollCd)
@@ -1466,7 +1507,16 @@ async function saveEmployeeMaster(message: string) {
         method: 'PUT',
         headers: authHeaders(compId),
         body: {
-          employees: entries.map(e => ({ company: e.company, payrollCd: e.payrollCd, name: e.name, driverCd: e.driverCd })),
+          // 入社日・退社日も送る (Refs #445)。手編集の保存では null のままだが、
+          // worker の upsert が COALESCE なので取り込み済みの値は潰れない
+          employees: entries.map(e => ({
+            company: e.company,
+            payrollCd: e.payrollCd,
+            name: e.name,
+            driverCd: e.driverCd,
+            hireDate: e.hireDate ?? null,
+            retireDate: e.retireDate ?? null,
+          })),
           attrs: collectAttrRows(entries),
           deleteAttrs: deleteAttrs.map(({ company, payrollCd, effectiveFrom }) => ({ company, payrollCd, effectiveFrom })),
           deleteEmployees: deleteEmployees.map(({ company, payrollCd }) => ({ company, payrollCd })),

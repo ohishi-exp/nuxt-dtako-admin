@@ -40,6 +40,10 @@ export interface EmployeeMasterEntry {
   payrollCd: string
   name: string
   driverCd: string | null
+  /** 入社日 (`SHAIN2.DAYNYU`、YYYY-MM-DD)。未取り込みは null (Refs #445)。 */
+  hireDate?: string | null
+  /** 退社日 (`SHAIN2.DAYTAI`)。在籍中は null。 */
+  retireDate?: string | null
   attrs: EmployeeAttrRow[]
 }
 
@@ -264,6 +268,11 @@ export interface KyuyoEmployeeRow {
   /** 給与区分 (SHAIN3.KKUBUN): 1=月給 / 2=日給 / 3=時給 / 4=その他、0=未設定。
    * rust-ichibanboshi#101 で追加。古い応答には無いので optional。 */
   kkubun?: number
+  /** 入社日 (SHAIN2.DAYNYU、"YYYY-MM-DD")。rust-ichibanboshi#105 で追加。
+   * **古い rust が本番に居ても取り込みを落とさない**よう optional (#98 と同じ作法)。 */
+  hire_date?: string | null
+  /** 退社日 (SHAIN2.DAYTAI)。在籍中は null (センチネル `1970-01-02` は rust が潰す)。 */
+  retire_date?: string | null
   retired: boolean
 }
 
@@ -278,7 +287,14 @@ export interface KyuyoEmployeesResponse {
 }
 
 export interface PayrollImportPlan {
-  employees: Array<{ company: string, payrollCd: string, name: string, driverCd: string | null }>
+  employees: Array<{
+    company: string
+    payrollCd: string
+    name: string
+    driverCd: string | null
+    hireDate: string | null
+    retireDate: string | null
+  }>
   attrs: EmployeeAttrPutRow[]
   /** 旧ラベルから統合した (= 削除する) 社員行。 */
   deleteEmployees: Array<{ company: string, payrollCd: string }>
@@ -286,6 +302,18 @@ export interface PayrollImportPlan {
   added: number
   /** 旧ラベル行から乗務員CD突合を引き継いだ人数。 */
   merged: number
+}
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+
+/** 上流の日付を "YYYY-MM-DD" に絞る。欠損・空・形式違いは null。
+ *
+ * 形式違いを**通さず落とす**のは、在籍日数の計算がそのまま日付比較をするため —
+ * 読めない値を混ぜると比較が静かに false になり、途中入社の人が全日出勤に戻る。 */
+export function normalizeIsoDate(raw: string | null | undefined): string | null {
+  if (typeof raw !== 'string') return null
+  const s = raw.trim()
+  return ISO_DATE_RE.test(s) ? s : null
 }
 
 /** 会社ラベルの正規化 (worker 側 PUT の normalizeCompany と同一規則: NFKC + trim)。
@@ -367,7 +395,16 @@ export function planPayrollDbImport(
       plan.merged += 1
       plan.deleteEmployees.push({ company: legacyLabel!, payrollCd })
     }
-    plan.employees.push({ company, payrollCd, name: row.employee_name, driverCd })
+    plan.employees.push({
+      company,
+      payrollCd,
+      name: row.employee_name,
+      driverCd,
+      // 古い rust は返さない → undefined を null に倒す。worker 側の upsert は
+      // null で既存値を潰さない (COALESCE) ので、取り込み済みの入社日は残る
+      hireDate: normalizeIsoDate(row.hire_date),
+      retireDate: normalizeIsoDate(row.retire_date),
+    })
 
     const branch = normalizeAttrText(row.department)
     const scheme = normalizeAttrText(payScheme(row.taikei))

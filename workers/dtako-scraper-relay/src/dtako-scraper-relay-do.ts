@@ -2140,7 +2140,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     try {
       const [employeeResult, attrResult] = await Promise.all([
         db
-          .prepare(`SELECT company, payroll_cd, name, driver_cd FROM employees WHERE comp_id = ?`)
+          .prepare(`SELECT company, payroll_cd, name, driver_cd, hire_date, retire_date FROM employees WHERE comp_id = ?`)
           .bind(compId)
           .all<EmployeeD1Row>(),
         db
@@ -2305,7 +2305,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     try {
       const [employeeResult, attrResult] = await Promise.all([
         db
-          .prepare(`SELECT company, payroll_cd, name, driver_cd FROM employees WHERE comp_id = ?`)
+          .prepare(`SELECT company, payroll_cd, name, driver_cd, hire_date, retire_date FROM employees WHERE comp_id = ?`)
           .bind(record.compId)
           .all<EmployeeD1Row>(),
         db
@@ -2695,7 +2695,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           .bind(compId, `${ym}-%`)
           .all<HolidayWorkD1Row>(),
         db
-          .prepare(`SELECT company, payroll_cd, name, driver_cd FROM employees WHERE comp_id = ?`)
+          .prepare(`SELECT company, payroll_cd, name, driver_cd, hire_date, retire_date FROM employees WHERE comp_id = ?`)
           .bind(compId)
           .all<EmployeeD1Row>(),
         db

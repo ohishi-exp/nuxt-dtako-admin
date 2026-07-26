@@ -48,6 +48,11 @@ export interface EmployeeInput {
   payrollCd: string;
   name: string;
   driverCd: string | null;
+  /** 入社日 (`SHAIN2.DAYNYU`、YYYY-MM-DD)。未取り込みは null (Refs #445)。 */
+  hireDate: string | null;
+  /** 退社日 (`SHAIN2.DAYTAI`)。在籍中は null — 給与大臣のセンチネル `1970-01-02` は
+   * rust-ichibanboshi#105 が潰してから寄こす。 */
+  retireDate: string | null;
 }
 
 export interface EmployeeAttrInput {
@@ -159,7 +164,21 @@ function normalizeEmployeeInput(raw: unknown, index: number): EmployeeInput {
     payrollCd: normalizePayrollCd(obj.payrollCd, `employees[${index}].payrollCd`),
     name: obj.name.normalize("NFKC").trim(),
     driverCd: normalizeDriverCd(obj.driverCd, `employees[${index}].driverCd`),
+    hireDate: normalizeNullableDate(obj.hireDate, `employees[${index}].hireDate`),
+    retireDate: normalizeNullableDate(obj.retireDate, `employees[${index}].retireDate`),
   };
+}
+
+/** 省略可の日付 (YYYY-MM-DD)。未設定・空文字は null。
+ *
+ * **省略を許すのは意図的** — 古い画面や手編集の保存では来ないので、必須にすると
+ * 入社日を持たない社員の編集が 400 になる (Refs #445)。 */
+function normalizeNullableDate(raw: unknown, field: string): string | null {
+  if (raw === null || raw === undefined || raw === "") return null;
+  if (typeof raw !== "string" || !DATE_RE.test(raw)) {
+    throw new EmployeeMasterError(`${field} は YYYY-MM-DD が必要です (${JSON.stringify(raw)})`);
+  }
+  return raw;
 }
 
 function normalizeAttrInput(raw: unknown, index: number): EmployeeAttrInput {
@@ -280,14 +299,30 @@ export function buildEmployeeMasterWriteStatements(
   }
   for (const e of body.employees) {
     statements.push({
-      sql: `INSERT INTO employees (comp_id, company, payroll_cd, name, name_key, driver_cd, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+      sql: `INSERT INTO employees
+              (comp_id, company, payroll_cd, name, name_key, driver_cd, hire_date, retire_date, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(comp_id, company, payroll_cd) DO UPDATE SET
               name = excluded.name,
               name_key = excluded.name_key,
               driver_cd = excluded.driver_cd,
+              -- **既存値を null で潰さない** (Refs #445)。手編集の保存や古い画面は
+              -- hireDate を送ってこないので、excluded をそのまま入れると取り込み済みの
+              -- 入社日が氏名の修正だけで消える。
+              hire_date = COALESCE(excluded.hire_date, employees.hire_date),
+              retire_date = COALESCE(excluded.retire_date, employees.retire_date),
               updated_at = excluded.updated_at`,
-      params: [compId, e.company, e.payrollCd, e.name, normalizeNameKey(e.name), e.driverCd, nowIso],
+      params: [
+        compId,
+        e.company,
+        e.payrollCd,
+        e.name,
+        normalizeNameKey(e.name),
+        e.driverCd,
+        e.hireDate,
+        e.retireDate,
+        nowIso,
+      ],
     });
   }
   for (const a of body.attrs) {
@@ -360,6 +395,10 @@ export interface EmployeeMasterEntry {
   payrollCd: string;
   name: string;
   driverCd: string | null;
+  /** 入社日 (YYYY-MM-DD)。未取り込みは null (Refs #445)。 */
+  hireDate: string | null;
+  /** 退社日 (YYYY-MM-DD)。在籍中は null。 */
+  retireDate: string | null;
   attrs: EmployeeAttrRow[];
 }
 
@@ -373,6 +412,9 @@ export interface EmployeeD1Row {
   payroll_cd: string;
   name: string;
   driver_cd: string | null;
+  /** migration 0015 で追加。取り込み前の行は NULL。 */
+  hire_date?: string | null;
+  retire_date?: string | null;
 }
 
 /** D1 `employee_attrs` テーブルの生行。 */
@@ -422,6 +464,8 @@ export function buildEmployeeMasterResponse(
     payrollCd: r.payroll_cd,
     name: r.name,
     driverCd: r.driver_cd,
+    hireDate: r.hire_date ?? null,
+    retireDate: r.retire_date ?? null,
     attrs: attrsByKey.get(`${r.company}|${r.payroll_cd}`) ?? [],
   }));
   return { employees };
