@@ -31,7 +31,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-01 23:52:33",
+              "end": "2026-06-02 13:51:00"
+            }
+          ]
         },
         {
           "day": 3,
@@ -43,7 +48,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-03 00:03:21",
+              "end": "2026-06-03 14:33:10"
+            }
+          ]
         },
         {
           "day": 4,
@@ -55,7 +65,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-04 00:04:00",
+              "end": "2026-06-04 13:45:08"
+            }
+          ]
         },
         {
           "day": 5,
@@ -67,7 +82,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-05 00:03:33",
+              "end": "2026-06-05 16:15:28"
+            }
+          ]
         },
         {
           "day": 8,
@@ -79,7 +99,16 @@
           "overtimeNightMinutes": 414,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 2
+          "sessions": [
+            {
+              "start": "2026-06-08 00:08:39",
+              "end": "2026-06-08 13:58:24"
+            },
+            {
+              "start": "2026-06-08 22:05:41",
+              "end": "2026-06-09 13:40:06"
+            }
+          ]
         },
         {
           "day": 10,
@@ -91,7 +120,16 @@
           "overtimeNightMinutes": 413,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 2
+          "sessions": [
+            {
+              "start": "2026-06-10 00:41:34",
+              "end": "2026-06-10 15:30:01"
+            },
+            {
+              "start": "2026-06-10 22:06:18",
+              "end": "2026-06-11 14:22:18"
+            }
+          ]
         },
         {
           "day": 12,
@@ -103,7 +141,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-12 00:16:07",
+              "end": "2026-06-12 14:41:06"
+            }
+          ]
         },
         {
           "day": 14,
@@ -115,7 +158,12 @@
           "overtimeNightMinutes": 26,
           "holidayKind": "legal",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-14 20:33:27",
+              "end": "2026-06-15 16:00:56"
+            }
+          ]
         },
         {
           "day": 15,
@@ -127,7 +175,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-15 22:09:37",
+              "end": "2026-06-16 14:43:31"
+            }
+          ]
         },
         {
           "day": 17,
@@ -139,7 +192,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-17 22:04:54",
+              "end": "2026-06-18 13:04:36"
+            }
+          ]
         },
         {
           "day": 18,
@@ -151,7 +209,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-18 22:01:33",
+              "end": "2026-06-19 14:03:33"
+            }
+          ]
         },
         {
           "day": 20,
@@ -163,7 +226,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-20 00:12:09",
+              "end": "2026-06-20 13:07:26"
+            }
+          ]
         },
         {
           "day": 21,
@@ -175,7 +243,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "legal",
           "voluntaryMinutes": 911,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-21 23:41:41",
+              "end": "2026-06-22 15:53:29"
+            }
+          ]
         },
         {
           "day": 23,
@@ -187,7 +260,16 @@
           "overtimeNightMinutes": 304,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 2
+          "sessions": [
+            {
+              "start": "2026-06-23 00:04:18",
+              "end": "2026-06-23 15:03:32"
+            },
+            {
+              "start": "2026-06-23 23:55:38",
+              "end": "2026-06-24 14:31:12"
+            }
+          ]
         },
         {
           "day": 25,
@@ -199,7 +281,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-25 00:02:07",
+              "end": "2026-06-25 15:03:37"
+            }
+          ]
         },
         {
           "day": 26,
@@ -211,7 +298,16 @@
           "overtimeNightMinutes": 303,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 2
+          "sessions": [
+            {
+              "start": "2026-06-26 02:37:13",
+              "end": "2026-06-26 16:13:37"
+            },
+            {
+              "start": "2026-06-26 23:56:01",
+              "end": "2026-06-27 14:59:52"
+            }
+          ]
         },
         {
           "day": 28,
@@ -223,7 +319,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "legal",
           "voluntaryMinutes": 863,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-28 23:55:51",
+              "end": "2026-06-29 15:19:01"
+            }
+          ]
         },
         {
           "day": 29,
@@ -235,7 +336,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-29 23:54:47",
+              "end": "2026-06-30 14:34:52"
+            }
+          ]
         }
       ],
       "source": "timecard",
@@ -272,7 +378,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-01 08:48:01",
+              "end": "2026-06-01 17:02:50"
+            }
+          ]
         },
         {
           "day": 2,
@@ -284,7 +395,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-02 08:45:10",
+              "end": "2026-06-02 17:03:49"
+            }
+          ]
         },
         {
           "day": 5,
@@ -296,7 +412,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-05 08:50:01",
+              "end": "2026-06-05 16:57:52"
+            }
+          ]
         },
         {
           "day": 6,
@@ -308,7 +429,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-06 08:50:38",
+              "end": "2026-06-06 16:03:21"
+            }
+          ]
         },
         {
           "day": 8,
@@ -320,7 +446,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-08 08:37:32",
+              "end": "2026-06-08 16:49:49"
+            }
+          ]
         },
         {
           "day": 9,
@@ -332,7 +463,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-09 08:54:25",
+              "end": "2026-06-09 16:24:16"
+            }
+          ]
         },
         {
           "day": 10,
@@ -344,7 +480,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-10 08:48:49",
+              "end": "2026-06-10 17:02:00"
+            }
+          ]
         },
         {
           "day": 11,
@@ -356,7 +497,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-11 08:40:15",
+              "end": "2026-06-11 12:09:05"
+            }
+          ]
         },
         {
           "day": 13,
@@ -368,7 +514,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-13 08:46:21",
+              "end": "2026-06-13 16:04:02"
+            }
+          ]
         },
         {
           "day": 15,
@@ -380,7 +531,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-15 08:44:29",
+              "end": "2026-06-15 16:03:23"
+            }
+          ]
         },
         {
           "day": 16,
@@ -392,7 +548,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-16 08:51:15",
+              "end": "2026-06-16 16:05:21"
+            }
+          ]
         },
         {
           "day": 17,
@@ -404,7 +565,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-17 08:43:37",
+              "end": "2026-06-17 16:05:16"
+            }
+          ]
         },
         {
           "day": 18,
@@ -416,7 +582,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-18 08:54:02",
+              "end": "2026-06-18 16:26:55"
+            }
+          ]
         },
         {
           "day": 19,
@@ -428,7 +599,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-19 08:41:50",
+              "end": "2026-06-19 16:10:41"
+            }
+          ]
         },
         {
           "day": 20,
@@ -440,7 +616,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-20 08:39:57",
+              "end": "2026-06-20 16:05:16"
+            }
+          ]
         },
         {
           "day": 22,
@@ -452,7 +633,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-22 08:40:10",
+              "end": "2026-06-22 16:13:09"
+            }
+          ]
         },
         {
           "day": 23,
@@ -464,7 +650,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-23 08:50:23",
+              "end": "2026-06-23 17:19:46"
+            }
+          ]
         },
         {
           "day": 25,
@@ -476,7 +667,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-25 08:47:03",
+              "end": "2026-06-25 16:04:25"
+            }
+          ]
         },
         {
           "day": 29,
@@ -488,7 +684,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-29 08:42:23",
+              "end": "2026-06-29 16:16:00"
+            }
+          ]
         },
         {
           "day": 30,
@@ -500,7 +701,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-30 08:45:37",
+              "end": "2026-06-30 16:20:36"
+            }
+          ]
         }
       ],
       "source": "timecard",
@@ -537,7 +743,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-01 08:00:31",
+              "end": "2026-06-01 17:18:55"
+            }
+          ]
         },
         {
           "day": 2,
@@ -549,7 +760,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-02 08:05:31",
+              "end": "2026-06-02 17:05:38"
+            }
+          ]
         },
         {
           "day": 3,
@@ -561,7 +777,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-03 07:58:51",
+              "end": "2026-06-03 18:04:31"
+            }
+          ]
         },
         {
           "day": 4,
@@ -573,7 +794,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-04 07:55:45",
+              "end": "2026-06-04 16:11:37"
+            }
+          ]
         },
         {
           "day": 5,
@@ -585,7 +811,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-05 07:59:37",
+              "end": "2026-06-05 17:14:04"
+            }
+          ]
         },
         {
           "day": 6,
@@ -597,7 +828,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-06 08:00:05",
+              "end": "2026-06-06 17:42:17"
+            }
+          ]
         },
         {
           "day": 8,
@@ -609,7 +845,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-08 07:58:43",
+              "end": "2026-06-08 17:06:15"
+            }
+          ]
         },
         {
           "day": 9,
@@ -621,7 +862,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-09 08:14:13",
+              "end": "2026-06-09 16:58:53"
+            }
+          ]
         },
         {
           "day": 10,
@@ -633,7 +879,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-10 07:58:19",
+              "end": "2026-06-10 17:39:10"
+            }
+          ]
         },
         {
           "day": 11,
@@ -645,7 +896,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-11 07:59:07",
+              "end": "2026-06-11 16:03:42"
+            }
+          ]
         },
         {
           "day": 12,
@@ -657,7 +913,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-12 07:59:44",
+              "end": "2026-06-12 16:56:43"
+            }
+          ]
         },
         {
           "day": 15,
@@ -669,7 +930,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-15 07:57:58",
+              "end": "2026-06-15 17:39:14"
+            }
+          ]
         },
         {
           "day": 16,
@@ -681,7 +947,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-16 07:57:51",
+              "end": "2026-06-16 16:03:00"
+            }
+          ]
         },
         {
           "day": 17,
@@ -693,7 +964,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-17 08:03:26",
+              "end": "2026-06-17 17:31:12"
+            }
+          ]
         },
         {
           "day": 18,
@@ -705,7 +981,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-18 07:56:06",
+              "end": "2026-06-18 16:50:59"
+            }
+          ]
         },
         {
           "day": 19,
@@ -717,7 +998,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-19 07:57:08",
+              "end": "2026-06-19 17:02:22"
+            }
+          ]
         },
         {
           "day": 20,
@@ -729,7 +1015,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-20 07:59:42",
+              "end": "2026-06-20 17:07:57"
+            }
+          ]
         },
         {
           "day": 22,
@@ -741,7 +1032,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-22 08:05:14",
+              "end": "2026-06-22 17:13:03"
+            }
+          ]
         },
         {
           "day": 23,
@@ -753,7 +1049,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-23 08:00:27",
+              "end": "2026-06-23 17:26:12"
+            }
+          ]
         },
         {
           "day": 24,
@@ -765,7 +1066,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-24 07:59:55",
+              "end": "2026-06-24 17:37:52"
+            }
+          ]
         },
         {
           "day": 25,
@@ -777,7 +1083,16 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 2
+          "sessions": [
+            {
+              "start": "2026-06-25 08:00:11",
+              "end": "2026-06-25 09:10:53"
+            },
+            {
+              "start": "2026-06-25 10:26:12",
+              "end": "2026-06-25 16:12:20"
+            }
+          ]
         },
         {
           "day": 26,
@@ -789,7 +1104,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-26 08:02:07",
+              "end": "2026-06-26 17:12:58"
+            }
+          ]
         },
         {
           "day": 27,
@@ -801,7 +1121,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-27 07:59:41",
+              "end": "2026-06-27 17:13:21"
+            }
+          ]
         },
         {
           "day": 29,
@@ -813,7 +1138,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-29 07:57:35",
+              "end": "2026-06-29 12:24:55"
+            }
+          ]
         },
         {
           "day": 30,
@@ -825,7 +1155,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-30 07:57:55",
+              "end": "2026-06-30 16:58:59"
+            }
+          ]
         }
       ],
       "source": "timecard",
@@ -862,7 +1197,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-01 07:51:10",
+              "end": "2026-06-01 17:02:58"
+            }
+          ]
         },
         {
           "day": 2,
@@ -874,7 +1214,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-02 07:43:06",
+              "end": "2026-06-02 17:03:28"
+            }
+          ]
         },
         {
           "day": 3,
@@ -886,7 +1231,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-03 07:48:30",
+              "end": "2026-06-03 16:59:25"
+            }
+          ]
         },
         {
           "day": 4,
@@ -898,7 +1248,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-04 07:51:29",
+              "end": "2026-06-04 16:51:07"
+            }
+          ]
         },
         {
           "day": 5,
@@ -910,7 +1265,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-05 07:42:58",
+              "end": "2026-06-05 16:51:33"
+            }
+          ]
         },
         {
           "day": 6,
@@ -922,7 +1282,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-06 07:49:41",
+              "end": "2026-06-06 16:56:44"
+            }
+          ]
         },
         {
           "day": 8,
@@ -934,7 +1299,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-08 07:49:35",
+              "end": "2026-06-08 16:57:57"
+            }
+          ]
         },
         {
           "day": 9,
@@ -946,7 +1316,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-09 07:40:59",
+              "end": "2026-06-09 16:56:38"
+            }
+          ]
         },
         {
           "day": 10,
@@ -958,7 +1333,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-10 07:46:55",
+              "end": "2026-06-10 17:05:22"
+            }
+          ]
         },
         {
           "day": 11,
@@ -970,7 +1350,16 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 2
+          "sessions": [
+            {
+              "start": "2026-06-11 07:44:15",
+              "end": "2026-06-11 11:41:10"
+            },
+            {
+              "start": "2026-06-11 13:14:38",
+              "end": "2026-06-11 16:49:11"
+            }
+          ]
         },
         {
           "day": 12,
@@ -982,7 +1371,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-12 07:54:48",
+              "end": "2026-06-12 16:56:04"
+            }
+          ]
         },
         {
           "day": 13,
@@ -994,7 +1388,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-13 07:47:31",
+              "end": "2026-06-13 16:54:02"
+            }
+          ]
         },
         {
           "day": 15,
@@ -1006,7 +1405,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-15 07:44:12",
+              "end": "2026-06-15 17:08:29"
+            }
+          ]
         },
         {
           "day": 16,
@@ -1018,7 +1422,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-16 07:45:03",
+              "end": "2026-06-16 16:59:08"
+            }
+          ]
         },
         {
           "day": 17,
@@ -1030,7 +1439,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-17 07:42:49",
+              "end": "2026-06-17 16:57:42"
+            }
+          ]
         },
         {
           "day": 18,
@@ -1042,7 +1456,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-18 07:45:11",
+              "end": "2026-06-18 16:54:19"
+            }
+          ]
         },
         {
           "day": 19,
@@ -1054,7 +1473,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-19 07:43:55",
+              "end": "2026-06-19 17:10:16"
+            }
+          ]
         },
         {
           "day": 26,
@@ -1066,7 +1490,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-26 07:47:13",
+              "end": "2026-06-26 16:54:24"
+            }
+          ]
         },
         {
           "day": 27,
@@ -1078,7 +1507,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-27 07:40:21",
+              "end": "2026-06-27 16:59:09"
+            }
+          ]
         },
         {
           "day": 29,
@@ -1090,7 +1524,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-29 07:43:44",
+              "end": "2026-06-29 16:53:07"
+            }
+          ]
         },
         {
           "day": 30,
@@ -1102,7 +1541,12 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
-          "sessionCount": 1
+          "sessions": [
+            {
+              "start": "2026-06-30 07:43:52",
+              "end": "2026-06-30 16:57:16"
+            }
+          ]
         }
       ],
       "source": "timecard",

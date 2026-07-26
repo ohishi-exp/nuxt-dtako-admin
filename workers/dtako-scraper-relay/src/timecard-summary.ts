@@ -98,8 +98,15 @@ export interface TimecardSummaryDay extends RestraintSummaryDay {
   holidayKind: TimecardHolidayKind;
   /** 自主出勤として賃金計算から外した実働 (分)。通常日は 0。 */
   voluntaryMinutes: number;
-  /** その日の打刻セッション数 (中抜けがあれば 2 以上)。 */
-  sessionCount: number;
+  /**
+   * その日の打刻区間 ("YYYY-MM-DD HH:MM:SS"、中抜けがあれば 2 つ以上)。
+   *
+   * **実働の計算に使ったものと同じ区間**を持つ (無効な打刻を落とし、重なりを併合
+   * した後の姿)。タイムカード表の 出勤1/退社1/出勤2/退社2 はこれをそのまま並べる
+   * ので、画面に出る時刻と残業の計算根拠が食い違わない (Refs #424 PR-E)。
+   * 打刻の無い日は空配列。
+   */
+  sessions: TimecardSession[];
 }
 
 export interface TimecardDriverSummary extends RestraintDriverSummary {
@@ -151,6 +158,16 @@ const SECONDS_PER_DAY = 24 * 60 * 60;
 /** 秒 → 分 (切り捨て)。出力の直前でだけ使う。 */
 function toMinutes(seconds: number): number {
   return Math.floor(seconds / 60);
+}
+
+/** エポック秒 → "YYYY-MM-DD HH:MM:SS" (`timestampToSeconds` の逆、UTC 解釈で往復する)。 */
+export function secondsToTimestamp(seconds: number): string {
+  const d = new Date(seconds * 1000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return (
+    `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} `
+    + `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`
+  );
 }
 
 /** 区間列の合計長。 */
@@ -262,8 +279,16 @@ export interface TimecardDayOptions {
   approved: boolean;
 }
 
-/** 打刻の無い日 / 自主出勤の日に使う「休み」の 1 行。 */
-function restDay(day: number, holidayKind: TimecardHolidayKind, voluntaryMinutes: number, sessionCount: number): TimecardSummaryDay {
+/** 打刻の無い日 / 自主出勤の日に使う「休み」の 1 行。
+ *
+ * 自主出勤は賃金計算から外すが**打刻は残す** — 労働時間として評価されうる時間を
+ * 画面から消さないため (承認へ昇格すればそのまま休日出勤になる)。 */
+function restDay(
+  day: number,
+  holidayKind: TimecardHolidayKind,
+  voluntaryMinutes: number,
+  sessions: TimecardSession[],
+): TimecardSummaryDay {
   return {
     day,
     isRestDay: true,
@@ -274,7 +299,7 @@ function restDay(day: number, holidayKind: TimecardHolidayKind, voluntaryMinutes
     overtimeNightMinutes: 0,
     holidayKind,
     voluntaryMinutes,
-    sessionCount,
+    sessions,
   };
 }
 
@@ -294,7 +319,13 @@ export function summarizeTimecardDay(row: TimecardDailyRow, opts: TimecardDayOpt
     raw.push({ from, to });
   }
   const punched = mergeIntervals(raw);
-  if (punched.length === 0) return restDay(dayNo, row.holiday, 0, 0);
+  // 表に出す打刻は**併合後の区間**。実働の計算に使うものと同じにして、画面の時刻と
+  // 残業の根拠が食い違わないようにする (Refs #424 PR-E)
+  const sessions: TimecardSession[] = punched.map(i => ({
+    start: secondsToTimestamp(i.from),
+    end: secondsToTimestamp(i.to),
+  }));
+  if (punched.length === 0) return restDay(dayNo, row.holiday, 0, sessions);
 
   const span: Interval = { from: punched[0]!.from, to: punched[punched.length - 1]!.to };
   // 実働 = 打刻区間 − 昼休憩。中抜け (打刻の切れ目) は punched に最初から無いので、
@@ -305,7 +336,7 @@ export function summarizeTimecardDay(row: TimecardDailyRow, opts: TimecardDayOpt
 
   // 休日の打刻で承認が無いものは自主出勤 — 賃金計算には一切入れず、時間だけ残す
   if (row.holiday !== "weekday" && !opts.approved) {
-    return restDay(dayNo, row.holiday, workingMinutes, punched.length);
+    return restDay(dayNo, row.holiday, workingMinutes, sessions);
   }
 
   const nightWindows = dailyWindows(span, NIGHT_FROM_HOUR, NIGHT_TO_HOUR);
@@ -333,7 +364,7 @@ export function summarizeTimecardDay(row: TimecardDailyRow, opts: TimecardDayOpt
     overtimeNightMinutes,
     holidayKind: row.holiday,
     voluntaryMinutes: 0,
-    sessionCount: punched.length,
+    sessions,
   };
 }
 

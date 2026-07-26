@@ -124,7 +124,11 @@ describe('summarizeTimecardDay — 休憩の導出', () => {
     // 実働 = 拘束 − 中抜け。12:00-13:00 は中抜け (11:41:10-13:14:38) の内側なので
     // 二重には引かない。秒で足してから丸めるので 451 (打刻ごとに丸めた 236+214=450 ではない)
     expect(d.workingMinutes).toBe(451)
-    expect(d.sessionCount).toBe(2)
+    // タイムカード表の 出勤1/退社1/出勤2/退社2 はこの 2 区間がそのまま入る
+    expect(d.sessions).toEqual([
+      { start: '2026-06-11 07:44:15', end: '2026-06-11 11:41:10' },
+      { start: '2026-06-11 13:14:38', end: '2026-06-11 16:49:11' },
+    ])
   })
 
   it('中抜けが昼と重ならない日は中抜け + 12:00-13:00 の両方を引く (実データ: 松山 2026-06-25)', () => {
@@ -142,7 +146,7 @@ describe('summarizeTimecardDay — 休憩の導出', () => {
     const d = summarizeTimecardDay(row('2026-06-01', [['08:00:00', '17:00:00']]), NO_APPROVAL)
     expect(d.restraintMinutes).toBe(540)
     expect(d.workingMinutes).toBe(480)
-    expect(d.sessionCount).toBe(1)
+    expect(d.sessions).toEqual([{ start: '2026-06-01 08:00:00', end: '2026-06-01 17:00:00' }])
   })
 
   it('昼をまたがない勤務は控除なし', () => {
@@ -245,7 +249,7 @@ describe('summarizeTimecardDay — 壊れた入力', () => {
   it('sessions が空なら休み扱い', () => {
     const d = summarizeTimecardDay(row('2026-06-01', []), NO_APPROVAL)
     expect(d.isRestDay).toBe(true)
-    expect(d.sessionCount).toBe(0)
+    expect(d.sessions).toEqual([])
   })
 
   it('時刻が読めない / 逆転している session は捨てる', () => {
@@ -254,8 +258,16 @@ describe('summarizeTimecardDay — 壊れた入力', () => {
     r.sessions.push({ start: '2026-06-01 19:00:00', end: 'bad' })
     r.sessions.push({ start: '2026-06-01 20:00:00', end: '2026-06-01 19:00:00' })
     const d = summarizeTimecardDay(r, NO_APPROVAL)
-    expect(d.sessionCount).toBe(1)
+    // 壊れた打刻は sessions にも残さない (表に出す時刻 = 計算に使った区間)
+    expect(d.sessions).toEqual([{ start: '2026-06-01 08:00:00', end: '2026-06-01 17:00:00' }])
     expect(d.workingMinutes).toBe(480)
+  })
+
+  it('重なった打刻は併合して 1 区間にする (表と計算で同じ姿になる)', () => {
+    const r = row('2026-06-01', [['08:00:00', '12:00:00']])
+    r.sessions.push({ start: '2026-06-01 11:00:00', end: '2026-06-01 17:00:00' })
+    const d = summarizeTimecardDay(r, NO_APPROVAL)
+    expect(d.sessions).toEqual([{ start: '2026-06-01 08:00:00', end: '2026-06-01 17:00:00' }])
   })
 
   it('date が読めなければ day 0 (月次側が warnings で落とす)', () => {
