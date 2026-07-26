@@ -126,12 +126,16 @@ import {
 import {
   buildHolidayWorkResponse,
   buildHolidayWorkWriteStatements,
+  buildNightShiftResponse,
+  buildNightShiftWriteStatements,
   buildWorkScheduleResponse,
   buildWorkScheduleWriteStatements,
   normalizeHolidayWorkPutBody,
+  normalizeNightShiftPutBody,
   normalizeWorkSchedulePutBody,
   WorkScheduleError,
   type HolidayWorkD1Row,
+  type NightShiftD1Row,
   type WorkScheduleD1Row,
   scopeByDriverCdAt,
   buildHolidayWorkIndex,
@@ -1763,6 +1767,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/holiday-work" && request.method === "PUT") {
       return this.handleHolidayWorkPut(request, record!);
     }
+    if (url.pathname === "/restraint-api/night-shift" && request.method === "GET") {
+      return this.handleNightShiftGet(record!);
+    }
+    if (url.pathname === "/restraint-api/night-shift" && request.method === "PUT") {
+      return this.handleNightShiftPut(request, record!);
+    }
     // ---- 勤怠 (タイムカード) の取得とアーカイブ (Refs #424 PR-A) ----
     if (url.pathname === "/restraint-api/kintai/fetch" && request.method === "POST") {
       return this.handleKintaiFetch(record!, url);
@@ -2469,6 +2479,54 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       console.error(JSON.stringify({ holiday_work_put: "error", error: describeUnknownError(err) }));
       return dvrJsonError(502, "休日出勤の承認簿の保存に失敗しました");
+    }
+    return Response.json({ saved: true, changed: statements.length });
+  }
+
+  /** GET /restraint-api/night-shift — 夜勤者マスタ全件 (Refs #433 PR-A)。
+   *
+   * 日跨ぎ打刻を「打刻エラー」とみなす判定からの除外リスト。**履歴を全件返す** —
+   * 月で絞らないのは、過去月を再取り込みした時に当時の姿を再現する必要があるため
+   * (絞り込みは `buildNightShiftIndex` が対象月の末日時点で行う)。 */
+  private async handleNightShiftGet(record: TheearthSessionRecord): Promise<Response> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return dvrJsonError(503, "夜勤者マスタ (DTAKO_DB) が未設定です");
+    try {
+      const result = await db
+        .prepare(`SELECT driver_cd, effective_from, is_night FROM night_shift_workers WHERE comp_id = ?`)
+        .bind(record.compId)
+        .all<NightShiftD1Row>();
+      return Response.json({ workers: buildNightShiftResponse(result.results ?? []) });
+    } catch (err) {
+      console.error(JSON.stringify({ night_shift_get: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "夜勤者マスタの取得に失敗しました");
+    }
+  }
+
+  /** PUT /restraint-api/night-shift — 差分 upsert/削除 (last-write-wins)。 */
+  private async handleNightShiftPut(request: Request, record: TheearthSessionRecord): Promise<Response> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return dvrJsonError(503, "夜勤者マスタ (DTAKO_DB) が未設定です");
+    let raw: unknown;
+    try {
+      raw = await request.json();
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    let body: ReturnType<typeof normalizeNightShiftPutBody>;
+    try {
+      body = normalizeNightShiftPutBody(raw);
+    } catch (err) {
+      if (err instanceof WorkScheduleError) return dvrJsonError(400, err.message);
+      throw err;
+    }
+    const statements = buildNightShiftWriteStatements(body, new Date().toISOString(), record.compId);
+    if (statements.length === 0) return Response.json({ saved: true, changed: 0 });
+    try {
+      await db.batch(statements.map((s) => db.prepare(s.sql).bind(...s.params)));
+    } catch (err) {
+      console.error(JSON.stringify({ night_shift_put: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "夜勤者マスタの保存に失敗しました");
     }
     return Response.json({ saved: true, changed: statements.length });
   }

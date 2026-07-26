@@ -1,8 +1,9 @@
 /**
- * 所定労働時間マスタ (`work_schedules`) と 承認済み休日出勤の登録簿
- * (`holiday_work_approvals`) の pure ロジック (Refs #424 PR-C、migration 0011/0012)。
+ * 勤務設定マスタの pure ロジック — 所定労働時間 (`work_schedules`)、承認済み休日出勤
+ * (`holiday_work_approvals`)、夜勤者 (`night_shift_workers`)
+ * (Refs #424 PR-C / #433 PR-A、migration 0011/0012/0014)。
  *
- * どちらもタイムカード (社内 CakePHP) 由来の勤務を法定区分へ振り分けるための入力:
+ * いずれもタイムカード (社内 CakePHP) 由来の勤務を法定区分へ振り分けるための入力:
  *
  * - **所定労働時間** … 実働がこれを超えた分が時間外。デジタコ (theearth) 由来の
  *   乗務員は CSV が時間外をそのまま持っているので対象外 — 効くのは timecard 由来
@@ -10,6 +11,8 @@
  * - **休日出勤の承認** … 休日に打刻がある日のうち、この表に載っている日だけが
  *   割増賃金の対象 (休日出勤)。載っていない日は「自主出勤」として賃金計算から
  *   外す (時間は記録・表示する)。
+ * - **夜勤者** … 日跨ぎ打刻を打刻エラーとみなす判定からの除外リスト。事務職の
+ *   日跨ぎは通常「終業の押し忘れ」だが、夜勤者は正常に日をまたぐ。
  *
  * **休憩の所定値は持たない**: 事務員は昼休憩で打刻を切っていることが実データで
  * 分かったため、休憩は打刻 (sessions) の中抜けギャップと 12:00-13:00 の和集合から
@@ -109,6 +112,36 @@ export interface HolidayWorkD1Row {
   work_date: string;
   reason: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// 夜勤者マスタ (Refs #433 PR-A)
+// ---------------------------------------------------------------------------
+
+export interface NightShiftInput {
+  driverCd: string;
+  /** YYYY-MM-DD */
+  effectiveFrom: string;
+  /** この日から夜勤者か。false = 解除 (行を消さずに履歴で終わらせる)。 */
+  isNight: boolean;
+}
+
+export interface NightShiftDeleteKey {
+  driverCd: string;
+  effectiveFrom: string;
+}
+
+export interface NightShiftPutBody {
+  workers: NightShiftInput[];
+  deleteWorkers: NightShiftDeleteKey[];
+}
+
+export interface NightShiftD1Row {
+  driver_cd: string;
+  effective_from: string;
+  is_night: number;
+}
+
+export interface NightShiftEntry extends NightShiftInput {}
 
 // ---------------------------------------------------------------------------
 // 入力の検証・正規化
@@ -226,6 +259,35 @@ export function normalizeHolidayWorkPutBody(raw: unknown): HolidayWorkPutBody {
   };
 }
 
+function normalizeNightShiftInput(raw: unknown, index: number): NightShiftInput {
+  const obj = asObject(raw, `workers[${index}]`);
+  if (typeof obj.isNight !== "boolean") {
+    throw new WorkScheduleError(`workers[${index}].isNight は true / false が必要です`);
+  }
+  return {
+    driverCd: normalizeDriverCd(obj.driverCd, `workers[${index}].driverCd`),
+    effectiveFrom: normalizeDate(obj.effectiveFrom, `workers[${index}].effectiveFrom`),
+    isNight: obj.isNight,
+  };
+}
+
+function normalizeNightShiftDeleteKey(raw: unknown, index: number): NightShiftDeleteKey {
+  const obj = asObject(raw, `deleteWorkers[${index}]`);
+  return {
+    driverCd: normalizeDriverCd(obj.driverCd, `deleteWorkers[${index}].driverCd`),
+    effectiveFrom: normalizeDate(obj.effectiveFrom, `deleteWorkers[${index}].effectiveFrom`),
+  };
+}
+
+/** PUT /restraint-api/night-shift の body を検証・正規化する (差分送信、未指定は空配列)。 */
+export function normalizeNightShiftPutBody(raw: unknown): NightShiftPutBody {
+  const obj = asObject(raw, "night-shift の PUT body");
+  return {
+    workers: normalizeArray(obj.workers, "workers", normalizeNightShiftInput),
+    deleteWorkers: normalizeArray(obj.deleteWorkers, "deleteWorkers", normalizeNightShiftDeleteKey),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // D1 書き込み文の組み立て (pure — 実行は DO 側で db.prepare(sql).bind(...params))
 // ---------------------------------------------------------------------------
@@ -301,6 +363,32 @@ export function buildHolidayWorkWriteStatements(
   return statements;
 }
 
+/** 夜勤者マスタの差分 upsert/削除。 */
+export function buildNightShiftWriteStatements(
+  body: NightShiftPutBody,
+  nowIso: string,
+  compId: string,
+): D1Statement[] {
+  const statements: D1Statement[] = [];
+  for (const w of body.workers) {
+    statements.push({
+      sql: `INSERT INTO night_shift_workers (comp_id, driver_cd, effective_from, is_night, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(comp_id, driver_cd, effective_from) DO UPDATE SET
+              is_night = excluded.is_night,
+              updated_at = excluded.updated_at`,
+      params: [compId, w.driverCd, w.effectiveFrom, w.isNight ? 1 : 0, nowIso],
+    });
+  }
+  for (const k of body.deleteWorkers) {
+    statements.push({
+      sql: `DELETE FROM night_shift_workers WHERE comp_id = ? AND driver_cd = ? AND effective_from = ?`,
+      params: [compId, k.driverCd, k.effectiveFrom],
+    });
+  }
+  return statements;
+}
+
 // ---------------------------------------------------------------------------
 // GET 応答の組み立て (pure)
 // ---------------------------------------------------------------------------
@@ -350,6 +438,22 @@ export function buildHolidayWorkResponse(rows: HolidayWorkD1Row[]): HolidayWorkE
       const d = Number(a.driverCd) - Number(b.driverCd);
       if (d !== 0) return d;
       return a.workDate < b.workDate ? -1 : a.workDate > b.workDate ? 1 : 0;
+    });
+}
+
+/** 夜勤者マスタを 乗務員CD → 適用開始日 の昇順で返す (履歴なので古い順に読ませる)。 */
+export function buildNightShiftResponse(rows: NightShiftD1Row[]): NightShiftEntry[] {
+  return rows
+    .map((r) => ({
+      driverCd: r.driver_cd,
+      effectiveFrom: r.effective_from,
+      // D1 は 0/1 の INTEGER。真偽の判定を呼び出し側に散らさず、ここで boolean に畳む
+      isNight: r.is_night !== 0,
+    }))
+    .sort((a, b) => {
+      const d = Number(a.driverCd) - Number(b.driverCd);
+      if (d !== 0) return d;
+      return a.effectiveFrom < b.effectiveFrom ? -1 : a.effectiveFrom > b.effectiveFrom ? 1 : 0;
     });
 }
 
@@ -440,4 +544,36 @@ export function buildHolidayWorkIndex(entries: HolidayWorkEntry[]): Set<string> 
 /** その社員のその日が「承認済み休日出勤」か。 */
 export function isHolidayWorkApproved(index: Set<string>, driverCd: string, workDate: string): boolean {
   return index.has(`${driverCd}|${workDate}`);
+}
+
+/**
+ * 対象月 (`yearMonth`, "YYYY-MM") の末日時点で夜勤者である乗務員CD の集合を作る
+ * (Refs #433 PR-A)。
+ *
+ * 乗務員CD ごとに「適用開始日が月末以前の行のうち最も新しいもの」を採り、その
+ * `isNight` が true の人だけを入れる。**履歴を辿るのは過去月の再取り込みのため** —
+ * 夜勤担当が替わった時に行を消してしまうと、当時は正常だった日跨ぎ打刻が一斉に
+ * 打刻エラーになる。解除は `isNight: false` の行を後ろに足して表現する。
+ *
+ * `yearMonth` が不正な形式なら空集合 (fail-soft = 誰も夜勤者でない = 日跨ぎが
+ * すべてエラー候補になる)。呼び出し側は必ず月を検証してから渡すこと。
+ */
+export function buildNightShiftIndex(
+  entries: readonly NightShiftEntry[],
+  yearMonth: string,
+): Set<string> {
+  const out = new Set<string>();
+  const monthEnd = lastDayOfMonth(yearMonth);
+  if (!monthEnd) return out;
+  const latest = new Map<string, NightShiftEntry>();
+  for (const e of entries) {
+    if (e.effectiveFrom > monthEnd) continue;
+    const cur = latest.get(e.driverCd);
+    if (cur && cur.effectiveFrom >= e.effectiveFrom) continue;
+    latest.set(e.driverCd, e);
+  }
+  for (const [driverCd, e] of latest) {
+    if (e.isNight) out.add(driverCd);
+  }
+  return out;
 }

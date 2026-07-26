@@ -5,15 +5,20 @@ import {
   buildHolidayWorkIndex,
   buildHolidayWorkResponse,
   buildHolidayWorkWriteStatements,
+  buildNightShiftIndex,
+  buildNightShiftResponse,
+  buildNightShiftWriteStatements,
   buildWorkScheduleResponse,
   buildWorkScheduleWriteStatements,
   isHolidayWorkApproved,
   normalizeHolidayWorkPutBody,
+  normalizeNightShiftPutBody,
   normalizeWorkSchedulePutBody,
   resolveWorkScheduleAt,
   scopeByDriverCdAt,
   WorkScheduleError,
   type HolidayWorkD1Row,
+  type NightShiftD1Row,
   type WorkScheduleD1Row,
   type WorkScheduleRow,
 } from '../src/work-schedule'
@@ -456,5 +461,159 @@ describe('scopeByDriverCdAt', () => {
       resolveAt,
     )
     expect(map.get('18')).toEqual({ branchCode: null, jobName: null })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 夜勤者マスタ (Refs #433 PR-A)
+// ---------------------------------------------------------------------------
+
+describe('normalizeNightShiftPutBody', () => {
+  it('乗務員CD の前ゼロを落とし、isNight をそのまま持つ', () => {
+    expect(normalizeNightShiftPutBody({
+      workers: [{ driverCd: '01706', effectiveFrom: '2026-02-01', isNight: true }],
+      deleteWorkers: [{ driverCd: '1707', effectiveFrom: '2026-03-01' }],
+    })).toEqual({
+      workers: [{ driverCd: '1706', effectiveFrom: '2026-02-01', isNight: true }],
+      deleteWorkers: [{ driverCd: '1707', effectiveFrom: '2026-03-01' }],
+    })
+  })
+
+  it('未指定の配列は空になる', () => {
+    expect(normalizeNightShiftPutBody({})).toEqual({ workers: [], deleteWorkers: [] })
+  })
+
+  it('isNight が boolean でなければ 400 相当のエラー', () => {
+    expect(() => normalizeNightShiftPutBody({ workers: [{ driverCd: '1706', effectiveFrom: '2026-02-01' }] }))
+      .toThrow(WorkScheduleError)
+    expect(() => normalizeNightShiftPutBody({
+      workers: [{ driverCd: '1706', effectiveFrom: '2026-02-01', isNight: 1 }],
+    })).toThrow(/isNight/)
+  })
+
+  it('乗務員CD・適用開始日の形式を検証する', () => {
+    expect(() => normalizeNightShiftPutBody({
+      workers: [{ driverCd: 'x', effectiveFrom: '2026-02-01', isNight: true }],
+    })).toThrow(/driverCd/)
+    expect(() => normalizeNightShiftPutBody({
+      workers: [{ driverCd: '1706', effectiveFrom: '2026/02/01', isNight: true }],
+    })).toThrow(/effectiveFrom/)
+    expect(() => normalizeNightShiftPutBody({
+      deleteWorkers: [{ driverCd: '1706', effectiveFrom: '2026-2-1' }],
+    })).toThrow(/effectiveFrom/)
+    expect(() => normalizeNightShiftPutBody({ deleteWorkers: [{ effectiveFrom: '2026-02-01' }] }))
+      .toThrow(/driverCd/)
+  })
+
+  it('body / 要素がオブジェクトでなければエラー', () => {
+    expect(() => normalizeNightShiftPutBody(null)).toThrow(WorkScheduleError)
+    expect(() => normalizeNightShiftPutBody({ workers: 'x' })).toThrow(/配列/)
+    expect(() => normalizeNightShiftPutBody({ workers: [1] })).toThrow(/workers\[0\]/)
+    expect(() => normalizeNightShiftPutBody({ deleteWorkers: [null] })).toThrow(/deleteWorkers\[0\]/)
+  })
+})
+
+describe('buildNightShiftWriteStatements', () => {
+  it('upsert は comp をセッション由来で入れ、boolean を 0/1 に落とす', () => {
+    const st = buildNightShiftWriteStatements(
+      {
+        workers: [
+          { driverCd: '1706', effectiveFrom: '2026-02-01', isNight: true },
+          { driverCd: '1707', effectiveFrom: '2026-05-01', isNight: false },
+        ],
+        deleteWorkers: [],
+      },
+      NOW,
+      COMP,
+    )
+    expect(st).toHaveLength(2)
+    expect(st[0]!.sql).toContain('INSERT INTO night_shift_workers')
+    expect(st[0]!.sql).toContain('ON CONFLICT(comp_id, driver_cd, effective_from)')
+    expect(st[0]!.params).toEqual([COMP, '1706', '2026-02-01', 1, NOW])
+    expect(st[1]!.params).toEqual([COMP, '1707', '2026-05-01', 0, NOW])
+  })
+
+  it('削除は comp + 乗務員CD + 適用開始日で絞る', () => {
+    const st = buildNightShiftWriteStatements(
+      { workers: [], deleteWorkers: [{ driverCd: '1706', effectiveFrom: '2026-02-01' }] },
+      NOW,
+      COMP,
+    )
+    expect(st).toHaveLength(1)
+    expect(st[0]!.sql).toContain('DELETE FROM night_shift_workers')
+    expect(st[0]!.params).toEqual([COMP, '1706', '2026-02-01'])
+  })
+
+  it('差分が空なら文も空', () => {
+    expect(buildNightShiftWriteStatements({ workers: [], deleteWorkers: [] }, NOW, COMP)).toEqual([])
+  })
+})
+
+describe('buildNightShiftResponse', () => {
+  it('乗務員CD (数値) → 適用開始日 の昇順で、is_night を boolean に畳む', () => {
+    const rows: NightShiftD1Row[] = [
+      { driver_cd: '1707', effective_from: '2026-02-01', is_night: 1 },
+      { driver_cd: '1706', effective_from: '2026-05-01', is_night: 0 },
+      { driver_cd: '1706', effective_from: '2026-02-01', is_night: 1 },
+    ]
+    expect(buildNightShiftResponse(rows)).toEqual([
+      { driverCd: '1706', effectiveFrom: '2026-02-01', isNight: true },
+      { driverCd: '1706', effectiveFrom: '2026-05-01', isNight: false },
+      { driverCd: '1707', effectiveFrom: '2026-02-01', isNight: true },
+    ])
+  })
+
+  it('同一乗務員の履歴は適用開始日の昇順に並ぶ (逆順・同値を含む)', () => {
+    const rows: NightShiftD1Row[] = [
+      { driver_cd: '1706', effective_from: '2026-02-01', is_night: 1 },
+      { driver_cd: '1706', effective_from: '2026-08-01', is_night: 1 },
+      { driver_cd: '1706', effective_from: '2026-05-01', is_night: 0 },
+      { driver_cd: '1706', effective_from: '2026-05-01', is_night: 0 },
+    ]
+    expect(buildNightShiftResponse(rows).map(r => r.effectiveFrom)).toEqual([
+      '2026-02-01', '2026-05-01', '2026-05-01', '2026-08-01',
+    ])
+  })
+
+  it('空なら空', () => {
+    expect(buildNightShiftResponse([])).toEqual([])
+  })
+})
+
+describe('buildNightShiftIndex', () => {
+  const YAMANE = { driverCd: '1706', effectiveFrom: '2026-02-01', isNight: true }
+  const SHIRASAYA = { driverCd: '1707', effectiveFrom: '2026-02-01', isNight: true }
+
+  it('月末時点で夜勤の人だけを含む', () => {
+    expect([...buildNightShiftIndex([YAMANE, SHIRASAYA], '2026-06')].sort()).toEqual(['1706', '1707'])
+  })
+
+  it('適用開始日が月末より後の行は効かない', () => {
+    expect(buildNightShiftIndex([{ driverCd: '1706', effectiveFrom: '2026-07-01', isNight: true }], '2026-06').size)
+      .toBe(0)
+  })
+
+  it('解除の行が後にあれば、その月以降は夜勤者でなくなる', () => {
+    const entries = [YAMANE, { driverCd: '1706', effectiveFrom: '2026-05-01', isNight: false }]
+    // 解除より前の月は当時のまま夜勤者 (過去月の再取り込みで姿が変わらない)
+    expect(buildNightShiftIndex(entries, '2026-04').has('1706')).toBe(true)
+    expect(buildNightShiftIndex(entries, '2026-06').has('1706')).toBe(false)
+  })
+
+  it('解除のあとに再登録すれば また夜勤者になる (順序が逆に並んでいても最新が勝つ)', () => {
+    const entries = [
+      { driverCd: '1706', effectiveFrom: '2026-06-01', isNight: true },
+      { driverCd: '1706', effectiveFrom: '2026-05-01', isNight: false },
+      YAMANE,
+    ]
+    expect(buildNightShiftIndex(entries, '2026-06').has('1706')).toBe(true)
+  })
+
+  it('月の形式が不正なら空集合 (= 日跨ぎがすべてエラー候補になる安全側)', () => {
+    expect(buildNightShiftIndex([YAMANE], '2026-6').size).toBe(0)
+  })
+
+  it('空のマスタなら空集合', () => {
+    expect(buildNightShiftIndex([], '2026-06').size).toBe(0)
   })
 })

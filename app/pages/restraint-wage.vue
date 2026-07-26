@@ -2203,6 +2203,81 @@ async function deleteHolidayWork(entry: HolidayWorkEntry) {
   }, '休日出勤の承認を取り消しました (この日は自主出勤に戻ります)')
 }
 
+// ---- 夜勤者マスタ (Refs #433 PR-A) ----
+// 日跨ぎ打刻を「打刻エラー」とみなす判定からの除外リスト。事務職の打刻が翌日に
+// またがるのは通常 終業の押し忘れだが、夜勤者は正常に日をまたぐ。
+// 履歴 (適用開始日 + 夜勤/解除) を持つのは、過去月を再取り込みした時に当時の姿を
+// 再現するため — 行を消すと当時は正常だった打刻が一斉にエラーになる。
+
+interface NightShiftEntry { driverCd: string, effectiveFrom: string, isNight: boolean }
+
+const nightShifts = ref<NightShiftEntry[]>([])
+const nightShiftLoaded = ref(false)
+const savingNightShift = ref(false)
+const nightShiftMessage = ref('')
+const nightShiftForm = ref({ driverCd: '', effectiveFrom: '', isNight: true })
+
+/** 乗務員CD → 氏名 (社員マスタから引く)。社員マスタ未読込・未登録なら空文字 —
+ * 表示の補助でしかないので、引けなくても登録・解除は妨げない。 */
+function driverNameOf(driverCd: string): string {
+  return employeeMaster.value.find(e => e.driverCd === driverCd)?.name ?? ''
+}
+
+async function loadNightShift() {
+  if (!session.value) return
+  try {
+    const res = await $fetch<{ workers: NightShiftEntry[] }>('/restraint-api/night-shift', {
+      headers: authHeaders(),
+    })
+    nightShifts.value = res.workers
+    nightShiftLoaded.value = true
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+}
+
+async function putNightShift(body: Record<string, unknown>, message: string) {
+  if (!session.value) return
+  savingNightShift.value = true
+  pageError.value = ''
+  try {
+    await $fetch('/restraint-api/night-shift', { method: 'PUT', headers: authHeaders(), body })
+    nightShiftMessage.value = message
+    await loadNightShift()
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+  finally {
+    savingNightShift.value = false
+  }
+}
+
+async function addNightShift() {
+  if (!/^\d{1,8}$/.test(nightShiftForm.value.driverCd.trim())) {
+    pageError.value = '乗務員CD は数字 (最大8桁) で入力してください'
+    return
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(nightShiftForm.value.effectiveFrom)) {
+    pageError.value = '適用開始日は YYYY-MM-DD で入力してください'
+    return
+  }
+  await putNightShift({
+    workers: [{
+      driverCd: nightShiftForm.value.driverCd.trim(),
+      effectiveFrom: nightShiftForm.value.effectiveFrom,
+      isNight: nightShiftForm.value.isNight,
+    }],
+  }, nightShiftForm.value.isNight ? '夜勤者に登録しました' : '夜勤者から解除しました')
+}
+
+async function deleteNightShift(entry: NightShiftEntry) {
+  await putNightShift({
+    deleteWorkers: [{ driverCd: entry.driverCd, effectiveFrom: entry.effectiveFrom }],
+  }, '履歴の行を削除しました')
+}
+
 watch([activeTab, month, session], () => {
   if (!session.value || !month.value) return
   // 上部バーの「給与DBから読み込み」はどのタブからでも押せるようにしている。
@@ -2246,8 +2321,11 @@ watch([activeTab, month, session], () => {
     loadEmployeeMasterScope()
   }
   else if (activeTab.value === 'schedule') {
-    // 所定は履歴全件なので 1 回だけ。承認簿は月で絞るので月が変わるたびに引き直す
+    // 所定・夜勤者は履歴全件なので 1 回だけ。承認簿は月で絞るので月が変わるたびに引き直す
     if (!workScheduleLoaded.value) loadWorkSchedule()
+    if (!nightShiftLoaded.value) loadNightShift()
+    // 夜勤者・承認簿の一覧に氏名を出すため (乗務員CD だけでは誰か分からない)
+    if (!employeeMasterLoaded.value) loadEmployeeMaster()
     loadHolidayWork()
   }
 }, { immediate: false })
@@ -3785,6 +3863,80 @@ watch([activeTab, month, session], () => {
               休日出勤として割増賃金の対象になります。載っていない日は<b>自主出勤</b>として賃金計算から外れますが、
               <b>時間は記録され画面にも出ます</b> — 後からこの表に日付を足せば休日出勤へ昇格します。<br>
               休日出勤は運用上ほとんど発生しない前提のため、日付を明示登録する方式にしています。
+            </p>
+          </UCard>
+
+          <UCard class="mt-4">
+            <template #header>
+              <div class="flex flex-wrap items-center gap-3">
+                <span class="font-semibold">夜勤者</span>
+                <span class="text-xs text-gray-500">ここに登録した人は日跨ぎの打刻を打刻エラーにしません</span>
+                <div class="flex-1" />
+                <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" :loading="savingNightShift" @click="loadNightShift" />
+              </div>
+            </template>
+
+            <p v-if="nightShiftMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2 mb-3">
+              {{ nightShiftMessage }}
+            </p>
+
+            <div class="flex flex-wrap items-end gap-2 mb-4">
+              <UFormField label="乗務員CD" size="xs" :help="driverNameOf(nightShiftForm.driverCd.trim()) || ' '">
+                <UInput v-model="nightShiftForm.driverCd" size="xs" class="w-28" />
+              </UFormField>
+              <UFormField label="適用開始日" size="xs" help="この日から">
+                <UInput v-model="nightShiftForm.effectiveFrom" type="date" size="xs" class="w-40" />
+              </UFormField>
+              <UFormField label="区分" size="xs" help="解除も履歴として残します">
+                <USelect
+                  v-model="nightShiftForm.isNight"
+                  size="xs"
+                  class="w-32"
+                  :items="[{ label: '夜勤者', value: true }, { label: '解除', value: false }]"
+                />
+              </UFormField>
+              <UButton size="xs" icon="i-lucide-plus" label="追加・更新" :loading="savingNightShift" @click="addNightShift" />
+            </div>
+
+            <p v-if="!nightShifts.length" class="text-sm text-gray-500">
+              夜勤者が登録されていません。この状態で勤怠を取り込むと、<b>事務職の日跨ぎ打刻はすべて打刻エラー</b>になります。
+              夜勤で日をまたぐ人は先にここへ登録してください。
+            </p>
+            <table v-else class="w-full text-sm">
+              <thead class="bg-gray-50 dark:bg-gray-800">
+                <tr>
+                  <th class="px-2 py-2 text-left">乗務員CD</th>
+                  <th class="px-2 py-2 text-left">氏名</th>
+                  <th class="px-2 py-2 text-left">適用開始日</th>
+                  <th class="px-2 py-2 text-left">区分</th>
+                  <th class="px-2 py-2" />
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="entry in nightShifts" :key="`${entry.driverCd}|${entry.effectiveFrom}`" class="border-t border-gray-200 dark:border-gray-700">
+                  <td class="px-2 py-1">{{ entry.driverCd }}</td>
+                  <td class="px-2 py-1">{{ driverNameOf(entry.driverCd) }}</td>
+                  <td class="px-2 py-1">{{ entry.effectiveFrom }}</td>
+                  <td class="px-2 py-1">
+                    <span :class="entry.isNight ? 'text-indigo-600 dark:text-indigo-400' : 'text-gray-500'">
+                      {{ entry.isNight ? '夜勤者' : '解除' }}
+                    </span>
+                  </td>
+                  <td class="px-2 py-1 text-right">
+                    <UButton size="xs" color="error" variant="ghost" icon="i-lucide-trash-2" :loading="savingNightShift" @click="deleteNightShift(entry)" />
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+
+            <p class="text-xs text-gray-500 mt-3">
+              事務職の打刻が翌日にまたがっていたら通常は<b>終業の押し忘れ</b>です (実データでは 35 時間の拘束になり、
+              翌日の打刻ごと巻き添えにして消えます)。ただし<b>夜勤者は正常に日をまたぐ</b>ため、ここに載っている人は
+              判定から外します。<br>
+              <b>行は消さずに「解除」を足してください</b> — 対象月に効くのは<b>適用開始日が月末以前の最新行</b>なので、
+              解除を履歴として残せば過去月を再取り込みしても当時の姿で計算されます。行そのものを削除すると、
+              当時は正常だった打刻が過去にさかのぼってエラーになります。<br>
+              デジタコ (theearth) 由来の乗務員には影響しません — 打刻ではなく拘束時間 CSV を使うためです。
             </p>
           </UCard>
         </template>
