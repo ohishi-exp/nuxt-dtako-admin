@@ -27,7 +27,8 @@ import type {
   WageReportRow,
 } from '~/utils/restraint-wage-view'
 import { MIN_WAGE_DEFAULT_KEY } from '~/utils/restraint-wage-view'
-import { buildTimecardTable, countWorkKinds, daysInMonth } from '~/utils/timecard-view'
+import { buildTimecardSummary, buildTimecardTable, countWorkKinds, daysInMonth } from '~/utils/timecard-view'
+import type { TimecardSummaryRow } from '~/utils/timecard-view'
 import type {
   OvertimeHoursComparison,
   ParsedSalaryCsv,
@@ -278,15 +279,21 @@ const timecardRows = computed(() =>
 /** 表示対象の乗務員CD (空 = 全員)。カンマ区切りで絞れる。 */
 const timecardFilter = ref('')
 
+/** `timecardFilter` の正規化キー集合 (空 = 絞り込みなし)。 */
+const timecardFilterCds = computed(() => timecardFilter.value
+  .split(/[,、\s]+/)
+  .map(s => s.trim())
+  .filter(Boolean)
+  .map(s => String(Number(s))))
+
+function matchesTimecardFilter(driverCd: string): boolean {
+  return !timecardFilterCds.value.length || timecardFilterCds.value.includes(String(Number(driverCd)))
+}
+
 const timecardSheets = computed(() => {
-  const filter = timecardFilter.value
-    .split(/[,、\s]+/)
-    .map(s => s.trim())
-    .filter(Boolean)
-    .map(s => String(Number(s)))
   const [year, monthNo] = [selectedYear.value, selectedMonthNo.value]
   return timecardRows.value
-    .filter(r => !filter.length || filter.includes(String(Number(r.summary.driverCd))))
+    .filter(r => matchesTimecardFilter(r.summary.driverCd))
     .map(r => {
       // 拘束時間上の残業・勤怠日数は summary から常に出せる。給与側 (基礎単価・
       // 残業計上額・勤怠日数) は給与比較タブで CSV を取り込んでいる時だけ埋まる
@@ -389,6 +396,11 @@ async function fetchKintai() {
     kintaiMessage.value
       = `${months.length} ヶ月 / ${rows} 行を取り込みました (サマリ更新 ${updated} 件)`
         + (warnings.length ? ` — 警告 ${warnings.length} 件: ${warnings.slice(0, 3).join(' / ')}` : '')
+    // **取り込んだ月のキャッシュを全部捨てる**。`loadWageReport` は選択中の月しか
+    // 捨てないので、期間取り込みの後に期間サマリー・一括印刷を開くと、選択中の月
+    // 以外は取り込み前の数字のまま出る (2026-07-26 実測: 4〜5月を再取り込みしたのに
+    // 公休が空欄・夜勤者が自主出勤のままで、リロードして初めて直った)
+    for (const ym of months) reportCache.delete(ym)
     // 表は wage-report 由来なので取り込み後に読み直す
     await loadWageReport()
   }
@@ -400,6 +412,117 @@ async function fetchKintai() {
     fetchingKintai.value = false
   }
 }
+
+// ---- 期間サマリー印刷 (Refs #443) ----
+// タイムカード表は「1 人 1 枚 × 日別」なので、期間分の日数を突き合わせたい総務には
+// 枚数が多すぎる。こちらは「1 ヶ月 1 枚 × 1 人 1 行」で、日別の打刻を出さない。
+
+const summaryFrom = ref('')
+const summaryTo = ref('')
+/** `reports` は一覧の行を作った元の wage-report 行 (タイムカード由来のみ)。
+ * 行クリックで日別表を出すのに日別サマリが要るので、一覧と一緒に持っておく
+ * (再取得すると、見ている一覧と中身がずれうる)。 */
+const summaryBatch = ref<Array<{ ym: string, rows: TimecardSummaryRow[], reports: WageReportRow[] }> | null>(null)
+const summaryProgress = ref('')
+const buildingSummary = ref(false)
+
+// 期間の既定は選択中の月だけ (勤怠取り込みと同じ作法)
+watch(month, (ym) => {
+  summaryFrom.value = ym
+  summaryTo.value = ym
+}, { immediate: true })
+
+const summaryTargetMonths = computed(() => {
+  const range = monthRange(summaryFrom.value, summaryTo.value)
+  return range.length ? range : [month.value]
+})
+
+/**
+ * その勤務月の 乗務員CD → 給与明細の残業手当。
+ *
+ * 突合は給与比較タブと同じ `compareSalaryMonth` に任せる (社員マスタ経由の
+ * 引き当て・同名別人の扱いを 2 箇所に持たない)。明細が未取り込みの月は空の Map で、
+ * 列は空欄になる — **ここで給与DBを取りに行かない** (1 社 10〜20 秒かかるので、
+ * 期間分を印刷ボタンに巻き込むと待たされる。取得は上部の給与DB バーの責務)。
+ */
+function salaryOvertimeMapFor(ym: string, rows: WageReportRow[]): Map<string, number> {
+  const map = new Map<string, number>()
+  const csvRows = (salaryParsed.value?.rows ?? []).filter(r => r.month === nextYm(ym))
+  if (!csvRows.length) return map
+  const compared = compareSalaryMonth(csvRows, rows, salaryItemConfig.value, salaryCdMap.value)
+  for (const r of compared.rows) {
+    map.set(String(Number(r.mappedDriverCd ?? r.driverCd)), r.csvOvertime)
+  }
+  return map
+}
+
+/**
+ * 期間サマリーを組んで**画面に開く** (印刷ダイアログは出さない、2026-07-26 要望)。
+ *
+ * 月次集計の一括印刷が即 `window.print()` するのと違い、こちらは中身を確かめてから
+ * 印刷したい — 給与明細の取り込み漏れ (残業(給与) が空欄) や乗務員CD の絞り込み
+ * ミスは、印刷ダイアログが被さった状態では気付けない。印刷はプレビュー上の
+ * 「印刷」ボタンから。
+ */
+async function openTimecardSummary() {
+  if (buildingSummary.value || !session.value) return
+  buildingSummary.value = true
+  pageError.value = ''
+  try {
+    const months = summaryTargetMonths.value
+    const batch: Array<{ ym: string, rows: TimecardSummaryRow[], reports: WageReportRow[] }> = []
+    for (const ym of months) {
+      summaryProgress.value = `${fmtYm(ym)} を集計中... (${batch.length + 1}/${months.length})`
+      const res = await fetchWageReport(ym)
+      const timecard = res.rows.filter(r => r.source === 'timecard' && matchesTimecardFilter(r.summary.driverCd))
+      const rows = buildTimecardSummary(
+        timecard,
+        Number(ym.slice(0, 4)),
+        Number(ym.slice(5, 7)),
+        salaryOvertimeMapFor(ym, res.rows),
+      )
+      batch.push({ ym, rows, reports: timecard })
+    }
+    summaryBatch.value = batch
+    summaryProgress.value = ''
+  }
+  catch (e) {
+    handleApiError(e)
+    summaryProgress.value = ''
+  }
+  finally {
+    buildingSummary.value = false
+  }
+}
+
+// ---- 一覧の行クリック → その人のその月の日別表 (2026-07-26 要望) ----
+// 一覧の数字が腑に落ちない時 (打刻エラー 2 日、有休 1.5 等) に、タブへ戻って月を
+// 選び直さずその場で根拠を見られるようにする。**印刷には出さない** — 一覧を
+// 印刷するための画面なので、開いたまま印刷しても紙は一覧のままにする。
+
+const summaryDetail = ref<{ ym: string, driverCd: string } | null>(null)
+const summaryDetailOpen = computed({
+  get: () => summaryDetail.value !== null,
+  set: (v: boolean) => { if (!v) summaryDetail.value = null },
+})
+
+/** 開いている日別表 (1 人分)。対象が見つからなければ null。 */
+const summaryDetailSheet = computed(() => {
+  const target = summaryDetail.value
+  if (!target) return null
+  const page = summaryBatch.value?.find(p => p.ym === target.ym)
+  const row = page?.reports.find(r => r.summary.driverCd === target.driverCd)
+  if (!row) return null
+  const year = Number(target.ym.slice(0, 4))
+  const monthNo = Number(target.ym.slice(5, 7))
+  return {
+    ym: target.ym,
+    driverCd: row.summary.driverCd,
+    driverName: row.summary.driverName,
+    rows: buildTimecardTable(row.summary.days, year, monthNo),
+    counts: countWorkKinds(row.summary.days),
+  }
+})
 
 /** 計算単価の表示 ("@1,206")。null は空文字 (空 div は高さ 0 で潰れる)。 */
 function fmtAt(rate: number | null): string {
@@ -2495,6 +2618,39 @@ watch([activeTab, month, session], () => {
       </section>
     </div>
 
+    <!-- 期間サマリー印刷ビュー (実行中はこれだけを表示 = 印刷対象、Refs #443) -->
+    <div v-else-if="summaryBatch" class="p-4">
+      <div class="flex items-center gap-3 mb-4 print:hidden">
+        <span class="font-semibold">期間サマリー ({{ summaryBatch.length }} ヶ月)</span>
+        <UButton size="xs" icon="i-lucide-printer" label="印刷" @click="printNow" />
+        <UButton size="xs" variant="soft" icon="i-lucide-x" label="閉じる" @click="summaryBatch = null" />
+        <span class="text-xs text-gray-500">行をクリックすると、その人の日別表 (打刻) を開いて数字の根拠を確かめられます</span>
+      </div>
+      <section v-for="page in summaryBatch" :key="page.ym" class="print-month-page mb-8">
+        <h1 class="text-lg font-bold mb-2">タイムカード集計表 ({{ fmtYm(page.ym) }})</h1>
+        <p v-if="!page.rows.length" class="text-sm text-gray-500">この月にタイムカード由来の勤務がありません</p>
+        <TimecardSummaryTable v-else :rows="page.rows" @select="cd => summaryDetail = { ym: page.ym, driverCd: cd }" />
+      </section>
+
+      <!-- 行クリックで開く日別表。印刷対象にしない (紙は一覧のまま) -->
+      <UModal v-model:open="summaryDetailOpen" :ui="{ content: 'max-w-2xl' }" class="print:hidden">
+        <template #content>
+          <div v-if="summaryDetailSheet" class="p-6 max-h-[85vh] overflow-y-auto">
+            <TimecardTable
+              :driver-cd="summaryDetailSheet.driverCd"
+              :driver-name="summaryDetailSheet.driverName"
+              :month="summaryDetailSheet.ym"
+              :rows="summaryDetailSheet.rows"
+              :counts="summaryDetailSheet.counts"
+            />
+            <div class="mt-3 flex justify-end">
+              <UButton size="sm" variant="soft" label="閉じる" @click="summaryDetail = null" />
+            </div>
+          </div>
+        </template>
+      </UModal>
+    </div>
+
     <template v-else>
       <div class="print:hidden">
         <TheearthSessionHeader title="拘束×賃金 (集計・単価・印刷)" api-prefix="/restraint-api" wide />
@@ -4155,6 +4311,27 @@ watch([activeTab, month, session], () => {
                   の打刻を社内タイムカードから取り直します (同じ内容なら版は増えません)
                 </span>
                 <span v-if="kintaiMessage" class="text-xs text-green-700 dark:text-green-400">{{ kintaiMessage }}</span>
+              </div>
+              <!-- 期間サマリー印刷 (Refs #443)。上の「印刷」は 1 人 1 枚の日別表なので、
+                   期間の日数を突き合わせたい時は枚数が多すぎる -->
+              <div class="mt-2 flex flex-wrap items-center gap-2 print:hidden">
+                <span class="text-xs text-gray-500">期間サマリー</span>
+                <USelect v-model="summaryFrom" size="xs" class="w-32" :items="payrollMonthOptions" :aria-label="'期間サマリーの勤務月 (から)'" />
+                <span class="text-xs text-gray-500">〜</span>
+                <USelect v-model="summaryTo" size="xs" class="w-32" :items="payrollMonthOptions" :aria-label="'期間サマリーの勤務月 (まで)'" />
+                <UButton
+                  size="xs"
+                  variant="soft"
+                  icon="i-lucide-table"
+                  :label="buildingSummary ? summaryProgress || '集計中...' : `サマリーを開く (${summaryTargetMonths.length} ヶ月)`"
+                  :loading="buildingSummary"
+                  :disabled="buildingSummary"
+                  @click="openTimecardSummary"
+                />
+                <span class="text-xs text-gray-500">
+                  月毎に 1 枚・1 人 1 行の一覧を開きます (日別の打刻は出ません)。中身を確かめてから印刷できます。
+                  残業(給与) は上の給与DBバーで対象期間を読み込むと入ります
+                </span>
               </div>
             </template>
 

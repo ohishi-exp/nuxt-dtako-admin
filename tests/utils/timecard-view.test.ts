@@ -1,6 +1,7 @@
 // タイムカード表 (既存 PDF 準拠の 8 列) への変換テスト (Refs #424 PR-E)
 import { describe, expect, it } from 'vitest'
 import {
+  buildTimecardSummary,
   buildTimecardTable,
   countWorkKinds,
   dayKindLabel,
@@ -8,7 +9,7 @@ import {
   daysInMonth,
   formatPunch,
 } from '../../app/utils/timecard-view'
-import type { RestraintSummaryDay } from '../../app/utils/restraint-wage-view'
+import type { RestraintSummaryDay, WageReportRow } from '../../app/utils/restraint-wage-view'
 
 function day(over: Partial<RestraintSummaryDay> & { day: number }): RestraintSummaryDay {
   return {
@@ -432,5 +433,90 @@ describe('countWorkKinds — 打刻エラーと休暇 (Refs #433)', () => {
   it('打刻のある日に付いた休暇 (遅刻) も数え、勤務区分は通常のまま', () => {
     const counts = countWorkKinds([day({ day: 1, leaves: ['遅刻'] })])
     expect(counts).toMatchObject({ normal: 1, publicHoliday: 0, paidLeave: 0, absence: 0 })
+  })
+})
+
+describe('buildTimecardSummary — 期間サマリー印刷の一覧行 (Refs #443)', () => {
+  function reportRow(over: Partial<WageReportRow['summary']> & { driverCd: string }): WageReportRow {
+    return {
+      summary: {
+        driverName: '事務 太郎',
+        branchName: '本社',
+        workDays: 0,
+        restDays: 0,
+        restraintMinutes: null,
+        drivingMinutes: null,
+        loadingMinutes: null,
+        breakMinutes: null,
+        workingMinutes: null,
+        overtimeMinutes: null,
+        nightMinutes: null,
+        overtimeNightMinutes: null,
+        maxDailyRestraintMinutes: null,
+        fiscalCumulativeMinutes: null,
+        restraintLimitMinutes: null,
+        excessRestraintMinutes: null,
+        over15hDays: 0,
+        avgDriving9hOverCount: 0,
+        days: [],
+        ...over,
+      },
+      fetched_at: null,
+      last_verified_at: null,
+      wage: {} as WageReportRow['wage'],
+      source: 'timecard',
+    }
+  }
+
+  it('出勤区分は日別から数え、休暇日数は worker の leaveCounts をそのまま使う', () => {
+    const [row] = buildTimecardSummary([reportRow({
+      driverCd: '1706',
+      workingMinutes: 9000,
+      overtimeMinutes: 600,
+      overtimeNightMinutes: 120,
+      days: [
+        day({ day: 1 }),
+        day({ day: 2, overtimeMinutes: 60 }),
+        day({ day: 3, holidayKind: 'legal' }),
+        day({ day: 4, isRestDay: true, voluntaryMinutes: 180 }),
+        day({ day: 5, isRestDay: true, punchErrorMinutes: 2000 }),
+        // 日別にも休暇はあるが、こちらは数えず leaveCounts を採る
+        day({ day: 6, isRestDay: true, leaves: ['公休'] }),
+      ],
+      leaveCounts: { publicHoliday: 8, paidLeave: 1.5, absence: 2, specialLeave: 1, late: 3, earlyLeave: 4 },
+    })], 2026, 6, new Map())
+
+    expect(row).toMatchObject({
+      driverCd: '1706',
+      driverName: '事務 太郎',
+      workingMinutes: 9000,
+      overtimeMinutes: 720,
+      salaryOvertime: null,
+      leaves: { publicHoliday: 8, paidLeave: 1.5, absence: 2, specialLeave: 1, late: 3, earlyLeave: 4 },
+    })
+    expect(row!.counts).toMatchObject({ normal: 1, overtime: 1, holidayWork: 1, voluntary: 1, punchError: 1 })
+    // 出勤 = 月日数 − 公休 − 有休 − 欠勤 (タイムカード表の「出勤日数 (拘束)」と同じ、
+    // Refs #441)。内訳の足し算にすると、タイムカードに行自体が無い日を数え損ねる
+    expect(row!.attendanceDays).toBe(30 - 8 - 1.5 - 2)
+  })
+
+  it('leaveCounts / 時間が無い行は 0 で埋める (古いサマリ)', () => {
+    const [row] = buildTimecardSummary([reportRow({ driverCd: '1048' })], 2026, 6, new Map())
+    expect(row).toMatchObject({
+      workingMinutes: 0,
+      overtimeMinutes: 0,
+      leaves: { publicHoliday: 0, paidLeave: 0, absence: 0, specialLeave: 0, late: 0, earlyLeave: 0 },
+      // 休暇が 1 日も無ければ全日出勤扱い (打刻の無い日も「来ていない」とは確定しない)
+      attendanceDays: 30,
+    })
+  })
+
+  it('給与明細の残業手当は乗務員CDを数値正規化して引く (未取り込みは null)', () => {
+    const rows = buildTimecardSummary(
+      [reportRow({ driverCd: '0065' }), reportRow({ driverCd: '1707' })],
+      2026, 6,
+      new Map([['65', 30000]]),
+    )
+    expect(rows.map(r => r.salaryOvertime)).toEqual([30000, null])
   })
 })
