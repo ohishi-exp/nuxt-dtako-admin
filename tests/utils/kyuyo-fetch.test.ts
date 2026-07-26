@@ -170,7 +170,7 @@ describe('payrollToParsedSalary', () => {
       amounts: { 基本給: 83_418, 残業手当: 77_762 },
       reportedTotal: 404_045,
       rates: { base: 3_679, overtime: 1_318 },
-      // 給与DB は支給項目しか返さないので勤怠日数は空 (Refs #433)
+      // API が勤怠を返さない版でも空で通る (Refs #433, rust-ichibanboshi#104)
       attendance: {},
     }])
     expect(out.itemLabels).toEqual(['基本給', '残業手当'])
@@ -220,5 +220,21 @@ describe('payrollToParsedSalary', () => {
     expect(payrollToParsedSalary([], '0100')).toEqual({
       rows: [], itemLabels: [], months: [], warnings: [],
     })
+  })
+
+  it('勤怠日数 (attendance) をそのまま SalaryCsvRow へ移す (rust-ichibanboshi#104)', () => {
+    const out = payrollToParsedSalary(
+      [row({ attendance: { 出勤日数: 21, 公休日数: 5, 有休日数: 1.5, 残業時間: 59 } })],
+      '0100',
+    )
+    // 項目名は給与明細の【勤怠】欄の見出しと同じ = 貼り付け CSV 経路と同じキーで引ける
+    expect(out.rows[0]!.attendance).toEqual({ 出勤日数: 21, 公休日数: 5, 有休日数: 1.5, 残業時間: 59 })
+    // 勤怠は支給項目には混ざらない
+    expect(out.itemLabels).toEqual(['基本給', '残業手当'])
+  })
+
+  it('半休の 0.5 が保たれる', () => {
+    const out = payrollToParsedSalary([row({ attendance: { 有休日数: 0.5 } })], '0100')
+    expect(out.rows[0]!.attendance!['有休日数']).toBe(0.5)
   })
 })

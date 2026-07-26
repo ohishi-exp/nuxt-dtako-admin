@@ -152,6 +152,14 @@ export interface KyuyoPayrollRow {
   pay_date: string
   /** **支給**項目名 → 金額 (円)。 */
   payments: Record<string, number>
+  /**
+   * **勤怠**項目名 → 値 (出勤日数・公休日数・有休日数・欠勤日数・残業時間 等、
+   * rust-ichibanboshi#104)。単位は項目ごとに違う (日 / 時間 / 回)。
+   *
+   * **optional** — この項目を返さない版の rust-ichibanboshi が動いている環境でも
+   * 取り込みを成功させるため (デプロイ順に依存しない)。
+   */
+  attendance?: Record<string, number>
   /** 基本単価 (日額)。取れなければ null。 */
   base_rate: number | null
   /** 残業単価 (時給)。取れなければ null。 */
@@ -210,9 +218,10 @@ export function payrollToParsedSalary(
       amounts,
       reportedTotal: row.totals?.soshikyu ?? null,
       rates: { base: row.base_rate, overtime: row.overtime_rate },
-      // 給与DB は支給項目 (MONEY 列) しか返さないので勤怠日数は空。貼り付け CSV の
-      // 【勤怠】セクション経由でのみ入る (Refs #433)
-      attendance: {},
+      // 勤怠日数 (`KINDATA*` 由来、rust-ichibanboshi#104)。項目名は給与明細の
+      // 【勤怠】欄の見出しと同じなので、貼り付け CSV 経路と同じキーで引ける。
+      // 返さない版の API でも空で通す (Refs #433)
+      attendance: row.attendance ?? {},
     })
   }
 
