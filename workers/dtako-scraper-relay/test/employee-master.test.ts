@@ -36,7 +36,9 @@ describe('normalizeEmployeeMasterPutBody', () => {
       employees: [{ company: ' 株 ', payrollCd: '007', name: ' 山田　太郎 ', driverCd: '0099' }],
     })
     // NFKC 正規化で全角スペース (U+3000) は半角スペースになる (name_key はさらに空白を全除去)
-    expect(body.employees).toEqual([{ company: '株', payrollCd: '7', name: '山田 太郎', driverCd: '99' }])
+    expect(body.employees).toEqual([
+      { company: '株', payrollCd: '7', name: '山田 太郎', driverCd: '99', hireDate: null, retireDate: null },
+    ])
   })
 
   it('employees.driverCd は null/undefined を許容する', () => {
@@ -48,6 +50,32 @@ describe('normalizeEmployeeMasterPutBody', () => {
       employees: [{ company: '株', payrollCd: '1', name: '甲', driverCd: null }],
     })
     expect(body2.employees[0]!.driverCd).toBeNull()
+  })
+
+  it('employees.hireDate/retireDate は省略可・空文字は null (Refs #445)', () => {
+    // 手編集の保存や古い画面は送ってこない。必須にすると入社日を持たない社員の
+    // 編集が 400 になる
+    const body = normalizeEmployeeMasterPutBody({
+      employees: [{ company: '株', payrollCd: '1', name: '甲' }],
+    })
+    expect(body.employees[0]).toMatchObject({ hireDate: null, retireDate: null })
+    const body2 = normalizeEmployeeMasterPutBody({
+      employees: [{ company: '株', payrollCd: '1', name: '甲', hireDate: '', retireDate: null }],
+    })
+    expect(body2.employees[0]).toMatchObject({ hireDate: null, retireDate: null })
+    const body3 = normalizeEmployeeMasterPutBody({
+      employees: [{ company: '株', payrollCd: '1', name: '甲', hireDate: '2020-04-01', retireDate: '2026-01-26' }],
+    })
+    expect(body3.employees[0]).toMatchObject({ hireDate: '2020-04-01', retireDate: '2026-01-26' })
+  })
+
+  it('employees.hireDate が YYYY-MM-DD でなければ弾く', () => {
+    expect(() => normalizeEmployeeMasterPutBody({
+      employees: [{ company: '株', payrollCd: '1', name: '甲', hireDate: '2020/04/01' }],
+    })).toThrow(/hireDate/)
+    expect(() => normalizeEmployeeMasterPutBody({
+      employees: [{ company: '株', payrollCd: '1', name: '甲', retireDate: 20260126 }],
+    })).toThrow(/retireDate/)
   })
 
   it('attrs を検証・正規化する (branch/payScheme は任意)', () => {
@@ -205,7 +233,7 @@ describe('normalizeEmployeeMasterPutBody', () => {
 describe('buildEmployeeMasterWriteStatements', () => {
   it('employees / attrs は upsert 文、delete系は DELETE 文になる', () => {
     const body = normalizeEmployeeMasterPutBody({
-      employees: [{ company: '株', payrollCd: '7', name: '山田　太郎', driverCd: '99' }],
+      employees: [{ company: '株', payrollCd: '7', name: '山田　太郎', driverCd: '99', hireDate: '2020-04-01' }],
       attrs: [{ company: '株', payrollCd: '7', effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A' }],
       deleteAttrs: [{ company: '有', payrollCd: '1', effectiveFrom: '2025-01-01' }],
       deleteEmployees: [{ company: '有', payrollCd: '2' }],
@@ -213,7 +241,11 @@ describe('buildEmployeeMasterWriteStatements', () => {
     const statements = buildEmployeeMasterWriteStatements(body, '2026-07-23T00:00:00.000Z', '27324455')
     expect(statements).toHaveLength(5)
     expect(statements[0]!.sql).toMatch(/INSERT INTO employees/)
-    expect(statements[0]!.params).toEqual(['27324455', '株', '7', '山田 太郎', '山田太郎', '99', '2026-07-23T00:00:00.000Z'])
+    expect(statements[0]!.params).toEqual([
+      '27324455', '株', '7', '山田 太郎', '山田太郎', '99', '2020-04-01', null, '2026-07-23T00:00:00.000Z',
+    ])
+    // 既存の入社日を null で潰さない (手編集の保存は hireDate を送ってこない、Refs #445)
+    expect(statements[0]!.sql).toMatch(/hire_date = COALESCE\(excluded\.hire_date, employees\.hire_date\)/)
     expect(statements[1]!.sql).toMatch(/INSERT INTO employee_attrs/)
     expect(statements[1]!.params).toEqual(['27324455', '株', '7', '2026-04-01', '本社', 'A', null, null, null, null])
     expect(statements[2]!.sql).toMatch(/DELETE FROM employee_attrs WHERE comp_id/)
@@ -310,7 +342,8 @@ describe('normalizeEmployeeMasterPutBody — payrollCompanyName (Refs #405)', ()
 describe('buildEmployeeMasterResponse', () => {
   it('employees + attrs を company|payrollCd で結合し、attrs は effectiveFrom 昇順にする', () => {
     const employeeRows: EmployeeD1Row[] = [
-      { company: '株', payroll_cd: '7', name: '山田太郎', driver_cd: '99' },
+      { company: '株', payroll_cd: '7', name: '山田太郎', driver_cd: '99', hire_date: '2020-04-01', retire_date: null },
+      // migration 0015 以前に取り込んだ行は列そのものが無い (undefined)
       { company: '有', payroll_cd: '1', name: '鈴木花子', driver_cd: null },
     ]
     const attrRows = [
@@ -325,12 +358,14 @@ describe('buildEmployeeMasterResponse', () => {
         payrollCd: '7',
         name: '山田太郎',
         driverCd: '99',
+        hireDate: '2020-04-01',
+        retireDate: null,
         attrs: [
           { effectiveFrom: '2025-04-01', branch: '支社', payScheme: 'B', branchCode: null, branchName: null, jobName: null, payKubun: null },
           { effectiveFrom: '2026-04-01', branch: '本社', payScheme: 'A', branchCode: 14, branchName: '本社', jobName: '乗務員', payKubun: 2 },
         ],
       },
-      { company: '有', payrollCd: '1', name: '鈴木花子', driverCd: null, attrs: [] },
+      { company: '有', payrollCd: '1', name: '鈴木花子', driverCd: null, hireDate: null, retireDate: null, attrs: [] },
     ])
   })
 

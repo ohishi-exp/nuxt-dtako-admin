@@ -32,7 +32,9 @@ function fmtDays(n: number): string {
       <thead>
         <tr class="text-left text-gray-500 border-b-2 border-gray-300 dark:border-gray-600">
           <th class="px-1.5 py-1.5">乗務員</th>
-          <th class="px-1.5 py-1.5 text-right" title="出勤した日数。残業の有無で分けず、打刻エラーの日も含む (押し忘れただけで出勤はしている)。時間の列からは打刻エラーの日は外れている">出勤</th>
+          <th class="px-1.5 py-1.5 text-right" title="打刻が実際にあった日数 (通常 + 残業 + 休日出勤 + 打刻エラー)。押し忘れの日も出勤に数える — 時間の列からだけ外れている">出勤</th>
+          <th class="px-1.5 py-1.5 text-right" title="在籍日数 − 公休 − 有休 − 欠勤。出勤がこれと合わないぶんが右の「差」">あるべき</th>
+          <th class="px-1.5 py-1.5 text-right" title="出勤 − あるべき。0 以外は記録の欠落 — 負なら打刻の無い日がある (打刻漏れ)、正なら休暇の登録漏れ">差</th>
           <th class="px-1.5 py-1.5 text-right" title="休日出勤の承認簿に載っている日">休日<br>出勤</th>
           <th class="px-1.5 py-1.5 text-right" title="休日に打刻があるが未承認の日。時間は記録するが賃金計算には入れていない">自主<br>出勤</th>
           <th class="px-1.5 py-1.5 text-right" title="公休 / 泊休 / 積置泊休 / 指休">公休</th>
@@ -57,6 +59,20 @@ function fmtDays(n: number): string {
         >
           <td class="px-1.5 py-1 whitespace-nowrap">{{ row.driverCd }} {{ row.driverName }}</td>
           <td class="px-1.5 py-1 text-right">{{ fmtDays(row.attendanceDays) }}</td>
+          <td class="px-1.5 py-1 text-right text-gray-500">
+            {{ fmtDays(row.expectedAttendanceDays) }}
+            <!-- 入社日が未取り込みの人は月日数から引いている = 途中入社なら過大に出て、
+                 差が実在のエラーなのか未取得のせいなのか判別できない (Refs #445) -->
+            <span
+              v-if="!row.employmentKnown"
+              class="text-gray-400"
+              title="入社日が未取得のため月日数から計算しています (途中入社・途中退職なら多く出ます)。社員マスタタブで「給与DBから取り込み」を実行してください"
+            >*</span>
+          </td>
+          <td
+            class="px-1.5 py-1 text-right"
+            :class="row.attendanceDiff !== 0 ? 'font-semibold text-red-600 dark:text-red-400' : ''"
+          >{{ row.attendanceDiff === 0 ? '' : (row.attendanceDiff > 0 ? `+${row.attendanceDiff}` : row.attendanceDiff) }}</td>
           <td class="px-1.5 py-1 text-right">{{ fmtDays(row.counts.holidayWork) }}</td>
           <td class="px-1.5 py-1 text-right text-amber-600 dark:text-amber-400">{{ fmtDays(row.counts.voluntary) }}</td>
           <td class="px-1.5 py-1 text-right">{{ fmtDays(row.leaves.publicHoliday) }}</td>

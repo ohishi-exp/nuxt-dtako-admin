@@ -53,6 +53,39 @@ export function daysInMonth(year: number, month: number): number {
   return new Date(Date.UTC(year, month, 0)).getUTCDate()
 }
 
+/** 在籍期間 (どちらも "YYYY-MM-DD"、未取得は null)。 */
+export interface EmploymentPeriod {
+  hireDate: string | null
+  retireDate: string | null
+}
+
+/**
+ * その月に**在籍していた日数** (Refs #445)。
+ *
+ * 出勤日数を「月日数 − 公休 − 有休 − 欠勤」で逆算していたため、途中入社・途中退職の
+ * 人が在籍していない日まで出勤に数えられていた (15日入社なら +14 日)。在籍日数で
+ * 引けばそのぶんが落ちる。
+ *
+ * 入社日・退社日が未取得 (給与大臣から取り込む前) なら**月日数をそのまま返す** —
+ * 従来と同じ値になるので、取り込み前後で数字が飛ばない。呼び出し側は
+ * 「未取得だから従来計算」だと分かるように画面へ出すこと。
+ *
+ * 月をまたぐ在籍 (入社が前月以前・退社が翌月以降) は月全体が在籍。
+ * 入社が翌月以降 / 退社が前月以前なら 0 日 (その月は 1 日も居ない)。
+ */
+export function employedDaysInMonth(year: number, month: number, period: EmploymentPeriod): number {
+  const last = daysInMonth(year, month)
+  if (last === 0) return 0
+  const first = `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-01`
+  const lastDay = `${first.slice(0, 8)}${String(last).padStart(2, '0')}`
+  // 文字列のまま比較する ("YYYY-MM-DD" は辞書順 = 日付順)。Date に通すと TZ の
+  // 解釈が入り、月初/月末の 1 日ずれを生む
+  const from = period.hireDate && period.hireDate > first ? period.hireDate : first
+  const to = period.retireDate && period.retireDate < lastDay ? period.retireDate : lastDay
+  if (from > to) return 0
+  return Number(to.slice(8, 10)) - Number(from.slice(8, 10)) + 1
+}
+
 /** 曜日 (0=日)。UTC で計算する — ローカル TZ に依存させない。 */
 export function dayOfWeek(year: number, month: number, day: number): number {
   return new Date(Date.UTC(year, month - 1, day)).getUTCDay()
@@ -233,6 +266,12 @@ export interface WorkKindCounts {
   paidLeave: number
   /** 欠勤日数。 */
   absence: number
+  /** **半休 (前休 / 後休) が付いた日数** — 日数であって 0.5 の合計ではない。
+   *
+   * 半休の日は打刻もあるので出勤 1 日として数えられる一方、休暇側にも 0.5 が
+   * 立つ。出勤の実績と「在籍日数 − 休暇」の突合が半休のたびに +0.5 ずれるので、
+   * 実績から 0.5 を引くために日数で持つ (Refs #445)。 */
+  halfLeaveDays: number
 }
 
 /** 1 日 1.0 と数える休暇 → 集計軸。worker 側 `countLeaves` と同一規則
@@ -271,12 +310,16 @@ export function countWorkKinds(days: readonly RestraintSummaryDay[]): WorkKindCo
     publicHoliday: 0,
     paidLeave: 0,
     absence: 0,
+    halfLeaveDays: 0,
   }
   for (const d of days) {
     for (const detail of d.leaves ?? []) {
       const full = LEAVE_FULL_DAY[detail]
       if (full) out[full] += 1
-      else if (LEAVE_HALF_DAY.has(detail)) out.paidLeave += 0.5
+      else if (LEAVE_HALF_DAY.has(detail)) {
+        out.paidLeave += 0.5
+        out.halfLeaveDays += 1
+      }
     }
     // `isPunchErrorDay(d)` を使わずに値を直接見る — 使うと分岐の中で
     // `punchErrorMinutes ?? 0` の右辺が到達不能になり branch 100% を割る
@@ -312,16 +355,29 @@ export interface TimecardSummaryRow {
   /** 出勤・自主出勤・打刻エラーの日数 (日別から数える)。 */
   counts: WorkKindCounts
   /**
-   * 出勤日数 = **月日数 − 公休 − 有休 − 欠勤**。
+   * 出勤日数 (**実績**) = 通常 + 残業 + 休日出勤 + 打刻エラー。
    *
-   * タイムカード表の「出勤日数 (拘束)」と同じ数え方 (Refs #441) — 給与明細の
-   * 出勤日数と一致することが実測で確認されている (30日 − 公休5日 = 25日)。
-   *
-   * **内訳の足し算 (通常 + 残業 + 休日出勤 + 打刻エラー) にはしない**。それだと
-   * タイムカードに行自体が無い日を出勤に数え損ねる。総日数からの逆算なら、
-   * 残業の有無でも打刻エラー (押し忘れただけで出勤はしている) でも数が動かない。
+   * 打刻が実際にあった日を数える。**打刻エラーの日も入れる** — 終業を押し忘れた
+   * だけで出勤したこと自体は疑いようがない (時間は賃金計算から外れている)。
+   * **自主出勤は入れない** — 休みの日に来た分で、休暇日数の側に既に入っている
+   * (入れると差分が常にずれる)。
    */
   attendanceDays: number
+  /**
+   * 出勤日数 (**あるべき数**) = 在籍日数 − 公休 − 有休 − 欠勤 (Refs #445)。
+   *
+   * 引く元が月日数ではなく在籍日数なのは、途中入社・途中退職の人が在籍していない
+   * 日まで出勤に数えられていたため。
+   */
+  expectedAttendanceDays: number
+  /**
+   * 実績 − あるべき数。**0 以外は記録の欠落**で、紙に出す前に直すもの:
+   * 負 = 打刻の無い日がある (打刻漏れ)、正 = 休暇の登録漏れ。
+   */
+  attendanceDiff: number
+  /** 在籍日数の算出に入社日/退社日を使えたか。false = 月日数で代用している
+   * (給与大臣から未取り込み)。差分が入社月だけずれるので画面で断る。 */
+  employmentKnown: boolean
   /** 休暇日数。**worker が数えた `leaveCounts` をそのまま使う** (下記)。 */
   leaves: { publicHoliday: number, paidLeave: number, absence: number, specialLeave: number, late: number, earlyLeave: number }
   /** 実働 (分)。 */
@@ -343,8 +399,13 @@ const EMPTY_LEAVES = { publicHoliday: 0, paidLeave: 0, absence: 0, specialLeave:
  * **休暇日数は日別から数え直さず `summary.leaveCounts` を使う** — 半休の数え方や
  * どの区分を公休に入れるかは worker の `countLeaves` が正で、画面側に 2 つ目の
  * 規則を置くと worker を変えた時に静かに食い違う (`buildAttendanceDays` と同じ理由)。
- * 出勤日数もその `leaves` から逆算するので、画面上で
- * **出勤 + 公休 + 有休 + 欠勤 = 月日数** が常に成り立つ。
+ * **出勤日数は実績 (打刻のあった日) を出し、`leaves` からの逆算との差を別に返す**
+ * (2026-07-26 決定)。両方を出すのは、食い違いがそのまま「記録の欠落」だから —
+ * 逆算だけだと打刻漏れが見えず、実績だけだと休暇の登録漏れが見えない。
+ *
+ * `employmentByDriver` は乗務員CD (数値正規化キー) → 入社日/退社日。渡さない
+ * (または入社日が未取り込みの) 社員は月日数で代用し、`employmentKnown: false` に
+ * なる — 途中入社の人は出勤が過大に出るので、画面はそれと分かるように出すこと。
  *
  * `salaryOvertimeByDriver` は乗務員CD (数値正規化キー) → 給与明細の残業手当。
  * その月の明細を取り込んでいなければ空の Map を渡す (列は空欄になる)。
@@ -354,16 +415,26 @@ export function buildTimecardSummary(
   year: number,
   month: number,
   salaryOvertimeByDriver: ReadonlyMap<string, number>,
+  employmentByDriver: ReadonlyMap<string, EmploymentPeriod> = new Map(),
 ): TimecardSummaryRow[] {
-  const last = daysInMonth(year, month)
   return rows.map((r) => {
     const counts = countWorkKinds(r.summary.days)
     const leaves = r.summary.leaveCounts ?? EMPTY_LEAVES
+    const period = employmentByDriver.get(String(Number(r.summary.driverCd)))
+    const employed = employedDaysInMonth(year, month, period ?? { hireDate: null, retireDate: null })
+    // 半休の日は打刻もあるので実績 1 日に数えられているが、休暇側にも 0.5 立って
+    // いる。引かないと半休のたびに差が +0.5 になり、実在の欠落が埋もれる
+    const actual = counts.normal + counts.overtime + counts.holidayWork + counts.punchError
+      - counts.halfLeaveDays * 0.5
+    const expected = employed - leaves.publicHoliday - leaves.paidLeave - leaves.absence
     return {
       driverCd: r.summary.driverCd,
       driverName: r.summary.driverName,
       counts,
-      attendanceDays: last - leaves.publicHoliday - leaves.paidLeave - leaves.absence,
+      attendanceDays: actual,
+      expectedAttendanceDays: expected,
+      attendanceDiff: actual - expected,
+      employmentKnown: period?.hireDate != null,
       leaves,
       workingMinutes: r.summary.workingMinutes ?? 0,
       overtimeMinutes: (r.summary.overtimeMinutes ?? 0) + (r.summary.overtimeNightMinutes ?? 0),

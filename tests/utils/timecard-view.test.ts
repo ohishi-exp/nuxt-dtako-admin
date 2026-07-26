@@ -7,6 +7,7 @@ import {
   dayKindLabel,
   dayOfWeek,
   daysInMonth,
+  employedDaysInMonth,
   formatPunch,
 } from '../../app/utils/timecard-view'
 import type { RestraintSummaryDay, WageReportRow } from '../../app/utils/restraint-wage-view'
@@ -203,6 +204,7 @@ describe('countWorkKinds', () => {
     expect(counts).toEqual({
       normal: 1, overtime: 2, holidayWork: 2, voluntary: 1, voluntaryMinutes: 300,
       punchError: 0, punchErrorMinutes: 0, publicHoliday: 0, paidLeave: 0, absence: 0,
+      halfLeaveDays: 0,
     })
   })
 
@@ -225,6 +227,7 @@ describe('countWorkKinds', () => {
     expect(countWorkKinds([])).toEqual({
       normal: 0, overtime: 0, holidayWork: 0, voluntary: 0, voluntaryMinutes: 0,
       punchError: 0, punchErrorMinutes: 0, publicHoliday: 0, paidLeave: 0, absence: 0,
+      halfLeaveDays: 0,
     })
   })
 })
@@ -422,7 +425,7 @@ describe('countWorkKinds — 打刻エラーと休暇 (Refs #433)', () => {
       day({ day: 6, isRestDay: true, leaves: ['後休'] }),
       day({ day: 9, isRestDay: true, leaves: ['欠勤'] }),
     ])
-    expect(counts).toMatchObject({ publicHoliday: 3, paidLeave: 2, absence: 1 })
+    expect(counts).toMatchObject({ publicHoliday: 3, paidLeave: 2, absence: 1, halfLeaveDays: 2 })
   })
 
   it('カウント対象外の区分 (短時・仮乗務) は数えない', () => {
@@ -433,6 +436,39 @@ describe('countWorkKinds — 打刻エラーと休暇 (Refs #433)', () => {
   it('打刻のある日に付いた休暇 (遅刻) も数え、勤務区分は通常のまま', () => {
     const counts = countWorkKinds([day({ day: 1, leaves: ['遅刻'] })])
     expect(counts).toMatchObject({ normal: 1, publicHoliday: 0, paidLeave: 0, absence: 0 })
+  })
+})
+
+describe('employedDaysInMonth (Refs #445)', () => {
+  it('入社日・退社日が無ければ月日数', () => {
+    expect(employedDaysInMonth(2026, 4, { hireDate: null, retireDate: null })).toBe(30)
+  })
+
+  it('途中入社はその日から月末まで', () => {
+    expect(employedDaysInMonth(2026, 4, { hireDate: '2026-04-16', retireDate: null })).toBe(15)
+    // 1 日入社は月全体
+    expect(employedDaysInMonth(2026, 4, { hireDate: '2026-04-01', retireDate: null })).toBe(30)
+  })
+
+  it('途中退職は月初からその日まで', () => {
+    expect(employedDaysInMonth(2026, 1, { hireDate: null, retireDate: '2026-01-26' })).toBe(26)
+  })
+
+  it('前月以前の入社・翌月以降の退職は月全体', () => {
+    expect(employedDaysInMonth(2026, 4, { hireDate: '2003-06-01', retireDate: '2030-01-01' })).toBe(30)
+  })
+
+  it('入社が翌月以降 / 退職が前月以前なら 0 日', () => {
+    expect(employedDaysInMonth(2026, 4, { hireDate: '2026-05-01', retireDate: null })).toBe(0)
+    expect(employedDaysInMonth(2026, 4, { hireDate: null, retireDate: '2026-03-31' })).toBe(0)
+  })
+
+  it('入社と退職が同じ月なら その間の日数', () => {
+    expect(employedDaysInMonth(2026, 4, { hireDate: '2026-04-10', retireDate: '2026-04-20' })).toBe(11)
+  })
+
+  it('月が不正なら 0', () => {
+    expect(employedDaysInMonth(2026, 13, { hireDate: null, retireDate: null })).toBe(0)
   })
 })
 
@@ -495,9 +531,14 @@ describe('buildTimecardSummary — 期間サマリー印刷の一覧行 (Refs #4
       leaves: { publicHoliday: 8, paidLeave: 1.5, absence: 2, specialLeave: 1, late: 3, earlyLeave: 4 },
     })
     expect(row!.counts).toMatchObject({ normal: 1, overtime: 1, holidayWork: 1, voluntary: 1, punchError: 1 })
-    // 出勤 = 月日数 − 公休 − 有休 − 欠勤 (タイムカード表の「出勤日数 (拘束)」と同じ、
-    // Refs #441)。内訳の足し算にすると、タイムカードに行自体が無い日を数え損ねる
-    expect(row!.attendanceDays).toBe(30 - 8 - 1.5 - 2)
+    // 出勤 = 実績 (通常1 + 残業1 + 休日出勤1 + 打刻エラー1)。自主出勤は入れない —
+    // 休みの日に来た分で、休暇日数の側に既に入っている
+    expect(row!.attendanceDays).toBe(4)
+    // あるべき数 = 在籍日数 (入社日未取得なので月日数 30) − 公休 − 有休 − 欠勤
+    expect(row!.expectedAttendanceDays).toBe(30 - 8 - 1.5 - 2)
+    // 差 = 記録の欠落。負 = 打刻の無い日がある
+    expect(row!.attendanceDiff).toBe(4 - (30 - 8 - 1.5 - 2))
+    expect(row!.employmentKnown).toBe(false)
   })
 
   it('leaveCounts / 時間が無い行は 0 で埋める (古いサマリ)', () => {
@@ -506,9 +547,40 @@ describe('buildTimecardSummary — 期間サマリー印刷の一覧行 (Refs #4
       workingMinutes: 0,
       overtimeMinutes: 0,
       leaves: { publicHoliday: 0, paidLeave: 0, absence: 0, specialLeave: 0, late: 0, earlyLeave: 0 },
-      // 休暇が 1 日も無ければ全日出勤扱い (打刻の無い日も「来ていない」とは確定しない)
-      attendanceDays: 30,
+      // 打刻が 1 日も無ければ実績 0、あるべき数は在籍日数そのまま
+      attendanceDays: 0,
+      expectedAttendanceDays: 30,
+      attendanceDiff: -30,
     })
+  })
+
+  it('入社日があれば在籍日数から引く — 途中入社を全日出勤にしない (Refs #445)', () => {
+    const rows = buildTimecardSummary(
+      [reportRow({
+        driverCd: '1706',
+        // 4/16 入社。1〜15 日は在籍していないので出勤に数えてはいけない
+        days: Array.from({ length: 10 }, (_, i) => day({ day: 16 + i })),
+        leaveCounts: { publicHoliday: 5, paidLeave: 0, absence: 0, specialLeave: 0, late: 0, earlyLeave: 0 },
+      })],
+      2026, 4,
+      new Map(),
+      new Map([['1706', { hireDate: '2026-04-16', retireDate: null }]]),
+    )
+    // 在籍 15 日 (16〜30) − 公休 5 = 10。実績も 10 なので差は出ない
+    expect(rows[0]).toMatchObject({ attendanceDays: 10, expectedAttendanceDays: 10, attendanceDiff: 0, employmentKnown: true })
+  })
+
+  it('入社日が未取得なら月日数で代用し、その旨を返す (Refs #445)', () => {
+    const rows = buildTimecardSummary(
+      [reportRow({
+        driverCd: '1706',
+        days: Array.from({ length: 10 }, (_, i) => day({ day: 16 + i })),
+        leaveCounts: { publicHoliday: 5, paidLeave: 0, absence: 0, specialLeave: 0, late: 0, earlyLeave: 0 },
+      })],
+      2026, 4, new Map(),
+    )
+    // 月日数 30 − 公休 5 = 25 に対し実績 10 → 差 -15 (入社日が入れば 0 になる)
+    expect(rows[0]).toMatchObject({ attendanceDays: 10, expectedAttendanceDays: 25, attendanceDiff: -15, employmentKnown: false })
   })
 
   it('給与明細の残業手当は乗務員CDを数値正規化して引く (未取り込みは null)', () => {

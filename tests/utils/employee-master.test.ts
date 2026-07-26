@@ -495,12 +495,33 @@ describe('planPayrollDbImport', () => {
     warnings: [],
   })
 
+  it('入社日・退社日を通す。読めない値は落とす (Refs #445)', () => {
+    // 在籍日数の計算は日付を素で比較するので、読めない値を通すと比較が静かに
+    // false になり、途中入社の人が全日出勤に戻る
+    const plan = planPayrollDbImport(
+      res([kyuyoRow({ hire_date: '2026-04-01', retire_date: null })]),
+      [], '2026-07', null,
+    )
+    expect(plan.employees[0]).toMatchObject({ hireDate: '2026-04-01', retireDate: null })
+
+    const bad = planPayrollDbImport(
+      res([kyuyoRow({ hire_date: '2026/04/01', retire_date: '' })]),
+      [], '2026-07', null,
+    )
+    expect(bad.employees[0]).toMatchObject({ hireDate: null, retireDate: null })
+  })
+
+  it('古い rust (入社日を返さない) でも取り込みは落ちない (Refs #445)', () => {
+    const plan = planPayrollDbImport(res([kyuyoRow()]), [], '2026-07', null)
+    expect(plan.employees[0]).toMatchObject({ hireDate: null, retireDate: null })
+  })
+
   it('新規社員は employees + attrs を作り、会社は給与大臣の会社コード (Refs #405)', () => {
     const plan = planPayrollDbImport(res([kyuyoRow()]), [], '2026-07', null)
     expect(plan.added).toBe(1)
     expect(plan.merged).toBe(0)
     expect(plan.employees).toEqual([
-      { company: '0100', payrollCd: '7', name: '山田　太郎', driverCd: null },
+      { company: '0100', payrollCd: '7', name: '山田　太郎', driverCd: null, hireDate: null, retireDate: null },
     ])
     expect(plan.attrs).toEqual([
       {
