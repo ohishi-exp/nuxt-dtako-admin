@@ -16,7 +16,7 @@
  *   基本残業等とは別物で、両者を並べて見るのが #424 の目的
  * - 日曜は網掛け (PDF の `fill = ($ds == "日")` と同じ)
  */
-import type { RestraintSummaryDay } from './restraint-wage-view'
+import type { RestraintSummaryDay, WageReportRow } from './restraint-wage-view'
 
 export interface TimecardTableRow {
   /** 日 (1-31)。 */
@@ -303,4 +303,50 @@ export function countWorkKinds(days: readonly RestraintSummaryDay[]): WorkKindCo
     else out.normal += 1
   }
   return out
+}
+
+/** 期間サマリー印刷の 1 行 = 1 人分の月次集計 (Refs #443)。 */
+export interface TimecardSummaryRow {
+  driverCd: string
+  driverName: string
+  /** 出勤・自主出勤・打刻エラーの日数 (日別から数える)。 */
+  counts: WorkKindCounts
+  /** 休暇日数。**worker が数えた `leaveCounts` をそのまま使う** (下記)。 */
+  leaves: { publicHoliday: number, paidLeave: number, absence: number, specialLeave: number, late: number, earlyLeave: number }
+  /** 実働 (分)。 */
+  workingMinutes: number
+  /** 打刻から計算した残業 (時間外 + 時間外深夜、分)。 */
+  overtimeMinutes: number
+  /** 給与明細の残業手当 (円)。その月の明細が未取り込みなら null。 */
+  salaryOvertime: number | null
+}
+
+const EMPTY_LEAVES = { publicHoliday: 0, paidLeave: 0, absence: 0, specialLeave: 0, late: 0, earlyLeave: 0 }
+
+/**
+ * wage-report の行を期間サマリー印刷の一覧へ畳む (Refs #443)。
+ *
+ * 呼び出し側で `source === 'timecard'` に絞ってから渡すこと — theearth 由来の行は
+ * 打刻も休暇も持たないので、混ぜると 0 の行が並ぶだけになる。
+ *
+ * **休暇日数は日別から数え直さず `summary.leaveCounts` を使う** — 半休の数え方や
+ * どの区分を公休に入れるかは worker の `countLeaves` が正で、画面側に 2 つ目の
+ * 規則を置くと worker を変えた時に静かに食い違う (`buildAttendanceDays` と同じ理由)。
+ *
+ * `salaryOvertimeByDriver` は乗務員CD (数値正規化キー) → 給与明細の残業手当。
+ * その月の明細を取り込んでいなければ空の Map を渡す (列は空欄になる)。
+ */
+export function buildTimecardSummary(
+  rows: readonly WageReportRow[],
+  salaryOvertimeByDriver: ReadonlyMap<string, number>,
+): TimecardSummaryRow[] {
+  return rows.map(r => ({
+    driverCd: r.summary.driverCd,
+    driverName: r.summary.driverName,
+    counts: countWorkKinds(r.summary.days),
+    leaves: r.summary.leaveCounts ?? EMPTY_LEAVES,
+    workingMinutes: r.summary.workingMinutes ?? 0,
+    overtimeMinutes: (r.summary.overtimeMinutes ?? 0) + (r.summary.overtimeNightMinutes ?? 0),
+    salaryOvertime: salaryOvertimeByDriver.get(String(Number(r.summary.driverCd))) ?? null,
+  }))
 }
