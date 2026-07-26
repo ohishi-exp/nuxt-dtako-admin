@@ -33,6 +33,7 @@ export default defineConfig({
         'src/branch-prefecture.ts',
         'src/restraint-d1.ts',
         'src/restraint-push.ts',
+        'src/restraint-wage-source.ts',
       ],
       thresholds: {
         lines: 100,
