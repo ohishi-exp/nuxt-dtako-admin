@@ -28,7 +28,7 @@ import type {
 } from '~/utils/restraint-wage-view'
 import { MIN_WAGE_DEFAULT_KEY } from '~/utils/restraint-wage-view'
 import { buildTimecardSummary, buildTimecardTable, countWorkKinds, employedDaysInMonth } from '~/utils/timecard-view'
-import type { TimecardSummaryRow } from '~/utils/timecard-view'
+import type { SalaryOvertime, TimecardSummaryRow } from '~/utils/timecard-view'
 import type {
   OvertimeHoursComparison,
   ParsedSalaryCsv,
@@ -451,13 +451,13 @@ const summaryTargetMonths = computed(() => {
  * 列は空欄になる — **ここで給与DBを取りに行かない** (1 社 10〜20 秒かかるので、
  * 期間分を印刷ボタンに巻き込むと待たされる。取得は上部の給与DB バーの責務)。
  */
-function salaryOvertimeMapFor(ym: string, rows: WageReportRow[]): Map<string, number> {
-  const map = new Map<string, number>()
+function salaryOvertimeMapFor(ym: string, rows: WageReportRow[]): Map<string, SalaryOvertime> {
+  const map = new Map<string, SalaryOvertime>()
   const csvRows = (salaryParsed.value?.rows ?? []).filter(r => r.month === nextYm(ym))
   if (!csvRows.length) return map
   const compared = compareSalaryMonth(csvRows, rows, salaryItemConfig.value, salaryCdMap.value)
   for (const r of compared.rows) {
-    map.set(String(Number(r.mappedDriverCd ?? r.driverCd)), r.csvOvertime)
+    map.set(String(Number(r.mappedDriverCd ?? r.driverCd)), { amount: r.csvOvertime, hours: r.csvOvertimeHours })
   }
   return map
 }

@@ -443,6 +443,14 @@ export interface SalaryComparisonRow {
   csvOvertime: number
   /** csvOvertime の内訳。 */
   csvOvertimeItems: SalaryItemAmount[]
+  /**
+   * 給与明細の**残業時間** (`KINDATA` の「残業時間」、Refs #447)。
+   *
+   * `csvOvertime` が金額なのに対しこちらは時間。打刻から計算した残業と**同じ単位で
+   * 並べられる**ので、金額だけの比較より食い違いの原因が見える (単価の違いか
+   * 時間の違いか)。欄が無い様式もあるので取れなければ null。
+   */
+  csvOvertimeHours: number | null
   csvTotal: number
   /** CSV の 支給合計額 列 (無ければ null、項目合計との検算用)。 */
   csvReportedTotal: number | null
@@ -519,6 +527,16 @@ const CSV_ATTENDANCE_LABELS = {
   paidLeave: '有休日数',
   absence: '欠勤日数',
 } as const
+
+/** 給与明細の残業時間の項目名 (`KINDATA`)。本番実データで 0100/0200/0300 の 3 社とも
+ * この名前 (Refs #447)。 */
+const CSV_OVERTIME_HOURS_LABEL = '残業時間'
+
+/** 給与明細の残業時間 (時間)。欄が無ければ null。 */
+export function csvOvertimeHoursOf(csv: SalaryCsvRow): number | null {
+  const v = (csv.attendance ?? {})[CSV_OVERTIME_HOURS_LABEL]
+  return typeof v === 'number' ? v : null
+}
 
 /**
  * 勤怠日数の突合セル (Refs #433)。
@@ -913,6 +931,7 @@ export function compareSalaryMonth(
       csvBaseItems: sums.buckets['base'].items,
       csvOvertime: overtime,
       csvOvertimeItems: sums.buckets['overtime'].items,
+      csvOvertimeHours: csvOvertimeHoursOf(csv),
       csvTotal: sums.total,
       csvReportedTotal: csv.reportedTotal,
       sysBase,

@@ -46,6 +46,7 @@ function fmtDays(n: number): string {
           <th class="px-1.5 py-1.5 text-right" title="打刻が翌日にまたがっていた日数 (終業の押し忘れ)。この日の時間は賃金計算から外れている">打刻<br>エラー</th>
           <th class="px-1.5 py-1.5 text-right">実働</th>
           <th class="px-1.5 py-1.5 text-right" title="打刻から計算した残業 (実働 − 所定労働時間)">残業<br>(計算)</th>
+          <th class="px-1.5 py-1.5 text-right" title="給与明細の残業時間 (KINDATA の「残業時間」)。左の「残業(計算)」と同じ単位なので、食い違いが単価由来か時間由来か分かる">残業時間<br>(給与)</th>
           <th class="px-1.5 py-1.5 text-right" title="給与明細の残業手当。その月の明細を取り込んでいなければ空欄">残業<br>(給与)</th>
         </tr>
       </thead>
@@ -84,6 +85,7 @@ function fmtDays(n: number): string {
           <td class="px-1.5 py-1 text-right text-red-600 dark:text-red-400">{{ fmtDays(row.counts.punchError) }}</td>
           <td class="px-1.5 py-1 text-right font-medium">{{ fmtMinutes(row.workingMinutes) }}</td>
           <td class="px-1.5 py-1 text-right">{{ row.overtimeMinutes > 0 ? fmtMinutes(row.overtimeMinutes) : '' }}</td>
+          <td class="px-1.5 py-1 text-right">{{ row.salaryOvertimeHours == null ? '' : `${row.salaryOvertimeHours}h` }}</td>
           <td class="px-1.5 py-1 text-right">{{ row.salaryOvertime == null ? '' : fmtYen(row.salaryOvertime) }}</td>
         </tr>
       </tbody>

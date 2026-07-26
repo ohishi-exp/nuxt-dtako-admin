@@ -583,12 +583,22 @@ describe('buildTimecardSummary — 期間サマリー印刷の一覧行 (Refs #4
     expect(rows[0]).toMatchObject({ attendanceDays: 10, expectedAttendanceDays: 25, attendanceDiff: -15, employmentKnown: false })
   })
 
-  it('給与明細の残業手当は乗務員CDを数値正規化して引く (未取り込みは null)', () => {
+  it('給与明細の残業は乗務員CDを数値正規化して引く (金額と時間、未取り込みは null)', () => {
     const rows = buildTimecardSummary(
       [reportRow({ driverCd: '0065' }), reportRow({ driverCd: '1707' })],
       2026, 6,
-      new Map([['65', 30000]]),
+      new Map([['65', { amount: 30000, hours: 51 }]]),
     )
     expect(rows.map(r => r.salaryOvertime)).toEqual([30000, null])
+    expect(rows.map(r => r.salaryOvertimeHours)).toEqual([51, null])
+  })
+
+  it('残業時間の欄が無い様式は時間だけ null (金額は出す、Refs #447)', () => {
+    const rows = buildTimecardSummary(
+      [reportRow({ driverCd: '0065' })],
+      2026, 6,
+      new Map([['65', { amount: 30000, hours: null }]]),
+    )
+    expect(rows[0]).toMatchObject({ salaryOvertime: 30000, salaryOvertimeHours: null })
   })
 })
