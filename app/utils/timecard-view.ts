@@ -386,9 +386,19 @@ export interface TimecardSummaryRow {
   overtimeMinutes: number
   /** 給与明細の残業手当 (円)。その月の明細が未取り込みなら null。 */
   salaryOvertime: number | null
+  /** 給与明細の**残業時間** (`KINDATA` の「残業時間」、Refs #447)。
+   * 打刻から計算した残業と同じ単位なので、金額だけの比較より食い違いの原因が
+   * 見える (単価の違いか時間の違いか)。欄が無い様式・未取り込みは null。 */
+  salaryOvertimeHours: number | null
 }
 
 const EMPTY_LEAVES = { publicHoliday: 0, paidLeave: 0, absence: 0, specialLeave: 0, late: 0, earlyLeave: 0 }
+
+/** 給与明細の残業 (金額と時間)。時間は欄が無い様式だと null。 */
+export interface SalaryOvertime {
+  amount: number
+  hours: number | null
+}
 
 /**
  * wage-report の行を期間サマリー印刷の一覧へ畳む (Refs #443)。
@@ -407,14 +417,14 @@ const EMPTY_LEAVES = { publicHoliday: 0, paidLeave: 0, absence: 0, specialLeave:
  * (または入社日が未取り込みの) 社員は月日数で代用し、`employmentKnown: false` に
  * なる — 途中入社の人は出勤が過大に出るので、画面はそれと分かるように出すこと。
  *
- * `salaryOvertimeByDriver` は乗務員CD (数値正規化キー) → 給与明細の残業手当。
+ * `salaryOvertimeByDriver` は乗務員CD (数値正規化キー) → 給与明細の残業 (金額と時間)。
  * その月の明細を取り込んでいなければ空の Map を渡す (列は空欄になる)。
  */
 export function buildTimecardSummary(
   rows: readonly WageReportRow[],
   year: number,
   month: number,
-  salaryOvertimeByDriver: ReadonlyMap<string, number>,
+  salaryOvertimeByDriver: ReadonlyMap<string, SalaryOvertime>,
   employmentByDriver: ReadonlyMap<string, EmploymentPeriod> = new Map(),
 ): TimecardSummaryRow[] {
   return rows.map((r) => {
@@ -424,6 +434,7 @@ export function buildTimecardSummary(
     const employed = employedDaysInMonth(year, month, period ?? { hireDate: null, retireDate: null })
     // 半休の日は打刻もあるので実績 1 日に数えられているが、休暇側にも 0.5 立って
     // いる。引かないと半休のたびに差が +0.5 になり、実在の欠落が埋もれる
+    const paid = salaryOvertimeByDriver.get(String(Number(r.summary.driverCd)))
     const actual = counts.normal + counts.overtime + counts.holidayWork + counts.punchError
       - counts.halfLeaveDays * 0.5
     const expected = employed - leaves.publicHoliday - leaves.paidLeave - leaves.absence
@@ -438,7 +449,8 @@ export function buildTimecardSummary(
       leaves,
       workingMinutes: r.summary.workingMinutes ?? 0,
       overtimeMinutes: (r.summary.overtimeMinutes ?? 0) + (r.summary.overtimeNightMinutes ?? 0),
-      salaryOvertime: salaryOvertimeByDriver.get(String(Number(r.summary.driverCd))) ?? null,
+      salaryOvertime: paid?.amount ?? null,
+      salaryOvertimeHours: paid?.hours ?? null,
     }
   })
 }

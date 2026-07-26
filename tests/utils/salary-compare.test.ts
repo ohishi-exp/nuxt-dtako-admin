@@ -11,6 +11,7 @@ import type { WageReportRow } from '../../app/utils/restraint-wage-view'
 import {
   compareCompanyLabel,
   compareSalaryMonth,
+  csvOvertimeHoursOf,
   computeSysBase,
   mergeSalaryCsvRows,
   computeOvertimePayAtRate,
@@ -55,6 +56,23 @@ const CSV_2026 = [
   row2026('1239    ', '城田　秀幸', '2026年 1月', [80938, 30000, 2000, 31500, 57270, 130130, 8866], 340704),
   row2026('1240', '山田 太郎', '2026年 2月', [70000, 0, 0, 20000, 0, 50000, 0], 140000),
 ].join('\r\n')
+
+describe('csvOvertimeHoursOf (Refs #447)', () => {
+  const row = (attendance?: Record<string, number>): SalaryCsvRow => ({
+    driverCd: '007', cdKey: '7', company: '株', driverName: '甲', month: '2026-07',
+    amounts: {}, reportedTotal: null, rates: { base: null, overtime: null },
+    ...(attendance ? { attendance } : {}),
+  })
+
+  it('KINDATA の「残業時間」を返す', () => {
+    expect(csvOvertimeHoursOf(row({ 残業時間: 51 }))).toBe(51)
+  })
+
+  it('欄が無い様式・勤怠そのものが無い行は null (金額だけの比較に落ちる)', () => {
+    expect(csvOvertimeHoursOf(row({ 出勤日数: 25 }))).toBeNull()
+    expect(csvOvertimeHoursOf(row())).toBeNull()
+  })
+})
 
 describe('splitDelimitedLine', () => {
   it('クォート無しのカンマ区切りを分割する', () => {
