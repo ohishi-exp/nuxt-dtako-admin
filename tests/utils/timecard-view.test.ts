@@ -47,22 +47,22 @@ describe('dayOfWeek', () => {
 })
 
 describe('formatPunch', () => {
-  it('同じ日なら HH:MM', () => {
-    expect(formatPunch('2026-06-11 07:44:15', '2026-06-11')).toBe('07:44')
+  it('HH:MM を返す', () => {
+    expect(formatPunch('2026-06-11 07:44:15')).toBe('07:44')
   })
 
-  it('日跨ぎは「翌 HH:MM」— 前日の時刻に見えるのを防ぐ', () => {
-    expect(formatPunch('2026-06-12 05:30:00', '2026-06-11')).toBe('翌 05:30')
+  it('日付は見ない — 打刻は押された日の行に出すので「翌」は使わない', () => {
+    expect(formatPunch('2026-06-12 05:30:00')).toBe('05:30')
   })
 
   it('T 区切りも読む', () => {
-    expect(formatPunch('2026-06-11T07:44:15', '2026-06-11')).toBe('07:44')
+    expect(formatPunch('2026-06-11T07:44:15')).toBe('07:44')
   })
 
   it('未定義・読めない形式は null', () => {
-    expect(formatPunch(undefined, '2026-06-11')).toBeNull()
-    expect(formatPunch('2026/06/11 07:44', '2026-06-11')).toBeNull()
-    expect(formatPunch('', '2026-06-11')).toBeNull()
+    expect(formatPunch(undefined)).toBeNull()
+    expect(formatPunch('2026/06/11 07:44')).toBeNull()
+    expect(formatPunch('')).toBeNull()
   })
 })
 
@@ -163,12 +163,17 @@ describe('buildTimecardTable', () => {
     expect(rows[6]!.note).toBe('休日出勤 / 打刻 3 回')
   })
 
-  it('日跨ぎ勤務の退社は「翌」が付く', () => {
+  it('日跨ぎ勤務 (乗務員・夜勤) の退社は押された日の行に出る', () => {
+    // 実データ: 冨田 竜 (乗務員) 2026-06-01 23:52 → 06-02 13:51
     const rows = buildTimecardTable([day({
       day: 1,
       sessions: [{ start: '2026-06-01 23:52:33', end: '2026-06-02 13:51:00' }],
     })], 2026, 6)
-    expect(rows[0]).toMatchObject({ in1: '23:52', out1: '翌 13:51' })
+    // 1 日は出勤だけ、2 日に退勤が出る。「翌」は使わない
+    expect(rows[0]).toMatchObject({ in1: '23:52', out1: null })
+    expect(rows[1]).toMatchObject({ day: 2, in1: null, out1: '13:51' })
+    // **正常な日跨ぎなので赤くしない・備考も出さない** (打刻エラーとは扱いが違う)
+    expect(rows[1]).toMatchObject({ isAfterPunchError: false, note: '' })
   })
 
   it('区分を持たない休みの日 (theearth 由来) は自主出勤にしない', () => {
@@ -224,8 +229,9 @@ describe('countWorkKinds', () => {
 })
 
 describe('打刻エラーの表示 (Refs #433)', () => {
-  it('打刻エラーの日は備考が「打刻エラー」で赤くなり、時刻は残る', () => {
-    // 実データ: 佐藤 泰弘 2026-06-08 07:14 → 06-09 18:52
+  it('打刻エラーの日は出勤だけ残し、ずれ込んだ退勤は出さない', () => {
+    // 実データ: 佐藤 泰弘 2026-06-08 07:14 → 06-09 18:52。
+    // 「翌 18:52」は**翌日に押された退勤**でこの日の退社ではないので出さない
     const rows = buildTimecardTable([day({
       day: 8,
       isRestDay: true,
@@ -238,8 +244,79 @@ describe('打刻エラーの表示 (Refs #433)', () => {
       note: '打刻エラー',
       isPunchError: true,
       in1: '07:14',
-      out1: '翌 18:52',
+      out1: null,
     })
+  })
+
+  it('ずれ込んだ退勤は実際に押された日の「退社」に出る', () => {
+    const rows = buildTimecardTable([day({
+      day: 8,
+      isRestDay: true,
+      punchErrorMinutes: 2138,
+      sessions: [{ start: '2026-06-08 07:14:08', end: '2026-06-09 18:52:15' }],
+    })], 2026, 6)
+    // 9 日は「退勤だけ / 出勤なし」= 実際に起きたことがそのまま読める
+    expect(rows[8]).toMatchObject({ day: 9, in1: null, out1: '18:52' })
+    // 「翌」は付けない — その日に押された打刻なので
+    expect(rows[8]!.out1).not.toContain('翌')
+  })
+
+  it('同じ日で終わる打刻はエラー日でもそのまま出す (中抜けは消さない)', () => {
+    const rows = buildTimecardTable([day({
+      day: 8,
+      isRestDay: true,
+      punchErrorMinutes: 2138,
+      sessions: [
+        { start: '2026-06-08 07:14:00', end: '2026-06-08 11:00:00' },
+        { start: '2026-06-08 12:00:00', end: '2026-06-09 18:52:00' },
+      ],
+    })], 2026, 6)
+    expect(rows[7]).toMatchObject({ in1: '07:14', out1: '11:00', in2: '12:00', out2: null })
+    expect(rows[8]!.out1).toBe('18:52')
+  })
+
+  it('翌々日へずれ込んでも実際の日へ返す', () => {
+    const rows = buildTimecardTable([day({
+      day: 8,
+      isRestDay: true,
+      punchErrorMinutes: 5000,
+      sessions: [{ start: '2026-06-08 07:00:00', end: '2026-06-10 09:30:00' }],
+    })], 2026, 6)
+    expect(rows[9]).toMatchObject({ day: 10, out1: '09:30', isAfterPunchError: true })
+    // 間の 9 日は影響を受けていない (退勤が押されたのは 10 日)
+    expect(rows[8]!.isAfterPunchError).toBe(false)
+  })
+
+  it('月をまたいでずれ込んだ分は落とす (出す行が無い)', () => {
+    const rows = buildTimecardTable([day({
+      day: 30,
+      isRestDay: true,
+      punchErrorMinutes: 2000,
+      sessions: [{ start: '2026-06-30 07:00:00', end: '2026-07-01 18:00:00' }],
+    })], 2026, 6)
+    expect(rows).toHaveLength(30)
+    expect(rows[29]).toMatchObject({ day: 30, in1: '07:00', out1: null })
+  })
+
+  it('読めない打刻はエラー日でも黙って落とす (返す先が決まらない)', () => {
+    const rows = buildTimecardTable([day({
+      day: 8,
+      isRestDay: true,
+      punchErrorMinutes: 2138,
+      sessions: [{ start: '2026-06-08 07:14:00', end: 'bad' }],
+    })], 2026, 6)
+    expect(rows[7]).toMatchObject({ in1: '07:14', out1: null, isPunchError: true })
+    // 返す先が決まらないので、どの日にも退勤は出さない
+    expect(rows.every(r => r.day === 8 || r.out1 === null)).toBe(true)
+  })
+
+  it('ずれ込んだ先に自分の打刻がある日は上書きしない', () => {
+    const rows = buildTimecardTable([
+      day({ day: 8, isRestDay: true, punchErrorMinutes: 2138,
+        sessions: [{ start: '2026-06-08 07:14:00', end: '2026-06-09 18:52:00' }] }),
+      day({ day: 9, sessions: [{ start: '2026-06-09 08:00:00', end: '2026-06-09 17:00:00' }] }),
+    ], 2026, 6)
+    expect(rows[8]).toMatchObject({ day: 9, in1: '08:00', out1: '17:00' })
   })
 
   it('打刻エラーは自主出勤・休日出勤より優先して表示する', () => {
@@ -266,6 +343,7 @@ describe('打刻エラーの表示 (Refs #433)', () => {
       note: '前日の打刻エラーの影響',
       isAfterPunchError: true,
       in1: null,
+      out1: '18:52',
     })
     // エラー日そのものは「翌日の影響」ではない
     expect(rows[7]!.isAfterPunchError).toBe(false)
