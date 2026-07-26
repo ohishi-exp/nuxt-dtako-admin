@@ -4,21 +4,21 @@
       "driverCd": "1029",
       "driverName": "冨田　竜",
       "branchName": "大石運輸倉庫㈱ 本社",
-      "workDays": 16,
-      "restDays": 2,
-      "restraintMinutes": 19939,
+      "workDays": 18,
+      "restDays": 3,
+      "restraintMinutes": 21833,
       "drivingMinutes": null,
       "loadingMinutes": null,
-      "breakMinutes": 3077,
-      "workingMinutes": 16862,
-      "overtimeMinutes": 7722,
-      "nightMinutes": 4993,
+      "breakMinutes": 3197,
+      "workingMinutes": 18636,
+      "overtimeMinutes": 8536,
+      "nightMinutes": 5615,
       "overtimeNightMinutes": 1460,
       "maxDailyRestraintMinutes": 2306,
       "fiscalCumulativeMinutes": null,
       "restraintLimitMinutes": null,
       "excessRestraintMinutes": null,
-      "over15hDays": 9,
+      "over15hDays": 11,
       "avgDriving9hOverCount": 0,
       "days": [
         {
@@ -31,6 +31,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-01 23:52:33",
@@ -48,6 +50,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-03 00:03:21",
@@ -65,6 +69,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-04 00:04:00",
@@ -82,12 +88,46 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-05 00:03:33",
               "end": "2026-06-05 16:15:28"
             }
           ]
+        },
+        {
+          "day": 6,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
+        },
+        {
+          "day": 7,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
         },
         {
           "day": 8,
@@ -99,6 +139,8 @@
           "overtimeNightMinutes": 414,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-08 00:08:39",
@@ -120,6 +162,8 @@
           "overtimeNightMinutes": 413,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-10 00:41:34",
@@ -141,12 +185,30 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-12 00:16:07",
               "end": "2026-06-12 14:41:06"
             }
           ]
+        },
+        {
+          "day": 13,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
         },
         {
           "day": 14,
@@ -158,6 +220,10 @@
           "overtimeNightMinutes": 26,
           "holidayKind": "legal",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
           "sessions": [
             {
               "start": "2026-06-14 20:33:27",
@@ -175,6 +241,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-15 22:09:37",
@@ -192,6 +260,10 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
           "sessions": [
             {
               "start": "2026-06-17 22:04:54",
@@ -209,6 +281,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-18 22:01:33",
@@ -226,6 +300,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-20 00:12:09",
@@ -235,14 +311,18 @@
         },
         {
           "day": 21,
-          "isRestDay": true,
-          "restraintMinutes": 0,
-          "workingMinutes": 0,
-          "overtimeMinutes": 0,
-          "nightMinutes": 0,
+          "isRestDay": false,
+          "restraintMinutes": 971,
+          "workingMinutes": 911,
+          "overtimeMinutes": 431,
+          "nightMinutes": 318,
           "overtimeNightMinutes": 0,
           "holidayKind": "legal",
-          "voluntaryMinutes": 911,
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
           "sessions": [
             {
               "start": "2026-06-21 23:41:41",
@@ -260,6 +340,8 @@
           "overtimeNightMinutes": 304,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-23 00:04:18",
@@ -281,6 +363,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-25 00:02:07",
@@ -298,6 +382,8 @@
           "overtimeNightMinutes": 303,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-26 02:37:13",
@@ -311,14 +397,18 @@
         },
         {
           "day": 28,
-          "isRestDay": true,
-          "restraintMinutes": 0,
-          "workingMinutes": 0,
-          "overtimeMinutes": 0,
-          "nightMinutes": 0,
+          "isRestDay": false,
+          "restraintMinutes": 923,
+          "workingMinutes": 863,
+          "overtimeMinutes": 383,
+          "nightMinutes": 304,
           "overtimeNightMinutes": 0,
           "holidayKind": "legal",
-          "voluntaryMinutes": 863,
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
           "sessions": [
             {
               "start": "2026-06-28 23:55:51",
@@ -336,6 +426,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-29 23:54:47",
@@ -345,14 +437,576 @@
         }
       ],
       "source": "timecard",
-      "voluntaryMinutes": 1774
+      "voluntaryMinutes": 0,
+      "punchErrorDays": 0,
+      "punchErrorMinutes": 0,
+      "leaveCounts": {
+        "publicHoliday": 7,
+        "paidLeave": 0,
+        "absence": 0,
+        "specialLeave": 0,
+        "late": 0,
+        "earlyLeave": 0
+      }
+    },
+    {
+      "driverCd": "1065",
+      "driverName": "佐藤　泰弘",
+      "branchName": "㈲大石運輸　本社",
+      "workDays": 21,
+      "restDays": 7,
+      "restraintMinutes": 16100,
+      "drivingMinutes": null,
+      "loadingMinutes": null,
+      "breakMinutes": 1260,
+      "workingMinutes": 14840,
+      "overtimeMinutes": 4760,
+      "nightMinutes": 0,
+      "overtimeNightMinutes": 0,
+      "maxDailyRestraintMinutes": 832,
+      "fiscalCumulativeMinutes": null,
+      "restraintLimitMinutes": null,
+      "excessRestraintMinutes": null,
+      "over15hDays": 0,
+      "avgDriving9hOverCount": 0,
+      "days": [
+        {
+          "day": 1,
+          "isRestDay": false,
+          "restraintMinutes": 783,
+          "workingMinutes": 723,
+          "overtimeMinutes": 243,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-01 07:13:25",
+              "end": "2026-06-01 20:16:42"
+            }
+          ]
+        },
+        {
+          "day": 2,
+          "isRestDay": false,
+          "restraintMinutes": 832,
+          "workingMinutes": 772,
+          "overtimeMinutes": 292,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-02 07:13:34",
+              "end": "2026-06-02 21:05:39"
+            }
+          ]
+        },
+        {
+          "day": 3,
+          "isRestDay": false,
+          "restraintMinutes": 769,
+          "workingMinutes": 709,
+          "overtimeMinutes": 229,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-03 07:13:24",
+              "end": "2026-06-03 20:03:07"
+            }
+          ]
+        },
+        {
+          "day": 4,
+          "isRestDay": false,
+          "restraintMinutes": 763,
+          "workingMinutes": 703,
+          "overtimeMinutes": 223,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-04 07:09:42",
+              "end": "2026-06-04 19:52:50"
+            }
+          ]
+        },
+        {
+          "day": 5,
+          "isRestDay": false,
+          "restraintMinutes": 714,
+          "workingMinutes": 654,
+          "overtimeMinutes": 174,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-05 07:13:42",
+              "end": "2026-06-05 19:08:08"
+            }
+          ]
+        },
+        {
+          "day": 6,
+          "isRestDay": false,
+          "restraintMinutes": 763,
+          "workingMinutes": 703,
+          "overtimeMinutes": 223,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-06 07:06:30",
+              "end": "2026-06-06 19:50:01"
+            }
+          ]
+        },
+        {
+          "day": 7,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
+        },
+        {
+          "day": 8,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 2138,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-08 07:14:08",
+              "end": "2026-06-09 18:52:15"
+            }
+          ]
+        },
+        {
+          "day": 9,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
+        },
+        {
+          "day": 10,
+          "isRestDay": false,
+          "restraintMinutes": 817,
+          "workingMinutes": 757,
+          "overtimeMinutes": 277,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-10 07:11:05",
+              "end": "2026-06-10 20:48:23"
+            }
+          ]
+        },
+        {
+          "day": 11,
+          "isRestDay": false,
+          "restraintMinutes": 731,
+          "workingMinutes": 671,
+          "overtimeMinutes": 191,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-11 07:14:22",
+              "end": "2026-06-11 19:25:44"
+            }
+          ]
+        },
+        {
+          "day": 12,
+          "isRestDay": false,
+          "restraintMinutes": 788,
+          "workingMinutes": 728,
+          "overtimeMinutes": 248,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-12 07:14:09",
+              "end": "2026-06-12 20:22:38"
+            }
+          ]
+        },
+        {
+          "day": 13,
+          "isRestDay": false,
+          "restraintMinutes": 709,
+          "workingMinutes": 649,
+          "overtimeMinutes": 169,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-13 07:15:03",
+              "end": "2026-06-13 19:04:24"
+            }
+          ]
+        },
+        {
+          "day": 14,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
+        },
+        {
+          "day": 15,
+          "isRestDay": false,
+          "restraintMinutes": 778,
+          "workingMinutes": 718,
+          "overtimeMinutes": 238,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-15 07:12:00",
+              "end": "2026-06-15 20:10:48"
+            }
+          ]
+        },
+        {
+          "day": 16,
+          "isRestDay": false,
+          "restraintMinutes": 760,
+          "workingMinutes": 700,
+          "overtimeMinutes": 220,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-16 07:09:31",
+              "end": "2026-06-16 19:50:27"
+            }
+          ]
+        },
+        {
+          "day": 17,
+          "isRestDay": false,
+          "restraintMinutes": 731,
+          "workingMinutes": 671,
+          "overtimeMinutes": 191,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-17 07:13:27",
+              "end": "2026-06-17 19:25:01"
+            }
+          ]
+        },
+        {
+          "day": 18,
+          "isRestDay": false,
+          "restraintMinutes": 742,
+          "workingMinutes": 682,
+          "overtimeMinutes": 202,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-18 07:10:54",
+              "end": "2026-06-18 19:33:37"
+            }
+          ]
+        },
+        {
+          "day": 19,
+          "isRestDay": false,
+          "restraintMinutes": 784,
+          "workingMinutes": 724,
+          "overtimeMinutes": 244,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-19 07:12:50",
+              "end": "2026-06-19 20:17:39"
+            }
+          ]
+        },
+        {
+          "day": 20,
+          "isRestDay": false,
+          "restraintMinutes": 811,
+          "workingMinutes": 751,
+          "overtimeMinutes": 271,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-20 07:10:54",
+              "end": "2026-06-20 20:42:06"
+            }
+          ]
+        },
+        {
+          "day": 21,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
+        },
+        {
+          "day": 22,
+          "isRestDay": false,
+          "restraintMinutes": 826,
+          "workingMinutes": 766,
+          "overtimeMinutes": 286,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-22 07:13:44",
+              "end": "2026-06-22 21:00:32"
+            }
+          ]
+        },
+        {
+          "day": 23,
+          "isRestDay": false,
+          "restraintMinutes": 752,
+          "workingMinutes": 692,
+          "overtimeMinutes": 212,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-23 07:13:41",
+              "end": "2026-06-23 19:45:46"
+            }
+          ]
+        },
+        {
+          "day": 25,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 2194,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-25 07:14:11",
+              "end": "2026-06-26 19:49:05"
+            }
+          ]
+        },
+        {
+          "day": 27,
+          "isRestDay": false,
+          "restraintMinutes": 736,
+          "workingMinutes": 676,
+          "overtimeMinutes": 196,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-27 07:13:30",
+              "end": "2026-06-27 19:30:22"
+            }
+          ]
+        },
+        {
+          "day": 28,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
+        },
+        {
+          "day": 29,
+          "isRestDay": false,
+          "restraintMinutes": 745,
+          "workingMinutes": 685,
+          "overtimeMinutes": 205,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-29 07:11:24",
+              "end": "2026-06-29 19:36:35"
+            }
+          ]
+        },
+        {
+          "day": 30,
+          "isRestDay": false,
+          "restraintMinutes": 766,
+          "workingMinutes": 706,
+          "overtimeMinutes": 226,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-30 07:11:23",
+              "end": "2026-06-30 19:57:48"
+            }
+          ]
+        }
+      ],
+      "source": "timecard",
+      "voluntaryMinutes": 0,
+      "punchErrorDays": 2,
+      "punchErrorMinutes": 4332,
+      "leaveCounts": {
+        "publicHoliday": 5,
+        "paidLeave": 0,
+        "absence": 0,
+        "specialLeave": 0,
+        "late": 0,
+        "earlyLeave": 0
+      }
     },
     {
       "driverCd": "1621",
       "driverName": "西山　珠里",
       "branchName": "㈲大石運輸　本社",
       "workDays": 20,
-      "restDays": 0,
+      "restDays": 7,
       "restraintMinutes": 8953,
       "drivingMinutes": null,
       "loadingMinutes": null,
@@ -378,6 +1032,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-01 08:48:01",
@@ -395,12 +1051,46 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-02 08:45:10",
               "end": "2026-06-02 17:03:49"
             }
           ]
+        },
+        {
+          "day": 3,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "有休"
+          ],
+          "sessions": []
+        },
+        {
+          "day": 4,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "有休"
+          ],
+          "sessions": []
         },
         {
           "day": 5,
@@ -412,6 +1102,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-05 08:50:01",
@@ -429,12 +1121,30 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-06 08:50:38",
               "end": "2026-06-06 16:03:21"
             }
           ]
+        },
+        {
+          "day": 7,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
         },
         {
           "day": 8,
@@ -446,6 +1156,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-08 08:37:32",
@@ -463,6 +1175,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-09 08:54:25",
@@ -480,6 +1194,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-10 08:48:49",
@@ -497,6 +1213,10 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "後休"
+          ],
           "sessions": [
             {
               "start": "2026-06-11 08:40:15",
@@ -514,12 +1234,30 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-13 08:46:21",
               "end": "2026-06-13 16:04:02"
             }
           ]
+        },
+        {
+          "day": 14,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
         },
         {
           "day": 15,
@@ -531,6 +1269,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-15 08:44:29",
@@ -548,6 +1288,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-16 08:51:15",
@@ -565,6 +1307,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-17 08:43:37",
@@ -582,6 +1326,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-18 08:54:02",
@@ -599,6 +1345,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-19 08:41:50",
@@ -616,12 +1364,30 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-20 08:39:57",
               "end": "2026-06-20 16:05:16"
             }
           ]
+        },
+        {
+          "day": 21,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
         },
         {
           "day": 22,
@@ -633,6 +1399,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-22 08:40:10",
@@ -650,12 +1418,30 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-23 08:50:23",
               "end": "2026-06-23 17:19:46"
             }
           ]
+        },
+        {
+          "day": 24,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "有休"
+          ],
+          "sessions": []
         },
         {
           "day": 25,
@@ -667,12 +1453,30 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-25 08:47:03",
               "end": "2026-06-25 16:04:25"
             }
           ]
+        },
+        {
+          "day": 28,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
         },
         {
           "day": 29,
@@ -684,6 +1488,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-29 08:42:23",
@@ -701,6 +1507,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-30 08:45:37",
@@ -710,14 +1518,24 @@
         }
       ],
       "source": "timecard",
-      "voluntaryMinutes": 0
+      "voluntaryMinutes": 0,
+      "punchErrorDays": 0,
+      "punchErrorMinutes": 0,
+      "leaveCounts": {
+        "publicHoliday": 4,
+        "paidLeave": 3.5,
+        "absence": 0,
+        "specialLeave": 0,
+        "late": 0,
+        "earlyLeave": 0
+      }
     },
     {
       "driverCd": "1663",
       "driverName": "松山　裕己",
       "branchName": "大石運輸倉庫㈱ 本社",
       "workDays": 25,
-      "restDays": 0,
+      "restDays": 5,
       "restraintMinutes": 13357,
       "drivingMinutes": null,
       "loadingMinutes": null,
@@ -743,6 +1561,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-01 08:00:31",
@@ -760,6 +1580,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-02 08:05:31",
@@ -777,6 +1599,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-03 07:58:51",
@@ -794,6 +1618,10 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "早退"
+          ],
           "sessions": [
             {
               "start": "2026-06-04 07:55:45",
@@ -811,6 +1639,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-05 07:59:37",
@@ -828,12 +1658,30 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-06 08:00:05",
               "end": "2026-06-06 17:42:17"
             }
           ]
+        },
+        {
+          "day": 7,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
         },
         {
           "day": 8,
@@ -845,6 +1693,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-08 07:58:43",
@@ -862,6 +1712,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-09 08:14:13",
@@ -879,6 +1731,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-10 07:58:19",
@@ -896,6 +1750,10 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "早退"
+          ],
           "sessions": [
             {
               "start": "2026-06-11 07:59:07",
@@ -913,12 +1771,46 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-12 07:59:44",
               "end": "2026-06-12 16:56:43"
             }
           ]
+        },
+        {
+          "day": 13,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
+        },
+        {
+          "day": 14,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
         },
         {
           "day": 15,
@@ -930,6 +1822,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-15 07:57:58",
@@ -947,6 +1841,10 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "早退"
+          ],
           "sessions": [
             {
               "start": "2026-06-16 07:57:51",
@@ -964,6 +1862,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-17 08:03:26",
@@ -981,6 +1881,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-18 07:56:06",
@@ -998,6 +1900,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-19 07:57:08",
@@ -1015,12 +1919,30 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-20 07:59:42",
               "end": "2026-06-20 17:07:57"
             }
           ]
+        },
+        {
+          "day": 21,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
         },
         {
           "day": 22,
@@ -1032,6 +1954,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-22 08:05:14",
@@ -1049,6 +1973,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-23 08:00:27",
@@ -1066,6 +1992,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-24 07:59:55",
@@ -1083,6 +2011,10 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "早退"
+          ],
           "sessions": [
             {
               "start": "2026-06-25 08:00:11",
@@ -1104,6 +2036,10 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "早退"
+          ],
           "sessions": [
             {
               "start": "2026-06-26 08:02:07",
@@ -1121,12 +2057,30 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-27 07:59:41",
               "end": "2026-06-27 17:13:21"
             }
           ]
+        },
+        {
+          "day": 28,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
         },
         {
           "day": 29,
@@ -1138,6 +2092,10 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "早退"
+          ],
           "sessions": [
             {
               "start": "2026-06-29 07:57:35",
@@ -1155,6 +2113,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-30 07:57:55",
@@ -1164,14 +2124,24 @@
         }
       ],
       "source": "timecard",
-      "voluntaryMinutes": 0
+      "voluntaryMinutes": 0,
+      "punchErrorDays": 0,
+      "punchErrorMinutes": 0,
+      "leaveCounts": {
+        "publicHoliday": 5,
+        "paidLeave": 0,
+        "absence": 0,
+        "specialLeave": 0,
+        "late": 0,
+        "earlyLeave": 6
+      }
     },
     {
       "driverCd": "1670",
       "driverName": "松永　寿乃",
       "branchName": "大石運輸倉庫㈱ 本社",
       "workDays": 21,
-      "restDays": 0,
+      "restDays": 9,
       "restraintMinutes": 11581,
       "drivingMinutes": null,
       "loadingMinutes": null,
@@ -1197,6 +2167,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-01 07:51:10",
@@ -1214,6 +2186,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-02 07:43:06",
@@ -1231,6 +2205,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-03 07:48:30",
@@ -1248,6 +2224,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-04 07:51:29",
@@ -1265,6 +2243,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-05 07:42:58",
@@ -1282,12 +2262,30 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-06 07:49:41",
               "end": "2026-06-06 16:56:44"
             }
           ]
+        },
+        {
+          "day": 7,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
         },
         {
           "day": 8,
@@ -1299,6 +2297,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-08 07:49:35",
@@ -1316,6 +2316,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-09 07:40:59",
@@ -1333,6 +2335,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-10 07:46:55",
@@ -1350,6 +2354,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-11 07:44:15",
@@ -1371,6 +2377,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-12 07:54:48",
@@ -1388,12 +2396,30 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-13 07:47:31",
               "end": "2026-06-13 16:54:02"
             }
           ]
+        },
+        {
+          "day": 14,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
         },
         {
           "day": 15,
@@ -1405,6 +2431,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-15 07:44:12",
@@ -1422,6 +2450,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-16 07:45:03",
@@ -1439,6 +2469,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-17 07:42:49",
@@ -1456,6 +2488,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-18 07:45:11",
@@ -1473,12 +2507,110 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-19 07:43:55",
               "end": "2026-06-19 17:10:16"
             }
           ]
+        },
+        {
+          "day": 20,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
+        },
+        {
+          "day": 21,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
+        },
+        {
+          "day": 22,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "有休"
+          ],
+          "sessions": []
+        },
+        {
+          "day": 23,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "有休"
+          ],
+          "sessions": []
+        },
+        {
+          "day": 24,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "有休"
+          ],
+          "sessions": []
+        },
+        {
+          "day": 25,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "有休"
+          ],
+          "sessions": []
         },
         {
           "day": 26,
@@ -1490,6 +2622,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-26 07:47:13",
@@ -1507,12 +2641,30 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-27 07:40:21",
               "end": "2026-06-27 16:59:09"
             }
           ]
+        },
+        {
+          "day": 28,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [
+            "公休"
+          ],
+          "sessions": []
         },
         {
           "day": 29,
@@ -1524,6 +2676,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-29 07:43:44",
@@ -1541,6 +2695,8 @@
           "overtimeNightMinutes": 0,
           "holidayKind": "weekday",
           "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
           "sessions": [
             {
               "start": "2026-06-30 07:43:52",
@@ -1550,7 +2706,337 @@
         }
       ],
       "source": "timecard",
-      "voluntaryMinutes": 0
+      "voluntaryMinutes": 0,
+      "punchErrorDays": 0,
+      "punchErrorMinutes": 0,
+      "leaveCounts": {
+        "publicHoliday": 5,
+        "paidLeave": 4,
+        "absence": 0,
+        "specialLeave": 0,
+        "late": 0,
+        "earlyLeave": 0
+      }
+    },
+    {
+      "driverCd": "1706",
+      "driverName": "山根　幸数",
+      "branchName": "大石運輸倉庫㈱ 本社",
+      "workDays": 13,
+      "restDays": 2,
+      "restraintMinutes": 3357,
+      "drivingMinutes": null,
+      "loadingMinutes": null,
+      "breakMinutes": 0,
+      "workingMinutes": 3357,
+      "overtimeMinutes": 0,
+      "nightMinutes": 1615,
+      "overtimeNightMinutes": 0,
+      "maxDailyRestraintMinutes": 270,
+      "fiscalCumulativeMinutes": null,
+      "restraintLimitMinutes": null,
+      "excessRestraintMinutes": null,
+      "over15hDays": 0,
+      "avgDriving9hOverCount": 0,
+      "days": [
+        {
+          "day": 2,
+          "isRestDay": false,
+          "restraintMinutes": 258,
+          "workingMinutes": 258,
+          "overtimeMinutes": 0,
+          "nightMinutes": 122,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-02 19:43:51",
+              "end": "2026-06-03 00:02:17"
+            }
+          ]
+        },
+        {
+          "day": 4,
+          "isRestDay": false,
+          "restraintMinutes": 258,
+          "workingMinutes": 258,
+          "overtimeMinutes": 0,
+          "nightMinutes": 122,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-04 19:44:41",
+              "end": "2026-06-05 00:02:46"
+            }
+          ]
+        },
+        {
+          "day": 6,
+          "isRestDay": false,
+          "restraintMinutes": 257,
+          "workingMinutes": 257,
+          "overtimeMinutes": 0,
+          "nightMinutes": 122,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-06 19:45:31",
+              "end": "2026-06-07 00:02:40"
+            }
+          ]
+        },
+        {
+          "day": 8,
+          "isRestDay": false,
+          "restraintMinutes": 260,
+          "workingMinutes": 260,
+          "overtimeMinutes": 0,
+          "nightMinutes": 127,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-08 19:47:51",
+              "end": "2026-06-09 00:07:51"
+            }
+          ]
+        },
+        {
+          "day": 10,
+          "isRestDay": false,
+          "restraintMinutes": 256,
+          "workingMinutes": 256,
+          "overtimeMinutes": 0,
+          "nightMinutes": 121,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-10 19:45:03",
+              "end": "2026-06-11 00:01:52"
+            }
+          ]
+        },
+        {
+          "day": 12,
+          "isRestDay": false,
+          "restraintMinutes": 256,
+          "workingMinutes": 256,
+          "overtimeMinutes": 0,
+          "nightMinutes": 122,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-12 19:45:28",
+              "end": "2026-06-13 00:02:06"
+            }
+          ]
+        },
+        {
+          "day": 14,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 318,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-14 18:46:26",
+              "end": "2026-06-15 00:04:29"
+            }
+          ]
+        },
+        {
+          "day": 16,
+          "isRestDay": false,
+          "restraintMinutes": 256,
+          "workingMinutes": 256,
+          "overtimeMinutes": 0,
+          "nightMinutes": 121,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-16 19:45:06",
+              "end": "2026-06-17 00:01:37"
+            }
+          ]
+        },
+        {
+          "day": 18,
+          "isRestDay": false,
+          "restraintMinutes": 255,
+          "workingMinutes": 255,
+          "overtimeMinutes": 0,
+          "nightMinutes": 122,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-18 19:47:04",
+              "end": "2026-06-19 00:02:13"
+            }
+          ]
+        },
+        {
+          "day": 20,
+          "isRestDay": false,
+          "restraintMinutes": 260,
+          "workingMinutes": 260,
+          "overtimeMinutes": 0,
+          "nightMinutes": 125,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-20 19:44:52",
+              "end": "2026-06-21 00:05:06"
+            }
+          ]
+        },
+        {
+          "day": 22,
+          "isRestDay": false,
+          "restraintMinutes": 256,
+          "workingMinutes": 256,
+          "overtimeMinutes": 0,
+          "nightMinutes": 124,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-22 19:47:35",
+              "end": "2026-06-23 00:04:03"
+            }
+          ]
+        },
+        {
+          "day": 24,
+          "isRestDay": false,
+          "restraintMinutes": 258,
+          "workingMinutes": 258,
+          "overtimeMinutes": 0,
+          "nightMinutes": 123,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-24 19:44:39",
+              "end": "2026-06-25 00:03:26"
+            }
+          ]
+        },
+        {
+          "day": 26,
+          "isRestDay": false,
+          "restraintMinutes": 270,
+          "workingMinutes": 270,
+          "overtimeMinutes": 0,
+          "nightMinutes": 137,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-26 19:46:24",
+              "end": "2026-06-27 00:17:11"
+            }
+          ]
+        },
+        {
+          "day": 28,
+          "isRestDay": true,
+          "restraintMinutes": 0,
+          "workingMinutes": 0,
+          "overtimeMinutes": 0,
+          "nightMinutes": 0,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "legal",
+          "voluntaryMinutes": 317,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-28 18:46:16",
+              "end": "2026-06-29 00:03:31"
+            }
+          ]
+        },
+        {
+          "day": 30,
+          "isRestDay": false,
+          "restraintMinutes": 257,
+          "workingMinutes": 257,
+          "overtimeMinutes": 0,
+          "nightMinutes": 127,
+          "overtimeNightMinutes": 0,
+          "holidayKind": "weekday",
+          "voluntaryMinutes": 0,
+          "punchErrorMinutes": 0,
+          "leaves": [],
+          "sessions": [
+            {
+              "start": "2026-06-30 19:50:43",
+              "end": "2026-07-01 00:07:47"
+            }
+          ]
+        }
+      ],
+      "source": "timecard",
+      "voluntaryMinutes": 635,
+      "punchErrorDays": 0,
+      "punchErrorMinutes": 0,
+      "leaveCounts": {
+        "publicHoliday": 0,
+        "paidLeave": 0,
+        "absence": 0,
+        "specialLeave": 0,
+        "late": 0,
+        "earlyLeave": 0
+      }
     }
   ],
   "warnings": []

@@ -26,12 +26,42 @@
  * 時間外深夜に回す。`classifyMonth` の契約に合わせ、深夜 (通常) と時間外深夜は
  * **排他** (`statutory = 実働 − 時間外 − 時間外深夜`) にする。
  *
- * ## 休日
+ * ## 休日 — 事務職と非事務職で扱いが違う (Refs #433)
  *
- * - **承認済み休日出勤** (`holiday_work_approvals` に日付がある) … 通常どおり時間を出す
- * - **自主出勤** (休日の打刻だが承認が無い) … `isRestDay: true` + 各時間 0 で出し、
+ * - **承認済み休日出勤** (`holiday_work_approvals` に日付がある) … 職種によらず
+ *   通常どおり時間を出す (法定 1.35 / 法定外 1.25)
+ * - **事務職の未承認の休日打刻 = 自主出勤** … `isRestDay: true` + 各時間 0 で出し、
  *   実働分は `voluntaryMinutes` に退避する。既存の賃金ロジックに手を入れずに
  *   「残業としてつけない」を実現でき、時間は画面と CSV に残る
+ * - **非事務職の未承認の休日打刻** … 自主出勤にせず**通常どおり計上する**。ただし
+ *   **法定外休日 (祝日・指定休) の割増はつけない** — `holidayKind` を `weekday` へ
+ *   落として平日として計算する (2026-07-26 ユーザー決定)。法定休日 (日曜) は
+ *   未承認でも 1.35 を付ける (労基法 35 条の休日労働そのものなので)
+ *
+ * ## 打刻エラー (Refs #433)
+ *
+ * **事務職 かつ 夜勤者でない かつ 日跨ぎの打刻** は終業の押し忘れとみなし、
+ * その日を賃金計算から外して `punchErrorMinutes` に拘束分を退避する
+ * (自主出勤と同じ隔離の作法)。時刻は残す — 総務が CakePHP 側で直すための
+ * 手掛かりだから。
+ *
+ * 拘束時間の長さは判定に使わない。実データ (2026-04〜06) では夜勤の 1706/1707 が
+ * 19:45→翌00:02 (4.3h) を月 15 回前後打っており、打刻漏れの 1065 は
+ * 07:14→翌18:52 (35.6h)。**事務職 + 夜勤者マスタ**の 2 条件で完全に分かれる。
+ *
+ * 押し忘れた日の終業は**翌日の打刻と組まれる**ため、翌日の行そのものが消える
+ * (実データで確認)。「翌日が空欄」も症状なので、画面側でその旨を出す。
+ *
+ * ## 休暇 (公休・有休等、Refs #433)
+ *
+ * 上流 (`yhonda-ohishi/nginx#779`) が `leaves: [{detail}]` を返す。`detail` は
+ * CakePHP の原文 (公休 / 有休 / 指休 / 欠勤 / 特休 / 前休 / 後休 / 遅刻 / 早退 …)
+ * で、**分類はこちら側で行う** (`countLeaves`)。集計軸は CakePHP の PDF
+ * (`TimeCardController::createPdf`) と揃えてある — それは給与明細の列
+ * (`出勤日数 / 公休日数 / 有休日数 / 欠勤日数 …`) と同じ軸なので突合できる。
+ *
+ * 打刻の無い休暇日も行として来る (`sessions: []`)。既存の「打刻なし = 休み」の
+ * 分岐にそのまま乗るので、時間は 0 のまま区分だけが載る。
  *
  * ## 休日区分の権威 (PR-D で解消済み)
  *
@@ -68,6 +98,12 @@ export interface TimecardSession {
   end: string;
 }
 
+/** 休暇 1 件 (`daily_report_other_detail` の `report_type='kyuka'`)。
+ * `detail` は CakePHP の原文 (公休 / 有休 / 指休 / 欠勤 / 特休 …)。 */
+export interface TimecardLeave {
+  detail: string;
+}
+
 /** `daily-json` の 1 行 (1 社員 × 1 日、日跨ぎは始業日に寄せてある)。 */
 export interface TimecardDailyRow {
   driver_id: number | string;
@@ -77,10 +113,16 @@ export interface TimecardDailyRow {
   start: string | null;
   end: string | null;
   restraint_minutes: number;
-  /** 中抜けの内訳。中抜けが無い日も要素数 1 で必ず入る (nginx#776)。 */
+  /** 中抜けの内訳。中抜けが無い日も要素数 1 で必ず入る (nginx#776)。
+   * 休暇だけで打刻の無い日は空配列 (nginx#779)。 */
   sessions: TimecardSession[];
   holiday: TimecardHolidayKind;
   office?: string | null;
+  /**
+   * その日の休暇 (nginx#779)。**optional** — この項目を返さない上流でも取り込みを
+   * 成功させるため (上流と本体のデプロイ順に依存しない)。
+   */
+  leaves?: TimecardLeave[];
 }
 
 /** 日別サマリ。`RestraintSummaryDay` の上に timecard 固有の 3 項目を足す
@@ -99,6 +141,13 @@ export interface TimecardSummaryDay extends RestraintSummaryDay {
   /** 自主出勤として賃金計算から外した実働 (分)。通常日は 0。 */
   voluntaryMinutes: number;
   /**
+   * 打刻エラー (事務職・非夜勤・日跨ぎ) として賃金計算から外した拘束 (分)。
+   * 通常日は 0。**この日が打刻エラーか**の判定はこの値が正 (0 より大きいか)。
+   */
+  punchErrorMinutes: number;
+  /** その日の休暇区分 (原文、公休 / 有休 / …)。無ければ空配列。 */
+  leaves: string[];
+  /**
    * その日の打刻区間 ("YYYY-MM-DD HH:MM:SS"、中抜けがあれば 2 つ以上)。
    *
    * **実働の計算に使ったものと同じ区間**を持つ (無効な打刻を落とし、重なりを併合
@@ -109,12 +158,38 @@ export interface TimecardSummaryDay extends RestraintSummaryDay {
   sessions: TimecardSession[];
 }
 
+/**
+ * 休暇の日数集計 (Refs #433)。軸は CakePHP の PDF (`TimeCardController::createPdf`)
+ * と同じ = 給与明細の列 (`出勤日数 / 公休日数 / 有休日数 / 欠勤日数 …`) と同じ。
+ * 半休 (前休・後休) があるので**整数とは限らない**。
+ */
+export interface TimecardLeaveCounts {
+  /** 公休日数 (公休 / 泊休 / 積置泊休 / 指休)。 */
+  publicHoliday: number;
+  /** 有休日数 (有休 = 1.0、前休 / 後休 / 前休作 / 後休作 = 0.5)。 */
+  paidLeave: number;
+  /** 欠勤日数。 */
+  absence: number;
+  /** 特別休暇。 */
+  specialLeave: number;
+  /** 遅刻回数。 */
+  late: number;
+  /** 早退回数。 */
+  earlyLeave: number;
+}
+
 export interface TimecardDriverSummary extends RestraintDriverSummary {
   days: TimecardSummaryDay[];
   /** サマリの出どころ。theearth 由来と混ざった時に見分ける (PR-D)。 */
   source: "timecard";
   /** 自主出勤の月合計 (分)。 */
   voluntaryMinutes: number;
+  /** 打刻エラーの日数 (Refs #433)。 */
+  punchErrorDays: number;
+  /** 打刻エラーとして賃金計算から外した拘束の月合計 (分)。 */
+  punchErrorMinutes: number;
+  /** 休暇の日数集計。 */
+  leaveCounts: TimecardLeaveCounts;
 }
 
 export interface TimecardSummaryResult {
@@ -269,6 +344,75 @@ export const NIGHT_FROM_HOUR = 22;
 export const NIGHT_TO_HOUR = 29; // 翌 05:00
 
 // ---------------------------------------------------------------------------
+// 職種・休暇・日跨ぎの判定 (Refs #433)
+// ---------------------------------------------------------------------------
+
+/**
+ * 事務職か (`employee_attrs.job_name` = `SHOZOKU.NAME2`)。
+ *
+ * **部分一致にしているのは表記ゆれのため** — 本番の実測値は `一般管理事務` 34 名 と
+ * `一般事務管理` 1 名 で、給与大臣側に前後の入れ替わった行が混ざっている。
+ * 完全一致のリストにすると 1 名を取りこぼす。
+ *
+ * **職種が引けない社員 (D1 未取り込み・職種 NULL) は false**。打刻エラーの判定も
+ * 自主出勤の隔離も掛からない安全側に倒す — 職種を知らないまま人の勤務を
+ * 賃金計算から外すほうが害が大きい。
+ */
+export function isClericalJob(jobName: string | null | undefined): boolean {
+  return typeof jobName === "string" && jobName.includes("事務");
+}
+
+/**
+ * 日跨ぎの打刻を含むか (始業日と終業日が違うセッションがある)。
+ *
+ * 比較するのは**併合後の区間**なので、画面に出る 出勤1/退社1 と判定根拠が一致する。
+ */
+export function hasOvernightSession(sessions: readonly TimecardSession[]): boolean {
+  return sessions.some((s) => s.start.slice(0, 10) !== s.end.slice(0, 10));
+}
+
+/** 1 日 1.0 と数える休暇 → 集計軸 (CakePHP の `createPdf` の switch と同じ)。 */
+const LEAVE_FULL_DAY: Record<string, keyof TimecardLeaveCounts> = {
+  公休: "publicHoliday",
+  泊休: "publicHoliday",
+  積置泊休: "publicHoliday",
+  指休: "publicHoliday",
+  有休: "paidLeave",
+  欠勤: "absence",
+  特休: "specialLeave",
+  遅刻: "late",
+  早退: "earlyLeave",
+};
+
+/** 0.5 日と数える休暇 (半休)。 */
+const LEAVE_HALF_DAY = new Set(["前休", "後休", "前休作", "後休作"]);
+
+/** 空の集計。 */
+export function emptyLeaveCounts(): TimecardLeaveCounts {
+  return { publicHoliday: 0, paidLeave: 0, absence: 0, specialLeave: 0, late: 0, earlyLeave: 0 };
+}
+
+/**
+ * 休暇区分 (原文) の並びを日数へ集計する。
+ *
+ * 上の 2 表に載っていない区分 (短時 / 仮乗務 / 有夜勤 / 家畜 …) は**数えない** —
+ * CakePHP の PDF でも備考に出るだけでカウントされない。区分そのものは
+ * 日別サマリの `leaves` に原文で残るので、画面には出せる。
+ */
+export function countLeaves(details: readonly string[]): TimecardLeaveCounts {
+  const out = emptyLeaveCounts();
+  for (const detail of details) {
+    const full = LEAVE_FULL_DAY[detail];
+    if (full) {
+      out[full] += 1;
+      continue;
+    }
+    if (LEAVE_HALF_DAY.has(detail)) out.paidLeave += 0.5;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // 日別の変換
 // ---------------------------------------------------------------------------
 
@@ -277,17 +421,23 @@ export interface TimecardDayOptions {
   dailyWorkMinutes: number | null;
   /** その日が承認済み休日出勤か。 */
   approved: boolean;
+  /** 事務職か (`isClericalJob`)。自主出勤の隔離と打刻エラーの判定はここが true の人だけ。 */
+  clerical: boolean;
+  /** 夜勤者か (`night_shift_workers`)。true なら日跨ぎを打刻エラーにしない。 */
+  nightShift: boolean;
 }
 
-/** 打刻の無い日 / 自主出勤の日に使う「休み」の 1 行。
+/** 賃金計算に入れない 1 行 (打刻なし / 自主出勤 / 打刻エラー)。
  *
- * 自主出勤は賃金計算から外すが**打刻は残す** — 労働時間として評価されうる時間を
- * 画面から消さないため (承認へ昇格すればそのまま休日出勤になる)。 */
+ * 自主出勤も打刻エラーも賃金計算から外すが**打刻は残す** — 自主出勤は労働時間として
+ * 評価されうる時間を画面から消さないため (承認へ昇格すればそのまま休日出勤になる)、
+ * 打刻エラーは総務が CakePHP 側で直すための手掛かりを消さないため。 */
 function restDay(
   day: number,
   holidayKind: TimecardHolidayKind,
-  voluntaryMinutes: number,
   sessions: TimecardSession[],
+  leaves: string[],
+  excluded: { voluntaryMinutes?: number, punchErrorMinutes?: number } = {},
 ): TimecardSummaryDay {
   return {
     day,
@@ -298,7 +448,9 @@ function restDay(
     nightMinutes: 0,
     overtimeNightMinutes: 0,
     holidayKind,
-    voluntaryMinutes,
+    voluntaryMinutes: excluded.voluntaryMinutes ?? 0,
+    punchErrorMinutes: excluded.punchErrorMinutes ?? 0,
+    leaves,
     sessions,
   };
 }
@@ -311,6 +463,7 @@ function restDay(
  */
 export function summarizeTimecardDay(row: TimecardDailyRow, opts: TimecardDayOptions): TimecardSummaryDay {
   const dayNo = dayOfMonth(row.date);
+  const leaves = (row.leaves ?? []).map((l) => l.detail);
   const raw: Interval[] = [];
   for (const s of row.sessions) {
     const from = timestampToSeconds(s.start);
@@ -325,7 +478,7 @@ export function summarizeTimecardDay(row: TimecardDailyRow, opts: TimecardDayOpt
     start: secondsToTimestamp(i.from),
     end: secondsToTimestamp(i.to),
   }));
-  if (punched.length === 0) return restDay(dayNo, row.holiday, 0, sessions);
+  if (punched.length === 0) return restDay(dayNo, row.holiday, sessions, leaves);
 
   const span: Interval = { from: punched[0]!.from, to: punched[punched.length - 1]!.to };
   // 実働 = 打刻区間 − 昼休憩。中抜け (打刻の切れ目) は punched に最初から無いので、
@@ -334,10 +487,23 @@ export function summarizeTimecardDay(row: TimecardDailyRow, opts: TimecardDayOpt
   const workingMinutes = toMinutes(totalLength(work));
   const restraintMinutes = toMinutes(span.to - span.from);
 
-  // 休日の打刻で承認が無いものは自主出勤 — 賃金計算には一切入れず、時間だけ残す
-  if (row.holiday !== "weekday" && !opts.approved) {
-    return restDay(dayNo, row.holiday, workingMinutes, sessions);
+  // 打刻エラー (事務職・非夜勤の日跨ぎ) は自主出勤より先に判定する — 終業の押し忘れで
+  // 拘束が 35 時間に膨らんだ数字は、休日出勤か平日かに関わらず賃金計算に入れられない
+  if (opts.clerical && !opts.nightShift && hasOvernightSession(sessions)) {
+    return restDay(dayNo, row.holiday, sessions, leaves, { punchErrorMinutes: restraintMinutes });
   }
+
+  // 事務職の未承認の休日打刻は自主出勤 — 賃金計算には一切入れず、時間だけ残す
+  if (opts.clerical && row.holiday !== "weekday" && !opts.approved) {
+    return restDay(dayNo, row.holiday, sessions, leaves, { voluntaryMinutes: workingMinutes });
+  }
+
+  // 非事務職の未承認の法定外休日 (祝日・指定休) は平日として計算する = 1.25 を付けない
+  // (2026-07-26 ユーザー決定)。法定休日 (日曜) は未承認でも 1.35 のまま。
+  // classifyMonth は日別行の holidayKind を曜日判定より優先するので、ここで落とせば
+  // 下流のロジックは無変更で済む
+  const holidayKind: TimecardHolidayKind =
+    row.holiday === "non_legal" && !opts.approved && !opts.clerical ? "weekday" : row.holiday;
 
   const nightWindows = dailyWindows(span, NIGHT_FROM_HOUR, NIGHT_TO_HOUR);
 
@@ -362,8 +528,10 @@ export function summarizeTimecardDay(row: TimecardDailyRow, opts: TimecardDayOpt
     overtimeMinutes: overtimeTotal - overtimeNightMinutes,
     nightMinutes: Math.max(0, nightTotal - overtimeNightMinutes),
     overtimeNightMinutes,
-    holidayKind: row.holiday,
+    holidayKind,
     voluntaryMinutes: 0,
+    punchErrorMinutes: 0,
+    leaves,
     sessions,
   };
 }
@@ -385,6 +553,11 @@ export interface TimecardMonthOptions {
   dailyWorkMinutesFor(driverCd: string): number | null;
   /** `{driverCd}|{YYYY-MM-DD}` の集合 (buildHolidayWorkIndex の出力)。 */
   approvedHolidayWork: Set<string>;
+  /** その社員が事務職か (`isClericalJob(jobName)` の結果)。省略時は全員 false =
+   * 自主出勤の隔離も打刻エラーの判定も掛からない (Refs #433)。 */
+  isClerical?(driverCd: string): boolean;
+  /** その社員が夜勤者か (`buildNightShiftIndex` の集合)。省略時は全員 false。 */
+  isNightShift?(driverCd: string): boolean;
 }
 
 /** 15 時間 (改善基準の 1 日拘束上限) を分で。 */
@@ -395,7 +568,12 @@ const OVER_15H_MINUTES = 15 * 60;
  *
  * 行が無い日は summary に出さない (`classifyMonth` は days に無い日を勤務なしとして
  * 扱うため、埋める必要がない)。`workDays` は実際に勤務した日数、`restDays` は
- * 自主出勤として外した日数 + 打刻はあったが実働 0 の日数。
+ * 賃金計算に入らなかった日数 = 休暇・自主出勤・**打刻エラー**・打刻はあったが実働 0
+ * の日数の合計。打刻エラーの内訳は `punchErrorDays` で別に持つ。
+ *
+ * 休暇だけで打刻が 1 日も無い社員も summary に出る (nginx#779 で公休の行が来る
+ * ようになったため)。勤務 0・休暇日数だけの行になり、給与明細の公休日数と
+ * 突合できる。
  */
 export function summarizeTimecardMonth(
   rows: TimecardDailyRow[],
@@ -418,6 +596,8 @@ export function summarizeTimecardMonth(
     const day = summarizeTimecardDay(row, {
       dailyWorkMinutes: opts.dailyWorkMinutesFor(driverCd),
       approved,
+      clerical: opts.isClerical?.(driverCd) ?? false,
+      nightShift: opts.isNightShift?.(driverCd) ?? false,
     });
     let entry = byDriver.get(driverCd);
     if (!entry) {
@@ -459,6 +639,9 @@ export function summarizeTimecardMonth(
       days,
       source: "timecard",
       voluntaryMinutes: sum((d) => d.voluntaryMinutes),
+      punchErrorDays: days.filter((d) => d.punchErrorMinutes > 0).length,
+      punchErrorMinutes: sum((d) => d.punchErrorMinutes),
+      leaveCounts: countLeaves(days.flatMap((d) => d.leaves)),
     });
   }
   summaries.sort((a, b) => Number(a.driverCd) - Number(b.driverCd));

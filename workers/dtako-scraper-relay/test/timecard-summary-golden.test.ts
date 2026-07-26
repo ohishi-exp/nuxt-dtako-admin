@@ -7,13 +7,15 @@
 //   UPDATE_GOLDEN=1 npx vitest run test/timecard-summary-golden.test.ts
 // で golden を再生成し、diff を PR でレビューする (restraint-wage-golden.test.ts と同作法)。
 //
-// fixture に含めた 4 名は実データから意図して選んである:
-//   1029 冨田　竜   … 乗務員。日曜出勤 3 日・日跨ぎ 12 日・中抜け 4 日
-//   1621 西山　珠里 … 事務/パート層。中抜けなし・休日出勤なしの素直な形
-//   1663 松山　裕己 … 中抜け 1 日 (昼をまたがない = 中抜けと 12:00-13:00 の両方を引く)
-//   1670 松永　寿乃 … 中抜け 1 日 (昼をまたぐ = 二重控除してはいけない)
+// fixture に含めた 6 名は実データから意図して選んである:
+//   1029 冨田　竜   … 乗務員 (非事務職)。日曜出勤 3 日・日跨ぎ 12 日・中抜け 4 日
+//   1065 佐藤　泰弘 … 一般管理事務・非夜勤。**日跨ぎ 2 日 = 打刻エラー** (Refs #433)
+//   1621 西山　珠里 … 非事務職。中抜けなし・休日出勤なしの素直な形
+//   1663 松山　裕己 … 一般管理事務。中抜け 1 日 (昼をまたがない = 両方引く)
+//   1670 松永　寿乃 … 一般管理事務。中抜け 1 日 (昼をまたぐ = 二重控除してはいけない)
+//   1706 山根　幸数 … 一般管理事務・**夜勤者**。日跨ぎ 15 日だがエラーにしない (Refs #433)
 import { describe, expect, it } from 'vitest'
-import { summarizeTimecardMonth, type TimecardDailyRow } from '../src/timecard-summary'
+import { isClericalJob, summarizeTimecardMonth, type TimecardDailyRow } from '../src/timecard-summary'
 import daily from '../../../tests/fixtures/restraint-wage/timecard-daily-2026-06.json'
 import golden from '../../../tests/fixtures/restraint-wage/golden/timecard-summaries.json'
 
@@ -21,8 +23,21 @@ import golden from '../../../tests/fixtures/restraint-wage/golden/timecard-summa
 const DAILY_WORK_MINUTES = 480
 
 /** 承認済み休日出勤。1029 が出勤した日曜 (6/14・6/21・6/28) のうち **6/14 だけ**を
- * 承認し、残り 2 日が自主出勤へ落ちることを golden で固定する。 */
+ * 承認し、残り 2 日が自主出勤 (事務職) / 休日出勤 (非事務職) へ分かれることを固定する。 */
 const APPROVED = new Set(['1029|2026-06-14'])
+
+/** 本番 D1 の `employee_attrs.job_name` 実測値。`isClericalJob` に通して事務職判定にする。 */
+const JOB_NAMES: Record<string, string> = {
+  1029: '乗務員',
+  1065: '一般管理事務',
+  1621: '乗務員',
+  1663: '一般管理事務',
+  1670: '一般管理事務',
+  1706: '一般管理事務',
+}
+
+/** 夜勤者マスタ (`buildNightShiftIndex` の出力に相当)。1706 山根だけ。 */
+const NIGHT_SHIFT = new Set(['1706'])
 
 const UPDATE_GOLDEN = Boolean(
   (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.UPDATE_GOLDEN,
@@ -34,6 +49,8 @@ describe('timecard-summary golden (実機 fixture 2026-06)', () => {
     yearMonth: '2026-06',
     dailyWorkMinutesFor: () => DAILY_WORK_MINUTES,
     approvedHolidayWork: APPROVED,
+    isClerical: driverCd => isClericalJob(JOB_NAMES[driverCd] ?? null),
+    isNightShift: driverCd => NIGHT_SHIFT.has(driverCd),
   })
 
   if (UPDATE_GOLDEN) {
@@ -54,8 +71,8 @@ describe('timecard-summary golden (実機 fixture 2026-06)', () => {
     expect(result).toEqual(golden)
   })
 
-  it('fixture は 4 名・実データ由来の形を保っている', () => {
-    expect(result.summaries.map(s => s.driverCd)).toEqual(['1029', '1621', '1663', '1670'])
+  it('fixture は 6 名・実データ由来の形を保っている', () => {
+    expect(result.summaries.map(s => s.driverCd)).toEqual(['1029', '1065', '1621', '1663', '1670', '1706'])
     expect(result.summaries.every(s => s.source === 'timecard')).toBe(true)
   })
 
@@ -87,16 +104,30 @@ describe('timecard-summary golden (実機 fixture 2026-06)', () => {
     }
   })
 
-  it('未承認の日曜出勤は自主出勤になり、賃金計算から外れる', () => {
+  it('非事務職 (乗務員) の未承認の日曜出勤は自主出勤にせず 1.35 で計上する (Refs #433)', () => {
     const tomita = result.summaries.find(s => s.driverCd === '1029')!
-    const voluntary = tomita.days.filter(d => d.holidayKind === 'legal' && d.isRestDay)
-    expect(voluntary.length).toBeGreaterThan(0)
+    // 打刻のある日曜だけを見る (6/7 は公休で打刻が無い)
+    const sundays = tomita.days.filter(d => d.holidayKind === 'legal' && d.sessions.length > 0)
+    expect(sundays.map(d => d.day)).toEqual([14, 21, 28])
+    for (const d of sundays) {
+      expect(d.isRestDay).toBe(false)
+      expect(d.voluntaryMinutes).toBe(0)
+      expect(d.workingMinutes).toBeGreaterThan(0)
+    }
+    // 承認が無い 6/21・6/28 も含めて自主出勤へは落ちない
+    expect(tomita.voluntaryMinutes).toBe(0)
+  })
+
+  it('事務職の未承認の休日出勤は従来どおり自主出勤へ落ちる (実データ: 山根 6/14・6/28)', () => {
+    const yamane = result.summaries.find(s => s.driverCd === '1706')!
+    const voluntary = yamane.days.filter(d => d.isRestDay && d.voluntaryMinutes > 0)
+    expect(voluntary.map(d => d.day)).toEqual([14, 28])
     for (const d of voluntary) {
       expect(d.workingMinutes).toBe(0)
-      expect(d.overtimeMinutes).toBe(0)
-      expect(d.voluntaryMinutes).toBeGreaterThan(0)
+      // 自主出勤の日も打刻は残す
+      expect(d.sessions.length).toBeGreaterThan(0)
     }
-    expect(tomita.voluntaryMinutes).toBe(voluntary.reduce((s, d) => s + d.voluntaryMinutes, 0))
+    expect(yamane.voluntaryMinutes).toBe(voluntary.reduce((s, d) => s + d.voluntaryMinutes, 0))
   })
 
   it('承認済みの日曜出勤は勤務日として時間が出る', () => {
@@ -105,6 +136,60 @@ describe('timecard-summary golden (実機 fixture 2026-06)', () => {
     expect(approved.isRestDay).toBe(false)
     expect(approved.workingMinutes).toBeGreaterThan(0)
     expect(approved.voluntaryMinutes).toBe(0)
+  })
+
+  it('事務職の日跨ぎは打刻エラーになり、賃金計算から外れる (実データ: 佐藤 6/8・6/25)', () => {
+    const sato = result.summaries.find(s => s.driverCd === '1065')!
+    expect(sato.punchErrorDays).toBe(2)
+    const errors = sato.days.filter(d => d.punchErrorMinutes > 0)
+    expect(errors.map(d => d.day)).toEqual([8, 25])
+    for (const d of errors) {
+      expect(d.isRestDay).toBe(true)
+      expect(d.workingMinutes).toBe(0)
+      expect(d.overtimeMinutes).toBe(0)
+      // 打刻は残す (総務が CakePHP 側で直すための手掛かり)
+      expect(d.sessions.length).toBeGreaterThan(0)
+    }
+    // 35.6h + 36.6h の架空拘束が残業合計へ入っていない
+    expect(sato.punchErrorMinutes).toBe(2138 + 2194)
+  })
+
+  it('夜勤者の日跨ぎは 15 日すべてエラーにしない (実データ: 山根)', () => {
+    const yamane = result.summaries.find(s => s.driverCd === '1706')!
+    expect(yamane.punchErrorDays).toBe(0)
+    // 15 日すべて日跨ぎ (19:43 → 翌 00:02)。うち 13 日が勤務日、
+    // 残り 2 日は日曜の未承認出勤なので自主出勤 (打刻エラーではない)
+    expect(yamane.days.length).toBe(15)
+    expect(yamane.days.every(d => d.sessions.some(s => s.start.slice(0, 10) !== s.end.slice(0, 10)))).toBe(true)
+    expect(yamane.workDays).toBe(13)
+  })
+
+  it('非事務職 (乗務員) の日跨ぎは 1 件もエラーにならない', () => {
+    const tomita = result.summaries.find(s => s.driverCd === '1029')!
+    expect(tomita.punchErrorDays).toBe(0)
+    const crossing = tomita.days.filter(d => d.sessions.some(s => s.start.slice(0, 10) !== s.end.slice(0, 10)))
+    expect(crossing.length).toBe(12)
+  })
+
+  it('打刻の無い休暇日も行として出て、時間 0 で区分だけ載る (Refs #433)', () => {
+    const sato = result.summaries.find(s => s.driverCd === '1065')!
+    // 実データ: 6/7・6/9・6/14・6/21・6/28 が公休
+    const kyuka = sato.days.filter(d => d.leaves.includes('公休'))
+    expect(kyuka.map(d => d.day)).toEqual([7, 9, 14, 21, 28])
+    for (const d of kyuka) {
+      expect(d.isRestDay).toBe(true)
+      expect(d.workingMinutes).toBe(0)
+      expect(d.sessions).toEqual([])
+    }
+    expect(sato.leaveCounts.publicHoliday).toBe(5)
+  })
+
+  it('打刻エラーの翌日が公休で消えている (画面で 9 日が空欄になる理由)', () => {
+    const sato = result.summaries.find(s => s.driverCd === '1065')!
+    // 6/8 の終業が 6/9 18:52 と組まれた結果、6/9 に打刻の行が無い
+    const d9 = sato.days.find(d => d.day === 9)!
+    expect(d9.sessions).toEqual([])
+    expect(sato.days.find(d => d.day === 8)!.punchErrorMinutes).toBeGreaterThan(0)
   })
 
   it('中抜けのある日は sessions が 2 本以上で、休憩が中抜け分だけ増える', () => {
@@ -125,11 +210,14 @@ describe('timecard-summary golden (実機 fixture 2026-06)', () => {
     ])
   })
 
-  it('自主出勤の日も打刻を残す (賃金計算からは外すが表には出す)', () => {
-    const tomita = result.summaries.find(s => s.driverCd === '1029')!
-    const voluntary = tomita.days.filter(d => d.isRestDay && d.voluntaryMinutes > 0)
-    expect(voluntary.length).toBeGreaterThan(0)
-    for (const d of voluntary) expect(d.sessions.length).toBeGreaterThan(0)
+  it('実働は拘束を超えない — 打刻エラーの日も 0 対 0 で成立する', () => {
+    // 上の「実働は拘束を超えない」と重なるが、隔離した日が負の差を作らないことの明示
+    for (const s of result.summaries) {
+      for (const d of s.days.filter(x => x.punchErrorMinutes > 0)) {
+        expect(d.restraintMinutes).toBe(0)
+        expect(d.workingMinutes).toBe(0)
+      }
+    }
   })
 
   it('法定外休日の承認が無いので warning は出ない', () => {

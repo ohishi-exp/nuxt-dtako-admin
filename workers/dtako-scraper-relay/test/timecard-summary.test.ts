@@ -10,6 +10,10 @@ import {
   overlapLength,
   stableTimecardSummaryBody,
   subtractIntervals,
+  countLeaves,
+  emptyLeaveCounts,
+  hasOvernightSession,
+  isClericalJob,
   summarizeTimecardDay,
   summarizeTimecardMonth,
   timestampToSeconds,
@@ -46,7 +50,15 @@ function row(
   }
 }
 
-const NO_APPROVAL = { dailyWorkMinutes: 480, approved: false }
+/**
+ * 既定の日別 opts = **事務職かつ夜勤者**・承認なし。
+ *
+ * `clerical: true` は自主出勤の隔離 (元からの挙動) を効かせるため。
+ * `nightShift: true` にしてあるのは、既存ケースに日跨ぎ勤務の時間計算
+ * (深夜帯・恒等式) が多く、打刻エラーの隔離が先に挟まると計算そのものを
+ * 検証できなくなるため。打刻エラーは専用の describe で見る。
+ */
+const NO_APPROVAL = { dailyWorkMinutes: 480, approved: false, clerical: true, nightShift: true }
 
 describe('timestampToSeconds', () => {
   it('秒あり・秒なし・T 区切りを読める', () => {
@@ -167,6 +179,8 @@ describe('summarizeTimecardDay — 時間外と深夜', () => {
     const d = summarizeTimecardDay(row('2026-06-01', [['08:00:00', '22:00:00']]), {
       dailyWorkMinutes: null,
       approved: false,
+      clerical: true,
+      nightShift: true,
     })
     expect(d.overtimeMinutes).toBe(0)
     expect(d.overtimeNightMinutes).toBe(0)
@@ -202,7 +216,7 @@ describe('summarizeTimecardDay — 時間外と深夜', () => {
   it('日跨ぎ勤務は始業日の 1 行として扱う', () => {
     const d = summarizeTimecardDay(
       row('2026-06-01', [['22:00:00', '2026-06-02 06:00:00']]),
-      { dailyWorkMinutes: 480, approved: false },
+      { dailyWorkMinutes: 480, approved: false, clerical: true, nightShift: true },
     )
     expect(d.day).toBe(1)
     expect(d.restraintMinutes).toBe(480)
@@ -232,6 +246,8 @@ describe('summarizeTimecardDay — 休日と自主出勤', () => {
     const d = summarizeTimecardDay(row('2026-06-07', [['08:00:00', '17:00:00']], 'legal'), {
       dailyWorkMinutes: 480,
       approved: true,
+      clerical: true,
+      nightShift: true,
     })
     expect(d.isRestDay).toBe(false)
     expect(d.workingMinutes).toBe(480)
@@ -277,10 +293,14 @@ describe('summarizeTimecardDay — 壊れた入力', () => {
 })
 
 describe('summarizeTimecardMonth', () => {
+  // 既定は NO_APPROVAL と同じく「事務職かつ夜勤者」— 自主出勤の隔離は効かせつつ、
+  // 日跨ぎのケースが打刻エラーへ倒れないようにする
   const opts = (approved: string[] = [], minutes: number | null = 480) => ({
     yearMonth: '2026-06',
     dailyWorkMinutesFor: () => minutes,
     approvedHolidayWork: new Set(approved),
+    isClerical: () => true,
+    isNightShift: () => true,
   })
 
   it('乗務員ごとに畳み、乗務員CD の数値順に並べる', () => {
@@ -477,5 +497,279 @@ describe('kintaiR2Paths', () => {
 
   it('乗務員CD が空でも key が壊れない', () => {
     expect(p.summaryLatest('')).toBe('kintai/27324455/2026-06/summary/unknown/latest.json')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 職種・打刻エラー・休暇 (Refs #433)
+// ---------------------------------------------------------------------------
+
+describe('isClericalJob', () => {
+  it('本番の表記ゆれ 2 種をどちらも拾う', () => {
+    expect(isClericalJob('一般管理事務')).toBe(true)
+    expect(isClericalJob('一般事務管理')).toBe(true)
+  })
+
+  it('乗務員・作業員・役員等は false', () => {
+    for (const job of ['乗務員', '乗務員(トレーラ)', '作業員2', '作業員点呼者', '整備', '役員', '執行役', '特定技能']) {
+      expect(isClericalJob(job)).toBe(false)
+    }
+  })
+
+  it('職種が引けない社員は false (判定を掛けない安全側)', () => {
+    expect(isClericalJob(null)).toBe(false)
+    expect(isClericalJob(undefined)).toBe(false)
+    expect(isClericalJob('')).toBe(false)
+  })
+})
+
+describe('hasOvernightSession', () => {
+  it('始業日と終業日が違えば true', () => {
+    expect(hasOvernightSession([{ start: '2026-06-08 07:14:08', end: '2026-06-09 18:52:15' }])).toBe(true)
+    // 夜勤の 4 時間でも日跨ぎは日跨ぎ (除外は夜勤者マスタで行う)
+    expect(hasOvernightSession([{ start: '2026-06-02 19:43:51', end: '2026-06-03 00:02:17' }])).toBe(true)
+  })
+
+  it('同日で終われば false (中抜けが複数あっても)', () => {
+    expect(hasOvernightSession([
+      { start: '2026-06-11 07:44:15', end: '2026-06-11 11:41:10' },
+      { start: '2026-06-11 13:14:38', end: '2026-06-11 16:49:11' },
+    ])).toBe(false)
+    expect(hasOvernightSession([])).toBe(false)
+  })
+
+  it('1 本でも日跨ぎがあれば true', () => {
+    expect(hasOvernightSession([
+      { start: '2026-06-11 07:44:15', end: '2026-06-11 11:41:10' },
+      { start: '2026-06-11 22:00:00', end: '2026-06-12 02:00:00' },
+    ])).toBe(true)
+  })
+})
+
+describe('countLeaves', () => {
+  it('公休の集計軸は 公休 / 泊休 / 積置泊休 / 指休', () => {
+    expect(countLeaves(['公休', '泊休', '積置泊休', '指休']).publicHoliday).toBe(4)
+  })
+
+  it('有休は 1.0、前休・後休は 0.5', () => {
+    expect(countLeaves(['有休']).paidLeave).toBe(1)
+    expect(countLeaves(['前休', '後休', '前休作', '後休作']).paidLeave).toBe(2)
+    expect(countLeaves(['有休', '前休']).paidLeave).toBe(1.5)
+  })
+
+  it('欠勤・特休・遅刻・早退はそれぞれの軸へ', () => {
+    expect(countLeaves(['欠勤', '特休', '遅刻', '早退'])).toEqual({
+      publicHoliday: 0, paidLeave: 0, absence: 1, specialLeave: 1, late: 1, earlyLeave: 1,
+    })
+  })
+
+  it('カウント対象外の区分 (短時・仮乗務・有夜勤・家畜) は数えない', () => {
+    expect(countLeaves(['短時', '仮乗務', '有夜勤', '家畜'])).toEqual(emptyLeaveCounts())
+  })
+
+  it('空なら全部 0', () => {
+    expect(countLeaves([])).toEqual(emptyLeaveCounts())
+  })
+})
+
+describe('summarizeTimecardDay — 打刻エラー (日跨ぎ)', () => {
+  /** 実データ: 佐藤 泰弘 (1065、一般管理事務) 2026-06-08 07:14 → 06-09 18:52。 */
+  const SATO = row('2026-06-08', [['07:14:08', '2026-06-09 18:52:15']])
+
+  it('事務職・非夜勤の日跨ぎは打刻エラーとして賃金計算から外す', () => {
+    const d = summarizeTimecardDay(SATO, { dailyWorkMinutes: 450, approved: false, clerical: true, nightShift: false })
+    expect(d.isRestDay).toBe(true)
+    expect(d.workingMinutes).toBe(0)
+    expect(d.overtimeMinutes).toBe(0)
+    expect(d.restraintMinutes).toBe(0)
+    // 35.6 時間 = 2138 分が退避される (残業合計を汚さない)
+    expect(d.punchErrorMinutes).toBe(2138)
+    // 打刻は残す — 総務が CakePHP 側で直すための手掛かり
+    expect(d.sessions).toEqual([{ start: '2026-06-08 07:14:08', end: '2026-06-09 18:52:15' }])
+  })
+
+  it('夜勤者は日跨ぎでもエラーにしない (実データ: 山根 19:43→翌00:02)', () => {
+    const d = summarizeTimecardDay(
+      row('2026-06-02', [['19:43:51', '2026-06-03 00:02:17']]),
+      { dailyWorkMinutes: 450, approved: false, clerical: true, nightShift: true },
+    )
+    expect(d.punchErrorMinutes).toBe(0)
+    expect(d.isRestDay).toBe(false)
+    expect(d.workingMinutes).toBe(258)
+  })
+
+  it('非事務職 (乗務員) は日跨ぎでもエラーにしない', () => {
+    const d = summarizeTimecardDay(SATO, { dailyWorkMinutes: 450, approved: false, clerical: false, nightShift: false })
+    expect(d.punchErrorMinutes).toBe(0)
+    expect(d.isRestDay).toBe(false)
+  })
+
+  it('同日で終わる打刻は事務職・非夜勤でもエラーにしない', () => {
+    const d = summarizeTimecardDay(
+      row('2026-06-01', [['07:13:25', '20:16:42']]),
+      { dailyWorkMinutes: 450, approved: false, clerical: true, nightShift: false },
+    )
+    expect(d.punchErrorMinutes).toBe(0)
+    expect(d.isRestDay).toBe(false)
+  })
+
+  it('休日の日跨ぎは自主出勤より打刻エラーが優先される', () => {
+    const d = summarizeTimecardDay(
+      row('2026-06-07', [['07:00:00', '2026-06-08 19:00:00']], 'legal'),
+      { dailyWorkMinutes: 450, approved: false, clerical: true, nightShift: false },
+    )
+    expect(d.punchErrorMinutes).toBeGreaterThan(0)
+    expect(d.voluntaryMinutes).toBe(0)
+  })
+})
+
+describe('summarizeTimecardDay — 非事務職の休日打刻 (Refs #433)', () => {
+  const NON_CLERICAL = { dailyWorkMinutes: 480, approved: false, clerical: false, nightShift: false }
+
+  it('自主出勤にせず通常どおり計上する', () => {
+    const d = summarizeTimecardDay(row('2026-06-07', [['08:00:00', '17:00:00']], 'legal'), NON_CLERICAL)
+    expect(d.isRestDay).toBe(false)
+    expect(d.voluntaryMinutes).toBe(0)
+    expect(d.workingMinutes).toBe(480)
+  })
+
+  it('法定休日 (日曜) は未承認でも holidayKind を保つ = 1.35 が付く', () => {
+    const d = summarizeTimecardDay(row('2026-06-07', [['08:00:00', '17:00:00']], 'legal'), NON_CLERICAL)
+    expect(d.holidayKind).toBe('legal')
+  })
+
+  it('法定外休日 (祝日・指定休) の未承認は weekday へ落とす = 1.25 を付けない', () => {
+    const d = summarizeTimecardDay(row('2026-05-04', [['08:00:00', '17:00:00']], 'non_legal'), NON_CLERICAL)
+    expect(d.holidayKind).toBe('weekday')
+    expect(d.isRestDay).toBe(false)
+    expect(d.workingMinutes).toBe(480)
+  })
+
+  it('法定外休日でも承認済みなら non_legal のまま = 1.25 が付く', () => {
+    const d = summarizeTimecardDay(row('2026-05-04', [['08:00:00', '17:00:00']], 'non_legal'), {
+      ...NON_CLERICAL,
+      approved: true,
+    })
+    expect(d.holidayKind).toBe('non_legal')
+  })
+
+  it('事務職は従来どおり自主出勤へ倒れる (法定外休日を weekday へ落とさない)', () => {
+    const d = summarizeTimecardDay(row('2026-05-04', [['08:00:00', '17:00:00']], 'non_legal'), NO_APPROVAL)
+    expect(d.isRestDay).toBe(true)
+    expect(d.holidayKind).toBe('non_legal')
+    expect(d.voluntaryMinutes).toBe(480)
+  })
+})
+
+describe('summarizeTimecardDay — 休暇 (Refs #433)', () => {
+  it('打刻なしの休暇日は時間 0 で区分だけ載る (実データ: 佐藤 2026-06-07 公休)', () => {
+    const d = summarizeTimecardDay(
+      row('2026-06-07', [], 'legal', { leaves: [{ detail: '公休' }] }),
+      NO_APPROVAL,
+    )
+    expect(d.isRestDay).toBe(true)
+    expect(d.leaves).toEqual(['公休'])
+    expect(d.workingMinutes).toBe(0)
+    expect(d.sessions).toEqual([])
+  })
+
+  it('打刻のある日の休暇 (遅刻・早退) も運ぶ', () => {
+    const d = summarizeTimecardDay(
+      row('2026-06-01', [['09:30:00', '17:00:00']], 'weekday', { leaves: [{ detail: '遅刻' }] }),
+      NO_APPROVAL,
+    )
+    expect(d.isRestDay).toBe(false)
+    expect(d.leaves).toEqual(['遅刻'])
+  })
+
+  it('1 日に複数区分が来ても全部運ぶ', () => {
+    const d = summarizeTimecardDay(
+      row('2026-06-01', [], 'weekday', { leaves: [{ detail: '前休' }, { detail: '遅刻' }] }),
+      NO_APPROVAL,
+    )
+    expect(d.leaves).toEqual(['前休', '遅刻'])
+  })
+
+  it('leaves を返さない上流でも空配列になる (デプロイ順に依存しない)', () => {
+    expect(summarizeTimecardDay(row('2026-06-01', [['08:00:00', '17:00:00']]), NO_APPROVAL).leaves).toEqual([])
+  })
+})
+
+describe('summarizeTimecardMonth — 打刻エラーと休暇 (Refs #433)', () => {
+  const monthOpts = (over: Record<string, unknown> = {}) => ({
+    yearMonth: '2026-06',
+    dailyWorkMinutesFor: () => 450 as number | null,
+    approvedHolidayWork: new Set<string>(),
+    ...over,
+  })
+
+  it('打刻エラーは日数と分を別枠で集計し、実働・残業には入らない', () => {
+    const { summaries } = summarizeTimecardMonth(
+      [
+        row('2026-06-01', [['07:13:25', '20:16:42']]),
+        row('2026-06-08', [['07:14:08', '2026-06-09 18:52:15']]),
+        row('2026-06-25', [['07:14:11', '2026-06-26 19:49:05']]),
+      ],
+      monthOpts({ isClerical: () => true, isNightShift: () => false }),
+    )
+    const s = summaries[0]!
+    expect(s.punchErrorDays).toBe(2)
+    expect(s.punchErrorMinutes).toBe(2138 + 2194)
+    // 賃金計算に入るのは 06-01 の 1 日だけ
+    expect(s.workDays).toBe(1)
+    expect(s.workingMinutes).toBe(723)
+    expect(s.restraintMinutes).toBe(783)
+  })
+
+  it('夜勤者は日跨ぎが 15 回あっても打刻エラー 0', () => {
+    const rows = Array.from({ length: 15 }, (_, i) => {
+      const day = String(i + 1).padStart(2, '0')
+      const next = String(i + 2).padStart(2, '0')
+      return row(`2026-06-${day}`, [['19:43:51', `2026-06-${next} 00:02:17`]])
+    })
+    const { summaries } = summarizeTimecardMonth(
+      rows,
+      monthOpts({ isClerical: () => true, isNightShift: () => true }),
+    )
+    expect(summaries[0]!.punchErrorDays).toBe(0)
+    expect(summaries[0]!.workDays).toBe(15)
+  })
+
+  it('isClerical / isNightShift 未指定なら全員 非事務職・非夜勤 (判定を掛けない)', () => {
+    const { summaries } = summarizeTimecardMonth(
+      [row('2026-06-08', [['07:14:08', '2026-06-09 18:52:15']])],
+      monthOpts(),
+    )
+    expect(summaries[0]!.punchErrorDays).toBe(0)
+    expect(summaries[0]!.workDays).toBe(1)
+  })
+
+  it('休暇を月次で集計する', () => {
+    const { summaries } = summarizeTimecardMonth(
+      [
+        row('2026-06-07', [], 'legal', { leaves: [{ detail: '公休' }] }),
+        row('2026-06-09', [], 'weekday', { leaves: [{ detail: '公休' }] }),
+        row('2026-06-10', [], 'weekday', { leaves: [{ detail: '有休' }] }),
+        row('2026-06-11', [], 'weekday', { leaves: [{ detail: '前休' }] }),
+        row('2026-06-12', [], 'weekday', { leaves: [{ detail: '欠勤' }] }),
+      ],
+      monthOpts({ isClerical: () => true }),
+    )
+    const s = summaries[0]!
+    expect(s.leaveCounts).toEqual({
+      publicHoliday: 2, paidLeave: 1.5, absence: 1, specialLeave: 0, late: 0, earlyLeave: 0,
+    })
+    // 打刻が 1 日も無いので勤務 0・全日 restDays
+    expect(s.workDays).toBe(0)
+    expect(s.restDays).toBe(5)
+  })
+
+  it('休暇の行しか無い社員も summary に出る (公休の突合ができる)', () => {
+    const { summaries } = summarizeTimecardMonth(
+      [{ ...row('2026-06-07', [], 'legal', { leaves: [{ detail: '公休' }] }), driver_id: 1048, name: '宮崎　康博' }],
+      monthOpts({ isClerical: () => true }),
+    )
+    expect(summaries.map(s => s.driverCd)).toEqual(['1048'])
+    expect(summaries[0]!.leaveCounts.publicHoliday).toBe(1)
   })
 })
