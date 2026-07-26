@@ -475,6 +475,11 @@ async function openTimecardSummary() {
   buildingSummary.value = true
   pageError.value = ''
   try {
+    // 区分と突合マスタが**揃ってから**組む。タブの watch でも読んでいるが、開いた
+    // 直後にボタンを押されると間に合わず、残業(給与) が静かに 0 円になる
+    // (未読込 = 全項目が既定区分に落ちる。給与比較との食い違いとして本番で露見)
+    if (!salaryConfigLoaded.value) await loadSalaryItemConfig()
+    if (!employeeMasterLoaded.value) await loadEmployeeMaster()
     const months = summaryTargetMonths.value
     const batch: Array<{ ym: string, rows: TimecardSummaryRow[], reports: WageReportRow[] }> = []
     for (const ym of months) {
@@ -2628,6 +2633,12 @@ watch([activeTab, month, session], () => {
   // いれば report が残っているので気付きにくい (dev の実機確認で踏んだ)
   else if (activeTab.value === 'timecard') {
     if (!report.value || report.value.month !== month.value) loadWageReport()
+    // 期間サマリーの 残業(給与) は給与比較と同じ `compareSalaryMonth` を通す。
+    // **支給項目区分を読まないと全項目が既定区分に落ちて残業が 0 円になる** —
+    // 給与比較タブでは 110,000 円なのにサマリーでは 0 という食い違いを本番で踏んだ
+    // (2026-07-26)。社員マスタも突合キー (給与コード → 乗務員CD) の供給元なので要る
+    if (!salaryConfigLoaded.value) loadSalaryItemConfig()
+    if (!employeeMasterLoaded.value) loadEmployeeMaster()
   }
   else if (activeTab.value === 'archive') {
     loadArchive()
