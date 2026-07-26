@@ -32,7 +32,7 @@ function fmtDays(n: number): string {
       <thead>
         <tr class="text-left text-gray-500 border-b-2 border-gray-300 dark:border-gray-600">
           <th class="px-1.5 py-1.5">乗務員</th>
-          <th class="px-1.5 py-1.5 text-right" title="打刻があり賃金計算に入った日数 (残業の有無で分けない)">出勤</th>
+          <th class="px-1.5 py-1.5 text-right" title="出勤した日数。残業の有無で分けず、打刻エラーの日も含む (押し忘れただけで出勤はしている)。時間の列からは打刻エラーの日は外れている">出勤</th>
           <th class="px-1.5 py-1.5 text-right" title="休日出勤の承認簿に載っている日">休日<br>出勤</th>
           <th class="px-1.5 py-1.5 text-right" title="休日に打刻があるが未承認の日。時間は記録するが賃金計算には入れていない">自主<br>出勤</th>
           <th class="px-1.5 py-1.5 text-right" title="公休 / 泊休 / 積置泊休 / 指休">公休</th>

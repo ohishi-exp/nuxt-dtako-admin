@@ -311,9 +311,18 @@ export interface TimecardSummaryRow {
   driverName: string
   /** 出勤・自主出勤・打刻エラーの日数 (日別から数える)。 */
   counts: WorkKindCounts
-  /** 出勤日数 = 通常 + 残業。**残業の有無で分けない** — 給与明細の「出勤日数」と
-   * 突き合わせる列なので、残業した日も出勤 1 日として数える (2026-07-26 指摘)。
-   * 休日出勤は別列 (承認の要る別枠なので合算しない)。 */
+  /**
+   * 出勤日数 = 通常 + 残業 + **打刻エラー**。
+   *
+   * 給与明細の「出勤日数」と突き合わせる列なので、
+   * - **残業の有無で分けない** — 残業した日も出勤 1 日 (2026-07-26 指摘)
+   * - **打刻エラーの日も出勤に数える** (2026-07-26 指摘) — 終業を押し忘れただけで
+   *   出勤したこと自体は疑いようがない。`countWorkKinds` が打刻エラーをどの区分にも
+   *   入れないのは**その日の時間が信用できない**からで (Refs #433)、出勤したか
+   *   どうかとは別の話。時間の列 (実働・残業) からは従来どおり外れている
+   *
+   * 休日出勤・自主出勤は別列 (承認の有無で扱いが変わる別枠なので合算しない)。
+   */
   attendanceDays: number
   /** 休暇日数。**worker が数えた `leaveCounts` をそのまま使う** (下記)。 */
   leaves: { publicHoliday: number, paidLeave: number, absence: number, specialLeave: number, late: number, earlyLeave: number }
@@ -350,7 +359,7 @@ export function buildTimecardSummary(
       driverCd: r.summary.driverCd,
       driverName: r.summary.driverName,
       counts,
-      attendanceDays: counts.normal + counts.overtime,
+      attendanceDays: counts.normal + counts.overtime + counts.punchError,
       leaves: r.summary.leaveCounts ?? EMPTY_LEAVES,
       workingMinutes: r.summary.workingMinutes ?? 0,
       overtimeMinutes: (r.summary.overtimeMinutes ?? 0) + (r.summary.overtimeNightMinutes ?? 0),

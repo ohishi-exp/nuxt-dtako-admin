@@ -369,6 +369,11 @@ async function fetchKintai() {
     kintaiMessage.value
       = `${months.length} ヶ月 / ${rows} 行を取り込みました (サマリ更新 ${updated} 件)`
         + (warnings.length ? ` — 警告 ${warnings.length} 件: ${warnings.slice(0, 3).join(' / ')}` : '')
+    // **取り込んだ月のキャッシュを全部捨てる**。`loadWageReport` は選択中の月しか
+    // 捨てないので、期間取り込みの後に期間サマリー・一括印刷を開くと、選択中の月
+    // 以外は取り込み前の数字のまま出る (2026-07-26 実測: 4〜5月を再取り込みしたのに
+    // 公休が空欄・夜勤者が自主出勤のままで、リロードして初めて直った)
+    for (const ym of months) reportCache.delete(ym)
     // 表は wage-report 由来なので取り込み後に読み直す
     await loadWageReport()
   }
