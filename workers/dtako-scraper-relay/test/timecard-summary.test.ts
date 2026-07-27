@@ -841,3 +841,135 @@ describe('summarizeTimecardMonth — 打刻エラーと休暇 (Refs #433)', () =
     expect(summaries[0]!.leaveCounts.publicHoliday).toBe(1)
   })
 })
+
+describe('退社打刻なし (end: null、nginx#780)', () => {
+  /** 始業だけのセッション (end: null) を含む日を作る。 */
+  function openRow(
+    date: string,
+    starts: string[],
+    complete: Array<[string, string]> = [],
+    extra: Partial<TimecardDailyRow> = {},
+  ): TimecardDailyRow {
+    const sessions = [
+      ...complete.map(([s, e]) => ({ start: `${date} ${s}`, end: `${date} ${e}` })),
+      ...starts.map(s => ({ start: `${date} ${s}`, end: null })),
+    ]
+    return {
+      driver_id: 1722,
+      name: '山下　寿裕',
+      date,
+      start: sessions[0]?.start ?? null,
+      end: null,
+      restraint_minutes: 0,
+      sessions,
+      holiday: 'weekday',
+      office: '大石運輸倉庫㈱ 本社',
+      ...extra,
+    }
+  }
+
+  it('過去日の未終業は「退社打刻なし」— 賃金計算から外し、始業は表示用に残る', () => {
+    const d = summarizeTimecardDay(openRow('2026-06-16', ['07:41:00']), NO_APPROVAL)
+    expect(d.missingClockOut).toBe(true)
+    expect(d.isRestDay).toBe(true)
+    expect(d.workingMinutes).toBe(0)
+    expect(d.punchErrorMinutes).toBe(0) // 終業が無いので拘束の長さは分からない
+    expect(d.sessions).toEqual([{ start: '2026-06-16 07:41:00', end: null }])
+  })
+
+  it('完結セッションと未終業が混在する日も丸ごと外し、完結分の拘束を punchErrorMinutes に退避する', () => {
+    const d = summarizeTimecardDay(
+      openRow('2026-06-16', ['13:10:00'], [['08:00:00', '12:00:00']]),
+      NO_APPROVAL,
+    )
+    expect(d.missingClockOut).toBe(true)
+    expect(d.isRestDay).toBe(true)
+    expect(d.punchErrorMinutes).toBe(240) // 08:00-12:00
+    // 表示用の並びは時刻順 (完結 → 未終業)
+    expect(d.sessions).toEqual([
+      { start: '2026-06-16 08:00:00', end: '2026-06-16 12:00:00' },
+      { start: '2026-06-16 13:10:00', end: null },
+    ])
+  })
+
+  it('未終業が完結セッションより早い日も時刻順に並ぶ', () => {
+    const d = summarizeTimecardDay(
+      openRow('2026-06-16', ['07:00:00'], [['08:00:00', '12:00:00']]),
+      NO_APPROVAL,
+    )
+    expect(d.sessions.map(s => s.start)).toEqual(['2026-06-16 07:00:00', '2026-06-16 08:00:00'])
+  })
+
+  it('同時刻の始業が並んでも順序が安定している (比較の等値分岐)', () => {
+    const d = summarizeTimecardDay(
+      openRow('2026-06-16', ['08:00:00'], [['08:00:00', '12:00:00']]),
+      NO_APPROVAL,
+    )
+    expect(d.sessions.map(s => s.start)).toEqual(['2026-06-16 08:00:00', '2026-06-16 08:00:00'])
+  })
+
+  it('当日の未終業は勤務中 — フラグを立てず打刻なしの休み扱い', () => {
+    const d = summarizeTimecardDay(
+      openRow('2026-06-16', ['07:41:00']),
+      { ...NO_APPROVAL, today: '2026-06-16' },
+    )
+    expect(d.missingClockOut).toBeUndefined()
+    expect(d.isRestDay).toBe(true)
+    expect(d.sessions).toEqual([{ start: '2026-06-16 07:41:00', end: null }])
+  })
+
+  it('today より前の日は押し忘れとしてフラグが立つ', () => {
+    const d = summarizeTimecardDay(
+      openRow('2026-06-16', ['07:41:00']),
+      { ...NO_APPROVAL, today: '2026-06-17' },
+    )
+    expect(d.missingClockOut).toBe(true)
+  })
+
+  it('始業時刻が読めない未終業セッションは捨てる (フラグも立たない)', () => {
+    const d = summarizeTimecardDay(openRow('2026-06-16', ['ぐちゃぐちゃ']), NO_APPROVAL)
+    expect(d.missingClockOut).toBeUndefined()
+    expect(d.sessions).toEqual([])
+  })
+
+  it('hasOvernightSession は end: null を日跨ぎと数えない', () => {
+    expect(hasOvernightSession([{ start: '2026-06-16 07:41:00', end: null }])).toBe(false)
+  })
+
+  it('月次: punchErrorDays に数え、warnings に日と件数が出る', () => {
+    const { summaries, warnings } = summarizeTimecardMonth(
+      [
+        openRow('2026-06-16', ['07:41:00']),
+        openRow('2026-06-17', ['07:45:00']),
+        { ...row('2026-06-23', [['07:38:00', '17:29:00']]), driver_id: 1722, name: '山下　寿裕' },
+      ],
+      {
+        yearMonth: '2026-06',
+        dailyWorkMinutesFor: () => 480,
+        approvedHolidayWork: new Set<string>(),
+        today: '2026-07-27',
+      },
+    )
+    const s = summaries[0]!
+    expect(s.punchErrorDays).toBe(2)
+    expect(s.punchErrorMinutes).toBe(0)
+    expect(s.workDays).toBe(1) // 6/23 だけが勤務日
+    expect(warnings).toEqual([
+      '乗務員 1722 (山下　寿裕): 退社打刻の無い日が 2 日あります (16, 17 日) — 賃金計算から外しています',
+    ])
+  })
+
+  it('月次: 未終業が無ければ warnings は出ない', () => {
+    const { warnings } = summarizeTimecardMonth(
+      [row('2026-06-02', [['08:00:00', '17:00:00']])],
+      {
+        yearMonth: '2026-06',
+        dailyWorkMinutesFor: () => 480,
+        approvedHolidayWork: new Set<string>(),
+        isClerical: () => true,
+        isNightShift: () => false,
+      },
+    )
+    expect(warnings).toEqual([])
+  })
+})

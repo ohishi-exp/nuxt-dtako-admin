@@ -602,3 +602,61 @@ describe('buildTimecardSummary — 期間サマリー印刷の一覧行 (Refs #4
     expect(rows[0]).toMatchObject({ salaryOvertime: 30000, salaryOvertimeHours: null })
   })
 })
+
+describe('退社打刻なし (missingClockOut、nginx#780)', () => {
+  it('dayKindLabel は「退社打刻なし」を最優先で出す', () => {
+    expect(dayKindLabel(day({ day: 16, isRestDay: true, missingClockOut: true }))).toBe('退社打刻なし')
+    // 分が退避されていても文言は具体的な方を採る
+    expect(
+      dayKindLabel(day({ day: 16, isRestDay: true, missingClockOut: true, punchErrorMinutes: 240 })),
+    ).toBe('退社打刻なし')
+  })
+
+  it('buildTimecardTable は出勤1 に始業を出し、退社1 は空欄・赤表示になる', () => {
+    const rows = buildTimecardTable(
+      [
+        day({
+          day: 16,
+          isRestDay: true,
+          missingClockOut: true,
+          sessions: [{ start: '2026-06-16 07:41:00', end: null }],
+        }),
+      ],
+      2026,
+      6,
+    )
+    const r = rows[15]!
+    expect(r.in1).toBe('07:41')
+    expect(r.out1).toBeNull()
+    expect(r.isPunchError).toBe(true)
+    expect(r.note).toBe('退社打刻なし')
+  })
+
+  it('end: null のセッションは退勤の持ち越し (翌日行) を作らない', () => {
+    const rows = buildTimecardTable(
+      [
+        day({
+          day: 16,
+          isRestDay: true,
+          missingClockOut: true,
+          sessions: [{ start: '2026-06-16 07:41:00', end: null }],
+        }),
+      ],
+      2026,
+      6,
+    )
+    expect(rows[16]!.out1).toBeNull()
+    expect(rows[16]!.isAfterPunchError).toBe(false)
+  })
+
+  it('countWorkKinds は分が 0 でも打刻エラーに数える', () => {
+    const counts = countWorkKinds([
+      day({ day: 16, isRestDay: true, missingClockOut: true }),
+      day({ day: 17, isRestDay: true, missingClockOut: true, punchErrorMinutes: 240 }),
+      day({ day: 23 }),
+    ])
+    expect(counts.punchError).toBe(2)
+    expect(counts.punchErrorMinutes).toBe(240)
+    expect(counts.normal).toBe(1)
+  })
+})

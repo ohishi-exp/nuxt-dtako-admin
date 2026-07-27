@@ -98,8 +98,9 @@ export type TimecardHolidayKind = RestraintHolidayKind;
 export interface TimecardSession {
   /** "YYYY-MM-DD HH:MM:SS" */
   start: string;
-  /** "YYYY-MM-DD HH:MM:SS" */
-  end: string;
+  /** "YYYY-MM-DD HH:MM:SS"。**退社押し忘れ (未終業) は null** — 上流が行ごと捨てると
+   * 「打刻の無い休み」と区別できないため、始業だけでも運んでくる (nginx#780)。 */
+  end: string | null;
 }
 
 /** 休暇 1 件 (`daily_report_other_detail` の `report_type='kyuka'`)。
@@ -152,10 +153,18 @@ export interface TimecardSummaryDay extends RestraintSummaryDay {
   /** その日の休暇区分 (原文、公休 / 有休 / …)。無ければ空配列。 */
   leaves: string[];
   /**
+   * 退社打刻の無い日 (始業だけのセッションがある = 退社押し忘れ、nginx#780)。
+   * その日の時間は信用できないので賃金計算から外す (打刻エラーと同じ隔離)。
+   * 当日 (勤務中) は押し忘れとは言えないのでこのフラグは立たない。
+   * optional — 旧サマリ (このフィールド導入前に保存されたもの) には無い。
+   */
+  missingClockOut?: boolean;
+  /**
    * その日の打刻区間 ("YYYY-MM-DD HH:MM:SS"、中抜けがあれば 2 つ以上)。
    *
    * **実働の計算に使ったものと同じ区間**を持つ (無効な打刻を落とし、重なりを併合
-   * した後の姿)。タイムカード表の 出勤1/退社1/出勤2/退社2 はこれをそのまま並べる
+   * した後の姿)。退社打刻の無い始業は `end: null` のまま**表示用に残す** (計算には
+   * 入らない)。タイムカード表の 出勤1/退社1/出勤2/退社2 はこれをそのまま並べる
    * ので、画面に出る時刻と残業の計算根拠が食い違わない (Refs #424 PR-E)。
    * 打刻の無い日は空配列。
    */
@@ -370,9 +379,10 @@ export function isClericalJob(jobName: string | null | undefined): boolean {
  * 日跨ぎの打刻を含むか (始業日と終業日が違うセッションがある)。
  *
  * 比較するのは**併合後の区間**なので、画面に出る 出勤1/退社1 と判定根拠が一致する。
+ * 終業の無いセッション (`end: null`) は日跨ぎとは言えないので対象外。
  */
 export function hasOvernightSession(sessions: readonly TimecardSession[]): boolean {
-  return sessions.some((s) => s.start.slice(0, 10) !== s.end.slice(0, 10));
+  return sessions.some((s) => s.end !== null && s.start.slice(0, 10) !== s.end.slice(0, 10));
 }
 
 /** 1 日 1.0 と数える休暇 → 集計軸 (CakePHP の `createPdf` の switch と同じ)。 */
@@ -430,6 +440,12 @@ export interface TimecardDayOptions {
   /** 夜勤者か (`night_shift_workers`)。true なら日跨ぎを打刻エラーにせず、
    * 未承認の休日打刻も自主出勤にせず平日として通常計上する (職種は問わない)。 */
   nightShift: boolean;
+  /**
+   * 今日の日付 ("YYYY-MM-DD"、JST)。**当日以降の未終業セッションは勤務中**であって
+   * 押し忘れではないので、「退社打刻なし」にしない (nginx#780)。
+   * 省略時は全日を過去扱い = 未終業は常に「退社打刻なし」になる。
+   */
+  today?: string;
 }
 
 /** 賃金計算に入れない 1 行 (打刻なし / 自主出勤 / 打刻エラー)。
@@ -442,9 +458,9 @@ function restDay(
   holidayKind: TimecardHolidayKind,
   sessions: TimecardSession[],
   leaves: string[],
-  excluded: { voluntaryMinutes?: number, punchErrorMinutes?: number } = {},
+  excluded: { voluntaryMinutes?: number, punchErrorMinutes?: number, missingClockOut?: boolean } = {},
 ): TimecardSummaryDay {
-  return {
+  const out: TimecardSummaryDay = {
     day,
     isRestDay: true,
     restraintMinutes: 0,
@@ -458,6 +474,10 @@ function restDay(
     leaves,
     sessions,
   };
+  // false は載せない — 旧サマリ (フィールド導入前) と JSON の形を揃え、
+  // R2 の版比較 (sha256) を不要に汚さない
+  if (excluded.missingClockOut) out.missingClockOut = true;
+  return out;
 }
 
 /**
@@ -470,10 +490,17 @@ export function summarizeTimecardDay(row: TimecardDailyRow, opts: TimecardDayOpt
   const dayNo = dayOfMonth(row.date);
   const leaves = (row.leaves ?? []).map((l) => l.detail);
   const raw: Interval[] = [];
+  // 退社打刻の無い始業 (`end: null`、nginx#780)。実働の計算には入れず表示用に残す
+  const openStarts: number[] = [];
   for (const s of row.sessions) {
     const from = timestampToSeconds(s.start);
+    if (from === null) continue;
+    if (s.end === null) {
+      openStarts.push(from);
+      continue;
+    }
     const to = timestampToSeconds(s.end);
-    if (from === null || to === null || to <= from) continue;
+    if (to === null || to <= from) continue;
     raw.push({ from, to });
   }
   const punched = mergeIntervals(raw);
@@ -483,6 +510,21 @@ export function summarizeTimecardDay(row: TimecardDailyRow, opts: TimecardDayOpt
     start: secondsToTimestamp(i.from),
     end: secondsToTimestamp(i.to),
   }));
+  for (const from of openStarts) sessions.push({ start: secondsToTimestamp(from), end: null });
+  // "YYYY-MM-DD HH:MM:SS" は辞書順 = 時刻順。localeCompare は ICU の照合順が
+  // 環境で食い違うので使わない (Refs #403)
+  sessions.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+
+  // 退社押し忘れ (過去日の未終業始業) — その日の時間はすべて信用できないので、
+  // #433 の打刻エラーと同じ作法で賃金計算から丸ごと外す (打刻は表示用に残す)。
+  // 当日以降の未終業は勤務中であって押し忘れとは言えないので外さない
+  if (openStarts.length > 0 && (opts.today === undefined || row.date < opts.today)) {
+    return restDay(dayNo, row.holiday, sessions, leaves, {
+      punchErrorMinutes:
+        punched.length > 0 ? toMinutes(punched[punched.length - 1]!.to - punched[0]!.from) : 0,
+      missingClockOut: true,
+    });
+  }
   if (punched.length === 0) return restDay(dayNo, row.holiday, sessions, leaves);
 
   const span: Interval = { from: punched[0]!.from, to: punched[punched.length - 1]!.to };
@@ -569,6 +611,9 @@ export interface TimecardMonthOptions {
   isClerical?(driverCd: string): boolean;
   /** その社員が夜勤者か (`buildNightShiftIndex` の集合)。省略時は全員 false。 */
   isNightShift?(driverCd: string): boolean;
+  /** 今日の日付 ("YYYY-MM-DD"、JST)。当日以降の未終業を「退社打刻なし」に
+   * しないための基準 (nginx#780)。省略時は全日を過去扱い。 */
+  today?: string;
 }
 
 /** 15 時間 (改善基準の 1 日拘束上限) を分で。 */
@@ -609,6 +654,7 @@ export function summarizeTimecardMonth(
       approved,
       clerical: opts.isClerical?.(driverCd) ?? false,
       nightShift: opts.isNightShift?.(driverCd) ?? false,
+      today: opts.today,
     });
     let entry = byDriver.get(driverCd);
     if (!entry) {
@@ -650,10 +696,19 @@ export function summarizeTimecardMonth(
       days,
       source: "timecard",
       voluntaryMinutes: sum((d) => d.voluntaryMinutes),
-      punchErrorDays: days.filter((d) => d.punchErrorMinutes > 0).length,
+      // 退社打刻なし (missingClockOut) も打刻エラーの一種として数える — 分が 0 でも
+      // 賃金計算から外れた日であることに変わりはない (nginx#780)
+      punchErrorDays: days.filter((d) => d.punchErrorMinutes > 0 || d.missingClockOut === true).length,
       punchErrorMinutes: sum((d) => d.punchErrorMinutes),
       leaveCounts: countLeaves(days.flatMap((d) => d.leaves)),
     });
+    const missingDays = days.filter((d) => d.missingClockOut === true).map((d) => d.day);
+    if (missingDays.length > 0) {
+      warnings.push(
+        `乗務員 ${driverCd} (${entry.name}): 退社打刻の無い日が ${missingDays.length} 日あります`
+        + ` (${missingDays.join(", ")} 日) — 賃金計算から外しています`,
+      );
+    }
   }
   summaries.sort((a, b) => Number(a.driverCd) - Number(b.driverCd));
   return { summaries, warnings };
