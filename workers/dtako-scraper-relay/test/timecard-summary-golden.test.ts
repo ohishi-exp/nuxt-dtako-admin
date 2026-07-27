@@ -147,14 +147,15 @@ describe('timecard-summary golden (実機 fixture 2026-06)', () => {
     expect(approved.voluntaryMinutes).toBe(0)
   })
 
-  it('事務職の日跨ぎは打刻エラーになり、賃金計算から外れる (実データ: 佐藤 6/8・6/25)', () => {
+  it('事務職の日跨ぎは打刻エラーになり、所定労働時間で計上される (実データ: 佐藤 6/8・6/25)', () => {
     const sato = result.summaries.find(s => s.driverCd === '1065')!
     expect(sato.punchErrorDays).toBe(2)
     const errors = sato.days.filter(d => d.punchErrorMinutes > 0)
     expect(errors.map(d => d.day)).toEqual([8, 25])
     for (const d of errors) {
-      expect(d.isRestDay).toBe(true)
-      expect(d.workingMinutes).toBe(0)
+      // 実時間は使えないが出勤はしているので所定で計上する (Refs #468)
+      expect(d.isRestDay).toBe(false)
+      expect(d.workingMinutes).toBe(DAILY_WORK_MINUTES)
       expect(d.overtimeMinutes).toBe(0)
       // 打刻は残す (総務が CakePHP 側で直すための手掛かり)
       expect(d.sessions.length).toBeGreaterThan(0)
@@ -219,12 +220,13 @@ describe('timecard-summary golden (実機 fixture 2026-06)', () => {
     ])
   })
 
-  it('実働は拘束を超えない — 打刻エラーの日も 0 対 0 で成立する', () => {
-    // 上の「実働は拘束を超えない」と重なるが、隔離した日が負の差を作らないことの明示
+  it('実働は拘束を超えない — 打刻エラーの日は所定 対 所定 で成立する', () => {
+    // 上の「実働は拘束を超えない」と重なるが、所定で埋めた日が負の差 (= 休憩がマイナス)
+    // を作らないことの明示 (Refs #468)
     for (const s of result.summaries) {
       for (const d of s.days.filter(x => x.punchErrorMinutes > 0)) {
-        expect(d.restraintMinutes).toBe(0)
-        expect(d.workingMinutes).toBe(0)
+        expect(d.restraintMinutes).toBe(DAILY_WORK_MINUTES)
+        expect(d.workingMinutes).toBe(DAILY_WORK_MINUTES)
       }
     }
   })

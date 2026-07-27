@@ -579,16 +579,45 @@ describe('summarizeTimecardDay — 打刻エラー (日跨ぎ)', () => {
   /** 実データ: 佐藤 泰弘 (1065、一般管理事務) 2026-06-08 07:14 → 06-09 18:52。 */
   const SATO = row('2026-06-08', [['07:14:08', '2026-06-09 18:52:15']])
 
-  it('事務職・非夜勤の日跨ぎは打刻エラーとして賃金計算から外す', () => {
+  it('事務職・非夜勤の日跨ぎは打刻エラー — 実時間の代わりに所定労働時間で計上する', () => {
     const d = summarizeTimecardDay(SATO, { dailyWorkMinutes: 450, approved: false, clerical: true, nightShift: false })
-    expect(d.isRestDay).toBe(true)
-    expect(d.workingMinutes).toBe(0)
+    expect(d.isRestDay).toBe(false)
+    expect(d.workingMinutes).toBe(450)
+    expect(d.restraintMinutes).toBe(450)
     expect(d.overtimeMinutes).toBe(0)
-    expect(d.restraintMinutes).toBe(0)
-    // 35.6 時間 = 2138 分が退避される (残業合計を汚さない)
+    // 35.6 時間 = 2138 分は実働に使わず記録として残す (残業合計を汚さない)
     expect(d.punchErrorMinutes).toBe(2138)
     // 打刻は残す — 総務が CakePHP 側で直すための手掛かり
     expect(d.sessions).toEqual([{ start: '2026-06-08 07:14:08', end: '2026-06-09 18:52:15' }])
+  })
+
+  it('所定が引けない社員の日跨ぎは、埋める値が無いので従来どおり外す', () => {
+    const d = summarizeTimecardDay(SATO, { dailyWorkMinutes: null, approved: false, clerical: true, nightShift: false })
+    expect(d.isRestDay).toBe(true)
+    expect(d.workingMinutes).toBe(0)
+    expect(d.restraintMinutes).toBe(0)
+    expect(d.punchErrorMinutes).toBe(2138)
+  })
+
+  it('未承認の休日打刻が日跨ぎでも、自主出勤の扱い (賃金計算に入れない) を優先する', () => {
+    const d = summarizeTimecardDay(
+      row('2026-06-21', [['07:14:08', '2026-06-22 18:52:15']], 'legal'),
+      { dailyWorkMinutes: 450, approved: false, clerical: true, nightShift: false },
+    )
+    expect(d.isRestDay).toBe(true)
+    expect(d.workingMinutes).toBe(0)
+    expect(d.holidayKind).toBe('legal')
+  })
+
+  it('承認済みの休日出勤なら日跨ぎでも所定で計上する (割増は付けない)', () => {
+    const d = summarizeTimecardDay(
+      row('2026-06-21', [['07:14:08', '2026-06-22 18:52:15']], 'legal'),
+      { dailyWorkMinutes: 450, approved: true, clerical: true, nightShift: false },
+    )
+    expect(d.isRestDay).toBe(false)
+    expect(d.workingMinutes).toBe(450)
+    // 時間が分からない日に割増の率だけ決めることはできないので平日として計上する
+    expect(d.holidayKind).toBe('weekday')
   })
 
   it('夜勤者は日跨ぎでもエラーにしない (実データ: 山根 19:43→翌00:02)', () => {
@@ -771,7 +800,7 @@ describe('summarizeTimecardMonth — 打刻エラーと休暇 (Refs #433)', () =
     ...over,
   })
 
-  it('打刻エラーは日数と分を別枠で集計し、実働・残業には入らない', () => {
+  it('打刻エラーの日も所定労働時間で計上し、実測の拘束は別枠に残す', () => {
     const { summaries } = summarizeTimecardMonth(
       [
         row('2026-06-01', [['07:13:25', '20:16:42']]),
@@ -783,10 +812,24 @@ describe('summarizeTimecardMonth — 打刻エラーと休暇 (Refs #433)', () =
     const s = summaries[0]!
     expect(s.punchErrorDays).toBe(2)
     expect(s.punchErrorMinutes).toBe(2138 + 2194)
-    // 賃金計算に入るのは 06-01 の 1 日だけ
+    // 3 日とも勤務日 — 打刻エラーの 2 日は所定 450 分で計上する (Refs #468)
+    expect(s.workDays).toBe(3)
+    expect(s.workingMinutes).toBe(723 + 450 + 450)
+    expect(s.restraintMinutes).toBe(783 + 450 + 450)
+  })
+
+  it('所定が引けなければ打刻エラーの日は従来どおり賃金計算から外れる', () => {
+    const { summaries } = summarizeTimecardMonth(
+      [
+        row('2026-06-01', [['07:13:25', '20:16:42']]),
+        row('2026-06-08', [['07:14:08', '2026-06-09 18:52:15']]),
+      ],
+      monthOpts({ dailyWorkMinutesFor: () => null, isClerical: () => true, isNightShift: () => false }),
+    )
+    const s = summaries[0]!
+    expect(s.punchErrorDays).toBe(1)
     expect(s.workDays).toBe(1)
     expect(s.workingMinutes).toBe(723)
-    expect(s.restraintMinutes).toBe(783)
   })
 
   it('夜勤者は日跨ぎが 15 回あっても打刻エラー 0', () => {
@@ -868,22 +911,45 @@ describe('退社打刻なし (end: null、nginx#780)', () => {
     }
   }
 
-  it('過去日の未終業は「退社打刻なし」— 賃金計算から外し、始業は表示用に残る', () => {
+  it('過去日の未終業は「退社打刻なし」— 所定労働時間で計上し、始業は表示用に残る', () => {
     const d = summarizeTimecardDay(openRow('2026-06-16', ['07:41:00']), NO_APPROVAL)
     expect(d.missingClockOut).toBe(true)
-    expect(d.isRestDay).toBe(true)
-    expect(d.workingMinutes).toBe(0)
+    expect(d.isRestDay).toBe(false)
+    expect(d.workingMinutes).toBe(480)
+    expect(d.restraintMinutes).toBe(480)
+    expect(d.overtimeMinutes).toBe(0)
     expect(d.punchErrorMinutes).toBe(0) // 終業が無いので拘束の長さは分からない
     expect(d.sessions).toEqual([{ start: '2026-06-16 07:41:00', end: null }])
   })
 
-  it('完結セッションと未終業が混在する日も丸ごと外し、完結分の拘束を punchErrorMinutes に退避する', () => {
+  it('所定が引けない社員の未終業は、埋める値が無いので従来どおり外す', () => {
+    const d = summarizeTimecardDay(
+      openRow('2026-06-16', ['07:41:00']),
+      { ...NO_APPROVAL, dailyWorkMinutes: null },
+    )
+    expect(d.missingClockOut).toBe(true)
+    expect(d.isRestDay).toBe(true)
+    expect(d.workingMinutes).toBe(0)
+  })
+
+  it('未承認の休日打刻に退社打刻が無くても、自主出勤の扱いを優先して外す', () => {
+    const d = summarizeTimecardDay(
+      openRow('2026-06-21', ['07:41:00'], [], { holiday: 'legal' }),
+      NO_APPROVAL,
+    )
+    expect(d.missingClockOut).toBe(true)
+    expect(d.isRestDay).toBe(true)
+    expect(d.holidayKind).toBe('legal')
+  })
+
+  it('完結セッションと未終業が混在する日も所定で計上し、完結分の拘束を punchErrorMinutes に退避する', () => {
     const d = summarizeTimecardDay(
       openRow('2026-06-16', ['13:10:00'], [['08:00:00', '12:00:00']]),
       NO_APPROVAL,
     )
     expect(d.missingClockOut).toBe(true)
-    expect(d.isRestDay).toBe(true)
+    expect(d.isRestDay).toBe(false)
+    expect(d.workingMinutes).toBe(480)
     expect(d.punchErrorMinutes).toBe(240) // 08:00-12:00
     // 表示用の並びは時刻順 (完結 → 未終業)
     expect(d.sessions).toEqual([
@@ -953,9 +1019,28 @@ describe('退社打刻なし (end: null、nginx#780)', () => {
     const s = summaries[0]!
     expect(s.punchErrorDays).toBe(2)
     expect(s.punchErrorMinutes).toBe(0)
-    expect(s.workDays).toBe(1) // 6/23 だけが勤務日
+    expect(s.workDays).toBe(3) // 退社打刻なしの 2 日も所定 480 分で計上する
+    expect(s.workingMinutes).toBe(480 + 480 + 531) // 6/23 は 07:38-17:29 − 昼休憩
     expect(warnings).toEqual([
-      '乗務員 1722 (山下　寿裕): 退社打刻の無い日が 2 日あります (16, 17 日) — 賃金計算から外しています',
+      '乗務員 1722 (山下　寿裕): 退社打刻の無い日が 2 日あります (16, 17 日)'
+      + ' — 時間は所定労働時間で計上しています。打刻を直して取り込み直すと実測に置き換わります',
+    ])
+  })
+
+  it('月次: 所定が引けない社員は外したことを warnings で言う', () => {
+    const { summaries, warnings } = summarizeTimecardMonth(
+      [openRow('2026-06-16', ['07:41:00'])],
+      {
+        yearMonth: '2026-06',
+        dailyWorkMinutesFor: () => null,
+        approvedHolidayWork: new Set<string>(),
+        today: '2026-07-27',
+      },
+    )
+    expect(summaries[0]!.workDays).toBe(0)
+    expect(warnings).toEqual([
+      '乗務員 1722 (山下　寿裕): 退社打刻の無い日が 1 日あります (16 日)'
+      + ' — うち 1 日は所定労働時間が引けないため賃金計算から外しています。打刻を直して取り込み直すと実測に置き換わります',
     ])
   })
 

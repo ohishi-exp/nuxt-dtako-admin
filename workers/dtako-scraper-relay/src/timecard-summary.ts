@@ -146,15 +146,19 @@ export interface TimecardSummaryDay extends RestraintSummaryDay {
   /** 自主出勤として賃金計算から外した実働 (分)。通常日は 0。 */
   voluntaryMinutes: number;
   /**
-   * 打刻エラー (事務職・非夜勤・日跨ぎ) として賃金計算から外した拘束 (分)。
+   * 打刻エラー (事務職・非夜勤・日跨ぎ) として**実働の計算に使わなかった**拘束 (分)。
    * 通常日は 0。**この日が打刻エラーか**の判定はこの値が正 (0 より大きいか)。
+   *
+   * この日は賃金計算から丸ごと外すのではなく、所定労働時間ぶんの勤務として計上する
+   * (Refs #468)。値は「本来ならこの拘束だった」という記録で、画面の赤表示と、
+   * 打刻を直す手掛かりとして残る。
    */
   punchErrorMinutes: number;
   /** その日の休暇区分 (原文、公休 / 有休 / …)。無ければ空配列。 */
   leaves: string[];
   /**
    * 退社打刻の無い日 (始業だけのセッションがある = 退社押し忘れ、nginx#780)。
-   * その日の時間は信用できないので賃金計算から外す (打刻エラーと同じ隔離)。
+   * 実時間は信用できないので、所定労働時間ぶんの勤務として計上する (Refs #468)。
    * 当日 (勤務中) は押し忘れとは言えないのでこのフラグは立たない。
    * optional — 旧サマリ (このフィールド導入前に保存されたもの) には無い。
    */
@@ -481,6 +485,57 @@ function restDay(
 }
 
 /**
+ * 打刻エラーの日を**所定労働時間ぶんの勤務**として計上した 1 行 (Refs #468)。
+ *
+ * その日の実時間は信用できないが、打刻がある以上**出勤はしている**。丸ごと外すと
+ * 出勤日数も実働時間も実態より小さくなり、月給を法定内時間で割る「基礎単価(実績)」が
+ * 過大に出る (実例: 山下 1722 の 2026-06 は 6 日欠けて 2,486 円/h ÷ 84h28m — 6 日を
+ * 所定で戻すと約 1,585 円/h)。
+ *
+ * 休日でも `weekday` として計上する — 時間が分からない日に割増の率だけ決めることは
+ * できない。割増が要る日は打刻を直して取り込み直せば実測に置き換わる。拘束は所定と
+ * 同じ値にする (実際の拘束が分からないので、休憩を引く先が無い)。
+ */
+function scheduledDay(
+  day: number,
+  sessions: TimecardSession[],
+  leaves: string[],
+  dailyWorkMinutes: number,
+  excluded: { punchErrorMinutes: number, missingClockOut?: boolean },
+): TimecardSummaryDay {
+  const out: TimecardSummaryDay = {
+    day,
+    isRestDay: false,
+    restraintMinutes: dailyWorkMinutes,
+    workingMinutes: dailyWorkMinutes,
+    overtimeMinutes: 0,
+    nightMinutes: 0,
+    overtimeNightMinutes: 0,
+    holidayKind: "weekday",
+    voluntaryMinutes: 0,
+    punchErrorMinutes: excluded.punchErrorMinutes,
+    leaves,
+    sessions,
+  };
+  if (excluded.missingClockOut) out.missingClockOut = true;
+  return out;
+}
+
+/**
+ * 打刻エラーの日に当てる所定労働時間 (分)。当てられない日は `null` = 従来どおり
+ * 賃金計算から外す。
+ *
+ * - 所定が引けない社員 (勤務設定に該当なし) … 埋める値が無い
+ * - 事務職 (非夜勤) の未承認の休日打刻 … 自主出勤として賃金計算に入れない (Refs #433)。
+ *   打刻エラーが重なっても、承認の無い休日出勤へ賃金を付ける側には倒さない
+ */
+function scheduledMinutesFor(row: TimecardDailyRow, opts: TimecardDayOptions): number | null {
+  if (opts.dailyWorkMinutes === null) return null;
+  if (opts.clerical && !opts.nightShift && row.holiday !== "weekday" && !opts.approved) return null;
+  return opts.dailyWorkMinutes;
+}
+
+/**
  * `daily-json` の 1 行を日別サマリへ畳む。
  *
  * `sessions` が空、または時刻が読めない行は「打刻なし」として休み扱いにする
@@ -515,15 +570,18 @@ export function summarizeTimecardDay(row: TimecardDailyRow, opts: TimecardDayOpt
   // 環境で食い違うので使わない (Refs #403)
   sessions.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
 
-  // 退社押し忘れ (過去日の未終業始業) — その日の時間はすべて信用できないので、
-  // #433 の打刻エラーと同じ作法で賃金計算から丸ごと外す (打刻は表示用に残す)。
-  // 当日以降の未終業は勤務中であって押し忘れとは言えないので外さない
+  // 退社押し忘れ (過去日の未終業始業) — 実時間は信用できないので所定労働時間ぶんの
+  // 勤務として計上する (Refs #468、打刻は表示用に残す)。
+  // 当日以降の未終業は勤務中であって押し忘れとは言えないので触らない
   if (openStarts.length > 0 && (opts.today === undefined || row.date < opts.today)) {
-    return restDay(dayNo, row.holiday, sessions, leaves, {
+    const excluded = {
       punchErrorMinutes:
         punched.length > 0 ? toMinutes(punched[punched.length - 1]!.to - punched[0]!.from) : 0,
       missingClockOut: true,
-    });
+    };
+    const scheduled = scheduledMinutesFor(row, opts);
+    if (scheduled !== null) return scheduledDay(dayNo, sessions, leaves, scheduled, excluded);
+    return restDay(dayNo, row.holiday, sessions, leaves, excluded);
   }
   if (punched.length === 0) return restDay(dayNo, row.holiday, sessions, leaves);
 
@@ -535,8 +593,13 @@ export function summarizeTimecardDay(row: TimecardDailyRow, opts: TimecardDayOpt
   const restraintMinutes = toMinutes(span.to - span.from);
 
   // 打刻エラー (事務職・非夜勤の日跨ぎ) は自主出勤より先に判定する — 終業の押し忘れで
-  // 拘束が 35 時間に膨らんだ数字は、休日出勤か平日かに関わらず賃金計算に入れられない
+  // 拘束が 35 時間に膨らんだ数字は、休日出勤か平日かに関わらず賃金計算に入れられない。
+  // 実時間の代わりに所定労働時間を当てる (Refs #468)
   if (opts.clerical && !opts.nightShift && hasOvernightSession(sessions)) {
+    const scheduled = scheduledMinutesFor(row, opts);
+    if (scheduled !== null) {
+      return scheduledDay(dayNo, sessions, leaves, scheduled, { punchErrorMinutes: restraintMinutes });
+    }
     return restDay(dayNo, row.holiday, sessions, leaves, { punchErrorMinutes: restraintMinutes });
   }
 
@@ -623,9 +686,10 @@ const OVER_15H_MINUTES = 15 * 60;
  * 月の日別行を乗務員ごとのサマリへ畳む。
  *
  * 行が無い日は summary に出さない (`classifyMonth` は days に無い日を勤務なしとして
- * 扱うため、埋める必要がない)。`workDays` は実際に勤務した日数、`restDays` は
- * 賃金計算に入らなかった日数 = 休暇・自主出勤・**打刻エラー**・打刻はあったが実働 0
- * の日数の合計。打刻エラーの内訳は `punchErrorDays` で別に持つ。
+ * 扱うため、埋める必要がない)。`workDays` は実際に勤務した日数 (**打刻エラーの日も
+ * 所定労働時間で計上するので含む**、Refs #468)、`restDays` は賃金計算に入らなかった
+ * 日数 = 休暇・自主出勤・打刻はあったが実働 0 の日数の合計。打刻エラーの内訳は
+ * `punchErrorDays` で別に持つ。
  *
  * 休暇だけで打刻が 1 日も無い社員も summary に出る (nginx#779 で公休の行が来る
  * ようになったため)。勤務 0・休暇日数だけの行になり、給与明細の公休日数と
@@ -697,16 +761,24 @@ export function summarizeTimecardMonth(
       source: "timecard",
       voluntaryMinutes: sum((d) => d.voluntaryMinutes),
       // 退社打刻なし (missingClockOut) も打刻エラーの一種として数える — 分が 0 でも
-      // 賃金計算から外れた日であることに変わりはない (nginx#780)
+      // 実時間が分からない日であることに変わりはない (nginx#780)。所定で計上した日も
+      // 含むので、これは「打刻を直すべき日」の数 (Refs #468)
       punchErrorDays: days.filter((d) => d.punchErrorMinutes > 0 || d.missingClockOut === true).length,
       punchErrorMinutes: sum((d) => d.punchErrorMinutes),
       leaveCounts: countLeaves(days.flatMap((d) => d.leaves)),
     });
-    const missingDays = days.filter((d) => d.missingClockOut === true).map((d) => d.day);
+    const missingDays = days.filter((d) => d.missingClockOut === true);
     if (missingDays.length > 0) {
+      // 所定が引けない日だけ従来どおり外れる (`scheduledMinutesFor` が null)。
+      // 全部所定で計上できたのか、外した日があるのかで文言を変える (Refs #468)
+      const excluded = missingDays.filter((d) => d.isRestDay).length;
       warnings.push(
         `乗務員 ${driverCd} (${entry.name}): 退社打刻の無い日が ${missingDays.length} 日あります`
-        + ` (${missingDays.join(", ")} 日) — 賃金計算から外しています`,
+        + ` (${missingDays.map((d) => d.day).join(", ")} 日) — `
+        + (excluded > 0
+          ? `うち ${excluded} 日は所定労働時間が引けないため賃金計算から外しています`
+          : "時間は所定労働時間で計上しています")
+        + "。打刻を直して取り込み直すと実測に置き換わります",
       );
     }
   }
