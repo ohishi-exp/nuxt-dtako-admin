@@ -799,38 +799,93 @@ export interface MergedSummaryEntry<T> {
 }
 
 /**
+ * デジタコ (拘束時間 CSV) にしか無い指標。タイムカードは打刻しか持たないので
+ * **構造的に出せない** — 重複乗務員でタイムカードを採るとき、この分だけは
+ * デジタコ側の値で埋め戻す (改善基準告示の管理項目が丸ごと空欄になるのを防ぐ)。
+ *
+ * `over15hDays` は入れない — タイムカードが自分の拘束から数えた値を持っており、
+ * 同じ行の「拘束合計」と整合する方を残すため。
+ */
+interface TheearthOnlyMetrics {
+  drivingMinutes: number | null;
+  loadingMinutes: number | null;
+  fiscalCumulativeMinutes: number | null;
+  restraintLimitMinutes: number | null;
+  excessRestraintMinutes: number | null;
+  /** 2 日平均運転 9h 超の回数。運転時間が要るのでタイムカードは常に 0。 */
+  avgDriving9hOverCount: number;
+}
+
+/** 埋め戻す対象のうち「タイムカードでは null」になる分。 */
+const THEEARTH_ONLY_NULLABLE_KEYS = [
+  "drivingMinutes",
+  "loadingMinutes",
+  "fiscalCumulativeMinutes",
+  "restraintLimitMinutes",
+  "excessRestraintMinutes",
+] as const satisfies ReadonlyArray<keyof TheearthOnlyMetrics>;
+
+type MergeableSummary = { driverCd: string } & Partial<TheearthOnlyMetrics>;
+
+/**
+ * タイムカード行にデジタコ由来の指標を埋め戻した entry を返す。
+ * 埋めるものが無ければ元の entry をそのまま返す (無駄なコピーを作らない)。
+ */
+function fillTheearthOnlyMetrics<T extends { data: MergeableSummary }>(
+  timecardEntry: T,
+  theearthEntry: T,
+): T {
+  const from = theearthEntry.data;
+  const to = timecardEntry.data;
+  const filled: Partial<TheearthOnlyMetrics> = {};
+  for (const key of THEEARTH_ONLY_NULLABLE_KEYS) {
+    if (to[key] == null && from[key] != null) filled[key] = from[key];
+  }
+  // 0 (= 数えられなかった) のときだけデジタコの回数を採る
+  if (!to.avgDriving9hOverCount && from.avgDriving9hOverCount) {
+    filled.avgDriving9hOverCount = from.avgDriving9hOverCount;
+  }
+  if (Object.keys(filled).length === 0) return timecardEntry;
+  return { ...timecardEntry, data: { ...timecardEntry.data, ...filled } };
+}
+
+/**
  * theearth (デジタコ) と timecard (タイムカード) のサマリを 1 本の行列に合流する。
  *
- * **同じ乗務員CD が両方に居たら theearth を採る** — デジタコに乗る乗務員は拘束時間
- * CSV が時間外まで持っており、打刻からの再計算より情報量が多い。落とした側は
- * warnings に出す (人によっては両方に痕跡が残りうるので、黙って消さない)。
+ * **同じ乗務員CD が両方に居たら timecard を採る** — 賃金は打刻を根拠にするため、
+ * 拘束/実働/時間外/深夜と勤怠日数はタイムカード側で統一する (2026-07-28 決定)。
+ * デジタコにしか無い列 (運転・荷役・年度累計・当月超過・平均運転9h超) だけは
+ * `fillTheearthOnlyMetrics` でデジタコ側から埋め戻す。落とした側は warnings に
+ * 出す (人によっては両方に痕跡が残りうるので、黙って消さない)。
  *
  * 並びは乗務員CD の数値順。`localeCompare` を使わないのは ICU の照合順が Windows と
  * Linux (CI) で食い違い、決定的な順序という目的自体が壊れるため (Refs #403)。
  */
-export function mergeSummarySources<T extends { data: { driverCd: string } }>(
+export function mergeSummarySources<T extends { data: MergeableSummary }>(
   theearth: readonly T[],
   timecard: readonly T[],
 ): { merged: MergedSummaryEntry<T>[]; warnings: string[] } {
-  const fromTheearth = new Set(theearth.map((s) => s.data.driverCd));
-  const merged: MergedSummaryEntry<T>[] = theearth.map((entry) => ({
-    entry,
-    source: "theearth" as const,
-  }));
+  const theearthByDriver = new Map(theearth.map((s) => [s.data.driverCd, s]));
+  const fromTimecard = new Set(timecard.map((s) => s.data.driverCd));
   const duplicated: string[] = [];
-  for (const entry of timecard) {
-    if (fromTheearth.has(entry.data.driverCd)) {
-      duplicated.push(entry.data.driverCd);
-      continue;
-    }
-    merged.push({ entry, source: "timecard" });
+  const merged: MergedSummaryEntry<T>[] = timecard.map((entry) => {
+    const counterpart = theearthByDriver.get(entry.data.driverCd);
+    if (!counterpart) return { entry, source: "timecard" as const };
+    duplicated.push(entry.data.driverCd);
+    return { entry: fillTheearthOnlyMetrics(entry, counterpart), source: "timecard" as const };
+  });
+  for (const entry of theearth) {
+    if (fromTimecard.has(entry.data.driverCd)) continue;
+    merged.push({ entry, source: "theearth" });
   }
   merged.sort((a, b) => Number(a.entry.data.driverCd) - Number(b.entry.data.driverCd));
   const warnings: string[] = [];
   if (duplicated.length > 0) {
     warnings.push(
       `乗務員CD ${duplicated.join(", ")} は デジタコ と タイムカード の両方にサマリがあるため、`
-      + `デジタコ側を採用しました`,
+      + `タイムカード側を採用しました `
+      + `(運転・荷役・年度累計・当月超過・平均運転9h超 はタイムカードから出せないため`
+      + `デジタコ側の値で補っています)`,
     );
   }
   return { merged, warnings };

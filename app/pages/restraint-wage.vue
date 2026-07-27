@@ -154,6 +154,10 @@ function monthHasArchive(year: number, monthNo: number): boolean {
 const kintaiMonths = ref<string[]>([])
 /** 給与取り込み済みの月 (YYYY-MM、会社不問)。 */
 const kyuyoSyncedMonths = ref<Set<string>>(new Set())
+/** 給与アーカイブが有る (給与大臣の会社コード, 勤務月) の組 (`会社|YYYY-MM`)。
+ * この組は upstream が SQLite キャッシュだけで返せる = OHKEN を開かないので、
+ * ボタンを押さなくても勝手に読んで良い (Refs #369 / rust-ichibanboshi#106)。 */
+const kyuyoSyncedKeys = ref<Set<string>>(new Set())
 /** 拘束サマリが ichiban に同期済みの月 (YYYY-MM) = 高速表示できる月 (Refs #460)。 */
 const ichibanMonths = ref<string[]>([])
 
@@ -178,16 +182,18 @@ const showBackfillHint = computed(() =>
   && !monthIsSynced(selectedYear.value, selectedMonthNo.value),
 )
 
-/** 給与の sync 済み月を ichiban から引く。バッジ表示専用なので**失敗しても静かに
- * 空のまま** (endpoint 未デプロイ・障害でページを壊さない)。 */
+/** 給与の sync 済み月を ichiban から引く。月タブのバッジと**アーカイブ自動表示**
+ * (`autoLoadArchivedPayroll`) の両方が使う。**失敗しても静かに空のまま** —
+ * その場合は従来どおり「給与DBから読み込み」ボタンでの取得だけになる。 */
 async function loadKyuyoSyncedMonths() {
   try {
     const token = currentAccessToken()
     if (!token) return
-    const res = await $fetch<{ entries: Array<{ month: string }> }>('/api/kyuyo/synced-months', {
+    const res = await $fetch<{ entries: Array<{ company: string, month: string }> }>('/api/kyuyo/synced-months', {
       headers: { Authorization: `Bearer ${token}` },
     })
     kyuyoSyncedMonths.value = new Set(res.entries.map(e => e.month))
+    kyuyoSyncedKeys.value = new Set(res.entries.map(e => `${e.company}|${e.month}`))
   }
   catch {
     // バッジが出ないだけ — エラー表示はしない
@@ -1552,6 +1558,9 @@ const payrollRangeTo = ref('')
 watch(month, (ym) => {
   payrollRangeFrom.value = ym
   payrollRangeTo.value = ym
+  // 前の月の結果メッセージは消す — 「4月を見ているのに 5月支給分を読み込みました」
+  // が残り続けると、今の月のデータが有るのか無いのか読み取れない
+  payrollDbMessage.value = ''
 }, { immediate: true })
 
 /** 期間セレクタの選択肢 (前年1月〜選択年12月の勤務月)。
@@ -1629,6 +1638,27 @@ async function matchFromIchiban() {
  * 取得済みデータは `/kyuyo-fetch` と**同じ sessionStorage キー**を共有する —
  * 一度取れば両方の画面で使い回せ、キャッシュが二重にならない。
  */
+/** sessionStorage の (会社, 支給月) を読む。壊れていたら null (取り直させる)。 */
+function readStoredPayroll(payrollCompany: string, payMonth: string): StoredPayroll | null {
+  if (!import.meta.client) return null
+  const cached = sessionStorage.getItem(payrollStorageKey(payrollCompany, payMonth))
+  if (!cached) return null
+  try {
+    return JSON.parse(cached) as StoredPayroll
+  }
+  catch {
+    return null
+  }
+}
+
+/** 取得済み明細を dbImports へ反映する。同じ (会社, 支給月) だけ差し替え、
+ * それ以外の既取得分は残す — 月を切り替えながら押しても前の月が消えない
+ * (突合は月で絞るので混ざらない)。 */
+function applyDbImports(loaded: typeof dbImports.value) {
+  const replaced = new Set(loaded.map(i => `${i.company}|${i.month}`))
+  dbImports.value = [...dbImports.value.filter(i => !replaced.has(`${i.company}|${i.month}`)), ...loaded]
+}
+
 async function loadPayrollFromDb() {
   const compId = session.value?.compId
   if (!compId) return
@@ -1647,17 +1677,7 @@ async function loadPayrollFromDb() {
       const payMonth = nextYm(workMonth)
       for (const { payrollCompany } of companies) {
         done += 1
-        const key = payrollStorageKey(payrollCompany, payMonth)
-        let stored: StoredPayroll | null = null
-        const cached = import.meta.client ? sessionStorage.getItem(key) : null
-        if (cached) {
-          try {
-            stored = JSON.parse(cached) as StoredPayroll
-          }
-          catch {
-            stored = null // 壊れていたら取り直す
-          }
-        }
+        let stored: StoredPayroll | null = readStoredPayroll(payrollCompany, payMonth)
         if (!stored) {
           // 取得済みの月は sessionStorage から返るので、期間を伸ばしても
           // 既に取った分は待たされない (キーは会社×支給月)
@@ -1673,16 +1693,13 @@ async function loadPayrollFromDb() {
             payrollDbMessage.value = `${payrollCompany} / ${fmtYm(payMonth)} の応答形式が想定外でした`
             continue
           }
-          if (import.meta.client) sessionStorage.setItem(key, JSON.stringify(stored))
+          if (import.meta.client) sessionStorage.setItem(payrollStorageKey(payrollCompany, payMonth), JSON.stringify(stored))
         }
         const parsed = payrollToParsedSalary(stored.rows as KyuyoPayrollRow[], payrollCompany)
         loaded.push({ company: payrollCompany, month: payMonth, parsed })
       }
     }
-    // 今回取った (会社, 支給月) だけ差し替え、それ以外の既取得分は残す —
-    // 月を切り替えながら押しても前の月が消えない (突合は月で絞るので混ざらない)
-    const replaced = new Set(loaded.map(i => `${i.company}|${i.month}`))
-    dbImports.value = [...dbImports.value.filter(i => !replaced.has(`${i.company}|${i.month}`)), ...loaded]
+    applyDbImports(loaded)
     const total = loaded.reduce((n, i) => n + i.parsed.rows.length, 0)
     const payLabel = loaded.length
       ? `${fmtYm(nextYm(workMonths[0]!))}${workMonths.length > 1 ? `〜${fmtYm(nextYm(workMonths[workMonths.length - 1]!))}` : ''} 支給分`
@@ -1696,6 +1713,81 @@ async function loadPayrollFromDb() {
   }
   finally {
     loadingPayrollDb.value = false
+  }
+}
+
+/**
+ * 選択中の月に**給与アーカイブがある会社だけ**、ボタンを押さずに読み込む
+ * (2026-07-28 要望「給与アーカイブあるのであれば、取り込みせずとも表示して」)。
+ *
+ * 対象は `kyuyo_sync_state` に (会社, 勤務月) がある組か、既に sessionStorage に
+ * ある組だけ — この 2 つは upstream が SQLite / ブラウザキャッシュだけで返せるので
+ * **給与大臣 (OHKEN) を開かない** = 待ち時間もロックも発生しない。アーカイブが
+ * 無い会社は従来どおり「給与DBから読み込み」ボタン (1 社 10〜20 秒) の担当のまま。
+ */
+let autoPayrollLoading = false
+let autoPayrollRerun = false
+
+async function autoLoadArchivedPayroll() {
+  // 手動取得 (全社を取る = 自動読みの上位互換) が走っている間は譲る。自動読み同士は
+  // 「後から来た方をもう一度回す」— compMap と synced-months が別タイミングで
+  // 解決するので、片方だけ見て終わると残りの会社が読まれない
+  if (loadingPayrollDb.value) return
+  if (autoPayrollLoading) {
+    autoPayrollRerun = true
+    return
+  }
+  const compId = session.value?.compId
+  if (!compId) return
+  const workMonth = month.value
+  const payMonth = nextYm(workMonth)
+  const companies = (compMap.value.find(c => c.compId === compId)?.payrollCompanies ?? [])
+    .filter(({ payrollCompany }) =>
+      // 既に画面に載っている組は読み直さない (押した直後の再取得を避ける)
+      !dbImports.value.some(i => i.company === payrollCompany && i.month === payMonth)
+      && (kyuyoSyncedKeys.value.has(`${payrollCompany}|${workMonth}`)
+        || readStoredPayroll(payrollCompany, payMonth) !== null),
+    )
+  if (!companies.length) return
+  autoPayrollLoading = true
+  const loaded: typeof dbImports.value = []
+  try {
+    const token = currentAccessToken()
+    for (const { payrollCompany } of companies) {
+      let stored = readStoredPayroll(payrollCompany, payMonth)
+      if (!stored) {
+        const body = await $fetch(`/api/kyuyo/payroll`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          query: { company: payrollCompany, month: workMonth },
+        })
+        stored = toStoredPayroll(body, new Date().toISOString())
+        if (!stored) continue // 形式が想定外 = ボタンで取り直す。自動読みは黙って諦める
+        if (import.meta.client) sessionStorage.setItem(payrollStorageKey(payrollCompany, payMonth), JSON.stringify(stored))
+      }
+      loaded.push({
+        company: payrollCompany,
+        month: payMonth,
+        parsed: payrollToParsedSalary(stored.rows as KyuyoPayrollRow[], payrollCompany),
+      })
+    }
+    if (!loaded.length) return
+    // 応答を待つ間に月を動かされていたら捨てる (古い月の明細を載せない)
+    if (month.value !== workMonth) return
+    applyDbImports(loaded)
+    const total = loaded.reduce((n, i) => n + i.parsed.rows.length, 0)
+    payrollDbMessage.value
+      = `給与アーカイブから ${loaded.length} 社 / ${total} 行を表示しました `
+        + `(${fmtYm(payMonth)} 支給分 — 取り込み操作は不要です)`
+  }
+  catch {
+    // 自動読みの失敗はボタンでの取得を妨げない — エラー表示はしない
+  }
+  finally {
+    autoPayrollLoading = false
+    if (autoPayrollRerun) {
+      autoPayrollRerun = false
+      void autoLoadArchivedPayroll()
+    }
   }
 }
 
@@ -2980,6 +3072,9 @@ watch([activeTab, month, session, archiveMonthsLoaded], () => {
   // 上部バーの「給与DBから読み込み」はどのタブからでも押せるようにしている。
   // ボタンの活殺は compMap 由来 (importPayrollOptions) なので、タブに関係なく読む
   if (!compMap.value.length) loadCompMap()
+  // 給与アーカイブがある会社は押さずに表示する (compMap / synced-months が後から
+  // 解決するので、下の watch でも同じ関数を叩く)
+  void autoLoadArchivedPayroll()
   if (activeTab.value === 'monthly' || activeTab.value === 'minwage') {
     if (!report.value || report.value.month !== month.value) loadWageReport()
     // 最低賃金 (法定下限) の設定カードは minwage タブに同居 (Refs #268 PR-E)
@@ -3038,6 +3133,14 @@ watch([activeTab, month, session, archiveMonthsLoaded], () => {
     loadHolidayWork()
   }
 }, { immediate: false })
+
+// 給与アーカイブの自動表示は compMap (対応する給与大臣の会社) と synced-months
+// (どの組がキャッシュ済みか) の**両方**が要る。どちらも上の watch より後に解決
+// しうるので、揃った時点でもう一度叩く (中身は冪等 — 既に載っている組は飛ばす)。
+watch([compMap, kyuyoSyncedKeys], () => {
+  if (!session.value || !archiveMonthsLoaded.value) return
+  void autoLoadArchivedPayroll()
+})
 </script>
 
 <template>
@@ -3734,6 +3837,10 @@ watch([activeTab, month, session, archiveMonthsLoaded], () => {
                 <b>上部の「給与DB」バー</b>から取得します (期間指定も可)。この画面では {{ fmtYm(nextYm(month)) }} 支給分を突合します
               </span>
             </div>
+            <p class="text-xs text-gray-500 mt-2">
+              <b>給与アーカイブ (取り込み済み) がある会社は、押さなくても自動で表示されます</b> —
+              月タブの<span class="text-amber-500">●</span>が目印です。ボタンは<b>アーカイブが無い会社を取りに行く</b>ときに使います。
+            </p>
             <p class="text-xs text-gray-500 mt-2">
               取得するのは<b>支給項目だけ</b>です (控除は API 側で分離済み)。1 社あたり 10〜20 秒かかります —
               給与大臣 PC が古く DB を都度開くためで、異常ではありません。

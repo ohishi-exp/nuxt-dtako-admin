@@ -3322,7 +3322,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * (Refs #424 PR-D) — デジタコに乗らない本社事務員等はタイムカード側からしか
    * 出てこない。行には `source` が付く。`computeWageRow` / `classifyMonth` /
    * `compareSalaryMonth` はどちらの由来でも同じものを使う (タイムカード側が
-   * `RestraintDriverSummary` 互換の形で保存されているため)。 */
+   * `RestraintDriverSummary` 互換の形で保存されているため)。
+   * **重複は timecard が勝つ** (2026-07-28 決定 — 賃金は打刻を根拠にする)。 */
   private async handleWageReport(record: TheearthSessionRecord, url: URL): Promise<Response> {
     const bucket = this.env.DTAKO_R2;
     if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
@@ -3362,7 +3363,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         this.loadWageReportSource(bucket, record.compId, ym, prevYm, kintaiPrefix),
       ]);
     const { noDataDrivers } = current;
-    // 同じ乗務員CD が両方に居たら theearth を採る (乗務員は従来どおり)
+    // 同じ乗務員CD が両方に居たら timecard を採る (打刻を賃金の根拠にする、2026-07-28)
     const { merged, warnings } = mergeSummarySources(current.summaries, kintaiCurrent.summaries);
     // 前月 days (週40h の月初跨ぎ週用) も同じ優先順で合流する — 当月と別の source を
     // 混ぜると跨ぎ週の実働が二重に積まれる
