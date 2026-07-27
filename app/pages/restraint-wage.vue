@@ -538,7 +538,9 @@ const kosokuDriverSheets = computed(() => {
         isDriver: true,
         rows: buildKosokuTimecardTable(merged, year, monthNo),
         counts,
-        restraint: sumKosokuMonth(thisMonth),
+        // 拘束・深夜は**暦日按分**なので、前月に始業した勤務も渡す (当月に落ちる分だけ
+        // 足される)。日数は始業日で数えるので `thisMonth` のまま
+        restraint: sumKosokuMonth(merged, month.value),
         // 残業の給与突合はドライバーには出さない (給与明細の突合キーが要る)
         overtimeCompare: null,
         // 出勤・休日出勤は数えられる。**公休・有休・欠勤は打刻にしか無いので 0 のまま**

@@ -55,6 +55,26 @@ export interface KosokuDay {
    * 休息イベント由来の勤務は空 (打刻が無い)。
    */
   punches: KosokuPunch[]
+  /**
+   * **暦日按分の内訳** (上流 #130)。日跨ぎ勤務だけ入り、1 日で終わる勤務は空。
+   *
+   * この日の各分数は勤務を**始業日へ丸ごと寄せた**値。月の拘束・深夜は**暦日按分**で
+   * 出す (ユーザー決定 2026-07-27) ので、内訳があるときはこちらを足す。
+   */
+  parts: KosokuDayPart[]
+}
+
+/** 暦日按分の 1 日分 (上流 #130)。 */
+export interface KosokuDayPart {
+  /** 暦日 (`YYYY-MM-DD`)。 */
+  date: string
+  restraintMinutes: number
+  workingMinutes: number
+  overtimeMinutes: number
+  legalHolidayMinutes: number
+  nightMinutes: number
+  overtimeNightMinutes: number
+  legalHolidayNightMinutes: number
 }
 
 /** 勤務を構成した打刻 1 つ (上流 #128)。 */
@@ -110,7 +130,31 @@ export function toKosokuDay(raw: unknown): KosokuDay | null {
     overtimeNightMinutes: num(r.overtime_night_minutes),
     legalHolidayNightMinutes: num(r.legal_holiday_night_minutes),
     punches: toKosokuPunches(r.punches),
+    parts: toKosokuParts(r.parts),
   }
+}
+
+/** 暦日按分の内訳を直す。**日付の無い項目は捨てる** (どの日か決められない)。 */
+function toKosokuParts(raw: unknown): KosokuDayPart[] {
+  if (!Array.isArray(raw)) return []
+  const out: KosokuDayPart[] = []
+  for (const p of raw) {
+    if (typeof p !== 'object' || p === null) continue
+    const r = p as Record<string, unknown>
+    const date = str(r.date)
+    if (!date) continue
+    out.push({
+      date,
+      restraintMinutes: num(r.restraint_minutes),
+      workingMinutes: num(r.working_minutes),
+      overtimeMinutes: num(r.overtime_minutes),
+      legalHolidayMinutes: num(r.legal_holiday_minutes),
+      nightMinutes: num(r.night_minutes),
+      overtimeNightMinutes: num(r.overtime_night_minutes),
+      legalHolidayNightMinutes: num(r.legal_holiday_night_minutes),
+    })
+  }
+  return out
 }
 
 /** 打刻の配列を直す。**時刻の無い項目は捨てる** (列に置けない)。 */
@@ -371,21 +415,38 @@ export interface KosokuMonthTotals {
 }
 
 /**
- * 月の拘束と深夜を合計する。
+ * 月の拘束と深夜を**暦日按分**で合計する (ユーザー決定 2026-07-27)。
  *
- * **法定休日の深夜も深夜に足す** — 上流は平日と法定休日で別項目に持つが
- * (`legal_holiday_night_minutes`)、画面に出すのは「その月に深夜帯で何分働いたか」なので
- * 分けない。時間外深夜だけは割増が違う (1.25+0.25) ので内訳として残す。
+ * 上流は勤務を始業日へ丸ごと寄せるが、現行の拘束時間管理表は暦日へ配る。**寄せ方は
+ * 暦日按分に合わせる** — 月末に始業して翌月に終わる勤務が、まるごと前の月に乗らない
+ * ようにするため。日跨ぎ勤務には上流が内訳 (`parts`) を添えてくる (#130) ので、
+ * それがあるときは対象月に落ちる分だけを足す。
  *
- * 拘束は 24 時間で打ち切られた日も**打ち切り後の値のまま**足す (上流 #118 の判断を
- * 画面で覆さない)。
+ * - **`parts` が無い勤務** (1 日で終わる / 上流が古い) は、その勤務の日付が対象月なら
+ *   丸ごと足す — 1 日で終わる勤務は按分しても同じ値になる
+ * - **法定休日の深夜も深夜に足す** — 上流は割増ごとに別項目で持つが、画面に出すのは
+ *   「その月に深夜帯で何分働いたか」。割増の違う時間外深夜だけ内訳として残す
+ * - 拘束は 24 時間で打ち切られた勤務も**打ち切り後の値のまま**足す (上流 #118 の
+ *   判断を画面で覆さない)
  */
-export function sumKosokuMonth(days: readonly KosokuDay[]): KosokuMonthTotals {
-  return days.reduce<KosokuMonthTotals>((acc, d) => ({
-    restraintMinutes: acc.restraintMinutes + d.restraintMinutes,
-    nightMinutes: acc.nightMinutes + d.nightMinutes + d.legalHolidayNightMinutes,
-    overtimeNightMinutes: acc.overtimeNightMinutes + d.overtimeNightMinutes,
-  }), { restraintMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0 })
+export function sumKosokuMonth(days: readonly KosokuDay[], month: string): KosokuMonthTotals {
+  const acc: KosokuMonthTotals = { restraintMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0 }
+  for (const d of days) {
+    if (d.parts.length) {
+      for (const p of d.parts) {
+        if (!p.date.startsWith(month)) continue
+        acc.restraintMinutes += p.restraintMinutes
+        acc.nightMinutes += p.nightMinutes + p.legalHolidayNightMinutes
+        acc.overtimeNightMinutes += p.overtimeNightMinutes
+      }
+      continue
+    }
+    if (!d.date.startsWith(month)) continue
+    acc.restraintMinutes += d.restraintMinutes
+    acc.nightMinutes += d.nightMinutes + d.legalHolidayNightMinutes
+    acc.overtimeNightMinutes += d.overtimeNightMinutes
+  }
+  return acc
 }
 
 /**
