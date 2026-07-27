@@ -9,7 +9,7 @@ import {
   sumKosokuMonth,
   toKosokuDay,
 } from '../../app/utils/kosoku-daily'
-import type { KosokuDay } from '../../app/utils/kosoku-daily'
+import type { KosokuDay, KosokuDayPart } from '../../app/utils/kosoku-daily'
 
 /** 上流 (rust-ichibanboshi /api/kintai/kosoku-daily) の 1 日ぶんの形。 */
 function rawDay(over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -91,6 +91,22 @@ describe('toKosokuDay', () => {
     expect(toKosokuDay(rawDay({ punches: 'nope' }))!.punches).toEqual([])
   })
 
+  it('暦日按分の内訳を持つ。日付の無い項目は捨てる', () => {
+    const d = toKosokuDay(rawDay({
+      parts: [
+        { date: '2026-06-02', restraint_minutes: 120, night_minutes: 120 },
+        { restraint_minutes: 480 },
+        null,
+      ],
+    }))!
+    expect(d.parts).toEqual([
+      part('2026-06-02', { restraintMinutes: 120, nightMinutes: 120 }),
+    ])
+    // 内訳が無い応答 (1 日で終わる勤務 / 上流の deploy 前) は空
+    expect(toKosokuDay(rawDay())!.parts).toEqual([])
+    expect(toKosokuDay(rawDay({ parts: 'nope' }))!.parts).toEqual([])
+  })
+
   it('数値の欠け・非数値は 0 で埋める (項目が増減しても落ちない)', () => {
     const d = toKosokuDay({
       date: '2026-06-02',
@@ -165,6 +181,21 @@ describe('parseKosokuDaily', () => {
   })
 })
 
+/** 暦日按分の 1 日分。0 以外だけ渡す。 */
+function part(date: string, over: Partial<KosokuDayPart> = {}): KosokuDayPart {
+  return {
+    date,
+    restraintMinutes: 0,
+    workingMinutes: 0,
+    overtimeMinutes: 0,
+    legalHolidayMinutes: 0,
+    nightMinutes: 0,
+    overtimeNightMinutes: 0,
+    legalHolidayNightMinutes: 0,
+    ...over,
+  }
+}
+
 /** 勤務 1 本 (打刻なし = 休息イベント由来)。時刻以外は既定値。 */
 function shift(start: string, end: string, over: Partial<KosokuDay> = {}): KosokuDay {
   return {
@@ -172,6 +203,7 @@ function shift(start: string, end: string, over: Partial<KosokuDay> = {}): Kosok
     start,
     end,
     punches: [],
+    parts: [],
     source: 'rest',
     isLegalHoliday: false,
     over24h: false,
@@ -397,12 +429,49 @@ describe('sumKosokuMonth', () => {
       shift('2026-06-07 20:00:00', '2026-06-08 06:00:00', {
         restraintMinutes: 600, isLegalHoliday: true, legalHolidayNightMinutes: 420,
       }),
-    ])
+    ], '2026-06')
     expect(t).toEqual({ restraintMinutes: 1320, nightMinutes: 480, overtimeNightMinutes: 30 })
   })
 
+  it('日跨ぎ勤務は暦日按分で足す (内訳がある分だけ)', () => {
+    // 6/30 22:00 〜 7/1 08:00 の勤務。前の作法だと 600 分すべてが 6 月に乗っていた
+    const t = sumKosokuMonth([
+      {
+        ...shift('2026-06-30 22:00:00', '2026-07-01 08:00:00', {
+          restraintMinutes: 600, nightMinutes: 420, overtimeNightMinutes: 60,
+        }),
+        parts: [
+          part('2026-06-30', { restraintMinutes: 120, nightMinutes: 120 }),
+          part('2026-07-01', { restraintMinutes: 480, nightMinutes: 300, overtimeNightMinutes: 60 }),
+        ],
+      },
+    ], '2026-06')
+    expect(t).toEqual({ restraintMinutes: 120, nightMinutes: 120, overtimeNightMinutes: 0 })
+  })
+
+  it('前月に始業した勤務の当月ぶんを拾う', () => {
+    const t = sumKosokuMonth([
+      {
+        ...shift('2026-05-31 22:00:00', '2026-06-01 08:00:00', { restraintMinutes: 600 }),
+        parts: [
+          part('2026-05-31', { restraintMinutes: 120 }),
+          part('2026-06-01', { restraintMinutes: 480, legalHolidayNightMinutes: 60 }),
+        ],
+      },
+    ], '2026-06')
+    expect(t).toEqual({ restraintMinutes: 480, nightMinutes: 60, overtimeNightMinutes: 0 })
+  })
+
+  it('内訳を持たない勤務は対象月のものだけ丸ごと足す (上流が古くても壊れない)', () => {
+    const t = sumKosokuMonth([
+      shift('2026-05-20 06:00:00', '2026-05-20 18:00:00', { restraintMinutes: 720 }),
+      shift('2026-06-02 06:00:00', '2026-06-02 18:00:00', { restraintMinutes: 600 }),
+    ], '2026-06')
+    expect(t.restraintMinutes).toBe(600)
+  })
+
   it('勤務が無ければすべて 0', () => {
-    expect(sumKosokuMonth([])).toEqual({ restraintMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0 })
+    expect(sumKosokuMonth([], '2026-06')).toEqual({ restraintMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0 })
   })
 })
 
