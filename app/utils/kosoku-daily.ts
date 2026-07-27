@@ -431,33 +431,81 @@ export interface KosokuMonthTotals {
  */
 export function sumKosokuMonth(days: readonly KosokuDay[], month: string): KosokuMonthTotals {
   const acc: KosokuMonthTotals = { restraintMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0 }
-  for (const d of days) {
-    if (d.parts.length) {
-      for (const p of d.parts) {
-        if (!p.date.startsWith(month)) continue
-        acc.restraintMinutes += p.restraintMinutes
-        acc.nightMinutes += p.nightMinutes + p.legalHolidayNightMinutes
-        acc.overtimeNightMinutes += p.overtimeNightMinutes
-      }
-      continue
-    }
-    if (!d.date.startsWith(month)) continue
-    acc.restraintMinutes += d.restraintMinutes
-    acc.nightMinutes += d.nightMinutes + d.legalHolidayNightMinutes
-    acc.overtimeNightMinutes += d.overtimeNightMinutes
+  for (const p of kosokuByCalendarDate(days, month).values()) {
+    acc.restraintMinutes += p.restraintMinutes
+    acc.nightMinutes += p.nightMinutes + p.legalHolidayNightMinutes
+    acc.overtimeNightMinutes += p.overtimeNightMinutes
   }
   return acc
 }
 
 /**
- * ドライバーの勤務区分の日数。
+ * 対象月の**暦日ごとの合計**を作る (Refs #472)。拘束・深夜の月合計も出勤日数も
+ * ここから数える — 按分した後の値だけを見れば、寄せ方の違いが 1 か所で済む。
  *
- * **打刻側と数え方を揃えられるのは「残業の有無」と「法定休日に働いたか」だけ。**
- * 公休・有休・欠勤は打刻 (CakePHP の休暇区分) にしか無く、運行イベントからは
- * 分からないので **0 のままにする** — 0 を「休みが無かった」と読ませないために、
- * 画面側はドライバーの行に休暇の日数を出さない。
+ * - 内訳 (`parts`) がある勤務は対象月に落ちる日だけを足す
+ * - 内訳の無い勤務 (1 日で終わる / 上流が古い) は、その勤務の日付が対象月なら丸ごと
+ *   その日へ足す
+ * - **同じ日に複数の勤務があれば 1 つの日にまとまる** (日数を二重に数えない)
  */
-export function countKosokuWorkKinds(days: readonly KosokuDay[]): WorkKindCounts {
+export function kosokuByCalendarDate(
+  days: readonly KosokuDay[],
+  month: string,
+): Map<string, KosokuDayPart> {
+  const byDate = new Map<string, KosokuDayPart>()
+  const add = (date: string, v: Omit<KosokuDayPart, 'date'>) => {
+    if (!date.startsWith(month)) return
+    const cur = byDate.get(date) ?? {
+      date,
+      restraintMinutes: 0,
+      workingMinutes: 0,
+      overtimeMinutes: 0,
+      legalHolidayMinutes: 0,
+      nightMinutes: 0,
+      overtimeNightMinutes: 0,
+      legalHolidayNightMinutes: 0,
+    }
+    cur.restraintMinutes += v.restraintMinutes
+    cur.workingMinutes += v.workingMinutes
+    cur.overtimeMinutes += v.overtimeMinutes
+    cur.legalHolidayMinutes += v.legalHolidayMinutes
+    cur.nightMinutes += v.nightMinutes
+    cur.overtimeNightMinutes += v.overtimeNightMinutes
+    cur.legalHolidayNightMinutes += v.legalHolidayNightMinutes
+    byDate.set(date, cur)
+  }
+  for (const d of days) {
+    if (d.parts.length) {
+      for (const p of d.parts) add(p.date, p)
+      continue
+    }
+    add(d.date, {
+      restraintMinutes: d.restraintMinutes,
+      workingMinutes: d.workingMinutes,
+      overtimeMinutes: d.overtimeMinutes,
+      legalHolidayMinutes: d.legalHolidayMinutes,
+      nightMinutes: d.nightMinutes,
+      overtimeNightMinutes: d.overtimeNightMinutes,
+      legalHolidayNightMinutes: d.legalHolidayNightMinutes,
+    })
+  }
+  return byDate
+}
+
+/**
+ * ドライバーの勤務区分の日数を**按分後の暦日**から数える (ユーザー指摘 2026-07-27)。
+ *
+ * 拘束を暦日按分するなら日数も同じ基準で数える。**始業日で数えると、前月末に始業して
+ * 1 日に終わった勤務の 1 日目が当月の出勤日数から抜ける** (拘束の分数は入るのに日数は
+ * 入らない、という食い違いになる)。**按分後に拘束が乗っている暦日をそのまま数える。**
+ *
+ * - 同じ日に 2 勤務あっても 1 日 (`kosokuByCalendarDate` がまとめる)
+ * - その日の区分は**按分後の値**で決める: 法定休日 > 残業 > 通常
+ * - **打刻側と数え方を揃えられるのはここまで。** 公休・有休・欠勤は打刻 (CakePHP の
+ *   休暇区分) にしか無く運行イベントからは分からないので 0 のままにする — 0 を
+ *   「休みが無かった」と読ませないために、画面側はドライバーの行に休暇の日数を出さない
+ */
+export function countKosokuWorkKinds(days: readonly KosokuDay[], month: string): WorkKindCounts {
   const out: WorkKindCounts = {
     normal: 0,
     overtime: 0,
@@ -471,14 +519,11 @@ export function countKosokuWorkKinds(days: readonly KosokuDay[]): WorkKindCounts
     absence: 0,
     halfLeaveDays: 0,
   }
-  // 同じ日に 2 勤務ある日を 2 日と数えない (出勤日数がずれる)
-  const seen = new Set<string>()
-  for (const d of days) {
-    if (seen.has(d.date)) continue
-    seen.add(d.date)
-    const sameDay = days.filter(x => x.date === d.date)
-    if (sameDay.some(x => x.isLegalHoliday)) out.holidayWork += 1
-    else if (sameDay.some(x => x.overtimeMinutes + x.overtimeNightMinutes > 0)) out.overtime += 1
+  for (const p of kosokuByCalendarDate(days, month).values()) {
+    // 拘束が乗っていない日は数えない (内訳が 0 分の日を出勤にしない)
+    if (p.restraintMinutes <= 0) continue
+    if (p.legalHolidayMinutes > 0) out.holidayWork += 1
+    else if (p.overtimeMinutes + p.overtimeNightMinutes > 0) out.overtime += 1
     else out.normal += 1
   }
   return out

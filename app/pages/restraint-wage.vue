@@ -529,17 +529,15 @@ const kosokuDriverSheets = computed(() => {
         kosokuPrevByDriver.value.get(driverCd) ?? [],
         kosokuByDriver.value.get(driverCd) ?? [],
       )
-      // 日数・拘束・深夜は**当月に始業した勤務だけ**で数える (拘束の帰属は始業日、上流 #118)
-      const thisMonth = merged.filter(d => d.date.startsWith(month.value))
-      const counts = countKosokuWorkKinds(thisMonth)
+      // 日数も拘束・深夜も**按分後の暦日**から数える (ユーザー指摘 2026-07-27)。
+      // 前月に始業した勤務も渡す — 当月に落ちる分だけが拾われる
+      const counts = countKosokuWorkKinds(merged, month.value)
       return {
         driverCd,
         driverName: driverNameByCd.value.get(driverCd) ?? '',
         isDriver: true,
         rows: buildKosokuTimecardTable(merged, year, monthNo),
         counts,
-        // 拘束・深夜は**暦日按分**なので、前月に始業した勤務も渡す (当月に落ちる分だけ
-        // 足される)。日数は始業日で数えるので `thisMonth` のまま
         restraint: sumKosokuMonth(merged, month.value),
         // 残業の給与突合はドライバーには出さない (給与明細の突合キーが要る)
         overtimeCompare: null,
