@@ -602,6 +602,31 @@ const hasTimecardSheets = computed(() =>
   timecardSections.value.some(s => s.sheets.length > 0))
 
 /**
+ * タイムカード表を**全部描く**か (Refs #472)。
+ *
+ * 画面では見えているシートだけ描く (`RenderWhenVisible`) — 134 人 × 30 日 × 8 列を一度に
+ * DOM へ載せるとメインスレッドが止まり、スクロールも効かなくなるため。**紙は一覧が
+ * 揃っていないと意味が無い**ので、印刷のときだけ全部描く。
+ *
+ * `beforeprint` で立てても Vue の描画は次のフレームなので間に合わない。**印刷ダイアログを
+ * 開く前に立てて 1 フレーム待つ** (`printTimecards`)。Ctrl+P で直接開かれた場合の保険と
+ * して `beforeprint` でも立てる — その回の紙は欠けるが、次からは揃う。
+ */
+const renderAllTimecards = ref(false)
+
+async function printTimecards() {
+  renderAllTimecards.value = true
+  await nextTick()
+  // 描画が済むまで 1 フレーム待つ (nextTick は DOM 反映まで、描画完了までは待たない)
+  await new Promise(resolve => requestAnimationFrame(() => resolve(null)))
+  window.print()
+}
+
+onMounted(() => {
+  if (import.meta.client) window.addEventListener('beforeprint', () => { renderAllTimecards.value = true })
+})
+
+/**
  * 打刻を 1 つも持たない = **サマリが sessions を持つ前より前に取り込まれたまま**。
  * 表が全部空欄になるので、再取り込みが要ることを画面から言う (Refs #424 PR-E 1/2)。
  */
@@ -4767,7 +4792,9 @@ watch([activeTab, month, session, archiveMonthsLoaded], () => {
                   class="w-48"
                   placeholder="乗務員CD (空欄=全員)"
                 />
-                <UButton size="xs" variant="soft" icon="i-lucide-printer" label="印刷" @click="printNow" />
+                <!-- 画面は見えているシートだけ描いているので、印刷前に全部描いてから
+                     ダイアログを開く (Refs #472) -->
+                <UButton size="xs" variant="soft" icon="i-lucide-printer" label="印刷" @click="printTimecards" />
               </div>
               <!-- 勤怠の取り込み (Refs #433)。ルートは #424 PR-A からあったが導線が無く、
                    打刻エラー判定・公休の追加を入れても誰も再取り込みできなかった -->
@@ -4834,14 +4861,21 @@ watch([activeTab, month, session, archiveMonthsLoaded], () => {
               <span class="text-sm font-medium">更新中 — 表示中のタイムカードは切り替え前の月のものです</span>
             </div>
 
-            <p v-if="!hasTimecardSheets" class="text-sm text-gray-500">
+            <!-- 取得中に「勤務がありません」を出すと、取り込みが要るように見える
+                 (2026-07-27 本番で指摘)。ドライバーは取り込み不要で、ただ取得に
+                 数秒かかっているだけ -->
+            <div v-if="!hasTimecardSheets && loadingKosoku" class="flex items-center gap-2 text-sm text-gray-500">
+              <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin text-primary" />
+              勤務を読み込んでいます…
+            </div>
+            <p v-else-if="!hasTimecardSheets" class="text-sm text-gray-500">
               この月に勤務がありません。
             </p>
 
             <!-- 会社ごとに区切り、事務員 (打刻) → ドライバー (打刻基準の日別サマリ) の順
                  (Refs #472 PR-C)。ドライバーの供給元は会社で絞られていないので、
                  見出しが無いと他社の人が混ざったまま並ぶ -->
-            <div v-else>
+            <div v-if="hasTimecardSheets">
               <div
                 v-for="section in timecardSections"
                 :key="section.compId ?? 'unknown'"
@@ -4855,18 +4889,23 @@ watch([activeTab, month, session, archiveMonthsLoaded], () => {
                   class="grid gap-4 print:grid-cols-3 md:grid-cols-2 xl:grid-cols-3"
                   :class="staleReport ? STALE_CLASS : ''"
                 >
-                  <TimecardTable
+                  <RenderWhenVisible
                     v-for="sheet in section.sheets"
                     :key="sheet.driverCd"
-                    :driver-cd="sheet.driverCd"
-                    :driver-name="sheet.driverName"
-                    :month="report?.month ?? month"
-                    :rows="sheet.rows"
-                    :counts="sheet.counts"
-                    :overtime-compare="sheet.overtimeCompare"
-                    :attendance-compare="sheet.attendanceCompare"
-                    :restraint="sheet.restraint"
-                  />
+                    :force="renderAllTimecards"
+                    min-height="34rem"
+                  >
+                    <TimecardTable
+                      :driver-cd="sheet.driverCd"
+                      :driver-name="sheet.driverName"
+                      :month="report?.month ?? month"
+                      :rows="sheet.rows"
+                      :counts="sheet.counts"
+                      :overtime-compare="sheet.overtimeCompare"
+                      :attendance-compare="sheet.attendanceCompare"
+                      :restraint="sheet.restraint"
+                    />
+                  </RenderWhenVisible>
                 </div>
               </div>
             </div>
