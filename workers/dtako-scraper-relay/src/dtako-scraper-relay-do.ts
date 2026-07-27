@@ -2959,14 +2959,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return Response.json({ month: parsed.ym, range, entries });
   }
 
-  /** GET /restraint-api/archive/months — アーカイブが存在する月 (YYYY-MM) の
-   * 一覧 (降順)。年月タブ UI と一括再計算・一括印刷の対象列挙に使う。R2 の
-   * delimited list で月ディレクトリだけ拾う (wage-master 等の非月 prefix は除外)。 */
-  private async handleArchiveMonths(record: TheearthSessionRecord): Promise<Response> {
-    const bucket = this.env.DTAKO_R2;
-    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
-    const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
-    const base = `${prefix}/${record.compId}/`;
+  /** 指定 prefix 配下の月ディレクトリ (YYYY-MM) を降順で列挙する。 */
+  private async listMonthDirs(bucket: R2Bucket, base: string): Promise<string[]> {
     const months: string[] = [];
     let cursor: string | undefined;
     do {
@@ -2978,7 +2972,24 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       cursor = res.truncated ? res.cursor : undefined;
     } while (cursor);
     months.sort((a, b) => b.localeCompare(a));
-    return Response.json({ months });
+    return months;
+  }
+
+  /** GET /restraint-api/archive/months — アーカイブが存在する月 (YYYY-MM) の
+   * 一覧 (降順)。年月タブ UI と一括再計算・一括印刷の対象列挙に使う。R2 の
+   * delimited list で月ディレクトリだけ拾う (wage-master 等の非月 prefix は除外)。
+   * `kintai_months` はタイムカード取り込み済みの月 (別 prefix、月タブの
+   * バッジ表示用。Refs #460)。 */
+  private async handleArchiveMonths(record: TheearthSessionRecord): Promise<Response> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
+    const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
+    const kintaiPrefix = this.env.KINTAI_R2_PREFIX || "kintai";
+    const [months, kintaiMonths] = await Promise.all([
+      this.listMonthDirs(bucket, `${prefix}/${record.compId}/`),
+      this.listMonthDirs(bucket, `${kintaiPrefix}/${record.compId}/`),
+    ]);
+    return Response.json({ months, kintai_months: kintaiMonths });
   }
 
   /** POST /restraint-api/archive/resummarize?month=YYYY-MM — R2 に保存済みの
