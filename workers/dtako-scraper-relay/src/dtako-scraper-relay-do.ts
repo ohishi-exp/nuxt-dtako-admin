@@ -315,6 +315,15 @@ function formatJstYearMonth(date: Date): string {
   return `${jst.getUTCFullYear()}年${String(jst.getUTCMonth() + 1).padStart(2, "0")}月`;
 }
 
+/** 今日の日付 (JST) を "YYYY-MM-DD" で返す (タイムカードの当日判定用、nginx#780)。 */
+function formatJstDate(date: Date): string {
+  const jst = new Date(date.getTime() + 9 * 3600 * 1000);
+  return (
+    `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, "0")}`
+    + `-${String(jst.getUTCDate()).padStart(2, "0")}`
+  );
+}
+
 /** SecretsStoreSecret (`.get()`) / 文字列 のどちらの binding でも値を取り出す。 */
 async function resolveSecret(binding: unknown): Promise<string> {
   if (typeof binding === "string") return binding;
@@ -2630,6 +2639,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       // null → 非事務職として扱われ、自主出勤の隔離も打刻エラーの判定も掛からない
       isClerical: (driverCd) => isClericalJob(scopeOf(driverCd).jobName),
       isNightShift: (driverCd) => nightShift.has(driverCd),
+      // 当日 (JST) の未終業打刻を「退社打刻なし」にしないための基準 (nginx#780)
+      today: formatJstDate(new Date()),
     });
 
     // 3) R2 へバージョン管理付きで保存

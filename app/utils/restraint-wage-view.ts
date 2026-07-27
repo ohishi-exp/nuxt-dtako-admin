@@ -4,10 +4,11 @@
  * の応答と同型。
  */
 
-/** 打刻区間 ("YYYY-MM-DD HH:MM:SS")。タイムカード由来の日にだけ入る (Refs #424 PR-E)。 */
+/** 打刻区間 ("YYYY-MM-DD HH:MM:SS")。タイムカード由来の日にだけ入る (Refs #424 PR-E)。
+ * `end` は退社押し忘れ (未終業) だと null (nginx#780)。 */
 export interface TimecardSession {
   start: string
-  end: string
+  end: string | null
 }
 
 export interface RestraintSummaryDay {
@@ -27,6 +28,9 @@ export interface RestraintSummaryDay {
   /** 打刻エラー (事務職・非夜勤の日跨ぎ) として賃金計算から外した拘束 (分)。
    * タイムカード由来のみ。0 より大きければその日は打刻エラー (Refs #433)。 */
   punchErrorMinutes?: number
+  /** 退社打刻の無い日 (退社押し忘れ、nginx#780)。賃金計算から外れている。
+   * タイムカード由来のみ・導入後に再取り込みしたサマリにだけ入る。 */
+  missingClockOut?: boolean
   /** その日の休暇区分 (原文、公休 / 有休 / …)。タイムカード由来のみ (Refs #433)。 */
   leaves?: string[]
 }

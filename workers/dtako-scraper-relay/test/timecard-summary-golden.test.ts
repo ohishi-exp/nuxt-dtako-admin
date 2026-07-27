@@ -169,14 +169,14 @@ describe('timecard-summary golden (実機 fixture 2026-06)', () => {
     // 15 日すべて日跨ぎ (19:43 → 翌 00:02)。日曜の 2 日も自主出勤にせず計上するので
     // 15 日すべてが勤務日 (Refs #433)
     expect(yamane.days.length).toBe(15)
-    expect(yamane.days.every(d => d.sessions.some(s => s.start.slice(0, 10) !== s.end.slice(0, 10)))).toBe(true)
+    expect(yamane.days.every(d => d.sessions.some(s => s.end !== null && s.start.slice(0, 10) !== s.end.slice(0, 10)))).toBe(true)
     expect(yamane.workDays).toBe(15)
   })
 
   it('非事務職 (乗務員) の日跨ぎは 1 件もエラーにならない', () => {
     const tomita = result.summaries.find(s => s.driverCd === '1029')!
     expect(tomita.punchErrorDays).toBe(0)
-    const crossing = tomita.days.filter(d => d.sessions.some(s => s.start.slice(0, 10) !== s.end.slice(0, 10)))
+    const crossing = tomita.days.filter(d => d.sessions.some(s => s.end !== null && s.start.slice(0, 10) !== s.end.slice(0, 10)))
     expect(crossing.length).toBe(12)
   })
 

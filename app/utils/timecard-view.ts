@@ -97,15 +97,15 @@ const TS_RE = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/
  *
  * **「翌 HH:MM」は返さない** — 打刻は必ず**押された日の行**に出す方針になったため
  * (下記 `carriedPunchOuts`)。日をまたぐ表示そのものが表から無くなった。 */
-export function formatPunch(ts: string | undefined): string | null {
+export function formatPunch(ts: string | null | undefined): string | null {
   if (!ts) return null
   const m = TS_RE.exec(ts)
   return m ? `${m[4]}:${m[5]}` : null
 }
 
-/** その日が打刻エラーか (事務職・非夜勤の日跨ぎ、Refs #433)。 */
+/** その日が打刻エラーか (事務職・非夜勤の日跨ぎ Refs #433、または退社打刻なし nginx#780)。 */
 export function isPunchErrorDay(d: RestraintSummaryDay | undefined): boolean {
-  return (d?.punchErrorMinutes ?? 0) > 0
+  return (d?.punchErrorMinutes ?? 0) > 0 || d?.missingClockOut === true
 }
 
 /** "YYYY-MM-DD HH:MM:SS" の日 (1-31)。読めなければ 0。 */
@@ -148,6 +148,8 @@ export function carriedPunchOuts(
   for (const d of days) {
     const fromError = isPunchErrorDay(d)
     for (const s of d.sessions ?? []) {
+      // 退社打刻の無いセッション (end=null、nginx#780) には持ち越す退勤が無い
+      if (s.end === null) continue
       // 日と時刻を 1 回のマッチで取る (別々に解析すると、片方だけ失敗する分岐が
       // 実際には起こり得ないのに残ってしまう)
       const m = TS_RE.exec(s.end)
@@ -168,6 +170,8 @@ export function carriedPunchOuts(
  * 自主出勤として説明してはいけない。
  */
 export function dayKindLabel(d: RestraintSummaryDay): string {
+  // 退社打刻なし (nginx#780) は打刻エラーの一種だが、症状がそのまま分かる文言で出す
+  if (d.missingClockOut === true) return '退社打刻なし'
   if (isPunchErrorDay(d)) return '打刻エラー'
   const kind = d.holidayKind
   if (d.isRestDay) {
@@ -322,9 +326,10 @@ export function countWorkKinds(days: readonly RestraintSummaryDay[]): WorkKindCo
       }
     }
     // `isPunchErrorDay(d)` を使わずに値を直接見る — 使うと分岐の中で
-    // `punchErrorMinutes ?? 0` の右辺が到達不能になり branch 100% を割る
+    // `punchErrorMinutes ?? 0` の右辺が到達不能になり branch 100% を割る。
+    // 退社打刻なし (missingClockOut、nginx#780) も分が 0 のまま打刻エラーに数える
     const punchError = d.punchErrorMinutes ?? 0
-    if (punchError > 0) {
+    if (punchError > 0 || d.missingClockOut === true) {
       out.punchError += 1
       out.punchErrorMinutes += punchError
       continue
