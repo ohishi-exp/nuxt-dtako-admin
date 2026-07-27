@@ -196,7 +196,16 @@ function part(date: string, over: Partial<KosokuDayPart> = {}): KosokuDayPart {
   }
 }
 
-/** 勤務 1 本 (打刻なし = 休息イベント由来)。時刻以外は既定値。 */
+/** 勤務 1 本 + 両端の打刻 (表の列に出るのは打刻だけ)。 */
+function punched(start: string, end: string, over: Partial<KosokuDay> = {}): KosokuDay {
+  return {
+    ...shift(start, end, over),
+    source: 'timecard',
+    punches: [{ at: start, state: '始業' }, { at: end, state: '終業' }],
+  }
+}
+
+/** 勤務 1 本 (打刻なし = 休息イベント由来 / 運行途中で切った区間)。時刻以外は既定値。 */
 function shift(start: string, end: string, over: Partial<KosokuDay> = {}): KosokuDay {
   return {
     date: start.slice(0, 10),
@@ -223,7 +232,7 @@ function shift(start: string, end: string, over: Partial<KosokuDay> = {}): Kosok
 
 describe('buildKosokuTimecardTable', () => {
   it('1〜月末の全日を出し、始業した日に 出勤1/退社1 を置く', () => {
-    const rows = buildKosokuTimecardTable([shift('2026-06-02 06:00:00', '2026-06-02 18:30:00')], 2026, 6)
+    const rows = buildKosokuTimecardTable([punched('2026-06-02 06:00:00', '2026-06-02 18:30:00')], 2026, 6)
     expect(rows.length).toBe(30)
     expect(rows[1]).toMatchObject({ day: 2, dowLabel: '火', in1: '06:00', out1: '18:30', in2: null, out2: null })
     // 勤務の無い日は空行として並べる (日付が飛ぶと目で追えない)
@@ -232,8 +241,8 @@ describe('buildKosokuTimecardTable', () => {
 
   it('同じ日に始業した 2 本目は 出勤2/退社2 (実際に起きる)', () => {
     const rows = buildKosokuTimecardTable([
-      shift('2026-06-08 14:00:00', '2026-06-08 18:00:00'),
-      shift('2026-06-08 04:42:00', '2026-06-08 10:00:00'),
+      punched('2026-06-08 14:00:00', '2026-06-08 18:00:00'),
+      punched('2026-06-08 04:42:00', '2026-06-08 10:00:00'),
     ], 2026, 6)
     // 時刻順に 1 本目 / 2 本目へ入る (入力順ではない)
     expect(rows[7]).toMatchObject({ in1: '04:42', out1: '10:00', in2: '14:00', out2: '18:00', note: '' })
@@ -241,24 +250,24 @@ describe('buildKosokuTimecardTable', () => {
 
   it('3 本以上は想定外 — 8 列に入らない分は備考に件数を出す (#472)', () => {
     const rows = buildKosokuTimecardTable([
-      shift('2026-06-10 01:00:00', '2026-06-10 03:00:00'),
-      shift('2026-06-10 06:00:00', '2026-06-10 09:00:00'),
-      shift('2026-06-10 12:00:00', '2026-06-10 15:00:00'),
+      punched('2026-06-10 01:00:00', '2026-06-10 03:00:00'),
+      punched('2026-06-10 06:00:00', '2026-06-10 09:00:00'),
+      punched('2026-06-10 12:00:00', '2026-06-10 15:00:00'),
     ], 2026, 6)
     expect(rows[9]).toMatchObject({ in1: '01:00', out1: '03:00', in2: '06:00', out2: '09:00' })
     expect(rows[9]!.note).toContain('出退勤 6 件')
   })
 
   it('始業・終業はそれぞれ起きた日の行に出す', () => {
-    const rows = buildKosokuTimecardTable([shift('2026-06-02 22:00:00', '2026-06-03 08:00:00')], 2026, 6)
+    const rows = buildKosokuTimecardTable([punched('2026-06-02 22:00:00', '2026-06-03 08:00:00')], 2026, 6)
     expect(rows[1]).toMatchObject({ day: 2, in1: '22:00', out1: null })
     expect(rows[2]).toMatchObject({ day: 3, in1: null, out1: '08:00' })
   })
 
   it('前日から続く終業がある日は 退社1 に入り、その日の始業は 出勤2 へ回る (社内 PDF と同じ形)', () => {
     const rows = buildKosokuTimecardTable([
-      shift('2026-06-02 22:00:00', '2026-06-03 08:00:00'),
-      shift('2026-06-03 20:00:00', '2026-06-04 06:00:00'),
+      punched('2026-06-02 22:00:00', '2026-06-03 08:00:00'),
+      punched('2026-06-03 20:00:00', '2026-06-04 06:00:00'),
     ], 2026, 6)
     expect(rows[2]).toMatchObject({ day: 3, in1: null, out1: '08:00', in2: '20:00', out2: null })
     expect(rows[2]!.note).toBe('')
@@ -268,23 +277,23 @@ describe('buildKosokuTimecardTable', () => {
   it('始業が前月でも終業は出す (月初の「退社が取れていない」を作らない)', () => {
     // 乗務員 1194 / 2026-04-01 で実際に起きていた形
     const rows = buildKosokuTimecardTable([
-      shift('2026-05-31 21:00:00', '2026-06-01 17:07:00'),
-      shift('2026-06-01 21:31:00', '2026-06-02 15:00:00'),
+      punched('2026-05-31 21:00:00', '2026-06-01 17:07:00'),
+      punched('2026-06-01 21:31:00', '2026-06-02 15:00:00'),
     ], 2026, 6)
     expect(rows[0]).toMatchObject({ day: 1, in1: null, out1: '17:07', in2: '21:31', out2: null })
     expect(rows[1]).toMatchObject({ day: 2, out1: '15:00' })
   })
 
   it('翌月に終業する勤務は始業だけ出す (終業を置く行がこの表に無い)', () => {
-    const rows = buildKosokuTimecardTable([shift('2026-06-30 20:00:00', '2026-07-01 09:00:00')], 2026, 6)
+    const rows = buildKosokuTimecardTable([punched('2026-06-30 20:00:00', '2026-07-01 09:00:00')], 2026, 6)
     expect(rows[29]).toMatchObject({ day: 30, in1: '20:00', out1: null })
     expect(rows[29]!.note).toBe('')
   })
 
   it('同時刻に終業と始業が並ぶ日は終業が先 (前の勤務が終わってから次が始まる)', () => {
     const rows = buildKosokuTimecardTable([
-      shift('2026-06-02 06:00:00', '2026-06-03 14:00:00'),
-      shift('2026-06-03 14:00:00', '2026-06-03 22:00:00'),
+      punched('2026-06-02 06:00:00', '2026-06-03 14:00:00'),
+      punched('2026-06-03 14:00:00', '2026-06-03 22:00:00'),
     ], 2026, 6)
     expect(rows[2]).toMatchObject({ day: 3, in1: null, out1: '14:00', in2: '14:00', out2: '22:00' })
   })
@@ -360,24 +369,23 @@ describe('buildKosokuTimecardTable', () => {
     expect(rows[0]).toMatchObject({ day: 1, in1: null, out1: '17:07' })
   })
 
-  it('24 時間で打ち切った勤務の終業は列に出さない (打刻が無い勤務、実在しない時刻)', () => {
-    // 乗務員 1194 / 2026-05-07 の形 — 終業打刻が無く `21:32 → 翌 21:32` になる
+  it('打刻の無い勤務は列に何も出さない (運行途中で切った区間・休息由来)', () => {
+    // 上流 #133 で 24 時間超の勤務を休息で割った途中の区間。境目は休息の開始・終了で
+    // あって出勤・退社ではないので、列に出すと打刻と見分けが付かない
     const rows = buildKosokuTimecardTable([
       shift('2026-06-09 21:32:00', '2026-06-10 21:32:00', { over24h: true }),
       shift('2026-06-11 06:00:00', '2026-06-11 15:00:00'),
     ], 2026, 6)
-    expect(rows[8]).toMatchObject({ day: 9, in1: '21:32', out1: null })
+    expect(rows[8]).toMatchObject({ day: 9, in1: null, out1: null })
+    // 打ち切りの事実は備考に残す
     expect(rows[8]!.note).toContain('退社不明 (拘束 24 時間で打ち切り)')
-    // 翌日の行に本物の退社があるように見せない
-    expect(rows[9]).toMatchObject({ day: 10, in1: null, out1: null, note: '' })
-    // 打ち切りでない勤務は従来どおり
-    expect(rows[10]).toMatchObject({ day: 11, in1: '06:00', out1: '15:00' })
+    expect(rows[10]).toMatchObject({ day: 11, in1: null, out1: null, note: '' })
   })
 
   it('読めない時刻は出さない (壊れた行で表を壊さない)', () => {
     const rows = buildKosokuTimecardTable([
-      shift('壊れた', 'これも壊れた'),
-      shift('2026-06-02 06:00:00', '壊れた'),
+      punched('壊れた', 'これも壊れた'),
+      punched('2026-06-02 06:00:00', '壊れた'),
     ], 2026, 6)
     expect(rows[1]).toMatchObject({ day: 2, in1: '06:00', out1: null })
     expect(rows.every(r => r.note === '')).toBe(true)
