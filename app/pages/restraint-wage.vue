@@ -514,6 +514,10 @@ async function loadKosokuDaily() {
  * `kosoku-daily` にはそれが無い。
  *
  * **乗務員CD 0 は落とす** (実測で返ってくる。社員マスタに居ない番号)。
+ *
+ * **打刻をまったく持たない乗務員も出さない** (ユーザー決定 2026-07-27)。表は打刻から
+ * 作る勤務表で、列に出せる時刻が 1 つも無いため。拘束は運行イベントから出せるが、
+ * それは拘束時間管理表の役目。
  */
 const kosokuDriverSheets = computed(() => {
   const [year, monthNo] = [selectedYear.value, selectedMonthNo.value]
@@ -529,6 +533,9 @@ const kosokuDriverSheets = computed(() => {
         kosokuPrevByDriver.value.get(driverCd) ?? [],
         kosokuByDriver.value.get(driverCd) ?? [],
       )
+      // **打刻をまったく持たない乗務員は出さない** (ユーザー決定 2026-07-27)。
+      // 表は打刻から作る勤務表で、列に出せる時刻が 1 つも無いため
+      if (!merged.some(d => d.punches.length)) return null
       // 日数も拘束・深夜も**按分後の暦日**から数える (ユーザー指摘 2026-07-27)。
       // 前月に始業した勤務も渡す — 当月に落ちる分だけが拾われる
       const counts = countKosokuWorkKinds(merged, month.value)
@@ -550,6 +557,7 @@ const kosokuDriverSheets = computed(() => {
         },
       }
     })
+    .filter(sheet => sheet !== null)
 })
 
 /** 乗務員CD → 氏名 (読み込み済みの全会社の社員マスタから)。 */

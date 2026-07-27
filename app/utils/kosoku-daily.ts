@@ -254,8 +254,7 @@ function parseStamp(ts: string): { year: number, month: number, day: number, tim
  *   落とすと「退社が取れていない」日に見える (乗務員 1194 / 2026-04 で確認)
  * - **同じ日に 3 本以上の勤務は想定外** (#472 でユーザー決定)。8 列に収まらない
  *   出来事は列に入れず、**備考に件数を出す** — 黙って消さず、起きたことが分かるようにする
- * - 残業・法定休日・24 時間超は**その日に始業した勤務**から数える (拘束の帰属は
- *   始業日、上流 #118 と同じ)
+ * - 残業・法定休日は**暦日按分**、24 時間超は**その日に始業した勤務**から数える
  */
 export function buildKosokuTimecardTable(
   days: readonly KosokuDay[],
@@ -288,24 +287,15 @@ export function buildKosokuTimecardTable(
       startedByDay.set(start.day, list)
     }
 
-    // **打刻があればそれを列に出す** (上流 #128 の `punches`)。社内タイムカード表は
-    // 打刻を日ごとに並べただけのもので、勤務という単位を持たない。`start`/`end` は
-    // 分に丸め・24 時間で打ち切りという解釈が入っているので、列には使わない
-    if (d.punches.length) {
-      for (const p of d.punches) {
-        const at = parseStamp(p.at)
-        // **始業が前月でも終業は出す** — 月初に前月から続く勤務が終わる日は珍しくない
-        if (at && inMonth(at)) push(at.day, at.time, p.state === '終業' ? 'out' : 'in')
-      }
-      continue
+    // **列に出すのは打刻だけ** (ユーザー決定 2026-07-27)。勤務の端 (`start`/`end`) は
+    // 休息の境目であって出勤・退社ではないので、列に出すと打刻と見分けが付かない —
+    // 長距離の 1 運行を休息で割った途中の区間 (上流 #133) がまさにそれ。
+    // 拘束・残業は日別の値として数えたまま
+    for (const p of d.punches) {
+      const at = parseStamp(p.at)
+      // **始業が前月でも終業は出す** — 月初に前月から続く勤務が終わる日は珍しくない
+      if (at && inMonth(at)) push(at.day, at.time, p.state === '終業' ? 'out' : 'in')
     }
-
-    // 打刻の無い勤務 (休息イベント由来) は勤務の端をそのまま使う
-    const end = parseStamp(d.end)
-    if (start && inMonth(start)) push(start.day, start.time, 'in')
-    // **24 時間で打ち切った勤務の終業は出さない。** `start + 24h` という**実在しない
-    // 時刻**が入っており、列に出すと翌日の行に本物の退社があるように見える
-    if (end && !d.over24h && inMonth(end)) push(end.day, end.time, 'out')
   }
 
   const rows: TimecardTableRow[] = []
