@@ -70,6 +70,27 @@ describe('toKosokuDay', () => {
     expect(toKosokuDay('2026-06-02')).toBeNull()
   })
 
+  it('打刻をそのまま持つ (壊れた項目だけ捨てる)', () => {
+    const d = toKosokuDay(rawDay({
+      punches: [
+        { at: '2026-06-02 09:25:37', state: '始業' },
+        { at: '2026-06-02 19:39:04' },
+        { state: '終業' },
+        null,
+        'boom',
+      ],
+    }))!
+    expect(d.punches).toEqual([
+      { at: '2026-06-02 09:25:37', state: '始業' },
+      { at: '2026-06-02 19:39:04', state: '' },
+    ])
+  })
+
+  it('punches が無い応答は空配列 (上流の deploy 前でも落ちない)', () => {
+    expect(toKosokuDay(rawDay())!.punches).toEqual([])
+    expect(toKosokuDay(rawDay({ punches: 'nope' }))!.punches).toEqual([])
+  })
+
   it('数値の欠け・非数値は 0 で埋める (項目が増減しても落ちない)', () => {
     const d = toKosokuDay({
       date: '2026-06-02',
@@ -144,12 +165,13 @@ describe('parseKosokuDaily', () => {
   })
 })
 
-/** 勤務 1 本。時刻以外は既定値。 */
+/** 勤務 1 本 (打刻なし = 休息イベント由来)。時刻以外は既定値。 */
 function shift(start: string, end: string, over: Partial<KosokuDay> = {}): KosokuDay {
   return {
     date: start.slice(0, 10),
     start,
     end,
+    punches: [],
     source: 'rest',
     isLegalHoliday: false,
     over24h: false,
@@ -253,7 +275,40 @@ describe('buildKosokuTimecardTable', () => {
     expect(rows[6]).toMatchObject({ isVoluntary: false, isPunchError: false, isAfterPunchError: false })
   })
 
-  it('24 時間で打ち切った勤務の終業は列に出さない (実在しない時刻)', () => {
+  it('打刻があれば打刻を列に出す (勤務の端ではなく)', () => {
+    // 乗務員 1194 / 2026-04 の形 — 打刻が運行 1 本 (2 晩) を挟み、上流は 24 時間で
+    // 打ち切るが、打刻には実際の終業がある (上流 #128)
+    const rows = buildKosokuTimecardTable([
+      {
+        ...shift('2026-06-01 21:31:00', '2026-06-02 21:31:00', { over24h: true }),
+        punches: [
+          { at: '2026-06-01 21:31:32', state: '始業' },
+          { at: '2026-06-03 16:47:04', state: '終業' },
+        ],
+      },
+    ], 2026, 6)
+    expect(rows[0]).toMatchObject({ day: 1, in1: '21:31', out1: null })
+    // 打ち切り後の 6/2 21:31 は出さず、実際の終業を 6/3 に出す
+    expect(rows[1]).toMatchObject({ day: 2, in1: null, out1: null })
+    expect(rows[2]).toMatchObject({ day: 3, in1: null, out1: '16:47' })
+    // 退社が出せるので「不明」ではない
+    expect(rows[0]!.note).toBe('拘束 24 時間超')
+  })
+
+  it('打刻が前月でも当月に落ちるものは出す', () => {
+    const rows = buildKosokuTimecardTable([
+      {
+        ...shift('2026-05-31 21:00:00', '2026-06-01 17:07:00'),
+        punches: [
+          { at: '2026-05-31 21:00:10', state: '始業' },
+          { at: '2026-06-01 17:07:48', state: '終業' },
+        ],
+      },
+    ], 2026, 6)
+    expect(rows[0]).toMatchObject({ day: 1, in1: null, out1: '17:07' })
+  })
+
+  it('24 時間で打ち切った勤務の終業は列に出さない (打刻が無い勤務、実在しない時刻)', () => {
     // 乗務員 1194 / 2026-05-07 の形 — 終業打刻が無く `21:32 → 翌 21:32` になる
     const rows = buildKosokuTimecardTable([
       shift('2026-06-09 21:32:00', '2026-06-10 21:32:00', { over24h: true }),
