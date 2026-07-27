@@ -3002,10 +3002,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     let clientSecret = "";
     try {
       clientSecret = await resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
-    } catch {
-      // secret 不調は他経路で log 済み — バッジ無しに落ちるだけ
+    } catch (err) {
+      // 失敗を黙って握るとバッジが出ない原因が追えない (2026-07-27 実害) —
+      // フォールバック (空 = バッジ非表示) は維持しつつ、必ず 1 行残す
+      console.error(JSON.stringify({ restraint_synced_months: "secret-error", error: describeUnknownError(err) }));
     }
-    if (!apiUrl || !clientId || !clientSecret) return [];
+    if (!apiUrl || !clientId || !clientSecret) {
+      console.log(JSON.stringify({ restraint_synced_months: "skipped-not-configured", comp_id: compId }));
+      return [];
+    }
     try {
       const res = await fetch(
         `${apiUrl}/api/restraint/synced-months?comp=${encodeURIComponent(compId)}`,
@@ -3016,9 +3021,22 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           },
         },
       );
-      if (!res.ok) return [];
+      if (!res.ok) {
+        console.error(
+          JSON.stringify({
+            restraint_synced_months: "upstream-error",
+            comp_id: compId,
+            status: res.status,
+            body: (await res.text()).slice(0, 200),
+          }),
+        );
+        return [];
+      }
       const raw = (await res.json()) as { entries?: unknown };
-      if (!Array.isArray(raw.entries)) return [];
+      if (!Array.isArray(raw.entries)) {
+        console.error(JSON.stringify({ restraint_synced_months: "bad-shape", comp_id: compId }));
+        return [];
+      }
       // wage-report の fan-out を支配するのは theearth 側 — 「高速表示可」の
       // 判定は theearth source の同期有無で見る
       const months = raw.entries
@@ -3029,8 +3047,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
             && typeof (e as { month?: unknown }).month === "string",
         )
         .map((e) => e.month);
+      console.log(
+        JSON.stringify({ restraint_synced_months: "ok", comp_id: compId, months: months.length }),
+      );
       return [...new Set(months)].sort((a, b) => b.localeCompare(a));
-    } catch {
+    } catch (err) {
+      console.error(
+        JSON.stringify({ restraint_synced_months: "error", comp_id: compId, error: describeUnknownError(err) }),
+      );
       return [];
     }
   }
