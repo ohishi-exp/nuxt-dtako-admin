@@ -313,6 +313,33 @@ export function groupTimecardSheetsByCompany<T extends { driverCd: string, isDri
   return out
 }
 
+/** 月の拘束と深夜 (人ごとのヘッダに出す、Refs #472 PR-D)。 */
+export interface KosokuMonthTotals {
+  restraintMinutes: number
+  /** 平日の所定内・法定内残業に重なる深夜。 */
+  nightMinutes: number
+  /** 平日の法定時間外に重なる深夜。`nightMinutes` とは排他 (上流 #118)。 */
+  overtimeNightMinutes: number
+}
+
+/**
+ * 月の拘束と深夜を合計する。
+ *
+ * **法定休日の深夜も深夜に足す** — 上流は平日と法定休日で別項目に持つが
+ * (`legal_holiday_night_minutes`)、画面に出すのは「その月に深夜帯で何分働いたか」なので
+ * 分けない。時間外深夜だけは割増が違う (1.25+0.25) ので内訳として残す。
+ *
+ * 拘束は 24 時間で打ち切られた日も**打ち切り後の値のまま**足す (上流 #118 の判断を
+ * 画面で覆さない)。
+ */
+export function sumKosokuMonth(days: readonly KosokuDay[]): KosokuMonthTotals {
+  return days.reduce<KosokuMonthTotals>((acc, d) => ({
+    restraintMinutes: acc.restraintMinutes + d.restraintMinutes,
+    nightMinutes: acc.nightMinutes + d.nightMinutes + d.legalHolidayNightMinutes,
+    overtimeNightMinutes: acc.overtimeNightMinutes + d.overtimeNightMinutes,
+  }), { restraintMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0 })
+}
+
 /**
  * ドライバーの勤務区分の日数。
  *

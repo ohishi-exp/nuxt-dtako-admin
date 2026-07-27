@@ -32,6 +32,12 @@ const props = defineProps<{
     holidayWork: DayCountPair
     publicHoliday: DayCountPair
   } | null
+  /** 月の拘束と深夜 (Refs #472 PR-D)。日別の 8 列は増やさずここに出す。null なら非表示。 */
+  restraint?: {
+    restraintMinutes: number
+    nightMinutes: number
+    overtimeNightMinutes: number
+  } | null
 }>()
 
 /** 分の符号付き表示 ("+2h13m" / "-2h13m")。0 は符号無し。 */
@@ -58,6 +64,30 @@ const attendanceSummary = computed(() => {
     .filter(([, pair]) => (pair as DayCountPair).sys > 0 || ((pair as DayCountPair).csv ?? 0) > 0)
     .map(([label, pair]) => `${label} ${fmtDayPair(pair as DayCountPair)}`)
     .join(' ・ ')
+})
+
+/**
+ * 月の拘束と深夜の 1 行 (Refs #472 PR-D)。
+ *
+ * **日別の 8 列は増やさない** — 表の形は社内 PDF に合わせてあり、総務がその形で
+ * 見慣れているため。人ごとのヘッダに足す。
+ *
+ * 深夜は「所定内・法定内残業に重なる深夜」と「時間外に重なる深夜」の**排他**な 2 本
+ * (上流 #118)。合計を出して内訳を括弧に入れる — 時間外深夜だけ別枠で見たい場面が
+ * あるが、合計が無いと深夜手当の当たりが付けられない。
+ */
+const restraintSummary = computed(() => {
+  const r = props.restraint
+  if (!r) return ''
+  const night = r.nightMinutes + r.overtimeNightMinutes
+  if (r.restraintMinutes <= 0 && night <= 0) return ''
+  const parts = [`拘束: ${fmtMinutes(r.restraintMinutes)}`]
+  // 0 の項目は出さない — 「深夜 0h00m (うち時間外深夜 0h00m)」は読む値が無い
+  if (night > 0) {
+    parts.push(`深夜: ${fmtMinutes(night)}`
+      + (r.overtimeNightMinutes > 0 ? ` (うち時間外深夜 ${fmtMinutes(r.overtimeNightMinutes)})` : ''))
+  }
+  return parts.join(' ・ ')
 })
 
 /** 有休・欠勤・自主出勤の日数 (0 の区分は出さない)。打刻エラーだけは別枠で赤く出すので
@@ -105,6 +135,8 @@ const kindSummary = computed(() => {
         (差 {{ fmtSignedMinutes(overtimeCompare.diffMinutes) }})
       </span>
     </div>
+    <!-- 月の拘束と深夜 (Refs #472 PR-D)。日別の列は増やさずここに出す -->
+    <div v-if="restraintSummary" class="py-0.5 text-gray-500">{{ restraintSummary }}</div>
 
     <table class="w-full border-collapse tabular-nums">
       <thead>

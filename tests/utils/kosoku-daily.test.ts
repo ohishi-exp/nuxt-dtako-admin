@@ -6,6 +6,7 @@ import {
   groupTimecardSheetsByCompany,
   mergeKosokuDays,
   parseKosokuDaily,
+  sumKosokuMonth,
   toKosokuDay,
 } from '../../app/utils/kosoku-daily'
 import type { KosokuDay } from '../../app/utils/kosoku-daily'
@@ -329,6 +330,24 @@ describe('countKosokuWorkKinds', () => {
     expect(c.holidayWork).toBe(1) // 6/7
     // 打刻にしか無い区分は 0 のまま (画面はドライバーの行に出さない)
     expect(c).toMatchObject({ publicHoliday: 0, paidLeave: 0, absence: 0, voluntary: 0, punchError: 0, halfLeaveDays: 0 })
+  })
+})
+
+describe('sumKosokuMonth', () => {
+  it('拘束と深夜を合計する。法定休日の深夜も深夜に足す', () => {
+    const t = sumKosokuMonth([
+      shift('2026-06-02 06:00:00', '2026-06-02 18:00:00', {
+        restraintMinutes: 720, nightMinutes: 60, overtimeNightMinutes: 30,
+      }),
+      shift('2026-06-07 20:00:00', '2026-06-08 06:00:00', {
+        restraintMinutes: 600, isLegalHoliday: true, legalHolidayNightMinutes: 420,
+      }),
+    ])
+    expect(t).toEqual({ restraintMinutes: 1320, nightMinutes: 480, overtimeNightMinutes: 30 })
+  })
+
+  it('勤務が無ければすべて 0', () => {
+    expect(sumKosokuMonth([])).toEqual({ restraintMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0 })
   })
 })
 
