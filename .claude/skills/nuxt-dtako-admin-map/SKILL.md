@@ -497,6 +497,14 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   スコープを D1 から引いて `summarizeTimecardMonth` を回し、社員別サマリも保存する。
   `GET /restraint-api/kintai/archive?month=` で版一覧と確認履歴を見る。**冪等** —
   内容が同じなら版は増えず `summaries_updated: 0` になる
+- **ドライバーの拘束・深夜** (`GET /restraint-api/kintai/kosoku-daily?month=`、Refs #472 PR-A):
+  rust-ichibanboshi の `/api/kintai/kosoku-daily` (打刻基準の日別サマリ、`driver` 省略で
+  全乗務員 = rust-ichibanboshi#125) を**中継するだけ**。応答は `{month, drivers:[{driver, days}]}`。
+  **R2 に置かない** — 生イベントからいつでも作り直せる派生値で、原本は社内 MariaDB 側にある。
+  ドライバーは打刻を持たないため `/kintai/fetch` の経路には出てこない (タイムカード表が
+  事務員しか出ていなかった原因)。**この拘束は現行の拘束時間管理表 (theearth 由来) と
+  一致しない** — あちらは運行 (デジタコ)、こちらは打刻で測るため、打刻のある乗務員では
+  拘束が増える (実測: 乗務員 1029 で +1,097 分)
 - **Secrets Store binding は解決できないと `get()` が throw する** — 宣言はあるが entry が
   無い/改名された時に素通しすると生のスタック付き 500 になる。try/catch で「未設定」と
   同じ 503 に倒すこと (2026-07-26 に dev で実際に踏んだ)
