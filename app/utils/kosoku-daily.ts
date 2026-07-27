@@ -347,6 +347,11 @@ export function buildKosokuTimecardTable(
       // **その日に乗った残業** (按分後)。勤務単位で足すと日跨ぎの勤務が始業日に
       // 丸ごと乗り、ヘッダの合計と読み方が食い違う
       overtimeMinutes: (attributed?.overtimeMinutes ?? 0) + (attributed?.overtimeNightMinutes ?? 0),
+      // **打刻が無い日でも実働は出す。** 長距離は運行途中に打刻が無く、列が空のままだと
+      // 「動いているのに拘束が取れていない」ように見える (2026-07-27 指摘)。
+      // 拘束ではなく実働 (拘束 − 休憩) を出すのはユーザー指示 — 拘束のままだと
+      // 残業と噛み合わない (拘束 10h17m でも休憩 3h04m を抜けば実働 7h13m で残業 0)
+      workingMinutes: attributed?.workingMinutes ?? 0,
       note: notes.join(' / '),
       isSunday: dow === 0,
       // 自主出勤・打刻エラーは打刻側 (事務員) の判定で、ドライバーには無い

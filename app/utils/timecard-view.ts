@@ -32,6 +32,16 @@ export interface TimecardTableRow {
   out2: string | null
   /** 打刻計算の残業 (分、時間外 + 時間外深夜)。0 なら表示しない。 */
   overtimeMinutes: number
+  /** その日の**実働** (分、拘束 − 休憩)。0 なら表示しない。
+   *
+   * **打刻が無い日でも乗る** — 長距離は運行途中で打刻が無いまま働いており、この列が
+   * 無いと「動いているのに拘束が取れていない」ように見える (2026-07-27 指摘)。
+   *
+   * 拘束ではなく実働を出すのはユーザー指示 (2026-07-27「拘束から休憩抜いて」)。
+   * 拘束のままだと残業と噛み合わない — 乗務員 1021 の 2026-04-03 は拘束 10h17m でも
+   * 休憩 3h04m を抜くと実働 7h13m で、所定 7.5h に届かず残業 0 になる。
+   * **社内 PDF の右端の列 (= 拘束) とは値が違う。** */
+  workingMinutes: number
   /** 備考 (休暇区分 + 勤務区分 + 打刻エラー + 3 回以上の打刻の件数)。無ければ空文字。 */
   note: string
   /** 日曜 (網掛けの対象)。 */
@@ -238,6 +248,7 @@ export function buildTimecardTable(
       in2: formatPunch(sessions[1]?.start),
       out2: punchOut(1),
       overtimeMinutes: (d?.overtimeMinutes ?? 0) + (d?.overtimeNightMinutes ?? 0),
+      workingMinutes: d?.workingMinutes ?? 0,
       note: notes.join(' / '),
       isSunday: dow === 0,
       isVoluntary: Boolean(d?.isRestDay && (d.voluntaryMinutes ?? 0) > 0),
