@@ -35,6 +35,7 @@ import {
   groupTimecardSheetsByCompany,
   mergeKosokuDays,
   parseKosokuDaily,
+  sumKosokuMonth,
 } from '~/utils/kosoku-daily'
 import type { SalaryOvertime, TimecardSummaryRow } from '~/utils/timecard-view'
 import type {
@@ -430,6 +431,12 @@ const timecardSheets = computed(() => {
           holidayWork: { sys: counts.holidayWork, csv: null },
           publicHoliday: { sys: counts.publicHoliday, csv: paidAttendance?.publicHoliday ?? null },
         },
+        // 月の拘束と深夜 (Refs #472 PR-D)。日別の 8 列は増やさずヘッダに出す
+        restraint: {
+          restraintMinutes: r.summary.restraintMinutes ?? 0,
+          nightMinutes: r.summary.nightMinutes ?? 0,
+          overtimeNightMinutes: r.summary.overtimeNightMinutes ?? 0,
+        },
       }
     })
 })
@@ -522,17 +529,25 @@ const kosokuDriverSheets = computed(() => {
         kosokuPrevByDriver.value.get(driverCd) ?? [],
         kosokuByDriver.value.get(driverCd) ?? [],
       )
+      // 日数・拘束・深夜は**当月に始業した勤務だけ**で数える (拘束の帰属は始業日、上流 #118)
+      const thisMonth = merged.filter(d => d.date.startsWith(month.value))
+      const counts = countKosokuWorkKinds(thisMonth)
       return {
         driverCd,
         driverName: driverNameByCd.value.get(driverCd) ?? '',
         isDriver: true,
         rows: buildKosokuTimecardTable(merged, year, monthNo),
-        // 日数は**当月に始業した勤務だけ**で数える (拘束の帰属は始業日、上流 #118)
-        counts: countKosokuWorkKinds(merged.filter(d => d.date.startsWith(month.value))),
-        // 給与突合はドライバーには出さない — 出勤日数の分母 (公休・有休・欠勤) が
-        // 打刻にしか無く、0 のまま並べると「公休 0 日」と読めてしまう
+        counts,
+        restraint: sumKosokuMonth(thisMonth),
+        // 残業の給与突合はドライバーには出さない (給与明細の突合キーが要る)
         overtimeCompare: null,
-        attendanceCompare: null,
+        // 出勤・休日出勤は数えられる。**公休・有休・欠勤は打刻にしか無いので 0 のまま**
+        // だが、表示側が 0 の区分を出さないので「公休 0 日」とは並ばない
+        attendanceCompare: {
+          work: { sys: counts.normal + counts.overtime, csv: null },
+          holidayWork: { sys: counts.holidayWork, csv: null },
+          publicHoliday: { sys: 0, csv: null },
+        },
       }
     })
 })
@@ -4850,6 +4865,7 @@ watch([activeTab, month, session, archiveMonthsLoaded], () => {
                     :counts="sheet.counts"
                     :overtime-compare="sheet.overtimeCompare"
                     :attendance-compare="sheet.attendanceCompare"
+                    :restraint="sheet.restraint"
                   />
                 </div>
               </div>
