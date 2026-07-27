@@ -22,4 +22,15 @@ export interface Env {
   /** Cloudflare 側のデプロイバージョン (`[version_metadata]` binding、実行時に
    *  自動注入される。GIT_SHA と揃わない = deploy 反映漏れの検知に使える)。 */
   CF_VERSION_METADATA?: WorkerVersionMetadata;
+  /** 勤怠の生イベント取得先 = rust-ichibanboshi の CF Tunnel origin
+   *  (Refs #470、ohishi-exp/rust-ichibanboshi#116)。**この worker で唯一の
+   *  上流 fetch** — 他の tool は R2 直読みで完結する。未設定なら
+   *  `get_kosoku_events` だけが明示エラーになる (他 tool は無関係に動く)。 */
+  NUXT_ICHIBAN_API_URL?: string;
+  /** 一番星 CF Access Service Token の client_id (公開識別子)。 */
+  NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID?: string;
+  /** 同 client_secret。Secrets Store binding (`.get()`) だが、ローカルや
+   *  dashboard の plain 変数では文字列で来るため `unknown` で受ける
+   *  (relay の `ICHIBAN_CF_ACCESS_CLIENT_SECRET` と同じ扱い)。 */
+  ICHIBAN_CF_ACCESS_CLIENT_SECRET?: unknown;
 }

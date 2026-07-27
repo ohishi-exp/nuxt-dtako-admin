@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
+  getKosokuEventsTool,
   listCompaniesTool,
   listMonthsTool,
   getWageReportTool,
@@ -284,10 +285,184 @@ describe("getWageReportTool", () => {
   });
 });
 
+// ===== get_kosoku_events ======================================================
+//
+// 他 tool と違い R2 ではなく上流 (rust-ichibanboshi) を fetch するので、
+// global fetch を差し替えて検証する。主眼は「握り潰さないこと」— 未設定・接続不能・
+// 非 2xx・非 JSON がそれぞれ原因の分かるメッセージで表に出ること。
+
+/** CF Access token が揃った env (上流 fetch が成立する状態)。 */
+function kosokuEnv(over: Partial<Env> = {}): Env {
+  return {
+    DTAKO_R2: createMockR2({}),
+    AUTH_WORKER_ORIGIN: "https://auth-staging.ippoan.org",
+    NUXT_ICHIBAN_API_URL: "https://rust-ichiban.example.com",
+    NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "cid.access",
+    ICHIBAN_CF_ACCESS_CLIENT_SECRET: { get: async () => "csecret" },
+    ...over,
+  } as Env;
+}
+
+const EVENT_ROW = {
+  datetime: "2026-06-01 06:22:03",
+  end_datetime: null,
+  driver_id: 1051,
+  source: "timecard",
+  state: "始業",
+  unko_no: null,
+  vehicle: null,
+};
+
+describe("get_kosoku_events", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("relays upstream rows and sends the CF Access service token", async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return new Response(JSON.stringify({ rows: [EVENT_ROW] }), { status: 200 });
+    });
+
+    const res = (await getKosokuEventsTool.execute(kosokuEnv(), {
+      driver: "1051",
+      month: "2026-06",
+    })) as { month: string; driver: string; rows: unknown[] };
+
+    expect(res).toEqual({ month: "2026-06", driver: "1051", rows: [EVENT_ROW] });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe(
+      "https://rust-ichiban.example.com/api/kintai/events?month=2026-06&driver=1051",
+    );
+    const headers = calls[0]!.init?.headers as Record<string, string>;
+    expect(headers["CF-Access-Client-Id"]).toBe("cid.access");
+    expect(headers["CF-Access-Client-Secret"]).toBe("csecret");
+  });
+
+  it("normalizes a trailing slash on the API URL and accepts a plain string secret", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      calls.push(url);
+      return new Response(JSON.stringify({ rows: [] }), { status: 200 });
+    });
+
+    await getKosokuEventsTool.execute(
+      kosokuEnv({
+        NUXT_ICHIBAN_API_URL: "https://rust-ichiban.example.com//",
+        // dashboard の plain 変数 / ローカル dev では文字列で来る
+        ICHIBAN_CF_ACCESS_CLIENT_SECRET: "plain-secret",
+      }),
+      { driver: "1051", month: "2026-06" },
+    );
+
+    expect(calls[0]).toBe(
+      "https://rust-ichiban.example.com/api/kintai/events?month=2026-06&driver=1051",
+    );
+  });
+
+  it("returns an empty array when upstream omits rows", async () => {
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const res = (await getKosokuEventsTool.execute(kosokuEnv(), {
+      driver: "1051",
+      month: "2026-06",
+    })) as { rows: unknown[] };
+    expect(res.rows).toEqual([]);
+  });
+
+  it("rejects an out-of-range month before touching upstream", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    await expect(
+      getKosokuEventsTool.execute(kosokuEnv(), { driver: "1051", month: "2026-13" }),
+    ).rejects.toThrow("YYYY-MM");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("fails loudly when the upstream binding set is incomplete", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const cases: Partial<Env>[] = [
+      { NUXT_ICHIBAN_API_URL: "" },
+      { NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: "" },
+      { ICHIBAN_CF_ACCESS_CLIENT_SECRET: undefined },
+    ];
+    for (const over of cases) {
+      await expect(
+        getKosokuEventsTool.execute(kosokuEnv(over), { driver: "1051", month: "2026-06" }),
+      ).rejects.toThrow("未設定");
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("treats an unresolvable Secrets Store binding as unset instead of a raw crash", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn());
+    await expect(
+      getKosokuEventsTool.execute(
+        kosokuEnv({
+          ICHIBAN_CF_ACCESS_CLIENT_SECRET: {
+            get: async () => {
+              throw new Error("secret not found");
+            },
+          },
+        }),
+        { driver: "1051", month: "2026-06" },
+      ),
+    ).rejects.toThrow("未設定");
+    expect(errors.mock.calls[0]![0]).toContain("secret-error");
+  });
+
+  it("surfaces a connection failure with its cause", async () => {
+    vi.stubGlobal("fetch", async () => {
+      throw new Error("Network connection lost");
+    });
+    await expect(
+      getKosokuEventsTool.execute(kosokuEnv(), { driver: "1051", month: "2026-06" }),
+    ).rejects.toThrow("rust-ichibanboshi へ接続できません: Network connection lost");
+  });
+
+  it("surfaces a non-Error rejection too", async () => {
+    vi.stubGlobal("fetch", async () => {
+      throw "boom";
+    });
+    await expect(
+      getKosokuEventsTool.execute(kosokuEnv(), { driver: "1051", month: "2026-06" }),
+    ).rejects.toThrow("boom");
+  });
+
+  it("surfaces the upstream status and body on a non-2xx", async () => {
+    vi.stubGlobal(
+      "fetch",
+      async () => new Response("MariaDB query failed: connect", { status: 502 }),
+    );
+    await expect(
+      getKosokuEventsTool.execute(kosokuEnv(), { driver: "1051", month: "2026-06" }),
+    ).rejects.toThrow("rust-ichibanboshi が 502 を返しました: MariaDB query failed: connect");
+  });
+
+  it("surfaces a non-JSON body (CF Access login HTML) instead of a parse crash", async () => {
+    vi.stubGlobal(
+      "fetch",
+      async () => new Response("<!DOCTYPE html><html>Access denied</html>", { status: 200 }),
+    );
+    await expect(
+      getKosokuEventsTool.execute(kosokuEnv(), { driver: "1051", month: "2026-06" }),
+    ).rejects.toThrow("応答が JSON ではありません");
+  });
+});
+
 describe("ALL_TOOLS", () => {
-  it("registers exactly the 4 read-only tools, none requiring a scope", () => {
+  it("registers exactly the 5 read-only tools, none requiring a scope", () => {
     expect(ALL_TOOLS.map((t) => t.name).sort()).toEqual(
-      ["get_restraint_summary", "get_wage_report", "list_companies", "list_months"].sort(),
+      [
+        "get_kosoku_events",
+        "get_restraint_summary",
+        "get_wage_report",
+        "list_companies",
+        "list_months",
+      ].sort(),
     );
     for (const tool of ALL_TOOLS) {
       expect(tool.requiresScope).toBeUndefined();

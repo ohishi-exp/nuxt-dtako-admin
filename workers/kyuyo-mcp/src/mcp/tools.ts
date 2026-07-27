@@ -19,6 +19,7 @@ import type {
   RestraintDriverSummary,
   RestraintSummaryDay,
 } from "../../../dtako-scraper-relay/src/theearth-restraint-client";
+import { resolveSecretBinding } from "../../../dtako-scraper-relay/src/cron";
 import type { Env } from "../env";
 import {
   companiesListPrefix,
@@ -233,6 +234,90 @@ export const getRestraintSummaryTool = {
   },
 } satisfies ToolEntry<typeof getRestraintSummaryArgs>;
 
+// ===== get_kosoku_events ======================================================
+
+const getKosokuEventsArgs = z
+  .object({
+    driver: z
+      .string()
+      .regex(/^\d{1,10}$/)
+      .describe("乗務員CD (数字。上流が必須にしているため省略不可)"),
+    month: z.string().regex(/^\d{4}-\d{2}$/).describe("対象年月 (YYYY-MM)"),
+  })
+  .strict();
+
+/** 上流 (rust-ichibanboshi) の応答本文をエラーメッセージに載せる長さ。
+ *  原因が読める程度に切る (CF Access のログイン HTML 等が丸ごと来ることがある)。 */
+const UPSTREAM_EXCERPT = 300;
+
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+export const getKosokuEventsTool = {
+  name: "get_kosoku_events",
+  description:
+    "指定した乗務員・年月の、打刻 (タイムカード) と運行イベントの**生の時系列**を時刻順に返す " +
+    "(拘束時間の打刻基準化 Phase 1、Refs #470)。集計しないので、同日2運行・打刻と運行のズレ・" +
+    "細切れ休憩・休息の長さといったパターンを実データで数えるのに使う。" +
+    "source は timecard (打刻) / dtako (運行の確定イベント) / dtako_events (デジタコ生イベント) の3種。" +
+    "end_datetime は区間を持つ dtako_events 由来の行だけ非 null。" +
+    "**注意: dtako_events の区間は入れ子** (運転の中に一般道/高速道などの道路種別が入る) なので、" +
+    "区間長を素朴に合計すると二重計上になる。",
+  inputSchema: getKosokuEventsArgs,
+  execute: async (env: Env, args) => {
+    if (!parseYm(args.month)) throw new Error("month は YYYY-MM で指定してください");
+
+    const apiUrl = (env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
+    const clientId = env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
+    // Secrets Store binding は「宣言はあるが解決できない」時に get() が throw する
+    // (ローカル dev や entry の消失・改名)。素通しすると原因が読めないので、
+    // 未設定と同じ扱いに倒す — relay の handleKintaiFetch と同じ判断。
+    let clientSecret = "";
+    try {
+      clientSecret = await resolveSecretBinding(env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
+    } catch (err) {
+      console.error(JSON.stringify({ kosoku_events: "secret-error", error: describeError(err) }));
+    }
+    if (!apiUrl || !clientId || !clientSecret) {
+      throw new Error(
+        "勤怠の取得先 (NUXT_ICHIBAN_API_URL / NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID / " +
+          "ICHIBAN_CF_ACCESS_CLIENT_SECRET) が未設定です",
+      );
+    }
+
+    const url =
+      `${apiUrl}/api/kintai/events?month=${encodeURIComponent(args.month)}` +
+      `&driver=${encodeURIComponent(args.driver)}`;
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret },
+      });
+    } catch (err) {
+      // 握り潰さず原因を返す (社内 LAN が落ちている / Tunnel 断)
+      throw new Error(`rust-ichibanboshi へ接続できません: ${describeError(err)}`);
+    }
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(
+        `rust-ichibanboshi が ${res.status} を返しました: ${text.slice(0, UPSTREAM_EXCERPT)}`,
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      // CF Access の認証画面 HTML が返るケース (Service Token 失効時に踏む)
+      throw new Error(
+        `rust-ichibanboshi の応答が JSON ではありません: ${text.slice(0, UPSTREAM_EXCERPT)}`,
+      );
+    }
+    const rows = (parsed as { rows?: unknown }).rows;
+    return { month: args.month, driver: args.driver, rows: Array.isArray(rows) ? rows : [] };
+  },
+} satisfies ToolEntry<typeof getKosokuEventsArgs>;
+
 /** server.ts が McpServer に登録する全 tool。inputSchema が異なるため
  *  `ToolEntry<z.ZodTypeAny>` に揃えて束ねる (cf-access-mcp と同じパターン)。 */
 export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
@@ -240,4 +325,5 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   listMonthsTool as unknown as ToolEntry<z.ZodTypeAny>,
   getWageReportTool as unknown as ToolEntry<z.ZodTypeAny>,
   getRestraintSummaryTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getKosokuEventsTool as unknown as ToolEntry<z.ZodTypeAny>,
 ];
