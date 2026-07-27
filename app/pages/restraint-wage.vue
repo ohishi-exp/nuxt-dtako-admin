@@ -29,7 +29,13 @@ import type {
 import { MIN_WAGE_DEFAULT_KEY } from '~/utils/restraint-wage-view'
 import { buildTimecardSummary, buildTimecardTable, countWorkKinds, employedDaysInMonth } from '~/utils/timecard-view'
 import type { KosokuDay } from '~/utils/kosoku-daily'
-import { parseKosokuDaily } from '~/utils/kosoku-daily'
+import {
+  buildKosokuTimecardTable,
+  countKosokuWorkKinds,
+  groupTimecardSheetsByCompany,
+  mergeKosokuDays,
+  parseKosokuDaily,
+} from '~/utils/kosoku-daily'
 import type { SalaryOvertime, TimecardSummaryRow } from '~/utils/timecard-view'
 import type {
   OvertimeHoursComparison,
@@ -275,6 +281,7 @@ watch(session, (s) => {
     // ドライバーの拘束・深夜 (Refs #472)。月を覚えたままだと再ログイン後に
     // 取り直さず、前の会社の値が残る
     kosokuByDriver.value = new Map()
+    kosokuPrevByDriver.value = new Map()
     kosokuMonth.value = ''
   }
   else {
@@ -409,6 +416,8 @@ const timecardSheets = computed(() => {
       return {
         driverCd: r.summary.driverCd,
         driverName: r.summary.driverName,
+        /** 打刻由来 (事務員側)。会社ごとの並びで先に出す (Refs #472 PR-C)。 */
+        isDriver: false,
         rows: buildTimecardTable(r.summary.days, year, monthNo),
         counts,
         overtimeCompare: overtimeHoursComparison({
@@ -425,13 +434,14 @@ const timecardSheets = computed(() => {
     })
 })
 
-// ---- ドライバーの拘束・深夜 (打刻基準の日別サマリ、Refs #472 PR-B) ----
+// ---- ドライバーの拘束・深夜 (打刻基準の日別サマリ、Refs #472 PR-B / PR-C) ----
 // ドライバーは打刻を持たない (theearth の拘束 CSV 由来) ので wage-report の
-// `source === 'timecard'` に出てこない。表に出すための素材を別経路で取る。
-// **この PR では取るだけで画面には出さない** (混ぜるのは PR-C)。
+// `source === 'timecard'` に出てこない。別経路で取って同じ 8 列の表に混ぜる。
 
 /** 乗務員CD → その月の勤務日 (打刻基準)。取得前・失敗時は空。 */
 const kosokuByDriver = ref<Map<string, KosokuDay[]>>(new Map())
+/** 同じく**前月**の勤務日。月初に終わる勤務の退社を出すために要る (下記)。 */
+const kosokuPrevByDriver = ref<Map<string, KosokuDay[]>>(new Map())
 /** `kosokuByDriver` がどの月のものか (未取得は空文字)。 */
 const kosokuMonth = ref('')
 const loadingKosoku = ref(false)
@@ -440,30 +450,45 @@ const loadingKosoku = ref(false)
 let kosokuEpoch = 0
 
 /**
- * 打刻基準の日別サマリを全乗務員ぶん取る (1 リクエスト)。
+ * 打刻基準の日別サマリを全乗務員ぶん取る (当月 + 前月を並行して 2 リクエスト)。
+ *
+ * **前月も取るのは月初の退社を出すため。** 上流は勤務を**始業日**で月に振り分けるので、
+ * 前月末に始業して当月 1 日に終業した勤務は当月の応答に入らない。当月分だけだと
+ * 1 日の行の退社が空欄になり「退社が取れていない」ように見える (実測: 乗務員 1194 の
+ * 2026-04-01 は `終業 17:07` の打刻があるのに、その勤務の始業が 3/31 なので 4 月には
+ * 来ない)。**直列にせず並行**で投げる — 1 か月ぶんが約 0.9 MB / 2〜6 秒あるため。
  *
  * **失敗しても画面を止めない** — ドライバー行が出ないだけで、事務員のタイムカード表は
- * 従来どおり出る。上流 (rust-ichibanboshi#125) の deploy 前は 502 が返るため、
- * ここで pageError を立てると既存の表示まで巻き添えになる。
+ * 従来どおり出る。ここで pageError を立てると既存の表示まで巻き添えになる。
  */
 async function loadKosokuDaily() {
   if (!session.value || !month.value) return
   const epoch = ++kosokuEpoch
   const ym = month.value
+  const prevMonthYm = prevYm(ym)
   loadingKosoku.value = true
+  const fetchMonth = (target: string) => $fetch<unknown>('/restraint-api/kintai/kosoku-daily', {
+    headers: authHeaders(),
+    query: { month: target },
+  })
   try {
-    const res = await $fetch<unknown>('/restraint-api/kintai/kosoku-daily', {
-      headers: authHeaders(),
-      query: { month: ym },
-    })
+    // 前月は「あれば使う」補助なので、落ちても当月の表示は続ける
+    const [res, prev] = await Promise.all([
+      fetchMonth(ym),
+      fetchMonth(prevMonthYm).catch((e) => {
+        console.warn('[kosoku-daily] 前月を取得できませんでした:', restraintErrorMessage(e))
+        return null
+      }),
+    ])
     if (epoch !== kosokuEpoch) return
-    const parsed = parseKosokuDaily(res, ym)
-    kosokuByDriver.value = parsed.byDriver
+    kosokuByDriver.value = parseKosokuDaily(res, ym).byDriver
+    kosokuPrevByDriver.value = prev ? parseKosokuDaily(prev, prevMonthYm).byDriver : new Map()
     kosokuMonth.value = ym
   }
   catch (e) {
     if (epoch !== kosokuEpoch) return
     kosokuByDriver.value = new Map()
+    kosokuPrevByDriver.value = new Map()
     kosokuMonth.value = ym // 同じ月で無限に取り直さない
     console.warn('[kosoku-daily] 取得できませんでした:', restraintErrorMessage(e))
   }
@@ -471,6 +496,95 @@ async function loadKosokuDaily() {
     if (epoch === kosokuEpoch) loadingKosoku.value = false
   }
 }
+
+/**
+ * ドライバーのタイムカード表 (Refs #472 PR-C)。
+ *
+ * **既に表に出ている乗務員CD は除く。** `kosoku-daily` は打刻を持つ人を全員返すので、
+ * 事務員も含まれる (2026-04 実測: 事務員 27 名のうち 25 名が両方に居た)。そのまま
+ * 混ぜると二重に並ぶ。事務員側は wage-report 由来を残す — あちらは所定労働時間・
+ * 休日出勤の承認・自主出勤・打刻エラーというこの画面固有の判定を通っており、
+ * `kosoku-daily` にはそれが無い。
+ *
+ * **乗務員CD 0 は落とす** (実測で返ってくる。社員マスタに居ない番号)。
+ */
+const kosokuDriverSheets = computed(() => {
+  const [year, monthNo] = [selectedYear.value, selectedMonthNo.value]
+  const shown = new Set(timecardRows.value.map(r => String(Number(r.summary.driverCd))))
+  return [...kosokuByDriver.value.keys()]
+    .filter(driverCd => driverCd !== '0' && !shown.has(driverCd))
+    .filter(driverCd => matchesTimecardFilter(driverCd))
+    .map((driverCd) => {
+      // 前月に始業して当月に終業した勤務も混ぜる — 表側が「終業は起きた日の行」に
+      // 置くので、月初の退社が空欄になるのを防ぐ。併せて月境界に残る休息由来の
+      // 欠片を落とす (実測: 乗務員 1194 / 2026-04-01)
+      const merged = mergeKosokuDays(
+        kosokuPrevByDriver.value.get(driverCd) ?? [],
+        kosokuByDriver.value.get(driverCd) ?? [],
+      )
+      return {
+        driverCd,
+        driverName: driverNameByCd.value.get(driverCd) ?? '',
+        isDriver: true,
+        rows: buildKosokuTimecardTable(merged, year, monthNo),
+        // 日数は**当月に始業した勤務だけ**で数える (拘束の帰属は始業日、上流 #118)
+        counts: countKosokuWorkKinds(merged.filter(d => d.date.startsWith(month.value))),
+        // 給与突合はドライバーには出さない — 出勤日数の分母 (公休・有休・欠勤) が
+        // 打刻にしか無く、0 のまま並べると「公休 0 日」と読めてしまう
+        overtimeCompare: null,
+        attendanceCompare: null,
+      }
+    })
+})
+
+/** 乗務員CD → 氏名 (読み込み済みの全会社の社員マスタから)。 */
+const driverNameByCd = computed(() => {
+  const map = new Map<string, string>()
+  for (const entries of Object.values(employeeMasterByComp.value)) {
+    for (const e of entries) {
+      if (!e.driverCd) continue
+      const key = normalizeDriverCdKey(e.driverCd)
+      if (!map.has(key)) map.set(key, e.name)
+    }
+  }
+  return map
+})
+
+/** 乗務員CD → 会社ID。同じ人が複数会社に在籍しうる (Refs #403) ので、
+ * **会社ID の小さい方**に寄せる — 表の並びが月によって入れ替わらないようにする。 */
+const compByDriverCd = computed(() => {
+  const map = new Map<string, string>()
+  for (const compId of Object.keys(employeeMasterByComp.value).sort()) {
+    for (const e of employeeMasterByComp.value[compId] ?? []) {
+      if (!e.driverCd) continue
+      const key = normalizeDriverCdKey(e.driverCd)
+      if (!map.has(key)) map.set(key, compId)
+    }
+  }
+  return map
+})
+
+/**
+ * 会社ごとに区切ったタイムカード表 (Refs #472 PR-C、ユーザー決定 2026-07-27)。
+ *
+ * 事務員 → ドライバーの順。開いている会社を先頭に置き、社員マスタで会社が引けない
+ * 乗務員CD は末尾の「会社不明」へ (落とすとマスタ未登録の人が黙って消える)。
+ */
+const timecardSections = computed(() => {
+  const order = [
+    ...(session.value ? [session.value.compId] : []),
+    ...DTAKO_COMPS.map(c => c.compId),
+  ]
+  return groupTimecardSheetsByCompany(
+    [...timecardSheets.value, ...kosokuDriverSheets.value],
+    driverCd => compByDriverCd.value.get(driverCd) ?? null,
+    [...new Set(order)],
+  )
+})
+
+/** 表に出す人が 1 人でも居るか (事務員・ドライバーどちらでも)。 */
+const hasTimecardSheets = computed(() =>
+  timecardSections.value.some(s => s.sheets.length > 0))
 
 /**
  * 打刻を 1 つも持たない = **サマリが sessions を持つ前より前に取り込まれたまま**。
@@ -1295,6 +1409,21 @@ async function loadEmployeeMaster(compId?: string) {
   catch (e) {
     if (isCurrent) handleApiError(e)
     else setEmployeeMasterEntries(target, [])
+  }
+}
+
+/** 既知の全会社 + 開いている会社の社員マスタを読む (Refs #472 PR-C)。
+ *
+ * タイムカード表のドライバー行は `kosoku-daily` 由来で**会社で絞られていない**ため、
+ * 会社の見出しに振り分けるには全会社のマスタが要る。読み込み済みの会社は飛ばす
+ * (タブを開くたびに全社ぶん取り直さない)。見えない会社は `loadEmployeeMaster` が
+ * 空で埋めるので、その人たちは「会社不明」に落ちる。 */
+function loadAllEmployeeMasters() {
+  if (!session.value) return
+  const targets = new Set([session.value.compId, ...DTAKO_COMPS.map(c => c.compId)])
+  for (const compId of targets) {
+    if (employeeMasterByComp.value[compId]) continue
+    loadEmployeeMaster(compId)
   }
 }
 
@@ -2829,6 +2958,10 @@ watch([activeTab, month, session, archiveMonthsLoaded], () => {
     if (!report.value || report.value.month !== month.value) loadWageReport()
     // ドライバーの拘束・深夜は wage-report に乗らない別経路 (Refs #472)
     if (kosokuMonth.value !== month.value) loadKosokuDaily()
+    // ドライバー行の会社と氏名は社員マスタで引く。`kosoku-daily` は会社で絞られて
+    // いないので、**開いている会社だけ読むと他社の人が全員「会社不明」になる**
+    // (Refs #472 PR-C)。他社は fail-soft (見えない会社は 401 で空のまま)
+    loadAllEmployeeMasters()
     // 期間サマリーの 残業(給与) は給与比較と同じ `compareSalaryMonth` を通す。
     // **支給項目区分を読まないと全項目が既定区分に落ちて残業が 0 円になる** —
     // 給与比較タブでは 110,000 円なのにサマリーでは 0 という食い違いを本番で踏んだ
@@ -4686,27 +4819,40 @@ watch([activeTab, month, session, archiveMonthsLoaded], () => {
               <span class="text-sm font-medium">更新中 — 表示中のタイムカードは切り替え前の月のものです</span>
             </div>
 
-            <p v-if="!timecardRows.length" class="text-sm text-gray-500">
-              この月にタイムカード由来の勤務がありません。デジタコ (拘束時間 CSV) 由来の乗務員は打刻を持たないため、
-              この表には出ません。
+            <p v-if="!hasTimecardSheets" class="text-sm text-gray-500">
+              この月に勤務がありません。
             </p>
 
-            <div
-              v-else
-              class="grid gap-4 print:grid-cols-3 md:grid-cols-2 xl:grid-cols-3"
-              :class="staleReport ? STALE_CLASS : ''"
-            >
-              <TimecardTable
-                v-for="sheet in timecardSheets"
-                :key="sheet.driverCd"
-                :driver-cd="sheet.driverCd"
-                :driver-name="sheet.driverName"
-                :month="report?.month ?? month"
-                :rows="sheet.rows"
-                :counts="sheet.counts"
-                :overtime-compare="sheet.overtimeCompare"
-                :attendance-compare="sheet.attendanceCompare"
-              />
+            <!-- 会社ごとに区切り、事務員 (打刻) → ドライバー (打刻基準の日別サマリ) の順
+                 (Refs #472 PR-C)。ドライバーの供給元は会社で絞られていないので、
+                 見出しが無いと他社の人が混ざったまま並ぶ -->
+            <div v-else>
+              <div
+                v-for="section in timecardSections"
+                :key="section.compId ?? 'unknown'"
+                class="mb-6 last:mb-0"
+              >
+                <h3 class="mb-2 border-b border-gray-300 pb-1 text-sm font-semibold dark:border-gray-600">
+                  {{ section.compId ? dtakoCompDisplay(section.compId) : '会社不明 (社員マスタに乗務員CDの登録なし)' }}
+                  <span class="ml-1 font-normal text-gray-500">{{ section.sheets.length }} 名</span>
+                </h3>
+                <div
+                  class="grid gap-4 print:grid-cols-3 md:grid-cols-2 xl:grid-cols-3"
+                  :class="staleReport ? STALE_CLASS : ''"
+                >
+                  <TimecardTable
+                    v-for="sheet in section.sheets"
+                    :key="sheet.driverCd"
+                    :driver-cd="sheet.driverCd"
+                    :driver-name="sheet.driverName"
+                    :month="report?.month ?? month"
+                    :rows="sheet.rows"
+                    :counts="sheet.counts"
+                    :overtime-compare="sheet.overtimeCompare"
+                    :attendance-compare="sheet.attendanceCompare"
+                  />
+                </div>
+              </div>
             </div>
           </UCard>
         </template>
