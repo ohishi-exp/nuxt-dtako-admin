@@ -490,6 +490,13 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   昇格する (実態が指揮命令下なら労働時間と評価されうるため「消さない」設計)。
   突合キーは `driver_cd` (= 乗務員CD = 一番星社員C = CakePHP `drivers.id`)
 - **タイムカード → サマリの変換** (`workers/dtako-scraper-relay/src/timecard-summary.ts`、100% gate、Refs #424 PR-B): 日別 JSON を `RestraintDriverSummary` 互換に畳むので `computeWageRow`/`classifyMonth`/`compareSalaryMonth` は無変更で事務員を計算できる。実働 = 打刻 − (中抜け ∪ 12:00-13:00)、時間外 = 実働 − 所定 (終わり側から取り深夜帯と重ねる)、自主出勤は `isRestDay: true` + 各時間 0 + `voluntaryMinutes`。**時刻は秒で保持して最後に分へ丸める** — 先に分へ丸めると上流の `restraint_minutes` と 1 分ずれる。fixture は実機応答 (`tests/fixtures/restraint-wage/timecard-daily-2026-06.json`) + golden
+- **重複乗務員は timecard が勝つ** (`mergeSummarySources`、2026-07-28 決定): 同じ乗務員CD が
+  デジタコとタイムカードの両方に居たら**タイムカード側を採用**する — 賃金は打刻を根拠に
+  するため、拘束/実働/時間外/深夜と勤怠日数はそちらで統一する。ただし**タイムカードから
+  構造的に出せない列** (運転・荷役・年度累計・当月超過・平均運転9h超) だけはデジタコ側の
+  値で埋め戻す (`fillTheearthOnlyMetrics`) — 改善基準告示の管理項目が丸ごと空欄になるのを
+  防ぐため。`over15hDays` は埋め戻さない (タイムカードが自分の拘束から数えた値を持ち、
+  同じ行の「拘束合計」と整合する方を残す)。落とした側は warning に出す
 - **取り込み** (`POST /restraint-api/kintai/fetch?month=`、Refs #424 PR-A): rust-ichibanboshi の
   `/api/kintai/daily` を CF Access Service Token で叩き、**上流応答を解釈せず生のまま**
   `kintai/{compId}/{ym}/raw/` へ versioned 保存 (theearth の `restraint/` とは別 prefix —
@@ -646,6 +653,14 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   一度取れば両画面で使い回せ、キャッシュが二重にならない。1 社 10〜20 秒かかるのは
   給与大臣 PC が古く AUTO_CLOSE で都度 DB を開くためで異常ではない。サーバー側
   `KyuyoLimiter` が同時 1 本なので**直列**で回す
+- **アーカイブがある会社はボタン無しで自動表示** (`autoLoadArchivedPayroll`、
+  2026-07-28 要望): `GET /api/kyuyo/synced-months` が返す (会社, 勤務月) の組
+  (= rust-ichibanboshi の derived store にある = SQLite だけで返せる) と、既に
+  sessionStorage にある組だけを、月を選んだ時点で勝手に読む。**OHKEN を開かない組に
+  限る**のが肝 — アーカイブが無い会社まで自動で取りに行くと 1 社 10〜20 秒の待ちと
+  `KyuyoLimiter` のロックを画面遷移のたびに踏む。無い会社は従来どおりボタンの担当。
+  `synced-months` は**会社込みで持つ** (月タブのバッジは会社不問だが、自動読みの
+  判定には会社が要る)
 
 ### 1 人 = 複数の給与社員CD (N:1、Refs #403)
 

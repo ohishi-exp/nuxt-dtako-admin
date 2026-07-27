@@ -434,13 +434,81 @@ describe('mergeSummarySources', () => {
     expect(warnings).toEqual([])
   })
 
-  it('同じ乗務員CD が両方に居たら theearth を採り warning を出す', () => {
-    const theearth = entry('1670')
-    const { merged, warnings } = mergeSummarySources([theearth], [entry('1670'), entry('205')])
+  it('同じ乗務員CD が両方に居たら timecard を採り warning を出す', () => {
+    const timecard = entry('1670')
+    const { merged, warnings } = mergeSummarySources([entry('1670')], [timecard, entry('205')])
     expect(merged.map(m => m.entry.data.driverCd)).toEqual(['205', '1670'])
-    expect(merged.find(m => m.entry.data.driverCd === '1670')!.entry).toBe(theearth)
+    expect(merged.map(m => m.source)).toEqual(['timecard', 'timecard'])
+    // 埋め戻す値が無いので entry はコピーされない
+    expect(merged.find(m => m.entry.data.driverCd === '1670')!.entry).toBe(timecard)
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toMatch(/1670/)
+    expect(warnings[0]).toMatch(/タイムカード側を採用/)
+  })
+
+  it('重複行はデジタコにしか無い指標だけ埋め戻す (時間はタイムカードのまま)', () => {
+    interface Row {
+      data: {
+        driverCd: string
+        restraintMinutes: number | null
+        drivingMinutes: number | null
+        loadingMinutes: number | null
+        fiscalCumulativeMinutes: number | null
+        restraintLimitMinutes: number | null
+        excessRestraintMinutes: number | null
+        over15hDays: number
+        avgDriving9hOverCount: number
+      }
+    }
+    const theearth: Row = {
+      data: {
+        driverCd: '1670',
+        restraintMinutes: 9999,
+        drivingMinutes: 8000,
+        loadingMinutes: 600,
+        fiscalCumulativeMinutes: 120000,
+        restraintLimitMinutes: 17400,
+        excessRestraintMinutes: 300,
+        over15hDays: 7,
+        avgDriving9hOverCount: 3,
+      },
+    }
+    const timecard: Row = {
+      data: {
+        driverCd: '1670',
+        restraintMinutes: 12000,
+        drivingMinutes: null,
+        loadingMinutes: null,
+        fiscalCumulativeMinutes: null,
+        restraintLimitMinutes: null,
+        excessRestraintMinutes: null,
+        over15hDays: 2,
+        avgDriving9hOverCount: 0,
+      },
+    }
+    const { merged } = mergeSummarySources([theearth], [timecard])
+    expect(merged).toHaveLength(1)
+    const data = merged[0]!.entry.data
+    // 拘束・15h超日数 は打刻側 (同じ行の拘束合計と整合する方)
+    expect(data.restraintMinutes).toBe(12000)
+    expect(data.over15hDays).toBe(2)
+    // タイムカードから出せない列だけデジタコで埋まる
+    expect(data.drivingMinutes).toBe(8000)
+    expect(data.loadingMinutes).toBe(600)
+    expect(data.fiscalCumulativeMinutes).toBe(120000)
+    expect(data.restraintLimitMinutes).toBe(17400)
+    expect(data.excessRestraintMinutes).toBe(300)
+    expect(data.avgDriving9hOverCount).toBe(3)
+    // 元オブジェクトは書き換えない
+    expect(timecard.data.drivingMinutes).toBeNull()
+  })
+
+  it('タイムカード側に値があれば埋め戻さない', () => {
+    const theearth = { data: { driverCd: '1', drivingMinutes: 100, avgDriving9hOverCount: 5 } }
+    const timecard = { data: { driverCd: '1', drivingMinutes: 0, avgDriving9hOverCount: 2 } }
+    const { merged } = mergeSummarySources([theearth], [timecard])
+    expect(merged[0]!.entry.data.drivingMinutes).toBe(0)
+    expect(merged[0]!.entry.data.avgDriving9hOverCount).toBe(2)
   })
 
   it('片方が空でも通る (乗務員だけ / 事務員だけの月)', () => {
