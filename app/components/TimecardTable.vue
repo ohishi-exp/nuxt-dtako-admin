@@ -149,6 +149,8 @@ const kindSummary = computed(() => {
           <th class="border-b border-gray-200 py-0.5 text-center font-normal dark:border-gray-700">退社2</th>
           <th class="border-b border-gray-200 py-0.5 text-right font-normal dark:border-gray-700">残業</th>
           <th class="border-b border-gray-200 py-0.5 text-left font-normal dark:border-gray-700">備考</th>
+          <!-- その日の実働 (拘束 − 休憩)。打刻の無い日にも乗る (Refs #472) -->
+          <th class="border-b border-gray-200 py-0.5 text-right font-normal dark:border-gray-700">実働</th>
         </tr>
       </thead>
       <tbody>
@@ -170,6 +172,7 @@ const kindSummary = computed(() => {
           <td class="text-center">{{ r.out2 ?? '' }}</td>
           <td class="text-right">{{ r.overtimeMinutes > 0 ? fmtMinutes(r.overtimeMinutes) : '' }}</td>
           <td class="pl-1 text-left whitespace-nowrap">{{ r.note }}</td>
+          <td class="pl-1 text-right text-gray-500">{{ r.workingMinutes > 0 ? fmtMinutes(r.workingMinutes) : '' }}</td>
         </tr>
       </tbody>
     </table>

@@ -591,3 +591,36 @@ describe('groupTimecardSheetsByCompany', () => {
       .toEqual(['999', '1000', '1100'])
   })
 })
+
+describe('実働の列 (Refs #472)', () => {
+  it('打刻が無い日でもその日の実働を出す', () => {
+    // 乗務員 1021 / 2026-04-03〜04 の形 — 打刻は 3 日の始業だけだが、
+    // 運行途中の 4 日にも拘束が乗る
+    const rows = buildKosokuTimecardTable([
+      {
+        ...shift('2026-06-03 06:33:00', '2026-06-03 16:50:00', { restraintMinutes: 617, workingMinutes: 433 }),
+        source: 'timecard',
+        punches: [{ at: '2026-06-03 06:33:38', state: '始業' }],
+      },
+      shift('2026-06-04 05:18:00', '2026-06-04 14:40:00', { restraintMinutes: 562, workingMinutes: 324, source: 'timecard' }),
+    ], 2026, 6)
+    expect(rows[2]).toMatchObject({ day: 3, in1: '06:33', workingMinutes: 433 })
+    // 打刻が無くても拘束は出す (列が空だと「動いているのに取れていない」に見える)
+    expect(rows[3]).toMatchObject({ day: 4, in1: null, out1: null, workingMinutes: 324 })
+    expect(rows[0]!.workingMinutes).toBe(0)
+  })
+
+  it('日跨ぎ勤務の実働は按分後の日に乗る', () => {
+    const rows = buildKosokuTimecardTable([
+      {
+        ...shift('2026-06-02 22:00:00', '2026-06-03 08:00:00', { restraintMinutes: 600, workingMinutes: 540 }),
+        parts: [
+          part('2026-06-02', { restraintMinutes: 120, workingMinutes: 120 }),
+          part('2026-06-03', { restraintMinutes: 480, workingMinutes: 420 }),
+        ],
+      },
+    ], 2026, 6)
+    expect(rows[1]!.workingMinutes).toBe(120)
+    expect(rows[2]!.workingMinutes).toBe(420)
+  })
+})
