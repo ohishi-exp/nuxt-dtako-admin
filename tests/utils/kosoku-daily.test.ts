@@ -406,17 +406,60 @@ describe('mergeKosokuDays', () => {
 describe('countKosokuWorkKinds', () => {
   it('残業の有無と法定休日で数える。同じ日の 2 勤務は 1 日', () => {
     const c = countKosokuWorkKinds([
-      shift('2026-06-02 06:00:00', '2026-06-02 12:00:00'),
-      shift('2026-06-02 20:00:00', '2026-06-02 23:00:00', { overtimeMinutes: 30 }),
-      shift('2026-06-03 06:00:00', '2026-06-03 20:00:00', { overtimeNightMinutes: 20 }),
-      shift('2026-06-07 08:00:00', '2026-06-07 12:00:00', { isLegalHoliday: true }),
-      shift('2026-06-04 06:00:00', '2026-06-04 12:00:00'),
-    ])
+      shift('2026-06-02 06:00:00', '2026-06-02 12:00:00', { restraintMinutes: 360 }),
+      shift('2026-06-02 20:00:00', '2026-06-02 23:00:00', { restraintMinutes: 180, overtimeMinutes: 30 }),
+      shift('2026-06-03 06:00:00', '2026-06-03 20:00:00', { restraintMinutes: 840, overtimeNightMinutes: 20 }),
+      shift('2026-06-07 08:00:00', '2026-06-07 12:00:00', { restraintMinutes: 240, isLegalHoliday: true, legalHolidayMinutes: 240 }),
+      shift('2026-06-04 06:00:00', '2026-06-04 12:00:00', { restraintMinutes: 360 }),
+    ], '2026-06')
     expect(c.overtime).toBe(2) // 6/2 (合算で残業あり) と 6/3
     expect(c.normal).toBe(1) // 6/4
     expect(c.holidayWork).toBe(1) // 6/7
     // 打刻にしか無い区分は 0 のまま (画面はドライバーの行に出さない)
     expect(c).toMatchObject({ publicHoliday: 0, paidLeave: 0, absence: 0, voluntary: 0, punchError: 0, halfLeaveDays: 0 })
+  })
+
+  it('前月に始業して当月に終わった勤務の 1 日目を数える (按分後 > 0 の日)', () => {
+    // 3/31 21:00 〜 4/1 17:07。始業日で数えると 4 月の出勤日数から抜けていた
+    const c = countKosokuWorkKinds([
+      {
+        ...shift('2026-05-31 21:00:00', '2026-06-01 17:07:00', { restraintMinutes: 1207 }),
+        parts: [
+          part('2026-05-31', { restraintMinutes: 180 }),
+          part('2026-06-01', { restraintMinutes: 1027, overtimeMinutes: 300 }),
+        ],
+      },
+    ], '2026-06')
+    expect(c.overtime).toBe(1)
+    expect(c.normal).toBe(0)
+  })
+
+  it('日跨ぎ勤務は両方の日を数える (按分した日それぞれに拘束が乗る)', () => {
+    const c = countKosokuWorkKinds([
+      {
+        ...shift('2026-06-02 22:00:00', '2026-06-03 08:00:00', { restraintMinutes: 600 }),
+        parts: [
+          part('2026-06-02', { restraintMinutes: 120 }),
+          part('2026-06-03', { restraintMinutes: 480, overtimeMinutes: 120 }),
+        ],
+      },
+    ], '2026-06')
+    expect(c.normal).toBe(1) // 6/2 (残業なし)
+    expect(c.overtime).toBe(1) // 6/3 (残業あり)
+  })
+
+  it('拘束が 0 分の日は数えない', () => {
+    const c = countKosokuWorkKinds([
+      shift('2026-06-02 06:00:00', '2026-06-02 06:00:00', { restraintMinutes: 0 }),
+    ], '2026-06')
+    expect(c).toMatchObject({ normal: 0, overtime: 0, holidayWork: 0 })
+  })
+
+  it('対象月の外の日は数えない', () => {
+    const c = countKosokuWorkKinds([
+      shift('2026-05-20 06:00:00', '2026-05-20 18:00:00', { restraintMinutes: 720 }),
+    ], '2026-06')
+    expect(c).toMatchObject({ normal: 0, overtime: 0, holidayWork: 0 })
   })
 })
 
