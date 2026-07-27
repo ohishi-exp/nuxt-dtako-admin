@@ -46,6 +46,23 @@ export interface KosokuDay {
   /** 平日の法定時間外に重なる深夜。`nightMinutes` とは排他。 */
   overtimeNightMinutes: number
   legalHolidayNightMinutes: number
+  /**
+   * この勤務の中にあった**打刻そのもの** (時刻順、上流 #128)。
+   *
+   * `start` / `end` は勤務としての解釈 (分に丸め・24 時間で打ち切り) が入るが、
+   * こちらは生の打刻。**表の 出勤/退社 列はこちらを使う** — 社内タイムカード表は
+   * 打刻を日ごとに並べただけのもので、勤務という単位を持たないため。
+   * 休息イベント由来の勤務は空 (打刻が無い)。
+   */
+  punches: KosokuPunch[]
+}
+
+/** 勤務を構成した打刻 1 つ (上流 #128)。 */
+export interface KosokuPunch {
+  /** `YYYY-MM-DD HH:MM:SS` (秒つき)。 */
+  at: string
+  /** `始業` / `終業`。 */
+  state: string
 }
 
 /** `{month, drivers: [{driver, days}]}` を乗務員CD 引きの表に直したもの。 */
@@ -92,7 +109,21 @@ export function toKosokuDay(raw: unknown): KosokuDay | null {
     nightMinutes: num(r.night_minutes),
     overtimeNightMinutes: num(r.overtime_night_minutes),
     legalHolidayNightMinutes: num(r.legal_holiday_night_minutes),
+    punches: toKosokuPunches(r.punches),
   }
+}
+
+/** 打刻の配列を直す。**時刻の無い項目は捨てる** (列に置けない)。 */
+function toKosokuPunches(raw: unknown): KosokuPunch[] {
+  if (!Array.isArray(raw)) return []
+  const out: KosokuPunch[] = []
+  for (const p of raw) {
+    if (typeof p !== 'object' || p === null) continue
+    const at = str((p as Record<string, unknown>).at)
+    if (!at) continue
+    out.push({ at, state: str((p as Record<string, unknown>).state) ?? '' })
+  }
+  return out
 }
 
 /**
@@ -202,19 +233,30 @@ export function buildKosokuTimecardTable(
   }
   for (const d of days) {
     const start = parseStamp(d.start)
-    const end = parseStamp(d.end)
-    // **始業が前月でも終業は出す** — 月初に前月から続く勤務が終わる日は珍しくなく、
-    // 落とすと「退社が取れていない」日に見える (2026-07-27 に乗務員 1194 で確認)
+    // 勤務そのものは始業日に紐づける (残業・法定休日・24 時間超はここから数える)
     if (start && inMonth(start)) {
-      push(start.day, start.time, 'in')
       const list = startedByDay.get(start.day) ?? []
       list.push(d)
       startedByDay.set(start.day, list)
     }
-    // **24 時間で打ち切った勤務の終業は出さない。** 終業が見つからなかった勤務を
-    // 上流が 24 時間で切ったもので、`start + 24h` という**実在しない時刻**が入っている
-    // (実測: 乗務員 1194 の 2026-05-07 は `21:32 → 翌 21:32`)。列に出すと翌日の行に
-    // 本物の退社があるように見えるので、始業日の備考で「打ち切り」と言う
+
+    // **打刻があればそれを列に出す** (上流 #128 の `punches`)。社内タイムカード表は
+    // 打刻を日ごとに並べただけのもので、勤務という単位を持たない。`start`/`end` は
+    // 分に丸め・24 時間で打ち切りという解釈が入っているので、列には使わない
+    if (d.punches.length) {
+      for (const p of d.punches) {
+        const at = parseStamp(p.at)
+        // **始業が前月でも終業は出す** — 月初に前月から続く勤務が終わる日は珍しくない
+        if (at && inMonth(at)) push(at.day, at.time, p.state === '終業' ? 'out' : 'in')
+      }
+      continue
+    }
+
+    // 打刻の無い勤務 (休息イベント由来) は勤務の端をそのまま使う
+    const end = parseStamp(d.end)
+    if (start && inMonth(start)) push(start.day, start.time, 'in')
+    // **24 時間で打ち切った勤務の終業は出さない。** `start + 24h` という**実在しない
+    // 時刻**が入っており、列に出すと翌日の行に本物の退社があるように見える
     if (end && !d.over24h && inMonth(end)) push(end.day, end.time, 'out')
   }
 
@@ -241,8 +283,14 @@ export function buildKosokuTimecardTable(
 
     const notes: string[] = []
     if (shifts.some(s => s.isLegalHoliday)) notes.push('法定休日')
-    // 退社の時刻が無い理由をその行で言う (列を空にしただけだと「取れていない」に見える)
-    if (shifts.some(s => s.over24h)) notes.push('退社不明 (拘束 24 時間で打ち切り)')
+    // 退社の時刻が無い理由をその行で言う (列を空にしただけだと「取れていない」に見える)。
+    // 打刻がある勤務は実際の終業を列に出せるので、打ち切りでも「不明」ではない
+    if (shifts.some(s => s.over24h && !s.punches.length)) {
+      notes.push('退社不明 (拘束 24 時間で打ち切り)')
+    }
+    else if (shifts.some(s => s.over24h)) {
+      notes.push('拘束 24 時間超')
+    }
     // 8 列に収まらない日 = #472 の「想定外」。**黙って消さず件数を出す**
     if (overflow > 0) notes.push(`出退勤 ${events.length} 件`)
 
