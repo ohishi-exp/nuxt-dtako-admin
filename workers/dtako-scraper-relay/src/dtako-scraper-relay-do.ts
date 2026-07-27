@@ -1800,6 +1800,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/kintai/archive" && request.method === "GET") {
       return this.handleKintaiArchive(record!, url);
     }
+    // ---- 打刻基準の日別サマリ (ドライバーの拘束・深夜。Refs #472 PR-A) ----
+    if (url.pathname === "/restraint-api/kintai/kosoku-daily" && request.method === "GET") {
+      return this.handleKintaiKosokuDaily(url);
+    }
     // ---- アーカイブ閲覧 (R2 読み出しのみ。Refs #244) ----
     if (url.pathname === "/restraint-api/archive/summaries" && request.method === "GET") {
       return this.handleArchiveSummaries(record!, url);
@@ -2809,6 +2813,72 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       console.error(JSON.stringify({ kintai_archive: "error", error: describeUnknownError(err) }));
       return dvrJsonError(502, "勤怠アーカイブの取得に失敗しました");
+    }
+  }
+
+  /**
+   * GET /restraint-api/kintai/kosoku-daily?month=YYYY-MM — **打刻基準の日別サマリ**を
+   * 全乗務員ぶん中継する (Refs #472 PR-A、上流は ohishi-exp/rust-ichibanboshi#125)。
+   *
+   * タイムカード表にドライバーを出すための経路。ドライバーは打刻を持たない代わりに
+   * 運行イベントを持ち、上流が打刻と休息から日別に畳んだものを返す。
+   *
+   * - **中継だけ。解釈も保存もしない。** `/kintai/fetch` (CakePHP 由来の日別データ) と
+   *   違い R2 に置かない — 上流の生イベントからいつでも作り直せる派生値で、原本は
+   *   社内 MariaDB 側にある。版を持つ意味が無い
+   * - **`driver` は渡さない** (= 上流は全乗務員を返す)。画面が要るのは全員ぶんで、
+   *   1 名ずつだと 96 名で約 3 秒かかる (一括は実測 0.25 秒)
+   * - 応答は上流の JSON をそのまま返す (`{month, drivers: [{driver, days}]}`)。
+   *   `days` の各項目は #118 の日別サマリ (拘束・休憩・実働・時間区分・深夜)
+   * - **会社で絞らない。** 乗務員CD は一番星 `社員ﾏｽﾀ.社員C` と同一番号体系で会社を
+   *   跨がず、`/kintai/fetch` の取り込みも同じ単位。受け手が社員マスタで引き当てる
+   */
+  private async handleKintaiKosokuDaily(url: URL): Promise<Response> {
+    const parsed = this.parseMonthParam(url);
+    if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
+    const { ym } = parsed;
+
+    const apiUrl = (this.env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
+    const clientId = this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
+    // Secrets Store binding は「宣言はあるが解決できない」時に get() が throw する。
+    // 素通しすると生のスタック付き 500 になるので未設定と同じ 503 に倒す
+    // (`/kintai/fetch` と同じ扱い)
+    let clientSecret = "";
+    try {
+      clientSecret = await resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
+    } catch (err) {
+      console.error(JSON.stringify({ kosoku_daily: "secret-error", error: describeUnknownError(err) }));
+    }
+    if (!apiUrl || !clientId || !clientSecret) {
+      return dvrJsonError(503, "勤怠の取得先 (NUXT_ICHIBAN_*) が未設定です");
+    }
+
+    try {
+      const upstream = await fetch(
+        `${apiUrl}/api/kintai/kosoku-daily?month=${encodeURIComponent(ym)}`,
+        {
+          headers: {
+            "CF-Access-Client-Id": clientId,
+            "CF-Access-Client-Secret": clientSecret,
+          },
+        },
+      );
+      const rawText = await upstream.text();
+      if (!upstream.ok) {
+        console.error(JSON.stringify({ kosoku_daily: "upstream-error", status: upstream.status }));
+        return dvrJsonError(502, `拘束サマリ API が ${upstream.status} を返しました: ${rawText.slice(0, 200)}`);
+      }
+      const body = JSON.parse(rawText) as { drivers?: unknown };
+      // 形だけ見る (中身は解釈しない)。上流が 1 名指定の形 (`days`) を返したら、
+      // 呼び出し方を間違えている = 全乗務員が入っていないので黙って通さない
+      if (!Array.isArray(body.drivers)) {
+        return dvrJsonError(502, "拘束サマリ API の応答に drivers 配列がありません");
+      }
+      console.log(JSON.stringify({ kosoku_daily: "relayed", month: ym, drivers: body.drivers.length }));
+      return Response.json(body);
+    } catch (err) {
+      console.error(JSON.stringify({ kosoku_daily: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "拘束サマリ API の取得に失敗しました");
     }
   }
 
