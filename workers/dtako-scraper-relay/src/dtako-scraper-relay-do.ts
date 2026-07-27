@@ -2985,11 +2985,54 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
     const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
     const kintaiPrefix = this.env.KINTAI_R2_PREFIX || "kintai";
-    const [months, kintaiMonths] = await Promise.all([
+    const [months, kintaiMonths, ichibanMonths] = await Promise.all([
       this.listMonthDirs(bucket, `${prefix}/${record.compId}/`),
       this.listMonthDirs(bucket, `${kintaiPrefix}/${record.compId}/`),
+      this.listIchibanSyncedMonths(record.compId),
     ]);
-    return Response.json({ months, kintai_months: kintaiMonths });
+    return Response.json({ months, kintai_months: kintaiMonths, ichiban_months: ichibanMonths });
+  }
+
+  /** ichiban に拘束サマリ (theearth source) が push 済みの月一覧 (Refs #460)。
+   * 月タブの「高速表示可」バッジと未同期時のバックフィル案内用。best-effort —
+   * 未設定・失敗は空 (バッジが出ないだけで月タブは従来どおり動く)。 */
+  private async listIchibanSyncedMonths(compId: string): Promise<string[]> {
+    const apiUrl = (this.env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
+    const clientId = this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
+    let clientSecret = "";
+    try {
+      clientSecret = await resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
+    } catch {
+      // secret 不調は他経路で log 済み — バッジ無しに落ちるだけ
+    }
+    if (!apiUrl || !clientId || !clientSecret) return [];
+    try {
+      const res = await fetch(
+        `${apiUrl}/api/restraint/synced-months?comp=${encodeURIComponent(compId)}`,
+        {
+          headers: {
+            "CF-Access-Client-Id": clientId,
+            "CF-Access-Client-Secret": clientSecret,
+          },
+        },
+      );
+      if (!res.ok) return [];
+      const raw = (await res.json()) as { entries?: unknown };
+      if (!Array.isArray(raw.entries)) return [];
+      // wage-report の fan-out を支配するのは theearth 側 — 「高速表示可」の
+      // 判定は theearth source の同期有無で見る
+      const months = raw.entries
+        .filter(
+          (e): e is { source: string; month: string } =>
+            typeof e === "object" && e !== null
+            && (e as { source?: unknown }).source === "theearth"
+            && typeof (e as { month?: unknown }).month === "string",
+        )
+        .map((e) => e.month);
+      return [...new Set(months)].sort((a, b) => b.localeCompare(a));
+    } catch {
+      return [];
+    }
   }
 
   /** POST /restraint-api/archive/resummarize?month=YYYY-MM — R2 に保存済みの

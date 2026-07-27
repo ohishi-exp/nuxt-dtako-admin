@@ -145,6 +145,8 @@ function monthHasArchive(year: number, monthNo: number): boolean {
 const kintaiMonths = ref<string[]>([])
 /** 給与取り込み済みの月 (YYYY-MM、会社不問)。 */
 const kyuyoSyncedMonths = ref<Set<string>>(new Set())
+/** 拘束サマリが ichiban に同期済みの月 (YYYY-MM) = 高速表示できる月 (Refs #460)。 */
+const ichibanMonths = ref<string[]>([])
 
 function monthHasKintai(year: number, monthNo: number): boolean {
   return kintaiMonths.value.includes(`${year}-${String(monthNo).padStart(2, '0')}`)
@@ -153,6 +155,19 @@ function monthHasKintai(year: number, monthNo: number): boolean {
 function monthHasKyuyo(year: number, monthNo: number): boolean {
   return kyuyoSyncedMonths.value.has(`${year}-${String(monthNo).padStart(2, '0')}`)
 }
+
+function monthIsSynced(year: number, monthNo: number): boolean {
+  return ichibanMonths.value.includes(`${year}-${String(monthNo).padStart(2, '0')}`)
+}
+
+/** 選択中の月がアーカイブ有りなのに未同期 = 表示が遅い状態。バックフィル
+ * (全月再計算) への案内を月タブ直下に出す。ichiban 連携が無い環境 (一覧が空) では
+ * 全月未同期に見えてしまうので、**1 件でも同期済みがある時だけ**出す。 */
+const showBackfillHint = computed(() =>
+  ichibanMonths.value.length > 0
+  && monthHasArchive(selectedYear.value, selectedMonthNo.value)
+  && !monthIsSynced(selectedYear.value, selectedMonthNo.value),
+)
 
 /** 給与の sync 済み月を ichiban から引く。バッジ表示専用なので**失敗しても静かに
  * 空のまま** (endpoint 未デプロイ・障害でページを壊さない)。 */
@@ -178,10 +193,12 @@ async function loadArchiveMonths() {
   if (!session.value || archiveMonthsLoading) return
   archiveMonthsLoading = true
   try {
-    const res = await $fetch<{ months: string[], kintai_months?: string[] }>('/restraint-api/archive/months', { headers: authHeaders() })
+    const res = await $fetch<{ months: string[], kintai_months?: string[], ichiban_months?: string[] }>('/restraint-api/archive/months', { headers: authHeaders() })
     archiveMonths.value = res.months
     // タイムカード取り込み済み月 (relay 旧版は返さない — その間はバッジ非表示)
     kintaiMonths.value = res.kintai_months ?? []
+    // 拘束サマリ同期済み月 (= 高速表示可、Refs #460)
+    ichibanMonths.value = res.ichiban_months ?? []
     // 給与バッジも同じタイミングで更新 (失敗は静かに無視)
     void loadKyuyoSyncedMonths()
     // 初期選択: アーカイブのある最新月
@@ -2887,15 +2904,33 @@ watch([activeTab, month, session, archiveMonthsLoaded], () => {
                   class="w-1.5 h-1.5 rounded-full bg-amber-500"
                   title="給与取り込み済み"
                 />
+                <span
+                  v-if="monthIsSynced(selectedYear, m)"
+                  class="w-1.5 h-1.5 rounded-full bg-emerald-500"
+                  title="高速表示可 (拘束サマリ同期済み)"
+                />
               </span>
             </div>
           </div>
           <span class="text-xs text-gray-500 ml-auto">
             薄い月はアーカイブなし ・
             <span class="inline-block w-1.5 h-1.5 rounded-full bg-sky-500 align-middle" /> タイムカード
-            <span class="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 align-middle ml-1" /> 給与 取り込み済み
+            <span class="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 align-middle ml-1" /> 給与
+            <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 align-middle ml-1" /> 高速表示可
           </span>
         </div>
+
+        <!-- 未同期月を開いている時のバックフィル案内 (Refs #460)。「なぜこの月は
+             遅いのか / どうすれば速くなるのか」を画面で説明する -->
+        <UAlert
+          v-if="MONTH_AWARE_TABS.includes(activeTab) && showBackfillHint"
+          color="info"
+          variant="soft"
+          class="print:hidden"
+          icon="i-lucide-zap"
+          :title="`${fmtYm(month)} は同期前のため表示に数秒かかります`"
+          description="アーカイブタブの「全月再計算」を 1 回実行すると全月が同期され、月切替が速くなります (theearth には接続しません)。"
+        />
 
         <!-- 給与DBから読み込み: 全タブ共通の上部バー (2026-07-25 要望)。
              読み込んだ明細は最低賃金チェックの「基本給(給与)/残業代(給与)」列と
