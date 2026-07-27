@@ -101,6 +101,10 @@ path = "app/utils/timecard-view.ts"
 branches = true
 
 [[files]]
+path = "app/utils/kosoku-daily.ts"
+branches = true
+
+[[files]]
 path = "app/utils/employee-master.ts"
 branches = true
 

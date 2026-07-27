@@ -28,6 +28,8 @@ import type {
 } from '~/utils/restraint-wage-view'
 import { MIN_WAGE_DEFAULT_KEY } from '~/utils/restraint-wage-view'
 import { buildTimecardSummary, buildTimecardTable, countWorkKinds, employedDaysInMonth } from '~/utils/timecard-view'
+import type { KosokuDay } from '~/utils/kosoku-daily'
+import { parseKosokuDaily } from '~/utils/kosoku-daily'
 import type { SalaryOvertime, TimecardSummaryRow } from '~/utils/timecard-view'
 import type {
   OvertimeHoursComparison,
@@ -270,6 +272,10 @@ watch(session, (s) => {
     minWageMasterLoaded.value = false
     // 再ログイン時に archive/months の解決を待ち直す (Refs #451)
     archiveMonthsLoaded.value = false
+    // ドライバーの拘束・深夜 (Refs #472)。月を覚えたままだと再ログイン後に
+    // 取り直さず、前の会社の値が残る
+    kosokuByDriver.value = new Map()
+    kosokuMonth.value = ''
   }
   else {
     loadArchiveMonths()
@@ -418,6 +424,53 @@ const timecardSheets = computed(() => {
       }
     })
 })
+
+// ---- ドライバーの拘束・深夜 (打刻基準の日別サマリ、Refs #472 PR-B) ----
+// ドライバーは打刻を持たない (theearth の拘束 CSV 由来) ので wage-report の
+// `source === 'timecard'` に出てこない。表に出すための素材を別経路で取る。
+// **この PR では取るだけで画面には出さない** (混ぜるのは PR-C)。
+
+/** 乗務員CD → その月の勤務日 (打刻基準)。取得前・失敗時は空。 */
+const kosokuByDriver = ref<Map<string, KosokuDay[]>>(new Map())
+/** `kosokuByDriver` がどの月のものか (未取得は空文字)。 */
+const kosokuMonth = ref('')
+const loadingKosoku = ref(false)
+
+/** wage-report と同じ latest-wins ガード (遅れて返った前の月で上書きさせない)。 */
+let kosokuEpoch = 0
+
+/**
+ * 打刻基準の日別サマリを全乗務員ぶん取る (1 リクエスト)。
+ *
+ * **失敗しても画面を止めない** — ドライバー行が出ないだけで、事務員のタイムカード表は
+ * 従来どおり出る。上流 (rust-ichibanboshi#125) の deploy 前は 502 が返るため、
+ * ここで pageError を立てると既存の表示まで巻き添えになる。
+ */
+async function loadKosokuDaily() {
+  if (!session.value || !month.value) return
+  const epoch = ++kosokuEpoch
+  const ym = month.value
+  loadingKosoku.value = true
+  try {
+    const res = await $fetch<unknown>('/restraint-api/kintai/kosoku-daily', {
+      headers: authHeaders(),
+      query: { month: ym },
+    })
+    if (epoch !== kosokuEpoch) return
+    const parsed = parseKosokuDaily(res, ym)
+    kosokuByDriver.value = parsed.byDriver
+    kosokuMonth.value = ym
+  }
+  catch (e) {
+    if (epoch !== kosokuEpoch) return
+    kosokuByDriver.value = new Map()
+    kosokuMonth.value = ym // 同じ月で無限に取り直さない
+    console.warn('[kosoku-daily] 取得できませんでした:', restraintErrorMessage(e))
+  }
+  finally {
+    if (epoch === kosokuEpoch) loadingKosoku.value = false
+  }
+}
 
 /**
  * 打刻を 1 つも持たない = **サマリが sessions を持つ前より前に取り込まれたまま**。
@@ -2774,6 +2827,8 @@ watch([activeTab, month, session, archiveMonthsLoaded], () => {
   // いれば report が残っているので気付きにくい (dev の実機確認で踏んだ)
   else if (activeTab.value === 'timecard') {
     if (!report.value || report.value.month !== month.value) loadWageReport()
+    // ドライバーの拘束・深夜は wage-report に乗らない別経路 (Refs #472)
+    if (kosokuMonth.value !== month.value) loadKosokuDaily()
     // 期間サマリーの 残業(給与) は給与比較と同じ `compareSalaryMonth` を通す。
     // **支給項目区分を読まないと全項目が既定区分に落ちて残業が 0 円になる** —
     // 給与比較タブでは 110,000 円なのにサマリーでは 0 という食い違いを本番で踏んだ
