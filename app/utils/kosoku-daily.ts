@@ -263,8 +263,12 @@ export function buildKosokuTimecardTable(
   month: number,
 ): TimecardTableRow[] {
   const last = daysInMonth(year, month)
+  const ym = `${year}-${String(month).padStart(2, '0')}`
   const inMonth = (s: { year: number, month: number, day: number }) =>
     s.year === year && s.month === month && s.day <= last
+  // **残業も法定休日も暦日按分で見る** (ユーザー指摘 2026-07-27)。勤務単位のままだと
+  // 3 日間の勤務の残業がまるごと始業日の行に乗り、ヘッダ (按分) と食い違う
+  const byDate = kosokuByCalendarDate(days, ym)
 
   /** 日 → その日に起きた出来事 (始業 / 終業) を時刻順に。 */
   const eventsByDay = new Map<number, Array<{ time: string, kind: 'in' | 'out' }>>()
@@ -325,8 +329,11 @@ export function buildKosokuTimecardTable(
       slot += 1
     }
 
+    const date = `${ym}-${String(day).padStart(2, '0')}`
+    const attributed = byDate.get(date)
+
     const notes: string[] = []
-    if (shifts.some(s => s.isLegalHoliday)) notes.push('法定休日')
+    if ((attributed?.legalHolidayMinutes ?? 0) > 0) notes.push('法定休日')
     // 退社の時刻が無い理由をその行で言う (列を空にしただけだと「取れていない」に見える)。
     // 打刻がある勤務は実際の終業を列に出せるので、打ち切りでも「不明」ではない
     if (shifts.some(s => s.over24h && !s.punches.length)) {
@@ -347,7 +354,9 @@ export function buildKosokuTimecardTable(
       out1: filled[1]!,
       in2: filled[2]!,
       out2: filled[3]!,
-      overtimeMinutes: shifts.reduce((n, s) => n + s.overtimeMinutes + s.overtimeNightMinutes, 0),
+      // **その日に乗った残業** (按分後)。勤務単位で足すと日跨ぎの勤務が始業日に
+      // 丸ごと乗り、ヘッダの合計と読み方が食い違う
+      overtimeMinutes: (attributed?.overtimeMinutes ?? 0) + (attributed?.overtimeNightMinutes ?? 0),
       note: notes.join(' / '),
       isSunday: dow === 0,
       // 自主出勤・打刻エラーは打刻側 (事務員) の判定で、ドライバーには無い

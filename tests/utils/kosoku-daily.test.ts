@@ -289,6 +289,24 @@ describe('buildKosokuTimecardTable', () => {
     expect(rows[2]).toMatchObject({ day: 3, in1: null, out1: '14:00', in2: '14:00', out2: '22:00' })
   })
 
+  it('日跨ぎ勤務の残業は按分後の日に乗る (始業日に丸ごと乗せない)', () => {
+    // 乗務員 1021 / 2026-04-03 で見つかった症状 — 3 日間の勤務の残業 19h56m が
+    // まるごと始業日の行に出ていた
+    const rows = buildKosokuTimecardTable([
+      {
+        ...shift('2026-06-03 06:33:00', '2026-06-05 02:29:00', {
+          restraintMinutes: 1440, over24h: true, overtimeMinutes: 1196,
+        }),
+        parts: [
+          part('2026-06-03', { restraintMinutes: 1047, overtimeMinutes: 400 }),
+          part('2026-06-04', { restraintMinutes: 393, overtimeMinutes: 796 }),
+        ],
+      },
+    ], 2026, 6)
+    expect(rows[2]!.overtimeMinutes).toBe(400) // 6/3
+    expect(rows[3]!.overtimeMinutes).toBe(796) // 6/4
+  })
+
   it('残業は 時間外 + 時間外深夜 (事務員と同じ定義)、同じ日は合算', () => {
     const rows = buildKosokuTimecardTable([
       shift('2026-06-02 06:00:00', '2026-06-02 12:00:00', { overtimeMinutes: 30, overtimeNightMinutes: 0 }),
@@ -299,7 +317,9 @@ describe('buildKosokuTimecardTable', () => {
 
   it('法定休日は備考に出す・日曜は網掛けの対象', () => {
     const rows = buildKosokuTimecardTable([
-      shift('2026-06-07 08:00:00', '2026-06-07 20:00:00', { isLegalHoliday: true }),
+      shift('2026-06-07 08:00:00', '2026-06-07 20:00:00', {
+        isLegalHoliday: true, restraintMinutes: 720, legalHolidayMinutes: 720,
+      }),
     ], 2026, 6)
     expect(rows[6]!.note).toContain('法定休日')
     expect(rows[6]!.isSunday).toBe(true)
