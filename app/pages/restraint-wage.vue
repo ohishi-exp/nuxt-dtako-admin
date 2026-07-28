@@ -33,11 +33,12 @@ import {
   buildKosokuTimecardTable,
   countKosokuWorkKinds,
   groupTimecardSheetsByCompany,
+  kosokuByCalendarDate,
   mergeKosokuDays,
   parseKosokuDaily,
   sumKosokuMonth,
 } from '~/utils/kosoku-daily'
-import type { SalaryOvertime, TimecardSummaryRow } from '~/utils/timecard-view'
+import type { SalaryOvertime, TimecardSummaryRow, WorkKindCounts } from '~/utils/timecard-view'
 import type {
   OvertimeHoursComparison,
   ParsedSalaryCsv,
@@ -420,32 +421,57 @@ const timecardSheets = computed(() => {
       const employed = employedDaysInMonth(year, monthNo, employmentByDriver.value.get(driverKey)
         ?? { hireDate: null, retireDate: null })
       const workDaysSys = employed - counts.publicHoliday - counts.paidLeave - counts.absence
+      // **打刻基準の日別サマリ (kosoku-daily) があれば時間はそちらで出す** (2026-07-28 決定)。
+      // 打刻由来サマリは「始業 → 次の終業」で 1 勤務を組むため、長距離のように出発時と
+      // 帰着時にしか打刻しない人は数日が 1 勤務になり、所定を超えた分が全部 時間外に
+      // なる (実測: 乗務員 1104 / 2026-04 で 8 日間 1 勤務・残業 321h04m)。上流は
+      // 打刻が無い区間を休息イベントで割るので、そちらが実態に合う (同 26 勤務・
+      // 残業 34h30m、紙のタイムカードと日別まで一致)。
+      const kosoku = kosokuDaysOf(driverKey)
+      const byDate = kosoku ? kosokuByCalendarDate(kosoku, month.value) : null
+      // 勤務日の区分は kosoku 側で数え直し、**休暇 (公休・有休・欠勤) は打刻側を残す** —
+      // 運行イベントには休暇が無いので、ここだけは打刻が唯一の出どころ
+      const mergedCounts = kosoku
+        ? { ...counts, ...pickWorkDayKinds(countKosokuWorkKinds(kosoku, month.value)) }
+        : counts
+      const sysOvertimeMinutes = byDate
+        ? [...byDate.values()].reduce((s, p) => s + p.overtimeMinutes + p.overtimeNightMinutes, 0)
+        : (r.summary.overtimeMinutes ?? 0) + (r.summary.overtimeNightMinutes ?? 0)
       return {
         driverCd: r.summary.driverCd,
         driverName: r.summary.driverName,
         /** 打刻由来 (事務員側)。会社ごとの並びで先に出す (Refs #472 PR-C)。 */
         isDriver: false,
-        rows: buildTimecardTable(r.summary.days, year, monthNo),
-        counts,
+        rows: kosoku
+          ? buildKosokuTimecardTable(kosoku, year, monthNo)
+          : buildTimecardTable(r.summary.days, year, monthNo),
+        counts: mergedCounts,
         overtimeCompare: overtimeHoursComparison({
-          sysOvertimeMinutes: (r.summary.overtimeMinutes ?? 0) + (r.summary.overtimeNightMinutes ?? 0),
+          sysOvertimeMinutes,
           csvOvertime: paid?.csvOvertime ?? 0,
           baseRateActual: paid?.baseRateActual ?? null,
         }),
         attendanceCompare: {
           work: { sys: workDaysSys, csv: paidAttendance?.work ?? null },
-          holidayWork: { sys: counts.holidayWork, csv: null },
+          holidayWork: { sys: mergedCounts.holidayWork, csv: null },
           publicHoliday: { sys: counts.publicHoliday, csv: paidAttendance?.publicHoliday ?? null },
         },
         // 月の拘束と深夜 (Refs #472 PR-D)。日別の 8 列は増やさずヘッダに出す
-        restraint: {
-          restraintMinutes: r.summary.restraintMinutes ?? 0,
-          nightMinutes: r.summary.nightMinutes ?? 0,
-          overtimeNightMinutes: r.summary.overtimeNightMinutes ?? 0,
-        },
+        restraint: kosoku
+          ? sumKosokuMonth(kosoku, month.value)
+          : {
+              restraintMinutes: r.summary.restraintMinutes ?? 0,
+              nightMinutes: r.summary.nightMinutes ?? 0,
+              overtimeNightMinutes: r.summary.overtimeNightMinutes ?? 0,
+            },
       }
     })
 })
+
+/** 勤務日の区分だけを抜く (休暇・自主出勤・打刻エラーは打刻側の値を残すため)。 */
+function pickWorkDayKinds(c: WorkKindCounts): Pick<WorkKindCounts, 'normal' | 'overtime' | 'holidayWork'> {
+  return { normal: c.normal, overtime: c.overtime, holidayWork: c.holidayWork }
+}
 
 // ---- ドライバーの拘束・深夜 (打刻基準の日別サマリ、Refs #472 PR-B / PR-C) ----
 // ドライバーは打刻を持たない (theearth の拘束 CSV 由来) ので wage-report の
@@ -461,6 +487,17 @@ const loadingKosoku = ref(false)
 
 /** wage-report と同じ latest-wins ガード (遅れて返った前の月で上書きさせない)。 */
 let kosokuEpoch = 0
+
+/**
+ * その乗務員の打刻基準の勤務日 (当月 + 前月に始業して当月に終わる分)。
+ * 未取得・その人の分が無ければ null — 呼び出し側は打刻由来サマリへ落ちる。
+ */
+function kosokuDaysOf(driverKey: string): KosokuDay[] | null {
+  if (kosokuMonth.value !== month.value) return null
+  const current = kosokuByDriver.value.get(driverKey)
+  if (!current) return null
+  return mergeKosokuDays(kosokuPrevByDriver.value.get(driverKey) ?? [], current)
+}
 
 /**
  * 打刻基準の日別サマリを全乗務員ぶん取る (当月 + 前月を並行して 2 リクエスト)。
@@ -515,9 +552,10 @@ async function loadKosokuDaily() {
  *
  * **既に表に出ている乗務員CD は除く。** `kosoku-daily` は打刻を持つ人を全員返すので、
  * 事務員も含まれる (2026-04 実測: 事務員 27 名のうち 25 名が両方に居た)。そのまま
- * 混ぜると二重に並ぶ。事務員側は wage-report 由来を残す — あちらは所定労働時間・
- * 休日出勤の承認・自主出勤・打刻エラーというこの画面固有の判定を通っており、
- * `kosoku-daily` にはそれが無い。
+ * 混ぜると二重に並ぶ。両方に居る人は `timecardSheets` 側が担当し、**そこでも時間は
+ * kosoku-daily を使う** (2026-07-28 決定) — 休暇・自主出勤・打刻エラー・給与突合という
+ * この画面固有の判定は打刻由来サマリにしか無いので、行そのものは向こうに残す。
+ * ここに来るのは打刻由来サマリを持たない人 (デジタコにしか居ない乗務員) だけ。
  *
  * **乗務員CD 0 は落とす** (実測で返ってくる。社員マスタに居ない番号)。
  *
