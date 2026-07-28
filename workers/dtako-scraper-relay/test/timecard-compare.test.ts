@@ -1031,6 +1031,64 @@ describe("差の推定原因 (Refs #501)", () => {
     expect(d.cause).toBe("lunch");
   });
 
+  it("フェリーと日跨ぎ終業の尻尾が重なった日も説明が付く (1708 松江 03-13 の形)", () => {
+    // -584 = フェリー二重控除 432 + 尻尾 151 + 丸め 1
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1708",
+      nginx: nginxDriver([{ date: "2026-03-13", kosokuMinutes: 51 }]),
+      oursByDate: new Map([
+        ["2026-03-13", { restraintMinutes: 635, ferryMinusMinutes: 432, punchTailMinutes: 151 }],
+      ]),
+      toleranceMinutes: 2,
+    }).days[12]!;
+    expect(d.cause).toBe("ferry+punch-tail");
+    expect(d.explainedMinutes).toBe(583);
+    expect(d.residualMinutes).toBe(-1);
+  });
+
+  it("尻尾だけの日も説明が付く", () => {
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1708",
+      nginx: nginxDriver([{ date: "2026-03-13", kosokuMinutes: 483 }]),
+      oursByDate: new Map([
+        ["2026-03-13", { restraintMinutes: 635, punchTailMinutes: 151 }],
+      ]),
+      toleranceMinutes: 2,
+    }).days[12]!;
+    expect(d.cause).toBe("punch-tail");
+    expect(d.explainedMinutes).toBe(151);
+  });
+
+  it("尻尾 0 の日を punch-tail 系で説明したことにしない", () => {
+    // ferry+punch-tail は両方が実在するときだけ候補になる
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1708",
+      nginx: nginxDriver([{ date: "2026-03-13", kosokuMinutes: 51 }]),
+      oursByDate: new Map([
+        ["2026-03-13", { restraintMinutes: 635, ferryMinusMinutes: 432 }],
+      ]),
+      toleranceMinutes: 2,
+    }).days[12]!;
+    expect(d.cause).toBe("unknown");
+  });
+
+  it("昼休と尻尾が重なった日も説明が付く", () => {
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1541",
+      nginx: nginxDriver([{ date: "2026-03-14", kosokuMinutes: 497 }]),
+      oursByDate: new Map([
+        ["2026-03-14", { restraintMinutes: 570, punchTailMinutes: 13 }],
+      ]),
+      toleranceMinutes: 2,
+    }).days[13]!;
+    expect(d.cause).toBe("lunch+punch-tail");
+    expect(d.explainedMinutes).toBe(73);
+  });
+
   it("未説明の日数と残差を月で数える — 検知の抜けを測る数字", () => {
     const r = compareTimecardMonth({
       month: "2026-04",

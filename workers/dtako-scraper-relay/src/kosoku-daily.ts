@@ -53,6 +53,14 @@ export interface KosokuCalendarPart {
    * 突合が cause `run-gap` として差を説明するための実額。
    */
   runGapMinutes: number;
+  /**
+   * **日跨ぎ終業の尻尾** — 最後のデジタコイベント → 翌暦日の終業打刻 (分)
+   * (Refs ohishi-exp/rust-ichibanboshi#172)。
+   *
+   * 紙は暦日ごとに「最初→最後のイベント」で数えるため、0 時過ぎの終業打刻までの
+   * 尻尾を数えない。こちらの拘束には含まれている — cause `punch-tail` の実額。
+   */
+  punchTailMinutes: number;
 }
 
 /** 上流の 1 勤務 (必要な項目だけ)。 */
@@ -89,6 +97,7 @@ function toPart(r: Record<string, unknown>): KosokuCalendarPart {
     overtimeNightMinutes: num(r.overtime_night_minutes),
     ferryMinusMinutes: num(r.ferry_minus_minutes),
     runGapMinutes: num(r.run_gap_minutes),
+    punchTailMinutes: num(r.punch_tail_minutes),
   };
 }
 
@@ -159,6 +168,7 @@ export function kosokuPartsByDate(
         overtimeNightMinutes: v.overtimeNightMinutes,
         ferryMinusMinutes: v.ferryMinusMinutes,
         runGapMinutes: v.runGapMinutes,
+        punchTailMinutes: v.punchTailMinutes,
       });
       return;
     }
@@ -169,6 +179,7 @@ export function kosokuPartsByDate(
     cur.overtimeNightMinutes += v.overtimeNightMinutes;
     cur.ferryMinusMinutes += v.ferryMinusMinutes;
     cur.runGapMinutes += v.runGapMinutes;
+    cur.punchTailMinutes += v.punchTailMinutes;
   };
   for (const shift of shifts) {
     if (shift.parts.length > 0) {

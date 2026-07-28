@@ -162,6 +162,16 @@ export type DiffCause =
   | "run-gap"
   /** 昼休 + 運行の継ぎ目。対の打刻を持つ乗務員の運行日で併発する。 */
   | "lunch+run-gap"
+  /**
+   * **日跨ぎ終業の尻尾** (実額)。紙は暦日ごとに「最初→最後のイベント」で数える
+   * ため、0 時過ぎの終業打刻までの尻尾を数えない。実額は上流の
+   * `punch_tail_minutes` (ohishi-exp/rust-ichibanboshi#172)。
+   */
+  | "punch-tail"
+  /** フェリー + 尻尾。1708 松江 03-13 (-584 = 432 + 151 + 丸め 1) の形。 */
+  | "ferry+punch-tail"
+  /** 昼休 + 尻尾。 */
+  | "lunch+punch-tail"
   /** **未説明。** ここが 0 になるまでが検知の仕事。 */
   | "unknown";
 
@@ -520,6 +530,7 @@ function classifyDiff(
   ferryMinusMinutes: number | null,
   crossMonthMinutes: number,
   runGapMinutes: number,
+  punchTailMinutes: number,
   tolerance: number,
 ): { cause: DiffCause; explainedMinutes: number; residualMinutes: number | null } {
   if (diffMinutes === null) {
@@ -529,12 +540,16 @@ function classifyDiff(
     return { cause: "none", explainedMinutes: 0, residualMinutes: diffMinutes };
   }
   const ferry = ferryMinusMinutes ?? 0;
+  const tail = punchTailMinutes;
   const candidates: Array<{ cause: DiffCause; explained: number }> = [
     { cause: "ferry", explained: ferry },
     { cause: "month-boundary", explained: crossMonthMinutes },
     { cause: "run-gap", explained: runGapMinutes },
+    { cause: "punch-tail", explained: tail },
+    { cause: "ferry+punch-tail", explained: ferry === 0 || tail === 0 ? 0 : ferry + tail },
     { cause: "lunch", explained: LUNCH_DEDUCTION_MINUTES },
     { cause: "lunch+run-gap", explained: runGapMinutes === 0 ? 0 : runGapMinutes + LUNCH_DEDUCTION_MINUTES },
+    { cause: "lunch+punch-tail", explained: tail === 0 ? 0 : tail + LUNCH_DEDUCTION_MINUTES },
     { cause: "lunch+ferry", explained: ferry + LUNCH_DEDUCTION_MINUTES },
   ];
   for (const c of candidates) {
@@ -561,7 +576,12 @@ export function compareTimecardMonth(input: {
   nginx: NginxDriverMonth | null;
   oursByDate: ReadonlyMap<
     string,
-    { restraintMinutes: number, ferryMinusMinutes?: number, runGapMinutes?: number }
+    {
+      restraintMinutes: number,
+      ferryMinusMinutes?: number,
+      runGapMinutes?: number,
+      punchTailMinutes?: number,
+    }
   >;
   /**
    * 暦日 → 月境界を跨ぐ勤務由来の分 (`crossMonthMinutesByDate`)。渡されなければ
@@ -612,7 +632,15 @@ export function compareTimecardMonth(input: {
       nginxMinutes === null || oursMinutes === null ? null : nginxMinutes - oursMinutes;
     const crossMonth = input.crossMonthByDate?.get(date) ?? 0;
     const runGap = ours?.runGapMinutes ?? 0;
-    let classified = classifyDiff(diffMinutes, ferryMinusMinutes, crossMonth, runGap, tolerance);
+    const punchTail = ours?.punchTailMinutes ?? 0;
+    let classified = classifyDiff(
+      diffMinutes,
+      ferryMinusMinutes,
+      crossMonth,
+      runGap,
+      punchTail,
+      tolerance,
+    );
     // 片側 (こちら) だけの日は差が引けず `none` になるが、値の全部が月を跨ぐ勤務
     // 由来なら説明は付いている — 翌月へ跨ぐ勤務の頭 (月末の ours-only) がこの形
     if (
@@ -682,7 +710,12 @@ export function compareTimecardMonthAll(input: {
     string,
     ReadonlyMap<
       string,
-      { restraintMinutes: number, ferryMinusMinutes?: number, runGapMinutes?: number }
+      {
+        restraintMinutes: number,
+        ferryMinusMinutes?: number,
+        runGapMinutes?: number,
+        punchTailMinutes?: number,
+      }
     >
   >;
   /** 乗務員CD → 暦日 → 月境界を跨ぐ勤務由来の分 (`crossMonthMinutesByDate`)。 */
