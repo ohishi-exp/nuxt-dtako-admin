@@ -20,6 +20,20 @@
  * nginx 側は控除 (昼休の一律 -60 分・フェリー・運行重複) がその日の積算を上回ると
  * **拘束が負になる** (yhonda-ohishi/nginx#783)。それを見つけるのがこの突合の目的
  * なので、途中のどこでも 0 に丸めない。`anomalies` に載せて数える。
+ *
+ * ## 突合の基準は「減算後」= 紙の値 (2026-07-28 ユーザー決定)
+ *
+ * nginx は控除の**前**の値も診断として出す (`total_before_minus` / `ferry_minus`)
+ * が、**比較に使うのは減算後**。理由は 2 つ:
+ *
+ * 1. 紙のタイムカード表に出ているのが減算後の値で、突合の相手はその紙
+ * 2. 「運行開始 → 始業」の減算 (`minus_unko`) は**減算後のほうがこちらと一致する** —
+ *    1379 / 2026-04-27 は差 -1 分、減算前だと +12 分。こちらの `kosoku-daily` も
+ *    その区間を拘束に入れていないため
+ *
+ * **フェリー控除 (`ferry_minus`) だけは逆で、引きすぎ**。1726 / 2026-03-14 は
+ * nginx -112 に対しこちら 321 で、差 -433 が控除額そのものだった。基準は変えず、
+ * 差の原因として `anomalies` に書く。
  */
 
 /** 突合の既定の許容誤差 (分)。秒→分の丸め方の違いで 1 分ずれる。 */
@@ -41,6 +55,14 @@ export interface NginxDay {
    * 減算後なので、比較はそちらのまま。この値は**負値の原因を説明する**ために持つ。
    */
   minusUnkoByType: Record<string, number>;
+  /**
+   * 同日フェリーとして日計から引かれた分 (yhonda-ohishi/nginx#787)。該当なしは null。
+   *
+   * **`minus_unko` とは逆で、こちらは引きすぎ**。実データ (1726 / 2026-03-14) では
+   * nginx -112 に対しこちら 321 で、差 -433 が**フェリー控除額そのもの**だった。
+   * 同日に 4 時間未満のフェリーが 2 本あると両方引かれて積算を食い破る。
+   */
+  ferryMinusMinutes: number | null;
 }
 
 /** nginx 側の 1 乗務員 × 1 ヶ月。 */
@@ -135,16 +157,20 @@ function toTotals(v: unknown): Record<string, number> {
 }
 
 /**
- * `kosoku_minutes` のうち**拘束そのものではない診断値**の接尾辞
- * (yhonda-ohishi/nginx#785)。
+ * `kosoku_minutes` のうち**拘束そのものではない診断値**
+ * (yhonda-ohishi/nginx#785 / #787)。
  *
  * - `<type>_minus_unko` … 「運行開始 → 始業」として日計から引かれた分
  * - `<type>_before_minus` / `total_before_minus` … その減算をする前の値
+ * - `ferry_minus` … 同日フェリーとして日計から引かれた分
  *
  * これらを type 別内訳に混ぜると**存在しない拘束区分**ができ、値が負なら偽の異常に
- * なる。接尾辞で外す — 上流が診断を増やしても同じ命名なら追随できる。
+ * なる。接尾辞と既知のキー名で外す — 上流が診断を増やしても同じ命名なら追随できる。
  */
 const KOSOKU_DIAGNOSTIC_SUFFIXES = ["_minus_unko", "_before_minus"] as const;
+
+/** 接尾辞では拾えない診断値のキー (`ferry_minus` は type 名を前に持たない)。 */
+const FERRY_MINUS_KEY = "ferry_minus";
 
 function diagnosticSuffixOf(key: string): string | null {
   return KOSOKU_DIAGNOSTIC_SUFFIXES.find((s) => key.endsWith(s)) ?? null;
@@ -156,6 +182,8 @@ interface ParsedKosoku {
   byType: Record<string, number>;
   /** type 別の「運行開始 → 始業」減算分 (0 は載せない)。負値の説明に使う。 */
   minusUnkoByType: Record<string, number>;
+  /** 同日フェリーとして引かれた分 (0/未提供は null)。負値の説明に使う。 */
+  ferryMinusMinutes: number | null;
 }
 
 /**
@@ -170,17 +198,24 @@ interface ParsedKosoku {
  * 増やしてもここを触らずに拾える。
  */
 function toKosoku(raw: unknown): ParsedKosoku {
+  const empty = { byType: {}, minusUnkoByType: {}, ferryMinusMinutes: null };
   const direct = finiteNumber(raw);
-  if (direct !== null) return { minutes: direct, byType: {}, minusUnkoByType: {} };
+  if (direct !== null) return { minutes: direct, ...empty };
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    return { minutes: null, byType: {}, minusUnkoByType: {} };
+    return { minutes: null, ...empty };
   }
   const byType: Record<string, number> = {};
   const minusUnkoByType: Record<string, number> = {};
+  let ferryMinusMinutes: number | null = null;
   let minutes: number | null = null;
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     const n = finiteNumber(value);
     if (n === null) continue;
+    if (key === FERRY_MINUS_KEY) {
+      // 0 は「該当なし」— null と同じ扱いにして説明文を出さない
+      if (n !== 0) ferryMinusMinutes = n;
+      continue;
+    }
     const suffix = diagnosticSuffixOf(key);
     if (suffix === "_minus_unko") {
       // 0 は「該当なし」— 全日に載せると異常メッセージが読みにくくなる
@@ -191,7 +226,7 @@ function toKosoku(raw: unknown): ParsedKosoku {
     if (key === "total") minutes = n;
     else byType[key] = n;
   }
-  return { minutes, byType, minusUnkoByType };
+  return { minutes, byType, minusUnkoByType, ferryMinusMinutes };
 }
 
 function toNginxDriver(entry: unknown, ym: string): NginxDriverMonth | null {
@@ -214,6 +249,7 @@ function toNginxDriver(entry: unknown, ym: string): NginxDriverMonth | null {
         // 内訳が別項目で来る形 (起票時の想定) も残す
         kosokuByType: { ...toKosokuByType(d.kosoku_by_type), ...kosoku.byType },
         minusUnkoByType: kosoku.minusUnkoByType,
+        ferryMinusMinutes: kosoku.ferryMinusMinutes,
       });
     }
   }
@@ -270,12 +306,20 @@ function dayAnomalies(day: NginxDay): CompareAnomaly[] {
   const found: CompareAnomaly[] = [];
   const total = day.kosokuMinutes;
   if (total !== null && total < 0) {
+    // フェリー控除で説明できるなら書く。原因が特定済み (yhonda-ohishi/nginx#787:
+    // 同日 4 時間未満のフェリーが 2 本あると両方引かれて積算を食い破る) なので、
+    // 読む人が毎回 CakePHP を追い直さずに済む
+    const ferry = day.ferryMinusMinutes;
+    const why =
+      ferry !== null && ferry > 0
+        ? `。同日フェリー控除の ${ferry} 分が引かれたため (控除前は ${total + ferry} 分)`
+        : "";
     found.push({
       kind: "negative-kosoku",
       date: day.date,
       field: null,
       minutes: total,
-      message: `nginx の拘束が負です (${total} 分)`,
+      message: `nginx の拘束が負です (${total} 分)${why}`,
     });
   }
   if (total !== null && total > MINUTES_PER_DAY) {

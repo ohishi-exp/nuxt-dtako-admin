@@ -84,6 +84,7 @@ describe("parsePdfJson", () => {
       kosokuMinutes: 570,
       kosokuByType: { デジタコ: 510, TC_DC: 60 },
       minusUnkoByType: {},
+      ferryMinusMinutes: null,
     });
     expect(d?.totals).toEqual({ shukkin: 2, kyujitsu_shukkin_raw: -1 });
   });
@@ -232,6 +233,35 @@ describe("parsePdfJson — 診断値 (nginx#785)", () => {
     expect(day?.minusUnkoByType).toEqual({});
   });
 
+  it("ferry_minus は type 別内訳に混ぜず、負の合計の原因として書く", () => {
+    // nginx#787 の実例 (1726 / 2026-03-14): 同日 4 時間未満のフェリー 2 本が
+    // 両方引かれ、積算 321 分を食い破って -112 になった
+    const r = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1726",
+      nginx: nginxDriver([
+        { date: "2026-03-14", kosokuMinutes: -112, byType: { デジタコ: -112 }, ferryMinus: 433 },
+      ]),
+      oursByDate: ours({ "2026-03-14": 321 }),
+    });
+    const total = r.anomalies.find((a) => a.kind === "negative-kosoku");
+    expect(total?.message).toBe(
+      "nginx の拘束が負です (-112 分)。同日フェリー控除の 433 分が引かれたため (控除前は 321 分)",
+    );
+    // 控除前の 321 分はこちらの値と一致する (フェリーは休憩なので拘束からは引かない)
+    expect(r.days.find((d) => d.date === "2026-03-14")?.oursMinutes).toBe(321);
+  });
+
+  it("ferry_minus が 0 / 未提供なら原因を書かない", () => {
+    const r = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1726",
+      nginx: nginxDriver([{ date: "2026-03-14", kosokuMinutes: -50 }]),
+      oursByDate: ours({ "2026-03-14": 0 }),
+    });
+    expect(r.anomalies[0]?.message).toBe("nginx の拘束が負です (-50 分)");
+  });
+
   it("減算が無い負値には原因を書かない", () => {
     const r = compareTimecardMonth({
       month: "2026-04",
@@ -261,6 +291,18 @@ describe("parsePdfJson — kosoku_minutes の形ゆれ", () => {
       kosokuMinutes: 5,
       kosokuByType: {},
       minusUnkoByType: {},
+    });
+  });
+
+  it("ferry_minus は type に入れず ferryMinusMinutes へ (0 は該当なし)", () => {
+    expect(oneDay({ total: -112, デジタコ: -112, ferry_minus: 433 })).toMatchObject({
+      kosokuMinutes: -112,
+      kosokuByType: { デジタコ: -112 },
+      ferryMinusMinutes: 433,
+    });
+    expect(oneDay({ total: 5, ferry_minus: 0 })).toMatchObject({
+      kosokuByType: {},
+      ferryMinusMinutes: null,
     });
   });
 
@@ -294,6 +336,7 @@ function nginxDriver(
     kosokuMinutes: number | null;
     byType?: Record<string, number>;
     minusUnko?: Record<string, number>;
+    ferryMinus?: number;
   }>,
   totals: Record<string, number> = {},
 ): NginxDriverMonth {
@@ -305,6 +348,7 @@ function nginxDriver(
       kosokuMinutes: d.kosokuMinutes,
       kosokuByType: d.byType ?? {},
       minusUnkoByType: d.minusUnko ?? {},
+      ferryMinusMinutes: d.ferryMinus ?? null,
     })),
     totals,
   };
