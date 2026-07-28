@@ -2985,7 +2985,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!upstream.ok) {
       console.error(JSON.stringify({ pdf_json: "upstream-error", status: upstream.status }));
       throw new RelayUpstreamError(
-        `タイムカードPDF API が ${upstream.status} を返しました: ${rawText.slice(0, 200)}`,
+        // 200 字だと CakePHP の HTML エラーページの <head> で埋まり、肝心の
+        // 「Error: Call to undefined ...」が切れて読めない (#492 の実機確認で実際に踏んだ)
+        `タイムカードPDF API が ${upstream.status} を返しました: ${rawText.slice(0, 600)}`,
       );
     }
     const body: unknown = JSON.parse(rawText);
