@@ -96,6 +96,23 @@ export function payrollCompanyLabel(
   return name ? `${name} (${payrollCompany})` : payrollCompany
 }
 
+/**
+ * dtako 会社ID を跨いで**会社コードだけ**から表示ラベルを引く
+ * (`大石運輸倉庫株式会社 (0200)`)。
+ *
+ * タイムカード表の区切りは給与の会社コード単位 (ユーザー決定 2026-07-28) で、
+ * 区画は dtako 会社ID を持たないため `payrollCompanyLabel` が使えない。会社コードは
+ * 給与大臣の中で一意なので、対応表の全 dtako 会社から最初に当たった名前を採る。
+ * 名前が未取得なら**コードだけ**を返す (突合はコードで行うので表示は無くても成立)。
+ */
+export function payrollCompanyLabelOf(comps: CompMapEntry[], payrollCompany: string): string {
+  for (const c of comps) {
+    const name = c.payrollCompanies.find(p => p.payrollCompany === payrollCompany)?.payrollCompanyName
+    if (name) return `${name} (${payrollCompany})`
+  }
+  return payrollCompany
+}
+
 /** 「27324455 (大石運輸倉庫)」形式の表示名。 */
 export function dtakoCompDisplay(compId: string): string {
   const found = DTAKO_COMPS.find(c => c.compId === compId)

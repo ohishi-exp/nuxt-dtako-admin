@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { DTAKO_COMPS, dtakoCompDisplay, dtakoCompLabel, parseCompMap, payrollCompanyLabel } from '../../app/utils/dtako-comps'
+import { DTAKO_COMPS, dtakoCompDisplay, dtakoCompLabel, parseCompMap, payrollCompanyLabel, payrollCompanyLabelOf } from '../../app/utils/dtako-comps'
 
 describe('DTAKO_COMPS', () => {
   it('会社IDは重複しない (社員マスタの会社横断表示がキー衝突しない前提)', () => {
@@ -103,5 +103,39 @@ describe('payrollCompanyLabel', () => {
     expect(payrollCompanyLabel(comps, '27324455', '0999')).toBe('0999')
     expect(payrollCompanyLabel(comps, '75700192', '0400')).toBe('0400')
     expect(payrollCompanyLabel([], '27324455', '0100')).toBe('0100')
+  })
+})
+
+describe('payrollCompanyLabelOf', () => {
+  // タイムカード表の区画は給与会社コードしか持たない (ユーザー決定 2026-07-28) ので、
+  // dtako 会社ID を跨いで名前を引く
+  const comps = parseCompMap({
+    comps: [
+      {
+        compId: '27324455',
+        compLabel: '大石運輸倉庫',
+        payrollCompanies: [
+          { payrollCompany: '0100', legacyLabel: null, payrollCompanyName: '有限会社 大石運輸' },
+          { payrollCompany: '0300', legacyLabel: null },
+        ],
+      },
+      {
+        compId: '75700192',
+        compLabel: '北海大運',
+        payrollCompanies: [{ payrollCompany: '0400', legacyLabel: null, payrollCompanyName: '北海大運株式会社' }],
+      },
+    ],
+  })
+
+  it('dtako 会社ID を知らなくても会社名を引ける', () => {
+    expect(payrollCompanyLabelOf(comps, '0100')).toBe('有限会社 大石運輸 (0100)')
+    // 2 社目 (別の dtako 会社の下) も同じ引き方で当たる
+    expect(payrollCompanyLabelOf(comps, '0400')).toBe('北海大運株式会社 (0400)')
+  })
+
+  it('会社名が未取得・対応表に無いコードはコードだけを返す (fail-soft)', () => {
+    expect(payrollCompanyLabelOf(comps, '0300')).toBe('0300')
+    expect(payrollCompanyLabelOf(comps, '0999')).toBe('0999')
+    expect(payrollCompanyLabelOf([], '0100')).toBe('0100')
   })
 })

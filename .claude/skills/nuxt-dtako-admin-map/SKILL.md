@@ -728,9 +728,9 @@ N:1 が現実に存在する (本番で 5 件、うち社員C 1619 鵜瀬裕一�
 |---|---|
 | `app/pages/restraint-wage.vue` | 9 タブ UI + 年月タブ + 一括再計算/一括印刷 + 印刷 CSS |
 | `app/components/RestraintWageMonthlyTable.vue` | 月次テーブル (単月表示と一括印刷で共用) |
-| `app/components/TimecardTable.vue` | タイムカード表 1 人分 (既存 PDF 準拠の 8 列、日曜網掛け、印刷は 3 人横並び) |
+| `app/components/TimecardTable.vue` | タイムカード表 1 人分 (既存 PDF 準拠の列 + 拘束/実働、日曜網掛け、印刷は 3 人横並び)。**拘束は常時表示** — 実働だけだと休憩が引かれているか読めないため (2026-07-28)。休憩・時間外・時間外深夜・深夜は `detailed` (1 人表示) のときだけ |
 | `app/utils/timecard-view.ts` | 日別サマリ → タイムカード表の行 + 勤務区分の日数 (pure、100% gate) |
-| `app/utils/kosoku-daily.ts` | **ドライバー**の打刻基準日別サマリの受け取り (`GET /restraint-api/kintai/kosoku-daily` → 乗務員CD 引き、pure、100% gate、Refs #472)。ドライバーは打刻を持たないので wage-report の `source === 'timecard'` に出てこない — タイムカード表にドライバーを出すための別経路 |
+| `app/utils/kosoku-daily.ts` | **ドライバー**の打刻基準日別サマリの受け取り (`GET /restraint-api/kintai/kosoku-daily` → 乗務員CD 引き、pure、100% gate、Refs #472)。ドライバーは打刻を持たないので wage-report の `source === 'timecard'` に出てこない — タイムカード表にドライバーを出すための別経路。**タイムカード表の並び順もここ** (`groupTimecardSheetsByCompany` / `timecardJobGroup`): 給与大臣の会社コード昇順で区切り、中は 事務 → 作業 → 整備 → 乗務 → その他 → 乗務員CD 順 (2026-07-28)。職種は `employee_attrs.job_name` (`SHOZOKU.NAME2`) の**部分一致**で振り分ける — 実測値に `一般事務管理` `作業員点呼者` `乗務員(トレーラ-)` のような表記ゆれがある |
 | `app/utils/restraint-wage-view.ts` | 共有型 + WAGE_COLUMNS + 表示ヘルパ |
 | `app/utils/salary-compare.ts` | 給与明細 CSV 解析 + 5 区分集計 + 突合 + 37条チェック + `computeSysBase` (給与区分で単価の掛け方を分岐) (pure) |
 | `workers/dtako-scraper-relay/src/restraint-wage.ts` | 賃金計算 pure (100% gate) |
