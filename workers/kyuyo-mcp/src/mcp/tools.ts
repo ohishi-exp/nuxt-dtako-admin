@@ -364,6 +364,16 @@ const getTimecardDiffArgs = z
         "差分も異常も無い乗務員を落とし、各乗務員の days も該当日だけに絞る (既定 true)。" +
           "false にすると全乗務員×全暦日を返すので応答が大きくなる",
       ),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe(
+        "mode=summary で返す乗務員の数 (既定 20)。**未説明 (unknown) の多い順**に絞る。" +
+          "落とした行も totals には入るので、全体の数字は変わらない",
+      ),
     mode: z
       .enum(["days", "summary"])
       .optional()
@@ -425,6 +435,49 @@ type TimecardDiffSummaryRow = CompareSummaryRow & {
   branchName: string | null;
 };
 
+/** `summary` モードの既定の返却件数。全乗務員だと 8 万文字を超えて読み手に載らない。 */
+const SUMMARY_DEFAULT_LIMIT = 20;
+
+/**
+ * 全乗務員ぶんの合計 (Refs #501)。**絞り込みの前に**数えるので、`limit` を変えても
+ * ここは動かない。
+ *
+ * 今回の目標は差を全部検知することなので、見るべきは `unknown_days` — **既知の規則で
+ * 説明が付かなかった日数**。ここが 0 になるまでが検知の仕事。
+ */
+function summaryTotals(rows: readonly TimecardDiffSummaryRow[]) {
+  const causeDays: Record<string, number> = {};
+  let unknownDays = 0;
+  let unknownMinutes = 0;
+  let anomalyCount = 0;
+  for (const row of rows) {
+    // `causeDays` は 0 件の原因を載せない = 生えている鍵の値は必ず数。
+    // `Partial<Record<..>>` の型どおりに `?? 0` を書くと到達しない分岐が残る
+    for (const [cause, days] of Object.entries(row.causeDays) as Array<[string, number]>) {
+      causeDays[cause] = (causeDays[cause] ?? 0) + days;
+    }
+    unknownDays += row.unknownCount;
+    unknownMinutes += row.unknownMinutes;
+    anomalyCount += row.anomalyCount;
+  }
+  return {
+    drivers: rows.length,
+    cause_days: causeDays,
+    unknown_days: unknownDays,
+    unknown_minutes: unknownMinutes,
+    anomaly_count: anomalyCount,
+  };
+}
+
+/**
+ * 未説明の多い順に並べる。同数なら残差の大きい順 (符号は問わない — 過大も過少も
+ * 同じだけ調べる価値がある)。
+ */
+function byUnknownDesc(a: TimecardDiffSummaryRow, b: TimecardDiffSummaryRow): number {
+  if (b.unknownCount !== a.unknownCount) return b.unknownCount - a.unknownCount;
+  return Math.abs(b.unknownMinutes) - Math.abs(a.unknownMinutes);
+}
+
 /**
  * `ours-only` の日数を営業所ごとに数える (Refs #501 A)。
  *
@@ -467,6 +520,8 @@ export const getTimecardDiffTool = {
     "yhonda-ohishi/nginx#783)・1 日 1440 分超・月次集計欄の負値を拾う。**差分と独立に出る** " +
     "(両者が一致していても nginx 側が負なら報告される)。" +
     "**全乗務員を見るときは mode=summary から入る** — 日別を落として 1 行にし、" +
+    "`totals` (原因別日数・未説明日数) を添えたうえで**未説明の多い順に既定 20 名**だけ返す (limit で変更可)。" +
+    "totals と ours_only_by_branch は絞り込む前の全乗務員で数えるので limit を変えても動かない。" +
     "こちら側の氏名・営業所と `ours_only_by_branch` (ours-only 日数の営業所別内訳) を添える。" +
     "そこで見当を付けてから driver 指定で日別に掘る。",
   inputSchema: getTimecardDiffArgs,
@@ -541,14 +596,23 @@ export const getTimecardDiffTool = {
           branchName: id?.branchName ?? null,
         };
       });
+      // 合計と営業所別は**絞り込む前**の全行で数える — limit は読む量を減らす
+      // だけで、全体像を変えてはいけない
+      const totals = summaryTotals(rows);
+      const branches = oursOnlyByBranch(rows);
+      const limit = args.limit ?? SUMMARY_DEFAULT_LIMIT;
+      const shown = [...rows].sort(byUnknownDesc).slice(0, limit);
       return {
         month: args.month,
         driver,
         onlyAnomalies,
         mode: "summary" as const,
         drivers: rows.length,
-        ours_only_by_branch: oursOnlyByBranch(rows),
-        results: rows,
+        totals,
+        ours_only_by_branch: branches,
+        /** 未説明の多い順。`limit` で切った残りの件数。 */
+        omitted: rows.length - shown.length,
+        results: shown,
       };
     }
 
