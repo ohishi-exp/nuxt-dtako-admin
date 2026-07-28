@@ -3,6 +3,7 @@ import {
   timecardCompareHeadline,
   timecardCompareRowClass,
   timecardCompareStatusLabel,
+  hasFerryMinus,
   fmtTimecardCompareDiff,
   fmtTimecardCompareMinutes,
   toTimecardCompareRows,
@@ -18,6 +19,7 @@ function day(over: Partial<TimecardCompareDay> = {}): TimecardCompareDay {
     oursMinutes: 570,
     diffMinutes: 0,
     status: 'match',
+    ferryMinusMinutes: null,
     anomalies: [],
     ...over,
   }
@@ -115,7 +117,7 @@ describe('timecardCompareHeadline', () => {
       name: 'テスト 乗務員',
       toleranceMinutes: 1,
       days: [],
-      totals: { nginxMinutes: 0, oursMinutes: 0, diffMinutes: 0 },
+      totals: { nginxMinutes: 0, oursMinutes: 0, diffMinutes: 0, ferryMinusMinutes: 0 },
       mismatchCount: 0,
       anomalies: [],
       ...over,
@@ -137,6 +139,11 @@ describe('timecardCompareHeadline', () => {
     expect(timecardCompareHeadline(r)).toBe('差なし / nginx 側の異常 1 件')
   })
 
+  it('フェリー控除があれば月計を出す (差の主因なので合計を読ませる)', () => {
+    const r = result({ totals: { nginxMinutes: 0, oursMinutes: 0, diffMinutes: 0, ferryMinusMinutes: 511 } })
+    expect(timecardCompareHeadline(r)).toBe('差なし / フェリー控除 511 分')
+  })
+
   it('両方あれば両方出す', () => {
     const r = result({
       mismatchCount: 2,
@@ -146,5 +153,25 @@ describe('timecardCompareHeadline', () => {
       ],
     })
     expect(timecardCompareHeadline(r)).toBe('差あり 2 日 / nginx 側の異常 2 件')
+  })
+})
+
+describe('hasFerryMinus', () => {
+  const base = {
+    month: '2026-03',
+    driverCd: '1726',
+    name: '',
+    toleranceMinutes: 1,
+    days: [],
+    mismatchCount: 0,
+    anomalies: [],
+  }
+
+  it('月内に控除が 1 分でもあれば列を出す', () => {
+    expect(hasFerryMinus({ ...base, totals: { nginxMinutes: 0, oursMinutes: 0, diffMinutes: 0, ferryMinusMinutes: 78 } })).toBe(true)
+  })
+
+  it('無い月は列を出さない (空列を並べない)', () => {
+    expect(hasFerryMinus({ ...base, totals: { nginxMinutes: 0, oursMinutes: 0, diffMinutes: 0, ferryMinusMinutes: 0 } })).toBe(false)
   })
 })

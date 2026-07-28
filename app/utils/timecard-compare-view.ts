@@ -18,7 +18,12 @@ export type TimecardCompareStatus =
   | 'both-empty'
 
 export interface TimecardCompareAnomaly {
-  kind: 'negative-kosoku' | 'negative-kosoku-type' | 'impossible-kosoku' | 'negative-total'
+  kind:
+    | 'negative-kosoku'
+    | 'negative-kosoku-type'
+    | 'impossible-kosoku'
+    | 'negative-total'
+    | 'ferry-minus'
   date: string | null
   field: string | null
   minutes: number
@@ -31,6 +36,8 @@ export interface TimecardCompareDay {
   oursMinutes: number | null
   diffMinutes: number | null
   status: TimecardCompareStatus
+  /** その日に nginx が引いた同日フェリー控除 (分)。該当なしは null。 */
+  ferryMinusMinutes: number | null
   anomalies: TimecardCompareAnomaly[]
 }
 
@@ -40,7 +47,13 @@ export interface TimecardCompareResult {
   name: string
   toleranceMinutes: number
   days: TimecardCompareDay[]
-  totals: { nginxMinutes: number, oursMinutes: number, diffMinutes: number }
+  totals: {
+    nginxMinutes: number
+    oursMinutes: number
+    diffMinutes: number
+    /** 月内のフェリー控除の合計 (分)。 */
+    ferryMinusMinutes: number
+  }
   mismatchCount: number
   anomalies: TimecardCompareAnomaly[]
 }
@@ -128,5 +141,14 @@ export function timecardCompareHeadline(result: TimecardCompareResult): string {
   const parts: string[] = []
   parts.push(result.mismatchCount > 0 ? `差あり ${result.mismatchCount} 日` : '差なし')
   if (result.anomalies.length > 0) parts.push(`nginx 側の異常 ${result.anomalies.length} 件`)
+  // 控除は差の主因なので月計を見出しに出す (日ごとの列だけだと合計が読めない)
+  if (result.totals.ferryMinusMinutes > 0) {
+    parts.push(`フェリー控除 ${result.totals.ferryMinusMinutes} 分`)
+  }
   return parts.join(' / ')
+}
+
+/** その月にフェリー控除が 1 日でもあるか (列を出すかの判定)。 */
+export function hasFerryMinus(result: TimecardCompareResult): boolean {
+  return result.totals.ferryMinusMinutes > 0
 }
