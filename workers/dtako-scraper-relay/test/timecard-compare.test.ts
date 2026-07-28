@@ -593,6 +593,71 @@ describe("同日フェリー控除 — 実応答 (nginx#787)", () => {
   });
 });
 
+// 控除額の出どころは **kosoku-daily (こちら側)** へ移った (nginx#788 → rust#146)。
+describe("フェリー控除の出どころ", () => {
+  /** こちら側 (kosoku-daily 由来) の入力。 */
+  const oursWithFerry = (entries: Record<string, [number, number]>) =>
+    new Map(
+      Object.entries(entries).map(([d, [restraintMinutes, ferryMinusMinutes]]) => [
+        d,
+        { restraintMinutes, ferryMinusMinutes },
+      ]),
+    );
+
+  it("こちら側の控除額を使う (nginx が出さなくなったため)", () => {
+    const r = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1726",
+      // nginx は控除額を出さない (#788 で revert 済み)
+      nginx: nginxDriver([{ date: "2026-03-14", kosokuMinutes: -112, byType: { デジタコ: -112 } }]),
+      oursByDate: oursWithFerry({ "2026-03-14": [321, 433] }),
+    });
+    const day = r.days.find((d) => d.date === "2026-03-14");
+    expect(day?.ferryMinusMinutes).toBe(433);
+    expect(r.totals.ferryMinusMinutes).toBe(433);
+    expect(r.anomalies.map((a) => a.kind)).toEqual([
+      "negative-kosoku",
+      "ferry-minus",
+      "negative-kosoku-type",
+    ]);
+    // 負の合計の説明にもこちらの値が入る
+    expect(r.anomalies[0]?.message).toContain("433 分が引かれたため (控除前は 321 分)");
+  });
+
+  it("合計が正の日でも出す (負にならないぶん見落とす)", () => {
+    const r = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1726",
+      nginx: nginxDriver([{ date: "2026-03-21", kosokuMinutes: 677 }]),
+      oursByDate: oursWithFerry({ "2026-03-21": [755, 78] }),
+    });
+    expect(r.days.find((d) => d.date === "2026-03-21")?.ferryMinusMinutes).toBe(78);
+    expect(r.anomalies.map((a) => a.kind)).toEqual(["ferry-minus"]);
+  });
+
+  it("控除 0 の日は載せない", () => {
+    const r = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1726",
+      nginx: nginxDriver([{ date: "2026-03-03", kosokuMinutes: 688 }]),
+      oursByDate: oursWithFerry({ "2026-03-03": [688, 0] }),
+    });
+    expect(r.days.find((d) => d.date === "2026-03-03")?.ferryMinusMinutes).toBeNull();
+    expect(r.anomalies).toEqual([]);
+  });
+
+  it("こちらに控除が無ければ nginx 側の値へ落ちる (後方互換)", () => {
+    const r = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1726",
+      nginx: nginxDriver([{ date: "2026-03-14", kosokuMinutes: -112, ferryMinus: 433 }]),
+      // ferryMinusMinutes を持たない古い形
+      oursByDate: ours({ "2026-03-14": 321 }),
+    });
+    expect(r.days.find((d) => d.date === "2026-03-14")?.ferryMinusMinutes).toBe(433);
+  });
+});
+
 describe("compareTimecardMonthAll", () => {
   const nginxByDriver = new Map<string, NginxDriverMonth>([
     ["1021", { ...nginxDriver([{ date: "2026-04-01", kosokuMinutes: 570 }]), driverCd: "1021" }],

@@ -36,6 +36,7 @@ describe('parseKosokuDaily', () => {
       // 30 (平日の深夜) + 5 (法定休日の深夜) — 画面と賃金は「深夜帯で何分か」しか持たない
       nightMinutes: 35,
       overtimeNightMinutes: 10,
+      ferryMinusMinutes: 0,
       parts: [],
     }])
   })
@@ -54,6 +55,7 @@ describe('parseKosokuDaily', () => {
       overtimeMinutes: 0,
       nightMinutes: 0,
       overtimeNightMinutes: 0,
+      ferryMinusMinutes: 0,
       parts: [],
     }])
   })
@@ -137,6 +139,7 @@ describe('kosokuPartsByDate', () => {
       overtimeMinutes: 20,
       nightMinutes: 40,
       overtimeNightMinutes: 5,
+      ferryMinusMinutes: 0,
     })
     // 同じ日の 2 勤務が 1 つにまとまる
     expect(got.get('2026-04-06')).toEqual({
@@ -145,6 +148,7 @@ describe('kosokuPartsByDate', () => {
       overtimeMinutes: 6,
       nightMinutes: 35,
       overtimeNightMinutes: 10,
+      ferryMinusMinutes: 0,
     })
   })
 
@@ -162,6 +166,7 @@ describe('mergeKosokuShiftMaps', () => {
       overtimeMinutes: 0,
       nightMinutes: 0,
       overtimeNightMinutes: 0,
+      ferryMinusMinutes: 0,
       parts: [],
     }))]])
 
