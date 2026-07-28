@@ -844,3 +844,93 @@ describe("summarizeCompareResults", () => {
     expect(summaries[1]?.statusDays["ours-only"]).toBe(1);
   });
 });
+
+describe("差の推定原因 (Refs #501)", () => {
+  function dayOf(nginxMin: number, oursMin: number, ferry?: number) {
+    const oursByDate = new Map<string, { restraintMinutes: number; ferryMinusMinutes?: number }>([
+      ["2026-04-01", { restraintMinutes: oursMin, ...(ferry === undefined ? {} : { ferryMinusMinutes: ferry }) }],
+    ]);
+    return compareTimecardMonth({
+      month: "2026-04",
+      driverCd: "1021",
+      nginx: nginxDriver([{ date: "2026-04-01", kosokuMinutes: nginxMin }]),
+      oursByDate,
+      toleranceMinutes: 2,
+    }).days[0]!;
+  }
+
+  it("許容誤差に収まる日は原因を付けない", () => {
+    const d = dayOf(569, 570);
+    expect(d.cause).toBe("none");
+    expect(d.explainedMinutes).toBe(0);
+  });
+
+  it("60 分の差は昼休控除と見る — nginx は拘束から引くがこちらは休憩に入れる", () => {
+    const d = dayOf(510, 570);
+    expect(d.cause).toBe("lunch");
+    expect(d.explainedMinutes).toBe(60);
+    expect(d.residualMinutes).toBe(0);
+  });
+
+  it("丸め 1 分が乗った 61 分も昼休控除に入れる", () => {
+    const d = dayOf(509, 570);
+    expect(d.cause).toBe("lunch");
+    expect(d.residualMinutes).toBe(-1);
+  });
+
+  it("フェリー控除は実額で引く (推定ではない)", () => {
+    const d = dayOf(137, 570, 433);
+    expect(d.cause).toBe("ferry");
+    expect(d.explainedMinutes).toBe(433);
+    expect(d.residualMinutes).toBe(0);
+  });
+
+  it("昼休とフェリーが重なった日も説明が付く", () => {
+    const d = dayOf(77, 570, 433);
+    expect(d.cause).toBe("lunch+ferry");
+    expect(d.explainedMinutes).toBe(493);
+  });
+
+  it("どの規則でも説明が付かない差は unknown で残す", () => {
+    const d = dayOf(170, 570);
+    expect(d.cause).toBe("unknown");
+    expect(d.explainedMinutes).toBe(0);
+    expect(d.residualMinutes).toBe(-400);
+  });
+
+  it("フェリー控除が 0 の日を ferry で説明したことにしない", () => {
+    // 控除 0 を足しても説明にならない。60 分でもないので unknown のまま
+    const d = dayOf(400, 570, 0);
+    expect(d.cause).toBe("unknown");
+  });
+
+  it("片側しか無い日は原因を付けない (引き算が成立していない)", () => {
+    const d = compareTimecardMonth({
+      month: "2026-04",
+      driverCd: "1099",
+      nginx: null,
+      oursByDate: ours({ "2026-04-01": 480 }),
+    }).days[0]!;
+    expect(d.status).toBe("ours-only");
+    expect(d.cause).toBe("none");
+    expect(d.residualMinutes).toBeNull();
+  });
+
+  it("未説明の日数と残差を月で数える — 検知の抜けを測る数字", () => {
+    const r = compareTimecardMonth({
+      month: "2026-04",
+      driverCd: "1021",
+      nginx: nginxDriver([
+        { date: "2026-04-01", kosokuMinutes: 510 }, // 昼休
+        { date: "2026-04-02", kosokuMinutes: 170 }, // 未説明 -400
+        { date: "2026-04-03", kosokuMinutes: 470 }, // 未説明 -100
+      ]),
+      oursByDate: ours({ "2026-04-01": 570, "2026-04-02": 570, "2026-04-03": 570 }),
+      toleranceMinutes: 2,
+    });
+    expect(r.unknownCount).toBe(2);
+    expect(r.unknownMinutes).toBe(-500);
+    expect(summarizeCompareResult(r).causeDays).toEqual({ lunch: 1, unknown: 2 });
+    expect(summarizeCompareResult(r).unknownCount).toBe(2);
+  });
+});
