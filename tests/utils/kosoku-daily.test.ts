@@ -7,6 +7,7 @@ import {
   mergeKosokuDays,
   parseKosokuDaily,
   sumKosokuMonth,
+  timecardJobGroup,
   toKosokuDay,
 } from '../../app/utils/kosoku-daily'
 import type { KosokuDay, KosokuDayPart } from '../../app/utils/kosoku-daily'
@@ -560,48 +561,92 @@ describe('sumKosokuMonth', () => {
   })
 })
 
-describe('groupTimecardSheetsByCompany', () => {
-  const sheets = [
-    { driverCd: '1119', isDriver: true },
-    { driverCd: '1018', isDriver: false },
-    { driverCd: '1442', isDriver: true },
-    { driverCd: '9001', isDriver: true },
-    { driverCd: '1200', isDriver: false },
-  ]
-  const comp = (cd: string) => ({ 1119: 'B', 1018: 'A', 1442: 'A', 1200: 'B' } as Record<string, string>)[cd] ?? null
-
-  it('会社ごとに区切り、事務員 → ドライバーの順に並べる', () => {
-    const sections = groupTimecardSheetsByCompany(sheets, comp, ['A', 'B'])
-    expect(sections.map(s => s.compId)).toEqual(['A', 'B', null])
-    expect(sections[0]!.sheets.map(s => s.driverCd)).toEqual(['1018', '1442'])
-    expect(sections[1]!.sheets.map(s => s.driverCd)).toEqual(['1200', '1119'])
+describe('timecardJobGroup', () => {
+  // 本番 D1 `employee_attrs.job_name` の実測値 (2026-07-28 時点の全 14 種)
+  it.each([
+    ['一般管理事務', 'clerical'],
+    ['一般事務管理', 'clerical'],
+    ['作業員', 'worker'],
+    ['作業員2', 'worker'],
+    ['作業員点呼者', 'worker'],
+    ['整備', 'maintenance'],
+    ['乗務員', 'driver'],
+    ['乗務員(トレーラ)', 'driver'],
+    ['乗務員(トレーラ-)', 'driver'],
+    ['乗務員(トレーラー)', 'driver'],
+    ['トレーラ乗務員', 'driver'],
+    ['運転手', 'driver'],
+    ['役員', 'other'],
+    ['執行役', 'other'],
+    ['特定技能', 'other'],
+  ])('%s → %s', (jobName, group) => {
+    expect(timecardJobGroup(jobName)).toBe(group)
   })
 
-  it('compOrder の会社を先に出し、それ以外は会社ID 昇順で後ろに付ける', () => {
-    expect(groupTimecardSheetsByCompany(sheets, comp, ['B']).map(s => s.compId)).toEqual(['B', 'A', null])
-    expect(groupTimecardSheetsByCompany(sheets, comp).map(s => s.compId)).toEqual(['A', 'B', null])
-    // 該当者の居ない会社は見出しごと出さない
-    expect(groupTimecardSheetsByCompany(sheets, comp, ['Z', 'A']).map(s => s.compId)).toEqual(['A', 'B', null])
+  it('職種が引けない社員は other (推測で乗務員や作業員に混ぜない)', () => {
+    expect(timecardJobGroup(null)).toBe('other')
+    expect(timecardJobGroup(undefined)).toBe('other')
+  })
+})
+
+describe('groupTimecardSheetsByCompany', () => {
+  const sheets = [
+    { driverCd: '1119' },
+    { driverCd: '1018' },
+    { driverCd: '1442' },
+    { driverCd: '9001' },
+    { driverCd: '1200' },
+  ]
+  const comp = (cd: string) =>
+    ({ 1119: '0200', 1018: '0100', 1442: '0100', 1200: '0200' } as Record<string, string>)[cd] ?? null
+  const job = (cd: string) =>
+    ({ 1018: '乗務員', 1442: '一般管理事務', 1200: '整備', 1119: '作業員' } as Record<string, string>)[cd] ?? null
+  const group = (cd: string) => timecardJobGroup(job(cd))
+
+  it('給与会社コードごとに区切り、事務 → 作業 → 整備 → 乗務 の順に並べる', () => {
+    const sections = groupTimecardSheetsByCompany(sheets, comp, group)
+    expect(sections.map(s => s.company)).toEqual(['0100', '0200', null])
+    // 1442 は乗務員CD が大きいが事務なので先。職種が並び順を決める
+    expect(sections[0]!.sheets.map(s => s.driverCd)).toEqual(['1442', '1018'])
+    expect(sections[1]!.sheets.map(s => s.driverCd)).toEqual(['1119', '1200'])
+  })
+
+  it('会社コードは昇順 (開いている会社を先頭にはしない)', () => {
+    const reversed = [...sheets].reverse()
+    expect(groupTimecardSheetsByCompany(reversed, comp, group).map(s => s.company))
+      .toEqual(['0100', '0200', null])
+  })
+
+  it('どの職種にも当てはまらない人は末尾のその他へ', () => {
+    const mixed = [
+      { driverCd: '2001' }, // 役員 → other
+      { driverCd: '2002' }, // 乗務員
+      { driverCd: '2003' }, // 職種なし → other
+    ]
+    const jobs = (cd: string) => ({ 2001: '役員', 2002: '乗務員' } as Record<string, string>)[cd] ?? null
+    expect(groupTimecardSheetsByCompany(mixed, () => '0100', cd => timecardJobGroup(jobs(cd)))[0]!
+      .sheets.map(s => s.driverCd)).toEqual(['2002', '2001', '2003'])
+  })
+
+  it('職種が渡されなければ全員 その他 = 乗務員CD 順', () => {
+    expect(groupTimecardSheetsByCompany(sheets, comp)[0]!.sheets.map(s => s.driverCd))
+      .toEqual(['1018', '1442'])
   })
 
   it('会社が引けない乗務員CD は末尾の会社不明へ (落とさない)', () => {
-    const sections = groupTimecardSheetsByCompany(sheets, comp, ['A', 'B'])
-    expect(sections[2]).toMatchObject({ compId: null })
+    const sections = groupTimecardSheetsByCompany(sheets, comp, group)
+    expect(sections[2]).toMatchObject({ company: null })
     expect(sections[2]!.sheets.map(s => s.driverCd)).toEqual(['9001'])
   })
 
   it('会社不明が居なければ区画を作らない', () => {
-    const only = [{ driverCd: '1018', isDriver: false }]
-    expect(groupTimecardSheetsByCompany(only, comp, ['A']).map(s => s.compId)).toEqual(['A'])
+    expect(groupTimecardSheetsByCompany([{ driverCd: '1018' }], comp, group).map(s => s.company))
+      .toEqual(['0100'])
   })
 
-  it('乗務員CD は数値順 (文字列順にしない)', () => {
-    const many = [
-      { driverCd: '1100', isDriver: true },
-      { driverCd: '999', isDriver: true },
-      { driverCd: '1000', isDriver: true },
-    ]
-    expect(groupTimecardSheetsByCompany(many, () => 'A', ['A'])[0]!.sheets.map(s => s.driverCd))
+  it('同じ職種の中では乗務員CD は数値順 (文字列順にしない)', () => {
+    const many = [{ driverCd: '1100' }, { driverCd: '999' }, { driverCd: '1000' }]
+    expect(groupTimecardSheetsByCompany(many, () => '0100', () => 'driver')[0]!.sheets.map(s => s.driverCd))
       .toEqual(['999', '1000', '1100'])
   })
 })

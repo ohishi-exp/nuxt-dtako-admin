@@ -37,6 +37,7 @@ import {
   mergeKosokuDays,
   parseKosokuDaily,
   sumKosokuMonth,
+  timecardJobGroup,
 } from '~/utils/kosoku-daily'
 import type { SalaryOvertime, TimecardSummaryRow, WorkKindCounts } from '~/utils/timecard-view'
 import type {
@@ -440,8 +441,6 @@ const timecardSheets = computed(() => {
       return {
         driverCd: r.summary.driverCd,
         driverName: r.summary.driverName,
-        /** 打刻由来 (事務員側)。会社ごとの並びで先に出す (Refs #472 PR-C)。 */
-        isDriver: false,
         rows: kosoku
           ? buildKosokuTimecardTable(kosoku, year, monthNo)
           : buildTimecardTable(r.summary.days, year, monthNo),
@@ -588,7 +587,6 @@ const kosokuDriverSheets = computed(() => {
       return {
         driverCd,
         driverName: driverNameByCd.value.get(driverCd) ?? '',
-        isDriver: true,
         rows: buildKosokuTimecardTable(merged, year, monthNo),
         counts,
         restraint: sumKosokuMonth(merged, month.value),
@@ -619,37 +617,41 @@ const driverNameByCd = computed(() => {
   return map
 })
 
-/** 乗務員CD → 会社ID。同じ人が複数会社に在籍しうる (Refs #403) ので、
- * **会社ID の小さい方**に寄せる — 表の並びが月によって入れ替わらないようにする。 */
-const compByDriverCd = computed(() => {
-  const map = new Map<string, string>()
-  for (const compId of Object.keys(employeeMasterByComp.value).sort()) {
-    for (const e of employeeMasterByComp.value[compId] ?? []) {
+/**
+ * 乗務員CD → 給与大臣の会社コードと職種名 (対象月末時点)。
+ *
+ * 表の区切りが**給与の会社コード**になった (ユーザー決定 2026-07-28) ので、
+ * dtako 会社ID ではなく社員マスタの `company` を引く。同じ人が複数会社に在籍
+ * しうる (Refs #403) ので**会社コードの小さい方**に寄せる — 表の並びが月によって
+ * 入れ替わらないようにする。職種は寄せた側の会社の属性行から採る。
+ */
+const timecardEmployeeByDriver = computed(() => {
+  const map = new Map<string, { company: string, jobName: string | null }>()
+  for (const entries of Object.values(employeeMasterByComp.value)) {
+    for (const e of entries) {
       if (!e.driverCd) continue
       const key = normalizeDriverCdKey(e.driverCd)
-      if (!map.has(key)) map.set(key, compId)
+      const cur = map.get(key)
+      if (cur && cur.company <= e.company) continue
+      map.set(key, { company: e.company, jobName: resolveAttrsAt(e, month.value)?.jobName ?? null })
     }
   }
   return map
 })
 
 /**
- * 会社ごとに区切ったタイムカード表 (Refs #472 PR-C、ユーザー決定 2026-07-27)。
+ * 給与会社コードごとに区切ったタイムカード表 (ユーザー決定 2026-07-28)。
  *
- * 事務員 → ドライバーの順。開いている会社を先頭に置き、社員マスタで会社が引けない
- * 乗務員CD は末尾の「会社不明」へ (落とすとマスタ未登録の人が黙って消える)。
+ * 会社コード昇順 → 職種 (事務 → 作業 → 整備 → 乗務 → その他) → 乗務員CD 順。
+ * 社員マスタで会社が引けない乗務員CD は末尾の「会社不明」へ (落とすとマスタ
+ * 未登録の人が黙って消える)。
  */
-const timecardSections = computed(() => {
-  const order = [
-    ...(session.value ? [session.value.compId] : []),
-    ...DTAKO_COMPS.map(c => c.compId),
-  ]
-  return groupTimecardSheetsByCompany(
+const timecardSections = computed(() =>
+  groupTimecardSheetsByCompany(
     [...timecardSheets.value, ...kosokuDriverSheets.value],
-    driverCd => compByDriverCd.value.get(driverCd) ?? null,
-    [...new Set(order)],
-  )
-})
+    driverCd => timecardEmployeeByDriver.value.get(driverCd)?.company ?? null,
+    driverCd => timecardJobGroup(timecardEmployeeByDriver.value.get(driverCd)?.jobName),
+  ))
 
 /** 表に出す人が 1 人でも居るか (事務員・ドライバーどちらでも)。 */
 const hasTimecardSheets = computed(() =>
@@ -5046,17 +5048,19 @@ watch([compMap, kyuyoSyncedKeys], () => {
               この月に勤務がありません。
             </p>
 
-            <!-- 会社ごとに区切り、事務員 (打刻) → ドライバー (打刻基準の日別サマリ) の順
-                 (Refs #472 PR-C)。ドライバーの供給元は会社で絞られていないので、
-                 見出しが無いと他社の人が混ざったまま並ぶ -->
+            <!-- **給与大臣の会社コード**ごとに区切り、中は 事務 → 作業 → 整備 → 乗務
+                 → その他 → 乗務員CD 順 (ユーザー決定 2026-07-28)。dtako 会社ID 単位
+                 (Refs #472 PR-C) だと 0100/0200/0300 の 3 社が 1 区画に混ざる。
+                 ドライバーの供給元も会社で絞られていないので、見出しが無いと
+                 他社の人が混ざったまま並ぶ -->
             <div v-if="hasTimecardSheets">
               <div
                 v-for="section in timecardSections"
-                :key="section.compId ?? 'unknown'"
+                :key="section.company ?? 'unknown'"
                 class="mb-6 last:mb-0"
               >
                 <h3 class="mb-2 border-b border-gray-300 pb-1 text-sm font-semibold dark:border-gray-600">
-                  {{ section.compId ? dtakoCompDisplay(section.compId) : '会社不明 (社員マスタに乗務員CDの登録なし)' }}
+                  {{ section.company ? payrollCompanyLabelOf(compMap, section.company) : '会社不明 (社員マスタに乗務員CDの登録なし)' }}
                   <span class="ml-1 font-normal text-gray-500">{{ section.sheets.length }} 名</span>
                 </h3>
                 <div

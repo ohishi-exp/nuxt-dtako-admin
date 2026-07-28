@@ -372,29 +372,61 @@ export function buildKosokuTimecardTable(
   return rows
 }
 
-/** 会社ごとに区切ったタイムカード表の 1 区画。`compId` が null = 会社不明。 */
+/** 会社ごとに区切ったタイムカード表の 1 区画。`company` が null = 会社不明。 */
 export interface TimecardCompanySection<T> {
-  compId: string | null
+  /** 給与大臣の会社コード 4 桁 (`0100` 等)。null = 社員マスタに乗務員CD が無い。 */
+  company: string | null
   sheets: T[]
 }
 
 /**
- * タイムカード表を**会社ごとに区切り、事務員 → ドライバーの順**に並べる
- * (#472 でユーザー決定、2026-07-27)。
+ * 職種の並び順 (ユーザー決定 2026-07-28)。**事務 → 作業 → 整備 → 乗務 → その他**。
+ *
+ * `employee_attrs.job_name` (= 給与大臣 `SHOZOKU.NAME2`) は自由文字列で表記ゆれが
+ * あるので**部分一致**で振り分ける — 本番の実測値は
+ * `一般管理事務` / `一般事務管理` (前後の入れ替わった行が 1 名混ざっている)、
+ * `作業員` / `作業員2` / `作業員点呼者`、`整備`、
+ * `乗務員` / `乗務員(トレーラ)` / `乗務員(トレーラ-)` / `乗務員(トレーラー)` / `トレーラ乗務員`。
+ *
+ * どれにも当てはまらない職種 (`役員` `執行役` `特定技能`) と**職種が引けない社員**は
+ * `other` で末尾にまとめる (ユーザー決定 2026-07-28) — 推測で乗務員や作業員に混ぜず、
+ * 区分の付いていない人がそのまま目に見える形で残す。
+ */
+export const TIMECARD_JOB_GROUPS = ['clerical', 'worker', 'maintenance', 'driver', 'other'] as const
+export type TimecardJobGroup = typeof TIMECARD_JOB_GROUPS[number]
+
+/** 職種名 → 並び順の区分。判定は部分一致 (上記)。 */
+export function timecardJobGroup(jobName: string | null | undefined): TimecardJobGroup {
+  if (typeof jobName !== 'string') return 'other'
+  // `作業員点呼者` のように複数の語を含む値があるので、順に見て最初に当たった区分を採る
+  if (jobName.includes('事務')) return 'clerical'
+  if (jobName.includes('作業')) return 'worker'
+  if (jobName.includes('整備')) return 'maintenance'
+  if (jobName.includes('乗務') || jobName.includes('運転')) return 'driver'
+  return 'other'
+}
+
+/**
+ * タイムカード表を**給与大臣の会社コードごとに区切り、職種順**に並べる
+ * (ユーザー決定 2026-07-28。元は dtako 会社ID × 事務員→ドライバー、#472 PR-C)。
+ *
+ * 区切りが dtako 会社ID (`27324455`) だと、その中に給与会社 `0100` `0200` `0300` の
+ * 3 社が混在したまま 183 名が 1 区画に並ぶ。給与の突合はもともと会社コード単位
+ * (Refs #405) なので、表の区切りもそちらに合わせる。
  *
  * ドライバーの供給元 (`kosoku-daily`) は会社で絞らず全乗務員を返すので、
  * 会社の見出しで区切らないと他社の人が混ざったまま並ぶ。
  *
- * - 会社の順は `compOrder` (呼び出し側が「開いている会社を先頭」にする)。
- *   そこに無い会社は会社ID 昇順で後ろに付ける
+ * - 会社の順は**会社コード昇順** (`0100` → `0200` → …)。4 桁ゼロ詰めなので
+ *   文字列順 = 番号順
  * - **社員マスタで会社が引けない乗務員CD は末尾の「会社不明」へまとめる** —
  *   落とすと、マスタ未登録の人が黙って表から消える
- * - 同じ会社の中は 事務員 (`isDriver: false`) → ドライバー、それぞれ乗務員CD 順
+ * - 同じ会社の中は `TIMECARD_JOB_GROUPS` の順 → 乗務員CD 順
  */
-export function groupTimecardSheetsByCompany<T extends { driverCd: string, isDriver: boolean }>(
+export function groupTimecardSheetsByCompany<T extends { driverCd: string }>(
   sheets: readonly T[],
   companyOf: (driverCd: string) => string | null,
-  compOrder: readonly string[] = [],
+  jobGroupOf: (driverCd: string) => TimecardJobGroup = () => 'other',
 ): Array<TimecardCompanySection<T>> {
   const byComp = new Map<string, T[]>()
   const unknown: T[] = []
@@ -405,16 +437,15 @@ export function groupTimecardSheetsByCompany<T extends { driverCd: string, isDri
     list.push(s)
     byComp.set(comp, list)
   }
-  const rest = [...byComp.keys()].filter(c => !compOrder.includes(c)).sort()
-  const order = [...compOrder.filter(c => byComp.has(c)), ...rest]
+  const rank = (cd: string) => TIMECARD_JOB_GROUPS.indexOf(jobGroupOf(cd))
   const sortSheets = (list: T[]) => list.sort((a, b) =>
-    (Number(a.isDriver) - Number(b.isDriver))
+    (rank(a.driverCd) - rank(b.driverCd))
     || a.driverCd.localeCompare(b.driverCd, undefined, { numeric: true }))
-  const out: Array<TimecardCompanySection<T>> = order.map(compId => ({
-    compId,
-    sheets: sortSheets(byComp.get(compId)!),
+  const out: Array<TimecardCompanySection<T>> = [...byComp.keys()].sort().map(company => ({
+    company,
+    sheets: sortSheets(byComp.get(company)!),
   }))
-  if (unknown.length) out.push({ compId: null, sheets: sortSheets(unknown) })
+  if (unknown.length) out.push({ company: null, sheets: sortSheets(unknown) })
   return out
 }
 

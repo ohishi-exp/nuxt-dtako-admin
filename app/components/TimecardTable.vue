@@ -4,7 +4,9 @@
  *
  * 列も並びも**社内 CakePHP が出している既存 PDF に合わせてある**
  * (`TimeCardController::createPdf`) — 総務がその形で見慣れているため、
- * 日/曜/出勤1/退社1/出勤2/退社2/残業/備考 の 8 列固定・1〜月末の全日・日曜は網掛け。
+ * 日/曜/出勤1/退社1/出勤2/退社2/残業/備考 + 拘束/実働・1〜月末の全日・日曜は網掛け。
+ * (拘束は PDF に無いが、実働だけだと休憩が引かれているか読めないので常に出す —
+ *  ユーザー指示 2026-07-28)
  *
  * 印刷では 3 人が横に並ぶ (親の grid が担当)。ここは 1 人分だけを描く。
  */
@@ -43,10 +45,11 @@ const props = defineProps<{
     legalHolidayMinutes: number
   } | null
   /**
-   * 内訳列 (拘束 / 休憩 / 時間外 / 時間外深夜 / 深夜) を出すか (2026-07-28 指示)。
+   * 内訳列 (休憩 / 時間外 / 時間外深夜 / 深夜) を出すか (2026-07-28 指示)。
    *
    * **1 人だけ表示している時だけ true。** 3 人横並び (印刷・一覧) では紙幅に入らず、
-   * 8 列に揃えてある社内 PDF の形も崩れる。
+   * 社内 PDF に揃えてある形も崩れる。**拘束だけは常に出す** (実働との差で休憩が
+   * 引かれているか読めるようにするため、同日ユーザー指示)。
    */
   detailed?: boolean
 }>()
@@ -168,11 +171,12 @@ const kindSummary = computed(() => {
             <th class="border-b border-gray-200 py-0.5 text-right font-normal dark:border-gray-700" title="その日に深夜帯 (22:00-05:00) で働いた時間">深夜</th>
           </template>
           <th class="border-b border-gray-200 py-0.5 text-left font-normal dark:border-gray-700">備考</th>
+          <!-- 拘束は**常に出す** (ユーザー指示 2026-07-28) — 実働だけだと休憩が引かれて
+               いるのか分からず、実働 = 拘束 の日 (昼休憩が落ちている) が見つけられない。
+               休憩そのもの (拘束 − 実働) は差で読めるので 1 人表示のときだけ -->
+          <th class="border-b border-gray-200 py-0.5 text-right font-normal dark:border-gray-700" title="終業 − 始業 (休憩を含む)">拘束</th>
+          <th v-if="detailed" class="border-b border-gray-200 py-0.5 text-right font-normal dark:border-gray-700" title="拘束 − 実働">休憩</th>
           <!-- その日の実働 (拘束 − 休憩)。打刻の無い日にも乗る (Refs #472) -->
-          <template v-if="detailed">
-            <th class="border-b border-gray-200 py-0.5 text-right font-normal dark:border-gray-700" title="終業 − 始業 (休憩を含む)">拘束</th>
-            <th class="border-b border-gray-200 py-0.5 text-right font-normal dark:border-gray-700" title="拘束 − 実働">休憩</th>
-          </template>
           <th class="border-b border-gray-200 py-0.5 text-right font-normal dark:border-gray-700">実働</th>
         </tr>
       </thead>
@@ -203,10 +207,8 @@ const kindSummary = computed(() => {
             <td class="text-right text-gray-500">{{ r.nightMinutes > 0 ? fmtMinutes(r.nightMinutes) : '' }}</td>
           </template>
           <td class="pl-1 text-left whitespace-nowrap">{{ r.note }}</td>
-          <template v-if="detailed">
-            <td class="pl-1 text-right text-gray-500">{{ r.restraintMinutes > 0 ? fmtMinutes(r.restraintMinutes) : '' }}</td>
-            <td class="text-right text-gray-500">{{ r.breakMinutes > 0 ? fmtMinutes(r.breakMinutes) : '' }}</td>
-          </template>
+          <td class="pl-1 text-right text-gray-500">{{ r.restraintMinutes > 0 ? fmtMinutes(r.restraintMinutes) : '' }}</td>
+          <td v-if="detailed" class="text-right text-gray-500">{{ r.breakMinutes > 0 ? fmtMinutes(r.breakMinutes) : '' }}</td>
           <td class="pl-1 text-right text-gray-500">{{ r.workingMinutes > 0 ? fmtMinutes(r.workingMinutes) : '' }}</td>
         </tr>
       </tbody>
