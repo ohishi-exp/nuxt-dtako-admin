@@ -3060,7 +3060,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       // nginx 側は driver をそのまま渡す (1 名なら 1 名だけ返る)
       const [pdfBody, shifts] = await Promise.all([
         this.fetchNginxPdfJson(ym, driver),
-        this.loadKosokuShifts(creds.apiUrl, creds.clientId, creds.clientSecret, ym, prevYmOf(ym)),
+        this.loadKosokuShiftsView(
+          creds.apiUrl,
+          creds.clientId,
+          creds.clientSecret,
+          true,
+          ym,
+          prevYmOf(ym),
+        ),
       ]);
       const nginxByDriver = parsePdfJson(pdfBody, ym);
       const oursByDriver = new Map<string, Map<string, { restraintMinutes: number }>>();
@@ -3296,10 +3303,31 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     clientSecret: string,
     ...months: string[]
   ): Promise<Map<string, KosokuShift[]> | null> {
+    return this.loadKosokuShiftsView(apiUrl, clientId, clientSecret, false, ...months);
+  }
+
+  /**
+   * `view=compare` で取る版 (Refs ohishi-exp/rust-ichibanboshi#157)。
+   *
+   * 既定の応答は 1 日 19 キー・全乗務員で **1.73 MB** あるが、突合が使うのは日付・拘束・
+   * フェリー控除と暦日按分用の `parts` だけ。絞ると **256 KB (実測 6.8 分の 1)**。
+   * この経路は社内から Cloudflare Tunnel を通るので、サイズがそのまま応答時間になる
+   * (実測: DB 0.48 秒 / rust 0.46 秒 なのにブラウザで 14〜57 秒)。
+   *
+   * **タイムカード表の経路では使わない** — あちらは打刻と各日の時間が要る。
+   */
+  private async loadKosokuShiftsView(
+    apiUrl: string,
+    clientId: string,
+    clientSecret: string,
+    compare: boolean,
+    ...months: string[]
+  ): Promise<Map<string, KosokuShift[]> | null> {
+    const view = compare ? "&view=compare" : "";
     const fetchMonth = async (ym: string): Promise<Map<string, KosokuShift[]> | null> => {
       try {
         const upstream = await fetch(
-          `${apiUrl}/api/kintai/kosoku-daily?month=${encodeURIComponent(ym)}`,
+          `${apiUrl}/api/kintai/kosoku-daily?month=${encodeURIComponent(ym)}${view}`,
           { headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret } },
         );
         if (!upstream.ok) {
