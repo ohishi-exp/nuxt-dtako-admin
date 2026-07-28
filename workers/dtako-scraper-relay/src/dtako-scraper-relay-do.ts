@@ -63,6 +63,7 @@ import {
   isR2OnlyRestraintPath,
 } from "./restraint-viewer-auth";
 import { needsTheearthQueue } from "./restraint-queue";
+import { UpstreamMemo } from "./upstream-memo";
 import {
   buildDvrSearchKey,
   dvrDataUrl,
@@ -2891,13 +2892,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * タイムカード表にドライバーを出すための経路。ドライバーは打刻を持たない代わりに
    * 運行イベントを持ち、上流が打刻と休息から日別に畳んだものを返す。
    *
-   * - **中継だけ。解釈も保存もしない。** `/kintai/fetch` (CakePHP 由来の日別データ) と
-   *   違い R2 に置かない — 上流の生イベントからいつでも作り直せる派生値で、原本は
-   *   社内 MariaDB 側にある。版を持つ意味が無い
+   * - **中継だけ。解釈しないし R2 にも置かない** — 上流の生イベントからいつでも
+   *   作り直せる派生値で、原本は社内 MariaDB 側にある。版を持つ意味が無い。
+   *   ただし生応答は 60 秒だけ DO 内 memo する (wage-report と共有、Refs #508) —
+   *   タブを開くと両経路が同じ月をほぼ同時に取りに来るため
    * - **`driver` は渡さない** (= 上流は全乗務員を返す)。画面が要るのは全員ぶんで、
    *   1 名ずつだと 96 名で約 3 秒かかる (一括は実測 0.25 秒)
    * - 応答は上流の JSON をそのまま返す (`{month, drivers: [{driver, days}]}`)。
-   *   `days` の各項目は #118 の日別サマリ (拘束・休憩・実働・時間区分・深夜)
+   *   `days` の各項目は #118 の日別サマリ (拘束・休憩・実働・時間区分・深夜)。
+   *   `view=timecard` (rust-ichibanboshi#164) で 0 値・未使用項目が省かれた slim 形 —
+   *   受け手 (front の `toKosokuDay`) は欠けを 0/false に落とす
    * - **会社で絞らない。** 乗務員CD は一番星 `社員ﾏｽﾀ.社員C` と同一番号体系で会社を
    *   跨がず、`/kintai/fetch` の取り込みも同じ単位。受け手が社員マスタで引き当てる
    */
@@ -2921,33 +2925,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return dvrJsonError(503, "勤怠の取得先 (NUXT_ICHIBAN_*) が未設定です");
     }
 
-    try {
-      const upstream = await fetch(
-        `${apiUrl}/api/kintai/kosoku-daily?month=${encodeURIComponent(ym)}`,
-        {
-          headers: {
-            "CF-Access-Client-Id": clientId,
-            "CF-Access-Client-Secret": clientSecret,
-          },
-        },
-      );
-      const rawText = await upstream.text();
-      if (!upstream.ok) {
-        console.error(JSON.stringify({ kosoku_daily: "upstream-error", status: upstream.status }));
-        return dvrJsonError(502, `拘束サマリ API が ${upstream.status} を返しました: ${rawText.slice(0, 200)}`);
-      }
-      const body = JSON.parse(rawText) as { drivers?: unknown };
-      // 形だけ見る (中身は解釈しない)。上流が 1 名指定の形 (`days`) を返したら、
-      // 呼び出し方を間違えている = 全乗務員が入っていないので黙って通さない
-      if (!Array.isArray(body.drivers)) {
-        return dvrJsonError(502, "拘束サマリ API の応答に drivers 配列がありません");
-      }
-      console.log(JSON.stringify({ kosoku_daily: "relayed", month: ym, drivers: body.drivers.length }));
-      return Response.json(body);
-    } catch (err) {
-      console.error(JSON.stringify({ kosoku_daily: "error", error: describeUnknownError(err) }));
+    // 生応答 memo を wage-report と共有する (Refs #508)。上流エラーの詳細は
+    // fetchKosokuRaw が log 済みなので、ここは null = 502 に畳む
+    const body = (await this.fetchKosokuRaw(apiUrl, clientId, clientSecret, ym)) as
+      | { drivers?: unknown }
+      | null;
+    if (body == null) {
       return dvrJsonError(502, "拘束サマリ API の取得に失敗しました");
     }
+    // 形だけ見る (中身は解釈しない)。上流が 1 名指定の形 (`days`) を返したら、
+    // 呼び出し方を間違えている = 全乗務員が入っていないので黙って通さない
+    if (!Array.isArray(body.drivers)) {
+      return dvrJsonError(502, "拘束サマリ API の応答に drivers 配列がありません");
+    }
+    console.log(JSON.stringify({ kosoku_daily: "relayed", month: ym, drivers: body.drivers.length }));
+    return Response.json(body);
   }
 
   /**
@@ -3145,30 +3137,57 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /**
-   * 上流応答の短期メモ (この DO インスタンス内)。
+   * 上流応答の短期メモ (この DO インスタンス内、Refs #508)。
    *
    * wage-report はタブ切替・月切替のたびに呼ばれ、そのたびに `kintai/daily` と
    * `kosoku-daily` を取り直していた (1 回 1.7MB)。画面が「勤務を読み込んでいます…」
    * から進まなくなったので、**同じ月は 60 秒だけ使い回す**。取り込み直後の反映が
-   * 最大 60 秒遅れるだけで、値そのものは上流が正。
+   * 最大 60 秒遅れるだけで、値そのものは上流が正。in-flight 共有も持つ — タブを
+   * 開くと wage-report と `/kintai/kosoku-daily` 中継が同じ月をほぼ同時に取りに
+   * 来るため、値キャッシュだけでは初回の重複が止まらない (rust-ichibanboshi#154
+   * で実測: 同じ月を 2〜3 回)。
    */
-  private kintaiUpstreamCache = new Map<string, { at: number; value: unknown }>();
+  private kintaiUpstreamMemo = new UpstreamMemo(60_000, 8);
 
   /** `key` の結果を TTL 内なら使い回す。null/undefined はキャッシュしない (再試行させる)。 */
-  private async memoKintaiUpstream<T>(key: string, load: () => Promise<T>): Promise<T> {
-    const TTL_MS = 60_000;
-    const now = Date.now();
-    const hit = this.kintaiUpstreamCache.get(key);
-    if (hit && now - hit.at < TTL_MS) return hit.value as T;
-    const value = await load();
-    if (value == null) return value;
-    // 月をまたいで無限に溜めない — 溢れたら古い順に落とす
-    if (this.kintaiUpstreamCache.size >= 8) {
-      const oldest = [...this.kintaiUpstreamCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
-      if (oldest) this.kintaiUpstreamCache.delete(oldest[0]);
-    }
-    this.kintaiUpstreamCache.set(key, { at: now, value });
-    return value;
+  private memoKintaiUpstream<T>(key: string, load: () => Promise<T>): Promise<T> {
+    return this.kintaiUpstreamMemo.get(key, Date.now(), load);
+  }
+
+  /**
+   * `kosoku-daily` の上流生応答 (JSON parse 済み) を月単位で memo する (Refs #508)。
+   *
+   * wage-report (`loadKosokuShifts`) と `/restraint-api/kintai/kosoku-daily` 中継が
+   * **同じ月を別々に取っていた**のを、この 1 本に統一する。`view=timecard` は画面
+   * 経路の減量 (ohishi-exp/rust-ichibanboshi#164) — 消費側 (front の
+   * `toKosokuDay` / relay の `parseKosokuDaily`) はどちらも欠けた数値を 0、欠けた
+   * bool を false に落とすので slim 応答をそのまま食える。未対応の上流は未知 view を
+   * 無視して全項目を返すため、デプロイ順序に制約はない。
+   *
+   * 取れなければ null (memo されず次回再試行)。
+   */
+  private fetchKosokuRaw(
+    apiUrl: string,
+    clientId: string,
+    clientSecret: string,
+    ym: string,
+  ): Promise<unknown> {
+    return this.memoKintaiUpstream(`kosoku-raw:${ym}`, async () => {
+      try {
+        const upstream = await fetch(
+          `${apiUrl}/api/kintai/kosoku-daily?month=${encodeURIComponent(ym)}&view=timecard`,
+          { headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret } },
+        );
+        if (!upstream.ok) {
+          console.error(JSON.stringify({ kosoku_raw: "upstream-error", ym, status: upstream.status }));
+          return null;
+        }
+        return JSON.parse(await upstream.text()) as unknown;
+      } catch (err) {
+        console.error(JSON.stringify({ kosoku_raw: "error", ym, error: describeUnknownError(err) }));
+        return null;
+      }
+    });
   }
 
   /**
@@ -3237,10 +3256,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const [dailyCurrent, dailyPrev, shiftsCurrent, shiftsPrev] = await Promise.all([
       this.memoKintaiUpstream(`daily:${ym}`, () => fetchDaily(ym)),
       this.memoKintaiUpstream(`daily:${prevYm}`, () => fetchDaily(prevYm)),
-      this.memoKintaiUpstream(`kosoku:${ym}`, () =>
-        this.loadKosokuShifts(apiUrl, clientId, clientSecret, ym)),
-      this.memoKintaiUpstream(`kosoku:${prevYm}`, () =>
-        this.loadKosokuShifts(apiUrl, clientId, clientSecret, prevYm)),
+      // kosoku の memo は fetchKosokuRaw の生応答層にある (Refs #508) — 画面の
+      // `/kintai/kosoku-daily` 中継と同じ月を共有するため、ここでは重ねない
+      this.loadKosokuShifts(apiUrl, clientId, clientSecret, ym),
+      this.loadKosokuShifts(apiUrl, clientId, clientSecret, prevYm),
     ]);
     // 当月の勤務 = 前月から跨いだ分 + 当月分 (`kosokuPartsByDate` が当月に落ちる分だけ拾う)
     const kosokuCurrent = mergeKosokuShiftMaps(shiftsPrev, shiftsCurrent);
@@ -3323,7 +3342,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * この経路は社内から Cloudflare Tunnel を通るので、サイズがそのまま応答時間になる
    * (実測: DB 0.48 秒 / rust 0.46 秒 なのにブラウザで 14〜57 秒)。
    *
-   * **タイムカード表の経路では使わない** — あちらは打刻と各日の時間が要る。
+   * 非 compare (wage-report の賃金計算) は `fetchKosokuRaw` (view=timecard +
+   * 生応答 memo、Refs #508) を通る — 打刻と各日の時間が要るので compare では足りない。
    */
   private async loadKosokuShiftsView(
     apiUrl: string,
@@ -3332,11 +3352,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     compare: boolean,
     ...months: string[]
   ): Promise<Map<string, KosokuShift[]> | null> {
-    const view = compare ? "&view=compare" : "";
     const fetchMonth = async (ym: string): Promise<Map<string, KosokuShift[]> | null> => {
+      if (!compare) {
+        // 賃金計算 (wage-report) の経路 — 画面の `/kintai/kosoku-daily` 中継と
+        // 同じ生応答 memo を共有する (Refs #508)。view=timecard の slim 応答でも
+        // parseKosokuDaily は欠けた数値を 0 に落とすので同じ形に畳める
+        const body = await this.fetchKosokuRaw(apiUrl, clientId, clientSecret, ym);
+        return body == null ? null : parseKosokuDaily(body);
+      }
       try {
         const upstream = await fetch(
-          `${apiUrl}/api/kintai/kosoku-daily?month=${encodeURIComponent(ym)}${view}`,
+          `${apiUrl}/api/kintai/kosoku-daily?month=${encodeURIComponent(ym)}&view=compare`,
           { headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret } },
         );
         if (!upstream.ok) {
