@@ -20,6 +20,18 @@ import type {
   RestraintSummaryDay,
 } from "../../../dtako-scraper-relay/src/theearth-restraint-client";
 import { resolveSecretBinding } from "../../../dtako-scraper-relay/src/cron";
+import {
+  kosokuPartsByDate,
+  parseKosokuDaily,
+  prevYmOf,
+  type KosokuShift,
+} from "../../../dtako-scraper-relay/src/kosoku-daily";
+import {
+  compareTimecardMonth,
+  compareTimecardMonthAll,
+  parsePdfJson,
+  type CompareResult,
+} from "../../../dtako-scraper-relay/src/timecard-compare";
 import type { Env } from "../env";
 import {
   companiesListPrefix,
@@ -254,6 +266,54 @@ function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * rust-ichibanboshi (社内 LAN の橋) を叩いて JSON を返す。
+ *
+ * **握り潰さない** — 未設定・接続不能・非 2xx・非 JSON をそれぞれ原因の分かる
+ * メッセージにして throw する。Secrets Store binding は「宣言はあるが解決できない」
+ * 時に `get()` が throw する (ローカル dev や entry の消失・改名) ので、未設定と
+ * 同じ扱いに倒す — relay の `handleKintaiFetch` と同じ判断。
+ */
+async function fetchIchibanJson(env: Env, pathWithQuery: string, tag: string): Promise<unknown> {
+  const apiUrl = (env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
+  const clientId = env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
+  let clientSecret = "";
+  try {
+    clientSecret = await resolveSecretBinding(env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
+  } catch (err) {
+    console.error(JSON.stringify({ [tag]: "secret-error", error: describeError(err) }));
+  }
+  if (!apiUrl || !clientId || !clientSecret) {
+    throw new Error(
+      "勤怠の取得先 (NUXT_ICHIBAN_API_URL / NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID / " +
+        "ICHIBAN_CF_ACCESS_CLIENT_SECRET) が未設定です",
+    );
+  }
+  let res: Response;
+  try {
+    res = await fetch(`${apiUrl}${pathWithQuery}`, {
+      headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret },
+    });
+  } catch (err) {
+    // 握り潰さず原因を返す (社内 LAN が落ちている / Tunnel 断)
+    throw new Error(`rust-ichibanboshi へ接続できません: ${describeError(err)}`);
+  }
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(
+      `rust-ichibanboshi が ${res.status} を返しました: ${text.slice(0, UPSTREAM_EXCERPT)}`,
+    );
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    // CF Access の認証画面 HTML が返るケース (Service Token 失効時に踏む)
+    throw new Error(
+      `rust-ichibanboshi の応答が JSON ではありません: ${text.slice(0, UPSTREAM_EXCERPT)}`,
+    );
+  }
+}
+
 export const getKosokuEventsTool = {
   name: "get_kosoku_events",
   description:
@@ -267,56 +327,131 @@ export const getKosokuEventsTool = {
   inputSchema: getKosokuEventsArgs,
   execute: async (env: Env, args) => {
     if (!parseYm(args.month)) throw new Error("month は YYYY-MM で指定してください");
-
-    const apiUrl = (env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
-    const clientId = env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
-    // Secrets Store binding は「宣言はあるが解決できない」時に get() が throw する
-    // (ローカル dev や entry の消失・改名)。素通しすると原因が読めないので、
-    // 未設定と同じ扱いに倒す — relay の handleKintaiFetch と同じ判断。
-    let clientSecret = "";
-    try {
-      clientSecret = await resolveSecretBinding(env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
-    } catch (err) {
-      console.error(JSON.stringify({ kosoku_events: "secret-error", error: describeError(err) }));
-    }
-    if (!apiUrl || !clientId || !clientSecret) {
-      throw new Error(
-        "勤怠の取得先 (NUXT_ICHIBAN_API_URL / NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID / " +
-          "ICHIBAN_CF_ACCESS_CLIENT_SECRET) が未設定です",
-      );
-    }
-
-    const url =
-      `${apiUrl}/api/kintai/events?month=${encodeURIComponent(args.month)}` +
-      `&driver=${encodeURIComponent(args.driver)}`;
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret },
-      });
-    } catch (err) {
-      // 握り潰さず原因を返す (社内 LAN が落ちている / Tunnel 断)
-      throw new Error(`rust-ichibanboshi へ接続できません: ${describeError(err)}`);
-    }
-    const text = await res.text();
-    if (!res.ok) {
-      throw new Error(
-        `rust-ichibanboshi が ${res.status} を返しました: ${text.slice(0, UPSTREAM_EXCERPT)}`,
-      );
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      // CF Access の認証画面 HTML が返るケース (Service Token 失効時に踏む)
-      throw new Error(
-        `rust-ichibanboshi の応答が JSON ではありません: ${text.slice(0, UPSTREAM_EXCERPT)}`,
-      );
-    }
+    const parsed = await fetchIchibanJson(
+      env,
+      `/api/kintai/events?month=${encodeURIComponent(args.month)}` +
+        `&driver=${encodeURIComponent(args.driver)}`,
+      "kosoku_events",
+    );
     const rows = (parsed as { rows?: unknown }).rows;
     return { month: args.month, driver: args.driver, rows: Array.isArray(rows) ? rows : [] };
   },
 } satisfies ToolEntry<typeof getKosokuEventsArgs>;
+
+// ===== get_timecard_diff =====================================================
+
+const getTimecardDiffArgs = z
+  .object({
+    month: z.string().regex(/^\d{4}-\d{2}$/).describe("対象年月 (YYYY-MM)"),
+    driver: z
+      .string()
+      .regex(/^\d{1,10}$/)
+      .optional()
+      .describe("乗務員CD (数字)。省略すると全乗務員を突合する"),
+    tolerance_minutes: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe("拘束の許容誤差 (分)。既定 1 — 秒→分の丸め方の違いで 1 分ずれるため"),
+    only_anomalies: z
+      .boolean()
+      .optional()
+      .describe(
+        "差分も異常も無い乗務員を落とし、各乗務員の days も該当日だけに絞る (既定 true)。" +
+          "false にすると全乗務員×全暦日を返すので応答が大きくなる",
+      ),
+  })
+  .strict();
+
+/** 突合結果の 1 日が「見るべき日」か。 */
+function isNotableDay(d: CompareResult["days"][number]): boolean {
+  if (d.anomalies.length > 0) return true;
+  return d.status !== "match" && d.status !== "within-tolerance" && d.status !== "both-empty";
+}
+
+export const getTimecardDiffTool = {
+  name: "get_timecard_diff",
+  description:
+    "社内 CakePHP のタイムカード表 (PDF) の拘束と、こちらの打刻基準の拘束を**暦日ごとに突き合わせて**返す " +
+    "(Refs #492)。driver 省略で全乗務員を一括チェックできる。" +
+    "既定 (only_anomalies=true) では差分も異常も無い乗務員を落とし、各乗務員の days も該当日だけに絞る。" +
+    "status は match / within-tolerance (許容誤差内) / mismatch / nginx-only / ours-only / both-empty。" +
+    "**残業は比較しない** — nginx 側は旅費由来+手入力の加算補正、こちらは所定超で定義が別物のため。" +
+    "anomalies は nginx 側のデータ異常で、負の拘束 (negative-kosoku / negative-kosoku-type、" +
+    "yhonda-ohishi/nginx#783)・1 日 1440 分超・月次集計欄の負値を拾う。**差分と独立に出る** " +
+    "(両者が一致していても nginx 側が負なら報告される)。",
+  inputSchema: getTimecardDiffArgs,
+  execute: async (env: Env, args) => {
+    if (!parseYm(args.month)) throw new Error("month は YYYY-MM で指定してください");
+    const onlyAnomalies = args.only_anomalies ?? true;
+    const driver = args.driver ? String(Number(args.driver)) : null;
+
+    // こちら側は前月も要る — 前月から跨いだ勤務が当月 1 日に落ちるため、
+    // 取らないと月初が過少になる
+    const prevYm = prevYmOf(args.month);
+    const kosokuQuery = (ym: string) => `/api/kintai/kosoku-daily?month=${encodeURIComponent(ym)}`;
+    const [pdfBody, curBody, prevBody] = await Promise.all([
+      fetchIchibanJson(
+        env,
+        `/api/kintai/pdf-json?month=${encodeURIComponent(args.month)}` +
+          (driver ? `&driver=${encodeURIComponent(driver)}` : ""),
+        "timecard_diff",
+      ),
+      fetchIchibanJson(env, kosokuQuery(args.month), "timecard_diff"),
+      fetchIchibanJson(env, kosokuQuery(prevYm), "timecard_diff"),
+    ]);
+
+    // 当月 + 前月を乗務員CD ごとに連結してから暦日按分する。relay の
+    // `mergeKosokuShiftMaps` を使わないのは、あちらが「取得失敗 = null」を扱う
+    // 都合で null を返しうる型になっており、ここでは起きない分岐が残るため
+    const shifts = new Map<string, KosokuShift[]>();
+    for (const body of [curBody, prevBody]) {
+      for (const [driverCd, driverShifts] of parseKosokuDaily(body)) {
+        shifts.set(driverCd, [...(shifts.get(driverCd) ?? []), ...driverShifts]);
+      }
+    }
+    const oursByDriver = new Map<string, Map<string, { restraintMinutes: number }>>();
+    for (const [driverCd, driverShifts] of shifts) {
+      oursByDriver.set(driverCd, kosokuPartsByDate(driverShifts, args.month));
+    }
+    const nginxByDriver = parsePdfJson(pdfBody, args.month);
+
+    let results: CompareResult[];
+    if (driver) {
+      results = [
+        compareTimecardMonth({
+          month: args.month,
+          driverCd: driver,
+          nginx: nginxByDriver.get(driver) ?? null,
+          oursByDate: oursByDriver.get(driver) ?? new Map(),
+          toleranceMinutes: args.tolerance_minutes,
+        }),
+      ];
+    } else {
+      results = compareTimecardMonthAll({
+        month: args.month,
+        nginxByDriver,
+        oursByDriver,
+        toleranceMinutes: args.tolerance_minutes,
+        onlyAnomalies,
+      });
+    }
+    // 全暦日を返すと 130 名 × 31 日で読み手の context を食い潰す。既定では
+    // 「見るべき日」だけに絞る (件数は mismatchCount / anomalies に残る)
+    const trimmed = onlyAnomalies
+      ? results.map((r) => ({ ...r, days: r.days.filter(isNotableDay) }))
+      : results;
+
+    return {
+      month: args.month,
+      driver,
+      onlyAnomalies,
+      drivers: trimmed.length,
+      results: trimmed,
+    };
+  },
+} satisfies ToolEntry<typeof getTimecardDiffArgs>;
 
 /** server.ts が McpServer に登録する全 tool。inputSchema が異なるため
  *  `ToolEntry<z.ZodTypeAny>` に揃えて束ねる (cf-access-mcp と同じパターン)。 */
@@ -326,4 +461,5 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getWageReportTool as unknown as ToolEntry<z.ZodTypeAny>,
   getRestraintSummaryTool as unknown as ToolEntry<z.ZodTypeAny>,
   getKosokuEventsTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getTimecardDiffTool as unknown as ToolEntry<z.ZodTypeAny>,
 ];

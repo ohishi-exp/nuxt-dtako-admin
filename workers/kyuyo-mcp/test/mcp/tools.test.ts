@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   getKosokuEventsTool,
+  getTimecardDiffTool,
   listCompaniesTool,
   listMonthsTool,
   getWageReportTool,
@@ -453,12 +454,244 @@ describe("get_kosoku_events", () => {
   });
 });
 
+// ===== get_timecard_diff =====================================================
+//
+// 上流を 3 本 (pdf-json / kosoku-daily 当月 / kosoku-daily 前月) 叩くので、
+// URL ごとに応答を出し分ける stub を置く。fetchIchibanJson 側の失敗系は
+// get_kosoku_events で見ているので、ここは突合の入出力に絞る。
+
+/** kosoku-daily の 1 日 (突合が見るのは restraint_minutes だけ)。 */
+function kosokuDay(date: string, restraint: number, parts: unknown[] = []) {
+  return {
+    date,
+    restraint_minutes: restraint,
+    working_minutes: restraint,
+    overtime_minutes: 0,
+    night_minutes: 0,
+    overtime_night_minutes: 0,
+    parts,
+  };
+}
+
+const PDF_JSON = {
+  month: "2026-04",
+  drivers: [
+    {
+      driver_id: 1021,
+      name: "テスト 乗務員",
+      days: [
+        { day: 1, kosoku_minutes: 570, kosoku_by_type: { デジタコ: 570 } }, // 一致
+        { day: 3, kosoku_minutes: 600, kosoku_by_type: { デジタコ: 600 } }, // 30 分差
+        { day: 6, kosoku_minutes: -30, kosoku_by_type: { TC_DC: -30 } }, // 負
+      ],
+      totals: { shukkin: 3 },
+    },
+    {
+      driver_id: 1030,
+      name: "一致する人",
+      days: [{ day: 1, kosoku_minutes: 480, kosoku_by_type: { デジタコ: 480 } }],
+      totals: {},
+    },
+  ],
+};
+
+const KOSOKU_CURRENT = {
+  month: "2026-04",
+  drivers: [
+    {
+      driver: 1021,
+      days: [kosokuDay("2026-04-01", 570), kosokuDay("2026-04-03", 570), kosokuDay("2026-04-06", 0)],
+    },
+    { driver: 1030, days: [kosokuDay("2026-04-01", 480)] },
+  ],
+};
+
+/** 前月から跨いだ勤務。1021 は当月へ内訳で落ちる (= 当月分に足される)。 */
+const KOSOKU_PREV = {
+  month: "2026-03",
+  drivers: [
+    {
+      driver: 1021,
+      days: [
+        {
+          ...kosokuDay("2026-03-31", 600, [
+            { date: "2026-03-31", restraint_minutes: 480 },
+            { date: "2026-04-01", restraint_minutes: 120 },
+          ]),
+        },
+      ],
+    },
+  ],
+};
+
+/** URL で応答を切り替える fetch stub。 */
+function stubIchiban(over: { prev?: unknown } = {}) {
+  const calls: string[] = [];
+  vi.stubGlobal("fetch", async (url: string) => {
+    calls.push(url);
+    if (url.includes("/api/kintai/pdf-json")) {
+      return new Response(JSON.stringify(PDF_JSON), { status: 200 });
+    }
+    if (url.includes("month=2026-03")) {
+      return new Response(JSON.stringify(over.prev ?? { month: "2026-03", drivers: [] }), {
+        status: 200,
+      });
+    }
+    return new Response(JSON.stringify(KOSOKU_CURRENT), { status: 200 });
+  });
+  return calls;
+}
+
+type DiffResult = {
+  month: string;
+  driver: string | null;
+  onlyAnomalies: boolean;
+  drivers: number;
+  results: Array<{
+    driverCd: string;
+    name: string;
+    mismatchCount: number;
+    days: Array<{ date: string; status: string; diffMinutes: number | null; anomalies: unknown[] }>;
+    anomalies: Array<{ kind: string }>;
+    totals: { nginxMinutes: number; oursMinutes: number; diffMinutes: number };
+  }>;
+};
+
+describe("get_timecard_diff", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("takes the 3 upstream calls it needs (pdf-json + kosoku-daily 当月/前月)", async () => {
+    const calls = stubIchiban();
+    await getTimecardDiffTool.execute(kosokuEnv(), { month: "2026-04", driver: "1021" });
+    expect(calls.sort()).toEqual([
+      "https://rust-ichiban.example.com/api/kintai/kosoku-daily?month=2026-03",
+      "https://rust-ichiban.example.com/api/kintai/kosoku-daily?month=2026-04",
+      "https://rust-ichiban.example.com/api/kintai/pdf-json?month=2026-04&driver=1021",
+    ]);
+  });
+
+  it("1 vs 1: 既定では見るべき日だけを返す", async () => {
+    stubIchiban();
+    const res = (await getTimecardDiffTool.execute(kosokuEnv(), {
+      month: "2026-04",
+      driver: "1021",
+    })) as DiffResult;
+
+    expect(res.month).toBe("2026-04");
+    expect(res.driver).toBe("1021");
+    expect(res.onlyAnomalies).toBe(true);
+    expect(res.drivers).toBe(1);
+    const r = res.results[0]!;
+    expect(r.name).toBe("テスト 乗務員");
+    // 4/1 は一致なので落ち、30 分差の 4/3 と負の 4/6 だけ残る
+    expect(r.days.map((d) => [d.date, d.status, d.diffMinutes])).toEqual([
+      ["2026-04-03", "mismatch", 30],
+      ["2026-04-06", "mismatch", -30],
+    ]);
+    expect(r.anomalies.map((a) => a.kind)).toEqual(["negative-kosoku", "negative-kosoku-type"]);
+  });
+
+  it("only_anomalies=false なら全暦日を返す", async () => {
+    stubIchiban();
+    const res = (await getTimecardDiffTool.execute(kosokuEnv(), {
+      month: "2026-04",
+      driver: "1021",
+      only_anomalies: false,
+    })) as DiffResult;
+    expect(res.onlyAnomalies).toBe(false);
+    expect(res.results[0]!.days).toHaveLength(30);
+  });
+
+  it("driver 省略で全乗務員、差分も異常も無い人は落ちる", async () => {
+    stubIchiban();
+    const res = (await getTimecardDiffTool.execute(kosokuEnv(), { month: "2026-04" })) as DiffResult;
+    expect(res.driver).toBeNull();
+    // 1030 は完全一致なので落ちる
+    expect(res.results.map((r) => r.driverCd)).toEqual(["1021"]);
+    expect(res.drivers).toBe(1);
+  });
+
+  it("driver 省略 + only_anomalies=false なら一致した人も返る", async () => {
+    stubIchiban();
+    const res = (await getTimecardDiffTool.execute(kosokuEnv(), {
+      month: "2026-04",
+      only_anomalies: false,
+    })) as DiffResult;
+    expect(res.results.map((r) => r.driverCd)).toEqual(["1021", "1030"]);
+  });
+
+  it("前月から跨いだ勤務を当月に足す (取らないと月初が過少になる)", async () => {
+    stubIchiban({ prev: KOSOKU_PREV });
+    const res = (await getTimecardDiffTool.execute(kosokuEnv(), {
+      month: "2026-04",
+      driver: "1021",
+      only_anomalies: false,
+    })) as DiffResult;
+    const apr1 = res.results[0]!.days.find((d) => d.date === "2026-04-01")!;
+    // 当月 570 + 前月から跨いだ 120 = 690 (nginx は 570 なので差が出る)
+    expect(apr1.status).toBe("mismatch");
+    expect(apr1.diffMinutes).toBe(-120);
+  });
+
+  it("tolerance_minutes を渡すと許容内に倒れる", async () => {
+    stubIchiban();
+    const res = (await getTimecardDiffTool.execute(kosokuEnv(), {
+      month: "2026-04",
+      driver: "1021",
+      tolerance_minutes: 60,
+    })) as DiffResult;
+    // 30 分差が許容内になり、負の 4/6 だけが残る (異常は差分と独立に出る)
+    expect(res.results[0]!.days.map((d) => d.date)).toEqual(["2026-04-06"]);
+  });
+
+  it("nginx に居ない乗務員も返す", async () => {
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/api/kintai/pdf-json")) {
+        return new Response(JSON.stringify({ month: "2026-04", drivers: [] }), { status: 200 });
+      }
+      if (url.includes("month=2026-03")) {
+        return new Response(JSON.stringify({ drivers: [] }), { status: 200 });
+      }
+      return new Response(JSON.stringify(KOSOKU_CURRENT), { status: 200 });
+    });
+    const res = (await getTimecardDiffTool.execute(kosokuEnv(), { month: "2026-04" })) as DiffResult;
+    expect(res.results.map((r) => r.driverCd)).toEqual(["1021", "1030"]);
+    expect(res.results[0]!.days.every((d) => d.status === "ours-only")).toBe(true);
+  });
+
+  it("どちらにも居ない乗務員を指定しても空で返す (1 名指定は必ず 1 件返す)", async () => {
+    stubIchiban();
+    const res = (await getTimecardDiffTool.execute(kosokuEnv(), {
+      month: "2026-04",
+      driver: "9999",
+    })) as DiffResult;
+    expect(res.results).toHaveLength(1);
+    expect(res.results[0]!.driverCd).toBe("9999");
+    expect(res.results[0]!.name).toBe("");
+    expect(res.results[0]!.days).toEqual([]);
+    expect(res.results[0]!.mismatchCount).toBe(0);
+  });
+
+  it("月の書式が通っても範囲外なら上流を叩かない", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    await expect(
+      getTimecardDiffTool.execute(kosokuEnv(), { month: "2026-13" }),
+    ).rejects.toThrow("YYYY-MM");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe("ALL_TOOLS", () => {
-  it("registers exactly the 5 read-only tools, none requiring a scope", () => {
+  it("registers exactly the 6 read-only tools, none requiring a scope", () => {
     expect(ALL_TOOLS.map((t) => t.name).sort()).toEqual(
       [
         "get_kosoku_events",
         "get_restraint_summary",
+        "get_timecard_diff",
         "get_wage_report",
         "list_companies",
         "list_months",
