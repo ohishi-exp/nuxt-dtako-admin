@@ -24,6 +24,7 @@ export default defineConfig({
         'src/theearth-net780-client.ts',
         'src/restraint-wage.ts',
         'src/restraint-viewer-auth.ts',
+        'src/restraint-queue.ts',
         'src/theearth-session.ts',
         'src/promise-queue.ts',
         'src/employee-master.ts',

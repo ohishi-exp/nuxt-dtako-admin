@@ -62,6 +62,7 @@ import {
   devViewerCompIds,
   isR2OnlyRestraintPath,
 } from "./restraint-viewer-auth";
+import { needsTheearthQueue } from "./restraint-queue";
 import {
   buildDvrSearchKey,
   dvrDataUrl,
@@ -1674,10 +1675,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!routing) {
       return dvrJsonError(400, "X-Theearth-Comp-Id / X-Theearth-User-B64 ヘッダが不正です");
     }
-    // theearth への実 HTTP コールを cookie の read→write ごと直列化する (Refs #237)。
+    // theearth の cookie を read→HTTP→write するルートだけ直列化する (Refs #237/#507)。
     // dvr-api / daily-report-api と同じキューなので、ページをまたいだ並行アクセス
     // も直列化される (同一 ASP.NET セッションへの並行リクエストは hang/500 する)。
-    return this.theearthQueue.enqueue(() => this.dispatchRestraintApi(request, url, routing));
+    // theearth に触らないルート (wage-report / kosoku-daily 中継 / D1 / R2 系) は
+    // キューを通さない — 全ルートを直列化していた時は、タブを開いた時の同時
+    // リクエストが 1 本ずつ処理され、D1 のみの employee-master が CPU 0ms のまま
+    // p95 31 秒になっていた (本番実測 2026-07-29)。キュー外ルートはセッション
+    // record を読むだけで書かないので、並行しても theearth セッションは壊れない。
+    if (needsTheearthQueue(url.pathname)) {
+      return this.theearthQueue.enqueue(() => this.dispatchRestraintApi(request, url, routing));
+    }
+    return this.dispatchRestraintApi(request, url, routing);
   }
 
   /** URL query から RestraintCsvParams を組み立てる。検証は呼び出し側で
