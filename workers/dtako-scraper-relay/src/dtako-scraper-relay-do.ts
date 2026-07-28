@@ -151,6 +151,7 @@ import {
   type TimecardDailyRow,
   type WageReportSource,
 } from "./timecard-summary";
+import { kosokuPartsByDate, parseKosokuDaily, prevYmOf, type KosokuShift } from "./kosoku-daily";
 import { buildRestraintD1Statements, type RestraintD1Entry } from "./restraint-d1";
 import { buildRestraintPushBodies } from "./restraint-push";
 import {
@@ -2627,6 +2628,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return dvrJsonError(502, "勤怠 API の取得に失敗しました");
     }
 
+    // 1.5) 打刻基準の日別サマリ (kosoku-daily) — **時間の出どころはこちらに統一する**
+    // (2026-07-28 決定)。打刻から組んだ勤務は、長距離のように出発時と帰着時にしか
+    // 打刻しない人で数日が 1 勤務になり、所定を超えた分が全部 時間外になる
+    // (実測: 乗務員 1104 / 2026-04 で 8 日間 1 勤務・月の残業 321h04m)。
+    //
+    // **前月も取る** — 前月に始業して当月へ跨いだ勤務は、上流が始業日 (= 前月) の
+    // 応答にしか入れないため。`kosokuPartsByDate` が当月に落ちる分だけ拾う。
+    // 取れなければ null のまま = 従来どおり打刻から組む (取り込みを止めない)。
+    const kosokuShifts = await this.loadKosokuShifts(apiUrl, clientId, clientSecret, ym, prevYmOf(ym));
+
     // 2) 所定労働時間・休日出勤の承認・社員のスコープ・夜勤者を D1 から引く
     const { schedules, approved, scopes, nightShift } = await this.loadKintaiInputs(record.compId, ym);
     const scopeOf = (driverCd: string) => scopes.get(driverCd) ?? { branchCode: null, jobName: null };
@@ -2645,7 +2656,23 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       isNightShift: (driverCd) => nightShift.has(driverCd),
       // 当日 (JST) の未終業打刻を「退社打刻なし」にしないための基準 (nginx#780)
       today: formatJstDate(new Date()),
+      // 上流が取れた時だけ渡す。**渡した月は全員ぶん kosoku 由来**になるので、
+      // 同じ月の中で人によって出どころが変わることは無い (2026-07-28 決定)
+      ...(kosokuShifts
+        ? {
+            kosokuPartsFor: (driverCd: string) => {
+              const shifts = kosokuShifts.get(driverCd);
+              return shifts ? kosokuPartsByDate(shifts, ym) : null;
+            },
+          }
+        : {}),
     });
+    if (!kosokuShifts) {
+      warnings.push(
+        "打刻基準の日別サマリ (kosoku-daily) が取れなかったため、時間は打刻から組んでいます"
+        + " — 長距離のように運行単位でしか打刻しない乗務員は残業が過大に出ます。取り込み直してください",
+      );
+    }
 
     // 3) R2 へバージョン管理付きで保存
     const prefix = this.env.KINTAI_R2_PREFIX || "kintai";
@@ -2880,6 +2907,50 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       console.error(JSON.stringify({ kosoku_daily: "error", error: describeUnknownError(err) }));
       return dvrJsonError(502, "拘束サマリ API の取得に失敗しました");
     }
+  }
+
+  /**
+   * `kosoku-daily` を当月 + 前月ぶん取って乗務員CD 引きにまとめる (2026-07-28)。
+   *
+   * **取れなければ null** — 取り込み自体は止めず、呼び出し側が従来どおり打刻から
+   * 組んだ上で warning を出す。片方だけ取れた場合は取れた方だけを使う (前月が
+   * 落ちても当月の勤務は正しく、月初に跨いだ勤務が欠けるだけで済む)。
+   */
+  private async loadKosokuShifts(
+    apiUrl: string,
+    clientId: string,
+    clientSecret: string,
+    ...months: string[]
+  ): Promise<Map<string, KosokuShift[]> | null> {
+    const fetchMonth = async (ym: string): Promise<Map<string, KosokuShift[]> | null> => {
+      try {
+        const upstream = await fetch(
+          `${apiUrl}/api/kintai/kosoku-daily?month=${encodeURIComponent(ym)}`,
+          { headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret } },
+        );
+        if (!upstream.ok) {
+          console.error(JSON.stringify({ kintai_fetch_kosoku: "upstream-error", ym, status: upstream.status }));
+          return null;
+        }
+        return parseKosokuDaily(JSON.parse(await upstream.text()));
+      } catch (err) {
+        console.error(
+          JSON.stringify({ kintai_fetch_kosoku: "error", ym, error: describeUnknownError(err) }),
+        );
+        return null;
+      }
+    };
+    const results = await Promise.all(months.map(fetchMonth));
+    // 当月 (先頭) が取れていないと時間が丸ごと出ないので、その時は諦める
+    if (!results[0]) return null;
+    const merged = new Map<string, KosokuShift[]>();
+    for (const result of results) {
+      if (!result) continue;
+      for (const [driverCd, shifts] of result) {
+        merged.set(driverCd, [...(merged.get(driverCd) ?? []), ...shifts]);
+      }
+    }
+    return merged;
   }
 
   // R2 突合マスタ (salary-cd-map) → 社員マスタの取り込み
