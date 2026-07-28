@@ -32,6 +32,18 @@ export interface KosokuCalendarPart {
   nightMinutes: number;
   /** 時間外に重なる深夜。 */
   overtimeNightMinutes: number;
+  /**
+   * **紙のタイムカード表がこの暦日から引いている同日フェリー控除** (分)。
+   * (Refs ohishi-exp/rust-ichibanboshi#146/#148)
+   *
+   * こちらの拘束には**入っていない** — 上流が `dtako_ferry_rows` から算出して
+   * 添えているだけで、紙との差の原因を説明するために運ぶ。
+   *
+   * **上流は暦日に 1 回しか載せない。** フェリー自体が休息イベントなので同じ暦日に
+   * 勤務が複数できることがあり (実測 1726 / 2026-03-14 は 4 勤務)、全部に載せると
+   * ここで合算したときに 4 倍になる。上流は最初の勤務にだけ載せている。
+   */
+  ferryMinusMinutes: number;
 }
 
 /** 上流の 1 勤務 (必要な項目だけ)。 */
@@ -66,6 +78,7 @@ function toPart(r: Record<string, unknown>): KosokuCalendarPart {
     overtimeMinutes: num(r.overtime_minutes),
     nightMinutes: num(r.night_minutes) + num(r.legal_holiday_night_minutes),
     overtimeNightMinutes: num(r.overtime_night_minutes),
+    ferryMinusMinutes: num(r.ferry_minus_minutes),
   };
 }
 
@@ -134,6 +147,7 @@ export function kosokuPartsByDate(
         overtimeMinutes: v.overtimeMinutes,
         nightMinutes: v.nightMinutes,
         overtimeNightMinutes: v.overtimeNightMinutes,
+        ferryMinusMinutes: v.ferryMinusMinutes,
       });
       return;
     }
@@ -142,6 +156,7 @@ export function kosokuPartsByDate(
     cur.overtimeMinutes += v.overtimeMinutes;
     cur.nightMinutes += v.nightMinutes;
     cur.overtimeNightMinutes += v.overtimeNightMinutes;
+    cur.ferryMinusMinutes += v.ferryMinusMinutes;
   };
   for (const shift of shifts) {
     if (shift.parts.length > 0) {

@@ -31,9 +31,18 @@
  *    1379 / 2026-04-27 は差 -1 分、減算前だと +12 分。こちらの `kosoku-daily` も
  *    その区間を拘束に入れていないため
  *
- * **フェリー控除 (`ferry_minus`) だけは逆で、引きすぎ**。1726 / 2026-03-14 は
- * nginx -112 に対しこちら 321 で、差 -433 が控除額そのものだった。基準は変えず、
- * 差の原因として `anomalies` に書く。
+ * **フェリー控除だけは逆で、引きすぎ**。1726 / 2026-03-14 は nginx -112 に対し
+ * こちら 321 で、差 -433 が控除額そのものだった。基準は変えず、差の原因として
+ * `anomalies` に書く。
+ *
+ * ## 控除額の出どころは**こちら側** (2026-07-28)
+ *
+ * 一時 nginx が `ferry_minus` を出していたが (yhonda-ohishi/nginx#787)、算出コストが
+ * 運行ごとの N+1 で全乗務員 +5 秒だったため revert され (#788)、
+ * **`dtako_ferry_rows` からの算出は rust 側へ移った**
+ * (ohishi-exp/rust-ichibanboshi#146/#148)。よって控除額は `kosoku-daily` の日別行に
+ * 乗って来る。nginx が再び出した場合に備えて pdf-json 側の読み取りも残してあるが、
+ * **こちらの値を優先**する。
  */
 
 /** 突合の既定の許容誤差 (分)。秒→分の丸め方の違いで 1 分ずれる。 */
@@ -447,7 +456,7 @@ export function compareTimecardMonth(input: {
   month: string;
   driverCd: string;
   nginx: NginxDriverMonth | null;
-  oursByDate: ReadonlyMap<string, { restraintMinutes: number }>;
+  oursByDate: ReadonlyMap<string, { restraintMinutes: number, ferryMinusMinutes?: number }>;
   toleranceMinutes?: number;
 }): CompareResult {
   const tolerance = input.toleranceMinutes ?? DEFAULT_TOLERANCE_MINUTES;
@@ -462,18 +471,29 @@ export function compareTimecardMonth(input: {
   let mismatchCount = 0;
 
   for (const date of daysOfMonth(input.month)) {
+    const ours = input.oursByDate.get(date);
     const nginxDay = nginxByDate.get(date) ?? null;
     const nginxMinutes = nginxDay?.kosokuMinutes ?? null;
-    const oursMinutes = input.oursByDate.get(date)?.restraintMinutes ?? null;
+    const oursMinutes = ours?.restraintMinutes ?? null;
     const status = statusOf(nginxMinutes, oursMinutes, tolerance);
-    const dayFound = nginxDay ? dayAnomalies(nginxDay) : [];
+    // 控除額は**こちら側の kosoku-daily 由来**を優先する。nginx が出していた頃の
+    // 値 (pdf-json の `ferry_minus`) は後方互換で残すだけ
+    const ferryFromOurs = ours?.ferryMinusMinutes;
+    const withFerry: NginxDay | null =
+      nginxDay && ferryFromOurs !== undefined && ferryFromOurs > 0
+        ? { ...nginxDay, ferryMinusMinutes: ferryFromOurs }
+        : nginxDay;
+    const dayFound = withFerry ? dayAnomalies(withFerry) : [];
     anomalies.push(...dayFound);
     if (nginxMinutes !== null) nginxTotal += nginxMinutes;
     if (oursMinutes !== null) oursTotal += oursMinutes;
     if (status !== "match" && status !== "within-tolerance" && status !== "both-empty") {
       mismatchCount += 1;
     }
-    const ferryMinusMinutes = nginxDay?.ferryMinusMinutes ?? null;
+    const ferryMinusMinutes =
+      ferryFromOurs !== undefined && ferryFromOurs > 0
+        ? ferryFromOurs
+        : (nginxDay?.ferryMinusMinutes ?? null);
     if (ferryMinusMinutes !== null) ferryTotal += ferryMinusMinutes;
     days.push({
       date,
@@ -517,7 +537,10 @@ export function compareTimecardMonth(input: {
 export function compareTimecardMonthAll(input: {
   month: string;
   nginxByDriver: ReadonlyMap<string, NginxDriverMonth>;
-  oursByDriver: ReadonlyMap<string, ReadonlyMap<string, { restraintMinutes: number }>>;
+  oursByDriver: ReadonlyMap<
+    string,
+    ReadonlyMap<string, { restraintMinutes: number, ferryMinusMinutes?: number }>
+  >;
   toleranceMinutes?: number;
   onlyAnomalies?: boolean;
 }): CompareResult[] {
