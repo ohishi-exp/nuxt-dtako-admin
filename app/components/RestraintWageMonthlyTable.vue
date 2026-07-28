@@ -3,6 +3,13 @@
  * 月次集計テーブル (theearth プレビュー形式 + 時間給の法定区分列、Refs #244)。
  * 単月表示と一括印刷 (月毎 1 テーブル) の両方で使う。
  * `expandWage` で時間給内訳列の表示/非表示を切り替える (印刷にもそのまま効く)。
+ *
+ * **時間区分 (時間外・週40超過・深夜・時間外深夜・法定休日) は `row.wage.minutes`
+ * = 最低賃金チェックと同じ `classifyMonth` の結果を出す** (2026-07-28 決定)。
+ * サマリの生値 (`summary.overtimeMinutes` 等) は法定休日に働いた分の時間外も
+ * 含んでいるため、同じ人・同じ月で 2 タブの時間外が食い違っていた
+ * (実測: 1018 / 2026-04 で 78h06m vs 68h54m、差は日曜 4 日分の 9h12m)。
+ * 賃金は法定休日労働を休日割増 1.35 に一本化する側が正なので、そちらへ寄せる。
  */
 import type { WageReportRow } from '~/utils/restraint-wage-view'
 
@@ -44,9 +51,14 @@ function fmtDays(n: number | undefined): string {
           <th class="px-1.5 py-1.5 text-right kintai-col" title="打刻から数えた欠勤日数">欠勤</th>
           <th class="px-1.5 py-1.5 text-right kintai-col" title="打刻が翌日にまたがっていた日数 (終業の押し忘れ)。この日の時間は賃金計算から外れている">打刻<br>エラー</th>
           <th class="px-1.5 py-1.5 text-right">実働</th>
-          <th class="px-1.5 py-1.5 text-right">時間外</th>
-          <th class="px-1.5 py-1.5 text-right">深夜</th>
-          <th class="px-1.5 py-1.5 text-right">時間外<br>深夜</th>
+          <!-- 時間区分は最低賃金チェックと同じ `classifyMonth` の結果を出す (2026-07-28 決定)。
+               サマリの生 `overtimeMinutes` は法定休日に働いた分の時間外も混ざっており、
+               同じ月の同じ人が 2 タブで違う時間外になっていた -->
+          <th class="px-1.5 py-1.5 text-right" title="法定休日を除いた平日・法定外休日の時間外 (最低賃金チェックの「残業代」列と同じ値)">時間外</th>
+          <th class="px-1.5 py-1.5 text-right" title="週40時間超過分 (時間外・法定休日として計上済みの分は除く)">週40<br>超過</th>
+          <th class="px-1.5 py-1.5 text-right" title="残業ではない通常勤務中の深夜 (0.25 加算分。実働の内数)">深夜</th>
+          <th class="px-1.5 py-1.5 text-right" title="時間外かつ深夜">時間外<br>深夜</th>
+          <th class="px-1.5 py-1.5 text-right" title="法定休日 (既定 日曜) の実働。労基法上この日に時間外の概念は無く休日割増 1.35 (深夜は 1.6) に一本化されるため、時間外列には出ない。深夜分がある行は下段に併記">法定<br>休日</th>
           <th class="px-1.5 py-1.5 text-right wage-col">単価</th>
           <template v-if="expandWage">
             <th v-for="c in WAGE_COLUMNS" :key="c.key" class="px-1.5 py-1.5 text-right wage-col">{{ c.label }}</th>
@@ -80,9 +92,18 @@ function fmtDays(n: number | undefined): string {
             {{ fmtDays(row.summary.punchErrorDays) }}
           </td>
           <td class="px-1.5 py-1 text-right">{{ fmtMinutes(row.summary.workingMinutes) }}</td>
-          <td class="px-1.5 py-1 text-right">{{ fmtMinutes(row.summary.overtimeMinutes) }}</td>
-          <td class="px-1.5 py-1 text-right">{{ fmtMinutes(row.summary.nightMinutes) }}</td>
-          <td class="px-1.5 py-1 text-right">{{ fmtMinutes(row.summary.overtimeNightMinutes) }}</td>
+          <td class="px-1.5 py-1 text-right">{{ fmtMinutes(row.wage.minutes.overtime) }}</td>
+          <td class="px-1.5 py-1 text-right">{{ fmtMinutes(row.wage.minutes.weekly40Excess) }}</td>
+          <td class="px-1.5 py-1 text-right">{{ fmtMinutes(row.wage.minutes.night) }}</td>
+          <td class="px-1.5 py-1 text-right">{{ fmtMinutes(row.wage.minutes.overtimeNight) }}</td>
+          <td class="px-1.5 py-1 text-right">
+            {{ fmtMinutes(row.wage.minutes.legalHoliday) }}
+            <!-- 法定休日の深夜 (1.6 倍) は別単価なので、有る行だけ下段に出す
+                 (常設列にすると既定の日勤者では全行 0h00m で紙面を食うだけ) -->
+            <div v-if="row.wage.minutes.legalHolidayNight > 0" class="text-[10px] text-gray-500" title="うち深夜 (1.6 倍)">
+              夜 {{ fmtMinutes(row.wage.minutes.legalHolidayNight) }}
+            </div>
+          </td>
           <td class="px-1.5 py-1 text-right wage-col">{{ fmtYen(row.wage.hourlyRate) }}</td>
           <template v-if="expandWage">
             <td v-for="c in WAGE_COLUMNS" :key="c.key" class="px-1.5 py-1 text-right wage-col">
