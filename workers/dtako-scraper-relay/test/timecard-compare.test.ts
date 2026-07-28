@@ -6,6 +6,8 @@ import {
   daysOfMonth,
   parsePdfJson,
   pdfJsonError,
+  summarizeCompareResult,
+  summarizeCompareResults,
   toDateKey,
   type NginxDriverMonth,
 } from "../src/timecard-compare";
@@ -717,5 +719,128 @@ describe("compareTimecardMonthAll", () => {
     });
     // 1030 の 60 分差が許容内に入り落ちる
     expect(rs.map((r) => r.driverCd)).toEqual(["1022", "1099"]);
+  });
+});
+
+describe("summarizeCompareResult", () => {
+  it("status ごとの日数を全 status ぶん (0 も) 返す", () => {
+    const r = compareTimecardMonth({
+      month: "2026-04",
+      driverCd: "1021",
+      nginx: nginxDriver([
+        { date: "2026-04-01", kosokuMinutes: 570 },
+        { date: "2026-04-02", kosokuMinutes: 571 },
+        { date: "2026-04-03", kosokuMinutes: 500 },
+        { date: "2026-04-04", kosokuMinutes: 480 },
+      ]),
+      oursByDate: ours({
+        "2026-04-01": 570,
+        "2026-04-02": 570,
+        "2026-04-03": 570,
+        "2026-04-05": 600,
+      }),
+    });
+    const s = summarizeCompareResult(r);
+    expect(s.driverCd).toBe("1021");
+    expect(s.name).toBe("テスト 乗務員");
+    expect(s.statusDays).toEqual({
+      match: 1,
+      "within-tolerance": 1,
+      mismatch: 1,
+      "nginx-only": 1,
+      "ours-only": 1,
+      // 4 月は 30 日。5 日ぶんが上に出ているので残りは 25 日
+      "both-empty": 25,
+    });
+    expect(s.mismatchCount).toBe(3);
+  });
+
+  it("mismatch 日の diff の幅を返す — 一定幅の控除か勤務の切り方かを 1 行で見分ける", () => {
+    const r = compareTimecardMonth({
+      month: "2026-04",
+      driverCd: "1026",
+      nginx: nginxDriver([
+        { date: "2026-04-01", kosokuMinutes: 500 },
+        { date: "2026-04-02", kosokuMinutes: 400 },
+        { date: "2026-04-03", kosokuMinutes: 600 },
+      ]),
+      oursByDate: ours({ "2026-04-01": 568, "2026-04-02": 476, "2026-04-03": 600 }),
+    });
+    const s = summarizeCompareResult(r);
+    // 4/3 は一致なので幅に入らない。-68 と -76 だけ
+    expect(s.diffRange).toEqual({ min: -76, max: -68 });
+  });
+
+  it("mismatch が 1 日も無ければ diffRange は null", () => {
+    const r = compareTimecardMonth({
+      month: "2026-04",
+      driverCd: "1021",
+      nginx: nginxDriver([{ date: "2026-04-01", kosokuMinutes: 570 }]),
+      oursByDate: ours({ "2026-04-01": 570 }),
+    });
+    expect(summarizeCompareResult(r).diffRange).toBeNull();
+  });
+
+  it("片側しか無い日は diffRange に入らない (引き算が成立していない)", () => {
+    const r = compareTimecardMonth({
+      month: "2026-04",
+      driverCd: "1099",
+      nginx: null,
+      oursByDate: ours({ "2026-04-01": 480, "2026-04-02": 500 }),
+    });
+    const s = summarizeCompareResult(r);
+    expect(s.statusDays["ours-only"]).toBe(2);
+    expect(s.mismatchCount).toBe(2);
+    expect(s.diffRange).toBeNull();
+    // nginx に居ないので氏名が空になる — 誰なのかは別途こちら側から補う (#501 A)
+    expect(s.name).toBe("");
+  });
+
+  it("anomaly を kind ごとに数える (0 件の kind は載せない)", () => {
+    const r = compareTimecardMonth({
+      month: "2026-04",
+      driverCd: "1022",
+      nginx: nginxDriver(
+        [
+          { date: "2026-04-01", kosokuMinutes: -30 },
+          { date: "2026-04-02", kosokuMinutes: -12 },
+        ],
+        { 拘束時間: -42 },
+      ),
+      oursByDate: ours({ "2026-04-01": 0, "2026-04-02": 0 }),
+    });
+    const s = summarizeCompareResult(r);
+    expect(s.anomalyKinds["negative-kosoku"]).toBe(2);
+    expect(s.anomalyKinds["negative-total"]).toBe(1);
+    expect(s.anomalyKinds["impossible-kosoku"]).toBeUndefined();
+    expect(s.anomalyCount).toBe(3);
+  });
+
+  it("月合計は突合結果のものをそのまま持つ", () => {
+    const r = compareTimecardMonth({
+      month: "2026-04",
+      driverCd: "1021",
+      nginx: nginxDriver([{ date: "2026-04-01", kosokuMinutes: 500 }]),
+      oursByDate: ours({ "2026-04-01": 570 }),
+    });
+    expect(summarizeCompareResult(r).totals).toEqual(r.totals);
+  });
+});
+
+describe("summarizeCompareResults", () => {
+  it("並び順を保ったまま全件を畳む", () => {
+    const rs = compareTimecardMonthAll({
+      month: "2026-04",
+      nginxByDriver: new Map<string, NginxDriverMonth>([
+        ["1021", { ...nginxDriver([{ date: "2026-04-01", kosokuMinutes: 570 }]), driverCd: "1021" }],
+      ]),
+      oursByDriver: new Map([
+        ["1021", ours({ "2026-04-01": 500 })],
+        ["1099", ours({ "2026-04-02": 480 })],
+      ]),
+    });
+    const summaries = summarizeCompareResults(rs);
+    expect(summaries.map((s) => s.driverCd)).toEqual(["1021", "1099"]);
+    expect(summaries[1]?.statusDays["ours-only"]).toBe(1);
   });
 });

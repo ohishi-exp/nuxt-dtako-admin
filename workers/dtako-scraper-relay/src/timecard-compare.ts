@@ -561,3 +561,80 @@ export function compareTimecardMonthAll(input: {
   }
   return out;
 }
+
+/**
+ * 1 乗務員 × 1 ヶ月の突合を、**日別を落として 1 行**にしたもの (Refs #501 F)。
+ *
+ * `only_anomalies=true` でも 129 名で 54 万文字返り、読み手の context に載らなかった。
+ * まずこの形で「誰のどこが変か」を数えてから、`driver` 指定で日別に掘る。
+ */
+export interface CompareSummaryRow {
+  driverCd: string;
+  /** nginx 側の氏名。**`ours-only` の乗務員は空**になる (nginx に居ないため)。 */
+  name: string;
+  /** status ごとの日数。すべての status を必ず持つ (0 も載せる)。 */
+  statusDays: Record<CompareDay["status"], number>;
+  mismatchCount: number;
+  anomalyCount: number;
+  /** kind ごとの anomaly 件数。**0 件の kind は載せない**。 */
+  anomalyKinds: Partial<Record<CompareAnomaly["kind"], number>>;
+  totals: CompareResult["totals"];
+  /**
+   * `mismatch` 日の `diffMinutes` の最小・最大。mismatch が 1 日も無ければ null。
+   *
+   * 幅が狭い (例 -76〜-68) なら**日ごとに一定の控除**、広いなら勤務の切り方の違い、
+   * と型を 1 行で見分けるために持つ。
+   */
+  diffRange: { min: number; max: number } | null;
+}
+
+const ALL_STATUSES: CompareDay["status"][] = [
+  "match",
+  "within-tolerance",
+  "mismatch",
+  "nginx-only",
+  "ours-only",
+  "both-empty",
+];
+
+/** 突合結果 1 件を 1 行に畳む。日別は落とす。 */
+export function summarizeCompareResult(result: CompareResult): CompareSummaryRow {
+  const statusDays = Object.fromEntries(ALL_STATUSES.map((s) => [s, 0])) as Record<
+    CompareDay["status"],
+    number
+  >;
+  const anomalyKinds: Partial<Record<CompareAnomaly["kind"], number>> = {};
+  let min: number | null = null;
+  let max: number | null = null;
+
+  for (const day of result.days) {
+    statusDays[day.status] += 1;
+    // 幅は mismatch だけで取る。within-tolerance は丸めノイズ、片側欠けの日は
+    // diffMinutes が null で引き算になっていない
+    if (day.status === "mismatch" && day.diffMinutes !== null) {
+      min = min === null ? day.diffMinutes : Math.min(min, day.diffMinutes);
+      max = max === null ? day.diffMinutes : Math.max(max, day.diffMinutes);
+    }
+  }
+  for (const a of result.anomalies) {
+    anomalyKinds[a.kind] = (anomalyKinds[a.kind] ?? 0) + 1;
+  }
+
+  return {
+    driverCd: result.driverCd,
+    name: result.name,
+    statusDays,
+    mismatchCount: result.mismatchCount,
+    anomalyCount: result.anomalies.length,
+    anomalyKinds,
+    totals: result.totals,
+    diffRange: min === null || max === null ? null : { min, max },
+  };
+}
+
+/** 全乗務員ぶんを畳む。並び順は入力のまま (乗務員CD 昇順)。 */
+export function summarizeCompareResults(
+  results: readonly CompareResult[],
+): CompareSummaryRow[] {
+  return results.map(summarizeCompareResult);
+}

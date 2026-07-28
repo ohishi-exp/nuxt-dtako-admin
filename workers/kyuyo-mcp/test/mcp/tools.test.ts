@@ -525,7 +525,7 @@ const KOSOKU_PREV = {
 };
 
 /** URL で応答を切り替える fetch stub。 */
-function stubIchiban(over: { prev?: unknown } = {}) {
+function stubIchiban(over: { prev?: unknown; cur?: unknown } = {}) {
   const calls: string[] = [];
   vi.stubGlobal("fetch", async (url: string) => {
     calls.push(url);
@@ -537,7 +537,7 @@ function stubIchiban(over: { prev?: unknown } = {}) {
         status: 200,
       });
     }
-    return new Response(JSON.stringify(KOSOKU_CURRENT), { status: 200 });
+    return new Response(JSON.stringify(over.cur ?? KOSOKU_CURRENT), { status: 200 });
   });
   return calls;
 }
@@ -697,6 +697,177 @@ describe("get_timecard_diff", () => {
       getTimecardDiffTool.execute(kosokuEnv(), { month: "2026-13" }),
     ).rejects.toThrow("YYYY-MM");
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ===== get_timecard_diff (mode=summary) ======================================
+
+/** こちらにしか居ない乗務員 (`ours-only`) を 1 名混ぜた kosoku-daily。 */
+const KOSOKU_WITH_OURS_ONLY = {
+  month: "2026-04",
+  drivers: [
+    ...KOSOKU_CURRENT.drivers,
+    { driver: 1211, days: [kosokuDay("2026-04-01", 673), kosokuDay("2026-04-02", 851)] },
+  ],
+};
+
+/** 給与比較アーカイブ (R2) に 1211 の営業所だけ置いた環境。 */
+function summaryModeEnv(entries?: Record<string, MockR2Entry>): Env {
+  return kosokuEnv({
+    DTAKO_R2: createMockR2(
+      entries ?? {
+        "restraint/27324455/2026-04/summary/1211/latest.json": {
+          value: JSON.stringify(
+            summary({
+              driverCd: "1211",
+              driverName: "薮田　高敏",
+              branchName: "大石運輸倉庫㈱　大阪営業所",
+            }),
+          ),
+        },
+      },
+    ),
+  });
+}
+
+type DiffSummaryResult = {
+  mode: string;
+  drivers: number;
+  ours_only_by_branch: Array<{ branchName: string | null; drivers: number; days: number }>;
+  results: Array<{
+    driverCd: string;
+    name: string;
+    oursName: string | null;
+    branchName: string | null;
+    statusDays: Record<string, number>;
+    diffRange: { min: number; max: number } | null;
+    days?: unknown;
+  }>;
+};
+
+describe("get_timecard_diff (mode=summary)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("日別を落として乗務員ごとに 1 行にする", async () => {
+    stubIchiban({ cur: KOSOKU_WITH_OURS_ONLY });
+    const res = (await getTimecardDiffTool.execute(summaryModeEnv(), {
+      month: "2026-04",
+      mode: "summary",
+    })) as DiffSummaryResult;
+    expect(res.mode).toBe("summary");
+    // 1030 は完全一致なので only_anomalies (既定 true) で落ちる
+    expect(res.results.map((r) => r.driverCd)).toEqual(["1021", "1211"]);
+    for (const row of res.results) expect(row.days).toBeUndefined();
+    // 1021 は 4/3 が +30 (nginx 600 / ours 570)、4/6 が -30 (nginx -30 / ours 0)
+    expect(res.results[0]?.statusDays.mismatch).toBe(2);
+    expect(res.results[0]?.diffRange).toEqual({ min: -30, max: 30 });
+  });
+
+  it("nginx に居ない乗務員の氏名・営業所をこちら側のアーカイブから補う", async () => {
+    stubIchiban({ cur: KOSOKU_WITH_OURS_ONLY });
+    const res = (await getTimecardDiffTool.execute(summaryModeEnv(), {
+      month: "2026-04",
+      mode: "summary",
+    })) as DiffSummaryResult;
+    const oursOnly = res.results.find((r) => r.driverCd === "1211");
+    // 突合の name は nginx 由来なので空。誰なのかは oursName でしか分からない
+    expect(oursOnly?.name).toBe("");
+    expect(oursOnly?.oursName).toBe("薮田　高敏");
+    expect(oursOnly?.branchName).toBe("大石運輸倉庫㈱　大阪営業所");
+    expect(oursOnly?.statusDays["ours-only"]).toBe(2);
+  });
+
+  it("ours-only の日数を営業所ごとに数える (日数の多い順)", async () => {
+    stubIchiban({
+      cur: {
+        month: "2026-04",
+        drivers: [
+          ...KOSOKU_WITH_OURS_ONLY.drivers,
+          // 別営業所で 1 日だけ。日数の多い大阪より後ろに来る
+          { driver: 1300, days: [kosokuDay("2026-04-01", 500)] },
+        ],
+      },
+    });
+    const env = summaryModeEnv({
+      "restraint/27324455/2026-04/summary/1211/latest.json": {
+        value: JSON.stringify(
+          summary({
+            driverCd: "1211",
+            driverName: "薮田　高敏",
+            branchName: "大石運輸倉庫㈱　大阪営業所",
+          }),
+        ),
+      },
+      "restraint/27324455/2026-04/summary/1300/latest.json": {
+        value: JSON.stringify(
+          summary({ driverCd: "1300", driverName: "別所　一", branchName: "テスト運輸　第二営業所" }),
+        ),
+      },
+      // 乗務員CD が数字でない行はスキップする (アーカイブ側の事故に引きずられない)
+      "restraint/27324455/2026-04/summary/x/latest.json": {
+        value: JSON.stringify(summary({ driverCd: "abc" })),
+      },
+    });
+    const res = (await getTimecardDiffTool.execute(env, {
+      month: "2026-04",
+      mode: "summary",
+    })) as DiffSummaryResult;
+    expect(res.ours_only_by_branch).toEqual([
+      { branchName: "大石運輸倉庫㈱　大阪営業所", drivers: 1, days: 2 },
+      { branchName: "テスト運輸　第二営業所", drivers: 1, days: 1 },
+    ]);
+  });
+
+  it("アーカイブに居ない乗務員は branchName が null になるだけで結果は返る", async () => {
+    stubIchiban({ cur: KOSOKU_WITH_OURS_ONLY });
+    const res = (await getTimecardDiffTool.execute(summaryModeEnv({}), {
+      month: "2026-04",
+      mode: "summary",
+    })) as DiffSummaryResult;
+    const oursOnly = res.results.find((r) => r.driverCd === "1211");
+    expect(oursOnly?.branchName).toBeNull();
+    expect(oursOnly?.oursName).toBeNull();
+    expect(res.ours_only_by_branch).toEqual([{ branchName: null, drivers: 1, days: 2 }]);
+  });
+
+  it("R2 が読めなくても突合は返す (営業所は諦める)", async () => {
+    stubIchiban({ cur: KOSOKU_WITH_OURS_ONLY });
+    const broken = kosokuEnv({
+      DTAKO_R2: {
+        list: async () => {
+          throw new Error("R2 down");
+        },
+      } as unknown as R2Bucket,
+    });
+    const res = (await getTimecardDiffTool.execute(broken, {
+      month: "2026-04",
+      mode: "summary",
+    })) as DiffSummaryResult;
+    expect(res.results.map((r) => r.driverCd)).toEqual(["1021", "1211"]);
+    expect(res.results.every((r) => r.branchName === null)).toBe(true);
+  });
+
+  it("driver 指定でも summary で返せる", async () => {
+    stubIchiban({ cur: KOSOKU_WITH_OURS_ONLY });
+    const res = (await getTimecardDiffTool.execute(summaryModeEnv(), {
+      month: "2026-04",
+      driver: "1211",
+      mode: "summary",
+    })) as DiffSummaryResult;
+    expect(res.drivers).toBe(1);
+    expect(res.results[0]?.branchName).toBe("大石運輸倉庫㈱　大阪営業所");
+  });
+
+  it("mode 省略なら従来どおり日別を返す", async () => {
+    stubIchiban({ cur: KOSOKU_WITH_OURS_ONLY });
+    const res = (await getTimecardDiffTool.execute(summaryModeEnv(), {
+      month: "2026-04",
+    })) as unknown as { mode: string; results: Array<{ days: unknown[] }> };
+    expect(res.mode).toBe("days");
+    expect(Array.isArray(res.results[0]?.days)).toBe(true);
   });
 });
 

@@ -31,7 +31,9 @@ import {
   compareTimecardMonthAll,
   parsePdfJson,
   pdfJsonError,
+  summarizeCompareResults,
   type CompareResult,
+  type CompareSummaryRow,
 } from "../../../dtako-scraper-relay/src/timecard-compare";
 import type { Env } from "../env";
 import {
@@ -362,8 +364,90 @@ const getTimecardDiffArgs = z
         "差分も異常も無い乗務員を落とし、各乗務員の days も該当日だけに絞る (既定 true)。" +
           "false にすると全乗務員×全暦日を返すので応答が大きくなる",
       ),
+    mode: z
+      .enum(["days", "summary"])
+      .optional()
+      .describe(
+        "days (既定) = 日別を返す。summary = 日別を落として乗務員ごとに 1 行 " +
+          "(status 別日数 / mismatch の diff 幅 / 月合計 / anomaly 件数) にし、" +
+          "営業所名を添える。全乗務員を一括で見るときは summary から入る",
+      ),
   })
   .strict();
+
+/** `summary` モードで乗務員に添える所属。給与比較アーカイブ (R2) 由来。 */
+interface DriverIdentity {
+  driverName: string;
+  branchName: string;
+}
+
+/**
+ * 給与比較アーカイブから `乗務員CD → 氏名・営業所` を引く (Refs #501 A)。
+ *
+ * 突合の `name` は **nginx 側の氏名**なので、`ours-only` の乗務員 (nginx のタイムカード
+ * 表に出ない人) は空になる。誰が落ちているのか読めないと分類できないので、こちら側の
+ * アーカイブから補う。
+ *
+ * **アーカイブが無くても突合自体は返す** — 会社の解決も R2 の読み取りも失敗したら
+ * 空の Map を返し、`branchName` は null になるだけにする。
+ */
+async function loadDriverIdentities(env: Env, ym: string): Promise<Map<string, DriverIdentity>> {
+  const out = new Map<string, DriverIdentity>();
+  try {
+    const base = companiesListPrefix(r2Prefix(env));
+    const prefixes = await listDelimitedPrefixes(env.DTAKO_R2, base);
+    const companies = prefixes
+      .map((p) => p.slice(base.length).replace(/\/$/, ""))
+      .filter((c) => COMP_ID_PATTERN.test(c));
+    for (const compId of companies) {
+      const { summaries } = await loadMonthSummaries(env, compId, ym);
+      for (const s of summaries) {
+        const cd = Number(s.data.driverCd);
+        if (!Number.isFinite(cd)) continue;
+        // 乗務員CD の正規化は突合側 (`String(Number(...))`) に合わせる
+        out.set(String(cd), {
+          driverName: s.data.driverName,
+          branchName: s.data.branchName,
+        });
+      }
+    }
+  } catch {
+    return new Map();
+  }
+  return out;
+}
+
+/** `summary` モードの 1 行。突合の畳んだ行に、こちら側の氏名・営業所を足したもの。 */
+type TimecardDiffSummaryRow = CompareSummaryRow & {
+  /** こちら側 (拘束時間管理表) の氏名。アーカイブに無ければ null。 */
+  oursName: string | null;
+  /** 営業所名。アーカイブに無ければ null。 */
+  branchName: string | null;
+};
+
+/**
+ * `ours-only` の日数を営業所ごとに数える (Refs #501 A)。
+ *
+ * `ours-only` = こちらに実績があるのに nginx のタイムカード表に居ない日。実測 2026-03
+ * では 47 名 / 1083 日あり、その主因は**大阪営業所が社内タイムカードを打っていない**こと
+ * だった (nginx の `createPdf` は打刻のある人しか PDF に載せない)。営業所で割ると
+ * 「紙と比べられない群」と「本当にこちらの欠落」を分けられる。
+ */
+function oursOnlyByBranch(
+  rows: readonly TimecardDiffSummaryRow[],
+): Array<{ branchName: string | null; drivers: number; days: number }> {
+  const acc = new Map<string, { branchName: string | null; drivers: number; days: number }>();
+  for (const row of rows) {
+    const days = row.statusDays["ours-only"];
+    if (days === 0) continue;
+    const key = row.branchName ?? "";
+    const cur = acc.get(key) ?? { branchName: row.branchName, drivers: 0, days: 0 };
+    cur.drivers += 1;
+    cur.days += days;
+    acc.set(key, cur);
+  }
+  return [...acc.values()].sort((a, b) => b.days - a.days);
+}
 
 /** 突合結果の 1 日が「見るべき日」か。 */
 function isNotableDay(d: CompareResult["days"][number]): boolean {
@@ -381,7 +465,10 @@ export const getTimecardDiffTool = {
     "**残業は比較しない** — nginx 側は旅費由来+手入力の加算補正、こちらは所定超で定義が別物のため。" +
     "anomalies は nginx 側のデータ異常で、負の拘束 (negative-kosoku / negative-kosoku-type、" +
     "yhonda-ohishi/nginx#783)・1 日 1440 分超・月次集計欄の負値を拾う。**差分と独立に出る** " +
-    "(両者が一致していても nginx 側が負なら報告される)。",
+    "(両者が一致していても nginx 側が負なら報告される)。" +
+    "**全乗務員を見るときは mode=summary から入る** — 日別を落として 1 行にし、" +
+    "こちら側の氏名・営業所と `ours_only_by_branch` (ours-only 日数の営業所別内訳) を添える。" +
+    "そこで見当を付けてから driver 指定で日別に掘る。",
   inputSchema: getTimecardDiffArgs,
   execute: async (env: Env, args) => {
     if (!parseYm(args.month)) throw new Error("month は YYYY-MM で指定してください");
@@ -442,6 +529,29 @@ export const getTimecardDiffTool = {
         onlyAnomalies,
       });
     }
+    // 日別を落として 1 行にする。only_anomalies=true でも 129 名で 54 万文字返り、
+    // 読み手の context に載らなかった (Refs #501 F)
+    if (args.mode === "summary") {
+      const identities = await loadDriverIdentities(env, args.month);
+      const rows: TimecardDiffSummaryRow[] = summarizeCompareResults(results).map((row) => {
+        const id = identities.get(row.driverCd);
+        return {
+          ...row,
+          oursName: id?.driverName ?? null,
+          branchName: id?.branchName ?? null,
+        };
+      });
+      return {
+        month: args.month,
+        driver,
+        onlyAnomalies,
+        mode: "summary" as const,
+        drivers: rows.length,
+        ours_only_by_branch: oursOnlyByBranch(rows),
+        results: rows,
+      };
+    }
+
     // 全暦日を返すと 130 名 × 31 日で読み手の context を食い潰す。既定では
     // 「見るべき日」だけに絞る (件数は mismatchCount / anomalies に残る)
     const trimmed = onlyAnomalies
@@ -452,6 +562,7 @@ export const getTimecardDiffTool = {
       month: args.month,
       driver,
       onlyAnomalies,
+      mode: "days" as const,
       drivers: trimmed.length,
       results: trimmed,
     };
