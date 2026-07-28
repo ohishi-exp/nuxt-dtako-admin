@@ -986,6 +986,51 @@ describe("差の推定原因 (Refs #501)", () => {
     expect(d.cause).toBe("unknown");
   });
 
+  it("運行の継ぎ目は実額で説明する (1731 藤田 03-16 の形)", () => {
+    // 紙は運行単位のスパン合算なので継ぎ目 23 分 (幽霊運行を挟む 12:17→12:40) が
+    // 入らない。こちらは #123 のとおり入れる — 差は上流の run_gap_minutes で説明
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1731",
+      nginx: nginxDriver([{ date: "2026-03-16", kosokuMinutes: 648 }]),
+      oursByDate: new Map([
+        ["2026-03-16", { restraintMinutes: 671, runGapMinutes: 23 }],
+      ]),
+      toleranceMinutes: 2,
+    }).days[15]!;
+    expect(d.cause).toBe("run-gap");
+    expect(d.explainedMinutes).toBe(23);
+    expect(d.residualMinutes).toBe(0);
+  });
+
+  it("昼休と継ぎ目が重なった日も説明が付く", () => {
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1541",
+      nginx: nginxDriver([{ date: "2026-03-14", kosokuMinutes: 487 }]),
+      oursByDate: new Map([
+        ["2026-03-14", { restraintMinutes: 570, runGapMinutes: 23 }],
+      ]),
+      toleranceMinutes: 2,
+    }).days[13]!;
+    expect(d.cause).toBe("lunch+run-gap");
+    expect(d.explainedMinutes).toBe(83);
+  });
+
+  it("継ぎ目 0 の日を run-gap や lunch+run-gap で説明したことにしない", () => {
+    // runGap 0 なら候補にならない — 60 分差は従来どおり lunch
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1541",
+      nginx: nginxDriver([{ date: "2026-03-14", kosokuMinutes: 510 }]),
+      oursByDate: new Map([
+        ["2026-03-14", { restraintMinutes: 570, runGapMinutes: 0 }],
+      ]),
+      toleranceMinutes: 2,
+    }).days[13]!;
+    expect(d.cause).toBe("lunch");
+  });
+
   it("未説明の日数と残差を月で数える — 検知の抜けを測る数字", () => {
     const r = compareTimecardMonth({
       month: "2026-04",
