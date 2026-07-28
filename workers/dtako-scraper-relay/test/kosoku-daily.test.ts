@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { kosokuPartsByDate, mergeKosokuShiftMaps, parseKosokuDaily, prevYmOf } from '../src/kosoku-daily'
+import { crossMonthMinutesByDate, kosokuPartsByDate, mergeKosokuShiftMaps, parseKosokuDaily, prevYmOf } from '../src/kosoku-daily'
 
 /** 上流 (`/api/kintai/kosoku-daily`) の 1 勤務。実応答のキー名そのまま。 */
 const shift = (over: Record<string, unknown> = {}) => ({
@@ -154,6 +154,71 @@ describe('kosokuPartsByDate', () => {
 
   it('対象月に何も落ちなければ空', () => {
     expect(kosokuPartsByDate(shifts, '2026-12').size).toBe(0)
+  })
+})
+
+describe('crossMonthMinutesByDate', () => {
+  // 1196 副島 (純夜勤 23:47→翌 08:03) の形
+  const shifts = parseKosokuDaily({
+    drivers: [{
+      driver: 1196,
+      days: [
+        // 前月から跨いで当月 1 日に朝側が落ちる勤務
+        shift({
+          date: '2026-02-28',
+          parts: [
+            { date: '2026-02-28', restraint_minutes: 13, working_minutes: 13, overtime_minutes: 0, night_minutes: 13, overtime_night_minutes: 0, legal_holiday_night_minutes: 0 },
+            { date: '2026-03-01', restraint_minutes: 481, working_minutes: 421, overtime_minutes: 0, night_minutes: 300, overtime_night_minutes: 0, legal_holiday_night_minutes: 0 },
+          ],
+        }),
+        // もう 1 本、同じ 03-01 に落ちる跨ぎ勤務 — 合算される
+        shift({
+          date: '2026-02-27',
+          parts: [
+            { date: '2026-02-27', restraint_minutes: 60, working_minutes: 60, overtime_minutes: 0, night_minutes: 0, overtime_night_minutes: 0, legal_holiday_night_minutes: 0 },
+            { date: '2026-03-01', restraint_minutes: 7, working_minutes: 7, overtime_minutes: 0, night_minutes: 0, overtime_night_minutes: 0, legal_holiday_night_minutes: 0 },
+          ],
+        }),
+        // 月内で完結する日跨ぎ勤務 — 跨ぎではないので数えない
+        shift({
+          date: '2026-03-01',
+          parts: [
+            { date: '2026-03-01', restraint_minutes: 12, working_minutes: 12, overtime_minutes: 0, night_minutes: 12, overtime_night_minutes: 0, legal_holiday_night_minutes: 0 },
+            { date: '2026-03-02', restraint_minutes: 488, working_minutes: 428, overtime_minutes: 0, night_minutes: 300, overtime_night_minutes: 0, legal_holiday_night_minutes: 0 },
+          ],
+        }),
+        // 1 日で終わる勤務 (内訳なし) — 跨ぎようがない
+        shift({ date: '2026-03-10' }),
+        // 当月末に始業して翌月へ跨ぐ勤務 — 当月に落ちる頭だけ数える
+        shift({
+          date: '2026-03-31',
+          parts: [
+            { date: '2026-03-31', restraint_minutes: 15, working_minutes: 15, overtime_minutes: 0, night_minutes: 15, overtime_night_minutes: 0, legal_holiday_night_minutes: 0 },
+            { date: '2026-04-01', restraint_minutes: 484, working_minutes: 424, overtime_minutes: 0, night_minutes: 300, overtime_night_minutes: 0, legal_holiday_night_minutes: 0 },
+          ],
+        }),
+      ],
+    }],
+  }).get('1196')!
+
+  it('月境界を跨ぐ勤務の当月分だけを暦日ごとに数える (同じ暦日は合算)', () => {
+    const got = crossMonthMinutesByDate(shifts, '2026-03')
+    expect([...got.entries()].sort()).toEqual([
+      ['2026-03-01', 488], // 481 + 7 (2 本の跨ぎ勤務が同じ暦日に落ちる)
+      ['2026-03-31', 15],
+    ])
+  })
+
+  it('前月側から見れば翌月へ跨ぐ頭が数えられる', () => {
+    const got = crossMonthMinutesByDate(shifts, '2026-02')
+    expect([...got.entries()].sort()).toEqual([
+      ['2026-02-27', 60],
+      ['2026-02-28', 13],
+    ])
+  })
+
+  it('跨ぐ勤務が無ければ空', () => {
+    expect(crossMonthMinutesByDate(shifts, '2026-05').size).toBe(0)
   })
 })
 

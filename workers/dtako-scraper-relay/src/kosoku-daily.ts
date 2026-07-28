@@ -169,6 +169,41 @@ export function kosokuPartsByDate(
 }
 
 /**
+ * **月境界を跨ぐ勤務**が対象月の暦日へ落とす拘束 (分) を、暦日ごとに数える
+ * (Refs #501)。
+ *
+ * 紙のタイムカード表 (nginx) は**月内の打刻だけで対を組む**ため、月を跨ぐ勤務は
+ * どちらの月のシートにも載らない — 前月に始業した勤務は当月シートから (始業が
+ * 見えない)、当月末に始業して翌月に終業する勤務は当月シートから (終業が見えない)
+ * 丸ごと落ちる。こちらは暦日按分で両方数えるので、その分がそのまま差になる。
+ *
+ * 実測 (1196 副島 / 純夜勤 23:47→翌 08:03): 02-28 始業の勤務 494 分が 2 月・3 月
+ * どちらの紙にも無く、3 月は 03-01 に -481 (前月から跨いだ朝側) と 03-31 に
+ * ours-only 15 (翌月へ跨ぐ頭) が出た。2 月も対称に -487 / 15。
+ *
+ * 返り値は「その暦日の値のうち、月を跨ぐ勤務由来の分」。突合側 (`timecard-compare`)
+ * が差の説明 (`cause: "month-boundary"`) に使う。1 日で終わる勤務 (`parts` が空) は
+ * 跨ぎようがないので見ない。
+ */
+export function crossMonthMinutesByDate(
+  shifts: readonly KosokuShift[],
+  ym: string,
+): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const shift of shifts) {
+    if (shift.parts.length === 0) continue;
+    const startsBefore = shift.date.slice(0, 7) < ym;
+    const endsAfter = shift.parts.some((p) => p.date.slice(0, 7) > ym);
+    if (!startsBefore && !endsAfter) continue;
+    for (const p of shift.parts) {
+      if (p.date.slice(0, 7) !== ym) continue;
+      out.set(p.date, (out.get(p.date) ?? 0) + p.restraintMinutes);
+    }
+  }
+  return out;
+}
+
+/**
  * 月ごとに取った勤務表を 1 本にまとめる (乗務員CD ごとに連結)。
  *
  * 当月の暦日按分には**前月から跨いだ勤務**も要るが、前月ぶんは前月の集計でも使う。

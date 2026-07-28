@@ -154,6 +154,7 @@ import {
   type WageReportSource,
 } from "./timecard-summary";
 import {
+  crossMonthMinutesByDate,
   kosokuPartsByDate,
   mergeKosokuShiftMaps,
   parseKosokuDaily,
@@ -3072,8 +3073,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       ]);
       const nginxByDriver = parsePdfJson(pdfBody, ym);
       const oursByDriver = new Map<string, Map<string, { restraintMinutes: number }>>();
+      // 月境界を跨ぐ勤務由来の分 — 紙は月内の打刻だけで対を組むため月を跨ぐ勤務が
+      // どちらの月にも載らない。その分を cause "month-boundary" として説明する
+      const crossMonthByDriver = new Map<string, Map<string, number>>();
       for (const [driverCd, driverShifts] of shifts ?? []) {
         oursByDriver.set(driverCd, kosokuPartsByDate(driverShifts, ym));
+        crossMonthByDriver.set(driverCd, crossMonthMinutesByDate(driverShifts, ym));
       }
 
       let results: CompareResult[];
@@ -3084,6 +3089,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
             driverCd: driver,
             nginx: nginxByDriver.get(driver) ?? null,
             oursByDate: oursByDriver.get(driver) ?? new Map(),
+            crossMonthByDate: crossMonthByDriver.get(driver),
             toleranceMinutes: tolerance,
           }),
         ];
@@ -3092,6 +3098,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           month: ym,
           nginxByDriver,
           oursByDriver,
+          crossMonthByDriver,
           toleranceMinutes: tolerance,
           onlyAnomalies,
         });

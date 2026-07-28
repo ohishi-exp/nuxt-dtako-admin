@@ -720,6 +720,18 @@ describe("compareTimecardMonthAll", () => {
     // 1030 の 60 分差が許容内に入り落ちる
     expect(rs.map((r) => r.driverCd)).toEqual(["1022", "1099"]);
   });
+
+  it("跨ぎ勤務の分を乗務員ごとに渡せる", () => {
+    const rs = compareTimecardMonthAll({
+      month: "2026-04",
+      nginxByDriver: new Map([
+        ["1030", nginxDriver([{ date: "2026-04-01", kosokuMinutes: 540 }])],
+      ]),
+      oursByDriver: new Map([["1030", ours({ "2026-04-01": 600 })]]),
+      crossMonthByDriver: new Map([["1030", new Map([["2026-04-01", 60]])]]),
+    });
+    expect(rs[0]?.days[0]?.cause).toBe("month-boundary");
+  });
 });
 
 describe("summarizeCompareResult", () => {
@@ -914,6 +926,64 @@ describe("差の推定原因 (Refs #501)", () => {
     expect(d.status).toBe("ours-only");
     expect(d.cause).toBe("none");
     expect(d.residualMinutes).toBeNull();
+  });
+
+  it("月境界を跨ぐ勤務は実額で説明する (1196 副島 03-01 の形)", () => {
+    // 前月から跨いだ勤務の朝側 481 分がこちらだけに乗る — 紙は月内の打刻で
+    // 対を組めず落とす。nginx 12 = 当日夜勤の頭だけ
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1196",
+      nginx: nginxDriver([{ date: "2026-03-01", kosokuMinutes: 12 }]),
+      oursByDate: ours({ "2026-03-01": 493 }),
+      crossMonthByDate: new Map([["2026-03-01", 481]]),
+      toleranceMinutes: 2,
+    }).days[0]!;
+    expect(d.cause).toBe("month-boundary");
+    expect(d.explainedMinutes).toBe(481);
+    expect(d.residualMinutes).toBe(0);
+  });
+
+  it("翌月へ跨ぐ勤務の頭 (月末の ours-only) も説明する (1196 副島 03-31 の形)", () => {
+    const r = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1196",
+      nginx: nginxDriver([]),
+      oursByDate: ours({ "2026-03-31": 15 }),
+      crossMonthByDate: new Map([["2026-03-31", 15]]),
+      toleranceMinutes: 2,
+    });
+    const d = r.days[30]!;
+    expect(d.status).toBe("ours-only");
+    expect(d.cause).toBe("month-boundary");
+    expect(d.explainedMinutes).toBe(15);
+    expect(d.residualMinutes).toBeNull();
+  });
+
+  it("ours-only でも跨ぎで説明できない値は none のまま", () => {
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1196",
+      nginx: nginxDriver([]),
+      oursByDate: ours({ "2026-03-31": 480 }),
+      crossMonthByDate: new Map([["2026-03-31", 15]]),
+      toleranceMinutes: 2,
+    }).days[30]!;
+    expect(d.status).toBe("ours-only");
+    expect(d.cause).toBe("none");
+  });
+
+  it("跨ぎ 0 の日を month-boundary で説明したことにしない", () => {
+    // crossMonthByDate に無い日 = 跨ぎ 0。explained 0 は候補にならず unknown のまま
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1196",
+      nginx: nginxDriver([{ date: "2026-03-02", kosokuMinutes: 170 }]),
+      oursByDate: ours({ "2026-03-02": 570 }),
+      crossMonthByDate: new Map(),
+      toleranceMinutes: 2,
+    }).days[1]!;
+    expect(d.cause).toBe("unknown");
   });
 
   it("未説明の日数と残差を月で数える — 検知の抜けを測る数字", () => {
