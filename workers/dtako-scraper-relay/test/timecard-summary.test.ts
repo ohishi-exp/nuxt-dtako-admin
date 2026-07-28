@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  applyKosokuTimes,
   kintaiR2Paths,
   mergeSummarySources,
   LUNCH_FROM_HOUR,
@@ -323,6 +324,33 @@ describe('summarizeTimecardMonth', () => {
     expect(m.maxDailyRestraintMinutes).toBe(660)
     expect(m.source).toBe('timecard')
     expect(m.days.map(d => d.day)).toEqual([1, 2])
+  })
+
+  it('kosokuPartsFor を渡すと時間が kosoku-daily 由来になる (打刻から組んだ勤務は使わない)', () => {
+    // 長距離の形: 打刻は 6/1 の始業と 6/9 の終業だけ = 8 日が 1 勤務になる入力
+    const rows = [row('2026-06-01', [['05:44:00', '23:59:00']])]
+    const parts = new Map([
+      ['2026-06-01', { restraintMinutes: 699, workingMinutes: 486, overtimeMinutes: 6, nightMinutes: 30, overtimeNightMinutes: 10 }],
+      ['2026-06-02', { restraintMinutes: 600, workingMinutes: 540, overtimeMinutes: 60, nightMinutes: 0, overtimeNightMinutes: 0 }],
+    ])
+    const { summaries } = summarizeTimecardMonth(rows, {
+      ...opts(),
+      kosokuPartsFor: () => parts,
+    })
+    const m = summaries[0]!
+    expect(m.days.map(d => d.day)).toEqual([1, 2])
+    expect(m.workDays).toBe(2)
+    expect(m.restraintMinutes).toBe(1299)
+    expect(m.workingMinutes).toBe(1026)
+    expect(m.overtimeMinutes).toBe(66)
+    expect(m.overtimeNightMinutes).toBe(10)
+  })
+
+  it('kosokuPartsFor がその人の分を持たなければ時間は 0 (出どころは月で 1 つに揃える)', () => {
+    const rows = [row('2026-06-01', [['08:00:00', '17:00:00']])]
+    const { summaries } = summarizeTimecardMonth(rows, { ...opts(), kosokuPartsFor: () => null })
+    expect(summaries[0]!.restraintMinutes).toBe(0)
+    expect(summaries[0]!.workingMinutes).toBe(0)
   })
 
   it('日付順に並べ替える (入力順に依存しない)', () => {
@@ -1124,5 +1152,98 @@ describe('退社打刻なし (end: null、nginx#780)', () => {
       },
     )
     expect(warnings).toEqual([])
+  })
+})
+
+describe('applyKosokuTimes', () => {
+  const day = (over: Record<string, unknown> = {}) => ({
+    day: 6,
+    isRestDay: false,
+    restraintMinutes: 12106,
+    workingMinutes: 11566,
+    overtimeMinutes: 7726,
+    nightMinutes: 0,
+    overtimeNightMinutes: 3360,
+    holidayKind: 'weekday' as const,
+    voluntaryMinutes: 0,
+    punchErrorMinutes: 0,
+    leaves: [] as string[],
+    sessions: [{ start: '2026-04-06 05:44:46', end: '2026-04-14 15:31:38' }],
+    ...over,
+  })
+  const part = (over: Record<string, number> = {}) => ({
+    restraintMinutes: 699,
+    workingMinutes: 486,
+    overtimeMinutes: 6,
+    nightMinutes: 30,
+    overtimeNightMinutes: 10,
+    ...over,
+  })
+
+  it('kosoku のある日は時間を差し替え、休暇・打刻・休日区分は残す', () => {
+    const [got] = applyKosokuTimes(
+      [day({ leaves: ['指休'], punchErrorMinutes: 99, holidayKind: 'non_legal' })],
+      new Map([['2026-04-06', part()]]),
+      '2026-04',
+    )
+    expect(got).toMatchObject({
+      day: 6,
+      isRestDay: false,
+      restraintMinutes: 699,
+      workingMinutes: 486,
+      overtimeMinutes: 6,
+      nightMinutes: 30,
+      overtimeNightMinutes: 10,
+      // 打刻側から引き継ぐもの
+      holidayKind: 'non_legal',
+      leaves: ['指休'],
+      punchErrorMinutes: 99,
+      sessions: [{ start: '2026-04-06 05:44:46', end: '2026-04-14 15:31:38' }],
+    })
+  })
+
+  it('休暇の日に kosoku の勤務があれば出勤に変える', () => {
+    const [got] = applyKosokuTimes(
+      [day({ isRestDay: true, leaves: ['公休'], restraintMinutes: 0, workingMinutes: 0 })],
+      new Map([['2026-04-06', part()]]),
+      '2026-04',
+    )
+    expect(got!.isRestDay).toBe(false)
+    expect(got!.workingMinutes).toBe(486)
+  })
+
+  it('kosoku に勤務が無い日は時間 0。**isRestDay は打刻側のまま**にして欠けに気付けるようにする', () => {
+    const got = applyKosokuTimes([day(), day({ day: 7, isRestDay: true })], new Map(), '2026-04')
+    expect(got.map(d => [d.day, d.isRestDay, d.restraintMinutes, d.workingMinutes, d.overtimeMinutes])).toEqual([
+      [6, false, 0, 0, 0],
+      [7, true, 0, 0, 0],
+    ])
+  })
+
+  it('打刻側に行が無い日は足す (日曜だけ法定休日)', () => {
+    const got = applyKosokuTimes(
+      [day()],
+      new Map([
+        ['2026-04-06', part()],
+        ['2026-04-12', part({ workingMinutes: 34 })], // 日曜
+        ['2026-04-13', part({ workingMinutes: 60 })], // 月曜
+      ]),
+      '2026-04',
+    )
+    expect(got.map(d => [d.day, d.holidayKind, d.isRestDay])).toEqual([
+      [6, 'weekday', false],
+      [12, 'legal', false],
+      [13, 'weekday', false],
+    ])
+    expect(got[1]).toMatchObject({ leaves: [], sessions: [], voluntaryMinutes: 0, punchErrorMinutes: 0 })
+  })
+
+  it('日順に並べ直す', () => {
+    const got = applyKosokuTimes(
+      [day({ day: 20 })],
+      new Map([['2026-04-02', part()], ['2026-04-20', part()]]),
+      '2026-04',
+    )
+    expect(got.map(d => d.day)).toEqual([2, 20])
   })
 })

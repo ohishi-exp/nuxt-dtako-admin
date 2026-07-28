@@ -81,6 +81,7 @@ import type {
   RestraintSummaryDay,
 } from "./theearth-restraint-client";
 import { TheearthClientError } from "./theearth-client";
+import type { KosokuCalendarPart } from "./kosoku-daily";
 
 /** 入力の構造不正 (呼び出し側で 502 相当にマップする — 上流 JSON が壊れている)。 */
 export class TimecardSummaryError extends TheearthClientError {
@@ -677,10 +678,81 @@ export interface TimecardMonthOptions {
   /** 今日の日付 ("YYYY-MM-DD"、JST)。当日以降の未終業を「退社打刻なし」に
    * しないための基準 (nginx#780)。省略時は全日を過去扱い。 */
   today?: string;
+  /**
+   * 乗務員CD → その月の**暦日ごとの時間** (`kosokuPartsByDate` の出力、2026-07-28)。
+   *
+   * **これを渡した月は時間の出どころが kosoku-daily に統一される** — 打刻から組んだ
+   * 勤務は使わず、休暇・打刻エラー・自主出勤・休日区分だけを打刻側から引き継ぐ。
+   * 省略 (= 上流が取れなかった) 時は従来どおり打刻から組む。**月の途中で出どころが
+   * 混ざることは無い** (全員ぶん揃うか、全員ぶん従来どおりか)。
+   */
+  kosokuPartsFor?(driverCd: string): ReadonlyMap<string, KosokuCalendarPart> | null;
 }
 
 /** 15 時間 (改善基準の 1 日拘束上限) を分で。 */
 const OVER_15H_MINUTES = 15 * 60;
+
+/**
+ * 打刻由来の日別行に **kosoku-daily の時間を被せる** (2026-07-28 決定)。
+ *
+ * 打刻から組んだ勤務は、長距離のように出発時と帰着時にしか打刻しない人で数日が
+ * 1 勤務になる (実測: 乗務員 1104 / 2026-04 は 4/6 05:44 → 4/14 15:31 が 1 勤務)。
+ * 時間の出どころは `kosoku-daily` (打刻が無い区間は休息イベントで割る) に**統一**し、
+ * 打刻側からは**休暇・打刻エラー・自主出勤・休日区分**だけを引き継ぐ。
+ *
+ * - kosoku に勤務がある日 … 時間を差し替え、勤務日 (`isRestDay: false`) にする
+ * - kosoku に勤務が無い日 … 時間は 0。**`isRestDay` は打刻側の判定のまま**にする —
+ *   打刻があるのに上流が勤務を組めていない日 (ohishi-exp/rust-ichibanboshi#138) を
+ *   「休み」に見せないため。0 時間の出勤として残り、欠けに気付ける
+ * - 打刻側に行が無い日 … 新しい行を足す。**`holidayKind` は日曜だけ `legal`** —
+ *   CakePHP の祝日・会社指定休の判定はその日の打刻行にしか無く、引く手段が無い。
+ *   祝日に打刻が 1 つも無い日 (= 運行イベントだけの日) は平日として計算される
+ */
+/** `YYYY-MM-DD` が日曜か。UTC で作るのは JST 変換で日付がずれないようにするため。 */
+function isSunday(date: string): boolean {
+  const [y, m, d] = date.split("-").map(Number) as [number, number, number];
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay() === 0;
+}
+
+export function applyKosokuTimes(
+  days: readonly TimecardSummaryDay[],
+  parts: ReadonlyMap<string, KosokuCalendarPart>,
+  ym: string,
+): TimecardSummaryDay[] {
+  const dateOf = (day: number) => `${ym}-${String(day).padStart(2, "0")}`;
+  const out = days.map((d) => {
+    const p = parts.get(dateOf(d.day));
+    return {
+      ...d,
+      isRestDay: p ? false : d.isRestDay,
+      restraintMinutes: p?.restraintMinutes ?? 0,
+      workingMinutes: p?.workingMinutes ?? 0,
+      overtimeMinutes: p?.overtimeMinutes ?? 0,
+      nightMinutes: p?.nightMinutes ?? 0,
+      overtimeNightMinutes: p?.overtimeNightMinutes ?? 0,
+    };
+  });
+  const seen = new Set(days.map((d) => d.day));
+  for (const [date, p] of parts) {
+    const day = Number(date.slice(8, 10));
+    if (seen.has(day)) continue;
+    out.push({
+      day,
+      isRestDay: false,
+      restraintMinutes: p.restraintMinutes,
+      workingMinutes: p.workingMinutes,
+      overtimeMinutes: p.overtimeMinutes,
+      nightMinutes: p.nightMinutes,
+      overtimeNightMinutes: p.overtimeNightMinutes,
+      holidayKind: isSunday(date) ? "legal" : "weekday",
+      voluntaryMinutes: 0,
+      punchErrorMinutes: 0,
+      leaves: [],
+      sessions: [],
+    });
+  }
+  return out.sort((a, b) => a.day - b.day);
+}
 
 /**
  * 月の日別行を乗務員ごとのサマリへ畳む。
@@ -729,8 +801,17 @@ export function summarizeTimecardMonth(
   }
 
   const summaries: TimecardDriverSummary[] = [];
+  // **打刻側に 1 行も無い社員はここでは足さない。** デジタコにしか居ない乗務員も
+  // kosoku-daily には出てくるが、その人たちを timecard 側へ移すのは賃金の出どころを
+  // 44 名ぶん切り替える別の変更なので、この PR では触らない (2026-04 実測)
   for (const [driverCd, entry] of byDriver) {
-    const days = [...entry.days].sort((a, b) => a.day - b.day);
+    const sorted = [...entry.days].sort((a, b) => a.day - b.day);
+    // `kosokuPartsFor` を渡された月は**その人の分が無くても打刻へ戻さない** —
+    // 人によって出どころが変わると、同じ表の数字がどちらの計算か分からなくなる
+    // (2026-07-28 決定)。上流に居ない社員は実測で「打刻のある日 0 日・休暇だけ」だった
+    const days = opts.kosokuPartsFor
+      ? applyKosokuTimes(sorted, opts.kosokuPartsFor(driverCd) ?? new Map(), opts.yearMonth)
+      : sorted;
     const worked = days.filter((d) => !d.isRestDay);
     const sum = (pick: (d: TimecardSummaryDay) => number) => days.reduce((s, d) => s + pick(d), 0);
     const restraintTotals = worked.map((d) => d.restraintMinutes);
