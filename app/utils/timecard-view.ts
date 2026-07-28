@@ -32,6 +32,13 @@ export interface TimecardTableRow {
   out2: string | null
   /** 打刻計算の残業 (分、時間外 + 時間外深夜)。0 なら表示しない。 */
   overtimeMinutes: number
+  /**
+   * 法定休日 (日曜) の実働 (分)。**残業ではない** ので残業列には括弧つきで出す
+   * (2026-07-28 決定)。労基法上この日に時間外の概念は無く、割増は休日割増 1.35
+   * (深夜 1.6) に一本化されるため。打刻由来の行は 0 — 休日出勤の判定は備考の
+   * `dayKindLabel` が担当する。
+   */
+  legalHolidayMinutes: number
   /** その日の**実働** (分、拘束 − 休憩)。0 なら表示しない。
    *
    * **打刻が無い日でも乗る** — 長距離は運行途中で打刻が無いまま働いており、この列が
@@ -248,6 +255,8 @@ export function buildTimecardTable(
       in2: formatPunch(sessions[1]?.start),
       out2: punchOut(1),
       overtimeMinutes: (d?.overtimeMinutes ?? 0) + (d?.overtimeNightMinutes ?? 0),
+      // 打刻由来の行は 0 — 法定休日の実働かどうかは備考 (`dayKindLabel`) が言う
+      legalHolidayMinutes: 0,
       workingMinutes: d?.workingMinutes ?? 0,
       note: notes.join(' / '),
       isSunday: dow === 0,

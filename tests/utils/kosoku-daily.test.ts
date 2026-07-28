@@ -324,13 +324,15 @@ describe('buildKosokuTimecardTable', () => {
     expect(rows[1]!.overtimeMinutes).toBe(85)
   })
 
-  it('法定休日は備考に出す・日曜は網掛けの対象', () => {
+  it('法定休日は備考に書かず、時間を残業列 (括弧つき) 用に持つ・日曜は網掛けの対象', () => {
     const rows = buildKosokuTimecardTable([
       shift('2026-06-07 08:00:00', '2026-06-07 20:00:00', {
         isLegalHoliday: true, restraintMinutes: 720, legalHolidayMinutes: 720,
       }),
     ], 2026, 6)
-    expect(rows[6]!.note).toContain('法定休日')
+    // 備考は空 — 「法定休日」と書いても何時間かが分からず、備考の幅も食っていた
+    expect(rows[6]!.note).toBe('')
+    expect(rows[6]!.legalHolidayMinutes).toBe(720)
     expect(rows[6]!.isSunday).toBe(true)
     // 打刻側の色分け (自主出勤・打刻エラー) はドライバーには無い
     expect(rows[6]).toMatchObject({ isVoluntary: false, isPunchError: false, isAfterPunchError: false })
@@ -501,7 +503,10 @@ describe('sumKosokuMonth', () => {
         restraintMinutes: 600, isLegalHoliday: true, legalHolidayNightMinutes: 420,
       }),
     ], '2026-06')
-    expect(t).toEqual({ restraintMinutes: 1320, nightMinutes: 480, overtimeNightMinutes: 30 })
+    expect(t).toEqual({
+      restraintMinutes: 1320, nightMinutes: 480, overtimeNightMinutes: 30,
+      overtimeMinutes: 0, legalHolidayMinutes: 0,
+    })
   })
 
   it('日跨ぎ勤務は暦日按分で足す (内訳がある分だけ)', () => {
@@ -517,7 +522,10 @@ describe('sumKosokuMonth', () => {
         ],
       },
     ], '2026-06')
-    expect(t).toEqual({ restraintMinutes: 120, nightMinutes: 120, overtimeNightMinutes: 0 })
+    expect(t).toEqual({
+      restraintMinutes: 120, nightMinutes: 120, overtimeNightMinutes: 0,
+      overtimeMinutes: 0, legalHolidayMinutes: 0,
+    })
   })
 
   it('前月に始業した勤務の当月ぶんを拾う', () => {
@@ -530,7 +538,10 @@ describe('sumKosokuMonth', () => {
         ],
       },
     ], '2026-06')
-    expect(t).toEqual({ restraintMinutes: 480, nightMinutes: 60, overtimeNightMinutes: 0 })
+    expect(t).toEqual({
+      restraintMinutes: 480, nightMinutes: 60, overtimeNightMinutes: 0,
+      overtimeMinutes: 0, legalHolidayMinutes: 0,
+    })
   })
 
   it('内訳を持たない勤務は対象月のものだけ丸ごと足す (上流が古くても壊れない)', () => {
@@ -542,7 +553,10 @@ describe('sumKosokuMonth', () => {
   })
 
   it('勤務が無ければすべて 0', () => {
-    expect(sumKosokuMonth([], '2026-06')).toEqual({ restraintMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0 })
+    expect(sumKosokuMonth([], '2026-06')).toEqual({
+      restraintMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0,
+      overtimeMinutes: 0, legalHolidayMinutes: 0,
+    })
   })
 })
 
