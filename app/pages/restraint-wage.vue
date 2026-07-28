@@ -294,6 +294,9 @@ watch(session, (s) => {
     employeeMasterLoaded.value = false
     // 他社分も含めて破棄する (会社横断表示、Refs #367)
     employeeMasterByComp.value = {}
+    // 飛んでいる取得も忘れる — 残したままだと再ログイン後の呼び出しが
+    // 前のセッションの Promise を共有して取り直さない (Refs #501)
+    employeeMasterInflight.clear()
     minWageMasterLoaded.value = false
     // 再ログイン時に archive/months の解決を待ち直す (Refs #451)
     archiveMonthsLoaded.value = false
@@ -1570,13 +1573,33 @@ function setEmployeeMasterEntries(compId: string, entries: EmployeeMasterEntry[]
   employeeMasterByComp.value = { ...employeeMasterByComp.value, [compId]: entries }
 }
 
+/** 進行中の取得を会社ごとに共有する (Refs #501)。
+ *
+ * `employeeMasterLoaded` も `employeeMasterByComp` も **await の後**にしか立たない
+ * ので、同じ tick で走る呼び出し (タイムカードタブは `loadAllEmployeeMasters` と
+ * 現在会社の 2 経路) が全部「未読込」を見て同じ GET を重複発行していた。relay の
+ * per-comp DO は直列化するので後続ほど待たされ、**ページ全体のクリティカルパス**に
+ * なる — 本番実測 (2026-07-28) で同じ URL が 3 本、2.1 / 5.5 / 5.9 秒。 */
+const employeeMasterInflight = new Map<string, Promise<void>>()
+
 /** 1 会社分を読む。`compId` 省略時は今開いている会社。
- * 他社の読み込みは fail-soft — テナントが許可されていない会社は 401/403 に
- * なるが、それは「見えないのが正しい」ので画面全体のエラーにはしない。 */
-async function loadEmployeeMaster(compId?: string) {
-  if (!session.value) return
+ * 同じ会社の取得が飛んでいる間は**それを共有**する (上の Map)。 */
+function loadEmployeeMaster(compId?: string): Promise<void> {
+  if (!session.value) return Promise.resolve()
   const target = compId ?? session.value.compId
-  const isCurrent = target === session.value.compId
+  const inflight = employeeMasterInflight.get(target)
+  if (inflight) return inflight
+  const p = fetchEmployeeMaster(target).finally(() => {
+    employeeMasterInflight.delete(target)
+  })
+  employeeMasterInflight.set(target, p)
+  return p
+}
+
+/** 他社の読み込みは fail-soft — テナントが許可されていない会社は 401/403 に
+ * なるが、それは「見えないのが正しい」ので画面全体のエラーにはしない。 */
+async function fetchEmployeeMaster(target: string) {
+  const isCurrent = target === session.value?.compId
   try {
     const res = await $fetch<EmployeeMasterGetResponse>('/restraint-api/employee-master', {
       headers: authHeaders(target),
