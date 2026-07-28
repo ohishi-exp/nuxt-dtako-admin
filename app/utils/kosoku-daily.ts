@@ -350,6 +350,12 @@ export function buildKosokuTimecardTable(
       overtimeMinutes: (attributed?.overtimeMinutes ?? 0) + (attributed?.overtimeNightMinutes ?? 0),
       // 法定休日 (日曜) の実働。**残業ではない** ので残業列には括弧つきで出す
       legalHolidayMinutes: attributed?.legalHolidayMinutes ?? 0,
+      // 1 人表示の内訳列 (Refs 2026-07-28)。按分後の暦日で揃える
+      restraintMinutes: attributed?.restraintMinutes ?? 0,
+      breakMinutes: Math.max(0, (attributed?.restraintMinutes ?? 0) - (attributed?.workingMinutes ?? 0)),
+      overtimeNightMinutes: attributed?.overtimeNightMinutes ?? 0,
+      // 法定休日の深夜もここへ足す (割増は違うが「深夜帯に何分働いたか」を出す列)
+      nightMinutes: (attributed?.nightMinutes ?? 0) + (attributed?.legalHolidayNightMinutes ?? 0),
       // **打刻が無い日でも実働は出す。** 長距離は運行途中に打刻が無く、列が空のままだと
       // 「動いているのに拘束が取れていない」ように見える (2026-07-27 指摘)。
       // 拘束ではなく実働 (拘束 − 休憩) を出すのはユーザー指示 — 拘束のままだと

@@ -39,6 +39,14 @@ export interface TimecardTableRow {
    * `dayKindLabel` が担当する。
    */
   legalHolidayMinutes: number
+  /** 拘束 (1 人表示の内訳列。実働 = 拘束 − 休憩)。 */
+  restraintMinutes: number
+  /** 休憩 (拘束 − 実働)。 */
+  breakMinutes: number
+  /** 時間外に重なる深夜 (`overtimeMinutes` の内数)。 */
+  overtimeNightMinutes: number
+  /** 残業でない通常勤務中の深夜。 */
+  nightMinutes: number
   /** その日の**実働** (分、拘束 − 休憩)。0 なら表示しない。
    *
    * **打刻が無い日でも乗る** — 長距離は運行途中で打刻が無いまま働いており、この列が
@@ -257,6 +265,10 @@ export function buildTimecardTable(
       overtimeMinutes: (d?.overtimeMinutes ?? 0) + (d?.overtimeNightMinutes ?? 0),
       // 打刻由来の行は 0 — 法定休日の実働かどうかは備考 (`dayKindLabel`) が言う
       legalHolidayMinutes: 0,
+      restraintMinutes: d?.restraintMinutes ?? 0,
+      breakMinutes: Math.max(0, (d?.restraintMinutes ?? 0) - (d?.workingMinutes ?? 0)),
+      overtimeNightMinutes: d?.overtimeNightMinutes ?? 0,
+      nightMinutes: d?.nightMinutes ?? 0,
       workingMinutes: d?.workingMinutes ?? 0,
       note: notes.join(' / '),
       isSunday: dow === 0,
