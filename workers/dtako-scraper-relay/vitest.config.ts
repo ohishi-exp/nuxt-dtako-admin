@@ -25,6 +25,7 @@ export default defineConfig({
         'src/restraint-wage.ts',
         'src/restraint-viewer-auth.ts',
         'src/restraint-queue.ts',
+        'src/upstream-memo.ts',
         'src/theearth-session.ts',
         'src/promise-queue.ts',
         'src/employee-master.ts',
