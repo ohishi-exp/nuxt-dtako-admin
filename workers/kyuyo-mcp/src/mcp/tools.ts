@@ -533,7 +533,12 @@ export const getTimecardDiffTool = {
     // こちら側は前月も要る — 前月から跨いだ勤務が当月 1 日に落ちるため、
     // 取らないと月初が過少になる
     const prevYm = prevYmOf(args.month);
-    const kosokuQuery = (ym: string) => `/api/kintai/kosoku-daily?month=${encodeURIComponent(ym)}`;
+    // **突合は `view=compare` で取る** (Refs ohishi-exp/rust-ichibanboshi#157)。
+    // 既定の応答は 1 日 19 キー・全乗務員で 1.73 MB あるが、突合が使うのは日付・拘束・
+    // フェリー控除と暦日按分用の parts だけ。絞ると 256 KB (実測 6.8 分の 1) になる。
+    // この経路は社内から Cloudflare Tunnel を通るので、サイズがそのまま応答時間になる
+    const kosokuQuery = (ym: string) =>
+      `/api/kintai/kosoku-daily?month=${encodeURIComponent(ym)}&view=compare`;
     const [pdfBody, curBody, prevBody] = await Promise.all([
       fetchIchibanJson(
         env,

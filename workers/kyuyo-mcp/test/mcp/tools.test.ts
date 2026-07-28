@@ -567,8 +567,9 @@ describe("get_timecard_diff", () => {
     const calls = stubIchiban();
     await getTimecardDiffTool.execute(kosokuEnv(), { month: "2026-04", driver: "1021" });
     expect(calls.sort()).toEqual([
-      "https://rust-ichiban.example.com/api/kintai/kosoku-daily?month=2026-03",
-      "https://rust-ichiban.example.com/api/kintai/kosoku-daily?month=2026-04",
+      // 突合は view=compare で取る (応答 1.73 MB → 256 KB、rust-ichibanboshi#157)
+      "https://rust-ichiban.example.com/api/kintai/kosoku-daily?month=2026-03&view=compare",
+      "https://rust-ichiban.example.com/api/kintai/kosoku-daily?month=2026-04&view=compare",
       "https://rust-ichiban.example.com/api/kintai/pdf-json?month=2026-04&driver=1021",
     ]);
   });
