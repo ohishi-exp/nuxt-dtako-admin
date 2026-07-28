@@ -55,6 +55,7 @@ import {
   timecardCompareStatusLabel,
   fmtTimecardCompareDiff,
   fmtTimecardCompareMinutes,
+  hasFerryMinus,
   toTimecardCompareRows,
 } from '~/utils/timecard-compare-view'
 
@@ -726,6 +727,14 @@ const compareOursAvailable = ref(true)
 
 const compareRows = computed(() =>
   compareResult.value ? toTimecardCompareRows(compareResult.value.days) : [])
+
+/**
+ * フェリー控除の列を出すか。**その月に 1 日でもあれば出す** — 控除は差の主因なので
+ * 額そのものを確かめられるようにする (合計が正のままの日もあり、負値だけ見ていると
+ * 見落とす: 1726 / 2026-03-21 は 677 分 + 控除 78 分)。無い月に空列は出さない。
+ */
+const showCompareFerry = computed(() =>
+  compareResult.value ? hasFerryMinus(compareResult.value) : false)
 
 /**
  * 押した時だけ取る。月タブを切り替えるたびに社内 LAN へ 3 往復させたくないのと、
@@ -5148,6 +5157,13 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       </th>
                       <th class="px-2 py-1 text-right">拘束 (こちら)</th>
                       <th class="px-2 py-1 text-right border-l border-gray-200 dark:border-gray-700">差</th>
+                      <th
+                        v-if="showCompareFerry"
+                        class="px-2 py-1 text-right"
+                        title="nginx がその日にフェリー控除で引いた分。控除前の値がこちらと一致するので、二重に引いています"
+                      >
+                        フェリー控除
+                      </th>
                       <th class="px-2 py-1 text-left">状態</th>
                       <th class="px-2 py-1 text-left">nginx 側の異常</th>
                     </tr>
@@ -5170,6 +5186,9 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       <td class="px-2 py-1 text-right tabular-nums border-l border-gray-200 dark:border-gray-700">
                         {{ fmtTimecardCompareDiff(row.diffMinutes) }}
                       </td>
+                      <td v-if="showCompareFerry" class="px-2 py-1 text-right tabular-nums text-red-700 dark:text-red-400">
+                        {{ row.ferryMinusMinutes === null ? '' : `-${row.ferryMinusMinutes}` }}
+                      </td>
                       <td class="px-2 py-1 text-xs">{{ timecardCompareStatusLabel(row.status) }}</td>
                       <td class="px-2 py-1 text-xs text-red-700 dark:text-red-400">
                         {{ row.anomalies.map(a => a.message).join(' / ') }}
@@ -5188,6 +5207,13 @@ watch([compMap, kyuyoSyncedKeys], () => {
                   突き合わせるのは<b>拘束だけ</b>です。残業は nginx 側が旅費由来 + 手入力の加算補正で、
                   こちらの所定超とは定義が別物なので比較していません。
                   「nginx 側の異常」は差分と独立に出ます (両者が一致していても nginx が負なら報告します)。
+                  <template v-if="showCompareFerry">
+                    <br>
+                    <b>フェリー控除は nginx 側の欠陥</b>です — <b>控除前の値がこちらと一致</b>し、控除ぶんだけが差になります
+                    (実測: 1726 / 2026-03 の 3/14 は控除 433 分で控除前 321 分、3/21 は控除 78 分で控除前 755 分。同月の他の日は ±1 分)。
+                    控除額は nginx からもらうしかありません — フェリーはデジタコのイベント名が一定せず (休息だったり休憩だったり)、
+                    <code>dtako_ferry_rows</code> を見ないと見分けられないためです。
+                  </template>
                 </p>
               </div>
             </div>

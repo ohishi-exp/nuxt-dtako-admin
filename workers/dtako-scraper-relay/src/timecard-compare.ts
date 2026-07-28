@@ -77,7 +77,12 @@ export interface NginxDriverMonth {
 
 /** 検出した異常 1 件。**差分とは独立** — 両者が一致していても出る。 */
 export interface CompareAnomaly {
-  kind: "negative-kosoku" | "negative-kosoku-type" | "impossible-kosoku" | "negative-total";
+  kind:
+    | "negative-kosoku"
+    | "negative-kosoku-type"
+    | "impossible-kosoku"
+    | "negative-total"
+    | "ferry-minus";
   /** 対象の暦日 (`YYYY-MM-DD`)。月次集計欄の異常は null。 */
   date: string | null;
   /** `negative-kosoku-type` は type 名、`negative-total` は集計欄の項目名。 */
@@ -94,6 +99,14 @@ export interface CompareDay {
   /** `nginx - ours`。どちらかが欠けている日は null。 */
   diffMinutes: number | null;
   status: "match" | "within-tolerance" | "mismatch" | "nginx-only" | "ours-only" | "both-empty";
+  /**
+   * その日に nginx が引いた同日フェリー控除 (分)。該当なしは null。
+   *
+   * **合計が正でも出す。** 実データ (1726 / 2026-03) では 3/14 が -112 分 (控除 433)、
+   * 3/21 が +677 分 (控除 78) で、後者は負にならないぶん見落とす。控除額そのものを
+   * 画面と MCP から確かめられるようにする。
+   */
+  ferryMinusMinutes: number | null;
   anomalies: CompareAnomaly[];
 }
 
@@ -108,6 +121,8 @@ export interface CompareResult {
     nginxMinutes: number;
     oursMinutes: number;
     diffMinutes: number;
+    /** 月内のフェリー控除の合計 (分)。nginx の `summary.total_ferry_minus` と一致する。 */
+    ferryMinusMinutes: number;
   };
   /** `status` が `match` / `within-tolerance` / `both-empty` 以外の日数。 */
   mismatchCount: number;
@@ -331,6 +346,30 @@ function dayAnomalies(day: NginxDay): CompareAnomaly[] {
       message: `nginx の拘束が 1 日 (${MINUTES_PER_DAY} 分) を超えています (${total} 分)`,
     });
   }
+  // フェリー控除は**それ自体が nginx 側の欠陥**なので、合計が負でなくても出す。
+  //
+  // 根拠は実測: 1726 / 2026-03 の 3/14 (控除 433) と 3/21 (控除 78) はどちらも
+  // **控除前の値がこちらと一致する** (321 / 755)。同月の他の日は ±1 分で揃うので、
+  // 控除ぶんだけが差になっている = 二重に引いている。
+  //
+  // **フェリーは `dtako_events` からは見分けられない。** 実測では 3/14 の 2 本が
+  // 「休息」(224分 / 210分)、3/21 の 1 本が「休憩」(78分) で、イベント名が一定しない。
+  // 見分けるには `dtako_ferry_rows` が要る。よってここでは分類から演繹せず、
+  // **控除前の値がこちらと一致するという実測だけ**を根拠にする。
+  const ferry = day.ferryMinusMinutes;
+  if (ferry !== null && ferry > 0) {
+    const before = total === null ? null : total + ferry;
+    found.push({
+      kind: "ferry-minus",
+      date: day.date,
+      field: null,
+      minutes: ferry,
+      message:
+        `nginx が同日フェリー控除で ${ferry} 分を引いています` +
+        (before === null ? "" : ` (控除前は ${before} 分)`) +
+        "。控除前の値がこちらと一致するので二重に引いています",
+    });
+  }
   // 合計が正でも内訳の片方が負なことがある (控除が type ごとに効くため)
   for (const [type, minutes] of Object.entries(day.kosokuByType)) {
     if (minutes < 0) {
@@ -419,6 +458,7 @@ export function compareTimecardMonth(input: {
   const anomalies: CompareAnomaly[] = [];
   let nginxTotal = 0;
   let oursTotal = 0;
+  let ferryTotal = 0;
   let mismatchCount = 0;
 
   for (const date of daysOfMonth(input.month)) {
@@ -433,6 +473,8 @@ export function compareTimecardMonth(input: {
     if (status !== "match" && status !== "within-tolerance" && status !== "both-empty") {
       mismatchCount += 1;
     }
+    const ferryMinusMinutes = nginxDay?.ferryMinusMinutes ?? null;
+    if (ferryMinusMinutes !== null) ferryTotal += ferryMinusMinutes;
     days.push({
       date,
       nginxMinutes,
@@ -440,6 +482,7 @@ export function compareTimecardMonth(input: {
       diffMinutes:
         nginxMinutes === null || oursMinutes === null ? null : nginxMinutes - oursMinutes,
       status,
+      ferryMinusMinutes,
       anomalies: dayFound,
     });
   }
@@ -456,6 +499,7 @@ export function compareTimecardMonth(input: {
       nginxMinutes: nginxTotal,
       oursMinutes: oursTotal,
       diffMinutes: nginxTotal - oursTotal,
+      ferryMinusMinutes: ferryTotal,
     },
     mismatchCount,
     anomalies,

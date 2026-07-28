@@ -12,6 +12,9 @@ import {
 // 実応答 (yhonda-ohishi/nginx#784) を 3 名 × 数日に間引いたもの。
 // ssh ohishi-data → `curl http://127.0.0.1:120/time-card/pdf-json?month=2026-04&recalc=0`
 import REAL_PDF_JSON from "./fixtures/pdf-json-2026-04.json";
+// 同日フェリー控除の実応答 (nginx#787 後、1726 / 2026-03)。3/14 は控除で合計が負に
+// なり、3/21 は控除があっても合計は正のまま — 後者を見落とさないための実データ。
+import REAL_FERRY_JSON from "./fixtures/pdf-json-ferry-2026-03.json";
 
 /** こちら側 (暦日按分後) の入力を作る。 */
 function ours(entries: Record<string, number>): Map<string, { restraintMinutes: number }> {
@@ -490,7 +493,12 @@ describe("compareTimecardMonth", () => {
       ]),
       oursByDate: ours({ "2026-04-01": 570, "2026-04-02": 470 }),
     });
-    expect(r.totals).toEqual({ nginxMinutes: 1050, oursMinutes: 1040, diffMinutes: 10 });
+    expect(r.totals).toEqual({
+      nginxMinutes: 1050,
+      oursMinutes: 1040,
+      diffMinutes: 10,
+      ferryMinusMinutes: 0,
+    });
   });
 
   it("対象月の外の日は無視する", () => {
@@ -500,8 +508,88 @@ describe("compareTimecardMonth", () => {
       nginx: nginxDriver([{ date: "2026-05-01", kosokuMinutes: 570 }]),
       oursByDate: ours({ "2026-03-31": 480 }),
     });
-    expect(r.totals).toEqual({ nginxMinutes: 0, oursMinutes: 0, diffMinutes: 0 });
+    expect(r.totals).toEqual({
+      nginxMinutes: 0,
+      oursMinutes: 0,
+      diffMinutes: 0,
+      ferryMinusMinutes: 0,
+    });
     expect(r.mismatchCount).toBe(0);
+  });
+});
+
+// #787 で ferry_minus が出るようになった。控除は**それ自体が nginx 側の欠陥**なので、
+// 合計が負でなくても見えないといけない (3/21 がまさにその形)。
+describe("同日フェリー控除 — 実応答 (nginx#787)", () => {
+  const parsed = parsePdfJson(REAL_FERRY_JSON, "2026-03");
+  const result = compareTimecardMonth({
+    month: "2026-03",
+    driverCd: "1726",
+    nginx: parsed.get("1726") ?? null,
+    // 実測値 (rust /api/kintai/kosoku-daily の暦日按分)
+    oursByDate: ours({
+      "2026-03-02": 1197,
+      "2026-03-03": 688,
+      "2026-03-14": 321,
+      "2026-03-21": 755,
+    }),
+  });
+  const dayOf = (date: string) => result.days.find((d) => d.date === date);
+
+  it("控除額を日ごとに持つ (該当なしは null)", () => {
+    expect(dayOf("2026-03-14")?.ferryMinusMinutes).toBe(433);
+    expect(dayOf("2026-03-21")?.ferryMinusMinutes).toBe(78);
+    expect(dayOf("2026-03-03")?.ferryMinusMinutes).toBeNull();
+  });
+
+  it("合計が正の日でも異常として出す (負にならないぶん見落とす)", () => {
+    const day = dayOf("2026-03-21");
+    expect(day?.nginxMinutes).toBe(677);
+    expect(day?.status).toBe("mismatch");
+    expect(day?.anomalies.map((a) => a.kind)).toEqual(["ferry-minus"]);
+    expect(day?.anomalies[0]?.message).toBe(
+      "nginx が同日フェリー控除で 78 分を引いています (控除前は 755 分)。控除前の値がこちらと一致するので二重に引いています",
+    );
+  });
+
+  it("控除前の値がこちらと一致する (控除が差の原因そのもの)", () => {
+    for (const date of ["2026-03-14", "2026-03-21"]) {
+      const d = dayOf(date)!;
+      expect(d.nginxMinutes! + d.ferryMinusMinutes!).toBe(d.oursMinutes);
+    }
+  });
+
+  it("負の日は合計・控除・内訳の 3 件が出る (同じ原因だがどれも事実)", () => {
+    // 合計 -112 / フェリー控除 433 / デジタコ内訳 -112 — 控除が積算を食い破った形
+    const kinds = dayOf("2026-03-14")?.anomalies.map((a) => a.kind);
+    expect(kinds).toEqual(["negative-kosoku", "ferry-minus", "negative-kosoku-type"]);
+    expect(dayOf("2026-03-14")?.anomalies[0]?.message).toBe(
+      "nginx の拘束が負です (-112 分)。同日フェリー控除の 433 分が引かれたため (控除前は 321 分)",
+    );
+  });
+
+  it("月計は nginx の total_ferry_minus と一致する", () => {
+    // 実応答の summary.total_ferry_minus = 511
+    expect(result.totals.ferryMinusMinutes).toBe(511);
+    expect(parsed.get("1726")?.totals.total_ferry_minus).toBe(511);
+  });
+
+  it("拘束が null の日に控除だけ来ても控除前は書かない (足す相手が無い)", () => {
+    const r = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1726",
+      nginx: nginxDriver([{ date: "2026-03-14", kosokuMinutes: null, ferryMinus: 60 }]),
+      oursByDate: ours({}),
+    });
+    expect(r.anomalies.map((a) => a.kind)).toEqual(["ferry-minus"]);
+    expect(r.anomalies[0]?.message).toBe(
+      "nginx が同日フェリー控除で 60 分を引いています。控除前の値がこちらと一致するので二重に引いています",
+    );
+  });
+
+  it("控除の無い日は従来どおり", () => {
+    expect(dayOf("2026-03-03")?.status).toBe("match");
+    expect(dayOf("2026-03-03")?.anomalies).toEqual([]);
   });
 });
 
