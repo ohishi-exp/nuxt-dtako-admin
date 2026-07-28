@@ -30,6 +30,7 @@ import {
   compareTimecardMonth,
   compareTimecardMonthAll,
   parsePdfJson,
+  pdfJsonError,
   type CompareResult,
 } from "../../../dtako-scraper-relay/src/timecard-compare";
 import type { Env } from "../env";
@@ -415,6 +416,10 @@ export const getTimecardDiffTool = {
     for (const [driverCd, driverShifts] of shifts) {
       oursByDriver.set(driverCd, kosokuPartsByDate(driverShifts, args.month));
     }
+    // nginx はエラーも HTTP 200 + `{error}` で返す (nginx#784)。素通しすると
+    // 「差なし」に見えるので必ず表に出す
+    const upstreamError = pdfJsonError(pdfBody);
+    if (upstreamError) throw new Error(`タイムカードPDF API: ${upstreamError}`);
     const nginxByDriver = parsePdfJson(pdfBody, args.month);
 
     let results: CompareResult[];

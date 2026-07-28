@@ -1,0 +1,290 @@
+{
+  "rows": [
+    {
+      "driver_id": 1021,
+      "name": "鈴木  昭",
+      "month": "2026-04",
+      "days": [
+        {
+          "date": "2026-04-01",
+          "attendance": {
+            "shukkin1": null,
+            "taisha1": null,
+            "shukkin2": null,
+            "taisha2": null
+          },
+          "remarks": "公休",
+          "leaves": [
+            {
+              "detail": "公休"
+            }
+          ],
+          "kosoku_minutes": {
+            "total": null,
+            "デジタコ": null,
+            "TC_DC": null
+          }
+        },
+        {
+          "date": "2026-04-03",
+          "attendance": {
+            "shukkin1": "06:33",
+            "taisha1": null,
+            "shukkin2": null,
+            "taisha2": null
+          },
+          "remarks": "",
+          "leaves": [],
+          "kosoku_minutes": {
+            "total": 617,
+            "デジタコ": 557,
+            "TC_DC": 60
+          }
+        },
+        {
+          "date": "2026-04-04",
+          "attendance": {
+            "shukkin1": null,
+            "taisha1": null,
+            "shukkin2": null,
+            "taisha2": null
+          },
+          "remarks": "",
+          "leaves": [],
+          "kosoku_minutes": {
+            "total": 562,
+            "デジタコ": 562,
+            "TC_DC": null
+          }
+        },
+        {
+          "date": "2026-04-05",
+          "attendance": {
+            "shukkin1": null,
+            "taisha1": null,
+            "shukkin2": null,
+            "taisha2": null
+          },
+          "remarks": "",
+          "leaves": [],
+          "kosoku_minutes": {
+            "total": 710,
+            "デジタコ": 710,
+            "TC_DC": null
+          }
+        }
+      ],
+      "summary": {
+        "shukkin": 21,
+        "kyuka": 4,
+        "yukyu": 0,
+        "kekkin": 0,
+        "chikoku": 0,
+        "soutai": 0,
+        "tokukyu": 0,
+        "kyujitsu_shukkin": 5,
+        "kyujitsu_shukkin_raw": 5,
+        "total_kosoku": 15940,
+        "before_hire": 0,
+        "after_retire": 0,
+        "kiso_date": 21
+      }
+    },
+    {
+      "driver_id": 1379,
+      "name": "植村　秀昭",
+      "month": "2026-04",
+      "days": [
+        {
+          "date": "2026-04-01",
+          "attendance": {
+            "shukkin1": "09:52",
+            "taisha1": "20:11",
+            "shukkin2": null,
+            "taisha2": null
+          },
+          "remarks": "",
+          "leaves": [],
+          "kosoku_minutes": {
+            "total": 618,
+            "デジタコ": 617,
+            "TC_DC": 1
+          }
+        },
+        {
+          "date": "2026-04-02",
+          "attendance": {
+            "shukkin1": "09:37",
+            "taisha1": "19:47",
+            "shukkin2": null,
+            "taisha2": null
+          },
+          "remarks": "",
+          "leaves": [],
+          "kosoku_minutes": {
+            "total": 608,
+            "デジタコ": 595,
+            "TC_DC": 13
+          }
+        },
+        {
+          "date": "2026-04-03",
+          "attendance": {
+            "shukkin1": "09:49",
+            "taisha1": "19:18",
+            "shukkin2": null,
+            "taisha2": null
+          },
+          "remarks": "",
+          "leaves": [],
+          "kosoku_minutes": {
+            "total": 569,
+            "デジタコ": 555,
+            "TC_DC": 14
+          }
+        },
+        {
+          "date": "2026-04-05",
+          "attendance": {
+            "shukkin1": null,
+            "taisha1": null,
+            "shukkin2": null,
+            "taisha2": null
+          },
+          "remarks": "公休",
+          "leaves": [
+            {
+              "detail": "公休"
+            }
+          ],
+          "kosoku_minutes": {
+            "total": null,
+            "デジタコ": null,
+            "TC_DC": null
+          }
+        },
+        {
+          "date": "2026-04-27",
+          "attendance": {
+            "shukkin1": "09:15",
+            "taisha1": "20:00",
+            "shukkin2": null,
+            "taisha2": null
+          },
+          "remarks": "",
+          "leaves": [],
+          "kosoku_minutes": {
+            "total": 644,
+            "デジタコ": 653,
+            "TC_DC": -9
+          }
+        }
+      ],
+      "summary": {
+        "shukkin": 21,
+        "kyuka": 7,
+        "yukyu": 0,
+        "kekkin": 0,
+        "chikoku": 0,
+        "soutai": 0,
+        "tokukyu": 0,
+        "kyujitsu_shukkin": 2,
+        "kyujitsu_shukkin_raw": 2,
+        "total_kosoku": 15045,
+        "before_hire": 0,
+        "after_retire": 0,
+        "kiso_date": 21
+      }
+    },
+    {
+      "driver_id": 1049,
+      "name": "松田　光也",
+      "month": "2026-04",
+      "days": [
+        {
+          "date": "2026-04-01",
+          "attendance": {
+            "shukkin1": "05:25",
+            "taisha1": null,
+            "shukkin2": null,
+            "taisha2": null
+          },
+          "remarks": "",
+          "leaves": [],
+          "kosoku_minutes": {
+            "total": 1046,
+            "デジタコ": 1046,
+            "TC_DC": null
+          }
+        },
+        {
+          "date": "2026-04-02",
+          "attendance": {
+            "shukkin1": null,
+            "taisha1": null,
+            "shukkin2": null,
+            "taisha2": null
+          },
+          "remarks": "",
+          "leaves": [],
+          "kosoku_minutes": {
+            "total": 505,
+            "デジタコ": 505,
+            "TC_DC": null
+          }
+        },
+        {
+          "date": "2026-04-03",
+          "attendance": {
+            "shukkin1": null,
+            "taisha1": null,
+            "shukkin2": null,
+            "taisha2": null
+          },
+          "remarks": "",
+          "leaves": [],
+          "kosoku_minutes": {
+            "total": 687,
+            "デジタコ": 687,
+            "TC_DC": null
+          }
+        },
+        {
+          "date": "2026-04-09",
+          "attendance": {
+            "shukkin1": null,
+            "taisha1": null,
+            "shukkin2": null,
+            "taisha2": null
+          },
+          "remarks": "公休",
+          "leaves": [
+            {
+              "detail": "公休"
+            }
+          ],
+          "kosoku_minutes": {
+            "total": null,
+            "デジタコ": null,
+            "TC_DC": null
+          }
+        }
+      ],
+      "summary": {
+        "shukkin": 20,
+        "kyuka": 10,
+        "yukyu": 0,
+        "kekkin": 0,
+        "chikoku": 0,
+        "soutai": 0,
+        "tokukyu": 0,
+        "kyujitsu_shukkin": 0,
+        "kyujitsu_shukkin_raw": -1,
+        "total_kosoku": 14247,
+        "before_hire": 0,
+        "after_retire": 0,
+        "kiso_date": 21
+      }
+    }
+  ]
+}

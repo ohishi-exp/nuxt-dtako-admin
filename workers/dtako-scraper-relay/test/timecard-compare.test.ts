@@ -5,9 +5,13 @@ import {
   compareTimecardMonthAll,
   daysOfMonth,
   parsePdfJson,
+  pdfJsonError,
   toDateKey,
   type NginxDriverMonth,
 } from "../src/timecard-compare";
+// 実応答 (yhonda-ohishi/nginx#784) を 3 名 × 数日に間引いたもの。
+// ssh ohishi-data → `curl http://127.0.0.1:120/time-card/pdf-json?month=2026-04&recalc=0`
+import REAL_PDF_JSON from "./fixtures/pdf-json-2026-04.json";
 
 /** こちら側 (暦日按分後) の入力を作る。 */
 function ours(entries: Record<string, number>): Map<string, { restraintMinutes: number }> {
@@ -151,6 +155,86 @@ describe("parsePdfJson", () => {
     expect(m.get("1021")?.totals).toEqual({});
     expect(m.get("1022")?.days[0]?.kosokuByType).toEqual({});
     expect(m.get("1022")?.totals).toEqual({});
+  });
+});
+
+// 実応答 (yhonda-ohishi/nginx#784) の形。起票時の想定と 3 点違っていた:
+// トップが `rows` / `kosoku_minutes` がオブジェクト / 月計が `summary`。
+describe("parsePdfJson — 実応答 (nginx#784)", () => {
+  const parsed = parsePdfJson(REAL_PDF_JSON, "2026-04");
+
+  it("rows を読む", () => {
+    expect([...parsed.keys()].sort()).toEqual(["1021", "1049", "1379"]);
+    expect(parsed.get("1021")?.name).toBe("鈴木  昭");
+  });
+
+  it("kosoku_minutes オブジェクトから total と type 別内訳を取る", () => {
+    // 1379 の 4/27 は TC_DC が負 (合計は正) — 実データ
+    const day = parsed.get("1379")?.days.find((d) => d.date === "2026-04-27");
+    expect(day?.kosokuMinutes).toBe(644);
+    expect(day?.kosokuByType).toEqual({ デジタコ: 653, TC_DC: -9 });
+  });
+
+  it("値が null の日は「行はあるが値なし」にする", () => {
+    // 4/1 は公休で拘束が無い日 ({total: null, デジタコ: null, TC_DC: null})
+    const day = parsed.get("1021")?.days.find((d) => d.date === "2026-04-01");
+    expect(day?.kosokuMinutes).toBeNull();
+    expect(day?.kosokuByType).toEqual({});
+  });
+
+  it("summary を月計として読む (kyujitsu_shukkin_raw の負値もそのまま)", () => {
+    expect(parsed.get("1049")?.totals.kyujitsu_shukkin_raw).toBe(-1);
+    expect(parsed.get("1021")?.totals.shukkin).toBe(21);
+  });
+
+  it("実データの負値がそのまま突合結果の異常になる", () => {
+    const r = compareTimecardMonth({
+      month: "2026-04",
+      driverCd: "1379",
+      nginx: parsed.get("1379") ?? null,
+      oursByDate: ours({ "2026-04-27": 644 }),
+    });
+    // 合計は一致しているのに内訳が負 — 差分と独立に出ることの実データ確認
+    expect(r.days.find((d) => d.date === "2026-04-27")?.status).toBe("match");
+    expect(r.anomalies).toEqual([
+      expect.objectContaining({ kind: "negative-kosoku-type", date: "2026-04-27", field: "TC_DC", minutes: -9 }),
+    ]);
+  });
+});
+
+describe("parsePdfJson — kosoku_minutes の形ゆれ", () => {
+  const oneDay = (kosoku: unknown) =>
+    parsePdfJson({ rows: [{ driver_id: 1, days: [{ day: 1, kosoku_minutes: kosoku }] }] }, "2026-04")
+      .get("1")?.days[0];
+
+  it("数値 1 個の形も受ける (起票時の想定)", () => {
+    expect(oneDay(570)).toMatchObject({ kosokuMinutes: 570, kosokuByType: {} });
+  });
+
+  it("total が無いオブジェクトは合計 null のまま内訳だけ取る", () => {
+    expect(oneDay({ TC_DC: -9 })).toMatchObject({ kosokuMinutes: null, kosokuByType: { TC_DC: -9 } });
+  });
+
+  it("配列・文字列・null は値なし", () => {
+    for (const raw of [[1], "60", null, undefined]) {
+      expect(oneDay(raw)).toMatchObject({ kosokuMinutes: null, kosokuByType: {} });
+    }
+  });
+});
+
+describe("pdfJsonError", () => {
+  it("nginx が 200 で返すエラーを拾う (月の書式違い・基礎日数の未登録)", () => {
+    expect(pdfJsonError({ error: "month は YYYY-MM 形式で指定してください" })).toBe(
+      "month は YYYY-MM 形式で指定してください",
+    );
+  });
+
+  it("正常応答・空文字・非オブジェクトは null", () => {
+    expect(pdfJsonError(REAL_PDF_JSON)).toBeNull();
+    expect(pdfJsonError({ error: "" })).toBeNull();
+    expect(pdfJsonError({ error: 42 })).toBeNull();
+    expect(pdfJsonError(null)).toBeNull();
+    expect(pdfJsonError("x")).toBeNull();
   });
 });
 

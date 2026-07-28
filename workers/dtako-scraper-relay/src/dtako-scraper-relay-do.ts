@@ -162,6 +162,7 @@ import {
   compareTimecardMonth,
   compareTimecardMonthAll,
   parsePdfJson,
+  pdfJsonError,
   type CompareResult,
 } from "./timecard-compare";
 import { buildRestraintD1Statements, type RestraintD1Entry } from "./restraint-d1";
@@ -2987,7 +2988,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         `タイムカードPDF API が ${upstream.status} を返しました: ${rawText.slice(0, 200)}`,
       );
     }
-    return JSON.parse(rawText);
+    const body: unknown = JSON.parse(rawText);
+    // nginx はエラーも HTTP 200 + `{error}` で返す (nginx#784)。素通しすると
+    // `rows` が無いだけになり、画面に「差なし」と出てしまう
+    const upstreamError = pdfJsonError(body);
+    if (upstreamError) throw new RelayUpstreamError(`タイムカードPDF API: ${upstreamError}`);
+    return body;
   }
 
   /** 乗務員CD クエリの検証。未指定は null、書式違いは `Error` (= 400)。 */
