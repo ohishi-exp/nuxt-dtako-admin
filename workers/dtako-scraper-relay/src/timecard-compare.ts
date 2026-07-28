@@ -126,6 +126,32 @@ function toTotals(v: unknown): Record<string, number> {
   return out;
 }
 
+/**
+ * 1 日の拘束を読む。
+ *
+ * 実応答 (yhonda-ohishi/nginx#784) は
+ * `kosoku_minutes: {total, デジタコ, TC_DC}` の**オブジェクト**で、値は日により null。
+ * 数値 1 個の形も受けておく (起票時の想定がそちらだった)。
+ * `total` 以外のキーをそのまま type 別内訳として扱うので、上流が type を増やしても
+ * ここを触らずに拾える。
+ */
+function toKosoku(raw: unknown): { minutes: number | null, byType: Record<string, number> } {
+  const direct = finiteNumber(raw);
+  if (direct !== null) return { minutes: direct, byType: {} };
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { minutes: null, byType: {} };
+  }
+  const byType: Record<string, number> = {};
+  let minutes: number | null = null;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const n = finiteNumber(value);
+    if (n === null) continue;
+    if (key === "total") minutes = n;
+    else byType[key] = n;
+  }
+  return { minutes, byType };
+}
+
 function toNginxDriver(entry: unknown, ym: string): NginxDriverMonth | null {
   if (typeof entry !== "object" || entry === null) return null;
   const e = entry as Record<string, unknown>;
@@ -139,10 +165,12 @@ function toNginxDriver(entry: unknown, ym: string): NginxDriverMonth | null {
       const d = raw as Record<string, unknown>;
       const date = toDateKey(d, ym);
       if (!date) continue;
+      const kosoku = toKosoku(d.kosoku_minutes);
       days.push({
         date,
-        kosokuMinutes: finiteNumber(d.kosoku_minutes),
-        kosokuByType: toKosokuByType(d.kosoku_by_type),
+        kosokuMinutes: kosoku.minutes,
+        // 内訳が別項目で来る形 (起票時の想定) も残す
+        kosokuByType: { ...toKosokuByType(d.kosoku_by_type), ...kosoku.byType },
       });
     }
   }
@@ -150,23 +178,43 @@ function toNginxDriver(entry: unknown, ym: string): NginxDriverMonth | null {
     driverCd: String(cd),
     name: typeof e.name === "string" ? e.name : "",
     days,
-    totals: toTotals(e.totals),
+    // 実応答は `summary`。`totals` は起票時の想定
+    totals: { ...toTotals(e.totals), ...toTotals(e.summary) },
   };
+}
+
+/**
+ * nginx が**エラーを HTTP 200 + `{error}` で返してくる**ので、それを拾う
+ * (yhonda-ohishi/nginx#784: 月の書式違い・`KyuyoKisoDate` 未登録)。
+ *
+ * 素通しすると `rows` が無いだけになり、画面には「差なし」と出てしまう。
+ * **黙って一致に見えるのが一番まずい**ので、呼び出し側で 502 に倒すために出す。
+ */
+export function pdfJsonError(body: unknown): string | null {
+  if (typeof body !== "object" || body === null) return null;
+  const err = (body as { error?: unknown }).error;
+  return typeof err === "string" && err !== "" ? err : null;
 }
 
 /**
  * nginx の `/time-card/pdf-json` 応答を乗務員CD 引きに直す。
  *
- * `{drivers: [...]}` (全乗務員) と `{driver_id, days}` (1 名指定) の**どちらの形でも
- * 受ける** — 上流の形が #782 で確定しておらず、呼び分けで壊れないようにするため。
- * 解釈できない行は黙って捨てる (中継は既に済んでおり、ここで throw しても
- * 呼び出し側に打つ手が無い)。
+ * 実応答 (yhonda-ohishi/nginx#784) は `{rows: [{driver_id, name, month, days, summary}]}`。
+ * `days` は `array_values` 済みの配列で、1 名指定でも全乗務員でも同じ形。
+ * 起票時に想定していた `{drivers: [...]}` / 単体オブジェクトも受けておく
+ * (呼び分けや将来の変更で黙って空にならないように)。
+ *
+ * 解釈できない行は捨てる — 中継は既に済んでおり、ここで throw しても呼び出し側に
+ * 打つ手が無い。**応答全体がエラーの場合だけ** [`pdfJsonError`] で別に拾う。
  */
 export function parsePdfJson(body: unknown, ym: string): Map<string, NginxDriverMonth> {
   const out = new Map<string, NginxDriverMonth>();
   if (typeof body !== "object" || body === null) return out;
   const b = body as Record<string, unknown>;
-  const entries = Array.isArray(b.drivers) ? b.drivers : [b];
+  let entries: unknown[];
+  if (Array.isArray(b.rows)) entries = b.rows;
+  else if (Array.isArray(b.drivers)) entries = b.drivers;
+  else entries = [b];
   for (const entry of entries) {
     const parsed = toNginxDriver(entry, ym);
     if (parsed) out.set(parsed.driverCd, parsed);

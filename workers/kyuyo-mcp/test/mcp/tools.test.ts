@@ -675,6 +675,21 @@ describe("get_timecard_diff", () => {
     expect(res.results[0]!.mismatchCount).toBe(0);
   });
 
+  it("nginx が 200 で返すエラーを握り潰さない (差なしに見えてしまう)", async () => {
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/api/kintai/pdf-json")) {
+        return new Response(
+          JSON.stringify({ error: "KyuyoKisoDate に 2026-04 の基礎日数が登録されていません" }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ drivers: [] }), { status: 200 });
+    });
+    await expect(
+      getTimecardDiffTool.execute(kosokuEnv(), { month: "2026-04", driver: "1021" }),
+    ).rejects.toThrow("基礎日数が登録されていません");
+  });
+
   it("月の書式が通っても範囲外なら上流を叩かない", async () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
