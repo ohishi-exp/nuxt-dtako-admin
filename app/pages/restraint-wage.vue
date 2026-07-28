@@ -891,7 +891,8 @@ function downloadMonthlyCsv() {
   const header = [
     '年月', '乗務員CD', '氏名', '事業所', '所属(マスタ)', '給与体系', '稼働日数', '休日数',
     '運転', '荷役', '休憩', '拘束合計', '年度累計(前月まで)', '当月超過', '15時間超過日数', '平均運転9h超過回数',
-    '実働', '時間外', '深夜', '時間外深夜', '単価',
+    // 時間区分は画面 (月次集計・最低賃金チェック) と同じ classifyMonth の結果を出す
+    '実働', '時間外', '週40超過', '深夜', '時間外深夜', '法定休日', '法定休日深夜', '法定外休日', '法定外休日深夜', '単価',
     ...WAGE_COLUMNS.map(c => `${c.label}(円)`), '合計(円)', '換算時給', '最低賃金', '最低賃金差',
   ]
   const lines = [header.join(',')]
@@ -905,7 +906,11 @@ function downloadMonthlyCsv() {
       String(s.workDays), String(s.restDays),
       fmtMinutes(s.drivingMinutes), fmtMinutes(s.loadingMinutes), fmtMinutes(s.breakMinutes), fmtMinutes(s.restraintMinutes),
       fmtMinutes(s.fiscalCumulativeMinutes), fmtMinutes(s.excessRestraintMinutes), String(s.over15hDays), String(s.avgDriving9hOverCount),
-      fmtMinutes(s.workingMinutes), fmtMinutes(s.overtimeMinutes), fmtMinutes(s.nightMinutes), fmtMinutes(s.overtimeNightMinutes),
+      fmtMinutes(s.workingMinutes),
+      fmtMinutes(w.minutes.overtime), fmtMinutes(w.minutes.weekly40Excess),
+      fmtMinutes(w.minutes.night), fmtMinutes(w.minutes.overtimeNight),
+      fmtMinutes(w.minutes.legalHoliday), fmtMinutes(w.minutes.legalHolidayNight),
+      fmtMinutes(w.minutes.nonLegalHoliday), fmtMinutes(w.minutes.nonLegalHolidayNight),
       w.hourlyRate == null ? '' : String(w.hourlyRate),
       ...WAGE_COLUMNS.map(c => (w.amounts ? String(w.amounts[c.key]) : '')),
       w.totalAmount == null ? '' : String(w.totalAmount),
@@ -3528,12 +3533,20 @@ watch([compMap, kyuyoSyncedKeys], () => {
               <span class="text-sm font-medium">更新中 — 表示中の数字は取得前のものです</span>
             </div>
 
-            <RestraintWageMonthlyTable
-              v-if="activeTab === 'monthly' && report?.rows.length"
-              :rows="report.rows"
-              :expand-wage="expandWage"
-              :class="staleReport ? STALE_CLASS : ''"
-            />
+            <template v-if="activeTab === 'monthly' && report?.rows.length">
+              <RestraintWageMonthlyTable
+                :rows="report.rows"
+                :expand-wage="expandWage"
+                :class="staleReport ? STALE_CLASS : ''"
+              />
+              <p class="text-xs text-gray-500 mt-2">
+                時間外・週40超過・深夜・時間外深夜・法定休日は<b>最低賃金チェックタブと同じ法定区分</b>です
+                (2026-07-28 に統一)。<b>法定休日 (既定 日曜) の実働は時間外に入りません</b> —
+                労基法上その日に時間外の概念は無く、割増は休日割増 1.35 倍 (深夜は 1.6 倍) に一本化されるためで、
+                法定休日列に丸ごと出ます。深夜は残業ではない通常勤務中の分だけ (実働の内数)。
+                区分ごとの単価・金額と検算 (差分列) は最低賃金チェックタブで見られます。
+              </p>
+            </template>
 
             <div
               v-else-if="activeTab === 'minwage' && report?.rows.length"
