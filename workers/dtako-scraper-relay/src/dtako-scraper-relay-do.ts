@@ -151,7 +151,13 @@ import {
   type TimecardDailyRow,
   type WageReportSource,
 } from "./timecard-summary";
-import { kosokuPartsByDate, parseKosokuDaily, prevYmOf, type KosokuShift } from "./kosoku-daily";
+import {
+  kosokuPartsByDate,
+  mergeKosokuShiftMaps,
+  parseKosokuDaily,
+  prevYmOf,
+  type KosokuShift,
+} from "./kosoku-daily";
 import { buildRestraintD1Statements, type RestraintD1Entry } from "./restraint-d1";
 import { buildRestraintPushBodies } from "./restraint-push";
 import {
@@ -2910,6 +2916,33 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /**
+   * 上流応答の短期メモ (この DO インスタンス内)。
+   *
+   * wage-report はタブ切替・月切替のたびに呼ばれ、そのたびに `kintai/daily` と
+   * `kosoku-daily` を取り直していた (1 回 1.7MB)。画面が「勤務を読み込んでいます…」
+   * から進まなくなったので、**同じ月は 60 秒だけ使い回す**。取り込み直後の反映が
+   * 最大 60 秒遅れるだけで、値そのものは上流が正。
+   */
+  private kintaiUpstreamCache = new Map<string, { at: number; value: unknown }>();
+
+  /** `key` の結果を TTL 内なら使い回す。null/undefined はキャッシュしない (再試行させる)。 */
+  private async memoKintaiUpstream<T>(key: string, load: () => Promise<T>): Promise<T> {
+    const TTL_MS = 60_000;
+    const now = Date.now();
+    const hit = this.kintaiUpstreamCache.get(key);
+    if (hit && now - hit.at < TTL_MS) return hit.value as T;
+    const value = await load();
+    if (value == null) return value;
+    // 月をまたいで無限に溜めない — 溢れたら古い順に落とす
+    if (this.kintaiUpstreamCache.size >= 8) {
+      const oldest = [...this.kintaiUpstreamCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+      if (oldest) this.kintaiUpstreamCache.delete(oldest[0]);
+    }
+    this.kintaiUpstreamCache.set(key, { at: now, value });
+    return value;
+  }
+
+  /**
    * タイムカード側のサマリを**その場で組む** (2026-07-28 決定「R2 やめろ」)。
    *
    * これまでは `kintai/fetch` が R2 へ書いたサマリを wage-report が読んでいたため、
@@ -2969,12 +3002,20 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       }
     };
 
-    const [dailyCurrent, dailyPrev, kosokuCurrent, kosokuPrev] = await Promise.all([
-      fetchDaily(ym),
-      fetchDaily(prevYm),
-      this.loadKosokuShifts(apiUrl, clientId, clientSecret, ym, prevYm),
-      this.loadKosokuShifts(apiUrl, clientId, clientSecret, prevYm),
+    // **同じ月を 2 度取らない。** 当月ぶんは「前月 + 当月」の勤務が要るが、前月ぶんも
+    // 同じ前月を使い回せる。最初の版は 3 回取っており (1 回 1.7MB)、画面が
+    // 「勤務を読み込んでいます…」から進まなくなった (2026-07-28 本番で発覚)
+    const [dailyCurrent, dailyPrev, shiftsCurrent, shiftsPrev] = await Promise.all([
+      this.memoKintaiUpstream(`daily:${ym}`, () => fetchDaily(ym)),
+      this.memoKintaiUpstream(`daily:${prevYm}`, () => fetchDaily(prevYm)),
+      this.memoKintaiUpstream(`kosoku:${ym}`, () =>
+        this.loadKosokuShifts(apiUrl, clientId, clientSecret, ym)),
+      this.memoKintaiUpstream(`kosoku:${prevYm}`, () =>
+        this.loadKosokuShifts(apiUrl, clientId, clientSecret, prevYm)),
     ]);
+    // 当月の勤務 = 前月から跨いだ分 + 当月分 (`kosokuPartsByDate` が当月に落ちる分だけ拾う)
+    const kosokuCurrent = mergeKosokuShiftMaps(shiftsPrev, shiftsCurrent);
+    const kosokuPrev = shiftsPrev;
     // 当月が取れないと賃金の素材が無い — 黙って空にせず R2 へ落とす
     if (!dailyCurrent) return null;
 

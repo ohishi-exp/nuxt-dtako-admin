@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { kosokuPartsByDate, parseKosokuDaily, prevYmOf } from '../src/kosoku-daily'
+import { kosokuPartsByDate, mergeKosokuShiftMaps, parseKosokuDaily, prevYmOf } from '../src/kosoku-daily'
 
 /** 上流 (`/api/kintai/kosoku-daily`) の 1 勤務。実応答のキー名そのまま。 */
 const shift = (over: Record<string, unknown> = {}) => ({
@@ -150,5 +150,41 @@ describe('kosokuPartsByDate', () => {
 
   it('対象月に何も落ちなければ空', () => {
     expect(kosokuPartsByDate(shifts, '2026-12').size).toBe(0)
+  })
+})
+
+describe('mergeKosokuShiftMaps', () => {
+  const map = (cd: string, dates: string[]) =>
+    new Map([[cd, dates.map(date => ({
+      date,
+      restraintMinutes: 0,
+      workingMinutes: 0,
+      overtimeMinutes: 0,
+      nightMinutes: 0,
+      overtimeNightMinutes: 0,
+      parts: [],
+    }))]])
+
+  it('乗務員ごとに連結する', () => {
+    const got = mergeKosokuShiftMaps(map('1', ['2026-03-31']), map('1', ['2026-04-01']))!
+    expect(got.get('1')!.map(s => s.date)).toEqual(['2026-03-31', '2026-04-01'])
+  })
+
+  it('片方にしか居ない乗務員も残す', () => {
+    const got = mergeKosokuShiftMaps(map('1', ['2026-03-31']), map('2', ['2026-04-01']))!
+    expect([...got.keys()].sort()).toEqual(['1', '2'])
+  })
+
+  it('取得できなかった月 (null) はもう一方をそのまま返す', () => {
+    const a = map('1', ['2026-03-31'])
+    expect(mergeKosokuShiftMaps(null, a)).toBe(a)
+    expect(mergeKosokuShiftMaps(a, null)).toBe(a)
+    expect(mergeKosokuShiftMaps(null, null)).toBeNull()
+  })
+
+  it('元の Map を書き換えない', () => {
+    const a = map('1', ['2026-03-31'])
+    mergeKosokuShiftMaps(a, map('1', ['2026-04-01']))
+    expect(a.get('1')).toHaveLength(1)
   })
 })

@@ -152,3 +152,23 @@ export function kosokuPartsByDate(
   }
   return byDate;
 }
+
+/**
+ * 月ごとに取った勤務表を 1 本にまとめる (乗務員CD ごとに連結)。
+ *
+ * 当月の暦日按分には**前月から跨いだ勤務**も要るが、前月ぶんは前月の集計でも使う。
+ * 同じ月を 2 度取らないよう、取得は月ごとに 1 回だけにしてここで合成する。
+ * どちらかが null (取得失敗) ならもう一方をそのまま返す。
+ */
+export function mergeKosokuShiftMaps(
+  a: Map<string, KosokuShift[]> | null,
+  b: Map<string, KosokuShift[]> | null,
+): Map<string, KosokuShift[]> | null {
+  if (!a) return b;
+  if (!b) return a;
+  const out = new Map<string, KosokuShift[]>(a);
+  for (const [driverCd, shifts] of b) {
+    out.set(driverCd, [...(out.get(driverCd) ?? []), ...shifts]);
+  }
+  return out;
+}
