@@ -42,6 +42,13 @@ const props = defineProps<{
     /** 法定休日 (日曜) の実働。 */
     legalHolidayMinutes: number
   } | null
+  /**
+   * 内訳列 (拘束 / 休憩 / 時間外 / 時間外深夜 / 深夜) を出すか (2026-07-28 指示)。
+   *
+   * **1 人だけ表示している時だけ true。** 3 人横並び (印刷・一覧) では紙幅に入らず、
+   * 8 列に揃えてある社内 PDF の形も崩れる。
+   */
+  detailed?: boolean
 }>()
 
 /** 分の符号付き表示 ("+2h13m" / "-2h13m")。0 は符号無し。 */
@@ -155,8 +162,17 @@ const kindSummary = computed(() => {
           <th class="border-b border-gray-200 py-0.5 text-center font-normal dark:border-gray-700">出勤2</th>
           <th class="border-b border-gray-200 py-0.5 text-center font-normal dark:border-gray-700">退社2</th>
           <th class="border-b border-gray-200 py-0.5 text-right font-normal dark:border-gray-700">残業</th>
+          <template v-if="detailed">
+            <th class="border-b border-gray-200 py-0.5 text-right font-normal dark:border-gray-700" title="法定時間外 (8h 超)。法定休日の実働は含まない">時間外</th>
+            <th class="border-b border-gray-200 py-0.5 text-right font-normal dark:border-gray-700" title="時間外に重なる深夜 (残業列の内数)">時間外<br>深夜</th>
+            <th class="border-b border-gray-200 py-0.5 text-right font-normal dark:border-gray-700" title="その日に深夜帯 (22:00-05:00) で働いた時間">深夜</th>
+          </template>
           <th class="border-b border-gray-200 py-0.5 text-left font-normal dark:border-gray-700">備考</th>
           <!-- その日の実働 (拘束 − 休憩)。打刻の無い日にも乗る (Refs #472) -->
+          <template v-if="detailed">
+            <th class="border-b border-gray-200 py-0.5 text-right font-normal dark:border-gray-700" title="終業 − 始業 (休憩を含む)">拘束</th>
+            <th class="border-b border-gray-200 py-0.5 text-right font-normal dark:border-gray-700" title="拘束 − 実働">休憩</th>
+          </template>
           <th class="border-b border-gray-200 py-0.5 text-right font-normal dark:border-gray-700">実働</th>
         </tr>
       </thead>
@@ -181,7 +197,16 @@ const kindSummary = computed(() => {
           <td class="text-right" :title="r.legalHolidayMinutes > 0 ? '法定休日 (日曜) の実働。時間外ではなく休日割増 1.35 倍' : undefined">
             {{ r.legalHolidayMinutes > 0 ? `(${fmtMinutes(r.legalHolidayMinutes)})` : (r.overtimeMinutes > 0 ? fmtMinutes(r.overtimeMinutes) : '') }}
           </td>
+          <template v-if="detailed">
+            <td class="text-right text-gray-500">{{ r.overtimeMinutes - r.overtimeNightMinutes > 0 ? fmtMinutes(r.overtimeMinutes - r.overtimeNightMinutes) : '' }}</td>
+            <td class="text-right text-gray-500">{{ r.overtimeNightMinutes > 0 ? fmtMinutes(r.overtimeNightMinutes) : '' }}</td>
+            <td class="text-right text-gray-500">{{ r.nightMinutes > 0 ? fmtMinutes(r.nightMinutes) : '' }}</td>
+          </template>
           <td class="pl-1 text-left whitespace-nowrap">{{ r.note }}</td>
+          <template v-if="detailed">
+            <td class="pl-1 text-right text-gray-500">{{ r.restraintMinutes > 0 ? fmtMinutes(r.restraintMinutes) : '' }}</td>
+            <td class="text-right text-gray-500">{{ r.breakMinutes > 0 ? fmtMinutes(r.breakMinutes) : '' }}</td>
+          </template>
           <td class="pl-1 text-right text-gray-500">{{ r.workingMinutes > 0 ? fmtMinutes(r.workingMinutes) : '' }}</td>
         </tr>
       </tbody>

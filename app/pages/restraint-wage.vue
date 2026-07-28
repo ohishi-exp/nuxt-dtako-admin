@@ -656,6 +656,14 @@ const hasTimecardSheets = computed(() =>
   timecardSections.value.some(s => s.sheets.length > 0))
 
 /**
+ * 表示が**1 人だけ**か (乗務員CD で絞り込んだ時)。true の間は 1 列に伸ばして
+ * 内訳列 (拘束 / 休憩 / 時間外 / 時間外深夜 / 深夜) も出す (2026-07-28 指示)。
+ * 3 人横並びでは紙幅に入らないので、その時は従来の 9 列のまま。
+ */
+const singleTimecardSheet = computed(() =>
+  timecardSections.value.reduce((n, s) => n + s.sheets.length, 0) === 1)
+
+/**
  * タイムカード表を**全部描く**か (Refs #472)。
  *
  * 画面では見えているシートだけ描く (`RenderWhenVisible`) — 134 人 × 30 日 × 8 列を一度に
@@ -5052,8 +5060,12 @@ watch([compMap, kyuyoSyncedKeys], () => {
                   <span class="ml-1 font-normal text-gray-500">{{ section.sheets.length }} 名</span>
                 </h3>
                 <div
-                  class="grid gap-4 print:grid-cols-3 md:grid-cols-2 xl:grid-cols-3"
-                  :class="staleReport ? STALE_CLASS : ''"
+                  class="grid gap-4"
+                  :class="[
+                    staleReport ? STALE_CLASS : '',
+                    // 1 人だけの時は横に伸ばして内訳列を読ませる
+                    singleTimecardSheet ? 'grid-cols-1' : 'print:grid-cols-3 md:grid-cols-2 xl:grid-cols-3',
+                  ]"
                 >
                   <RenderWhenVisible
                     v-for="sheet in section.sheets"
@@ -5070,6 +5082,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       :overtime-compare="sheet.overtimeCompare"
                       :attendance-compare="sheet.attendanceCompare"
                       :restraint="sheet.restraint"
+                      :detailed="singleTimecardSheet"
                     />
                   </RenderWhenVisible>
                 </div>
