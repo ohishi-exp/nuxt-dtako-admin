@@ -38,6 +38,7 @@ describe('parseKosokuDaily', () => {
       overtimeNightMinutes: 10,
       ferryMinusMinutes: 0,
       runGapMinutes: 0,
+      punchTailMinutes: 0,
       parts: [],
     }])
   })
@@ -58,6 +59,7 @@ describe('parseKosokuDaily', () => {
       overtimeNightMinutes: 0,
       ferryMinusMinutes: 0,
       runGapMinutes: 0,
+      punchTailMinutes: 0,
       parts: [],
     }])
   })
@@ -143,6 +145,7 @@ describe('kosokuPartsByDate', () => {
       overtimeNightMinutes: 5,
       ferryMinusMinutes: 0,
       runGapMinutes: 0,
+      punchTailMinutes: 0,
     })
     // 同じ日の 2 勤務が 1 つにまとまる
     expect(got.get('2026-04-06')).toEqual({
@@ -153,6 +156,7 @@ describe('kosokuPartsByDate', () => {
       overtimeNightMinutes: 10,
       ferryMinusMinutes: 0,
       runGapMinutes: 0,
+      punchTailMinutes: 0,
     })
   })
 
@@ -235,6 +239,14 @@ describe('crossMonthMinutesByDate', () => {
     expect(kosokuPartsByDate(m, '2026-04').get('2026-04-06')!.runGapMinutes).toBe(28)
   })
 
+  it('punch_tail_minutes を運ぶ (rust#172 の日跨ぎ終業の尻尾)', () => {
+    const m = parseKosokuDaily({
+      drivers: [{ driver: 8, days: [shift({ date: '2026-04-06', punch_tail_minutes: 151 })] }],
+    }).get('8')!
+    expect(m[0]!.punchTailMinutes).toBe(151)
+    expect(kosokuPartsByDate(m, '2026-04').get('2026-04-06')!.punchTailMinutes).toBe(151)
+  })
+
   it('跨ぐ勤務が無ければ空', () => {
     expect(crossMonthMinutesByDate(shifts, '2026-05').size).toBe(0)
   })
@@ -251,6 +263,7 @@ describe('mergeKosokuShiftMaps', () => {
       overtimeNightMinutes: 0,
       ferryMinusMinutes: 0,
       runGapMinutes: 0,
+      punchTailMinutes: 0,
       parts: [],
     }))]])
 
