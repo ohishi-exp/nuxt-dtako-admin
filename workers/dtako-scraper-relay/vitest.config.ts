@@ -34,6 +34,7 @@ export default defineConfig({
         'src/restraint-d1.ts',
         'src/restraint-push.ts',
         'src/restraint-wage-source.ts',
+        'src/timecard-compare.ts',
       ],
       thresholds: {
         lines: 100,

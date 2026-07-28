@@ -158,6 +158,12 @@ import {
   prevYmOf,
   type KosokuShift,
 } from "./kosoku-daily";
+import {
+  compareTimecardMonth,
+  compareTimecardMonthAll,
+  parsePdfJson,
+  type CompareResult,
+} from "./timecard-compare";
 import { buildRestraintD1Statements, type RestraintD1Entry } from "./restraint-d1";
 import { buildRestraintPushBodies } from "./restraint-push";
 import {
@@ -295,6 +301,19 @@ interface WorkEditPageRecord {
 function dvrJsonError(status: number, message: string): Response {
   return Response.json({ error: message }, { status });
 }
+
+/**
+ * 中継ハンドラの失敗を HTTP ステータスへ writeback するための型 (Refs #492 PR-A)。
+ *
+ * タイムカード突合は「クエリ検証 → 上流 2 本 → 純ロジック」と段が多く、途中で
+ * `Response` を返す形にすると `Promise.all` が組めない。throw して 1 箇所
+ * ([`relayErrorResponse`]) で写す。
+ */
+class RelayBadRequestError extends Error {}
+/** 資格情報・binding が揃っていない (= 503)。 */
+class RelayConfigError extends Error {}
+/** 上流が non-2xx を返した (= 502)。 */
+class RelayUpstreamError extends Error {}
 
 /** VenusSessionExpiredError を 401 にマップする時の文言。dvr-api / daily-report-api
  * の両方で 10 箇所超に同じ文字列がハードコードされていたのを 1 箇所に集約する
@@ -1808,6 +1827,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return this.handleKintaiArchive(record!, url);
     }
     // ---- 打刻基準の日別サマリ (ドライバーの拘束・深夜。Refs #472 PR-A) ----
+    if (url.pathname === "/restraint-api/kintai/pdf-json" && request.method === "GET") {
+      return this.handleKintaiPdfJson(url);
+    }
+    if (url.pathname === "/restraint-api/timecard-compare" && request.method === "GET") {
+      return this.handleTimecardCompare(url);
+    }
     if (url.pathname === "/restraint-api/kintai/kosoku-daily" && request.method === "GET") {
       return this.handleKintaiKosokuDaily(url);
     }
@@ -2913,6 +2938,186 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       console.error(JSON.stringify({ kosoku_daily: "error", error: describeUnknownError(err) }));
       return dvrJsonError(502, "拘束サマリ API の取得に失敗しました");
     }
+  }
+
+  /**
+   * ichiban (rust-ichibanboshi) 呼び出しの資格情報を揃える。取れなければ null。
+   *
+   * Secrets Store binding は「宣言はあるが解決できない」時に `get()` が throw するので、
+   * 素通しせず未設定と同じ扱いに倒す (`/kintai/fetch` と同じ)。
+   */
+  private async ichibanCreds(
+    tag: string,
+  ): Promise<{ apiUrl: string; clientId: string; clientSecret: string } | null> {
+    const apiUrl = (this.env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
+    const clientId = this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
+    let clientSecret = "";
+    try {
+      clientSecret = await resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
+    } catch (err) {
+      console.error(JSON.stringify({ [tag]: "secret-error", error: describeUnknownError(err) }));
+    }
+    if (!apiUrl || !clientId || !clientSecret) return null;
+    return { apiUrl, clientId, clientSecret };
+  }
+
+  /**
+   * 社内 CakePHP のタイムカード表 **PDF 相当**を取る (Refs #492 PR-A、上流は
+   * ohishi-exp/rust-ichibanboshi#143 → yhonda-ohishi/nginx#782)。
+   *
+   * `driver` を渡せば 1 名、省略すれば全乗務員。**キャッシュしない** — 突合は
+   * 「いま nginx が何を出しているか」を見るのが目的で、こちらで溜めると nginx 側の
+   * 修正が反映されたかどうかが分からなくなる。
+   */
+  private async fetchNginxPdfJson(ym: string, driver: string | null): Promise<unknown> {
+    const creds = await this.ichibanCreds("pdf_json");
+    if (!creds) throw new RelayConfigError("勤怠の取得先 (NUXT_ICHIBAN_*) が未設定です");
+    const q = new URLSearchParams({ month: ym });
+    if (driver) q.set("driver", driver);
+    const upstream = await fetch(`${creds.apiUrl}/api/kintai/pdf-json?${q.toString()}`, {
+      headers: {
+        "CF-Access-Client-Id": creds.clientId,
+        "CF-Access-Client-Secret": creds.clientSecret,
+      },
+    });
+    const rawText = await upstream.text();
+    if (!upstream.ok) {
+      console.error(JSON.stringify({ pdf_json: "upstream-error", status: upstream.status }));
+      throw new RelayUpstreamError(
+        `タイムカードPDF API が ${upstream.status} を返しました: ${rawText.slice(0, 200)}`,
+      );
+    }
+    return JSON.parse(rawText);
+  }
+
+  /** 乗務員CD クエリの検証。未指定は null、書式違いは `Error` (= 400)。 */
+  private parseDriverParam(url: URL): string | null {
+    const raw = url.searchParams.get("driver");
+    if (raw === null) return null;
+    if (!/^\d+$/.test(raw)) throw new RelayBadRequestError("driver は乗務員CD (数字) で指定してください");
+    return String(Number(raw));
+  }
+
+  /**
+   * GET /restraint-api/kintai/pdf-json?month=YYYY-MM[&driver=1021] — nginx の
+   * タイムカード表 PDF 相当 JSON を**そのまま**中継する (Refs #492 PR-A)。
+   *
+   * 突合結果ではなく生の上流応答が要る場面 (nginx 側の修正確認・形の調査) 用。
+   * 解釈は [`handleTimecardCompare`] 側で行う。
+   */
+  private async handleKintaiPdfJson(url: URL): Promise<Response> {
+    const parsed = this.parseMonthParam(url);
+    if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
+    try {
+      const driver = this.parseDriverParam(url);
+      const body = await this.fetchNginxPdfJson(parsed.ym, driver);
+      return Response.json(body);
+    } catch (err) {
+      return this.relayErrorResponse("pdf_json", err, "タイムカードPDF API の取得に失敗しました");
+    }
+  }
+
+  /**
+   * GET /restraint-api/timecard-compare?month=YYYY-MM[&driver=1021][&tolerance=1][&only_anomalies=1]
+   * — nginx のタイムカード表とこちらの拘束時間を**暦日ごとに突き合わせる** (Refs #492 PR-A)。
+   *
+   * - `driver` 指定 = 1 vs 1 (画面の目視突合)。省略 = 全乗務員 (MCP の一括チェック)
+   * - `only_anomalies=1` は全乗務員のときだけ効く。差分も異常も無い人を落とす
+   * - 突合するのは**拘束だけ**。残業は定義が別物なので比較しない (ユーザー決定)
+   *
+   * こちら側の値は `kosoku-daily` を**当月 + 前月**取って暦日按分したもの — 前月から
+   * 跨いだ勤務が当月 1 日に落ちるため、前月を取らないと月初が過少になる。
+   */
+  private async handleTimecardCompare(url: URL): Promise<Response> {
+    const parsed = this.parseMonthParam(url);
+    if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
+    const { ym } = parsed;
+
+    let driver: string | null;
+    let tolerance: number | undefined;
+    try {
+      driver = this.parseDriverParam(url);
+      tolerance = this.parseToleranceParam(url);
+    } catch (err) {
+      return this.relayErrorResponse("timecard_compare", err, "クエリの解釈に失敗しました");
+    }
+    const onlyAnomalies = url.searchParams.get("only_anomalies") === "1";
+
+    const creds = await this.ichibanCreds("timecard_compare");
+    if (!creds) return dvrJsonError(503, "勤怠の取得先 (NUXT_ICHIBAN_*) が未設定です");
+
+    try {
+      // こちら側 (kosoku-daily) は 1 名指定でも全乗務員ぶん取る — 上流が月単位で
+      // 1 リクエスト (実測 0.25 秒) であり、絞る API を別に持つ意味が無い。
+      // nginx 側は driver をそのまま渡す (1 名なら 1 名だけ返る)
+      const [pdfBody, shifts] = await Promise.all([
+        this.fetchNginxPdfJson(ym, driver),
+        this.loadKosokuShifts(creds.apiUrl, creds.clientId, creds.clientSecret, ym, prevYmOf(ym)),
+      ]);
+      const nginxByDriver = parsePdfJson(pdfBody, ym);
+      const oursByDriver = new Map<string, Map<string, { restraintMinutes: number }>>();
+      for (const [driverCd, driverShifts] of shifts ?? []) {
+        oursByDriver.set(driverCd, kosokuPartsByDate(driverShifts, ym));
+      }
+
+      let results: CompareResult[];
+      if (driver) {
+        results = [
+          compareTimecardMonth({
+            month: ym,
+            driverCd: driver,
+            nginx: nginxByDriver.get(driver) ?? null,
+            oursByDate: oursByDriver.get(driver) ?? new Map(),
+            toleranceMinutes: tolerance,
+          }),
+        ];
+      } else {
+        results = compareTimecardMonthAll({
+          month: ym,
+          nginxByDriver,
+          oursByDriver,
+          toleranceMinutes: tolerance,
+          onlyAnomalies,
+        });
+      }
+
+      console.log(
+        JSON.stringify({
+          timecard_compare: "built",
+          month: ym,
+          driver,
+          results: results.length,
+          // 上流が落ちても突合自体は返す (片側 null で nginx-only / ours-only に出る)
+          ours: shifts ? "yes" : "no",
+        }),
+      );
+      return Response.json({
+        month: ym,
+        driver,
+        onlyAnomalies: driver ? false : onlyAnomalies,
+        oursAvailable: shifts !== null,
+        results,
+      });
+    } catch (err) {
+      return this.relayErrorResponse("timecard_compare", err, "タイムカード突合に失敗しました");
+    }
+  }
+
+  /** `tolerance` クエリ。未指定は undefined (= 既定 1 分)、負・非数は 400。 */
+  private parseToleranceParam(url: URL): number | undefined {
+    const raw = url.searchParams.get("tolerance");
+    if (raw === null) return undefined;
+    if (!/^\d+$/.test(raw)) throw new RelayBadRequestError("tolerance は 0 以上の分数で指定してください");
+    return Number(raw);
+  }
+
+  /** 中継系のエラーを HTTP へ写す (400 / 502 / 503)。 */
+  private relayErrorResponse(tag: string, err: unknown, fallback: string): Response {
+    if (err instanceof RelayBadRequestError) return dvrJsonError(400, err.message);
+    if (err instanceof RelayConfigError) return dvrJsonError(503, err.message);
+    if (err instanceof RelayUpstreamError) return dvrJsonError(502, err.message);
+    console.error(JSON.stringify({ [tag]: "error", error: describeUnknownError(err) }));
+    return dvrJsonError(502, fallback);
   }
 
   /**
