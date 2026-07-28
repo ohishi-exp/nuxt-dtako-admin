@@ -22,7 +22,10 @@
           "kosoku_minutes": {
             "total": null,
             "デジタコ": null,
-            "TC_DC": null
+            "TC_DC": null,
+            "TC_DC_minus_unko": 0,
+            "TC_DC_before_minus": null,
+            "total_before_minus": null
           }
         },
         {
@@ -38,7 +41,10 @@
           "kosoku_minutes": {
             "total": 617,
             "デジタコ": 557,
-            "TC_DC": 60
+            "TC_DC": 60,
+            "TC_DC_minus_unko": 0,
+            "TC_DC_before_minus": 60,
+            "total_before_minus": 617
           }
         },
         {
@@ -54,23 +60,10 @@
           "kosoku_minutes": {
             "total": 562,
             "デジタコ": 562,
-            "TC_DC": null
-          }
-        },
-        {
-          "date": "2026-04-05",
-          "attendance": {
-            "shukkin1": null,
-            "taisha1": null,
-            "shukkin2": null,
-            "taisha2": null
-          },
-          "remarks": "",
-          "leaves": [],
-          "kosoku_minutes": {
-            "total": 710,
-            "デジタコ": 710,
-            "TC_DC": null
+            "TC_DC": null,
+            "TC_DC_minus_unko": 0,
+            "TC_DC_before_minus": null,
+            "total_before_minus": 562
           }
         }
       ],
@@ -85,6 +78,7 @@
         "kyujitsu_shukkin": 5,
         "kyujitsu_shukkin_raw": 5,
         "total_kosoku": 15940,
+        "total_kosoku_before_minus": 15940,
         "before_hire": 0,
         "after_retire": 0,
         "kiso_date": 21
@@ -108,7 +102,10 @@
           "kosoku_minutes": {
             "total": 618,
             "デジタコ": 617,
-            "TC_DC": 1
+            "TC_DC": 1,
+            "TC_DC_minus_unko": 3,
+            "TC_DC_before_minus": 4,
+            "total_before_minus": 621
           }
         },
         {
@@ -124,7 +121,10 @@
           "kosoku_minutes": {
             "total": 608,
             "デジタコ": 595,
-            "TC_DC": 13
+            "TC_DC": 13,
+            "TC_DC_minus_unko": 0,
+            "TC_DC_before_minus": 13,
+            "total_before_minus": 608
           }
         },
         {
@@ -140,7 +140,29 @@
           "kosoku_minutes": {
             "total": 569,
             "デジタコ": 555,
-            "TC_DC": 14
+            "TC_DC": 14,
+            "TC_DC_minus_unko": 0,
+            "TC_DC_before_minus": 14,
+            "total_before_minus": 569
+          }
+        },
+        {
+          "date": "2026-04-04",
+          "attendance": {
+            "shukkin1": "04:02",
+            "taisha1": "17:35",
+            "shukkin2": null,
+            "taisha2": null
+          },
+          "remarks": "",
+          "leaves": [],
+          "kosoku_minutes": {
+            "total": 812,
+            "デジタコ": 808,
+            "TC_DC": 4,
+            "TC_DC_minus_unko": 4,
+            "TC_DC_before_minus": 8,
+            "total_before_minus": 816
           }
         },
         {
@@ -160,7 +182,10 @@
           "kosoku_minutes": {
             "total": null,
             "デジタコ": null,
-            "TC_DC": null
+            "TC_DC": null,
+            "TC_DC_minus_unko": 0,
+            "TC_DC_before_minus": null,
+            "total_before_minus": null
           }
         },
         {
@@ -176,7 +201,10 @@
           "kosoku_minutes": {
             "total": 644,
             "デジタコ": 653,
-            "TC_DC": -9
+            "TC_DC": -9,
+            "TC_DC_minus_unko": 13,
+            "TC_DC_before_minus": 4,
+            "total_before_minus": 657
           }
         }
       ],
@@ -191,6 +219,7 @@
         "kyujitsu_shukkin": 2,
         "kyujitsu_shukkin_raw": 2,
         "total_kosoku": 15045,
+        "total_kosoku_before_minus": 15099,
         "before_hire": 0,
         "after_retire": 0,
         "kiso_date": 21
@@ -214,7 +243,10 @@
           "kosoku_minutes": {
             "total": 1046,
             "デジタコ": 1046,
-            "TC_DC": null
+            "TC_DC": null,
+            "TC_DC_minus_unko": 4,
+            "TC_DC_before_minus": null,
+            "total_before_minus": 1050
           }
         },
         {
@@ -230,7 +262,10 @@
           "kosoku_minutes": {
             "total": 505,
             "デジタコ": 505,
-            "TC_DC": null
+            "TC_DC": null,
+            "TC_DC_minus_unko": 0,
+            "TC_DC_before_minus": null,
+            "total_before_minus": 505
           }
         },
         {
@@ -246,7 +281,29 @@
           "kosoku_minutes": {
             "total": 687,
             "デジタコ": 687,
-            "TC_DC": null
+            "TC_DC": null,
+            "TC_DC_minus_unko": 0,
+            "TC_DC_before_minus": null,
+            "total_before_minus": 687
+          }
+        },
+        {
+          "date": "2026-04-05",
+          "attendance": {
+            "shukkin1": "05:31",
+            "taisha1": null,
+            "shukkin2": null,
+            "taisha2": null
+          },
+          "remarks": "",
+          "leaves": [],
+          "kosoku_minutes": {
+            "total": 959,
+            "デジタコ": 959,
+            "TC_DC": null,
+            "TC_DC_minus_unko": 2,
+            "TC_DC_before_minus": null,
+            "total_before_minus": 961
           }
         },
         {
@@ -266,7 +323,10 @@
           "kosoku_minutes": {
             "total": null,
             "デジタコ": null,
-            "TC_DC": null
+            "TC_DC": null,
+            "TC_DC_minus_unko": 0,
+            "TC_DC_before_minus": null,
+            "total_before_minus": null
           }
         }
       ],
@@ -281,6 +341,7 @@
         "kyujitsu_shukkin": 0,
         "kyujitsu_shukkin_raw": -1,
         "total_kosoku": 14247,
+        "total_kosoku_before_minus": 14289,
         "before_hire": 0,
         "after_retire": 0,
         "kiso_date": 21

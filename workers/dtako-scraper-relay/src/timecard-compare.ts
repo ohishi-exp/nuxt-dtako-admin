@@ -33,6 +33,14 @@ export interface NginxDay {
   kosokuMinutes: number | null;
   /** type 別内訳 (`デジタコ` / `TC_DC`)。上流が出さなければ空。 */
   kosokuByType: Record<string, number>;
+  /**
+   * type 別の「運行開始 → 始業」減算分 (yhonda-ohishi/nginx#785)。0 は載せない。
+   *
+   * **突合の基準は変えない。** 実データで確かめたところ、減算前の値はこちらの値に
+   * 近づかない (1379 / 2026-04-27 は差 -1 分 → 減算前だと +12 分)。紙に出ているのは
+   * 減算後なので、比較はそちらのまま。この値は**負値の原因を説明する**ために持つ。
+   */
+  minusUnkoByType: Record<string, number>;
 }
 
 /** nginx 側の 1 乗務員 × 1 ヶ月。 */
@@ -127,29 +135,63 @@ function toTotals(v: unknown): Record<string, number> {
 }
 
 /**
+ * `kosoku_minutes` のうち**拘束そのものではない診断値**の接尾辞
+ * (yhonda-ohishi/nginx#785)。
+ *
+ * - `<type>_minus_unko` … 「運行開始 → 始業」として日計から引かれた分
+ * - `<type>_before_minus` / `total_before_minus` … その減算をする前の値
+ *
+ * これらを type 別内訳に混ぜると**存在しない拘束区分**ができ、値が負なら偽の異常に
+ * なる。接尾辞で外す — 上流が診断を増やしても同じ命名なら追随できる。
+ */
+const KOSOKU_DIAGNOSTIC_SUFFIXES = ["_minus_unko", "_before_minus"] as const;
+
+function diagnosticSuffixOf(key: string): string | null {
+  return KOSOKU_DIAGNOSTIC_SUFFIXES.find((s) => key.endsWith(s)) ?? null;
+}
+
+/** 1 日の拘束の読み取り結果。 */
+interface ParsedKosoku {
+  minutes: number | null;
+  byType: Record<string, number>;
+  /** type 別の「運行開始 → 始業」減算分 (0 は載せない)。負値の説明に使う。 */
+  minusUnkoByType: Record<string, number>;
+}
+
+/**
  * 1 日の拘束を読む。
  *
  * 実応答 (yhonda-ohishi/nginx#784) は
  * `kosoku_minutes: {total, デジタコ, TC_DC}` の**オブジェクト**で、値は日により null。
- * 数値 1 個の形も受けておく (起票時の想定がそちらだった)。
- * `total` 以外のキーをそのまま type 別内訳として扱うので、上流が type を増やしても
- * ここを触らずに拾える。
+ * #785 で診断値 (`TC_DC_minus_unko` ほか) が加わった。数値 1 個の形も受けておく
+ * (起票時の想定がそちらだった)。
+ *
+ * `total` と診断値を除いたキーを type 別内訳として扱うので、上流が拘束区分を
+ * 増やしてもここを触らずに拾える。
  */
-function toKosoku(raw: unknown): { minutes: number | null, byType: Record<string, number> } {
+function toKosoku(raw: unknown): ParsedKosoku {
   const direct = finiteNumber(raw);
-  if (direct !== null) return { minutes: direct, byType: {} };
+  if (direct !== null) return { minutes: direct, byType: {}, minusUnkoByType: {} };
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    return { minutes: null, byType: {} };
+    return { minutes: null, byType: {}, minusUnkoByType: {} };
   }
   const byType: Record<string, number> = {};
+  const minusUnkoByType: Record<string, number> = {};
   let minutes: number | null = null;
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     const n = finiteNumber(value);
     if (n === null) continue;
+    const suffix = diagnosticSuffixOf(key);
+    if (suffix === "_minus_unko") {
+      // 0 は「該当なし」— 全日に載せると異常メッセージが読みにくくなる
+      if (n !== 0) minusUnkoByType[key.slice(0, -suffix.length)] = n;
+      continue;
+    }
+    if (suffix) continue;
     if (key === "total") minutes = n;
     else byType[key] = n;
   }
-  return { minutes, byType };
+  return { minutes, byType, minusUnkoByType };
 }
 
 function toNginxDriver(entry: unknown, ym: string): NginxDriverMonth | null {
@@ -171,6 +213,7 @@ function toNginxDriver(entry: unknown, ym: string): NginxDriverMonth | null {
         kosokuMinutes: kosoku.minutes,
         // 内訳が別項目で来る形 (起票時の想定) も残す
         kosokuByType: { ...toKosokuByType(d.kosoku_by_type), ...kosoku.byType },
+        minusUnkoByType: kosoku.minusUnkoByType,
       });
     }
   }
@@ -247,12 +290,19 @@ function dayAnomalies(day: NginxDay): CompareAnomaly[] {
   // 合計が正でも内訳の片方が負なことがある (控除が type ごとに効くため)
   for (const [type, minutes] of Object.entries(day.kosokuByType)) {
     if (minutes < 0) {
+      // 「運行開始 → 始業」の二重補正で説明できるならそう言う — 上流の原因が
+      // 特定済み (yhonda-ohishi/nginx#785) なので、読む人が毎回調べ直さずに済む
+      const minus = day.minusUnkoByType[type];
+      const why =
+        minus !== undefined && minus > 0
+          ? `。運行開始→始業の ${minus} 分が引かれたため (減算前は ${minutes + minus} 分)`
+          : "";
       found.push({
         kind: "negative-kosoku-type",
         date: day.date,
         field: type,
         minutes,
-        message: `nginx の拘束内訳 ${type} が負です (${minutes} 分)`,
+        message: `nginx の拘束内訳 ${type} が負です (${minutes} 分)${why}`,
       });
     }
   }

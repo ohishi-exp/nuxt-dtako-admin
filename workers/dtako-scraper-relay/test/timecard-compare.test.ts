@@ -83,6 +83,7 @@ describe("parsePdfJson", () => {
       date: "2026-04-01",
       kosokuMinutes: 570,
       kosokuByType: { デジタコ: 510, TC_DC: 60 },
+      minusUnkoByType: {},
     });
     expect(d?.totals).toEqual({ shukkin: 2, kyujitsu_shukkin_raw: -1 });
   });
@@ -199,6 +200,46 @@ describe("parsePdfJson — 実応答 (nginx#784)", () => {
     expect(r.anomalies).toEqual([
       expect.objectContaining({ kind: "negative-kosoku-type", date: "2026-04-27", field: "TC_DC", minutes: -9 }),
     ]);
+    // 原因 (運行開始→始業 の二重補正) を messages に含める — 読む人が毎回調べ直さない
+    expect(r.anomalies[0]?.message).toContain("運行開始→始業の 13 分");
+    expect(r.anomalies[0]?.message).toContain("減算前は 4 分");
+  });
+});
+
+// #785 で `kosoku_minutes` に診断値が加わった。拘束区分と混ぜると存在しない
+// type ができ、負なら偽の異常になる。
+describe("parsePdfJson — 診断値 (nginx#785)", () => {
+  const parsed = parsePdfJson(REAL_PDF_JSON, "2026-04");
+
+  it("_before_minus / _minus_unko を type 別内訳に混ぜない", () => {
+    const day = parsed.get("1379")?.days.find((d) => d.date === "2026-04-27");
+    // 実応答は TC_DC_minus_unko / TC_DC_before_minus / total_before_minus も持つ
+    expect(Object.keys(day?.kosokuByType ?? {}).sort()).toEqual(["TC_DC", "デジタコ"]);
+    expect(day?.kosokuMinutes).toBe(644);
+  });
+
+  it("減算分は minusUnkoByType へ (0 の日は載せない)", () => {
+    const days = parsed.get("1379")?.days ?? [];
+    expect(days.find((d) => d.date === "2026-04-27")?.minusUnkoByType).toEqual({ TC_DC: 13 });
+    expect(days.find((d) => d.date === "2026-04-01")?.minusUnkoByType).toEqual({ TC_DC: 3 });
+    // 4/2 は TC_DC_minus_unko: 0
+    expect(days.find((d) => d.date === "2026-04-02")?.minusUnkoByType).toEqual({});
+  });
+
+  it("拘束が null の日は内訳も減算も空", () => {
+    const day = parsed.get("1021")?.days.find((d) => d.date === "2026-04-01");
+    expect(day?.kosokuByType).toEqual({});
+    expect(day?.minusUnkoByType).toEqual({});
+  });
+
+  it("減算が無い負値には原因を書かない", () => {
+    const r = compareTimecardMonth({
+      month: "2026-04",
+      driverCd: "1021",
+      nginx: nginxDriver([{ date: "2026-04-01", kosokuMinutes: 10, byType: { TC_DC: -5 } }]),
+      oursByDate: ours({ "2026-04-01": 10 }),
+    });
+    expect(r.anomalies[0]?.message).toBe("nginx の拘束内訳 TC_DC が負です (-5 分)");
   });
 });
 
@@ -213,6 +254,14 @@ describe("parsePdfJson — kosoku_minutes の形ゆれ", () => {
 
   it("total が無いオブジェクトは合計 null のまま内訳だけ取る", () => {
     expect(oneDay({ TC_DC: -9 })).toMatchObject({ kosokuMinutes: null, kosokuByType: { TC_DC: -9 } });
+  });
+
+  it("total_before_minus だけでも type には入れない", () => {
+    expect(oneDay({ total: 5, total_before_minus: 9 })).toMatchObject({
+      kosokuMinutes: 5,
+      kosokuByType: {},
+      minusUnkoByType: {},
+    });
   });
 
   it("配列・文字列・null は値なし", () => {
@@ -240,7 +289,12 @@ describe("pdfJsonError", () => {
 
 /** 突合用の nginx 側 1 名を素早く作る。 */
 function nginxDriver(
-  days: Array<{ date: string; kosokuMinutes: number | null; byType?: Record<string, number> }>,
+  days: Array<{
+    date: string;
+    kosokuMinutes: number | null;
+    byType?: Record<string, number>;
+    minusUnko?: Record<string, number>;
+  }>,
   totals: Record<string, number> = {},
 ): NginxDriverMonth {
   return {
@@ -250,6 +304,7 @@ function nginxDriver(
       date: d.date,
       kosokuMinutes: d.kosokuMinutes,
       kosokuByType: d.byType ?? {},
+      minusUnkoByType: d.minusUnko ?? {},
     })),
     totals,
   };
