@@ -2910,6 +2910,126 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /**
+   * タイムカード側のサマリを**その場で組む** (2026-07-28 決定「R2 やめろ」)。
+   *
+   * これまでは `kintai/fetch` が R2 へ書いたサマリを wage-report が読んでいたため、
+   * **取り込みを回すまで古い値が出続けていた** (実測: 乗務員 1108 / 2026-04 が
+   * 打刻由来の 3 勤務・拘束 447h29m のまま。上流の kosoku-daily では 24 勤務・
+   * 拘束 172h04m)。サマリは生イベントからいつでも作り直せる派生値なので、
+   * **原本を持たない R2 を経由するのをやめて毎回組む**。
+   *
+   * 素材:
+   * - 休暇・休日区分・打刻エラー … `/api/kintai/daily` (CakePHP 中継、上流が SQLite で
+   *   read-through しているので 2 回目以降はミリ秒)
+   * - 時間 … `/api/kintai/kosoku-daily` (打刻 + 休息、MariaDB 直読み)
+   *
+   * 前月ぶんも組む — 週40h の月初跨ぎ週が前月の日別を要るため。**前々月から前月へ
+   * 跨いだ勤務までは拾わない** (前月の 1 日の週40h がわずかに小さく出るだけで、
+   * 当月の賃金には効かない)。
+   *
+   * 取得先が未設定・上流が落ちている時は null を返し、呼び出し側が従来どおり
+   * R2 へ落ちる。
+   */
+  private async buildKintaiSummariesLive(
+    compId: string,
+    ym: string,
+    prevYm: string,
+  ): Promise<{
+    current: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
+    prev: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
+  } | null> {
+    const apiUrl = (this.env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
+    const clientId = this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
+    let clientSecret = "";
+    try {
+      clientSecret = await resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
+    } catch {
+      // secret 不調は他所で log 済み。ここは R2 へ落ちるだけで良い
+    }
+    if (!apiUrl || !clientId || !clientSecret) return null;
+
+    const headers = { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret };
+    const fetchDaily = async (month: string): Promise<TimecardDailyRow[] | null> => {
+      try {
+        const res = await fetch(
+          `${apiUrl}/api/kintai/daily?month=${encodeURIComponent(month)}`,
+          { headers },
+        );
+        if (!res.ok) {
+          console.error(JSON.stringify({ wage_report_kintai: "daily-error", month, status: res.status }));
+          return null;
+        }
+        const body = JSON.parse(await res.text()) as { rows?: unknown };
+        return Array.isArray(body.rows) ? (body.rows as TimecardDailyRow[]) : null;
+      } catch (err) {
+        console.error(
+          JSON.stringify({ wage_report_kintai: "daily-throw", month, error: describeUnknownError(err) }),
+        );
+        return null;
+      }
+    };
+
+    const [dailyCurrent, dailyPrev, kosokuCurrent, kosokuPrev] = await Promise.all([
+      fetchDaily(ym),
+      fetchDaily(prevYm),
+      this.loadKosokuShifts(apiUrl, clientId, clientSecret, ym, prevYm),
+      this.loadKosokuShifts(apiUrl, clientId, clientSecret, prevYm),
+    ]);
+    // 当月が取れないと賃金の素材が無い — 黙って空にせず R2 へ落とす
+    if (!dailyCurrent) return null;
+
+    const build = async (
+      month: string,
+      rows: TimecardDailyRow[] | null,
+      shifts: Map<string, KosokuShift[]> | null,
+    ) => {
+      if (!rows) return { summaries: [], noDataDrivers: [] };
+      const { schedules, approved, scopes, nightShift } = await this.loadKintaiInputs(compId, month);
+      const scopeOf = (driverCd: string) => scopes.get(driverCd) ?? { branchCode: null, jobName: null };
+      const { summaries } = summarizeTimecardMonth(rows, {
+        yearMonth: month,
+        dailyWorkMinutesFor: (driverCd) => {
+          const scope = scopeOf(driverCd);
+          return (
+            resolveWorkScheduleAt(schedules, month, scope.branchCode, scope.jobName)?.dailyWorkMinutes ?? null
+          );
+        },
+        approvedHolidayWork: approved,
+        isClerical: (driverCd) => isClericalJob(scopeOf(driverCd).jobName),
+        isNightShift: (driverCd) => nightShift.has(driverCd),
+        today: formatJstDate(new Date()),
+        ...(shifts
+          ? {
+              kosokuPartsFor: (driverCd: string) => {
+                const s = shifts.get(driverCd);
+                return s ? kosokuPartsByDate(s, month) : null;
+              },
+            }
+          : {}),
+      });
+      return {
+        summaries: summaries.map((data) => ({ data, fetchedAt: null, lastVerifiedAt: null })),
+        noDataDrivers: [] as string[],
+      };
+    };
+
+    const [current, prev] = await Promise.all([
+      build(ym, dailyCurrent, kosokuCurrent),
+      build(prevYm, dailyPrev, kosokuPrev),
+    ]);
+    console.log(
+      JSON.stringify({
+        wage_report_kintai: "live",
+        comp_id: compId,
+        ym,
+        drivers: current.summaries.length,
+        kosoku: kosokuCurrent ? "yes" : "no",
+      }),
+    );
+    return { current, prev };
+  }
+
+  /**
    * `kosoku-daily` を当月 + 前月ぶん取って乗務員CD 引きにまとめる (2026-07-28)。
    *
    * **取れなければ null** — 取り込み自体は止めず、呼び出し側が従来どおり打刻から
@@ -3306,11 +3426,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     kintaiCurrent: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
     kintaiPrev: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
   }> {
+    // タイムカード側は **R2 を読まずその場で組む** (2026-07-28 決定「R2 やめろ」)。
+    // R2 は `kintai/fetch` を回した時点の写しでしかなく、取り込みを忘れると古い値が
+    // 出続ける (実測: 乗務員 1108 / 2026-04 が打刻由来の 3 勤務・拘束 447h29m のまま)。
+    // 上流が取れない時だけ従来どおり R2 へ落ちる。
+    const live = await this.buildKintaiSummariesLive(compId, ym, prevYm);
     const fromR2 = {
       current: () => this.loadMonthSummaries(bucket, compId, ym),
       prev: () => this.loadMonthSummaries(bucket, compId, prevYm),
-      kintaiCurrent: () => this.loadMonthSummaries(bucket, compId, ym, kintaiPrefix),
-      kintaiPrev: () => this.loadMonthSummaries(bucket, compId, prevYm, kintaiPrefix),
+      kintaiCurrent: () =>
+        live ? Promise.resolve(live.current) : this.loadMonthSummaries(bucket, compId, ym, kintaiPrefix),
+      kintaiPrev: () =>
+        live ? Promise.resolve(live.prev) : this.loadMonthSummaries(bucket, compId, prevYm, kintaiPrefix),
     };
     const allR2 = async () => {
       const [current, prev, kintaiCurrent, kintaiPrev] = await Promise.all([
@@ -3378,8 +3505,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const [current, prev, kintaiCurrent, kintaiPrev] = await Promise.all([
       pick(wire.current_theearth, fromR2.current, `theearth:${ym}`),
       pick(wire.prev_theearth, fromR2.prev, `theearth:${prevYm}`),
-      pick(wire.current_timecard, fromR2.kintaiCurrent, `timecard:${ym}`),
-      pick(wire.prev_timecard, fromR2.kintaiPrev, `timecard:${prevYm}`),
+      // **タイムカード側は ichiban の写しも使わない** — R2 と同じく push した時点で
+      // 止まっており、取り込みを回すまで古い値が出る (2026-07-28 決定「R2 やめろ」)。
+      // その場で組めた時はそれを使い、組めなかった時だけ写しへ落ちる
+      live ? live.current : pick(wire.current_timecard, fromR2.kintaiCurrent, `timecard:${ym}`),
+      live ? live.prev : pick(wire.prev_timecard, fromR2.kintaiPrev, `timecard:${prevYm}`),
     ]);
     console.log(JSON.stringify({ wage_report_source: "ichiban", comp_id: compId, ym }));
     return { current, prev, kintaiCurrent, kintaiPrev };
