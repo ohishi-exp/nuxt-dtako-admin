@@ -21,6 +21,7 @@ import type {
 } from "../../../dtako-scraper-relay/src/theearth-restraint-client";
 import { resolveSecretBinding } from "../../../dtako-scraper-relay/src/cron";
 import {
+  crossMonthMinutesByDate,
   kosokuPartsByDate,
   parseKosokuDaily,
   prevYmOf,
@@ -560,8 +561,12 @@ export const getTimecardDiffTool = {
       }
     }
     const oursByDriver = new Map<string, Map<string, { restraintMinutes: number }>>();
+    // 月境界を跨ぐ勤務由来の分 — 紙は月内の打刻だけで対を組むため月を跨ぐ勤務が
+    // どちらの月にも載らない。cause "month-boundary" の説明に使う (Refs #501)
+    const crossMonthByDriver = new Map<string, Map<string, number>>();
     for (const [driverCd, driverShifts] of shifts) {
       oursByDriver.set(driverCd, kosokuPartsByDate(driverShifts, args.month));
+      crossMonthByDriver.set(driverCd, crossMonthMinutesByDate(driverShifts, args.month));
     }
     // nginx はエラーも HTTP 200 + `{error}` で返す (nginx#784)。素通しすると
     // 「差なし」に見えるので必ず表に出す
@@ -577,6 +582,7 @@ export const getTimecardDiffTool = {
           driverCd: driver,
           nginx: nginxByDriver.get(driver) ?? null,
           oursByDate: oursByDriver.get(driver) ?? new Map(),
+          crossMonthByDate: crossMonthByDriver.get(driver),
           toleranceMinutes: args.tolerance_minutes,
         }),
       ];
@@ -585,6 +591,7 @@ export const getTimecardDiffTool = {
         month: args.month,
         nginxByDriver,
         oursByDriver,
+        crossMonthByDriver,
         toleranceMinutes: args.tolerance_minutes,
         onlyAnomalies,
       });

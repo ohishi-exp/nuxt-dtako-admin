@@ -8,22 +8,31 @@ name: kyuyo-mcp worker
 # pull_request: typecheck + test (coverage 100% gate) のみ、deploy は skip。
 # push(main/tag) / workflow_dispatch: 上記 gate に加えて deploy を実行。
 #
-# ロジックが依存する dtako-scraper-relay の pure ロジック (restraint-wage.ts /
-# theearth-restraint-client.ts) の変更でも再デプロイされるよう path filter に含める。
+# ロジックが依存する dtako-scraper-relay の pure ロジック (cron.ts / kosoku-daily.ts /
+# restraint-wage.ts / theearth-restraint-client.ts / timecard-compare.ts) の変更でも
+# 再デプロイされるよう path filter に含める。tools.ts が import する relay ソースを
+# 増やしたら、ここにも必ず足すこと — 漏れると relay 側の修正が MCP に届かない
+# (#511 の month-boundary が get_timecard_diff に反映されず気付いた)。
 on:
   push:
     branches: [main]
     tags: ['v*']
     paths:
       - 'workers/kyuyo-mcp/**'
+      - 'workers/dtako-scraper-relay/src/cron.ts'
+      - 'workers/dtako-scraper-relay/src/kosoku-daily.ts'
       - 'workers/dtako-scraper-relay/src/restraint-wage.ts'
       - 'workers/dtako-scraper-relay/src/theearth-restraint-client.ts'
+      - 'workers/dtako-scraper-relay/src/timecard-compare.ts'
       - '.github/workflows/kyuyo-mcp-deploy.yml'
   pull_request:
     paths:
       - 'workers/kyuyo-mcp/**'
+      - 'workers/dtako-scraper-relay/src/cron.ts'
+      - 'workers/dtako-scraper-relay/src/kosoku-daily.ts'
       - 'workers/dtako-scraper-relay/src/restraint-wage.ts'
       - 'workers/dtako-scraper-relay/src/theearth-restraint-client.ts'
+      - 'workers/dtako-scraper-relay/src/timecard-compare.ts'
       - '.github/workflows/kyuyo-mcp-deploy.yml'
   workflow_dispatch:
 
