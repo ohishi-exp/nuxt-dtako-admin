@@ -861,6 +861,75 @@ describe("get_timecard_diff (mode=summary)", () => {
     expect(res.results[0]?.branchName).toBe("大石運輸倉庫㈱　大阪営業所");
   });
 
+  it("totals は絞り込む前の全乗務員で数える", async () => {
+    stubIchiban({ cur: KOSOKU_WITH_OURS_ONLY });
+    const res = (await getTimecardDiffTool.execute(summaryModeEnv(), {
+      month: "2026-04",
+      mode: "summary",
+      limit: 1,
+    })) as unknown as {
+      drivers: number;
+      omitted: number;
+      totals: { drivers: number; unknown_days: number };
+      results: unknown[];
+    };
+    // 返すのは 1 名でも、drivers / totals は 2 名ぶんのまま
+    expect(res.results).toHaveLength(1);
+    expect(res.omitted).toBe(1);
+    expect(res.drivers).toBe(2);
+    expect(res.totals.drivers).toBe(2);
+    expect(res.totals.unknown_days).toBeGreaterThan(0);
+  });
+
+  it("未説明の多い順に返す", async () => {
+    stubIchiban({ cur: KOSOKU_WITH_OURS_ONLY });
+    const res = (await getTimecardDiffTool.execute(summaryModeEnv(), {
+      month: "2026-04",
+      mode: "summary",
+      limit: 1,
+    })) as unknown as { results: Array<{ driverCd: string; unknownCount: number }> };
+    // 1021 は 4/3 (+30) と 4/6 (-30) が未説明。1211 は ours-only だけなので 0
+    expect(res.results[0]?.driverCd).toBe("1021");
+    expect(res.results[0]?.unknownCount).toBe(2);
+  });
+
+  it("未説明の日数が同じなら残差の大きい方を先に返す", async () => {
+    // どちらも未説明 1 日だが、1030 は +300、1021 は +100
+    stubIchiban({
+      cur: {
+        month: "2026-04",
+        drivers: [
+          { driver: 1021, days: [kosokuDay("2026-04-01", 470)] },
+          { driver: 1030, days: [kosokuDay("2026-04-01", 180)] },
+        ],
+      },
+    });
+    const res = (await getTimecardDiffTool.execute(summaryModeEnv({}), {
+      month: "2026-04",
+      mode: "summary",
+      limit: 2,
+    })) as unknown as { results: Array<{ driverCd: string; unknownCount: number }> };
+    expect(res.results.map((r) => r.unknownCount)).toEqual([1, 1]);
+    expect(res.results.map((r) => r.driverCd)).toEqual(["1030", "1021"]);
+  });
+
+  it("limit 省略なら 20 名まで", async () => {
+    const many = {
+      month: "2026-04",
+      drivers: Array.from({ length: 25 }, (_, i) => ({
+        driver: 2000 + i,
+        days: [kosokuDay("2026-04-01", 500 + i)],
+      })),
+    };
+    stubIchiban({ cur: many });
+    const res = (await getTimecardDiffTool.execute(summaryModeEnv({}), {
+      month: "2026-04",
+      mode: "summary",
+    })) as unknown as { drivers: number; omitted: number; results: unknown[] };
+    expect(res.results).toHaveLength(20);
+    expect(res.omitted).toBe(res.drivers - 20);
+  });
+
   it("mode 省略なら従来どおり日別を返す", async () => {
     stubIchiban({ cur: KOSOKU_WITH_OURS_ONLY });
     const res = (await getTimecardDiffTool.execute(summaryModeEnv(), {
