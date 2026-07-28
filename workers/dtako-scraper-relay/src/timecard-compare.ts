@@ -1,0 +1,354 @@
+/**
+ * 社内 CakePHP のタイムカード表 (PDF) と、こちらの拘束時間を**暦日ごとに突き合わせる**
+ * (Refs #492 PR-A、上流は yhonda-ohishi/nginx#782 / ohishi-exp/rust-ichibanboshi#143)。
+ *
+ * ## なぜ暦日で比べられるのか
+ *
+ * nginx の `time_card_kosoku` は計算した時点で**暦日へ配ってある** (勤務ではなく運行
+ * 単位で積み、`proc_date` ごとに保存する)。こちら側も #473〜#479 で拘束・深夜・残業・
+ * 出勤日数をすべて暦日按分に統一した。よって単位変換は要らず、`YYYY-MM-DD` をキーに
+ * そのまま引き算できる。
+ *
+ * ## 突合するのは拘束だけ
+ *
+ * - **残業は比較しない** (ユーザー決定)。nginx の残業列は旅費由来 + 手入力の加算補正で、
+ *   こちらの `overtimeMinutes` (所定超) とは定義が別物。並べても差の意味が読めない
+ * - 打刻・休暇区分・月次集計欄の突合は上流の実応答を見てから (#492 の後続)
+ *
+ * ## 負の拘束は clamp しない
+ *
+ * nginx 側は控除 (昼休の一律 -60 分・フェリー・運行重複) がその日の積算を上回ると
+ * **拘束が負になる** (yhonda-ohishi/nginx#783)。それを見つけるのがこの突合の目的
+ * なので、途中のどこでも 0 に丸めない。`anomalies` に載せて数える。
+ */
+
+/** 突合の既定の許容誤差 (分)。秒→分の丸め方の違いで 1 分ずれる。 */
+export const DEFAULT_TOLERANCE_MINUTES = 1;
+
+/** nginx 側の 1 暦日。 */
+export interface NginxDay {
+  /** `YYYY-MM-DD`。 */
+  date: string;
+  /** 拘束 (分)。**負のまま持つ**。行はあるが値が無い場合は null。 */
+  kosokuMinutes: number | null;
+  /** type 別内訳 (`デジタコ` / `TC_DC`)。上流が出さなければ空。 */
+  kosokuByType: Record<string, number>;
+}
+
+/** nginx 側の 1 乗務員 × 1 ヶ月。 */
+export interface NginxDriverMonth {
+  /** 乗務員CD (`String(Number(...))` 正規化済み)。 */
+  driverCd: string;
+  name: string;
+  days: NginxDay[];
+  /** 月次集計欄。負値の検出に使うので生値のまま持つ。 */
+  totals: Record<string, number>;
+}
+
+/** 検出した異常 1 件。**差分とは独立** — 両者が一致していても出る。 */
+export interface CompareAnomaly {
+  kind: "negative-kosoku" | "negative-kosoku-type" | "impossible-kosoku" | "negative-total";
+  /** 対象の暦日 (`YYYY-MM-DD`)。月次集計欄の異常は null。 */
+  date: string | null;
+  /** `negative-kosoku-type` は type 名、`negative-total` は集計欄の項目名。 */
+  field: string | null;
+  minutes: number;
+  message: string;
+}
+
+/** 1 暦日の突合結果。 */
+export interface CompareDay {
+  date: string;
+  nginxMinutes: number | null;
+  oursMinutes: number | null;
+  /** `nginx - ours`。どちらかが欠けている日は null。 */
+  diffMinutes: number | null;
+  status: "match" | "within-tolerance" | "mismatch" | "nginx-only" | "ours-only" | "both-empty";
+  anomalies: CompareAnomaly[];
+}
+
+/** 1 乗務員 × 1 ヶ月の突合結果。 */
+export interface CompareResult {
+  month: string;
+  driverCd: string;
+  name: string;
+  toleranceMinutes: number;
+  days: CompareDay[];
+  totals: {
+    nginxMinutes: number;
+    oursMinutes: number;
+    diffMinutes: number;
+  };
+  /** `status` が `match` / `within-tolerance` / `both-empty` 以外の日数。 */
+  mismatchCount: number;
+  anomalies: CompareAnomaly[];
+}
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** 暦日として取りうる上限 (分)。これを超える値は上流の計算事故。 */
+const MINUTES_PER_DAY = 1440;
+
+function finiteNumber(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * `day` (1〜31) か `date` (`YYYY-MM-DD`) のどちらでも暦日にする。
+ *
+ * 上流 (nginx#782) の形が確定していないので**両方受ける**。突合の相手 (こちら側) は
+ * `YYYY-MM-DD` を鍵にしているので、ここで揃える。
+ */
+export function toDateKey(raw: Record<string, unknown>, ym: string): string | null {
+  if (typeof raw.date === "string" && DATE_RE.test(raw.date)) return raw.date;
+  const day = finiteNumber(raw.day);
+  if (day === null || !Number.isInteger(day) || day < 1 || day > 31) return null;
+  return `${ym}-${String(day).padStart(2, "0")}`;
+}
+
+function toKosokuByType(v: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return out;
+  for (const [key, raw] of Object.entries(v as Record<string, unknown>)) {
+    const n = finiteNumber(raw);
+    if (n !== null) out[key] = n;
+  }
+  return out;
+}
+
+function toTotals(v: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return out;
+  for (const [key, raw] of Object.entries(v as Record<string, unknown>)) {
+    const n = finiteNumber(raw);
+    if (n !== null) out[key] = n;
+  }
+  return out;
+}
+
+function toNginxDriver(entry: unknown, ym: string): NginxDriverMonth | null {
+  if (typeof entry !== "object" || entry === null) return null;
+  const e = entry as Record<string, unknown>;
+  // 上流は `driver_id`、こちらの他経路は `driver` — どちらでも拾う
+  const cd = Number(e.driver_id ?? e.driver);
+  if (!Number.isFinite(cd) || cd === 0) return null;
+  const days: NginxDay[] = [];
+  if (Array.isArray(e.days)) {
+    for (const raw of e.days) {
+      if (typeof raw !== "object" || raw === null) continue;
+      const d = raw as Record<string, unknown>;
+      const date = toDateKey(d, ym);
+      if (!date) continue;
+      days.push({
+        date,
+        kosokuMinutes: finiteNumber(d.kosoku_minutes),
+        kosokuByType: toKosokuByType(d.kosoku_by_type),
+      });
+    }
+  }
+  return {
+    driverCd: String(cd),
+    name: typeof e.name === "string" ? e.name : "",
+    days,
+    totals: toTotals(e.totals),
+  };
+}
+
+/**
+ * nginx の `/time-card/pdf-json` 応答を乗務員CD 引きに直す。
+ *
+ * `{drivers: [...]}` (全乗務員) と `{driver_id, days}` (1 名指定) の**どちらの形でも
+ * 受ける** — 上流の形が #782 で確定しておらず、呼び分けで壊れないようにするため。
+ * 解釈できない行は黙って捨てる (中継は既に済んでおり、ここで throw しても
+ * 呼び出し側に打つ手が無い)。
+ */
+export function parsePdfJson(body: unknown, ym: string): Map<string, NginxDriverMonth> {
+  const out = new Map<string, NginxDriverMonth>();
+  if (typeof body !== "object" || body === null) return out;
+  const b = body as Record<string, unknown>;
+  const entries = Array.isArray(b.drivers) ? b.drivers : [b];
+  for (const entry of entries) {
+    const parsed = toNginxDriver(entry, ym);
+    if (parsed) out.set(parsed.driverCd, parsed);
+  }
+  return out;
+}
+
+/** その日の nginx 側の値から異常を拾う。 */
+function dayAnomalies(day: NginxDay): CompareAnomaly[] {
+  const found: CompareAnomaly[] = [];
+  const total = day.kosokuMinutes;
+  if (total !== null && total < 0) {
+    found.push({
+      kind: "negative-kosoku",
+      date: day.date,
+      field: null,
+      minutes: total,
+      message: `nginx の拘束が負です (${total} 分)`,
+    });
+  }
+  if (total !== null && total > MINUTES_PER_DAY) {
+    found.push({
+      kind: "impossible-kosoku",
+      date: day.date,
+      field: null,
+      minutes: total,
+      message: `nginx の拘束が 1 日 (${MINUTES_PER_DAY} 分) を超えています (${total} 分)`,
+    });
+  }
+  // 合計が正でも内訳の片方が負なことがある (控除が type ごとに効くため)
+  for (const [type, minutes] of Object.entries(day.kosokuByType)) {
+    if (minutes < 0) {
+      found.push({
+        kind: "negative-kosoku-type",
+        date: day.date,
+        field: type,
+        minutes,
+        message: `nginx の拘束内訳 ${type} が負です (${minutes} 分)`,
+      });
+    }
+  }
+  return found;
+}
+
+/** 月次集計欄の負値を拾う。 */
+function totalsAnomalies(totals: Record<string, number>): CompareAnomaly[] {
+  const found: CompareAnomaly[] = [];
+  for (const [field, minutes] of Object.entries(totals)) {
+    if (minutes < 0) {
+      found.push({
+        kind: "negative-total",
+        date: null,
+        field,
+        minutes,
+        message: `nginx の月次集計 ${field} が負です (${minutes})`,
+      });
+    }
+  }
+  return found;
+}
+
+/** その月の暦日 (`YYYY-MM-DD`) を 1 日から末日まで。 */
+export function daysOfMonth(ym: string): string[] {
+  const [y, m] = ym.split("-").map(Number) as [number, number];
+  // 翌月 0 日 = 当月末日
+  const last = new Date(Date.UTC(m === 12 ? y + 1 : y, m === 12 ? 0 : m, 0)).getUTCDate();
+  const out: string[] = [];
+  for (let d = 1; d <= last; d += 1) out.push(`${ym}-${String(d).padStart(2, "0")}`);
+  return out;
+}
+
+function statusOf(
+  nginxMinutes: number | null,
+  oursMinutes: number | null,
+  tolerance: number,
+): CompareDay["status"] {
+  // 「行が無い」と「0 分」は実質同じなので、片方が 0 なら一致扱いにする —
+  // そうしないと稼働の無い日が月の 2/3 ほど mismatch になり、本当の差が埋もれる
+  const nginxEmpty = nginxMinutes === null || nginxMinutes === 0;
+  const oursEmpty = oursMinutes === null || oursMinutes === 0;
+  if (nginxEmpty && oursEmpty) return "both-empty";
+  if (nginxMinutes === null) return "ours-only";
+  if (oursMinutes === null) return "nginx-only";
+  const diff = Math.abs(nginxMinutes - oursMinutes);
+  if (diff === 0) return "match";
+  return diff <= tolerance ? "within-tolerance" : "mismatch";
+}
+
+/**
+ * 1 乗務員 × 1 ヶ月を暦日で突き合わせる。
+ *
+ * `oursByDate` は [`kosokuPartsByDate`](./kosoku-daily.ts) の出力を想定 (暦日按分後)。
+ * 月の全暦日を必ず返す — 画面は 1〜31 日の固定行で描くため、欠けた日を呼び出し側が
+ * 埋め直さなくていいようにする。
+ */
+export function compareTimecardMonth(input: {
+  month: string;
+  driverCd: string;
+  nginx: NginxDriverMonth | null;
+  oursByDate: ReadonlyMap<string, { restraintMinutes: number }>;
+  toleranceMinutes?: number;
+}): CompareResult {
+  const tolerance = input.toleranceMinutes ?? DEFAULT_TOLERANCE_MINUTES;
+  const nginxByDate = new Map<string, NginxDay>();
+  for (const d of input.nginx?.days ?? []) nginxByDate.set(d.date, d);
+
+  const days: CompareDay[] = [];
+  const anomalies: CompareAnomaly[] = [];
+  let nginxTotal = 0;
+  let oursTotal = 0;
+  let mismatchCount = 0;
+
+  for (const date of daysOfMonth(input.month)) {
+    const nginxDay = nginxByDate.get(date) ?? null;
+    const nginxMinutes = nginxDay?.kosokuMinutes ?? null;
+    const oursMinutes = input.oursByDate.get(date)?.restraintMinutes ?? null;
+    const status = statusOf(nginxMinutes, oursMinutes, tolerance);
+    const dayFound = nginxDay ? dayAnomalies(nginxDay) : [];
+    anomalies.push(...dayFound);
+    if (nginxMinutes !== null) nginxTotal += nginxMinutes;
+    if (oursMinutes !== null) oursTotal += oursMinutes;
+    if (status !== "match" && status !== "within-tolerance" && status !== "both-empty") {
+      mismatchCount += 1;
+    }
+    days.push({
+      date,
+      nginxMinutes,
+      oursMinutes,
+      diffMinutes:
+        nginxMinutes === null || oursMinutes === null ? null : nginxMinutes - oursMinutes,
+      status,
+      anomalies: dayFound,
+    });
+  }
+
+  anomalies.push(...totalsAnomalies(input.nginx?.totals ?? {}));
+
+  return {
+    month: input.month,
+    driverCd: input.driverCd,
+    name: input.nginx?.name ?? "",
+    toleranceMinutes: tolerance,
+    days,
+    totals: {
+      nginxMinutes: nginxTotal,
+      oursMinutes: oursTotal,
+      diffMinutes: nginxTotal - oursTotal,
+    },
+    mismatchCount,
+    anomalies,
+  };
+}
+
+/**
+ * 全乗務員ぶんをまとめて突合する (MCP の一括チェック用)。
+ *
+ * **どちらか片方にしか居ない乗務員も返す** — 「nginx に居るのにこちらに居ない」は
+ * それ自体が調べたい異常なので、積集合を取ると消えてしまう。
+ *
+ * `onlyAnomalies` を立てると、差分も異常も無い乗務員を落とす (既定の呼ばれ方)。
+ */
+export function compareTimecardMonthAll(input: {
+  month: string;
+  nginxByDriver: ReadonlyMap<string, NginxDriverMonth>;
+  oursByDriver: ReadonlyMap<string, ReadonlyMap<string, { restraintMinutes: number }>>;
+  toleranceMinutes?: number;
+  onlyAnomalies?: boolean;
+}): CompareResult[] {
+  const driverCds = new Set<string>([...input.nginxByDriver.keys(), ...input.oursByDriver.keys()]);
+  const out: CompareResult[] = [];
+  for (const driverCd of [...driverCds].sort((a, b) => Number(a) - Number(b))) {
+    const result = compareTimecardMonth({
+      month: input.month,
+      driverCd,
+      nginx: input.nginxByDriver.get(driverCd) ?? null,
+      oursByDate: input.oursByDriver.get(driverCd) ?? new Map(),
+      toleranceMinutes: input.toleranceMinutes,
+    });
+    if (input.onlyAnomalies && result.mismatchCount === 0 && result.anomalies.length === 0) {
+      continue;
+    }
+    out.push(result);
+  }
+  return out;
+}
