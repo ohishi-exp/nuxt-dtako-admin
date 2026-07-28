@@ -645,36 +645,34 @@ export function sumByCategory(row: SalaryCsvRow, config: SalaryItemConfig): Sala
 /**
  * 残業の「時間」比較 (タイムカード表示用、Refs #441)。
  *
- * 拘束時間上の残業 (打刻から計算した時間) と、給与明細に計上された残業代を
- * **基礎単価(実績) で時間へ逆算した値**を並べる。**逆算は法定割増
- * (1.25/1.5倍・深夜0.25倍) を戻さない単純な「金額 ÷ 基礎単価」** — 円ベースの
- * 主判定 (`diffCsvVsBaseRateOvertime`) の理論値とは別の、時間の桁感を掴むための
- * 簡易換算であることに注意 (割増が乗っている分、実際の残業時間より大きく出る)。
+ * システム側 (実働から計算した時間外 + 時間外深夜 + 週40超過) と、**給与明細の
+ * 勤怠欄にある残業時間そのもの** (`KINDATA` の「残業時間」) を並べる。
  *
- * 基礎単価(実績) が無ければ (`baseRateActual` が null か 0 以下) 支給側は
- * 計算不能 = null (独自の按分計算はしない、Refs #253 の方針と同じ)。
+ * 以前は「残業計上額 ÷ 基礎単価(実績)」で時間へ逆算していたが、割増 (1.25/1.5 倍・
+ * 深夜 0.25 倍) を戻さない簡易換算なので実際の残業時間より大きく出ていた
+ * (2026-07-28 ユーザー指摘)。給与明細が残業時間を持っているのだから、そちらを出す。
+ *
+ * 給与明細を取り込んでいない月や、勤怠欄に残業時間が無い会社は null (= 「-」表示)。
  */
 export interface OvertimeHoursComparison {
-  /** 拘束時間上の残業 (分、時間外+時間外深夜+週40超過)。`sysOvertimeMinutes` と同じ。 */
-  restraintMinutes: number
-  /** 給与の残業計上額 ÷ 基礎単価(実績) を時間へ逆算した値 (分)。計算不能なら null。 */
+  /** システム側の残業 (分、時間外+時間外深夜+週40超過)。`sysOvertimeMinutes` と同じ。 */
+  sysMinutes: number
+  /** 給与明細の残業時間 (分)。取り込んでいない / 欄が無ければ null。 */
   paidMinutes: number | null
-  /** 拘束時間上の残業 − 支給分の残業 (分)。正 = 打刻の方が多い (未払いの疑い)。
+  /** システム側 − 給与側 (分)。正 = 打刻の方が多い (未払いの疑い)。
    * `paidMinutes` が null なら null。 */
   diffMinutes: number | null
 }
 
 export function overtimeHoursComparison(
-  row: Pick<SalaryComparisonRow, 'sysOvertimeMinutes' | 'csvOvertime' | 'baseRateActual'>,
+  row: Pick<SalaryComparisonRow, 'sysOvertimeMinutes' | 'csvOvertimeHours'>,
 ): OvertimeHoursComparison {
-  const restraintMinutes = row.sysOvertimeMinutes
-  const paidMinutes = row.baseRateActual !== null && row.baseRateActual > 0
-    ? Math.round((row.csvOvertime / row.baseRateActual) * 60)
-    : null
+  const sysMinutes = row.sysOvertimeMinutes
+  const paidMinutes = row.csvOvertimeHours === null ? null : Math.round(row.csvOvertimeHours * 60)
   return {
-    restraintMinutes,
+    sysMinutes,
     paidMinutes,
-    diffMinutes: paidMinutes === null ? null : restraintMinutes - paidMinutes,
+    diffMinutes: paidMinutes === null ? null : sysMinutes - paidMinutes,
   }
 }
 

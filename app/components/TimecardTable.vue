@@ -37,6 +37,10 @@ const props = defineProps<{
     restraintMinutes: number
     nightMinutes: number
     overtimeNightMinutes: number
+    /** 法定時間外 (8h 超)。法定休日の実働は含まない。 */
+    overtimeMinutes: number
+    /** 法定休日 (日曜) の実働。 */
+    legalHolidayMinutes: number
   } | null
 }>()
 
@@ -80,9 +84,12 @@ const restraintSummary = computed(() => {
   const r = props.restraint
   if (!r) return ''
   const night = r.nightMinutes + r.overtimeNightMinutes
-  if (r.restraintMinutes <= 0 && night <= 0) return ''
+  if (r.restraintMinutes <= 0 && night <= 0 && r.overtimeMinutes <= 0 && r.legalHolidayMinutes <= 0) return ''
   const parts = [`拘束: ${fmtMinutes(r.restraintMinutes)}`]
   // 0 の項目は出さない — 「深夜 0h00m (うち時間外深夜 0h00m)」は読む値が無い
+  if (r.overtimeMinutes > 0) parts.push(`時間外: ${fmtMinutes(r.overtimeMinutes)}`)
+  // 法定休日は時間外に入らない (休日割増 1.35 に一本化) ので別に出す
+  if (r.legalHolidayMinutes > 0) parts.push(`法定休日: ${fmtMinutes(r.legalHolidayMinutes)}`)
   if (night > 0) {
     parts.push(`深夜: ${fmtMinutes(night)}`
       + (r.overtimeNightMinutes > 0 ? ` (うち時間外深夜 ${fmtMinutes(r.overtimeNightMinutes)})` : ''))
@@ -122,12 +129,12 @@ const kindSummary = computed(() => {
     <!-- 残業の「拘束時間 vs 給与換算時間」比較 (Refs #441)。給与側は基礎単価(実績) が
          無い (給与比較タブで CSV 未取り込み等) と "-" になる -->
     <div
-      v-if="overtimeCompare && (overtimeCompare.restraintMinutes > 0 || (overtimeCompare.paidMinutes ?? 0) > 0)"
+      v-if="overtimeCompare && (overtimeCompare.sysMinutes > 0 || (overtimeCompare.paidMinutes ?? 0) > 0)"
       class="py-0.5 text-gray-500"
-      title="給与換算 = 給与明細の残業計上額 ÷ 基礎単価(実績)。法定割増 (1.25/1.5倍等) を戻していない簡易換算のため、正常な月でも給与換算の方が大きく出ます"
+      title="給与 = 給与明細の勤怠欄にある残業時間そのもの (KINDATA)。給与比較タブで明細を取り込んでいない月は「-」"
     >
-      残業: 拘束 {{ fmtMinutes(overtimeCompare.restraintMinutes) }}
-      / 給与換算 {{ overtimeCompare.paidMinutes != null ? fmtMinutes(overtimeCompare.paidMinutes) : '-' }}
+      残業: 実働 {{ fmtMinutes(overtimeCompare.sysMinutes) }}
+      / 給与 {{ overtimeCompare.paidMinutes != null ? fmtMinutes(overtimeCompare.paidMinutes) : '-' }}
       <span
         v-if="overtimeCompare.diffMinutes != null"
         :class="overtimeCompare.diffMinutes > 0 ? 'text-amber-600 dark:text-amber-400' : ''"
@@ -170,7 +177,10 @@ const kindSummary = computed(() => {
           <td class="text-center">{{ r.out1 ?? '' }}</td>
           <td class="text-center">{{ r.in2 ?? '' }}</td>
           <td class="text-center">{{ r.out2 ?? '' }}</td>
-          <td class="text-right">{{ r.overtimeMinutes > 0 ? fmtMinutes(r.overtimeMinutes) : '' }}</td>
+          <!-- 法定休日は残業ではないので括弧つきで出す (2026-07-28 決定)。備考には書かない -->
+          <td class="text-right" :title="r.legalHolidayMinutes > 0 ? '法定休日 (日曜) の実働。時間外ではなく休日割増 1.35 倍' : undefined">
+            {{ r.legalHolidayMinutes > 0 ? `(${fmtMinutes(r.legalHolidayMinutes)})` : (r.overtimeMinutes > 0 ? fmtMinutes(r.overtimeMinutes) : '') }}
+          </td>
           <td class="pl-1 text-left whitespace-nowrap">{{ r.note }}</td>
           <td class="pl-1 text-right text-gray-500">{{ r.workingMinutes > 0 ? fmtMinutes(r.workingMinutes) : '' }}</td>
         </tr>

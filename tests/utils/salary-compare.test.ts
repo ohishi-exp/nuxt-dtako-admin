@@ -531,40 +531,33 @@ describe('computeOvertimePayAtRate (労基法37条、worker computeMinWageOverti
 })
 
 describe('overtimeHoursComparison (タイムカード表示用、Refs #441)', () => {
-  it('基礎単価があれば給与の残業額を時間へ逆算する', () => {
-    // 25,000円 ÷ 1,000円/h × 60 = 1,500分
-    const c = overtimeHoursComparison({ sysOvertimeMinutes: 1200, csvOvertime: 25000, baseRateActual: 1000 })
-    expect(c.restraintMinutes).toBe(1200)
-    expect(c.paidMinutes).toBe(1500)
-    expect(c.diffMinutes).toBe(1200 - 1500) // 打刻より給与換算の方が多い (割増を戻していないため)
+  it('給与側は給与明細の残業時間そのもの (時間 → 分)', () => {
+    const c = overtimeHoursComparison({ sysOvertimeMinutes: 1200, csvOvertimeHours: 10.5 })
+    expect(c.sysMinutes).toBe(1200)
+    expect(c.paidMinutes).toBe(630)
+    expect(c.diffMinutes).toBe(1200 - 630)
   })
 
-  it('差は 拘束 − 給与換算 (正 = 打刻の方が多い = 未払いの疑い)', () => {
-    const c = overtimeHoursComparison({ sysOvertimeMinutes: 2000, csvOvertime: 10000, baseRateActual: 1000 })
+  it('差は 実働 − 給与 (正 = 打刻の方が多い = 未払いの疑い)', () => {
+    const c = overtimeHoursComparison({ sysOvertimeMinutes: 2000, csvOvertimeHours: 10 })
     expect(c.paidMinutes).toBe(600)
     expect(c.diffMinutes).toBe(1400)
   })
 
-  it('基礎単価が null なら支給側は計算不能 (null)', () => {
-    const c = overtimeHoursComparison({ sysOvertimeMinutes: 1200, csvOvertime: 25000, baseRateActual: null })
+  it('残業時間の欄が無ければ給与側は null (逆算はしない)', () => {
+    const c = overtimeHoursComparison({ sysOvertimeMinutes: 1200, csvOvertimeHours: null })
     expect(c.paidMinutes).toBeNull()
     expect(c.diffMinutes).toBeNull()
   })
 
-  it('基礎単価が 0 以下でも計算不能 (0除算を避ける)', () => {
-    const c = overtimeHoursComparison({ sysOvertimeMinutes: 1200, csvOvertime: 25000, baseRateActual: 0 })
-    expect(c.paidMinutes).toBeNull()
-  })
-
-  it('給与の残業計上額が 0 なら支給分は 0 分 (全額が未払いとして差に出る)', () => {
-    const c = overtimeHoursComparison({ sysOvertimeMinutes: 1200, csvOvertime: 0, baseRateActual: 1000 })
+  it('給与の残業時間が 0 なら 0 分 (全部が差に出る)', () => {
+    const c = overtimeHoursComparison({ sysOvertimeMinutes: 1200, csvOvertimeHours: 0 })
     expect(c.paidMinutes).toBe(0)
     expect(c.diffMinutes).toBe(1200)
   })
 
   it('分未満は四捨五入する', () => {
-    const c = overtimeHoursComparison({ sysOvertimeMinutes: 0, csvOvertime: 1000, baseRateActual: 1401 })
-    expect(c.paidMinutes).toBe(Math.round((1000 / 1401) * 60)) // 43
+    expect(overtimeHoursComparison({ sysOvertimeMinutes: 0, csvOvertimeHours: 1.234 }).paidMinutes).toBe(74)
   })
 })
 

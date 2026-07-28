@@ -448,8 +448,7 @@ const timecardSheets = computed(() => {
         counts: mergedCounts,
         overtimeCompare: overtimeHoursComparison({
           sysOvertimeMinutes,
-          csvOvertime: paid?.csvOvertime ?? 0,
-          baseRateActual: paid?.baseRateActual ?? null,
+          csvOvertimeHours: paid?.csvOvertimeHours ?? null,
         }),
         attendanceCompare: {
           work: { sys: workDaysSys, csv: paidAttendance?.work ?? null },
@@ -463,6 +462,9 @@ const timecardSheets = computed(() => {
               restraintMinutes: r.summary.restraintMinutes ?? 0,
               nightMinutes: r.summary.nightMinutes ?? 0,
               overtimeNightMinutes: r.summary.overtimeNightMinutes ?? 0,
+              // 法定区分は wage-report が classifyMonth で出した値 (月次集計と同じ)
+              overtimeMinutes: r.wage.minutes.overtime,
+              legalHolidayMinutes: r.wage.minutes.legalHoliday + r.wage.minutes.legalHolidayNight,
             },
       }
     })
@@ -2283,12 +2285,10 @@ function paidFor(driverCd: string): { base: number, overtime: number } | null {
  * 残業「時間」比較用、Refs #441)。salaryComparison が無くても拘束側の時間は
  * summary から常に出せるので、ここが空でも「支給分」欄だけが "-" になる。 */
 const paidOvertimeByDriver = computed(() => {
-  const map = new Map<string, { csvOvertime: number, baseRateActual: number | null }>()
+  const map = new Map<string, { csvOvertimeHours: number | null }>()
   for (const r of salaryComparison.value?.rows ?? []) {
-    map.set(String(Number(r.mappedDriverCd ?? r.driverCd)), {
-      csvOvertime: r.csvOvertime,
-      baseRateActual: r.baseRateActual,
-    })
+    // 給与明細の勤怠欄にある残業時間そのもの。金額からの逆算はしない (2026-07-28)
+    map.set(String(Number(r.mappedDriverCd ?? r.driverCd)), { csvOvertimeHours: r.csvOvertimeHours })
   }
   return map
 })

@@ -322,8 +322,9 @@ export function buildKosokuTimecardTable(
     const date = `${ym}-${String(day).padStart(2, '0')}`
     const attributed = byDate.get(date)
 
+    // **法定休日は備考に書かない** — 残業列に括弧つきの数字で出す (2026-07-28 決定)。
+    // 「法定休日」と書いてあっても何時間かが分からず、備考の幅も食っていた
     const notes: string[] = []
-    if ((attributed?.legalHolidayMinutes ?? 0) > 0) notes.push('法定休日')
     // 退社の時刻が無い理由をその行で言う (列を空にしただけだと「取れていない」に見える)。
     // 打刻がある勤務は実際の終業を列に出せるので、打ち切りでも「不明」ではない
     if (shifts.some(s => s.over24h && !s.punches.length)) {
@@ -347,6 +348,8 @@ export function buildKosokuTimecardTable(
       // **その日に乗った残業** (按分後)。勤務単位で足すと日跨ぎの勤務が始業日に
       // 丸ごと乗り、ヘッダの合計と読み方が食い違う
       overtimeMinutes: (attributed?.overtimeMinutes ?? 0) + (attributed?.overtimeNightMinutes ?? 0),
+      // 法定休日 (日曜) の実働。**残業ではない** ので残業列には括弧つきで出す
+      legalHolidayMinutes: attributed?.legalHolidayMinutes ?? 0,
       // **打刻が無い日でも実働は出す。** 長距離は運行途中に打刻が無く、列が空のままだと
       // 「動いているのに拘束が取れていない」ように見える (2026-07-27 指摘)。
       // 拘束ではなく実働 (拘束 − 休憩) を出すのはユーザー指示 — 拘束のままだと
@@ -416,6 +419,10 @@ export interface KosokuMonthTotals {
   nightMinutes: number
   /** 平日の法定時間外に重なる深夜。`nightMinutes` とは排他 (上流 #118)。 */
   overtimeNightMinutes: number
+  /** 法定時間外 (8h 超)。法定休日の実働は含まない (あちらは休日割増に一本化)。 */
+  overtimeMinutes: number
+  /** 法定休日 (日曜) の実働。深夜ぶんも含む。 */
+  legalHolidayMinutes: number
 }
 
 /**
@@ -434,11 +441,19 @@ export interface KosokuMonthTotals {
  *   判断を画面で覆さない)
  */
 export function sumKosokuMonth(days: readonly KosokuDay[], month: string): KosokuMonthTotals {
-  const acc: KosokuMonthTotals = { restraintMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0 }
+  const acc: KosokuMonthTotals = {
+    restraintMinutes: 0,
+    nightMinutes: 0,
+    overtimeNightMinutes: 0,
+    overtimeMinutes: 0,
+    legalHolidayMinutes: 0,
+  }
   for (const p of kosokuByCalendarDate(days, month).values()) {
     acc.restraintMinutes += p.restraintMinutes
     acc.nightMinutes += p.nightMinutes + p.legalHolidayNightMinutes
     acc.overtimeNightMinutes += p.overtimeNightMinutes
+    acc.overtimeMinutes += p.overtimeMinutes
+    acc.legalHolidayMinutes += p.legalHolidayMinutes
   }
   return acc
 }
