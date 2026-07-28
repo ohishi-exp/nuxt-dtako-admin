@@ -153,6 +153,15 @@ export type DiffCause =
    * 数え漏らしている分なので、こちらが正。
    */
   | "month-boundary"
+  /**
+   * **運行の継ぎ目** (実額)。紙は運行単位のスパン合算なので 運行終了 → 次の運行開始
+   * の短い空きを拘束に入れない。こちらは #123 の決定どおり入れる (ユーザー決定
+   * 2026-07-29: 拘束は変えず突合で説明扱いに落とす)。実額は上流の
+   * `run_gap_minutes` (ohishi-exp/rust-ichibanboshi#170)。
+   */
+  | "run-gap"
+  /** 昼休 + 運行の継ぎ目。対の打刻を持つ乗務員の運行日で併発する。 */
+  | "lunch+run-gap"
   /** **未説明。** ここが 0 になるまでが検知の仕事。 */
   | "unknown";
 
@@ -503,12 +512,14 @@ const LUNCH_DEDUCTION_MINUTES = 60;
  * 説明が付いたとみなす。**収まらなければ `unknown`** — そこが未解明の差。
  *
  * 昼休は上流の応答に出てこないので**差の形から当てる**。フェリーは実額が来るので
- * そのまま引く。当てる順は「フェリー → 月境界 → 昼休」— 実額 (確実) を推定より先に。
+ * そのまま引く。当てる順は「フェリー → 月境界 → 継ぎ目 → 昼休 → 併発」—
+ * 実額 (確実) を推定より先に。
  */
 function classifyDiff(
   diffMinutes: number | null,
   ferryMinusMinutes: number | null,
   crossMonthMinutes: number,
+  runGapMinutes: number,
   tolerance: number,
 ): { cause: DiffCause; explainedMinutes: number; residualMinutes: number | null } {
   if (diffMinutes === null) {
@@ -521,7 +532,9 @@ function classifyDiff(
   const candidates: Array<{ cause: DiffCause; explained: number }> = [
     { cause: "ferry", explained: ferry },
     { cause: "month-boundary", explained: crossMonthMinutes },
+    { cause: "run-gap", explained: runGapMinutes },
     { cause: "lunch", explained: LUNCH_DEDUCTION_MINUTES },
+    { cause: "lunch+run-gap", explained: runGapMinutes === 0 ? 0 : runGapMinutes + LUNCH_DEDUCTION_MINUTES },
     { cause: "lunch+ferry", explained: ferry + LUNCH_DEDUCTION_MINUTES },
   ];
   for (const c of candidates) {
@@ -546,7 +559,10 @@ export function compareTimecardMonth(input: {
   month: string;
   driverCd: string;
   nginx: NginxDriverMonth | null;
-  oursByDate: ReadonlyMap<string, { restraintMinutes: number, ferryMinusMinutes?: number }>;
+  oursByDate: ReadonlyMap<
+    string,
+    { restraintMinutes: number, ferryMinusMinutes?: number, runGapMinutes?: number }
+  >;
   /**
    * 暦日 → 月境界を跨ぐ勤務由来の分 (`crossMonthMinutesByDate`)。渡されなければ
    * `month-boundary` の説明は付かない (候補の explained が 0 で素通り)。
@@ -595,7 +611,8 @@ export function compareTimecardMonth(input: {
     const diffMinutes =
       nginxMinutes === null || oursMinutes === null ? null : nginxMinutes - oursMinutes;
     const crossMonth = input.crossMonthByDate?.get(date) ?? 0;
-    let classified = classifyDiff(diffMinutes, ferryMinusMinutes, crossMonth, tolerance);
+    const runGap = ours?.runGapMinutes ?? 0;
+    let classified = classifyDiff(diffMinutes, ferryMinusMinutes, crossMonth, runGap, tolerance);
     // 片側 (こちら) だけの日は差が引けず `none` になるが、値の全部が月を跨ぐ勤務
     // 由来なら説明は付いている — 翌月へ跨ぐ勤務の頭 (月末の ours-only) がこの形
     if (
@@ -663,7 +680,10 @@ export function compareTimecardMonthAll(input: {
   nginxByDriver: ReadonlyMap<string, NginxDriverMonth>;
   oursByDriver: ReadonlyMap<
     string,
-    ReadonlyMap<string, { restraintMinutes: number, ferryMinusMinutes?: number }>
+    ReadonlyMap<
+      string,
+      { restraintMinutes: number, ferryMinusMinutes?: number, runGapMinutes?: number }
+    >
   >;
   /** 乗務員CD → 暦日 → 月境界を跨ぐ勤務由来の分 (`crossMonthMinutesByDate`)。 */
   crossMonthByDriver?: ReadonlyMap<string, ReadonlyMap<string, number>>;

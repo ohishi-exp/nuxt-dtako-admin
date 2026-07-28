@@ -37,6 +37,7 @@ describe('parseKosokuDaily', () => {
       nightMinutes: 35,
       overtimeNightMinutes: 10,
       ferryMinusMinutes: 0,
+      runGapMinutes: 0,
       parts: [],
     }])
   })
@@ -56,6 +57,7 @@ describe('parseKosokuDaily', () => {
       nightMinutes: 0,
       overtimeNightMinutes: 0,
       ferryMinusMinutes: 0,
+      runGapMinutes: 0,
       parts: [],
     }])
   })
@@ -140,6 +142,7 @@ describe('kosokuPartsByDate', () => {
       nightMinutes: 40,
       overtimeNightMinutes: 5,
       ferryMinusMinutes: 0,
+      runGapMinutes: 0,
     })
     // 同じ日の 2 勤務が 1 つにまとまる
     expect(got.get('2026-04-06')).toEqual({
@@ -149,6 +152,7 @@ describe('kosokuPartsByDate', () => {
       nightMinutes: 35,
       overtimeNightMinutes: 10,
       ferryMinusMinutes: 0,
+      runGapMinutes: 0,
     })
   })
 
@@ -217,6 +221,20 @@ describe('crossMonthMinutesByDate', () => {
     ])
   })
 
+  it('run_gap_minutes を運ぶ・暦日で合算する (rust#170 の継ぎ目)', () => {
+    const m = parseKosokuDaily({
+      drivers: [{
+        driver: 9,
+        days: [
+          shift({ date: '2026-04-06', run_gap_minutes: 23 }),
+          shift({ date: '2026-04-06', run_gap_minutes: 5 }),
+        ],
+      }],
+    }).get('9')!
+    expect(m[0]!.runGapMinutes).toBe(23)
+    expect(kosokuPartsByDate(m, '2026-04').get('2026-04-06')!.runGapMinutes).toBe(28)
+  })
+
   it('跨ぐ勤務が無ければ空', () => {
     expect(crossMonthMinutesByDate(shifts, '2026-05').size).toBe(0)
   })
@@ -232,6 +250,7 @@ describe('mergeKosokuShiftMaps', () => {
       nightMinutes: 0,
       overtimeNightMinutes: 0,
       ferryMinusMinutes: 0,
+      runGapMinutes: 0,
       parts: [],
     }))]])
 

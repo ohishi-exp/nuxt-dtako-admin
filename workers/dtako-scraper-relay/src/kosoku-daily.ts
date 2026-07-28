@@ -44,6 +44,15 @@ export interface KosokuCalendarPart {
    * ここで合算したときに 4 倍になる。上流は最初の勤務にだけ載せている。
    */
   ferryMinusMinutes: number;
+  /**
+   * **運行の継ぎ目** — 勤務の中の 運行終了 → 次の運行開始 の空き (分)
+   * (Refs ohishi-exp/rust-ichibanboshi#170、ユーザー決定 2026-07-29)。
+   *
+   * 紙は運行単位のスパンを合算するのでこの空きを拘束に入れない。こちらは
+   * #123 の決定どおり入れる。こちらの拘束には**含まれている** (フェリーと逆) —
+   * 突合が cause `run-gap` として差を説明するための実額。
+   */
+  runGapMinutes: number;
 }
 
 /** 上流の 1 勤務 (必要な項目だけ)。 */
@@ -79,6 +88,7 @@ function toPart(r: Record<string, unknown>): KosokuCalendarPart {
     nightMinutes: num(r.night_minutes) + num(r.legal_holiday_night_minutes),
     overtimeNightMinutes: num(r.overtime_night_minutes),
     ferryMinusMinutes: num(r.ferry_minus_minutes),
+    runGapMinutes: num(r.run_gap_minutes),
   };
 }
 
@@ -148,6 +158,7 @@ export function kosokuPartsByDate(
         nightMinutes: v.nightMinutes,
         overtimeNightMinutes: v.overtimeNightMinutes,
         ferryMinusMinutes: v.ferryMinusMinutes,
+        runGapMinutes: v.runGapMinutes,
       });
       return;
     }
@@ -157,6 +168,7 @@ export function kosokuPartsByDate(
     cur.nightMinutes += v.nightMinutes;
     cur.overtimeNightMinutes += v.overtimeNightMinutes;
     cur.ferryMinusMinutes += v.ferryMinusMinutes;
+    cur.runGapMinutes += v.runGapMinutes;
   };
   for (const shift of shifts) {
     if (shift.parts.length > 0) {

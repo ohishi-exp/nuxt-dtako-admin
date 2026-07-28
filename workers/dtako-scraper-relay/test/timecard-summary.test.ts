@@ -330,8 +330,8 @@ describe('summarizeTimecardMonth', () => {
     // 長距離の形: 打刻は 6/1 の始業と 6/9 の終業だけ = 8 日が 1 勤務になる入力
     const rows = [row('2026-06-01', [['05:44:00', '23:59:00']])]
     const parts = new Map([
-      ['2026-06-01', { restraintMinutes: 699, workingMinutes: 486, overtimeMinutes: 6, nightMinutes: 30, overtimeNightMinutes: 10, ferryMinusMinutes: 0 }],
-      ['2026-06-02', { restraintMinutes: 600, workingMinutes: 540, overtimeMinutes: 60, nightMinutes: 0, overtimeNightMinutes: 0, ferryMinusMinutes: 0 }],
+      ['2026-06-01', { restraintMinutes: 699, workingMinutes: 486, overtimeMinutes: 6, nightMinutes: 30, overtimeNightMinutes: 10, ferryMinusMinutes: 0, runGapMinutes: 0 }],
+      ['2026-06-02', { restraintMinutes: 600, workingMinutes: 540, overtimeMinutes: 60, nightMinutes: 0, overtimeNightMinutes: 0, ferryMinusMinutes: 0, runGapMinutes: 0 }],
     ])
     const { summaries } = summarizeTimecardMonth(rows, {
       ...opts(),
@@ -1165,6 +1165,7 @@ describe('applyKosokuTimes', () => {
     nightMinutes: 0,
     overtimeNightMinutes: 3360,
       ferryMinusMinutes: 0,
+      runGapMinutes: 0,
     holidayKind: 'weekday' as const,
     voluntaryMinutes: 0,
     punchErrorMinutes: 0,
@@ -1179,6 +1180,7 @@ describe('applyKosokuTimes', () => {
     nightMinutes: 30,
     overtimeNightMinutes: 10,
       ferryMinusMinutes: 0,
+      runGapMinutes: 0,
     ...over,
   })
 
@@ -1197,6 +1199,7 @@ describe('applyKosokuTimes', () => {
       nightMinutes: 30,
       overtimeNightMinutes: 10,
       ferryMinusMinutes: 0,
+      runGapMinutes: 0,
       // 打刻側から引き継ぐもの
       holidayKind: 'non_legal',
       leaves: ['指休'],
