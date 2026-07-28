@@ -116,8 +116,38 @@ export interface CompareDay {
    * 画面と MCP から確かめられるようにする。
    */
   ferryMinusMinutes: number | null;
+  /**
+   * その日の差 (`nginx - ours`) を**どこまで説明できたか** (Refs #501)。
+   *
+   * 今回の目標は直すことではなく、**差を全部検知して原因の当たりを付ける**こと。
+   * `cause` が `unknown` の日が残っている限り、突合はまだ見えていない差を持っている。
+   */
+  cause: DiffCause;
+  /** 既知の規則で説明が付いた分 (分)。nginx がこちらより小さくなる向きを正で持つ。 */
+  explainedMinutes: number;
+  /** 説明しきれずに残った差 (分)。`diffMinutes + explainedMinutes`。 */
+  residualMinutes: number | null;
   anomalies: CompareAnomaly[];
 }
+
+/**
+ * 差の**推定原因**。片側にしか無い日と、許容誤差に収まる日は `none`。
+ *
+ * `lunch` は**推定**で、`ferry` は**実額**。nginx が引いた昼休は上流の応答に出て
+ * こないので差の形 (60 分前後) から当てるしかないが、フェリー控除額はこちら側の
+ * `kosoku-daily` が実額を運んでくる (ohishi-exp/rust-ichibanboshi#146/#148)。
+ */
+export type DiffCause =
+  /** 説明する差が無い (`match` / `within-tolerance` / 片側だけ / 両側空)。 */
+  | "none"
+  /** 昼休の一律控除 (推定)。nginx は**拘束から**引くが、こちらは休憩に入れて拘束からは引かない。 */
+  | "lunch"
+  /** 同日フェリー控除 (実額)。 */
+  | "ferry"
+  /** 昼休 + フェリーの合計で説明が付く。 */
+  | "lunch+ferry"
+  /** **未説明。** ここが 0 になるまでが検知の仕事。 */
+  | "unknown";
 
 /** 1 乗務員 × 1 ヶ月の突合結果。 */
 export interface CompareResult {
@@ -135,6 +165,10 @@ export interface CompareResult {
   };
   /** `status` が `match` / `within-tolerance` / `both-empty` 以外の日数。 */
   mismatchCount: number;
+  /** 原因が `unknown` の日数。**検知の抜けを測る数字**なので、独立に持つ。 */
+  unknownCount: number;
+  /** 原因が `unknown` の日の `residualMinutes` の合計 (分)。 */
+  unknownMinutes: number;
   anomalies: CompareAnomaly[];
 }
 
@@ -446,6 +480,53 @@ function statusOf(
 }
 
 /**
+ * 紙が拘束から一律で引く昼休 (分)。
+ *
+ * nginx は運行を挟まない勤務 (`始業` → `終業`) で、始業が 12:00 前・終業が 13:00 後なら
+ * **拘束から 60 分引く** (`TimeCardKosokuController::_make_tc_to_tc`)。こちらは同じ昼休を
+ * **休憩**に入れるだけで拘束からは引かない (`rust-ichibanboshi/src/kosoku.rs`) ため、
+ * その 60 分がまるごと差になる。
+ */
+const LUNCH_DEDUCTION_MINUTES = 60;
+
+/**
+ * その日の差の**推定原因**を決める (Refs #501)。
+ *
+ * 既知の規則で引かれた分を差から取り除き、残り (`residual`) が許容誤差に収まれば
+ * 説明が付いたとみなす。**収まらなければ `unknown`** — そこが未解明の差。
+ *
+ * 昼休は上流の応答に出てこないので**差の形から当てる**。フェリーは実額が来るので
+ * そのまま引く。両方を当てる順は「フェリー → 昼休」— フェリーが実額で確実なため。
+ */
+function classifyDiff(
+  diffMinutes: number | null,
+  ferryMinusMinutes: number | null,
+  tolerance: number,
+): { cause: DiffCause; explainedMinutes: number; residualMinutes: number | null } {
+  if (diffMinutes === null) {
+    return { cause: "none", explainedMinutes: 0, residualMinutes: null };
+  }
+  if (Math.abs(diffMinutes) <= tolerance) {
+    return { cause: "none", explainedMinutes: 0, residualMinutes: diffMinutes };
+  }
+  const ferry = ferryMinusMinutes ?? 0;
+  const candidates: Array<{ cause: DiffCause; explained: number }> = [
+    { cause: "ferry", explained: ferry },
+    { cause: "lunch", explained: LUNCH_DEDUCTION_MINUTES },
+    { cause: "lunch+ferry", explained: ferry + LUNCH_DEDUCTION_MINUTES },
+  ];
+  for (const c of candidates) {
+    // 引かれていない (ferry 0) 組み合わせは候補にしない — 0 を足しても説明にならない
+    if (c.explained === 0) continue;
+    const residual = diffMinutes + c.explained;
+    if (Math.abs(residual) <= tolerance) {
+      return { cause: c.cause, explainedMinutes: c.explained, residualMinutes: residual };
+    }
+  }
+  return { cause: "unknown", explainedMinutes: 0, residualMinutes: diffMinutes };
+}
+
+/**
  * 1 乗務員 × 1 ヶ月を暦日で突き合わせる。
  *
  * `oursByDate` は [`kosokuPartsByDate`](./kosoku-daily.ts) の出力を想定 (暦日按分後)。
@@ -469,6 +550,8 @@ export function compareTimecardMonth(input: {
   let oursTotal = 0;
   let ferryTotal = 0;
   let mismatchCount = 0;
+  let unknownCount = 0;
+  let unknownMinutes = 0;
 
   for (const date of daysOfMonth(input.month)) {
     const ours = input.oursByDate.get(date);
@@ -495,14 +578,24 @@ export function compareTimecardMonth(input: {
         ? ferryFromOurs
         : (nginxDay?.ferryMinusMinutes ?? null);
     if (ferryMinusMinutes !== null) ferryTotal += ferryMinusMinutes;
+    const diffMinutes =
+      nginxMinutes === null || oursMinutes === null ? null : nginxMinutes - oursMinutes;
+    const classified = classifyDiff(diffMinutes, ferryMinusMinutes, tolerance);
+    // `unknown` になるのは差が引けた日だけなので、残差 = 差そのもの
+    if (diffMinutes !== null && classified.cause === "unknown") {
+      unknownCount += 1;
+      unknownMinutes += diffMinutes;
+    }
     days.push({
       date,
       nginxMinutes,
       oursMinutes,
-      diffMinutes:
-        nginxMinutes === null || oursMinutes === null ? null : nginxMinutes - oursMinutes,
+      diffMinutes,
       status,
       ferryMinusMinutes,
+      cause: classified.cause,
+      explainedMinutes: classified.explainedMinutes,
+      residualMinutes: classified.residualMinutes,
       anomalies: dayFound,
     });
   }
@@ -522,6 +615,8 @@ export function compareTimecardMonth(input: {
       ferryMinusMinutes: ferryTotal,
     },
     mismatchCount,
+    unknownCount,
+    unknownMinutes,
     anomalies,
   };
 }
@@ -578,6 +673,11 @@ export interface CompareSummaryRow {
   anomalyCount: number;
   /** kind ごとの anomaly 件数。**0 件の kind は載せない**。 */
   anomalyKinds: Partial<Record<CompareAnomaly["kind"], number>>;
+  /** 推定原因ごとの日数。**0 件の原因は載せない** (`none` も載せない)。 */
+  causeDays: Partial<Record<DiffCause, number>>;
+  /** 未説明の日数と、その残差の合計 (分)。**検知の抜けを測る数字**。 */
+  unknownCount: number;
+  unknownMinutes: number;
   totals: CompareResult["totals"];
   /**
    * `mismatch` 日の `diffMinutes` の最小・最大。mismatch が 1 日も無ければ null。
@@ -604,11 +704,13 @@ export function summarizeCompareResult(result: CompareResult): CompareSummaryRow
     number
   >;
   const anomalyKinds: Partial<Record<CompareAnomaly["kind"], number>> = {};
+  const causeDays: Partial<Record<DiffCause, number>> = {};
   let min: number | null = null;
   let max: number | null = null;
 
   for (const day of result.days) {
     statusDays[day.status] += 1;
+    if (day.cause !== "none") causeDays[day.cause] = (causeDays[day.cause] ?? 0) + 1;
     // 幅は mismatch だけで取る。within-tolerance は丸めノイズ、片側欠けの日は
     // diffMinutes が null で引き算になっていない
     if (day.status === "mismatch" && day.diffMinutes !== null) {
@@ -627,6 +729,9 @@ export function summarizeCompareResult(result: CompareResult): CompareSummaryRow
     mismatchCount: result.mismatchCount,
     anomalyCount: result.anomalies.length,
     anomalyKinds,
+    causeDays,
+    unknownCount: result.unknownCount,
+    unknownMinutes: result.unknownMinutes,
     totals: result.totals,
     diffRange: min === null || max === null ? null : { min, max },
   };
