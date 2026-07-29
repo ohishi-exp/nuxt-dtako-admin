@@ -1089,6 +1089,51 @@ describe("差の推定原因 (Refs #501)", () => {
     expect(d.explainedMinutes).toBe(73);
   });
 
+  it("日跨ぎ始業の頭は実額で説明する (1108 福留 03-06 の形)", () => {
+    // 始業 03-05 07:41 の対が無く当日イベント無し — 頭のうち 03-06 に落ちた
+    // 516 分 (00:00→運行開始 08:36) がそのまま差になる
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1108",
+      nginx: nginxDriver([{ date: "2026-03-06", kosokuMinutes: 318 }]),
+      oursByDate: new Map([
+        ["2026-03-06", { restraintMinutes: 834, punchHeadMinutes: 516 }],
+      ]),
+      toleranceMinutes: 2,
+    }).days[5]!;
+    expect(d.cause).toBe("punch-head");
+    expect(d.explainedMinutes).toBe(516);
+    expect(d.residualMinutes).toBe(0);
+  });
+
+  it("ours-only の日も頭で説明する (1108 福留 03-05 の形)", () => {
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1108",
+      nginx: nginxDriver([]),
+      oursByDate: new Map([
+        ["2026-03-05", { restraintMinutes: 979, punchHeadMinutes: 979 }],
+      ]),
+      toleranceMinutes: 2,
+    }).days[4]!;
+    expect(d.status).toBe("ours-only");
+    expect(d.cause).toBe("punch-head");
+    expect(d.explainedMinutes).toBe(979);
+  });
+
+  it("ours-only でも頭で説明できない値は none のまま", () => {
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1108",
+      nginx: nginxDriver([]),
+      oursByDate: new Map([
+        ["2026-03-05", { restraintMinutes: 979, punchHeadMinutes: 500 }],
+      ]),
+      toleranceMinutes: 2,
+    }).days[4]!;
+    expect(d.cause).toBe("none");
+  });
+
   it("未説明の日数と残差を月で数える — 検知の抜けを測る数字", () => {
     const r = compareTimecardMonth({
       month: "2026-04",

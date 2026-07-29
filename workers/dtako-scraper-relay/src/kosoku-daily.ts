@@ -61,6 +61,12 @@ export interface KosokuCalendarPart {
    * 尻尾を数えない。こちらの拘束には含まれている — cause `punch-tail` の実額。
    */
   punchTailMinutes: number;
+  /**
+   * **日跨ぎ始業の頭** — 始業打刻 → 後の暦日の最初のデジタコイベント (分)
+   * (Refs ohishi-exp/rust-ichibanboshi#173、`punchTailMinutes` の鏡像)。
+   * cause `punch-head` の実額。
+   */
+  punchHeadMinutes: number;
 }
 
 /** 上流の 1 勤務 (必要な項目だけ)。 */
@@ -98,6 +104,7 @@ function toPart(r: Record<string, unknown>): KosokuCalendarPart {
     ferryMinusMinutes: num(r.ferry_minus_minutes),
     runGapMinutes: num(r.run_gap_minutes),
     punchTailMinutes: num(r.punch_tail_minutes),
+    punchHeadMinutes: num(r.punch_head_minutes),
   };
 }
 
@@ -169,6 +176,7 @@ export function kosokuPartsByDate(
         ferryMinusMinutes: v.ferryMinusMinutes,
         runGapMinutes: v.runGapMinutes,
         punchTailMinutes: v.punchTailMinutes,
+        punchHeadMinutes: v.punchHeadMinutes,
       });
       return;
     }
@@ -180,6 +188,7 @@ export function kosokuPartsByDate(
     cur.ferryMinusMinutes += v.ferryMinusMinutes;
     cur.runGapMinutes += v.runGapMinutes;
     cur.punchTailMinutes += v.punchTailMinutes;
+    cur.punchHeadMinutes += v.punchHeadMinutes;
   };
   for (const shift of shifts) {
     if (shift.parts.length > 0) {

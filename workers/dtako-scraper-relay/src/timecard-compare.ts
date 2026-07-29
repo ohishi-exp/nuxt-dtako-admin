@@ -172,6 +172,13 @@ export type DiffCause =
   | "ferry+punch-tail"
   /** 昼休 + 尻尾。 */
   | "lunch+punch-tail"
+  /**
+   * **日跨ぎ始業の頭** (実額、尻尾の鏡像)。対の無い始業が次の休息まで伸びるとき、
+   * 最初のデジタコイベントが後の暦日にあると紙は打刻の日を数えない。実額は上流の
+   * `punch_head_minutes` (ohishi-exp/rust-ichibanboshi#173)。
+   * 1108 福留 03-05/06 (頭 1495 分 = 979 + 516) の形。
+   */
+  | "punch-head"
   /** **未説明。** ここが 0 になるまでが検知の仕事。 */
   | "unknown";
 
@@ -531,6 +538,7 @@ function classifyDiff(
   crossMonthMinutes: number,
   runGapMinutes: number,
   punchTailMinutes: number,
+  punchHeadMinutes: number,
   tolerance: number,
 ): { cause: DiffCause; explainedMinutes: number; residualMinutes: number | null } {
   if (diffMinutes === null) {
@@ -546,6 +554,7 @@ function classifyDiff(
     { cause: "month-boundary", explained: crossMonthMinutes },
     { cause: "run-gap", explained: runGapMinutes },
     { cause: "punch-tail", explained: tail },
+    { cause: "punch-head", explained: punchHeadMinutes },
     { cause: "ferry+punch-tail", explained: ferry === 0 || tail === 0 ? 0 : ferry + tail },
     { cause: "lunch", explained: LUNCH_DEDUCTION_MINUTES },
     { cause: "lunch+run-gap", explained: runGapMinutes === 0 ? 0 : runGapMinutes + LUNCH_DEDUCTION_MINUTES },
@@ -581,6 +590,7 @@ export function compareTimecardMonth(input: {
       ferryMinusMinutes?: number,
       runGapMinutes?: number,
       punchTailMinutes?: number,
+      punchHeadMinutes?: number,
     }
   >;
   /**
@@ -633,27 +643,34 @@ export function compareTimecardMonth(input: {
     const crossMonth = input.crossMonthByDate?.get(date) ?? 0;
     const runGap = ours?.runGapMinutes ?? 0;
     const punchTail = ours?.punchTailMinutes ?? 0;
+    const punchHead = ours?.punchHeadMinutes ?? 0;
     let classified = classifyDiff(
       diffMinutes,
       ferryMinusMinutes,
       crossMonth,
       runGap,
       punchTail,
+      punchHead,
       tolerance,
     );
-    // 片側 (こちら) だけの日は差が引けず `none` になるが、値の全部が月を跨ぐ勤務
-    // 由来なら説明は付いている — 翌月へ跨ぐ勤務の頭 (月末の ours-only) がこの形
-    if (
-      status === "ours-only" &&
-      oursMinutes !== null &&
-      crossMonth > 0 &&
-      Math.abs(oursMinutes - crossMonth) <= tolerance
-    ) {
-      classified = {
-        cause: "month-boundary",
-        explainedMinutes: crossMonth,
-        residualMinutes: classified.residualMinutes,
-      };
+    // 片側 (こちら) だけの日は差が引けず `none` になるが、値の全部が「紙が構造的に
+    // 見えない分」(月境界の跨ぎ / 日跨ぎ始業の頭) なら説明は付いている —
+    // 翌月へ跨ぐ勤務の頭 (月末の ours-only) や、始業打刻だけの日 (1108 03-05) がこの形
+    if (status === "ours-only" && oursMinutes !== null) {
+      const oursOnlyCandidates: Array<{ cause: DiffCause; explained: number }> = [
+        { cause: "month-boundary", explained: crossMonth },
+        { cause: "punch-head", explained: punchHead },
+      ];
+      for (const c of oursOnlyCandidates) {
+        if (c.explained > 0 && Math.abs(oursMinutes - c.explained) <= tolerance) {
+          classified = {
+            cause: c.cause,
+            explainedMinutes: c.explained,
+            residualMinutes: classified.residualMinutes,
+          };
+          break;
+        }
+      }
     }
     // `unknown` になるのは差が引けた日だけなので、残差 = 差そのもの
     if (diffMinutes !== null && classified.cause === "unknown") {
@@ -715,6 +732,7 @@ export function compareTimecardMonthAll(input: {
         ferryMinusMinutes?: number,
         runGapMinutes?: number,
         punchTailMinutes?: number,
+        punchHeadMinutes?: number,
       }
     >
   >;
