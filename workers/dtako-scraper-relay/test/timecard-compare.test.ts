@@ -1332,6 +1332,36 @@ describe("差の推定原因 (Refs #501)", () => {
     expect(d.cause).toBe("lunch");
   });
 
+  it("月境界の跨ぎと丸めが併発した日も説明が付く (1194 陣野 04-01 の形)", () => {
+    // 前月から跨いだ勤務 552 のうち、0 時過ぎの運行イベント 525 は紙のデジタコ側に
+    // 部分計上される (drift = ours(月内) − paper = -27)。-525 = -(552 - 27)
+    const d = compareTimecardMonth({
+      month: "2026-04",
+      driverCd: "1194",
+      nginx: nginxDriver([{ date: "2026-04-01", kosokuMinutes: 699 }]),
+      oursByDate: ours({ "2026-04-01": 1224 }),
+      crossMonthByDate: new Map([["2026-04-01", 552]]),
+      paperDriftByDate: new Map([["2026-04-01", -27]]),
+      toleranceMinutes: 2,
+    }).days[0]!;
+    expect(d.cause).toBe("month-boundary+rounding");
+    expect(d.explainedMinutes).toBe(525);
+    expect(d.residualMinutes).toBe(0);
+  });
+
+  it("跨ぎが無い日を month-boundary+rounding で説明したことにしない", () => {
+    // drift だけでは -525 に届かず、跨ぎ 0 なので複合候補も 0 → unknown のまま
+    const d = compareTimecardMonth({
+      month: "2026-04",
+      driverCd: "1194",
+      nginx: nginxDriver([{ date: "2026-04-01", kosokuMinutes: 699 }]),
+      oursByDate: ours({ "2026-04-01": 1224 }),
+      paperDriftByDate: new Map([["2026-04-01", -27]]),
+      toleranceMinutes: 2,
+    }).days[0]!;
+    expect(d.cause).toBe("unknown");
+  });
+
   it("未説明の日数と残差を月で数える — 検知の抜けを測る数字", () => {
     const r = compareTimecardMonth({
       month: "2026-04",
