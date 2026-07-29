@@ -732,6 +732,18 @@ describe("compareTimecardMonthAll", () => {
     });
     expect(rs[0]?.days[0]?.cause).toBe("month-boundary");
   });
+
+  it("紙の再現値との差を乗務員ごとに渡せる", () => {
+    const rs = compareTimecardMonthAll({
+      month: "2026-04",
+      nginxByDriver: new Map([
+        ["1030", nginxDriver([{ date: "2026-04-01", kosokuMinutes: 595 }])],
+      ]),
+      oursByDriver: new Map([["1030", ours({ "2026-04-01": 600 })]]),
+      paperDriftByDriver: new Map([["1030", new Map([["2026-04-01", 5]])]]),
+    });
+    expect(rs[0]?.days[0]?.cause).toBe("rounding");
+  });
 });
 
 describe("summarizeCompareResult", () => {
@@ -1247,6 +1259,77 @@ describe("差の推定原因 (Refs #501)", () => {
     expect(d.cause).toBe("ferry+punch-head");
     expect(d.explainedMinutes).toBe(89);
     expect(d.residualMinutes).toBe(0);
+  });
+
+  it("丸め方式の差は実額 (紙の再現値との差) で説明する (1194 陣野 03-11 の形)", () => {
+    // 紙は区分ごとに丸めるため、切れ目の多い日に ±数分が堆積する。
+    // -3 = ours 687 − paper 684 (rust#179 の paper_drift_by_date)
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1194",
+      nginx: nginxDriver([{ date: "2026-03-11", kosokuMinutes: 684 }]),
+      oursByDate: ours({ "2026-03-11": 687 }),
+      paperDriftByDate: new Map([["2026-03-11", 3]]),
+      toleranceMinutes: 2,
+    }).days[10]!;
+    expect(d.cause).toBe("rounding");
+    expect(d.explainedMinutes).toBe(3);
+    expect(d.residualMinutes).toBe(0);
+  });
+
+  it("丸めは紙が大きい向き (負の drift) も説明する (1729 石坂 03-26 の形)", () => {
+    // +8 = 紙の区間時間 (端点床) が経過より大きく積む日。drift = ours − paper = -8
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1729",
+      nginx: nginxDriver([{ date: "2026-03-26", kosokuMinutes: 709 }]),
+      oursByDate: ours({ "2026-03-26": 701 }),
+      paperDriftByDate: new Map([["2026-03-26", -8]]),
+      toleranceMinutes: 2,
+    }).days[25]!;
+    expect(d.cause).toBe("rounding");
+    expect(d.explainedMinutes).toBe(-8);
+    expect(d.residualMinutes).toBe(0);
+  });
+
+  it("フェリーと丸めが併発した日も説明が付く (1714 井上 03-06 の形)", () => {
+    // -76 = -ferry 73 - 丸め 3
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1714",
+      nginx: nginxDriver([{ date: "2026-03-06", kosokuMinutes: 1330 }]),
+      oursByDate: new Map([["2026-03-06", { restraintMinutes: 1406, ferryMinusMinutes: 73 }]]),
+      paperDriftByDate: new Map([["2026-03-06", 3]]),
+      toleranceMinutes: 2,
+    }).days[5]!;
+    expect(d.cause).toBe("ferry+rounding");
+    expect(d.explainedMinutes).toBe(76);
+    expect(d.residualMinutes).toBe(0);
+  });
+
+  it("drift が差に届かない日を rounding で説明したことにしない", () => {
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1021",
+      nginx: nginxDriver([{ date: "2026-03-11", kosokuMinutes: 400 }]),
+      oursByDate: ours({ "2026-03-11": 570 }),
+      paperDriftByDate: new Map([["2026-03-11", 3]]),
+      toleranceMinutes: 2,
+    }).days[10]!;
+    expect(d.cause).toBe("unknown");
+  });
+
+  it("既存の cause で説明できる日は rounding より先にそちらが当たる", () => {
+    // drift は昼休など構造差も含む全再現差 (60 になる) — 先に lunch が当たること
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1729",
+      nginx: nginxDriver([{ date: "2026-03-02", kosokuMinutes: 481 }]),
+      oursByDate: ours({ "2026-03-02": 541 }),
+      paperDriftByDate: new Map([["2026-03-02", 60]]),
+      toleranceMinutes: 2,
+    }).days[1]!;
+    expect(d.cause).toBe("lunch");
   });
 
   it("未説明の日数と残差を月で数える — 検知の抜けを測る数字", () => {

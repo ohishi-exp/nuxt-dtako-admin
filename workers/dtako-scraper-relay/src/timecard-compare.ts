@@ -193,6 +193,20 @@ export type DiffCause =
   | "ferry+run-head"
   /** 昼休 + 始業前の運行の頭。 */
   | "lunch+run-head"
+  /**
+   * **丸め方式の差** (実額)。紙は打刻・イベントの秒を保持したまま**区分ごとに**
+   * 丸めて日計へ足す (TC_DC は経過秒切り捨て、デジタコの区間時間は端点床) ため、
+   * 区分の切れ目が多い日に ±数分が堆積する — 正負両方向に出る。実額は上流の
+   * `paper_drift_by_date` (ohishi-exp/rust-ichibanboshi#179 = 紙の日別拘束の再現値
+   * とこちらの暦日按分値の差)。
+   *
+   * **最後の候補。** 再現値との差は昼休など既存 cause の分も含む全再現差なので、
+   * 個別の cause で説明できる日はそちらが先に当たる — ここへ落ちるのは丸めだけが
+   * 残った日。
+   */
+  | "rounding"
+  /** フェリー + 丸め。1714 井上 03-06 (-76 = 73 + 3) の形。 */
+  | "ferry+rounding"
   /** **未説明。** ここが 0 になるまでが検知の仕事。 */
   | "unknown";
 
@@ -555,6 +569,7 @@ function classifyDiff(
   punchHeadMinutes: number,
   runHeadCorrection: number,
   lunchOverlapMinutes: number,
+  paperDriftMinutes: number,
   tolerance: number,
 ): { cause: DiffCause; explainedMinutes: number; residualMinutes: number | null } {
   if (diffMinutes === null) {
@@ -585,6 +600,13 @@ function classifyDiff(
     { cause: "lunch+punch-tail", explained: tail === 0 ? 0 : tail + lunch },
     { cause: "lunch+run-head", explained: runHead === 0 ? 0 : runHead + lunch },
     { cause: "lunch+ferry", explained: ferry + lunch },
+    // 丸め (紙の再現値との差) は**必ず最後** — 全再現差なので、先に置くと個別の
+    // cause で説明できる日まで rounding に見えてしまう。負にもなる (紙が大きい日)
+    { cause: "rounding", explained: paperDriftMinutes },
+    {
+      cause: "ferry+rounding",
+      explained: ferry === 0 || paperDriftMinutes === 0 ? 0 : ferry + paperDriftMinutes,
+    },
   ];
   for (const c of candidates) {
     // 引かれていない (ferry 0) 組み合わせは候補にしない — 0 を足しても説明にならない
@@ -625,6 +647,11 @@ export function compareTimecardMonth(input: {
    * `month-boundary` の説明は付かない (候補の explained が 0 で素通り)。
    */
   crossMonthByDate?: ReadonlyMap<string, number>;
+  /**
+   * 暦日 → 紙の再現値との差 (`ours − paper`、上流の `paper_drift_by_date`)。
+   * 渡されなければ `rounding` の説明は付かない。
+   */
+  paperDriftByDate?: ReadonlyMap<string, number>;
   toleranceMinutes?: number;
 }): CompareResult {
   const tolerance = input.toleranceMinutes ?? DEFAULT_TOLERANCE_MINUTES;
@@ -692,6 +719,7 @@ export function compareTimecardMonth(input: {
       punchHead,
       runHeadCorrection,
       ours?.lunchOverlapMinutes ?? 0,
+      input.paperDriftByDate?.get(date) ?? 0,
       tolerance,
     );
     // 片側 (こちら) だけの日は差が引けず `none` になるが、値の全部が「紙が構造的に
@@ -781,6 +809,8 @@ export function compareTimecardMonthAll(input: {
   >;
   /** 乗務員CD → 暦日 → 月境界を跨ぐ勤務由来の分 (`crossMonthMinutesByDate`)。 */
   crossMonthByDriver?: ReadonlyMap<string, ReadonlyMap<string, number>>;
+  /** 乗務員CD → 暦日 → 紙の再現値との差 (`paper_drift_by_date`)。 */
+  paperDriftByDriver?: ReadonlyMap<string, ReadonlyMap<string, number>>;
   toleranceMinutes?: number;
   onlyAnomalies?: boolean;
 }): CompareResult[] {
@@ -793,6 +823,7 @@ export function compareTimecardMonthAll(input: {
       nginx: input.nginxByDriver.get(driverCd) ?? null,
       oursByDate: input.oursByDriver.get(driverCd) ?? new Map(),
       crossMonthByDate: input.crossMonthByDriver?.get(driverCd),
+      paperDriftByDate: input.paperDriftByDriver?.get(driverCd),
       toleranceMinutes: input.toleranceMinutes,
     });
     if (input.onlyAnomalies && result.mismatchCount === 0 && result.anomalies.length === 0) {

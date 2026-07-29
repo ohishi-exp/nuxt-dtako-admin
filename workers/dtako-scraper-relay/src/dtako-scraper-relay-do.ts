@@ -158,6 +158,7 @@ import {
   kosokuPartsByDate,
   mergeKosokuShiftMaps,
   parseKosokuDaily,
+  parsePaperDriftByDriver,
   prevYmOf,
   type KosokuShift,
 } from "./kosoku-daily";
@@ -3060,17 +3061,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       // こちら側 (kosoku-daily) は 1 名指定でも全乗務員ぶん取る — 上流が月単位で
       // 1 リクエスト (実測 0.25 秒) であり、絞る API を別に持つ意味が無い。
       // nginx 側は driver をそのまま渡す (1 名なら 1 名だけ返る)
-      const [pdfBody, shifts] = await Promise.all([
+      const [pdfBody, compareKosoku] = await Promise.all([
         this.fetchNginxPdfJson(ym, driver),
-        this.loadKosokuShiftsView(
-          creds.apiUrl,
-          creds.clientId,
-          creds.clientSecret,
-          true,
-          ym,
-          prevYmOf(ym),
-        ),
+        this.loadCompareKosoku(creds.apiUrl, creds.clientId, creds.clientSecret, ym),
       ]);
+      const { shifts, paperDriftByDriver } = compareKosoku;
       const nginxByDriver = parsePdfJson(pdfBody, ym);
       const oursByDriver = new Map<string, Map<string, { restraintMinutes: number }>>();
       // 月境界を跨ぐ勤務由来の分 — 紙は月内の打刻だけで対を組むため月を跨ぐ勤務が
@@ -3090,6 +3085,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
             nginx: nginxByDriver.get(driver) ?? null,
             oursByDate: oursByDriver.get(driver) ?? new Map(),
             crossMonthByDate: crossMonthByDriver.get(driver),
+            paperDriftByDate: paperDriftByDriver.get(driver),
             toleranceMinutes: tolerance,
           }),
         ];
@@ -3099,6 +3095,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           nginxByDriver,
           oursByDriver,
           crossMonthByDriver,
+          paperDriftByDriver,
           toleranceMinutes: tolerance,
           onlyAnomalies,
         });
@@ -3338,51 +3335,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     clientSecret: string,
     ...months: string[]
   ): Promise<Map<string, KosokuShift[]> | null> {
-    return this.loadKosokuShiftsView(apiUrl, clientId, clientSecret, false, ...months);
-  }
-
-  /**
-   * `view=compare` で取る版 (Refs ohishi-exp/rust-ichibanboshi#157)。
-   *
-   * 既定の応答は 1 日 19 キー・全乗務員で **1.73 MB** あるが、突合が使うのは日付・拘束・
-   * フェリー控除と暦日按分用の `parts` だけ。絞ると **256 KB (実測 6.8 分の 1)**。
-   * この経路は社内から Cloudflare Tunnel を通るので、サイズがそのまま応答時間になる
-   * (実測: DB 0.48 秒 / rust 0.46 秒 なのにブラウザで 14〜57 秒)。
-   *
-   * 非 compare (wage-report の賃金計算) は `fetchKosokuRaw` (view=timecard +
-   * 生応答 memo、Refs #508) を通る — 打刻と各日の時間が要るので compare では足りない。
-   */
-  private async loadKosokuShiftsView(
-    apiUrl: string,
-    clientId: string,
-    clientSecret: string,
-    compare: boolean,
-    ...months: string[]
-  ): Promise<Map<string, KosokuShift[]> | null> {
     const fetchMonth = async (ym: string): Promise<Map<string, KosokuShift[]> | null> => {
-      if (!compare) {
-        // 賃金計算 (wage-report) の経路 — 画面の `/kintai/kosoku-daily` 中継と
-        // 同じ生応答 memo を共有する (Refs #508)。view=timecard の slim 応答でも
-        // parseKosokuDaily は欠けた数値を 0 に落とすので同じ形に畳める
-        const body = await this.fetchKosokuRaw(apiUrl, clientId, clientSecret, ym);
-        return body == null ? null : parseKosokuDaily(body);
-      }
-      try {
-        const upstream = await fetch(
-          `${apiUrl}/api/kintai/kosoku-daily?month=${encodeURIComponent(ym)}&view=compare`,
-          { headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret } },
-        );
-        if (!upstream.ok) {
-          console.error(JSON.stringify({ kintai_fetch_kosoku: "upstream-error", ym, status: upstream.status }));
-          return null;
-        }
-        return parseKosokuDaily(JSON.parse(await upstream.text()));
-      } catch (err) {
-        console.error(
-          JSON.stringify({ kintai_fetch_kosoku: "error", ym, error: describeUnknownError(err) }),
-        );
-        return null;
-      }
+      // 賃金計算 (wage-report) の経路 — 画面の `/kintai/kosoku-daily` 中継と
+      // 同じ生応答 memo を共有する (Refs #508)。view=timecard の slim 応答でも
+      // parseKosokuDaily は欠けた数値を 0 に落とすので同じ形に畳める
+      const body = await this.fetchKosokuRaw(apiUrl, clientId, clientSecret, ym);
+      return body == null ? null : parseKosokuDaily(body);
     };
     const results = await Promise.all(months.map(fetchMonth));
     // 当月 (先頭) が取れていないと時間が丸ごと出ないので、その時は諦める
@@ -3395,6 +3353,63 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       }
     }
     return merged;
+  }
+
+  /**
+   * 突合用に `view=compare` で当月 + 前月を取る (Refs ohishi-exp/rust-ichibanboshi#157)。
+   *
+   * 既定の応答は 1 日 19 キー・全乗務員で **1.73 MB** あるが、突合が使うのは日付・拘束・
+   * フェリー控除と暦日按分用の `parts` だけ。絞ると **256 KB (実測 6.8 分の 1)**。
+   * この経路は社内から Cloudflare Tunnel を通るので、サイズがそのまま応答時間になる
+   * (実測: DB 0.48 秒 / rust 0.46 秒 なのにブラウザで 14〜57 秒)。
+   *
+   * 前月も取るのは月初の暦日按分のため (前月から跨いだ勤務が当月 1 日に落ちる)。
+   * **紙の再現値との差 (`paper_drift_by_date`) は当月の応答からだけ**読む — 紙も
+   * この再現も月単位で閉じている (Refs ohishi-exp/rust-ichibanboshi#179)。
+   * 取れなければ shifts は null (呼び出し側が ours 欠けとして突合を続ける)。
+   */
+  private async loadCompareKosoku(
+    apiUrl: string,
+    clientId: string,
+    clientSecret: string,
+    ym: string,
+  ): Promise<{
+    shifts: Map<string, KosokuShift[]> | null;
+    paperDriftByDriver: Map<string, Map<string, number>>;
+  }> {
+    const fetchMonth = async (month: string): Promise<unknown | null> => {
+      try {
+        const upstream = await fetch(
+          `${apiUrl}/api/kintai/kosoku-daily?month=${encodeURIComponent(month)}&view=compare`,
+          { headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret } },
+        );
+        if (!upstream.ok) {
+          console.error(
+            JSON.stringify({ kintai_fetch_kosoku: "upstream-error", ym: month, status: upstream.status }),
+          );
+          return null;
+        }
+        return JSON.parse(await upstream.text());
+      } catch (err) {
+        console.error(
+          JSON.stringify({ kintai_fetch_kosoku: "error", ym: month, error: describeUnknownError(err) }),
+        );
+        return null;
+      }
+    };
+    const [curBody, prevBody] = await Promise.all([fetchMonth(ym), fetchMonth(prevYmOf(ym))]);
+    const paperDriftByDriver =
+      curBody == null ? new Map<string, Map<string, number>>() : parsePaperDriftByDriver(curBody);
+    // 当月が取れていないと時間が丸ごと出ないので、その時は諦める
+    if (curBody == null) return { shifts: null, paperDriftByDriver };
+    const merged = new Map<string, KosokuShift[]>();
+    for (const body of [curBody, prevBody]) {
+      if (body == null) continue;
+      for (const [driverCd, shifts] of parseKosokuDaily(body)) {
+        merged.set(driverCd, [...(merged.get(driverCd) ?? []), ...shifts]);
+      }
+    }
+    return { shifts: merged, paperDriftByDriver };
   }
 
   // R2 突合マスタ (salary-cd-map) → 社員マスタの取り込み

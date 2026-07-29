@@ -551,7 +551,13 @@ type DiffResult = {
     driverCd: string;
     name: string;
     mismatchCount: number;
-    days: Array<{ date: string; status: string; diffMinutes: number | null; anomalies: unknown[] }>;
+    days: Array<{
+      date: string;
+      status: string;
+      diffMinutes: number | null;
+      cause?: string;
+      anomalies: unknown[];
+    }>;
     anomalies: Array<{ kind: string }>;
     totals: { nginxMinutes: number; oursMinutes: number; diffMinutes: number };
   }>;
@@ -646,6 +652,26 @@ describe("get_timecard_diff", () => {
     })) as DiffResult;
     // 30 分差が許容内になり、負の 4/6 だけが残る (異常は差分と独立に出る)
     expect(res.results[0]!.days.map((d) => d.date)).toEqual(["2026-04-06"]);
+  });
+
+  it("紙の再現値との差 (paper_drift_by_date) が cause rounding として効く", async () => {
+    // 4/3 は nginx 600 / ours 570 (差 +30)。当月応答の drift -30 (= ours - paper) が
+    // あれば丸め方式の差として説明が付く (Refs ohishi-exp/rust-ichibanboshi#179)
+    stubIchiban({
+      cur: {
+        ...KOSOKU_CURRENT,
+        drivers: [
+          { ...KOSOKU_CURRENT.drivers[0]!, paper_drift_by_date: { "2026-04-03": -30 } },
+          KOSOKU_CURRENT.drivers[1]!,
+        ],
+      },
+    });
+    const res = (await getTimecardDiffTool.execute(kosokuEnv(), {
+      month: "2026-04",
+      driver: "1021",
+    })) as DiffResult;
+    const apr3 = res.results[0]!.days.find((d) => d.date === "2026-04-03")!;
+    expect(apr3.cause).toBe("rounding");
   });
 
   it("nginx に居ない乗務員も返す", async () => {
