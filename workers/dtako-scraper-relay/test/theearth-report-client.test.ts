@@ -2081,6 +2081,88 @@ describe("harvestDailyReport", () => {
     expect(rows.map((r) => r.operationNo)).toEqual(["A", "B"]);
   });
 
+  it("continues collecting when a ... link jumps directly to the next page (NumericPager)", async () => {
+    const jar = createCookieJar();
+    const page1 = reportPageHtml({
+      rows: [{ operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" }],
+      currentPage: 1,
+      links: [link("ctl01$more", "", "...")],
+    });
+    // 「...」の応答が次ページ本体 (gCurrentPage=2 + 行あり)。旧実装はここで
+    // 「2」のリンクを探して見つからず break し、この行を取りこぼしていた。
+    const page2 = reportPageHtml({
+      rows: [{ operationNo: "B", startDateTime: "2026/07/03 08:00:00", workEndDateTime: "07/03 18:00" }],
+      currentPage: 2,
+      links: [],
+    });
+    const fetchImpl = sequenceFetch([html(page1), html(page2)]);
+    const rows = await harvestDailyReport(jar, { from: "2026/07/01 00:00", to: "2026/07/07 00:00" }, fetchImpl);
+    expect(rows.map((r) => r.operationNo)).toEqual(["A", "B"]);
+  });
+
+  it("uses the last ... link (forward) when both backward and forward ellipses exist", async () => {
+    const jar = createCookieJar();
+    const posted: string[] = [];
+    const page1 = reportPageHtml({
+      rows: [{ operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" }],
+      currentPage: 4,
+      links: [link("pager$back", "", "…"), link("pager$fwd", "", "…")],
+    });
+    const page5 = reportPageHtml({
+      rows: [{ operationNo: "B", startDateTime: "2026/07/03 08:00:00", workEndDateTime: "07/03 18:00" }],
+      currentPage: 5,
+      links: [],
+    });
+    let call = 0;
+    const fetchImpl = (async (_url: unknown, init?: { body?: unknown }) => {
+      call += 1;
+      if (call === 1) return html(page1);
+      posted.push(String(init?.body ?? ""));
+      return html(page5);
+    }) as FetchLike;
+    const rows = await harvestDailyReport(jar, { from: "2026/07/01 00:00", to: "2026/07/07 00:00" }, fetchImpl);
+    expect(rows.map((r) => r.operationNo)).toEqual(["A", "B"]);
+    expect(new URLSearchParams(posted[0]).get("__EVENTTARGET")).toBe("pager$fwd");
+  });
+
+  it("breaks safely when the ... response has no gCurrentPage and no next link", async () => {
+    const jar = createCookieJar();
+    const page1 = reportPageHtml({
+      rows: [{ operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" }],
+      currentPage: 1,
+      links: [link("ctl01$more", "", "...")],
+    });
+    const oddResponse = reportPageHtml({ rows: [], currentPage: 9, links: [] })
+      .replace(/<span class="gCurrentPage">9<\/span>/, "");
+    const fetchImpl = sequenceFetch([html(page1), html(oddResponse)]);
+    const rows = await harvestDailyReport(jar, { from: "2026/07/01 00:00", to: "2026/07/07 00:00" }, fetchImpl);
+    expect(rows.map((r) => r.operationNo)).toEqual(["A"]);
+  });
+
+  it("deduplicates rows that appear on two pages (same operationNo + startDateTime)", async () => {
+    const jar = createCookieJar();
+    const page1 = reportPageHtml({
+      rows: [
+        { operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" },
+        { operationNo: "B", startDateTime: "2026/07/04 08:00:00", workEndDateTime: "07/04 18:00" },
+      ],
+      currentPage: 1,
+      links: [link("ctl02$ctl02", "", "2")],
+    });
+    const page2 = reportPageHtml({
+      rows: [
+        // B がページ跨ぎで再登場 (同一運行)。C は新規。
+        { operationNo: "B", startDateTime: "2026/07/04 08:00:00", workEndDateTime: "07/04 18:00" },
+        { operationNo: "C", startDateTime: "2026/07/03 08:00:00", workEndDateTime: "07/03 18:00" },
+      ],
+      currentPage: 2,
+      links: [],
+    });
+    const fetchImpl = sequenceFetch([html(page1), html(page2)]);
+    const rows = await harvestDailyReport(jar, { from: "2026/07/01 00:00", to: "2026/07/07 00:00" }, fetchImpl);
+    expect(rows.map((r) => r.operationNo)).toEqual(["A", "B", "C"]);
+  });
+
   it("stops when no next page link can be found at all (last page)", async () => {
     const jar = createCookieJar();
     const onlyPage = reportPageHtml({

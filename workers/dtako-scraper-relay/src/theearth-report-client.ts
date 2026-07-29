@@ -1718,10 +1718,25 @@ export async function harvestDailyReport(
     const nextText = String(currentPage + 1);
     let nextLink = links.find((l) => l.text === nextText);
     if (!nextLink) {
-      const moreLink = links.find((l) => l.text === "...");
+      // 「...」は窓の後方 (戻る側) と前方 (進む側) の両方に出る。先頭 match だと
+      // 2 窓目以降で**戻る側**を押して後退してしまうため、必ず最後の (= 進む側の)
+      // 「...」を使う。
+      const moreLinks = links.filter((l) => l.text === "..." || l.text === "…");
+      const moreLink = moreLinks.length > 0 ? moreLinks[moreLinks.length - 1] : undefined;
       if (moreLink) {
         html = await postPagerLink(jar, url, html, moreLink, fetchImpl, timeoutMs);
-        currentPage = extractCurrentPageNumber(html) ?? currentPage;
+        const landedPage = extractCurrentPageNumber(html);
+        if (landedPage !== null && landedPage === currentPage + 1) {
+          // 「...」がページャ窓送りではなく**次ページへの直接遷移**だった場合
+          // (ASP.NET NumericPager の標準挙動)。この html が次ページ本体なので、
+          // リンク探索をやり直さずそのまま次イテレーションで行を回収する。
+          // 旧実装はここで古い nextText のリンクを探して見つからず break し、
+          // **窓の境界 (例: 3ページ) ごとに検索結果が静かに打ち切られていた**
+          // (実機 2026-07-29: 2ヶ月検索が新しい端の63行だけになった)。
+          currentPage = landedPage;
+          continue;
+        }
+        currentPage = landedPage ?? currentPage;
         nextLink = extractPagerLinks(html).find((l) => l.text === nextText);
       }
     }
@@ -1748,7 +1763,17 @@ export async function harvestDailyReport(
     currentPage += 1;
   }
 
-  return rows.filter((r) => r.workEndDateTime >= range.from && r.workEndDateTime <= range.to);
+  // ページ送りの跨ぎ (「...」の直接遷移や窓送り) で同一ページを二度読むことがある
+  // ため、運行No + 開始日時で重複排除する (実機 2026-07-29: 同一運行が一覧に 2 行
+  // 重複して表示された)。初出順は維持する。
+  const seen = new Set<string>();
+  return rows.filter((r) => {
+    if (r.workEndDateTime < range.from || r.workEndDateTime > range.to) return false;
+    const key = `${r.operationNo} ${r.startDateTime}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 // ---------------------------------------------------------------------------
