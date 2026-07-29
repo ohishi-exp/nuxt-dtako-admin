@@ -664,12 +664,15 @@ export function compareTimecardMonth(input: {
     const punchTail = ours?.punchTailMinutes ?? 0;
     const punchHead = ours?.punchHeadMinutes ?? 0;
     // 始業前の運行の頭: 紙の minus_unko (nginx#785 の診断値) が控除した分を引いた
-    // 残りが、紙に残った頭 = 紙が大きくなる向きの説明
+    // 残りが、紙に残った頭 = 紙が大きくなる向きの説明。
+    // **TC_DC が null の日は minus_unko が計算されても着地しない** (紙は TC_DC から
+    // 引くため。実測 1541 吉田 03-21: minus_unko 5 が診断に出るが total には効いて
+    // いない) — 適用済みとして数えるのは TC_DC が値を持つ日だけ
     const runHeadOurs = ours?.runHeadMinutes ?? 0;
-    const paperMinusUnko = Object.values(nginxDay?.minusUnkoByType ?? {}).reduce(
-      (a, b) => a + b,
-      0,
-    );
+    const paperMinusUnko =
+      nginxDay === null || nginxDay.kosokuByType["TC_DC"] === undefined
+        ? 0
+        : Object.values(nginxDay.minusUnkoByType).reduce((a, b) => a + b, 0);
     const runHeadCorrection =
       runHeadOurs === 0 && paperMinusUnko === 0 ? 0 : paperMinusUnko - runHeadOurs;
     let classified = classifyDiff(
