@@ -171,6 +171,10 @@ const kyuyoSyncedMonths = ref<Set<string>>(new Set())
  * この組は upstream が SQLite キャッシュだけで返せる = OHKEN を開かないので、
  * ボタンを押さなくても勝手に読んで良い (Refs #369 / rust-ichibanboshi#106)。 */
 const kyuyoSyncedKeys = ref<Set<string>>(new Set())
+/** 上の 2 つが一度でも解決したか (成否は問わない)。給与比較タブが「まだ読み込み中」と
+ * 「取り込まれていない」を取り違えないための門 (Refs #554) — 未解決のうちに
+ * 「取り込んでください」を出すと、待てば出るデータに対して取り込みを促してしまう。 */
+const kyuyoSyncedLoaded = ref(false)
 /** 拘束サマリが ichiban に同期済みの月 (YYYY-MM) = 高速表示できる月 (Refs #460)。 */
 const ichibanMonths = ref<string[]>([])
 /** relay の kintai 上流キャッシュ (daily+kosoku) が揃っている月 (Refs #543 followup)。
@@ -223,6 +227,10 @@ async function loadKyuyoSyncedMonths() {
   }
   catch {
     // バッジが出ないだけ — エラー表示はしない
+  }
+  finally {
+    // 失敗しても「解決済み」にする — 引けない環境で「読み込み中」を出し続けない
+    kyuyoSyncedLoaded.value = true
   }
 }
 
@@ -1652,6 +1660,9 @@ function loadAllEmployeeMasters() {
 // (`/api/kyuyo/employees`) で、**金額は一切ブラウザに来ない**。
 
 const compMap = ref<CompMapEntry[]>([])
+/** comp-map が一度でも解決したか (成否は問わない、Refs #554)。`kyuyoSyncedLoaded` と
+ * 同じ理由 — 会社が分かる前は「アーカイブが無い」の判定自体ができない。 */
+const compMapLoaded = ref(false)
 const importPayrollCompany = ref('')
 const importingPayroll = ref(false)
 
@@ -1669,6 +1680,9 @@ async function loadCompMap() {
   }
   catch {
     compMap.value = [] // 取れなければ取り込みカードを出さない (fail-soft)
+  }
+  finally {
+    compMapLoaded.value = true
   }
 }
 
@@ -1889,7 +1903,9 @@ async function loadPayrollFromDb() {
  * **給与大臣 (OHKEN) を開かない** = 待ち時間もロックも発生しない。アーカイブが
  * 無い会社は従来どおり「給与DBから読み込み」ボタン (1 社 10〜20 秒) の担当のまま。
  */
-let autoPayrollLoading = false
+/** 自動読み込みの走行中フラグ。**ref にしてある** — 給与比較タブの「読み込み中」表示が
+ * これを見るため (Refs #554)。素の let にすると表示が更新されない。 */
+const autoPayrollLoading = ref(false)
 let autoPayrollRerun = false
 
 async function autoLoadArchivedPayroll() {
@@ -1897,7 +1913,7 @@ async function autoLoadArchivedPayroll() {
   // 「後から来た方をもう一度回す」— compMap と synced-months が別タイミングで
   // 解決するので、片方だけ見て終わると残りの会社が読まれない
   if (loadingPayrollDb.value) return
-  if (autoPayrollLoading) {
+  if (autoPayrollLoading.value) {
     autoPayrollRerun = true
     return
   }
@@ -1913,7 +1929,7 @@ async function autoLoadArchivedPayroll() {
         || readStoredPayroll(payrollCompany, payMonth) !== null),
     )
   if (!companies.length) return
-  autoPayrollLoading = true
+  autoPayrollLoading.value = true
   const loaded: typeof dbImports.value = []
   try {
     const token = currentAccessToken()
@@ -1947,7 +1963,7 @@ async function autoLoadArchivedPayroll() {
     // 自動読みの失敗はボタンでの取得を妨げない — エラー表示はしない
   }
   finally {
-    autoPayrollLoading = false
+    autoPayrollLoading.value = false
     if (autoPayrollRerun) {
       autoPayrollRerun = false
       void autoLoadArchivedPayroll()
@@ -2339,6 +2355,40 @@ const salaryMonthRows = computed(() =>
 const salaryComparison = computed<SalaryComparison | null>(() => {
   if (!salaryParsed.value || !report.value || report.value.month !== month.value) return null
   return compareSalaryMonth(salaryMonthRows.value, report.value.rows, salaryItemConfig.value, salaryCdMap.value)
+})
+
+// ---- 給与比較タブの表示状態 (Refs #554) ----
+// 「比較結果」カードは元々 `v-if="salaryParsed"` だったため、給与アーカイブの自動読み込みが
+// 終わるまで**カードごと存在しなかった** = 文字通り「給与比較が出ない」。読み込み中なのか
+// 取り込まれていないのかを画面から読み取れるよう、状態を 1 つの computed に集約する。
+
+/** 閲覧中の会社に対応する給与大臣の会社 (= 給与DB取得・自動読み込みの対象)。 */
+const sessionPayrollCompanies = computed(() =>
+  compMap.value.find(c => c.compId === (session.value?.compId ?? ''))?.payrollCompanies ?? [])
+
+/** まだ明細が増えうる状態 (自動読み込み待ち・取得中・判定材料が未解決)。 */
+const payrollLoading = computed(() => {
+  // 会社対応表と給与アーカイブの一覧が解決するまでは「無い」と判定できない
+  if (!compMapLoaded.value || !kyuyoSyncedLoaded.value) return true
+  if (loadingPayrollDb.value || autoPayrollLoading.value) return true
+  // 自動読み込みの対象がまだ画面に載っていない (watch 発火待ち) 間も読み込み中扱い
+  const payMonth = nextYm(month.value)
+  return sessionPayrollCompanies.value.some(({ payrollCompany }) =>
+    kyuyoSyncedKeys.value.has(`${payrollCompany}|${month.value}`)
+    && !dbImports.value.some(i => i.company === payrollCompany && i.month === payMonth))
+})
+
+type SalaryStatus = 'loading-payroll' | 'no-payroll' | 'no-pay-month' | 'loading-report' | 'no-report' | 'ready'
+
+/** 給与比較カードの中身の出し分け。**明細が既に有る月は読み込み中でも表を出す** —
+ * 1 社分でも見えている方が「何も出ない」より役に立つ (残りは自動で足される)。 */
+const salaryStatus = computed<SalaryStatus>(() => {
+  if (salaryMonthRows.value.length) {
+    if (loadingReport.value) return 'loading-report'
+    return salaryComparison.value ? 'ready' : 'no-report'
+  }
+  if (payrollLoading.value) return 'loading-payroll'
+  return salaryParsed.value ? 'no-pay-month' : 'no-payroll'
 })
 
 // ---- 給与比較の絞り込み・並べ替え (Refs #449) ----
@@ -3684,6 +3734,14 @@ watch([compMap, kyuyoSyncedKeys], () => {
               この月の summary がアーカイブにありません (/restraint-fetch で取得するか、アーカイブタブで再計算してください)
             </p>
 
+            <!-- 初回読み込み中 (report がまだ無い) は下の staleReport に該当せず、
+                 カードの中身が**丸ごと空**だった (Refs #554)。ヘッダーだけのカードが
+                 十数秒出る状態は「壊れている」と読まれるので、ここで言い切る。 -->
+            <div v-if="!report && loadingReport" class="flex items-center gap-2 text-sm text-gray-500">
+              <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin text-primary" />
+              集計を読み込んでいます… ({{ fmtYm(month) }})
+            </div>
+
             <!-- 更新中は「古い数字を今の値として読ませない」(2026-07-25 指摘)。
                  スピナーがボタン側だけだと、月を切り替えた直後や再取得中に前の月の表が
                  そのまま残っていることに気付けず、見間違いのもとになる。表を薄くして
@@ -4103,7 +4161,11 @@ watch([compMap, kyuyoSyncedKeys], () => {
             </template>
           </UCard>
 
-          <UCard v-if="salaryParsed">
+          <!-- カードは**常設**する (Refs #554)。以前は `v-if="salaryParsed"` だったため、
+               給与アーカイブの自動読み込みが終わるまでカードごと存在せず、「給与比較が
+               出ない」という報告になった。読み込み中なのか取り込まれていないのかを
+               必ずこの中で言い切る。 -->
+          <UCard>
             <template #header>
               <div class="flex flex-wrap items-center gap-3">
                 <span class="font-semibold">比較結果 ({{ fmtYm(month) }})</span>
@@ -4113,12 +4175,53 @@ watch([compMap, kyuyoSyncedKeys], () => {
               </div>
             </template>
 
-            <p v-if="!salaryMonthRows.length" class="text-sm text-gray-500">
-              貼り付けデータに {{ fmtYm(month) }} の行がありません (上の「検出した月」から切り替えてください)
-            </p>
-            <p v-else-if="loadingReport" class="text-sm text-gray-500">
-              システム計算 (wage-report) を読み込み中...
-            </p>
+            <div v-if="salaryStatus === 'loading-payroll'" class="flex items-center gap-2 text-sm text-gray-500">
+              <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin text-primary" />
+              {{ fmtYm(nextYm(month)) }} 支給分の給与明細を読み込んでいます…
+            </div>
+
+            <!-- 明細が無い = 待っても出ない。何が足りないかと、取り込みの導線を出す -->
+            <div
+              v-else-if="salaryStatus === 'no-payroll' || salaryStatus === 'no-pay-month'"
+              class="text-sm bg-amber-50 dark:bg-amber-950 rounded-lg p-3 space-y-2"
+            >
+              <p class="text-amber-700 dark:text-amber-400">
+                ⚠ <b>{{ fmtYm(nextYm(month)) }} 支給分</b>の給与明細がまだ取り込まれていません
+                ({{ fmtYm(month) }} の勤務分は翌月払いのため {{ fmtYm(nextYm(month)) }} 支給分と突合します)。
+                給与比較にはこの明細が要ります。
+              </p>
+              <div v-if="salaryStatus === 'no-pay-month' && salaryParsed?.months.length" class="flex flex-wrap items-center gap-1">
+                <span class="text-xs text-gray-500">取り込み済みの支給月 (クリックで対応する勤務月に切替):</span>
+                <UButton
+                  v-for="ym in salaryParsed.months"
+                  :key="ym"
+                  size="xs"
+                  variant="soft"
+                  :label="fmtYm(ym)"
+                  @click="selectSalaryMonth(ym)"
+                />
+              </div>
+              <div class="flex flex-wrap items-center gap-2">
+                <UButton
+                  size="xs"
+                  icon="i-lucide-database"
+                  label="給与DBから読み込み"
+                  :loading="loadingPayrollDb"
+                  :disabled="!sessionPayrollCompanies.length"
+                  @click="loadPayrollFromDb"
+                />
+                <span class="text-xs text-gray-500">
+                  上部の「給与DB」バーと同じ取得です ({{ sessionPayrollCompanies.length }} 社 / 1 社あたり 10〜20 秒)。
+                  上の貼り付け・ファイル読み込みでも構いません
+                </span>
+              </div>
+            </div>
+
+            <div v-else-if="salaryStatus === 'loading-report'" class="flex items-center gap-2 text-sm text-gray-500">
+              <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin text-primary" />
+              システム計算 (wage-report) を読み込んでいます… ({{ fmtYm(month) }})
+            </div>
+
             <p v-else-if="!salaryComparison" class="text-sm text-gray-500">
               この月の summary がアーカイブにありません (/restraint-fetch で取得するか、アーカイブタブで再計算してください)
             </p>
