@@ -204,6 +204,7 @@ import {
   getExpenseForm,
   getReviseFormPage,
   getWorkForm,
+  releaseLoadedOperation,
   harvestDailyReport,
   recalculateExpense,
   recalculateWork,
@@ -4812,7 +4813,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   private handleReportExpenseForm(record: TheearthSessionRecord, url: URL): Promise<Response> {
     const opeNo = url.searchParams.get("opeNo") ?? "";
     const startOpe = url.searchParams.get("startOpe") ?? "";
-    return this.callReportAction(record, "経費入力フォームの取得", (jar) => getExpenseForm(jar, opeNo, startOpe));
+    return this.callReportAction(record, "経費入力フォームの取得", async (jar) => {
+      // theearth セッションに残る「読み込み済み運行」を解放してから開く (別運行の
+      // グリッドが返る事故の根治、releaseLoadedOperation の doc 参照。Refs #540)
+      await releaseLoadedOperation(jar);
+      return getExpenseForm(jar, opeNo, startOpe);
+    });
   }
 
   /** POST /daily-report-api/expense/save — `btnExpenceEditSetting` postback で
@@ -4953,7 +4959,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   private handleReportWorkForm(record: TheearthSessionRecord, url: URL): Promise<Response> {
     const opeNo = url.searchParams.get("opeNo") ?? "";
     const startOpe = url.searchParams.get("startOpe") ?? "";
-    return this.callReportAction(record, "作業入力フォームの取得", (jar) => getWorkForm(jar, opeNo, startOpe));
+    return this.callReportAction(record, "作業入力フォームの取得", async (jar) => {
+      await releaseLoadedOperation(jar);
+      return getWorkForm(jar, opeNo, startOpe);
+    });
   }
 
   /** POST /daily-report-api/work/edit-start — 対象行の `btnEditButton` postback で
@@ -5029,6 +5038,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const opeNo = url.searchParams.get("opeNo") ?? "";
     const startOpe = url.searchParams.get("startOpe") ?? "";
     return this.callReportAction(record, "運行データ修正フォームの取得", async (jar) => {
+      await releaseLoadedOperation(jar);
       const { form, pageHtml } = await getReviseFormPage(jar, opeNo, startOpe);
       await this.ctx.storage.put<RevisePageRecord>(REPORT_REVISE_PAGE_KEY, {
         opeNo,

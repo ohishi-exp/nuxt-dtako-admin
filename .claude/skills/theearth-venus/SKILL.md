@@ -469,6 +469,15 @@ F-NRS1010 に書いた「作業1〜5時間・距離・燃料の詳細」フィ�
 - **排他ロックの挙動 (2026-07-10 実機確定)**: URL 直接 GET 自体がロックを取得する。
   別セッションがロック中だと空ページ + CloseMsg「編集できません」が返る (F-DES1013 節
   参照)。詰まったら F-DES1010 の行選択 + `btnInitialize` postback で解除
+- **運行はセッションに 1 件だけ「読み込み済み」になり、解放するまで URL の OpeNo は
+  無視される (2026-07-29 実機確定)**: A を GET した後に B を `?OpeNo=B` で GET しても
+  **A のグリッドが返る** (form action は B をエコーするので action 検証では検出不能)。
+  実ブラウザは編集ウィンドウを閉じた時に親 F-DES1010 の `ReturnUpdate()` が
+  **`btnRelece` (解放、`ctl00$MainContent$btnRelece`) を click** して解放している
+  (J-DES1010 実 JS)。browserless 実装は**編集フォームを開く前に必ず F-DES1010 で
+  btnRelece を full form postback** すること (`releaseLoadedOperation`)。これを
+  怠ると「次の運行を開いても前の運行のデータが表示される」(日報編集画面の実害、
+  Refs #540)
 
 ### F-DES1013 [作業入力] の編集フォーム (2026-07-10 cdp-pair 実機確定、旧記載を全面訂正)
 

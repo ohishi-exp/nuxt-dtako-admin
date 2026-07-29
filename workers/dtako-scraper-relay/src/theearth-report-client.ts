@@ -697,6 +697,46 @@ function assertEditPageMatchesOperation(html: string, opeNo: string, pageLabel: 
   }
 }
 
+/** F-DES1010 の `btnRelece` (解放) を full form で postback し、theearth セッションに
+ * 読み込まれている運行を解放する。
+ *
+ * theearth の編集ページ (F-DES1011/1012/1013) は plain GET の OpeNo を**セッションに
+ * 運行が読み込み済みだと無視**し、前の運行のグリッドを返す (実機確定 2026-07-29:
+ * A を開いた後 B を GET しても A の作業行が返り、btnRelece postback 後は B が正しく
+ * 返った)。実ブラウザは編集ウィンドウの閉鎖時に親一覧の `ReturnUpdate()` が
+ * `$('#btnRelece').click()` を実行して解放している (J-DES1010 実 JS 確認)。
+ * relay も編集フォームを開く前に必ずこれを踏む。
+ *
+ * btnRelece が見つからない場合はページ仕様変更の可能性があるため warn を残して
+ * スキップする (解放できないだけで、開けなくするほどではない)。 */
+export async function releaseLoadedOperation(
+  jar: CookieJar,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<void> {
+  const url = `${BASE_URL}${OPERATION_LIST_PATH}`;
+  const listHtml = await fetchOperationListHtml(jar, url, fetchImpl, timeoutMs);
+  const button = findFormFieldById(listHtml, "btnRelece") ?? findFormFieldById(listHtml, "MainContent_btnRelece");
+  if (!button) {
+    console.warn("releaseLoadedOperation: btnRelece が見つかりません — 解放をスキップします (ページ仕様変更?)");
+    return;
+  }
+  const body = new URLSearchParams({
+    ...serializeFormFields(listHtml),
+    [button.name]: button.value || "解放",
+  });
+  const res = await postForm(jar, url, body, fetchImpl, timeoutMs);
+  if (!res.ok) {
+    throw new TheearthClientError(`読み込み運行の解放 (btnRelece) が HTTP ${res.status} を返しました`);
+  }
+  const html = await res.text();
+  if (isLoginRedirect(html)) {
+    throw new VenusSessionExpiredError(
+      "読み込み運行の解放後にログイン画面が返されました — theearth セッションが切れています",
+    );
+  }
+}
+
 /** GET → HTTP ステータス / ログインリダイレクト検査、の共通ヘルパ (F-DES1011/
  * 1012/1013 の各編集ページで同一パターン)。 */
 async function fetchEditPageHtml(
