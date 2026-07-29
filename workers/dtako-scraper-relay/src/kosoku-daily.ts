@@ -26,11 +26,18 @@
 export interface KosokuCalendarPart {
   restraintMinutes: number;
   workingMinutes: number;
-  /** 法定時間外 (8h 超)。所定内・法定内残業はどちらも 1.00 倍なので分けて持たない。 */
+  /**
+   * 法定時間外 (8h 超) のうち**深夜に重ならない分**。所定内・法定内残業はどちらも
+   * 1.00 倍なので分けて持たない。
+   *
+   * **上流とは意味が違う** — 上流 (`overtime_minutes`) は時間外の全部で
+   * `overtime_night_minutes` はその内数だが、こちらは `overtimeNightMinutes` と
+   * **排他**にして持つ (`toPart` で引く。理由はそちらの doc)。
+   */
   overtimeMinutes: number;
   /** 深夜 (所定内・法定内残業ぶん + 法定休日ぶん)。時間外深夜とは排他。 */
   nightMinutes: number;
-  /** 時間外に重なる深夜。 */
+  /** 時間外に重なる深夜。`overtimeMinutes` とは排他 (上記)。 */
   overtimeNightMinutes: number;
   /**
    * **紙のタイムカード表がこの暦日から引いている同日フェリー控除** (分)。
@@ -110,14 +117,26 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
  * 上流の 1 件を畳む。**深夜は法定休日ぶんも足す** — 上流は割増ごとに別項目で持つが、
  * こちらの日別行は「その日に深夜帯で何分働いたか」しか持たず、法定休日かどうかは
  * `holidayKind` を見て `classifyMonth` が決めるため。
+ *
+ * **`overtime_night_minutes` は `overtime_minutes` の内数なので引く** (Refs #564)。
+ * 上流 (rust-ichibanboshi `src/kosoku.rs`) は実働を 1 分ずつ歩き、法定時間外の 1 分を
+ * `overtime_minutes` に足したうえで、その分が深夜ならさらに `overtime_night_minutes`
+ * にも足す。こちらの日別行 (`RestraintSummaryDay`) は
+ * **実働 = 法定内 + 時間外 + 時間外深夜** が成り立つ排他の契約なので、内数のまま流すと
+ * `classifyMonth` の法定内 (= 実働 − 時間外 − 時間外深夜) が深夜残業ぶんだけ二重に
+ * 引かれ、時間外深夜が 1.25 と 1.5 の両方で払われる (2026-06 の実データで
+ * 法定内が `max(0, …)` に張り付き、最低賃金チェックの差分列に負で表面化した)。
+ *
+ * `Math.max` は上流が壊れた値を返した時の防御 (上流の構成上 内数 ≤ 全体 は保証される)。
  */
 function toPart(r: Record<string, unknown>): KosokuCalendarPart {
+  const overtimeNightMinutes = num(r.overtime_night_minutes);
   return {
     restraintMinutes: num(r.restraint_minutes),
     workingMinutes: num(r.working_minutes),
-    overtimeMinutes: num(r.overtime_minutes),
+    overtimeMinutes: Math.max(0, num(r.overtime_minutes) - overtimeNightMinutes),
     nightMinutes: num(r.night_minutes) + num(r.legal_holiday_night_minutes),
-    overtimeNightMinutes: num(r.overtime_night_minutes),
+    overtimeNightMinutes,
     ferryMinusMinutes: num(r.ferry_minus_minutes),
     runGapMinutes: num(r.run_gap_minutes),
     punchTailMinutes: num(r.punch_tail_minutes),

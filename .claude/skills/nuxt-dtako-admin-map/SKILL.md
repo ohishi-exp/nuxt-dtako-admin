@@ -641,6 +641,16 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   所属コード順)、`POST /restraint-api/min-wage/apply-to-wage-master` (単価マスタへの
   一括設定 = 「単価マスタ = 最低賃金」運用 (#282) の出口。プレビュー→確定の 2 段、
   適用開始日は**厚労省の発効日**で県ごとに違う)
+> **上流 kosoku-daily の 時間外深夜 は 時間外 の内数** (Refs #564)。上流
+> (rust-ichibanboshi `src/kosoku.rs`) は法定時間外の 1 分を `overtime_minutes` に足し、
+> その分が深夜ならさらに `overtime_night_minutes` にも足す。こちら側の型
+> (relay `KosokuCalendarPart` / front `KosokuDay`) は **`toPart` /
+> `toKosokuDay`・`toKosokuParts` で引いて排他**にしてから持つ — `RestraintSummaryDay` と
+> `classifyMonth` が「実働 = 法定内 + 時間外 + 時間外深夜」を前提にしており、内数のまま
+> 流すと法定内が二重に引かれ、時間外深夜が 1.25 と 1.5 の両方で払われる。時間外の合計が
+> 要る所は `overtimeMinutes + overtimeNightMinutes` で足す。**保存済みサマリを直すには
+> 月ごとに「タイムカードを取り込み」が必要**。
+
 - 乗務員 → 拠点は `branchByDriverCdAt` (月末時点の所属)。theearth の事業所名
   (`大石運輸倉庫㈱　本社営業所`) は拠点キーと噛み合わないのでフォールバック扱い
 

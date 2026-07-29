@@ -683,3 +683,58 @@ describe('実働の列 (Refs #472)', () => {
     expect(rows[2]!.workingMinutes).toBe(420)
   })
 })
+
+// ---- 時間外深夜は上流では時間外の内数 (Refs #564) ----
+
+describe('時間外深夜の内数を読み取りで排他へ直す (Refs #564)', () => {
+  it('toKosokuDay: overtimeMinutes から時間外深夜を引く', () => {
+    // 上流: 実働 518 のうち 法定時間外 158、そのうち 120 が深夜に重なる
+    const d = toKosokuDay(rawDay({ overtime_minutes: 158, overtime_night_minutes: 120 }))!
+    expect(d.overtimeMinutes).toBe(38)
+    expect(d.overtimeNightMinutes).toBe(120)
+    // 足せば上流の時間外に戻る (合計が要る所はこの足し算で出す)
+    expect(d.overtimeMinutes + d.overtimeNightMinutes).toBe(158)
+  })
+
+  it('toKosokuDay: 暦日按分の内訳 (parts) も同じ規則で直す', () => {
+    const d = toKosokuDay(rawDay({
+      parts: [
+        { date: '2026-06-02', working_minutes: 300, overtime_minutes: 60, overtime_night_minutes: 45 },
+        { date: '2026-06-03', working_minutes: 218, overtime_minutes: 98, overtime_night_minutes: 0 },
+      ],
+    }))!
+    expect(d.parts.map(p => [p.overtimeMinutes, p.overtimeNightMinutes])).toEqual([[15, 45], [98, 0]])
+  })
+
+  it('実働が丸ごと時間外の日でも 実働 ≧ 時間外 + 時間外深夜 になる', () => {
+    // 2026-06 の本番で出た形 (日跨ぎ勤務の続きの日): 実働 = 上流の時間外、
+    // その中に深夜が 300。引かないと 時間外 + 時間外深夜 > 実働 になり、
+    // classifyMonth の法定内が max(0, …) に張り付いて差分列に負で出る
+    const d = toKosokuDay(rawDay({
+      working_minutes: 1072,
+      overtime_minutes: 1072,
+      overtime_night_minutes: 300,
+    }))!
+    expect(d.overtimeMinutes + d.overtimeNightMinutes).toBeLessThanOrEqual(d.workingMinutes)
+    expect(d.workingMinutes - d.overtimeMinutes - d.overtimeNightMinutes).toBe(0)
+  })
+
+  it('上流が壊れた値 (内数 > 全体) を返しても負にしない', () => {
+    const d = toKosokuDay(rawDay({ overtime_minutes: 10, overtime_night_minutes: 30 }))!
+    expect(d.overtimeMinutes).toBe(0)
+  })
+
+  it('buildKosokuTimecardTable の残業列が二重に乗らない', () => {
+    const rows = buildKosokuTimecardTable([
+      punched('2026-06-02 06:00:00', '2026-06-02 20:00:00', {
+        workingMinutes: 720,
+        // 読み取り済みの形 (排他)。上流の時間外は 240 + 120 = 360
+        overtimeMinutes: 240,
+        overtimeNightMinutes: 120,
+      }),
+    ], 2026, 6)
+    // 残業列 = 時間外 + 時間外深夜 = 上流の時間外そのもの
+    expect(rows[1]!.overtimeMinutes).toBe(360)
+    expect(rows[1]!.overtimeNightMinutes).toBe(120)
+  })
+})
