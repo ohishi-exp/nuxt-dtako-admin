@@ -128,9 +128,20 @@ credential か overlap ID を落とすと拒否され「強制ログインに失
 - `btnOK` 適用後でも **plain GET では絞込が消える** — btnUpdate postback の応答にしか
   反映されない。全ページ収集 (harvest) は btnUpdate 応答を 1 ページ目として開始する
   必要がある (`theearth-report-client.ts` の `harvestDailyReport` の `initialHtml`)
-- btnUpdate を hidden だけの**部分 POST で送ると `ddlRowCount` (1ページ表示件数) が
-  既定の 10 に落ちて残留する** (実機で 30→10 に化けて要復旧だった)。ASP.NET の select は
-  POST に含めないと既定値扱いになるため、**full form 直列化 (`serializeFormFields`) が必須**
+- **submit ボタン postback 全般** (btnUpdate / btnInitialize=編集制御解除 / ページャの
+  「最初」「最後」ボタン) を hidden だけの**部分 POST で送ると `ddlRowCount` (1ページ
+  表示件数) が既定の 10 に落ちて残留する** (実機で 30→10 に化けて要復旧が 2 回:
+  btnUpdate 2026-07-08、btnInitialize 2026-07-29)。ASP.NET の select は POST に含めないと
+  既定値扱いになるため、**full form 直列化 (`serializeFormFields`) が必須**。
+  `__EVENTTARGET` 経由のページャ**リンク** postback は ViewState が値を保持するため
+  この罠を踏まない。worker の `postOperationListUpdate` は落ちた設定の自動復旧を兼ねて
+  30 の option がある時だけ `ddlRowCount=30` を明示送信する
+- **postback 応答ページのページャ `<a>` は href が `&#39;` に entity encode され得る**。
+  生シングルクォート前提の regex だと btnUpdate 応答 (絞込ハーベストの 1 ページ目) で
+  リンクが 1 本も取れず、**エラーなく 1 ページで打ち切られて検索結果が大量欠落する**
+  (実機 2026-07-29)。href は decode してから `__doPostBack` を照合すること
+  (`extractPagerLinks`)。1ページ目で行ありのまま次リンク無しの時は pager 周辺 markup を
+  console.warn で Tail に残して誤検出を検知できるようにしてある
 - この設定は theearth アカウント単位で共有される (同一アカウントを複数の担当者が共有
   している運用実績あり)。検索後は **`btnOK` で元値を適用し直して必ず復元**する
   (`withVehicleNarrow` が finally 相当で書き戻し、復元失敗は主エラーとして loud fail)
