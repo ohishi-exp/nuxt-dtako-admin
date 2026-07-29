@@ -43,6 +43,15 @@ export class UpstreamMemo {
     return p;
   }
 
+  /**
+   * key の memo 値を落とす (取り込み直後の無効化用、Refs #543 PR-3)。
+   * in-flight は触らない — 飛行中の取得が完了すると再格納されうるが、それは
+   * 高々 TTL ぶんの既容認の古さ (取り込み前に始まった取得が載るだけ)。
+   */
+  delete(key: string): void {
+    this.values.delete(key);
+  }
+
   private store(key: string, at: number, value: unknown): void {
     if (!this.values.has(key) && this.values.size >= this.maxEntries) {
       // ここに来る時点で values は必ず非空 — 最古の 1 件を落とす

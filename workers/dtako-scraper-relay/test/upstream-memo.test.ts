@@ -52,6 +52,20 @@ describe('UpstreamMemo', () => {
     expect(calls).toBe(1)
   })
 
+  it('delete で memo 値が落ち、次の get は load し直す (取り込み後の無効化)', async () => {
+    const memo = new UpstreamMemo(60_000, 8)
+    let calls = 0
+    const load = async () => {
+      calls += 1
+      return calls
+    }
+    expect(await memo.get('k', 0, load)).toBe(1)
+    memo.delete('k')
+    expect(await memo.get('k', 1, load)).toBe(2)
+    // 無い key の delete も安全
+    expect(() => memo.delete('missing')).not.toThrow()
+  })
+
   it('null は memo しない — 次の呼び出しで再試行する', async () => {
     const memo = new UpstreamMemo(60_000, 8)
     let calls = 0
