@@ -314,6 +314,7 @@ export async function getExpenseForm(
       "経費入力ページがログイン画面を返しました — theearth セッションが切れています",
     );
   }
+  assertEditPageMatchesOperation(html, opeNo, "経費入力ページ");
   const fuelRows = parseFuelRows(html);
   if (fuelRows.length === 0) {
     // 給油 0 件の運行は実運用上あり得るが、ページ構造自体が想定と違う場合も同じ
@@ -669,6 +670,31 @@ export interface RecalculateExpenseResult {
   /** 再集計成功後に「システム連動開始」ボタンが enable されたか
    * (SKILL.md: 再集計成功の副次確認シグナル)。 */
   linkSysEnabled: boolean;
+}
+
+/** ASP.NET がページの `<form action>` にエコーする現在 URL から OpeNo を抜き出す。
+ * action が無い/OpeNo を含まない場合は null (検証スキップ)。 */
+function extractFormActionOpeNo(html: string): string | null {
+  const m = html.match(/<form\b[^>]*\baction=["']([^"']*)["']/i);
+  if (!m) return null;
+  const q = decodeHtmlEntities(m[1]).match(/[?&]OpeNo=(\d+)/i);
+  return q ? q[1] : null;
+}
+
+/** 編集ページ (F-DES1011/1012/1013) が**要求した運行のページとして返ってきたか**を
+ * form action の OpeNo エコーで検証する。theearth はセッションに「読み込んだ運行」を
+ * 持つため、状態によっては別運行のページが返り得る (実機報告 2026-07-29:
+ * 「次の運行を開くと前の運行の作業行が残る」)。黙って別運行のデータを表示するのが
+ * 最悪の事故なので、不一致は loud fail + Tail に実際の OpeNo を残す。 */
+function assertEditPageMatchesOperation(html: string, opeNo: string, pageLabel: string): void {
+  const actual = extractFormActionOpeNo(html);
+  if (actual !== null && actual !== opeNo) {
+    console.error(`edit page OpeNo mismatch: page=${pageLabel} requested=${opeNo} actual=${actual}`);
+    throw new TheearthClientError(
+      `${pageLabel}が要求と異なる運行 (要求 …${opeNo.slice(-6)} / 応答 …${actual.slice(-6)}) を返しました — ` +
+        "theearth セッションに前の運行が残っている可能性があります。モーダルを閉じて開き直してください",
+    );
+  }
 }
 
 /** GET → HTTP ステータス / ログインリダイレクト検査、の共通ヘルパ (F-DES1011/
@@ -2178,6 +2204,7 @@ export async function getWorkForm(
   validateStartOpe(startOpe);
   const url = buildOperationWorkUrl(opeNo, startOpe);
   const pageHtml = await fetchEditPageHtml(jar, url, "作業入力ページ", fetchImpl, timeoutMs);
+  assertEditPageMatchesOperation(pageHtml, opeNo, "作業入力ページ");
   assertWorkPageNotLocked(pageHtml);
   const workRows = parseWorkRows(pageHtml);
   if (workRows.length === 0) {
@@ -2525,6 +2552,7 @@ export async function getReviseFormPage(
   validateStartOpe(startOpe);
   const url = buildOperationReviseUrl(opeNo, startOpe);
   const pageHtml = await fetchEditPageHtml(jar, url, "運行データ修正ページ", fetchImpl, timeoutMs);
+  assertEditPageMatchesOperation(pageHtml, opeNo, "運行データ修正ページ");
   const driverField = findFormFieldById(pageHtml, "txtDriver1");
   if (!driverField) {
     throw new TheearthClientError(
