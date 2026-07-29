@@ -26,6 +26,7 @@ import {
   parseKosokuDaily,
   parseFerryMinusByDriver,
   parsePaperDriftByDriver,
+  parsePaperOutsideByDriver,
   prevYmOf,
   type KosokuShift,
 } from "../../../dtako-scraper-relay/src/kosoku-daily";
@@ -573,6 +574,8 @@ export const getTimecardDiffTool = {
     // 紙の再現値との差 (cause "rounding" の実額) — 当月の応答からだけ読む
     // (Refs ohishi-exp/rust-ichibanboshi#179)
     const paperDriftByDriver = parsePaperDriftByDriver(curBody);
+    // 紙だけが数える勤務外の分 (cause "paper-outside" の実額、Refs #546 / rust#182)
+    const paperOutsideByDriver = parsePaperOutsideByDriver(curBody);
     // フェリー控除の日別マップ (rust#181) — 勤務に貼れない日があるのでマップ優先
     const ferryMinusByDriver = parseFerryMinusByDriver(curBody);
     // nginx はエラーも HTTP 200 + `{error}` で返す (nginx#784)。素通しすると
@@ -590,6 +593,7 @@ export const getTimecardDiffTool = {
           nginx: nginxByDriver.get(driver) ?? null,
           oursByDate: oursByDriver.get(driver) ?? new Map(),
           crossMonthByDate: crossMonthByDriver.get(driver),
+          paperOutsideByDate: paperOutsideByDriver.get(driver),
           paperDriftByDate: paperDriftByDriver.get(driver),
           ferryMinusByDate: ferryMinusByDriver.get(driver),
           toleranceMinutes: args.tolerance_minutes,
@@ -601,6 +605,7 @@ export const getTimecardDiffTool = {
         nginxByDriver,
         oursByDriver,
         crossMonthByDriver,
+        paperOutsideByDriver,
         paperDriftByDriver,
         ferryMinusByDriver,
         toleranceMinutes: args.tolerance_minutes,
