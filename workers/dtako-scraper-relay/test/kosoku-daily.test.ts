@@ -5,6 +5,7 @@ import {
   mergeKosokuShiftMaps,
   parseKosokuDaily,
   parseFerryMinusByDriver,
+  parseGapMidnightByDriver,
   parseMinusUnkoByDriver,
   parseOursOutsideByDriver,
   parsePaperDriftByDriver,
@@ -408,6 +409,24 @@ describe('parseMinusUnkoByDriver', () => {
 
   it('マップが無い乗務員は載らない', () => {
     expect(parseMinusUnkoByDriver({ drivers: [{ driver: 1729 }] }).size).toBe(0)
+  })
+})
+
+describe('parseGapMidnightByDriver', () => {
+  it('乗務員CD 引きに直す (Refs #546 / ohishi-exp/rust-ichibanboshi#182)', () => {
+    const got = parseGapMidnightByDriver({
+      drivers: [{
+        driver: 1536,
+        days: [],
+        gap_midnight_by_date: { '2026-06-10': -8, '2026-06-11': 8 },
+      }],
+    })
+    expect(got.get('1536')?.get('2026-06-10')).toBe(-8)
+    expect(got.get('1536')?.get('2026-06-11')).toBe(8)
+  })
+
+  it('マップが無い乗務員は載らない', () => {
+    expect(parseGapMidnightByDriver({ drivers: [{ driver: 1536 }] }).size).toBe(0)
   })
 })
 

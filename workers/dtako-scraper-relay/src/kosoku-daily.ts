@@ -229,6 +229,18 @@ export function parseMinusUnkoByDriver(body: unknown): Map<string, Map<string, n
   return parseDateMapByDriver(body, "minus_unko_by_date");
 }
 
+/**
+ * 上流が乗務員ごとに添える**深夜を跨ぐ継ぎ目の暦日配分の差** (`gap_midnight_by_date`、
+ * Refs #546 / ohishi-exp/rust-ichibanboshi#182)。
+ *
+ * 紙は `運行終了 → 運行開始` の対を丸ごと運行開始の日へ載せるが、こちらは暦日で
+ * 割る。**同じ時間の置き場所が違うだけ**なので、運行開始日が正 (紙が多い)・前日が
+ * 負 (紙が少ない) で釣り合う。突合が cause `gap-midnight` に使う。
+ */
+export function parseGapMidnightByDriver(body: unknown): Map<string, Map<string, number>> {
+  return parseDateMapByDriver(body, "gap_midnight_by_date");
+}
+
 /** `drivers[].<key>` の `{YYYY-MM-DD: 分}` を乗務員CD 引きに直す共通部。 */
 function parseDateMapByDriver(body: unknown, key: string): Map<string, Map<string, number>> {
   const out = new Map<string, Map<string, number>>();

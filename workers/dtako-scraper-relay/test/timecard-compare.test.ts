@@ -1426,6 +1426,49 @@ describe("差の推定原因 (Refs #501)", () => {
     expect(d.residualMinutes).toBe(0);
   });
 
+  it("深夜跨ぎの継ぎ目の暦日配分を実額で説明する (1536 谷川 06-11 の形)", () => {
+    // 紙は 運行終了 06-10 23:51:55 → 運行開始 06-11 07:03:07 の対 431 分を丸ごと
+    // 06-11 へ。こちらは 06-10 に 8 + 06-11 に 423 なので 06-11 だけ紙が 8 大きい
+    const d = compareTimecardMonth({
+      month: "2026-06",
+      driverCd: "1536",
+      nginx: nginxDriver([{ date: "2026-06-11", kosokuMinutes: 1426 }]),
+      oursByDate: ours({ "2026-06-11": 1418 }),
+      gapMidnightByDate: new Map([["2026-06-11", 8]]),
+      toleranceMinutes: 2,
+    }).days[10]!;
+    expect(d.cause).toBe("gap-midnight");
+    expect(d.explainedMinutes).toBe(-8);
+    expect(d.residualMinutes).toBe(0);
+  });
+
+  it("深夜跨ぎの継ぎ目は前日側も説明する (符号が逆)", () => {
+    const d = compareTimecardMonth({
+      month: "2026-06",
+      driverCd: "1536",
+      nginx: nginxDriver([{ date: "2026-06-10", kosokuMinutes: 1358 }]),
+      oursByDate: ours({ "2026-06-10": 1366 }),
+      gapMidnightByDate: new Map([["2026-06-10", -8]]),
+      toleranceMinutes: 2,
+    }).days[9]!;
+    expect(d.cause).toBe("gap-midnight");
+    expect(d.explainedMinutes).toBe(8);
+    expect(d.residualMinutes).toBe(0);
+  });
+
+  it("gap_midnight を乗務員ごとに渡せる", () => {
+    const rs = compareTimecardMonthAll({
+      month: "2026-06",
+      nginxByDriver: new Map([
+        ["1536", nginxDriver([{ date: "2026-06-11", kosokuMinutes: 1426 }])],
+      ]),
+      oursByDriver: new Map([["1536", ours({ "2026-06-11": 1418 })]]),
+      gapMidnightByDriver: new Map([["1536", new Map([["2026-06-11", 8]])]]),
+      toleranceMinutes: 2,
+    });
+    expect(rs[0]!.days[10]!.cause).toBe("gap-midnight");
+  });
+
   it("minus_unko を乗務員ごとに渡せる", () => {
     const rs = compareTimecardMonthAll({
       month: "2026-01",

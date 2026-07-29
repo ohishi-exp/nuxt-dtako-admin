@@ -25,6 +25,7 @@ import {
   kosokuPartsByDate,
   parseKosokuDaily,
   parseFerryMinusByDriver,
+  parseGapMidnightByDriver,
   parseMinusUnkoByDriver,
   parseOursOutsideByDriver,
   parsePaperDriftByDriver,
@@ -582,6 +583,8 @@ export const getTimecardDiffTool = {
     const oursOutsideByDriver = parseOursOutsideByDriver(curBody);
     // 紙が引く 運行開始 → 始業 (cause "minus-unko" の実額、Refs #546 / rust#182)
     const minusUnkoByDriver = parseMinusUnkoByDriver(curBody);
+    // 深夜を跨ぐ継ぎ目の暦日配分の差 (cause "gap-midnight" の実額、Refs #546)
+    const gapMidnightByDriver = parseGapMidnightByDriver(curBody);
     // フェリー控除の日別マップ (rust#181) — 勤務に貼れない日があるのでマップ優先
     const ferryMinusByDriver = parseFerryMinusByDriver(curBody);
     // nginx はエラーも HTTP 200 + `{error}` で返す (nginx#784)。素通しすると
@@ -602,6 +605,7 @@ export const getTimecardDiffTool = {
           paperOutsideByDate: paperOutsideByDriver.get(driver),
           oursOutsideByDate: oursOutsideByDriver.get(driver),
           minusUnkoByDate: minusUnkoByDriver.get(driver),
+          gapMidnightByDate: gapMidnightByDriver.get(driver),
           paperDriftByDate: paperDriftByDriver.get(driver),
           ferryMinusByDate: ferryMinusByDriver.get(driver),
           toleranceMinutes: args.tolerance_minutes,
@@ -616,6 +620,7 @@ export const getTimecardDiffTool = {
         paperOutsideByDriver,
         oursOutsideByDriver,
         minusUnkoByDriver,
+        gapMidnightByDriver,
         paperDriftByDriver,
         ferryMinusByDriver,
         toleranceMinutes: args.tolerance_minutes,
