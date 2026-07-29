@@ -22,6 +22,7 @@ import {
   startWorkRowEdit,
   unlockOperation,
   verifyReadNoDescending,
+  withDisplayNarrow,
   withVehicleNarrow,
 } from "../src/theearth-report-client";
 import { createCookieJar, TheearthClientError, type FetchLike } from "../src/theearth-client";
@@ -1260,6 +1261,214 @@ describe("withVehicleNarrow", () => {
       caught = e;
     }
     expect((caught as Error).message).toMatch(/戻せませんでした: raw-restore-failure/);
+  });
+});
+
+describe("withDisplayNarrow (readDate)", () => {
+  const readDate = { from: "2026/02/01 12:34", to: "2026/03/29 23:59" };
+
+  function listHtml(): string {
+    return `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-DES" />
+      <input type="submit" id="btnUpdate" name="ctl00$MainContent$btnUpdate" value="更新" />
+    </form></body></html>`;
+  }
+
+  /** F-GOS0030 fixture: 条件日 2 行 (ddlSortDay1/2 + ucStartDate/ucEndDate) を持つ。
+   * 実 DOM (2026-07-29 実機確認) と同じく id は `ucStartDate2_txtYear`、name は
+   * `ucStartDate2$txtYear` 形式。 */
+  function readDateConfigHtml(opts: {
+    row1?: string;
+    row2?: string;
+    omitDdlSortDay2?: boolean;
+    omitFieldId?: string;
+    eraChecked?: boolean;
+    omitEra?: boolean;
+    withVehicleFields?: boolean;
+  } = {}): string {
+    const row1 = opts.row1 ?? "OperationDate";
+    const row2 = opts.row2 ?? "ReadNo";
+    const sortDay = (n: number, selected: string): string => opts.omitDdlSortDay2 && n === 2
+      ? ""
+      : `<select id="ddlSortDay${n}" name="ddlSortDay${n}">
+          <option value="OperationDate"${selected === "OperationDate" ? " selected" : ""}>運行日</option>
+          <option value="ReadNo"${selected === "ReadNo" ? " selected" : ""}>読取日</option>
+        </select>`;
+    const dateFields = (prefix: string, y: string, m: string, d: string): string =>
+      ["txtYear", "txtMonth", "txtDay"].map((suffix, i) => opts.omitFieldId === `${prefix}_${suffix}`
+        ? ""
+        : `<input type="text" id="${prefix}_${suffix}" name="${prefix}$${suffix}" value="${[y, m, d][i]}" />`).join("\n")
+      + (opts.omitEra
+        ? ""
+        : `<input type="checkbox" id="${prefix}_chkUseEra" name="${prefix}$chkUseEra"${opts.eraChecked ? ' checked="checked"' : ""} />`);
+    return `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-GOS" />
+      ${sortDay(1, row1)}
+      ${dateFields("ucStartDate1", "", "", "")}
+      ${dateFields("ucEndDate1", "", "", "")}
+      ${sortDay(2, row2)}
+      ${dateFields("ucStartDate2", "26", "4", "29")}
+      ${dateFields("ucEndDate2", "", "", "")}
+      ${opts.withVehicleFields ? `<input type="text" id="txtSVehicle" name="txtSVehicle" value="" /><input type="text" id="txtEVehicle" name="txtEVehicle" value="" />` : ""}
+      <input type="submit" id="btnOK" name="btnOK" value="適用" />
+    </form></body></html>`;
+  }
+
+  /** GET DES → GET GOS → POST 適用 → POST btnUpdate → POST 復元 の応答列 +
+   * POST body capture。 */
+  function narrowFetchMock(gosHtml: string) {
+    const bodies: string[] = [];
+    let call = 0;
+    const fetchImpl = (async (_url, init) => {
+      call += 1;
+      if (call === 1) return html(listHtml());
+      if (call === 2) return html(gosHtml);
+      bodies.push(String(init?.body ?? ""));
+      if (call === 4) return html("first-page");
+      return html("applied");
+    }) as FetchLike;
+    return { fetchImpl, bodies };
+  }
+
+  it("rejects when neither vehicle nor readDate is provided", async () => {
+    const jar = createCookieJar();
+    await expect(withDisplayNarrow(jar, {}, async () => "x", sequenceFetch([]))).rejects.toThrow(
+      ReportParamError,
+    );
+  });
+
+  it("rejects a malformed read-date bound before any request", async () => {
+    const jar = createCookieJar();
+    await expect(
+      withDisplayNarrow(jar, { readDate: { from: "2026/2/1 12:34", to: readDate.to } }, async () => "x", sequenceFetch([])),
+    ).rejects.toThrow(ReportParamError);
+    await expect(
+      withDisplayNarrow(jar, { readDate: { from: readDate.from, to: "bogus" } }, async () => "x", sequenceFetch([])),
+    ).rejects.toThrow(ReportParamError);
+  });
+
+  it("overwrites the ReadNo row (row 2) with two-digit year / non-padded month+day, then restores the leftover values", async () => {
+    const jar = createCookieJar();
+    const { fetchImpl, bodies } = narrowFetchMock(readDateConfigHtml());
+
+    const result = await withDisplayNarrow(jar, { readDate }, async (_j, firstPageHtml) => firstPageHtml, fetchImpl);
+    expect(result).toBe("first-page");
+
+    const applyBody = new URLSearchParams(bodies[0]);
+    expect(applyBody.get("ucStartDate2$txtYear")).toBe("26");
+    expect(applyBody.get("ucStartDate2$txtMonth")).toBe("2");
+    expect(applyBody.get("ucStartDate2$txtDay")).toBe("1");
+    expect(applyBody.get("ucEndDate2$txtYear")).toBe("26");
+    expect(applyBody.get("ucEndDate2$txtMonth")).toBe("3");
+    expect(applyBody.get("ucEndDate2$txtDay")).toBe("29");
+    // 和暦チェックは unchecked として送らない
+    expect(applyBody.has("ucStartDate2$chkUseEra")).toBe(false);
+    expect(applyBody.has("ucEndDate2$chkUseEra")).toBe(false);
+    // ReadNo 行が既にあるので ddl は触らない
+    expect(applyBody.get("ddlSortDay2")).toBe("ReadNo");
+    expect(applyBody.get("btnOK")).toBe("適用");
+
+    // 復元: 残留していた "26/4/29〜(空)" が書き戻される
+    const restoreBody = new URLSearchParams(bodies[2]);
+    expect(restoreBody.get("ucStartDate2$txtYear")).toBe("26");
+    expect(restoreBody.get("ucStartDate2$txtMonth")).toBe("4");
+    expect(restoreBody.get("ucStartDate2$txtDay")).toBe("29");
+    expect(restoreBody.get("ucEndDate2$txtYear")).toBe("");
+    expect(restoreBody.has("ucStartDate2$chkUseEra")).toBe(false);
+  });
+
+  it("uses row 1 when ddlSortDay1 is ReadNo (row without era checkboxes)", async () => {
+    const jar = createCookieJar();
+    const { fetchImpl, bodies } = narrowFetchMock(readDateConfigHtml({ row1: "ReadNo", row2: "OperationDate", omitEra: true }));
+
+    await withDisplayNarrow(jar, { readDate }, async () => undefined, fetchImpl);
+    const applyBody = new URLSearchParams(bodies[0]);
+    expect(applyBody.get("ucStartDate1$txtYear")).toBe("26");
+    expect(applyBody.get("ucStartDate1$txtMonth")).toBe("2");
+    // 2 行目は触らない (残留値のまま送る)
+    expect(applyBody.get("ucStartDate2$txtMonth")).toBe("4");
+  });
+
+  it("switches ddlSortDay2 to ReadNo when neither row is ReadNo, and restores the original selection", async () => {
+    const jar = createCookieJar();
+    const { fetchImpl, bodies } = narrowFetchMock(readDateConfigHtml({ row1: "OperationDate", row2: "OperationDate" }));
+
+    await withDisplayNarrow(jar, { readDate }, async () => undefined, fetchImpl);
+    const applyBody = new URLSearchParams(bodies[0]);
+    expect(applyBody.get("ddlSortDay2")).toBe("ReadNo");
+    expect(applyBody.get("ucStartDate2$txtMonth")).toBe("2");
+    const restoreBody = new URLSearchParams(bodies[2]);
+    expect(restoreBody.get("ddlSortDay2")).toBe("OperationDate");
+  });
+
+  it("loud-fails when no row is ReadNo and ddlSortDay2 is missing", async () => {
+    const jar = createCookieJar();
+    const { fetchImpl } = narrowFetchMock(readDateConfigHtml({ row1: "OperationDate", row2: "OperationDate", omitDdlSortDay2: true }));
+    await expect(withDisplayNarrow(jar, { readDate }, async () => "x", fetchImpl)).rejects.toThrow(
+      "ddlSortDay2",
+    );
+  });
+
+  it("loud-fails when a read-date field is missing", async () => {
+    const jar = createCookieJar();
+    const { fetchImpl } = narrowFetchMock(readDateConfigHtml({ omitFieldId: "ucEndDate2_txtDay" }));
+    await expect(withDisplayNarrow(jar, { readDate }, async () => "x", fetchImpl)).rejects.toThrow(
+      "ucEndDate2_txtDay",
+    );
+  });
+
+  it("unchecks a checked era checkbox for the apply and restores it as checked", async () => {
+    const jar = createCookieJar();
+    const { fetchImpl, bodies } = narrowFetchMock(readDateConfigHtml({ eraChecked: true }));
+
+    await withDisplayNarrow(jar, { readDate }, async () => undefined, fetchImpl);
+    const applyBody = new URLSearchParams(bodies[0]);
+    expect(applyBody.has("ucStartDate2$chkUseEra")).toBe(false);
+    expect(applyBody.has("ucEndDate2$chkUseEra")).toBe(false);
+    const restoreBody = new URLSearchParams(bodies[2]);
+    expect(restoreBody.get("ucStartDate2$chkUseEra")).toBe("on");
+    expect(restoreBody.get("ucEndDate2$chkUseEra")).toBe("on");
+  });
+
+  it("stringifies null originals (unchecked era) in the restore-failure message", async () => {
+    const jar = createCookieJar();
+    let call = 0;
+    const fetchImpl = (async () => {
+      call += 1;
+      if (call === 1) return html(listHtml());
+      if (call === 2) return html(readDateConfigHtml());
+      if (call === 5) return status(500); // 復元 POST が失敗
+      return html("ok");
+    }) as FetchLike;
+    let caught: unknown;
+    try {
+      await withDisplayNarrow(jar, { readDate }, async () => "ok", fetchImpl);
+    }
+    catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(TheearthClientError);
+    expect((caught as Error).message).toMatch(/戻せませんでした/);
+    expect((caught as Error).message).toMatch(/ucStartDate2\$chkUseEra=""/);
+  });
+
+  it("combines vehicle and read-date narrowing in a single apply postback", async () => {
+    const jar = createCookieJar();
+    const { fetchImpl, bodies } = narrowFetchMock(readDateConfigHtml({ withVehicleFields: true }));
+
+    await withDisplayNarrow(
+      jar,
+      { vehicle: { from: "6572", to: "6572" }, readDate },
+      async () => undefined,
+      fetchImpl,
+    );
+    const applyBody = new URLSearchParams(bodies[0]);
+    expect(applyBody.get("txtSVehicle")).toBe("6572");
+    expect(applyBody.get("txtEVehicle")).toBe("6572");
+    expect(applyBody.get("ucStartDate2$txtYear")).toBe("26");
+    const restoreBody = new URLSearchParams(bodies[2]);
+    expect(restoreBody.get("txtSVehicle")).toBe("");
+    expect(restoreBody.get("ucStartDate2$txtMonth")).toBe("4");
   });
 });
 
