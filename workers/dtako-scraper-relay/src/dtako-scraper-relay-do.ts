@@ -172,6 +172,7 @@ import {
   mergeKosokuShiftMaps,
   parseKosokuDaily,
   parseFerryMinusByDriver,
+  parseMinusUnkoByDriver,
   parseOursOutsideByDriver,
   parsePaperDriftByDriver,
   parsePaperOutsideByDriver,
@@ -3205,6 +3206,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         paperDriftByDriver,
         paperOutsideByDriver,
         oursOutsideByDriver,
+        minusUnkoByDriver,
         ferryMinusByDriver,
       } = compareKosoku;
       const nginxByDriver = parsePdfJson(pdfBody, ym);
@@ -3228,6 +3230,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
             crossMonthByDate: crossMonthByDriver.get(driver),
             paperOutsideByDate: paperOutsideByDriver.get(driver),
             oursOutsideByDate: oursOutsideByDriver.get(driver),
+            minusUnkoByDate: minusUnkoByDriver.get(driver),
             paperDriftByDate: paperDriftByDriver.get(driver),
             ferryMinusByDate: ferryMinusByDriver.get(driver),
             toleranceMinutes: tolerance,
@@ -3241,6 +3244,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           crossMonthByDriver,
           paperOutsideByDriver,
           oursOutsideByDriver,
+          minusUnkoByDriver,
           paperDriftByDriver,
           ferryMinusByDriver,
           toleranceMinutes: tolerance,
@@ -4010,6 +4014,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     paperDriftByDriver: Map<string, Map<string, number>>;
     paperOutsideByDriver: Map<string, Map<string, number>>;
     oursOutsideByDriver: Map<string, Map<string, number>>;
+    minusUnkoByDriver: Map<string, Map<string, number>>;
     ferryMinusByDriver: Map<string, Map<string, number>>;
   }> {
     const fetchMonth = async (month: string): Promise<unknown | null> => {
@@ -4044,6 +4049,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       curBody == null
         ? new Map<string, Map<string, number>>()
         : parseOursOutsideByDriver(curBody);
+    // 紙が引く 運行開始 → 始業 も当月応答からだけ読む (cause "minus-unko" の実額)
+    const minusUnkoByDriver =
+      curBody == null ? new Map<string, Map<string, number>>() : parseMinusUnkoByDriver(curBody);
     // フェリー控除の日別マップも当月応答からだけ読む (rust#181 — 勤務に貼れない日がある)
     const ferryMinusByDriver =
       curBody == null ? new Map<string, Map<string, number>>() : parseFerryMinusByDriver(curBody);
@@ -4054,6 +4062,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         paperDriftByDriver,
         paperOutsideByDriver,
         oursOutsideByDriver,
+        minusUnkoByDriver,
         ferryMinusByDriver,
       };
     }
@@ -4069,6 +4078,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       paperDriftByDriver,
       paperOutsideByDriver,
       oursOutsideByDriver,
+      minusUnkoByDriver,
       ferryMinusByDriver,
     };
   }

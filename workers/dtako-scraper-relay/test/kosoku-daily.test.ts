@@ -5,6 +5,7 @@ import {
   mergeKosokuShiftMaps,
   parseKosokuDaily,
   parseFerryMinusByDriver,
+  parseMinusUnkoByDriver,
   parseOursOutsideByDriver,
   parsePaperDriftByDriver,
   parsePaperOutsideByDriver,
@@ -394,6 +395,19 @@ describe('parseOursOutsideByDriver', () => {
 
   it('マップが無い乗務員は載らない', () => {
     expect(parseOursOutsideByDriver({ drivers: [{ driver: 1442 }] }).size).toBe(0)
+  })
+})
+
+describe('parseMinusUnkoByDriver', () => {
+  it('乗務員CD 引きに直す (Refs #546 / ohishi-exp/rust-ichibanboshi#182)', () => {
+    const got = parseMinusUnkoByDriver({
+      drivers: [{ driver: 1729, days: [], minus_unko_by_date: { '2026-01-09': 9 } }],
+    })
+    expect(got.get('1729')?.get('2026-01-09')).toBe(9)
+  })
+
+  it('マップが無い乗務員は載らない', () => {
+    expect(parseMinusUnkoByDriver({ drivers: [{ driver: 1729 }] }).size).toBe(0)
   })
 })
 
