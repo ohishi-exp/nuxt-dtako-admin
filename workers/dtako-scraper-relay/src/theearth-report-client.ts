@@ -1300,6 +1300,9 @@ async function postOperationListUpdate(
 export interface DisplayNarrow {
   /** 車輌CD range (`txtSVehicle`/`txtEVehicle`)。 */
   vehicle?: VehicleNarrowRange;
+  /** 乗務員CD range (`txtSDriver`/`txtEDriver`、8桁以内の数値。フィールドの実在は
+   * 2026-07-29 に F-GOS0030 実フォームで確認済み)。 */
+  driver?: VehicleNarrowRange;
   /** 読取日 range (ReadNo 条件行の `ucStartDate*`/`ucEndDate*`)。 */
   readDate?: ReadDateNarrowRange;
 }
@@ -1340,12 +1343,19 @@ export async function withDisplayNarrow<T>(
   fetchImpl: FetchLike = fetch,
   timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
 ): Promise<T> {
-  if (!narrow.vehicle && !narrow.readDate) {
-    throw new ReportParamError("絞込条件 (vehicle / readDate) が 1 つも指定されていません");
+  if (!narrow.vehicle && !narrow.driver && !narrow.readDate) {
+    throw new ReportParamError("絞込条件 (vehicle / driver / readDate) が 1 つも指定されていません");
   }
   if (narrow.vehicle) {
     validateVehicleCd(narrow.vehicle.from, "下限");
     validateVehicleCd(narrow.vehicle.to, "上限");
+  }
+  if (narrow.driver) {
+    for (const [value, label] of [[narrow.driver.from, "下限"], [narrow.driver.to, "上限"]] as const) {
+      if (!VEHICLE_CD_RE.test(value)) {
+        throw new ReportParamError(`乗務員CD (${label}) は8桁以内の数値で指定してください: "${value}"`);
+      }
+    }
   }
   if (narrow.readDate && (!RANGE_BOUND_RE.test(narrow.readDate.from) || !RANGE_BOUND_RE.test(narrow.readDate.to))) {
     throw new ReportParamError('読取日範囲は "YYYY/MM/DD HH:mm" 形式で指定してください');
@@ -1377,6 +1387,18 @@ export async function withDisplayNarrow<T>(
     }
     overrides[sField.name] = narrow.vehicle.from;
     overrides[eField.name] = narrow.vehicle.to;
+  }
+  if (narrow.driver) {
+    const sField = findFormFieldById(configHtml, "txtSDriver");
+    const eField = findFormFieldById(configHtml, "txtEDriver");
+    if (!sField || !eField) {
+      throw new TheearthClientError(
+        "表示条件指定ページの乗務員絞込フィールド (txtSDriver/txtEDriver) が見つかりません — " +
+          "theearth-np のページ仕様変更の可能性があります",
+      );
+    }
+    overrides[sField.name] = narrow.driver.from;
+    overrides[eField.name] = narrow.driver.to;
   }
   if (narrow.readDate) {
     Object.assign(overrides, resolveReadDateOverrides(configHtml, narrow.readDate));

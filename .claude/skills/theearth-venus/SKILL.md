@@ -163,7 +163,11 @@ credential か overlap ID を落とすと拒否され「強制ログインに失
 
 Worker 実装: `workers/dtako-scraper-relay/src/theearth-report-client.ts` の
 `withDisplayNarrow()` (`/daily-report-api/list` から使用。車輌のみの旧 API
-`withVehicleNarrow()` は thin wrapper として残置)。
+`withVehicleNarrow()` は thin wrapper として残置)。**乗務員CD range
+(`txtSDriver`/`txtEDriver`) も実在を確認済み** (2026-07-29 実フォーム) で、同じ機構で
+絞れる — 1 名絞込ならグリッドが ~20 行になり検索が数秒で返る (全社 2 ヶ月 ~2,000 行を
+めくるのと桁違い)。theearth 側の条件が乗務員2 に一致する可能性があるため、worker 側で
+乗務員CD の防御的後段フィルタは掛けない (front の表示フィルタが最終形)。
 
 ### F-GOS0030 の「読取日」条件は残留すると期間外検索を静かに 0 件にする (2026-07-29 実機確定)
 

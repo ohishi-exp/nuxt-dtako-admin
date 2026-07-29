@@ -914,6 +914,7 @@ describe("withVehicleNarrow", () => {
     return `<html><body><form>
       <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-GOS" />
       <input type="text" id="txtSDriver" name="txtSDriver" value="baseline-driver" />
+      <input type="text" id="txtEDriver" name="txtEDriver" value="" />
       <input type="text" id="txtSVehicle" name="txtSVehicle" value="${opts.sVehicle ?? ""}" />
       <input type="text" id="txtEVehicle" name="txtEVehicle" value="${opts.eVehicle ?? ""}" />
       <select id="ddlOrder0" name="ddlOrder0"><option value="ReadNo" selected>読取日</option><option value="OperationDate">運行日</option></select>
@@ -936,6 +937,36 @@ describe("withVehicleNarrow", () => {
     }) as FetchLike;
     return { fetchImpl, bodies };
   }
+
+  it("applies a driver CD range via txtSDriver/txtEDriver and restores the originals", async () => {
+    const jar = createCookieJar();
+    const { fetchImpl, bodies } = narrowFetchMock({});
+    await withDisplayNarrow(jar, { driver: { from: "1732", to: "1732" } }, async () => undefined, fetchImpl);
+    const applyBody = new URLSearchParams(bodies[0]);
+    expect(applyBody.get("txtSDriver")).toBe("1732");
+    expect(applyBody.get("txtEDriver")).toBe("1732");
+    const restoreBody = new URLSearchParams(bodies[2]);
+    expect(restoreBody.get("txtSDriver")).toBe("baseline-driver");
+    expect(restoreBody.get("txtEDriver")).toBe("");
+  });
+
+  it("rejects a non-numeric driver CD before making any request", async () => {
+    const jar = createCookieJar();
+    await expect(
+      withDisplayNarrow(jar, { driver: { from: "abc", to: "1732" } }, async () => "x", sequenceFetch([])),
+    ).rejects.toThrow(ReportParamError);
+    await expect(
+      withDisplayNarrow(jar, { driver: { from: "1732", to: "123456789" } }, async () => "x", sequenceFetch([])),
+    ).rejects.toThrow(ReportParamError);
+  });
+
+  it("loud-fails when the driver narrow fields are missing from the config page", async () => {
+    const jar = createCookieJar();
+    const { fetchImpl } = narrowFetchMock({ gosHtml: displayConfigHtml({ missingVehicleFields: true }) });
+    await expect(
+      withDisplayNarrow(jar, { driver: { from: "1732", to: "1732" } }, async () => "x", fetchImpl),
+    ).rejects.toThrow("txtSDriver");
+  });
 
   it("bumps ddlRowCount to 30 in the btnUpdate postback when a 30 option exists", async () => {
     const jar = createCookieJar();

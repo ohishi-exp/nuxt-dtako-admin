@@ -227,9 +227,9 @@ const sortOk = ref<boolean | null>(null)
 const listLoading = ref(false)
 const listError = ref<string | null>(null)
 
-/** 乗務員絞込 (CD または名前の部分一致、クライアント側フィルタ)。theearth 側の
- * 表示条件指定 (F-GOS0030) に乗務員 range フィールドがあるかは実機未確認のため、
- * 車輌CD のようなサーバー側絞込ではなく取得済み行のフィルタで実現する。 */
+/** 乗務員絞込 (CD または名前の部分一致)。表示は常にこのクライアント側フィルタを
+ * 通すが、入力が数値 (CD) の場合は loadList がサーバー側絞込 (F-GOS0030 の
+ * `txtSDriver`/`txtEDriver`、2026-07-29 実機確認) も併用して取得自体を絞る。 */
 const driverFilter = ref('')
 
 const filteredRows = computed(() => {
@@ -268,6 +268,11 @@ async function loadList() {
   }
   listLoading.value = true
   listError.value = null
+  // 前回の検索結果を残したまま新しい検索が走ると「いつの結果か分からない一覧」が
+  // 表示され続ける (セッション切れ→再ログイン後に顕著)。開始時点で必ず空にして、
+  // 見えている一覧 = 直近の検索結果を保証する。
+  rows.value = []
+  sortOk.value = null
   try {
     const query: Record<string, string> = {
       from: toReportDateTime(periodForm.from),
@@ -276,6 +281,14 @@ async function loadList() {
     if (trimmedVehicleCd) {
       query.vehicleFrom = trimmedVehicleCd
       query.vehicleTo = trimmedVehicleCd
+    }
+    // 乗務員絞込が数値 (CD) ならサーバー側絞込も併用する。グリッドが対象乗務員の
+    // 行だけになりページ送りが激減、検索が数秒で返る (名前指定は従来どおり
+    // 全件取得 + クライアント側フィルタ)。
+    const trimmedDriver = driverFilter.value.trim()
+    if (DRIVER_CD_RE.test(trimmedDriver)) {
+      query.driverFrom = trimmedDriver
+      query.driverTo = trimmedDriver
     }
     const res = await $fetch<{ rows: DailyReportRow[], sortOk: boolean | null }>('/daily-report-api/list', {
       headers: authHeaders(),
@@ -294,6 +307,36 @@ async function loadList() {
   finally {
     listLoading.value = false
   }
+}
+
+// --- 表示中一覧の CSV ダウンロード (クライアント側生成) ---
+
+/** CSV フィールドのエスケープ (カンマ/引用符/改行を含む場合のみ引用)。 */
+function csvField(value: string | null): string {
+  const v = value ?? ''
+  return /[",\n]/.test(v) ? `"${v.replaceAll('"', '""')}"` : v
+}
+
+/** 表示中 (絞込後) の一覧をそのまま CSV でダウンロードする。theearth の正式な
+ * csvdata.zip (F-NOS3010) とは別物で、画面の表を手元に持ち出す簡易エクスポート。 */
+function downloadListCsv() {
+  const header = ['運行No', '運行日', '事業所CD', '事業所名', '車輌CD', '車輌名', '乗務員CD1', '乗務員名1', '出社日時', '退社日時', '出庫日時', '帰庫日時', '総走行距離', '売上', '経費']
+  const lines = [header.join(',')]
+  for (const r of filteredRows.value) {
+    lines.push([
+      r.operationNo, r.operationDate, r.branchCd, r.branchName, r.vehicleCd, r.vehicleName,
+      r.driverCd1, r.driverName1, r.workStartDateTime, r.workEndDateTime,
+      r.operationStartDateTime, r.operationEndDateTime, r.totalRunningDist, r.salesFlag, r.expenseFlag,
+    ].map(csvField).join(','))
+  }
+  // BOM 付き UTF-8 (Excel でそのまま文字化けせず開ける)
+  const blob = new Blob(['\uFEFF' + lines.join('\r\n') + '\r\n'], { type: 'text/csv;charset=utf-8' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  const stamp = (s: string) => s.replaceAll('-', '').replace('T', '-').replaceAll(':', '')
+  a.download = `daily-report-list_${stamp(periodForm.from)}_${stamp(periodForm.to)}.csv`
+  a.click()
+  URL.revokeObjectURL(a.href)
 }
 
 // --- 編集後 csvdata.zip ダウンロード (F-NOS3010) ---
@@ -1374,9 +1417,19 @@ onMounted(() => {
         <!-- 運転日報一覧 -->
         <UCard>
           <template #header>
-            <span class="font-semibold">
-              運行データ入力一覧 ({{ filteredRows.length }} 件<template v-if="filteredRows.length !== rows.length"> / 全 {{ rows.length }} 件</template>)
-            </span>
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <span class="font-semibold">
+                運行データ入力一覧 ({{ filteredRows.length }} 件<template v-if="filteredRows.length !== rows.length"> / 全 {{ rows.length }} 件</template>)
+              </span>
+              <UButton
+                icon="i-lucide-download"
+                label="一覧をCSVダウンロード"
+                size="sm"
+                variant="outline"
+                :disabled="filteredRows.length === 0"
+                @click="downloadListCsv"
+              />
+            </div>
           </template>
           <div v-if="listLoading" class="text-center py-8 text-gray-400">
             読み込み中…
