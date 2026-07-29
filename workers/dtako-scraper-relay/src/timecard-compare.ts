@@ -179,6 +179,18 @@ export type DiffCause =
    * 1108 福留 03-05/06 (頭 1495 分 = 979 + 516) の形。
    */
   | "punch-head"
+  /**
+   * **始業前の運行の頭** (実額、**紙が大きくなる向き**)。紙は運行スパンを運行開始
+   * から数えるが minus_unko 控除 (nginx#785) は 1 日 1 回しか効かず、同じ暦日に
+   * 勤務が 2 本ある日や TC_DC null の日は頭が紙に残る。説明は「紙の
+   * `TC_DC_minus_unko` − こちらの `run_head_minutes`」(通常は負)。
+   * 実測 1026 一瀬 03-12 (+7 = 朝の頭 7 が残り、控除は夕方の 3 のみ)。
+   */
+  | "run-head"
+  /** フェリー + 始業前の運行の頭。フェリー航路の常連 (1026) は毎日併発する。 */
+  | "ferry+run-head"
+  /** 昼休 + 始業前の運行の頭。 */
+  | "lunch+run-head"
   /** **未説明。** ここが 0 になるまでが検知の仕事。 */
   | "unknown";
 
@@ -539,6 +551,7 @@ function classifyDiff(
   runGapMinutes: number,
   punchTailMinutes: number,
   punchHeadMinutes: number,
+  runHeadCorrection: number,
   tolerance: number,
 ): { cause: DiffCause; explainedMinutes: number; residualMinutes: number | null } {
   if (diffMinutes === null) {
@@ -549,16 +562,21 @@ function classifyDiff(
   }
   const ferry = ferryMinusMinutes ?? 0;
   const tail = punchTailMinutes;
+  // 紙が控除しきれなかった運行の頭 (通常は負 = 紙が大きい)。0 なら候補にならない
+  const runHead = runHeadCorrection;
   const candidates: Array<{ cause: DiffCause; explained: number }> = [
     { cause: "ferry", explained: ferry },
     { cause: "month-boundary", explained: crossMonthMinutes },
     { cause: "run-gap", explained: runGapMinutes },
     { cause: "punch-tail", explained: tail },
     { cause: "punch-head", explained: punchHeadMinutes },
+    { cause: "run-head", explained: runHead },
     { cause: "ferry+punch-tail", explained: ferry === 0 || tail === 0 ? 0 : ferry + tail },
+    { cause: "ferry+run-head", explained: ferry === 0 || runHead === 0 ? 0 : ferry + runHead },
     { cause: "lunch", explained: LUNCH_DEDUCTION_MINUTES },
     { cause: "lunch+run-gap", explained: runGapMinutes === 0 ? 0 : runGapMinutes + LUNCH_DEDUCTION_MINUTES },
     { cause: "lunch+punch-tail", explained: tail === 0 ? 0 : tail + LUNCH_DEDUCTION_MINUTES },
+    { cause: "lunch+run-head", explained: runHead === 0 ? 0 : runHead + LUNCH_DEDUCTION_MINUTES },
     { cause: "lunch+ferry", explained: ferry + LUNCH_DEDUCTION_MINUTES },
   ];
   for (const c of candidates) {
@@ -591,6 +609,7 @@ export function compareTimecardMonth(input: {
       runGapMinutes?: number,
       punchTailMinutes?: number,
       punchHeadMinutes?: number,
+      runHeadMinutes?: number,
     }
   >;
   /**
@@ -644,6 +663,15 @@ export function compareTimecardMonth(input: {
     const runGap = ours?.runGapMinutes ?? 0;
     const punchTail = ours?.punchTailMinutes ?? 0;
     const punchHead = ours?.punchHeadMinutes ?? 0;
+    // 始業前の運行の頭: 紙の minus_unko (nginx#785 の診断値) が控除した分を引いた
+    // 残りが、紙に残った頭 = 紙が大きくなる向きの説明
+    const runHeadOurs = ours?.runHeadMinutes ?? 0;
+    const paperMinusUnko = Object.values(nginxDay?.minusUnkoByType ?? {}).reduce(
+      (a, b) => a + b,
+      0,
+    );
+    const runHeadCorrection =
+      runHeadOurs === 0 && paperMinusUnko === 0 ? 0 : paperMinusUnko - runHeadOurs;
     let classified = classifyDiff(
       diffMinutes,
       ferryMinusMinutes,
@@ -651,6 +679,7 @@ export function compareTimecardMonth(input: {
       runGap,
       punchTail,
       punchHead,
+      runHeadCorrection,
       tolerance,
     );
     // 片側 (こちら) だけの日は差が引けず `none` になるが、値の全部が「紙が構造的に
@@ -733,6 +762,7 @@ export function compareTimecardMonthAll(input: {
         runGapMinutes?: number,
         punchTailMinutes?: number,
         punchHeadMinutes?: number,
+        runHeadMinutes?: number,
       }
     >
   >;
