@@ -723,6 +723,13 @@ N:1 が現実に存在する (本番で 5 件、うち社員C 1619 鵜瀬裕一�
   無い月は薄表示)。サマリ再計算は単月/全月一括 (`POST archive/resummarize?month=`、
   R2 の生 CSV から再計算 — theearth 非依存、**CSV の lastVerifiedAt/確認履歴は
   更新しない**)。一括印刷は月範囲 × 乗務員CD範囲 → 月毎改ページの印刷プレビュー
+- 月タブの「高速表示可」バッジ (emerald ドット、Refs #460) は **2 段階** (Refs #543
+  followup、案A 2026-07-29): フル = 拘束サマリ同期済み + relay の kintai 上流キャッシュ
+  (DO SQLite `upstream_cache`、daily+kosoku 両方) 有り / 弱 (opacity-50) = 同期済みのみ。
+  `archive/months` の `kintai_cached_months` が供給元 (`UPSTREAM_CACHE` フラグ off の
+  relay は空配列、旧 relay はフィールド無し → front はフル表示に fallback)。判定 pure は
+  `fastBadgeState` (`app/utils/restraint-wage-view.ts`)。キャッシュ有りでも上流の版 (etag)
+  が動けば miss になるため「速いことが多い」目安表示
 
 | ファイル | 役割 |
 |---|---|

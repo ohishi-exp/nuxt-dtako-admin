@@ -90,6 +90,24 @@ export class UpstreamCache {
   }
 
   /**
+   * daily と kosoku の**両方**の行が揃っている月 (YYYY-MM、降順) を返す
+   * (Refs #543 followup — 月タブ「高速表示可」バッジの 2 段階表示用)。
+   * 片方しか無い月は wage-report で残り半分のライブ取得が要るため数えない。
+   * テーブル未作成でも throw しない (ensureTable が CREATE IF NOT EXISTS)。
+   */
+  monthsWithBothKinds(): string[] {
+    this.ensureTable();
+    return this.sql
+      .exec(
+        `SELECT month FROM upstream_cache WHERE kind = 'daily'
+         AND month IN (SELECT month FROM upstream_cache WHERE kind = 'kosoku')
+         ORDER BY month DESC`,
+      )
+      .toArray()
+      .map((row) => String(row.month));
+  }
+
+  /**
    * gzip 本文を upsert する。**1.9MB 超は格納せず false** (呼び出し側は
    * ライブ動作のままで良い — 次回も再取得になるだけで壊れない)。
    */

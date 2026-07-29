@@ -26,6 +26,15 @@ class FakeSql implements SqlStorageLike {
   exec(query: string, ...bindings: unknown[]) {
     this.execLog.push(query.trim().split(/\s+/, 2).join(' '))
     if (query.startsWith('CREATE TABLE')) return cursor([])
+    if (query.startsWith('SELECT month')) {
+      // monthsWithBothKinds: daily と kosoku が両方ある月を降順で
+      const months = [...this.rows.keys()]
+        .filter(k => k.startsWith('daily|'))
+        .map(k => k.slice('daily|'.length))
+        .filter(m => this.rows.has(`kosoku|${m}`))
+        .sort((a, b) => b.localeCompare(a))
+      return cursor(months.map(month => ({ month })))
+    }
     if (query.startsWith('SELECT')) {
       const [kind, month] = bindings as [string, string]
       const row = this.rows.get(`${kind}|${month}`)
@@ -113,6 +122,20 @@ describe('UpstreamCache', () => {
     cache.delete('daily', '2026-06')
     expect(cache.getFresh('daily', '2026-06', 'e', 2)).toBeNull()
     expect(() => cache.delete('kosoku', '2026-01')).not.toThrow()
+  })
+
+  it('monthsWithBothKinds は daily+kosoku が揃った月だけを降順で返す', async () => {
+    const sql = new FakeSql()
+    const cache = new UpstreamCache(sql)
+    expect(cache.monthsWithBothKinds()).toEqual([])
+    const gz = await gzipText('x')
+    cache.put('daily', '2026-05', gz, 'sha', 'e', 1)
+    cache.put('kosoku', '2026-05', gz, 'sha', 'e', 1)
+    cache.put('daily', '2026-06', gz, 'sha', 'e', 1)
+    cache.put('kosoku', '2026-06', gz, 'sha', 'e', 1)
+    cache.put('daily', '2026-07', gz, 'sha', 'e', 1) // kosoku 無し → 数えない
+    cache.put('kosoku', '2026-04', gz, 'sha', 'e', 1) // daily 無し → 数えない
+    expect(cache.monthsWithBothKinds()).toEqual(['2026-06', '2026-05'])
   })
 
   it('upsert は同キーの行を置き換える。CREATE TABLE は 1 回だけ', async () => {

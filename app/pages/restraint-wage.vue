@@ -20,13 +20,14 @@
 import type {
   ArchiveCsvEntry,
   ArchiveHistoryEntry,
+  FastBadgeState,
   MinWageMaster,
   RestraintDriverSummary,
   WageMaster,
   WageReportResponse,
   WageReportRow,
 } from '~/utils/restraint-wage-view'
-import { MIN_WAGE_DEFAULT_KEY } from '~/utils/restraint-wage-view'
+import { fastBadgeState, MIN_WAGE_DEFAULT_KEY } from '~/utils/restraint-wage-view'
 import { buildTimecardSummary, buildTimecardTable, countWorkKinds, employedDaysInMonth } from '~/utils/timecard-view'
 import type { KosokuDay } from '~/utils/kosoku-daily'
 import {
@@ -172,6 +173,9 @@ const kyuyoSyncedMonths = ref<Set<string>>(new Set())
 const kyuyoSyncedKeys = ref<Set<string>>(new Set())
 /** 拘束サマリが ichiban に同期済みの月 (YYYY-MM) = 高速表示できる月 (Refs #460)。 */
 const ichibanMonths = ref<string[]>([])
+/** relay の kintai 上流キャッシュ (daily+kosoku) が揃っている月 (Refs #543 followup)。
+ * null = 旧 relay 応答 (フィールド無し) — バッジは従来どおりフル表示に fallback。 */
+const kintaiCachedMonths = ref<string[] | null>(null)
 
 function monthHasKintai(year: number, monthNo: number): boolean {
   return kintaiMonths.value.includes(`${year}-${String(monthNo).padStart(2, '0')}`)
@@ -183,6 +187,16 @@ function monthHasKyuyo(year: number, monthNo: number): boolean {
 
 function monthIsSynced(year: number, monthNo: number): boolean {
   return ichibanMonths.value.includes(`${year}-${String(monthNo).padStart(2, '0')}`)
+}
+
+/** 「高速表示可」バッジの 2 段階判定 (Refs #543 followup)。判定は pure な
+ * `fastBadgeState` (app/utils/restraint-wage-view.ts) に寄せてある。 */
+function monthFastBadge(year: number, monthNo: number): FastBadgeState {
+  return fastBadgeState(
+    `${year}-${String(monthNo).padStart(2, '0')}`,
+    ichibanMonths.value,
+    kintaiCachedMonths.value,
+  )
 }
 
 /** 選択中の月がアーカイブ有りなのに未同期 = 表示が遅い状態。バックフィル
@@ -220,12 +234,15 @@ async function loadArchiveMonths() {
   if (!session.value || archiveMonthsLoading) return
   archiveMonthsLoading = true
   try {
-    const res = await $fetch<{ months: string[], kintai_months?: string[], ichiban_months?: string[] }>('/restraint-api/archive/months', { headers: authHeaders() })
+    const res = await $fetch<{ months: string[], kintai_months?: string[], ichiban_months?: string[], kintai_cached_months?: string[] }>('/restraint-api/archive/months', { headers: authHeaders() })
     archiveMonths.value = res.months
     // タイムカード取り込み済み月 (relay 旧版は返さない — その間はバッジ非表示)
     kintaiMonths.value = res.kintai_months ?? []
     // 拘束サマリ同期済み月 (= 高速表示可、Refs #460)
     ichibanMonths.value = res.ichiban_months ?? []
+    // kintai 上流キャッシュ有りの月 (Refs #543 followup)。旧 relay はフィールド
+    // 自体が無い → null のままにしてバッジを従来どおりフル表示に fallback
+    kintaiCachedMonths.value = res.kintai_cached_months ?? null
     // 給与バッジも同じタイミングで更新 (失敗は静かに無視)
     void loadKyuyoSyncedMonths()
     // 初期選択: アーカイブのある最新月
@@ -3388,10 +3405,16 @@ watch([compMap, kyuyoSyncedKeys], () => {
                   class="w-1.5 h-1.5 rounded-full bg-amber-500"
                   title="給与取り込み済み"
                 />
+                <!-- 高速表示可は 2 段階 (Refs #543 followup): フル = 同期済み +
+                     kintai キャッシュ有り / 弱 (opacity-50) = 同期済みのみ。
+                     キャッシュ有りでも上流の版が動けば読み直すため「目安」表示 -->
                 <span
-                  v-if="monthIsSynced(selectedYear, m)"
+                  v-if="monthFastBadge(selectedYear, m) !== 'none'"
                   class="w-1.5 h-1.5 rounded-full bg-emerald-500"
-                  title="高速表示可 (拘束サマリ同期済み)"
+                  :class="monthFastBadge(selectedYear, m) === 'synced-only' ? 'opacity-50' : ''"
+                  :title="monthFastBadge(selectedYear, m) === 'full'
+                    ? '高速表示可 (拘束サマリ同期済み・キャッシュ有り)'
+                    : '高速表示可 (拘束サマリ同期済み)'"
                 />
               </span>
             </div>
@@ -3400,7 +3423,8 @@ watch([compMap, kyuyoSyncedKeys], () => {
             薄い月はアーカイブなし ・
             <span class="inline-block w-1.5 h-1.5 rounded-full bg-sky-500 align-middle" /> タイムカード
             <span class="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 align-middle ml-1" /> 給与
-            <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 align-middle ml-1" /> 高速表示可
+            <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 align-middle ml-1" /> 高速表示可 (キャッシュ有り)
+            <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 opacity-50 align-middle ml-1" /> 同期のみ
           </span>
         </div>
 

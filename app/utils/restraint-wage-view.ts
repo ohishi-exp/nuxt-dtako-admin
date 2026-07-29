@@ -238,3 +238,35 @@ export function monthRange(from: string, to: string, max = MONTH_RANGE_MAX): str
   }
   return out
 }
+
+// ---- 月タブ「高速表示可」バッジの 2 段階判定 (Refs #543 followup、案A 2026-07-29) ----
+
+/**
+ * 「高速表示可」バッジの表示段階。
+ *
+ * - `full`: 拘束サマリ同期済み + relay の kintai 上流キャッシュ有り (フル表示)
+ * - `synced-only`: 拘束サマリ同期済みのみ (弱表示 — キャッシュが無いぶん
+ *   月切替で上流取得が要る可能性が高い)
+ * - `none`: バッジ無し
+ */
+export type FastBadgeState = 'full' | 'synced-only' | 'none'
+
+/**
+ * 月タブの「高速表示可」バッジ判定 (pure)。
+ *
+ * `cachedMonths` が `null` = relay が `kintai_cached_months` を返さない旧応答 —
+ * 従来どおりフル表示に fallback する (既存挙動を壊さない)。空配列は
+ * 「キャッシュ無効 (フラグ off) or 何も載っていない」で、全て弱表示になる。
+ *
+ * キャッシュが有っても上流の版 (etag) が動いていれば読み直し (miss) になるため、
+ * このバッジは「速いことが多い」目安であって保証ではない。
+ */
+export function fastBadgeState(
+  ym: string,
+  syncedMonths: readonly string[],
+  cachedMonths: readonly string[] | null,
+): FastBadgeState {
+  if (!syncedMonths.includes(ym)) return 'none'
+  if (cachedMonths === null || cachedMonths.includes(ym)) return 'full'
+  return 'synced-only'
+}
