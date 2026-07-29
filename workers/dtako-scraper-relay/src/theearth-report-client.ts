@@ -1580,6 +1580,24 @@ function findPagerSubmitButton(html: string, label: string): PagerSubmitButton |
   return null;
 }
 
+/** ページャの「次」submit ボタンのラベル候補 (実ラベル未確定のため両方試す)。 */
+const PAGER_NEXT_LABELS = ["次", "次へ"];
+
+/** ページャ (`dpOperation`) 配下の submit ボタンの value 一覧 (打ち切り診断用)。 */
+function listPagerSubmitButtonValues(html: string): string[] {
+  const values: string[] = [];
+  const re = /<input\b[^>]*>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const tag = m[0];
+    if (!/\btype="submit"/i.test(tag)) continue;
+    if (!/\bname="[^"]*dpOperation[^"]*"/i.test(tag)) continue;
+    const valueMatch = tag.match(/\bvalue="([^"]*)"/i);
+    values.push((valueMatch?.[1] ?? "") + (/\bdisabled\b/i.test(tag) ? "(disabled)" : ""));
+  }
+  return values;
+}
+
 async function postPagerSubmitButton(
   jar: CookieJar,
   url: string,
@@ -1741,20 +1759,39 @@ export async function harvestDailyReport(
       }
     }
     if (!nextLink) {
-      // 「次」リンクが無い = 最終ページに到達したとみなして打ち切る。
+      // 数値リンクも「...」も無い窓は「次」submit ボタンで進むタイプがある
+      // (「最初」「最後」と同じ ASP.NET DataPager のボタン、実機 2026-07-29:
+      // 窓が「1 2 3」のみで forward 省略記号が無く 3 ページで打ち切られていた)。
+      // 進めたか (gCurrentPage が増えたか) を必ず検証し、進まなければ最終ページ
+      // とみなして打ち切る (無限ループ防止)。
+      const nextButton = PAGER_NEXT_LABELS
+        .map((label) => findPagerSubmitButton(html, label))
+        .find((b) => b !== null);
+      if (nextButton) {
+        const prevPage = currentPage;
+        html = await postPagerSubmitButton(jar, url, html, nextButton, fetchImpl, timeoutMs);
+        const landedPage = extractCurrentPageNumber(html);
+        if (landedPage !== null && landedPage > prevPage) {
+          currentPage = landedPage;
+          continue;
+        }
+      }
+      // 最終ページに到達したとみなして打ち切る。
       // 注意: これはページャ構造の想定違いと区別できない (「本当に最終ページ」
       // と「regex が実際のマークアップに一致していない」を応答内容だけから
-      // 判別する信頼できるシグナルが無いため)。1ページ目で行ありのまま打ち切る
-      // 場合は誤検出の可能性が高いので、Tail Worker から markup を追えるよう
-      // pager 周辺の実 HTML を warn で残す (実機 2026-07-29 に btnUpdate 応答起点の
-      // harvest が 1 ページで打ち切られ検索結果が大量欠落した事故の再発検知)。
-      if (pageCount === 0 && pageRows.length > 0) {
-        const pagerArea =
-          html.match(/.{0,200}gCurrentPage[\s\S]{0,400}/)?.[0]?.replace(/\s+/g, " ")
-            ?? "(gCurrentPage 無し)";
+      // 判別する信頼できるシグナルが無いため)。打ち切りの実態を Tail Worker から
+      // 追えるよう、ページ番号・リンク文字列・pager ボタン一覧を warn で残す
+      // (実機 2026-07-29 に 1 ページ/3 ページ打ち切りで検索結果が大量欠落した
+      // 事故が続いたための常設診断)。
+      if (pageRows.length > 0) {
+        const buttonValues = listPagerSubmitButtonValues(html);
+        const detail = pageCount === 0
+          ? ` pager=${html.match(/.{0,200}gCurrentPage[\s\S]{0,400}/)?.[0]?.replace(/\s+/g, " ") ?? "(gCurrentPage 無し)"}`
+          : "";
         console.warn(
-          `harvestDailyReport: 1ページ目で次リンクが見つかりません rows=${pageRows.length} ` +
-            `links=${links.length} pager=${pagerArea}`,
+          `harvestDailyReport: 次ページ手段なしで打ち切り page=${currentPage} pages=${pageCount + 1} ` +
+            `rowsSoFar=${rows.length} links=[${links.map((l) => l.text).join(",")}] ` +
+            `buttons=[${buttonValues.join(",")}]${detail}`,
         );
       }
       break;
@@ -1769,7 +1806,7 @@ export async function harvestDailyReport(
   const seen = new Set<string>();
   return rows.filter((r) => {
     if (r.workEndDateTime < range.from || r.workEndDateTime > range.to) return false;
-    const key = `${r.operationNo} ${r.startDateTime}`;
+    const key = `${r.operationNo} ${r.startDateTime}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
