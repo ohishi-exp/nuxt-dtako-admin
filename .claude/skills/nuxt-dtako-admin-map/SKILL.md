@@ -730,6 +730,14 @@ N:1 が現実に存在する (本番で 5 件、うち社員C 1619 鵜瀬裕一�
   relay は空配列、旧 relay はフィールド無し → front はフル表示に fallback)。判定 pure は
   `fastBadgeState` (`app/utils/restraint-wage-view.ts`)。キャッシュ有りでも上流の版 (etag)
   が動けば miss になるため「速いことが多い」目安表示
+- **空状態は必ず言い切る** (Refs #554)。給与比較タブの「比較結果」カードは**常設**で、
+  `salaryStatus` computed が `loading-payroll` / `no-payroll` / `no-pay-month` /
+  `loading-report` / `no-report` / `ready` を出し分ける。月次集計カードも初回
+  (`report === null && loadingReport`) にスピナーを出す — 以前はどちらも
+  「カードが無い / 中身が空」で、読み込み中と未取り込みの区別が画面から付かず
+  「給与比較が出ない」という報告になった。「読み込み中」と「取り込まれていない」の
+  取り違えを防ぐ門が `compMapLoaded` / `kyuyoSyncedLoaded` (会社と給与アーカイブ一覧が
+  解決するまでは「無い」と判定しない)
 
 | ファイル | 役割 |
 |---|---|
