@@ -170,6 +170,8 @@ export type DiffCause =
   | "punch-tail"
   /** フェリー + 尻尾。1708 松江 03-13 (-584 = 432 + 151 + 丸め 1) の形。 */
   | "ferry+punch-tail"
+  /** フェリー + 日跨ぎ始業の頭。1029 冨田 03-18 (-89 = 84 + 5) の形。 */
+  | "ferry+punch-head"
   /** 昼休 + 尻尾。 */
   | "lunch+punch-tail"
   /**
@@ -552,6 +554,7 @@ function classifyDiff(
   punchTailMinutes: number,
   punchHeadMinutes: number,
   runHeadCorrection: number,
+  lunchOverlapMinutes: number,
   tolerance: number,
 ): { cause: DiffCause; explainedMinutes: number; residualMinutes: number | null } {
   if (diffMinutes === null) {
@@ -564,6 +567,9 @@ function classifyDiff(
   const tail = punchTailMinutes;
   // 紙が控除しきれなかった運行の頭 (通常は負 = 紙が大きい)。0 なら候補にならない
   const runHead = runHeadCorrection;
+  // 昼休は実額 (rust#177 の窓の重なり) があればそれを、無ければ従来の固定 60 を使う。
+  // 終業が窓の中に落ちる対は 60 未満になる (1714 井上 03-04 の 20 分)
+  const lunch = lunchOverlapMinutes > 0 ? lunchOverlapMinutes : LUNCH_DEDUCTION_MINUTES;
   const candidates: Array<{ cause: DiffCause; explained: number }> = [
     { cause: "ferry", explained: ferry },
     { cause: "month-boundary", explained: crossMonthMinutes },
@@ -572,12 +578,13 @@ function classifyDiff(
     { cause: "punch-head", explained: punchHeadMinutes },
     { cause: "run-head", explained: runHead },
     { cause: "ferry+punch-tail", explained: ferry === 0 || tail === 0 ? 0 : ferry + tail },
+    { cause: "ferry+punch-head", explained: ferry === 0 || punchHeadMinutes === 0 ? 0 : ferry + punchHeadMinutes },
     { cause: "ferry+run-head", explained: ferry === 0 || runHead === 0 ? 0 : ferry + runHead },
-    { cause: "lunch", explained: LUNCH_DEDUCTION_MINUTES },
-    { cause: "lunch+run-gap", explained: runGapMinutes === 0 ? 0 : runGapMinutes + LUNCH_DEDUCTION_MINUTES },
-    { cause: "lunch+punch-tail", explained: tail === 0 ? 0 : tail + LUNCH_DEDUCTION_MINUTES },
-    { cause: "lunch+run-head", explained: runHead === 0 ? 0 : runHead + LUNCH_DEDUCTION_MINUTES },
-    { cause: "lunch+ferry", explained: ferry + LUNCH_DEDUCTION_MINUTES },
+    { cause: "lunch", explained: lunch },
+    { cause: "lunch+run-gap", explained: runGapMinutes === 0 ? 0 : runGapMinutes + lunch },
+    { cause: "lunch+punch-tail", explained: tail === 0 ? 0 : tail + lunch },
+    { cause: "lunch+run-head", explained: runHead === 0 ? 0 : runHead + lunch },
+    { cause: "lunch+ferry", explained: ferry + lunch },
   ];
   for (const c of candidates) {
     // 引かれていない (ferry 0) 組み合わせは候補にしない — 0 を足しても説明にならない
@@ -610,6 +617,7 @@ export function compareTimecardMonth(input: {
       punchTailMinutes?: number,
       punchHeadMinutes?: number,
       runHeadMinutes?: number,
+      lunchOverlapMinutes?: number,
     }
   >;
   /**
@@ -683,6 +691,7 @@ export function compareTimecardMonth(input: {
       punchTail,
       punchHead,
       runHeadCorrection,
+      ours?.lunchOverlapMinutes ?? 0,
       tolerance,
     );
     // 片側 (こちら) だけの日は差が引けず `none` になるが、値の全部が「紙が構造的に
@@ -766,6 +775,7 @@ export function compareTimecardMonthAll(input: {
         punchTailMinutes?: number,
         punchHeadMinutes?: number,
         runHeadMinutes?: number,
+        lunchOverlapMinutes?: number,
       }
     >
   >;
