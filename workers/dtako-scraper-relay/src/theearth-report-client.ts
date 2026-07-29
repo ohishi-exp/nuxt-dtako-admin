@@ -1648,8 +1648,12 @@ async function postPagerLink(
   fetchImpl: FetchLike,
   timeoutMs: number,
 ): Promise<string> {
+  // 実ブラウザの __doPostBack は form 全体を送る。hidden だけの部分 POST だと
+  // `ddlRowCount` (表示件数) が毎ページ保存値へ戻り、btnUpdate で 30 に引き上げても
+  // 2ページ目以降が 10行/頁 に落ちる (実測 2026-07-29: 199頁×10行で検索1回2分。
+  // full form なら 30行/頁 で頁数 1/3)。
   const body = new URLSearchParams({
-    ...extractHiddenFields(html),
+    ...serializeFormFields(html),
     __EVENTTARGET: link.target,
     __EVENTARGUMENT: link.argument,
   });
@@ -1807,14 +1811,17 @@ export async function harvestDailyReport(
           : "";
         console.warn(
           `harvestDailyReport: 次ページ手段なしで打ち切り page=${currentPage} pages=${pageCount + 1} ` +
-            `rowsSoFar=${rows.length} links=[${links.map((l) => l.text).join(",")}] ` +
+            `rowsSoFar=${rows.length} links=[${links.map((l) => JSON.stringify(l.text)).join(",")}] ` +
             `buttons=[${buttonValues.join(",")}]${detail}`,
         );
       }
       break;
     }
     html = await postPagerLink(jar, url, html, nextLink, fetchImpl, timeoutMs);
-    currentPage += 1;
+    // ページ番号は遷移のたびに実ページの gCurrentPage から再同期する。+1 の推測だけに
+    // 頼ると実ページとズレ、次リンクが「見えているのに探せない」打ち切りや後退リンク
+    // 踏みが起きる (実機 2026-07-29: page=20 なのに links=[...,21..24] で打ち切り)。
+    currentPage = extractCurrentPageNumber(html) ?? currentPage + 1;
   }
 
   // ページ送りの跨ぎ (「...」の直接遷移や窓送り) で同一ページを二度読むことがある
