@@ -1913,6 +1913,17 @@ describe("harvestDailyReport", () => {
     }
   });
 
+  it("maps the ASP.NET null-key 500 (session invalidated) to VenusSessionExpiredError", async () => {
+    const jar = createCookieJar();
+    const nullKeyErrorPage = new Response(
+      "<html><body><h1>キーを Null にすることはできません。 パラメーター名:key</h1></body></html>",
+      { status: 500, headers: { "content-type": "text/html" } },
+    );
+    await expect(
+      harvestDailyReport(jar, { from: "2026/07/01 00:00", to: "2026/07/07 00:00" }, sequenceFetch([nullKeyErrorPage])),
+    ).rejects.toThrow(VenusSessionExpiredError);
+  });
+
   it("throws on non-ok GET / login redirect on the initial GET", async () => {
     const jar1 = createCookieJar();
     await expect(

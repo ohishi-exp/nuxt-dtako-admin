@@ -106,6 +106,16 @@ function assertNoOtherEditConflict(html: string, actionLabel: string): void {
   }
 }
 
+/** ASP.NET の「キーを Null にすることはできません。パラメーター名:key」500。
+ * theearth のセッション無効化 (別セッションの同時ログイン等) は VenusBridge 以外の
+ * aspx GET ではこの 500 として現れる (実機 2026-07-29: 再ログインで解消を確認)。
+ * SKILL.md「セッション無効化は HTTP 500 でも現れる」節と同じ方針で
+ * VenusSessionExpiredError → 401 にマップし、再ログイン導線へ繋ぐ
+ * (502 に潰すと利用者が回復手段に辿りつけない)。 */
+function isNullKeySessionError(status: number, rawBody: string): boolean {
+  return status === 500 && rawBody.includes("キーを Null にすることはできません");
+}
+
 /** GET が非 2xx を返した時に、ASP.NET エラーページの要約を log + メッセージに
  * 載せて throw する (postback 版の postButton と同じ調査手法、Refs #199)。
  * F-GOS0030 / F-DES1011 が再ログイン後も HTTP 500 を返し続ける事象 (staging
@@ -114,10 +124,17 @@ async function throwGetError(pageLabel: string, res: { status: number; text: () 
   let detail = "";
   try {
     const rawBody = await res.text();
+    if (isNullKeySessionError(res.status, rawBody)) {
+      throw new VenusSessionExpiredError(
+        `${pageLabel}が「キーを Null にすることはできません」の HTTP 500 を返しました — ` +
+          "theearth セッションが別ログイン等で無効化されています。再ログインしてください",
+      );
+    }
     detail = extractErrorSnippet(rawBody);
     const dump = rawBody.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 600);
     console.error(`theearth GET failed: HTTP ${res.status} page=${pageLabel} body=${dump}`);
-  } catch {
+  } catch (err) {
+    if (err instanceof VenusSessionExpiredError) throw err;
     // body が読めなくても HTTP status だけで throw する
   }
   throw new TheearthClientError(
