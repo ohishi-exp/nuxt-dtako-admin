@@ -66,6 +66,14 @@ import { needsTheearthQueue } from "./restraint-queue";
 import { UpstreamMemo } from "./upstream-memo";
 import { measurePhase, PhaseTimer, phaseTimingLogLine } from "./phase-timing";
 import {
+  CacheStateTracker,
+  gunzipText,
+  gzipText,
+  parseVersionResponse,
+  UpstreamCache,
+  type CacheKind,
+} from "./upstream-cache";
+import {
   buildDvrSearchKey,
   dvrDataUrl,
   DvrSearchParamError,
@@ -396,6 +404,12 @@ export interface RelayEnv {
    * (Refs ohishi-exp/dtako-scraper#22)。
    */
   SCRAPER_MODE?: string;
+  /**
+   * `"on"` で kintai 系上流応答の DO SQLite キャッシュ + 条件付き再検証を有効化
+   * する (Refs #543 PR-2)。off (既定・未設定) は完全に従来経路。詳細は
+   * upstream-cache.ts と loadKintaiTextWithCache のコメント参照。
+   */
+  UPSTREAM_CACHE?: string;
   /**
    * dtako-scraper の Rust 版と同一 JSON shape (`comp_id`/`user_name`/`user_pass`/
    * `tenant_id` の配列) の CF Secrets Store binding。`SCRAPER_MODE=http` の時のみ
@@ -2917,6 +2931,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const { ym } = parsed;
     // フェーズ計測 (Refs #543 PR-1)。挙動は変えない — ログ 1 行と Server-Timing だけ
     const timer = new PhaseTimer();
+    // キャッシュの hit/miss/live を phase log の cacheState に載せる (Refs #543 PR-2)
+    const tracker = new CacheStateTracker();
 
     const apiUrl = (this.env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
     const clientId = this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
@@ -2936,7 +2952,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 生応答 memo を wage-report と共有する (Refs #508)。上流エラーの詳細は
     // fetchKosokuRaw が log 済みなので、ここは null = 502 に畳む
     const body = (await timer.measure("kosoku-cur", () =>
-      this.fetchKosokuRaw(apiUrl, clientId, clientSecret, ym, timer, "kosoku-cur"),
+      this.fetchKosokuRaw(apiUrl, clientId, clientSecret, ym, timer, "kosoku-cur", "version-cur", tracker),
     )) as { drivers?: unknown } | null;
     if (body == null) {
       return dvrJsonError(502, "拘束サマリ API の取得に失敗しました");
@@ -2947,14 +2963,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return dvrJsonError(502, "拘束サマリ API の応答に drivers 配列がありません");
     }
     console.log(JSON.stringify({ kosoku_daily: "relayed", month: ym, drivers: body.drivers.length }));
-    return this.withPhaseTiming("kintai/kosoku-daily", ym, timer, Response.json(body));
+    return this.withPhaseTiming("kintai/kosoku-daily", ym, timer, tracker.aggregate(), Response.json(body));
   }
 
   /** フェーズ計測の出力 (ログ 1 行 + Server-Timing ヘッダ)。**応答は絶対に壊さない**
-   * — 計測側の不具合はここで握って応答をそのまま返す (Refs #543 PR-1)。 */
-  private withPhaseTiming(route: string, month: string, timer: PhaseTimer, res: Response): Response {
+   * — 計測側の不具合はここで握って応答をそのまま返す (Refs #543 PR-1)。
+   * cacheState は上流キャッシュの集約結果 "hit" | "miss" | "live" (Refs #543 PR-2)。 */
+  private withPhaseTiming(
+    route: string,
+    month: string,
+    timer: PhaseTimer,
+    cacheState: string,
+    res: Response,
+  ): Response {
     try {
-      console.log(phaseTimingLogLine(route, month, timer, "live"));
+      console.log(phaseTimingLogLine(route, month, timer, cacheState));
       res.headers.set("Server-Timing", timer.serverTimingHeader());
     } catch (err) {
       console.error(JSON.stringify({ phase_timing: "emit-error", route, error: describeUnknownError(err) }));
@@ -3178,6 +3201,132 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return this.kintaiUpstreamMemo.get(key, Date.now(), load);
   }
 
+  /** kintai 系上流キャッシュ (`UPSTREAM_CACHE=on` の時だけ使う、Refs #543 PR-2)。 */
+  private upstreamCache: UpstreamCache | null = null;
+
+  /** DO SQLite (`new_sqlite_classes`) 上の上流応答キャッシュ。lazy 生成。 */
+  private upstreamCacheStore(): UpstreamCache {
+    if (!this.upstreamCache) this.upstreamCache = new UpstreamCache(this.ctx.storage.sql);
+    return this.upstreamCache;
+  }
+
+  /**
+   * rust の勤怠データ版数 (`GET /api/kintai/version?month=`) を月単位で引く
+   * (Refs #543 PR-2、上流は ohishi-exp/rust-ichibanboshi#184)。応答は
+   * `{month, etag}` — etag は opaque な版識別子で、SQLite キャッシュ行の
+   * upstream_etag と一致すれば本文を再取得せずに済む。
+   *
+   * **取れなければ null = キャッシュ不使用 (ライブ取得へ)** — 鮮度の判定材料が
+   * 無い以上、古い値を返す側に倒してはならない。60 秒 memo は本文と同じ
+   * UpstreamMemo — 同一リクエスト群 (daily と kosoku が同じ月をほぼ同時に引く)
+   * の照会を月 1 本に畳む。null (失敗) は memo されず次回再試行。
+   */
+  private fetchKintaiVersion(
+    apiUrl: string,
+    clientId: string,
+    clientSecret: string,
+    ym: string,
+    timer?: PhaseTimer,
+    phase?: string,
+  ): Promise<string | null> {
+    return this.memoKintaiUpstream(`kintai-version:${ym}`, () =>
+      measurePhase(timer, phase ?? "version", async () => {
+        try {
+          const res = await fetch(`${apiUrl}/api/kintai/version?month=${encodeURIComponent(ym)}`, {
+            headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret },
+          });
+          if (!res.ok) {
+            console.error(JSON.stringify({ kintai_version: "upstream-error", ym, status: res.status }));
+            return null;
+          }
+          const text = await res.text();
+          if (timer && phase) timer.setBytes(phase, text.length);
+          const etag = parseVersionResponse(JSON.parse(text));
+          if (etag === null) {
+            console.error(JSON.stringify({ kintai_version: "bad-shape", ym }));
+          }
+          return etag;
+        } catch (err) {
+          console.error(JSON.stringify({ kintai_version: "error", ym, error: describeUnknownError(err) }));
+          return null;
+        }
+      }),
+    );
+  }
+
+  /**
+   * kintai 系上流 (`daily` / `kosoku-daily`) の本文取得に DO SQLite キャッシュを
+   * 挟む (Refs #543 PR-2)。`UPSTREAM_CACHE=on` の時だけ有効で、off (既定) なら
+   * fetchLive をそのまま呼ぶ = 完全に従来経路。
+   *
+   * 鮮度は条件付き再検証で守る — 上流の版 (etag) が行と一致した時だけ本文を使う。
+   * **古い値は一切返さない**:
+   *
+   * - 版照会が失敗 → キャッシュを読まずライブ取得 (tracker には "live")
+   * - 行なし・版不一致 → ライブ取得して gzip upsert ("miss")
+   * - キャッシュ層の失敗 (SQLite/gzip/破損本文) も全て握ってライブへ —
+   *   キャッシュの不具合がリクエストを落とすことはない
+   * - gzip 後 1.9MB 超は格納スキップ (DO SQLite の行 2MB 制限)。phase log に
+   *   `cache-skip-*` の 0ms mark で残す
+   */
+  private async loadKintaiTextWithCache(opts: {
+    kind: CacheKind;
+    ym: string;
+    apiUrl: string;
+    clientId: string;
+    clientSecret: string;
+    /** 従来のライブ取得。失敗は null (呼び出し側の従来ハンドリングのまま)。 */
+    fetchLive: () => Promise<string | null>;
+    timer?: PhaseTimer;
+    /** 本文フェーズ名 (cache-skip mark 用)。 */
+    phase?: string;
+    /** 版照会フェーズ名 ("version-cur" / "version-prev")。 */
+    versionPhase?: string;
+    tracker?: CacheStateTracker;
+  }): Promise<string | null> {
+    const { kind, ym, apiUrl, clientId, clientSecret, fetchLive, timer, phase, versionPhase, tracker } =
+      opts;
+    if (this.env.UPSTREAM_CACHE !== "on") return fetchLive();
+
+    const etag = await this.fetchKintaiVersion(apiUrl, clientId, clientSecret, ym, timer, versionPhase);
+    if (etag === null) {
+      // 版が引けない = 鮮度を判定できない。キャッシュは読まずライブへ (安全側)
+      tracker?.add("live");
+      return fetchLive();
+    }
+    try {
+      const gz = this.upstreamCacheStore().getFresh(kind, ym, etag, Date.now());
+      if (gz) {
+        const text = await gunzipText(gz);
+        tracker?.add("hit");
+        return text;
+      }
+    } catch (err) {
+      // 読み出し失敗 (SQLite/破損 gzip) はライブ取得で吸収する (応答は落とさない)
+      console.error(
+        JSON.stringify({ upstream_cache: "read-error", kind, ym, error: describeUnknownError(err) }),
+      );
+    }
+    tracker?.add("miss");
+    const text = await fetchLive();
+    if (text !== null) {
+      try {
+        const gz = await gzipText(text);
+        const stored = this.upstreamCacheStore().put(kind, ym, gz, await this.sha256Hex(gz), etag, Date.now());
+        if (!stored) {
+          // 行 2MB 制限: gzip 後 1.9MB 超は格納しない (次回もライブ)。phase log に残す
+          timer?.mark(`cache-skip-${phase ?? kind}`, gz.byteLength);
+          console.log(JSON.stringify({ upstream_cache: "size-skip", kind, ym, gz_bytes: gz.byteLength }));
+        }
+      } catch (err) {
+        console.error(
+          JSON.stringify({ upstream_cache: "write-error", kind, ym, error: describeUnknownError(err) }),
+        );
+      }
+    }
+    return text;
+  }
+
   /**
    * `kosoku-daily` の上流生応答 (JSON parse 済み) を月単位で memo する (Refs #508)。
    *
@@ -3197,20 +3346,42 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     ym: string,
     timer?: PhaseTimer,
     phase?: string,
+    versionPhase?: string,
+    tracker?: CacheStateTracker,
   ): Promise<unknown> {
     return this.memoKintaiUpstream(`kosoku-raw:${ym}`, async () => {
+      const text = await this.loadKintaiTextWithCache({
+        kind: "kosoku",
+        ym,
+        apiUrl,
+        clientId,
+        clientSecret,
+        timer,
+        phase,
+        versionPhase,
+        tracker,
+        fetchLive: async () => {
+          try {
+            const upstream = await fetch(
+              `${apiUrl}/api/kintai/kosoku-daily?month=${encodeURIComponent(ym)}&view=timecard`,
+              { headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret } },
+            );
+            if (!upstream.ok) {
+              console.error(JSON.stringify({ kosoku_raw: "upstream-error", ym, status: upstream.status }));
+              return null;
+            }
+            const t = await upstream.text();
+            // 応答サイズを計測に載せる (memo ヒット時はこの loader ごと呼ばれない = bytes 無し)
+            if (timer && phase) timer.setBytes(phase, t.length);
+            return t;
+          } catch (err) {
+            console.error(JSON.stringify({ kosoku_raw: "error", ym, error: describeUnknownError(err) }));
+            return null;
+          }
+        },
+      });
+      if (text === null) return null;
       try {
-        const upstream = await fetch(
-          `${apiUrl}/api/kintai/kosoku-daily?month=${encodeURIComponent(ym)}&view=timecard`,
-          { headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret } },
-        );
-        if (!upstream.ok) {
-          console.error(JSON.stringify({ kosoku_raw: "upstream-error", ym, status: upstream.status }));
-          return null;
-        }
-        const text = await upstream.text();
-        // 応答サイズを計測に載せる (memo ヒット時はこの loader ごと呼ばれない = bytes 無し)
-        if (timer && phase) timer.setBytes(phase, text.length);
         return JSON.parse(text) as unknown;
       } catch (err) {
         console.error(JSON.stringify({ kosoku_raw: "error", ym, error: describeUnknownError(err) }));
@@ -3245,6 +3416,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     ym: string,
     prevYm: string,
     timer?: PhaseTimer,
+    tracker?: CacheStateTracker,
   ): Promise<{
     current: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
     prev: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
@@ -3260,19 +3432,45 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!apiUrl || !clientId || !clientSecret) return null;
 
     const headers = { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret };
-    const fetchDaily = async (month: string, phase: string): Promise<TimecardDailyRow[] | null> => {
+    const fetchDaily = async (
+      month: string,
+      phase: string,
+      versionPhase: string,
+    ): Promise<TimecardDailyRow[] | null> => {
+      const text = await this.loadKintaiTextWithCache({
+        kind: "daily",
+        ym: month,
+        apiUrl,
+        clientId,
+        clientSecret,
+        timer,
+        phase,
+        versionPhase,
+        tracker,
+        fetchLive: async () => {
+          try {
+            const res = await fetch(
+              `${apiUrl}/api/kintai/daily?month=${encodeURIComponent(month)}`,
+              { headers },
+            );
+            if (!res.ok) {
+              console.error(JSON.stringify({ wage_report_kintai: "daily-error", month, status: res.status }));
+              return null;
+            }
+            const t = await res.text();
+            // 応答サイズを計測に載せる (memo ヒット時はこの loader ごと呼ばれない = bytes 無し)
+            timer?.setBytes(phase, t.length);
+            return t;
+          } catch (err) {
+            console.error(
+              JSON.stringify({ wage_report_kintai: "daily-throw", month, error: describeUnknownError(err) }),
+            );
+            return null;
+          }
+        },
+      });
+      if (text === null) return null;
       try {
-        const res = await fetch(
-          `${apiUrl}/api/kintai/daily?month=${encodeURIComponent(month)}`,
-          { headers },
-        );
-        if (!res.ok) {
-          console.error(JSON.stringify({ wage_report_kintai: "daily-error", month, status: res.status }));
-          return null;
-        }
-        const text = await res.text();
-        // 応答サイズを計測に載せる (memo ヒット時はこの loader ごと呼ばれない = bytes 無し)
-        timer?.setBytes(phase, text.length);
         const body = JSON.parse(text) as { rows?: unknown };
         return Array.isArray(body.rows) ? (body.rows as TimecardDailyRow[]) : null;
       } catch (err) {
@@ -3288,18 +3486,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 「勤務を読み込んでいます…」から進まなくなった (2026-07-28 本番で発覚)
     const [dailyCurrent, dailyPrev, shiftsCurrent, shiftsPrev] = await Promise.all([
       measurePhase(timer, "daily-cur", () =>
-        this.memoKintaiUpstream(`daily:${ym}`, () => fetchDaily(ym, "daily-cur")),
+        this.memoKintaiUpstream(`daily:${ym}`, () => fetchDaily(ym, "daily-cur", "version-cur")),
       ),
       measurePhase(timer, "daily-prev", () =>
-        this.memoKintaiUpstream(`daily:${prevYm}`, () => fetchDaily(prevYm, "daily-prev")),
+        this.memoKintaiUpstream(`daily:${prevYm}`, () => fetchDaily(prevYm, "daily-prev", "version-prev")),
       ),
       // kosoku の memo は fetchKosokuRaw の生応答層にある (Refs #508) — 画面の
       // `/kintai/kosoku-daily` 中継と同じ月を共有するため、ここでは重ねない
       measurePhase(timer, "kosoku-cur", () =>
-        this.loadKosokuShifts(apiUrl, clientId, clientSecret, [ym], timer, "kosoku-cur"),
+        this.loadKosokuShifts(apiUrl, clientId, clientSecret, [ym], timer, "kosoku-cur", "version-cur", tracker),
       ),
       measurePhase(timer, "kosoku-prev", () =>
-        this.loadKosokuShifts(apiUrl, clientId, clientSecret, [prevYm], timer, "kosoku-prev"),
+        this.loadKosokuShifts(apiUrl, clientId, clientSecret, [prevYm], timer, "kosoku-prev", "version-prev", tracker),
       ),
     ]);
     // 当月の勤務 = 前月から跨いだ分 + 当月分 (`kosokuPartsByDate` が当月に落ちる分だけ拾う)
@@ -3375,12 +3573,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     months: string[],
     timer?: PhaseTimer,
     phase?: string,
+    versionPhase?: string,
+    tracker?: CacheStateTracker,
   ): Promise<Map<string, KosokuShift[]> | null> {
     const fetchMonth = async (ym: string): Promise<Map<string, KosokuShift[]> | null> => {
       // 賃金計算 (wage-report) の経路 — 画面の `/kintai/kosoku-daily` 中継と
       // 同じ生応答 memo を共有する (Refs #508)。view=timecard の slim 応答でも
       // parseKosokuDaily は欠けた数値を 0 に落とすので同じ形に畳める
-      const body = await this.fetchKosokuRaw(apiUrl, clientId, clientSecret, ym, timer, phase);
+      const body = await this.fetchKosokuRaw(apiUrl, clientId, clientSecret, ym, timer, phase, versionPhase, tracker);
       return body == null ? null : parseKosokuDaily(body);
     };
     const results = await Promise.all(months.map(fetchMonth));
@@ -3805,6 +4005,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     prevYm: string,
     kintaiPrefix: string,
     timer?: PhaseTimer,
+    tracker?: CacheStateTracker,
   ): Promise<{
     current: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
     prev: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
@@ -3816,7 +4017,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 出続ける (実測: 乗務員 1108 / 2026-04 が打刻由来の 3 勤務・拘束 447h29m のまま)。
     // 上流が取れない時だけ従来どおり R2 へ落ちる。
     const live = await measurePhase(timer, "kintai-live", () =>
-      this.buildKintaiSummariesLive(compId, ym, prevYm, timer),
+      this.buildKintaiSummariesLive(compId, ym, prevYm, timer, tracker),
     );
     const fromR2 = {
       current: () =>
@@ -3938,6 +4139,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const { year, month, ym } = parsed;
     // フェーズ計測 (Refs #543 PR-1)。挙動は変えない — ログ 1 行と Server-Timing だけ
     const timer = new PhaseTimer();
+    // キャッシュの hit/miss/live を phase log の cacheState に載せる (Refs #543 PR-2)
+    const tracker = new CacheStateTracker();
 
     const loadMaster = async <T>(
       name: "wage-master" | "min-wage" | "wage-config",
@@ -3975,7 +4178,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           loadMaster<WageConfig>("wage-config", normalizeWageConfig, normalizeWageConfig(null)),
         ),
         timer.measure("source", () =>
-          this.loadWageReportSource(bucket, record.compId, ym, prevYm, kintaiPrefix, timer),
+          this.loadWageReportSource(bucket, record.compId, ym, prevYm, kintaiPrefix, timer, tracker),
         ),
       ]);
     const { noDataDrivers } = current;
@@ -4028,6 +4231,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       "wage-report",
       ym,
       timer,
+      tracker.aggregate(),
       Response.json({ month: ym, rows, no_data_drivers: noDataDrivers, warnings, config }),
     );
   }
