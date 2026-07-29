@@ -1396,6 +1396,49 @@ describe("差の推定原因 (Refs #501)", () => {
     expect(d.residualMinutes).toBe(0);
   });
 
+  it("紙が引く 運行開始 → 始業 を実額で説明する", () => {
+    const d = compareTimecardMonth({
+      month: "2026-01",
+      driverCd: "1729",
+      nginx: nginxDriver([{ date: "2026-01-09", kosokuMinutes: 765 }]),
+      oursByDate: ours({ "2026-01-09": 774 }),
+      minusUnkoByDate: new Map([["2026-01-09", 9]]),
+      toleranceMinutes: 2,
+    }).days[8]!;
+    expect(d.cause).toBe("minus-unko");
+    expect(d.explainedMinutes).toBe(9);
+    expect(d.residualMinutes).toBe(0);
+  });
+
+  it("こちらだけの時間と minus_unko の汎用ペアでも説明する (1729 石坂 01-09 の形)", () => {
+    // -15 = ours-outside 6 (始業から最初のデジタコ区間までの空白) + minus-unko 9
+    const d = compareTimecardMonth({
+      month: "2026-01",
+      driverCd: "1729",
+      nginx: nginxDriver([{ date: "2026-01-09", kosokuMinutes: 759 }]),
+      oursByDate: ours({ "2026-01-09": 774 }),
+      oursOutsideByDate: new Map([["2026-01-09", 6]]),
+      minusUnkoByDate: new Map([["2026-01-09", 9]]),
+      toleranceMinutes: 2,
+    }).days[8]!;
+    expect(d.cause).toBe("ours-outside+minus-unko");
+    expect(d.explainedMinutes).toBe(15);
+    expect(d.residualMinutes).toBe(0);
+  });
+
+  it("minus_unko を乗務員ごとに渡せる", () => {
+    const rs = compareTimecardMonthAll({
+      month: "2026-01",
+      nginxByDriver: new Map([
+        ["1729", nginxDriver([{ date: "2026-01-09", kosokuMinutes: 765 }])],
+      ]),
+      oursByDriver: new Map([["1729", ours({ "2026-01-09": 774 })]]),
+      minusUnkoByDriver: new Map([["1729", new Map([["2026-01-09", 9]])]]),
+      toleranceMinutes: 2,
+    });
+    expect(rs[0]!.days[8]!.cause).toBe("minus-unko");
+  });
+
   it("こちらだけの時間を乗務員ごとに渡せる", () => {
     const rs = compareTimecardMonthAll({
       month: "2026-02",

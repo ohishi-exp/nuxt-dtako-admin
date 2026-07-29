@@ -211,6 +211,15 @@ export type DiffCause =
    */
   | "ours-outside"
   /**
+   * **紙が引く `運行開始 → 始業`** (実額、Refs #546 / ohishi-exp/rust-ichibanboshi#182)。
+   * 打刻より先に運行を始めた日、紙はその頭を日計から引く (`_make_minus_unko_day`)
+   * ので紙が小さくなる — `lunch` と同じ向き。実額は上流の `minus_unko_by_date`。
+   *
+   * 単独で当たる日より**複合の項**として効く方が多い (実測 1729 石坂 2026-01-09 の
+   * −15 = `ours-outside` 6 + `minus-unko` 9)。
+   */
+  | "minus-unko"
+  /**
    * **丸め方式の差** (実額)。紙は打刻・イベントの秒を保持したまま**区分ごとに**
    * 丸めて日計へ足す (TC_DC は経過秒切り捨て、デジタコの区間時間は端点床) ため、
    * 区分の切れ目が多い日に ±数分が堆積する — 正負両方向に出る。実額は上流の
@@ -603,6 +612,7 @@ function classifyDiff(
   lunchOverlapMinutes: number,
   paperOutsideMinutes: number,
   oursOutsideMinutes: number,
+  minusUnkoMinutes: number,
   paperDriftMinutes: number,
   tolerance: number,
 ): { cause: DiffCauseLabel; explainedMinutes: number; residualMinutes: number | null } {
@@ -637,6 +647,8 @@ function classifyDiff(
     },
     // こちらだけが数える時間 (紙が小さくなる向き = 正)
     { cause: "ours-outside", explained: oursOutsideMinutes },
+    // 紙が引く 運行開始 → 始業 (紙が小さくなる向き = 正)
+    { cause: "minus-unko", explained: minusUnkoMinutes },
     { cause: "lunch", explained: lunch },
     { cause: "lunch+run-gap", explained: runGapMinutes === 0 ? 0 : runGapMinutes + lunch },
     { cause: "lunch+punch-tail", explained: tail === 0 ? 0 : tail + lunch },
@@ -661,6 +673,7 @@ function classifyDiff(
     { key: "run-head", value: runHead },
     { key: "paper-outside", value: -paperOutsideMinutes },
     { key: "ours-outside", value: oursOutsideMinutes },
+    { key: "minus-unko", value: minusUnkoMinutes },
     { key: "lunch", value: lunchOverlapMinutes },
   ].filter((p) => p.value !== 0);
   const generic: Array<{ cause: DiffCauseLabel; explained: number }> = [];
@@ -750,6 +763,11 @@ export function compareTimecardMonth(input: {
    */
   oursOutsideByDate?: ReadonlyMap<string, number>;
   /**
+   * 暦日 → 紙が引く `運行開始 → 始業` (上流の `minus_unko_by_date`)。
+   * 渡されなければ `minus-unko` の説明は付かない。
+   */
+  minusUnkoByDate?: ReadonlyMap<string, number>;
+  /**
    * 暦日 → 紙の再現値との差 (`ours − paper`、上流の `paper_drift_by_date`)。
    * 渡されなければ `rounding` の説明は付かない。
    */
@@ -832,6 +850,7 @@ export function compareTimecardMonth(input: {
       ours?.lunchOverlapMinutes ?? 0,
       input.paperOutsideByDate?.get(date) ?? 0,
       input.oursOutsideByDate?.get(date) ?? 0,
+      input.minusUnkoByDate?.get(date) ?? 0,
       input.paperDriftByDate?.get(date) ?? 0,
       tolerance,
     );
@@ -926,6 +945,8 @@ export function compareTimecardMonthAll(input: {
   paperOutsideByDriver?: ReadonlyMap<string, ReadonlyMap<string, number>>;
   /** 乗務員CD → 暦日 → こちらだけが数える時間 (`ours_outside_by_date`)。 */
   oursOutsideByDriver?: ReadonlyMap<string, ReadonlyMap<string, number>>;
+  /** 乗務員CD → 暦日 → 紙が引く `運行開始 → 始業` (`minus_unko_by_date`)。 */
+  minusUnkoByDriver?: ReadonlyMap<string, ReadonlyMap<string, number>>;
   /** 乗務員CD → 暦日 → 紙の再現値との差 (`paper_drift_by_date`)。 */
   paperDriftByDriver?: ReadonlyMap<string, ReadonlyMap<string, number>>;
   /** 乗務員CD → 暦日 → フェリー控除 (`ferry_minus_by_date`)。 */
@@ -944,6 +965,7 @@ export function compareTimecardMonthAll(input: {
       crossMonthByDate: input.crossMonthByDriver?.get(driverCd),
       paperOutsideByDate: input.paperOutsideByDriver?.get(driverCd),
       oursOutsideByDate: input.oursOutsideByDriver?.get(driverCd),
+      minusUnkoByDate: input.minusUnkoByDriver?.get(driverCd),
       paperDriftByDate: input.paperDriftByDriver?.get(driverCd),
       ferryMinusByDate: input.ferryMinusByDriver?.get(driverCd),
       toleranceMinutes: input.toleranceMinutes,

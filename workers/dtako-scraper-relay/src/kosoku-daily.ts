@@ -217,6 +217,18 @@ export function parseOursOutsideByDriver(body: unknown): Map<string, Map<string,
   return parseDateMapByDriver(body, "ours_outside_by_date");
 }
 
+/**
+ * 上流が乗務員ごとに添える**紙が引く `運行開始 → 始業`** (`minus_unko_by_date`、
+ * Refs #546 / ohishi-exp/rust-ichibanboshi#182)。
+ *
+ * 打刻より先に運行を始めた日、紙はその頭を日計から引く (`_make_minus_unko_day`)
+ * のでこちらより小さくなる。**紙が小さくなる向き** (lunch と同じ) の実額で、
+ * 突合が cause `minus-unko` と汎用部分和の項に使う。
+ */
+export function parseMinusUnkoByDriver(body: unknown): Map<string, Map<string, number>> {
+  return parseDateMapByDriver(body, "minus_unko_by_date");
+}
+
 /** `drivers[].<key>` の `{YYYY-MM-DD: 分}` を乗務員CD 引きに直す共通部。 */
 function parseDateMapByDriver(body: unknown, key: string): Map<string, Map<string, number>> {
   const out = new Map<string, Map<string, number>>();
