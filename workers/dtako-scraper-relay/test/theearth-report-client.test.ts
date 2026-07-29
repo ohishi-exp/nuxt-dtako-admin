@@ -746,6 +746,25 @@ describe("unlockOperation", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("serializes the full form so ddlRowCount is not reset by the unlock postback", async () => {
+    const jar = createCookieJar();
+    const pageHtml = unlockListHtml().replace(
+      "</form>",
+      `<select id="ddlRowCount" name="ctl00$MainContent$ddlRowCount">
+        <option value="10">10</option><option value="30" selected>30</option>
+      </select></form>`,
+    );
+    let captured = "";
+    let call = 0;
+    const fetchImpl = (async (_url: unknown, init?: { body?: unknown }) => {
+      call += 1;
+      if (call === 2) captured = String(init?.body ?? "");
+      return html(pageHtml);
+    }) as FetchLike;
+    await unlockOperation(jar, { opeNo: OPE_NO, startOpe: START_OPE }, fetchImpl);
+    expect(new URLSearchParams(captured).get("ctl00$MainContent$ddlRowCount")).toBe("30");
+  });
+
   it("falls back to a default label when the button has no value attribute", async () => {
     const jar = createCookieJar();
     const noValueHtml = unlockListHtml({ buttonNoValue: true });
@@ -917,6 +936,50 @@ describe("withVehicleNarrow", () => {
     }) as FetchLike;
     return { fetchImpl, bodies };
   }
+
+  it("bumps ddlRowCount to 30 in the btnUpdate postback when a 30 option exists", async () => {
+    const jar = createCookieJar();
+    const des = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-DES" />
+      <select id="MainContent_ddlRowCount" name="ctl00$MainContent$ddlRowCount">
+        <option value="10" selected>10</option><option value="30">30</option>
+      </select>
+      <input type="submit" id="btnUpdate" name="ctl00$MainContent$btnUpdate" value="更新" />
+    </form></body></html>`;
+    const { fetchImpl, bodies } = narrowFetchMock({ desHtml: des });
+    await withVehicleNarrow(jar, range, async () => undefined, fetchImpl);
+    // 部分 POST 事故で 10 に落ちて残留した表示件数を、btnUpdate のついでに 30 へ復旧する
+    const updateBody = new URLSearchParams(bodies[1]);
+    expect(updateBody.get("ctl00$MainContent$ddlRowCount")).toBe("30");
+  });
+
+  it("leaves ddlRowCount untouched when the page has no 30 option", async () => {
+    const jar = createCookieJar();
+    const des = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-DES" />
+      <select id="MainContent_ddlRowCount" name="ctl00$MainContent$ddlRowCount">
+        <option value="10" selected>10</option><option value="20">20</option>
+      </select>
+      <input type="submit" id="btnUpdate" name="ctl00$MainContent$btnUpdate" value="更新" />
+    </form></body></html>`;
+    const { fetchImpl, bodies } = narrowFetchMock({ desHtml: des });
+    await withVehicleNarrow(jar, range, async () => undefined, fetchImpl);
+    const updateBody = new URLSearchParams(bodies[1]);
+    expect(updateBody.get("ctl00$MainContent$ddlRowCount")).toBe("10");
+  });
+
+  it("ignores a row-count select without a name attribute", async () => {
+    const jar = createCookieJar();
+    const des = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-DES" />
+      <select id="MainContent_ddlRowCount"><option value="10" selected>10</option><option value="30">30</option></select>
+      <input type="submit" id="btnUpdate" name="ctl00$MainContent$btnUpdate" value="更新" />
+    </form></body></html>`;
+    const { fetchImpl, bodies } = narrowFetchMock({ desHtml: des });
+    await withVehicleNarrow(jar, range, async () => undefined, fetchImpl);
+    const updateBody = new URLSearchParams(bodies[1]);
+    expect([...updateBody.keys()].some(k => k.includes("ddlRowCount"))).toBe(false);
+  });
 
   it("rejects a non-numeric or over-length vehicle CD before making any request", async () => {
     const jar = createCookieJar();
@@ -1790,6 +1853,64 @@ describe("harvestDailyReport", () => {
       page1,
     );
     expect(rows.map((r) => r.operationNo)).toEqual(["A"]);
+  });
+
+  it("follows pager links whose href is entity-encoded or single-quoted (postback-rendered page)", async () => {
+    const jar = createCookieJar();
+    const page1Base = reportPageHtml({
+      rows: [{ operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" }],
+      currentPage: 1,
+      links: [],
+    });
+    // btnUpdate 等の postback 応答は href が `&#39;` に entity encode され得る。
+    // 属性のシングルクォート・href 無し・__doPostBack でない <a> の無視も併せて固定。
+    const page1 = page1Base.replace(
+      "</form>",
+      `<a>no-href</a><a href="other.html">plain</a>`
+        + `<a href='javascript:__doPostBack(&#39;pager&#39;,&#39;2&#39;)'>2</a></form>`,
+    );
+    const page2 = reportPageHtml({
+      rows: [{ operationNo: "B", startDateTime: "2026/07/04 08:00:00", workEndDateTime: "07/04 18:00" }],
+      currentPage: 2,
+      links: [],
+    });
+    const fetchImpl = sequenceFetch([html(page1), html(page2)]);
+    const rows = await harvestDailyReport(jar, { from: "2026/07/01 00:00", to: "2026/07/07 00:00" }, fetchImpl);
+    expect(rows.map((r) => r.operationNo)).toEqual(["A", "B"]);
+  });
+
+  it("warns with the pager-area markup when page 1 has rows but no next link", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const jar = createCookieJar();
+      const page = reportPageHtml({
+        rows: [{ operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" }],
+        currentPage: 1,
+        links: [],
+      });
+      await harvestDailyReport(jar, { from: "2026/07/01 00:00", to: "2026/07/07 00:00" }, sequenceFetch([html(page)]));
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("gCurrentPage"));
+    }
+    finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("warns with a placeholder when the page has no gCurrentPage marker", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const jar = createCookieJar();
+      const page = reportPageHtml({
+        rows: [{ operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" }],
+        currentPage: 1,
+        links: [],
+      }).replace(/<span class="gCurrentPage">1<\/span>/, "");
+      await harvestDailyReport(jar, { from: "2026/07/01 00:00", to: "2026/07/07 00:00" }, sequenceFetch([html(page)]));
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("gCurrentPage 無し"));
+    }
+    finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it("throws on non-ok GET / login redirect on the initial GET", async () => {

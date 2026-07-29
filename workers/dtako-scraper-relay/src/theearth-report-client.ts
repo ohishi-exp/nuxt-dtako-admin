@@ -990,9 +990,12 @@ export async function unlockOperation(
         "見つかりません — theearth-np のページ仕様変更の可能性があります",
     );
   }
-  const hidden = extractHiddenFields(html);
+  // btnInitialize は submit ボタン postback = form 値を読むため、hidden だけの
+  // 部分 POST だと `ddlRowCount` (表示件数) が既定の 10 に落ちて**アカウント設定と
+  // して残留**する (実機 2026-07-29: 編集制御解除の直後から一覧が 10行/頁 に縮んだ)。
+  // full form 直列化で現在値を保って送る。
   const body = new URLSearchParams({
-    ...hidden,
+    ...serializeFormFields(html),
     [opNoField.name]: params.opeNo,
     [startDtField.name]: params.startOpe,
     [indexField.name]: "0",
@@ -1032,6 +1035,28 @@ function extractSelectedOptionValueBySuffix(html: string, idSuffix: string): str
     }
   }
   return null;
+}
+
+/** id が指定 suffix で終わる `<select>` の name を返す。指定 value の `<option>` を
+ * 持たない (= その値を送ると event validation で 500 になる) 場合は null。 */
+function findSelectWithOptionBySuffix(
+  html: string,
+  idSuffix: string,
+  optionValue: string,
+): { name: string } | null {
+  const escaped = idSuffix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const selectRe = new RegExp(
+    `<select\\b([^>]*\\bid=["'][^"']*${escaped}["'][^>]*)>([\\s\\S]*?)</select>`,
+    "i",
+  );
+  const m = html.match(selectRe);
+  if (!m) return null;
+  const nameMatch = m[1].match(/\bname=["']([^"']+)["']/i);
+  if (!nameMatch) return null;
+  const escapedValue = optionValue.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const optionRe = new RegExp(`<option\\b[^>]*\\bvalue=["']${escapedValue}["']`, "i");
+  if (!optionRe.test(m[2])) return null;
+  return { name: nameMatch[1] };
 }
 
 /** id が指定 suffix で終わる radio `<input>` が checked か。 */
@@ -1231,8 +1256,14 @@ async function postOperationListUpdate(
   fetchImpl: FetchLike,
   timeoutMs: number,
 ): Promise<string> {
+  const fields = serializeFormFields(listHtml);
+  // `ddlRowCount` (1ページ表示件数) は部分 POST 事故で既定の 10 に落ちて残留する
+  // ことがある (アカウント共有設定、本来は最大の 30)。ページ送り回数を減らす +
+  // 落ちた設定を復旧するため、30 の option がページに実在する時だけ 30 へ引き上げる。
+  const rowCount = findSelectWithOptionBySuffix(listHtml, "ddlRowCount", "30");
+  if (rowCount) fields[rowCount.name] = "30";
   const body = new URLSearchParams({
-    ...serializeFormFields(listHtml),
+    ...fields,
     [updateButton.name]: updateButton.value || "更新",
   });
   const res = await postForm(jar, url, body, fetchImpl, timeoutMs);
@@ -1501,14 +1532,21 @@ interface PagerLink {
 
 /** ページャの `<a href="javascript:__doPostBack('T','A')">TEXT</a>` を全て
  * 抽出する。target/argument の命名規則 (数値引数か各リンク固有 target か) は
- * SKILL.md でも実データ未採取のため仮定せず、可視テキストで次ページを探す。 */
+ * SKILL.md でも実データ未採取のため仮定せず、可視テキストで次ページを探す。
+ * href は postback 応答ページで `&#39;` 等に entity encode されることがあるため、
+ * decode してから __doPostBack を照合する (plain GET の応答だけ相手にしていた頃の
+ * 生クォート前提だと postback 応答起点の harvest が 1 ページで打ち切られる)。 */
 function extractPagerLinks(html: string): PagerLink[] {
   const links: PagerLink[] = [];
-  const re = /<a\b[^>]*href="javascript:__doPostBack\('([^']*)'\s*,\s*'([^']*)'\)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const re = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(html)) !== null) {
-    const text = m[3].replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ").trim();
-    links.push({ target: m[1], argument: m[2], text });
+    const hrefMatch = m[1].match(/\bhref=(?:"([^"]*)"|'([^']*)')/i);
+    if (!hrefMatch) continue;
+    const pb = decodeHtmlEntities(hrefMatch[1] ?? hrefMatch[2]).match(/^javascript:__doPostBack\('([^']*)'\s*,\s*'([^']*)'\)$/);
+    if (!pb) continue;
+    const text = m[2].replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ").trim();
+    links.push({ target: pb[1], argument: pb[2], text });
   }
   return links;
 }
@@ -1550,7 +1588,10 @@ async function postPagerSubmitButton(
   fetchImpl: FetchLike,
   timeoutMs: number,
 ): Promise<string> {
-  const body = new URLSearchParams({ ...extractHiddenFields(html), [button.name]: button.value });
+  // submit ボタンの postback は form 値を読むため、hidden だけの部分 POST だと
+  // `ddlRowCount` (表示件数) が既定の 10 に落ちて**アカウント設定として残留**する
+  // (btnUpdate で実証済みの罠)。full form 直列化で現在値を保って送る。
+  const body = new URLSearchParams({ ...serializeFormFields(html), [button.name]: button.value });
   const res = await postForm(jar, url, body, fetchImpl, timeoutMs);
   if (!res.ok) {
     throw new TheearthClientError(`運行データ入力一覧のページ送りが HTTP ${res.status} を返しました`);
@@ -1688,8 +1729,19 @@ export async function harvestDailyReport(
       // 「次」リンクが無い = 最終ページに到達したとみなして打ち切る。
       // 注意: これはページャ構造の想定違いと区別できない (「本当に最終ページ」
       // と「regex が実際のマークアップに一致していない」を応答内容だけから
-      // 判別する信頼できるシグナルが無いため)。row 数が想定より少なく見える等
-      // 挙動がおかしい場合は staging 実機で pager markup を確認すること。
+      // 判別する信頼できるシグナルが無いため)。1ページ目で行ありのまま打ち切る
+      // 場合は誤検出の可能性が高いので、Tail Worker から markup を追えるよう
+      // pager 周辺の実 HTML を warn で残す (実機 2026-07-29 に btnUpdate 応答起点の
+      // harvest が 1 ページで打ち切られ検索結果が大量欠落した事故の再発検知)。
+      if (pageCount === 0 && pageRows.length > 0) {
+        const pagerArea =
+          html.match(/.{0,200}gCurrentPage[\s\S]{0,400}/)?.[0]?.replace(/\s+/g, " ")
+            ?? "(gCurrentPage 無し)";
+        console.warn(
+          `harvestDailyReport: 1ページ目で次リンクが見つかりません rows=${pageRows.length} ` +
+            `links=${links.length} pager=${pagerArea}`,
+        );
+      }
       break;
     }
     html = await postPagerLink(jar, url, html, nextLink, fetchImpl, timeoutMs);
