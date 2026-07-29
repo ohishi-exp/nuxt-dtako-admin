@@ -18,7 +18,8 @@ const shift = (over: Record<string, unknown> = {}) => ({
   date: '2026-04-06',
   restraint_minutes: 699,
   working_minutes: 486,
-  overtime_minutes: 6,
+  // 上流の時間外は**時間外深夜を含む全部** (Refs #564)。16 のうち 10 が深夜
+  overtime_minutes: 16,
   night_minutes: 30,
   overtime_night_minutes: 10,
   legal_holiday_night_minutes: 5,
@@ -44,6 +45,7 @@ describe('parseKosokuDaily', () => {
       date: '2026-04-06',
       restraintMinutes: 699,
       workingMinutes: 486,
+      // 16 − 10 = 内数の時間外深夜を引いて排他にする (Refs #564)
       overtimeMinutes: 6,
       // 30 (平日の深夜) + 5 (法定休日の深夜) — 画面と賃金は「深夜帯で何分か」しか持たない
       nightMinutes: 35,
@@ -158,7 +160,8 @@ describe('kosokuPartsByDate', () => {
     expect(got.get('2026-04-01')).toEqual({
       restraintMinutes: 300,
       workingMinutes: 250,
-      overtimeMinutes: 20,
+      // 上流 20 − 内数の時間外深夜 5 (Refs #564)
+      overtimeMinutes: 15,
       nightMinutes: 40,
       overtimeNightMinutes: 5,
       ferryMinusMinutes: 0,
@@ -442,3 +445,60 @@ describe('parseFerryMinusByDriver', () => {
     expect(parseFerryMinusByDriver({ drivers: [{ driver: 1026 }] }).size).toBe(0)
   })
 })
+
+describe('時間外深夜の内数を読み取りで排他へ直す (Refs #564)', () => {
+  /** `classifyMonth` が前提にしている契約。 */
+  const holdsExclusive = (p: { workingMinutes: number; overtimeMinutes: number; overtimeNightMinutes: number }) =>
+    p.workingMinutes - p.overtimeMinutes - p.overtimeNightMinutes >= 0;
+
+  it('上流の時間外から内数の時間外深夜を引く', () => {
+    const [got] = parseKosokuDaily({
+      drivers: [{ driver: 1, days: [shift({ working_minutes: 946, overtime_minutes: 466, overtime_night_minutes: 120 })] }],
+    }).get('1')!;
+    // 466 は深夜 120 を含む全部なので、引いて 346 / 120 の排他にする
+    expect(got!.overtimeMinutes).toBe(346);
+    expect(got!.overtimeNightMinutes).toBe(120);
+    // 法定内 = 実働 − 時間外 − 時間外深夜 = 480 (所定 8h) で辻褄が合う
+    expect(got!.workingMinutes - got!.overtimeMinutes - got!.overtimeNightMinutes).toBe(480);
+  });
+
+  it('実働が丸ごと時間外の日 (日跨ぎ勤務の続き) でも契約が崩れない', () => {
+    // 2026-06 の本番で出た形。引かないと 時間外 + 時間外深夜 > 実働 になり、
+    // classifyMonth の法定内が max(0, …) に張り付いて最低賃金チェックの差分列に負で出る
+    const [got] = parseKosokuDaily({
+      drivers: [{ driver: 1, days: [shift({ working_minutes: 1072, overtime_minutes: 1072, overtime_night_minutes: 300 })] }],
+    }).get('1')!;
+    expect(got!.overtimeMinutes).toBe(772);
+    expect(holdsExclusive(got!)).toBe(true);
+    expect(got!.workingMinutes - got!.overtimeMinutes - got!.overtimeNightMinutes).toBe(0);
+  });
+
+  it('暦日按分 (parts) も同じ規則。合計しても契約が崩れない', () => {
+    const shifts = parseKosokuDaily({
+      drivers: [{
+        driver: 1,
+        days: [shift({
+          date: '2026-04-06',
+          working_minutes: 1500,
+          overtime_minutes: 1020,
+          overtime_night_minutes: 420,
+          parts: [
+            { date: '2026-04-06', restraint_minutes: 800, working_minutes: 700, overtime_minutes: 220, night_minutes: 0, overtime_night_minutes: 120, legal_holiday_night_minutes: 0 },
+            { date: '2026-04-07', restraint_minutes: 900, working_minutes: 800, overtime_minutes: 800, night_minutes: 0, overtime_night_minutes: 300, legal_holiday_night_minutes: 0 },
+          ],
+        })],
+      }],
+    }).get('1')!;
+    const byDate = kosokuPartsByDate(shifts, '2026-04');
+    expect(byDate.get('2026-04-06')!.overtimeMinutes).toBe(100);
+    expect(byDate.get('2026-04-07')!.overtimeMinutes).toBe(500);
+    for (const p of byDate.values()) expect(holdsExclusive(p)).toBe(true);
+  });
+
+  it('上流が壊れた値 (内数 > 全体) を返しても負にしない', () => {
+    const [got] = parseKosokuDaily({
+      drivers: [{ driver: 1, days: [shift({ overtime_minutes: 10, overtime_night_minutes: 30 })] }],
+    }).get('1')!;
+    expect(got!.overtimeMinutes).toBe(0);
+  });
+});

@@ -38,12 +38,19 @@ export interface KosokuDay {
   workingMinutes: number
   statutoryMinutes: number
   withinStatutoryOvertimeMinutes: number
-  /** 法定時間外 (8h 超)。 */
+  /**
+   * 法定時間外 (8h 超) のうち**深夜に重ならない分**。
+   *
+   * **上流とは意味が違う** — 上流の `overtime_minutes` は時間外の全部で
+   * `overtime_night_minutes` はその内数。**読み取り時に引いて排他にしている**
+   * (Refs #564、`toKosokuDay`/`toKosokuParts`)。時間外の合計が要る所は
+   * `overtimeMinutes + overtimeNightMinutes` で足す。
+   */
   overtimeMinutes: number
   legalHolidayMinutes: number
   /** 平日の所定内・法定内残業に重なる深夜。 */
   nightMinutes: number
-  /** 平日の法定時間外に重なる深夜。`nightMinutes` とは排他。 */
+  /** 平日の法定時間外に重なる深夜。`nightMinutes`・`overtimeMinutes` とは排他。 */
   overtimeNightMinutes: number
   legalHolidayNightMinutes: number
   /**
@@ -101,6 +108,22 @@ function str(v: unknown): string | null {
 }
 
 /**
+ * 上流の `overtime_minutes` から `overtime_night_minutes` を引いた
+ * 「深夜に重ならない時間外」(Refs #564)。
+ *
+ * 上流 (rust-ichibanboshi `src/kosoku.rs`) は実働を 1 分ずつ歩き、法定時間外の 1 分を
+ * `overtime_minutes` に足したうえで、その分が深夜ならさらに `overtime_night_minutes`
+ * にも足す — つまり**時間外深夜は時間外の内数**。この画面側の型は 2 つを**排他**として
+ * 扱い、合計が要る所で足す (`buildKosokuTimecardTable` の残業列など) ので、
+ * 読み取り時に引いておく。引かないと残業列と月合計で深夜残業が二重に乗る。
+ *
+ * `Math.max` は上流が壊れた値を返した時の防御 (上流の構成上 内数 ≤ 全体 は保証される)。
+ */
+function exclusiveOvertime(r: Record<string, unknown>): number {
+  return Math.max(0, num(r.overtime_minutes) - num(r.overtime_night_minutes))
+}
+
+/**
  * 日 1 件を画面用に直す。**日付・始業・終業のどれかが欠けた行は捨てる**
  * (`null`) — 時刻の無い勤務は表に置き場が無く、0 として並べると「その日は
  * 働いていない」に見えるため。数値の欠けは 0 で埋める (項目が増減しても落ちない)。
@@ -124,7 +147,8 @@ export function toKosokuDay(raw: unknown): KosokuDay | null {
     workingMinutes: num(r.working_minutes),
     statutoryMinutes: num(r.statutory_minutes),
     withinStatutoryOvertimeMinutes: num(r.within_statutory_overtime_minutes),
-    overtimeMinutes: num(r.overtime_minutes),
+    // 上流の時間外深夜は時間外の内数なので引いて排他にする (Refs #564)
+    overtimeMinutes: exclusiveOvertime(r),
     legalHolidayMinutes: num(r.legal_holiday_minutes),
     nightMinutes: num(r.night_minutes),
     overtimeNightMinutes: num(r.overtime_night_minutes),
@@ -147,7 +171,7 @@ function toKosokuParts(raw: unknown): KosokuDayPart[] {
       date,
       restraintMinutes: num(r.restraint_minutes),
       workingMinutes: num(r.working_minutes),
-      overtimeMinutes: num(r.overtime_minutes),
+      overtimeMinutes: exclusiveOvertime(r),
       legalHolidayMinutes: num(r.legal_holiday_minutes),
       nightMinutes: num(r.night_minutes),
       overtimeNightMinutes: num(r.overtime_night_minutes),
