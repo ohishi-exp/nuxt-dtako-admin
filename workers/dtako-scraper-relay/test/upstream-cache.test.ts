@@ -31,6 +31,11 @@ class FakeSql implements SqlStorageLike {
       const row = this.rows.get(`${kind}|${month}`)
       return cursor(row ? [{ body_gz: row.body_gz, upstream_etag: row.upstream_etag }] : [])
     }
+    if (query.startsWith('DELETE')) {
+      const [kind, month] = bindings as [string, string]
+      this.rows.delete(`${kind}|${month}`)
+      return cursor([])
+    }
     if (query.startsWith('UPDATE')) {
       const [now, kind, month] = bindings as [number, string, string]
       const row = this.rows.get(`${kind}|${month}`)
@@ -99,6 +104,15 @@ describe('UpstreamCache', () => {
     const oversized = new Uint8Array(UPSTREAM_CACHE_MAX_GZ_BYTES + 1)
     expect(cache.put('kosoku', '2026-06', oversized, 'sha', 'e', 1)).toBe(false)
     expect(sql.rows.size).toBe(0)
+  })
+
+  it('delete で行が落ち、次の getFresh は miss。無い行の delete も安全', async () => {
+    const sql = new FakeSql()
+    const cache = new UpstreamCache(sql)
+    cache.put('daily', '2026-06', await gzipText('body'), 'sha', 'e', 1)
+    cache.delete('daily', '2026-06')
+    expect(cache.getFresh('daily', '2026-06', 'e', 2)).toBeNull()
+    expect(() => cache.delete('kosoku', '2026-01')).not.toThrow()
   })
 
   it('upsert は同キーの行を置き換える。CREATE TABLE は 1 回だけ', async () => {

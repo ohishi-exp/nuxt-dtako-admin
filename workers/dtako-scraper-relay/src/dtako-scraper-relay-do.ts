@@ -2652,6 +2652,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return dvrJsonError(503, "勤怠の取得先 (NUXT_ICHIBAN_*) が未設定です");
     }
 
+    // 0) 上流キャッシュの温め用に「取り込み前の版」を取る (Refs #543 PR-3)。
+    // 本文より先に引く — 本文は必ずこの版と同時かそれより新しくなり、
+    // 「新しい etag に古い本文」の取り違えが起きない (warmDailyCacheAfterIngest 参照)
+    const etagBefore =
+      this.env.UPSTREAM_CACHE === "on"
+        ? await this.fetchKintaiVersionLive(apiUrl, clientId, clientSecret, ym)
+        : null;
+
     // 1) 上流から生 JSON を取る
     let rawText: string;
     let rows: TimecardDailyRow[];
@@ -2787,6 +2795,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       console.error(JSON.stringify({ kintai_fetch: "r2-error", error: describeUnknownError(err) }));
       return dvrJsonError(502, "勤怠データの保存に失敗しました");
     }
+
+    // 4) 上流キャッシュの強制更新 (Refs #543 PR-3)。まず対象月 (+前月) を無効化し、
+    // 取り込みが持っている最新の daily 本文だけ温め直す。kosoku は次の読みが
+    // write-through で作り直す (二度取りしない)
+    this.invalidateKintaiUpstreamCache([ym, prevYmOf(ym)], "kintai-fetch");
+    await this.warmDailyCacheAfterIngest(apiUrl, clientId, clientSecret, ym, rawText, etagBefore);
 
     return Response.json({
       month: ym,
@@ -3230,28 +3244,41 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     phase?: string,
   ): Promise<string | null> {
     return this.memoKintaiUpstream(`kintai-version:${ym}`, () =>
-      measurePhase(timer, phase ?? "version", async () => {
-        try {
-          const res = await fetch(`${apiUrl}/api/kintai/version?month=${encodeURIComponent(ym)}`, {
-            headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret },
-          });
-          if (!res.ok) {
-            console.error(JSON.stringify({ kintai_version: "upstream-error", ym, status: res.status }));
-            return null;
-          }
-          const text = await res.text();
-          if (timer && phase) timer.setBytes(phase, text.length);
-          const etag = parseVersionResponse(JSON.parse(text));
-          if (etag === null) {
-            console.error(JSON.stringify({ kintai_version: "bad-shape", ym }));
-          }
-          return etag;
-        } catch (err) {
-          console.error(JSON.stringify({ kintai_version: "error", ym, error: describeUnknownError(err) }));
-          return null;
-        }
-      }),
+      measurePhase(timer, phase ?? "version", () =>
+        this.fetchKintaiVersionLive(apiUrl, clientId, clientSecret, ym, timer, phase),
+      ),
     );
+  }
+
+  /** `fetchKintaiVersion` の memo 無し版 — 取り込み直後の強制更新 (Refs #543 PR-3)
+   * は「今この瞬間の版」が要るので 60s memo を通さない。 */
+  private async fetchKintaiVersionLive(
+    apiUrl: string,
+    clientId: string,
+    clientSecret: string,
+    ym: string,
+    timer?: PhaseTimer,
+    phase?: string,
+  ): Promise<string | null> {
+    try {
+      const res = await fetch(`${apiUrl}/api/kintai/version?month=${encodeURIComponent(ym)}`, {
+        headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret },
+      });
+      if (!res.ok) {
+        console.error(JSON.stringify({ kintai_version: "upstream-error", ym, status: res.status }));
+        return null;
+      }
+      const text = await res.text();
+      if (timer && phase) timer.setBytes(phase, text.length);
+      const etag = parseVersionResponse(JSON.parse(text));
+      if (etag === null) {
+        console.error(JSON.stringify({ kintai_version: "bad-shape", ym }));
+      }
+      return etag;
+    } catch (err) {
+      console.error(JSON.stringify({ kintai_version: "error", ym, error: describeUnknownError(err) }));
+      return null;
+    }
   }
 
   /**
@@ -3325,6 +3352,78 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       }
     }
     return text;
+  }
+
+  /**
+   * 取り込み系 (kintai/fetch・resummarize・拘束 CSV 取込) の完了後に、対象月の
+   * 上流キャッシュ (SQLite 行 + 60s memo) を落とす (Refs #543 PR-3)。
+   *
+   * 「操作者が取り込みを押した = 上流データが動いたかもしれない」の合図なので、
+   * 次の読みを必ず再検証 (版照会 → hit/miss) に倒す。**フラグ off でも実行する**
+   * — SQL は空振りでも安価で、後からフラグを on にした時に古い行が残らない。
+   * memo の無効化はキャッシュ機能と無関係に取り込み直後の画面を最新にする。
+   *
+   * best-effort — 無効化の失敗で取り込み応答は落とさない (次の読みは版照会で
+   * どのみち守られる)。
+   */
+  private invalidateKintaiUpstreamCache(months: string[], reason: string): void {
+    try {
+      for (const ym of months) {
+        this.kintaiUpstreamMemo.delete(`daily:${ym}`);
+        this.kintaiUpstreamMemo.delete(`kosoku-raw:${ym}`);
+        this.kintaiUpstreamMemo.delete(`kintai-version:${ym}`);
+        this.upstreamCacheStore().delete("daily", ym);
+        this.upstreamCacheStore().delete("kosoku", ym);
+      }
+      console.log(JSON.stringify({ upstream_cache: "invalidated", reason, months }));
+    } catch (err) {
+      console.error(
+        JSON.stringify({ upstream_cache: "invalidate-error", reason, error: describeUnknownError(err) }),
+      );
+    }
+  }
+
+  /**
+   * kintai/fetch (取り込みボタン) 完了後の daily キャッシュ温め (Refs #543 PR-3)。
+   *
+   * 取り込みが持っている最新の daily 本文 (refresh=1 で取り直した rawText) を
+   * **二度取りせず**そのまま格納する。ただし本文と版の対応がズレると「新しい
+   * etag に古い本文」が hit し続ける事故になるため、**取り込み前後の版が一致した
+   * 時だけ**格納する (etagBefore/etagAfter の二重確認)。ズレた・版が引けない時は
+   * 行を消して次回 miss に倒す (invalidate 済みなので何もしない = 消えたまま)。
+   *
+   * kosoku 側はここで温めない — 読み経路 (loadKintaiTextWithCache) が miss 時に
+   * write-through するため、次の読みが自然に格納する (二度取りもしない)。
+   *
+   * best-effort — 温めの失敗で取り込み応答は落とさない。
+   */
+  private async warmDailyCacheAfterIngest(
+    apiUrl: string,
+    clientId: string,
+    clientSecret: string,
+    ym: string,
+    dailyText: string,
+    etagBefore: string | null,
+  ): Promise<void> {
+    if (this.env.UPSTREAM_CACHE !== "on" || etagBefore === null) return;
+    try {
+      const etagAfter = await this.fetchKintaiVersionLive(apiUrl, clientId, clientSecret, ym);
+      if (etagAfter === null || etagAfter !== etagBefore) {
+        // 取り込み中に版が動いた / 版が引けない — 温めを見送る (行は invalidate で
+        // 消えているので、次の読みが版照会付きで作り直す)
+        console.log(
+          JSON.stringify({ upstream_cache: "warm-skip", ym, reason: etagAfter === null ? "version-failed" : "version-moved" }),
+        );
+        return;
+      }
+      const gz = await gzipText(dailyText);
+      const stored = this.upstreamCacheStore().put("daily", ym, gz, await this.sha256Hex(gz), etagAfter, Date.now());
+      console.log(
+        JSON.stringify({ upstream_cache: stored ? "warmed" : "size-skip", kind: "daily", ym, gz_bytes: gz.byteLength }),
+      );
+    } catch (err) {
+      console.error(JSON.stringify({ upstream_cache: "warm-error", ym, error: describeUnknownError(err) }));
+    }
   }
 
   /**
@@ -3978,6 +4077,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
     await this.upsertRestraintSummariesD1(record.compId, "theearth", parsed.ym, d1Entries);
     await this.pushRestraintSummariesToIchiban(record.compId, "theearth", parsed.ym, d1Entries);
+    // 上流キャッシュの無効化 (Refs #543 PR-3)。resummarize 自体は kintai 上流を
+    // 変えないが、「操作者が再計算した = 表示を最新にしたい」合図なので、次の
+    // kintai 読みを再検証に倒す (最新テキストは持っていないので put はしない)
+    this.invalidateKintaiUpstreamCache([parsed.ym, prevYmOf(parsed.ym)], "resummarize");
     return Response.json({
       month: parsed.ym,
       csv_processed: csvCount,
@@ -4607,6 +4710,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       this.ctx.waitUntil(this.saveRestraintToR2(record.compId, params, csv.bytes, archiveSummaries));
       const range = params.driverFrom ? `${params.driverFrom}-${params.driverTo}` : "all";
       const month = String(params.month).padStart(2, "0");
+      // 上流キャッシュの無効化 (Refs #543 PR-3)。resummarize と同じ理由 —
+      // CSV 取込は kintai 上流を変えないが、次の kintai 読みを再検証に倒す
+      const csvYm = `${params.year}-${month}`;
+      this.invalidateKintaiUpstreamCache([csvYm, prevYmOf(csvYm)], "restraint-csv");
       return new Response(csv.bytes, {
         status: 200,
         headers: {

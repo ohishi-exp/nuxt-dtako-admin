@@ -81,6 +81,15 @@ export class UpstreamCache {
   }
 
   /**
+   * 行を落とす (取り込み直後の無効化、Refs #543 PR-3)。行が無くても何もしない。
+   * 消した月は次回読みが miss になり、版照会 → ライブ取得で作り直される。
+   */
+  delete(kind: CacheKind, month: string): void {
+    this.ensureTable();
+    this.sql.exec("DELETE FROM upstream_cache WHERE kind = ? AND month = ?", kind, month);
+  }
+
+  /**
    * gzip 本文を upsert する。**1.9MB 超は格納せず false** (呼び出し側は
    * ライブ動作のままで良い — 次回も再取得になるだけで壊れない)。
    */
