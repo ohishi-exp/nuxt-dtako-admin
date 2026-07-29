@@ -2,7 +2,7 @@
  * kyuyo-mcp Worker エントリ。
  *
  * 給与比較 (拘束時間×賃金計算) データを読み取り専用 MCP tool として公開する薄い
- * worker。`@ippoan/mcp-cf-workers` の `createWorkerMcp` を consume する
+ * worker。`@ippoan/mcp-cf-workers` の `createWorkerMcpV2` を consume する
  * (nuxt-dtako-admin#374 Phase 1、cf-access-mcp / gmail-mcp と同じ構成)。
  *
  *   GET  /healthz … ヘルスチェック (認証前段でも通す)
