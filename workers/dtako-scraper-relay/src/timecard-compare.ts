@@ -207,6 +207,13 @@ export type DiffCause =
   | "rounding"
   /** フェリー + 丸め。1714 井上 03-06 (-76 = 73 + 3) の形。 */
   | "ferry+rounding"
+  /**
+   * **月境界の跨ぎ + 丸め**。純夜勤の跨ぎ勤務でも、0 時過ぎの運行イベントは紙の
+   * デジタコ側に**部分計上**される — 跨ぎの丸ごと (`crossMonth`) から紙が拾った分
+   * (drift が負に出る) を引いた残りが差になる。1194 陣野 04-01
+   * (-525 = 跨ぎ 552 − 紙の部分計上 27) の形。
+   */
+  | "month-boundary+rounding"
   /** **未説明。** ここが 0 になるまでが検知の仕事。 */
   | "unknown";
 
@@ -606,6 +613,15 @@ function classifyDiff(
     {
       cause: "ferry+rounding",
       explained: ferry === 0 || paperDriftMinutes === 0 ? 0 : ferry + paperDriftMinutes,
+    },
+    // 跨ぎ勤務でも 0 時過ぎの運行イベントは紙のデジタコ側に部分計上される — その分
+    // drift が負に出るので、跨ぎの丸ごとと合算すると釣り合う (1194 陣野 04-01)
+    {
+      cause: "month-boundary+rounding",
+      explained:
+        crossMonthMinutes === 0 || paperDriftMinutes === 0
+          ? 0
+          : crossMonthMinutes + paperDriftMinutes,
     },
   ];
   for (const c of candidates) {
