@@ -169,6 +169,7 @@ import {
   mergeKosokuShiftMaps,
   parseKosokuDaily,
   parseFerryMinusByDriver,
+  parseOursOutsideByDriver,
   parsePaperDriftByDriver,
   parsePaperOutsideByDriver,
   prevYmOf,
@@ -3158,8 +3159,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         this.fetchNginxPdfJson(ym, driver),
         this.loadCompareKosoku(creds.apiUrl, creds.clientId, creds.clientSecret, ym),
       ]);
-      const { shifts, paperDriftByDriver, paperOutsideByDriver, ferryMinusByDriver } =
-        compareKosoku;
+      const {
+        shifts,
+        paperDriftByDriver,
+        paperOutsideByDriver,
+        oursOutsideByDriver,
+        ferryMinusByDriver,
+      } = compareKosoku;
       const nginxByDriver = parsePdfJson(pdfBody, ym);
       const oursByDriver = new Map<string, Map<string, { restraintMinutes: number }>>();
       // 月境界を跨ぐ勤務由来の分 — 紙は月内の打刻だけで対を組むため月を跨ぐ勤務が
@@ -3180,6 +3186,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
             oursByDate: oursByDriver.get(driver) ?? new Map(),
             crossMonthByDate: crossMonthByDriver.get(driver),
             paperOutsideByDate: paperOutsideByDriver.get(driver),
+            oursOutsideByDate: oursOutsideByDriver.get(driver),
             paperDriftByDate: paperDriftByDriver.get(driver),
             ferryMinusByDate: ferryMinusByDriver.get(driver),
             toleranceMinutes: tolerance,
@@ -3192,6 +3199,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           oursByDriver,
           crossMonthByDriver,
           paperOutsideByDriver,
+          oursOutsideByDriver,
           paperDriftByDriver,
           ferryMinusByDriver,
           toleranceMinutes: tolerance,
@@ -3758,6 +3766,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     shifts: Map<string, KosokuShift[]> | null;
     paperDriftByDriver: Map<string, Map<string, number>>;
     paperOutsideByDriver: Map<string, Map<string, number>>;
+    oursOutsideByDriver: Map<string, Map<string, number>>;
     ferryMinusByDriver: Map<string, Map<string, number>>;
   }> {
     const fetchMonth = async (month: string): Promise<unknown | null> => {
@@ -3788,12 +3797,22 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       curBody == null
         ? new Map<string, Map<string, number>>()
         : parsePaperOutsideByDriver(curBody);
+    const oursOutsideByDriver =
+      curBody == null
+        ? new Map<string, Map<string, number>>()
+        : parseOursOutsideByDriver(curBody);
     // フェリー控除の日別マップも当月応答からだけ読む (rust#181 — 勤務に貼れない日がある)
     const ferryMinusByDriver =
       curBody == null ? new Map<string, Map<string, number>>() : parseFerryMinusByDriver(curBody);
     // 当月が取れていないと時間が丸ごと出ないので、その時は諦める
     if (curBody == null) {
-      return { shifts: null, paperDriftByDriver, paperOutsideByDriver, ferryMinusByDriver };
+      return {
+        shifts: null,
+        paperDriftByDriver,
+        paperOutsideByDriver,
+        oursOutsideByDriver,
+        ferryMinusByDriver,
+      };
     }
     const merged = new Map<string, KosokuShift[]>();
     for (const body of [curBody, prevBody]) {
@@ -3802,7 +3821,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         merged.set(driverCd, [...(merged.get(driverCd) ?? []), ...shifts]);
       }
     }
-    return { shifts: merged, paperDriftByDriver, paperOutsideByDriver, ferryMinusByDriver };
+    return {
+      shifts: merged,
+      paperDriftByDriver,
+      paperOutsideByDriver,
+      oursOutsideByDriver,
+      ferryMinusByDriver,
+    };
   }
 
   // R2 突合マスタ (salary-cd-map) → 社員マスタの取り込み
