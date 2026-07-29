@@ -73,6 +73,7 @@ import {
   UpstreamCache,
   type CacheKind,
 } from "./upstream-cache";
+import { etagMatches, weakEtag } from "./http-etag";
 import {
   buildDvrSearchKey,
   dvrDataUrl,
@@ -1865,7 +1866,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return this.handleTimecardCompare(url);
     }
     if (url.pathname === "/restraint-api/kintai/kosoku-daily" && request.method === "GET") {
-      return this.handleKintaiKosokuDaily(url);
+      return this.handleKintaiKosokuDaily(url, request.headers.get("if-none-match"));
     }
     // ---- アーカイブ閲覧 (R2 読み出しのみ。Refs #244) ----
     if (url.pathname === "/restraint-api/archive/summaries" && request.method === "GET") {
@@ -1888,7 +1889,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
     // ---- 賃金計算 (月指定、R2 summary + マスタから。Refs #244) ----
     if (url.pathname === "/restraint-api/wage-report" && request.method === "GET") {
-      return this.handleWageReport(record!, url);
+      return this.handleWageReport(record!, url, request.headers.get("if-none-match"));
     }
     return dvrJsonError(404, "Not Found");
   }
@@ -2939,7 +2940,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * - **会社で絞らない。** 乗務員CD は一番星 `社員ﾏｽﾀ.社員C` と同一番号体系で会社を
    *   跨がず、`/kintai/fetch` の取り込みも同じ単位。受け手が社員マスタで引き当てる
    */
-  private async handleKintaiKosokuDaily(url: URL): Promise<Response> {
+  private async handleKintaiKosokuDaily(url: URL, ifNoneMatch: string | null): Promise<Response> {
     const parsed = this.parseMonthParam(url);
     if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
     const { ym } = parsed;
@@ -2977,26 +2978,62 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return dvrJsonError(502, "拘束サマリ API の応答に drivers 配列がありません");
     }
     console.log(JSON.stringify({ kosoku_daily: "relayed", month: ym, drivers: body.drivers.length }));
-    return this.withPhaseTiming("kintai/kosoku-daily", ym, timer, tracker.aggregate(), Response.json(body));
+    // 内容不変なら 304 で本文を送らない (Refs #543 PR-5)。304 でも計測は出す
+    const { res, notModified } = await this.jsonWithEtag(body, ifNoneMatch);
+    return this.withPhaseTiming("kintai/kosoku-daily", ym, timer, tracker.aggregate(), res, notModified);
   }
 
   /** フェーズ計測の出力 (ログ 1 行 + Server-Timing ヘッダ)。**応答は絶対に壊さない**
    * — 計測側の不具合はここで握って応答をそのまま返す (Refs #543 PR-1)。
-   * cacheState は上流キャッシュの集約結果 "hit" | "miss" | "live" (Refs #543 PR-2)。 */
+   * cacheState は上流キャッシュの集約結果 "hit" | "miss" | "live" (Refs #543 PR-2)。
+   * notModified は 304 応答 (Refs #543 PR-5) — 304 でも計測ログは 1 行出す。 */
   private withPhaseTiming(
     route: string,
     month: string,
     timer: PhaseTimer,
     cacheState: string,
     res: Response,
+    notModified = false,
   ): Response {
     try {
-      console.log(phaseTimingLogLine(route, month, timer, cacheState));
+      console.log(phaseTimingLogLine(route, month, timer, cacheState, notModified));
       res.headers.set("Server-Timing", timer.serverTimingHeader());
     } catch (err) {
       console.error(JSON.stringify({ phase_timing: "emit-error", route, error: describeUnknownError(err) }));
     }
     return res;
+  }
+
+  /**
+   * JSON 応答に弱い ETag を付け、If-None-Match 一致なら 304 (本文なし) を返す
+   * (Refs #543 PR-5)。kosoku-daily / wage-report の 1.7MB 級応答の転送量削減 —
+   * `cache-control: no-cache` はブラウザに「保存してよいが毎回再検証せよ」を
+   * 指示し、内容不変なら 304 だけが往復する (フロント変更は不要)。
+   *
+   * ETag は**実際に送る本文** (JSON.stringify 結果) の sha256 — キャッシュ層の
+   * sha256 (gzip 済み上流テキストのもの) は再シリアライズで応答本文と一致しない
+   * ため使わない。stringify のキー順は上流の出現順で安定なので、データ不変なら
+   * ETag も不変。
+   */
+  private async jsonWithEtag(
+    payload: unknown,
+    ifNoneMatch: string | null,
+  ): Promise<{ res: Response; notModified: boolean }> {
+    const serialized = JSON.stringify(payload);
+    const etag = weakEtag(await this.sha256Hex(new TextEncoder().encode(serialized)));
+    if (etagMatches(ifNoneMatch, etag)) {
+      return {
+        res: new Response(null, { status: 304, headers: { etag, "cache-control": "no-cache" } }),
+        notModified: true,
+      };
+    }
+    return {
+      res: new Response(serialized, {
+        status: 200,
+        headers: { "content-type": "application/json", etag, "cache-control": "no-cache" },
+      }),
+      notModified: false,
+    };
   }
 
   /**
@@ -4234,7 +4271,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * `compareSalaryMonth` はどちらの由来でも同じものを使う (タイムカード側が
    * `RestraintDriverSummary` 互換の形で保存されているため)。
    * **重複は timecard が勝つ** (2026-07-28 決定 — 賃金は打刻を根拠にする)。 */
-  private async handleWageReport(record: TheearthSessionRecord, url: URL): Promise<Response> {
+  private async handleWageReport(
+    record: TheearthSessionRecord,
+    url: URL,
+    ifNoneMatch: string | null,
+  ): Promise<Response> {
     const bucket = this.env.DTAKO_R2;
     if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
     const parsed = this.parseMonthParam(url);
@@ -4330,13 +4371,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       ),
     }));
     endRows();
-    return this.withPhaseTiming(
-      "wage-report",
-      ym,
-      timer,
-      tracker.aggregate(),
-      Response.json({ month: ym, rows, no_data_drivers: noDataDrivers, warnings, config }),
+    // 内容不変なら 304 で本文を送らない (Refs #543 PR-5)。304 でも計測は出す
+    const { res, notModified } = await this.jsonWithEtag(
+      { month: ym, rows, no_data_drivers: noDataDrivers, warnings, config },
+      ifNoneMatch,
     );
+    return this.withPhaseTiming("wage-report", ym, timer, tracker.aggregate(), res, notModified);
   }
 
   /** SHA-256 の hex digest (R2 アーカイブの変化検知用)。 */

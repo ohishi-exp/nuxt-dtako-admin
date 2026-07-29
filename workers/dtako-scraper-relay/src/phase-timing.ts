@@ -117,14 +117,24 @@ export function measurePhase<T>(
 /**
  * リクエスト末尾に 1 行出す構造化ログ (JSON 文字列)。
  *
- * `cacheState` は PR-2 (キャッシュ導入) 用の予約フィールド — 現状は常に "live"。
+ * `cacheState` は上流キャッシュの集約結果 ("hit" | "miss" | "live"、Refs #543 PR-2)。
+ * `notModified` は If-None-Match 一致で 304 (本文なし) を返した時だけ true が載る
+ * (Refs #543 PR-5) — 304 でもフェーズ計測は 1 行出す。
  */
 export function phaseTimingLogLine(
   route: string,
   month: string,
   timer: PhaseTimer,
   cacheState: string,
+  notModified = false,
 ): string {
   const { phases, totalMs } = timer.report();
-  return JSON.stringify({ phase_timing: route, month, phases, totalMs, cacheState });
+  return JSON.stringify({
+    phase_timing: route,
+    month,
+    phases,
+    totalMs,
+    cacheState,
+    ...(notModified ? { notModified: true } : {}),
+  });
 }
