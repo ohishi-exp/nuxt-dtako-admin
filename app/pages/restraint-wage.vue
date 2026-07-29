@@ -243,6 +243,65 @@ async function loadKyuyoSyncedMonths() {
   }
 }
 
+// ---- 手動キャッシュ warm (Refs #554) ----
+// 上流 (rust-ichibanboshi) をデプロイすると版 (etag) が動いて全月が miss になる
+// (ohishi-exp/rust-ichibanboshi#191)。次に開いた人が 1.7MB × 2 種を月ぶん払うので、
+// 先に押しておける口を用意する。**月を順番に**叩く — 並列にすると 1.7MB 級の取得が
+// 重なり、上流の kosoku 同時実行キャップ (rust-ichibanboshi#188) と競合する。
+
+const warming = ref(false)
+const warmProgress = ref('')
+const warmMessage = ref('')
+
+/** 温める対象 (タイムカード取り込み済みの月、新しい順)。既にキャッシュが揃っている月も
+ * 含める — 版が動いていればそこで miss になり、温め直しになるのが狙いのため。 */
+const warmTargetMonths = computed(() => [...kintaiMonths.value].sort().reverse())
+
+interface WarmResult { enabled: boolean, daily: string, kosoku: string, ms: number }
+
+async function warmKintaiCache() {
+  if (warming.value) return
+  const months = warmTargetMonths.value
+  if (!months.length) return
+  warming.value = true
+  warmMessage.value = ''
+  pageError.value = ''
+  let refetched = 0
+  let alreadyFresh = 0
+  let failed = 0
+  try {
+    for (const [i, ym] of months.entries()) {
+      warmProgress.value = `${i + 1}/${months.length} ${fmtYm(ym)} を温めています…`
+      const res = await $fetch<WarmResult>('/restraint-api/kintai/warm', {
+        method: 'POST',
+        headers: authHeaders(),
+        query: { month: ym },
+      })
+      if (!res.enabled) {
+        warmMessage.value = 'キャッシュが無効です (relay の UPSTREAM_CACHE=off、'
+          + 'またはログイン情報から利用者を特定できませんでした)'
+        return
+      }
+      const states = [res.daily, res.kosoku]
+      if (states.includes('error') || states.includes('live')) failed += 1
+      else if (states.includes('miss')) refetched += 1
+      else alreadyFresh += 1
+    }
+    warmMessage.value = `${months.length} ヶ月を温めました — `
+      + `取り直し ${refetched} / 既に最新 ${alreadyFresh}`
+      + (failed ? ` / 失敗 ${failed} (上流が応答しない月)` : '')
+  }
+  catch (e) {
+    handleApiError(e)
+  }
+  finally {
+    warming.value = false
+    warmProgress.value = ''
+    // 「高速表示可」バッジを取り直す
+    await loadArchiveMonths()
+  }
+}
+
 /** loadArchiveMonths の in-flight ガード (Refs #451)。onMounted (restoreSession 直後、同期) と
  * watch(session) (同 flush の microtask) がほぼ同時に呼ぶため、走行中の再入は捨てる。 */
 let archiveMonthsLoading = false
@@ -374,15 +433,34 @@ const STALE_CLASS = 'opacity-40 pointer-events-none select-none'
 /** 月別 wage-report のキャッシュ (一括印刷で再利用)。 */
 const reportCache = new Map<string, WageReportResponse>()
 
+/**
+ * 直近の wage-report が上流キャッシュを使えたか (Refs #554)。relay が
+ * `X-Upstream-Cache: hit|miss|live` をヘッダで返す (本文に入れると hit/miss で
+ * 本文が変わり、弱 ETag が動いて 304 が効かなくなる)。
+ *
+ * - `hit`  … 版が一致してキャッシュを再利用した (速い)
+ * - `miss` … **上流の版 (sha) が変わっていたので取り直した** — 画面に出す
+ * - `live` … 版が引けずキャッシュ不使用 / キャッシュ無効
+ */
+const upstreamCacheState = ref<'hit' | 'miss' | 'live' | null>(null)
+/** 直近の wage-report にかかった時間 (ms)。miss の説明に添える。 */
+const reportElapsedMs = ref(0)
+
 async function fetchWageReport(ym: string): Promise<WageReportResponse> {
   const cached = reportCache.get(ym)
   if (cached) return cached
-  const res = await $fetch<WageReportResponse>('/restraint-api/wage-report', {
+  const startedAt = Date.now()
+  // ヘッダを読むため raw で受ける ($fetch は本文しか返さない)
+  const res = await $fetch.raw<WageReportResponse>('/restraint-api/wage-report', {
     headers: authHeaders(),
     query: { month: ym },
   })
-  reportCache.set(ym, res)
-  return res
+  reportElapsedMs.value = Date.now() - startedAt
+  const state = res.headers.get('x-upstream-cache')
+  upstreamCacheState.value = state === 'hit' || state === 'miss' || state === 'live' ? state : null
+  const body = res._data as WageReportResponse
+  reportCache.set(ym, body)
+  return body
 }
 
 /** loadWageReport の世代。タブ/月の切り替え連打で in-flight が複数になった時、
@@ -3486,6 +3564,38 @@ watch([compMap, kyuyoSyncedKeys], () => {
             <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 opacity-50 align-middle ml-1" /> 同期のみ
           </span>
         </div>
+
+        <!-- 手動キャッシュ warm (Refs #554)。上流をデプロイすると版が変わって全月の
+             キャッシュが miss になるので、開く前に押しておける口を出す -->
+        <div v-if="warmTargetMonths.length" class="flex flex-wrap items-center gap-2 print:hidden">
+          <UButton
+            size="xs"
+            variant="soft"
+            icon="i-lucide-flame"
+            :label="`キャッシュを温める (${warmTargetMonths.length} ヶ月)`"
+            :loading="warming"
+            :disabled="warming"
+            title="上流の版が変わると全月のキャッシュが無効になります。月を順番に取り直して「高速表示可」に戻します (1 ヶ月あたり数秒)"
+            @click="warmKintaiCache"
+          />
+          <span v-if="warmProgress" class="text-xs text-gray-500">{{ warmProgress }}</span>
+          <span v-else-if="warmMessage" class="text-xs text-green-700 dark:text-green-400">{{ warmMessage }}</span>
+          <span v-else class="text-xs text-gray-500">
+            上流をデプロイした後は版が変わってキャッシュが効きません。押しておくと次から速くなります
+          </span>
+        </div>
+
+        <!-- 上流の版が変わって取り直した時だけ出す (Refs #554)。「なぜ今回だけ遅かったのか」
+             を画面で説明する — 出さないと「たまに遅い」が原因不明のままになる -->
+        <UAlert
+          v-if="MONTH_AWARE_TABS.includes(activeTab) && upstreamCacheState === 'miss' && !loadingReport"
+          color="warning"
+          variant="soft"
+          class="print:hidden"
+          icon="i-lucide-refresh-cw"
+          :title="`上流のデータ版が変わっていたため取り直しました (${(reportElapsedMs / 1000).toFixed(1)} 秒)`"
+          description="勤怠の元データか計算ロジックが更新されると、キャッシュしていた版は使えなくなります。この月はもう温まったので、次に開くときは速くなります。"
+        />
 
         <!-- 未同期月を開いている時のバックフィル案内 (Refs #460)。「なぜこの月は
              遅いのか / どうすれば速くなるのか」を画面で説明する -->
