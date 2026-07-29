@@ -122,7 +122,7 @@ export interface CompareDay {
    * 今回の目標は直すことではなく、**差を全部検知して原因の当たりを付ける**こと。
    * `cause` が `unknown` の日が残っている限り、突合はまだ見えていない差を持っている。
    */
-  cause: DiffCause;
+  cause: DiffCauseLabel;
   /** 既知の規則で説明が付いた分 (分)。nginx がこちらより小さくなる向きを正で持つ。 */
   explainedMinutes: number;
   /** 説明しきれずに残った差 (分)。`diffMinutes + explainedMinutes`。 */
@@ -204,6 +204,13 @@ export type DiffCause =
   /** フェリー + 勤務外。控除 (紙が小さくなる) と勤務外 (紙が大きくなる) の相殺形。 */
   | "ferry+paper-outside"
   /**
+   * **こちらだけが数える時間** (実額、`paper-outside` の鏡像。Refs #546 /
+   * ohishi-exp/rust-ichibanboshi#182)。紙の計上材料 (DIGI イベント + 対) に覆われない
+   * こちらの拘束 — アイドリングだけの休息明け勤務 (車中泊、実測 1442 2026-05-27 の
+   * 753 分) など。実額は上流の `ours_outside_by_date`。
+   */
+  | "ours-outside"
+  /**
    * **丸め方式の差** (実額)。紙は打刻・イベントの秒を保持したまま**区分ごとに**
    * 丸めて日計へ足す (TC_DC は経過秒切り捨て、デジタコの区間時間は端点床) ため、
    * 区分の切れ目が多い日に ±数分が堆積する — 正負両方向に出る。実額は上流の
@@ -226,6 +233,14 @@ export type DiffCause =
   | "month-boundary+rounding"
   /** **未説明。** ここが 0 になるまでが検知の仕事。 */
   | "unknown";
+
+/**
+ * 実額どうしの**汎用組み合わせ** (Refs #546 フォローアップ)。個別に列挙した複合
+ * (`ferry+punch-tail` 等) で拾えない 2〜3 項の組み合わせは、実額の部分和を機械的に
+ * 試して `"a+b"` / `"a+b+c"` の形のラベルで説明する ([`classifyDiff`])。
+ * 既知の単独 cause をつないだ文字列なので、読み方は列挙した複合と同じ。
+ */
+export type DiffCauseLabel = DiffCause | (string & {});
 
 /** 1 乗務員 × 1 ヶ月の突合結果。 */
 export interface CompareResult {
@@ -587,9 +602,10 @@ function classifyDiff(
   runHeadCorrection: number,
   lunchOverlapMinutes: number,
   paperOutsideMinutes: number,
+  oursOutsideMinutes: number,
   paperDriftMinutes: number,
   tolerance: number,
-): { cause: DiffCause; explainedMinutes: number; residualMinutes: number | null } {
+): { cause: DiffCauseLabel; explainedMinutes: number; residualMinutes: number | null } {
   if (diffMinutes === null) {
     return { cause: "none", explainedMinutes: 0, residualMinutes: null };
   }
@@ -603,7 +619,7 @@ function classifyDiff(
   // 昼休は実額 (rust#177 の窓の重なり) があればそれを、無ければ従来の固定 60 を使う。
   // 終業が窓の中に落ちる対は 60 未満になる (1714 井上 03-04 の 20 分)
   const lunch = lunchOverlapMinutes > 0 ? lunchOverlapMinutes : LUNCH_DEDUCTION_MINUTES;
-  const candidates: Array<{ cause: DiffCause; explained: number }> = [
+  const specific: Array<{ cause: DiffCauseLabel; explained: number }> = [
     { cause: "ferry", explained: ferry },
     { cause: "month-boundary", explained: crossMonthMinutes },
     { cause: "run-gap", explained: runGapMinutes },
@@ -619,11 +635,54 @@ function classifyDiff(
       cause: "ferry+paper-outside",
       explained: ferry === 0 || paperOutsideMinutes === 0 ? 0 : ferry - paperOutsideMinutes,
     },
+    // こちらだけが数える時間 (紙が小さくなる向き = 正)
+    { cause: "ours-outside", explained: oursOutsideMinutes },
     { cause: "lunch", explained: lunch },
     { cause: "lunch+run-gap", explained: runGapMinutes === 0 ? 0 : runGapMinutes + lunch },
     { cause: "lunch+punch-tail", explained: tail === 0 ? 0 : tail + lunch },
     { cause: "lunch+run-head", explained: runHead === 0 ? 0 : runHead + lunch },
     { cause: "lunch+ferry", explained: ferry + lunch },
+  ];
+  // 実額どうしの**汎用組み合わせ** (Refs #546 フォローアップ)。個別列挙で拾えない
+  // 2〜3 項の複合 (実測 1069 01-13: lunch 60 + punch-head 4 = 64) を部分和で試す。
+  //
+  // - **drift (rounding) は混ぜない** — 再現差は構造差を全部含むので二重計上になる。
+  //   drift と組んでよいのは紙の再現に**入っていない** ferry / month-boundary だけで、
+  //   それは下の列挙 (`ferry+rounding` / `month-boundary+rounding`) が持つ
+  // - **lunch は実額 (窓の重なり) があるときだけ** — 固定 60 の推定を部分和に
+  //   入れると偶然の一致が増える
+  // - 項の少ない説明ほど強いので、ペアを全部試してから 3 項
+  const parts: Array<{ key: string; value: number }> = [
+    { key: "ferry", value: ferry },
+    { key: "month-boundary", value: crossMonthMinutes },
+    { key: "run-gap", value: runGapMinutes },
+    { key: "punch-tail", value: tail },
+    { key: "punch-head", value: punchHeadMinutes },
+    { key: "run-head", value: runHead },
+    { key: "paper-outside", value: -paperOutsideMinutes },
+    { key: "ours-outside", value: oursOutsideMinutes },
+    { key: "lunch", value: lunchOverlapMinutes },
+  ].filter((p) => p.value !== 0);
+  const generic: Array<{ cause: DiffCauseLabel; explained: number }> = [];
+  for (let i = 0; i < parts.length; i += 1) {
+    for (let j = i + 1; j < parts.length; j += 1) {
+      generic.push({
+        cause: `${parts[i]!.key}+${parts[j]!.key}`,
+        explained: parts[i]!.value + parts[j]!.value,
+      });
+    }
+  }
+  for (let i = 0; i < parts.length; i += 1) {
+    for (let j = i + 1; j < parts.length; j += 1) {
+      for (let k = j + 1; k < parts.length; k += 1) {
+        generic.push({
+          cause: `${parts[i]!.key}+${parts[j]!.key}+${parts[k]!.key}`,
+          explained: parts[i]!.value + parts[j]!.value + parts[k]!.value,
+        });
+      }
+    }
+  }
+  const driftLast: Array<{ cause: DiffCauseLabel; explained: number }> = [
     // 丸め (紙の再現値との差) は**必ず最後** — 全再現差なので、先に置くと個別の
     // cause で説明できる日まで rounding に見えてしまう。負にもなる (紙が大きい日)
     { cause: "rounding", explained: paperDriftMinutes },
@@ -641,7 +700,7 @@ function classifyDiff(
           : crossMonthMinutes + paperDriftMinutes,
     },
   ];
-  for (const c of candidates) {
+  for (const c of [...specific, ...generic, ...driftLast]) {
     // 引かれていない (ferry 0) 組み合わせは候補にしない — 0 を足しても説明にならない
     if (c.explained === 0) continue;
     const residual = diffMinutes + c.explained;
@@ -685,6 +744,11 @@ export function compareTimecardMonth(input: {
    * 渡されなければ `paper-outside` の説明は付かない。
    */
   paperOutsideByDate?: ReadonlyMap<string, number>;
+  /**
+   * 暦日 → こちらだけが数える時間 (上流の `ours_outside_by_date`、鏡像)。
+   * 渡されなければ `ours-outside` の説明は付かない。
+   */
+  oursOutsideByDate?: ReadonlyMap<string, number>;
   /**
    * 暦日 → 紙の再現値との差 (`ours − paper`、上流の `paper_drift_by_date`)。
    * 渡されなければ `rounding` の説明は付かない。
@@ -767,6 +831,7 @@ export function compareTimecardMonth(input: {
       runHeadCorrection,
       ours?.lunchOverlapMinutes ?? 0,
       input.paperOutsideByDate?.get(date) ?? 0,
+      input.oursOutsideByDate?.get(date) ?? 0,
       input.paperDriftByDate?.get(date) ?? 0,
       tolerance,
     );
@@ -859,6 +924,8 @@ export function compareTimecardMonthAll(input: {
   crossMonthByDriver?: ReadonlyMap<string, ReadonlyMap<string, number>>;
   /** 乗務員CD → 暦日 → 紙だけが数える勤務外の分 (`paper_outside_by_date`)。 */
   paperOutsideByDriver?: ReadonlyMap<string, ReadonlyMap<string, number>>;
+  /** 乗務員CD → 暦日 → こちらだけが数える時間 (`ours_outside_by_date`)。 */
+  oursOutsideByDriver?: ReadonlyMap<string, ReadonlyMap<string, number>>;
   /** 乗務員CD → 暦日 → 紙の再現値との差 (`paper_drift_by_date`)。 */
   paperDriftByDriver?: ReadonlyMap<string, ReadonlyMap<string, number>>;
   /** 乗務員CD → 暦日 → フェリー控除 (`ferry_minus_by_date`)。 */
@@ -876,6 +943,7 @@ export function compareTimecardMonthAll(input: {
       oursByDate: input.oursByDriver.get(driverCd) ?? new Map(),
       crossMonthByDate: input.crossMonthByDriver?.get(driverCd),
       paperOutsideByDate: input.paperOutsideByDriver?.get(driverCd),
+      oursOutsideByDate: input.oursOutsideByDriver?.get(driverCd),
       paperDriftByDate: input.paperDriftByDriver?.get(driverCd),
       ferryMinusByDate: input.ferryMinusByDriver?.get(driverCd),
       toleranceMinutes: input.toleranceMinutes,
@@ -905,7 +973,7 @@ export interface CompareSummaryRow {
   /** kind ごとの anomaly 件数。**0 件の kind は載せない**。 */
   anomalyKinds: Partial<Record<CompareAnomaly["kind"], number>>;
   /** 推定原因ごとの日数。**0 件の原因は載せない** (`none` も載せない)。 */
-  causeDays: Partial<Record<DiffCause, number>>;
+  causeDays: Partial<Record<DiffCauseLabel, number>>;
   /** 未説明の日数と、その残差の合計 (分)。**検知の抜けを測る数字**。 */
   unknownCount: number;
   unknownMinutes: number;
@@ -935,7 +1003,7 @@ export function summarizeCompareResult(result: CompareResult): CompareSummaryRow
     number
   >;
   const anomalyKinds: Partial<Record<CompareAnomaly["kind"], number>> = {};
-  const causeDays: Partial<Record<DiffCause, number>> = {};
+  const causeDays: Partial<Record<DiffCauseLabel, number>> = {};
   let min: number | null = null;
   let max: number | null = null;
 

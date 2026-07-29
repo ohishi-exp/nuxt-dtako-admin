@@ -25,6 +25,7 @@ import {
   kosokuPartsByDate,
   parseKosokuDaily,
   parseFerryMinusByDriver,
+  parseOursOutsideByDriver,
   parsePaperDriftByDriver,
   parsePaperOutsideByDriver,
   prevYmOf,
@@ -576,6 +577,8 @@ export const getTimecardDiffTool = {
     const paperDriftByDriver = parsePaperDriftByDriver(curBody);
     // 紙だけが数える勤務外の分 (cause "paper-outside" の実額、Refs #546 / rust#182)
     const paperOutsideByDriver = parsePaperOutsideByDriver(curBody);
+    // こちらだけが数える時間 (cause "ours-outside" の実額、鏡像)
+    const oursOutsideByDriver = parseOursOutsideByDriver(curBody);
     // フェリー控除の日別マップ (rust#181) — 勤務に貼れない日があるのでマップ優先
     const ferryMinusByDriver = parseFerryMinusByDriver(curBody);
     // nginx はエラーも HTTP 200 + `{error}` で返す (nginx#784)。素通しすると
@@ -594,6 +597,7 @@ export const getTimecardDiffTool = {
           oursByDate: oursByDriver.get(driver) ?? new Map(),
           crossMonthByDate: crossMonthByDriver.get(driver),
           paperOutsideByDate: paperOutsideByDriver.get(driver),
+          oursOutsideByDate: oursOutsideByDriver.get(driver),
           paperDriftByDate: paperDriftByDriver.get(driver),
           ferryMinusByDate: ferryMinusByDriver.get(driver),
           toleranceMinutes: args.tolerance_minutes,
@@ -606,6 +610,7 @@ export const getTimecardDiffTool = {
         oursByDriver,
         crossMonthByDriver,
         paperOutsideByDriver,
+        oursOutsideByDriver,
         paperDriftByDriver,
         ferryMinusByDriver,
         toleranceMinutes: args.tolerance_minutes,

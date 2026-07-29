@@ -205,6 +205,18 @@ export function parsePaperOutsideByDriver(body: unknown): Map<string, Map<string
   return parseDateMapByDriver(body, "paper_outside_by_date");
 }
 
+/**
+ * 上流が乗務員ごとに添える**こちらだけが数える時間** (`ours_outside_by_date`、
+ * `paper_outside_by_date` の鏡像。Refs #546 / ohishi-exp/rust-ichibanboshi#182)。
+ *
+ * 紙の計上材料 (デジタコの DIGI イベント + 打刻/運行境界の対) に覆われない
+ * こちらの拘束 — アイドリングだけの休息明け勤務 (車中泊) など。**紙が小さくなる
+ * 向き** (run-gap と同じ) の実額で、突合が cause `ours-outside` に使う。
+ */
+export function parseOursOutsideByDriver(body: unknown): Map<string, Map<string, number>> {
+  return parseDateMapByDriver(body, "ours_outside_by_date");
+}
+
 /** `drivers[].<key>` の `{YYYY-MM-DD: 分}` を乗務員CD 引きに直す共通部。 */
 function parseDateMapByDriver(body: unknown, key: string): Map<string, Map<string, number>> {
   const out = new Map<string, Map<string, number>>();

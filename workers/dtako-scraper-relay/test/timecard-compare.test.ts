@@ -1364,6 +1364,51 @@ describe("差の推定原因 (Refs #501)", () => {
     expect(d.residualMinutes).toBe(0);
   });
 
+  it("こちらだけが数える時間は実額で説明する (1676 山口 02-04 の形)", () => {
+    // アイドリングだけの区間などを紙はどの type にも積まない — こちらが大きい向き
+    const d = compareTimecardMonth({
+      month: "2026-02",
+      driverCd: "1676",
+      nginx: nginxDriver([{ date: "2026-02-04", kosokuMinutes: 269 }]),
+      oursByDate: ours({ "2026-02-04": 762 }),
+      oursOutsideByDate: new Map([["2026-02-04", 493]]),
+      toleranceMinutes: 2,
+    }).days[3]!;
+    expect(d.cause).toBe("ours-outside");
+    expect(d.explainedMinutes).toBe(493);
+    expect(d.residualMinutes).toBe(0);
+  });
+
+  it("継ぎ目とこちらだけの時間の汎用ペアでも説明する (1442 廣安 05-27 の形)", () => {
+    // -782 = run-gap 29 + ours-outside 753 — 個別列挙に無い組み合わせ
+    const d = compareTimecardMonth({
+      month: "2026-05",
+      driverCd: "1442",
+      nginx: nginxDriver([{ date: "2026-05-27", kosokuMinutes: 657 }]),
+      oursByDate: new Map([
+        ["2026-05-27", { restraintMinutes: 1439, runGapMinutes: 29 }],
+      ]),
+      oursOutsideByDate: new Map([["2026-05-27", 753]]),
+      toleranceMinutes: 2,
+    }).days[26]!;
+    expect(d.cause).toBe("run-gap+ours-outside");
+    expect(d.explainedMinutes).toBe(782);
+    expect(d.residualMinutes).toBe(0);
+  });
+
+  it("こちらだけの時間を乗務員ごとに渡せる", () => {
+    const rs = compareTimecardMonthAll({
+      month: "2026-02",
+      nginxByDriver: new Map([
+        ["1676", nginxDriver([{ date: "2026-02-04", kosokuMinutes: 269 }])],
+      ]),
+      oursByDriver: new Map([["1676", ours({ "2026-02-04": 762 })]]),
+      oursOutsideByDriver: new Map([["1676", new Map([["2026-02-04", 493]])]]),
+      toleranceMinutes: 2,
+    });
+    expect(rs[0]?.days[3]?.cause).toBe("ours-outside");
+  });
+
   it("勤務外が差に届かない日を paper-outside で説明したことにしない", () => {
     const d = compareTimecardMonth({
       month: "2026-01",
@@ -1373,6 +1418,59 @@ describe("差の推定原因 (Refs #501)", () => {
       paperOutsideByDate: new Map([["2026-01-05", 3]]),
       toleranceMinutes: 2,
     }).days[4]!;
+    expect(d.cause).toBe("unknown");
+  });
+
+  it("実額どうしの汎用ペアで説明する (1069 前田 01-13 の形)", () => {
+    // -64 = lunch 実額 60 + punch-head 4 — 個別列挙に無い組み合わせは部分和で拾う
+    const d = compareTimecardMonth({
+      month: "2026-01",
+      driverCd: "1069",
+      nginx: nginxDriver([{ date: "2026-01-13", kosokuMinutes: 493 }]),
+      oursByDate: new Map([
+        ["2026-01-13", { restraintMinutes: 557, lunchOverlapMinutes: 60, punchHeadMinutes: 4 }],
+      ]),
+      toleranceMinutes: 2,
+    }).days[12]!;
+    expect(d.cause).toBe("punch-head+lunch");
+    expect(d.explainedMinutes).toBe(64);
+    expect(d.residualMinutes).toBe(0);
+  });
+
+  it("汎用の 3 項の部分和でも説明する", () => {
+    // -100 = run-gap 30 + punch-tail 20 + lunch 実額 50
+    const d = compareTimecardMonth({
+      month: "2026-01",
+      driverCd: "1069",
+      nginx: nginxDriver([{ date: "2026-01-13", kosokuMinutes: 400 }]),
+      oursByDate: new Map([
+        [
+          "2026-01-13",
+          {
+            restraintMinutes: 500,
+            runGapMinutes: 30,
+            punchTailMinutes: 20,
+            lunchOverlapMinutes: 50,
+          },
+        ],
+      ]),
+      toleranceMinutes: 2,
+    }).days[12]!;
+    expect(d.cause).toBe("run-gap+punch-tail+lunch");
+    expect(d.explainedMinutes).toBe(100);
+    expect(d.residualMinutes).toBe(0);
+  });
+
+  it("部分和が届かない日を汎用組み合わせで説明したことにしない", () => {
+    const d = compareTimecardMonth({
+      month: "2026-01",
+      driverCd: "1069",
+      nginx: nginxDriver([{ date: "2026-01-13", kosokuMinutes: 300 }]),
+      oursByDate: new Map([
+        ["2026-01-13", { restraintMinutes: 500, runGapMinutes: 30, punchTailMinutes: 20 }],
+      ]),
+      toleranceMinutes: 2,
+    }).days[12]!;
     expect(d.cause).toBe("unknown");
   });
 
