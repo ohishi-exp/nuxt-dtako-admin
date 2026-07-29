@@ -63,6 +63,13 @@ export class PhaseTimer {
     return () => this.push(name, this.now() - t0);
   }
 
+  /** 所要を伴わない出来事 (キャッシュ格納スキップ等) を 0ms フェーズとして残す。 */
+  mark(name: string, bytes?: number): void {
+    const entry: PhaseEntry = { name, ms: 0 };
+    if (bytes !== undefined) entry.bytes = bytes;
+    this.phases.push(entry);
+  }
+
   /** フェーズの応答サイズを載せる。フェーズ未確定なら確定時に合流する。 */
   setBytes(name: string, bytes: number): void {
     const found = this.phases.find((p) => p.name === name);

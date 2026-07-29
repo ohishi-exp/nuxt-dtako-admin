@@ -57,6 +57,17 @@ describe('PhaseTimer', () => {
     ])
   })
 
+  it('mark は 0ms フェーズとして出来事を残す (bytes は任意)', () => {
+    const clock = fakeClock()
+    const timer = new PhaseTimer(clock.now)
+    timer.mark('cache-skip-kosoku-cur', 2_000_000)
+    timer.mark('note')
+    expect(timer.report().phases).toEqual([
+      { name: 'cache-skip-kosoku-cur', ms: 0, bytes: 2_000_000 },
+      { name: 'note', ms: 0 },
+    ])
+  })
+
   it('begin/end は既存コードを包みにくい区間を記録する', () => {
     const clock = fakeClock()
     const timer = new PhaseTimer(clock.now)
