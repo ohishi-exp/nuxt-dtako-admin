@@ -2139,6 +2139,83 @@ describe("harvestDailyReport", () => {
     expect(rows.map((r) => r.operationNo)).toEqual(["A"]);
   });
 
+  it("stops silently (no warn) when the final page has no rows", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const jar = createCookieJar();
+      const page = reportPageHtml({ rows: [], currentPage: 1, links: [] });
+      const rows = await harvestDailyReport(jar, { from: "2026/07/01 00:00", to: "2026/07/07 00:00" }, sequenceFetch([html(page)]));
+      expect(rows).toEqual([]);
+      expect(warnSpy).not.toHaveBeenCalled();
+    }
+    finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("advances via the 次 pager submit button when no numeric link or ellipsis exists", async () => {
+    const jar = createCookieJar();
+    const nextButton = `<input type="submit" name="ctl00$MainContent$dpOperation$ctl03$ctl00" value="次" />`;
+    const page1 = reportPageHtml({
+      rows: [{ operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" }],
+      currentPage: 1,
+      links: [],
+    }).replace("</form>", `${nextButton}</form>`);
+    const page2 = reportPageHtml({
+      rows: [{ operationNo: "B", startDateTime: "2026/07/03 08:00:00", workEndDateTime: "07/03 18:00" }],
+      currentPage: 2,
+      links: [],
+    });
+    const fetchImpl = sequenceFetch([html(page1), html(page2)]);
+    const rows = await harvestDailyReport(jar, { from: "2026/07/01 00:00", to: "2026/07/07 00:00" }, fetchImpl);
+    expect(rows.map((r) => r.operationNo)).toEqual(["A", "B"]);
+  });
+
+  it("also accepts the 次へ label for the next pager button", async () => {
+    const jar = createCookieJar();
+    const nextButton = `<input type="submit" name="ctl00$MainContent$dpOperation$ctl03$ctl00" value="次へ" />`;
+    const page1 = reportPageHtml({
+      rows: [{ operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" }],
+      currentPage: 1,
+      links: [],
+    }).replace("</form>", `${nextButton}</form>`);
+    const page2 = reportPageHtml({
+      rows: [{ operationNo: "B", startDateTime: "2026/07/03 08:00:00", workEndDateTime: "07/03 18:00" }],
+      currentPage: 2,
+      links: [],
+    });
+    const fetchImpl = sequenceFetch([html(page1), html(page2)]);
+    const rows = await harvestDailyReport(jar, { from: "2026/07/01 00:00", to: "2026/07/07 00:00" }, fetchImpl);
+    expect(rows.map((r) => r.operationNo)).toEqual(["A", "B"]);
+  });
+
+  it("stops when the 次 button does not advance the page, and logs the pager button inventory", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const jar = createCookieJar();
+      const buttons =
+        `<input type="submit" name="ctl00$MainContent$dpOperation$ctl00$ctl00" value="最初" disabled="disabled" />`
+        + `<input type="submit" name="ctl00$MainContent$dpOperation$ctl03$ctl00" value="次" />`
+        + `<input type="submit" name="ctl00$MainContent$dpOperation$ctl04$ctl00" />`
+        + `<input type="submit" name="ctl00$MainContent$btnUpdate" value="更新" />`;
+      const page1 = reportPageHtml({
+        rows: [{ operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" }],
+        currentPage: 1,
+        links: [],
+      }).replace("</form>", `${buttons}</form>`);
+      // 次 button postback がページを進めない (同じ page 1 を返す) → 打ち切り
+      const fetchImpl = sequenceFetch([html(page1), html(page1)]);
+      const rows = await harvestDailyReport(jar, { from: "2026/07/01 00:00", to: "2026/07/07 00:00" }, fetchImpl);
+      expect(rows.map((r) => r.operationNo)).toEqual(["A"]);
+      const message = warnSpy.mock.calls.map((c) => String(c[0])).find((s) => s.includes("打ち切り"));
+      // dpOperation 配下だけを列挙 (btnUpdate は含まない)、disabled マーカーと value 無しも表現
+      expect(message).toContain("buttons=[最初(disabled),次,]");
+    }
+    finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it("deduplicates rows that appear on two pages (same operationNo + startDateTime)", async () => {
     const jar = createCookieJar();
     const page1 = reportPageHtml({
