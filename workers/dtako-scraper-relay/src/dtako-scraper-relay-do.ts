@@ -4739,7 +4739,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
   }
 
-  /** GET /daily-report-api/list?from=&to=&vehicleFrom=&vehicleTo= — F-DES1010
+  /** GET /daily-report-api/list?from=&to=&vehicleFrom=&vehicleTo=&driverFrom=&driverTo= — F-DES1010
    * 全ページ収集。from/to は "YYYY/MM/DD HH:mm" 形式 (harvestDailyReport の
    * HarvestRange)。読取日ソートが降順設定になっているか (`sortOk`) も併せて返す —
    * false の場合フロント側で「表示条件指定を確認してください」の警告を出す想定
@@ -4763,6 +4763,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const to = url.searchParams.get("to") ?? "";
     const vehicleFrom = url.searchParams.get("vehicleFrom");
     const vehicleTo = url.searchParams.get("vehicleTo");
+    const driverFrom = url.searchParams.get("driverFrom");
+    const driverTo = url.searchParams.get("driverTo");
     return this.callReportAction(record, "運転日報の取得", async (jar) => {
       // 並び順チェック (F-GOS0030) は表示用の事前確認に過ぎない (早期打ち切りの
       // 安全性は harvestDailyReport 側の単調非増加ランタイム検証が守る) ため、
@@ -4782,6 +4784,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       // しないと残留値より前の期間の検索がエラーなく 0 件になる (Refs #524)。
       const narrow: DisplayNarrow = { readDate: { from, to } };
       if (vehicleFrom && vehicleTo) narrow.vehicle = { from: vehicleFrom, to: vehicleTo };
+      // 乗務員CD range (両方揃った時のみ)。グリッドが対象乗務員の行だけになり、
+      // ページ送り数が激減する (全社 950 行 → 1 名 ~20 行、Refs #536)。結果の
+      // 取りこぼし防止のため防御的な後段フィルタは掛けない (theearth 側の条件が
+      // 乗務員2 にも一致し得るため。front 側の絞込表示がそのまま最終形になる)。
+      if (driverFrom && driverTo) narrow.driver = { from: driverFrom, to: driverTo };
       const harvested = await withDisplayNarrow(
         jar,
         narrow,
