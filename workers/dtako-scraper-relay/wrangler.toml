@@ -117,9 +117,11 @@ NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
 NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"
 
 # kintai 系上流応答の DO SQLite キャッシュ + 条件付き再検証 (Refs #543 PR-2)。
-# "on" のときだけ有効。既定 off = 完全に従来経路 (上流の version エンドポイント
-# rust-ichibanboshi#184 のデプロイ確認後に段階的に on へ)。
-UPSTREAM_CACHE = "off"
+# "on" のときだけ有効。off = 完全に従来経路。version エンドポイント
+# (rust-ichibanboshi#185) の本番デプロイ + kintai_reader への GRANT 4 テーブル
+# 適用を確認済みのため本番も on (2026-07-29)。照会失敗時はライブ取得へ
+# フォールバックするので、切り戻しはこの 1 行を off に戻すだけ。
+UPSTREAM_CACHE = "on"
 
 [env.staging]
 name = "nuxt-dtako-admin-scraper-relay-staging"
