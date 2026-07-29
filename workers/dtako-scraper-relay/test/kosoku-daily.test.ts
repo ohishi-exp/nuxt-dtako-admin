@@ -40,6 +40,7 @@ describe('parseKosokuDaily', () => {
       runGapMinutes: 0,
       punchTailMinutes: 0,
       punchHeadMinutes: 0,
+      runHeadMinutes: 0,
       parts: [],
     }])
   })
@@ -62,6 +63,7 @@ describe('parseKosokuDaily', () => {
       runGapMinutes: 0,
       punchTailMinutes: 0,
       punchHeadMinutes: 0,
+      runHeadMinutes: 0,
       parts: [],
     }])
   })
@@ -149,6 +151,7 @@ describe('kosokuPartsByDate', () => {
       runGapMinutes: 0,
       punchTailMinutes: 0,
       punchHeadMinutes: 0,
+      runHeadMinutes: 0,
     })
     // 同じ日の 2 勤務が 1 つにまとまる
     expect(got.get('2026-04-06')).toEqual({
@@ -161,6 +164,7 @@ describe('kosokuPartsByDate', () => {
       runGapMinutes: 0,
       punchTailMinutes: 0,
       punchHeadMinutes: 0,
+      runHeadMinutes: 0,
     })
   })
 
@@ -259,6 +263,14 @@ describe('crossMonthMinutesByDate', () => {
     expect(kosokuPartsByDate(m, '2026-04').get('2026-04-06')!.punchHeadMinutes).toBe(979)
   })
 
+  it('run_head_minutes を運ぶ (rust#174 の始業前の運行の頭)', () => {
+    const m = parseKosokuDaily({
+      drivers: [{ driver: 6, days: [shift({ date: '2026-04-06', run_head_minutes: 8 })] }],
+    }).get('6')!
+    expect(m[0]!.runHeadMinutes).toBe(8)
+    expect(kosokuPartsByDate(m, '2026-04').get('2026-04-06')!.runHeadMinutes).toBe(8)
+  })
+
   it('跨ぐ勤務が無ければ空', () => {
     expect(crossMonthMinutesByDate(shifts, '2026-05').size).toBe(0)
   })
@@ -277,6 +289,7 @@ describe('mergeKosokuShiftMaps', () => {
       runGapMinutes: 0,
       punchTailMinutes: 0,
       punchHeadMinutes: 0,
+      runHeadMinutes: 0,
       parts: [],
     }))]])
 

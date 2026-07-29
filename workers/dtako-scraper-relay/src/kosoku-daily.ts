@@ -67,6 +67,15 @@ export interface KosokuCalendarPart {
    * cause `punch-head` の実額。
    */
   punchHeadMinutes: number;
+  /**
+   * **始業前の運行の頭** — 直前の運行開始 → 始業打刻 (分)
+   * (Refs ohishi-exp/rust-ichibanboshi#174)。
+   *
+   * **紙が大きくなる向き** (他の実額と逆) — 紙は運行スパンを運行開始から数え、
+   * minus_unko 控除は 1 日 1 回しか効かない。cause `run-head` は
+   * 「紙の TC_DC_minus_unko − この頭」を負の説明に使う。
+   */
+  runHeadMinutes: number;
 }
 
 /** 上流の 1 勤務 (必要な項目だけ)。 */
@@ -105,6 +114,7 @@ function toPart(r: Record<string, unknown>): KosokuCalendarPart {
     runGapMinutes: num(r.run_gap_minutes),
     punchTailMinutes: num(r.punch_tail_minutes),
     punchHeadMinutes: num(r.punch_head_minutes),
+    runHeadMinutes: num(r.run_head_minutes),
   };
 }
 
@@ -177,6 +187,7 @@ export function kosokuPartsByDate(
         runGapMinutes: v.runGapMinutes,
         punchTailMinutes: v.punchTailMinutes,
         punchHeadMinutes: v.punchHeadMinutes,
+        runHeadMinutes: v.runHeadMinutes,
       });
       return;
     }
@@ -189,6 +200,7 @@ export function kosokuPartsByDate(
     cur.runGapMinutes += v.runGapMinutes;
     cur.punchTailMinutes += v.punchTailMinutes;
     cur.punchHeadMinutes += v.punchHeadMinutes;
+    cur.runHeadMinutes += v.runHeadMinutes;
   };
   for (const shift of shifts) {
     if (shift.parts.length > 0) {

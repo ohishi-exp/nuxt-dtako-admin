@@ -1134,6 +1134,70 @@ describe("差の推定原因 (Refs #501)", () => {
     expect(d.cause).toBe("none");
   });
 
+  it("紙が控除しきれない運行の頭は負の実額で説明する (1026 一瀬 03-12 の形)", () => {
+    // 朝の頭 8 + 夕の頭 3、紙の minus_unko は 3 のみ → 紙が 8 分前後大きい。
+    // diff +7 (丸め差 1) が run-head で収まる
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1026",
+      nginx: nginxDriver([
+        { date: "2026-03-12", kosokuMinutes: 799, minusUnko: { TC_DC: 3 } },
+      ]),
+      oursByDate: new Map([
+        ["2026-03-12", { restraintMinutes: 792, runHeadMinutes: 11 }],
+      ]),
+      toleranceMinutes: 2,
+    }).days[11]!;
+    expect(d.cause).toBe("run-head");
+    expect(d.explainedMinutes).toBe(-8);
+    expect(d.residualMinutes).toBe(-1);
+  });
+
+  it("フェリーと運行の頭が併発した日も説明が付く (1026 の毎日の形)", () => {
+    // diff = -ferry + 頭の残り: -72 = -76 + 4 (+丸め)
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1026",
+      nginx: nginxDriver([
+        { date: "2026-03-09", kosokuMinutes: 849, minusUnko: { TC_DC: 4 } },
+      ]),
+      oursByDate: new Map([
+        ["2026-03-09", { restraintMinutes: 921, ferryMinusMinutes: 76, runHeadMinutes: 9 }],
+      ]),
+      toleranceMinutes: 2,
+    }).days[8]!;
+    expect(d.cause).toBe("ferry+run-head");
+    expect(d.explainedMinutes).toBe(71);
+    expect(d.residualMinutes).toBe(-1);
+  });
+
+  it("頭も控除も無い日を run-head で説明したことにしない", () => {
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1026",
+      nginx: nginxDriver([{ date: "2026-03-12", kosokuMinutes: 580 }]),
+      oursByDate: new Map([["2026-03-12", { restraintMinutes: 570 }]]),
+      toleranceMinutes: 2,
+    }).days[11]!;
+    expect(d.cause).toBe("unknown");
+  });
+
+  it("紙の控除と頭が釣り合う日は補正 0 で候補にならない", () => {
+    // minus_unko 6 = 頭 6 → 補正 0。60 分差は従来どおり lunch
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1026",
+      nginx: nginxDriver([
+        { date: "2026-03-02", kosokuMinutes: 510, minusUnko: { TC_DC: 6 } },
+      ]),
+      oursByDate: new Map([
+        ["2026-03-02", { restraintMinutes: 570, runHeadMinutes: 6 }],
+      ]),
+      toleranceMinutes: 2,
+    }).days[1]!;
+    expect(d.cause).toBe("lunch");
+  });
+
   it("未説明の日数と残差を月で数える — 検知の抜けを測る数字", () => {
     const r = compareTimecardMonth({
       month: "2026-04",
