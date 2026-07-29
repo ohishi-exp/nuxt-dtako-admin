@@ -339,6 +339,40 @@ function downloadListCsv() {
   URL.revokeObjectURL(a.href)
 }
 
+// --- 各行の csvdata.zip ダウンロード (一覧から直接、単一運行のみ) ---
+
+const rowZipLoadingNo = ref<string | null>(null)
+const rowZipError = ref<string | null>(null)
+
+/** この運行だけの csvdata.zip を一覧の行から直接ダウンロードする。モーダル内の
+ * 同名機能 (expense/work/revise) と同じ endpoint (`/daily-report-api/zip`)。 */
+async function downloadRowZip(row: DailyReportRow) {
+  const s = session.value
+  if (!s || rowZipLoadingNo.value) return
+  rowZipLoadingNo.value = row.operationNo
+  rowZipError.value = null
+  try {
+    const params = new URLSearchParams({ opeNo: row.operationNo, startOpe: row.startDateTime })
+    const res = await fetch(`/daily-report-api/zip?${params.toString()}`, { headers: authHeaders() })
+    if (!res.ok) {
+      const data = await res.json().catch(() => null) as { error?: string } | null
+      const message = data?.error ?? `csvdata.zip の取得に失敗しました (HTTP ${res.status})`
+      if (res.status === 401) {
+        expireSession(message)
+        return
+      }
+      throw new Error(message)
+    }
+    await downloadBlobResponse(res, `csvdata-${row.operationNo}.zip`)
+  }
+  catch (e) {
+    rowZipError.value = e instanceof Error ? e.message : String(e)
+  }
+  finally {
+    rowZipLoadingNo.value = null
+  }
+}
+
 // --- 編集後 csvdata.zip ダウンロード (F-NOS3010) ---
 
 const zipLoading = ref(false)
@@ -1403,6 +1437,9 @@ onMounted(() => {
           <div v-if="listError" class="mt-3 text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
             {{ listError }}
           </div>
+          <div v-if="rowZipError" class="mt-3 text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
+            {{ rowZipError }}
+          </div>
           <div v-if="zipError" class="mt-3 text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
             {{ zipError }}
           </div>
@@ -1511,6 +1548,14 @@ onMounted(() => {
                     <UButton size="xs" variant="outline" icon="i-lucide-clipboard-list" label="作業を編集" @click="openWorkModal(row)" />
                     <UButton size="xs" variant="outline" icon="i-lucide-fuel" label="経費 (給油) を編集" @click="openExpenseModal(row)" />
                     <UButton size="xs" variant="outline" icon="i-lucide-user" label="乗務員を編集" @click="openReviseModal(row)" />
+                    <UButton
+                      size="xs"
+                      variant="outline"
+                      icon="i-lucide-file-archive"
+                      label="csv"
+                      :loading="rowZipLoadingNo === row.operationNo"
+                      @click="downloadRowZip(row)"
+                    />
                     <UButton
                       v-if="row.exclusionFlag"
                       size="xs"
