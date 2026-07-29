@@ -192,6 +192,19 @@ export function parseFerryMinusByDriver(body: unknown): Map<string, Map<string, 
   return parseDateMapByDriver(body, "ferry_minus_by_date");
 }
 
+/**
+ * 上流が乗務員ごとに添える**紙だけが数える勤務外の分** (`paper_outside_by_date`、
+ * Refs #546 / ohishi-exp/rust-ichibanboshi#182) を乗務員CD 引きに直す。
+ *
+ * 紙は打刻に縛られず、デジタコのイベントと隣接対を数え続ける — 終業打刻の後も
+ * 続くイベント (状態切り忘れの夜通し「積み」、構内ミニ運行) が勤務の外に残ると、
+ * その分だけ紙が大きくなる。**紙が大きくなる向き** (run-head と同じ) の実額で、
+ * 突合が cause `paper-outside` に使う。
+ */
+export function parsePaperOutsideByDriver(body: unknown): Map<string, Map<string, number>> {
+  return parseDateMapByDriver(body, "paper_outside_by_date");
+}
+
 /** `drivers[].<key>` の `{YYYY-MM-DD: 分}` を乗務員CD 引きに直す共通部。 */
 function parseDateMapByDriver(body: unknown, key: string): Map<string, Map<string, number>> {
   const out = new Map<string, Map<string, number>>();
