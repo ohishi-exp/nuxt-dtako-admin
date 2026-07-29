@@ -64,6 +64,7 @@ import {
 } from "./restraint-viewer-auth";
 import { needsTheearthQueue } from "./restraint-queue";
 import { UpstreamMemo } from "./upstream-memo";
+import { measurePhase, PhaseTimer, phaseTimingLogLine } from "./phase-timing";
 import {
   buildDvrSearchKey,
   dvrDataUrl,
@@ -2683,7 +2684,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // **前月も取る** — 前月に始業して当月へ跨いだ勤務は、上流が始業日 (= 前月) の
     // 応答にしか入れないため。`kosokuPartsByDate` が当月に落ちる分だけ拾う。
     // 取れなければ null のまま = 従来どおり打刻から組む (取り込みを止めない)。
-    const kosokuShifts = await this.loadKosokuShifts(apiUrl, clientId, clientSecret, ym, prevYmOf(ym));
+    const kosokuShifts = await this.loadKosokuShifts(apiUrl, clientId, clientSecret, [ym, prevYmOf(ym)]);
 
     // 2) 所定労働時間・休日出勤の承認・社員のスコープ・夜勤者を D1 から引く
     const { schedules, approved, scopes, nightShift } = await this.loadKintaiInputs(record.compId, ym);
@@ -2914,6 +2915,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const parsed = this.parseMonthParam(url);
     if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
     const { ym } = parsed;
+    // フェーズ計測 (Refs #543 PR-1)。挙動は変えない — ログ 1 行と Server-Timing だけ
+    const timer = new PhaseTimer();
 
     const apiUrl = (this.env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
     const clientId = this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
@@ -2932,9 +2935,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
     // 生応答 memo を wage-report と共有する (Refs #508)。上流エラーの詳細は
     // fetchKosokuRaw が log 済みなので、ここは null = 502 に畳む
-    const body = (await this.fetchKosokuRaw(apiUrl, clientId, clientSecret, ym)) as
-      | { drivers?: unknown }
-      | null;
+    const body = (await timer.measure("kosoku-cur", () =>
+      this.fetchKosokuRaw(apiUrl, clientId, clientSecret, ym, timer, "kosoku-cur"),
+    )) as { drivers?: unknown } | null;
     if (body == null) {
       return dvrJsonError(502, "拘束サマリ API の取得に失敗しました");
     }
@@ -2944,7 +2947,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return dvrJsonError(502, "拘束サマリ API の応答に drivers 配列がありません");
     }
     console.log(JSON.stringify({ kosoku_daily: "relayed", month: ym, drivers: body.drivers.length }));
-    return Response.json(body);
+    return this.withPhaseTiming("kintai/kosoku-daily", ym, timer, Response.json(body));
+  }
+
+  /** フェーズ計測の出力 (ログ 1 行 + Server-Timing ヘッダ)。**応答は絶対に壊さない**
+   * — 計測側の不具合はここで握って応答をそのまま返す (Refs #543 PR-1)。 */
+  private withPhaseTiming(route: string, month: string, timer: PhaseTimer, res: Response): Response {
+    try {
+      console.log(phaseTimingLogLine(route, month, timer, "live"));
+      res.headers.set("Server-Timing", timer.serverTimingHeader());
+    } catch (err) {
+      console.error(JSON.stringify({ phase_timing: "emit-error", route, error: describeUnknownError(err) }));
+    }
+    return res;
   }
 
   /**
@@ -3180,6 +3195,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     clientId: string,
     clientSecret: string,
     ym: string,
+    timer?: PhaseTimer,
+    phase?: string,
   ): Promise<unknown> {
     return this.memoKintaiUpstream(`kosoku-raw:${ym}`, async () => {
       try {
@@ -3191,7 +3208,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           console.error(JSON.stringify({ kosoku_raw: "upstream-error", ym, status: upstream.status }));
           return null;
         }
-        return JSON.parse(await upstream.text()) as unknown;
+        const text = await upstream.text();
+        // 応答サイズを計測に載せる (memo ヒット時はこの loader ごと呼ばれない = bytes 無し)
+        if (timer && phase) timer.setBytes(phase, text.length);
+        return JSON.parse(text) as unknown;
       } catch (err) {
         console.error(JSON.stringify({ kosoku_raw: "error", ym, error: describeUnknownError(err) }));
         return null;
@@ -3224,6 +3244,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     compId: string,
     ym: string,
     prevYm: string,
+    timer?: PhaseTimer,
   ): Promise<{
     current: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
     prev: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
@@ -3239,7 +3260,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!apiUrl || !clientId || !clientSecret) return null;
 
     const headers = { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret };
-    const fetchDaily = async (month: string): Promise<TimecardDailyRow[] | null> => {
+    const fetchDaily = async (month: string, phase: string): Promise<TimecardDailyRow[] | null> => {
       try {
         const res = await fetch(
           `${apiUrl}/api/kintai/daily?month=${encodeURIComponent(month)}`,
@@ -3249,7 +3270,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           console.error(JSON.stringify({ wage_report_kintai: "daily-error", month, status: res.status }));
           return null;
         }
-        const body = JSON.parse(await res.text()) as { rows?: unknown };
+        const text = await res.text();
+        // 応答サイズを計測に載せる (memo ヒット時はこの loader ごと呼ばれない = bytes 無し)
+        timer?.setBytes(phase, text.length);
+        const body = JSON.parse(text) as { rows?: unknown };
         return Array.isArray(body.rows) ? (body.rows as TimecardDailyRow[]) : null;
       } catch (err) {
         console.error(
@@ -3263,12 +3287,20 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 同じ前月を使い回せる。最初の版は 3 回取っており (1 回 1.7MB)、画面が
     // 「勤務を読み込んでいます…」から進まなくなった (2026-07-28 本番で発覚)
     const [dailyCurrent, dailyPrev, shiftsCurrent, shiftsPrev] = await Promise.all([
-      this.memoKintaiUpstream(`daily:${ym}`, () => fetchDaily(ym)),
-      this.memoKintaiUpstream(`daily:${prevYm}`, () => fetchDaily(prevYm)),
+      measurePhase(timer, "daily-cur", () =>
+        this.memoKintaiUpstream(`daily:${ym}`, () => fetchDaily(ym, "daily-cur")),
+      ),
+      measurePhase(timer, "daily-prev", () =>
+        this.memoKintaiUpstream(`daily:${prevYm}`, () => fetchDaily(prevYm, "daily-prev")),
+      ),
       // kosoku の memo は fetchKosokuRaw の生応答層にある (Refs #508) — 画面の
       // `/kintai/kosoku-daily` 中継と同じ月を共有するため、ここでは重ねない
-      this.loadKosokuShifts(apiUrl, clientId, clientSecret, ym),
-      this.loadKosokuShifts(apiUrl, clientId, clientSecret, prevYm),
+      measurePhase(timer, "kosoku-cur", () =>
+        this.loadKosokuShifts(apiUrl, clientId, clientSecret, [ym], timer, "kosoku-cur"),
+      ),
+      measurePhase(timer, "kosoku-prev", () =>
+        this.loadKosokuShifts(apiUrl, clientId, clientSecret, [prevYm], timer, "kosoku-prev"),
+      ),
     ]);
     // 当月の勤務 = 前月から跨いだ分 + 当月分 (`kosokuPartsByDate` が当月に落ちる分だけ拾う)
     const kosokuCurrent = mergeKosokuShiftMaps(shiftsPrev, shiftsCurrent);
@@ -3312,8 +3344,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     };
 
     const [current, prev] = await Promise.all([
-      build(ym, dailyCurrent, kosokuCurrent),
-      build(prevYm, dailyPrev, kosokuPrev),
+      measurePhase(timer, "build-cur", () => build(ym, dailyCurrent, kosokuCurrent)),
+      measurePhase(timer, "build-prev", () => build(prevYm, dailyPrev, kosokuPrev)),
     ]);
     console.log(
       JSON.stringify({
@@ -3333,18 +3365,22 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * **取れなければ null** — 取り込み自体は止めず、呼び出し側が従来どおり打刻から
    * 組んだ上で warning を出す。片方だけ取れた場合は取れた方だけを使う (前月が
    * 落ちても当月の勤務は正しく、月初に跨いだ勤務が欠けるだけで済む)。
+   *
+   * timer/phase はフェーズ計測用 (Refs #543 PR-1、任意) — 応答サイズを phase に載せる。
    */
   private async loadKosokuShifts(
     apiUrl: string,
     clientId: string,
     clientSecret: string,
-    ...months: string[]
+    months: string[],
+    timer?: PhaseTimer,
+    phase?: string,
   ): Promise<Map<string, KosokuShift[]> | null> {
     const fetchMonth = async (ym: string): Promise<Map<string, KosokuShift[]> | null> => {
       // 賃金計算 (wage-report) の経路 — 画面の `/kintai/kosoku-daily` 中継と
       // 同じ生応答 memo を共有する (Refs #508)。view=timecard の slim 応答でも
       // parseKosokuDaily は欠けた数値を 0 に落とすので同じ形に畳める
-      const body = await this.fetchKosokuRaw(apiUrl, clientId, clientSecret, ym);
+      const body = await this.fetchKosokuRaw(apiUrl, clientId, clientSecret, ym, timer, phase);
       return body == null ? null : parseKosokuDaily(body);
     };
     const results = await Promise.all(months.map(fetchMonth));
@@ -3768,6 +3804,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     ym: string,
     prevYm: string,
     kintaiPrefix: string,
+    timer?: PhaseTimer,
   ): Promise<{
     current: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
     prev: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
@@ -3778,14 +3815,26 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // R2 は `kintai/fetch` を回した時点の写しでしかなく、取り込みを忘れると古い値が
     // 出続ける (実測: 乗務員 1108 / 2026-04 が打刻由来の 3 勤務・拘束 447h29m のまま)。
     // 上流が取れない時だけ従来どおり R2 へ落ちる。
-    const live = await this.buildKintaiSummariesLive(compId, ym, prevYm);
+    const live = await measurePhase(timer, "kintai-live", () =>
+      this.buildKintaiSummariesLive(compId, ym, prevYm, timer),
+    );
     const fromR2 = {
-      current: () => this.loadMonthSummaries(bucket, compId, ym),
-      prev: () => this.loadMonthSummaries(bucket, compId, prevYm),
+      current: () =>
+        measurePhase(timer, "r2-theearth-cur", () => this.loadMonthSummaries(bucket, compId, ym)),
+      prev: () =>
+        measurePhase(timer, "r2-theearth-prev", () => this.loadMonthSummaries(bucket, compId, prevYm)),
       kintaiCurrent: () =>
-        live ? Promise.resolve(live.current) : this.loadMonthSummaries(bucket, compId, ym, kintaiPrefix),
+        live
+          ? Promise.resolve(live.current)
+          : measurePhase(timer, "r2-kintai-cur", () =>
+              this.loadMonthSummaries(bucket, compId, ym, kintaiPrefix),
+            ),
       kintaiPrev: () =>
-        live ? Promise.resolve(live.prev) : this.loadMonthSummaries(bucket, compId, prevYm, kintaiPrefix),
+        live
+          ? Promise.resolve(live.prev)
+          : measurePhase(timer, "r2-kintai-prev", () =>
+              this.loadMonthSummaries(bucket, compId, prevYm, kintaiPrefix),
+            ),
     };
     const allR2 = async () => {
       const [current, prev, kintaiCurrent, kintaiPrev] = await Promise.all([
@@ -3812,14 +3861,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
     let wire: WageSourceResponseWire;
     try {
-      const res = await fetch(
-        `${apiUrl}/api/restraint/wage-source?comp=${encodeURIComponent(compId)}&month=${encodeURIComponent(ym)}`,
-        {
-          headers: {
-            "CF-Access-Client-Id": clientId,
-            "CF-Access-Client-Secret": clientSecret,
+      const res = await measurePhase(timer, "wage-source", () =>
+        fetch(
+          `${apiUrl}/api/restraint/wage-source?comp=${encodeURIComponent(compId)}&month=${encodeURIComponent(ym)}`,
+          {
+            headers: {
+              "CF-Access-Client-Id": clientId,
+              "CF-Access-Client-Secret": clientSecret,
+            },
           },
-        },
+        ),
       );
       if (!res.ok) {
         console.error(
@@ -3827,7 +3878,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         );
         return allR2();
       }
-      const raw: unknown = await res.json();
+      // JSON parse (本文受信込み) は fetch (ヘッダ到着まで) と分けて計る。
+      // サイズは content-length があればそれを載せる (Tunnel 圧縮時は無いこともある)
+      const contentLength = Number(res.headers.get("content-length"));
+      if (timer && Number.isFinite(contentLength) && contentLength > 0) {
+        timer.setBytes("wage-source-parse", contentLength);
+      }
+      const raw: unknown = await measurePhase(timer, "wage-source-parse", () => res.json());
       if (!isWageSourceResponse(raw)) {
         console.error(JSON.stringify({ wage_report_source: "bad-shape", comp_id: compId, ym }));
         return allR2();
@@ -3879,6 +3936,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const parsed = this.parseMonthParam(url);
     if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
     const { year, month, ym } = parsed;
+    // フェーズ計測 (Refs #543 PR-1)。挙動は変えない — ログ 1 行と Server-Timing だけ
+    const timer = new PhaseTimer();
 
     const loadMaster = async <T>(
       name: "wage-master" | "min-wage" | "wage-config",
@@ -3903,15 +3962,24 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // マスタ 3 種と当月・前月 summary は互いに独立なので一括並列で読む (月切替の体感に直結)
     const [wageMaster, minWageMaster, config, { current, prev, kintaiCurrent, kintaiPrev }] =
       await Promise.all([
-        loadMaster<WageMaster>("wage-master", normalizeWageMaster, { drivers: {} }),
-        loadMaster<MinWageMaster>("min-wage", normalizeMinWageMaster, {
-          prefectures: {},
-          branchToPrefecture: {},
-        }),
-        loadMaster<WageConfig>("wage-config", normalizeWageConfig, normalizeWageConfig(null)),
-        this.loadWageReportSource(bucket, record.compId, ym, prevYm, kintaiPrefix),
+        timer.measure("master-wage", () =>
+          loadMaster<WageMaster>("wage-master", normalizeWageMaster, { drivers: {} }),
+        ),
+        timer.measure("master-min-wage", () =>
+          loadMaster<MinWageMaster>("min-wage", normalizeMinWageMaster, {
+            prefectures: {},
+            branchToPrefecture: {},
+          }),
+        ),
+        timer.measure("master-config", () =>
+          loadMaster<WageConfig>("wage-config", normalizeWageConfig, normalizeWageConfig(null)),
+        ),
+        timer.measure("source", () =>
+          this.loadWageReportSource(bucket, record.compId, ym, prevYm, kintaiPrefix, timer),
+        ),
       ]);
     const { noDataDrivers } = current;
+    const endMerge = timer.begin("merge");
     // 同じ乗務員CD が両方に居たら timecard を採る (打刻を賃金の根拠にする、2026-07-28)
     const { merged, warnings } = mergeSummarySources(current.summaries, kintaiCurrent.summaries);
     // 前月 days (週40h の月初跨ぎ週用) も同じ優先順で合流する — 当月と別の source を
@@ -3926,11 +3994,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         `前月 (${prevYm}) の summary がアーカイブに無いため、月初の跨ぎ週の週40h計算は当月分のみで近似しています`,
       );
     }
+    endMerge();
     // 最低賃金の県は theearth の事業所名ではなく社員マスタの所属 (月末時点) で引く
     // (Refs #409 Phase 3)。D1 が無い / 読めない場合は空のまま = 従来どおり
     // theearth 事業所名 + defaultPrefecture のフォールバックで動く
-    const { branches: employeeBranches, payKubun } = await this.branchByDriverCd(record.compId, ym);
+    const { branches: employeeBranches, payKubun } = await timer.measure("branches", () =>
+      this.branchByDriverCd(record.compId, ym),
+    );
 
+    const endRows = timer.begin("rows");
     const rows = merged.map(({ entry, source }) => ({
       summary: entry.data,
       /** 'theearth' (デジタコ) | 'timecard' (タイムカード)。画面のバッジ用 (PR-E)。 */
@@ -3951,7 +4023,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         employeeBranches.get(entry.data.driverCd) ?? null,
       ),
     }));
-    return Response.json({ month: ym, rows, no_data_drivers: noDataDrivers, warnings, config });
+    endRows();
+    return this.withPhaseTiming(
+      "wage-report",
+      ym,
+      timer,
+      Response.json({ month: ym, rows, no_data_drivers: noDataDrivers, warnings, config }),
+    );
   }
 
   /** SHA-256 の hex digest (R2 アーカイブの変化検知用)。 */
