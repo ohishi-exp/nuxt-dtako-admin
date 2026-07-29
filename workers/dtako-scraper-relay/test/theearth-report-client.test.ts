@@ -2678,6 +2678,35 @@ function recordingFetch(responses: (Response | (() => Response))[], bodies: stri
 }
 
 describe("getWorkForm", () => {
+  it("accepts a page whose form action echoes the requested OpeNo", async () => {
+    const jar = createCookieJar();
+    const page = workFormHtml().replace(
+      "<form>",
+      `<form action="./F-DES1013[OperationWorkEdit].aspx?OpeNo=${OPE_NO}&amp;StartOpe=x">`,
+    );
+    const form = await getWorkForm(jar, OPE_NO, START_OPE, sequenceFetch([html(page)]));
+    expect(form.workRows).toHaveLength(2);
+  });
+
+  it("skips the check leniently when the form action has no OpeNo", async () => {
+    const jar = createCookieJar();
+    const page = workFormHtml().replace("<form>", `<form action="./F-DES1013[OperationWorkEdit].aspx">`);
+    const form = await getWorkForm(jar, OPE_NO, START_OPE, sequenceFetch([html(page)]));
+    expect(form.workRows).toHaveLength(2);
+  });
+
+  it("loud-fails when the page echoes a different OpeNo (previous operation still loaded)", async () => {
+    const jar = createCookieJar();
+    const other = "2299999999999999999999";
+    const page = workFormHtml().replace(
+      "<form>",
+      `<form action="./F-DES1013[OperationWorkEdit].aspx?OpeNo=${other}&amp;StartOpe=x">`,
+    );
+    await expect(
+      getWorkForm(jar, OPE_NO, START_OPE, sequenceFetch([html(page)])),
+    ).rejects.toThrow(/異なる運行/);
+  });
+
   it("parses work display rows and event options from the work edit page", async () => {
     const jar = createCookieJar();
     const form = await getWorkForm(jar, OPE_NO, START_OPE, sequenceFetch([html(workFormHtml())]));
