@@ -18,6 +18,11 @@ export interface IntrospectResult {
    * で「admin は全会社」を判定するのに使う (Refs #367)。WS ハンドシェイク判定
    * (decideRelayAuth) は従来どおり active しか見ない。 */
   role?: string
+  /** active:true の時に introspect が返す JWT の email claim (Refs #554)。
+   * kintai 上流キャッシュを**人単位の DO** に分けるための鍵に使う。
+   * theearth のユーザー名は共有アカウントになりうるので鍵にしない。
+   * WS ハンドシェイク判定 (decideRelayAuth) は従来どおり active しか見ない。 */
+  email?: string
 }
 
 /** ハンドシェイク判定結果。`status === 101` の時だけ accept する。 */

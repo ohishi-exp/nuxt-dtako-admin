@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
   aggregateCacheState,
+  cacheDoNameForEmail,
   CacheStateTracker,
   gunzipText,
   gzipText,
+  LocalUpstreamCache,
   parseVersionResponse,
   UPSTREAM_CACHE_MAX_GZ_BYTES,
   UpstreamCache,
@@ -136,6 +138,57 @@ describe('UpstreamCache', () => {
     cache.put('daily', '2026-07', gz, 'sha', 'e', 1) // kosoku 無し → 数えない
     cache.put('kosoku', '2026-04', gz, 'sha', 'e', 1) // daily 無し → 数えない
     expect(cache.monthsWithBothKinds()).toEqual(['2026-06', '2026-05'])
+  })
+
+  it('LocalUpstreamCache は同期 UpstreamCache を Promise 版の口に包む (Refs #554)', async () => {
+    const sql = new FakeSql()
+    let now = 1000
+    const local = new LocalUpstreamCache(new UpstreamCache(sql), () => now)
+    const gz = await gzipText('{"rows":[]}')
+
+    expect(await local.put('daily', '2026-06', gz, 'sha', 'etag-1')).toBe(true)
+    now = 2000
+    const hit = await local.getFresh('daily', '2026-06', 'etag-1')
+    expect(await gunzipText(hit!)).toBe('{"rows":[]}')
+    // now は注入したものが使われる (verified_at が進む)
+    expect(sql.rows.get('daily|2026-06')!.verified_at).toBe(2000)
+
+    expect(await local.getFresh('daily', '2026-06', 'etag-2')).toBeNull()
+    expect(await local.monthsWithBothKinds()).toEqual([]) // kosoku が無い
+    await local.put('kosoku', '2026-06', gz, 'sha', 'etag-1')
+    expect(await local.monthsWithBothKinds()).toEqual(['2026-06'])
+
+    await local.delete('daily', '2026-06')
+    expect(await local.getFresh('daily', '2026-06', 'etag-1')).toBeNull()
+    // 1.9MB 超は false (同期版と同じ)
+    expect(
+      await local.put('kosoku', '2026-07', new Uint8Array(UPSTREAM_CACHE_MAX_GZ_BYTES + 1), 's', 'e'),
+    ).toBe(false)
+  })
+
+  it('LocalUpstreamCache の now 既定は Date.now (注入しなくても動く)', async () => {
+    const local = new LocalUpstreamCache(new UpstreamCache(new FakeSql()))
+    const before = Date.now()
+    await local.put('daily', '2026-06', await gzipText('x'), 'sha', 'e')
+    const hit = await local.getFresh('daily', '2026-06', 'e')
+    expect(hit).not.toBeNull()
+    expect(Date.now()).toBeGreaterThanOrEqual(before)
+  })
+
+  describe('cacheDoNameForEmail', () => {
+    it('生の email を含まず、正規化 (trim/小文字) して同じ名前になる', async () => {
+      const a = await cacheDoNameForEmail('User@Example.com')
+      const b = await cacheDoNameForEmail('  user@example.com  ')
+      expect(a).toBe(b)
+      expect(a).not.toContain('user@example.com')
+      expect(a).toMatch(/^kintai-cache-[0-9a-f]{32}$/)
+    })
+
+    it('別の email は別の名前になる', async () => {
+      const a = await cacheDoNameForEmail('a@example.com')
+      const b = await cacheDoNameForEmail('b@example.com')
+      expect(a).not.toBe(b)
+    })
   })
 
   it('upsert は同キーの行を置き換える。CREATE TABLE は 1 回だけ', async () => {

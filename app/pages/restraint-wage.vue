@@ -62,7 +62,6 @@ import {
 
 const {
   session: theearthSession,
-  authHeaders: theearthHeaders,
   restoreSession,
   expireSession: theearthExpireSession,
   lastAccount,
@@ -80,14 +79,24 @@ const session = computed<{ compId: string, userName: string } | null>(() =>
   theearthSession.value
   ?? (viewerComp.value ? { compId: viewerComp.value, userName: '閲覧' } : null))
 
-/** `compId` を明示すると閲覧モードでその会社に対して投げる (社員マスタの会社横断、
- * Refs #367)。触れるかどうかの判定は worker 側 (`viewerCompIdsForTenant`) が
- * DTAKO_ACCOUNTS の逆引きで行うため、ここで会社を絞る必要はない。 */
+/**
+ * **常に viewer 経路 (auth-worker JWT) で叩く** (Refs #554)。
+ *
+ * このページが使う /restraint-api は 30 経路あるが、theearth セッション必須なのは
+ * `login` / `logout` / `report` / `csv` の 4 つだけで (`isR2OnlyRestraintPath`)、
+ * **その 4 つはこのページから 1 つも呼んでいない** (拘束CSV取得ページの担当)。
+ * 以前は theearth セッションがあるとそちらを優先していたが、それだと relay が
+ * introspect を通らず**誰が見ているのか (email) が relay に届かない** — 上流
+ * キャッシュを email 単位の DO に置くのにこれが要る。
+ *
+ * `compId` を明示するとその会社に対して投げる (社員マスタの会社横断、Refs #367)。
+ * 触れるかどうかの判定は worker 側 (`viewerCompIdsForTenant`) が DTAKO_ACCOUNTS の
+ * 逆引きで行うため、ここで会社を絞る必要はない。
+ */
 function authHeaders(compId?: string): Record<string, string> {
-  if (theearthSession.value) return theearthHeaders()
   const token = currentAccessToken()
   return {
-    'X-Theearth-Comp-Id': compId ?? viewerComp.value,
+    'X-Theearth-Comp-Id': compId ?? session.value?.compId ?? viewerComp.value,
     'X-Theearth-User-B64': b64urlUtf8('viewer'),
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   }
