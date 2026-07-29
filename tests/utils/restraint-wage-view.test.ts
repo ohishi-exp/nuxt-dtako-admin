@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, monthRange, MONTH_RANGE_MAX, nextYm, prevYm } from '../../app/utils/restraint-wage-view'
+import { fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, monthRange, MONTH_RANGE_MAX, nextYm, prevYm } from '../../app/utils/restraint-wage-view'
 
 describe('fmtMinutes', () => {
   it('時間+分を "XhYYm" 表記にする', () => {
@@ -127,5 +127,28 @@ describe('monthRange', () => {
     expect(monthRange('2026/07', '2026-08')).toEqual([])
     expect(monthRange('2026-13', '2026-14')).toEqual([])
     expect(monthRange('2026-00', '2026-01')).toEqual([])
+  })
+})
+
+describe('fastBadgeState (「高速表示可」バッジの 2 段階、Refs #543 followup)', () => {
+  const synced = ['2026-05', '2026-06']
+
+  it('未同期の月はバッジ無し (キャッシュ有無に関わらず)', () => {
+    expect(fastBadgeState('2026-07', synced, ['2026-07'])).toBe('none')
+    expect(fastBadgeState('2026-07', synced, null)).toBe('none')
+    expect(fastBadgeState('2026-07', [], [])).toBe('none')
+  })
+
+  it('同期済み + キャッシュ有りはフル表示', () => {
+    expect(fastBadgeState('2026-06', synced, ['2026-06'])).toBe('full')
+  })
+
+  it('同期済みのみ (キャッシュ無し / フラグ off の空配列) は弱表示', () => {
+    expect(fastBadgeState('2026-06', synced, ['2026-05'])).toBe('synced-only')
+    expect(fastBadgeState('2026-06', synced, [])).toBe('synced-only')
+  })
+
+  it('旧 relay 応答 (フィールド無し = null) は従来どおりフル表示に fallback', () => {
+    expect(fastBadgeState('2026-06', synced, null)).toBe('full')
   })
 })

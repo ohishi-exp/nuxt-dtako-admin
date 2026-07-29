@@ -3994,7 +3994,28 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       this.listMonthDirs(bucket, `${kintaiPrefix}/${record.compId}/`),
       this.listIchibanSyncedMonths(record.compId),
     ]);
-    return Response.json({ months, kintai_months: kintaiMonths, ichiban_months: ichibanMonths });
+    return Response.json({
+      months,
+      kintai_months: kintaiMonths,
+      ichiban_months: ichibanMonths,
+      // kintai 上流キャッシュ (daily+kosoku 両方) が揃っている月 — 月タブの
+      // 「高速表示可」バッジの 2 段階表示用 (Refs #543 followup)。DO ローカルの
+      // SQLite SELECT なのでコストほぼゼロ
+      kintai_cached_months: this.kintaiCachedMonths(),
+    });
+  }
+
+  /** 「高速表示可」バッジ用: kintai 上流キャッシュが揃っている月 (Refs #543 followup)。
+   * フラグ off ではキャッシュが読まれない = 「速い」表示が嘘になるので空。
+   * 失敗しても archive/months 自体は落とさない (バッジが弱表示になるだけ)。 */
+  private kintaiCachedMonths(): string[] {
+    if (this.env.UPSTREAM_CACHE !== "on") return [];
+    try {
+      return this.upstreamCacheStore().monthsWithBothKinds();
+    } catch (err) {
+      console.error(JSON.stringify({ upstream_cache: "months-error", error: describeUnknownError(err) }));
+      return [];
+    }
   }
 
   /** ichiban に拘束サマリ (theearth source) が push 済みの月一覧 (Refs #460)。
