@@ -2227,6 +2227,83 @@ describe("harvestDailyReport", () => {
     }
   });
 
+  it("sends the full form (ddlRowCount preserved) on pager link postbacks", async () => {
+    const jar = createCookieJar();
+    const rowCountSelect =
+      `<select id="MainContent_ddlRowCount" name="ctl00$MainContent$ddlRowCount">`
+      + `<option value="10">10</option><option value="30" selected>30</option></select>`;
+    const page1 = reportPageHtml({
+      rows: [{ operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" }],
+      currentPage: 1,
+      links: [link("pager$page2", "", "2")],
+    }).replace("</form>", `${rowCountSelect}</form>`);
+    const page2 = reportPageHtml({
+      rows: [{ operationNo: "B", startDateTime: "2026/07/03 08:00:00", workEndDateTime: "07/03 18:00" }],
+      currentPage: 2,
+      links: [],
+    });
+    const posted: string[] = [];
+    let call = 0;
+    const fetchImpl = (async (_url: unknown, init?: { body?: unknown }) => {
+      call += 1;
+      if (call === 1) return html(page1);
+      posted.push(String(init?.body ?? ""));
+      return html(page2);
+    }) as FetchLike;
+    const rows = await harvestDailyReport(jar, { from: "2026/07/01 00:00", to: "2026/07/07 00:00" }, fetchImpl);
+    expect(rows.map((r) => r.operationNo)).toEqual(["A", "B"]);
+    const body = new URLSearchParams(posted[0]);
+    expect(body.get("__EVENTTARGET")).toBe("pager$page2");
+    // 部分 POST だと毎ページ表示件数が保存値へ戻る — full form で 30 を維持する
+    expect(body.get("ctl00$MainContent$ddlRowCount")).toBe("30");
+  });
+
+  it("resyncs currentPage from gCurrentPage after each pager navigation", async () => {
+    const jar = createCookieJar();
+    const page1 = reportPageHtml({
+      rows: [{ operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" }],
+      currentPage: 1,
+      links: [link("pager$p2", "", "2")],
+    });
+    // 「2」リンクの遷移先が実は 5 ページ目 (番号ズレの再現)。+1 推測のままだと
+    // nextText=3 を探して打ち切るが、gCurrentPage 再同期後は「6」を辿れる。
+    const page5 = reportPageHtml({
+      rows: [{ operationNo: "B", startDateTime: "2026/07/04 08:00:00", workEndDateTime: "07/04 18:00" }],
+      currentPage: 5,
+      links: [link("pager$p6", "", "6")],
+    });
+    const page6 = reportPageHtml({
+      rows: [{ operationNo: "C", startDateTime: "2026/07/03 08:00:00", workEndDateTime: "07/03 18:00" }],
+      currentPage: 6,
+      links: [],
+    });
+    const fetchImpl = sequenceFetch([html(page1), html(page5), html(page6)]);
+    const rows = await harvestDailyReport(jar, { from: "2026/07/01 00:00", to: "2026/07/07 00:00" }, fetchImpl);
+    expect(rows.map((r) => r.operationNo)).toEqual(["A", "B", "C"]);
+  });
+
+  it("falls back to +1 when a pager response lacks the gCurrentPage marker", async () => {
+    const jar = createCookieJar();
+    const page1 = reportPageHtml({
+      rows: [{ operationNo: "A", startDateTime: "2026/07/05 08:00:00", workEndDateTime: "07/05 18:00" }],
+      currentPage: 1,
+      links: [link("pager$p2", "", "2")],
+    });
+    const page2NoMarker = reportPageHtml({
+      rows: [{ operationNo: "B", startDateTime: "2026/07/04 08:00:00", workEndDateTime: "07/04 18:00" }],
+      currentPage: 2,
+      links: [link("pager$p3", "", "3")],
+    }).replace(/<span class="gCurrentPage">2<\/span>/, "");
+    const page3 = reportPageHtml({
+      rows: [{ operationNo: "C", startDateTime: "2026/07/03 08:00:00", workEndDateTime: "07/03 18:00" }],
+      currentPage: 3,
+      links: [],
+    });
+    const fetchImpl = sequenceFetch([html(page1), html(page2NoMarker), html(page3)]);
+    const rows = await harvestDailyReport(jar, { from: "2026/07/01 00:00", to: "2026/07/07 00:00" }, fetchImpl);
+    expect(rows.map((r) => r.operationNo)).toEqual(["A", "B", "C"]);
+  });
+
   it("deduplicates rows that appear on two pages (same operationNo + startDateTime)", async () => {
     const jar = createCookieJar();
     const page1 = reportPageHtml({
