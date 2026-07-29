@@ -1080,6 +1080,73 @@ function validateVehicleCd(value: string, label: string): void {
   }
 }
 
+export interface ReadDateNarrowRange {
+  /** 読取日下限、"YYYY/MM/DD HH:mm" (`HarvestRange.from` と同じ値。日付部分のみ使う)。 */
+  from: string;
+  /** 読取日上限 (同 `to`)。 */
+  to: string;
+}
+
+/** F-GOS0030 の読取日条件を要求期間で上書きする override マップを組み立てる。
+ *
+ * 共有設定に残留した読取日下限 (実機で "26/4/29〜" を確認、2026-07-29) は一覧グリッド
+ * 自体を絞るため、それより前の期間を検索すると harvest 後のフィルタで**エラーなく
+ * 0 件**になる。検索のたびに読取日 range を要求期間で明示上書きして、この残留値に
+ * 依存しない一覧を取る (ページ送り数の削減も兼ねる)。
+ *
+ * 条件日行は 2 行 (ddlSortDay1/ddlSortDay2) あり、どちらが読取日 (ReadNo) かは共有
+ * 設定の現在値次第なので selected 値で探す。どちらも ReadNo でなければ 2 行目を
+ * ReadNo に切り替えて使う (withDisplayNarrow が適用後に必ず元へ戻す前提)。
+ * 年欄は maxLength=2 の西暦下 2 桁 (和暦チェック chkUseEra OFF 時、実機確認
+ * 2026-07-29)。ON だと同じ数値が和暦年として解釈されるため、対象行の chkUseEra は
+ * 明示的に unchecked (キーを送らない = null override) にする。 */
+function resolveReadDateOverrides(
+  configHtml: string,
+  range: ReadDateNarrowRange,
+): Record<string, string | null> {
+  const overrides: Record<string, string | null> = {};
+  let row: 1 | 2 | null = null;
+  for (const n of [1, 2] as const) {
+    if (extractSelectedOptionValueBySuffix(configHtml, `ddlSortDay${n}`) === "ReadNo") {
+      row = n;
+      break;
+    }
+  }
+  if (row === null) {
+    const ddl = findFormFieldById(configHtml, "ddlSortDay2");
+    if (!ddl) {
+      throw new TheearthClientError(
+        "表示条件指定ページの条件日種別 (ddlSortDay2) が見つかりません — theearth-np のページ仕様変更の可能性があります",
+      );
+    }
+    overrides[ddl.name] = "ReadNo";
+    row = 2;
+  }
+  for (const [prefix, bound] of [
+    [`ucStartDate${row}`, range.from],
+    [`ucEndDate${row}`, range.to],
+  ] as const) {
+    const [y, m, d] = bound.slice(0, 10).split("/");
+    const parts: Record<string, string> = {
+      txtYear: y.slice(2),
+      txtMonth: String(Number(m)),
+      txtDay: String(Number(d)),
+    };
+    for (const [suffix, value] of Object.entries(parts)) {
+      const field = findFormFieldById(configHtml, `${prefix}_${suffix}`);
+      if (!field) {
+        throw new TheearthClientError(
+          `表示条件指定ページの読取日フィールド (${prefix}_${suffix}) が見つかりません — theearth-np のページ仕様変更の可能性があります`,
+        );
+      }
+      overrides[field.name] = value;
+    }
+    const era = findFormFieldById(configHtml, `${prefix}_chkUseEra`);
+    if (era) overrides[era.name] = null;
+  }
+  return overrides;
+}
+
 async function fetchDisplayConfigHtml(
   jar: CookieJar,
   url: string,
@@ -1120,33 +1187,34 @@ async function fetchOperationListHtml(
   return html;
 }
 
-/** F-GOS0030 の車輌絞込を `btnOK` (適用) postback で反映する。`lnkSaveCategory`
- * (絞込条件保存) では**一覧に反映されない** (実機確認、withVehicleNarrow の doc 参照)。 */
-async function applyVehicleNarrowConfig(
+/** F-GOS0030 の絞込フィールドを `btnOK` (適用) postback で反映する。`lnkSaveCategory`
+ * (絞込条件保存) では**一覧に反映されない** (実機確認、withDisplayNarrow の doc 参照)。
+ * overrides の値 `null` は「キー自体を送らない」— checkbox (chkUseEra 等) を
+ * unchecked として送るのに使う (ブラウザの form submit は unchecked を含めない)。 */
+async function applyDisplayNarrowConfig(
   jar: CookieJar,
   url: string,
   baseline: Record<string, string>,
-  fieldNames: { sName: string; eName: string },
+  overrides: Record<string, string | null>,
   applyButton: { name: string; value: string },
-  vehicleFrom: string,
-  vehicleTo: string,
   fetchImpl: FetchLike,
   timeoutMs: number,
 ): Promise<void> {
-  const body = new URLSearchParams({
-    ...baseline,
-    [fieldNames.sName]: vehicleFrom,
-    [fieldNames.eName]: vehicleTo,
-    [applyButton.name]: applyButton.value || "適用",
-  });
+  const merged: Record<string, string> = { ...baseline };
+  for (const [name, value] of Object.entries(overrides)) {
+    if (value === null) delete merged[name];
+    else merged[name] = value;
+  }
+  merged[applyButton.name] = applyButton.value || "適用";
+  const body = new URLSearchParams(merged);
   const res = await postForm(jar, url, body, fetchImpl, timeoutMs);
   if (!res.ok) {
-    throw new TheearthClientError(`表示条件指定 (車輌絞込) の適用が HTTP ${res.status} を返しました`);
+    throw new TheearthClientError(`表示条件指定 (絞込) の適用が HTTP ${res.status} を返しました`);
   }
   const html = await res.text();
   if (isLoginRedirect(html)) {
     throw new VenusSessionExpiredError(
-      "表示条件指定 (車輌絞込) の適用後にログイン画面が返されました — theearth セッションが切れています",
+      "表示条件指定 (絞込) の適用後にログイン画面が返されました — theearth セッションが切れています",
     );
   }
 }
@@ -1180,9 +1248,17 @@ async function postOperationListUpdate(
   return html;
 }
 
+/** withDisplayNarrow で一時適用する絞込条件。少なくとも一方の指定が必要。 */
+export interface DisplayNarrow {
+  /** 車輌CD range (`txtSVehicle`/`txtEVehicle`)。 */
+  vehicle?: VehicleNarrowRange;
+  /** 読取日 range (ReadNo 条件行の `ucStartDate*`/`ucEndDate*`)。 */
+  readDate?: ReadDateNarrowRange;
+}
+
 /**
- * F-GOS0030 の「車輌」絞込条件 (`txtSVehicle`/`txtEVehicle`、車輌CD 範囲) を
- * 一時的に適用して `fn` を実行し、**成功しても失敗しても必ず元の値へ書き戻す**。
+ * F-GOS0030 の絞込条件 (車輌CD 範囲 / 読取日範囲) を一時的に適用して `fn` を
+ * 実行し、**成功しても失敗しても必ず元の値へ書き戻す**。
  *
  * 実ブラウザの適用フロー (cdp-pair 実機確定、2026-07-08。これ以外の経路は**効かない**):
  *
@@ -1209,15 +1285,23 @@ async function postOperationListUpdate(
  * `fn` には絞込反映済みの 1ページ目 HTML を渡す (`harvestDailyReport` の
  * `initialHtml` にそのまま流し込む用)。
  */
-export async function withVehicleNarrow<T>(
+export async function withDisplayNarrow<T>(
   jar: CookieJar,
-  range: VehicleNarrowRange,
+  narrow: DisplayNarrow,
   fn: (jar: CookieJar, firstPageHtml: string) => Promise<T>,
   fetchImpl: FetchLike = fetch,
   timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
 ): Promise<T> {
-  validateVehicleCd(range.from, "下限");
-  validateVehicleCd(range.to, "上限");
+  if (!narrow.vehicle && !narrow.readDate) {
+    throw new ReportParamError("絞込条件 (vehicle / readDate) が 1 つも指定されていません");
+  }
+  if (narrow.vehicle) {
+    validateVehicleCd(narrow.vehicle.from, "下限");
+    validateVehicleCd(narrow.vehicle.to, "上限");
+  }
+  if (narrow.readDate && (!RANGE_BOUND_RE.test(narrow.readDate.from) || !RANGE_BOUND_RE.test(narrow.readDate.to))) {
+    throw new ReportParamError('読取日範囲は "YYYY/MM/DD HH:mm" 形式で指定してください');
+  }
 
   const listUrl = `${BASE_URL}${OPERATION_LIST_PATH}`;
   const configUrl = `${BASE_URL}${DISPLAY_CONFIG_PATH}`;
@@ -1233,13 +1317,21 @@ export async function withVehicleNarrow<T>(
   }
 
   const configHtml = await fetchDisplayConfigHtml(jar, configUrl, fetchImpl, timeoutMs);
-  const sField = findFormFieldById(configHtml, "txtSVehicle");
-  const eField = findFormFieldById(configHtml, "txtEVehicle");
-  if (!sField || !eField) {
-    throw new TheearthClientError(
-      "表示条件指定ページの車輌絞込フィールド (txtSVehicle/txtEVehicle) が見つかりません — " +
-        "theearth-np のページ仕様変更の可能性があります",
-    );
+  const overrides: Record<string, string | null> = {};
+  if (narrow.vehicle) {
+    const sField = findFormFieldById(configHtml, "txtSVehicle");
+    const eField = findFormFieldById(configHtml, "txtEVehicle");
+    if (!sField || !eField) {
+      throw new TheearthClientError(
+        "表示条件指定ページの車輌絞込フィールド (txtSVehicle/txtEVehicle) が見つかりません — " +
+          "theearth-np のページ仕様変更の可能性があります",
+      );
+    }
+    overrides[sField.name] = narrow.vehicle.from;
+    overrides[eField.name] = narrow.vehicle.to;
+  }
+  if (narrow.readDate) {
+    Object.assign(overrides, resolveReadDateOverrides(configHtml, narrow.readDate));
   }
   const applyButton = findFormFieldById(configHtml, "btnOK");
   if (!applyButton) {
@@ -1249,13 +1341,16 @@ export async function withVehicleNarrow<T>(
   }
 
   const baseline = serializeFormFields(configHtml);
-  const fieldNames = { sName: sField.name, eName: eField.name };
-  const originalFrom = baseline[fieldNames.sName] ?? "";
-  const originalTo = baseline[fieldNames.eName] ?? "";
+  // 復元は「上書きした各キーの元の値」。null override (checkbox の unchecked 化)
+  // だけは baseline に無ければ null (= 送らない) で戻し、text/select は空文字で戻す。
+  const originals: Record<string, string | null> = {};
+  for (const [name, value] of Object.entries(overrides)) {
+    originals[name] = value === null
+      ? (Object.hasOwn(baseline, name) ? baseline[name] : null)
+      : (baseline[name] ?? "");
+  }
 
-  await applyVehicleNarrowConfig(
-    jar, configUrl, baseline, fieldNames, applyButton, range.from, range.to, fetchImpl, timeoutMs,
-  );
+  await applyDisplayNarrowConfig(jar, configUrl, baseline, overrides, applyButton, fetchImpl, timeoutMs);
 
   let result: T | undefined;
   let fnFailed = false;
@@ -1269,14 +1364,15 @@ export async function withVehicleNarrow<T>(
   }
 
   try {
-    await applyVehicleNarrowConfig(
-      jar, configUrl, baseline, fieldNames, applyButton, originalFrom, originalTo, fetchImpl, timeoutMs,
-    );
+    await applyDisplayNarrowConfig(jar, configUrl, baseline, originals, applyButton, fetchImpl, timeoutMs);
   } catch (restoreErr) {
     const restoreMessage = restoreErr instanceof Error ? restoreErr.message : String(restoreErr);
     const fnMessage = fnFailed ? (fnError instanceof Error ? fnError.message : String(fnError)) : null;
+    const restored = Object.entries(originals)
+      .map(([name, value]) => `${name}="${value ?? ""}"`)
+      .join(", ");
     throw new TheearthClientError(
-      `車輌絞込 (F-GOS0030) を元 ("${originalFrom}"〜"${originalTo}") へ戻せませんでした: ${restoreMessage}` +
+      `表示条件の絞込 (F-GOS0030) を元 (${restored}) へ戻せませんでした: ${restoreMessage}` +
         (fnMessage ? ` (元の処理も失敗していました: ${fnMessage})` : "") +
         " — theearth の表示条件指定を手動で確認してください",
     );
@@ -1284,6 +1380,17 @@ export async function withVehicleNarrow<T>(
 
   if (fnFailed) throw fnError;
   return result as T;
+}
+
+/** 後方互換: 車輌絞込のみの旧 API。`withDisplayNarrow` の thin wrapper。 */
+export function withVehicleNarrow<T>(
+  jar: CookieJar,
+  range: VehicleNarrowRange,
+  fn: (jar: CookieJar, firstPageHtml: string) => Promise<T>,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<T> {
+  return withDisplayNarrow(jar, { vehicle: range }, fn, fetchImpl, timeoutMs);
 }
 
 // ---------------------------------------------------------------------------

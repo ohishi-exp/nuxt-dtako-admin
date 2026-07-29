@@ -215,7 +215,8 @@ import {
   startWorkRowEdit,
   unlockOperation,
   verifyReadNoDescending,
-  withVehicleNarrow,
+  withDisplayNarrow,
+  type DisplayNarrow,
   type AddFuelRowParams,
   type DeleteFuelRowParams,
   type SaveFuelRowParams,
@@ -4744,13 +4745,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * false の場合フロント側で「表示条件指定を確認してください」の警告を出す想定
    * (SKILL.md 早期打ち切りの前提)。
    *
-   * vehicleFrom/vehicleTo (車輌CD、両方揃った時のみ) が指定された場合、
-   * F-GOS0030 の車輌絞込条件を一時的に適用して取得し、取得後は必ず元へ戻す
-   * (`withVehicleNarrow` 参照、アカウント単位の共有設定のため)。絞込は btnUpdate
+   * F-GOS0030 の絞込条件は取得のたびに一時適用して、取得後は必ず元へ戻す
+   * (`withDisplayNarrow` 参照、アカウント単位の共有設定のため)。読取日 range は
+   * **常に** from/to で上書きする (共有設定に残留した読取日下限が一覧グリッドを
+   * 絞り、期間外検索がエラーなく 0 件になる事故の再発防止)。vehicleFrom/vehicleTo
+   * (車輌CD、両方揃った時のみ) はこれに加えて車輌絞込も適用する。絞込は btnUpdate
    * 応答 (= `firstPageHtml`) にしか反映されないため、それを harvest の 1 ページ目に
    * 流し込む。2 ページ目以降のページャ postback で絞込が維持されるかは未検証
    * (実データが 1 ページに収まり確認不能だった) なので、返す直前に車輌CD range で
-   * 防御的にフィルタして「絞れていない行が混ざる」事故を塞ぐ。
+   * 防御的にフィルタして「絞れていない行が混ざる」事故を塞ぐ (期間は
+   * harvestDailyReport が常に workEndDateTime でフィルタ済み)。
    *
    * 同一 theearth セッションへの並行リクエストはセッションロックで hang/500 する
    * ため、必ず逐次実行する (Promise.all で並列化しない)。 */
@@ -4773,13 +4777,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         if (err instanceof VenusSessionExpiredError) throw err;
         console.error("Report list sort check error (degraded to sortOk=null):", err);
       }
+      // 読取日絞込は常に適用する。F-GOS0030 (アカウント共有設定) に残留した読取日
+      // 下限 (実機で "26/4/29〜" を確認) が一覧グリッド自体を絞るため、明示上書き
+      // しないと残留値より前の期間の検索がエラーなく 0 件になる (Refs #524)。
+      const narrow: DisplayNarrow = { readDate: { from, to } };
+      if (vehicleFrom && vehicleTo) narrow.vehicle = { from: vehicleFrom, to: vehicleTo };
+      const harvested = await withDisplayNarrow(
+        jar,
+        narrow,
+        (narrowJar, firstPageHtml) =>
+          harvestDailyReport(narrowJar, { from, to }, undefined, undefined, firstPageHtml),
+      );
       if (vehicleFrom && vehicleTo) {
-        const harvested = await withVehicleNarrow(
-          jar,
-          { from: vehicleFrom, to: vehicleTo },
-          (narrowJar, firstPageHtml) =>
-            harvestDailyReport(narrowJar, { from, to }, undefined, undefined, firstPageHtml),
-        );
         const lo = Number(vehicleFrom);
         const hi = Number(vehicleTo);
         const rows = harvested.filter((r) => {
@@ -4788,8 +4797,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         });
         return { rows, sortOk };
       }
-      const rows = await harvestDailyReport(jar, { from, to });
-      return { rows, sortOk };
+      return { rows: harvested, sortOk };
     });
   }
 

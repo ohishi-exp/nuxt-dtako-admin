@@ -138,7 +138,33 @@ credential か overlap ID を落とすと拒否され「強制ログインに失
   に収まった)。worker 実装は返す直前に車輌CD range で防御的にフィルタして混入を塞いでいる
 
 Worker 実装: `workers/dtako-scraper-relay/src/theearth-report-client.ts` の
-`withVehicleNarrow()` (`/daily-report-api/list?vehicleFrom=&vehicleTo=` から使用)。
+`withDisplayNarrow()` (`/daily-report-api/list` から使用。車輌のみの旧 API
+`withVehicleNarrow()` は thin wrapper として残置)。
+
+### F-GOS0030 の「読取日」条件は残留すると期間外検索を静かに 0 件にする (2026-07-29 実機確定)
+
+> consumer: `workers/dtako-scraper-relay/src/theearth-report-client.ts`
+> (`withDisplayNarrow` / `resolveReadDateOverrides`)
+
+F-DES1010 のグリッドは F-GOS0030 の**条件日 range でサーバー側絞込された行しか含まない**。
+harvest は from/to を theearth に入力せず取得済み行を worker 側でフィルタするだけなので、
+共有設定に古い読取日下限 (実機で「26/4/29〜」の残留を確認) があると、それより前の期間の
+検索が**エラーなく 0 件**になる (日報編集画面の「検索 0 件」事故の真因)。対策として
+`/daily-report-api/list` は**検索のたびに読取日 range を要求期間で明示上書き**する
+(適用後は必ず元の残留値へ復元)。副次効果でページ送り数も期間分だけに減る。
+
+**フィールド構造** (実 DOM、2026-07-29 確認):
+
+- 条件日行は 2 行: `ddlSortDay1`/`ddlSortDay2` (選択肢 `OperationDate`=運行日 /
+  `ReadNo`=読取日)。**どちらの行が読取日かは共有設定の現在値次第**なので selected 値で
+  探す。どちらも ReadNo でなければ 2 行目を ReadNo に切り替えて使う (復元前提)
+- 各行の range は `ucStartDate{N}$txtYear/txtMonth/txtDay` 〜 `ucEndDate{N}$...`
+  (id は `_` 区切り、name は `$` 区切り)。**年は maxLength=2 の西暦下 2 桁**、月日は
+  非パディング (UI 実測値 "26"/"4"/"29")
+- 各 range 横の `chkUseEra` (和暦チェック) が ON だと同じ数値が和暦年として解釈される。
+  worker は対象行の chkUseEra を**明示 unchecked (キーを送らない) にして西暦解釈を固定**し、
+  復元時に元のチェック状態へ戻す
+- 適用/復元は車輌絞込と同一の 3 段フロー (btnOK → 親 btnUpdate full form postback)
 
 ### 状態判定
 
