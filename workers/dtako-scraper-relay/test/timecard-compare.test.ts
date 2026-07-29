@@ -1141,7 +1141,7 @@ describe("差の推定原因 (Refs #501)", () => {
       month: "2026-03",
       driverCd: "1026",
       nginx: nginxDriver([
-        { date: "2026-03-12", kosokuMinutes: 799, minusUnko: { TC_DC: 3 } },
+        { date: "2026-03-12", kosokuMinutes: 799, byType: { TC_DC: 7 }, minusUnko: { TC_DC: 3 } },
       ]),
       oursByDate: new Map([
         ["2026-03-12", { restraintMinutes: 792, runHeadMinutes: 11 }],
@@ -1159,7 +1159,7 @@ describe("差の推定原因 (Refs #501)", () => {
       month: "2026-03",
       driverCd: "1026",
       nginx: nginxDriver([
-        { date: "2026-03-09", kosokuMinutes: 849, minusUnko: { TC_DC: 4 } },
+        { date: "2026-03-09", kosokuMinutes: 849, byType: { TC_DC: 8 }, minusUnko: { TC_DC: 4 } },
       ]),
       oursByDate: new Map([
         ["2026-03-09", { restraintMinutes: 921, ferryMinusMinutes: 76, runHeadMinutes: 9 }],
@@ -1182,13 +1182,32 @@ describe("差の推定原因 (Refs #501)", () => {
     expect(d.cause).toBe("unknown");
   });
 
+  it("TC_DC が null の日は minus_unko を適用済みと数えない (1541 吉田 03-21 の形)", () => {
+    // minus_unko 5 が診断に出るが TC_DC null で着地していない — 頭 5 は紙に残る。
+    // -73 = -ferry 77 + 頭 5 (+丸め 1) が ferry+run-head で収まる
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1541",
+      nginx: nginxDriver([
+        { date: "2026-03-21", kosokuMinutes: 817, minusUnko: { TC_DC: 5 } },
+      ]),
+      oursByDate: new Map([
+        ["2026-03-21", { restraintMinutes: 890, ferryMinusMinutes: 77, runHeadMinutes: 5 }],
+      ]),
+      toleranceMinutes: 2,
+    }).days[20]!;
+    expect(d.cause).toBe("ferry+run-head");
+    expect(d.explainedMinutes).toBe(72);
+    expect(d.residualMinutes).toBe(-1);
+  });
+
   it("紙の控除と頭が釣り合う日は補正 0 で候補にならない", () => {
     // minus_unko 6 = 頭 6 → 補正 0。60 分差は従来どおり lunch
     const d = compareTimecardMonth({
       month: "2026-03",
       driverCd: "1026",
       nginx: nginxDriver([
-        { date: "2026-03-02", kosokuMinutes: 510, minusUnko: { TC_DC: 6 } },
+        { date: "2026-03-02", kosokuMinutes: 510, byType: { TC_DC: 11 }, minusUnko: { TC_DC: 6 } },
       ]),
       oursByDate: new Map([
         ["2026-03-02", { restraintMinutes: 570, runHeadMinutes: 6 }],
