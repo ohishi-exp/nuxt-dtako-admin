@@ -466,9 +466,10 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   所属コード」** — 所属 (`SHOZOKU`) は営業所 × 職種の組で 1 営業所が職種ごとに
   別 INCODE を持つため、コードを行の第 1 キーにすると同じ営業所が区分の中で割れる
   (2026-04 本番で 0200 の乗務員が 本社 → 諸富 → 大阪 → 本社 → 北九州 → 大阪)。
-  表の右端は **計算 3 列 (基本給/残業代合計/合計) → 給与 2 列 → 比較 3 列
-  (給与 − 計算)**。基本給は左の内訳列と右で 2 回出る (左は時間の内訳、右は突合)。
-  比較は片方が欠けたら 0 ではなく null (「-」)
+  表の右端は **金額 3 列 (基本給 / 残業代合計 / 合計) で、各セルを 上段 計算 →
+  中段 給与 → 下段 差 (給与 − 計算) の 3 段に積む** (ユーザー決定 2026-07-30。
+  横 8 列に開くと 17 列で紙にも画面にも収まらなかった)。基本給は左の内訳列と右で
+  2 回出る (左は時間の内訳、右は突合)。差は片方が欠けたら 0 ではなく null (「-」)
 - マスタは R2 `restraint/{compId}/{wage-master|min-wage|wage-config}/latest.json`
   (putVersionedR2 の版管理を再利用 — 一括変更 = PUT 1 回 = 1 版)
 - DO routes: `GET/PUT /restraint-api/{wage-master|min-wage|wage-config}`、
