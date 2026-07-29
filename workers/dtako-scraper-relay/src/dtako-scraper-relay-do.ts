@@ -66,12 +66,15 @@ import { needsTheearthQueue } from "./restraint-queue";
 import { UpstreamMemo } from "./upstream-memo";
 import { measurePhase, PhaseTimer, phaseTimingLogLine } from "./phase-timing";
 import {
+  cacheDoNameForEmail,
   CacheStateTracker,
   gunzipText,
   gzipText,
+  LocalUpstreamCache,
   parseVersionResponse,
   UpstreamCache,
   type CacheKind,
+  type UpstreamCacheClient,
 } from "./upstream-cache";
 import { etagMatches, weakEtag } from "./http-etag";
 import {
@@ -438,6 +441,13 @@ export interface RelayEnv {
    */
   RESTRAINT_DEV_VIEWER_COMP?: string;
   /**
+   * ローカル開発専用: 上記の短絡時に viewer レコードへ載せる email (Refs #554)。
+   * kintai 上流キャッシュは email 単位の DO に置くため、これが無いとローカルでは
+   * キャッシュ経路そのものが動かない (= 検証できない)。`wrangler dev --var
+   * RESTRAINT_DEV_VIEWER_EMAIL:dev@example.com` でのみ渡す。
+   */
+  RESTRAINT_DEV_VIEWER_EMAIL?: string;
+  /**
    * ETC 利用照会サービスのアカウント JSON 配列 (`[{user_id, password}, ...]`、
    * browser-render-rust の `ETC_ACCOUNTS` env と同一 shape)。DTAKO_ACCOUNTS と
    * 同じく dashboard の plain Environment Variable として投入する (wrangler.toml
@@ -548,6 +558,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         active: true,
         tenant_id: typeof data.tenant_id === "string" ? data.tenant_id : undefined,
         role: typeof data.role === "string" ? data.role : undefined,
+        // kintai 上流キャッシュの DO 鍵 (Refs #554)。認可には使わない
+        email: typeof data.email === "string" ? data.email : undefined,
       };
     } catch {
       return { active: false };
@@ -556,6 +568,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+
+    // email 単位キャッシュ DO の内部ルート (Refs #554)。worker は /internal/ を
+    // DO へ流さないので、ここへ来るのは同 namespace の DO からの stub 呼び出しだけ
+    if (url.pathname.startsWith("/internal/kintai-cache/")) {
+      return this.handleKintaiCacheInternal(request, url);
+    }
 
     // /dvr-viewer 系 (Refs #90) の DVR viewer API。scraper 系とは独立した経路で、
     // 認証は auth-worker introspect ではなく「theearth へのログインそのもの」
@@ -1736,8 +1754,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     routing: TheearthRouting,
     url: URL,
   ): Promise<TheearthSessionRecord | null> {
-    const viewerRecord = (role?: string): TheearthSessionRecord => ({
+    const viewerRecord = (role?: string, email?: string): TheearthSessionRecord => ({
       viewerRole: role,
+      viewerEmail: email,
       token: token ?? "viewer",
       compId: routing.compId,
       userName: routing.userName,
@@ -1749,7 +1768,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // nuxt dev は stagingTenantId バイパスで auth セッションを持たないため、
     // JWT 無しでも許可する (token 必須チェックより先に判定)。
     if (this.env.RESTRAINT_DEV_VIEWER_COMP) {
-      return devViewerCompIds(this.env.RESTRAINT_DEV_VIEWER_COMP).has(routing.compId) ? viewerRecord() : null;
+      return devViewerCompIds(this.env.RESTRAINT_DEV_VIEWER_COMP).has(routing.compId)
+        ? viewerRecord(undefined, this.env.RESTRAINT_DEV_VIEWER_EMAIL)
+        : null;
     }
     if (!token) return null;
     const result = await this.introspect(token, `https://${url.host}`);
@@ -1763,7 +1784,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // admin は DTAKO_ACCOUNTS に載っている全会社を見られる (グループ管理者、
     // Refs #367)。それ以外は従来どおり自 tenant の会社のみ。
     return allowedViewerComps(accounts, result.tenant_id, result.role).has(routing.compId)
-      ? viewerRecord(result.role)
+      ? viewerRecord(result.role, result.email)
       : null;
   }
 
@@ -1868,7 +1889,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return this.handleTimecardCompare(url);
     }
     if (url.pathname === "/restraint-api/kintai/kosoku-daily" && request.method === "GET") {
-      return this.handleKintaiKosokuDaily(url, request.headers.get("if-none-match"));
+      return this.handleKintaiKosokuDaily(record!, url, request.headers.get("if-none-match"));
+    }
+    // 手動キャッシュ warm (Refs #554)。上流デプロイで版が動いた後に押しておく口
+    if (url.pathname === "/restraint-api/kintai/warm" && request.method === "POST") {
+      return this.handleKintaiWarm(record!, url);
     }
     // ---- アーカイブ閲覧 (R2 読み出しのみ。Refs #244) ----
     if (url.pathname === "/restraint-api/archive/summaries" && request.method === "GET") {
@@ -2802,8 +2827,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 4) 上流キャッシュの強制更新 (Refs #543 PR-3)。まず対象月 (+前月) を無効化し、
     // 取り込みが持っている最新の daily 本文だけ温め直す。kosoku は次の読みが
     // write-through で作り直す (二度取りしない)
-    this.invalidateKintaiUpstreamCache([ym, prevYmOf(ym)], "kintai-fetch");
-    await this.warmDailyCacheAfterIngest(apiUrl, clientId, clientSecret, ym, rawText, etagBefore);
+    // キャッシュは操作者の email 単位 DO にあるので、ここで触れるのも操作者ぶん (Refs #554)
+    const cache = await this.remoteUpstreamCache(record.viewerEmail);
+    await this.invalidateKintaiUpstreamCache([ym, prevYmOf(ym)], "kintai-fetch", cache);
+    await this.warmDailyCacheAfterIngest(apiUrl, clientId, clientSecret, ym, rawText, etagBefore, cache);
 
     return Response.json({
       month: ym,
@@ -2942,7 +2969,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * - **会社で絞らない。** 乗務員CD は一番星 `社員ﾏｽﾀ.社員C` と同一番号体系で会社を
    *   跨がず、`/kintai/fetch` の取り込みも同じ単位。受け手が社員マスタで引き当てる
    */
-  private async handleKintaiKosokuDaily(url: URL, ifNoneMatch: string | null): Promise<Response> {
+  private async handleKintaiKosokuDaily(
+    record: TheearthSessionRecord,
+    url: URL,
+    ifNoneMatch: string | null,
+  ): Promise<Response> {
     const parsed = this.parseMonthParam(url);
     if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
     const { ym } = parsed;
@@ -2950,6 +2981,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const timer = new PhaseTimer();
     // キャッシュの hit/miss/live を phase log の cacheState に載せる (Refs #543 PR-2)
     const tracker = new CacheStateTracker();
+    // 上流キャッシュは閲覧者の email 単位 DO (Refs #554)
+    const cache = await this.remoteUpstreamCache(record.viewerEmail);
 
     const apiUrl = (this.env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
     const clientId = this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
@@ -2969,7 +3002,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 生応答 memo を wage-report と共有する (Refs #508)。上流エラーの詳細は
     // fetchKosokuRaw が log 済みなので、ここは null = 502 に畳む
     const body = (await timer.measure("kosoku-cur", () =>
-      this.fetchKosokuRaw(apiUrl, clientId, clientSecret, ym, timer, "kosoku-cur", "version-cur", tracker),
+      this.fetchKosokuRaw(apiUrl, clientId, clientSecret, ym, timer, "kosoku-cur", "version-cur", tracker, cache),
     )) as { drivers?: unknown } | null;
     if (body == null) {
       return dvrJsonError(502, "拘束サマリ API の取得に失敗しました");
@@ -2985,10 +3018,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return this.withPhaseTiming("kintai/kosoku-daily", ym, timer, tracker.aggregate(), res, notModified);
   }
 
-  /** フェーズ計測の出力 (ログ 1 行 + Server-Timing ヘッダ)。**応答は絶対に壊さない**
-   * — 計測側の不具合はここで握って応答をそのまま返す (Refs #543 PR-1)。
-   * cacheState は上流キャッシュの集約結果 "hit" | "miss" | "live" (Refs #543 PR-2)。
-   * notModified は 304 応答 (Refs #543 PR-5) — 304 でも計測ログは 1 行出す。 */
+  /** フェーズ計測の出力 (ログ 1 行 + Server-Timing / X-Upstream-Cache ヘッダ)。
+   * **応答は絶対に壊さない** — 計測側の不具合はここで握って応答をそのまま返す
+   * (Refs #543 PR-1)。cacheState は上流キャッシュの集約結果
+   * "hit" | "miss" | "live" (Refs #543 PR-2)。notModified は 304 応答 (PR-5) —
+   * 304 でも計測ログは 1 行出す。
+   *
+   * `X-Upstream-Cache` は front が「上流の版が変わって取り直した (miss)」を
+   * 画面に出すために読む (Refs #554)。**本文ではなくヘッダに載せる** — 本文に
+   * 入れると hit/miss で本文が変わり、弱 ETag が動いて PR-5 の 304 が効かなくなる。
+   * 304 応答にも載せる (ブラウザは 304 のヘッダを保存済み応答へマージするので、
+   * 載せないと front が前回の値を読んでしまう)。 */
   private withPhaseTiming(
     route: string,
     month: string,
@@ -3000,6 +3040,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     try {
       console.log(phaseTimingLogLine(route, month, timer, cacheState, notModified));
       res.headers.set("Server-Timing", timer.serverTimingHeader());
+      res.headers.set("X-Upstream-Cache", cacheState);
     } catch (err) {
       console.error(JSON.stringify({ phase_timing: "emit-error", route, error: describeUnknownError(err) }));
     }
@@ -3264,13 +3305,103 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return this.kintaiUpstreamMemo.get(key, Date.now(), load);
   }
 
-  /** kintai 系上流キャッシュ (`UPSTREAM_CACHE=on` の時だけ使う、Refs #543 PR-2)。 */
+  /** kintai 系上流キャッシュ (`UPSTREAM_CACHE=on` の時だけ使う、Refs #543 PR-2)。
+   * **この DO 自身の SQLite** — キャッシュ DO (`kintai-cache-*`) として呼ばれた
+   * ときだけ中身が入る。経路 DO 側は remote client 経由で触る (Refs #554)。 */
   private upstreamCache: UpstreamCache | null = null;
 
   /** DO SQLite (`new_sqlite_classes`) 上の上流応答キャッシュ。lazy 生成。 */
   private upstreamCacheStore(): UpstreamCache {
     if (!this.upstreamCache) this.upstreamCache = new UpstreamCache(this.ctx.storage.sql);
     return this.upstreamCache;
+  }
+
+  /**
+   * email 単位のキャッシュ DO への remote client (Refs #554)。
+   *
+   * 経路の DO (`theearth-{会社}:{ユーザー}`) は theearth アカウント単位で、共有
+   * アカウント運用だと「誰のキャッシュか」が定まらない。キャッシュの中身は月単位の
+   * 上流データで theearth とは無関係なので、**認可済みの email** で DO を分ける。
+   *
+   * email が無い (theearth セッション経路・introspect が email を返さない) 時は
+   * null を返し、呼び出し側はキャッシュ無し (= 従来のライブ取得) に倒す。
+   */
+  private async remoteUpstreamCache(email: string | undefined): Promise<UpstreamCacheClient | null> {
+    if (this.env.UPSTREAM_CACHE !== "on" || !email) return null;
+    const name = await cacheDoNameForEmail(email);
+    const stub = this.env.RELAY.get(this.env.RELAY.idFromName(name));
+    const call = async (op: string, body: BodyInit | null, headers: Record<string, string> = {}) =>
+      stub.fetch(`https://relay.internal/internal/kintai-cache/${op}`, {
+        method: "POST",
+        headers,
+        body,
+      });
+    return {
+      async getFresh(kind, month, etag) {
+        const res = await call("get", null, { "X-Kind": kind, "X-Month": month, "X-Cache-Etag": etag });
+        if (res.status !== 200) return null;
+        return new Uint8Array(await res.arrayBuffer());
+      },
+      async put(kind, month, bodyGz, sha256, etag) {
+        // BLOB は body に直接載せる (base64 にすると 1.3 倍になる)
+        const res = await call("put", bodyGz as unknown as BodyInit, {
+          "X-Kind": kind,
+          "X-Month": month,
+          "X-Cache-Etag": etag,
+          "X-Cache-Sha": sha256,
+          "Content-Type": "application/octet-stream",
+        });
+        if (!res.ok) return false;
+        return ((await res.json()) as { stored?: boolean }).stored === true;
+      },
+      async delete(kind, month) {
+        await call("delete", null, { "X-Kind": kind, "X-Month": month });
+      },
+      async monthsWithBothKinds() {
+        const res = await call("months", null);
+        if (!res.ok) return [];
+        return ((await res.json()) as { months?: string[] }).months ?? [];
+      },
+    };
+  }
+
+  /**
+   * キャッシュ DO 側の内部ルート (Refs #554)。**外からは到達できない** —
+   * worker の `fetch` は `/dvr-api/` `/restraint-api/` 等の既知 prefix しか DO へ
+   * 流さず、`/internal/` は 404 になる。ここへ来るのは同 namespace の DO からの
+   * stub 呼び出しだけ。
+   */
+  private async handleKintaiCacheInternal(request: Request, url: URL): Promise<Response> {
+    const op = url.pathname.slice("/internal/kintai-cache/".length);
+    const store = new LocalUpstreamCache(this.upstreamCacheStore());
+    const kind = (request.headers.get("X-Kind") ?? "") as CacheKind;
+    const month = request.headers.get("X-Month") ?? "";
+    if (op === "months") {
+      return Response.json({ months: await store.monthsWithBothKinds() });
+    }
+    if (kind !== "daily" && kind !== "kosoku") return dvrJsonError(400, "X-Kind は daily|kosoku");
+    if (!/^\d{4}-\d{2}$/.test(month)) return dvrJsonError(400, "X-Month は YYYY-MM");
+    if (op === "get") {
+      const etag = request.headers.get("X-Cache-Etag") ?? "";
+      const gz = await store.getFresh(kind, month, etag);
+      // 204 = 行なし or 版不一致 (呼び出し側はライブ取得へ)
+      if (!gz) return new Response(null, { status: 204 });
+      return new Response(gz as unknown as BodyInit, {
+        status: 200,
+        headers: { "Content-Type": "application/octet-stream" },
+      });
+    }
+    if (op === "put") {
+      const etag = request.headers.get("X-Cache-Etag") ?? "";
+      const sha = request.headers.get("X-Cache-Sha") ?? "";
+      const gz = new Uint8Array(await request.arrayBuffer());
+      return Response.json({ stored: await store.put(kind, month, gz, sha, etag) });
+    }
+    if (op === "delete") {
+      await store.delete(kind, month);
+      return new Response(null, { status: 204 });
+    }
+    return dvrJsonError(404, "Not Found");
   }
 
   /**
@@ -3359,10 +3490,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     /** 版照会フェーズ名 ("version-cur" / "version-prev")。 */
     versionPhase?: string;
     tracker?: CacheStateTracker;
+    /** email 単位キャッシュ DO の client (Refs #554)。**null ならキャッシュ不使用** —
+     * identity が取れない経路 (theearth セッション) は従来どおりライブ取得。 */
+    cache?: UpstreamCacheClient | null;
   }): Promise<string | null> {
-    const { kind, ym, apiUrl, clientId, clientSecret, fetchLive, timer, phase, versionPhase, tracker } =
+    const { kind, ym, apiUrl, clientId, clientSecret, fetchLive, timer, phase, versionPhase, tracker, cache } =
       opts;
-    if (this.env.UPSTREAM_CACHE !== "on") return fetchLive();
+    if (this.env.UPSTREAM_CACHE !== "on" || !cache) return fetchLive();
 
     const etag = await this.fetchKintaiVersion(apiUrl, clientId, clientSecret, ym, timer, versionPhase);
     if (etag === null) {
@@ -3371,7 +3505,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return fetchLive();
     }
     try {
-      const gz = this.upstreamCacheStore().getFresh(kind, ym, etag, Date.now());
+      const gz = await cache.getFresh(kind, ym, etag);
       if (gz) {
         const text = await gunzipText(gz);
         tracker?.add("hit");
@@ -3388,7 +3522,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (text !== null) {
       try {
         const gz = await gzipText(text);
-        const stored = this.upstreamCacheStore().put(kind, ym, gz, await this.sha256Hex(gz), etag, Date.now());
+        const stored = await cache.put(kind, ym, gz, await this.sha256Hex(gz), etag);
         if (!stored) {
           // 行 2MB 制限: gzip 後 1.9MB 超は格納しない (次回もライブ)。phase log に残す
           timer?.mark(`cache-skip-${phase ?? kind}`, gz.byteLength);
@@ -3414,17 +3548,29 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    *
    * best-effort — 無効化の失敗で取り込み応答は落とさない (次の読みは版照会で
    * どのみち守られる)。
+   *
+   * **落とせるのは操作者自身のキャッシュ DO だけ** (Refs #554)。キャッシュを email
+   * 単位の DO に分けたため、他人ぶんには手が届かない。ただし鮮度は条件付き再検証が
+   * 担保しており (読みは毎回 版照会 → etag 不一致なら miss)、この delete は
+   * 「上流の etag が動かなかった場合」に備えた保険という位置づけ。memo (60s、この DO
+   * ローカル) の無効化は従来どおり全経路に効く。
    */
-  private invalidateKintaiUpstreamCache(months: string[], reason: string): void {
+  private async invalidateKintaiUpstreamCache(
+    months: string[],
+    reason: string,
+    cache?: UpstreamCacheClient | null,
+  ): Promise<void> {
     try {
       for (const ym of months) {
         this.kintaiUpstreamMemo.delete(`daily:${ym}`);
         this.kintaiUpstreamMemo.delete(`kosoku-raw:${ym}`);
         this.kintaiUpstreamMemo.delete(`kintai-version:${ym}`);
-        this.upstreamCacheStore().delete("daily", ym);
-        this.upstreamCacheStore().delete("kosoku", ym);
+        if (cache) {
+          await cache.delete("daily", ym);
+          await cache.delete("kosoku", ym);
+        }
       }
-      console.log(JSON.stringify({ upstream_cache: "invalidated", reason, months }));
+      console.log(JSON.stringify({ upstream_cache: "invalidated", reason, months, owner: Boolean(cache) }));
     } catch (err) {
       console.error(
         JSON.stringify({ upstream_cache: "invalidate-error", reason, error: describeUnknownError(err) }),
@@ -3453,8 +3599,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     ym: string,
     dailyText: string,
     etagBefore: string | null,
+    cache: UpstreamCacheClient | null,
   ): Promise<void> {
-    if (this.env.UPSTREAM_CACHE !== "on" || etagBefore === null) return;
+    if (this.env.UPSTREAM_CACHE !== "on" || etagBefore === null || !cache) return;
     try {
       const etagAfter = await this.fetchKintaiVersionLive(apiUrl, clientId, clientSecret, ym);
       if (etagAfter === null || etagAfter !== etagBefore) {
@@ -3466,13 +3613,128 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         return;
       }
       const gz = await gzipText(dailyText);
-      const stored = this.upstreamCacheStore().put("daily", ym, gz, await this.sha256Hex(gz), etagAfter, Date.now());
+      const stored = await cache.put("daily", ym, gz, await this.sha256Hex(gz), etagAfter);
       console.log(
         JSON.stringify({ upstream_cache: stored ? "warmed" : "size-skip", kind: "daily", ym, gz_bytes: gz.byteLength }),
       );
     } catch (err) {
       console.error(JSON.stringify({ upstream_cache: "warm-error", ym, error: describeUnknownError(err) }));
     }
+  }
+
+  /**
+   * 手動キャッシュ warm (`POST /restraint-api/kintai/warm?month=YYYY-MM`、Refs #554)。
+   *
+   * 上流 (rust-ichibanboshi) をデプロイすると版 (etag) が動いて全月が miss になる
+   * (ohishi-exp/rust-ichibanboshi#191)。次に画面を開いた人が 1.7MB × 2 種を月ぶん
+   * 払うことになるので、**先に押しておける口**を用意する。cron ではなく手動なのは、
+   * 上流キャッシュが DO ごと = `theearth-{会社}:{ユーザー}` ごとに分かれているため —
+   * 押した本人の DO が温まり、その人が読むのも同じ DO になる。
+   *
+   * 1 リクエスト 1 ヶ月。複数月は front が**順番に**叩く (並列にすると 1.7MB 級の
+   * 取得が重なり、上流の kosoku 同時実行キャップ (rust-ichibanboshi#188) と競合する)。
+   * daily → kosoku も直列。
+   *
+   * 応答の `daily` / `kosoku` は `CacheStateTracker` の集約そのまま:
+   * `hit` = 既に温まっていた / `miss` = 取り直して格納した / `live` = 版が引けず
+   * キャッシュ不使用 (温まっていない)。`error` は上流取得に失敗した月。
+   */
+  private async handleKintaiWarm(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const ym = url.searchParams.get("month") ?? "";
+    if (!/^\d{4}-\d{2}$/.test(ym)) {
+      return dvrJsonError(400, "month は YYYY-MM で指定してください");
+    }
+    const cache = await this.remoteUpstreamCache(record.viewerEmail);
+    if (!cache) {
+      // フラグ off / email 不明。「壊れている」ではないので 200 で伝える
+      return Response.json({ month: ym, enabled: false, daily: "off", kosoku: "off", ms: 0 });
+    }
+    const creds = await this.ichibanCreds("kintai-warm");
+    if (!creds) return dvrJsonError(503, "上流 API (rust-ichibanboshi) の接続情報が未設定です");
+    const { apiUrl, clientId, clientSecret } = creds;
+    const startedAt = Date.now();
+    const dailyTracker = new CacheStateTracker();
+    const kosokuTracker = new CacheStateTracker();
+
+    const dailyText = await this.fetchKintaiDailyText({
+      apiUrl,
+      clientId,
+      clientSecret,
+      ym,
+      tracker: dailyTracker,
+      cache,
+    });
+    const kosokuRaw = await this.fetchKosokuRaw(
+      apiUrl,
+      clientId,
+      clientSecret,
+      ym,
+      undefined,
+      undefined,
+      undefined,
+      kosokuTracker,
+      cache,
+    );
+
+    const daily = dailyText === null ? "error" : dailyTracker.aggregate();
+    const kosoku = kosokuRaw === null ? "error" : kosokuTracker.aggregate();
+    const ms = Date.now() - startedAt;
+    console.log(JSON.stringify({ upstream_cache: "warm-manual", month: ym, daily, kosoku, ms }));
+    return Response.json({ month: ym, enabled: true, daily, kosoku, ms });
+  }
+
+  /**
+   * `/api/kintai/daily` の上流本文 (テキスト) をキャッシュ経由で取る (Refs #554)。
+   *
+   * `buildKintaiSummariesLive` に inline で持っていたものを切り出した — 手動 warm
+   * (`/restraint-api/kintai/warm`) が**読みと同じ経路・同じキャッシュ鍵**で温めるため。
+   * URL と cache kind をここ 1 箇所に閉じておかないと、warm が別の行を作って
+   * 「温めたのに次の読みが miss」になりかねない。
+   */
+  private fetchKintaiDailyText(opts: {
+    apiUrl: string;
+    clientId: string;
+    clientSecret: string;
+    ym: string;
+    timer?: PhaseTimer;
+    phase?: string;
+    versionPhase?: string;
+    tracker?: CacheStateTracker;
+    cache?: UpstreamCacheClient | null;
+  }): Promise<string | null> {
+    const { apiUrl, clientId, clientSecret, ym, timer, phase, versionPhase, tracker, cache } = opts;
+    return this.loadKintaiTextWithCache({
+      kind: "daily",
+      ym,
+      apiUrl,
+      clientId,
+      clientSecret,
+      timer,
+      phase,
+      versionPhase,
+      tracker,
+      cache,
+      fetchLive: async () => {
+        try {
+          const res = await fetch(`${apiUrl}/api/kintai/daily?month=${encodeURIComponent(ym)}`, {
+            headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret },
+          });
+          if (!res.ok) {
+            console.error(JSON.stringify({ wage_report_kintai: "daily-error", month: ym, status: res.status }));
+            return null;
+          }
+          const t = await res.text();
+          // 応答サイズを計測に載せる (memo ヒット時はこの loader ごと呼ばれない = bytes 無し)
+          if (phase) timer?.setBytes(phase, t.length);
+          return t;
+        } catch (err) {
+          console.error(
+            JSON.stringify({ wage_report_kintai: "daily-throw", month: ym, error: describeUnknownError(err) }),
+          );
+          return null;
+        }
+      },
+    });
   }
 
   /**
@@ -3496,6 +3758,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     phase?: string,
     versionPhase?: string,
     tracker?: CacheStateTracker,
+    cache?: UpstreamCacheClient | null,
   ): Promise<unknown> {
     return this.memoKintaiUpstream(`kosoku-raw:${ym}`, async () => {
       const text = await this.loadKintaiTextWithCache({
@@ -3508,6 +3771,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         phase,
         versionPhase,
         tracker,
+        cache,
         fetchLive: async () => {
           try {
             const upstream = await fetch(
@@ -3563,6 +3827,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     compId: string,
     ym: string,
     prevYm: string,
+    cache: UpstreamCacheClient | null,
     timer?: PhaseTimer,
     tracker?: CacheStateTracker,
   ): Promise<{
@@ -3579,43 +3844,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
     if (!apiUrl || !clientId || !clientSecret) return null;
 
-    const headers = { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret };
     const fetchDaily = async (
       month: string,
       phase: string,
       versionPhase: string,
     ): Promise<TimecardDailyRow[] | null> => {
-      const text = await this.loadKintaiTextWithCache({
-        kind: "daily",
-        ym: month,
+      const text = await this.fetchKintaiDailyText({
         apiUrl,
         clientId,
         clientSecret,
+        ym: month,
         timer,
         phase,
         versionPhase,
         tracker,
-        fetchLive: async () => {
-          try {
-            const res = await fetch(
-              `${apiUrl}/api/kintai/daily?month=${encodeURIComponent(month)}`,
-              { headers },
-            );
-            if (!res.ok) {
-              console.error(JSON.stringify({ wage_report_kintai: "daily-error", month, status: res.status }));
-              return null;
-            }
-            const t = await res.text();
-            // 応答サイズを計測に載せる (memo ヒット時はこの loader ごと呼ばれない = bytes 無し)
-            timer?.setBytes(phase, t.length);
-            return t;
-          } catch (err) {
-            console.error(
-              JSON.stringify({ wage_report_kintai: "daily-throw", month, error: describeUnknownError(err) }),
-            );
-            return null;
-          }
-        },
+        cache,
       });
       if (text === null) return null;
       try {
@@ -4024,19 +4267,20 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       kintai_months: kintaiMonths,
       ichiban_months: ichibanMonths,
       // kintai 上流キャッシュ (daily+kosoku 両方) が揃っている月 — 月タブの
-      // 「高速表示可」バッジの 2 段階表示用 (Refs #543 followup)。DO ローカルの
-      // SQLite SELECT なのでコストほぼゼロ
-      kintai_cached_months: this.kintaiCachedMonths(),
+      // 「高速表示可」バッジの 2 段階表示用 (Refs #543 followup)。閲覧者自身の
+      // キャッシュ DO に問い合わせる (Refs #554) — バッジは「自分にとって速いか」
+      kintai_cached_months: await this.kintaiCachedMonths(record.viewerEmail),
     });
   }
 
   /** 「高速表示可」バッジ用: kintai 上流キャッシュが揃っている月 (Refs #543 followup)。
-   * フラグ off ではキャッシュが読まれない = 「速い」表示が嘘になるので空。
+   * フラグ off / email 不明ではキャッシュが読まれない = 「速い」表示が嘘になるので空。
    * 失敗しても archive/months 自体は落とさない (バッジが弱表示になるだけ)。 */
-  private kintaiCachedMonths(): string[] {
-    if (this.env.UPSTREAM_CACHE !== "on") return [];
+  private async kintaiCachedMonths(email: string | undefined): Promise<string[]> {
     try {
-      return this.upstreamCacheStore().monthsWithBothKinds();
+      const cache = await this.remoteUpstreamCache(email);
+      if (!cache) return [];
+      return await cache.monthsWithBothKinds();
     } catch (err) {
       console.error(JSON.stringify({ upstream_cache: "months-error", error: describeUnknownError(err) }));
       return [];
@@ -4202,6 +4446,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     ym: string,
     prevYm: string,
     kintaiPrefix: string,
+    cache: UpstreamCacheClient | null,
     timer?: PhaseTimer,
     tracker?: CacheStateTracker,
   ): Promise<{
@@ -4215,7 +4460,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 出続ける (実測: 乗務員 1108 / 2026-04 が打刻由来の 3 勤務・拘束 447h29m のまま)。
     // 上流が取れない時だけ従来どおり R2 へ落ちる。
     const live = await measurePhase(timer, "kintai-live", () =>
-      this.buildKintaiSummariesLive(compId, ym, prevYm, timer, tracker),
+      this.buildKintaiSummariesLive(compId, ym, prevYm, cache, timer, tracker),
     );
     const fromR2 = {
       current: () =>
@@ -4343,6 +4588,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const timer = new PhaseTimer();
     // キャッシュの hit/miss/live を phase log の cacheState に載せる (Refs #543 PR-2)
     const tracker = new CacheStateTracker();
+    // 上流キャッシュは閲覧者の email 単位 DO にある (Refs #554)。email が取れない
+    // 経路 (theearth セッション) では null = 従来どおりライブ取得
+    const wageCache = await this.remoteUpstreamCache(record.viewerEmail);
 
     const loadMaster = async <T>(
       name: "wage-master" | "min-wage" | "wage-config",
@@ -4380,7 +4628,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           loadMaster<WageConfig>("wage-config", normalizeWageConfig, normalizeWageConfig(null)),
         ),
         timer.measure("source", () =>
-          this.loadWageReportSource(bucket, record.compId, ym, prevYm, kintaiPrefix, timer, tracker),
+          this.loadWageReportSource(bucket, record.compId, ym, prevYm, kintaiPrefix, wageCache, timer, tracker),
         ),
       ]);
     const { noDataDrivers } = current;

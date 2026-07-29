@@ -144,6 +144,63 @@ export class UpstreamCache {
   }
 }
 
+/**
+ * キャッシュ操作の口 (Refs #554)。実装は 2 つあり、呼び出し側
+ * (`loadKintaiTextWithCache`) はどちらかを知らずに使う:
+ *
+ * - `LocalUpstreamCache` — キャッシュ DO 自身が自分の SQLite を直接触る
+ * - Remote (DO 側に実装) — 経路の DO が **email 単位のキャッシュ DO** へ委譲する
+ *
+ * 分けた理由: キャッシュはもともと theearth アカウント単位の DO に同居していたが、
+ * theearth は共有アカウントになりうるので鍵として不適切だった。中身は月単位の上流
+ * データで theearth とは無関係なので、認可済みの identity (email) で分ける。
+ */
+export interface UpstreamCacheClient {
+  getFresh(kind: CacheKind, month: string, etag: string): Promise<Uint8Array | null>;
+  put(kind: CacheKind, month: string, bodyGz: Uint8Array, sha256: string, etag: string): Promise<boolean>;
+  delete(kind: CacheKind, month: string): Promise<void>;
+  monthsWithBothKinds(): Promise<string[]>;
+}
+
+/** SQLite 直接の実装 (キャッシュ DO の中で使う)。同期 API を Promise に包むだけ。 */
+export class LocalUpstreamCache implements UpstreamCacheClient {
+  constructor(
+    private readonly cache: UpstreamCache,
+    private readonly now: () => number = () => Date.now(),
+  ) {}
+
+  async getFresh(kind: CacheKind, month: string, etag: string): Promise<Uint8Array | null> {
+    return this.cache.getFresh(kind, month, etag, this.now());
+  }
+
+  async put(
+    kind: CacheKind,
+    month: string,
+    bodyGz: Uint8Array,
+    sha256: string,
+    etag: string,
+  ): Promise<boolean> {
+    return this.cache.put(kind, month, bodyGz, sha256, etag, this.now());
+  }
+
+  async delete(kind: CacheKind, month: string): Promise<void> {
+    this.cache.delete(kind, month);
+  }
+
+  async monthsWithBothKinds(): Promise<string[]> {
+    return this.cache.monthsWithBothKinds();
+  }
+}
+
+/** email から キャッシュ DO の名前を作る (Refs #554)。**生の email は DO 名にしない**
+ * — DO 名は観測ログにも出るため。正規化 (trim + 小文字) してから sha256 の先頭 32 文字。 */
+export async function cacheDoNameForEmail(email: string): Promise<string> {
+  const bytes = new TextEncoder().encode(email.trim().toLowerCase());
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `kintai-cache-${hex.slice(0, 32)}`;
+}
+
 /** JSON テキストを gzip する (CompressionStream — Workers / Node 18+ 共通)。 */
 export async function gzipText(text: string): Promise<Uint8Array> {
   const stream = new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"));

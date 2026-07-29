@@ -26,6 +26,11 @@ export interface TheearthSessionRecord {
    * DO storage に保存されるのは theearth セッションだけで、viewer は毎リクエスト
    * 組み立てるため永続化されない。 */
   viewerRole?: string;
+  /** viewer 経路で認可した時の JWT の email claim (Refs #554)。kintai 上流
+   * キャッシュを人単位の DO に分ける鍵に使う (`kintai-cache-{sha256(email)}`)。
+   * **認可には使わない** — 会社スコープは従来どおり tenant 逆引き。
+   * theearth ログイン由来のセッションでは undefined (= キャッシュを使わない)。 */
+  viewerEmail?: string;
 }
 
 export interface TheearthRouting {
