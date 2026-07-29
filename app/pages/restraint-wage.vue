@@ -21,13 +21,21 @@ import type {
   ArchiveCsvEntry,
   ArchiveHistoryEntry,
   FastBadgeState,
+  MinWageCompareRow,
   MinWageMaster,
+  MinWageRowAttrs,
   RestraintDriverSummary,
   WageMaster,
   WageReportResponse,
   WageReportRow,
 } from '~/utils/restraint-wage-view'
-import { fastBadgeState, MIN_WAGE_DEFAULT_KEY } from '~/utils/restraint-wage-view'
+import {
+  fastBadgeState,
+  groupMinWageRows,
+  MIN_WAGE_DEFAULT_KEY,
+  MIN_WAGE_JOB_GROUP_LABEL,
+  minWageCompareRow,
+} from '~/utils/restraint-wage-view'
 import { buildTimecardSummary, buildTimecardTable, countWorkKinds, employedDaysInMonth } from '~/utils/timecard-view'
 import type { KosokuDay } from '~/utils/kosoku-daily'
 import {
@@ -743,22 +751,29 @@ const driverNameByCd = computed(() => {
 })
 
 /**
- * 乗務員CD → 給与大臣の会社コードと職種名 (対象月末時点)。
+ * 乗務員CD → 給与大臣の会社コードと所属 (営業所・職種、対象月末時点)。
+ * **タイムカード表と最低賃金チェックの並べ替えで共有**する。
  *
  * 表の区切りが**給与の会社コード**になった (ユーザー決定 2026-07-28) ので、
  * dtako 会社ID ではなく社員マスタの `company` を引く。同じ人が複数会社に在籍
  * しうる (Refs #403) ので**会社コードの小さい方**に寄せる — 表の並びが月によって
- * 入れ替わらないようにする。職種は寄せた側の会社の属性行から採る。
+ * 入れ替わらないようにする。所属は寄せた側の会社の属性行から採る。
  */
-const timecardEmployeeByDriver = computed(() => {
-  const map = new Map<string, { company: string, jobName: string | null }>()
+const employeeOrderAttrsByDriver = computed(() => {
+  const map = new Map<string, MinWageRowAttrs & { company: string }>()
   for (const entries of Object.values(employeeMasterByComp.value)) {
     for (const e of entries) {
       if (!e.driverCd) continue
       const key = normalizeDriverCdKey(e.driverCd)
       const cur = map.get(key)
       if (cur && cur.company <= e.company) continue
-      map.set(key, { company: e.company, jobName: resolveAttrsAt(e, month.value)?.jobName ?? null })
+      const attrs = resolveAttrsAt(e, month.value)
+      map.set(key, {
+        company: e.company,
+        branchCode: attrs?.branchCode ?? null,
+        branchName: attrs?.branchName ?? null,
+        jobName: attrs?.jobName ?? null,
+      })
     }
   }
   return map
@@ -774,8 +789,8 @@ const timecardEmployeeByDriver = computed(() => {
 const timecardSections = computed(() =>
   groupTimecardSheetsByCompany(
     [...timecardSheets.value, ...kosokuDriverSheets.value],
-    driverCd => timecardEmployeeByDriver.value.get(driverCd)?.company ?? null,
-    driverCd => timecardJobGroup(timecardEmployeeByDriver.value.get(driverCd)?.jobName),
+    driverCd => employeeOrderAttrsByDriver.value.get(driverCd)?.company ?? null,
+    driverCd => timecardJobGroup(employeeOrderAttrsByDriver.value.get(driverCd)?.jobName),
   ))
 
 /** 表に出す人が 1 人でも居るか (事務員・ドライバーどちらでも)。 */
@@ -2537,6 +2552,63 @@ function paidFor(driverCd: string): { base: number, overtime: number } | null {
   return paidByDriver.value.get(String(Number(driverCd))) ?? null
 }
 
+/**
+ * 最低賃金チェックの表を **会社 → 職員区分 (事務員 → 作業員 → 整備 → 乗務員 → その他)**
+ * で区切り、中を **営業所 → 乗務員CD** で並べる (ユーザー決定 2026-07-30)。
+ *
+ * 素の応答順 (乗務員CD 順) では会社も職種も混ざるので、100 人超を上から読んで
+ * 「どの職員区分の人が下回っているか」を追えなかった。営業所の順は
+ * 「その営業所が持つ最小の所属コード」— 詳細は `groupMinWageRows` の doc。
+ */
+const minWageSections = computed(() =>
+  groupMinWageRows(
+    report.value?.rows ?? [],
+    row => row.summary.driverCd,
+    row => minWageAttrsFor(row.summary.driverCd),
+  ))
+
+/**
+ * 乗務員CD (正規化キー) → 右端の比較ブロック (計算 3 列 / 給与 2 列 / 比較 3 列、
+ * ユーザー決定 2026-07-30)。
+ *
+ * 基本給(法定内) は左の内訳列 (対象時間 / @単価 / 金額) とここで**2 回出る** —
+ * 左は時間の内訳を読む列、ここは金額を給与実績と突き合わせる列なので、
+ * 比較ブロックを右端に揃えるために重複はそのまま残す (ユーザー了承)。
+ */
+const minWageCompareByDriver = computed(() => {
+  const map = new Map<string, MinWageCompareRow>()
+  for (const row of report.value?.rows ?? []) {
+    const key = normalizeDriverCdKey(row.summary.driverCd)
+    map.set(key, minWageCompareRow(
+      {
+        base: row.wage.amounts?.statutory ?? null,
+        // 残業代合計 = 残業 (時間外+週40超過) + 深夜残業 (時間外深夜)
+        overtime: sumNullable(row.wage.actualOvertimePay, row.wage.actualNightOvertimePay),
+        total: row.wage.totalAmount,
+      },
+      paidFor(row.summary.driverCd),
+    ))
+  }
+  return map
+})
+
+/** 比較ブロックの 1 行 (report に無い乗務員は全 null 相当)。 */
+function minWageCompare(driverCd: string): MinWageCompareRow {
+  return minWageCompareByDriver.value.get(normalizeDriverCdKey(driverCd))
+    ?? minWageCompareRow({ base: null, overtime: null, total: null }, null)
+}
+
+/** 乗務員CD → 並べ替え・表示に使う所属 (社員マスタで引けない人は null)。 */
+function minWageAttrsFor(driverCd: string): MinWageRowAttrs | null {
+  return employeeOrderAttrsByDriver.value.get(normalizeDriverCdKey(driverCd)) ?? null
+}
+
+/** 氏名の下に出す営業所名 (`SHOZOKU.NAME1`)。**最低賃金は営業所の県で決まる**
+ * (Refs #409) ので、並びの根拠と判定の根拠を同じ場所で見せる。 */
+function minWageBranchLabel(driverCd: string): string {
+  return minWageAttrsFor(driverCd)?.branchName ?? ''
+}
+
 /** 乗務員CD (正規化キー) → 給与明細の残業計上額 + 基礎単価(実績) (タイムカード表の
  * 残業「時間」比較用、Refs #441)。salaryComparison が無くても拘束側の時間は
  * summary から常に出せるので、ここが空でも「支給分」欄だけが "-" になる。 */
@@ -3895,31 +3967,64 @@ watch([compMap, kyuyoSyncedKeys], () => {
               :class="staleReport ? STALE_CLASS : ''"
             >
               <table class="w-full text-sm">
+                <!-- 右端に**計算 3 列 / 給与 2 列 / 比較 3 列**の突合ブロックを置く
+                     (ユーザー決定 2026-07-30)。左の区分列は時間の内訳を読む列で、
+                     金額の突合はここだけで完結させる。基本給(法定内) が 2 回出るのは
+                     承知の上 (左は内訳つき) -->
                 <thead>
                   <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
-                    <th class="px-2 py-2">乗務員CD</th>
-                    <th class="px-2 py-2">氏名</th>
-                    <th class="px-2 py-2 text-right">実働</th>
-                    <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="法定時間内賃金 (深夜・残業等の割増区分を含まない基本部分)。対象時間 = 実働 − 時間外 − 時間外深夜 − 週40超過 − 法定休日実働。「給与比較」タブの基本給(計算)と同じ値">基本給(法定内)<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
-                    <th class="px-2 py-2 text-right" title="残業ではない通常勤務中の深夜加算分 (0.25倍、基本給とは別枠の上乗せ)。@ は計算単価 (加算分 0.25 倍のみ)">深夜(通常)<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
-                    <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="対象時間 = 時間外 + 週40超過 (2段表示)。@ は残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)。月60時間超過は時間が橙色">残業代<br><span class="font-normal text-xs">(時間外 / 週40超過 / @単価 / 金額)</span></th>
-                    <th class="px-2 py-2 text-right" title="対象時間 = 時間外深夜。@ は深夜残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)">深夜残業代<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
-                    <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="法定休日 (既定 日曜) の実働すべて (1.35倍、深夜分は1.6倍)。@ は通常+深夜合算の実額按分">法定休日<br><span class="font-normal text-xs">(通常 / 深夜 / @単価 / 金額)</span></th>
-                    <th class="px-2 py-2 text-right" title="実働 − (法定内 + 時間外 + 時間外深夜 + 法定休日の通常+深夜)。0 以外 = 表に出ていない区分へ分類された時間がある (法定外休日設定・休日フラグ日の実働・日別データ不整合など) — 検算用">差分<br><span class="font-normal text-xs">(実働 − 表合計)</span></th>
-                    <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700">残業代合計<br><span class="font-normal text-xs">(残業+深夜残業)</span></th>
-                    <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700">合計(計算)<br><span class="font-normal text-xs">(全区分合計)</span></th>
-                    <th class="px-2 py-2 text-right border-l border-gray-200 dark:border-gray-700" title="支払い済み給与: 給与比較タブで取り込んだ給与明細 CSV の基本給扱い項目の合計。CSV の年月は支給月ラベルのため勤務月+1 の行を突合 (月末締め・翌月払い)。未取り込みの月は「-」">基本給(給与)<br><span class="font-normal text-xs">(支払い実績)</span></th>
-                    <th class="px-2 py-2 text-right" title="支払い済み給与: 給与比較タブで取り込んだ給与明細 CSV の割増扱い項目 (残業・深夜・休日出勤) の合計。CSV の年月は支給月ラベルのため勤務月+1 の行を突合 (月末締め・翌月払い)。未取り込みの月は「-」">残業代(給与)<br><span class="font-normal text-xs">(支払い実績)</span></th>
+                    <th rowspan="2" class="px-2 py-2 align-bottom">乗務員CD</th>
+                    <th rowspan="2" class="px-2 py-2 align-bottom">氏名<br><span class="font-normal text-xs">(営業所)</span></th>
+                    <th rowspan="2" class="px-2 py-2 text-right align-bottom">実働</th>
+                    <th rowspan="2" class="px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="法定時間内賃金 (深夜・残業等の割増区分を含まない基本部分)。対象時間 = 実働 − 時間外 − 時間外深夜 − 週40超過 − 法定休日実働。「給与比較」タブの基本給(計算)と同じ値">基本給(法定内)<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
+                    <th rowspan="2" class="px-2 py-2 text-right align-bottom" title="残業ではない通常勤務中の深夜加算分 (0.25倍、基本給とは別枠の上乗せ)。@ は計算単価 (加算分 0.25 倍のみ)">深夜(通常)<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
+                    <th rowspan="2" class="px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="対象時間 = 時間外 + 週40超過 (2段表示)。@ は残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)。月60時間超過は時間が橙色">残業代<br><span class="font-normal text-xs">(時間外 / 週40超過 / @単価 / 金額)</span></th>
+                    <th rowspan="2" class="px-2 py-2 text-right align-bottom" title="対象時間 = 時間外深夜。@ は深夜残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)">深夜残業代<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
+                    <th rowspan="2" class="px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="法定休日 (既定 日曜) の実働すべて (1.35倍、深夜分は1.6倍)。@ は通常+深夜合算の実額按分">法定休日<br><span class="font-normal text-xs">(通常 / 深夜 / @単価 / 金額)</span></th>
+                    <th rowspan="2" class="px-2 py-2 text-right align-bottom" title="実働 − (法定内 + 時間外 + 時間外深夜 + 法定休日の通常+深夜)。0 以外 = 表に出ていない区分へ分類された時間がある (法定外休日設定・休日フラグ日の実働・日別データ不整合など) — 検算用">差分<br><span class="font-normal text-xs">(実働 − 表合計)</span></th>
+                    <th colspan="3" class="px-2 py-1 text-center border-l-2 border-gray-300 dark:border-gray-600 text-xs" title="単価マスタ × 拘束時間データの換算理論値">計算</th>
+                    <th colspan="2" class="px-2 py-1 text-center border-l-2 border-gray-300 dark:border-gray-600 text-xs" title="給与比較タブで取り込んだ給与明細の実績 (勤務月+1 の支給月ラベルで突合)">給与 (支払い実績)</th>
+                    <th colspan="3" class="px-2 py-1 text-center border-l-2 border-gray-300 dark:border-gray-600 text-xs" title="給与 − 計算。マイナス = 支払いが換算理論値を下回っている。どちらか欠けている行は「-」">比較 (給与 − 計算)</th>
+                  </tr>
+                  <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
+                    <th class="px-2 py-2 text-right border-l-2 border-gray-300 dark:border-gray-600" title="法定時間内賃金 (金額)。左の「基本給(法定内)」の金額と同じ値を、突合しやすいようここにも出している">基本給</th>
+                    <th class="px-2 py-2 text-right" title="残業 (時間外+週40超過) + 深夜残業 (時間外深夜)">残業代合計</th>
+                    <th class="px-2 py-2 text-right" title="全区分合計 (基本給 + 深夜 + 残業代合計 + 法定休日)">合計</th>
+                    <th class="px-2 py-2 text-right border-l-2 border-gray-300 dark:border-gray-600" title="給与明細の基本給扱い項目の合計 (区分は「支給項目区分」の設定に従う)。未取り込みの月は「-」">基本給</th>
+                    <th class="px-2 py-2 text-right" title="給与明細の割増扱い項目 (残業・深夜・休日出勤) の合計。未取り込みの月は「-」">残業代</th>
+                    <th class="px-2 py-2 text-right border-l-2 border-gray-300 dark:border-gray-600" title="基本給(給与) − 基本給(法定内)">基本給 差</th>
+                    <th class="px-2 py-2 text-right" title="残業代(給与) − 残業代合計(計算)">残業代 差</th>
+                    <th class="px-2 py-2 text-right" title="(基本給+残業代)(給与) − 合計(計算)">合計 差</th>
                   </tr>
                 </thead>
-                <tbody>
+                <!-- **会社 → 職員区分**で区切り、中は 営業所 (所属コード) → 乗務員CD 順
+                     (ユーザー決定 2026-07-30)。区切りが無いと 100 人超の並びで
+                     「どの職員区分が下回っているか」を追えない。最低賃金は営業所の県で
+                     決まる (Refs #409) ので営業所も氏名の下に出す -->
+                <tbody
+                  v-for="section in minWageSections"
+                  :key="`${section.company ?? 'unknown'}|${section.jobGroup}`"
+                >
+                  <tr class="bg-gray-50 dark:bg-gray-800/60 border-b border-gray-200 dark:border-gray-700">
+                    <td :colspan="17" class="px-2 py-1.5 text-xs font-semibold">
+                      {{ section.company ? payrollCompanyLabelOf(compMap, section.company) : '会社不明 (社員マスタに乗務員CDの登録なし)' }}
+                      <span class="mx-1 text-gray-400">/</span>
+                      {{ MIN_WAGE_JOB_GROUP_LABEL[section.jobGroup] }}
+                      <span class="ml-1 font-normal text-gray-500">{{ section.rows.length }} 名</span>
+                    </td>
+                  </tr>
                   <tr
-                    v-for="row in report.rows"
+                    v-for="row in section.rows"
                     :key="row.summary.driverCd"
                     class="border-b border-gray-100 dark:border-gray-800"
                   >
                     <td class="px-2 py-1.5">{{ row.summary.driverCd }}</td>
-                    <td class="px-2 py-1.5">{{ row.summary.driverName }}</td>
+                    <td class="px-2 py-1.5">
+                      <div>{{ row.summary.driverName }}</div>
+                      <div v-if="minWageBranchLabel(row.summary.driverCd)" class="text-xs text-gray-500">
+                        {{ minWageBranchLabel(row.summary.driverCd) }}
+                      </div>
+                    </td>
                     <td class="px-2 py-1.5 text-right">{{ fmtMinutes(row.summary.workingMinutes) }}</td>
                     <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700">
                       <div class="text-xs text-gray-500">{{ fmtMinutes(row.wage.minutes.statutory) }}</div>
@@ -3953,17 +4058,41 @@ watch([compMap, kyuyoSyncedKeys], () => {
                         {{ fmtSignedMinutes(unaccountedMinutes(row)) }}
                       </span>
                     </td>
-                    <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700">
-                      <div class="font-medium">{{ fmtYen(sumNullable(row.wage.actualOvertimePay, row.wage.actualNightOvertimePay)) }}</div>
-                    </td>
-                    <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700">
-                      <div class="font-medium">{{ fmtYen(row.wage.totalAmount) }}</div>
-                    </td>
-                    <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700">
-                      <div class="font-medium">{{ fmtYen(paidFor(row.summary.driverCd)?.base ?? null) }}</div>
+                    <!-- 右端の突合ブロック: 計算 3 列 / 給与 2 列 / 比較 3 列 -->
+                    <td class="px-2 py-1.5 text-right border-l-2 border-gray-300 dark:border-gray-600">
+                      <div class="font-medium">{{ fmtYen(minWageCompare(row.summary.driverCd).calcBase) }}</div>
                     </td>
                     <td class="px-2 py-1.5 text-right">
-                      <div class="font-medium">{{ fmtYen(paidFor(row.summary.driverCd)?.overtime ?? null) }}</div>
+                      <div class="font-medium">{{ fmtYen(minWageCompare(row.summary.driverCd).calcOvertime) }}</div>
+                    </td>
+                    <td class="px-2 py-1.5 text-right">
+                      <div class="font-medium">{{ fmtYen(minWageCompare(row.summary.driverCd).calcTotal) }}</div>
+                    </td>
+                    <td class="px-2 py-1.5 text-right border-l-2 border-gray-300 dark:border-gray-600">
+                      <div class="font-medium">{{ fmtYen(minWageCompare(row.summary.driverCd).paidBase) }}</div>
+                    </td>
+                    <td class="px-2 py-1.5 text-right">
+                      <div class="font-medium">{{ fmtYen(minWageCompare(row.summary.driverCd).paidOvertime) }}</div>
+                    </td>
+                    <!-- マイナス (支払いが理論値より少ない) だけ赤。プラスは手当等の
+                         上乗せで珍しくないため色を付けない (給与比較タブと同じ扱い) -->
+                    <td
+                      class="px-2 py-1.5 text-right border-l-2 border-gray-300 dark:border-gray-600"
+                      :class="(minWageCompare(row.summary.driverCd).diffBase ?? 0) < 0 ? 'text-red-600 font-medium' : 'text-gray-500'"
+                    >
+                      {{ fmtDiff(minWageCompare(row.summary.driverCd).diffBase) }}
+                    </td>
+                    <td
+                      class="px-2 py-1.5 text-right"
+                      :class="(minWageCompare(row.summary.driverCd).diffOvertime ?? 0) < 0 ? 'text-red-600 font-medium' : 'text-gray-500'"
+                    >
+                      {{ fmtDiff(minWageCompare(row.summary.driverCd).diffOvertime) }}
+                    </td>
+                    <td
+                      class="px-2 py-1.5 text-right"
+                      :class="(minWageCompare(row.summary.driverCd).diffTotal ?? 0) < 0 ? 'text-red-600 font-medium' : 'text-gray-500'"
+                    >
+                      {{ fmtDiff(minWageCompare(row.summary.driverCd).diffTotal) }}
                     </td>
                   </tr>
                 </tbody>
@@ -3974,8 +4103,19 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 単価は「単価マスタ」タブで管理します。
               </p>
               <p class="text-xs text-gray-500 mt-2">
+                並びは<b>給与大臣の会社コード → 職員区分 (事務員 → 作業員 → 整備 → 乗務員 → その他) → 営業所 → 乗務員CD</b> 順。
+                職員区分は社員マスタの職種名 (<code>SHOZOKU.NAME2</code>、対象月末時点) から判定し、タイムカード表と同じ区分を使う。
+                営業所の順は<b>その営業所が持つ最小の所属コード</b> (<code>SHOZOKU.INCODE</code>) — 1 つの営業所が職種ごとに別コードを持つため
+                (<code>本社 乗務員</code> と <code>本社 乗務員(トレーラ)</code>)、コードそのまま並べると同じ営業所が区分の中で割れる。
+                氏名の下は営業所名 (<code>SHOZOKU.NAME1</code>) — 最低賃金は就業地の都道府県で決まるため、同じ営業所の人は同じ下限で判定される。
+                社員マスタで会社が引けない人は末尾の「会社不明」にまとめている (落とすと未登録の人が黙って消えるため)。<br>
+                右端は<b>金額の突合ブロック</b> — <b>計算</b> (基本給 / 残業代合計 / 合計) → <b>給与</b> (基本給 / 残業代) → <b>比較 (給与 − 計算)</b> の 3 組。
+                比較はマイナス = 支払いが換算理論値を下回っている印 (赤)。プラスは各種手当の上乗せで珍しくないため色は付けない。
+                どちらか片方が無い行 (給与明細 未取り込み・単価未設定) は 0 ではなく「-」。
+                合計 差 は <b>(基本給+残業代)(給与) − 合計(計算)</b> で、計算側の合計には深夜・法定休日も入る。
+                <b>基本給は左の内訳列と右のブロックで 2 回出る</b> — 左は対象時間・@単価つきで時間の内訳を読む列、右は金額を給与実績と並べる列。<br>
                 合計(計算) = 基本給 + 深夜 + 残業代合計 + 法定休日 (全区分合計、「給与比較」タブの合計(計算)と同じ値)。<br>
-                基本給(給与)・残業代(給与) は<b>支払い済み給与の実績</b> — 給与比較タブで取り込んだ給与明細 CSV の基本給扱い / 割増扱い項目の合計。CSV の年月ラベルは支給月なので、勤務月+1 (翌月支給) の行を突合している。
+                給与側は<b>支払い済み給与の実績</b> — 給与比較タブで取り込んだ給与明細 CSV の基本給扱い / 割増扱い項目の合計。CSV の年月ラベルは支給月なので、勤務月+1 (翌月支給) の行を突合している。
                 月末締め・翌月払いのため実際の支給は翌月 (ヘッダの支給月表示)。CSV 未取り込みの月は「-」。項目の区分は「支給項目区分」の設定に従う。<br>
                 <b>実働 = 基本給(法定内)の対象時間 + 時間外 + 週40超過 + 時間外深夜 + 法定休日(通常+深夜)</b>。
                 深夜(通常) だけは上記の<b>内数</b> (0.25 加算のための別枠計上) なので、実働の足し算には含めない。

@@ -3,6 +3,12 @@
  * 型は worker (workers/dtako-scraper-relay/src/{theearth-restraint-client,restraint-wage}.ts)
  * の応答と同型。
  */
+// 職員区分の並び (事務 → 作業 → 整備 → 乗務 → その他) はタイムカード表と**同じ定義を
+// 共有**する (ユーザー決定 2026-07-28 の並びをそのまま最低賃金チェックへ持ち込む)。
+// 定義の置き場は kosoku-daily.ts のまま — そちらの `groupTimecardSheetsByCompany` と
+// 判定を二重に持つと表記ゆれの追加で片方だけ直す事故が起きる。
+import type { TimecardJobGroup } from './kosoku-daily'
+import { TIMECARD_JOB_GROUPS, timecardJobGroup } from './kosoku-daily'
 
 /** 打刻区間 ("YYYY-MM-DD HH:MM:SS")。タイムカード由来の日にだけ入る (Refs #424 PR-E)。
  * `end` は退社押し忘れ (未終業) だと null (nginx#780)。 */
@@ -269,4 +275,140 @@ export function fastBadgeState(
   if (!syncedMonths.includes(ym)) return 'none'
   if (cachedMonths === null || cachedMonths.includes(ym)) return 'full'
   return 'synced-only'
+}
+
+// ---- 最低賃金チェックの並び (ユーザー決定 2026-07-30) ----
+
+/** 職員区分の見出し。`other` は「推測で他の区分に混ぜない」ので中身を明示する。 */
+export const MIN_WAGE_JOB_GROUP_LABEL: Record<TimecardJobGroup, string> = {
+  clerical: '事務員',
+  worker: '作業員',
+  maintenance: '整備',
+  driver: '乗務員',
+  other: 'その他 (役員・特定技能・職種未設定)',
+}
+
+/** 並べ替えに使う社員マスタの所属 (対象月末時点)。全 null = マスタで引けない人。 */
+export interface MinWageRowAttrs {
+  /** 給与大臣の会社コード 4 桁 (`0100` 等)。null = 社員マスタに乗務員CD が無い。 */
+  company: string | null
+  /** 所属コード (`SHOZOKU.INCODE`)。**営業所の並び順の正** (Refs #409)。 */
+  branchCode: number | null
+  /** 営業所名 (`SHOZOKU.NAME1`)。 */
+  branchName: string | null
+  /** 職種名 (`SHOZOKU.NAME2`)。職員区分の判定元。 */
+  jobName: string | null
+}
+
+/** 計算 (理論値) と給与 (支払い実績) を突き合わせる 3 列 × 3 組 (Refs #560)。 */
+export interface MinWageCompareRow {
+  /** 基本給: 法定時間内賃金 (計算) / 基本給扱い項目の合計 (給与)。 */
+  calcBase: number | null
+  paidBase: number | null
+  diffBase: number | null
+  /** 残業代: 残業 + 深夜残業 (計算) / 割増扱い項目の合計 (給与)。 */
+  calcOvertime: number | null
+  paidOvertime: number | null
+  diffOvertime: number | null
+  /** 合計: 全区分合計 (計算) / 基本給 + 残業代 (給与)。 */
+  calcTotal: number | null
+  paidTotal: number | null
+  diffTotal: number | null
+}
+
+/**
+ * 比較列 (**給与 − 計算**、Refs #560)。給与比較タブの `diffBase`/`diffTotal` と
+ * 同じ向きに揃える — マイナス = 支払いが換算理論値を下回っている。
+ *
+ * **どちらか片方でも無ければ差は null (「-」)** — 給与明細を取り込んでいない月や
+ * 単価未設定の乗務員で 0 を出すと「一致した」に見えてしまう。
+ */
+export function minWageCompareRow(
+  calc: { base: number | null, overtime: number | null, total: number | null },
+  paid: { base: number, overtime: number } | null,
+): MinWageCompareRow {
+  const paidTotal = paid ? paid.base + paid.overtime : null
+  const diff = (p: number | null, c: number | null) => (p == null || c == null ? null : p - c)
+  return {
+    calcBase: calc.base,
+    paidBase: paid?.base ?? null,
+    diffBase: diff(paid?.base ?? null, calc.base),
+    calcOvertime: calc.overtime,
+    paidOvertime: paid?.overtime ?? null,
+    diffOvertime: diff(paid?.overtime ?? null, calc.overtime),
+    calcTotal: calc.total,
+    paidTotal,
+    diffTotal: diff(paidTotal, calc.total),
+  }
+}
+
+/** 会社 × 職員区分の 1 区画。`company` が null = 社員マスタで会社が引けない人。 */
+export interface MinWageSection<T> {
+  company: string | null
+  jobGroup: TimecardJobGroup
+  rows: T[]
+}
+
+/**
+ * 最低賃金チェックの表を**会社 → 職員区分**で区切り、中を**営業所 → 乗務員CD**で
+ * 並べる (ユーザー決定 2026-07-30)。
+ *
+ * - 会社は**会社コード昇順** (`0100` → `0200` → …)。4 桁ゼロ詰めなので文字列順 = 番号順。
+ *   社員マスタで会社が引けない人は末尾の「会社不明」へ — 落とすとマスタ未登録の人が
+ *   黙って表から消える (タイムカード表 `groupTimecardSheetsByCompany` と同じ作法)
+ * - 職員区分は `TIMECARD_JOB_GROUPS` の順 = **事務員 → 作業員 → 整備 → 乗務員 → その他**。
+ *   判定はタイムカード表と共有 (`timecardJobGroup`、`SHOZOKU.NAME2` の部分一致)
+ * - 区分の中は**営業所ごとにまとめ**、その中を所属コード → 乗務員CD 順。所属は
+ *   給与大臣では営業所 × 職種の組なので、区分で切れば営業所もまとまる
+ *   (2026-07-30 のユーザー指摘)。**最低賃金は営業所の県で決まる** (Refs #409) ので、
+ *   営業所が散らばらない並びは判定を読むうえでも効く
+ * - **営業所の順は「その営業所が持つ最小の所属コード」** (`SHOZOKU.INCODE`、
+ *   Refs #409 の「並びは所属コード」を営業所単位に読み替えたもの)。所属コードを
+ *   そのまま行の第 1 キーにすると、**同じ営業所が区分の中で 2 つに割れる** —
+ *   1 つの営業所が職種ごとに別コードを持つため (`本社 乗務員` と
+ *   `本社 乗務員(トレーラ)` はどちらも乗務員区分だがコードが離れている)。
+ *   2026-04 の本番データで 0200 の乗務員が 本社 → 諸富 → 大阪 → 本社 → 北九州 →
+ *   大阪 と割れて出たので、営業所単位のまとめに直した
+ * - 所属コードをまったく持たない営業所 (再取り込み前) は営業所名順で区分の末尾へ
+ */
+export function groupMinWageRows<T>(
+  rows: readonly T[],
+  driverCdOf: (row: T) => string,
+  attrsOf: (row: T) => MinWageRowAttrs | null,
+): Array<MinWageSection<T>> {
+  const sections = new Map<string, MinWageSection<T>>()
+  /** 営業所名 → その営業所の最小所属コード (全行から。区画をまたいで同じ順になる)。 */
+  const branchRank = new Map<string, number>()
+  for (const row of rows) {
+    const attrs = attrsOf(row)
+    const jobGroup = timecardJobGroup(attrs?.jobName)
+    const company = attrs?.company ?? null
+    const key = `${company ?? ''}|${jobGroup}`
+    const section = sections.get(key) ?? { company, jobGroup, rows: [] }
+    section.rows.push(row)
+    sections.set(key, section)
+    const branch = attrs?.branchName ?? ''
+    const code = attrs?.branchCode ?? Number.POSITIVE_INFINITY
+    const cur = branchRank.get(branch)
+    if (cur === undefined || code < cur) branchRank.set(branch, code)
+  }
+  // `Infinity - Infinity` は NaN で比較関数が壊れるため引き算では比べない
+  const cmpNum = (x: number, y: number) => (x === y ? 0 : x < y ? -1 : 1)
+  const byRow = (a: T, b: T) => {
+    const aa = attrsOf(a)
+    const ba = attrsOf(b)
+    const an = aa?.branchName ?? ''
+    const bn = ba?.branchName ?? ''
+    const inf = Number.POSITIVE_INFINITY
+    return cmpNum(branchRank.get(an) ?? inf, branchRank.get(bn) ?? inf)
+      || an.localeCompare(bn, 'ja')
+      || cmpNum(aa?.branchCode ?? inf, ba?.branchCode ?? inf)
+      || driverCdOf(a).localeCompare(driverCdOf(b), undefined, { numeric: true })
+  }
+  return [...sections.values()]
+    .sort((a, b) =>
+      (a.company === null ? 1 : 0) - (b.company === null ? 1 : 0)
+      || (a.company ?? '').localeCompare(b.company ?? '')
+      || TIMECARD_JOB_GROUPS.indexOf(a.jobGroup) - TIMECARD_JOB_GROUPS.indexOf(b.jobGroup))
+    .map(s => ({ ...s, rows: [...s.rows].sort(byRow) }))
 }

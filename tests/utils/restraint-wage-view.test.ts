@@ -3,10 +3,12 @@
  *
  * - fmtMinutes: 分 → "XhYYm" 表記 (Refs #251)。null/undefined は "-"
  * - fmtYen / fmtArchiveTs / fmtYm の基本フォーマット
+ * - groupMinWageRows: 最低賃金チェックの並び (会社 → 職員区分 → 営業所 → 乗務員CD)
  */
 
 import { describe, it, expect } from 'vitest'
-import { fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, monthRange, MONTH_RANGE_MAX, nextYm, prevYm } from '../../app/utils/restraint-wage-view'
+import type { MinWageRowAttrs } from '../../app/utils/restraint-wage-view'
+import { fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, groupMinWageRows, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, nextYm, prevYm } from '../../app/utils/restraint-wage-view'
 
 describe('fmtMinutes', () => {
   it('時間+分を "XhYYm" 表記にする', () => {
@@ -150,5 +152,158 @@ describe('fastBadgeState (「高速表示可」バッジの 2 段階、Refs #543
 
   it('旧 relay 応答 (フィールド無し = null) は従来どおりフル表示に fallback', () => {
     expect(fastBadgeState('2026-06', synced, null)).toBe('full')
+  })
+})
+
+// ---- groupMinWageRows (最低賃金チェックの並び、ユーザー決定 2026-07-30) ----
+
+describe('groupMinWageRows', () => {
+  interface Row { cd: string }
+  const rows = (...cds: string[]): Row[] => cds.map(cd => ({ cd }))
+  /** 乗務員CD → 所属 (会社 / 所属コード / 営業所名 / 職種名)。 */
+  const attrs: Record<string, MinWageRowAttrs> = {
+    // 0100: 事務 (本社) / 乗務 (本社・佐賀)
+    1001: { company: '0100', branchCode: 1, branchName: '本社', jobName: '一般管理事務' },
+    1002: { company: '0100', branchCode: 3, branchName: '本社', jobName: '乗務員' },
+    1003: { company: '0100', branchCode: 8, branchName: '佐賀営業所', jobName: '乗務員(トレーラ)' },
+    1004: { company: '0100', branchCode: 2, branchName: '本社', jobName: '作業員点呼者' },
+    1005: { company: '0100', branchCode: 4, branchName: '本社', jobName: '整備' },
+    1006: { company: '0100', branchCode: 9, branchName: '本社', jobName: '役員' },
+    // 0200 は別会社なので必ず 0100 の後ろ
+    2001: { company: '0200', branchCode: 1, branchName: '本社', jobName: '乗務員' },
+  }
+  const group = (list: Row[]) =>
+    groupMinWageRows(list, r => r.cd, r => attrs[r.cd] ?? null)
+
+  it('会社コード昇順 → 職員区分 (事務 → 作業 → 整備 → 乗務 → その他) で区切る', () => {
+    const sections = group(rows('2001', '1006', '1003', '1005', '1004', '1001'))
+    expect(sections.map(s => [s.company, s.jobGroup])).toEqual([
+      ['0100', 'clerical'],
+      ['0100', 'worker'],
+      ['0100', 'maintenance'],
+      ['0100', 'driver'],
+      ['0100', 'other'],
+      ['0200', 'driver'],
+    ])
+  })
+
+  it('区分の中は営業所 (所属コード) 順 → 乗務員CD 順', () => {
+    // 1003 は佐賀 (所属コード 8)、1002 は本社 (3) なので本社が先
+    const drivers = group(rows('1003', '1002')).find(s => s.jobGroup === 'driver')
+    expect(drivers?.rows.map(r => r.cd)).toEqual(['1002', '1003'])
+  })
+
+  it('1 営業所が職種ごとに別の所属コードを持っても営業所は割れない', () => {
+    // 本番 2026-04 で踏んだ形: 同じ乗務員区分の中に
+    // 「本社 乗務員」(3) と「本社 乗務員(トレーラ)」(21) があり、間に他営業所の
+    // コード (諸富 10 / 大阪 15) が挟まる。素の所属コード順では本社が 2 つに割れる
+    const trailer: Record<string, MinWageRowAttrs> = {
+      h1: { company: '0200', branchCode: 3, branchName: '本社', jobName: '乗務員' },
+      m1: { company: '0200', branchCode: 10, branchName: '諸富営業所', jobName: '乗務員' },
+      o1: { company: '0200', branchCode: 15, branchName: '大阪営業所', jobName: '乗務員' },
+      h2: { company: '0200', branchCode: 21, branchName: '本社', jobName: '乗務員(トレーラ)' },
+    }
+    const sections = groupMinWageRows(rows('h1', 'm1', 'o1', 'h2'), r => r.cd, r => trailer[r.cd] ?? null)
+    expect(sections).toHaveLength(1)
+    // 本社 (最小コード 3) → 諸富 (10) → 大阪 (15)。本社は 2 行が隣り合う
+    expect(sections[0]!.rows.map(r => r.cd)).toEqual(['h1', 'h2', 'm1', 'o1'])
+  })
+
+  it('同じ営業所の中は乗務員CD の数値順 (ゼロ詰めでも桁で崩れない)', () => {
+    const same: Record<string, MinWageRowAttrs> = {
+      9: { company: '0100', branchCode: 1, branchName: '本社', jobName: '乗務員' },
+      10: { company: '0100', branchCode: 1, branchName: '本社', jobName: '乗務員' },
+    }
+    const sections = groupMinWageRows(rows('10', '9'), r => r.cd, r => same[r.cd] ?? null)
+    expect(sections[0]!.rows.map(r => r.cd)).toEqual(['9', '10'])
+  })
+
+  it('所属コードをまったく持たない営業所 (再取り込み前) は区分の末尾', () => {
+    const mixed: Record<string, MinWageRowAttrs> = {
+      a: { company: '0100', branchCode: null, branchName: '本社', jobName: '乗務員' },
+      b: { company: '0100', branchCode: null, branchName: '佐賀営業所', jobName: '乗務員' },
+      c: { company: '0100', branchCode: 8, branchName: '佐賀営業所', jobName: '乗務員' },
+    }
+    const sections = groupMinWageRows(rows('a', 'b', 'c'), r => r.cd, r => mixed[r.cd] ?? null)
+    // 佐賀 (営業所の最小コード 8) がまとまって先、コードの無い本社が末尾
+    expect(sections[0]!.rows.map(r => r.cd)).toEqual(['c', 'b', 'a'])
+  })
+
+  it('営業所名も所属コードも無い行 (会社不明) は比較関数を壊さず並ぶ', () => {
+    const none: Record<string, MinWageRowAttrs> = {
+      12: { company: null, branchCode: null, branchName: null, jobName: null },
+      3: { company: null, branchCode: null, branchName: null, jobName: null },
+    }
+    const sections = groupMinWageRows(rows('12', '3'), r => r.cd, r => none[r.cd] ?? null)
+    expect(sections[0]!.rows.map(r => r.cd)).toEqual(['3', '12'])
+  })
+
+  it('社員マスタで引けない人は末尾の「会社不明」へ (落とさない)', () => {
+    const sections = group(rows('9999', '2001', '1001'))
+    expect(sections.map(s => s.company)).toEqual(['0100', '0200', null])
+    expect(sections.at(-1)!.rows.map(r => r.cd)).toEqual(['9999'])
+    // 職種も引けないので「その他」区分
+    expect(sections.at(-1)!.jobGroup).toBe('other')
+  })
+
+  it('行を 1 つも落とさない', () => {
+    const list = rows('2001', '1006', '1003', '1005', '1004', '1002', '1001', '9999')
+    const flat = group(list).flatMap(s => s.rows.map(r => r.cd))
+    expect(flat.slice().sort()).toEqual(list.map(r => r.cd).slice().sort())
+  })
+
+  it('空配列は空の区画', () => {
+    expect(group([])).toEqual([])
+  })
+
+  it('区分の見出しは 事務員 / 作業員 / 整備 / 乗務員 / その他', () => {
+    expect(MIN_WAGE_JOB_GROUP_LABEL.clerical).toBe('事務員')
+    expect(MIN_WAGE_JOB_GROUP_LABEL.worker).toBe('作業員')
+    expect(MIN_WAGE_JOB_GROUP_LABEL.maintenance).toBe('整備')
+    expect(MIN_WAGE_JOB_GROUP_LABEL.driver).toBe('乗務員')
+    expect(MIN_WAGE_JOB_GROUP_LABEL.other).toContain('その他')
+  })
+})
+
+// ---- minWageCompareRow (右端の突合ブロック、ユーザー決定 2026-07-30) ----
+
+describe('minWageCompareRow', () => {
+  const calc = { base: 173112, overtime: 60271, total: 262857 }
+
+  it('比較は 給与 − 計算 (給与比較タブと同じ向き)', () => {
+    const r = minWageCompareRow(calc, { base: 173112, overtime: 145883 })
+    expect(r.diffBase).toBe(0)
+    expect(r.diffOvertime).toBe(145883 - 60271)
+    // 合計は (基本給+残業代)(給与) − 合計(計算)
+    expect(r.paidTotal).toBe(173112 + 145883)
+    expect(r.diffTotal).toBe(173112 + 145883 - 262857)
+  })
+
+  it('支払いが理論値を下回るとマイナス', () => {
+    const r = minWageCompareRow(calc, { base: 150000, overtime: 20000 })
+    expect(r.diffBase).toBe(150000 - 173112)
+    expect(r.diffOvertime).toBe(20000 - 60271)
+    expect(r.diffTotal).toBeLessThan(0)
+  })
+
+  it('給与明細 未取り込み (paid null) は差を出さない', () => {
+    const r = minWageCompareRow(calc, null)
+    expect(r.paidBase).toBeNull()
+    expect(r.paidOvertime).toBeNull()
+    expect(r.paidTotal).toBeNull()
+    expect(r.diffBase).toBeNull()
+    expect(r.diffOvertime).toBeNull()
+    expect(r.diffTotal).toBeNull()
+    // 計算側はそのまま出る
+    expect(r.calcBase).toBe(173112)
+    expect(r.calcTotal).toBe(262857)
+  })
+
+  it('単価未設定 (計算が null) の列も差は null で 0 に倒さない', () => {
+    const r = minWageCompareRow({ base: null, overtime: null, total: null }, { base: 100, overtime: 200 })
+    expect(r.diffBase).toBeNull()
+    expect(r.diffOvertime).toBeNull()
+    expect(r.diffTotal).toBeNull()
+    expect(r.paidTotal).toBe(300)
   })
 })

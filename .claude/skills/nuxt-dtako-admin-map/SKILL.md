@@ -458,6 +458,17 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   `UPDATE_GOLDEN=1` (作法は fixture README)。最低賃金チェック/給与比較の両タブの
   テストが同一 fixture を使う (org 方針: `local-first-testing` skill、計画:
   `docs/plan-268-wage-tab-separation.md`)
+- **最低賃金チェックの並びと右端の突合ブロック** (ユーザー決定 2026-07-30、
+  `groupMinWageRows`/`minWageCompareRow` = `app/utils/restraint-wage-view.ts`):
+  並びは **会社コード → 職員区分 (事務員 → 作業員 → 整備 → 乗務員 → その他) →
+  営業所 → 乗務員CD**。職員区分の判定はタイムカード表と共有
+  (`timecardJobGroup`、`kosoku-daily.ts`)。**営業所の順は「その営業所が持つ最小の
+  所属コード」** — 所属 (`SHOZOKU`) は営業所 × 職種の組で 1 営業所が職種ごとに
+  別 INCODE を持つため、コードを行の第 1 キーにすると同じ営業所が区分の中で割れる
+  (2026-04 本番で 0200 の乗務員が 本社 → 諸富 → 大阪 → 本社 → 北九州 → 大阪)。
+  表の右端は **計算 3 列 (基本給/残業代合計/合計) → 給与 2 列 → 比較 3 列
+  (給与 − 計算)**。基本給は左の内訳列と右で 2 回出る (左は時間の内訳、右は突合)。
+  比較は片方が欠けたら 0 ではなく null (「-」)
 - マスタは R2 `restraint/{compId}/{wage-master|min-wage|wage-config}/latest.json`
   (putVersionedR2 の版管理を再利用 — 一括変更 = PUT 1 回 = 1 版)
 - DO routes: `GET/PUT /restraint-api/{wage-master|min-wage|wage-config}`、
