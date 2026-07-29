@@ -744,6 +744,19 @@ describe("compareTimecardMonthAll", () => {
     });
     expect(rs[0]?.days[0]?.cause).toBe("rounding");
   });
+
+  it("フェリー控除の日別マップを乗務員ごとに渡せる", () => {
+    const rs = compareTimecardMonthAll({
+      month: "2026-05",
+      nginxByDriver: new Map([
+        ["1026", nginxDriver([{ date: "2026-05-01", kosokuMinutes: 886 }])],
+      ]),
+      oursByDriver: new Map([["1026", ours({ "2026-05-01": 961 })]]),
+      ferryMinusByDriver: new Map([["1026", new Map([["2026-05-01", 76]])]]),
+      toleranceMinutes: 2,
+    });
+    expect(rs[0]?.days[0]?.cause).toBe("ferry");
+  });
 });
 
 describe("summarizeCompareResult", () => {
@@ -1360,6 +1373,39 @@ describe("差の推定原因 (Refs #501)", () => {
       toleranceMinutes: 2,
     }).days[0]!;
     expect(d.cause).toBe("unknown");
+  });
+
+  it("フェリー控除は日別マップを優先する (1026 一瀬 05-01 の形)", () => {
+    // 前月に始業した勤務だけが覆う日 — 勤務への貼り付け (ours.ferryMinusMinutes) は
+    // 無いが、上流の ferry_minus_by_date (rust#181) には居る
+    const r = compareTimecardMonth({
+      month: "2026-05",
+      driverCd: "1026",
+      nginx: nginxDriver([{ date: "2026-05-01", kosokuMinutes: 886 }]),
+      oursByDate: ours({ "2026-05-01": 961 }),
+      ferryMinusByDate: new Map([["2026-05-01", 76]]),
+      toleranceMinutes: 2,
+    });
+    const d = r.days[0]!;
+    expect(d.cause).toBe("ferry");
+    expect(d.explainedMinutes).toBe(76);
+    expect(d.residualMinutes).toBe(1);
+    expect(d.ferryMinusMinutes).toBe(76);
+    // 二重控除の異常も従来どおり出る
+    expect(d.anomalies.some((a) => a.kind === "ferry-minus")).toBe(true);
+  });
+
+  it("日別マップが無い日は従来の貼り付け値へ倒す", () => {
+    const d = compareTimecardMonth({
+      month: "2026-05",
+      driverCd: "1026",
+      nginx: nginxDriver([{ date: "2026-05-02", kosokuMinutes: 832 }]),
+      oursByDate: new Map([["2026-05-02", { restraintMinutes: 905, ferryMinusMinutes: 73 }]]),
+      ferryMinusByDate: new Map([["2026-05-01", 76]]),
+      toleranceMinutes: 2,
+    }).days[1]!;
+    expect(d.cause).toBe("ferry");
+    expect(d.explainedMinutes).toBe(73);
   });
 
   it("未説明の日数と残差を月で数える — 検知の抜けを測る数字", () => {

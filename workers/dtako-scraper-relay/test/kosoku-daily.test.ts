@@ -4,6 +4,7 @@ import {
   kosokuPartsByDate,
   mergeKosokuShiftMaps,
   parseKosokuDaily,
+  parseFerryMinusByDriver,
   parsePaperDriftByDriver,
   prevYmOf,
 } from '../src/kosoku-daily'
@@ -365,5 +366,18 @@ describe('parsePaperDriftByDriver', () => {
     expect([...got.keys()]).toEqual(['1041'])
     expect(got.get('1041')?.size).toBe(1)
     expect(got.get('1041')?.get('2026-03-06')).toBe(2)
+  })
+})
+
+describe('parseFerryMinusByDriver', () => {
+  it('乗務員CD 引きに直す (Refs ohishi-exp/rust-ichibanboshi#181)', () => {
+    const got = parseFerryMinusByDriver({
+      drivers: [{ driver: 1026, days: [], ferry_minus_by_date: { '2026-05-01': 76 } }],
+    })
+    expect(got.get('1026')?.get('2026-05-01')).toBe(76)
+  })
+
+  it('マップが無い乗務員は載らない', () => {
+    expect(parseFerryMinusByDriver({ drivers: [{ driver: 1026 }] }).size).toBe(0)
   })
 })

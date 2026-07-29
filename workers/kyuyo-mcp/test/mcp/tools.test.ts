@@ -674,6 +674,30 @@ describe("get_timecard_diff", () => {
     expect(apr3.cause).toBe("rounding");
   });
 
+  it("フェリー控除の日別マップ (ferry_minus_by_date) が cause ferry として効く", async () => {
+    // 4/3 は nginx 600 / ours 570 (差 +30)... ではなく、勤務に貼れない控除の形:
+    // 差 -30 をマップの 30 が説明する (rust#181)
+    stubIchiban({
+      cur: {
+        ...KOSOKU_CURRENT,
+        drivers: [
+          {
+            driver: 1021,
+            days: [kosokuDay("2026-04-01", 570), kosokuDay("2026-04-03", 630), kosokuDay("2026-04-06", 0)],
+            ferry_minus_by_date: { "2026-04-03": 30 },
+          },
+          KOSOKU_CURRENT.drivers[1]!,
+        ],
+      },
+    });
+    const res = (await getTimecardDiffTool.execute(kosokuEnv(), {
+      month: "2026-04",
+      driver: "1021",
+    })) as DiffResult;
+    const apr3 = res.results[0]!.days.find((d) => d.date === "2026-04-03")!;
+    expect(apr3.cause).toBe("ferry");
+  });
+
   it("nginx に居ない乗務員も返す", async () => {
     vi.stubGlobal("fetch", async (url: string) => {
       if (url.includes("/api/kintai/pdf-json")) {
