@@ -745,6 +745,19 @@ describe("compareTimecardMonthAll", () => {
     expect(rs[0]?.days[0]?.cause).toBe("rounding");
   });
 
+  it("紙だけが数える勤務外を乗務員ごとに渡せる", () => {
+    const rs = compareTimecardMonthAll({
+      month: "2026-01",
+      nginxByDriver: new Map([
+        ["1069", nginxDriver([{ date: "2026-01-05", kosokuMinutes: 773 }])],
+      ]),
+      oursByDriver: new Map([["1069", ours({ "2026-01-05": 371 })]]),
+      paperOutsideByDriver: new Map([["1069", new Map([["2026-01-05", 403]])]]),
+      toleranceMinutes: 2,
+    });
+    expect(rs[0]?.days[4]?.cause).toBe("paper-outside");
+  });
+
   it("フェリー控除の日別マップを乗務員ごとに渡せる", () => {
     const rs = compareTimecardMonthAll({
       month: "2026-05",
@@ -1318,6 +1331,49 @@ describe("差の推定原因 (Refs #501)", () => {
     expect(d.cause).toBe("ferry+rounding");
     expect(d.explainedMinutes).toBe(76);
     expect(d.residualMinutes).toBe(0);
+  });
+
+  it("紙だけが数える勤務外は実額で説明する (1069 前田 01-05 の形)", () => {
+    // 終業 17:17 の後も夜通し続く「積み」(状態切り忘れ) を紙は 0 時まで数える。
+    // +402 = 紙が大きい向き — explained は負 (rust の paper_outside_by_date)
+    const d = compareTimecardMonth({
+      month: "2026-01",
+      driverCd: "1069",
+      nginx: nginxDriver([{ date: "2026-01-05", kosokuMinutes: 773 }]),
+      oursByDate: ours({ "2026-01-05": 371 }),
+      paperOutsideByDate: new Map([["2026-01-05", 403]]),
+      toleranceMinutes: 2,
+    }).days[4]!;
+    expect(d.cause).toBe("paper-outside");
+    expect(d.explainedMinutes).toBe(-403);
+    expect(d.residualMinutes).toBe(-1);
+  });
+
+  it("フェリーと勤務外が併発した日も説明が付く (相殺の形)", () => {
+    // diff +40 = 勤務外 100 (紙が大きい) − フェリー控除 60 (紙が小さい)
+    const d = compareTimecardMonth({
+      month: "2026-01",
+      driverCd: "1069",
+      nginx: nginxDriver([{ date: "2026-01-05", kosokuMinutes: 540 }]),
+      oursByDate: new Map([["2026-01-05", { restraintMinutes: 500, ferryMinusMinutes: 60 }]]),
+      paperOutsideByDate: new Map([["2026-01-05", 100]]),
+      toleranceMinutes: 2,
+    }).days[4]!;
+    expect(d.cause).toBe("ferry+paper-outside");
+    expect(d.explainedMinutes).toBe(-40);
+    expect(d.residualMinutes).toBe(0);
+  });
+
+  it("勤務外が差に届かない日を paper-outside で説明したことにしない", () => {
+    const d = compareTimecardMonth({
+      month: "2026-01",
+      driverCd: "1069",
+      nginx: nginxDriver([{ date: "2026-01-05", kosokuMinutes: 773 }]),
+      oursByDate: ours({ "2026-01-05": 371 }),
+      paperOutsideByDate: new Map([["2026-01-05", 3]]),
+      toleranceMinutes: 2,
+    }).days[4]!;
+    expect(d.cause).toBe("unknown");
   });
 
   it("drift が差に届かない日を rounding で説明したことにしない", () => {

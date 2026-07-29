@@ -194,6 +194,16 @@ export type DiffCause =
   /** 昼休 + 始業前の運行の頭。 */
   | "lunch+run-head"
   /**
+   * **紙だけが数える勤務外の時間** (実額、**紙が大きくなる向き**、Refs #546 /
+   * ohishi-exp/rust-ichibanboshi#182)。紙は打刻に縛られずデジタコのイベントと
+   * 隣接対を数え続ける — 終業打刻の後も続くイベント (状態切り忘れの夜通し
+   * 「積み」= 1069 前田 2026-01-05 の +402、終業後の構内ミニ運行 = 1018 金原
+   * 2026-03-03 の +6) が勤務の外に残った分。実額は上流の `paper_outside_by_date`。
+   */
+  | "paper-outside"
+  /** フェリー + 勤務外。控除 (紙が小さくなる) と勤務外 (紙が大きくなる) の相殺形。 */
+  | "ferry+paper-outside"
+  /**
    * **丸め方式の差** (実額)。紙は打刻・イベントの秒を保持したまま**区分ごとに**
    * 丸めて日計へ足す (TC_DC は経過秒切り捨て、デジタコの区間時間は端点床) ため、
    * 区分の切れ目が多い日に ±数分が堆積する — 正負両方向に出る。実額は上流の
@@ -576,6 +586,7 @@ function classifyDiff(
   punchHeadMinutes: number,
   runHeadCorrection: number,
   lunchOverlapMinutes: number,
+  paperOutsideMinutes: number,
   paperDriftMinutes: number,
   tolerance: number,
 ): { cause: DiffCause; explainedMinutes: number; residualMinutes: number | null } {
@@ -602,6 +613,12 @@ function classifyDiff(
     { cause: "ferry+punch-tail", explained: ferry === 0 || tail === 0 ? 0 : ferry + tail },
     { cause: "ferry+punch-head", explained: ferry === 0 || punchHeadMinutes === 0 ? 0 : ferry + punchHeadMinutes },
     { cause: "ferry+run-head", explained: ferry === 0 || runHead === 0 ? 0 : ferry + runHead },
+    // 紙だけが数える勤務外 (紙が大きくなる向き) — explained は負
+    { cause: "paper-outside", explained: -paperOutsideMinutes },
+    {
+      cause: "ferry+paper-outside",
+      explained: ferry === 0 || paperOutsideMinutes === 0 ? 0 : ferry - paperOutsideMinutes,
+    },
     { cause: "lunch", explained: lunch },
     { cause: "lunch+run-gap", explained: runGapMinutes === 0 ? 0 : runGapMinutes + lunch },
     { cause: "lunch+punch-tail", explained: tail === 0 ? 0 : tail + lunch },
@@ -663,6 +680,11 @@ export function compareTimecardMonth(input: {
    * `month-boundary` の説明は付かない (候補の explained が 0 で素通り)。
    */
   crossMonthByDate?: ReadonlyMap<string, number>;
+  /**
+   * 暦日 → 紙だけが数える勤務外の分 (上流の `paper_outside_by_date`、Refs #546)。
+   * 渡されなければ `paper-outside` の説明は付かない。
+   */
+  paperOutsideByDate?: ReadonlyMap<string, number>;
   /**
    * 暦日 → 紙の再現値との差 (`ours − paper`、上流の `paper_drift_by_date`)。
    * 渡されなければ `rounding` の説明は付かない。
@@ -744,6 +766,7 @@ export function compareTimecardMonth(input: {
       punchHead,
       runHeadCorrection,
       ours?.lunchOverlapMinutes ?? 0,
+      input.paperOutsideByDate?.get(date) ?? 0,
       input.paperDriftByDate?.get(date) ?? 0,
       tolerance,
     );
@@ -834,6 +857,8 @@ export function compareTimecardMonthAll(input: {
   >;
   /** 乗務員CD → 暦日 → 月境界を跨ぐ勤務由来の分 (`crossMonthMinutesByDate`)。 */
   crossMonthByDriver?: ReadonlyMap<string, ReadonlyMap<string, number>>;
+  /** 乗務員CD → 暦日 → 紙だけが数える勤務外の分 (`paper_outside_by_date`)。 */
+  paperOutsideByDriver?: ReadonlyMap<string, ReadonlyMap<string, number>>;
   /** 乗務員CD → 暦日 → 紙の再現値との差 (`paper_drift_by_date`)。 */
   paperDriftByDriver?: ReadonlyMap<string, ReadonlyMap<string, number>>;
   /** 乗務員CD → 暦日 → フェリー控除 (`ferry_minus_by_date`)。 */
@@ -850,6 +875,7 @@ export function compareTimecardMonthAll(input: {
       nginx: input.nginxByDriver.get(driverCd) ?? null,
       oursByDate: input.oursByDriver.get(driverCd) ?? new Map(),
       crossMonthByDate: input.crossMonthByDriver?.get(driverCd),
+      paperOutsideByDate: input.paperOutsideByDriver?.get(driverCd),
       paperDriftByDate: input.paperDriftByDriver?.get(driverCd),
       ferryMinusByDate: input.ferryMinusByDriver?.get(driverCd),
       toleranceMinutes: input.toleranceMinutes,
