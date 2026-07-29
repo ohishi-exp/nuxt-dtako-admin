@@ -24,6 +24,7 @@ import {
   crossMonthMinutesByDate,
   kosokuPartsByDate,
   parseKosokuDaily,
+  parsePaperDriftByDriver,
   prevYmOf,
   type KosokuShift,
 } from "../../../dtako-scraper-relay/src/kosoku-daily";
@@ -568,6 +569,9 @@ export const getTimecardDiffTool = {
       oursByDriver.set(driverCd, kosokuPartsByDate(driverShifts, args.month));
       crossMonthByDriver.set(driverCd, crossMonthMinutesByDate(driverShifts, args.month));
     }
+    // 紙の再現値との差 (cause "rounding" の実額) — 当月の応答からだけ読む
+    // (Refs ohishi-exp/rust-ichibanboshi#179)
+    const paperDriftByDriver = parsePaperDriftByDriver(curBody);
     // nginx はエラーも HTTP 200 + `{error}` で返す (nginx#784)。素通しすると
     // 「差なし」に見えるので必ず表に出す
     const upstreamError = pdfJsonError(pdfBody);
@@ -583,6 +587,7 @@ export const getTimecardDiffTool = {
           nginx: nginxByDriver.get(driver) ?? null,
           oursByDate: oursByDriver.get(driver) ?? new Map(),
           crossMonthByDate: crossMonthByDriver.get(driver),
+          paperDriftByDate: paperDriftByDriver.get(driver),
           toleranceMinutes: args.tolerance_minutes,
         }),
       ];
@@ -592,6 +597,7 @@ export const getTimecardDiffTool = {
         nginxByDriver,
         oursByDriver,
         crossMonthByDriver,
+        paperDriftByDriver,
         toleranceMinutes: args.tolerance_minutes,
         onlyAnomalies,
       });

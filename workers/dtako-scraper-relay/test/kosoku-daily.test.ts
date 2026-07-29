@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { crossMonthMinutesByDate, kosokuPartsByDate, mergeKosokuShiftMaps, parseKosokuDaily, prevYmOf } from '../src/kosoku-daily'
+import {
+  crossMonthMinutesByDate,
+  kosokuPartsByDate,
+  mergeKosokuShiftMaps,
+  parseKosokuDaily,
+  parsePaperDriftByDriver,
+  prevYmOf,
+} from '../src/kosoku-daily'
 
 /** 上流 (`/api/kintai/kosoku-daily`) の 1 勤務。実応答のキー名そのまま。 */
 const shift = (over: Record<string, unknown> = {}) => ({
@@ -319,5 +326,44 @@ describe('mergeKosokuShiftMaps', () => {
     const a = map('1', ['2026-03-31'])
     mergeKosokuShiftMaps(a, map('1', ['2026-04-01']))
     expect(a.get('1')).toHaveLength(1)
+  })
+})
+
+describe('parsePaperDriftByDriver', () => {
+  it('乗務員CD 引きに直す (Refs ohishi-exp/rust-ichibanboshi#179)', () => {
+    const got = parsePaperDriftByDriver({
+      drivers: [
+        { driver: 1194, days: [], paper_drift_by_date: { '2026-03-11': 3, '2026-03-02': 61 } },
+        { driver: 1729, days: [], paper_drift_by_date: { '2026-03-26': -8 } },
+      ],
+    })
+    expect(got.get('1194')?.get('2026-03-11')).toBe(3)
+    expect(got.get('1194')?.get('2026-03-02')).toBe(61)
+    expect(got.get('1729')?.get('2026-03-26')).toBe(-8)
+  })
+
+  it('壊れた形は黙って空 — body が object でない / drivers が配列でない', () => {
+    expect(parsePaperDriftByDriver(null).size).toBe(0)
+    expect(parsePaperDriftByDriver('x').size).toBe(0)
+    expect(parsePaperDriftByDriver({ drivers: 'x' }).size).toBe(0)
+  })
+
+  it('解釈できない行・値は捨てる', () => {
+    const got = parsePaperDriftByDriver({
+      drivers: [
+        null,
+        { driver: 0, paper_drift_by_date: { '2026-03-01': 1 } }, // CD 0
+        { driver: 1021 }, // drift 無し
+        { driver: 1030, paper_drift_by_date: [1] }, // 配列は形違い
+        {
+          driver: 1041,
+          paper_drift_by_date: { 'not-a-date': 1, '2026-03-05': 'x', '2026-03-06': 2 },
+        },
+        { driver: 1051, paper_drift_by_date: { 'not-a-date': 1 } }, // 有効な日が残らない
+      ],
+    })
+    expect([...got.keys()]).toEqual(['1041'])
+    expect(got.get('1041')?.size).toBe(1)
+    expect(got.get('1041')?.get('2026-03-06')).toBe(2)
   })
 })

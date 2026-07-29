@@ -167,6 +167,38 @@ export function parseKosokuDaily(body: unknown): Map<string, KosokuShift[]> {
 }
 
 /**
+ * 上流が乗務員ごとに添える**紙の再現値との差** (`paper_drift_by_date`、
+ * Refs ohishi-exp/rust-ichibanboshi#179) を乗務員CD 引きに直す。
+ *
+ * 値は `ours − paper` (正 = こちらが大きい)。紙は秒を保持したまま区分ごとに丸める
+ * ため、区分の切れ目が多い日に ±数分が堆積する — 突合が cause `rounding` /
+ * `ferry+rounding` の実額に使う。上流は差の無い日・値の無い日を省くので、無い日は
+ * 0 と読む。**当月の応答からだけ**読めばよい (紙もこちらの再現も月単位で閉じている)。
+ */
+export function parsePaperDriftByDriver(body: unknown): Map<string, Map<string, number>> {
+  const out = new Map<string, Map<string, number>>();
+  if (typeof body !== "object" || body === null) return out;
+  const drivers = (body as { drivers?: unknown }).drivers;
+  if (!Array.isArray(drivers)) return out;
+  for (const entry of drivers) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as { driver?: unknown; paper_drift_by_date?: unknown };
+    const cd = Number(e.driver);
+    if (!Number.isFinite(cd) || cd === 0) continue;
+    const raw = e.paper_drift_by_date;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue;
+    const drift = new Map<string, number>();
+    for (const [date, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (!DATE_RE.test(date)) continue;
+      if (typeof v !== "number" || !Number.isFinite(v)) continue;
+      drift.set(date, v);
+    }
+    if (drift.size > 0) out.set(String(cd), drift);
+  }
+  return out;
+}
+
+/**
  * 対象月の**暦日ごとの合計**を作る。
  *
  * - 内訳 (`parts`) がある勤務は対象月に落ちる日だけを足す
