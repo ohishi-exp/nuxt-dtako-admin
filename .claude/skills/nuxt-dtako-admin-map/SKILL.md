@@ -738,6 +738,26 @@ N:1 が現実に存在する (本番で 5 件、うち社員C 1619 鵜瀬裕一�
   「給与比較が出ない」という報告になった。「読み込み中」と「取り込まれていない」の
   取り違えを防ぐ門が `compMapLoaded` / `kyuyoSyncedLoaded` (会社と給与アーカイブ一覧が
   解決するまでは「無い」と判定しない)
+- **このページは theearth を使わない** (Refs #554)。`authHeaders()` は**常に viewer 経路
+  (auth-worker JWT)**。theearth セッション必須なのは `login`/`logout`/`report`/`csv` の
+  4 経路だけ (`isR2OnlyRestraintPath`) で、このページはどれも呼ばない。以前は theearth
+  セッションがあるとそちらを優先しており、**relay が introspect を通らず email が
+  届かなかった** — 上流キャッシュを人単位に分けるのにそれが要る
+- **kintai 上流キャッシュは email 単位の DO** (`kintai-cache-{sha256(email)}`、Refs #554)。
+  経路の DO (`theearth-{会社}:{ユーザー}`) は theearth アカウント単位で、共有アカウント
+  運用だと「誰のキャッシュか」が定まらない。中身は月単位の上流データで theearth とは
+  無関係なので、認可済みの email で分ける (DO 名に生 email は入れない)。口は
+  `UpstreamCacheClient` で、キャッシュ DO 内は `LocalUpstreamCache`、経路 DO 側は
+  remote client (`/internal/kintai-cache/*` へ stub fetch)
+- **手動 warm** `POST /restraint-api/kintai/warm?month=` (Refs #554)。上流
+  (rust-ichibanboshi) をデプロイすると版 (etag) が動いて全月 miss になるため、開く前に
+  押しておける口。1 リクエスト 1 ヶ月で、front が**順番に**叩く (並列は上流の kosoku
+  同時実行キャップ rust-ichibanboshi#188 と競合する)。cron にしないのはキャッシュが
+  人単位で「誰の DO を温めるか」が決められないため
+- **`X-Upstream-Cache: hit|miss|live` はヘッダで返す** (Refs #554)。front は miss の時だけ
+  「上流の版が変わったため取り直しました」を出す。**本文に入れてはいけない** — hit/miss で
+  本文が変わると弱 ETag も動き、#543 PR-5 の 304 が効かなくなる。304 応答にも載せる
+  (ブラウザは 304 のヘッダを保存済み応答へマージするため)
 
 | ファイル | 役割 |
 |---|---|
