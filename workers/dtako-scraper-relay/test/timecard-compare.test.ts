@@ -1217,6 +1217,38 @@ describe("差の推定原因 (Refs #501)", () => {
     expect(d.cause).toBe("lunch");
   });
 
+  it("昼休は実額 (窓の重なり) があれば固定 60 より優先する (1714 井上 03-04 の形)", () => {
+    // 終業 12:20 が窓の中 → 紙の控除は 20 分だけ。固定 60 では -21 が unknown だった
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1714",
+      nginx: nginxDriver([{ date: "2026-03-04", kosokuMinutes: 426 }]),
+      oursByDate: new Map([
+        ["2026-03-04", { restraintMinutes: 447, lunchOverlapMinutes: 20 }],
+      ]),
+      toleranceMinutes: 2,
+    }).days[3]!;
+    expect(d.cause).toBe("lunch");
+    expect(d.explainedMinutes).toBe(20);
+    expect(d.residualMinutes).toBe(-1);
+  });
+
+  it("フェリーと日跨ぎ始業の頭が併発した日も説明が付く (1029 冨田 03-18 の形)", () => {
+    // -89 = -ferry 84 - 頭 5
+    const d = compareTimecardMonth({
+      month: "2026-03",
+      driverCd: "1029",
+      nginx: nginxDriver([{ date: "2026-03-18", kosokuMinutes: 887 }]),
+      oursByDate: new Map([
+        ["2026-03-18", { restraintMinutes: 976, ferryMinusMinutes: 84, punchHeadMinutes: 5 }],
+      ]),
+      toleranceMinutes: 2,
+    }).days[17]!;
+    expect(d.cause).toBe("ferry+punch-head");
+    expect(d.explainedMinutes).toBe(89);
+    expect(d.residualMinutes).toBe(0);
+  });
+
   it("未説明の日数と残差を月で数える — 検知の抜けを測る数字", () => {
     const r = compareTimecardMonth({
       month: "2026-04",

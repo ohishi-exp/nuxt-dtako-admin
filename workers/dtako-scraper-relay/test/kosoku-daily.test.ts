@@ -41,6 +41,7 @@ describe('parseKosokuDaily', () => {
       punchTailMinutes: 0,
       punchHeadMinutes: 0,
       runHeadMinutes: 0,
+      lunchOverlapMinutes: 0,
       parts: [],
     }])
   })
@@ -64,6 +65,7 @@ describe('parseKosokuDaily', () => {
       punchTailMinutes: 0,
       punchHeadMinutes: 0,
       runHeadMinutes: 0,
+      lunchOverlapMinutes: 0,
       parts: [],
     }])
   })
@@ -152,6 +154,7 @@ describe('kosokuPartsByDate', () => {
       punchTailMinutes: 0,
       punchHeadMinutes: 0,
       runHeadMinutes: 0,
+      lunchOverlapMinutes: 0,
     })
     // 同じ日の 2 勤務が 1 つにまとまる
     expect(got.get('2026-04-06')).toEqual({
@@ -165,6 +168,7 @@ describe('kosokuPartsByDate', () => {
       punchTailMinutes: 0,
       punchHeadMinutes: 0,
       runHeadMinutes: 0,
+      lunchOverlapMinutes: 0,
     })
   })
 
@@ -290,6 +294,7 @@ describe('mergeKosokuShiftMaps', () => {
       punchTailMinutes: 0,
       punchHeadMinutes: 0,
       runHeadMinutes: 0,
+      lunchOverlapMinutes: 0,
       parts: [],
     }))]])
 

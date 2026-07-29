@@ -76,6 +76,14 @@ export interface KosokuCalendarPart {
    * 「紙の TC_DC_minus_unko − この頭」を負の説明に使う。
    */
   runHeadMinutes: number;
+  /**
+   * **昼休の窓 (12:00-13:00) との重なり** (分、Refs ohishi-exp/rust-ichibanboshi#177)。
+   *
+   * 紙の昼休控除は一律 60 分ではなく、運行を挟まない打刻の対と窓の重なりを引く
+   * (終業が窓の中なら重なりだけ)。cause `lunch` の実額 — 0 より大きければ固定 60
+   * の推定より優先する。
+   */
+  lunchOverlapMinutes: number;
 }
 
 /** 上流の 1 勤務 (必要な項目だけ)。 */
@@ -115,6 +123,7 @@ function toPart(r: Record<string, unknown>): KosokuCalendarPart {
     punchTailMinutes: num(r.punch_tail_minutes),
     punchHeadMinutes: num(r.punch_head_minutes),
     runHeadMinutes: num(r.run_head_minutes),
+    lunchOverlapMinutes: num(r.lunch_overlap_minutes),
   };
 }
 
@@ -188,6 +197,7 @@ export function kosokuPartsByDate(
         punchTailMinutes: v.punchTailMinutes,
         punchHeadMinutes: v.punchHeadMinutes,
         runHeadMinutes: v.runHeadMinutes,
+        lunchOverlapMinutes: v.lunchOverlapMinutes,
       });
       return;
     }
@@ -201,6 +211,7 @@ export function kosokuPartsByDate(
     cur.punchTailMinutes += v.punchTailMinutes;
     cur.punchHeadMinutes += v.punchHeadMinutes;
     cur.runHeadMinutes += v.runHeadMinutes;
+    cur.lunchOverlapMinutes += v.lunchOverlapMinutes;
   };
   for (const shift of shifts) {
     if (shift.parts.length > 0) {
