@@ -13,6 +13,7 @@ import {
   harvestDailyReport,
   parseExpenseMasters,
   recalculateExpense,
+  releaseLoadedOperation,
   recalculateWork,
   startSystemLink,
   ReportParamError,
@@ -2676,6 +2677,80 @@ function recordingFetch(responses: (Response | (() => Response))[], bodies: stri
     return typeof entry === "function" ? entry() : entry;
   }) as FetchLike;
 }
+
+describe("releaseLoadedOperation", () => {
+  function listWithRelece(opts: { idPrefix?: string; withValue?: boolean; omit?: boolean } = {}): string {
+    const id = `${opts.idPrefix ?? ""}btnRelece`;
+    const valueAttr = opts.withValue ? ' value="解放"' : "";
+    return `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-DES" />
+      <select id="MainContent_ddlRowCount" name="ctl00$MainContent$ddlRowCount">
+        <option value="10">10</option><option value="30" selected>30</option>
+      </select>
+      ${opts.omit ? "" : `<input type="submit" id="${id}" name="ctl00$MainContent$btnRelece"${valueAttr} />`}
+    </form></body></html>`;
+  }
+
+  it("posts btnRelece with the full form (selects preserved)", async () => {
+    const jar = createCookieJar();
+    const posted: string[] = [];
+    let call = 0;
+    const fetchImpl = (async (_url: unknown, init?: { body?: unknown }) => {
+      call += 1;
+      if (call === 1) return html(listWithRelece({ withValue: true }));
+      posted.push(String(init?.body ?? ""));
+      return html("released");
+    }) as FetchLike;
+    await releaseLoadedOperation(jar, fetchImpl);
+    const body = new URLSearchParams(posted[0]);
+    expect(body.get("ctl00$MainContent$btnRelece")).toBe("解放");
+    // 部分 POST だと ddlRowCount が既定へ落ちる罠 — full form で現在値を保つ
+    expect(body.get("ctl00$MainContent$ddlRowCount")).toBe("30");
+  });
+
+  it("finds the button by the MainContent_ prefixed id and defaults the value", async () => {
+    const jar = createCookieJar();
+    const posted: string[] = [];
+    let call = 0;
+    const fetchImpl = (async (_url: unknown, init?: { body?: unknown }) => {
+      call += 1;
+      if (call === 1) return html(listWithRelece({ idPrefix: "MainContent_" }));
+      posted.push(String(init?.body ?? ""));
+      return html("released");
+    }) as FetchLike;
+    await releaseLoadedOperation(jar, fetchImpl);
+    expect(new URLSearchParams(posted[0]).get("ctl00$MainContent$btnRelece")).toBe("解放");
+  });
+
+  it("warns and skips (no POST) when btnRelece is missing", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const jar = createCookieJar();
+      let calls = 0;
+      const fetchImpl = (async () => {
+        calls += 1;
+        return html(listWithRelece({ omit: true }));
+      }) as FetchLike;
+      await releaseLoadedOperation(jar, fetchImpl);
+      expect(calls).toBe(1);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("btnRelece"));
+    }
+    finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("throws on a non-ok release POST / login redirect", async () => {
+    const jar1 = createCookieJar();
+    await expect(
+      releaseLoadedOperation(jar1, sequenceFetch([html(listWithRelece({ withValue: true })), status(500)])),
+    ).rejects.toThrow(TheearthClientError);
+    const jar2 = createCookieJar();
+    await expect(
+      releaseLoadedOperation(jar2, sequenceFetch([html(listWithRelece({ withValue: true })), html(LOGIN_REDIRECT_HTML)])),
+    ).rejects.toThrow(VenusSessionExpiredError);
+  });
+});
 
 describe("getWorkForm", () => {
   it("accepts a page whose form action echoes the requested OpeNo", async () => {
