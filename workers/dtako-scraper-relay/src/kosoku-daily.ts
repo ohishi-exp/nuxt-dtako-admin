@@ -176,24 +176,42 @@ export function parseKosokuDaily(body: unknown): Map<string, KosokuShift[]> {
  * 0 と読む。**当月の応答からだけ**読めばよい (紙もこちらの再現も月単位で閉じている)。
  */
 export function parsePaperDriftByDriver(body: unknown): Map<string, Map<string, number>> {
+  return parseDateMapByDriver(body, "paper_drift_by_date");
+}
+
+/**
+ * 上流が乗務員ごとに添える**フェリー控除の日別マップ** (`ferry_minus_by_date`、
+ * Refs ohishi-exp/rust-ichibanboshi#181) を乗務員CD 引きに直す。
+ *
+ * 勤務への貼り付け (`ferry_minus_minutes`) は「その日に始まる勤務か、その日に掛かる
+ * parts が応答に居る」前提で、**前月に始業した勤務だけが覆う日**の控除は貼れずに
+ * 落ちる (実測 1026 一瀬 2026-05-01: 出庫 04-30 の運行のフェリー 76 分)。突合は
+ * このマップを優先し、無ければ従来の貼り付け値へ倒す (旧上流との互換)。
+ */
+export function parseFerryMinusByDriver(body: unknown): Map<string, Map<string, number>> {
+  return parseDateMapByDriver(body, "ferry_minus_by_date");
+}
+
+/** `drivers[].<key>` の `{YYYY-MM-DD: 分}` を乗務員CD 引きに直す共通部。 */
+function parseDateMapByDriver(body: unknown, key: string): Map<string, Map<string, number>> {
   const out = new Map<string, Map<string, number>>();
   if (typeof body !== "object" || body === null) return out;
   const drivers = (body as { drivers?: unknown }).drivers;
   if (!Array.isArray(drivers)) return out;
   for (const entry of drivers) {
     if (typeof entry !== "object" || entry === null) continue;
-    const e = entry as { driver?: unknown; paper_drift_by_date?: unknown };
+    const e = entry as Record<string, unknown>;
     const cd = Number(e.driver);
     if (!Number.isFinite(cd) || cd === 0) continue;
-    const raw = e.paper_drift_by_date;
+    const raw = e[key];
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue;
-    const drift = new Map<string, number>();
+    const byDate = new Map<string, number>();
     for (const [date, v] of Object.entries(raw as Record<string, unknown>)) {
       if (!DATE_RE.test(date)) continue;
       if (typeof v !== "number" || !Number.isFinite(v)) continue;
-      drift.set(date, v);
+      byDate.set(date, v);
     }
-    if (drift.size > 0) out.set(String(cd), drift);
+    if (byDate.size > 0) out.set(String(cd), byDate);
   }
   return out;
 }

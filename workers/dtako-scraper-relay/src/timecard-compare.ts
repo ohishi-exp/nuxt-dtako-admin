@@ -668,6 +668,13 @@ export function compareTimecardMonth(input: {
    * 渡されなければ `rounding` の説明は付かない。
    */
   paperDriftByDate?: ReadonlyMap<string, number>;
+  /**
+   * 暦日 → フェリー控除 (上流の `ferry_minus_by_date`、
+   * ohishi-exp/rust-ichibanboshi#181)。勤務への貼り付けではマップに直せない日がある
+   * (前月に始業した勤務だけが覆う日 — 実測 1026 一瀬 2026-05-01 の 76 分) ので、
+   * あればこちらを優先する。無ければ従来の貼り付け値へ倒す。
+   */
+  ferryMinusByDate?: ReadonlyMap<string, number>;
   toleranceMinutes?: number;
 }): CompareResult {
   const tolerance = input.toleranceMinutes ?? DEFAULT_TOLERANCE_MINUTES;
@@ -690,8 +697,10 @@ export function compareTimecardMonth(input: {
     const oursMinutes = ours?.restraintMinutes ?? null;
     const status = statusOf(nginxMinutes, oursMinutes, tolerance);
     // 控除額は**こちら側の kosoku-daily 由来**を優先する。nginx が出していた頃の
-    // 値 (pdf-json の `ferry_minus`) は後方互換で残すだけ
-    const ferryFromOurs = ours?.ferryMinusMinutes;
+    // 値 (pdf-json の `ferry_minus`) は後方互換で残すだけ。
+    // 日別マップ (rust#181) があれば勤務への貼り付けより優先 — 貼り付けは
+    // 前月に始業した勤務だけが覆う日の控除を運べない
+    const ferryFromOurs = input.ferryMinusByDate?.get(date) ?? ours?.ferryMinusMinutes;
     const withFerry: NginxDay | null =
       nginxDay && ferryFromOurs !== undefined && ferryFromOurs > 0
         ? { ...nginxDay, ferryMinusMinutes: ferryFromOurs }
@@ -827,6 +836,8 @@ export function compareTimecardMonthAll(input: {
   crossMonthByDriver?: ReadonlyMap<string, ReadonlyMap<string, number>>;
   /** 乗務員CD → 暦日 → 紙の再現値との差 (`paper_drift_by_date`)。 */
   paperDriftByDriver?: ReadonlyMap<string, ReadonlyMap<string, number>>;
+  /** 乗務員CD → 暦日 → フェリー控除 (`ferry_minus_by_date`)。 */
+  ferryMinusByDriver?: ReadonlyMap<string, ReadonlyMap<string, number>>;
   toleranceMinutes?: number;
   onlyAnomalies?: boolean;
 }): CompareResult[] {
@@ -840,6 +851,7 @@ export function compareTimecardMonthAll(input: {
       oursByDate: input.oursByDriver.get(driverCd) ?? new Map(),
       crossMonthByDate: input.crossMonthByDriver?.get(driverCd),
       paperDriftByDate: input.paperDriftByDriver?.get(driverCd),
+      ferryMinusByDate: input.ferryMinusByDriver?.get(driverCd),
       toleranceMinutes: input.toleranceMinutes,
     });
     if (input.onlyAnomalies && result.mismatchCount === 0 && result.anomalies.length === 0) {
