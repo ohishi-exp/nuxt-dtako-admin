@@ -39,6 +39,7 @@ export default defineConfig({
         'src/timecard-compare.ts',
         'src/phase-timing.ts',
         'src/upstream-cache.ts',
+        'src/http-etag.ts',
       ],
       thresholds: {
         lines: 100,

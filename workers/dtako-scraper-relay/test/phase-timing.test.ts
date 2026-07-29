@@ -149,6 +149,22 @@ describe('phaseTimingLogLine', () => {
   })
 })
 
+describe('phaseTimingLogLine (notModified)', () => {
+  it('304 の時だけ notModified: true が載る', () => {
+    const clock = fakeClock()
+    const timer = new PhaseTimer(clock.now)
+    const line = phaseTimingLogLine('wage-report', '2026-06', timer, 'hit', true)
+    expect(JSON.parse(line)).toEqual({
+      phase_timing: 'wage-report',
+      month: '2026-06',
+      phases: [],
+      totalMs: 0,
+      cacheState: 'hit',
+      notModified: true,
+    })
+  })
+})
+
 describe('PhaseTimer (既定クロック)', () => {
   it('now 未注入でも動く (Date.now)', async () => {
     const timer = new PhaseTimer()
