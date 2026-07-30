@@ -101,6 +101,12 @@ migrations_dir = "../../migrations"
 
 [vars]
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth.ippoan.org"
+# ブラウザレス scrape (ohishi-exp/dtako-scraper#22)。staging / preview は当初から
+# "http" だったが本番だけ未設定のまま残り、旧 vpc-relay 経路 (Kagoya VPS の
+# dtako-scraper) に落ちていた。上流はすでに到達不能で、WS が無言で 502 になり
+# browser には「handshake failed (comp_id 不正 / 認証エラー等)」という無関係な
+# 文言だけが出ていた (2026-07-30、comp_id 27324455 / 75700192 で発覚)。
+SCRAPER_MODE = "http"
 ETC_R2_PREFIX = "etc"
 # 拘束時間管理表 CSV / サマリ JSON のアーカイブ prefix (Refs #241)。key 設計と
 # バージョン管理 (latest + v-{ts}、7日 retention) は theearth-restraint-client.ts 参照。
