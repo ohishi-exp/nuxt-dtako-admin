@@ -127,7 +127,9 @@ NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"
 # 引く (`kintai-relay.ts` の tenantForCompId)。値が空 / KV に無ければ
 # POST /kintai-relay/run は 503 で fail-closed になり、静かに別テナントへ書かない。
 # 秘匿値ではないので var でよい。
-# KINTAI_COMP_ID = "<一番星の comp_id>"
+# 大石運輸倉庫 (給与 0100/0200/0300)。北海大運 (75700192) は対象外 — 打刻を持つのは
+# こちらだけで、給与比較アーカイブに居る会社もこの 1 社 (D1 `comp_payroll_map` 参照)。
+KINTAI_COMP_ID = "27324455"
 
 # kintai 系上流応答の DO SQLite キャッシュ + 条件付き再検証 (Refs #543 PR-2)。
 # "on" のときだけ有効。off = 完全に従来経路。version エンドポイント
@@ -209,6 +211,11 @@ database_id = "81dd4136-b5c8-4c1b-93c8-28fdafbe1a8d"
 migrations_dir = "../../migrations"
 
 [env.staging.vars]
+# **KINTAI_COMP_ID は staging に置かない** (Refs ohishi-exp/rust-ichibanboshi#205 の 04b)。
+# 打刻の書き先は tenant で決まり、staging も本番も同じ KV / 同じ tenant を見るので、
+# 入れると staging から本番の kintai.* に書ける。未設定なら POST /kintai-relay/run は
+# 503 で fail-closed。top-level [vars] は named environment に継承されないので、
+# ここに書かない = 無効、で正しく閉じる。
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 # ohishi-exp/dtako-scraper#22 のブラウザレス化を staging で試験する (DTAKO_ACCOUNTS は
 # 値に秘密を含むため wrangler.toml には置かず、dashboard の plain var で別途投入する)。
