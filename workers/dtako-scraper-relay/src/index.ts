@@ -184,6 +184,12 @@ async function handleKintaiRelay(request: Request, env: RelayWorkerEnv): Promise
     return fail(503, "kintai-relay not configured");
   }
 
+  // **呼び出し元の proof。** この口は app (worker/index.ts) が素通しするので外から
+  // 到達しうる。書き込みを起動する機械経路なので、下流と同じ shared secret を
+  // constant-time で検証する (`alc-internal-proxy` の consumer proof と同じ関門)。
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
   const accountsRaw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
   let accounts: unknown = null;
   try {
@@ -229,4 +235,12 @@ async function handleKintaiRelay(request: Request, env: RelayWorkerEnv): Promise
     console.error(JSON.stringify({ kintai_relay: "failed", message }));
     return fail(502, message);
   }
+}
+
+/** 定数時間比較 (auth-worker の alc-internal-proxy.ts と同実装)。 */
+function constantTimeEquals(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
 }

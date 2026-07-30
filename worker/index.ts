@@ -38,6 +38,7 @@ export default {
       || url.pathname.startsWith("/daily-report-api/")
       || url.pathname.startsWith("/restraint-api/")
       || url.pathname.startsWith("/net780-api/")
+      || url.pathname.startsWith("/kintai-relay/")
     ) {
       // comp_id/session 抽出と DO routing は relay worker (default fetch) が行う。
       // ここは原 request (WS upgrade + query string、または zip ダウンロード GET) を
@@ -47,6 +48,9 @@ export default {
       // file/logout)。/daily-report-api/* は /daily-report-edit (日報編集、Refs #169)
       // の API — /dvr-api/* とは別の theearth ログインセッションを持つ
       // (X-Report-Comp-Id / X-Report-User-B64 routing ヘッダ、relay worker 側で解決)。
+      // /kintai-relay/* は打刻をオンプレ → GCP へ運ぶ機械経路 (Refs
+      // ohishi-exp/rust-ichibanboshi#205 の 04b)。**ブラウザ経路ではない** — relay 側が
+      // X-Alc-Proxy-Secret を constant-time 検証する (ここは素通しするだけ)。
       return env.SCRAPER_RELAY.fetch(request);
     }
     return (nitroApp as NitroHandler).fetch(request, env, ctx);
