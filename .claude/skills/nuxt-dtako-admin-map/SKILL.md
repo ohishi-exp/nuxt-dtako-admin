@@ -475,6 +475,8 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   `border-collapse` の表では効かない。表側を `max-h` + `overflow-auto` にする必要もある
   (`overflow-x-auto` だけだと縦も暗黙にスクロール容器になりページスクロールでは固定されない)。
   給与の列はホバーで支給項目の内訳を出す (`fmtItemsTitle`)。
+  **印刷は分類ごとに改ページ** (`.minwage-section` = 1 tbody = 1 分類に `break-before: page`、
+  先頭だけ `:first-of-type` で除外して白紙を出さない。Refs #572)。
   **法定外休日 (祝日・会社指定休の出勤) の列は該当者が居る月だけ出す** (Refs #566) —
   差分列の検算は 9 区分すべてを引くので、0 以外は日別データの不整合を指す
 - **単価マスタタブの「乗務員を追加」** (Refs #568): 一覧は R2 の単価マスタから作るので

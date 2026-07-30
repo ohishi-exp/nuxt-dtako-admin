@@ -4078,7 +4078,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
               class="overflow-auto max-h-[75vh] print:max-h-none print:overflow-visible"
               :class="staleReport ? STALE_CLASS : ''"
             >
-              <table class="w-full text-sm">
+              <table class="minwage-table w-full text-sm">
                 <!-- 右端の突合ブロックは**縦 3 段** (ユーザー決定 2026-07-30):
                      1 列 = 1 つの金額 (基本給 / 残業代合計 / 合計) で、中を
                      計算 → 給与 → 差 の 3 行に積む。横 8 列に開くと 17 列になって
@@ -4112,11 +4112,13 @@ watch([compMap, kyuyoSyncedKeys], () => {
                      (ユーザー決定 2026-07-30)。区切りが無いと 100 人超の並びで
                      「どの職員区分が下回っているか」を追えない。最低賃金は営業所の県で
                      決まる (Refs #409) ので営業所も氏名の下に出す -->
+                <!-- 1 tbody = 1 分類。印刷は分類ごとに改ページ (`.minwage-section`) -->
                 <tbody
                   v-for="section in minWageSections"
                   :key="`${section.company ?? 'unknown'}|${section.jobGroup}`"
+                  class="minwage-section"
                 >
-                  <tr class="bg-gray-50 dark:bg-gray-800/60 border-b border-gray-200 dark:border-gray-700">
+                  <tr class="minwage-section-head bg-gray-50 dark:bg-gray-800/60 border-b border-gray-200 dark:border-gray-700">
                     <td :colspan="minWageColumnCount" class="px-2 py-1.5 text-xs font-semibold">
                       {{ section.company ? payrollCompanyLabelOf(compMap, section.company) : '会社不明 (社員マスタに乗務員CDの登録なし)' }}
                       <span class="mx-1 text-gray-400">/</span>
@@ -5875,5 +5877,17 @@ watch([compMap, kyuyoSyncedKeys], () => {
      break-inside を止める (Refs #424 PR-E)。 */
   .timecard-sheet { font-size: 8px; }
   .timecard-sheet td, .timecard-sheet th { padding: 0 2px; }
+
+  /* 最低賃金チェック: **分類 (会社 × 職員区分) ごとに改ページ** (2026-07-30 要望)。
+     区画は tbody 1 つ = 1 分類なので、2 つ目以降の tbody の前で改ページする
+     (先頭で切ると白紙が 1 枚出る)。列見出しは Chrome が thead を各ページの
+     先頭に繰り返してくれる。13 列あるので字を詰める。 */
+  .minwage-section { break-before: page; }
+  .minwage-section:first-of-type { break-before: auto; }
+  /* 3 段積みの行と分類見出しが紙の境目で割れないように */
+  .minwage-table tr { break-inside: avoid; }
+  .minwage-section-head { break-after: avoid; }
+  .minwage-table { font-size: 9px; }
+  .minwage-table th, .minwage-table td { padding: 2px 3px; }
 }
 </style>
