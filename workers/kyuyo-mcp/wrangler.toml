@@ -38,6 +38,20 @@ NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"
 binding = "AUTH_WORKER"
 service = "auth-worker-staging"
 
+# dtako-scraper-relay への service binding (Refs ohishi-exp/rust-ichibanboshi#205 の 04b)。
+# `run_kintai_relay` tool が POST /kintai-relay/run を叩く。**運ぶロジックは relay 側の
+# 1 実装のまま** — こちらは MCP の認証付き入口を出すだけ。GCP への hop は relay 自身の
+# AUTH_WORKER (**本番** auth-worker) を通るので、この worker の staging AS 規約とは無関係。
+[[services]]
+binding = "SCRAPER_RELAY"
+service = "nuxt-dtako-admin-scraper-relay"
+
+# relay が要求する consumer proof (X-Alc-Proxy-Secret)。**既存 entry を binding するだけ**。
+[[secrets_store_secrets]]
+binding = "INTERNAL_SHARED_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "INTERNAL_SHARED_SECRET"
+
 # 一番星 (rust-ichibanboshi) への CF Access Service Token (Refs #470)。
 # **既存の Service Token を再利用** — app 本体 / dtako-scraper-relay が使っている
 # のと同じ Secrets Store entry (secret_name="CF_ACCESS_CLIENT_SECRET") を binding

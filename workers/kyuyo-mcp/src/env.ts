@@ -33,4 +33,10 @@ export interface Env {
    *  dashboard の plain 変数では文字列で来るため `unknown` で受ける
    *  (relay の `ICHIBAN_CF_ACCESS_CLIENT_SECRET` と同じ扱い)。 */
   ICHIBAN_CF_ACCESS_CLIENT_SECRET?: unknown;
+  /** dtako-scraper-relay への service binding。打刻を GCP へ運ぶ
+   *  `POST /kintai-relay/run` を叩く (Refs ohishi-exp/rust-ichibanboshi#205 の 04b)。
+   *  **運ぶロジックは relay 側の 1 実装のまま** — こちらは認証付きの入口を出すだけ。 */
+  SCRAPER_RELAY?: { fetch(input: string, init?: RequestInit): Promise<Response> };
+  /** relay が要求する consumer proof (`X-Alc-Proxy-Secret`)。 */
+  INTERNAL_SHARED_SECRET?: unknown;
 }

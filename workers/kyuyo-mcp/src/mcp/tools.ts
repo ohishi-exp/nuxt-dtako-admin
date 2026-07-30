@@ -678,6 +678,72 @@ export const getTimecardDiffTool = {
 
 /** server.ts が McpServer に登録する全 tool。inputSchema が異なるため
  *  `ToolEntry<z.ZodTypeAny>` に揃えて束ねる (cf-access-mcp と同じパターン)。 */
+
+// ── run_kintai_relay ──────────────────────────────────────────────────────────
+
+const runKintaiRelayArgs = z.object({
+  month: z.string().describe("対象月 (YYYY-MM)"),
+  after_driver_cd: z
+    .number()
+    .int()
+    .optional()
+    .describe("続きから回す位置。前回の応答の next_after_driver_cd を渡す"),
+  max_drivers: z.number().int().optional().describe("1 回で回す乗務員数 (既定 10、上限 50)"),
+  apply: z
+    .boolean()
+    .optional()
+    .describe("**true で初めて GCP に書く**。省略時は差分の件数を数えるだけ"),
+});
+
+/**
+ * 打刻をオンプレ → GCP へ 1 ページぶん運ぶ (Refs ohishi-exp/rust-ichibanboshi#205 の 04b)。
+ *
+ * **運ぶロジックはここに無い。** relay の `POST /kintai-relay/run` を service binding
+ * 越しに叩くだけで、署名の突き合わせは rust 側 (`kintai_push::plan_batch`)、tenant の
+ * 解決は relay 側 (KV `dtako_accounts`)。ここは MCP の認証付き入口を出すだけ —
+ * 人間に `INTERNAL_SHARED_SECRET` を手渡さずに起動できるようにするのが目的。
+ */
+export const runKintaiRelayTool = {
+  name: "run_kintai_relay",
+  description:
+    "社内 MariaDB の打刻を GCP 側 (Supabase kintai.*) へ 1 ページぶん運ぶ " +
+    "(Refs ohishi-exp/rust-ichibanboshi#205 の 04b)。" +
+    "**apply を付けない限り 1 件も書かない** — 差分の件数だけ返る (既定)。" +
+    "オンプレから乗務員を 1 ページ引き、GCP から署名を集め、差分だけを GCP へ渡す。" +
+    "Cloudflare Tunnel の 30 秒上限があるので乗務員数で区切られる — " +
+    "応答の nextAfterDriverCd が null になるまで呼び直すこと。" +
+    "misplaced が 0 でなければ運び方が壊れている。" +
+    "unknownStates が空でなければ上流に DDL の CHECK に無い state が来ている。",
+  inputSchema: runKintaiRelayArgs,
+  // **write tool。** 打刻を本番 Supabase に書きうるので read tool と同じ扱いにしない
+  requiresScope: "mcp.write",
+  execute: async (env: Env, args: z.infer<typeof runKintaiRelayArgs>) => {
+    if (!parseYm(args.month)) throw new Error("month は YYYY-MM で指定してください");
+    const relay = env.SCRAPER_RELAY;
+    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
+    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+
+    const res = await relay.fetch("https://relay.internal/kintai-relay/run", {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
+      body: JSON.stringify({
+        month: args.month,
+        after_driver_cd: args.after_driver_cd,
+        max_drivers: args.max_drivers,
+        apply: args.apply === true,
+      }),
+    });
+    const body = await res.text();
+    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
+    try {
+      return JSON.parse(body) as unknown;
+    } catch {
+      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
+    }
+  },
+};
+
 export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   listCompaniesTool as unknown as ToolEntry<z.ZodTypeAny>,
   listMonthsTool as unknown as ToolEntry<z.ZodTypeAny>,
@@ -685,4 +751,5 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getRestraintSummaryTool as unknown as ToolEntry<z.ZodTypeAny>,
   getKosokuEventsTool as unknown as ToolEntry<z.ZodTypeAny>,
   getTimecardDiffTool as unknown as ToolEntry<z.ZodTypeAny>,
+  runKintaiRelayTool as unknown as ToolEntry<z.ZodTypeAny>,
 ];
