@@ -469,7 +469,9 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   表の右端は **金額 3 列 (基本給 / 残業代合計 / 合計) で、各セルを 上段 計算 →
   中段 給与 → 下段 差 (給与 − 計算) の 3 段に積む** (ユーザー決定 2026-07-30。
   横 8 列に開くと 17 列で紙にも画面にも収まらなかった)。基本給は左の内訳列と右で
-  2 回出る (左は時間の内訳、右は突合)。差は片方が欠けたら 0 ではなく null (「-」)
+  2 回出る (左は時間の内訳、右は突合)。差は片方が欠けたら 0 ではなく null (「-」)。
+  **法定外休日 (祝日・会社指定休の出勤) の列は該当者が居る月だけ出す** (Refs #566) —
+  差分列の検算は 9 区分すべてを引くので、0 以外は日別データの不整合を指す
 - マスタは R2 `restraint/{compId}/{wage-master|min-wage|wage-config}/latest.json`
   (putVersionedR2 の版管理を再利用 — 一括変更 = PUT 1 回 = 1 版)
 - DO routes: `GET/PUT /restraint-api/{wage-master|min-wage|wage-config}`、
