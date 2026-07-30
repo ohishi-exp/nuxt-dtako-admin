@@ -992,19 +992,29 @@ describe("get_timecard_diff (mode=summary)", () => {
 });
 
 describe("ALL_TOOLS", () => {
-  it("registers exactly the 6 read-only tools, none requiring a scope", () => {
+  /** 読むだけの tool。scope を要求しない (binding_jwt が valid なら誰でも呼べる)。 */
+  const READ_ONLY = [
+    "get_kosoku_events",
+    "get_restraint_summary",
+    "get_timecard_diff",
+    "get_wage_report",
+    "list_companies",
+    "list_months",
+  ];
+  /** 書きうる tool。**scope を要求する** (Refs ohishi-exp/rust-ichibanboshi#205 の 04b)。 */
+  const WRITE = { run_kintai_relay: "mcp.write" } as const;
+
+  it("read-only tool と write tool を取り違えない", () => {
     expect(ALL_TOOLS.map((t) => t.name).sort()).toEqual(
-      [
-        "get_kosoku_events",
-        "get_restraint_summary",
-        "get_timecard_diff",
-        "get_wage_report",
-        "list_companies",
-        "list_months",
-      ].sort(),
+      [...READ_ONLY, ...Object.keys(WRITE)].sort(),
     );
     for (const tool of ALL_TOOLS) {
-      expect(tool.requiresScope).toBeUndefined();
+      if (READ_ONLY.includes(tool.name)) {
+        expect(tool.requiresScope, tool.name).toBeUndefined();
+        continue;
+      }
+      // **新しい tool を read-only 側に足したら、ここで気付く**
+      expect(tool.requiresScope, tool.name).toBe(WRITE[tool.name as keyof typeof WRITE]);
     }
   });
 });
