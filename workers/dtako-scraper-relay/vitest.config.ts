@@ -40,6 +40,7 @@ export default defineConfig({
         'src/phase-timing.ts',
         'src/upstream-cache.ts',
         'src/http-etag.ts',
+        'src/kintai-relay.ts',
       ],
       thresholds: {
         lines: 100,

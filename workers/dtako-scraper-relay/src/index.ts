@@ -6,6 +6,7 @@
 // 10211/10061、nuxt-items/items-sync と同型)。
 export { DtakoScraperRelayDO } from "./dtako-scraper-relay-do";
 import { resolveTheearthRouting } from "./theearth-session";
+import { buildDeps, relayKintaiPage, tenantForCompId } from "./kintai-relay";
 import { resolveDtakoAccountsRaw, resolveSecretBinding, runScheduledCron } from "./cron";
 
 interface RelayWorkerEnv {
@@ -16,6 +17,16 @@ interface RelayWorkerEnv {
    * — dashboard の plain 変数は deploy で消える (Refs #367)。 */
   DTAKO_CONFIG_KV?: unknown;
   ETC_ACCOUNTS?: unknown;
+  /** auth-worker への service binding。`/ichibanboshi-proxy/*` (OIDC mint) に使う。 */
+  AUTH_WORKER?: { fetch(input: string, init?: RequestInit): Promise<Response> };
+  /** consumer worker proof (`X-Alc-Proxy-Secret`)。未設定なら打刻の中継は 503。 */
+  INTERNAL_SHARED_SECRET?: unknown;
+  /** オンプレ rust-ichibanboshi (CF Tunnel) の origin と CF Access Service Token。 */
+  NUXT_ICHIBAN_API_URL?: string;
+  NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID?: string;
+  ICHIBAN_CF_ACCESS_CLIENT_SECRET?: unknown;
+  /** 打刻を運ぶ対象の会社。tenant は KV の `dtako_accounts` から引く。 */
+  KINTAI_COMP_ID?: string;
 }
 
 export default {
@@ -44,6 +55,12 @@ export default {
       }
       const id = env.RELAY.idFromName(routing.doKey);
       return env.RELAY.get(id).fetch(request);
+    }
+
+    if (url.pathname === "/kintai-relay/run" && request.method === "POST") {
+      // 打刻をオンプレ → GCP へ 1 ページぶん運ぶ (Refs ohishi-exp/rust-ichibanboshi#205 の 04b)。
+      // DO に載せない — 状態を持たず、直列化も要らない (オンプレ側がページで区切る)。
+      return handleKintaiRelay(request, env);
     }
 
     if (url.pathname === "/ws/scraper") {
@@ -136,3 +153,80 @@ export default {
     );
   },
 };
+
+/**
+ * `POST /kintai-relay/run` — 打刻を 1 ページぶん運ぶ。
+ *
+ * body は `{month, after_driver_cd?, max_drivers?, apply?}`。応答の
+ * `nextAfterDriverCd` が `null` になるまで呼び出し側が呼び直す。
+ * **`apply` を付けない限り GCP へは 1 件も渡さない** (件数だけ返る)。
+ *
+ * 宣言が欠けていれば **503 で fail-closed** — 「走ったが実は何も運んでいない」を
+ * 作らない。tenant は KV の `dtako_accounts` から `KINTAI_COMP_ID` で引く
+ * (呼び出し元に名乗らせない)。
+ */
+async function handleKintaiRelay(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const authWorker = env.AUTH_WORKER;
+  const compId = (env.KINTAI_COMP_ID ?? "").trim();
+  const origin = (env.NUXT_ICHIBAN_API_URL ?? "").trim();
+  const cfId = (env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID ?? "").trim();
+  const [proxySecret, cfSecret] = await Promise.all([
+    resolveSecretBinding(env.INTERNAL_SHARED_SECRET),
+    resolveSecretBinding(env.ICHIBAN_CF_ACCESS_CLIENT_SECRET),
+  ]);
+  if (!authWorker || !compId || !origin || !cfId || !proxySecret || !cfSecret) {
+    return fail(503, "kintai-relay not configured");
+  }
+
+  const accountsRaw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
+  let accounts: unknown = null;
+  try {
+    accounts = JSON.parse(accountsRaw || "null");
+  } catch {
+    accounts = null;
+  }
+  const tenantId = tenantForCompId(accounts, compId);
+  if (!tenantId) {
+    // KV から消えた時に静かに別テナントへ書かないよう loud fail (Refs #367 の実害)
+    console.error(JSON.stringify({ kintai_relay: "tenant not resolved", comp_id: compId }));
+    return fail(503, "tenant not resolved from dtako_accounts");
+  }
+
+  let body: { month?: unknown; after_driver_cd?: unknown; max_drivers?: unknown; apply?: unknown };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return fail(400, "body must be JSON");
+  }
+
+  const deps = buildDeps({
+    ichibanOrigin: origin,
+    cfAccessClientId: cfId,
+    cfAccessClientSecret: cfSecret,
+    authWorker,
+    proxySecret,
+    tenantId,
+  });
+  try {
+    const report = await relayKintaiPage(deps, {
+      month: String(body.month ?? ""),
+      afterDriverCd: typeof body.after_driver_cd === "number" ? body.after_driver_cd : null,
+      maxDrivers: typeof body.max_drivers === "number" ? body.max_drivers : undefined,
+      apply: body.apply === true,
+    });
+    console.log(JSON.stringify({ kintai_relay: "ok", ...report }));
+    return new Response(JSON.stringify(report), {
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    console.error(JSON.stringify({ kintai_relay: "failed", message }));
+    return fail(502, message);
+  }
+}
