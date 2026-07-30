@@ -1283,8 +1283,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
   }
 
+  /**
+   * scrape 経路の comp_id → theearth 認証情報の解決。
+   *
+   * **参照先は `dtakoAccountsRaw()` に統一する** (= KV `dtako-relay-config` の
+   * `dtako_accounts` が正、無ければ binding に fallback)。以前はここだけ
+   * `env.DTAKO_ACCOUNTS` binding を直読みしていたため、規範どおり KV に投入して
+   * あっても WS 経由の手動リランからは見えず、`comp_id=... が DTAKO_ACCOUNTS に
+   * 見つかりません` になっていた (2026-07-30、comp_id 27324455 / 75700192)。
+   * cron 経路 (`resolveDtakoAccounts`) と viewer 認可は既に KV を見ていたので、
+   * この関数だけが 2026-07-25 の KV 移行から取り残されていた。
+   */
   private async resolveAccount(compId: string): Promise<DtakoAccountRaw | null> {
-    const raw = await resolveSecret(this.env.DTAKO_ACCOUNTS);
+    const raw = await this.dtakoAccountsRaw();
     if (!raw) return null;
     let accounts: DtakoAccountRaw[];
     try {
