@@ -1102,15 +1102,32 @@ function fmtAtRate(pay: number | null, minutes: number): string {
 }
 
 /** 実働 − 表に出ている区分時間の合計 (法定内 + 時間外 + 週40超過 + 時間外深夜 +
- * 法定休日(通常+深夜))。週40超過は法定内から控除済み (案B Refs #282) のため加算対象。
- * 0 以外 = 表に無い区分へ分類された時間がある (wage-config の法定外休日設定・
- * 休日フラグ日の実働・日別データ不整合など) — 検算用 (Refs #282)。 */
+ * 法定休日(通常+深夜) + 法定外休日(通常+深夜))。週40超過は法定内から控除済み
+ * (案B Refs #282) のため加算対象。**9 区分すべてを引く** (法定外休日を落としていて
+ * 「表に出ていないのに差分が出る」状態だった、Refs #566)。0 以外 = 日別データ不整合か、
+ * ここに無い区分へ分類された時間がある印 — 検算用 (Refs #282)。 */
 function unaccountedMinutes(row: WageReportRow): number | null {
   const working = row.summary.workingMinutes
   if (working == null) return null
   const m = row.wage.minutes
-  return working - (m.statutory + m.overtime + m.weekly40Excess + m.overtimeNight + m.legalHoliday + m.legalHolidayNight)
+  return working - (m.statutory + m.overtime + m.weekly40Excess + m.overtimeNight
+    + m.legalHoliday + m.legalHolidayNight + m.nonLegalHoliday + m.nonLegalHolidayNight)
 }
+
+/**
+ * その月に**法定外休日**の実働がある人が 1 人でも居るか (Refs #566)。
+ *
+ * 土曜は平日扱い (2026-07-18 決定) なので通常は 0 だが、**祝日・会社指定休に出勤した日**は
+ * 打刻側の休日区分が `non_legal` になり、この区分へ入る (2026-01 の実測は成人の日の 1 名
+ * 4h38m だけ)。金額は合計(計算)に入っているのに時間の列が無く、差分列にだけ姿を現していた。
+ * **常時 1 列増やすと表が広がるので、有る月だけ出す。**
+ */
+const hasNonLegalHolidayWork = computed(() =>
+  (report.value?.rows ?? []).some(r =>
+    r.wage.minutes.nonLegalHoliday + r.wage.minutes.nonLegalHolidayNight > 0))
+
+/** 最低賃金チェックの表の列数 (区画見出しの colspan 用)。 */
+const minWageColumnCount = computed(() => (hasNonLegalHolidayWork.value ? 13 : 12))
 
 /** 符号つき分表示 ("-1h30m")。fmtMinutes は負値を想定しないため絶対値に符号を付ける。 */
 function fmtSignedMinutes(minutes: number | null): string {
@@ -3982,7 +3999,9 @@ watch([compMap, kyuyoSyncedKeys], () => {
                     <th class="px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="対象時間 = 時間外 + 週40超過 (2段表示)。@ は残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)。月60時間超過は時間が橙色">残業代<br><span class="font-normal text-xs">(時間外 / 週40超過 / @単価 / 金額)</span></th>
                     <th class="px-2 py-2 text-right align-bottom" title="対象時間 = 時間外深夜。@ は深夜残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)">深夜残業代<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
                     <th class="px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="法定休日 (既定 日曜) の実働すべて (1.35倍、深夜分は1.6倍)。@ は通常+深夜合算の実額按分">法定休日<br><span class="font-normal text-xs">(通常 / 深夜 / @単価 / 金額)</span></th>
-                    <th class="px-2 py-2 text-right align-bottom" title="実働 − (法定内 + 時間外 + 時間外深夜 + 法定休日の通常+深夜)。0 以外 = 表に出ていない区分へ分類された時間がある (法定外休日設定・休日フラグ日の実働・日別データ不整合など) — 検算用">差分<br><span class="font-normal text-xs">(実働 − 表合計)</span></th>
+                    <!-- 祝日・会社指定休に出勤した日だけ入る区分。有る月だけ列を出す (Refs #566) -->
+                    <th v-if="hasNonLegalHolidayWork" class="px-2 py-2 text-right align-bottom" title="法定外休日 (祝日・会社指定休に出勤した日) の実働すべて。土曜は平日扱いなのでここには入らない (2026-07-18 決定)。@ は通常+深夜合算の実額按分">法定外休日<br><span class="font-normal text-xs">(通常 / 深夜 / @単価 / 金額)</span></th>
+                    <th class="px-2 py-2 text-right align-bottom" title="実働 − (法定内 + 時間外 + 週40超過 + 時間外深夜 + 法定休日 + 法定外休日)。9 区分すべてを引いているので、0 以外 = 日別データの不整合 — 検算用">差分<br><span class="font-normal text-xs">(実働 − 表合計)</span></th>
                     <th class="px-2 py-2 text-right align-bottom border-l-2 border-gray-300 dark:border-gray-600" title="上段=計算 (法定時間内賃金、左の「基本給(法定内)」の金額と同じ値) / 中段=給与 (給与明細の基本給扱い項目の合計) / 下段=差 (給与 − 計算)">基本給<br><span class="font-normal text-xs">(計算 / 給与 / 差)</span></th>
                     <th class="px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="上段=計算 (残業 (時間外+週40超過) + 深夜残業 (時間外深夜)) / 中段=給与 (給与明細の割増扱い項目 = 残業・深夜・休日出勤の合計) / 下段=差 (給与 − 計算)">残業代合計<br><span class="font-normal text-xs">(計算 / 給与 / 差)</span></th>
                     <th class="px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="上段=計算 (全区分合計 = 基本給 + 深夜 + 残業代合計 + 法定休日) / 中段=給与 (基本給 + 残業代) / 下段=差 (給与 − 計算)">合計<br><span class="font-normal text-xs">(計算 / 給与 / 差)</span></th>
@@ -3997,7 +4016,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                   :key="`${section.company ?? 'unknown'}|${section.jobGroup}`"
                 >
                   <tr class="bg-gray-50 dark:bg-gray-800/60 border-b border-gray-200 dark:border-gray-700">
-                    <td :colspan="12" class="px-2 py-1.5 text-xs font-semibold">
+                    <td :colspan="minWageColumnCount" class="px-2 py-1.5 text-xs font-semibold">
                       {{ section.company ? payrollCompanyLabelOf(compMap, section.company) : '会社不明 (社員マスタに乗務員CDの登録なし)' }}
                       <span class="mx-1 text-gray-400">/</span>
                       {{ MIN_WAGE_JOB_GROUP_LABEL[section.jobGroup] }}
@@ -4043,6 +4062,12 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       <div class="text-xs text-gray-500">{{ fmtMinutes(row.wage.minutes.legalHolidayNight) }}</div>
                       <div class="text-xs text-gray-400">{{ fmtAtRate(sumNullable(row.wage.amounts?.legalHoliday ?? null, row.wage.amounts?.legalHolidayNight ?? null), row.wage.minutes.legalHoliday + row.wage.minutes.legalHolidayNight) }}</div>
                       <div class="font-medium">{{ fmtYen(sumNullable(row.wage.amounts?.legalHoliday ?? null, row.wage.amounts?.legalHolidayNight ?? null)) }}</div>
+                    </td>
+                    <td v-if="hasNonLegalHolidayWork" class="px-2 py-1.5 text-right">
+                      <div class="text-xs text-gray-500">{{ fmtMinutes(row.wage.minutes.nonLegalHoliday) }}</div>
+                      <div class="text-xs text-gray-500">{{ fmtMinutes(row.wage.minutes.nonLegalHolidayNight) }}</div>
+                      <div class="text-xs text-gray-400">{{ fmtAtRate(sumNullable(row.wage.amounts?.nonLegalHoliday ?? null, row.wage.amounts?.nonLegalHolidayNight ?? null), row.wage.minutes.nonLegalHoliday + row.wage.minutes.nonLegalHolidayNight) }}</div>
+                      <div class="font-medium">{{ fmtYen(sumNullable(row.wage.amounts?.nonLegalHoliday ?? null, row.wage.amounts?.nonLegalHolidayNight ?? null)) }}</div>
                     </td>
                     <td class="px-2 py-1.5 text-right">
                       <span :class="unaccountedMinutes(row) === 0 ? 'text-xs text-gray-400' : 'text-red-600 font-bold'">
@@ -4107,9 +4132,10 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 合計(計算) = 基本給 + 深夜 + 残業代合計 + 法定休日 (全区分合計、「給与比較」タブの合計(計算)と同じ値)。<br>
                 給与側は<b>支払い済み給与の実績</b> — 給与比較タブで取り込んだ給与明細 CSV の基本給扱い / 割増扱い項目の合計。CSV の年月ラベルは支給月なので、勤務月+1 (翌月支給) の行を突合している。
                 月末締め・翌月払いのため実際の支給は翌月 (ヘッダの支給月表示)。CSV 未取り込みの月は「-」。項目の区分は「支給項目区分」の設定に従う。<br>
-                <b>実働 = 基本給(法定内)の対象時間 + 時間外 + 週40超過 + 時間外深夜 + 法定休日(通常+深夜)</b>。
+                <b>実働 = 基本給(法定内)の対象時間 + 時間外 + 週40超過 + 時間外深夜 + 法定休日(通常+深夜) + 法定外休日(通常+深夜)</b>。
+                法定外休日は<b>祝日・会社指定休に出勤した日</b>だけ入る区分で、有る月だけ列が出る (土曜は平日扱い — 2026-07-18 決定)。
                 深夜(通常) だけは上記の<b>内数</b> (0.25 加算のための別枠計上) なので、実働の足し算には含めない。
-                差分列はこの検算 (実働 − 表合計) で、0 以外 (赤) は表に出ていない区分へ分類された時間がある印 (法定外休日設定・休日フラグ日の実働・日別データ不整合など)。<br>
+                差分列はこの検算 (実働 − 表合計) で、<b>9 区分すべてを引いている</b>ので 0 以外 (赤) は日別データの不整合を指す。<br>
                 土曜は平日扱い (法定外休日は使わない — 2026-07-18 決定)。法定休日は日曜のみ。<br>
                 各金額の上の @ は計算単価 (円/h、金額 ÷ 対象時間の実額按分)。基本給の @ は基礎単価そのもの、深夜(通常) の @ は加算分 0.25 倍のみの単価。単価未設定の乗務員は計算されません。<br>
                 基本給(法定内) の対象時間 = 実働 − 時間外 − 時間外深夜 − 週40超過 − 法定休日実働 (時間外・週40超過の基礎1.0は残業代の1.25側にのみ含まれる — 2026-07-18 案B 決定で週40超過の二重計上を解消)。
