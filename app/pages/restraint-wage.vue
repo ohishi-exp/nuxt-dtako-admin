@@ -2836,6 +2836,75 @@ function addRate(cd: string) {
   newRates.value = { ...newRates.value, [cd]: { rate: '', from: input.from } }
 }
 
+// ---- 単価マスタに居ない乗務員を足す (Refs #568) ----
+//
+// 一覧は R2 の単価マスタ (`master.drivers`) から作るので、**まだ 1 件も履歴が無い人は
+// 行が無く、単価を登録する手段が画面に無かった** (最低賃金チェックの「単価未設定:
+// … 単価マスタタブで登録してください」に従っても登録できない)。CSV 取込か
+// 「単価マスタへ一括設定」でしか入らないのは遠回りなので、行を足せるようにする。
+
+/**
+ * 追加できる候補 = 単価マスタにまだ居ない人。2 つの供給元を混ぜる:
+ *
+ * - **社員マスタ**の乗務員CD (このタブで読んでいる。会社・所属列の供給元と同じ)
+ * - **読み込み済みの賃金集計に居る乗務員** — 最低賃金チェックの「単価未設定」警告に
+ *   出る人は社員マスタに乗務員CD が無いことがあり (実測: 警告 2 名のうち 1 名)、
+ *   社員マスタだけでは候補に出ず登録できない。**追加の fetch はしない** (集計が
+ *   まだ無ければその分だけ候補に出ないだけ)
+ */
+const masterAddCandidates = computed(() => {
+  const seen = new Map<string, string>()
+  const add = (cd: string | null | undefined, name: string) => {
+    if (!cd || master.value.drivers[cd]) return
+    // 同じ人が複数会社に居ることがある (Refs #403) ので先勝ちで 1 つに畳む
+    if (!seen.has(cd)) seen.set(cd, name ? `${cd} ${name}` : cd)
+  }
+  for (const row of employeeMasterRows.value) add(row.entry.driverCd, row.entry.name)
+  for (const row of report.value?.rows ?? []) {
+    add(normalizeDriverCdKey(row.summary.driverCd), row.summary.driverName)
+  }
+  return [...seen.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
+    .map(([value, label]) => ({ label, value }))
+})
+
+const newDriver = ref({ cd: '', rate: '', from: '' })
+
+/** USelectMenu の選択値から乗務員CD を取り出す (文字列でも `{value}` でも受ける)。 */
+function selectedDriverCd(v: unknown): string {
+  if (typeof v === 'string') return v
+  if (v && typeof v === 'object' && 'value' in v) return String((v as { value: unknown }).value ?? '')
+  return ''
+}
+
+/** 候補を選ぶと単価マスタに行を足す (**「保存」で確定**、他の編集と同じ作法)。 */
+function addDriverToMaster() {
+  const cd = newDriver.value.cd.trim()
+  if (!cd || !newDriver.value.rate || !newDriver.value.from) return
+  const rate = Number(newDriver.value.rate)
+  if (!Number.isFinite(rate) || rate < 0) {
+    masterMessage.value = `単価が不正です (${cd})`
+    return
+  }
+  if (master.value.drivers[cd]) {
+    masterMessage.value = `乗務員 ${cd} は既に一覧にあります (行の「新規単価」から追加してください)`
+    return
+  }
+  // 氏名は社員マスタ → 賃金集計の順で引く (単価マスタ側は表示用にしか使わない)
+  const name = employeeMasterRows.value.find(r => r.entry.driverCd === cd)?.entry.name
+    ?? report.value?.rows.find(r => normalizeDriverCdKey(r.summary.driverCd) === cd)?.summary.driverName
+  master.value = {
+    ...master.value,
+    drivers: {
+      ...master.value.drivers,
+      [cd]: { ...(name ? { name } : {}), rates: [{ effectiveFrom: newDriver.value.from, hourlyRate: rate }] },
+    },
+  }
+  masterMessage.value = `乗務員 ${cd}${name ? ` ${name}` : ''} を単価 ${rate} 円 (適用 ${newDriver.value.from}) で追加しました。「保存」で確定します`
+  // 適用開始日は連続入力しやすいよう残す (addRate と同じ作法)
+  newDriver.value = { cd: '', rate: '', from: newDriver.value.from }
+}
+
 function toggleSelect(cd: string) {
   const next = new Set(selectedCds.value)
   if (next.has(cd)) next.delete(cd)
@@ -4860,6 +4929,41 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 />
               </UFormField>
               <span class="text-xs text-gray-500 self-end pb-1">{{ masterRows.length }} 名</span>
+            </div>
+
+            <!-- 単価マスタにまだ居ない人を足す (Refs #568)。一覧は R2 の単価マスタから
+                 作るので、履歴が 1 件も無い人は行が無く登録する手段が無かった -->
+            <div class="flex flex-wrap items-end gap-3 border border-gray-200 dark:border-gray-800 rounded-lg p-3 mb-3">
+              <span class="text-sm font-medium">乗務員を追加:</span>
+              <UFormField label="乗務員 (社員マスタから)">
+                <!-- 選択値は文字列 (乗務員CD) で受ける。`value-key` があっても項目
+                     オブジェクトが飛んでくる版があるため、どちらでも CD を取り出す -->
+                <USelectMenu
+                  :model-value="newDriver.cd"
+                  :items="masterAddCandidates"
+                  :search-input="{ placeholder: '乗務員CD / 氏名で検索' }"
+                  value-key="value"
+                  size="sm" class="w-64" placeholder="選択"
+                  @update:model-value="(v: unknown) => newDriver = { ...newDriver, cd: selectedDriverCd(v) }"
+                />
+              </UFormField>
+              <UFormField label="基本時間単価 (円)">
+                <UInput v-model="newDriver.rate" size="sm" type="number" class="w-28" />
+              </UFormField>
+              <UFormField label="適用開始日">
+                <UInput v-model="newDriver.from" size="sm" type="date" />
+              </UFormField>
+              <UButton
+                size="sm" variant="soft" label="追加"
+                :disabled="!newDriver.cd || !newDriver.rate || !newDriver.from"
+                @click="addDriverToMaster"
+              />
+              <span v-if="masterAddCandidates.length" class="text-xs text-gray-500">
+                候補 {{ masterAddCandidates.length }} 名 (社員マスタ・読み込み済みの集計に居て単価マスタに無い人)。追加後に「保存」で確定
+              </span>
+              <span v-else class="text-xs text-gray-500">
+                社員マスタの乗務員はすべて単価マスタに登録済みです
+              </span>
             </div>
 
             <div class="flex flex-wrap items-end gap-3 border border-gray-200 dark:border-gray-800 rounded-lg p-3 mb-4">
