@@ -656,6 +656,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return this.handleEtcScrapeAllWs(url);
     }
 
+    // どちらの経路に入ったかを必ず残す。SCRAPER_MODE の実効値が分からないまま
+    // 「WS が無言で閉じる」を追うと切り分けに時間がかかる (2026-07-30 の調査)。
+    console.log(
+      `DtakoScraperRelayDO route: mode=${this.env.SCRAPER_MODE ?? "(unset)"} kind=${kind ?? "(none)"} comp_id=${url.searchParams.get("comp_id") ?? "(none)"}`,
+    );
     if (this.env.SCRAPER_MODE === "http") {
       return this.handleHttpScrape(url);
     }
@@ -672,12 +677,32 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // TODO: Workers VPC (beta) の実際のホスト/パス解決方法を deploy 前に要確認。
     // ここでは binding が private target への routing を担う前提のプレースホルダ URL。
     const upstreamUrl = `http://dtako-scraper.internal/scrape/ws?${upstreamParams.toString()}`;
-    const upstreamRes = await this.env.DTAKO_SCRAPER_VPC.fetch(upstreamUrl, {
-      headers: { Upgrade: "websocket" },
-    });
+    let upstreamRes: Response;
+    try {
+      upstreamRes = await this.env.DTAKO_SCRAPER_VPC.fetch(upstreamUrl, {
+        headers: { Upgrade: "websocket" },
+      });
+    } catch (err) {
+      // fetch 自体の throw (VPC binding の解決失敗・上流ダウン等)。従来はそのまま
+      // 上位に飛んで DO の unhandled になり、browser には何も届かなかった。
+      console.error(
+        `DtakoScraperRelayDO connectVpcRelay fetch threw: url=${upstreamUrl} err=${err instanceof Error ? err.message : String(err)}`,
+      );
+      return this.rejectWithReason(
+        "上流スクレイパー (dtako-scraper) に接続できません (VPC binding の fetch が失敗)",
+      );
+    }
     const upstreamWs = upstreamRes.webSocket;
     if (!upstreamWs) {
-      return new Response("Upstream scraper unavailable", { status: 502 });
+      // 502 を返すと browser 側は「メッセージ 0 件で切断」しか観測できず、
+      // `handshake failed (comp_id 不正 / 認証エラー等)` という無関係な推測文言が
+      // 表示される。実際の理由 (上流が WS upgrade を返さなかった) を WS で伝える。
+      console.error(
+        `DtakoScraperRelayDO connectVpcRelay no webSocket in upstream response: url=${upstreamUrl} status=${upstreamRes.status}`,
+      );
+      return this.rejectWithReason(
+        `上流スクレイパー (dtako-scraper) が WebSocket を返しませんでした (status=${upstreamRes.status})`,
+      );
     }
     upstreamWs.accept();
     this.upstream = upstreamWs;
@@ -5892,6 +5917,22 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch {
       // already closed
     }
+  }
+
+  /**
+   * WS ハンドシェイクは 101 で成立させ、`{event:"error"}` で理由を 1 件送ってから
+   * 閉じる。502 等の HTTP エラーで返すと browser 側 (`app/utils/api.ts` の
+   * `triggerScrapeStream`) は「メッセージ 0 件で切断」しか観測できず、
+   * `handshake failed (comp_id 不正 / 認証エラー等)` という**実際の原因と無関係な
+   * 推測文言**を表示してしまう (2026-07-30 の調査で 2 社分のエラーがこれだった)。
+   */
+  private rejectWithReason(message: string): Response {
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    this.ctx.acceptWebSocket(server);
+    this.sendSafely(server, { event: "error", message });
+    this.closeSafely(server, 1011, "upstream unavailable");
+    return new Response(null, { status: 101, webSocket: client });
   }
 
   // browser → dtako-scraper 方向は現状不要 (トリガー時のパラメータは接続 URL の
