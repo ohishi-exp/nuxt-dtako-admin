@@ -42,6 +42,7 @@ import {
   buildScraperZipUrl,
   buildEtcCsvDownloadUrl,
   splitCsvAllStream,
+  getDtakoEventsEtags,
 } from '~/utils/api'
 import {
   isLive,
@@ -453,6 +454,16 @@ describe('api', () => {
       await callApi(() => getScrapeHistory())
       assertMock(() => {
         expect(mockFetch.mock.calls[0][0]).toBe(`${API_BASE}/api/scraper/history?limit=50`)
+      })
+    })
+
+    it('getDtakoEventsEtags', async () => {
+      stubOk({ unsplit: [], unsplit_total: 0, warnings: [] })
+      await callApi(() => getDtakoEventsEtags('2026-07-01', '2026-07-31'))
+      assertMock(() => {
+        expect(mockFetch.mock.calls[0][0]).toBe(
+          `${API_BASE}/api/dtako/events/etags?date_from=2026-07-01&date_to=2026-07-31`,
+        )
       })
     })
   })

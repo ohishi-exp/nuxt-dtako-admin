@@ -29,6 +29,15 @@
  *   - **呼び手のテナントで絞られない** — tenant は upload レコード側から引く
  *     (`repo/dtako_upload.rs` の `get_upload_tenant_and_key` は `WHERE id = $1` のみ)。
  *     管理者のテナントとスクレイプ対象 comp のテナントが違っても効く
+ *
+ *     ⚠️ **この自動リトライは、その「絞られない」挙動に依存している。** dtako の
+ *     2 社 (27324455 / 75700192) は別テナントで、`全企業` スクレイプはログイン中の
+ *     管理者と無関係な comp も回すため、テナント絞りだと片方が直せない。
+ *     **将来 alc がこの口を呼び手のテナントで絞るようにしたら、別テナントぶんの
+ *     自動リトライは黙って効かなくなる** — その時はここも直すこと (relay DO 側から
+ *     内部経路で呼ぶ等)。マルチテナント基盤としては「レコード側の tenant で処理する」
+ *     方が横断アクセスの余地を残すので、絞る変更が入ること自体はあり得る
+ *     (#205 監督から別途起票予定、2026-07-31)。
  * - **`POST /api/split-csv-all`** — 手動の掃除ボタン用。
  *   - **テナント絞り** (`list_uploads_needing_split(tenant_id)`) なので、別テナントの
  *     comp の取り残しは掃えない
@@ -128,6 +137,52 @@ export function splitLineClass(state: string): string {
     default:
       // failed / unrecovered — 運行が消えている状態なので最も強く出す
       return 'font-bold text-red-600 dark:text-red-400'
+  }
+}
+
+// --- 取り込み後の答え合わせ (未分割の実数、Refs #205-40 / rust-alc-api#587) ---
+//
+// `split_failed === 0` は「分割済み」の十分条件ではない (冒頭参照) ので、
+// **本当に読み取り側に出るようになったか**は `GET /api/dtako/events/etags` の
+// `unsplit_total` (= `has_kudgivt = FALSE` の実数) で確かめる。2026-07-31 に消えた
+// 1 件に気づけたのはこの値であって `split_failed` ではなかった。
+
+/** alc 側 `MAX_RANGE_DAYS_ETAGS`。これを超える期間は 400 になる。 */
+export const ETAGS_MAX_RANGE_DAYS = 40
+
+/** 答え合わせに使う日付範囲。上限を超える / 日付が無いときは `null` (問い合わせない)。 */
+export function unsplitCheckRange(dates: string[]): { from: string, to: string } | null {
+  const sorted = [...dates].filter(Boolean).sort()
+  const from = sorted[0]
+  const to = sorted[sorted.length - 1]
+  if (!from || !to) return null
+  const spanDays = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000) + 1
+  if (!Number.isFinite(spanDays) || spanDays > ETAGS_MAX_RANGE_DAYS) return null
+  return { from, to }
+}
+
+/**
+ * `unsplit_total` を 1 行の日本語にする。
+ *
+ * **テナントの但し書きを必ず付ける** — この口は呼び手 (ログイン中の管理者) の
+ * テナントで絞られるので、`全企業` スクレイプでは**もう一方の会社の未分割は
+ * この数に入らない**。「0 件だから全部大丈夫」と読まれると、まさに今回直そうと
+ * している見落としが別の形で再発する。
+ */
+export function formatUnsplitTotal(
+  range: { from: string, to: string },
+  total: number,
+): { level: 'info' | 'error', text: string } {
+  const period = range.from === range.to ? range.from : `${range.from}〜${range.to}`
+  if (total > 0) {
+    return {
+      level: 'error',
+      text: `未分割の運行が ${total} 件残っています (${period}、ログイン中のテナントのみ)。「未分割をまとめて分割」を実行してください`,
+    }
+  }
+  return {
+    level: 'info',
+    text: `未分割の運行なし (${period}、ログイン中のテナントのみ — 他テナントの会社はこの数に入りません)`,
   }
 }
 
