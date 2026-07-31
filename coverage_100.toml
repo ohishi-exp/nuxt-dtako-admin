@@ -167,3 +167,7 @@ branches = true
 [[files]]
 path = "server/api/profit/snapshot.delete.ts"
 branches = true
+
+[[files]]
+path = "app/utils/scrape-split.ts"
+branches = true

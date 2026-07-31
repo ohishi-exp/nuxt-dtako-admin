@@ -944,6 +944,45 @@ JWT を持たない server-to-server caller で、かつ `comp_id` は複数 ten
 表示される。`INTERNAL_SHARED_SECRET` 未設定の間は自動アップロードをスキップし
 zip ダウンロードのみ提供する (fail-closed にはしない、機能低下のみ)。
 
+### 取り込みのあとに CSV 分割をやり直す (Refs ohishi-exp/rust-ichibanboshi#205 の 40)
+
+**取り込みが成功しても CSV 分割が失敗すると、その運行は静かに消える。** alc の
+`dtako_operations.has_kudgivt` は「この運行の CSV が R2 に split 済みか」を表す列で、
+**読み取り側 3 クエリが全部 `has_kudgivt = TRUE` で絞っている**
+(`crates/alc-dtako/src/repo/dtako_y_time_export.rs` の `list_operations` /
+`list_drivers_with_operations` / `list_operations_for_drivers`。`GET
+/api/dtako/events/etags` だけでなく `GET /api/dtako/events` も同じ repo)。一方
+`process_zip` は運行行を作り直すが `insert_operation` の列に `has_kudgivt` が無いので
+**アップロードのたびに `DEFAULT FALSE` に戻る**。TRUE に戻すのは split の成功だけ。
+⇒ split が失敗すると**入力からも欠け検知の母集団からも同時に消える**
+(2026-07-31 に実際に発生: 乗務員 1652 の運行 `2607011001540000003510` が残り、
+alc の運行数が 1130 → 1129 に減った)。
+
+- alc は取り込み自体は成功させたまま失敗件数を `POST /api/upload` 応答の
+  **`split_failed`** に載せる (ippoan/rust-alc-api#586)。relay は
+  `parseAlcUploadResponse` で拾い、**WS `result` の構造化フィールド**
+  (`upload_id` / `operations_count` / `split_failed`) として front に渡す。
+  `status` は `success` のまま — 取り込みと分割は**別建て**で見せる
+- `app/pages/scraper.vue` が `split_failed > 0` を見て
+  **`POST /api/proxy/api/split-csv/{upload_id}` を自動で叩き直す**。この口は
+  **冪等** (R2 から ZIP を取り直して同じ key に PUT 上書き)、**件数上限なし**、
+  **呼び手のテナントで絞られない** (tenant は upload レコードから引く =
+  `repo/dtako_upload.rs` の `get_upload_tenant_and_key` が `WHERE id = $1` のみ)
+- **`split-csv-all` は自動には使わない** — テナント絞り
+  (`list_uploads_needing_split(tenant_id)`) なので `全企業` スクレイプの片方
+  (別 tenant) を掃えず、かつ **1 回 50 件で切る** (`SPLIT_CSV_ALL_LIMIT`)。
+  `/scraper` の「未分割をまとめて分割」ボタン (手動) から呼び、`done` の
+  `candidates / success / failed / **skipped**` をそのまま画面に出す
+- **relay DO からは分割を呼べない** — auth-worker `/alc-internal-proxy` の path
+  allowlist (`classifyInternalPath`) に `/api/upload` はあるが `/api/split-csv/*`
+  は無い (403)。よって **cron 実行分は自動リトライされない** — cron は
+  `split_failed > 0` を `console.error` で鳴らすだけなので、**診断は Tail Worker の
+  Observability を見て、復旧は管理画面から**行う
+- **`split_failed === 0` は「分割済み」の十分条件ではない**。alc の
+  `update_has_kudgivt` が当たらなかった unko_no は `tracing::warn!` されるだけで
+  `Ok(0)` が返る (R2 側は trim しない生文字列 / DB 側は trim 済みのキーずれ)。
+  実数は `GET /api/dtako/events/etags` の `unsplit_total` (rust-alc-api#587) で見る
+
 ### 関連ファイル
 
 | ファイル | 役割 |

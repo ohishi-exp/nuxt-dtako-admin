@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   AlcInternalUploadError,
+  parseAlcUploadResponse,
   uploadDtakoZipViaAlcInternalProxy,
   type FetchLike,
 } from '../src/alc-internal-upload'
@@ -59,5 +60,44 @@ describe('uploadDtakoZipViaAlcInternalProxy', () => {
         fetchImpl2,
       ),
     ).rejects.toThrow('forbidden')
+  })
+})
+
+describe('parseAlcUploadResponse', () => {
+  it('takes upload_id / operations_count / split_failed out of the UploadResponse', () => {
+    expect(
+      parseAlcUploadResponse(
+        '{"upload_id":"abc","operations_count":3,"status":"completed","split_failed":2}',
+      ),
+    ).toEqual({ uploadId: 'abc', operationsCount: 3, splitFailed: 2 })
+  })
+
+  it('keeps split_failed: 0 as 0 (取り込み + 分割ともに成功)', () => {
+    expect(parseAlcUploadResponse('{"upload_id":"abc","operations_count":0,"split_failed":0}'))
+      .toEqual({ uploadId: 'abc', operationsCount: 0, splitFailed: 0 })
+  })
+
+  it('null (不明) にする — 欠落フィールドを 0 に丸めない (旧 alc に「成功」と嘘をつかないため)', () => {
+    expect(parseAlcUploadResponse('{"upload_id":"abc","operations_count":3,"status":"completed"}'))
+      .toEqual({ uploadId: 'abc', operationsCount: 3, splitFailed: null })
+  })
+
+  it('returns all-null for unparseable / non-object / wrong-typed bodies', () => {
+    const allNull = { uploadId: null, operationsCount: null, splitFailed: null }
+    expect(parseAlcUploadResponse('not json')).toEqual(allNull)
+    expect(parseAlcUploadResponse('null')).toEqual(allNull)
+    expect(parseAlcUploadResponse('"a string"')).toEqual(allNull)
+    expect(parseAlcUploadResponse('[]')).toEqual({ ...allNull })
+    expect(
+      parseAlcUploadResponse('{"upload_id":"","operations_count":"3","split_failed":"2"}'),
+    ).toEqual(allNull)
+    expect(
+      parseAlcUploadResponse('{"upload_id":7,"operations_count":null,"split_failed":null}'),
+    ).toEqual(allNull)
+  })
+
+  it('rejects non-finite numbers (JSON の 1e999 は Infinity になる)', () => {
+    expect(parseAlcUploadResponse('{"upload_id":"x","operations_count":1e999,"split_failed":1e999}'))
+      .toEqual({ uploadId: 'x', operationsCount: null, splitFailed: null })
   })
 })

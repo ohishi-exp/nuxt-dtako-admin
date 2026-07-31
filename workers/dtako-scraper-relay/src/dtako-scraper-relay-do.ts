@@ -46,7 +46,11 @@ import {
   type CookieJar,
   type LoginResult,
 } from "./theearth-client";
-import { uploadDtakoZipViaAlcInternalProxy } from "./alc-internal-upload";
+import {
+  parseAlcUploadResponse,
+  uploadDtakoZipViaAlcInternalProxy,
+  type AlcUploadOutcome,
+} from "./alc-internal-upload";
 import {
   EtcMeisaiClientError,
   EtcMeisaiNoUsageError,
@@ -844,9 +848,30 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         { sharedSecret, tenantId: account.tenant_id, filename: "csvdata.zip", zipBytes: zip },
         this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER),
       );
-      console.log(
-        JSON.stringify({ ...logBase, status: "success", zip_bytes: zip.byteLength, upload: uploadBody.slice(0, 200) }),
-      );
+      const outcome = parseAlcUploadResponse(uploadBody);
+      const line = {
+        ...logBase,
+        zip_bytes: zip.byteLength,
+        upload: uploadBody.slice(0, 200),
+        upload_id: outcome.uploadId,
+        split_failed: outcome.splitFailed,
+      };
+      // cron には画面もリトライの当てもない (`/api/split-csv/{id}` は
+      // alc-internal-proxy の path allowlist に無いので DO からは 403、Refs
+      // #205-40) ので、**分割の失敗は error レベルで鳴らす**。握り潰すと該当運行が
+      // 読み取り側 (has_kudgivt = TRUE 絞り) から黙って消える。復旧は管理画面の
+      // 「CSV分割」/「未分割をまとめて分割」で行う。診断ログは Tail Worker 側に出る。
+      if (outcome.splitFailed !== null && outcome.splitFailed > 0) {
+        console.error(
+          JSON.stringify({
+            ...line,
+            status: "split_failed",
+            message: `取り込みは成功したが CSV 分割が ${outcome.splitFailed} 件失敗した (該当運行が読み取り側から消える)`,
+          }),
+        );
+      } else {
+        console.log(JSON.stringify({ ...line, status: "success" }));
+      }
     } catch (err) {
       const message =
         err instanceof TheearthClientError ? err.message : describeUnknownError(err);
@@ -1221,6 +1246,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
       let resultStatus: "success" | "error" = "success";
       let resultMessage: string;
+      // 取り込み応答の構造化結果。CSV 分割が失敗していても**取り込み自体は成功**
+      // なので resultStatus は success のまま separate に運ぶ (Refs #205-40)。
+      // ブラウザ側 (scraper.vue) が split_failed > 0 を見て
+      // `POST /api/proxy/api/split-csv/{upload_id}` を自動で叩き直す。
+      let uploadOutcome: AlcUploadOutcome | null = null;
       if (sharedSecret) {
         this.sendSafely(server, { event: "progress", comp_id: params.compId, step: "upload" });
         try {
@@ -1228,6 +1258,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
             { sharedSecret, tenantId: account.tenant_id, filename: "csvdata.zip", zipBytes: zip },
             this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER),
           );
+          uploadOutcome = parseAlcUploadResponse(uploadBody);
           resultMessage = `アップロード完了: ${uploadBody.slice(0, 300)}`;
         } catch (err) {
           resultStatus = "error";
@@ -1239,6 +1270,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         resultMessage = `${zip.byteLength} bytes (INTERNAL_SHARED_SECRET 未設定のため自動アップロードはスキップ、手動ダウンロードのみ)`;
       }
 
+      // 値が取れたフィールドだけ載せる — 欠落 (旧 alc / アップロード未実施) を 0 に
+      // 丸めて送ると、front が「分割は成功した」と誤って表示してしまう。
+      const uploadFields: Record<string, unknown> = {};
+      if (uploadOutcome) {
+        if (uploadOutcome.uploadId) uploadFields.upload_id = uploadOutcome.uploadId;
+        if (uploadOutcome.operationsCount !== null) {
+          uploadFields.operations_count = uploadOutcome.operationsCount;
+        }
+        if (uploadOutcome.splitFailed !== null) {
+          uploadFields.split_failed = uploadOutcome.splitFailed;
+        }
+      }
+
       this.sendSafely(server, {
         event: "result",
         comp_id: params.compId,
@@ -1246,6 +1290,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         status: resultStatus,
         message: resultMessage,
         zip_url: zipUrl,
+        ...uploadFields,
       });
       this.sendSafely(server, { event: "done" });
       this.closeSafely(server, 1000, "done");

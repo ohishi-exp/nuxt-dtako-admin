@@ -639,6 +639,20 @@ export interface ScrapeProgressEvent {
    * で `/api/etc-csv/download` の URL に変換して使う。
    */
   key?: string
+  /**
+   * dtako スクレイプの自動アップロードが成功した時にのみ載る、alc の
+   * `POST /api/upload` 応答 (`UploadResponse`) 由来の値 (Refs #205-40)。
+   *
+   * `split_failed > 0` は「**取り込みは成功したが CSV 分割が失敗した**」状態で、
+   * alc の読み取り側 3 クエリはいずれも `has_kudgivt = TRUE` で絞るため、
+   * その運行は入力からも欠け検知の母集団からも同時に消える。呼び出し側は
+   * `upload_id` を使って `splitCsv()` を叩き直すこと。
+   *
+   * **フィールドが無い = 不明** (旧 relay / 旧 alc)。0 と同一視しないこと。
+   */
+  upload_id?: string
+  operations_count?: number
+  split_failed?: number
 }
 
 /** ETC CSV の R2 key を、front worker (この app 自身) の R2 binding 経由で
