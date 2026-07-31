@@ -1001,8 +1001,8 @@ describe("ALL_TOOLS", () => {
     "list_companies",
     "list_months",
   ];
-  /** 書きうる tool。**scope を要求する** (Refs ohishi-exp/rust-ichibanboshi#205 の 04b)。 */
-  const WRITE = { run_kintai_relay: "mcp.write" } as const;
+  /** 書きうる tool。**scope を要求する** (Refs ohishi-exp/rust-ichibanboshi#205 の 04b / 10)。 */
+  const WRITE = { run_kintai_relay: "mcp.write", run_kintai_recalc: "mcp.write" } as const;
 
   it("read-only tool と write tool を取り違えない", () => {
     expect(ALL_TOOLS.map((t) => t.name).sort()).toEqual(
