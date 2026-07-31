@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { uploadZip, getPendingUploads, rerunUpload, getUploads, splitCsv } from '~/utils/api'
+import { parseSplitCsvResponse } from '~/utils/scrape-split'
 import type { UploadResponse, PendingUpload } from '~/types'
 
 const isDragging = ref(false)
@@ -132,8 +133,12 @@ async function loadUploads() {
 async function handleSplit(uploadId: string) {
   splittingId.value = uploadId
   try {
-    await splitCsv(uploadId)
-    splitResults.value[uploadId] = { success: true, message: '分割完了' }
+    // 200 が返っても個別 CSV の PUT が失敗していることがある (`split_failed`)。
+    // 「分割完了」と言い切ると、運行が消えたままなのに直したつもりになる (Refs #205-40)。
+    const failed = parseSplitCsvResponse(await splitCsv(uploadId))
+    splitResults.value[uploadId] = failed !== null && failed > 0
+      ? { success: false, message: `${failed} 件失敗したままです` }
+      : { success: true, message: '分割完了' }
   } catch (e) {
     splitResults.value[uploadId] = { success: false, message: e instanceof Error ? e.message : '失敗' }
   } finally {
@@ -189,6 +194,18 @@ onMounted(() => {
       color="success"
       variant="subtle"
       :title="`${result.operations_count} 件の運行データを取り込みました`"
+    />
+
+    <!-- 取り込みは成功したが CSV 分割が失敗した (Refs #205-40)。分割されていない運行は
+         `has_kudgivt = FALSE` のまま残り、読み取り側 3 クエリが全部 TRUE で絞るため
+         一覧からも欠け検知からも消える。取り込みの成功表示とは別枠で出す。 -->
+    <UAlert
+      v-if="result && (result.split_failed ?? 0) > 0"
+      icon="i-lucide-alert-triangle"
+      color="error"
+      variant="subtle"
+      :title="`CSV分割が ${result.split_failed} 件失敗しました`"
+      description="このままだと該当運行が一覧にも欠け検知にも出てきません。下の「アップロード履歴 / CSV分割」で該当のアップロードの「CSV分割」を押してやり直してください。"
     />
 
     <!-- Error -->
