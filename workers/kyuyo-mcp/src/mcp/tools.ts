@@ -348,6 +348,44 @@ export const getKosokuEventsTool = {
   },
 } satisfies ToolEntry<typeof getKosokuEventsArgs>;
 
+// ===== get_rest_diff =========================================================
+
+const getRestDiffArgs = z
+  .object({
+    month: z.string().regex(/^\d{4}-\d{2}$/).describe("対象年月 (YYYY-MM)"),
+    driver: z
+      .string()
+      .regex(/^\d{1,10}$/)
+      .optional()
+      .describe("乗務員CD (数字)。**省略すると全乗務員** — 1 回で対象が全部出る"),
+  })
+  .strict();
+
+export const getRestDiffTool = {
+  name: "get_rest_diff",
+  description:
+    "同じ運行について `time_card_dtako` 由来の休息と `dtako_events` 由来の休息を突き合わせ、" +
+    "**ずれている運行を名指しで返す** (Refs ohishi-exp/rust-ichibanboshi#205 の 41)。" +
+    "オンプレ (CakePHP) の `_setbyUnkoNo` は INSERT しかしないため、デジタコ側が休息を切り直しても " +
+    "`time_card_dtako` は追従せず**古い行が残る**。残ると勤務の切れ目が増えて拘束・休憩が狂う。" +
+    "ここに出た運行は旅費編集画面の「勤務時間再登録」(yhonda-ohishi/nginx#792) を押せば直る。" +
+    "**driver は省略可** — 省略すると月ぶんの対象が全部出る。" +
+    "items[] は {unko_no, driver_cds, run_date, dtako_rest_rows, dtako_events_rest_intervals, " +
+    "dtako_only, dtako_events_only}。`dtako_only` が古い行の疑い、`dtako_events_only` が未反映の疑い。" +
+    "items は max_items (500) で切られるが、`total` と乗務員別内訳 `by_driver` は**切る前の総数**。" +
+    "**判定には一切入らない観測用**で、拘束の値そのものは変えない。",
+  inputSchema: getRestDiffArgs,
+  execute: async (env: Env, args) => {
+    if (!parseYm(args.month)) throw new Error("month は YYYY-MM で指定してください");
+    const driver = args.driver ? `&driver=${encodeURIComponent(args.driver)}` : "";
+    return await fetchIchibanJson(
+      env,
+      `/api/kintai/rest-diff?month=${encodeURIComponent(args.month)}${driver}`,
+      "rest_diff",
+    );
+  },
+} satisfies ToolEntry<typeof getRestDiffArgs>;
+
 // ===== get_timecard_diff =====================================================
 
 const getTimecardDiffArgs = z
@@ -910,6 +948,7 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getWageReportTool as unknown as ToolEntry<z.ZodTypeAny>,
   getRestraintSummaryTool as unknown as ToolEntry<z.ZodTypeAny>,
   getKosokuEventsTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getRestDiffTool as unknown as ToolEntry<z.ZodTypeAny>,
   getTimecardDiffTool as unknown as ToolEntry<z.ZodTypeAny>,
   runKintaiRelayTool as unknown as ToolEntry<z.ZodTypeAny>,
   runKintaiRecalcTool as unknown as ToolEntry<z.ZodTypeAny>,
