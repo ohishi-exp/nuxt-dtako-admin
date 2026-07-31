@@ -749,6 +749,87 @@ export const runKintaiRelayTool = {
   },
 };
 
+// ── run_kintai_recalc ────────────────────────────────────────────────────────
+
+const runKintaiRecalcArgs = z.object({
+  month: z
+    .string()
+    .optional()
+    .describe("対象月 (YYYY-MM)。省略すると JST の当月"),
+  after_driver_cd: z
+    .number()
+    .int()
+    .optional()
+    .describe("続きから回す位置。前回の応答の next_after_driver_cd をそのまま渡す"),
+  max_drivers: z
+    .number()
+    .int()
+    .optional()
+    .describe("1 回で畳み直す乗務員数の上限 (既定 20、上限 50)"),
+  stale_only: z
+    .boolean()
+    .optional()
+    .describe("現行の logic_version を 1 つも持たない乗務員だけに絞る (既定 false)"),
+  apply: z
+    .boolean()
+    .optional()
+    .describe("**true で初めて GCP に書く**。省略時は変わる件数を数えるだけ (preview)"),
+});
+
+/**
+ * 全量再計算を GCP 側で 1 ページぶん進める (Refs ohishi-exp/rust-ichibanboshi#205 の 10)。
+ *
+ * `run_kintai_relay` が拾うのは**窓で打刻が変わった乗務員だけ**。`kosoku.rs` の
+ * deploy や TOML の閾値・丸め方を変えると全乗務員が一斉に stale になり、そちらでは
+ * 拾えない — この tool が受け持つ。**続きがある** — `next_after_driver_cd` を
+ * `after_driver_cd` に渡して呼び直すとページングできる。
+ *
+ * **ロジックはここに無い。** relay の `POST /kintai-relay/recalc` を service
+ * binding 越しに叩くだけで、`apply` の有無で受け側 (rust-ichibanboshi) への
+ * `GET`/`POST` を relay が選ぶ。ここは MCP の認証付き入口を出すだけ。
+ */
+export const runKintaiRecalcTool = {
+  name: "run_kintai_recalc",
+  description:
+    "全量再計算を 1 ページぶん進める (Refs ohishi-exp/rust-ichibanboshi#205 の 10)。" +
+    "`run_kintai_relay` が拾わない stale (kosoku.rs の deploy / TOML 変更由来) を畳み直す。" +
+    "**apply を付けない限り 1 行も書かない** — 変わる件数だけ返る (既定)。" +
+    "1 ページで終わらなければ応答の next_after_driver_cd が入る。" +
+    "**続きがあるので、それを after_driver_cd に渡して回りきるまで呼び直す** " +
+    "(`null` なら回りきっている)。応答の fold / stale は受け側の形をそのまま返す。",
+  inputSchema: runKintaiRecalcArgs,
+  // **write tool。** apply: true で本番 Supabase に書きうるので read tool と同じ扱いにしない
+  requiresScope: "mcp.write",
+  execute: async (env: Env, args: z.infer<typeof runKintaiRecalcArgs>) => {
+    if (args.month !== undefined && !parseYm(args.month)) {
+      throw new Error("month は YYYY-MM で指定してください");
+    }
+    const relay = env.SCRAPER_RELAY;
+    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
+    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+
+    const res = await relay.fetch("https://relay.internal/kintai-relay/recalc", {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
+      body: JSON.stringify({
+        month: args.month,
+        after_driver_cd: args.after_driver_cd,
+        max_drivers: args.max_drivers,
+        stale_only: args.stale_only,
+        apply: args.apply === true,
+      }),
+    });
+    const body = await res.text();
+    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
+    try {
+      return JSON.parse(body) as unknown;
+    } catch {
+      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
+    }
+  },
+};
+
 export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   listCompaniesTool as unknown as ToolEntry<z.ZodTypeAny>,
   listMonthsTool as unknown as ToolEntry<z.ZodTypeAny>,
@@ -757,4 +838,5 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getKosokuEventsTool as unknown as ToolEntry<z.ZodTypeAny>,
   getTimecardDiffTool as unknown as ToolEntry<z.ZodTypeAny>,
   runKintaiRelayTool as unknown as ToolEntry<z.ZodTypeAny>,
+  runKintaiRecalcTool as unknown as ToolEntry<z.ZodTypeAny>,
 ];

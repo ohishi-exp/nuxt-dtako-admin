@@ -58,6 +58,8 @@ const PROXY_BASE = "https://auth-worker.internal";
 
 const EVENTS_PATH = "/api/kintai/timecard/events";
 const WINDOW_PATH = "/api/kintai/timecard/window";
+/** 全量再計算の口 (rust-ichibanboshi `src/routes/kintai_recalc.rs`)。 */
+const RECALC_PATH = "/api/kintai/recalc";
 
 /** 窓の既定の月数 — **当月 + 前月**。始業 / 終業 の後追い修正を拾う幅。 */
 export const DEFAULT_MONTH_COUNT = 2;
@@ -299,4 +301,65 @@ export function buildDeps(opts: {
       });
     },
   };
+}
+
+export interface KintaiRecalcInput {
+  /** 対象月 (`YYYY-MM`)。省略時は JST の当月。 */
+  month?: string;
+  /** 続きから回す位置。前回の応答の `next_after_driver_cd` をそのまま渡す。 */
+  afterDriverCd?: number;
+  /** 1 回で畳み直す乗務員数の上限 (受け側の既定 20、上限 50)。 */
+  maxDrivers?: number;
+  /** 現行の `logic_version` を 1 つも持たない乗務員だけに絞る。既定 `false`。 */
+  staleOnly?: boolean;
+  /** **`true` で初めて書く。** 既定は 1 行も書かない (受け側の `GET` と同じ意味)。 */
+  apply?: boolean;
+  /** 当月の判定に使う時刻 (ms)。**テスト用** — 省略時は `Date.now()`。 */
+  now?: number;
+}
+
+/**
+ * 全量再計算を 1 ページぶん進める (Refs ohishi-exp/rust-ichibanboshi#205 の 10)。
+ *
+ * 窓の中継 ([`relayKintaiWindow`]) と違って**続きがある** — `after_driver_cd` で
+ * 呼び出し側がページングする。応答 (`fold` / `stale` / `next_after_driver_cd`) は
+ * 受け側の形をそのまま返す。ここで reshape すると、受け側がフィールドを足したときに
+ * 中継だけ直し忘れて情報が欠ける (`.gcp()` は auth-worker `/ichibanboshi-proxy`
+ * 経由、`buildDeps` と同じ資格情報)。
+ *
+ * `apply` が無ければ `GET` (受け側は絶対に書かない口)、`apply: true` なら `POST`。
+ */
+export async function relayKintaiRecalc(
+  deps: Pick<KintaiRelayDeps, "gcp">,
+  input: KintaiRecalcInput,
+): Promise<unknown> {
+  const month = input.month ?? jstMonth(input.now ?? Date.now());
+  if (!MONTH_RE.test(month)) {
+    throw new KintaiRelayError(`month は YYYY-MM で指定してください: ${month}`);
+  }
+  const apply = input.apply === true;
+
+  if (apply) {
+    return readJson<unknown>(
+      await deps.gcp(RECALC_PATH, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          month,
+          after_driver_cd: input.afterDriverCd,
+          max_drivers: input.maxDrivers,
+          stale_only: input.staleOnly === true,
+          apply: true,
+        }),
+      }),
+      "gcp kintai recalc",
+    );
+  }
+
+  // **GET は書かない口。** apply を持たせない (受け側の型と同じ塞ぎ方)
+  const q = new URLSearchParams({ month });
+  if (input.afterDriverCd !== undefined) q.set("after_driver_cd", String(input.afterDriverCd));
+  if (input.maxDrivers !== undefined) q.set("max_drivers", String(input.maxDrivers));
+  if (input.staleOnly === true) q.set("stale_only", "true");
+  return readJson<unknown>(await deps.gcp(`${RECALC_PATH}?${q}`), "gcp kintai recalc");
 }

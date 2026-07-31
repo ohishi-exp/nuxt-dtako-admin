@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   relayKintaiWindow,
+  relayKintaiRecalc,
   windowMonths,
   jstMonth,
   tenantForCompId,
@@ -210,6 +211,121 @@ describe("relayKintaiWindow (ohishi-exp/rust-ichibanboshi#205 の 04b)", () => {
       onprem: { [EVENTS]: () => new Response("<html>login</html>", { status: 200 }) },
     });
     await expect(relayKintaiWindow(d, { month: "2026-06" })).rejects.toThrow(/parse failed/);
+  });
+});
+
+const RECALC = "/api/kintai/recalc";
+
+/** `relayKintaiRecalc` は gcp() しか使わない。呼ばれた順に記録する。 */
+function gcpStub(table: Record<string, unknown | ((init?: RequestInit) => Response)>) {
+  const calls: { path: string; method?: string; body?: string }[] = [];
+  const gcp = vi.fn(async (path: string, init?: RequestInit) => {
+    calls.push({ path, method: init?.method, body: init?.body as string | undefined });
+    const key = path.split("?")[0]!;
+    const hit = table[key];
+    if (hit === undefined) return new Response("no stub", { status: 404 });
+    if (typeof hit === "function") return (hit as (i?: RequestInit) => Response)(init);
+    return json(hit);
+  });
+  return { gcp, calls };
+}
+
+describe("relayKintaiRecalc (ohishi-exp/rust-ichibanboshi#205 の 10)", () => {
+  it("壊れた month は 1 回も叩かずに落ちる", async () => {
+    const { gcp, calls } = gcpStub({});
+    await expect(relayKintaiRecalc({ gcp }, { month: "2026-7" })).rejects.toBeInstanceOf(
+      KintaiRelayError,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it("**month 省略時は JST の当月** (`now` で固定できる)", async () => {
+    const { gcp, calls } = gcpStub({ [RECALC]: { month: "2026-06" } });
+    await relayKintaiRecalc({ gcp }, { now: NOW });
+    expect(calls[0]!.path).toContain("month=2026-06");
+  });
+
+  it("**month も now も無ければ実時刻の当月**を使う (既定で呼べる)", async () => {
+    const { gcp, calls } = gcpStub({ [RECALC]: {} });
+    await relayKintaiRecalc({ gcp }, {});
+    const url = new URL(`https://x${calls[0]!.path}`);
+    expect(url.searchParams.get("month")).toBe(jstMonth(Date.now()));
+  });
+
+  it("**apply が無ければ GET** — 受け側の書けない口を叩く", async () => {
+    const { gcp, calls } = gcpStub({ [RECALC]: { drivers: [], stale: {} } });
+    const r = await relayKintaiRecalc(
+      { gcp },
+      { month: "2026-06", afterDriverCd: 1130, maxDrivers: 10, staleOnly: true },
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.method).toBeUndefined();
+    const url = new URL(`https://x${calls[0]!.path}`);
+    expect(url.pathname).toBe(RECALC);
+    expect(url.searchParams.get("month")).toBe("2026-06");
+    expect(url.searchParams.get("after_driver_cd")).toBe("1130");
+    expect(url.searchParams.get("max_drivers")).toBe("10");
+    expect(url.searchParams.get("stale_only")).toBe("true");
+    // **受け側の応答をそのまま返す** — reshape しない
+    expect(r).toEqual({ drivers: [], stale: {} });
+  });
+
+  it("GET の query は省略項目を持たない (欠けた値を 'undefined' 文字列で送らない)", async () => {
+    const { gcp, calls } = gcpStub({ [RECALC]: {} });
+    await relayKintaiRecalc({ gcp }, { month: "2026-06" });
+    const url = new URL(`https://x${calls[0]!.path}`);
+    expect(url.searchParams.has("after_driver_cd")).toBe(false);
+    expect(url.searchParams.has("max_drivers")).toBe(false);
+    expect(url.searchParams.has("stale_only")).toBe(false);
+  });
+
+  it("**apply: true なら POST** — 初めて書く", async () => {
+    const { gcp, calls } = gcpStub({
+      [RECALC]: { month: "2026-06", apply: true, next_after_driver_cd: 9999 },
+    });
+    const r = await relayKintaiRecalc(
+      { gcp },
+      { month: "2026-06", afterDriverCd: 1130, maxDrivers: 10, staleOnly: true, apply: true },
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.method).toBe("POST");
+    expect(calls[0]!.path).toBe(RECALC);
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      month: "2026-06",
+      after_driver_cd: 1130,
+      max_drivers: 10,
+      stale_only: true,
+      apply: true,
+    });
+    expect(r).toMatchObject({ next_after_driver_cd: 9999 });
+  });
+
+  it("POST でも省略項目は素通しする (受け側の Option がそのまま None になる)", async () => {
+    const { gcp, calls } = gcpStub({ [RECALC]: {} });
+    await relayKintaiRecalc({ gcp }, { month: "2026-06", apply: true });
+    const sent = JSON.parse(calls[0]!.body!);
+    expect(sent.after_driver_cd).toBeUndefined();
+    expect(sent.max_drivers).toBeUndefined();
+    expect(sent.stale_only).toBe(false);
+  });
+
+  it("どちら側が落ちたかを本文の先頭付きで返す (GET / POST 両方)", async () => {
+    const fail = () => new Response("boom", { status: 502 });
+    const get = gcpStub({ [RECALC]: fail });
+    await expect(relayKintaiRecalc(get, { month: "2026-06" })).rejects.toThrow(
+      /gcp kintai recalc: status 502: boom/,
+    );
+    const post = gcpStub({ [RECALC]: fail });
+    await expect(relayKintaiRecalc(post, { month: "2026-06", apply: true })).rejects.toThrow(
+      /gcp kintai recalc: status 502: boom/,
+    );
+  });
+
+  it("JSON でない応答は parse failed で落とす", async () => {
+    const { gcp } = gcpStub({ [RECALC]: () => new Response("<html>", { status: 200 }) });
+    await expect(relayKintaiRecalc({ gcp }, { month: "2026-06" })).rejects.toThrow(
+      /parse failed/,
+    );
   });
 });
 
