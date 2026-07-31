@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
+  ETAGS_MAX_RANGE_DAYS,
   formatSplitAllDone,
+  formatUnsplitTotal,
   initialSplitStatus,
   parseSplitCsvResponse,
   retriedSplitStatus,
   splitLineClass,
   splitRetryTarget,
+  unsplitCheckRange,
 } from '~/utils/scrape-split'
 
 describe('splitRetryTarget', () => {
@@ -111,6 +114,54 @@ describe('formatSplitAllDone', () => {
     expect(formatSplitAllDone({ candidates: 2, success: 1, failed: 1 }))
       .toBe('候補 2 件 / 処理 2 件 (成功 1 / 失敗 1)')
     expect(formatSplitAllDone({})).toBe('候補 0 件 / 処理 0 件 (成功 0 / 失敗 0)')
+  })
+})
+
+describe('unsplitCheckRange', () => {
+  it('spans the earliest to the latest scraped date', () => {
+    expect(unsplitCheckRange(['2026-07-03', '2026-07-01', '2026-07-02']))
+      .toEqual({ from: '2026-07-01', to: '2026-07-03' })
+  })
+
+  it('handles a single day', () => {
+    expect(unsplitCheckRange(['2026-07-01'])).toEqual({ from: '2026-07-01', to: '2026-07-01' })
+  })
+
+  it('returns null for no dates', () => {
+    expect(unsplitCheckRange([])).toBeNull()
+    expect(unsplitCheckRange([''])).toBeNull()
+  })
+
+  it('accepts exactly the alc limit and rejects one more (40 日)', () => {
+    expect(ETAGS_MAX_RANGE_DAYS).toBe(40)
+    // 2026-07-01 〜 2026-08-09 = 40 日ちょうど
+    expect(unsplitCheckRange(['2026-07-01', '2026-08-09']))
+      .toEqual({ from: '2026-07-01', to: '2026-08-09' })
+    // 41 日は alc が 400 を返すので問い合わせない
+    expect(unsplitCheckRange(['2026-07-01', '2026-08-10'])).toBeNull()
+  })
+
+  it('returns null for unparseable dates instead of sending a bad range', () => {
+    expect(unsplitCheckRange(['not-a-date', 'also-bad'])).toBeNull()
+  })
+})
+
+describe('formatUnsplitTotal', () => {
+  it('shouts when unsplit operations remain', () => {
+    const line = formatUnsplitTotal({ from: '2026-07-01', to: '2026-07-01' }, 1)
+    expect(line.level).toBe('error')
+    expect(line.text).toContain('1 件残っています')
+    expect(line.text).toContain('2026-07-01')
+    expect(line.text).toContain('まとめて分割')
+  })
+
+  it('always says the count is tenant-scoped (0 件でも「全部大丈夫」と読ませない)', () => {
+    const ok = formatUnsplitTotal({ from: '2026-07-01', to: '2026-07-03' }, 0)
+    expect(ok.level).toBe('info')
+    expect(ok.text).toContain('2026-07-01〜2026-07-03')
+    expect(ok.text).toContain('ログイン中のテナント')
+    expect(formatUnsplitTotal({ from: '2026-07-01', to: '2026-07-01' }, 2).text)
+      .toContain('ログイン中のテナント')
   })
 })
 

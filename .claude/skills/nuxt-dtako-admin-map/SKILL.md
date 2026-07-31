@@ -981,7 +981,18 @@ alc の運行数が 1130 → 1129 に減った)。
 - **`split_failed === 0` は「分割済み」の十分条件ではない**。alc の
   `update_has_kudgivt` が当たらなかった unko_no は `tracing::warn!` されるだけで
   `Ok(0)` が返る (R2 側は trim しない生文字列 / DB 側は trim 済みのキーずれ)。
-  実数は `GET /api/dtako/events/etags` の `unsplit_total` (rust-alc-api#587) で見る
+  よって `/scraper` は**取り込みの後に必ず答え合わせをする** —
+  `GET /api/dtako/events/etags` (`getDtakoEventsEtags`) の **`unsplit_total`**
+  (= `has_kudgivt = FALSE` の実数、rust-alc-api#587) を取り、0 でなければ赤字で出す。
+  2026-07-31 に消えた 1 件に気づけたのはこの値であって `split_failed` ではなかった。
+  期間上限は alc 側 `MAX_RANGE_DAYS_ETAGS` = **40 日** (超えたら問い合わせず、
+  「省略した」と画面に出す)。**この数はログイン中のテナントぶんだけ**なので、
+  0 件表示にも必ずその但し書きを付ける (`formatUnsplitTotal`)
+- ⚠️ **自動リトライは「`split-csv/{id}` が呼び手のテナントで絞られない」ことに
+  依存している。** dtako の 2 社は別テナントで、`全企業` スクレイプはログイン中の
+  管理者と無関係な comp も回すため。**将来 alc がこの口をテナント絞りにしたら、
+  別テナントぶんの自動リトライは黙って効かなくなる** — その時は relay DO 側から
+  内部経路で呼ぶ等に作り替えること (#205 監督が別途起票予定、2026-07-31)
 
 ### 関連ファイル
 

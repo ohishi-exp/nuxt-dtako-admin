@@ -512,6 +512,35 @@ export async function splitCsv(uploadId: string): Promise<any> {
   return request<any>(`/api/split-csv/${uploadId}`, { method: 'POST' })
 }
 
+/** `GET /api/dtako/events/etags` の応答のうち、未 split の把握に使う部分だけ
+ * (ippoan/rust-alc-api#587)。`items` (月ゲートの指紋) はここでは使わない。 */
+export interface DtakoEventsEtagsResponse {
+  unsplit?: { unko_no: string, driver_cd: string, reading_date: string }[]
+  /** `has_kudgivt = FALSE` の運行の**実数** (`unsplit` は 500 件で切られるが、こちらは切られない)。 */
+  unsplit_total?: number
+  warnings?: string[]
+}
+
+/**
+ * 指定期間に **CSV 分割されていない運行 (`has_kudgivt = FALSE`)** が何件あるかを引く。
+ *
+ * `split_failed` は「分割が失敗した件数」であって「分割済みか」ではない — alc 側の
+ * `update_has_kudgivt` が当たらなかった unko_no は warn されるだけで成功扱いになる
+ * ため、`split_failed === 0` でも未分割が残ることがある (実害 2026-07-31)。
+ * **取り込みの後始末が本当に効いたかはこの実数で確認する** (Refs #205-40)。
+ *
+ * 期間上限は alc 側 `MAX_RANGE_DAYS_ETAGS` = **40 日** (超えると 400)。
+ * テナントは呼び手 (ログイン中の管理者) のもので絞られる。
+ */
+export async function getDtakoEventsEtags(
+  dateFrom: string,
+  dateTo: string,
+): Promise<DtakoEventsEtagsResponse> {
+  return request<DtakoEventsEtagsResponse>(
+    `/api/dtako/events/etags?date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`,
+  )
+}
+
 export async function splitCsvAllStream(
   onProgress: (evt: any) => void,
 ): Promise<void> {

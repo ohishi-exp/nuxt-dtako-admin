@@ -1,14 +1,17 @@
 <script setup lang="ts">
-import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl, saveScrapeHistory, buildScraperZipUrl, buildEtcCsvDownloadUrl, splitCsv, splitCsvAllStream } from '~/utils/api'
+import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl, saveScrapeHistory, buildScraperZipUrl, buildEtcCsvDownloadUrl, splitCsv, splitCsvAllStream, getDtakoEventsEtags } from '~/utils/api'
 import type { ScrapeResult, ScrapeHistoryItem, PendingUpload, ScrapeStatusEntry } from '~/types'
 import type { ScrapeProgressEvent } from '~/utils/api'
 import {
+  ETAGS_MAX_RANGE_DAYS,
   formatSplitAllDone,
+  formatUnsplitTotal,
   initialSplitStatus,
   parseSplitCsvResponse,
   retriedSplitStatus,
   splitLineClass,
   splitRetryTarget,
+  unsplitCheckRange,
   type SplitAllDoneEvent,
 } from '~/utils/scrape-split'
 
@@ -327,6 +330,41 @@ async function drainSplitRetries() {
   await Promise.all(pendingSplitRetries.splice(0))
 }
 
+// --- 取り込み後の答え合わせ (Refs #205-40) ---
+//
+// `split_failed === 0` は「分割済み」の十分条件ではない (alc の update_has_kudgivt が
+// 当たらなかった unko_no は warn されるだけで Ok(0))。**本当に読み取り側に出るように
+// なったか**は `GET /api/dtako/events/etags` の `unsplit_total` (= has_kudgivt = FALSE
+// の実数、rust-alc-api#587) で確かめる。2026-07-31 に消えた 1 件に気づけたのは
+// この値であって split_failed ではなかった。
+//
+// この確認は**取り込みの成否を左右しない** — 失敗しても警告行を 1 本出すだけ。
+
+const unsplitLine = ref<{ level: 'info' | 'error', text: string } | null>(null)
+
+async function checkUnsplit(dates: string[]) {
+  const range = unsplitCheckRange(dates)
+  if (!range) {
+    // 期間が alc の上限 (40 日) を超えた。黙って飛ばすと「確認した」と誤読されるので出す。
+    unsplitLine.value = dates.length
+      ? { level: 'info', text: `未分割の確認は省略しました (対象期間が ${ETAGS_MAX_RANGE_DAYS} 日を超えています)` }
+      : null
+    return
+  }
+  try {
+    const res = await getDtakoEventsEtags(range.from, range.to)
+    unsplitLine.value = typeof res.unsplit_total === 'number'
+      ? formatUnsplitTotal(range, res.unsplit_total)
+      : { level: 'info', text: '未分割の件数を確認できませんでした (alc が unsplit_total を返していません)' }
+  }
+  catch (e) {
+    unsplitLine.value = {
+      level: 'error',
+      text: `未分割の確認に失敗しました: ${e instanceof Error ? e.message : '不明なエラー'}`,
+    }
+  }
+}
+
 // --- 未分割をまとめて分割 (手動、Refs #205-40) ---
 //
 // 自動やり直しが拾えるのは「今回のスクレイプで取り込んだ upload」だけ。過去の
@@ -428,6 +466,7 @@ async function handleScrape() {
 
   // 分割のやり直しが終わるまで「実行中」を解かない (残っているのに完了に見えるのを防ぐ)
   await drainSplitRetries()
+  await checkUnsplit(tasks.value.map(t => t.date))
   isRunning.value = false
   await loadCalendar()
   await loadHistory()
@@ -491,6 +530,7 @@ async function handleRerun(task: DayTask) {
   task.status = task.results.some(r => r.status === 'error') ? 'error' : 'success'
   // 分割のやり直しが終わるまで「実行中」を解かない (残っているのに完了に見えるのを防ぐ)
   await drainSplitRetries()
+  await checkUnsplit(tasks.value.map(t => t.date))
   isRunning.value = false
   await loadCalendar()
   await loadHistory()
@@ -555,6 +595,7 @@ async function handleRerunAllErrors() {
 
   // 分割のやり直しが終わるまで「実行中」を解かない (残っているのに完了に見えるのを防ぐ)
   await drainSplitRetries()
+  await checkUnsplit(tasks.value.map(t => t.date))
   isRunning.value = false
   await loadCalendar()
   await loadHistory()
@@ -696,6 +737,7 @@ async function handleHistoryRerun(item: ScrapeHistoryItem) {
 
   // 分割のやり直しが終わるまで「実行中」を解かない (残っているのに完了に見えるのを防ぐ)
   await drainSplitRetries()
+  await checkUnsplit(tasks.value.map(t => t.date))
   isRunning.value = false
   await loadCalendar()
   await loadHistory()
@@ -958,6 +1000,18 @@ onMounted(() => {
           size="xs"
           @click="handleRerunAllErrors"
         />
+      </div>
+
+      <!-- 取り込み後の答え合わせ (Refs #205-40)。split_failed が 0 でも未分割が残る
+           ことがあるので、has_kudgivt = FALSE の実数 (`unsplit_total`) で確かめる。 -->
+      <div
+        v-if="unsplitLine"
+        class="text-xs"
+        :class="unsplitLine.level === 'error'
+          ? 'font-bold text-red-600 dark:text-red-400'
+          : 'text-gray-500 dark:text-gray-400'"
+      >
+        {{ unsplitLine.text }}
       </div>
 
       <div class="space-y-2">
