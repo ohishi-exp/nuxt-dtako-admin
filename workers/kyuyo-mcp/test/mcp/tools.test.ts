@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   getKosokuEventsTool,
+  getRestDiffTool,
   getTimecardDiffTool,
   listCompaniesTool,
   listMonthsTool,
@@ -451,6 +452,81 @@ describe("get_kosoku_events", () => {
     await expect(
       getKosokuEventsTool.execute(kosokuEnv(), { driver: "1051", month: "2026-06" }),
     ).rejects.toThrow("応答が JSON ではありません");
+  });
+});
+
+// ===== get_rest_diff ==========================================================
+//
+// `fetchIchibanJson` の失敗系は get_kosoku_events で見ているので、ここは
+// **乗務員を省略できること**と URL の形、そして上流の応答を解釈せずそのまま
+// 返すことに絞る (Refs ohishi-exp/rust-ichibanboshi#205 の 41)。
+
+const REST_DIFF_BODY = {
+  month: "2026-06",
+  driver: null,
+  from: "2026-06-01 00:00:00",
+  to: "2026-07-02 00:00:00",
+  total: 1,
+  items: [
+    {
+      unko_no: "26061409573000000034471",
+      driver_cds: [1445],
+      run_date: "2026-06-14",
+      dtako_rest_rows: 5,
+      dtako_events_rest_intervals: 1,
+      dtako_only: ["2026-06-18 07:50:36"],
+      dtako_events_only: ["2026-06-19 13:22:00"],
+    },
+  ],
+  by_driver: { "1445": 1 },
+  scanned_unko: 1,
+  skipped_rows: 0,
+  max_items: 500,
+};
+
+describe("get_rest_diff", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("乗務員を省略すると全乗務員ぶんを 1 回で引く", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      calls.push(url);
+      return new Response(JSON.stringify(REST_DIFF_BODY), { status: 200 });
+    });
+
+    const res = await getRestDiffTool.execute(kosokuEnv(), { month: "2026-06" });
+
+    // 上流の応答を**解釈せずそのまま**返す (by_driver も総数のまま届く)
+    expect(res).toEqual(REST_DIFF_BODY);
+    expect(calls).toEqual([
+      "https://rust-ichiban.example.com/api/kintai/rest-diff?month=2026-06",
+    ]);
+  });
+
+  it("乗務員を指定すれば query に載る", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      calls.push(url);
+      return new Response(JSON.stringify(REST_DIFF_BODY), { status: 200 });
+    });
+
+    await getRestDiffTool.execute(kosokuEnv(), { month: "2026-06", driver: "1445" });
+
+    expect(calls[0]).toBe(
+      "https://rust-ichiban.example.com/api/kintai/rest-diff?month=2026-06&driver=1445",
+    );
+  });
+
+  it("範囲外の月は上流を叩く前に落とす", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    await expect(getRestDiffTool.execute(kosokuEnv(), { month: "2026-13" })).rejects.toThrow(
+      "YYYY-MM",
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -998,6 +1074,9 @@ describe("ALL_TOOLS", () => {
     // POST が無く、この tool にも apply 相当の引数が無いので write 側に置かない
     "get_kintai_day_summaries",
     "get_kosoku_events",
+    // 休息のずれの診断 (Refs ohishi-exp/rust-ichibanboshi#205 の 41)。
+    // 上流に GET しか無く、判定にも入らない素の観測なので read-only
+    "get_rest_diff",
     "get_restraint_summary",
     "get_timecard_diff",
     "get_wage_report",
