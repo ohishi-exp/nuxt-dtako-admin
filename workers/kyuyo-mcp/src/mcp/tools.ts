@@ -765,7 +765,15 @@ const runKintaiRecalcArgs = z.object({
     .number()
     .int()
     .optional()
-    .describe("1 回で畳み直す乗務員数の上限 (既定 20、上限 50)"),
+    .describe(
+      "1 ページで畳む乗務員数。既定 100、上限 150。" +
+        "**月ゲートに指紋を書かせたい (= 次回以降のゼロ読みを成立させたい) 場合は、" +
+        "母集団を 1 ページに収める値**を指定すること — gate を書く条件に" +
+        "「1 ページで回りきる」が含まれるため。" +
+        "逆に **logic_version 変更直後の全量 apply は 50 程度に落とす**こと " +
+        "(etags 約 25 秒 + 全量読み + 全員ぶんの書き込みが Cloudflare の 100 秒上限を" +
+        "超えて 524 になる実測がある)。",
+    ),
   stale_only: z
     .boolean()
     .optional()

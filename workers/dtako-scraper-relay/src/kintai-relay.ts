@@ -310,7 +310,14 @@ export interface KintaiRecalcInput {
   month?: string;
   /** 続きから回す位置。前回の応答の `next_after_driver_cd` をそのまま渡す。 */
   afterDriverCd?: number;
-  /** 1 回で畳み直す乗務員数の上限 (受け側の既定 20、上限 50)。 */
+  /**
+   * 1 ページで畳む乗務員数 (受け側の既定 100、上限 150 =
+   * `kintai_recalc::MAX_MAX_FOLD_DRIVERS`)。
+   *
+   * **月ゲートに指紋を書かせたいなら母集団を 1 ページに収めること** — gate を書く
+   * 条件に「1 ページで回りきる」が含まれる。逆に `logic_version` 変更直後の全量
+   * apply は 50 程度に落とす (Cloudflare の 100 秒上限を超えて 524 になる実測)。
+   */
   maxDrivers?: number;
   /** 現行の `logic_version` を 1 つも持たない乗務員だけに絞る。既定 `false`。 */
   staleOnly?: boolean;
