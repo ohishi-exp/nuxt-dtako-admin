@@ -994,6 +994,9 @@ describe("get_timecard_diff (mode=summary)", () => {
 describe("ALL_TOOLS", () => {
   /** 読むだけの tool。scope を要求しない (binding_jwt が valid なら誰でも呼べる)。 */
   const READ_ONLY = [
+    // 畳んだ結果を読むだけ (Refs ohishi-exp/rust-ichibanboshi#205 の 23)。受け側に
+    // POST が無く、この tool にも apply 相当の引数が無いので write 側に置かない
+    "get_kintai_day_summaries",
     "get_kosoku_events",
     "get_restraint_summary",
     "get_timecard_diff",

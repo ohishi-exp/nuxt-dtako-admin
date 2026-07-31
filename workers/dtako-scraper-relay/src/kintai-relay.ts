@@ -60,6 +60,8 @@ const EVENTS_PATH = "/api/kintai/timecard/events";
 const WINDOW_PATH = "/api/kintai/timecard/window";
 /** 全量再計算の口 (rust-ichibanboshi `src/routes/kintai_recalc.rs`)。 */
 const RECALC_PATH = "/api/kintai/recalc";
+/** 畳んだ結果の読み出し口 (rust-ichibanboshi `src/routes/kintai_day_summaries.rs`)。 */
+const DAY_SUMMARIES_PATH = "/api/kintai/day-summaries";
 
 /** 窓の既定の月数 — **当月 + 前月**。始業 / 終業 の後追い修正を拾う幅。 */
 export const DEFAULT_MONTH_COUNT = 2;
@@ -308,7 +310,14 @@ export interface KintaiRecalcInput {
   month?: string;
   /** 続きから回す位置。前回の応答の `next_after_driver_cd` をそのまま渡す。 */
   afterDriverCd?: number;
-  /** 1 回で畳み直す乗務員数の上限 (受け側の既定 20、上限 50)。 */
+  /**
+   * 1 ページで畳む乗務員数 (受け側の既定 100、上限 150 =
+   * `kintai_recalc::MAX_MAX_FOLD_DRIVERS`)。
+   *
+   * **月ゲートに指紋を書かせたいなら母集団を 1 ページに収めること** — gate を書く
+   * 条件に「1 ページで回りきる」が含まれる。逆に `logic_version` 変更直後の全量
+   * apply は 50 程度に落とす (Cloudflare の 100 秒上限を超えて 524 になる実測)。
+   */
   maxDrivers?: number;
   /** 現行の `logic_version` を 1 つも持たない乗務員だけに絞る。既定 `false`。 */
   staleOnly?: boolean;
@@ -362,4 +371,42 @@ export async function relayKintaiRecalc(
   if (input.maxDrivers !== undefined) q.set("max_drivers", String(input.maxDrivers));
   if (input.staleOnly === true) q.set("stale_only", "true");
   return readJson<unknown>(await deps.gcp(`${RECALC_PATH}?${q}`), "gcp kintai recalc");
+}
+
+export interface KintaiDaySummariesInput {
+  /** 対象月 (`YYYY-MM`)。**必須扱い** — 省略時は JST の当月。 */
+  month?: string;
+  /** 乗務員CD で 1 人に絞る。省略時は全乗務員。 */
+  driver?: string;
+  /** 当月の判定に使う時刻 (ms)。**テスト用** — 省略時は `Date.now()`。 */
+  now?: number;
+}
+
+/**
+ * 畳んだ結果 (`kintai.day_summaries`) を読む (Refs ohishi-exp/rust-ichibanboshi#205 の 23)。
+ *
+ * **読むだけ。** 受け側に `POST` は無い ([`relayKintaiRecalc`] と違い `apply` 相当が
+ * 存在しない口)。ここにも書き込み側を足さないこと。
+ *
+ * 応答は**そのまま返す**。用途はオンプレ基準 JSON との突合で、キー
+ * (`乗務員CD|暦日|開始時刻`) も列名も受け側が基準ファイルに合わせてある —
+ * ここで件数の要約や整形を挟むと、突合スクリプトがそのまま比較できなくなる。
+ * (`relayKintaiRecalc` を reshape しない理由と同じで、受け側が列を足したときに
+ * 中継だけ直し忘れて情報が欠ける形も避ける。)
+ */
+export async function relayKintaiDaySummaries(
+  deps: Pick<KintaiRelayDeps, "gcp">,
+  input: KintaiDaySummariesInput,
+): Promise<unknown> {
+  const month = input.month ?? jstMonth(input.now ?? Date.now());
+  if (!MONTH_RE.test(month)) {
+    throw new KintaiRelayError(`month は YYYY-MM で指定してください: ${month}`);
+  }
+  const q = new URLSearchParams({ month });
+  // 空文字は「絞らない」— `driver=` を送ると受け側の `parse_driver` が 400 にする
+  if (input.driver) q.set("driver", input.driver);
+  return readJson<unknown>(
+    await deps.gcp(`${DAY_SUMMARIES_PATH}?${q}`),
+    "gcp kintai day-summaries",
+  );
 }

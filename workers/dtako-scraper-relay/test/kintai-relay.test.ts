@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   relayKintaiWindow,
   relayKintaiRecalc,
+  relayKintaiDaySummaries,
   windowMonths,
   jstMonth,
   tenantForCompId,
@@ -324,6 +325,91 @@ describe("relayKintaiRecalc (ohishi-exp/rust-ichibanboshi#205 の 10)", () => {
   it("JSON でない応答は parse failed で落とす", async () => {
     const { gcp } = gcpStub({ [RECALC]: () => new Response("<html>", { status: 200 }) });
     await expect(relayKintaiRecalc({ gcp }, { month: "2026-06" })).rejects.toThrow(
+      /parse failed/,
+    );
+  });
+});
+
+const DAY_SUMMARIES = "/api/kintai/day-summaries";
+
+describe("relayKintaiDaySummaries (ohishi-exp/rust-ichibanboshi#205 の 23)", () => {
+  /** 受け側が返す形 — キーは `乗務員CD|暦日|開始時刻`、値は shift_source + 分数。 */
+  const SAMPLE = {
+    month: "2026-06",
+    rows: 1,
+    summaries: {
+      "1130|2026-06-01|2026-06-01 08:00:00": {
+        shift_source: "punch",
+        restraint_minutes: 720,
+        working_minutes: 600,
+      },
+    },
+  };
+
+  it("壊れた month は 1 回も叩かずに落ちる", async () => {
+    const { gcp, calls } = gcpStub({});
+    await expect(
+      relayKintaiDaySummaries({ gcp }, { month: "2026-7" }),
+    ).rejects.toBeInstanceOf(KintaiRelayError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("**month 省略時は JST の当月** (`now` で固定できる)", async () => {
+    const { gcp, calls } = gcpStub({ [DAY_SUMMARIES]: SAMPLE });
+    await relayKintaiDaySummaries({ gcp }, { now: NOW });
+    expect(calls[0]!.path).toContain("month=2026-06");
+  });
+
+  it("**month も now も無ければ実時刻の当月**を使う", async () => {
+    const { gcp, calls } = gcpStub({ [DAY_SUMMARIES]: SAMPLE });
+    await relayKintaiDaySummaries({ gcp }, {});
+    const url = new URL(`https://x${calls[0]!.path}`);
+    expect(url.searchParams.get("month")).toBe(jstMonth(Date.now()));
+  });
+
+  it("**GET で読むだけ。** 応答はそのまま返す (突合がそのまま比較できるように)", async () => {
+    const { gcp, calls } = gcpStub({ [DAY_SUMMARIES]: SAMPLE });
+    const r = await relayKintaiDaySummaries({ gcp }, { month: "2026-06", driver: "1130" });
+    expect(calls).toHaveLength(1);
+    // method 未指定 = GET。body も無い — この経路は 1 行も書けない
+    expect(calls[0]!.method).toBeUndefined();
+    expect(calls[0]!.body).toBeUndefined();
+    const url = new URL(`https://x${calls[0]!.path}`);
+    expect(url.pathname).toBe(DAY_SUMMARIES);
+    expect(url.searchParams.get("month")).toBe("2026-06");
+    expect(url.searchParams.get("driver")).toBe("1130");
+    // **reshape しない** — 件数の要約も整形も挟まない
+    expect(r).toEqual(SAMPLE);
+  });
+
+  it("driver を省いたら query に出さない (`driver=` は受け側が 400 にする)", async () => {
+    const { gcp, calls } = gcpStub({ [DAY_SUMMARIES]: SAMPLE });
+    await relayKintaiDaySummaries({ gcp }, { month: "2026-06" });
+    expect(new URL(`https://x${calls[0]!.path}`).searchParams.has("driver")).toBe(false);
+
+    const empty = gcpStub({ [DAY_SUMMARIES]: SAMPLE });
+    await relayKintaiDaySummaries(empty, { month: "2026-06", driver: "" });
+    expect(new URL(`https://x${empty.calls[0]!.path}`).searchParams.has("driver")).toBe(false);
+  });
+
+  it("0 件の月も**そのまま通す** (空と「口が無い」を混ぜない)", async () => {
+    const empty = { month: "2026-06", rows: 0, summaries: {} };
+    const { gcp } = gcpStub({ [DAY_SUMMARIES]: empty });
+    expect(await relayKintaiDaySummaries({ gcp }, { month: "2026-06" })).toEqual(empty);
+  });
+
+  it("どちら側が落ちたかを本文の先頭付きで返す", async () => {
+    const { gcp } = gcpStub({ [DAY_SUMMARIES]: () => new Response("boom", { status: 502 }) });
+    await expect(relayKintaiDaySummaries({ gcp }, { month: "2026-06" })).rejects.toThrow(
+      /gcp kintai day-summaries: status 502: boom/,
+    );
+  });
+
+  it("JSON でない応答は parse failed で落とす", async () => {
+    const { gcp } = gcpStub({
+      [DAY_SUMMARIES]: () => new Response("<html>", { status: 200 }),
+    });
+    await expect(relayKintaiDaySummaries({ gcp }, { month: "2026-06" })).rejects.toThrow(
       /parse failed/,
     );
   });
