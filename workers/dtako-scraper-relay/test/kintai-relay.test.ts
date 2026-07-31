@@ -1,9 +1,12 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
-  relayKintaiPage,
+  relayKintaiWindow,
+  windowMonths,
+  jstMonth,
   tenantForCompId,
   buildDeps,
   KintaiRelayError,
+  MAX_MONTH_COUNT,
   type KintaiRelayDeps,
 } from "../src/kintai-relay";
 
@@ -37,192 +40,176 @@ function deps(handlers: {
   return { deps: d, calls };
 }
 
-const DRIVERS = "/api/kintai/timecard/drivers";
-const SIGNATURES = "/api/kintai/timecard/signatures";
-const DIFF = "/api/kintai/timecard/diff";
-const TIMECARD = "/api/kintai/timecard";
+const EVENTS = "/api/kintai/timecard/events";
+const WINDOW = "/api/kintai/timecard/window";
 
-describe("relayKintaiPage (ohishi-exp/rust-ichibanboshi#205 の 04b)", () => {
-  it("month が YYYY-MM でなければ 1 回も叩かない", async () => {
+/** 2026-06-15 12:00 JST。窓の既定を確かめるための固定時刻。 */
+const NOW = Date.UTC(2026, 5, 15, 3, 0, 0);
+
+function punch(driver: number, at: string, state: string) {
+  return { datetime: at, driver_id: driver, source: "timecard", state };
+}
+
+describe("relayKintaiWindow (ohishi-exp/rust-ichibanboshi#205 の 04b)", () => {
+  it("**窓の既定は当月 + 前月** — 始業/終業 の後追い修正を拾う幅", () => {
+    expect(windowMonths("2026-06", 2)).toEqual(["2026-05", "2026-06"]);
+    // 年をまたいでも畳める
+    expect(windowMonths("2026-01", 3)).toEqual(["2025-11", "2025-12", "2026-01"]);
+    expect(windowMonths("2026-06", 1)).toEqual(["2026-06"]);
+  });
+
+  it("当月は **JST** で切る (UTC のままだと月初/月末が 1 日ずれる)", () => {
+    // 2026-06-30 21:00 UTC = 2026-07-01 06:00 JST
+    expect(jstMonth(Date.UTC(2026, 5, 30, 21, 0, 0))).toBe("2026-07");
+    expect(jstMonth(Date.UTC(2026, 5, 30, 14, 0, 0))).toBe("2026-06");
+  });
+
+  it("**month も now も無ければ実時刻の当月**を使う (既定で呼べる)", async () => {
+    const { deps: d } = deps({
+      onprem: { [EVENTS]: { drivers: [], events: [] } },
+      gcp: { [WINDOW]: {} },
+    });
+    const r = await relayKintaiWindow(d, {});
+    expect(r.months).toHaveLength(2);
+    for (const m of r.months) expect(m).toMatch(/^\d{4}-\d{2}$/);
+    expect(r.months[1]).toBe(jstMonth(Date.now()));
+  });
+
+  it("month / month_count が壊れていれば 1 回も叩かない", async () => {
     const { deps: d, calls } = deps({});
-    await expect(relayKintaiPage(d, { month: "2026-7" })).rejects.toBeInstanceOf(KintaiRelayError);
+    await expect(relayKintaiWindow(d, { month: "2026-7" })).rejects.toBeInstanceOf(
+      KintaiRelayError,
+    );
+    await expect(relayKintaiWindow(d, { month: "2026-06", monthCount: 0 })).rejects.toThrow(
+      /month_count/,
+    );
+    await expect(
+      relayKintaiWindow(d, { month: "2026-06", monthCount: MAX_MONTH_COUNT + 1 }),
+    ).rejects.toThrow(/month_count/);
+    await expect(relayKintaiWindow(d, { month: "2026-06", monthCount: 1.5 })).rejects.toThrow(
+      /month_count/,
+    );
     expect(calls).toHaveLength(0);
   });
 
-  it("乗務員が居なければ署名も引かない", async () => {
-    const { deps: d, calls } = deps({
-      onprem: { [DRIVERS]: { drivers: [], next_after_driver_cd: null } },
-    });
-    const r = await relayKintaiPage(d, { month: MONTH });
-    expect(r.drivers).toBe(0);
-    expect(r.nextAfterDriverCd).toBeNull();
-    expect(calls.filter((c) => c.side === "gcp")).toHaveLength(0);
-  });
-
-  it("応答に drivers が無くても落ちない (空として扱う)", async () => {
-    const { deps: d } = deps({ onprem: { [DRIVERS]: {} } });
-    const r = await relayKintaiPage(d, { month: MONTH });
-    expect(r.drivers).toBe(0);
-    expect(r.nextAfterDriverCd).toBeNull();
-  });
-
-  it("**署名 → 差分 → 反映** を順に回し、件数を積む", async () => {
-    const batch = { month: MONTH, driver_cd: 1130, days: {}, delete_dates: [] };
+  it("**1 往復ずつで運びきる。** 続きの位置は無い", async () => {
     const { deps: d, calls } = deps({
       onprem: {
-        [DRIVERS]: { drivers: [1130], next_after_driver_cd: 1130 },
-        [DIFF]: { batches: [batch], unknown_states: ["謎"] },
+        [EVENTS]: {
+          months: ["2026-05", "2026-06"],
+          drivers: [1130, 1200],
+          events: [punch(1130, "2026-06-01 08:00:00", "始業")],
+          elapsed_ms: 140,
+        },
       },
       gcp: {
-        [SIGNATURES]: { signatures: { "2026-07-01": SIG } },
-        [TIMECARD]: { days_written: 2, days_deleted: 1, misplaced: 0, unknown_states: ["別の謎"] },
+        [WINDOW]: {
+          drivers_written: 1,
+          days_written: 1,
+          days_deleted: 0,
+          misplaced: 0,
+          unknown_states: ["謎"],
+          dry_run: true,
+          elapsed_ms: 55,
+        },
       },
     });
-    const r = await relayKintaiPage(d, { month: MONTH, apply: true });
+    const r = await relayKintaiWindow(d, { now: NOW });
 
-    expect(r.drivers).toBe(1);
-    expect(r.batchesSent).toBe(1);
-    expect(r.daysWritten).toBe(2);
-    expect(r.daysDeleted).toBe(1);
-    expect(r.misplaced).toBe(0);
-    expect(r.nextAfterDriverCd).toBe(1130);
-    // **両側の unknown_states がまとまる**
-    expect(r.unknownStates).toEqual(["別の謎", "謎"]);
+    expect(r.months).toEqual(["2026-05", "2026-06"]);
+    expect(r.drivers).toBe(2);
+    expect(r.events).toBe(1);
+    expect(r.daysWritten).toBe(1);
+    expect(r.unknownStates).toEqual(["謎"]);
+    // オンプレ 1 回 + GCP 1 回だけ
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.path).toContain("months=2026-05%2C2026-06");
 
-    // 引いた署名をそのまま diff に渡している (ここで計算しない)
-    const diffCall = calls.find((c) => c.path === DIFF)!;
-    expect(JSON.parse(diffCall.body!)).toEqual({
-      month: MONTH,
-      remote: { "1130": { "2026-07-01": SIG } },
-    });
+    // 窓と乗務員をそのまま渡している (ここで突き合わせない)
+    const sent = JSON.parse(calls[1]!.body!);
+    expect(sent.months).toEqual(["2026-05", "2026-06"]);
+    expect(sent.drivers).toEqual([1130, 1200]);
+    expect(sent.events).toHaveLength(1);
   });
 
-  it("**apply が無ければ GCP へ 1 件も渡さない** (数えるだけ)", async () => {
-    const batch = { month: MONTH, driver_cd: 1130, days: {}, delete_dates: [] };
+  it("**apply が無ければ dry_run を立てて渡す** — 受け側に 1 行も書かせない", async () => {
     const { deps: d, calls } = deps({
-      onprem: {
-        [DRIVERS]: { drivers: [1130], next_after_driver_cd: null },
-        [DIFF]: { batches: [batch] },
-      },
-      gcp: { [SIGNATURES]: { signatures: {} } },
+      onprem: { [EVENTS]: { drivers: [1130], events: [] } },
+      gcp: { [WINDOW]: { dry_run: true } },
     });
-    const r = await relayKintaiPage(d, { month: MONTH });
-    expect(r.batchesSent).toBe(1);
-    expect(r.daysWritten).toBe(0);
-    expect(calls.filter((c) => c.path === TIMECARD)).toHaveLength(0);
+    const r = await relayKintaiWindow(d, { month: "2026-06" });
+    expect(JSON.parse(calls[1]!.body!).dry_run).toBe(true);
+    expect(r.dryRun).toBe(true);
+
+    const applied = deps({
+      onprem: { [EVENTS]: { drivers: [1130], events: [] } },
+      gcp: { [WINDOW]: { dry_run: false } },
+    });
+    const r2 = await relayKintaiWindow(applied.deps, { month: "2026-06", apply: true });
+    expect(JSON.parse(applied.calls[1]!.body!).dry_run).toBe(false);
+    expect(r2.dryRun).toBe(false);
   });
 
-  it("差分が無ければ何も渡らない (batches が欠けていても同じ)", async () => {
-    const { deps: d, calls } = deps({
-      onprem: {
-        [DRIVERS]: { drivers: [1130], next_after_driver_cd: null },
-        [DIFF]: {},
-      },
-      gcp: { [SIGNATURES]: {} },
+  it("応答が欠けていても 0 として積む (drivers / events も同じ)", async () => {
+    const { deps: d } = deps({ onprem: { [EVENTS]: {} }, gcp: { [WINDOW]: {} } });
+    const r = await relayKintaiWindow(d, { month: "2026-06" });
+    expect(r).toMatchObject({
+      drivers: 0,
+      events: 0,
+      driversWritten: 0,
+      daysWritten: 0,
+      daysDeleted: 0,
+      misplaced: 0,
+      dryRun: false,
     });
-    const r = await relayKintaiPage(d, { month: MONTH, apply: true });
-    expect(r.batchesSent).toBe(0);
     expect(r.unknownStates).toEqual([]);
-    expect(calls.filter((c) => c.path === TIMECARD)).toHaveLength(0);
   });
 
-  it("相手が返した件数が欠けていても 0 として積む", async () => {
-    const batch = { month: MONTH, driver_cd: 1130, days: {}, delete_dates: [] };
+  it("**各レグの所要時間を返す。** 相手の自己申告も拾う", async () => {
     const { deps: d } = deps({
-      onprem: {
-        [DRIVERS]: { drivers: [1130], next_after_driver_cd: null },
-        [DIFF]: { batches: [batch] },
-      },
-      gcp: { [SIGNATURES]: { signatures: {} }, [TIMECARD]: {} },
+      onprem: { [EVENTS]: { drivers: [], events: [], elapsed_ms: 140 } },
+      gcp: { [WINDOW]: { elapsed_ms: 55 } },
     });
-    const r = await relayKintaiPage(d, { month: MONTH, apply: true });
-    expect(r).toMatchObject({ daysWritten: 0, daysDeleted: 0, misplaced: 0 });
-  });
-
-  it("ページングの指定は query に乗る", async () => {
-    const { deps: d, calls } = deps({
-      onprem: { [DRIVERS]: { drivers: [], next_after_driver_cd: null } },
-    });
-    await relayKintaiPage(d, { month: MONTH, afterDriverCd: 1200, maxDrivers: 5 });
-    expect(calls[0]!.path).toContain("after_driver_cd=1200");
-    expect(calls[0]!.path).toContain("max_drivers=5");
-  });
-
-  it("**どちら側が落ちたか**を本文の先頭付きで返す", async () => {
-    const fail = () => new Response("boom detail", { status: 502 });
-    const onpremDown = deps({ onprem: { [DRIVERS]: fail } });
-    await expect(relayKintaiPage(onpremDown.deps, { month: MONTH })).rejects.toThrow(
-      /onprem drivers: status 502: boom detail/,
-    );
-
-    const gcpDown = deps({
-      onprem: { [DRIVERS]: { drivers: [1130], next_after_driver_cd: null } },
-      gcp: { [SIGNATURES]: fail },
-    });
-    await expect(relayKintaiPage(gcpDown.deps, { month: MONTH })).rejects.toThrow(
-      /gcp signatures \(driver 1130\): status 502/,
-    );
-
-    const diffDown = deps({
-      onprem: { [DRIVERS]: { drivers: [1130], next_after_driver_cd: null }, [DIFF]: fail },
-      gcp: { [SIGNATURES]: {} },
-    });
-    await expect(relayKintaiPage(diffDown.deps, { month: MONTH })).rejects.toThrow(
-      /onprem diff: status 502/,
-    );
-
-    const applyDown = deps({
-      onprem: {
-        [DRIVERS]: { drivers: [1130], next_after_driver_cd: null },
-        [DIFF]: { batches: [{}] },
-      },
-      gcp: { [SIGNATURES]: {}, [TIMECARD]: fail },
-    });
-    await expect(
-      relayKintaiPage(applyDown.deps, { month: MONTH, apply: true }),
-    ).rejects.toThrow(/gcp timecard: status 502/);
-  });
-
-  it("**各レグの所要時間を返す。** オンプレの自己申告も拾う", async () => {
-    const batch = { month: MONTH, driver_cd: 1130, days: {}, delete_dates: [] };
-    const { deps: d } = deps({
-      onprem: {
-        // オンプレが自己申告した DB 時間。relay 側の計測との差が Tunnel の往復
-        [DRIVERS]: { drivers: [1130], next_after_driver_cd: null, elapsed_ms: 12 },
-        [DIFF]: { batches: [batch], elapsed_ms: 34 },
-      },
-      gcp: { [SIGNATURES]: { signatures: {} }, [TIMECARD]: {} },
-    });
-    const r = await relayKintaiPage(d, { month: MONTH, apply: true });
-
-    expect(r.timings.onpremDriversMs).toBe(12);
-    expect(r.timings.onpremDiffMs).toBe(34);
-    for (const k of ["totalMs", "driversMs", "signaturesMs", "diffMs", "applyMs"] as const) {
+    const r = await relayKintaiWindow(d, { month: "2026-06" });
+    expect(r.timings.onpremEventsMs).toBe(140);
+    expect(r.timings.gcpApplyMs).toBe(55);
+    for (const k of ["totalMs", "eventsMs", "applyMs"] as const) {
       expect(typeof r.timings[k]).toBe("number");
       expect(r.timings[k]).toBeGreaterThanOrEqual(0);
     }
   });
 
-  it("**古い版のオンプレが相手なら自己申告は null。** 数でない値も拾わない", async () => {
+  it("古い版が相手なら自己申告は null (数でない値も拾わない)", async () => {
     const { deps: d } = deps({
-      // elapsed_ms を返さない版 / 文字列で返す版のどちらも null に倒す
-      onprem: { [DRIVERS]: { drivers: [], next_after_driver_cd: null, elapsed_ms: "12" } },
+      onprem: { [EVENTS]: { drivers: [], events: [], elapsed_ms: "140" } },
+      gcp: { [WINDOW]: {} },
     });
-    const r = await relayKintaiPage(d, { month: MONTH });
-    expect(r.timings.onpremDriversMs).toBeNull();
-    expect(r.timings.onpremDiffMs).toBeNull();
-    // 乗務員が居なければ 2 以降は走らないので 0 のまま
-    expect(r.timings.signaturesMs).toBe(0);
-    expect(r.timings.diffMs).toBe(0);
-    expect(r.timings.applyMs).toBe(0);
-    expect(typeof r.timings.totalMs).toBe("number");
+    const r = await relayKintaiWindow(d, { month: "2026-06" });
+    expect(r.timings.onpremEventsMs).toBeNull();
+    expect(r.timings.gcpApplyMs).toBeNull();
+  });
+
+  it("**どちら側が落ちたか**を本文の先頭付きで返す", async () => {
+    const fail = () => new Response("boom detail", { status: 502 });
+    const onpremDown = deps({ onprem: { [EVENTS]: fail } });
+    await expect(relayKintaiWindow(onpremDown.deps, { month: "2026-06" })).rejects.toThrow(
+      /onprem events: status 502: boom detail/,
+    );
+
+    const gcpDown = deps({
+      onprem: { [EVENTS]: { drivers: [], events: [] } },
+      gcp: { [WINDOW]: fail },
+    });
+    await expect(relayKintaiWindow(gcpDown.deps, { month: "2026-06" })).rejects.toThrow(
+      /gcp timecard window: status 502/,
+    );
   });
 
   it("JSON でない応答は parse failed で落とす (HTML のログイン画面等)", async () => {
     const { deps: d } = deps({
-      onprem: { [DRIVERS]: () => new Response("<html>login</html>", { status: 200 }) },
+      onprem: { [EVENTS]: () => new Response("<html>login</html>", { status: 200 }) },
     });
-    await expect(relayKintaiPage(d, { month: MONTH })).rejects.toThrow(/parse failed/);
+    await expect(relayKintaiWindow(d, { month: "2026-06" })).rejects.toThrow(/parse failed/);
   });
 });
 

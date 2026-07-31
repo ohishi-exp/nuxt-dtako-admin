@@ -682,45 +682,49 @@ export const getTimecardDiffTool = {
 // ── run_kintai_relay ──────────────────────────────────────────────────────────
 
 const runKintaiRelayArgs = z.object({
-  month: z.string().describe("対象月 (YYYY-MM)"),
-  after_driver_cd: z
+  month: z
+    .string()
+    .optional()
+    .describe("窓の最後の月 (YYYY-MM)。省略すると JST の当月"),
+  month_count: z
     .number()
     .int()
     .optional()
-    .describe("続きから回す位置。前回の応答の next_after_driver_cd を渡す"),
-  max_drivers: z.number().int().optional().describe("1 回で回す乗務員数 (既定 50、上限 100)"),
+    .describe("窓の月数 (既定 2 = 当月 + 前月、上限 12)"),
   apply: z
     .boolean()
     .optional()
-    .describe("**true で初めて GCP に書く**。省略時は差分の件数を数えるだけ"),
+    .describe("**true で初めて GCP に書く**。省略時は変わる件数を数えるだけ"),
 });
 
 /**
- * 打刻をオンプレ → GCP へ 1 ページぶん運ぶ (Refs ohishi-exp/rust-ichibanboshi#205 の 04b)。
+ * 打刻をオンプレ → GCP へ**窓ぶんまるごと**運ぶ (Refs ohishi-exp/rust-ichibanboshi#205 の 04b)。
  *
  * **運ぶロジックはここに無い。** relay の `POST /kintai-relay/run` を service binding
- * 越しに叩くだけで、署名の突き合わせは rust 側 (`kintai_push::plan_batch`)、tenant の
+ * 越しに叩くだけで、署名の突き合わせは受け側 (`kintai_push::plan_window`)、tenant の
  * 解決は relay 側 (KV `dtako_accounts`)。ここは MCP の認証付き入口を出すだけ —
  * 人間に `INTERNAL_SHARED_SECRET` を手渡さずに起動できるようにするのが目的。
  */
 export const runKintaiRelayTool = {
   name: "run_kintai_relay",
   description:
-    "社内 MariaDB の打刻を GCP 側 (Supabase kintai.*) へ 1 ページぶん運ぶ " +
+    "社内 MariaDB の打刻を GCP 側 (Supabase kintai.*) へ運ぶ " +
     "(Refs ohishi-exp/rust-ichibanboshi#205 の 04b)。" +
-    "**apply を付けない限り 1 件も書かない** — 差分の件数だけ返る (既定)。" +
-    "オンプレから乗務員を 1 ページ引き、GCP から署名を集め、差分だけを GCP へ渡す。" +
-    "Cloudflare Tunnel の 30 秒上限があるので乗務員数で区切られる — " +
-    "応答の nextAfterDriverCd が null になるまで呼び直すこと。" +
+    "**apply を付けない限り 1 行も書かない** — 変わる件数だけ返る (既定)。" +
+    "窓 (既定 = 当月 + 前月) をまるごと 1 回で運ぶので、**呼び直しは要らない**。" +
+    "毎回まるごと送り直すのは 始業/終業 が後から直るため。" +
+    "書き込みは受け側の日単位署名が守るので、変わった日しか書かれない — " +
+    "daysWritten が 0 なら「変わっていない」であって「動かなかった」ではない。" +
     "misplaced が 0 でなければ運び方が壊れている。" +
     "unknownStates が空でなければ上流に DDL の CHECK に無い state が来ている。" +
-    "timings に各レグの所要時間 (ms) が入る — 遅いときはどのレグかをまずこれで見る " +
-    "(onprem*Ms との差が Tunnel の往復ぶん)。",
+    "timings に各レグの所要時間 (ms) が入る (onprem*Ms との差が Tunnel の往復ぶん)。",
   inputSchema: runKintaiRelayArgs,
   // **write tool。** 打刻を本番 Supabase に書きうるので read tool と同じ扱いにしない
   requiresScope: "mcp.write",
   execute: async (env: Env, args: z.infer<typeof runKintaiRelayArgs>) => {
-    if (!parseYm(args.month)) throw new Error("month は YYYY-MM で指定してください");
+    if (args.month !== undefined && !parseYm(args.month)) {
+      throw new Error("month は YYYY-MM で指定してください");
+    }
     const relay = env.SCRAPER_RELAY;
     if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
     const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
@@ -731,8 +735,7 @@ export const runKintaiRelayTool = {
       headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
       body: JSON.stringify({
         month: args.month,
-        after_driver_cd: args.after_driver_cd,
-        max_drivers: args.max_drivers,
+        month_count: args.month_count,
         apply: args.apply === true,
       }),
     });

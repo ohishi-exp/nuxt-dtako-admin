@@ -45,15 +45,11 @@ describe("run_kintai_relay (ohishi-exp/rust-ichibanboshi#205 の 04b)", () => {
   });
 
   it("proof を付けて relay の /kintai-relay/run を叩き、応答をそのまま返す", async () => {
-    const report = { month: "2026-06", drivers: 3, nextAfterDriverCd: 1200 };
+    const report = { months: ["2026-05", "2026-06"], drivers: 94, daysWritten: 0 };
     const e = env({
       SCRAPER_RELAY: { fetch: vi.fn(async () => new Response(JSON.stringify(report))) },
     });
-    const got = await runKintaiRelayTool.execute(e, {
-      month: "2026-06",
-      after_driver_cd: 1130,
-      max_drivers: 5,
-    });
+    const got = await runKintaiRelayTool.execute(e, { month: "2026-06", month_count: 2 });
     expect(got).toEqual(report);
     const call = (e.SCRAPER_RELAY as { fetch: ReturnType<typeof vi.fn> }).fetch.mock.calls[0]!;
     expect(call[0]).toBe("https://relay.internal/kintai-relay/run");
@@ -61,9 +57,17 @@ describe("run_kintai_relay (ohishi-exp/rust-ichibanboshi#205 の 04b)", () => {
     expect((init.headers as Record<string, string>)["X-Alc-Proxy-Secret"]).toBe(SECRET);
     expect(JSON.parse(init.body as string)).toMatchObject({
       month: "2026-06",
-      after_driver_cd: 1130,
-      max_drivers: 5,
+      month_count: 2,
     });
+  });
+
+  it("**month は省略できる** — 窓の既定 (JST 当月 + 前月) は relay 側が決める", async () => {
+    const e = env();
+    await runKintaiRelayTool.execute(e, {});
+    const call = (e.SCRAPER_RELAY as { fetch: ReturnType<typeof vi.fn> }).fetch.mock.calls[0]!;
+    const body = JSON.parse((call[1] as RequestInit).body as string);
+    expect(body.month).toBeUndefined();
+    expect(body.apply).toBe(false);
   });
 
   it("relay の失敗は本文の先頭を添えて上げる", async () => {

@@ -6,7 +6,7 @@
 // 10211/10061、nuxt-items/items-sync と同型)。
 export { DtakoScraperRelayDO } from "./dtako-scraper-relay-do";
 import { resolveTheearthRouting } from "./theearth-session";
-import { buildDeps, relayKintaiPage, tenantForCompId } from "./kintai-relay";
+import { buildDeps, relayKintaiWindow, tenantForCompId } from "./kintai-relay";
 import { resolveDtakoAccountsRaw, resolveSecretBinding, runScheduledCron } from "./cron";
 
 interface RelayWorkerEnv {
@@ -155,11 +155,12 @@ export default {
 };
 
 /**
- * `POST /kintai-relay/run` — 打刻を 1 ページぶん運ぶ。
+ * `POST /kintai-relay/run` — 打刻を**窓ぶんまるごと** 1 回で運ぶ。
  *
- * body は `{month, after_driver_cd?, max_drivers?, apply?}`。応答の
- * `nextAfterDriverCd` が `null` になるまで呼び出し側が呼び直す。
- * **`apply` を付けない限り GCP へは 1 件も渡さない** (件数だけ返る)。
+ * body は `{month?, month_count?, apply?}`。`month` 省略で JST の当月、
+ * `month_count` 省略で 2 か月 (当月 + 前月)。**呼び直しは要らない** —
+ * 乗務員でも日でも刻まないので 1 回で運びきる。
+ * **`apply` を付けない限り 1 行も書かない** (受け側に `dry_run` を立てて渡す)。
  *
  * 宣言が欠けていれば **503 で fail-closed** — 「走ったが実は何も運んでいない」を
  * 作らない。tenant は KV の `dtako_accounts` から `KINTAI_COMP_ID` で引く
@@ -204,7 +205,7 @@ async function handleKintaiRelay(request: Request, env: RelayWorkerEnv): Promise
     return fail(503, "tenant not resolved from dtako_accounts");
   }
 
-  let body: { month?: unknown; after_driver_cd?: unknown; max_drivers?: unknown; apply?: unknown };
+  let body: { month?: unknown; month_count?: unknown; apply?: unknown };
   try {
     body = (await request.json()) as typeof body;
   } catch {
@@ -220,10 +221,10 @@ async function handleKintaiRelay(request: Request, env: RelayWorkerEnv): Promise
     tenantId,
   });
   try {
-    const report = await relayKintaiPage(deps, {
-      month: String(body.month ?? ""),
-      afterDriverCd: typeof body.after_driver_cd === "number" ? body.after_driver_cd : null,
-      maxDrivers: typeof body.max_drivers === "number" ? body.max_drivers : undefined,
+    const report = await relayKintaiWindow(deps, {
+      // month 省略 = JST の当月。窓は既定で当月 + 前月
+      month: typeof body.month === "string" && body.month ? body.month : undefined,
+      monthCount: typeof body.month_count === "number" ? body.month_count : undefined,
       apply: body.apply === true,
     });
     console.log(JSON.stringify({ kintai_relay: "ok", ...report }));
