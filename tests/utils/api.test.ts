@@ -975,7 +975,7 @@ describe('api', () => {
       ]
       const received: unknown[] = []
       const promise = triggerScrapeStream(
-        { start_date: '2026-01-01', end_date: '2026-01-31', comp_id: 'C1', skip_upload: true },
+        { start_date: '2026-01-01', end_date: '2026-01-31', comp_id: 'C1' },
         evt => received.push(evt),
       )
 
@@ -986,7 +986,6 @@ describe('api', () => {
       expect(url.searchParams.get('start_date')).toBe('2026-01-01')
       expect(url.searchParams.get('end_date')).toBe('2026-01-31')
       expect(url.searchParams.get('comp_id')).toBe('C1')
-      expect(url.searchParams.get('skip_upload')).toBe('true')
       expect(url.searchParams.get('session')).toBeTruthy()
       for (const e of events) wsEmit(ws, e)
       await promise
