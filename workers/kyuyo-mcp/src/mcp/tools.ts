@@ -830,6 +830,72 @@ export const runKintaiRecalcTool = {
   },
 };
 
+// ── get_kintai_day_summaries ─────────────────────────────────────────────────
+
+const getKintaiDaySummariesArgs = z.object({
+  month: z
+    .string()
+    .regex(/^\d{4}-\d{2}$/)
+    .describe("対象年月 (YYYY-MM)"),
+  driver: z
+    .string()
+    .regex(/^\d{1,10}$/)
+    .optional()
+    .describe("乗務員CD (数字)。省略すると全乗務員"),
+});
+
+/**
+ * GCP 側で畳んだ日別サマリ (`kintai.day_summaries`) を読む
+ * (Refs ohishi-exp/rust-ichibanboshi#205 の 23)。
+ *
+ * **読むだけの tool。** 受け側 (`src/routes/kintai_day_summaries.rs`) に `POST` が
+ * 無く、`run_kintai_recalc` の `apply` に当たる引数もここには無い — 引数は
+ * `month` と `driver` の 2 つだけで、この tool からは 1 行も書けない。
+ *
+ * `requiresScope` を持たないのは既存の read tool (`get_kosoku_events` /
+ * `get_restraint_summary` 等) と揃えたため — この repo の read tool は
+ * `requiresScope` を持たず、`mcp.write` は書ける tool
+ * (`run_kintai_relay` / `run_kintai_recalc`) だけが要求する
+ * (`src/mcp/scope.ts`: `requiresScope` 無しは常に許可)。書けないこの tool に
+ * `mcp.write` と同じ強さを求めない。
+ *
+ * 応答は**そのまま返す**。用途はオンプレ基準 JSON (`get_timecard_diff` が使う側) との
+ * **行単位**の突合で、受け側がキー (`乗務員CD|暦日|開始時刻`) も列名も基準ファイルに
+ * 合わせてある。ここで件数の要約や整形を挟むと、突合スクリプトがそのまま比較できない。
+ */
+export const getKintaiDaySummariesTool = {
+  name: "get_kintai_day_summaries",
+  description:
+    "GCP 側で畳んだ日別サマリ (kintai.day_summaries) を月ぶん返す " +
+    "(Refs ohishi-exp/rust-ichibanboshi#205 の 23)。" +
+    "**読むだけ — 1 行も書かない。** " +
+    "キーは `乗務員CD|暦日|開始時刻`、値は shift_source と拘束/実働/休憩/深夜などの**分数**。" +
+    "オンプレ基準 (get_kosoku_events / 拘束時間管理表) との突合を総数ではなく" +
+    "**行・分単位**でやるための口で、応答は受け側の形をそのまま返す (整形も要約もしない)。" +
+    "データが 0 件の月は 404 ではなく rows: 0 と空の summaries が返る。",
+  inputSchema: getKintaiDaySummariesArgs,
+  execute: async (env: Env, args: z.infer<typeof getKintaiDaySummariesArgs>) => {
+    if (!parseYm(args.month)) throw new Error("month は YYYY-MM で指定してください");
+    const relay = env.SCRAPER_RELAY;
+    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
+    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+
+    const q = new URLSearchParams({ month: args.month });
+    if (args.driver) q.set("driver", args.driver);
+    const res = await relay.fetch(`https://relay.internal/kintai-relay/day-summaries?${q}`, {
+      headers: { "X-Alc-Proxy-Secret": secret },
+    });
+    const body = await res.text();
+    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
+    try {
+      return JSON.parse(body) as unknown;
+    } catch {
+      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
+    }
+  },
+};
+
 export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   listCompaniesTool as unknown as ToolEntry<z.ZodTypeAny>,
   listMonthsTool as unknown as ToolEntry<z.ZodTypeAny>,
@@ -839,4 +905,5 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getTimecardDiffTool as unknown as ToolEntry<z.ZodTypeAny>,
   runKintaiRelayTool as unknown as ToolEntry<z.ZodTypeAny>,
   runKintaiRecalcTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getKintaiDaySummariesTool as unknown as ToolEntry<z.ZodTypeAny>,
 ];
