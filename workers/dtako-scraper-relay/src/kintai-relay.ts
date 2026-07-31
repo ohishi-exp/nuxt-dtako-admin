@@ -66,6 +66,32 @@ export class KintaiRelayError extends Error {
   }
 }
 
+/**
+ * 各レグの所要時間 (ms)。**見積もりで上限を決めないための実測値。**
+ *
+ * `max_drivers` の既定は「1 乗務員あたり 0.2 秒」という見積もりで置かれていて、
+ * 本番では 10 人で Cloudflare の 524 (100 秒) を超えていた
+ * (ohishi-exp/rust-ichibanboshi#225)。どのレグが遅いかを応答に出しておけば、
+ * 次に遅くなったときにコードを読み直さずに切り分けられる。
+ *
+ * オンプレ自己申告 (`onprem*Ms`) との差が **Tunnel の往復ぶん**。DB が遅いのか
+ * 経路が遅いのかを、この 2 つの差で分ける。
+ */
+export interface KintaiRelayTimings {
+  totalMs: number;
+  /** 1. オンプレ: 乗務員の 1 ページ。 */
+  driversMs: number;
+  /** 2. GCP: 署名。**乗務員ごとに 1 往復**するのでここは人数に比例する。 */
+  signaturesMs: number;
+  /** 3. オンプレ: 差分。**524 を踏んだのはここ。** */
+  diffMs: number;
+  /** 4. GCP: 差分の反映。`apply` 無しなら 0。 */
+  applyMs: number;
+  /** オンプレが自己申告した所要時間。古い版が相手だと `null`。 */
+  onpremDriversMs: number | null;
+  onpremDiffMs: number | null;
+}
+
 /** 1 ページぶんの結果。 */
 export interface KintaiRelayReport {
   month: string;
@@ -81,6 +107,8 @@ export interface KintaiRelayReport {
   unknownStates: string[];
   /** 続きの位置。`null` なら回りきった。 */
   nextAfterDriverCd: number | null;
+  /** 各レグの所要時間。 */
+  timings: KintaiRelayTimings;
 }
 
 export interface KintaiRelayInput {
@@ -128,15 +156,32 @@ export async function relayKintaiPage(
     throw new KintaiRelayError(`month は YYYY-MM で指定してください: ${input.month}`);
   }
   const apply = input.apply === true;
+  // Workers の `Date.now()` は I/O をまたぐと進む。各レグは fetch を含むので測れる
+  const startedAt = Date.now();
+  const timings: KintaiRelayTimings = {
+    totalMs: 0,
+    driversMs: 0,
+    signaturesMs: 0,
+    diffMs: 0,
+    applyMs: 0,
+    onpremDriversMs: null,
+    onpremDiffMs: null,
+  };
+  /** 相手が自己申告した所要時間。古い版が相手なら `null` のまま。 */
+  const reported = (v: unknown) => (typeof v === "number" ? v : null);
 
   // ── 1. オンプレ: 対象月の乗務員を 1 ページ ────────────────────────────────
   const q = new URLSearchParams({ month: input.month });
   if (input.afterDriverCd != null) q.set("after_driver_cd", String(input.afterDriverCd));
   if (input.maxDrivers != null) q.set("max_drivers", String(input.maxDrivers));
-  const page = await readJson<{ drivers?: number[]; next_after_driver_cd?: number | null }>(
-    await deps.onprem(`${DRIVERS_PATH}?${q}`),
-    "onprem drivers",
-  );
+  const at1 = Date.now();
+  const page = await readJson<{
+    drivers?: number[];
+    next_after_driver_cd?: number | null;
+    elapsed_ms?: unknown;
+  }>(await deps.onprem(`${DRIVERS_PATH}?${q}`), "onprem drivers");
+  timings.driversMs = Date.now() - at1;
+  timings.onpremDriversMs = reported(page.elapsed_ms);
   const drivers = Array.isArray(page.drivers) ? page.drivers : [];
 
   const report: KintaiRelayReport = {
@@ -148,11 +193,16 @@ export async function relayKintaiPage(
     misplaced: 0,
     unknownStates: [],
     nextAfterDriverCd: page.next_after_driver_cd ?? null,
+    timings,
   };
-  if (drivers.length === 0) return report;
+  if (drivers.length === 0) {
+    timings.totalMs = Date.now() - startedAt;
+    return report;
+  }
 
   // ── 2. GCP: その乗務員ぶんの署名 ──────────────────────────────────────────
   // **ここでは中身を見ない。** 3 へそのまま渡し、突き合わせは Rust 側に任せる
+  const at2 = Date.now();
   const remote: Record<string, Record<string, string>> = {};
   for (const driver of drivers) {
     const sq = new URLSearchParams({ month: input.month, driver_cd: String(driver) });
@@ -162,11 +212,14 @@ export async function relayKintaiPage(
     );
     remote[String(driver)] = got.signatures ?? {};
   }
+  timings.signaturesMs = Date.now() - at2;
 
   // ── 3. オンプレ: 署名を渡して差分を受け取る ───────────────────────────────
+  const at3 = Date.now();
   const diff = await readJson<{
     batches?: unknown[];
     unknown_states?: string[];
+    elapsed_ms?: unknown;
   }>(
     await deps.onprem(DIFF_PATH, {
       method: "POST",
@@ -175,10 +228,13 @@ export async function relayKintaiPage(
     }),
     "onprem diff",
   );
+  timings.diffMs = Date.now() - at3;
+  timings.onpremDiffMs = reported(diff.elapsed_ms);
   const batches = Array.isArray(diff.batches) ? diff.batches : [];
   const unknown = new Set<string>(diff.unknown_states ?? []);
 
   // ── 4. GCP: 差分を渡す ────────────────────────────────────────────────────
+  const at4 = Date.now();
   for (const batch of batches) {
     if (!apply) {
       report.batchesSent += 1; // 数えるだけ (計画の可視化)
@@ -204,7 +260,9 @@ export async function relayKintaiPage(
     for (const s of applied.unknown_states ?? []) unknown.add(s);
   }
 
+  timings.applyMs = Date.now() - at4;
   report.unknownStates = [...unknown].sort();
+  timings.totalMs = Date.now() - startedAt;
   return report;
 }
 

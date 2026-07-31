@@ -183,6 +183,41 @@ describe("relayKintaiPage (ohishi-exp/rust-ichibanboshi#205 の 04b)", () => {
     ).rejects.toThrow(/gcp timecard: status 502/);
   });
 
+  it("**各レグの所要時間を返す。** オンプレの自己申告も拾う", async () => {
+    const batch = { month: MONTH, driver_cd: 1130, days: {}, delete_dates: [] };
+    const { deps: d } = deps({
+      onprem: {
+        // オンプレが自己申告した DB 時間。relay 側の計測との差が Tunnel の往復
+        [DRIVERS]: { drivers: [1130], next_after_driver_cd: null, elapsed_ms: 12 },
+        [DIFF]: { batches: [batch], elapsed_ms: 34 },
+      },
+      gcp: { [SIGNATURES]: { signatures: {} }, [TIMECARD]: {} },
+    });
+    const r = await relayKintaiPage(d, { month: MONTH, apply: true });
+
+    expect(r.timings.onpremDriversMs).toBe(12);
+    expect(r.timings.onpremDiffMs).toBe(34);
+    for (const k of ["totalMs", "driversMs", "signaturesMs", "diffMs", "applyMs"] as const) {
+      expect(typeof r.timings[k]).toBe("number");
+      expect(r.timings[k]).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("**古い版のオンプレが相手なら自己申告は null。** 数でない値も拾わない", async () => {
+    const { deps: d } = deps({
+      // elapsed_ms を返さない版 / 文字列で返す版のどちらも null に倒す
+      onprem: { [DRIVERS]: { drivers: [], next_after_driver_cd: null, elapsed_ms: "12" } },
+    });
+    const r = await relayKintaiPage(d, { month: MONTH });
+    expect(r.timings.onpremDriversMs).toBeNull();
+    expect(r.timings.onpremDiffMs).toBeNull();
+    // 乗務員が居なければ 2 以降は走らないので 0 のまま
+    expect(r.timings.signaturesMs).toBe(0);
+    expect(r.timings.diffMs).toBe(0);
+    expect(r.timings.applyMs).toBe(0);
+    expect(typeof r.timings.totalMs).toBe("number");
+  });
+
   it("JSON でない応答は parse failed で落とす (HTML のログイン画面等)", async () => {
     const { deps: d } = deps({
       onprem: { [DRIVERS]: () => new Response("<html>login</html>", { status: 200 }) },

@@ -688,7 +688,7 @@ const runKintaiRelayArgs = z.object({
     .int()
     .optional()
     .describe("続きから回す位置。前回の応答の next_after_driver_cd を渡す"),
-  max_drivers: z.number().int().optional().describe("1 回で回す乗務員数 (既定 10、上限 50)"),
+  max_drivers: z.number().int().optional().describe("1 回で回す乗務員数 (既定 50、上限 100)"),
   apply: z
     .boolean()
     .optional()
@@ -713,7 +713,9 @@ export const runKintaiRelayTool = {
     "Cloudflare Tunnel の 30 秒上限があるので乗務員数で区切られる — " +
     "応答の nextAfterDriverCd が null になるまで呼び直すこと。" +
     "misplaced が 0 でなければ運び方が壊れている。" +
-    "unknownStates が空でなければ上流に DDL の CHECK に無い state が来ている。",
+    "unknownStates が空でなければ上流に DDL の CHECK に無い state が来ている。" +
+    "timings に各レグの所要時間 (ms) が入る — 遅いときはどのレグかをまずこれで見る " +
+    "(onprem*Ms との差が Tunnel の往復ぶん)。",
   inputSchema: runKintaiRelayArgs,
   // **write tool。** 打刻を本番 Supabase に書きうるので read tool と同じ扱いにしない
   requiresScope: "mcp.write",
