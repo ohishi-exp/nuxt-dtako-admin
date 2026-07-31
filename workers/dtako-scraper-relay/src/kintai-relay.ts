@@ -2,24 +2,27 @@
  * 打刻 (タイムカード) をオンプレから GCP へ運ぶ (Refs ohishi-exp/rust-ichibanboshi#205 の 04b)。
  *
  * オンプレの rust-ichibanboshi は社内 MariaDB から打刻を読めるが、GCP 側の同じ
- * バイナリは読めない。**畳むのは GCP 側**にしたので、打刻を運ぶ必要がある。
+ * バイナリは読めない。**畳むのは GCP 側**にあるので、打刻を運ぶ必要がある。
  *
- * ## 往復するのは relay。オンプレは外へ出ない
+ * ## 窓ぶんをまるごと、1 往復ずつ
  *
- * relay が起動する側なので、オンプレから折り返させない。オンプレは
- * request / response だけで、送り先 URL も GCP の資格情報も持たない:
+ *   1. オンプレ `GET  /api/kintai/timecard/events?months=`  窓ぶんを全乗務員まとめて
+ *   2. GCP     `POST /api/kintai/timecard/window`          まるごと渡す
  *
- *   1. オンプレ `GET  /api/kintai/timecard/drivers`    対象月の乗務員を 1 ページ
- *   2. GCP     `GET  /api/kintai/timecard/signatures`  その乗務員ぶんの署名
- *   3. オンプレ `POST /api/kintai/timecard/diff`        署名を渡し、差分を受け取る
- *   4. GCP     `POST /api/kintai/timecard`             差分を渡す
+ * 以前は乗務員ごとに署名を引いてから差分を運んでいた。2026-07-31 の実測 (94 名) で
+ * **署名引きだけが 33.6 秒 / 全体の 94%** を占め、一方その月の全打刻の転送は
+ * **1.3 秒**で済んでいた — 費用は往復の回数であって転送量ではない。しかも apply 時は
+ * 反映も 1 batch ずつで、GCP へ 2N 往復していた (rust-ichibanboshi#228 で畳んだ)。
  *
- * ## 署名はここで計算しない
+ * ## 窓を毎回まるごと送り直す
  *
- * 2 で引いた署名を 3 へ**そのまま渡す**だけで、突き合わせは Rust 側
- * (`kintai_push::plan_batch`) が持つ。ここで `day_signature` を実装すると 2 実装に
- * なり、式が少しでもずれた瞬間に「中身は同じなのに毎回全日が違う」と判定して静かに
- * 全件を書き直し続ける (#205 の決定 3 で `kosoku.rs` を写さないのと同じ理由)。
+ * **始業 / 終業 は後から直る。** 積み増しだけにすると、直された打刻が永久に
+ * 反映されない。よって窓 (既定は当月 + 前月) を毎回送る。書き込みが無駄にならない
+ * のは受け側の日単位署名が守るから — **変わった日しか書かない**。
+ *
+ * 突き合わせも受け側 (`kintai_push::plan_window`)。ここで署名を計算すると
+ * `day_signature` が 2 実装になり、式が少しでもずれると「中身は同じなのに毎回全日が
+ * 違う」と判定して静かに全件を書き直し続ける (#205 の決定 3 と同じ理由)。
  *
  * ## tenant は KV から引く
  *
@@ -36,11 +39,10 @@
  *   されているので relay は持たない。relay が出すのは `X-Alc-Proxy-Secret` と
  *   `X-Tenant-ID` の 2 つだけ
  *
- * ## 1 回の呼び出しを乗務員数で区切る
+ * ## 冪等なので呼び直しは安全
  *
- * オンプレは Cloudflare Tunnel (30 秒上限) の内側にいる。`drivers` が `max_drivers`
- * で区切って `next_after_driver_cd` を返すので、`null` になるまで呼び直す。
- * **1 呼び出し = 1 ページ**にして、続きの判断は呼び出し側に残す。
+ * 読むだけの 1 と、変わった日しか書かない 2 の組なので、途中で落ちても
+ * やり直せば同じ状態に収束する。
  */
 
 /** service binding の最小形 (`cloudflare:workers` の型に依存しないための構造的型)。 */
@@ -54,10 +56,14 @@ const PROXY_PREFIX = "/ichibanboshi-proxy";
 /** service binding fetch 用の絶対 URL base。host は binding が無視するが path は必要。 */
 const PROXY_BASE = "https://auth-worker.internal";
 
-const DRIVERS_PATH = "/api/kintai/timecard/drivers";
-const SIGNATURES_PATH = "/api/kintai/timecard/signatures";
-const DIFF_PATH = "/api/kintai/timecard/diff";
-const TIMECARD_PATH = "/api/kintai/timecard";
+const EVENTS_PATH = "/api/kintai/timecard/events";
+const WINDOW_PATH = "/api/kintai/timecard/window";
+
+/** 窓の既定の月数 — **当月 + 前月**。始業 / 終業 の後追い修正を拾う幅。 */
+export const DEFAULT_MONTH_COUNT = 2;
+
+/** 窓の上限。広げるほど転送が増えるので、遡りたいときだけ明示させる。 */
+export const MAX_MONTH_COUNT = 12;
 
 export class KintaiRelayError extends Error {
   constructor(message: string) {
@@ -69,54 +75,55 @@ export class KintaiRelayError extends Error {
 /**
  * 各レグの所要時間 (ms)。**見積もりで上限を決めないための実測値。**
  *
- * `max_drivers` の既定は「1 乗務員あたり 0.2 秒」という見積もりで置かれていて、
- * 本番では 10 人で Cloudflare の 524 (100 秒) を超えていた
- * (ohishi-exp/rust-ichibanboshi#225)。どのレグが遅いかを応答に出しておけば、
- * 次に遅くなったときにコードを読み直さずに切り分けられる。
+ * かつて `max_drivers` の既定は「1 乗務員あたり 0.2 秒」という見積もりで置かれて
+ * いて、本番では 10 人で Cloudflare の 524 (100 秒) を超えていた
+ * (rust-ichibanboshi#225)。どのレグが遅いかを応答に出しておけば、次に遅くなった
+ * ときにコードを読み直さずに切り分けられる。
  *
  * オンプレ自己申告 (`onprem*Ms`) との差が **Tunnel の往復ぶん**。DB が遅いのか
  * 経路が遅いのかを、この 2 つの差で分ける。
  */
-export interface KintaiRelayTimings {
+export interface KintaiWindowTimings {
   totalMs: number;
-  /** 1. オンプレ: 乗務員の 1 ページ。 */
-  driversMs: number;
-  /** 2. GCP: 署名。**乗務員ごとに 1 往復**するのでここは人数に比例する。 */
-  signaturesMs: number;
-  /** 3. オンプレ: 差分。**524 を踏んだのはここ。** */
-  diffMs: number;
-  /** 4. GCP: 差分の反映。`apply` 無しなら 0。 */
+  /** 1. オンプレ: 窓ぶんの読み出し。 */
+  eventsMs: number;
+  /** 2. GCP: 反映 (dry-run でも突き合わせは走る)。 */
   applyMs: number;
-  /** オンプレが自己申告した所要時間。古い版が相手だと `null`。 */
-  onpremDriversMs: number | null;
-  onpremDiffMs: number | null;
+  /** 相手が自己申告した所要時間。古い版が相手だと `null`。 */
+  onpremEventsMs: number | null;
+  gcpApplyMs: number | null;
 }
 
-/** 1 ページぶんの結果。 */
-export interface KintaiRelayReport {
-  month: string;
-  /** 見た乗務員数。 */
+/** 1 回ぶんの結果。**窓は 1 回で運びきる** — 続きの位置は無い。 */
+export interface KintaiWindowReport {
+  /** 実際に運んだ月。 */
+  months: string[];
+  /** 送り主が見つけた乗務員数。 */
   drivers: number;
-  /** GCP へ渡した batch 数。 */
-  batchesSent: number;
+  /** 運んだ生行数。 */
+  events: number;
+  /** 書き換えた乗務員数。**大半は 0 のはず** (打刻はほとんど戻らない)。 */
+  driversWritten: number;
   daysWritten: number;
   daysDeleted: number;
-  /** 相手が「日/乗務員/月が食い違う」として弾いた行数。**0 でないと運び方が壊れている**。 */
+  /** 受け側が「窓の外 / 名乗っていない乗務員」として弾いた行数。**0 でないと壊れている**。 */
   misplaced: number;
-  /** DDL の CHECK に無かった `state` の実値 (両側ぶん)。 */
+  /** DDL の CHECK に無かった `state` の実値。 */
   unknownStates: string[];
-  /** 続きの位置。`null` なら回りきった。 */
-  nextAfterDriverCd: number | null;
-  /** 各レグの所要時間。 */
-  timings: KintaiRelayTimings;
+  /** **`true` なら件数は計画であって実績ではない** (1 行も書いていない)。 */
+  dryRun: boolean;
+  timings: KintaiWindowTimings;
 }
 
-export interface KintaiRelayInput {
-  month: string;
-  afterDriverCd?: number | null;
-  maxDrivers?: number;
-  /** **`false` なら GCP へ 1 件も渡さない** (既定)。差分の件数だけ数える。 */
+export interface KintaiWindowInput {
+  /** 窓の**最後の**月 (`YYYY-MM`)。省略時は JST の当月。 */
+  month?: string;
+  /** 窓の月数 (既定 [`DEFAULT_MONTH_COUNT`])。 */
+  monthCount?: number;
+  /** **`false` なら受け側に 1 行も書かせない** (既定)。件数だけ返る。 */
   apply?: boolean;
+  /** 当月の判定に使う時刻 (ms)。**テスト用** — 省略時は `Date.now()`。 */
+  now?: number;
 }
 
 export interface KintaiRelayDeps {
@@ -142,128 +149,100 @@ async function readJson<T>(res: Response, who: string): Promise<T> {
   }
 }
 
-/**
- * 1 ページぶん運ぶ。**続きは呼び出し側が `nextAfterDriverCd` を見て呼び直す。**
- *
- * 途中で落ちたら例外。冪等 (差分だけを運び、結果が相手の署名に反映される) なので、
- * 呼び直せば同じ状態に収束する。
- */
-export async function relayKintaiPage(
-  deps: KintaiRelayDeps,
-  input: KintaiRelayInput,
-): Promise<KintaiRelayReport> {
-  if (!MONTH_RE.test(input.month)) {
-    throw new KintaiRelayError(`month は YYYY-MM で指定してください: ${input.month}`);
+/** JST の当月 (`YYYY-MM`)。**UTC のまま切ると月初/月末が 1 日ずれる。** */
+export function jstMonth(now: number): string {
+  const d = new Date(now + 9 * 60 * 60 * 1000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+/** `last` を最後尾とする `count` か月ぶんを昇順で。年をまたいでも `Date.UTC` が畳む。 */
+export function windowMonths(last: string, count: number): string[] {
+  const [y, m] = last.split("-").map(Number);
+  const out: string[] = [];
+  for (let i = count - 1; i >= 0; i--) {
+    const d = new Date(Date.UTC(y!, m! - 1 - i, 1));
+    out.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`);
   }
+  return out;
+}
+
+/**
+ * 窓ぶんを 1 回で運ぶ。**続きは無い** — 乗務員でも日でも刻まない。
+ *
+ * `apply` を付けない限り受け側は 1 行も書かない (`dry_run` を立てて渡す)。
+ * 冪等なので、途中で落ちてもやり直せば同じ状態に収束する。
+ */
+export async function relayKintaiWindow(
+  deps: KintaiRelayDeps,
+  input: KintaiWindowInput,
+): Promise<KintaiWindowReport> {
+  const last = input.month ?? jstMonth(input.now ?? Date.now());
+  if (!MONTH_RE.test(last)) {
+    throw new KintaiRelayError(`month は YYYY-MM で指定してください: ${last}`);
+  }
+  const count = input.monthCount ?? DEFAULT_MONTH_COUNT;
+  if (!Number.isInteger(count) || count < 1 || count > MAX_MONTH_COUNT) {
+    throw new KintaiRelayError(`month_count は 1〜${MAX_MONTH_COUNT} です: ${count}`);
+  }
+  const months = windowMonths(last, count);
   const apply = input.apply === true;
+
   // Workers の `Date.now()` は I/O をまたぐと進む。各レグは fetch を含むので測れる
   const startedAt = Date.now();
-  const timings: KintaiRelayTimings = {
-    totalMs: 0,
-    driversMs: 0,
-    signaturesMs: 0,
-    diffMs: 0,
-    applyMs: 0,
-    onpremDriversMs: null,
-    onpremDiffMs: null,
-  };
-  /** 相手が自己申告した所要時間。古い版が相手なら `null` のまま。 */
   const reported = (v: unknown) => (typeof v === "number" ? v : null);
 
-  // ── 1. オンプレ: 対象月の乗務員を 1 ページ ────────────────────────────────
-  const q = new URLSearchParams({ month: input.month });
-  if (input.afterDriverCd != null) q.set("after_driver_cd", String(input.afterDriverCd));
-  if (input.maxDrivers != null) q.set("max_drivers", String(input.maxDrivers));
+  // ── 1. オンプレ: 窓ぶんを全乗務員まとめて ─────────────────────────────────
+  const q = new URLSearchParams({ months: months.join(",") });
   const at1 = Date.now();
-  const page = await readJson<{
+  const got = await readJson<{
     drivers?: number[];
-    next_after_driver_cd?: number | null;
+    events?: unknown[];
     elapsed_ms?: unknown;
-  }>(await deps.onprem(`${DRIVERS_PATH}?${q}`), "onprem drivers");
-  timings.driversMs = Date.now() - at1;
-  timings.onpremDriversMs = reported(page.elapsed_ms);
-  const drivers = Array.isArray(page.drivers) ? page.drivers : [];
+  }>(await deps.onprem(`${EVENTS_PATH}?${q}`), "onprem events");
+  const eventsMs = Date.now() - at1;
+  const drivers = Array.isArray(got.drivers) ? got.drivers : [];
+  const events = Array.isArray(got.events) ? got.events : [];
 
-  const report: KintaiRelayReport = {
-    month: input.month,
-    drivers: drivers.length,
-    batchesSent: 0,
-    daysWritten: 0,
-    daysDeleted: 0,
-    misplaced: 0,
-    unknownStates: [],
-    nextAfterDriverCd: page.next_after_driver_cd ?? null,
-    timings,
-  };
-  if (drivers.length === 0) {
-    timings.totalMs = Date.now() - startedAt;
-    return report;
-  }
-
-  // ── 2. GCP: その乗務員ぶんの署名 ──────────────────────────────────────────
-  // **ここでは中身を見ない。** 3 へそのまま渡し、突き合わせは Rust 側に任せる
+  // ── 2. GCP: まるごと渡す ──────────────────────────────────────────────────
+  // **突き合わせは向こう。** ここで署名を計算しない (2 実装にしない)
   const at2 = Date.now();
-  const remote: Record<string, Record<string, string>> = {};
-  for (const driver of drivers) {
-    const sq = new URLSearchParams({ month: input.month, driver_cd: String(driver) });
-    const got = await readJson<{ signatures?: Record<string, string> }>(
-      await deps.gcp(`${SIGNATURES_PATH}?${sq}`),
-      `gcp signatures (driver ${driver})`,
-    );
-    remote[String(driver)] = got.signatures ?? {};
-  }
-  timings.signaturesMs = Date.now() - at2;
-
-  // ── 3. オンプレ: 署名を渡して差分を受け取る ───────────────────────────────
-  const at3 = Date.now();
-  const diff = await readJson<{
-    batches?: unknown[];
+  const applied = await readJson<{
+    drivers_written?: number;
+    days_written?: number;
+    days_deleted?: number;
+    misplaced?: number;
     unknown_states?: string[];
+    dry_run?: unknown;
     elapsed_ms?: unknown;
   }>(
-    await deps.onprem(DIFF_PATH, {
+    await deps.gcp(WINDOW_PATH, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ month: input.month, remote }),
+      body: JSON.stringify({ months, drivers, events, dry_run: !apply }),
     }),
-    "onprem diff",
+    "gcp timecard window",
   );
-  timings.diffMs = Date.now() - at3;
-  timings.onpremDiffMs = reported(diff.elapsed_ms);
-  const batches = Array.isArray(diff.batches) ? diff.batches : [];
-  const unknown = new Set<string>(diff.unknown_states ?? []);
+  const applyMs = Date.now() - at2;
 
-  // ── 4. GCP: 差分を渡す ────────────────────────────────────────────────────
-  const at4 = Date.now();
-  for (const batch of batches) {
-    if (!apply) {
-      report.batchesSent += 1; // 数えるだけ (計画の可視化)
-      continue;
-    }
-    const applied = await readJson<{
-      days_written?: number;
-      days_deleted?: number;
-      misplaced?: number;
-      unknown_states?: string[];
-    }>(
-      await deps.gcp(TIMECARD_PATH, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(batch),
-      }),
-      "gcp timecard",
-    );
-    report.batchesSent += 1;
-    report.daysWritten += applied.days_written ?? 0;
-    report.daysDeleted += applied.days_deleted ?? 0;
-    report.misplaced += applied.misplaced ?? 0;
-    for (const s of applied.unknown_states ?? []) unknown.add(s);
-  }
-
-  timings.applyMs = Date.now() - at4;
-  report.unknownStates = [...unknown].sort();
-  timings.totalMs = Date.now() - startedAt;
-  return report;
+  return {
+    months,
+    drivers: drivers.length,
+    events: events.length,
+    driversWritten: applied.drivers_written ?? 0,
+    daysWritten: applied.days_written ?? 0,
+    daysDeleted: applied.days_deleted ?? 0,
+    misplaced: applied.misplaced ?? 0,
+    unknownStates: [...(applied.unknown_states ?? [])].sort(),
+    // **受け側の自己申告を正とする。** こちらの意図と食い違ったら向こうが正しい
+    dryRun: applied.dry_run === true,
+    timings: {
+      totalMs: Date.now() - startedAt,
+      eventsMs,
+      applyMs,
+      onpremEventsMs: reported(got.elapsed_ms),
+      gcpApplyMs: reported(applied.elapsed_ms),
+    },
+  };
 }
 
 /**
@@ -286,7 +265,7 @@ export function tenantForCompId(accounts: unknown, compId: string): string | nul
   return null;
 }
 
-/** [`relayKintaiPage`] に渡す実体を組む。 */
+/** [`relayKintaiWindow`] に渡す実体を組む。 */
 export function buildDeps(opts: {
   ichibanOrigin: string;
   cfAccessClientId: string;
