@@ -6,7 +6,13 @@
 // 10211/10061、nuxt-items/items-sync と同型)。
 export { DtakoScraperRelayDO } from "./dtako-scraper-relay-do";
 import { resolveTheearthRouting } from "./theearth-session";
-import { buildDeps, relayKintaiRecalc, relayKintaiWindow, tenantForCompId } from "./kintai-relay";
+import {
+  buildDeps,
+  relayKintaiDaySummaries,
+  relayKintaiRecalc,
+  relayKintaiWindow,
+  tenantForCompId,
+} from "./kintai-relay";
 import { resolveDtakoAccountsRaw, resolveSecretBinding, runScheduledCron } from "./cron";
 
 interface RelayWorkerEnv {
@@ -67,6 +73,12 @@ export default {
       // 全量再計算を GCP 側で 1 ページぶん進める (Refs ohishi-exp/rust-ichibanboshi#205 の 10)。
       // 打刻を運ぶ経路ではない — deploy / TOML 変更で stale になった乗務員を畳み直すだけ
       return handleKintaiRecalc(request, env);
+    }
+
+    if (url.pathname === "/kintai-relay/day-summaries" && request.method === "GET") {
+      // 畳んだ結果を読む (Refs ohishi-exp/rust-ichibanboshi#205 の 23)。
+      // **GET だけ。** 受け側に書き込みの口が無いので、こちらにも作らない
+      return handleKintaiDaySummaries(request, env);
     }
 
     if (url.pathname === "/ws/scraper") {
@@ -326,6 +338,85 @@ async function handleKintaiRecalc(request: Request, env: RelayWorkerEnv): Promis
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     console.error(JSON.stringify({ kintai_recalc: "failed", message }));
+    return fail(502, message);
+  }
+}
+
+/**
+ * `GET /kintai-relay/day-summaries?month=YYYY-MM[&driver=CD]` — 畳んだ結果を読む。
+ *
+ * **読むだけの口。** 受け側 (`src/routes/kintai_day_summaries.rs`) に `POST` は無く、
+ * `recalc` の `apply` に当たるものも無い。ここを `POST` にしないのは、書ける口と
+ * 見分けが付かなくなるため — この経路は method からして 1 行も書けない。
+ *
+ * 応答は**そのまま返す** (件数の要約も整形も挟まない)。用途はオンプレ基準 JSON との
+ * 行単位の突合で、突合スクリプトがそのまま比較できることが目的。
+ *
+ * 認証・tenant 解決は `/kintai-relay/run` と同じ関門 (`X-Alc-Proxy-Secret` の
+ * constant-time 検証 → KV `dtako_accounts` から `KINTAI_COMP_ID` で引く)。
+ * なお受け側は `X-Tenant-ID` を読まず instance の設定で読み先を固定しているが、
+ * ここでは他の中継と同じ形で名乗る (auth-worker の関門が `X-Tenant-ID` を必須にしており、
+ * 欠けると 400 になる)。
+ */
+async function handleKintaiDaySummaries(
+  request: Request,
+  env: RelayWorkerEnv,
+): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const authWorker = env.AUTH_WORKER;
+  const compId = (env.KINTAI_COMP_ID ?? "").trim();
+  const origin = (env.NUXT_ICHIBAN_API_URL ?? "").trim();
+  const cfId = (env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID ?? "").trim();
+  const [proxySecret, cfSecret] = await Promise.all([
+    resolveSecretBinding(env.INTERNAL_SHARED_SECRET),
+    resolveSecretBinding(env.ICHIBAN_CF_ACCESS_CLIENT_SECRET),
+  ]);
+  if (!authWorker || !compId || !origin || !cfId || !proxySecret || !cfSecret) {
+    return fail(503, "kintai-relay not configured");
+  }
+
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  const accountsRaw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
+  let accounts: unknown = null;
+  try {
+    accounts = JSON.parse(accountsRaw || "null");
+  } catch {
+    accounts = null;
+  }
+  const tenantId = tenantForCompId(accounts, compId);
+  if (!tenantId) {
+    console.error(JSON.stringify({ kintai_day_summaries: "tenant not resolved", comp_id: compId }));
+    return fail(503, "tenant not resolved from dtako_accounts");
+  }
+
+  const url = new URL(request.url);
+  const deps = buildDeps({
+    ichibanOrigin: origin,
+    cfAccessClientId: cfId,
+    cfAccessClientSecret: cfSecret,
+    authWorker,
+    proxySecret,
+    tenantId,
+  });
+  try {
+    const summaries = await relayKintaiDaySummaries(deps, {
+      month: url.searchParams.get("month") || undefined,
+      driver: url.searchParams.get("driver") || undefined,
+    });
+    console.log(JSON.stringify({ kintai_day_summaries: "ok" }));
+    return new Response(JSON.stringify(summaries), {
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    console.error(JSON.stringify({ kintai_day_summaries: "failed", message }));
     return fail(502, message);
   }
 }
