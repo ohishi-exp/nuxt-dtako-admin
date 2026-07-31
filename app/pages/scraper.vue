@@ -47,7 +47,6 @@ const compIdLabels: Record<string, string> = Object.fromEntries(
 )
 
 const selectedCompId = useState('scraper-compId', () => '')
-const skipUpload = useState('scraper-skipUpload', () => false)
 
 // --- ETC 明細スクレイプ (管理タブ、Refs #134) ---
 // ETC_ACCOUNTS 登録済みの全アカウントを一括実行する (`kind: 'etc-all'`)。
@@ -432,7 +431,6 @@ async function handleScrape() {
               comp_id: compId,
               start_date: task.date,
               end_date: task.date,
-              skip_upload: skipUpload.value,
             },
             (evt: ScrapeProgressEvent) => {
               if (evt.event === 'progress') {
@@ -499,7 +497,6 @@ async function handleRerun(task: DayTask) {
             comp_id: compId || undefined,
             start_date: task.date,
             end_date: task.date,
-            skip_upload: skipUpload.value,
           },
           (evt: ScrapeProgressEvent) => {
             if (evt.event === 'progress') {
@@ -562,7 +559,6 @@ async function handleRerunAllErrors() {
               comp_id: compId || undefined,
               start_date: task.date,
               end_date: task.date,
-              skip_upload: skipUpload.value,
             },
             (evt: ScrapeProgressEvent) => {
               if (evt.event === 'progress') {
@@ -707,7 +703,6 @@ async function handleHistoryRerun(item: ScrapeHistoryItem) {
         comp_id: item.comp_id,
         start_date: item.target_date,
         end_date: item.target_date,
-        skip_upload: skipUpload.value,
       },
       (evt: ScrapeProgressEvent) => {
         if (evt.event === 'progress') {
@@ -851,10 +846,6 @@ onMounted(() => {
             <option v-for="opt in compIdOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
           </select>
         </div>
-        <label class="flex items-center gap-2">
-          <input v-model="skipUpload" type="checkbox" class="rounded">
-          <span class="text-sm">アップロードをスキップ</span>
-        </label>
       </div>
     </UCard>
 

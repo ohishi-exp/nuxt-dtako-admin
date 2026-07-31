@@ -708,7 +708,6 @@ function buildScraperWsUrl(req: ScrapeRequest, token: string): string {
   if (req.start_date) params.set('start_date', req.start_date)
   if (req.end_date) params.set('end_date', req.end_date)
   if (req.comp_id) params.set('comp_id', req.comp_id)
-  if (req.skip_upload) params.set('skip_upload', 'true')
   return `${scraperRelayUrl}/ws/scraper?${params.toString()}`
 }
 
