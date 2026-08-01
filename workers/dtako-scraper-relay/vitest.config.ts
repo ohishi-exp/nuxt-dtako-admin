@@ -29,6 +29,7 @@ export default defineConfig({
         'src/theearth-session.ts',
         'src/promise-queue.ts',
         'src/scrape-dispatch.ts',
+        'src/scrape-queue.ts',
         'src/employee-master.ts',
         'src/work-schedule.ts',
         'src/timecard-summary.ts',
