@@ -396,6 +396,92 @@ describe("get_kintai_diff (ohishi-exp/rust-ichibanboshi#205 の 50)", () => {
     expect(res.only_onprem_other.items[0].onprem.night_minutes).toBe(0);
   });
 
+  it("driver 指定形 (`drivers` が無くトップレベルに `driver`/`days`) を単一乗務員として読む (#599)", async () => {
+    // オンプレ `kosoku-daily` は driver 指定すると `{drivers:[...]}` ではなく
+    // `{month, driver, days:[...], punches:[...], duplicate_rows}` を返す。
+    vi.stubGlobal(
+      "fetch",
+      async () =>
+        new Response(
+          JSON.stringify({
+            month: "2026-06",
+            driver: 1518,
+            days: [day({ date: "2026-06-01", start: "2026-06-01 08:00:00" })],
+            punches: [],
+            duplicate_rows: 0,
+          }),
+          { status: 200 },
+        ),
+    );
+    const gcpValue = {
+      shift_source: "timecard",
+      restraint_minutes: 720,
+      working_minutes: 600,
+      break_minutes: 120,
+      rest_minus_minutes: 0,
+      statutory_minutes: 480,
+      within_statutory_overtime_minutes: 0,
+      overtime_minutes: 120,
+      legal_holiday_minutes: 0,
+      night_minutes: 0,
+      overtime_night_minutes: 0,
+      legal_holiday_night_minutes: 0,
+    };
+    const e = env({
+      SCRAPER_RELAY: {
+        fetch: vi.fn(
+          async () =>
+            new Response(
+              JSON.stringify(gcpBody({ "1518|2026-06-01|2026-06-01 08:00:00": gcpValue })),
+              { status: 200 },
+            ),
+        ),
+      },
+    });
+    const res = (await getKintaiDiffTool.execute(e, { month: "2026-06", driver: "1518" })) as any;
+    expect(res.onprem_rows).toBe(1);
+    expect(res.onprem_unreadable).toBe(false);
+    // 値が両側で完全一致 → 修正前は `drivers` 不在で onprem が空になり only_gcp に化けていた。
+    // 直った後はどのカテゴリにも出ない
+    expect(res.only_gcp.total).toBe(0);
+    expect(res.only_onprem_other.total).toBe(0);
+    expect(res.value_diff_restraint_match.total).toBe(0);
+    expect(res.value_diff_restraint_mismatch.total).toBe(0);
+  });
+
+  it("単一乗務員形の応答に `driver` が無ければ、呼び出しに渡した driver 引数へ落とす", async () => {
+    vi.stubGlobal(
+      "fetch",
+      async () =>
+        new Response(
+          JSON.stringify({
+            month: "2026-06",
+            // driver フィールド無し (念のための防御。実際は上流がほぼ必ずエコーする)
+            days: [day({ date: "2026-06-08", start: "2026-06-08 09:00:00" })],
+          }),
+          { status: 200 },
+        ),
+    );
+    const e = env();
+    const res = (await getKintaiDiffTool.execute(e, { month: "2026-06", driver: "1049" })) as any;
+    expect(res.onprem_rows).toBe(1);
+    expect(res.only_onprem_other.items[0].driver_cd).toBe("1049");
+  });
+
+  it("driver 省略の全乗務員形 (`drivers` 配列) は従来どおり読める (回帰確認)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      async () =>
+        new Response(JSON.stringify(onpremBody([{ driver: 1518, days: [day()] }])), {
+          status: 200,
+        }),
+    );
+    const e = env();
+    const res = (await getKintaiDiffTool.execute(e, { month: "2026-06" })) as any;
+    expect(res.onprem_rows).toBe(1);
+    expect(res.onprem_unreadable).toBe(false);
+  });
+
   it("オンプレ `drivers` そのものが配列でない応答は空扱いにする", async () => {
     vi.stubGlobal(
       "fetch",
@@ -404,5 +490,46 @@ describe("get_kintai_diff (ohishi-exp/rust-ichibanboshi#205 の 50)", () => {
     const e = env();
     const res = (await getKintaiDiffTool.execute(e, { month: "2026-06" })) as any;
     expect(res.onprem_rows).toBe(0);
+  });
+
+  it("★ どちらの形 (`drivers` 配列 / driver 指定形の `days` 配列) にも当てはまらないときは、" +
+    "静かに 0 行にせず onprem_unreadable を立てて note にも出す (#599)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      // month しか無い = 全乗務員形でも単一乗務員形でもない、読めない応答
+      async () => new Response(JSON.stringify({ month: "2026-06", weird: true }), { status: 200 }),
+    );
+    const gcpValue = {
+      shift_source: "timecard",
+      restraint_minutes: 720,
+      working_minutes: 600,
+      break_minutes: 120,
+      rest_minus_minutes: 0,
+      statutory_minutes: 480,
+      within_statutory_overtime_minutes: 0,
+      overtime_minutes: 120,
+      legal_holiday_minutes: 0,
+      night_minutes: 0,
+      overtime_night_minutes: 0,
+      legal_holiday_night_minutes: 0,
+    };
+    const e = env({
+      SCRAPER_RELAY: {
+        fetch: vi.fn(
+          async () =>
+            new Response(
+              JSON.stringify(gcpBody({ "1518|2026-06-01|2026-06-01 08:00:00": gcpValue })),
+              { status: 200 },
+            ),
+        ),
+      },
+    });
+    const res = (await getKintaiDiffTool.execute(e, { month: "2026-06", driver: "1518" })) as any;
+    expect(res.onprem_rows).toBe(0);
+    expect(res.onprem_unreadable).toBe(true);
+    // GCP 側の行は (形が読めなかったので) only_gcp に残るが、note がフラグで
+    // 「本当に GCP にしか無い」と誤読しないよう明記する
+    expect(res.only_gcp.total).toBe(1);
+    expect(res.note).toMatch(/読めなかった/);
   });
 });
