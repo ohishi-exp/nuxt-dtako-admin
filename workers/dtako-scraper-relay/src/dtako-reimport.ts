@@ -46,6 +46,22 @@ export class DtakoReimportError extends Error {
   }
 }
 
+/**
+ * push (② オンプレ autoload への POST) を送った後、応答を確定できずに失敗した
+ * ことを示す (受け入れ条件・親指摘 2026-08-01)。**取り込みは応答より前に走る**
+ * (`dtako_autoload.rs` 実測: 307 でも取り込み済み) ため、`deps.onpremAutoload` が
+ * 例外を投げた場合 — DO の deploy 中断・network 断等で応答を読めなかった場合 —
+ * **push 自体は届いていて取り込みが実行された可能性がある。** この例外は通常の
+ * `DtakoReimportError` (= まだ push していない/対象が悪い、再実行して安全) と
+ * 区別し、呼び出し元が「盲目的に再実行して二重取り込みにする」ことを防ぐ。
+ */
+export class DtakoReimportPushUncertainError extends DtakoReimportError {
+  constructor(message: string) {
+    super(message);
+    this.name = "DtakoReimportPushUncertainError";
+  }
+}
+
 const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04] as const;
 
 /**
@@ -135,12 +151,28 @@ export async function runDtakoReimport(
   const entries = listZipEntryNames(zip);
   const resetTimecard = input.resetTimecard === true;
   const path = buildAutoloadPath(input.unkoNo, resetTimecard);
-  const res = await deps.onpremAutoload(path, {
-    method: "POST",
-    headers: { "content-type": "application/zip" },
-    body: zip,
-  });
-  const bodyText = await res.text();
+  // push (fetch + 応答本文の読み出し) をひとまとめに try する — **どちらで失敗しても
+  // 「サーバへは届いたかもしれない」という点で扱いは同じ**。fetch 自体が例外を投げる
+  // (DO の deploy 中断・network 断) のはヘッダすら受け取れていないので厳密には
+  // 「届いたか分からない」だが、CakePHP 側の取り込みは応答より前に走るため
+  // (module doc 参照)、安全側に倒して両方とも「取り込み済みの可能性あり」として扱う。
+  let res: Response;
+  let bodyText: string;
+  try {
+    res = await deps.onpremAutoload(path, {
+      method: "POST",
+      headers: { "content-type": "application/zip" },
+      body: zip,
+    });
+    bodyText = await res.text();
+  } catch (err) {
+    throw new DtakoReimportPushUncertainError(
+      `unko_no=${input.unkoNo} へのオンプレ push 中に応答を確定できませんでした — ` +
+        "取り込みは応答より前に走るため、既に取り込み済みの可能性があります。" +
+        "再実行の前に dtako_events (この unko_no) を確認してください: " +
+        (err instanceof Error ? err.message : String(err)),
+    );
+  }
   let autoload: Record<string, unknown>;
   try {
     autoload = JSON.parse(bodyText) as Record<string, unknown>;

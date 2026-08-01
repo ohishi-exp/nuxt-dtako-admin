@@ -1086,7 +1086,12 @@ export const runDtakoReimportTool = {
     "**reset_timecard の既定は false。** true で②に続けて③(勤務時間再登録)まで" +
     "実行する — 既定で破壊的操作を増やさない。" +
     "応答には entries (zip内のファイル名) と、オンプレ側の応答をそのまま含む " +
-    "autoload (http_status/http_ok/location/response_excerpt/reset_*) が入る。",
+    "autoload (http_status/http_ok/location/response_excerpt/reset_*) が入る。" +
+    "**★★ エラーに `uncertain: true` が含まれていたら、この tool を同じ引数で" +
+    "再実行しないこと。** push (②) を送った後に応答を確定できなかった場合の印で、" +
+    "取り込みは応答より前に走るため既に取り込み済みの可能性がある。盲目的な" +
+    "再実行は二重取り込みになりうる — 再実行の前に対象の dtako_events / " +
+    "time_card_dtako が既に更新されていないかを別経路で確認すること。",
   inputSchema: runDtakoReimportArgs,
   // **write tool。** read-only 一覧 (test/mcp/tools.test.ts の READ_ONLY) には
   // 入れない — 取り込みという破壊的操作を伴うため (受け入れ条件7)
