@@ -903,6 +903,56 @@ export const getDtakoScrapeStatusTool = {
   },
 };
 
+const getDtakoScrapeProgressArgs = z
+  .object({
+    comp_id: z
+      .string()
+      .optional()
+      .describe(
+        "会社を絞る (省略すると dtako_accounts に載っている全社ぶんを comps 配列で返す)",
+      ),
+  })
+  .strict();
+
+export const getDtakoScrapeProgressTool = {
+  name: "get_dtako_scrape_progress",
+  description:
+    "**run_dtako_scrape で起動した `/cron/dtako` job が「まだ走っている / 終わった / " +
+    "落ちた」かを DO の scrapeQueue から直接見る** (Refs ohishi-exp/rust-ichibanboshi#205 の 43)。" +
+    "読むだけ。**get_dtako_scrape_status とは別物** — あちらは alc 側の履歴で、" +
+    "ブラウザ経由 (画面の「スクレイプ履歴」) の実行しか載らず、" +
+    "run_dtako_scrape や日次 cron の実行は 1 件も載らない (#205-43 で確認済み)。" +
+    "こちらは DO 自身が持つ状態なので、無人実行でも見える。" +
+    "**DO は comp_id ごとの instance。** comp_id を省略すると dtako_accounts の" +
+    "全社ぶんを `comps` 配列で返す (会社ごとに comp_id 付き) — 1 社しか見えていないのに" +
+    "全部見たと錯覚しないよう、常にどの社のものかが分かる形になっている。" +
+    "各 job の state は pending/running/done/failed の 4 つ。" +
+    "**failed には error が付く。黙って消えない。** " +
+    "done でも split_failed が null でない数を持つことがある — " +
+    "0 より大きければ取り込みは成功したが CSV 分割が落ちた回 " +
+    "(get_dtako_scrape_status の split_failed と同じ注意: 必要条件であって十分条件ではない)。" +
+    "**進捗は上限 200 件で古い方から捨てる** (応答の max_records で分かる)。",
+  inputSchema: getDtakoScrapeProgressArgs,
+  execute: async (env: Env, args: z.infer<typeof getDtakoScrapeProgressArgs>) => {
+    const relay = env.SCRAPER_RELAY;
+    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
+    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+    const q = args.comp_id ? `?comp_id=${encodeURIComponent(args.comp_id)}` : "";
+    const res = await relay.fetch(`https://relay.internal/kintai-relay/scrape-progress${q}`, {
+      method: "GET",
+      headers: { "X-Alc-Proxy-Secret": secret },
+    });
+    const body = await res.text();
+    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
+    try {
+      return JSON.parse(body) as unknown;
+    } catch {
+      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
+    }
+  },
+};
+
 // ── run_kintai_recalc ────────────────────────────────────────────────────────
 
 const runKintaiRecalcArgs = z.object({
@@ -1070,5 +1120,6 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   runKintaiRecalcTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDtakoScrapeTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDtakoScrapeStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getDtakoScrapeProgressTool as unknown as ToolEntry<z.ZodTypeAny>,
   getKintaiDaySummariesTool as unknown as ToolEntry<z.ZodTypeAny>,
 ];

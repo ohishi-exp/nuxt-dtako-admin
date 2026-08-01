@@ -251,3 +251,14 @@ export function dateRangeOf(dates: string[]): { from: string; to: string } | nul
   if (first === undefined || last === undefined) return null;
   return { from: first, to: last };
 }
+
+/**
+ * `/cron/dtako` の進捗を DO storage に記録する時のキー (Refs #205-43)。
+ *
+ * `dispatchScrapeDates` は 1 日 1 回で配る規約 (`start_date === end_date`) だが、
+ * `/cron/dtako` 自体は範囲を受け付ける契約なので、範囲で呼ばれた場合も潰さずに
+ * 区別できるキーを返す。
+ */
+export function scrapeJobKey(startDate: string, endDate: string): string {
+  return startDate === endDate ? startDate : `${startDate}..${endDate}`;
+}

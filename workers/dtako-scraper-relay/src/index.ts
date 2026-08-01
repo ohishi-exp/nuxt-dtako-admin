@@ -97,6 +97,13 @@ export default {
       return handleScrapeHistory(request, env);
     }
 
+    if (url.pathname === "/kintai-relay/scrape-progress" && request.method === "GET") {
+      // `/cron/dtako` (無人実行) の進捗 — 「まだ走っている/終わった/落ちた」を
+      // 区別する (Refs #205-43)。scrape-history (alc 側、ブラウザ経路しか書かない)
+      // とは別で、こちらは DO の scrapeQueue が持つ状態を直接見る。read-only
+      return handleScrapeProgress(request, env);
+    }
+
     if (url.pathname === "/kintai-relay/day-summaries" && request.method === "GET") {
       // 畳んだ結果を読む (Refs ohishi-exp/rust-ichibanboshi#205 の 23)。
       // **GET だけ。** 受け側に書き込みの口が無いので、こちらにも作らない
@@ -608,4 +615,73 @@ async function handleScrapeHistory(request: Request, env: RelayWorkerEnv): Promi
     }),
     { status: 200, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } },
   );
+}
+
+/** `dtako_accounts` から重複無しの comp_id 一覧を取る。空 / comp_id を持たない行は
+ * 無視する (`tenantForCompId` と同じ規約)。 */
+function compIdsOf(accounts: unknown): string[] {
+  if (!Array.isArray(accounts)) return [];
+  const seen = new Set<string>();
+  for (const a of accounts) {
+    if (typeof a !== "object" || a === null) continue;
+    const compId = (a as { comp_id?: unknown }).comp_id;
+    if (typeof compId === "string" && compId.trim()) seen.add(compId.trim());
+    else if (typeof compId === "number") seen.add(String(compId));
+  }
+  return [...seen];
+}
+
+/**
+ * `GET /kintai-relay/scrape-progress?comp_id=` — `/cron/dtako` (無人実行) の
+ * 進捗を DO から直接引く (Refs #205-43)。scrape-history (alc 側、ブラウザ経路
+ * しか書かないので無人実行は載らない) とは別の口。
+ *
+ * **DO は comp_id ごとの instance** なので、`comp_id` を渡さなければ
+ * `dtako_accounts` に載っている**全社ぶん**を返す — 「片方しか見ていないのに
+ * 全部に見える」形を避けるため、常にどの comp のものかを応答に残す。
+ */
+async function handleScrapeProgress(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  const accountsRaw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
+  let accounts: unknown = null;
+  try {
+    accounts = JSON.parse(accountsRaw || "null");
+  } catch {
+    accounts = null;
+  }
+
+  const requested = new URL(request.url).searchParams.get("comp_id")?.trim();
+  const compIds = requested ? [requested] : compIdsOf(accounts);
+  if (compIds.length === 0) {
+    return fail(503, "comp_id が解決できません (dtako_accounts が空、または comp_id を指定してください)");
+  }
+
+  const comps = await Promise.all(
+    compIds.map(async (compId) => {
+      const id = env.RELAY.idFromName(`scraper-comp-${compId}`);
+      try {
+        const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/dtako/progress");
+        const text = await res.text();
+        if (!res.ok) return { comp_id: compId, error: `status ${res.status}: ${text.slice(0, 200)}` };
+        return { comp_id: compId, ...(JSON.parse(text) as Record<string, unknown>) };
+      } catch (err) {
+        return { comp_id: compId, error: err instanceof Error ? err.message : String(err) };
+      }
+    }),
+  );
+
+  return new Response(JSON.stringify({ comps }), {
+    status: 200,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
 }
