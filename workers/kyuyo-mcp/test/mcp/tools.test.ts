@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
+  getDtakoScrapeStatusTool,
   getKosokuEventsTool,
   getRestDiffTool,
+  runDtakoScrapeTool,
   getTimecardDiffTool,
   listCompaniesTool,
   listMonthsTool,
@@ -1076,6 +1078,7 @@ describe("ALL_TOOLS", () => {
     "get_kosoku_events",
     // 休息のずれの診断 (Refs ohishi-exp/rust-ichibanboshi#205 の 41)。
     // 上流に GET しか無く、判定にも入らない素の観測なので read-only
+    "get_dtako_scrape_status",
     "get_rest_diff",
     "get_restraint_summary",
     "get_timecard_diff",
@@ -1084,7 +1087,12 @@ describe("ALL_TOOLS", () => {
     "list_months",
   ];
   /** 書きうる tool。**scope を要求する** (Refs ohishi-exp/rust-ichibanboshi#205 の 04b / 10)。 */
-  const WRITE = { run_kintai_relay: "mcp.write", run_kintai_recalc: "mcp.write" } as const;
+  const WRITE = {
+    run_kintai_relay: "mcp.write",
+    run_kintai_recalc: "mcp.write",
+    // 本番の R2 / DB を書き換えうる (Refs ohishi-exp/rust-ichibanboshi#205 の 42)
+    run_dtako_scrape: "mcp.write",
+  } as const;
 
   it("read-only tool と write tool を取り違えない", () => {
     expect(ALL_TOOLS.map((t) => t.name).sort()).toEqual(
