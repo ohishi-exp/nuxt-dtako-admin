@@ -117,6 +117,13 @@ export default {
       return handleOperationZip(request, env);
     }
 
+    if (url.pathname === "/kintai-relay/dtako-reimport" && request.method === "POST") {
+      // ① zip 取得 (自前ログイン) → ② オンプレ autoload push を 1 tool で完結させる
+      // (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67)。**同期。** 取り込みまで
+      // 行う書き込み経路なので `/kintai-relay/operation-zip` (read-only) とは別の口
+      return handleDtakoReimport(request, env);
+    }
+
     if (url.pathname === "/ws/scraper") {
       // SCRAPER_MODE=http (Refs ohishi-exp/dtako-scraper#22) は comp_id 単位で
       // DO を分けることで同一企業への並列リクエストを自然に直列化する。comp_id が
@@ -512,6 +519,75 @@ async function handleOperationZip(request: Request, env: RelayWorkerEnv): Promis
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ comp_id: compId, ope_no: opeNo, start_ope: startOpe }),
+  });
+  // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
+  return new Response(res.body, {
+    status: res.status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * `POST /kintai-relay/dtako-reimport` — 運行 1 件の csvdata.zip を**自前ログイン**
+ * で取り、オンプレ rust-ichibanboshi の `POST /api/dtako/autoload` (Refs #205 の
+ * 58/61/63/65、変更しない) へそのまま push する (Refs
+ * ohishi-exp/rust-ichibanboshi#280、#205 の 67)。
+ *
+ * body は `{ope_no, start_ope, unko_no, reset_timecard?, comp_id?}`。
+ * **`ope_no`/`start_ope`/`unko_no` は必須。** `/kintai-relay/operation-zip`
+ * (read-only) と違い**取り込みを伴う書き込み経路**なので、別の口にする。
+ *
+ * **同期で返す。** entries (zip 内ファイル名) とオンプレの応答をその場で見られる
+ * ようにする — `/kintai-relay/scrape` (202 非同期) とは違う型。
+ *
+ * 認証・tenant フォールバックは `/kintai-relay/operation-zip` と同じ
+ * (`X-Alc-Proxy-Secret` の constant-time 検証、`comp_id` 省略時は `KINTAI_COMP_ID`)。
+ */
+async function handleDtakoReimport(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  let body: {
+    ope_no?: unknown;
+    start_ope?: unknown;
+    unko_no?: unknown;
+    reset_timecard?: unknown;
+    comp_id?: unknown;
+  };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return fail(400, "body must be JSON");
+  }
+  const opeNo = typeof body.ope_no === "string" ? body.ope_no : "";
+  const startOpe = typeof body.start_ope === "string" ? body.start_ope : "";
+  const unkoNo = typeof body.unko_no === "string" ? body.unko_no : "";
+  if (!opeNo || !startOpe || !unkoNo) {
+    return fail(400, "ope_no / start_ope / unko_no は必須です");
+  }
+  const compId =
+    (typeof body.comp_id === "string" && body.comp_id.trim()) || (env.KINTAI_COMP_ID ?? "").trim();
+  if (!compId) return fail(503, "comp_id が解決できません");
+
+  const id = env.RELAY.idFromName(`scraper-comp-${compId}`);
+  const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/dtako/reimport", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      comp_id: compId,
+      ope_no: opeNo,
+      start_ope: startOpe,
+      unko_no: unkoNo,
+      reset_timecard: body.reset_timecard === true,
+    }),
   });
   // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
   return new Response(res.body, {

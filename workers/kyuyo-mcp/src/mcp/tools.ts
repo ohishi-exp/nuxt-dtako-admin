@@ -1015,6 +1015,108 @@ export const getOperationZipTool = {
   },
 };
 
+// ── run_dtako_reimport ───────────────────────────────────────────────────────
+
+/** オンプレ側 `unko_no` は23桁 (kintai-ops skill §4.6 — theearth/GCP 側の
+ * `ope_no_22` とは桁数が違う。混同すると存在しない運行を指す)。 */
+const UNKO_NO_23_RE = /^\d{23}$/;
+
+const runDtakoReimportArgs = z
+  .object({
+    ope_no_22: z
+      .string()
+      .regex(OPE_NO_RE)
+      .describe("運行No。theearth 側の22桁 (get_operation_zip の ope_no_22 と同じ)。"),
+    start_ope: z
+      .string()
+      .regex(START_OPE_RE)
+      .describe('出庫日時。"YYYY/MM/DD H:mm:ss" (時は0埋めしない、例 "2026/07/07 7:53:30")'),
+    unko_no: z
+      .string()
+      .regex(UNKO_NO_23_RE)
+      .describe(
+        "オンプレ側の運行NO。**23桁**、ope_no_22 とは桁が違う (末尾1桁を含む値)。" +
+          "取り込み先 (社内 nginx / dtako_events) を名指しする鍵で、ここを間違えると別の運行に取り込む。",
+      ),
+    reset_timecard: z
+      .boolean()
+      .optional()
+      .describe(
+        "true で②(取り込み)に続けて③(勤務時間再登録、resetby-unko-no)まで実行する。" +
+          "**既定 false。** 破壊的操作 (time_card_dtako への書き戻し) を既定で増やさない。",
+      ),
+    comp_id: z.string().optional().describe("会社。省略すると relay の既定 (KINTAI_COMP_ID)"),
+  })
+  .strict();
+
+/**
+ * 運行 1 件の csvdata.zip を取得〜オンプレ取り込みまで 1 tool で完結させる
+ * (Refs ohishi-exp/rust-ichibanboshi#280、#205 の 67)。
+ *
+ * **目的: モデルが base64 を書き写さない。** 以前は `get_operation_zip` の
+ * `zip_base64` をモデルが書き写してオンプレへ POST しており、書き写した時点で
+ * 壊れる事故が 2 回起きていた (`base64: invalid input`)。しかも壊れた zip を
+ * 投げても社内 nginx (CakePHP) は黙って無視するため、原因が分からなかった。
+ *
+ * この tool は relay の `POST /kintai-relay/dtako-reimport` を叩くだけ — ①zip
+ * 取得 (自前ログイン) と②オンプレ push (`rust-ichibanboshi` の
+ * `POST /api/dtako/autoload`、変更しない) は relay 内で完結し、zip のバイト列は
+ * このプロセス (kyuyo-mcp) にも、ましてやモデルにも渡らない。
+ *
+ * **write tool。** dtako_events / (reset_timecard=true なら) time_card_dtako を
+ * 書き換えうる破壊的操作なので、`get_operation_zip` と違い `mcp.write` を要求する。
+ */
+export const runDtakoReimportTool = {
+  name: "run_dtako_reimport",
+  description:
+    "運行 1 件の csvdata.zip を theearth から取得し、そのままオンプレの取り込み口 " +
+    "(`POST /api/dtako/autoload`) へ push する 1 tool 完結版 " +
+    "(Refs ohishi-exp/rust-ichibanboshi#280、#205 の 67)。" +
+    "**base64 をモデルが書き写す必要が無い** — get_operation_zip の zip_base64 を" +
+    "手で運んでいた旧経路は書き写した時点で壊れる事故が起きていた。relay が " +
+    "①zip取得(自前ログイン)〜②オンプレpush まで内部で完結させる。" +
+    "**書き込み tool。** dtako_events を書き換える破壊的操作。preview は無い — " +
+    "内容を先に確認したいなら get_operation_zip を先に呼ぶこと。" +
+    "**★★ http_status / reset_http_status は成功の証明にならない。** autoload は " +
+    "api フラグ無しだと307を返すことがあるが、取り込み自体は redirect 判定より前に" +
+    "実行済み。reset_timecard(③)の応答は空200で、成否はPHP側のFlash(session)にしか" +
+    "出ない。判断材料は response_excerpt / dtako_events_count / reset_note であって" +
+    "http_status の2xx/3xx分類ではない (rust-ichibanboshi dtako_autoload.rs の" +
+    "module doc 参照)。" +
+    "**reset_timecard の既定は false。** true で②に続けて③(勤務時間再登録)まで" +
+    "実行する — 既定で破壊的操作を増やさない。" +
+    "応答には entries (zip内のファイル名) と、オンプレ側の応答をそのまま含む " +
+    "autoload (http_status/http_ok/location/response_excerpt/reset_*) が入る。",
+  inputSchema: runDtakoReimportArgs,
+  // **write tool。** read-only 一覧 (test/mcp/tools.test.ts の READ_ONLY) には
+  // 入れない — 取り込みという破壊的操作を伴うため (受け入れ条件7)
+  requiresScope: "mcp.write",
+  execute: async (env: Env, args: z.infer<typeof runDtakoReimportArgs>) => {
+    const relay = env.SCRAPER_RELAY;
+    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
+    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+    const res = await relay.fetch("https://relay.internal/kintai-relay/dtako-reimport", {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
+      body: JSON.stringify({
+        ope_no: args.ope_no_22,
+        start_ope: args.start_ope,
+        unko_no: args.unko_no,
+        reset_timecard: args.reset_timecard === true,
+        comp_id: args.comp_id,
+      }),
+    });
+    const body = await res.text();
+    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
+    try {
+      return JSON.parse(body) as unknown;
+    } catch {
+      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
+    }
+  },
+};
+
 // ── run_kintai_recalc ────────────────────────────────────────────────────────
 
 const runKintaiRecalcArgs = z.object({
@@ -1449,4 +1551,5 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getKintaiDaySummariesTool as unknown as ToolEntry<z.ZodTypeAny>,
   getKintaiDiffTool as unknown as ToolEntry<z.ZodTypeAny>,
   getOperationZipTool as unknown as ToolEntry<z.ZodTypeAny>,
+  runDtakoReimportTool as unknown as ToolEntry<z.ZodTypeAny>,
 ];

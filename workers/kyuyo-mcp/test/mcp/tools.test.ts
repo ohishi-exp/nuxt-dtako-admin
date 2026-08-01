@@ -1098,6 +1098,9 @@ describe("ALL_TOOLS", () => {
     run_kintai_recalc: "mcp.write",
     // 本番の R2 / DB を書き換えうる (Refs ohishi-exp/rust-ichibanboshi#205 の 42)
     run_dtako_scrape: "mcp.write",
+    // dtako_events (と reset_timecard=true なら time_card_dtako) を書き換えうる
+    // 取り込み (Refs ohishi-exp/rust-ichibanboshi#280、#205 の 67)
+    run_dtako_reimport: "mcp.write",
   } as const;
 
   it("read-only tool と write tool を取り違えない", () => {
