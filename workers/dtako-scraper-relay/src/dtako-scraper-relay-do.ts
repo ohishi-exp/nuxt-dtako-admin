@@ -43,8 +43,10 @@ import {
   scrapeViaHttp,
   TheearthClientError,
   TheearthNotZipError,
+  TheearthPageMismatchError,
   type CookieJar,
   type LoginResult,
+  type TheearthEvidence,
 } from "./theearth-client";
 import {
   parseAlcUploadResponse,
@@ -388,6 +390,20 @@ const THEEARTH_SESSION_EXPIRED_MESSAGE = "theearth セッションが切れま�
  * generic 文言に潰すと現場で原因が追えない (Refs #90 staging 実機で実害)。 */
 function describeUnknownError(err: unknown): string {
   return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+}
+
+/** scrape 失敗の message と (あれば) 証拠一式を取り出す (Refs #205-52)。
+ * `TheearthPageMismatchError` は「想定した form 要素が見つからなかった」時に
+ * status/content-type/本文長/経過ms/ログインフォーム検出/本文抜粋を持つ —
+ * **原因を断定しない代わりに、断定しなくて済むだけの事実をログに残す。** */
+function describeScrapeFailure(err: unknown): { message: string; evidence?: TheearthEvidence } {
+  if (err instanceof TheearthPageMismatchError) {
+    return { message: err.message, evidence: err.evidence };
+  }
+  if (err instanceof TheearthClientError) {
+    return { message: err.message };
+  }
+  return { message: describeUnknownError(err) };
 }
 
 /** ETC 手動実行 (`/ws/scraper?kind=etc|etc-all`) の「今月/先月」ボタン選択を
@@ -877,6 +893,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   ): Promise<void> {
     const logBase = { cron: "dtako", comp_id: account.comp_id, range: `${range.startDate}..${range.endDate}` };
     await this.recordScrapeJob(jobKey, { state: "running" });
+    // 段階別 (login/csv_get/stage1/stage2) の所要 ms (Refs #205-52)。成功/失敗
+    // どちらでも finally で 1 行出す — **失敗時のログだけで「どの段が何ms掛かったか
+    // (= timeout に当たったか当たっていないか)」の両方向が読める**ようにする。
+    const timer = new PhaseTimer();
     try {
       const zip = await scrapeViaHttp(
         {
@@ -887,6 +907,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           endDate: range.endDate,
         },
         (step) => console.log(JSON.stringify({ ...logBase, step })),
+        undefined,
+        {},
+        timer,
       );
 
       const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
@@ -956,10 +979,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         );
       }
     } catch (err) {
-      const message =
-        err instanceof TheearthClientError ? err.message : describeUnknownError(err);
-      console.error(JSON.stringify({ ...logBase, status: "error", message }));
+      const { message, evidence } = describeScrapeFailure(err);
+      // evidence がある時 (= TheearthPageMismatchError) だけ本文抜粋/status/
+      // content-type/経過msをログに載せる。DO storage の `error` は短い要約のみ
+      // (Refs #205-52 条件6 — 本文は response 由来なので credential は含まないが、
+      // 進捗レコードを肥大させない)。
+      console.error(JSON.stringify({ ...logBase, status: "error", message, ...(evidence ? { evidence } : {}) }));
       await this.recordScrapeJob(jobKey, { state: "failed", error: message });
+    } finally {
+      const { phases, totalMs } = timer.report();
+      console.log(JSON.stringify({ ...logBase, scrape_phase_timing: phases, total_ms: totalMs }));
     }
   }
 
@@ -1098,19 +1127,31 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   /** `/cron/dtako` (このスクレイプ job) の進捗を `ctx.storage` に記録する。
    * **観測のための書き込みなので、失敗してもスクレイプ本体は止めない** —
-   * 例外を投げず console.error だけ残す (Refs #205-43 の条件3)。 */
+   * 例外を投げず console.error だけ残す (Refs #205-43 の条件3)。
+   *
+   * **`state: "pending"` (= 新規ディスパッチの入口) だけは `existing` を spread
+   * しない。** 同じ jobKey (同じ日付) を再実行した時、以前の spread は
+   * `error`/`fold_state`/`fold_error` 等を patch に含めない限り引き継いでしまい、
+   * `state: "done"` に上書きされても `error` だけ前回の値が残り続けていた
+   * (issue #595 実測 — `state`/`upload_id`/`split_failed` は更新されるのに
+   * `error`/`accepted_at` だけ古いまま)。**新しい試行の入口では前回の残骸を
+   * 全部捨てて `accepted_at` も引き直す。** running/done/failed はこの試行の
+   * 記録の上に重ねるだけなので、今まで通り spread する。 */
   private async recordScrapeJob(
     jobKey: string,
     patch: Partial<Omit<ScrapeJobRecord, "date">> & { state: ScrapeJobRecord["state"] },
   ): Promise<void> {
     try {
       const key = DtakoScraperRelayDO.SCRAPE_JOB_KEY_PREFIX + jobKey;
-      const existing = await this.ctx.storage.get<ScrapeJobRecord>(key);
-      const record: ScrapeJobRecord = {
-        ...(existing ?? { date: jobKey, accepted_at: new Date().toISOString() }),
-        ...patch,
-        date: jobKey,
-      };
+      const base: ScrapeJobRecord =
+        patch.state === "pending"
+          ? { date: jobKey, accepted_at: new Date().toISOString(), state: "pending" }
+          : ((await this.ctx.storage.get<ScrapeJobRecord>(key)) ?? {
+              date: jobKey,
+              accepted_at: new Date().toISOString(),
+              state: "pending",
+            });
+      const record: ScrapeJobRecord = { ...base, ...patch, date: jobKey };
       await this.ctx.storage.put(key, record);
       await this.touchScrapeJobOrder(jobKey);
     } catch (err) {
@@ -1496,6 +1537,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return;
     }
 
+    // 段階別 (login/csv_get/stage1/stage2) の所要 ms (Refs #205-52)。cron/MCP 経路
+    // (runCronDtakoScrape) と同じ計測を通す — ブラウザ経路だけ観測が薄いと、
+    // 「経路が違うから」という誤診の温床になる。
+    const timer = new PhaseTimer();
     try {
       const zip = await scrapeViaHttp(
         {
@@ -1508,6 +1553,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         (step, message) => {
           this.sendSafely(server, { event: "progress", comp_id: params.compId, step, message });
         },
+        undefined,
+        {},
+        timer,
       );
 
       // 手動ダウンロード用に常に保存 (自動アップロードの成否に関わらず、監査/リトライ用に残す)。
@@ -1590,6 +1638,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       this.closeSafely(server, 1000, "done");
     } catch (err) {
       const message = err instanceof TheearthClientError ? err.message : "スクレイプに失敗しました";
+      // WS 越しの browser にはあえて短い message だけ送る。証拠一式 (status/
+      // content-type/本文抜粋/経過ms) は console.error (Tail Worker) 側にだけ出す
+      // (Refs #205-52) — cron/MCP 経路と同じ診断面に揃える。
+      const { message: diagMessage, evidence } = describeScrapeFailure(err);
+      console.error(
+        JSON.stringify({
+          scraper_ws: "dtako",
+          comp_id: params.compId,
+          status: "error",
+          message: diagMessage,
+          ...(evidence ? { evidence } : {}),
+        }),
+      );
       // ZIP でない応答 (HTML エラーページ / ログインページ等) も原因調査用にダウンロード
       // できるよう保存し、download URL を result に載せる (「でもダウンロードさせろ」対応)。
       let zipUrl: string | undefined;
@@ -1619,6 +1680,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       });
       this.sendSafely(server, { event: "done" });
       this.closeSafely(server, 1011, "scrape failed");
+    } finally {
+      const { phases, totalMs } = timer.report();
+      console.log(
+        JSON.stringify({ scraper_ws: "dtako", comp_id: params.compId, scrape_phase_timing: phases, total_ms: totalMs }),
+      );
     }
   }
 
