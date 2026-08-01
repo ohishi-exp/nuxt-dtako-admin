@@ -96,6 +96,8 @@ describe("get_dtako_scrape_status", () => {
   it("**split_failed が十分条件でないことが説明から読める**", () => {
     expect(getDtakoScrapeStatusTool.description).toContain("十分条件ではない");
     expect(getDtakoScrapeStatusTool.description).toContain("unsplit_total");
+    // **null は「残っていない」ではなく「見ていない」**
+    expect(getDtakoScrapeStatusTool.description).toContain("見ていない");
   });
 
   it("limit を省略すると relay の既定に委ねる", async () => {
@@ -109,7 +111,7 @@ describe("get_dtako_scrape_status", () => {
   });
 
   it("limit を渡すと query に載り、応答をそのまま返す", async () => {
-    const body = { limit: 5, split_failed: 1, history: [{ status: "split_failed" }] };
+    const body = { limit: 5, split_failed: 1, unsplit_total: null, history: [{ status: "split_failed" }] };
     const e = env({
       SCRAPER_RELAY: { fetch: vi.fn(async () => new Response(JSON.stringify(body))) },
     });
@@ -118,6 +120,33 @@ describe("get_dtako_scrape_status", () => {
     expect(relayOf(e).fetch.mock.calls[0]![0]).toBe(
       "https://relay.internal/kintai-relay/scrape-history?limit=5",
     );
+  });
+
+  it("**date_from / date_to を渡すと unsplit_total を数えに行く**", async () => {
+    const body = { split_failed: 0, unsplit_total: 0, unsplit: [], history: [] };
+    const e = env({
+      SCRAPER_RELAY: { fetch: vi.fn(async () => new Response(JSON.stringify(body))) },
+    });
+    const got = await getDtakoScrapeStatusTool.execute(e, {
+      date_from: "2026-06-03",
+      date_to: "2026-07-01",
+    });
+    expect(got).toEqual(body);
+    expect(relayOf(e).fetch.mock.calls[0]![0]).toBe(
+      "https://relay.internal/kintai-relay/scrape-history?date_from=2026-06-03&date_to=2026-07-01",
+    );
+  });
+
+  it("日付の形が違えば schema が弾く", () => {
+    expect(getDtakoScrapeStatusTool.inputSchema.safeParse({ date_from: "2026-6-3" }).success).toBe(
+      false,
+    );
+    expect(
+      getDtakoScrapeStatusTool.inputSchema.safeParse({
+        date_from: "2026-06-03",
+        date_to: "2026-07-01",
+      }).success,
+    ).toBe(true);
   });
 
   it("binding / secret が無ければ fail-closed", async () => {

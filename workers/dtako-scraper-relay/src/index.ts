@@ -19,6 +19,8 @@ import {
   DEFAULT_HISTORY_LIMIT,
   dispatchScrapeDates,
   fetchScrapeHistory,
+  fetchUnsplit,
+  isValidDate,
   MAX_SCRAPE_DATES,
   planScrapeDispatch,
 } from "./scrape-dispatch";
@@ -549,29 +551,59 @@ async function handleScrapeHistory(request: Request, env: RelayWorkerEnv): Promi
   const tenantId = tenantForCompId(accounts, compId);
   if (!tenantId) return fail(503, "tenant not resolved from dtako_accounts");
 
-  const raw = new URL(request.url).searchParams.get("limit");
+  const params = new URL(request.url).searchParams;
+  const raw = params.get("limit");
   const parsed = raw === null ? DEFAULT_HISTORY_LIMIT : Number.parseInt(raw, 10);
   const limit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 200) : DEFAULT_HISTORY_LIMIT;
 
+  const proxy = ((input: unknown, init?: RequestInit) =>
+    authWorker.fetch(input as string, init)) as unknown as typeof fetch;
+
   let history: unknown;
   try {
-    history = await fetchScrapeHistory(
-      { sharedSecret: proxySecret, tenantId, limit },
-      (input, init) => authWorker.fetch(input as string, init),
-    );
+    history = await fetchScrapeHistory({ sharedSecret: proxySecret, tenantId, limit }, proxy);
   } catch (err) {
     return fail(502, err instanceof Error ? err.message : String(err));
+  }
+
+  // **`split_failed` だけでは足りない。** date_from/date_to をもらえたら
+  // `has_kudgivt = FALSE` が残っているかを alc の etags から直接数える
+  // (`scrape-dispatch.ts` の fetchUnsplit の docs)。もらえなければ **null** —
+  // 「残っていない」と「見ていない」を混ぜない
+  const dateFrom = params.get("date_from");
+  const dateTo = params.get("date_to");
+  let unsplitTotal: number | null = null;
+  let unsplit: unknown[] = [];
+  let unsplitError: string | null = null;
+  if (isValidDate(dateFrom) && isValidDate(dateTo)) {
+    try {
+      const got = await fetchUnsplit(
+        { sharedSecret: proxySecret, tenantId, dateFrom, dateTo },
+        proxy,
+      );
+      unsplitTotal = got.unsplit_total;
+      unsplit = got.unsplit;
+    } catch (err) {
+      // **観測が落ちても履歴は返す。** ただし黙らない
+      unsplitError = err instanceof Error ? err.message : String(err);
+    }
   }
 
   return new Response(
     JSON.stringify({
       limit,
       split_failed: countSplitFailed(history),
+      // **null は「見ていない」** (date_from / date_to が無い、または引けなかった)
+      unsplit_total: unsplitTotal,
+      unsplit,
+      unsplit_error: unsplitError,
       // **十分条件ではない** ことを応答自身に書く
       note:
         "split_failed が 0 でも has_kudgivt = FALSE が残ることがあります " +
         "(alc の update_has_kudgivt が当たらなくても Ok(0) を返すため)。" +
-        "必要条件であって十分条件ではありません。",
+        "必要条件であって十分条件ではありません。" +
+        "確実に確かめるには date_from / date_to を渡して unsplit_total を見てください " +
+        "(null は「残っていない」ではなく「見ていない」)。",
       history,
     }),
     { status: 200, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } },

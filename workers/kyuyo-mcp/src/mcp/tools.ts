@@ -848,6 +848,19 @@ export const runDtakoScrapeTool = {
 const getDtakoScrapeStatusArgs = z
   .object({
     limit: z.number().int().min(1).max(200).optional().describe("引く履歴の件数 (既定 50)"),
+    date_from: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional()
+      .describe(
+        "unsplit_total を数える期間の始まり (YYYY-MM-DD)。" +
+          "**date_to と両方渡さないと unsplit_total は null (見ていない) になる**",
+      ),
+    date_to: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional()
+      .describe("同・終わり (YYYY-MM-DD)。期間の上限は alc 側で 40 日"),
   })
   .strict();
 
@@ -860,15 +873,22 @@ export const getDtakoScrapeStatusTool = {
     "status が split_failed の行は CSV 分割が落ちた回。" +
     "★**split_failed が 0 でも has_kudgivt = FALSE が残ることがある** " +
     "(alc の update_has_kudgivt が当たらなくても Ok(0) を返すため) — " +
-    "**必要条件であって十分条件ではない**。確実に確かめるには " +
-    "run_kintai_recalc の応答の unsplit / unsplit_total を見ること。",
+    "**必要条件であって十分条件ではない**。" +
+    "**date_from / date_to を渡すと unsplit_total (未 split の運行数) を直接数える** — " +
+    "これが 0 なら取り込みは完了している。" +
+    "**unsplit_total が null なのは「残っていない」ではなく「見ていない」** " +
+    "(date_from / date_to を渡していないか、alc から引けなかった。後者は unsplit_error に出る)。",
   inputSchema: getDtakoScrapeStatusArgs,
   execute: async (env: Env, args: z.infer<typeof getDtakoScrapeStatusArgs>) => {
     const relay = env.SCRAPER_RELAY;
     if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
     const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
     if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
-    const q = args.limit === undefined ? "" : `?limit=${args.limit}`;
+    const p = new URLSearchParams();
+    if (args.limit !== undefined) p.set("limit", String(args.limit));
+    if (args.date_from !== undefined) p.set("date_from", args.date_from);
+    if (args.date_to !== undefined) p.set("date_to", args.date_to);
+    const q = p.size === 0 ? "" : `?${p.toString()}`;
     const res = await relay.fetch(`https://relay.internal/kintai-relay/scrape-history${q}`, {
       method: "GET",
       headers: { "X-Alc-Proxy-Secret": secret },
