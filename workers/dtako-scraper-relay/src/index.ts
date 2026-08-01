@@ -110,6 +110,13 @@ export default {
       return handleKintaiDaySummaries(request, env);
     }
 
+    if (url.pathname === "/kintai-relay/operation-zip" && request.method === "POST") {
+      // 運行 1 件ぶんの csvdata.zip を自前ログインで取る (Refs
+      // ohishi-exp/rust-ichibanboshi#274, #205 の 59)。**同期。** 取り込みはしない
+      // read-only な操作なので、scrape dispatch (202 非同期) とは別の型にする
+      return handleOperationZip(request, env);
+    }
+
     if (url.pathname === "/ws/scraper") {
       // SCRAPER_MODE=http (Refs ohishi-exp/dtako-scraper#22) は comp_id 単位で
       // DO を分けることで同一企業への並列リクエストを自然に直列化する。comp_id が
@@ -456,6 +463,61 @@ function constantTimeEquals(a: string, b: string): boolean {
   let diff = 0;
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return diff === 0;
+}
+
+/**
+ * `POST /kintai-relay/operation-zip` — 運行 1 件ぶんの csvdata.zip を**自前ログイン**
+ * (`DTAKO_ACCOUNTS`) で取る (Refs ohishi-exp/rust-ichibanboshi#274, #205 の 59)。
+ *
+ * body は `{ope_no, start_ope, comp_id?}`。**`ope_no`/`start_ope` は必須**、
+ * バリデーション (22桁/日時形式/空ZIP判定) は DO 側の `downloadOperationCsvZip`
+ * (theearth-report-client.ts) が持つ — ここでは素通しする。
+ *
+ * **同期で返す。** `/kintai-relay/scrape` (取り込みまで走る非同期ジョブ) と違い、
+ * この口は取り込み (`autoload` への POST) をしない read-only な zip 取得なので、
+ * 「受理しただけ」の 202 にする理由が無い。
+ *
+ * 認証・tenant フォールバックは `/kintai-relay/scrape` と同じ (`X-Alc-Proxy-Secret`
+ * の constant-time 検証、`comp_id` 省略時は `KINTAI_COMP_ID`)。
+ */
+async function handleOperationZip(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  let body: { ope_no?: unknown; start_ope?: unknown; comp_id?: unknown };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return fail(400, "body must be JSON");
+  }
+  const opeNo = typeof body.ope_no === "string" ? body.ope_no : "";
+  const startOpe = typeof body.start_ope === "string" ? body.start_ope : "";
+  if (!opeNo || !startOpe) {
+    return fail(400, "ope_no / start_ope は必須です");
+  }
+  const compId =
+    (typeof body.comp_id === "string" && body.comp_id.trim()) || (env.KINTAI_COMP_ID ?? "").trim();
+  if (!compId) return fail(503, "comp_id が解決できません");
+
+  const id = env.RELAY.idFromName(`scraper-comp-${compId}`);
+  const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/dtako/operation-zip", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ comp_id: compId, ope_no: opeNo, start_ope: startOpe }),
+  });
+  // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
+  return new Response(res.body, {
+    status: res.status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
 }
 
 /**

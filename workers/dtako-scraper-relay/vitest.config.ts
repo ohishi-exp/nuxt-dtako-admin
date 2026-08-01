@@ -43,6 +43,7 @@ export default defineConfig({
         'src/upstream-cache.ts',
         'src/http-etag.ts',
         'src/kintai-relay.ts',
+        'src/operation-zip.ts',
       ],
       thresholds: {
         lines: 100,

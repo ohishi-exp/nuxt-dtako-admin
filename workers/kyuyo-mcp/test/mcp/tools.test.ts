@@ -1084,6 +1084,7 @@ describe("ALL_TOOLS", () => {
     "get_dtako_scrape_status",
     // `/cron/dtako` (無人実行) の進捗を DO から直接見るだけ (Refs #205-43)
     "get_dtako_scrape_progress",
+    "get_operation_zip",
     "get_rest_diff",
     "get_restraint_summary",
     "get_timecard_diff",
