@@ -63,6 +63,7 @@ import {
 } from "./etc-meisai-client";
 import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveDtakoAccountsRaw, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
 import { scrapeJobKey } from "./scrape-dispatch";
+import { buildOperationZipPayload } from "./operation-zip";
 import {
   clearRunningPointer,
   MAX_SCRAPE_JOB_RECORDS,
@@ -670,6 +671,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/cron/dtako/progress" && request.method === "GET") {
       return this.handleCronDtakoProgress();
     }
+    // 運行 1 件ぶんの csvdata.zip を自前ログインで取る (Refs
+    // ohishi-exp/rust-ichibanboshi#274, #205 の 59)。**`/cron/dtako` と違い同期**
+    // (202 で受理するだけの非同期ジョブにしない) — 取り込み (autoload への POST)
+    // をしないので、破壊的操作の待ち行列に乗せる理由が無い。認証は index.ts の
+    // /kintai-relay/operation-zip 側 (X-Alc-Proxy-Secret) が持つ。
+    if (url.pathname === "/cron/dtako/operation-zip" && request.method === "POST") {
+      return this.handleCronDtakoOperationZip(request);
+    }
     if (url.pathname === "/cron/etc" && request.method === "POST") {
       return this.handleCronEtc(request);
     }
@@ -1149,6 +1158,86 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         `DtakoScraperRelayDO handleCronDtakoProgress failed: ${describeUnknownError(err)}`,
       );
       return Response.json({ error: "進捗の読み出しに失敗しました" }, { status: 500 });
+    }
+  }
+
+  /**
+   * POST /cron/dtako/operation-zip — body {comp_id, ope_no, start_ope}。運行 1 件
+   * ぶんの csvdata.zip を**自前ログイン**で取る (Refs
+   * ohishi-exp/rust-ichibanboshi#274, #205 の 59)。`handleReportZip`
+   * (`/daily-report-api/zip`) はブラウザ由来の `TheearthSessionRecord` (別 DO
+   * instance `theearth-{comp}:{userB64}`) に依存するため使えない — こちらは
+   * `runCronDtakoScrape` と同じ「comp_id 単位 DO + 都度 `login()`」の型を採る。
+   *
+   * **`scrapeQueue` (`enqueueScrape`) で直列化する** — 同一 comp_id への並行
+   * theearth リクエストはセッションロックで hang/500 する (`downloadCsvZip` の
+   * doc comment 参照)。cron scrape (`/cron/dtako`) と同じキューを共有するため、
+   * 窓の無人取り直しと本経路が同時に来ても直列に捌かれる。**取り込み
+   * (`autoload` への POST) はしない** — `downloadOperationCsvZip` が返す zip を
+   * 応答に載せるだけの read-only な操作。
+   */
+  private async handleCronDtakoOperationZip(request: Request): Promise<Response> {
+    let body: { comp_id?: unknown; ope_no?: unknown; start_ope?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return Response.json({ error: "JSON body が必要です" }, { status: 400 });
+    }
+    const compId = typeof body.comp_id === "string" ? body.comp_id : "";
+    const opeNo = typeof body.ope_no === "string" ? body.ope_no : "";
+    const startOpe = typeof body.start_ope === "string" ? body.start_ope : "";
+    if (!compId || !opeNo || !startOpe) {
+      return Response.json({ error: "comp_id / ope_no / start_ope が必要です" }, { status: 400 });
+    }
+
+    const account = await this.resolveAccount(compId);
+    if (!account) {
+      return Response.json({ error: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
+    }
+
+    return this.enqueueScrape(() => this.runOperationZip(account, opeNo, startOpe));
+  }
+
+  private async runOperationZip(account: DtakoAccountRaw, opeNo: string, startOpe: string): Promise<Response> {
+    const jar = createCookieJar();
+    try {
+      await login(jar, { compId: account.comp_id, userName: account.user_name, userPass: account.user_pass });
+      const zip = await downloadOperationCsvZip(jar, { opeNo, startOpe });
+      const payload = buildOperationZipPayload(zip);
+      console.log(
+        JSON.stringify({
+          operation_zip: "ok",
+          comp_id: account.comp_id,
+          ope_no: opeNo,
+          bytes: payload.bytes,
+          omitted: payload.omitted,
+          entries: payload.entries,
+        }),
+      );
+      return Response.json({
+        ok: true,
+        comp_id: account.comp_id,
+        ope_no: opeNo,
+        start_ope: startOpe,
+        bytes: payload.bytes,
+        zip_base64: payload.zipBase64,
+        omitted: payload.omitted,
+        limit_bytes: payload.limitBytes,
+        entries: payload.entries,
+      });
+    } catch (err) {
+      if (err instanceof VenusSessionExpiredError) {
+        return Response.json({ error: THEEARTH_SESSION_EXPIRED_MESSAGE }, { status: 401 });
+      }
+      if (err instanceof ReportParamError) {
+        return Response.json({ error: err.message }, { status: 400 });
+      }
+      const message =
+        err instanceof TheearthClientError ? err.message : `csvdata.zip の取得に失敗しました (${describeUnknownError(err)})`;
+      console.error(
+        JSON.stringify({ operation_zip: "failed", comp_id: account.comp_id, ope_no: opeNo, message }),
+      );
+      return Response.json({ error: message }, { status: 502 });
     }
   }
 

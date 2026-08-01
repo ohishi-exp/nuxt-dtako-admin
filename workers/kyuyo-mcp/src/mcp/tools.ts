@@ -20,6 +20,7 @@ import type {
   RestraintSummaryDay,
 } from "../../../dtako-scraper-relay/src/theearth-restraint-client";
 import { resolveSecretBinding } from "../../../dtako-scraper-relay/src/cron";
+import { OPE_NO_RE, START_OPE_RE } from "../../../dtako-scraper-relay/src/theearth-report-client";
 import {
   crossMonthMinutesByDate,
   kosokuPartsByDate,
@@ -953,6 +954,67 @@ export const getDtakoScrapeProgressTool = {
   },
 };
 
+// ── get_operation_zip ────────────────────────────────────────────────────────
+
+const getOperationZipArgs = z
+  .object({
+    ope_no_22: z
+      .string()
+      .regex(OPE_NO_RE)
+      .describe(
+        "運行No。**theearth 側の 22 桁**。オンプレの unko_no は 23 桁 — " +
+          "呼び出し元が末尾 1 桁を落として渡すこと (この tool は 22 桁しか受け付けない)。" +
+          "rust-ichibanboshi の day-events (#273) が返す zip_request.ope_no がそのまま渡せる",
+      ),
+    start_ope: z
+      .string()
+      .regex(START_OPE_RE)
+      .describe('出庫日時。"YYYY/MM/DD H:mm:ss" (時は0埋めしない、例 "2026/07/07 7:53:30")'),
+    comp_id: z.string().optional().describe("会社。省略すると relay の既定 (KINTAI_COMP_ID)"),
+  })
+  .strict();
+
+/**
+ * 運行 1 件ぶんの csvdata.zip を取る (Refs ohishi-exp/rust-ichibanboshi#274, #205 の 59)。
+ *
+ * **read-only。** relay の `POST /kintai-relay/operation-zip` を叩くだけ —
+ * relay 側が `DTAKO_ACCOUNTS` で自前ログインして theearth から zip を取る
+ * (ブラウザセッションに依存しない)。取り込み (`autoload` への POST) はしない、
+ * 1 段目だけの tool。
+ */
+export const getOperationZipTool = {
+  name: "get_operation_zip",
+  description:
+    "運行 1 件ぶんの csvdata.zip を取る (Refs ohishi-exp/rust-ichibanboshi#274, #205 の 59)。" +
+    "**読むだけ — 取り込み (nginx への autoload POST) はしない。** " +
+    "relay が `DTAKO_ACCOUNTS` で自前ログインして theearth から取得する " +
+    "(ブラウザのセッションには依存しない、無人で呼べる)。" +
+    "**zip_base64 は上限 (既定 1MB、応答の limit_bytes) を超えると null** になり、" +
+    "代わりに `omitted: true` が立つ (壊れた zip を黙って返さない)。" +
+    "単一運行の実測は 8.7KB — 超えるなら ope_no_22/start_ope の指定間違いを疑うこと。" +
+    "`entries` に zip 内の CSV 名 (KUDGFUL/KUDGIVT/KUDGURI/SokudoData 等) が入るので、" +
+    "取り込み側が探すファイルが揃っているかを事前に確認できる。",
+  inputSchema: getOperationZipArgs,
+  execute: async (env: Env, args: z.infer<typeof getOperationZipArgs>) => {
+    const relay = env.SCRAPER_RELAY;
+    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
+    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+    const res = await relay.fetch("https://relay.internal/kintai-relay/operation-zip", {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
+      body: JSON.stringify({ ope_no: args.ope_no_22, start_ope: args.start_ope, comp_id: args.comp_id }),
+    });
+    const body = await res.text();
+    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
+    try {
+      return JSON.parse(body) as unknown;
+    } catch {
+      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
+    }
+  },
+};
+
 // ── run_kintai_recalc ────────────────────────────────────────────────────────
 
 const runKintaiRecalcArgs = z.object({
@@ -1386,4 +1448,5 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getDtakoScrapeProgressTool as unknown as ToolEntry<z.ZodTypeAny>,
   getKintaiDaySummariesTool as unknown as ToolEntry<z.ZodTypeAny>,
   getKintaiDiffTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getOperationZipTool as unknown as ToolEntry<z.ZodTypeAny>,
 ];

@@ -65,10 +65,12 @@ export class ReportParamError extends TheearthClientError {
   }
 }
 
-const OPE_NO_RE = /^\d{22}$/;
+// kyuyo-mcp の tool 入力バリデーションでも同じ正規表現を使う (Refs #205 の 59) —
+// export してこの 1 箇所を正とする (別ファイルで再定義すると桁数・書式がずれうる)。
+export const OPE_NO_RE = /^\d{22}$/;
 // 時は1桁のこともある (lblStartDateTime の実測値 "2026/07/07 1:03:16"、
 // ゼロ埋めされない。cdp-pair 実機確認、Refs #169)。
-const START_OPE_RE = /^\d{4}\/\d{2}\/\d{2} \d{1,2}:\d{2}:\d{2}$/;
+export const START_OPE_RE = /^\d{4}\/\d{2}\/\d{2} \d{1,2}:\d{2}:\d{2}$/;
 const RANGE_BOUND_RE = /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}$/;
 
 function validateOpeNo(opeNo: string): void {
