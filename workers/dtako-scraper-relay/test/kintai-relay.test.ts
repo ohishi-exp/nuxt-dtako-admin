@@ -9,6 +9,12 @@ import {
   buildDeps,
   KintaiRelayError,
   MAX_MONTH_COUNT,
+  decideFoldTrigger,
+  monthsCoveredByRange,
+  foldMonth,
+  FOLD_PAGE_MAX_DRIVERS,
+  FOLD_CLOSE_MAX_DRIVERS,
+  MAX_FOLD_PAGES,
   type KintaiRelayDeps,
 } from "../src/kintai-relay";
 
@@ -327,6 +333,142 @@ describe("relayKintaiRecalc (ohishi-exp/rust-ichibanboshi#205 の 10)", () => {
     await expect(relayKintaiRecalc({ gcp }, { month: "2026-06" })).rejects.toThrow(
       /parse failed/,
     );
+  });
+});
+
+describe("decideFoldTrigger (ohishi-exp/rust-ichibanboshi#205 の 10)", () => {
+  it("アップロードが無ければ回さない", () => {
+    expect(decideFoldTrigger(null)).toEqual({ run: false, reason: "no_upload" });
+  });
+
+  it("**split_failed > 0 の間は回さない** — 不完全データで上書きし成功に見えるより、古い値のままの方がマシ", () => {
+    expect(decideFoldTrigger({ splitFailed: 1 })).toEqual({ run: false, reason: "split_failed" });
+    expect(decideFoldTrigger({ splitFailed: 42 })).toEqual({ run: false, reason: "split_failed" });
+  });
+
+  it("split_failed が 0 か不明 (null、旧 alc) なら回す", () => {
+    expect(decideFoldTrigger({ splitFailed: 0 })).toEqual({ run: true });
+    expect(decideFoldTrigger({ splitFailed: null })).toEqual({ run: true });
+  });
+});
+
+describe("monthsCoveredByRange (ohishi-exp/rust-ichibanboshi#205 の 10)", () => {
+  it("同じ日なら1か月だけ", () => {
+    expect(monthsCoveredByRange("2026-06-15", "2026-06-15")).toEqual(["2026-06"]);
+  });
+
+  it("月境界をまたげば複数月 (年またぎも畳める)", () => {
+    expect(monthsCoveredByRange("2026-06-25", "2026-07-05")).toEqual(["2026-06", "2026-07"]);
+    expect(monthsCoveredByRange("2025-12-20", "2026-01-05")).toEqual(["2025-12", "2026-01"]);
+  });
+
+  it("壊れた日付は空配列 (fold を回さない側に倒す)", () => {
+    expect(monthsCoveredByRange("nope", "2026-06-15")).toEqual([]);
+    expect(monthsCoveredByRange("2026-06-15", "nope")).toEqual([]);
+  });
+
+  it("start が end より後 (異常な範囲) も空配列", () => {
+    expect(monthsCoveredByRange("2026-07-01", "2026-06-01")).toEqual([]);
+  });
+});
+
+describe("foldMonth (ohishi-exp/rust-ichibanboshi#205 の 10)", () => {
+  /** RECALC への呼び出しを順番に台本どおり返す stub。呼ばれた body を記録する。 */
+  function scriptedGcp(responses: Array<Record<string, unknown>>) {
+    const calls: { body: Record<string, unknown> }[] = [];
+    const gcp = vi.fn(async (_path: string, init?: RequestInit) => {
+      const body = init?.body ? (JSON.parse(init.body as string) as Record<string, unknown>) : {};
+      calls.push({ body });
+      const r = responses[calls.length - 1];
+      return json(r ?? {});
+    });
+    return { gcp, calls };
+  }
+
+  it("1ページで収束したら、続けて封じる1回 (ページングなし・max_drivers=150) を呼ぶ", async () => {
+    const { gcp, calls } = scriptedGcp([
+      { fold: { drivers_written: 3 }, next_after_driver_cd: null },
+      { fold: { drivers_written: 0 }, next_after_driver_cd: null },
+    ]);
+    const report = await foldMonth({ gcp }, { month: "2026-06", apply: true });
+    expect(report).toEqual({
+      month: "2026-06",
+      pages: 1,
+      driversWritten: 3,
+      attemptedGateClose: true,
+      capped: false,
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.body.max_drivers).toBe(FOLD_PAGE_MAX_DRIVERS);
+    expect(calls[0]!.body.after_driver_cd).toBeUndefined();
+    expect(calls[1]!.body.max_drivers).toBe(FOLD_CLOSE_MAX_DRIVERS);
+    expect(calls[1]!.body.after_driver_cd).toBeUndefined();
+  });
+
+  it("複数ページに分かれても next_after_driver_cd を引き継ぎ、収束後に1回だけ封じる", async () => {
+    const { gcp, calls } = scriptedGcp([
+      { fold: { drivers_written: 50 }, next_after_driver_cd: 1200 },
+      { fold: { drivers_written: 50 }, next_after_driver_cd: 1400 },
+      { fold: { drivers_written: 20 }, next_after_driver_cd: null },
+      { fold: { drivers_written: 0 }, next_after_driver_cd: null },
+    ]);
+    const report = await foldMonth({ gcp }, { month: "2026-06", apply: true });
+    expect(report).toEqual({
+      month: "2026-06",
+      pages: 3,
+      driversWritten: 120,
+      attemptedGateClose: true,
+      capped: false,
+    });
+    expect(calls).toHaveLength(4);
+    expect(calls[0]!.body.after_driver_cd).toBeUndefined();
+    expect(calls[1]!.body.after_driver_cd).toBe(1200);
+    expect(calls[2]!.body.after_driver_cd).toBe(1400);
+    // 封じる回はページングしない
+    expect(calls[3]!.body.after_driver_cd).toBeUndefined();
+    expect(calls[3]!.body.max_drivers).toBe(FOLD_CLOSE_MAX_DRIVERS);
+  });
+
+  it(`**MAX_FOLD_PAGES (${MAX_FOLD_PAGES}) で打ち切る** — 収束していないので封じる呼び出しはしない`, async () => {
+    const responses = Array.from({ length: MAX_FOLD_PAGES }, (_, i) => ({
+      fold: { drivers_written: 1 },
+      next_after_driver_cd: 1000 + i,
+    }));
+    const { gcp, calls } = scriptedGcp(responses);
+    const report = await foldMonth({ gcp }, { month: "2026-06", apply: true });
+    expect(report).toEqual({
+      month: "2026-06",
+      pages: MAX_FOLD_PAGES,
+      driversWritten: MAX_FOLD_PAGES,
+      attemptedGateClose: false,
+      capped: true,
+    });
+    // 封じる呼び出しをしていない = ちょうど MAX_FOLD_PAGES 回だけ
+    expect(calls).toHaveLength(MAX_FOLD_PAGES);
+  });
+
+  it("応答が欠けていても 0 として積む (fold / next_after_driver_cd が無い応答)", async () => {
+    const { gcp } = scriptedGcp([{}, {}]);
+    const report = await foldMonth({ gcp }, { month: "2026-06", apply: false });
+    expect(report).toEqual({
+      month: "2026-06",
+      pages: 1,
+      driversWritten: 0,
+      attemptedGateClose: true,
+      capped: false,
+    });
+  });
+
+  it("応答が object ですらない (JSON でも壊れた形) 場合も落ちずに 0 として積む", async () => {
+    const gcp = vi.fn(async () => new Response("null", { status: 200 }));
+    const report = await foldMonth({ gcp }, { month: "2026-06", apply: false });
+    expect(report).toEqual({
+      month: "2026-06",
+      pages: 1,
+      driversWritten: 0,
+      attemptedGateClose: true,
+      capped: false,
+    });
   });
 });
 
