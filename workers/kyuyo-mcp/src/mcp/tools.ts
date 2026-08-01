@@ -1108,6 +1108,226 @@ export const getKintaiDaySummariesTool = {
   },
 };
 
+// ── get_kintai_diff ─────────────────────────────────────────────────────────
+
+/**
+ * オンプレ (`kosoku-daily`) と GCP (`day_summaries`) の共通 11 分数列。
+ *
+ * 列名はもともと両受け口で一致している (`kintai_day_summaries.rs` のモジュール docs)。
+ * オンプレ側だけ `source`、GCP 側だけ `shift_source` と呼ぶので、そこだけ読み替える。
+ */
+const KINTAI_DIFF_MINUTE_FIELDS = [
+  "restraint_minutes",
+  "working_minutes",
+  "break_minutes",
+  "rest_minus_minutes",
+  "statutory_minutes",
+  "within_statutory_overtime_minutes",
+  "overtime_minutes",
+  "legal_holiday_minutes",
+  "night_minutes",
+  "overtime_night_minutes",
+  "legal_holiday_night_minutes",
+] as const;
+
+type KintaiDiffMinuteField = (typeof KINTAI_DIFF_MINUTE_FIELDS)[number];
+
+/** 突合 1 行の値 (両側とも同じ形に揃えて持つ)。 */
+type KintaiDiffValue = { shift_source: unknown } & Record<KintaiDiffMinuteField, number>;
+
+function toNumberOr0(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+/** GCP `day_summaries` の `{summaries: {key: {...}}}` を突合用の Map にする。 */
+function gcpSummariesToMap(body: unknown): Map<string, KintaiDiffValue> {
+  const out = new Map<string, KintaiDiffValue>();
+  const summaries = (body as { summaries?: unknown }).summaries;
+  if (!summaries || typeof summaries !== "object") return out;
+  for (const [key, raw] of Object.entries(summaries as Record<string, unknown>)) {
+    const r = raw as Record<string, unknown>;
+    const value = { shift_source: r.shift_source } as KintaiDiffValue;
+    for (const f of KINTAI_DIFF_MINUTE_FIELDS) value[f] = toNumberOr0(r[f]);
+    out.set(key, value);
+  }
+  return out;
+}
+
+/**
+ * オンプレ `kosoku-daily` (`view` 省略 = Full) の `{drivers: [{driver, days: [...]}]}` を
+ * 突合用の Map にする。
+ *
+ * **`punches` / `parts` はここで捨てる** — 全乗務員月ぶんで punches/parts まで持ち回すと
+ * Worker の CPU/メモリを無駄に食う。突合に要るのは 11 分数 + `source` + キー 3 つだけ。
+ */
+function onpremKosokuDailyToMap(body: unknown): Map<string, KintaiDiffValue> {
+  const out = new Map<string, KintaiDiffValue>();
+  const drivers = (body as { drivers?: unknown }).drivers;
+  if (!Array.isArray(drivers)) return out;
+  for (const d of drivers) {
+    const driver = (d as { driver?: unknown }).driver;
+    const days = (d as { days?: unknown }).days;
+    if (!Array.isArray(days)) continue;
+    for (const day of days) {
+      const r = day as Record<string, unknown>;
+      const date = r.date;
+      const start = r.start;
+      if (typeof date !== "string" || typeof start !== "string") continue;
+      const key = `${driver}|${date}|${start}`;
+      const value = { shift_source: r.source } as KintaiDiffValue;
+      for (const f of KINTAI_DIFF_MINUTE_FIELDS) value[f] = toNumberOr0(r[f]);
+      out.set(key, value);
+    }
+  }
+  return out;
+}
+
+/** `driver|date|start` キーから乗務員CD (先頭要素) を取り出す。 */
+function driverOfKey(key: string): string {
+  return key.slice(0, key.indexOf("|"));
+}
+
+/** キーは常に `gcpSummariesToMap` / `onpremKosokuDailyToMap` が組んだ 3 要素なので、
+ *  分解結果が欠けることはない。 */
+function keyToRow(key: string): { driver_cd: string; date: string; start: string } {
+  const [driver_cd, date, ...rest] = key.split("|");
+  return { driver_cd: driver_cd as string, date: date as string, start: rest.join("|") };
+}
+
+/** カテゴリごとの上限。500 は `get_rest_diff` と同じ既定に揃えた。 */
+const KINTAI_DIFF_MAX_ITEMS = 500;
+
+/** 1 カテゴリぶんを `max_items` で切り、`total`/`capped` を添えて返す。黙って切らない。 */
+function capCategory<T>(items: T[]): { total: number; capped: boolean; items: T[] } {
+  return {
+    total: items.length,
+    capped: items.length > KINTAI_DIFF_MAX_ITEMS,
+    items: items.slice(0, KINTAI_DIFF_MAX_ITEMS),
+  };
+}
+
+const getKintaiDiffArgs = z
+  .object({
+    month: z.string().regex(/^\d{4}-\d{2}$/).describe("対象年月 (YYYY-MM)"),
+    driver: z
+      .string()
+      .regex(/^\d{1,10}$/)
+      .optional()
+      .describe("乗務員CD (数字)。省略すると全乗務員"),
+  })
+  .strict();
+
+export const getKintaiDiffTool = {
+  name: "get_kintai_diff",
+  description:
+    "オンプレ (rust-ichibanboshi の `/api/kintai/kosoku-daily`) と GCP " +
+    "(`kintai.day_summaries`、`get_kintai_day_summaries` と同じ値) の日別サマリを " +
+    "`乗務員CD|暦日|開始時刻` キーで突き合わせ、**ずれている行だけを名指しで返す**。" +
+    "**GET 2 本を叩いて突き合わせるだけ** — 1 バイトも書かない。" +
+    "ずれは 4 つに分ける: only_gcp (GCPにしか無い) / " +
+    "only_onprem_driver0 (オンプレにしか無く乗務員CD=0。GCPが意図的に除外しているので" +
+    "「欠け」ではない) / only_onprem_other (オンプレにしか無く乗務員CD≠0。こちらが本当の欠け) / " +
+    "value_diff_restraint_match (値が違うが restraint_minutes は一致) / " +
+    "value_diff_restraint_mismatch (restraint_minutes も違う)。" +
+    "各カテゴリ items は " +
+    String(KINTAI_DIFF_MAX_ITEMS) +
+    " 件で切るが、total は切る前の総数 (capped で切れたかが分かる)。" +
+    "**どちら側が古いかは判定しない** — 休憩/休息の伸び縮みは双方向に起きるため、" +
+    "件数や長さだけで古い側を決めると外れる (実例あり)。古い側の特定は取り直しの結果で判断すること。" +
+    "**GCP が畳み直し待ち (stale) のときは、ここに出る差が入力のずれではなく単なる未反映のこともある** — " +
+    "stale かどうかは `run_kintai_recalc` を `apply` 省略で叩いて別途確認すること " +
+    "(この tool 自身は version の一致/不一致を主張しない)。",
+  inputSchema: getKintaiDiffArgs,
+  execute: async (env: Env, args: z.infer<typeof getKintaiDiffArgs>) => {
+    if (!parseYm(args.month)) throw new Error("month は YYYY-MM で指定してください");
+
+    const relay = env.SCRAPER_RELAY;
+    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
+    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+
+    const gcpQuery = new URLSearchParams({ month: args.month });
+    if (args.driver) gcpQuery.set("driver", args.driver);
+    const onpremQuery =
+      `/api/kintai/kosoku-daily?month=${encodeURIComponent(args.month)}` +
+      (args.driver ? `&driver=${encodeURIComponent(args.driver)}` : "");
+
+    const [gcpRes, onpremBody] = await Promise.all([
+      relay.fetch(`https://relay.internal/kintai-relay/day-summaries?${gcpQuery}`, {
+        headers: { "X-Alc-Proxy-Secret": secret },
+      }),
+      fetchIchibanJson(env, onpremQuery, "kintai_diff"),
+    ]);
+    const gcpText = await gcpRes.text();
+    if (!gcpRes.ok) throw new Error(`relay: status ${gcpRes.status}: ${gcpText.slice(0, 200)}`);
+    let gcpBody: unknown;
+    try {
+      gcpBody = JSON.parse(gcpText);
+    } catch {
+      throw new Error(`relay: parse failed: ${gcpText.slice(0, 200)}`);
+    }
+
+    const gcp = gcpSummariesToMap(gcpBody);
+    const onprem = onpremKosokuDailyToMap(onpremBody);
+
+    const onlyGcp: Array<{ driver_cd: string; date: string; start: string; gcp: KintaiDiffValue }> = [];
+    const onlyOnpremDriver0: Array<{
+      driver_cd: string;
+      date: string;
+      start: string;
+      onprem: KintaiDiffValue;
+    }> = [];
+    const onlyOnpremOther: Array<{
+      driver_cd: string;
+      date: string;
+      start: string;
+      onprem: KintaiDiffValue;
+    }> = [];
+    const restraintMatch: Array<{
+      driver_cd: string;
+      date: string;
+      start: string;
+      diff_fields: KintaiDiffMinuteField[];
+      gcp: KintaiDiffValue;
+      onprem: KintaiDiffValue;
+    }> = [];
+    const restraintMismatch: typeof restraintMatch = [];
+
+    for (const [key, g] of gcp) {
+      const o = onprem.get(key);
+      const row = keyToRow(key);
+      if (!o) {
+        onlyGcp.push({ ...row, gcp: g });
+        continue;
+      }
+      const diffFields = KINTAI_DIFF_MINUTE_FIELDS.filter((f) => g[f] !== o[f]);
+      if (diffFields.length === 0) continue;
+      const bucket = g.restraint_minutes === o.restraint_minutes ? restraintMatch : restraintMismatch;
+      bucket.push({ ...row, diff_fields: diffFields, gcp: g, onprem: o });
+    }
+    for (const [key, o] of onprem) {
+      if (gcp.has(key)) continue;
+      const row = keyToRow(key);
+      (driverOfKey(key) === "0" ? onlyOnpremDriver0 : onlyOnpremOther).push({ ...row, onprem: o });
+    }
+
+    return {
+      month: args.month,
+      driver: args.driver ?? null,
+      gcp_rows: gcp.size,
+      onprem_rows: onprem.size,
+      only_gcp: capCategory(onlyGcp),
+      only_onprem_driver0: capCategory(onlyOnpremDriver0),
+      only_onprem_other: capCategory(onlyOnpremOther),
+      value_diff_restraint_match: capCategory(restraintMatch),
+      value_diff_restraint_mismatch: capCategory(restraintMismatch),
+      note:
+        "どちら側が古いかはこの tool では判定しない。GCP が stale (畳み直し待ち) の場合、" +
+        "ここに出る差が未反映なだけのことがある — run_kintai_recalc を apply 省略で叩いて確認すること。",
+    };
+  },
+} satisfies ToolEntry<typeof getKintaiDiffArgs>;
+
 export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   listCompaniesTool as unknown as ToolEntry<z.ZodTypeAny>,
   listMonthsTool as unknown as ToolEntry<z.ZodTypeAny>,
@@ -1122,4 +1342,5 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getDtakoScrapeStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDtakoScrapeProgressTool as unknown as ToolEntry<z.ZodTypeAny>,
   getKintaiDaySummariesTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getKintaiDiffTool as unknown as ToolEntry<z.ZodTypeAny>,
 ];

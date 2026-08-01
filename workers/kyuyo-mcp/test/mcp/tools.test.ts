@@ -1075,6 +1075,9 @@ describe("ALL_TOOLS", () => {
     // 畳んだ結果を読むだけ (Refs ohishi-exp/rust-ichibanboshi#205 の 23)。受け側に
     // POST が無く、この tool にも apply 相当の引数が無いので write 側に置かない
     "get_kintai_day_summaries",
+    // オンプレ (kosoku-daily) と GCP (day_summaries) の突合。GET 2 本を叩くだけで
+    // 1 バイトも書かない (Refs ohishi-exp/rust-ichibanboshi#205 の 50)
+    "get_kintai_diff",
     "get_kosoku_events",
     // 休息のずれの診断 (Refs ohishi-exp/rust-ichibanboshi#205 の 41)。
     // 上流に GET しか無く、判定にも入らない素の観測なので read-only
