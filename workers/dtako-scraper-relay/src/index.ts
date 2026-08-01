@@ -14,6 +14,14 @@ import {
   tenantForCompId,
 } from "./kintai-relay";
 import { resolveDtakoAccountsRaw, resolveSecretBinding, runScheduledCron } from "./cron";
+import {
+  countSplitFailed,
+  DEFAULT_HISTORY_LIMIT,
+  dispatchScrapeDates,
+  fetchScrapeHistory,
+  MAX_SCRAPE_DATES,
+  planScrapeDispatch,
+} from "./scrape-dispatch";
 
 interface RelayWorkerEnv {
   RELAY: DurableObjectNamespace;
@@ -73,6 +81,18 @@ export default {
       // 全量再計算を GCP 側で 1 ページぶん進める (Refs ohishi-exp/rust-ichibanboshi#205 の 10)。
       // 打刻を運ぶ経路ではない — deploy / TOML 変更で stale になった乗務員を畳み直すだけ
       return handleKintaiRecalc(request, env);
+    }
+
+    if (url.pathname === "/kintai-relay/scrape" && request.method === "POST") {
+      // 読取日を名指しで取り直す (Refs ohishi-exp/rust-ichibanboshi#205 の 42)。
+      // **本番にデータを書く経路** — 受理しか返さない (結果は下の history で見る)
+      return handleScrapeDispatch(request, env);
+    }
+
+    if (url.pathname === "/kintai-relay/scrape-history" && request.method === "GET") {
+      // 取り直しの結果 (Refs #205 の 42)。**GET だけ。** 配布とは別の口にして、
+      // 「起動した」を「終わった」と読み違えられないようにする
+      return handleScrapeHistory(request, env);
     }
 
     if (url.pathname === "/kintai-relay/day-summaries" && request.method === "GET") {
@@ -427,4 +447,133 @@ function constantTimeEquals(a: string, b: string): boolean {
   let diff = 0;
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return diff === 0;
+}
+
+/**
+ * `POST /kintai-relay/scrape` — **読取日を名指しで取り直す** (Refs
+ * ohishi-exp/rust-ichibanboshi#205 の 42)。
+ *
+ * body は `{dates: ["YYYY-MM-DD", ...], comp_id?}`。**`dates` は必須**で、
+ * 既定値を作らない (`scrape-dispatch.ts` の docs — 取り込みは `has_kudgivt` を
+ * 一旦 `FALSE` に戻すので、要らない日を巻き込むと運行が読み取り側から消える)。
+ *
+ * **応答は「受理した」までしか言わない。** `/cron/dtako` は 202 を返して非同期に
+ * 走るので、結果は `GET /kintai-relay/scrape-history` で別に見る。
+ * 認証・設定の関門は `/kintai-relay/run` と同じ (`X-Alc-Proxy-Secret`)。
+ */
+async function handleScrapeDispatch(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  let body: { dates?: unknown; comp_id?: unknown };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return fail(400, "body must be JSON");
+  }
+  if (!Array.isArray(body.dates) || body.dates.length === 0) {
+    return fail(400, "dates (YYYY-MM-DD の配列) は必須です");
+  }
+  const compId =
+    (typeof body.comp_id === "string" && body.comp_id.trim()) || (env.KINTAI_COMP_ID ?? "").trim();
+  if (!compId) return fail(503, "comp_id が解決できません");
+
+  const plan = planScrapeDispatch(body.dates);
+  if (plan.dates.length === 0) {
+    return fail(400, `YYYY-MM-DD として読める日付がありません: ${plan.invalid.join(", ")}`);
+  }
+
+  const dispatched = await dispatchScrapeDates(compId, plan.dates, async (doKey, path, payload) => {
+    const id = env.RELAY.idFromName(doKey);
+    const res = await env.RELAY.get(id).fetch(`https://relay.internal${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return { ok: res.ok, status: res.status, text: await res.text() };
+  });
+  console.log(JSON.stringify({ scrape_dispatch: compId, dates: plan.dates.length }));
+
+  return new Response(
+    JSON.stringify({
+      comp_id: compId,
+      // **ここが一番大事** — 受理は完了ではない
+      note:
+        "**受理しただけで、まだ結果は出ていません。** スクレイプは非同期に走ります。" +
+        "結果 (status / split_failed) は GET /kintai-relay/scrape-history で確認してください。",
+      dispatched,
+      accepted_dates: dispatched.filter((d) => d.accepted).map((d) => d.date),
+      failed_dates: dispatched.filter((d) => !d.accepted).map((d) => d.date),
+      // 黙って切らない
+      truncated_dates: plan.truncated,
+      invalid_dates: plan.invalid,
+      max_dates_per_call: MAX_SCRAPE_DATES,
+    }),
+    { status: 202, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } },
+  );
+}
+
+/**
+ * `GET /kintai-relay/scrape-history?limit=` — 取り直しの**結果**を alc から引く
+ * (Refs #205 の 42)。配布 (`POST /kintai-relay/scrape`) とは別の口。
+ */
+async function handleScrapeHistory(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const authWorker = env.AUTH_WORKER;
+  const compId = (env.KINTAI_COMP_ID ?? "").trim();
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!authWorker || !compId || !proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  const accountsRaw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
+  let accounts: unknown = null;
+  try {
+    accounts = JSON.parse(accountsRaw || "null");
+  } catch {
+    accounts = null;
+  }
+  const tenantId = tenantForCompId(accounts, compId);
+  if (!tenantId) return fail(503, "tenant not resolved from dtako_accounts");
+
+  const raw = new URL(request.url).searchParams.get("limit");
+  const parsed = raw === null ? DEFAULT_HISTORY_LIMIT : Number.parseInt(raw, 10);
+  const limit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 200) : DEFAULT_HISTORY_LIMIT;
+
+  let history: unknown;
+  try {
+    history = await fetchScrapeHistory(
+      { sharedSecret: proxySecret, tenantId, limit },
+      (input, init) => authWorker.fetch(input as string, init),
+    );
+  } catch (err) {
+    return fail(502, err instanceof Error ? err.message : String(err));
+  }
+
+  return new Response(
+    JSON.stringify({
+      limit,
+      split_failed: countSplitFailed(history),
+      // **十分条件ではない** ことを応答自身に書く
+      note:
+        "split_failed が 0 でも has_kudgivt = FALSE が残ることがあります " +
+        "(alc の update_has_kudgivt が当たらなくても Ok(0) を返すため)。" +
+        "必要条件であって十分条件ではありません。",
+      history,
+    }),
+    { status: 200, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } },
+  );
 }

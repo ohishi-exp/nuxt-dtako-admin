@@ -787,6 +787,102 @@ export const runKintaiRelayTool = {
   },
 };
 
+// ── run_dtako_scrape / get_dtako_scrape_status ────────────────────────────────
+
+const runDtakoScrapeArgs = z
+  .object({
+    dates: z
+      .array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/))
+      .min(1)
+      .describe(
+        "取り直す**読取日**の配列 (YYYY-MM-DD)。**必須** — 既定値は無い。" +
+          "get_reading_dates (rust-ichibanboshi の /api/kintai/reading-dates) の " +
+          "by_reading_date のキーをそのまま渡す。**勤務日ではなく読取日**",
+      ),
+    comp_id: z.string().optional().describe("会社。省略すると relay の既定 (KINTAI_COMP_ID)"),
+  })
+  .strict();
+
+/**
+ * 読取日を名指しでスクレイプし直す (Refs ohishi-exp/rust-ichibanboshi#205 の 42)。
+ *
+ * **配るロジックはここに無い。** relay の `POST /kintai-relay/scrape` を service
+ * binding 越しに叩くだけ (`run_kintai_relay` と同じ形)。
+ */
+export const runDtakoScrapeTool = {
+  name: "run_dtako_scrape",
+  description:
+    "**【書き込み】指定した読取日のデジタコデータを取り直す** " +
+    "(Refs ohishi-exp/rust-ichibanboshi#205 の 42)。" +
+    "イベント分類 (休憩⇄運転) を後から編集すると alc の R2 の CSV が古いままになり、" +
+    "拘束・休憩の値がオンプレとずれる。該当の読取日を取り直せば直る。" +
+    "**dates は必須で既定値は無い** — 取り込みは has_kudgivt を一旦 FALSE に戻すので、" +
+    "要らない日を巻き込むと運行が読み取り側から消える。" +
+    "**勤務日ではなく読取日**を渡すこと (長距離は運行終了の数日後に読取日が付く。実測 +11 日)。" +
+    "1 回の上限は 10 日で、**超えたぶんは truncated_dates に返る** (黙って切らない)。" +
+    "★**応答は「受理した」までで、結果はまだ出ていない。** スクレイプは非同期に走るので、" +
+    "終わったかどうかは get_dtako_scrape_status で別に確認すること。",
+  inputSchema: runDtakoScrapeArgs,
+  // **write tool。** 本番の R2 / DB を書き換えうるので read tool と同じ扱いにしない
+  requiresScope: "mcp.write",
+  execute: async (env: Env, args: z.infer<typeof runDtakoScrapeArgs>) => {
+    const relay = env.SCRAPER_RELAY;
+    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
+    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+    const res = await relay.fetch("https://relay.internal/kintai-relay/scrape", {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
+      body: JSON.stringify({ dates: args.dates, comp_id: args.comp_id }),
+    });
+    const body = await res.text();
+    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
+    try {
+      return JSON.parse(body) as unknown;
+    } catch {
+      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
+    }
+  },
+};
+
+const getDtakoScrapeStatusArgs = z
+  .object({
+    limit: z.number().int().min(1).max(200).optional().describe("引く履歴の件数 (既定 50)"),
+  })
+  .strict();
+
+export const getDtakoScrapeStatusTool = {
+  name: "get_dtako_scrape_status",
+  description:
+    "run_dtako_scrape で起動した取り直しの**結果**を返す " +
+    "(Refs ohishi-exp/rust-ichibanboshi#205 の 42)。読むだけ。" +
+    "history は {target_date, comp_id, status, message} の配列で、" +
+    "status が split_failed の行は CSV 分割が落ちた回。" +
+    "★**split_failed が 0 でも has_kudgivt = FALSE が残ることがある** " +
+    "(alc の update_has_kudgivt が当たらなくても Ok(0) を返すため) — " +
+    "**必要条件であって十分条件ではない**。確実に確かめるには " +
+    "run_kintai_recalc の応答の unsplit / unsplit_total を見ること。",
+  inputSchema: getDtakoScrapeStatusArgs,
+  execute: async (env: Env, args: z.infer<typeof getDtakoScrapeStatusArgs>) => {
+    const relay = env.SCRAPER_RELAY;
+    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
+    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+    const q = args.limit === undefined ? "" : `?limit=${args.limit}`;
+    const res = await relay.fetch(`https://relay.internal/kintai-relay/scrape-history${q}`, {
+      method: "GET",
+      headers: { "X-Alc-Proxy-Secret": secret },
+    });
+    const body = await res.text();
+    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
+    try {
+      return JSON.parse(body) as unknown;
+    } catch {
+      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
+    }
+  },
+};
+
 // ── run_kintai_recalc ────────────────────────────────────────────────────────
 
 const runKintaiRecalcArgs = z.object({
@@ -952,5 +1048,7 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getTimecardDiffTool as unknown as ToolEntry<z.ZodTypeAny>,
   runKintaiRelayTool as unknown as ToolEntry<z.ZodTypeAny>,
   runKintaiRecalcTool as unknown as ToolEntry<z.ZodTypeAny>,
+  runDtakoScrapeTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getDtakoScrapeStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
   getKintaiDaySummariesTool as unknown as ToolEntry<z.ZodTypeAny>,
 ];
