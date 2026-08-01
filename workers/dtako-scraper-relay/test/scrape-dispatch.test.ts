@@ -1,8 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   countSplitFailed,
+  dateRangeOf,
   dispatchScrapeDates,
   fetchScrapeHistory,
+  fetchUnsplit,
   isValidDate,
   MAX_SCRAPE_DATES,
   planScrapeDispatch,
@@ -155,5 +157,87 @@ describe("countSplitFailed", () => {
   it("配列でなければ 0 (推測しない)", () => {
     expect(countSplitFailed(null)).toBe(0);
     expect(countSplitFailed({ history: [] })).toBe(0);
+  });
+});
+
+describe("fetchUnsplit", () => {
+  it("**unsplit / unsplit_total だけを取り出す** (items は 1,100 件超あるので捨てる)", async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return new Response(
+        JSON.stringify({
+          period: {},
+          items: Array.from({ length: 1130 }, (_, i) => ({ unko_no: String(i) })),
+          unsplit: [{ unko_no: "U1", driver_cd: "1107", reading_date: "2026-06-11" }],
+          unsplit_total: 3,
+          warnings: [],
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+
+    const got = await fetchUnsplit(
+      { sharedSecret: "s3cret", tenantId: "t-1", dateFrom: "2026-06-03", dateTo: "2026-07-01" },
+      fetchImpl,
+    );
+    expect(got.unsplit_total).toBe(3);
+    expect(got.unsplit).toHaveLength(1);
+    expect(got).not.toHaveProperty("items");
+    expect(calls[0]!.url).toBe(
+      "https://auth-worker.internal/alc-internal-proxy/api/dtako/events/etags?date_from=2026-06-03&date_to=2026-07-01",
+    );
+    const headers = calls[0]!.init?.headers as Record<string, string>;
+    expect(headers["X-Alc-Proxy-Secret"]).toBe("s3cret");
+    expect(headers["X-Tenant-ID"]).toBe("t-1");
+  });
+
+  it("欠けたフィールドは 0 / 空に倒すが、**上流の失敗は握り潰さない**", async () => {
+    const empty = (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch;
+    const got = await fetchUnsplit(
+      { sharedSecret: "s", tenantId: "t", dateFrom: "2026-06-03", dateTo: "2026-06-04" },
+      empty,
+    );
+    expect(got).toEqual({ unsplit: [], unsplit_total: 0 });
+
+    const nulled = (async () => new Response("null", { status: 200 })) as unknown as typeof fetch;
+    expect(
+      await fetchUnsplit(
+        { sharedSecret: "s", tenantId: "t", dateFrom: "2026-06-03", dateTo: "2026-06-04" },
+        nulled,
+      ),
+    ).toEqual({ unsplit: [], unsplit_total: 0 });
+
+    // 期間の上限 (alc 側 40 日) 超過はここに落ちる
+    const bad = (async () =>
+      new Response("range too wide", { status: 400 })) as unknown as typeof fetch;
+    await expect(
+      fetchUnsplit(
+        { sharedSecret: "s", tenantId: "t", dateFrom: "2026-01-01", dateTo: "2026-12-31" },
+        bad,
+      ),
+    ).rejects.toThrow("alc etags failed (400): range too wide");
+
+    const html = (async () => new Response("<html>", { status: 200 })) as unknown as typeof fetch;
+    await expect(
+      fetchUnsplit(
+        { sharedSecret: "s", tenantId: "t", dateFrom: "2026-06-03", dateTo: "2026-06-04" },
+        html,
+      ),
+    ).rejects.toThrow("alc etags parse failed");
+  });
+});
+
+describe("dateRangeOf", () => {
+  it("最小と最大を返す (飛びがあっても両端)", () => {
+    expect(dateRangeOf(["2026-06-11", "2026-06-03", "2026-07-01"])).toEqual({
+      from: "2026-06-03",
+      to: "2026-07-01",
+    });
+  });
+
+  it("読めない日付だけ / 空なら null (0 に化かさない)", () => {
+    expect(dateRangeOf([])).toBeNull();
+    expect(dateRangeOf(["nope", "2026-02-30"])).toBeNull();
   });
 });

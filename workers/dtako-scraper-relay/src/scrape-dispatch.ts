@@ -20,6 +20,28 @@
  * - **上限を超えたら黙って切らず、切った日付を返す** ([`MAX_SCRAPE_DATES`])
  * - **`accepted` は「受理された」であって「終わった」ではない。** `/cron/dtako` は
  *   202 を返して非同期に走る。結果は [`fetchScrapeHistory`] で別に確認する
+ *
+ * ## 手順 (MCP tool から回すとき)
+ *
+ * ```text
+ * 1. rust-ichibanboshi の GET /api/kintai/reading-dates?month=YYYY-MM
+ *      → by_reading_date のキー = 取り直す読取日。**勤務日ではない**
+ *        (長距離は運行終了の数日後に読取日が付く。実測 +11 日)
+ *
+ * 2. run_dtako_scrape  { dates: ["YYYY-MM-DD", ...] }        ← 書き込み
+ *      → 202。accepted_dates / failed_dates / truncated_dates / invalid_dates
+ *      **上限 10 日。11 日以上渡すと truncated_dates に返るので、そのまま次の呼びに渡す**
+ *      **この応答は「受理した」まで。まだ何も終わっていない**
+ *
+ * 3. get_dtako_scrape_status { date_from, date_to }           ← 読むだけ
+ *      → split_failed が 0 か / unsplit_total が 0 か を見る
+ *      **split_failed は必要条件でしかない** (alc の update_has_kudgivt が
+ *      当たらなくても Ok(0) を返す)。**unsplit_total が 0 で初めて取り込み完了**
+ *      **unsplit_total が null は「残っていない」ではなく「見ていない」**
+ *      (date_from / date_to を渡していないか、引けなかった = unsplit_error に出る)
+ *
+ * 4. run_kintai_recalc { month, apply: true } で畳み直して値を測る
+ * ```
  */
 
 /** 1 回で配れる読取日の上限。
@@ -172,4 +194,60 @@ export function countSplitFailed(history: unknown): number {
   return history.filter(
     (r) => typeof r === "object" && r !== null && (r as { status?: unknown }).status === "split_failed",
   ).length;
+}
+
+/**
+ * alc の `GET /api/dtako/events/etags` から **`unsplit` / `unsplit_total` だけ**
+ * を引く (Refs ohishi-exp/rust-ichibanboshi#205 の 42)。
+ *
+ * **`split_failed` では足りないから居る。** alc の `update_has_kudgivt` が当たらなくても
+ * `Ok(0)` を返すので、`split_failed === 0` でも `has_kudgivt = FALSE` の運行が残りうる
+ * (`alc-internal-upload.ts` の docs)。**残っているかを直接数えるのがこちら。**
+ *
+ * **`items` は返さない。** 月ぶんで 1,100 件超あり (実測 2026-06 = 1,130)、
+ * ここでは 1 つも使わない。`unsplit` は alc 側で 500 件に切られるが `unsplit_total` は
+ * 実数なので、切られても「残っているか」は答えが出る。
+ *
+ * 期間の上限は alc 側で 40 日 (`MAX_RANGE_DAYS_ETAGS`)。超えたら上流の 4xx が
+ * そのまま本文つきで上がる (握り潰さない)。
+ */
+export async function fetchUnsplit(
+  input: { sharedSecret: string; tenantId: string; dateFrom: string; dateTo: string },
+  fetchImpl: FetchLike,
+): Promise<{ unsplit: unknown[]; unsplit_total: number }> {
+  const q = `date_from=${input.dateFrom}&date_to=${input.dateTo}`;
+  const res = await fetchImpl(`${INTERNAL_PROXY_BASE}/alc-internal-proxy/api/dtako/events/etags?${q}`, {
+    method: "GET",
+    headers: {
+      "X-Alc-Proxy-Secret": input.sharedSecret,
+      "X-Tenant-ID": input.tenantId,
+    },
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`alc etags failed (${res.status}): ${text.slice(0, 300)}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(`alc etags parse failed: ${text.slice(0, 300)}`);
+  }
+  const obj = (parsed ?? {}) as { unsplit?: unknown; unsplit_total?: unknown };
+  return {
+    unsplit: Array.isArray(obj.unsplit) ? obj.unsplit : [],
+    unsplit_total:
+      typeof obj.unsplit_total === "number" && Number.isFinite(obj.unsplit_total)
+        ? obj.unsplit_total
+        : 0,
+  };
+}
+
+/** 日付の並びから `[最小, 最大]` を返す。空なら `null`。 */
+export function dateRangeOf(dates: string[]): { from: string; to: string } | null {
+  const valid = dates.filter(isValidDate).sort();
+  const first = valid[0];
+  const last = valid[valid.length - 1];
+  if (first === undefined || last === undefined) return null;
+  return { from: first, to: last };
 }
