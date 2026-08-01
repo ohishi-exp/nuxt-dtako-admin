@@ -1153,33 +1153,64 @@ function gcpSummariesToMap(body: unknown): Map<string, KintaiDiffValue> {
   return out;
 }
 
-/**
- * オンプレ `kosoku-daily` (`view` 省略 = Full) の `{drivers: [{driver, days: [...]}]}` を
- * 突合用の Map にする。
+/** `onpremKosokuDailyToMap` の結果。読めたかどうかを Map の中身から切り離して持つ
+ *  (空 Map だけでは「本当に 0 行」と「形が読めなかった」の区別が付かないため)。 */
+interface OnpremParseResult {
+  map: Map<string, KintaiDiffValue>;
+  /** `drivers` 配列 (省略形) にも `days` 配列 (driver 指定形) にも当てはまらなかった。 */
+  unreadable: boolean;
+}
+
+/** `days` 配列 1 人ぶんを `driver` 引きのキーで Map に足す (両形式で共有)。
  *
  * **`punches` / `parts` はここで捨てる** — 全乗務員月ぶんで punches/parts まで持ち回すと
- * Worker の CPU/メモリを無駄に食う。突合に要るのは 11 分数 + `source` + キー 3 つだけ。
- */
-function onpremKosokuDailyToMap(body: unknown): Map<string, KintaiDiffValue> {
-  const out = new Map<string, KintaiDiffValue>();
-  const drivers = (body as { drivers?: unknown }).drivers;
-  if (!Array.isArray(drivers)) return out;
-  for (const d of drivers) {
-    const driver = (d as { driver?: unknown }).driver;
-    const days = (d as { days?: unknown }).days;
-    if (!Array.isArray(days)) continue;
-    for (const day of days) {
-      const r = day as Record<string, unknown>;
-      const date = r.date;
-      const start = r.start;
-      if (typeof date !== "string" || typeof start !== "string") continue;
-      const key = `${driver}|${date}|${start}`;
-      const value = { shift_source: r.source } as KintaiDiffValue;
-      for (const f of KINTAI_DIFF_MINUTE_FIELDS) value[f] = toNumberOr0(r[f]);
-      out.set(key, value);
-    }
+ * Worker の CPU/メモリを無駄に食う。突合に要るのは 11 分数 + `source` + キー 3 つだけ。 */
+function addOnpremDriverDays(out: Map<string, KintaiDiffValue>, driver: unknown, days: unknown[]): void {
+  for (const day of days) {
+    const r = day as Record<string, unknown>;
+    const date = r.date;
+    const start = r.start;
+    if (typeof date !== "string" || typeof start !== "string") continue;
+    const key = `${driver}|${date}|${start}`;
+    const value = { shift_source: r.source } as KintaiDiffValue;
+    for (const f of KINTAI_DIFF_MINUTE_FIELDS) value[f] = toNumberOr0(r[f]);
+    out.set(key, value);
   }
-  return out;
+}
+
+/**
+ * オンプレ `kosoku-daily` を突合用の Map にする。**応答の形が `driver` クエリの
+ * 有無で変わる** (Refs ohishi-exp/nuxt-dtako-admin#599):
+ *
+ * - `driver` 省略 = `{drivers: [{driver, days: [...]}]}` (全乗務員)
+ * - `driver` 指定 = `{driver, days: [...]}` (`drivers` が無い。単一乗務員をトップレベルに展開)
+ *
+ * 単一乗務員形の乗務員CD は**応答の `driver` を優先し、無ければ呼び出しに渡した
+ * `requestedDriver` (MCP tool の引数) へ落とす** — 上流はほぼ必ず `driver` を
+ * エコーするが、必須の保証が無いため。
+ *
+ * **どちらの形にも当てはまらなければ空 Map ではなく `unreadable: true` を返す。**
+ * 空 Map のまま返すと「オンプレにその乗務員の行が無い」と「応答の形を読み間違えた」が
+ * 呼び出し側から区別できず、両側に在る行まで `only_gcp` に化ける (#599)。
+ */
+function onpremKosokuDailyToMap(body: unknown, requestedDriver: string | undefined): OnpremParseResult {
+  const out = new Map<string, KintaiDiffValue>();
+  const b = body as { drivers?: unknown; driver?: unknown; days?: unknown };
+  if (Array.isArray(b.drivers)) {
+    for (const d of b.drivers) {
+      const driver = (d as { driver?: unknown }).driver;
+      const days = (d as { days?: unknown }).days;
+      if (!Array.isArray(days)) continue;
+      addOnpremDriverDays(out, driver, days);
+    }
+    return { map: out, unreadable: false };
+  }
+  if (Array.isArray(b.days)) {
+    const driver = b.driver ?? requestedDriver;
+    addOnpremDriverDays(out, driver, b.days);
+    return { map: out, unreadable: false };
+  }
+  return { map: out, unreadable: true };
 }
 
 /** `driver|date|start` キーから乗務員CD (先頭要素) を取り出す。 */
@@ -1236,7 +1267,11 @@ export const getKintaiDiffTool = {
     "件数や長さだけで古い側を決めると外れる (実例あり)。古い側の特定は取り直しの結果で判断すること。" +
     "**GCP が畳み直し待ち (stale) のときは、ここに出る差が入力のずれではなく単なる未反映のこともある** — " +
     "stale かどうかは `run_kintai_recalc` を `apply` 省略で叩いて別途確認すること " +
-    "(この tool 自身は version の一致/不一致を主張しない)。",
+    "(この tool 自身は version の一致/不一致を主張しない)。" +
+    "**オンプレ応答は driver 指定の有無で形が変わる** (省略時 `{drivers:[...]}` / 指定時 " +
+    "`{driver, days:[...]}` で `drivers` が無い) — 両方読む。`onprem_unreadable` が true なら " +
+    "どちらの形にも当てはまらず読めなかったということで、onprem_rows: 0 は " +
+    "「本当に 0 行」ではないので only_gcp を「GCP にしか無い」と解釈しないこと。",
   inputSchema: getKintaiDiffArgs,
   execute: async (env: Env, args: z.infer<typeof getKintaiDiffArgs>) => {
     if (!parseYm(args.month)) throw new Error("month は YYYY-MM で指定してください");
@@ -1268,7 +1303,8 @@ export const getKintaiDiffTool = {
     }
 
     const gcp = gcpSummariesToMap(gcpBody);
-    const onprem = onpremKosokuDailyToMap(onpremBody);
+    const onpremParsed = onpremKosokuDailyToMap(onpremBody, args.driver);
+    const onprem = onpremParsed.map;
 
     const onlyGcp: Array<{ driver_cd: string; date: string; start: string; gcp: KintaiDiffValue }> = [];
     const onlyOnpremDriver0: Array<{
@@ -1316,6 +1352,7 @@ export const getKintaiDiffTool = {
       driver: args.driver ?? null,
       gcp_rows: gcp.size,
       onprem_rows: onprem.size,
+      onprem_unreadable: onpremParsed.unreadable,
       only_gcp: capCategory(onlyGcp),
       only_onprem_driver0: capCategory(onlyOnpremDriver0),
       only_onprem_other: capCategory(onlyOnpremOther),
@@ -1323,7 +1360,13 @@ export const getKintaiDiffTool = {
       value_diff_restraint_mismatch: capCategory(restraintMismatch),
       note:
         "どちら側が古いかはこの tool では判定しない。GCP が stale (畳み直し待ち) の場合、" +
-        "ここに出る差が未反映なだけのことがある — run_kintai_recalc を apply 省略で叩いて確認すること。",
+        "ここに出る差が未反映なだけのことがある — run_kintai_recalc を apply 省略で叩いて確認すること。" +
+        (onpremParsed.unreadable
+          ? " **onprem_unreadable: true — オンプレ応答の形が読めなかった** " +
+            "(drivers 配列も driver 指定形の days 配列も無かった)。onprem_rows: 0 は " +
+            "「本当に 0 行」ではなく「読めなかった」なので、この結果の only_gcp を " +
+            "「GCP にしか無い」と解釈しないこと。"
+          : ""),
     };
   },
 } satisfies ToolEntry<typeof getKintaiDiffArgs>;
