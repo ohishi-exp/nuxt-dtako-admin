@@ -60,6 +60,7 @@ import {
   type ScrapeMonthTarget,
 } from "./etc-meisai-client";
 import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveDtakoAccountsRaw, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
+import { scrapeJobKey } from "./scrape-dispatch";
 import {
   allowedViewerComps,
   compIdsInSameTenant,
@@ -261,6 +262,20 @@ interface DtakoAccountRaw {
   user_name: string;
   user_pass: string;
   tenant_id: string;
+}
+
+/** `/cron/dtako` 1 ジョブぶんの進捗 (Refs #205-43)。DO の `ctx.storage` に
+ * `scrape-job:{date}` キーで持つ。`date` は `scrapeJobKey` の値 (1 日なら
+ * `YYYY-MM-DD`、範囲なら `YYYY-MM-DD..YYYY-MM-DD`)。 */
+interface ScrapeJobRecord {
+  date: string;
+  state: "pending" | "running" | "done" | "failed";
+  accepted_at: string;
+  error?: string;
+  /** state === "done" の時だけ載る。`0` でも `has_kudgivt = FALSE` が残ることが
+   * ある (`alc-internal-upload.ts` の docs) — **必要条件であって十分条件ではない**。 */
+  split_failed?: number | null;
+  upload_id?: string | null;
 }
 
 interface StoredZip {
@@ -623,6 +638,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/cron/dtako" && request.method === "POST") {
       return this.handleCronDtako(request);
     }
+    // read-only。この DO インスタンス (= 1 comp_id) の /cron/dtako 進捗を返す
+    // (Refs #205-43)。認証は /cron/dtako と同じくこの worker 自身からしか
+    // 到達できない前提 (index.ts の /kintai-relay/scrape-progress 側で持つ)。
+    if (url.pathname === "/cron/dtako/progress" && request.method === "GET") {
+      return this.handleCronDtakoProgress();
+    }
     if (url.pathname === "/cron/etc" && request.method === "POST") {
       return this.handleCronEtc(request);
     }
@@ -814,8 +835,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       );
     }
 
+    // 受理した時点で pending を記録する。**waitUntil の外で await** — ここで
+    // 待たないと、202 を返した直後に progress を引いても pending すら見えない
+    // (Refs #205-43)。書き込み自体の失敗は recordScrapeJob 内で握って本体を止めない。
+    const jobKey = scrapeJobKey(startDate, endDate);
+    await this.recordScrapeJob(jobKey, { state: "pending" });
+
     this.ctx.waitUntil(
-      this.enqueueScrape(() => this.runCronDtakoScrape(account, { startDate, endDate })),
+      this.enqueueScrape(() => this.runCronDtakoScrape(account, { startDate, endDate }, jobKey)),
     );
     return Response.json({ accepted: true, comp_id: compId }, { status: 202 });
   }
@@ -823,8 +850,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   private async runCronDtakoScrape(
     account: DtakoAccountRaw,
     range: { startDate: string; endDate: string },
+    jobKey: string,
   ): Promise<void> {
     const logBase = { cron: "dtako", comp_id: account.comp_id, range: `${range.startDate}..${range.endDate}` };
+    await this.recordScrapeJob(jobKey, { state: "running" });
     try {
       const zip = await scrapeViaHttp(
         {
@@ -839,9 +868,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
       const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
       if (!sharedSecret) {
-        console.error(
-          JSON.stringify({ ...logBase, status: "error", message: "INTERNAL_SHARED_SECRET 未設定のためアップロード不能 (zip は破棄)" }),
-        );
+        const message = "INTERNAL_SHARED_SECRET 未設定のためアップロード不能 (zip は破棄)";
+        console.error(JSON.stringify({ ...logBase, status: "error", message }));
+        await this.recordScrapeJob(jobKey, { state: "failed", error: message });
         return;
       }
       const uploadBody = await uploadDtakoZipViaAlcInternalProxy(
@@ -861,6 +890,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       // #205-40) ので、**分割の失敗は error レベルで鳴らす**。握り潰すと該当運行が
       // 読み取り側 (has_kudgivt = TRUE 絞り) から黙って消える。復旧は管理画面の
       // 「CSV分割」/「未分割をまとめて分割」で行う。診断ログは Tail Worker 側に出る。
+      //
+      // **進捗としては `done`。** アップロード自体は成功しているので、
+      // split_failed の件数はレコードに残すだけで state は failed にしない
+      // (get_dtako_scrape_status の split_failed / unsplit_total 側の役目)。
       if (outcome.splitFailed !== null && outcome.splitFailed > 0) {
         console.error(
           JSON.stringify({
@@ -872,10 +905,91 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       } else {
         console.log(JSON.stringify({ ...line, status: "success" }));
       }
+      await this.recordScrapeJob(jobKey, {
+        state: "done",
+        upload_id: outcome.uploadId,
+        split_failed: outcome.splitFailed,
+      });
     } catch (err) {
       const message =
         err instanceof TheearthClientError ? err.message : describeUnknownError(err);
       console.error(JSON.stringify({ ...logBase, status: "error", message }));
+      await this.recordScrapeJob(jobKey, { state: "failed", error: message });
+    }
+  }
+
+  /** 進捗を保持する上限。**増やし続けない** — 超えたぶんは一番古く触れられた
+   * 日付から `scrape-job:` レコードごと `touchScrapeJobOrder` が捨てる (Refs
+   * #205-43)。200 は 1 回 10 日 (`MAX_SCRAPE_DATES`) の配布を 20 回ぶん見渡せる
+   * 値で、日次 cron 1 件/日を足しても数か月分は残る。 */
+  private static readonly MAX_SCRAPE_JOB_RECORDS = 200;
+  private static readonly SCRAPE_JOB_KEY_PREFIX = "scrape-job:";
+  private static readonly SCRAPE_JOB_ORDER_KEY = "scrape-job-order";
+
+  /** `/cron/dtako` (このスクレイプ job) の進捗を `ctx.storage` に記録する。
+   * **観測のための書き込みなので、失敗してもスクレイプ本体は止めない** —
+   * 例外を投げず console.error だけ残す (Refs #205-43 の条件3)。 */
+  private async recordScrapeJob(
+    jobKey: string,
+    patch: Partial<Omit<ScrapeJobRecord, "date">> & { state: ScrapeJobRecord["state"] },
+  ): Promise<void> {
+    try {
+      const key = DtakoScraperRelayDO.SCRAPE_JOB_KEY_PREFIX + jobKey;
+      const existing = await this.ctx.storage.get<ScrapeJobRecord>(key);
+      const record: ScrapeJobRecord = {
+        ...(existing ?? { date: jobKey, accepted_at: new Date().toISOString() }),
+        ...patch,
+        date: jobKey,
+      };
+      await this.ctx.storage.put(key, record);
+      await this.touchScrapeJobOrder(jobKey);
+    } catch (err) {
+      console.error(
+        `DtakoScraperRelayDO recordScrapeJob failed (job=${jobKey}): ${describeUnknownError(err)}`,
+      );
+    }
+  }
+
+  /** 挿入順 (実際には「最後に触れた順」) の index を更新し、
+   * [`MAX_SCRAPE_JOB_RECORDS`] を超えたら古い方から `scrape-job:` レコードごと
+   * 捨てる。**黙って消さない** — 捨てた日付を console.log に残す。 */
+  private async touchScrapeJobOrder(jobKey: string): Promise<void> {
+    const orderKey = DtakoScraperRelayDO.SCRAPE_JOB_ORDER_KEY;
+    const order = (await this.ctx.storage.get<string[]>(orderKey)) ?? [];
+    const next = order.filter((d) => d !== jobKey);
+    next.push(jobKey);
+    const overflow = next.length - DtakoScraperRelayDO.MAX_SCRAPE_JOB_RECORDS;
+    const evicted = overflow > 0 ? next.splice(0, overflow) : [];
+    if (evicted.length > 0) {
+      await Promise.all(
+        evicted.map((d) => this.ctx.storage.delete(DtakoScraperRelayDO.SCRAPE_JOB_KEY_PREFIX + d)),
+      );
+      console.log(JSON.stringify({ scrape_job_progress: "evicted", count: evicted.length, dates: evicted }));
+    }
+    await this.ctx.storage.put(orderKey, next);
+  }
+
+  /** GET /cron/dtako/progress — この DO インスタンス (= 1 comp_id) の
+   * `/cron/dtako` 進捗一覧。read-only (Refs #205-43)。 */
+  private async handleCronDtakoProgress(): Promise<Response> {
+    try {
+      const order = (await this.ctx.storage.get<string[]>(DtakoScraperRelayDO.SCRAPE_JOB_ORDER_KEY)) ?? [];
+      const records = await Promise.all(
+        order.map((d) => this.ctx.storage.get<ScrapeJobRecord>(DtakoScraperRelayDO.SCRAPE_JOB_KEY_PREFIX + d)),
+      );
+      const queue = records.filter((r): r is ScrapeJobRecord => r != null);
+      const counts = { pending: 0, running: 0, done: 0, failed: 0 };
+      for (const r of queue) counts[r.state] += 1;
+      return Response.json({
+        queue,
+        ...counts,
+        max_records: DtakoScraperRelayDO.MAX_SCRAPE_JOB_RECORDS,
+      });
+    } catch (err) {
+      console.error(
+        `DtakoScraperRelayDO handleCronDtakoProgress failed: ${describeUnknownError(err)}`,
+      );
+      return Response.json({ error: "進捗の読み出しに失敗しました" }, { status: 500 });
     }
   }
 

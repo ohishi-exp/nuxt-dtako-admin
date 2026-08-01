@@ -8,6 +8,7 @@ import {
   isValidDate,
   MAX_SCRAPE_DATES,
   planScrapeDispatch,
+  scrapeJobKey,
 } from "../src/scrape-dispatch";
 
 describe("planScrapeDispatch", () => {
@@ -239,5 +240,15 @@ describe("dateRangeOf", () => {
   it("読めない日付だけ / 空なら null (0 に化かさない)", () => {
     expect(dateRangeOf([])).toBeNull();
     expect(dateRangeOf(["nope", "2026-02-30"])).toBeNull();
+  });
+});
+
+describe("scrapeJobKey", () => {
+  it("同じ日付なら 1 日ぶんとして返す", () => {
+    expect(scrapeJobKey("2026-06-03", "2026-06-03")).toBe("2026-06-03");
+  });
+
+  it("範囲なら両端を区別できる形で返す", () => {
+    expect(scrapeJobKey("2026-06-03", "2026-06-05")).toBe("2026-06-03..2026-06-05");
   });
 });
