@@ -61,6 +61,7 @@ import {
 } from "./etc-meisai-client";
 import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveDtakoAccountsRaw, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
 import { scrapeJobKey } from "./scrape-dispatch";
+import { buildDeps, decideFoldTrigger, foldMonth, monthsCoveredByRange } from "./kintai-relay";
 import {
   allowedViewerComps,
   compIdsInSameTenant,
@@ -276,6 +277,24 @@ interface ScrapeJobRecord {
    * ある (`alc-internal-upload.ts` の docs) — **必要条件であって十分条件ではない**。 */
   split_failed?: number | null;
   upload_id?: string | null;
+  /** 取り込み成功後の勤怠 fold の進捗 (Refs ohishi-exp/rust-ichibanboshi#205 の
+   * 10)。`skipped_split_failed` は「不完全データで上書きするより、古い値のまま
+   * の方がマシ」という判断で意図的に回さなかった状態 (Refs #205 監督)。 */
+  fold_state?:
+    | "running"
+    | "done"
+    | "capped"
+    | "skipped_split_failed"
+    | "skipped_no_upload"
+    | "not_configured"
+    | "failed";
+  fold_error?: string;
+  /** 対象月ごとの内訳。通常 1 か月 (cron は常に 1 日 = 1 か月)、月境界をまたぐ
+   * 手動スクレイプだけ複数になりうる。 */
+  fold_months?: string[];
+  /** ページング呼び出しの合計回数 (封じる呼び出しを含む、複数月ぶんの合算)。 */
+  fold_pages?: number;
+  fold_drivers_written?: number;
 }
 
 interface StoredZip {
@@ -515,6 +534,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 直列化するための待ち行列。`PromiseQueue` (pure、node vitest でテスト可) 実装
    * を利用する。 */
   private scrapeQueue = new PromiseQueue();
+  /** 取り込み成功後の勤怠 fold (Refs ohishi-exp/rust-ichibanboshi#205 の 10) を
+   * 同一 DO 内で直列化する待ち行列。cron と手動 WS が同じ comp_id に同時に
+   * 触っても、fold の多重起動 (重複書き込み) を防ぐ。 */
+  private foldQueue = new PromiseQueue();
   /** dvr-api / daily-report-api の theearth セッション (cookie) を読み書きする
    * 処理を直列化する待ち行列。同一 DO 内で複数リクエストが並行すると
    * storage.get → theearth への実 HTTP コール → storage.put がインターリーブし、
@@ -910,11 +933,158 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         upload_id: outcome.uploadId,
         split_failed: outcome.splitFailed,
       });
+      // 取り込み本体はここで完了済み (state: "done" 記録済み)。この先で fold が
+      // 何をしようと、上の記録は変わらない (条件3: fold 失敗が取り込みを道連れ
+      // にしない)。cron 経路は元々 ctx.waitUntil の中なので、ここで await して
+      // 待ち時間を伸ばして良い (WS 経路の executeScrape とは違い、閉じるべき
+      // 接続が無い)。
+      //
+      // **二重に catch する。** `foldAfterIngest` 自身が全部 catch する設計だが、
+      // ここは既に取り込み成功を記録した"後"の try ブロック内 — 万一
+      // `foldAfterIngest` が想定外に throw すると、下の catch が取り込みの
+      // 成否を "failed" で上書きしてしまう (条件3 違反)。それを避けるための
+      // 保険。
+      try {
+        await this.foldAfterIngest(account, range, jobKey, outcome);
+      } catch (foldErr) {
+        console.error(
+          JSON.stringify({
+            kintai_fold: "unexpected_error_outer",
+            comp_id: account.comp_id,
+            error: describeUnknownError(foldErr),
+          }),
+        );
+      }
     } catch (err) {
       const message =
         err instanceof TheearthClientError ? err.message : describeUnknownError(err);
       console.error(JSON.stringify({ ...logBase, status: "error", message }));
       await this.recordScrapeJob(jobKey, { state: "failed", error: message });
+    }
+  }
+
+  /**
+   * 取り込み (アップロード) 成功後に勤怠の畳み直しを蹴る (Refs
+   * ohishi-exp/rust-ichibanboshi#205 の 10)。
+   *
+   * **取り込み本体を絶対に道連れにしない** — 呼び出し元は取り込みの成否記録を
+   * 終えた"後"にこれを呼ぶこと。ここでは例外を外へ投げない (全部 catch する)。
+   *
+   * **`split_failed > 0` の間は skip する。** rust-alc-api の
+   * `has_kudgivt = TRUE` フィルタにより、split が終わっていない運行は fold の
+   * 入力 (`GET /api/dtako/events`) からそもそも見えない (`decideFoldTrigger` の
+   * docs 参照、`rust-alc-api/crates/alc-dtako/src/dtako_events.rs` で確認済み)。
+   * ここで畳むと「不完全なデータで上書きし、しかも成功したように見える」—
+   * 何もしない方がまだマシ、という判断 (Refs #205 監督)。
+   */
+  private async foldAfterIngest(
+    account: DtakoAccountRaw,
+    range: { startDate: string; endDate: string },
+    jobKey: string,
+    uploadOutcome: AlcUploadOutcome | null,
+  ): Promise<void> {
+    try {
+      const decision = decideFoldTrigger(uploadOutcome);
+      if (!decision.run) {
+        await this.recordScrapeJob(jobKey, {
+          state: "done",
+          fold_state: decision.reason === "split_failed" ? "skipped_split_failed" : "skipped_no_upload",
+        });
+        return;
+      }
+
+      const months = monthsCoveredByRange(range.startDate, range.endDate);
+      if (months.length === 0) {
+        await this.recordScrapeJob(jobKey, {
+          state: "done",
+          fold_state: "failed",
+          fold_error: `不正な日付範囲: ${range.startDate}..${range.endDate}`,
+        });
+        return;
+      }
+
+      // 同一 comp_id (= この DO インスタンス) 内で fold の多重起動を防ぐ
+      // (cron と手動 WS が同時に触っても直列に捌く、scrapeQueue と同じ理由)。
+      await this.foldQueue.enqueue(() => this.runFoldMonths(account, jobKey, months));
+    } catch (err) {
+      console.error(
+        JSON.stringify({
+          kintai_fold: "unexpected_error",
+          comp_id: account.comp_id,
+          error: describeUnknownError(err),
+        }),
+      );
+    }
+  }
+
+  /**
+   * [`foldAfterIngest`] からキュー越しに呼ばれる本体。対象月ぶんを順に
+   * `foldMonth` (`kintai-relay.ts`) へ渡す。1 か月あたりのページ数上限は
+   * `foldMonth` 側が持つ — ここでは複数月ぶんの結果を合算して記録するだけ。
+   *
+   * `relayKintaiRecalc` / `buildDeps` を HTTP self-call (`/kintai-relay/recalc`)
+   * 経由にしないのは、この DO が既に `DTAKO_ACCOUNTS` から引いた
+   * `account.tenant_id` を持っているため — `/kintai-relay/recalc` は
+   * `env.KINTAI_COMP_ID` という単一 tenant 前提の口 (MCP tool 用) で、この DO の
+   * ような複数 comp_id/tenant を跨ぐ呼び出し元には合わない。
+   */
+  private async runFoldMonths(
+    account: DtakoAccountRaw,
+    jobKey: string,
+    months: string[],
+  ): Promise<void> {
+    await this.recordScrapeJob(jobKey, { state: "done", fold_state: "running", fold_months: months });
+    try {
+      const origin = (this.env.NUXT_ICHIBAN_API_URL ?? "").trim();
+      const cfAccessClientId = (this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID ?? "").trim();
+      const [sharedSecret, cfAccessClientSecret] = await Promise.all([
+        resolveSecret(this.env.INTERNAL_SHARED_SECRET),
+        resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET),
+      ]);
+      if (!origin || !cfAccessClientId || !sharedSecret || !cfAccessClientSecret) {
+        await this.recordScrapeJob(jobKey, {
+          state: "done",
+          fold_state: "not_configured",
+          fold_error:
+            "NUXT_ICHIBAN_API_URL / NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID / ICHIBAN_CF_ACCESS_CLIENT_SECRET / INTERNAL_SHARED_SECRET のいずれかが未設定",
+        });
+        return;
+      }
+
+      const deps = buildDeps({
+        ichibanOrigin: origin,
+        cfAccessClientId,
+        cfAccessClientSecret,
+        authWorker: this.env.AUTH_WORKER,
+        proxySecret: sharedSecret,
+        tenantId: account.tenant_id,
+      });
+
+      let totalPages = 0;
+      let totalDriversWritten = 0;
+      let anyCapped = false;
+      for (const month of months) {
+        const report = await foldMonth(deps, { month, apply: true });
+        totalPages += report.pages + (report.attemptedGateClose ? 1 : 0);
+        totalDriversWritten += report.driversWritten;
+        if (report.capped) anyCapped = true;
+        console.log(
+          JSON.stringify({ kintai_fold: "month_done", comp_id: account.comp_id, ...report }),
+        );
+      }
+
+      await this.recordScrapeJob(jobKey, {
+        state: "done",
+        fold_state: anyCapped ? "capped" : "done",
+        fold_pages: totalPages,
+        fold_drivers_written: totalDriversWritten,
+      });
+    } catch (err) {
+      const message = describeUnknownError(err);
+      console.error(
+        JSON.stringify({ kintai_fold: "failed", comp_id: account.comp_id, months, message }),
+      );
+      await this.recordScrapeJob(jobKey, { state: "done", fold_state: "failed", fold_error: message });
     }
   }
 
@@ -1396,6 +1566,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           uploadFields.split_failed = uploadOutcome.splitFailed;
         }
       }
+
+      // 取り込み (アップロード) の結果は上の resultStatus/resultMessage で確定
+      // 済み。fold はこの先で何をしようと WS の応答内容を変えない (条件4: 取り込み
+      // の挙動を変えない)。**await しない** — WS を待たせず即座に "done" を返し、
+      // fold は別の ctx.waitUntil で独立して走らせる (ブラウザの接続を fold の
+      // 所要時間 [ページング込みで数分かかりうる] だけ引き延ばさないため)。
+      const jobKey = scrapeJobKey(params.startDate, params.endDate);
+      this.ctx.waitUntil(
+        this.foldAfterIngest(account, params, jobKey, uploadOutcome).catch(() => {}),
+      );
 
       this.sendSafely(server, {
         event: "result",

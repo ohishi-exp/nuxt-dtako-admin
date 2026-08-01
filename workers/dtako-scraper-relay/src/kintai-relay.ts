@@ -373,6 +373,163 @@ export async function relayKintaiRecalc(
   return readJson<unknown>(await deps.gcp(`${RECALC_PATH}?${q}`), "gcp kintai recalc");
 }
 
+/**
+ * 取り込み (スクレイプ → アップロード → CSV 分割) 成功後に fold (勤怠の畳み直し)
+ * を回すべきか決める (Refs ohishi-exp/rust-ichibanboshi#205 の 10)。
+ *
+ * **`splitFailed > 0` の間は回さない。** rust-alc-api の `has_kudgivt = TRUE`
+ * フィルタにより、split が終わっていない運行は fold の入力 (`GET
+ * /api/dtako/events`) からそもそも見えない (rust-alc-api
+ * `crates/alc-dtako/src/dtako_events.rs` で確認済み)。ここで畳むと**不完全な
+ * データで上書きし、しかも成功したように見える** — 古い値のまま残る方が
+ * まだマシ、という判断 (Refs #205 監督)。`splitFailed` が `null` (旧 alc /
+ * 応答に無い = 不明) は「失敗が確認できない」なので回す。
+ */
+export type FoldTriggerDecision =
+  | { run: true }
+  | { run: false; reason: "no_upload" | "split_failed" };
+
+export function decideFoldTrigger(
+  uploadOutcome: { splitFailed: number | null } | null,
+): FoldTriggerDecision {
+  if (!uploadOutcome) return { run: false, reason: "no_upload" };
+  if (uploadOutcome.splitFailed !== null && uploadOutcome.splitFailed > 0) {
+    return { run: false, reason: "split_failed" };
+  }
+  return { run: true };
+}
+
+/**
+ * `startDate`..`endDate` (`YYYY-MM-DD`) が属する月 (`YYYY-MM`) を昇順・重複無しで
+ * 返す。cron 経路は常に 1 日分 = 1 か月だが、WS (手動) 経路は月境界をまたぐ範囲を
+ * 選べるため複数月になりうる。壊れた日付は空配列 (fold を回さない側に倒す)。
+ */
+export function monthsCoveredByRange(startDate: string, endDate: string): string[] {
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(`${endDate}T00:00:00Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return [];
+  const months: string[] = [];
+  const cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+  const endCursor = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
+  while (cursor.getTime() <= endCursor.getTime()) {
+    months.push(`${cursor.getUTCFullYear()}-${String(cursor.getUTCMonth() + 1).padStart(2, "0")}`);
+    cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+  }
+  return months;
+}
+
+/** 1 ページの乗務員数。**524 を避けるための安全値** — rust-ichibanboshi 側の
+ * 実測 (`src/routes/kintai_recalc.rs` の docs: 100 名/ページで 109 秒、524 実測
+ * あり) を踏まえ、収束フェーズは 50 に固定する。 */
+export const FOLD_PAGE_MAX_DRIVERS = 50;
+
+/** 1 回の fold 起動で許すページング呼び出しの上限 (収束フェーズのみ、封じる
+ * 最後の 1 回は含まない)。**歯止め** — 届かなければ打ち切って `capped` を報告し、
+ * 続きは次回の呼び出し (翌日の cron 等) に委ねる。 */
+export const MAX_FOLD_PAGES = 10;
+
+/** 収束後、月ゲートを封じる最後の 1 回に使うページサイズ。rust-ichibanboshi の
+ * `MAX_MAX_FOLD_DRIVERS` と同じ値 — 母集団がこれ以下に収まる回だけ月ゲートの
+ * 5 条件 (after_driver_cd 無し・次ページ無し等) を満たせる。 */
+export const FOLD_CLOSE_MAX_DRIVERS = 150;
+
+interface RecalcPageResult {
+  driversWritten: number;
+  /** `null` なら回りきった (次ページ無し)。 */
+  nextAfterDriverCd: number | null;
+}
+
+/** `relayKintaiRecalc` の応答 (受け側の形をそのまま返す) から fold のページング
+ * 判断に要る 2 値だけを読む。応答の他フィールドはここでは扱わない
+ * ([`relayKintaiRecalc`] の docs と同じ理由で reshape しない)。 */
+function parseRecalcPage(raw: unknown): RecalcPageResult {
+  const obj = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+  const fold = typeof obj.fold === "object" && obj.fold !== null ? (obj.fold as Record<string, unknown>) : {};
+  const driversWritten = typeof fold.drivers_written === "number" ? fold.drivers_written : 0;
+  const next = obj.next_after_driver_cd;
+  return {
+    driversWritten,
+    nextAfterDriverCd: typeof next === "number" ? next : null,
+  };
+}
+
+export interface FoldMonthReport {
+  month: string;
+  /** ページング呼び出し (収束フェーズ) の回数。封じる 1 回は含まない。 */
+  pages: number;
+  driversWritten: number;
+  /** 収束後、月ゲートを封じる呼び出しを試みたか (`capped` の間は `false`)。 */
+  attemptedGateClose: boolean;
+  /** ページ数上限に達して打ち切ったか。 */
+  capped: boolean;
+}
+
+/**
+ * 対象月を「収束させてから封じる」の 2 段で畳み直す (Refs
+ * ohishi-exp/rust-ichibanboshi#205 の 10)。
+ *
+ * rust-ichibanboshi 側 (`src/routes/kintai_recalc.rs`) の月ゲートは「そのページで
+ * 月まるごとを完結させた回だけ」digest を書く (`after_driver_cd` 無し・次ページ
+ * 無し・`stale_only` でない・warnings 空の 5 条件)。[`FOLD_PAGE_MAX_DRIVERS`]
+ * (50) でページングすると個々のページ単体はこの条件を満たさないため、月ゲートが
+ * 一切書かれないままになる。よって:
+ *
+ * 1. `maxDrivers: 50` で `next_after_driver_cd` が `null` になるまでページング
+ *    (実際の書き込みはここで完結する)
+ * 2. 続けてページングなしの単発呼び出しをもう 1 回 (`maxDrivers: 150`)。1 で
+ *    収束済みなら全員 unchanged で高速に終わり、5 条件を満たして月ゲートが
+ *    書かれる (母集団が 150 を超えるテナントではこの最適化は成立しないが、
+ *    正しさには影響しない — 次回また全量読みになるだけ)。
+ *
+ * ページ数が [`MAX_FOLD_PAGES`] を超えたら打ち切る (`capped: true`、無限ループの
+ * 歯止め)。**打ち切った回は封じる呼び出しを試みない** — 収束していないのに
+ * 封じると、未処理の乗務員が古い fingerprint のまま「最新」と刻まれる事故に
+ * なる (rust-ichibanboshi 側の 5 条件がこの状況を弾く設計と同じ理由)。
+ */
+export async function foldMonth(
+  deps: Pick<KintaiRelayDeps, "gcp">,
+  input: { month: string; apply: boolean; now?: number },
+): Promise<FoldMonthReport> {
+  let afterDriverCd: number | undefined;
+  let pages = 0;
+  let driversWritten = 0;
+  let capped = false;
+  for (;;) {
+    pages++;
+    const page = parseRecalcPage(
+      await relayKintaiRecalc(deps, {
+        month: input.month,
+        afterDriverCd,
+        maxDrivers: FOLD_PAGE_MAX_DRIVERS,
+        apply: input.apply,
+        now: input.now,
+      }),
+    );
+    driversWritten += page.driversWritten;
+    if (page.nextAfterDriverCd === null) break;
+    if (pages >= MAX_FOLD_PAGES) {
+      capped = true;
+      break;
+    }
+    afterDriverCd = page.nextAfterDriverCd;
+  }
+
+  if (capped) {
+    return { month: input.month, pages, driversWritten, attemptedGateClose: false, capped: true };
+  }
+
+  const closing = parseRecalcPage(
+    await relayKintaiRecalc(deps, {
+      month: input.month,
+      maxDrivers: FOLD_CLOSE_MAX_DRIVERS,
+      apply: input.apply,
+      now: input.now,
+    }),
+  );
+  driversWritten += closing.driversWritten;
+  return { month: input.month, pages, driversWritten, attemptedGateClose: true, capped: false };
+}
+
 export interface KintaiDaySummariesInput {
   /** 対象月 (`YYYY-MM`)。**必須扱い** — 省略時は JST の当月。 */
   month?: string;
