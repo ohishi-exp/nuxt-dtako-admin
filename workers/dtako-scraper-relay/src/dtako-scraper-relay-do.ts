@@ -65,6 +65,11 @@ import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resol
 import { scrapeJobKey } from "./scrape-dispatch";
 import { buildOperationZipPayload } from "./operation-zip";
 import {
+  DtakoReimportError,
+  runDtakoReimport as runDtakoReimportPure,
+  type DtakoReimportDeps,
+} from "./dtako-reimport";
+import {
   clearRunningPointer,
   MAX_SCRAPE_JOB_RECORDS,
   migrateLegacyScrapeJobsOnce,
@@ -679,6 +684,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/cron/dtako/operation-zip" && request.method === "POST") {
       return this.handleCronDtakoOperationZip(request);
     }
+    // ① zip 取得 (自前ログイン) → ② オンプレ autoload push を 1 回で完結させる
+    // (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67)。**書き込み (取り込み) を
+    // 伴う**ので `/cron/dtako/operation-zip` と違い破壊的操作 — `scrapeQueue` で
+    // 直列化する (`handleCronDtakoOperationZip` と同じキュー)。認証は index.ts の
+    // /kintai-relay/dtako-reimport 側 (X-Alc-Proxy-Secret) が持つ。
+    if (url.pathname === "/cron/dtako/reimport" && request.method === "POST") {
+      return this.handleCronDtakoReimport(request);
+    }
     if (url.pathname === "/cron/etc" && request.method === "POST") {
       return this.handleCronEtc(request);
     }
@@ -1236,6 +1249,143 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         err instanceof TheearthClientError ? err.message : `csvdata.zip の取得に失敗しました (${describeUnknownError(err)})`;
       console.error(
         JSON.stringify({ operation_zip: "failed", comp_id: account.comp_id, ope_no: opeNo, message }),
+      );
+      return Response.json({ error: message }, { status: 502 });
+    }
+  }
+
+  /**
+   * POST /cron/dtako/reimport — body {comp_id, ope_no, start_ope, unko_no,
+   * reset_timecard?}。運行 1 件の csvdata.zip を**自前ログイン**で取得し、
+   * オンプレ rust-ichibanboshi の `POST /api/dtako/autoload` (Refs #205 の
+   * 58/61/63/65、**変更しない**) へそのまま push する (Refs
+   * ohishi-exp/rust-ichibanboshi#280、#205 の 67)。
+   *
+   * `runOperationZip` と同じ「comp_id 単位 DO + 都度 `login()`」だが、こちらは
+   * **取り込みまで実行する**破壊的操作なので、同じ `scrapeQueue` で直列化しつつも
+   * 応答は同期で返す (受理しただけの 202 にしない — 呼び出し元がその場で
+   * entries / 取り込み結果を見られるようにする)。
+   */
+  private async handleCronDtakoReimport(request: Request): Promise<Response> {
+    let body: {
+      comp_id?: unknown;
+      ope_no?: unknown;
+      start_ope?: unknown;
+      unko_no?: unknown;
+      reset_timecard?: unknown;
+    };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return Response.json({ error: "JSON body が必要です" }, { status: 400 });
+    }
+    const compId = typeof body.comp_id === "string" ? body.comp_id : "";
+    const opeNo = typeof body.ope_no === "string" ? body.ope_no : "";
+    const startOpe = typeof body.start_ope === "string" ? body.start_ope : "";
+    const unkoNo = typeof body.unko_no === "string" ? body.unko_no : "";
+    const resetTimecard = body.reset_timecard === true;
+    if (!compId || !opeNo || !startOpe || !unkoNo) {
+      return Response.json(
+        { error: "comp_id / ope_no / start_ope / unko_no が必要です" },
+        { status: 400 },
+      );
+    }
+
+    const account = await this.resolveAccount(compId);
+    if (!account) {
+      return Response.json({ error: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
+    }
+
+    // オンプレの資格情報 (Refs #280 の条件1 — kosoku-daily/pdf-json 等の既存経路と
+    // 同じ CF Access Service Token、新しい credential/allowlist 登録は不要)。
+    // Secrets Store binding は「宣言はあるが解決できない」時に throw するので、
+    // 素通しせず未設定と同じ扱いに倒す (`handleKintaiKosokuDaily` と同じ)。
+    const origin = (this.env.NUXT_ICHIBAN_API_URL ?? "").trim();
+    const cfAccessClientId = (this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID ?? "").trim();
+    let cfAccessClientSecret = "";
+    try {
+      cfAccessClientSecret = await resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
+    } catch (err) {
+      console.error(JSON.stringify({ dtako_reimport: "secret-error", error: describeUnknownError(err) }));
+    }
+    if (!origin || !cfAccessClientId || !cfAccessClientSecret) {
+      return Response.json(
+        {
+          error:
+            "オンプレの取得先 (NUXT_ICHIBAN_API_URL / NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID / ICHIBAN_CF_ACCESS_CLIENT_SECRET) が未設定です",
+        },
+        { status: 503 },
+      );
+    }
+
+    return this.enqueueScrape(() =>
+      this.runDtakoReimportJob(
+        account,
+        { opeNo, startOpe, unkoNo, resetTimecard },
+        origin,
+        cfAccessClientId,
+        cfAccessClientSecret,
+      ),
+    );
+  }
+
+  private async runDtakoReimportJob(
+    account: DtakoAccountRaw,
+    input: { opeNo: string; startOpe: string; unkoNo: string; resetTimecard: boolean },
+    origin: string,
+    cfAccessClientId: string,
+    cfAccessClientSecret: string,
+  ): Promise<Response> {
+    const base = origin.replace(/\/+$/, "");
+    const deps: DtakoReimportDeps = {
+      fetchZip: async () => {
+        const jar = createCookieJar();
+        await login(jar, {
+          compId: account.comp_id,
+          userName: account.user_name,
+          userPass: account.user_pass,
+        });
+        return downloadOperationCsvZip(jar, { opeNo: input.opeNo, startOpe: input.startOpe });
+      },
+      onpremAutoload: (path, init) =>
+        fetch(`${base}${path}`, {
+          ...init,
+          headers: {
+            ...(init.headers as Record<string, string> | undefined),
+            "CF-Access-Client-Id": cfAccessClientId,
+            "CF-Access-Client-Secret": cfAccessClientSecret,
+          },
+        }),
+    };
+    try {
+      const report = await runDtakoReimportPure(deps, {
+        opeNo: input.opeNo,
+        startOpe: input.startOpe,
+        unkoNo: input.unkoNo,
+        resetTimecard: input.resetTimecard,
+      });
+      console.log(
+        JSON.stringify({
+          dtako_reimport: "ok",
+          comp_id: account.comp_id,
+          unko_no: input.unkoNo,
+          bytes: report.bytes,
+          entries: report.entries,
+          http_status: report.http_status,
+        }),
+      );
+      return Response.json(report);
+    } catch (err) {
+      if (err instanceof VenusSessionExpiredError) {
+        return Response.json({ error: THEEARTH_SESSION_EXPIRED_MESSAGE }, { status: 401 });
+      }
+      if (err instanceof ReportParamError || err instanceof DtakoReimportError) {
+        return Response.json({ error: err.message }, { status: 400 });
+      }
+      const message =
+        err instanceof TheearthClientError ? err.message : `dtako reimport に失敗しました (${describeUnknownError(err)})`;
+      console.error(
+        JSON.stringify({ dtako_reimport: "failed", comp_id: account.comp_id, unko_no: input.unkoNo, message }),
       );
       return Response.json({ error: message }, { status: 502 });
     }

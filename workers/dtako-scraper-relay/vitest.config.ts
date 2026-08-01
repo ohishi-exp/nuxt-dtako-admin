@@ -44,6 +44,7 @@ export default defineConfig({
         'src/http-etag.ts',
         'src/kintai-relay.ts',
         'src/operation-zip.ts',
+        'src/dtako-reimport.ts',
       ],
       thresholds: {
         lines: 100,
