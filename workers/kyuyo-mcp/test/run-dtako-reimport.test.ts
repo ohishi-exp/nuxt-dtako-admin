@@ -30,6 +30,11 @@ describe("run_dtako_reimport (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67
     expect(runDtakoReimportTool.description).toContain("entries");
   });
 
+  it("**説明で uncertain:true のときは再実行しないことが読める** (push 後に応答不明=二重取り込み事故の歯止め)", () => {
+    expect(runDtakoReimportTool.description).toContain("uncertain");
+    expect(runDtakoReimportTool.description).toContain("再実行しない");
+  });
+
   it("unko_no は23桁のみ通す (22桁の ope_no_22 と桁数が違う)", () => {
     expect(runDtakoReimportTool.inputSchema.safeParse(baseArgs).success).toBe(true);
     expect(
@@ -128,5 +133,19 @@ describe("run_dtako_reimport (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67
       SCRAPER_RELAY: { fetch: vi.fn(async () => new Response("<html>", { status: 200 })) },
     });
     await expect(runDtakoReimportTool.execute(html, baseArgs)).rejects.toThrow(/parse failed/);
+  });
+
+  it("relay が uncertain:true を返した (push 後に応答不明) 場合もそのままエラー文へ透過する", async () => {
+    const e = env({
+      SCRAPER_RELAY: {
+        fetch: vi.fn(
+          async () =>
+            new Response(JSON.stringify({ error: "応答を確定できませんでした", uncertain: true }), {
+              status: 502,
+            }),
+        ),
+      },
+    });
+    await expect(runDtakoReimportTool.execute(e, baseArgs)).rejects.toThrow(/uncertain.*true/);
   });
 });

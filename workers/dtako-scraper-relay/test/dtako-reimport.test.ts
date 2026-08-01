@@ -3,6 +3,7 @@ import {
   assertZipReadyForPush,
   buildAutoloadPath,
   DtakoReimportError,
+  DtakoReimportPushUncertainError,
   runDtakoReimport,
   UNKO_NO_RE,
   type DtakoReimportDeps,
@@ -169,7 +170,42 @@ describe("runDtakoReimport", () => {
     expect(report.autoload).toEqual({ parse_error: true, raw_excerpt: "<html>502 Bad Gateway</html>" });
   });
 
-  it("zip 取得自体の失敗 (自前ログイン失敗等) はそのまま伝播する", async () => {
+  it("push (fetch) 自体が例外を投げたら DtakoReimportPushUncertainError で区別する (取り込み済みかもしれない)", async () => {
+    const deps = depsOf({
+      onpremAutoload: vi.fn(async () => {
+        throw new Error("network reset");
+      }),
+    });
+    await expect(
+      runDtakoReimport(deps, { opeNo: OPE_NO, startOpe: START_OPE, unkoNo: UNKO_NO_23 }),
+    ).rejects.toThrow(DtakoReimportPushUncertainError);
+    await expect(
+      runDtakoReimport(deps, { opeNo: OPE_NO, startOpe: START_OPE, unkoNo: UNKO_NO_23 }),
+    ).rejects.toThrow(/再実行の前に dtako_events/);
+  });
+
+  it("push が Error でない値を throw しても文字列化して区別する", async () => {
+    const deps = depsOf({
+      onpremAutoload: vi.fn(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-throw-literal
+        throw "boom";
+      }),
+    });
+    await expect(
+      runDtakoReimport(deps, { opeNo: OPE_NO, startOpe: START_OPE, unkoNo: UNKO_NO_23 }),
+    ).rejects.toThrow(/boom/);
+  });
+
+  it("push は成功したが応答本文の読み出しで例外が起きても同様に区別する", async () => {
+    const badRes = new Response("body");
+    vi.spyOn(badRes, "text").mockRejectedValue(new Error("stream error"));
+    const deps = depsOf({ onpremAutoload: vi.fn(async () => badRes) });
+    await expect(
+      runDtakoReimport(deps, { opeNo: OPE_NO, startOpe: START_OPE, unkoNo: UNKO_NO_23 }),
+    ).rejects.toThrow(DtakoReimportPushUncertainError);
+  });
+
+  it("zip 取得自体の失敗 (自前ログイン失敗等、push 前) は通常の Error のまま伝播する (再実行して安全)", async () => {
     const deps = depsOf({
       fetchZip: vi.fn(async () => {
         throw new Error("theearth login failed");

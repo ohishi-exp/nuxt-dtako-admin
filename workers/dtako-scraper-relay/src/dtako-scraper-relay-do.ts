@@ -66,6 +66,7 @@ import { scrapeJobKey } from "./scrape-dispatch";
 import { buildOperationZipPayload } from "./operation-zip";
 import {
   DtakoReimportError,
+  DtakoReimportPushUncertainError,
   runDtakoReimport as runDtakoReimportPure,
   type DtakoReimportDeps,
 } from "./dtako-reimport";
@@ -1378,6 +1379,20 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
         return Response.json({ error: THEEARTH_SESSION_EXPIRED_MESSAGE }, { status: 401 });
+      }
+      // **push 送信後に応答を確定できなかった場合は区別する** (親指摘
+      // 2026-08-01)。取り込みは応答より前に走るため、盲目的な再実行は二重取り込み
+      // になりうる — `uncertain: true` を呼び出し元 (kyuyo-mcp tool) まで伝える。
+      if (err instanceof DtakoReimportPushUncertainError) {
+        console.error(
+          JSON.stringify({
+            dtako_reimport: "push_uncertain",
+            comp_id: account.comp_id,
+            unko_no: input.unkoNo,
+            message: err.message,
+          }),
+        );
+        return Response.json({ error: err.message, uncertain: true }, { status: 502 });
       }
       if (err instanceof ReportParamError || err instanceof DtakoReimportError) {
         return Response.json({ error: err.message }, { status: 400 });
