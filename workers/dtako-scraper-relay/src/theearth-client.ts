@@ -16,6 +16,8 @@
  * これを含めれば `SCRAPER_MODE=http` (Chromium 不要) で正常動作する。
  */
 
+import { measurePhase, type PhaseTimer } from "./phase-timing";
+
 export const BASE_URL = "https://theearth-np.com";
 const LOGIN_PATH = "/F-OES1010[Login].aspx";
 export const CSV_PATH = "/F-NOS3010[GeneralCsv].aspx";
@@ -66,6 +68,46 @@ export class VenusSessionExpiredError extends TheearthClientError {
     super(message);
     this.name = "VenusSessionExpiredError";
   }
+}
+
+/** 想定した form 要素 (CSV フォームの必須 id / 2段階目の出力ボタン等) がページに
+ * 見つからなかった時の証拠一式 (Refs #205-52)。**原因を断定しない** — 「ページ仕様が
+ * 変更された」は確かめていない限り書かない。ここに残す事実だけが呼び出し側
+ * (DO の console.error) で見える診断材料になる。credential / cookie は含めない。 */
+export interface TheearthEvidence {
+  status: number;
+  contentType: string;
+  bodyLength: number;
+  elapsedMs: number;
+  hasLoginForm: boolean;
+  /** title + タグ除去済み本文の先頭 (`describePage` と同じ 160 字上限、credential 無し)。 */
+  page: string;
+}
+
+/** 想定した form 要素が見つからなかった (= どの既知パターンにも一致しなかった) 事を
+ * 表す。「ページ仕様が変更された」と決め付けず、`evidence` に事実だけを残す
+ * (Refs #205-52)。 */
+export class TheearthPageMismatchError extends TheearthClientError {
+  readonly evidence: TheearthEvidence;
+  constructor(message: string, evidence: TheearthEvidence) {
+    super(message);
+    this.name = "TheearthPageMismatchError";
+    this.evidence = evidence;
+  }
+}
+
+/** [`TheearthEvidence`] を応答 + 経過時間から組み立てる。本文は `describePage` の
+ * title + 160字要約のみ (生の HTML は載せない — 大きくなりすぎるのと、
+ * ASP.NET フォームが入力値をそのまま echo する構造上のリスクを避けるため)。 */
+function buildEvidence(res: Response, html: string, elapsedMs: number): TheearthEvidence {
+  return {
+    status: res.status,
+    contentType: res.headers.get("content-type") ?? "",
+    bodyLength: html.length,
+    elapsedMs,
+    hasLoginForm: hasLoginForm(html),
+    page: describePage(html),
+  };
 }
 
 export type FetchLike = typeof fetch;
@@ -144,6 +186,12 @@ export async function fetchWithJar(
   init: RequestInit,
   fetchImpl: FetchLike,
   timeoutMs?: number,
+  /** 診断用のステージ名 (login/csv_get/stage1/stage2 等)。timeout メッセージに
+   * 載せて、**どの段が・どちらの timeout 定数 (30s request / 150s export) に
+   * 当たったか**を ms 値と合わせて一目で分かるようにする (Refs #205-52、
+   * 「ボタンが見つかりません」という無関係な文言に化けて timeout が見えなく
+   * なっていた問題への対応)。省略時は "request" とだけ表示する。 */
+  stageLabel = "request",
 ): Promise<Response> {
   const headers = new Headers(init.headers);
   const cookie = cookieHeader(jar);
@@ -158,7 +206,7 @@ export async function fetchWithJar(
     // loud fail する。ハングしたセッション / 遅いサーバをそのまま無限待ちしない。
     if (signal?.aborted) {
       throw new TheearthClientError(
-        `theearth-np への通信がタイムアウトしました (${timeoutMs}ms) — ` +
+        `theearth-np への通信 (${stageLabel}) がタイムアウトしました (${timeoutMs}ms) — ` +
           "サーバ応答が遅い、またはセッションが固まっている可能性があります",
       );
     }
@@ -430,7 +478,7 @@ async function submitForcedLogin(
   });
   const overlapField = findFormFieldById(html, "txtOverlapSessionID");
   if (overlapField) body.set(overlapField.name, overlapSessionId ?? overlapField.value);
-  return postForm(jar, loginUrl, body, fetchImpl, timeoutMs);
+  return postForm(jar, loginUrl, body, fetchImpl, timeoutMs, "login_forced");
 }
 
 /** 強制ログイン POST の応答を解釈する (redirect / ログイン成功マーカー / ログイン画面
@@ -476,7 +524,7 @@ export async function login(
 ): Promise<LoginResult> {
   const loginUrl = `${BASE_URL}${LOGIN_PATH}?mode=timeout`;
 
-  const getRes = await fetchWithJar(jar, loginUrl, { method: "GET" }, fetchImpl, timeoutMs);
+  const getRes = await fetchWithJar(jar, loginUrl, { method: "GET" }, fetchImpl, timeoutMs, "login_get");
   const html = await getRes.text();
   const hidden = extractHiddenFields(html);
 
@@ -488,7 +536,7 @@ export async function login(
     btnLogin: "ログイン",
   });
 
-  const postRes = await postForm(jar, loginUrl, body, fetchImpl, timeoutMs);
+  const postRes = await postForm(jar, loginUrl, body, fetchImpl, timeoutMs, "login_post");
 
   // 通常ログイン成功時は Response.Redirect (3xx) で戻ることが多い。
   if (postRes.status >= 300 && postRes.status < 400) {
@@ -500,6 +548,7 @@ export async function login(
         { method: "GET" },
         fetchImpl,
         timeoutMs,
+        "login_redirect_follow",
       );
       await followRes.text();
     }
@@ -572,6 +621,7 @@ export async function postForm(
   body: URLSearchParams,
   fetchImpl: FetchLike,
   timeoutMs?: number,
+  stageLabel?: string,
 ): Promise<Response> {
   return fetchWithJar(
     jar,
@@ -583,6 +633,7 @@ export async function postForm(
     },
     fetchImpl,
     timeoutMs,
+    stageLabel,
   );
 }
 
@@ -733,12 +784,18 @@ export async function downloadCsvZip(
   range: CsvDateRange,
   fetchImpl: FetchLike = fetch,
   timeouts: ScrapeTimeouts = {},
+  /** 段階別の所要 ms を記録する (Refs #205-52)。省略時は計測なしで動く
+   * (`measurePhase` が timer 未指定なら素通しする、`phase-timing.ts` 参照)。 */
+  timer?: PhaseTimer,
 ): Promise<ArrayBuffer> {
   const requestTimeoutMs = timeouts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const exportTimeoutMs = timeouts.exportTimeoutMs ?? DEFAULT_EXPORT_TIMEOUT_MS;
   const csvUrl = `${BASE_URL}${CSV_PATH}`;
 
-  const getRes = await fetchWithJar(jar, csvUrl, { method: "GET" }, fetchImpl, requestTimeoutMs);
+  const getT0 = Date.now();
+  const getRes = await measurePhase(timer, "csv_get", () =>
+    fetchWithJar(jar, csvUrl, { method: "GET" }, fetchImpl, requestTimeoutMs, "csv_get"),
+  );
   const html = await getRes.text();
   // セッション切れの場合ここでログイン画面が返る。チェックせずに進むと
   // 「CSV フォームの要素が見つかりません」という誤解を招く generic error に
@@ -755,8 +812,12 @@ export async function downloadCsvZip(
   for (const id of CSV_FORM_IDS) {
     const field = findFormFieldById(html, id);
     if (!field) {
-      throw new TheearthClientError(
-        `CSV フォームの要素 (id=${id}) が見つかりません — theearth-np のページ仕様が変更された可能性があります`,
+      // **原因を断定しない** (Refs #205-52) — 「ページ仕様が変更された」は
+      // 確かめていない。事実 (status/content-type/本文長/経過ms/ログイン
+      // フォーム検出の有無/本文先頭) だけを evidence に残す。
+      throw new TheearthPageMismatchError(
+        `CSV フォームの要素 (id=${id}) が見つかりません`,
+        buildEvidence(getRes, html, Date.now() - getT0),
       );
     }
     fields.set(id, field);
@@ -786,7 +847,10 @@ export async function downloadCsvZip(
     [fields.get("btnCsvSvr")!.name]: fields.get("btnCsvSvr")!.value,
   });
 
-  const stage1Res = await postForm(jar, csvUrl, stage1Body, fetchImpl, requestTimeoutMs);
+  const stage1T0 = Date.now();
+  const stage1Res = await measurePhase(timer, "stage1", () =>
+    postForm(jar, csvUrl, stage1Body, fetchImpl, requestTimeoutMs, "stage1"),
+  );
   const stage1ContentType = stage1Res.headers.get("content-type") ?? "";
 
   // 1段階目で直接 ZIP が返るケース (実装差異に備える)
@@ -807,8 +871,15 @@ export async function downloadCsvZip(
   const outputButton =
     findFormFieldById(stage1Html, "btnCsvSvrOutput") ?? findFormFieldById(stage1Html, "btnCsvOutput");
   if (!outputButton) {
-    throw new TheearthClientError(
-      "CSV ダウンロードの2段階目ボタンが見つかりません — theearth-np のページ仕様が変更された可能性があります",
+    // **原因を断定しない** (Refs #205-52) — 「ページ仕様が変更された」は確かめて
+    // いない。この throw に来るには stage1Html を最後まで読めていて (= 30秒/150秒
+    // どちらの timeout にも当たっておらず、fetchWithJar の timeout catch は
+    // 別の文言で先に throw する)、ログインフォームでもない。evidence の
+    // `elapsedMs` が [`DEFAULT_REQUEST_TIMEOUT_MS`] に近ければ timeout ギリギリ
+    // だった可能性を示すが、それ自体は事実であって推測ではない。
+    throw new TheearthPageMismatchError(
+      "CSV ダウンロードの2段階目ボタンが見つかりません",
+      buildEvidence(stage1Res, stage1Html, Date.now() - stage1T0),
     );
   }
   const stage2Body = new URLSearchParams({
@@ -816,7 +887,9 @@ export async function downloadCsvZip(
     ...dateRange,
     [outputButton.name]: outputButton.value || "ダウンロード",
   });
-  const stage2Res = await postForm(jar, csvUrl, stage2Body, fetchImpl, exportTimeoutMs);
+  const stage2Res = await measurePhase(timer, "stage2", () =>
+    postForm(jar, csvUrl, stage2Body, fetchImpl, exportTimeoutMs, "stage2"),
+  );
   const buf = await stage2Res.arrayBuffer();
   return ensureZip(buf, stage2Res.headers.get("content-type") ?? "");
 }
@@ -847,14 +920,20 @@ export async function scrapeViaHttp(
   onProgress: ProgressCallback,
   fetchImpl: FetchLike = fetch,
   timeouts: ScrapeTimeouts = {},
+  /** 段階別 (login/csv_get/stage1/stage2) の所要 ms を記録する (Refs #205-52)。
+   * 呼び出し側 (DO) が生成して渡し、成功/失敗どちらでも `timer.report()` を
+   * ログに出せば「どの段で・何ms掛かったか」が読める。省略時は計測しない。 */
+  timer?: PhaseTimer,
 ): Promise<ArrayBuffer> {
   const jar = createCookieJar();
   onProgress("login");
-  await login(
-    jar,
-    { compId: params.compId, userName: params.userName, userPass: params.userPass },
-    fetchImpl,
-    timeouts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+  await measurePhase(timer, "login", () =>
+    login(
+      jar,
+      { compId: params.compId, userName: params.userName, userPass: params.userPass },
+      fetchImpl,
+      timeouts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    ),
   );
   onProgress("download");
   const zip = await downloadCsvZip(
@@ -862,6 +941,7 @@ export async function scrapeViaHttp(
     { startDate: params.startDate, endDate: params.endDate },
     fetchImpl,
     timeouts,
+    timer,
   );
   onProgress("done");
   return zip;

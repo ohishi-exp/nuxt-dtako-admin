@@ -14,9 +14,11 @@ import {
   splitJapaneseDate,
   TheearthClientError,
   TheearthNotZipError,
+  TheearthPageMismatchError,
   VenusSessionExpiredError,
   type FetchLike,
 } from '../src/theearth-client'
+import { PhaseTimer } from '../src/phase-timing'
 
 const ZIP_BYTES = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x01, 0x02, 0x03, 0x04])
 
@@ -217,6 +219,35 @@ describe('fetchWithJar timeout handling', () => {
     await expect(
       fetchWithJar(createCookieJar(), 'https://theearth-np.com/x', { method: 'GET' }, fetchImpl),
     ).rejects.toThrow('network boom')
+  })
+
+  it('includes the stage label and timeout ms so request (30s) vs export (150s) timeouts are distinguishable (Refs #205-52)', async () => {
+    // 「どちらの timeout に当たったか」を文言そのものから読めるようにする。
+    const ctrl = new AbortController()
+    ctrl.abort()
+    const fetchImpl = (async () => {
+      throw new DOMException('The operation was aborted', 'AbortError')
+    }) as unknown as FetchLike
+    await expect(
+      fetchWithJar(
+        createCookieJar(),
+        'https://theearth-np.com/x',
+        { method: 'GET', signal: ctrl.signal },
+        fetchImpl,
+        150000,
+        'stage2',
+      ),
+    ).rejects.toThrow('stage2')
+    await expect(
+      fetchWithJar(
+        createCookieJar(),
+        'https://theearth-np.com/x',
+        { method: 'GET', signal: ctrl.signal },
+        fetchImpl,
+        150000,
+        'stage2',
+      ),
+    ).rejects.toThrow('150000ms')
   })
 })
 
@@ -676,6 +707,30 @@ describe('downloadCsvZip', () => {
     await expect(downloadCsvZip(jar, range, fetchImpl)).rejects.toThrow('btnCsvSvr')
   })
 
+  it('does not claim the page structure changed, and attaches evidence, when a required CSV form field is missing (Refs #205-52)', async () => {
+    // 確かめていない原因 (「ページ仕様が変更された」) を断定しない。代わりに
+    // status/content-type/本文長/経過ms/ログインフォーム検出/本文抜粋を残す。
+    const fetchImpl = sequenceFetch([html(csvPageHtml({ omit: 'btnCsvSvr' }))])
+    const jar = createCookieJar()
+    const err = await downloadCsvZip(jar, range, fetchImpl).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(TheearthPageMismatchError)
+    const mismatch = err as TheearthPageMismatchError
+    expect(mismatch.message).not.toContain('ページ仕様が変更された')
+    expect(mismatch.evidence.status).toBe(200)
+    expect(mismatch.evidence.contentType).toContain('text/html')
+    expect(mismatch.evidence.bodyLength).toBeGreaterThan(0)
+    expect(mismatch.evidence.hasLoginForm).toBe(false)
+    expect(mismatch.evidence.elapsedMs).toBeGreaterThanOrEqual(0)
+  })
+
+  it('defaults evidence.contentType to empty when the GET response has no Content-Type header', async () => {
+    const fetchImpl = sequenceFetch([htmlNoContentType(csvPageHtml({ omit: 'btnCsvSvr' }))])
+    const jar = createCookieJar()
+    const err = (await downloadCsvZip(jar, range, fetchImpl).catch((e: unknown) => e)) as TheearthPageMismatchError
+    expect(err).toBeInstanceOf(TheearthPageMismatchError)
+    expect(err.evidence.contentType).toBe('')
+  })
+
   it('maps a login page on the initial GET to VenusSessionExpiredError (Refs #169)', async () => {
     // 真因の回帰テスト: セッション切れの GET 応答を「フォーム要素が見つからない」
     // generic error に潰さず、401 で再ログインを促せる形にする。
@@ -694,6 +749,22 @@ describe('downloadCsvZip', () => {
     const fetchImpl = sequenceFetch([html(csvPageHtml()), html(STAGE1_CONFIRM_NO_OUTPUT_HTML)])
     const jar = createCookieJar()
     await expect(downloadCsvZip(jar, range, fetchImpl)).rejects.toThrow(TheearthClientError)
+  })
+
+  it('does not claim the page structure changed, and attaches evidence, when the stage-2 output button is missing (Refs #205-52)', async () => {
+    // これが本件の主題の文言 (「2段階目ボタンが見つかりません」)。ここに来るには
+    // stage1Html を最後まで読めていて (timeout でも abort でもない) ログイン
+    // フォームでもない — evidence がそれを裏付ける。
+    const fetchImpl = sequenceFetch([html(csvPageHtml()), html(STAGE1_CONFIRM_NO_OUTPUT_HTML)])
+    const jar = createCookieJar()
+    const err = await downloadCsvZip(jar, range, fetchImpl).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(TheearthPageMismatchError)
+    const mismatch = err as TheearthPageMismatchError
+    expect(mismatch.message).not.toContain('ページ仕様が変更された')
+    expect(mismatch.message).toContain('2段階目ボタン')
+    expect(mismatch.evidence.status).toBe(200)
+    expect(mismatch.evidence.hasLoginForm).toBe(false)
+    expect(mismatch.evidence.bodyLength).toBe(STAGE1_CONFIRM_NO_OUTPUT_HTML.length)
   })
 
   it('throws a TheearthNotZipError carrying the raw response bytes when stage-2 is not a ZIP', async () => {
@@ -754,6 +825,30 @@ describe('downloadCsvZip', () => {
   })
 })
 
+describe('downloadCsvZip phase timing (Refs #205-52)', () => {
+  const range = { startDate: '2026-07-01', endDate: '2026-07-02' }
+
+  it('records ms for csv_get and stage1 and stage2 on success', async () => {
+    const fetchImpl = sequenceFetch([html(csvPageHtml()), html(STAGE1_CONFIRM_HTML), zipResponse()])
+    const timer = new PhaseTimer()
+    await downloadCsvZip(createCookieJar(), range, fetchImpl, {}, timer)
+    const names = timer.report().phases.map((p) => p.name)
+    expect(names).toEqual(['csv_get', 'stage1', 'stage2'])
+    for (const p of timer.report().phases) expect(p.ms).toBeGreaterThanOrEqual(0)
+  })
+
+  it('still records the failing stage ms when the stage-2 button is missing (timeout-or-not is readable from the failure log alone)', async () => {
+    const fetchImpl = sequenceFetch([html(csvPageHtml()), html(STAGE1_CONFIRM_NO_OUTPUT_HTML)])
+    const timer = new PhaseTimer()
+    await downloadCsvZip(createCookieJar(), range, fetchImpl, {}, timer).catch(() => {})
+    // stage2 には到達していないので csv_get/stage1 の 2 段だけ載る。timeout なら
+    // 該当段の ms が DEFAULT_REQUEST_TIMEOUT_MS 近辺に張り付くはずだが、ここは
+    // フェイクの即時応答なので timeout ではないことが ms からも読める。
+    const names = timer.report().phases.map((p) => p.name)
+    expect(names).toEqual(['csv_get', 'stage1'])
+  })
+})
+
 describe('scrapeViaHttp', () => {
   it('runs login then download and reports progress in order', async () => {
     const fetchImpl = sequenceFetch([
@@ -777,5 +872,31 @@ describe('scrapeViaHttp', () => {
     )
     expect(steps).toEqual(['login', 'download', 'done'])
     expect(new Uint8Array(buf).slice(0, 4)).toEqual(new Uint8Array([0x50, 0x4b, 0x03, 0x04]))
+  })
+
+  it('records login/csv_get/stage1/stage2 phase timing when a timer is passed (Refs #205-52)', async () => {
+    const fetchImpl = sequenceFetch([
+      html(LOGIN_PAGE_HTML),
+      html(LOGIN_SUCCESS_HTML),
+      html(csvPageHtml()),
+      html(STAGE1_CONFIRM_HTML),
+      zipResponse(),
+    ])
+    const timer = new PhaseTimer()
+    await scrapeViaHttp(
+      {
+        compId: '27324455',
+        userName: 'user1',
+        userPass: 'pass1',
+        startDate: '2026-07-01',
+        endDate: '2026-07-02',
+      },
+      () => {},
+      fetchImpl,
+      {},
+      timer,
+    )
+    const names = timer.report().phases.map((p) => p.name)
+    expect(names).toEqual(['login', 'csv_get', 'stage1', 'stage2'])
   })
 })

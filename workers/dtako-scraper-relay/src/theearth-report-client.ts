@@ -1994,9 +1994,9 @@ export async function downloadOperationCsvZip(
   const startDtField = findFormFieldById(html, "txtStartDateTime");
   const stage1Button = findFormFieldById(html, "btnCsvSvr");
   if (!selectModeRadio || !opNoField || !startDtField || !stage1Button) {
+    // 原因を断定しない (Refs #205-52) — 「ページ仕様が変更された」は確かめていない。
     throw new TheearthClientError(
-      "CSV フォームの要素 (rdoSelect0/txtOperationNo/txtStartDateTime/btnCsvSvr) が見つかりません — " +
-        "theearth-np のページ仕様が変更された可能性があります",
+      "CSV フォームの要素 (rdoSelect0/txtOperationNo/txtStartDateTime/btnCsvSvr) が見つかりません",
     );
   }
 
@@ -2027,10 +2027,8 @@ export async function downloadOperationCsvZip(
   }
   const outputButton = findFormFieldById(stage1Html, "btnCsvSvrOutput");
   if (!outputButton) {
-    throw new TheearthClientError(
-      "CSV ダウンロードの2段階目ボタン (btnCsvSvrOutput) が見つかりません — " +
-        "theearth-np のページ仕様が変更された可能性があります",
-    );
+    // 原因を断定しない (Refs #205-52) — 「ページ仕様が変更された」は確かめていない。
+    throw new TheearthClientError("CSV ダウンロードの2段階目ボタン (btnCsvSvrOutput) が見つかりません");
   }
   // 確認ページは選択フィールドをエコーバックするが、欠落 = 空 ZIP の事故を防ぐ
   // ため選択フィールドはこちらの値で明示的に上書きする。
