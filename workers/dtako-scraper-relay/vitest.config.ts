@@ -48,6 +48,7 @@ export default defineConfig({
         'src/dtako-alc-upload.ts',
         'src/kintai-diff.ts',
         'src/dtako-day-events-lookup.ts',
+        'src/dtako-day-operations-list.ts',
       ],
       thresholds: {
         lines: 100,

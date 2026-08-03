@@ -77,6 +77,7 @@ import {
   type DtakoAlcUploadDeps,
 } from "./dtako-alc-upload";
 import { pickOnpremUnkoNoFromDayEvents } from "./dtako-day-events-lookup";
+import { pickDayOperationsList } from "./dtako-day-operations-list";
 import {
   clearRunningPointer,
   MAX_SCRAPE_JOB_RECORDS,
@@ -2744,6 +2745,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/kintai/day-events-lookup" && request.method === "GET") {
       return this.handleKintaiDayEventsLookup(url);
     }
+    // 突合明細から運行1件をalcへ上げ直す導線 (viewer 認可、Refs #633-17)。
+    // day-operations は読むだけ、alc-upload は既存 /cron/dtako/alc-upload の
+    // 内部経路 (runDtakoAlcUploadJob) をそのまま呼ぶ (ロジックの複製をしない)。
+    if (url.pathname === "/restraint-api/kintai/day-operations" && request.method === "GET") {
+      return this.handleKintaiDayOperationsList(url);
+    }
+    if (url.pathname === "/restraint-api/kintai/alc-upload" && request.method === "POST") {
+      return this.handleKintaiAlcUpload(record!, request);
+    }
     // ---- アーカイブ閲覧 (R2 読み出しのみ。Refs #244) ----
     if (url.pathname === "/restraint-api/archive/summaries" && request.method === "GET") {
       return this.handleArchiveSummaries(record!, url);
@@ -4558,6 +4568,100 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       console.error(JSON.stringify({ kintai_day_events_lookup: "error", error: describeUnknownError(err) }));
       return dvrJsonError(502, err instanceof Error ? err.message : "day-events の取得に失敗しました");
     }
+  }
+
+  /**
+   * GET /restraint-api/kintai/day-operations?driver_cd=&date= — その日の運行
+   * 一覧を返す (Refs #633-17)。`day-events-lookup` の逆 — あちらは ope_no(22桁)
+   * で絞って1件を返す専用、こちらは絞らず一覧を返す。上流は同じ
+   * `GET /api/kintai/day-events`。
+   *
+   * **読むだけ・副作用なし。何度呼んでも安全。** 運行が0件でも200で
+   * `operations: []` を返す (404にしない — その日に運行が無いのは正常な答え)。
+   *
+   * `ope_no`/`start_ope` は上流の `operations[].zip_request` からそのまま
+   * (`dtako-day-operations-list.ts` 参照、加工しない)。
+   */
+  private async handleKintaiDayOperationsList(url: URL): Promise<Response> {
+    const driverCd = url.searchParams.get("driver_cd") || "";
+    if (!/^\d{1,10}$/.test(driverCd)) {
+      return dvrJsonError(400, "driver_cd は乗務員CD (数字) で指定してください");
+    }
+    const date = url.searchParams.get("date") || "";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return dvrJsonError(400, `date は YYYY-MM-DD で指定してください: "${date}"`);
+    }
+
+    const creds = await this.ichibanCreds("kintai_day_operations_list");
+    if (!creds) return dvrJsonError(503, "オンプレの取得先 (NUXT_ICHIBAN_*) が未設定です");
+
+    try {
+      const q = new URLSearchParams({ driver: driverCd, date });
+      const upstream = await fetch(`${creds.apiUrl}/api/kintai/day-events?${q.toString()}`, {
+        headers: {
+          "CF-Access-Client-Id": creds.clientId,
+          "CF-Access-Client-Secret": creds.clientSecret,
+        },
+      });
+      const text = await upstream.text();
+      if (!upstream.ok) {
+        return dvrJsonError(502, `day-events が ${upstream.status} を返しました: ${text.slice(0, 300)}`);
+      }
+      let dayEvents: unknown;
+      try {
+        dayEvents = JSON.parse(text);
+      } catch {
+        return dvrJsonError(502, `day-events の応答がJSONではありません: ${text.slice(0, 300)}`);
+      }
+      const operations = pickDayOperationsList(dayEvents);
+      console.log(
+        JSON.stringify({ kintai_day_operations_list: "ok", driver_cd: driverCd, date, count: operations.length }),
+      );
+      return Response.json({ driver_cd: driverCd, date, operations });
+    } catch (err) {
+      console.error(JSON.stringify({ kintai_day_operations_list: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, err instanceof Error ? err.message : "day-events の取得に失敗しました");
+    }
+  }
+
+  /**
+   * POST /restraint-api/kintai/alc-upload — 突合明細から運行1件をalcへ上げ直す
+   * ブラウザセッション版 (Refs #633-17)。`POST /kintai-relay/dtako-alc-upload`
+   * (機械呼び出し・`X-Alc-Proxy-Secret`) と違うのは認証だけ — 実処理は同じ
+   * `runDtakoAlcUploadJob` (`/cron/dtako/alc-upload` 内部経路) をそのまま呼ぶ
+   * (ロジックを複製しない)。`comp_id` はクエリで受けず `record.compId`
+   * (viewer 認可済み) を使う — `/restraint-api/kintai/fetch` と同じ。
+   *
+   * 応答は `/kintai-relay/dtako-alc-upload` と同じ形 (`upload_id` /
+   * `operations_count` / `split_failed` / `split_confirmed` / `notes`)。
+   * ここで畳み直し (fold) はしない — 呼び出し側 (画面) が別途案内する。
+   */
+  private async handleKintaiAlcUpload(record: TheearthSessionRecord, request: Request): Promise<Response> {
+    let body: { ope_no?: unknown; start_ope?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return dvrJsonError(400, "body must be JSON");
+    }
+    const opeNo = typeof body.ope_no === "string" ? body.ope_no : "";
+    if (!/^\d{22}$/.test(opeNo)) {
+      return dvrJsonError(400, `ope_no は22桁の数値で指定してください: "${opeNo}"`);
+    }
+    const startOpe = typeof body.start_ope === "string" ? body.start_ope : "";
+    if (!startOpe) {
+      return dvrJsonError(400, "start_ope は必須です");
+    }
+
+    const account = await this.resolveAccount(record.compId);
+    if (!account) {
+      return dvrJsonError(500, `comp_id=${record.compId} が DTAKO_ACCOUNTS に見つかりません`);
+    }
+    const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
+    if (!sharedSecret) {
+      return dvrJsonError(503, "INTERNAL_SHARED_SECRET 未設定のため alc へ投入できません");
+    }
+
+    return this.enqueueScrape(() => this.runDtakoAlcUploadJob(account, { opeNo, startOpe }, sharedSecret));
   }
 
   /**
