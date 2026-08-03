@@ -44,6 +44,25 @@ function toStatusOrNull(v: unknown): DayEventsLookupStatus | null {
   return typeof v === 'string' && (STATUSES as readonly string[]).includes(v) ? (v as DayEventsLookupStatus) : null
 }
 
+/**
+ * `lookup.unkoNo` (relay `dtako-day-events-lookup.ts` の `DayEventsLookupResult`
+ * がそのまま JSON になった実物のキー、**camelCase**) を優先して読み、無ければ
+ * `lookup.unko_no` (snake_case) を fallback として見る。
+ *
+ * ★ 本番実測で確定したバグ (Refs #633-2、親の実機確認 2026-08-04):
+ * `Response.json({ ..., lookup })` の `lookup` は relay 側の TS オブジェクト
+ * (`DayEventsLookupResult { status, unkoNo, candidates }`) をそのまま返しており、
+ * **`unko_no` へは変換されない**。以前の実装は `lookup.unko_no` だけを読んでいたため
+ * 常に `undefined` → `null` になり、`status: 'found'` でも23桁が出ない状態が
+ * (この関数が #625 で作られてから) 本番でずっと続いていた可能性が高い。
+ * `status`/`candidates` はキー名が一致しているため影響を受けていない。
+ * fallback は残す — 受け側の形が将来 snake_case に揃っても壊れないための保険。
+ */
+function pickUnkoNo(lookup: Record<string, unknown>): string | null {
+  if (typeof lookup.unkoNo === 'string') return lookup.unkoNo
+  return toStringOrNull(lookup.unko_no)
+}
+
 /** `GET /restraint-api/kintai/day-events-lookup` の応答をそのまま camelCase に
  * 読み替える。壊れた形は全部 `null`/空配列に倒す — 呼び出し側は `status: null`
  * を「引けていない (found/not_found/ambiguousのどれとも言えない)」として
@@ -56,7 +75,7 @@ export function parseDayEventsLookup(raw: unknown): DayEventsLookup {
     date: toStringOrNull(r.date),
     opeNo: toStringOrNull(r.ope_no),
     status: toStatusOrNull(lookup.status),
-    unkoNo: toStringOrNull(lookup.unko_no),
+    unkoNo: pickUnkoNo(lookup),
     candidates: toStringArray(lookup.candidates),
   }
 }
