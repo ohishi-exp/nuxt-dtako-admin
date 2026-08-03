@@ -503,12 +503,46 @@ export function kintaiDiffCacheStateFromLiveResult(result: KintaiDiffApiResult):
  * 除外する** — `KINTAI_DIFF_CATEGORIES` の note のとおり GCP が乗務員CD>0だけを
  * 対象にしている意図的な除外であって、差ではないため。
  *
- * ★ 運行NO単位の集計 (`observations.unkoDiffGcpOnlyDriverSplit` / 対象月に GCP に
- * しか無い運行数) はここでは一切参照しない。#620 の親コメントのとおり、その値は
- * `neverOnpremOps` (打刻システムが無い営業所の乗務員 + 乗務員CD=0) が9割超を
- * 占めるため、混ぜると毎月必ず「差あり」になる無意味な判定になる。この関数は
- * 日別サマリの5区分だけで判定し、運行NO単位の集計 (取り込み漏れ候補、#623-2 が
- * 別途扱う) とは独立に保つ。
+ * ★ `onlyGcp` (日別サマリの5区分の1つ) は差に含めてよいのか — 2026-08-03 に実際に
+ * 議論になったので、答えと根拠をここに残す (Refs #620)。
+ *
+ * **1. 実測 (2026-08-03、本番の `get_kintai_diff` を `comp=27324455` / 2026-06 で
+ * 叩いた結果):**
+ * ```
+ * gcp_rows: 3368 / onprem_rows: 3368
+ * only_gcp: 0
+ * only_onprem_driver0: 0 / only_onprem_other: 0
+ * value_diff_restraint_match: 3 / value_diff_restraint_mismatch: 2
+ * ```
+ * **同じ月・同じ会社**で `unko_diff_gcp_only_driver_split.never_onprem_ops` は
+ * **399件**ある。⇒ `only_gcp` は 0 なのに `never_onprem_ops` は 399 —
+ * 日別サマリの `only_gcp` は構造的な層 (打刻システムが無い営業所の乗務員) を
+ * そもそも含んでいない。
+ *
+ * **2. なぜ 0 になるか — 母集団が違う:**
+ * - `onlyGcp` はオンプレ `kosoku-daily` **⇔** GCP `day_summaries` の突合
+ *   (`kintai-diff.ts` の `buildKintaiDiff`)。**どちらも同じ fold ロジック・同じ
+ *   乗務員母集団**から作られるので、打刻システムが無い営業所の乗務員は theearth
+ *   由来で両側に居り、片側だけに出ることが構造的に無い。
+ * - `unkoDiffGcpOnlyDriverSplit` (`never_onprem_ops` 等、下の
+ *   [`KintaiDiffGcpOnlyDriverSplitView`]) は **alc の運行一覧 ⇔ オンプレに
+ *   押し込み済みの運行**の突合。母集団が違うので、打刻機と繋がっていない層が
+ *   まるごと片側に出る (#613 で決着済み: 打刻システムは本社のみで、タイムカードが
+ *   全事業所に導入されるまでこの層は恒久的に居続ける。差として赤く出すと
+ *   毎月必ず点灯する無意味な警告になる)。
+ *
+ * ⇒ **`onlyGcp` は差として扱ってよい。`never_onprem_ops` 系 (運行NO単位の集計) は
+ * 扱ってはいけない。**
+ *
+ * **3. ただし `onlyGcp` が非0でも、原因は断定できない。** 「入力がずれている」のか
+ * 「GCP が畳み直し待ち (stale) で未反映なだけ」なのかはここでは区別しない —
+ * `get_kintai_diff` 自身の note と同じ注意 (`kintai-diff.ts` の該当箇所参照)。
+ * 画面側でも原因を断定しない (このファイル冒頭の docs 参照)。
+ *
+ * ★ 上記のとおり運行NO単位の集計 (`observations.unkoDiffGcpOnlyDriverSplit` /
+ * 対象月に GCP にしか無い運行数) はここでは一切参照しない。この関数は日別サマリの
+ * 5区分だけで判定し、運行NO単位の集計 (取り込み漏れ候補、#623-2 が別途扱う) とは
+ * 独立に保つ。
  */
 export function kintaiDiffHasAnyDiff(summary: KintaiDiffSummary): boolean {
   return (
