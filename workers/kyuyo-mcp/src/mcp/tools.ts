@@ -1211,6 +1211,61 @@ export const runKintaiRecalcTool = {
   },
 };
 
+// ── run_kintai_restraint_sync ───────────────────────────────────────────────
+
+const runKintaiRestraintSyncArgs = z
+  .object({
+    month: z.string().regex(/^\d{4}-\d{2}$/).describe("同期する年月 (YYYY-MM)。省略値は無い"),
+    comp_id: z.string().optional().describe("会社。省略すると relay の既定 (KINTAI_COMP_ID)"),
+  })
+  .strict();
+
+/**
+ * 拘束サマリの写し (R2 `kintai/` prefix) を無人で押し直す
+ * (Refs #606-6)。画面の「取り込み」ボタン (`POST /restraint-api/kintai/fetch`)
+ * だけがこの写しを更新でき、無人経路が無かったため化石化していた
+ * (実測 2026-08-03: 全月 2026-07-27 の push のまま)。
+ *
+ * **運ぶロジックはここに無い。** relay の `POST /kintai-relay/restraint-sync`
+ * (Refs #606-6) を叩くだけ — `run_kintai_relay` / `run_dtako_reimport` と同じ
+ * `X-Alc-Proxy-Secret` 方式。**`/restraint-api/*` は叩かない** — あちらは
+ * auth-worker JWT (viewer 経路) 前提の名前空間で、機械呼び出し用の共有シークレット
+ * バイパスを持たせない設計判断のため (Refs #606-6 親子間の合意)。
+ */
+export const runKintaiRestraintSyncTool = {
+  name: "run_kintai_restraint_sync",
+  description:
+    "拘束サマリの写し (R2 `kintai/` prefix、拘束×賃金画面が読む) を指定した年月ぶん押し直す " +
+    "(Refs #606-6)。画面の「取り込み」ボタンと同じ処理を無人で叩けるようにしたもの — " +
+    "この口が無いと写しは二度と更新されず化石化する (実例: 2026-08-03 時点で全月" +
+    "2026-07-27 の push のまま止まっていた)。" +
+    "**month は必須、省略値は無い** — 呼び出し側 (cron 等) が前月・当月をそれぞれ明示して呼ぶ想定。" +
+    "**`/restraint-api/*` ではなく `/kintai-relay/*` (機械用の名前空間、既存の " +
+    "run_kintai_relay と同じ X-Alc-Proxy-Secret 方式) を叩く。**",
+  inputSchema: runKintaiRestraintSyncArgs,
+  // **write tool。** 拘束サマリの R2 アーカイブを書き換えうるので read tool と同じ扱いにしない
+  requiresScope: "mcp.write",
+  execute: async (env: Env, args: z.infer<typeof runKintaiRestraintSyncArgs>) => {
+    const relay = env.SCRAPER_RELAY;
+    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
+    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+
+    const res = await relay.fetch("https://relay.internal/kintai-relay/restraint-sync", {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
+      body: JSON.stringify({ month: args.month, comp_id: args.comp_id }),
+    });
+    const body = await res.text();
+    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
+    try {
+      return JSON.parse(body) as unknown;
+    } catch {
+      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
+    }
+  },
+};
+
 // ── get_kintai_day_summaries ─────────────────────────────────────────────────
 
 const getKintaiDaySummariesArgs = z.object({
@@ -1550,6 +1605,7 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getTimecardDiffTool as unknown as ToolEntry<z.ZodTypeAny>,
   runKintaiRelayTool as unknown as ToolEntry<z.ZodTypeAny>,
   runKintaiRecalcTool as unknown as ToolEntry<z.ZodTypeAny>,
+  runKintaiRestraintSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDtakoScrapeTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDtakoScrapeStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDtakoScrapeProgressTool as unknown as ToolEntry<z.ZodTypeAny>,

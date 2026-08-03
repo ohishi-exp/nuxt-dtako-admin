@@ -3,9 +3,12 @@ import {
   CronConfigError,
   DTAKO_CRON,
   ETC_CRON,
+  RESTRAINT_SYNC_CRON,
+  currentYmJst,
   etcCsvKey,
   parseDtakoAccounts,
   parseEtcAccounts,
+  prevYm,
   resolveDtakoAccountsRaw,
   resolveSecretBinding,
   DTAKO_ACCOUNTS_KV_KEY,
@@ -68,6 +71,20 @@ describe('etcCsvKey', () => {
     expect(etcCsvKey('etc-staging', 'u', new Date('2026-07-02T21:00:05Z'))).toBe(
       'etc-staging/u/2026-07-03/060005.csv',
     )
+  })
+})
+
+describe('currentYmJst / prevYm', () => {
+  it('JST で当月を YYYY-MM で返す', () => {
+    // 2026-08-03 00:30 JST = 2026-08-02 15:30 UTC → 当月(JST) = 2026-08
+    expect(currentYmJst(new Date('2026-08-02T15:30:00Z'))).toBe('2026-08')
+    // 2026-07-31 23:30 JST = 2026-07-31 14:30 UTC → 当月(JST) = 2026-07
+    expect(currentYmJst(new Date('2026-07-31T14:30:00Z'))).toBe('2026-07')
+  })
+
+  it('前月を返す (年またぎも扱う)', () => {
+    expect(prevYm('2026-08')).toBe('2026-07')
+    expect(prevYm('2026-01')).toBe('2025-12')
   })
 })
 
@@ -180,6 +197,68 @@ describe('runScheduledCron: etc', () => {
     const results = await runScheduledCron(ETC_CRON, { etcAccountsRaw: ETC_ACCOUNTS_JSON }, failCall, now)
     expect(results[0]).toMatchObject({ ok: false, detail: 'boom' })
     expect(results[1]).toMatchObject({ ok: false, detail: '42' })
+  })
+})
+
+describe('runScheduledCron: restraint', () => {
+  const now = new Date('2026-08-02T19:00:00Z') // 2026-08-03 04:00 JST
+
+  it('DTAKO_ACCOUNTS 未設定は skip する', async () => {
+    const results = await runScheduledCron(RESTRAINT_SYNC_CRON, {}, okDoCall([]), now)
+    expect(results).toHaveLength(1)
+    expect(results[0].kind).toBe('restraint')
+    expect(results[0].ok).toBe(true)
+    expect(results[0].detail).toContain('DTAKO_ACCOUNTS 未設定')
+  })
+
+  it('各社の comp_id 単位 DO に前月+当月の /cron/restraint-sync を投げる', async () => {
+    const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+    const results = await runScheduledCron(
+      RESTRAINT_SYNC_CRON,
+      { dtakoAccountsRaw: DTAKO_ACCOUNTS_JSON },
+      okDoCall(calls),
+      now,
+    )
+    // 2 社 × (当月 + 前月) = 4 件
+    expect(results).toHaveLength(4)
+    expect(results.every((r) => r.kind === 'restraint' && r.ok)).toBe(true)
+    expect(calls).toEqual(
+      expect.arrayContaining([
+        { doKey: 'scraper-comp-27324455', path: '/cron/restraint-sync', body: { comp_id: '27324455', month: '2026-08' } },
+        { doKey: 'scraper-comp-27324455', path: '/cron/restraint-sync', body: { comp_id: '27324455', month: '2026-07' } },
+        { doKey: 'scraper-comp-99999999', path: '/cron/restraint-sync', body: { comp_id: '99999999', month: '2026-08' } },
+        { doKey: 'scraper-comp-99999999', path: '/cron/restraint-sync', body: { comp_id: '99999999', month: '2026-07' } },
+      ]),
+    )
+  })
+
+  it('DO 呼び出しの失敗 (throw) は per-account/月の error result になる', async () => {
+    const failCall: CronDoCall = async (doKey) => {
+      if (doKey.includes('27324455')) throw new Error('do down')
+      throw 'string error'
+    }
+    const results = await runScheduledCron(
+      RESTRAINT_SYNC_CRON,
+      { dtakoAccountsRaw: DTAKO_ACCOUNTS_JSON },
+      failCall,
+      now,
+    )
+    expect(results).toHaveLength(4)
+    for (const r of results) {
+      expect(r.ok).toBe(false)
+      expect(['do down', 'string error']).toContain(r.detail)
+    }
+  })
+
+  it('DO が non-2xx を返したら ok=false で status を detail に載せる', async () => {
+    const call: CronDoCall = async () => ({ ok: false, status: 500, text: 'account not found' })
+    const results = await runScheduledCron(
+      RESTRAINT_SYNC_CRON,
+      { dtakoAccountsRaw: DTAKO_ACCOUNTS_JSON },
+      call,
+      now,
+    )
+    expect(results.every((r) => r.ok === false && r.detail.includes('HTTP 500'))).toBe(true)
   })
 })
 
