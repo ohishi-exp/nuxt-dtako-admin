@@ -4,6 +4,7 @@ import {
   buildAutoloadPath,
   DtakoReimportError,
   DtakoReimportPushUncertainError,
+  isUnkoNoAcceptable,
   runDtakoReimport,
   UNKO_NO_RE,
   type DtakoReimportDeps,
@@ -12,6 +13,7 @@ import {
 const OPE_NO = "2606050753300000004286";
 const START_OPE = "2026/07/07 7:53:30";
 const UNKO_NO_23 = "26060507533000000042861";
+const UNKO_NO_22 = UNKO_NO_23.slice(0, 22);
 
 /** `PK\x03\x04` local file header 1 エントリぶんの最小 ZIP (operation-zip.test.ts
  * と同じ最小モック — central directory / EOCD は付けない)。 */
@@ -31,6 +33,27 @@ describe("UNKO_NO_RE", () => {
     expect(UNKO_NO_RE.test(UNKO_NO_23.slice(1))).toBe(false); // 22桁
     expect(UNKO_NO_RE.test(`${UNKO_NO_23}1`)).toBe(false); // 24桁
     expect(UNKO_NO_RE.test(`${UNKO_NO_23.slice(0, 22)}a`)).toBe(false); // 非数字混じり
+  });
+});
+
+describe("isUnkoNoAcceptable (Refs #625: ②のみなら22桁も受ける)", () => {
+  it("reset_timecard=false (①②のみ) なら22桁・23桁どちらも通す", () => {
+    expect(isUnkoNoAcceptable(UNKO_NO_22, false)).toBe(true);
+    expect(isUnkoNoAcceptable(UNKO_NO_23, false)).toBe(true);
+  });
+
+  it("reset_timecard=true (③まで) なら23桁のみ通し、22桁は弾く (新しい歯止め)", () => {
+    expect(isUnkoNoAcceptable(UNKO_NO_23, true)).toBe(true);
+    expect(isUnkoNoAcceptable(UNKO_NO_22, true)).toBe(false);
+  });
+
+  it("桁数のどちらでも、空・非数字・21桁・24桁は引き続き弾く", () => {
+    for (const resetTimecard of [false, true]) {
+      expect(isUnkoNoAcceptable("", resetTimecard)).toBe(false);
+      expect(isUnkoNoAcceptable("abcdefghijklmnopqrstuvw", resetTimecard)).toBe(false); // 23文字だが数字でない
+      expect(isUnkoNoAcceptable(UNKO_NO_22.slice(1), resetTimecard)).toBe(false); // 21桁
+      expect(isUnkoNoAcceptable(`${UNKO_NO_23}1`, resetTimecard)).toBe(false); // 24桁
+    }
   });
 });
 
@@ -77,10 +100,37 @@ function depsOf(over: Partial<DtakoReimportDeps> = {}): DtakoReimportDeps {
 }
 
 describe("runDtakoReimport", () => {
-  it("unko_no が23桁でなければ zip を取りにいかず拒否する (一括取り込み事故の歯止め)", async () => {
+  it("unko_no が22桁でも23桁でもなければ zip を取りにいかず拒否する (一括取り込み事故の歯止め)", async () => {
     const deps = depsOf();
     await expect(
       runDtakoReimport(deps, { opeNo: OPE_NO, startOpe: START_OPE, unkoNo: "123" }),
+    ).rejects.toThrow(DtakoReimportError);
+    expect(deps.fetchZip).not.toHaveBeenCalled();
+  });
+
+  it("22桁 + reset_timecard省略 (①②のみ) は通す (Refs #625、取り込み漏れ候補は対象CDが作れない)", async () => {
+    const onpremAutoload = vi.fn(async () => new Response(JSON.stringify({ http_status: 200 })));
+    const deps = depsOf({ onpremAutoload });
+    const report = await runDtakoReimport(deps, {
+      opeNo: OPE_NO,
+      startOpe: START_OPE,
+      unkoNo: UNKO_NO_22,
+    });
+    expect(report.unko_no).toBe(UNKO_NO_22);
+    expect(deps.fetchZip).toHaveBeenCalled();
+    const call = (onpremAutoload as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(call[0]).toBe(`/api/dtako/autoload?unko_no=${UNKO_NO_22}&reset_timecard=false`);
+  });
+
+  it("22桁 + reset_timecard=true (③まで) は zip を取りにいかず拒否する (新しい歯止め)", async () => {
+    const deps = depsOf();
+    await expect(
+      runDtakoReimport(deps, {
+        opeNo: OPE_NO,
+        startOpe: START_OPE,
+        unkoNo: UNKO_NO_22,
+        resetTimecard: true,
+      }),
     ).rejects.toThrow(DtakoReimportError);
     expect(deps.fetchZip).not.toHaveBeenCalled();
   });

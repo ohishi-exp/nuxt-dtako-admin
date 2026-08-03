@@ -6664,9 +6664,11 @@ watch([compMap, kyuyoSyncedKeys], () => {
               運行1件 (運行NO) ぶんの csvdata.zip を theearth から取り直し、オンプレ MariaDB へ push します。
               <b>rust-ichibanboshi 側のコード自身が「押しても直る保証が無い」対象があると明記しています</b> —
               下の「保証」の表示を必ず確認してください。実行前に保証を確認しても、実行そのものはブロックされません。
+              運行NOは<b>「勤務時間再登録まで行う」がオフなら22桁 (取り込み漏れ候補等) でも構いません</b> —
+              オンでは③ (`resetby-unko-no`) の対象になるため23桁 (対象CDまで) が必須です。
             </p>
             <div class="flex flex-wrap items-center gap-2 mb-2">
-              <UInput v-model="mysqlRefreshUnkoNo" size="xs" placeholder="運行NO (unko_no、23桁)" class="w-56" />
+              <UInput v-model="mysqlRefreshUnkoNo" size="xs" placeholder="運行NO (unko_no、22桁 or 23桁)" class="w-56" />
               <UInput v-model="mysqlRefreshDriverCd" size="xs" placeholder="乗務員CD (任意、保証判定用)" class="w-44" />
               <UCheckbox v-model="mysqlRefreshResetTimecard" label="勤務時間再登録まで行う (③、破壊的)" />
             </div>
