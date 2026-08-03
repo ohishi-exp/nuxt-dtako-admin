@@ -3,7 +3,8 @@
 // 中核は round-trip: 実 fixture のサマリ (theearth 4 名 / timecard 6 名) を
 // buildRestraintD1Statements で行に落とし、INSERT パラメータから復元した行を
 // restraintSummaryFromD1Rows に通すと**元のサマリと深い等価**になることを固定する。
-// これが崩れると読み取り切替 (PR-C) で情報が欠ける。
+// この D1 写しは表示には使わない突合用のスナップショット (2026-08-03 決定、
+// #606-5 / #614) — round-trip が崩れると突合の値が欠ける。
 
 import { describe, expect, it } from 'vitest'
 import {

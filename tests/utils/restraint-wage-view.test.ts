@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from 'vitest'
 import type { MinWageRowAttrs } from '../../app/utils/restraint-wage-view'
-import { fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, groupMinWageRows, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, nextYm, prevYm } from '../../app/utils/restraint-wage-view'
+import { fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, groupMinWageRows, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, nextYm, prevYm } from '../../app/utils/restraint-wage-view'
 
 describe('fmtMinutes', () => {
   it('時間+分を "XhYYm" 表記にする', () => {
@@ -152,6 +152,20 @@ describe('fastBadgeState (「高速表示可」バッジの 2 段階、Refs #543
 
   it('旧 relay 応答 (フィールド無し = null) は従来どおりフル表示に fallback', () => {
     expect(fastBadgeState('2026-06', synced, null)).toBe('full')
+  })
+})
+
+describe('isTimecardSynced (timecard 側の無人同期状態、Refs #611 / #614)', () => {
+  it('同期済み月一覧に含まれていれば true', () => {
+    expect(isTimecardSynced('2026-06', ['2026-05', '2026-06'])).toBe(true)
+  })
+
+  it('含まれていなければ false', () => {
+    expect(isTimecardSynced('2026-07', ['2026-05', '2026-06'])).toBe(false)
+  })
+
+  it('空配列 (未設定・失敗時のフォールバック) は false', () => {
+    expect(isTimecardSynced('2026-06', [])).toBe(false)
   })
 })
 
