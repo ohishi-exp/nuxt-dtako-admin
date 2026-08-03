@@ -5,6 +5,7 @@ import {
   runDtakoAlcUpload,
   type DtakoAlcUploadDeps,
 } from "../src/dtako-alc-upload";
+import { VenusSessionExpiredError } from "../src/theearth-client";
 
 const OPE_NO = "2606050753300000004286";
 const START_OPE = "2026/07/07 7:53:30";
@@ -45,6 +46,7 @@ describe("assertZipReadyForAlcUpload", () => {
 
 function depsOf(over: Partial<DtakoAlcUploadDeps> = {}): DtakoAlcUploadDeps {
   return {
+    recalculateWork: vi.fn(async () => {}),
     fetchZip: vi.fn(async () => minimalZip()),
     uploadZip: vi.fn(async () => JSON.stringify({ upload_id: "u-1", operations_count: 1, status: "completed" })),
     ...over,
@@ -144,5 +146,46 @@ describe("runDtakoAlcUpload", () => {
       }),
     });
     await expect(runDtakoAlcUpload(deps, { opeNo: OPE_NO, startOpe: START_OPE })).rejects.toThrow(/boom/);
+  });
+
+  it("zip 取得の前に再集計 (recalculateWork) を呼び、成功なら report.recalculate に含める (Refs #633-19)", async () => {
+    const calls: string[] = [];
+    const deps = depsOf({
+      recalculateWork: vi.fn(async () => {
+        calls.push("recalculate");
+      }),
+      fetchZip: vi.fn(async () => {
+        calls.push("fetch");
+        return minimalZip();
+      }),
+    });
+    const report = await runDtakoAlcUpload(deps, { opeNo: OPE_NO, startOpe: START_OPE });
+    expect(calls).toEqual(["recalculate", "fetch"]);
+    expect(report.recalculate).toEqual({ ok: true });
+  });
+
+  it("再集計が失敗しても zip 取得と alc 投入は続行し、report.recalculate に失敗を残す (握り潰さない)", async () => {
+    const deps = depsOf({
+      recalculateWork: vi.fn(async () => {
+        throw new Error("btnScore が見つかりません");
+      }),
+    });
+    const report = await runDtakoAlcUpload(deps, { opeNo: OPE_NO, startOpe: START_OPE });
+    expect(report.recalculate).toEqual({ ok: false, error: "btnScore が見つかりません" });
+    expect(deps.fetchZip).toHaveBeenCalled();
+    expect(deps.uploadZip).toHaveBeenCalled();
+  });
+
+  it("再集計が VenusSessionExpiredError を投げたら伝播し、zip 取得も alc 投入も行わない (受け入れ条件6)", async () => {
+    const deps = depsOf({
+      recalculateWork: vi.fn(async () => {
+        throw new VenusSessionExpiredError("theearth セッションが切れています");
+      }),
+    });
+    await expect(runDtakoAlcUpload(deps, { opeNo: OPE_NO, startOpe: START_OPE })).rejects.toThrow(
+      VenusSessionExpiredError,
+    );
+    expect(deps.fetchZip).not.toHaveBeenCalled();
+    expect(deps.uploadZip).not.toHaveBeenCalled();
   });
 });

@@ -9,6 +9,7 @@ import {
   UNKO_NO_RE,
   type DtakoReimportDeps,
 } from "../src/dtako-reimport";
+import { VenusSessionExpiredError } from "../src/theearth-client";
 
 const OPE_NO = "2606050753300000004286";
 const START_OPE = "2026/07/07 7:53:30";
@@ -93,6 +94,7 @@ describe("buildAutoloadPath", () => {
 
 function depsOf(over: Partial<DtakoReimportDeps> = {}): DtakoReimportDeps {
   return {
+    recalculateWork: vi.fn(async () => {}),
     fetchZip: vi.fn(async () => minimalZip()),
     onpremAutoload: vi.fn(async () => new Response(JSON.stringify({ http_status: 200, http_ok: true }))),
     ...over,
@@ -106,6 +108,7 @@ describe("runDtakoReimport", () => {
       runDtakoReimport(deps, { opeNo: OPE_NO, startOpe: START_OPE, unkoNo: "123" }),
     ).rejects.toThrow(DtakoReimportError);
     expect(deps.fetchZip).not.toHaveBeenCalled();
+    expect(deps.recalculateWork).not.toHaveBeenCalled();
   });
 
   it("22桁 + reset_timecard省略 (①②のみ) は通す (Refs #625、取り込み漏れ候補は対象CDが作れない)", async () => {
@@ -264,5 +267,46 @@ describe("runDtakoReimport", () => {
     await expect(
       runDtakoReimport(deps, { opeNo: OPE_NO, startOpe: START_OPE, unkoNo: UNKO_NO_23 }),
     ).rejects.toThrow("theearth login failed");
+  });
+
+  it("zip 取得の前に再集計 (recalculateWork) を呼び、成功なら report.recalculate に含める (Refs #633-19)", async () => {
+    const calls: string[] = [];
+    const deps = depsOf({
+      recalculateWork: vi.fn(async () => {
+        calls.push("recalculate");
+      }),
+      fetchZip: vi.fn(async () => {
+        calls.push("fetch");
+        return minimalZip();
+      }),
+    });
+    const report = await runDtakoReimport(deps, { opeNo: OPE_NO, startOpe: START_OPE, unkoNo: UNKO_NO_23 });
+    expect(calls).toEqual(["recalculate", "fetch"]);
+    expect(report.recalculate).toEqual({ ok: true });
+  });
+
+  it("再集計が失敗しても zip 取得と push は続行し、report.recalculate に失敗を残す (握り潰さない)", async () => {
+    const deps = depsOf({
+      recalculateWork: vi.fn(async () => {
+        throw new Error("btnScore が見つかりません");
+      }),
+    });
+    const report = await runDtakoReimport(deps, { opeNo: OPE_NO, startOpe: START_OPE, unkoNo: UNKO_NO_23 });
+    expect(report.recalculate).toEqual({ ok: false, error: "btnScore が見つかりません" });
+    expect(deps.fetchZip).toHaveBeenCalled();
+    expect(deps.onpremAutoload).toHaveBeenCalled();
+  });
+
+  it("再集計が VenusSessionExpiredError を投げたら伝播し、zip 取得も push も行わない (受け入れ条件6)", async () => {
+    const deps = depsOf({
+      recalculateWork: vi.fn(async () => {
+        throw new VenusSessionExpiredError("theearth セッションが切れています");
+      }),
+    });
+    await expect(
+      runDtakoReimport(deps, { opeNo: OPE_NO, startOpe: START_OPE, unkoNo: UNKO_NO_23 }),
+    ).rejects.toThrow(VenusSessionExpiredError);
+    expect(deps.fetchZip).not.toHaveBeenCalled();
+    expect(deps.onpremAutoload).not.toHaveBeenCalled();
   });
 });

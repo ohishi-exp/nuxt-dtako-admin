@@ -48,6 +48,7 @@
 
 import { listZipEntryNames } from "./operation-zip";
 import { parseAlcUploadResponse } from "./alc-internal-upload";
+import { recalculateBeforeFetch, type RecalculateOutcome } from "./theearth-recalculate";
 
 export class DtakoAlcUploadError extends Error {
   constructor(message: string) {
@@ -80,6 +81,11 @@ export function assertZipReadyForAlcUpload(buf: ArrayBuffer): void {
 }
 
 export interface DtakoAlcUploadDeps {
+  /** ① zip 取得の直前に走らせる「作業時間再集計」(theearth F-DES1013、Refs
+   * #633-19)。**無条件で呼ぶ** (フラグは作らない — 「取り直す」= 最新にする、
+   * が目的のため)。失敗は `recalculateBeforeFetch` が outcome に畳んで後続の
+   * `fetchZip` を続行させる。`VenusSessionExpiredError` だけは伝播する。 */
+  recalculateWork(): Promise<void>;
   /** ① zip 取得 (自前ログイン)。実装側 (DO) が opeNo/startOpe/comp_id を握って呼ぶ。
    * theearth 側の失敗 (`VenusSessionExpiredError`/`ReportParamError` 等) は
    * そのまま伝播させてよい — 呼び出し元 (DO ハンドラ) が種類ごとに分けて応答する。 */
@@ -97,6 +103,9 @@ export interface DtakoAlcUploadInput {
 export interface DtakoAlcUploadReport {
   ope_no: string;
   start_ope: string;
+  /** zip 取得直前に走らせた「作業時間再集計」の結果。成功時も含める — 再集計が
+   * 走ったかどうかを呼び出し側が追えるようにする (受け入れ条件、Refs #633-19)。 */
+  recalculate: RecalculateOutcome;
   /** 取得した zip の生サイズ (bytes)。 */
   bytes: number;
   /** zip 内のファイル名一覧 (展開しない列挙)。 */
@@ -149,6 +158,7 @@ export async function runDtakoAlcUpload(
   deps: DtakoAlcUploadDeps,
   input: DtakoAlcUploadInput,
 ): Promise<DtakoAlcUploadReport> {
+  const recalculate = await recalculateBeforeFetch(deps.recalculateWork);
   const zip = await deps.fetchZip();
   assertZipReadyForAlcUpload(zip);
   const entries = listZipEntryNames(zip);
@@ -166,6 +176,7 @@ export async function runDtakoAlcUpload(
   return {
     ope_no: input.opeNo,
     start_ope: input.startOpe,
+    recalculate,
     bytes: zip.byteLength,
     entries,
     upload_id: outcome.uploadId,
