@@ -644,6 +644,191 @@ export function parseKintaiDiffValueDiffItemsFromResponse(raw: unknown): KintaiD
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// 5区分すべての items を画面に出す (Refs #633-6)。
+//
+// 上の `parseKintaiDiffValueDiffItemsFromResponse` は「取り込み漏れ候補との突き合わせ」
+// (#633-1) 用に value_diff_* だけを読んでいた。ここではそれを 5 区分ぶんに広げる —
+// 「38件ある」まで分かっても、どの乗務員のどの日かが画面から辿れないという指摘
+// (issue #633-6 本文) に応える。**value_diff_* の items 自体は上と同じ生データを
+// 読み直すだけ** (二重管理ではなく、用途が違うので独立の読み方をする — このファイル
+// 冒頭の「コピーではなく独立に書き直す」方針と同じ)。
+//
+// ★ ライブ応答にしか items が乗らないのは value_diff_* と同じ (relay がキャッシュ
+// 保存時に items を捨てる、`kintai-diff.ts` の `toCachedCategory` docs 参照)。
+// ─────────────────────────────────────────────────────────────────────────
+
+/** 5 区分の分数フィールドの表示ラベル。relay 側 `KINTAI_DIFF_MINUTE_FIELDS`
+ * (`kintai-diff.ts`) と同じ並び・同じフィールド名 — front は import できないため
+ * 独立に持つ (このファイル冒頭の docs と同じ理由)。ラベルは表示専用で、
+ * 突合の判定には使わない。 */
+const KINTAI_DIFF_FIELD_LABELS: ReadonlyArray<{ field: string, label: string }> = [
+  { field: 'restraint_minutes', label: '拘束' },
+  { field: 'working_minutes', label: '実働' },
+  { field: 'break_minutes', label: '休憩' },
+  { field: 'rest_minus_minutes', label: '休息不足' },
+  { field: 'statutory_minutes', label: '法定内' },
+  { field: 'within_statutory_overtime_minutes', label: '法定内残業' },
+  { field: 'overtime_minutes', label: '残業' },
+  { field: 'legal_holiday_minutes', label: '法定休日' },
+  { field: 'night_minutes', label: '深夜' },
+  { field: 'overtime_night_minutes', label: '残業深夜' },
+  { field: 'legal_holiday_night_minutes', label: '法定休日深夜' },
+] as const
+
+function kintaiDiffFieldLabel(field: string): string {
+  return KINTAI_DIFF_FIELD_LABELS.find(f => f.field === field)?.label ?? field
+}
+
+/** `value_diff_*` 1 行ぶん、または `only_gcp`/`only_onprem_*` 1 行ぶんの表示行。
+ * `kind` で判別する — value_diff は両側の値を持ち `diffFields` で差分項目を絞れるが、
+ * one_sided は片側の値しか無いので比較のしようが無い。 */
+export type KintaiDiffCategoryItemRow =
+  | {
+    kind: 'value_diff'
+    driverCd: string
+    date: string
+    start: string
+    diffFields: string[]
+    gcp: Record<string, number>
+    onprem: Record<string, number>
+  }
+  | {
+    kind: 'one_sided'
+    driverCd: string
+    date: string
+    start: string
+    side: 'gcp' | 'onprem'
+    values: Record<string, number>
+  }
+
+export interface KintaiDiffCategoryItems {
+  key: KintaiDiffCategoryDef['key']
+  rows: KintaiDiffCategoryItemRow[]
+}
+
+function parseKintaiDiffRowBase(r: Record<string, unknown>): { driverCd: string, date: string, start: string } | null {
+  const driverCd = typeof r.driver_cd === 'string'
+    ? r.driver_cd
+    : typeof r.driver_cd === 'number' && Number.isFinite(r.driver_cd)
+      ? String(r.driver_cd)
+      : null
+  if (driverCd === null || typeof r.date !== 'string' || typeof r.start !== 'string') return null
+  return { driverCd, date: r.date, start: r.start }
+}
+
+function parseKintaiDiffOneSidedRow(raw: unknown, side: 'gcp' | 'onprem'): KintaiDiffCategoryItemRow | null {
+  if (raw == null || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const base = parseKintaiDiffRowBase(r)
+  if (!base) return null
+  return { kind: 'one_sided', ...base, side, values: toMinuteRecord(r[side]) }
+}
+
+function parseKintaiDiffValueDiffRow(raw: unknown): KintaiDiffCategoryItemRow | null {
+  if (raw == null || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const base = parseKintaiDiffRowBase(r)
+  if (!base) return null
+  return {
+    kind: 'value_diff',
+    ...base,
+    diffFields: Array.isArray(r.diff_fields) ? r.diff_fields.filter((f): f is string => typeof f === 'string') : [],
+    gcp: toMinuteRecord(r.gcp),
+    onprem: toMinuteRecord(r.onprem),
+  }
+}
+
+function parseKintaiDiffCategoryRows(
+  raw: unknown,
+  parseRow: (raw: unknown) => KintaiDiffCategoryItemRow | null,
+): KintaiDiffCategoryItemRow[] {
+  const r = (raw ?? {}) as Record<string, unknown>
+  const items = Array.isArray(r.items) ? r.items : []
+  return items.map(parseRow).filter((x): x is KintaiDiffCategoryItemRow => x !== null)
+}
+
+/** `/restraint-api/kintai/diff` の生応答 (ライブ取得) から 5 区分ぶんの items を
+ * まとめて読む。キャッシュ応答 (`/kintai/diff-cache`) を渡しても items が無いだけで
+ * 各区分 `rows: []` になる (呼び出し側が「ライブ取得直後だけ」使うことを保証すること —
+ * `parseKintaiDiffValueDiffItemsFromResponse` と同じ制約)。 */
+export function parseKintaiDiffCategoryItemsFromResponse(raw: unknown): KintaiDiffCategoryItems[] {
+  const r = (raw ?? {}) as Record<string, unknown>
+  const diff = (r.diff ?? {}) as Record<string, unknown>
+  return [
+    { key: 'onlyGcp', rows: parseKintaiDiffCategoryRows(diff.only_gcp, x => parseKintaiDiffOneSidedRow(x, 'gcp')) },
+    {
+      key: 'onlyOnpremDriver0',
+      rows: parseKintaiDiffCategoryRows(diff.only_onprem_driver0, x => parseKintaiDiffOneSidedRow(x, 'onprem')),
+    },
+    {
+      key: 'onlyOnpremOther',
+      rows: parseKintaiDiffCategoryRows(diff.only_onprem_other, x => parseKintaiDiffOneSidedRow(x, 'onprem')),
+    },
+    {
+      key: 'valueDiffRestraintMatch',
+      rows: parseKintaiDiffCategoryRows(diff.value_diff_restraint_match, parseKintaiDiffValueDiffRow),
+    },
+    {
+      key: 'valueDiffRestraintMismatch',
+      rows: parseKintaiDiffCategoryRows(diff.value_diff_restraint_mismatch, parseKintaiDiffValueDiffRow),
+    },
+  ]
+}
+
+export interface KintaiDiffValueDiffFieldRow {
+  field: string
+  label: string
+  gcp: number
+  onprem: number
+}
+
+/** `value_diff_*` 行を**差のある項目だけ** GCP/オンプレ並びの表示行にする
+ * (Refs #633-6 受け入れ条件2)。`diffFields` は relay 側で既に「両側とも値が存在し
+ * (`missing_fields` に落ちておらず)、かつ値が違った項目」に絞られている
+ * (`kintai-diff.ts` の `buildKintaiDiff` 参照) — ここでは並べ替え・ラベル付けだけを
+ * 行い、差の有無を再判定しない。差の無い項目を並べて薄めないための唯一の窓口。 */
+export function kintaiDiffValueDiffFieldRows(row: {
+  diffFields: string[]
+  gcp: Record<string, number>
+  onprem: Record<string, number>
+}): KintaiDiffValueDiffFieldRow[] {
+  return row.diffFields.map(field => ({
+    field,
+    label: kintaiDiffFieldLabel(field),
+    gcp: row.gcp[field] ?? 0,
+    onprem: row.onprem[field] ?? 0,
+  }))
+}
+
+export interface KintaiDiffOneSidedFieldRow {
+  field: string
+  label: string
+  value: number
+}
+
+/** `only_gcp`/`only_onprem_*` 行 (片側にしか行が無い) の**非0項目だけ**を表示行にする。
+ * 比較対象がそもそも無い片側だけの値なので「差」ではなく「その日にその側にあった値」
+ * を示すだけ — 0 の項目まで11個並べても情報が無く明細を薄めるだけなので省く。 */
+export function kintaiDiffOneSidedFieldRows(values: Record<string, number>): KintaiDiffOneSidedFieldRow[] {
+  return KINTAI_DIFF_FIELD_LABELS
+    .filter(({ field }) => (values[field] ?? 0) !== 0)
+    .map(({ field, label }) => ({ field, label, value: values[field] ?? 0 }))
+}
+
+/** 5 区分 items 一覧の上限。relay 側 `KINTAI_DIFF_MAX_ITEMS` (`kintai-diff.ts`) と
+ * 同じ値 — front は import できないため独立に持つ (このファイル冒頭の docs と同じ
+ * 理由)。表示 (「上限で切れています」の注記) にしか使わない — 切る処理自体は
+ * relay 側が既にやっている。 */
+export const KINTAI_DIFF_ITEMS_DISPLAY_MAX = 500
+
+/** 区分の `{total, capped}` から「上限で切れています」の注記文を作る。黙って切らない
+ * (Refs #633-6 受け入れ条件4)。切れていなければ `null`。 */
+export function fmtKintaiDiffCategoryCappedNote(count: KintaiDiffCategoryCount): string | null {
+  if (!count.capped) return null
+  return `上限 ${KINTAI_DIFF_ITEMS_DISPLAY_MAX} 件で切れています (総数 ${count.total} 件)。`
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // compared_days / only_gcp / only_onprem_* の「日」単位の材料 (Refs #633-3)。
 //
 // ★ #633-1 の `no_diff` (差分リストに無い=一致) は、実は「突き合わせてすらいない日」
