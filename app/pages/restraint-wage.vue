@@ -6585,7 +6585,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                     <!-- 取り込み漏れ候補の運行NO一覧 (Refs #623-2)。★ 遅い口 — 押した時だけ叩く -->
                     <div class="mt-2">
                       <UButton
-                        size="2xs"
+                        size="xs"
                         variant="soft"
                         icon="i-lucide-list"
                         :label="unkoGapsLoaded ? '運行NO を出し直す' : '運行NO を出す'"
@@ -6656,7 +6656,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                                   start_ope目安: {{ kintaiUnkoGapsDeriveStartOpe(no) ?? '不明' }}
                                 </span>
                                 <UButton
-                                  size="2xs"
+                                  size="xs"
                                   variant="soft"
                                   label="③ に入れる"
                                   @click="applyUnkoGapCandidateToMysqlForm(d.driverCd, no)"
