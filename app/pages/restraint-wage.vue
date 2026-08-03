@@ -74,6 +74,27 @@ import {
   summarizeTimecardCompareResults,
   toTimecardCompareRows,
 } from '~/utils/timecard-compare-view'
+import type {
+  KintaiDiffApiResult,
+  KintaiDiffPrescription,
+  KintaiFoldPageView,
+  KintaiFoldProgress,
+  KintaiRefreshMysqlPreview,
+  KintaiWindowReportView,
+} from '~/utils/kintai-diff-view'
+import {
+  buildKintaiDiffPrescriptions,
+  fmtKintaiDiffCount,
+  fmtKintaiRefreshMysqlGuarantee,
+  foldProgressAppend,
+  foldProgressInitial,
+  KINTAI_DIFF_CATEGORIES,
+  parseKintaiDiffApiResponse,
+  parseKintaiFoldPage,
+  parseKintaiRefreshMysqlApplyResult,
+  parseKintaiRefreshMysqlPreview,
+  parseKintaiWindowReport,
+} from '~/utils/kintai-diff-view'
 
 const {
   session: theearthSession,
@@ -145,11 +166,12 @@ const TABS = [
   { key: 'schedule', label: '勤務設定' },
   { key: 'timecard', label: 'タイムカード' },
   { key: 'compare', label: 'タイムカード照合' },
+  { key: 'gcpdiff', label: 'オンプレ vs Supabase' },
 ] as const
 
 /** 対象月が効くタブ。ここに無いタブでは年月バーを出さない (Refs #409)。
  * 単価マスタは選択月時点の単価を出すので対象に含む。 */
-const MONTH_AWARE_TABS: string[] = ['archive', 'monthly', 'minwage', 'salary', 'master', 'schedule', 'timecard', 'compare']
+const MONTH_AWARE_TABS: string[] = ['archive', 'monthly', 'minwage', 'salary', 'master', 'schedule', 'timecard', 'compare', 'gcpdiff']
 
 type TabKey = typeof TABS[number]['key']
 const activeTab = ref<TabKey>('monthly')
@@ -1027,6 +1049,253 @@ async function fetchKintai() {
     fetchingKintai.value = false
   }
 }
+
+// ---------------------------------------------------------------------------
+// オンプレ vs Supabase 比較タブ (Refs #615-5)
+// ---------------------------------------------------------------------------
+// サーバ側の4口 (#618) は完成済み。ここは表示 + 取り直し3ボタンの二段階UIだけ。
+// **原因を断定しない** (docs/plan-615-onprem-gcp-diff.md 決定1) — 差の5区分と
+// 観測値、「どの操作で直りうるか」という処方の候補までを出し、「押せば直る」とは
+// 書かない (保証の有無は MySQL 取り直しが対象ごとに別に持つ)。
+
+const gcpDiffResult = ref<KintaiDiffApiResult | null>(null)
+const gcpDiffLoading = ref(false)
+const gcpDiffError = ref('')
+const gcpDiffLoaded = ref(false)
+
+// テンプレートでの `gcpDiffResult.value?.xxx` のネストした optional chaining は
+// vue-tsc の v-if 絞り込みが効かないことがあるため、表示用に平らな computed へ分ける
+const gcpDiffSummary = computed(() => gcpDiffResult.value?.summary ?? null)
+const gcpDiffObservations = computed(() => gcpDiffResult.value?.observations ?? null)
+const gcpDiffObservationsError = computed(() => gcpDiffResult.value?.observationsError ?? null)
+
+const gcpDiffPrescriptions = computed<KintaiDiffPrescription[]>(() =>
+  buildKintaiDiffPrescriptions(gcpDiffSummary.value, gcpDiffObservations.value))
+
+async function loadGcpDiff() {
+  if (!month.value) return
+  gcpDiffLoading.value = true
+  gcpDiffError.value = ''
+  try {
+    const res = await $fetch<unknown>('/restraint-api/kintai/diff', {
+      headers: authHeaders(),
+      query: { month: month.value },
+    })
+    gcpDiffResult.value = parseKintaiDiffApiResponse(res)
+    gcpDiffLoaded.value = true
+  }
+  catch (e) {
+    gcpDiffResult.value = null
+    gcpDiffLoaded.value = false
+    gcpDiffError.value = restraintErrorMessage(e)
+  }
+  finally {
+    gcpDiffLoading.value = false
+  }
+}
+
+// 月が変わったら前の結果を消す (「タイムカード照合」タブと同じ理由 — 別月の
+// 差分・保証が残ると誤読する)
+watch(month, () => {
+  gcpDiffResult.value = null
+  gcpDiffLoaded.value = false
+  gcpDiffError.value = ''
+})
+
+// ---- ① 打刻の運び直し (窓ぶん。続きは無い、1回で運びきる) ----
+
+const timecardRefreshPreview = ref<KintaiWindowReportView | null>(null)
+const timecardRefreshLoading = ref(false)
+const timecardRefreshError = ref('')
+
+async function callTimecardRefresh(apply: boolean) {
+  timecardRefreshLoading.value = true
+  timecardRefreshError.value = ''
+  try {
+    const res = await $fetch<unknown>('/restraint-api/kintai/refresh/timecard', {
+      method: 'POST',
+      headers: authHeaders(),
+      query: apply ? { month: month.value, apply: true } : { month: month.value },
+    })
+    timecardRefreshPreview.value = parseKintaiWindowReport(res)
+  }
+  catch (e) {
+    timecardRefreshError.value = restraintErrorMessage(e)
+  }
+  finally {
+    timecardRefreshLoading.value = false
+  }
+}
+
+/** まず dry-run で「何件変わるか」を見せる (既定 apply なし)。 */
+function previewTimecardRefresh() {
+  timecardRefreshPreview.value = null
+  callTimecardRefresh(false)
+}
+
+/** **preview (dry-run) を経由した後だけ**実行できる (いきなり apply しない、やること4)。
+ * 一度実行すると `dryRun: false` に変わるので、続けて押しても弾く — 再実行するには
+ * もう一度「確認」を押させる (fold の二段階と同じ安全策)。 */
+function applyTimecardRefresh() {
+  if (!timecardRefreshPreview.value || !timecardRefreshPreview.value.dryRun) return
+  callTimecardRefresh(true)
+}
+
+watch(month, () => {
+  timecardRefreshPreview.value = null
+  timecardRefreshError.value = ''
+})
+
+// ---- ② GCP 側の畳み直し (fold recalc)。next_after_driver_cd が null になるまで
+//      **front が回し切る** (やること4)。1ページ = 最大50人 (受け側の既定)。 ----
+
+const foldStaleOnly = ref(false)
+const foldProgress = ref<KintaiFoldProgress | null>(null)
+const foldRunning = ref(false)
+const foldError = ref('')
+/** true なら直前のループが apply=true (実行) だった。preview と実行を UI で区別する。 */
+const foldApplied = ref(false)
+
+async function fetchFoldPage(afterDriverCd: number | undefined, apply: boolean): Promise<KintaiFoldPageView> {
+  const query: Record<string, string | number | boolean> = { month: month.value }
+  if (afterDriverCd !== undefined) query.after_driver_cd = afterDriverCd
+  if (foldStaleOnly.value) query.stale_only = true
+  if (apply) query.apply = true
+  const res = await $fetch<unknown>('/restraint-api/kintai/refresh/fold', {
+    method: 'POST',
+    headers: authHeaders(),
+    query,
+  })
+  return parseKintaiFoldPage(res)
+}
+
+/** ページングの本体。preview (apply=false) にも実行 (apply=true) にも使う共通処理。
+ * `next_after_driver_cd` が返る限り、前ページの値を `after_driver_cd` に積んで叩き直す。 */
+async function runFoldPaging(apply: boolean) {
+  foldRunning.value = true
+  foldError.value = ''
+  foldApplied.value = apply
+  let progress = foldProgressInitial()
+  foldProgress.value = progress
+  let after: number | undefined
+  try {
+    // 安全弁: 応答が壊れて next_after_driver_cd が回らなくても無限ループにしない
+    // (50人/ページ × 200 = 1万人ぶん。実在の乗務員数を大きく超える)
+    for (let i = 0; i < 200; i++) {
+      const page = await fetchFoldPage(after, apply)
+      progress = foldProgressAppend(progress, page)
+      foldProgress.value = progress
+      if (page.nextAfterDriverCd === null) break
+      after = page.nextAfterDriverCd
+    }
+  }
+  catch (e) {
+    foldError.value = restraintErrorMessage(e)
+  }
+  finally {
+    foldRunning.value = false
+  }
+}
+
+/** まず dry-run で全ページ回し、合計「何件変わるか」を見せる。 */
+function previewFoldRefresh() {
+  runFoldPaging(false)
+}
+
+/** **preview (回しきった dry-run) を経由した後だけ**実行できる。 */
+function applyFoldRefresh() {
+  if (!foldProgress.value || foldApplied.value) return
+  runFoldPaging(true)
+}
+
+watch(month, () => {
+  foldProgress.value = null
+  foldError.value = ''
+  foldApplied.value = false
+})
+
+// ---- ③ MySQL (dtako) 側の取り直し。運行1件 (unko_no) 単位。
+//      「押しても直る保証」の有無を必ず併記する (やること5) ----
+
+const mysqlRefreshUnkoNo = ref('')
+/** 保証判定 (guarantee) 用の任意入力。両方揃ったときだけサーバが判定する。 */
+const mysqlRefreshDriverCd = ref('')
+const mysqlRefreshResetTimecard = ref(false)
+const mysqlRefreshPreview = ref<KintaiRefreshMysqlPreview | null>(null)
+const mysqlRefreshLoading = ref(false)
+const mysqlRefreshError = ref('')
+const mysqlRefreshApplyResult = ref('')
+
+const mysqlRefreshGuaranteeText = computed(() => fmtKintaiRefreshMysqlGuarantee(mysqlRefreshPreview.value))
+
+async function postMysqlRefresh(apply: boolean) {
+  const driverCd = mysqlRefreshDriverCd.value.trim()
+  return $fetch<unknown>('/restraint-api/kintai/refresh/mysql', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: {
+      unko_no: mysqlRefreshUnkoNo.value.trim(),
+      // driver_cd/month は保証判定にしか使わない (サーバ側は両方揃った時だけ判定する)。
+      // 片方だけ送っても判定されないだけで、実行の可否には影響しない
+      driver_cd: driverCd || undefined,
+      month: driverCd ? month.value : undefined,
+      reset_timecard: mysqlRefreshResetTimecard.value,
+      apply,
+    },
+  })
+}
+
+async function previewMysqlRefresh() {
+  if (!mysqlRefreshUnkoNo.value.trim()) return
+  mysqlRefreshLoading.value = true
+  mysqlRefreshError.value = ''
+  mysqlRefreshApplyResult.value = ''
+  mysqlRefreshPreview.value = null
+  try {
+    mysqlRefreshPreview.value = parseKintaiRefreshMysqlPreview(await postMysqlRefresh(false))
+  }
+  catch (e) {
+    mysqlRefreshError.value = restraintErrorMessage(e)
+  }
+  finally {
+    mysqlRefreshLoading.value = false
+  }
+}
+
+/** **preview を経由した後だけ**実行できる。保証が無くても実行はブロックしない
+ * (サーバ側もブロックしていない、決定2) — 実行の可否と保証の有無は別軸。
+ * 実行後は preview を消す — 続けて押しても再実行させない (再実行するにはもう一度
+ * 「確認」を押させる、fold/timecard と同じ安全策)。 */
+async function applyMysqlRefresh() {
+  if (!mysqlRefreshPreview.value) return
+  mysqlRefreshLoading.value = true
+  mysqlRefreshError.value = ''
+  try {
+    const res = parseKintaiRefreshMysqlApplyResult(await postMysqlRefresh(true))
+    mysqlRefreshApplyResult.value
+      = `取得 ${res.bytes ?? '?'} bytes / ${res.entriesCount ?? '?'} ファイル、`
+        + `push応答 ${res.httpStatus ?? '?'} (取込 ${res.autoloadHttpStatus ?? '?'}`
+        + (mysqlRefreshResetTimecard.value ? ` / 再登録 ${res.resetHttpStatus ?? '?'}` : '')
+        + ')'
+    mysqlRefreshPreview.value = null
+  }
+  catch (e) {
+    mysqlRefreshError.value = restraintErrorMessage(e)
+  }
+  finally {
+    mysqlRefreshLoading.value = false
+  }
+}
+
+// 対象 (unko_no) を変えたら古い preview を消す (別対象の保証を見せ続けない)
+watch(mysqlRefreshUnkoNo, () => {
+  mysqlRefreshPreview.value = null
+  mysqlRefreshApplyResult.value = ''
+})
+watch(month, () => {
+  mysqlRefreshPreview.value = null
+  mysqlRefreshApplyResult.value = ''
+})
 
 // ---- 期間サマリー印刷 (Refs #443) ----
 // タイムカード表は「1 人 1 枚 × 日別」なので、期間分の日数を突き合わせたい総務には
@@ -5975,6 +6244,279 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 </table>
               </div>
             </template>
+          </UCard>
+        </template>
+
+        <template v-else-if="activeTab === 'gcpdiff'">
+          <UCard>
+            <template #header>
+              <div class="flex flex-wrap items-center gap-2 print:hidden">
+                <span class="font-semibold">オンプレ vs Supabase ({{ fmtYm(month) }})</span>
+                <span class="text-xs text-gray-500">
+                  勤怠の日別サマリを、オンプレ (MariaDB 生読み) と GCP (Supabase の畳み込み) で
+                  突き合わせます。<b>同じ実装なので「なぜ違うか」はここでは判定しません</b> — 差の区分と
+                  観測値、「どの操作で直りうるか」の候補までを出します。
+                </span>
+                <div class="flex-1" />
+                <UButton
+                  size="xs"
+                  icon="i-lucide-git-compare"
+                  :label="gcpDiffLoaded ? '再取得' : '月を取得'"
+                  :loading="gcpDiffLoading"
+                  :disabled="gcpDiffLoading"
+                  @click="loadGcpDiff"
+                />
+              </div>
+            </template>
+
+            <UAlert
+              v-if="gcpDiffError"
+              color="error"
+              variant="soft"
+              class="mb-3"
+              icon="i-lucide-alert-triangle"
+              title="取得できませんでした"
+              :description="gcpDiffError"
+            />
+
+            <p v-if="!gcpDiffLoaded && !gcpDiffLoading && !gcpDiffError" class="text-sm text-gray-500">
+              「月を取得」を押すと、この月の日別サマリをオンプレ・GCP 双方から1回ずつ取得して突き合わせます。
+              <b>乗務員での絞り込みはできません</b> (月全体を1回取得するほうが絞り込みより速い実測があるため —
+              見たい乗務員は取得後に手元の一覧から探してください)。
+            </p>
+            <div v-else-if="gcpDiffLoading" class="flex items-center gap-2 text-sm text-gray-500">
+              <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin text-primary" />
+              取得しています…
+            </div>
+            <template v-else-if="gcpDiffLoaded && gcpDiffSummary">
+              <UAlert
+                v-if="gcpDiffSummary.onpremUnreadable"
+                color="warning"
+                variant="soft"
+                class="mb-3"
+                icon="i-lucide-alert-triangle"
+                title="オンプレの応答の形が読めませんでした"
+                description="このため「GCPのみ」の件数は当てになりません — オンプレ側が本当に空なのか、応答の形が読めなかっただけなのか区別できていません。"
+              />
+
+              <div class="mb-3 text-xs text-gray-500">
+                GCP {{ gcpDiffSummary.gcpRows }} 行 / オンプレ {{ gcpDiffSummary.onpremRows }} 行
+              </div>
+
+              <!-- 差の5区分 -->
+              <div class="overflow-x-auto mb-4">
+                <table class="min-w-full text-sm border-collapse">
+                  <thead class="bg-gray-100 dark:bg-gray-800">
+                    <tr>
+                      <th class="px-2 py-1 text-left">区分</th>
+                      <th class="px-2 py-1 text-right">件数</th>
+                      <th class="px-2 py-1 text-left">注記</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="cat in KINTAI_DIFF_CATEGORIES" :key="cat.key" class="border-t border-gray-200 dark:border-gray-700">
+                      <td class="px-2 py-1">{{ cat.label }}</td>
+                      <td class="px-2 py-1 text-right tabular-nums">{{ fmtKintaiDiffCount(gcpDiffSummary[cat.key]) }}</td>
+                      <td class="px-2 py-1 text-xs text-gray-500">{{ cat.note }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <!-- 観測値 (判定材料であって原因ではない) -->
+              <div class="mb-4">
+                <h4 class="font-semibold text-sm mb-1">観測値</h4>
+                <UAlert
+                  v-if="gcpDiffObservationsError"
+                  color="warning"
+                  variant="soft"
+                  class="mb-2"
+                  icon="i-lucide-alert-triangle"
+                  title="観測値を取得できませんでした"
+                  :description="gcpDiffObservationsError"
+                />
+                <ul v-else-if="gcpDiffObservations" class="text-sm space-y-1">
+                  <li>stale (現行ロジック未反映) の乗務員数: <b>{{ gcpDiffObservations.staleDrivers ?? '不明' }}</b></li>
+                  <li>畳み直すと変わる乗務員数 (dry-run 1ページぶん): <b>{{ gcpDiffObservations.foldWouldWriteDrivers ?? '不明' }}</b></li>
+                  <li>対象月に GCP にしか無い運行数: <b>{{ gcpDiffObservations.unkoDiffGcpOnlyInMonth ?? '不明' }}</b></li>
+                  <li v-if="gcpDiffObservations.warnings.length">
+                    警告:
+                    <ul class="list-disc list-inside">
+                      <li v-for="(w, i) in gcpDiffObservations.warnings" :key="i" class="text-amber-700 dark:text-amber-400">
+                        {{ w }}
+                      </li>
+                    </ul>
+                  </li>
+                </ul>
+                <p v-else class="text-sm text-gray-500">観測値はありません。</p>
+              </div>
+
+              <!-- 処方の候補 (原因ではない) -->
+              <div>
+                <h4 class="font-semibold text-sm mb-1">処方の候補 (原因の断定ではありません)</h4>
+                <p class="text-xs text-gray-500 mb-1">
+                  オンプレと GCP は同じ実装なので、差は「入力が違う」= 2つのDBの中身の差でしかなく、
+                  どちらが正しいかはここでは判定できません。以下は観測値から機械的に導いた候補であって、
+                  <b>「押せば直る」ことを意味しません</b> — 保証の有無は③の対象ごとに個別に確認してください。
+                </p>
+                <ul class="text-sm space-y-1">
+                  <li v-for="p in gcpDiffPrescriptions" :key="p.key" :class="p.relevant ? '' : 'text-gray-400'">
+                    <UBadge v-if="p.relevant" color="warning" variant="subtle" size="sm" class="mr-1">該当あり</UBadge>
+                    {{ p.action }} — {{ p.observation }}
+                  </li>
+                </ul>
+              </div>
+            </template>
+          </UCard>
+
+          <!-- 取り直し3ボタン。すべて preview (dry-run) → 実行の二段階 -->
+          <UCard class="mt-4">
+            <template #header>
+              <span class="font-semibold">① 打刻を運び直す (オンプレ → GCP)</span>
+            </template>
+            <p class="text-xs text-gray-500 mb-2">
+              窓 (既定: 当月+前月) ぶんの打刻をオンプレから運び、GCP 側に反映し直します。
+              <b>押しても直る保証はありません</b> — 打刻が既に GCP に反映済みなら書き換えは 0 件のままです。
+            </p>
+            <UAlert
+              v-if="timecardRefreshError"
+              color="error"
+              variant="soft"
+              class="mb-2"
+              icon="i-lucide-alert-triangle"
+              title="失敗しました"
+              :description="timecardRefreshError"
+            />
+            <div class="flex flex-wrap items-center gap-2">
+              <UButton
+                size="xs"
+                label="① 確認 (dry-run)"
+                :loading="timecardRefreshLoading"
+                :disabled="timecardRefreshLoading"
+                @click="previewTimecardRefresh"
+              />
+              <UButton
+                size="xs"
+                color="error"
+                label="② 実行 (書き込む)"
+                :loading="timecardRefreshLoading"
+                :disabled="timecardRefreshLoading || !timecardRefreshPreview || !timecardRefreshPreview.dryRun"
+                @click="applyTimecardRefresh"
+              />
+            </div>
+            <div v-if="timecardRefreshPreview" class="mt-2 text-sm">
+              <span :class="timecardRefreshPreview.dryRun ? 'text-gray-500' : 'font-medium text-green-700 dark:text-green-400'">
+                {{ timecardRefreshPreview.dryRun ? '(dry-run — まだ書き込んでいません)' : '(実行しました)' }}
+              </span>
+              対象月 {{ timecardRefreshPreview.months.join(', ') }} / 乗務員 {{ timecardRefreshPreview.drivers }} 名 /
+              行 {{ timecardRefreshPreview.events }} 件 →
+              書き換え <b>{{ timecardRefreshPreview.driversWritten }}</b> 名 (日 {{ timecardRefreshPreview.daysWritten }} 件)
+              <span v-if="timecardRefreshPreview.misplaced > 0" class="text-red-600 dark:text-red-400">
+                / 窓外として弾いた行 {{ timecardRefreshPreview.misplaced }} 件 (0でないと壊れています)
+              </span>
+            </div>
+          </UCard>
+
+          <UCard class="mt-4">
+            <template #header>
+              <span class="font-semibold">② GCP 側を畳み直す (fold recalc)</span>
+            </template>
+            <p class="text-xs text-gray-500 mb-2">
+              GCP 側の日別サマリを全量再計算し直します。<b>押しても直る保証はありません</b>
+              (畳み直しても値が変わらないことがあります)。1ページ最大50人ずつ処理し、
+              <code>next_after_driver_cd</code> が無くなるまでこの画面が自動で回し切ります。
+            </p>
+            <UCheckbox v-model="foldStaleOnly" label="stale (現行ロジック未反映) の乗務員だけに絞る" class="mb-2" />
+            <UAlert
+              v-if="foldError"
+              color="error"
+              variant="soft"
+              class="mb-2"
+              icon="i-lucide-alert-triangle"
+              title="失敗しました (途中まで進んだページはあります)"
+              :description="foldError"
+            />
+            <div class="flex flex-wrap items-center gap-2">
+              <UButton
+                size="xs"
+                label="① 確認 (dry-run、全ページ回し切る)"
+                :loading="foldRunning"
+                :disabled="foldRunning"
+                @click="previewFoldRefresh"
+              />
+              <UButton
+                size="xs"
+                color="error"
+                label="② 実行 (書き込む、全ページ回し切る)"
+                :loading="foldRunning"
+                :disabled="foldRunning || !foldProgress || foldApplied"
+                @click="applyFoldRefresh"
+              />
+            </div>
+            <div v-if="foldProgress" class="mt-2 text-sm">
+              <span :class="foldApplied ? 'font-medium text-green-700 dark:text-green-400' : 'text-gray-500'">
+                {{ foldApplied ? '(実行' : '(dry-run' }}{{ foldProgress.done ? ' — 完了)' : foldRunning ? ' — 進行中)' : ' — 中断)' }}
+              </span>
+              {{ foldProgress.pages }} ページ処理 / 通算 <b>{{ foldProgress.driversWrittenTotal }}</b> 名ぶん
+              {{ foldApplied ? '書き換え' : '変わる見込み' }}
+              <ul v-if="foldProgress.warnings.length" class="list-disc list-inside text-amber-700 dark:text-amber-400 mt-1">
+                <li v-for="(w, i) in foldProgress.warnings" :key="i">{{ w }}</li>
+              </ul>
+            </div>
+          </UCard>
+
+          <UCard class="mt-4">
+            <template #header>
+              <span class="font-semibold">③ MySQL (dtako) 側を取り直す</span>
+            </template>
+            <p class="text-xs text-gray-500 mb-2">
+              運行1件 (運行NO) ぶんの csvdata.zip を theearth から取り直し、オンプレ MariaDB へ push します。
+              <b>rust-ichibanboshi 側のコード自身が「押しても直る保証が無い」対象があると明記しています</b> —
+              下の「保証」の表示を必ず確認してください。実行前に保証を確認しても、実行そのものはブロックされません。
+            </p>
+            <div class="flex flex-wrap items-center gap-2 mb-2">
+              <UInput v-model="mysqlRefreshUnkoNo" size="xs" placeholder="運行NO (unko_no、23桁)" class="w-56" />
+              <UInput v-model="mysqlRefreshDriverCd" size="xs" placeholder="乗務員CD (任意、保証判定用)" class="w-44" />
+              <UCheckbox v-model="mysqlRefreshResetTimecard" label="勤務時間再登録まで行う (③、破壊的)" />
+            </div>
+            <UAlert
+              v-if="mysqlRefreshError"
+              color="error"
+              variant="soft"
+              class="mb-2"
+              icon="i-lucide-alert-triangle"
+              title="失敗しました"
+              :description="mysqlRefreshError"
+            />
+            <div class="flex flex-wrap items-center gap-2">
+              <UButton
+                size="xs"
+                label="① 確認 (dry-run)"
+                :loading="mysqlRefreshLoading"
+                :disabled="mysqlRefreshLoading || !mysqlRefreshUnkoNo.trim()"
+                @click="previewMysqlRefresh"
+              />
+              <UButton
+                size="xs"
+                color="error"
+                label="② 実行 (取り直す)"
+                :loading="mysqlRefreshLoading"
+                :disabled="mysqlRefreshLoading || !mysqlRefreshPreview"
+                @click="applyMysqlRefresh"
+              />
+            </div>
+            <div v-if="mysqlRefreshPreview" class="mt-2 text-sm">
+              <div class="text-xs text-gray-500">ope_no: {{ mysqlRefreshPreview.opeNo }} / start_ope: {{ mysqlRefreshPreview.startOpe }}</div>
+              <div
+                class="font-medium"
+                :class="mysqlRefreshPreview.guarantee?.guaranteed ? 'text-green-700 dark:text-green-400' : 'text-amber-700 dark:text-amber-400'"
+              >
+                {{ mysqlRefreshGuaranteeText }}
+              </div>
+            </div>
+            <div v-if="mysqlRefreshApplyResult" class="mt-2 text-sm text-gray-600 dark:text-gray-400">
+              {{ mysqlRefreshApplyResult }}
+            </div>
           </UCard>
         </template>
       </div>
