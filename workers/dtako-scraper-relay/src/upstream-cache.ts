@@ -17,8 +17,11 @@
  * — DO への配線は dtako-scraper-relay-do.ts の loadKintaiTextWithCache 参照。
  */
 
-/** キャッシュ対象の上流の種別。month と合わせて主キーになる。 */
-export type CacheKind = "daily" | "kosoku";
+/** キャッシュ対象の上流の種別。month と合わせて主キーになる。
+ * `"kosoku-full"` は `/kintai/diff` (オンプレ⇔GCP突合) 専用の全項目版
+ * (Refs #633-4) — `"kosoku"` (画面経路の `view=timecard` slim 版) とは
+ * **別の主キー**にして、絶対に混ぜて配信されないようにする。 */
+export type CacheKind = "daily" | "kosoku" | "kosoku-full";
 
 /** 1 取得単位のキャッシュ結果。live = フラグ off ではなく「版照会失敗で不使用」。 */
 export type CachePieceState = "hit" | "miss" | "live";

@@ -347,6 +347,74 @@ describe("compared_days (Refs #633-3、親の実測 2026-08-04 で確定した�
   });
 });
 
+describe("項目の欠損 (Refs #633-4、親の実測 2026-08-04 で確定した本番の偽陽性への対応)", () => {
+  it("★ 実測そのもの: view=timecard でオンプレが rest_minus_minutes を欠いた行は、その項目を比較から除外する (欠損を0扱いして差をでっち上げない)", () => {
+    // 実測: 1026|2026-06-14|23:25 は GCP側 rest_minus_minutes=209、
+    // オンプレ (view=timecard) はキー自体が応答に無い。旧実装は toNumberOr0 で
+    // 欠損を0に倒しており、209 と 0 の差を「値が違う」と誤検出していた
+    // (2026-06 実測で「値が違う」26件中23件がこの型の偽陽性だった)。
+    const onpremDay = day({ date: "2026-06-14", start: "2026-06-14 23:25:00" });
+    delete (onpremDay as Record<string, unknown>).rest_minus_minutes;
+    const onprem = onpremBody([{ driver: 1026, days: [onpremDay] }]);
+    const gcp = gcpBody({ "1026|2026-06-14|2026-06-14 23:25:00": { ...GCP_VALUE, rest_minus_minutes: 209 } });
+
+    const res = buildKintaiDiff(gcp, onprem);
+
+    // rest_minus_minutes 以外は両側一致させてあるので、除外すれば差は0件
+    expect(res.value_diff_restraint_match.total).toBe(0);
+    expect(res.value_diff_restraint_mismatch.total).toBe(0);
+    // 両側に行はあるので compared_days には入る (突き合わせ自体はできている、Refs #633-3 と矛盾しない)
+    expect(res.compared_days.items).toEqual(["1026|2026-06-14"]);
+    // 除外した項目は missing_fields に残す (front で「比較していません」と出すため)
+    expect(res.missing_fields).toEqual(["rest_minus_minutes"]);
+  });
+
+  it("両側にあって値が違う項目は、従来どおり差として数える (回帰確認 — 欠損除外が本物の差まで消さないこと)", () => {
+    // 実測: 1029|2026-06-14|20:33 (rest_minus_minutes が両側にあり値が違う想定)
+    const onprem = onpremBody([
+      { driver: 1029, days: [day({ date: "2026-06-14", start: "2026-06-14 20:33:00", rest_minus_minutes: 344 })] },
+    ]);
+    const gcp = gcpBody({ "1029|2026-06-14|2026-06-14 20:33:00": { ...GCP_VALUE, rest_minus_minutes: 209 } });
+
+    const res = buildKintaiDiff(gcp, onprem);
+
+    expect(res.value_diff_restraint_match.total).toBe(1);
+    expect(res.value_diff_restraint_mismatch.total).toBe(0);
+    expect(res.value_diff_restraint_match.items[0]!.diff_fields).toEqual(["rest_minus_minutes"]);
+    expect(res.missing_fields).toEqual([]);
+  });
+
+  it("missing_fields は複数項目・複数行にまたがってもソート済みで重複除去される", () => {
+    const day1 = day({ date: "2026-06-01", start: "2026-06-01 08:00:00" });
+    delete (day1 as Record<string, unknown>).night_minutes;
+    delete (day1 as Record<string, unknown>).rest_minus_minutes;
+    const day2 = day({ date: "2026-06-02", start: "2026-06-02 08:00:00" });
+    delete (day2 as Record<string, unknown>).rest_minus_minutes;
+    const onprem = onpremBody([
+      { driver: 2001, days: [day1] },
+      { driver: 2002, days: [day2] },
+    ]);
+    const gcp = gcpBody({
+      "2001|2026-06-01|2026-06-01 08:00:00": GCP_VALUE,
+      "2002|2026-06-02|2026-06-02 08:00:00": GCP_VALUE,
+    });
+    const res = buildKintaiDiff(gcp, onprem);
+    expect(res.missing_fields).toEqual(["night_minutes", "rest_minus_minutes"]);
+  });
+
+  it("restraint_minutes 自体が片側に無ければ match と断定せず mismatch 側へ倒す (保守的な既定 — 一致の確証が無いものを一致扱いしない)", () => {
+    const onpremDay = day({ date: "2026-06-01", start: "2026-06-01 08:00:00" });
+    delete (onpremDay as Record<string, unknown>).restraint_minutes;
+    const onprem = onpremBody([{ driver: 3001, days: [onpremDay] }]);
+    // break_minutes を変えて何らかの diff_fields は生じさせる (restraint 抜きでも比較対象が残る形)
+    const gcp = gcpBody({ "3001|2026-06-01|2026-06-01 08:00:00": { ...GCP_VALUE, break_minutes: 999 } });
+    const res = buildKintaiDiff(gcp, onprem);
+    expect(res.value_diff_restraint_match.total).toBe(0);
+    expect(res.value_diff_restraint_mismatch.total).toBe(1);
+    expect(res.missing_fields).toContain("restraint_minutes");
+  });
+});
+
 describe("gcpSummariesToMap / onpremKosokuDailyToMap (単体)", () => {
   it("gcpSummariesToMap は summaries が object でなければ空 Map", () => {
     expect(gcpSummariesToMap({ summaries: "not-an-object" }).size).toBe(0);
@@ -589,6 +657,7 @@ describe("突合結果のキャッシュ (Refs #620-3)", () => {
       value_diff_restraint_match: cat(0, []),
       value_diff_restraint_mismatch: cat(3, [{} as never]),
       compared_days: cat(5, ["1|2026-06-01"]),
+      missing_fields: ["rest_minus_minutes"],
     };
   }
 
@@ -606,6 +675,7 @@ describe("突合結果のキャッシュ (Refs #620-3)", () => {
           only_onprem_other: { total: 0, capped: false },
           value_diff_restraint_match: { total: 0, capped: false },
           value_diff_restraint_mismatch: { total: 3, capped: true },
+          missing_fields: ["rest_minus_minutes"],
         },
         observations: OBSERVATIONS,
         observations_error: null,
@@ -630,6 +700,46 @@ describe("突合結果のキャッシュ (Refs #620-3)", () => {
       const snapshot = buildKintaiDiffCacheSnapshot("2026-06", fullDiffResult(), null, "err");
       const roundTripped = parseKintaiDiffCacheSnapshot(JSON.parse(JSON.stringify(snapshot)));
       expect(roundTripped).toEqual(snapshot);
+    });
+
+    it("★ #633-4 より前に保存された旧スナップショット (missing_fields 無し) も読める (空配列に倒す、unreadable にしない)", () => {
+      const legacy = {
+        month: "2026-06",
+        diff: {
+          gcp_rows: 10,
+          onprem_rows: 8,
+          onprem_unreadable: false,
+          only_gcp: { total: 1, capped: false },
+          only_onprem_driver0: { total: 2, capped: true },
+          only_onprem_other: { total: 0, capped: false },
+          value_diff_restraint_match: { total: 0, capped: false },
+          value_diff_restraint_mismatch: { total: 3, capped: true },
+          // missing_fields キー自体が無い (旧形式)
+        },
+        observations: null,
+        observations_error: null,
+      };
+      const res = parseKintaiDiffCacheSnapshot(legacy);
+      expect(res).not.toBeNull();
+      expect(res?.diff.missing_fields).toEqual([]);
+    });
+
+    it("missing_fields に未知の文字列/非文字列が混ざっていたら除く (フィールド名の集合だけ通す)", () => {
+      const res = parseKintaiDiffCacheSnapshot({
+        month: "2026-06",
+        diff: {
+          gcp_rows: 10,
+          onprem_rows: 8,
+          onprem_unreadable: false,
+          only_gcp: { total: 1, capped: false },
+          only_onprem_driver0: { total: 2, capped: true },
+          only_onprem_other: { total: 0, capped: false },
+          value_diff_restraint_match: { total: 0, capped: false },
+          value_diff_restraint_mismatch: { total: 3, capped: true },
+          missing_fields: ["rest_minus_minutes", "not_a_real_field", 123, null],
+        },
+      });
+      expect(res?.diff.missing_fields).toEqual(["rest_minus_minutes"]);
     });
 
     it("raw が null / オブジェクトでない場合は null を返す (読めなかった扱い)", () => {

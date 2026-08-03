@@ -87,6 +87,7 @@ import {
   fmtKintaiDiffCacheHeadline,
   fmtKintaiDiffCount,
   fmtKintaiDiffLastVerified,
+  fmtKintaiDiffMissingFieldsNote,
   fmtKintaiRefreshMysqlGuarantee,
   foldProgressAppend,
   foldProgressInitial,
@@ -6703,6 +6704,16 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 icon="i-lucide-alert-triangle"
                 title="オンプレの応答の形が読めませんでした"
                 description="このため「GCPのみ」の件数は当てになりません — オンプレ側が本当に空なのか、応答の形が読めなかっただけなのか区別できていません。"
+              />
+              <!-- Refs #633-4: 「差0件」と「その項目を比較できていない」を混同しない -->
+              <UAlert
+                v-if="fmtKintaiDiffMissingFieldsNote(gcpDiffSummary.missingFields)"
+                color="warning"
+                variant="soft"
+                class="mb-3"
+                icon="i-lucide-alert-triangle"
+                title="一部項目を比較していません"
+                :description="fmtKintaiDiffMissingFieldsNote(gcpDiffSummary.missingFields) ?? ''"
               />
 
               <div class="mb-3 text-xs text-gray-500">

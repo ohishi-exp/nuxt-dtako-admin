@@ -4,6 +4,7 @@ import {
   fmtKintaiDiffCacheHeadline,
   fmtKintaiDiffCount,
   fmtKintaiDiffLastVerified,
+  fmtKintaiDiffMissingFieldsNote,
   fmtKintaiRefreshMysqlGuarantee,
   foldProgressAppend,
   foldProgressInitial,
@@ -90,6 +91,48 @@ describe('parseKintaiDiffSummary', () => {
   it('capped を拾う', () => {
     const s = parseKintaiDiffSummary(diffBody({ diff: { ...diffBody().diff, only_gcp: { total: 600, capped: true } } }))
     expect(s?.onlyGcp).toEqual({ total: 600, capped: true })
+  })
+
+  // Refs #633-4: missing_fields (比較から除外した項目) の読み取り
+  it('missing_fields を読む (★ 実測: view=timecard でrest_minus_minutes等が欠ける)', () => {
+    const s = parseKintaiDiffSummary(
+      diffBody({ diff: { ...diffBody().diff, missing_fields: ['rest_minus_minutes', 'night_minutes'] } }),
+    )
+    expect(s?.missingFields).toEqual(['rest_minus_minutes', 'night_minutes'])
+  })
+
+  it('missing_fields が無い/配列でない応答は空配列に倒す (「差0件」の月と区別が付く)', () => {
+    expect(parseKintaiDiffSummary(diffBody())?.missingFields).toEqual([])
+    expect(
+      parseKintaiDiffSummary(diffBody({ diff: { ...diffBody().diff, missing_fields: 'not-an-array' } }))?.missingFields,
+    ).toEqual([])
+  })
+
+  it('missing_fields 内の非文字列は除く', () => {
+    const s = parseKintaiDiffSummary(
+      diffBody({ diff: { ...diffBody().diff, missing_fields: ['rest_minus_minutes', 123, null] } }),
+    )
+    expect(s?.missingFields).toEqual(['rest_minus_minutes'])
+  })
+})
+
+describe('fmtKintaiDiffMissingFieldsNote (Refs #633-4、「差0件」と「比較していない」を混同しない)', () => {
+  it('空配列なら null (正常な月にノイズを出さない)', () => {
+    expect(fmtKintaiDiffMissingFieldsNote([])).toBeNull()
+  })
+
+  it('★ 実測の項目名を含む注記文を作る', () => {
+    const note = fmtKintaiDiffMissingFieldsNote(['rest_minus_minutes'])
+    expect(note).toContain('rest_minus_minutes')
+    expect(note).toContain('比較していません')
+    // 「差0件」に含めていないことを明示する (断定の否定を混同しないよう明文化)
+    expect(note).toContain('差0件')
+  })
+
+  it('複数項目は区切って並べる', () => {
+    const note = fmtKintaiDiffMissingFieldsNote(['rest_minus_minutes', 'night_minutes'])
+    expect(note).toContain('rest_minus_minutes')
+    expect(note).toContain('night_minutes')
   })
 })
 

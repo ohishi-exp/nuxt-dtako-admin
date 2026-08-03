@@ -48,6 +48,11 @@ export interface KintaiDiffSummary {
   onlyOnpremOther: KintaiDiffCategoryCount
   valueDiffRestraintMatch: KintaiDiffCategoryCount
   valueDiffRestraintMismatch: KintaiDiffCategoryCount
+  /** 比較から除外した項目名 (Refs #633-4)。オンプレを `view=timecard` (項目を絞った
+   * 応答) で取ると一部項目がキーごと欠け、以前は欠損を0扱いして存在しない差を
+   * でっち上げていた (2026-06 実測: 26件中23件が偽陽性)。**非空なら「◯項目は
+   * 比較していません」と出すこと** — 「差0件」と「比較できていない」を混同しない。 */
+  missingFields: string[]
 }
 
 export function parseKintaiDiffSummary(raw: unknown): KintaiDiffSummary | null {
@@ -65,6 +70,9 @@ export function parseKintaiDiffSummary(raw: unknown): KintaiDiffSummary | null {
     onlyOnpremOther: toCategoryCount(diff.only_onprem_other),
     valueDiffRestraintMatch: toCategoryCount(diff.value_diff_restraint_match),
     valueDiffRestraintMismatch: toCategoryCount(diff.value_diff_restraint_mismatch),
+    missingFields: Array.isArray(diff.missing_fields)
+      ? diff.missing_fields.filter((f): f is string => typeof f === 'string')
+      : [],
   }
 }
 
@@ -93,6 +101,14 @@ export const KINTAI_DIFF_CATEGORIES: readonly KintaiDiffCategoryDef[] = [
 /** `total` を人が読める形にする。上限で切られていれば「500+」のように示す (黙って切らない)。 */
 export function fmtKintaiDiffCount(c: KintaiDiffCategoryCount): string {
   return c.capped ? `${c.total}+ (表示は500件まで)` : String(c.total)
+}
+
+/** `missingFields` が非空なら「◯項目は比較していません」の注記文を作る。空なら null
+ * (「比較していない」ことを毎回表示すると、正常な月にまでノイズが出るため)。
+ * 空の判定はしない — 呼び出し側が「差0件」と混同しないための土台に使うこと (Refs #633-4)。 */
+export function fmtKintaiDiffMissingFieldsNote(missingFields: string[]): string | null {
+  if (missingFields.length === 0) return null
+  return `${missingFields.join('、')} は比較していません (オンプレの応答にこの項目が無かったため — 「差0件」に含めていません)。`
 }
 
 // ─────────────────────────────────────────────────────────────────────────
