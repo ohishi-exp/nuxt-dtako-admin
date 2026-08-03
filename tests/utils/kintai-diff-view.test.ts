@@ -4,6 +4,7 @@ import {
   fmtKintaiDiffCacheHeadline,
   fmtKintaiDiffCount,
   fmtKintaiDiffLastVerified,
+  fmtKintaiDiffMissingFieldsNote,
   fmtKintaiRefreshMysqlGuarantee,
   foldProgressAppend,
   foldProgressInitial,
@@ -11,6 +12,8 @@ import {
   kintaiDiffHasAnyDiff,
   parseKintaiDiffApiResponse,
   parseKintaiDiffCacheState,
+  parseKintaiDiffComparedDays,
+  parseKintaiDiffDayCoverageFromResponse,
   parseKintaiDiffObservations,
   parseKintaiDiffSummary,
   parseKintaiDiffValueDiffItems,
@@ -88,6 +91,48 @@ describe('parseKintaiDiffSummary', () => {
   it('capped を拾う', () => {
     const s = parseKintaiDiffSummary(diffBody({ diff: { ...diffBody().diff, only_gcp: { total: 600, capped: true } } }))
     expect(s?.onlyGcp).toEqual({ total: 600, capped: true })
+  })
+
+  // Refs #633-4: missing_fields (比較から除外した項目) の読み取り
+  it('missing_fields を読む (★ 実測: view=timecard でrest_minus_minutes等が欠ける)', () => {
+    const s = parseKintaiDiffSummary(
+      diffBody({ diff: { ...diffBody().diff, missing_fields: ['rest_minus_minutes', 'night_minutes'] } }),
+    )
+    expect(s?.missingFields).toEqual(['rest_minus_minutes', 'night_minutes'])
+  })
+
+  it('missing_fields が無い/配列でない応答は空配列に倒す (「差0件」の月と区別が付く)', () => {
+    expect(parseKintaiDiffSummary(diffBody())?.missingFields).toEqual([])
+    expect(
+      parseKintaiDiffSummary(diffBody({ diff: { ...diffBody().diff, missing_fields: 'not-an-array' } }))?.missingFields,
+    ).toEqual([])
+  })
+
+  it('missing_fields 内の非文字列は除く', () => {
+    const s = parseKintaiDiffSummary(
+      diffBody({ diff: { ...diffBody().diff, missing_fields: ['rest_minus_minutes', 123, null] } }),
+    )
+    expect(s?.missingFields).toEqual(['rest_minus_minutes'])
+  })
+})
+
+describe('fmtKintaiDiffMissingFieldsNote (Refs #633-4、「差0件」と「比較していない」を混同しない)', () => {
+  it('空配列なら null (正常な月にノイズを出さない)', () => {
+    expect(fmtKintaiDiffMissingFieldsNote([])).toBeNull()
+  })
+
+  it('★ 実測の項目名を含む注記文を作る', () => {
+    const note = fmtKintaiDiffMissingFieldsNote(['rest_minus_minutes'])
+    expect(note).toContain('rest_minus_minutes')
+    expect(note).toContain('比較していません')
+    // 「差0件」に含めていないことを明示する (断定の否定を混同しないよう明文化)
+    expect(note).toContain('差0件')
+  })
+
+  it('複数項目は区切って並べる', () => {
+    const note = fmtKintaiDiffMissingFieldsNote(['rest_minus_minutes', 'night_minutes'])
+    expect(note).toContain('rest_minus_minutes')
+    expect(note).toContain('night_minutes')
   })
 })
 
@@ -820,5 +865,103 @@ describe('parseKintaiDiffValueDiffItemsFromResponse', () => {
   it('壊れた応答 (diff 自体が無い) でも空配列に倒す', () => {
     expect(parseKintaiDiffValueDiffItemsFromResponse(null)).toEqual({ match: [], mismatch: [] })
     expect(parseKintaiDiffValueDiffItemsFromResponse({})).toEqual({ match: [], mismatch: [] })
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────
+// compared_days / only_gcp / only_onprem_* の「日」単位の材料 (Refs #633-3)。
+// ★ #633-1 の no_diff (差分リストに無い=一致) が「突き合わせてすらいない日」を
+// 「一致」と誤読していたバグの修正で追加。compared_days は「比較できた日」であって
+// 「一致した日」ではない (kintai-diff-view.ts 冒頭・kintai-candidate-diff.ts の docs 参照)。
+// ─────────────────────────────────────────────────────────────────────────
+
+describe('parseKintaiDiffComparedDays', () => {
+  it('items をそのまま読む (capped も)', () => {
+    expect(parseKintaiDiffComparedDays({ total: 2, capped: false, items: ['1445|2026-06-24', '1740|2026-06-06'] }))
+      .toEqual({ keys: ['1445|2026-06-24', '1740|2026-06-06'], capped: false })
+    expect(parseKintaiDiffComparedDays({ total: 5000, capped: true, items: ['a'] }))
+      .toEqual({ keys: ['a'], capped: true })
+  })
+
+  it('items が配列でない (compared_days フィールド自体が応答に無い、古いキャッシュ想定) は null', () => {
+    expect(parseKintaiDiffComparedDays({})).toBeNull()
+    expect(parseKintaiDiffComparedDays({ total: 0, capped: false })).toBeNull()
+  })
+
+  it('raw が null/オブジェクトでなければ null', () => {
+    expect(parseKintaiDiffComparedDays(null)).toBeNull()
+    expect(parseKintaiDiffComparedDays('x')).toBeNull()
+  })
+
+  it('items 内の非文字列は除く', () => {
+    expect(parseKintaiDiffComparedDays({ items: ['1445|2026-06-24', 123, null] }).keys)
+      .toEqual(['1445|2026-06-24'])
+  })
+})
+
+describe('parseKintaiDiffDayCoverageFromResponse', () => {
+  it('★ issue #633 実例をそのまま読む: 1445は06-24のみcompared_days、06-25はonly_*にも無い', () => {
+    const raw = {
+      month: '2026-06',
+      diff: {
+        gcp_rows: 27,
+        onprem_rows: 27,
+        onprem_unreadable: false,
+        only_gcp: { total: 0, capped: false, items: [] },
+        only_onprem_driver0: { total: 0, capped: false, items: [] },
+        only_onprem_other: { total: 0, capped: false, items: [] },
+        value_diff_restraint_match: { total: 0, capped: false, items: [] },
+        value_diff_restraint_mismatch: { total: 0, capped: false, items: [] },
+        compared_days: { total: 1, capped: false, items: ['1445|2026-06-24'] },
+      },
+    }
+    const coverage = parseKintaiDiffDayCoverageFromResponse(raw)
+    expect(coverage.comparedDays).toEqual({ keys: ['1445|2026-06-24'], capped: false })
+    expect(coverage.onlyGcpDays).toEqual([])
+    expect(coverage.onlyOnpremDays).toEqual([])
+  })
+
+  it('only_gcp / only_onprem_driver0 / only_onprem_other の items から driverCd+date を抜く (onprem系はまとめる)', () => {
+    const raw = {
+      diff: {
+        only_gcp: { items: [{ driver_cd: '2001', date: '2026-06-01', start: '08:00', gcp: {} }] },
+        only_onprem_driver0: { items: [{ driver_cd: '0', date: '2026-06-02', start: '09:00', onprem: {} }] },
+        only_onprem_other: { items: [{ driver_cd: '2002', date: '2026-06-03', start: '09:00', onprem: {} }] },
+        compared_days: { items: [] },
+      },
+    }
+    const coverage = parseKintaiDiffDayCoverageFromResponse(raw)
+    expect(coverage.onlyGcpDays).toEqual([{ driverCd: '2001', date: '2026-06-01' }])
+    expect(coverage.onlyOnpremDays).toEqual([
+      { driverCd: '0', date: '2026-06-02' },
+      { driverCd: '2002', date: '2026-06-03' },
+    ])
+  })
+
+  it('driver_cd が数値でも読む (#630 と同型 — 文字列に決め打たない)', () => {
+    const raw = { diff: { only_gcp: { items: [{ driver_cd: 2001, date: '2026-06-01' }] }, compared_days: { items: [] } } }
+    expect(parseKintaiDiffDayCoverageFromResponse(raw).onlyGcpDays).toEqual([{ driverCd: '2001', date: '2026-06-01' }])
+  })
+
+  it('driver_cd/date が欠けた壊れた行は無視する', () => {
+    const raw = {
+      diff: {
+        only_gcp: { items: [{ date: '2026-06-01' }, { driver_cd: '1' }, null, 'x'] },
+        compared_days: { items: [] },
+      },
+    }
+    expect(parseKintaiDiffDayCoverageFromResponse(raw).onlyGcpDays).toEqual([])
+  })
+
+  it('compared_days が応答に無い (古いキャッシュ・壊れた応答) なら comparedDays: null (「未確認」に倒す合図)', () => {
+    const raw = { diff: { only_gcp: { items: [] } } }
+    expect(parseKintaiDiffDayCoverageFromResponse(raw).comparedDays).toBeNull()
+  })
+
+  it('壊れた応答 (diff 自体が無い) でも例外を投げず空扱いにする', () => {
+    const coverage = parseKintaiDiffDayCoverageFromResponse(null)
+    expect(coverage.comparedDays).toBeNull()
+    expect(coverage.onlyGcpDays).toEqual([])
+    expect(coverage.onlyOnpremDays).toEqual([])
   })
 })

@@ -48,6 +48,11 @@ export interface KintaiDiffSummary {
   onlyOnpremOther: KintaiDiffCategoryCount
   valueDiffRestraintMatch: KintaiDiffCategoryCount
   valueDiffRestraintMismatch: KintaiDiffCategoryCount
+  /** 比較から除外した項目名 (Refs #633-4)。オンプレを `view=timecard` (項目を絞った
+   * 応答) で取ると一部項目がキーごと欠け、以前は欠損を0扱いして存在しない差を
+   * でっち上げていた (2026-06 実測: 26件中23件が偽陽性)。**非空なら「◯項目は
+   * 比較していません」と出すこと** — 「差0件」と「比較できていない」を混同しない。 */
+  missingFields: string[]
 }
 
 export function parseKintaiDiffSummary(raw: unknown): KintaiDiffSummary | null {
@@ -65,6 +70,9 @@ export function parseKintaiDiffSummary(raw: unknown): KintaiDiffSummary | null {
     onlyOnpremOther: toCategoryCount(diff.only_onprem_other),
     valueDiffRestraintMatch: toCategoryCount(diff.value_diff_restraint_match),
     valueDiffRestraintMismatch: toCategoryCount(diff.value_diff_restraint_mismatch),
+    missingFields: Array.isArray(diff.missing_fields)
+      ? diff.missing_fields.filter((f): f is string => typeof f === 'string')
+      : [],
   }
 }
 
@@ -93,6 +101,14 @@ export const KINTAI_DIFF_CATEGORIES: readonly KintaiDiffCategoryDef[] = [
 /** `total` を人が読める形にする。上限で切られていれば「500+」のように示す (黙って切らない)。 */
 export function fmtKintaiDiffCount(c: KintaiDiffCategoryCount): string {
   return c.capped ? `${c.total}+ (表示は500件まで)` : String(c.total)
+}
+
+/** `missingFields` が非空なら「◯項目は比較していません」の注記文を作る。空なら null
+ * (「比較していない」ことを毎回表示すると、正常な月にまでノイズが出るため)。
+ * 空の判定はしない — 呼び出し側が「差0件」と混同しないための土台に使うこと (Refs #633-4)。 */
+export function fmtKintaiDiffMissingFieldsNote(missingFields: string[]): string | null {
+  if (missingFields.length === 0) return null
+  return `${missingFields.join('、')} は比較していません (オンプレの応答にこの項目が無かったため — 「差0件」に含めていません)。`
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -624,6 +640,86 @@ export function parseKintaiDiffValueDiffItemsFromResponse(raw: unknown): KintaiD
   return {
     match: parseKintaiDiffValueDiffItems(diff.value_diff_restraint_match),
     mismatch: parseKintaiDiffValueDiffItems(diff.value_diff_restraint_mismatch),
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// compared_days / only_gcp / only_onprem_* の「日」単位の材料 (Refs #633-3)。
+//
+// ★ #633-1 の `no_diff` (差分リストに無い=一致) は、実は「突き合わせてすらいない日」
+// (運行の開始日と、折り畳んだ勤務の暦日がずれる日跨ぎ勤務、1445/2026-06-25 の実例) を
+// 「一致」と誤読していたバグの原因そのもの (親の実測、2026-08-04)。ここで読む
+// `compared_days` は「両側に行があった日」であって「一致した日」ではない —
+// 値が一致していても違っていても入る (`kintai-diff.ts` の `KintaiDiffResult.compared_days`
+// docs 参照)。この区別を読み替えないこと。
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface KintaiDiffComparedDays {
+  /** 「乗務員CD|暦日」の生キー (relay 側の driver_cd をそのまま、前ゼロ等は未正規化)。 */
+  keys: string[]
+  capped: boolean
+}
+
+/** `diff.compared_days` (`{total, capped, items}`) を読む。`items` が配列でない
+ * (`compared_days` フィールド自体が応答に無い、古いキャッシュ・将来の形変更) 場合は
+ * `null` — 呼び出し側は「未確認」(判別できない) として扱うこと。 */
+export function parseKintaiDiffComparedDays(raw: unknown): KintaiDiffComparedDays | null {
+  if (raw == null || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  if (!Array.isArray(r.items)) return null
+  return {
+    keys: r.items.filter((x): x is string => typeof x === 'string'),
+    capped: r.capped === true,
+  }
+}
+
+export interface KintaiDiffDayRow {
+  driverCd: string
+  date: string
+}
+
+/** `only_gcp` / `only_onprem_driver0` / `only_onprem_other` の items から
+ * 「乗務員CD + 暦日」だけを抜く (開始時刻・分数の値は捨てる)。 */
+function parseKintaiDiffDayRows(raw: unknown): KintaiDiffDayRow[] {
+  const r = (raw ?? {}) as Record<string, unknown>
+  const items = Array.isArray(r.items) ? r.items : []
+  const out: KintaiDiffDayRow[] = []
+  for (const item of items) {
+    if (item == null || typeof item !== 'object') continue
+    const o = item as Record<string, unknown>
+    const driverCd = typeof o.driver_cd === 'string'
+      ? o.driver_cd
+      : typeof o.driver_cd === 'number' && Number.isFinite(o.driver_cd)
+        ? String(o.driver_cd)
+        : null
+    if (driverCd === null || typeof o.date !== 'string') continue
+    out.push({ driverCd, date: o.date })
+  }
+  return out
+}
+
+export interface KintaiDiffDayCoverageRaw {
+  /** `null` は `compared_days` が応答に無い/壊れている (「未確認」に倒すこと)。 */
+  comparedDays: KintaiDiffComparedDays | null
+  onlyGcpDays: KintaiDiffDayRow[]
+  /** `only_onprem_driver0` (乗務員CD=0) + `only_onprem_other` をまとめたもの。 */
+  onlyOnpremDays: KintaiDiffDayRow[]
+}
+
+/** ライブ `/kintai/diff` の生応答から、`day_absent`/`one_sided` 判定に要る
+ * 「日」単位の材料をまとめて読む (Refs #633-3)。value-diff items と同じく
+ * **ライブ応答にしか無い** — キャッシュ応答 (`/kintai/diff-cache`) を渡しても
+ * `comparedDays: null` になるだけで落ちない。 */
+export function parseKintaiDiffDayCoverageFromResponse(raw: unknown): KintaiDiffDayCoverageRaw {
+  const r = (raw ?? {}) as Record<string, unknown>
+  const diff = (r.diff ?? {}) as Record<string, unknown>
+  return {
+    comparedDays: parseKintaiDiffComparedDays(diff.compared_days),
+    onlyGcpDays: parseKintaiDiffDayRows(diff.only_gcp),
+    onlyOnpremDays: [
+      ...parseKintaiDiffDayRows(diff.only_onprem_driver0),
+      ...parseKintaiDiffDayRows(diff.only_onprem_other),
+    ],
   }
 }
 

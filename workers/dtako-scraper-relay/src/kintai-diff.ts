@@ -31,23 +31,53 @@ export const KINTAI_DIFF_MINUTE_FIELDS = [
 
 export type KintaiDiffMinuteField = (typeof KINTAI_DIFF_MINUTE_FIELDS)[number];
 
-/** 突合 1 行の値 (両側とも同じ形に揃えて持つ)。 */
+/** 突合 1 行の値 (両側とも同じ形に揃えて持つ)。**欠けていた項目も 0 に倒して持つ** —
+ * 値そのものだけでは「0 分だった」と「項目自体が応答に無かった」が区別できないため、
+ * 区別が要る場所 ([`KintaiDiffValueEntry`] の `presentFields`) は別で持つ。 */
 export type KintaiDiffValue = { shift_source: unknown } & Record<KintaiDiffMinuteField, number>;
+
+/**
+ * 突合 1 行ぶん (Refs #633-4)。`value` に加えて、**その行の元応答に実際にキーが
+ * 存在した項目**を `presentFields` として持つ。
+ *
+ * ★★ これが要る理由 (親の実測で確定した本番バグ、2026-08-04): オンプレの
+ * `kosoku-daily` を `view=timecard` (項目を絞った slim 応答) で取ると、
+ * `rest_minus_minutes` 等 5 項目が応答に**キーごと存在しない**。以前はここを
+ * `toNumberOr0` で無条件に 0 に倒しており、GCP 側の実値 (非0) と食い違って
+ * 「値が違う」を大量に誤検出していた (2026-06 実測: 26件中23件がこの偽陽性)。
+ * **「項目が無い」と「値が0」を区別しないと、絞った応答を渡された瞬間に
+ * 存在しない差をでっち上げる** — この型と `presentFields` はその再発防止。
+ */
+export interface KintaiDiffValueEntry {
+  value: KintaiDiffValue;
+  presentFields: Set<KintaiDiffMinuteField>;
+}
 
 function toNumberOr0(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
 }
 
+/** `r` に実際にキーが存在した分数項目だけを集める (値の妥当性は問わない —
+ * 「キーが応答に無い」ことだけを見る。値が壊れている場合は `toNumberOr0` 側の
+ * 既存の防御 (0 に倒す) に任せ、ここでは「存在した」扱いにする)。 */
+function presentMinuteFields(r: Record<string, unknown>): Set<KintaiDiffMinuteField> {
+  const out = new Set<KintaiDiffMinuteField>();
+  for (const f of KINTAI_DIFF_MINUTE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(r, f)) out.add(f);
+  }
+  return out;
+}
+
 /** GCP `day_summaries` の `{summaries: {key: {...}}}` を突合用の Map にする。 */
-export function gcpSummariesToMap(body: unknown): Map<string, KintaiDiffValue> {
-  const out = new Map<string, KintaiDiffValue>();
+export function gcpSummariesToMap(body: unknown): Map<string, KintaiDiffValueEntry> {
+  const out = new Map<string, KintaiDiffValueEntry>();
   const summaries = (body as { summaries?: unknown } | null)?.summaries;
   if (!summaries || typeof summaries !== "object") return out;
   for (const [key, raw] of Object.entries(summaries as Record<string, unknown>)) {
     const r = raw as Record<string, unknown>;
     const value = { shift_source: r.shift_source } as KintaiDiffValue;
     for (const f of KINTAI_DIFF_MINUTE_FIELDS) value[f] = toNumberOr0(r[f]);
-    out.set(key, value);
+    out.set(key, { value, presentFields: presentMinuteFields(r) });
   }
   return out;
 }
@@ -55,14 +85,14 @@ export function gcpSummariesToMap(body: unknown): Map<string, KintaiDiffValue> {
 /** [onpremKosokuDailyToMap] の結果。読めたかどうかを Map の中身から切り離して持つ
  * (空 Map だけでは「本当に 0 行」と「形が読めなかった」の区別が付かないため)。 */
 export interface OnpremParseResult {
-  map: Map<string, KintaiDiffValue>;
+  map: Map<string, KintaiDiffValueEntry>;
   /** `drivers` 配列 (全乗務員形) にも `days` 配列 (driver 指定形) にも当てはまらなかった。 */
   unreadable: boolean;
 }
 
 /** `days` 配列 1 人ぶんを `driver` 引きのキーで Map に足す (両形式で共有)。
  * **`punches` / `parts` はここで捨てる** — 突合に要るのは 11 分数 + `source` + キー 3 つだけ。 */
-function addOnpremDriverDays(out: Map<string, KintaiDiffValue>, driver: unknown, days: unknown[]): void {
+function addOnpremDriverDays(out: Map<string, KintaiDiffValueEntry>, driver: unknown, days: unknown[]): void {
   for (const day of days) {
     const r = day as Record<string, unknown>;
     const date = r.date;
@@ -71,7 +101,7 @@ function addOnpremDriverDays(out: Map<string, KintaiDiffValue>, driver: unknown,
     const key = `${driver}|${date}|${start}`;
     const value = { shift_source: r.source } as KintaiDiffValue;
     for (const f of KINTAI_DIFF_MINUTE_FIELDS) value[f] = toNumberOr0(r[f]);
-    out.set(key, value);
+    out.set(key, { value, presentFields: presentMinuteFields(r) });
   }
 }
 
@@ -90,7 +120,7 @@ function addOnpremDriverDays(out: Map<string, KintaiDiffValue>, driver: unknown,
  * 呼び出し側から区別できず、両側に在る行まで `only_gcp` に化ける (#599)。
  */
 export function onpremKosokuDailyToMap(body: unknown, requestedDriver?: string): OnpremParseResult {
-  const out = new Map<string, KintaiDiffValue>();
+  const out = new Map<string, KintaiDiffValueEntry>();
   const b = (body ?? {}) as { drivers?: unknown; driver?: unknown; days?: unknown };
   if (Array.isArray(b.drivers)) {
     for (const d of b.drivers) {
@@ -124,6 +154,10 @@ function keyToRow(key: string): { driver_cd: string; date: string; start: string
 /** カテゴリごとの上限。get_kintai_diff / get_rest_diff と同じ既定に揃えた。 */
 export const KINTAI_DIFF_MAX_ITEMS = 500;
 
+/** `compared_days` (Refs #633-3) だけの上限。他カテゴリより緩い — 「乗務員CD|暦日」
+ * だけの軽い文字列で、値差カテゴリの行 (gcp/onprem の11分数を持つ) より1件が軽いため。 */
+export const KINTAI_DIFF_COMPARED_DAYS_MAX_ITEMS = 4000;
+
 export interface CappedCategory<T> {
   /** 切る前の総数。 */
   total: number;
@@ -132,12 +166,13 @@ export interface CappedCategory<T> {
   items: T[];
 }
 
-/** 1 カテゴリぶんを `KINTAI_DIFF_MAX_ITEMS` で切り、`total`/`capped` を添えて返す。黙って切らない。 */
-function capCategory<T>(items: T[]): CappedCategory<T> {
+/** 1 カテゴリぶんを `limit` (既定 `KINTAI_DIFF_MAX_ITEMS`) で切り、`total`/`capped` を
+ * 添えて返す。黙って切らない。 */
+function capCategory<T>(items: T[], limit: number = KINTAI_DIFF_MAX_ITEMS): CappedCategory<T> {
   return {
     total: items.length,
-    capped: items.length > KINTAI_DIFF_MAX_ITEMS,
-    items: items.slice(0, KINTAI_DIFF_MAX_ITEMS),
+    capped: items.length > limit,
+    items: items.slice(0, limit),
   };
 }
 
@@ -175,11 +210,38 @@ export interface KintaiDiffResult {
   value_diff_restraint_match: CappedCategory<KintaiDiffValueDiffRow>;
   /** `restraint_minutes` も違う。 */
   value_diff_restraint_mismatch: CappedCategory<KintaiDiffValueDiffRow>;
+  /**
+   * 両側に行があった「乗務員CD|暦日」(開始時刻は落として重複除去・ソート、Refs #633-3)。
+   *
+   * ★ 「比較できた日」であって「一致した日」ではない — 値が一致していても違って
+   * いても、両側に行があれば入る (`value_diff_restraint_match`/`mismatch` に出た行も
+   * 含む)。**この区別を front 側で読み替えないこと** — #633-1 の `no_diff` (差分
+   * リストに無い=一致) は、実は「突き合わせてすらいない日」(日跨ぎ勤務で運行の
+   * 開始日と勤務の暦日がずれる、1445/2026-06-25 の実例) を「一致」と誤読していた
+   * バグの原因そのもの。ここに無い日は「一致」でも「不一致」でもなく「比較して
+   * いない」という意味に front 側で扱うこと。
+   */
+  compared_days: CappedCategory<string>;
+  /**
+   * 比較から除外した項目名 (Refs #633-4)。両側のどちらかの行にキー自体が
+   * 存在しなかった項目 — オンプレを `view=timecard` (項目を絞った応答) で取ると
+   * `rest_minus_minutes` 等が丸ごと欠ける実例がある。**「差 0 件」と「比較できて
+   * いない」を混同しないための一覧**であって、値の欠損を 0 と見なして差に数える
+   * ことは絶対にしない (親指摘: 2026-06 実測で「値が違う」26件中23件がこの偽陽性
+   * だった)。front はこれが非空なら「◯項目は比較していません」と出すこと。
+   */
+  missing_fields: KintaiDiffMinuteField[];
 }
 
 /**
- * `乗務員CD|暦日|開始時刻` キーで突き合わせ、get_kintai_diff と同じ 5 区分に分ける。
- * 値が完全一致する行はどのカテゴリにも出さない (差が無いので報告不要)。
+ * `乗務員CD|暦日|開始時刻` キーで突き合わせ、get_kintai_diff と同じ 5 区分 +
+ * `compared_days` に分ける。値が完全一致する行はどのカテゴリにも出さない
+ * (差が無いので報告不要) が、`compared_days` には**一致していても**入れる
+ * (「比較できたか」を表すため、Refs #633-3)。
+ *
+ * ★ 項目ごとに**両側で応答にキーが存在した場合だけ**比較する (Refs #633-4)。
+ * 片側にしか無い項目は比較から除外し `missing_fields` に積む — 欠損を 0 として
+ * 扱って存在しない差をでっち上げないため。
  */
 export function buildKintaiDiff(gcpBody: unknown, onpremBody: unknown, requestedDriver?: string): KintaiDiffResult {
   const gcp = gcpSummariesToMap(gcpBody);
@@ -191,23 +253,41 @@ export function buildKintaiDiff(gcpBody: unknown, onpremBody: unknown, requested
   const onlyOnpremOther: Array<KintaiDiffRow & { onprem: KintaiDiffValue }> = [];
   const restraintMatch: KintaiDiffValueDiffRow[] = [];
   const restraintMismatch: KintaiDiffValueDiffRow[] = [];
+  const comparedDays = new Set<string>();
+  const missingFields = new Set<KintaiDiffMinuteField>();
 
   for (const [key, g] of gcp) {
     const o = onprem.get(key);
     const row = keyToRow(key);
     if (!o) {
-      onlyGcp.push({ ...row, gcp: g });
+      onlyGcp.push({ ...row, gcp: g.value });
       continue;
     }
-    const diffFields = KINTAI_DIFF_MINUTE_FIELDS.filter((f) => g[f] !== o[f]);
+    comparedDays.add(`${row.driver_cd}|${row.date}`);
+
+    const diffFields: KintaiDiffMinuteField[] = [];
+    for (const f of KINTAI_DIFF_MINUTE_FIELDS) {
+      const gHas = g.presentFields.has(f);
+      const oHas = o.presentFields.has(f);
+      if (!gHas || !oHas) {
+        missingFields.add(f);
+        continue;
+      }
+      if (g.value[f] !== o.value[f]) diffFields.push(f);
+    }
     if (diffFields.length === 0) continue;
-    const bucket = g.restraint_minutes === o.restraint_minutes ? restraintMatch : restraintMismatch;
-    bucket.push({ ...row, diff_fields: diffFields, gcp: g, onprem: o });
+
+    const restraintComparable = g.presentFields.has("restraint_minutes") && o.presentFields.has("restraint_minutes");
+    const bucket =
+      restraintComparable && g.value.restraint_minutes === o.value.restraint_minutes
+        ? restraintMatch
+        : restraintMismatch;
+    bucket.push({ ...row, diff_fields: diffFields, gcp: g.value, onprem: o.value });
   }
   for (const [key, o] of onprem) {
     if (gcp.has(key)) continue;
     const row = keyToRow(key);
-    (driverOfKey(key) === "0" ? onlyOnpremDriver0 : onlyOnpremOther).push({ ...row, onprem: o });
+    (driverOfKey(key) === "0" ? onlyOnpremDriver0 : onlyOnpremOther).push({ ...row, onprem: o.value });
   }
 
   return {
@@ -219,6 +299,8 @@ export function buildKintaiDiff(gcpBody: unknown, onpremBody: unknown, requested
     only_onprem_other: capCategory(onlyOnpremOther),
     value_diff_restraint_match: capCategory(restraintMatch),
     value_diff_restraint_mismatch: capCategory(restraintMismatch),
+    compared_days: capCategory([...comparedDays].sort(), KINTAI_DIFF_COMPARED_DAYS_MAX_ITEMS),
+    missing_fields: [...missingFields].sort(),
   };
 }
 
@@ -350,6 +432,11 @@ export interface KintaiDiffCacheSnapshot {
     only_onprem_other: KintaiDiffCachedCategory;
     value_diff_restraint_match: KintaiDiffCachedCategory;
     value_diff_restraint_mismatch: KintaiDiffCachedCategory;
+    /** Refs #633-4。`onprem_unreadable` と同じ扱いで保存する — 「差 0 件」の
+     * 保存済みスナップショットが実は項目を比較できていなかった、という状態を
+     * キャッシュだけ読む画面でも隠さないため (件数の小さい配列なので `items` の
+     * ような容量都合の除外対象ではない)。 */
+    missing_fields: KintaiDiffMinuteField[];
   };
   observations: KintaiDiffObservations | null;
   observations_error: string | null;
@@ -374,6 +461,7 @@ export function buildKintaiDiffCacheSnapshot(
       only_onprem_other: toCachedCategory(diff.only_onprem_other),
       value_diff_restraint_match: toCachedCategory(diff.value_diff_restraint_match),
       value_diff_restraint_mismatch: toCachedCategory(diff.value_diff_restraint_mismatch),
+      missing_fields: diff.missing_fields,
     },
     observations,
     observations_error: observationsError,
@@ -424,6 +512,13 @@ export function parseKintaiDiffCacheSnapshot(raw: unknown): KintaiDiffCacheSnaps
   if (typeof d.gcp_rows !== "number" || typeof d.onprem_rows !== "number" || typeof d.onprem_unreadable !== "boolean") {
     return null;
   }
+  // ★ 保存時に missing_fields が無かった旧スナップショット (#633-4 より前) は
+  // 「読めなかった」にはせず空配列に倒す — 旧形式を丸ごと unreadable 扱いにすると
+  // 直前まで見えていた保存分が急に消える (Refs #620-3 と同じ「古い値を黙って
+  // 消さない」方針)。
+  const missingFields = Array.isArray(d.missing_fields)
+    ? d.missing_fields.filter((f): f is KintaiDiffMinuteField => typeof f === "string" && (KINTAI_DIFF_MINUTE_FIELDS as readonly string[]).includes(f))
+    : [];
   return {
     month: r.month,
     diff: {
@@ -435,6 +530,7 @@ export function parseKintaiDiffCacheSnapshot(raw: unknown): KintaiDiffCacheSnaps
       only_onprem_other: onlyOnpremOther,
       value_diff_restraint_match: valueDiffMatch,
       value_diff_restraint_mismatch: valueDiffMismatch,
+      missing_fields: missingFields,
     },
     observations: r.observations != null ? parseCachedObservations(r.observations) : null,
     observations_error: typeof r.observations_error === "string" ? r.observations_error : null,

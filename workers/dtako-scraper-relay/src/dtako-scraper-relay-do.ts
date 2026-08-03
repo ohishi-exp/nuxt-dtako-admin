@@ -3936,8 +3936,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (ctx instanceof Response) return ctx;
     const { deps, creds } = ctx;
 
+    // ★ fetchKosokuRaw (view=timecard、slim) ではなく fetchKosokuRawFull (全項目版)
+    // を使う — 突合は11分数を全部比較するため、項目を絞った応答を渡すと欠損を
+    // 0扱いして存在しない差をでっち上げる (Refs #633-4、親の実測で確定)。
     const [onpremBody, gcpResult] = await Promise.all([
-      this.fetchKosokuRaw(creds.apiUrl, creds.clientId, creds.clientSecret, ym),
+      this.fetchKosokuRawFull(creds.apiUrl, creds.clientId, creds.clientSecret, ym),
       relayKintaiDaySummaries(deps, { month: ym }).catch((err) => (err instanceof Error ? err : new Error(String(err)))),
     ]);
     if (onpremBody == null) return dvrJsonError(502, "拘束サマリ API の取得に失敗しました");
@@ -4890,10 +4893,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       for (const ym of months) {
         this.kintaiUpstreamMemo.delete(`daily:${ym}`);
         this.kintaiUpstreamMemo.delete(`kosoku-raw:${ym}`);
+        // ★ Refs #633-4: 全項目版 (kintai/diff 用) の memo/永続キャッシュも同時に
+        // 落とす。これを忘れると、取り込み直後でも /kintai/diff だけ古いオンプレ
+        // 応答を配り続ける (slim 側だけ最新になり、突合結果とズレる)。
+        this.kintaiUpstreamMemo.delete(`kosoku-raw-full:${ym}`);
         this.kintaiUpstreamMemo.delete(`kintai-version:${ym}`);
         if (cache) {
           await cache.delete("daily", ym);
           await cache.delete("kosoku", ym);
+          await cache.delete("kosoku-full", ym);
         }
       }
       console.log(JSON.stringify({ upstream_cache: "invalidated", reason, months, owner: Boolean(cache) }));
@@ -5123,6 +5131,76 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         return JSON.parse(text) as unknown;
       } catch (err) {
         console.error(JSON.stringify({ kosoku_raw: "error", ym, error: describeUnknownError(err) }));
+        return null;
+      }
+    });
+  }
+
+  /**
+   * `kosoku-daily` の上流生応答を**全項目版** (`view` 省略) で月単位 memo する
+   * (Refs #633-4)。`fetchKosokuRaw` (`view=timecard`、画面経路の減量用) とは
+   * **別物** — `/kintai/diff` (オンプレ⇔GCP突合) だけがこちらを使う。
+   *
+   * ★★ 分ける理由 (親の実測で確定した本番バグ、2026-08-04): `view=timecard` は
+   * `rest_minus_minutes` 等 5 項目をキーごと欠く。突合は11分数を全部比較するため、
+   * slim 応答を渡すと欠損を0扱いして存在しない差をでっち上げる (2026-06 実測:
+   * 「値が違う」26件中23件がこの偽陽性だった)。
+   *
+   * `memoKintaiUpstream` のキー (`kosoku-raw-full:${ym}`) と DO SQLite 永続キャッシュ
+   * の `CacheKind` (`"kosoku-full"`) を、どちらも `fetchKosokuRaw` の slim 経路
+   * (`kosoku-raw:${ym}` / `"kosoku"`) と別にする — 混ぜると、他方の呼び出し
+   * (wage-report / `/kintai/kosoku-daily` 中継) の memo/キャッシュと入れ替わって
+   * 配信される事故になる。
+   *
+   * 取れなければ null (memo されず次回再試行)。
+   */
+  private fetchKosokuRawFull(
+    apiUrl: string,
+    clientId: string,
+    clientSecret: string,
+    ym: string,
+    timer?: PhaseTimer,
+    phase?: string,
+    versionPhase?: string,
+    tracker?: CacheStateTracker,
+    cache?: UpstreamCacheClient | null,
+  ): Promise<unknown> {
+    return this.memoKintaiUpstream(`kosoku-raw-full:${ym}`, async () => {
+      const text = await this.loadKintaiTextWithCache({
+        kind: "kosoku-full",
+        ym,
+        apiUrl,
+        clientId,
+        clientSecret,
+        timer,
+        phase,
+        versionPhase,
+        tracker,
+        cache,
+        fetchLive: async () => {
+          try {
+            const upstream = await fetch(
+              `${apiUrl}/api/kintai/kosoku-daily?month=${encodeURIComponent(ym)}`,
+              { headers: { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret } },
+            );
+            if (!upstream.ok) {
+              console.error(JSON.stringify({ kosoku_raw_full: "upstream-error", ym, status: upstream.status }));
+              return null;
+            }
+            const t = await upstream.text();
+            if (timer && phase) timer.setBytes(phase, t.length);
+            return t;
+          } catch (err) {
+            console.error(JSON.stringify({ kosoku_raw_full: "error", ym, error: describeUnknownError(err) }));
+            return null;
+          }
+        },
+      });
+      if (text === null) return null;
+      try {
+        return JSON.parse(text) as unknown;
+      } catch (err) {
+        console.error(JSON.stringify({ kosoku_raw_full: "error", ym, error: describeUnknownError(err) }));
         return null;
       }
     });
