@@ -124,6 +124,13 @@ export default {
       return handleDtakoReimport(request, env);
     }
 
+    if (url.pathname === "/kintai-relay/dtako-alc-upload" && request.method === "POST") {
+      // ① zip 取得 (自前ログイン) → ② alc `/api/upload` 投入を運行1件で完結させる
+      // (Refs #633-7)。**同期。** `/kintai-relay/dtako-reimport` (オンプレ autoload
+      // 向け) と対になる書き込み経路 — 投入先が alc なので unko_no は不要
+      return handleDtakoAlcUpload(request, env);
+    }
+
     if (url.pathname === "/kintai-relay/restraint-sync" && request.method === "POST") {
       // 拘束サマリの写し (R2 kintai/ prefix) を無人で押し直す (Refs #606-6)。
       // 画面の「取り込み」ボタン (POST /restraint-api/kintai/fetch) と同じ処理を
@@ -596,6 +603,61 @@ async function handleDtakoReimport(request: Request, env: RelayWorkerEnv): Promi
       unko_no: unkoNo,
       reset_timecard: body.reset_timecard === true,
     }),
+  });
+  // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
+  return new Response(res.body, {
+    status: res.status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * `POST /kintai-relay/dtako-alc-upload` — 運行 1 件の csvdata.zip を**自前ログイン**
+ * で取り、rust-alc-api の `POST /api/upload` へそのまま投入する (Refs #633-7)。
+ *
+ * body は `{ope_no, start_ope, comp_id?}`。**`ope_no`/`start_ope` は必須。**
+ * `unko_no` は不要 — `/api/upload` は zip 内の KUDGURI.csv から読むため URL に
+ * 載せる必要が無い (`/kintai-relay/dtako-reimport` = オンプレ autoload 向けとの違い)。
+ *
+ * **同期で返す。** entries (zip 内ファイル名) と alc の応答 (upload_id/split の
+ * 未確定注記) をその場で見られるようにする — `/kintai-relay/dtako-reimport` と
+ * 同じ型。
+ *
+ * 認証・tenant フォールバックは `/kintai-relay/operation-zip` と同じ
+ * (`X-Alc-Proxy-Secret` の constant-time 検証、`comp_id` 省略時は `KINTAI_COMP_ID`)。
+ */
+async function handleDtakoAlcUpload(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  let body: { ope_no?: unknown; start_ope?: unknown; comp_id?: unknown };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return fail(400, "body must be JSON");
+  }
+  const opeNo = typeof body.ope_no === "string" ? body.ope_no : "";
+  const startOpe = typeof body.start_ope === "string" ? body.start_ope : "";
+  if (!opeNo || !startOpe) {
+    return fail(400, "ope_no / start_ope は必須です");
+  }
+  const compId =
+    (typeof body.comp_id === "string" && body.comp_id.trim()) || (env.KINTAI_COMP_ID ?? "").trim();
+  if (!compId) return fail(503, "comp_id が解決できません");
+
+  const id = env.RELAY.idFromName(`scraper-comp-${compId}`);
+  const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/dtako/alc-upload", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ comp_id: compId, ope_no: opeNo, start_ope: startOpe }),
   });
   // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
   return new Response(res.body, {

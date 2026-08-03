@@ -71,6 +71,11 @@ import {
   runDtakoReimport as runDtakoReimportPure,
   type DtakoReimportDeps,
 } from "./dtako-reimport";
+import {
+  DtakoAlcUploadError,
+  runDtakoAlcUpload as runDtakoAlcUploadPure,
+  type DtakoAlcUploadDeps,
+} from "./dtako-alc-upload";
 import { pickOnpremUnkoNoFromDayEvents } from "./dtako-day-events-lookup";
 import {
   clearRunningPointer,
@@ -718,6 +723,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // /kintai-relay/dtako-reimport 側 (X-Alc-Proxy-Secret) が持つ。
     if (url.pathname === "/cron/dtako/reimport" && request.method === "POST") {
       return this.handleCronDtakoReimport(request);
+    }
+    // ① zip 取得 (自前ログイン) → ② alc 投入 (`/api/upload`) を運行1件で完結させる
+    // (Refs #633-7)。`handleCronDtakoReimport` (オンプレ autoload 向け) と対だが、
+    // 投入先が alc なので unko_no は要らない (`/api/upload` は zip 内の
+    // KUDGURI.csv から読む)。書き込み (取り込み) を伴うので `scrapeQueue` で直列化。
+    // 認証は index.ts の /kintai-relay/dtako-alc-upload 側 (X-Alc-Proxy-Secret) が持つ。
+    if (url.pathname === "/cron/dtako/alc-upload" && request.method === "POST") {
+      return this.handleCronDtakoAlcUpload(request);
     }
     if (url.pathname === "/cron/etc" && request.method === "POST") {
       return this.handleCronEtc(request);
@@ -1435,6 +1448,130 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         err instanceof TheearthClientError ? err.message : `dtako reimport に失敗しました (${describeUnknownError(err)})`;
       console.error(
         JSON.stringify({ dtako_reimport: "failed", comp_id: account.comp_id, unko_no: input.unkoNo, message }),
+      );
+      return Response.json({ error: message }, { status: 502 });
+    }
+  }
+
+  /**
+   * POST /cron/dtako/alc-upload — body {comp_id, ope_no, start_ope}。運行 1 件の
+   * csvdata.zip を**自前ログイン**で取得し、rust-alc-api の `POST /api/upload`
+   * (`alc-internal-upload.ts` の `uploadDtakoZipViaAlcInternalProxy`、
+   * `runCronDtakoScrape` が読取日ぶん全部で使うのと同じ経路) へ**運行1件だけ**で
+   * 投入する (Refs #633-7)。
+   *
+   * `handleCronDtakoReimport` (オンプレ autoload 向け) と対になる — こちらは
+   * `unko_no` が要らない (`/api/upload` は zip 内の KUDGURI.csv から unko_no を
+   * 読むため URL に載せる必要が無い)。中身を先に確認したいだけなら、この口を
+   * 叩く前に既存の read-only な `POST /cron/dtako/operation-zip` を使うこと
+   * (`runDtakoAlcUploadPure` の module doc 参照 — この route に preview は無い)。
+   */
+  private async handleCronDtakoAlcUpload(request: Request): Promise<Response> {
+    let body: { comp_id?: unknown; ope_no?: unknown; start_ope?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return Response.json({ error: "JSON body が必要です" }, { status: 400 });
+    }
+    const compId = typeof body.comp_id === "string" ? body.comp_id : "";
+    const opeNo = typeof body.ope_no === "string" ? body.ope_no : "";
+    const startOpe = typeof body.start_ope === "string" ? body.start_ope : "";
+    if (!compId || !opeNo || !startOpe) {
+      return Response.json({ error: "comp_id / ope_no / start_ope が必要です" }, { status: 400 });
+    }
+
+    const account = await this.resolveAccount(compId);
+    if (!account) {
+      return Response.json({ error: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
+    }
+
+    const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
+    if (!sharedSecret) {
+      return Response.json(
+        { error: "INTERNAL_SHARED_SECRET 未設定のため alc へ投入できません" },
+        { status: 503 },
+      );
+    }
+
+    return this.enqueueScrape(() => this.runDtakoAlcUploadJob(account, { opeNo, startOpe }, sharedSecret));
+  }
+
+  private async runDtakoAlcUploadJob(
+    account: DtakoAccountRaw,
+    input: { opeNo: string; startOpe: string },
+    sharedSecret: string,
+  ): Promise<Response> {
+    const deps: DtakoAlcUploadDeps = {
+      fetchZip: async () => {
+        const jar = createCookieJar();
+        await login(jar, {
+          compId: account.comp_id,
+          userName: account.user_name,
+          userPass: account.user_pass,
+        });
+        return downloadOperationCsvZip(jar, { opeNo: input.opeNo, startOpe: input.startOpe });
+      },
+      uploadZip: (filename, zipBytes) =>
+        uploadDtakoZipViaAlcInternalProxy(
+          { sharedSecret, tenantId: account.tenant_id, filename, zipBytes },
+          this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER),
+        ),
+    };
+    try {
+      const report = await runDtakoAlcUploadPure(deps, { opeNo: input.opeNo, startOpe: input.startOpe });
+      const line = {
+        dtako_alc_upload: "ok" as const,
+        comp_id: account.comp_id,
+        ope_no: input.opeNo,
+        bytes: report.bytes,
+        upload_id: report.upload_id,
+        split_failed: report.split_failed,
+      };
+      // split は非同期 — 失敗件数が既にこの応答に乗っていれば error レベルで鳴らす
+      // (`runCronDtakoScrape` と同じ方針)。0/null (未確定) は info ログのみ。
+      if (report.split_failed !== null && report.split_failed > 0) {
+        console.error(
+          JSON.stringify({
+            ...line,
+            status: "split_failed",
+            message: `取り込みは成功したが CSV 分割が ${report.split_failed} 件失敗した (該当運行が読み取り側から消える)`,
+          }),
+        );
+      } else {
+        console.log(JSON.stringify({ ...line, status: "success" }));
+      }
+      return Response.json(report);
+    } catch (err) {
+      if (err instanceof VenusSessionExpiredError) {
+        return Response.json({ error: THEEARTH_SESSION_EXPIRED_MESSAGE }, { status: 401 });
+      }
+      if (err instanceof ReportParamError) {
+        return Response.json({ error: err.message }, { status: 400 });
+      }
+      if (err instanceof DtakoAlcUploadError) {
+        console.error(
+          JSON.stringify({
+            dtako_alc_upload: "failed",
+            phase: "alc_upload",
+            comp_id: account.comp_id,
+            ope_no: input.opeNo,
+            message: err.message,
+          }),
+        );
+        return Response.json({ error: err.message }, { status: 502 });
+      }
+      const message =
+        err instanceof TheearthClientError
+          ? err.message
+          : `dtako alc-upload に失敗しました (${describeUnknownError(err)})`;
+      console.error(
+        JSON.stringify({
+          dtako_alc_upload: "failed",
+          phase: "theearth_fetch",
+          comp_id: account.comp_id,
+          ope_no: input.opeNo,
+          message,
+        }),
       );
       return Response.json({ error: message }, { status: 502 });
     }
