@@ -162,11 +162,17 @@ export function parseKintaiDiffObservations(raw: unknown): KintaiDiffObservation
   }
 }
 
-/** `/restraint-api/kintai/diff` 応答全体 (month/diff/observations/observations_error) を一括で読む。 */
+/** `/restraint-api/kintai/diff` 応答全体 (month/diff/observations/observations_error) を一括で読む。
+ * `fetchedAt`/`lastVerifiedAt` は突合結果のキャッシュ保存に伴って追加されたフィールド
+ * (Refs #620-3) — この口はライブの突合 (約50秒) なので、応答が返った時点の
+ * `lastVerifiedAt` は「たった今」になる。front はこれをそのまま「最終確認」表示に
+ * 使い、保存分だけを読む別口 (`/kintai/diff-cache`) へ二度打ちしない。 */
 export interface KintaiDiffApiResult {
   summary: KintaiDiffSummary | null
   observations: KintaiDiffObservationsView | null
   observationsError: string | null
+  fetchedAt: string | null
+  lastVerifiedAt: string | null
 }
 
 export function parseKintaiDiffApiResponse(raw: unknown): KintaiDiffApiResult {
@@ -175,6 +181,8 @@ export function parseKintaiDiffApiResponse(raw: unknown): KintaiDiffApiResult {
     summary: parseKintaiDiffSummary(raw),
     observations: parseKintaiDiffObservations(r.observations),
     observationsError: typeof r.observations_error === 'string' ? r.observations_error : null,
+    fetchedAt: typeof r.fetched_at === 'string' ? r.fetched_at : null,
+    lastVerifiedAt: typeof r.last_verified_at === 'string' ? r.last_verified_at : null,
   }
 }
 
@@ -414,4 +422,129 @@ export function fmtKintaiRefreshMysqlGuarantee(preview: KintaiRefreshMysqlPrevie
   if (!g.found) return '対象がオンプレの rest-diff に見当たりません (判定不能 — 直る保証がある、という意味ではありません)'
   if (g.guaranteed) return `保証あり (kind: ${g.kind}) — この対象は押せば直る側です`
   return `保証なし (kind: ${g.kind ?? '不明'}) — 押しても直る保証はありません。実行後は結果を確認してください`
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// GET /restraint-api/kintai/diff-cache — 突合結果のキャッシュ (Refs #620-3)
+//
+// フル突合 (`/kintai/diff`、約50秒) の結果を保存し「最終確認日」を添えて出す。
+// この口 (`/kintai/diff-cache`) は R2 read だけの軽い応答なので、月を選ぶ/タブを
+// 開くたびに自動で叩いてよい — 突合そのもの (50秒) は「取り直す」ボタンを押した
+// 時だけ叩く (自動では走らせない)。
+//
+// ★ 「未確認」「読めなかった」「確認済み (差0件を含む)」を混同しないこと —
+// この repo で繰り返し要求される作法 (`stale_months` の `total_drivers`、
+// `collected_etag_unko_nos()` が `Option` を返す理由、`onprem_unreadable` と同じ)。
+// 3状態を1つの `KintaiDiffCacheState` (discriminated union) にまとめ、呼び出し側が
+// 状態を取り違えないようにする。
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface KintaiDiffCacheStateOk {
+  status: 'ok'
+  summary: KintaiDiffSummary
+  observations: KintaiDiffObservationsView | null
+  observationsError: string | null
+  fetchedAt: string | null
+  lastVerifiedAt: string | null
+}
+
+export type KintaiDiffCacheState =
+  | { status: 'none' }
+  | { status: 'unreadable' }
+  | KintaiDiffCacheStateOk
+
+/**
+ * `/kintai/diff-cache` の応答を読む。`cached !== true` は「未確認」、
+ * `unreadable: true` (または応答自体が壊れている) は「読めなかった」、それ以外は
+ * 保存済みスナップショット (差0件のケースも含む — それは summary の各カテゴリが
+ * 0 であることで表現される)。
+ */
+export function parseKintaiDiffCacheState(raw: unknown): KintaiDiffCacheState {
+  if (raw == null || typeof raw !== 'object') return { status: 'unreadable' }
+  const r = raw as Record<string, unknown>
+  if (r.cached !== true) return { status: 'none' }
+  if (r.unreadable === true) return { status: 'unreadable' }
+  // `parseKintaiDiffSummary` はライブ応答向けに寛容 (`diff` が欠けていても 0 埋めの
+  // summary を返す) — ここでそのまま使うと「diff が無い壊れた応答」を「差 0 件」に
+  // 化けさせてしまう (#620-3 やること★ の混同そのもの)。キャッシュ応答は
+  // `month`/`diff` が両方揃っていることを先に確認してから委譲する。
+  if (typeof r.month !== 'string' || r.diff == null || typeof r.diff !== 'object') return { status: 'unreadable' }
+  const summary = parseKintaiDiffSummary(r)
+  if (!summary) return { status: 'unreadable' }
+  return {
+    status: 'ok',
+    summary,
+    observations: parseKintaiDiffObservations(r.observations),
+    observationsError: typeof r.observations_error === 'string' ? r.observations_error : null,
+    fetchedAt: typeof r.fetched_at === 'string' ? r.fetched_at : null,
+    lastVerifiedAt: typeof r.last_verified_at === 'string' ? r.last_verified_at : null,
+  }
+}
+
+/** ライブの突合 (`/kintai/diff`、「取り直す」を押した直後) の結果を、保存分の
+ * 表示と同じ `KintaiDiffCacheState` に変換する。**二度目の read
+ * (`/kintai/diff-cache`) を打たずに「最終確認」表示を更新するため** — ライブ応答
+ * には保存に使ったのと同じ `fetchedAt`/`lastVerifiedAt` が既に載っている
+ * (`handleKintaiDiff` が保存直後の値をそのまま返す)。 */
+export function kintaiDiffCacheStateFromLiveResult(result: KintaiDiffApiResult): KintaiDiffCacheState {
+  if (!result.summary) return { status: 'unreadable' }
+  return {
+    status: 'ok',
+    summary: result.summary,
+    observations: result.observations,
+    observationsError: result.observationsError,
+    fetchedAt: result.fetchedAt,
+    lastVerifiedAt: result.lastVerifiedAt,
+  }
+}
+
+/**
+ * summary (5区分) から「差が0件だったか」を判定する。**`onlyOnpremDriver0` は
+ * 除外する** — `KINTAI_DIFF_CATEGORIES` の note のとおり GCP が乗務員CD>0だけを
+ * 対象にしている意図的な除外であって、差ではないため。
+ *
+ * ★ 運行NO単位の集計 (`observations.unkoDiffGcpOnlyDriverSplit` / 対象月に GCP に
+ * しか無い運行数) はここでは一切参照しない。#620 の親コメントのとおり、その値は
+ * `neverOnpremOps` (打刻システムが無い営業所の乗務員 + 乗務員CD=0) が9割超を
+ * 占めるため、混ぜると毎月必ず「差あり」になる無意味な判定になる。この関数は
+ * 日別サマリの5区分だけで判定し、運行NO単位の集計 (取り込み漏れ候補、#623-2 が
+ * 別途扱う) とは独立に保つ。
+ */
+export function kintaiDiffHasAnyDiff(summary: KintaiDiffSummary): boolean {
+  return (
+    summary.onlyGcp.total > 0
+    || summary.onlyOnpremOther.total > 0
+    || summary.valueDiffRestraintMatch.total > 0
+    || summary.valueDiffRestraintMismatch.total > 0
+  )
+}
+
+/** ISO 文字列 (UTC) を JST の `MM/DD HH:mm` にする (`app/utils/profit-r2.ts` の
+ * `restraintVersionTimestamp` と同じ JST 変換の作法 — 壁時計を UTC getter で読む)。
+ * パースできなければ null。 */
+export function fmtKintaiDiffLastVerified(iso: string | null): string | null {
+  if (!iso) return null
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return null
+  const jst = new Date(d.getTime() + 9 * 3600 * 1000)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(jst.getUTCMonth() + 1)}/${p(jst.getUTCDate())} ${p(jst.getUTCHours())}:${p(jst.getUTCMinutes())}`
+}
+
+/**
+ * キャッシュ状態を画面の見出し文言にする。「未確認」「読めませんでした」
+ * 「差はありません/差があります (最終確認: …)」を混同しない、この画面の唯一の窓口
+ * (#620-3 やること★)。
+ *
+ * `onpremUnreadable` (オンプレ応答の形が読めなかった突合) のときは「差はありません」
+ * と断定しない — 既存の警告 (画面側の別の UAlert) と矛盾しないよう、確認時刻だけ
+ * 添えて有無の断定を避ける。
+ */
+export function fmtKintaiDiffCacheHeadline(state: KintaiDiffCacheState): string {
+  if (state.status === 'none') return '未確認'
+  if (state.status === 'unreadable') return '読めませんでした'
+  const at = fmtKintaiDiffLastVerified(state.lastVerifiedAt)
+  const atSuffix = at ? ` (最終確認: ${at})` : ' (確認時刻不明)'
+  if (state.summary.onpremUnreadable) return `差の有無は判定できません${atSuffix}`
+  return kintaiDiffHasAnyDiff(state.summary) ? `差があります${atSuffix}` : `差はありません${atSuffix}`
 }

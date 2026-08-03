@@ -75,7 +75,7 @@ import {
   toTimecardCompareRows,
 } from '~/utils/timecard-compare-view'
 import type {
-  KintaiDiffApiResult,
+  KintaiDiffCacheState,
   KintaiDiffPrescription,
   KintaiFoldPageView,
   KintaiFoldProgress,
@@ -84,12 +84,15 @@ import type {
 } from '~/utils/kintai-diff-view'
 import {
   buildKintaiDiffPrescriptions,
+  fmtKintaiDiffCacheHeadline,
   fmtKintaiDiffCount,
   fmtKintaiRefreshMysqlGuarantee,
   foldProgressAppend,
   foldProgressInitial,
+  kintaiDiffCacheStateFromLiveResult,
   KINTAI_DIFF_CATEGORIES,
   parseKintaiDiffApiResponse,
+  parseKintaiDiffCacheState,
   parseKintaiFoldPage,
   parseKintaiRefreshMysqlApplyResult,
   parseKintaiRefreshMysqlPreview,
@@ -1112,20 +1115,63 @@ async function fetchKintai() {
 // 観測値、「どの操作で直りうるか」という処方の候補までを出し、「押せば直る」とは
 // 書かない (保証の有無は MySQL 取り直しが対象ごとに別に持つ)。
 
-const gcpDiffResult = ref<KintaiDiffApiResult | null>(null)
 const gcpDiffLoading = ref(false)
 const gcpDiffError = ref('')
-const gcpDiffLoaded = ref(false)
 
-// テンプレートでの `gcpDiffResult.value?.xxx` のネストした optional chaining は
-// vue-tsc の v-if 絞り込みが効かないことがあるため、表示用に平らな computed へ分ける
-const gcpDiffSummary = computed(() => gcpDiffResult.value?.summary ?? null)
-const gcpDiffObservations = computed(() => gcpDiffResult.value?.observations ?? null)
-const gcpDiffObservationsError = computed(() => gcpDiffResult.value?.observationsError ?? null)
+// 突合結果のキャッシュ (Refs #620-3)。フル突合 (`/kintai/diff`、約50秒) は
+// 「取り直す」ボタンを押した時だけ叩く (自動では走らせない) — 画面に自動で
+// 出すのは R2 read だけの軽い口 (`/kintai/diff-cache`) から読んだ保存分。
+// 「未確認」「読めなかった」「確認済み (差0件を含む)」の3状態を混同しないため、
+// 表示は summary/observations 単体ではなく必ずこの `KintaiDiffCacheState` 経由で扱う
+// (kintai-diff-view.ts の docs 参照)。
+const gcpDiffCacheState = ref<KintaiDiffCacheState>({ status: 'none' })
+const gcpDiffCacheLoading = ref(false)
+
+// テンプレートでの discriminated union の絞り込みは vue-tsc で効かないことがあるため、
+// 表示用に平らな computed へ分ける (ローカル変数に一度受けてから絞り込む — 同じ式内で
+// `.value` を読み直す形は絞り込みが効かないことがある)
+const gcpDiffSummary = computed(() => {
+  const state = gcpDiffCacheState.value
+  return state.status === 'ok' ? state.summary : null
+})
+const gcpDiffObservations = computed(() => {
+  const state = gcpDiffCacheState.value
+  return state.status === 'ok' ? state.observations : null
+})
+const gcpDiffObservationsError = computed(() => {
+  const state = gcpDiffCacheState.value
+  return state.status === 'ok' ? state.observationsError : null
+})
+const gcpDiffCacheHeadline = computed(() => fmtKintaiDiffCacheHeadline(gcpDiffCacheState.value))
 
 const gcpDiffPrescriptions = computed<KintaiDiffPrescription[]>(() =>
   buildKintaiDiffPrescriptions(gcpDiffSummary.value, gcpDiffObservations.value))
 
+/** 保存済みスナップショットだけを読む軽い口 (R2 read のみ、突合は実行しない)。
+ * タブを開いた/月を変えた時に自動で叩いてよい (Refs #620-3)。 */
+async function loadGcpDiffCache() {
+  if (!month.value) return
+  gcpDiffCacheLoading.value = true
+  try {
+    const res = await $fetch<unknown>('/restraint-api/kintai/diff-cache', {
+      headers: authHeaders(),
+      query: { month: month.value },
+    })
+    gcpDiffCacheState.value = parseKintaiDiffCacheState(res)
+  }
+  catch {
+    // 保存分の読み出し自体が失敗 (ネットワーク等) — 「未確認」と混同しないよう
+    // 「読めなかった」扱いにする。「取り直す」ボタン自体は生きているので、
+    // ここではエラーメッセージを別途出さない (他の自動読み込み系バッジと同じ
+    // 「静かに諦める」扱い)。
+    gcpDiffCacheState.value = { status: 'unreadable' }
+  }
+  finally {
+    gcpDiffCacheLoading.value = false
+  }
+}
+
+/** フル突合 (約50秒)。**「取り直す」ボタンを押した時だけ**叩く — 自動では走らせない。 */
 async function loadGcpDiff() {
   if (!month.value) return
   gcpDiffLoading.value = true
@@ -1135,12 +1181,15 @@ async function loadGcpDiff() {
       headers: authHeaders(),
       query: { month: month.value },
     })
-    gcpDiffResult.value = parseKintaiDiffApiResponse(res)
-    gcpDiffLoaded.value = true
+    const parsed = parseKintaiDiffApiResponse(res)
+    // 保存直後の値をそのまま「最終確認」表示に反映する — 二度目の read
+    // (`/kintai/diff-cache`) を打たない (Refs #620-3)。
+    gcpDiffCacheState.value = kintaiDiffCacheStateFromLiveResult(parsed)
   }
   catch (e) {
-    gcpDiffResult.value = null
-    gcpDiffLoaded.value = false
+    // 失敗しても直前まで表示していた保存分 (gcpDiffCacheState) はそのまま残す —
+    // 「取り直しに失敗した」ことと「差が消えた」ことは別なので、古い値を黙って
+    // 消さない (エラーはアラートで別途出す)。
     gcpDiffError.value = restraintErrorMessage(e)
   }
   finally {
@@ -1149,12 +1198,18 @@ async function loadGcpDiff() {
 }
 
 // 月が変わったら前の結果を消す (「タイムカード照合」タブと同じ理由 — 別月の
-// 差分・保証が残ると誤読する)
+// 差分・保証が残ると誤読する)。gcpDiffCacheState も同時に消す — 前の月の
+// 「最終確認: …」を新しい月の値に見せてはいけない (Refs #620-3 やること★)。
 watch(month, () => {
-  gcpDiffResult.value = null
-  gcpDiffLoaded.value = false
   gcpDiffError.value = ''
+  gcpDiffCacheState.value = { status: 'none' }
 })
+
+// このタブを見ている間だけ、タブを開いた/月が変わるたびに保存分を自動で読み直す
+// (R2 read だけの軽い口、Refs #620-3)。フル突合はここでは絶対に叩かない。
+watch([activeTab, month], ([tab]) => {
+  if (tab === 'gcpdiff') loadGcpDiffCache()
+}, { immediate: true })
 
 // ---- ① 打刻の運び直し (窓ぶん。続きは無い、1回で運びきる) ----
 
@@ -6332,12 +6387,22 @@ watch([compMap, kyuyoSyncedKeys], () => {
                   観測値、「どの操作で直りうるか」の候補までを出します。
                 </span>
                 <div class="flex-1" />
+                <!-- 保存分の「最終確認」— 突合そのもの (50秒) は右のボタンでしか走らない
+                     (Refs #620-3)。古い値を現在の値に見せないよう、月ごとに必ず出す。 -->
+                <UBadge
+                  :color="gcpDiffCacheState.status === 'ok' ? 'neutral' : 'warning'"
+                  variant="subtle"
+                  size="sm"
+                >
+                  {{ gcpDiffCacheLoading ? '確認状況を確認中…' : gcpDiffCacheHeadline }}
+                </UBadge>
                 <UButton
                   size="xs"
                   icon="i-lucide-git-compare"
-                  :label="gcpDiffLoaded ? '再取得' : '月を取得'"
+                  label="取り直す (約50秒)"
                   :loading="gcpDiffLoading"
                   :disabled="gcpDiffLoading"
+                  title="この場で本物の突合をやり直します。約50秒かかります — 自動では走りません。"
                   @click="loadGcpDiff"
                 />
               </div>
@@ -6349,20 +6414,34 @@ watch([compMap, kyuyoSyncedKeys], () => {
               variant="soft"
               class="mb-3"
               icon="i-lucide-alert-triangle"
-              title="取得できませんでした"
+              title="取り直しに失敗しました"
               :description="gcpDiffError"
             />
 
-            <p v-if="!gcpDiffLoaded && !gcpDiffLoading && !gcpDiffError" class="text-sm text-gray-500">
-              「月を取得」を押すと、この月の日別サマリをオンプレ・GCP 双方から1回ずつ取得して突き合わせます。
+            <div v-if="gcpDiffLoading" class="mb-3 flex items-center gap-2 text-sm text-gray-500">
+              <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin text-primary" />
+              取り直しています… 約50秒かかります (オンプレ・GCP 双方から取得し、GCP recalc の dry-run も走らせるため)。
+            </div>
+
+            <div v-if="gcpDiffCacheLoading && gcpDiffCacheState.status === 'none' && !gcpDiffLoading" class="flex items-center gap-2 text-sm text-gray-500">
+              <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin text-primary" />
+              保存分を確認しています…
+            </div>
+            <p v-else-if="gcpDiffCacheState.status === 'none' && !gcpDiffLoading" class="text-sm text-gray-500">
+              この月はまだ一度も突合していません (<b>未確認</b>)。「取り直す」を押すと、この月の日別サマリを
+              オンプレ・GCP 双方から1回ずつ取得して突き合わせます (約50秒)。
               <b>乗務員での絞り込みはできません</b> (月全体を1回取得するほうが絞り込みより速い実測があるため —
               見たい乗務員は取得後に手元の一覧から探してください)。
             </p>
-            <div v-else-if="gcpDiffLoading" class="flex items-center gap-2 text-sm text-gray-500">
-              <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin text-primary" />
-              取得しています…
-            </div>
-            <template v-else-if="gcpDiffLoaded && gcpDiffSummary">
+            <UAlert
+              v-else-if="gcpDiffCacheState.status === 'unreadable' && !gcpDiffLoading"
+              color="warning"
+              variant="soft"
+              icon="i-lucide-alert-triangle"
+              title="保存分を読めませんでした"
+              description="「差はありません」という意味ではありません — 「取り直す」を押して突合し直してください。"
+            />
+            <template v-else-if="gcpDiffCacheState.status === 'ok' && gcpDiffSummary">
               <UAlert
                 v-if="gcpDiffSummary.onpremUnreadable"
                 color="warning"
