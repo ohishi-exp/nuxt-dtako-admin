@@ -127,6 +127,15 @@ describe('kintaiUnkoGapsReadability (★ #620/#615-7 と同型: 「無い」と�
   it('null (欠落・型不一致) は false 同様に「引けていない」扱い', () => {
     expect(kintaiUnkoGapsReadability(parseKintaiUnkoGaps({}))).toBe('etags_unavailable')
   })
+
+  it('driver_cds_available だけが欠落・型不一致でも driver_cds_unavailable (gcp_etags_available: true と同時に成立させて確認)', () => {
+    expect(
+      kintaiUnkoGapsReadability(parseKintaiUnkoGaps(body({ driver_cds_available: undefined }))),
+    ).toBe('driver_cds_unavailable')
+    expect(
+      kintaiUnkoGapsReadability(parseKintaiUnkoGaps(body({ driver_cds_available: 'x' }))),
+    ).toBe('driver_cds_unavailable')
+  })
 })
 
 describe('kintaiUnkoGapsDriverTotalCount', () => {

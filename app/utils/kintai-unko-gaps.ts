@@ -86,18 +86,22 @@ export function parseKintaiUnkoGaps(raw: unknown): KintaiUnkoGaps {
 /**
  * 「候補なし」と表示していい状態かどうか (#620/#615-7 と同型の区別)。
  *
- * - `ok`: 両方 true (or 未設定でない)。件数をそのまま信じてよい
+ * - `ok`: 両方 `true`。件数をそのまま信じてよい
  * - `etags_unavailable`: GCP側の運行一覧が引けていない — 候補は**不明**、0件ではない
  * - `driver_cds_unavailable`: alc が driver_cds を返していない — **正常に空のこともある**が、
  *   「取り込み漏れ0件」と断定はできない
  *
- * 両方 false ならより重い `etags_unavailable` を優先する。
+ * ★ **`true` 以外はすべて「引けていない」扱いにする** (`=== false` ではなく `!== true`)。
+ * 欠落・`null`・型不一致 (壊れた応答・上流の形変更) を `'ok'` に倒すと、画面が
+ * 「取り込み漏れの候補はありません」と静かに嘘をつく (親指摘、PR #628 CI で捕まった)。
+ *
+ * 両方 `true` でないならより重い `etags_unavailable` を優先する。
  */
 export type KintaiUnkoGapsReadability = 'ok' | 'etags_unavailable' | 'driver_cds_unavailable'
 
 export function kintaiUnkoGapsReadability(g: KintaiUnkoGaps): KintaiUnkoGapsReadability {
-  if (g.gcpEtagsAvailable === false) return 'etags_unavailable'
-  if (g.driverCdsAvailable === false) return 'driver_cds_unavailable'
+  if (g.gcpEtagsAvailable !== true) return 'etags_unavailable'
+  if (g.driverCdsAvailable !== true) return 'driver_cds_unavailable'
   return 'ok'
 }
 
