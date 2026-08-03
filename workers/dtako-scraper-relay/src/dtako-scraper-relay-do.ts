@@ -71,6 +71,7 @@ import {
   runDtakoReimport as runDtakoReimportPure,
   type DtakoReimportDeps,
 } from "./dtako-reimport";
+import { pickOnpremUnkoNoFromDayEvents } from "./dtako-day-events-lookup";
 import {
   clearRunningPointer,
   MAX_SCRAPE_JOB_RECORDS,
@@ -2601,6 +2602,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/kintai/refresh/mysql" && request.method === "POST") {
       return this.handleKintaiRefreshMysql(record!, request);
     }
+    // ②(取り込み)の後、オンプレから実物の23桁 unko_no を引く (viewer 認可、
+    // 読むだけ・②を実行しない。Refs #625)
+    if (url.pathname === "/restraint-api/kintai/day-events-lookup" && request.method === "GET") {
+      return this.handleKintaiDayEventsLookup(url);
+    }
     // ---- アーカイブ閲覧 (R2 読み出しのみ。Refs #244) ----
     if (url.pathname === "/restraint-api/archive/summaries" && request.method === "GET") {
       return this.handleArchiveSummaries(record!, url);
@@ -4347,6 +4353,71 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return Response.json({ ...resultBody, guarantee, guarantee_error: guaranteeError }, { status: res.status });
     }
     return res;
+  }
+
+  /**
+   * GET /restraint-api/kintai/day-events-lookup?driver_cd=&ope_no= —
+   * ②(取り込み)の後、オンプレに生まれた運行から実物の23桁 `unko_no` を引く
+   * (Refs #625)。
+   *
+   * 取り込み漏れ候補は GCP (alc) 由来の22桁 (対象CD抜き) しか無く、③ (勤務時間
+   * 再登録) には実物の23桁が必須。**② で取り込んだ直後は、その運行はオンプレに
+   * 存在する** — 23桁は CSV から読むのではなく、`GET /api/kintai/day-events`
+   * (rust-ichibanboshi、Refs #205 の 57) をそのまま中継し `ope_no` (22桁) で
+   * 絞るだけで引ける (`dtako-day-events-lookup.ts` の module doc 参照)。
+   *
+   * **読むだけ・②③どちらも実行しない。** ①②を実行済みかどうかはこの口では
+   * 判定しない — ②の直後に呼んで反映されているかを確かめるのも、時間をおいて
+   * もう一度呼ぶのも、呼び出し側 (人 / 画面) の責務。何回でも安全に呼べる
+   * (副作用が無い) ようにしてあるのは、そのための設計 — ②の反映タイミングが
+   * 未確認 (親の 0 段目コメント参照) なので、自動リトライは持たない。
+   *
+   * `ope_no` は22桁ちょうどでなければ拒否する — この口は「候補(22桁)から23桁を
+   * 引く」専用で、既に23桁が分かっている対象にはそもそも要らない。
+   */
+  private async handleKintaiDayEventsLookup(url: URL): Promise<Response> {
+    const driverCd = url.searchParams.get("driver_cd") || "";
+    if (!/^\d{1,10}$/.test(driverCd)) {
+      return dvrJsonError(400, "driver_cd は乗務員CD (数字) で指定してください");
+    }
+    const opeNo = url.searchParams.get("ope_no") || "";
+    if (!/^\d{22}$/.test(opeNo)) {
+      return dvrJsonError(400, `ope_no は22桁の数値 (GCP側の運行NO) で指定してください: "${opeNo}"`);
+    }
+    // 22桁は上のガードを通っているので deriveOpeNoFromUnkoNo は必ず成功する
+    // (UNKO_NO_22_RE と同じ正規表現、`kintai-diff.ts` 参照)。
+    const date = deriveOpeNoFromUnkoNo(opeNo)!.startOpe.slice(0, 10).replace(/\//g, "-");
+
+    const creds = await this.ichibanCreds("kintai_day_events_lookup");
+    if (!creds) return dvrJsonError(503, "オンプレの取得先 (NUXT_ICHIBAN_*) が未設定です");
+
+    try {
+      const q = new URLSearchParams({ driver: driverCd, date });
+      const upstream = await fetch(`${creds.apiUrl}/api/kintai/day-events?${q.toString()}`, {
+        headers: {
+          "CF-Access-Client-Id": creds.clientId,
+          "CF-Access-Client-Secret": creds.clientSecret,
+        },
+      });
+      const text = await upstream.text();
+      if (!upstream.ok) {
+        return dvrJsonError(502, `day-events が ${upstream.status} を返しました: ${text.slice(0, 300)}`);
+      }
+      let dayEvents: unknown;
+      try {
+        dayEvents = JSON.parse(text);
+      } catch {
+        return dvrJsonError(502, `day-events の応答がJSONではありません: ${text.slice(0, 300)}`);
+      }
+      const lookup = pickOnpremUnkoNoFromDayEvents(dayEvents, opeNo);
+      console.log(
+        JSON.stringify({ kintai_day_events_lookup: "ok", driver_cd: driverCd, date, status: lookup.status }),
+      );
+      return Response.json({ driver_cd: driverCd, date, ope_no: opeNo, lookup });
+    } catch (err) {
+      console.error(JSON.stringify({ kintai_day_events_lookup: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, err instanceof Error ? err.message : "day-events の取得に失敗しました");
+    }
   }
 
   /**
