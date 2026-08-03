@@ -45,6 +45,7 @@ export default defineConfig({
         'src/kintai-relay.ts',
         'src/operation-zip.ts',
         'src/dtako-reimport.ts',
+        'src/kintai-diff.ts',
       ],
       thresholds: {
         lines: 100,
