@@ -138,6 +138,10 @@ import {
 } from '~/utils/kintai-unko-gaps'
 import type { DayEventsLookup } from '~/utils/kintai-day-events-lookup'
 import { parseDayEventsLookup } from '~/utils/kintai-day-events-lookup'
+import type { KintaiDayOperation } from '~/utils/kintai-day-operations'
+import { parseKintaiDayOperations, isKintaiDayOperationUnkoNo23Digit } from '~/utils/kintai-day-operations'
+import type { KintaiAlcUploadResult } from '~/utils/kintai-alc-upload'
+import { parseKintaiAlcUploadResult } from '~/utils/kintai-alc-upload'
 
 const {
   session: theearthSession,
@@ -1247,6 +1251,93 @@ const gcpDiffCategoryItemsByKey = computed<Record<string, KintaiDiffCategoryRowV
   return out
 })
 
+// ---- 突合明細から運行1件をalcへ上げ直す (Refs #633-17) ----
+// ★ 自動実行しない・複数運行あっても自動で1件を選ばない (親判断1,2、
+// day-events-lookup の ambiguous と同じ理由)。「運行を引く」を押した行にだけ、
+// その日の運行を全部並べる。「alcへ上げ直す」は運行1件ごとのボタンで、押した
+// ときだけ叩く。5区分すべての行 (driverCd+date を持つ) がこの1本を共有する。
+
+interface DiffRowDayOperationsState {
+  status: 'loading' | 'ok' | 'error'
+  operations: KintaiDayOperation[]
+  error: string
+}
+
+/** key は `driverCd|date`。同じ乗務員・同じ日の行が複数区分に跨っても
+ * 1回引けば全区分で共有できる。 */
+const diffRowDayOperations = ref<Map<string, DiffRowDayOperationsState>>(new Map())
+
+function diffRowKey(driverCd: string, date: string): string {
+  return `${driverCd}|${date}`
+}
+
+function diffRowDayOperationsFor(driverCd: string, date: string): DiffRowDayOperationsState | null {
+  return diffRowDayOperations.value.get(diffRowKey(driverCd, date)) ?? null
+}
+
+/** 「運行を引く」ボタン。読むだけ・副作用なし・何度でも安全 (day-events-lookup
+ * と同じ設計)。 */
+async function lookupDayOperationsForDiffRow(driverCd: string, date: string) {
+  const key = diffRowKey(driverCd, date)
+  diffRowDayOperations.value.set(key, { status: 'loading', operations: [], error: '' })
+  try {
+    const res = await $fetch<unknown>('/restraint-api/kintai/day-operations', {
+      headers: authHeaders(),
+      query: { driver_cd: driverCd, date },
+    })
+    const parsed = parseKintaiDayOperations(res)
+    diffRowDayOperations.value.set(key, { status: 'ok', operations: parsed.operations, error: '' })
+  }
+  catch (e) {
+    diffRowDayOperations.value.set(key, { status: 'error', operations: [], error: restraintErrorMessage(e) })
+  }
+}
+
+interface DiffRowAlcUploadState {
+  status: 'loading' | 'ok' | 'error'
+  result: KintaiAlcUploadResult | null
+  error: string
+}
+
+/** key は unkoNo (運行ごとに一意)。 */
+const diffRowAlcUpload = ref<Map<string, DiffRowAlcUploadState>>(new Map())
+
+function diffRowAlcUploadFor(unkoNo: string): DiffRowAlcUploadState | null {
+  return diffRowAlcUpload.value.get(unkoNo) ?? null
+}
+
+/** 運行1件をalcへ上げ直す (書き込み。preview は無い — `dtako-alc-upload.ts` の
+ * module doc 参照)。**同じ運行を続けて2回押せないよう、投入中はボタン側で
+ * disabled にする** (親判断7 — 並列に叩くと同一comp_idのtheearthセッション
+ * ロックでhang/500になり得る、呼び出し側は `diffRowAlcUploadFor(...)?.status
+ * === 'loading'` を見て disabled を出す)。畳み直し (fold) はここではしない —
+ * 応答表示側で別途案内する (親判断6)。 */
+async function uploadOperationToAlc(op: KintaiDayOperation) {
+  if (diffRowAlcUploadFor(op.unkoNo)?.status === 'loading') return
+  diffRowAlcUpload.value.set(op.unkoNo, { status: 'loading', result: null, error: '' })
+  try {
+    const res = await $fetch<unknown>('/restraint-api/kintai/alc-upload', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: { ope_no: op.opeNo, start_ope: op.startOpe },
+    })
+    diffRowAlcUpload.value.set(op.unkoNo, { status: 'ok', result: parseKintaiAlcUploadResult(res), error: '' })
+  }
+  catch (e) {
+    diffRowAlcUpload.value.set(op.unkoNo, { status: 'error', result: null, error: restraintErrorMessage(e) })
+  }
+}
+
+/** alcへ上げ直した後の「畳み直しが別途必要」案内から、既存の畳み直しセクション
+ * (`jumpToGcpFold` と同じ id) へスクロールするだけ — 新しい畳み直しボタンは
+ * 作らない (親判断6)。既にこのタブ・この月を見ている前提なので、tab/month の
+ * 切り替えはしない。 */
+function scrollToFoldSection() {
+  if (import.meta.client) {
+    document.getElementById('gcp-fold-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+}
+
 /** テンプレートでの discriminated union の絞り込みは vue-tsc で効かないことがあるため
  * (このファイル冒頭 `gcpDiffSummary` 等と同じ理由)、表示用に平らな形へ潰す。
  * `fieldRows` は `match`/`mismatch` 以外では空配列、`side` は `one_sided` 以外では
@@ -1347,6 +1438,10 @@ watch(month, () => {
   gcpDiffCacheState.value = { status: 'none' }
   gcpDiffItemsState.value = { status: 'none' }
   gcpDiffCategoryItemsState.value = { status: 'none' }
+  // 別月の明細行に対する「運行を引く」「alcへ上げ直す」の結果も同時に消す
+  // (driverCd+date/unkoNo は月をまたいで衝突しうるため、Refs #633-17)。
+  diffRowDayOperations.value = new Map()
+  diffRowAlcUpload.value = new Map()
 })
 
 // このタブを見ている間だけ、タブを開いた/月が変わるたびに保存分を自動で読み直す
@@ -1598,8 +1693,9 @@ watch(month, () => {
 // ---- 取り込み漏れ候補の運行NO一覧 (Refs #623-2) ----
 // ★ この口は遅い (alc への etags 往復を含む、所要時間の保証なし)。**自動実行しない** —
 // 「運行NO を出す」ボタンを押したときだけ叩く。押すと乗務員ごとに運行NOを一覧し、
-// 各行の「③に入れる」で③のフォームへ値を渡す (自動実行はしない、人が確認してから
-// 「① 確認」を押す)。
+// 各行の「①② の欄に入れる (22桁)」で③のフォーム (①②の欄を共用) へ値を渡す —
+// ③自体は実行しない、22桁のままなので③は拒否される (自動実行はしない、人が確認して
+// から「① 確認」を押す)。
 
 const unkoGapsResult = ref<KintaiUnkoGaps | null>(null)
 const unkoGapsLoading = ref(false)
@@ -1721,6 +1817,21 @@ watch(month, () => {
  * 「勤務時間再登録まで行う」を使える。
  */
 function applyUnkoGapCandidateToMysqlForm(driverCd: string, unkoNo: string) {
+  mysqlRefreshUnkoNo.value = unkoNo
+  mysqlRefreshDriverCd.value = driverCd
+  if (import.meta.client) {
+    document.getElementById('gcp-mysql-refresh-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+}
+
+/**
+ * 明細 (day-operations で引いた運行) の23桁 unkoNo を③のフォームへ渡す
+ * (Refs #633-17b)。`applyUnkoGapCandidateToMysqlForm` と同じことを23桁でやる —
+ * 違いは渡す桁数だけ (あちらは22桁のまま、こちらは day-operations が返す
+ * 23桁をそのまま)。**自動実行はしない** — 欄に入れてスクロールするだけで、
+ * ③ (勤務時間再登録) の実行は人が「勤務時間再登録まで行う」を確認してから押す。
+ */
+function applyDayOperationToMysqlResetForm(driverCd: string, unkoNo: string) {
   mysqlRefreshUnkoNo.value = unkoNo
   mysqlRefreshDriverCd.value = driverCd
   if (import.meta.client) {
@@ -6857,6 +6968,99 @@ watch([compMap, kyuyoSyncedKeys], () => {
                             <div v-for="fr in row.oneSidedFieldRows" :key="fr.field" class="text-xs">
                               {{ fr.label }}: {{ fr.value }}
                             </div>
+
+                            <!-- alcへ上げ直す導線 (Refs #633-17)。★ 押しただけでは何も投入
+                                 しない — 「運行を引く」は day-operations を読むだけ、
+                                 「alcへ上げ直す」は運行1件ごとのボタンで人が選んで押す
+                                 (複数運行を自動で選ばない、親判断1,2)。 -->
+                            <div class="mt-1">
+                              <UButton
+                                size="xs"
+                                variant="soft"
+                                label="運行を引く"
+                                :loading="diffRowDayOperationsFor(row.driverCd, row.date)?.status === 'loading'"
+                                @click="lookupDayOperationsForDiffRow(row.driverCd, row.date)"
+                              />
+                              <UAlert
+                                v-if="diffRowDayOperationsFor(row.driverCd, row.date)?.status === 'error'"
+                                color="error"
+                                variant="soft"
+                                class="mt-1"
+                                :description="diffRowDayOperationsFor(row.driverCd, row.date)?.error ?? ''"
+                              />
+                              <p
+                                v-else-if="diffRowDayOperationsFor(row.driverCd, row.date)?.status === 'ok'
+                                  && (diffRowDayOperationsFor(row.driverCd, row.date)?.operations.length ?? 0) === 0"
+                                class="text-xs text-gray-500 mt-1"
+                              >
+                                この日に運行が見つかりませんでした。
+                              </p>
+                              <ul
+                                v-else-if="diffRowDayOperationsFor(row.driverCd, row.date)?.status === 'ok'"
+                                class="mt-1 space-y-1"
+                              >
+                                <li
+                                  v-for="op in (diffRowDayOperationsFor(row.driverCd, row.date)?.operations ?? [])"
+                                  :key="op.unkoNo"
+                                  class="rounded border border-gray-200 dark:border-gray-700 p-1"
+                                >
+                                  <div class="text-xs">
+                                    {{ op.vehicle ?? '(車両不明)' }} / 出庫 {{ op.startOpe }}
+                                    <span v-if="op.runStart" class="text-gray-500">(運行開始 {{ op.runStart }})</span>
+                                  </div>
+                                  <!-- 押す前に見せる注意 (親判断5): 押した後では遅い -->
+                                  <p class="text-xs text-warning">
+                                    ⚠ 投入するとこの運行は読み取り側から一時的に消えます (has_kudgivt が一時的に FALSE に戻ります)。
+                                  </p>
+                                  <UButton
+                                    size="xs"
+                                    color="error"
+                                    variant="soft"
+                                    label="alcへ上げ直す"
+                                    :loading="diffRowAlcUploadFor(op.unkoNo)?.status === 'loading'"
+                                    :disabled="diffRowAlcUploadFor(op.unkoNo)?.status === 'loading'"
+                                    @click="uploadOperationToAlc(op)"
+                                  />
+                                  <!-- ③ (勤務時間再登録) の欄へ渡す導線 (Refs #633-17b)。day-operations が
+                                       返す23桁 (対象CD込み) をそのまま渡す — ここで③は実行しない、
+                                       欄に入れてスクロールするだけ (人が確認して押す)。23桁が引けて
+                                       いない運行 (壊れた形で front が防御的に落とした場合) はボタンごと
+                                       出さない — 「押せるのに失敗する」を作らない。 -->
+                                  <UButton
+                                    v-if="isKintaiDayOperationUnkoNo23Digit(op.unkoNo)"
+                                    size="xs"
+                                    variant="soft"
+                                    label="③ の欄に入れる (23桁)"
+                                    class="ml-1"
+                                    @click="applyDayOperationToMysqlResetForm(row.driverCd, op.unkoNo)"
+                                  />
+                                  <UAlert
+                                    v-if="diffRowAlcUploadFor(op.unkoNo)?.status === 'error'"
+                                    color="error"
+                                    variant="soft"
+                                    class="mt-1"
+                                    :description="diffRowAlcUploadFor(op.unkoNo)?.error ?? ''"
+                                  />
+                                  <div v-else-if="diffRowAlcUploadFor(op.unkoNo)?.status === 'ok'" class="text-xs mt-1 space-y-0.5">
+                                    <!-- operations_count は黙って隠さない (2なら2マンで主・助手の両方が入った、親判断3) -->
+                                    <p>
+                                      upload_id: {{ diffRowAlcUploadFor(op.unkoNo)?.result?.uploadId ?? '(なし)' }} /
+                                      operations_count: {{ diffRowAlcUploadFor(op.unkoNo)?.result?.operationsCount ?? '?' }}
+                                    </p>
+                                    <!-- split_failed: 0 を「成功」と表示しない — notes.split をそのまま出す (親判断4) -->
+                                    <p class="text-warning">{{ diffRowAlcUploadFor(op.unkoNo)?.result?.notes.split }}</p>
+                                    <p class="text-warning">{{ diffRowAlcUploadFor(op.unkoNo)?.result?.notes.hasKudgivt }}</p>
+                                    <p>
+                                      畳み直し (recalc) が別途必要です —
+                                      <button type="button" class="underline" @click="scrollToFoldSection">
+                                        「② GCP 側の畳み直し」
+                                      </button>
+                                      から実行してください (このボタンは投入するだけで畳み直しはしません、親判断6)。
+                                    </p>
+                                  </div>
+                                </li>
+                              </ul>
+                            </div>
                           </li>
                         </ul>
                       </div>
@@ -6964,8 +7168,9 @@ watch([compMap, kyuyoSyncedKeys], () => {
                               </span>
                             </div>
                             <!-- 運行NOはコピー用テキスト (select-all) としても出しつつ、
-                                 「③に入れる」で mysqlRefreshUnkoNo/driverCd 欄へも渡す
-                                 (Refs #623-2。#625/#627 マージ済みで22桁のまま①②が実行できる) -->
+                                 「①② の欄に入れる (22桁)」で mysqlRefreshUnkoNo/driverCd 欄へも渡す
+                                 (Refs #623-2。#625/#627 マージ済みで22桁のまま①②が実行できる。
+                                 ③自体はこの22桁では拒否される — ラベルは Refs #633-17b で明確化) -->
                             <ul class="mt-1 space-y-2">
                               <li v-for="no in d.unkoNos" :key="no">
                                 <div class="flex flex-wrap items-center gap-2">
@@ -6977,7 +7182,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                                   <UButton
                                     size="xs"
                                     variant="soft"
-                                    label="③ に入れる"
+                                    label="①② の欄に入れる (22桁)"
                                     @click="applyUnkoGapCandidateToMysqlForm(d.driverCd, no)"
                                   />
                                 </div>
