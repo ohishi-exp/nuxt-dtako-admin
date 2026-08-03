@@ -3,6 +3,7 @@ import {
   relayKintaiWindow,
   relayKintaiRecalc,
   relayKintaiDaySummaries,
+  relayKintaiStaleMonths,
   windowMonths,
   jstMonth,
   tenantForCompId,
@@ -554,6 +555,88 @@ describe("relayKintaiDaySummaries (ohishi-exp/rust-ichibanboshi#205 の 23)", ()
     await expect(relayKintaiDaySummaries({ gcp }, { month: "2026-06" })).rejects.toThrow(
       /parse failed/,
     );
+  });
+});
+
+const STALE_MONTHS = "/api/kintai/stale-months";
+
+describe("relayKintaiStaleMonths (Refs #620)", () => {
+  /** 受け側の確定済みの形 (#620 起票時に確認済み)。 */
+  const SAMPLE = {
+    logic_version: "0dd618334e44252b",
+    from: "2025-07",
+    to: "2026-06",
+    default_window_months: 12,
+    months: [
+      { month: "2026-06", stale_drivers: 0, total_drivers: 0 },
+      { month: "2026-05", stale_drivers: 0, total_drivers: 12 },
+      { month: "2026-04", stale_drivers: 3, total_drivers: 12 },
+    ],
+  };
+
+  it("**GET で読むだけ。** 応答はそのまま返す (丸めない)", async () => {
+    const { gcp, calls } = gcpStub({ [STALE_MONTHS]: SAMPLE });
+    const r = await relayKintaiStaleMonths({ gcp }, {});
+    expect(calls).toHaveLength(1);
+    // method 未指定 = GET。body も無い — この経路は 1 行も書けない
+    expect(calls[0]!.method).toBeUndefined();
+    expect(calls[0]!.body).toBeUndefined();
+    const url = new URL(`https://x${calls[0]!.path}`);
+    expect(url.pathname).toBe(STALE_MONTHS);
+    expect(r).toEqual(SAMPLE);
+  });
+
+  it("from/to を省略したら query を一切付けない (受け側の既定に任せる)", async () => {
+    const { gcp, calls } = gcpStub({ [STALE_MONTHS]: SAMPLE });
+    await relayKintaiStaleMonths({ gcp }, {});
+    expect(calls[0]!.path).toBe(STALE_MONTHS);
+  });
+
+  it("from/to を指定したら query にそのまま乗せる", async () => {
+    const { gcp, calls } = gcpStub({ [STALE_MONTHS]: SAMPLE });
+    await relayKintaiStaleMonths({ gcp }, { from: "2025-07", to: "2026-06" });
+    const url = new URL(`https://x${calls[0]!.path}`);
+    expect(url.pathname).toBe(STALE_MONTHS);
+    expect(url.searchParams.get("from")).toBe("2025-07");
+    expect(url.searchParams.get("to")).toBe("2026-06");
+  });
+
+  it("from だけ指定できる (to は受け側の既定に任せる)", async () => {
+    const { gcp, calls } = gcpStub({ [STALE_MONTHS]: SAMPLE });
+    await relayKintaiStaleMonths({ gcp }, { from: "2025-07" });
+    const url = new URL(`https://x${calls[0]!.path}`);
+    expect(url.searchParams.get("from")).toBe("2025-07");
+    expect(url.searchParams.has("to")).toBe(false);
+  });
+
+  it("壊れた from は 1 回も叩かずに落ちる", async () => {
+    const { gcp, calls } = gcpStub({});
+    await expect(
+      relayKintaiStaleMonths({ gcp }, { from: "2025-7" }),
+    ).rejects.toBeInstanceOf(KintaiRelayError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("壊れた to は 1 回も叩かずに落ちる", async () => {
+    const { gcp, calls } = gcpStub({});
+    await expect(
+      relayKintaiStaleMonths({ gcp }, { to: "2026-6" }),
+    ).rejects.toBeInstanceOf(KintaiRelayError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("どちら側が落ちたかを本文の先頭付きで返す", async () => {
+    const { gcp } = gcpStub({ [STALE_MONTHS]: () => new Response("boom", { status: 502 }) });
+    await expect(relayKintaiStaleMonths({ gcp }, {})).rejects.toThrow(
+      /gcp kintai stale-months: status 502: boom/,
+    );
+  });
+
+  it("JSON でない応答は parse failed で落とす", async () => {
+    const { gcp } = gcpStub({
+      [STALE_MONTHS]: () => new Response("<html>", { status: 200 }),
+    });
+    await expect(relayKintaiStaleMonths({ gcp }, {})).rejects.toThrow(/parse failed/);
   });
 });
 

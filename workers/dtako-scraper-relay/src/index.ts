@@ -10,6 +10,7 @@ import {
   buildDeps,
   relayKintaiDaySummaries,
   relayKintaiRecalc,
+  relayKintaiStaleMonths,
   relayKintaiWindow,
   tenantForCompId,
 } from "./kintai-relay";
@@ -108,6 +109,13 @@ export default {
       // 畳んだ結果を読む (Refs ohishi-exp/rust-ichibanboshi#205 の 23)。
       // **GET だけ。** 受け側に書き込みの口が無いので、こちらにも作らない
       return handleKintaiDaySummaries(request, env);
+    }
+
+    if (url.pathname === "/kintai-relay/stale-months" && request.method === "GET") {
+      // 月ごとの stale (畳み直しが要るか) だけを読む (Refs #620)。`unko_diff` を
+      // 含む本物の突合 (`/kintai-relay/recalc` 相当、約50秒) とは別の軽い口 —
+      // **GET だけ。** 受け側に書き込みの口が無いので、こちらにも作らない
+      return handleKintaiStaleMonths(request, env);
     }
 
     if (url.pathname === "/kintai-relay/operation-zip" && request.method === "POST") {
@@ -468,6 +476,87 @@ async function handleKintaiDaySummaries(
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     console.error(JSON.stringify({ kintai_day_summaries: "failed", message }));
+    return fail(502, message);
+  }
+}
+
+/**
+ * `GET /kintai-relay/stale-months?from=YYYY-MM&to=YYYY-MM` — 月ごとの stale
+ * (畳み直しが要るか) だけを読む (Refs #620)。
+ *
+ * **読むだけの口。** 受け側 (`src/routes/stale_months.rs`) に `POST` は無い —
+ * `handleKintaiDaySummaries` と同じ塞ぎ方。`from`/`to` は両方省略可 (受け側の既定は
+ * 当月から12か月遡る、上限36か月)。
+ *
+ * 応答は**そのまま返す**。`total_drivers === 0` (day_summaries が1行も無い =
+ * データ無し) と `stale_drivers > 0` (畳み直しが要る) の読み分けは呼び出し側の責務 —
+ * ここで丸めると「データ無し」と「畳み済みで最新」を混同する欠陥を作り直す (#620)。
+ *
+ * 認証・tenant 解決は `handleKintaiDaySummaries` と同じ関門 (`X-Alc-Proxy-Secret` の
+ * constant-time 検証 → KV `dtako_accounts` から `KINTAI_COMP_ID` で引く)。受け側は
+ * `X-Tenant-ID` を読まず instance の設定で読み先を固定しているが、ここでは他の中継と
+ * 同じ形で名乗る (auth-worker の関門が `X-Tenant-ID` を必須にしており、欠けると 400
+ * になる)。
+ */
+async function handleKintaiStaleMonths(
+  request: Request,
+  env: RelayWorkerEnv,
+): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const authWorker = env.AUTH_WORKER;
+  const compId = (env.KINTAI_COMP_ID ?? "").trim();
+  const origin = (env.NUXT_ICHIBAN_API_URL ?? "").trim();
+  const cfId = (env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID ?? "").trim();
+  const [proxySecret, cfSecret] = await Promise.all([
+    resolveSecretBinding(env.INTERNAL_SHARED_SECRET),
+    resolveSecretBinding(env.ICHIBAN_CF_ACCESS_CLIENT_SECRET),
+  ]);
+  if (!authWorker || !compId || !origin || !cfId || !proxySecret || !cfSecret) {
+    return fail(503, "kintai-relay not configured");
+  }
+
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  const accountsRaw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
+  let accounts: unknown = null;
+  try {
+    accounts = JSON.parse(accountsRaw || "null");
+  } catch {
+    accounts = null;
+  }
+  const tenantId = tenantForCompId(accounts, compId);
+  if (!tenantId) {
+    console.error(JSON.stringify({ kintai_stale_months: "tenant not resolved", comp_id: compId }));
+    return fail(503, "tenant not resolved from dtako_accounts");
+  }
+
+  const url = new URL(request.url);
+  const deps = buildDeps({
+    ichibanOrigin: origin,
+    cfAccessClientId: cfId,
+    cfAccessClientSecret: cfSecret,
+    authWorker,
+    proxySecret,
+    tenantId,
+  });
+  try {
+    const months = await relayKintaiStaleMonths(deps, {
+      from: url.searchParams.get("from") || undefined,
+      to: url.searchParams.get("to") || undefined,
+    });
+    console.log(JSON.stringify({ kintai_stale_months: "ok" }));
+    return new Response(JSON.stringify(months), {
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    console.error(JSON.stringify({ kintai_stale_months: "failed", message }));
     return fail(502, message);
   }
 }
