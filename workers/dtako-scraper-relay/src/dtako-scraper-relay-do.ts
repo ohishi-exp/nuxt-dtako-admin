@@ -3951,13 +3951,23 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
     // 表示に要る分だけを R2 へ保存する (Refs #620-3)。best-effort — 失敗しても
     // このライブ応答は落とさない (取れたてのデータは既に手元にあるため)。
+    //
+    // ★ `diff.onprem_unreadable` (オンプレ応答の形が読めず突合そのものが成立
+    // しなかった回) は保存しない — 保存すると、壊れた回に「最終確認: …」が付いて
+    // 確認済みに見えてしまう (親指摘、#620-3 追加1)。保存を諦めても以前の
+    // (成立していた) スナップショットが latest に残っているので、次に保存分を
+    // 読んだ front には古いが信頼できる値がそのまま出る — 壊れた値で上書きする
+    // より安全。`observationsError` (観測値だけ取れなかった側) はここでは弾かない
+    // — 差の5区分自体は信頼できるままなので、従来どおり別枠のアラートで扱う。
     let cache: { fetchedAt: string; lastVerifiedAt: string } | null = null;
-    try {
-      cache = await this.saveKintaiDiffCacheToR2(record.compId, ym, diff, observations, observationsError);
-    } catch (err) {
-      console.error(
-        JSON.stringify({ kintai_diff: "cache-save-error", month: ym, error: describeUnknownError(err) }),
-      );
+    if (!diff.onprem_unreadable) {
+      try {
+        cache = await this.saveKintaiDiffCacheToR2(record.compId, ym, diff, observations, observationsError);
+      } catch (err) {
+        console.error(
+          JSON.stringify({ kintai_diff: "cache-save-error", month: ym, error: describeUnknownError(err) }),
+        );
+      }
     }
 
     console.log(
