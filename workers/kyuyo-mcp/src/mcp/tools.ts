@@ -1122,6 +1122,83 @@ export const runDtakoReimportTool = {
   },
 };
 
+// ── run_dtako_alc_upload ─────────────────────────────────────────────────────
+
+const runDtakoAlcUploadArgs = z
+  .object({
+    ope_no_22: z
+      .string()
+      .regex(OPE_NO_RE)
+      .describe(
+        "運行No。theearth 側の22桁 (get_operation_zip の ope_no_22 と同じ)。" +
+          "オンプレの unko_no (23桁) を持っている場合は末尾1桁を落として渡すこと。",
+      ),
+    start_ope: z
+      .string()
+      .regex(START_OPE_RE)
+      .describe('出庫日時。"YYYY/MM/DD H:mm:ss" (時は0埋めしない、例 "2026/07/07 7:53:30")'),
+    comp_id: z.string().optional().describe("会社。省略すると relay の既定 (KINTAI_COMP_ID)"),
+  })
+  .strict();
+
+/**
+ * 運行 1 件の csvdata.zip を theearth から取得し、そのまま alc へ上げ直す
+ * (Refs #633-9、relay 側は #633-7 / PR #638 で完成済み)。
+ *
+ * **`run_dtako_reimport` との違いは宛先と body だけ。** あちらはオンプレの
+ * `POST /api/dtako/autoload` (23桁の unko_no が要る、dtako_events を書く) を叩くが、
+ * こちらは alc の `/api/upload` (`POST /kintai-relay/dtako-alc-upload`、relay の
+ * `dtako-alc-upload.ts` 参照) を叩く。alc 側は zip 内 KUDGURI.csv の行から
+ * `ope_no`/`start_ope` を読むため **`unko_no` は渡さない**。オンプレを触らないので
+ * `reset_timecard` (③ 勤務時間再登録) に相当するものも無い。
+ */
+export const runDtakoAlcUploadTool = {
+  name: "run_dtako_alc_upload",
+  description:
+    "運行 1 件の csvdata.zip を theearth から取得し、alc へ上げ直す " +
+    "(Refs #633-9。relay の POST /kintai-relay/dtako-alc-upload を叩くだけ)。" +
+    "**run_dtako_reimport との違い: unko_no は渡さない・reset_timecard も無い。** " +
+    "alc の /api/upload は zip 内 KUDGURI.csv から ope_no/start_ope を読むため " +
+    "オンプレの23桁 unko_no は不要。オンプレ (dtako_events / time_card_dtako) は" +
+    "一切触らないので③(勤務時間再登録)に相当する引数も無い。" +
+    "**書き込み tool。preview は無い** — 中身を先に確認したいなら同じ引数で " +
+    "get_operation_zip (read-only) を先に呼ぶこと。" +
+    "**応答の split_confirmed は常に false。** split_failed: 0 を『分割済み』と" +
+    "読まないこと — try_split_csv はアップロード直後に non-blocking で走るため、" +
+    "この応答の時点では確定しない。確定させたいなら時間を置いて upload_id で改めて" +
+    "確認すること。" +
+    "**has_kudgivt は DEFAULT FALSE に戻る。** split が成功するまで、この運行は" +
+    "読み取り側 (/api/dtako/events・/etags・Y時間) から一時的に消える。" +
+    "**同一 comp_id を並列に叩かないこと。** theearth のセッションは1社1本しか" +
+    "持てず、並列で呼ぶと hang や 500 になりうる — 1件ずつ呼ぶこと。",
+  inputSchema: runDtakoAlcUploadArgs,
+  // **write tool。** read-only 一覧 (test/mcp/tools.test.ts の READ_ONLY) には
+  // 入れない — alc への書き込み (upsert) を伴うため
+  requiresScope: "mcp.write",
+  execute: async (env: Env, args: z.infer<typeof runDtakoAlcUploadArgs>) => {
+    const relay = env.SCRAPER_RELAY;
+    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
+    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+    const res = await relay.fetch("https://relay.internal/kintai-relay/dtako-alc-upload", {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
+      body: JSON.stringify({
+        ope_no: args.ope_no_22,
+        start_ope: args.start_ope,
+        comp_id: args.comp_id,
+      }),
+    });
+    const body = await res.text();
+    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
+    try {
+      return JSON.parse(body) as unknown;
+    } catch {
+      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
+    }
+  },
+};
+
 // ── run_kintai_recalc ────────────────────────────────────────────────────────
 
 const runKintaiRecalcArgs = z.object({
@@ -1613,4 +1690,5 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getKintaiDiffTool as unknown as ToolEntry<z.ZodTypeAny>,
   getOperationZipTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDtakoReimportTool as unknown as ToolEntry<z.ZodTypeAny>,
+  runDtakoAlcUploadTool as unknown as ToolEntry<z.ZodTypeAny>,
 ];

@@ -1103,6 +1103,8 @@ describe("ALL_TOOLS", () => {
     // dtako_events (と reset_timecard=true なら time_card_dtako) を書き換えうる
     // 取り込み (Refs ohishi-exp/rust-ichibanboshi#280、#205 の 67)
     run_dtako_reimport: "mcp.write",
+    // alc (R2 CSV) を書き換えうるアップロード。オンプレは触らない (Refs #633-9)
+    run_dtako_alc_upload: "mcp.write",
   } as const;
 
   it("read-only tool と write tool を取り違えない", () => {
