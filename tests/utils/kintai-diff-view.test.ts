@@ -13,6 +13,8 @@ import {
   parseKintaiDiffCacheState,
   parseKintaiDiffObservations,
   parseKintaiDiffSummary,
+  parseKintaiDiffValueDiffItems,
+  parseKintaiDiffValueDiffItemsFromResponse,
   parseKintaiFoldPage,
   parseKintaiRefreshMysqlApplyResult,
   parseKintaiRefreshMysqlGuarantee,
@@ -674,5 +676,149 @@ describe('fmtKintaiDiffCacheHeadline — 未確認/読めなかった/確認済�
   it('確認時刻が無ければ「確認時刻不明」に倒す', () => {
     const state = parseKintaiDiffCacheState(cacheBody({ last_verified_at: undefined }))
     expect(fmtKintaiDiffCacheHeadline(state)).toContain('確認時刻不明')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────
+// value_diff_restraint_match / value_diff_restraint_mismatch の items[]
+// (Refs #633-1)。実応答形 (`KintaiDiffValueDiffRow` = `KintaiDiffRow` +
+// `diff_fields`/`gcp`/`onprem`) を、issue #633 の実測 (1740/2026-06-06) に
+// 寄せた fixture で確認する。★ driver_cd は文字列 (`keyToRow` が文字列キーの
+// split から作るため、#630 と同じ理由で数値に決め打たない)。
+// ─────────────────────────────────────────────────────────────────────────
+
+/** 受け側 (`KintaiDiffValue`) の生の形 — `shift_source` (文字列) を含む。 */
+function diffValue(over: Record<string, unknown> = {}) {
+  return {
+    shift_source: 'dtako',
+    restraint_minutes: 593,
+    working_minutes: 494,
+    break_minutes: 100,
+    rest_minus_minutes: 0,
+    statutory_minutes: 480,
+    within_statutory_overtime_minutes: 0,
+    overtime_minutes: 14,
+    legal_holiday_minutes: 0,
+    night_minutes: 0,
+    overtime_night_minutes: 0,
+    legal_holiday_night_minutes: 0,
+    ...over,
+  }
+}
+
+/** `parseKintaiDiffValueDiffItem` が読んだ後の期待値 — `toMinuteRecord` は数値
+ * フィールドだけを拾うので `shift_source` (文字列) は落ちる。この突き合わせ機能では
+ * shift_source を使わないため、意図的に持たない。 */
+function expectedMinutes(over: Record<string, number> = {}) {
+  const { shift_source: _shiftSource, ...rest } = diffValue(over)
+  return rest
+}
+
+describe('parseKintaiDiffValueDiffItems', () => {
+  it('items が無いカテゴリは空配列', () => {
+    expect(parseKintaiDiffValueDiffItems({})).toEqual([])
+    expect(parseKintaiDiffValueDiffItems(null)).toEqual([])
+    expect(parseKintaiDiffValueDiffItems({ total: 1, capped: false })).toEqual([])
+  })
+
+  it('driver_cd が文字列の行を読む (#630 と同型 — 数値に決め打たない)', () => {
+    const items = parseKintaiDiffValueDiffItems({
+      total: 1,
+      capped: false,
+      items: [
+        {
+          driver_cd: '1740',
+          date: '2026-06-06',
+          start: '2026-06-06T08:22:00',
+          diff_fields: ['break_minutes', 'working_minutes', 'overtime_minutes'],
+          gcp: diffValue(),
+          onprem: diffValue({ working_minutes: 534, break_minutes: 60, overtime_minutes: 54 }),
+        },
+      ],
+    })
+    expect(items).toEqual([
+      {
+        driverCd: '1740',
+        date: '2026-06-06',
+        diffFields: ['break_minutes', 'working_minutes', 'overtime_minutes'],
+        gcp: expectedMinutes(),
+        onprem: expectedMinutes({ working_minutes: 534, break_minutes: 60, overtime_minutes: 54 }),
+      },
+    ])
+  })
+
+  it('driver_cd/date が欠けた壊れた行は無視する (読めた分だけ返す)', () => {
+    const items = parseKintaiDiffValueDiffItems({
+      items: [
+        { date: '2026-06-06', gcp: diffValue(), onprem: diffValue() },
+        { driver_cd: '1445', gcp: diffValue(), onprem: diffValue() },
+        { driver_cd: '1740', date: '2026-06-06', diff_fields: [], gcp: diffValue(), onprem: diffValue() },
+      ],
+    })
+    expect(items).toHaveLength(1)
+    expect(items[0].driverCd).toBe('1740')
+  })
+})
+
+describe('parseKintaiDiffValueDiffItemsFromResponse', () => {
+  it('/kintai/diff の生応答から match/mismatch 2 カテゴリぶんの items を読む', () => {
+    const raw = {
+      month: '2026-06',
+      diff: {
+        gcp_rows: 1,
+        onprem_rows: 1,
+        onprem_unreadable: false,
+        only_gcp: { total: 0, capped: false },
+        only_onprem_driver0: { total: 0, capped: false },
+        only_onprem_other: { total: 0, capped: false },
+        value_diff_restraint_match: {
+          total: 1,
+          capped: false,
+          items: [
+            {
+              driver_cd: '1740',
+              date: '2026-06-06',
+              start: '2026-06-06T08:22:00',
+              diff_fields: ['break_minutes', 'working_minutes', 'overtime_minutes'],
+              gcp: diffValue(),
+              onprem: diffValue({ working_minutes: 534, break_minutes: 60, overtime_minutes: 54 }),
+            },
+          ],
+        },
+        value_diff_restraint_mismatch: { total: 0, capped: false, items: [] },
+      },
+    }
+    const { match, mismatch } = parseKintaiDiffValueDiffItemsFromResponse(raw)
+    expect(mismatch).toEqual([])
+    expect(match).toHaveLength(1)
+    expect(match[0]).toEqual({
+      driverCd: '1740',
+      date: '2026-06-06',
+      diffFields: ['break_minutes', 'working_minutes', 'overtime_minutes'],
+      gcp: expectedMinutes(),
+      onprem: expectedMinutes({ working_minutes: 534, break_minutes: 60, overtime_minutes: 54 }),
+    })
+  })
+
+  it('キャッシュ応答 (items を保存しない) を渡しても空配列になるだけで落ちない', () => {
+    const cached = {
+      month: '2026-06',
+      diff: {
+        gcp_rows: 1,
+        onprem_rows: 1,
+        onprem_unreadable: false,
+        only_gcp: { total: 0, capped: false },
+        only_onprem_driver0: { total: 0, capped: false },
+        only_onprem_other: { total: 0, capped: false },
+        value_diff_restraint_match: { total: 1, capped: false },
+        value_diff_restraint_mismatch: { total: 0, capped: false },
+      },
+    }
+    expect(parseKintaiDiffValueDiffItemsFromResponse(cached)).toEqual({ match: [], mismatch: [] })
+  })
+
+  it('壊れた応答 (diff 自体が無い) でも空配列に倒す', () => {
+    expect(parseKintaiDiffValueDiffItemsFromResponse(null)).toEqual({ match: [], mismatch: [] })
+    expect(parseKintaiDiffValueDiffItemsFromResponse({})).toEqual({ match: [], mismatch: [] })
   })
 })

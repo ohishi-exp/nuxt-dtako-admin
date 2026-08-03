@@ -553,6 +553,80 @@ export function kintaiDiffHasAnyDiff(summary: KintaiDiffSummary): boolean {
   )
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// value_diff_restraint_match / value_diff_restraint_mismatch の items[]
+// (Refs #633-1 — 取り込み漏れ候補との突き合わせに使う。
+//
+// ★ ライブの `/kintai/diff` 応答には `items` が乗っているが、`parseKintaiDiffSummary`
+// (`toCategoryCount`) は表示に要る `total`/`capped` だけを読み、items は捨てている。
+// 保存分 (`/kintai/diff-cache`) はそもそも items を持たない (relay 側で保存前に捨てる、
+// `kintai-diff.ts` の `toCachedCategory` docs 参照) — items が要るのはライブ取得の
+// その場限りで、ここは独立にライブ応答からだけ読む。
+// ─────────────────────────────────────────────────────────────────────────
+
+/** 1 行ぶんの値差 (`KintaiDiffValueDiffRow` を camelCase に読み替えたもの)。 */
+export interface KintaiDiffValueDiffItem {
+  driverCd: string
+  date: string
+  diffFields: string[]
+  gcp: Record<string, number>
+  onprem: Record<string, number>
+}
+
+function toMinuteRecord(raw: unknown): Record<string, number> {
+  const r = (raw ?? {}) as Record<string, unknown>
+  const out: Record<string, number> = {}
+  for (const [k, v] of Object.entries(r)) {
+    if (typeof v === 'number' && Number.isFinite(v)) out[k] = v
+  }
+  return out
+}
+
+function parseKintaiDiffValueDiffItem(raw: unknown): KintaiDiffValueDiffItem | null {
+  if (raw == null || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const driverCd = typeof r.driver_cd === 'string'
+    ? r.driver_cd
+    : typeof r.driver_cd === 'number' && Number.isFinite(r.driver_cd)
+      ? String(r.driver_cd)
+      : null
+  if (driverCd === null || typeof r.date !== 'string') return null
+  return {
+    driverCd,
+    date: r.date,
+    diffFields: Array.isArray(r.diff_fields) ? r.diff_fields.filter((f): f is string => typeof f === 'string') : [],
+    gcp: toMinuteRecord(r.gcp),
+    onprem: toMinuteRecord(r.onprem),
+  }
+}
+
+/** 1 カテゴリぶん (`{items: [...]}`) の items を読む。壊れた行は無視して読めた分だけ返す。 */
+export function parseKintaiDiffValueDiffItems(raw: unknown): KintaiDiffValueDiffItem[] {
+  const r = (raw ?? {}) as Record<string, unknown>
+  const items = Array.isArray(r.items) ? r.items : []
+  return items
+    .map(parseKintaiDiffValueDiffItem)
+    .filter((x): x is KintaiDiffValueDiffItem => x !== null)
+}
+
+export interface KintaiDiffValueDiffItems {
+  match: KintaiDiffValueDiffItem[]
+  mismatch: KintaiDiffValueDiffItem[]
+}
+
+/** `/restraint-api/kintai/diff` の生応答から2カテゴリぶんの items をまとめて読む。
+ * キャッシュ応答 (`/kintai/diff-cache`) を渡しても items が無いだけで空配列になる
+ * (呼び出し側で「ライブ取得直後だけ」呼ぶことを保証すること — このモジュール自体は
+ * 呼び出しタイミングを制御しない)。 */
+export function parseKintaiDiffValueDiffItemsFromResponse(raw: unknown): KintaiDiffValueDiffItems {
+  const r = (raw ?? {}) as Record<string, unknown>
+  const diff = (r.diff ?? {}) as Record<string, unknown>
+  return {
+    match: parseKintaiDiffValueDiffItems(diff.value_diff_restraint_match),
+    mismatch: parseKintaiDiffValueDiffItems(diff.value_diff_restraint_mismatch),
+  }
+}
+
 /** ISO 文字列 (UTC) を JST の `MM/DD HH:mm` にする (`app/utils/profit-r2.ts` の
  * `restraintVersionTimestamp` と同じ JST 変換の作法 — 壁時計を UTC getter で読む)。
  * パースできなければ null。 */
