@@ -62,6 +62,13 @@ const WINDOW_PATH = "/api/kintai/timecard/window";
 const RECALC_PATH = "/api/kintai/recalc";
 /** 畳んだ結果の読み出し口 (rust-ichibanboshi `src/routes/kintai_day_summaries.rs`)。 */
 const DAY_SUMMARIES_PATH = "/api/kintai/day-summaries";
+/**
+ * 月ごとの stale (畳み直しが要るか) だけを返す軽い口 (rust-ichibanboshi
+ * `src/routes/stale_months.rs`、Refs #620)。`unko_diff` (alc の etags 掃引、約50秒) を
+ * 含まない Postgres 1 往復だけの応答 — 月タブの丸のためだけに `/api/kintai/recalc`
+ * (フル突合) を叩かないための専用口。
+ */
+const STALE_MONTHS_PATH = "/api/kintai/stale-months";
 
 /** 窓の既定の月数 — **当月 + 前月**。始業 / 終業 の後追い修正を拾う幅。 */
 export const DEFAULT_MONTH_COUNT = 2;
@@ -565,5 +572,43 @@ export async function relayKintaiDaySummaries(
   return readJson<unknown>(
     await deps.gcp(`${DAY_SUMMARIES_PATH}?${q}`),
     "gcp kintai day-summaries",
+  );
+}
+
+export interface KintaiStaleMonthsInput {
+  /** 窓の開始月 (`YYYY-MM`)。省略可 — 受け側の既定 (当月から12か月遡る) に任せる。 */
+  from?: string;
+  /** 窓の終了月 (`YYYY-MM`)。省略可 — 受け側の既定 (当月) に任せる。 */
+  to?: string;
+}
+
+/**
+ * 月ごとの stale (畳み直しが要るか) だけを読む (Refs #620)。
+ *
+ * **読むだけ。** 受け側に `POST` は無い ([`relayKintaiDaySummaries`] と同じ塞ぎ方)。
+ * `from`/`to` は両方省略可で、省略時は受け側の既定 (当月から12か月遡る、上限36か月)
+ * に任せる — ここで既定値や窓の計算を持たない (2重実装にしない、`relayKintaiWindow`
+ * が窓計算をこちらで持つのとは違い、この口は「何を返すか」を受け側が決める設計)。
+ *
+ * 応答は**そのまま返す**。呼び出し側 (画面) が `total_drivers === 0` (データ無し) と
+ * `stale_drivers > 0` (畳み直しが要る) を読み分ける — ここで丸めない。
+ */
+export async function relayKintaiStaleMonths(
+  deps: Pick<KintaiRelayDeps, "gcp">,
+  input: KintaiStaleMonthsInput,
+): Promise<unknown> {
+  if (input.from !== undefined && !MONTH_RE.test(input.from)) {
+    throw new KintaiRelayError(`from は YYYY-MM で指定してください: ${input.from}`);
+  }
+  if (input.to !== undefined && !MONTH_RE.test(input.to)) {
+    throw new KintaiRelayError(`to は YYYY-MM で指定してください: ${input.to}`);
+  }
+  const q = new URLSearchParams();
+  if (input.from) q.set("from", input.from);
+  if (input.to) q.set("to", input.to);
+  const qs = q.toString();
+  return readJson<unknown>(
+    await deps.gcp(qs ? `${STALE_MONTHS_PATH}?${qs}` : STALE_MONTHS_PATH),
+    "gcp kintai stale-months",
   );
 }

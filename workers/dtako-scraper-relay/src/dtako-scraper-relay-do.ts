@@ -94,6 +94,7 @@ import {
   monthsCoveredByRange,
   relayKintaiDaySummaries,
   relayKintaiRecalc,
+  relayKintaiStaleMonths,
   relayKintaiWindow,
   type KintaiRelayDeps,
 } from "./kintai-relay";
@@ -2569,6 +2570,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/kintai/diff" && request.method === "GET") {
       return this.handleKintaiDiff(record!, url);
     }
+    // 月タブの「畳み直しが要る月」丸 (viewer 認可、Refs #620)。フル突合
+    // (kintai/diff、約50秒) とは別の軽い口 — 月タブ描画のたびに叩いても壊れない
+    if (url.pathname === "/restraint-api/kintai/stale-months" && request.method === "GET") {
+      return this.handleKintaiStaleMonths(record!, url);
+    }
     if (url.pathname === "/restraint-api/kintai/refresh/timecard" && request.method === "POST") {
       return this.handleKintaiRefreshTimecard(record!, url);
     }
@@ -3935,6 +3941,36 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       }),
     );
     return Response.json({ month: ym, diff, observations, observations_error: observationsError });
+  }
+
+  /**
+   * GET /restraint-api/kintai/stale-months?from=YYYY-MM&to=YYYY-MM — 月タブの
+   * 「畳み直しが要る月」丸のための軽い口 (Refs #620)。
+   *
+   * 中身は `kintai-relay.ts` の `relayKintaiStaleMonths` そのまま (Postgres 1 往復、
+   * `unko_diff` の etags 掃引を含まない) — `/kintai/diff` (フル突合、約50秒) と違い、
+   * 月タブ描画のたびに叩いても壊れない。`from`/`to` は両方省略可 — 受け側の既定
+   * (当月から12か月遡る) に任せる。
+   *
+   * 応答はそのまま返す。`total_drivers === 0` (データ無し) と `stale_drivers > 0`
+   * (畳み直しが要る) の読み分けは front 側 (`app/utils/kintai-stale-months.ts`) の
+   * 責務 — ここで丸めない (#620 の教訓: 「無い」と「引けていない」を混同しない)。
+   */
+  private async handleKintaiStaleMonths(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_stale_months");
+    if (ctx instanceof Response) return ctx;
+
+    const from = url.searchParams.get("from") || undefined;
+    const to = url.searchParams.get("to") || undefined;
+
+    try {
+      const months = await relayKintaiStaleMonths(ctx.deps, { from, to });
+      console.log(JSON.stringify({ kintai_stale_months: "ok" }));
+      return Response.json(months);
+    } catch (err) {
+      console.error(JSON.stringify({ kintai_stale_months: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, err instanceof Error ? err.message : "月別 stale の取得に失敗しました");
+    }
   }
 
   /**

@@ -95,6 +95,13 @@ import {
   parseKintaiRefreshMysqlPreview,
   parseKintaiWindowReport,
 } from '~/utils/kintai-diff-view'
+import type { KintaiStaleMonthBadge, KintaiStaleMonthsResponse } from '~/utils/kintai-stale-months'
+import {
+  kintaiStaleMonthBadge,
+  kintaiStaleMonthEntry,
+  kintaiStaleMonthKey,
+  parseKintaiStaleMonths,
+} from '~/utils/kintai-stale-months'
 
 const {
   session: theearthSession,
@@ -232,6 +239,11 @@ const ichibanMonthsTimecard = ref<string[]>([])
 /** relay の kintai 上流キャッシュ (daily+kosoku) が揃っている月 (Refs #543 followup)。
  * null = 旧 relay 応答 (フィールド無し) — バッジは従来どおりフル表示に fallback。 */
 const kintaiCachedMonths = ref<string[] | null>(null)
+/** 月ごとの stale (畳み直しが要るか、Refs #620)。`GET /restraint-api/kintai/stale-months`
+ * を月タブ描画のたびに叩き直さないよう、他のバッジと同じく loadArchiveMonths と
+ * 同じタイミングで1回だけ取る。null = 未取得 (取得中 or 失敗) — 判定は
+ * `app/utils/kintai-stale-months.ts` の pure 関数に寄せる。 */
+const kintaiStaleMonths = ref<KintaiStaleMonthsResponse | null>(null)
 
 function monthHasKintai(year: number, monthNo: number): boolean {
   return kintaiMonths.value.includes(`${year}-${String(monthNo).padStart(2, '0')}`)
@@ -259,6 +271,32 @@ function monthFastBadge(year: number, monthNo: number): FastBadgeState {
     ichibanMonths.value,
     kintaiCachedMonths.value,
   )
+}
+
+/** 月タブの「畳み直しが要る月」丸 (Refs #620)。判定は pure な `kintaiStaleMonthBadge`
+ * (app/utils/kintai-stale-months.ts) に寄せる — 塗る条件は `stale_drivers > 0` だけ、
+ * `total_drivers === 0` (データ無し) は「畳み済みで最新」と別扱いにする。 */
+function monthStaleBadge(year: number, monthNo: number): KintaiStaleMonthBadge {
+  return kintaiStaleMonthBadge(kintaiStaleMonthKey(year, monthNo), kintaiStaleMonths.value?.months ?? [])
+}
+
+/** ツールチップ用に stale/total の実数を出す。応答に無い月は null。 */
+function monthStaleEntry(year: number, monthNo: number) {
+  return kintaiStaleMonthEntry(kintaiStaleMonthKey(year, monthNo), kintaiStaleMonths.value?.months ?? [])
+}
+
+/** stale の丸を押したら「オンプレ vs Supabase」タブへ飛び、その月を選んで
+ * 「② GCP 側を畳み直す」セクションまでスクロールする (Refs #620 やること2の理想形)。
+ * 押せなくても丸自体は出るので、この導線が無くても機能は成立する。 */
+function jumpToGcpFold(year: number, monthNo: number) {
+  selectedYear.value = year
+  selectedMonthNo.value = monthNo
+  activeTab.value = 'gcpdiff'
+  if (import.meta.client) {
+    nextTick(() => {
+      document.getElementById('gcp-fold-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }
 }
 
 /** 選択中の月がアーカイブ有りなのに未同期 = 表示が遅い状態。バックフィル
@@ -289,6 +327,20 @@ async function loadKyuyoSyncedMonths() {
   finally {
     // 失敗しても「解決済み」にする — 引けない環境で「読み込み中」を出し続けない
     kyuyoSyncedLoaded.value = true
+  }
+}
+
+/** 月ごとの stale を relay 経由で1回だけ取る (Refs #620)。**フル突合
+ * (/restraint-api/kintai/diff、約50秒) はここでは叩かない** — この口は
+ * Postgres 1 往復だけの軽い応答で、月タブ描画のたびに叩いても壊れない設計。
+ * 失敗しても静かに空のまま — バッジが出ないだけで他の月タブ表示は止めない。 */
+async function loadKintaiStaleMonths() {
+  try {
+    const res = await $fetch<unknown>('/restraint-api/kintai/stale-months', { headers: authHeaders() })
+    kintaiStaleMonths.value = parseKintaiStaleMonths(res)
+  }
+  catch {
+    // バッジが出ないだけ — エラー表示はしない (他の月タブバッジと同じ扱い)
   }
 }
 
@@ -372,6 +424,8 @@ async function loadArchiveMonths() {
     kintaiCachedMonths.value = res.kintai_cached_months ?? null
     // 給与バッジも同じタイミングで更新 (失敗は静かに無視)
     void loadKyuyoSyncedMonths()
+    // 月ごとの stale バッジも同じタイミングで1回だけ (失敗は静かに無視、Refs #620)
+    void loadKintaiStaleMonths()
     // 初期選択: アーカイブのある最新月
     if (res.months.length > 0 && !monthHasArchive(selectedYear.value, selectedMonthNo.value)) {
       const latest = res.months[0]!
@@ -4062,6 +4116,24 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       ? ' / タイムカードも同期済み'
                       : ' / タイムカードは未同期 (夜間バッチ待ち、表示自体には影響しません)')"
                 />
+                <!-- オンプレ vs GCP の畳み直し状況 (Refs #620)。**塗るのは
+                     stale_drivers > 0 だけ** — 「GCPにしか無い運行」は混ぜない
+                     (#620 の決定、毎月点灯する無意味な警告を避ける)。
+                     total_drivers === 0 (データ無し) は「畳み済みで最新」とは
+                     別の見た目 (灰) にする — 混同すると未取り込みの月が
+                     収束済みに見える (#620 が解こうとしている問題そのもの) -->
+                <button
+                  v-if="monthStaleBadge(selectedYear, m) === 'stale'"
+                  type="button"
+                  class="w-1.5 h-1.5 rounded-full bg-red-500 cursor-pointer"
+                  :title="`畳み直しが要ります (${monthStaleEntry(selectedYear, m)?.staleDrivers ?? '?'}名 / ${monthStaleEntry(selectedYear, m)?.totalDrivers ?? '?'}名中) — クリックで『オンプレ vs Supabase』タブへ`"
+                  @click="jumpToGcpFold(selectedYear, m)"
+                />
+                <span
+                  v-else-if="monthStaleBadge(selectedYear, m) === 'no_data'"
+                  class="w-1.5 h-1.5 rounded-full bg-gray-400"
+                  title="データ無し (GCP側にこの月の day_summaries が1行も無い — 未取り込み/対象外。畳み直しの警告ではありません)"
+                />
               </span>
             </div>
           </div>
@@ -4071,6 +4143,8 @@ watch([compMap, kyuyoSyncedKeys], () => {
             <span class="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 align-middle ml-1" /> 給与
             <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 align-middle ml-1" /> 高速表示可 (キャッシュ有り)
             <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 opacity-50 align-middle ml-1" /> 同期のみ
+            <span class="inline-block w-1.5 h-1.5 rounded-full bg-red-500 align-middle ml-1" /> 畳み直しが要る (オンプレ vs GCP)
+            <span class="inline-block w-1.5 h-1.5 rounded-full bg-gray-400 align-middle ml-1" /> GCP側データ無し
           </span>
         </div>
 
@@ -6455,7 +6529,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
             </div>
           </UCard>
 
-          <UCard class="mt-4">
+          <UCard id="gcp-fold-section" class="mt-4">
             <template #header>
               <span class="font-semibold">② GCP 側を畳み直す (fold recalc)</span>
             </template>
