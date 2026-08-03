@@ -33,6 +33,14 @@ function diffBody(over: Record<string, unknown> = {}) {
       fold_would_write_drivers: 0,
       warnings: ['dtako 入力欠け: 乗務員12名の末尾が16日超'],
       unko_diff_gcp_only_in_month: 417,
+      unko_diff_gcp_only_driver_split: {
+        never_onprem_drivers: 41,
+        never_onprem_ops: 399,
+        also_in_month_drivers: 2,
+        also_in_month_ops: 2,
+        other_month_only_drivers: 3,
+        other_month_only_ops: 16,
+      },
       next_after_driver_cd: null,
     },
     observations_error: null,
@@ -98,15 +106,45 @@ describe('parseKintaiDiffObservations', () => {
       foldWouldWriteDrivers: 0,
       warnings: ['dtako 入力欠け: 乗務員12名の末尾が16日超'],
       unkoDiffGcpOnlyInMonth: 417,
+      unkoDiffGcpOnlyDriverSplit: {
+        neverOnpremDrivers: 41,
+        neverOnpremOps: 399,
+        alsoInMonthDrivers: 2,
+        alsoInMonthOps: 2,
+        otherMonthOnlyDrivers: 3,
+        otherMonthOnlyOps: 16,
+      },
     })
   })
 
-  it('欠けたフィールドは null/[] に倒す', () => {
+  it('欠けたフィールドは null/[]/0 に倒す (3区分の和と合計 (unkoDiffGcpOnlyInMonth) との整合を壊さないよう split は 0)', () => {
     expect(parseKintaiDiffObservations({})).toEqual({
       staleDrivers: null,
       foldWouldWriteDrivers: null,
       warnings: [],
       unkoDiffGcpOnlyInMonth: null,
+      unkoDiffGcpOnlyDriverSplit: {
+        neverOnpremDrivers: 0,
+        neverOnpremOps: 0,
+        alsoInMonthDrivers: 0,
+        alsoInMonthOps: 0,
+        otherMonthOnlyDrivers: 0,
+        otherMonthOnlyOps: 0,
+      },
+    })
+  })
+
+  it('unko_diff_gcp_only_driver_split の一部フィールドだけ欠けていたらそこだけ 0 に倒す', () => {
+    const o = parseKintaiDiffObservations({
+      unko_diff_gcp_only_driver_split: { also_in_month_drivers: 2, also_in_month_ops: 2 },
+    })
+    expect(o?.unkoDiffGcpOnlyDriverSplit).toEqual({
+      neverOnpremDrivers: 0,
+      neverOnpremOps: 0,
+      alsoInMonthDrivers: 2,
+      alsoInMonthOps: 2,
+      otherMonthOnlyDrivers: 0,
+      otherMonthOnlyOps: 0,
     })
   })
 
@@ -169,13 +207,33 @@ describe('buildKintaiDiffPrescriptions', () => {
     expect(ps.find(p => p.key === 'timecard')?.relevant).toBe(false)
   })
 
-  it('unko_diff_gcp_only_in_month > 0 または only_gcp > 0 で mysql が relevant になる', () => {
-    const ps1 = buildKintaiDiffPrescriptions(null, parseKintaiDiffObservations({ unko_diff_gcp_only_in_month: 10 }))
+  it('also_in_month_ops > 0 または other_month_only_ops > 0 または only_gcp > 0 で mysql が relevant になる (Refs #615-7)', () => {
+    const ps1 = buildKintaiDiffPrescriptions(
+      null,
+      parseKintaiDiffObservations({ unko_diff_gcp_only_driver_split: { also_in_month_ops: 2 } }),
+    )
     expect(ps1.find(p => p.key === 'mysql')?.relevant).toBe(true)
 
-    const summary = parseKintaiDiffSummary({ month: '2026-06', diff: { only_gcp: { total: 2, capped: false } } })
-    const ps2 = buildKintaiDiffPrescriptions(summary, null)
+    const ps2 = buildKintaiDiffPrescriptions(
+      null,
+      parseKintaiDiffObservations({ unko_diff_gcp_only_driver_split: { other_month_only_ops: 16 } }),
+    )
     expect(ps2.find(p => p.key === 'mysql')?.relevant).toBe(true)
+
+    const summary = parseKintaiDiffSummary({ month: '2026-06', diff: { only_gcp: { total: 2, capped: false } } })
+    const ps3 = buildKintaiDiffPrescriptions(summary, null)
+    expect(ps3.find(p => p.key === 'mysql')?.relevant).toBe(true)
+  })
+
+  it('never_onprem_ops だけでは mysql は relevant にならない (オンプレに居ない乗務員の運行を取り込む導線ではないため)', () => {
+    const ps = buildKintaiDiffPrescriptions(
+      null,
+      parseKintaiDiffObservations({
+        unko_diff_gcp_only_in_month: 399,
+        unko_diff_gcp_only_driver_split: { never_onprem_drivers: 41, never_onprem_ops: 399 },
+      }),
+    )
+    expect(ps.find(p => p.key === 'mysql')?.relevant).toBe(false)
   })
 
   it('mysql の候補文言に「保証はありません」が入っている (押せば直ると誤読させない)', () => {

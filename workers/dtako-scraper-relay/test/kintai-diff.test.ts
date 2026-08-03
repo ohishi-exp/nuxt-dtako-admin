@@ -247,6 +247,14 @@ describe("pickRecalcObservations (Refs #615-4)", () => {
       fold: { drivers_written: 5 },
       warnings: ["dtako 入力欠け: 乗務員12名の末尾が16日超"],
       unko_diff_gcp_only_in_month: 417,
+      unko_diff_gcp_only_driver_split: {
+        never_onprem_drivers: 41,
+        never_onprem_ops: 399,
+        also_in_month_drivers: 2,
+        also_in_month_ops: 2,
+        other_month_only_drivers: 3,
+        other_month_only_ops: 16,
+      },
       next_after_driver_cd: 1234,
     });
     expect(obs).toEqual({
@@ -254,6 +262,14 @@ describe("pickRecalcObservations (Refs #615-4)", () => {
       fold_would_write_drivers: 5,
       warnings: ["dtako 入力欠け: 乗務員12名の末尾が16日超"],
       unko_diff_gcp_only_in_month: 417,
+      unko_diff_gcp_only_driver_split: {
+        never_onprem_drivers: 41,
+        never_onprem_ops: 399,
+        also_in_month_drivers: 2,
+        also_in_month_ops: 2,
+        other_month_only_drivers: 3,
+        other_month_only_ops: 16,
+      },
       next_after_driver_cd: 1234,
     });
   });
@@ -263,12 +279,21 @@ describe("pickRecalcObservations (Refs #615-4)", () => {
     expect(obs.fold_would_write_drivers).toBe(9);
   });
 
-  it("原型が壊れていても例外を投げず null/空配列に倒す (未知の応答形への耐性)", () => {
+  it("原型が壊れていても例外を投げず null/空配列/0 に倒す (未知の応答形への耐性)", () => {
+    const emptySplit = {
+      never_onprem_drivers: 0,
+      never_onprem_ops: 0,
+      also_in_month_drivers: 0,
+      also_in_month_ops: 0,
+      other_month_only_drivers: 0,
+      other_month_only_ops: 0,
+    };
     expect(pickRecalcObservations(null)).toEqual({
       stale_drivers: null,
       fold_would_write_drivers: null,
       warnings: [],
       unko_diff_gcp_only_in_month: null,
+      unko_diff_gcp_only_driver_split: emptySplit,
       next_after_driver_cd: null,
     });
     expect(pickRecalcObservations("not-an-object")).toEqual({
@@ -276,7 +301,39 @@ describe("pickRecalcObservations (Refs #615-4)", () => {
       fold_would_write_drivers: null,
       warnings: [],
       unko_diff_gcp_only_in_month: null,
+      unko_diff_gcp_only_driver_split: emptySplit,
       next_after_driver_cd: null,
+    });
+  });
+
+  it("unko_diff_gcp_only_driver_split が無ければ全フィールド 0 に倒す (合計との整合を壊さないため null にしない)", () => {
+    const obs = pickRecalcObservations({});
+    expect(obs.unko_diff_gcp_only_driver_split).toEqual({
+      never_onprem_drivers: 0,
+      never_onprem_ops: 0,
+      also_in_month_drivers: 0,
+      also_in_month_ops: 0,
+      other_month_only_drivers: 0,
+      other_month_only_ops: 0,
+    });
+  });
+
+  it("unko_diff_gcp_only_driver_split が object でなければ無視する (壊れた形への耐性)", () => {
+    const obs = pickRecalcObservations({ unko_diff_gcp_only_driver_split: "nope" });
+    expect(obs.unko_diff_gcp_only_driver_split.also_in_month_ops).toBe(0);
+  });
+
+  it("unko_diff_gcp_only_driver_split の一部フィールドだけ欠けていたらそこだけ 0 に倒す", () => {
+    const obs = pickRecalcObservations({
+      unko_diff_gcp_only_driver_split: { also_in_month_drivers: 2, also_in_month_ops: 2 },
+    });
+    expect(obs.unko_diff_gcp_only_driver_split).toEqual({
+      never_onprem_drivers: 0,
+      never_onprem_ops: 0,
+      also_in_month_drivers: 2,
+      also_in_month_ops: 2,
+      other_month_only_drivers: 0,
+      other_month_only_ops: 0,
     });
   });
 

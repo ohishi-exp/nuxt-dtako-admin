@@ -6338,7 +6338,45 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 <ul v-else-if="gcpDiffObservations" class="text-sm space-y-1">
                   <li>stale (現行ロジック未反映) の乗務員数: <b>{{ gcpDiffObservations.staleDrivers ?? '不明' }}</b></li>
                   <li>畳み直すと変わる乗務員数 (dry-run 1ページぶん): <b>{{ gcpDiffObservations.foldWouldWriteDrivers ?? '不明' }}</b></li>
-                  <li>対象月に GCP にしか無い運行数: <b>{{ gcpDiffObservations.unkoDiffGcpOnlyInMonth ?? '不明' }}</b></li>
+
+                  <!-- GCP にしか無い運行の内訳 (Refs #615-7)。also_in_month (取り込み漏れの候補) を
+                       主役にし、never_onprem (構造的なもの) は副次的に畳んで出す。 -->
+                  <li v-if="gcpDiffObservations.unkoDiffGcpOnlyInMonth === null">
+                    対象月に GCP にしか無い運行数: <b>不明</b>
+                  </li>
+                  <li v-else>
+                    <div>
+                      取り込み漏れの候補 (当月オンプレにも居る乗務員の運行):
+                      <b class="text-base">{{ gcpDiffObservations.unkoDiffGcpOnlyDriverSplit.alsoInMonthOps }}</b>
+                      <span class="text-xs text-gray-500">
+                        (乗務員 {{ gcpDiffObservations.unkoDiffGcpOnlyDriverSplit.alsoInMonthDrivers }}名)
+                      </span>
+                    </div>
+                    <details class="mt-1 text-xs text-gray-500">
+                      <summary class="cursor-pointer select-none">
+                        対象月に GCP にしか無い運行数 (合計 {{ gcpDiffObservations.unkoDiffGcpOnlyInMonth }} = 下3つの和) — 内訳
+                      </summary>
+                      <ul class="list-disc list-inside mt-1 space-y-0.5">
+                        <li>
+                          当月オンプレにも居る乗務員の運行 (取り込み漏れの候補、上と同じ数):
+                          {{ gcpDiffObservations.unkoDiffGcpOnlyDriverSplit.alsoInMonthOps }}
+                          (乗務員 {{ gcpDiffObservations.unkoDiffGcpOnlyDriverSplit.alsoInMonthDrivers }}名)
+                        </li>
+                        <li>
+                          別月にはオンプレに居る乗務員の運行:
+                          {{ gcpDiffObservations.unkoDiffGcpOnlyDriverSplit.otherMonthOnlyOps }}
+                          (乗務員 {{ gcpDiffObservations.unkoDiffGcpOnlyDriverSplit.otherMonthOnlyDrivers }}名)
+                        </li>
+                        <li>
+                          打刻システムが無い営業所の乗務員 + 乗務員CD=0 (構内移動・回送等) の運行:
+                          {{ gcpDiffObservations.unkoDiffGcpOnlyDriverSplit.neverOnpremOps }}
+                          (乗務員 {{ gcpDiffObservations.unkoDiffGcpOnlyDriverSplit.neverOnpremDrivers }}名) —
+                          構造的なもので差ではありません
+                        </li>
+                      </ul>
+                    </details>
+                  </li>
+
                   <li v-if="gcpDiffObservations.warnings.length">
                     警告:
                     <ul class="list-disc list-inside">
