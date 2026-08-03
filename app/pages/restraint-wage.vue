@@ -1563,11 +1563,14 @@ async function checkDtakoPresenceForAllCandidates() {
         query: { driver_cd: c.driverCd, ope_no: c.unkoNo },
       })
       const lookup = parseDayEventsLookup(res)
-      dtakoPresenceResults.value.set(key, kintaiUnkoGapDtakoCheckResultFromLookup(lookup.status, lookup.unkoNo))
+      dtakoPresenceResults.value.set(
+        key,
+        kintaiUnkoGapDtakoCheckResultFromLookup(lookup.status, lookup.unkoNo, lookup.candidates),
+      )
     }
     catch {
       // 1件の失敗で全体を止めない — この候補だけ「調べられていない」に倒し、続きを回す。
-      dtakoPresenceResults.value.set(key, { status: 'inconclusive', unkoNo23: null })
+      dtakoPresenceResults.value.set(key, { status: 'inconclusive', unkoNo23: null, candidates: [] })
     }
     dtakoPresenceProgress.value = { done: (dtakoPresenceProgress.value?.done ?? 0) + 1, total: candidates.length }
   }
@@ -6826,13 +6829,14 @@ watch([compMap, kyuyoSyncedKeys], () => {
                                   />
                                 </div>
 
-                                <!-- オンプレにデジタコが在るか (Refs #633-1 条件8〜14)。★ 押した時だけ
-                                     一括で調べる (下のボタン) — ここは結果があれば表示するだけ。 -->
+                                <!-- オンプレにデジタコが在るか (Refs #633-1 条件8〜14、#633-2 で multiple を追加)。
+                                     ★ 押した時だけ一括で調べる (下のボタン) — ここは結果があれば表示するだけ。 -->
                                 <p
                                   class="mt-1 text-xs"
                                   :class="{
                                     'text-green-700 dark:text-green-400': dtakoPresenceViewFor(d.driverCd, no).status === 'present',
-                                    'text-gray-500': dtakoPresenceViewFor(d.driverCd, no).status !== 'present',
+                                    'text-amber-700 dark:text-amber-400': dtakoPresenceViewFor(d.driverCd, no).status === 'multiple',
+                                    'text-gray-500': dtakoPresenceViewFor(d.driverCd, no).status === 'absent' || dtakoPresenceViewFor(d.driverCd, no).status === 'inconclusive',
                                   }"
                                 >
                                   {{ dtakoPresenceViewFor(d.driverCd, no).message }}
@@ -6840,6 +6844,17 @@ watch([compMap, kyuyoSyncedKeys], () => {
                                     実物: <code class="select-all">{{ dtakoPresenceViewFor(d.driverCd, no).unkoNo23 }}</code>
                                   </template>
                                 </p>
+                                <!-- multiple: 人が目で見て選ぶための候補一覧。★ 自動で1件を選ばない —
+                                     ③フォームへの「使う」ボタンはここには置かない (どれが正しい対象CDかは
+                                     front には判別できないため、親判断 2026-08-04)。 -->
+                                <ul
+                                  v-if="dtakoPresenceViewFor(d.driverCd, no).candidates.length"
+                                  class="mt-0.5 ml-4 text-xs text-gray-500 list-disc list-inside"
+                                >
+                                  <li v-for="c in dtakoPresenceViewFor(d.driverCd, no).candidates" :key="c">
+                                    <code class="select-all">{{ c }}</code>
+                                  </li>
+                                </ul>
 
                                 <!-- その日の両側の差 (Refs #633-1)。★ 候補が複数あっても価値は
                                      1件ずつ違う (issue #633 実測: 1740は40分差あり・1445は一致) —
