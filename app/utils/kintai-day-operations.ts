@@ -32,6 +32,16 @@ function toStringOrNull(v: unknown): string | null {
   return typeof v === 'string' ? v : null
 }
 
+const UNKO_NO_23_RE = /^\d{23}$/
+
+/** `unkoNo` が③ (勤務時間再登録、`resetby-unko-no`) に使える23桁 (対象CD込み) か。
+ * relay 側 (`pickDayOperationsList`) は既に23桁だけを通しているはずだが、front は
+ * 応答を信用せず自前で確認する (CLAUDE.md の防御的読み取り方針)。22桁のまま
+ * ③へ渡すと「別の乗務員の行を消しかねない」ため、ボタンの活性判定に使う。 */
+export function isKintaiDayOperationUnkoNo23Digit(unkoNo: string): boolean {
+  return UNKO_NO_23_RE.test(unkoNo)
+}
+
 /** `GET /restraint-api/kintai/day-operations` の応答を読む。壊れた形は空配列に
  * 倒す (捏造しない) — 呼び出し側は「運行がありません」と「読めなかった」を
  * 混同しないよう、この関数の戻り値ではなく呼び出し元の try/catch で区別する。 */

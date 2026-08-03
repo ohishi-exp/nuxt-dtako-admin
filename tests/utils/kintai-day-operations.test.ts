@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseKintaiDayOperations } from '~/utils/kintai-day-operations'
+import { parseKintaiDayOperations, isKintaiDayOperationUnkoNo23Digit } from '~/utils/kintai-day-operations'
 
 const OPE_NO_22 = '2606050753300000004286'
 const UNKO_NO_23 = `${OPE_NO_22}1`
@@ -59,5 +59,21 @@ describe('parseKintaiDayOperations', () => {
     expect(parseKintaiDayOperations('garbage')).toEqual({ driverCd: null, date: null, operations: [] })
     expect(parseKintaiDayOperations({})).toEqual({ driverCd: null, date: null, operations: [] })
     expect(parseKintaiDayOperations({ operations: [null, 'x', 123] }).operations).toEqual([])
+  })
+})
+
+describe('isKintaiDayOperationUnkoNo23Digit', () => {
+  it('23桁の数字なら true', () => {
+    expect(isKintaiDayOperationUnkoNo23Digit(UNKO_NO_23)).toBe(true)
+  })
+
+  it('22桁 (対象CD無し) は false', () => {
+    expect(isKintaiDayOperationUnkoNo23Digit(OPE_NO_22)).toBe(false)
+  })
+
+  it('空文字/24桁/数字以外は false (捏造しない — あるものをそのまま判定するだけ)', () => {
+    expect(isKintaiDayOperationUnkoNo23Digit('')).toBe(false)
+    expect(isKintaiDayOperationUnkoNo23Digit(`${UNKO_NO_23}9`)).toBe(false)
+    expect(isKintaiDayOperationUnkoNo23Digit(`${OPE_NO_22}a`)).toBe(false)
   })
 })

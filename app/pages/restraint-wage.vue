@@ -139,7 +139,7 @@ import {
 import type { DayEventsLookup } from '~/utils/kintai-day-events-lookup'
 import { parseDayEventsLookup } from '~/utils/kintai-day-events-lookup'
 import type { KintaiDayOperation } from '~/utils/kintai-day-operations'
-import { parseKintaiDayOperations } from '~/utils/kintai-day-operations'
+import { parseKintaiDayOperations, isKintaiDayOperationUnkoNo23Digit } from '~/utils/kintai-day-operations'
 import type { KintaiAlcUploadResult } from '~/utils/kintai-alc-upload'
 import { parseKintaiAlcUploadResult } from '~/utils/kintai-alc-upload'
 
@@ -1693,8 +1693,9 @@ watch(month, () => {
 // ---- 取り込み漏れ候補の運行NO一覧 (Refs #623-2) ----
 // ★ この口は遅い (alc への etags 往復を含む、所要時間の保証なし)。**自動実行しない** —
 // 「運行NO を出す」ボタンを押したときだけ叩く。押すと乗務員ごとに運行NOを一覧し、
-// 各行の「③に入れる」で③のフォームへ値を渡す (自動実行はしない、人が確認してから
-// 「① 確認」を押す)。
+// 各行の「①② の欄に入れる (22桁)」で③のフォーム (①②の欄を共用) へ値を渡す —
+// ③自体は実行しない、22桁のままなので③は拒否される (自動実行はしない、人が確認して
+// から「① 確認」を押す)。
 
 const unkoGapsResult = ref<KintaiUnkoGaps | null>(null)
 const unkoGapsLoading = ref(false)
@@ -1816,6 +1817,21 @@ watch(month, () => {
  * 「勤務時間再登録まで行う」を使える。
  */
 function applyUnkoGapCandidateToMysqlForm(driverCd: string, unkoNo: string) {
+  mysqlRefreshUnkoNo.value = unkoNo
+  mysqlRefreshDriverCd.value = driverCd
+  if (import.meta.client) {
+    document.getElementById('gcp-mysql-refresh-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+}
+
+/**
+ * 明細 (day-operations で引いた運行) の23桁 unkoNo を③のフォームへ渡す
+ * (Refs #633-17b)。`applyUnkoGapCandidateToMysqlForm` と同じことを23桁でやる —
+ * 違いは渡す桁数だけ (あちらは22桁のまま、こちらは day-operations が返す
+ * 23桁をそのまま)。**自動実行はしない** — 欄に入れてスクロールするだけで、
+ * ③ (勤務時間再登録) の実行は人が「勤務時間再登録まで行う」を確認してから押す。
+ */
+function applyDayOperationToMysqlResetForm(driverCd: string, unkoNo: string) {
   mysqlRefreshUnkoNo.value = unkoNo
   mysqlRefreshDriverCd.value = driverCd
   if (import.meta.client) {
@@ -7005,6 +7021,19 @@ watch([compMap, kyuyoSyncedKeys], () => {
                                     :disabled="diffRowAlcUploadFor(op.unkoNo)?.status === 'loading'"
                                     @click="uploadOperationToAlc(op)"
                                   />
+                                  <!-- ③ (勤務時間再登録) の欄へ渡す導線 (Refs #633-17b)。day-operations が
+                                       返す23桁 (対象CD込み) をそのまま渡す — ここで③は実行しない、
+                                       欄に入れてスクロールするだけ (人が確認して押す)。23桁が引けて
+                                       いない運行 (壊れた形で front が防御的に落とした場合) はボタンごと
+                                       出さない — 「押せるのに失敗する」を作らない。 -->
+                                  <UButton
+                                    v-if="isKintaiDayOperationUnkoNo23Digit(op.unkoNo)"
+                                    size="xs"
+                                    variant="soft"
+                                    label="③ の欄に入れる (23桁)"
+                                    class="ml-1"
+                                    @click="applyDayOperationToMysqlResetForm(row.driverCd, op.unkoNo)"
+                                  />
                                   <UAlert
                                     v-if="diffRowAlcUploadFor(op.unkoNo)?.status === 'error'"
                                     color="error"
@@ -7139,8 +7168,9 @@ watch([compMap, kyuyoSyncedKeys], () => {
                               </span>
                             </div>
                             <!-- 運行NOはコピー用テキスト (select-all) としても出しつつ、
-                                 「③に入れる」で mysqlRefreshUnkoNo/driverCd 欄へも渡す
-                                 (Refs #623-2。#625/#627 マージ済みで22桁のまま①②が実行できる) -->
+                                 「①② の欄に入れる (22桁)」で mysqlRefreshUnkoNo/driverCd 欄へも渡す
+                                 (Refs #623-2。#625/#627 マージ済みで22桁のまま①②が実行できる。
+                                 ③自体はこの22桁では拒否される — ラベルは Refs #633-17b で明確化) -->
                             <ul class="mt-1 space-y-2">
                               <li v-for="no in d.unkoNos" :key="no">
                                 <div class="flex flex-wrap items-center gap-2">
@@ -7152,7 +7182,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                                   <UButton
                                     size="xs"
                                     variant="soft"
-                                    label="③ に入れる"
+                                    label="①② の欄に入れる (22桁)"
                                     @click="applyUnkoGapCandidateToMysqlForm(d.driverCd, no)"
                                   />
                                 </div>
