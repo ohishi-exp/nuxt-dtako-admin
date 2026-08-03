@@ -124,6 +124,14 @@ export default {
       return handleDtakoReimport(request, env);
     }
 
+    if (url.pathname === "/kintai-relay/restraint-sync" && request.method === "POST") {
+      // 拘束サマリの写し (R2 kintai/ prefix) を無人で押し直す (Refs #606-6)。
+      // 画面の「取り込み」ボタン (POST /restraint-api/kintai/fetch) と同じ処理を
+      // DO 内部 (/cron/restraint-sync) へ転送するだけ — auth-worker JWT / theearth
+      // セッション前提の /restraint-api/* とは別の、機械呼び出し用の名前空間
+      return handleRestraintSync(request, env);
+    }
+
     if (url.pathname === "/ws/scraper") {
       // SCRAPER_MODE=http (Refs ohishi-exp/dtako-scraper#22) は comp_id 単位で
       // DO を分けることで同一企業への並列リクエストを自然に直列化する。comp_id が
@@ -588,6 +596,60 @@ async function handleDtakoReimport(request: Request, env: RelayWorkerEnv): Promi
       unko_no: unkoNo,
       reset_timecard: body.reset_timecard === true,
     }),
+  });
+  // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
+  return new Response(res.body, {
+    status: res.status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * `POST /kintai-relay/restraint-sync` — 拘束サマリの写し (R2 `kintai/` prefix) を
+ * 指定した年月ぶん無人で押し直す (Refs #606-6)。
+ *
+ * body は `{month, comp_id?}`。**`month` は必須。** `comp_id` 省略時は
+ * `KINTAI_COMP_ID` (`/kintai-relay/operation-zip` と同じフォールバック)。
+ * `month` の形式チェック (YYYY-MM) は DO 側 (`handleKintaiFetch` の
+ * `parseMonthParam`) が持つ — ここでは素通しする。
+ *
+ * **`/restraint-api/kintai/fetch` (auth-worker JWT / theearth セッション前提の
+ * viewer 名前空間) は経由しない。** DO 内部の `/cron/restraint-sync` へ直接
+ * 転送する — 認証・comp_id フォールバックは `/kintai-relay/operation-zip` と同じ
+ * (`X-Alc-Proxy-Secret` の constant-time 検証)。
+ *
+ * **押した写しは表示に使われない** (#606-5 決定)。突合・履歴用のスナップショットを
+ * 最新に保つのが目的で、同期が失敗しても画面は壊れない。
+ */
+async function handleRestraintSync(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  let body: { month?: unknown; comp_id?: unknown };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return fail(400, "body must be JSON");
+  }
+  const month = typeof body.month === "string" ? body.month : "";
+  if (!month) return fail(400, "month は必須です");
+  const compId =
+    (typeof body.comp_id === "string" && body.comp_id.trim()) || (env.KINTAI_COMP_ID ?? "").trim();
+  if (!compId) return fail(503, "comp_id が解決できません");
+
+  const id = env.RELAY.idFromName(`scraper-comp-${compId}`);
+  const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/restraint-sync", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ comp_id: compId, month }),
   });
   // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
   return new Response(res.body, {

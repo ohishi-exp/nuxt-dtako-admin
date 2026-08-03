@@ -9,6 +9,10 @@
  * - ETC (明細 CSV): GCE の cron `etc-scrape-batch-env`
  *   (`0 21,22,23,0 * * *` UTC = JST 6,7,8,9 時)。
  *
+ * 拘束サマリ同期 (`0 19 * * *` UTC = JST 4:00) は移行元を持たない新規追加
+ * (Refs #606-6)。画面の「取り込み」ボタンだけが叩けていた
+ * `POST /restraint-api/kintai/fetch` 相当の処理を、前月+当月ぶん無人で押し直す。
+ *
  * この module は pure に保つ (fetch / DO namespace を直接触らず、DO 呼び出しは
  * `CronDoCall` として注入する) — node vitest で 100% gate に載せるため。
  * 実際の配線 (RELAY.idFromName → DO.fetch) は index.ts の scheduled handler。
@@ -18,6 +22,10 @@
 export const DTAKO_CRON = "0 16 * * *";
 /** ETC 明細スクレイプの cron 式 (UTC)。GCE cron と同じ JST 6,7,8,9 時。 */
 export const ETC_CRON = "0 21,22,23,0 * * *";
+/** 拘束サマリ (R2 `kintai/` prefix) の日次同期 cron 式 (UTC)。JST 4:00 —
+ * dtako 日次 (JST 1:00) の後で ETC (JST 6,7,8,9 時) の前、既存 2 本と重ならない
+ * 時間帯 (Refs #606-6)。 */
+export const RESTRAINT_SYNC_CRON = "0 19 * * *";
 
 export interface DtakoAccountEntry {
   comp_id: string;
@@ -75,6 +83,20 @@ export function parseEtcAccounts(raw: string | undefined): EtcAccountEntry[] {
 export function yesterdayJst(now: Date): string {
   const jstMs = now.getTime() + 9 * 3600 * 1000 - 24 * 3600 * 1000;
   return new Date(jstMs).toISOString().slice(0, 10);
+}
+
+/** 当月 (JST) を YYYY-MM で返す (拘束サマリ同期 cron の対象月計算に使う)。 */
+export function currentYmJst(now: Date): string {
+  const jstMs = now.getTime() + 9 * 3600 * 1000;
+  return new Date(jstMs).toISOString().slice(0, 7);
+}
+
+/** `YYYY-MM` の前月を `YYYY-MM` で返す。 */
+export function prevYm(ym: string): string {
+  const [year, month] = ym.split("-").map(Number) as [number, number];
+  const prevYear = month === 1 ? year - 1 : year;
+  const prevMonth = month === 1 ? 12 : month - 1;
+  return `${prevYear}-${String(prevMonth).padStart(2, "0")}`;
 }
 
 /** ETC 明細 CSV の R2 保存キー。JST タイムスタンプでユニーク化する
@@ -145,7 +167,7 @@ export interface CronEnvValues {
 }
 
 export interface CronRunResult {
-  kind: "dtako" | "etc" | "none";
+  kind: "dtako" | "etc" | "restraint" | "none";
   target: string;
   ok: boolean;
   detail: string;
@@ -230,6 +252,46 @@ export async function runScheduledCron(
           return {
             kind: "etc",
             target: account.user_id,
+            ok: false,
+            detail: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }),
+    );
+  }
+
+  if (cron === RESTRAINT_SYNC_CRON) {
+    // 拘束サマリの写しを更新できる経路は画面の「取り込み」ボタン
+    // (`POST /restraint-api/kintai/fetch`) だけで、無人で押し直す経路が無かった
+    // ため写しが化石化していた (実測 2026-08-03、Refs #606-6)。account は dtako
+    // スクレイプと同じ theearth 会社単位 (comp_id) の一覧を使う — 拘束サマリも
+    // 会社ごとの theearth データなので、対象は dtako と同じ母集団でよい。
+    const accounts = parseDtakoAccounts(env.dtakoAccountsRaw);
+    if (accounts.length === 0) {
+      return [{ kind: "restraint", target: "*", ok: true, detail: "DTAKO_ACCOUNTS 未設定のため skip" }];
+    }
+    // 前月 + 当月をそれぞれ同期する。月初は前月の打刻が後から確定するため、
+    // 当月だけだと締め後に化石化する (Refs #606-6)。
+    const curYm = currentYmJst(now);
+    const months = [curYm, prevYm(curYm)];
+    const jobs = accounts.flatMap((account) => months.map((month) => ({ account, month })));
+    return Promise.all(
+      jobs.map(async ({ account, month }): Promise<CronRunResult> => {
+        try {
+          const res = await callDo(`scraper-comp-${account.comp_id}`, "/cron/restraint-sync", {
+            comp_id: account.comp_id,
+            month,
+          });
+          return {
+            kind: "restraint",
+            target: `${account.comp_id}|${month}`,
+            ok: res.ok,
+            detail: `HTTP ${res.status}: ${res.text.slice(0, 200)}`,
+          };
+        } catch (err) {
+          return {
+            kind: "restraint",
+            target: `${account.comp_id}|${month}`,
             ok: false,
             detail: err instanceof Error ? err.message : String(err),
           };
