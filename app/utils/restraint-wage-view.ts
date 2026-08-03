@@ -41,6 +41,14 @@ export interface RestraintSummaryDay {
   leaves?: string[]
 }
 
+/**
+ * `fillTheearthOnlyMetrics` (`timecard-summary.ts`) が埋め戻しうるキー
+ * (運転・荷役・年度累計・拘束上限・当月超過・平均運転9h超、Refs #606-7)。
+ */
+export type TheearthBackfillKey =
+  | 'drivingMinutes' | 'loadingMinutes' | 'fiscalCumulativeMinutes'
+  | 'restraintLimitMinutes' | 'excessRestraintMinutes' | 'avgDriving9hOverCount'
+
 export interface RestraintDriverSummary {
   driverCd: string
   driverName: string
@@ -74,6 +82,15 @@ export interface RestraintDriverSummary {
     late: number
     earlyLeave: number
   }
+  /**
+   * この行 (タイムカード由来) のうち、どのキーを theearth (デジタコ拘束時間管理表)
+   * 側から埋め戻したか (Refs #606-7)。**打刻からは構造的に出せない指標**
+   * (運転・荷役・年度累計・拘束上限・当月超過・平均運転9h超) が対象。
+   * 未設定 = 埋め戻し不要 (theearth 由来の行そのもの) か、埋め戻すものが無かった
+   * (theearth 側にも値が無い) のどちらか — その行が theearth 由来かは
+   * `WageReportRow.source` で分かるので、そちらと突き合わせて読む。
+   */
+  backfilledFromTheearth?: TheearthBackfillKey[]
 }
 
 export type WageCategoryKey =
