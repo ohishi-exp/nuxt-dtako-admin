@@ -1456,18 +1456,17 @@ watch(month, () => {
 })
 
 /**
- * 候補の行から③のフォームへ値を渡す (Refs #623-2)。**自動実行はしない** — 欄に
- * 値が入るだけで、「① 確認」は人が押す。
+ * 候補の乗務員CDだけを③のフォームへ渡す (Refs #623-2、親判断 2026-08-03)。
+ * **自動実行はしない** — 欄に値が入るだけで、「① 確認」は人が押す。
  *
- * ★ 渡せるのは受け口が返す **22桁 (GCP側)** の運行NOそのまま。③が要る本来の値は
- * **23桁 (オンプレ側、末尾1桁 = 対象CD)** だが、候補の運行はまだオンプレに無いため
- * 対象CDを機械的に決められない — 捏造しない (issue #623-2 の罠メモ)。22桁のままだと
- * ③側のガード (`unko_no は23桁の数値`) に「① 確認」で弾かれる。**これは想定内**:
- * 対象CDが分かっている人がその場で1桁補ってから押す、という明示的な半完了として
- * 渡している (23桁を機械が当てにいくより安全)。
+ * ★ **運行NO (unko_no欄) には何も入れない。** 受け口が返すのは22桁 (GCP側) だが、
+ * ③が要るのは23桁 (オンプレ側、末尾1桁 = 対象CD) — 候補の運行はまだオンプレに無いため
+ * 対象CDを機械的に決められない。22桁を欄に入れると「①確認」が23桁ガードで必ず
+ * 落ちる (=押すと壊れるボタンになる) うえ、「足りない1桁を人がその場で判断」は
+ * 実質的に捏造を人に代行させるのと同じ (親指摘)。運行NOは一覧のテキスト
+ * (コピー可能) として見せるだけに留め、欄には入れない。
  */
-function applyUnkoGapCandidateToMysqlForm(driverCd: number, unkoNo: string) {
-  mysqlRefreshUnkoNo.value = unkoNo
+function applyUnkoGapCandidateToMysqlForm(driverCd: number) {
   mysqlRefreshDriverCd.value = String(driverCd)
   if (import.meta.client) {
     document.getElementById('gcp-mysql-refresh-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -6631,25 +6630,30 @@ watch([compMap, kyuyoSyncedKeys], () => {
                             :key="d.driverCd"
                             class="text-sm border border-gray-200 dark:border-gray-700 rounded p-2"
                           >
-                            <div class="font-medium">
-                              乗務員CD {{ d.driverCd }}
-                              <span class="text-xs text-gray-500">
-                                ({{ d.unkoNos.length }}件{{ d.truncated ? ' 以上 — 上限で打ち切り' : '' }})
+                            <div class="font-medium flex flex-wrap items-center gap-2">
+                              <span>
+                                乗務員CD {{ d.driverCd }}
+                                <span class="text-xs text-gray-500">
+                                  ({{ d.unkoNos.length }}件{{ d.truncated ? ' 以上 — 上限で打ち切り' : '' }})
+                                </span>
                               </span>
+                              <UButton
+                                size="2xs"
+                                variant="soft"
+                                label="③へ乗務員CDを入れる"
+                                @click="applyUnkoGapCandidateToMysqlForm(d.driverCd)"
+                              />
                             </div>
+                            <!-- 運行NOはコピー用テキストとして出すだけ。③の欄には入れない —
+                                 22桁 (GCP側) のままで、オンプレ23桁目 (対象CD) は未確定 -->
                             <ul class="mt-1 space-y-1">
                               <li v-for="no in d.unkoNos" :key="no" class="flex flex-wrap items-center gap-2">
-                                <code class="text-xs">{{ no }}</code>
+                                <code class="text-xs select-all">{{ no }}</code>
                                 <span class="text-xs text-gray-500">
-                                  ({{ unkoGapsResult.unkoNoDigits ?? no.length }}桁、GCP側) —
+                                  ({{ unkoGapsResult.unkoNoDigits ?? no.length }}桁、GCP側)。
+                                  オンプレの23桁目 (対象CD) は未確定です —
                                   start_ope目安: {{ kintaiUnkoGapsDeriveStartOpe(no) ?? '不明' }}
                                 </span>
-                                <UButton
-                                  size="2xs"
-                                  variant="soft"
-                                  label="③ に入れる"
-                                  @click="applyUnkoGapCandidateToMysqlForm(d.driverCd, no)"
-                                />
                               </li>
                             </ul>
                           </div>
