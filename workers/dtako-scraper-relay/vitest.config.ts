@@ -45,6 +45,7 @@ export default defineConfig({
         'src/kintai-relay.ts',
         'src/operation-zip.ts',
         'src/dtako-reimport.ts',
+        'src/dtako-alc-upload.ts',
         'src/kintai-diff.ts',
         'src/dtako-day-events-lookup.ts',
       ],
