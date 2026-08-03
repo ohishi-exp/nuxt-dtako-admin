@@ -169,40 +169,47 @@ export function kintaiUnkoGapsDeriveStartOpe(unkoNo: string): string | null {
 // 上流 (`kintai-day-events-lookup.ts`) 側の docs を見直すこと。
 // ─────────────────────────────────────────────────────────────────────────
 
-export type KintaiUnkoGapDtakoCheckStatus = 'present' | 'absent' | 'inconclusive'
+export type KintaiUnkoGapDtakoCheckStatus = 'present' | 'absent' | 'inconclusive' | 'multiple'
 
 export interface KintaiUnkoGapDtakoCheckResult {
   status: KintaiUnkoGapDtakoCheckStatus
   /** `status === 'present'` のときだけ非null (見つかった23桁の実物)。 */
   unkoNo23: string | null
+  /** `status === 'multiple'` のときだけ非空 (2マン=対象CD1/2 等で、同じ22桁 prefix に
+   * 23桁が複数ある場合の候補一覧)。それ以外は空配列。 */
+  candidates: string[]
 }
 
 /**
- * `day-events-lookup` の `status` を、この候補判定専用の3値に倒す。
+ * `day-events-lookup` の `status` を、この候補判定専用の4値に倒す (Refs #633-2)。
  *
  * - `found` → `present` (オンプレにデジタコあり)
  * - `not_found` → `absent` (その乗務員・その日で引いた限り見つからない)
- * - `ambiguous` / `null` (応答が読めなかった・まだ調べていない) → `inconclusive`
- *
- * ★ `ambiguous` を `absent` と混同しないこと (条件12) — 複数候補があるだけで
- * 「無い」と決まったわけではない。呼び出し側 (画面) は「まだ調べていない」
- * (候補が結果一覧に無い) 場合もこの関数を経由させず `inconclusive` 相当の表示に
- * 倒してよい — 3値とも表示文言は同じ「調べられていません」で構わない
- * (条件12「ambiguous/エラー/未実行はまとめて『調べられていない』」)。
+ * - `ambiguous` → **`multiple`** (どの23桁か特定できない。`absent`/`inconclusive` と
+ *   混同しないこと — #633-1 条件12 では ambiguous を inconclusive にまとめていたが、
+ *   親判断 (2026-08-04) で「情報量の改善」として multiple に独立させた。**安全上の
+ *   理由ではない** — `unkoNo23` は multiple でも常に `null` のままで、
+ *   自動選択の経路はどのみち無い)
+ * - `null` (応答が読めなかった・まだ調べていない) → `inconclusive`
  */
 export function kintaiUnkoGapDtakoCheckResultFromLookup(
   status: 'found' | 'not_found' | 'ambiguous' | null,
   unkoNo: string | null,
+  candidates: string[] = [],
 ): KintaiUnkoGapDtakoCheckResult {
-  if (status === 'found') return { status: 'present', unkoNo23: unkoNo }
-  if (status === 'not_found') return { status: 'absent', unkoNo23: null }
-  return { status: 'inconclusive', unkoNo23: null }
+  if (status === 'found') return { status: 'present', unkoNo23: unkoNo, candidates: [] }
+  if (status === 'not_found') return { status: 'absent', unkoNo23: null, candidates: [] }
+  if (status === 'ambiguous') return { status: 'multiple', unkoNo23: null, candidates }
+  return { status: 'inconclusive', unkoNo23: null, candidates: [] }
 }
 
 export interface KintaiUnkoGapDtakoCheckView {
   status: KintaiUnkoGapDtakoCheckStatus
   message: string
   unkoNo23: string | null
+  /** `status === 'multiple'` のときだけ非空。人が目で見て選ぶための一覧 —
+   * **自動で1件を選ばない** (呼び出し側もここから③フォームへ自動で流し込まないこと)。 */
+  candidates: string[]
 }
 
 /**
@@ -210,15 +217,19 @@ export interface KintaiUnkoGapDtakoCheckView {
  * (条件10) — `present` でも「③のみで直る可能性がありますが保証ではありません」に
  * とどめる。`result` が無い (まだこの候補を調べていない) 場合も `inconclusive`
  * と同じ文言にする (条件12)。
+ *
+ * ★ `present`/`absent`/`inconclusive` の文言は #633-1 から**1文字も変えていない**
+ * (本番確認中のため、親の明示指示)。
  */
 export function kintaiUnkoGapDtakoCheckView(result: KintaiUnkoGapDtakoCheckResult | undefined): KintaiUnkoGapDtakoCheckView {
-  const r = result ?? { status: 'inconclusive' as const, unkoNo23: null }
+  const r = result ?? { status: 'inconclusive' as const, unkoNo23: null, candidates: [] as string[] }
   if (r.status === 'present') {
     return {
       status: 'present',
       message: 'オンプレにデジタコがあります — デジタコ自体の取り込み漏れではありません。'
         + '足りないのは time_card_dtako の行だけです (③のみで直る可能性がありますが、保証ではありません)。',
       unkoNo23: r.unkoNo23,
+      candidates: [],
     }
   }
   if (r.status === 'absent') {
@@ -226,11 +237,22 @@ export function kintaiUnkoGapDtakoCheckView(result: KintaiUnkoGapDtakoCheckResul
       status: 'absent',
       message: 'その乗務員・その日で引いた限り、オンプレにデジタコが見つかりません (別の乗務員CD・別の日の可能性は潰していません)。',
       unkoNo23: null,
+      candidates: [],
+    }
+  }
+  if (r.status === 'multiple') {
+    return {
+      status: 'multiple',
+      message: '同じ日に23桁が複数あり、どれか特定できません'
+        + ' (2マン (対象CD1/2) で同じ22桁に23桁が2件あることがあります)。',
+      unkoNo23: null,
+      candidates: r.candidates,
     }
   }
   return {
     status: 'inconclusive',
     message: 'オンプレにデジタコがあるか調べられていません。',
     unkoNo23: null,
+    candidates: [],
   }
 }
