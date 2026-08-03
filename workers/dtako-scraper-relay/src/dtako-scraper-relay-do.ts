@@ -3297,8 +3297,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    *
    * 経路: CakePHP (LAN, loopback) ← rust-ichibanboshi (同一ホスト) ← ここ (CF Access
    * Service Token)。**上流応答は解釈せず生のまま**バージョン管理付きで R2 に保存し、
-   * 併せて社員別サマリ (`summarizeTimecardMonth`) も保存する。wage-report はこの
-   * サマリを読む (PR-D)。
+   * 併せて社員別サマリ (`summarizeTimecardMonth`) も保存する。
+   *
+   * **★ この R2 サマリと ichiban への push (下の `pushRestraintSummariesToIchiban`) は
+   * 「押した時点のスナップショット」でしかない** (2026-08-03 決定、#606-5)。
+   * wage-report はもう読まない — `loadWageReportSource` の timecard 側は
+   * `buildKintaiSummariesLive` (その場で打刻+kosoku-daily から組み直す) の成否だけで
+   * 決める。ここでの保存/push を消してはいない (突合・履歴用に残す) が、フォール
+   * バック無しを「バグ」と誤解して戻さないこと。
    *
    * 冪等: 同じ内容なら latest の lastVerifiedAt だけ進み版は増えない
    * (`putVersionedR2` の sha256 比較。theearth の CSV 取得と同じ作法)。
@@ -3463,6 +3469,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         });
       }
       await this.upsertRestraintSummariesD1(record.compId, "timecard", ym, d1Entries);
+      // ここでの push は突合用のスナップショットとして残すだけ — wage-report の
+      // timecard 側表示はもう読まない (#606-5、handleKintaiFetch の docstring参照)
       await this.pushRestraintSummariesToIchiban(record.compId, "timecard", ym, d1Entries);
     } catch (err) {
       console.error(JSON.stringify({ kintai_fetch: "r2-error", error: describeUnknownError(err) }));
@@ -4471,8 +4479,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 跨いだ勤務までは拾わない** (前月の 1 日の週40h がわずかに小さく出るだけで、
    * 当月の賃金には効かない)。
    *
-   * 取得先が未設定・上流が落ちている時は null を返し、呼び出し側が従来どおり
-   * R2 へ落ちる。
+   * **取得先が未設定・上流が落ちている時は null を返す。** 以前はここで呼び出し側が
+   * R2 (写し) へ落ちていたが、2026-08-03 決定 (#606-5) でそのフォールバックは撤去済み
+   * — null は `loadWageReportSource` で「timecard 行を空にする」に直結する。
+   * 握り潰さないよう、null を返す分岐にはそれぞれ理由を残す。
    */
   private async buildKintaiSummariesLive(
     compId: string,
@@ -4491,9 +4501,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     try {
       clientSecret = await resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
     } catch {
-      // secret 不調は他所で log 済み。ここは R2 へ落ちるだけで良い
+      // secret 不調は他所で log 済み。ここでは配線未設定と同じ扱いに倒すだけで良い
     }
-    if (!apiUrl || !clientId || !clientSecret) return null;
+    if (!apiUrl || !clientId || !clientSecret) {
+      console.error(JSON.stringify({ wage_report_kintai: "live-not-configured", comp_id: compId, ym }));
+      return null;
+    }
 
     const fetchDaily = async (
       month: string,
@@ -4545,8 +4558,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 当月の勤務 = 前月から跨いだ分 + 当月分 (`kosokuPartsByDate` が当月に落ちる分だけ拾う)
     const kosokuCurrent = mergeKosokuShiftMaps(shiftsPrev, shiftsCurrent);
     const kosokuPrev = shiftsPrev;
-    // 当月が取れないと賃金の素材が無い — 黙って空にせず R2 へ落とす
-    if (!dailyCurrent) return null;
+    // 当月の `/api/kintai/daily` が取れないと賃金の素材が無い。R2 へは落とさず null
+    // (呼び出し側で timecard 行が空になる、#606-5) — 握り潰さずここで理由を残す
+    if (!dailyCurrent) {
+      console.error(JSON.stringify({ wage_report_kintai: "live-daily-missing", comp_id: compId, ym }));
+      return null;
+    }
 
     const build = async (
       month: string,
@@ -5097,20 +5114,31 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   /** wage-report の素材 (当月+前月 × theearth+timecard のサマリ) を読む
    * (Refs #452 / rust-ichibanboshi#106 Phase 3c)。
    *
-   * まず ichiban の `GET /api/restraint/wage-source` を 1 fetch — Phase 3b の
-   * push が溜めた写しで、従来の R2 GET 約300本 (fan-out) を置き換える。
-   * フォールバックは 2 段:
+   * **theearth 側** (`current` / `prev`) はまず ichiban の
+   * `GET /api/restraint/wage-source` を 1 fetch — Phase 3b の push が溜めた写しで、
+   * 従来の R2 GET 約300本 (fan-out) を置き換える。フォールバックは 2 段
+   * (theearth 側にのみ適用。timecard 側は下記の通り別扱い):
    *
    * - fetch 自体の失敗 / 未設定環境 → 全部 R2 (従来経路そのまま)
    * - fetch は成功したが特定の (source, 月) が未 push (`synced_at` null) →
    *   その piece だけ R2 から読む (push が追い付くまでの過渡期・新月の初回)
+   *
+   * **timecard 側** (`kintaiCurrent` / `kintaiPrev`) は **`buildKintaiSummariesLive`
+   * の成否だけで決める** (2026-08-03 決定、#606-5 — 写しフォールバックを撤去)。
+   * ichiban `wage-source` の `current_timecard`/`prev_timecard` も R2 (`kintai/`
+   * prefix) も「`kintai/fetch` (取り込みボタン) が最後に押された時点の写し」でしか
+   * なく、押し直す無人経路が無い (cron にも MCP にも `/restraint-api/kintai/fetch`
+   * を叩く口が無い)。化石を読むと「493時間」「月まるごと空」のような値を
+   * 「正しい拘束時間」として黙って表示しかねない (実測、#606-5)。
+   * **live が失敗したら timecard 行は空にする** — 古い値を出すより欠ける方を選ぶ
+   * (親判断)。失敗は `kintaiLive: false` で呼び出し側まで伝え、console.error でも
+   * 残す (「黙って空」は不可)。
    */
   private async loadWageReportSource(
     bucket: R2Bucket,
     compId: string,
     ym: string,
     prevYm: string,
-    kintaiPrefix: string,
     cache: UpstreamCacheClient | null,
     timer?: PhaseTimer,
     tracker?: CacheStateTracker,
@@ -5119,40 +5147,38 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     prev: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
     kintaiCurrent: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
     kintaiPrev: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
+    /** timecard 側 live-build の成否。false なら kintaiCurrent/kintaiPrev は
+     * 空 (`{ summaries: [], noDataDrivers: [] }`)。呼び出し側 (`handleWageReport`)
+     * は warnings 等で応答から観測できるようにすること (#606-5、握り潰し禁止)。 */
+    kintaiLive: boolean;
   }> {
-    // タイムカード側は **R2 を読まずその場で組む** (2026-07-28 決定「R2 やめろ」)。
-    // R2 は `kintai/fetch` を回した時点の写しでしかなく、取り込みを忘れると古い値が
-    // 出続ける (実測: 乗務員 1108 / 2026-04 が打刻由来の 3 勤務・拘束 447h29m のまま)。
-    // 上流が取れない時だけ従来どおり R2 へ落ちる。
+    // タイムカード側は **R2 も ichiban の写しも読まず、live-build の成否だけで決める**
+    // (2026-07-28「R2 やめろ」決定 → 2026-08-03 に写しフォールバックも撤去、#606-5)。
+    // 上の docstring 参照。
     const live = await measurePhase(timer, "kintai-live", () =>
       this.buildKintaiSummariesLive(compId, ym, prevYm, cache, timer, tracker),
     );
+    const emptyKintaiMonth: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>> = {
+      summaries: [],
+      noDataDrivers: [],
+    };
+    if (!live) {
+      // 握り潰さない — buildKintaiSummariesLive 内で理由別ログ済みだが、ここでも
+      // 「wage-report のこの応答は timecard 側が空になった」ことを明示しておく
+      console.error(JSON.stringify({ wage_report_kintai: "live-failed-empty", comp_id: compId, ym }));
+    }
+    const kintaiCurrent = live ? live.current : emptyKintaiMonth;
+    const kintaiPrev = live ? live.prev : emptyKintaiMonth;
+    const kintaiLive = live !== null;
     const fromR2 = {
       current: () =>
         measurePhase(timer, "r2-theearth-cur", () => this.loadMonthSummaries(bucket, compId, ym)),
       prev: () =>
         measurePhase(timer, "r2-theearth-prev", () => this.loadMonthSummaries(bucket, compId, prevYm)),
-      kintaiCurrent: () =>
-        live
-          ? Promise.resolve(live.current)
-          : measurePhase(timer, "r2-kintai-cur", () =>
-              this.loadMonthSummaries(bucket, compId, ym, kintaiPrefix),
-            ),
-      kintaiPrev: () =>
-        live
-          ? Promise.resolve(live.prev)
-          : measurePhase(timer, "r2-kintai-prev", () =>
-              this.loadMonthSummaries(bucket, compId, prevYm, kintaiPrefix),
-            ),
     };
     const allR2 = async () => {
-      const [current, prev, kintaiCurrent, kintaiPrev] = await Promise.all([
-        fromR2.current(),
-        fromR2.prev(),
-        fromR2.kintaiCurrent(),
-        fromR2.kintaiPrev(),
-      ]);
-      return { current, prev, kintaiCurrent, kintaiPrev };
+      const [current, prev] = await Promise.all([fromR2.current(), fromR2.prev()]);
+      return { current, prev, kintaiCurrent, kintaiPrev, kintaiLive };
     };
 
     const apiUrl = (this.env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
@@ -5206,7 +5232,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return allR2();
     }
 
-    // 未 push (synced_at null) の piece だけ R2 へ (過渡期・新月初回)
+    // 未 push (synced_at null) の piece だけ R2 へ (過渡期・新月初回) — **theearth 側のみ**。
+    // timecard 側 (`wire.current_timecard` / `wire.prev_timecard`) はここでは一切読まない
+    // (#606-5 — 上の docstring 参照。読むと化石スナップショットが表示に混ざる)
     const pick = async (
       month: WageSourceMonthWire,
       fallback: () => ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>,
@@ -5216,17 +5244,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       console.log(JSON.stringify({ wage_report_source: "r2-piece-fallback", comp_id: compId, piece: label }));
       return fallback();
     };
-    const [current, prev, kintaiCurrent, kintaiPrev] = await Promise.all([
+    const [current, prev] = await Promise.all([
       pick(wire.current_theearth, fromR2.current, `theearth:${ym}`),
       pick(wire.prev_theearth, fromR2.prev, `theearth:${prevYm}`),
-      // **タイムカード側は ichiban の写しも使わない** — R2 と同じく push した時点で
-      // 止まっており、取り込みを回すまで古い値が出る (2026-07-28 決定「R2 やめろ」)。
-      // その場で組めた時はそれを使い、組めなかった時だけ写しへ落ちる
-      live ? live.current : pick(wire.current_timecard, fromR2.kintaiCurrent, `timecard:${ym}`),
-      live ? live.prev : pick(wire.prev_timecard, fromR2.kintaiPrev, `timecard:${prevYm}`),
     ]);
     console.log(JSON.stringify({ wage_report_source: "ichiban", comp_id: compId, ym }));
-    return { current, prev, kintaiCurrent, kintaiPrev };
+    return { current, prev, kintaiCurrent, kintaiPrev, kintaiLive };
   }
 
   /** GET /restraint-api/wage-report?month=YYYY-MM — R2 の summary + マスタから
@@ -5274,11 +5297,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const prevYear = month === 1 ? year - 1 : year;
     const prevMonth = month === 1 ? 12 : month - 1;
     const prevYm = `${prevYear}-${String(prevMonth).padStart(2, "0")}`;
-    // タイムカード由来 (本社事務員等) のサマリは別 prefix に置いてある — デジタコに
-    // 乗らない人はここからしか出てこない (Refs #424 PR-D)
-    const kintaiPrefix = this.env.KINTAI_R2_PREFIX || "kintai";
+    // タイムカード由来 (本社事務員等、デジタコに乗らない人) のサマリは
+    // `loadWageReportSource` が live-build の成否だけで組む (#606-5、Refs #424 PR-D)
     // マスタ 3 種と当月・前月 summary は互いに独立なので一括並列で読む (月切替の体感に直結)
-    const [wageMaster, minWageMaster, config, { current, prev, kintaiCurrent, kintaiPrev }] =
+    const [wageMaster, minWageMaster, config, { current, prev, kintaiCurrent, kintaiPrev, kintaiLive }] =
       await Promise.all([
         timer.measure("master-wage", () =>
           loadMaster<WageMaster>("wage-master", normalizeWageMaster, { drivers: {} }),
@@ -5293,13 +5315,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           loadMaster<WageConfig>("wage-config", normalizeWageConfig, normalizeWageConfig(null)),
         ),
         timer.measure("source", () =>
-          this.loadWageReportSource(bucket, record.compId, ym, prevYm, kintaiPrefix, wageCache, timer, tracker),
+          this.loadWageReportSource(bucket, record.compId, ym, prevYm, wageCache, timer, tracker),
         ),
       ]);
     const { noDataDrivers } = current;
     const endMerge = timer.begin("merge");
     // 同じ乗務員CD が両方に居たら timecard を採る (打刻を賃金の根拠にする、2026-07-28)
     const { merged, warnings } = mergeSummarySources(current.summaries, kintaiCurrent.summaries);
+    // live-build 失敗は握り潰さない — timecard 行が空になっていることを応答の
+    // warnings から観測できるようにする (#606-5。古い写しへは戻さない)
+    if (!kintaiLive) {
+      warnings.push(
+        "タイムカード側の live-build に失敗したため、この月はタイムカード由来の行を表示していません"
+          + " (古い写しにはフォールバックしません。取り込み先の疎通を確認してください)",
+      );
+    }
     // 前月 days (週40h の月初跨ぎ週用) も同じ優先順で合流する — 当月と別の source を
     // 混ぜると跨ぎ週の実働が二重に積まれる
     const { merged: prevMerged } = mergeSummarySources(prev.summaries, kintaiPrev.summaries);
