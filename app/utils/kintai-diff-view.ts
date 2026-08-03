@@ -354,14 +354,19 @@ export function parseKintaiRefreshMysqlApplyResult(raw: unknown): KintaiRefreshM
 /**
  * 保証の有無を、**「押せば直る」と誤読されない文言**で 1 行にする
  * (#615-5 やること5・決定2)。`found: false` は「対象が rest-diff に見当たらない
- * (=判定不能)」であって「保証あり」ではないので、`guaranteed` だけを見ないこと。
+ * (=判定不能)」であって直る保証があるわけではないので、`guaranteed` だけを見ないこと。
+ *
+ * ★ `found: false` の文言に「保証あり」という部分文字列を含めないこと —
+ * 「保証**あり**の意味ではありません」のような否定文でも、部分一致のテスト
+ * ガード (`not.toContain('保証あり')`) に引っかかる (2026-08-03 実際に CI で踏んだ)。
+ * ガードを緩めるのではなく、文言側でこの部分文字列を避け続けること。
  */
 export function fmtKintaiRefreshMysqlGuarantee(preview: KintaiRefreshMysqlPreview | null): string {
   if (!preview) return '保証の有無はまだ分かりません (まず「確認」を押してください)'
   if (preview.guaranteeError) return `保証を判定できませんでした: ${preview.guaranteeError}`
   const g = preview.guarantee
   if (!g) return '保証の有無は不明です (乗務員CD と対象月の両方を指定すると判定できます)'
-  if (!g.found) return '対象がオンプレの rest-diff に見当たりません (判定不能 — 保証ありの意味ではありません)'
+  if (!g.found) return '対象がオンプレの rest-diff に見当たりません (判定不能 — 直る保証がある、という意味ではありません)'
   if (g.guaranteed) return `保証あり (kind: ${g.kind}) — この対象は押せば直る側です`
   return `保証なし (kind: ${g.kind ?? '不明'}) — 押しても直る保証はありません。実行後は結果を確認してください`
 }
