@@ -18,8 +18,19 @@
  * 2026-08-03: 233 件中 50 件で該当)。**22桁 prefix で絞る**ことでそれを除く。
  * 絞った結果が0件・複数件のときは呼び出し側 (人) に決めさせる —
  * `not_found`/`ambiguous` を返し、どちらを消すか自動では選ばない。
- * (2マン運行で対象CD違いの2行が同じ22桁prefixにぶら下がる、
- * `rust-ichibanboshi#281` の実害を参照。)
+ *
+ * ## ★★ ambiguous を自動選択してはいけない理由 (Refs #625-2 調査、
+ * `rust-ichibanboshi#281` 実害の実コード確認)
+ *
+ * ③ (`resetbyUnkoNo`) は **delete と rebuild が非対称**: PHP の `deleteAll` は
+ * **呼び出し側が渡した exact な `unko_no` の行だけ**を消すが、続く
+ * `_setbyUnkoNo` (再構築 insert) は **22桁prefix + "1"/"2" (対象CD 1/2) 両方**の
+ * `dtako_events` を材料にする。つまり「delete は渡した1件だけ、rebuild は
+ * 両クルー分」。**対象CDを取り違えて渡すと、delete だけが他人 (もう一方の
+ * クルー) の行に当たる** — rebuild 側は両方カバーするので気付きにくい形で
+ * 実害化する。同じ22桁prefixに23桁が2件 (`ambiguous`) 出たら、**どちらが
+ * 呼び出し元の意図した対象CDかはこのmoduleには判別できない**ので、1件目を
+ * 選ぶような近道は絶対に取らない。
  */
 
 export type DayEventsLookupStatus = "found" | "not_found" | "ambiguous";
