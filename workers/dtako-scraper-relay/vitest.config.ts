@@ -46,6 +46,7 @@ export default defineConfig({
         'src/operation-zip.ts',
         'src/dtako-reimport.ts',
         'src/dtako-alc-upload.ts',
+        'src/theearth-recalculate.ts',
         'src/kintai-diff.ts',
         'src/dtako-day-events-lookup.ts',
         'src/dtako-day-operations-list.ts',

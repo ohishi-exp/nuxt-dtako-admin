@@ -33,6 +33,7 @@
  */
 
 import { listZipEntryNames } from "./operation-zip";
+import { recalculateBeforeFetch, type RecalculateOutcome } from "./theearth-recalculate";
 
 /** `unko_no` はオンプレ側の桁 (kintai-ops skill §4.6: GCP/theearth 側は22桁だが
  * 社内 nginx の URL キー・取り込みの対象指定は 23 桁)。**23 桁以外は拒否** —
@@ -113,6 +114,11 @@ export function buildAutoloadPath(unkoNo: string, resetTimecard: boolean): strin
 }
 
 export interface DtakoReimportDeps {
+  /** ① zip 取得の直前に走らせる「作業時間再集計」(theearth F-DES1013、Refs
+   * #633-19)。**無条件で呼ぶ** (フラグは作らない — 「取り直す」= 最新にする、
+   * が目的のため)。失敗は `recalculateBeforeFetch` が outcome に畳んで後続の
+   * `fetchZip` を続行させる。`VenusSessionExpiredError` だけは伝播する。 */
+  recalculateWork(): Promise<void>;
   /** ① zip 取得 (自前ログイン)。実装側 (DO) が opeNo/startOpe/comp_id を握って呼ぶ。 */
   fetchZip(): Promise<ArrayBuffer>;
   /** ② オンプレ autoload への POST。CF Access ヘッダは実装側で付ける。 */
@@ -135,6 +141,9 @@ export interface DtakoReimportReport {
   ope_no: string;
   start_ope: string;
   unko_no: string;
+  /** zip 取得直前に走らせた「作業時間再集計」の結果。成功時も含める — 再集計が
+   * 走ったかどうかを呼び出し側が追えるようにする (受け入れ条件、Refs #633-19)。 */
+  recalculate: RecalculateOutcome;
   /** 取得した zip の生サイズ (bytes)。 */
   bytes: number;
   /** zip 内のファイル名一覧 (展開しない列挙、`operation-zip.ts` と同じ parser)。
@@ -167,6 +176,7 @@ export async function runDtakoReimport(
         : `unko_no は22桁または23桁の数値で指定してください: "${input.unkoNo}"`,
     );
   }
+  const recalculate = await recalculateBeforeFetch(deps.recalculateWork);
   const zip = await deps.fetchZip();
   assertZipReadyForPush(zip);
   const entries = listZipEntryNames(zip);
@@ -205,6 +215,7 @@ export async function runDtakoReimport(
     ope_no: input.opeNo,
     start_ope: input.startOpe,
     unko_no: input.unkoNo,
+    recalculate,
     bytes: zip.byteLength,
     entries,
     http_status: res.status,

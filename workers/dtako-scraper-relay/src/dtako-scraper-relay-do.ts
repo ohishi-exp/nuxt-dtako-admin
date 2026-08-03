@@ -64,6 +64,7 @@ import {
 import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveDtakoAccountsRaw, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
 import { scrapeJobKey } from "./scrape-dispatch";
 import { buildOperationZipPayload } from "./operation-zip";
+import { recalculateBeforeFetch } from "./theearth-recalculate";
 import {
   DtakoReimportError,
   DtakoReimportPushUncertainError,
@@ -1239,7 +1240,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 応答に載せるだけの read-only な操作。
    */
   private async handleCronDtakoOperationZip(request: Request): Promise<Response> {
-    let body: { comp_id?: unknown; ope_no?: unknown; start_ope?: unknown };
+    let body: { comp_id?: unknown; ope_no?: unknown; start_ope?: unknown; recalculate?: unknown };
     try {
       body = (await request.json()) as typeof body;
     } catch {
@@ -1248,6 +1249,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const compId = typeof body.comp_id === "string" ? body.comp_id : "";
     const opeNo = typeof body.ope_no === "string" ? body.ope_no : "";
     const startOpe = typeof body.start_ope === "string" ? body.start_ope : "";
+    // 既定 false — この口は「読むだけ、取り込みはしない」契約 (tool description
+    // 参照)。再集計は theearth 側の DriverState1〜5Min を書き換える書き込みなので、
+    // 既定で入れると契約が変わる (Refs #633-19、issue の「★ 親の設計判断」2)。
+    const recalculate = body.recalculate === true;
     if (!compId || !opeNo || !startOpe) {
       return Response.json({ error: "comp_id / ope_no / start_ope が必要です" }, { status: 400 });
     }
@@ -1257,13 +1262,31 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return Response.json({ error: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
     }
 
-    return this.enqueueScrape(() => this.runOperationZip(account, opeNo, startOpe));
+    return this.enqueueScrape(() => this.runOperationZip(account, opeNo, startOpe, recalculate));
   }
 
-  private async runOperationZip(account: DtakoAccountRaw, opeNo: string, startOpe: string): Promise<Response> {
+  private async runOperationZip(
+    account: DtakoAccountRaw,
+    opeNo: string,
+    startOpe: string,
+    recalculate: boolean,
+  ): Promise<Response> {
     const jar = createCookieJar();
     try {
       await login(jar, { compId: account.comp_id, userName: account.user_name, userPass: account.user_pass });
+      const recalculateResult = recalculate
+        ? await recalculateBeforeFetch(() => recalculateWork(jar, opeNo, startOpe))
+        : null;
+      if (recalculateResult && !recalculateResult.ok) {
+        console.error(
+          JSON.stringify({
+            operation_zip: "recalculate_failed",
+            comp_id: account.comp_id,
+            ope_no: opeNo,
+            message: recalculateResult.error,
+          }),
+        );
+      }
       const zip = await downloadOperationCsvZip(jar, { opeNo, startOpe });
       const payload = buildOperationZipPayload(zip);
       console.log(
@@ -1271,6 +1294,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           operation_zip: "ok",
           comp_id: account.comp_id,
           ope_no: opeNo,
+          recalculate_ok: recalculateResult?.ok ?? null,
           bytes: payload.bytes,
           omitted: payload.omitted,
           entries: payload.entries,
@@ -1281,6 +1305,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         comp_id: account.comp_id,
         ope_no: opeNo,
         start_ope: startOpe,
+        recalculate: recalculateResult,
         bytes: payload.bytes,
         zip_base64: payload.zipBase64,
         omitted: payload.omitted,
@@ -1386,16 +1411,20 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     cfAccessClientSecret: string,
   ): Promise<Response> {
     const base = origin.replace(/\/+$/, "");
+    // 自前ログインの jar は再集計 (recalculateWork) と zip 取得
+    // (downloadOperationCsvZip) で共有する — 両方が同じ `CookieJar` 型を取り、
+    // 同一セッションの中で「再集計してから取る」を成立させる (Refs #633-19)。
+    const jar = createCookieJar();
     const deps: DtakoReimportDeps = {
-      fetchZip: async () => {
-        const jar = createCookieJar();
+      recalculateWork: async () => {
         await login(jar, {
           compId: account.comp_id,
           userName: account.user_name,
           userPass: account.user_pass,
         });
-        return downloadOperationCsvZip(jar, { opeNo: input.opeNo, startOpe: input.startOpe });
+        await recalculateWork(jar, input.opeNo, input.startOpe);
       },
+      fetchZip: () => downloadOperationCsvZip(jar, { opeNo: input.opeNo, startOpe: input.startOpe }),
       onpremAutoload: (path, init) =>
         fetch(`${base}${path}`, {
           ...init,
@@ -1413,11 +1442,22 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         unkoNo: input.unkoNo,
         resetTimecard: input.resetTimecard,
       });
+      if (!report.recalculate.ok) {
+        console.error(
+          JSON.stringify({
+            dtako_reimport: "recalculate_failed",
+            comp_id: account.comp_id,
+            unko_no: input.unkoNo,
+            message: report.recalculate.error,
+          }),
+        );
+      }
       console.log(
         JSON.stringify({
           dtako_reimport: "ok",
           comp_id: account.comp_id,
           unko_no: input.unkoNo,
+          recalculate_ok: report.recalculate.ok,
           bytes: report.bytes,
           entries: report.entries,
           http_status: report.http_status,
@@ -1502,16 +1542,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     input: { opeNo: string; startOpe: string },
     sharedSecret: string,
   ): Promise<Response> {
+    // 自前ログインの jar は再集計 (recalculateWork) と zip 取得
+    // (downloadOperationCsvZip) で共有する (dtako-reimport と同じ理由、Refs #633-19)。
+    const jar = createCookieJar();
     const deps: DtakoAlcUploadDeps = {
-      fetchZip: async () => {
-        const jar = createCookieJar();
+      recalculateWork: async () => {
         await login(jar, {
           compId: account.comp_id,
           userName: account.user_name,
           userPass: account.user_pass,
         });
-        return downloadOperationCsvZip(jar, { opeNo: input.opeNo, startOpe: input.startOpe });
+        await recalculateWork(jar, input.opeNo, input.startOpe);
       },
+      fetchZip: () => downloadOperationCsvZip(jar, { opeNo: input.opeNo, startOpe: input.startOpe }),
       uploadZip: (filename, zipBytes) =>
         uploadDtakoZipViaAlcInternalProxy(
           { sharedSecret, tenantId: account.tenant_id, filename, zipBytes },
@@ -1520,10 +1563,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     };
     try {
       const report = await runDtakoAlcUploadPure(deps, { opeNo: input.opeNo, startOpe: input.startOpe });
+      if (!report.recalculate.ok) {
+        console.error(
+          JSON.stringify({
+            dtako_alc_upload: "recalculate_failed",
+            comp_id: account.comp_id,
+            ope_no: input.opeNo,
+            message: report.recalculate.error,
+          }),
+        );
+      }
       const line = {
         dtako_alc_upload: "ok" as const,
         comp_id: account.comp_id,
         ope_no: input.opeNo,
+        recalculate_ok: report.recalculate.ok,
         bytes: report.bytes,
         upload_id: report.upload_id,
         split_failed: report.split_failed,
