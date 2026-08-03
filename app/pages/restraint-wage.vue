@@ -1471,8 +1471,8 @@ watch(month, () => {
  * 何人目かを表すため、無いと別の乗務員の行を指す。この候補ではまだオンプレに
  * 無く対象CDを決められないので、③ (「勤務時間再登録まで行う」チェック) は使えない。
  *
- * relay側の23桁ガードを22桁 (reset_timecard未指定時) まで緩める変更は別タスク
- * (#625-1) が担当。
+ * relay側のガード (`isUnkoNoAcceptable`) は reset_timecard の有無で必要桁数を
+ * 分けている (#625/#627、マージ済み) — 22桁のまま渡しても①②はそのまま実行できる。
  */
 function applyUnkoGapCandidateToMysqlForm(driverCd: number, unkoNo: string) {
   mysqlRefreshUnkoNo.value = unkoNo
@@ -6647,7 +6647,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                             </div>
                             <!-- 運行NOはコピー用テキスト (select-all) としても出しつつ、
                                  「③に入れる」で mysqlRefreshUnkoNo/driverCd 欄へも渡す
-                                 (Refs #623-2, #625-1 で22桁のまま①②が通るようになる想定) -->
+                                 (Refs #623-2。#625/#627 マージ済みで22桁のまま①②が実行できる) -->
                             <ul class="mt-1 space-y-1">
                               <li v-for="no in d.unkoNos" :key="no" class="flex flex-wrap items-center gap-2">
                                 <code class="text-xs select-all">{{ no }}</code>
