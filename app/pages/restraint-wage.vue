@@ -86,6 +86,7 @@ import {
   buildKintaiDiffPrescriptions,
   fmtKintaiDiffCacheHeadline,
   fmtKintaiDiffCount,
+  fmtKintaiDiffLastVerified,
   fmtKintaiRefreshMysqlGuarantee,
   foldProgressAppend,
   foldProgressInitial,
@@ -93,11 +94,21 @@ import {
   KINTAI_DIFF_CATEGORIES,
   parseKintaiDiffApiResponse,
   parseKintaiDiffCacheState,
+  parseKintaiDiffValueDiffItemsFromResponse,
   parseKintaiFoldPage,
   parseKintaiRefreshMysqlApplyResult,
   parseKintaiRefreshMysqlPreview,
   parseKintaiWindowReport,
 } from '~/utils/kintai-diff-view'
+import type {
+  KintaiCandidateDiffFieldRow,
+  KintaiCandidateDiffItemsState,
+  KintaiCandidateDiffResult,
+} from '~/utils/kintai-candidate-diff'
+import {
+  kintaiCandidateDiffFieldRows,
+  lookupKintaiCandidateDiff,
+} from '~/utils/kintai-candidate-diff'
 import type { KintaiStaleMonthBadge, KintaiStaleMonthsResponse } from '~/utils/kintai-stale-months'
 import {
   kintaiStaleMonthBadge,
@@ -1156,6 +1167,34 @@ const gcpDiffCacheHeadline = computed(() => fmtKintaiDiffCacheHeadline(gcpDiffCa
 const gcpDiffPrescriptions = computed<KintaiDiffPrescription[]>(() =>
   buildKintaiDiffPrescriptions(gcpDiffSummary.value, gcpDiffObservations.value))
 
+// 取り込み漏れ候補との突き合わせ (Refs #633-1)。値差の items は**ライブ取得
+// (「取り直す」を押した直後) にしか無い** — 保存分のキャッシュ読み込み
+// (loadGcpDiffCache) では触らない。まだライブ取得していない/読めなかった月は
+// 「未確認」のまま (`KintaiCandidateDiffItemsState` の3状態、kintai-candidate-diff.ts
+// の docs 参照)。
+const gcpDiffItemsState = ref<KintaiCandidateDiffItemsState>({ status: 'none' })
+
+/** 候補1件 (乗務員CD + 運行NO) ぶんの突き合わせ結果。 */
+function candidateDiffFor(driverCd: string, unkoNo: string): KintaiCandidateDiffResult {
+  return lookupKintaiCandidateDiff(driverCd, unkoNo, gcpDiffItemsState.value)
+}
+
+/** テンプレートでの discriminated union の絞り込みは vue-tsc で効かないことがあるため
+ * (このファイル冒頭 `gcpDiffSummary` 等と同じ理由)、表示用に平らな形へ潰す。
+ * `fieldRows` は `match`/`mismatch` 以外では空配列 (テンプレート側で `.length` だけ見ればよい)。 */
+interface UnkoGapCandidateDiffView {
+  kind: KintaiCandidateDiffResult['kind']
+  lastVerified: string | null
+  fieldRows: KintaiCandidateDiffFieldRow[]
+}
+
+function candidateDiffViewFor(driverCd: string, unkoNo: string): UnkoGapCandidateDiffView {
+  const result = candidateDiffFor(driverCd, unkoNo)
+  const lastVerified = result.kind === 'unconfirmed' ? null : fmtKintaiDiffLastVerified(result.lastVerifiedAt)
+  const fieldRows = result.kind === 'match' || result.kind === 'mismatch' ? kintaiCandidateDiffFieldRows(result.item) : []
+  return { kind: result.kind, lastVerified, fieldRows }
+}
+
 /** 保存済みスナップショットだけを読む軽い口 (R2 read のみ、突合は実行しない)。
  * タブを開いた/月を変えた時に自動で叩いてよい (Refs #620-3)。 */
 async function loadGcpDiffCache() {
@@ -1194,11 +1233,17 @@ async function loadGcpDiff() {
     // 保存直後の値をそのまま「最終確認」表示に反映する — 二度目の read
     // (`/kintai/diff-cache`) を打たない (Refs #620-3)。
     gcpDiffCacheState.value = kintaiDiffCacheStateFromLiveResult(parsed)
+    // 値差の items (取り込み漏れ候補との突き合わせ用、Refs #633-1) はライブ応答にしか
+    // 乗っていない — ここで拾う。`parsed.summary` が無い (壊れた応答) 場合は
+    // 「読めなかった」扱いにし、「差はありません」に化けさせない。
+    gcpDiffItemsState.value = parsed.summary
+      ? { status: 'ok', items: parseKintaiDiffValueDiffItemsFromResponse(res), lastVerifiedAt: parsed.lastVerifiedAt }
+      : { status: 'unreadable' }
   }
   catch (e) {
-    // 失敗しても直前まで表示していた保存分 (gcpDiffCacheState) はそのまま残す —
-    // 「取り直しに失敗した」ことと「差が消えた」ことは別なので、古い値を黙って
-    // 消さない (エラーはアラートで別途出す)。
+    // 失敗しても直前まで表示していた保存分 (gcpDiffCacheState/gcpDiffItemsState) は
+    // そのまま残す — 「取り直しに失敗した」ことと「差が消えた」ことは別なので、
+    // 古い値を黙って消さない (エラーはアラートで別途出す)。
     gcpDiffError.value = restraintErrorMessage(e)
   }
   finally {
@@ -1207,11 +1252,13 @@ async function loadGcpDiff() {
 }
 
 // 月が変わったら前の結果を消す (「タイムカード照合」タブと同じ理由 — 別月の
-// 差分・保証が残ると誤読する)。gcpDiffCacheState も同時に消す — 前の月の
-// 「最終確認: …」を新しい月の値に見せてはいけない (Refs #620-3 やること★)。
+// 差分・保証が残ると誤読する)。gcpDiffCacheState/gcpDiffItemsState も同時に消す —
+// 前の月の「最終確認: …」や値差 items を新しい月の候補と突き合わせてはいけない
+// (Refs #620-3 やること★、#633-1 も同型)。
 watch(month, () => {
   gcpDiffError.value = ''
   gcpDiffCacheState.value = { status: 'none' }
+  gcpDiffItemsState.value = { status: 'none' }
 })
 
 // このタブを見ている間だけ、タブを開いた/月が変わるたびに保存分を自動で読み直す
@@ -6699,19 +6746,61 @@ watch([compMap, kyuyoSyncedKeys], () => {
                             <!-- 運行NOはコピー用テキスト (select-all) としても出しつつ、
                                  「③に入れる」で mysqlRefreshUnkoNo/driverCd 欄へも渡す
                                  (Refs #623-2。#625/#627 マージ済みで22桁のまま①②が実行できる) -->
-                            <ul class="mt-1 space-y-1">
-                              <li v-for="no in d.unkoNos" :key="no" class="flex flex-wrap items-center gap-2">
-                                <code class="text-xs select-all">{{ no }}</code>
-                                <span class="text-xs text-gray-500">
-                                  ({{ unkoGapsResult.unkoNoDigits ?? no.length }}桁、GCP側) —
-                                  start_ope目安: {{ kintaiUnkoGapsDeriveStartOpe(no) ?? '不明' }}
-                                </span>
-                                <UButton
-                                  size="xs"
-                                  variant="soft"
-                                  label="③ に入れる"
-                                  @click="applyUnkoGapCandidateToMysqlForm(d.driverCd, no)"
-                                />
+                            <ul class="mt-1 space-y-2">
+                              <li v-for="no in d.unkoNos" :key="no">
+                                <div class="flex flex-wrap items-center gap-2">
+                                  <code class="text-xs select-all">{{ no }}</code>
+                                  <span class="text-xs text-gray-500">
+                                    ({{ unkoGapsResult.unkoNoDigits ?? no.length }}桁、GCP側) —
+                                    start_ope目安: {{ kintaiUnkoGapsDeriveStartOpe(no) ?? '不明' }}
+                                  </span>
+                                  <UButton
+                                    size="xs"
+                                    variant="soft"
+                                    label="③ に入れる"
+                                    @click="applyUnkoGapCandidateToMysqlForm(d.driverCd, no)"
+                                  />
+                                </div>
+
+                                <!-- その日の両側の差 (Refs #633-1)。★ 候補が複数あっても価値は
+                                     1件ずつ違う (issue #633 実測: 1740は40分差あり・1445は一致) —
+                                     一律に「取り込むべき」とは出さず、その日の実測を並べるだけ。 -->
+                                <div class="mt-1 pl-1 border-l-2 border-gray-200 dark:border-gray-700">
+                                  <p
+                                    v-if="candidateDiffViewFor(d.driverCd, no).kind === 'unconfirmed'"
+                                    class="text-xs text-gray-500"
+                                  >
+                                    その日の差分は未確認です — この月の「オンプレ vs Supabase」をまだ取り直していません
+                                    (取り直すと分かります)。
+                                  </p>
+                                  <p
+                                    v-else-if="candidateDiffViewFor(d.driverCd, no).kind === 'no_diff'"
+                                    class="text-xs text-gray-500"
+                                  >
+                                    その日は両側一致しています (差分リストに無し。最終確認:
+                                    {{ candidateDiffViewFor(d.driverCd, no).lastVerified ?? '不明' }})。
+                                    取り込む必要が無いと決まったわけではありません — 日別サマリに出ない形の
+                                    欠けもあり得ます。
+                                  </p>
+                                  <div v-else class="text-xs">
+                                    <p class="text-gray-700 dark:text-gray-300">
+                                      その日は差があります
+                                      ({{ candidateDiffViewFor(d.driverCd, no).kind === 'mismatch' ? '拘束も不一致' : '拘束は一致・内訳のみ違います' }}、
+                                      最終確認: {{ candidateDiffViewFor(d.driverCd, no).lastVerified ?? '不明' }})。
+                                      <span class="text-gray-500">取り込むと揃う可能性がありますが、保証ではありません。</span>
+                                    </p>
+                                    <table class="mt-1 border-collapse">
+                                      <tbody>
+                                        <tr v-for="row in candidateDiffViewFor(d.driverCd, no).fieldRows" :key="row.field">
+                                          <td class="pr-2 text-gray-500">{{ row.label }}</td>
+                                          <td class="text-right pr-1" :class="row.differs ? 'font-semibold' : ''">{{ row.gcp }}</td>
+                                          <td class="text-gray-400 px-1">←→</td>
+                                          <td class="text-right" :class="row.differs ? 'font-semibold' : ''">{{ row.onprem }}</td>
+                                        </tr>
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                </div>
                               </li>
                             </ul>
                           </div>
