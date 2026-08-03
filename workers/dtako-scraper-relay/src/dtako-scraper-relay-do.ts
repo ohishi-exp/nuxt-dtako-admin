@@ -697,6 +697,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return this.handleCronEtc(request);
     }
 
+    // 拘束サマリの写し (R2 kintai/ prefix) を無人で押し直す (Refs #606-6)。
+    // dtako グループとは無関係だが、認証・到達性の作法 (index.ts の
+    // /kintai-relay/restraint-sync 側で X-Alc-Proxy-Secret を検証、この worker
+    // 自身からしか到達できない) は /cron/dtako/* と同じなのでこの並びに置く。
+    if (url.pathname === "/cron/restraint-sync" && request.method === "POST") {
+      return this.handleCronRestraintSync(request);
+    }
+
     // ETC 全アカウント一括実行 (kind=etc-all) のディスパッチャ DO インスタンス
     // (idFromName("etc-admin-all")、index.ts 参照) が、各アカウント固有の DO
     // (`etc-{user_id}`) に対して叩く同期スクレイプ endpoint。cron/etc と同じく
@@ -3493,6 +3501,51 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       fetched_at: ts,
       warnings,
     });
+  }
+
+  /**
+   * POST /cron/restraint-sync — body {comp_id, month}。拘束サマリの写し
+   * (R2 `kintai/` prefix) を無人で押し直す (Refs #606-6)。
+   *
+   * **処理は `handleKintaiFetch` をそのまま呼ぶだけ (変更しない)。** theearth
+   * セッションを持たない synthetic record を組み立て、month を query string に
+   * 載せ替えて渡す。`handleKintaiFetch` は `record.compId` / `record.viewerEmail`
+   * しか読まない (theearth cookie には触れない R2-only 処理、Refs #606-6 調査済み)
+   * ので、theearth ログインは不要。
+   *
+   * 認証は index.ts の `/kintai-relay/restraint-sync` 側 (`X-Alc-Proxy-Secret`) が
+   * 持つ — この worker 自身からしか到達できない前提は `/cron/dtako` と同じ。
+   *
+   * **★ ここで押した写しは表示に使われない** (2026-08-03 決定、#606-5)。
+   * `loadWageReportSource` の timecard 側は live-build (`buildKintaiSummariesLive`)
+   * の成否だけで決まる。この同期の目的は突合・履歴用のスナップショットを最新に
+   * 保つことで、**同期が失敗しても画面は壊れない** (`handleKintaiFetch` の
+   * docstring 参照)。
+   */
+  private async handleCronRestraintSync(request: Request): Promise<Response> {
+    let body: { comp_id?: unknown; month?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return dvrJsonError(400, "body must be JSON");
+    }
+    const compId = typeof body.comp_id === "string" ? body.comp_id.trim() : "";
+    const month = typeof body.month === "string" ? body.month : "";
+    if (!compId || !month) {
+      return dvrJsonError(400, "comp_id / month は必須です");
+    }
+    const record: TheearthSessionRecord = {
+      token: "cron",
+      compId,
+      userName: "",
+      cookies: [],
+      createdAt: Date.now(),
+      expiresAt: Date.now(),
+    };
+    const url = new URL(
+      `https://relay.internal/restraint-api/kintai/fetch?month=${encodeURIComponent(month)}`,
+    );
+    return this.handleKintaiFetch(record, url);
   }
 
   /** 勤怠サマリ計算の入力 (所定マスタ・休日出勤の承認・社員のスコープ・夜勤者) を
