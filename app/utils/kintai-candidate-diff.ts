@@ -2,7 +2,7 @@
  * 取り込み漏れ候補 (`kintai-unko-gaps.ts` の `drivers[].{driverCd, unkoNos}`) と
  * オンプレ vs Supabase の値差 (`kintai-diff-view.ts` の
  * `KintaiDiffValueDiffItem[]`) を、**乗務員CD + 運行日**で突き合わせる pure ロジック
- * (Refs #633-1)。
+ * (Refs #633-1、#633-3 で day_absent/one_sided を追加)。
  *
  * ★ 新しい計算・新しい口は作らない。候補と差分は既に同じ画面 (`/restraint-wage` の
  * 「オンプレ vs Supabase」タブ) が両方持っている — ここでは受け取った2つの配列を
@@ -16,6 +16,15 @@
  * この月でまだライブ取得していない/読めなかった状態を「差はありません」と混同しない
  * よう、`KintaiDiffCacheState` (`kintai-diff-view.ts`) と同じ形の3状態
  * (`none`/`unreadable`/`ok`) で受け取る — 呼び出し側 (画面) がこの3状態を作る。
+ *
+ * ★★ #633-3 で直したバグの原型 (絶対に繰り返さないこと): 値差 items に見当たらない
+ * 日を無条件に「両側一致」と読んでいた。しかし運行NOの先頭6桁は**運行の開始日**で
+ * あって**勤怠の暦日**ではない — 日跨ぎ勤務 (前日 20 時台開始・翌日終業) では
+ * 折り畳んだ勤務の暦日が運行の開始日と1日ずれる。この場合その日はそもそも
+ * **突き合わせてすらいない** (両側とも行が存在しない)。「一致」と「未突合」を
+ * 区別するため、relay の `compared_days` (両側に行があった日、一致していても
+ * 不一致でも入る) を必ず経由すること — **`compared_days` を「一致した日」と
+ * 読み替えたくなったら、それがこのバグの再発**。
  */
 
 export interface KintaiCandidateDiffItem {
@@ -31,24 +40,58 @@ export interface KintaiCandidateDiffItems {
   mismatch: KintaiCandidateDiffItem[]
 }
 
+/** `day_absent`/`one_sided` 判定に要る「日」単位の材料 (Refs #633-3)。
+ * キーは全て `normalizeDriverCdKeyLocal` 済みの `乗務員CD|暦日` — 呼び出し側
+ * ([`buildKintaiCandidateDayCoverage`]) が1回だけ正規化して Set にまとめ、
+ * 候補1件ずつの照合は `.has()` (O(1)) で済ませる。 */
+export interface KintaiCandidateDayCoverage {
+  /** 両側に行があった日 (一致していても不一致でも入る — 「比較できた」の意味)。 */
+  comparedDays: Set<string>
+  /** `compared_days` がカテゴリ上限で切られていたか。true のときは
+   * `comparedDays` に無くても「両側に無い」と断定できない (見えている範囲が
+   * 全部ではないため) — 呼び出し側は `unconfirmed` に倒すこと。 */
+  comparedDaysCapped: boolean
+  /** GCP にしか行が無かった日。 */
+  onlyGcpDays: Set<string>
+  /** オンプレにしか行が無かった日 (`only_onprem_driver0` + `only_onprem_other`)。 */
+  onlyOnpremDays: Set<string>
+}
+
 /** ライブ取得の3状態。`kintai-diff-view.ts` の `KintaiDiffCacheState` と同じ形に
- * 揃える (「未確認」「読めなかった」「確認済み」を混同しないための共通作法)。 */
+ * 揃える (「未確認」「読めなかった」「確認済み」を混同しないための共通作法)。
+ * `dayCoverage: null` は `compared_days` が応答に無い/壊れている (古いキャッシュ・
+ * 将来の形変更) — この場合 `match`/`mismatch` 以外はすべて `unconfirmed` に倒す
+ * (「一致」と嘘をつくより「判別できない」と言う方を選ぶ、Refs #633-3)。 */
 export type KintaiCandidateDiffItemsState =
   | { status: 'none' }
   | { status: 'unreadable' }
-  | { status: 'ok', items: KintaiCandidateDiffItems, lastVerifiedAt: string | null }
+  | {
+    status: 'ok'
+    items: KintaiCandidateDiffItems
+    dayCoverage: KintaiCandidateDayCoverage | null
+    lastVerifiedAt: string | null
+  }
 
 export type KintaiCandidateDiffResult =
   /** この月の値差をまだライブ取得していない、または読めなかった。
-   * 「両側一致」と混同しないこと — 判定材料がまだ無いだけ。 */
+   * 「両側一致」と混同しないこと — 判定材料がまだ無いだけ。
+   * `compared_days` が応答に無い/capped のときもここに倒す (Refs #633-3)。 */
   | { kind: 'unconfirmed', date: string | null }
-  /** 値差の一覧 (取得済み) に見当たらなかった。**「取り込む必要が無い」と断定しない** —
-   * 日別サマリに出ない形の欠けもあり得るため、事実 (一致) だけを表す。 */
+  /** 値差の一覧 (取得済み) に見当たらず、かつ `compared_days` に両側の行があった
+   * ことが確認できた日。**ここで初めて「その日は両側一致」と言ってよい。** */
   | { kind: 'no_diff', date: string, lastVerifiedAt: string | null }
   /** 値が違うが拘束時間 (`restraint_minutes`) は一致 (内訳だけ違う)。 */
   | { kind: 'match', date: string, lastVerifiedAt: string | null, item: KintaiCandidateDiffItem }
   /** 拘束時間も不一致。 */
   | { kind: 'mismatch', date: string, lastVerifiedAt: string | null, item: KintaiCandidateDiffItem }
+  /** `compared_days` に無く、`only_gcp`/`only_onprem_*` の items にも無い — **その日は
+   * 両側とも勤務行が存在せず、突き合わせていない** (日跨ぎ勤務で運行の開始日と
+   * 勤怠の暦日がずれている可能性、1445/2026-06-25 の実例)。「一致」でも「不一致」
+   * でもなく「判定できない」という意味 (Refs #633-3)。 */
+  | { kind: 'day_absent', date: string, lastVerifiedAt: string | null }
+  /** `compared_days` に無いが、`only_gcp` または `only_onprem_*` の items にはある —
+   * 片側にしか勤務行が無い日 (Refs #633-3)。 */
+  | { kind: 'one_sided', date: string, lastVerifiedAt: string | null, side: 'gcp' | 'onprem' }
 
 const UNKO_NO_22_RE = /^\d{22}$/
 const UNKO_NO_23_RE = /^\d{23}$/
@@ -74,14 +117,57 @@ function normalizeDriverCdKeyLocal(driverCd: string): string {
   return /^\d+$/.test(trimmed) ? String(Number(trimmed)) : trimmed
 }
 
+function dayCoverageKey(driverCd: string, date: string): string {
+  return `${normalizeDriverCdKeyLocal(driverCd)}|${date}`
+}
+
+/** relay の生キー (`乗務員CD|暦日`、前ゼロ等は未正規化) を正規化して Set にする。 */
+function normalizeRawDayKeys(rawKeys: string[]): Set<string> {
+  const out = new Set<string>()
+  for (const raw of rawKeys) {
+    const sep = raw.indexOf('|')
+    if (sep < 0) {
+      out.add(raw)
+      continue
+    }
+    out.add(dayCoverageKey(raw.slice(0, sep), raw.slice(sep + 1)))
+  }
+  return out
+}
+
 /**
- * 1件の候補 (乗務員CD + 運行NO) を、取得済みの値差一覧と突き合わせる。
+ * `kintai-diff-view.ts` の `parseKintaiDiffDayCoverageFromResponse` が返す生データから
+ * [`KintaiCandidateDayCoverage`] を組む (1回だけ正規化、候補ごとの照合は `.has()` で
+ * 済ませるため)。`comparedDays: null` (`compared_days` が応答に無い/壊れている) の
+ * ときは `null` を返す — 呼び出し側は `dayCoverage: null` として状態に持たせ、
+ * `lookupKintaiCandidateDiff` が `unconfirmed` に倒す。
+ */
+export function buildKintaiCandidateDayCoverage(raw: {
+  comparedDays: { keys: string[], capped: boolean } | null
+  onlyGcpDays: Array<{ driverCd: string, date: string }>
+  onlyOnpremDays: Array<{ driverCd: string, date: string }>
+}): KintaiCandidateDayCoverage | null {
+  if (!raw.comparedDays) return null
+  return {
+    comparedDays: normalizeRawDayKeys(raw.comparedDays.keys),
+    comparedDaysCapped: raw.comparedDays.capped,
+    onlyGcpDays: new Set(raw.onlyGcpDays.map(r => dayCoverageKey(r.driverCd, r.date))),
+    onlyOnpremDays: new Set(raw.onlyOnpremDays.map(r => dayCoverageKey(r.driverCd, r.date))),
+  }
+}
+
+/**
+ * 1件の候補 (乗務員CD + 運行NO) を、取得済みの値差一覧・日カバレッジと突き合わせる。
  *
- * - `itemsState.status !== 'ok'` (まだライブ取得していない/読めなかった)、または
- *   運行NOの桁数が不正で運行日を作れない場合は `unconfirmed`
- * - 拘束不一致 (`mismatch`) を拘束一致 (`match`) より優先して探す (両方には出ない実装
- *   なので優先順位は実害無いが、`buildKintaiDiff` の分類と同じ重さの順にしておく)
- * - どちらにも見当たらなければ `no_diff` (その日は両側一致)
+ * 判定順序 (Refs #633-3、この順で決め打つ):
+ * 1. `itemsState.status !== 'ok'`、または運行NOの桁数が不正で運行日を作れない → `unconfirmed`
+ * 2. 値差 items (`mismatch` を `match` より優先) に見つかれば、その区分をそのまま返す
+ *    (値差 items にある = 両側に行がある確定なので、`compared_days` を見るまでもない)
+ * 3. `dayCoverage` が無い、または `comparedDaysCapped` → `unconfirmed`
+ *    (「一致」と嘘をつくより「判別できない」と言う方を選ぶ)
+ * 4. `compared_days` にあれば `no_diff` (**ここで初めて「両側一致」と言ってよい**)
+ * 5. `only_gcp`/`only_onprem_*` のどちらかにあれば `one_sided`
+ * 6. どこにも無ければ `day_absent` (両側とも突き合わせていない)
  */
 export function lookupKintaiCandidateDiff(
   driverCd: string,
@@ -101,7 +187,20 @@ export function lookupKintaiCandidateDiff(
   const match = itemsState.items.match.find(isSameDayDriver)
   if (match) return { kind: 'match', date, lastVerifiedAt: itemsState.lastVerifiedAt, item: match }
 
-  return { kind: 'no_diff', date, lastVerifiedAt: itemsState.lastVerifiedAt }
+  const coverage = itemsState.dayCoverage
+  if (!coverage || coverage.comparedDaysCapped) return { kind: 'unconfirmed', date }
+
+  const dayKey = dayCoverageKey(driverCd, date)
+  if (coverage.comparedDays.has(dayKey)) {
+    return { kind: 'no_diff', date, lastVerifiedAt: itemsState.lastVerifiedAt }
+  }
+  if (coverage.onlyGcpDays.has(dayKey)) {
+    return { kind: 'one_sided', date, lastVerifiedAt: itemsState.lastVerifiedAt, side: 'gcp' }
+  }
+  if (coverage.onlyOnpremDays.has(dayKey)) {
+    return { kind: 'one_sided', date, lastVerifiedAt: itemsState.lastVerifiedAt, side: 'onprem' }
+  }
+  return { kind: 'day_absent', date, lastVerifiedAt: itemsState.lastVerifiedAt }
 }
 
 /** 画面に並べる分数フィールドの表示順とラベル (issue #633 の例と同じ4項目)。

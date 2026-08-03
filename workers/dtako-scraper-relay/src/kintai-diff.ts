@@ -124,6 +124,10 @@ function keyToRow(key: string): { driver_cd: string; date: string; start: string
 /** カテゴリごとの上限。get_kintai_diff / get_rest_diff と同じ既定に揃えた。 */
 export const KINTAI_DIFF_MAX_ITEMS = 500;
 
+/** `compared_days` (Refs #633-3) だけの上限。他カテゴリより緩い — 「乗務員CD|暦日」
+ * だけの軽い文字列で、値差カテゴリの行 (gcp/onprem の11分数を持つ) より1件が軽いため。 */
+export const KINTAI_DIFF_COMPARED_DAYS_MAX_ITEMS = 4000;
+
 export interface CappedCategory<T> {
   /** 切る前の総数。 */
   total: number;
@@ -132,12 +136,13 @@ export interface CappedCategory<T> {
   items: T[];
 }
 
-/** 1 カテゴリぶんを `KINTAI_DIFF_MAX_ITEMS` で切り、`total`/`capped` を添えて返す。黙って切らない。 */
-function capCategory<T>(items: T[]): CappedCategory<T> {
+/** 1 カテゴリぶんを `limit` (既定 `KINTAI_DIFF_MAX_ITEMS`) で切り、`total`/`capped` を
+ * 添えて返す。黙って切らない。 */
+function capCategory<T>(items: T[], limit: number = KINTAI_DIFF_MAX_ITEMS): CappedCategory<T> {
   return {
     total: items.length,
-    capped: items.length > KINTAI_DIFF_MAX_ITEMS,
-    items: items.slice(0, KINTAI_DIFF_MAX_ITEMS),
+    capped: items.length > limit,
+    items: items.slice(0, limit),
   };
 }
 
@@ -175,11 +180,25 @@ export interface KintaiDiffResult {
   value_diff_restraint_match: CappedCategory<KintaiDiffValueDiffRow>;
   /** `restraint_minutes` も違う。 */
   value_diff_restraint_mismatch: CappedCategory<KintaiDiffValueDiffRow>;
+  /**
+   * 両側に行があった「乗務員CD|暦日」(開始時刻は落として重複除去・ソート、Refs #633-3)。
+   *
+   * ★ 「比較できた日」であって「一致した日」ではない — 値が一致していても違って
+   * いても、両側に行があれば入る (`value_diff_restraint_match`/`mismatch` に出た行も
+   * 含む)。**この区別を front 側で読み替えないこと** — #633-1 の `no_diff` (差分
+   * リストに無い=一致) は、実は「突き合わせてすらいない日」(日跨ぎ勤務で運行の
+   * 開始日と勤務の暦日がずれる、1445/2026-06-25 の実例) を「一致」と誤読していた
+   * バグの原因そのもの。ここに無い日は「一致」でも「不一致」でもなく「比較して
+   * いない」という意味に front 側で扱うこと。
+   */
+  compared_days: CappedCategory<string>;
 }
 
 /**
- * `乗務員CD|暦日|開始時刻` キーで突き合わせ、get_kintai_diff と同じ 5 区分に分ける。
- * 値が完全一致する行はどのカテゴリにも出さない (差が無いので報告不要)。
+ * `乗務員CD|暦日|開始時刻` キーで突き合わせ、get_kintai_diff と同じ 5 区分 +
+ * `compared_days` に分ける。値が完全一致する行はどのカテゴリにも出さない
+ * (差が無いので報告不要) が、`compared_days` には**一致していても**入れる
+ * (「比較できたか」を表すため、Refs #633-3)。
  */
 export function buildKintaiDiff(gcpBody: unknown, onpremBody: unknown, requestedDriver?: string): KintaiDiffResult {
   const gcp = gcpSummariesToMap(gcpBody);
@@ -191,6 +210,7 @@ export function buildKintaiDiff(gcpBody: unknown, onpremBody: unknown, requested
   const onlyOnpremOther: Array<KintaiDiffRow & { onprem: KintaiDiffValue }> = [];
   const restraintMatch: KintaiDiffValueDiffRow[] = [];
   const restraintMismatch: KintaiDiffValueDiffRow[] = [];
+  const comparedDays = new Set<string>();
 
   for (const [key, g] of gcp) {
     const o = onprem.get(key);
@@ -199,6 +219,7 @@ export function buildKintaiDiff(gcpBody: unknown, onpremBody: unknown, requested
       onlyGcp.push({ ...row, gcp: g });
       continue;
     }
+    comparedDays.add(`${row.driver_cd}|${row.date}`);
     const diffFields = KINTAI_DIFF_MINUTE_FIELDS.filter((f) => g[f] !== o[f]);
     if (diffFields.length === 0) continue;
     const bucket = g.restraint_minutes === o.restraint_minutes ? restraintMatch : restraintMismatch;
@@ -219,6 +240,7 @@ export function buildKintaiDiff(gcpBody: unknown, onpremBody: unknown, requested
     only_onprem_other: capCategory(onlyOnpremOther),
     value_diff_restraint_match: capCategory(restraintMatch),
     value_diff_restraint_mismatch: capCategory(restraintMismatch),
+    compared_days: capCategory([...comparedDays].sort(), KINTAI_DIFF_COMPARED_DAYS_MAX_ITEMS),
   };
 }
 

@@ -94,6 +94,7 @@ import {
   KINTAI_DIFF_CATEGORIES,
   parseKintaiDiffApiResponse,
   parseKintaiDiffCacheState,
+  parseKintaiDiffDayCoverageFromResponse,
   parseKintaiDiffValueDiffItemsFromResponse,
   parseKintaiFoldPage,
   parseKintaiRefreshMysqlApplyResult,
@@ -106,6 +107,7 @@ import type {
   KintaiCandidateDiffResult,
 } from '~/utils/kintai-candidate-diff'
 import {
+  buildKintaiCandidateDayCoverage,
   kintaiCandidateDiffFieldRows,
   lookupKintaiCandidateDiff,
 } from '~/utils/kintai-candidate-diff'
@@ -1183,18 +1185,25 @@ function candidateDiffFor(driverCd: string, unkoNo: string): KintaiCandidateDiff
 
 /** テンプレートでの discriminated union の絞り込みは vue-tsc で効かないことがあるため
  * (このファイル冒頭 `gcpDiffSummary` 等と同じ理由)、表示用に平らな形へ潰す。
- * `fieldRows` は `match`/`mismatch` 以外では空配列 (テンプレート側で `.length` だけ見ればよい)。 */
+ * `fieldRows` は `match`/`mismatch` 以外では空配列、`side` は `one_sided` 以外では
+ * `null` (テンプレート側で `.length`/`!== null` だけ見ればよい)。 */
 interface UnkoGapCandidateDiffView {
   kind: KintaiCandidateDiffResult['kind']
+  /** `MM-DD` 表示用 (day_absent/one_sided の文言に使う)。運行NOの桁数が不正で
+   * 運行日を作れなかった場合だけ null。 */
+  dayShort: string | null
   lastVerified: string | null
   fieldRows: KintaiCandidateDiffFieldRow[]
+  side: 'gcp' | 'onprem' | null
 }
 
 function candidateDiffViewFor(driverCd: string, unkoNo: string): UnkoGapCandidateDiffView {
   const result = candidateDiffFor(driverCd, unkoNo)
   const lastVerified = result.kind === 'unconfirmed' ? null : fmtKintaiDiffLastVerified(result.lastVerifiedAt)
   const fieldRows = result.kind === 'match' || result.kind === 'mismatch' ? kintaiCandidateDiffFieldRows(result.item) : []
-  return { kind: result.kind, lastVerified, fieldRows }
+  const side = result.kind === 'one_sided' ? result.side : null
+  const dayShort = result.date ? result.date.slice(5) : null
+  return { kind: result.kind, dayShort, lastVerified, fieldRows, side }
 }
 
 /** 保存済みスナップショットだけを読む軽い口 (R2 read のみ、突合は実行しない)。
@@ -1235,11 +1244,19 @@ async function loadGcpDiff() {
     // 保存直後の値をそのまま「最終確認」表示に反映する — 二度目の read
     // (`/kintai/diff-cache`) を打たない (Refs #620-3)。
     gcpDiffCacheState.value = kintaiDiffCacheStateFromLiveResult(parsed)
-    // 値差の items (取り込み漏れ候補との突き合わせ用、Refs #633-1) はライブ応答にしか
-    // 乗っていない — ここで拾う。`parsed.summary` が無い (壊れた応答) 場合は
-    // 「読めなかった」扱いにし、「差はありません」に化けさせない。
+    // 値差の items + compared_days (取り込み漏れ候補との突き合わせ用、Refs #633-1/#633-3)
+    // はライブ応答にしか乗っていない — ここで拾う。`parsed.summary` が無い (壊れた応答)
+    // 場合は「読めなかった」扱いにし、「差はありません」に化けさせない。
+    // `dayCoverage` は `compared_days` が応答に無ければ (古いキャッシュ・将来の形変更)
+    // `null` になる — `lookupKintaiCandidateDiff` がそれを「未確認」に倒す
+    // (compared_days を「一致した日」と誤読しないための必須の一手間、Refs #633-3)。
     gcpDiffItemsState.value = parsed.summary
-      ? { status: 'ok', items: parseKintaiDiffValueDiffItemsFromResponse(res), lastVerifiedAt: parsed.lastVerifiedAt }
+      ? {
+          status: 'ok',
+          items: parseKintaiDiffValueDiffItemsFromResponse(res),
+          dayCoverage: buildKintaiCandidateDayCoverage(parseKintaiDiffDayCoverageFromResponse(res)),
+          lastVerifiedAt: parsed.lastVerifiedAt,
+        }
       : { status: 'unreadable' }
   }
   catch (e) {
@@ -6875,6 +6892,26 @@ watch([compMap, kyuyoSyncedKeys], () => {
                                     {{ candidateDiffViewFor(d.driverCd, no).lastVerified ?? '不明' }})。
                                     取り込む必要が無いと決まったわけではありません — 日別サマリに出ない形の
                                     欠けもあり得ます。
+                                  </p>
+                                  <!-- day_absent (Refs #633-3): 運行の開始日と勤怠の暦日がずれる日跨ぎ
+                                       勤務で、その日は両側とも突き合わせていない。「一致」と混同しない。 -->
+                                  <p
+                                    v-else-if="candidateDiffViewFor(d.driverCd, no).kind === 'day_absent'"
+                                    class="text-xs text-gray-500"
+                                  >
+                                    {{ candidateDiffViewFor(d.driverCd, no).dayShort }} の勤務行は両側とも存在しません —
+                                    この運行は別の日に始まった勤務に含まれている可能性があります (日跨ぎ)。
+                                    突き合わせていないので、一致とも不一致とも言えません (最終確認:
+                                    {{ candidateDiffViewFor(d.driverCd, no).lastVerified ?? '不明' }})。
+                                  </p>
+                                  <!-- one_sided (Refs #633-3): 片側にしか勤務行が無い日。事実だけ出す。 -->
+                                  <p
+                                    v-else-if="candidateDiffViewFor(d.driverCd, no).kind === 'one_sided'"
+                                    class="text-xs text-amber-700 dark:text-amber-400"
+                                  >
+                                    {{ candidateDiffViewFor(d.driverCd, no).dayShort }} の勤務行は片側にしかありません
+                                    ({{ candidateDiffViewFor(d.driverCd, no).side === 'gcp' ? 'GCP側のみ' : 'オンプレ側のみ' }}、
+                                    最終確認: {{ candidateDiffViewFor(d.driverCd, no).lastVerified ?? '不明' }})。
                                   </p>
                                   <div v-else class="text-xs">
                                     <p class="text-gray-700 dark:text-gray-300">

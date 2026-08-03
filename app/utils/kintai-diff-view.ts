@@ -627,6 +627,86 @@ export function parseKintaiDiffValueDiffItemsFromResponse(raw: unknown): KintaiD
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// compared_days / only_gcp / only_onprem_* の「日」単位の材料 (Refs #633-3)。
+//
+// ★ #633-1 の `no_diff` (差分リストに無い=一致) は、実は「突き合わせてすらいない日」
+// (運行の開始日と、折り畳んだ勤務の暦日がずれる日跨ぎ勤務、1445/2026-06-25 の実例) を
+// 「一致」と誤読していたバグの原因そのもの (親の実測、2026-08-04)。ここで読む
+// `compared_days` は「両側に行があった日」であって「一致した日」ではない —
+// 値が一致していても違っていても入る (`kintai-diff.ts` の `KintaiDiffResult.compared_days`
+// docs 参照)。この区別を読み替えないこと。
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface KintaiDiffComparedDays {
+  /** 「乗務員CD|暦日」の生キー (relay 側の driver_cd をそのまま、前ゼロ等は未正規化)。 */
+  keys: string[]
+  capped: boolean
+}
+
+/** `diff.compared_days` (`{total, capped, items}`) を読む。`items` が配列でない
+ * (`compared_days` フィールド自体が応答に無い、古いキャッシュ・将来の形変更) 場合は
+ * `null` — 呼び出し側は「未確認」(判別できない) として扱うこと。 */
+export function parseKintaiDiffComparedDays(raw: unknown): KintaiDiffComparedDays | null {
+  if (raw == null || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  if (!Array.isArray(r.items)) return null
+  return {
+    keys: r.items.filter((x): x is string => typeof x === 'string'),
+    capped: r.capped === true,
+  }
+}
+
+export interface KintaiDiffDayRow {
+  driverCd: string
+  date: string
+}
+
+/** `only_gcp` / `only_onprem_driver0` / `only_onprem_other` の items から
+ * 「乗務員CD + 暦日」だけを抜く (開始時刻・分数の値は捨てる)。 */
+function parseKintaiDiffDayRows(raw: unknown): KintaiDiffDayRow[] {
+  const r = (raw ?? {}) as Record<string, unknown>
+  const items = Array.isArray(r.items) ? r.items : []
+  const out: KintaiDiffDayRow[] = []
+  for (const item of items) {
+    if (item == null || typeof item !== 'object') continue
+    const o = item as Record<string, unknown>
+    const driverCd = typeof o.driver_cd === 'string'
+      ? o.driver_cd
+      : typeof o.driver_cd === 'number' && Number.isFinite(o.driver_cd)
+        ? String(o.driver_cd)
+        : null
+    if (driverCd === null || typeof o.date !== 'string') continue
+    out.push({ driverCd, date: o.date })
+  }
+  return out
+}
+
+export interface KintaiDiffDayCoverageRaw {
+  /** `null` は `compared_days` が応答に無い/壊れている (「未確認」に倒すこと)。 */
+  comparedDays: KintaiDiffComparedDays | null
+  onlyGcpDays: KintaiDiffDayRow[]
+  /** `only_onprem_driver0` (乗務員CD=0) + `only_onprem_other` をまとめたもの。 */
+  onlyOnpremDays: KintaiDiffDayRow[]
+}
+
+/** ライブ `/kintai/diff` の生応答から、`day_absent`/`one_sided` 判定に要る
+ * 「日」単位の材料をまとめて読む (Refs #633-3)。value-diff items と同じく
+ * **ライブ応答にしか無い** — キャッシュ応答 (`/kintai/diff-cache`) を渡しても
+ * `comparedDays: null` になるだけで落ちない。 */
+export function parseKintaiDiffDayCoverageFromResponse(raw: unknown): KintaiDiffDayCoverageRaw {
+  const r = (raw ?? {}) as Record<string, unknown>
+  const diff = (r.diff ?? {}) as Record<string, unknown>
+  return {
+    comparedDays: parseKintaiDiffComparedDays(diff.compared_days),
+    onlyGcpDays: parseKintaiDiffDayRows(diff.only_gcp),
+    onlyOnpremDays: [
+      ...parseKintaiDiffDayRows(diff.only_onprem_driver0),
+      ...parseKintaiDiffDayRows(diff.only_onprem_other),
+    ],
+  }
+}
+
 /** ISO 文字列 (UTC) を JST の `MM/DD HH:mm` にする (`app/utils/profit-r2.ts` の
  * `restraintVersionTimestamp` と同じ JST 変換の作法 — 壁時計を UTC getter で読む)。
  * パースできなければ null。 */
