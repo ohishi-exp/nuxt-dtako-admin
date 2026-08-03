@@ -67,8 +67,8 @@ import { buildOperationZipPayload } from "./operation-zip";
 import {
   DtakoReimportError,
   DtakoReimportPushUncertainError,
+  isUnkoNoAcceptable,
   runDtakoReimport as runDtakoReimportPure,
-  UNKO_NO_RE,
   type DtakoReimportDeps,
 } from "./dtako-reimport";
 import {
@@ -4074,11 +4074,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    *
    * 実体は `runDtakoReimportJob` (`/cron/dtako/reimport` = `run_dtako_reimport`
    * MCP tool と同じ内部処理) をそのまま呼ぶだけ。**必須引数は `unko_no` だけ** —
-   * `ope_no`/`start_ope` は省略可で、省略時は `unko_no` (23桁) から
-   * `deriveOpeNoFromUnkoNo` (`kintai-diff.ts`) で機械的に導出する (親指摘
-   * 2026-08-03: 運行NOは桁に開始日時を持っているため、rest-diff が返す
+   * `ope_no`/`start_ope` は省略可で、省略時は `unko_no` (22桁または23桁) から
+   * `deriveOpeNoFromUnkoNo` (`kintai-diff.ts`、桁数で分岐する) で機械的に導出する
+   * (親指摘 2026-08-03: 運行NOは桁に開始日時を持っているため、rest-diff が返す
    * `unko_no` をそのまま渡せば足りる)。**明示的に渡された場合はそちらを優先する**
    * (theearth 側の運行検索等で正確な値が既に分かっている場合の上書き用)。
+   *
+   * **`unko_no` は `reset_timecard` の有無で必要な桁数が変わる** (Refs #625、
+   * `isUnkoNoAcceptable`)。③ (`reset_timecard: true`) は `resetby-unko-no/{unko_no}`
+   * の対象になるので実物の23桁が必須。①②のみ (既定) は取り込み対象を zip が決めるので、
+   * GCP (alc) 由来の22桁 (対象CD 抜き = 取り込み漏れ候補) も受け付ける。
    *
    * **既定は dry-run — `apply: true` が無ければ MariaDB には一切触れない**
    * (zip 取得も push もしない)。`driver_cd`/`month` が両方揃っていれば、
@@ -4108,11 +4113,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!unkoNo) {
       return dvrJsonError(400, "unko_no は必須です");
     }
-    if (!UNKO_NO_RE.test(unkoNo)) {
-      return dvrJsonError(400, `unko_no は23桁の数値で指定してください: "${unkoNo}"`);
+    // reset_timecard (③まで行うか) で必要な桁数が変わる (Refs #625) — ③は
+    // resetby-unko-no/{unko_no} の対象になるため実物の23桁が必須だが、①②のみなら
+    // 取り込み対象は zip が決めるので GCP (alc) 由来の22桁 (取り込み漏れ候補) も通す。
+    const resetTimecard = body.reset_timecard === true;
+    if (!isUnkoNoAcceptable(unkoNo, resetTimecard)) {
+      return dvrJsonError(
+        400,
+        resetTimecard
+          ? `勤務時間再登録 (reset_timecard=true) は unko_no が23桁の数値である必要があります: "${unkoNo}"`
+          : `unko_no は22桁または23桁の数値で指定してください: "${unkoNo}"`,
+      );
     }
-    // ope_no/start_ope が明示されていればそちらを優先。無ければ unko_no (23桁 =
-    // 開始日時12桁+車輌CD10桁+対象CD1桁) から機械的に導出する
+    // ope_no/start_ope が明示されていればそちらを優先。無ければ unko_no (22桁または
+    // 23桁 = 開始日時12桁+車輌CD10桁[+対象CD1桁]) から機械的に導出する
+    // (`deriveOpeNoFromUnkoNo` が桁数で分岐する、Refs #625)
     const explicitOpeNo = typeof body.ope_no === "string" && body.ope_no ? body.ope_no : null;
     const explicitStartOpe = typeof body.start_ope === "string" && body.start_ope ? body.start_ope : null;
     let opeNo: string;
@@ -4128,7 +4143,6 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       opeNo = explicitOpeNo ?? derived.opeNo22;
       startOpe = explicitStartOpe ?? derived.startOpe;
     }
-    const resetTimecard = body.reset_timecard === true;
     const apply = body.apply === true;
     const driverCd =
       typeof body.driver_cd === "string" && /^\d{1,10}$/.test(body.driver_cd) ? body.driver_cd : null;

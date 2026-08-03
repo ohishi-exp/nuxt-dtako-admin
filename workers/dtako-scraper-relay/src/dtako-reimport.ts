@@ -36,8 +36,24 @@ import { listZipEntryNames } from "./operation-zip";
 
 /** `unko_no` はオンプレ側の桁 (kintai-ops skill §4.6: GCP/theearth 側は22桁だが
  * 社内 nginx の URL キー・取り込みの対象指定は 23 桁)。**23 桁以外は拒否** —
- * 一括取り込み (月まるごと等) の事故を防ぐ歯止め (受け入れ条件9)。 */
+ * 一括取り込み (月まるごと等) の事故を防ぐ歯止め (受け入れ条件9)。
+ *
+ * ③ (`reset_timecard: true`、`resetby-unko-no/{unko_no}` の対象) はこの regex を
+ * そのまま使う — 23桁目 (対象CD) が「2マンの何人目か」を区別する実物の値が要る。
+ * ①②のみ (`reset_timecard: false`、既定) は `UNKO_NO_22_RE` も許す — 取り込み
+ * 対象は zip (`opeNo`+`startOpe`) が決めるので `unko_no` は「1件に紐付ける歯止めと
+ * 監査ラベル」でしかなく、GCP (alc) 由来の 22 桁 (対象CD 抜き) しか無い運行
+ * (取り込み漏れ候補) も通す必要がある (Refs #625)。**桁数のどちらでも「1件だけを
+ * 名指す」という歯止めの目的は変わらない** — 緩めるのは「23桁ちょうど」→
+ * 「22桁または23桁」だけで、「12桁以上なら何でも」にはしない。 */
 export const UNKO_NO_RE = /^\d{23}$/;
+export const UNKO_NO_22_RE = /^\d{22}$/;
+
+/** `unko_no` の桁数ガード本体。`resetTimecard` で必要な桁数が変わる (上のコメント参照)。 */
+export function isUnkoNoAcceptable(unkoNo: string, resetTimecard: boolean): boolean {
+  if (resetTimecard) return UNKO_NO_RE.test(unkoNo);
+  return UNKO_NO_RE.test(unkoNo) || UNKO_NO_22_RE.test(unkoNo);
+}
 
 export class DtakoReimportError extends Error {
   constructor(message: string) {
@@ -143,13 +159,17 @@ export async function runDtakoReimport(
   deps: DtakoReimportDeps,
   input: DtakoReimportInput,
 ): Promise<DtakoReimportReport> {
-  if (!UNKO_NO_RE.test(input.unkoNo)) {
-    throw new DtakoReimportError(`unko_no は23桁の数値で指定してください: "${input.unkoNo}"`);
+  const resetTimecard = input.resetTimecard === true;
+  if (!isUnkoNoAcceptable(input.unkoNo, resetTimecard)) {
+    throw new DtakoReimportError(
+      resetTimecard
+        ? `勤務時間再登録 (reset_timecard=true) は unko_no が23桁の数値である必要があります: "${input.unkoNo}"`
+        : `unko_no は22桁または23桁の数値で指定してください: "${input.unkoNo}"`,
+    );
   }
   const zip = await deps.fetchZip();
   assertZipReadyForPush(zip);
   const entries = listZipEntryNames(zip);
-  const resetTimecard = input.resetTimecard === true;
   const path = buildAutoloadPath(input.unkoNo, resetTimecard);
   // push (fetch + 応答本文の読み出し) をひとまとめに try する — **どちらで失敗しても
   // 「サーバへは届いたかもしれない」という点で扱いは同じ**。fetch 自体が例外を投げる
