@@ -19,7 +19,7 @@
  */
 
 export interface KintaiUnkoGapsDriverEntry {
-  driverCd: number
+  driverCd: string
   unkoNos: string[]
   truncated: boolean
 }
@@ -50,12 +50,30 @@ function toStringArray(v: unknown): string[] {
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
 }
 
+/**
+ * `driver_cd` は口によって表現が違う (★ #630-1 の原因)。
+ * 受け口 (`unko_gaps.rs`) は `drivers[].driver_cd` を **文字列** (`HashMap<String, _>`
+ * 由来) で返す一方、絞り込み指定の echo (`driver_cd` トップレベル) は `Option<i64>`
+ * = **数値 or null**。ここで数値表現に固定すると `drivers[]` が丸ごと弾かれて
+ * 「候補はありません」に化ける (本番実測、乗務員 1445/1740 が両方消えた) — 両方
+ * 受けて文字列に揃える。
+ */
+function toDriverCdString(v: unknown): string | null {
+  if (typeof v === 'string') {
+    const s = v.trim()
+    return s.length > 0 ? s : null
+  }
+  if (typeof v === 'number' && Number.isFinite(v)) return String(v)
+  return null
+}
+
 function parseDriverEntry(raw: unknown): KintaiUnkoGapsDriverEntry | null {
   if (raw == null || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
-  if (typeof r.driver_cd !== 'number' || !Number.isFinite(r.driver_cd)) return null
+  const driverCd = toDriverCdString(r.driver_cd)
+  if (driverCd === null) return null
   return {
-    driverCd: r.driver_cd,
+    driverCd,
     unkoNos: toStringArray(r.unko_nos),
     truncated: r.truncated === true,
   }
@@ -69,7 +87,7 @@ export function parseKintaiUnkoGaps(raw: unknown): KintaiUnkoGaps {
   const driversRaw = Array.isArray(r.drivers) ? r.drivers : []
   return {
     month: typeof r.month === 'string' ? r.month : null,
-    driverCd: typeof r.driver_cd === 'string' ? r.driver_cd : null,
+    driverCd: toDriverCdString(r.driver_cd),
     gcpEtagsAvailable: toBoolOrNull(r.gcp_etags_available),
     driverCdsAvailable: toBoolOrNull(r.driver_cds_available),
     unkoNoDigits: toNumberOrNull(r.unko_no_digits),

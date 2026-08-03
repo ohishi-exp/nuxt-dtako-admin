@@ -1525,9 +1525,9 @@ watch(month, () => {
  * 引くだけで、CSVを解凍して読む必要はない。見つかった23桁を運行NO欄に入れ直せば
  * 「勤務時間再登録まで行う」を使える。
  */
-function applyUnkoGapCandidateToMysqlForm(driverCd: number, unkoNo: string) {
+function applyUnkoGapCandidateToMysqlForm(driverCd: string, unkoNo: string) {
   mysqlRefreshUnkoNo.value = unkoNo
-  mysqlRefreshDriverCd.value = String(driverCd)
+  mysqlRefreshDriverCd.value = driverCd
   if (import.meta.client) {
     document.getElementById('gcp-mysql-refresh-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }

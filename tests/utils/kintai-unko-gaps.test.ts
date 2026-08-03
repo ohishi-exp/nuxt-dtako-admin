@@ -6,7 +6,13 @@ import {
   parseKintaiUnkoGaps,
 } from '~/utils/kintai-unko-gaps'
 
-/** issue #623-2 起票時に確定済みの応答形。 */
+/**
+ * rust-ichibanboshi `unko_gaps.rs` の実応答形 (★ #630-1 で本番実測して確定 —
+ * `drivers[].driver_cd` は `HashMap<String, _>` 由来の**文字列**。トップレベルの
+ * `driver_cd` (絞り込み指定の echo) だけが `Option<i64>` = 数値 or null で別物)。
+ * #623-2 時点の fixture は `drivers[].driver_cd` を数値と誤って固定しており、
+ * それがそのまま「候補は実在するのに `drivers: []` に化ける」実バグだった。
+ */
 function body(over: Record<string, unknown> = {}) {
   return {
     month: '2026-06',
@@ -15,8 +21,8 @@ function body(over: Record<string, unknown> = {}) {
     driver_cds_available: true,
     unko_no_digits: 22,
     drivers: [
-      { driver_cd: 1445, unko_nos: ['2606011234560001234560'], truncated: false },
-      { driver_cd: 1740, unko_nos: ['2606021234560001234561', '2606031234560001234562'], truncated: false },
+      { driver_cd: '1445', unko_nos: ['2606011234560001234560'], truncated: false },
+      { driver_cd: '1740', unko_nos: ['2606021234560001234561', '2606031234560001234562'], truncated: false },
     ],
     drivers_truncated: false,
     unknown_driver_unko_nos: [],
@@ -36,8 +42,8 @@ describe('parseKintaiUnkoGaps', () => {
       driverCdsAvailable: true,
       unkoNoDigits: 22,
       drivers: [
-        { driverCd: 1445, unkoNos: ['2606011234560001234560'], truncated: false },
-        { driverCd: 1740, unkoNos: ['2606021234560001234561', '2606031234560001234562'], truncated: false },
+        { driverCd: '1445', unkoNos: ['2606011234560001234560'], truncated: false },
+        { driverCd: '1740', unkoNos: ['2606021234560001234561', '2606031234560001234562'], truncated: false },
       ],
       driversTruncated: false,
       unknownDriverUnkoNos: [],
@@ -46,9 +52,10 @@ describe('parseKintaiUnkoGaps', () => {
     })
   })
 
-  it('driver_cd (絞り込み指定) が文字列で返れば読む', () => {
-    const r = parseKintaiUnkoGaps(body({ driver_cd: '1445' }))
-    expect(r.driverCd).toBe('1445')
+  it('driver_cd (絞り込み指定・トップレベル) が文字列でも数値でも読む', () => {
+    expect(parseKintaiUnkoGaps(body({ driver_cd: '1445' })).driverCd).toBe('1445')
+    // 実際の受け口は Option<i64> = 数値 or null で返す (drivers[].driver_cd とは別物)
+    expect(parseKintaiUnkoGaps(body({ driver_cd: 1445 })).driverCd).toBe('1445')
   })
 
   it('null/文字列/配列でない drivers は空扱い (壊さない)', () => {
@@ -68,24 +75,28 @@ describe('parseKintaiUnkoGaps', () => {
     expect(parseKintaiUnkoGaps(body({ drivers: 'not-array' })).drivers).toEqual([])
   })
 
-  it('driver_cd の無い/非数値要素・object でない要素は捨てる (driver_cd が主キー)', () => {
+  it('driver_cd の無い/空文字・object でない要素は捨てる (driver_cd が主キー、文字列も数値も両方受ける)', () => {
     const r = parseKintaiUnkoGaps(
       body({
         drivers: [
           { unko_nos: ['x'] },
           'x',
           null,
+          { driver_cd: '', unko_nos: ['x'] },
           { driver_cd: '9', unko_nos: ['x'] },
           { driver_cd: 9, unko_nos: ['2606011234560001234560'], truncated: true },
         ],
       }),
     )
-    expect(r.drivers).toEqual([{ driverCd: 9, unkoNos: ['2606011234560001234560'], truncated: true }])
+    expect(r.drivers).toEqual([
+      { driverCd: '9', unkoNos: ['x'], truncated: false },
+      { driverCd: '9', unkoNos: ['2606011234560001234560'], truncated: true },
+    ])
   })
 
   it('unko_nos が配列でない/文字列以外を含むなら弾く', () => {
-    const r = parseKintaiUnkoGaps(body({ drivers: [{ driver_cd: 1, unko_nos: ['a', 1, null, 'b'] }] }))
-    expect(r.drivers).toEqual([{ driverCd: 1, unkoNos: ['a', 'b'], truncated: false }])
+    const r = parseKintaiUnkoGaps(body({ drivers: [{ driver_cd: '1', unko_nos: ['a', 1, null, 'b'] }] }))
+    expect(r.drivers).toEqual([{ driverCd: '1', unkoNos: ['a', 'b'], truncated: false }])
   })
 
   it('可用性フラグが真偽値以外なら null (「引けていない」を捨てない)', () => {
