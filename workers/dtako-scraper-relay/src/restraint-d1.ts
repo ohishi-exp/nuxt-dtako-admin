@@ -5,9 +5,15 @@
 // (CSV・版・履歴) の保管庫として残し、D1 は常に「latest の写し」に保つ —
 // putVersionedR2 の結果 (sha256 / fetchedAt / lastVerifiedAt) をそのまま反映する。
 //
+// **★ この D1 写しは表示には使わない突合用のスナップショットである** (2026-08-03
+// 決定、#606-5 / #614)。wage-report は theearth 側を ichiban 経由の wage-source
+// (rust-ichibanboshi の restraint_local.sqlite) から読み、timecard 側は
+// buildKintaiSummariesLive の成否だけで決める — どちらも D1 (このモジュール) を
+// 読み取り経路に昇格させる計画は無い。D1 は突合・履歴用の写しとして残すだけ。
+//
 // このモジュールは pure (cloudflare 非依存): 変換とステートメント構築だけを持ち、
 // 実行 (db.batch) は DO 側。round-trip (summary → 行 → summary) が恒等であることを
-// テストで固定し、読み取り切替 (PR-C) 時の欠損を防ぐ。
+// テストで固定し、突合用スナップショットとして値が欠けないことを保証する。
 
 import type {
   RestraintDriverSummary,
@@ -246,7 +252,8 @@ export function buildRestraintD1Statements(
 }
 
 // ---------------------------------------------------------------------------
-// 読み取り: 行 → サマリ (PR-C の読み取り切替で使う。PR-A では round-trip の証明)
+// 読み取り: 行 → サマリ (表示経路には使わない。突合用スナップショットの round-trip
+// が壊れていないことを PR-A 由来のテストで確かめるためだけに存在する)
 // ---------------------------------------------------------------------------
 
 /** restraint_driver_month の SELECT 行 (snake_case、D1 の素の結果)。 */

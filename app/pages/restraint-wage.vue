@@ -32,6 +32,7 @@ import type {
 import {
   fastBadgeState,
   groupMinWageRows,
+  isTimecardSynced,
   MIN_WAGE_DEFAULT_KEY,
   MIN_WAGE_JOB_GROUP_LABEL,
   minWageCompareRow,
@@ -201,6 +202,11 @@ const kyuyoSyncedKeys = ref<Set<string>>(new Set())
 const kyuyoSyncedLoaded = ref(false)
 /** 拘束サマリが ichiban に同期済みの月 (YYYY-MM) = 高速表示できる月 (Refs #460)。 */
 const ichibanMonths = ref<string[]>([])
+/** timecard 側が ichiban に同期済みの月 (YYYY-MM、#611 の無人同期、Refs #614)。
+ * 「高速表示可」バッジの判定 (theearth 基準) には混ぜない — timecard 側は
+ * live-build 一本化済みで同期の有無が表示速度に効かないため。バッジのツール
+ * チップで timecard 側の同期状況を併記するためだけに使う。 */
+const ichibanMonthsTimecard = ref<string[]>([])
 /** relay の kintai 上流キャッシュ (daily+kosoku) が揃っている月 (Refs #543 followup)。
  * null = 旧 relay 応答 (フィールド無し) — バッジは従来どおりフル表示に fallback。 */
 const kintaiCachedMonths = ref<string[] | null>(null)
@@ -215,6 +221,12 @@ function monthHasKyuyo(year: number, monthNo: number): boolean {
 
 function monthIsSynced(year: number, monthNo: number): boolean {
   return ichibanMonths.value.includes(`${year}-${String(monthNo).padStart(2, '0')}`)
+}
+
+/** timecard 側が ichiban に同期済みか (#611 の無人同期、Refs #614)。バッジの
+ * ツールチップに添えるだけで、バッジ自体の full/synced-only/none 判定は変えない。 */
+function monthIsTimecardSynced(year: number, monthNo: number): boolean {
+  return isTimecardSynced(`${year}-${String(monthNo).padStart(2, '0')}`, ichibanMonthsTimecard.value)
 }
 
 /** 「高速表示可」バッジの 2 段階判定 (Refs #543 followup)。判定は pure な
@@ -325,12 +337,14 @@ async function loadArchiveMonths() {
   if (!session.value || archiveMonthsLoading) return
   archiveMonthsLoading = true
   try {
-    const res = await $fetch<{ months: string[], kintai_months?: string[], ichiban_months?: string[], kintai_cached_months?: string[] }>('/restraint-api/archive/months', { headers: authHeaders() })
+    const res = await $fetch<{ months: string[], kintai_months?: string[], ichiban_months?: string[], ichiban_months_timecard?: string[], kintai_cached_months?: string[] }>('/restraint-api/archive/months', { headers: authHeaders() })
     archiveMonths.value = res.months
     // タイムカード取り込み済み月 (relay 旧版は返さない — その間はバッジ非表示)
     kintaiMonths.value = res.kintai_months ?? []
     // 拘束サマリ同期済み月 (= 高速表示可、Refs #460)
     ichibanMonths.value = res.ichiban_months ?? []
+    // timecard 側の無人同期済み月 (旧 relay 応答には無い、Refs #614)
+    ichibanMonthsTimecard.value = res.ichiban_months_timecard ?? []
     // kintai 上流キャッシュ有りの月 (Refs #543 followup)。旧 relay はフィールド
     // 自体が無い → null のままにしてバッジを従来どおりフル表示に fallback
     kintaiCachedMonths.value = res.kintai_cached_months ?? null
@@ -3772,9 +3786,12 @@ watch([compMap, kyuyoSyncedKeys], () => {
                   v-if="monthFastBadge(selectedYear, m) !== 'none'"
                   class="w-1.5 h-1.5 rounded-full bg-emerald-500"
                   :class="monthFastBadge(selectedYear, m) === 'synced-only' ? 'opacity-50' : ''"
-                  :title="monthFastBadge(selectedYear, m) === 'full'
+                  :title="(monthFastBadge(selectedYear, m) === 'full'
                     ? '高速表示可 (拘束サマリ同期済み・キャッシュ有り)'
-                    : '高速表示可 (拘束サマリ同期済み)'"
+                    : '高速表示可 (拘束サマリ同期済み)')
+                    + (monthIsTimecardSynced(selectedYear, m)
+                      ? ' / タイムカードも同期済み'
+                      : ' / タイムカードは未同期 (夜間バッチ待ち、表示自体には影響しません)')"
                 />
               </span>
             </div>
@@ -4599,6 +4616,8 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再計算" :loading="loadingReport" @click="loadWageReport" />
               </div>
             </template>
+
+            <p v-for="w in report?.warnings ?? []" :key="w" class="text-xs text-amber-600 dark:text-amber-400 mb-1">⚠ {{ w }}</p>
 
             <div v-if="salaryStatus === 'loading-payroll'" class="flex items-center gap-2 text-sm text-gray-500">
               <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin text-primary" />
@@ -5694,6 +5713,8 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 </span>
               </div>
             </template>
+
+            <p v-for="w in report?.warnings ?? []" :key="w" class="text-xs text-amber-600 dark:text-amber-400 mb-1">⚠ {{ w }}</p>
 
             <UAlert
               v-if="timecardNeedsRefetch"

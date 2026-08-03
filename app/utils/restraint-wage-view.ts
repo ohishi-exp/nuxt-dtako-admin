@@ -294,6 +294,19 @@ export function fastBadgeState(
   return 'synced-only'
 }
 
+/**
+ * timecard 側が ichiban へ同期済みかどうか (#611 の無人同期、毎日 JST 4:00、Refs #614)。
+ *
+ * ★ `fastBadgeState` の判定 (full/synced-only/none) には**混ぜない**。「高速表示可」は
+ * wage-report の R2 GET fan-out (theearth 側、約300本) を避けられるかどうかの目安で、
+ * timecard 側は #606-5 で live-build 一本化済み — 同期の有無は表示速度に影響しない。
+ * この関数は「timecard 側の無人同期がこの月までバックフィルできているか」という
+ * 別軸の情報を画面が読めるようにするためだけに存在する。
+ */
+export function isTimecardSynced(ym: string, timecardSyncedMonths: readonly string[]): boolean {
+  return timecardSyncedMonths.includes(ym)
+}
+
 // ---- 最低賃金チェックの並び (ユーザー決定 2026-07-30) ----
 
 /** 職員区分の見出し。`other` は「推測で他の区分に混ぜない」ので中身を明示する。 */

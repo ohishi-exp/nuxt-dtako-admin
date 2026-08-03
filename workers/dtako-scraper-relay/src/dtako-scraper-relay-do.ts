@@ -4992,7 +4992,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
     const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
     const kintaiPrefix = this.env.KINTAI_R2_PREFIX || "kintai";
-    const [months, kintaiMonths, ichibanMonths] = await Promise.all([
+    const [months, kintaiMonths, ichibanSynced] = await Promise.all([
       this.listMonthDirs(bucket, `${prefix}/${record.compId}/`),
       this.listMonthDirs(bucket, `${kintaiPrefix}/${record.compId}/`),
       this.listIchibanSyncedMonths(record.compId),
@@ -5000,7 +5000,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return Response.json({
       months,
       kintai_months: kintaiMonths,
-      ichiban_months: ichibanMonths,
+      ichiban_months: ichibanSynced.theearth,
+      // timecard 側が ichiban へ同期済みの月 (#611 の無人同期、Refs #614)。
+      // 「高速表示可」バッジの判定自体は theearth 基準のまま変えない (#606-5 で
+      // timecard は live-build 一本化済み、同期の有無は表示速度に効かない) が、
+      // 画面がどちらの source までバックフィルが進んでいるかを読めるようにする
+      ichiban_months_timecard: ichibanSynced.timecard,
       // kintai 上流キャッシュ (daily+kosoku 両方) が揃っている月 — 月タブの
       // 「高速表示可」バッジの 2 段階表示用 (Refs #543 followup)。閲覧者自身の
       // キャッシュ DO に問い合わせる (Refs #554) — バッジは「自分にとって速いか」
@@ -5022,10 +5027,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
   }
 
-  /** ichiban に拘束サマリ (theearth source) が push 済みの月一覧 (Refs #460)。
-   * 月タブの「高速表示可」バッジと未同期時のバックフィル案内用。best-effort —
-   * 未設定・失敗は空 (バッジが出ないだけで月タブは従来どおり動く)。 */
-  private async listIchibanSyncedMonths(compId: string): Promise<string[]> {
+  /** ichiban に拘束サマリが push 済みの月一覧、theearth と timecard の両方
+   * (Refs #460、#614)。月タブの「高速表示可」バッジ (theearth 基準) と未同期時の
+   * バックフィル案内、および timecard 側の無人同期 (#611) がどこまで進んでいるかの
+   * 画面表示に使う。best-effort — 未設定・失敗は両方空 (バッジが出ないだけで
+   * 月タブは従来どおり動く)。 */
+  private async listIchibanSyncedMonths(compId: string): Promise<{ theearth: string[], timecard: string[] }> {
     const apiUrl = (this.env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
     const clientId = this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
     let clientSecret = "";
@@ -5038,7 +5045,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
     if (!apiUrl || !clientId || !clientSecret) {
       console.log(JSON.stringify({ restraint_synced_months: "skipped-not-configured", comp_id: compId }));
-      return [];
+      return { theearth: [], timecard: [] };
     }
     try {
       const res = await fetch(
@@ -5059,32 +5066,42 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
             body: (await res.text()).slice(0, 200),
           }),
         );
-        return [];
+        return { theearth: [], timecard: [] };
       }
       const raw = (await res.json()) as { entries?: unknown };
       if (!Array.isArray(raw.entries)) {
         console.error(JSON.stringify({ restraint_synced_months: "bad-shape", comp_id: compId }));
-        return [];
+        return { theearth: [], timecard: [] };
       }
-      // wage-report の fan-out を支配するのは theearth 側 — 「高速表示可」の
-      // 判定は theearth source の同期有無で見る
-      const months = raw.entries
-        .filter(
-          (e): e is { source: string; month: string } =>
-            typeof e === "object" && e !== null
-            && (e as { source?: unknown }).source === "theearth"
-            && typeof (e as { month?: unknown }).month === "string",
-        )
-        .map((e) => e.month);
-      console.log(
-        JSON.stringify({ restraint_synced_months: "ok", comp_id: compId, months: months.length }),
+      const entries = raw.entries.filter(
+        (e): e is { source: string, month: string } =>
+          typeof e === "object" && e !== null
+          && typeof (e as { source?: unknown }).source === "string"
+          && typeof (e as { month?: unknown }).month === "string",
       );
-      return [...new Set(months)].sort((a, b) => b.localeCompare(a));
+      // source 別に集計する (#614) — 「高速表示可」の判定自体は theearth 基準の
+      // ままだが (fan-out を支配するのは theearth 側)、timecard 側の無人同期
+      // (#611) がどこまで進んでいるかも画面が読めるようにする
+      const monthsOf = (source: "theearth" | "timecard") =>
+        [...new Set(entries.filter((e) => e.source === source).map((e) => e.month))].sort((a, b) =>
+          b.localeCompare(a)
+        );
+      const theearth = monthsOf("theearth");
+      const timecard = monthsOf("timecard");
+      console.log(
+        JSON.stringify({
+          restraint_synced_months: "ok",
+          comp_id: compId,
+          months: theearth.length,
+          months_timecard: timecard.length,
+        }),
+      );
+      return { theearth, timecard };
     } catch (err) {
       console.error(
         JSON.stringify({ restraint_synced_months: "error", comp_id: compId, error: describeUnknownError(err) }),
       );
-      return [];
+      return { theearth: [], timecard: [] };
     }
   }
 
@@ -5096,7 +5113,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * **CSV 側の lastVerifiedAt / 確認履歴は更新しない** — theearth で内容を
    * 確認したわけではないため。書くのは summary の latest + 版だけ (内容が
    * 変わらなければ putVersionedR2 が版を増やさず lastVerifiedAt だけ進むが、
-   * これは「保存済み CSV から同じサマリが再現された」ことの記録として正しい)。 */
+   * これは「保存済み CSV から同じサマリが再現された」ことの記録として正しい)。
+   *
+   * **timecard 版はこれの対になるものを作らない** (2026-08-03 判断、#614)。
+   * ここでの再計算は「保存済みの生 CSV から表示用サマリを組み直す」もので、
+   * timecard 側は `loadWageReportSource` が wage-report のたびに
+   * `buildKintaiSummariesLive` で打刻 + kosoku-daily から毎回組み直しており
+   * (#606-5、写しフォールバック無し)、再計算し直すべき「古い表示用サマリ」が
+   * そもそも存在しない。突合・履歴用の写し (R2 kintai/ prefix・D1・ichiban) の
+   * 更新は #611 の無人同期 (毎日 JST 4:00 の cron/restraint-sync) が担うため、
+   * 手動再計算の口も要らない。 */
   private async handleArchiveResummarize(record: TheearthSessionRecord, url: URL): Promise<Response> {
     const bucket = this.env.DTAKO_R2;
     if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
