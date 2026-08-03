@@ -1456,17 +1456,26 @@ watch(month, () => {
 })
 
 /**
- * 候補の乗務員CDだけを③のフォームへ渡す (Refs #623-2、親判断 2026-08-03)。
+ * 候補の行から③のフォームへ値を渡す (Refs #623-2、親判断 2026-08-03 — 一度 (b) に
+ * 差し替えたが、オンプレ側の実コード確認で前提が変わり (a) に戻した)。
  * **自動実行はしない** — 欄に値が入るだけで、「① 確認」は人が押す。
  *
- * ★ **運行NO (unko_no欄) には何も入れない。** 受け口が返すのは22桁 (GCP側) だが、
- * ③が要るのは23桁 (オンプレ側、末尾1桁 = 対象CD) — 候補の運行はまだオンプレに無いため
- * 対象CDを機械的に決められない。22桁を欄に入れると「①確認」が23桁ガードで必ず
- * 落ちる (=押すと壊れるボタンになる) うえ、「足りない1桁を人がその場で判断」は
- * 実質的に捏造を人に代行させるのと同じ (親指摘)。運行NOは一覧のテキスト
- * (コピー可能) として見せるだけに留め、欄には入れない。
+ * ★ 渡すのは受け口が返す **22桁 (GCP側)** の運行NOそのまま。23桁 (オンプレ側、
+ * 末尾1桁 = 対象CD) を機械的に作って捏造することはしない。
+ *
+ * `rust-ichibanboshi` の `dtako_autoload.rs::parse_unko_no` は12桁以上の数字を
+ * 通す (22桁の実例をテストが確認済み) — **① (zip取得) と ② (オンプレ取り込み) は
+ * 22桁のまま実行できる** (`unko_no` は取り込み対象を決める鍵ではなく歯止め・監査
+ * ラベル、対象を決めているのは zip の中身)。**23桁が本当に要るのは
+ * ③ (勤務時間再登録、`resetby-unko-no/{unko_no}`) だけ** — 対象CDで2マンの
+ * 何人目かを表すため、無いと別の乗務員の行を指す。この候補ではまだオンプレに
+ * 無く対象CDを決められないので、③ (「勤務時間再登録まで行う」チェック) は使えない。
+ *
+ * relay側の23桁ガードを22桁 (reset_timecard未指定時) まで緩める変更は別タスク
+ * (#625-1) が担当。
  */
-function applyUnkoGapCandidateToMysqlForm(driverCd: number) {
+function applyUnkoGapCandidateToMysqlForm(driverCd: number, unkoNo: string) {
+  mysqlRefreshUnkoNo.value = unkoNo
   mysqlRefreshDriverCd.value = String(driverCd)
   if (import.meta.client) {
     document.getElementById('gcp-mysql-refresh-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -6630,30 +6639,28 @@ watch([compMap, kyuyoSyncedKeys], () => {
                             :key="d.driverCd"
                             class="text-sm border border-gray-200 dark:border-gray-700 rounded p-2"
                           >
-                            <div class="font-medium flex flex-wrap items-center gap-2">
-                              <span>
-                                乗務員CD {{ d.driverCd }}
-                                <span class="text-xs text-gray-500">
-                                  ({{ d.unkoNos.length }}件{{ d.truncated ? ' 以上 — 上限で打ち切り' : '' }})
-                                </span>
+                            <div class="font-medium">
+                              乗務員CD {{ d.driverCd }}
+                              <span class="text-xs text-gray-500">
+                                ({{ d.unkoNos.length }}件{{ d.truncated ? ' 以上 — 上限で打ち切り' : '' }})
                               </span>
-                              <UButton
-                                size="2xs"
-                                variant="soft"
-                                label="③へ乗務員CDを入れる"
-                                @click="applyUnkoGapCandidateToMysqlForm(d.driverCd)"
-                              />
                             </div>
-                            <!-- 運行NOはコピー用テキストとして出すだけ。③の欄には入れない —
-                                 22桁 (GCP側) のままで、オンプレ23桁目 (対象CD) は未確定 -->
+                            <!-- 運行NOはコピー用テキスト (select-all) としても出しつつ、
+                                 「③に入れる」で mysqlRefreshUnkoNo/driverCd 欄へも渡す
+                                 (Refs #623-2, #625-1 で22桁のまま①②が通るようになる想定) -->
                             <ul class="mt-1 space-y-1">
                               <li v-for="no in d.unkoNos" :key="no" class="flex flex-wrap items-center gap-2">
                                 <code class="text-xs select-all">{{ no }}</code>
                                 <span class="text-xs text-gray-500">
-                                  ({{ unkoGapsResult.unkoNoDigits ?? no.length }}桁、GCP側)。
-                                  オンプレの23桁目 (対象CD) は未確定です —
+                                  ({{ unkoGapsResult.unkoNoDigits ?? no.length }}桁、GCP側) —
                                   start_ope目安: {{ kintaiUnkoGapsDeriveStartOpe(no) ?? '不明' }}
                                 </span>
+                                <UButton
+                                  size="2xs"
+                                  variant="soft"
+                                  label="③ に入れる"
+                                  @click="applyUnkoGapCandidateToMysqlForm(d.driverCd, no)"
+                                />
                               </li>
                             </ul>
                           </div>
@@ -6852,8 +6859,9 @@ watch([compMap, kyuyoSyncedKeys], () => {
               <UCheckbox v-model="mysqlRefreshResetTimecard" label="勤務時間再登録まで行う (③、破壊的)" />
             </div>
             <p v-if="/^\d{22}$/.test(mysqlRefreshUnkoNo.trim())" class="text-xs text-amber-700 dark:text-amber-400 mb-2">
-              22桁 (GCP側) のままです — オンプレ23桁目 (対象CD) を確認して1桁補ってください。
-              このままでは「① 確認」が23桁チェックで失敗します。
+              22桁 (GCP側) です。取り込み (①②) はこのまま実行できます。
+              ③ (勤務時間再登録) はオンプレの23桁 (対象CD込み) が必要なため、この候補では行えません
+              (「勤務時間再登録まで行う」のチェックは外してください)。
             </p>
             <UAlert
               v-if="mysqlRefreshError"
