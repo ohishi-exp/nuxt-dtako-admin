@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   buildKintaiDiffPrescriptions,
   fmtKintaiDiffCacheHeadline,
+  fmtKintaiDiffCategoryCappedNote,
   fmtKintaiDiffCount,
   fmtKintaiDiffLastVerified,
   fmtKintaiDiffMissingFieldsNote,
@@ -10,8 +11,11 @@ import {
   foldProgressInitial,
   kintaiDiffCacheStateFromLiveResult,
   kintaiDiffHasAnyDiff,
+  kintaiDiffOneSidedFieldRows,
+  kintaiDiffValueDiffFieldRows,
   parseKintaiDiffApiResponse,
   parseKintaiDiffCacheState,
+  parseKintaiDiffCategoryItemsFromResponse,
   parseKintaiDiffComparedDays,
   parseKintaiDiffDayCoverageFromResponse,
   parseKintaiDiffObservations,
@@ -865,6 +869,194 @@ describe('parseKintaiDiffValueDiffItemsFromResponse', () => {
   it('壊れた応答 (diff 自体が無い) でも空配列に倒す', () => {
     expect(parseKintaiDiffValueDiffItemsFromResponse(null)).toEqual({ match: [], mismatch: [] })
     expect(parseKintaiDiffValueDiffItemsFromResponse({})).toEqual({ match: [], mismatch: [] })
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────
+// 5区分すべての items (Refs #633-6)。issue #633-6 本文の実データ (2026-05 実測、
+// 1018|2026-05-01|03:22 / 1107|2026-05-09|09:43) に寄せた fixture で確認する。
+// ─────────────────────────────────────────────────────────────────────────
+
+describe('parseKintaiDiffCategoryItemsFromResponse', () => {
+  it('5区分ぶんの items を key ごとに読む (issue #633-6 実データに寄せた fixture)', () => {
+    const raw = {
+      month: '2026-05',
+      diff: {
+        gcp_rows: 100,
+        onprem_rows: 100,
+        onprem_unreadable: false,
+        only_gcp: {
+          total: 1,
+          capped: false,
+          items: [
+            { driver_cd: '9001', date: '2026-05-02', start: '2026-05-02T05:00:00', gcp: diffValue() },
+          ],
+        },
+        only_onprem_driver0: {
+          total: 1,
+          capped: false,
+          items: [
+            { driver_cd: '0', date: '2026-05-03', start: '2026-05-03T06:00:00', onprem: diffValue() },
+          ],
+        },
+        only_onprem_other: {
+          total: 1,
+          capped: false,
+          items: [
+            { driver_cd: '9002', date: '2026-05-04', start: '2026-05-04T07:00:00', onprem: diffValue() },
+          ],
+        },
+        value_diff_restraint_match: {
+          total: 1,
+          capped: false,
+          items: [
+            {
+              driver_cd: '1018',
+              date: '2026-05-01',
+              start: '2026-05-01T03:22:00',
+              diff_fields: ['working_minutes', 'break_minutes', 'overtime_minutes'],
+              gcp: diffValue({ working_minutes: 636, break_minutes: 211, overtime_minutes: 156 }),
+              onprem: diffValue({ working_minutes: 777, break_minutes: 70, overtime_minutes: 297 }),
+            },
+          ],
+        },
+        value_diff_restraint_mismatch: { total: 0, capped: false, items: [] },
+      },
+    }
+    const categories = parseKintaiDiffCategoryItemsFromResponse(raw)
+    expect(categories.map(c => c.key)).toEqual([
+      'onlyGcp',
+      'onlyOnpremDriver0',
+      'onlyOnpremOther',
+      'valueDiffRestraintMatch',
+      'valueDiffRestraintMismatch',
+    ])
+
+    const onlyGcp = categories.find(c => c.key === 'onlyGcp')!
+    expect(onlyGcp.rows).toEqual([
+      { kind: 'one_sided', driverCd: '9001', date: '2026-05-02', start: '2026-05-02T05:00:00', side: 'gcp', values: expectedMinutes() },
+    ])
+
+    const onlyOnpremDriver0 = categories.find(c => c.key === 'onlyOnpremDriver0')!
+    expect(onlyOnpremDriver0.rows).toEqual([
+      { kind: 'one_sided', driverCd: '0', date: '2026-05-03', start: '2026-05-03T06:00:00', side: 'onprem', values: expectedMinutes() },
+    ])
+
+    const onlyOnpremOther = categories.find(c => c.key === 'onlyOnpremOther')!
+    expect(onlyOnpremOther.rows).toEqual([
+      { kind: 'one_sided', driverCd: '9002', date: '2026-05-04', start: '2026-05-04T07:00:00', side: 'onprem', values: expectedMinutes() },
+    ])
+
+    const match = categories.find(c => c.key === 'valueDiffRestraintMatch')!
+    expect(match.rows).toEqual([
+      {
+        kind: 'value_diff',
+        driverCd: '1018',
+        date: '2026-05-01',
+        start: '2026-05-01T03:22:00',
+        diffFields: ['working_minutes', 'break_minutes', 'overtime_minutes'],
+        gcp: expectedMinutes({ working_minutes: 636, break_minutes: 211, overtime_minutes: 156 }),
+        onprem: expectedMinutes({ working_minutes: 777, break_minutes: 70, overtime_minutes: 297 }),
+      },
+    ])
+
+    const mismatch = categories.find(c => c.key === 'valueDiffRestraintMismatch')!
+    expect(mismatch.rows).toEqual([])
+  })
+
+  it('driver_cd/date/start が欠けた壊れた行は無視する (読めた分だけ返す)', () => {
+    const raw = {
+      diff: {
+        only_gcp: { items: [{ date: '2026-05-02', gcp: diffValue() }, { driver_cd: '9001', gcp: diffValue() }] },
+        only_onprem_driver0: { items: [] },
+        only_onprem_other: { items: [] },
+        value_diff_restraint_match: {
+          items: [{ driver_cd: '1', date: '2026-05-01', diff_fields: [], gcp: diffValue(), onprem: diffValue() }],
+        },
+        value_diff_restraint_mismatch: { items: [] },
+      },
+    }
+    const categories = parseKintaiDiffCategoryItemsFromResponse(raw)
+    expect(categories.find(c => c.key === 'onlyGcp')!.rows).toEqual([])
+    // start が無いので match からも落ちる
+    expect(categories.find(c => c.key === 'valueDiffRestraintMatch')!.rows).toEqual([])
+  })
+
+  it('キャッシュ応答 (items を保存しない) を渡しても各区分 rows: [] になるだけで落ちない', () => {
+    const cached = {
+      month: '2026-05',
+      diff: {
+        only_gcp: { total: 1, capped: false },
+        only_onprem_driver0: { total: 0, capped: false },
+        only_onprem_other: { total: 0, capped: false },
+        value_diff_restraint_match: { total: 1, capped: false },
+        value_diff_restraint_mismatch: { total: 0, capped: false },
+      },
+    }
+    const categories = parseKintaiDiffCategoryItemsFromResponse(cached)
+    for (const c of categories) expect(c.rows).toEqual([])
+  })
+
+  it('壊れた応答 (diff 自体が無い) でも全区分 rows: [] に倒す', () => {
+    for (const raw of [null, {}, { diff: null }]) {
+      const categories = parseKintaiDiffCategoryItemsFromResponse(raw)
+      expect(categories).toHaveLength(5)
+      for (const c of categories) expect(c.rows).toEqual([])
+    }
+  })
+})
+
+describe('kintaiDiffValueDiffFieldRows', () => {
+  it('diffFields の並びで GCP/オンプレを添えた表示行にする (issue #633-6 実データ)', () => {
+    const rows = kintaiDiffValueDiffFieldRows({
+      diffFields: ['working_minutes', 'break_minutes', 'overtime_minutes'],
+      gcp: expectedMinutes({ working_minutes: 636, break_minutes: 211, overtime_minutes: 156 }),
+      onprem: expectedMinutes({ working_minutes: 777, break_minutes: 70, overtime_minutes: 297 }),
+    })
+    expect(rows).toEqual([
+      { field: 'working_minutes', label: '実働', gcp: 636, onprem: 777 },
+      { field: 'break_minutes', label: '休憩', gcp: 211, onprem: 70 },
+      { field: 'overtime_minutes', label: '残業', gcp: 156, onprem: 297 },
+    ])
+  })
+
+  it('diffFields が空なら空配列 (差の無い項目を並べて薄めない)', () => {
+    expect(kintaiDiffValueDiffFieldRows({ diffFields: [], gcp: expectedMinutes(), onprem: expectedMinutes() })).toEqual([])
+  })
+
+  it('未知のフィールド名でもラベルはフィールド名にフォールバックする', () => {
+    const rows = kintaiDiffValueDiffFieldRows({ diffFields: ['unknown_minutes'], gcp: { unknown_minutes: 1 }, onprem: { unknown_minutes: 2 } })
+    expect(rows).toEqual([{ field: 'unknown_minutes', label: 'unknown_minutes', gcp: 1, onprem: 2 }])
+  })
+
+  it('gcp/onprem に値が無いフィールドは0扱い', () => {
+    expect(kintaiDiffValueDiffFieldRows({ diffFields: ['restraint_minutes'], gcp: {}, onprem: {} }))
+      .toEqual([{ field: 'restraint_minutes', label: '拘束', gcp: 0, onprem: 0 }])
+  })
+})
+
+describe('kintaiDiffOneSidedFieldRows', () => {
+  it('非0の項目だけを11項目の並び順で返す', () => {
+    const rows = kintaiDiffOneSidedFieldRows(expectedMinutes({ working_minutes: 480, overtime_minutes: 30 }))
+    expect(rows).toEqual([
+      { field: 'working_minutes', label: '実働', value: 480 },
+      { field: 'overtime_minutes', label: '残業', value: 30 },
+    ])
+  })
+
+  it('全項目0なら空配列', () => {
+    expect(kintaiDiffOneSidedFieldRows({})).toEqual([])
+  })
+})
+
+describe('fmtKintaiDiffCategoryCappedNote', () => {
+  it('capped: false なら null', () => {
+    expect(fmtKintaiDiffCategoryCappedNote({ total: 3, capped: false })).toBeNull()
+  })
+
+  it('capped: true なら上限と総数を明示する文言 (黙って切らない)', () => {
+    expect(fmtKintaiDiffCategoryCappedNote({ total: 612, capped: true }))
+      .toBe('上限 500 件で切れています (総数 612 件)。')
   })
 })
 

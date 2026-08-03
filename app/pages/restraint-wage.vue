@@ -76,7 +76,11 @@ import {
 } from '~/utils/timecard-compare-view'
 import type {
   KintaiDiffCacheState,
+  KintaiDiffCategoryItemRow,
+  KintaiDiffCategoryItems,
+  KintaiDiffOneSidedFieldRow,
   KintaiDiffPrescription,
+  KintaiDiffValueDiffFieldRow,
   KintaiFoldPageView,
   KintaiFoldProgress,
   KintaiRefreshMysqlPreview,
@@ -85,6 +89,7 @@ import type {
 import {
   buildKintaiDiffPrescriptions,
   fmtKintaiDiffCacheHeadline,
+  fmtKintaiDiffCategoryCappedNote,
   fmtKintaiDiffCount,
   fmtKintaiDiffLastVerified,
   fmtKintaiDiffMissingFieldsNote,
@@ -92,9 +97,12 @@ import {
   foldProgressAppend,
   foldProgressInitial,
   kintaiDiffCacheStateFromLiveResult,
+  kintaiDiffOneSidedFieldRows,
+  kintaiDiffValueDiffFieldRows,
   KINTAI_DIFF_CATEGORIES,
   parseKintaiDiffApiResponse,
   parseKintaiDiffCacheState,
+  parseKintaiDiffCategoryItemsFromResponse,
   parseKintaiDiffDayCoverageFromResponse,
   parseKintaiDiffValueDiffItemsFromResponse,
   parseKintaiFoldPage,
@@ -1184,6 +1192,61 @@ function candidateDiffFor(driverCd: string, unkoNo: string): KintaiCandidateDiff
   return lookupKintaiCandidateDiff(driverCd, unkoNo, gcpDiffItemsState.value)
 }
 
+// 5区分の明細 (Refs #633-6): 「38件ある」まで分かっても、どの乗務員のどの日かが
+// 画面から辿れないという指摘に応える。値差 items (gcpDiffItemsState、#633-1) と
+// 同じ理由で**ライブ応答にしか乗らない** — 保存分のキャッシュだけを読んでいる状態
+// (gcpDiffCacheState が cache 由来) では 'none'/'unreadable' のまま残し、
+// 「明細は取り直すと出ます」と表示する (「差はありません」に化けさせない)。
+const gcpDiffCategoryItemsState = ref<
+  { status: 'none' } | { status: 'unreadable' } | { status: 'ok', categories: KintaiDiffCategoryItems[] }
+>({ status: 'none' })
+
+/** テンプレートでの discriminated union の絞り込みは vue-tsc で効かないことがあるため
+ * (このファイル冒頭 `gcpDiffSummary` 等と同じ理由)、`row.kind` で分岐する処理は
+ * ここ (plain な .ts 関数) で済ませ、テンプレートには `side`/フィールド行だけを渡す。 */
+interface KintaiDiffCategoryRowView {
+  driverCd: string
+  date: string
+  start: string
+  /** `null` は value_diff 行 (両側の値を持つ)。非 null は one_sided 行 (片側のみ)。 */
+  side: 'gcp' | 'onprem' | null
+  valueDiffFieldRows: KintaiDiffValueDiffFieldRow[]
+  oneSidedFieldRows: KintaiDiffOneSidedFieldRow[]
+}
+
+function toKintaiDiffCategoryRowView(row: KintaiDiffCategoryItemRow): KintaiDiffCategoryRowView {
+  if (row.kind === 'value_diff') {
+    return {
+      driverCd: row.driverCd,
+      date: row.date,
+      start: row.start,
+      side: null,
+      valueDiffFieldRows: kintaiDiffValueDiffFieldRows(row),
+      oneSidedFieldRows: [],
+    }
+  }
+  return {
+    driverCd: row.driverCd,
+    date: row.date,
+    start: row.start,
+    side: row.side,
+    valueDiffFieldRows: [],
+    oneSidedFieldRows: kintaiDiffOneSidedFieldRows(row.values),
+  }
+}
+
+/** `KINTAI_DIFF_CATEGORIES` の `key` → 表示用行、の形にまとめた computed。
+ * `gcpDiffCategoryItemsState` が `ok` でなければ空 (テンプレート側は
+ * `gcpDiffCategoryItemsState.status` を先に見て「取り直すと出ます」を出すため、
+ * ここが空でも「差が無い」と読まれることはない)。 */
+const gcpDiffCategoryItemsByKey = computed<Record<string, KintaiDiffCategoryRowView[]>>(() => {
+  const state = gcpDiffCategoryItemsState.value
+  if (state.status !== 'ok') return {}
+  const out: Record<string, KintaiDiffCategoryRowView[]> = {}
+  for (const c of state.categories) out[c.key] = c.rows.map(toKintaiDiffCategoryRowView)
+  return out
+})
+
 /** テンプレートでの discriminated union の絞り込みは vue-tsc で効かないことがあるため
  * (このファイル冒頭 `gcpDiffSummary` 等と同じ理由)、表示用に平らな形へ潰す。
  * `fieldRows` は `match`/`mismatch` 以外では空配列、`side` は `one_sided` 以外では
@@ -1259,6 +1322,10 @@ async function loadGcpDiff() {
           lastVerifiedAt: parsed.lastVerifiedAt,
         }
       : { status: 'unreadable' }
+    // 5区分の明細 (Refs #633-6)。上と同じ理由でライブ応答にしか乗らない。
+    gcpDiffCategoryItemsState.value = parsed.summary
+      ? { status: 'ok', categories: parseKintaiDiffCategoryItemsFromResponse(res) }
+      : { status: 'unreadable' }
   }
   catch (e) {
     // 失敗しても直前まで表示していた保存分 (gcpDiffCacheState/gcpDiffItemsState) は
@@ -1279,6 +1346,7 @@ watch(month, () => {
   gcpDiffError.value = ''
   gcpDiffCacheState.value = { status: 'none' }
   gcpDiffItemsState.value = { status: 'none' }
+  gcpDiffCategoryItemsState.value = { status: 'none' }
 })
 
 // このタブを見ている間だけ、タブを開いた/月が変わるたびに保存分を自動で読み直す
@@ -6738,6 +6806,63 @@ watch([compMap, kyuyoSyncedKeys], () => {
                     </tr>
                   </tbody>
                 </table>
+              </div>
+
+              <!-- 5区分の明細 (Refs #633-6): 件数だけでは「どの乗務員のどの日か」が
+                   画面から辿れないという指摘に応える。既定は details 要素で畳んでおき、
+                   押した時だけ開く。0件の区分は出さない。 -->
+              <div class="mb-4">
+                <h4 class="font-semibold text-sm mb-1">明細</h4>
+                <p v-if="gcpDiffCategoryItemsState.status !== 'ok'" class="text-sm text-gray-500">
+                  明細は取り直すと出ます (保存分のキャッシュは明細を持っていません — 「取り直す」を押してください)。
+                </p>
+                <template v-else>
+                  <template v-for="cat in KINTAI_DIFF_CATEGORIES" :key="cat.key">
+                    <details
+                      v-if="gcpDiffSummary[cat.key].total > 0"
+                      class="mb-2 rounded border border-gray-200 dark:border-gray-700 p-2"
+                    >
+                      <summary class="cursor-pointer text-sm font-medium">
+                        {{ cat.label }} の明細 ({{ fmtKintaiDiffCount(gcpDiffSummary[cat.key]) }})
+                      </summary>
+                      <div class="mt-2 space-y-2">
+                        <UAlert
+                          v-if="fmtKintaiDiffCategoryCappedNote(gcpDiffSummary[cat.key])"
+                          color="warning"
+                          variant="soft"
+                          icon="i-lucide-alert-triangle"
+                          title="明細が切れています"
+                          :description="fmtKintaiDiffCategoryCappedNote(gcpDiffSummary[cat.key]) ?? ''"
+                        />
+                        <!-- Refs #633-6 条件6: missing_fields の注記を明細の近くにも出す
+                             (件数表の近くだけでなく)。value_diff_* の項目自体がここから漏れうるため。 -->
+                        <p
+                          v-if="(cat.key === 'valueDiffRestraintMatch' || cat.key === 'valueDiffRestraintMismatch')
+                            && fmtKintaiDiffMissingFieldsNote(gcpDiffSummary.missingFields)"
+                          class="text-xs text-warning"
+                        >
+                          {{ fmtKintaiDiffMissingFieldsNote(gcpDiffSummary.missingFields) }}
+                        </p>
+                        <ul class="divide-y divide-gray-200 dark:divide-gray-700 text-sm">
+                          <li v-for="(row, i) in (gcpDiffCategoryItemsByKey[cat.key] ?? [])" :key="i" class="py-1">
+                            <div class="text-xs text-gray-500">
+                              乗務員CD {{ row.driverCd }} / {{ row.date }} / {{ row.start }}
+                              <span v-if="row.side">({{ row.side === 'gcp' ? 'GCP' : 'オンプレ' }}のみ)</span>
+                            </div>
+                            <!-- value_diff 行: 差のある項目だけを並べる (差の無い項目で薄めない) -->
+                            <div v-for="fr in row.valueDiffFieldRows" :key="fr.field" class="text-xs">
+                              {{ fr.label }}: GCP {{ fr.gcp }} ←→ オンプレ {{ fr.onprem }}
+                            </div>
+                            <!-- one_sided 行: 比較対象が無い片側だけの値 (非0項目だけ) -->
+                            <div v-for="fr in row.oneSidedFieldRows" :key="fr.field" class="text-xs">
+                              {{ fr.label }}: {{ fr.value }}
+                            </div>
+                          </li>
+                        </ul>
+                      </div>
+                    </details>
+                  </template>
+                </template>
               </div>
 
               <!-- 観測値 (判定材料であって原因ではない) -->
