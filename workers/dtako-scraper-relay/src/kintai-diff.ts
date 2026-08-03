@@ -159,7 +159,12 @@ export interface KintaiDiffResult {
   /** オンプレ応答の形が読めなかった (#599)。true のとき `onprem_rows: 0` は
    * 「本当に 0 行」ではないので `only_gcp` を「GCP にしか無い」と解釈しないこと。 */
   onprem_unreadable: boolean;
-  /** GCP にしか無い。 */
+  /** GCP にしか無い。**運行NO単位の `never_onprem_ops` (下の
+   * [`KintaiDiffGcpOnlyDriverSplit`]) とは母集団が違う** — こちらはオンプレ
+   * `kosoku-daily` ⇔ GCP `day_summaries` (同じ fold・同じ乗務員母集団) の突合なので、
+   * 打刻システムが無い営業所の乗務員が居ても構造的に非0にならない。差に含めてよい
+   * 理由の実測・根拠は front (`nuxt-dtako-admin` の `app/utils/kintai-diff-view.ts`
+   * `kintaiDiffHasAnyDiff` の docs) 参照 (Refs #620)。 */
   only_gcp: CappedCategory<KintaiDiffRow & { gcp: KintaiDiffValue }>;
   /** オンプレにしか無く乗務員CD=0。GCP が `driver_cd > 0` で意図的に除外しているので
    * 「欠け」ではない (rust-ichibanboshi `src/kintai_repo.rs` / `src/kintai_fold.rs`)。 */
