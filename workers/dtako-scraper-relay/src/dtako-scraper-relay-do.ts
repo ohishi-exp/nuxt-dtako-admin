@@ -68,6 +68,7 @@ import {
   DtakoReimportError,
   DtakoReimportPushUncertainError,
   runDtakoReimport as runDtakoReimportPure,
+  UNKO_NO_RE,
   type DtakoReimportDeps,
 } from "./dtako-reimport";
 import {
@@ -85,13 +86,29 @@ import {
   type QueuedScrapeItem,
   type ScrapeJobRecord,
 } from "./scrape-queue";
-import { buildDeps, decideFoldTrigger, foldMonth, monthsCoveredByRange } from "./kintai-relay";
+import {
+  buildDeps,
+  decideFoldTrigger,
+  foldMonth,
+  FOLD_PAGE_MAX_DRIVERS,
+  monthsCoveredByRange,
+  relayKintaiDaySummaries,
+  relayKintaiRecalc,
+  relayKintaiWindow,
+  type KintaiRelayDeps,
+} from "./kintai-relay";
 import {
   allowedViewerComps,
   compIdsInSameTenant,
   devViewerCompIds,
   isR2OnlyRestraintPath,
 } from "./restraint-viewer-auth";
+import {
+  buildKintaiDiff,
+  deriveOpeNoFromUnkoNo,
+  pickRecalcObservations,
+  pickRestDiffGuarantee,
+} from "./kintai-diff";
 import { needsTheearthQueue } from "./restraint-queue";
 import { UpstreamMemo } from "./upstream-memo";
 import { measurePhase, PhaseTimer, phaseTimingLogLine } from "./phase-timing";
@@ -2548,6 +2565,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/kintai/warm" && request.method === "POST") {
       return this.handleKintaiWarm(record!, url);
     }
+    // ---- オンプレ vs GCP 比較 + 取り直し3口 (viewer 認可、既定 dry-run。Refs #615-4) ----
+    if (url.pathname === "/restraint-api/kintai/diff" && request.method === "GET") {
+      return this.handleKintaiDiff(record!, url);
+    }
+    if (url.pathname === "/restraint-api/kintai/refresh/timecard" && request.method === "POST") {
+      return this.handleKintaiRefreshTimecard(record!, url);
+    }
+    if (url.pathname === "/restraint-api/kintai/refresh/fold" && request.method === "POST") {
+      return this.handleKintaiRefreshFold(record!, url);
+    }
+    if (url.pathname === "/restraint-api/kintai/refresh/mysql" && request.method === "POST") {
+      return this.handleKintaiRefreshMysql(record!, request);
+    }
     // ---- アーカイブ閲覧 (R2 読み出しのみ。Refs #244) ----
     if (url.pathname === "/restraint-api/archive/summaries" && request.method === "GET") {
       return this.handleArchiveSummaries(record!, url);
@@ -3804,6 +3834,347 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
     if (!apiUrl || !clientId || !clientSecret) return null;
     return { apiUrl, clientId, clientSecret };
+  }
+
+  // -------------------------------------------------------------------------
+  // オンプレ vs GCP 比較 + 取り直し3口 (viewer 認可、既定 dry-run。Refs #615-4)
+  //
+  // `/kintai-relay/*` (共有シークレット・機械用) には一切触れない。ここで組む
+  // `KintaiRelayDeps` は viewer 認可済みの `record.compId` から `resolveAccount` で
+  // tenant_id を引いて作る — `runFoldMonths` (Refs #205 の 10) が
+  // `/kintai-relay/recalc` への HTTP self-call を使わずに複数 comp_id/tenant を
+  // 跨いで `buildDeps` を直接組んでいるのと同じ理由・同じパターン。
+  // -------------------------------------------------------------------------
+
+  /**
+   * account の tenant_id 解決 + オンプレ/GCP 資格情報を揃えて `kintai-relay.ts` の
+   * deps を組む。揃わなければ理由付きの Response を返す (呼び出し側は
+   * `instanceof Response` で分岐する)。
+   */
+  private async buildKintaiRelayContext(
+    compId: string,
+    tag: string,
+  ): Promise<
+    | { deps: KintaiRelayDeps; creds: { apiUrl: string; clientId: string; clientSecret: string } }
+    | Response
+  > {
+    const creds = await this.ichibanCreds(tag);
+    if (!creds) return dvrJsonError(503, "オンプレの取得先 (NUXT_ICHIBAN_*) が未設定です");
+    const account = await this.resolveAccount(compId);
+    if (!account) return dvrJsonError(500, `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません`);
+    const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
+    if (!sharedSecret || !this.env.AUTH_WORKER) {
+      return dvrJsonError(503, "GCP の取得先 (INTERNAL_SHARED_SECRET / AUTH_WORKER) が未設定です");
+    }
+    const deps = buildDeps({
+      ichibanOrigin: creds.apiUrl,
+      cfAccessClientId: creds.clientId,
+      cfAccessClientSecret: creds.clientSecret,
+      authWorker: this.env.AUTH_WORKER,
+      proxySecret: sharedSecret,
+      tenantId: account.tenant_id,
+    });
+    return { deps, creds };
+  }
+
+  /**
+   * GET /restraint-api/kintai/diff?month=YYYY-MM — オンプレ (`kosoku-daily`) と
+   * GCP (`day_summaries`) の日別サマリを突き合わせ、差の5区分 + 観測値を返す
+   * (Refs #615-4)。突合の意味は `kintai-diff.ts` の docs 参照 (kyuyo-mcp
+   * `get_kintai_diff` と揃えてある)。
+   *
+   * **`driver` は受け付けない — 取得は月全体を1回、絞り込みは手元で行う**
+   * (#615-3 決定4。rest-diff の driver 絞り込みが月全体より遅い実測があるのと
+   * 同じ理由)。
+   *
+   * `observations` (stale / fold warnings / GCP-only 運行数) は GCP recalc の
+   * dry-run 1 ページぶんから拾う副産物。**取れなくても差分表示自体は止めない**
+   * (fail-soft、`observations_error` に理由を残す) — 原因を断定しないための
+   * 判定材料であって、無いと差分が読めなくなるものではないため。
+   */
+  private async handleKintaiDiff(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const parsed = this.parseMonthParam(url);
+    if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
+    const { ym } = parsed;
+
+    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_diff");
+    if (ctx instanceof Response) return ctx;
+    const { deps, creds } = ctx;
+
+    const [onpremBody, gcpResult] = await Promise.all([
+      this.fetchKosokuRaw(creds.apiUrl, creds.clientId, creds.clientSecret, ym),
+      relayKintaiDaySummaries(deps, { month: ym }).catch((err) => (err instanceof Error ? err : new Error(String(err)))),
+    ]);
+    if (onpremBody == null) return dvrJsonError(502, "拘束サマリ API の取得に失敗しました");
+    if (gcpResult instanceof Error) {
+      return dvrJsonError(502, `GCP day-summaries の取得に失敗しました: ${gcpResult.message}`);
+    }
+
+    const diff = buildKintaiDiff(gcpResult, onpremBody);
+
+    // 観測値は best-effort。stale/warnings/GCP-only 件数は「判定材料」であって
+    // 差分そのものではないので、ここが失敗しても diff は返す
+    let observations: ReturnType<typeof pickRecalcObservations> | null = null;
+    let observationsError: string | null = null;
+    try {
+      const raw = await relayKintaiRecalc(deps, { month: ym, maxDrivers: FOLD_PAGE_MAX_DRIVERS, apply: false });
+      observations = pickRecalcObservations(raw);
+    } catch (err) {
+      observationsError = describeUnknownError(err);
+      console.error(
+        JSON.stringify({ kintai_diff: "observations-error", month: ym, error: observationsError }),
+      );
+    }
+
+    console.log(
+      JSON.stringify({
+        kintai_diff: "ok",
+        month: ym,
+        gcp_rows: diff.gcp_rows,
+        onprem_rows: diff.onprem_rows,
+      }),
+    );
+    return Response.json({ month: ym, diff, observations, observations_error: observationsError });
+  }
+
+  /**
+   * POST /restraint-api/kintai/refresh/timecard?month=&month_count=&apply= —
+   * 打刻をオンプレ→GCPへ**窓ぶん**運び直す (Refs #615-4)。
+   *
+   * 中身は `kintai-relay.ts` の `relayKintaiWindow` そのまま — 窓の既定 (当月+前月)
+   * も dry-run の既定もあちらが持つ。**`apply=true` を明示した時だけ書く。**
+   */
+  private async handleKintaiRefreshTimecard(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_refresh_timecard");
+    if (ctx instanceof Response) return ctx;
+
+    const month = url.searchParams.get("month") || undefined;
+    if (month !== undefined && !/^\d{4}-\d{2}$/.test(month)) {
+      return dvrJsonError(400, "month は YYYY-MM で指定してください");
+    }
+    const monthCountRaw = url.searchParams.get("month_count");
+    let monthCount: number | undefined;
+    if (monthCountRaw !== null) {
+      monthCount = Number(monthCountRaw);
+      if (!Number.isInteger(monthCount)) return dvrJsonError(400, "month_count は整数で指定してください");
+    }
+    const apply = url.searchParams.get("apply") === "true";
+
+    try {
+      const report = await relayKintaiWindow(ctx.deps, { month, monthCount, apply });
+      console.log(
+        JSON.stringify({
+          kintai_refresh_timecard: "ok",
+          apply,
+          drivers_written: report.driversWritten,
+          days_written: report.daysWritten,
+        }),
+      );
+      return Response.json(report);
+    } catch (err) {
+      console.error(JSON.stringify({ kintai_refresh_timecard: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, err instanceof Error ? err.message : "打刻の運び直しに失敗しました");
+    }
+  }
+
+  /**
+   * POST /restraint-api/kintai/refresh/fold?month=&after_driver_cd=&max_drivers=&stale_only=&apply=
+   * — GCP 側で全量再計算を**1ページぶん**進める (Refs #615-4)。
+   *
+   * **ページングは呼び出し側 (front) が回し切る** — 応答の `next_after_driver_cd`
+   * をそのまま返すので、`null` になるまで同じ引数で叩き直すこと。
+   *
+   * **`max_drivers` の既定を大きくしない** — `logic_version` 変更直後の全量 apply は
+   * `FOLD_PAGE_MAX_DRIVERS` (50) 程度でないと Cloudflare の 100 秒上限 (524) に
+   * 当たる実測がある (#615-3 決定3)。
+   */
+  private async handleKintaiRefreshFold(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_refresh_fold");
+    if (ctx instanceof Response) return ctx;
+
+    const parsed = this.parseMonthParam(url);
+    if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
+
+    const afterDriverCdRaw = url.searchParams.get("after_driver_cd");
+    let afterDriverCd: number | undefined;
+    if (afterDriverCdRaw !== null) {
+      afterDriverCd = Number(afterDriverCdRaw);
+      if (!Number.isInteger(afterDriverCd)) return dvrJsonError(400, "after_driver_cd は整数で指定してください");
+    }
+    const maxDriversRaw = url.searchParams.get("max_drivers");
+    let maxDrivers = FOLD_PAGE_MAX_DRIVERS;
+    if (maxDriversRaw !== null) {
+      maxDrivers = Number(maxDriversRaw);
+      if (!Number.isInteger(maxDrivers) || maxDrivers < 1) {
+        return dvrJsonError(400, "max_drivers は正の整数で指定してください");
+      }
+    }
+    const staleOnly = url.searchParams.get("stale_only") === "true";
+    const apply = url.searchParams.get("apply") === "true";
+
+    try {
+      const report = await relayKintaiRecalc(ctx.deps, {
+        month: parsed.ym,
+        afterDriverCd,
+        maxDrivers,
+        staleOnly,
+        apply,
+      });
+      console.log(
+        JSON.stringify({ kintai_refresh_fold: "ok", month: parsed.ym, apply, max_drivers: maxDrivers }),
+      );
+      return Response.json(report);
+    } catch (err) {
+      console.error(JSON.stringify({ kintai_refresh_fold: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, err instanceof Error ? err.message : "畳み直しに失敗しました");
+    }
+  }
+
+  /**
+   * POST /restraint-api/kintai/refresh/mysql — body
+   * `{unko_no, ope_no?, start_ope?, reset_timecard?, driver_cd?, month?, apply?}`。
+   * 運行**1件**の csvdata.zip を取り直し、オンプレ MariaDB の `dtako_events`
+   * (+`reset_timecard: true` なら `time_card_dtako`) へ push する (Refs #615-4)。
+   *
+   * 実体は `runDtakoReimportJob` (`/cron/dtako/reimport` = `run_dtako_reimport`
+   * MCP tool と同じ内部処理) をそのまま呼ぶだけ。**必須引数は `unko_no` だけ** —
+   * `ope_no`/`start_ope` は省略可で、省略時は `unko_no` (23桁) から
+   * `deriveOpeNoFromUnkoNo` (`kintai-diff.ts`) で機械的に導出する (親指摘
+   * 2026-08-03: 運行NOは桁に開始日時を持っているため、rest-diff が返す
+   * `unko_no` をそのまま渡せば足りる)。**明示的に渡された場合はそちらを優先する**
+   * (theearth 側の運行検索等で正確な値が既に分かっている場合の上書き用)。
+   *
+   * **既定は dry-run — `apply: true` が無ければ MariaDB には一切触れない**
+   * (zip 取得も push もしない)。`driver_cd`/`month` が両方揃っていれば、
+   * オンプレ rest-diff から対象 `unko_no` の `kind` を引いて
+   * **「押しても直る保証」(`guarantee`) を返り値に載せる** — `kind: "mismatch"` だけが
+   * 保証あり、`dtako_missing`/`events_missing` は保証無し (rust-ichibanboshi
+   * `src/kintai_rest_diff.rs` の doc、#615-2 で確認済み)。**保証が無くても実行は
+   * ブロックしない** — 実測で `mismatch` が3か月連続0件のため、ブロックすると
+   * この口が実質使えなくなる (#615-3 決定2、画面側が保証の有無を併記する設計)。
+   */
+  private async handleKintaiRefreshMysql(record: TheearthSessionRecord, request: Request): Promise<Response> {
+    let body: {
+      unko_no?: unknown;
+      ope_no?: unknown;
+      start_ope?: unknown;
+      reset_timecard?: unknown;
+      driver_cd?: unknown;
+      month?: unknown;
+      apply?: unknown;
+    };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return dvrJsonError(400, "body must be JSON");
+    }
+    const unkoNo = typeof body.unko_no === "string" ? body.unko_no : "";
+    if (!unkoNo) {
+      return dvrJsonError(400, "unko_no は必須です");
+    }
+    if (!UNKO_NO_RE.test(unkoNo)) {
+      return dvrJsonError(400, `unko_no は23桁の数値で指定してください: "${unkoNo}"`);
+    }
+    // ope_no/start_ope が明示されていればそちらを優先。無ければ unko_no (23桁 =
+    // 開始日時12桁+車輌CD10桁+対象CD1桁) から機械的に導出する
+    const explicitOpeNo = typeof body.ope_no === "string" && body.ope_no ? body.ope_no : null;
+    const explicitStartOpe = typeof body.start_ope === "string" && body.start_ope ? body.start_ope : null;
+    let opeNo: string;
+    let startOpe: string;
+    if (explicitOpeNo && explicitStartOpe) {
+      opeNo = explicitOpeNo;
+      startOpe = explicitStartOpe;
+    } else {
+      const derived = deriveOpeNoFromUnkoNo(unkoNo);
+      if (!derived) {
+        return dvrJsonError(400, `unko_no から ope_no/start_ope を導出できませんでした: "${unkoNo}"`);
+      }
+      opeNo = explicitOpeNo ?? derived.opeNo22;
+      startOpe = explicitStartOpe ?? derived.startOpe;
+    }
+    const resetTimecard = body.reset_timecard === true;
+    const apply = body.apply === true;
+    const driverCd =
+      typeof body.driver_cd === "string" && /^\d{1,10}$/.test(body.driver_cd) ? body.driver_cd : null;
+    const month = typeof body.month === "string" && /^\d{4}-\d{2}$/.test(body.month) ? body.month : null;
+
+    // ── 「押しても直る保証」の判定 (driver_cd/month が揃っている時だけ best-effort) ──
+    let guarantee: ReturnType<typeof pickRestDiffGuarantee> | null = null;
+    let guaranteeError: string | null = null;
+    if (driverCd && month) {
+      const creds = await this.ichibanCreds("kintai_refresh_mysql_guarantee");
+      if (!creds) {
+        guaranteeError = "オンプレの取得先 (NUXT_ICHIBAN_*) が未設定のため判定できませんでした";
+      } else {
+        try {
+          const q = new URLSearchParams({ month, driver: driverCd });
+          const upstream = await fetch(`${creds.apiUrl}/api/kintai/rest-diff?${q.toString()}`, {
+            headers: {
+              "CF-Access-Client-Id": creds.clientId,
+              "CF-Access-Client-Secret": creds.clientSecret,
+            },
+          });
+          const text = await upstream.text();
+          if (!upstream.ok) throw new Error(`status ${upstream.status}: ${text.slice(0, 200)}`);
+          guarantee = pickRestDiffGuarantee(JSON.parse(text), unkoNo);
+        } catch (err) {
+          guaranteeError = describeUnknownError(err);
+          console.error(
+            JSON.stringify({ kintai_refresh_mysql: "guarantee-error", unko_no: unkoNo, error: guaranteeError }),
+          );
+        }
+      }
+    }
+
+    if (!apply) {
+      return Response.json({
+        dry_run: true,
+        ope_no: opeNo,
+        start_ope: startOpe,
+        unko_no: unkoNo,
+        guarantee,
+        guarantee_error: guaranteeError,
+      });
+    }
+
+    const account = await this.resolveAccount(record.compId);
+    if (!account) {
+      return dvrJsonError(500, `comp_id=${record.compId} が DTAKO_ACCOUNTS に見つかりません`);
+    }
+    const origin = (this.env.NUXT_ICHIBAN_API_URL ?? "").trim();
+    const cfAccessClientId = (this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID ?? "").trim();
+    let cfAccessClientSecret = "";
+    try {
+      cfAccessClientSecret = await resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET);
+    } catch (err) {
+      console.error(JSON.stringify({ kintai_refresh_mysql: "secret-error", error: describeUnknownError(err) }));
+    }
+    if (!origin || !cfAccessClientId || !cfAccessClientSecret) {
+      return dvrJsonError(
+        503,
+        "オンプレの取得先 (NUXT_ICHIBAN_API_URL / NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID / ICHIBAN_CF_ACCESS_CLIENT_SECRET) が未設定です",
+      );
+    }
+
+    const res = await this.enqueueScrape(() =>
+      this.runDtakoReimportJob(
+        account,
+        { opeNo, startOpe, unkoNo, resetTimecard },
+        origin,
+        cfAccessClientId,
+        cfAccessClientSecret,
+      ),
+    );
+    // runDtakoReimportJob は成否を Response で返す (成功 json / エラー json どちらも)。
+    // 保証の判定結果をここで合成する — 応答が JSON で読めなければそのまま素通しする
+    const resultBody = await res
+      .clone()
+      .json()
+      .catch(() => null);
+    if (resultBody && typeof resultBody === "object") {
+      return Response.json({ ...resultBody, guarantee, guarantee_error: guaranteeError }, { status: res.status });
+    }
+    return res;
   }
 
   /**
