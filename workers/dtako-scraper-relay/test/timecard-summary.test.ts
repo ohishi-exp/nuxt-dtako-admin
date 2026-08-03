@@ -21,6 +21,7 @@ import {
   TimecardSummaryError,
   totalLength,
   trailingSlice,
+  type TheearthBackfillKey,
   type TimecardDailyRow,
 } from '../src/timecard-summary'
 
@@ -460,6 +461,9 @@ describe('mergeSummarySources', () => {
     expect(merged.map(m => m.entry.data.driverCd)).toEqual(['205', '1029', '1670', '1800'])
     expect(merged.map(m => m.source)).toEqual(['timecard', 'theearth', 'theearth', 'timecard'])
     expect(warnings).toEqual([])
+    // theearth 単独行 (timecard に counterpart が無い) は埋め戻し自体が起きないので
+    // backfilledFromTheearth は付かない (source で theearth 由来と分かるので二重に持たせない)
+    for (const m of merged) expect((m.entry.data as { backfilledFromTheearth?: unknown }).backfilledFromTheearth).toBeUndefined()
   })
 
   it('同じ乗務員CD が両方に居たら timecard を採り warning を出す', () => {
@@ -472,6 +476,8 @@ describe('mergeSummarySources', () => {
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toMatch(/1670/)
     expect(warnings[0]).toMatch(/タイムカード側を採用/)
+    // 埋め戻す値が無い重複行は backfilledFromTheearth も付かない
+    expect((merged.find(m => m.entry.data.driverCd === '1670')!.entry.data as { backfilledFromTheearth?: unknown }).backfilledFromTheearth).toBeUndefined()
   })
 
   it('重複行はデジタコにしか無い指標だけ埋め戻す (時間はタイムカードのまま)', () => {
@@ -486,6 +492,7 @@ describe('mergeSummarySources', () => {
         excessRestraintMinutes: number | null
         over15hDays: number
         avgDriving9hOverCount: number
+        backfilledFromTheearth?: readonly TheearthBackfillKey[]
       }
     }
     const theearth: Row = {
@@ -529,14 +536,75 @@ describe('mergeSummarySources', () => {
     expect(data.avgDriving9hOverCount).toBe(3)
     // 元オブジェクトは書き換えない
     expect(timecard.data.drivingMinutes).toBeNull()
+    // 埋め戻した 6 キー全部が乗る (Refs #606-7、画面の theearth 由来印の元)
+    expect(data.backfilledFromTheearth).toEqual([
+      'drivingMinutes',
+      'loadingMinutes',
+      'fiscalCumulativeMinutes',
+      'restraintLimitMinutes',
+      'excessRestraintMinutes',
+      'avgDriving9hOverCount',
+    ])
   })
 
-  it('タイムカード側に値があれば埋め戻さない', () => {
+  it('theearth 側にも無い分は backfilledFromTheearth に含めない (埋め戻せた分だけ載る)', () => {
+    interface Row {
+      data: {
+        driverCd: string
+        drivingMinutes: number | null
+        loadingMinutes: number | null
+        fiscalCumulativeMinutes: number | null
+        restraintLimitMinutes: number | null
+        excessRestraintMinutes: number | null
+        avgDriving9hOverCount: number
+        backfilledFromTheearth?: readonly TheearthBackfillKey[]
+      }
+    }
+    // theearth 側も loadingMinutes / restraintLimitMinutes は null (取れなかった)
+    const theearth: Row = {
+      data: {
+        driverCd: '1670',
+        drivingMinutes: 8000,
+        loadingMinutes: null,
+        fiscalCumulativeMinutes: 120000,
+        restraintLimitMinutes: null,
+        excessRestraintMinutes: 300,
+        avgDriving9hOverCount: 3,
+      },
+    }
+    const timecard: Row = {
+      data: {
+        driverCd: '1670',
+        drivingMinutes: null,
+        loadingMinutes: null,
+        fiscalCumulativeMinutes: null,
+        restraintLimitMinutes: null,
+        excessRestraintMinutes: null,
+        avgDriving9hOverCount: 0,
+      },
+    }
+    const { merged } = mergeSummarySources([theearth], [timecard])
+    const data = merged[0]!.entry.data
+    expect(data.backfilledFromTheearth).toEqual([
+      'drivingMinutes',
+      'fiscalCumulativeMinutes',
+      'excessRestraintMinutes',
+      'avgDriving9hOverCount',
+    ])
+    // theearth 側にも無かった分は null のまま、キーにも含めない
+    expect(data.loadingMinutes).toBeNull()
+    expect(data.restraintLimitMinutes).toBeNull()
+    expect(data.backfilledFromTheearth).not.toContain('loadingMinutes')
+    expect(data.backfilledFromTheearth).not.toContain('restraintLimitMinutes')
+  })
+
+  it('タイムカード側に値があれば埋め戻さない (backfilledFromTheearth も付かない)', () => {
     const theearth = { data: { driverCd: '1', drivingMinutes: 100, avgDriving9hOverCount: 5 } }
     const timecard = { data: { driverCd: '1', drivingMinutes: 0, avgDriving9hOverCount: 2 } }
     const { merged } = mergeSummarySources([theearth], [timecard])
     expect(merged[0]!.entry.data.drivingMinutes).toBe(0)
     expect(merged[0]!.entry.data.avgDriving9hOverCount).toBe(2)
+    expect((merged[0]!.entry.data as { backfilledFromTheearth?: unknown }).backfilledFromTheearth).toBeUndefined()
   })
 
   it('片方が空でも通る (乗務員だけ / 事務員だけの月)', () => {

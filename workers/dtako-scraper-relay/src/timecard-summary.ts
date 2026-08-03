@@ -906,7 +906,19 @@ const THEEARTH_ONLY_NULLABLE_KEYS = [
   "excessRestraintMinutes",
 ] as const satisfies ReadonlyArray<keyof TheearthOnlyMetrics>;
 
-type MergeableSummary = { driverCd: string } & Partial<TheearthOnlyMetrics>;
+/** `fillTheearthOnlyMetrics` が実際に埋め戻しうるキー全部 (nullable 5 つ + 回数 1 つ)。 */
+export type TheearthBackfillKey = keyof TheearthOnlyMetrics;
+
+type MergeableSummary = { driverCd: string } & Partial<TheearthOnlyMetrics> & {
+  /**
+   * この行のうち、どのキーを theearth (デジタコ) 側から埋め戻したかの一覧
+   * (Refs #606-7)。**埋め戻さなかった行・埋め戻すものが無かった行では未設定** —
+   * 「打刻由来で null」「theearth にも無くて null」と区別するため、空配列と
+   * unset を分けない (`fillTheearthOnlyMetrics` は埋めるものが無ければキー自体を
+   * 足さない)。画面はここを見て theearth 由来の値だけに控えめな印を出す。
+   */
+  backfilledFromTheearth?: readonly TheearthBackfillKey[];
+};
 
 /**
  * タイムカード行にデジタコ由来の指標を埋め戻した entry を返す。
@@ -919,15 +931,23 @@ function fillTheearthOnlyMetrics<T extends { data: MergeableSummary }>(
   const from = theearthEntry.data;
   const to = timecardEntry.data;
   const filled: Partial<TheearthOnlyMetrics> = {};
+  const backfilled: TheearthBackfillKey[] = [];
   for (const key of THEEARTH_ONLY_NULLABLE_KEYS) {
-    if (to[key] == null && from[key] != null) filled[key] = from[key];
+    if (to[key] == null && from[key] != null) {
+      filled[key] = from[key];
+      backfilled.push(key);
+    }
   }
   // 0 (= 数えられなかった) のときだけデジタコの回数を採る
   if (!to.avgDriving9hOverCount && from.avgDriving9hOverCount) {
     filled.avgDriving9hOverCount = from.avgDriving9hOverCount;
+    backfilled.push("avgDriving9hOverCount");
   }
-  if (Object.keys(filled).length === 0) return timecardEntry;
-  return { ...timecardEntry, data: { ...timecardEntry.data, ...filled } };
+  if (backfilled.length === 0) return timecardEntry;
+  return {
+    ...timecardEntry,
+    data: { ...timecardEntry.data, ...filled, backfilledFromTheearth: backfilled },
+  };
 }
 
 /**

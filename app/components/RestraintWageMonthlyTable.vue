@@ -11,9 +11,10 @@
  * (実測: 1018 / 2026-04 で 78h06m vs 68h54m、差は日曜 4 日分の 9h12m)。
  * 賃金は法定休日労働を休日割増 1.35 に一本化する側が正なので、そちらへ寄せる。
  */
-import type { WageReportRow } from '~/utils/restraint-wage-view'
+import { computed } from 'vue'
+import type { TheearthBackfillKey, WageReportRow } from '~/utils/restraint-wage-view'
 
-defineProps<{
+const props = defineProps<{
   rows: WageReportRow[]
   expandWage: boolean
 }>()
@@ -27,10 +28,32 @@ function fmtDays(n: number | undefined): string {
   if (!n) return '-'
   return Number.isInteger(n) ? String(n) : n.toFixed(1)
 }
+
+/**
+ * その値が theearth (デジタコ拘束時間管理表) から埋め戻されたものかどうか
+ * (Refs #606-7)。対象は打刻から構造的に出せない 6 指標
+ * (運転・荷役・年度累計・拘束上限・当月超過・平均運転9h超) だけ。
+ * theearth 由来の行そのもの (`row.source === 'theearth'`) はここでは false になる
+ * (埋め戻しは起きていない) — その行が theearth 由来なのは行全体の話なので、
+ * このバッジは「タイムカード優先の行の中で、この値だけ theearth 由来」を示す。
+ */
+function isTheearthBackfilled(row: WageReportRow, key: TheearthBackfillKey): boolean {
+  return !!row.summary.backfilledFromTheearth?.includes(key)
+}
+
+const BACKFILL_TITLE = 'デジタコ拘束時間管理表 (theearth) 由来の値です。打刻からは算出できない項目のため埋め戻しています'
+
+/** 1 行でも埋め戻しがあれば凡例を出す (デジタコ由来だけの月は常に false = 凡例を出さない)。 */
+const hasAnyBackfill = computed(() =>
+  props.rows.some(r => (r.summary.backfilledFromTheearth?.length ?? 0) > 0),
+)
 </script>
 
 <template>
   <div class="overflow-x-auto print:overflow-visible">
+    <p v-if="hasAnyBackfill" class="text-[10px] text-gray-500 mb-1">
+      <span class="inline-block w-1.5 h-1.5 rounded-full bg-violet-500 align-middle" /> {{ BACKFILL_TITLE }}
+    </p>
     <table class="w-full text-xs monthly-table">
       <thead>
         <tr class="text-left text-gray-500 border-b-2 border-gray-300 dark:border-gray-600">
@@ -72,16 +95,29 @@ function fmtDays(n: number | undefined): string {
         <tr v-for="row in rows" :key="row.summary.driverCd" class="border-b border-gray-100 dark:border-gray-800">
           <td class="px-1.5 py-1 whitespace-nowrap">{{ row.summary.driverCd }} {{ row.summary.driverName }}</td>
           <td class="px-1.5 py-1 text-right">{{ row.summary.workDays }}</td>
-          <td class="px-1.5 py-1 text-right">{{ fmtMinutes(row.summary.drivingMinutes) }}</td>
-          <td class="px-1.5 py-1 text-right">{{ fmtMinutes(row.summary.loadingMinutes) }}</td>
+          <td class="px-1.5 py-1 text-right">
+            {{ fmtMinutes(row.summary.drivingMinutes) }}
+            <span v-if="isTheearthBackfilled(row, 'drivingMinutes')" class="inline-block w-1.5 h-1.5 rounded-full bg-violet-500 align-middle" :title="BACKFILL_TITLE" />
+          </td>
+          <td class="px-1.5 py-1 text-right">
+            {{ fmtMinutes(row.summary.loadingMinutes) }}
+            <span v-if="isTheearthBackfilled(row, 'loadingMinutes')" class="inline-block w-1.5 h-1.5 rounded-full bg-violet-500 align-middle" :title="BACKFILL_TITLE" />
+          </td>
           <td class="px-1.5 py-1 text-right">{{ fmtMinutes(row.summary.breakMinutes) }}</td>
           <td class="px-1.5 py-1 text-right font-medium">{{ fmtMinutes(row.summary.restraintMinutes) }}</td>
-          <td class="px-1.5 py-1 text-right">{{ fmtMinutes(row.summary.fiscalCumulativeMinutes) }}</td>
+          <td class="px-1.5 py-1 text-right">
+            {{ fmtMinutes(row.summary.fiscalCumulativeMinutes) }}
+            <span v-if="isTheearthBackfilled(row, 'fiscalCumulativeMinutes')" class="inline-block w-1.5 h-1.5 rounded-full bg-violet-500 align-middle" :title="BACKFILL_TITLE" />
+          </td>
           <td class="px-1.5 py-1 text-right" :class="(row.summary.excessRestraintMinutes ?? 0) > 0 ? 'text-red-600 font-bold' : ''">
             {{ fmtMinutes(row.summary.excessRestraintMinutes) }}
+            <span v-if="isTheearthBackfilled(row, 'excessRestraintMinutes')" class="inline-block w-1.5 h-1.5 rounded-full bg-violet-500 align-middle" :title="BACKFILL_TITLE" />
           </td>
           <td class="px-1.5 py-1 text-right">{{ row.summary.over15hDays }}</td>
-          <td class="px-1.5 py-1 text-right">{{ row.summary.avgDriving9hOverCount }}</td>
+          <td class="px-1.5 py-1 text-right">
+            {{ row.summary.avgDriving9hOverCount }}
+            <span v-if="isTheearthBackfilled(row, 'avgDriving9hOverCount')" class="inline-block w-1.5 h-1.5 rounded-full bg-violet-500 align-middle" :title="BACKFILL_TITLE" />
+          </td>
           <td class="px-1.5 py-1 text-right kintai-col">{{ fmtDays(row.summary.leaveCounts?.publicHoliday) }}</td>
           <td class="px-1.5 py-1 text-right kintai-col">{{ fmtDays(row.summary.leaveCounts?.paidLeave) }}</td>
           <td class="px-1.5 py-1 text-right kintai-col">{{ fmtDays(row.summary.leaveCounts?.absence) }}</td>
