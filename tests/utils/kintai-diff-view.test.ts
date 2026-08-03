@@ -1037,7 +1037,7 @@ describe('kintaiDiffValueDiffFieldRows', () => {
 
 describe('kintaiDiffOneSidedFieldRows', () => {
   it('非0の項目だけを11項目の並び順で返す', () => {
-    const rows = kintaiDiffOneSidedFieldRows(expectedMinutes({ working_minutes: 480, overtime_minutes: 30 }))
+    const rows = kintaiDiffOneSidedFieldRows({ working_minutes: 480, overtime_minutes: 30 })
     expect(rows).toEqual([
       { field: 'working_minutes', label: '実働', value: 480 },
       { field: 'overtime_minutes', label: '残業', value: 30 },
