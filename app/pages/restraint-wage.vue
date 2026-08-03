@@ -116,8 +116,10 @@ import {
   kintaiStaleMonthKey,
   parseKintaiStaleMonths,
 } from '~/utils/kintai-stale-months'
-import type { KintaiUnkoGaps } from '~/utils/kintai-unko-gaps'
+import type { KintaiUnkoGapDtakoCheckResult, KintaiUnkoGaps } from '~/utils/kintai-unko-gaps'
 import {
+  kintaiUnkoGapDtakoCheckResultFromLookup,
+  kintaiUnkoGapDtakoCheckView,
   kintaiUnkoGapsDeriveStartOpe,
   kintaiUnkoGapsDriverTotalCount,
   kintaiUnkoGapsReadability,
@@ -1521,10 +1523,65 @@ const unkoGapsLoaded = ref(false)
 const unkoGapsReadability = computed(() => unkoGapsResult.value ? kintaiUnkoGapsReadability(unkoGapsResult.value) : null)
 const unkoGapsDriverTotal = computed(() => unkoGapsResult.value ? kintaiUnkoGapsDriverTotalCount(unkoGapsResult.value) : 0)
 
+// ---- 候補ごとの「オンプレにデジタコが在るか」チェック (Refs #633-1 条件8〜14) ----
+// ★ 親の実測 (2026-08-04) で確定した原因への対応 — unko-gaps の候補は
+// `time_card_dtako` の有無しか見ておらず、デジタコ自体 (`dtako_events`) は
+// 取り込み済みでも候補に出る (1445 の実例)。**新しい判定はしない** —
+// 既存の口 (day-events-lookup) の `status` をそのまま3値に倒すだけ
+// (`kintai-unko-gaps.ts` の `kintaiUnkoGapDtakoCheckResultFromLookup` docs 参照)。
+// **押した時だけ、候補を直列で1件ずつ**引く (自動実行しない、やること9)。
+const dtakoPresenceResults = ref<Map<string, KintaiUnkoGapDtakoCheckResult>>(new Map())
+const dtakoPresenceChecking = ref(false)
+const dtakoPresenceProgress = ref<{ done: number, total: number } | null>(null)
+
+function dtakoPresenceKey(driverCd: string, unkoNo: string): string {
+  return `${driverCd}|${unkoNo}`
+}
+
+/** 候補1件ぶんの表示 (未実行/ambiguous/エラーは全部「調べられていない」に倒す —
+ * `kintaiUnkoGapDtakoCheckView` の docs 参照、やること12)。 */
+function dtakoPresenceViewFor(driverCd: string, unkoNo: string) {
+  return kintaiUnkoGapDtakoCheckView(dtakoPresenceResults.value.get(dtakoPresenceKey(driverCd, unkoNo)))
+}
+
+/** 候補一覧 (乗務員ごとの unkoNos) 全件を、直列で1件ずつ day-events-lookup へ
+ * 投げる。**「候補一覧の下の一括ボタン」からのみ呼ばれる** — 自動実行はしない。 */
+async function checkDtakoPresenceForAllCandidates() {
+  if (!unkoGapsResult.value || dtakoPresenceChecking.value) return
+  const candidates: Array<{ driverCd: string, unkoNo: string }> = []
+  for (const d of unkoGapsResult.value.drivers) {
+    for (const no of d.unkoNos) candidates.push({ driverCd: d.driverCd, unkoNo: no })
+  }
+  if (!candidates.length) return
+  dtakoPresenceChecking.value = true
+  dtakoPresenceProgress.value = { done: 0, total: candidates.length }
+  for (const c of candidates) {
+    const key = dtakoPresenceKey(c.driverCd, c.unkoNo)
+    try {
+      const res = await $fetch<unknown>('/restraint-api/kintai/day-events-lookup', {
+        headers: authHeaders(),
+        query: { driver_cd: c.driverCd, ope_no: c.unkoNo },
+      })
+      const lookup = parseDayEventsLookup(res)
+      dtakoPresenceResults.value.set(key, kintaiUnkoGapDtakoCheckResultFromLookup(lookup.status, lookup.unkoNo))
+    }
+    catch {
+      // 1件の失敗で全体を止めない — この候補だけ「調べられていない」に倒し、続きを回す。
+      dtakoPresenceResults.value.set(key, { status: 'inconclusive', unkoNo23: null })
+    }
+    dtakoPresenceProgress.value = { done: (dtakoPresenceProgress.value?.done ?? 0) + 1, total: candidates.length }
+  }
+  dtakoPresenceChecking.value = false
+}
+
 async function loadUnkoGaps() {
   if (!month.value) return
   unkoGapsLoading.value = true
   unkoGapsError.value = ''
+  // 新しく候補を取り直すと乗務員CD/運行NOの組が変わりうるため、前回のチェック結果は
+  // 古い候補と紐付かない — 一緒に消す。
+  dtakoPresenceResults.value = new Map()
+  dtakoPresenceProgress.value = null
   try {
     const res = await $fetch<unknown>('/restraint-api/kintai/unko-gaps', {
       headers: authHeaders(),
@@ -1547,6 +1604,8 @@ watch(month, () => {
   unkoGapsResult.value = null
   unkoGapsLoaded.value = false
   unkoGapsError.value = ''
+  dtakoPresenceResults.value = new Map()
+  dtakoPresenceProgress.value = null
 })
 
 /**
@@ -6694,6 +6753,11 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       <span class="text-xs text-gray-500 ml-2">
                         ★ 遅い口です (alc への etags 往復を含み、所要時間の保証はありません)。押した時だけ取得します。
                       </span>
+                      <p class="text-xs text-gray-500 mt-1">
+                        ★ この候補判定はオンプレの <code>time_card_dtako</code> に在るかだけを見ています。
+                        デジタコ自体 (<code>dtako_events</code>) は取り込み済みでも、ここに出ることがあります
+                        (下の「オンプレのデジタコ在否を調べる」で1件ずつ区別できます)。
+                      </p>
 
                       <UAlert
                         v-if="unkoGapsError"
@@ -6762,6 +6826,21 @@ watch([compMap, kyuyoSyncedKeys], () => {
                                   />
                                 </div>
 
+                                <!-- オンプレにデジタコが在るか (Refs #633-1 条件8〜14)。★ 押した時だけ
+                                     一括で調べる (下のボタン) — ここは結果があれば表示するだけ。 -->
+                                <p
+                                  class="mt-1 text-xs"
+                                  :class="{
+                                    'text-green-700 dark:text-green-400': dtakoPresenceViewFor(d.driverCd, no).status === 'present',
+                                    'text-gray-500': dtakoPresenceViewFor(d.driverCd, no).status !== 'present',
+                                  }"
+                                >
+                                  {{ dtakoPresenceViewFor(d.driverCd, no).message }}
+                                  <template v-if="dtakoPresenceViewFor(d.driverCd, no).unkoNo23">
+                                    実物: <code class="select-all">{{ dtakoPresenceViewFor(d.driverCd, no).unkoNo23 }}</code>
+                                  </template>
+                                </p>
+
                                 <!-- その日の両側の差 (Refs #633-1)。★ 候補が複数あっても価値は
                                      1件ずつ違う (issue #633 実測: 1740は40分差あり・1445は一致) —
                                      一律に「取り込むべき」とは出さず、その日の実測を並べるだけ。 -->
@@ -6809,6 +6888,23 @@ watch([compMap, kyuyoSyncedKeys], () => {
                             (上の {{ gcpDiffObservations.unkoDiffGcpOnlyDriverSplit.alsoInMonthOps }} 件と
                             取得タイミングの違いで一致しないことがあります)
                           </p>
+
+                          <!-- オンプレのデジタコ在否の一括チェック (Refs #633-1 条件8〜14)。
+                               ★ 押した時だけ、候補を直列で1件ずつ引く (自動実行しない)。 -->
+                          <div class="mt-2">
+                            <UButton
+                              size="xs"
+                              variant="soft"
+                              icon="i-lucide-search"
+                              label="オンプレのデジタコ在否を調べる"
+                              :loading="dtakoPresenceChecking"
+                              :disabled="dtakoPresenceChecking"
+                              @click="checkDtakoPresenceForAllCandidates"
+                            />
+                            <span v-if="dtakoPresenceProgress" class="text-xs text-gray-500 ml-2">
+                              {{ dtakoPresenceProgress.done }} / {{ dtakoPresenceProgress.total }} 件確認
+                            </span>
+                          </div>
                         </div>
                         <p v-else-if="unkoGapsReadability === 'ok'" class="text-xs text-gray-500 mt-2">
                           候補はありません。
@@ -6819,6 +6915,10 @@ watch([compMap, kyuyoSyncedKeys], () => {
                             乗務員不明の運行
                             ({{ unkoGapsResult.unknownDriverUnkoNos.length }}件{{ unkoGapsResult.unknownDriverUnkoNosTruncated ? ' 以上' : '' }})
                           </summary>
+                          <p class="mt-1">
+                            ★ 乗務員CD が無いため、上の「オンプレのデジタコ在否を調べる」の対象外です
+                            (day-events-lookup は driver_cd が必須)。
+                          </p>
                           <ul class="list-disc list-inside mt-1">
                             <li v-for="no in unkoGapsResult.unknownDriverUnkoNos" :key="no"><code>{{ no }}</code></li>
                           </ul>

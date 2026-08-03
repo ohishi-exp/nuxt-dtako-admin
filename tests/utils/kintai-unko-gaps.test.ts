@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
+  kintaiUnkoGapDtakoCheckResultFromLookup,
+  kintaiUnkoGapDtakoCheckView,
   kintaiUnkoGapsDeriveStartOpe,
   kintaiUnkoGapsDriverTotalCount,
   kintaiUnkoGapsReadability,
@@ -176,5 +178,82 @@ describe('kintaiUnkoGapsDeriveStartOpe (★ 表示専用。捏造しない — 2
   it('22桁でも23桁でもない (桁数違反) は null', () => {
     expect(kintaiUnkoGapsDeriveStartOpe('123')).toBeNull()
     expect(kintaiUnkoGapsDeriveStartOpe('a'.repeat(22))).toBeNull()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────
+// 候補ごとの「オンプレにデジタコが在るか」チェック (Refs #633-1 条件8〜14)。
+// 親の実測 (2026-08-04): unko-gaps の候補は `time_card_dtako` の有無しか見ておらず、
+// `dtako_events` (デジタコ自体) は取り込み済みでも候補に出る (1445 の実例)。
+// ─────────────────────────────────────────────────────────────────────────
+
+describe('kintaiUnkoGapDtakoCheckResultFromLookup', () => {
+  it('found → present (見つかった23桁を持つ)', () => {
+    expect(kintaiUnkoGapDtakoCheckResultFromLookup('found', '26062513554200000034471')).toEqual({
+      status: 'present',
+      unkoNo23: '26062513554200000034471',
+    })
+  })
+
+  it('not_found → absent', () => {
+    expect(kintaiUnkoGapDtakoCheckResultFromLookup('not_found', null)).toEqual({
+      status: 'absent',
+      unkoNo23: null,
+    })
+  })
+
+  it('ambiguous → inconclusive (「無い」と混同しない、条件12)', () => {
+    expect(kintaiUnkoGapDtakoCheckResultFromLookup('ambiguous', null)).toEqual({
+      status: 'inconclusive',
+      unkoNo23: null,
+    })
+  })
+
+  it('null (応答が読めなかった) → inconclusive', () => {
+    expect(kintaiUnkoGapDtakoCheckResultFromLookup(null, null)).toEqual({
+      status: 'inconclusive',
+      unkoNo23: null,
+    })
+  })
+})
+
+describe('kintaiUnkoGapDtakoCheckView (★ 「押せば直る」と読める書き方をしない、条件10)', () => {
+  it('present: 「取り込み漏れではない」は書くが「直る」とは断定しない', () => {
+    const view = kintaiUnkoGapDtakoCheckView({ status: 'present', unkoNo23: '26062513554200000034471' })
+    expect(view.status).toBe('present')
+    expect(view.message).toContain('取り込み漏れではありません')
+    expect(view.message).toContain('保証ではありません')
+    expect(view.unkoNo23).toBe('26062513554200000034471')
+  })
+
+  it('absent: その乗務員・その日で引いた限り、と断定しない書き方', () => {
+    const view = kintaiUnkoGapDtakoCheckView({ status: 'absent', unkoNo23: null })
+    expect(view.status).toBe('absent')
+    expect(view.message).toContain('見つかりません')
+    expect(view.unkoNo23).toBeNull()
+  })
+
+  it('inconclusive: 「調べられていません」(not_found と同じ文言にしない)', () => {
+    const view = kintaiUnkoGapDtakoCheckView({ status: 'inconclusive', unkoNo23: null })
+    expect(view.message).toContain('調べられていません')
+    expect(view.message).not.toContain('見つかりません')
+  })
+
+  it('result が undefined (まだ調べていない候補) も inconclusive と同じ文言 (条件12: ambiguous/エラー/未実行をまとめる)', () => {
+    const view = kintaiUnkoGapDtakoCheckView(undefined)
+    expect(view.status).toBe('inconclusive')
+    expect(view.message).toBe(kintaiUnkoGapDtakoCheckView({ status: 'inconclusive', unkoNo23: null }).message)
+  })
+
+  it('★ issue #633 実測: 1445は found (dtako_events 在り) なので present', () => {
+    const result = kintaiUnkoGapDtakoCheckResultFromLookup('found', '26062513554200000034471')
+    const view = kintaiUnkoGapDtakoCheckView(result)
+    expect(view.status).toBe('present')
+  })
+
+  it('★ issue #633 実測: 1740は not_found (operations: []) なので absent', () => {
+    const result = kintaiUnkoGapDtakoCheckResultFromLookup('not_found', null)
+    const view = kintaiUnkoGapDtakoCheckView(result)
+    expect(view.status).toBe('absent')
   })
 })
