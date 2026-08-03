@@ -95,6 +95,7 @@ import {
   relayKintaiDaySummaries,
   relayKintaiRecalc,
   relayKintaiStaleMonths,
+  relayKintaiUnkoGaps,
   relayKintaiWindow,
   type KintaiRelayDeps,
 } from "./kintai-relay";
@@ -2586,6 +2587,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/kintai/stale-months" && request.method === "GET") {
       return this.handleKintaiStaleMonths(record!, url);
     }
+    // 取り込み漏れ候補の運行NO一覧 (viewer 認可、Refs #623-2)。★ 遅い口 —
+    // ページ描画のたびに叩かない (呼び出し側の責務)。読むだけ、POSTは無い
+    if (url.pathname === "/restraint-api/kintai/unko-gaps" && request.method === "GET") {
+      return this.handleKintaiUnkoGaps(record!, url);
+    }
     if (url.pathname === "/restraint-api/kintai/refresh/timecard" && request.method === "POST") {
       return this.handleKintaiRefreshTimecard(record!, url);
     }
@@ -4055,6 +4061,37 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       console.error(JSON.stringify({ kintai_stale_months: "error", error: describeUnknownError(err) }));
       return dvrJsonError(502, err instanceof Error ? err.message : "月別 stale の取得に失敗しました");
+    }
+  }
+
+  /**
+   * GET /restraint-api/kintai/unko-gaps?month=YYYY-MM&driver_cd=<任意> —
+   * 取り込み漏れ候補 (`also_in_month`) の運行NO一覧 (Refs #623-2)。
+   *
+   * 中身は `kintai-relay.ts` の `relayKintaiUnkoGaps` そのまま。**★ alc への etags
+   * 往復を含み遅い** (受け側 docs 「ページ表示で叩く口ではない」) — 呼び出しの
+   * タイミングはここでは制御しない。押した時だけ叩く設計は画面側の責務。
+   *
+   * 応答はそのまま返す。`gcp_etags_available`/`driver_cds_available` が false の
+   * ときに「候補なし」と丸めるのは front (画面) の責務 — ここで丸めない。
+   */
+  private async handleKintaiUnkoGaps(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const month = url.searchParams.get("month") || "";
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      return dvrJsonError(400, "month は YYYY-MM で指定してください");
+    }
+    const driverCd = url.searchParams.get("driver_cd") || undefined;
+
+    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_unko_gaps");
+    if (ctx instanceof Response) return ctx;
+
+    try {
+      const gaps = await relayKintaiUnkoGaps(ctx.deps, { month, driverCd });
+      console.log(JSON.stringify({ kintai_unko_gaps: "ok", month }));
+      return Response.json(gaps);
+    } catch (err) {
+      console.error(JSON.stringify({ kintai_unko_gaps: "error", month, error: describeUnknownError(err) }));
+      return dvrJsonError(502, err instanceof Error ? err.message : "取り込み漏れ候補の取得に失敗しました");
     }
   }
 

@@ -69,6 +69,13 @@ const DAY_SUMMARIES_PATH = "/api/kintai/day-summaries";
  * (フル突合) を叩かないための専用口。
  */
 const STALE_MONTHS_PATH = "/api/kintai/stale-months";
+/**
+ * 取り込み漏れ候補の運行NO一覧を読む口 (rust-ichibanboshi、Refs #623-2)。
+ * `logic_version` を動かさない場所 (`src/routes/unko_gaps.rs` 想定) に置かれている。
+ * **★ alc への etags 往復を含み遅い** — 受け側 docs に明記あり、ページ描画で
+ * 叩いてはいけない。呼び出しタイミングの制御は呼び出し元 (画面) の責務。
+ */
+const UNKO_GAPS_PATH = "/api/kintai/unko-gaps";
 
 /** 窓の既定の月数 — **当月 + 前月**。始業 / 終業 の後追い修正を拾う幅。 */
 export const DEFAULT_MONTH_COUNT = 2;
@@ -611,4 +618,37 @@ export async function relayKintaiStaleMonths(
     await deps.gcp(qs ? `${STALE_MONTHS_PATH}?${qs}` : STALE_MONTHS_PATH),
     "gcp kintai stale-months",
   );
+}
+
+export interface KintaiUnkoGapsInput {
+  /** 対象月 (`YYYY-MM`)。必須。 */
+  month: string;
+  /** 絞り込む乗務員コード。省略可 — 省略時は受け側が対象月の全乗務員ぶんを返す。 */
+  driverCd?: string;
+}
+
+/**
+ * 取り込み漏れ候補 (`also_in_month`) の運行NO一覧を読む (Refs #623-2)。
+ *
+ * **★ 遅い。** alc への etags 往復を含み、所要時間の保証は無い (受け側 docs に
+ * 「ページ表示で叩く口ではない」と明記)。**呼び出しタイミングはここで制御しない** —
+ * 呼ぶかどうか・いつ呼ぶかは呼び出し元 (画面、ユーザー操作) の責務。ここでは
+ * 単に中継するだけ。
+ *
+ * 読むだけ。受け側に `POST` は無い ([`relayKintaiStaleMonths`] と同じ塞ぎ方)。
+ *
+ * 応答は**そのまま返す**。`gcp_etags_available` / `driver_cds_available` が
+ * `false` のときに「候補なし」と丸めるのは呼び出し側 (画面) の責務 — ここで
+ * 丸めない (#620/#615-7 と同型の「無い」と「引けていない」の混同を避ける作法)。
+ */
+export async function relayKintaiUnkoGaps(
+  deps: Pick<KintaiRelayDeps, "gcp">,
+  input: KintaiUnkoGapsInput,
+): Promise<unknown> {
+  if (!MONTH_RE.test(input.month)) {
+    throw new KintaiRelayError(`month は YYYY-MM で指定してください: ${input.month}`);
+  }
+  const q = new URLSearchParams({ month: input.month });
+  if (input.driverCd) q.set("driver_cd", input.driverCd);
+  return readJson<unknown>(await deps.gcp(`${UNKO_GAPS_PATH}?${q}`), "gcp kintai unko-gaps");
 }
