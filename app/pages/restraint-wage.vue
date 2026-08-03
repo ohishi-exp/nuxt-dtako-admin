@@ -105,6 +105,13 @@ import {
   kintaiStaleMonthKey,
   parseKintaiStaleMonths,
 } from '~/utils/kintai-stale-months'
+import type { KintaiUnkoGaps } from '~/utils/kintai-unko-gaps'
+import {
+  kintaiUnkoGapsDeriveStartOpe,
+  kintaiUnkoGapsDriverTotalCount,
+  kintaiUnkoGapsReadability,
+  parseKintaiUnkoGaps,
+} from '~/utils/kintai-unko-gaps'
 
 const {
   session: theearthSession,
@@ -1405,6 +1412,67 @@ watch(month, () => {
   mysqlRefreshPreview.value = null
   mysqlRefreshApplyResult.value = ''
 })
+
+// ---- 取り込み漏れ候補の運行NO一覧 (Refs #623-2) ----
+// ★ この口は遅い (alc への etags 往復を含む、所要時間の保証なし)。**自動実行しない** —
+// 「運行NO を出す」ボタンを押したときだけ叩く。押すと乗務員ごとに運行NOを一覧し、
+// 各行の「③に入れる」で③のフォームへ値を渡す (自動実行はしない、人が確認してから
+// 「① 確認」を押す)。
+
+const unkoGapsResult = ref<KintaiUnkoGaps | null>(null)
+const unkoGapsLoading = ref(false)
+const unkoGapsError = ref('')
+const unkoGapsLoaded = ref(false)
+
+const unkoGapsReadability = computed(() => unkoGapsResult.value ? kintaiUnkoGapsReadability(unkoGapsResult.value) : null)
+const unkoGapsDriverTotal = computed(() => unkoGapsResult.value ? kintaiUnkoGapsDriverTotalCount(unkoGapsResult.value) : 0)
+
+async function loadUnkoGaps() {
+  if (!month.value) return
+  unkoGapsLoading.value = true
+  unkoGapsError.value = ''
+  try {
+    const res = await $fetch<unknown>('/restraint-api/kintai/unko-gaps', {
+      headers: authHeaders(),
+      query: { month: month.value },
+    })
+    unkoGapsResult.value = parseKintaiUnkoGaps(res)
+    unkoGapsLoaded.value = true
+  }
+  catch (e) {
+    unkoGapsResult.value = null
+    unkoGapsLoaded.value = false
+    unkoGapsError.value = restraintErrorMessage(e)
+  }
+  finally {
+    unkoGapsLoading.value = false
+  }
+}
+
+watch(month, () => {
+  unkoGapsResult.value = null
+  unkoGapsLoaded.value = false
+  unkoGapsError.value = ''
+})
+
+/**
+ * 候補の行から③のフォームへ値を渡す (Refs #623-2)。**自動実行はしない** — 欄に
+ * 値が入るだけで、「① 確認」は人が押す。
+ *
+ * ★ 渡せるのは受け口が返す **22桁 (GCP側)** の運行NOそのまま。③が要る本来の値は
+ * **23桁 (オンプレ側、末尾1桁 = 対象CD)** だが、候補の運行はまだオンプレに無いため
+ * 対象CDを機械的に決められない — 捏造しない (issue #623-2 の罠メモ)。22桁のままだと
+ * ③側のガード (`unko_no は23桁の数値`) に「① 確認」で弾かれる。**これは想定内**:
+ * 対象CDが分かっている人がその場で1桁補ってから押す、という明示的な半完了として
+ * 渡している (23桁を機械が当てにいくより安全)。
+ */
+function applyUnkoGapCandidateToMysqlForm(driverCd: number, unkoNo: string) {
+  mysqlRefreshUnkoNo.value = unkoNo
+  mysqlRefreshDriverCd.value = String(driverCd)
+  if (import.meta.client) {
+    document.getElementById('gcp-mysql-refresh-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+}
 
 // ---- 期間サマリー印刷 (Refs #443) ----
 // タイムカード表は「1 人 1 枚 × 日別」なので、期間分の日数を突き合わせたい総務には
@@ -6505,6 +6573,113 @@ watch([compMap, kyuyoSyncedKeys], () => {
                         (乗務員 {{ gcpDiffObservations.unkoDiffGcpOnlyDriverSplit.alsoInMonthDrivers }}名)
                       </span>
                     </div>
+
+                    <!-- 取り込み漏れ候補の運行NO一覧 (Refs #623-2)。★ 遅い口 — 押した時だけ叩く -->
+                    <div class="mt-2">
+                      <UButton
+                        size="2xs"
+                        variant="soft"
+                        icon="i-lucide-list"
+                        :label="unkoGapsLoaded ? '運行NO を出し直す' : '運行NO を出す'"
+                        :loading="unkoGapsLoading"
+                        :disabled="unkoGapsLoading"
+                        @click="loadUnkoGaps"
+                      />
+                      <span class="text-xs text-gray-500 ml-2">
+                        ★ 遅い口です (alc への etags 往復を含み、所要時間の保証はありません)。押した時だけ取得します。
+                      </span>
+
+                      <UAlert
+                        v-if="unkoGapsError"
+                        color="error"
+                        variant="soft"
+                        class="mt-2"
+                        icon="i-lucide-alert-triangle"
+                        title="取得できませんでした"
+                        :description="unkoGapsError"
+                      />
+
+                      <div v-else-if="unkoGapsLoading" class="flex items-center gap-2 text-sm text-gray-500 mt-2">
+                        <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin text-primary" />
+                        取得しています… (数十秒かかることがあります)
+                      </div>
+
+                      <template v-else-if="unkoGapsLoaded && unkoGapsResult">
+                        <!-- ★「候補なし」と「引けていない」を混同しない (issue #623-2 の必須条件) -->
+                        <UAlert
+                          v-if="unkoGapsReadability === 'etags_unavailable'"
+                          color="warning"
+                          variant="soft"
+                          class="mt-2"
+                          icon="i-lucide-alert-triangle"
+                          title="GCP側の運行一覧が引けませんでした"
+                          description="「候補なし」ではなく「引けていない」状態です。下の一覧は当てになりません — 時間をおいて出し直してください。"
+                        />
+                        <UAlert
+                          v-else-if="unkoGapsReadability === 'driver_cds_unavailable'"
+                          color="warning"
+                          variant="soft"
+                          class="mt-2"
+                          icon="i-lucide-alert-triangle"
+                          title="乗務員別の内訳が引けませんでした"
+                          description="alc が driver_cds を返していません (正常に空のこともあります) — 「取り込み漏れ0件」と断定できません。"
+                        />
+
+                        <div v-if="unkoGapsResult.drivers.length" class="mt-2 space-y-2">
+                          <div
+                            v-for="d in unkoGapsResult.drivers"
+                            :key="d.driverCd"
+                            class="text-sm border border-gray-200 dark:border-gray-700 rounded p-2"
+                          >
+                            <div class="font-medium">
+                              乗務員CD {{ d.driverCd }}
+                              <span class="text-xs text-gray-500">
+                                ({{ d.unkoNos.length }}件{{ d.truncated ? ' 以上 — 上限で打ち切り' : '' }})
+                              </span>
+                            </div>
+                            <ul class="mt-1 space-y-1">
+                              <li v-for="no in d.unkoNos" :key="no" class="flex flex-wrap items-center gap-2">
+                                <code class="text-xs">{{ no }}</code>
+                                <span class="text-xs text-gray-500">
+                                  ({{ unkoGapsResult.unkoNoDigits ?? no.length }}桁、GCP側) —
+                                  start_ope目安: {{ kintaiUnkoGapsDeriveStartOpe(no) ?? '不明' }}
+                                </span>
+                                <UButton
+                                  size="2xs"
+                                  variant="soft"
+                                  label="③ に入れる"
+                                  @click="applyUnkoGapCandidateToMysqlForm(d.driverCd, no)"
+                                />
+                              </li>
+                            </ul>
+                          </div>
+                          <p class="text-xs text-gray-400">
+                            この一覧の延べ件数 {{ unkoGapsDriverTotal }} 件
+                            (上の {{ gcpDiffObservations.unkoDiffGcpOnlyDriverSplit.alsoInMonthOps }} 件と
+                            取得タイミングの違いで一致しないことがあります)
+                          </p>
+                        </div>
+                        <p v-else-if="unkoGapsReadability === 'ok'" class="text-xs text-gray-500 mt-2">
+                          候補はありません。
+                        </p>
+
+                        <details v-if="unkoGapsResult.unknownDriverUnkoNos.length" class="mt-2 text-xs text-gray-500">
+                          <summary class="cursor-pointer select-none">
+                            乗務員不明の運行
+                            ({{ unkoGapsResult.unknownDriverUnkoNos.length }}件{{ unkoGapsResult.unknownDriverUnkoNosTruncated ? ' 以上' : '' }})
+                          </summary>
+                          <ul class="list-disc list-inside mt-1">
+                            <li v-for="no in unkoGapsResult.unknownDriverUnkoNos" :key="no"><code>{{ no }}</code></li>
+                          </ul>
+                        </details>
+
+                        <p class="text-xs text-gray-400 mt-2">
+                          所要 {{ unkoGapsResult.elapsedMs ?? '?' }} ms
+                          {{ unkoGapsResult.driversTruncated ? ' / 乗務員一覧は上限で打ち切りあり' : '' }}
+                        </p>
+                      </template>
+                    </div>
+
                     <details class="mt-1 text-xs text-gray-500">
                       <summary class="cursor-pointer select-none">
                         対象月に GCP にしか無い運行数 (合計 {{ gcpDiffObservations.unkoDiffGcpOnlyInMonth }} = 下3つの和) — 内訳
@@ -6656,7 +6831,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
             </div>
           </UCard>
 
-          <UCard class="mt-4">
+          <UCard id="gcp-mysql-refresh-section" class="mt-4">
             <template #header>
               <span class="font-semibold">③ MySQL (dtako) 側を取り直す</span>
             </template>
@@ -6672,6 +6847,10 @@ watch([compMap, kyuyoSyncedKeys], () => {
               <UInput v-model="mysqlRefreshDriverCd" size="xs" placeholder="乗務員CD (任意、保証判定用)" class="w-44" />
               <UCheckbox v-model="mysqlRefreshResetTimecard" label="勤務時間再登録まで行う (③、破壊的)" />
             </div>
+            <p v-if="/^\d{22}$/.test(mysqlRefreshUnkoNo.trim())" class="text-xs text-amber-700 dark:text-amber-400 mb-2">
+              22桁 (GCP側) のままです — オンプレ23桁目 (対象CD) を確認して1桁補ってください。
+              このままでは「① 確認」が23桁チェックで失敗します。
+            </p>
             <UAlert
               v-if="mysqlRefreshError"
               color="error"

@@ -4,6 +4,7 @@ import {
   relayKintaiRecalc,
   relayKintaiDaySummaries,
   relayKintaiStaleMonths,
+  relayKintaiUnkoGaps,
   windowMonths,
   jstMonth,
   tenantForCompId,
@@ -637,6 +638,72 @@ describe("relayKintaiStaleMonths (Refs #620)", () => {
       [STALE_MONTHS]: () => new Response("<html>", { status: 200 }),
     });
     await expect(relayKintaiStaleMonths({ gcp }, {})).rejects.toThrow(/parse failed/);
+  });
+});
+
+const UNKO_GAPS = "/api/kintai/unko-gaps";
+
+describe("relayKintaiUnkoGaps (Refs #623-2)", () => {
+  /** 受け口の確定済みの形 (issue #623-2 起票時に確認済み)。 */
+  const SAMPLE = {
+    month: "2026-06",
+    driver_cd: null,
+    gcp_etags_available: true,
+    driver_cds_available: true,
+    unko_no_digits: 22,
+    drivers: [
+      { driver_cd: 1445, unko_nos: ["260601123456000012345600"], truncated: false },
+      { driver_cd: 1740, unko_nos: ["260602123456000012345601"], truncated: false },
+    ],
+    drivers_truncated: false,
+    unknown_driver_unko_nos: [],
+    unknown_driver_unko_nos_truncated: false,
+    elapsed_ms: 12345,
+  };
+
+  it("**GET で読むだけ。** 応答はそのまま返す (丸めない)", async () => {
+    const { gcp, calls } = gcpStub({ [UNKO_GAPS]: SAMPLE });
+    const r = await relayKintaiUnkoGaps({ gcp }, { month: "2026-06" });
+    expect(calls).toHaveLength(1);
+    // method 未指定 = GET。body も無い — この経路は 1 行も書けない
+    expect(calls[0]!.method).toBeUndefined();
+    expect(calls[0]!.body).toBeUndefined();
+    const url = new URL(`https://x${calls[0]!.path}`);
+    expect(url.pathname).toBe(UNKO_GAPS);
+    expect(url.searchParams.get("month")).toBe("2026-06");
+    expect(url.searchParams.has("driver_cd")).toBe(false);
+    expect(r).toEqual(SAMPLE);
+  });
+
+  it("driver_cd を指定したら query にそのまま乗せる", async () => {
+    const { gcp, calls } = gcpStub({ [UNKO_GAPS]: SAMPLE });
+    await relayKintaiUnkoGaps({ gcp }, { month: "2026-06", driverCd: "1445" });
+    const url = new URL(`https://x${calls[0]!.path}`);
+    expect(url.searchParams.get("driver_cd")).toBe("1445");
+  });
+
+  it("month が無い/壊れていたら 1 回も叩かずに落ちる", async () => {
+    const { gcp, calls } = gcpStub({});
+    await expect(
+      relayKintaiUnkoGaps({ gcp }, { month: "2026-6" }),
+    ).rejects.toBeInstanceOf(KintaiRelayError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("どちら側が落ちたかを本文の先頭付きで返す", async () => {
+    const { gcp } = gcpStub({ [UNKO_GAPS]: () => new Response("boom", { status: 502 }) });
+    await expect(relayKintaiUnkoGaps({ gcp }, { month: "2026-06" })).rejects.toThrow(
+      /gcp kintai unko-gaps: status 502: boom/,
+    );
+  });
+
+  it("JSON でない応答は parse failed で落とす", async () => {
+    const { gcp } = gcpStub({
+      [UNKO_GAPS]: () => new Response("<html>", { status: 200 }),
+    });
+    await expect(relayKintaiUnkoGaps({ gcp }, { month: "2026-06" })).rejects.toThrow(
+      /parse failed/,
+    );
   });
 });
 
