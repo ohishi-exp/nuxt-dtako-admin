@@ -5,11 +5,18 @@ import {
   timecardCompareStatusLabel,
   hasFerryMinus,
   fmtTimecardCompareDiff,
+  fmtTimecardCompareDiffRange,
   fmtTimecardCompareMinutes,
+  fmtTimecardCompareCauseDays,
+  fmtTimecardCompareUnknown,
   toTimecardCompareRows,
+  summarizeTimecardCompareResult,
+  summarizeTimecardCompareResults,
+  sortTimecardCompareSummaryRows,
   type TimecardCompareDay,
   type TimecardCompareResult,
   type TimecardCompareRow,
+  type TimecardCompareSummaryRow,
 } from '~/utils/timecard-compare-view'
 
 function day(over: Partial<TimecardCompareDay> = {}): TimecardCompareDay {
@@ -20,6 +27,9 @@ function day(over: Partial<TimecardCompareDay> = {}): TimecardCompareDay {
     diffMinutes: 0,
     status: 'match',
     ferryMinusMinutes: null,
+    cause: 'none',
+    explainedMinutes: 0,
+    residualMinutes: 0,
     anomalies: [],
     ...over,
   }
@@ -119,6 +129,8 @@ describe('timecardCompareHeadline', () => {
       days: [],
       totals: { nginxMinutes: 0, oursMinutes: 0, diffMinutes: 0, ferryMinusMinutes: 0 },
       mismatchCount: 0,
+      unknownCount: 0,
+      unknownMinutes: 0,
       anomalies: [],
       ...over,
     }
@@ -164,6 +176,8 @@ describe('hasFerryMinus', () => {
     toleranceMinutes: 1,
     days: [],
     mismatchCount: 0,
+    unknownCount: 0,
+    unknownMinutes: 0,
     anomalies: [],
   }
 
@@ -173,5 +187,178 @@ describe('hasFerryMinus', () => {
 
   it('無い月は列を出さない (空列を並べない)', () => {
     expect(hasFerryMinus({ ...base, totals: { nginxMinutes: 0, oursMinutes: 0, diffMinutes: 0, ferryMinusMinutes: 0 } })).toBe(false)
+  })
+})
+
+describe('summarizeTimecardCompareResult', () => {
+  function result(over: Partial<TimecardCompareResult> = {}): TimecardCompareResult {
+    return {
+      month: '2026-04',
+      driverCd: '1021',
+      name: 'テスト 乗務員',
+      toleranceMinutes: 1,
+      days: [],
+      totals: { nginxMinutes: 0, oursMinutes: 0, diffMinutes: 0, ferryMinusMinutes: 0 },
+      mismatchCount: 0,
+      unknownCount: 0,
+      unknownMinutes: 0,
+      anomalies: [],
+      ...over,
+    }
+  }
+
+  it('乗務員CD/氏名/合計をそのまま持つ', () => {
+    const srow = summarizeTimecardCompareResult(result({ mismatchCount: 3, unknownCount: 2, unknownMinutes: 45 }))
+    expect(srow).toMatchObject({
+      driverCd: '1021',
+      name: 'テスト 乗務員',
+      mismatchCount: 3,
+      unknownCount: 2,
+      unknownMinutes: 45,
+    })
+  })
+
+  it('全 status を 0 埋めで持つ (0 件の status も落とさない)', () => {
+    const srow = summarizeTimecardCompareResult(result({
+      days: [day({ status: 'match' }), day({ status: 'match' }), day({ status: 'mismatch', diffMinutes: -10 })],
+    }))
+    expect(srow.statusDays).toEqual({
+      match: 2,
+      'within-tolerance': 0,
+      mismatch: 1,
+      'nginx-only': 0,
+      'ours-only': 0,
+      'both-empty': 0,
+    })
+  })
+
+  it('cause ごとの日数を数える (none は載せない)', () => {
+    const srow = summarizeTimecardCompareResult(result({
+      days: [
+        day({ cause: 'lunch' }),
+        day({ cause: 'lunch' }),
+        day({ cause: 'ferry' }),
+        day({ cause: 'none' }),
+      ],
+    }))
+    expect(srow.causeDays).toEqual({ lunch: 2, ferry: 1 })
+  })
+
+  it('anomaly の kind ごとの件数を数える', () => {
+    const srow = summarizeTimecardCompareResult(result({
+      anomalies: [
+        { kind: 'negative-kosoku', date: '2026-04-01', field: null, minutes: -1, message: 'x' },
+        { kind: 'negative-kosoku', date: '2026-04-02', field: null, minutes: -1, message: 'x' },
+        { kind: 'ferry-minus', date: '2026-04-03', field: null, minutes: 1, message: 'x' },
+      ],
+    }))
+    expect(srow.anomalyCount).toBe(3)
+    expect(srow.anomalyKinds).toEqual({ 'negative-kosoku': 2, 'ferry-minus': 1 })
+  })
+
+  it('差の幅は mismatch 日の diffMinutes だけで取る (within-tolerance は含めない)', () => {
+    const srow = summarizeTimecardCompareResult(result({
+      days: [
+        day({ status: 'mismatch', diffMinutes: -30 }),
+        day({ status: 'mismatch', diffMinutes: 20 }),
+        day({ status: 'within-tolerance', diffMinutes: 1000 }),
+        // 片側欠けは diffMinutes が null で引き算になっていない
+        day({ status: 'mismatch', diffMinutes: null }),
+      ],
+    }))
+    expect(srow.diffRange).toEqual({ min: -30, max: 20 })
+  })
+
+  it('mismatch が 1 日も無ければ null', () => {
+    const srow = summarizeTimecardCompareResult(result({ days: [day({ status: 'match' })] }))
+    expect(srow.diffRange).toBeNull()
+  })
+})
+
+describe('summarizeTimecardCompareResults / sortTimecardCompareSummaryRows', () => {
+  function result(over: Partial<TimecardCompareResult> = {}): TimecardCompareResult {
+    return {
+      month: '2026-04',
+      driverCd: '1021',
+      name: '',
+      toleranceMinutes: 1,
+      days: [],
+      totals: { nginxMinutes: 0, oursMinutes: 0, diffMinutes: 0, ferryMinusMinutes: 0 },
+      mismatchCount: 0,
+      unknownCount: 0,
+      unknownMinutes: 0,
+      anomalies: [],
+      ...over,
+    }
+  }
+
+  it('入力順のまま畳む', () => {
+    const rows = summarizeTimecardCompareResults([
+      result({ driverCd: '1021' }),
+      result({ driverCd: '1022' }),
+    ])
+    expect(rows.map(r => r.driverCd)).toEqual(['1021', '1022'])
+  })
+
+  it('既定の並びは未説明の残差 (unknownMinutes) が大きい順', () => {
+    const rows: TimecardCompareSummaryRow[] = summarizeTimecardCompareResults([
+      result({ driverCd: '1001', unknownMinutes: 10 }),
+      result({ driverCd: '1002', unknownMinutes: 90 }),
+      result({ driverCd: '1003', unknownMinutes: 40 }),
+    ])
+    expect(sortTimecardCompareSummaryRows(rows).map(r => r.driverCd)).toEqual(['1002', '1003', '1001'])
+  })
+
+  it('同値は乗務員CD昇順で安定させる', () => {
+    const rows = summarizeTimecardCompareResults([
+      result({ driverCd: '1099', unknownMinutes: 0 }),
+      result({ driverCd: '1002', unknownMinutes: 0 }),
+    ])
+    expect(sortTimecardCompareSummaryRows(rows).map(r => r.driverCd)).toEqual(['1002', '1099'])
+  })
+
+  it('元の配列を書き換えない', () => {
+    const rows = summarizeTimecardCompareResults([
+      result({ driverCd: '1001', unknownMinutes: 1 }),
+      result({ driverCd: '1002', unknownMinutes: 99 }),
+    ])
+    const before = rows.map(r => r.driverCd)
+    sortTimecardCompareSummaryRows(rows)
+    expect(rows.map(r => r.driverCd)).toEqual(before)
+  })
+})
+
+describe('fmtTimecardCompareUnknown', () => {
+  it('日数と分を並べる (0 件でも出す)', () => {
+    expect(fmtTimecardCompareUnknown({ unknownCount: 0, unknownMinutes: 0 })).toBe('0日 / 0分')
+    expect(fmtTimecardCompareUnknown({ unknownCount: 3, unknownMinutes: 45 })).toBe('3日 / 45分')
+  })
+})
+
+describe('fmtTimecardCompareDiffRange', () => {
+  it('符号つきの範囲にする', () => {
+    expect(fmtTimecardCompareDiffRange({ min: -30, max: 20 })).toBe('-0:30〜+0:20')
+  })
+
+  it('null は空文字 (mismatch が無い月)', () => {
+    expect(fmtTimecardCompareDiffRange(null)).toBe('')
+  })
+})
+
+describe('fmtTimecardCompareCauseDays', () => {
+  it('件数が多い順に cause:件数 を並べる', () => {
+    expect(fmtTimecardCompareCauseDays({ lunch: 2, ferry: 5, unknown: 1 })).toBe('ferry:5 / lunch:2 / unknown:1')
+  })
+
+  it('同数は cause 名の辞書順', () => {
+    expect(fmtTimecardCompareCauseDays({ lunch: 1, ferry: 1 })).toBe('ferry:1 / lunch:1')
+  })
+
+  it('0 件の cause は載せない', () => {
+    expect(fmtTimecardCompareCauseDays({ lunch: 0, ferry: 2 })).toBe('ferry:2')
+  })
+
+  it('空は空文字', () => {
+    expect(fmtTimecardCompareCauseDays({})).toBe('')
   })
 })

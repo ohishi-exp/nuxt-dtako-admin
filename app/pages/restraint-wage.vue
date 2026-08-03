@@ -58,14 +58,19 @@ import type {
   SalaryItemConfig,
 } from '~/utils/salary-compare'
 import type { EmployeeMasterEntry, EmployeeMasterGetResponse } from '~/utils/employee-master'
-import type { TimecardCompareResponse, TimecardCompareResult } from '~/utils/timecard-compare-view'
+import type { TimecardCompareResponse, TimecardCompareResult, TimecardCompareSummaryRow } from '~/utils/timecard-compare-view'
 import {
   timecardCompareHeadline,
   timecardCompareRowClass,
   timecardCompareStatusLabel,
+  fmtTimecardCompareCauseDays,
   fmtTimecardCompareDiff,
+  fmtTimecardCompareDiffRange,
   fmtTimecardCompareMinutes,
+  fmtTimecardCompareUnknown,
   hasFerryMinus,
+  sortTimecardCompareSummaryRows,
+  summarizeTimecardCompareResults,
   toTimecardCompareRows,
 } from '~/utils/timecard-compare-view'
 
@@ -138,11 +143,12 @@ const TABS = [
   { key: 'employees', label: '社員マスタ' },
   { key: 'schedule', label: '勤務設定' },
   { key: 'timecard', label: 'タイムカード' },
+  { key: 'compare', label: 'タイムカード照合' },
 ] as const
 
 /** 対象月が効くタブ。ここに無いタブでは年月バーを出さない (Refs #409)。
  * 単価マスタは選択月時点の単価を出すので対象に含む。 */
-const MONTH_AWARE_TABS: string[] = ['archive', 'monthly', 'minwage', 'salary', 'master', 'schedule', 'timecard']
+const MONTH_AWARE_TABS: string[] = ['archive', 'monthly', 'minwage', 'salary', 'master', 'schedule', 'timecard', 'compare']
 
 type TabKey = typeof TABS[number]['key']
 const activeTab = ref<TabKey>('monthly')
@@ -840,21 +846,43 @@ const timecardNeedsRefetch = computed(() =>
   && timecardRows.value.every(r => r.summary.days.every(d => !d.sessions?.length)),
 )
 
-// ---- nginx のタイムカード表との突合 (Refs #492 PR-B) ----
+// ---- nginx のタイムカード表との突合 (Refs #492 PR-B、月×全乗務員一覧は #606-8) ----
 //
 // 社内 CakePHP が出している紙のタイムカード表 (拘束列) と、この画面の拘束を暦日ごとに
 // 引き算して並べる。**判定は relay 側が済ませてある** — 両側で判定すると必ずずれるので、
 // ここは表示だけ。突合するのは拘束だけで、残業は定義が別物なので比較しない。
+//
+// 「タイムカード照合」タブの担当。以前は `timecard` タブに 1 vs 1 (乗務員CD で
+// 絞れている時だけ) の突合ブロックが埋まっていたが、月全体で「誰のどこが変か」を
+// 見る手段が無かったため、月 × 全乗務員の一覧 + 1 人へのドリルダウンに置き換えた
+// (Refs #606-8)。旧ブロックはここへ統合し、`timecard` タブからは削除した
+// (同じ突合が 2 か所に出ていると「どちらが正か」の質問が必ず出るため)。
 
-/** 突合できるのは**乗務員CD で 1 人に絞れている時だけ** (1 vs 1 の目視用)。 */
-const compareDriverCd = computed(() =>
-  timecardFilterCds.value.length === 1 ? timecardFilterCds.value[0]! : null)
-
-const compareResult = ref<TimecardCompareResult | null>(null)
-const compareLoading = ref(false)
-const compareError = ref('')
+/**
+ * 月 × 全乗務員ぶんの突合結果 (`driver` を付けずに取った生の応答)。
+ *
+ * `only_anomalies=1` でも 129 名で 54 万文字返る (relay 側コメント参照) ので、
+ * **日別を含むこの生データは DOM に出さない** — 1 乗務員 1 行に畳んだ
+ * `compareSummaryRows` だけを一覧に出し、選択した 1 人ぶんだけ `compareRows` で
+ * 日別テーブルへ展開する。
+ */
+const compareAllResults = ref<TimecardCompareResult[]>([])
+const compareAllLoading = ref(false)
+const compareAllError = ref('')
+const compareAllLoaded = ref(false)
 /** 上流 (kosoku-daily) が落ちていた場合。片側だけの表になるので画面から言う。 */
 const compareOursAvailable = ref(true)
+
+/** 一覧の 1 行。既定は未説明の残差 (`unknownMinutes`) が大きい順 (ユーザー決定 2026-08-03)。 */
+const compareSummaryRows = computed(() =>
+  sortTimecardCompareSummaryRows(summarizeTimecardCompareResults(compareAllResults.value)))
+
+/** ドリルダウン中の乗務員CD。一覧の行を選ぶとセットする。 */
+const compareSelectedDriverCd = ref<string | null>(null)
+
+/** 選択した乗務員の突合結果 (日別込み)。既に取得済みの `compareAllResults` から探すだけ — 再取得しない。 */
+const compareResult = computed(() =>
+  compareAllResults.value.find(r => r.driverCd === compareSelectedDriverCd.value) ?? null)
 
 const compareRows = computed(() =>
   compareResult.value ? toTimecardCompareRows(compareResult.value.days) : [])
@@ -868,36 +896,47 @@ const showCompareFerry = computed(() =>
   compareResult.value ? hasFerryMinus(compareResult.value) : false)
 
 /**
- * 押した時だけ取る。月タブを切り替えるたびに社内 LAN へ 3 往復させたくないのと、
- * 「いま nginx が何を出しているか」を見るのが目的で自動更新に意味が無いため。
+ * 押した時だけ取る。月タブを切り替えるたびに社内 LAN へ往復させたくないのと、
+ * 「いま nginx が何を出しているか」を見るのが目的で自動更新に意味が無いため
+ * (`timecard` タブの旧 1 vs 1 突合と同じ方針)。`driver` を付けずに `only_anomalies=1`
+ * を渡し、月内で差分も異常も無い乗務員は上流側で落とす。
  */
-async function loadTimecardCompare() {
-  const driver = compareDriverCd.value
-  if (!driver || !month.value) return
-  compareLoading.value = true
-  compareError.value = ''
+async function loadTimecardCompareAll() {
+  if (!month.value) return
+  compareAllLoading.value = true
+  compareAllError.value = ''
+  compareSelectedDriverCd.value = null
   try {
     const res = await $fetch<TimecardCompareResponse>('/restraint-api/timecard-compare', {
       headers: authHeaders(),
-      query: { month: month.value, driver },
+      query: { month: month.value, only_anomalies: 1 },
     })
-    compareResult.value = res.results[0] ?? null
+    compareAllResults.value = res.results
     compareOursAvailable.value = res.oursAvailable
+    compareAllLoaded.value = true
   }
   catch (e) {
-    compareResult.value = null
-    compareError.value = restraintErrorMessage(e)
+    compareAllResults.value = []
+    compareAllLoaded.value = false
+    compareAllError.value = restraintErrorMessage(e)
   }
   finally {
-    compareLoading.value = false
+    compareAllLoading.value = false
   }
 }
 
-// 月や対象者が変わったら前の結果を消す — 別の人・別の月の表が残ると誤読する
-watch([month, compareDriverCd], () => {
-  compareResult.value = null
-  compareError.value = ''
+// 月が変わったら前の結果を消す — 別の月の一覧が残ると誤読する
+watch(month, () => {
+  compareAllResults.value = []
+  compareAllLoaded.value = false
+  compareAllError.value = ''
+  compareSelectedDriverCd.value = null
 })
+
+/** 一覧の行を選ぶ (トグル)。もう一度同じ行を選ぶと閉じる。 */
+function selectCompareDriver(row: TimecardCompareSummaryRow) {
+  compareSelectedDriverCd.value = compareSelectedDriverCd.value === row.driverCd ? null : row.driverCd
+}
 
 // ---- 勤怠 (タイムカード) の取り込み (Refs #433) ----
 // ルート自体は #424 PR-A で作ったが**画面から叩く導線が無かった**ため、
@@ -5666,129 +5705,6 @@ watch([compMap, kyuyoSyncedKeys], () => {
               description="この月のサマリは打刻区間を持つ前に取り込まれたものです。勤怠を再取り込みすると表に時刻が入ります。"
             />
 
-            <!-- nginx (社内 CakePHP) のタイムカード表との突合 (Refs #492 PR-B)。
-                 紙の表と 1 vs 1 で見比べるためのものなので、乗務員CD で 1 人に
-                 絞れている時だけ出す。印刷は既存の 3 人横並びを崩さないよう外す -->
-            <div class="mb-3 print:hidden">
-              <div class="flex flex-wrap items-center gap-2">
-                <UButton
-                  size="xs"
-                  variant="soft"
-                  icon="i-lucide-git-compare"
-                  label="nginx と突合"
-                  :loading="compareLoading"
-                  :disabled="!compareDriverCd || compareLoading"
-                  @click="loadTimecardCompare"
-                />
-                <span v-if="!compareDriverCd" class="text-xs text-gray-500">
-                  乗務員CD を 1 人だけ入れると、社内タイムカード表 (nginx) の拘束と日ごとに突き合わせられます
-                </span>
-                <span v-else-if="compareResult" class="text-xs">
-                  <b>{{ compareResult.name || compareDriverCd }}</b> —
-                  {{ timecardCompareHeadline(compareResult) }}
-                  <span class="text-gray-500">
-                    (許容誤差 {{ compareResult.toleranceMinutes }} 分 /
-                    月計 nginx {{ fmtTimecardCompareMinutes(compareResult.totals.nginxMinutes) }} vs
-                    こちら {{ fmtTimecardCompareMinutes(compareResult.totals.oursMinutes) }} =
-                    {{ fmtTimecardCompareDiff(compareResult.totals.diffMinutes) }})
-                  </span>
-                </span>
-                <span v-else class="text-xs text-gray-500">
-                  乗務員CD {{ compareDriverCd }} を社内タイムカード表 (nginx) と突き合わせます
-                </span>
-              </div>
-
-              <UAlert
-                v-if="compareError"
-                color="error"
-                variant="soft"
-                class="mt-2"
-                icon="i-lucide-alert-triangle"
-                title="突合できませんでした"
-                :description="compareError"
-              />
-              <UAlert
-                v-else-if="compareResult && !compareOursAvailable"
-                color="warning"
-                variant="soft"
-                class="mt-2"
-                icon="i-lucide-alert-triangle"
-                title="こちら側の拘束が取れていません"
-                description="上流 (kosoku-daily) が落ちているため、nginx 側だけの表になっています。差分は当てになりません。"
-              />
-
-              <div v-if="compareResult" class="mt-2 overflow-x-auto">
-                <table class="min-w-full text-sm border-collapse">
-                  <thead class="bg-gray-100 dark:bg-gray-800">
-                    <tr>
-                      <th class="px-2 py-1 text-right w-10">日</th>
-                      <th class="px-2 py-1 text-center w-8">曜</th>
-                      <th class="px-2 py-1 text-right border-l border-gray-200 dark:border-gray-700">
-                        nginx 拘束
-                      </th>
-                      <th class="px-2 py-1 text-right">拘束 (こちら)</th>
-                      <th class="px-2 py-1 text-right border-l border-gray-200 dark:border-gray-700">差</th>
-                      <th
-                        v-if="showCompareFerry"
-                        class="px-2 py-1 text-right"
-                        title="nginx がその日にフェリー控除で引いた分。控除前の値がこちらと一致するので、二重に引いています"
-                      >
-                        フェリー控除
-                      </th>
-                      <th class="px-2 py-1 text-left">状態</th>
-                      <th class="px-2 py-1 text-left">nginx 側の異常</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr
-                      v-for="row in compareRows"
-                      :key="row.date"
-                      class="border-t border-gray-200 dark:border-gray-700"
-                      :class="[timecardCompareRowClass(row), row.isSunday ? 'font-medium' : '']"
-                    >
-                      <td class="px-2 py-1 text-right tabular-nums">{{ row.day }}</td>
-                      <td class="px-2 py-1 text-center" :class="row.isSunday ? 'text-red-600 dark:text-red-400' : ''">
-                        {{ row.weekdayLabel }}
-                      </td>
-                      <td class="px-2 py-1 text-right tabular-nums border-l border-gray-200 dark:border-gray-700">
-                        {{ fmtTimecardCompareMinutes(row.nginxMinutes) }}
-                      </td>
-                      <td class="px-2 py-1 text-right tabular-nums">{{ fmtTimecardCompareMinutes(row.oursMinutes) }}</td>
-                      <td class="px-2 py-1 text-right tabular-nums border-l border-gray-200 dark:border-gray-700">
-                        {{ fmtTimecardCompareDiff(row.diffMinutes) }}
-                      </td>
-                      <td v-if="showCompareFerry" class="px-2 py-1 text-right tabular-nums text-red-700 dark:text-red-400">
-                        {{ row.ferryMinusMinutes === null ? '' : `-${row.ferryMinusMinutes}` }}
-                      </td>
-                      <td class="px-2 py-1 text-xs">{{ timecardCompareStatusLabel(row.status) }}</td>
-                      <td class="px-2 py-1 text-xs text-red-700 dark:text-red-400">
-                        {{ row.anomalies.map(a => a.message).join(' / ') }}
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-                <p
-                  v-for="a in compareResult.anomalies.filter(x => x.date === null)"
-                  :key="a.field ?? ''"
-                  class="mt-1 text-xs text-red-700 dark:text-red-400"
-                >
-                  {{ a.message }}
-                </p>
-                <p class="mt-1 text-xs text-gray-500">
-                  突き合わせるのは<b>拘束だけ</b>です。残業は nginx 側が旅費由来 + 手入力の加算補正で、
-                  こちらの所定超とは定義が別物なので比較していません。
-                  「nginx 側の異常」は差分と独立に出ます (両者が一致していても nginx が負なら報告します)。
-                  <template v-if="showCompareFerry">
-                    <br>
-                    <b>フェリー控除は nginx 側の欠陥</b>です — <b>控除前の値がこちらと一致</b>し、控除ぶんだけが差になります
-                    (実測: 1726 / 2026-03 の 3/14 は控除 433 分で控除前 321 分、3/21 は控除 78 分で控除前 755 分。同月の他の日は ±1 分)。
-                    控除額は nginx からもらうしかありません — フェリーはデジタコのイベント名が一定せず (休息だったり休憩だったり)、
-                    <code>dtako_ferry_rows</code> を見ないと見分けられないためです。
-                  </template>
-                </p>
-              </div>
-            </div>
-
             <!-- 月切替で見出しだけ先に新しい月へ変わり、下の表が前の月のまま残る
                  (Refs #456 追加報告 2026-07-27)。月次集計と同じ「更新中」帯 + 薄化で
                  「表示中の表は前の月のもの」と分かるようにし、誤操作も止める -->
@@ -5855,6 +5771,189 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 </div>
               </div>
             </div>
+          </UCard>
+        </template>
+
+        <!-- タイムカード照合 (Refs #606-8)。月 × 全乗務員で「誰のどこが変か」を一覧し、
+             行を選ぶとその乗務員の日別 (旧 timecard タブの 1 vs 1 突合と同じ表) へ
+             ドリルダウンする。1 vs 1 突合は元々ここに埋まっていたが、月全体を見る
+             手段が無かったため専用タブへ切り出した (旧ブロックは timecard タブから
+             削除済み)。 -->
+        <template v-else-if="activeTab === 'compare'">
+          <UCard>
+            <template #header>
+              <div class="flex flex-wrap items-center gap-2 print:hidden">
+                <span class="font-semibold">タイムカード照合 ({{ fmtYm(month) }})</span>
+                <span class="text-xs text-gray-500">
+                  社内タイムカード表 (nginx) の拘束と、こちらの拘束を暦日ごとに突き合わせます。
+                  判定は relay 側で済ませてあり、ここは表示だけです。突き合わせるのは<b>拘束だけ</b> —
+                  残業は定義が別物なので比較しません。
+                </span>
+                <div class="flex-1" />
+                <UButton
+                  size="xs"
+                  icon="i-lucide-git-compare"
+                  :label="compareAllLoaded ? '再照合' : '月 × 全乗務員を照合'"
+                  :loading="compareAllLoading"
+                  :disabled="compareAllLoading"
+                  @click="loadTimecardCompareAll"
+                />
+              </div>
+            </template>
+
+            <UAlert
+              v-if="compareAllError"
+              color="error"
+              variant="soft"
+              class="mb-3"
+              icon="i-lucide-alert-triangle"
+              title="突合できませんでした"
+              :description="compareAllError"
+            />
+            <UAlert
+              v-else-if="compareAllLoaded && !compareOursAvailable"
+              color="warning"
+              variant="soft"
+              class="mb-3"
+              icon="i-lucide-alert-triangle"
+              title="こちら側の拘束が取れていません"
+              description="上流 (kosoku-daily) が落ちているため、nginx 側だけの表になっています。差分は当てになりません。"
+            />
+
+            <p v-if="!compareAllLoaded && !compareAllLoading && !compareAllError" class="text-sm text-gray-500">
+              「月 × 全乗務員を照合」を押すと、この月の全乗務員を社内タイムカード表 (nginx) と
+              突き合わせます (差分・異常のどちらも無い乗務員は一覧から落とします)。社内 LAN へ
+              往復するので、月タブを切り替えるだけでは自動更新しません。
+            </p>
+            <div v-else-if="compareAllLoading" class="flex items-center gap-2 text-sm text-gray-500">
+              <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin text-primary" />
+              照合しています…
+            </div>
+            <template v-else-if="compareAllLoaded">
+              <p v-if="compareSummaryRows.length === 0" class="text-sm text-gray-500">
+                差分・異常のある乗務員はいません。
+              </p>
+              <div v-else class="overflow-x-auto">
+                <table class="min-w-full text-sm border-collapse">
+                  <thead class="bg-gray-100 dark:bg-gray-800">
+                    <tr>
+                      <th class="px-2 py-1 text-left">乗務員CD</th>
+                      <th class="px-2 py-1 text-left">氏名</th>
+                      <th class="px-2 py-1 text-right" title="拘束の差が許容誤差を超えた暦日の数">差あり日数</th>
+                      <th class="px-2 py-1 text-right" title="nginx 側の値そのものの異常 (負の拘束など)">異常件数</th>
+                      <th class="px-2 py-1 text-right" title="差の原因を検知できなかった日数と、その残差の合計。検知の抜けを測る数字">未説明 (日数/分)</th>
+                      <th class="px-2 py-1 text-right" title="差あり日の diffMinutes の最小〜最大">差の幅</th>
+                      <th class="px-2 py-1 text-left" title="差を説明できた原因ごとの日数 (relay の生の分類名)">推定原因の内訳</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template v-for="srow in compareSummaryRows" :key="srow.driverCd">
+                      <tr
+                        class="cursor-pointer border-t border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800/60"
+                        :class="compareSelectedDriverCd === srow.driverCd ? 'bg-primary-50 dark:bg-primary-950/40' : ''"
+                        @click="selectCompareDriver(srow)"
+                      >
+                        <td class="px-2 py-1 tabular-nums">{{ srow.driverCd }}</td>
+                        <td class="px-2 py-1">{{ srow.name || '(nginx に居ません)' }}</td>
+                        <td class="px-2 py-1 text-right tabular-nums">{{ srow.mismatchCount }}</td>
+                        <td class="px-2 py-1 text-right tabular-nums">{{ srow.anomalyCount }}</td>
+                        <td class="px-2 py-1 text-right tabular-nums">{{ fmtTimecardCompareUnknown(srow) }}</td>
+                        <td class="px-2 py-1 text-right tabular-nums">{{ fmtTimecardCompareDiffRange(srow.diffRange) }}</td>
+                        <td class="px-2 py-1 text-xs">{{ fmtTimecardCompareCauseDays(srow.causeDays) }}</td>
+                      </tr>
+                      <tr v-if="compareSelectedDriverCd === srow.driverCd">
+                        <td colspan="7" class="border-t-0 bg-gray-50 px-2 py-3 dark:bg-gray-900/40">
+                          <!-- 日別ドリルダウン。選択した 1 人ぶんだけを DOM に出す
+                               (全員ぶんの日別は取得済みだが持っているだけで描かない、Refs #606-8) -->
+                          <div v-if="compareResult">
+                            <div class="text-xs">
+                              <b>{{ compareResult.name || compareResult.driverCd }}</b> —
+                              {{ timecardCompareHeadline(compareResult) }}
+                              <span class="text-gray-500">
+                                (許容誤差 {{ compareResult.toleranceMinutes }} 分 /
+                                月計 nginx {{ fmtTimecardCompareMinutes(compareResult.totals.nginxMinutes) }} vs
+                                こちら {{ fmtTimecardCompareMinutes(compareResult.totals.oursMinutes) }} =
+                                {{ fmtTimecardCompareDiff(compareResult.totals.diffMinutes) }})
+                              </span>
+                            </div>
+                            <div class="mt-2 overflow-x-auto">
+                              <table class="min-w-full text-sm border-collapse">
+                                <thead class="bg-gray-100 dark:bg-gray-800">
+                                  <tr>
+                                    <th class="px-2 py-1 text-right w-10">日</th>
+                                    <th class="px-2 py-1 text-center w-8">曜</th>
+                                    <th class="px-2 py-1 text-right border-l border-gray-200 dark:border-gray-700">
+                                      nginx 拘束
+                                    </th>
+                                    <th class="px-2 py-1 text-right">拘束 (こちら)</th>
+                                    <th class="px-2 py-1 text-right border-l border-gray-200 dark:border-gray-700">差</th>
+                                    <th
+                                      v-if="showCompareFerry"
+                                      class="px-2 py-1 text-right"
+                                      title="nginx がその日にフェリー控除で引いた分。控除前の値がこちらと一致するので、二重に引いています"
+                                    >
+                                      フェリー控除
+                                    </th>
+                                    <th class="px-2 py-1 text-left">状態</th>
+                                    <th class="px-2 py-1 text-left">nginx 側の異常</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  <tr
+                                    v-for="drow in compareRows"
+                                    :key="drow.date"
+                                    class="border-t border-gray-200 dark:border-gray-700"
+                                    :class="[timecardCompareRowClass(drow), drow.isSunday ? 'font-medium' : '']"
+                                  >
+                                    <td class="px-2 py-1 text-right tabular-nums">{{ drow.day }}</td>
+                                    <td class="px-2 py-1 text-center" :class="drow.isSunday ? 'text-red-600 dark:text-red-400' : ''">
+                                      {{ drow.weekdayLabel }}
+                                    </td>
+                                    <td class="px-2 py-1 text-right tabular-nums border-l border-gray-200 dark:border-gray-700">
+                                      {{ fmtTimecardCompareMinutes(drow.nginxMinutes) }}
+                                    </td>
+                                    <td class="px-2 py-1 text-right tabular-nums">{{ fmtTimecardCompareMinutes(drow.oursMinutes) }}</td>
+                                    <td class="px-2 py-1 text-right tabular-nums border-l border-gray-200 dark:border-gray-700">
+                                      {{ fmtTimecardCompareDiff(drow.diffMinutes) }}
+                                    </td>
+                                    <td v-if="showCompareFerry" class="px-2 py-1 text-right tabular-nums text-red-700 dark:text-red-400">
+                                      {{ drow.ferryMinusMinutes === null ? '' : `-${drow.ferryMinusMinutes}` }}
+                                    </td>
+                                    <td class="px-2 py-1 text-xs">{{ timecardCompareStatusLabel(drow.status) }}</td>
+                                    <td class="px-2 py-1 text-xs text-red-700 dark:text-red-400">
+                                      {{ drow.anomalies.map(a => a.message).join(' / ') }}
+                                    </td>
+                                  </tr>
+                                </tbody>
+                              </table>
+                              <p
+                                v-for="a in compareResult.anomalies.filter(x => x.date === null)"
+                                :key="a.field ?? ''"
+                                class="mt-1 text-xs text-red-700 dark:text-red-400"
+                              >
+                                {{ a.message }}
+                              </p>
+                              <p class="mt-1 text-xs text-gray-500">
+                                突き合わせるのは<b>拘束だけ</b>です。残業は nginx 側が旅費由来 + 手入力の加算補正で、
+                                こちらの所定超とは定義が別物なので比較していません。
+                                「nginx 側の異常」は差分と独立に出ます (両者が一致していても nginx が負なら報告します)。
+                                <template v-if="showCompareFerry">
+                                  <br>
+                                  <b>フェリー控除は nginx 側の欠陥</b>です — <b>控除前の値がこちらと一致</b>し、控除ぶんだけが差になります
+                                  (実測: 1726 / 2026-03 の 3/14 は控除 433 分で控除前 321 分、3/21 は控除 78 分で控除前 755 分。同月の他の日は ±1 分)。
+                                  控除額は nginx からもらうしかありません — フェリーはデジタコのイベント名が一定せず (休息だったり休憩だったり)、
+                                  <code>dtako_ferry_rows</code> を見ないと見分けられないためです。
+                                </template>
+                              </p>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </template>
           </UCard>
         </template>
       </div>
