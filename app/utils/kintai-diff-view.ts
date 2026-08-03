@@ -99,11 +99,49 @@ export function fmtKintaiDiffCount(c: KintaiDiffCategoryCount): string {
 // observations (GCP recalc dry-run の副産物。判定材料であって原因ではない)
 // ─────────────────────────────────────────────────────────────────────────
 
+/**
+ * [`KintaiDiffObservationsView.unkoDiffGcpOnlyInMonth`] の内訳 (Refs #615-7)。
+ * worker (`kintai-diff.ts` の `KintaiDiffGcpOnlyDriverSplit`) をそのまま camelCase に
+ * 読み替えるだけ。**3つの ops (`alsoInMonthOps`/`neverOnpremOps`/`otherMonthOnlyOps`) の和が
+ * `unkoDiffGcpOnlyInMonth` と一致する** — 表示側はこの整合を崩さないこと。
+ * 欠けたフィールドは 0 に倒す (undefined 安全)。
+ */
+export interface KintaiDiffGcpOnlyDriverSplitView {
+  /** 対象乗務員がオンプレに一度も居ない (打刻システムが無い営業所 + 乗務員CD=0)。
+   * **構造的なもので差ではない** — 画面で「差」「欠け」「異常」と呼ばないこと。 */
+  neverOnpremDrivers: number
+  neverOnpremOps: number
+  /** 対象乗務員は当月オンプレにも居る。**取り込み漏れの候補** — ここが主役。 */
+  alsoInMonthDrivers: number
+  alsoInMonthOps: number
+  /** 対象乗務員は別月にはオンプレに居る。 */
+  otherMonthOnlyDrivers: number
+  otherMonthOnlyOps: number
+}
+
+function toNumberOr0(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : 0
+}
+
+function parseKintaiDiffGcpOnlyDriverSplit(raw: unknown): KintaiDiffGcpOnlyDriverSplitView {
+  const r = (raw ?? {}) as Record<string, unknown>
+  return {
+    neverOnpremDrivers: toNumberOr0(r.never_onprem_drivers),
+    neverOnpremOps: toNumberOr0(r.never_onprem_ops),
+    alsoInMonthDrivers: toNumberOr0(r.also_in_month_drivers),
+    alsoInMonthOps: toNumberOr0(r.also_in_month_ops),
+    otherMonthOnlyDrivers: toNumberOr0(r.other_month_only_drivers),
+    otherMonthOnlyOps: toNumberOr0(r.other_month_only_ops),
+  }
+}
+
 export interface KintaiDiffObservationsView {
   staleDrivers: number | null
   foldWouldWriteDrivers: number | null
   warnings: string[]
   unkoDiffGcpOnlyInMonth: number | null
+  /** [`KintaiDiffGcpOnlyDriverSplitView`] の docs 参照。上流に無ければ全フィールド 0。 */
+  unkoDiffGcpOnlyDriverSplit: KintaiDiffGcpOnlyDriverSplitView
 }
 
 export function parseKintaiDiffObservations(raw: unknown): KintaiDiffObservationsView | null {
@@ -120,6 +158,7 @@ export function parseKintaiDiffObservations(raw: unknown): KintaiDiffObservation
       typeof r.unko_diff_gcp_only_in_month === 'number' && Number.isFinite(r.unko_diff_gcp_only_in_month)
         ? r.unko_diff_gcp_only_in_month
         : null,
+    unkoDiffGcpOnlyDriverSplit: parseKintaiDiffGcpOnlyDriverSplit(r.unko_diff_gcp_only_driver_split),
   }
 }
 
@@ -166,7 +205,13 @@ export function buildKintaiDiffPrescriptions(
 ): KintaiDiffPrescription[] {
   const staleOrFold = (observations?.staleDrivers ?? 0) > 0 || (observations?.foldWouldWriteDrivers ?? 0) > 0
   const onpremOnly = (summary?.onlyOnpremOther.total ?? 0) > 0
-  const gcpOnlyOrUnko = (summary?.onlyGcp.total ?? 0) > 0 || (observations?.unkoDiffGcpOnlyInMonth ?? 0) > 0
+  // ★ never_onprem (打刻システムが無い営業所 + 乗務員CD=0) だけでは点灯させない (Refs #615-7) —
+  // オンプレに居ない乗務員の運行を取り込む導線ではないため、押しても直らない。
+  // also_in_month (取り込み漏れの候補) と other_month_only を基準にする。
+  const gcpOnlyOrUnko =
+    (summary?.onlyGcp.total ?? 0) > 0 ||
+    (observations?.unkoDiffGcpOnlyDriverSplit.alsoInMonthOps ?? 0) > 0 ||
+    (observations?.unkoDiffGcpOnlyDriverSplit.otherMonthOnlyOps ?? 0) > 0
 
   return [
     {
@@ -183,7 +228,7 @@ export function buildKintaiDiffPrescriptions(
     },
     {
       key: 'mysql',
-      observation: 'GCP にしか無い運行/行がある (dtako 入力欠けの可能性)',
+      observation: '当月または別月にオンプレにも居る乗務員の運行が GCP にしか無い (dtako 入力欠けの可能性)',
       action: 'MySQL 側 (dtako) を取り直す — ★押しても直る保証はありません',
       relevant: gcpOnlyOrUnko,
     },

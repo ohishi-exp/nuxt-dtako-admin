@@ -234,6 +234,29 @@ export function buildKintaiDiff(gcpBody: unknown, onpremBody: unknown, requested
  * を踏襲し、ここでも新しいフィールドが増えたら拾えるだけ拾う・欠けていれば `null`/`[]`
  * に倒す防御的な読み方に統一する (型を固定しすぎて上流の応答変化で丸ごと壊れないため)。
  */
+/**
+ * [`KintaiDiffObservations.unko_diff_gcp_only_in_month`] の内訳 (Refs #615-7)。
+ * 対象月に GCP にしか無い運行を、乗務員側の事情で 3 つに割る:
+ *
+ * - `never_onprem_*`: 対象乗務員がオンプレに一度も居ない。**打刻システムが無い営業所**の
+ *   乗務員、または**乗務員CD=0** (構内移動・回送等) — 構造的に説明が付くので差ではない
+ * - `also_in_month_*`: 対象乗務員は当月オンプレにも居る。**取り込み漏れの候補**
+ * - `other_month_only_*`: 対象乗務員は別月にはオンプレに居る
+ *
+ * `never_onprem_ops + also_in_month_ops + other_month_only_ops` は
+ * `unko_diff_gcp_only_in_month` (対象月の合計) と一致する。上流 (`run_kintai_recalc`) が
+ * 既に計算しているものをそのまま読むだけで、ここでは何も計算しない。
+ * 欠けたフィールドは 0 に倒す (undefined 安全 — 合計との整合を壊さないため `null` にしない)。
+ */
+export interface KintaiDiffGcpOnlyDriverSplit {
+  never_onprem_drivers: number;
+  never_onprem_ops: number;
+  also_in_month_drivers: number;
+  also_in_month_ops: number;
+  other_month_only_drivers: number;
+  other_month_only_ops: number;
+}
+
 export interface KintaiDiffObservations {
   /** 現行 `logic_version` を 1 つも持たない乗務員数 (= stale)。読めなければ `null`。 */
   stale_drivers: number | null;
@@ -244,12 +267,26 @@ export interface KintaiDiffObservations {
   warnings: string[];
   /** 対象月に GCP にしか無い運行の件数。読めなければ `null`。 */
   unko_diff_gcp_only_in_month: number | null;
+  /** [`KintaiDiffGcpOnlyDriverSplit`] の docs 参照。上流に無ければ全フィールド 0。 */
+  unko_diff_gcp_only_driver_split: KintaiDiffGcpOnlyDriverSplit;
   /** ページングの続きがあるか (`null` なら回りきった/情報なし)。 */
   next_after_driver_cd: number | null;
 }
 
 function toNumberOrNull(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+function pickGcpOnlyDriverSplit(raw: unknown): KintaiDiffGcpOnlyDriverSplit {
+  const obj = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+  return {
+    never_onprem_drivers: toNumberOr0(obj.never_onprem_drivers),
+    never_onprem_ops: toNumberOr0(obj.never_onprem_ops),
+    also_in_month_drivers: toNumberOr0(obj.also_in_month_drivers),
+    also_in_month_ops: toNumberOr0(obj.also_in_month_ops),
+    other_month_only_drivers: toNumberOr0(obj.other_month_only_drivers),
+    other_month_only_ops: toNumberOr0(obj.other_month_only_ops),
+  };
 }
 
 /** [`KintaiDiffObservations`] の docs 参照。 */
@@ -263,6 +300,7 @@ export function pickRecalcObservations(raw: unknown): KintaiDiffObservations {
     fold_would_write_drivers: toNumberOrNull(fold.drivers_written ?? obj.drivers_written),
     warnings: warningsRaw.filter((w): w is string => typeof w === "string"),
     unko_diff_gcp_only_in_month: toNumberOrNull(obj.unko_diff_gcp_only_in_month),
+    unko_diff_gcp_only_driver_split: pickGcpOnlyDriverSplit(obj.unko_diff_gcp_only_driver_split),
     next_after_driver_cd: toNumberOrNull(obj.next_after_driver_cd),
   };
 }
