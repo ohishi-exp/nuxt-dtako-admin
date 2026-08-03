@@ -112,6 +112,8 @@ import {
   kintaiUnkoGapsReadability,
   parseKintaiUnkoGaps,
 } from '~/utils/kintai-unko-gaps'
+import type { DayEventsLookup } from '~/utils/kintai-day-events-lookup'
+import { parseDayEventsLookup } from '~/utils/kintai-day-events-lookup'
 
 const {
   session: theearthSession,
@@ -1403,10 +1405,55 @@ async function applyMysqlRefresh() {
   }
 }
 
-// 対象 (unko_no) を変えたら古い preview を消す (別対象の保証を見せ続けない)
+// ---- ②の後、取り込み漏れ候補 (22桁) から実物の23桁を引く (Refs #625) ----
+// ★ CSV を解凍して読む必要はない — ②(上のボタン)で取り込んだ直後は、その運行は
+// オンプレに存在するので、乗務員CD+日付 (day-events) で引ける。②を再実行しない
+// 読むだけの口なので、何回でも安全に呼べる — ②直後に反映されるかは未確認
+// (親の0段目コメント参照) なので、ここでは自動リトライをしない。「①②実行」→
+// 「引く」→ 見つからなければ時間をおいてもう一度「引く」を人が判断して押す。
+
+const dayEventsLookup = ref<DayEventsLookup | null>(null)
+const dayEventsLookupLoading = ref(false)
+const dayEventsLookupError = ref('')
+
+const mysqlRefreshUnkoNoIs22Digit = computed(() => /^\d{22}$/.test(mysqlRefreshUnkoNo.value.trim()))
+
+async function lookupDayEventsForMysqlRefreshCandidate() {
+  const opeNo = mysqlRefreshUnkoNo.value.trim()
+  const driverCd = mysqlRefreshDriverCd.value.trim()
+  if (!/^\d{22}$/.test(opeNo) || !driverCd) return
+  dayEventsLookupLoading.value = true
+  dayEventsLookupError.value = ''
+  dayEventsLookup.value = null
+  try {
+    const res = await $fetch<unknown>('/restraint-api/kintai/day-events-lookup', {
+      headers: authHeaders(),
+      query: { driver_cd: driverCd, ope_no: opeNo },
+    })
+    dayEventsLookup.value = parseDayEventsLookup(res)
+  }
+  catch (e) {
+    dayEventsLookupError.value = restraintErrorMessage(e)
+  }
+  finally {
+    dayEventsLookupLoading.value = false
+  }
+}
+
+/** 引いた23桁 (found、または ambiguous の中から人が選んだ1件) を運行NO欄へ渡す。
+ * **自動では選ばない** — この関数は人がクリックしたときだけ呼ばれる。 */
+function useDayEventsLookupUnkoNo(unkoNo: string | null) {
+  if (!unkoNo) return
+  mysqlRefreshUnkoNo.value = unkoNo
+}
+
+// 対象 (unko_no) を変えたら古い preview / lookup 結果を消す (別対象の保証・
+// 別対象の23桁候補を見せ続けない)
 watch(mysqlRefreshUnkoNo, () => {
   mysqlRefreshPreview.value = null
   mysqlRefreshApplyResult.value = ''
+  dayEventsLookup.value = null
+  dayEventsLookupError.value = ''
 })
 watch(month, () => {
   mysqlRefreshPreview.value = null
@@ -1468,11 +1515,15 @@ watch(month, () => {
  * 22桁のまま実行できる** (`unko_no` は取り込み対象を決める鍵ではなく歯止め・監査
  * ラベル、対象を決めているのは zip の中身)。**23桁が本当に要るのは
  * ③ (勤務時間再登録、`resetby-unko-no/{unko_no}`) だけ** — 対象CDで2マンの
- * 何人目かを表すため、無いと別の乗務員の行を指す。この候補ではまだオンプレに
- * 無く対象CDを決められないので、③ (「勤務時間再登録まで行う」チェック) は使えない。
+ * 何人目かを表すため、無いと別の乗務員の行を指す。
  *
  * relay側のガード (`isUnkoNoAcceptable`) は reset_timecard の有無で必要桁数を
  * 分けている (#625/#627、マージ済み) — 22桁のまま渡しても①②はそのまま実行できる。
+ *
+ * ★ ②実行後は、`lookupDayEventsForMysqlRefreshCandidate` (Refs #625) で実物の
+ * 23桁を引ける — ②でオンプレに生まれた運行を day-events (乗務員CD+日付) から
+ * 引くだけで、CSVを解凍して読む必要はない。見つかった23桁を運行NO欄に入れ直せば
+ * 「勤務時間再登録まで行う」を使える。
  */
 function applyUnkoGapCandidateToMysqlForm(driverCd: number, unkoNo: string) {
   mysqlRefreshUnkoNo.value = unkoNo
@@ -6858,11 +6909,62 @@ watch([compMap, kyuyoSyncedKeys], () => {
               <UInput v-model="mysqlRefreshDriverCd" size="xs" placeholder="乗務員CD (任意、保証判定用)" class="w-44" />
               <UCheckbox v-model="mysqlRefreshResetTimecard" label="勤務時間再登録まで行う (③、破壊的)" />
             </div>
-            <p v-if="/^\d{22}$/.test(mysqlRefreshUnkoNo.trim())" class="text-xs text-amber-700 dark:text-amber-400 mb-2">
-              22桁 (GCP側) です。取り込み (①②) はこのまま実行できます。
-              ③ (勤務時間再登録) はオンプレの23桁 (対象CD込み) が必要なため、この候補では行えません
-              (「勤務時間再登録まで行う」のチェックは外してください)。
-            </p>
+            <div v-if="mysqlRefreshUnkoNoIs22Digit" class="text-xs mb-2">
+              <p class="text-amber-700 dark:text-amber-400">
+                22桁 (GCP側) です。取り込み (①②) はこのまま実行できます。
+                ③ (勤務時間再登録) にはオンプレの23桁 (対象CD込み) が必要です —
+                <b>①②を実行した後</b>、下のボタンでオンプレから実物の23桁を引けます
+                (②の反映タイミングは未確認のため自動では引きません。時間をおいて何度でも押し直せます)。
+              </p>
+              <div class="flex flex-wrap items-center gap-2 mt-1">
+                <UButton
+                  size="xs"
+                  variant="soft"
+                  label="day-events で23桁を引く"
+                  :loading="dayEventsLookupLoading"
+                  :disabled="dayEventsLookupLoading || !mysqlRefreshDriverCd.trim()"
+                  @click="lookupDayEventsForMysqlRefreshCandidate"
+                />
+                <span v-if="!mysqlRefreshDriverCd.trim()" class="text-gray-400">乗務員CD欄が必要です</span>
+              </div>
+              <UAlert
+                v-if="dayEventsLookupError"
+                color="error"
+                variant="soft"
+                class="mt-1"
+                icon="i-lucide-alert-triangle"
+                title="引けませんでした"
+                :description="dayEventsLookupError"
+              />
+              <template v-if="dayEventsLookup">
+                <p v-if="dayEventsLookup.status === 'not_found'" class="text-gray-500 mt-1">
+                  {{ dayEventsLookup.date }} の乗務員CD {{ dayEventsLookup.driverCd }} に、この候補 (prefix {{ dayEventsLookup.opeNo }}) の運行がまだ見えません。
+                  ①②を実行済みなら、時間をおいてもう一度お試しください (読むだけなので何度でも安全です)。
+                </p>
+                <p v-else-if="dayEventsLookup.status === 'found' && dayEventsLookup.unkoNo" class="text-green-700 dark:text-green-400 mt-1">
+                  見つかりました: <code class="select-all">{{ dayEventsLookup.unkoNo }}</code>
+                  <UButton
+                    size="xs"
+                    variant="soft"
+                    label="この値を運行NO欄に入れる"
+                    class="ml-2"
+                    @click="useDayEventsLookupUnkoNo(dayEventsLookup.unkoNo)"
+                  />
+                </p>
+                <template v-else-if="dayEventsLookup.status === 'ambiguous'">
+                  <p class="text-amber-700 dark:text-amber-400 mt-1">
+                    複数の運行が該当しました (2マン運行等)。<b>乗務員を取り違えると別の人のデータを消します</b> —
+                    正しい行を確認してから選んでください。黙って1件目は選びません。
+                  </p>
+                  <ul class="mt-1 space-y-1">
+                    <li v-for="c in dayEventsLookup.candidates" :key="c" class="flex items-center gap-2">
+                      <code class="select-all">{{ c }}</code>
+                      <UButton size="xs" variant="soft" label="この値を使う" @click="useDayEventsLookupUnkoNo(c)" />
+                    </li>
+                  </ul>
+                </template>
+              </template>
+            </div>
             <UAlert
               v-if="mysqlRefreshError"
               color="error"

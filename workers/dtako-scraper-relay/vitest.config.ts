@@ -46,6 +46,7 @@ export default defineConfig({
         'src/operation-zip.ts',
         'src/dtako-reimport.ts',
         'src/kintai-diff.ts',
+        'src/dtako-day-events-lookup.ts',
       ],
       thresholds: {
         lines: 100,
