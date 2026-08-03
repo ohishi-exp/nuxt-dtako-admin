@@ -1,16 +1,27 @@
 /**
- * /restraint-api の R2-only ルートを auth-worker introspect (viewer 経路) で
- * 認可するための pure ロジック (Refs #272)。
+ * /restraint-api の**theearth セッション不要**なルートを auth-worker introspect
+ * (viewer 経路) で認可するための pure ロジック (Refs #272)。
  *
  * theearth セッション必須のままにするのは theearth を実際に触るルート
- * (login / logout / report / csv) だけ。それ以外の /restraint-api/* は R2 しか
- * 読み書きしない (賃金マスタ・アーカイブ閲覧・wage-report 等) ため、
+ * (login / logout / report / csv) だけ。それ以外の /restraint-api/* は
  * auth-worker JWT (introspect active) + tenant→comp 逆引きで許可する。
  *
  * comp スコープの根拠は DTAKO_ACCOUNTS (comp_id→tenant_id) の逆引き —
  * ルーティングヘッダ `X-Theearth-Comp-Id` をそのまま信用しない (ヘッダ偽装で
- * 他社 R2 を読めない)。DTAKO_ACCOUNTS 未設定の環境では viewer 経路は常に
+ * 他社のデータを読めない)。DTAKO_ACCOUNTS 未設定の環境では viewer 経路は常に
  * 不許可 (fail-closed、theearth セッション経路は従来どおり)。
+ *
+ * **`isR2OnlyRestraintPath` という名前は現在 R2-only ではない対象も含む
+ * (Refs #615-4、親指摘 2026-08-03)。** #272 時点では対象が「賃金マスタ・
+ * アーカイブ閲覧・wage-report 等、R2 しか読み書きしないルート」だけだったため
+ * この名前になったが、#615-4 で足した `/restraint-api/kintai/{diff,refresh/*}`
+ * は ichiban (オンプレ) / GCP (Supabase) を叩き、`refresh/*` は書き込みもする。
+ * それでも同じ判定関数に乗せて安全なのは、ハンドラ側 (`dispatchRestraintApi` の
+ * `authorizeRestraintViewer`) が theearth cookie を持たない合成 record を渡し、
+ * 各ハンドラは `record.compId` (tenant スコープ済み) しか読まない設計だから —
+ * 判定の実体は「theearth セッションが要らないルートか」であって「R2 しか
+ * 触らないか」ではない。改名は影響範囲が広い (呼び出し元・test 名) ため
+ * 見送り、意味のずれをここに明記するだけにとどめる。
  */
 import type { DtakoAccountEntry } from "./cron";
 
@@ -22,7 +33,9 @@ const THEEARTH_ONLY_PATHS = new Set([
   "/restraint-api/csv",
 ]);
 
-/** R2 だけを読み書きする /restraint-api ルートか (viewer 経路の対象か)。 */
+/** theearth セッションが要らない (viewer 経路の対象になる) /restraint-api
+ * ルートか。**名前は R2-only だが、実際の判定は「theearth セッション不要か」**
+ * — module docs の「`isR2OnlyRestraintPath` という名前は…」を参照。 */
 export function isR2OnlyRestraintPath(pathname: string): boolean {
   if (!pathname.startsWith("/restraint-api/")) return false;
   return !THEEARTH_ONLY_PATHS.has(pathname);

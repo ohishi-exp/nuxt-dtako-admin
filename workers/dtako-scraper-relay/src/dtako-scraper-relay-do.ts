@@ -103,7 +103,12 @@ import {
   devViewerCompIds,
   isR2OnlyRestraintPath,
 } from "./restraint-viewer-auth";
-import { buildKintaiDiff, pickRecalcObservations, pickRestDiffGuarantee } from "./kintai-diff";
+import {
+  buildKintaiDiff,
+  deriveOpeNoFromUnkoNo,
+  pickRecalcObservations,
+  pickRestDiffGuarantee,
+} from "./kintai-diff";
 import { needsTheearthQueue } from "./restraint-queue";
 import { UpstreamMemo } from "./upstream-memo";
 import { measurePhase, PhaseTimer, phaseTimingLogLine } from "./phase-timing";
@@ -4027,15 +4032,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   /**
    * POST /restraint-api/kintai/refresh/mysql — body
-   * `{ope_no, start_ope, unko_no, reset_timecard?, driver_cd?, month?, apply?}`。
-   * 運行**1件**の csvdata.zip を取り直し、オンプレ MariaDB の `dtako_events`
+   * `{unko_no, reset_timecard?, driver_cd?, month?, apply?}`。運行**1件**の
+   * csvdata.zip を取り直し、オンプレ MariaDB の `dtako_events`
    * (+`reset_timecard: true` なら `time_card_dtako`) へ push する (Refs #615-4)。
    *
    * 実体は `runDtakoReimportJob` (`/cron/dtako/reimport` = `run_dtako_reimport`
-   * MCP tool と同じ内部処理) をそのまま呼ぶだけ — **`ope_no`/`start_ope` の入力は
-   * 既存 tool と同じ形を要求する**。rest-diff (`kind`) には `unko_no`/`run_date` しか
-   * 無く、この2値を機械的に導出する経路が3repoに存在しないため (#615-4 [開始] 報告で
-   * 親に共有済み)。
+   * MCP tool と同じ内部処理) をそのまま呼ぶだけ。**必須引数は `unko_no` だけ** —
+   * `ope_no_22`/`start_ope` は `unko_no` (23桁) から `deriveOpeNoFromUnkoNo`
+   * (`kintai-diff.ts`) で機械的に導出する (親指摘 2026-08-03: 運行NOは桁に
+   * 開始日時を持っているため、rest-diff が返す `unko_no` をそのまま渡せば足りる)。
    *
    * **既定は dry-run — `apply: true` が無ければ MariaDB には一切触れない**
    * (zip 取得も push もしない)。`driver_cd`/`month` が両方揃っていれば、
@@ -4048,8 +4053,6 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    */
   private async handleKintaiRefreshMysql(record: TheearthSessionRecord, request: Request): Promise<Response> {
     let body: {
-      ope_no?: unknown;
-      start_ope?: unknown;
       unko_no?: unknown;
       reset_timecard?: unknown;
       driver_cd?: unknown;
@@ -4061,15 +4064,20 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch {
       return dvrJsonError(400, "body must be JSON");
     }
-    const opeNo = typeof body.ope_no === "string" ? body.ope_no : "";
-    const startOpe = typeof body.start_ope === "string" ? body.start_ope : "";
     const unkoNo = typeof body.unko_no === "string" ? body.unko_no : "";
-    if (!opeNo || !startOpe || !unkoNo) {
-      return dvrJsonError(400, "ope_no / start_ope / unko_no は必須です");
+    if (!unkoNo) {
+      return dvrJsonError(400, "unko_no は必須です");
     }
     if (!UNKO_NO_RE.test(unkoNo)) {
       return dvrJsonError(400, `unko_no は23桁の数値で指定してください: "${unkoNo}"`);
     }
+    // 運行NOは桁に開始日時を持っている (23桁 = 開始日時12桁+車輌CD10桁+対象CD1桁) —
+    // ope_no_22/start_ope を呼び出し元に要求せず、ここで機械的に導出する
+    const derived = deriveOpeNoFromUnkoNo(unkoNo);
+    if (!derived) {
+      return dvrJsonError(400, `unko_no から ope_no/start_ope を導出できませんでした: "${unkoNo}"`);
+    }
+    const { opeNo22: opeNo, startOpe } = derived;
     const resetTimecard = body.reset_timecard === true;
     const apply = body.apply === true;
     const driverCd =

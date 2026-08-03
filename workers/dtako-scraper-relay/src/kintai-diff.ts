@@ -305,3 +305,53 @@ export function pickRestDiffGuarantee(raw: unknown, unkoNo: string): RestDiffGua
   }
   return { found: false, kind: null, guaranteed: false };
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// unko_no → ope_no_22 / start_ope の導出 (Refs #615-4、親の指摘 2026-08-03)
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * 運行NO (`unko_no`) から theearth 側の識別子 (`ope_no_22`/`start_ope`) を導く
+ * (Refs #615-4)。**運行NO は桁に情報を持っている**: 23桁 = 開始日時12桁 +
+ * 車輌CD10桁 + 対象CD1桁。前半12桁を読めば始業日時が復元できる。
+ *
+ * - オンプレの `unko_no` は**23桁**、GCP (alc 由来) は既に**22桁** (kintai-ops skill
+ *   §4.6)。**末尾1桁を落とすのはオンプレ形のときだけ** — 22桁と23桁を混ぜる
+ *   (23桁のまま末尾を落とし忘れる/22桁からさらに落とす) と存在しない運行を指す。
+ * - `start_ope` の形式は `"YYYY/MM/DD H:mm:ss"`。**時は0埋めなし** (`START_OPE_RE`
+ *   がそう定義している) — 分・秒は2桁のまま。
+ *
+ * 23桁/22桁のどちらでもない (桁数違反) 入力は `null` を返す (呼び出し側が400にする)。
+ * 前半12桁が実在するカレンダー値かまでは検証しない — 運行NOの構造から機械的に
+ * 切り出すだけで、意味的な妥当性は theearth 側 (押した結果) が判定する。
+ */
+export interface DerivedOpeNo {
+  opeNo22: string;
+  startOpe: string;
+}
+
+const UNKO_NO_23_RE = /^\d{23}$/;
+const UNKO_NO_22_RE = /^\d{22}$/;
+
+export function deriveOpeNoFromUnkoNo(unkoNo: string): DerivedOpeNo | null {
+  let opeNo22: string;
+  if (UNKO_NO_23_RE.test(unkoNo)) {
+    opeNo22 = unkoNo.slice(0, 22);
+  } else if (UNKO_NO_22_RE.test(unkoNo)) {
+    opeNo22 = unkoNo;
+  } else {
+    return null;
+  }
+
+  const prefix = opeNo22.slice(0, 12);
+  const yy = Number(prefix.slice(0, 2));
+  const mm = prefix.slice(2, 4);
+  const dd = prefix.slice(4, 6);
+  const hh = Number(prefix.slice(6, 8));
+  const mi = prefix.slice(8, 10);
+  const ss = prefix.slice(10, 12);
+  // 2000年代決め打ち (theearth/dtako の運用開始が2000年以降のため)。
+  const year = 2000 + yy;
+  const startOpe = `${year}/${mm}/${dd} ${hh}:${mi}:${ss}`;
+  return { opeNo22, startOpe };
+}

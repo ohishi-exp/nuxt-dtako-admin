@@ -5,6 +5,7 @@ import {
   onpremKosokuDailyToMap,
   pickRecalcObservations,
   pickRestDiffGuarantee,
+  deriveOpeNoFromUnkoNo,
   KINTAI_DIFF_MAX_ITEMS,
 } from "../src/kintai-diff";
 
@@ -323,5 +324,41 @@ describe("pickRestDiffGuarantee (Refs #615-4)", () => {
   it("kind が文字列でない要素は kind: null 扱い", () => {
     const res = pickRestDiffGuarantee({ items: [{ unko_no: "x", kind: 123 }] }, "x");
     expect(res).toEqual({ found: true, kind: null, guaranteed: false });
+  });
+});
+
+describe("deriveOpeNoFromUnkoNo (Refs #615-4、親指摘 2026-08-03)", () => {
+  // 23桁 = 開始日時12桁 (260519054958 = 2026-05-19 05:49:58) + 車輌CD10桁 + 対象CD1桁
+  const UNKO_NO_23 = "26051905495800000018740";
+  const OPE_NO_22 = UNKO_NO_23.slice(0, 22);
+
+  it("23桁 (オンプレ形) は末尾1桁を落として22桁にし、先頭12桁から start_ope を組む", () => {
+    expect(UNKO_NO_23).toHaveLength(23);
+    const res = deriveOpeNoFromUnkoNo(UNKO_NO_23);
+    expect(res).toEqual({ opeNo22: OPE_NO_22, startOpe: "2026/05/19 5:49:58" });
+  });
+
+  it("22桁 (GCP形) はそのまま ope_no_22 として使う", () => {
+    expect(OPE_NO_22).toHaveLength(22);
+    const res = deriveOpeNoFromUnkoNo(OPE_NO_22);
+    expect(res).toEqual({ opeNo22: OPE_NO_22, startOpe: "2026/05/19 5:49:58" });
+  });
+
+  it("桁数が23でも22でもなければ null (呼び出し側が400にする)", () => {
+    expect(deriveOpeNoFromUnkoNo("123")).toBeNull();
+    expect(deriveOpeNoFromUnkoNo("2".repeat(24))).toBeNull();
+    expect(deriveOpeNoFromUnkoNo("")).toBeNull();
+    expect(deriveOpeNoFromUnkoNo("abcdefghijklmnopqrstuvw")).toBeNull(); // 23文字だが数字でない
+  });
+
+  it("時が2桁 (10時以降) ならそのまま2桁で出る", () => {
+    // 2026-05-19 14:05:03
+    const res = deriveOpeNoFromUnkoNo("26051914050300000018740");
+    expect(res?.startOpe).toBe("2026/05/19 14:05:03");
+  });
+
+  it("時が0時台なら1桁になる (0埋めなし)", () => {
+    const res = deriveOpeNoFromUnkoNo("26051900050300000018740");
+    expect(res?.startOpe).toBe("2026/05/19 0:05:03");
   });
 });
