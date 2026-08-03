@@ -35,7 +35,7 @@
    6 ヶ月固定。theearth のみ = 本社以外の営業所の専業ドライバー、timecard のみ = 本社系。
    原因は**不明** (D1 のスコープ設定が疑わしいが確定できず)。
 
-## 設計 (決定 1〜4)
+## 設計 (決定 1〜5)
 
 1. **表示は live-build 一本化し、化石を読む経路を塞ぐ。** `loadWageReportSource` が
    ichiban の `current_timecard`/`prev_timecard` を読むフォールバックを外す。
@@ -48,9 +48,24 @@
    (デジタコ運行からの算出は rust-alc-api 側の新規実装が要るので別 issue)。
    ⇒ これが「**CSV 読み取りは検証用に残す**」の技術的な意味づけ:
    theearth は **検証用 かつ 6 指標の唯一の供給源**。
-4. **検証 (突合) タブを `archive` タブに置く。** 「theearth vs 打刻」の突合は現状どの
-   タブにも無い (既存の `timecard-compare` は「打刻 vs 社内の紙タイムカード」で別物)。
-   **突合の相手は live-build の値であって、押された写しではない。**
+4. **社内 nginx の紙タイムカードとの照合を専用タブにして見える化する。** 照合そのものは
+   既に実装済み — `GET /restraint-api/timecard-compare` (Refs #492 PR-B)。**relay 側は
+   月 × 全乗務員に既に対応している** (`driver` は省略可、`tolerance` / `only_anomalies`
+   パラメータあり、乗務員別サマリ型もある。
+   `workers/dtako-scraper-relay/src/timecard-compare.ts:978-1010` 付近)。**ところが画面は
+   「乗務員CD で 1 人に絞れている時だけ」に制限している** (`app/pages/restraint-wage.vue:849-851`
+   の `compareDriverCd`)。しかも `timecard` タブの中に埋まっていて、**月全体で「誰のどこが
+   変か」を見る手段が無い**。比較対象は**拘束時間だけ** (残業は定義が別物なので比較しない)。
+   判定は relay 側で済ませてあり、画面は表示だけ — この方針は維持する。
+   - **専用タブを新設**し、月 × 全乗務員の一覧 (差の大きい順 / `only_anomalies` で異常のみ)
+     を出す。1 人の日別へはそこからドリルダウンする
+   - **front のみで完結する** — relay 側は既に対応済みなので API 追加は不要
+   - 現在 `timecard` タブにある 1 vs 1 の突合 UI は、新タブへ移すか残すかを実装時に判断する
+5. **theearth vs 打刻の突合を `archive` タブに置く (決定 4 より後、優先度は下)。**
+   「theearth vs 打刻」の突合は現状どのタブにも無い (既存の `timecard-compare` は
+   「打刻 vs 社内の紙タイムカード」で別物)。**突合の相手は live-build の値であって、
+   押された写しではない。** 紙タイムカードとの照合 (決定4) の方が、実際の運用で先に
+   見たい差である (ユーザー判断 2026-08-03)。
 
 ## 非スコープ (別 issue)
 
@@ -65,4 +80,5 @@ timecard 版 resummarize / `ichiban_months` バッジが timecard を見てい�
 | B | #606-5 | 表示の live-build 一本化 + 化石フォールバック除去 |
 | C | #606-6 | 無人同期 (kyuyo-mcp tool + cron) |
 | D | #606-7 | theearth 由来 6 指標の明示 |
-| E | (B マージ後に起票) | 検証 (突合) タブ = archive タブ拡張 |
+| E | #606-8 | 紙タイムカード照合タブ (新設、front のみ) |
+| F | (後日) | theearth vs 打刻の突合 = archive タブ拡張 |
