@@ -106,9 +106,15 @@ import {
 } from "./restraint-viewer-auth";
 import {
   buildKintaiDiff,
+  buildKintaiDiffCacheSnapshot,
   deriveOpeNoFromUnkoNo,
+  kintaiDiffCacheR2Paths,
+  parseKintaiDiffCacheSnapshot,
   pickRecalcObservations,
   pickRestDiffGuarantee,
+  type KintaiDiffCacheSnapshot,
+  type KintaiDiffObservations,
+  type KintaiDiffResult,
 } from "./kintai-diff";
 import { needsTheearthQueue } from "./restraint-queue";
 import { UpstreamMemo } from "./upstream-memo";
@@ -2570,6 +2576,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/kintai/diff" && request.method === "GET") {
       return this.handleKintaiDiff(record!, url);
     }
+    // フル突合 (kintai/diff、約50秒) の結果を保存分だけ読む軽い口 (Refs #620-3)。
+    // 突合は実行しない — 「未確認/読めなかった/差0件」を区別して返すだけ。
+    if (url.pathname === "/restraint-api/kintai/diff-cache" && request.method === "GET") {
+      return this.handleKintaiDiffCache(record!, url);
+    }
     // 月タブの「畳み直しが要る月」丸 (viewer 認可、Refs #620)。フル突合
     // (kintai/diff、約50秒) とは別の軽い口 — 月タブ描画のたびに叩いても壊れない
     if (url.pathname === "/restraint-api/kintai/stale-months" && request.method === "GET") {
@@ -3897,6 +3908,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * dry-run 1 ページぶんから拾う副産物。**取れなくても差分表示自体は止めない**
    * (fail-soft、`observations_error` に理由を残す) — 原因を断定しないための
    * 判定材料であって、無いと差分が読めなくなるものではないため。
+   *
+   * この口自体が約50秒かかるため、応答用に計算した結果は「表示に要る分だけ」を
+   * R2 へ保存する (Refs #620-3、`saveKintaiDiffCacheToR2` の doc 参照)。保存は
+   * best-effort — 失敗してもこの応答 (ライブの突合結果) は返す。保存できた
+   * fetched_at/last_verified_at を応答に含めるので、front は「取り直す」を押した
+   * 直後に二度目の read (`/kintai/diff-cache`) を打たずに「最終確認」を更新できる。
    */
   private async handleKintaiDiff(record: TheearthSessionRecord, url: URL): Promise<Response> {
     const parsed = this.parseMonthParam(url);
@@ -3932,6 +3949,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       );
     }
 
+    // 表示に要る分だけを R2 へ保存する (Refs #620-3)。best-effort — 失敗しても
+    // このライブ応答は落とさない (取れたてのデータは既に手元にあるため)。
+    let cache: { fetchedAt: string; lastVerifiedAt: string } | null = null;
+    try {
+      cache = await this.saveKintaiDiffCacheToR2(record.compId, ym, diff, observations, observationsError);
+    } catch (err) {
+      console.error(
+        JSON.stringify({ kintai_diff: "cache-save-error", month: ym, error: describeUnknownError(err) }),
+      );
+    }
+
     console.log(
       JSON.stringify({
         kintai_diff: "ok",
@@ -3940,7 +3968,54 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         onprem_rows: diff.onprem_rows,
       }),
     );
-    return Response.json({ month: ym, diff, observations, observations_error: observationsError });
+    return Response.json({
+      month: ym,
+      diff,
+      observations,
+      observations_error: observationsError,
+      fetched_at: cache?.fetchedAt ?? null,
+      last_verified_at: cache?.lastVerifiedAt ?? null,
+    });
+  }
+
+  /**
+   * GET /restraint-api/kintai/diff-cache?month=YYYY-MM — `/kintai/diff` (約50秒)
+   * を実行せず、保存済みのスナップショットだけを読む軽い口 (Refs #620-3)。
+   *
+   * front はタブを開いた/月を変えた時にこちらを自動で叩き、「最終確認:
+   * MM/DD HH:MM」を出す。50秒の口 (`/kintai/diff`) は「取り直す」ボタンを押した
+   * 時だけ叩く — このハンドラは絶対に理論値の突合を実行しない。
+   *
+   * 応答は3状態を区別する (#620-3 やること★「無い」と「引けていない」の混同禁止):
+   * - `{cached: false}` — 一度も保存されていない (=未確認)
+   * - `{cached: true, unreadable: true}` — 保存はあるが読めなかった (壊れた JSON 等)
+   * - `{cached: true, unreadable: false, ...}` — 保存済みスナップショット
+   *   (差0件の「正常」もここに含まれる — front 側が総数0を「差はありません」と表示する)
+   */
+  private async handleKintaiDiffCache(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const parsed = this.parseMonthParam(url);
+    if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
+    const { ym } = parsed;
+    try {
+      const cache = await this.loadKintaiDiffCacheFromR2(record.compId, ym);
+      if (!cache.cached) return Response.json({ cached: false });
+      if (cache.unreadable) return Response.json({ cached: true, unreadable: true });
+      return Response.json({
+        cached: true,
+        unreadable: false,
+        month: cache.snapshot.month,
+        diff: cache.snapshot.diff,
+        observations: cache.snapshot.observations,
+        observations_error: cache.snapshot.observations_error,
+        fetched_at: cache.fetchedAt,
+        last_verified_at: cache.lastVerifiedAt,
+      });
+    } catch (err) {
+      console.error(
+        JSON.stringify({ kintai_diff_cache: "error", month: ym, error: describeUnknownError(err) }),
+      );
+      return dvrJsonError(502, err instanceof Error ? err.message : "キャッシュの取得に失敗しました");
+    }
   }
 
   /**
@@ -6027,6 +6102,88 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     await bucket.put(historyKey, appendHistoryJsonl(text, line), {
       httpMetadata: { contentType: "application/x-ndjson" },
     });
+  }
+
+  /**
+   * `/kintai/diff` の結果 (フル) から「表示に要る分だけ」のスナップショットを組んで
+   * R2 へ保存する (Refs #620-3)。`/restraint-fetch` の CSV/サマリ archive と同じ
+   * 流儀 (`putVersionedR2`: latest + 内容が変わった時だけ `v-{ts}`、customMetadata
+   * に sha256/fetchedAt/lastVerifiedAt) — 新しい保存方式は作らない。
+   *
+   * R2 未 binding の環境では保存をスキップし `null` を返す (突合自体は成功させる、
+   * `saveRestraintToR2` と同じ判断)。呼び出し側はこの戻り値の有無で「保存できたか」
+   * を判定し、できなくても失敗にはしない。
+   */
+  private async saveKintaiDiffCacheToR2(
+    compId: string,
+    ym: string,
+    diff: KintaiDiffResult,
+    observations: KintaiDiffObservations | null,
+    observationsError: string | null,
+  ): Promise<{ fetchedAt: string; lastVerifiedAt: string } | null> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return null;
+    const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
+    const paths = kintaiDiffCacheR2Paths(prefix, compId, ym);
+    const snapshot = buildKintaiDiffCacheSnapshot(ym, diff, observations, observationsError);
+    const now = restraintVersionTimestamp(new Date());
+    const nowIso = new Date().toISOString();
+    const result = await this.putVersionedR2(
+      bucket,
+      paths.latest,
+      paths.version(now),
+      JSON.stringify(snapshot),
+      "application/json",
+      nowIso,
+    );
+    if (result.changed) await this.pruneRestraintVersions(bucket, paths.dir);
+    // lastVerifiedAt は「今回確認した時刻」そのもの (putVersionedR2 が unchanged
+    // でも customMetadata.lastVerifiedAt を nowIso に更新するのと同じ意味)。
+    return { fetchedAt: result.fetchedAt, lastVerifiedAt: nowIso };
+  }
+
+  /**
+   * `saveKintaiDiffCacheToR2` が保存したスナップショットを読む (Refs #620-3)。
+   * 突合は一切実行しない — R2 read だけの軽い口。
+   *
+   * `cached: false` (一度も保存されていない) と `cached: true, unreadable: true`
+   * (保存はあるが JSON が壊れている等で読めなかった) を区別して返す — どちらも
+   * 「差はありません」と混同してはいけない (module docs 冒頭 / #620-3 やること★)。
+   */
+  private async loadKintaiDiffCacheFromR2(
+    compId: string,
+    ym: string,
+  ): Promise<
+    | { cached: false }
+    | { cached: true; unreadable: true }
+    | {
+        cached: true;
+        unreadable: false;
+        snapshot: KintaiDiffCacheSnapshot;
+        fetchedAt: string | null;
+        lastVerifiedAt: string | null;
+      }
+  > {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return { cached: false };
+    const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
+    const paths = kintaiDiffCacheR2Paths(prefix, compId, ym);
+    const obj = await bucket.get(paths.latest);
+    if (!obj) return { cached: false };
+    let parsed: KintaiDiffCacheSnapshot | null;
+    try {
+      parsed = parseKintaiDiffCacheSnapshot(JSON.parse(await obj.text()));
+    } catch {
+      parsed = null;
+    }
+    if (!parsed) return { cached: true, unreadable: true };
+    return {
+      cached: true,
+      unreadable: false,
+      snapshot: parsed,
+      fetchedAt: obj.customMetadata?.fetchedAt ?? null,
+      lastVerifiedAt: obj.customMetadata?.lastVerifiedAt ?? null,
+    };
   }
 
   /** 新しい版を書いた後の掃除: `{dir}/v-*` を list して、後継版の出現から

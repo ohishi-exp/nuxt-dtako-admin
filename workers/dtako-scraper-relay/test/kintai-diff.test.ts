@@ -1,12 +1,16 @@
 import { describe, it, expect } from "vitest";
 import {
   buildKintaiDiff,
+  buildKintaiDiffCacheSnapshot,
   gcpSummariesToMap,
   onpremKosokuDailyToMap,
+  kintaiDiffCacheR2Paths,
+  parseKintaiDiffCacheSnapshot,
   pickRecalcObservations,
   pickRestDiffGuarantee,
   deriveOpeNoFromUnkoNo,
   KINTAI_DIFF_MAX_ITEMS,
+  type KintaiDiffResult,
 } from "../src/kintai-diff";
 
 /** GCP `day_summaries` の応答形。 */
@@ -431,5 +435,194 @@ describe("deriveOpeNoFromUnkoNo (Refs #615-4、親指摘 2026-08-03)", () => {
   it("時が0時台なら1桁になる (0埋めなし)", () => {
     const res = deriveOpeNoFromUnkoNo("26051900050300000018740");
     expect(res?.startOpe).toBe("2026/05/19 0:05:03");
+  });
+});
+
+describe("突合結果のキャッシュ (Refs #620-3)", () => {
+  const OBSERVATIONS = {
+    stale_drivers: 3,
+    fold_would_write_drivers: 5,
+    warnings: ["dtako 入力欠け: 乗務員12名の末尾が16日超"],
+    unko_diff_gcp_only_in_month: 417,
+    unko_diff_gcp_only_driver_split: {
+      never_onprem_drivers: 41,
+      never_onprem_ops: 399,
+      also_in_month_drivers: 2,
+      also_in_month_ops: 2,
+      other_month_only_drivers: 3,
+      other_month_only_ops: 16,
+    },
+    next_after_driver_cd: null,
+  };
+
+  /** [`KintaiDiffResult`] の最小形 (items はダミー1件ずつ — カテゴリの total/capped
+   * だけを保存する仕様なので、items の中身自体はテストの関心事ではない)。 */
+  function fullDiffResult(): KintaiDiffResult {
+    const cat = <T,>(total: number, items: T[]): { total: number; capped: boolean; items: T[] } => ({
+      total,
+      capped: total > items.length,
+      items,
+    });
+    return {
+      gcp_rows: 10,
+      onprem_rows: 8,
+      onprem_unreadable: false,
+      only_gcp: cat(1, [{ driver_cd: "1", date: "2026-06-01", start: "08:00", gcp: {} as never }]),
+      only_onprem_driver0: cat(2, []),
+      only_onprem_other: cat(0, []),
+      value_diff_restraint_match: cat(0, []),
+      value_diff_restraint_mismatch: cat(3, [{} as never]),
+    };
+  }
+
+  describe("buildKintaiDiffCacheSnapshot / parseKintaiDiffCacheSnapshot", () => {
+    it("フルの突合結果から items を捨てて total/capped だけのスナップショットを組む", () => {
+      const snapshot = buildKintaiDiffCacheSnapshot("2026-06", fullDiffResult(), OBSERVATIONS, null);
+      expect(snapshot).toEqual({
+        month: "2026-06",
+        diff: {
+          gcp_rows: 10,
+          onprem_rows: 8,
+          onprem_unreadable: false,
+          only_gcp: { total: 1, capped: false },
+          only_onprem_driver0: { total: 2, capped: true },
+          only_onprem_other: { total: 0, capped: false },
+          value_diff_restraint_match: { total: 0, capped: false },
+          value_diff_restraint_mismatch: { total: 3, capped: true },
+        },
+        observations: OBSERVATIONS,
+        observations_error: null,
+      });
+      // items は保存対象に含まれない (JSON化しても混ざっていない)
+      expect(JSON.stringify(snapshot)).not.toMatch(/"items"/);
+    });
+
+    it("observations が無い (observations_error 付き) スナップショットも組める", () => {
+      const snapshot = buildKintaiDiffCacheSnapshot("2026-06", fullDiffResult(), null, "GCP recalc に失敗しました");
+      expect(snapshot.observations).toBeNull();
+      expect(snapshot.observations_error).toBe("GCP recalc に失敗しました");
+    });
+
+    it("JSON round-trip (R2 に保存 → 読み出し) で完全一致する (正常系)", () => {
+      const snapshot = buildKintaiDiffCacheSnapshot("2026-06", fullDiffResult(), OBSERVATIONS, null);
+      const roundTripped = parseKintaiDiffCacheSnapshot(JSON.parse(JSON.stringify(snapshot)));
+      expect(roundTripped).toEqual(snapshot);
+    });
+
+    it("observations が null のスナップショットも round-trip できる", () => {
+      const snapshot = buildKintaiDiffCacheSnapshot("2026-06", fullDiffResult(), null, "err");
+      const roundTripped = parseKintaiDiffCacheSnapshot(JSON.parse(JSON.stringify(snapshot)));
+      expect(roundTripped).toEqual(snapshot);
+    });
+
+    it("raw が null / オブジェクトでない場合は null を返す (読めなかった扱い)", () => {
+      expect(parseKintaiDiffCacheSnapshot(null)).toBeNull();
+      expect(parseKintaiDiffCacheSnapshot(undefined)).toBeNull();
+      expect(parseKintaiDiffCacheSnapshot("not-an-object")).toBeNull();
+      expect(parseKintaiDiffCacheSnapshot(42)).toBeNull();
+    });
+
+    it("month が文字列でなければ null", () => {
+      expect(parseKintaiDiffCacheSnapshot({ month: 202606, diff: {} })).toBeNull();
+      expect(parseKintaiDiffCacheSnapshot({ diff: {} })).toBeNull();
+    });
+
+    it("diff が無い/オブジェクトでなければ null", () => {
+      expect(parseKintaiDiffCacheSnapshot({ month: "2026-06" })).toBeNull();
+      expect(parseKintaiDiffCacheSnapshot({ month: "2026-06", diff: null })).toBeNull();
+      expect(parseKintaiDiffCacheSnapshot({ month: "2026-06", diff: "nope" })).toBeNull();
+    });
+
+    const validDiff = () => ({
+      gcp_rows: 10,
+      onprem_rows: 8,
+      onprem_unreadable: false,
+      only_gcp: { total: 1, capped: false },
+      only_onprem_driver0: { total: 2, capped: true },
+      only_onprem_other: { total: 0, capped: false },
+      value_diff_restraint_match: { total: 0, capped: false },
+      value_diff_restraint_mismatch: { total: 3, capped: true },
+    });
+
+    it.each([
+      "only_gcp",
+      "only_onprem_driver0",
+      "only_onprem_other",
+      "value_diff_restraint_match",
+      "value_diff_restraint_mismatch",
+    ] as const)("5区分のうち %s が壊れていれば null (total/capped 欠け・非オブジェクトを個別に確認)", (key) => {
+      const brokenMissingTotal = { ...validDiff(), [key]: { capped: false } };
+      expect(parseKintaiDiffCacheSnapshot({ month: "2026-06", diff: brokenMissingTotal })).toBeNull();
+      const brokenNotObject = { ...validDiff(), [key]: "nope" };
+      expect(parseKintaiDiffCacheSnapshot({ month: "2026-06", diff: brokenNotObject })).toBeNull();
+      const brokenNull = { ...validDiff(), [key]: null };
+      expect(parseKintaiDiffCacheSnapshot({ month: "2026-06", diff: brokenNull })).toBeNull();
+    });
+
+    it("gcp_rows/onprem_rows/onprem_unreadable の型が違えば null", () => {
+      expect(
+        parseKintaiDiffCacheSnapshot({ month: "2026-06", diff: { ...validDiff(), gcp_rows: "10" } }),
+      ).toBeNull();
+      expect(
+        parseKintaiDiffCacheSnapshot({ month: "2026-06", diff: { ...validDiff(), onprem_rows: "8" } }),
+      ).toBeNull();
+      expect(
+        parseKintaiDiffCacheSnapshot({ month: "2026-06", diff: { ...validDiff(), onprem_unreadable: "false" } }),
+      ).toBeNull();
+    });
+
+    it("observations が null なら結果も null (差の有無とは無関係に読める)", () => {
+      const res = parseKintaiDiffCacheSnapshot({ month: "2026-06", diff: validDiff(), observations: null });
+      expect(res?.observations).toBeNull();
+    });
+
+    it("observations キーが無ければ null 扱い", () => {
+      const res = parseKintaiDiffCacheSnapshot({ month: "2026-06", diff: validDiff() });
+      expect(res?.observations).toBeNull();
+    });
+
+    it("observations がオブジェクトでない (壊れた形) 場合は observations: null に倒す (例外を投げない)", () => {
+      const res = parseKintaiDiffCacheSnapshot({ month: "2026-06", diff: validDiff(), observations: "nope" });
+      expect(res?.observations).toBeNull();
+    });
+
+    it("observations は保存時と同じ平らな形で読む (warnings が配列でなければ空配列に倒す)", () => {
+      const res = parseKintaiDiffCacheSnapshot({
+        month: "2026-06",
+        diff: validDiff(),
+        observations: { stale_drivers: 1, warnings: "not-an-array" },
+      });
+      expect(res?.observations).toEqual({
+        stale_drivers: 1,
+        fold_would_write_drivers: null,
+        warnings: [],
+        unko_diff_gcp_only_in_month: null,
+        unko_diff_gcp_only_driver_split: {
+          never_onprem_drivers: 0,
+          never_onprem_ops: 0,
+          also_in_month_drivers: 0,
+          also_in_month_ops: 0,
+          other_month_only_drivers: 0,
+          other_month_only_ops: 0,
+        },
+        next_after_driver_cd: null,
+      });
+    });
+
+    it("observations_error が文字列でなければ null に倒す", () => {
+      const res = parseKintaiDiffCacheSnapshot({ month: "2026-06", diff: validDiff(), observations_error: 123 });
+      expect(res?.observations_error).toBeNull();
+    });
+  });
+
+  describe("kintaiDiffCacheR2Paths", () => {
+    it("`${prefix}/${compId}/kintai-diff/${ym}` を基点に latest/version(ts) を組む", () => {
+      const paths = kintaiDiffCacheR2Paths("restraint", "27324455", "2026-06");
+      expect(paths.dir).toBe("restraint/27324455/kintai-diff/2026-06");
+      expect(paths.latest).toBe("restraint/27324455/kintai-diff/2026-06/latest.json");
+      expect(paths.version("20260803T211500")).toBe(
+        "restraint/27324455/kintai-diff/2026-06/v-20260803T211500.json",
+      );
+    });
   });
 });

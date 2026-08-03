@@ -306,6 +306,155 @@ export function pickRecalcObservations(raw: unknown): KintaiDiffObservations {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// 突合結果のキャッシュ (Refs #620-3)
+//
+// `/kintai/diff` (このファイルの上、約50秒) の結果を保存し「最終確認日」を添えて
+// 出すための pure ロジック。保存先の版管理 (R2 latest + 内容が変わった時だけ
+// `v-{ts}`、customMetadata に sha256/fetchedAt/lastVerifiedAt) は
+// `/restraint-fetch` の CSV/サマリ archive (`theearth-restraint-client.ts` の
+// `restraintR2Paths` / DO の `putVersionedR2`) と同じ流儀に揃える — 新しい
+// 方式は作らない。実行 (R2 read/write) は DO 側、ここは変換だけ。
+//
+// **保存するのは表示に要る分だけ** — 各カテゴリの `total`/`capped` だけを持ち、
+// `items` (行の中身、カテゴリごと最大500件) は捨てる。この画面 (オンプレ vs
+// Supabase タブ) は件数しか表示しないため。行の一覧が要る取り込み漏れ候補の導線
+// (#623-2) は別の新しい口を持つ計画で、ここのキャッシュとは無関係。
+// ─────────────────────────────────────────────────────────────────────────
+
+/** R2 保存用の1カテゴリ (`total`/`capped` だけ。`items` は保存しない)。 */
+export interface KintaiDiffCachedCategory {
+  total: number;
+  capped: boolean;
+}
+
+function toCachedCategory(c: CappedCategory<unknown>): KintaiDiffCachedCategory {
+  return { total: c.total, capped: c.capped };
+}
+
+/** R2 latest.json の中身。フィールド名は `/kintai/diff` の応答 (`diff`/`observations`/
+ * `observations_error`) と揃えている — front の `parseKintaiDiffApiResponse` が
+ * ライブ応答・キャッシュ応答のどちらもそのまま読めるようにするため。 */
+export interface KintaiDiffCacheSnapshot {
+  month: string;
+  diff: {
+    gcp_rows: number;
+    onprem_rows: number;
+    onprem_unreadable: boolean;
+    only_gcp: KintaiDiffCachedCategory;
+    only_onprem_driver0: KintaiDiffCachedCategory;
+    only_onprem_other: KintaiDiffCachedCategory;
+    value_diff_restraint_match: KintaiDiffCachedCategory;
+    value_diff_restraint_mismatch: KintaiDiffCachedCategory;
+  };
+  observations: KintaiDiffObservations | null;
+  observations_error: string | null;
+}
+
+/** 突合の結果 (フル、`items` 込み) から保存用スナップショットを組む
+ * (`items` を捨てるだけ — 判定や計算は一切しない)。 */
+export function buildKintaiDiffCacheSnapshot(
+  month: string,
+  diff: KintaiDiffResult,
+  observations: KintaiDiffObservations | null,
+  observationsError: string | null,
+): KintaiDiffCacheSnapshot {
+  return {
+    month,
+    diff: {
+      gcp_rows: diff.gcp_rows,
+      onprem_rows: diff.onprem_rows,
+      onprem_unreadable: diff.onprem_unreadable,
+      only_gcp: toCachedCategory(diff.only_gcp),
+      only_onprem_driver0: toCachedCategory(diff.only_onprem_driver0),
+      only_onprem_other: toCachedCategory(diff.only_onprem_other),
+      value_diff_restraint_match: toCachedCategory(diff.value_diff_restraint_match),
+      value_diff_restraint_mismatch: toCachedCategory(diff.value_diff_restraint_mismatch),
+    },
+    observations,
+    observations_error: observationsError,
+  };
+}
+
+function parseCachedCategory(raw: unknown): KintaiDiffCachedCategory | null {
+  if (raw == null || typeof raw !== "object") return null;
+  const c = raw as Record<string, unknown>;
+  if (typeof c.total !== "number" || typeof c.capped !== "boolean") return null;
+  return { total: c.total, capped: c.capped };
+}
+
+/** 保存済み `observations` を読む。**保存時と同じ (既に平らな) 形**なので
+ * `pickRecalcObservations` (upstream の recalc dry-run 応答の形、`stale.drivers`
+ * のようにネストしている) とは読む形が違う — 混同しないこと。 */
+function parseCachedObservations(raw: unknown): KintaiDiffObservations | null {
+  if (raw == null || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  return {
+    stale_drivers: toNumberOrNull(r.stale_drivers),
+    fold_would_write_drivers: toNumberOrNull(r.fold_would_write_drivers),
+    warnings: Array.isArray(r.warnings) ? r.warnings.filter((w): w is string => typeof w === "string") : [],
+    unko_diff_gcp_only_in_month: toNumberOrNull(r.unko_diff_gcp_only_in_month),
+    unko_diff_gcp_only_driver_split: pickGcpOnlyDriverSplit(r.unko_diff_gcp_only_driver_split),
+    next_after_driver_cd: toNumberOrNull(r.next_after_driver_cd),
+  };
+}
+
+/**
+ * R2 latest.json (`JSON.parse` 済みの値) を検証して読む。壊れている/形が
+ * 合わない場合は `null` — 呼び出し側はこれを**「読めませんでした」として表示し、
+ * 「差はありません」(0件の正常な結果) と混同しないこと** (#620-3 やること★:
+ * 「無い」と「引けていない」を混同しない、この repo で繰り返し要求される作法)。
+ */
+export function parseKintaiDiffCacheSnapshot(raw: unknown): KintaiDiffCacheSnapshot | null {
+  if (raw == null || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.month !== "string") return null;
+  if (r.diff == null || typeof r.diff !== "object") return null;
+  const d = r.diff as Record<string, unknown>;
+  const onlyGcp = parseCachedCategory(d.only_gcp);
+  const onlyOnpremDriver0 = parseCachedCategory(d.only_onprem_driver0);
+  const onlyOnpremOther = parseCachedCategory(d.only_onprem_other);
+  const valueDiffMatch = parseCachedCategory(d.value_diff_restraint_match);
+  const valueDiffMismatch = parseCachedCategory(d.value_diff_restraint_mismatch);
+  if (!onlyGcp || !onlyOnpremDriver0 || !onlyOnpremOther || !valueDiffMatch || !valueDiffMismatch) return null;
+  if (typeof d.gcp_rows !== "number" || typeof d.onprem_rows !== "number" || typeof d.onprem_unreadable !== "boolean") {
+    return null;
+  }
+  return {
+    month: r.month,
+    diff: {
+      gcp_rows: d.gcp_rows,
+      onprem_rows: d.onprem_rows,
+      onprem_unreadable: d.onprem_unreadable,
+      only_gcp: onlyGcp,
+      only_onprem_driver0: onlyOnpremDriver0,
+      only_onprem_other: onlyOnpremOther,
+      value_diff_restraint_match: valueDiffMatch,
+      value_diff_restraint_mismatch: valueDiffMismatch,
+    },
+    observations: r.observations != null ? parseCachedObservations(r.observations) : null,
+    observations_error: typeof r.observations_error === "string" ? r.observations_error : null,
+  };
+}
+
+/** R2 key 設計。`/restraint-fetch` の `restraintR2Paths` と同じ `${prefix}/${compId}/...`
+ * 形に揃える (月ごとの `latest.json` + 内容が変わった時だけ `v-{ts}.json`)。 */
+export interface KintaiDiffCacheR2Paths {
+  /** 版一覧の list / prune 用ディレクトリ。 */
+  dir: string;
+  latest: string;
+  version(ts: string): string;
+}
+
+export function kintaiDiffCacheR2Paths(prefix: string, compId: string, ym: string): KintaiDiffCacheR2Paths {
+  const dir = `${prefix}/${compId}/kintai-diff/${ym}`;
+  return {
+    dir,
+    latest: `${dir}/latest.json`,
+    version: (ts) => `${dir}/v-${ts}.json`,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // MySQL 取り直し (①②③) の「押しても直る保証」判定
 // ─────────────────────────────────────────────────────────────────────────
 

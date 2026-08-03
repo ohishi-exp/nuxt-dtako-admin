@@ -1,11 +1,16 @@
 import { describe, it, expect } from 'vitest'
 import {
   buildKintaiDiffPrescriptions,
+  fmtKintaiDiffCacheHeadline,
   fmtKintaiDiffCount,
+  fmtKintaiDiffLastVerified,
   fmtKintaiRefreshMysqlGuarantee,
   foldProgressAppend,
   foldProgressInitial,
+  kintaiDiffCacheStateFromLiveResult,
+  kintaiDiffHasAnyDiff,
   parseKintaiDiffApiResponse,
+  parseKintaiDiffCacheState,
   parseKintaiDiffObservations,
   parseKintaiDiffSummary,
   parseKintaiFoldPage,
@@ -166,6 +171,18 @@ describe('parseKintaiDiffApiResponse', () => {
     const r = parseKintaiDiffApiResponse(diffBody({ observations: null, observations_error: 'GCP recalc dry-run 失敗: status 502' }))
     expect(r.observations).toBeNull()
     expect(r.observationsError).toBe('GCP recalc dry-run 失敗: status 502')
+  })
+
+  it('fetched_at/last_verified_at を読む (Refs #620-3、突合結果のキャッシュ保存に伴い追加)', () => {
+    const r = parseKintaiDiffApiResponse(diffBody({ fetched_at: '2026-08-01T00:00:00.000Z', last_verified_at: '2026-08-03T12:20:00.000Z' }))
+    expect(r.fetchedAt).toBe('2026-08-01T00:00:00.000Z')
+    expect(r.lastVerifiedAt).toBe('2026-08-03T12:20:00.000Z')
+  })
+
+  it('fetched_at/last_verified_at が無ければ null (保存に失敗した場合、best-effort)', () => {
+    const r = parseKintaiDiffApiResponse(diffBody())
+    expect(r.fetchedAt).toBeNull()
+    expect(r.lastVerifiedAt).toBeNull()
   })
 })
 
@@ -453,5 +470,209 @@ describe('fmtKintaiRefreshMysqlGuarantee — 「押せば直る」と誤読さ�
     })
     expect(msg).toContain('保証なし')
     expect(msg).not.toContain('押せば直る')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────
+// 突合結果のキャッシュ (Refs #620-3)
+// ─────────────────────────────────────────────────────────────────────────
+
+function cacheBody(over: Record<string, unknown> = {}) {
+  return {
+    cached: true,
+    unreadable: false,
+    month: '2026-06',
+    diff: diffBody().diff,
+    observations: diffBody().observations,
+    observations_error: null,
+    fetched_at: '2026-08-01T00:00:00.000Z',
+    last_verified_at: '2026-08-03T12:20:00.000Z',
+    ...over,
+  }
+}
+
+describe('parseKintaiDiffCacheState — 未確認/読めなかった/確認済みの3状態', () => {
+  it('raw が null/オブジェクトでなければ「読めなかった」扱い', () => {
+    expect(parseKintaiDiffCacheState(null)).toEqual({ status: 'unreadable' })
+    expect(parseKintaiDiffCacheState(undefined)).toEqual({ status: 'unreadable' })
+    expect(parseKintaiDiffCacheState('x')).toEqual({ status: 'unreadable' })
+  })
+
+  it('cached !== true は「未確認」(保存が一度も無い)', () => {
+    expect(parseKintaiDiffCacheState({ cached: false })).toEqual({ status: 'none' })
+    expect(parseKintaiDiffCacheState({})).toEqual({ status: 'none' })
+    expect(parseKintaiDiffCacheState({ cached: 'true' })).toEqual({ status: 'none' })
+  })
+
+  it('cached: true, unreadable: true は「読めなかった」(保存はあるが壊れていた)', () => {
+    expect(parseKintaiDiffCacheState({ cached: true, unreadable: true })).toEqual({ status: 'unreadable' })
+  })
+
+  it('cached: true で month/diff が読めなければ「読めなかった」扱いに倒す (黙って「未確認」にしない)', () => {
+    expect(parseKintaiDiffCacheState({ cached: true, unreadable: false })).toEqual({ status: 'unreadable' })
+    expect(parseKintaiDiffCacheState({ cached: true, unreadable: false, month: 'x' })).toEqual({ status: 'unreadable' })
+  })
+
+  it('保存済みスナップショットを読む (差0件のケースも status: ok に含まれる)', () => {
+    const state = parseKintaiDiffCacheState(cacheBody())
+    expect(state.status).toBe('ok')
+    if (state.status !== 'ok') throw new Error('unreachable')
+    expect(state.summary.month).toBe('2026-06')
+    expect(state.observations?.unkoDiffGcpOnlyInMonth).toBe(417)
+    expect(state.observationsError).toBeNull()
+    expect(state.fetchedAt).toBe('2026-08-01T00:00:00.000Z')
+    expect(state.lastVerifiedAt).toBe('2026-08-03T12:20:00.000Z')
+  })
+
+  it('observations_error 付き (観測値だけ取れなかった) も status: ok として読む', () => {
+    const state = parseKintaiDiffCacheState(cacheBody({ observations: null, observations_error: 'timeout' }))
+    expect(state.status).toBe('ok')
+    if (state.status !== 'ok') throw new Error('unreachable')
+    expect(state.observations).toBeNull()
+    expect(state.observationsError).toBe('timeout')
+  })
+
+  it('fetched_at/last_verified_at が欠けていれば null', () => {
+    const state = parseKintaiDiffCacheState(cacheBody({ fetched_at: undefined, last_verified_at: undefined }))
+    if (state.status !== 'ok') throw new Error('unreachable')
+    expect(state.fetchedAt).toBeNull()
+    expect(state.lastVerifiedAt).toBeNull()
+  })
+})
+
+describe('kintaiDiffCacheStateFromLiveResult — 「取り直す」直後にライブ応答から状態を組む', () => {
+  it('summary が読めれば status: ok に変換する (二度目の read を要らなくする)', () => {
+    const live = parseKintaiDiffApiResponse(diffBody({ fetched_at: '2026-08-03T12:20:00.000Z', last_verified_at: '2026-08-03T12:20:00.000Z' }))
+    const state = kintaiDiffCacheStateFromLiveResult(live)
+    expect(state).toEqual({
+      status: 'ok',
+      summary: live.summary,
+      observations: live.observations,
+      observationsError: live.observationsError,
+      fetchedAt: '2026-08-03T12:20:00.000Z',
+      lastVerifiedAt: '2026-08-03T12:20:00.000Z',
+    })
+  })
+
+  it('summary が読めなければ unreadable (ライブの突合自体が読めなかった場合)', () => {
+    const live = parseKintaiDiffApiResponse({})
+    expect(kintaiDiffCacheStateFromLiveResult(live)).toEqual({ status: 'unreadable' })
+  })
+})
+
+describe('kintaiDiffHasAnyDiff — only_onprem_driver0 は除外、運行NO単位の集計は見ない', () => {
+  const zeroDiff = () => parseKintaiDiffSummary(diffBody({
+    diff: {
+      gcp_rows: 0,
+      onprem_rows: 0,
+      onprem_unreadable: false,
+      only_gcp: { total: 0, capped: false },
+      only_onprem_driver0: { total: 41, capped: false },
+      only_onprem_other: { total: 0, capped: false },
+      value_diff_restraint_match: { total: 0, capped: false },
+      value_diff_restraint_mismatch: { total: 0, capped: false },
+    },
+  }))!
+
+  it('only_onprem_driver0 だけが非0でも false (意図的な除外であって差ではない)', () => {
+    expect(kintaiDiffHasAnyDiff(zeroDiff())).toBe(false)
+  })
+
+  it.each([
+    ['onlyGcp', { only_gcp: { total: 1, capped: false } }],
+    ['onlyOnpremOther', { only_onprem_other: { total: 1, capped: false } }],
+    ['valueDiffRestraintMatch', { value_diff_restraint_match: { total: 1, capped: false } }],
+    ['valueDiffRestraintMismatch', { value_diff_restraint_mismatch: { total: 1, capped: false } }],
+  ] as const)('%s が非0なら true', (_label, patch) => {
+    const summary = parseKintaiDiffSummary(diffBody({
+      diff: {
+        gcp_rows: 0,
+        onprem_rows: 0,
+        onprem_unreadable: false,
+        only_gcp: { total: 0, capped: false },
+        only_onprem_driver0: { total: 0, capped: false },
+        only_onprem_other: { total: 0, capped: false },
+        value_diff_restraint_match: { total: 0, capped: false },
+        value_diff_restraint_mismatch: { total: 0, capped: false },
+        ...patch,
+      },
+    }))!
+    expect(kintaiDiffHasAnyDiff(summary)).toBe(true)
+  })
+})
+
+describe('fmtKintaiDiffLastVerified — ISO(UTC) を JST の MM/DD HH:mm にする', () => {
+  it('null は null', () => {
+    expect(fmtKintaiDiffLastVerified(null)).toBeNull()
+  })
+
+  it('パースできない文字列は null', () => {
+    expect(fmtKintaiDiffLastVerified('not-a-date')).toBeNull()
+  })
+
+  it('UTC → JST (+9h) に変換する', () => {
+    // 2026-08-03T12:20:00Z → JST 2026-08-03 21:20
+    expect(fmtKintaiDiffLastVerified('2026-08-03T12:20:00.000Z')).toBe('08/03 21:20')
+  })
+
+  it('JST変換で日付が繰り上がる場合も正しく出す (UTC 15:30 → JST 翌日0:30)', () => {
+    expect(fmtKintaiDiffLastVerified('2026-08-03T15:30:00.000Z')).toBe('08/04 00:30')
+  })
+})
+
+describe('fmtKintaiDiffCacheHeadline — 未確認/読めなかった/確認済みを混同しない見出し', () => {
+  it('未確認', () => {
+    expect(fmtKintaiDiffCacheHeadline({ status: 'none' })).toBe('未確認')
+  })
+
+  it('読めなかった', () => {
+    expect(fmtKintaiDiffCacheHeadline({ status: 'unreadable' })).toBe('読めませんでした')
+  })
+
+  it('差0件なら「差はありません」+ 最終確認時刻', () => {
+    const state = parseKintaiDiffCacheState(cacheBody({
+      diff: {
+        gcp_rows: 0,
+        onprem_rows: 0,
+        onprem_unreadable: false,
+        only_gcp: { total: 0, capped: false },
+        only_onprem_driver0: { total: 41, capped: false },
+        only_onprem_other: { total: 0, capped: false },
+        value_diff_restraint_match: { total: 0, capped: false },
+        value_diff_restraint_mismatch: { total: 0, capped: false },
+      },
+    }))
+    const headline = fmtKintaiDiffCacheHeadline(state)
+    expect(headline).toContain('差はありません')
+    expect(headline).toContain('最終確認: 08/03 21:20')
+  })
+
+  it('差ありなら「差があります」+ 最終確認時刻', () => {
+    const state = parseKintaiDiffCacheState(cacheBody())
+    const headline = fmtKintaiDiffCacheHeadline(state)
+    expect(headline).toContain('差があります')
+  })
+
+  it('onprem_unreadable の突合結果は「差はありません」と断定しない', () => {
+    const state = parseKintaiDiffCacheState(cacheBody({
+      diff: {
+        gcp_rows: 0,
+        onprem_rows: 0,
+        onprem_unreadable: true,
+        only_gcp: { total: 0, capped: false },
+        only_onprem_driver0: { total: 0, capped: false },
+        only_onprem_other: { total: 0, capped: false },
+        value_diff_restraint_match: { total: 0, capped: false },
+        value_diff_restraint_mismatch: { total: 0, capped: false },
+      },
+    }))
+    const headline = fmtKintaiDiffCacheHeadline(state)
+    expect(headline).not.toContain('差はありません')
+    expect(headline).toContain('判定できません')
+  })
+
+  it('確認時刻が無ければ「確認時刻不明」に倒す', () => {
+    const state = parseKintaiDiffCacheState(cacheBody({ last_verified_at: undefined }))
+    expect(fmtKintaiDiffCacheHeadline(state)).toContain('確認時刻不明')
   })
 })
