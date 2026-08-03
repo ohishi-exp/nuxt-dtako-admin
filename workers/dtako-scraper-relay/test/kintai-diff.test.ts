@@ -351,6 +351,20 @@ describe("deriveOpeNoFromUnkoNo (Refs #615-4、親指摘 2026-08-03)", () => {
     expect(deriveOpeNoFromUnkoNo("abcdefghijklmnopqrstuvw")).toBeNull(); // 23文字だが数字でない
   });
 
+  it("日時部 (先頭12桁) がカレンダー上不正な値でも null にはせず機械的に切り出す", () => {
+    // 年99(2099)・月13・日32・時25・分61・秒61 — 桁数・数字要件は満たすが暦として
+    // 存在しない。意味的な妥当性は theearth 側 (push した結果) が判定する設計
+    // (module docs 参照) — ここで弾くと「桁数は合っているのに落ちる」という別の
+    // 失敗モードを作ってしまう
+    const unkoNo = "99133225616100000018740";
+    expect(unkoNo).toHaveLength(23);
+    const res = deriveOpeNoFromUnkoNo(unkoNo);
+    expect(res).toEqual({
+      opeNo22: unkoNo.slice(0, 22),
+      startOpe: "2099/13/32 25:61:61",
+    });
+  });
+
   it("時が2桁 (10時以降) ならそのまま2桁で出る", () => {
     // 2026-05-19 14:05:03
     const res = deriveOpeNoFromUnkoNo("26051914050300000018740");

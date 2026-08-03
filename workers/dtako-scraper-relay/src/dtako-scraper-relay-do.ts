@@ -4032,15 +4032,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   /**
    * POST /restraint-api/kintai/refresh/mysql — body
-   * `{unko_no, reset_timecard?, driver_cd?, month?, apply?}`。運行**1件**の
-   * csvdata.zip を取り直し、オンプレ MariaDB の `dtako_events`
+   * `{unko_no, ope_no?, start_ope?, reset_timecard?, driver_cd?, month?, apply?}`。
+   * 運行**1件**の csvdata.zip を取り直し、オンプレ MariaDB の `dtako_events`
    * (+`reset_timecard: true` なら `time_card_dtako`) へ push する (Refs #615-4)。
    *
    * 実体は `runDtakoReimportJob` (`/cron/dtako/reimport` = `run_dtako_reimport`
    * MCP tool と同じ内部処理) をそのまま呼ぶだけ。**必須引数は `unko_no` だけ** —
-   * `ope_no_22`/`start_ope` は `unko_no` (23桁) から `deriveOpeNoFromUnkoNo`
-   * (`kintai-diff.ts`) で機械的に導出する (親指摘 2026-08-03: 運行NOは桁に
-   * 開始日時を持っているため、rest-diff が返す `unko_no` をそのまま渡せば足りる)。
+   * `ope_no`/`start_ope` は省略可で、省略時は `unko_no` (23桁) から
+   * `deriveOpeNoFromUnkoNo` (`kintai-diff.ts`) で機械的に導出する (親指摘
+   * 2026-08-03: 運行NOは桁に開始日時を持っているため、rest-diff が返す
+   * `unko_no` をそのまま渡せば足りる)。**明示的に渡された場合はそちらを優先する**
+   * (theearth 側の運行検索等で正確な値が既に分かっている場合の上書き用)。
    *
    * **既定は dry-run — `apply: true` が無ければ MariaDB には一切触れない**
    * (zip 取得も push もしない)。`driver_cd`/`month` が両方揃っていれば、
@@ -4054,6 +4056,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   private async handleKintaiRefreshMysql(record: TheearthSessionRecord, request: Request): Promise<Response> {
     let body: {
       unko_no?: unknown;
+      ope_no?: unknown;
+      start_ope?: unknown;
       reset_timecard?: unknown;
       driver_cd?: unknown;
       month?: unknown;
@@ -4071,13 +4075,23 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!UNKO_NO_RE.test(unkoNo)) {
       return dvrJsonError(400, `unko_no は23桁の数値で指定してください: "${unkoNo}"`);
     }
-    // 運行NOは桁に開始日時を持っている (23桁 = 開始日時12桁+車輌CD10桁+対象CD1桁) —
-    // ope_no_22/start_ope を呼び出し元に要求せず、ここで機械的に導出する
-    const derived = deriveOpeNoFromUnkoNo(unkoNo);
-    if (!derived) {
-      return dvrJsonError(400, `unko_no から ope_no/start_ope を導出できませんでした: "${unkoNo}"`);
+    // ope_no/start_ope が明示されていればそちらを優先。無ければ unko_no (23桁 =
+    // 開始日時12桁+車輌CD10桁+対象CD1桁) から機械的に導出する
+    const explicitOpeNo = typeof body.ope_no === "string" && body.ope_no ? body.ope_no : null;
+    const explicitStartOpe = typeof body.start_ope === "string" && body.start_ope ? body.start_ope : null;
+    let opeNo: string;
+    let startOpe: string;
+    if (explicitOpeNo && explicitStartOpe) {
+      opeNo = explicitOpeNo;
+      startOpe = explicitStartOpe;
+    } else {
+      const derived = deriveOpeNoFromUnkoNo(unkoNo);
+      if (!derived) {
+        return dvrJsonError(400, `unko_no から ope_no/start_ope を導出できませんでした: "${unkoNo}"`);
+      }
+      opeNo = explicitOpeNo ?? derived.opeNo22;
+      startOpe = explicitStartOpe ?? derived.startOpe;
     }
-    const { opeNo22: opeNo, startOpe } = derived;
     const resetTimecard = body.reset_timecard === true;
     const apply = body.apply === true;
     const driverCd =
