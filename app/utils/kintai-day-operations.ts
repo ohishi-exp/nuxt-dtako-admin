@@ -42,6 +42,14 @@ export function isKintaiDayOperationUnkoNo23Digit(unkoNo: string): boolean {
   return UNKO_NO_23_RE.test(unkoNo)
 }
 
+/** ohishi-dev の旅費行 (運行1件) 詳細画面へのリンク (Refs #633-27)。URL キーは
+ * オンプレの23桁そのものなので、22桁 (対象CD無し) では別運行/存在しない行を指しうる
+ * — `isKintaiDayOperationUnkoNo23Digit` と同じガードで23桁以外は `null` にする。 */
+export function kintaiDayOperationRyohiRowsUrl(unkoNo: string): string | null {
+  if (!isKintaiDayOperationUnkoNo23Digit(unkoNo)) return null
+  return `http://ohishi-dev.ohishi.local/ryohi-rows/view/${unkoNo}`
+}
+
 /** `GET /restraint-api/kintai/day-operations` の応答を読む。壊れた形は空配列に
  * 倒す (捏造しない) — 呼び出し側は「運行がありません」と「読めなかった」を
  * 混同しないよう、この関数の戻り値ではなく呼び出し元の try/catch で区別する。 */

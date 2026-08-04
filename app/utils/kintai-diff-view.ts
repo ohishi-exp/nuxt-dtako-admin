@@ -800,6 +800,16 @@ export function kintaiDiffValueDiffFieldRows(row: {
   }))
 }
 
+/** ohishi-dev の打刻画面 (タイムカード) へのリンク (Refs #633-27)。乗務員CD +
+ * 明細行の暦日から月だけ切り出して組み立てるだけ — 実在確認はしない (押した先で
+ * 404 でも構わない、ここでは URL を組むだけの責務)。`date` が `YYYY-MM-DD` の
+ * 形でなければ `null` (壊れた形で存在しないリンクを出さない)。 */
+export function kintaiDiffOhishiDevTimeCardUrl(driverCd: string, date: string): string | null {
+  const month = date.slice(0, 7)
+  if (!/^\d{4}-\d{2}$/.test(month)) return null
+  return `https://ohishi-dev.ohishi.local/time-card?driver_id=${encodeURIComponent(driverCd)}&month=${month}`
+}
+
 export interface KintaiDiffOneSidedFieldRow {
   field: string
   label: string

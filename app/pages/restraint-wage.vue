@@ -97,6 +97,7 @@ import {
   foldProgressAppend,
   foldProgressInitial,
   kintaiDiffCacheStateFromLiveResult,
+  kintaiDiffOhishiDevTimeCardUrl,
   kintaiDiffOneSidedFieldRows,
   kintaiDiffValueDiffFieldRows,
   KINTAI_DIFF_CATEGORIES,
@@ -139,7 +140,11 @@ import {
 import type { DayEventsLookup } from '~/utils/kintai-day-events-lookup'
 import { parseDayEventsLookup } from '~/utils/kintai-day-events-lookup'
 import type { KintaiDayOperation } from '~/utils/kintai-day-operations'
-import { parseKintaiDayOperations, isKintaiDayOperationUnkoNo23Digit } from '~/utils/kintai-day-operations'
+import {
+  parseKintaiDayOperations,
+  isKintaiDayOperationUnkoNo23Digit,
+  kintaiDayOperationRyohiRowsUrl,
+} from '~/utils/kintai-day-operations'
 import type { KintaiAlcUploadResult } from '~/utils/kintai-alc-upload'
 import { parseKintaiAlcUploadResult } from '~/utils/kintai-alc-upload'
 
@@ -6956,9 +6961,23 @@ watch([compMap, kyuyoSyncedKeys], () => {
                         </p>
                         <ul class="divide-y divide-gray-200 dark:divide-gray-700 text-sm">
                           <li v-for="(row, i) in (gcpDiffCategoryItemsByKey[cat.key] ?? [])" :key="i" class="py-1">
-                            <div class="text-xs text-gray-500">
-                              乗務員CD {{ row.driverCd }} / {{ row.date }} / {{ row.start }}
-                              <span v-if="row.side">({{ row.side === 'gcp' ? 'GCP' : 'オンプレ' }}のみ)</span>
+                            <div class="text-xs text-gray-500 flex flex-wrap items-center gap-1">
+                              <span>
+                                乗務員CD {{ row.driverCd }} / {{ row.date }} / {{ row.start }}
+                                <span v-if="row.side">({{ row.side === 'gcp' ? 'GCP' : 'オンプレ' }}のみ)</span>
+                              </span>
+                              <!-- ohishi-dev の打刻画面への導線 (Refs #633-27)。ここでは
+                                   URLを組むだけ — 実在確認はしない。 -->
+                              <UButton
+                                v-if="kintaiDiffOhishiDevTimeCardUrl(row.driverCd, row.date)"
+                                size="2xs"
+                                variant="link"
+                                icon="i-lucide-external-link"
+                                label="打刻を見る"
+                                :to="kintaiDiffOhishiDevTimeCardUrl(row.driverCd, row.date) ?? undefined"
+                                target="_blank"
+                                rel="noopener"
+                              />
                             </div>
                             <!-- value_diff 行: 差のある項目だけを並べる (差の無い項目で薄めない) -->
                             <div v-for="fr in row.valueDiffFieldRows" :key="fr.field" class="text-xs">
@@ -7033,6 +7052,20 @@ watch([compMap, kyuyoSyncedKeys], () => {
                                     label="③ の欄に入れる (23桁)"
                                     class="ml-1"
                                     @click="applyDayOperationToMysqlResetForm(row.driverCd, op.unkoNo)"
+                                  />
+                                  <!-- ohishi-dev の旅費行 (運行1件) 詳細画面への導線 (Refs #633-27)。
+                                       23桁 (対象CD込み) が引けている運行だけ出す — URL キーが
+                                       23桁そのものなので、22桁のままでは別運行を指しうる。 -->
+                                  <UButton
+                                    v-if="kintaiDayOperationRyohiRowsUrl(op.unkoNo)"
+                                    size="xs"
+                                    variant="link"
+                                    icon="i-lucide-external-link"
+                                    label="運行を見る"
+                                    class="ml-1"
+                                    :to="kintaiDayOperationRyohiRowsUrl(op.unkoNo) ?? undefined"
+                                    target="_blank"
+                                    rel="noopener"
                                   />
                                   <UAlert
                                     v-if="diffRowAlcUploadFor(op.unkoNo)?.status === 'error'"

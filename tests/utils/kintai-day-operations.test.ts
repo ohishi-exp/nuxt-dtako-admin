@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { parseKintaiDayOperations, isKintaiDayOperationUnkoNo23Digit } from '~/utils/kintai-day-operations'
+import {
+  parseKintaiDayOperations,
+  isKintaiDayOperationUnkoNo23Digit,
+  kintaiDayOperationRyohiRowsUrl,
+} from '~/utils/kintai-day-operations'
 
 const OPE_NO_22 = '2606050753300000004286'
 const UNKO_NO_23 = `${OPE_NO_22}1`
@@ -75,5 +79,22 @@ describe('isKintaiDayOperationUnkoNo23Digit', () => {
     expect(isKintaiDayOperationUnkoNo23Digit('')).toBe(false)
     expect(isKintaiDayOperationUnkoNo23Digit(`${UNKO_NO_23}9`)).toBe(false)
     expect(isKintaiDayOperationUnkoNo23Digit(`${OPE_NO_22}a`)).toBe(false)
+  })
+})
+
+describe('kintaiDayOperationRyohiRowsUrl', () => {
+  it('23桁の unkoNo からURLを組む', () => {
+    expect(kintaiDayOperationRyohiRowsUrl(UNKO_NO_23)).toBe(
+      `http://ohishi-dev.ohishi.local/ryohi-rows/view/${UNKO_NO_23}`,
+    )
+  })
+
+  it('22桁 (対象CD無し) は null (別運行を指しうるため出さない)', () => {
+    expect(kintaiDayOperationRyohiRowsUrl(OPE_NO_22)).toBeNull()
+  })
+
+  it('空文字/数字以外は null', () => {
+    expect(kintaiDayOperationRyohiRowsUrl('')).toBeNull()
+    expect(kintaiDayOperationRyohiRowsUrl(`${OPE_NO_22}a`)).toBeNull()
   })
 })
