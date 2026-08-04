@@ -1468,12 +1468,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   ): Promise<Response> {
     const jobState = this.makeTheearthLoginJobState();
     // recalculateBeforeFetch は成否 (ok/error) だけを畳んで返し、内側の resolved
-    // value (recoveredFromStuckLock/selfUnlocked) は捨てる — ログに出すため
-    // クロージャの外の可変オブジェクトで受け取る (jobState.logins と同じ流儀。
-    // let 変数への再代入だと closure 経由の代入を型が追い切れないため object にする、
-    // Refs #633-23)。
-    const unlockInfo: { recoveredFromStuckLock: boolean | null; selfUnlocked: boolean | null } = {
-      recoveredFromStuckLock: null,
+    // value (unlocked/selfUnlocked) は捨てる — ログに出すためクロージャの外の
+    // 可変オブジェクトで受け取る (jobState.logins と同じ流儀。let 変数への
+    // 再代入だと closure 経由の代入を型が追い切れないため object にする、Refs #633-23)。
+    const unlockInfo: { unlocked: boolean | null; selfUnlocked: boolean | null } = {
+      unlocked: null,
       selfUnlocked: null,
     };
     try {
@@ -1481,7 +1480,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         ? await recalculateBeforeFetch(() =>
             this.withTheearthLoginSession(account, jobState, async (jar) => {
               const result = await recalculateWorkUnattended(jar, opeNo, startOpe);
-              unlockInfo.recoveredFromStuckLock = result.recoveredFromStuckLock;
+              unlockInfo.unlocked = result.unlocked;
               unlockInfo.selfUnlocked = result.selfUnlocked;
               return result;
             }),
@@ -1514,7 +1513,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           theearth_kicked: jobState.logins.some((l) => l.kicked),
           // btnInitialize は他ユーザーの正当なロックも解除しうるため、呼んだ
           // かどうかを必ず可視化する (#642 の theearth_kicked と同じ理由、Refs #633-23)。
-          theearth_recovered_from_stuck_lock: unlockInfo.recoveredFromStuckLock,
+          theearth_unlocked: unlockInfo.unlocked,
           theearth_self_unlocked: unlockInfo.selfUnlocked,
         }),
       );
@@ -1638,17 +1637,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // (将来そういう経路ができても) ログイン済み jar を確実に使える。
     const jobState = this.makeTheearthLoginJobState();
     // deps.recalculateWork の戻り値は Promise<void> (dtako-reimport.ts の pure 側の
-    // 契約) なので、ログに出す recoveredFromStuckLock/selfUnlocked はクロージャの
-    // 外の可変オブジェクトで受け取る (Refs #633-23、runOperationZip と同じ理由)。
-    const unlockInfo: { recoveredFromStuckLock: boolean | null; selfUnlocked: boolean | null } = {
-      recoveredFromStuckLock: null,
+    // 契約) なので、ログに出す unlocked/selfUnlocked はクロージャの外の可変
+    // オブジェクトで受け取る (Refs #633-23、runOperationZip と同じ理由)。
+    const unlockInfo: { unlocked: boolean | null; selfUnlocked: boolean | null } = {
+      unlocked: null,
       selfUnlocked: null,
     };
     const deps: DtakoReimportDeps = {
       recalculateWork: async () => {
         await this.withTheearthLoginSession(account, jobState, async (jar) => {
           const result = await recalculateWorkUnattended(jar, input.opeNo, input.startOpe);
-          unlockInfo.recoveredFromStuckLock = result.recoveredFromStuckLock;
+          unlockInfo.unlocked = result.unlocked;
           unlockInfo.selfUnlocked = result.selfUnlocked;
         });
       },
@@ -1694,7 +1693,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           http_status: report.http_status,
           theearth_logins: jobState.logins.length,
           theearth_kicked: jobState.logins.some((l) => l.kicked),
-          theearth_recovered_from_stuck_lock: unlockInfo.recoveredFromStuckLock,
+          theearth_unlocked: unlockInfo.unlocked,
           theearth_self_unlocked: unlockInfo.selfUnlocked,
         }),
       );
@@ -1788,15 +1787,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // Refs #633-23 (runDtakoReimportJob と同じ理由) — deps.recalculateWork は
     // Promise<void> 契約なので、ログに出す情報はクロージャの外の可変オブジェクトで
     // 受け取る。
-    const unlockInfo: { recoveredFromStuckLock: boolean | null; selfUnlocked: boolean | null } = {
-      recoveredFromStuckLock: null,
+    const unlockInfo: { unlocked: boolean | null; selfUnlocked: boolean | null } = {
+      unlocked: null,
       selfUnlocked: null,
     };
     const deps: DtakoAlcUploadDeps = {
       recalculateWork: async () => {
         await this.withTheearthLoginSession(account, jobState, async (jar) => {
           const result = await recalculateWorkUnattended(jar, input.opeNo, input.startOpe);
-          unlockInfo.recoveredFromStuckLock = result.recoveredFromStuckLock;
+          unlockInfo.unlocked = result.unlocked;
           unlockInfo.selfUnlocked = result.selfUnlocked;
         });
       },
@@ -1832,7 +1831,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         split_failed: report.split_failed,
         theearth_logins: jobState.logins.length,
         theearth_kicked: jobState.logins.some((l) => l.kicked),
-        theearth_recovered_from_stuck_lock: unlockInfo.recoveredFromStuckLock,
+        theearth_unlocked: unlockInfo.unlocked,
         theearth_self_unlocked: unlockInfo.selfUnlocked,
       };
       // split は非同期 — 失敗件数が既にこの応答に乗っていれば error レベルで鳴らす
@@ -7694,7 +7693,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /** POST /daily-report-api/expense/recalculate — `btnScore` postback で評価点を
-   * 再集計する (body は `{opeNo, startOpe}`)。 */
+   * 再集計する (body は `{opeNo, startOpe}`)。`recalculateExpense` (→
+   * `recalculateByScore`) は GET の前に無条件で `unlockOperation` を呼ぶ
+   * (Refs #633-23)。`btnInitialize` は他ユーザーの正当な編集ロックも解除しうる
+   * ため、応答 (`unlocked`) に加えて構造化ログにも必ず出す。 */
   private async handleReportExpenseRecalculate(record: TheearthSessionRecord, request: Request): Promise<Response> {
     let body: { opeNo?: unknown; startOpe?: unknown };
     try {
@@ -7704,7 +7706,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
     const opeNo = typeof body.opeNo === "string" ? body.opeNo : "";
     const startOpe = typeof body.startOpe === "string" ? body.startOpe : "";
-    return this.callReportAction(record, "評価点再集計", (jar) => recalculateExpense(jar, opeNo, startOpe));
+    return this.callReportAction(record, "評価点再集計", async (jar) => {
+      const result = await recalculateExpense(jar, opeNo, startOpe);
+      console.log(
+        JSON.stringify({
+          daily_report_expense_recalculate: "ok",
+          ope_no: opeNo,
+          theearth_unlocked: result.unlocked,
+        }),
+      );
+      return result;
+    });
   }
 
   /** POST /daily-report-api/expense/link-sys — `btnScore` (再集計) → `btnLinkSys`
@@ -7852,7 +7864,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /** POST /daily-report-api/work/recalculate — F-DES1013 の `btnScore` postback で
-   * 作業時間を再集計する (DriverState1〜5Min が更新される。body は `{opeNo, startOpe}`)。 */
+   * 作業時間を再集計する (DriverState1〜5Min が更新される。body は `{opeNo, startOpe}`)。
+   * `recalculateWork` (→ `recalculateByScore`) は GET の前に無条件で
+   * `unlockOperation` を呼ぶ (Refs #633-23、ユーザー指示: 死んだセッションが
+   * 残したロックで弾かれるより先に解除して普通に通る方が正しい)。`btnInitialize`
+   * は他ユーザーの正当な編集ロックも解除しうるため、応答 (`unlocked`) に加えて
+   * 構造化ログにも必ず出す。 */
   private async handleReportWorkRecalculate(record: TheearthSessionRecord, request: Request): Promise<Response> {
     let body: { opeNo?: unknown; startOpe?: unknown };
     try {
@@ -7862,7 +7879,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
     const opeNo = typeof body.opeNo === "string" ? body.opeNo : "";
     const startOpe = typeof body.startOpe === "string" ? body.startOpe : "";
-    return this.callReportAction(record, "作業時間再集計", (jar) => recalculateWork(jar, opeNo, startOpe));
+    return this.callReportAction(record, "作業時間再集計", async (jar) => {
+      const result = await recalculateWork(jar, opeNo, startOpe);
+      console.log(
+        JSON.stringify({
+          daily_report_work_recalculate: "ok",
+          ope_no: opeNo,
+          theearth_unlocked: result.unlocked,
+        }),
+      );
+      return result;
+    });
   }
 
   /** GET /daily-report-api/revise?opeNo=&startOpe= — F-DES1011 乗務員CD 等の現在値

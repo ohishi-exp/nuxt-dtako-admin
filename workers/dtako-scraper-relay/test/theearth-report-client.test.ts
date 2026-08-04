@@ -57,6 +57,25 @@ function sequenceFetch(responses: (Response | (() => Response))[]): FetchLike {
 
 const LOGIN_REDIRECT_HTML = `<html><body><form><input id="txtPass" name="txtPass" type="password" /></form></body></html>`;
 
+// recalculateByScore (recalculateWork/recalculateExpense の共通実装) は GET の
+// 前に無条件で unlockOperation (F-DES1010 一覧への GET+POST) を呼ぶ
+// (ユーザー指示 2026-08-04「取得時にロック解除いるよ」、Refs #633-23)。この
+// GET+POST ペアを毎回のテストの先頭に差し込むための共通 fixture/ヘルパ。
+function unlockOperationListHtml(): string {
+  return `<html><body><form>
+    <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-LIST" />
+    <input type="submit" id="btnInitialize" name="ctl00$MainContent$btnInitialize" value="編集制御解除" />
+    <input type="text" id="txtOperationNo" name="ctl00$MainContent$txtOperationNo" class="none" />
+    <input type="text" id="txtStartDateTime" name="ctl00$MainContent$txtStartDateTime" class="none" />
+    <input type="text" id="txtIndex" name="ctl00$MainContent$txtIndex" class="none" />
+    <input type="text" id="txtCurrentID" name="ctl00$MainContent$txtCurrentID" class="none" />
+  </form></body></html>`;
+}
+/** `recalculateByScore` 冒頭の無条件 `unlockOperation` (GET+POST) 応答2件。 */
+function unlockResponses(): Response[] {
+  return [html(unlockOperationListHtml()), html(unlockOperationListHtml())];
+}
+
 // --- F-DES1012 経費入力フォーム fixture -------------------------------------
 // 実 DOM 構造 (cdp-pair 実機確認、Refs #183、2026-07-08): `MainContent_` prefix は
 // 無い。表示専用行は `lstFuel_lbl<Field>_<N>` の <span>、編集ボタン押下後にだけ
@@ -503,16 +522,19 @@ describe("recalculateExpense", () => {
   it("succeeds and reports linkSysEnabled=true after recalculation", async () => {
     const jar = createCookieJar();
     const fetchImpl = sequenceFetch([
+      ...unlockResponses(),
       html(expenseFormHtml({ rows: 1 })),
       html(expenseFormHtml({ rows: 1, linkSysDisabled: false, recalculated: true })),
     ]);
     const result = await recalculateExpense(jar, OPE_NO, START_OPE, fetchImpl);
     expect(result.linkSysEnabled).toBe(true);
+    expect(result.unlocked).toBe(true);
   });
 
   it("reports linkSysEnabled=false when the button is still disabled", async () => {
     const jar = createCookieJar();
     const fetchImpl = sequenceFetch([
+      ...unlockResponses(),
       html(expenseFormHtml({ rows: 1 })),
       html(expenseFormHtml({ rows: 1, linkSysDisabled: true, recalculated: true })),
     ]);
@@ -527,7 +549,7 @@ describe("recalculateExpense", () => {
       <input type="submit" id="btnScore" name="btnScore" value="評価点再集計" />
       再集計が終了しました。
     </form></body></html>`;
-    const fetchImpl = sequenceFetch([html(expenseFormHtml({ rows: 1 })), html(noLinkSysHtml)]);
+    const fetchImpl = sequenceFetch([...unlockResponses(), html(expenseFormHtml({ rows: 1 })), html(noLinkSysHtml)]);
     const result = await recalculateExpense(jar, OPE_NO, START_OPE, fetchImpl);
     expect(result.linkSysEnabled).toBe(false);
   });
@@ -535,6 +557,7 @@ describe("recalculateExpense", () => {
   it("falls back to a default label when the score button has no value attribute", async () => {
     const jar = createCookieJar();
     const fetchImpl = sequenceFetch([
+      ...unlockResponses(),
       html(expenseFormHtml({ rows: 1, scoreButtonNoValue: true })),
       html(expenseFormHtml({ rows: 1, recalculated: true })),
     ]);
@@ -542,15 +565,14 @@ describe("recalculateExpense", () => {
     expect(result.linkSysEnabled).toBe(false);
   });
 
-  it("throws the unlock guidance instead of a raw btnScore-missing error when the operation is locked (Refs #633-23)", async () => {
+  it("throws the unlock guidance (backstop) when the lock is still returned even after the unconditional unlock (Refs #633-23)", async () => {
     // ロック中は lstFuel を含まない空ページが返る (F-DES1013 と同型、
     // theearth-venus skill「URL 直接遷移 (F-DES1011/1012/1013 共通)」節)。
-    // btnScore を探す前に検知しないと「ページ仕様変更の可能性」という
-    // 確かめていない原因を挙げてしまう。
+    // 無条件 unlockOperation の後もなお返るなら残骸ではなく本物の競合。
     const jar = createCookieJar();
-    await expect(recalculateExpense(jar, OPE_NO, START_OPE, sequenceFetch([html(WORK_LOCKED_HTML)]))).rejects.toThrow(
-      /編集ロック中|編集制御解除/,
-    );
+    await expect(
+      recalculateExpense(jar, OPE_NO, START_OPE, sequenceFetch([...unlockResponses(), html(WORK_LOCKED_HTML)])),
+    ).rejects.toThrow(/編集ロック中|編集制御解除/);
   });
 
   it("rejects malformed OpeNo / StartOpe", async () => {
@@ -562,25 +584,28 @@ describe("recalculateExpense", () => {
   it("throws on non-ok GET / login redirect on GET", async () => {
     const jar1 = createCookieJar();
     await expect(
-      recalculateExpense(jar1, OPE_NO, START_OPE, sequenceFetch([status(500)])),
+      recalculateExpense(jar1, OPE_NO, START_OPE, sequenceFetch([...unlockResponses(), status(500)])),
     ).rejects.toThrow(TheearthClientError);
     const jar2 = createCookieJar();
     await expect(
-      recalculateExpense(jar2, OPE_NO, START_OPE, sequenceFetch([html(LOGIN_REDIRECT_HTML)])),
+      recalculateExpense(jar2, OPE_NO, START_OPE, sequenceFetch([...unlockResponses(), html(LOGIN_REDIRECT_HTML)])),
     ).rejects.toThrow(VenusSessionExpiredError);
   });
 
   it("throws when the score button is missing", async () => {
     const jar = createCookieJar();
     const noButtonHtml = `<html><body><form><input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS1" /></form></body></html>`;
-    const fetchImpl = sequenceFetch([html(noButtonHtml)]);
+    const fetchImpl = sequenceFetch([...unlockResponses(), html(noButtonHtml)]);
     await expect(recalculateExpense(jar, OPE_NO, START_OPE, fetchImpl)).rejects.toThrow(TheearthClientError);
   });
 
   it("throws on non-ok POST / login redirect on POST", async () => {
     const jar1 = createCookieJar();
     await expect(
-      recalculateExpense(jar1, OPE_NO, START_OPE, sequenceFetch([html(expenseFormHtml({ rows: 1 })), status(500)])),
+      recalculateExpense(
+        jar1, OPE_NO, START_OPE,
+        sequenceFetch([...unlockResponses(), html(expenseFormHtml({ rows: 1 })), status(500)]),
+      ),
     ).rejects.toThrow(TheearthClientError);
     const jar2 = createCookieJar();
     await expect(
@@ -588,7 +613,7 @@ describe("recalculateExpense", () => {
         jar2,
         OPE_NO,
         START_OPE,
-        sequenceFetch([html(expenseFormHtml({ rows: 1 })), html(LOGIN_REDIRECT_HTML)]),
+        sequenceFetch([...unlockResponses(), html(expenseFormHtml({ rows: 1 })), html(LOGIN_REDIRECT_HTML)]),
       ),
     ).rejects.toThrow(VenusSessionExpiredError);
   });
@@ -596,13 +621,17 @@ describe("recalculateExpense", () => {
   it("throws on concurrent-edit conflict", async () => {
     const jar = createCookieJar();
     const conflictHtml = `<html><body>他ユーザー編集中のため処理を中止しました。</body></html>`;
-    const fetchImpl = sequenceFetch([html(expenseFormHtml({ rows: 1 })), html(conflictHtml)]);
+    const fetchImpl = sequenceFetch([...unlockResponses(), html(expenseFormHtml({ rows: 1 })), html(conflictHtml)]);
     await expect(recalculateExpense(jar, OPE_NO, START_OPE, fetchImpl)).rejects.toThrow(/他ユーザー/);
   });
 
   it("throws when the completion message is missing", async () => {
     const jar = createCookieJar();
-    const fetchImpl = sequenceFetch([html(expenseFormHtml({ rows: 1 })), html(expenseFormHtml({ rows: 1 }))]);
+    const fetchImpl = sequenceFetch([
+      ...unlockResponses(),
+      html(expenseFormHtml({ rows: 1 })),
+      html(expenseFormHtml({ rows: 1 })),
+    ]);
     await expect(recalculateExpense(jar, OPE_NO, START_OPE, fetchImpl)).rejects.toThrow(/再集計が終了しました/);
   });
 });
@@ -3162,12 +3191,14 @@ describe("saveWorkRowFromPage", () => {
 describe("recalculateWork", () => {
   it("posts btnScore on the work edit page and reports linkSys enablement", async () => {
     const fetchImpl = sequenceFetch([
+      ...unlockResponses(),
       html(workFormHtml()),
       html(workFormHtml({ recalculated: true, linkSysDisabled: false })),
     ]);
     const jar = createCookieJar();
     const result = await recalculateWork(jar, OPE_NO, START_OPE, fetchImpl);
     expect(result.linkSysEnabled).toBe(true);
+    expect(result.unlocked).toBe(true);
   });
 
   it("rejects invalid opeNo", async () => {
@@ -3176,7 +3207,7 @@ describe("recalculateWork", () => {
   });
 
   it("throws when the completion message is missing", async () => {
-    const fetchImpl = sequenceFetch([html(workFormHtml()), html(workFormHtml())]);
+    const fetchImpl = sequenceFetch([...unlockResponses(), html(workFormHtml()), html(workFormHtml())]);
     const jar = createCookieJar();
     await expect(recalculateWork(jar, OPE_NO, START_OPE, fetchImpl)).rejects.toThrow(/再集計が終了しました/);
   });
@@ -3184,19 +3215,23 @@ describe("recalculateWork", () => {
   it("throws when btnScore is missing", async () => {
     const jar = createCookieJar();
     await expect(
-      recalculateWork(jar, OPE_NO, START_OPE, sequenceFetch([html(workFormHtml({ scoreButton: false }))])),
+      recalculateWork(
+        jar, OPE_NO, START_OPE,
+        sequenceFetch([...unlockResponses(), html(workFormHtml({ scoreButton: false }))]),
+      ),
     ).rejects.toThrow(/btnScore/);
   });
 
-  it("throws the unlock guidance instead of a raw btnScore-missing error when the operation is locked (Refs #633-23)", async () => {
+  it("throws the unlock guidance (backstop) when the lock is still returned even after the unconditional unlock (Refs #633-23)", async () => {
     // ロック残留のまま btnScore を postback すると theearth 側が
     // NullReferenceException で HTTP 500 を返す (2026-08-04 実観測、Refs #633-23)。
     // 空ページで btnScore が見つからず「ページ仕様変更の可能性があります」という
     // 確かめていない原因を返していた旧挙動を、ロック検知で先に loud fail させる。
+    // 無条件 unlockOperation の後もなお返るなら残骸ではなく本物の競合。
     const jar = createCookieJar();
-    await expect(recalculateWork(jar, OPE_NO, START_OPE, sequenceFetch([html(WORK_LOCKED_HTML)]))).rejects.toThrow(
-      /編集ロック中|編集制御解除/,
-    );
+    await expect(
+      recalculateWork(jar, OPE_NO, START_OPE, sequenceFetch([...unlockResponses(), html(WORK_LOCKED_HTML)])),
+    ).rejects.toThrow(/編集ロック中|編集制御解除/);
   });
 });
 
@@ -3238,13 +3273,23 @@ describe("recalculateWork across two operations without releasing (Refs #633-23)
       const params = new URLSearchParams(bodyStr);
 
       if (url.includes("F-DES1010")) {
-        // 運行データ入力(一覧) — releaseLoadedOperation の GET/POST
+        // 運行データ入力(一覧) — releaseLoadedOperation (btnRelece) と
+        // recalculateWork 冒頭の無条件 unlockOperation (btnInitialize) の両方が
+        // この URL を叩く (Refs #633-23)。このテストは「セッションに1件だけ
+        // 読み込み済み」のバグ (loaded pointer) だけを見るので、btnInitialize
+        // 側 (ExclusionFlag) の POST は状態に影響させない — 見つかりさえすれば
+        // unlockOperation 自体は素通りさせてよい。
         if (params.get("ctl00$MainContent$btnRelece") !== null) {
           loaded = null;
         }
         return html(`<html><body><form>
           <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-LIST" />
           <input type="submit" id="btnRelece" name="ctl00$MainContent$btnRelece" value="解放" />
+          <input type="submit" id="btnInitialize" name="ctl00$MainContent$btnInitialize" value="編集制御解除" />
+          <input type="text" id="txtOperationNo" name="ctl00$MainContent$txtOperationNo" class="none" />
+          <input type="text" id="txtStartDateTime" name="ctl00$MainContent$txtStartDateTime" class="none" />
+          <input type="text" id="txtIndex" name="ctl00$MainContent$txtIndex" class="none" />
+          <input type="text" id="txtCurrentID" name="ctl00$MainContent$txtCurrentID" class="none" />
         </form></body></html>`);
       }
 
@@ -3293,6 +3338,43 @@ describe("recalculateWork across two operations without releasing (Refs #633-23)
 // 「編集ロック中のため...」の文言に変わり、ExclusionFlag ロックが真因と確定した。
 // cron 経路は「セッションに1件だけ読み込み済み」問題 (releaseLoadedOperation) だけ
 // でなく、ExclusionFlag そのもの (unlockOperation/btnInitialize) にも対処が要る。
+// recalculateByScore 自体が GET の前に無条件で unlockOperation を呼ぶ設計に
+// なった (ユーザー指示 2026-08-04「取得時にロック解除いるよ」→「recalculateByScore
+// 本体に入れて」)。recalculateWork/recalculateExpense のどちらもこれを通る。
+describe("recalculateByScore unconditional unlock (Refs #633-23)", () => {
+  it("recalculateWork always unlocks before GET, even when there was no stuck lock", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([
+      ...unlockResponses(), // unlockOperation (無条件、前)
+      html(workFormHtml()), html(workFormHtml({ recalculated: true, linkSysDisabled: false })), // GET+POST btnScore
+    ]);
+    const result = await recalculateWork(jar, OPE_NO, START_OPE, fetchImpl);
+    expect(result.linkSysEnabled).toBe(true);
+    expect(result.unlocked).toBe(true);
+  });
+
+  it("recalculateExpense also unlocks before GET (shares recalculateByScore)", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([
+      ...unlockResponses(), // unlockOperation (無条件、前)
+      html(expenseFormHtml({ rows: 1 })), html(expenseFormHtml({ rows: 1, recalculated: true })), // GET+POST btnScore
+    ]);
+    const result = await recalculateExpense(jar, OPE_NO, START_OPE, fetchImpl);
+    expect(result.unlocked).toBe(true);
+  });
+
+  it("still throws TheearthEditLockedError as a backstop if the lock is returned even after unlocking (real conflict, not a stale lock)", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([
+      ...unlockResponses(), // unlockOperation (無条件、前) — 効かなかった
+      html(WORK_LOCKED_HTML), // GET — それでもロック中の空ページ (backstop が検知)
+      // これ以降 fetch が呼ばれたら sequenceFetch が "unexpected extra fetch call" で
+      // 検知する — リトライしないことの証明 (検知 → 解除 → やり直し、の分岐は無い)。
+    ]);
+    await expect(recalculateWork(jar, OPE_NO, START_OPE, fetchImpl)).rejects.toThrow(TheearthEditLockedError);
+  });
+});
+
 describe("recalculateWorkUnattended (Refs #633-23)", () => {
   /** F-DES1010 一覧応答 — releaseLoadedOperation (btnRelece) と unlockOperation
    * (btnInitialize + 行選択用 hidden) の両方が読む要素を1つの fixture にまとめた
@@ -3309,63 +3391,41 @@ describe("recalculateWorkUnattended (Refs #633-23)", () => {
     </form></body></html>`;
   }
 
-  it("succeeds on the first try and self-unlocks afterward (no stuck lock)", async () => {
+  it("releases the session pointer, unlocks unconditionally, recalculates, then self-unlocks and releases again", async () => {
     const jar = createCookieJar();
     const fetchImpl = sequenceFetch([
       html(comboListHtml()), html(comboListHtml()), // releaseLoadedOperation (前)
-      html(workFormHtml()), html(workFormHtml({ recalculated: true, linkSysDisabled: false })), // recalculateWork
+      html(comboListHtml()), html(comboListHtml()), // recalculateWork → recalculateByScore の unlockOperation (無条件、前)
+      html(workFormHtml()), html(workFormHtml({ recalculated: true, linkSysDisabled: false })), // GET+POST btnScore
       html(comboListHtml()), html(comboListHtml()), // unlockOperation (自分のロックの後始末)
       html(comboListHtml()), html(comboListHtml()), // releaseLoadedOperation (後)
     ]);
     const result = await recalculateWorkUnattended(jar, OPE_NO, START_OPE, fetchImpl);
     expect(result.linkSysEnabled).toBe(true);
-    expect(result.recoveredFromStuckLock).toBe(false);
+    expect(result.unlocked).toBe(true);
     expect(result.selfUnlocked).toBe(true);
   });
 
-  it("recovers from a stuck ExclusionFlag lock: unlocks and retries once, then succeeds", async () => {
+  it("propagates TheearthEditLockedError (real conflict) without self-unlocking or releasing again", async () => {
     const jar = createCookieJar();
     const fetchImpl = sequenceFetch([
       html(comboListHtml()), html(comboListHtml()), // releaseLoadedOperation (前)
-      html(WORK_LOCKED_HTML), // recalculateWork 1回目 — ロック中の空ページ、POST しない
-      html(comboListHtml()), html(comboListHtml()), // unlockOperation (ロック解除)
-      html(workFormHtml()), html(workFormHtml({ recalculated: true })), // recalculateWork 2回目 — 成功
-      html(comboListHtml()), html(comboListHtml()), // unlockOperation (自分のロックの後始末)
-      html(comboListHtml()), html(comboListHtml()), // releaseLoadedOperation (後)
-    ]);
-    const result = await recalculateWorkUnattended(jar, OPE_NO, START_OPE, fetchImpl);
-    expect(result.recoveredFromStuckLock).toBe(true);
-    expect(result.selfUnlocked).toBe(true);
-  });
-
-  it("retries at most once — if it fails again after unlocking, throws the ORIGINAL lock error (not the retry's error)", async () => {
-    const jar = createCookieJar();
-    const fetchImpl = sequenceFetch([
-      html(comboListHtml()), html(comboListHtml()), // releaseLoadedOperation (前)
-      html(WORK_LOCKED_HTML), // recalculateWork 1回目 — ロック
-      html(comboListHtml()), html(comboListHtml()), // unlockOperation (ロック解除)
-      status(500), // recalculateWork 2回目 (リトライ) — ロックとは無関係の別エラーで
-      // 失敗させ、「リトライの新しいエラーではなく元の lock エラーがそのまま
-      // 投げられる」ことを見分ける。これ以降 fetch が呼ばれたら sequenceFetch が
-      // "unexpected extra fetch call" で検知する (2回で打ち切りループしないことの証明)。
-    ]);
-    let caught: unknown;
-    try {
-      await recalculateWorkUnattended(jar, OPE_NO, START_OPE, fetchImpl);
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(TheearthEditLockedError);
-    expect((caught as Error).message).toMatch(/編集ロック中|編集制御解除/); // HTTP 500 に化けていない
-  });
-
-  it("does not touch unlockOperation for errors that are not a stuck lock (btnScore missing)", async () => {
-    const jar = createCookieJar();
-    const fetchImpl = sequenceFetch([
-      html(comboListHtml()), html(comboListHtml()), // releaseLoadedOperation (前)
-      html(workFormHtml({ scoreButton: false })), // recalculateWork — ロックではない別のエラー
+      html(comboListHtml()), html(comboListHtml()), // recalculateByScore の unlockOperation (無条件、前)
+      html(WORK_LOCKED_HTML), // GET — それでもロック中 (本物の競合、backstop)
       // これ以降 fetch が呼ばれたら sequenceFetch が "unexpected extra fetch call" で
-      // 検知する — unlockOperation/self-unlock/release(後) が一切走らないことの証明。
+      // 検知する — 失敗時は self-unlock/release(後) を一切行わないことの証明。
+    ]);
+    await expect(recalculateWorkUnattended(jar, OPE_NO, START_OPE, fetchImpl)).rejects.toThrow(TheearthEditLockedError);
+  });
+
+  it("propagates other errors (btnScore missing) without self-unlocking or releasing again", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([
+      html(comboListHtml()), html(comboListHtml()), // releaseLoadedOperation (前)
+      html(comboListHtml()), html(comboListHtml()), // recalculateByScore の unlockOperation (無条件、前)
+      html(workFormHtml({ scoreButton: false })), // GET — ロックではない別のエラー
+      // これ以降 fetch が呼ばれたら sequenceFetch が "unexpected extra fetch call" で
+      // 検知する — self-unlock/release(後) が一切走らないことの証明。
     ]);
     await expect(recalculateWorkUnattended(jar, OPE_NO, START_OPE, fetchImpl)).rejects.toThrow(/btnScore/);
   });
