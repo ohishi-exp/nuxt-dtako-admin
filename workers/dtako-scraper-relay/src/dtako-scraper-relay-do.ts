@@ -6994,7 +6994,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const fetched = await Promise.all(
       months.map(async (month) => {
         try {
-          return { month, map: parseGcpDaySummaries(await relayKintaiDaySummaries(ctx.deps, { month })) };
+          // daily / kosoku の生応答と同じ 60 秒 memo に載せる (Refs #508 と同型)。
+          // 実測でここが GCP モード最大のフェーズ (1.8 秒) — 月を往復するだけで
+          // 毎回取り直していた
+          const map = await this.memoKintaiUpstream(`gcp-day:${month}`, async () =>
+            parseGcpDaySummaries(await relayKintaiDaySummaries(ctx.deps, { month })),
+          );
+          return { month, map };
         } catch (err) {
           const message = describeUnknownError(err);
           console.error(JSON.stringify({ wage_report_gcp: "error", comp_id: compId, month, error: message }));
@@ -7150,7 +7156,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const rows = merged.map(({ entry, source }) => {
       const { summary, missing } = overlay(entry.data, ym);
       return {
-        summary,
+        // ★ `source=gcp` では日別行 (`days`) を本文に載せない (2026-08-04 実測)。
+        // 最低賃金チェックは `days` を読まない (日別表はタイムカードタブが
+        // 既定ソースの `report` から作る) のに、112 名ぶんの日別が応答の大半を
+        // 占めて約 1.1MB になっていた。計算 (`computeWageRow`) は days を使い切った
+        // 後なので、落としても数字は 1 円も変わらない
+        summary: gcpOverlay ? { ...summary, days: [] } : summary,
         /** 'theearth' (デジタコ) | 'timecard' (タイムカード)。画面のバッジ用 (PR-E)。 */
         source,
         /** 給与区分 (1=月給 / 2=日給 / 3=時給 / 4=その他)。社員マスタに無ければ null。
