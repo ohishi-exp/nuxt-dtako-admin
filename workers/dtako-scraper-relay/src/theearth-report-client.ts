@@ -973,7 +973,12 @@ export interface StartSystemLinkResult {
  * `btnScore` (再集計) → その応答で `btnLinkSys` が disabled→enabled になる → その
  * viewstate で `btnLinkSys` postback、の連鎖で実行する。**theearth 側にデータを連動
  * させる本番アクション**。連動完了の成功シグナルは skill 未記載のため、各段階の状態と
- * 応答本文を log に厚く出して実機で観測できるようにする (判定は後で確定、Refs #199)。 */
+ * 応答本文を log に厚く出して実機で観測できるようにする (判定は後で確定、Refs #199)。
+ *
+ * **GET の前に必ず `unlockOperation` (`btnInitialize`) で対象運行のロックを
+ * 解除する** (`recalculateByScore` と同じ理由、Refs #633-24)。死んだセッションが
+ * 残した ExclusionFlag ロックか自分が前回残したロックかは叩く前に区別できないため、
+ * 検知を待たず毎回先に片付ける。 */
 export async function startSystemLink(
   jar: CookieJar,
   opeNo: string,
@@ -984,6 +989,7 @@ export async function startSystemLink(
   validateOpeNo(opeNo);
   validateStartOpe(startOpe);
   const url = buildOperationExpenseUrl(opeNo, startOpe);
+  await unlockOperation(jar, { opeNo, startOpe }, fetchImpl, timeoutMs);
   console.log(`[link-sys] start opeNo=${opeNo} startOpe=${startOpe}`);
 
   // 1. GET (最新 viewstate 取得)
