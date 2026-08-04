@@ -1,10 +1,13 @@
 import { describe, it, expect, vi } from "vitest";
 import { runDtakoAlcUploadTool } from "../src/mcp/tools";
+import { CRON_BATCH_MAX_ITEMS } from "../../dtako-scraper-relay/src/cron-batch";
 import type { Env } from "../src/env";
 
 const SECRET = "internal-shared-secret";
 const OPE_NO_22 = "2606050753300000004286";
 const START_OPE = "2026/07/07 7:53:30";
+const OPE_NO_22_B = "2606050753300000004287";
+const START_OPE_B = "2026/07/08 8:00:00";
 
 function env(over: Partial<Record<string, unknown>> = {}) {
   return {
@@ -133,5 +136,76 @@ describe("run_dtako_alc_upload (Refs #633-9)", () => {
       SCRAPER_RELAY: { fetch: vi.fn(async () => new Response("<html>", { status: 200 })) },
     });
     await expect(runDtakoAlcUploadTool.execute(html, baseArgs)).rejects.toThrow(/parse failed/);
+  });
+
+  // Refs #633-24
+  describe("items (バッチ)", () => {
+    const itemA = { ope_no_22: OPE_NO_22, start_ope: START_OPE };
+    const itemB = { ope_no_22: OPE_NO_22_B, start_ope: START_OPE_B };
+
+    it("**説明で items・上限件数が読める**", () => {
+      expect(runDtakoAlcUploadTool.description).toContain("items");
+      expect(runDtakoAlcUploadTool.description).toContain(String(CRON_BATCH_MAX_ITEMS));
+    });
+
+    it("単体フィールドと items のどちらも無いと拒否する", () => {
+      expect(runDtakoAlcUploadTool.inputSchema.safeParse({}).success).toBe(false);
+    });
+
+    it("items だけでも通る (単体フィールド省略可)", () => {
+      expect(runDtakoAlcUploadTool.inputSchema.safeParse({ items: [itemA] }).success).toBe(true);
+    });
+
+    it("items の要素は unko_no を持たない (strict、reimport との違い)", () => {
+      expect(
+        runDtakoAlcUploadTool.inputSchema.safeParse({ items: [{ ...itemA, unko_no: "1" }] }).success,
+      ).toBe(false);
+    });
+
+    it(`items は最大 ${CRON_BATCH_MAX_ITEMS} 件まで`, () => {
+      const items = Array.from({ length: CRON_BATCH_MAX_ITEMS }, () => itemA);
+      expect(runDtakoAlcUploadTool.inputSchema.safeParse({ items }).success).toBe(true);
+      expect(runDtakoAlcUploadTool.inputSchema.safeParse({ items: [...items, itemA] }).success).toBe(false);
+    });
+
+    it("items を渡すと {comp_id, items:[{ope_no,start_ope}]} 形式で relay へ送る (unko_no 無し)", async () => {
+      const e = env();
+      await runDtakoAlcUploadTool.execute(e, { comp_id: "0100", items: [itemA, itemB] });
+      const body = JSON.parse((relayOf(e).fetch.mock.calls[0]![1] as RequestInit).body as string);
+      expect(body).toEqual({
+        comp_id: "0100",
+        items: [
+          { ope_no: OPE_NO_22, start_ope: START_OPE },
+          { ope_no: OPE_NO_22_B, start_ope: START_OPE_B },
+        ],
+      });
+    });
+
+    it("items を渡すと単体形式のフィールドは無視される", async () => {
+      const e = env();
+      await runDtakoAlcUploadTool.execute(e, { ...baseArgs, items: [itemB] });
+      const body = JSON.parse((relayOf(e).fetch.mock.calls[0]![1] as RequestInit).body as string);
+      expect(body.items).toEqual([{ ope_no: OPE_NO_22_B, start_ope: START_OPE_B }]);
+      expect(body.ope_no).toBeUndefined();
+    });
+
+    it("バッチ応答 (results[]/truncated/remaining) もそのまま返す", async () => {
+      const payload = {
+        ok: true,
+        comp_id: "0100",
+        results: [{ ok: true, result: { ope_no: OPE_NO_22, upload_id: "abc" } }],
+        success_count: 1,
+        failure_count: 0,
+        truncated: false,
+        remaining: 0,
+        theearth_logins: 1,
+        theearth_kicked: false,
+      };
+      const e = env({
+        SCRAPER_RELAY: { fetch: vi.fn(async () => new Response(JSON.stringify(payload))) },
+      });
+      const got = await runDtakoAlcUploadTool.execute(e, { items: [itemA] });
+      expect(got).toEqual(payload);
+    });
   });
 });
