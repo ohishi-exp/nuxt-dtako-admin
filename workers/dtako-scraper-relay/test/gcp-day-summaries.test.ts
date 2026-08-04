@@ -231,6 +231,29 @@ describe("overlayGcpDayTimes", () => {
     });
   });
 
+  it("同じ暦日の行が複数あっても GCP 値は 1 回しか割り当てない (日別合計 = 月合計を保つ、Refs #667)", () => {
+    // 乗務員CD 1718 / 2026-06 実測: summary.days に同じ暦日 (06-25) が 2 行あり、
+    // どちらにも GCP 値を割り当てると日別合計が月合計を超えて「差分」が赤字になった。
+    const res = overlayGcpDayTimes(
+      summary({ days: [day({ day: 1 }), day({ day: 1, isRestDay: true })] }),
+      parts,
+      "2026-06",
+    );
+    expect(res.summary.days).toEqual([
+      // 1 行目 (先勝ち) だけが GCP 値を受け取る
+      { day: 1, isRestDay: false, restraintMinutes: 960, workingMinutes: 800, overtimeMinutes: 300, nightMinutes: 40, overtimeNightMinutes: 20 },
+      // 2 行目 (同じ暦日) は「GCP に勤務が無い日」と同じ扱い: 0 分・isRestDay は元のまま
+      { day: 1, isRestDay: true, restraintMinutes: 0, workingMinutes: 0, overtimeMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0 },
+      { day: 7, isRestDay: false, holidayKind: "legal", restraintMinutes: 300, workingMinutes: 240, overtimeMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0 },
+    ]);
+    // 不変条件: 日別行の合計 = 月合計 (二重計上されていない)
+    const dailySum = (pick: (d: (typeof res.summary.days)[number]) => number | null) =>
+      res.summary.days.reduce((acc, d) => acc + (pick(d) ?? 0), 0);
+    expect(dailySum((d) => d.workingMinutes)).toBe(res.summary.workingMinutes);
+    expect(dailySum((d) => d.restraintMinutes)).toBe(res.summary.restraintMinutes);
+    expect(dailySum((d) => d.overtimeMinutes)).toBe(res.summary.overtimeMinutes);
+  });
+
   it("GCP に行が無い乗務員は 0 分ではなく欠測にする (最低賃金割れの判定を回さない)", () => {
     for (const p of [null, new Map<string, GcpDayPart>(), parts]) {
       const res = overlayGcpDayTimes(summary({ days: [day()] }), p, "2026-07");
