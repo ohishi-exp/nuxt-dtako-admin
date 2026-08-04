@@ -65,6 +65,7 @@ import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resol
 import { scrapeJobKey } from "./scrape-dispatch";
 import { buildOperationZipPayload } from "./operation-zip";
 import { recalculateBeforeFetch } from "./theearth-recalculate";
+import { decideRelogin, isEntryReusable, type LoginSessionEntry } from "./theearth-login-session";
 import {
   DtakoReimportError,
   DtakoReimportPushUncertainError,
@@ -589,6 +590,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * dvr-viewer.vue の loadNotifications+loadMasters 並列発火で顕在化)。
    * scrapeQueue と同じ `PromiseQueue` 実装を利用する。 */
   private theearthQueue = new PromiseQueue();
+  /** 自前ログイン経路 (`runOperationZip`/`runDtakoReimportJob`/
+   * `runDtakoAlcUploadJob`、いずれも `scrapeQueue` 経由で直列化済み) が使い回す
+   * theearth ログインセッション。**DO インスタンス内のメモリだけ**に置き、
+   * `ctx.storage` には保存しない (`theearth-session.ts` の DO storage セッション
+   * — `dvr-api`/`daily-report-api` のブラウザ由来経路、2213行付近 — とは別物。
+   * こちらは今まで何も永続化していなかった posture を変えない。DO が evict
+   * されたらログインし直すだけで十分。Refs #633-20)。 */
+  private theearthLoginCache: LoginSessionEntry<CookieJar> | null = null;
 
   constructor(ctx: DurableObjectState, env: RelayEnv) {
     super(ctx, env);
@@ -1224,6 +1233,99 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
   }
 
+  /** 1 job (`runOperationZip`/`runDtakoReimportJob`/`runDtakoAlcUploadJob` の
+   * 1 回の実行) の間だけ生きる、再ログイン予算とログイン実績のカウンタ。
+   * `theearth-login-session.ts` の判定 (`decideRelogin`) が読む
+   * `reloginAttempts` と、応答/ログに載せる `logins` を持つ。job ごとに
+   * 呼び出し側 (`runOperationZip` 等) が新規に作る — DO インスタンスを跨いで
+   * 持ち越さない。 */
+  private makeTheearthLoginJobState(): { reloginAttempts: number; logins: Array<LoginResult & { at: number }> } {
+    return { reloginAttempts: 0, logins: [] };
+  }
+
+  /** 自前ログインを実行し、`this.theearthLoginCache` を更新する。ログインの
+   * たびに `kicked`/`kickedUserName` を構造化ログへ出す (issue #633-20 の
+   * 「代わりに可視化する」節 — 繰り返し蹴っていることが黙って進まないように
+   * するのが目的)。 */
+  private async freshTheearthLoginSession(
+    account: DtakoAccountRaw,
+    jobState: { reloginAttempts: number; logins: Array<LoginResult & { at: number }> },
+  ): Promise<LoginSessionEntry<CookieJar>> {
+    const jar = createCookieJar();
+    const result = await login(jar, {
+      compId: account.comp_id,
+      userName: account.user_name,
+      userPass: account.user_pass,
+    });
+    const now = Date.now();
+    jobState.logins.push({ ...result, at: now });
+    console.log(
+      JSON.stringify({
+        theearth_login_session: "login",
+        comp_id: account.comp_id,
+        kicked: result.kicked,
+        kicked_user_name: result.kickedUserName ?? null,
+        logins_this_job: jobState.logins.length,
+      }),
+    );
+    const entry: LoginSessionEntry<CookieJar> = { compId: account.comp_id, jar, loggedInAt: now, lastUsedAt: now };
+    this.theearthLoginCache = entry;
+    return entry;
+  }
+
+  /**
+   * theearth を叩く 1 操作 (`recalculateWork`/`downloadOperationCsvZip` 等) を、
+   * DO インスタンス内で使い回しているログインセッション経由で実行する
+   * (Refs #633-20)。判定ロジック本体は `theearth-login-session.ts`
+   * (`isEntryReusable`/`decideRelogin`) — ここは配線だけ:
+   *
+   * 1. 使い回せるキャッシュがあればそれを使う。無ければ新規ログイン
+   * 2. `run` が成功したら `lastUsedAt` を更新して返す (idle TTL の起点)
+   * 3. `VenusSessionExpiredError` を受けたらキャッシュを破棄し、
+   *    `decideRelogin` (予算 + 最短寿命ガード) が許可した時だけ**1 回だけ**
+   *    再ログインして**同じ操作を1回だけ**やり直す。拒否されたら
+   *    理由をログに残して元の例外をそのまま投げる (呼び出し元が 401 に
+   *    マップする、既存の挙動を変えない)
+   *
+   * **`scrapeQueue` (`enqueueScrape`) の直列化の中でしか呼ばれない** — 同一
+   * comp_id への並行呼び出しは無いので、`this.theearthLoginCache` の
+   * 読み書きに新しいロックは要らない。
+   */
+  private async withTheearthLoginSession<T>(
+    account: DtakoAccountRaw,
+    jobState: { reloginAttempts: number; logins: Array<LoginResult & { at: number }> },
+    run: (jar: CookieJar) => Promise<T>,
+  ): Promise<T> {
+    const now = Date.now();
+    const entry = isEntryReusable(this.theearthLoginCache, account.comp_id, now)
+      ? this.theearthLoginCache!
+      : await this.freshTheearthLoginSession(account, jobState);
+    try {
+      const result = await run(entry.jar);
+      entry.lastUsedAt = Date.now();
+      return result;
+    } catch (err) {
+      if (!(err instanceof VenusSessionExpiredError)) throw err;
+      if (this.theearthLoginCache === entry) this.theearthLoginCache = null;
+      const decision = decideRelogin(entry, Date.now(), jobState.reloginAttempts);
+      console.error(
+        JSON.stringify({
+          theearth_login_session: "session_expired",
+          comp_id: account.comp_id,
+          relogin_allowed: decision.allow,
+          relogin_reason: decision.reason ?? null,
+          relogin_attempts_used: jobState.reloginAttempts,
+        }),
+      );
+      if (!decision.allow) throw err;
+      jobState.reloginAttempts++;
+      const freshEntry = await this.freshTheearthLoginSession(account, jobState);
+      const result = await run(freshEntry.jar);
+      freshEntry.lastUsedAt = Date.now();
+      return result;
+    }
+  }
+
   /**
    * POST /cron/dtako/operation-zip — body {comp_id, ope_no, start_ope}。運行 1 件
    * ぶんの csvdata.zip を**自前ログイン**で取る (Refs
@@ -1271,11 +1373,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     startOpe: string,
     recalculate: boolean,
   ): Promise<Response> {
-    const jar = createCookieJar();
+    const jobState = this.makeTheearthLoginJobState();
     try {
-      await login(jar, { compId: account.comp_id, userName: account.user_name, userPass: account.user_pass });
       const recalculateResult = recalculate
-        ? await recalculateBeforeFetch(() => recalculateWork(jar, opeNo, startOpe))
+        ? await recalculateBeforeFetch(() =>
+            this.withTheearthLoginSession(account, jobState, (jar) => recalculateWork(jar, opeNo, startOpe)),
+          )
         : null;
       if (recalculateResult && !recalculateResult.ok) {
         console.error(
@@ -1287,7 +1390,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           }),
         );
       }
-      const zip = await downloadOperationCsvZip(jar, { opeNo, startOpe });
+      const zip = await this.withTheearthLoginSession(account, jobState, (jar) =>
+        downloadOperationCsvZip(jar, { opeNo, startOpe }),
+      );
       const payload = buildOperationZipPayload(zip);
       console.log(
         JSON.stringify({
@@ -1298,6 +1403,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           bytes: payload.bytes,
           omitted: payload.omitted,
           entries: payload.entries,
+          theearth_logins: jobState.logins.length,
+          theearth_kicked: jobState.logins.some((l) => l.kicked),
         }),
       );
       return Response.json({
@@ -1311,6 +1418,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         omitted: payload.omitted,
         limit_bytes: payload.limitBytes,
         entries: payload.entries,
+        theearth_logins: jobState.logins.length,
+        theearth_kicked: jobState.logins.some((l) => l.kicked),
       });
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
@@ -1411,20 +1520,22 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     cfAccessClientSecret: string,
   ): Promise<Response> {
     const base = origin.replace(/\/+$/, "");
-    // 自前ログインの jar は再集計 (recalculateWork) と zip 取得
-    // (downloadOperationCsvZip) で共有する — 両方が同じ `CookieJar` 型を取り、
-    // 同一セッションの中で「再集計してから取る」を成立させる (Refs #633-19)。
-    const jar = createCookieJar();
+    // 自前ログインセッションは再集計 (recalculateWork) と zip 取得
+    // (downloadOperationCsvZip) で使い回す — DO インスタンス内キャッシュ経由
+    // (`withTheearthLoginSession`、Refs #633-20)。login() はどちらの呼び出しに
+    // も埋め込まない — `fetchZip` が `recalculateWork` を経由しなくても
+    // (将来そういう経路ができても) ログイン済み jar を確実に使える。
+    const jobState = this.makeTheearthLoginJobState();
     const deps: DtakoReimportDeps = {
       recalculateWork: async () => {
-        await login(jar, {
-          compId: account.comp_id,
-          userName: account.user_name,
-          userPass: account.user_pass,
-        });
-        await recalculateWork(jar, input.opeNo, input.startOpe);
+        await this.withTheearthLoginSession(account, jobState, (jar) =>
+          recalculateWork(jar, input.opeNo, input.startOpe),
+        );
       },
-      fetchZip: () => downloadOperationCsvZip(jar, { opeNo: input.opeNo, startOpe: input.startOpe }),
+      fetchZip: () =>
+        this.withTheearthLoginSession(account, jobState, (jar) =>
+          downloadOperationCsvZip(jar, { opeNo: input.opeNo, startOpe: input.startOpe }),
+        ),
       onpremAutoload: (path, init) =>
         fetch(`${base}${path}`, {
           ...init,
@@ -1461,9 +1572,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           bytes: report.bytes,
           entries: report.entries,
           http_status: report.http_status,
+          theearth_logins: jobState.logins.length,
+          theearth_kicked: jobState.logins.some((l) => l.kicked),
         }),
       );
-      return Response.json(report);
+      return Response.json({
+        ...report,
+        theearth_logins: jobState.logins.length,
+        theearth_kicked: jobState.logins.some((l) => l.kicked),
+      });
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
         return Response.json({ error: THEEARTH_SESSION_EXPIRED_MESSAGE }, { status: 401 });
@@ -1542,19 +1659,20 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     input: { opeNo: string; startOpe: string },
     sharedSecret: string,
   ): Promise<Response> {
-    // 自前ログインの jar は再集計 (recalculateWork) と zip 取得
-    // (downloadOperationCsvZip) で共有する (dtako-reimport と同じ理由、Refs #633-19)。
-    const jar = createCookieJar();
+    // 自前ログインセッションは再集計 (recalculateWork) と zip 取得
+    // (downloadOperationCsvZip) で使い回す — DO インスタンス内キャッシュ経由
+    // (`withTheearthLoginSession`、dtako-reimport と同じ理由、Refs #633-20)。
+    const jobState = this.makeTheearthLoginJobState();
     const deps: DtakoAlcUploadDeps = {
       recalculateWork: async () => {
-        await login(jar, {
-          compId: account.comp_id,
-          userName: account.user_name,
-          userPass: account.user_pass,
-        });
-        await recalculateWork(jar, input.opeNo, input.startOpe);
+        await this.withTheearthLoginSession(account, jobState, (jar) =>
+          recalculateWork(jar, input.opeNo, input.startOpe),
+        );
       },
-      fetchZip: () => downloadOperationCsvZip(jar, { opeNo: input.opeNo, startOpe: input.startOpe }),
+      fetchZip: () =>
+        this.withTheearthLoginSession(account, jobState, (jar) =>
+          downloadOperationCsvZip(jar, { opeNo: input.opeNo, startOpe: input.startOpe }),
+        ),
       uploadZip: (filename, zipBytes) =>
         uploadDtakoZipViaAlcInternalProxy(
           { sharedSecret, tenantId: account.tenant_id, filename, zipBytes },
@@ -1581,6 +1699,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         bytes: report.bytes,
         upload_id: report.upload_id,
         split_failed: report.split_failed,
+        theearth_logins: jobState.logins.length,
+        theearth_kicked: jobState.logins.some((l) => l.kicked),
       };
       // split は非同期 — 失敗件数が既にこの応答に乗っていれば error レベルで鳴らす
       // (`runCronDtakoScrape` と同じ方針)。0/null (未確定) は info ログのみ。
@@ -1595,7 +1715,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       } else {
         console.log(JSON.stringify({ ...line, status: "success" }));
       }
-      return Response.json(report);
+      return Response.json({
+        ...report,
+        theearth_logins: jobState.logins.length,
+        theearth_kicked: jobState.logins.some((l) => l.kicked),
+      });
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
         return Response.json({ error: THEEARTH_SESSION_EXPIRED_MESSAGE }, { status: 401 });
