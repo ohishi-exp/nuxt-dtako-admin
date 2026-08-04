@@ -21,6 +21,7 @@ import type {
 } from "../../../dtako-scraper-relay/src/theearth-restraint-client";
 import { resolveSecretBinding } from "../../../dtako-scraper-relay/src/cron";
 import { OPE_NO_RE, START_OPE_RE } from "../../../dtako-scraper-relay/src/theearth-report-client";
+import { CRON_BATCH_MAX_ITEMS } from "../../../dtako-scraper-relay/src/cron-batch";
 import {
   crossMonthMinutesByDate,
   kosokuPartsByDate,
@@ -956,31 +957,90 @@ export const getDtakoScrapeProgressTool = {
 
 // ── get_operation_zip ────────────────────────────────────────────────────────
 
-const getOperationZipArgs = z
+const getOperationZipItemArgs = z
   .object({
     ope_no_22: z
       .string()
       .regex(OPE_NO_RE)
       .describe(
         "運行No。**theearth 側の 22 桁**。オンプレの unko_no は 23 桁 — " +
-          "呼び出し元が末尾 1 桁を落として渡すこと (この tool は 22 桁しか受け付けない)。" +
-          "rust-ichibanboshi の day-events (#273) が返す zip_request.ope_no がそのまま渡せる",
+          "呼び出し元が末尾 1 桁を落として渡すこと。",
       ),
     start_ope: z
       .string()
       .regex(START_OPE_RE)
       .describe('出庫日時。"YYYY/MM/DD H:mm:ss" (時は0埋めしない、例 "2026/07/07 7:53:30")'),
-    comp_id: z.string().optional().describe("会社。省略すると relay の既定 (KINTAI_COMP_ID)"),
+    recalculate: z
+      .boolean()
+      .optional()
+      .describe(
+        "true にすると relay が読む前に theearth の作業時間を再集計する (書き込み)。既定 false。",
+      ),
   })
   .strict();
 
+const getOperationZipArgs = z
+  .object({
+    ope_no_22: z
+      .string()
+      .regex(OPE_NO_RE)
+      .optional()
+      .describe(
+        "運行No。**theearth 側の 22 桁**。オンプレの unko_no は 23 桁 — " +
+          "呼び出し元が末尾 1 桁を落として渡すこと (この tool は 22 桁しか受け付けない)。" +
+          "rust-ichibanboshi の day-events (#273) が返す zip_request.ope_no がそのまま渡せる。" +
+          "**`items` を渡す場合は省略する** (単体形式専用のフィールド)。",
+      ),
+    start_ope: z
+      .string()
+      .regex(START_OPE_RE)
+      .optional()
+      .describe(
+        '出庫日時。"YYYY/MM/DD H:mm:ss" (時は0埋めしない、例 "2026/07/07 7:53:30")。' +
+          "**`items` を渡す場合は省略する**。",
+      ),
+    recalculate: z
+      .boolean()
+      .optional()
+      .describe(
+        "**既定 false — 読むだけで theearth 側は一切書き換えない。** " +
+          "true にすると relay が読む前に theearth の作業時間を再集計する (書き込み操作)。" +
+          "**単体形式のときだけ有効** — `items` を渡す場合は items[].recalculate を使う。",
+      ),
+    comp_id: z.string().optional().describe("会社。省略すると relay の既定 (KINTAI_COMP_ID)"),
+    items: z
+      .array(getOperationZipItemArgs)
+      .min(1)
+      .max(CRON_BATCH_MAX_ITEMS)
+      .optional()
+      .describe(
+        `複数運行をまとめて 1 回の呼び出しで処理する場合の配列 (**上限 ${CRON_BATCH_MAX_ITEMS} 件、` +
+          "超過は relay が 400 で拒否する — 切り詰めない)。指定すると単体形式の " +
+          "ope_no_22/start_ope/recalculate は無視され、items の各要素がそれぞれ処理される。" +
+          "**★ items 形式の応答には zip_base64 が含まれない** (`bytes`/`entries`/`omitted` の" +
+          "メタ情報のみ) — 20件分の base64 で応答が膨れるのを避けるため。中身のバイト列が" +
+          "要る運行は、その運行だけ単体形式 (items を使わない呼び出し) で個別に取り直すこと。" +
+          "応答には results[]/success_count/failure_count/truncated/remaining/theearth_logins " +
+          "が載る。theearth セッション切れ (truncated: true) の場合、remaining 件は未着手なので " +
+          "残りを別の呼び出しで処理すること。",
+      ),
+  })
+  .strict()
+  .refine((v) => (v.items && v.items.length > 0) || (v.ope_no_22 && v.start_ope), {
+    message: "ope_no_22 と start_ope の組、または items のどちらかが必要です",
+  });
+
 /**
- * 運行 1 件ぶんの csvdata.zip を取る (Refs ohishi-exp/rust-ichibanboshi#274, #205 の 59)。
+ * 運行 1 件ぶん (または `items` で複数件まとめて) の csvdata.zip を取る (Refs
+ * ohishi-exp/rust-ichibanboshi#274, #205 の 59、複数件対応は Refs #633)。
  *
  * **read-only。** relay の `POST /kintai-relay/operation-zip` を叩くだけ —
  * relay 側が `DTAKO_ACCOUNTS` で自前ログインして theearth から zip を取る
  * (ブラウザセッションに依存しない)。取り込み (`autoload` への POST) はしない、
  * 1 段目だけの tool。
+ *
+ * **単体形式 (`ope_no_22`/`start_ope`) は `items` 追加前と body/挙動を変えていない**
+ * — `items` が無ければ従来どおりの1件形式のまま relay へ送る (Refs #633-24)。
  */
 export const getOperationZipTool = {
   name: "get_operation_zip",
@@ -993,24 +1053,40 @@ export const getOperationZipTool = {
     "代わりに `omitted: true` が立つ (壊れた zip を黙って返さない)。" +
     "単一運行の実測は 8.7KB — 超えるなら ope_no_22/start_ope の指定間違いを疑うこと。" +
     "`entries` に zip 内の CSV 名 (KUDGFUL/KUDGIVT/KUDGURI/SokudoData 等) が入るので、" +
-    "取り込み側が探すファイルが揃っているかを事前に確認できる。",
+    "取り込み側が探すファイルが揃っているかを事前に確認できる。" +
+    "**既定は読むだけ (theearth 側は書き換えない)。** `recalculate: true` を渡すと、読む前に " +
+    "relay が theearth の作業時間を再集計する (書き込み操作、既定 false のまま変えない)。" +
+    `**複数運行をまとめる場合は \`items\` (最大 ${CRON_BATCH_MAX_ITEMS} 件、超過は relay が400) を使う。` +
+    "★ items 形式では zip_base64 は返らない (bytes/entries/omitted のみ) — 中身が要る運行は" +
+    "単体形式で個別に取り直すこと。応答に results[]/success_count/failure_count/truncated/" +
+    "remaining/theearth_logins が載る。",
   inputSchema: getOperationZipArgs,
   execute: async (env: Env, args: z.infer<typeof getOperationZipArgs>) => {
     const relay = env.SCRAPER_RELAY;
     if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
     const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
     if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+    const body = args.items
+      ? {
+          comp_id: args.comp_id,
+          items: args.items.map((item) => ({
+            ope_no: item.ope_no_22,
+            start_ope: item.start_ope,
+            recalculate: item.recalculate === true,
+          })),
+        }
+      : { ope_no: args.ope_no_22, start_ope: args.start_ope, recalculate: args.recalculate, comp_id: args.comp_id };
     const res = await relay.fetch("https://relay.internal/kintai-relay/operation-zip", {
       method: "POST",
       headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
-      body: JSON.stringify({ ope_no: args.ope_no_22, start_ope: args.start_ope, comp_id: args.comp_id }),
+      body: JSON.stringify(body),
     });
-    const body = await res.text();
-    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
+    const responseBody = await res.text();
+    if (!res.ok) throw new Error(`relay: status ${res.status}: ${responseBody.slice(0, 200)}`);
     try {
-      return JSON.parse(body) as unknown;
+      return JSON.parse(responseBody) as unknown;
     } catch {
-      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
+      throw new Error(`relay: parse failed: ${responseBody.slice(0, 200)}`);
     }
   },
 };
@@ -1021,33 +1097,89 @@ export const getOperationZipTool = {
  * `ope_no_22` とは桁数が違う。混同すると存在しない運行を指す)。 */
 const UNKO_NO_23_RE = /^\d{23}$/;
 
+/** `unko_no` の説明文 (単体・items 共通)。reset_timecard の値で意味が変わる
+ * (dtako-reimport.ts の `isUnkoNoAcceptable`/module doc 参照)。**「間違えると
+ * 別の運行に取り込む」という説明は reset_timecard=true のときだけ正しい** —
+ * reset_timecard=false (既定) では取り込み対象を zip (ope_no_22+start_ope) が
+ * 決めるため、unko_no は「1件に紐付ける歯止めと監査ラベル」でしかない
+ * (Refs #633-24、旧説明のせいで作業が止まった)。 */
+const UNKO_NO_DESCRIPTION =
+  "オンプレ側の運行NO。**23桁**、ope_no_22 とは桁が違う (末尾1桁 = 対象CD を含む値)。" +
+  "**reset_timecard=false (既定) のときは「1件に紐付ける歯止めと監査ラベル」でしかない** — " +
+  "取り込み対象は zip (ope_no_22 + start_ope) が決めるため、unko_no を間違えても別の運行に" +
+  "取り込まれることはない。**reset_timecard=true のときだけ意味が変わる**: 23桁目 (対象CD) が" +
+  "「2マンの何人目か」を区別する実物の値として使われるため、ここを間違えると別の乗務員の" +
+  "勤務時間を書き換えてしまう。**2マンの運行でも、22桁 (対象CD抜き) 1本の投入で主・助手の" +
+  "両方が取り込まれる** (`operations_count: 2` で実証済み) — `…1`/`…2` の2桁を2回に分けて" +
+  "呼ぶ必要は無い。";
+
+const runDtakoReimportItemArgs = z
+  .object({
+    ope_no_22: z.string().regex(OPE_NO_RE).describe("運行No。theearth 側の22桁。"),
+    start_ope: z
+      .string()
+      .regex(START_OPE_RE)
+      .describe('出庫日時。"YYYY/MM/DD H:mm:ss" (時は0埋めしない、例 "2026/07/07 7:53:30")'),
+    unko_no: z.string().regex(UNKO_NO_23_RE).describe(UNKO_NO_DESCRIPTION),
+    reset_timecard: z
+      .boolean()
+      .optional()
+      .describe("true で②(取り込み)に続けて③(勤務時間再登録)まで実行する。既定 false。"),
+  })
+  .strict();
+
 const runDtakoReimportArgs = z
   .object({
     ope_no_22: z
       .string()
       .regex(OPE_NO_RE)
-      .describe("運行No。theearth 側の22桁 (get_operation_zip の ope_no_22 と同じ)。"),
+      .optional()
+      .describe(
+        "運行No。theearth 側の22桁 (get_operation_zip の ope_no_22 と同じ)。" +
+          "**`items` を渡す場合は省略する** (単体形式専用のフィールド)。",
+      ),
     start_ope: z
       .string()
       .regex(START_OPE_RE)
-      .describe('出庫日時。"YYYY/MM/DD H:mm:ss" (時は0埋めしない、例 "2026/07/07 7:53:30")'),
+      .optional()
+      .describe(
+        '出庫日時。"YYYY/MM/DD H:mm:ss" (時は0埋めしない、例 "2026/07/07 7:53:30")。' +
+          "**`items` を渡す場合は省略する**。",
+      ),
     unko_no: z
       .string()
       .regex(UNKO_NO_23_RE)
-      .describe(
-        "オンプレ側の運行NO。**23桁**、ope_no_22 とは桁が違う (末尾1桁を含む値)。" +
-          "取り込み先 (社内 nginx / dtako_events) を名指しする鍵で、ここを間違えると別の運行に取り込む。",
-      ),
+      .optional()
+      .describe(`${UNKO_NO_DESCRIPTION} **\`items\` を渡す場合は省略する** (items[].unko_no を使う)。`),
     reset_timecard: z
       .boolean()
       .optional()
       .describe(
         "true で②(取り込み)に続けて③(勤務時間再登録、resetby-unko-no)まで実行する。" +
-          "**既定 false。** 破壊的操作 (time_card_dtako への書き戻し) を既定で増やさない。",
+          "**既定 false。** 破壊的操作 (time_card_dtako への書き戻し) を既定で増やさない。" +
+          "**単体形式のときだけ有効** — `items` を渡す場合は items[].reset_timecard を使う。",
       ),
     comp_id: z.string().optional().describe("会社。省略すると relay の既定 (KINTAI_COMP_ID)"),
+    items: z
+      .array(runDtakoReimportItemArgs)
+      .min(1)
+      .max(CRON_BATCH_MAX_ITEMS)
+      .optional()
+      .describe(
+        `複数運行をまとめて 1 回の呼び出しで取り込む場合の配列 (**上限 ${CRON_BATCH_MAX_ITEMS} 件、` +
+          "超過は relay が 400 で拒否する — 切り詰めない)。**`unko_no` は items の各要素にも必須**" +
+          " (alc-upload と違い reimport は常に unko_no が要る)。指定すると単体形式の " +
+          "ope_no_22/start_ope/unko_no/reset_timecard は無視される。応答には " +
+          "results[]/success_count/failure_count/truncated/remaining/theearth_logins が載る — " +
+          "theearth セッション切れ (truncated: true) の場合、remaining 件は未着手。" +
+          "**results[i] に uncertain: true が含まれる項目は、同じ引数で再実行しないこと** " +
+          "(push 後に応答不明=二重取り込みの可能性)。",
+      ),
   })
-  .strict();
+  .strict()
+  .refine((v) => (v.items && v.items.length > 0) || (v.ope_no_22 && v.start_ope && v.unko_no), {
+    message: "ope_no_22/start_ope/unko_no の組、または items のどちらかが必要です",
+  });
 
 /**
  * 運行 1 件の csvdata.zip を取得〜オンプレ取り込みまで 1 tool で完結させる
@@ -1091,7 +1223,11 @@ export const runDtakoReimportTool = {
     "再実行しないこと。** push (②) を送った後に応答を確定できなかった場合の印で、" +
     "取り込みは応答より前に走るため既に取り込み済みの可能性がある。盲目的な" +
     "再実行は二重取り込みになりうる — 再実行の前に対象の dtako_events / " +
-    "time_card_dtako が既に更新されていないかを別経路で確認すること。",
+    "time_card_dtako が既に更新されていないかを別経路で確認すること。" +
+    `**unko_no: ${UNKO_NO_DESCRIPTION}** ` +
+    `**複数運行をまとめる場合は \`items\` (最大 ${CRON_BATCH_MAX_ITEMS} 件、超過は relay が400) を使う。` +
+    "items の各要素にも unko_no が必須。応答に results[]/success_count/failure_count/" +
+    "truncated/remaining/theearth_logins が載る。",
   inputSchema: runDtakoReimportArgs,
   // **write tool。** read-only 一覧 (test/mcp/tools.test.ts の READ_ONLY) には
   // 入れない — 取り込みという破壊的操作を伴うため (受け入れ条件7)
@@ -1101,45 +1237,88 @@ export const runDtakoReimportTool = {
     if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
     const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
     if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+    const body = args.items
+      ? {
+          comp_id: args.comp_id,
+          items: args.items.map((item) => ({
+            ope_no: item.ope_no_22,
+            start_ope: item.start_ope,
+            unko_no: item.unko_no,
+            reset_timecard: item.reset_timecard === true,
+          })),
+        }
+      : {
+          ope_no: args.ope_no_22,
+          start_ope: args.start_ope,
+          unko_no: args.unko_no,
+          reset_timecard: args.reset_timecard === true,
+          comp_id: args.comp_id,
+        };
     const res = await relay.fetch("https://relay.internal/kintai-relay/dtako-reimport", {
       method: "POST",
       headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
-      body: JSON.stringify({
-        ope_no: args.ope_no_22,
-        start_ope: args.start_ope,
-        unko_no: args.unko_no,
-        reset_timecard: args.reset_timecard === true,
-        comp_id: args.comp_id,
-      }),
+      body: JSON.stringify(body),
     });
-    const body = await res.text();
-    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
+    const responseBody = await res.text();
+    if (!res.ok) throw new Error(`relay: status ${res.status}: ${responseBody.slice(0, 200)}`);
     try {
-      return JSON.parse(body) as unknown;
+      return JSON.parse(responseBody) as unknown;
     } catch {
-      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
+      throw new Error(`relay: parse failed: ${responseBody.slice(0, 200)}`);
     }
   },
 };
 
 // ── run_dtako_alc_upload ─────────────────────────────────────────────────────
 
+const runDtakoAlcUploadItemArgs = z
+  .object({
+    ope_no_22: z.string().regex(OPE_NO_RE).describe("運行No。theearth 側の22桁。"),
+    start_ope: z
+      .string()
+      .regex(START_OPE_RE)
+      .describe('出庫日時。"YYYY/MM/DD H:mm:ss" (時は0埋めしない、例 "2026/07/07 7:53:30")'),
+  })
+  .strict();
+
 const runDtakoAlcUploadArgs = z
   .object({
     ope_no_22: z
       .string()
       .regex(OPE_NO_RE)
+      .optional()
       .describe(
         "運行No。theearth 側の22桁 (get_operation_zip の ope_no_22 と同じ)。" +
-          "オンプレの unko_no (23桁) を持っている場合は末尾1桁を落として渡すこと。",
+          "オンプレの unko_no (23桁) を持っている場合は末尾1桁を落として渡すこと。" +
+          "**`items` を渡す場合は省略する** (単体形式専用のフィールド)。",
       ),
     start_ope: z
       .string()
       .regex(START_OPE_RE)
-      .describe('出庫日時。"YYYY/MM/DD H:mm:ss" (時は0埋めしない、例 "2026/07/07 7:53:30")'),
+      .optional()
+      .describe(
+        '出庫日時。"YYYY/MM/DD H:mm:ss" (時は0埋めしない、例 "2026/07/07 7:53:30")。' +
+          "**`items` を渡す場合は省略する**。",
+      ),
     comp_id: z.string().optional().describe("会社。省略すると relay の既定 (KINTAI_COMP_ID)"),
+    items: z
+      .array(runDtakoAlcUploadItemArgs)
+      .min(1)
+      .max(CRON_BATCH_MAX_ITEMS)
+      .optional()
+      .describe(
+        `複数運行をまとめて 1 回の呼び出しで alc へ上げ直す場合の配列 (**上限 ` +
+          `${CRON_BATCH_MAX_ITEMS} 件、超過は relay が 400 で拒否する — 切り詰めない)。` +
+          "unko_no は無い (alc-upload に unko_no は不要なので items にも無い)。" +
+          "relay 側が直列に処理するので、**items を使えば「同一 comp_id を並列に叩かない」" +
+          "を自分で気をつける必要が無くなる**。応答には results[]/success_count/" +
+          "failure_count/truncated/remaining/theearth_logins が載る。",
+      ),
   })
-  .strict();
+  .strict()
+  .refine((v) => (v.items && v.items.length > 0) || (v.ope_no_22 && v.start_ope), {
+    message: "ope_no_22 と start_ope の組、または items のどちらかが必要です",
+  });
 
 /**
  * 運行 1 件の csvdata.zip を theearth から取得し、そのまま alc へ上げ直す
@@ -1170,7 +1349,11 @@ export const runDtakoAlcUploadTool = {
     "**has_kudgivt は DEFAULT FALSE に戻る。** split が成功するまで、この運行は" +
     "読み取り側 (/api/dtako/events・/etags・Y時間) から一時的に消える。" +
     "**同一 comp_id を並列に叩かないこと。** theearth のセッションは1社1本しか" +
-    "持てず、並列で呼ぶと hang や 500 になりうる — 1件ずつ呼ぶこと。",
+    "持てず、並列で呼ぶと hang や 500 になりうる — 1件ずつ呼ぶこと " +
+    `(または \`items\` で最大 ${CRON_BATCH_MAX_ITEMS} 件をまとめて渡すと relay が直列に処理する)。` +
+    "**複数運行をまとめる場合は `items` を使う。unko_no は無い。★ items 形式でも zip_base64 は" +
+    "元々含まれない (このtoolの応答にzip_base64は無い)。** 応答に results[]/success_count/" +
+    "failure_count/truncated/remaining/theearth_logins が載る。",
   inputSchema: runDtakoAlcUploadArgs,
   // **write tool。** read-only 一覧 (test/mcp/tools.test.ts の READ_ONLY) には
   // 入れない — alc への書き込み (upsert) を伴うため
@@ -1180,21 +1363,23 @@ export const runDtakoAlcUploadTool = {
     if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
     const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
     if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+    const body = args.items
+      ? {
+          comp_id: args.comp_id,
+          items: args.items.map((item) => ({ ope_no: item.ope_no_22, start_ope: item.start_ope })),
+        }
+      : { ope_no: args.ope_no_22, start_ope: args.start_ope, comp_id: args.comp_id };
     const res = await relay.fetch("https://relay.internal/kintai-relay/dtako-alc-upload", {
       method: "POST",
       headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
-      body: JSON.stringify({
-        ope_no: args.ope_no_22,
-        start_ope: args.start_ope,
-        comp_id: args.comp_id,
-      }),
+      body: JSON.stringify(body),
     });
-    const body = await res.text();
-    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
+    const responseBody = await res.text();
+    if (!res.ok) throw new Error(`relay: status ${res.status}: ${responseBody.slice(0, 200)}`);
     try {
-      return JSON.parse(body) as unknown;
+      return JSON.parse(responseBody) as unknown;
     } catch {
-      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
+      throw new Error(`relay: parse failed: ${responseBody.slice(0, 200)}`);
     }
   },
 };
