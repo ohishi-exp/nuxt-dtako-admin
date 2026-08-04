@@ -6165,6 +6165,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     cache: UpstreamCacheClient | null,
     timer?: PhaseTimer,
     tracker?: CacheStateTracker,
+    /** true なら `kosoku-daily` を**取らない** (Refs 2026-08-04)。`source=gcp` は
+     * 時間を GCP `day_summaries` で丸ごと差し替えるので、ここで 1.7MB × 2 か月を
+     * 取っても捨てるだけ。休暇・休日区分・打刻エラーは `/api/kintai/daily` 側から
+     * 引くので、落としても GCP モードの出力は変わらない。 */
+    skipKosoku = false,
   ): Promise<{
     current: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
     prev: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
@@ -6222,12 +6227,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       ),
       // kosoku の memo は fetchKosokuRaw の生応答層にある (Refs #508) — 画面の
       // `/kintai/kosoku-daily` 中継と同じ月を共有するため、ここでは重ねない
-      measurePhase(timer, "kosoku-cur", () =>
-        this.loadKosokuShifts(apiUrl, clientId, clientSecret, [ym], timer, "kosoku-cur", "version-cur", tracker),
-      ),
-      measurePhase(timer, "kosoku-prev", () =>
-        this.loadKosokuShifts(apiUrl, clientId, clientSecret, [prevYm], timer, "kosoku-prev", "version-prev", tracker),
-      ),
+      skipKosoku
+        ? Promise.resolve(null)
+        : measurePhase(timer, "kosoku-cur", () =>
+            this.loadKosokuShifts(apiUrl, clientId, clientSecret, [ym], timer, "kosoku-cur", "version-cur", tracker),
+          ),
+      skipKosoku
+        ? Promise.resolve(null)
+        : measurePhase(timer, "kosoku-prev", () =>
+            this.loadKosokuShifts(apiUrl, clientId, clientSecret, [prevYm], timer, "kosoku-prev", "version-prev", tracker),
+          ),
     ]);
     // 当月の勤務 = 前月から跨いだ分 + 当月分 (`kosokuPartsByDate` が当月に落ちる分だけ拾う)
     const kosokuCurrent = mergeKosokuShiftMaps(shiftsPrev, shiftsCurrent);
@@ -6842,6 +6851,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     cache: UpstreamCacheClient | null,
     timer?: PhaseTimer,
     tracker?: CacheStateTracker,
+    /** `source=gcp` 用。`buildKintaiSummariesLive` の同名引数へそのまま渡す。 */
+    skipKosoku = false,
   ): Promise<{
     current: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
     prev: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
@@ -6856,7 +6867,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // (2026-07-28「R2 やめろ」決定 → 2026-08-03 に写しフォールバックも撤去、#606-5)。
     // 上の docstring 参照。
     const live = await measurePhase(timer, "kintai-live", () =>
-      this.buildKintaiSummariesLive(compId, ym, prevYm, cache, timer, tracker),
+      this.buildKintaiSummariesLive(compId, ym, prevYm, cache, timer, tracker, skipKosoku),
     );
     const emptyKintaiMonth: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>> = {
       summaries: [],
@@ -6970,15 +6981,25 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   ): Promise<Map<string, Map<string, Map<string, GcpDayPart>>> | Response> {
     const ctx = await this.buildKintaiRelayContext(compId, "wage_report_gcp");
     if (ctx instanceof Response) return ctx;
+    // ★ 月ごとに直列で取らない (2026-08-04 本番で「終わらない」実測)。この口は重く
+    // (同じ口を1か月ぶん叩く /kintai/diff が約50秒)、2 か月を直列にすると倍積む。
+    const fetched = await Promise.all(
+      months.map(async (month) => {
+        try {
+          return { month, map: parseGcpDaySummaries(await relayKintaiDaySummaries(ctx.deps, { month })) };
+        } catch (err) {
+          const message = describeUnknownError(err);
+          console.error(JSON.stringify({ wage_report_gcp: "error", comp_id: compId, month, error: message }));
+          return { month, error: message };
+        }
+      }),
+    );
     const out = new Map<string, Map<string, Map<string, GcpDayPart>>>();
-    for (const month of months) {
-      try {
-        out.set(month, parseGcpDaySummaries(await relayKintaiDaySummaries(ctx.deps, { month })));
-      } catch (err) {
-        const message = describeUnknownError(err);
-        console.error(JSON.stringify({ wage_report_gcp: "error", comp_id: compId, month, error: message }));
-        return dvrJsonError(502, `GCP day-summaries (${month}) の取得に失敗しました: ${message}`);
+    for (const f of fetched) {
+      if (f.error !== undefined) {
+        return dvrJsonError(502, `GCP day-summaries (${f.month}) の取得に失敗しました: ${f.error}`);
       }
+      out.set(f.month, f.map!);
     }
     return out;
   }
@@ -7043,7 +7064,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // タイムカード由来 (本社事務員等、デジタコに乗らない人) のサマリは
     // `loadWageReportSource` が live-build の成否だけで組む (#606-5、Refs #424 PR-D)
     // マスタ 3 種と当月・前月 summary は互いに独立なので一括並列で読む (月切替の体感に直結)
-    const [wageMaster, minWageMaster, config, { current, prev, kintaiCurrent, kintaiPrev, kintaiLive }] =
+    const [wageMaster, minWageMaster, config, { current, prev, kintaiCurrent, kintaiPrev, kintaiLive }, gcpOverlay] =
       await Promise.all([
         timer.measure("master-wage", () =>
           loadMaster<WageMaster>("wage-master", normalizeWageMaster, { drivers: {} }),
@@ -7058,9 +7079,25 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           loadMaster<WageConfig>("wage-config", normalizeWageConfig, normalizeWageConfig(null)),
         ),
         timer.measure("source", () =>
-          this.loadWageReportSource(bucket, record.compId, ym, prevYm, wageCache, timer, tracker),
+          this.loadWageReportSource(
+            bucket,
+            record.compId,
+            ym,
+            prevYm,
+            wageCache,
+            timer,
+            tracker,
+            restraintSource === "gcp",
+          ),
         ),
+        // ★ GCP は素材読みと**同時**に走らせる (2026-08-04)。合流を待ってから足すと
+        // 「通常の wage-report が全部終わってから + 50秒」になり体感で終わらない。
+        // 素材読みとは独立 (compId と月しか要らない) なので待つ理由が無い
+        restraintSource === "gcp"
+          ? timer.measure("gcp-day-summaries", () => this.loadGcpDayTimes(record.compId, [ym, prevYm]))
+          : Promise.resolve(null),
       ]);
+    if (gcpOverlay instanceof Response) return gcpOverlay;
     const { noDataDrivers } = current;
     const endMerge = timer.begin("merge");
     // 同じ乗務員CD が両方に居たら timecard を採る (打刻を賃金の根拠にする、2026-07-28)
@@ -7084,16 +7121,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
     endMerge();
 
-    // `source=gcp` の時だけ、合流後のサマリの時間を GCP 由来に差し替える。
-    // 当月と前月の両方を差し替える — 片方だけだと月初の跨ぎ週で 2 つのソースの
-    // 実働が混ざる (既定経路が当月/前月で同じ優先順を使っているのと同じ理由)
-    const gcpOverlay =
-      restraintSource === "gcp"
-        ? await timer.measure("gcp-day-summaries", () =>
-            this.loadGcpDayTimes(record.compId, [ym, prevYm]),
-          )
-        : null;
-    if (gcpOverlay instanceof Response) return gcpOverlay;
+    // 合流後のサマリの時間を GCP 由来に差し替える。当月と前月の両方を差し替える —
+    // 片方だけだと月初の跨ぎ週で 2 つのソースの実働が混ざる
     const overlay = (entry: RestraintDriverSummary, forYm: string) =>
       gcpOverlay
         ? overlayGcpDayTimes(entry, gcpPartsFor(gcpOverlay.get(forYm)!, entry.driverCd), forYm)

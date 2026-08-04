@@ -622,7 +622,7 @@ async function fetchWageReport(ym: string): Promise<WageReportResponse> {
 // **別 ref に分けて持つ** — `report` は月次集計・給与比較・タイムカード表も見ており、
 // 最低賃金チェックのトグルでそれらの数字が動いてはいけない。既定のままなら
 // 追加のフェッチも起きない。
-const minWageRestraintSource = ref<RestraintSourceKey>('current')
+const minWageRestraintSource = ref<RestraintSourceKey>('gcp')
 const RESTRAINT_SOURCE_OPTIONS = [
   { label: '現行 (デジタコ拘束表 + オンプレ打刻)', value: 'current' },
   { label: 'GCP (day_summaries)', value: 'gcp' },
@@ -4507,11 +4507,14 @@ watch([activeTab, month, session, archiveMonthsLoaded], () => {
   // 給与アーカイブがある会社は押さずに表示する (compMap / synced-months が後から
   // 解決するので、下の watch でも同じ関数を叩く)
   void autoLoadArchivedPayroll()
+  // ★ 最低賃金チェックで GCP を見ている間は「現行」側を撃たない (2026-08-04)。
+  // 表示に使わない重い応答 (wage-source + 打刻 + kosoku-daily 2か月) を裏で
+  // もう 1 本走らせていて、体感速度が倍悪かった。月次集計へ切り替えた時に
+  // この watcher がもう一度走るので、その時に読めばよい
+  const showingGcp = activeTab.value === 'minwage' && minWageRestraintSource.value === 'gcp'
   if (activeTab.value === 'monthly' || activeTab.value === 'minwage') {
-    if (!report.value || report.value.month !== month.value) loadWageReport()
-    // GCP 由来の拘束時間は最低賃金チェックで選ばれている時だけ読む (既定では叩かない)
-    if (activeTab.value === 'minwage' && minWageRestraintSource.value === 'gcp'
-      && (!gcpReport.value || gcpReport.value.month !== month.value)) {
+    if (!showingGcp && (!report.value || report.value.month !== month.value)) loadWageReport()
+    if (showingGcp && (!gcpReport.value || gcpReport.value.month !== month.value)) {
       loadGcpWageReport()
     }
     // 最低賃金 (法定下限) の設定カードは minwage タブに同居 (Refs #268 PR-E)
