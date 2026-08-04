@@ -1469,7 +1469,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     try {
       const recalculateResult = recalculate
         ? await recalculateBeforeFetch(() =>
-            this.withTheearthLoginSession(account, jobState, (jar) => recalculateWork(jar, opeNo, startOpe)),
+            this.withTheearthLoginSession(account, jobState, async (jar) => {
+              // セッションに前回の運行が読み込み済みのまま残っていると、そちらが
+              // 再集計される (Refs #633-23、theearth-venus skill「運行はセッションに
+              // 1件だけ…」節)。処理後も解放し、他セッションを空ページ+HTTP 500 で
+              // ブロックしたままにしない。
+              await releaseLoadedOperation(jar);
+              const result = await recalculateWork(jar, opeNo, startOpe);
+              await releaseLoadedOperation(jar);
+              return result;
+            }),
           )
         : null;
       if (recalculateResult && !recalculateResult.ok) {
@@ -1620,9 +1629,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const jobState = this.makeTheearthLoginJobState();
     const deps: DtakoReimportDeps = {
       recalculateWork: async () => {
-        await this.withTheearthLoginSession(account, jobState, (jar) =>
-          recalculateWork(jar, input.opeNo, input.startOpe),
-        );
+        await this.withTheearthLoginSession(account, jobState, async (jar) => {
+          // Refs #633-23 (dtako-alc-upload と同じ理由、runOperationZip のコメント参照)。
+          await releaseLoadedOperation(jar);
+          await recalculateWork(jar, input.opeNo, input.startOpe);
+          await releaseLoadedOperation(jar);
+        });
       },
       fetchZip: () =>
         this.withTheearthLoginSession(account, jobState, (jar) =>
@@ -1757,9 +1769,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const jobState = this.makeTheearthLoginJobState();
     const deps: DtakoAlcUploadDeps = {
       recalculateWork: async () => {
-        await this.withTheearthLoginSession(account, jobState, (jar) =>
-          recalculateWork(jar, input.opeNo, input.startOpe),
-        );
+        await this.withTheearthLoginSession(account, jobState, async (jar) => {
+          // Refs #633-23 (runOperationZip のコメント参照)。
+          await releaseLoadedOperation(jar);
+          await recalculateWork(jar, input.opeNo, input.startOpe);
+          await releaseLoadedOperation(jar);
+        });
       },
       fetchZip: () =>
         this.withTheearthLoginSession(account, jobState, (jar) =>
