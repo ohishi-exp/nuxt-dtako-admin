@@ -2089,6 +2089,14 @@ function fmtAtRate(pay: number | null, minutes: number): string {
   return fmtAt(ratePerHour(pay, minutes))
 }
 
+/** 月給者の固定残業代を最低賃金換算した「みなし時間数」の表示 ("@12.3h")。
+ * 残業代(定額) ÷ 最低賃金(円/時)。どちらか無ければ空文字 (空 div は高さ0で潰れる、
+ * 既存の fmtAt と同じ慣習)。 */
+function fmtOvertimeMinWageHours(overtimePay: number | null, minWageRate: number | null): string {
+  if (overtimePay == null || minWageRate == null || minWageRate <= 0) return ''
+  return `@${(overtimePay / minWageRate).toFixed(1)}h`
+}
+
 /** 実働 − 表に出ている区分時間の合計 (法定内 + 時間外 + 週40超過 + 時間外深夜 +
  * 法定休日(通常+深夜) + 法定外休日(通常+深夜))。週40超過は法定内から控除済み
  * (案B Refs #282) のため加算対象。**9 区分すべてを引く** (法定外休日を落としていて
@@ -3568,6 +3576,7 @@ const paidByDriver = computed(() => {
     /** 内訳 (支給項目ごと)。ホバーで見せる (2026-07-30 要望)。 */
     baseItems: SalaryItemAmount[]
     overtimeItems: SalaryItemAmount[]
+    overtimeFixed: boolean
   }>()
   for (const r of salaryComparison.value?.rows ?? []) {
     map.set(String(Number(r.mappedDriverCd ?? r.driverCd)), {
@@ -3575,6 +3584,7 @@ const paidByDriver = computed(() => {
       overtime: r.csvOvertime,
       baseItems: r.csvBaseItems,
       overtimeItems: r.csvOvertimeItems,
+      overtimeFixed: r.overtimeFixed,
     })
   }
   return map
@@ -5285,6 +5295,11 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       <div class="text-xs text-gray-500">{{ fmtYen(minWageCompare(row.summary.driverCd).paidBase) }}</div>
                       <div class="text-xs text-gray-500">{{ fmtYen(minWageCompare(row.summary.driverCd).paidOvertime) }}</div>
                       <div class="font-medium">{{ fmtYen(minWageCompare(row.summary.driverCd).paidTotal) }}</div>
+                      <div
+                        v-if="paidFor(row.summary.driverCd)?.overtimeFixed"
+                        class="text-xs text-gray-400"
+                        title="残業代(定額) ÷ 最低賃金(円/時) = 最低賃金換算のみなし時間数。月給者(固定残業)のみ表示"
+                      >{{ fmtOvertimeMinWageHours(minWageCompare(row.summary.driverCd).paidOvertime, row.wage.minWage.rate) }}</div>
                     </td>
                     <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700">
                       <div
