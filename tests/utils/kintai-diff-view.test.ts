@@ -11,6 +11,7 @@ import {
   foldProgressInitial,
   kintaiDiffCacheStateFromLiveResult,
   kintaiDiffHasAnyDiff,
+  kintaiDiffOhishiDevTimeCardUrl,
   kintaiDiffOneSidedFieldRows,
   kintaiDiffValueDiffFieldRows,
   parseKintaiDiffApiResponse,
@@ -1155,5 +1156,19 @@ describe('parseKintaiDiffDayCoverageFromResponse', () => {
     expect(coverage.comparedDays).toBeNull()
     expect(coverage.onlyGcpDays).toEqual([])
     expect(coverage.onlyOnpremDays).toEqual([])
+  })
+})
+
+describe('kintaiDiffOhishiDevTimeCardUrl', () => {
+  it('乗務員CD + 明細行の暦日から月を切り出してURLを組む', () => {
+    expect(kintaiDiffOhishiDevTimeCardUrl('1536', '2026-06-25')).toBe(
+      'https://ohishi-dev.ohishi.local/time-card?driver_id=1536&month=2026-06',
+    )
+  })
+
+  it('date が YYYY-MM-DD の形でなければ null (壊れた形で存在しないリンクを出さない)', () => {
+    expect(kintaiDiffOhishiDevTimeCardUrl('1536', '')).toBeNull()
+    expect(kintaiDiffOhishiDevTimeCardUrl('1536', '2026')).toBeNull()
+    expect(kintaiDiffOhishiDevTimeCardUrl('1536', 'garbage')).toBeNull()
   })
 })
