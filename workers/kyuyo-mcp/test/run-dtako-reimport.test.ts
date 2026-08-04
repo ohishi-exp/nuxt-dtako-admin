@@ -42,18 +42,67 @@ describe("run_dtako_reimport (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67
     expect(runDtakoReimportTool.description).toContain("再実行しない");
   });
 
-  it("unko_no は23桁のみ通す (22桁の ope_no_22 と桁数が違う)", () => {
-    expect(runDtakoReimportTool.inputSchema.safeParse(baseArgs).success).toBe(true);
+  // Refs #633-24-3: relay の isUnkoNoAcceptable は reset_timecard:false (明示時) なら
+  // 22桁 (GCP/alc 由来、対象CD抜き) も受け付ける。MCP 側だけ23桁固定にすると relay
+  // なら通るはずの入力を MCP が先に弾いてしまうため、relay に合わせて緩める。
+  // **reset_timecard の既定は true (#633-24-2)** なので、省略時は23桁必須のまま —
+  // 22桁を通すには reset_timecard: false を明示する必要がある。
+  it("unko_no は reset_timecard:false 明示時に22桁も通す。桁数の上下限・非数字混じりは常に拒否", () => {
+    expect(runDtakoReimportTool.inputSchema.safeParse(baseArgs).success).toBe(true); // 23桁 (既定 true でも通る)
+    expect(
+      runDtakoReimportTool.inputSchema.safeParse({
+        ...baseArgs,
+        unko_no: UNKO_NO_23.slice(1),
+        reset_timecard: false,
+      }).success,
+    ).toBe(true); // 22桁 + reset_timecard:false 明示
+    expect(
+      runDtakoReimportTool.inputSchema.safeParse({
+        ...baseArgs,
+        unko_no: UNKO_NO_23.slice(2),
+        reset_timecard: false,
+      }).success,
+    ).toBe(false); // 21桁は false 明示でも拒否
+    expect(
+      runDtakoReimportTool.inputSchema.safeParse({
+        ...baseArgs,
+        unko_no: `${UNKO_NO_23}9`,
+        reset_timecard: false,
+      }).success,
+    ).toBe(false); // 24桁は false 明示でも拒否
+    expect(
+      runDtakoReimportTool.inputSchema.safeParse({
+        ...baseArgs,
+        unko_no: `${UNKO_NO_23.slice(0, 22)}a`,
+        reset_timecard: false,
+      }).success,
+    ).toBe(false); // 非数字混じり
+  });
+
+  it("unko_no は22桁でも、reset_timecard 省略時 (既定 true) は23桁必須のため拒否する", () => {
     expect(
       runDtakoReimportTool.inputSchema.safeParse({ ...baseArgs, unko_no: UNKO_NO_23.slice(1) }).success,
-    ).toBe(false); // 22桁
+    ).toBe(false); // 22桁 + reset_timecard 省略 (既定 true)
+  });
+
+  it("reset_timecard:true のときは unko_no が23桁でないと拒否する (relay の isUnkoNoAcceptable と同じ条件)", () => {
     expect(
-      runDtakoReimportTool.inputSchema.safeParse({ ...baseArgs, unko_no: `${UNKO_NO_23}9` }).success,
-    ).toBe(false); // 24桁
+      runDtakoReimportTool.inputSchema.safeParse({
+        ...baseArgs,
+        unko_no: UNKO_NO_23.slice(1),
+        reset_timecard: true,
+      }).success,
+    ).toBe(false); // 22桁 + reset_timecard:true
     expect(
-      runDtakoReimportTool.inputSchema.safeParse({ ...baseArgs, unko_no: `${UNKO_NO_23.slice(0, 22)}a` })
-        .success,
-    ).toBe(false); // 非数字混じり
+      runDtakoReimportTool.inputSchema.safeParse({ ...baseArgs, reset_timecard: true }).success,
+    ).toBe(true); // 23桁 + reset_timecard:true
+    expect(
+      runDtakoReimportTool.inputSchema.safeParse({
+        ...baseArgs,
+        unko_no: UNKO_NO_23.slice(1),
+        reset_timecard: false,
+      }).success,
+    ).toBe(true); // 22桁 + reset_timecard:false は明示でも通る
   });
 
   it("ope_no_22 / start_ope の形式チェックは get_operation_zip と同じ regex を使う", () => {
@@ -207,11 +256,31 @@ describe("run_dtako_reimport (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67
       expect(runDtakoReimportTool.inputSchema.safeParse({ items: [withoutUnkoNo] }).success).toBe(false);
     });
 
-    it("items の要素の unko_no も 23 桁のみ通す", () => {
+    it("items の要素の unko_no は22桁または23桁を通す (reset_timecard: false 明示)", () => {
       expect(
         runDtakoReimportTool.inputSchema.safeParse({ items: [{ ...itemA, unko_no: itemA.unko_no.slice(1) }] })
           .success,
-      ).toBe(false);
+      ).toBe(true); // 22桁
+      expect(
+        runDtakoReimportTool.inputSchema.safeParse({ items: [{ ...itemA, unko_no: itemA.unko_no.slice(2) }] })
+          .success,
+      ).toBe(false); // 21桁
+    });
+
+    it("items の要素は reset_timecard:true だと unko_no が23桁でないと拒否する (要素単位、他要素に影響しない)", () => {
+      expect(
+        runDtakoReimportTool.inputSchema.safeParse({
+          items: [{ ...itemA, unko_no: itemA.unko_no.slice(1), reset_timecard: true }],
+        }).success,
+      ).toBe(false); // 22桁 + reset_timecard:true
+      expect(
+        runDtakoReimportTool.inputSchema.safeParse({
+          items: [
+            { ...itemA, unko_no: itemA.unko_no.slice(1), reset_timecard: false },
+            { ...itemB, reset_timecard: true },
+          ],
+        }).success,
+      ).toBe(true); // itemA: 22桁+false は通り、itemB: 23桁+true も通る (要素ごとに判定)
     });
 
     it(`items は最大 ${CRON_BATCH_MAX_ITEMS} 件まで`, () => {

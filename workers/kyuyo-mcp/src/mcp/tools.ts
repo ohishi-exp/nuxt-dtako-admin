@@ -1097,12 +1097,21 @@ export const getOperationZipTool = {
  * `ope_no_22` とは桁数が違う。混同すると存在しない運行を指す)。 */
 const UNKO_NO_23_RE = /^\d{23}$/;
 
+/** relay (`dtako-reimport.ts` の `isUnkoNoAcceptable`) は `reset_timecard: false`
+ * (明示時) のとき 22 桁 (対象CD抜き、GCP/alc 由来) も受け付ける — 取り込み対象は
+ * zip (ope_no_22+start_ope) が決めるため。ここで一律23桁固定にすると relay なら
+ * 通るはずの22桁を MCP 側で弾いてしまう (Refs #633-24-3)。**MCP tool 側の
+ * reset_timecard 既定は true (#633-24-2) だが、この regex 自体は false/true どちらの
+ * 値でも構文として通す — 桁数と既定値の強制は runDtakoReimportItemArgs/
+ * runDtakoReimportArgs の `.refine()` が担う。** */
+const UNKO_NO_22_OR_23_RE = /^\d{22,23}$/;
+
 /** `unko_no` の説明文 (単体・items 共通)。reset_timecard の値で意味が変わる
  * (dtako-reimport.ts の `isUnkoNoAcceptable`/module doc 参照)。**「間違えると
- * 別の運行に取り込む」という説明は reset_timecard=true のときだけ正しい** —
- * reset_timecard=false (既定) では取り込み対象を zip (ope_no_22+start_ope) が
- * 決めるため、unko_no は「1件に紐付ける歯止めと監査ラベル」でしかない
- * (Refs #633-24、旧説明のせいで作業が止まった)。 */
+ * 別の運行に取り込む」という説明は reset_timecard=true (既定、#633-24-2) のときだけ
+ * 正しい** — reset_timecard=false を明示したときだけ取り込み対象を zip
+ * (ope_no_22+start_ope) が決め、unko_no は「1件に紐付ける歯止めと監査ラベル」でしか
+ * ない (Refs #633-24、旧説明のせいで作業が止まった)。 */
 const UNKO_NO_DESCRIPTION =
   "オンプレ側の運行NO。**23桁**、ope_no_22 とは桁が違う (末尾1桁 = 対象CD を含む値)。" +
   "**reset_timecard=false を明示したときは「1件に紐付ける歯止めと監査ラベル」でしかない** — " +
@@ -1111,7 +1120,8 @@ const UNKO_NO_DESCRIPTION =
   "(対象CD) が「2マンの何人目か」を区別する実物の値として使われるため、ここを間違えると" +
   "別の乗務員の勤務時間を書き換えてしまう。**2マンの運行でも、22桁 (対象CD抜き) 1本の投入で" +
   "主・助手の両方が取り込まれる** (`operations_count: 2` で実証済み) — `…1`/`…2` の2桁を" +
-  "2回に分けて呼ぶ必要は無い。";
+  "2回に分けて呼ぶ必要は無い。**22桁 (対象CD抜き) を受け付けるのは reset_timecard=false を" +
+  "明示したときだけ** — 23桁が必須になるのは reset_timecard=true (既定) のときだけ。";
 
 const runDtakoReimportItemArgs = z
   .object({
@@ -1120,7 +1130,7 @@ const runDtakoReimportItemArgs = z
       .string()
       .regex(START_OPE_RE)
       .describe('出庫日時。"YYYY/MM/DD H:mm:ss" (時は0埋めしない、例 "2026/07/07 7:53:30")'),
-    unko_no: z.string().regex(UNKO_NO_23_RE).describe(UNKO_NO_DESCRIPTION),
+    unko_no: z.string().regex(UNKO_NO_22_OR_23_RE).describe(UNKO_NO_DESCRIPTION),
     reset_timecard: z
       .boolean()
       .optional()
@@ -1130,7 +1140,11 @@ const runDtakoReimportItemArgs = z
           "false にすると②だけで止める。",
       ),
   })
-  .strict();
+  .strict()
+  .refine((v) => v.reset_timecard !== true || UNKO_NO_23_RE.test(v.unko_no), {
+    message: "reset_timecard: true のときは unko_no は23桁である必要があります",
+    path: ["unko_no"],
+  });
 
 const runDtakoReimportArgs = z
   .object({
@@ -1152,7 +1166,7 @@ const runDtakoReimportArgs = z
       ),
     unko_no: z
       .string()
-      .regex(UNKO_NO_23_RE)
+      .regex(UNKO_NO_22_OR_23_RE)
       .optional()
       .describe(`${UNKO_NO_DESCRIPTION} **\`items\` を渡す場合は省略する** (items[].unko_no を使う)。`),
     reset_timecard: z
@@ -1184,7 +1198,20 @@ const runDtakoReimportArgs = z
   .strict()
   .refine((v) => (v.items && v.items.length > 0) || (v.ope_no_22 && v.start_ope && v.unko_no), {
     message: "ope_no_22/start_ope/unko_no の組、または items のどちらかが必要です",
-  });
+  })
+  .refine(
+    (v) => {
+      // items 指定時は単体の reset_timecard/unko_no は無視される仕様なので、
+      // items が無いときだけこのチェックを効かせる (relay の isUnkoNoAcceptable と同じ条件)。
+      if (v.items && v.items.length > 0) return true;
+      if (v.reset_timecard !== true) return true;
+      return !!v.unko_no && UNKO_NO_23_RE.test(v.unko_no);
+    },
+    {
+      message: "reset_timecard: true のときは unko_no は23桁である必要があります",
+      path: ["unko_no"],
+    },
+  );
 
 /**
  * 運行 1 件の csvdata.zip を取得〜オンプレ取り込みまで 1 tool で完結させる
