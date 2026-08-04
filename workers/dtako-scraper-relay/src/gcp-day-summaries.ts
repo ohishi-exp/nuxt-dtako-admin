@@ -160,6 +160,18 @@ export interface GcpOverlayResult {
  *
  * 出勤日数 (`workDays`/`restDays`) は差し替えない — GCP には休暇区分が無く、
  * 打刻由来の `restDays` (賃金計算に入らなかった日数) とは意味が違うため。
+ *
+ * ## ★ 不変条件: 日別行の合計 = 月合計
+ *
+ * `summary.days` に同じ暦日 (`day`) の行が複数入っていても (打刻/theearth 側の
+ * 上流データが日跨ぎ勤務の分割等で 1 暦日に複数行を持たせることがある — 実測:
+ * 乗務員CD 1718 / 2026-06 で 31 行、当月は 30 日しかなかった Refs #667)、
+ * **月合計は暦日ユニークな `inMonth` からしか作らない**ため、同じ `GcpDayPart` を
+ * 複数行にそのまま割り当てると日別行の合計だけが月合計を超えて二重計上になる
+ * (最低賃金チェックの「差分 (実働 − 表合計)」が 0 でなくなる — 恒久的な不変条件が壊れる)。
+ * これを防ぐため、**同じ暦日には `summary.days` の並び順で最初の行にだけ GCP 値を
+ * 割り当て、2 行目以降は「GCP に勤務が無い日」と同じ扱い (0 分・`isRestDay` は元のまま)
+ * にする**。これにより常に「日別行の合計 = 月合計」が成り立つ。
  */
 export function overlayGcpDayTimes(
   summary: RestraintDriverSummary,
@@ -173,8 +185,11 @@ export function overlayGcpDayTimes(
   }
   if (inMonth.size === 0) return { summary: blankTimes(summary), missing: true };
 
+  // 同じ暦日が複数行あっても GCP 値は 1 回しか割り当てない (先勝ち)。
+  const assigned = new Set<number>();
   const days: RestraintSummaryDay[] = summary.days.map((d) => {
-    const p = inMonth.get(d.day);
+    const p = assigned.has(d.day) ? undefined : inMonth.get(d.day);
+    if (p) assigned.add(d.day);
     return {
       ...d,
       isRestDay: p ? false : d.isRestDay,
