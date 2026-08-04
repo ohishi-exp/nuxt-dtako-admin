@@ -259,6 +259,12 @@ import {
   type KosokuShift,
 } from "./kosoku-daily";
 import {
+  gcpPartsFor,
+  overlayGcpDayTimes,
+  parseGcpDaySummaries,
+  type GcpDayPart,
+} from "./gcp-day-summaries";
+import {
   compareTimecardMonth,
   compareTimecardMonthAll,
   parsePdfJson,
@@ -6946,6 +6952,37 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     return { current, prev, kintaiCurrent, kintaiPrev, kintaiLive };
   }
 
+  /**
+   * `wage-report?source=gcp` 用に GCP `kintai.day_summaries` を月ぶん読む。
+   *
+   * 経路は `/kintai/diff` の GCP 側とまったく同じ (auth-worker `/ichibanboshi-proxy`
+   * 経由の `relayKintaiDaySummaries`) — オンプレ (`kosoku-daily`) とは別の口なので
+   * 混同しないこと。
+   *
+   * **取れなければ古い値へ倒さず Response (502) を返す。** ここでフォールバックすると
+   * 「GCP を選んだのにオンプレの数字が出る」= 切り替えが効いていないのに効いたように
+   * 見える状態になり、突合の道具として成立しない (#606-5 の「化石を黙って出さない」と
+   * 同じ考え方)。
+   */
+  private async loadGcpDayTimes(
+    compId: string,
+    months: readonly string[],
+  ): Promise<Map<string, Map<string, Map<string, GcpDayPart>>> | Response> {
+    const ctx = await this.buildKintaiRelayContext(compId, "wage_report_gcp");
+    if (ctx instanceof Response) return ctx;
+    const out = new Map<string, Map<string, Map<string, GcpDayPart>>>();
+    for (const month of months) {
+      try {
+        out.set(month, parseGcpDaySummaries(await relayKintaiDaySummaries(ctx.deps, { month })));
+      } catch (err) {
+        const message = describeUnknownError(err);
+        console.error(JSON.stringify({ wage_report_gcp: "error", comp_id: compId, month, error: message }));
+        return dvrJsonError(502, `GCP day-summaries (${month}) の取得に失敗しました: ${message}`);
+      }
+    }
+    return out;
+  }
+
   /** GET /restraint-api/wage-report?month=YYYY-MM — R2 の summary + マスタから
    * 時間給計算行を返す (Refs #244)。週40h の月初跨ぎ週のため前月 summary の
    * days も読み込む (無ければ跨ぎ週は当月分のみで近似し warning を返す)。
@@ -6955,7 +6992,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 出てこない。行には `source` が付く。`computeWageRow` / `classifyMonth` /
    * `compareSalaryMonth` はどちらの由来でも同じものを使う (タイムカード側が
    * `RestraintDriverSummary` 互換の形で保存されているため)。
-   * **重複は timecard が勝つ** (2026-07-28 決定 — 賃金は打刻を根拠にする)。 */
+   * **重複は timecard が勝つ** (2026-07-28 決定 — 賃金は打刻を根拠にする)。
+   *
+   * ## `?source=gcp` — 拘束時間ソースの切り替え (最低賃金チェック用)
+   *
+   * 省略時 (`current`) は**上の経路そのまま** = 従来の応答と 1 バイトも変わらない。
+   * `gcp` を渡した時だけ、合流後のサマリの**時間を GCP `kintai.day_summaries` 由来に
+   * 差し替えて**から `computeWageRow` を回す (`gcp-day-summaries.ts`)。休暇・休日区分・
+   * 運転/荷役などデジタコ側にしか無い項目は元のまま残る。
+   *
+   * GCP にその乗務員 × その月の行が 1 つも無い行は **0 分ではなく欠測** (`restraint_missing`)
+   * にして返す — 0 に倒すと「拘束 0 の月」として最低賃金割れの判定が回ってしまう
+   * (ユーザー決定 2026-08-04)。GCP の取得に失敗した時は**古い値へ倒さず 502** にする。 */
   private async handleWageReport(
     record: TheearthSessionRecord,
     url: URL,
@@ -6966,6 +7014,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const parsed = this.parseMonthParam(url);
     if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
     const { year, month, ym } = parsed;
+    const restraintSource = url.searchParams.get("source") === "gcp" ? "gcp" : "current";
     // フェーズ計測 (Refs #543 PR-1)。挙動は変えない — ログ 1 行と Server-Timing だけ
     const timer = new PhaseTimer();
     // キャッシュの hit/miss/live を phase log の cacheState に載せる (Refs #543 PR-2)
@@ -7027,9 +7076,6 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 前月 days (週40h の月初跨ぎ週用) も同じ優先順で合流する — 当月と別の source を
     // 混ぜると跨ぎ週の実働が二重に積まれる
     const { merged: prevMerged } = mergeSummarySources(prev.summaries, kintaiPrev.summaries);
-    const prevDaysByDriver = new Map<string, RestraintSummaryDay[]>(
-      prevMerged.map((m) => [m.entry.data.driverCd, m.entry.data.days]),
-    );
 
     if (merged.length > 0 && prevMerged.length === 0) {
       warnings.push(
@@ -7037,6 +7083,25 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       );
     }
     endMerge();
+
+    // `source=gcp` の時だけ、合流後のサマリの時間を GCP 由来に差し替える。
+    // 当月と前月の両方を差し替える — 片方だけだと月初の跨ぎ週で 2 つのソースの
+    // 実働が混ざる (既定経路が当月/前月で同じ優先順を使っているのと同じ理由)
+    const gcpOverlay =
+      restraintSource === "gcp"
+        ? await timer.measure("gcp-day-summaries", () =>
+            this.loadGcpDayTimes(record.compId, [ym, prevYm]),
+          )
+        : null;
+    if (gcpOverlay instanceof Response) return gcpOverlay;
+    const overlay = (entry: RestraintDriverSummary, forYm: string) =>
+      gcpOverlay
+        ? overlayGcpDayTimes(entry, gcpPartsFor(gcpOverlay.get(forYm)!, entry.driverCd), forYm)
+        : { summary: entry, missing: false };
+
+    const prevDaysByDriver = new Map<string, RestraintSummaryDay[]>(
+      prevMerged.map((m) => [m.entry.data.driverCd, overlay(m.entry.data, prevYm).summary.days]),
+    );
     // 最低賃金の県は theearth の事業所名ではなく社員マスタの所属 (月末時点) で引く
     // (Refs #409 Phase 3)。D1 が無い / 読めない場合は空のまま = 従来どおり
     // theearth 事業所名 + defaultPrefecture のフォールバックで動く
@@ -7045,33 +7110,62 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     );
 
     const endRows = timer.begin("rows");
-    const rows = merged.map(({ entry, source }) => ({
-      summary: entry.data,
-      /** 'theearth' (デジタコ) | 'timecard' (タイムカード)。画面のバッジ用 (PR-E)。 */
-      source,
-      /** 給与区分 (1=月給 / 2=日給 / 3=時給 / 4=その他)。社員マスタに無ければ null。
-       * 給与比較が「基本給(計算)」の単価の掛け方を決めるのに使う (Refs #429)。 */
-      pay_kubun: payKubun.get(entry.data.driverCd) ?? null,
-      fetched_at: entry.fetchedAt,
-      last_verified_at: entry.lastVerifiedAt,
-      wage: computeWageRow(
-        entry.data,
-        year,
-        month,
-        wageMaster,
-        minWageMaster,
-        config,
-        prevDaysByDriver.get(entry.data.driverCd) ?? [],
-        employeeBranches.get(entry.data.driverCd) ?? null,
-      ),
-    }));
+    const rows = merged.map(({ entry, source }) => {
+      const { summary, missing } = overlay(entry.data, ym);
+      return {
+        summary,
+        /** 'theearth' (デジタコ) | 'timecard' (タイムカード)。画面のバッジ用 (PR-E)。 */
+        source,
+        /** 給与区分 (1=月給 / 2=日給 / 3=時給 / 4=その他)。社員マスタに無ければ null。
+         * 給与比較が「基本給(計算)」の単価の掛け方を決めるのに使う (Refs #429)。 */
+        pay_kubun: payKubun.get(entry.data.driverCd) ?? null,
+        fetched_at: entry.fetchedAt,
+        last_verified_at: entry.lastVerifiedAt,
+        /** `source=gcp` で GCP 側にこの乗務員 × この月の行が無かった (= 欠測)。
+         * **既定経路では列ごと出さない** — 既定の応答本文を 1 バイトも変えないため
+         * (変えると全閲覧者の弱 ETag が 1 回無効になる)。 */
+        ...(gcpOverlay ? { restraint_missing: missing } : {}),
+        wage: computeWageRow(
+          summary,
+          year,
+          month,
+          wageMaster,
+          minWageMaster,
+          config,
+          prevDaysByDriver.get(entry.data.driverCd) ?? [],
+          employeeBranches.get(entry.data.driverCd) ?? null,
+        ),
+      };
+    });
     endRows();
+    const missingCount = rows.filter((r) => r.restraint_missing === true).length;
+    if (missingCount > 0) {
+      warnings.push(
+        `GCP の日別サマリ (day_summaries) に ${missingCount} 名ぶんの ${ym} の行がありません`
+          + " (該当行は欠測として金額を出していません — 0 分として最低賃金割れの判定はしません)",
+      );
+    }
     // 内容不変なら 304 で本文を送らない (Refs #543 PR-5)。304 でも計測は出す
     const { res, notModified } = await this.jsonWithEtag(
-      { month: ym, rows, no_data_drivers: noDataDrivers, warnings, config },
+      {
+        month: ym,
+        // 既定経路は従来どおりのキーだけ返す (本文を変えない = ETag を無効にしない)
+        ...(gcpOverlay ? { restraint_source: restraintSource } : {}),
+        rows,
+        no_data_drivers: noDataDrivers,
+        warnings,
+        config,
+      },
       ifNoneMatch,
     );
-    return this.withPhaseTiming("wage-report", ym, timer, tracker.aggregate(), res, notModified);
+    return this.withPhaseTiming(
+      gcpOverlay ? "wage-report-gcp" : "wage-report",
+      ym,
+      timer,
+      tracker.aggregate(),
+      res,
+      notModified,
+    );
   }
 
   /** SHA-256 の hex digest (R2 アーカイブの変化検知用)。 */

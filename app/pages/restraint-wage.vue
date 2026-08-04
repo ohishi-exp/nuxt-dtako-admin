@@ -25,6 +25,7 @@ import type {
   MinWageMaster,
   MinWageRowAttrs,
   RestraintDriverSummary,
+  RestraintSourceKey,
   WageMaster,
   WageReportResponse,
   WageReportRow,
@@ -521,6 +522,8 @@ watch(month, (ym) => {
 watch(session, (s) => {
   if (!s) {
     report.value = null
+    gcpReport.value = null
+    gcpReportError.value = ''
     archiveEntries.value = []
     archiveHistory.value = {}
     printBatch.value = null
@@ -572,7 +575,7 @@ const expandWage = ref(false)
  * もとになっていた (2026-07-25 指摘)。行を消すとスクロール位置と列幅を失うので
  * 消さずに薄くし、表の上にスピナーを出して「これは今の値ではない」と分かるようにする。
  */
-const staleReport = computed(() => loadingReport.value && (report.value?.rows.length ?? 0) > 0)
+const staleReport = computed(() => displayLoading.value && (displayReport.value?.rows.length ?? 0) > 0)
 /** 古い数字だと分かるように薄くし、誤操作も止める。 */
 const STALE_CLASS = 'opacity-40 pointer-events-none select-none'
 /** 月別 wage-report のキャッシュ (一括印刷で再利用)。 */
@@ -607,6 +610,88 @@ async function fetchWageReport(ym: string): Promise<WageReportResponse> {
   reportCache.set(ym, body)
   return body
 }
+
+// ---- 最低賃金チェックの拘束時間ソース切り替え (ユーザー決定 2026-08-04) ----
+//
+// 既定 (`current`) は**この画面が従来ずっと出していたもの**: theearth の拘束時間
+// 管理表 CSV (デジタコ = 運行ベース) と オンプレ `kosoku-daily` (打刻 + 休息、
+// MariaDB 直読み) の合流。**GCP は 1 行も混ざっていない。**
+// `gcp` を選んだ時だけ relay が `?source=gcp` で拘束時間を GCP `day_summaries`
+// (「オンプレ vs Supabase」タブが突き合わせている側) に差し替えて計算し直す。
+//
+// **別 ref に分けて持つ** — `report` は月次集計・給与比較・タイムカード表も見ており、
+// 最低賃金チェックのトグルでそれらの数字が動いてはいけない。既定のままなら
+// 追加のフェッチも起きない。
+const minWageRestraintSource = ref<RestraintSourceKey>('current')
+const RESTRAINT_SOURCE_OPTIONS = [
+  { label: '現行 (デジタコ拘束表 + オンプレ打刻)', value: 'current' },
+  { label: 'GCP (day_summaries)', value: 'gcp' },
+] as const
+const RESTRAINT_SOURCE_NOTE: Record<RestraintSourceKey, string> = {
+  current: 'theearth の拘束時間管理表 (運行ベース) と オンプレ kosoku-daily (打刻ベース) の合流。この画面が従来ずっと出していた値',
+  gcp: 'GCP kintai.day_summaries の拘束時間だけを差し替えて再計算。休暇・休日区分・運転/荷役は現行ソースのまま',
+}
+const gcpReport = ref<WageReportResponse | null>(null)
+const loadingGcpReport = ref(false)
+const gcpReportError = ref('')
+
+/** 最低賃金チェックが実際に表示している応答 (他タブは常に `report`)。 */
+const minWageReport = computed(() =>
+  minWageRestraintSource.value === 'gcp' ? gcpReport.value : report.value)
+
+/** 月次集計 / 最低賃金チェックの共有カードが表示している応答。 */
+const displayReport = computed(() =>
+  activeTab.value === 'minwage' ? minWageReport.value : report.value)
+const displayLoading = computed(() =>
+  activeTab.value === 'minwage' && minWageRestraintSource.value === 'gcp'
+    ? loadingGcpReport.value
+    : loadingReport.value)
+
+/** ヘッダーの「再計算」— いま表示しているソースを取り直す。 */
+function reloadDisplayReport() {
+  if (activeTab.value === 'minwage' && minWageRestraintSource.value === 'gcp') {
+    loadGcpWageReport()
+    return
+  }
+  loadWageReport()
+}
+
+let gcpReportEpoch = 0
+
+/** GCP 由来の拘束時間で計算し直した wage-report を読む。**失敗しても `report`
+ * (既定ソース) には触らない** — 「GCP を選んだのに既定の数字が出る」= 切り替えが
+ * 効いていないのに効いたように見える状態を作らないため (relay 側も 502 で倒す)。 */
+async function loadGcpWageReport() {
+  if (!session.value || !month.value) return
+  const epoch = ++gcpReportEpoch
+  const ym = month.value
+  loadingGcpReport.value = true
+  gcpReportError.value = ''
+  try {
+    const res = await $fetch<WageReportResponse>('/restraint-api/wage-report', {
+      headers: authHeaders(),
+      query: { month: ym, source: 'gcp' },
+    })
+    if (epoch !== gcpReportEpoch) return
+    gcpReport.value = res
+  }
+  catch (e) {
+    if (epoch !== gcpReportEpoch) return
+    gcpReport.value = null
+    gcpReportError.value = restraintErrorMessage(e)
+  }
+  finally {
+    if (epoch === gcpReportEpoch) loadingGcpReport.value = false
+  }
+}
+
+// GCP を選んだ (または選んだまま月が変わった) 時だけ取りに行く。既定へ戻す時は
+// 何も読まない — `report` は既に手元にある
+watch([minWageRestraintSource, month], ([source, ym]) => {
+  if (source !== 'gcp' || !session.value || !ym) return
+  if (gcpReport.value?.month === ym) return
+  loadGcpWageReport()
+})
 
 /** loadWageReport の世代。タブ/月の切り替え連打で in-flight が複数になった時、
  * **最後に発火した読み込みだけ**が画面に触れる (latest-wins、Refs #456)。
@@ -1988,7 +2073,7 @@ function unaccountedMinutes(row: WageReportRow): number | null {
  * **常時 1 列増やすと表が広がるので、有る月だけ出す。**
  */
 const hasNonLegalHolidayWork = computed(() =>
-  (report.value?.rows ?? []).some(r =>
+  (displayReport.value?.rows ?? []).some(r =>
     r.wage.minutes.nonLegalHoliday + r.wage.minutes.nonLegalHolidayNight > 0))
 
 /** 最低賃金チェックの表の列数 (区画見出しの colspan 用)。 */
@@ -2008,7 +2093,7 @@ function sumNullable(a: number | null, b: number | null): number | null {
   return (a ?? 0) + (b ?? 0)
 }
 
-const missingRateRows = computed(() => (report.value?.rows ?? []).filter(r => r.wage.hourlyRate === null))
+const missingRateRows = computed(() => (displayReport.value?.rows ?? []).filter(r => r.wage.hourlyRate === null))
 
 /** 月次集計テーブルを CSV (UTF-8 BOM) で保存する (全列)。
  *
@@ -3469,7 +3554,7 @@ function minWagePaidTitle(driverCd: string): string {
  */
 const minWageSections = computed(() =>
   groupMinWageRows(
-    report.value?.rows ?? [],
+    minWageReport.value?.rows ?? [],
     row => row.summary.driverCd,
     row => minWageAttrsFor(row.summary.driverCd),
   ))
@@ -3484,7 +3569,7 @@ const minWageSections = computed(() =>
  */
 const minWageCompareByDriver = computed(() => {
   const map = new Map<string, MinWageCompareRow>()
-  for (const row of report.value?.rows ?? []) {
+  for (const row of minWageReport.value?.rows ?? []) {
     const key = normalizeDriverCdKey(row.summary.driverCd)
     map.set(key, minWageCompareRow(
       {
@@ -4424,6 +4509,11 @@ watch([activeTab, month, session, archiveMonthsLoaded], () => {
   void autoLoadArchivedPayroll()
   if (activeTab.value === 'monthly' || activeTab.value === 'minwage') {
     if (!report.value || report.value.month !== month.value) loadWageReport()
+    // GCP 由来の拘束時間は最低賃金チェックで選ばれている時だけ読む (既定では叩かない)
+    if (activeTab.value === 'minwage' && minWageRestraintSource.value === 'gcp'
+      && (!gcpReport.value || gcpReport.value.month !== month.value)) {
+      loadGcpWageReport()
+    }
     // 最低賃金 (法定下限) の設定カードは minwage タブに同居 (Refs #268 PR-E)
     if (activeTab.value === 'minwage' && !minWageMasterLoaded.value) loadMinWageMaster()
     // 拠点 → 都道府県の割り当て表 (Refs #409)
@@ -4911,23 +5001,48 @@ watch([compMap, kyuyoSyncedKeys], () => {
                   />
                   <UButton size="xs" variant="soft" icon="i-lucide-file-down" label="CSV" :disabled="!report?.rows.length" @click="downloadMonthlyCsv" />
                 </template>
-                <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再計算" :loading="loadingReport" @click="loadWageReport" />
+                <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再計算" :loading="displayLoading" @click="reloadDisplayReport" />
               </div>
             </template>
 
-            <p v-for="w in report?.warnings ?? []" :key="w" class="text-xs text-amber-600 dark:text-amber-400 mb-1">⚠ {{ w }}</p>
+            <!-- 拘束時間ソースの切り替え (最低賃金チェックのみ、既定は「現行」)。
+                 既定 = theearth の拘束時間管理表 (デジタコ = 運行ベース) + オンプレ
+                 kosoku-daily (打刻ベース) の合流で、**GCP は混ざっていない**。
+                 「GCP」を選ぶと拘束時間だけを kintai.day_summaries に差し替えて
+                 計算し直す (「オンプレ vs Supabase」タブが突き合わせている側)。 -->
+            <div v-if="activeTab === 'minwage'" class="flex flex-wrap items-center gap-3 mb-3 print:hidden">
+              <span class="text-sm font-medium">拘束時間ソース:</span>
+              <UButton
+                v-for="opt in RESTRAINT_SOURCE_OPTIONS"
+                :key="opt.value"
+                size="xs"
+                :variant="minWageRestraintSource === opt.value ? 'solid' : 'outline'"
+                :label="opt.label"
+                :loading="opt.value === 'gcp' && loadingGcpReport"
+                @click="minWageRestraintSource = opt.value"
+              />
+              <span class="text-xs text-gray-500">
+                {{ RESTRAINT_SOURCE_NOTE[minWageRestraintSource] }}
+              </span>
+            </div>
+            <p v-if="gcpReportError" class="text-xs text-red-600 dark:text-red-400 mb-1">
+              ⚠ GCP の拘束時間を取得できませんでした: {{ gcpReportError }}
+              (現行ソースの数字にはフォールバックしていません — 表は空のままです)
+            </p>
+
+            <p v-for="w in displayReport?.warnings ?? []" :key="w" class="text-xs text-amber-600 dark:text-amber-400 mb-1">⚠ {{ w }}</p>
             <p v-if="missingRateRows.length" class="text-xs text-amber-600 dark:text-amber-400 mb-1">
               ⚠ 単価未設定: {{ missingRateRows.map(r => `${r.summary.driverCd} ${r.summary.driverName}`).join(', ') }} (単価マスタタブで登録してください)
             </p>
 
-            <p v-if="!report?.rows.length && !loadingReport" class="text-sm text-gray-500">
+            <p v-if="!displayReport?.rows.length && !displayLoading && !gcpReportError" class="text-sm text-gray-500">
               この月の summary がアーカイブにありません (/restraint-fetch で取得するか、アーカイブタブで再計算してください)
             </p>
 
             <!-- 初回読み込み中 (report がまだ無い) は下の staleReport に該当せず、
                  カードの中身が**丸ごと空**だった (Refs #554)。ヘッダーだけのカードが
                  十数秒出る状態は「壊れている」と読まれるので、ここで言い切る。 -->
-            <div v-if="!report && loadingReport" class="flex items-center gap-2 text-sm text-gray-500">
+            <div v-if="!displayReport && displayLoading" class="flex items-center gap-2 text-sm text-gray-500">
               <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin text-primary" />
               集計を読み込んでいます… ({{ fmtYm(month) }})
             </div>
@@ -4961,7 +5076,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
             </template>
 
             <div
-              v-else-if="activeTab === 'minwage' && report?.rows.length"
+              v-else-if="activeTab === 'minwage' && minWageReport?.rows.length"
               class="overflow-auto max-h-[75vh] print:max-h-none print:overflow-visible"
               :class="staleReport ? STALE_CLASS : ''"
             >
@@ -5025,6 +5140,17 @@ watch([compMap, kyuyoSyncedKeys], () => {
                         {{ minWageBranchLabel(row.summary.driverCd) }}
                       </div>
                     </td>
+                    <!-- 選んだソースにこの乗務員 × この月の行が無い = **欠測** (ユーザー決定 2026-08-04)。
+                         0 分に倒すと「拘束 0 の月」として最低賃金割れの判定が回ってしまうので、
+                         金額を出さずに欠測と言い切る -->
+                    <td
+                      v-if="row.restraint_missing"
+                      :colspan="minWageColumnCount - 2"
+                      class="px-2 py-1.5 text-xs text-amber-600 dark:text-amber-400"
+                    >
+                      欠測 — GCP の day_summaries に {{ fmtYm(month) }} のこの乗務員の行がありません (0 分ではないため判定していません)
+                    </td>
+                    <template v-else>
                     <td class="px-2 py-1.5 text-right">{{ fmtMinutes(row.summary.workingMinutes) }}</td>
                     <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700">
                       <div class="text-xs text-gray-500">{{ fmtMinutes(row.wage.minutes.statutory) }}</div>
@@ -5106,6 +5232,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                         {{ fmtDiff(minWageCompare(row.summary.driverCd).diffTotal) }}
                       </div>
                     </td>
+                    </template>
                   </tr>
                 </tbody>
               </table>
