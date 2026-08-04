@@ -3584,7 +3584,6 @@ const paidByDriver = computed(() => {
     overtimeItems: SalaryItemAmount[]
     overtimeFixed: boolean
     csvOvertimeHours: number | null
-    isDaily: boolean
   }>()
   for (const r of salaryComparison.value?.rows ?? []) {
     map.set(String(Number(r.mappedDriverCd ?? r.driverCd)), {
@@ -3594,7 +3593,6 @@ const paidByDriver = computed(() => {
       overtimeItems: r.csvOvertimeItems,
       overtimeFixed: r.overtimeFixed,
       csvOvertimeHours: r.csvOvertimeHours,
-      isDaily: r.isDaily,
     })
   }
   return map
@@ -5311,7 +5309,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                         title="残業代(定額) ÷ 最低賃金(円/時) = 最低賃金換算のみなし時間数。月給者(固定残業)のみ表示"
                       >{{ fmtOvertimeMinWageHours(minWageCompare(row.summary.driverCd).paidOvertime, row.wage.minWage.rate) }}</div>
                       <div
-                        v-if="paidFor(row.summary.driverCd)?.isDaily"
+                        v-if="paidFor(row.summary.driverCd)?.csvOvertimeHours != null"
                         class="text-xs text-gray-400"
                         title="給与実績(CSV)の残業時間"
                       >{{ fmtCsvOvertimeHours(paidFor(row.summary.driverCd)?.csvOvertimeHours ?? null) }}</div>

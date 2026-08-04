@@ -474,9 +474,6 @@ export interface SalaryComparisonRow {
    * `diffCsvVsBaseRateOvertime` (労基法37条) だけが効く。
    */
   overtimeFixed: boolean
-  /** 日給者か (給与区分 = 日給、PAY_KUBUN_DAILY)。給与実績の残業時間 (csvOvertimeHours)
-   * を表示する対象の判定に使う。 */
-  isDaily: boolean
   /** CSV − システム (システム側が null なら null)。 */
   diffBase: number | null
   /** `overtimeFixed` の人は **null** — 定額と単価×時間の差に意味が無いため
@@ -916,7 +913,6 @@ export function compareSalaryMonth(
     const sysOvertime = csv.rates.overtime !== null ? Math.round((csv.rates.overtime * overtimeMinutes) / 60) : null
     // 月給者 = 固定残業とみなす (Refs #449)。定額と「単価×時間」の差は判定に使えない
     const overtimeFixed = (report.pay_kubun ?? null) === PAY_KUBUN_MONTHLY
-    const isDaily = (report.pay_kubun ?? null) === PAY_KUBUN_DAILY
     const sysTotal = sysBase !== null && sysOvertime !== null ? sysBase + sysOvertime : null
 
     // 支払い実績 (csvOvertime) と直接比較する最低賃金理論値。時間軸は
@@ -956,7 +952,6 @@ export function compareSalaryMonth(
       sysWorkDays: workDays,
       sysOvertimeMinutes: overtimeMinutes,
       overtimeFixed,
-      isDaily,
       diffBase: sysBase === null ? null : base - sysBase,
       diffOvertime: sysOvertime === null || overtimeFixed ? null : overtime - sysOvertime,
       diffTotal: sysTotal === null ? null : sums.total - sysTotal,
