@@ -3176,6 +3176,95 @@ describe("recalculateWork", () => {
   });
 });
 
+// --- Refs #633-23: セッションに読み込み済みの運行が解放されるまで F-DES1013 の
+// URL の OpeNo は無視される (theearth-venus skill「運行はセッションに1件だけ…」節、
+// 2026-07-29 実機確定)。cron 経路 (runOperationZip/runDtakoReimportJob/
+// runDtakoAlcUploadJob) が recalculateWork の前後で releaseLoadedOperation を
+// 呼ばないまま運行 A → 運行 B と続けて処理すると、B の再集計が実際には A の
+// ページに対して行われる。この節は fake fetch でその sticky 挙動を再現し、
+// release を挟まない場合に壊れる/挟めば直ることを両方確認する。
+describe("recalculateWork across two operations without releasing (Refs #633-23)", () => {
+  const OPE_A = "2231234567890123456781";
+  const START_A = "2026/07/07 10:00:00";
+  const OPE_B = "2231234567890123456782";
+  const START_B = "2026/07/08 11:00:00";
+
+  function stickyWorkFormHtml(op: "A" | "B", opts: { recalculated?: boolean } = {}): string {
+    return `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-WORK-${op}" />
+      <input type="submit" id="btnScore" name="btnScore" value="作業時間再集計" />
+      ${opts.recalculated ? "<div>再集計が終了しました。</div>" : ""}
+    </form></body></html>`;
+  }
+
+  /** theearth 実機の sticky セッション ("運行はセッションに1件だけ読み込み済みに
+   * なり、解放するまで URL の OpeNo は無視される") を模した fake fetch。
+   * `loaded` が null でない限り、F-DES1013 への GET は要求 OpeNo に関係なく
+   * `loaded` の運行のページを返す。F-DES1010 一覧への `btnRelece` POST だけが
+   * `loaded` を解放する。btnScore postback が実際にどの運行のページに対して
+   * 行われたかは、POST body に載った __VIEWSTATE (`VS-WORK-A`/`VS-WORK-B`) で
+   * 判別できる — theearth 実機の「form action は要求 OpeNo をエコーするので
+   * action だけでは検出不能」と同じ理由で、URL ではなく POST body を見る。 */
+  function stickySessionFetch(): { fetchImpl: FetchLike; recalculatedViewStates: string[] } {
+    let loaded: "A" | "B" | null = null;
+    const recalculatedViewStates: string[] = [];
+    const fetchImpl = (async (input: unknown, init?: { body?: unknown }) => {
+      const url = String(input);
+      const bodyStr = init?.body !== undefined && init.body !== null ? String(init.body) : "";
+      const params = new URLSearchParams(bodyStr);
+
+      if (url.includes("F-DES1010")) {
+        // 運行データ入力(一覧) — releaseLoadedOperation の GET/POST
+        if (params.get("ctl00$MainContent$btnRelece") !== null) {
+          loaded = null;
+        }
+        return html(`<html><body><form>
+          <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-LIST" />
+          <input type="submit" id="btnRelece" name="ctl00$MainContent$btnRelece" value="解放" />
+        </form></body></html>`);
+      }
+
+      // F-DES1013 (作業入力ページ)
+      if (params.has("btnScore")) {
+        // btnScore postback は「今セッションに読み込まれている運行」に対して行われる
+        // (要求 URL の OpeNo は見ない) — sticky 挙動そのもの。
+        recalculatedViewStates.push(params.get("__VIEWSTATE") ?? "");
+        return html(stickyWorkFormHtml(loaded ?? "A", { recalculated: true }));
+      }
+      // GET (fetchEditPageHtml)。既に別の運行が読み込み済みならそれを返す
+      // (要求 OpeNo は無視、実機確定 2026-07-29)。
+      const requestedOp: "A" | "B" = url.includes(OPE_A) ? "A" : "B";
+      if (loaded === null) loaded = requestedOp;
+      return html(stickyWorkFormHtml(loaded));
+    }) as FetchLike;
+    return { fetchImpl, recalculatedViewStates };
+  }
+
+  it("silently recalculates the stale operation A when B is processed without releasing first (reproduces the bug)", async () => {
+    const jar = createCookieJar();
+    const { fetchImpl, recalculatedViewStates } = stickySessionFetch();
+
+    await recalculateWork(jar, OPE_A, START_A, fetchImpl);
+    // release を挟まずに B を処理する — cron 経路 (修正前) と同じ手順。
+    const resultB = await recalculateWork(jar, OPE_B, START_B, fetchImpl);
+
+    // ok:true が返る (エラーにならない) が、実際に再集計されたのは両方とも A。
+    expect(resultB).toBeTruthy();
+    expect(recalculatedViewStates).toEqual(["VS-WORK-A", "VS-WORK-A"]);
+  });
+
+  it("recalculates the correct operation when releaseLoadedOperation runs between the two (the fix)", async () => {
+    const jar = createCookieJar();
+    const { fetchImpl, recalculatedViewStates } = stickySessionFetch();
+
+    await recalculateWork(jar, OPE_A, START_A, fetchImpl);
+    await releaseLoadedOperation(jar, fetchImpl);
+    await recalculateWork(jar, OPE_B, START_B, fetchImpl);
+
+    expect(recalculatedViewStates).toEqual(["VS-WORK-A", "VS-WORK-B"]);
+  });
+});
+
 // --- F-DES1011 運行データ修正フォーム fixture --------------------------------
 
 function reviseFormHtml(opts: {
