@@ -5,7 +5,10 @@ import {
   createCookieJar,
   detectWareki,
   downloadCsvZip,
+  EMPTY_ZIP_BYTE_LENGTH,
+  EVIDENCE_BODY_PREFIX_MAX,
   extractHiddenFields,
+  isEmptyZip,
   fetchWithJar,
   ingestSetCookie,
   login,
@@ -21,6 +24,14 @@ import {
 import { PhaseTimer } from '../src/phase-timing'
 
 const ZIP_BYTES = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x01, 0x02, 0x03, 0x04])
+
+/** theearth が「その期間に運行が 1 件も無い」時に返す空 ZIP — EOCD (`PK\x05\x06`)
+ * だけの 22 bytes (Refs #633-22)。 */
+function emptyZipBytes(): Uint8Array {
+  const bytes = new Uint8Array(EMPTY_ZIP_BYTE_LENGTH)
+  bytes.set([0x50, 0x4b, 0x05, 0x06])
+  return bytes
+}
 
 function html(body: string): Response {
   return new Response(body, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } })
@@ -457,6 +468,61 @@ describe('assertZipMagic', () => {
   })
 })
 
+describe('isEmptyZip / 空 ZIP の文言分離 (Refs #633-22)', () => {
+  it('EOCD だけの 22 bytes を空 ZIP と判定する', () => {
+    expect(isEmptyZip(emptyZipBytes().buffer as ArrayBuffer)).toBe(true)
+  })
+
+  it('実データ入り ZIP (PK\\x03\\x04) は空 ZIP ではない', () => {
+    expect(isEmptyZip(ZIP_BYTES.buffer as ArrayBuffer)).toBe(false)
+  })
+
+  it('**22 bytes でも EOCD で始まらなければ空 ZIP ではない** (長さだけで決めない)', () => {
+    const notEocd = new Uint8Array(EMPTY_ZIP_BYTE_LENGTH)
+    notEocd.set([0x3c, 0x68, 0x74, 0x6d]) // "<htm"
+    expect(isEmptyZip(notEocd.buffer as ArrayBuffer)).toBe(false)
+  })
+
+  it('**EOCD で始まっても 22 bytes でなければ空 ZIP ではない** (中身のある ZIP を握り潰さない)', () => {
+    const longer = new Uint8Array(EMPTY_ZIP_BYTE_LENGTH + 1)
+    longer.set([0x50, 0x4b, 0x05, 0x06])
+    expect(isEmptyZip(longer.buffer as ArrayBuffer)).toBe(false)
+  })
+
+  it('空 ZIP は「データがありません」と言い、**確かめていない原因 (ログイン切れ / ページ仕様変更) を並べない**', () => {
+    const err = (() => {
+      try {
+        assertZipMagic(emptyZipBytes().buffer as ArrayBuffer)
+        return null
+      } catch (e) {
+        return e as Error
+      }
+    })()
+    expect(err).toBeInstanceOf(TheearthClientError)
+    expect(err!.message).toContain('空の ZIP')
+    expect(err!.message).toContain('データがありません')
+    expect(err!.message).toContain('22 bytes')
+    // ここが本件の主題 — この 2 語が出ていたせいで無害な未来日プローブ 3 件が
+    // 3 日間「原因不明の cron 故障」として引き継がれた。
+    expect(err!.message).not.toContain('ログイン切れ')
+    expect(err!.message).not.toContain('ページ仕様変更')
+  })
+
+  it('空 ZIP **以外**の非 ZIP は従来どおり候補を挙げる文言のまま (回帰させない)', () => {
+    const err = (() => {
+      try {
+        assertZipMagic(new TextEncoder().encode('<html>error page</html>').buffer as ArrayBuffer)
+        return null
+      } catch (e) {
+        return e as Error
+      }
+    })()
+    expect(err!.message).toContain('ZIP ではありません')
+    expect(err!.message).toContain('ログイン切れ')
+    expect(err!.message).not.toContain('空の ZIP')
+  })
+})
+
 describe('login', () => {
   const params = { compId: '27324455', userName: 'user1', userPass: 'pass1' }
 
@@ -721,6 +787,32 @@ describe('downloadCsvZip', () => {
     expect(mismatch.evidence.bodyLength).toBeGreaterThan(0)
     expect(mismatch.evidence.hasLoginForm).toBe(false)
     expect(mismatch.evidence.elapsedMs).toBeGreaterThanOrEqual(0)
+  })
+
+  it('**原本の先頭を bodyPrefix に載せる** — evidence.page の 160 字要約では「どの既知パターンからどう外れたか」が読めない (Refs #633-22)', async () => {
+    const page = csvPageHtml({ omit: 'btnCsvSvr' })
+    const fetchImpl = sequenceFetch([html(page)])
+    const jar = createCookieJar()
+    const err = (await downloadCsvZip(jar, range, fetchImpl).catch((e: unknown) => e)) as TheearthPageMismatchError
+    expect(err.bodyPrefix).toBe(page)
+    // 要約 (evidence.page) とは別物。要約はタグ除去済み 160 字、こちらは生の HTML。
+    expect(err.bodyPrefix).not.toBe(err.evidence.page)
+  })
+
+  it('bodyPrefix は EVIDENCE_BODY_PREFIX_MAX で切る (R2 に置くのは取っ掛かりで全文ではない)', async () => {
+    const padded = csvPageHtml({ omit: 'btnCsvSvr' }) + '<!--' + 'x'.repeat(EVIDENCE_BODY_PREFIX_MAX) + '-->'
+    const fetchImpl = sequenceFetch([html(padded)])
+    const jar = createCookieJar()
+    const err = (await downloadCsvZip(jar, range, fetchImpl).catch((e: unknown) => e)) as TheearthPageMismatchError
+    expect(err.bodyPrefix.length).toBe(EVIDENCE_BODY_PREFIX_MAX)
+    expect(err.bodyPrefix).toBe(padded.slice(0, EVIDENCE_BODY_PREFIX_MAX))
+  })
+
+  it('stage-2 ボタン欠落でも bodyPrefix に stage1 の原本が載る', async () => {
+    const fetchImpl = sequenceFetch([html(csvPageHtml()), html(STAGE1_CONFIRM_NO_OUTPUT_HTML)])
+    const jar = createCookieJar()
+    const err = (await downloadCsvZip(jar, range, fetchImpl).catch((e: unknown) => e)) as TheearthPageMismatchError
+    expect(err.bodyPrefix).toBe(STAGE1_CONFIRM_NO_OUTPUT_HTML)
   })
 
   it('defaults evidence.contentType to empty when the GET response has no Content-Type header', async () => {

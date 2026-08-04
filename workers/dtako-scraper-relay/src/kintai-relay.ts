@@ -401,11 +401,58 @@ export async function relayKintaiRecalc(
  */
 export type FoldTriggerDecision =
   | { run: true }
-  | { run: false; reason: "no_upload" | "split_failed" };
+  | { run: false; reason: "no_upload" | "split_failed" | "out_of_scope" };
+
+/** fold の対象会社かどうか。判定の**引数**を `KINTAI_COMP_ID` の宣言 (env) にする。 */
+export interface FoldScope {
+  /** 取り込みが終わった会社。 */
+  compId: string;
+  /** `wrangler.toml` の `KINTAI_COMP_ID` の値をそのまま渡す (未設定なら undefined)。 */
+  kintaiCompId: string | undefined;
+}
+
+/**
+ * **この会社の勤怠を畳んでよいか。**
+ *
+ * 畳み先 (rust-ichibanboshi) は `[kintai_events] tenant_id` で**単一テナントに
+ * pin** されており、別テナントを名乗ると 403 で弾く
+ * (`src/routes/kintai_timecard.rs` の `assert_same_tenant`)。relay は comp ごとの
+ * `tenant_id` を KV `dtako_accounts` から引いてそのまま名乗るので、**対象外の会社は
+ * 何を送っても通らない。**
+ *
+ * 実害 (Refs #633-22): fold の自動起動が入った 2026-08-01 以降、comp 75700192 の
+ * 取り込みは毎回成功しているのに fold だけが
+ * `X-Tenant-ID が [kintai_events] tenant_id と一致しません (畳めません)` で
+ * **1 度も成功していない**。恒久的な `fold_state: "failed"` が常態化して、
+ * **本物の fold 失敗が埋もれる。**
+ *
+ * ## 方針を焼き込まない
+ *
+ * 「どの会社が勤怠の対象か」は `wrangler.toml` の `KINTAI_COMP_ID` が既に宣言して
+ * いる (「打刻を持つのは大石運輸倉庫だけ」)。**値をコピーせず宣言を参照する** —
+ * 将来 対象が変わったら `KINTAI_COMP_ID` 側が変わり、この判定も自動で追随する。
+ *
+ * ## 未設定は「対象なし」
+ *
+ * `KINTAI_COMP_ID` は staging に**意図的に置いていない** (書き先は tenant で決まり、
+ * staging も本番も同じ KV / 同じ tenant を見るため、置くと staging から本番の
+ * `kintai.*` に書ける)。`/kintai-relay/run` が未設定で 503 に倒れるのと同じく、
+ * ここも未設定なら**誰も対象にしない** — fail-closed が正しい向き。
+ */
+export function isFoldTargetComp(scope: FoldScope): boolean {
+  const target = (scope.kintaiCompId ?? "").trim();
+  if (!target) return false;
+  return scope.compId.trim() === target;
+}
 
 export function decideFoldTrigger(
   uploadOutcome: { splitFailed: number | null } | null,
+  scope: FoldScope,
 ): FoldTriggerDecision {
+  // **範囲の判定を先に置く。** 対象外の会社では「取り込みが成功したか」も
+  // 「split が落ちたか」も fold の可否と無関係で、どちらを理由に記録しても
+  // 「直せば畳める」と読めてしまう (実際には何をしても畳めない)。
+  if (!isFoldTargetComp(scope)) return { run: false, reason: "out_of_scope" };
   if (!uploadOutcome) return { run: false, reason: "no_upload" };
   if (uploadOutcome.splitFailed !== null && uploadOutcome.splitFailed > 0) {
     return { run: false, reason: "split_failed" };
