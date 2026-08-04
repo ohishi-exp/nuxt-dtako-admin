@@ -883,6 +883,12 @@ async function recalculateByScore(
   timeoutMs: number,
 ): Promise<RecalculateExpenseResult> {
   const html = await fetchEditPageHtml(jar, url, pageLabel, fetchImpl, timeoutMs);
+  // ロック中の運行は lstWork/lstFuel を含まない空ページが返り、その状態で btnScore
+  // を postback すると theearth 側が NullReferenceException で HTTP 500 を返す
+  // (Refs #633-23、2026-08-04 実観測)。btnScore を探す前に検知しないと「ページ仕様
+  // 変更の可能性があります」という確かめていない原因を挙げてしまう (#644 の
+  // 症状と同型) ため、findFormFieldById より先に呼ぶ。
+  assertEditPageNotLocked(html);
 
   const button = findFormFieldById(html, "btnScore");
   if (!button) {
@@ -2123,9 +2129,12 @@ const WORK_EDIT_FIELD_IDS = {
 } as const;
 
 /** ロック中運行への GET 応答か (CloseMsg の実文言、cdp-pair 実機確認 2026-07-10)。
- * ロック中はページが空 (lstWork 無し) になるため、「作業 0 件」と誤認する前に
- * ここで loud fail する。 */
-function assertWorkPageNotLocked(html: string): void {
+ * ロック中はページが空 (F-DES1013 なら lstWork 無し) になるため、「作業 0 件」と
+ * 誤認する前にここで loud fail する。**F-DES1011/1012/1013 共通の挙動**
+ * (theearth-venus skill「URL 直接遷移 (F-DES1011/1012/1013 共通)」節の
+ * 「排他ロックの挙動」参照) — 関数名を `assertWorkPageNotLocked` から改めたのは
+ * F-DES1012 (経費入力) の再集計経路 (`recalculateByScore`) からも呼ぶため。 */
+function assertEditPageNotLocked(html: string): void {
   if (html.includes("編集を完了していないため、編集できません")) {
     throw new TheearthClientError(
       "この運行は編集ロック中のためデータを表示できません — 一覧の「編集制御解除」で" +
@@ -2245,7 +2254,7 @@ export async function getWorkForm(
   const url = buildOperationWorkUrl(opeNo, startOpe);
   const pageHtml = await fetchEditPageHtml(jar, url, "作業入力ページ", fetchImpl, timeoutMs);
   assertEditPageMatchesOperation(pageHtml, opeNo, "作業入力ページ");
-  assertWorkPageNotLocked(pageHtml);
+  assertEditPageNotLocked(pageHtml);
   const workRows = parseWorkRows(pageHtml);
   if (workRows.length === 0) {
     // 作業 0 件 (新規行テンプレートだけのページ) は実運用上あり得るが、ページ構造の
@@ -2318,7 +2327,7 @@ export async function startWorkRowEdit(
   validateStartOpe(params.startOpe);
   const url = buildOperationWorkUrl(params.opeNo, params.startOpe);
   const pageHtml = await fetchEditPageHtml(jar, url, "作業入力ページ", fetchImpl, timeoutMs);
-  assertWorkPageNotLocked(pageHtml);
+  assertEditPageNotLocked(pageHtml);
   const rows = parseWorkRows(pageHtml);
   if (!rows.some((r) => r.ctrlIndex === params.ctrlIndex)) {
     throw new ReportParamError(`作業行 (ctrlIndex=${params.ctrlIndex}) が見つかりません`);
@@ -2519,7 +2528,7 @@ export async function saveWorkRowFromPage(
   // 反映確認には別セッションの GET が確実)。GET はロックを取り直すが、同一 jar なら
   // 直後の一覧表示までで解放される想定。
   const rereadHtml = await fetchEditPageHtml(jar, url, "作業入力ページ", fetchImpl, timeoutMs);
-  assertWorkPageNotLocked(rereadHtml);
+  assertEditPageNotLocked(rereadHtml);
   return { workRows: parseWorkRows(rereadHtml), eventOptions: parseWorkEventOptions(rereadHtml) };
 }
 

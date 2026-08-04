@@ -540,6 +540,17 @@ describe("recalculateExpense", () => {
     expect(result.linkSysEnabled).toBe(false);
   });
 
+  it("throws the unlock guidance instead of a raw btnScore-missing error when the operation is locked (Refs #633-23)", async () => {
+    // ロック中は lstFuel を含まない空ページが返る (F-DES1013 と同型、
+    // theearth-venus skill「URL 直接遷移 (F-DES1011/1012/1013 共通)」節)。
+    // btnScore を探す前に検知しないと「ページ仕様変更の可能性」という
+    // 確かめていない原因を挙げてしまう。
+    const jar = createCookieJar();
+    await expect(recalculateExpense(jar, OPE_NO, START_OPE, sequenceFetch([html(WORK_LOCKED_HTML)]))).rejects.toThrow(
+      /編集ロック中|編集制御解除/,
+    );
+  });
+
   it("rejects malformed OpeNo / StartOpe", async () => {
     const jar = createCookieJar();
     await expect(recalculateExpense(jar, "bad", START_OPE)).rejects.toThrow(ReportParamError);
@@ -3173,6 +3184,17 @@ describe("recalculateWork", () => {
     await expect(
       recalculateWork(jar, OPE_NO, START_OPE, sequenceFetch([html(workFormHtml({ scoreButton: false }))])),
     ).rejects.toThrow(/btnScore/);
+  });
+
+  it("throws the unlock guidance instead of a raw btnScore-missing error when the operation is locked (Refs #633-23)", async () => {
+    // ロック残留のまま btnScore を postback すると theearth 側が
+    // NullReferenceException で HTTP 500 を返す (2026-08-04 実観測、Refs #633-23)。
+    // 空ページで btnScore が見つからず「ページ仕様変更の可能性があります」という
+    // 確かめていない原因を返していた旧挙動を、ロック検知で先に loud fail させる。
+    const jar = createCookieJar();
+    await expect(recalculateWork(jar, OPE_NO, START_OPE, sequenceFetch([html(WORK_LOCKED_HTML)]))).rejects.toThrow(
+      /編集ロック中|編集制御解除/,
+    );
   });
 });
 
