@@ -50,6 +50,7 @@ export default defineConfig({
         'src/kintai-diff.ts',
         'src/dtako-day-events-lookup.ts',
         'src/dtako-day-operations-list.ts',
+        'src/theearth-login-session.ts',
       ],
       thresholds: {
         lines: 100,
