@@ -107,8 +107,10 @@ import {
   relayKintaiStaleMonths,
   relayKintaiUnkoGaps,
   relayKintaiWindow,
+  type FoldTriggerDecision,
   type KintaiRelayDeps,
 } from "./kintai-relay";
+import { buildScrapeErrorArtifact } from "./scrape-error-artifact";
 import {
   allowedViewerComps,
   compIdsInSameTenant,
@@ -435,6 +437,19 @@ function describeScrapeFailure(err: unknown): { message: string; evidence?: Thee
   return { message: describeUnknownError(err) };
 }
 
+/** `decideFoldTrigger` が「回さない」と決めた理由 → 進捗レコードの `fold_state`
+ * (Refs #633-22)。**全部 `skipped_*`** — どれも失敗ではなく、意図して回さなかった
+ * 状態を表す (`scrape-queue.ts` の `ScrapeJobRecord.fold_state` の doc 参照)。
+ * 網羅を型で担保するため `Record<...>` で受ける (理由が増えたらここが型エラーになる)。 */
+const FOLD_SKIP_STATE: Record<
+  Exclude<FoldTriggerDecision, { run: true }>["reason"],
+  NonNullable<ScrapeJobRecord["fold_state"]>
+> = {
+  no_upload: "skipped_no_upload",
+  split_failed: "skipped_split_failed",
+  out_of_scope: "skipped_out_of_scope",
+};
+
 /** ETC 手動実行 (`/ws/scraper?kind=etc|etc-all`) の「今月/先月」ボタン選択を
  * URL query (`month=previous`) から読む。`previous` 以外 (未指定含む) は
  * `undefined` = 今月 (`resolveScrapeMonthAnchor` の既定) にフォールバックする。 */
@@ -556,6 +571,13 @@ export interface RelayEnv {
   DTAKO_R2?: R2Bucket;
   /** ETC CSV の R2 key prefix。staging は `etc-staging` で本番 (`etc`) と分離する。 */
   ETC_R2_PREFIX?: string;
+  /** dtako スクレイプ失敗の原本 (ZIP でない応答 / 想定と違うページ) の R2 key
+   * prefix (`dtako-scrape` / `-staging` / `-preview`、Refs #633-22)。
+   * key 設計と「何を残して何を残さないか」は `scrape-error-artifact.ts` の doc 参照。 */
+  DTAKO_SCRAPE_R2_PREFIX?: string;
+  /** 勤怠 (fold) の対象会社。`wrangler.toml` の宣言をそのまま fold の可否判定に
+   * 使う (`kintai-relay.ts` の `isFoldTargetComp`)。未設定 = 対象なし (fail-closed)。 */
+  KINTAI_COMP_ID?: string;
   /** 拘束時間管理表 CSV / サマリ JSON の R2 key prefix (`restraint` /
    * `restraint-staging` / `restraint-preview`)。key 設計とバージョン管理
    * (latest + 内容が変わった時だけ `v-{ts}` 追加、SHA-256 変化検知) は
@@ -1073,15 +1095,71 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       }
     } catch (err) {
       const { message, evidence } = describeScrapeFailure(err);
+      // 原本を R2 へ残す (Refs #633-22)。**console だけでは数日で消える** —
+      // Tail Worker は Workers Logs へ転写するだけで保存しないので、2026-08-01 の
+      // `id=rdoSelect1 が見つかりません` は 3 日後には原本がどこにも無かった。
+      // 何を残して何を残さないか (空 ZIP は残さない等) は `scrape-error-artifact.ts`。
+      const artifactKey = await this.saveScrapeErrorArtifact(err, account.comp_id, jobKey);
       // evidence がある時 (= TheearthPageMismatchError) だけ本文抜粋/status/
       // content-type/経過msをログに載せる。DO storage の `error` は短い要約のみ
       // (Refs #205-52 条件6 — 本文は response 由来なので credential は含まないが、
-      // 進捗レコードを肥大させない)。
-      console.error(JSON.stringify({ ...logBase, status: "error", message, ...(evidence ? { evidence } : {}) }));
+      // 進捗レコードを肥大させない)。**`bodyPrefix` は載せない** — 生の HTML は
+      // R2 側の役目 (ログを膨らませない)。
+      console.error(
+        JSON.stringify({
+          ...logBase,
+          status: "error",
+          message,
+          ...(evidence ? { evidence } : {}),
+          ...(artifactKey ? { error_artifact: artifactKey } : {}),
+        }),
+      );
       await recordScrapeJob(this.ctx.storage, jobKey, { state: "failed", error: message });
     } finally {
       const { phases, totalMs } = timer.report();
       console.log(JSON.stringify({ ...logBase, scrape_phase_timing: phases, total_ms: totalMs }));
+    }
+  }
+
+  /**
+   * スクレイプ失敗の原本を R2 へ保存する (Refs #633-22)。保存した key を返す
+   * (保存しなかった / できなかった時は `null`)。
+   *
+   * **失敗しても本体を止めない。** これは診断のための書き込みで、ここで throw
+   * すると「取り込みが落ちた理由」より「証拠が保存できなかった」が上に出てしまう
+   * (`recordScrapeJob` と同じ流儀、Refs #205-43 条件3)。ETC の
+   * `EtcMeisaiNotCsvError` 保存も同型で握っている。
+   */
+  private async saveScrapeErrorArtifact(
+    err: unknown,
+    compId: string,
+    jobKey: string,
+  ): Promise<string | null> {
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return null;
+    const artifact = buildScrapeErrorArtifact(err, {
+      prefix: this.env.DTAKO_SCRAPE_R2_PREFIX || "dtako-scrape",
+      compId,
+      jobKey,
+      nowMs: Date.now(),
+    });
+    if (!artifact) return null;
+    try {
+      await bucket.put(artifact.key, artifact.body, {
+        httpMetadata: { contentType: artifact.contentType },
+      });
+      return artifact.key;
+    } catch (putErr) {
+      console.error(
+        JSON.stringify({
+          scrape_error_artifact: "put_failed",
+          comp_id: compId,
+          job: jobKey,
+          key: artifact.key,
+          error: describeUnknownError(putErr),
+        }),
+      );
+      return null;
     }
   }
 
@@ -1106,11 +1184,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     uploadOutcome: AlcUploadOutcome | null,
   ): Promise<void> {
     try {
-      const decision = decideFoldTrigger(uploadOutcome);
+      // **`KINTAI_COMP_ID` の宣言をそのまま判定に使う** (値をコピーしない、
+      // Refs #633-22)。対象外の会社で fold を回すと畳み先が 403 を返し、恒久的な
+      // `fold_state: "failed"` になって本物の失敗が埋もれる (`isFoldTargetComp` の doc)。
+      const decision = decideFoldTrigger(uploadOutcome, {
+        compId: account.comp_id,
+        kintaiCompId: this.env.KINTAI_COMP_ID,
+      });
       if (!decision.run) {
         await recordScrapeJob(this.ctx.storage, jobKey, {
           state: "done",
-          fold_state: decision.reason === "split_failed" ? "skipped_split_failed" : "skipped_no_upload",
+          fold_state: FOLD_SKIP_STATE[decision.reason],
         });
         return;
       }

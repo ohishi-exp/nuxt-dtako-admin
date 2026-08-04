@@ -84,21 +84,46 @@ export interface TheearthEvidence {
   page: string;
 }
 
+/** [`TheearthPageMismatchError.bodyPrefix`] に載せる本文の上限 (文字)。
+ *
+ * `evidence.page` の 160 字要約では「そのページが何だったのか」までしか分からず、
+ * **どの既知パターンからどう外れたのかが読めない** (2026-08-01 の comp 75700192 の
+ * `id=rdoSelect1 が見つかりません` は、3 日後に調べた時点で原本がどこにも残って
+ * いなかった、Refs #633-22)。原本の先頭だけを保存して次の再現で答えを出せるように
+ * する。**大きくしすぎない** — R2 に置くのは調査の取っ掛かりで、全文ではない。 */
+export const EVIDENCE_BODY_PREFIX_MAX = 4096;
+
 /** 想定した form 要素が見つからなかった (= どの既知パターンにも一致しなかった) 事を
  * 表す。「ページ仕様が変更された」と決め付けず、`evidence` に事実だけを残す
  * (Refs #205-52)。 */
 export class TheearthPageMismatchError extends TheearthClientError {
   readonly evidence: TheearthEvidence;
-  constructor(message: string, evidence: TheearthEvidence) {
+  /**
+   * 原本調査用の本文先頭 ([`EVIDENCE_BODY_PREFIX_MAX`] 文字で切る、Refs #633-22)。
+   *
+   * **ログには出さない。R2 への保存専用** (`scrape-error-artifact.ts`)。
+   * `evidence.page` と違い生の HTML なので、console に出すと Workers Logs が
+   * 膨らむ上に保持期間 (数日) で消える — 消えては困るから R2 に置く、というのが
+   * このフィールドの存在理由。
+   *
+   * **credential は入らない。** この error を投げるのは `downloadCsvZip` の 2 箇所
+   * だけで、どちらも「credential を一切送っていないリクエスト」の応答
+   * (CSV ページの GET / 日付範囲だけを送った stage1 の POST) を見ている。
+   * ログイン POST の応答は `login()` が別の error で先に処理する。
+   */
+  readonly bodyPrefix: string;
+  constructor(message: string, evidence: TheearthEvidence, body: string) {
     super(message);
     this.name = "TheearthPageMismatchError";
     this.evidence = evidence;
+    this.bodyPrefix = body.slice(0, EVIDENCE_BODY_PREFIX_MAX);
   }
 }
 
 /** [`TheearthEvidence`] を応答 + 経過時間から組み立てる。本文は `describePage` の
  * title + 160字要約のみ (生の HTML は載せない — 大きくなりすぎるのと、
- * ASP.NET フォームが入力値をそのまま echo する構造上のリスクを避けるため)。 */
+ * ASP.NET フォームが入力値をそのまま echo する構造上のリスクを避けるため。
+ * 原本の先頭が要る時は [`TheearthPageMismatchError.bodyPrefix`] を使う)。 */
 function buildEvidence(res: Response, html: string, elapsedMs: number): TheearthEvidence {
   return {
     status: res.status,
@@ -734,8 +759,45 @@ function zipMagicOk(buf: ArrayBuffer): boolean {
   );
 }
 
-/** ZIP でない時の user 向けメッセージ (assertZipMagic / ensureZip で共用)。 */
+/** 空 ZIP = EOCD (End Of Central Directory) レコードだけの 22 bytes。 */
+export const EMPTY_ZIP_BYTE_LENGTH = 22;
+const EOCD_MAGIC = [0x50, 0x4b, 0x05, 0x06];
+
+/**
+ * **中身が 1 件も無い ZIP** (`PK\x05\x06` の EOCD だけ、ちょうど 22 bytes) か。
+ *
+ * theearth は「要求した期間に運行が 1 件も無い」時にこれを返す (2026-08-01 実証、
+ * Refs #633-22)。`PK\x03\x04` で始まらないので [`zipMagicOk`] は false になり、
+ * 従来はページ仕様変更やログイン切れと同じ文言に潰れていた — **実際には
+ * 「その読取日にデータが無い」だけで、システムはどこも壊れていない。**
+ *
+ * これを分けないと何が起きるか (実害): 診断目的で未来日を投入した 3 件が
+ * 「ログイン切れ、または theearth-np のページ仕様変更の可能性があります」と表示され、
+ * **3 日間「原因不明の日次 cron 故障」として引き継がれ続けた** (#633-22 の調査で
+ * 投入者を特定して初めて無害と判明)。
+ */
+export function isEmptyZip(buf: ArrayBuffer): boolean {
+  const bytes = new Uint8Array(buf);
+  return (
+    bytes.length === EMPTY_ZIP_BYTE_LENGTH &&
+    bytes[0] === EOCD_MAGIC[0] &&
+    bytes[1] === EOCD_MAGIC[1] &&
+    bytes[2] === EOCD_MAGIC[2] &&
+    bytes[3] === EOCD_MAGIC[3]
+  );
+}
+
+/** ZIP でない時の user 向けメッセージ (assertZipMagic / ensureZip で共用)。
+ *
+ * **空 ZIP は別文言にする** ([`isEmptyZip`] の doc 参照)。原因が確定している
+ * ケースに「確かめていない原因の候補」を並べると切り分けを誤らせる。 */
 function notZipMessage(buf: ArrayBuffer): string {
+  if (isEmptyZip(buf)) {
+    return (
+      `取得したデータが空の ZIP です (${buf.byteLength} bytes) — ` +
+      "その読取日に theearth 側のデータがありません (未来日・休業日など)"
+    );
+  }
   return (
     `取得したデータが ZIP ではありません (${buf.byteLength} bytes) — ` +
     "ログイン切れ、または theearth-np のページ仕様変更の可能性があります"
@@ -818,6 +880,7 @@ export async function downloadCsvZip(
       throw new TheearthPageMismatchError(
         `CSV フォームの要素 (id=${id}) が見つかりません`,
         buildEvidence(getRes, html, Date.now() - getT0),
+        html,
       );
     }
     fields.set(id, field);
@@ -880,6 +943,7 @@ export async function downloadCsvZip(
     throw new TheearthPageMismatchError(
       "CSV ダウンロードの2段階目ボタンが見つかりません",
       buildEvidence(stage1Res, stage1Html, Date.now() - stage1T0),
+      stage1Html,
     );
   }
   const stage2Body = new URLSearchParams({

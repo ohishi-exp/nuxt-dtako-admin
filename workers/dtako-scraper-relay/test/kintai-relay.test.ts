@@ -12,6 +12,7 @@ import {
   KintaiRelayError,
   MAX_MONTH_COUNT,
   decideFoldTrigger,
+  isFoldTargetComp,
   monthsCoveredByRange,
   foldMonth,
   FOLD_PAGE_MAX_DRIVERS,
@@ -338,19 +339,50 @@ describe("relayKintaiRecalc (ohishi-exp/rust-ichibanboshi#205 の 10)", () => {
   });
 });
 
+describe("isFoldTargetComp (Refs #633-22)", () => {
+  it("KINTAI_COMP_ID と一致する会社だけが対象", () => {
+    expect(isFoldTargetComp({ compId: "27324455", kintaiCompId: "27324455" })).toBe(true);
+    expect(isFoldTargetComp({ compId: "75700192", kintaiCompId: "27324455" })).toBe(false);
+  });
+
+  it("**KINTAI_COMP_ID 未設定は「対象なし」** — staging は意図的に置いていないので fail-closed が正しい向き", () => {
+    expect(isFoldTargetComp({ compId: "27324455", kintaiCompId: undefined })).toBe(false);
+    expect(isFoldTargetComp({ compId: "27324455", kintaiCompId: "" })).toBe(false);
+    expect(isFoldTargetComp({ compId: "27324455", kintaiCompId: "   " })).toBe(false);
+  });
+
+  it("前後の空白は両側とも無視する (var の書き間違いで静かに全社 skip にしない)", () => {
+    expect(isFoldTargetComp({ compId: " 27324455 ", kintaiCompId: " 27324455 " })).toBe(true);
+  });
+});
+
 describe("decideFoldTrigger (ohishi-exp/rust-ichibanboshi#205 の 10)", () => {
+  /** 勤怠の対象会社 (wrangler.toml の KINTAI_COMP_ID)。 */
+  const inScope = { compId: "27324455", kintaiCompId: "27324455" };
+
   it("アップロードが無ければ回さない", () => {
-    expect(decideFoldTrigger(null)).toEqual({ run: false, reason: "no_upload" });
+    expect(decideFoldTrigger(null, inScope)).toEqual({ run: false, reason: "no_upload" });
   });
 
   it("**split_failed > 0 の間は回さない** — 不完全データで上書きし成功に見えるより、古い値のままの方がマシ", () => {
-    expect(decideFoldTrigger({ splitFailed: 1 })).toEqual({ run: false, reason: "split_failed" });
-    expect(decideFoldTrigger({ splitFailed: 42 })).toEqual({ run: false, reason: "split_failed" });
+    expect(decideFoldTrigger({ splitFailed: 1 }, inScope)).toEqual({ run: false, reason: "split_failed" });
+    expect(decideFoldTrigger({ splitFailed: 42 }, inScope)).toEqual({ run: false, reason: "split_failed" });
   });
 
   it("split_failed が 0 か不明 (null、旧 alc) なら回す", () => {
-    expect(decideFoldTrigger({ splitFailed: 0 })).toEqual({ run: true });
-    expect(decideFoldTrigger({ splitFailed: null })).toEqual({ run: true });
+    expect(decideFoldTrigger({ splitFailed: 0 }, inScope)).toEqual({ run: true });
+    expect(decideFoldTrigger({ splitFailed: null }, inScope)).toEqual({ run: true });
+  });
+
+  it("**対象外の会社は取り込みが完全に成功していても回さない** (Refs #633-22 — comp 75700192 の 403 の実害)", () => {
+    const outOfScope = { compId: "75700192", kintaiCompId: "27324455" };
+    expect(decideFoldTrigger({ splitFailed: 0 }, outOfScope)).toEqual({ run: false, reason: "out_of_scope" });
+  });
+
+  it("**範囲の判定が先** — 対象外なら no_upload / split_failed ではなく out_of_scope を返す (「直せば畳める」と読めてしまうため)", () => {
+    const outOfScope = { compId: "75700192", kintaiCompId: "27324455" };
+    expect(decideFoldTrigger(null, outOfScope)).toEqual({ run: false, reason: "out_of_scope" });
+    expect(decideFoldTrigger({ splitFailed: 3 }, outOfScope)).toEqual({ run: false, reason: "out_of_scope" });
   });
 });
 

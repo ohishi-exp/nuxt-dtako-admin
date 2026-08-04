@@ -51,13 +51,19 @@ export interface ScrapeJobRecord {
   upload_id?: string | null;
   /** 取り込み成功後の勤怠 fold の進捗 (Refs ohishi-exp/rust-ichibanboshi#205 の
    * 10)。`skipped_split_failed` は「不完全データで上書きするより、古い値のまま
-   * の方がマシ」という判断で意図的に回さなかった状態。 */
+   * の方がマシ」という判断で意図的に回さなかった状態。
+   *
+   * `skipped_out_of_scope` は**勤怠の対象会社ではない**ため最初から回さなかった
+   * 状態 (Refs #633-22、`kintai-relay.ts` の `isFoldTargetComp`)。**失敗ではない** —
+   * これを `failed` として記録していた間、comp 75700192 は取り込み成功のたびに
+   * 403 を出し続け、本物の fold 失敗と見分けが付かなかった。 */
   fold_state?:
     | "running"
     | "done"
     | "capped"
     | "skipped_split_failed"
     | "skipped_no_upload"
+    | "skipped_out_of_scope"
     | "not_configured"
     | "failed";
   fold_error?: string;
