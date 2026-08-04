@@ -3459,9 +3459,25 @@ function removeEmployeeEntry(key: string) {
 const salaryMonthRows = computed(() =>
   (salaryParsed.value?.rows ?? []).filter(r => r.month === nextYm(month.value)))
 
+/**
+ * 給与明細との突合。**表示中のソースの行と突き合わせる** (`displayReport`)。
+ *
+ * ★ 2026-08-04 の回帰修正: ここが `report` (現行ソース) 固定だったため、
+ * 最低賃金チェックで GCP を選ぶと `report` を読まなくなった時点で
+ * `salaryComparison` が null になり、**給与列・差列が全部「-」**になっていた
+ * (給与データ自体は取り込めているのに)。
+ *
+ * `displayReport` は minwage タブ以外では `report` と同じなので、給与比較タブ・
+ * 月次集計タブの挙動は変わらない。minwage + GCP のときだけ GCP 由来の行と
+ * 突き合わせる — 左の「計算」列が GCP 基準なので、差もその基準で取るのが筋。
+ *
+ * `compareSalaryMonth` が読むのは `summary` の乗務員CD/氏名/稼働日数/実働/時間外と
+ * `wage.*` だけで **`days` は使わない**ため、日別を落とした GCP 応答でも成立する。
+ */
 const salaryComparison = computed<SalaryComparison | null>(() => {
-  if (!salaryParsed.value || !report.value || report.value.month !== month.value) return null
-  return compareSalaryMonth(salaryMonthRows.value, report.value.rows, salaryItemConfig.value, salaryCdMap.value)
+  const src = displayReport.value
+  if (!salaryParsed.value || !src || src.month !== month.value) return null
+  return compareSalaryMonth(salaryMonthRows.value, src.rows, salaryItemConfig.value, salaryCdMap.value)
 })
 
 // ---- 給与比較タブの表示状態 (Refs #554) ----
