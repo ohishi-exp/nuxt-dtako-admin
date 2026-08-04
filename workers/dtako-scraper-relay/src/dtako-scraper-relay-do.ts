@@ -81,6 +81,7 @@ import {
 import { pickOnpremUnkoNoFromDayEvents } from "./dtako-day-events-lookup";
 import { pickDayOperationsList } from "./dtako-day-operations-list";
 import {
+  annotateFoldStaleness,
   clearRunningPointer,
   MAX_SCRAPE_JOB_RECORDS,
   migrateLegacyScrapeJobsOnce,
@@ -1154,7 +1155,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     jobKey: string,
     months: string[],
   ): Promise<void> {
-    await recordScrapeJob(this.ctx.storage, jobKey, { state: "done", fold_state: "running", fold_months: months });
+    await recordScrapeJob(this.ctx.storage, jobKey, {
+      state: "done",
+      fold_state: "running",
+      fold_started_at: new Date().toISOString(),
+      fold_months: months,
+    });
     try {
       const origin = (this.env.NUXT_ICHIBAN_API_URL ?? "").trim();
       const cfAccessClientId = (this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID ?? "").trim();
@@ -1217,7 +1223,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       const records = await Promise.all(
         order.map((d) => this.ctx.storage.get<ScrapeJobRecord>(SCRAPE_JOB_KEY_PREFIX + d)),
       );
-      const queue = records.filter((r): r is ScrapeJobRecord => r != null);
+      const queue = records
+        .filter((r): r is ScrapeJobRecord => r != null)
+        .map((r) => annotateFoldStaleness(r, Date.now()));
       const counts = { pending: 0, running: 0, done: 0, failed: 0 };
       for (const r of queue) counts[r.state] += 1;
       return Response.json({
