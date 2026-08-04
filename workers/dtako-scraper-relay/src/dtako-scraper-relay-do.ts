@@ -6222,9 +6222,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       measurePhase(timer, "daily-cur", () =>
         this.memoKintaiUpstream(`daily:${ym}`, () => fetchDaily(ym, "daily-cur", "version-cur")),
       ),
-      measurePhase(timer, "daily-prev", () =>
-        this.memoKintaiUpstream(`daily:${prevYm}`, () => fetchDaily(prevYm, "daily-prev", "version-prev")),
-      ),
+      // ★ `source=gcp` では前月の打刻を取らない (2026-08-04 実測)。前月の days は
+      // 週40h の月初跨ぎ週にしか使わず、GCP モードではその時間も GCP で差し替わる。
+      // theearth 側の前月サマリは `wage-source` から来るので、前月の行自体は消えない。
+      // 失うのは「前月末の跨ぎ週にいるタイムカード専任者 (事務員) の祝日・会社指定休
+      // 判定」だけ (日曜=法定休日は日付から出せる)。
+      // 実測ではこれで daily-prev 2736ms / version-prev 2681ms / build-prev 2951ms が消える
+      skipKosoku
+        ? Promise.resolve(null)
+        : measurePhase(timer, "daily-prev", () =>
+            this.memoKintaiUpstream(`daily:${prevYm}`, () => fetchDaily(prevYm, "daily-prev", "version-prev")),
+          ),
       // kosoku の memo は fetchKosokuRaw の生応答層にある (Refs #508) — 画面の
       // `/kintai/kosoku-daily` 中継と同じ月を共有するため、ここでは重ねない
       skipKosoku
