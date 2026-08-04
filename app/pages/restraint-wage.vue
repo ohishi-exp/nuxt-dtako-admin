@@ -4002,12 +4002,30 @@ function triggerDownload(blob: Blob, filename: string) {
 // 全社共通の 1 履歴として単価マスタと同じタブで管理する。
 // ---------------------------------------------------------------------------
 
+/** 最低賃金カードを開いているか (既定は閉じる、2026-08-04 要望)。
+ *
+ * 法定の下限は年 1 回しか変わらず、普段は表の数字を見に来るだけなので、
+ * 都道府県 47 行 + 拠点の割り当て + 一括設定まで常時開いていると邪魔だった。
+ * **開くまで `min-wage` / `min-wage/branches` も取りに行かない** (実測 397ms +
+ * 630ms)。中身はこのカードでしか使わないので、閉じている間は要らない。 */
+const minWageCardOpen = ref(false)
+
 const minWageMaster = ref<MinWageMaster>({ prefectures: {}, branchToPrefecture: {} })
 const minWageMasterLoaded = ref(false)
 const savingMinWage = ref(false)
 const minWageMessage = ref('')
 const newMinWageRate = ref('')
 const newMinWageFrom = ref('')
+
+/** 最低賃金カードの中身 (法定下限 + 拠点→都道府県) を必要になった時だけ読む。 */
+function loadMinWageCard() {
+  if (!minWageMasterLoaded.value) loadMinWageMaster()
+  if (!branchGroupsLoaded.value) loadBranchGroups()
+}
+
+watch(minWageCardOpen, (open) => {
+  if (open && session.value) loadMinWageCard()
+})
 
 async function loadMinWageMaster() {
   if (!session.value) return
@@ -4537,10 +4555,9 @@ watch([activeTab, month, session, archiveMonthsLoaded], () => {
     if (showingGcp && (!gcpReport.value || gcpReport.value.month !== month.value)) {
       loadGcpWageReport()
     }
-    // 最低賃金 (法定下限) の設定カードは minwage タブに同居 (Refs #268 PR-E)
-    if (activeTab.value === 'minwage' && !minWageMasterLoaded.value) loadMinWageMaster()
-    // 拠点 → 都道府県の割り当て表 (Refs #409)
-    if (activeTab.value === 'minwage' && !branchGroupsLoaded.value) loadBranchGroups()
+    // 最低賃金 (法定下限) の設定カードは minwage タブに同居 (Refs #268 PR-E)。
+    // **カードを開いた時だけ読む** (2026-08-04) — 閉じている間は誰も使わない
+    if (activeTab.value === 'minwage' && minWageCardOpen.value) loadMinWageCard()
     // 支払い実績 (給与) 列の分類・突合に使う (Refs #282)
     if (activeTab.value === 'minwage' && !salaryConfigLoaded.value) loadSalaryItemConfig()
     // minwage は突合 (支払い実績列)、monthly は CSV の 所属(マスタ)/給与体系 列で使う
@@ -5303,13 +5320,23 @@ watch([compMap, kyuyoSyncedKeys], () => {
           <UCard v-if="activeTab === 'minwage'">
             <template #header>
               <div class="flex flex-wrap items-center gap-3">
-                <span class="font-semibold">最低賃金</span>
+                <!-- 見出しごとクリックで開閉する (小さい矢印だけだと当たらない) -->
+                <button type="button" class="flex items-center gap-2 text-left" @click="minWageCardOpen = !minWageCardOpen">
+                  <UIcon :name="minWageCardOpen ? 'i-lucide-chevron-down' : 'i-lucide-chevron-right'" class="size-4 text-gray-500" />
+                  <span class="font-semibold">最低賃金</span>
+                </button>
                 <span class="text-xs text-gray-500">基本時間単価 (会社が決めた支給額) とは別に、法定の下限として全社共通で設定します</span>
                 <div class="flex-1" />
-                <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" :loading="!minWageMasterLoaded" @click="loadMinWageMaster" />
-                <UButton size="xs" icon="i-lucide-save" label="保存" :loading="savingMinWage" @click="saveMinWageMaster" />
+                <template v-if="minWageCardOpen">
+                  <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" :loading="!minWageMasterLoaded" @click="loadMinWageMaster" />
+                  <UButton size="xs" icon="i-lucide-save" label="保存" :loading="savingMinWage" @click="saveMinWageMaster" />
+                </template>
               </div>
             </template>
+
+            <!-- 閉じている間は中身を描画しない (都道府県 47 行 + 拠点の割り当て +
+                 一括設定のプレビューまで持つので、v-show だと畳んでも描画コストが残る) -->
+            <div v-if="minWageCardOpen">
 
             <!-- 都道府県別 (Refs #409)。全社共通 1 本では拠点をまたぐ実態を表せない
                  ため、厚労省から 47 都道府県を取り込んで拠点ごとに割り当てる。
@@ -5471,6 +5498,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
               </tbody>
             </table>
             <p v-else class="text-sm text-gray-500">未設定です。上の欄から追加してください。</p>
+            </div>
           </UCard>
         </template>
 
