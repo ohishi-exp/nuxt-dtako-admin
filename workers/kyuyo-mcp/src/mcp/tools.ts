@@ -1105,13 +1105,13 @@ const UNKO_NO_23_RE = /^\d{23}$/;
  * (Refs #633-24、旧説明のせいで作業が止まった)。 */
 const UNKO_NO_DESCRIPTION =
   "オンプレ側の運行NO。**23桁**、ope_no_22 とは桁が違う (末尾1桁 = 対象CD を含む値)。" +
-  "**reset_timecard=false (既定) のときは「1件に紐付ける歯止めと監査ラベル」でしかない** — " +
+  "**reset_timecard=false を明示したときは「1件に紐付ける歯止めと監査ラベル」でしかない** — " +
   "取り込み対象は zip (ope_no_22 + start_ope) が決めるため、unko_no を間違えても別の運行に" +
-  "取り込まれることはない。**reset_timecard=true のときだけ意味が変わる**: 23桁目 (対象CD) が" +
-  "「2マンの何人目か」を区別する実物の値として使われるため、ここを間違えると別の乗務員の" +
-  "勤務時間を書き換えてしまう。**2マンの運行でも、22桁 (対象CD抜き) 1本の投入で主・助手の" +
-  "両方が取り込まれる** (`operations_count: 2` で実証済み) — `…1`/`…2` の2桁を2回に分けて" +
-  "呼ぶ必要は無い。";
+  "取り込まれることはない。**reset_timecard=true (既定) のときだけ意味が変わる**: 23桁目 " +
+  "(対象CD) が「2マンの何人目か」を区別する実物の値として使われるため、ここを間違えると" +
+  "別の乗務員の勤務時間を書き換えてしまう。**2マンの運行でも、22桁 (対象CD抜き) 1本の投入で" +
+  "主・助手の両方が取り込まれる** (`operations_count: 2` で実証済み) — `…1`/`…2` の2桁を" +
+  "2回に分けて呼ぶ必要は無い。";
 
 const runDtakoReimportItemArgs = z
   .object({
@@ -1124,7 +1124,11 @@ const runDtakoReimportItemArgs = z
     reset_timecard: z
       .boolean()
       .optional()
-      .describe("true で②(取り込み)に続けて③(勤務時間再登録)まで実行する。既定 false。"),
+      .default(true)
+      .describe(
+        "true (既定) で②(取り込み)に続けて③(勤務時間再登録)まで実行する。" +
+          "false にすると②だけで止める。",
+      ),
   })
   .strict();
 
@@ -1154,9 +1158,10 @@ const runDtakoReimportArgs = z
     reset_timecard: z
       .boolean()
       .optional()
+      .default(true)
       .describe(
-        "true で②(取り込み)に続けて③(勤務時間再登録、resetby-unko-no)まで実行する。" +
-          "**既定 false。** 破壊的操作 (time_card_dtako への書き戻し) を既定で増やさない。" +
+        "true (既定) で②(取り込み)に続けて③(勤務時間再登録、resetby-unko-no)まで実行する。" +
+          "false にすると②だけで止める (GCP側 time_card_dtako には届かない)。" +
           "**単体形式のときだけ有効** — `items` を渡す場合は items[].reset_timecard を使う。",
       ),
     comp_id: z.string().optional().describe("会社。省略すると relay の既定 (KINTAI_COMP_ID)"),
@@ -1215,8 +1220,13 @@ export const runDtakoReimportTool = {
     "出ない。判断材料は response_excerpt / dtako_events_count / reset_note であって" +
     "http_status の2xx/3xx分類ではない (rust-ichibanboshi dtako_autoload.rs の" +
     "module doc 参照)。" +
-    "**reset_timecard の既定は false。** true で②に続けて③(勤務時間再登録)まで" +
-    "実行する — 既定で破壊的操作を増やさない。" +
+    "**reset_timecard の既定は true (2026-08-04 変更)。** ②(取り込み)に続けて" +
+    "③(勤務時間再登録)まで実行し、GCP側 (time_card_dtako 由来の fold 入力) にも" +
+    "反映する。**②だけ (false) にすると GCP 側には永久に届かない** — これで半日" +
+    "溶かした実害があったため既定を反転した。③は材料 (dtako_events の 休息/運行開始/" +
+    "運行終了) が0件ならfail-closedでスキップされ (rust-ichibanboshi#283/#290)、" +
+    "誤って time_card_dtako を消すことはない。②だけで止めたい場合は " +
+    "reset_timecard: false を明示すること。" +
     "応答には entries (zip内のファイル名) と、オンプレ側の応答をそのまま含む " +
     "autoload (http_status/http_ok/location/response_excerpt/reset_*) が入る。" +
     "**★★ エラーに `uncertain: true` が含まれていたら、この tool を同じ引数で" +
