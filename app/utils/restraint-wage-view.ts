@@ -136,6 +136,10 @@ export interface WageReportRow {
    * 社員マスタに無い / 未取り込みなら null。給与比較が「基本給(計算)」の
    * 単価の掛け方を決めるのに使う。 */
   pay_kubun?: number | null
+  /** `restraint_source: 'gcp'` の応答で、GCP `day_summaries` にこの乗務員 × この月の
+   * 行が無かった (= 欠測)。既定 (`current`) の応答では常に false / 未定義。
+   * **0 分ではない** ので、金額・最低賃金割れの判定は出さずに「-」で表示する。 */
+  restraint_missing?: boolean
 }
 
 export interface WageReportResponse {
@@ -143,7 +147,13 @@ export interface WageReportResponse {
   rows: WageReportRow[]
   no_data_drivers: string[]
   warnings: string[]
+  /** 拘束時間の出どころ。`current` = 従来どおり theearth 拘束表 + オンプレ打刻
+   * (`kosoku-daily`)、`gcp` = GCP `kintai.day_summaries`。古い応答には無い。 */
+  restraint_source?: RestraintSourceKey
 }
+
+/** 最低賃金チェックで選べる拘束時間ソース (既定は `current` = 従来の挙動)。 */
+export type RestraintSourceKey = 'current' | 'gcp'
 
 /** `prefecture` は最低賃金の一括設定で入った場合の根拠県 (手入力には付かない、Refs #409)。 */
 export interface WageRateEntry { effectiveFrom: string, hourlyRate: number, prefecture?: string }

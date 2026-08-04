@@ -48,6 +48,7 @@ export default defineConfig({
         'src/dtako-alc-upload.ts',
         'src/theearth-recalculate.ts',
         'src/kintai-diff.ts',
+        'src/gcp-day-summaries.ts',
         'src/dtako-day-events-lookup.ts',
         'src/dtako-day-operations-list.ts',
         'src/theearth-login-session.ts',
