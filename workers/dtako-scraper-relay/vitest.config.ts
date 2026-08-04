@@ -52,6 +52,7 @@ export default defineConfig({
         'src/dtako-day-operations-list.ts',
         'src/theearth-login-session.ts',
         'src/scrape-error-artifact.ts',
+        'src/cron-batch.ts',
       ],
       thresholds: {
         lines: 100,

@@ -3375,30 +3375,18 @@ describe("recalculateByScore unconditional unlock (Refs #633-23)", () => {
   });
 });
 
+// releaseLoadedOperation (セッションの読み込み済みポインタ解放、Refs #645) の
+// 前後呼び出しは DO 側 (runOperationZip 等) に残したまま触っていない
+// (ユーザー指示「無駄に差分を増やさない」) — この関数が持つのは
+// recalculateWork (→ recalculateByScore の無条件 unlockOperation) + 成功後の
+// 自己解放 (selfUnlocked) だけ。
 describe("recalculateWorkUnattended (Refs #633-23)", () => {
-  /** F-DES1010 一覧応答 — releaseLoadedOperation (btnRelece) と unlockOperation
-   * (btnInitialize + 行選択用 hidden) の両方が読む要素を1つの fixture にまとめた
-   * もの (実ページは同一 URL なので、この関数が両方の GET/POST に使い回せる)。 */
-  function comboListHtml(): string {
-    return `<html><body><form>
-      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-LIST" />
-      <input type="submit" id="btnRelece" name="ctl00$MainContent$btnRelece" value="解放" />
-      <input type="submit" id="btnInitialize" name="ctl00$MainContent$btnInitialize" value="編集制御解除" />
-      <input type="text" id="txtOperationNo" name="ctl00$MainContent$txtOperationNo" class="none" />
-      <input type="text" id="txtStartDateTime" name="ctl00$MainContent$txtStartDateTime" class="none" />
-      <input type="text" id="txtIndex" name="ctl00$MainContent$txtIndex" class="none" />
-      <input type="text" id="txtCurrentID" name="ctl00$MainContent$txtCurrentID" class="none" />
-    </form></body></html>`;
-  }
-
-  it("releases the session pointer, unlocks unconditionally, recalculates, then self-unlocks and releases again", async () => {
+  it("unlocks unconditionally before recalculating, then self-unlocks the lock it just took", async () => {
     const jar = createCookieJar();
     const fetchImpl = sequenceFetch([
-      html(comboListHtml()), html(comboListHtml()), // releaseLoadedOperation (前)
-      html(comboListHtml()), html(comboListHtml()), // recalculateWork → recalculateByScore の unlockOperation (無条件、前)
+      ...unlockResponses(), // recalculateWork → recalculateByScore の unlockOperation (無条件、前)
       html(workFormHtml()), html(workFormHtml({ recalculated: true, linkSysDisabled: false })), // GET+POST btnScore
-      html(comboListHtml()), html(comboListHtml()), // unlockOperation (自分のロックの後始末)
-      html(comboListHtml()), html(comboListHtml()), // releaseLoadedOperation (後)
+      ...unlockResponses(), // unlockOperation (自分のロックの後始末)
     ]);
     const result = await recalculateWorkUnattended(jar, OPE_NO, START_OPE, fetchImpl);
     expect(result.linkSysEnabled).toBe(true);
@@ -3406,26 +3394,24 @@ describe("recalculateWorkUnattended (Refs #633-23)", () => {
     expect(result.selfUnlocked).toBe(true);
   });
 
-  it("propagates TheearthEditLockedError (real conflict) without self-unlocking or releasing again", async () => {
+  it("propagates TheearthEditLockedError (real conflict) without self-unlocking", async () => {
     const jar = createCookieJar();
     const fetchImpl = sequenceFetch([
-      html(comboListHtml()), html(comboListHtml()), // releaseLoadedOperation (前)
-      html(comboListHtml()), html(comboListHtml()), // recalculateByScore の unlockOperation (無条件、前)
+      ...unlockResponses(), // recalculateByScore の unlockOperation (無条件、前) — 効かなかった
       html(WORK_LOCKED_HTML), // GET — それでもロック中 (本物の競合、backstop)
       // これ以降 fetch が呼ばれたら sequenceFetch が "unexpected extra fetch call" で
-      // 検知する — 失敗時は self-unlock/release(後) を一切行わないことの証明。
+      // 検知する — 失敗時は self-unlock を一切行わないことの証明。
     ]);
     await expect(recalculateWorkUnattended(jar, OPE_NO, START_OPE, fetchImpl)).rejects.toThrow(TheearthEditLockedError);
   });
 
-  it("propagates other errors (btnScore missing) without self-unlocking or releasing again", async () => {
+  it("propagates other errors (btnScore missing) without self-unlocking", async () => {
     const jar = createCookieJar();
     const fetchImpl = sequenceFetch([
-      html(comboListHtml()), html(comboListHtml()), // releaseLoadedOperation (前)
-      html(comboListHtml()), html(comboListHtml()), // recalculateByScore の unlockOperation (無条件、前)
+      ...unlockResponses(), // recalculateByScore の unlockOperation (無条件、前)
       html(workFormHtml({ scoreButton: false })), // GET — ロックではない別のエラー
       // これ以降 fetch が呼ばれたら sequenceFetch が "unexpected extra fetch call" で
-      // 検知する — self-unlock/release(後) が一切走らないことの証明。
+      // 検知する — self-unlock が一切走らないことの証明。
     ]);
     await expect(recalculateWorkUnattended(jar, OPE_NO, START_OPE, fetchImpl)).rejects.toThrow(/btnScore/);
   });
