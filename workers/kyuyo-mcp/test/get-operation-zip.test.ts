@@ -1,10 +1,13 @@
 import { describe, it, expect, vi } from "vitest";
 import { getOperationZipTool } from "../src/mcp/tools";
+import { CRON_BATCH_MAX_ITEMS } from "../../dtako-scraper-relay/src/cron-batch";
 import type { Env } from "../src/env";
 
 const SECRET = "internal-shared-secret";
 const OPE_NO_22 = "2606050753300000004286";
 const START_OPE = "2026/07/07 7:53:30";
+const OPE_NO_22_B = "2606050753300000004287";
+const START_OPE_B = "2026/07/08 8:00:00";
 
 function env(over: Partial<Record<string, unknown>> = {}) {
   return {
@@ -129,5 +132,125 @@ describe("get_operation_zip (Refs ohishi-exp/rust-ichibanboshi#274, #205 の 59)
     await expect(
       getOperationZipTool.execute(html, { ope_no_22: OPE_NO_22, start_ope: START_OPE }),
     ).rejects.toThrow(/parse failed/);
+  });
+
+  // Refs #633-24: items (バッチ) 対応。単体形式は上のテストで固定済み (regression)。
+  describe("recalculate (単体形式)", () => {
+    it("**説明で既定 false / 書き込みになることが読める**", () => {
+      expect(getOperationZipTool.description).toContain("recalculate");
+      expect(getOperationZipTool.description).toContain("既定は読むだけ");
+    });
+
+    it("省略時は relay へ recalculate を送らない (既定 false は relay 側の契約)", async () => {
+      const e = env();
+      await getOperationZipTool.execute(e, { ope_no_22: OPE_NO_22, start_ope: START_OPE });
+      const body = JSON.parse((relayOf(e).fetch.mock.calls[0]![1] as RequestInit).body as string);
+      expect(body.recalculate).toBeUndefined();
+    });
+
+    it("true を渡すと body にそのまま乗る", async () => {
+      const e = env();
+      await getOperationZipTool.execute(e, { ope_no_22: OPE_NO_22, start_ope: START_OPE, recalculate: true });
+      const body = JSON.parse((relayOf(e).fetch.mock.calls[0]![1] as RequestInit).body as string);
+      expect(body.recalculate).toBe(true);
+    });
+  });
+
+  describe("items (バッチ, Refs #633-24)", () => {
+    it("**説明で上限件数・zip_base64 が返らないことが読める**", () => {
+      expect(getOperationZipTool.description).toContain("items");
+      expect(getOperationZipTool.description).toContain(String(CRON_BATCH_MAX_ITEMS));
+      expect(getOperationZipTool.description).toContain("zip_base64 は返らない");
+    });
+
+    it("ope_no_22/start_ope と items のどちらも無いと拒否する", () => {
+      expect(getOperationZipTool.inputSchema.safeParse({}).success).toBe(false);
+    });
+
+    it("items だけでも通る (単体フィールド省略可)", () => {
+      expect(
+        getOperationZipTool.inputSchema.safeParse({
+          items: [{ ope_no_22: OPE_NO_22, start_ope: START_OPE }],
+        }).success,
+      ).toBe(true);
+    });
+
+    it(`items は最大 ${CRON_BATCH_MAX_ITEMS} 件まで — schema レベルでも超過を弾く`, () => {
+      const items = Array.from({ length: CRON_BATCH_MAX_ITEMS }, () => ({
+        ope_no_22: OPE_NO_22,
+        start_ope: START_OPE,
+      }));
+      expect(getOperationZipTool.inputSchema.safeParse({ items }).success).toBe(true);
+      expect(
+        getOperationZipTool.inputSchema.safeParse({ items: [...items, { ope_no_22: OPE_NO_22, start_ope: START_OPE }] })
+          .success,
+      ).toBe(false);
+    });
+
+    it("items が空配列だと拒否する (min 1)", () => {
+      expect(getOperationZipTool.inputSchema.safeParse({ items: [] }).success).toBe(false);
+    });
+
+    it("items の要素は ope_no_22/start_ope の形式チェックを受ける", () => {
+      expect(
+        getOperationZipTool.inputSchema.safeParse({ items: [{ ope_no_22: "bad", start_ope: START_OPE }] }).success,
+      ).toBe(false);
+    });
+
+    it("items を渡すと {comp_id, items:[{ope_no,start_ope,recalculate}]} 形式で relay へ送る", async () => {
+      const e = env();
+      await getOperationZipTool.execute(e, {
+        comp_id: "0100",
+        items: [
+          { ope_no_22: OPE_NO_22, start_ope: START_OPE },
+          { ope_no_22: OPE_NO_22_B, start_ope: START_OPE_B, recalculate: true },
+        ],
+      });
+      const body = JSON.parse((relayOf(e).fetch.mock.calls[0]![1] as RequestInit).body as string);
+      expect(body).toEqual({
+        comp_id: "0100",
+        items: [
+          { ope_no: OPE_NO_22, start_ope: START_OPE, recalculate: false },
+          { ope_no: OPE_NO_22_B, start_ope: START_OPE_B, recalculate: true },
+        ],
+      });
+    });
+
+    it("items を渡すと単体形式の ope_no_22/start_ope/recalculate は無視される", async () => {
+      const e = env();
+      await getOperationZipTool.execute(e, {
+        ope_no_22: OPE_NO_22,
+        start_ope: START_OPE,
+        recalculate: true,
+        items: [{ ope_no_22: OPE_NO_22_B, start_ope: START_OPE_B }],
+      });
+      const body = JSON.parse((relayOf(e).fetch.mock.calls[0]![1] as RequestInit).body as string);
+      expect(body.items).toEqual([{ ope_no: OPE_NO_22_B, start_ope: START_OPE_B, recalculate: false }]);
+      expect(body.ope_no).toBeUndefined();
+    });
+
+    it("バッチ応答 (results[]/truncated/remaining) もそのまま返す", async () => {
+      const payload = {
+        ok: true,
+        comp_id: "0100",
+        results: [
+          { ok: true, result: { ope_no: OPE_NO_22, bytes: 100, omitted: false, entries: ["KUDGURI.csv"] } },
+          { ok: false, error: "seq expired" },
+        ],
+        success_count: 1,
+        failure_count: 1,
+        truncated: true,
+        remaining: 3,
+        theearth_logins: 1,
+        theearth_kicked: false,
+      };
+      const e = env({
+        SCRAPER_RELAY: { fetch: vi.fn(async () => new Response(JSON.stringify(payload))) },
+      });
+      const got = await getOperationZipTool.execute(e, {
+        items: [{ ope_no_22: OPE_NO_22, start_ope: START_OPE }],
+      });
+      expect(got).toEqual(payload);
+    });
   });
 });
