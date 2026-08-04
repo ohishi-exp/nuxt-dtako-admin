@@ -1557,6 +1557,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         entries: payload.entries,
         theearth_logins: jobState.logins.length,
         theearth_kicked: jobState.logins.some((l) => l.kicked),
+        // 構造化ログ (上の console.log) にしか出ていなかった抜けを直す (Refs #633-24)。
+        theearth_unlocked: unlockInfo.unlocked,
+        theearth_self_unlocked: unlockInfo.selfUnlocked,
       });
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
@@ -1637,6 +1640,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         bytes: payload.bytes,
         omitted: payload.omitted,
         entries: payload.entries,
+        // 構造化ログ (上の console.log) にしか出ていなかった抜けを直す (Refs #633-24)。
+        // バッチは項目ごとに値が異なりうるので、単体形式の「応答トップレベル」
+        // ではなく results[i] (この item の結果オブジェクト) に載せる。
+        theearth_unlocked: unlockInfo.unlocked,
+        theearth_self_unlocked: unlockInfo.selfUnlocked,
       };
     });
 
@@ -1835,6 +1843,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         ...report,
         theearth_logins: jobState.logins.length,
         theearth_kicked: jobState.logins.some((l) => l.kicked),
+        theearth_unlocked: unlockInfo.unlocked,
+        theearth_self_unlocked: unlockInfo.selfUnlocked,
       });
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
@@ -1940,7 +1950,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           theearth_self_unlocked: unlockInfo.selfUnlocked,
         }),
       );
-      return report;
+      // 構造化ログ (上の console.log) にしか出ていなかった抜けを直す (Refs #633-24)。
+      return { ...report, theearth_unlocked: unlockInfo.unlocked, theearth_self_unlocked: unlockInfo.selfUnlocked };
     });
 
     const successCount = batch.results.filter((r) => r.ok).length;
@@ -2105,6 +2116,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         ...report,
         theearth_logins: jobState.logins.length,
         theearth_kicked: jobState.logins.some((l) => l.kicked),
+        theearth_unlocked: unlockInfo.unlocked,
+        theearth_self_unlocked: unlockInfo.selfUnlocked,
       });
     } catch (err) {
       if (err instanceof VenusSessionExpiredError) {
@@ -2216,7 +2229,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           }),
         );
       }
-      return report;
+      // 構造化ログ (上の console.log/error) にしか出ていなかった抜けを直す (Refs #633-24)。
+      return { ...report, theearth_unlocked: unlockInfo.unlocked, theearth_self_unlocked: unlockInfo.selfUnlocked };
     });
 
     const successCount = batch.results.filter((r) => r.ok).length;
