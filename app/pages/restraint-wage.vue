@@ -5195,8 +5195,11 @@ watch([compMap, kyuyoSyncedKeys], () => {
                     <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 align-bottom">氏名<br><span class="font-normal text-xs">(営業所)</span></th>
                     <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom">実働</th>
                     <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="法定時間内賃金 (深夜・残業等の割増区分を含まない基本部分)。対象時間 = 実働 − 時間外 − 時間外深夜 − 週40超過 − 法定休日実働。「給与比較」タブの基本給(計算)と同じ値">基本給(法定内)<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
-                    <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom" title="残業ではない通常勤務中の深夜加算分 (0.25倍、基本給とは別枠の上乗せ)。@ は計算単価 (加算分 0.25 倍のみ)">深夜(通常)<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
-                    <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="対象時間 = 時間外 + 週40超過 (2段表示)。@ は残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)。月60時間超過は時間が橙色">残業代<br><span class="font-normal text-xs">(時間外 / 週40超過 / @単価 / 金額)</span></th>
+                    <!-- 深夜 (通常) は労基法37条4項の**割増**なので、区切り線は深夜の左に置き
+                         残業代・深夜残業代と同じ「割増」ブロックに入れる (ユーザー指示 2026-08-04)。
+                         基本給 (法定内) は 1.0 倍の本体賃金でここだけが割増ではない -->
+                    <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="残業ではない通常勤務中の深夜加算分 (労基法37条4項、0.25倍の上乗せのみ)。基礎の 1.0 倍は左の基本給(法定内)に入っているので、法定内深夜の支払は 基本給 + この列 = 1.25 倍になる。@ は計算単価 (加算分 0.25 倍のみ)">深夜(通常)<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
+                    <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom" title="対象時間 = 時間外 + 週40超過 (2段表示)。@ は残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)。月60時間超過は時間が橙色">残業代<br><span class="font-normal text-xs">(時間外 / 週40超過 / @単価 / 金額)</span></th>
                     <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom" title="対象時間 = 時間外深夜。@ は深夜残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)">深夜残業代<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
                     <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="法定休日 (既定 日曜) の実働すべて (1.35倍、深夜分は1.6倍)。@ は通常+深夜合算の実額按分">法定休日<br><span class="font-normal text-xs">(通常 / 深夜 / @単価 / 金額)</span></th>
                     <!-- 祝日・会社指定休に出勤した日だけ入る区分。有る月だけ列を出す (Refs #566) -->
@@ -5254,12 +5257,12 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       <div class="text-xs text-gray-400">{{ fmtAtRate(row.wage.amounts?.statutory ?? null, row.wage.minutes.statutory) }}</div>
                       <div class="font-medium">{{ fmtYen(row.wage.amounts?.statutory ?? null) }}</div>
                     </td>
-                    <td class="px-2 py-1.5 text-right">
+                    <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700">
                       <div class="text-xs text-gray-500">{{ fmtMinutes(row.wage.minutes.night) }}</div>
                       <div class="text-xs text-gray-400">{{ fmtAtRate(row.wage.amounts?.night ?? null, row.wage.minutes.night) }}</div>
                       <div class="font-medium">{{ fmtYen(row.wage.amounts?.night ?? null) }}</div>
                     </td>
-                    <td class="px-2 py-1.5 text-right border-l border-gray-200 dark:border-gray-700">
+                    <td class="px-2 py-1.5 text-right">
                       <div class="text-xs" :class="row.wage.overtimeMinutes > 60 * 60 ? 'text-amber-600 font-medium' : 'text-gray-500'">{{ fmtMinutes(row.wage.minutes.overtime) }}</div>
                       <div class="text-xs" :class="row.wage.overtimeMinutes > 60 * 60 ? 'text-amber-600' : 'text-gray-500'">{{ fmtMinutes(row.wage.minutes.weekly40Excess) }}</div>
                       <div class="text-xs text-gray-400">{{ fmtAtRate(row.wage.actualOvertimePay, row.wage.overtimeMinutes) }}</div>
