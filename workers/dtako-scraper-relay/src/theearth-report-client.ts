@@ -65,6 +65,17 @@ export class ReportParamError extends TheearthClientError {
   }
 }
 
+/** F-DES1011/1012/1013 が対象運行の編集ロック (`ExclusionFlag`) 中に返す空ページ
+ * (`assertEditPageNotLocked` が検出) を表す。呼び出し側 (`recalculateWorkUnattended`)
+ * が文言の一致ではなく型で分岐できるようにする (Refs #633-23、文言を変えると
+ * 分岐が壊れる string-match を避ける)。 */
+export class TheearthEditLockedError extends TheearthClientError {
+  constructor(message: string) {
+    super(message);
+    this.name = "TheearthEditLockedError";
+  }
+}
+
 // kyuyo-mcp の tool 入力バリデーションでも同じ正規表現を使う (Refs #205 の 59) —
 // export してこの 1 箇所を正とする (別ファイルで再定義すると桁数・書式がずれうる)。
 export const OPE_NO_RE = /^\d{22}$/;
@@ -672,6 +683,13 @@ export interface RecalculateExpenseResult {
   /** 再集計成功後に「システム連動開始」ボタンが enable されたか
    * (SKILL.md: 再集計成功の副次確認シグナル)。 */
   linkSysEnabled: boolean;
+  /** 再集計の前に `unlockOperation` (`btnInitialize`) を呼んだか。常に true —
+   * `recalculateByScore` が GET の前に無条件で呼ぶ設計のため (ユーザー指示
+   * 2026-08-04「取得時にロック解除いるよ」、Refs #633-23)。死んだセッションが
+   * 残したロックか自分が前回残したロックかは叩く前に区別できないので、検知を
+   * 待たず毎回先に片付ける。`btnInitialize` は他ユーザーの正当な編集ロックも
+   * 解除しうるため、呼び出し側 (DO) は必ずログ/応答で可視化すること。 */
+  unlocked: boolean;
 }
 
 /** ASP.NET がページの `<form action>` にエコーする現在 URL から OpeNo を抜き出す。
@@ -873,21 +891,32 @@ function serializeAllFieldsSkippingEmptySelects(html: string): Record<string, st
 }
 
 /** `btnScore` postback の共通実装。F-DES1012 (評価点再集計) と F-DES1013
- * (作業時間再集計) は物理的に同一ボタンでラベルだけ違う (SKILL.md 実機確認)。 */
+ * (作業時間再集計) は物理的に同一ボタンでラベルだけ違う (SKILL.md 実機確認)。
+ *
+ * **GET の前に必ず `unlockOperation` (`btnInitialize`) で対象運行のロックを
+ * 解除する** (ユーザー指示 2026-08-04「取得時にロック解除いるよ」、Refs
+ * #633-23)。1697 が詰まっていた真因は「誰かが編集中」ではなく「死んだセッションが
+ * 残した ExclusionFlag ロック」で、死んだセッションの残骸か自分が前回残した
+ * ロックかは叩く前に区別できないため、検知を待たず毎回先に片付ける。ブラウザ
+ * 経路 (`/daily-report-api/work/recalculate` 等、人が画面の前にいる経路) も含めて
+ * 全経路がこれを通る — 人が「再集計」を押した時に残骸ロックで弾かれて「編集制御
+ * 解除を押してこい」と言われるより、先に解除して普通に通る方が正しい (ユーザー
+ * 判断)。`assertEditPageNotLocked` は backstop として残す — 先に解除しても
+ * なおロックが返るなら、それは残骸ではなく実際に他ユーザーが編集中ということ。 */
 async function recalculateByScore(
   jar: CookieJar,
   url: string,
+  opeNo: string,
+  startOpe: string,
   pageLabel: string,
   actionLabel: string,
   fetchImpl: FetchLike,
   timeoutMs: number,
 ): Promise<RecalculateExpenseResult> {
+  await unlockOperation(jar, { opeNo, startOpe }, fetchImpl, timeoutMs);
+
   const html = await fetchEditPageHtml(jar, url, pageLabel, fetchImpl, timeoutMs);
-  // ロック中の運行は lstWork/lstFuel を含まない空ページが返り、その状態で btnScore
-  // を postback すると theearth 側が NullReferenceException で HTTP 500 を返す
-  // (Refs #633-23、2026-08-04 実観測)。btnScore を探す前に検知しないと「ページ仕様
-  // 変更の可能性があります」という確かめていない原因を挙げてしまう (#644 の
-  // 症状と同型) ため、findFormFieldById より先に呼ぶ。
+  // 上で解除してもなお返るロックは残骸ではなく本物の競合 (backstop、Refs #633-23)。
   assertEditPageNotLocked(html);
 
   const button = findFormFieldById(html, "btnScore");
@@ -909,7 +938,7 @@ async function recalculateByScore(
   }
   const linkSysTag = findTagById(postHtml, "btnLinkSys");
   const linkSysEnabled = !!linkSysTag && !/class=["'][^"']*aspNetDisabled/i.test(linkSysTag);
-  return { linkSysEnabled };
+  return { linkSysEnabled, unlocked: true };
 }
 
 /** POST 相当: `btnScore` postback で評価点を再集計する (F-DES1013 の「作業時間
@@ -925,7 +954,7 @@ export async function recalculateExpense(
   validateOpeNo(opeNo);
   validateStartOpe(startOpe);
   const url = buildOperationExpenseUrl(opeNo, startOpe);
-  return recalculateByScore(jar, url, "経費入力ページ", "評価点再集計", fetchImpl, timeoutMs);
+  return recalculateByScore(jar, url, opeNo, startOpe, "経費入力ページ", "評価点再集計", fetchImpl, timeoutMs);
 }
 
 export interface StartSystemLinkResult {
@@ -2136,7 +2165,7 @@ const WORK_EDIT_FIELD_IDS = {
  * F-DES1012 (経費入力) の再集計経路 (`recalculateByScore`) からも呼ぶため。 */
 function assertEditPageNotLocked(html: string): void {
   if (html.includes("編集を完了していないため、編集できません")) {
-    throw new TheearthClientError(
+    throw new TheearthEditLockedError(
       "この運行は編集ロック中のためデータを表示できません — 一覧の「編集制御解除」で" +
         "ロックを解放してから開き直してください",
     );
@@ -2544,7 +2573,46 @@ export async function recalculateWork(
   validateOpeNo(opeNo);
   validateStartOpe(startOpe);
   const url = buildOperationWorkUrl(opeNo, startOpe);
-  return recalculateByScore(jar, url, "作業入力ページ", "作業時間再集計", fetchImpl, timeoutMs);
+  return recalculateByScore(jar, url, opeNo, startOpe, "作業入力ページ", "作業時間再集計", fetchImpl, timeoutMs);
+}
+
+export interface RecalculateWorkUnattendedResult extends RecalculateExpenseResult {
+  /** 再集計の成功後、自分が GET で取得した ExclusionFlag ロックを重ねて
+   * `unlockOperation` で解放したか (実ブラウザが編集ウィンドウを閉じる操作の
+   * 代替、根治、Refs #633-23)。`recalculateByScore` の GET 前の無条件解除は
+   * 「次に誰かがこの運行を触る時」の後始末であって、cron 自身が処理した直後の
+   * 一般利用者 (人が theearth を直接開く場合を含む) への影響までは防げない
+   * ため、cron 経路だけ成功直後にも解放する。ブラウザ経路
+   * (`/daily-report-api/work/recalculate` 等) では行わない — 人が続けて同じ運行を
+   * 編集する可能性があり、自分の作業中に横から割り込まれるリスクを避けるため。 */
+  selfUnlocked: boolean;
+}
+
+/**
+ * cron の自前ログイン経路 (`runOperationZip`/`runDtakoReimportJob`/
+ * `runDtakoAlcUploadJob`) 専用の `recalculateWork` ラッパ (Refs #633-23)。
+ * ExclusionFlag ロックの解除そのものは `recalculateByScore` が GET の前に
+ * 無条件で行う (ブラウザ経路も含む共通処理)。ここで足すのは cron 特有の2点:
+ *
+ * 1. `releaseLoadedOperation` でセッションの読み込み済みポインタを解放
+ *    (前後) — cron はログインセッションを DO インスタンス内で使い回す
+ *    (Refs #633-20) ため、別運行を続けて処理すると「セッションに1件だけ
+ *    読み込み済み」の sticky 状態を踏む (Refs #633-23、#645)。ブラウザ経路は
+ *    1 セッション 1 運行が前提なので、この問題を持たない
+ * 2. 成功後の自分のロックの自己解放 (`selfUnlocked`) — 下記 doc 参照
+ */
+export async function recalculateWorkUnattended(
+  jar: CookieJar,
+  opeNo: string,
+  startOpe: string,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<RecalculateWorkUnattendedResult> {
+  await releaseLoadedOperation(jar, fetchImpl, timeoutMs);
+  const result = await recalculateWork(jar, opeNo, startOpe, fetchImpl, timeoutMs);
+  await unlockOperation(jar, { opeNo, startOpe }, fetchImpl, timeoutMs);
+  await releaseLoadedOperation(jar, fetchImpl, timeoutMs);
+  return { ...result, selfUnlocked: true };
 }
 
 // ---------------------------------------------------------------------------
