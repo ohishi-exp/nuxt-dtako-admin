@@ -6874,21 +6874,38 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // タイムカード側は **R2 も ichiban の写しも読まず、live-build の成否だけで決める**
     // (2026-07-28「R2 やめろ」決定 → 2026-08-03 に写しフォールバックも撤去、#606-5)。
     // 上の docstring 参照。
-    const live = await measurePhase(timer, "kintai-live", () =>
+    // ★ ここで await しない (2026-08-04 実測)。timecard 側 (打刻) と theearth 側
+    // (`wage-source`) は互いに独立なのに直列で待っており、`source` が
+    // kintai-live 1,762ms + wage-source 1,083ms = 2,855ms とほぼ完全な足し算に
+    // なっていた。下の `resolveLive()` を await する場所まで走らせ続ける。
+    const livePromise = measurePhase(timer, "kintai-live", () =>
       this.buildKintaiSummariesLive(compId, ym, prevYm, cache, timer, tracker, skipKosoku),
     );
     const emptyKintaiMonth: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>> = {
       summaries: [],
       noDataDrivers: [],
     };
-    if (!live) {
-      // 握り潰さない — buildKintaiSummariesLive 内で理由別ログ済みだが、ここでも
-      // 「wage-report のこの応答は timecard 側が空になった」ことを明示しておく
-      console.error(JSON.stringify({ wage_report_kintai: "live-failed-empty", comp_id: compId, ym }));
-    }
-    const kintaiCurrent = live ? live.current : emptyKintaiMonth;
-    const kintaiPrev = live ? live.prev : emptyKintaiMonth;
-    const kintaiLive = live !== null;
+    /** timecard 側の結果 (**1 度だけ**評価する — 失敗ログを二重に出さない)。 */
+    let livePartsPromise: Promise<{
+      kintaiCurrent: typeof emptyKintaiMonth;
+      kintaiPrev: typeof emptyKintaiMonth;
+      kintaiLive: boolean;
+    }> | null = null;
+    const resolveLive = () => {
+      livePartsPromise ??= livePromise.then((live) => {
+        if (!live) {
+          // 握り潰さない — buildKintaiSummariesLive 内で理由別ログ済みだが、ここでも
+          // 「wage-report のこの応答は timecard 側が空になった」ことを明示しておく
+          console.error(JSON.stringify({ wage_report_kintai: "live-failed-empty", comp_id: compId, ym }));
+        }
+        return {
+          kintaiCurrent: live ? live.current : emptyKintaiMonth,
+          kintaiPrev: live ? live.prev : emptyKintaiMonth,
+          kintaiLive: live !== null,
+        };
+      });
+      return livePartsPromise;
+    };
     const fromR2 = {
       current: () =>
         measurePhase(timer, "r2-theearth-cur", () => this.loadMonthSummaries(bucket, compId, ym)),
@@ -6896,8 +6913,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         measurePhase(timer, "r2-theearth-prev", () => this.loadMonthSummaries(bucket, compId, prevYm)),
     };
     const allR2 = async () => {
-      const [current, prev] = await Promise.all([fromR2.current(), fromR2.prev()]);
-      return { current, prev, kintaiCurrent, kintaiPrev, kintaiLive };
+      const [current, prev, liveParts] = await Promise.all([
+        fromR2.current(),
+        fromR2.prev(),
+        resolveLive(),
+      ]);
+      return { current, prev, ...liveParts };
     };
 
     const apiUrl = (this.env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
@@ -6963,12 +6984,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       console.log(JSON.stringify({ wage_report_source: "r2-piece-fallback", comp_id: compId, piece: label }));
       return fallback();
     };
-    const [current, prev] = await Promise.all([
+    const [current, prev, liveParts] = await Promise.all([
       pick(wire.current_theearth, fromR2.current, `theearth:${ym}`),
       pick(wire.prev_theearth, fromR2.prev, `theearth:${prevYm}`),
+      resolveLive(),
     ]);
     console.log(JSON.stringify({ wage_report_source: "ichiban", comp_id: compId, ym }));
-    return { current, prev, kintaiCurrent, kintaiPrev, kintaiLive };
+    return { current, prev, ...liveParts };
   }
 
   /**
