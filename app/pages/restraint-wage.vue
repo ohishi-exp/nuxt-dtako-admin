@@ -657,14 +657,29 @@ function reloadDisplayReport() {
 }
 
 let gcpReportEpoch = 0
+/** 走行中の `loadGcpWageReport` (同じ月なら相乗りする)。
+ *
+ * ★ 2026-08-04 本番実測: **同じ月の GCP wage-report が 2 本同時に飛んでいた。**
+ * タブ/月の watcher と `[activeTab, minWageRestraintSource, month]` の watcher が
+ * どちらも呼ぶため。`gcpReportEpoch` は「遅れて返った古い応答で上書きしない」
+ * ガードであって**発行そのものは止めない**ので、重い応答 (約1.1MB) を同じ DO に
+ * 2 本ぶつけていた — サーバ側 2.0〜2.7秒に対し実測 wall が 4 秒だった主因。 */
+let gcpReportInflight: { ym: string, promise: Promise<void> } | null = null
 
 /** GCP 由来の拘束時間で計算し直した wage-report を読む。**失敗しても `report`
  * (既定ソース) には触らない** — 「GCP を選んだのに既定の数字が出る」= 切り替えが
  * 効いていないのに効いたように見える状態を作らないため (relay 側も 502 で倒す)。 */
-async function loadGcpWageReport() {
-  if (!session.value || !month.value) return
+function loadGcpWageReport(): Promise<void> {
+  if (!session.value || !month.value) return Promise.resolve()
+  // 同じ月が走行中なら相乗りする (二重発行を止める)
+  if (gcpReportInflight?.ym === month.value) return gcpReportInflight.promise
+  const promise = runGcpWageReport(month.value)
+  gcpReportInflight = { ym: month.value, promise }
+  return promise
+}
+
+async function runGcpWageReport(ym: string) {
   const epoch = ++gcpReportEpoch
-  const ym = month.value
   loadingGcpReport.value = true
   gcpReportError.value = ''
   try {
@@ -681,6 +696,7 @@ async function loadGcpWageReport() {
     gcpReportError.value = restraintErrorMessage(e)
   }
   finally {
+    if (gcpReportInflight?.ym === ym) gcpReportInflight = null
     if (epoch === gcpReportEpoch) loadingGcpReport.value = false
   }
 }
