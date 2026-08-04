@@ -25,7 +25,7 @@ import {
   planScrapeDispatch,
 } from "./scrape-dispatch";
 
-interface RelayWorkerEnv {
+export interface RelayWorkerEnv {
   RELAY: DurableObjectNamespace;
   SCRAPER_MODE?: string;
   DTAKO_ACCOUNTS?: unknown;
@@ -488,12 +488,22 @@ function constantTimeEquals(a: string, b: string): boolean {
 }
 
 /**
- * `POST /kintai-relay/operation-zip` — 運行 1 件ぶんの csvdata.zip を**自前ログイン**
- * (`DTAKO_ACCOUNTS`) で取る (Refs ohishi-exp/rust-ichibanboshi#274, #205 の 59)。
+ * `POST /kintai-relay/operation-zip` — 運行 1 件ぶん (または `items` でまとめて
+ * 複数件) の csvdata.zip を**自前ログイン** (`DTAKO_ACCOUNTS`) で取る (Refs
+ * ohishi-exp/rust-ichibanboshi#274, #205 の 59。複数件対応は Refs #633-24a)。
  *
- * body は `{ope_no, start_ope, comp_id?}`。**`ope_no`/`start_ope` は必須**、
- * バリデーション (22桁/日時形式/空ZIP判定) は DO 側の `downloadOperationCsvZip`
- * (theearth-report-client.ts) が持つ — ここでは素通しする。
+ * **body は素通しする。** このプロキシが持つのは認証 (`X-Alc-Proxy-Secret`) と
+ * `comp_id` フォールバック (`KINTAI_COMP_ID`) と DO routing (`idFromName`) だけで、
+ * `ope_no`/`start_ope`/`items`/`recalculate` 等のフィールド検証は一切しない —
+ * 全て DO 側の `/cron/dtako/operation-zip` (`parseOperationZipRequest`、
+ * `cron-batch.ts`) に委ねる。
+ *
+ * **★ 以前はここで `ope_no`/`start_ope` だけを拾って新しい object に組み直して
+ * いた。この「拾い出し」が原因で、DO 側に `items`/`recalculate` を足しても
+ * この層で黙って消えるバグを 2 回踏んだ (Refs #633-24)。二度と同じ穴を踏まない
+ * ため、フィールド単位の組み直しを一切やめ、受け取った body をそのまま
+ * (`comp_id` だけ解決値で上書きして) DO へ渡す設計にした。** DO へ新しい
+ * フィールドを足しても、このプロキシは変更不要になる。
  *
  * **同期で返す。** `/kintai-relay/scrape` (取り込みまで走る非同期ジョブ) と違い、
  * この口は取り込み (`autoload` への POST) をしない read-only な zip 取得なので、
@@ -502,7 +512,7 @@ function constantTimeEquals(a: string, b: string): boolean {
  * 認証・tenant フォールバックは `/kintai-relay/scrape` と同じ (`X-Alc-Proxy-Secret`
  * の constant-time 検証、`comp_id` 省略時は `KINTAI_COMP_ID`)。
  */
-async function handleOperationZip(request: Request, env: RelayWorkerEnv): Promise<Response> {
+export async function handleOperationZip(request: Request, env: RelayWorkerEnv): Promise<Response> {
   const fail = (status: number, error: string) =>
     new Response(JSON.stringify({ error }), {
       status,
@@ -514,16 +524,11 @@ async function handleOperationZip(request: Request, env: RelayWorkerEnv): Promis
   const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
   if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
 
-  let body: { ope_no?: unknown; start_ope?: unknown; comp_id?: unknown };
+  let body: Record<string, unknown>;
   try {
-    body = (await request.json()) as typeof body;
+    body = (await request.json()) as Record<string, unknown>;
   } catch {
     return fail(400, "body must be JSON");
-  }
-  const opeNo = typeof body.ope_no === "string" ? body.ope_no : "";
-  const startOpe = typeof body.start_ope === "string" ? body.start_ope : "";
-  if (!opeNo || !startOpe) {
-    return fail(400, "ope_no / start_ope は必須です");
   }
   const compId =
     (typeof body.comp_id === "string" && body.comp_id.trim()) || (env.KINTAI_COMP_ID ?? "").trim();
@@ -533,9 +538,11 @@ async function handleOperationZip(request: Request, env: RelayWorkerEnv): Promis
   const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/dtako/operation-zip", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ comp_id: compId, ope_no: opeNo, start_ope: startOpe }),
+    // body を素通しし、comp_id だけ解決値で上書きする (フィールド単位の組み直しはしない)。
+    body: JSON.stringify({ ...body, comp_id: compId }),
   });
   // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
+  // ope_no/start_ope 等の検証エラーも DO の文言のままここを通る (Refs #633-24a)。
   return new Response(res.body, {
     status: res.status,
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
@@ -543,14 +550,17 @@ async function handleOperationZip(request: Request, env: RelayWorkerEnv): Promis
 }
 
 /**
- * `POST /kintai-relay/dtako-reimport` — 運行 1 件の csvdata.zip を**自前ログイン**
- * で取り、オンプレ rust-ichibanboshi の `POST /api/dtako/autoload` (Refs #205 の
- * 58/61/63/65、変更しない) へそのまま push する (Refs
- * ohishi-exp/rust-ichibanboshi#280、#205 の 67)。
+ * `POST /kintai-relay/dtako-reimport` — 運行 1 件 (または `items` でまとめて
+ * 複数件) の csvdata.zip を**自前ログイン**で取り、オンプレ rust-ichibanboshi の
+ * `POST /api/dtako/autoload` (Refs #205 の 58/61/63/65、変更しない) へそのまま
+ * push する (Refs ohishi-exp/rust-ichibanboshi#280、#205 の 67。複数件対応は
+ * Refs #633-24a)。
  *
- * body は `{ope_no, start_ope, unko_no, reset_timecard?, comp_id?}`。
- * **`ope_no`/`start_ope`/`unko_no` は必須。** `/kintai-relay/operation-zip`
- * (read-only) と違い**取り込みを伴う書き込み経路**なので、別の口にする。
+ * **body は素通しする** (`handleOperationZip` の doc comment 参照 — フィールド
+ * 単位の組み直しをやめた理由も同じ)。`ope_no`/`start_ope`/`unko_no`/`items` の
+ * 検証は DO 側の `/cron/dtako/reimport` (`parseDtakoReimportRequest`) に委ねる。
+ * `/kintai-relay/operation-zip` (read-only) と違い**取り込みを伴う書き込み経路**
+ * なので、別の口にする。
  *
  * **同期で返す。** entries (zip 内ファイル名) とオンプレの応答をその場で見られる
  * ようにする — `/kintai-relay/scrape` (202 非同期) とは違う型。
@@ -558,7 +568,7 @@ async function handleOperationZip(request: Request, env: RelayWorkerEnv): Promis
  * 認証・tenant フォールバックは `/kintai-relay/operation-zip` と同じ
  * (`X-Alc-Proxy-Secret` の constant-time 検証、`comp_id` 省略時は `KINTAI_COMP_ID`)。
  */
-async function handleDtakoReimport(request: Request, env: RelayWorkerEnv): Promise<Response> {
+export async function handleDtakoReimport(request: Request, env: RelayWorkerEnv): Promise<Response> {
   const fail = (status: number, error: string) =>
     new Response(JSON.stringify({ error }), {
       status,
@@ -570,23 +580,11 @@ async function handleDtakoReimport(request: Request, env: RelayWorkerEnv): Promi
   const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
   if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
 
-  let body: {
-    ope_no?: unknown;
-    start_ope?: unknown;
-    unko_no?: unknown;
-    reset_timecard?: unknown;
-    comp_id?: unknown;
-  };
+  let body: Record<string, unknown>;
   try {
-    body = (await request.json()) as typeof body;
+    body = (await request.json()) as Record<string, unknown>;
   } catch {
     return fail(400, "body must be JSON");
-  }
-  const opeNo = typeof body.ope_no === "string" ? body.ope_no : "";
-  const startOpe = typeof body.start_ope === "string" ? body.start_ope : "";
-  const unkoNo = typeof body.unko_no === "string" ? body.unko_no : "";
-  if (!opeNo || !startOpe || !unkoNo) {
-    return fail(400, "ope_no / start_ope / unko_no は必須です");
   }
   const compId =
     (typeof body.comp_id === "string" && body.comp_id.trim()) || (env.KINTAI_COMP_ID ?? "").trim();
@@ -596,13 +594,8 @@ async function handleDtakoReimport(request: Request, env: RelayWorkerEnv): Promi
   const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/dtako/reimport", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      comp_id: compId,
-      ope_no: opeNo,
-      start_ope: startOpe,
-      unko_no: unkoNo,
-      reset_timecard: body.reset_timecard === true,
-    }),
+    // body を素通しし、comp_id だけ解決値で上書きする (フィールド単位の組み直しはしない)。
+    body: JSON.stringify({ ...body, comp_id: compId }),
   });
   // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
   return new Response(res.body, {
@@ -612,12 +605,15 @@ async function handleDtakoReimport(request: Request, env: RelayWorkerEnv): Promi
 }
 
 /**
- * `POST /kintai-relay/dtako-alc-upload` — 運行 1 件の csvdata.zip を**自前ログイン**
- * で取り、rust-alc-api の `POST /api/upload` へそのまま投入する (Refs #633-7)。
+ * `POST /kintai-relay/dtako-alc-upload` — 運行 1 件 (または `items` でまとめて
+ * 複数件) の csvdata.zip を**自前ログイン**で取り、rust-alc-api の
+ * `POST /api/upload` へそのまま投入する (Refs #633-7。複数件対応は Refs #633-24a)。
  *
- * body は `{ope_no, start_ope, comp_id?}`。**`ope_no`/`start_ope` は必須。**
- * `unko_no` は不要 — `/api/upload` は zip 内の KUDGURI.csv から読むため URL に
- * 載せる必要が無い (`/kintai-relay/dtako-reimport` = オンプレ autoload 向けとの違い)。
+ * **body は素通しする** (`handleOperationZip` の doc comment 参照)。`ope_no`/
+ * `start_ope`/`items` の検証は DO 側の `/cron/dtako/alc-upload`
+ * (`parseDtakoAlcUploadRequest`) に委ねる。`unko_no` は不要 — `/api/upload` は
+ * zip 内の KUDGURI.csv から読むため URL に載せる必要が無い
+ * (`/kintai-relay/dtako-reimport` = オンプレ autoload 向けとの違い)。
  *
  * **同期で返す。** entries (zip 内ファイル名) と alc の応答 (upload_id/split の
  * 未確定注記) をその場で見られるようにする — `/kintai-relay/dtako-reimport` と
@@ -626,7 +622,7 @@ async function handleDtakoReimport(request: Request, env: RelayWorkerEnv): Promi
  * 認証・tenant フォールバックは `/kintai-relay/operation-zip` と同じ
  * (`X-Alc-Proxy-Secret` の constant-time 検証、`comp_id` 省略時は `KINTAI_COMP_ID`)。
  */
-async function handleDtakoAlcUpload(request: Request, env: RelayWorkerEnv): Promise<Response> {
+export async function handleDtakoAlcUpload(request: Request, env: RelayWorkerEnv): Promise<Response> {
   const fail = (status: number, error: string) =>
     new Response(JSON.stringify({ error }), {
       status,
@@ -638,16 +634,11 @@ async function handleDtakoAlcUpload(request: Request, env: RelayWorkerEnv): Prom
   const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
   if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
 
-  let body: { ope_no?: unknown; start_ope?: unknown; comp_id?: unknown };
+  let body: Record<string, unknown>;
   try {
-    body = (await request.json()) as typeof body;
+    body = (await request.json()) as Record<string, unknown>;
   } catch {
     return fail(400, "body must be JSON");
-  }
-  const opeNo = typeof body.ope_no === "string" ? body.ope_no : "";
-  const startOpe = typeof body.start_ope === "string" ? body.start_ope : "";
-  if (!opeNo || !startOpe) {
-    return fail(400, "ope_no / start_ope は必須です");
   }
   const compId =
     (typeof body.comp_id === "string" && body.comp_id.trim()) || (env.KINTAI_COMP_ID ?? "").trim();
@@ -657,7 +648,8 @@ async function handleDtakoAlcUpload(request: Request, env: RelayWorkerEnv): Prom
   const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/dtako/alc-upload", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ comp_id: compId, ope_no: opeNo, start_ope: startOpe }),
+    // body を素通しし、comp_id だけ解決値で上書きする (フィールド単位の組み直しはしない)。
+    body: JSON.stringify({ ...body, comp_id: compId }),
   });
   // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
   return new Response(res.body, {
