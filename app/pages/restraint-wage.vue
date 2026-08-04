@@ -687,8 +687,12 @@ async function loadGcpWageReport() {
 
 // GCP を選んだ (または選んだまま月が変わった) 時だけ取りに行く。既定へ戻す時は
 // 何も読まない — `report` は既に手元にある
-watch([minWageRestraintSource, month], ([source, ym]) => {
-  if (source !== 'gcp' || !session.value || !ym) return
+// ★ `activeTab` も条件に入れる (2026-08-04 本番実測)。既定を GCP にしたことで、
+// **月次集計タブを開いただけで GCP まで取りに行っていた** — 64秒かかる「現行」と
+// 15秒の GCP が同じ DO を奪い合い、体感がさらに悪化する。見ていないタブのために
+// 上流を叩かない
+watch([activeTab, minWageRestraintSource, month], ([tab, source, ym]) => {
+  if (tab !== 'minwage' || source !== 'gcp' || !session.value || !ym) return
   if (gcpReport.value?.month === ym) return
   loadGcpWageReport()
 })
