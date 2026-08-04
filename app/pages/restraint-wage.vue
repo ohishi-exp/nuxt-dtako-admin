@@ -6970,7 +6970,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                                    URLを組むだけ — 実在確認はしない。 -->
                               <UButton
                                 v-if="kintaiDiffOhishiDevTimeCardUrl(row.driverCd, row.date)"
-                                size="2xs"
+                                size="xs"
                                 variant="link"
                                 icon="i-lucide-external-link"
                                 label="打刻を見る"
