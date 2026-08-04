@@ -15,8 +15,10 @@ import {
   recalculateExpense,
   releaseLoadedOperation,
   recalculateWork,
+  recalculateWorkUnattended,
   startSystemLink,
   ReportParamError,
+  TheearthEditLockedError,
   saveDriverFromPage,
   saveFuelRow,
   saveWorkRowFromPage,
@@ -3284,6 +3286,88 @@ describe("recalculateWork across two operations without releasing (Refs #633-23)
     await recalculateWork(jar, OPE_B, START_B, fetchImpl);
 
     expect(recalculatedViewStates).toEqual(["VS-WORK-A", "VS-WORK-B"]);
+  });
+});
+
+// Refs #633-23 (#647 の続き): 1697 を実機で叩いた結果、生の HTTP 500 が
+// 「編集ロック中のため...」の文言に変わり、ExclusionFlag ロックが真因と確定した。
+// cron 経路は「セッションに1件だけ読み込み済み」問題 (releaseLoadedOperation) だけ
+// でなく、ExclusionFlag そのもの (unlockOperation/btnInitialize) にも対処が要る。
+describe("recalculateWorkUnattended (Refs #633-23)", () => {
+  /** F-DES1010 一覧応答 — releaseLoadedOperation (btnRelece) と unlockOperation
+   * (btnInitialize + 行選択用 hidden) の両方が読む要素を1つの fixture にまとめた
+   * もの (実ページは同一 URL なので、この関数が両方の GET/POST に使い回せる)。 */
+  function comboListHtml(): string {
+    return `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-LIST" />
+      <input type="submit" id="btnRelece" name="ctl00$MainContent$btnRelece" value="解放" />
+      <input type="submit" id="btnInitialize" name="ctl00$MainContent$btnInitialize" value="編集制御解除" />
+      <input type="text" id="txtOperationNo" name="ctl00$MainContent$txtOperationNo" class="none" />
+      <input type="text" id="txtStartDateTime" name="ctl00$MainContent$txtStartDateTime" class="none" />
+      <input type="text" id="txtIndex" name="ctl00$MainContent$txtIndex" class="none" />
+      <input type="text" id="txtCurrentID" name="ctl00$MainContent$txtCurrentID" class="none" />
+    </form></body></html>`;
+  }
+
+  it("succeeds on the first try and self-unlocks afterward (no stuck lock)", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([
+      html(comboListHtml()), html(comboListHtml()), // releaseLoadedOperation (前)
+      html(workFormHtml()), html(workFormHtml({ recalculated: true, linkSysDisabled: false })), // recalculateWork
+      html(comboListHtml()), html(comboListHtml()), // unlockOperation (自分のロックの後始末)
+      html(comboListHtml()), html(comboListHtml()), // releaseLoadedOperation (後)
+    ]);
+    const result = await recalculateWorkUnattended(jar, OPE_NO, START_OPE, fetchImpl);
+    expect(result.linkSysEnabled).toBe(true);
+    expect(result.recoveredFromStuckLock).toBe(false);
+    expect(result.selfUnlocked).toBe(true);
+  });
+
+  it("recovers from a stuck ExclusionFlag lock: unlocks and retries once, then succeeds", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([
+      html(comboListHtml()), html(comboListHtml()), // releaseLoadedOperation (前)
+      html(WORK_LOCKED_HTML), // recalculateWork 1回目 — ロック中の空ページ、POST しない
+      html(comboListHtml()), html(comboListHtml()), // unlockOperation (ロック解除)
+      html(workFormHtml()), html(workFormHtml({ recalculated: true })), // recalculateWork 2回目 — 成功
+      html(comboListHtml()), html(comboListHtml()), // unlockOperation (自分のロックの後始末)
+      html(comboListHtml()), html(comboListHtml()), // releaseLoadedOperation (後)
+    ]);
+    const result = await recalculateWorkUnattended(jar, OPE_NO, START_OPE, fetchImpl);
+    expect(result.recoveredFromStuckLock).toBe(true);
+    expect(result.selfUnlocked).toBe(true);
+  });
+
+  it("retries at most once — if it fails again after unlocking, throws the ORIGINAL lock error (not the retry's error)", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([
+      html(comboListHtml()), html(comboListHtml()), // releaseLoadedOperation (前)
+      html(WORK_LOCKED_HTML), // recalculateWork 1回目 — ロック
+      html(comboListHtml()), html(comboListHtml()), // unlockOperation (ロック解除)
+      status(500), // recalculateWork 2回目 (リトライ) — ロックとは無関係の別エラーで
+      // 失敗させ、「リトライの新しいエラーではなく元の lock エラーがそのまま
+      // 投げられる」ことを見分ける。これ以降 fetch が呼ばれたら sequenceFetch が
+      // "unexpected extra fetch call" で検知する (2回で打ち切りループしないことの証明)。
+    ]);
+    let caught: unknown;
+    try {
+      await recalculateWorkUnattended(jar, OPE_NO, START_OPE, fetchImpl);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(TheearthEditLockedError);
+    expect((caught as Error).message).toMatch(/編集ロック中|編集制御解除/); // HTTP 500 に化けていない
+  });
+
+  it("does not touch unlockOperation for errors that are not a stuck lock (btnScore missing)", async () => {
+    const jar = createCookieJar();
+    const fetchImpl = sequenceFetch([
+      html(comboListHtml()), html(comboListHtml()), // releaseLoadedOperation (前)
+      html(workFormHtml({ scoreButton: false })), // recalculateWork — ロックではない別のエラー
+      // これ以降 fetch が呼ばれたら sequenceFetch が "unexpected extra fetch call" で
+      // 検知する — unlockOperation/self-unlock/release(後) が一切走らないことの証明。
+    ]);
+    await expect(recalculateWorkUnattended(jar, OPE_NO, START_OPE, fetchImpl)).rejects.toThrow(/btnScore/);
   });
 });
 

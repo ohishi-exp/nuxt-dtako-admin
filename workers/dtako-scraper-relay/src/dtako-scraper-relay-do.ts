@@ -292,6 +292,7 @@ import {
   harvestDailyReport,
   recalculateExpense,
   recalculateWork,
+  recalculateWorkUnattended,
   startSystemLink,
   ReportParamError,
   saveDriverFromPage,
@@ -1466,17 +1467,22 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     recalculate: boolean,
   ): Promise<Response> {
     const jobState = this.makeTheearthLoginJobState();
+    // recalculateBeforeFetch は成否 (ok/error) だけを畳んで返し、内側の resolved
+    // value (recoveredFromStuckLock/selfUnlocked) は捨てる — ログに出すため
+    // クロージャの外の可変オブジェクトで受け取る (jobState.logins と同じ流儀。
+    // let 変数への再代入だと closure 経由の代入を型が追い切れないため object にする、
+    // Refs #633-23)。
+    const unlockInfo: { recoveredFromStuckLock: boolean | null; selfUnlocked: boolean | null } = {
+      recoveredFromStuckLock: null,
+      selfUnlocked: null,
+    };
     try {
       const recalculateResult = recalculate
         ? await recalculateBeforeFetch(() =>
             this.withTheearthLoginSession(account, jobState, async (jar) => {
-              // セッションに前回の運行が読み込み済みのまま残っていると、そちらが
-              // 再集計される (Refs #633-23、theearth-venus skill「運行はセッションに
-              // 1件だけ…」節)。処理後も解放し、他セッションを空ページ+HTTP 500 で
-              // ブロックしたままにしない。
-              await releaseLoadedOperation(jar);
-              const result = await recalculateWork(jar, opeNo, startOpe);
-              await releaseLoadedOperation(jar);
+              const result = await recalculateWorkUnattended(jar, opeNo, startOpe);
+              unlockInfo.recoveredFromStuckLock = result.recoveredFromStuckLock;
+              unlockInfo.selfUnlocked = result.selfUnlocked;
               return result;
             }),
           )
@@ -1506,6 +1512,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           entries: payload.entries,
           theearth_logins: jobState.logins.length,
           theearth_kicked: jobState.logins.some((l) => l.kicked),
+          // btnInitialize は他ユーザーの正当なロックも解除しうるため、呼んだ
+          // かどうかを必ず可視化する (#642 の theearth_kicked と同じ理由、Refs #633-23)。
+          theearth_recovered_from_stuck_lock: unlockInfo.recoveredFromStuckLock,
+          theearth_self_unlocked: unlockInfo.selfUnlocked,
         }),
       );
       return Response.json({
@@ -1627,13 +1637,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // も埋め込まない — `fetchZip` が `recalculateWork` を経由しなくても
     // (将来そういう経路ができても) ログイン済み jar を確実に使える。
     const jobState = this.makeTheearthLoginJobState();
+    // deps.recalculateWork の戻り値は Promise<void> (dtako-reimport.ts の pure 側の
+    // 契約) なので、ログに出す recoveredFromStuckLock/selfUnlocked はクロージャの
+    // 外の可変オブジェクトで受け取る (Refs #633-23、runOperationZip と同じ理由)。
+    const unlockInfo: { recoveredFromStuckLock: boolean | null; selfUnlocked: boolean | null } = {
+      recoveredFromStuckLock: null,
+      selfUnlocked: null,
+    };
     const deps: DtakoReimportDeps = {
       recalculateWork: async () => {
         await this.withTheearthLoginSession(account, jobState, async (jar) => {
-          // Refs #633-23 (dtako-alc-upload と同じ理由、runOperationZip のコメント参照)。
-          await releaseLoadedOperation(jar);
-          await recalculateWork(jar, input.opeNo, input.startOpe);
-          await releaseLoadedOperation(jar);
+          const result = await recalculateWorkUnattended(jar, input.opeNo, input.startOpe);
+          unlockInfo.recoveredFromStuckLock = result.recoveredFromStuckLock;
+          unlockInfo.selfUnlocked = result.selfUnlocked;
         });
       },
       fetchZip: () =>
@@ -1678,6 +1694,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           http_status: report.http_status,
           theearth_logins: jobState.logins.length,
           theearth_kicked: jobState.logins.some((l) => l.kicked),
+          theearth_recovered_from_stuck_lock: unlockInfo.recoveredFromStuckLock,
+          theearth_self_unlocked: unlockInfo.selfUnlocked,
         }),
       );
       return Response.json({
@@ -1767,13 +1785,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // (downloadOperationCsvZip) で使い回す — DO インスタンス内キャッシュ経由
     // (`withTheearthLoginSession`、dtako-reimport と同じ理由、Refs #633-20)。
     const jobState = this.makeTheearthLoginJobState();
+    // Refs #633-23 (runDtakoReimportJob と同じ理由) — deps.recalculateWork は
+    // Promise<void> 契約なので、ログに出す情報はクロージャの外の可変オブジェクトで
+    // 受け取る。
+    const unlockInfo: { recoveredFromStuckLock: boolean | null; selfUnlocked: boolean | null } = {
+      recoveredFromStuckLock: null,
+      selfUnlocked: null,
+    };
     const deps: DtakoAlcUploadDeps = {
       recalculateWork: async () => {
         await this.withTheearthLoginSession(account, jobState, async (jar) => {
-          // Refs #633-23 (runOperationZip のコメント参照)。
-          await releaseLoadedOperation(jar);
-          await recalculateWork(jar, input.opeNo, input.startOpe);
-          await releaseLoadedOperation(jar);
+          const result = await recalculateWorkUnattended(jar, input.opeNo, input.startOpe);
+          unlockInfo.recoveredFromStuckLock = result.recoveredFromStuckLock;
+          unlockInfo.selfUnlocked = result.selfUnlocked;
         });
       },
       fetchZip: () =>
@@ -1808,6 +1832,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         split_failed: report.split_failed,
         theearth_logins: jobState.logins.length,
         theearth_kicked: jobState.logins.some((l) => l.kicked),
+        theearth_recovered_from_stuck_lock: unlockInfo.recoveredFromStuckLock,
+        theearth_self_unlocked: unlockInfo.selfUnlocked,
       };
       // split は非同期 — 失敗件数が既にこの応答に乗っていれば error レベルで鳴らす
       // (`runCronDtakoScrape` と同じ方針)。0/null (未確定) は info ログのみ。

@@ -65,6 +65,17 @@ export class ReportParamError extends TheearthClientError {
   }
 }
 
+/** F-DES1011/1012/1013 が対象運行の編集ロック (`ExclusionFlag`) 中に返す空ページ
+ * (`assertEditPageNotLocked` が検出) を表す。呼び出し側 (`recalculateWorkUnattended`)
+ * が文言の一致ではなく型で分岐できるようにする (Refs #633-23、文言を変えると
+ * 分岐が壊れる string-match を避ける)。 */
+export class TheearthEditLockedError extends TheearthClientError {
+  constructor(message: string) {
+    super(message);
+    this.name = "TheearthEditLockedError";
+  }
+}
+
 // kyuyo-mcp の tool 入力バリデーションでも同じ正規表現を使う (Refs #205 の 59) —
 // export してこの 1 箇所を正とする (別ファイルで再定義すると桁数・書式がずれうる)。
 export const OPE_NO_RE = /^\d{22}$/;
@@ -2136,7 +2147,7 @@ const WORK_EDIT_FIELD_IDS = {
  * F-DES1012 (経費入力) の再集計経路 (`recalculateByScore`) からも呼ぶため。 */
 function assertEditPageNotLocked(html: string): void {
   if (html.includes("編集を完了していないため、編集できません")) {
-    throw new TheearthClientError(
+    throw new TheearthEditLockedError(
       "この運行は編集ロック中のためデータを表示できません — 一覧の「編集制御解除」で" +
         "ロックを解放してから開き直してください",
     );
@@ -2545,6 +2556,67 @@ export async function recalculateWork(
   validateStartOpe(startOpe);
   const url = buildOperationWorkUrl(opeNo, startOpe);
   return recalculateByScore(jar, url, "作業入力ページ", "作業時間再集計", fetchImpl, timeoutMs);
+}
+
+export interface RecalculateWorkUnattendedResult extends RecalculateExpenseResult {
+  /** ExclusionFlag ロック中 (`TheearthEditLockedError`) で失敗し、`unlockOperation`
+   * で強制解除してリトライしたら成功した場合に true。他ユーザーの正当なロックを
+   * 解除してしまった可能性がある稀な事象なので、呼び出し側は必ずログ/応答に出すこと。 */
+  recoveredFromStuckLock: boolean;
+  /** 再集計の成功後、自分が GET で取得した ExclusionFlag ロックを `unlockOperation`
+   * で解放したか (実ブラウザが編集ウィンドウを閉じる操作の代替、Refs #633-23)。 */
+  selfUnlocked: boolean;
+}
+
+/**
+ * cron の自前ログイン経路 (`runOperationZip`/`runDtakoReimportJob`/
+ * `runDtakoAlcUploadJob`) 専用の `recalculateWork` ラッパ (Refs #633-23)。
+ * `/daily-report-api/work/recalculate` (ブラウザ由来セッション、人が画面の前に
+ * いる経路) からは呼ばない — 人が居るなら、勝手にロックを解除するより
+ * `TheearthEditLockedError` の文言で「編集制御解除してください」と促す方が正しい
+ * (親の設計判断)。
+ *
+ * 手順:
+ * 1. `releaseLoadedOperation` でセッションの読み込み済みポインタを解放 (前)
+ * 2. `recalculateWork` を実行。`TheearthEditLockedError` (ExclusionFlag ロック中)
+ *    で失敗したら `unlockOperation` で対象運行だけ強制解除し、**1 回だけ**
+ *    やり直す (#642 の再ログイン予算と同じ「1 job につき 1 回」の考え方 — ここを
+ *    ループにすると本物の他ユーザー編集と延々競り合いかねない)。やり直しても
+ *    失敗したら、リトライ後の別のエラーではなく**元の `TheearthEditLockedError`
+ *    をそのまま投げる** (呼び出し側の分岐をロック起因のまま安定させるため)
+ * 3. 成功したら `unlockOperation` で自分のロックを解放する (根治) — 直前の GET で
+ *    取ったロックは対象運行を opeNo/startOpe で名指しした自分のものなので、他
+ *    セッションを巻き込む余地は無い (もし他セッションが本当に保持していたら
+ *    手順2の GET が空ページを返しているはずで、この行には到達しない)
+ * 4. `releaseLoadedOperation` でセッションの読み込み済みポインタを解放 (後)
+ */
+export async function recalculateWorkUnattended(
+  jar: CookieJar,
+  opeNo: string,
+  startOpe: string,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<RecalculateWorkUnattendedResult> {
+  await releaseLoadedOperation(jar, fetchImpl, timeoutMs);
+
+  let result: RecalculateExpenseResult;
+  let recoveredFromStuckLock = false;
+  try {
+    result = await recalculateWork(jar, opeNo, startOpe, fetchImpl, timeoutMs);
+  } catch (err) {
+    if (!(err instanceof TheearthEditLockedError)) throw err;
+    await unlockOperation(jar, { opeNo, startOpe }, fetchImpl, timeoutMs);
+    try {
+      result = await recalculateWork(jar, opeNo, startOpe, fetchImpl, timeoutMs);
+      recoveredFromStuckLock = true;
+    } catch {
+      throw err;
+    }
+  }
+
+  await unlockOperation(jar, { opeNo, startOpe }, fetchImpl, timeoutMs);
+  await releaseLoadedOperation(jar, fetchImpl, timeoutMs);
+  return { ...result, recoveredFromStuckLock, selfUnlocked: true };
 }
 
 // ---------------------------------------------------------------------------
