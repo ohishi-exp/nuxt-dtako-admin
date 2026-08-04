@@ -496,6 +496,37 @@ title = 「作業入力」(空白パディング多数)。
 - 同一セッション内の再 GET は通る (worker の GET→編集→保存の連続操作は同一 jar なら OK)
 - 残留ロックは F-DES1010 の行選択 + `btnInitialize` で解除 (unlockOperation)
 
+**★ ロック中の運行に `btnScore` を postback すると HTTP 500 が返る (2026-08-04 実観測)**:
+
+```
+POST が HTTP 500 を返しました — オブジェクト参照がオブジェクト インスタンスに設定されていません。
+```
+
+ASP.NET の NullReferenceException。**空ページ (= `lstWork` 不在) に対して再集計を押すので
+サーバ側が落ちる**、という筋。**同じ運行・同じ引数で 1 回目だけ成功し、以後ずっと同じ 500**
+という形で現れる (1 回目が自分でロックを取り、解放せずに終わるため)。
+
+**⇒ 再集計が「最初だけ成功してその後ずっと 500」になったら、まずロック残留を疑うこと。**
+theearth 側の恒久障害でも、その運行固有のデータ不正でもない可能性が高い。
+
+**★★ `btnRelece` と `btnInitialize` は別物。混同しないこと (2026-08-04 に実際に混同した)**:
+
+| 機構 | 症状 | 解除 |
+|---|---|---|
+| **セッションに 1 件だけ「読み込み済み」** | URL の `OpeNo` が無視され、**前の運行**のページが返る | **`btnRelece`** (`releaseLoadedOperation`) |
+| **運行そのものの編集ロック (`ExclusionFlag`)** | **別セッション**の GET が空ページになる | **`btnInitialize`** (`unlockOperation`) |
+
+**`btnRelece` は自分のセッションが掴んでいるものしか解放しない。**
+⇒ **セッションが死んだ後 (DO evict / 例外 / TTL 切れ) に残ったロックは、次のセッションの
+`btnRelece` では消せない。** そこは `btnInitialize` の領分。
+**この skill が両者を別々の回復手段として書き分けていること自体が、別機構である傍証。**
+
+**★ browserless の一括処理は `recalculateWork` の前後で `releaseLoadedOperation` を呼ぶこと。**
+前だけだと「これから使うセッションを綺麗にする」で終わり、**実行後にそのセッションが運行を
+掴んだままになる**。`nuxt-dtako-admin` の cron 経路 3 本はこれを呼んでおらず、**ログイン
+セッションを使い回すようにした瞬間に「B のつもりで A を再集計する」回帰**になった
+(Refs ohishi-exp/nuxt-dtako-admin#645)。
+
 **作業行 `lstWork` の実構造 (lstFuel と同型)**:
 - **表示行**: `lstWork_lbl<Field>_<N>` の `<span>` (`MainContent_` prefix 無し)。
   Field = `OperationNo` / `EventCD`(作業種別CD 例 301) / `EventName`(例 休憩) /
