@@ -78,6 +78,17 @@ import {
   runDtakoAlcUpload as runDtakoAlcUploadPure,
   type DtakoAlcUploadDeps,
 } from "./dtako-alc-upload";
+import {
+  BatchTooLargeError,
+  assertBatchSizeWithinLimit,
+  parseDtakoAlcUploadRequest,
+  parseDtakoReimportRequest,
+  parseOperationZipRequest,
+  runBatchSequential,
+  type DtakoAlcUploadItem,
+  type DtakoReimportItem,
+  type OperationZipItem,
+} from "./cron-batch";
 import { pickOnpremUnkoNoFromDayEvents } from "./dtako-day-events-lookup";
 import { pickDayOperationsList } from "./dtako-day-operations-list";
 import {
@@ -1420,12 +1431,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /**
-   * POST /cron/dtako/operation-zip — body {comp_id, ope_no, start_ope}。運行 1 件
-   * ぶんの csvdata.zip を**自前ログイン**で取る (Refs
+   * POST /cron/dtako/operation-zip — body {comp_id, ope_no, start_ope} (単体) か
+   * {comp_id, items: [{ope_no, start_ope, recalculate?}, ...]} (バッチ、Refs
+   * #633)。運行 1 件ぶんの csvdata.zip を**自前ログイン**で取る (Refs
    * ohishi-exp/rust-ichibanboshi#274, #205 の 59)。`handleReportZip`
    * (`/daily-report-api/zip`) はブラウザ由来の `TheearthSessionRecord` (別 DO
    * instance `theearth-{comp}:{userB64}`) に依存するため使えない — こちらは
    * `runCronDtakoScrape` と同じ「comp_id 単位 DO + 都度 `login()`」の型を採る。
+   *
+   * **単体形式の body/応答は `items` 追加前と 1 バイトも変えていない**
+   * (`parseOperationZipRequest` が単体形式を解いた時は既存の
+   * `runOperationZip` をそのまま呼ぶ、body の判定・正規化ロジックは
+   * `cron-batch.ts` の pure 関数でテスト済み)。
    *
    * **`scrapeQueue` (`enqueueScrape`) で直列化する** — 同一 comp_id への並行
    * theearth リクエストはセッションロックで hang/500 する (`downloadCsvZip` の
@@ -1435,29 +1452,33 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 応答に載せるだけの read-only な操作。
    */
   private async handleCronDtakoOperationZip(request: Request): Promise<Response> {
-    let body: { comp_id?: unknown; ope_no?: unknown; start_ope?: unknown; recalculate?: unknown };
+    let body: { comp_id?: unknown; ope_no?: unknown; start_ope?: unknown; recalculate?: unknown; items?: unknown };
     try {
       body = (await request.json()) as typeof body;
     } catch {
       return Response.json({ error: "JSON body が必要です" }, { status: 400 });
     }
-    const compId = typeof body.comp_id === "string" ? body.comp_id : "";
-    const opeNo = typeof body.ope_no === "string" ? body.ope_no : "";
-    const startOpe = typeof body.start_ope === "string" ? body.start_ope : "";
-    // 既定 false — この口は「読むだけ、取り込みはしない」契約 (tool description
-    // 参照)。再集計は theearth 側の DriverState1〜5Min を書き換える書き込みなので、
-    // 既定で入れると契約が変わる (Refs #633-19、issue の「★ 親の設計判断」2)。
-    const recalculate = body.recalculate === true;
-    if (!compId || !opeNo || !startOpe) {
-      return Response.json({ error: "comp_id / ope_no / start_ope が必要です" }, { status: 400 });
+    const parsed = parseOperationZipRequest(body);
+    if ("error" in parsed) {
+      return Response.json({ error: parsed.error }, { status: 400 });
     }
 
-    const account = await this.resolveAccount(compId);
+    const account = await this.resolveAccount(parsed.compId);
     if (!account) {
-      return Response.json({ error: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
+      return Response.json({ error: `comp_id=${parsed.compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
     }
 
-    return this.enqueueScrape(() => this.runOperationZip(account, opeNo, startOpe, recalculate));
+    if (!parsed.isBatch) {
+      const { opeNo, startOpe, recalculate } = parsed.items[0];
+      return this.enqueueScrape(() => this.runOperationZip(account, opeNo, startOpe, recalculate));
+    }
+    try {
+      assertBatchSizeWithinLimit(parsed.items.length);
+    } catch (err) {
+      if (err instanceof BatchTooLargeError) return Response.json({ error: err.message }, { status: 400 });
+      throw err;
+    }
+    return this.enqueueScrape(() => this.runOperationZipBatch(account, parsed.items));
   }
 
   private async runOperationZip(
@@ -1554,11 +1575,109 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /**
+   * バッチ版 `runOperationZip` (Refs #633)。`items` を 1 つの job (= 1 回の
+   * `enqueueScrape`) の中で直列に処理する — ログインセッション (`jobState`) を
+   * 全件で共有するので、theearth へのログインは通常 1 回で済む (#642 が既に
+   * 達成済みの効果を、バッチにすることで HTTP 往復も 1 回にまとめる)。
+   *
+   * **`zip_base64` は載せない** (親指示5) — 20 件分の base64 で応答が膨れて
+   * 転記事故を誘発するため。中身が要る運行だけ単体形式で取り直すこと。
+   */
+  private async runOperationZipBatch(account: DtakoAccountRaw, items: OperationZipItem[]): Promise<Response> {
+    const jobState = this.makeTheearthLoginJobState();
+    const batch = await runBatchSequential(items, async (item, index) => {
+      const unlockInfo: { unlocked: boolean | null; selfUnlocked: boolean | null } = {
+        unlocked: null,
+        selfUnlocked: null,
+      };
+      const recalculateResult = item.recalculate
+        ? await recalculateBeforeFetch(() =>
+            this.withTheearthLoginSession(account, jobState, async (jar) => {
+              await releaseLoadedOperation(jar);
+              const result = await recalculateWorkUnattended(jar, item.opeNo, item.startOpe);
+              unlockInfo.unlocked = result.unlocked;
+              unlockInfo.selfUnlocked = result.selfUnlocked;
+              await releaseLoadedOperation(jar);
+              return result;
+            }),
+          )
+        : null;
+      if (recalculateResult && !recalculateResult.ok) {
+        console.error(
+          JSON.stringify({
+            operation_zip_batch: "recalculate_failed",
+            comp_id: account.comp_id,
+            ope_no: item.opeNo,
+            index,
+            message: recalculateResult.error,
+          }),
+        );
+      }
+      const zip = await this.withTheearthLoginSession(account, jobState, (jar) =>
+        downloadOperationCsvZip(jar, { opeNo: item.opeNo, startOpe: item.startOpe }),
+      );
+      const payload = buildOperationZipPayload(zip);
+      console.log(
+        JSON.stringify({
+          operation_zip_batch: "ok",
+          comp_id: account.comp_id,
+          ope_no: item.opeNo,
+          index,
+          recalculate_ok: recalculateResult?.ok ?? null,
+          bytes: payload.bytes,
+          omitted: payload.omitted,
+          theearth_unlocked: unlockInfo.unlocked,
+          theearth_self_unlocked: unlockInfo.selfUnlocked,
+        }),
+      );
+      return {
+        ope_no: item.opeNo,
+        start_ope: item.startOpe,
+        recalculate: recalculateResult,
+        bytes: payload.bytes,
+        omitted: payload.omitted,
+        entries: payload.entries,
+      };
+    });
+
+    const successCount = batch.results.filter((r) => r.ok).length;
+    console.log(
+      JSON.stringify({
+        operation_zip_batch: "done",
+        comp_id: account.comp_id,
+        item_count: items.length,
+        success_count: successCount,
+        failure_count: batch.results.length - successCount,
+        truncated: batch.truncated,
+        remaining: batch.remaining,
+        theearth_logins: jobState.logins.length,
+        theearth_kicked: jobState.logins.some((l) => l.kicked),
+      }),
+    );
+    return Response.json({
+      ok: true,
+      comp_id: account.comp_id,
+      results: batch.results,
+      success_count: successCount,
+      failure_count: batch.results.length - successCount,
+      truncated: batch.truncated,
+      remaining: batch.remaining,
+      theearth_logins: jobState.logins.length,
+      theearth_kicked: jobState.logins.some((l) => l.kicked),
+    });
+  }
+
+  /**
    * POST /cron/dtako/reimport — body {comp_id, ope_no, start_ope, unko_no,
-   * reset_timecard?}。運行 1 件の csvdata.zip を**自前ログイン**で取得し、
-   * オンプレ rust-ichibanboshi の `POST /api/dtako/autoload` (Refs #205 の
-   * 58/61/63/65、**変更しない**) へそのまま push する (Refs
-   * ohishi-exp/rust-ichibanboshi#280、#205 の 67)。
+   * reset_timecard?} (単体) か {comp_id, items: [{ope_no, start_ope, unko_no,
+   * reset_timecard?}, ...]} (バッチ、Refs #633)。運行 1 件の csvdata.zip を
+   * **自前ログイン**で取得し、オンプレ rust-ichibanboshi の
+   * `POST /api/dtako/autoload` (Refs #205 の 58/61/63/65、**変更しない**) へ
+   * そのまま push する (Refs ohishi-exp/rust-ichibanboshi#280、#205 の 67)。
+   *
+   * **単体形式の body/応答は `items` 追加前と 1 バイトも変えていない**
+   * (`parseDtakoReimportRequest` 参照。`unko_no` は `reimport` にだけ必須 —
+   * バッチでも省略できない)。
    *
    * `runOperationZip` と同じ「comp_id 単位 DO + 都度 `login()`」だが、こちらは
    * **取り込みまで実行する**破壊的操作なので、同じ `scrapeQueue` で直列化しつつも
@@ -1572,27 +1691,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       start_ope?: unknown;
       unko_no?: unknown;
       reset_timecard?: unknown;
+      items?: unknown;
     };
     try {
       body = (await request.json()) as typeof body;
     } catch {
       return Response.json({ error: "JSON body が必要です" }, { status: 400 });
     }
-    const compId = typeof body.comp_id === "string" ? body.comp_id : "";
-    const opeNo = typeof body.ope_no === "string" ? body.ope_no : "";
-    const startOpe = typeof body.start_ope === "string" ? body.start_ope : "";
-    const unkoNo = typeof body.unko_no === "string" ? body.unko_no : "";
-    const resetTimecard = body.reset_timecard === true;
-    if (!compId || !opeNo || !startOpe || !unkoNo) {
-      return Response.json(
-        { error: "comp_id / ope_no / start_ope / unko_no が必要です" },
-        { status: 400 },
-      );
+    const parsed = parseDtakoReimportRequest(body);
+    if ("error" in parsed) {
+      return Response.json({ error: parsed.error }, { status: 400 });
     }
 
-    const account = await this.resolveAccount(compId);
+    const account = await this.resolveAccount(parsed.compId);
     if (!account) {
-      return Response.json({ error: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
+      return Response.json({ error: `comp_id=${parsed.compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
     }
 
     // オンプレの資格情報 (Refs #280 の条件1 — kosoku-daily/pdf-json 等の既存経路と
@@ -1617,14 +1730,26 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       );
     }
 
+    if (!parsed.isBatch) {
+      const { opeNo, startOpe, unkoNo, resetTimecard } = parsed.items[0];
+      return this.enqueueScrape(() =>
+        this.runDtakoReimportJob(
+          account,
+          { opeNo, startOpe, unkoNo, resetTimecard },
+          origin,
+          cfAccessClientId,
+          cfAccessClientSecret,
+        ),
+      );
+    }
+    try {
+      assertBatchSizeWithinLimit(parsed.items.length);
+    } catch (err) {
+      if (err instanceof BatchTooLargeError) return Response.json({ error: err.message }, { status: 400 });
+      throw err;
+    }
     return this.enqueueScrape(() =>
-      this.runDtakoReimportJob(
-        account,
-        { opeNo, startOpe, unkoNo, resetTimecard },
-        origin,
-        cfAccessClientId,
-        cfAccessClientSecret,
-      ),
+      this.runDtakoReimportBatch(account, parsed.items, origin, cfAccessClientId, cfAccessClientSecret),
     );
   }
 
@@ -1742,11 +1867,120 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /**
-   * POST /cron/dtako/alc-upload — body {comp_id, ope_no, start_ope}。運行 1 件の
+   * バッチ版 `runDtakoReimportJob` (Refs #633)。`items` を 1 job で直列に処理し、
+   * ログインセッション (`jobState`) を全件で共有する。1 件の失敗は
+   * `results[i]` に理由 (`err.message`、`DtakoReimportPushUncertainError` を
+   * 含む) を積んで続行し、`VenusSessionExpiredError` だけは残りを打ち切る
+   * (`runBatchSequential` の契約、`cron-batch.ts` 参照)。 */
+  private async runDtakoReimportBatch(
+    account: DtakoAccountRaw,
+    items: DtakoReimportItem[],
+    origin: string,
+    cfAccessClientId: string,
+    cfAccessClientSecret: string,
+  ): Promise<Response> {
+    const base = origin.replace(/\/+$/, "");
+    const jobState = this.makeTheearthLoginJobState();
+    const batch = await runBatchSequential(items, async (item, index) => {
+      const unlockInfo: { unlocked: boolean | null; selfUnlocked: boolean | null } = {
+        unlocked: null,
+        selfUnlocked: null,
+      };
+      const deps: DtakoReimportDeps = {
+        recalculateWork: async () => {
+          await this.withTheearthLoginSession(account, jobState, async (jar) => {
+            await releaseLoadedOperation(jar);
+            const result = await recalculateWorkUnattended(jar, item.opeNo, item.startOpe);
+            unlockInfo.unlocked = result.unlocked;
+            unlockInfo.selfUnlocked = result.selfUnlocked;
+            await releaseLoadedOperation(jar);
+          });
+        },
+        fetchZip: () =>
+          this.withTheearthLoginSession(account, jobState, (jar) =>
+            downloadOperationCsvZip(jar, { opeNo: item.opeNo, startOpe: item.startOpe }),
+          ),
+        onpremAutoload: (path, init) =>
+          fetch(`${base}${path}`, {
+            ...init,
+            headers: {
+              ...(init.headers as Record<string, string> | undefined),
+              "CF-Access-Client-Id": cfAccessClientId,
+              "CF-Access-Client-Secret": cfAccessClientSecret,
+            },
+          }),
+      };
+      const report = await runDtakoReimportPure(deps, {
+        opeNo: item.opeNo,
+        startOpe: item.startOpe,
+        unkoNo: item.unkoNo,
+        resetTimecard: item.resetTimecard,
+      });
+      if (!report.recalculate.ok) {
+        console.error(
+          JSON.stringify({
+            dtako_reimport_batch: "recalculate_failed",
+            comp_id: account.comp_id,
+            unko_no: item.unkoNo,
+            index,
+            message: report.recalculate.error,
+          }),
+        );
+      }
+      console.log(
+        JSON.stringify({
+          dtako_reimport_batch: "ok",
+          comp_id: account.comp_id,
+          unko_no: item.unkoNo,
+          index,
+          recalculate_ok: report.recalculate.ok,
+          bytes: report.bytes,
+          http_status: report.http_status,
+          theearth_unlocked: unlockInfo.unlocked,
+          theearth_self_unlocked: unlockInfo.selfUnlocked,
+        }),
+      );
+      return report;
+    });
+
+    const successCount = batch.results.filter((r) => r.ok).length;
+    console.log(
+      JSON.stringify({
+        dtako_reimport_batch: "done",
+        comp_id: account.comp_id,
+        item_count: items.length,
+        success_count: successCount,
+        failure_count: batch.results.length - successCount,
+        truncated: batch.truncated,
+        remaining: batch.remaining,
+        theearth_logins: jobState.logins.length,
+        theearth_kicked: jobState.logins.some((l) => l.kicked),
+      }),
+    );
+    return Response.json({
+      ok: true,
+      comp_id: account.comp_id,
+      results: batch.results,
+      success_count: successCount,
+      failure_count: batch.results.length - successCount,
+      truncated: batch.truncated,
+      remaining: batch.remaining,
+      theearth_logins: jobState.logins.length,
+      theearth_kicked: jobState.logins.some((l) => l.kicked),
+    });
+  }
+
+  /**
+   * POST /cron/dtako/alc-upload — body {comp_id, ope_no, start_ope} (単体) か
+   * {comp_id, items: [{ope_no, start_ope}, ...]} (バッチ、Refs #633)。運行 1 件の
    * csvdata.zip を**自前ログイン**で取得し、rust-alc-api の `POST /api/upload`
    * (`alc-internal-upload.ts` の `uploadDtakoZipViaAlcInternalProxy`、
    * `runCronDtakoScrape` が読取日ぶん全部で使うのと同じ経路) へ**運行1件だけ**で
    * 投入する (Refs #633-7)。
+   *
+   * **単体形式の body/応答は `items` 追加前と 1 バイトも変えていない**
+   * (`parseDtakoAlcUploadRequest` 参照。`unko_no` はこの経路には無い —
+   * `reimport` と違い、zip 内 KUDGURI.csv から読むため受け取らない)。
    *
    * `handleCronDtakoReimport` (オンプレ autoload 向け) と対になる — こちらは
    * `unko_no` が要らない (`/api/upload` は zip 内の KUDGURI.csv から unko_no を
@@ -1755,22 +1989,20 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * (`runDtakoAlcUploadPure` の module doc 参照 — この route に preview は無い)。
    */
   private async handleCronDtakoAlcUpload(request: Request): Promise<Response> {
-    let body: { comp_id?: unknown; ope_no?: unknown; start_ope?: unknown };
+    let body: { comp_id?: unknown; ope_no?: unknown; start_ope?: unknown; items?: unknown };
     try {
       body = (await request.json()) as typeof body;
     } catch {
       return Response.json({ error: "JSON body が必要です" }, { status: 400 });
     }
-    const compId = typeof body.comp_id === "string" ? body.comp_id : "";
-    const opeNo = typeof body.ope_no === "string" ? body.ope_no : "";
-    const startOpe = typeof body.start_ope === "string" ? body.start_ope : "";
-    if (!compId || !opeNo || !startOpe) {
-      return Response.json({ error: "comp_id / ope_no / start_ope が必要です" }, { status: 400 });
+    const parsed = parseDtakoAlcUploadRequest(body);
+    if ("error" in parsed) {
+      return Response.json({ error: parsed.error }, { status: 400 });
     }
 
-    const account = await this.resolveAccount(compId);
+    const account = await this.resolveAccount(parsed.compId);
     if (!account) {
-      return Response.json({ error: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
+      return Response.json({ error: `comp_id=${parsed.compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
     }
 
     const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
@@ -1781,7 +2013,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       );
     }
 
-    return this.enqueueScrape(() => this.runDtakoAlcUploadJob(account, { opeNo, startOpe }, sharedSecret));
+    if (!parsed.isBatch) {
+      const { opeNo, startOpe } = parsed.items[0];
+      return this.enqueueScrape(() => this.runDtakoAlcUploadJob(account, { opeNo, startOpe }, sharedSecret));
+    }
+    try {
+      assertBatchSizeWithinLimit(parsed.items.length);
+    } catch (err) {
+      if (err instanceof BatchTooLargeError) return Response.json({ error: err.message }, { status: 400 });
+      throw err;
+    }
+    return this.enqueueScrape(() => this.runDtakoAlcUploadBatch(account, parsed.items, sharedSecret));
   }
 
   private async runDtakoAlcUploadJob(
@@ -1898,6 +2140,110 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       );
       return Response.json({ error: message }, { status: 502 });
     }
+  }
+
+  /**
+   * バッチ版 `runDtakoAlcUploadJob` (Refs #633)。`items` を 1 job で直列に処理し、
+   * ログインセッション (`jobState`) を全件で共有する。1 件の失敗は
+   * `results[i]` に理由を積んで続行し、`VenusSessionExpiredError` だけは残りを
+   * 打ち切る (`runBatchSequential` の契約、`cron-batch.ts` 参照)。 */
+  private async runDtakoAlcUploadBatch(
+    account: DtakoAccountRaw,
+    items: DtakoAlcUploadItem[],
+    sharedSecret: string,
+  ): Promise<Response> {
+    const jobState = this.makeTheearthLoginJobState();
+    const batch = await runBatchSequential(items, async (item, index) => {
+      const unlockInfo: { unlocked: boolean | null; selfUnlocked: boolean | null } = {
+        unlocked: null,
+        selfUnlocked: null,
+      };
+      const deps: DtakoAlcUploadDeps = {
+        recalculateWork: async () => {
+          await this.withTheearthLoginSession(account, jobState, async (jar) => {
+            await releaseLoadedOperation(jar);
+            const result = await recalculateWorkUnattended(jar, item.opeNo, item.startOpe);
+            unlockInfo.unlocked = result.unlocked;
+            unlockInfo.selfUnlocked = result.selfUnlocked;
+            await releaseLoadedOperation(jar);
+          });
+        },
+        fetchZip: () =>
+          this.withTheearthLoginSession(account, jobState, (jar) =>
+            downloadOperationCsvZip(jar, { opeNo: item.opeNo, startOpe: item.startOpe }),
+          ),
+        uploadZip: (filename, zipBytes) =>
+          uploadDtakoZipViaAlcInternalProxy(
+            { sharedSecret, tenantId: account.tenant_id, filename, zipBytes },
+            this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER),
+          ),
+      };
+      const report = await runDtakoAlcUploadPure(deps, { opeNo: item.opeNo, startOpe: item.startOpe });
+      if (!report.recalculate.ok) {
+        console.error(
+          JSON.stringify({
+            dtako_alc_upload_batch: "recalculate_failed",
+            comp_id: account.comp_id,
+            ope_no: item.opeNo,
+            index,
+            message: report.recalculate.error,
+          }),
+        );
+      }
+      if (report.split_failed !== null && report.split_failed > 0) {
+        console.error(
+          JSON.stringify({
+            dtako_alc_upload_batch: "split_failed",
+            comp_id: account.comp_id,
+            ope_no: item.opeNo,
+            index,
+            split_failed: report.split_failed,
+            message: `取り込みは成功したが CSV 分割が ${report.split_failed} 件失敗した (該当運行が読み取り側から消える)`,
+          }),
+        );
+      } else {
+        console.log(
+          JSON.stringify({
+            dtako_alc_upload_batch: "ok",
+            comp_id: account.comp_id,
+            ope_no: item.opeNo,
+            index,
+            recalculate_ok: report.recalculate.ok,
+            bytes: report.bytes,
+            upload_id: report.upload_id,
+            theearth_unlocked: unlockInfo.unlocked,
+            theearth_self_unlocked: unlockInfo.selfUnlocked,
+          }),
+        );
+      }
+      return report;
+    });
+
+    const successCount = batch.results.filter((r) => r.ok).length;
+    console.log(
+      JSON.stringify({
+        dtako_alc_upload_batch: "done",
+        comp_id: account.comp_id,
+        item_count: items.length,
+        success_count: successCount,
+        failure_count: batch.results.length - successCount,
+        truncated: batch.truncated,
+        remaining: batch.remaining,
+        theearth_logins: jobState.logins.length,
+        theearth_kicked: jobState.logins.some((l) => l.kicked),
+      }),
+    );
+    return Response.json({
+      ok: true,
+      comp_id: account.comp_id,
+      results: batch.results,
+      success_count: successCount,
+      failure_count: batch.results.length - successCount,
+      truncated: batch.truncated,
+      remaining: batch.remaining,
+      theearth_logins: jobState.logins.length,
+      theearth_kicked: jobState.logins.some((l) => l.kicked),
+    });
   }
 
   /** POST /cron/etc — body {user_id}。credential は DO 自身が ETC_ACCOUNTS
