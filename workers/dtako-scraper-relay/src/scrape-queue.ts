@@ -64,6 +64,10 @@ export interface ScrapeJobRecord {
   fold_months?: string[];
   fold_pages?: number;
   fold_drivers_written?: number;
+  /** `fold_state: "running"` を書いた時刻 (ISO)。このフィールド追加前のレコードには
+   * 無い — [`annotateFoldStaleness`] は無ければ `accepted_at` で代用する (精度は
+   * 落ちるが、日単位の古さを見るには十分)。 */
+  fold_started_at?: string;
 }
 
 /** storage に積む 1 件分。`account` (認証情報) は持たない — drain 時に
@@ -309,4 +313,31 @@ export async function migrateLegacyScrapeJobsOnce(
     await storage.setAlarm(Date.now());
   }
   return { ran: true, requeued, failedClosed };
+}
+
+/** `fold_state: "running"` の古さの閾値 (ミリ秒)。**★ この数字は未検証**
+ * (Refs #633-21)。fold 1 回の実所要時間の実測が無く、「1 読取日の scrape が約
+ * 3 分」(kintai-ops skill 実測) の 10 倍かかることは考えにくい、という程度の
+ * 根拠しかない。実測で違うと分かったら、この数字ではなく実測値を報告すること。 */
+export const STALE_FOLD_THRESHOLD_MS = 30 * 60 * 1000;
+
+/** 進捗応答用に、`fold_state: "running"` のレコードへ経過時間の算出値を添える。
+ * **保存値 (`fold_state` そのもの) は書き換えない** — running が本当に残骸か
+ * どうかは断定できない (deploy による DO evict で fold も巻き添えになった、
+ * という読みは Refs #633-21 の推測であって確定情報ではない)。読み手が判断する
+ * ための材料 (`fold_running_for_ms` / `fold_stale`) を渡すだけに留める。
+ *
+ * `now` は必ず引数で受ける (呼び出し元でテストできるよう `Date.now()` を
+ * ここで直接呼ばない)。`fold_started_at` が無い旧レコードは `accepted_at` で
+ * 代用する (精度は落ちるが、日単位の古さを見るには十分)。 */
+export function annotateFoldStaleness(
+  record: ScrapeJobRecord,
+  now: number,
+): ScrapeJobRecord & { fold_running_for_ms?: number; fold_stale?: boolean } {
+  if (record.fold_state !== "running") return record;
+  const startedAt = record.fold_started_at ?? record.accepted_at;
+  const startedMs = Date.parse(startedAt);
+  if (Number.isNaN(startedMs)) return record;
+  const fold_running_for_ms = Math.max(0, now - startedMs);
+  return { ...record, fold_running_for_ms, fold_stale: fold_running_for_ms > STALE_FOLD_THRESHOLD_MS };
 }

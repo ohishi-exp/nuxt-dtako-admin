@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  annotateFoldStaleness,
   clearRunningPointer,
   MAX_SCRAPE_JOB_RECORDS,
   MAX_SCRAPE_QUEUE_LENGTH,
@@ -13,6 +14,7 @@ import {
   SCRAPE_QUEUE_KEY,
   SCRAPE_RUNNING_KEY,
   setRunningPointer,
+  STALE_FOLD_THRESHOLD_MS,
   touchScrapeJobOrder,
   type QueuedScrapeItem,
   type QueueStorage,
@@ -424,5 +426,98 @@ describe("migrateLegacyScrapeJobsOnce — 既存孤児の一度きり移送 (受
     const storage = new FakeStorage();
     const result = await migrateLegacyScrapeJobsOnce(storage, "0100");
     expect(result).toEqual({ ran: true, requeued: [], failedClosed: [] });
+  });
+});
+
+describe("annotateFoldStaleness", () => {
+  const NOW = Date.parse("2026-08-04T00:00:00.000Z");
+
+  it("fold_state が running でないレコードは素通しされる (undefined / 他の状態値の両方)", () => {
+    const noFold: ScrapeJobRecord = {
+      date: "2026-06-01",
+      state: "done",
+      accepted_at: "2026-08-01T00:00:00.000Z",
+    };
+    expect(annotateFoldStaleness(noFold, NOW)).toBe(noFold);
+
+    const doneFold: ScrapeJobRecord = {
+      date: "2026-06-02",
+      state: "done",
+      accepted_at: "2026-08-01T00:00:00.000Z",
+      fold_state: "done",
+    };
+    expect(annotateFoldStaleness(doneFold, NOW)).toBe(doneFold);
+  });
+
+  it("fold_started_at が無く accepted_at だけのレコードでも経過が出る (accepted_at で代用)", () => {
+    const record: ScrapeJobRecord = {
+      date: "2026-03-03",
+      state: "done",
+      accepted_at: "2026-08-03T20:00:00.000Z",
+      fold_state: "running",
+    };
+    const result = annotateFoldStaleness(record, NOW);
+    expect(result.fold_running_for_ms).toBe(NOW - Date.parse("2026-08-03T20:00:00.000Z"));
+    expect(result.fold_stale).toBe(true);
+  });
+
+  it("fold_started_at がある場合はそちらを優先する", () => {
+    const record: ScrapeJobRecord = {
+      date: "2026-03-03",
+      state: "done",
+      accepted_at: "2026-08-01T00:00:00.000Z",
+      fold_state: "running",
+      fold_started_at: "2026-08-03T23:59:00.000Z",
+    };
+    const result = annotateFoldStaleness(record, NOW);
+    expect(result.fold_running_for_ms).toBe(60_000);
+    expect(result.fold_stale).toBe(false);
+  });
+
+  it("閾値ちょうどは stale ではない (超えて初めて stale)", () => {
+    const startedAt = NOW - STALE_FOLD_THRESHOLD_MS;
+    const record: ScrapeJobRecord = {
+      date: "2026-06-04",
+      state: "done",
+      accepted_at: new Date(startedAt).toISOString(),
+      fold_state: "running",
+    };
+    const result = annotateFoldStaleness(record, NOW);
+    expect(result.fold_running_for_ms).toBe(STALE_FOLD_THRESHOLD_MS);
+    expect(result.fold_stale).toBe(false);
+  });
+
+  it("閾値未満は stale ではない", () => {
+    const startedAt = NOW - (STALE_FOLD_THRESHOLD_MS - 1);
+    const record: ScrapeJobRecord = {
+      date: "2026-06-05",
+      state: "done",
+      accepted_at: new Date(startedAt).toISOString(),
+      fold_state: "running",
+    };
+    const result = annotateFoldStaleness(record, NOW);
+    expect(result.fold_stale).toBe(false);
+  });
+
+  it("閾値超えは stale", () => {
+    const startedAt = NOW - (STALE_FOLD_THRESHOLD_MS + 1);
+    const record: ScrapeJobRecord = {
+      date: "2026-06-06",
+      state: "done",
+      accepted_at: new Date(startedAt).toISOString(),
+      fold_state: "running",
+    };
+    const result = annotateFoldStaleness(record, NOW);
+    expect(result.fold_stale).toBe(true);
+  });
+
+  it("accepted_at / fold_started_at のどちらも不正な日付なら素通しする (fail-closed で例外を投げない)", () => {
+    const record: ScrapeJobRecord = {
+      date: "2026-06-07",
+      state: "done",
+      accepted_at: "not-a-date",
+      fold_state: "running",
+    };
+    expect(annotateFoldStaleness(record, NOW)).toBe(record);
   });
 });
