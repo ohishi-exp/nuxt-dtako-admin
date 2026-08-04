@@ -21,16 +21,19 @@ function env(over: Partial<Record<string, unknown>> = {}) {
 
 const relayOf = (e: Env) => e.SCRAPER_RELAY as unknown as { fetch: ReturnType<typeof vi.fn> };
 const baseArgs = { ope_no_22: OPE_NO_22, start_ope: START_OPE, unko_no: UNKO_NO_23 };
+// execute() は inputSchema.safeParse 後の値 (reset_timecard は常に確定した boolean) を
+// 受け取る前提の型なので、safeParse を経由しない直呼びテストでは明示する。
+const execArgs = { ...baseArgs, reset_timecard: true };
 
 describe("run_dtako_reimport (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67)", () => {
   it("**write tool として scope を要求する** — read tool と同じ扱いにしない (受け入れ条件7)", () => {
     expect(runDtakoReimportTool.requiresScope).toBe("mcp.write");
   });
 
-  it("**説明で base64 を書き写さないこと・http_status が成否の証明にならないこと・reset_timecard 既定 false が読める**", () => {
+  it("**説明で base64 を書き写さないこと・http_status が成否の証明にならないこと・reset_timecard 既定 true が読める**", () => {
     expect(runDtakoReimportTool.description).toContain("base64");
     expect(runDtakoReimportTool.description).toContain("http_status");
-    expect(runDtakoReimportTool.description).toContain("既定は false");
+    expect(runDtakoReimportTool.description).toContain("既定は true");
     expect(runDtakoReimportTool.description).toContain("entries");
   });
 
@@ -62,8 +65,10 @@ describe("run_dtako_reimport (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67
     ).toBe(false);
   });
 
-  it("reset_timecard / comp_id は省略できる", () => {
-    expect(runDtakoReimportTool.inputSchema.safeParse(baseArgs).success).toBe(true);
+  it("reset_timecard / comp_id は省略できる (省略時はスキーマの既定 true が入る)", () => {
+    const parsed = runDtakoReimportTool.inputSchema.safeParse(baseArgs);
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.reset_timecard).toBe(true);
     expect(
       runDtakoReimportTool.inputSchema.safeParse({ ...baseArgs, reset_timecard: true, comp_id: "0100" })
         .success,
@@ -72,10 +77,10 @@ describe("run_dtako_reimport (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67
 
   it("binding / secret が無ければ fail-closed", async () => {
     await expect(
-      runDtakoReimportTool.execute(env({ SCRAPER_RELAY: undefined }), baseArgs),
+      runDtakoReimportTool.execute(env({ SCRAPER_RELAY: undefined }), execArgs),
     ).rejects.toThrow(/SCRAPER_RELAY/);
     await expect(
-      runDtakoReimportTool.execute(env({ INTERNAL_SHARED_SECRET: "" }), baseArgs),
+      runDtakoReimportTool.execute(env({ INTERNAL_SHARED_SECRET: "" }), execArgs),
     ).rejects.toThrow(/INTERNAL_SHARED_SECRET/);
   });
 
@@ -92,7 +97,7 @@ describe("run_dtako_reimport (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67
     const e = env({
       SCRAPER_RELAY: { fetch: vi.fn(async () => new Response(JSON.stringify(payload))) },
     });
-    const got = await runDtakoReimportTool.execute(e, { ...baseArgs, comp_id: "0100" });
+    const got = await runDtakoReimportTool.execute(e, { ...execArgs, comp_id: "0100" });
     expect(got).toEqual(payload);
     const call = relayOf(e).fetch.mock.calls[0]!;
     expect(call[0]).toBe("https://relay.internal/kintai-relay/dtako-reimport");
@@ -102,28 +107,34 @@ describe("run_dtako_reimport (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67
       ope_no: OPE_NO_22,
       start_ope: START_OPE,
       unko_no: UNKO_NO_23,
-      reset_timecard: false,
+      reset_timecard: true,
       comp_id: "0100",
     });
   });
 
-  it("reset_timecard を明示的に渡すと body へそのまま乗る", async () => {
+  it("reset_timecard を明示的に渡すと body へそのまま乗る (true/false どちらも)", async () => {
+    const eTrue = env();
+    await runDtakoReimportTool.execute(eTrue, { ...baseArgs, reset_timecard: true });
+    const bodyTrue = JSON.parse((relayOf(eTrue).fetch.mock.calls[0]![1] as RequestInit).body as string);
+    expect(bodyTrue.reset_timecard).toBe(true);
+
+    const eFalse = env();
+    await runDtakoReimportTool.execute(eFalse, { ...baseArgs, reset_timecard: false });
+    const bodyFalse = JSON.parse((relayOf(eFalse).fetch.mock.calls[0]![1] as RequestInit).body as string);
+    expect(bodyFalse.reset_timecard).toBe(false);
+  });
+
+  it("reset_timecard 省略時はスキーマの既定 (true) が body に乗る (実際の呼び出し経路 = inputSchema.parse → execute)", async () => {
     const e = env();
-    await runDtakoReimportTool.execute(e, { ...baseArgs, reset_timecard: true });
+    const parsed = runDtakoReimportTool.inputSchema.parse(baseArgs);
+    await runDtakoReimportTool.execute(e, parsed);
     const body = JSON.parse((relayOf(e).fetch.mock.calls[0]![1] as RequestInit).body as string);
     expect(body.reset_timecard).toBe(true);
   });
 
-  it("reset_timecard 省略時は false を明示する (既定で③まで実行しない)", async () => {
-    const e = env();
-    await runDtakoReimportTool.execute(e, baseArgs);
-    const body = JSON.parse((relayOf(e).fetch.mock.calls[0]![1] as RequestInit).body as string);
-    expect(body.reset_timecard).toBe(false);
-  });
-
   it("comp_id を省略すると relay の既定に委ねる (こちらで埋めない)", async () => {
     const e = env();
-    await runDtakoReimportTool.execute(e, baseArgs);
+    await runDtakoReimportTool.execute(e, execArgs);
     const body = JSON.parse((relayOf(e).fetch.mock.calls[0]![1] as RequestInit).body as string);
     expect(body.comp_id).toBeUndefined();
   });
@@ -132,11 +143,11 @@ describe("run_dtako_reimport (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67
     const bad = env({
       SCRAPER_RELAY: { fetch: vi.fn(async () => new Response("nope", { status: 401 })) },
     });
-    await expect(runDtakoReimportTool.execute(bad, baseArgs)).rejects.toThrow(/relay: status 401: nope/);
+    await expect(runDtakoReimportTool.execute(bad, execArgs)).rejects.toThrow(/relay: status 401: nope/);
     const html = env({
       SCRAPER_RELAY: { fetch: vi.fn(async () => new Response("<html>", { status: 200 })) },
     });
-    await expect(runDtakoReimportTool.execute(html, baseArgs)).rejects.toThrow(/parse failed/);
+    await expect(runDtakoReimportTool.execute(html, execArgs)).rejects.toThrow(/parse failed/);
   });
 
   it("relay が uncertain:true を返した (push 後に応答不明) 場合もそのままエラー文へ透過する", async () => {
@@ -150,7 +161,7 @@ describe("run_dtako_reimport (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67
         ),
       },
     });
-    await expect(runDtakoReimportTool.execute(e, baseArgs)).rejects.toThrow(/uncertain.*true/);
+    await expect(runDtakoReimportTool.execute(e, execArgs)).rejects.toThrow(/uncertain.*true/);
   });
 
   // Refs #633-24
@@ -168,8 +179,15 @@ describe("run_dtako_reimport (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67
   });
 
   describe("items (バッチ, Refs #633-24)", () => {
-    const itemA = { ope_no_22: OPE_NO_22, start_ope: START_OPE, unko_no: UNKO_NO_23 };
-    const itemB = { ope_no_22: OPE_NO_22_B, start_ope: START_OPE_B, unko_no: UNKO_NO_23_B };
+    // execute() 直呼びの型が reset_timecard: boolean (非 optional) を要求するため、
+    // 「省略時 (旧既定 false)」を意図する箇所は明示的に false を書く。
+    const itemA = { ope_no_22: OPE_NO_22, start_ope: START_OPE, unko_no: UNKO_NO_23, reset_timecard: false };
+    const itemB = {
+      ope_no_22: OPE_NO_22_B,
+      start_ope: START_OPE_B,
+      unko_no: UNKO_NO_23_B,
+      reset_timecard: false,
+    };
 
     it("**説明で上限件数・items にも unko_no が必須なことが読める**", () => {
       expect(runDtakoReimportTool.description).toContain("items");
@@ -206,6 +224,8 @@ describe("run_dtako_reimport (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67
       const e = env();
       await runDtakoReimportTool.execute(e, {
         comp_id: "0100",
+        // 単体形式の reset_timecard は items 使用時は無視されるので値は何でもよい。
+        reset_timecard: true,
         items: [itemA, { ...itemB, reset_timecard: true }],
       });
       const body = JSON.parse((relayOf(e).fetch.mock.calls[0]![1] as RequestInit).body as string);
@@ -218,9 +238,17 @@ describe("run_dtako_reimport (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67
       });
     });
 
+    it("items の要素も reset_timecard を省略すると既定 true になる (スキーマレベル)", () => {
+      const parsed = runDtakoReimportTool.inputSchema.safeParse({
+        items: [{ ope_no_22: OPE_NO_22, start_ope: START_OPE, unko_no: UNKO_NO_23 }],
+      });
+      expect(parsed.success).toBe(true);
+      expect(parsed.success && parsed.data.items?.[0]?.reset_timecard).toBe(true);
+    });
+
     it("items を渡すと単体形式のフィールドは無視される", async () => {
       const e = env();
-      await runDtakoReimportTool.execute(e, { ...baseArgs, items: [itemB] });
+      await runDtakoReimportTool.execute(e, { ...execArgs, items: [itemB] });
       const body = JSON.parse((relayOf(e).fetch.mock.calls[0]![1] as RequestInit).body as string);
       expect(body.items).toEqual([
         { ope_no: OPE_NO_22_B, start_ope: START_OPE_B, unko_no: UNKO_NO_23_B, reset_timecard: false },
@@ -243,7 +271,7 @@ describe("run_dtako_reimport (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67
       const e = env({
         SCRAPER_RELAY: { fetch: vi.fn(async () => new Response(JSON.stringify(payload))) },
       });
-      const got = await runDtakoReimportTool.execute(e, { items: [itemA] });
+      const got = await runDtakoReimportTool.execute(e, { reset_timecard: true, items: [itemA] });
       expect(got).toEqual(payload);
     });
   });
