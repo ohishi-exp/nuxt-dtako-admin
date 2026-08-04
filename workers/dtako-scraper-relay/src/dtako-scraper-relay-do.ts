@@ -1479,9 +1479,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       const recalculateResult = recalculate
         ? await recalculateBeforeFetch(() =>
             this.withTheearthLoginSession(account, jobState, async (jar) => {
+              // セッションに前回の運行が読み込み済みのまま残っていると、そちらが
+              // 再集計される (Refs #633-23、theearth-venus skill「運行はセッションに
+              // 1件だけ…」節)。処理後も解放し、他セッションを空ページ+HTTP 500 で
+              // ブロックしたままにしない。
+              await releaseLoadedOperation(jar);
               const result = await recalculateWorkUnattended(jar, opeNo, startOpe);
               unlockInfo.unlocked = result.unlocked;
               unlockInfo.selfUnlocked = result.selfUnlocked;
+              await releaseLoadedOperation(jar);
               return result;
             }),
           )
@@ -1646,9 +1652,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const deps: DtakoReimportDeps = {
       recalculateWork: async () => {
         await this.withTheearthLoginSession(account, jobState, async (jar) => {
+          // Refs #633-23 (dtako-alc-upload と同じ理由、runOperationZip のコメント参照)。
+          await releaseLoadedOperation(jar);
           const result = await recalculateWorkUnattended(jar, input.opeNo, input.startOpe);
           unlockInfo.unlocked = result.unlocked;
           unlockInfo.selfUnlocked = result.selfUnlocked;
+          await releaseLoadedOperation(jar);
         });
       },
       fetchZip: () =>
@@ -1794,9 +1803,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const deps: DtakoAlcUploadDeps = {
       recalculateWork: async () => {
         await this.withTheearthLoginSession(account, jobState, async (jar) => {
+          // Refs #633-23 (runOperationZip のコメント参照)。
+          await releaseLoadedOperation(jar);
           const result = await recalculateWorkUnattended(jar, input.opeNo, input.startOpe);
           unlockInfo.unlocked = result.unlocked;
           unlockInfo.selfUnlocked = result.selfUnlocked;
+          await releaseLoadedOperation(jar);
         });
       },
       fetchZip: () =>

@@ -2592,15 +2592,12 @@ export interface RecalculateWorkUnattendedResult extends RecalculateExpenseResul
  * cron の自前ログイン経路 (`runOperationZip`/`runDtakoReimportJob`/
  * `runDtakoAlcUploadJob`) 専用の `recalculateWork` ラッパ (Refs #633-23)。
  * ExclusionFlag ロックの解除そのものは `recalculateByScore` が GET の前に
- * 無条件で行う (ブラウザ経路も含む共通処理)。ここで足すのは cron 特有の2点:
+ * 無条件で行う (ブラウザ経路も含む共通処理)。ここで足すのは cron 特有の1点、
+ * 成功後の自分のロックの自己解放 (`selfUnlocked`、上記 doc 参照) だけ。
  *
- * 1. `releaseLoadedOperation` でセッションの読み込み済みポインタを解放
- *    (前後) — cron はログインセッションを DO インスタンス内で使い回す
- *    (Refs #633-20) ため、別運行を続けて処理すると「セッションに1件だけ
- *    読み込み済み」の sticky 状態を踏む (Refs #633-23、#645)。ブラウザ経路は
- *    1 セッション 1 運行が前提なので、この問題を持たない
- * 2. 成功後の自分のロックの自己解放 (`selfUnlocked`) — 下記 doc 参照
- */
+ * **`releaseLoadedOperation` (セッションの読み込み済みポインタ解放、Refs #645)
+ * の前後呼び出しはこの関数に含めない** — DO 側 (`runOperationZip` 等) に
+ * 既にある呼び出しをそのまま使う。 */
 export async function recalculateWorkUnattended(
   jar: CookieJar,
   opeNo: string,
@@ -2608,10 +2605,8 @@ export async function recalculateWorkUnattended(
   fetchImpl: FetchLike = fetch,
   timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
 ): Promise<RecalculateWorkUnattendedResult> {
-  await releaseLoadedOperation(jar, fetchImpl, timeoutMs);
   const result = await recalculateWork(jar, opeNo, startOpe, fetchImpl, timeoutMs);
   await unlockOperation(jar, { opeNo, startOpe }, fetchImpl, timeoutMs);
-  await releaseLoadedOperation(jar, fetchImpl, timeoutMs);
   return { ...result, selfUnlocked: true };
 }
 
