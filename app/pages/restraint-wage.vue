@@ -237,6 +237,22 @@ const archiveMonths = ref<string[]>([])
  * 最新アーカイブ月へ付け替わって読み直し = R2 GET 約300本の fan-out が丸ごと1回無駄になる。
  * 失敗時も true にする (エラー表示した上で従来どおり既定月で動かす — ページを殺さない)。 */
 const archiveMonthsLoaded = ref(false)
+/**
+ * 対象月が sessionStorage から復元された = **利用者が直前に選んでいた月**
+ * (2026-08-04 実測)。
+ *
+ * `archiveMonthsLoaded` の待ちは「アーカイブが無い当月で撃って捨てフェッチになる」
+ * のを防ぐため (Refs #451) だが、復元した月は当月の当てずっぽうではなく
+ * 「さっき見ていた月」なので待つ理由が無い。実測では `archive/months` が 1,705ms
+ * かかり、その**後**に wage-report (約 2,000ms) が始まっていた — 体感 3.2〜3.5 秒の
+ * 正体はこの直列。復元できた時はここを短絡する。
+ *
+ * 復元月にアーカイブが無かった場合は `loadArchiveMonths` が最新月へ付け替え、
+ * watcher が正しい月で撃ち直す (latest-wins ガード済み) — 捨てフェッチ 1 回で済む。
+ */
+const monthRestoredFromSession = ref(false)
+/** 月連動の読み込みを始めてよいか (= 対象月が確定したか)。 */
+const monthSettled = computed(() => archiveMonthsLoaded.value || monthRestoredFromSession.value)
 const selectedYear = ref(new Date().getFullYear())
 const selectedMonthNo = ref(new Date().getMonth() + 1)
 
@@ -497,6 +513,7 @@ onMounted(() => {
   if (savedMonth) {
     selectedYear.value = parseInt(savedMonth[1]!, 10)
     selectedMonthNo.value = parseInt(savedMonth[2]!, 10)
+    monthRestoredFromSession.value = true
   }
   restoreSalaryImports()
   restoreSession()
@@ -541,6 +558,7 @@ watch(session, (s) => {
     minWageMasterLoaded.value = false
     // 再ログイン時に archive/months の解決を待ち直す (Refs #451)
     archiveMonthsLoaded.value = false
+    monthRestoredFromSession.value = false
     // ドライバーの拘束・深夜 (Refs #472)。月を覚えたままだと再ログイン後に
     // 取り直さず、前の会社の値が残る
     kosokuByDriver.value = new Map()
@@ -4532,13 +4550,13 @@ async function deleteNightShift(entry: NightShiftEntry) {
   }, '履歴の行を削除しました')
 }
 
-watch([activeTab, month, session, archiveMonthsLoaded], () => {
+watch([activeTab, month, session, monthSettled], () => {
   if (!session.value || !month.value) return
   // archive/months の解決前は撃たない — 既定月 (アーカイブ無し) で wage-report が走る
   // 捨てフェッチと、その裏の R2 GET fan-out が同一 DO 上で他リクエストと競合するのを防ぐ。
   // 解決時に archiveMonthsLoaded が true へ変わり (月の付け替えも同 flush)、ここが一度だけ
   // 正しい月で発火する (Refs #451)
-  if (!archiveMonthsLoaded.value) return
+  if (!monthSettled.value) return
   // 上部バーの「給与DBから読み込み」はどのタブからでも押せるようにしている。
   // ボタンの活殺は compMap 由来 (importPayrollOptions) なので、タブに関係なく読む
   if (!compMap.value.length) loadCompMap()
@@ -4615,7 +4633,7 @@ watch([activeTab, month, session, archiveMonthsLoaded], () => {
 // (どの組がキャッシュ済みか) の**両方**が要る。どちらも上の watch より後に解決
 // しうるので、揃った時点でもう一度叩く (中身は冪等 — 既に載っている組は飛ばす)。
 watch([compMap, kyuyoSyncedKeys], () => {
-  if (!session.value || !archiveMonthsLoaded.value) return
+  if (!session.value || !monthSettled.value) return
   void autoLoadArchivedPayroll()
 })
 </script>
