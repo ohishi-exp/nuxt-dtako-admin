@@ -149,7 +149,19 @@ import {
 import type { KintaiAlcUploadResult } from '~/utils/kintai-alc-upload'
 import { parseKintaiAlcUploadResult } from '~/utils/kintai-alc-upload'
 import type { SnapshotSourceRow } from '~/utils/wage-snapshot-client'
-import { buildSnapshotPayload, contentHash } from '~/utils/wage-snapshot-client'
+import { buildSnapshotPayload, contentHash, WAGE_LOGIC_VERSION } from '~/utils/wage-snapshot-client'
+import type { WageRangeResponse } from '~/utils/wage-range-view'
+import {
+  defaultRange,
+  monthBadgeLabel,
+  monthCellState,
+  monthDiff,
+  monthsNeedingRefresh,
+  parseWageRange,
+  rangeDiff,
+  sumWageRangeRows,
+  wageRangeCsv,
+} from '~/utils/wage-range-view'
 
 const {
   session: theearthSession,
@@ -214,6 +226,9 @@ const TABS = [
   { key: 'archive', label: 'アーカイブ' },
   { key: 'monthly', label: '月次集計・印刷' },
   { key: 'minwage', label: '最低賃金チェック' },
+  // 保存済みスナップショットの期間集計 (Refs #677)。数字の出どころが最低賃金チェックと
+  // 同じなので隣に置く
+  { key: 'range', label: '期間集計' },
   { key: 'salary', label: '給与比較' },
   { key: 'items', label: '支給項目区分' },
   { key: 'master', label: '単価マスタ' },
@@ -3815,6 +3830,172 @@ watch([minWageTableSettled, month, minWageRestraintSource], ([settled]) => {
   if (settled) void saveWageSnapshot()
 }, { immediate: true })
 
+// ---------------------------------------------------------------------------
+// 期間集計タブ (Refs #677 PR-E)
+// ---------------------------------------------------------------------------
+// 1 行 = 1 乗務員。**月ごとの差を横に並べ**、右端に期間合計 (計算額 / 給与支払額 /
+// 差合計) を置く。素材は保存済みスナップショットだけを読む — `wage-report` を
+// 期間分回すと 1 か月 15〜64 秒 × 月数かかるため。足りない月は「未保存」として
+// 見えるようにし、取り直しは PR-F の担当。
+
+const rangeFrom = ref('')
+const rangeTo = ref('')
+const rangeSource = ref<RestraintSourceKey>('gcp')
+const rangeData = ref<WageRangeResponse | null>(null)
+const rangeLoading = ref(false)
+const rangeError = ref('')
+
+// 既定は「その年の 1 月 〜 選択中の月」(ユーザー決定 2026-08-05)。月タブを動かしたら追従する
+watch(month, (ym) => {
+  const d = defaultRange(ym)
+  rangeFrom.value = d.from
+  rangeTo.value = d.to
+}, { immediate: true })
+
+/** 表に出す月の並び (期間が不正なら空)。 */
+const rangeMonths = computed(() => monthRange(rangeFrom.value, rangeTo.value))
+
+/** 月 → カバレッジ (表の月セルが状態を引く)。 */
+const rangeMonthByYm = computed(() =>
+  new Map((rangeData.value?.months ?? []).map(m => [m.ym, m])))
+
+/** 単月表と同じ並び (会社 → 職員区分 → 営業所 → 乗務員CD)。 */
+const rangeSections = computed(() =>
+  groupMinWageRows(rangeData.value?.rows ?? [], r => r.driverCd, r => r.attrs))
+
+const rangeTotals = computed(() => sumWageRangeRows(rangeData.value?.rows ?? [], rangeMonths.value))
+
+/**
+ * 表から引く値は**すべて computed に畳んでおく** (112 名 × 12 か月の表)。
+ * template から関数を直に呼ぶと、1 セルにつき 3 段 + class 判定で 6 回走り、
+ * 区画小計に至っては「月数 × 6 回 × 全行ループ」になって再描画が目に見えて重くなる。
+ */
+const rangeSectionTotalsByKey = computed(() => {
+  const map = new Map<string, ReturnType<typeof sumWageRangeRows>>()
+  for (const s of rangeSections.value) {
+    map.set(`${s.company ?? ''}|${s.jobGroup}`, sumWageRangeRows(s.rows, rangeMonths.value))
+  }
+  return map
+})
+
+function rangeSectionTotals(company: string | null, jobGroup: string) {
+  return rangeSectionTotalsByKey.value.get(`${company ?? ''}|${jobGroup}`)
+    ?? sumWageRangeRows([], rangeMonths.value)
+}
+
+/** 乗務員CD → 期間合計の差。 */
+const rangeRowDiffs = computed(() =>
+  new Map((rangeData.value?.rows ?? []).map(r => [r.driverCd, rangeDiff(r)])))
+
+/** `乗務員CD|YYYY-MM` → その月の差。 */
+const rangeMonthDiffs = computed(() => {
+  const map = new Map<string, ReturnType<typeof monthDiff>>()
+  for (const r of rangeData.value?.rows ?? []) {
+    for (const m of rangeMonths.value) map.set(`${r.driverCd}|${m}`, monthDiff(r.byMonth[m]))
+  }
+  return map
+})
+
+/** `乗務員CD|YYYY-MM` → 月セルの状態。 */
+const rangeCellStates = computed(() => {
+  const map = new Map<string, ReturnType<typeof monthCellState>>()
+  for (const r of rangeData.value?.rows ?? []) {
+    for (const m of rangeMonths.value) {
+      map.set(`${r.driverCd}|${m}`, monthCellState(r, rangeMonthByYm.value.get(m)))
+    }
+  }
+  return map
+})
+
+const NULL_DIFF3 = { base: null, overtime: null, total: null }
+function rowDiffOf(driverCd: string) {
+  return rangeRowDiffs.value.get(driverCd) ?? NULL_DIFF3
+}
+function monthDiffOf(driverCd: string, ym: string) {
+  return rangeMonthDiffs.value.get(`${driverCd}|${ym}`) ?? NULL_DIFF3
+}
+function cellStateOf(driverCd: string, ym: string) {
+  return rangeCellStates.value.get(`${driverCd}|${ym}`) ?? 'unsaved'
+}
+
+/** 月セルのツールチップ (状態ごとの説明)。 */
+const CELL_STATE_TITLE: Record<string, string> = {
+  excluded: 'この月は集計対象外 (給与未取込など)',
+  unsaved: 'この月はまだ保存されていません',
+  missing: 'この乗務員のこの月は集計できません (欠測・単価未設定・給与明細に無し)',
+  counted: '',
+}
+
+/** 取り直すべき月 (未保存 / 要再計算)。PR-F のボタンが対象にする。 */
+const rangeRefreshTargets = computed(() => monthsNeedingRefresh(rangeData.value?.months ?? []))
+
+/**
+ * 期間集計を読む。**保存済みだけを読む** — ここで `wage-report` を回さない。
+ *
+ * 鮮度判定の材料 (今のマスタの版) はクエリで渡す。**マスタを読み込めていない間は
+ * 渡さない** — 空のマスタの sha を送ると全月が「要再計算」に化ける。
+ * 給与の同期時刻は月ごとに違うのでここでは渡せず、`payroll` 由来の stale 判定は
+ * この画面では出ない (単月の保存時に記録済みの値がサーバ側に残る)。
+ */
+async function loadWageRange() {
+  const compId = session.value?.compId
+  if (!compId || !rangeMonths.value.length) return
+  rangeLoading.value = true
+  rangeError.value = ''
+  try {
+    const token = currentAccessToken()
+    const query: Record<string, string> = {
+      comp: compId,
+      from: rangeMonths.value[0]!,
+      to: rangeMonths.value[rangeMonths.value.length - 1]!,
+      source: rangeSource.value,
+      wage_logic_version: WAGE_LOGIC_VERSION,
+    }
+    if (salaryConfigLoaded.value) query.salary_item_sha = contentHash(salaryItemConfig.value)
+    if (minWageMasterLoaded.value) query.min_wage_sha = contentHash(minWageMaster.value)
+    const body = await $fetch('/api/kyuyo/wage-range', {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      query,
+    })
+    rangeData.value = parseWageRange(body)
+  }
+  catch (e: unknown) {
+    rangeError.value = e instanceof Error ? e.message : String(e)
+    rangeData.value = null
+  }
+  finally {
+    rangeLoading.value = false
+  }
+}
+
+// このタブを見ている間だけ、期間・ソースを変えるたびに読み直す
+watch([activeTab, rangeFrom, rangeTo, rangeSource, session], ([tab]) => {
+  if (tab === 'range') void loadWageRange()
+}, { immediate: true })
+
+// マスタが後から解決したら鮮度判定つきで読み直す (空マスタの sha で撃たない)
+watch([salaryConfigLoaded, minWageMasterLoaded], () => {
+  if (activeTab.value === 'range' && rangeData.value) void loadWageRange()
+})
+
+function downloadRangeCsv() {
+  const csv = wageRangeCsv(rangeData.value?.rows ?? [], rangeMonths.value)
+  const blob = new Blob([`﻿${csv}`], { type: 'text/csv;charset=utf-8' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = `wage-range_${rangeFrom.value}_${rangeTo.value}.csv`
+  a.click()
+  URL.revokeObjectURL(a.href)
+}
+
+/** 月セルを押したらその月の最低賃金チェックへ (数字の根拠は単月の表で見る)。 */
+function jumpToMinWageMonth(ym: string) {
+  selectedYear.value = parseInt(ym.slice(0, 4), 10)
+  selectedMonthNo.value = parseInt(ym.slice(5, 7), 10)
+  minWageRestraintSource.value = rangeSource.value
+  activeTab.value = 'minwage'
+}
+
 /** 乗務員CD (正規化キー) → 給与明細の残業計上額 + 基礎単価(実績) (タイムカード表の
  * 残業「時間」比較用、Refs #441)。salaryComparison が無くても拘束側の時間は
  * summary から常に出せるので、ここが空でも「支給分」欄だけが "-" になる。 */
@@ -5237,6 +5418,21 @@ watch([compMap, kyuyoSyncedKeys], () => {
                   />
                   <UButton size="xs" variant="soft" icon="i-lucide-file-down" label="CSV" :disabled="!report?.rows.length" @click="downloadMonthlyCsv" />
                 </template>
+                <!-- 期間集計 (Refs #677) 用の保存状態。**ボタンは置かない** — 表が確定した
+                     時点で自動保存する。ここは「保存されたか」を読むためだけの表示。
+                     拘束時間ソースの行に置いていたが説明文に埋もれて見つけにくかったため、
+                     ヘッダの再計算ボタン隣へ移した (ユーザー指摘 2026-08-05) -->
+                <span
+                  v-if="activeTab === 'minwage' && snapshotState.status !== 'idle'"
+                  class="text-xs whitespace-nowrap"
+                  :class="snapshotState.status === 'error' ? 'text-red-600 dark:text-red-400' : 'text-gray-500'"
+                  :title="snapshotState.message ?? '期間集計タブはこの保存を合算して表示します'"
+                >
+                  <template v-if="snapshotState.status === 'saving'">期間集計用に保存中…</template>
+                  <template v-else-if="snapshotState.status === 'saved'">期間集計用に保存しました ({{ snapshotState.at }})</template>
+                  <template v-else-if="snapshotState.status === 'skipped'">保存済み (変更なし)</template>
+                  <template v-else>保存できませんでした — 表示には影響しません</template>
+                </span>
                 <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再計算" :loading="displayLoading" @click="reloadDisplayReport" />
               </div>
             </template>
@@ -5259,19 +5455,6 @@ watch([compMap, kyuyoSyncedKeys], () => {
               />
               <span class="text-xs text-gray-500">
                 {{ RESTRAINT_SOURCE_NOTE[minWageRestraintSource] }}
-              </span>
-              <!-- 期間集計 (Refs #677) 用の保存状態。**ボタンは置かない** — 表が確定した
-                   時点で自動保存する。ここは「保存されたか」を読むためだけの表示 -->
-              <span
-                v-if="snapshotState.status !== 'idle'"
-                class="ml-auto text-xs"
-                :class="snapshotState.status === 'error' ? 'text-red-600 dark:text-red-400' : 'text-gray-500'"
-                :title="snapshotState.message ?? '期間集計タブはこの保存を合算して表示します'"
-              >
-                <template v-if="snapshotState.status === 'saving'">期間集計用に保存中…</template>
-                <template v-else-if="snapshotState.status === 'saved'">期間集計用に保存しました ({{ snapshotState.at }})</template>
-                <template v-else-if="snapshotState.status === 'skipped'">保存済み (変更なし)</template>
-                <template v-else>保存できませんでした — 表示には影響しません</template>
               </span>
             </div>
             <p v-if="gcpReportError" class="text-xs text-red-600 dark:text-red-400 mb-1">
@@ -5722,6 +5905,231 @@ watch([compMap, kyuyoSyncedKeys], () => {
               </tbody>
             </table>
             <p v-else class="text-sm text-gray-500">未設定です。上の欄から追加してください。</p>
+            </div>
+          </UCard>
+        </template>
+
+        <!-- ③b 期間集計 (Refs #677)。保存済みスナップショットだけを読む —
+             `wage-report` を期間分回すと 1 か月 15〜64 秒 × 月数かかる -->
+        <template v-else-if="activeTab === 'range'">
+          <UCard>
+            <template #header>
+              <div class="flex flex-wrap items-center gap-3">
+                <span class="font-semibold">期間集計</span>
+                <USelect v-model="rangeFrom" size="xs" class="w-32" :items="payrollMonthOptions" aria-label="期間 (から)" />
+                <span class="text-gray-400">〜</span>
+                <USelect v-model="rangeTo" size="xs" class="w-32" :items="payrollMonthOptions" aria-label="期間 (まで)" />
+                <UButton
+                  v-for="opt in RESTRAINT_SOURCE_OPTIONS"
+                  :key="opt.value"
+                  size="xs"
+                  :variant="rangeSource === opt.value ? 'solid' : 'outline'"
+                  :label="opt.label"
+                  @click="rangeSource = opt.value"
+                />
+                <div class="flex-1" />
+                <UButton size="xs" variant="soft" icon="i-lucide-file-down" label="CSV" :disabled="!rangeData?.rows.length" @click="downloadRangeCsv" />
+                <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" :loading="rangeLoading" @click="loadWageRange" />
+              </div>
+            </template>
+
+            <p v-if="rangeError" class="text-xs text-red-600 dark:text-red-400 mb-2">
+              ⚠ 期間集計を読み込めませんでした: {{ rangeError }}
+            </p>
+
+            <div v-if="rangeLoading && !rangeData" class="flex items-center gap-2 text-sm text-gray-500">
+              <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin text-primary" />
+              保存済みの集計を読み込んでいます…
+            </div>
+
+            <!-- 月カバレッジ。押すとその月の最低賃金チェックへ飛ぶ (数字の根拠は単月で見る) -->
+            <div v-if="rangeData" class="flex flex-wrap gap-1 mb-3">
+              <button
+                v-for="m in rangeData.months"
+                :key="m.ym"
+                type="button"
+                class="text-xs px-2 py-0.5 border rounded"
+                :class="!m.saved || m.excluded
+                  ? 'border-gray-300 dark:border-gray-700 text-gray-400'
+                  : m.stale
+                    ? 'border-amber-500 text-amber-600 dark:text-amber-400'
+                    : 'border-green-600 text-green-700 dark:text-green-400'"
+                :title="m.staleReason.length ? `要再計算: ${m.staleReason.join(', ')}` : (m.computedAt ?? '')"
+                @click="jumpToMinWageMonth(m.ym)"
+              >
+                {{ fmtYm(m.ym) }} {{ monthBadgeLabel(m) }}
+              </button>
+              <span v-if="rangeRefreshTargets.length" class="text-xs text-gray-500 self-center ml-2">
+                {{ rangeRefreshTargets.length }} ヶ月が未保存 / 要再計算です (その月の最低賃金チェックを開くと保存されます)
+              </span>
+            </div>
+
+            <p v-if="rangeData && !rangeData.rows.length && !rangeLoading" class="text-sm text-gray-500">
+              この期間に保存済みの集計がありません。各月の「最低賃金チェック」を開くと保存されます。
+            </p>
+
+            <div v-if="rangeData?.rows.length" class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
+                    <th rowspan="2" class="px-2 py-2 align-bottom">乗務員CD</th>
+                    <th rowspan="2" class="px-2 py-2 align-bottom">氏名<br><span class="font-normal text-xs">(営業所)</span></th>
+                    <th rowspan="2" class="px-2 py-2 text-right align-bottom">集計<br>月数</th>
+                    <th
+                      :colspan="rangeMonths.length"
+                      class="px-2 py-2 text-center border-l-2 border-gray-300 dark:border-gray-600"
+                      title="給与 − 計算。上段 基本給 / 中段 残業代 / 下段 合計。集計に入らなかった月は — (0 ではない)"
+                    >
+                      月ごとの差 (給与 − 計算)
+                    </th>
+                    <th colspan="3" class="px-2 py-2 text-center border-l-2 border-gray-300 dark:border-gray-600">期間合計</th>
+                  </tr>
+                  <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
+                    <th
+                      v-for="(m, i) in rangeMonths"
+                      :key="m"
+                      class="px-2 py-1 text-right text-xs"
+                      :class="i === 0 ? 'border-l-2 border-gray-300 dark:border-gray-600' : ''"
+                    >
+                      {{ parseInt(m.slice(5), 10) }}月
+                    </th>
+                    <th class="px-2 py-1 text-right text-xs border-l-2 border-gray-300 dark:border-gray-600">計算額</th>
+                    <th class="px-2 py-1 text-right text-xs">給与支払額</th>
+                    <th class="px-2 py-1 text-right text-xs">差合計</th>
+                  </tr>
+                </thead>
+                <tbody v-for="section in rangeSections" :key="`${section.company ?? 'unknown'}|${section.jobGroup}`">
+                  <tr class="bg-gray-50 dark:bg-gray-800/60 border-b border-gray-200 dark:border-gray-700">
+                    <td :colspan="rangeMonths.length + 6" class="px-2 py-1.5 text-xs font-semibold">
+                      {{ section.company ? payrollCompanyLabelOf(compMap, section.company) : '会社不明 (社員マスタに乗務員CDの登録なし)' }}
+                      <span class="mx-1 text-gray-400">/</span>
+                      {{ MIN_WAGE_JOB_GROUP_LABEL[section.jobGroup] }}
+                      <span class="ml-1 font-normal text-gray-500">{{ section.rows.length }} 名</span>
+                    </td>
+                  </tr>
+                  <tr v-for="row in section.rows" :key="row.driverCd" class="border-b border-gray-100 dark:border-gray-800">
+                    <td class="px-2 py-1.5">{{ row.driverCd }}</td>
+                    <td class="px-2 py-1.5">
+                      <div>{{ row.driverName }}</div>
+                      <div v-if="row.attrs.branchName" class="text-xs text-gray-500">{{ row.attrs.branchName }}</div>
+                    </td>
+                    <td class="px-2 py-1.5 text-right whitespace-nowrap">
+                      <span :class="row.monthsCounted < rangeMonths.length ? 'text-amber-600 dark:text-amber-400' : ''">
+                        {{ row.monthsCounted }} / {{ rangeMonths.length }}
+                      </span>
+                    </td>
+                    <!-- 月ごとの差。集計に入らなかった月は — (0 と見分ける) -->
+                    <td
+                      v-for="(m, i) in rangeMonths"
+                      :key="m"
+                      class="px-2 py-1.5 text-right"
+                      :class="i === 0 ? 'border-l-2 border-gray-300 dark:border-gray-600' : ''"
+                      :title="CELL_STATE_TITLE[cellStateOf(row.driverCd, m)]"
+                    >
+                      <div v-if="cellStateOf(row.driverCd, m) === 'counted'" class="leading-tight">
+                        <div class="text-xs" :class="(monthDiffOf(row.driverCd, m).base ?? 0) < 0 ? 'text-red-600' : 'text-gray-500'">
+                          {{ fmtDiff(monthDiffOf(row.driverCd, m).base) }}
+                        </div>
+                        <div class="text-xs" :class="(monthDiffOf(row.driverCd, m).overtime ?? 0) < 0 ? 'text-red-600' : 'text-gray-500'">
+                          {{ fmtDiff(monthDiffOf(row.driverCd, m).overtime) }}
+                        </div>
+                        <div class="font-medium" :class="(monthDiffOf(row.driverCd, m).total ?? 0) < 0 ? 'text-red-600' : ''">
+                          {{ fmtDiff(monthDiffOf(row.driverCd, m).total) }}
+                        </div>
+                      </div>
+                      <span v-else class="text-xs text-gray-400">—</span>
+                    </td>
+                    <!-- 期間合計 3 ブロック (単月表と同じ縦横) -->
+                    <td class="px-2 py-1.5 text-right border-l-2 border-gray-300 dark:border-gray-600 leading-tight">
+                      <div class="text-xs text-gray-500">{{ fmtYen(row.calcBase) }}</div>
+                      <div class="text-xs text-gray-500">{{ fmtYen(row.calcOvertime) }}</div>
+                      <div class="font-medium">{{ fmtYen(row.calcTotal) }}</div>
+                    </td>
+                    <td class="px-2 py-1.5 text-right leading-tight">
+                      <div class="text-xs text-gray-500">{{ fmtYen(row.paidBase) }}</div>
+                      <div class="text-xs text-gray-500">{{ fmtYen(row.paidOvertime) }}</div>
+                      <div class="font-medium">{{ fmtYen(row.paidBase + row.paidOvertime) }}</div>
+                    </td>
+                    <td class="px-2 py-1.5 text-right leading-tight">
+                      <div class="text-xs" :class="(rowDiffOf(row.driverCd).base ?? 0) < 0 ? 'text-red-600' : 'text-gray-500'">{{ fmtDiff(rowDiffOf(row.driverCd).base) }}</div>
+                      <div class="text-xs" :class="(rowDiffOf(row.driverCd).overtime ?? 0) < 0 ? 'text-red-600' : 'text-gray-500'">{{ fmtDiff(rowDiffOf(row.driverCd).overtime) }}</div>
+                      <div class="font-medium" :class="(rowDiffOf(row.driverCd).total ?? 0) < 0 ? 'text-red-600' : ''">{{ fmtDiff(rowDiffOf(row.driverCd).total) }}</div>
+                    </td>
+                  </tr>
+                  <!-- 区画の小計。月セルは合計段の差だけ (3 段は右端の期間合計にのみ出す) -->
+                  <tr class="border-b-2 border-gray-300 dark:border-gray-600 font-medium">
+                    <td colspan="3" class="px-2 py-1.5 text-xs">区画 小計 ({{ section.rows.length }} 名)</td>
+                    <td
+                      v-for="(m, i) in rangeMonths"
+                      :key="m"
+                      class="px-2 py-1.5 text-right text-xs"
+                      :class="[
+                        i === 0 ? 'border-l-2 border-gray-300 dark:border-gray-600' : '',
+                        (rangeSectionTotals(section.company, section.jobGroup).diffByMonth[m] ?? 0) < 0 ? 'text-red-600' : '',
+                      ]"
+                    >
+                      {{ fmtDiff(rangeSectionTotals(section.company, section.jobGroup).diffByMonth[m] ?? null) }}
+                    </td>
+                    <td class="px-2 py-1.5 text-right border-l-2 border-gray-300 dark:border-gray-600 leading-tight">
+                      <div class="text-xs text-gray-500">{{ fmtYen(rangeSectionTotals(section.company, section.jobGroup).calcBase) }}</div>
+                      <div class="text-xs text-gray-500">{{ fmtYen(rangeSectionTotals(section.company, section.jobGroup).calcOvertime) }}</div>
+                      <div>{{ fmtYen(rangeSectionTotals(section.company, section.jobGroup).calcTotal) }}</div>
+                    </td>
+                    <td class="px-2 py-1.5 text-right leading-tight">
+                      <div class="text-xs text-gray-500">{{ fmtYen(rangeSectionTotals(section.company, section.jobGroup).paidBase) }}</div>
+                      <div class="text-xs text-gray-500">{{ fmtYen(rangeSectionTotals(section.company, section.jobGroup).paidOvertime) }}</div>
+                      <div>{{ fmtYen(rangeSectionTotals(section.company, section.jobGroup).paidBase + rangeSectionTotals(section.company, section.jobGroup).paidOvertime) }}</div>
+                    </td>
+                    <td class="px-2 py-1.5 text-right leading-tight">
+                      <div class="text-xs" :class="(rangeSectionTotals(section.company, section.jobGroup).diff.base ?? 0) < 0 ? 'text-red-600' : 'text-gray-500'">{{ fmtDiff(rangeSectionTotals(section.company, section.jobGroup).diff.base) }}</div>
+                      <div class="text-xs" :class="(rangeSectionTotals(section.company, section.jobGroup).diff.overtime ?? 0) < 0 ? 'text-red-600' : 'text-gray-500'">{{ fmtDiff(rangeSectionTotals(section.company, section.jobGroup).diff.overtime) }}</div>
+                      <div :class="(rangeSectionTotals(section.company, section.jobGroup).diff.total ?? 0) < 0 ? 'text-red-600' : ''">{{ fmtDiff(rangeSectionTotals(section.company, section.jobGroup).diff.total) }}</div>
+                    </td>
+                  </tr>
+                </tbody>
+                <tfoot>
+                  <tr class="border-t-2 border-gray-400 dark:border-gray-500 font-semibold">
+                    <td colspan="3" class="px-2 py-2 text-xs">総合計 ({{ rangeTotals.drivers }} 名)</td>
+                    <td
+                      v-for="(m, i) in rangeMonths"
+                      :key="m"
+                      class="px-2 py-2 text-right text-xs"
+                      :class="[
+                        i === 0 ? 'border-l-2 border-gray-300 dark:border-gray-600' : '',
+                        (rangeTotals.diffByMonth[m] ?? 0) < 0 ? 'text-red-600' : '',
+                      ]"
+                    >
+                      {{ fmtDiff(rangeTotals.diffByMonth[m] ?? null) }}
+                    </td>
+                    <td class="px-2 py-2 text-right border-l-2 border-gray-300 dark:border-gray-600 leading-tight">
+                      <div class="text-xs font-normal text-gray-500">{{ fmtYen(rangeTotals.calcBase) }}</div>
+                      <div class="text-xs font-normal text-gray-500">{{ fmtYen(rangeTotals.calcOvertime) }}</div>
+                      <div>{{ fmtYen(rangeTotals.calcTotal) }}</div>
+                    </td>
+                    <td class="px-2 py-2 text-right leading-tight">
+                      <div class="text-xs font-normal text-gray-500">{{ fmtYen(rangeTotals.paidBase) }}</div>
+                      <div class="text-xs font-normal text-gray-500">{{ fmtYen(rangeTotals.paidOvertime) }}</div>
+                      <div>{{ fmtYen(rangeTotals.paidBase + rangeTotals.paidOvertime) }}</div>
+                    </td>
+                    <td class="px-2 py-2 text-right leading-tight">
+                      <div class="text-xs font-normal" :class="(rangeTotals.diff.base ?? 0) < 0 ? 'text-red-600' : 'text-gray-500'">{{ fmtDiff(rangeTotals.diff.base) }}</div>
+                      <div class="text-xs font-normal" :class="(rangeTotals.diff.overtime ?? 0) < 0 ? 'text-red-600' : 'text-gray-500'">{{ fmtDiff(rangeTotals.diff.overtime) }}</div>
+                      <div :class="(rangeTotals.diff.total ?? 0) < 0 ? 'text-red-600' : ''">{{ fmtDiff(rangeTotals.diff.total) }}</div>
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+
+              <p class="text-xs text-gray-500 mt-3">
+                各月の「最低賃金チェック」を開いた時点の確定値を保存し、それを合算している (再計算はしない)。
+                並びは単月表と同じ<b>会社 → 職員区分 → 営業所 → 乗務員CD</b>。<br>
+                <b>月セルは差だけ</b>を 3 段 (基本給 / 残業代 / 合計) で出す — 月ごとに 9 数値を並べると読めないため、
+                計算額・給与支払額は右端の期間合計にだけ出す。月セルを押すとその月の最低賃金チェックへ飛ぶ。<br>
+                <b>集計に入らなかった月は「—」</b> (0 ではない)。欠測・単価未設定・給与明細に無い行はその人のその月が外れ、
+                <b>給与を取り込んでいない月は月ごと外れる</b> — 0 円で足すと支払いが理論値を大きく下回っているように見えるため。
+                「集計月数」が期間の月数に満たない行は、入社・退職・欠測のいずれかで一部の月しか足せていない。<br>
+                差のマイナス (赤) = 支払いが換算理論値を下回っている。プラスは手当の上乗せで珍しくないため色を付けない (単月表と同じ)。
+              </p>
             </div>
           </UCard>
         </template>
