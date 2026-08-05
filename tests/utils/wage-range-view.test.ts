@@ -119,6 +119,14 @@ describe('parseWageRange', () => {
     expect(junk.rows[0]!.calcTotal).toBe(0)
   })
 
+  /** 欠測月リストは文字列だけ拾う (数値や null が混ざっても月キーとして扱わない)。 */
+  it('months_missing の非文字列要素を捨てる', () => {
+    const parsed = parseWageRange({
+      rows: [{ driver_cd: 1035, months_missing: ['2026-02', 202_603, null, '2026-04'] }],
+    })
+    expect(parsed.rows[0]!.monthsMissing).toEqual(['2026-02', '2026-04'])
+  })
+
   /** 配列の中身が null でも落ちない (`row ?? {}` / `v ?? {}` の枝)。 */
   it('rows / by_month の要素が null でも落ちない', () => {
     const parsed = parseWageRange({
