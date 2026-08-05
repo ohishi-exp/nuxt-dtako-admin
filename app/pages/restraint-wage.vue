@@ -5531,7 +5531,14 @@ watch([compMap, kyuyoSyncedKeys], () => {
                   <template v-if="snapshotState.status === 'saving'">期間集計用に保存中…</template>
                   <template v-else-if="snapshotState.status === 'saved'">期間集計用に保存しました ({{ snapshotState.at }})</template>
                   <template v-else-if="snapshotState.status === 'skipped'">保存済み (変更なし)</template>
-                  <template v-else>保存できませんでした — 表示には影響しません</template>
+                  <!-- **理由を本文に出す** — title (ホバー) にだけ入れていたら、
+                       利用者は「保存できませんでした」しか読めず、原因の切り分けに
+                       入れなかった (2026-08-05 本番)。長い時は CSS で省略し、
+                       全文は title で読めるようにする -->
+                  <template v-else>
+                    保存できませんでした:
+                    <span class="inline-block max-w-[28rem] truncate align-bottom">{{ snapshotState.message || '理由不明' }}</span>
+                  </template>
                 </span>
                 <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再計算" :loading="displayLoading" @click="reloadDisplayReport" />
               </div>
