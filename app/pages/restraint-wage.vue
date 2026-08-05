@@ -4233,13 +4233,20 @@ const minWageMasterLoaded = ref(false)
 
 const rangeFrom = ref('')
 const rangeTo = ref('')
+/** 一括取得の走行中フラグ。月の watcher が期間を書き換えないよう先に宣言する。 */
+const rangeRefreshing = ref(false)
+const rangeRefreshProgress = ref('')
+const rangeRefreshMessage = ref('')
 const rangeSource = ref<RestraintSourceKey>('gcp')
 const rangeData = ref<WageRangeResponse | null>(null)
 const rangeLoading = ref(false)
 const rangeError = ref('')
 
-// 既定は「その年の 1 月 〜 選択中の月」(ユーザー決定 2026-08-05)。月タブを動かしたら追従する
+// 既定は「その年の 1 月 〜 選択中の月」(ユーザー決定 2026-08-05)。月タブを動かしたら追従する。
+// **一括取得中は追従しない** — 取得は対象月を順に開いて回るので、そのたびに期間が
+// 書き換わると「何を集計しているのか」が変わってしまう (Refs #677 PR-F)
 watch(month, (ym) => {
+  if (rangeRefreshing.value) return
   const d = defaultRange(ym)
   rangeFrom.value = d.from
   rangeTo.value = d.to
@@ -4387,6 +4394,83 @@ function jumpToMinWageMonth(ym: string) {
   selectedMonthNo.value = parseInt(ym.slice(5, 7), 10)
   minWageRestraintSource.value = rangeSource.value
   activeTab.value = 'minwage'
+}
+
+/**
+ * 1 か月ぶんの待ち時間。既定ソース (`current`) は実測 64 秒かかるので広めに取る。
+ * 超えたらその月は諦めて次へ進む (全体が止まるより、どこで止まったかを出す)。
+ */
+const REFRESH_MONTH_TIMEOUT_MS = 180_000
+
+/** `pred` が true になるまで待つ。タイムアウトしたら false。 */
+function waitUntil(pred: () => boolean, timeoutMs: number): Promise<boolean> {
+  if (pred()) return Promise.resolve(true)
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const stop = watch(pred, (ok) => {
+      if (!ok) return
+      stop()
+      if (timer !== undefined) clearTimeout(timer)
+      resolve(true)
+    })
+    timer = setTimeout(() => {
+      stop()
+      resolve(false)
+    }, timeoutMs)
+  })
+}
+
+/**
+ * 未保存 / 要再計算の月を順に取得して保存する (Refs #677 PR-F)。
+ *
+ * **保存の経路を増やさない。** 実際に計算して保存するのは単月表の自動保存
+ * (`saveWageSnapshot`) で、ここがやるのは「その月を開いて、保存が終わるまで待つ」
+ * ことだけ。計算をここにも持つと、期間集計の数字とジャンプ先の単月表の数字が
+ * 食い違いうる (同じ値の作り方が 2 箇所になる)。
+ *
+ * 画面は実際に対象月の最低賃金チェックへ切り替わる — 裏で回すより、何を計算して
+ * いるのかが見えた方が待ち時間の意味が分かる。終わったら元の月・タブへ戻す。
+ */
+async function refreshMissingMonths() {
+  const targets = [...rangeRefreshTargets.value]
+  if (rangeRefreshing.value || !targets.length || !session.value) return
+  const keepTab = activeTab.value
+  const keepYear = selectedYear.value
+  const keepMonthNo = selectedMonthNo.value
+  rangeRefreshing.value = true
+  rangeRefreshMessage.value = ''
+  const failed: string[] = []
+  let done = 0
+  try {
+    // 自動保存に任せるので、単月表のソースを期間集計と揃えてから開く
+    minWageRestraintSource.value = rangeSource.value
+    activeTab.value = 'minwage'
+    for (const ym of targets) {
+      rangeRefreshProgress.value = `${fmtYm(ym)} を計算しています… (${done + failed.length + 1}/${targets.length})`
+      // **前の月の 'saved' を持ち越さない** — 持ち越すと次の月を待たずに完了と誤判定する
+      snapshotState.value = { status: 'idle' }
+      selectedYear.value = parseInt(ym.slice(0, 4), 10)
+      selectedMonthNo.value = parseInt(ym.slice(5, 7), 10)
+      const ok = await waitUntil(
+        () => month.value === ym
+          && (snapshotState.value.status === 'saved' || snapshotState.value.status === 'skipped'),
+        REFRESH_MONTH_TIMEOUT_MS,
+      )
+      if (ok) done += 1
+      else failed.push(ym)
+    }
+  }
+  finally {
+    selectedYear.value = keepYear
+    selectedMonthNo.value = keepMonthNo
+    activeTab.value = keepTab
+    rangeRefreshing.value = false
+    rangeRefreshProgress.value = ''
+    rangeRefreshMessage.value = failed.length
+      ? `${done} ヶ月を保存しました。${failed.map(fmtYm).join(' / ')} は時間内に終わりませんでした (その月を個別に開いて確認してください)`
+      : `${done} ヶ月を保存しました`
+    await loadWageRange()
+  }
 }
 
 const savingMinWage = ref(false)
@@ -5228,6 +5312,18 @@ watch([compMap, kyuyoSyncedKeys], () => {
           >{{ payrollDbMessage }}</span>
         </div>
 
+        <!-- 期間集計の一括取得中 (Refs #677 PR-F)。**タブの外に出す** — 取得中は
+             対象月の最低賃金チェックへ順に切り替わるので、期間集計タブ内に置くと
+             進捗が見えないまま月だけが勝手に動いているように見える -->
+        <div
+          v-if="rangeRefreshing"
+          class="flex items-center gap-2 text-sm bg-blue-50 dark:bg-blue-950 rounded-lg p-3 print:hidden"
+        >
+          <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin text-primary" />
+          <span>期間集計の一括取得中: {{ rangeRefreshProgress || '準備しています…' }}</span>
+          <span class="text-xs text-gray-500">終わったら元の月・タブに戻ります</span>
+        </div>
+
         <p v-if="pageError" class="text-sm text-red-600 bg-red-50 dark:bg-red-950 rounded-lg p-3">
           {{ pageError }}
         </p>
@@ -5961,10 +6057,29 @@ watch([compMap, kyuyoSyncedKeys], () => {
               >
                 {{ fmtYm(m.ym) }} {{ monthBadgeLabel(m) }}
               </button>
-              <span v-if="rangeRefreshTargets.length" class="text-xs text-gray-500 self-center ml-2">
-                {{ rangeRefreshTargets.length }} ヶ月が未保存 / 要再計算です (その月の最低賃金チェックを開くと保存されます)
+              <!-- 未保存 / 要再計算の月をまとめて取得 (Refs #677 PR-F)。押すと対象月の
+                   最低賃金チェックを順に開き、単月表の自動保存に任せる -->
+              <UButton
+                v-if="rangeRefreshTargets.length"
+                size="xs"
+                variant="soft"
+                icon="i-lucide-refresh-cw"
+                class="ml-2"
+                :label="rangeRefreshing
+                  ? (rangeRefreshProgress || '取得中…')
+                  : `未保存・要再計算の月を取得 (${rangeRefreshTargets.length})`"
+                :loading="rangeRefreshing"
+                @click="refreshMissingMonths"
+              />
+              <span v-else-if="!rangeRefreshing" class="text-xs text-gray-500 self-center ml-2">
+                この期間は全て保存済みです
               </span>
             </div>
+
+            <p v-if="rangeRefreshMessage" class="text-xs text-gray-500 mb-2">{{ rangeRefreshMessage }}</p>
+            <p v-if="rangeRefreshing" class="text-xs text-gray-500 mb-2">
+              対象月の最低賃金チェックを順に開いています (1 ヶ月あたり 15〜64 秒)。終わったら元の月に戻ります。
+            </p>
 
             <p v-if="rangeData && !rangeData.rows.length && !rangeLoading" class="text-sm text-gray-500">
               この期間に保存済みの集計がありません。各月の「最低賃金チェック」を開くと保存されます。
