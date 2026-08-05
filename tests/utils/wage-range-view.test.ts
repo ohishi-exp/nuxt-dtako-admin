@@ -119,6 +119,20 @@ describe('parseWageRange', () => {
     expect(junk.rows[0]!.calcTotal).toBe(0)
   })
 
+  /** 配列の中身が null でも落ちない (`row ?? {}` / `v ?? {}` の枝)。 */
+  it('rows / by_month の要素が null でも落ちない', () => {
+    const parsed = parseWageRange({
+      months: [null],
+      rows: [null, { driver_cd: 1, by_month: { '2026-01': null } }],
+    })
+    expect(parsed.months[0]!.ym).toBe('')
+    expect(parsed.rows[0]!.driverCd).toBe('')
+    expect(parsed.rows[1]!.byMonth['2026-01']).toEqual({
+      calcBase: null, calcOvertime: null, calcTotal: null,
+      paidBase: null, paidOvertime: null, hourlyRate: null,
+    })
+  })
+
   it('restraint_source が無ければ gcp とみなす', () => {
     expect(parseWageRange({}).restraintSource).toBe('gcp')
   })
@@ -256,6 +270,17 @@ describe('wageRangeCsv', () => {
     expect(line).toContain('1035')
     // 集計に入っていない 2026-02 は空欄 (0 と区別する)
     expect(line!.split(',')[7]).toBe('')
+  })
+
+  /** 社員マスタで引けない人 (属性が全部 null) も落とさず空欄で出す。 */
+  it('属性が null の行も空欄で出す', () => {
+    const csv = wageRangeCsv([row({
+      attrs: { company: null, branchCode: null, branchName: null, jobName: null },
+    })], [])
+    const cells = csv.split('\n')[1]!.split(',')
+    expect(cells[2]).toBe('')
+    expect(cells[3]).toBe('')
+    expect(cells[4]).toBe('')
   })
 
   it('カンマや引用符を含む氏名を壊さない', () => {

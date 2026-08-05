@@ -171,3 +171,14 @@ branches = true
 [[files]]
 path = "app/utils/scrape-split.ts"
 branches = true
+
+# 賃金確定値の月次スナップショット (Refs #677)。どちらも DB も時計も要らない純関数で、
+# 保存 payload の組み立てと期間集計の合算・差の導出・CSV を持つ。
+# **branches も 100%** — 実測 (Stmts/Branch/Funcs/Lines すべて 100) してから登録した。
+[[files]]
+path = "app/utils/wage-snapshot-client.ts"
+branches = true
+
+[[files]]
+path = "app/utils/wage-range-view.ts"
+branches = true

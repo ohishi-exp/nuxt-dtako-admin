@@ -103,7 +103,8 @@ export function stableStringify(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
   const entries = Object.entries(value as Record<string, unknown>)
     .filter(([, v]) => v !== undefined)
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    // キーは一意なので「等しい」枝は存在しない (三項を 2 分岐に保つ)
+    .sort(([a], [b]) => (a < b ? -1 : 1))
   return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(',')}}`
 }
 
