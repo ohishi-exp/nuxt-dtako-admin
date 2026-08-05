@@ -16,6 +16,7 @@ import type {
   RestraintDriverSummary,
   RestraintSummaryDay,
 } from "../../dtako-scraper-relay/src/theearth-restraint-client";
+import type { WageCategoryMinutes } from "../../dtako-scraper-relay/src/restraint-wage";
 
 const SECRET = "internal-shared-secret";
 
@@ -88,7 +89,7 @@ function env(over: Partial<Record<string, unknown>> = {}, entries = R2_ENTRIES):
     RESTRAINT_R2_PREFIX: "restraint",
     AUTH_WORKER_ORIGIN: "https://auth-staging.ippoan.org",
     SCRAPER_RELAY: {
-      fetch: vi.fn(async (url: string, _init?: RequestInit) => {
+      fetch: vi.fn(async (url: string, _init?: unknown) => {
         const month = new URL(url).searchParams.get("month")!;
         return new Response(JSON.stringify(gcpBody(month)));
       }),
@@ -106,7 +107,7 @@ type WageReportResult = {
   rows: Array<{
     summary: RestraintDriverSummary;
     restraint_missing?: boolean;
-    wage: { minutes: Record<string, number> };
+    wage: { minutes: WageCategoryMinutes };
   }>;
 };
 
@@ -201,7 +202,7 @@ describe("get_wage_report の source 引数 (Refs #675)", () => {
     const e = env({ INTERNAL_SHARED_SECRET: { get: async () => SECRET } });
     const res = await run(e, { company: "0100", month: "2026-06" });
     expect(res.restraint_source).toBe("gcp");
-    const init = relayFetch(e).mock.calls[0]![1] as RequestInit;
-    expect((init.headers as Record<string, string>)["X-Alc-Proxy-Secret"]).toBe(SECRET);
+    const init = relayFetch(e).mock.calls[0]![1] as { headers: Record<string, string> };
+    expect(init.headers["X-Alc-Proxy-Secret"]).toBe(SECRET);
   });
 });
