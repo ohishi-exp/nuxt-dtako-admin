@@ -10,6 +10,7 @@ import {
   payrollStorageKey,
   payrollToParsedSalary,
   shouldPurgeSession,
+  fmtPayrollSync,
   summarizeStored,
   type KyuyoPayrollRow,
   toStoredPayroll,
@@ -103,6 +104,8 @@ describe('toStoredPayroll', () => {
       warningCount: 1,
       rows: body.rows,
       warnings: body.warnings,
+      // upstream が返さない版でも取り込みは成功する。判らないので null (Refs #467)
+      syncedAt: null,
     })
   })
   it('warnings が無くても壊れない / 想定外形式は null', () => {
@@ -111,6 +114,70 @@ describe('toStoredPayroll', () => {
     expect(toStoredPayroll(null, 't')).toBeNull()
     expect(toStoredPayroll({ rows: [] }, 't')).toBeNull() // database なし
     expect(toStoredPayroll({ database: 'X' }, 't')).toBeNull() // rows なし
+  })
+
+  // ── source / synced_at (Refs #467) ───────────────────────────────
+  // upstream は返しているのに front が捨てていた。捨てると「サーバーに保存済みの
+  // 値を見ているのか、いま給与大臣を叩いたのか」が画面から判らない。
+
+  it('source と synced_at を拾う', () => {
+    const stored = toStoredPayroll({
+      database: 'X',
+      rows: [],
+      source: 'cache',
+      synced_at: '2026-02-03T09:12:00Z',
+    }, 't')
+    expect(stored?.source).toBe('cache')
+    expect(stored?.syncedAt).toBe('2026-02-03T09:12:00Z')
+  })
+
+  /** **形が想定外でも取り込み自体は失敗させない** — 明細が読めることの方が大事。 */
+  it('未知の source は undefined に落とすが、明細は取り込む', () => {
+    const stored = toStoredPayroll({ database: 'X', rows: [{ a: 1 }], source: 'ohken' }, 't')
+    expect(stored?.source).toBeUndefined()
+    expect(stored?.rowCount).toBe(1)
+  })
+
+  it('source が live でも拾う', () => {
+    expect(toStoredPayroll({ database: 'X', rows: [], source: 'live' }, 't')?.source).toBe('live')
+  })
+
+  it('synced_at が無い / 空文字なら null', () => {
+    expect(toStoredPayroll({ database: 'X', rows: [] }, 't')?.syncedAt).toBeNull()
+    expect(toStoredPayroll({ database: 'X', rows: [], synced_at: '' }, 't')?.syncedAt).toBeNull()
+    expect(toStoredPayroll({ database: 'X', rows: [], synced_at: 42 }, 't')?.syncedAt).toBeNull()
+  })
+})
+
+describe('fmtPayrollSync', () => {
+  it('同期時刻と出どころを 1 行で出す', () => {
+    const out = fmtPayrollSync({ source: 'cache', syncedAt: '2026-02-03T09:12:00Z' })
+    expect(out).toContain('サーバー保存')
+    expect(out).toContain('2026')
+  })
+
+  it('live は給与大臣から取得と出す', () => {
+    expect(fmtPayrollSync({ source: 'live', syncedAt: '2026-02-03T09:12:00Z' }))
+      .toContain('給与大臣から取得')
+  })
+
+  /** 判らないものを黙って埋めない。 */
+  it('時刻も出どころも無ければ -', () => {
+    expect(fmtPayrollSync({})).toBe('-')
+    expect(fmtPayrollSync({ syncedAt: null })).toBe('-')
+    expect(fmtPayrollSync({ syncedAt: 'not-a-date' })).toBe('-')
+  })
+
+  it('出どころだけ判るときはそれだけ出す', () => {
+    expect(fmtPayrollSync({ source: 'cache' })).toBe('サーバー保存')
+    expect(fmtPayrollSync({ source: 'live', syncedAt: 'not-a-date' })).toBe('給与大臣から取得')
+  })
+
+  /** 旧版 upstream は `synced_at` だけ返して `source` を返さないことがある。 */
+  it('時刻だけ判るときは時刻だけ出す (括弧を付けない)', () => {
+    const out = fmtPayrollSync({ syncedAt: '2026-02-03T09:12:00Z' })
+    expect(out).toContain('2026')
+    expect(out).not.toContain('(')
   })
 })
 

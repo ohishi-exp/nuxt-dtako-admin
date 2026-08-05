@@ -16,6 +16,7 @@ import { defaultPayrollMonth } from '~/utils/ichiban-health'
 import {
   buildFetchPlan,
   expandMonthRange,
+  fmtPayrollSync,
   parsePayrollStorageKey,
   payrollStorageKey,
   shouldPurgeSession,
@@ -301,6 +302,9 @@ onMounted(() => {
             <th class="py-2 pr-3 font-medium text-right">人数</th>
             <th class="py-2 pr-3 font-medium text-right">warnings</th>
             <th class="py-2 pr-3 font-medium">取得時刻</th>
+            <!-- サーバー側の同期時刻 (Refs #467)。上の「取得時刻」はこのブラウザが
+                 受け取った時刻で、両者は別物 -->
+            <th class="py-2 pr-3 font-medium">サーバー同期</th>
             <th class="py-2 font-medium" />
           </tr>
         </thead>
@@ -312,6 +316,7 @@ onMounted(() => {
             <td class="py-2 pr-3 text-right tabular-nums">{{ row.rowCount }}</td>
             <td class="py-2 pr-3 text-right tabular-nums">{{ row.warningCount }}</td>
             <td class="py-2 pr-3 text-gray-500 dark:text-gray-400">{{ new Date(row.fetchedAt).toLocaleString('ja-JP') }}</td>
+            <td class="py-2 pr-3 text-gray-500 dark:text-gray-400">{{ fmtPayrollSync(row) }}</td>
             <td class="py-2 text-right">
               <UButton size="xs" variant="ghost" color="error" @click="removeStored(row.company, row.month)">
                 削除
