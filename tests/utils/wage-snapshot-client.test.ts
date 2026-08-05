@@ -207,6 +207,23 @@ describe('buildSnapshotPayload', () => {
     expect(a).not.toBe(b)
   })
 
+  /** マスタ未読込 (最低賃金カードを開いていない) は「判らない」— 空マスタの sha を
+   * 送ると実際のマスタと違う版として記録され、後で全月が「要再計算」に化ける。 */
+  it('最低賃金マスタが未読込なら min_wage_sha を送らない', () => {
+    const { payload } = buildSnapshotPayload({
+      compId: 'comp-a',
+      month: '2026-01',
+      restraintSource: 'gcp',
+      rows: [sourceRow()],
+      salaryItemConfig: ITEM_CONFIG,
+      minWageMaster: null,
+      payrollSyncedAt: null,
+    })
+    expect(payload.masters.min_wage_sha).toBeNull()
+    expect(payload.masters.salary_item_sha).toMatch(/^[0-9a-f]{8}$/)
+    expect(payload.rows).toHaveLength(1)
+  })
+
   it('行が 0 件でも payload は作る (その月に対象者が居ない、を保存できる)', () => {
     const { payload } = build([])
     expect(payload.rows).toEqual([])

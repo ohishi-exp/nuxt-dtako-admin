@@ -153,6 +153,7 @@ import { buildSnapshotPayload, contentHash, WAGE_LOGIC_VERSION } from '~/utils/w
 import type { WageRangeResponse } from '~/utils/wage-range-view'
 import {
   defaultRange,
+  describeApiError,
   monthBadgeLabel,
   monthCellState,
   monthDiff,
@@ -3727,6 +3728,12 @@ let lastSnapshotHash = ''
  * 前の月が残っている (`staleReport`) 状態で送ると、別の月の数字を保存してしまう。
  * マスタ 3 種も揃うまで待つ (未読込だと全項目が既定区分に落ち、給与側が 0 円になる)。
  */
+// ★ `minWageMasterLoaded` を条件に入れてはいけない (2026-08-05 本番で保存が 1 度も
+//    走らなかった)。最低賃金マスタは**カードを開くまで読み込まない**設計なので
+//    (実測 397ms + 630ms の節約)、カードを閉じたまま使う限り永久に false になる。
+//    マスタは `min_wage_sha` (鮮度メタ) にしか要らないので、読めていなければ
+//    **sha を送らない**で保存する — 保存が走らないより桁違いにましで、
+//    サーバ側は「渡されていない版は判定しない」実装になっている。
 const minWageTableSettled = computed(() =>
   activeTab.value === 'minwage'
   && !!session.value
@@ -3734,8 +3741,7 @@ const minWageTableSettled = computed(() =>
   && !staleReport.value
   && (minWageReport.value?.rows.length ?? 0) > 0
   && employeeMasterLoaded.value
-  && salaryConfigLoaded.value
-  && minWageMasterLoaded.value)
+  && salaryConfigLoaded.value)
 
 /**
  * 突合に使った給与明細の同期時刻 (対象会社の中で**最も古いもの**)。
@@ -3794,7 +3800,9 @@ async function saveWageSnapshot() {
     restraintSource: minWageRestraintSource.value,
     rows: snapshotSourceRows(),
     salaryItemConfig: salaryItemConfig.value,
-    minWageMaster: minWageMaster.value,
+    // 未読込 (カードを開いていない) なら sha を送らない — 空マスタの sha を送ると
+    // 実際のマスタと違う版として記録され、後で全月が「要再計算」に化ける
+    minWageMaster: minWageMasterLoaded.value ? minWageMaster.value : null,
     payrollSyncedAt: payrollSyncedAtForMonth(),
   })
   const hash = contentHash(payload)
@@ -3821,7 +3829,7 @@ async function saveWageSnapshot() {
   }
   catch (e: unknown) {
     // 保存の失敗でページを壊さない。次に表が確定した時に再挑戦される
-    snapshotState.value = { status: 'error', message: e instanceof Error ? e.message : String(e) }
+    snapshotState.value = { status: 'error', message: describeApiError(e) }
   }
 }
 
@@ -4353,7 +4361,9 @@ async function loadWageRange() {
     rangeData.value = parseWageRange(body)
   }
   catch (e: unknown) {
-    rangeError.value = e instanceof Error ? e.message : String(e)
+    // upstream の本文まで出す — 既定の message は status しか持たず、
+    // 503 の理由 (kintai_push 無効 / 認可未設定 / テナント未決定) が判らない
+    rangeError.value = describeApiError(e)
     rangeData.value = null
   }
   finally {
