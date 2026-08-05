@@ -3830,171 +3830,6 @@ watch([minWageTableSettled, month, minWageRestraintSource], ([settled]) => {
   if (settled) void saveWageSnapshot()
 }, { immediate: true })
 
-// ---------------------------------------------------------------------------
-// 期間集計タブ (Refs #677 PR-E)
-// ---------------------------------------------------------------------------
-// 1 行 = 1 乗務員。**月ごとの差を横に並べ**、右端に期間合計 (計算額 / 給与支払額 /
-// 差合計) を置く。素材は保存済みスナップショットだけを読む — `wage-report` を
-// 期間分回すと 1 か月 15〜64 秒 × 月数かかるため。足りない月は「未保存」として
-// 見えるようにし、取り直しは PR-F の担当。
-
-const rangeFrom = ref('')
-const rangeTo = ref('')
-const rangeSource = ref<RestraintSourceKey>('gcp')
-const rangeData = ref<WageRangeResponse | null>(null)
-const rangeLoading = ref(false)
-const rangeError = ref('')
-
-// 既定は「その年の 1 月 〜 選択中の月」(ユーザー決定 2026-08-05)。月タブを動かしたら追従する
-watch(month, (ym) => {
-  const d = defaultRange(ym)
-  rangeFrom.value = d.from
-  rangeTo.value = d.to
-}, { immediate: true })
-
-/** 表に出す月の並び (期間が不正なら空)。 */
-const rangeMonths = computed(() => monthRange(rangeFrom.value, rangeTo.value))
-
-/** 月 → カバレッジ (表の月セルが状態を引く)。 */
-const rangeMonthByYm = computed(() =>
-  new Map((rangeData.value?.months ?? []).map(m => [m.ym, m])))
-
-/** 単月表と同じ並び (会社 → 職員区分 → 営業所 → 乗務員CD)。 */
-const rangeSections = computed(() =>
-  groupMinWageRows(rangeData.value?.rows ?? [], r => r.driverCd, r => r.attrs))
-
-const rangeTotals = computed(() => sumWageRangeRows(rangeData.value?.rows ?? [], rangeMonths.value))
-
-/**
- * 表から引く値は**すべて computed に畳んでおく** (112 名 × 12 か月の表)。
- * template から関数を直に呼ぶと、1 セルにつき 3 段 + class 判定で 6 回走り、
- * 区画小計に至っては「月数 × 6 回 × 全行ループ」になって再描画が目に見えて重くなる。
- */
-const rangeSectionTotalsByKey = computed(() => {
-  const map = new Map<string, ReturnType<typeof sumWageRangeRows>>()
-  for (const s of rangeSections.value) {
-    map.set(`${s.company ?? ''}|${s.jobGroup}`, sumWageRangeRows(s.rows, rangeMonths.value))
-  }
-  return map
-})
-
-function rangeSectionTotals(company: string | null, jobGroup: string) {
-  return rangeSectionTotalsByKey.value.get(`${company ?? ''}|${jobGroup}`)
-    ?? sumWageRangeRows([], rangeMonths.value)
-}
-
-/** 乗務員CD → 期間合計の差。 */
-const rangeRowDiffs = computed(() =>
-  new Map((rangeData.value?.rows ?? []).map(r => [r.driverCd, rangeDiff(r)])))
-
-/** `乗務員CD|YYYY-MM` → その月の差。 */
-const rangeMonthDiffs = computed(() => {
-  const map = new Map<string, ReturnType<typeof monthDiff>>()
-  for (const r of rangeData.value?.rows ?? []) {
-    for (const m of rangeMonths.value) map.set(`${r.driverCd}|${m}`, monthDiff(r.byMonth[m]))
-  }
-  return map
-})
-
-/** `乗務員CD|YYYY-MM` → 月セルの状態。 */
-const rangeCellStates = computed(() => {
-  const map = new Map<string, ReturnType<typeof monthCellState>>()
-  for (const r of rangeData.value?.rows ?? []) {
-    for (const m of rangeMonths.value) {
-      map.set(`${r.driverCd}|${m}`, monthCellState(r, rangeMonthByYm.value.get(m)))
-    }
-  }
-  return map
-})
-
-const NULL_DIFF3 = { base: null, overtime: null, total: null }
-function rowDiffOf(driverCd: string) {
-  return rangeRowDiffs.value.get(driverCd) ?? NULL_DIFF3
-}
-function monthDiffOf(driverCd: string, ym: string) {
-  return rangeMonthDiffs.value.get(`${driverCd}|${ym}`) ?? NULL_DIFF3
-}
-function cellStateOf(driverCd: string, ym: string) {
-  return rangeCellStates.value.get(`${driverCd}|${ym}`) ?? 'unsaved'
-}
-
-/** 月セルのツールチップ (状態ごとの説明)。 */
-const CELL_STATE_TITLE: Record<string, string> = {
-  excluded: 'この月は集計対象外 (給与未取込など)',
-  unsaved: 'この月はまだ保存されていません',
-  missing: 'この乗務員のこの月は集計できません (欠測・単価未設定・給与明細に無し)',
-  counted: '',
-}
-
-/** 取り直すべき月 (未保存 / 要再計算)。PR-F のボタンが対象にする。 */
-const rangeRefreshTargets = computed(() => monthsNeedingRefresh(rangeData.value?.months ?? []))
-
-/**
- * 期間集計を読む。**保存済みだけを読む** — ここで `wage-report` を回さない。
- *
- * 鮮度判定の材料 (今のマスタの版) はクエリで渡す。**マスタを読み込めていない間は
- * 渡さない** — 空のマスタの sha を送ると全月が「要再計算」に化ける。
- * 給与の同期時刻は月ごとに違うのでここでは渡せず、`payroll` 由来の stale 判定は
- * この画面では出ない (単月の保存時に記録済みの値がサーバ側に残る)。
- */
-async function loadWageRange() {
-  const compId = session.value?.compId
-  if (!compId || !rangeMonths.value.length) return
-  rangeLoading.value = true
-  rangeError.value = ''
-  try {
-    const token = currentAccessToken()
-    const query: Record<string, string> = {
-      comp: compId,
-      from: rangeMonths.value[0]!,
-      to: rangeMonths.value[rangeMonths.value.length - 1]!,
-      source: rangeSource.value,
-      wage_logic_version: WAGE_LOGIC_VERSION,
-    }
-    if (salaryConfigLoaded.value) query.salary_item_sha = contentHash(salaryItemConfig.value)
-    if (minWageMasterLoaded.value) query.min_wage_sha = contentHash(minWageMaster.value)
-    const body = await $fetch('/api/kyuyo/wage-range', {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      query,
-    })
-    rangeData.value = parseWageRange(body)
-  }
-  catch (e: unknown) {
-    rangeError.value = e instanceof Error ? e.message : String(e)
-    rangeData.value = null
-  }
-  finally {
-    rangeLoading.value = false
-  }
-}
-
-// このタブを見ている間だけ、期間・ソースを変えるたびに読み直す
-watch([activeTab, rangeFrom, rangeTo, rangeSource, session], ([tab]) => {
-  if (tab === 'range') void loadWageRange()
-}, { immediate: true })
-
-// マスタが後から解決したら鮮度判定つきで読み直す (空マスタの sha で撃たない)
-watch([salaryConfigLoaded, minWageMasterLoaded], () => {
-  if (activeTab.value === 'range' && rangeData.value) void loadWageRange()
-})
-
-function downloadRangeCsv() {
-  const csv = wageRangeCsv(rangeData.value?.rows ?? [], rangeMonths.value)
-  const blob = new Blob([`﻿${csv}`], { type: 'text/csv;charset=utf-8' })
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
-  a.download = `wage-range_${rangeFrom.value}_${rangeTo.value}.csv`
-  a.click()
-  URL.revokeObjectURL(a.href)
-}
-
-/** 月セルを押したらその月の最低賃金チェックへ (数字の根拠は単月の表で見る)。 */
-function jumpToMinWageMonth(ym: string) {
-  selectedYear.value = parseInt(ym.slice(0, 4), 10)
-  selectedMonthNo.value = parseInt(ym.slice(5, 7), 10)
-  minWageRestraintSource.value = rangeSource.value
-  activeTab.value = 'minwage'
-}
 
 /** 乗務員CD (正規化キー) → 給与明細の残業計上額 + 基礎単価(実績) (タイムカード表の
  * 残業「時間」比較用、Refs #441)。salaryComparison が無くても拘束側の時間は
@@ -4387,6 +4222,173 @@ const minWageCardOpen = ref(false)
 
 const minWageMaster = ref<MinWageMaster>({ prefectures: {}, branchToPrefecture: {} })
 const minWageMasterLoaded = ref(false)
+
+// ---------------------------------------------------------------------------
+// 期間集計タブ (Refs #677 PR-E)
+// ---------------------------------------------------------------------------
+// 1 行 = 1 乗務員。**月ごとの差を横に並べ**、右端に期間合計 (計算額 / 給与支払額 /
+// 差合計) を置く。素材は保存済みスナップショットだけを読む — `wage-report` を
+// 期間分回すと 1 か月 15〜64 秒 × 月数かかるため。足りない月は「未保存」として
+// 見えるようにし、取り直しは PR-F の担当。
+
+const rangeFrom = ref('')
+const rangeTo = ref('')
+const rangeSource = ref<RestraintSourceKey>('gcp')
+const rangeData = ref<WageRangeResponse | null>(null)
+const rangeLoading = ref(false)
+const rangeError = ref('')
+
+// 既定は「その年の 1 月 〜 選択中の月」(ユーザー決定 2026-08-05)。月タブを動かしたら追従する
+watch(month, (ym) => {
+  const d = defaultRange(ym)
+  rangeFrom.value = d.from
+  rangeTo.value = d.to
+}, { immediate: true })
+
+/** 表に出す月の並び (期間が不正なら空)。 */
+const rangeMonths = computed(() => monthRange(rangeFrom.value, rangeTo.value))
+
+/** 月 → カバレッジ (表の月セルが状態を引く)。 */
+const rangeMonthByYm = computed(() =>
+  new Map((rangeData.value?.months ?? []).map(m => [m.ym, m])))
+
+/** 単月表と同じ並び (会社 → 職員区分 → 営業所 → 乗務員CD)。 */
+const rangeSections = computed(() =>
+  groupMinWageRows(rangeData.value?.rows ?? [], r => r.driverCd, r => r.attrs))
+
+const rangeTotals = computed(() => sumWageRangeRows(rangeData.value?.rows ?? [], rangeMonths.value))
+
+/**
+ * 表から引く値は**すべて computed に畳んでおく** (112 名 × 12 か月の表)。
+ * template から関数を直に呼ぶと、1 セルにつき 3 段 + class 判定で 6 回走り、
+ * 区画小計に至っては「月数 × 6 回 × 全行ループ」になって再描画が目に見えて重くなる。
+ */
+const rangeSectionTotalsByKey = computed(() => {
+  const map = new Map<string, ReturnType<typeof sumWageRangeRows>>()
+  for (const s of rangeSections.value) {
+    map.set(`${s.company ?? ''}|${s.jobGroup}`, sumWageRangeRows(s.rows, rangeMonths.value))
+  }
+  return map
+})
+
+function rangeSectionTotals(company: string | null, jobGroup: string) {
+  return rangeSectionTotalsByKey.value.get(`${company ?? ''}|${jobGroup}`)
+    ?? sumWageRangeRows([], rangeMonths.value)
+}
+
+/** 乗務員CD → 期間合計の差。 */
+const rangeRowDiffs = computed(() =>
+  new Map((rangeData.value?.rows ?? []).map(r => [r.driverCd, rangeDiff(r)])))
+
+/** `乗務員CD|YYYY-MM` → その月の差。 */
+const rangeMonthDiffs = computed(() => {
+  const map = new Map<string, ReturnType<typeof monthDiff>>()
+  for (const r of rangeData.value?.rows ?? []) {
+    for (const m of rangeMonths.value) map.set(`${r.driverCd}|${m}`, monthDiff(r.byMonth[m]))
+  }
+  return map
+})
+
+/** `乗務員CD|YYYY-MM` → 月セルの状態。 */
+const rangeCellStates = computed(() => {
+  const map = new Map<string, ReturnType<typeof monthCellState>>()
+  for (const r of rangeData.value?.rows ?? []) {
+    for (const m of rangeMonths.value) {
+      map.set(`${r.driverCd}|${m}`, monthCellState(r, rangeMonthByYm.value.get(m)))
+    }
+  }
+  return map
+})
+
+const NULL_DIFF3 = { base: null, overtime: null, total: null }
+function rowDiffOf(driverCd: string) {
+  return rangeRowDiffs.value.get(driverCd) ?? NULL_DIFF3
+}
+function monthDiffOf(driverCd: string, ym: string) {
+  return rangeMonthDiffs.value.get(`${driverCd}|${ym}`) ?? NULL_DIFF3
+}
+function cellStateOf(driverCd: string, ym: string) {
+  return rangeCellStates.value.get(`${driverCd}|${ym}`) ?? 'unsaved'
+}
+
+/** 月セルのツールチップ (状態ごとの説明)。 */
+const CELL_STATE_TITLE: Record<string, string> = {
+  excluded: 'この月は集計対象外 (給与未取込など)',
+  unsaved: 'この月はまだ保存されていません',
+  missing: 'この乗務員のこの月は集計できません (欠測・単価未設定・給与明細に無し)',
+  counted: '',
+}
+
+/** 取り直すべき月 (未保存 / 要再計算)。PR-F のボタンが対象にする。 */
+const rangeRefreshTargets = computed(() => monthsNeedingRefresh(rangeData.value?.months ?? []))
+
+/**
+ * 期間集計を読む。**保存済みだけを読む** — ここで `wage-report` を回さない。
+ *
+ * 鮮度判定の材料 (今のマスタの版) はクエリで渡す。**マスタを読み込めていない間は
+ * 渡さない** — 空のマスタの sha を送ると全月が「要再計算」に化ける。
+ * 給与の同期時刻は月ごとに違うのでここでは渡せず、`payroll` 由来の stale 判定は
+ * この画面では出ない (単月の保存時に記録済みの値がサーバ側に残る)。
+ */
+async function loadWageRange() {
+  const compId = session.value?.compId
+  if (!compId || !rangeMonths.value.length) return
+  rangeLoading.value = true
+  rangeError.value = ''
+  try {
+    const token = currentAccessToken()
+    const query: Record<string, string> = {
+      comp: compId,
+      from: rangeMonths.value[0]!,
+      to: rangeMonths.value[rangeMonths.value.length - 1]!,
+      source: rangeSource.value,
+      wage_logic_version: WAGE_LOGIC_VERSION,
+    }
+    if (salaryConfigLoaded.value) query.salary_item_sha = contentHash(salaryItemConfig.value)
+    if (minWageMasterLoaded.value) query.min_wage_sha = contentHash(minWageMaster.value)
+    const body = await $fetch('/api/kyuyo/wage-range', {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      query,
+    })
+    rangeData.value = parseWageRange(body)
+  }
+  catch (e: unknown) {
+    rangeError.value = e instanceof Error ? e.message : String(e)
+    rangeData.value = null
+  }
+  finally {
+    rangeLoading.value = false
+  }
+}
+
+// このタブを見ている間だけ、期間・ソースを変えるたびに読み直す
+watch([activeTab, rangeFrom, rangeTo, rangeSource, session], ([tab]) => {
+  if (tab === 'range') void loadWageRange()
+}, { immediate: true })
+
+// マスタが後から解決したら鮮度判定つきで読み直す (空マスタの sha で撃たない)
+watch([salaryConfigLoaded, minWageMasterLoaded], () => {
+  if (activeTab.value === 'range' && rangeData.value) void loadWageRange()
+})
+
+function downloadRangeCsv() {
+  const csv = wageRangeCsv(rangeData.value?.rows ?? [], rangeMonths.value)
+  const blob = new Blob([`﻿${csv}`], { type: 'text/csv;charset=utf-8' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = `wage-range_${rangeFrom.value}_${rangeTo.value}.csv`
+  a.click()
+  URL.revokeObjectURL(a.href)
+}
+
+/** 月セルを押したらその月の最低賃金チェックへ (数字の根拠は単月の表で見る)。 */
+function jumpToMinWageMonth(ym: string) {
+  selectedYear.value = parseInt(ym.slice(0, 4), 10)
+  selectedMonthNo.value = parseInt(ym.slice(5, 7), 10)
+  minWageRestraintSource.value = rangeSource.value
+  activeTab.value = 'minwage'
+}
+
 const savingMinWage = ref(false)
 const minWageMessage = ref('')
 const newMinWageRate = ref('')
