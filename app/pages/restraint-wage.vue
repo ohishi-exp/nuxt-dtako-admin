@@ -5522,16 +5522,21 @@ watch([compMap, kyuyoSyncedKeys], () => {
                      時点で自動保存する。ここは「保存されたか」を読むためだけの表示。
                      拘束時間ソースの行に置いていたが説明文に埋もれて見つけにくかったため、
                      ヘッダの再計算ボタン隣へ移した (ユーザー指摘 2026-08-05) -->
+                <!-- **理由は本文に、省略も tooltip もせずに出す** (ユーザー指摘 2026-08-05)。
+                     title に入れるとホバーしないと読めず、**コピーもできない** —
+                     エラー文言はそのまま貼って調べるものなので、選択できる形で出す。
+                     エラー時だけ折り返す (成功時の短い文言は 1 行のまま) -->
                 <span
                   v-if="activeTab === 'minwage' && snapshotState.status !== 'idle'"
-                  class="text-xs whitespace-nowrap"
-                  :class="snapshotState.status === 'error' ? 'text-red-600 dark:text-red-400' : 'text-gray-500'"
-                  :title="snapshotState.message ?? '期間集計タブはこの保存を合算して表示します'"
+                  class="text-xs"
+                  :class="snapshotState.status === 'error'
+                    ? 'text-red-600 dark:text-red-400 select-all break-all'
+                    : 'text-gray-500 whitespace-nowrap'"
                 >
                   <template v-if="snapshotState.status === 'saving'">期間集計用に保存中…</template>
                   <template v-else-if="snapshotState.status === 'saved'">期間集計用に保存しました ({{ snapshotState.at }})</template>
                   <template v-else-if="snapshotState.status === 'skipped'">保存済み (変更なし)</template>
-                  <template v-else>保存できませんでした — 表示には影響しません</template>
+                  <template v-else>保存できませんでした: {{ snapshotState.message || '理由不明' }}</template>
                 </span>
                 <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再計算" :loading="displayLoading" @click="reloadDisplayReport" />
               </div>
@@ -6033,7 +6038,9 @@ watch([compMap, kyuyoSyncedKeys], () => {
               </div>
             </template>
 
-            <p v-if="rangeError" class="text-xs text-red-600 dark:text-red-400 mb-2">
+            <!-- エラー文言はそのまま貼って調べるものなので選択できる形で出す
+                 (`select-all`)。省略も tooltip もしない -->
+            <p v-if="rangeError" class="text-xs text-red-600 dark:text-red-400 mb-2 select-all break-all">
               ⚠ 期間集計を読み込めませんでした: {{ rangeError }}
             </p>
 
