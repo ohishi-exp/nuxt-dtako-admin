@@ -270,6 +270,35 @@ export function monthsNeedingRefresh(months: readonly WageRangeMonth[]): string[
   return months.filter(m => !m.saved || m.stale === true).map(m => m.ym)
 }
 
+/**
+ * 月カバレッジ行の右端に出す注記 (取り直すべき月が無い時だけ表示する)。
+ *
+ * 「全て保存済み」だけだと、保存はされているが全月が集計対象外の時に
+ * 下の「集計がありません」と矛盾して読める。対象外の月数をここで明示する。
+ */
+export function rangeCoverageNote(months: readonly WageRangeMonth[]): string {
+  if (!months.length) return ''
+  const excluded = months.filter(m => m.excluded).length
+  if (excluded === months.length) return `この期間は全ての月が集計対象外です (${excluded} ヶ月)`
+  if (excluded) return `この期間は全て保存済みです (うち ${excluded} ヶ月は集計対象外)`
+  return 'この期間は全て保存済みです'
+}
+
+/**
+ * 行が 1 件も無い時の説明。「保存されていない」のか「保存済みだが集計に入らない」
+ * のかで打ち手が違うので、月の状態から理由を出し分ける。
+ */
+export function emptyRowsNote(months: readonly WageRangeMonth[]): string {
+  // 月が 0 件の時もここに落ちる (未保存 0 === 月数 0)。
+  if (months.filter(m => !m.saved).length === months.length) {
+    return 'この期間に保存済みの集計がありません。各月の「最低賃金チェック」を開くと保存されます。'
+  }
+  if (months.every(m => !m.saved || m.excluded)) {
+    return '保存はされていますが、この期間は全ての月が集計対象外 (給与未取込など) のため合算できません。'
+  }
+  return '保存済みの月はありますが、合算できる乗務員がいません (欠測・単価未設定・給与明細に無し)。'
+}
+
 /** CSV (表示している行をそのまま)。月ごとの差 (合計段) + 期間合計 3 ブロック。 */
 export function wageRangeCsv(rows: readonly WageRangeRow[], months: readonly string[]): string {
   const head = [

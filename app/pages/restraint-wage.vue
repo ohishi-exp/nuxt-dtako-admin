@@ -154,11 +154,13 @@ import type { WageRangeResponse } from '~/utils/wage-range-view'
 import {
   defaultRange,
   describeApiError,
+  emptyRowsNote,
   monthBadgeLabel,
   monthCellState,
   monthDiff,
   monthsNeedingRefresh,
   parseWageRange,
+  rangeCoverageNote,
   rangeDiff,
   sumWageRangeRows,
   wageRangeCsv,
@@ -4333,6 +4335,10 @@ const CELL_STATE_TITLE: Record<string, string> = {
 /** 取り直すべき月 (未保存 / 要再計算)。PR-F のボタンが対象にする。 */
 const rangeRefreshTargets = computed(() => monthsNeedingRefresh(rangeData.value?.months ?? []))
 
+/** 月カバレッジ行の注記 / 行 0 件時の説明 (矛盾した文言を出さないため中身は util に寄せる)。 */
+const rangeCoverageNoteText = computed(() => rangeCoverageNote(rangeData.value?.months ?? []))
+const rangeEmptyNoteText = computed(() => emptyRowsNote(rangeData.value?.months ?? []))
+
 /**
  * 期間集計を読む。**保存済みだけを読む** — ここで `wage-report` を回さない。
  *
@@ -6081,7 +6087,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 @click="refreshMissingMonths"
               />
               <span v-else-if="!rangeRefreshing" class="text-xs text-gray-500 self-center ml-2">
-                この期間は全て保存済みです
+                {{ rangeCoverageNoteText }}
               </span>
             </div>
 
@@ -6091,7 +6097,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
             </p>
 
             <p v-if="rangeData && !rangeData.rows.length && !rangeLoading" class="text-sm text-gray-500">
-              この期間に保存済みの集計がありません。各月の「最低賃金チェック」を開くと保存されます。
+              {{ rangeEmptyNoteText }}
             </p>
 
             <div v-if="rangeData?.rows.length" class="overflow-x-auto">
