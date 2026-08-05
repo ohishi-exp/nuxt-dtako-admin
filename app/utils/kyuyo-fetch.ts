@@ -78,11 +78,27 @@ export function shouldPurgeSession(storedOwner: string | null, currentSub: strin
 /** sessionStorage に保存する 1 件 (会社×月)。rows は payroll 応答そのまま。 */
 export interface StoredPayroll {
   database: string
+  /** **ブラウザがこの明細を受け取った時刻**。サーバ側の同期時刻ではない。 */
   fetchedAt: string
   rowCount: number
   warningCount: number
   rows: unknown[]
   warnings: string[]
+  /**
+   * upstream がこの応答をどこから返したか (Refs #467)。
+   *
+   * - `cache` — rust-ichibanboshi の derived store から (給与大臣 PC に触っていない)
+   * - `live` — 給与大臣 DB を実際に読んだ
+   *
+   * **古い保存や旧版 upstream では `undefined`** (判らない、の意味)。
+   */
+  source?: 'cache' | 'live'
+  /**
+   * **サーバ側でこの会社×月を最後に同期した時刻** (RFC3339)。`fetchedAt` と違い
+   * ブラウザを跨いで意味を持つ — 賃金スナップショットの鮮度判定はこちらを使う
+   * (ohishi-exp/nuxt-dtako-admin#677)。取れなければ `null`。
+   */
+  syncedAt?: string | null
 }
 
 /** payroll 応答 → 保存形。応答形式が想定外なら null。 */
@@ -94,6 +110,13 @@ export function toStoredPayroll(body: unknown, fetchedAt: string): StoredPayroll
   const warnings = Array.isArray(warningsRaw)
     ? warningsRaw.filter((w): w is string => typeof w === 'string')
     : []
+  // `source` / `synced_at` は upstream が返しているのにここで捨てていた (Refs #467)。
+  // **形が想定外でも取り込み自体は失敗させない** — 明細が読めることの方が大事で、
+  // 判らない時は「判らない」(undefined / null) として持つ
+  const sourceRaw = (body as { source?: unknown }).source
+  const source = sourceRaw === 'cache' || sourceRaw === 'live' ? sourceRaw : undefined
+  const syncedRaw = (body as { synced_at?: unknown }).synced_at
+  const syncedAt = typeof syncedRaw === 'string' && syncedRaw !== '' ? syncedRaw : null
   return {
     database,
     fetchedAt,
@@ -101,6 +124,8 @@ export function toStoredPayroll(body: unknown, fetchedAt: string): StoredPayroll
     warningCount: warnings.length,
     rows,
     warnings,
+    ...(source === undefined ? {} : { source }),
+    syncedAt,
   }
 }
 
@@ -112,6 +137,10 @@ export interface StoredSummary {
   fetchedAt: string
   rowCount: number
   warningCount: number
+  /** upstream の出どころ (`cache` / `live`)。判らなければ undefined (Refs #467)。 */
+  source?: 'cache' | 'live'
+  /** サーバ側の最終同期時刻。取れなければ null / undefined。 */
+  syncedAt?: string | null
 }
 
 export function summarizeStored(
@@ -128,9 +157,36 @@ export function summarizeStored(
         fetchedAt: value.fetchedAt,
         rowCount: value.rowCount,
         warningCount: value.warningCount,
+        source: value.source,
+        syncedAt: value.syncedAt,
       }]
     })
     .sort((a, b) => a.company.localeCompare(b.company) || a.month.localeCompare(b.month))
+}
+
+/**
+ * 同期の出どころ・時刻を 1 行で表す (Refs #467)。
+ *
+ * 「サーバーには保存しません」という旧来の案内が実態と合っていない
+ * (rust-ichibanboshi は derived store に持っていて、sync 済みなら 3 社 169 行が 1.4 秒で返る)。
+ * **どこから来た値をいつ同期したのか**を画面に出して、取り込みボタンを押すべきかを
+ * 読み手が判断できるようにする。
+ *
+ * 判らないもの (旧版 upstream / 古い保存) は黙って埋めず `-`。
+ */
+export function fmtPayrollSync(entry: { source?: 'cache' | 'live', syncedAt?: string | null }): string {
+  const label = entry.source === 'cache'
+    ? 'サーバー保存'
+    : entry.source === 'live'
+      ? '給与大臣から取得'
+      : ''
+  if (!entry.syncedAt) return label || '-'
+  const d = new Date(entry.syncedAt)
+  if (Number.isNaN(d.getTime())) return label || '-'
+  const ts = d.toLocaleString('ja-JP', {
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  })
+  return label ? `${ts} (${label})` : ts
 }
 
 // ── 給与比較への橋渡し (Refs #369 PR-B2) ─────────────────────
