@@ -82,7 +82,8 @@ export interface SnapshotPayload {
   wage_logic_version: string
   masters: {
     salary_item_sha: string
-    min_wage_sha: string
+    /** マスタ未読込なら null (「判らない」— サーバは判定しない)。 */
+    min_wage_sha: string | null
     payroll_synced_at: string | null
   }
   rows: SnapshotPayloadRow[]
@@ -139,7 +140,8 @@ export function buildSnapshotPayload(input: {
   restraintSource: string
   rows: SnapshotSourceRow[]
   salaryItemConfig: SalaryItemConfig
-  minWageMaster: MinWageMaster
+  /** **未読込なら `null`** — 空マスタの sha を送ると後で全月が「要再計算」に化ける。 */
+  minWageMaster: MinWageMaster | null
   payrollSyncedAt: string | null
 }): { payload: SnapshotPayload, skipped: string[] } {
   const skipped: string[] = []
@@ -178,7 +180,7 @@ export function buildSnapshotPayload(input: {
       wage_logic_version: WAGE_LOGIC_VERSION,
       masters: {
         salary_item_sha: contentHash(input.salaryItemConfig),
-        min_wage_sha: contentHash(input.minWageMaster),
+        min_wage_sha: input.minWageMaster === null ? null : contentHash(input.minWageMaster),
         payroll_synced_at: input.payrollSyncedAt,
       },
       rows,
