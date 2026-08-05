@@ -4732,8 +4732,8 @@ watch([compMap, kyuyoSyncedKeys], () => {
       </div>
 
       <div class="p-6 space-y-4">
-        <!-- 機能タブ -->
-        <div class="flex flex-wrap items-center gap-3">
+        <!-- 機能タブ (操作用なので印刷対象外、Refs #671) -->
+        <div class="flex flex-wrap items-center gap-3 print:hidden">
           <UButton
             v-for="tab in TABS"
             :key="tab.key"
@@ -4747,8 +4747,9 @@ watch([compMap, kyuyoSyncedKeys], () => {
         <!-- 対象月: 年セレクタ + 月タブ。
              月が効かないタブ (支給項目区分・社員マスタ) では出さない — 選んでも
              何も変わらないのに操作できると、単価マスタで「1月を選んだのに 6月適用の
-             単価が出る」ように誤解を招く (2026-07-25 指摘)。 -->
-        <div v-if="MONTH_AWARE_TABS.includes(activeTab)" class="flex flex-wrap items-center gap-2 border border-gray-200 dark:border-gray-800 rounded-lg p-2">
+             単価が出る」ように誤解を招く (2026-07-25 指摘)。
+             操作用なので印刷対象外 (Refs #671)。 -->
+        <div v-if="MONTH_AWARE_TABS.includes(activeTab)" class="flex flex-wrap items-center gap-2 border border-gray-200 dark:border-gray-800 rounded-lg p-2 print:hidden">
           <USelect
             v-model="selectedYear"
             :items="yearOptions.map(y => ({ label: `${y}年`, value: y }))"
@@ -4870,8 +4871,9 @@ watch([compMap, kyuyoSyncedKeys], () => {
         <!-- 給与DBから読み込み: 全タブ共通の上部バー (2026-07-25 要望)。
              読み込んだ明細は最低賃金チェックの「基本給(給与)/残業代(給与)」列と
              給与比較タブの両方が使うので、タブを移動せずここで取れるようにする。
-             期間は**勤務月**で指定する (画面の月タブと同じ基準)。 -->
-        <div v-if="session" class="flex flex-wrap items-center gap-2 border border-sky-200 dark:border-sky-900 rounded-lg p-2">
+             期間は**勤務月**で指定する (画面の月タブと同じ基準)。
+             操作用なので印刷対象外 (Refs #671)。 -->
+        <div v-if="session" class="flex flex-wrap items-center gap-2 border border-sky-200 dark:border-sky-900 rounded-lg p-2 print:hidden">
           <span class="text-sm font-medium">給与DB</span>
           <USelect
             v-model="payrollRangeFrom"
