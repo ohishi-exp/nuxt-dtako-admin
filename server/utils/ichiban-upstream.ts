@@ -32,15 +32,26 @@ export class IchibanUpstreamError extends Error {
   }
 }
 
+/** 書き込み系で使う method/body。省略時は従来どおり GET (body 無し)。 */
+export interface IchibanUpstreamInit {
+  method?: 'GET' | 'POST'
+  /** JSON 文字列。渡すと `Content-Type: application/json` を付ける。 */
+  body?: string
+}
+
 /**
- * `<NUXT_ICHIBAN_API_URL>/{path}{search}` に CF Access Service Token 付きで GET する。
+ * `<NUXT_ICHIBAN_API_URL>/{path}{search}` に CF Access Service Token 付きで転送する。
  * upstream の応答 (2xx/非2xx問わず) はそのまま `Response` として返す — 意味づけ
  * (passthrough か JSON parse して検証するか) は呼び出し元の責務。
  *
  * `extraHeaders` は CF Access ヘッダに追加で付与する (kyuyo proxy がユーザー JWT の
  * `Authorization` を素通し転送するために使う。Refs #369)。
+ *
+ * `init` で POST できる (Refs #467, ohishi-exp/nuxt-dtako-admin#677)。**既定は GET のまま** —
+ * 既存の呼び出し (`/api/ichiban/*` / `/api/kyuyo/*` の GET proxy、profit/monthly) は
+ * 引数を増やさずそのまま動く。
  */
-export async function fetchIchiban(env: Record<string, unknown>, path: string, search: string, extraHeaders: Record<string, string> = {}): Promise<Response> {
+export async function fetchIchiban(env: Record<string, unknown>, path: string, search: string, extraHeaders: Record<string, string> = {}, init: IchibanUpstreamInit = {}): Promise<Response> {
   const [clientId, clientSecret] = await Promise.all([
     resolveSecret(env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID),
     resolveSecret(env.ICHIBAN_CF_ACCESS_CLIENT_SECRET),
@@ -55,13 +66,15 @@ export async function fetchIchiban(env: Record<string, unknown>, path: string, s
 
   try {
     return await fetch(upstreamUrl, {
-      method: 'GET',
+      method: init.method ?? 'GET',
       headers: {
         ...extraHeaders,
         'CF-Access-Client-Id': clientId,
         'CF-Access-Client-Secret': clientSecret,
         Accept: 'application/json',
+        ...(init.body === undefined ? {} : { 'Content-Type': 'application/json' }),
       },
+      ...(init.body === undefined ? {} : { body: init.body }),
     })
   }
   catch (e: unknown) {
