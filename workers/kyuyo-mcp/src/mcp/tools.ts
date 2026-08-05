@@ -20,6 +20,12 @@ import type {
   RestraintSummaryDay,
 } from "../../../dtako-scraper-relay/src/theearth-restraint-client";
 import { resolveSecretBinding } from "../../../dtako-scraper-relay/src/cron";
+import {
+  gcpPartsFor,
+  overlayGcpDayTimes,
+  parseGcpDaySummaries,
+  type GcpDayPart,
+} from "../../../dtako-scraper-relay/src/gcp-day-summaries";
 import { OPE_NO_RE, START_OPE_RE } from "../../../dtako-scraper-relay/src/theearth-report-client";
 import { CRON_BATCH_MAX_ITEMS } from "../../../dtako-scraper-relay/src/cron-batch";
 import {
@@ -166,16 +172,78 @@ const monthArgsShape = {
 
 // ===== get_wage_report ========================================================
 
-const getWageReportArgs = z.object(monthArgsShape).strict();
+/** 拘束時間の出どころ (画面の `RestraintSourceKey` と同じ値域、Refs #675)。 */
+const RESTRAINT_SOURCES = ["current", "gcp"] as const;
+
+/** 省略時の既定。**画面 (最低賃金チェック) の既定と揃える** — 揃っていないと
+ * 同じ会社・月・乗務員で MCP と画面が違う数字を返し、MCP を根拠に判断できない。 */
+const DEFAULT_RESTRAINT_SOURCE = "gcp" as const;
+
+const getWageReportArgs = z
+  .object({
+    ...monthArgsShape,
+    source: z
+      .enum(RESTRAINT_SOURCES)
+      .optional()
+      .describe(
+        "拘束時間の出どころ。省略時は gcp (最低賃金チェック画面の既定と同じ)。" +
+          "gcp = GCP kintai.day_summaries の拘束時間だけを差し替えて再計算 " +
+          "(休暇・休日区分・運転/荷役は current のまま) / " +
+          "current = theearth 拘束時間管理表 (運行ベース) + オンプレ kosoku-daily (打刻ベース) " +
+          "の合流で GCP は 1 行も混ざらない",
+      ),
+  })
+  .strict();
+
+/**
+ * GCP `kintai.day_summaries` を月ぶん読む (`get_kintai_day_summaries` と同じ口)。
+ * relay 側 `loadGcpDayTimes` (`dtako-scraper-relay-do.ts`) の MCP 版。
+ *
+ * 月を直列で取らない — この口は 1 か月で数十秒かかることがあり、当月+前月を
+ * 直列にすると倍積む (relay 側が 2026-08-04 の本番実測で踏んだ)。
+ */
+async function loadGcpDayParts(
+  env: Env,
+  months: readonly string[],
+): Promise<Map<string, Map<string, Map<string, GcpDayPart>>>> {
+  const relay = env.SCRAPER_RELAY;
+  if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です (source=gcp には relay が要ります)");
+  const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+
+  const fetched = await Promise.all(
+    months.map(async (month) => {
+      const q = new URLSearchParams({ month });
+      const res = await relay.fetch(`https://relay.internal/kintai-relay/day-summaries?${q}`, {
+        headers: { "X-Alc-Proxy-Secret": secret },
+      });
+      const body = await res.text();
+      if (!res.ok) {
+        throw new Error(`GCP day-summaries (${month}): status ${res.status}: ${body.slice(0, 200)}`);
+      }
+      let raw: unknown;
+      try {
+        raw = JSON.parse(body);
+      } catch {
+        throw new Error(`GCP day-summaries (${month}): parse failed: ${body.slice(0, 200)}`);
+      }
+      return { month, map: parseGcpDaySummaries(raw) };
+    }),
+  );
+  return new Map(fetched.map((f) => [f.month, f.map]));
+}
 
 export const getWageReportTool = {
   name: "get_wage_report",
   description:
     "指定した会社・年月の賃金計算結果を、拘束時間サマリと突き合わせた行の配列で返す " +
     "(拘束時間×賃金マスタから computeWageRow で再計算。給与明細実績との突合は含まない — " +
-    "サーバー側に給与明細アーカイブが存在しないため)。",
+    "サーバー側に給与明細アーカイブが存在しないため)。" +
+    "拘束時間の出どころは `source` で選べ、**省略時は画面と同じ gcp**。" +
+    "source=gcp では日別行 (summary.days) を落とす (計算は days を使い切った後なので数字は変わらない)。",
   inputSchema: getWageReportArgs,
   execute: async (env: Env, args) => {
+    const source = args.source ?? DEFAULT_RESTRAINT_SOURCE;
     const parsed = parseYm(args.month);
     if (!parsed) throw new Error("month は YYYY-MM で指定してください");
     const { year, month } = parsed;
@@ -198,16 +266,26 @@ export const getWageReportTool = {
     const prevMonth = month === 1 ? 12 : month - 1;
     const prevYm = `${prevYear}-${String(prevMonth).padStart(2, "0")}`;
 
-    const [wageMaster, minWageMaster, config, current, prev] = await Promise.all([
+    const [wageMaster, minWageMaster, config, current, prev, gcpByMonth] = await Promise.all([
       loadMaster<WageMaster>("wage-master", normalizeWageMaster, { drivers: {} }),
       loadMaster<MinWageMaster>("min-wage", normalizeMinWageMaster, { prefectures: {}, branchToPrefecture: {} }),
       loadMaster<WageConfig>("wage-config", normalizeWageConfig, normalizeWageConfig(null)),
       loadMonthSummaries(env, args.company, args.month),
       loadMonthSummaries(env, args.company, prevYm),
+      // 素材読みとは独立 (月しか要らない) なので待たずに並列で走らせる
+      source === "gcp" ? loadGcpDayParts(env, [args.month, prevYm]) : Promise.resolve(null),
     ]);
 
+    // 拘束時間を GCP 由来に差し替える。**当月と前月の両方**を差し替えること —
+    // 片方だけだと月初の跨ぎ週 (週40h) で 2 つのソースの実働が混ざる
+    // (relay 側 handleWageReport と同じ手順、Refs #675)。
+    const overlay = (entry: RestraintDriverSummary, forYm: string) =>
+      gcpByMonth
+        ? overlayGcpDayTimes(entry, gcpPartsFor(gcpByMonth.get(forYm)!, entry.driverCd), forYm)
+        : { summary: entry, missing: false };
+
     const prevDaysByDriver = new Map<string, RestraintSummaryDay[]>(
-      prev.summaries.map((s) => [s.data.driverCd, s.data.days]),
+      prev.summaries.map((s) => [s.data.driverCd, overlay(s.data, prevYm).summary.days]),
     );
 
     const warnings: string[] = [];
@@ -217,22 +295,38 @@ export const getWageReportTool = {
       );
     }
 
-    const rows = current.summaries.map((s) => ({
-      summary: s.data,
-      fetched_at: s.fetched_at,
-      last_verified_at: s.last_verified_at,
-      wage: computeWageRow(
-        s.data,
-        year,
-        month,
-        wageMaster,
-        minWageMaster,
-        config,
-        prevDaysByDriver.get(s.data.driverCd) ?? [],
-      ),
-    }));
+    const rows = current.summaries.map((s) => {
+      const { summary, missing } = overlay(s.data, args.month);
+      return {
+        // source=gcp では日別行を本文に載せない (relay 側と同じ、Refs #675)。
+        // 112 名ぶんの日別が応答の大半 (実測 1.1MB 超) を占めるのに、賃金計算は
+        // days を使い切った後なので落としても数字は 1 円も変わらない。
+        summary: gcpByMonth ? { ...summary, days: [] } : summary,
+        fetched_at: s.fetched_at,
+        last_verified_at: s.last_verified_at,
+        // GCP 側にこの乗務員 × この月の行が無かった (= 欠測)。**0 分ではない**ので
+        // 呼び出し側は金額・最低賃金割れの判定を出さないこと。
+        ...(gcpByMonth ? { restraint_missing: missing } : {}),
+        wage: computeWageRow(
+          summary,
+          year,
+          month,
+          wageMaster,
+          minWageMaster,
+          config,
+          prevDaysByDriver.get(s.data.driverCd) ?? [],
+        ),
+      };
+    });
 
-    return { month: args.month, rows, no_data_drivers: current.noDataDrivers, warnings };
+    // どちらのソースで計算したかを必ず載せる — 応答だけ見て画面と突き合わせられるように
+    return {
+      month: args.month,
+      restraint_source: source,
+      rows,
+      no_data_drivers: current.noDataDrivers,
+      warnings,
+    };
   },
 } satisfies ToolEntry<typeof getWageReportArgs>;
 

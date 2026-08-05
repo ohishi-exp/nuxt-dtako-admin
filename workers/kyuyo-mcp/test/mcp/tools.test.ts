@@ -213,6 +213,9 @@ describe("getRestraintSummaryTool", () => {
   });
 });
 
+// `source: "current"` を明示しているのは、この describe が **R2 直読み + 計算**の
+// 経路を検証しているため。既定は画面と揃えた `gcp` (Refs #675) で、そちらは relay を
+// 叩くので `test/get-wage-report-gcp.test.ts` で別に検証する。
 describe("getWageReportTool", () => {
   it("computes a wage row per driver using empty (fallback) masters when none archived", async () => {
     const env = makeEnv({
@@ -220,7 +223,7 @@ describe("getWageReportTool", () => {
         value: JSON.stringify(summary({ driverCd: "1", days: [day(1), day(2)] })),
       },
     });
-    const res = (await getWageReportTool.execute(env, { company: "0100", month: "2026-07" })) as {
+    const res = (await getWageReportTool.execute(env, { company: "0100", month: "2026-07", source: "current" })) as {
       month: string;
       rows: Array<{ summary: RestraintDriverSummary; wage: unknown }>;
       warnings: string[];
@@ -238,7 +241,7 @@ describe("getWageReportTool", () => {
       "restraint/0100/2026-07/summary/1/latest.json": { value: JSON.stringify(summary({ driverCd: "1" })) },
       "restraint/0100/2026-06/summary/1/latest.json": { value: JSON.stringify(summary({ driverCd: "1" })) },
     });
-    const res = (await getWageReportTool.execute(env, { company: "0100", month: "2026-07" })) as {
+    const res = (await getWageReportTool.execute(env, { company: "0100", month: "2026-07", source: "current" })) as {
       warnings: string[];
     };
     expect(res.warnings).toEqual([]);
@@ -249,7 +252,11 @@ describe("getWageReportTool", () => {
       "restraint/0100/2026-01/summary/1/latest.json": { value: JSON.stringify(summary({ driverCd: "1" })) },
       "restraint/0100/2025-12/summary/1/latest.json": { value: JSON.stringify(summary({ driverCd: "1" })) },
     });
-    const res = (await getWageReportTool.execute(env, { company: "0100", month: "2026-01" })) as {
+    const res = (await getWageReportTool.execute(env, {
+      company: "0100",
+      month: "2026-01",
+      source: "current",
+    })) as {
       warnings: string[];
     };
     expect(res.warnings).toEqual([]);
@@ -270,7 +277,7 @@ describe("getWageReportTool", () => {
       "restraint/0100/2026-07/summary/1/latest.json": { value: JSON.stringify(summary({ driverCd: "1" })) },
       "restraint/0100/wage-master/latest.json": { value: "{not json" },
     });
-    const res = (await getWageReportTool.execute(env, { company: "0100", month: "2026-07" })) as {
+    const res = (await getWageReportTool.execute(env, { company: "0100", month: "2026-07", source: "current" })) as {
       rows: unknown[];
     };
     expect(res.rows).toHaveLength(1);
@@ -282,7 +289,7 @@ describe("getWageReportTool", () => {
       // 構文的には valid JSON だが normalizeWageMaster が期待する {drivers:{...}} 形ではない
       "restraint/0100/wage-master/latest.json": { value: JSON.stringify({ drivers: "not-an-object" }) },
     });
-    const res = (await getWageReportTool.execute(env, { company: "0100", month: "2026-07" })) as {
+    const res = (await getWageReportTool.execute(env, { company: "0100", month: "2026-07", source: "current" })) as {
       rows: unknown[];
     };
     expect(res.rows).toHaveLength(1);
