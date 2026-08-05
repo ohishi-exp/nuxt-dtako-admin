@@ -699,3 +699,55 @@ export async function relayKintaiUnkoGaps(
   if (input.driverCd) q.set("driver_cd", input.driverCd);
   return readJson<unknown>(await deps.gcp(`${UNKO_GAPS_PATH}?${q}`), "gcp kintai unko-gaps");
 }
+
+// ---------------------------------------------------------------------------
+// 賃金確定値の月次スナップショット (Refs ohishi-exp/nuxt-dtako-admin#677)
+// ---------------------------------------------------------------------------
+// 読み書きする `kintai.wage_snapshot` は Supabase にあり、そこへ繋がるのは GCP の
+// インスタンスだけ。**Supabase の接続情報を ohishi-data (local) には置かない**方針
+// (資格情報は auth-worker 1 箇所に集約) なので、画面 → relay → `/ichibanboshi-proxy`
+// → GCP という経路になる。`relayKintaiDaySummaries` とまったく同じ道。
+
+/** 保存の口 (rust-ichibanboshi `src/routes/wage_snapshot.rs`)。 */
+const WAGE_SNAPSHOT_PATH = "/api/kintai/wage-snapshot";
+/** 期間集計の口 (同上)。 */
+const WAGE_RANGE_PATH = "/api/kintai/wage-range";
+
+/**
+ * 画面が確定させた 1 か月ぶんを保存する。
+ *
+ * **`comp_id` は呼び出し元に名乗らせない** — 呼び出し元 (ブラウザ) が body に
+ * 入れてきた値は捨て、relay が認可済みの `compId` で上書きする。名乗らせると
+ * JWT の通る利用者が他社のスナップショットを書き換えられる (`kintai-relay` の
+ * 「tenant は KV から引く / 呼び出し元に名乗らせない」と同じ理由)。
+ */
+export async function relayWageSnapshotPut(
+  deps: Pick<KintaiRelayDeps, "gcp">,
+  compId: string,
+  body: unknown,
+): Promise<unknown> {
+  const payload = { ...(body as Record<string, unknown>), comp_id: compId };
+  return readJson<unknown>(
+    await deps.gcp(WAGE_SNAPSHOT_PATH, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+    "gcp wage-snapshot",
+  );
+}
+
+/**
+ * 期間集計を読む。`comp` は保存と同じ理由で relay が上書きする。
+ * `from` / `to` / `source` / 現行版 (鮮度判定用) はそのまま渡す — 何を返すかは
+ * 受け側が決める設計 (`relayKintaiStaleMonths` と同じ)。
+ */
+export async function relayWageRangeGet(
+  deps: Pick<KintaiRelayDeps, "gcp">,
+  compId: string,
+  query: URLSearchParams,
+): Promise<unknown> {
+  const q = new URLSearchParams(query);
+  q.set("comp", compId);
+  return readJson<unknown>(await deps.gcp(`${WAGE_RANGE_PATH}?${q}`), "gcp wage-range");
+}
