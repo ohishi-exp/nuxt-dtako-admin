@@ -13,6 +13,13 @@
  * `paid - calc` はサーバも持たない。単月表の `minWageCompareRow` と定義を 1 箇所に
  * 保つため、送るのは 計算 / 給与 の素の値だけ。
  *
+ * ## 最低賃金マスタの版は持たない (2026-08-05 に廃止)
+ *
+ * 保存する 9 数値は**単価マスタ・拘束時間・支給項目区分**で決まり、最低賃金は 1 円も
+ * 動かさない (割れているかの判定に使うだけ)。影響しないものを鮮度メタに入れたせいで、
+ * 「最低賃金カードを開かないと版が付かない」という **UI の折りたたみ状態への依存**が
+ * 生まれていた。
+ *
  * ## 版 (sha) は「変わったか」だけ判れば良い
  *
  * 単価マスタ・支給項目区分が動いた月を「要再計算」にするための材料なので、
@@ -21,7 +28,7 @@
  * 別物と判定され、全月が無意味に stale になる。
  */
 
-import type { MinWageMaster, MinWageRowAttrs, WageMaster } from './restraint-wage-view'
+import type { MinWageRowAttrs, WageMaster } from './restraint-wage-view'
 import type { SalaryItemConfig } from './salary-compare'
 
 /**
@@ -82,8 +89,6 @@ export interface SnapshotPayload {
   wage_logic_version: string
   masters: {
     salary_item_sha: string
-    /** マスタ未読込なら null (「判らない」— サーバは判定しない)。 */
-    min_wage_sha: string | null
     payroll_synced_at: string | null
   }
   rows: SnapshotPayloadRow[]
@@ -140,8 +145,6 @@ export function buildSnapshotPayload(input: {
   restraintSource: string
   rows: SnapshotSourceRow[]
   salaryItemConfig: SalaryItemConfig
-  /** **未読込なら `null`** — 空マスタの sha を送ると後で全月が「要再計算」に化ける。 */
-  minWageMaster: MinWageMaster | null
   payrollSyncedAt: string | null
 }): { payload: SnapshotPayload, skipped: string[] } {
   const skipped: string[] = []
@@ -180,7 +183,6 @@ export function buildSnapshotPayload(input: {
       wage_logic_version: WAGE_LOGIC_VERSION,
       masters: {
         salary_item_sha: contentHash(input.salaryItemConfig),
-        min_wage_sha: input.minWageMaster === null ? null : contentHash(input.minWageMaster),
         payroll_synced_at: input.payrollSyncedAt,
       },
       rows,

@@ -3800,9 +3800,6 @@ async function saveWageSnapshot() {
     restraintSource: minWageRestraintSource.value,
     rows: snapshotSourceRows(),
     salaryItemConfig: salaryItemConfig.value,
-    // 未読込 (カードを開いていない) なら sha を送らない — 空マスタの sha を送ると
-    // 実際のマスタと違う版として記録され、後で全月が「要再計算」に化ける
-    minWageMaster: minWageMasterLoaded.value ? minWageMaster.value : null,
     payrollSyncedAt: payrollSyncedAtForMonth(),
   })
   const hash = contentHash(payload)
@@ -3810,13 +3807,12 @@ async function saveWageSnapshot() {
   snapshotState.value = { status: 'saving' }
   try {
     const token = currentAccessToken()
+    // 宛先は relay (`/restraint-api/*`)。GCP の Supabase へは relay → auth-worker
+    // `/ichibanboshi-proxy` 経由でしか届かない (Refs #686)。`comp_id` は relay が
+    // 認可済みの値で上書きするので、ここで送る値は参考でしかない
     const res = await $fetch<{ saved?: number, skipped_unchanged?: boolean }>(
-      '/api/kyuyo/wage-snapshot',
-      {
-        method: 'POST',
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-        body: payload,
-      },
+      '/restraint-api/wage-snapshot',
+      { method: 'POST', headers: authHeaders(), body: payload },
     )
     lastSnapshotHash = hash
     const at = new Date().toLocaleString('ja-JP', { hour: '2-digit', minute: '2-digit' })
@@ -4351,8 +4347,8 @@ async function loadWageRange() {
   rangeLoading.value = true
   rangeError.value = ''
   try {
-    const token = currentAccessToken()
     const query: Record<string, string> = {
+      // relay が認可済みの comp で上書きするが、意図を明示するために送る
       comp: compId,
       from: rangeMonths.value[0]!,
       to: rangeMonths.value[rangeMonths.value.length - 1]!,
@@ -4360,11 +4356,7 @@ async function loadWageRange() {
       wage_logic_version: WAGE_LOGIC_VERSION,
     }
     if (salaryConfigLoaded.value) query.salary_item_sha = contentHash(salaryItemConfig.value)
-    if (minWageMasterLoaded.value) query.min_wage_sha = contentHash(minWageMaster.value)
-    const body = await $fetch('/api/kyuyo/wage-range', {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      query,
-    })
+    const body = await $fetch('/restraint-api/wage-range', { headers: authHeaders(), query })
     rangeData.value = parseWageRange(body)
   }
   catch (e: unknown) {
@@ -4384,7 +4376,7 @@ watch([activeTab, rangeFrom, rangeTo, rangeSource, session], ([tab]) => {
 }, { immediate: true })
 
 // マスタが後から解決したら鮮度判定つきで読み直す (空マスタの sha で撃たない)
-watch([salaryConfigLoaded, minWageMasterLoaded], () => {
+watch(salaryConfigLoaded, () => {
   if (activeTab.value === 'range' && rangeData.value) void loadWageRange()
 })
 

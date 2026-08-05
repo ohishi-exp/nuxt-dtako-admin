@@ -9,14 +9,10 @@ import {
   WAGE_LOGIC_VERSION,
   type SnapshotSourceRow,
 } from '~/utils/wage-snapshot-client'
-import type { MinWageMaster, WageMaster } from '~/utils/restraint-wage-view'
+import type { WageMaster } from '~/utils/restraint-wage-view'
 import type { SalaryItemConfig } from '~/utils/salary-compare'
 
 const ITEM_CONFIG: SalaryItemConfig = { items: { 基本給: 'base', 残業手当: 'overtime' } } as SalaryItemConfig
-const MIN_WAGE: MinWageMaster = {
-  prefectures: { 全社共通: [{ effectiveFrom: '2025-10-01', rate: 1000 }] },
-  branchToPrefecture: {},
-}
 
 function sourceRow(over: Partial<SnapshotSourceRow> = {}): SnapshotSourceRow {
   return {
@@ -43,7 +39,6 @@ function build(rows: SnapshotSourceRow[], payrollSyncedAt: string | null = '2026
     restraintSource: 'gcp',
     rows,
     salaryItemConfig: ITEM_CONFIG,
-    minWageMaster: MIN_WAGE,
     payrollSyncedAt,
   })
 }
@@ -117,7 +112,6 @@ describe('buildSnapshotPayload', () => {
     expect(payload.wage_logic_version).toBe(WAGE_LOGIC_VERSION)
     expect(payload.masters.payroll_synced_at).toBe('2026-02-03T09:12:00Z')
     expect(payload.masters.salary_item_sha).toMatch(/^[0-9a-f]{8}$/)
-    expect(payload.masters.min_wage_sha).toMatch(/^[0-9a-f]{8}$/)
     expect(payload.rows).toEqual([{
       driver_cd: 1035,
       driver_name: '山田 太郎',
@@ -201,27 +195,9 @@ describe('buildSnapshotPayload', () => {
       restraintSource: 'gcp',
       rows: [sourceRow()],
       salaryItemConfig: { items: { 基本給: 'overtime' } } as SalaryItemConfig,
-      minWageMaster: MIN_WAGE,
       payrollSyncedAt: null,
     }).payload.masters.salary_item_sha
     expect(a).not.toBe(b)
-  })
-
-  /** マスタ未読込 (最低賃金カードを開いていない) は「判らない」— 空マスタの sha を
-   * 送ると実際のマスタと違う版として記録され、後で全月が「要再計算」に化ける。 */
-  it('最低賃金マスタが未読込なら min_wage_sha を送らない', () => {
-    const { payload } = buildSnapshotPayload({
-      compId: 'comp-a',
-      month: '2026-01',
-      restraintSource: 'gcp',
-      rows: [sourceRow()],
-      salaryItemConfig: ITEM_CONFIG,
-      minWageMaster: null,
-      payrollSyncedAt: null,
-    })
-    expect(payload.masters.min_wage_sha).toBeNull()
-    expect(payload.masters.salary_item_sha).toMatch(/^[0-9a-f]{8}$/)
-    expect(payload.rows).toHaveLength(1)
   })
 
   it('行が 0 件でも payload は作る (その月に対象者が居ない、を保存できる)', () => {
