@@ -155,6 +155,7 @@ import {
   defaultRange,
   describeApiError,
   emptyRowsNote,
+  filterNegativeDiffRows,
   monthBadgeLabel,
   monthCellState,
   monthDiff,
@@ -4265,11 +4266,28 @@ const rangeMonths = computed(() => monthRange(rangeFrom.value, rangeTo.value))
 const rangeMonthByYm = computed(() =>
   new Map((rangeData.value?.months ?? []).map(m => [m.ym, m])))
 
+/** 差合計がマイナス (支払いが計算を下回る) の乗務員だけに絞るか。 */
+const rangeNegativeOnly = ref(false)
+
+/** 応答の全行 (絞り込み前)。「0 件」の理由を出し分けるのに要る。 */
+const rangeAllRows = computed(() => rangeData.value?.rows ?? [])
+
+/**
+ * 表・合計・CSV が見る行。**絞り込みはここ 1 か所だけ**で行い、
+ * 以降の集計 (区画小計・総合計・月ごとの差) は全部この結果から作る
+ * — 表示と合計がずれないようにするため。
+ */
+const rangeVisibleRows = computed(() =>
+  (rangeNegativeOnly.value ? filterNegativeDiffRows(rangeAllRows.value) : rangeAllRows.value))
+
+/** 絞り込みボタンに出す件数 (押していない時も「何人いるか」を見せる)。 */
+const rangeNegativeCount = computed(() => filterNegativeDiffRows(rangeAllRows.value).length)
+
 /** 単月表と同じ並び (会社 → 職員区分 → 営業所 → 乗務員CD)。 */
 const rangeSections = computed(() =>
-  groupMinWageRows(rangeData.value?.rows ?? [], r => r.driverCd, r => r.attrs))
+  groupMinWageRows(rangeVisibleRows.value, r => r.driverCd, r => r.attrs))
 
-const rangeTotals = computed(() => sumWageRangeRows(rangeData.value?.rows ?? [], rangeMonths.value))
+const rangeTotals = computed(() => sumWageRangeRows(rangeVisibleRows.value, rangeMonths.value))
 
 /**
  * 表から引く値は**すべて computed に畳んでおく** (112 名 × 12 か月の表)。
@@ -4291,12 +4309,12 @@ function rangeSectionTotals(company: string | null, jobGroup: string) {
 
 /** 乗務員CD → 期間合計の差。 */
 const rangeRowDiffs = computed(() =>
-  new Map((rangeData.value?.rows ?? []).map(r => [r.driverCd, rangeDiff(r)])))
+  new Map(rangeVisibleRows.value.map(r => [r.driverCd, rangeDiff(r)])))
 
 /** `乗務員CD|YYYY-MM` → その月の差。 */
 const rangeMonthDiffs = computed(() => {
   const map = new Map<string, ReturnType<typeof monthDiff>>()
-  for (const r of rangeData.value?.rows ?? []) {
+  for (const r of rangeVisibleRows.value) {
     for (const m of rangeMonths.value) map.set(`${r.driverCd}|${m}`, monthDiff(r.byMonth[m]))
   }
   return map
@@ -4305,7 +4323,7 @@ const rangeMonthDiffs = computed(() => {
 /** `乗務員CD|YYYY-MM` → 月セルの状態。 */
 const rangeCellStates = computed(() => {
   const map = new Map<string, ReturnType<typeof monthCellState>>()
-  for (const r of rangeData.value?.rows ?? []) {
+  for (const r of rangeVisibleRows.value) {
     for (const m of rangeMonths.value) {
       map.set(`${r.driverCd}|${m}`, monthCellState(r, rangeMonthByYm.value.get(m)))
     }
@@ -4337,7 +4355,11 @@ const rangeRefreshTargets = computed(() => monthsNeedingRefresh(rangeData.value?
 
 /** 月カバレッジ行の注記 / 行 0 件時の説明 (矛盾した文言を出さないため中身は util に寄せる)。 */
 const rangeCoverageNoteText = computed(() => rangeCoverageNote(rangeData.value?.months ?? []))
-const rangeEmptyNoteText = computed(() => emptyRowsNote(rangeData.value?.months ?? []))
+const rangeEmptyNoteText = computed(() => (
+  // 絞り込みで 0 件になっただけの時に「保存されていません」と言わない。
+  rangeNegativeOnly.value && rangeAllRows.value.length
+    ? '差合計がマイナスの乗務員はいません (この期間はいずれも計算額以上を支払っています)。'
+    : emptyRowsNote(rangeData.value?.months ?? [])))
 
 /**
  * 期間集計を読む。**保存済みだけを読む** — ここで `wage-report` を回さない。
@@ -4387,11 +4409,12 @@ watch(salaryConfigLoaded, () => {
 })
 
 function downloadRangeCsv() {
-  const csv = wageRangeCsv(rangeData.value?.rows ?? [], rangeMonths.value)
+  // 画面に出ている行をそのまま落とす (絞り込み中はその結果だけ)。
+  const csv = wageRangeCsv(rangeVisibleRows.value, rangeMonths.value)
   const blob = new Blob([`﻿${csv}`], { type: 'text/csv;charset=utf-8' })
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob)
-  a.download = `wage-range_${rangeFrom.value}_${rangeTo.value}.csv`
+  a.download = `wage-range_${rangeFrom.value}_${rangeTo.value}${rangeNegativeOnly.value ? '_minus' : ''}.csv`
   a.click()
   URL.revokeObjectURL(a.href)
 }
@@ -6038,8 +6061,20 @@ watch([compMap, kyuyoSyncedKeys], () => {
                   :label="opt.label"
                   @click="rangeSource = opt.value"
                 />
+                <!-- 払い不足 (差合計マイナス) の乗務員だけに絞る。押していない時も
+                     件数を出して「何人いるか」だけ判るようにする -->
+                <UButton
+                  size="xs"
+                  :variant="rangeNegativeOnly ? 'solid' : 'outline'"
+                  :color="rangeNegativeOnly ? 'error' : 'neutral'"
+                  icon="i-lucide-trending-down"
+                  :label="`差合計マイナスのみ (${rangeNegativeCount})`"
+                  :disabled="!rangeAllRows.length"
+                  title="期間合計で 給与 − 計算 がマイナス = 計算額より支払いが少ない乗務員だけを表示します"
+                  @click="rangeNegativeOnly = !rangeNegativeOnly"
+                />
                 <div class="flex-1" />
-                <UButton size="xs" variant="soft" icon="i-lucide-file-down" label="CSV" :disabled="!rangeData?.rows.length" @click="downloadRangeCsv" />
+                <UButton size="xs" variant="soft" icon="i-lucide-file-down" label="CSV" :disabled="!rangeVisibleRows.length" @click="downloadRangeCsv" />
                 <UButton size="xs" variant="soft" icon="i-lucide-refresh-cw" label="再読込" :loading="rangeLoading" @click="loadWageRange" />
               </div>
             </template>
@@ -6096,11 +6131,11 @@ watch([compMap, kyuyoSyncedKeys], () => {
               対象月の最低賃金チェックを順に開いています (1 ヶ月あたり 15〜64 秒)。終わったら元の月に戻ります。
             </p>
 
-            <p v-if="rangeData && !rangeData.rows.length && !rangeLoading" class="text-sm text-gray-500">
+            <p v-if="rangeData && !rangeVisibleRows.length && !rangeLoading" class="text-sm text-gray-500">
               {{ rangeEmptyNoteText }}
             </p>
 
-            <div v-if="rangeData?.rows.length" class="overflow-x-auto">
+            <div v-if="rangeVisibleRows.length" class="overflow-x-auto">
               <table class="w-full text-sm">
                 <thead>
                   <tr class="text-left text-gray-500 border-b border-gray-200 dark:border-gray-700">
@@ -6221,7 +6256,10 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 </tbody>
                 <tfoot>
                   <tr class="border-t-2 border-gray-400 dark:border-gray-500 font-semibold">
-                    <td colspan="3" class="px-2 py-2 text-xs">総合計 ({{ rangeTotals.drivers }} 名)</td>
+                    <!-- 絞り込み中はそう明記する — 全社の総額と読み違えないように -->
+                    <td colspan="3" class="px-2 py-2 text-xs">
+                      総合計 ({{ rangeTotals.drivers }} 名{{ rangeNegativeOnly ? ' / 差合計マイナスのみ' : '' }})
+                    </td>
                     <td
                       v-for="(m, i) in rangeMonths"
                       :key="m"

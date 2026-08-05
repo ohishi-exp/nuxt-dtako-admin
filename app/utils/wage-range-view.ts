@@ -183,6 +183,20 @@ export function rangeDiff(row: { monthsCounted: number, calcBase: number, calcOv
   }
 }
 
+/**
+ * 差合計がマイナスの行だけ残す (= 期間を通して**支払いが計算を下回っている**乗務員)。
+ *
+ * 差 = 給与 − 計算 なので、マイナスが払い不足の向き。ちょうど 0 は残さない
+ * (一致しているものを見に来る画面ではない)。集計月数 0 の行は差が出せない
+ * (`rangeDiff` が null) ので、`0 未満` かどうかを判定できず落とす。
+ */
+export function filterNegativeDiffRows(rows: readonly WageRangeRow[]): WageRangeRow[] {
+  return rows.filter((r) => {
+    const t = rangeDiff(r).total
+    return t != null && t < 0
+  })
+}
+
 /** 区画 (会社 × 職員区分) / 全体の合計。 */
 export interface WageRangeTotals {
   drivers: number

@@ -4,6 +4,7 @@ import {
   defaultRange,
   describeApiError,
   emptyRowsNote,
+  filterNegativeDiffRows,
   monthBadgeLabel,
   monthCellState,
   monthDiff,
@@ -200,6 +201,30 @@ describe('rangeDiff', () => {
       .map(m => monthDiff(r.byMonth[m]).total ?? 0)
       .reduce((a, b) => a + b, 0)
     expect(monthly).toBe(rangeDiff(r).total)
+  })
+})
+
+describe('filterNegativeDiffRows', () => {
+  /** 差 = 給与 − 計算。マイナス = 計算額より支払いが少ない (見に来るのはこれ)。 */
+  it('差合計がマイナスの行だけ残す', () => {
+    const under = row({ driverCd: '1', paidBase: 198_000, paidOvertime: 78_000 }) // -4,000
+    const over = row({ driverCd: '2', paidBase: 210_000, paidOvertime: 90_000 }) // +20,000
+    expect(filterNegativeDiffRows([under, over]).map(r => r.driverCd)).toEqual(['1'])
+  })
+
+  /** ちょうど 0 は「合っている」ので残さない。 */
+  it('差 0 の行は残さない', () => {
+    const even = row({ paidBase: 200_000, paidOvertime: 80_000 })
+    expect(filterNegativeDiffRows([even])).toEqual([])
+  })
+
+  /** 1 か月も集計できていない行は差が出せない (0 円未払いとは違う)。 */
+  it('集計月数 0 の行は残さない', () => {
+    expect(filterNegativeDiffRows([row({ monthsCounted: 0, paidBase: 0, paidOvertime: 0 })])).toEqual([])
+  })
+
+  it('空なら空', () => {
+    expect(filterNegativeDiffRows([])).toEqual([])
   })
 })
 
