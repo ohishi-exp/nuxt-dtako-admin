@@ -4342,6 +4342,31 @@ function cellStateOf(driverCd: string, ym: string) {
   return rangeCellStates.value.get(`${driverCd}|${ym}`) ?? 'unsaved'
 }
 
+/**
+ * 押された月セル (乗務員 × 月)。差 3 段だけでは「いくら払っていくら計算だったか」が
+ * 判らないので、その場で内訳を出す (Refs #677)。単月の最低賃金チェックを引き直すと
+ * 1 か月 15〜64 秒かかるため、**保存済みスナップショットの値だけ**を出す。
+ */
+const rangeCellPick = ref<{ driverCd: string, ym: string } | null>(null)
+const rangeCellOpen = computed({
+  get: () => rangeCellPick.value != null,
+  set: (v: boolean) => { if (!v) rangeCellPick.value = null },
+})
+
+const rangeCellDetail = computed(() => {
+  const pick = rangeCellPick.value
+  if (!pick) return null
+  const row = rangeVisibleRows.value.find(r => r.driverCd === pick.driverCd)
+  if (!row) return null
+  return {
+    row,
+    ym: pick.ym,
+    state: cellStateOf(pick.driverCd, pick.ym),
+    amounts: row.byMonth[pick.ym] ?? null,
+    diff: monthDiffOf(pick.driverCd, pick.ym),
+  }
+})
+
 /** 月セルのツールチップ (状態ごとの説明)。 */
 const CELL_STATE_TITLE: Record<string, string> = {
   excluded: 'この月は集計対象外 (給与未取込など)',
@@ -6185,13 +6210,15 @@ watch([compMap, kyuyoSyncedKeys], () => {
                         {{ row.monthsCounted }} / {{ rangeMonths.length }}
                       </span>
                     </td>
-                    <!-- 月ごとの差。集計に入らなかった月は — (0 と見分ける) -->
+                    <!-- 月ごとの差。集計に入らなかった月は — (0 と見分ける)。
+                         押すとその月の内訳 (実働・単価・計算・給与) をモーダルで出す -->
                     <td
                       v-for="(m, i) in rangeMonths"
                       :key="m"
-                      class="px-2 py-1.5 text-right"
+                      class="px-2 py-1.5 text-right cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800"
                       :class="i === 0 ? 'border-l-2 border-gray-300 dark:border-gray-600' : ''"
-                      :title="CELL_STATE_TITLE[cellStateOf(row.driverCd, m)]"
+                      :title="CELL_STATE_TITLE[cellStateOf(row.driverCd, m)] || `${fmtYm(m)} の内訳を見る`"
+                      @click="rangeCellPick = { driverCd: row.driverCd, ym: m }"
                     >
                       <div v-if="cellStateOf(row.driverCd, m) === 'counted'" class="leading-tight">
                         <div class="text-xs" :class="(monthDiffOf(row.driverCd, m).base ?? 0) < 0 ? 'text-red-600' : 'text-gray-500'">
@@ -6294,13 +6321,106 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 各月の「最低賃金チェック」を開いた時点の確定値を保存し、それを合算している (再計算はしない)。
                 並びは単月表と同じ<b>会社 → 職員区分 → 営業所 → 乗務員CD</b>。<br>
                 <b>月セルは差だけ</b>を 3 段 (基本給 / 残業代 / 合計) で出す — 月ごとに 9 数値を並べると読めないため、
-                計算額・給与支払額は右端の期間合計にだけ出す。月セルを押すとその月の最低賃金チェックへ飛ぶ。<br>
+                計算額・給与支払額は右端の期間合計にだけ出す。<b>月セルを押すとその月の内訳</b>
+                (実働・適用単価・計算 / 給与の 3 段) をモーダルで出す — そこから最低賃金チェックへも飛べる。<br>
                 <b>集計に入らなかった月は「—」</b> (0 ではない)。欠測・単価未設定・給与明細に無い行はその人のその月が外れ、
                 <b>給与を取り込んでいない月は月ごと外れる</b> — 0 円で足すと支払いが理論値を大きく下回っているように見えるため。
                 「集計月数」が期間の月数に満たない行は、入社・退職・欠測のいずれかで一部の月しか足せていない。<br>
                 差のマイナス (赤) = 支払いが換算理論値を下回っている。プラスは手当の上乗せで珍しくないため色を付けない (単月表と同じ)。
               </p>
             </div>
+
+            <!-- 月セルの内訳。保存済みスナップショットの値だけを出す — 最低賃金チェックを
+                 引き直すと 1 か月 15〜64 秒かかるため。全区分の内訳が要る時は下のボタンで飛ぶ -->
+            <UModal v-model:open="rangeCellOpen" :ui="{ content: 'max-w-lg' }">
+              <template #content>
+                <div v-if="rangeCellDetail" class="p-6">
+                  <div class="flex items-baseline gap-2 mb-1">
+                    <span class="font-semibold">{{ rangeCellDetail.row.driverName }}</span>
+                    <span class="text-xs text-gray-500">{{ rangeCellDetail.row.driverCd }}</span>
+                    <span v-if="rangeCellDetail.row.attrs.branchName" class="text-xs text-gray-500">
+                      {{ rangeCellDetail.row.attrs.branchName }}
+                    </span>
+                  </div>
+                  <div class="text-sm text-gray-500 mb-4">{{ fmtYm(rangeCellDetail.ym) }} の内訳</div>
+
+                  <!-- 集計に入らなかった月は金額を出さない (0 と読ませない) -->
+                  <p v-if="!rangeCellDetail.amounts || rangeCellDetail.state !== 'counted'" class="text-sm text-amber-600 dark:text-amber-400">
+                    {{ CELL_STATE_TITLE[rangeCellDetail.state] || 'この月は集計に入っていません' }}
+                  </p>
+
+                  <table v-else class="w-full text-sm">
+                    <tbody>
+                      <tr class="border-b border-gray-100 dark:border-gray-800">
+                        <td class="py-1.5 text-gray-500">実働</td>
+                        <td class="py-1.5 text-right" colspan="2">
+                          {{ rangeCellDetail.amounts.workingMinutes == null ? '—' : fmtMinutes(rangeCellDetail.amounts.workingMinutes) }}
+                        </td>
+                      </tr>
+                      <tr class="border-b border-gray-200 dark:border-gray-700">
+                        <td class="py-1.5 text-gray-500">適用単価</td>
+                        <td class="py-1.5 text-right" colspan="2">{{ fmtYen(rangeCellDetail.amounts.hourlyRate) }}</td>
+                      </tr>
+                      <tr class="text-xs text-gray-500">
+                        <td />
+                        <td class="py-1 text-right">計算</td>
+                        <td class="py-1 text-right">給与</td>
+                      </tr>
+                      <tr class="border-b border-gray-100 dark:border-gray-800">
+                        <td class="py-1.5 text-gray-500">基本給</td>
+                        <td class="py-1.5 text-right">{{ fmtYen(rangeCellDetail.amounts.calcBase) }}</td>
+                        <td class="py-1.5 text-right">{{ fmtYen(rangeCellDetail.amounts.paidBase) }}</td>
+                      </tr>
+                      <tr class="border-b border-gray-100 dark:border-gray-800">
+                        <td class="py-1.5 text-gray-500">残業代</td>
+                        <td class="py-1.5 text-right">{{ fmtYen(rangeCellDetail.amounts.calcOvertime) }}</td>
+                        <td class="py-1.5 text-right">{{ fmtYen(rangeCellDetail.amounts.paidOvertime) }}</td>
+                      </tr>
+                      <tr class="border-b border-gray-200 dark:border-gray-700 font-medium">
+                        <td class="py-1.5 text-gray-500">合計</td>
+                        <td class="py-1.5 text-right">{{ fmtYen(rangeCellDetail.amounts.calcTotal) }}</td>
+                        <td class="py-1.5 text-right">
+                          {{ rangeCellDetail.amounts.paidBase == null || rangeCellDetail.amounts.paidOvertime == null
+                            ? '—'
+                            : fmtYen(rangeCellDetail.amounts.paidBase + rangeCellDetail.amounts.paidOvertime) }}
+                        </td>
+                      </tr>
+                      <!-- 差 = 給与 − 計算。表の月セルと同じ 3 段・同じ色 -->
+                      <tr>
+                        <td class="py-1.5 text-gray-500">差 (給与 − 計算)</td>
+                        <td class="py-1.5 text-right text-xs" :class="(rangeCellDetail.diff.base ?? 0) < 0 ? 'text-red-600' : 'text-gray-500'">
+                          基本給 {{ fmtDiff(rangeCellDetail.diff.base) }}
+                        </td>
+                        <td class="py-1.5 text-right text-xs" :class="(rangeCellDetail.diff.overtime ?? 0) < 0 ? 'text-red-600' : 'text-gray-500'">
+                          残業代 {{ fmtDiff(rangeCellDetail.diff.overtime) }}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td />
+                        <td class="py-1.5 text-right font-medium" colspan="2" :class="(rangeCellDetail.diff.total ?? 0) < 0 ? 'text-red-600' : ''">
+                          合計 {{ fmtDiff(rangeCellDetail.diff.total) }}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+
+                  <p class="text-xs text-gray-500 mt-3">
+                    保存済みスナップショットの値。区分ごとの時間・単価まで見る時は最低賃金チェックを開く
+                    (この月を選び直して再計算するので 15〜64 秒かかる)。
+                  </p>
+                  <div class="mt-3 flex justify-end gap-2">
+                    <UButton
+                      size="sm"
+                      variant="soft"
+                      icon="i-lucide-external-link"
+                      label="この月の最低賃金チェックを開く"
+                      @click="jumpToMinWageMonth(rangeCellDetail.ym); rangeCellPick = null"
+                    />
+                    <UButton size="sm" variant="ghost" label="閉じる" @click="rangeCellPick = null" />
+                  </div>
+                </div>
+              </template>
+            </UModal>
           </UCard>
         </template>
 

@@ -42,6 +42,8 @@ export interface WageRangeAmounts {
   paidBase: number | null
   paidOvertime: number | null
   hourlyRate: number | null
+  /** その月の実労働時間 (分)。古い応答には無いので null もある。 */
+  workingMinutes: number | null
 }
 
 /** 期間集計の 1 行。 */
@@ -129,6 +131,7 @@ export function parseWageRange(body: unknown): WageRangeResponse {
           paidBase: num(a.paid_base),
           paidOvertime: num(a.paid_overtime),
           hourlyRate: num(a.hourly_rate),
+          workingMinutes: num(a.working_minutes),
         }
       }
       return {

@@ -26,6 +26,7 @@ function amounts(over: Record<string, number | null> = {}) {
     paid_base: 198_000,
     paid_overtime: 78_000,
     hourly_rate: 1420,
+    working_minutes: 11_820,
     ...over,
   }
 }
@@ -70,7 +71,7 @@ function row(over: Partial<WageRangeRow> = {}): WageRangeRow {
     byMonth: {
       '2026-01': {
         calcBase: 200_000, calcOvertime: 80_000, calcTotal: 280_000,
-        paidBase: 198_000, paidOvertime: 78_000, hourlyRate: 1420,
+        paidBase: 198_000, paidOvertime: 78_000, hourlyRate: 1420, workingMinutes: 11_820,
       },
     },
     calcBase: 200_000,
@@ -108,6 +109,8 @@ describe('parseWageRange', () => {
     expect(parsed.rows[0]!.driverCd).toBe('1035')
     expect(parsed.rows[0]!.attrs.branchCode).toBe(210)
     expect(parsed.rows[0]!.byMonth['2026-01']!.calcTotal).toBe(280_000)
+    // 月セルの内訳モーダルが出す実働 (月ごと)。古い応答には無いので null もある
+    expect(parsed.rows[0]!.byMonth['2026-01']!.workingMinutes).toBe(11_820)
   })
 
   /** 壊れた応答で画面を落とさない (期間集計が出ないだけにする)。 */
@@ -140,7 +143,7 @@ describe('parseWageRange', () => {
     expect(parsed.rows[0]!.driverCd).toBe('')
     expect(parsed.rows[1]!.byMonth['2026-01']).toEqual({
       calcBase: null, calcOvertime: null, calcTotal: null,
-      paidBase: null, paidOvertime: null, hourlyRate: null,
+      paidBase: null, paidOvertime: null, hourlyRate: null, workingMinutes: null,
     })
   })
 
@@ -169,7 +172,7 @@ describe('monthDiff', () => {
   it('片側が無ければその段は null', () => {
     const d = monthDiff({
       calcBase: 100, calcOvertime: 50, calcTotal: 150,
-      paidBase: null, paidOvertime: 40, hourlyRate: null,
+      paidBase: null, paidOvertime: 40, hourlyRate: null, workingMinutes: null,
     })
     expect(d.base).toBeNull()
     expect(d.overtime).toBe(-10)
@@ -192,8 +195,8 @@ describe('rangeDiff', () => {
     const r = row({
       monthsCounted: 2,
       byMonth: {
-        '2026-01': { calcBase: 100, calcOvertime: 50, calcTotal: 150, paidBase: 90, paidOvertime: 60, hourlyRate: null },
-        '2026-02': { calcBase: 200, calcOvertime: 80, calcTotal: 280, paidBase: 210, paidOvertime: 70, hourlyRate: null },
+        '2026-01': { calcBase: 100, calcOvertime: 50, calcTotal: 150, paidBase: 90, paidOvertime: 60, hourlyRate: null, workingMinutes: null },
+        '2026-02': { calcBase: 200, calcOvertime: 80, calcTotal: 280, paidBase: 210, paidOvertime: 70, hourlyRate: null, workingMinutes: null },
       },
       calcBase: 300, calcOvertime: 130, calcTotal: 430, paidBase: 300, paidOvertime: 130,
     })
