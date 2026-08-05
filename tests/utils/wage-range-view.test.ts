@@ -3,11 +3,13 @@ import { describe, it, expect } from 'vitest'
 import {
   defaultRange,
   describeApiError,
+  emptyRowsNote,
   monthBadgeLabel,
   monthCellState,
   monthDiff,
   monthsNeedingRefresh,
   parseWageRange,
+  rangeCoverageNote,
   rangeDiff,
   sumWageRangeRows,
   wageRangeCsv,
@@ -266,6 +268,51 @@ describe('monthsNeedingRefresh', () => {
       month({ ym: '2026-04', stale: null }),
     ]
     expect(monthsNeedingRefresh(months)).toEqual(['2026-02', '2026-03'])
+  })
+})
+
+describe('rangeCoverageNote', () => {
+  it('月が無ければ何も言わない', () => {
+    expect(rangeCoverageNote([])).toBe('')
+  })
+
+  it('全て集計に入っていれば「全て保存済み」', () => {
+    expect(rangeCoverageNote([month({ ym: '2026-01' }), month({ ym: '2026-02' })]))
+      .toBe('この期間は全て保存済みです')
+  })
+
+  /** 下の「集計がありません」と矛盾して読めないよう対象外の月数を出す。 */
+  it('一部が集計対象外なら月数を添える', () => {
+    const months = [month({ ym: '2026-01' }), month({ ym: '2026-02', excluded: 'payroll_missing' })]
+    expect(rangeCoverageNote(months)).toBe('この期間は全て保存済みです (うち 1 ヶ月は集計対象外)')
+  })
+
+  it('全月が集計対象外ならそう言い切る', () => {
+    const months = [
+      month({ ym: '2026-01', excluded: 'payroll_missing' }),
+      month({ ym: '2026-02', excluded: 'payroll_missing' }),
+    ]
+    expect(rangeCoverageNote(months)).toBe('この期間は全ての月が集計対象外です (2 ヶ月)')
+  })
+})
+
+describe('emptyRowsNote', () => {
+  it('月が無い / 全月未保存なら保存を促す', () => {
+    expect(emptyRowsNote([])).toContain('保存済みの集計がありません')
+    expect(emptyRowsNote([month({ saved: false })])).toContain('保存済みの集計がありません')
+  })
+
+  /** 保存済みなのに 0 件 = 保存し直しても直らない。理由を出し分ける。 */
+  it('保存済みだが全月が集計対象外ならそう言う', () => {
+    const months = [
+      month({ ym: '2026-01', excluded: 'payroll_missing' }),
+      month({ ym: '2026-02', saved: false }),
+    ]
+    expect(emptyRowsNote(months)).toContain('全ての月が集計対象外')
+  })
+
+  it('集計対象の月があるのに 0 件なら行側の理由を出す', () => {
+    expect(emptyRowsNote([month({ ym: '2026-01' })])).toContain('合算できる乗務員がいません')
   })
 })
 
