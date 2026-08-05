@@ -39,7 +39,12 @@ const navigation = [
         <h1 class="text-lg font-bold">デジタコ管理</h1>
       </div>
 
-      <nav class="flex-1 p-2">
+      <!-- メニューが画面高を超えたらここだけスクロールする (Refs #681)。
+           **`min-h-0` が要る** — flex の子は `min-height: auto` が既定で、`flex-1` だけ
+           では内容より縮まない。縮まないと nav が `h-screen` を突き抜け、下の
+           AuthToolbar (Apps / Settings / Logout) が画面外へ押し出される。
+           `overflow-y-auto` だけを足しても同じ理由で効かない。 -->
+      <nav class="flex-1 min-h-0 overflow-y-auto p-2">
         <NuxtLink
           v-for="item in navigation"
           :key="item.to"
