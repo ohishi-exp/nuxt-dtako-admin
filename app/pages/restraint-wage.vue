@@ -148,6 +148,8 @@ import {
 } from '~/utils/kintai-day-operations'
 import type { KintaiAlcUploadResult } from '~/utils/kintai-alc-upload'
 import { parseKintaiAlcUploadResult } from '~/utils/kintai-alc-upload'
+import type { SnapshotSourceRow } from '~/utils/wage-snapshot-client'
+import { buildSnapshotPayload, contentHash } from '~/utils/wage-snapshot-client'
 
 const {
   session: theearthSession,
@@ -3686,6 +3688,133 @@ function minWageBranchLabel(driverCd: string): string {
   return minWageAttrsFor(driverCd)?.branchName ?? ''
 }
 
+// ---------------------------------------------------------------------------
+// 賃金スナップショットの自動保存 (Refs #677 PR-D)
+// ---------------------------------------------------------------------------
+// この表の右端 3 ブロックは毎回その場で組んでおり、画面を離れると消える。期間を
+// 跨いで見るには月タブを踏み直すしかなく、`wage-report` は 1 か月 15〜64 秒かかる
+// (2026-08-04 実測)。**表が確定した時点の写しを保存**しておけば、期間集計は
+// 保存の合算で済む (ohishi-exp/rust-ichibanboshi#292 の `kintai.wage_snapshot`)。
+//
+// **ボタンは置かない** (ユーザー決定 2026-08-05)。表が出た = 確定した時に自動で送る。
+
+interface SnapshotUiState {
+  status: 'idle' | 'saving' | 'saved' | 'skipped' | 'error'
+  at?: string
+  message?: string
+}
+const snapshotState = ref<SnapshotUiState>({ status: 'idle' })
+/** 直近に送った payload の内容ハッシュ。同じなら送らない (月タブの往復で毎回撃たない)。 */
+let lastSnapshotHash = ''
+
+/**
+ * 表が確定しているか。**ここが false の間は 1 バイトも送らない** — 読み込み中や
+ * 前の月が残っている (`staleReport`) 状態で送ると、別の月の数字を保存してしまう。
+ * マスタ 3 種も揃うまで待つ (未読込だと全項目が既定区分に落ち、給与側が 0 円になる)。
+ */
+const minWageTableSettled = computed(() =>
+  activeTab.value === 'minwage'
+  && !!session.value
+  && !displayLoading.value
+  && !staleReport.value
+  && (minWageReport.value?.rows.length ?? 0) > 0
+  && employeeMasterLoaded.value
+  && salaryConfigLoaded.value
+  && minWageMasterLoaded.value)
+
+/**
+ * 突合に使った給与明細の同期時刻 (対象会社の中で**最も古いもの**)。
+ *
+ * 1 社でも取り込めていなければ `null` = 「給与未取込」として保存する。期間集計は
+ * その月を集計から外す (0 円で足して支払い不足に見せない、#677 の合算規則)。
+ * 最も古いものを採るのは、どれか 1 社が古ければその月ぜんたいを「要再計算」に
+ * したいため。
+ */
+function payrollSyncedAtForMonth(): string | null {
+  const compId = session.value?.compId
+  const companies = compMap.value.find(c => c.compId === compId)?.payrollCompanies ?? []
+  if (!companies.length) return null
+  const payMonth = nextYm(month.value)
+  let oldest: string | null = null
+  for (const { payrollCompany } of companies) {
+    const synced = readStoredPayroll(payrollCompany, payMonth)?.syncedAt
+    if (!synced) return null
+    if (oldest === null || synced < oldest) oldest = synced
+  }
+  return oldest
+}
+
+/** 表示中の 1 行 → 保存の材料。表に出ている値をそのまま写す (再計算しない)。 */
+function snapshotSourceRows(): SnapshotSourceRow[] {
+  return (minWageReport.value?.rows ?? []).map((row) => {
+    const cmp = minWageCompare(row.summary.driverCd)
+    const paid = paidFor(row.summary.driverCd)
+    return {
+      driverCd: row.summary.driverCd,
+      driverName: row.summary.driverName,
+      hourlyRate: row.wage.hourlyRate,
+      calcBase: cmp.calcBase,
+      calcOvertime: cmp.calcOvertime,
+      calcTotal: cmp.calcTotal,
+      paidBase: paid?.base ?? null,
+      paidOvertime: paid?.overtime ?? null,
+      workingMinutes: row.summary.workingMinutes,
+      restraintMissing: row.restraint_missing === true,
+      attrs: minWageAttrsFor(row.summary.driverCd),
+      payKubun: row.pay_kubun ?? null,
+    }
+  })
+}
+
+/**
+ * 表示中の月を保存する。**表示を待たせない** — 失敗しても画面は壊さず、状態表示に
+ * 出すだけ (保存は期間集計の高速化のためのもので、単月表示の正しさには関わらない)。
+ */
+async function saveWageSnapshot() {
+  const compId = session.value?.compId
+  if (!compId || !minWageTableSettled.value) return
+  const { payload, skipped } = buildSnapshotPayload({
+    compId,
+    month: month.value,
+    restraintSource: minWageRestraintSource.value,
+    rows: snapshotSourceRows(),
+    salaryItemConfig: salaryItemConfig.value,
+    minWageMaster: minWageMaster.value,
+    payrollSyncedAt: payrollSyncedAtForMonth(),
+  })
+  const hash = contentHash(payload)
+  if (hash === lastSnapshotHash) return
+  snapshotState.value = { status: 'saving' }
+  try {
+    const token = currentAccessToken()
+    const res = await $fetch<{ saved?: number, skipped_unchanged?: boolean }>(
+      '/api/kyuyo/wage-snapshot',
+      {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: payload,
+      },
+    )
+    lastSnapshotHash = hash
+    const at = new Date().toLocaleString('ja-JP', { hour: '2-digit', minute: '2-digit' })
+    snapshotState.value = {
+      status: res?.skipped_unchanged ? 'skipped' : 'saved',
+      at,
+      // 落とした行は黙って減らさない (乗務員CD が数値にならない行)
+      message: skipped.length ? `${skipped.length} 行は乗務員CDが数値でないため保存していません` : undefined,
+    }
+  }
+  catch (e: unknown) {
+    // 保存の失敗でページを壊さない。次に表が確定した時に再挑戦される
+    snapshotState.value = { status: 'error', message: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/** 表が確定するたび / 月・ソースを変えるたびに保存する。 */
+watch([minWageTableSettled, month, minWageRestraintSource], ([settled]) => {
+  if (settled) void saveWageSnapshot()
+}, { immediate: true })
+
 /** 乗務員CD (正規化キー) → 給与明細の残業計上額 + 基礎単価(実績) (タイムカード表の
  * 残業「時間」比較用、Refs #441)。salaryComparison が無くても拘束側の時間は
  * summary から常に出せるので、ここが空でも「支給分」欄だけが "-" になる。 */
@@ -5130,6 +5259,19 @@ watch([compMap, kyuyoSyncedKeys], () => {
               />
               <span class="text-xs text-gray-500">
                 {{ RESTRAINT_SOURCE_NOTE[minWageRestraintSource] }}
+              </span>
+              <!-- 期間集計 (Refs #677) 用の保存状態。**ボタンは置かない** — 表が確定した
+                   時点で自動保存する。ここは「保存されたか」を読むためだけの表示 -->
+              <span
+                v-if="snapshotState.status !== 'idle'"
+                class="ml-auto text-xs"
+                :class="snapshotState.status === 'error' ? 'text-red-600 dark:text-red-400' : 'text-gray-500'"
+                :title="snapshotState.message ?? '期間集計タブはこの保存を合算して表示します'"
+              >
+                <template v-if="snapshotState.status === 'saving'">期間集計用に保存中…</template>
+                <template v-else-if="snapshotState.status === 'saved'">期間集計用に保存しました ({{ snapshotState.at }})</template>
+                <template v-else-if="snapshotState.status === 'skipped'">保存済み (変更なし)</template>
+                <template v-else>保存できませんでした — 表示には影響しません</template>
               </span>
             </div>
             <p v-if="gcpReportError" class="text-xs text-red-600 dark:text-red-400 mb-1">
