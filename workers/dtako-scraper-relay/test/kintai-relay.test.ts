@@ -3,6 +3,8 @@ import {
   relayKintaiWindow,
   relayKintaiRecalc,
   relayKintaiDaySummaries,
+  relayWageRangeGet,
+  relayWageSnapshotPut,
   relayKintaiStaleMonths,
   relayKintaiUnkoGaps,
   windowMonths,
@@ -818,5 +820,67 @@ describe("buildDeps", () => {
     expect(h["X-Tenant-ID"]).toBe("tenant-a");
     expect(h["content-type"]).toBe("application/json");
     expect((call[1] as RequestInit).method).toBe("POST");
+  });
+});
+
+describe("賃金スナップショットの中継 (ohishi-exp/nuxt-dtako-admin#677)", () => {
+  /** **comp_id は呼び出し元に名乗らせない。** body の値は捨てて relay が上書きする。 */
+  it("relayWageSnapshotPut は body の comp_id を認可済みの値で上書きする", async () => {
+    let seen: { path: string; init?: RequestInit } | null = null;
+    const deps = {
+      gcp: async (path: string, init?: RequestInit) => {
+        seen = { path, init };
+        return json({ saved: 3, skipped_unchanged: false });
+      },
+    } as unknown as KintaiRelayDeps;
+
+    const out = await relayWageSnapshotPut(deps, "27324455", {
+      comp_id: "他社のID",
+      month: "2026-01",
+      rows: [],
+    });
+
+    expect(out).toEqual({ saved: 3, skipped_unchanged: false });
+    expect(seen!.path).toBe("/api/kintai/wage-snapshot");
+    expect(seen!.init?.method).toBe("POST");
+    const sent = JSON.parse(String(seen!.init?.body));
+    expect(sent.comp_id).toBe("27324455");
+    expect(sent.month).toBe("2026-01");
+  });
+
+  it("relayWageRangeGet は comp を上書きし、他のクエリはそのまま渡す", async () => {
+    let seenPath = "";
+    const deps = {
+      gcp: async (path: string) => {
+        seenPath = path;
+        return json({ from: "2026-01", to: "2026-03", months: [], rows: [] });
+      },
+    } as unknown as KintaiRelayDeps;
+
+    await relayWageRangeGet(
+      deps,
+      "27324455",
+      new URLSearchParams({
+        comp: "他社のID",
+        from: "2026-01",
+        to: "2026-03",
+        source: "gcp",
+        salary_item_sha: "a08d07ff",
+      }),
+    );
+
+    const q = new URLSearchParams(seenPath.split("?")[1]);
+    expect(seenPath.startsWith("/api/kintai/wage-range?")).toBe(true);
+    expect(q.get("comp")).toBe("27324455");
+    expect(q.get("from")).toBe("2026-01");
+    expect(q.get("source")).toBe("gcp");
+    expect(q.get("salary_item_sha")).toBe("a08d07ff");
+  });
+
+  it("受け側が非 2xx を返したら投げる (黙って空を返さない)", async () => {
+    const deps = {
+      gcp: async () => json({ error: "month は YYYY-MM" }, 400),
+    } as unknown as KintaiRelayDeps;
+    await expect(relayWageRangeGet(deps, "c", new URLSearchParams())).rejects.toThrow();
   });
 });

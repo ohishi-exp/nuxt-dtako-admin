@@ -114,6 +114,8 @@ import {
   FOLD_PAGE_MAX_DRIVERS,
   monthsCoveredByRange,
   relayKintaiDaySummaries,
+  relayWageRangeGet,
+  relayWageSnapshotPut,
   relayKintaiRecalc,
   relayKintaiStaleMonths,
   relayKintaiUnkoGaps,
@@ -3464,6 +3466,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // ---- 賃金計算 (月指定、R2 summary + マスタから。Refs #244) ----
     if (url.pathname === "/restraint-api/wage-report" && request.method === "GET") {
       return this.handleWageReport(record!, url, request.headers.get("if-none-match"));
+    }
+    // ---- 賃金確定値のスナップショット (GCP の Supabase へ中継、#677) ----
+    if (url.pathname === "/restraint-api/wage-snapshot" && request.method === "POST") {
+      return this.handleWageSnapshotPut(record!, request);
+    }
+    if (url.pathname === "/restraint-api/wage-range" && request.method === "GET") {
+      return this.handleWageRange(record!, url);
     }
     return dvrJsonError(404, "Not Found");
   }
@@ -7038,6 +7047,53 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       out.set(f.month, f.map!);
     }
     return out;
+  }
+
+  /**
+   * POST /restraint-api/wage-snapshot — 画面が確定させた 1 か月ぶんを GCP へ中継する
+   * (Refs ohishi-exp/nuxt-dtako-admin#677)。
+   *
+   * **relay は中身を検算しない。** 形の検証も金額の妥当性も受け側 (rust-ichibanboshi)
+   * の責務で、ここがやるのは「認可済みの comp_id を差し込んで転送する」ことだけ。
+   */
+  private async handleWageSnapshotPut(
+    record: TheearthSessionRecord,
+    request: Request,
+  ): Promise<Response> {
+    const ctx = await this.buildKintaiRelayContext(record.compId, "wage_snapshot");
+    if (ctx instanceof Response) return ctx;
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    try {
+      return Response.json(await relayWageSnapshotPut(ctx.deps, record.compId, body));
+    } catch (err) {
+      const message = describeUnknownError(err);
+      console.error(JSON.stringify({ wage_snapshot: "error", comp_id: record.compId, error: message }));
+      return dvrJsonError(502, `賃金スナップショットの保存に失敗しました: ${message}`);
+    }
+  }
+
+  /**
+   * GET /restraint-api/wage-range — 期間集計を GCP から読む
+   * (Refs ohishi-exp/nuxt-dtako-admin#677)。
+   *
+   * `wage-report` と違い**この口は計算しない** — 保存済みを SUM して返すだけなので
+   * 1 往復で終わる (期間分の `wage-report` は 1 か月 15〜64 秒 × 月数かかる)。
+   */
+  private async handleWageRange(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const ctx = await this.buildKintaiRelayContext(record.compId, "wage_range");
+    if (ctx instanceof Response) return ctx;
+    try {
+      return Response.json(await relayWageRangeGet(ctx.deps, record.compId, url.searchParams));
+    } catch (err) {
+      const message = describeUnknownError(err);
+      console.error(JSON.stringify({ wage_range: "error", comp_id: record.compId, error: message }));
+      return dvrJsonError(502, `期間集計の取得に失敗しました: ${message}`);
+    }
   }
 
   /** GET /restraint-api/wage-report?month=YYYY-MM — R2 の summary + マスタから
