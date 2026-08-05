@@ -3651,8 +3651,16 @@ const minWageCompareByDriver = computed(() => {
     map.set(key, minWageCompareRow(
       {
         base: row.wage.amounts?.statutory ?? null,
-        // 残業代合計 = 残業 (時間外+週40超過) + 深夜残業 (時間外深夜)
-        overtime: sumNullable(row.wage.actualOvertimePay, row.wage.actualNightOvertimePay),
+        // 残業代合計 = **基本給(法定内)以外のすべて** = 合計 − 基本給 (Refs #673)。
+        // 時間外系 3 区分 (時間外 / 週40超過 / 時間外深夜) だけを足していた頃は、
+        // 深夜(通常)・法定休日・法定休日深夜・法定外休日・法定外休日深夜 の 5 区分が
+        // どの段にも入らず合計にだけ入り、`基本給 + 残業代 ≠ 合計` になっていた
+        // (2026-06 実データで 112 名中 108 名が不成立)。給与側の `overtime` 区分は
+        // 「残業・深夜・**休日出勤**手当」を含む定義 (salary-compare.ts) なので、
+        // 計算側もそれに揃える。引き算で出すことで区分が将来増えても追従する。
+        overtime: row.wage.totalAmount !== null && row.wage.amounts !== null
+          ? row.wage.totalAmount - row.wage.amounts.statutory
+          : null,
         total: row.wage.totalAmount,
       },
       paidFor(row.summary.driverCd),
@@ -5207,7 +5215,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                     <!-- 祝日・会社指定休に出勤した日だけ入る区分。有る月だけ列を出す (Refs #566) -->
                     <th v-if="hasNonLegalHolidayWork" class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom" title="法定外休日 (祝日・会社指定休に出勤した日) の実働すべて。土曜は平日扱いなのでここには入らない (2026-07-18 決定)。@ は通常+深夜合算の実額按分">法定外休日<br><span class="font-normal text-xs">(通常 / 深夜 / @単価 / 金額)</span></th>
                     <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom" title="実働 − (法定内 + 時間外 + 週40超過 + 時間外深夜 + 法定休日 + 法定外休日)。9 区分すべてを引いているので、0 以外 = 日別データの不整合 — 検算用">差分<br><span class="font-normal text-xs">(実働 − 表合計)</span></th>
-                    <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom border-l-2 border-gray-300 dark:border-gray-600" title="単価マスタ × 拘束時間データの換算理論値。上段=基本給(法定内) / 中段=残業代合計 (残業+深夜残業) / 下段=合計 (全区分合計)">計算<br><span class="font-normal text-xs">(基本給 / 残業代 / 合計)</span></th>
+                    <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom border-l-2 border-gray-300 dark:border-gray-600" title="単価マスタ × 拘束時間データの換算理論値。上段=基本給(法定内) / 中段=残業代合計 (基本給以外のすべて — 残業・週40超過・時間外深夜・深夜(通常)・法定休日・法定外休日) / 下段=合計 (上2段の和 = 全区分合計)">計算<br><span class="font-normal text-xs">(基本給 / 残業代 / 合計)</span></th>
                     <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="給与比較タブで取り込んだ給与明細の実績 (勤務月+1 の支給月ラベルで突合)。上段=基本給扱い項目の合計 / 中段=割増扱い項目 (残業・深夜・休日出勤) の合計 / 下段=その 2 つの合計">給与<br><span class="font-normal text-xs">(基本給 / 残業代 / 合計)</span></th>
                     <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="給与 − 計算。マイナス (赤) = 支払いが換算理論値を下回っている。どちらか欠けている行は「-」">差<br><span class="font-normal text-xs">(基本給 / 残業代 / 合計)</span></th>
                   </tr>
@@ -5364,9 +5372,11 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 <b>上段 基本給 → 中段 残業代合計 → 下段 合計</b> の 3 段に積んでいる (同じ金額どうしが横に並ぶ)。
                 差はマイナス = 支払いが換算理論値を下回っている印 (赤)。プラスは各種手当の上乗せで珍しくないため色は付けない。
                 どちらか片方が無い行 (給与明細 未取り込み・単価未設定) は 0 ではなく「-」。
-                合計 差 は <b>(基本給+残業代)(給与) − 合計(計算)</b> で、計算側の合計には深夜・法定休日も入る。
+                <b>3 段は縦に足し合う</b> — 計算・給与・差のどの列でも <b>基本給 + 残業代 = 合計</b> になる (Refs #673)。
                 <b>基本給は左の内訳列と右のブロックで 2 回出る</b> — 左は対象時間・@単価つきで時間の内訳を読む列、右は金額を給与実績と並べる列。<br>
-                合計(計算) = 基本給 + 深夜 + 残業代合計 + 法定休日 (全区分合計、「給与比較」タブの合計(計算)と同じ値)。<br>
+                残業代合計(計算) = <b>合計 − 基本給(法定内)</b> = 残業 + 週40超過 + 時間外深夜 + 深夜(通常) + 法定休日(通常+深夜) + 法定外休日(通常+深夜)。
+                給与側の割増扱い項目が「残業・深夜・<b>休日出勤</b>手当」を含む定義のため、計算側もそれに揃えている。
+                合計(計算) は全区分合計 (「給与比較」タブの合計(計算)と同じ値)。<br>
                 給与側は<b>支払い済み給与の実績</b> — 給与比較タブで取り込んだ給与明細 CSV の基本給扱い / 割増扱い項目の合計。CSV の年月ラベルは支給月なので、勤務月+1 (翌月支給) の行を突合している。
                 月末締め・翌月払いのため実際の支給は翌月 (ヘッダの支給月表示)。CSV 未取り込みの月は「-」。項目の区分は「支給項目区分」の設定に従う。<br>
                 <b>実働 = 基本給(法定内)の対象時間 + 時間外 + 週40超過 + 時間外深夜 + 法定休日(通常+深夜) + 法定外休日(通常+深夜)</b>。

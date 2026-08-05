@@ -346,7 +346,9 @@ export interface MinWageCompareRow {
   calcBase: number | null
   paidBase: number | null
   diffBase: number | null
-  /** 残業代: 残業 + 深夜残業 (計算) / 割増扱い項目の合計 (給与)。 */
+  /** 残業代: 基本給(法定内)以外のすべて = 合計 − 基本給 (計算) / 割増扱い項目の合計 (給与)。
+   * 計算側が時間外系 3 区分だけだった頃は深夜(通常)・法定休日・法定外休日が
+   * どの段にも入らず `基本給 + 残業代 ≠ 合計` になっていた (Refs #673)。 */
   calcOvertime: number | null
   paidOvertime: number | null
   diffOvertime: number | null
