@@ -33,6 +33,7 @@ export default {
     const url = new URL(request.url);
     if (
       url.pathname === "/ws/scraper"
+      || url.pathname === "/ws/rdp"
       || url.pathname.startsWith("/scraper-zip/")
       || url.pathname.startsWith("/dvr-api/")
       || url.pathname.startsWith("/daily-report-api/")
@@ -51,6 +52,9 @@ export default {
       // /kintai-relay/* は打刻をオンプレ → GCP へ運ぶ機械経路 (Refs
       // ohishi-exp/rust-ichibanboshi#205 の 04b)。**ブラウザ経路ではない** — relay 側が
       // X-Alc-Proxy-Secret を constant-time 検証する (ここは素通しするだけ)。
+      // /ws/rdp はブラウザ内 RemoteApp ビューア ↔ 社内の RDP 中継 (Refs #693)。
+      // relay worker が Workers VPC binding で社内へ出る。token の検証も
+      // 向こう側 (auth-worker introspect) — ここは素通しするだけ。
       return env.SCRAPER_RELAY.fetch(request);
     }
     return (nitroApp as NitroHandler).fetch(request, env, ctx);
