@@ -240,6 +240,90 @@ Get-RDWebClientDeploymentSetting -Name LaunchResourceInBrowser
 | 想定同時利用者数 / 音声・印刷・ファイルの要否 | user | リスク #5 / #8 |
 | 方式 A (フルデスクトップ) の併設可否 | user | PR-4 の要否 |
 
+## 実機検証ログ (2026-08-17)
+
+対象機 `172.18.21.102` = `OHISHI-SRV.OHISHI.LOCAL` で実施。
+
+### 確定した構成
+
+| 項目 | 実測値 |
+|---|---|
+| OS | **Windows Server 2016 Standard** (10.0.14393)、HPE ProLiant ML30 Gen10 |
+| ドメイン | `OHISHI.LOCAL` のメンバーサーバー (DC は `OHSV03.ohishi.local`) |
+| 展開済み RDS 役割 | RD 接続ブローカー / RD セッション ホスト / RD Web アクセス (すべて同一機) |
+| RD ゲートウェイ | 当初**未配置**。Windows 機能としては導入済みだが**展開への登録は未完** (後述) |
+| RD ライセンス | 展開には未登録。**GPO で指定**されている (後述) |
+| CAL | **ユーザー CAL** (`LicensingMode = 4`)、`LicenseServers = localhost` |
+| 適用 GPO | `Default Domain Policy` と `ローカル グループ ポリシー` の 2 つのみ |
+| 証明書 | 展開に**未設定だった**ため、検証用に自己署名証明書を作成し 3 役割に割り当て |
+
+### 到達点 — 方式 D は原理的に成立することを実機で確認
+
+1. `Install-RDWebClientPackage` → `Import-RDWebClientBrokerCert` → `Publish-RDWebClientPackage`
+   で **RD Web Client の publish に成功**
+2. `https://ohishi-srv.ohishi.local/RDWeb/webclient/index.html` に**ログインできた**
+3. **publish 済み RemoteApp の一覧がブラウザに表示された** — `一番星 運送業システムVer.7`、
+   `大蔵大臣 NXVer4Su...`、`cmd`、`CutStudio`、`Power Automate`、`Power BI Desktop`、
+   `querySession` の 7 つ
+4. アプリ起動時に「リモート PC への接続が失われました」で切断 →
+   **MS が「一覧は見えるが接続できない場合は RD ゲートウェイを見よ」として挙げている症状**
+
+つまり残件は RD ゲートウェイのみ。**publish・認証・一覧表示までは動作済み**。
+
+### 詰まっている点 — `Add-RDServer` が「検証を実行しています」でハングする
+
+RD ゲートウェイを展開に登録する `Add-RDServer -Role RDS-GATEWAY` が完了しない。
+
+切り分け済み (すべて**シロ**):
+
+| 候補 | 結果 |
+|---|---|
+| TLS 1.0 無効化 (Server 2016 の RDS + WID を壊す既知問題) | ✕ 該当せず。`RDMS` は `Running` |
+| WinHTTP プロキシ | ✕ 「直接アクセス (プロキシ サーバーなし)」 |
+| WinRM 不通 | ✕ `Test-WSMan` が正常応答 |
+| 再起動保留 | ✕ `RebootPending` は `False` |
+| Windows Update 待ち | ✕ `wuauserv` は正常 |
+
+途中で `TSGateway` サービスが `StopPending` でハングする事象が発生 (後に `Running` に復帰)。
+
+**残る最有力候補は GPO**。MS の
+[Unable to Install RDS Deployment or Add RDS Roles](https://learn.microsoft.com/en-us/troubleshoot/windows-server/remote/unable-to-install-rds-deployment-or-add-rds-roles)
+が「展開変更を失敗させる」として名指ししているポリシーの筆頭が
+**「使用するリモート デスクトップ ライセンス サーバーを指定する」**で、本機にこれが当たっている。
+推奨手順は「一時的に外して実行し、終わったら戻す」。
+
+**業務時間外に実施する** (user 判断)。外している間、新規 RDS 接続がライセンス設定を見失うため。
+`Default Domain Policy` 由来かローカル GPO 由来かは要確認 (ドメイン由来なら影響範囲が全マシンに及ぶ)。
+
+### 副次的に判明した、設計に効く事実
+
+- **`fDisableCdm = 1`** — クライアントのドライブ リダイレクトが**無効**。
+  RemoteApp とローカル PC 間で**ファイルのやり取りができない**。ブラウザ経由でも同じ制約。
+  業務でファイル受け渡しが必要なら別途対処が要る。
+- **`cmd` が RemoteApp として publish されている** — コマンドプロンプトが誰でも開ける状態。
+  社内 LAN 限定の現状では実害は小さいが、**dtako-admin から使える = 実質的に外に出す**ことになるため、
+  公開前に publish 対象と RemoteApp ごとのユーザー割り当てを見直すこと。
+- **`.local` ドメインのため公的証明書が取れない**。外部公開時は Cloudflare Tunnel で
+  外向きの名前を与え、TLS を Cloudflare 側で終端する設計が必要。
+- ESENT 490 (`SystemIdentity.mdb` へのアクセス拒否) が頻出するが、これは
+  **RD ゲートウェイが Network Service で動くことによる既知の権限問題**で動作には影響しない。
+  `icacls "C:\Windows\System32\LogFiles\Sum" /grant "NETWORK SERVICE:(OI)(CI)M"` で解消する。
+
+### 次にやること
+
+1. 「使用するリモート デスクトップ ライセンス サーバーを指定する」の Winning GPO を特定する
+2. **業務時間外**に、当該ポリシーを一時解除して `Add-RDServer -Role RDS-GATEWAY` を完了させ、
+   `Set-RDDeploymentGatewayConfiguration -GatewayMode Custom` と
+   `Set-RDCertificate -Role RDGateway` まで実施し、**ポリシーを必ず復元する**
+3. ブラウザ側 PC に自己署名証明書を「信頼されたルート証明機関」として導入し、
+   **RemoteApp がブラウザ内で起動するところまで**確認する
+4. そこまで通ったら、**dtako-admin への iframe 埋め込みを実測**して方式 D / B の最終判定を行う
+
+`Add-RDServer` がどうしても通らない場合の回避策として、展開への登録を行わず
+`Set-RDDeploymentGatewayConfiguration -GatewayMode Custom` で外部ゲートウェイとして指定し、
+接続承認ポリシー (CAP) / リソース承認ポリシー (RAP) を RD ゲートウェイ マネージャーから
+手動作成する道がある (自動作成される分を手で作る手間と引き換えにハングを回避できる)。
+
 ## 参照
 
 - [Set up Remote Desktop web client for users — Microsoft Learn](https://learn.microsoft.com/en-us/windows-server/remote/remote-desktop-services/remote-desktop-web-client-admin)
