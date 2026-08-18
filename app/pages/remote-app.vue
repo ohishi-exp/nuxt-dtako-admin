@@ -9,10 +9,11 @@
  * WebSocket は 302 を辿れないので、**接続前に Access の cookie を確保する**
  * (`app/utils/rdp-access.ts`)。
  *
- * **接続先とパスワードはこのリポジトリに書かない。** 接続先は入力欄 (localStorage に
- * 記憶)、パスワードは毎回入力で記憶しない。この repo は public。
+ * **配置先ごとの値はこのリポジトリに書かない。** 宛先・ドメイン・RemoteApp は中継の
+ * `/defaults` が配り (権威は中継の `--allow` と site の env)、画面はそれを初期値に入れる。
+ * 読めなければ入力欄の値 (localStorage) をそのまま使う。パスワードは記憶しない。
  */
-import { browserDeps, ensureAccessSession, probeAccessSession, rdpWsUrl } from '~/utils/rdp-access'
+import { browserDeps, ensureAccessSession, fetchRdpDefaults, probeAccessSession, rdpWsUrl } from '~/utils/rdp-access'
 
 /** 中継の公開ホスト名 (`wss://…`)。Access がここを守る。 */
 const rdpRelayUrl = (useRuntimeConfig().public.rdpRelayUrl as string) || ''
@@ -52,7 +53,27 @@ onMounted(async () => {
   // 接続先が無いと WebSocket の URL を組めない。案内は connect() で出す。
   if (!rdpRelayUrl) return
   accessReady.value = await probeAccessSession(rdpWsUrl(rdpRelayUrl), browserDeps())
+  // Access を通れているなら既定値も読める。押す前に欄が埋まっている方が親切。
+  if (accessReady.value) await applyDefaults()
 })
+
+/**
+ * 中継が配る既定値を欄に入れる (Refs #693)。
+ *
+ * **宛先は中継の値で上書きする。** 中継は `--allow` で唯一の宛先を知っていて、
+ * 違う値を送れば「許可されていない宛先」で閉じられるだけなので、権威は向こうにある。
+ * ドメインと RemoteApp は**空のときだけ**入れる — 利用者が選んだ値 (フルデスクトップ
+ * にするために空にした、等) を消さないため。
+ *
+ * 読めなければ何もしない (古い中継・未ログイン・CORS 未設定はすべて同じ扱い)。
+ */
+async function applyDefaults() {
+  const defaults = await fetchRdpDefaults(rdpRelayUrl)
+  if (!defaults) return
+  if (defaults.destination) form.destination = defaults.destination
+  if (!form.domain && defaults.domain) form.domain = defaults.domain
+  if (!form.remoteApp && defaults.remoteApp) form.remoteApp = defaults.remoteApp
+}
 
 function remember() {
   try {
@@ -110,7 +131,6 @@ function makePrintSink() {
 
 async function connect() {
   errorText.value = ''
-  if (!form.destination) { errorText.value = '接続先を入れてください'; return }
   if (!rdpRelayUrl) { errorText.value = '中継の接続先が未設定です (NUXT_PUBLIC_RDP_RELAY_URL)'; return }
 
   connecting.value = true
@@ -120,6 +140,10 @@ async function connect() {
     status.value = 'Cloudflare Access を確認中…'
     await ensureAccessSession(rdpRelayUrl)
     accessReady.value = true
+
+    // 初回 (cookie が無くて mount 時に読めなかった) はここで埋まる。
+    await applyDefaults()
+    if (!form.destination) { errorText.value = '接続先を入れてください'; return }
 
     status.value = 'クライアントを読み込み中…'
     // wasm を含むので client 側でだけ読み込む。SSR には載せない。
