@@ -107,6 +107,9 @@ NUXT_ALC_API_URL = "https://rust-alc-api-566bls5vfq-an.a.run.app"
 # (front Worker から直接 Cloudflare Tunnel/Workers VPC 経由で dtako-scraper に
 # 到達する構成。rust-alc-api の SCRAPER_URL 経由の旧経路は廃止、Refs #XXX)。
 NUXT_PUBLIC_SCRAPER_RELAY_URL = "wss://dtako.ippoan.org"
+# RemoteApp ビューアが繋ぐ RDP 中継 (Cloudflare Access が守る公開ホスト名)。
+# 中継はオンプレ (localTunnel 経由)、環境ごとの差は無いので全 env で同じ。
+NUXT_PUBLIC_RDP_RELAY_URL = "wss://rdp.ippoan.org"
 # /api/ichiban/* が転送する rust-ichibanboshi (CAPE#01) の CF Tunnel hostname (Refs #330)。
 NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
 # CF Access Service Token の client_id (公開識別子なので secret ではなく var、
@@ -177,6 +180,9 @@ NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 NUXT_ALC_API_URL = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_SCRAPER_RELAY_URL = "wss://dtako-staging.ippoan.org"
+# RemoteApp ビューアが繋ぐ RDP 中継 (Cloudflare Access が守る公開ホスト名)。
+# 中継はオンプレ (localTunnel 経由)、環境ごとの差は無いので全 env で同じ。
+NUXT_PUBLIC_RDP_RELAY_URL = "wss://rdp.ippoan.org"
 NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
 NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"
 
@@ -240,6 +246,9 @@ NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 NUXT_ALC_API_URL = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_SCRAPER_RELAY_URL = "wss://dtako-preview.ippoan.org"
+# RemoteApp ビューアが繋ぐ RDP 中継 (Cloudflare Access が守る公開ホスト名)。
+# 中継はオンプレ (localTunnel 経由)、環境ごとの差は無いので全 env で同じ。
+NUXT_PUBLIC_RDP_RELAY_URL = "wss://rdp.ippoan.org"
 NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
 NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"
 
@@ -312,6 +321,9 @@ NUXT_PUBLIC_API_BASE = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_AUTH_WORKER_URL = "https://auth-staging.ippoan.org"
 NUXT_ALC_API_URL = "https://rust-alc-api-staging-566bls5vfq-an.a.run.app"
 NUXT_PUBLIC_SCRAPER_RELAY_URL = "wss://dtako-staging.ippoan.org"
+# RemoteApp ビューアが繋ぐ RDP 中継 (Cloudflare Access が守る公開ホスト名)。
+# 中継はオンプレ (localTunnel 経由)、環境ごとの差は無いので全 env で同じ。
+NUXT_PUBLIC_RDP_RELAY_URL = "wss://rdp.ippoan.org"
 NUXT_ICHIBAN_API_URL = "https://rust-ichiban.mtamaramu.com"
 NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID = "824a8b3c7042c7040924f38797a832f7.access"
 DEV_LOGIN = "true"
