@@ -28,6 +28,7 @@ const navigation = [
   { label: '類似運行検索・比較', icon: 'i-lucide-search', to: '/profit/compare' },
   { label: '一番星ヘルスチェック', icon: 'i-lucide-heart-pulse', to: '/ichiban-health' },
   { label: '給与DB取得', icon: 'i-lucide-database', to: '/kyuyo-fetch' },
+  { label: 'リモートアプリ', icon: 'i-lucide-monitor', to: '/remote-app' },
 ]
 </script>
 
