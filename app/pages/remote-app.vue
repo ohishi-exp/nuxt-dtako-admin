@@ -87,6 +87,13 @@ async function connect() {
     await import('@devolutions/iron-remote-desktop')
     const rdp = await import('@devolutions/iron-remote-desktop-rdp')
 
+    // **wasm の初期化。忘れると `__wbindgen_malloc` の undefined 参照で落ちる。**
+    // Backend を触る前に一度だけ呼ぶ必要がある (デモクライアントも onMount でやっている)。
+    // ページを再訪すると setup は再実行されるので、フラグは window に置く。
+    const w = window as unknown as { __ironRdpInit?: Promise<void> }
+    w.__ironRdpInit ??= rdp.init('INFO')
+    await w.__ironRdpInit
+
     status.value = '接続中…'
     remember()
 
