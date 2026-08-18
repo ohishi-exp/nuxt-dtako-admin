@@ -14,7 +14,11 @@
  * 打てるようにしておくと中継の allowlist とズレて「許可されていない宛先」で黙って
  * 閉じられるだけなので、欄ごと消してある。打つのは利用者ごとの資格情報だけ。
  * 前回の値は localStorage に残し、`/defaults` が読めなかったときの最後の頼みにする。
+ *
+ * **パスワードはこのアプリが持たない。** 接続が通った時点でブラウザのパスワード
+ * マネージャに預ける (`app/utils/browser-credentials.ts`)。保存するかは利用者が決める。
  */
+import { saveBrowserCredential } from '~/utils/browser-credentials'
 import { browserDeps, ensureAccessSession, fetchRdpDefaults, probeAccessSession, rdpWsUrl } from '~/utils/rdp-access'
 
 /** 中継の公開ホスト名 (`wss://…`)。Access がここを守る。 */
@@ -33,7 +37,10 @@ const form = reactive({
   width: 1920,
   height: 920,
 })
-/** **記憶しない。** */
+/**
+ * **このアプリは持たない。** localStorage にもサーバーにも書かない。
+ * 預け先はブラウザのパスワードマネージャだけ (`saveBrowserCredential`)。
+ */
 const password = ref('')
 
 const status = ref('未接続')
@@ -220,7 +227,12 @@ async function connect() {
     // クライアントは何も送らず、サーバーが十数秒で黙って切る (実機で再現した)。
     userInteraction.setVisibility(true)
 
+    // **接続が通った直後に預ける。** SPA は遷移しないので、ブラウザ任せだと
+    // 「保存しますか」が出ない (実機で出なかった)。保存するかは利用者が決める。
+    await saveBrowserCredential(form.username, password.value)
+
     // 画面に残さない。ここから先はサーバー側のセッションが持っている。
+    // 次回は保存したブラウザが autofill で埋める。
     password.value = ''
     connected.value = true
     status.value = '接続中'
@@ -256,16 +268,21 @@ async function connect() {
       リモートアプリ
     </h1>
 
+    <!-- **ふつうのログインフォームの形にしておく。** name/id が無いと、ブラウザの
+         パスワードマネージャは保存も autofill も判断できない。 -->
     <form v-if="!connected" class="flex flex-wrap items-end gap-3" @submit.prevent="connect">
-      <label class="flex flex-col text-sm">
+      <label class="flex flex-col text-sm" for="rdp-username">
         ユーザー名
-        <input v-model="form.username" class="border rounded px-2 py-1" autocomplete="username">
+        <input
+          id="rdp-username" v-model="form.username" name="username"
+          class="border rounded px-2 py-1" autocomplete="username"
+        >
       </label>
-      <label class="flex flex-col text-sm">
+      <label class="flex flex-col text-sm" for="rdp-password">
         パスワード
         <input
-          v-model="password" type="password" class="border rounded px-2 py-1"
-          autocomplete="current-password"
+          id="rdp-password" v-model="password" name="password" type="password"
+          class="border rounded px-2 py-1" autocomplete="current-password"
         >
       </label>
       <button
