@@ -62,8 +62,17 @@ function reject(status: number, reason: string): Response {
   return new Response(reason, { status });
 }
 
-/** auth-worker `/auth/introspect` を service binding 経由で叩く (DO 側と同じ形)。 */
-async function introspect(env: RdpRelayEnv, token: string): Promise<IntrospectResult> {
+/**
+ * auth-worker `/auth/introspect` を service binding 経由で叩く (DO 側と同じ形)。
+ *
+ * **`origin` を必ず送る。** これが無いと auth-worker は通さない (実機で 401 になった)。
+ * DO 側の introspect も `{ token, origin }` を送っている。
+ */
+async function introspect(
+  env: RdpRelayEnv,
+  token: string,
+  origin: string,
+): Promise<IntrospectResult> {
   const secret = env.INTERNAL_SHARED_SECRET;
   const sharedSecret =
     typeof secret === "string"
@@ -71,16 +80,17 @@ async function introspect(env: RdpRelayEnv, token: string): Promise<IntrospectRe
       : await (secret as { get?: () => Promise<string> } | undefined)?.get?.();
   if (!sharedSecret || !env.AUTH_WORKER) return { active: false };
 
-  const origin = env.NUXT_PUBLIC_AUTH_WORKER_URL || "https://auth.ippoan.org";
+  // 引数の origin (呼び出し元のオリジン) とは別物。DO 側と同じ名前にしておく。
+  const authWorkerUrl = env.NUXT_PUBLIC_AUTH_WORKER_URL || "https://auth.ippoan.org";
   try {
-    const res = await env.AUTH_WORKER.fetch(`${origin}/auth/introspect`, {
+    const res = await env.AUTH_WORKER.fetch(`${authWorkerUrl}/auth/introspect`, {
       method: "POST",
       headers: {
         Authorization: sharedSecret,
         "Content-Type": "application/json",
         "User-Agent": "nuxt-dtako-admin/rdp-relay-proxy",
       },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ token, origin }),
     });
     if (!res.ok) return { active: false };
     return (await res.json()) as IntrospectResult;
@@ -106,7 +116,9 @@ export async function proxyRdpWebSocket(env: RdpRelayEnv, request: Request): Pro
   const token = url.searchParams.get("token");
   if (!token) return reject(401, "token クエリが無い");
 
-  if (decideRelayAuth(await introspect(env, token)).status !== 101) {
+  if (decideRelayAuth(await introspect(env, token, `https://${url.host}`)).status !== 101) {
+    // ここを黙って返していたせいで、実機の 401 が Workers Logs から追えなかった。
+    console.error(`rdp-relay-proxy introspect rejected: origin=https://${url.host}`);
     return reject(401, "セッションが無効か期限切れです");
   }
 
