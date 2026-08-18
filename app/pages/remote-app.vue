@@ -277,14 +277,6 @@ async function connect() {
       <span class="text-sm opacity-70">{{ status }}</span>
     </form>
 
-    <!-- 打てないので、せめて「どこへ繋ぐことになっているか」は見えるようにする。 -->
-    <p v-if="!connected && form.destination" class="text-xs opacity-60">
-      接続先 {{ form.destination }}
-      <span v-if="form.domain"> / ドメイン {{ form.domain }}</span>
-      <span v-if="form.remoteApp"> / {{ form.remoteApp }}</span>
-      <span v-else> / フルデスクトップ</span>
-    </p>
-
     <p v-if="accessReady === false" class="text-sm opacity-70">
       Cloudflare Access に未ログインです。「接続」を押すとログイン画面が別窓で開きます
       (ポップアップを許可してください)。
