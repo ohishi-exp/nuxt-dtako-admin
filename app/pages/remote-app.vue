@@ -9,9 +9,11 @@
  * WebSocket は 302 を辿れないので、**接続前に Access の cookie を確保する**
  * (`app/utils/rdp-access.ts`)。
  *
- * **配置先ごとの値はこのリポジトリに書かない。** 宛先・ドメイン・RemoteApp は中継の
- * `/defaults` が配り (権威は中継の `--allow` と site の env)、画面はそれを初期値に入れる。
- * 読めなければ入力欄の値 (localStorage) をそのまま使う。パスワードは記憶しない。
+ * **配置先ごとの値はこのリポジトリにも画面にも持たない。** 宛先・ドメイン・RemoteApp は
+ * 中継の `/defaults` が配る (権威は中継の `--allow` と site の env)。入力欄は無い —
+ * 打てるようにしておくと中継の allowlist とズレて「許可されていない宛先」で黙って
+ * 閉じられるだけなので、欄ごと消してある。打つのは利用者ごとの資格情報だけ。
+ * 前回の値は localStorage に残し、`/defaults` が読めなかったときの最後の頼みにする。
  */
 import { browserDeps, ensureAccessSession, fetchRdpDefaults, probeAccessSession, rdpWsUrl } from '~/utils/rdp-access'
 
@@ -58,21 +60,22 @@ onMounted(async () => {
 })
 
 /**
- * 中継が配る既定値を欄に入れる (Refs #693)。
+ * 中継が配る接続先を取り込む (Refs #693)。
  *
- * **宛先は中継の値で上書きする。** 中継は `--allow` で唯一の宛先を知っていて、
- * 違う値を送れば「許可されていない宛先」で閉じられるだけなので、権威は向こうにある。
- * ドメインと RemoteApp は**空のときだけ**入れる — 利用者が選んだ値 (フルデスクトップ
- * にするために空にした、等) を消さないため。
+ * **返ってきた値を丸ごと採る。空も含めて。** 画面に入力欄が無くなったので、
+ * ここで「空のときだけ入れる」をやると、site の env で `||ALIAS` を消して
+ * フルデスクトップに戻しても、localStorage に残った古い値が生き続けてしまう。
+ * 権威は中継 1 か所、というのがこの作りの前提。
  *
- * 読めなければ何もしない (古い中継・未ログイン・CORS 未設定はすべて同じ扱い)。
+ * 読めなければ何もしない — 前回の値 (localStorage) がそのまま残るので、
+ * 中継が一時的に読めないだけなら接続はできる。
  */
 async function applyDefaults() {
   const defaults = await fetchRdpDefaults(rdpRelayUrl)
   if (!defaults) return
-  if (defaults.destination) form.destination = defaults.destination
-  if (!form.domain && defaults.domain) form.domain = defaults.domain
-  if (!form.remoteApp && defaults.remoteApp) form.remoteApp = defaults.remoteApp
+  form.destination = defaults.destination
+  form.domain = defaults.domain
+  form.remoteApp = defaults.remoteApp
 }
 
 function remember() {
@@ -141,9 +144,12 @@ async function connect() {
     await ensureAccessSession(rdpRelayUrl)
     accessReady.value = true
 
-    // 初回 (cookie が無くて mount 時に読めなかった) はここで埋まる。
+    // 初回 (cookie が無くて mount 時に読めなかった) はここで取れる。
     await applyDefaults()
-    if (!form.destination) { errorText.value = '接続先を入れてください'; return }
+    if (!form.destination) {
+      errorText.value = '中継から接続先を取得できませんでした (/defaults)'
+      return
+    }
 
     status.value = 'クライアントを読み込み中…'
     // wasm を含むので client 側でだけ読み込む。SSR には載せない。
@@ -252,20 +258,8 @@ async function connect() {
 
     <form v-if="!connected" class="flex flex-wrap items-end gap-3" @submit.prevent="connect">
       <label class="flex flex-col text-sm">
-        接続先
-        <input v-model="form.destination" class="border rounded px-2 py-1" placeholder="host:port">
-      </label>
-      <label class="flex flex-col text-sm">
         ユーザー名
         <input v-model="form.username" class="border rounded px-2 py-1" autocomplete="username">
-      </label>
-      <label class="flex flex-col text-sm">
-        ドメイン
-        <input v-model="form.domain" class="border rounded px-2 py-1">
-      </label>
-      <label class="flex flex-col text-sm">
-        アプリ (空でデスクトップ)
-        <input v-model="form.remoteApp" class="border rounded px-2 py-1" placeholder="||ALIAS">
       </label>
       <label class="flex flex-col text-sm">
         パスワード
@@ -282,6 +276,14 @@ async function connect() {
       </button>
       <span class="text-sm opacity-70">{{ status }}</span>
     </form>
+
+    <!-- 打てないので、せめて「どこへ繋ぐことになっているか」は見えるようにする。 -->
+    <p v-if="!connected && form.destination" class="text-xs opacity-60">
+      接続先 {{ form.destination }}
+      <span v-if="form.domain"> / ドメイン {{ form.domain }}</span>
+      <span v-if="form.remoteApp"> / {{ form.remoteApp }}</span>
+      <span v-else> / フルデスクトップ</span>
+    </p>
 
     <p v-if="accessReady === false" class="text-sm opacity-70">
       Cloudflare Access に未ログインです。「接続」を押すとログイン画面が別窓で開きます
