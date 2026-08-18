@@ -2,7 +2,7 @@
 name: nuxt-dtako-admin-map
 generated-from: nuxt-dtako-admin:2b9f72a885a55d6c5f3e9ad73912a04ed7738baa
 paths: [app/, server/]
-description: ippoan/nuxt-dtako-admin (dtako デジタコ運行データ管理画面、Nuxt 4 + Cloudflare Workers) の構造ナビゲーション。rust-alc-api を直 fetch する frontend と、R2 binding が要る Y時間 Excel export、ブラウザ内完結の NET780 ビューア (net780-wasm 経由) の server route / page 配置を 1 枚にまとめる。トリガー:「dtako」「nuxt-dtako-admin」「Y時間 export」「y-time-export」「vehicle-settings」「DTAKO_R2」「運行データ」「dtako.ippoan.org」「net780」「NET780」「net780-wasm」等。
+description: ippoan/nuxt-dtako-admin (dtako デジタコ運行データ管理画面、Nuxt 4 + Cloudflare Workers) の構造ナビゲーション。rust-alc-api を直 fetch する frontend と、R2 binding が要る Y時間 Excel export、ブラウザ内完結の NET780 ビューア (net780-wasm 経由) の server route / page 配置を 1 枚にまとめる。トリガー:「dtako」「nuxt-dtako-admin」「Y時間 export」「y-time-export」「vehicle-settings」「DTAKO_R2」「運行データ」「dtako.ippoan.org」「net780」「NET780」「net780-wasm」「remote-app」「RemoteApp」「IronRDP」「RDP」「rdp.ippoan.org」「Cloudflare Access」等。
 ---
 
 # nuxt-dtako-admin-map — ippoan/nuxt-dtako-admin 構造ナビゲーション
@@ -22,6 +22,7 @@ dtako (デジタコ運行データ) 管理画面。Nuxt 4 + Nitro `cloudflare_mo
 | **pages (時間集計)** | `app/pages/{daily-hours/index,restraint-compare,restraint-report,restraint-fetch,y-time-export}.vue` | 日別時間 / 拘束時間 比較・レポート / 拘束CSV取得 (theearth F-ERS2010、下記) / Y時間 export UI |
 | **pages (車両設定)** | `app/pages/vehicle-settings/{index,diff,history,unconfirmed}.vue` | デジタコ車両設定の閲覧・差分・履歴・未確認 |
 | **pages (管理/認証)** | `app/pages/{members,api-tokens,event-classifications,login}.vue` `auth/callback.vue` `ichiban-health.vue` | メンバ / API トークン / イベント分類 / login / 一番星ヘルスチェック (`/ichiban-health` — rust-ichibanboshi の既存 API と給与読み取り API を一括疎通確認、pure ロジックは `app/utils/ichiban-health.ts`、Refs #369) |
+| **pages (社内リモート)** | `app/pages/remote-app.vue` | ブラウザ内 RemoteApp ビューア (IronRDP/WASM、Refs #693)。**中継は Cloudflare Access が守る公開ホスト名へ直結** — Worker はデータ経路に居ない (下記) |
 | **pages (外部利用者)** | `app/pages/dvr-viewer.vue` | DVR 動画ビューア (Refs #90)。theearth credential pass-through ログイン (auth-worker 不要、`auth.global.ts` の publicPaths + `layout: false`、サイドバー「DVR 動画」タブからも遷移可)。`/dvr-api/*` は worker/index.ts → SCRAPER_RELAY service binding → `workers/dtako-scraper-relay` の DO (`theearth-session.ts` / `theearth-venus-client.ts`) |
 | **components** | `app/components/Event*.vue` `VehicleSettings*.vue` `CsvDataTable.vue` `DriverSearchSelect.vue` | イベント表 / 車両設定 表示・diff / CSV テーブル |
 | **server/api (proxy)** | `server/api/proxy/[...path].ts` `server/utils/alc-proxy.ts` | `/api/proxy/*` → auth-worker `/alc-proxy/*` (introspect / ACL / OIDC mint / identity 注入を集約) → rust-alc-api `/api/*` (createAuthWorkerProxyHandler、#434 step 3 方式 B)。consumer は AUTH_WORKER service binding に X-Alc-Proxy-Secret + browser JWT を thin-forward するだけ。`alc-proxy.ts` の `alcProxyFetch` は R2 が要る route が同じ `/alc-proxy` 経由で backend を叩き Response を受け取るヘルパ (lockdown 後も OIDC 不要で通る。旧 `identity.ts` の直叩き+resolveIdentityHeaders を置換、#434 caller #2) |
@@ -1004,6 +1005,70 @@ alc の運行数が 1130 → 1129 に減った)。
 | `workers/dtako-scraper-relay/src/index.ts` | `comp_id` (http 用) / `session` (vpc-relay 用) で DO へ routing、`/scraper-zip/*` 転送 |
 | `worker/index.ts` | app 本体の entry。`/ws/scraper` と `/scraper-zip/*` を SCRAPER_RELAY service binding に転送 |
 | `app/utils/api.ts` | `triggerScrapeStream()` / `buildScraperZipUrl()` |
+
+## RemoteApp ビューア (`/remote-app`、Refs #693)
+
+社内 RDS の RemoteApp をブラウザの中で描画する。RDP を喋るのは WASM
+(`@devolutions/iron-remote-desktop{,-rdp}`)、その先は**オンプレの中継**
+(`ohishi-exp/rust-ichibanboshi` の `src/bin/rdp_relay.rs`) が RDS との TLS を張る。
+
+```
+ブラウザ ──wss──> rdp.ippoan.org (Cloudflare Access)
+                 → localTunnel → 中継 (Cf-Access-Jwt-Assertion を JWKS 検証)
+                 → RDS:3389
+```
+
+**Worker は経路に居ない。** 旧 `/ws/rdp` (app worker → service binding → relay worker →
+Workers VPC binding) は #705 で撤去済み。中継が `--auth cf-access` で動く以上、Worker 経由では
+`Cf-Access-Jwt-Assertion` を付けられず 401 になるため、残しても切り戻し先にならない
+(戻すなら中継を `--auth vpc` にする側の判断が先)。
+
+### `new WebSocket()` は 302 を辿れない — 接続前に Access の cookie を確保する
+
+cookie (`CF_Authorization`) が無いまま `wss://…/rdp` を開くと、Access のリダイレクトを
+WebSocket が処理できず**理由の分からない接続失敗**になる。`app/utils/rdp-access.ts` が:
+
+1. `/rdp` へ WebSocket を 1 本張って `open` が来るかで cookie の有無を測る
+   (**`fetch` では測れない** — 中継の `/health` は CORS ヘッダを持たず、Access も
+   preflight を 403 で落とすので、認証済みでも cross-origin fetch は失敗しうる。
+   「失敗 = 未ログイン」と読めない)
+2. 無ければ `/health` を**別窓で開いて** Access を通し (auth-worker の OIDC surface が
+   既存 `logi_auth_token` セッションで無言に通す)、1 秒間隔で測り直す
+3. 通ったら窓を閉じて本接続
+
+`window.open` は**クリック直後**にしか通らない (transient activation) ので、`connect()` の
+先頭で await する。probe の制限時間を 4 秒に抑えてあるのはこのため。
+
+**中継のログに `WARN 中継セッション異常終了: ハンドシェイク前に切断された` が毎回出るのは
+この probe の跡**で、障害ではない。
+
+### 配置先ごとの値は画面に持たない (`/defaults`)
+
+宛先・ドメイン・RemoteApp のエイリアスは**中継の `/defaults`** が配る (権威は中継の
+`--allow` と site の env `/etc/ichibanboshi/rdp-relay.env`)。画面に入力欄は無い —
+打てるようにすると中継の allowlist とズレて「許可されていない宛先」で黙って閉じられる。
+**返ってきた値は空も含めて丸ごと採る** (欄が無い以上「空のときだけ入れる」だと、env で
+`||ALIAS` を消してフルデスクトップに戻しても localStorage の古い値が生き続ける)。
+読めなければ前回値 (localStorage) で繋ぎ、それも無ければ
+「中継から接続先を取得できませんでした (/defaults)」で止める。
+
+パスワードは**このアプリが持たない** — 接続が通った時点で Credential Management API に
+預け、保存するかは利用者が決める (`app/utils/browser-credentials.ts`)。SPA は submit しても
+遷移しないので、ブラウザ任せでは保存が提案されない。入力欄の `name`/`id` も保存と
+autofill の手がかりとして要る。
+
+### 関連ファイル
+
+| ファイル | 役割 |
+|---|---|
+| `app/pages/remote-app.vue` | 画面。入力欄は ユーザー名 / パスワード だけ |
+| `app/utils/rdp-access.ts` | URL 組み立て / cookie の疎通確認 / ログイン窓 / `/defaults` 読み取り (`coverage_100.toml` 登録済み) |
+| `app/utils/browser-credentials.ts` | パスワードマネージャへの受け渡し |
+| `wrangler.toml` `[vars]` | `NUXT_PUBLIC_RDP_RELAY_URL = "wss://rdp.ippoan.org"` (全 env 共通。`runtimeConfig.public.rdpRelayUrl`) |
+| `vendor/iron-remote-desktop-rdp/` | WASM クライアント (vendoring) |
+
+中継側 (bin / systemd / env / Access アプリ) は `rust-ichibanboshi-map` skill を見る。
+
 
 ## Cron (VPS / GCE cron の Worker 移行)
 
