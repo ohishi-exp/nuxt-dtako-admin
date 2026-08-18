@@ -23,7 +23,7 @@ export default defineNuxtConfig({
       // 経由で dtako-scraper に到達する)。
       scraperRelayUrl: process.env.NUXT_PUBLIC_SCRAPER_RELAY_URL || '',
       // RemoteApp ビューアが繋ぐ RDP 中継 (Cloudflare Access が守る公開ホスト名)。
-      // Worker の `/ws/rdp` を経由しない直結経路 (app/utils/rdp-access.ts)。
+      // 画面から直接張る (app/utils/rdp-access.ts)。Worker はこの経路に居ない。
       rdpRelayUrl: process.env.NUXT_PUBLIC_RDP_RELAY_URL || '',
     },
   },

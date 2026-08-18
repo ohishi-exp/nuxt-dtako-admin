@@ -53,14 +53,6 @@ service = "auth-worker"
 binding = "DTAKO_SCRAPER_VPC"
 service_id = "019f20af-c6ac-7dd0-8381-ea22add4bd40"
 
-# Workers VPC binding — 社内の RDP 中継 (rust-ichibanboshi の rdp-relay) に
-# localTunnel 経由で到達する VPC Service `rdp-relay`。`/ws/rdp` が使う。
-# **宛先の host/port は VPC Service 側の設定が持つ** (この repo は public なので
-# ここには書かない)。中継は公開ホスト名を持たず、この binding からしか届かない。
-[[vpc_services]]
-binding = "RDP_RELAY_VPC"
-service_id = "01a01099-b193-7c82-b586-91570b6cec32"
-
 [observability]
 enabled = true
 
@@ -192,14 +184,6 @@ service = "auth-worker-staging"
 binding = "DTAKO_SCRAPER_VPC"
 service_id = "019f20af-c6ac-7dd0-8381-ea22add4bd40"
 
-# Workers VPC binding — 社内の RDP 中継 (rust-ichibanboshi の rdp-relay) に
-# localTunnel 経由で到達する VPC Service `rdp-relay`。`/ws/rdp` が使う。
-# **宛先の host/port は VPC Service 側の設定が持つ** (この repo は public なので
-# ここには書かない)。中継は公開ホスト名を持たず、この binding からしか届かない。
-[[env.staging.vpc_services]]
-binding = "RDP_RELAY_VPC"
-service_id = "01a01099-b193-7c82-b586-91570b6cec32"
-
 # named environment は top-level [observability] を継承しない (wrangler の既定挙動、
 # keep_vars と同種の罠)。これが無いと staging では console.log (Workers Logs) が
 # 一切キャプチャされず、request/websocket のライフサイクルイベントだけが見える状態
@@ -302,14 +286,6 @@ service = "auth-worker-staging"
 [[env.preview.vpc_services]]
 binding = "DTAKO_SCRAPER_VPC"
 service_id = "019f20af-c6ac-7dd0-8381-ea22add4bd40"
-
-# Workers VPC binding — 社内の RDP 中継 (rust-ichibanboshi の rdp-relay) に
-# localTunnel 経由で到達する VPC Service `rdp-relay`。`/ws/rdp` が使う。
-# **宛先の host/port は VPC Service 側の設定が持つ** (この repo は public なので
-# ここには書かない)。中継は公開ホスト名を持たず、この binding からしか届かない。
-[[env.preview.vpc_services]]
-binding = "RDP_RELAY_VPC"
-service_id = "01a01099-b193-7c82-b586-91570b6cec32"
 
 [env.preview.observability]
 enabled = true

@@ -14,7 +14,6 @@ import {
   tenantForCompId,
 } from "./kintai-relay";
 import { resolveDtakoAccountsRaw, resolveSecretBinding, runScheduledCron } from "./cron";
-import { proxyRdpWebSocket } from "./rdp-relay-proxy";
 import {
   countSplitFailed,
   DEFAULT_HISTORY_LIMIT,
@@ -44,8 +43,6 @@ export interface RelayWorkerEnv {
   ICHIBAN_CF_ACCESS_CLIENT_SECRET?: unknown;
   /** 打刻を運ぶ対象の会社。tenant は KV の `dtako_accounts` から引く。 */
   KINTAI_COMP_ID?: string;
-  /** VPC Service `rdp-relay` (社内の RDP 中継)。`/ws/rdp` が使う (Refs #693)。 */
-  RDP_RELAY_VPC?: { fetch(input: string, init?: RequestInit): Promise<Response> };
   /** auth-worker の origin。introspect の絶対 URL 組み立てにのみ使う。 */
   NUXT_PUBLIC_AUTH_WORKER_URL?: string;
 }
@@ -172,13 +169,6 @@ export default {
       }
       const id = env.RELAY.idFromName(key);
       return env.RELAY.get(id).fetch(request);
-    }
-
-    if (url.pathname === "/ws/rdp") {
-      // ブラウザ内 RemoteApp ビューア ↔ 社内の RDP 中継 (Refs #693)。
-      // DO を通さない — scraper と違い session ごとの状態を持たず、素の双方向
-      // ストリームを流すだけなので、DO instance を挟む理由が無い。
-      return proxyRdpWebSocket(env, request);
     }
 
     if (url.pathname.startsWith("/scraper-zip/")) {

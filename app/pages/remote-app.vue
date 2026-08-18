@@ -7,8 +7,7 @@
  * データ経路に居ない。中継は `Cf-Access-Jwt-Assertion` を自分で検証する。
  *
  * WebSocket は 302 を辿れないので、**接続前に Access の cookie を確保する**
- * (`app/utils/rdp-access.ts`)。旧経路の `/ws/rdp` (Worker が introspect して VPC
- * binding へ繋ぐ) は切り戻し先として残してあるが、中継が cf-access モードの間は通らない。
+ * (`app/utils/rdp-access.ts`)。
  *
  * **接続先とパスワードはこのリポジトリに書かない。** 接続先は入力欄 (localStorage に
  * 記憶)、パスワードは毎回入力で記憶しない。この repo は public。
