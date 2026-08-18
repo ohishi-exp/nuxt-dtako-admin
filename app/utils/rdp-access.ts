@@ -35,6 +35,12 @@ const RDP_PATH = '/rdp'
 const ACCESS_LOGIN_PATH = '/health'
 
 /**
+ * 配置先ごとの既定値を配る口 (`rust-ichibanboshi` の `rdp_defaults.rs`)。
+ * 宛先は中継の allowlist そのものなので、**画面は同じ値を持たない**。
+ */
+const DEFAULTS_PATH = '/defaults'
+
+/**
  * 疎通確認 1 回の制限時間。
  *
  * **5 秒より短くしてある。** 未ログインなら Access が即 302 を返すので通常は 1 秒も
@@ -87,13 +93,56 @@ export function rdpWsUrl(base: string): string {
 }
 
 /**
- * `wss://host` → `https://host/health`。
+ * `wss://host` → `https://host`。
  *
  * 設定は WS 用に `wss://` で持っている (`scraperRelayUrl` と同じ形) ので、
- * 遷移用に http scheme へ直す。
+ * HTTP で読む口はここで scheme を直す。
  */
+function httpBase(base: string): string {
+  return trimSlash(base).replace(/^ws(s?):\/\//, 'http$1://')
+}
+
+/** Access のログイン遷移に使う URL。 */
 export function accessLoginUrl(base: string): string {
-  return `${trimSlash(base).replace(/^ws(s?):\/\//, 'http$1://')}${ACCESS_LOGIN_PATH}`
+  return `${httpBase(base)}${ACCESS_LOGIN_PATH}`
+}
+
+/** 中継が配る接続の既定値。**資格情報は入っていない** (利用者ごとに違うため)。 */
+export interface RdpDefaults {
+  /** 繋ぎ先。中継の allowlist そのものなので、画面の値より優先してよい。 */
+  destination: string
+  domain: string
+  remoteApp: string
+}
+
+function asString(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+/**
+ * 中継の `/defaults` を読む。**読めなければ `null`** で、画面は利用者の入力を使う。
+ *
+ * 失敗の形は 3 つあってどれも区別しない — cookie が無い (Access の 302 が
+ * CORS で読めない)、中継が古くて口が無い (404)、CORS 未設定 (応答は返るが読めない)。
+ * どれも「既定値が無い」として同じに扱えば、画面は入力欄で成立し続ける。
+ */
+export async function fetchRdpDefaults(
+  base: string,
+  fetchFn: typeof fetch = globalThis.fetch,
+): Promise<RdpDefaults | null> {
+  try {
+    const res = await fetchFn(`${httpBase(base)}${DEFAULTS_PATH}`, { credentials: 'include' })
+    if (!res.ok) return null
+    const body = await res.json() as Record<string, unknown>
+    return {
+      destination: asString(body.destination),
+      domain: asString(body.domain),
+      remoteApp: asString(body.remote_app),
+    }
+  }
+  catch {
+    return null
+  }
 }
 
 /**

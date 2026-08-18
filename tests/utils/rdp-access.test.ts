@@ -3,6 +3,7 @@ import {
   accessLoginUrl,
   browserDeps,
   ensureAccessSession,
+  fetchRdpDefaults,
   LOGIN_CLOSED,
   LOGIN_TIMEOUT,
   LOGIN_TIMEOUT_MS,
@@ -200,6 +201,53 @@ describe('ensureAccessSession', () => {
     }
     finally {
       globalAny.WebSocket = original
+    }
+  })
+})
+
+describe('fetchRdpDefaults', () => {
+  function jsonResponse(body: unknown, ok = true) {
+    return { ok, json: async () => body } as unknown as Response
+  }
+
+  it('中継が配る値を読み、remote_app を camelCase に読み替える', async () => {
+    const fetchFn = vi.fn(async () => jsonResponse({
+      destination: '10.0.0.1:3389', domain: 'OHISHI', remote_app: '||APP',
+    }))
+    await expect(fetchRdpDefaults(BASE, fetchFn as unknown as typeof fetch)).resolves.toEqual({
+      destination: '10.0.0.1:3389', domain: 'OHISHI', remoteApp: '||APP',
+    })
+    // cookie を送らないと Access に弾かれる。scheme は http 側に直す。
+    expect(fetchFn).toHaveBeenCalledWith('https://rdp.example.org/defaults', { credentials: 'include' })
+  })
+
+  it('欠けている値は空文字にする (古い中継が一部しか返さない場合)', async () => {
+    const fetchFn = vi.fn(async () => jsonResponse({ destination: '10.0.0.1:3389', domain: 42 }))
+    await expect(fetchRdpDefaults(BASE, fetchFn as unknown as typeof fetch)).resolves.toEqual({
+      destination: '10.0.0.1:3389', domain: '', remoteApp: '',
+    })
+  })
+
+  it('404 (口の無い古い中継) は既定値なしとして扱う', async () => {
+    const fetchFn = vi.fn(async () => jsonResponse(null, false))
+    await expect(fetchRdpDefaults(BASE, fetchFn as unknown as typeof fetch)).resolves.toBeNull()
+  })
+
+  it('CORS で読めない / 届かないときも既定値なし', async () => {
+    const fetchFn = vi.fn(async () => { throw new TypeError('Failed to fetch') })
+    await expect(fetchRdpDefaults(BASE, fetchFn as unknown as typeof fetch)).resolves.toBeNull()
+  })
+
+  it('fetch を省くと global の fetch を使う', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({ destination: 'd', domain: 'dom', remote_app: 'app' }))
+    try {
+      await expect(fetchRdpDefaults(BASE)).resolves.toEqual({
+        destination: 'd', domain: 'dom', remoteApp: 'app',
+      })
+    }
+    finally {
+      spy.mockRestore()
     }
   })
 })
