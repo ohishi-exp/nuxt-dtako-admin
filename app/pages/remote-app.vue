@@ -49,6 +49,27 @@ function remember() {
   catch { /* 記憶できなくても接続はできる */ }
 }
 
+/**
+ * 例外の中身を文字列にする。
+ *
+ * IronRDP が投げる `IronError` は **`Error` ではない**ので `String(e)` だと
+ * `[object Object]` になり、実機で理由が一切分からなかった。
+ */
+function describeError(e: unknown): string {
+  if (e instanceof Error) return e.message
+  const iron = e as { backtrace?: () => string, kind?: () => unknown }
+  if (typeof iron?.backtrace === 'function') {
+    const kind = typeof iron.kind === 'function' ? `${String(iron.kind())}: ` : ''
+    return kind + String(iron.backtrace())
+  }
+  try {
+    return JSON.stringify(e) ?? String(e)
+  }
+  catch {
+    return String(e)
+  }
+}
+
 /** 印刷ジョブを組み立ててブラウザに落とす。RemoteApp 側は PDF ドライバへ印刷する。 */
 function makePrintSink() {
   const jobs = new Map<number, Uint8Array[]>()
@@ -146,15 +167,33 @@ async function connect() {
 
     const config = configBuilder.build()
 
-    await userInteraction.connect(config)
+    const session = await userInteraction.connect(config)
+
+    // **`connect()` はセッションを走らせない。** 返ってきた `run()` を呼ばないと
+    // クライアントは何も送らず、サーバーが十数秒で黙って切る (実機で再現した)。
+    userInteraction.setVisibility(true)
 
     // 画面に残さない。ここから先はサーバー側のセッションが持っている。
     password.value = ''
     connected.value = true
     status.value = '接続中'
+
+    // `run()` はセッションが終わるまで解決しない。await で待つと画面が出せないので繋がない。
+    session
+      .run()
+      .then((info: { reason?: () => string }) => {
+        status.value = `切断 (${info?.reason?.() ?? '正常終了'})`
+      })
+      .catch((e: unknown) => {
+        status.value = '切断'
+        errorText.value = describeError(e)
+      })
+      .finally(() => {
+        connected.value = false
+      })
   }
   catch (e) {
-    errorText.value = e instanceof Error ? e.message : String(e)
+    errorText.value = describeError(e)
     status.value = '切断'
     connected.value = false
   }
