@@ -104,6 +104,12 @@ async function connect() {
     }
     el.setAttribute('scale', 'fit')
     el.setAttribute('flexcenter', 'true')
+    // **カスタム要素には既定のスタイルが無い。** 指定しないと display:inline /
+    // width:auto のまま 0x0 になり、canvas (1920x920) が画面外へ押し出される
+    // (実機で「繋がっているのに何も映らない」になった)。
+    el.style.display = 'block'
+    el.style.width = '100%'
+    el.style.height = '100%'
     el.module = rdp.Backend
     screenHost.value?.replaceChildren(el)
 
