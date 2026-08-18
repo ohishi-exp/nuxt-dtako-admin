@@ -118,3 +118,32 @@ describe('proxyRdpWebSocket が繋ぐ前に断る条件', () => {
     expect(await res.text()).toContain('401')
   })
 })
+
+describe('introspect へ渡すもの', () => {
+  it('origin を送る (無いと auth-worker が通さない。実機で 401 になった)', async () => {
+    let sentBody: unknown = null
+    const env: RdpRelayEnv = {
+      RDP_RELAY_VPC: { fetch: async () => new Response(null, { status: 502 }) },
+      AUTH_WORKER: {
+        fetch: async (_url: string, init?: RequestInit) => {
+          sentBody = JSON.parse(String(init?.body ?? '{}'))
+          return new Response(JSON.stringify({ active: true }), { status: 200 })
+        },
+      },
+      INTERNAL_SHARED_SECRET: 'shared-secret',
+    }
+
+    await proxyRdpWebSocket(env, wsRequest())
+
+    expect(sentBody).toEqual({ token: 't', origin: 'https://dtako.example' })
+  })
+
+  it('SecretsStore binding (.get()) からも secret を取れる', async () => {
+    const env: RdpRelayEnv = {
+      ...envWith({ fetch: async () => new Response(null, { status: 502 }) }),
+      INTERNAL_SHARED_SECRET: { get: async () => 'from-store' },
+    }
+    // secret が取れていれば introspect まで進み、上流の 502 で弾かれる (401 ではない)
+    expect((await proxyRdpWebSocket(env, wsRequest())).status).toBe(502)
+  })
+})
