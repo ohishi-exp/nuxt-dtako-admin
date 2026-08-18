@@ -2,15 +2,21 @@
 /**
  * 社内の RemoteApp をブラウザの中で描画して操作する画面 (Refs #693)。
  *
- * WASM クライアント (IronRDP) が RDP を喋り、WebSocket は同一オリジンの `/ws/rdp` へ張る。
- * その先は Worker が Workers VPC binding で社内の中継へ繋ぎ替える (`rdp-relay-proxy.ts`)。
+ * WASM クライアント (IronRDP) が RDP を喋り、WebSocket は **Cloudflare Access が守る
+ * 中継の公開ホスト名** (`NUXT_PUBLIC_RDP_RELAY_URL` の `/rdp`) へ直接張る。Worker は
+ * データ経路に居ない。中継は `Cf-Access-Jwt-Assertion` を自分で検証する。
+ *
+ * WebSocket は 302 を辿れないので、**接続前に Access の cookie を確保する**
+ * (`app/utils/rdp-access.ts`)。旧経路の `/ws/rdp` (Worker が introspect して VPC
+ * binding へ繋ぐ) は切り戻し先として残してあるが、中継が cf-access モードの間は通らない。
  *
  * **接続先とパスワードはこのリポジトリに書かない。** 接続先は入力欄 (localStorage に
  * 記憶)、パスワードは毎回入力で記憶しない。この repo は public。
  */
-import { useAuth } from '@ippoan/auth-client'
+import { browserDeps, ensureAccessSession, probeAccessSession, rdpWsUrl } from '~/utils/rdp-access'
 
-const { token } = useAuth()
+/** 中継の公開ホスト名 (`wss://…`)。Access がここを守る。 */
+const rdpRelayUrl = (useRuntimeConfig().public.rdpRelayUrl as string) || ''
 
 /** パスワード以外は記憶する。再接続のたびに全部打ち直すのは現実的でないため。 */
 const STORAGE_KEY = 'remote-app:form:v1'
@@ -34,12 +40,19 @@ const connecting = ref(false)
 const connected = ref(false)
 const screenHost = ref<HTMLElement | null>(null)
 
-onMounted(() => {
+/** Access を通れるか。`null` は未確認。接続の前に分かっていると案内が出せる。 */
+const accessReady = ref<boolean | null>(null)
+
+onMounted(async () => {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null')
     if (saved) Object.assign(form, saved)
   }
   catch { /* 壊れていたら既定のまま */ }
+
+  // 接続先が無いと WebSocket の URL を組めない。案内は connect() で出す。
+  if (!rdpRelayUrl) return
+  accessReady.value = await probeAccessSession(rdpWsUrl(rdpRelayUrl), browserDeps())
 })
 
 function remember() {
@@ -99,11 +112,17 @@ function makePrintSink() {
 async function connect() {
   errorText.value = ''
   if (!form.destination) { errorText.value = '接続先を入れてください'; return }
-  if (!token.value) { errorText.value = 'ログインし直してください (token が無い)'; return }
+  if (!rdpRelayUrl) { errorText.value = '中継の接続先が未設定です (NUXT_PUBLIC_RDP_RELAY_URL)'; return }
 
   connecting.value = true
-  status.value = 'クライアントを読み込み中…'
   try {
+    // **クリック直後にやる。** cookie が無ければここでログイン画面 (別窓) を開くので、
+    // wasm の読み込みを先にやると transient activation が切れてブロックされる。
+    status.value = 'Cloudflare Access を確認中…'
+    await ensureAccessSession(rdpRelayUrl)
+    accessReady.value = true
+
+    status.value = 'クライアントを読み込み中…'
     // wasm を含むので client 側でだけ読み込む。SSR には載せない。
     await import('@devolutions/iron-remote-desktop')
     const rdp = await import('@devolutions/iron-remote-desktop-rdp')
@@ -142,10 +161,9 @@ async function connect() {
       }, { once: true })
     })
 
-    // WebSocket は同一オリジン。Access の cookie も別ホストの証明書も要らない。
-    const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
-    const proxyAddress
-      = `${scheme}://${location.host}/ws/rdp?token=${encodeURIComponent(token.value)}`
+    // 中継へ直接張る。認証は Access の cookie が持つので、URL に資格情報は載せない
+    // (中継の `/rdp` はクエリを一切読まない — `rust-ichibanboshi` の `rdp_relay.rs`)。
+    const proxyAddress = rdpWsUrl(rdpRelayUrl)
 
     const configBuilder = userInteraction
       .configBuilder()
@@ -154,8 +172,8 @@ async function connect() {
       .withDestination(form.destination)
       .withProxyAddress(proxyAddress)
       .withServerDomain(form.domain)
-      // 中継は Worker 側で認証済み。RDCleanPath の欄は空にできないので印を入れる。
-      .withAuthToken('via-worker')
+      // 利用者の認証は Access が済ませている。RDCleanPath の欄は空にできないので印を入れる。
+      .withAuthToken('via-access')
       .withDesktopSize({ width: form.width, height: form.height })
       .withExtension(rdp.displayControl(true))
       .withExtension(rdp.printJobStreamCallbacks(makePrintSink()))
@@ -241,6 +259,11 @@ async function connect() {
       </button>
       <span class="text-sm opacity-70">{{ status }}</span>
     </form>
+
+    <p v-if="accessReady === false" class="text-sm opacity-70">
+      Cloudflare Access に未ログインです。「接続」を押すとログイン画面が別窓で開きます
+      (ポップアップを許可してください)。
+    </p>
 
     <p v-if="errorText" class="text-sm text-red-600">
       {{ errorText }}
