@@ -20,6 +20,7 @@ function row(over: Partial<AllowanceReportRow> = {}): AllowanceReportRow {
     driverName: '佐竹 繁',
     vehicleName: '十勝800か16',
     seq: 1,
+    fromTs: null,
     originCity: '北海道広尾郡広尾町会所前６',
     destCity: '北海道河西郡芽室町祥栄北８線',
     viaCities: '',

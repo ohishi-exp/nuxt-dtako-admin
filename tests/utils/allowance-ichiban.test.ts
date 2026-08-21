@@ -58,6 +58,7 @@ function row(over: Partial<AllowanceReportRow> = {}): AllowanceReportRow {
     driverName: '中村 一由',
     vehicleName: '帯広800か1109',
     seq: 1,
+    fromTs: null,
     originCity: '北海道釧路市西港１-98-41',
     destCity: '北海道河東郡上士幌町上士幌東３線',
     viaCities: '',
