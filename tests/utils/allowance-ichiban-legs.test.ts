@@ -28,11 +28,11 @@ function slip(over: Partial<VehicleDailySlip> = {}): VehicleDailySlip {
     ...over,
   }
 }
-const build = (slips: VehicleDailySlip[], covered: string[] = []) =>
-  buildIchibanLegs('柳井 亮祐', slips, new Set(covered), '2026-07')
+const build = (slips: VehicleDailySlip[], usedRowIds: string[] = [], provisional = {}) =>
+  buildIchibanLegs('柳井 亮祐', slips, new Set(usedRowIds), '2026-07', provisional)
 
 describe('buildIchibanLegs', () => {
-  it('デジタコに便が無い日の明細から便を起こし、マスタで手当を引く', () => {
+  it('どのデジタコ便にも当たらなかった明細から便を起こし、マスタで手当を引く', () => {
     const legs = build([slip()])
     expect(legs).toHaveLength(1)
     expect(legs[0]).toMatchObject({
@@ -49,8 +49,33 @@ describe('buildIchibanLegs', () => {
     expect(legs[0]!.quantity).toBeCloseTo(12.51)
   })
 
-  it('デジタコの便がある日は触らない (同じ仕事が二重に載るため)', () => {
-    expect(build([slip()], ['2026-07-18'])).toEqual([])
+  it('デジタコ便に当たった明細は触らない (同じ仕事が二重に載るため)', () => {
+    expect(build([slip()], ['20260718-1'])).toEqual([])
+  })
+
+  it('同じ日にデジタコ便があっても、当たらなかった明細からは起こす', () => {
+    // 増地 07-18 の実データ: 釧路→川西 はデジタコ便に当たり、広尾→芽室 だけ余る
+    const legs = build([
+      slip({ saleDate: '2026-07-18', origin: '釧路', dest: '川西', destAreaName: '北海道帯広市', rowId: 'used' }),
+      slip({ saleDate: '2026-07-18', origin: '広尾', dest: '大野ﾌｧｰﾑ', destAreaName: '北海道芽室町', unit: 't', quantity: 12.5, rowId: 'left' }),
+    ], ['used'])
+    expect(legs).toHaveLength(1)
+    // 施設名 (`大野ﾌｧｰﾑ`) ではなく市町村名を採る — デジタコ側の経路キーと揃えるため
+    expect(legs[0]).toMatchObject({ origin: '広尾', dest: '芽室', status: 'unknown', allowanceYen: null })
+  })
+
+  it('マスタに無い経路には暫定手当を当てる (デジタコ由来の便と同じ経路キー)', () => {
+    const legs = build(
+      [slip({ origin: '広尾', dest: '大野ﾌｧｰﾑ', destAreaName: '北海道芽室町', unit: 't', quantity: 12.5 })],
+      [],
+      { '広尾|芽室': 9000 },
+    )
+    expect(legs[0]).toMatchObject({ allowanceYen: 9000, isProvisional: true, status: 'unknown' })
+  })
+
+  it('マスタで決まる便には暫定を当てない', () => {
+    const legs = build([slip()], [], { '釧路|浦幌': 99999 })
+    expect(legs[0]).toMatchObject({ allowanceYen: 9000, isProvisional: false })
   })
 
   it('対象月の外の明細は返さない', () => {
@@ -155,13 +180,31 @@ describe('summarizeIchibanLegs', () => {
     expect(summarizeIchibanLegs(legs)).toEqual({
       trips: 2,
       allowanceYen: 9000,
+      provisionalYen: 0,
+      provisionalTrips: 0,
       unknownTrips: 1,
       salesYen: 34403 + 22000,
     })
   })
 
+  it('暫定を当てた便は「うち暫定」として別に数える', () => {
+    const legs = build(
+      [
+        slip(),
+        slip({ origin: '広尾', dest: '大野ﾌｧｰﾑ', destAreaName: '北海道芽室町', unit: 't', quantity: 12.5, amount: 41250, rowId: 'p' }),
+      ],
+      [],
+      { '広尾|芽室': 9000 },
+    )
+    expect(summarizeIchibanLegs(legs)).toMatchObject({
+      trips: 2, allowanceYen: 18000, provisionalYen: 9000, provisionalTrips: 1, unknownTrips: 0,
+    })
+  })
+
   it('便が無ければ全部 0', () => {
-    expect(summarizeIchibanLegs([])).toEqual({ trips: 0, allowanceYen: 0, unknownTrips: 0, salesYen: 0 })
+    expect(summarizeIchibanLegs([])).toEqual({
+      trips: 0, allowanceYen: 0, provisionalYen: 0, provisionalTrips: 0, unknownTrips: 0, salesYen: 0,
+    })
   })
 })
 

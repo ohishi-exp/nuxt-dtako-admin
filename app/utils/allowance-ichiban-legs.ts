@@ -42,11 +42,13 @@
  * **地域名が `北海道` までしか無い**代わりに施設名がマスタの語彙そのもの、という行も
  * あるので、どちらか一方では足りない。
  *
- * **推測で金額を作らない。** マスタで決まらなければ `unknown` のまま返し、呼び出し側が
- * 「未確定」として人に見せる (この画面の他の便と同じ扱い)。
+ * **推測で金額を作らない。** マスタで決まらなければ、画面で入れた**暫定手当**
+ * (`allowance-provisional.ts`) を経路キーで引く。それも無ければ `unknown` のまま返し、
+ * 呼び出し側が「未確定」として人に見せる (この画面の他の便と同じ扱い)。
  */
 import { lookupAllowance, placeKey, normalizePlace, type AllowanceLookup } from './allowance-rate'
 import { areaTown } from './allowance-ichiban'
+import { provisionalFor, type ProvisionalMap } from './allowance-provisional'
 import type { VehicleDailySlip } from './ichiban'
 
 /**
@@ -73,8 +75,10 @@ export interface IchibanLeg {
   dest: string
   /** 引き当てたマスタの卸地。決まらなければ空。 */
   masterDest: string
-  /** 決まらなければ null。 */
+  /** マスタで決まった額。決まらなければ**暫定手当**。どちらも無ければ null。 */
   allowanceYen: number | null
+  /** 暫定手当を当てた便。**確定と混ぜないための印。** */
+  isProvisional: boolean
   status: AllowanceLookup['status']
   /** その便に畳んだ明細の売上合計。 */
   salesYen: number
@@ -108,7 +112,11 @@ function resolve(group: VehicleDailySlip[]): { origin: string, dest: string, loo
   for (const dest of candidates) {
     const lookup = lookupAllowance(origin, dest)
     if (lookup.status === 'ok') return { origin, dest, lookup }
-    if (fallback === null) fallback = { dest, lookup }
+    // **どれも引けなかったときは最後の候補を採る。** 候補は
+    // 「着地N (施設名) → 地域名 (市町村)」の順に積むので、最後は市町村名になる。
+    // 施設名 (`大野ﾌｧｰﾑ`) を残すと、デジタコ側の便が作る経路キー (`広尾|芽室`) と
+    // 揃わず、**暫定手当が当たらない**。
+    fallback = { dest, lookup }
   }
   if (fallback === null) return { origin, dest: '', lookup: { status: 'unknown', dest: '' } }
   return { origin, dest: fallback.dest, lookup: fallback.lookup }
@@ -139,16 +147,28 @@ function splitByLoad(slips: VehicleDailySlip[]): VehicleDailySlip[][] {
   return out
 }
 
-function toLeg(driverName: string, date: string, group: VehicleDailySlip[]): IchibanLeg {
+function toLeg(
+  driverName: string,
+  date: string,
+  group: VehicleDailySlip[],
+  provisional: ProvisionalMap,
+): IchibanLeg {
   const first = group[0]!
   const { origin, dest, lookup } = resolve(group)
+  const masterDest = lookup.status === 'ok' ? lookup.dest : ''
+  // マスタで決まらない経路は**暫定手当**を当てる。デジタコ由来の便と同じ経路キー
+  // (`積地|卸地`) で引くので、画面で 1 度入れれば両方に効く。
+  const provisionalYen = lookup.status === 'ok'
+    ? null
+    : provisionalFor({ allowanceYen: null, originCity: origin, destCity: dest, masterDest }, provisional)
   return {
     driverName,
     date,
     origin,
     dest,
-    masterDest: lookup.status === 'ok' ? lookup.dest : '',
-    allowanceYen: lookup.status === 'ok' ? lookup.allowanceYen : null,
+    masterDest,
+    allowanceYen: lookup.status === 'ok' ? lookup.allowanceYen : provisionalYen,
+    isProvisional: provisionalYen !== null,
     status: lookup.status,
     salesYen: group.reduce((sum, s) => sum + s.amount, 0),
     quantity: group.reduce((sum, s) => sum + (isTons(s.unit) ? s.quantity : 0), 0),
@@ -163,25 +183,30 @@ function legSortKey(leg: IchibanLeg): string {
 }
 
 /**
- * **デジタコに便が 1 つも無い日**の明細から便を起こす。
+ * **どのデジタコ便にも当たらなかった明細**から便を起こす。
  *
- * `coveredDates` はその乗務員にデジタコ由来の便がある日 (`YYYY-MM-DD`)。
- * **その日は触らない** — 一部だけ取れている日に足すと、同じ仕事が二重に載る。
- * 「まるごと無い日」だけを埋めるので、足しすぎない代わりに埋め残しは出る。
+ * `usedRowIds` は既にデジタコ由来の便に当たった明細の `rowId`。**当たった明細は
+ * 触らないので、同じ仕事が二重に載ることはない。**
+ *
+ * **「デジタコの便が 1 つも無い日」に限らない。** 一部だけ取れている日にも
+ * 起こし損ねた便がある — 2026-07 の実データでは残っていた 4 便が全部この形だった
+ * (増地 07-18 は同じ日に 釧路→川西 のデジタコ便があり、広尾→芽室 だけが欠けていた)。
+ * 日単位で避けると永久に埋まらない。
  *
  * `ym` は対象月 (`2026-07`)。月の外の明細は返さない。
  */
 export function buildIchibanLegs(
   driverName: string,
   slips: VehicleDailySlip[],
-  coveredDates: Set<string>,
+  usedRowIds: Set<string>,
   ym: string,
+  provisional: ProvisionalMap,
 ): IchibanLeg[] {
   const byKey = new Map<string, VehicleDailySlip[]>()
   for (const slip of slips) {
     const date = slip.saleDate.slice(0, 10)
     if (!date.startsWith(ym)) continue
-    if (coveredDates.has(date)) continue
+    if (usedRowIds.has(slip.rowId)) continue
     // **積地だけで束ねる。** 卸地で分けると複数卸しの便が水増しされる。
     const key = `${date}|${placeKey(slip.origin)}`
     const list = byKey.get(key) ?? []
@@ -191,7 +216,7 @@ export function buildIchibanLegs(
   const legs: IchibanLeg[] = []
   for (const [key, group] of byKey) {
     const date = key.slice(0, 10)
-    for (const part of splitByLoad(group)) legs.push(toLeg(driverName, date, part))
+    for (const part of splitByLoad(group)) legs.push(toLeg(driverName, date, part, provisional))
   }
   return legs.sort((a, b) => (legSortKey(a) > legSortKey(b) ? 1 : -1))
 }
@@ -199,20 +224,32 @@ export function buildIchibanLegs(
 /** 一番星から起こした便の合計。**確定の手当とは別に数える。** */
 export interface IchibanLegTotals {
   trips: number
-  /** マスタで金額が決まった便の手当合計。 */
+  /** 手当の合計 (確定 + 暫定)。 */
   allowanceYen: number
+  /** うち暫定の額と便数。**確定と混ぜたまま読ませない。** */
+  provisionalYen: number
+  provisionalTrips: number
   /** 金額が決まらなかった便数。 */
   unknownTrips: number
   salesYen: number
 }
 
 export function summarizeIchibanLegs(legs: IchibanLeg[]): IchibanLegTotals {
-  const out: IchibanLegTotals = { trips: 0, allowanceYen: 0, unknownTrips: 0, salesYen: 0 }
+  const out: IchibanLegTotals = {
+    trips: 0, allowanceYen: 0, provisionalYen: 0, provisionalTrips: 0, unknownTrips: 0, salesYen: 0,
+  }
   for (const leg of legs) {
     out.trips += 1
     out.salesYen += leg.salesYen
-    if (leg.allowanceYen === null) out.unknownTrips += 1
-    else out.allowanceYen += leg.allowanceYen
+    if (leg.allowanceYen === null) {
+      out.unknownTrips += 1
+      continue
+    }
+    out.allowanceYen += leg.allowanceYen
+    if (leg.isProvisional) {
+      out.provisionalTrips += 1
+      out.provisionalYen += leg.allowanceYen
+    }
   }
   return out
 }
