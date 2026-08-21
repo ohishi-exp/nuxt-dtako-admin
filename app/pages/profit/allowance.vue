@@ -104,6 +104,41 @@ function fetchOperationsFor(range: { from: string, to: string }, driverCd?: stri
   })
 }
 
+const monthly = computed(() => buildMonthlyAllowance(operations.value, shownYm.value))
+
+function opHasIssue(op: OperationNode): boolean {
+  return op.irregularTrips > 0 || op.error !== null
+}
+function driverHasIssue(d: DriverNode): boolean {
+  return d.irregularTrips > 0 || d.failedOperations > 0
+}
+
+const visibleDrivers = computed(() => (onlyIrregular.value
+  ? monthly.value.drivers.filter(driverHasIssue)
+  : monthly.value.drivers))
+
+function visibleOperations(d: DriverNode): OperationNode[] {
+  return onlyIrregular.value ? d.operations.filter(opHasIssue) : d.operations
+}
+function visibleRows(op: OperationNode): AllowanceReportRow[] {
+  return onlyIrregular.value ? op.rows.filter(r => r.status !== 'ok') : op.rows
+}
+
+const csvRows = computed(() => visibleDrivers.value
+  .flatMap(d => visibleOperations(d).flatMap(op => visibleRows(op))))
+
+// --- 開閉 ---
+const openDrivers = reactive<Record<string, boolean>>({})
+const openOps = reactive<Record<string, boolean>>({})
+
+/** 1 人だけなら最初から開いておく (毎回クリックさせない)。 */
+function autoOpen() {
+  for (const key of Object.keys(openDrivers)) delete openDrivers[key]
+  for (const key of Object.keys(openOps)) delete openOps[key]
+  const only = monthly.value.drivers
+  if (only.length === 1) openDrivers[only[0]!.driverName] = true
+}
+
 /** 1 運行ぶんのイベントCSV を引いて便に切り出す。失敗は握りつぶさず error に残す。 */
 async function resolveOperation(op: {
   unko_no: string
