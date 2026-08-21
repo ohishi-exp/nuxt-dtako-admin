@@ -103,6 +103,7 @@ import {
   parsePdfTripFile,
   serializePdfTripFile,
   comparePdfTrips,
+  driverKey,
   routeText,
   type PdfTripFile,
 } from '~/utils/allowance-pdf-compare'
@@ -846,6 +847,27 @@ const pdfCompare = computed(() => {
 /** PDF の月と集計中の月が違う。押す前に気付けるように出す。 */
 const pdfMonthMismatch = computed(() =>
   pdfFile.value !== null && status.value === 'ready' && pdfFile.value.ym !== shownYm.value)
+
+/**
+ * 手当表PDF との突合を**社員番号 (乗務員CD) 順**に並べ直す。
+ *
+ * `comparePdfTrips` は氏名順で返す — あの層は乗務員CD を知らないため。本表と
+ * 同じ並びにしないと、2 つの表を目で往復するときに行がずれる。
+ * **キーは空白を落とした氏名** (`driverKey`) なので、乗務員マスタ側も同じ形に揃える。
+ */
+const driverCdByCompareKey = computed(() => {
+  const map = new Map<string, string>()
+  for (const d of drivers.value) map.set(driverKey(d.driver_name), d.driver_cd.trim())
+  return map
+})
+const pdfCompareDrivers = computed(() => {
+  const list = pdfCompare.value?.drivers ?? []
+  const keyOf = (name: string) => {
+    const cd = driverCdByCompareKey.value.get(name)
+    return cd === undefined ? `9${name}` : `0${cd.padStart(8, '0')}`
+  }
+  return [...list].sort((a, b) => (keyOf(a.driverName) > keyOf(b.driverName) ? 1 : -1))
+})
 
 const pdfOnlyEntries = computed(() => (pdfCompare.value?.entries ?? []).filter(e => e.status === 'pdf_only'))
 const screenOnlyEntries = computed(() => (pdfCompare.value?.entries ?? []).filter(e => e.status === 'screen_only'))
@@ -1821,7 +1843,7 @@ function downloadCsv() {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="d in pdfCompare.drivers" :key="d.driverName" class="border-t border-gray-100 dark:border-gray-800/70">
+                <tr v-for="d in pdfCompareDrivers" :key="d.driverName" class="border-t border-gray-100 dark:border-gray-800/70">
                   <td class="px-3 py-1 whitespace-nowrap font-medium">{{ d.driverName }}</td>
                   <td class="px-3 py-1 text-right">{{ d.pdfTrips }}</td>
                   <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(d.pdfYen) }}</td>
