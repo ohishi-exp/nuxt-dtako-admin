@@ -114,23 +114,28 @@ function resolve(group: VehicleDailySlip[]): { origin: string, dest: string, loo
   return { origin, dest: fallback.dest, lookup: fallback.lookup }
 }
 
-/** 同じ日・同じ経路の明細を、1 台ぶんずつの便に切る。 */
+/**
+ * 同じ日・同じ積地の明細を、1 台ぶんずつの便に切る。
+ *
+ * **空の受け皿を先に置いて、最後に「残りがあれば足す」を書かない。** 呼び出し側は
+ * 必ず 1 件以上の群を渡すので、その `if` は永久に真になり、分岐として宙に浮く
+ * (カバレッジ 100% gate が落ちる)。
+ */
 function splitByLoad(slips: VehicleDailySlip[]): VehicleDailySlip[][] {
-  const out: VehicleDailySlip[][] = []
-  let current: VehicleDailySlip[] = []
+  const out: VehicleDailySlip[][] = [[]]
   let load = 0
   for (const slip of slips) {
     // 単位が t でない明細は積載量として比べられないので、切らずに同じ便へ入れる。
     const tons = isTons(slip.unit) ? slip.quantity : 0
+    const current = out[out.length - 1]!
     if (current.length > 0 && load + tons > MAX_LOAD_TONS) {
-      out.push(current)
-      current = []
-      load = 0
+      out.push([slip])
+      load = tons
+      continue
     }
     current.push(slip)
     load += tons
   }
-  if (current.length > 0) out.push(current)
   return out
 }
 

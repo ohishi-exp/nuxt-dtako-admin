@@ -124,12 +124,21 @@ describe('buildIchibanLegs', () => {
     expect(legs[0]!.allowanceYen).toBe(9000)
   })
 
-  it('日付 → 積地 → 卸地 の順に並べる', () => {
+  it('日付 → 積地 → 卸地 の順に並べる (入れ替えが起きる順で渡す)', () => {
     const legs = build([
       slip({ saleDate: '2026-07-20', origin: '苫小牧', dest: '富士', destAreaName: '北海道帯広市', rowId: 'x' }),
       slip({ saleDate: '2026-07-18', rowId: 'y' }),
     ])
     expect(legs.map(l => l.date)).toEqual(['2026-07-18', '2026-07-20'])
+  })
+
+  it('最初から順に並んでいても崩さない (比較関数の両側を通す)', () => {
+    const legs = build([
+      slip({ saleDate: '2026-07-18', rowId: 'a' }),
+      slip({ saleDate: '2026-07-20', origin: '苫小牧', dest: '富士', destAreaName: '北海道帯広市', rowId: 'b' }),
+      slip({ saleDate: '2026-07-21', origin: '広尾', dest: '安平', destAreaName: '北海道安平町', rowId: 'c' }),
+    ])
+    expect(legs.map(l => l.date)).toEqual(['2026-07-18', '2026-07-20', '2026-07-21'])
   })
 
   it('明細が無ければ空', () => {
