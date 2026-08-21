@@ -70,6 +70,7 @@ import {
   parseExcluded,
   serializeExcluded,
   toggleExcluded,
+  isExcluded,
   excludedKey,
   applyExclusions,
   staleExclusionKeys,
@@ -635,9 +636,20 @@ function forcedRowIds(r: AllowanceReportRow): string[] {
  * **卸しイベントが無くて卸地が決まらない便。** 運行終了の後に卸している運行がこれ。
  * 強制突合で一番星の明細を結べば、卸地・手当・売上がまとめて決まる。
  * 既に結んである便も (外せるように) 残す。
+ *
+ * **除外した便も出す** (`monthlyAll` を見る)。降しが無い便への答えは
+ * 「除外 (実在しない)」と「強制突合 (実在するが卸地が取れていない)」の 2 つで、
+ * 一方を選んだ後にもう一方へ移れないと詰む。実際 2026-07-16 の便は先に除外され、
+ * 後から**運行終了後に卸していただけ**と分かった。
  */
-const unresolvedDestRows = computed(() => allRows()
+const unresolvedDestRows = computed(() => monthlyAll.value.drivers
+  .flatMap(d => d.operations.flatMap(op => op.rows))
   .filter(r => r.destCity.trim() === '' || forcedRowIds(r).length > 0))
+
+/** その便が除外されているか (強制突合の一覧で印を出す)。 */
+function isRowExcluded(r: AllowanceReportRow): boolean {
+  return isExcluded(r, excluded.value)
+}
 
 /** 既にどこかの便に当たっている明細。同じ売上を 2 つの便に付けないため。 */
 const usedSlipRowIds = computed(() => {
@@ -1563,6 +1575,12 @@ function downloadCsv() {
             候補は<b>同じ乗務員・日付 ±1 日</b>で、<b>他の便に当たっていない明細</b>だけ出しています
             (同じ売上を 2 つの便に付けないため)。積地が一致する明細を先に並べています。
           </p>
+          <p class="text-gray-500">
+            <b>除外した便もここに出します。</b>降しが無い便への答えは
+            「<b>除外</b> = 実在しない」と「<b>強制突合</b> = 実在するが卸地が取れていない」の 2 つで、
+            一方を選んだ後にもう一方へ移れないと詰むためです。
+            <b>除外したままでは合計に入りません</b> — 結ぶなら「除外を戻す」も押してください。
+          </p>
           <div class="space-y-2">
             <div
               v-for="r in unresolvedDestRows"
@@ -1590,6 +1608,19 @@ function downloadCsv() {
                   @click="clearForcedLeg(forceMatchKey(r))"
                 >
                   結びつけを全部外す
+                </button>
+                <span
+                  v-if="isRowExcluded(r)"
+                  class="px-1 rounded text-[10px] bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-300"
+                  title="「便ではない」と外した便。合計に入っていません"
+                >除外中</span>
+                <button
+                  v-if="isRowExcluded(r)"
+                  class="text-purple-500 hover:text-purple-700 hover:underline"
+                  title="集計に戻します。結びつけても、除外したままでは合計に入りません"
+                  @click="toggleRowExclusion(r)"
+                >
+                  除外を戻す
                 </button>
               </div>
               <p v-if="candidatesFor(r).length === 0" class="mt-2 text-gray-400">
