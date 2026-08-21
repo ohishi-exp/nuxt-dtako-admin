@@ -1097,6 +1097,13 @@ describe('ignoredEventCodes / dropIgnoredRows', () => {
     expect(dropIgnoredRows(['イベントCD', 'イベント名'], rows, new Set(['405']))).toBe(rows)
   })
 
+  it('セルが欠けている行でも落ちない (イベントCD も イベント名 も空扱い)', () => {
+    // CSV の行が header より短いことが実在する。`row[i]` が undefined になる側。
+    const headers = ['イベントCD', 'イベント名']
+    const rows: string[][] = [[], ['401']]
+    expect(dropIgnoredRows(headers, rows, new Set(['401']))).toEqual([[]])
+  })
+
   it('イベント名 列が無ければ「イベント」扱いで落とす', () => {
     expect(dropIgnoredRows(['イベントCD'], [['401'], ['201']], new Set(['401']))).toEqual([['201']])
   })
