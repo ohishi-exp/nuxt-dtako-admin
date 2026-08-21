@@ -28,6 +28,7 @@ import {
   eventHeaders,
   ignoredEventCodes,
   dropIgnoredRows,
+  hasMeasuredValue,
 } from '~/utils/event-data-table'
 
 describe('colIndex', () => {
@@ -1068,6 +1069,31 @@ describe('ignoredEventCodes / dropIgnoredRows', () => {
     const headers = ['イベントCD', 'イベント名']
     const rows = [['201', '運転'], ['401', '急加速'], ['403', '急カーブ']]
     expect(dropIgnoredRows(headers, rows, ignoredEventCodes(classifications))).toEqual([['201', '運転']])
+  })
+
+  it('区間距離や区間時間を持つ行は無視でも落とさない (収支の指標が静かに変わるため)', () => {
+    // 実データの無視設定には `413 連続運転` (252.9km / 288分) が入っている。
+    const headers = ['イベントCD', 'イベント名', '区間距離', '区間時間']
+    const ignored = new Set(['401', '413'])
+    const rows = [
+      ['401', '急加速', '0', '0'],
+      ['413', '連続運転', '252.9', '288'],
+      ['413', '連続運転', '0', '5'],
+      ['413', '連続運転', '', ''],
+    ]
+    expect(dropIgnoredRows(headers, rows, ignored)).toEqual([
+      ['413', '連続運転', '252.9', '288'],
+      ['413', '連続運転', '0', '5'],
+    ])
+  })
+
+  it('数値の入った列を見分ける', () => {
+    expect(hasMeasuredValue(['1.5'], 0)).toBe(true)
+    expect(hasMeasuredValue(['0'], 0)).toBe(false)
+    expect(hasMeasuredValue([''], 0)).toBe(false)
+    expect(hasMeasuredValue(['x'], 0)).toBe(false)
+    expect(hasMeasuredValue([], 0)).toBe(false)
+    expect(hasMeasuredValue(['1'], -1)).toBe(false)
   })
 
   it('走行・アイドリング・速度超過 の無視行は落とさない (区間距離/区間時間 の材料)', () => {
