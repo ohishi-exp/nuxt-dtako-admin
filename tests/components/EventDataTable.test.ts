@@ -100,12 +100,15 @@ describe('EventDataTable', () => {
   })
 
   it('イベント分類で「無視」にした行を落とし、件数を出して戻せる', async () => {
+    // 急加速は 0km / 0分。**区間距離か区間時間を持つ行は無視でも落とさない**
+    // (収支の 円/km・円/時間 の材料になるため) ので、ここは 0 にしておく。
+    const spike = { 'イベントCD': '401', 'イベント名': '急加速', '区間距離': '0', '区間時間': '0' }
     const wrapper = createWrapper({
       headers: fullHeaders,
       rows: [
         makeRow({ 'イベントCD': '202', 'イベント名': '積み' }),
-        makeRow({ 'イベントCD': '401', 'イベント名': '急加速' }),
-        makeRow({ 'イベントCD': '401', 'イベント名': '急加速' }),
+        makeRow(spike),
+        makeRow(spike),
       ],
     })
     await flushPromises()
@@ -119,9 +122,21 @@ describe('EventDataTable', () => {
     expect(wrapper.text()).toContain('「無視」にした 2 件も表示')
   })
 
+  it('区間距離や区間時間を持つ無視行は落とさない (収支の材料を消さない)', async () => {
+    const wrapper = createWrapper({
+      headers: fullHeaders,
+      rows: [makeRow({ 'イベントCD': '401', 'イベント名': '急加速', '区間距離': '252.9', '区間時間': '288' })],
+    })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('「無視」にした')
+  })
+
   it('分類が引けなくても表は出す (全部見えるだけ)', async () => {
     vi.mocked(getEventClassifications).mockRejectedValueOnce(new Error('引けない'))
-    const wrapper = createWrapper({ headers: fullHeaders, rows: [makeRow({ 'イベントCD': '401' })] })
+    const wrapper = createWrapper({
+      headers: fullHeaders,
+      rows: [makeRow({ 'イベントCD': '401', '区間距離': '0', '区間時間': '0' })],
+    })
     await flushPromises()
     expect(wrapper.find('.crew-panel').exists()).toBe(true)
     expect(wrapper.text()).not.toContain('「無視」にした')
