@@ -31,6 +31,9 @@
  * **デジタコに運行が 1 件も無い日は、一番星の明細から便を起こす**
  * (`allowance-ichiban-legs.ts`)。デジタコが無いのだから、そこから取るしかない。
  * 起こしたぶんは**デジタコ由来と混ぜず**、別に数えて「合計 (デジタコ + 一番星)」で足す。
+ *
+ * **降しイベントが無い便には、一番星の明細を手で結べる** (強制突合、
+ * `allowance-force-match.ts`)。運行終了の後に卸している運行がこれに当たる。
  */
 import { getOperations, getOperationCsv, getDrivers } from '~/utils/api'
 import { fetchAllPages } from '~/utils/paged-fetch'
@@ -73,6 +76,17 @@ import {
   unkoNoOfKey,
   type ExcludedMap,
 } from '~/utils/allowance-excluded'
+import {
+  FORCE_MATCH_KEY,
+  parseForceMatch,
+  serializeForceMatch,
+  toggleForceMatch,
+  clearForceMatch,
+  forceMatchKey,
+  resolveForceMatches,
+  forceMatchCandidates,
+  type ForceMatchMap,
+} from '~/utils/allowance-force-match'
 import {
   MAX_LOAD_TONS,
   buildIchibanLegs,
@@ -198,6 +212,31 @@ function persistExcluded(next: ExcludedMap) {
   }
 }
 
+/**
+ * **卸しイベントが無い便に、一番星の明細を手で結びつける** (強制突合)。
+ *
+ * 運行終了の後に卸している運行があり、その便には降しが 1 つも付かない。
+ * `carryOverDest` も当たらないと卸地が永久に決まらない。一番星には卸地も金額も
+ * あるので、人が「この便はこの明細」と決められれば全部決まる。
+ */
+const forceMatch = ref<ForceMatchMap>({})
+
+function persistForceMatch(next: ForceMatchMap) {
+  forceMatch.value = next
+  try {
+    localStorage.setItem(FORCE_MATCH_KEY, serializeForceMatch(next))
+  }
+  catch (e) {
+    cacheNote.value = `強制突合を保存できませんでした — ${e instanceof Error ? e.message : String(e)}`
+  }
+}
+function toggleForcedSlip(legKey: string, rowId: string) {
+  persistForceMatch(toggleForceMatch(forceMatch.value, legKey, rowId))
+}
+function clearForcedLeg(legKey: string) {
+  persistForceMatch(clearForceMatch(forceMatch.value, legKey))
+}
+
 /** 除外する / 戻すの両方。同じキーをもう一度渡せば戻る。 */
 function toggleExclusion(key: string) {
   persistExcluded(toggleExcluded(excluded.value, key))
@@ -306,6 +345,7 @@ onMounted(async () => {
   }
   provisional.value = parseProvisional(localStorage.getItem(PROVISIONAL_KEY))
   excluded.value = parseExcluded(localStorage.getItem(EXCLUDED_KEY))
+  forceMatch.value = parseForceMatch(localStorage.getItem(FORCE_MATCH_KEY))
   pdfFile.value = parsePdfTripFile(localStorage.getItem(PDF_TRIPS_KEY))
   // **乗務員マスタはキャッシュ復元より先に読む。** 一番星を乗務員で引いた月の
   // キャッシュは `driver:<CD>` を鍵にしているので、氏名→CD が引けないと
@@ -386,7 +426,48 @@ const salesError = ref<string | null>(null)
 /** 引いた一番星の明細 (鍵は `driver:<CD>` か 車番)。**便を起こすのに使う。** */
 const slipsByKey = ref<Record<string, VehicleDailySlip[]>>({})
 
-const byLeg = computed(() => reconciled.value?.byLeg ?? new Map<string, LegReconcile>())
+/** 一番星の明細を `rowId` で引く。強制突合が結んだ相手を取り出すのに使う。 */
+const slipByRowId = computed(() => {
+  const map = new Map<string, VehicleDailySlip>()
+  for (const list of Object.values(slipsByKey.value)) {
+    for (const slip of list) map.set(slip.rowId, slip)
+  }
+  return map
+})
+
+/** 便のキー → 強制突合の結果。 */
+const forcedLegs = computed(() => resolveForceMatches(
+  monthlyAll.value.drivers.flatMap(d => d.operations.flatMap(op => op.rows)),
+  forceMatch.value,
+  slipByRowId.value,
+  provisional.value,
+))
+
+/**
+ * 突合結果。**強制突合で結んだ便は上書きする。**
+ *
+ * ここで差し替えれば、売上・収支・未突合の数え方は全部そのまま追従する
+ * (`summarizeSales` も `unmatchedLegs` もこの Map を読んでいる)。
+ */
+const byLeg = computed(() => {
+  const base = reconciled.value?.byLeg ?? new Map<string, LegReconcile>()
+  if (forcedLegs.value.size === 0) return base
+  const out = new Map(base)
+  for (const row of allRows()) {
+    const forced = forcedLegs.value.get(forceMatchKey(row))
+    if (forced === undefined) continue
+    out.set(legKey(row), {
+      key: legKey(row),
+      status: 'matched',
+      slips: forced.slips,
+      quantity: forced.quantity,
+      salesYen: forced.salesYen,
+      split: false,
+      fromPool: false,
+    })
+  }
+  return out
+})
 const hasSales = computed(() => reconciled.value !== null)
 
 function allRows(): AllowanceReportRow[] {
@@ -539,7 +620,40 @@ function legProvisionalYen(r: AllowanceReportRow): number | null {
 /** 1 便の「支払う手当」= 確定があればそれ、無ければ暫定。どちらも無ければ null。 */
 function legPayYen(r: AllowanceReportRow): number | null {
   if (r.allowanceYen !== null) return r.allowanceYen
+  // 強制突合で卸地が決まった便は、その卸地でマスタ (無ければ暫定) から引いた額。
+  const forced = forcedLegs.value.get(forceMatchKey(r))
+  if (forced !== undefined && forced.allowanceYen !== null) return forced.allowanceYen
   return legProvisionalYen(r)
+}
+
+/** その便に結んだ明細の `rowId`。無ければ空。 */
+function forcedRowIds(r: AllowanceReportRow): string[] {
+  return forceMatch.value[forceMatchKey(r)] ?? []
+}
+
+/**
+ * **卸しイベントが無くて卸地が決まらない便。** 運行終了の後に卸している運行がこれ。
+ * 強制突合で一番星の明細を結べば、卸地・手当・売上がまとめて決まる。
+ * 既に結んである便も (外せるように) 残す。
+ */
+const unresolvedDestRows = computed(() => allRows()
+  .filter(r => r.destCity.trim() === '' || forcedRowIds(r).length > 0))
+
+/** 既にどこかの便に当たっている明細。同じ売上を 2 つの便に付けないため。 */
+const usedSlipRowIds = computed(() => {
+  const used = new Set<string>()
+  for (const hit of byLeg.value.values()) {
+    for (const slip of hit.slips) used.add(slip.rowId)
+  }
+  return used
+})
+
+/** その便に結べる候補の明細。 */
+function candidatesFor(r: AllowanceReportRow): VehicleDailySlip[] {
+  const cd = driverCdByName.value.get(r.driverName)
+  if (cd === undefined) return []
+  const slips = slipsByKey.value[driverSlipKey(cd)] ?? []
+  return forceMatchCandidates(r, slips, usedSlipRowIds.value, forcedRowIds(r))
 }
 
 /** 手当が決まらない経路の一覧 (暫定を入れる欄を並べる)。 */
@@ -686,6 +800,14 @@ interface LegPayLabel {
 }
 function legPayLabel(r: AllowanceReportRow): LegPayLabel {
   if (r.allowanceYen !== null) return { text: yen(r.allowanceYen), warn: false, title: 'マスタで決まった手当' }
+  const forced = forcedLegs.value.get(forceMatchKey(r))
+  if (forced !== undefined && forced.allowanceYen !== null) {
+    return {
+      text: `${yen(forced.allowanceYen)} (強制突合${forced.isProvisional ? '・暫定' : ''})`,
+      warn: true,
+      title: `一番星の明細を手で結んで卸地を ${forced.dest} と決めた便`,
+    }
+  }
   const provisionalYen = legProvisionalYen(r)
   if (provisionalYen !== null) {
     return {
@@ -1427,6 +1549,70 @@ function downloadCsv() {
               </template>
             </tbody>
           </table>
+        </div>
+
+        <div v-if="unresolvedDestRows.length > 0" class="mt-6 space-y-2 text-xs">
+          <h2 class="text-sm font-semibold">卸地が決まらない便 (強制突合)</h2>
+          <p class="text-gray-500">
+            <b>降しイベントが 1 つも無い便</b>です。デジタコは積みで便を切り、卸地は後ろの降しから取りますが、
+            <b>運行終了の後に卸している</b>運行があり、その便には降しが付きません
+            (実例 <code>07/16 09:31 積み 釧路市西港</code> → <code>10:17 運転 123.2km</code> →
+            <code>12:21 運行終了 音更町駒場北町</code>)。<b>次の運行から引き継ぐ推定も当たらない</b>ことがあります。
+            <b>一番星には卸地も金額もあります</b> — 明細をクリックして結べば、
+            <b>卸地・手当・売上がまとめて決まります</b>。<b>推測では結びません。人が選んでください。</b>
+            候補は<b>同じ乗務員・日付 ±1 日</b>で、<b>他の便に当たっていない明細</b>だけ出しています
+            (同じ売上を 2 つの便に付けないため)。積地が一致する明細を先に並べています。
+          </p>
+          <div class="space-y-2">
+            <div
+              v-for="r in unresolvedDestRows"
+              :key="forceMatchKey(r)"
+              class="border border-gray-200 dark:border-gray-800 rounded-lg p-3"
+            >
+              <div class="flex flex-wrap items-center gap-3">
+                <span class="whitespace-nowrap">{{ r.date }}</span>
+                <span class="whitespace-nowrap font-medium">{{ r.driverName }}</span>
+                <span class="whitespace-nowrap text-gray-500">{{ r.vehicleName }}</span>
+                <span class="whitespace-nowrap">便 {{ r.seq }}</span>
+                <span class="whitespace-nowrap">{{ r.originCity || '?' }} → {{ r.destCity || '?' }}</span>
+                <span class="whitespace-nowrap" :class="legPayLabel(r).warn ? 'text-amber-600 dark:text-amber-400' : ''">
+                  {{ legPayLabel(r).text }}
+                </span>
+                <span v-if="forcedRowIds(r).length > 0" class="whitespace-nowrap text-emerald-600 dark:text-emerald-400">
+                  売上 {{ yen(legSalesYen(r)) }}
+                </span>
+                <button class="text-blue-500 hover:text-blue-700 hover:underline" @click="openOperation(r.unkoNo)">
+                  運行を開く
+                </button>
+                <button
+                  v-if="forcedRowIds(r).length > 0"
+                  class="text-purple-500 hover:text-purple-700 hover:underline"
+                  @click="clearForcedLeg(forceMatchKey(r))"
+                >
+                  結びつけを全部外す
+                </button>
+              </div>
+              <p v-if="candidatesFor(r).length === 0" class="mt-2 text-gray-400">
+                結べる明細がありません (日付 ±1 日に、他の便に当たっていない明細が無い)
+              </p>
+              <div v-else class="mt-2 flex flex-wrap gap-1.5">
+                <button
+                  v-for="c in candidatesFor(r)"
+                  :key="c.rowId"
+                  class="px-2 py-1 rounded border text-left"
+                  :class="forcedRowIds(r).includes(c.rowId)
+                    ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300'
+                    : 'border-gray-300 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800'"
+                  :title="forcedRowIds(r).includes(c.rowId) ? 'クリックで結びつけを外す' : 'クリックでこの便に結ぶ'"
+                  @click="toggleForcedSlip(forceMatchKey(r), c.rowId)"
+                >
+                  {{ c.saleDate.slice(5) }} {{ c.origin || '?' }}→{{ c.dest || c.destAreaName || '?' }}
+                  {{ tons(c.quantity) }} {{ yen(c.amount) }}
+                  <span class="text-gray-400">{{ c.itemName }} 車{{ c.vehicleNumber }}</span>
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div v-if="ichibanLegs.length > 0" class="mt-6 space-y-2 text-xs">

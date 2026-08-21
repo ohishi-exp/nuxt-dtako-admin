@@ -107,19 +107,33 @@ function destCandidates(slip: VehicleDailySlip): string[] {
  */
 function resolve(group: VehicleDailySlip[]): { origin: string, dest: string, lookup: AllowanceLookup } {
   const origin = placeKey(group[0]!.origin)
+  const { dest, lookup } = resolveSlipDest(origin, group)
+  return { origin, dest, lookup }
+}
+
+/**
+ * 積地と明細の並びから**卸地とマスタの引き当て**を決める。
+ *
+ * 便の積地はデジタコ側が持っていることもある (`allowance-force-match.ts` の強制突合)
+ * ので、積地は引数で受け取る。**最終卸し地から遡って試す**のは同じ。
+ */
+export function resolveSlipDest(
+  origin: string,
+  group: VehicleDailySlip[],
+): { dest: string, lookup: AllowanceLookup } {
   const candidates = [...group].reverse().flatMap(destCandidates)
   let fallback: { dest: string, lookup: AllowanceLookup } | null = null
   for (const dest of candidates) {
     const lookup = lookupAllowance(origin, dest)
-    if (lookup.status === 'ok') return { origin, dest, lookup }
+    if (lookup.status === 'ok') return { dest, lookup }
     // **どれも引けなかったときは最後の候補を採る。** 候補は
     // 「着地N (施設名) → 地域名 (市町村)」の順に積むので、最後は市町村名になる。
     // 施設名 (`大野ﾌｧｰﾑ`) を残すと、デジタコ側の便が作る経路キー (`広尾|芽室`) と
     // 揃わず、**暫定手当が当たらない**。
     fallback = { dest, lookup }
   }
-  if (fallback === null) return { origin, dest: '', lookup: { status: 'unknown', dest: '' } }
-  return { origin, dest: fallback.dest, lookup: fallback.lookup }
+  if (fallback === null) return { dest: '', lookup: { status: 'unknown', dest: '' } }
+  return { dest: fallback.dest, lookup: fallback.lookup }
 }
 
 /**
