@@ -22,10 +22,10 @@
 import { excludedKey, type ExcludableRow } from './allowance-excluded'
 import { resolveSlipDest } from './allowance-ichiban-legs'
 import { dayDiff, DATE_SLACK } from './allowance-ichiban'
-import { placeKey } from './allowance-rate'
-import { addressToCity, cityToPlace } from './allowance-trips'
+import { placeKey, type AllowanceLookup } from './allowance-rate'
+import { addressToCity, cityToPlace, type LegAllowance } from './allowance-trips'
 import { provisionalFor, type ProvisionalMap } from './allowance-provisional'
-import type { AllowanceReportRow } from './allowance-report'
+import type { AllowanceReportRow, OperationAllowance } from './allowance-report'
 import type { VehicleDailySlip } from './ichiban'
 
 /** localStorage のキー。**形を変えるときは番号を上げる。** */
@@ -98,6 +98,12 @@ export interface ForcedLeg {
   quantity: number
   /** 明細から決めた卸地。 */
   dest: string
+  /**
+   * 決めた卸地でのマスタの引き当て。**そのまま便に移して集計に反映させる**
+   * (`forcedLegAllowance`)。金額だけでなく `status` も要るので、
+   * `masterDest` / `allowanceYen` と別に丸ごと持つ。
+   */
+  lookup: AllowanceLookup
   /** マスタで引けた卸地。引けなければ空。 */
   masterDest: string
   /** マスタ → 暫定 の順で決めた手当。どちらも無ければ null。 */
@@ -128,6 +134,7 @@ export function forcedLeg(
     salesYen: slips.reduce((sum, s) => sum + s.amount, 0),
     quantity: slips.reduce((sum, s) => sum + s.quantity, 0),
     dest,
+    lookup,
     masterDest,
     allowanceYen: lookup.status === 'ok' ? lookup.allowanceYen : provisionalYen,
     isProvisional: provisionalYen !== null,
@@ -151,6 +158,52 @@ export function resolveForceMatches(
     out.set(key, forcedLeg(row, slips, provisional))
   }
   return out
+}
+
+/**
+ * **強制突合で決まった卸地・手当を、その便の引き当て結果に映す。**
+ *
+ * 集計 (`buildMonthlyAllowance`) に渡す**前**に当てるのが肝。便の行
+ * (`AllowanceReportRow`) の卸地・マスタ卸地・手当・状態は `toReportRows` が
+ * `LegAllowance` から作るので、ここで映しておけば
+ *
+ * - 便の行の「積地 → 卸地」
+ * - 経路キー (`allowance-provisional.ts` の `routeKey` = 暫定手当と手当表PDF との突合)
+ * - 便数・手当・未確定の数え方
+ *
+ * が**全部同じ 1 か所から**追従する。表示側で差し替えると、経路だけ直って
+ * 数え方が置き去りになる (実際 `釧路 → (不明)` のまま PDF 突合が「経路違い」で
+ * 当たっていた)。
+ *
+ * **`lookup` は丸ごと差し替える。** 元の引き当ては卸地が空のまま引いたもの
+ * (必ず `unknown`) なので、残しても意味が無い。暫定手当はここでは当てない —
+ * 経路キーで当てるのが `allowance-provisional.ts` の役目で、ここで確定に混ぜると
+ * 「うち暫定」に数えられなくなる。
+ */
+export function forcedLegAllowance(item: LegAllowance, forced: ForcedLeg): LegAllowance {
+  return { leg: { ...item.leg, destCity: forced.dest }, lookup: forced.lookup, destSource: 'forced' }
+}
+
+/**
+ * 強制突合を運行の引き当て結果に当てる。**結んでいない運行・便はそのまま**
+ * (中身が同じなら同じ参照を返す — 無駄に identity を変えると、これを読む
+ * `computed` が作り直されて表の開閉が飛ぶ)。
+ */
+export function applyForcedLegs(
+  ops: OperationAllowance[],
+  forced: Map<string, ForcedLeg>,
+): OperationAllowance[] {
+  if (forced.size === 0) return ops
+  return ops.map((op) => {
+    let touched = false
+    const legs = op.legs.map((item, i) => {
+      const hit = forced.get(forceMatchKey({ unkoNo: op.unkoNo, seq: i + 1, fromTs: item.leg.fromTs }))
+      if (hit === undefined) return item
+      touched = true
+      return forcedLegAllowance(item, hit)
+    })
+    return touched ? { ...op, legs } : op
+  })
 }
 
 /**

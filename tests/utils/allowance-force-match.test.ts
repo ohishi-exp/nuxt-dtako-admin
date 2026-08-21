@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import type { AllowanceReportRow } from '~/utils/allowance-report'
+import { toReportRows, type AllowanceReportRow, type OperationAllowance } from '~/utils/allowance-report'
+import type { AllowanceLeg, LegAllowance } from '~/utils/allowance-trips'
 import type { VehicleDailySlip } from '~/utils/ichiban'
 import {
   parseForceMatch,
@@ -10,6 +11,8 @@ import {
   legOrigin,
   forcedLeg,
   resolveForceMatches,
+  forcedLegAllowance,
+  applyForcedLegs,
   forceMatchCandidates,
 } from '~/utils/allowance-force-match'
 
@@ -154,6 +157,81 @@ describe('forcedLeg', () => {
   it('暫定も無ければ手当は決めない (推測しない)', () => {
     const out = forcedLeg(row({ originCity: '北海道広尾郡広尾町会所前６' }), [slip({ dest: '大野ﾌｧｰﾑ', destAreaName: '北海道芽室町' })], {})
     expect(out.allowanceYen).toBeNull()
+  })
+})
+
+/** 降しが 1 つも無い便 (卸地が決まらない = 強制突合の対象)。 */
+function bareLeg(over: Partial<AllowanceLeg> = {}): LegAllowance {
+  const leg: AllowanceLeg = {
+    loadRowIndex: 3,
+    unloadRowIndexes: [],
+    originCity: '北海道釧路市西港１',
+    destCity: '',
+    viaCities: [],
+    fromTs: 1784000000,
+    toTs: null,
+    ...over,
+  }
+  return { leg, lookup: { status: 'unknown', dest: '' }, destSource: 'event' }
+}
+function operation(legs: LegAllowance[]): OperationAllowance {
+  return {
+    unkoNo: '2607160931450000001318',
+    readingDate: '2026-07-16',
+    operationDate: '2026-07-16',
+    driverName: '柳井 亮祐',
+    vehicleName: '帯広800か1318',
+    legs,
+    carryIn: { cities: [], toTs: null },
+    error: null,
+  }
+}
+
+describe('forcedLegAllowance / applyForcedLegs', () => {
+  const forced = forcedLeg(row(), [slip()], {})
+
+  it('卸地と引き当てを便に映す (出どころは forced)', () => {
+    const out = forcedLegAllowance(bareLeg(), forced)
+    expect(out.leg.destCity).toBe('浦幌')
+    expect(out.lookup).toEqual(forced.lookup)
+    expect(out.destSource).toBe('forced')
+  })
+
+  it('結んだ便だけを差し替え、他の便と積みの他の列は触らない', () => {
+    const other = bareLeg({ fromTs: 1784099999, loadRowIndex: 7 })
+    const ops = [operation([bareLeg(), other])]
+    const out = applyForcedLegs(ops, new Map([[KEY, forced]]))
+    expect(out[0]!.legs[0]!.leg).toMatchObject({ destCity: '浦幌', originCity: '北海道釧路市西港１', loadRowIndex: 3 })
+    expect(out[0]!.legs[1]!).toBe(other)
+  })
+
+  it('映した卸地・手当が便の行に出る (経路キーが釧路|浦幌 になる)', () => {
+    const rows = toReportRows(applyForcedLegs([operation([bareLeg()])], new Map([[KEY, forced]])))
+    expect(rows[0]).toMatchObject({
+      destCity: '浦幌', masterDest: '浦幌', allowanceYen: 9000, status: 'ok', destSource: 'forced',
+    })
+  })
+
+  it('暫定で決まる便は手当を映さない (「うち暫定」に数えるのは経路キー側の役目)', () => {
+    const hiroo = bareLeg({ originCity: '北海道広尾郡広尾町会所前６' })
+    const prov = forcedLeg(
+      { originCity: '北海道広尾郡広尾町会所前６' },
+      [slip({ dest: '大野ﾌｧｰﾑ', destAreaName: '北海道芽室町' })],
+      { '広尾|芽室': 9000 },
+    )
+    const rows = toReportRows(applyForcedLegs([operation([hiroo])], new Map([[KEY, prov]])))
+    expect(rows[0]).toMatchObject({ destCity: '芽室', masterDest: '', allowanceYen: null })
+  })
+
+  it('結びつけが 1 件も無ければ渡された配列をそのまま返す', () => {
+    const ops = [operation([bareLeg()])]
+    expect(applyForcedLegs(ops, new Map())).toBe(ops)
+  })
+
+  it('どの便にも当たらない結びつけでは運行の identity を変えない', () => {
+    const ops = [operation([bareLeg({ fromTs: 1784099999 })])]
+    const out = applyForcedLegs(ops, new Map([[KEY, forced]]))
+    expect(out[0]!).toBe(ops[0]!)
   })
 })
 

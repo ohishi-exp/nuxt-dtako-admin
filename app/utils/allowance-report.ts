@@ -80,7 +80,10 @@ export interface AllowanceReportRow {
   /** 決まらなければ null。 */
   allowanceYen: number | null
   status: 'ok' | 'ambiguous' | 'unknown'
-  /** `carried` は卸地を**次の運行の先頭の降しから引き継いだ推定**。 */
+  /**
+   * `carried` は卸地を**次の運行の先頭の降しから引き継いだ推定**、
+   * `forced` は**人が結んだ一番星の明細から決めたもの** (強制突合)。
+   */
   destSource: DestSource
 }
 
@@ -156,6 +159,21 @@ export function summarizeByDriver(rows: AllowanceReportRow[]): DriverAllowanceTo
   return [...map.values()].sort((a, b) => compareText(a.driverName, b.driverName))
 }
 
+/**
+ * 卸地の出どころの表示。**CSV は 2 か所ある** (ここと `allowance-ichiban.ts` の
+ * `reconcileCsvLines`) ので、語彙はここに 1 つだけ置く。三項で書き分けると
+ * `forced` を足したときに片方だけ `イベント` と嘘をつく。
+ */
+const DEST_SOURCE_LABEL: Record<DestSource, string> = {
+  event: 'イベント',
+  carried: '次運行の先頭の降し (推定)',
+  forced: '一番星の明細 (強制突合)',
+}
+
+export function destSourceLabel(source: DestSource): string {
+  return DEST_SOURCE_LABEL[source]
+}
+
 const CSV_HEADER = [
   '運行NO', '日付', '乗務員', '車輌', '便', '積地(市町村)', '卸地(市町村)',
   '途中卸し', 'マスタ卸地', '手当', '状態', '卸地の出どころ',
@@ -168,8 +186,7 @@ export function reportRowsToCsvLines(rows: AllowanceReportRow[]): string[] {
     CSV_HEADER.map(quote).join(','),
     ...rows.map(r => [
       r.unkoNo, r.date, r.driverName, r.vehicleName, r.seq, r.originCity, r.destCity,
-      r.viaCities, r.masterDest, r.allowanceYen, r.status,
-      r.destSource === 'carried' ? '次運行の先頭の降し (推定)' : 'イベント',
+      r.viaCities, r.masterDest, r.allowanceYen, r.status, destSourceLabel(r.destSource),
     ].map(quote).join(',')),
   ]
 }
@@ -205,7 +222,13 @@ export interface OperationNode {
   /** 金額が決まった便数。 */
   trips: number
   totalYen: number
-  /** 金額が決まらなかった便数 (= 未確定)。 */
+  /**
+   * **マスタで**金額が決まらなかった便数。
+   *
+   * 画面の「未確定」とは**別物**。あちらは「手当が 1 円も決まっていない便」で、
+   * 暫定手当 (`allowance-provisional.ts`) が当たった便は数えない。ここは
+   * マスタしか知らないので、暫定が当たる便も入る。
+   */
   irregularTrips: number
   /** 卸地を次の運行から引き継いだ便数 (= **推定**)。合計には入るが印を出す。 */
   carriedTrips: number
