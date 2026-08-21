@@ -16,6 +16,9 @@
  * デジタコには**降しが 1 つも無い積み** (= 実在しない便) が混ざるので、
  * **その積みを「便ではない」と印を付けて集計から外せる** (`allowance-excluded.ts`)。
  * 外した便も**黙って消さず**、件数を出して一覧から戻せるようにする。
+ *
+ * **前回の検索 (月・車輌CD) は localStorage に残し、開いたらキャッシュから
+ * そのまま出す** (通信しない)。毎回 月を選び直して `集計` を押す手間を無くす。
  */
 import { getOperations, getOperationCsv, getDrivers } from '~/utils/api'
 import { fetchAllPages } from '~/utils/paged-fetch'
@@ -58,6 +61,11 @@ import {
   unkoNoOfKey,
   type ExcludedMap,
 } from '~/utils/allowance-excluded'
+import {
+  LAST_SEARCH_KEY,
+  parseLastSearch,
+  serializeLastSearch,
+} from '~/utils/allowance-last-search'
 import {
   CACHE_KEY,
   parseCache,
@@ -104,6 +112,21 @@ const TARGETS_KEY = 'dtako:allowance:driver-cds'
  */
 const cacheNote = ref<string | null>(null)
 const cachedMonth = ref<MonthCache | null>(null)
+/** 前回の集計をキャッシュから出しているだけ (= 通信していない) か。画面に出す。 */
+const restoredFromCache = ref(false)
+
+/**
+ * 検索条件 (月・車輌CD) を残す。**対象乗務員は別に保存済み** (`TARGETS_KEY`)。
+ * 保存できなくても集計はできるので、失敗は握る。
+ */
+function saveLastSearch() {
+  try {
+    localStorage.setItem(LAST_SEARCH_KEY, serializeLastSearch({ ym: ym.value, vehicle: vehicle.value }))
+  }
+  catch {
+    // localStorage が使えない環境。次に開いたとき今月に戻るだけで、集計は正しい。
+  }
+}
 
 /**
  * マスタで手当が決まらない経路に入れる**暫定の手当** (経路キー → 円/便)。
@@ -207,9 +230,17 @@ const pendingDriver = ref('')
 
 onMounted(async () => {
   targets.value = parseTargets(localStorage.getItem(TARGETS_KEY))
-  cachedMonth.value = readCache()
+  // **条件を戻すのはキャッシュを読む前。** `readCache` は `ym.value` の月を探すので、
+  // 順番を逆にすると今月のキャッシュ (たいてい無い) を見にいってしまう。
+  const last = parseLastSearch(localStorage.getItem(LAST_SEARCH_KEY))
+  if (last) {
+    ym.value = last.ym
+    vehicle.value = last.vehicle
+  }
   provisional.value = parseProvisional(localStorage.getItem(PROVISIONAL_KEY))
   excluded.value = parseExcluded(localStorage.getItem(EXCLUDED_KEY))
+  cachedMonth.value = readCache()
+  if (cachedMonth.value) restoreFromCache(cachedMonth.value)
   try {
     drivers.value = await getDrivers()
   }
@@ -301,6 +332,21 @@ function groupRowsByVehicle(rows: AllowanceReportRow[]): Map<string, AllowanceRe
   return groups
 }
 
+/** 便を車輌C ごとに分けて車輌C の昇順に並べる。突合の入力の順を固定する。 */
+function orderedVehicleRows(rows: AllowanceReportRow[]): [string, AllowanceReportRow[]][] {
+  return [...groupRowsByVehicle(rows)].sort((a, b) => (a[0] > b[0] ? 1 : -1))
+}
+
+/** **手元にある明細だけで突合する (通信しない)。** キャッシュからの復元と共用。 */
+function applyReconcile(
+  ordered: [string, AllowanceReportRow[]][],
+  slips: Record<string, VehicleDailySlip[]>,
+) {
+  const inputs: VehicleReconcileInput[] = ordered
+    .map(([vehicle, vehicleRows]) => ({ vehicle, rows: vehicleRows, slips: slips[vehicle] ?? [] }))
+  reconciled.value = reconcileVehicles(inputs, slips[POOL_VEHICLE] ?? [])
+}
+
 /**
  * 一番星の明細を引いて突合する。**キャッシュにある車輌C は引き直さない。**
  * 明細側には「変わったか」を判定する材料が無いので、取り直しは `force` に任せる。
@@ -312,7 +358,7 @@ async function runReconcile(
   force: boolean,
 ): Promise<Record<string, VehicleDailySlip[]>> {
   const range = slipDateRange(shownYm.value)
-  const ordered = [...groupRowsByVehicle(rows)].sort((a, b) => (a[0] > b[0] ? 1 : -1))
+  const ordered = orderedVehicleRows(rows)
   const vehicles = [...ordered.map(([vehicle]) => vehicle), POOL_VEHICLE]
   const plan = planSlipFetch(vehicles, cachedSlips, force)
   const slips: Record<string, VehicleDailySlip[]> = { ...plan.reuse }
@@ -320,9 +366,7 @@ async function runReconcile(
     progress.value = `一番星の明細を取得中 ${vehicle === POOL_VEHICLE ? `受け皿(${POOL_VEHICLE})` : `車輌${vehicle}`}`
     slips[vehicle] = tradableSlips(await fetchVehicleDailySlips(vehicle, range.from, range.to))
   }
-  const inputs: VehicleReconcileInput[] = ordered
-    .map(([vehicle, vehicleRows]) => ({ vehicle, rows: vehicleRows, slips: slips[vehicle] ?? [] }))
-  reconciled.value = reconcileVehicles(inputs, slips[POOL_VEHICLE] ?? [])
+  applyReconcile(ordered, slips)
   return slips
 }
 
@@ -559,7 +603,31 @@ function fromCached(op: CachedOperation): OperationAllowance {
   }
 }
 
+/**
+ * **前回の集計をキャッシュからそのまま出す (通信しない)。**
+ *
+ * 月と車輌CD を戻しただけでは白紙の画面が出るだけで、結局 `集計` を押し直すことになる。
+ * その月の材料は `allowance-cache.ts` に残っているので、**開いた瞬間に前回の続きから
+ * 見られる**ようにする。手当はキャッシュに入っていない (マスタを直したのに画面が
+ * 変わらない壊れ方を避けるため) ので、`fromCached` が引き直す。
+ *
+ * **最新かどうかは保証しない。** キャッシュ以降に取り込み直しがあれば古いままなので、
+ * 「キャッシュから出している」ことを画面に出し、`集計` で取り直せるようにしておく。
+ */
+function restoreFromCache(month: MonthCache) {
+  operations.value = applyCarryOver(month.operations.map(fromCached))
+  shownYm.value = month.ym
+  autoOpen()
+  status.value = 'ready'
+  restoredFromCache.value = true
+  // **明細を 1 車輌ぶんも持っていない月は突合しない。** 全部「一番星に無し」に見えて、
+  // 売上ゼロの月と区別が付かなくなる (一番星が落ちていた回のキャッシュがこれ)。
+  if (Object.keys(month.slips).length > 0) applyReconcile(orderedVehicleRows(allRows()), month.slips)
+}
+
 async function run(force = false) {
+  saveLastSearch()
+  restoredFromCache.value = false
   status.value = 'loading'
   errorMessage.value = null
   salesError.value = null
@@ -726,6 +794,11 @@ function downloadCsv() {
       <template v-else>
         この月のキャッシュはありません。<b>集計</b>で取ったぶんは次回から使い回します。
       </template>
+    </p>
+    <p v-if="restoredFromCache" class="text-xs text-sky-600 dark:text-sky-400 mb-3">
+      前回の検索 (<b>{{ shownYm }}</b>) をキャッシュから<b>そのまま表示</b>しています —
+      <b>通信していない</b>ので、キャッシュ保存後に取り込み直しがあれば古いままです。
+      最新にするには <b>集計</b> を押してください。
     </p>
     <p v-if="cacheNote" class="text-xs text-amber-600 dark:text-amber-400 mb-3">
       {{ cacheNote }}
