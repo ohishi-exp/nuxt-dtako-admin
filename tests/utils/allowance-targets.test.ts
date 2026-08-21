@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  isDriverCd,
   normalizeDriverCd,
   parseTargets,
   serializeTargets,
@@ -18,6 +19,19 @@ describe('normalizeDriverCd', () => {
   })
 })
 
+describe('isDriverCd', () => {
+  it('CD らしい文字列だけ通す', () => {
+    expect(isDriverCd('1412')).toBe(true)
+    expect(isDriverCd('A-12_3')).toBe(true)
+  })
+
+  it('氏名は弾く (旧版が氏名を保存していたため)', () => {
+    expect(isDriverCd('中村 一由')).toBe(false)
+    expect(isDriverCd('中村　一由')).toBe(false)
+    expect(isDriverCd('')).toBe(false)
+  })
+})
+
 describe('parseTargets', () => {
   it('保存済みの配列を重複排除・昇順で返す', () => {
     expect(parseTargets('["1732","1412"," 1412 "]')).toEqual(['1412', '1732'])
@@ -30,8 +44,12 @@ describe('parseTargets', () => {
     expect(parseTargets('{"a":1}')).toEqual([])
   })
 
-  it('文字列でない要素と空文字は落とす', () => {
-    expect(parseTargets('[1,null,""," ","1412"]')).toEqual(['1412'])
+  it('文字列でない要素・空文字・氏名は落とす', () => {
+    expect(parseTargets('[1,null,""," ","中村 一由","1412"]')).toEqual(['1412'])
+  })
+
+  it('氏名で保存していた旧版の値はまるごと落ちる', () => {
+    expect(parseTargets('["中村 一由","佐竹 繁","増地 誠"]')).toEqual([])
   })
 })
 
@@ -51,8 +69,9 @@ describe('toggleTarget', () => {
     expect(toggleTarget(['1412'], ' 1412 ')).toEqual([])
   })
 
-  it('空の CD は何もしない', () => {
+  it('空の CD・氏名は何もしない', () => {
     expect(toggleTarget(['1412'], '   ')).toEqual(['1412'])
+    expect(toggleTarget(['1412'], '中村 一由')).toEqual(['1412'])
   })
 })
 

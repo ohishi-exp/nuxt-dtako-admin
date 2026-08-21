@@ -31,8 +31,10 @@ import {
 
 /** イベントCSV を同時に引く本数。alc を叩きすぎないための上限。 */
 const CSV_CONCURRENCY = 4
-/** 対象乗務員の保存先。ブラウザごとに残る。 */
-const TARGETS_KEY = 'dtako:allowance:targets'
+/** 対象乗務員 (乗務員CD) の保存先。ブラウザごとに残る。
+ * **氏名で保存していた旧版とはキーを分ける** — 同じキーのまま意味を変えると、
+ * 氏名が `driver_cd` として API に渡って 0 件になる (2026-08-21 に踏んだ)。 */
+const TARGETS_KEY = 'dtako:allowance:driver-cds'
 
 
 function currentYm(): string {
@@ -87,6 +89,11 @@ watch(pendingDriver, (cd) => {
 
 function labelOf(cd: string): string {
   return driverLabel(drivers.value, cd)
+}
+
+/** 乗務員マスタに無い CD。指定ミスか、マスタが引けていないかのどちらか。 */
+function isUnknownDriver(cd: string): boolean {
+  return drivers.value.length > 0 && !drivers.value.some(d => d.driver_cd.trim() === cd)
 }
 
 /** 1 乗務員ぶんの運行をページングで全部取る。 */
@@ -271,8 +278,11 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
         <button
           v-for="cd in targets"
           :key="cd"
-          class="px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 hover:line-through"
-          title="クリックで対象から外す"
+          class="px-2 py-0.5 rounded-full hover:line-through"
+          :class="isUnknownDriver(cd)
+            ? 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300'
+            : 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300'"
+          :title="isUnknownDriver(cd) ? '乗務員マスタに無い CD です' : 'クリックで対象から外す'"
           @click="toggle(cd)"
         >
           {{ labelOf(cd) }} ✕
