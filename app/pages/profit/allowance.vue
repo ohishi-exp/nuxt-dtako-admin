@@ -591,6 +591,30 @@ const ichibanLegs = computed<IchibanLeg[]>(() => {
 })
 const ichibanTotals = computed(() => summarizeIchibanLegs(ichibanLegs.value))
 
+/**
+ * 一番星から起こした便を、デジタコ由来の便と同じ形にする (手当表PDF との突合用)。
+ *
+ * **運行NO は持てない** — 元になる運行がそもそも無いのがこの便の定義。空にして、
+ * 突合結果から「運行を開く」が押せないことで区別が付くようにする。
+ */
+function ichibanLegAsRow(leg: IchibanLeg): AllowanceReportRow {
+  return {
+    unkoNo: '',
+    date: leg.date,
+    driverName: leg.driverName,
+    vehicleName: leg.vehicleNumber,
+    seq: 0,
+    fromTs: null,
+    originCity: leg.origin,
+    destCity: leg.dest,
+    viaCities: '',
+    masterDest: leg.masterDest,
+    allowanceYen: leg.allowanceYen,
+    status: leg.status,
+    destSource: 'event',
+  }
+}
+
 /** デジタコ由来 + 一番星から起こしたぶん の合計。**画面で足して見せるのはここだけ。** */
 const combined = computed(() => {
   const allowanceYen = monthly.value.totalYen + monthProvisional.value.yen + ichibanTotals.value.allowanceYen
@@ -624,7 +648,12 @@ const excludedTotals = computed(() => {
 const pdfCompare = computed(() => {
   const file = pdfFile.value
   if (!file || file.ym !== shownYm.value) return null
-  return comparePdfTrips(file, allRows().map(row => ({ row, payYen: legPayYen(row) })))
+  return comparePdfTrips(file, [
+    ...allRows().map(row => ({ row, payYen: legPayYen(row) })),
+    // **一番星から起こした便も比べる。** 入れないと、埋めたはずの便が
+    // 「PDF にあって画面に無い便」に出続けて、直ったことが分からない。
+    ...ichibanLegs.value.map(leg => ({ row: ichibanLegAsRow(leg), payYen: leg.allowanceYen })),
+  ])
 })
 /** PDF の月と集計中の月が違う。押す前に気付けるように出す。 */
 const pdfMonthMismatch = computed(() =>
@@ -1446,6 +1475,7 @@ function downloadCsv() {
             経路が合って日付が 1 日ずれたもの・日付が合って経路が違うものも当てますが、<b>印を残して</b>下に出します
             (黙って寄せません)。ここに出ている「PDF にあって画面に無い便」は、
             <b>デジタコに運行が無い日</b>か<b>alc への取り込み漏れ</b>のどちらかです。
+            <b>一番星から起こした便も比べています</b> — 起こして埋まった便はここに出ません。
           </p>
 
           <div class="flex flex-wrap gap-6 text-sm items-center">
