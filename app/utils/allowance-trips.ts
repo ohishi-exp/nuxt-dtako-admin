@@ -148,8 +148,10 @@ export function lookupAllowanceByCity(originCity: string, destCity: string): All
  *
  * - `event` … その便の中の降しイベントから取れた (確定)
  * - `carried` … **次の運行の先頭にある降しから引き継いだ (推定)**
+ * - `forced` … **人が結んだ一番星の明細から決めた** (強制突合、
+ *   `allowance-force-match.ts`)。降しイベントが 1 つも無い便の卸地はこれでしか決まらない
  */
-export type DestSource = 'event' | 'carried'
+export type DestSource = 'event' | 'carried' | 'forced'
 
 export interface LegAllowance {
   leg: AllowanceLeg

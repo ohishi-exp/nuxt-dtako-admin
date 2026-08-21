@@ -125,11 +125,13 @@ describe('reportRowsToCsvLines', () => {
     expect(lines[2]).toContain('"","unknown"')
   })
 
-  it('卸地の出どころを最後の列に書く', () => {
-    const lines = reportRowsToCsvLines(toReportRows([op({ legs: [OK, CARRIED] })]))
+  it('卸地の出どころを最後の列に書く (強制突合も「イベント」と嘘をつかない)', () => {
+    const forced: LegAllowance = { ...CARRIED, destSource: 'forced' }
+    const lines = reportRowsToCsvLines(toReportRows([op({ legs: [OK, CARRIED, forced] })]))
     expect(lines[0]).toContain('"卸地の出どころ"')
     expect(lines[1]!.endsWith('"イベント"')).toBe(true)
     expect(lines[2]!.endsWith('"次運行の先頭の降し (推定)"')).toBe(true)
+    expect(lines[3]!.endsWith('"一番星の明細 (強制突合)"')).toBe(true)
   })
 
   it('値に含まれる引用符を escape する', () => {

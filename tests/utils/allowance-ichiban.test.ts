@@ -465,6 +465,11 @@ describe('reconcileCsvLines', () => {
     expect(lines[1]).toContain('"次運行の先頭の降し (推定)"')
   })
 
+  it('強制突合で卸地が決まった便もその旨を出す', () => {
+    const lines = reconcileCsvLines([row({ destSource: 'forced' })], new Map(), {})
+    expect(lines[1]).toContain('"一番星の明細 (強制突合)"')
+  })
+
   it('手当が決まらない理由 (unknown / ambiguous) を突合の状態と別の列で出す', () => {
     const unknown = reconcileCsvLines([row({ allowanceYen: null, status: 'unknown' })], new Map(), {})
     const ambiguous = reconcileCsvLines([row({ allowanceYen: null, status: 'ambiguous' })], new Map(), {})

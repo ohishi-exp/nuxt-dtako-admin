@@ -9,7 +9,8 @@
  * 突合して `売上` を出し、`収支 = 売上 − 手当` を 3 段すべてに並べる。
  *
  * 表示は **乗務員 → 運行 → 便** の 3 段。上から順に開いて、最後は運行詳細へ飛べる。
- * マスタで金額が決まらない便 (未確定) は合計に入れず、各段に件数を出す。
+ * 金額が決まらない便は合計に入れず、各段に件数を出す。**「未確定」は手当が 1 円も
+ * 決まっていない便**で、確定 (マスタ)・暫定・強制突合のどれで決まっても数えない。
  * イベントCSV が引けない運行も、**突合できなかった便・明細・単価の食い違いも**、
  * 隠さず件数と一覧で残す。
  *
@@ -36,6 +37,10 @@
  *
  * **降しイベントが無い便には、一番星の明細を手で結べる** (強制突合、
  * `allowance-force-match.ts`)。運行終了の後に卸している運行がこれに当たる。
+ * 結んで決まった卸地・手当は**集計 (`buildMonthlyAllowance`) に渡す前に便へ映す**
+ * (`applyForcedLegs`)。ここが一番星から起こした便と違うところで、あちらは
+ * デジタコに無い便を足すのに対し、こちらは**既にある便の欠けを埋める**ので、
+ * 表示側で差し替えると経路だけ直って数え方が置き去りになる。
  */
 import { getOperations, getOperationCsv, getDrivers } from '~/utils/api'
 import { fetchAllPages } from '~/utils/paged-fetch'
@@ -51,6 +56,7 @@ import {
   applyCarryOver,
   buildMonthlyAllowance,
   monthReadingRange,
+  toReportRows,
   type OperationAllowance,
   type AllowanceReportRow,
   type DriverNode,
@@ -87,6 +93,7 @@ import {
   clearForceMatch,
   forceMatchKey,
   resolveForceMatches,
+  applyForcedLegs,
   forceMatchCandidates,
   type ForceMatchMap,
 } from '~/utils/allowance-force-match'
@@ -408,9 +415,43 @@ function fetchOperationsFor(range: { from: string, to: string }, driverCd?: stri
 const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
 const tons = (v: number) => `${Math.round(v * 100) / 100}t`
 
+// --- 一番星の明細と、強制突合 (降しが無い便に明細を手で結ぶ) ---
+// **集計より先に置く。** 強制突合で決まった卸地・手当を便へ映してから
+// `buildMonthlyAllowance` に渡すので、経路の表示・経路キー (暫定手当・手当表PDF
+// との突合)・便数・手当・未確定の数え方が全部そのまま追従する。
+// (明細そのものの引き方は下の「売上 (一番星との突合)」にある)
+
+/** 引いた一番星の明細 (鍵は `driver:<CD>` か 車番)。**便を起こすのに使う。** */
+const slipsByKey = ref<Record<string, VehicleDailySlip[]>>({})
+
+/** 一番星の明細を `rowId` で引く。強制突合が結んだ相手を取り出すのに使う。 */
+const slipByRowId = computed(() => {
+  const map = new Map<string, VehicleDailySlip>()
+  for (const list of Object.values(slipsByKey.value)) {
+    for (const slip of list) map.set(slip.rowId, slip)
+  }
+  return map
+})
+
+/**
+ * 便のキー → 強制突合の結果。
+ *
+ * **対象月の外の便も含めて引く** (`toReportRows` をそのまま渡す)。月で切ってから
+ * 引くと、月末の運行に結んだぶんが集計に映らない。
+ */
+const forcedLegs = computed(() => resolveForceMatches(
+  toReportRows(operations.value),
+  forceMatch.value,
+  slipByRowId.value,
+  provisional.value,
+))
+
 /** 除外を当てる**前**の集計。モーダル (外した便を戻す場所) と、当たらなくなった
  * 除外の検出はこちらを見る。 */
-const monthlyAll = computed(() => buildMonthlyAllowance(operations.value, shownYm.value))
+const monthlyAll = computed(() => buildMonthlyAllowance(
+  applyForcedLegs(operations.value, forcedLegs.value),
+  shownYm.value,
+))
 const exclusion = computed(() => applyExclusions(monthlyAll.value, excluded.value))
 /** **除外を抜いた集計。** 表・合計・売上突合・CSV は全部こちらを読む。 */
 const monthly = computed(() => exclusion.value.monthly)
@@ -427,26 +468,6 @@ const staleExclusions = computed(() => staleExclusionKeys(monthlyAll.value, excl
 // 一番星が引けなくても手当は出せるので、失敗は握りつぶさず別枠で出す。
 const reconciled = ref<VehiclesReconcileResult | null>(null)
 const salesError = ref<string | null>(null)
-/** 引いた一番星の明細 (鍵は `driver:<CD>` か 車番)。**便を起こすのに使う。** */
-const slipsByKey = ref<Record<string, VehicleDailySlip[]>>({})
-
-/** 一番星の明細を `rowId` で引く。強制突合が結んだ相手を取り出すのに使う。 */
-const slipByRowId = computed(() => {
-  const map = new Map<string, VehicleDailySlip>()
-  for (const list of Object.values(slipsByKey.value)) {
-    for (const slip of list) map.set(slip.rowId, slip)
-  }
-  return map
-})
-
-/** 便のキー → 強制突合の結果。 */
-const forcedLegs = computed(() => resolveForceMatches(
-  monthlyAll.value.drivers.flatMap(d => d.operations.flatMap(op => op.rows)),
-  forceMatch.value,
-  slipByRowId.value,
-  provisional.value,
-))
-
 /**
  * 突合結果。**強制突合で結んだ便は上書きする。**
  *
@@ -621,13 +642,32 @@ function legProvisionalYen(r: AllowanceReportRow): number | null {
   return provisionalFor(r, provisional.value)
 }
 
-/** 1 便の「支払う手当」= 確定があればそれ、無ければ暫定。どちらも無ければ null。 */
+/**
+ * 1 便の「支払う手当」= 確定があればそれ、無ければ暫定。どちらも無ければ null。
+ *
+ * **強制突合をここで足さない。** 決まった卸地・手当は集計の**前**に便へ映してある
+ * (`applyForcedLegs`) ので、マスタで引けた便は `r.allowanceYen` に入っていて、
+ * 引けなかった便は経路キーがもう `釧路|駒場` なので `legProvisionalYen` が当たる。
+ */
 function legPayYen(r: AllowanceReportRow): number | null {
-  if (r.allowanceYen !== null) return r.allowanceYen
-  // 強制突合で卸地が決まった便は、その卸地でマスタ (無ければ暫定) から引いた額。
-  const forced = forcedLegs.value.get(forceMatchKey(r))
-  if (forced !== undefined && forced.allowanceYen !== null) return forced.allowanceYen
-  return legProvisionalYen(r)
+  return r.allowanceYen ?? legProvisionalYen(r)
+}
+
+/**
+ * **未確定 = 手当が 1 円も決まっていない便。** 確定 (マスタ)・暫定・強制突合の
+ * どれで決まっても未確定には数えない。
+ *
+ * `buildMonthlyAllowance` の `irregularTrips` は**マスタしか知らない**ので、
+ * 暫定が当たった便まで未確定に数えてしまう (強制突合したぶんは `applyForcedLegs` で
+ * 便に映してあるので、ここではマスタで決まった便と区別が要らない)。
+ * `summarizeProvisional` の `missingTrips` がちょうどこの定義。
+ */
+const monthUnresolvedTrips = computed(() => monthProvisional.value.missingTrips)
+function driverUnresolvedTrips(d: DriverNode): number {
+  return driverProvisional(d).missingTrips
+}
+function opUnresolvedTrips(op: OperationNode): number {
+  return opProvisional(op).missingTrips
 }
 
 /** その便に結んだ明細の `rowId`。無ければ空。 */
@@ -884,7 +924,9 @@ interface LegPayLabel {
   title: string
 }
 function legPayLabel(r: AllowanceReportRow): LegPayLabel {
-  if (r.allowanceYen !== null) return { text: yen(r.allowanceYen), warn: false, title: 'マスタで決まった手当' }
+  // **強制突合を先に見る。** 卸地・手当は集計の前に便へ映してあるので、
+  // マスタで引けた便は `r.allowanceYen` が埋まっていて、後ろに置くと
+  // 「人が結んで決めた」ことが画面から消える。
   const forced = forcedLegs.value.get(forceMatchKey(r))
   if (forced !== undefined && forced.allowanceYen !== null) {
     return {
@@ -893,6 +935,7 @@ function legPayLabel(r: AllowanceReportRow): LegPayLabel {
       title: `一番星の明細を手で結んで卸地を ${forced.dest} と決めた便`,
     }
   }
+  if (r.allowanceYen !== null) return { text: yen(r.allowanceYen), warn: false, title: 'マスタで決まった手当' }
   const provisionalYen = legProvisionalYen(r)
   if (provisionalYen !== null) {
     return {
@@ -961,10 +1004,10 @@ const fareMismatches = computed(() => fareChecks.value.filter(f => f.status === 
 const outOfMaster = computed(() => fareChecks.value.filter(f => f.status === 'no_master'))
 
 function opHasIssue(op: OperationNode): boolean {
-  return op.irregularTrips > 0 || op.error !== null
+  return opUnresolvedTrips(op) > 0 || op.error !== null
 }
 function driverHasIssue(d: DriverNode): boolean {
-  return d.irregularTrips > 0 || d.failedOperations > 0
+  return driverUnresolvedTrips(d) > 0 || d.failedOperations > 0
 }
 
 /**
@@ -990,7 +1033,9 @@ function visibleOperations(d: DriverNode): OperationNode[] {
   return onlyIrregular.value ? d.operations.filter(opHasIssue) : d.operations
 }
 function visibleRows(op: OperationNode): AllowanceReportRow[] {
-  return onlyIrregular.value ? op.rows.filter(r => r.status !== 'ok') : op.rows
+  // **「未確定だけ」は手当で絞る。** `status` はマスタの引き当てしか見ないので、
+  // 暫定や強制突合で決まった便まで残って、上の件数と数が合わなくなる。
+  return onlyIrregular.value ? op.rows.filter(r => legPayYen(r) === null) : op.rows
 }
 
 const csvRows = computed(() => visibleDrivers.value
@@ -1208,7 +1253,8 @@ function downloadCsv() {
       デジタコの積み/降しから便を切り出し、料金・給与マスタで 1 便あたりの手当を引きます。
       売上はデジタコに無い (積載量を持たない) ので、<b>一番星の運転日報明細</b>と突合して
       その税抜売上をそのまま使い、<b>収支 = 売上 − 手当</b>を出します。
-      乗務員 → 運行 → 便 の順に開けます。マスタで金額が決まらない便は合計に入れず「未確定」に数えます。
+      乗務員 → 運行 → 便 の順に開けます。<b>手当が 1 円も決まらない便</b>は合計に入れず「未確定」に数えます
+      (マスタ・暫定・強制突合のどれかで決まった便は入りません)。
       突合できなかった便・明細と、マスタの運賃と単価が食い違う明細は、下に件数と一覧で出します。
       <b>降しが 1 つも無い積み</b>のような実在しない便は、便の行 (または運行を開いたところ) の
       <b>除外</b>で集計から外せます。外した便は<b>下の「除外した便」から戻せます</b>。
@@ -1365,8 +1411,11 @@ function downloadCsv() {
           <span>収支 <b :class="combined.marginYen < 0 ? 'text-red-600 dark:text-red-400' : ''">
             {{ hasSales ? yen(combined.marginYen) : '-' }}
           </b></span>
-          <span :class="monthly.irregularTrips > 0 ? 'text-amber-600 dark:text-amber-400' : ''">
-            未確定 <b>{{ monthly.irregularTrips }}</b> 便
+          <span
+            :class="monthUnresolvedTrips > 0 ? 'text-amber-600 dark:text-amber-400' : ''"
+            title="手当が 1 円も決まっていない便。マスタ・暫定・強制突合のどれかで決まった便は入りません"
+          >
+            未確定 <b>{{ monthUnresolvedTrips }}</b> 便
           </span>
           <span
             v-if="excludedRows.length > 0"
@@ -1464,7 +1513,7 @@ function downloadCsv() {
                     class="px-3 py-2 text-right"
                     :class="driverHasIssue(d) ? 'text-amber-600 dark:text-amber-400' : 'text-gray-300 dark:text-gray-700'"
                   >
-                    {{ d.irregularTrips }}<span v-if="d.failedOperations > 0"> + 運行{{ d.failedOperations }}</span>
+                    {{ driverUnresolvedTrips(d) }}<span v-if="d.failedOperations > 0"> + 運行{{ d.failedOperations }}</span>
                   </td>
                   <td
                     class="px-3 py-2 text-right"
@@ -1526,7 +1575,7 @@ function downloadCsv() {
                               class="px-3 py-1.5 text-right"
                               :class="opHasIssue(op) ? 'text-amber-600 dark:text-amber-400' : 'text-gray-300 dark:text-gray-700'"
                             >
-                              {{ op.irregularTrips }}
+                              {{ opUnresolvedTrips(op) }}
                             </td>
                             <td
                               class="px-3 py-1.5 text-right"
@@ -1572,7 +1621,7 @@ function downloadCsv() {
                                     v-for="r in visibleRows(op)"
                                     :key="`${r.unkoNo}-${r.seq}`"
                                     class="border-t border-gray-100 dark:border-gray-800/50 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50"
-                                    :class="r.status !== 'ok' ? 'bg-amber-50 dark:bg-amber-950/30' : ''"
+                                    :class="legPayYen(r) === null ? 'bg-amber-50 dark:bg-amber-950/30' : ''"
                                     :title="`運行 ${r.unkoNo} を開く`"
                                     @click="openOperation(r.unkoNo)"
                                   >
@@ -1585,6 +1634,11 @@ function downloadCsv() {
                                         class="ml-1 px-1 rounded text-[10px] bg-sky-100 text-sky-700 dark:bg-sky-900/50 dark:text-sky-300"
                                         title="この便に降しイベントが無く、卸地を次の運行の先頭の降しから引き継いでいます (推定)"
                                       >推定</span>
+                                      <span
+                                        v-else-if="r.destSource === 'forced'"
+                                        class="ml-1 px-1 rounded text-[10px] bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300"
+                                        title="この便に降しイベントが無く、人が結んだ一番星の明細から卸地を決めています (強制突合)"
+                                      >強制突合</span>
                                       <span v-if="r.viaCities.includes('>')" class="text-gray-400">({{ r.viaCities }})</span>
                                     </td>
                                     <td class="px-3 py-1">{{ r.masterDest || '-' }}</td>

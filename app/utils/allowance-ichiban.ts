@@ -23,7 +23,7 @@ import { epochToYmd, type VehicleDailySlip } from './ichiban'
 import { normalizePlace, lookupFare } from './allowance-rate'
 import { RATE_MASTER, type RateRow } from './allowance-rate-master'
 import { addressToCity, cityToPlace, CITY_TO_DEST } from './allowance-trips'
-import { compareText, type AllowanceReportRow } from './allowance-report'
+import { compareText, destSourceLabel, type AllowanceReportRow } from './allowance-report'
 import { provisionalFor, type ProvisionalMap } from './allowance-provisional'
 
 /** 一番星の売上年月日と便の日付のズレ許容 (日)。手当表が翌日に押し出されるのと同じ揺れ。 */
@@ -558,8 +558,7 @@ export function reconcileCsvLines(
       const payYen = (r.allowanceYen ?? 0) + (provisionalYen ?? 0)
       return [
         r.unkoNo, r.date, r.driverName, r.vehicleName, r.seq, r.originCity, r.destCity,
-        r.viaCities, r.masterDest,
-        r.destSource === 'carried' ? '次運行の先頭の降し (推定)' : 'イベント',
+        r.viaCities, r.masterDest, destSourceLabel(r.destSource),
         r.allowanceYen, r.status, provisionalYen, hit.quantity, hit.salesYen,
         margin(hit.salesYen, payYen), hit.status,
         hit.split ? '推定' : '', hit.fromPool ? POOL_VEHICLE : '',
