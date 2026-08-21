@@ -9,14 +9,15 @@
  * マスタで金額が決まらない便 (未確定) は合計に入れず、各段に件数を出す。
  * イベントCSV が引けない運行も、隠さず理由付きで残す。
  */
-import { getOperations, getOperationCsv } from '~/utils/api'
+import { getOperations, getOperationCsv, getDrivers } from '~/utils/api'
+import { fetchAllPages } from '~/utils/paged-fetch'
+import type { Driver, OperationListItem } from '~/types'
 import { extractAllowanceLegs, allowanceForLegs } from '~/utils/allowance-trips'
 import {
   parseTargets,
   serializeTargets,
   toggleTarget,
-  filterByTargets,
-  driverCandidates,
+  driverLabel,
 } from '~/utils/allowance-targets'
 import {
   buildMonthlyAllowance,
@@ -41,7 +42,6 @@ function currentYm(): string {
 
 const ym = ref(currentYm())
 const vehicle = ref('')
-const driver = ref('')
 
 type Status = 'idle' | 'loading' | 'ready' | 'error'
 const status = ref<Status>('idle')
@@ -55,43 +55,53 @@ const shownYm = ref('')
 const onlyIrregular = ref(false)
 
 // --- 対象乗務員 ---
-// 全社を集計すると帯広のバルク車以外まで引き当てにいって未確定が数百件になるので、
-// **対象を保存して、その人の運行だけ イベントCSV を引く** (重い処理を減らす)。
+// 全乗務員を集計すると帯広のバルク車以外まで引き当てにいって未確定が数百件になるので、
+// **対象を保存して、その乗務員の運行だけ `/api/operations` に引かせる**。
+// 名前で全件取ってから絞る作りは誤り — `per_page` は 200 に丸められるため、
+// 月の後ろ 200 件しか返らず前半がまるごと落ちる (2026-07 は全社 1142 運行)。
 const targets = ref<string[]>([])
-const candidates = ref<string[]>([])
-const targetPanelOpen = ref(false)
-const candidatesLoading = ref(false)
+const drivers = ref<Driver[]>([])
+const pendingDriver = ref('')
 
-onMounted(() => {
+onMounted(async () => {
   targets.value = parseTargets(localStorage.getItem(TARGETS_KEY))
-  if (targets.value.length === 0) targetPanelOpen.value = true
+  try {
+    drivers.value = await getDrivers()
+  }
+  catch {
+    // 乗務員マスタが引けなくても CD だけで動く (表示が CD のままになるだけ)
+  }
 })
 
-function persistTargets() {
+function toggle(cd: string) {
+  targets.value = toggleTarget(targets.value, cd)
   localStorage.setItem(TARGETS_KEY, serializeTargets(targets.value))
 }
 
-function toggle(name: string) {
-  targets.value = toggleTarget(targets.value, name)
-  persistTargets()
+/** セレクタで選ばれたら対象に足して、次の選択に備えて空に戻す。 */
+watch(pendingDriver, (cd) => {
+  if (!cd) return
+  toggle(cd)
+  pendingDriver.value = ''
+})
+
+function labelOf(cd: string): string {
+  return driverLabel(drivers.value, cd)
 }
 
-/** 対象を選ぶための候補。運行一覧だけ引く (イベントCSV は引かないので速い)。 */
-async function loadCandidates() {
-  candidatesLoading.value = true
-  errorMessage.value = null
-  try {
-    const range = monthReadingRange(ym.value)
-    const res = await getOperations({ date_from: range.from, date_to: range.to, per_page: 500 })
-    candidates.value = driverCandidates(res.operations)
-    targetPanelOpen.value = true
-  }
-  catch (e) {
-    errorMessage.value = e instanceof Error ? e.message : String(e)
-  }
-  finally {
-    candidatesLoading.value = false
-  }
+/** 1 乗務員ぶんの運行をページングで全部取る。 */
+function fetchOperationsFor(range: { from: string, to: string }, driverCd?: string) {
+  return fetchAllPages<OperationListItem>(async (page) => {
+    const res = await getOperations({
+      date_from: range.from,
+      date_to: range.to,
+      driver_cd: driverCd,
+      vehicle_cd: vehicle.value.trim() || undefined,
+      page,
+      per_page: 200,
+    })
+    return { items: res.operations, total: res.total }
+  })
 }
 
 const monthly = computed(() => buildMonthlyAllowance(operations.value, shownYm.value))
@@ -164,14 +174,16 @@ async function run() {
   progress.value = '運行を検索中...'
   try {
     const range = monthReadingRange(ym.value)
-    const res = await getOperations({
-      date_from: range.from,
-      date_to: range.to,
-      vehicle_cd: vehicle.value.trim() || undefined,
-      driver_cd: driver.value.trim() || undefined,
-      per_page: 500,
-    })
-    const found = filterByTargets(res.operations, targets.value)
+    const found: OperationListItem[] = []
+    if (targets.value.length === 0) {
+      found.push(...await fetchOperationsFor(range))
+    }
+    else {
+      for (const cd of targets.value) {
+        progress.value = `運行を検索中 ${labelOf(cd)}`
+        found.push(...await fetchOperationsFor(range, cd))
+      }
+    }
     const resolved: OperationAllowance[] = []
     for (let i = 0; i < found.length; i += CSV_CONCURRENCY) {
       progress.value = `イベントCSV を取得中 ${resolved.length}/${found.length}`
@@ -228,22 +240,12 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
       <label class="text-xs text-gray-500">車輌CD
         <input v-model="vehicle" placeholder="1109" class="block text-sm border rounded px-2 py-1 w-28 dark:bg-gray-900">
       </label>
-      <label class="text-xs text-gray-500">乗務員CD
-        <input v-model="driver" placeholder="1412" class="block text-sm border rounded px-2 py-1 w-28 dark:bg-gray-900">
-      </label>
       <button
         class="text-sm px-4 py-1.5 rounded bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white"
         :disabled="status === 'loading'"
         @click="run"
       >
         {{ status === 'loading' ? '集計中...' : '集計' }}
-      </button>
-      <button
-        class="text-sm px-4 py-1.5 rounded border border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50"
-        :disabled="candidatesLoading"
-        @click="loadCandidates"
-      >
-        {{ candidatesLoading ? '読込中...' : '対象乗務員を選ぶ' }}
       </button>
       <button
         v-if="csvRows.length > 0"
@@ -257,46 +259,23 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
     <div class="mb-4 text-xs">
       <div class="flex flex-wrap items-center gap-2">
         <span class="text-gray-500">対象乗務員</span>
+        <DriverSearchSelect
+          v-model="pendingDriver"
+          :drivers="drivers"
+          value-key="driver_cd"
+          placeholder="乗務員を追加"
+        />
         <span v-if="targets.length === 0" class="text-amber-600 dark:text-amber-400">
           未設定 — 全乗務員を集計します (時間がかかり、未確定が大量に出ます)
         </span>
         <button
-          v-for="name in targets"
-          :key="name"
+          v-for="cd in targets"
+          :key="cd"
           class="px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 hover:line-through"
           title="クリックで対象から外す"
-          @click="toggle(name)"
+          @click="toggle(cd)"
         >
-          {{ name }} ✕
-        </button>
-      </div>
-
-      <div v-if="targetPanelOpen" class="mt-2 border border-gray-200 dark:border-gray-800 rounded-lg p-3">
-        <p v-if="candidates.length === 0" class="text-gray-400">
-          「対象乗務員を選ぶ」を押すと、その月に運行のある乗務員が出ます。
-        </p>
-        <template v-else>
-          <p class="text-gray-500 mb-2">
-            {{ ym }} に運行のある乗務員 ({{ candidates.length }}) — 選ぶとこのブラウザに保存されます
-          </p>
-          <div class="flex flex-wrap gap-x-4 gap-y-1">
-            <label
-              v-for="name in candidates"
-              :key="name"
-              class="flex items-center gap-1.5 cursor-pointer select-none"
-            >
-              <input
-                type="checkbox"
-                class="cursor-pointer"
-                :checked="targets.includes(name)"
-                @change="toggle(name)"
-              >
-              {{ name }}
-            </label>
-          </div>
-        </template>
-        <button class="mt-2 text-gray-500 hover:underline" @click="targetPanelOpen = false">
-          閉じる
+          {{ labelOf(cd) }} ✕
         </button>
       </div>
     </div>
@@ -355,14 +334,6 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
                   <td class="px-3 py-2 font-medium">
                     <span class="text-gray-400 mr-1">{{ openDrivers[d.driverName] ? '▾' : '▸' }}</span>
                     {{ d.driverName || '(不明)' }}
-                    <button
-                      v-if="d.driverName"
-                      class="ml-2 text-[11px] font-normal text-gray-400 hover:text-blue-500 hover:underline"
-                      :title="targets.includes(d.driverName) ? '対象から外す' : '対象に加える'"
-                      @click.stop="toggle(d.driverName)"
-                    >
-                      {{ targets.includes(d.driverName) ? '対象から外す' : '対象に加える' }}
-                    </button>
                   </td>
                   <td class="px-3 py-2 text-right">{{ d.operations.length }}</td>
                   <td class="px-3 py-2 text-right">{{ d.trips }}</td>
