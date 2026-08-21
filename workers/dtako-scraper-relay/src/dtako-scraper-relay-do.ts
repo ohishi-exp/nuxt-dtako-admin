@@ -243,6 +243,7 @@ import {
   mergeSummarySources,
   stableTimecardSummaryBody,
   summarizeTimecardMonth,
+  theearthUnsyncedWarning,
   type TimecardDailyRow,
   type WageReportSource,
 } from "./timecard-summary";
@@ -7205,6 +7206,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 前月 days (週40h の月初跨ぎ週用) も同じ優先順で合流する — 当月と別の source を
     // 混ぜると跨ぎ週の実働が二重に積まれる
     const { merged: prevMerged } = mergeSummarySources(prev.summaries, kintaiPrev.summaries);
+    // デジタコ側の未同期を握り潰さない (#712)。**theearth には無人同期が無い**ので、
+    // 出さないと「打刻を持たない乗務員 (本社以外の営業所、#613) が丸ごと落ちた表」が
+    // 正常に見える。実際に 3 週間気づかれなかった
+    const unsynced = theearthUnsyncedWarning(ym, prevYm, current.summaries, prev.summaries, kintaiPrev.summaries);
+    if (unsynced !== null) warnings.push(unsynced);
 
     if (merged.length > 0 && prevMerged.length === 0) {
       warnings.push(

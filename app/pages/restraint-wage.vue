@@ -26,6 +26,7 @@ import type {
   MinWageRowAttrs,
   RestraintDriverSummary,
   RestraintSourceKey,
+  TheearthSyncState,
   WageMaster,
   WageReportResponse,
   WageReportRow,
@@ -37,6 +38,7 @@ import {
   MIN_WAGE_DEFAULT_KEY,
   MIN_WAGE_JOB_GROUP_LABEL,
   minWageCompareRow,
+  theearthSyncState,
 } from '~/utils/restraint-wage-view'
 import { buildTimecardSummary, buildTimecardTable, countWorkKinds, employedDaysInMonth } from '~/utils/timecard-view'
 import type { KosokuDay } from '~/utils/kosoku-daily'
@@ -354,6 +356,35 @@ function monthFastBadge(year: number, monthNo: number): FastBadgeState {
     ichibanMonths.value,
     kintaiCachedMonths.value,
   )
+}
+
+/** theearth (デジタコ) 拘束サマリの同期状態 (Refs #712)。判定は pure な
+ * `theearthSyncState` (app/utils/restraint-wage-view.ts) に寄せてある。
+ *
+ * ★ **theearth 側には無人同期が無い** — cron (#606-6) が押し直すのは timecard 側
+ * だけで、theearth 側は人が /restraint-fetch を実行したときにしか進まない。
+ * cron 化はしない判断 (2026-08-21 オーナー) なので、この丸が取り込みを起こす
+ * 唯一のきっかけになる。
+ *
+ * ★ `archiveMonths` を渡すのが要点 — ichiban 未同期でも R2 アーカイブがあれば
+ * wage-report は R2 に落ちて行を出す (`archived-only`)。そこで「人が落ちている」と
+ * 出すと嘘になる。 */
+function monthTheearthSync(year: number, monthNo: number): TheearthSyncState {
+  return theearthSyncState(
+    `${year}-${String(monthNo).padStart(2, '0')}`,
+    ichibanMonths.value,
+    archiveMonths.value,
+    kintaiMonths.value,
+  )
+}
+
+/** 未同期の月から拘束CSV取得画面へ、対象年月を選択済みで飛ぶ (Refs #712)。
+ * 別画面で年月を選び直す一手間を挟むと、気づいても押されずに終わる。 */
+function jumpToRestraintFetch(year: number, monthNo: number) {
+  void navigateTo({
+    path: '/restraint-fetch',
+    query: { month: `${year}-${String(monthNo).padStart(2, '0')}` },
+  })
 }
 
 /** 月タブの「畳み直しが要る月」丸 (Refs #620)。判定は pure な `kintaiStaleMonthBadge`
@@ -5246,11 +5277,30 @@ watch([compMap, kyuyoSyncedKeys], () => {
                   class="w-1.5 h-1.5 rounded-full bg-emerald-500"
                   :class="monthFastBadge(selectedYear, m) === 'synced-only' ? 'opacity-50' : ''"
                   :title="(monthFastBadge(selectedYear, m) === 'full'
-                    ? '高速表示可 (拘束サマリ同期済み・キャッシュ有り)'
-                    : '高速表示可 (拘束サマリ同期済み)')
+                    ? 'デジタコ拘束サマリ 同期済み + 上流キャッシュ有り (高速表示)'
+                    : 'デジタコ拘束サマリ 同期済み (上流キャッシュ無しのため表示に数秒)')
                     + (monthIsTimecardSynced(selectedYear, m)
                       ? ' / タイムカードも同期済み'
                       : ' / タイムカードは未同期 (夜間バッチ待ち、表示自体には影響しません)')"
+                />
+                <!-- デジタコ拘束サマリ 未同期 (Refs #712)。**theearth 側には
+                     無人同期が無い** — cron (#606-6) は timecard 側しか押し直さず、
+                     人が /restraint-fetch を実行するまで永久に埋まらない。
+                     出すのは **ichiban 未同期 かつ R2 アーカイブも無い**月だけ
+                     (`unsynced`)。アーカイブがあれば wage-report は R2 に落ちて
+                     行を出すので (`archived-only`)、遅いだけで欠測ではない —
+                     そちらは既存の #460 バックフィル案内が扱う。
+                     この月は打刻を持たない乗務員 (本社以外の営業所、#613) が
+                     wage-report から丸ごと落ちるので、**丸を出さないと誰も
+                     気づけない** (実際に 3 週間気づかれなかった)。
+                     打刻すら無い月 (out-of-scope) には出さない — 過去の全月を
+                     警告で埋めると、本当に押すべき月が埋もれる -->
+                <button
+                  v-if="monthTheearthSync(selectedYear, m) === 'unsynced'"
+                  type="button"
+                  class="w-1.5 h-1.5 rounded-full bg-orange-500 cursor-pointer"
+                  title="この月はデジタコ拘束時間管理表を一度も取り込んでいません — 打刻を持たない乗務員 (本社以外の営業所) が表に 1 行も出ていません。無人で埋まる経路はありません: クリックで『拘束CSV取得』へ (対象年月を選択済みで開きます)"
+                  @click="jumpToRestraintFetch(selectedYear, m)"
                 />
                 <!-- オンプレ vs GCP の畳み直し状況 (Refs #620)。**塗るのは
                      stale_drivers > 0 だけ** — 「GCPにしか無い運行」は混ぜない
@@ -5277,8 +5327,9 @@ watch([compMap, kyuyoSyncedKeys], () => {
             薄い月はアーカイブなし ・
             <span class="inline-block w-1.5 h-1.5 rounded-full bg-sky-500 align-middle" /> タイムカード
             <span class="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 align-middle ml-1" /> 給与
-            <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 align-middle ml-1" /> 高速表示可 (キャッシュ有り)
-            <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 opacity-50 align-middle ml-1" /> 同期のみ
+            <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 align-middle ml-1" /> デジタコ同期済み (キャッシュ有り)
+            <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 opacity-50 align-middle ml-1" /> デジタコ同期済み
+            <span class="inline-block w-1.5 h-1.5 rounded-full bg-orange-500 align-middle ml-1" /> デジタコ未取り込み (要 拘束CSV取得)
             <span class="inline-block w-1.5 h-1.5 rounded-full bg-red-500 align-middle ml-1" /> 畳み直しが要る (オンプレ vs GCP)
             <span class="inline-block w-1.5 h-1.5 rounded-full bg-gray-400 align-middle ml-1" /> GCP側データ無し
           </span>
@@ -5294,7 +5345,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
             :label="`キャッシュを温める (${warmTargetMonths.length} ヶ月)`"
             :loading="warming"
             :disabled="warming"
-            title="上流の版が変わると全月のキャッシュが無効になります。月を順番に取り直して「高速表示可」に戻します (1 ヶ月あたり数秒)"
+            title="上流の版が変わると全月のキャッシュが無効になるので、月を順番に取り直します (1 ヶ月あたり数秒)。★ デジタコ拘束時間管理表の取り込みは進みません — 橙の丸が付いた月は『拘束CSV取得』で取り込む必要があります"
             @click="warmKintaiCache"
           />
           <span v-if="warmProgress" class="text-xs text-gray-500">{{ warmProgress }}</span>

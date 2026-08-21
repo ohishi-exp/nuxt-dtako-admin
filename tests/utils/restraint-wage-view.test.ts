@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from 'vitest'
 import type { MinWageRowAttrs } from '../../app/utils/restraint-wage-view'
-import { fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, groupMinWageRows, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, nextYm, prevYm } from '../../app/utils/restraint-wage-view'
+import { fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, groupMinWageRows, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
 
 describe('fmtMinutes', () => {
   it('時間+分を "XhYYm" 表記にする', () => {
@@ -166,6 +166,33 @@ describe('isTimecardSynced (timecard 側の無人同期状態、Refs #611 / #614
 
   it('空配列 (未設定・失敗時のフォールバック) は false', () => {
     expect(isTimecardSynced('2026-06', [])).toBe(false)
+  })
+})
+
+describe('theearthSyncState (デジタコ拘束サマリの状態、Refs #712)', () => {
+  const synced = ['2026-06', '2026-07']
+  const archive = ['2026-05', '2026-06', '2026-07']
+  const active = ['2026-05', '2026-06', '2026-07', '2026-08']
+
+  it('ichiban 同期済みの月は synced', () => {
+    expect(theearthSyncState('2026-07', synced, archive, active)).toBe('synced')
+  })
+
+  it('未同期でも R2 アーカイブがあれば archived-only — 行は落ちない (遅いだけ)', () => {
+    expect(theearthSyncState('2026-05', synced, archive, active)).toBe('archived-only')
+  })
+
+  it('同期もアーカイブも無く打刻だけある月は unsynced (当月がこれになる)', () => {
+    expect(theearthSyncState('2026-08', synced, archive, active)).toBe('unsynced')
+  })
+
+  it('打刻すら無い月は out-of-scope — 過去の全月を警告で埋めない', () => {
+    expect(theearthSyncState('2026-09', synced, archive, active)).toBe('out-of-scope')
+    expect(theearthSyncState('2020-01', [], [], [])).toBe('out-of-scope')
+  })
+
+  it('同期済みならアーカイブ・打刻が無くても synced が優先する', () => {
+    expect(theearthSyncState('2026-04', ['2026-04'], [], [])).toBe('synced')
   })
 })
 
