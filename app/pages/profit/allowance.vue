@@ -423,8 +423,10 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
                                   <tr
                                     v-for="r in visibleRows(op)"
                                     :key="`${r.unkoNo}-${r.seq}`"
-                                    class="border-t border-gray-100 dark:border-gray-800/50"
+                                    class="border-t border-gray-100 dark:border-gray-800/50 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50"
                                     :class="r.status !== 'ok' ? 'bg-amber-50 dark:bg-amber-950/30' : ''"
+                                    :title="`運行 ${r.unkoNo} を開く`"
+                                    @click="goToOperation(r.unkoNo)"
                                   >
                                     <td class="pl-16 pr-3 py-1 whitespace-nowrap">{{ r.date }}</td>
                                     <td class="px-3 py-1 text-right">{{ r.seq }}</td>
