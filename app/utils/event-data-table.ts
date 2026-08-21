@@ -190,6 +190,44 @@ export function classifyEventName(name: string): EventCategory {
   return 'event'
 }
 
+/**
+ * イベント分類 (`/event-classifications`) で「無視」に指定された値。
+ * **保存されているのはラベル (`無視`) ではなく値 (`ignore`)。**
+ */
+export const IGNORE_CLASSIFICATION = 'ignore'
+
+/** 「無視」にされたイベントCD の集合。 */
+export function ignoredEventCodes(
+  classifications: { event_cd: string, classification: string }[],
+): Set<string> {
+  return new Set(
+    classifications
+      .filter(c => c.classification === IGNORE_CLASSIFICATION)
+      .map(c => c.event_cd.trim())
+      .filter(cd => cd !== ''),
+  )
+}
+
+/**
+ * 「無視」のイベント行を落とす。
+ *
+ * **イベント分類の設定は保存できるだけで、どこからも読まれていなかった**
+ * (2026-08-21 に判明)。急加速・急減速・急カーブ・速度オーバー・アイドリングを
+ * `無視` にしてあるのに、イベント表には 260 件並んで積み/降しが埋もれていた。
+ *
+ * イベントCD 列が無い CSV はそのまま返す (列が無いのに推測で落とさない)。
+ */
+export function dropIgnoredRows(
+  headers: string[],
+  rows: string[][],
+  ignored: Set<string>,
+): string[][] {
+  if (ignored.size === 0) return rows
+  const idx = colIndex(headers, 'イベントCD')
+  if (idx < 0) return rows
+  return rows.filter(row => !ignored.has((row[idx] ?? '').trim()))
+}
+
 export function filterRowsByCategory(
   rows: string[][],
   eventNameIdx: number,

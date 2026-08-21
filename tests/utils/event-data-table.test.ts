@@ -26,6 +26,8 @@ import {
   rowIndicesInTimeRange,
   rowIndicesInTimeRanges,
   eventHeaders,
+  ignoredEventCodes,
+  dropIgnoredRows,
 } from '~/utils/event-data-table'
 
 describe('colIndex', () => {
@@ -1046,5 +1048,35 @@ describe('rowIndicesInTimeRanges', () => {
 
   it('レグが空なら空配列', () => {
     expect(rowIndicesInTimeRanges(headers, rows, [])).toEqual([])
+  })
+})
+
+describe('ignoredEventCodes / dropIgnoredRows', () => {
+  const classifications = [
+    { event_cd: '201', classification: 'work' },
+    { event_cd: '401', classification: 'ignore' },
+    { event_cd: '403', classification: 'ignore' },
+    { event_cd: ' ', classification: 'ignore' },
+  ]
+
+  it('「無視」にされたイベントCD だけを集める (空の CD は入れない)', () => {
+    expect([...ignoredEventCodes(classifications)]).toEqual(['401', '403'])
+    expect(ignoredEventCodes([]).size).toBe(0)
+  })
+
+  it('「無視」の行を落とす', () => {
+    const headers = ['イベントCD', 'イベント名']
+    const rows = [['201', '運転'], ['401', '急加速'], ['403', '急カーブ']]
+    expect(dropIgnoredRows(headers, rows, ignoredEventCodes(classifications))).toEqual([['201', '運転']])
+  })
+
+  it('無視が無ければそのまま返す', () => {
+    const rows = [['401', '急加速']]
+    expect(dropIgnoredRows(['イベントCD'], rows, new Set())).toBe(rows)
+  })
+
+  it('イベントCD 列が無ければそのまま返す (推測で落とさない)', () => {
+    const rows = [['急加速']]
+    expect(dropIgnoredRows(['イベント名'], rows, new Set(['401']))).toBe(rows)
   })
 })

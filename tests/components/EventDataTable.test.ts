@@ -1,9 +1,19 @@
-import { describe, it, expect } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { describe, it, expect, vi } from 'vitest'
+import { mount, flushPromises } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import EventDataTable from '~/components/EventDataTable.vue'
 import type { CsvJsonResponse } from '~/types'
 import { UIconStub } from '../helpers/stubs'
+import { getEventClassifications } from '~/utils/api'
+
+// イベント分類 (`/event-classifications`) の「無視」を表が読むようになったので、
+// 取得はモックする。既定は 401 (急加速) だけ無視。
+vi.mock('~/utils/api', () => ({
+  getEventClassifications: vi.fn(async () => [
+    { event_cd: '401', classification: 'ignore' },
+    { event_cd: '201', classification: 'work' },
+  ]),
+}))
 
 const fullHeaders = [
   '開始日時', '終了日時', 'イベントCD', 'イベント名', '区間時間', '区間距離',
@@ -87,6 +97,34 @@ describe('EventDataTable', () => {
     const wrapper = createWrapper({ headers: ['不要列'], rows: [['a']] })
     // crewGroups has 1 group but no displayColumns → panel still renders
     expect(wrapper.find('.crew-panel').exists()).toBe(true)
+  })
+
+  it('イベント分類で「無視」にした行を落とし、件数を出して戻せる', async () => {
+    const wrapper = createWrapper({
+      headers: fullHeaders,
+      rows: [
+        makeRow({ 'イベントCD': '202', 'イベント名': '積み' }),
+        makeRow({ 'イベントCD': '401', 'イベント名': '急加速' }),
+        makeRow({ 'イベントCD': '401', 'イベント名': '急加速' }),
+      ],
+    })
+    await flushPromises()
+    expect(wrapper.text()).toContain('「無視」にした 2 件も表示')
+    expect(wrapper.findAll('div.overflow-auto > label')).toHaveLength(1)
+    // チェックすると戻せる (件数の表示はそのまま)
+    const box = wrapper.find('label input[type="checkbox"]')
+    await box.setValue(true)
+    await nextTick()
+    expect((box.element as HTMLInputElement).checked).toBe(true)
+    expect(wrapper.text()).toContain('「無視」にした 2 件も表示')
+  })
+
+  it('分類が引けなくても表は出す (全部見えるだけ)', async () => {
+    vi.mocked(getEventClassifications).mockRejectedValueOnce(new Error('引けない'))
+    const wrapper = createWrapper({ headers: fullHeaders, rows: [makeRow({ 'イベントCD': '401' })] })
+    await flushPromises()
+    expect(wrapper.find('.crew-panel').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('「無視」にした')
   })
 
   it('EventCrewPanel の update:selected-summary をそのまま relay する (実体の EventCrewPanel を使用)', async () => {
