@@ -63,6 +63,14 @@ export interface AllowanceReportRow {
   vehicleName: string
   /** その運行の中で何便目か (1 始まり)。 */
   seq: number
+  /**
+   * 積みイベントの `開始日時` (epoch 秒)。読めなければ null。
+   *
+   * **便を取り直しに強く名指しするための鍵。** `seq` は積みが 1 つ増減するとずれるが、
+   * 開始日時は運行の中で一意で、イベントCSV を取り直しても動かない
+   * (`allowance-excluded.ts` の `excludedKey`)。
+   */
+  fromTs: number | null
   originCity: string
   destCity: string
   /** 途中で降ろした市町村を `>` で連ねたもの (複数卸しの便だけ埋まる)。 */
@@ -105,6 +113,7 @@ export function toReportRows(ops: OperationAllowance[]): AllowanceReportRow[] {
         driverName: op.driverName ?? '',
         vehicleName: op.vehicleName ?? '',
         seq: i + 1,
+        fromTs: leg.fromTs,
         originCity: leg.originCity,
         destCity: leg.destCity,
         viaCities: leg.viaCities.join('>'),

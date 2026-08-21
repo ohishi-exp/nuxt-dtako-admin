@@ -12,6 +12,10 @@
  * マスタで金額が決まらない便 (未確定) は合計に入れず、各段に件数を出す。
  * イベントCSV が引けない運行も、**突合できなかった便・明細・単価の食い違いも**、
  * 隠さず件数と一覧で残す。
+ *
+ * デジタコには**降しが 1 つも無い積み** (= 実在しない便) が混ざるので、
+ * **その積みを「便ではない」と印を付けて集計から外せる** (`allowance-excluded.ts`)。
+ * 外した便も**黙って消さず**、件数を出して一覧から戻せるようにする。
  */
 import { getOperations, getOperationCsv, getDrivers } from '~/utils/api'
 import { fetchAllPages } from '~/utils/paged-fetch'
@@ -43,6 +47,17 @@ import {
   provisionalRoutes,
   type ProvisionalMap,
 } from '~/utils/allowance-provisional'
+import {
+  EXCLUDED_KEY,
+  parseExcluded,
+  serializeExcluded,
+  toggleExcluded,
+  excludedKey,
+  applyExclusions,
+  staleExclusionKeys,
+  unkoNoOfKey,
+  type ExcludedMap,
+} from '~/utils/allowance-excluded'
 import {
   CACHE_KEY,
   parseCache,
@@ -113,6 +128,33 @@ function onProvisionalInput(key: string, raw: string) {
   saveProvisional(key, Math.trunc(Number(raw)) || 0)
 }
 
+/**
+ * **便ではない積み**に印を付けて集計から外す (キー → true)。
+ *
+ * デジタコには「実際には積んでいない積み」が混ざり、降しが 1 つも無い便として
+ * 残り続ける (実例 `2607152258300000001318` の 便3)。**黙って消さない** —
+ * 外した件数を出し、下の一覧から戻せるようにする。
+ */
+const excluded = ref<ExcludedMap>({})
+
+function persistExcluded(next: ExcludedMap) {
+  excluded.value = next
+  try {
+    localStorage.setItem(EXCLUDED_KEY, serializeExcluded(next))
+  }
+  catch (e) {
+    cacheNote.value = `除外を保存できませんでした — ${e instanceof Error ? e.message : String(e)}`
+  }
+}
+
+/** 除外する / 戻すの両方。同じキーをもう一度渡せば戻る。 */
+function toggleExclusion(key: string) {
+  persistExcluded(toggleExcluded(excluded.value, key))
+}
+function toggleRowExclusion(r: AllowanceReportRow) {
+  toggleExclusion(excludedKey(r))
+}
+
 function readCache(): MonthCache | null {
   try {
     return findMonth(parseCache(localStorage.getItem(CACHE_KEY)), ym.value)
@@ -167,6 +209,7 @@ onMounted(async () => {
   targets.value = parseTargets(localStorage.getItem(TARGETS_KEY))
   cachedMonth.value = readCache()
   provisional.value = parseProvisional(localStorage.getItem(PROVISIONAL_KEY))
+  excluded.value = parseExcluded(localStorage.getItem(EXCLUDED_KEY))
   try {
     drivers.value = await getDrivers()
   }
@@ -219,7 +262,19 @@ function fetchOperationsFor(range: { from: string, to: string }, driverCd?: stri
 const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
 const tons = (v: number) => `${Math.round(v * 100) / 100}t`
 
-const monthly = computed(() => buildMonthlyAllowance(operations.value, shownYm.value))
+/** 除外を当てる**前**の集計。モーダル (外した便を戻す場所) と、当たらなくなった
+ * 除外の検出はこちらを見る。 */
+const monthlyAll = computed(() => buildMonthlyAllowance(operations.value, shownYm.value))
+const exclusion = computed(() => applyExclusions(monthlyAll.value, excluded.value))
+/** **除外を抜いた集計。** 表・合計・売上突合・CSV は全部こちらを読む。 */
+const monthly = computed(() => exclusion.value.monthly)
+/** 外した便そのもの (一覧に出して戻す)。 */
+const excludedRows = computed(() => exclusion.value.rows)
+/**
+ * **当たらなくなった除外。** 同じ運行が集計に居るのに、その除外がどの便にも
+ * 当たっていないもの = イベントCSV が変わって積みが動いた疑い。黙って効かなくしない。
+ */
+const staleExclusions = computed(() => staleExclusionKeys(monthlyAll.value, excluded.value))
 
 // --- 売上 (一番星との突合) ---
 // デジタコには積載量が無いので、売上は一番星の `amount` をそのまま使う。
@@ -317,6 +372,20 @@ function legMarginYen(r: AllowanceReportRow): number | null {
   if (!hit) return null
   return margin(hit.salesYen, legPayYen(r) ?? 0)
 }
+
+/**
+ * 外した便が持っていた手当・売上。**「黙って消えた額」を出すため**に数える。
+ * 実在しない便なら ¥0 のままなので、動かないことが正しい確認になる。
+ */
+const excludedTotals = computed(() => {
+  let allowanceYen = 0
+  let salesYen = 0
+  for (const r of excludedRows.value) {
+    allowanceYen += legPayYen(r) ?? 0
+    salesYen += legSalesYen(r) ?? 0
+  }
+  return { allowanceYen, salesYen }
+})
 
 /** 1 便の手当欄。**未確定は理由まで出す** — `unknown` と `ambiguous` は直し方が逆。 */
 interface LegPayLabel {
@@ -561,10 +630,12 @@ function openOperation(unkoNo: string) {
   modalUnkoNo.value = unkoNo
 }
 
+/** **除外した便もモーダルには出す** (`monthlyAll` を見る) — 外した便を戻す場所が
+ * 一覧しか無いと、運行の中身を見ながら戻せない。 */
 const modalTarget = computed(() => {
   const unkoNo = modalUnkoNo.value
   if (unkoNo === null) return null
-  for (const d of monthly.value.drivers) {
+  for (const d of monthlyAll.value.drivers) {
     const op = d.operations.find(o => o.unkoNo === unkoNo)
     if (!op) continue
     return {
@@ -603,6 +674,8 @@ function downloadCsv() {
       その税抜売上をそのまま使い、<b>収支 = 売上 − 手当</b>を出します。
       乗務員 → 運行 → 便 の順に開けます。マスタで金額が決まらない便は合計に入れず「未確定」に数えます。
       突合できなかった便・明細と、マスタの運賃と単価が食い違う明細は、下に件数と一覧で出します。
+      <b>降しが 1 つも無い積み</b>のような実在しない便は、便の行 (または運行を開いたところ) の
+      <b>除外</b>で集計から外せます。外した便は<b>下の「除外した便」から戻せます</b>。
     </p>
 
     <div class="flex flex-wrap gap-3 items-end mb-4">
@@ -717,6 +790,14 @@ function downloadCsv() {
           </b></span>
           <span :class="monthly.irregularTrips > 0 ? 'text-amber-600 dark:text-amber-400' : ''">
             未確定 <b>{{ monthly.irregularTrips }}</b> 便
+          </span>
+          <span
+            v-if="excludedRows.length > 0"
+            class="text-purple-600 dark:text-purple-400"
+            title="「便ではない」と印を付けて外した便。上の便数・手当・売上・収支・未確定のどれにも入っていません。下の「除外した便」から戻せます"
+          >
+            除外 <b>{{ excludedRows.length }}</b> 便
+            (手当 {{ yen(excludedTotals.allowanceYen) }} ・ 売上 {{ yen(excludedTotals.salesYen) }})
           </span>
           <span
             v-if="monthly.carriedTrips > 0"
@@ -890,6 +971,7 @@ function downloadCsv() {
                                     <th class="text-right px-3 py-1 font-medium text-gray-500">売上</th>
                                     <th class="text-right px-3 py-1 font-medium text-gray-500">収支</th>
                                     <th class="text-left px-3 py-1 font-medium text-gray-500">突合</th>
+                                    <th class="px-3 py-1" />
                                   </tr>
                                 </thead>
                                 <tbody>
@@ -938,6 +1020,15 @@ function downloadCsv() {
                                         :key="flag"
                                         class="ml-1 text-amber-600 dark:text-amber-400"
                                       >{{ flag }}</span>
+                                    </td>
+                                    <td class="px-3 py-1 text-right whitespace-nowrap">
+                                      <button
+                                        class="text-purple-500 hover:text-purple-700 hover:underline"
+                                        title="この積みは便ではない、と印を付けて集計から外します (下の「除外した便」から戻せます)"
+                                        @click.stop="toggleRowExclusion(r)"
+                                      >
+                                        除外
+                                      </button>
                                     </td>
                                   </tr>
                                 </tbody>
@@ -993,6 +1084,74 @@ function downloadCsv() {
                       {{ yen(route.yen * route.trips) }}
                     </span>
                     <span v-else class="text-gray-400">-</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div v-if="excludedRows.length > 0 || staleExclusions.length > 0" class="mt-6 space-y-2 text-xs">
+          <h2 class="text-sm font-semibold">除外した便</h2>
+          <p class="text-gray-500">
+            <b>「便ではない」と印を付けて外した積み</b>です。デジタコには<b>降しが 1 つも無い積み</b>が混ざり、
+            卸地が永久に決まらない便として残ります (実例 <code>2607152258300000001318</code> の 便3)。
+            ここに出ている便は<b>便数・手当・売上・収支・未確定のどの合計にも入っていません</b>。
+            <b>黙って消してはいません</b> — いつでも戻せます。
+            印はこのブラウザに保存され、<b>積みの開始日時</b>で便を指しているので、イベントCSV を取り直しても同じ便に付いたままです。
+          </p>
+
+          <p v-if="staleExclusions.length > 0" class="text-amber-600 dark:text-amber-400">
+            <b>{{ staleExclusions.length }} 件</b>の除外が、いまの便に当たっていません
+            (同じ運行は集計に居るので、<b>イベントCSV が変わって積みが動いた</b>疑いがあります)。
+            中身を確かめて、要らなければ外してください。
+          </p>
+          <ul v-if="staleExclusions.length > 0" class="space-y-1">
+            <li v-for="key in staleExclusions" :key="key" class="flex flex-wrap items-center gap-2">
+              <code class="font-mono text-[11px]">{{ key }}</code>
+              <button class="text-blue-500 hover:text-blue-700 hover:underline" @click="openOperation(unkoNoOfKey(key))">
+                運行を開く
+              </button>
+              <button class="text-purple-500 hover:text-purple-700 hover:underline" @click="toggleExclusion(key)">
+                この除外を消す
+              </button>
+            </li>
+          </ul>
+
+          <div v-if="excludedRows.length > 0" class="overflow-x-auto border border-gray-200 dark:border-gray-800 rounded-lg">
+            <table class="w-full">
+              <thead class="bg-gray-50 dark:bg-gray-800">
+                <tr>
+                  <th class="text-left px-3 py-1.5 font-medium text-gray-500">日付</th>
+                  <th class="text-left px-3 py-1.5 font-medium text-gray-500">乗務員</th>
+                  <th class="text-left px-3 py-1.5 font-medium text-gray-500">車輌</th>
+                  <th class="text-right px-3 py-1.5 font-medium text-gray-500">便</th>
+                  <th class="text-left px-3 py-1.5 font-medium text-gray-500">積地 → 卸地</th>
+                  <th class="text-left px-3 py-1.5 font-medium text-gray-500">マスタ卸地</th>
+                  <th class="text-right px-3 py-1.5 font-medium text-gray-500">手当</th>
+                  <th class="text-right px-3 py-1.5 font-medium text-gray-500">売上</th>
+                  <th class="px-3 py-1.5" />
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="r in excludedRows" :key="excludedKey(r)" class="border-t border-gray-100 dark:border-gray-800/70">
+                  <td class="px-3 py-1 whitespace-nowrap">{{ r.date }}</td>
+                  <td class="px-3 py-1 whitespace-nowrap">{{ r.driverName }}</td>
+                  <td class="px-3 py-1 whitespace-nowrap">{{ r.vehicleName }}</td>
+                  <td class="px-3 py-1 text-right">{{ r.seq }}</td>
+                  <td class="px-3 py-1">{{ r.originCity || '?' }} → {{ r.destCity || '?' }}</td>
+                  <td class="px-3 py-1">{{ r.masterDest || '-' }}</td>
+                  <td class="px-3 py-1 text-right whitespace-nowrap">
+                    <span :class="legPayLabel(r).warn ? 'text-amber-600 dark:text-amber-400' : ''">{{ legPayLabel(r).text }}</span>
+                  </td>
+                  <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(legSalesYen(r)) }}</td>
+                  <td class="px-3 py-1 text-right whitespace-nowrap">
+                    <button class="text-blue-500 hover:text-blue-700 hover:underline mr-3" @click="openOperation(r.unkoNo)">
+                      運行を開く
+                    </button>
+                    <button class="text-purple-500 hover:text-purple-700 hover:underline" @click="toggleRowExclusion(r)">
+                      戻す
+                    </button>
                   </td>
                 </tr>
               </tbody>
@@ -1162,8 +1321,10 @@ function downloadCsv() {
       v-if="modalTarget"
       v-bind="modalTarget"
       :provisional="provisional"
+      :excluded="excluded"
       @close="modalUnkoNo = null"
       @update-provisional="onProvisionalInput"
+      @toggle-exclude="toggleExclusion"
     />
   </div>
 </template>

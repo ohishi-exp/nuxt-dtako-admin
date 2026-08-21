@@ -8,12 +8,16 @@
  *
  * 便・売上は**呼び出し側が集計で既に持っているものをそのまま受け取る** (引き直さない)。
  * イベントCSV だけ開いたときに 1 本引く。
+ *
+ * **「便ではない」と外した便もここには出す** (印を付けて合計から抜くだけ) —
+ * 運行の中身を見ながら外す / 戻すができる場所がここしか無いため。
  */
 import { getOperationCsv } from '~/utils/api'
 import type { CsvJsonResponse } from '~/types'
 import type { AllowanceReportRow } from '~/utils/allowance-report'
 import { margin, type LegReconcile } from '~/utils/allowance-ichiban'
 import { provisionalFor, routeKey, type ProvisionalMap } from '~/utils/allowance-provisional'
+import { excludedKey, isExcluded, type ExcludedMap } from '~/utils/allowance-excluded'
 
 /** 便 1 行と、その突合結果。`<script setup>` は export を持てないのでローカル型。 */
 interface AllowanceModalEntry {
@@ -31,12 +35,17 @@ const props = defineProps<{
   entries: AllowanceModalEntry[]
   /** 経路キー → 暫定の手当。マスタに無い経路の金額を手で入れたもの。 */
   provisional: ProvisionalMap
+  /** 「便ではない」と印を付けて外した便。**このモーダルには外した便も出す** —
+   * 運行の中身を見ながら戻せる場所がここしか無いため。 */
+  excluded: ExcludedMap
 }>()
 
 const emit = defineEmits<{
   close: []
   /** 暫定の手当を入れ直した (保存は呼び出し側)。 */
   'update-provisional': [key: string, raw: string]
+  /** 便を除外した / 戻した (同じキーで入れ替わる。保存は呼び出し側)。 */
+  'toggle-exclude': [key: string]
 }>()
 
 const csv = ref<CsvJsonResponse | null>(null)
@@ -68,6 +77,14 @@ function onKeydown(e: KeyboardEvent) {
 onMounted(() => window.addEventListener('keydown', onKeydown))
 onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
+/** 「便ではない」と外した便か。**合計から抜くが、行は消さない。** */
+function isRowExcluded(e: AllowanceModalEntry): boolean {
+  return isExcluded(e.row, props.excluded)
+}
+function legExcludedKey(e: AllowanceModalEntry): string {
+  return excludedKey(e.row)
+}
+
 /** 1 便の暫定手当。マスタで決まっている便には当たらない。 */
 function legProvisionalYen(e: AllowanceModalEntry): number | null {
   return provisionalFor(e.row, props.provisional)
@@ -83,12 +100,22 @@ const totals = computed(() => {
   let allowanceYen = 0
   let provisionalYen = 0
   let salesYen = 0
+  let trips = 0
+  let excludedTrips = 0
   for (const e of props.entries) {
+    // 外した便は**どの合計にも入れない**。行は消さずに残す (戻せるように)。
+    if (isRowExcluded(e)) {
+      excludedTrips += 1
+      continue
+    }
+    trips += 1
     allowanceYen += e.row.allowanceYen ?? 0
     provisionalYen += legProvisionalYen(e) ?? 0
     salesYen += e.hit?.salesYen ?? 0
   }
   return {
+    trips,
+    excludedTrips,
     allowanceYen: allowanceYen + provisionalYen,
     provisionalYen,
     salesYen,
@@ -165,7 +192,12 @@ function legSlipLabel(e: AllowanceModalEntry): string {
 
         <div v-else>
           <div class="mb-2 flex flex-wrap gap-4 text-xs">
-            <span>便 <b>{{ entries.length }}</b></span>
+            <span>便 <b>{{ totals.trips }}</b></span>
+            <span
+              v-if="totals.excludedTrips > 0"
+              class="text-purple-600 dark:text-purple-400"
+              title="「便ではない」と印を付けて外した便。手当・売上・収支・便数のどれにも入っていません"
+            >除外 <b>{{ totals.excludedTrips }}</b></span>
             <span>
               手当 <b>{{ yen(totals.allowanceYen) }}</b>
               <span
@@ -189,6 +221,7 @@ function legSlipLabel(e: AllowanceModalEntry): string {
                   <th class="text-right px-3 py-1.5 font-medium text-gray-500">売上</th>
                   <th class="text-right px-3 py-1.5 font-medium text-gray-500">収支</th>
                   <th class="text-left px-3 py-1.5 font-medium text-gray-500">一番星の明細</th>
+                  <th class="px-3 py-1.5" />
                 </tr>
               </thead>
               <tbody>
@@ -196,8 +229,16 @@ function legSlipLabel(e: AllowanceModalEntry): string {
                   v-for="e in entries"
                   :key="`${e.row.unkoNo}-${e.row.seq}`"
                   class="border-t border-gray-100 dark:border-gray-800/70"
+                  :class="isRowExcluded(e) ? 'bg-purple-50 dark:bg-purple-950/30 text-gray-400 dark:text-gray-500' : ''"
                 >
-                  <td class="px-3 py-1 whitespace-nowrap">{{ e.row.date }}</td>
+                  <td class="px-3 py-1 whitespace-nowrap">
+                    {{ e.row.date }}
+                    <span
+                      v-if="isRowExcluded(e)"
+                      class="ml-1 px-1 rounded text-[10px] bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-300"
+                      title="「便ではない」と印を付けて外した便。合計には入っていません"
+                    >除外</span>
+                  </td>
                   <td class="px-3 py-1 text-right">{{ e.row.seq }}</td>
                   <td class="px-3 py-1">{{ e.row.originCity || '?' }} → {{ e.row.destCity || '?' }}</td>
                   <td class="px-3 py-1">{{ e.row.masterDest || '-' }}</td>
@@ -222,6 +263,17 @@ function legSlipLabel(e: AllowanceModalEntry): string {
                   <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(legSales(e)) }}</td>
                   <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(legMargin(e)) }}</td>
                   <td class="px-3 py-1">{{ legSlipLabel(e) }}</td>
+                  <td class="px-3 py-1 text-right whitespace-nowrap">
+                    <button
+                      class="text-purple-500 hover:text-purple-700 hover:underline"
+                      :title="isRowExcluded(e)
+                        ? 'この便を集計に戻します'
+                        : 'この積みは便ではない、と印を付けて集計から外します (いつでも戻せます)'"
+                      @click="emit('toggle-exclude', legExcludedKey(e))"
+                    >
+                      {{ isRowExcluded(e) ? '戻す' : '除外' }}
+                    </button>
+                  </td>
                 </tr>
               </tbody>
             </table>
