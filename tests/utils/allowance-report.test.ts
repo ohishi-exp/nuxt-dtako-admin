@@ -7,6 +7,7 @@ import {
   reportRowsToCsvLines,
   monthReadingRange,
   buildMonthlyAllowance,
+  applyCarryOver,
   type OperationAllowance,
   type AllowanceReportRow,
 } from '~/utils/allowance-report'
@@ -22,12 +23,15 @@ function leg(over: Partial<LegAllowance['leg']> = {}): LegAllowance['leg'] {
 function op(over: Partial<OperationAllowance> = {}): OperationAllowance {
   return {
     unkoNo: '2607010419590000001109', readingDate: '2026-07-02', operationDate: '2026-07-01',
-    driverName: '中村 一由', vehicleName: '帯広800か1109', legs: [], error: null, ...over,
+    driverName: '中村 一由', vehicleName: '帯広800か1109', legs: [],
+    carryIn: { cities: [], toTs: null }, error: null, ...over,
   }
 }
 
-const OK: LegAllowance = { leg: leg(), lookup: { status: 'ok', allowanceYen: 9000, dest: '上士幌', rows: [] } }
-const NG: LegAllowance = { leg: leg({ destCity: '芽室町', viaCities: ['芽室町'] }), lookup: { status: 'unknown', dest: '芽室' } }
+const OK: LegAllowance = { leg: leg(), lookup: { status: 'ok', allowanceYen: 9000, dest: '上士幌', rows: [] }, destSource: 'event' }
+const NG: LegAllowance = { leg: leg({ destCity: '芽室町', viaCities: ['芽室町'] }), lookup: { status: 'unknown', dest: '芽室' }, destSource: 'event' }
+/** 卸地を次の運行から引き継いだ便 (推定)。 */
+const CARRIED: LegAllowance = { leg: leg({ destCity: '士幌町', viaCities: ['士幌町'] }), lookup: { status: 'ok', allowanceYen: 9000, dest: '溝口', rows: [] }, destSource: 'carried' }
 
 describe('compareText', () => {
   it('昇順で比較する (localeCompare は使わない — ICU の照合順が環境で逆転するため)', () => {
@@ -64,6 +68,7 @@ describe('toReportRows', () => {
     const via: LegAllowance = {
       leg: leg({ viaCities: ['清水町', '帯広市'], destCity: '帯広市' }),
       lookup: { status: 'ok', allowanceYen: 12000, dest: '富士', rows: [] },
+      destSource: 'event',
     }
     expect(toReportRows([op({ legs: [via] })])[0]!.viaCities).toBe('清水町>帯広市')
   })
@@ -71,6 +76,11 @@ describe('toReportRows', () => {
   it('乗務員名・車輌名が無い運行は空文字にする', () => {
     const rows = toReportRows([op({ driverName: null, vehicleName: null, legs: [OK] })])
     expect(rows[0]).toMatchObject({ driverName: '', vehicleName: '' })
+  })
+
+  it('卸地の出どころ (推定かどうか) を行に持つ', () => {
+    const rows = toReportRows([op({ legs: [OK, CARRIED] })])
+    expect(rows.map(r => r.destSource)).toEqual(['event', 'carried'])
   })
 
   it('便が無い運行は行を作らない', () => {
@@ -115,6 +125,13 @@ describe('reportRowsToCsvLines', () => {
     expect(lines[2]).toContain('"","unknown"')
   })
 
+  it('卸地の出どころを最後の列に書く', () => {
+    const lines = reportRowsToCsvLines(toReportRows([op({ legs: [OK, CARRIED] })]))
+    expect(lines[0]).toContain('"卸地の出どころ"')
+    expect(lines[1]!.endsWith('"イベント"')).toBe(true)
+    expect(lines[2]!.endsWith('"次運行の先頭の降し (推定)"')).toBe(true)
+  })
+
   it('値に含まれる引用符を escape する', () => {
     const dirty = [{ ...rows[0]!, driverName: '中村 "一由"' }]
     expect(reportRowsToCsvLines(dirty)[1]).toContain('"中村 ""一由"""')
@@ -127,12 +144,13 @@ const D = (day: number, hour = 5) => Date.UTC(2026, 6, day, hour) / 1000
 const AUG = (day: number) => Date.UTC(2026, 7, day, 5) / 1000
 
 function okLeg(ts: number): LegAllowance {
-  return { leg: leg({ fromTs: ts }), lookup: { status: 'ok', allowanceYen: 9000, dest: '上士幌', rows: [] } }
+  return { leg: leg({ fromTs: ts }), lookup: { status: 'ok', allowanceYen: 9000, dest: '上士幌', rows: [] }, destSource: 'event' }
 }
 function ngLeg(ts: number): LegAllowance {
   return {
     leg: leg({ fromTs: ts, destCity: '', viaCities: [] }),
     lookup: { status: 'unknown', dest: '' },
+    destSource: 'event',
   }
 }
 
@@ -194,7 +212,61 @@ describe('buildMonthlyAllowance', () => {
 
   it('空なら 0', () => {
     expect(buildMonthlyAllowance([], '2026-07')).toEqual({
-      drivers: [], trips: 0, totalYen: 0, irregularTrips: 0, failedOperations: 0, outOfMonthTrips: 0,
+      drivers: [], trips: 0, totalYen: 0, irregularTrips: 0, carriedTrips: 0,
+      failedOperations: 0, outOfMonthTrips: 0,
     })
+  })
+})
+
+describe('applyCarryOver', () => {
+  // 実データ (2026-07 / 帯広800か1109): 26070604185900000011091 の最終便 (07-07 15:21
+  // 積み、降し無し) の卸地は、次の運行 26070804190900000011091 の先頭 (07-08 4:40
+  // 士幌町) にあった。運行 1 本だけを見ていると永久に決まらない。
+  const trailing = { ...ngLeg(D(7, 15)), leg: leg({ fromTs: D(7, 15), destCity: '', viaCities: [], unloadRowIndexes: [] }) }
+  const A = op({ unkoNo: '26070604185900000011091', legs: [okLeg(D(6)), trailing] })
+  const B = op({
+    unkoNo: '26070804190900000011091',
+    legs: [okLeg(D(8))],
+    carryIn: { cities: ['士幌町'], toTs: D(8, 4) },
+  })
+
+  it('同じ乗務員+車輌の次の運行から卸地を引き継ぐ', () => {
+    const out = applyCarryOver([A, B])
+    expect(out[0]!.legs[1]!.leg.destCity).toBe('士幌町')
+    expect(out[0]!.legs[1]!.destSource).toBe('carried')
+    // 引き継ぎ元 (次の運行) 自身の便は触られない
+    expect(out[1]!.legs).toEqual(B.legs)
+  })
+
+  it('運行NO 順に並べ直してから当てる (引いた順に依存しない)', () => {
+    expect(applyCarryOver([B, A])[1]!.legs[1]!.leg.destCity).toBe('士幌町')
+  })
+
+  it('乗務員か車輌が違えば引き継がない (積み残しは同じ車に載っている)', () => {
+    const other = op({ ...B, driverName: '柳井 亮祐' })
+    expect(applyCarryOver([A, other])[0]!.legs[1]!.leg.destCity).toBe('')
+    const otherVehicle = op({ ...B, vehicleName: '帯広800か1318' })
+    expect(applyCarryOver([A, otherVehicle])[0]!.legs[1]!.leg.destCity).toBe('')
+  })
+
+  it('乗務員名・車輌名が無くてもキーを作れる (同じ null 同士でまとまる)', () => {
+    const a = op({ ...A, driverName: null, vehicleName: null })
+    const b = op({ ...B, driverName: null, vehicleName: null })
+    expect(applyCarryOver([a, b])[0]!.legs[1]!.leg.destCity).toBe('士幌町')
+  })
+
+  it('引いた範囲の最後の運行は埋まらない (次の運行を持っていないため)', () => {
+    expect(applyCarryOver([A])[0]!.legs[1]!.leg.destCity).toBe('')
+    expect(applyCarryOver([])).toEqual([])
+  })
+})
+
+describe('buildMonthlyAllowance / 推定卸地の件数', () => {
+  it('引き継いだ便を carriedTrips に数える (合計には入れる)', () => {
+    const carried = { ...okLeg(D(7)), destSource: 'carried' as const }
+    const m = buildMonthlyAllowance([op({ legs: [okLeg(D(6)), carried] })], '2026-07')
+    expect(m).toMatchObject({ trips: 2, totalYen: 18000, carriedTrips: 1 })
+    expect(m.drivers[0]).toMatchObject({ carriedTrips: 1 })
+    expect(m.drivers[0]!.operations[0]).toMatchObject({ carriedTrips: 1 })
   })
 })
