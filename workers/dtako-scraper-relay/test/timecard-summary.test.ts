@@ -17,6 +17,7 @@ import {
   isClericalJob,
   summarizeTimecardDay,
   summarizeTimecardMonth,
+  theearthUnsyncedWarning,
   timestampToSeconds,
   TimecardSummaryError,
   totalLength,
@@ -447,6 +448,34 @@ describe('summarizeTimecardMonth', () => {
 
   it('空入力は空サマリ', () => {
     expect(summarizeTimecardMonth([], opts())).toEqual({ summaries: [], warnings: [] })
+  })
+})
+
+describe('theearthUnsyncedWarning (デジタコ未同期の warning、Refs #712)', () => {
+  const e = (driverCd: string) => ({ data: { driverCd } })
+
+  it('当月に theearth サマリが 1 件でもあれば null (= 同期済み)', () => {
+    expect(theearthUnsyncedWarning('2026-07', '2026-06', [e('1742')], [], [])).toBeNull()
+  })
+
+  it('未同期の月は「無人で埋まらない」ことと前月のデジタコのみ人数を出す', () => {
+    const w = theearthUnsyncedWarning(
+      '2026-08',
+      '2026-07',
+      [],
+      [e('1742'), e('1523'), e('1718')],
+      [e('1523'), e('1718')],
+    )
+    expect(w).toContain('2026-08 はデジタコ (拘束時間管理表) を一度も取り込んでいません')
+    expect(w).toContain('拘束CSV取得')
+    // 1742 だけが前月のデジタコのみ (打刻を持たない層)
+    expect(w).toContain('前月 2026-07 はデジタコにしか居ない乗務員が 1 名')
+  })
+
+  it('前月もデジタコのみが居ない (前月ごと未同期など) なら人数は添えない', () => {
+    const w = theearthUnsyncedWarning('2026-08', '2026-07', [], [], [e('1523')])
+    expect(w).toContain('2026-08 はデジタコ (拘束時間管理表) を一度も取り込んでいません')
+    expect(w).not.toContain('前月')
   })
 })
 

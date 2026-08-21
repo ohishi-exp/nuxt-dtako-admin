@@ -304,6 +304,51 @@ export function fastBadgeState(
   return 'synced-only'
 }
 
+// ---- theearth (デジタコ) 拘束サマリの同期状態 (Refs #712) ----
+
+/**
+ * 月タブの「デジタコ拘束サマリ」状態。
+ *
+ * - `synced`: ichiban へ同期済み (緑丸が出る月)
+ * - `archived-only`: 未同期だが **R2 アーカイブがある** — `loadWageReportSource` の
+ *   `pick()` が R2 へフォールバックするので **行は落ちない。遅いだけ**。
+ *   直し方も違う (theearth に触らない「全月再計算」で済む) ので、
+ *   ここでは警告を出さない (既存の #460 バックフィル案内の領分)
+ * - `unsynced`: 未同期で **R2 アーカイブも無い** = 一度も取り込んでいない月。
+ *   theearth 由来の行が**丸ごと落ちている** — 打刻を持たない乗務員
+ *   (本社以外の営業所、#613) はこの月の表に 1 行も出ない
+ * - `out-of-scope`: そもそもこの月のデータが無い (未来月・取り込み対象外)
+ */
+export type TheearthSyncState = 'synced' | 'archived-only' | 'unsynced' | 'out-of-scope'
+
+/**
+ * theearth (デジタコ) 拘束サマリの状態 (pure、Refs #712)。
+ *
+ * **theearth 側には無人同期の経路が無い** — 書けるのは人が `/restraint-fetch`
+ * (拘束CSV取得) を月ごとに実行したときだけで、cron 無人同期は timecard 側
+ * (R2 `kintai/` prefix) しか書かない (#606-6)。cron 化はしない判断
+ * (2026-08-21 オーナー: 「cron はいらない、人間が取り込むでいい」) なので、
+ * **この表示が取り込みを起こす唯一のきっかけ**になる。
+ *
+ * ★ **`archiveMonths` を混ぜずに「未同期」だけで警告を出してはいけない。**
+ * ichiban 未同期でも R2 アーカイブがあれば wage-report は R2 に落ちて行を出すので、
+ * 「人が落ちている」は嘘になる。落ちるのは**両方無い**月だけ。
+ *
+ * `activeMonths` (実際には timecard 取り込み済み月) は「この月に何かデータがある」
+ * ことの判定に使う — これが無いと、データの存在しない過去月・未来月まで警告で
+ * 埋まって、本当に押すべき月が埋もれる。
+ */
+export function theearthSyncState(
+  ym: string,
+  syncedMonths: readonly string[],
+  archiveMonths: readonly string[],
+  activeMonths: readonly string[],
+): TheearthSyncState {
+  if (syncedMonths.includes(ym)) return 'synced'
+  if (archiveMonths.includes(ym)) return 'archived-only'
+  return activeMonths.includes(ym) ? 'unsynced' : 'out-of-scope'
+}
+
 /**
  * timecard 側が ichiban へ同期済みかどうか (#611 の無人同期、毎日 JST 4:00、Refs #614)。
  *

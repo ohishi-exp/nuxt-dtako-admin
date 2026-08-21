@@ -951,6 +951,37 @@ function fillTheearthOnlyMetrics<T extends { data: MergeableSummary }>(
 }
 
 /**
+ * theearth (デジタコ) 拘束サマリが未同期の月に付ける warning (Refs #712)。
+ * 同期済み (= 当月の theearth サマリが 1 件でもある) なら null。
+ *
+ * **theearth 側には無人同期の経路が無い。** cron (#606-6) が押し直すのは timecard 側
+ * (R2 `kintai/` prefix) だけで、theearth 側 (`restraint/` prefix + push
+ * `source=theearth`) は人が画面『拘束CSV取得』を実行したときにしか進まない。
+ * cron 化はしない判断 (2026-08-21 オーナー) なので、**放っておいても埋まらない**。
+ *
+ * 未同期の月に「何名欠けているか」は**原理的に数えられない** (数えるには
+ * その月の theearth サマリが要る) ので、**前月の「デジタコにしか居ない乗務員」の
+ * 人数**を根拠として添える。この層は本社以外の営業所で、打刻システムが無いため
+ * デジタコが唯一の正 (#613) — つまり未同期の月は丸ごと表から落ちている。
+ */
+export function theearthUnsyncedWarning(
+  ym: string,
+  prevYm: string,
+  theearthCurrent: readonly { data: { driverCd: string } }[],
+  theearthPrev: readonly { data: { driverCd: string } }[],
+  timecardPrev: readonly { data: { driverCd: string } }[],
+): string | null {
+  if (theearthCurrent.length > 0) return null;
+  const head = `${ym} はデジタコ (拘束時間管理表) を一度も取り込んでいません`
+    + " — 無人で埋まる経路はありません。画面『拘束CSV取得』でこの月を取り込んでください";
+  const prevTimecardCds = new Set(timecardPrev.map((s) => s.data.driverCd));
+  const prevOnly = theearthPrev.filter((s) => !prevTimecardCds.has(s.data.driverCd)).length;
+  if (prevOnly === 0) return head;
+  return `${head} (前月 ${prevYm} はデジタコにしか居ない乗務員が ${prevOnly} 名居たため、`
+    + "この月の表からは同程度の人数が丸ごと落ちています)";
+}
+
+/**
  * theearth (デジタコ) と timecard (タイムカード) のサマリを 1 本の行列に合流する。
  *
  * **同じ乗務員CD が両方に居たら timecard を採る** — 賃金は打刻を根拠にするため、
