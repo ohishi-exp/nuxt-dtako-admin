@@ -482,6 +482,9 @@ export interface EventLegDateGroup {
   date: string
   fromTs: number
   toTs: number
+  /** その日付に属するレグ (fromTs昇順)。`fromTs`〜`toTs` の間には無関係な別レグが
+   * 挟まりうるので、行を選ぶときは union ではなくこちらを使う。 */
+  legs: { fromTs: number, toTs: number }[]
 }
 
 /**
@@ -492,13 +495,17 @@ export interface EventLegDateGroup {
  * 日付昇順で返す。
  */
 export function groupLegsByDate(legs: { fromTs: number, toTs: number }[]): EventLegDateGroup[] {
-  const byDate = new Map<string, { fromTs: number, toTs: number }>()
+  const byDate = new Map<string, { fromTs: number, toTs: number, legs: { fromTs: number, toTs: number }[] }>()
   for (const leg of legs) {
     const date = epochToYmd(leg.fromTs)
     const existing = byDate.get(date)
     byDate.set(date, existing
-      ? { fromTs: Math.min(existing.fromTs, leg.fromTs), toTs: Math.max(existing.toTs, leg.toTs) }
-      : { fromTs: leg.fromTs, toTs: leg.toTs })
+      ? {
+          fromTs: Math.min(existing.fromTs, leg.fromTs),
+          toTs: Math.max(existing.toTs, leg.toTs),
+          legs: [...existing.legs, leg].sort((a, b) => a.fromTs - b.fromTs),
+        }
+      : { fromTs: leg.fromTs, toTs: leg.toTs, legs: [leg] })
   }
   return [...byDate.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
@@ -529,4 +536,26 @@ export function rowIndicesInTimeRange(headers: string[], rows: string[][], fromT
     result.push(i)
   })
   return result
+}
+
+/**
+ * 複数レグぶんの `rowIndicesInTimeRange` を **union** した index 一覧 (昇順・重複なし)。
+ *
+ * **レグの間には無関係な別レグが挟まる。** 実運用回帰 (2026-08-21、運行
+ * `26070604185900000011091`): 一番星の伝票 `釧路市 → 標茶町` が 07-06 と 07-07 の
+ * 2 レグにマッチしたとき、`Math.min(fromTs)`〜`Math.max(toTs)` の 1 区間で行を
+ * 選ぶと、間に挟まる 士幌町行き・上士幌町行きのレグと 9 時間半の休息まで
+ * 巻き込んで **19 行**が選択され、距離も時間も実態の数倍に膨れた。
+ * レグごとに選んで union すれば、挟まったぶんは入らない。
+ */
+export function rowIndicesInTimeRanges(
+  headers: string[],
+  rows: string[][],
+  ranges: { fromTs: number, toTs: number }[],
+): number[] {
+  const found = new Set<number>()
+  for (const range of ranges) {
+    for (const i of rowIndicesInTimeRange(headers, rows, range.fromTs, range.toTs)) found.add(i)
+  }
+  return [...found].sort((a, b) => a - b)
 }

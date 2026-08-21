@@ -24,6 +24,7 @@ import {
   proposeEventRowRange,
   groupLegsByDate,
   rowIndicesInTimeRange,
+  rowIndicesInTimeRanges,
   eventHeaders,
 } from '~/utils/event-data-table'
 
@@ -904,6 +905,10 @@ describe('groupLegsByDate', () => {
         date: '2026-07-01',
         fromTs: parseEventDatetimeToTs('2026/07/01 11:15:12'),
         toTs: parseEventDatetimeToTs('2026/07/01 17:14:28'),
+        legs: [
+          { fromTs: parseEventDatetimeToTs('2026/07/01 11:15:12'), toTs: parseEventDatetimeToTs('2026/07/01 13:35:11') },
+          { fromTs: parseEventDatetimeToTs('2026/07/01 14:37:01'), toTs: parseEventDatetimeToTs('2026/07/01 17:14:28') },
+        ],
       },
     ])
   })
@@ -918,11 +923,13 @@ describe('groupLegsByDate', () => {
         date: '2026-07-01',
         fromTs: parseEventDatetimeToTs('2026/07/01 11:15:12'),
         toTs: parseEventDatetimeToTs('2026/07/01 13:35:11'),
+        legs: [{ fromTs: parseEventDatetimeToTs('2026/07/01 11:15:12'), toTs: parseEventDatetimeToTs('2026/07/01 13:35:11') }],
       },
       {
         date: '2026-07-02',
         fromTs: parseEventDatetimeToTs('2026/07/02 04:00:00'),
         toTs: parseEventDatetimeToTs('2026/07/02 06:00:00'),
+        legs: [{ fromTs: parseEventDatetimeToTs('2026/07/02 04:00:00'), toTs: parseEventDatetimeToTs('2026/07/02 06:00:00') }],
       },
     ])
   })
@@ -1001,3 +1008,43 @@ describe('rowIndicesInTimeRange', () => {
   })
 })
 
+
+describe('rowIndicesInTimeRanges', () => {
+  // 実運用回帰 (2026-08-21、運行 26070604185900000011091): 一番星の伝票
+  // `釧路市 → 標茶町` が 07-06 と 07-07 の 2 レグにマッチしたとき、間に挟まる
+  // 士幌町行き・上士幌町行きのレグと休息まで巻き込んで選択されていた。
+  const headers = ['開始日時', '終了日時']
+  const rows = [
+    ['2026/07/06 06:10:56', '2026/07/06 06:47:43'], // 0 積み (レグ1)
+    ['2026/07/06 06:47:43', '2026/07/06 07:55:02'], // 1 運転 (レグ1)
+    ['2026/07/06 07:55:02', '2026/07/06 08:33:40'], // 2 降し (レグ1)
+    ['2026/07/06 09:51:33', '2026/07/06 10:46:38'], // 3 別レグ (士幌町行き)
+    ['2026/07/06 19:15:57', '2026/07/07 04:48:56'], // 4 休息
+    ['2026/07/07 06:08:29', '2026/07/07 06:39:53'], // 5 積み (レグ2)
+    ['2026/07/07 06:39:53', '2026/07/07 07:55:04'], // 6 降し (レグ2)
+  ]
+  const leg1 = {
+    fromTs: parseEventDatetimeToTs('2026/07/06 06:10:56')!,
+    toTs: parseEventDatetimeToTs('2026/07/06 08:33:40')!,
+  }
+  const leg2 = {
+    fromTs: parseEventDatetimeToTs('2026/07/07 06:08:29')!,
+    toTs: parseEventDatetimeToTs('2026/07/07 07:55:04')!,
+  }
+
+  it('レグごとに選んで union する (間に挟まった別レグ・休息は入らない)', () => {
+    expect(rowIndicesInTimeRanges(headers, rows, [leg1, leg2])).toEqual([0, 1, 2, 5, 6])
+  })
+
+  it('1 区間に潰すと間の別レグまで入ってしまう (この関数が防いでいるもの)', () => {
+    expect(rowIndicesInTimeRange(headers, rows, leg1.fromTs, leg2.toTs)).toEqual([0, 1, 2, 3, 4, 5, 6])
+  })
+
+  it('重なるレグを渡しても index は重複しない (昇順)', () => {
+    expect(rowIndicesInTimeRanges(headers, rows, [leg1, leg1])).toEqual([0, 1, 2])
+  })
+
+  it('レグが空なら空配列', () => {
+    expect(rowIndicesInTimeRanges(headers, rows, [])).toEqual([])
+  })
+})

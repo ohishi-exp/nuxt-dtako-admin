@@ -7,7 +7,7 @@ import {
   selectedRowsLocationRange,
   proposeEventRowRange,
   groupLegsByDate,
-  rowIndicesInTimeRange,
+  rowIndicesInTimeRanges,
   type SelectedRowsSummary,
   type SelectedRowsLocationRange,
 } from '~/utils/event-data-table'
@@ -138,7 +138,7 @@ const proposedLegCount = ref(0)
  * `selectedEventRange` (EventCrewPanel からの emit で更新される、下流表示用) とは
  * 別に持つ — 同じ ref を双方向に使うと EventCrewPanel 側の emit が上書きし合い
  * 無限ループ/競合の元になる。 */
-const proposedEventRange = ref<{ fromTs: number, toTs: number } | null>(null)
+const proposedEventRange = ref<{ fromTs: number, toTs: number, legs?: { fromTs: number, toTs: number }[] } | null>(null)
 /** 日付をまたぐレグがある場合の日付ごとのデジタコ実績 (Refs #356 派生要望:
  * 「日付が違う部分を分けて別々に登録したい」)。ProfitPanel に渡し、伝票候補を
  * 日付ごとにグループ化して個別に保存できるようにする。日付が1つしか無ければ
@@ -157,8 +157,14 @@ interface ProposeCandidate {
  * 2件以上あれば自動適用せず、ユーザーにどちらを反映するか選ばせる。 */
 const proposeCandidates = ref<ProposeCandidate[]>([])
 
-function applyProposedRange(headers: string[], rows: string[][], range: { fromTs: number, toTs: number }) {
-  const idx = rowIndicesInTimeRange(headers, rows, range.fromTs, range.toTs)
+function applyProposedRange(
+  headers: string[],
+  rows: string[][],
+  range: { fromTs: number, toTs: number, legs?: { fromTs: number, toTs: number }[] },
+) {
+  // レグごとに選んで union する。全レグを 1 区間に潰すと、レグの間に挟まった
+  // 無関係な別レグ (別の卸地・休息) まで選択に入る (Refs rowIndicesInTimeRanges)。
+  const idx = rowIndicesInTimeRanges(headers, rows, range.legs ?? [range])
   selectedEventRange.value = range
   selectedEventSummary.value = summarizeSelectedRows(headers, rows, idx)
   selectedEventLocation.value = selectedRowsLocationRange(headers, rows, idx)
@@ -172,10 +178,10 @@ function applyProposedRange(headers: string[], rows: string[][], range: { fromTs
 function buildLegGroups(headers: string[], rows: string[][], legs: { fromTs: number, toTs: number }[]): ProfitPanelLegGroup[] {
   const dateGroups = groupLegsByDate(legs)
   if (dateGroups.length <= 1) return []
-  return dateGroups.map(({ date, fromTs, toTs }) => ({
+  return dateGroups.map(({ date, fromTs, toTs, legs: dateLegs }) => ({
     date,
     range: { fromTs, toTs },
-    summary: summarizeSelectedRows(headers, rows, rowIndicesInTimeRange(headers, rows, fromTs, toTs)),
+    summary: summarizeSelectedRows(headers, rows, rowIndicesInTimeRanges(headers, rows, dateLegs)),
   }))
 }
 
