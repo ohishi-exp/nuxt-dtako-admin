@@ -49,6 +49,34 @@ const connecting = ref(false)
 const connected = ref(false)
 const screenHost = ref<HTMLElement | null>(null)
 
+/**
+ * 走っているセッション。**閉じる (切断) ためだけに持つ。**
+ *
+ * `ref` にしない — WASM 側のオブジェクトを Vue の reactive proxy で包むと、
+ * プロキシ越しのメソッド呼び出しで壊れうる。画面に出す値でもない。
+ */
+let activeSession: { shutdown(): void } | null = null
+
+/**
+ * 接続を閉じる。
+ *
+ * **タブそのものは閉じられない** — `window.close()` はスクリプトが開いた窓にしか
+ * 効かず、リンク (`target="_blank"`) で開いたタブでは黙って無視される。ここでやるのは
+ * セッションの終了までで、画面は接続前のフォームに戻る (`run()` の `finally` が戻す)。
+ */
+function disconnect() {
+  status.value = '切断中…'
+  try {
+    activeSession?.shutdown()
+  }
+  catch (e) {
+    // 既に切れているだけのことが多い。握って画面は戻す。
+    errorText.value = describeError(e)
+  }
+  activeSession = null
+  connected.value = false
+}
+
 /** Access を通れるか。`null` は未確認。接続の前に分かっていると案内が出せる。 */
 const accessReady = ref<boolean | null>(null)
 
@@ -222,6 +250,7 @@ async function connect() {
     const config = configBuilder.build()
 
     const session = await userInteraction.connect(config)
+    activeSession = session
 
     // **`connect()` はセッションを走らせない。** 返ってきた `run()` を呼ばないと
     // クライアントは何も送らず、サーバーが十数秒で黙って切る (実機で再現した)。
@@ -248,6 +277,7 @@ async function connect() {
         errorText.value = describeError(e)
       })
       .finally(() => {
+        activeSession = null
         connected.value = false
       })
   }
@@ -293,6 +323,19 @@ async function connect() {
       </button>
       <span class="text-sm opacity-70">{{ status }}</span>
     </form>
+
+    <!-- 接続中はフォームが消えるので、状態と切断はここに出す。
+         **これが無いと閉じる手段がタブを消すことしかない。** -->
+    <div v-if="connected" class="flex flex-wrap items-center gap-3">
+      <span class="text-sm opacity-70">{{ status }}</span>
+      <button
+        class="border rounded px-3 py-1"
+        title="リモートアプリの接続を切ります。タブはブラウザの × で閉じてください"
+        @click="disconnect"
+      >
+        閉じる (切断)
+      </button>
+    </div>
 
     <p v-if="accessReady === false" class="text-sm opacity-70">
       Cloudflare Access に未ログインです。「接続」を押すとログイン画面が別窓で開きます
