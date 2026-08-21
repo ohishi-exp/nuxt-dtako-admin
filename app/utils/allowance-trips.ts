@@ -6,8 +6,21 @@
  * 58% しか一致しない (1 回の積みで複数の牧場に降ろす便があるため)。合わなかった
  * 4 本のうち 2 本は月跨ぎで翌月分の便が手元の PDF に無いだけの計測上の差。
  *
- * 卸地は**その積みの次の積みが来るまでに降ろした最後の市町村**を採る。手当表が
- * `清水・富士` のように複数卸しを 1 便として最終卸し地の金額で書いているのと揃う。
+ * 卸地は**その積みの次の積みが来るまでに降ろした最初の市町村**を採る。
+ *
+ * **「最後」ではない (2026-08-21 に帯広 5 台で訂正)。** 1109 には卸地が 2 つ以上に
+ * 割れる便が 1 つも無く、どちらの規則でも同じ結果になっていた。他の 4 台で割れる便が
+ * 8 件出て、**8 件とも手当表PDF の金額は最初の卸し地のもの**だった:
+ *
+ * ```
+ * 苫小牧 → 帯広市富士町 → 清水町     PDF 「苫小牧〜清水・富士」 ¥12,000 = 苫小牧|富士
+ * 帯広   → 士幌町       → 音更町     PDF 「帯広〜士幌」        ¥10,000 = 帯広|士幌
+ * 広尾   → 安平町       → 帯広市富士町 PDF 「広尾〜安平」        ¥6,000  = 広尾|安平
+ * 士幌   → 清水町       → 鹿追町     PDF 「士幌〜清水」        ¥8,000  = 士幌|清水DF
+ * ```
+ *
+ * 手当表の `清水・富士` は**表記の順で、降ろした順ではない** (実際は 富士 が先)。
+ * ここを「最後」と読んだのが元の誤りだった。
  */
 import { colIndex, classifyTimeCategory, parseEventDatetimeToTs } from './event-data-table'
 import { lookupAllowance, type AllowanceLookup } from './allowance-rate'
@@ -19,9 +32,9 @@ export interface AllowanceLeg {
   unloadRowIndexes: number[]
   /** 積みの `開始市町村名`。 */
   originCity: string
-  /** 最終卸し地の `終了市町村名`。降しが 1 つも無ければ空。 */
+  /** **最初の**卸し地の `終了市町村名`。降しが 1 つも無ければ空。 */
   destCity: string
-  /** 降ろした市町村を順に。最後が `destCity`。 */
+  /** 降ろした市町村を順に。最初が `destCity`。 */
   viaCities: string[]
   /** 積みの `開始日時` (epoch 秒)。読めなければ null。 */
   fromTs: number | null
@@ -67,7 +80,8 @@ export function extractAllowanceLegs(headers: string[], rows: string[][]): Allow
     // 市町村名が欠けている降し行が実在する。空で上書きすると卸地を見失うので飛ばす。
     if (!city) continue
     current.viaCities.push(city)
-    current.destCity = city
+    // 手当は**最初の**卸し地で決まる。後から来た降しで上書きしない。
+    if (!current.destCity) current.destCity = city
   }
   return legs
 }
@@ -129,14 +143,96 @@ export function lookupAllowanceByCity(originCity: string, destCity: string): All
   return lookupAllowance(cityToPlace(origin), mapped ?? cityToPlace(dest))
 }
 
+/**
+ * 卸地の出どころ。
+ *
+ * - `event` … その便の中の降しイベントから取れた (確定)
+ * - `carried` … **次の運行の先頭にある降しから引き継いだ (推定)**
+ */
+export type DestSource = 'event' | 'carried'
+
 export interface LegAllowance {
   leg: AllowanceLeg
   lookup: AllowanceLookup
+  destSource: DestSource
 }
 
 /** 各便に手当を引き当てる。 */
 export function allowanceForLegs(legs: AllowanceLeg[]): LegAllowance[] {
-  return legs.map(leg => ({ leg, lookup: lookupAllowanceByCity(leg.originCity, leg.destCity) }))
+  return legs.map(leg => ({
+    leg,
+    lookup: lookupAllowanceByCity(leg.originCity, leg.destCity),
+    destSource: 'event' as const,
+  }))
+}
+
+/**
+ * 運行の**先頭** (最初の積みより前) にある降し = 前の運行の積み残しを降ろしたもの。
+ *
+ * 2026-07 の 1109 (中村 一由) で、卸地が決まらなかった便 3 件はすべて
+ * **運行の最終便 (最後の積みの後に降しが 1 つも無い)** で、その降しは
+ * **次の運行の先頭**に記録されていた (オンプレ `dtako_events` の 14 運行で確認):
+ *
+ * ```
+ * 26070604185900000011091  [LULULUrLULUL   ← 末尾が積み (07-07 の便6)
+ * 26070804190900000011091  [ULULUrLULU     ← 先頭が降し ★これが上の便の卸地
+ * 26071504161600000011091  [LULULUrLULUL   ← 末尾が積み (07-16 の便6)
+ * 26071704155800000011091  [ULULULUrLULU   ← 先頭が降し
+ * 26073104154100000011091  [ULULUrLULUL    ← 先頭が降し / 末尾が積み (08-01 の便5)
+ * ```
+ *
+ * (`L`=積み `U`=降し `r`=休息 `[`=運行開始)。積んだまま帰庫し、翌朝の運行の頭で
+ * 降ろす形で、**イベントの欠落ではない**。
+ */
+export interface CarryInUnload {
+  /** 最初の積みより前に降ろした市町村 (順に。市町村名が空の行は入らない)。 */
+  cities: string[]
+
+  /** その最後の降しの `終了日時` (epoch 秒)。読めなければ null。 */
+  toTs: number | null
+}
+
+/** イベントCSV の先頭 (最初の積みより前) にある降しを取り出す。 */
+export function extractCarryInUnloads(headers: string[], rows: string[][]): CarryInUnload {
+  const nameIdx = colIndex(headers, 'イベント名')
+  const endCityIdx = colIndex(headers, '終了市町村名')
+  const endIdx = colIndex(headers, '終了日時')
+  const carry: CarryInUnload = { cities: [], toTs: null }
+  if (nameIdx < 0 || endCityIdx < 0) return carry
+  for (const row of rows) {
+    const category = classifyTimeCategory(row[nameIdx] ?? '')
+    if (category === 'loading') break
+    if (category !== 'unloading') continue
+    carry.toTs = parseEventDatetimeToTs(row[endIdx] ?? '')
+    const city = (row[endCityIdx] ?? '').trim()
+    if (city) carry.cities.push(city)
+  }
+  return carry
+}
+
+/**
+ * 運行の最終便に降しが 1 つも無いとき、**次の運行の先頭の降し**を卸地として引き継ぐ。
+ *
+ * 引き継いだ便は `destSource: 'carried'` になる。**推測で埋めているのではなく、
+ * 実在する降しイベントを別の運行から持ってきている**が、便との対応づけは
+ * 「運行をまたいだ隣接」という規則に頼っているので、確定した便とは区別して見せる。
+ *
+ * 降しが 1 つでもある便 (卸地の市町村名だけが空の便) には触らない — そちらは
+ * 別の原因なので、引き継ぎで塗り潰すと間違いが黙って混ざる。
+ */
+export function carryOverDest(items: LegAllowance[], carryIn: CarryInUnload): LegAllowance[] {
+  const last = items[items.length - 1]
+  if (!last || last.leg.unloadRowIndexes.length > 0 || carryIn.cities.length === 0) return items
+  const leg: AllowanceLeg = {
+    ...last.leg,
+    destCity: carryIn.cities[0]!,
+    viaCities: [...last.leg.viaCities, ...carryIn.cities],
+    toTs: carryIn.toTs,
+  }
+  return [
+    ...items.slice(0, -1),
+    { leg, lookup: lookupAllowanceByCity(leg.originCity, leg.destCity), destSource: 'carried' },
+  ]
 }
 
 export interface AllowanceTotals {

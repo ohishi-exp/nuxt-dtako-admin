@@ -12,7 +12,7 @@
 import { getOperations, getOperationCsv, getDrivers } from '~/utils/api'
 import { fetchAllPages } from '~/utils/paged-fetch'
 import type { Driver, OperationListItem } from '~/types'
-import { extractAllowanceLegs, allowanceForLegs } from '~/utils/allowance-trips'
+import { extractAllowanceLegs, extractCarryInUnloads, allowanceForLegs } from '~/utils/allowance-trips'
 import {
   parseTargets,
   serializeTargets,
@@ -20,6 +20,7 @@ import {
   driverLabel,
 } from '~/utils/allowance-targets'
 import {
+  applyCarryOver,
   buildMonthlyAllowance,
   monthReadingRange,
   reportRowsToCsvLines,
@@ -162,12 +163,17 @@ async function resolveOperation(op: {
     driverName: op.driver_name,
     vehicleName: op.vehicle_name,
     legs: [],
+    carryIn: { cities: [], toTs: null },
     error: null,
   }
   if (!op.has_kudgivt) return { ...base, error: 'イベントCSV が未取り込み (has_kudgivt=false)' }
   try {
     const csv = await getOperationCsv(op.unko_no, 'events')
-    return { ...base, legs: allowanceForLegs(extractAllowanceLegs(csv.headers, csv.rows)) }
+    return {
+      ...base,
+      legs: allowanceForLegs(extractAllowanceLegs(csv.headers, csv.rows)),
+      carryIn: extractCarryInUnloads(csv.headers, csv.rows),
+    }
   }
   catch (e) {
     return { ...base, error: e instanceof Error ? e.message : String(e) }
@@ -197,7 +203,8 @@ async function run() {
       const chunk = found.slice(i, i + CSV_CONCURRENCY)
       resolved.push(...await Promise.all(chunk.map(resolveOperation)))
     }
-    operations.value = resolved
+    // 積んだまま帰庫した便の卸地は次の運行の先頭にある。全運行を引き終えてから当てる。
+    operations.value = applyCarryOver(resolved)
     shownYm.value = ym.value
     autoOpen()
     progress.value = ''
@@ -308,6 +315,13 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
           <span>手当合計 <b>{{ yen(monthly.totalYen) }}</b></span>
           <span :class="monthly.irregularTrips > 0 ? 'text-amber-600 dark:text-amber-400' : ''">
             未確定 <b>{{ monthly.irregularTrips }}</b> 便
+          </span>
+          <span
+            v-if="monthly.carriedTrips > 0"
+            class="text-sky-600 dark:text-sky-400"
+            title="卸地をその次の運行の先頭にある降しから引き継いだ便 (積んだまま帰庫して翌朝降ろす形)。金額は合計に入れています"
+          >
+            推定卸地 <b>{{ monthly.carriedTrips }}</b> 便
           </span>
           <span v-if="monthly.failedOperations > 0" class="text-amber-600 dark:text-amber-400">
             便を取れなかった運行 <b>{{ monthly.failedOperations }}</b>
@@ -432,6 +446,11 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
                                     <td class="px-3 py-1 text-right">{{ r.seq }}</td>
                                     <td class="px-3 py-1">
                                       {{ r.originCity || '?' }} → {{ r.destCity || '?' }}
+                                      <span
+                                        v-if="r.destSource === 'carried'"
+                                        class="ml-1 px-1 rounded text-[10px] bg-sky-100 text-sky-700 dark:bg-sky-900/50 dark:text-sky-300"
+                                        title="この便に降しイベントが無く、卸地を次の運行の先頭の降しから引き継いでいます (推定)"
+                                      >推定</span>
                                       <span v-if="r.viaCities.includes('>')" class="text-gray-400">({{ r.viaCities }})</span>
                                     </td>
                                     <td class="px-3 py-1">{{ r.masterDest || '-' }}</td>

@@ -6,7 +6,7 @@
  * 「何便が未確定か」を出して人に見せる (2026-08-21 ユーザー判断)。
  */
 import { epochToYmd } from './ichiban'
-import type { LegAllowance } from './allowance-trips'
+import { carryOverDest, type CarryInUnload, type DestSource, type LegAllowance } from './allowance-trips'
 
 /** 1 運行ぶんの引き当て結果。 */
 export interface OperationAllowance {
@@ -18,8 +18,40 @@ export interface OperationAllowance {
   driverName: string | null
   vehicleName: string | null
   legs: LegAllowance[]
+  /** その運行の**先頭**にある降し (前の運行の積み残し)。`applyCarryOver` が使う。 */
+  carryIn: CarryInUnload
   /** イベントCSV が引けなかった等の理由。引けていれば null。 */
   error: string | null
+}
+
+/**
+ * **運行をまたいで積み残しの卸地を埋める。**
+ *
+ * 積んだまま帰庫し、翌朝の運行の頭で降ろす便がある。その降しは次の運行のイベントCSV
+ * に入るので、運行 1 本だけを見ていると卸地が永久に決まらない (2026-07 の帯広 5 台で
+ * 12 便、うち 10 便がこれで埋まる)。
+ *
+ * 同じ **乗務員 + 車輌**の運行を運行NO順 (= 開始日時順) に並べ、隣り合う 2 本の間で
+ * `carryOverDest` を当てる。**引いた範囲の最後の運行は埋まらない** — 次の運行を
+ * 持っていないため。その便は翌月ぶんなので、対象月の合計には効かない。
+ */
+export function applyCarryOver(ops: OperationAllowance[]): OperationAllowance[] {
+  const byTruck = new Map<string, OperationAllowance[]>()
+  for (const op of ops) {
+    const key = `${op.driverName ?? ''}|${op.vehicleName ?? ''}`
+    const list = byTruck.get(key) ?? []
+    list.push(op)
+    byTruck.set(key, list)
+  }
+  const filled = new Map<string, LegAllowance[]>()
+  for (const list of byTruck.values()) {
+    const sorted = [...list].sort((a, b) => compareText(a.unkoNo, b.unkoNo))
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const op = sorted[i]!
+      filled.set(op.unkoNo, carryOverDest(op.legs, sorted[i + 1]!.carryIn))
+    }
+  }
+  return ops.map(op => ({ ...op, legs: filled.get(op.unkoNo) ?? op.legs }))
 }
 
 /** 表と CSV の 1 行 = 1 便。 */
@@ -40,6 +72,8 @@ export interface AllowanceReportRow {
   /** 決まらなければ null。 */
   allowanceYen: number | null
   status: 'ok' | 'ambiguous' | 'unknown'
+  /** `carried` は卸地を**次の運行の先頭の降しから引き継いだ推定**。 */
+  destSource: DestSource
 }
 
 /**
@@ -77,6 +111,7 @@ export function toReportRows(ops: OperationAllowance[]): AllowanceReportRow[] {
         masterDest: lookup.status === 'ok' ? lookup.dest : '',
         allowanceYen: lookup.status === 'ok' ? lookup.allowanceYen : null,
         status: lookup.status,
+        destSource: item.destSource,
       })
     })
   }
@@ -114,7 +149,7 @@ export function summarizeByDriver(rows: AllowanceReportRow[]): DriverAllowanceTo
 
 const CSV_HEADER = [
   '運行NO', '日付', '乗務員', '車輌', '便', '積地(市町村)', '卸地(市町村)',
-  '途中卸し', 'マスタ卸地', '手当', '状態',
+  '途中卸し', 'マスタ卸地', '手当', '状態', '卸地の出どころ',
 ]
 
 /** CSV の各行 (先頭はヘッダ)。値にカンマが入りうるので必ず引用する。 */
@@ -125,6 +160,7 @@ export function reportRowsToCsvLines(rows: AllowanceReportRow[]): string[] {
     ...rows.map(r => [
       r.unkoNo, r.date, r.driverName, r.vehicleName, r.seq, r.originCity, r.destCity,
       r.viaCities, r.masterDest, r.allowanceYen, r.status,
+      r.destSource === 'carried' ? '次運行の先頭の降し (推定)' : 'イベント',
     ].map(quote).join(',')),
   ]
 }
@@ -162,6 +198,8 @@ export interface OperationNode {
   totalYen: number
   /** 金額が決まらなかった便数 (= 未確定)。 */
   irregularTrips: number
+  /** 卸地を次の運行から引き継いだ便数 (= **推定**)。合計には入るが印を出す。 */
+  carriedTrips: number
 }
 
 /** 乗務員 1 人ぶんの月まとめ (展開すると運行が見える)。 */
@@ -171,6 +209,7 @@ export interface DriverNode {
   trips: number
   totalYen: number
   irregularTrips: number
+  carriedTrips: number
   /** 便を 1 つも取れなかった運行の本数。 */
   failedOperations: number
 }
@@ -180,6 +219,7 @@ export interface MonthlyAllowance {
   trips: number
   totalYen: number
   irregularTrips: number
+  carriedTrips: number
   failedOperations: number
   /**
    * 引いた運行に含まれるが、便の日付が対象月の外だったもの。**合計には入れない。**
@@ -198,6 +238,7 @@ function emptyOperationNode(op: OperationAllowance): OperationNode {
     trips: 0,
     totalYen: 0,
     irregularTrips: 0,
+    carriedTrips: 0,
   }
 }
 
@@ -224,6 +265,7 @@ export function buildMonthlyAllowance(ops: OperationAllowance[], ym: string): Mo
     const node = emptyOperationNode(op)
     node.rows = rows
     for (const row of rows) {
+      if (row.destSource === 'carried') node.carriedTrips += 1
       if (row.allowanceYen === null) node.irregularTrips += 1
       else {
         node.trips += 1
@@ -232,11 +274,12 @@ export function buildMonthlyAllowance(ops: OperationAllowance[], ym: string): Mo
     }
     const name = op.driverName ?? ''
     const driver = byDriver.get(name)
-      ?? { driverName: name, operations: [], trips: 0, totalYen: 0, irregularTrips: 0, failedOperations: 0 }
+      ?? { driverName: name, operations: [], trips: 0, totalYen: 0, irregularTrips: 0, carriedTrips: 0, failedOperations: 0 }
     driver.operations.push(node)
     driver.trips += node.trips
     driver.totalYen += node.totalYen
     driver.irregularTrips += node.irregularTrips
+    driver.carriedTrips += node.carriedTrips
     if (op.error !== null) driver.failedOperations += 1
     byDriver.set(name, driver)
   }
@@ -250,6 +293,7 @@ export function buildMonthlyAllowance(ops: OperationAllowance[], ym: string): Mo
     trips: drivers.reduce((sum, d) => sum + d.trips, 0),
     totalYen: drivers.reduce((sum, d) => sum + d.totalYen, 0),
     irregularTrips: drivers.reduce((sum, d) => sum + d.irregularTrips, 0),
+    carriedTrips: drivers.reduce((sum, d) => sum + d.carriedTrips, 0),
     failedOperations: drivers.reduce((sum, d) => sum + d.failedOperations, 0),
     outOfMonthTrips: allRows.length - inMonth.length,
   }

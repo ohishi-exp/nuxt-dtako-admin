@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   extractAllowanceLegs,
+  extractCarryInUnloads,
+  carryOverDest,
   addressToCity,
   cityToPlace,
   lookupAllowanceByCity,
@@ -17,7 +19,7 @@ function ev(name: string, startCity = '', endCity = '', start = '2026/7/1 4:20:0
 }
 
 describe('extractAllowanceLegs', () => {
-  it('積みごとに 1 便を作り、次の積みまでに降ろした最後の市町村を卸地にする', () => {
+  it('積みごとに 1 便を作り、次の積みまでに降ろした最初の市町村を卸地にする', () => {
     const legs = extractAllowanceLegs(HEADERS, [
       ev('運行開始', '釧路市'),
       ev('積み', '釧路市'),
@@ -28,8 +30,10 @@ describe('extractAllowanceLegs', () => {
       ev('降し', '', '千歳市'),
     ])
     expect(legs).toHaveLength(2)
+    // 複数卸しは**最初**が卸地 (2026-08-21 に帯広 5 台の実データで確定。手当表PDF の
+    // 金額は 8 件とも最初の卸し地のもの。`清水・富士` は表記順で降ろした順ではない)
     expect(legs[0]).toMatchObject({
-      originCity: '釧路市', destCity: '帯広市', viaCities: ['清水町', '帯広市'],
+      originCity: '釧路市', destCity: '清水町', viaCities: ['清水町', '帯広市'],
       loadRowIndex: 1, unloadRowIndexes: [3, 4],
     })
     expect(legs[1]).toMatchObject({ originCity: '苫小牧市', destCity: '千歳市', viaCities: ['千歳市'] })
@@ -87,6 +91,82 @@ describe('extractAllowanceLegs', () => {
   it('必要な列が無い CSV は推測せず空を返す', () => {
     expect(extractAllowanceLegs(['イベント名', '開始日時'], [ev('積み', '釧路市')])).toEqual([])
     expect(extractAllowanceLegs([], [])).toEqual([])
+  })
+})
+
+describe('extractCarryInUnloads', () => {
+  it('最初の積みより前の降し (前の運行の積み残し) を市町村と時刻で返す', () => {
+    const carry = extractCarryInUnloads(HEADERS, [
+      ev('運行開始', '音更町'),
+      ev('降し', '', '士幌町', '2026/7/8 4:40:0', '2026/7/8 5:20:0'),
+      ev('積み', '釧路市'),
+      ev('降し', '', '標茶町'),
+    ])
+    expect(carry.cities).toEqual(['士幌町'])
+    expect(carry.toTs).toBe(Date.UTC(2026, 6, 8, 5, 20, 0) / 1000)
+  })
+
+  it('複数あれば順に持つ / 市町村名が空の行は入れないが時刻は進める', () => {
+    const carry = extractCarryInUnloads(HEADERS, [
+      ev('降し', '', '清水町', '2026/7/8 4:00:0', '2026/7/8 4:30:0'),
+      ev('降し', '', '', '2026/7/8 5:00:0', '2026/7/8 5:30:0'),
+      ev('積み', '釧路市'),
+    ])
+    expect(carry.cities).toEqual(['清水町'])
+    expect(carry.toTs).toBe(Date.UTC(2026, 6, 8, 5, 30, 0) / 1000)
+  })
+
+  it('先頭が積みなら積み残しは無い', () => {
+    expect(extractCarryInUnloads(HEADERS, [ev('積み', '釧路市'), ev('降し', '', '標茶町')]))
+      .toEqual({ cities: [], toTs: null })
+  })
+
+  it('列が足りない行・必要な列が無い CSV でも落ちない', () => {
+    expect(extractCarryInUnloads(HEADERS, [[], ['降し']])).toEqual({ cities: [], toTs: null })
+    expect(extractCarryInUnloads(['イベント名'], [ev('降し', '', '士幌町')]))
+      .toEqual({ cities: [], toTs: null })
+    expect(extractCarryInUnloads([], [ev('降し', '', '士幌町')]))
+      .toEqual({ cities: [], toTs: null })
+  })
+})
+
+describe('carryOverDest', () => {
+  // 実データ (2026-07 / 帯広800か1109): 運行 26070604185900000011091 の最終便は
+  // 07-07 15:21 に釧路で積んだきり降しが無く、その降しは次の運行
+  // 26070804190900000011091 の先頭 (07-08 4:40 士幌町中士幌) にあった。
+  const trailing = () => allowanceForLegs(extractAllowanceLegs(HEADERS, [
+    ev('積み', '釧路市'),
+    ev('降し', '', '標茶町'),
+    ev('積み', '釧路市', '', '2026/7/7 15:21:23'),
+  ]))
+
+  it('降しが無い最終便に、次の運行の先頭の降しを卸地として引き継ぐ', () => {
+    const out = carryOverDest(trailing(), { cities: ['士幌町'], toTs: 1234 })
+    expect(out).toHaveLength(2)
+    expect(out[0]!.destSource).toBe('event')
+    expect(out[1]!.leg).toMatchObject({ destCity: '士幌町', viaCities: ['士幌町'], toTs: 1234 })
+    expect(out[1]!.destSource).toBe('carried')
+    // 釧路|士幌 は マスタの 溝口 (¥9,000)。手当表PDF の `釧路〜士幌 ¥9,000` と一致する
+    expect(out[1]!.lookup).toMatchObject({ status: 'ok', allowanceYen: 9000, dest: '溝口' })
+  })
+
+  it('引き継ぎ先が複数あれば最初の卸し地を採る', () => {
+    const out = carryOverDest(trailing(), { cities: ['清水町', '帯広市'], toTs: null })
+    expect(out[1]!.leg).toMatchObject({ destCity: '清水町', viaCities: ['清水町', '帯広市'] })
+  })
+
+  it('最終便に降しが 1 つでもあれば触らない (卸地が空でも塗り潰さない)', () => {
+    const items = allowanceForLegs(extractAllowanceLegs(HEADERS, [
+      ev('積み', '釧路市'),
+      ev('降し', '', ''),
+    ]))
+    expect(carryOverDest(items, { cities: ['士幌町'], toTs: 1 })).toBe(items)
+  })
+
+  it('次の運行に積み残しが無ければ触らない / 便が無ければ触らない', () => {
+    const items = trailing()
+    expect(carryOverDest(items, { cities: [], toTs: null })).toBe(items)
+    expect(carryOverDest([], { cities: ['士幌町'], toTs: 1 })).toEqual([])
   })
 })
 
