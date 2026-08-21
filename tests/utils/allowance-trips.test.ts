@@ -72,10 +72,15 @@ describe('extractAllowanceLegs', () => {
     expect(broken[0]!.fromTs).toBeNull()
   })
 
-  it('列が足りない行があっても落ちない', () => {
-    const legs = extractAllowanceLegs(HEADERS, [['積み'], ['降し']])
+  it('列が足りない行・空行があっても落ちない', () => {
+    // 空行はイベント名すら取れない。市町村名・日時が欠けた行と併せて、
+    // 列が無い側の分岐を通す。
+    const legs = extractAllowanceLegs(HEADERS, [[], ['積み'], ['降し'], []])
     expect(legs).toHaveLength(1)
-    expect(legs[0]).toMatchObject({ originCity: '', destCity: '', fromTs: null, toTs: null })
+    expect(legs[0]).toMatchObject({
+      loadRowIndex: 1, unloadRowIndexes: [2],
+      originCity: '', destCity: '', viaCities: [], fromTs: null, toTs: null,
+    })
   })
 
   it('必要な列が無い CSV は推測せず空を返す', () => {
