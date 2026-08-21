@@ -204,3 +204,7 @@ branches = true
 [[files]]
 path = "app/utils/allowance-report.ts"
 branches = true
+
+[[files]]
+path = "app/utils/allowance-targets.ts"
+branches = true
