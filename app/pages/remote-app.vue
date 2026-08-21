@@ -50,12 +50,18 @@ const connected = ref(false)
 const screenHost = ref<HTMLElement | null>(null)
 
 /**
- * 走っているセッション。**閉じる (切断) ためだけに持つ。**
+ * 走っているセッションを切るための口。**閉じる (切断) ためだけに持つ。**
+ *
+ * **`connect()` の返り値ではない。** あれは `NewSessionInfo` (`sessionId` /
+ * `websocketPort` / `initialDesktopSize` / `run`) で `shutdown` を持たない。
+ * `shutdown()` は `<iron-remote-desktop>` の `UserInteraction` 側にある
+ * (`vendor/iron-remote-desktop/index.d.ts`)。ここを取り違えて
+ * `y?.shutdown is not a function` を出した (2026-08-21 に本番で踏んだ)。
  *
  * `ref` にしない — WASM 側のオブジェクトを Vue の reactive proxy で包むと、
  * プロキシ越しのメソッド呼び出しで壊れうる。画面に出す値でもない。
  */
-let activeSession: { shutdown(): void } | null = null
+let activeUi: { shutdown(): void } | null = null
 
 /**
  * 接続を閉じる。
@@ -67,13 +73,13 @@ let activeSession: { shutdown(): void } | null = null
 function disconnect() {
   status.value = '切断中…'
   try {
-    activeSession?.shutdown()
+    activeUi?.shutdown()
   }
   catch (e) {
     // 既に切れているだけのことが多い。握って画面は戻す。
     errorText.value = describeError(e)
   }
-  activeSession = null
+  activeUi = null
   connected.value = false
 }
 
@@ -250,7 +256,7 @@ async function connect() {
     const config = configBuilder.build()
 
     const session = await userInteraction.connect(config)
-    activeSession = session
+    activeUi = userInteraction
 
     // **`connect()` はセッションを走らせない。** 返ってきた `run()` を呼ばないと
     // クライアントは何も送らず、サーバーが十数秒で黙って切る (実機で再現した)。
@@ -277,7 +283,7 @@ async function connect() {
         errorText.value = describeError(e)
       })
       .finally(() => {
-        activeSession = null
+        activeUi = null
         connected.value = false
       })
   }
