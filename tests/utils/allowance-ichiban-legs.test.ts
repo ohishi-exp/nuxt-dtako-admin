@@ -28,8 +28,12 @@ function slip(over: Partial<VehicleDailySlip> = {}): VehicleDailySlip {
     ...over,
   }
 }
-const build = (slips: VehicleDailySlip[], usedRowIds: string[] = [], provisional = {}) =>
-  buildIchibanLegs('柳井 亮祐', slips, new Set(usedRowIds), '2026-07', provisional)
+const build = (
+  slips: VehicleDailySlip[],
+  usedRowIds: string[] = [],
+  provisional = {},
+  coveredOrigins: string[] = [],
+) => buildIchibanLegs('柳井 亮祐', slips, new Set(usedRowIds), new Set(coveredOrigins), '2026-07', provisional)
 
 describe('buildIchibanLegs', () => {
   it('どのデジタコ便にも当たらなかった明細から便を起こし、マスタで手当を引く', () => {
@@ -62,6 +66,29 @@ describe('buildIchibanLegs', () => {
     expect(legs).toHaveLength(1)
     // 施設名 (`大野ﾌｧｰﾑ`) ではなく市町村名を採る — デジタコ側の経路キーと揃えるため
     expect(legs[0]).toMatchObject({ origin: '広尾', dest: '芽室', status: 'unknown', allowanceYen: null })
+  })
+
+  it('同じ日・同じ積地にデジタコ便があれば起こさない (複数卸しの片割れ)', () => {
+    // 西島 07-21 の実データ: デジタコ便は 苫小牧発。余った `橋本畜産` は
+    // PDF では `苫小牧 → 清水・富士` の一部で、別の便ではない
+    const legs = build(
+      [slip({ saleDate: '2026-07-21', origin: '苫小牧', dest: '橋本畜産', destAreaName: '北海道音更町', unit: 't', quantity: 6.5 })],
+      [],
+      {},
+      ['2026-07-21|苫小牧'],
+    )
+    expect(legs).toEqual([])
+  })
+
+  it('積地が違えば、同じ日にデジタコ便があっても起こす', () => {
+    const legs = build(
+      [slip({ saleDate: '2026-07-18', origin: '広尾', dest: '大野ﾌｧｰﾑ', destAreaName: '北海道芽室町', unit: 't', quantity: 12.5 })],
+      [],
+      {},
+      ['2026-07-18|釧路'],
+    )
+    expect(legs).toHaveLength(1)
+    expect(legs[0]!.origin).toBe('広尾')
   })
 
   it('マスタに無い経路には暫定手当を当てる (デジタコ由来の便と同じ経路キー)', () => {

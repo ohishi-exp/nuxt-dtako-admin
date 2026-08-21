@@ -35,7 +35,7 @@
 import { getOperations, getOperationCsv, getDrivers } from '~/utils/api'
 import { fetchAllPages } from '~/utils/paged-fetch'
 import type { Driver, OperationListItem } from '~/types'
-import { extractAllowanceLegs, extractCarryInUnloads, allowanceForLegs } from '~/utils/allowance-trips'
+import { extractAllowanceLegs, extractCarryInUnloads, allowanceForLegs, addressToCity, cityToPlace } from '~/utils/allowance-trips'
 import {
   parseTargets,
   serializeTargets,
@@ -593,7 +593,10 @@ const ichibanLegs = computed<IchibanLeg[]>(() => {
     const cd = driverCdByName.value.get(d.driverName)
     if (cd === undefined) continue
     const slips = slipsByKey.value[driverSlipKey(cd)] ?? []
-    out.push(...buildIchibanLegs(d.driverName, slips, used, shownYm.value, provisional.value))
+    // **デジタコ便がある `日付|積地`。** その積地に残った明細は複数卸しの片割れ。
+    const coveredOrigins = new Set(d.operations.flatMap(op => op.rows
+      .map(r => `${r.date}|${cityToPlace(addressToCity(r.originCity))}`)))
+    out.push(...buildIchibanLegs(d.driverName, slips, used, coveredOrigins, shownYm.value, provisional.value))
   }
   return out
 })

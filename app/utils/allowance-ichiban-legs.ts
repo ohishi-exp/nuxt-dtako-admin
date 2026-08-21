@@ -193,12 +193,17 @@ function legSortKey(leg: IchibanLeg): string {
  * (増地 07-18 は同じ日に 釧路→川西 のデジタコ便があり、広尾→芽室 だけが欠けていた)。
  * 日単位で避けると永久に埋まらない。
  *
+ * **ただし積地単位では避ける。** `coveredOrigins` はデジタコ便がある
+ * `日付|積地`。デジタコは**積みでしか便を切らない**ので、同じ積地に残った明細は
+ * その便の**複数卸しの片割れ**であって別の便ではない。
+ *
  * `ym` は対象月 (`2026-07`)。月の外の明細は返さない。
  */
 export function buildIchibanLegs(
   driverName: string,
   slips: VehicleDailySlip[],
   usedRowIds: Set<string>,
+  coveredOrigins: Set<string>,
   ym: string,
   provisional: ProvisionalMap,
 ): IchibanLeg[] {
@@ -209,6 +214,11 @@ export function buildIchibanLegs(
     if (usedRowIds.has(slip.rowId)) continue
     // **積地だけで束ねる。** 卸地で分けると複数卸しの便が水増しされる。
     const key = `${date}|${placeKey(slip.origin)}`
+    // **同じ日・同じ積地にデジタコ便があるなら起こさない。** デジタコは積みでしか
+    // 便を切らないので、その積地の追加の卸しは**その便の複数卸しの片割れ**であって
+    // 別の便ではない。起こすと二重に載る (2026-07 で 6 便 ¥54,000 を水増しした:
+    // `苫小牧 → 橋本畜産` は PDF では `苫小牧 → 清水・富士` の一部)。
+    if (coveredOrigins.has(key)) continue
     const list = byKey.get(key) ?? []
     list.push(slip)
     byKey.set(key, list)
