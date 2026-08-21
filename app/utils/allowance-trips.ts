@@ -72,6 +72,24 @@ export function extractAllowanceLegs(headers: string[], rows: string[][]): Allow
   return legs
 }
 
+/**
+ * イベントCSV の `開始市町村名` / `終了市町村名` から市町村を取り出す。
+ *
+ * **列名に反して、入っているのは市町村名ではなく住所**
+ * (`北海道釧路市西港１-98-41` / `北海道河東郡上士幌町上士幌東３線`)。
+ * 2026-08-21 に本番の画面で実データを見て判明した。都道府県と郡を落として
+ * 市区町村までを返す。
+ *
+ * 取り出せなければ**入力をそのまま返す** — 適当に切り詰めて別の場所に当たるより、
+ * マスタで `unknown` になって人の目に触れる方が安全。
+ */
+const ADDRESS_CITY_RE = /^(?:.{2,3}[都道府県])(?:[^都道府県市区町村]{1,8}郡)?([^市区町村]{1,8}[市区町村])/
+
+export function addressToCity(address: string): string {
+  const trimmed = address.trim()
+  return ADDRESS_CITY_RE.exec(trimmed)?.[1] ?? trimmed
+}
+
 /** `釧路市` → `釧路`。マスタの積地はこの粒度で書かれている。 */
 export function cityToPlace(city: string): string {
   return city.trim().replace(/(市|町|村)$/, '')
@@ -99,15 +117,16 @@ export const CITY_TO_DEST: Record<string, string> = {
 }
 
 /**
- * デジタコの市町村名から 1 便の運行手当を引く。
+ * デジタコの `開始/終了市町村名` (実体は住所) から 1 便の運行手当を引く。
  *
  * `CITY_TO_DEST` に無ければ市町村名から `市/町/村` を落としてマスタを引く
  * (`本別町` → `本別` のように、マスタの卸地がそのまま町名の契約がある)。
  */
 export function lookupAllowanceByCity(originCity: string, destCity: string): AllowanceLookup {
-  const origin = cityToPlace(originCity)
-  const mapped = CITY_TO_DEST[`${originCity.trim()}|${destCity.trim()}`]
-  return lookupAllowance(origin, mapped ?? cityToPlace(destCity))
+  const origin = addressToCity(originCity)
+  const dest = addressToCity(destCity)
+  const mapped = CITY_TO_DEST[`${origin}|${dest}`]
+  return lookupAllowance(cityToPlace(origin), mapped ?? cityToPlace(dest))
 }
 
 export interface LegAllowance {

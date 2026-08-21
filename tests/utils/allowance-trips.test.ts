@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   extractAllowanceLegs,
+  addressToCity,
   cityToPlace,
   lookupAllowanceByCity,
   allowanceForLegs,
@@ -89,6 +90,29 @@ describe('extractAllowanceLegs', () => {
   })
 })
 
+describe('addressToCity', () => {
+  // 列名は「開始市町村名」だが、実際に入っているのは住所。
+  // 2026-08-21 に本番の画面で車輌 1109 の実データを見て確認した値。
+  it('都道府県と郡を落として市区町村を取り出す', () => {
+    expect(addressToCity('北海道釧路市西港１-98-41')).toBe('釧路市')
+    expect(addressToCity('北海道河東郡士幌町中士幌')).toBe('士幌町')
+    expect(addressToCity('北海道河東郡上士幌町上士幌東３線')).toBe('上士幌町')
+    expect(addressToCity('北海道川上郡標茶町多和星空の黒牛加工・直売所')).toBe('標茶町')
+    expect(addressToCity('北海道河東郡音更町豊田東４線')).toBe('音更町')
+  })
+
+  it('郡が無い住所も市まで取れる', () => {
+    expect(addressToCity('北海道帯広市西22条南')).toBe('帯広市')
+    expect(addressToCity('北海道苫小牧市入船町')).toBe('苫小牧市')
+  })
+
+  it('取り出せなければ入力をそのまま返す (裸の市町村名・空・都道府県だけ)', () => {
+    expect(addressToCity('釧路市')).toBe('釧路市')
+    expect(addressToCity('北海道')).toBe('北海道')
+    expect(addressToCity('  ')).toBe('')
+  })
+})
+
 describe('cityToPlace', () => {
   it('市町村の接尾辞を落とす', () => {
     expect(cityToPlace('釧路市')).toBe('釧路')
@@ -126,6 +150,29 @@ describe('lookupAllowanceByCity', () => {
   it('マスタに無い経路は unknown (推測しない)', () => {
     expect(lookupAllowanceByCity('広尾町', '芽室町').status).toBe('unknown')
     expect(lookupAllowanceByCity('釧路市', '').status).toBe('unknown')
+  })
+
+  it('住所のまま渡しても引ける (本番の実データ 2026-07 車輌1109)', () => {
+    const real: [string, string, number | null][] = [
+      ['北海道釧路市西港１-98-41', '北海道河東郡士幌町中士幌', 9000],
+      ['北海道釧路市西港１-98-41', '北海道河東郡上士幌町上士幌東３線', 9000],
+      ['北海道釧路市西港２-101-1', '北海道川上郡標茶町多和', 8000],
+      ['北海道釧路市西港２-101-1', '北海道川上郡標茶町多和星空の黒牛加工・直売所', 8000],
+      ['北海道釧路市西港２-101-1', '北海道河東郡音更町豊田東４線', 9000],
+      ['北海道釧路市西港１-98-41', '', null],
+    ]
+    for (const [origin, dest, yen] of real) {
+      const got = lookupAllowanceByCity(origin, dest)
+      if (yen === null) expect(got.status).toBe('unknown')
+      else expect(got).toMatchObject({ status: 'ok', allowanceYen: yen })
+    }
+  })
+
+  it('帯広市は住所で渡しても積地で金額が分かれる', () => {
+    expect(lookupAllowanceByCity('北海道釧路市西港１', '北海道帯広市川西町'))
+      .toMatchObject({ status: 'ok', allowanceYen: 9000, dest: '川西' })
+    expect(lookupAllowanceByCity('北海道広尾郡広尾町会所前', '北海道帯広市富士町'))
+      .toMatchObject({ status: 'ok', allowanceYen: 8000, dest: '富士' })
   })
 
   it('対応表のキーは 積地市|卸地市 の形', () => {
