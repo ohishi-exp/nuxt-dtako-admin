@@ -7,6 +7,7 @@ import {
   scoreVehicleDailySlips,
   calcProfitEfficiency,
   fetchVehicleDailySlips,
+  fetchDriverDailySlips,
   searchVehicleDailySlips,
   type VehicleDailyApiRow,
   type VehicleDailySlip,
@@ -263,6 +264,48 @@ describe('fetchVehicleDailySlips', () => {
     expect(result).toHaveLength(1)
     expect(result[0]!.vehicleNumber).toBe('8504')
     expect(result[0]!.rowId).toBe('20260621-1001')
+  })
+})
+
+describe('fetchDriverDailySlips', () => {
+  const fetchMock = vi.fn()
+
+  beforeEach(() => {
+    fetchMock.mockReset()
+    vi.stubGlobal('$fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('乗務員CD で引き、車番をまたいだ明細をそのまま返す (rust-ichibanboshi#302)', async () => {
+    // 西島 (1656) の 2026-07-16。車番 0040 枝番 01 に載っていて、車番引きでは見えない行。
+    fetchMock.mockResolvedValue({
+      source_table: '運転日報明細',
+      data: [{
+        sale_date: '2026-07-16',
+        vehicle_number: '0040',
+        customer_code: '015204',
+        customer_name: '大　石　畜　産　（大石畜産)',
+        origin_area_name: '北海道釧路市',
+        dest_area_name: '北海道浦幌町',
+        origin: '釧路',
+        dest: '浦幌',
+        is_subcontracted: false,
+        amount: 33825,
+        row_id: '20260716-117',
+      }],
+    })
+
+    const result = await fetchDriverDailySlips('1656', '2026-06-30', '2026-08-02')
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/ichiban/api/sales/vehicle-daily', {
+      query: { driver: '1656', from: '2026-06-30', to: '2026-08-02', limit: '5000' },
+    })
+    expect(result).toHaveLength(1)
+    expect(result[0]!.vehicleNumber).toBe('0040')
+    expect(result[0]!.amount).toBe(33825)
   })
 })
 
