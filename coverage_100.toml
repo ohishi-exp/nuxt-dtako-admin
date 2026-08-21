@@ -189,3 +189,10 @@ branches = true
 [[files]]
 path = "app/utils/rdp-access.ts"
 branches = true
+
+[[files]]
+path = "app/utils/allowance-rate.ts"
+branches = true
+
+[[files]]
+path = "app/utils/allowance-rate-master.ts"
