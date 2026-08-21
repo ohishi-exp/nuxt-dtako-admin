@@ -212,7 +212,8 @@ describe('buildMonthlyAllowance', () => {
 
   it('空なら 0', () => {
     expect(buildMonthlyAllowance([], '2026-07')).toEqual({
-      drivers: [], trips: 0, totalYen: 0, irregularTrips: 0, failedOperations: 0, outOfMonthTrips: 0,
+      drivers: [], trips: 0, totalYen: 0, irregularTrips: 0, carriedTrips: 0,
+      failedOperations: 0, outOfMonthTrips: 0,
     })
   })
 })
