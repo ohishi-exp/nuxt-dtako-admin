@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  compareText,
   legDate,
   toReportRows,
   summarizeByDriver,
@@ -27,6 +28,15 @@ function op(over: Partial<OperationAllowance> = {}): OperationAllowance {
 
 const OK: LegAllowance = { leg: leg(), lookup: { status: 'ok', allowanceYen: 9000, dest: '上士幌', rows: [] } }
 const NG: LegAllowance = { leg: leg({ destCity: '芽室町', viaCities: ['芽室町'] }), lookup: { status: 'unknown', dest: '芽室' } }
+
+describe('compareText', () => {
+  it('昇順で比較する (localeCompare は使わない — ICU の照合順が環境で逆転するため)', () => {
+    expect(compareText('B', 'A')).toBe(1)
+    expect(compareText('A', 'B')).toBe(-1)
+    expect(compareText('2026-07-02', '2026-07-04')).toBe(-1)
+    expect(compareText('2026-08-01', '2026-07-04')).toBe(1)
+  })
+})
 
 describe('legDate', () => {
   it('積みの時刻が読めればその日付', () => {

@@ -42,6 +42,17 @@ export interface AllowanceReportRow {
   status: 'ok' | 'ambiguous' | 'unknown'
 }
 
+/**
+ * 文字列の昇順比較。**`localeCompare` は使わない** — ICU の照合順が Windows と Linux で
+ * 逆転し CI だけ落ちる事故がある。
+ *
+ * 同値は -1 を返す。並べ替えのキーはどれも一意 (乗務員名は Map のキー、運行NO は
+ * 乗務員の中で一意) なので同値は来ない。
+ */
+export function compareText(a: string, b: string): number {
+  return a > b ? 1 : -1
+}
+
 /** 便の日付。積みの時刻が読めなければ運行日 → 読取日 の順に落とす。 */
 export function legDate(op: OperationAllowance, fromTs: number | null): string {
   if (fromTs !== null) return epochToYmd(fromTs)
@@ -98,9 +109,7 @@ export function summarizeByDriver(rows: AllowanceReportRow[]): DriverAllowanceTo
     }
     map.set(row.driverName, entry)
   }
-  // 乗務員名は Map のキーなので重複しない。`localeCompare` は使わない
-  // (ICU の照合順が Windows と Linux で逆転し CI だけ落ちる事故がある)。
-  return [...map.values()].sort((a, b) => (a.driverName > b.driverName ? 1 : -1))
+  return [...map.values()].sort((a, b) => compareText(a.driverName, b.driverName))
 }
 
 const CSV_HEADER = [
@@ -232,11 +241,9 @@ export function buildMonthlyAllowance(ops: OperationAllowance[], ym: string): Mo
     byDriver.set(name, driver)
   }
 
-  // 乗務員名は Map のキーなので重複しない。`localeCompare` は使わない
-  // (ICU の照合順が環境で入れ替わり CI だけ落ちる)。
-  const drivers = [...byDriver.values()].sort((a, b) => (a.driverName > b.driverName ? 1 : -1))
+  const drivers = [...byDriver.values()].sort((a, b) => compareText(a.driverName, b.driverName))
   for (const driver of drivers) {
-    driver.operations.sort((a, b) => (a.readingDate > b.readingDate ? 1 : -1))
+    driver.operations.sort((a, b) => compareText(a.readingDate, b.readingDate))
   }
   return {
     drivers,
