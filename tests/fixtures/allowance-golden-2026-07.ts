@@ -4,6 +4,8 @@
  *
  * PDF 側は各ページ下部に印字された列合計 15 本すべてと一致することを確認済み。
  * `irregular: true` はマスタに載っていない経路 (2026-08-21 時点)。
+ * `釧路〜駒場（別海）` は 2026-08-21 に xlsx 未収載のままマスタへ足した
+ * (実在する経路で、手当表PDF に金額がある。詳細は `rate_master.json` の `note`)。
  */
 export interface AllowanceGoldenRow {
   origin: string
@@ -39,6 +41,6 @@ export const ALLOWANCE_GOLDEN_2026_07: AllowanceGoldenRow[] = [
   { origin: '広尾', dest: '札内・音更', allowanceYen: 9000, trips: 1, irregular: false },
   { origin: '広尾', dest: '浦幌', allowanceYen: 9000, trips: 1, irregular: false },
   { origin: '苫小牧', dest: '（清水）・富士', allowanceYen: 12000, trips: 1, irregular: false },
-  { origin: '釧路', dest: '駒場（別海）', allowanceYen: 4500, trips: 1, irregular: true },
+  { origin: '釧路', dest: '駒場（別海）', allowanceYen: 4500, trips: 1, irregular: false },
   { origin: '駒場（釧路）', dest: '別海', allowanceYen: 4500, trips: 1, irregular: true },
 ]
