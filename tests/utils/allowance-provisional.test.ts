@@ -9,6 +9,7 @@ import {
   summarizeProvisional,
   emptyProvisionalTotals,
   provisionalRoutes,
+  routeLabel,
 } from '~/utils/allowance-provisional'
 
 /** 2026-07 に実在した「マスタの穴」= 広尾 → 芽室 (マスタに芽室が 1 行も無い)。 */
@@ -122,6 +123,18 @@ describe('summarizeProvisional', () => {
 
   it('対象が無ければ 0', () => {
     expect(summarizeProvisional([], {})).toEqual(emptyProvisionalTotals())
+  })
+})
+
+describe('routeLabel', () => {
+  it('経路キーを矢印にする', () => {
+    expect(routeLabel('広尾|芽室')).toBe('広尾 → 芽室')
+  })
+
+  it('卸地が取れていない便は `(不明)` と書く (`釧路 → ` と出さない)', () => {
+    expect(routeLabel('釧路|')).toBe('釧路 → (不明)')
+    expect(routeLabel('|芽室')).toBe('(不明) → 芽室')
+    expect(routeLabel('')).toBe('(不明) → (不明)')
   })
 })
 
