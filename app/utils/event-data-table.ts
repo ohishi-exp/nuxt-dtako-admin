@@ -210,22 +210,26 @@ export function ignoredEventCodes(
 
 /**
  * 「無視」のイベント行を**「イベント」タブからだけ**落とす。
+ * **ただし区間距離か区間時間を持つ行は落とさない。**
  *
  * **イベント分類の設定は保存できるだけで、どこからも読まれていなかった**
  * (2026-08-21 に判明)。急加速・急減速・急カーブを `無視` にしてあるのに、
  * イベントタブに 260 件並んで 積み/降し/運行開始 が埋もれていた。
  *
- * **走行・アイドリング・速度超過 のタブに出る行は落とさない。** これらは
- * **区間距離と区間時間を持っていて、選択すると 円/km・円/時間 の材料になる**。
- * 実測 (2026-07 の 1 運行) では、無視に設定された 46 行が
- * **296.8km / 981分** = その運行の距離の 17.5%・時間の 27% を占めていた
- * (405 速度オーバー 247.1km、412 アイドリング 721分)。
- * 全部落とすと収支の指標が静かに狂う。
+ * **数字を持つ行は隠さない。** 選択行の 区間距離 / 区間時間 は
+ * `summarizeSelectedRows` → `calcProfitEfficiency` の 円/km・円/時間 になる。
+ * 隠すと選べなくなり、**表示を整えたつもりで収支の指標が静かに変わる**。
+ * 実データの無視設定には
  *
- * 一方「イベント」タブに落ちる無視行 (急加速/急減速/急カーブ) は
- * **区間距離も区間時間も 0** なので、隠しても数字は 1 も動かない。
+ * - `413 連続運転` … **252.9km / 288分** を持つ (1 運行の実測)
+ * - `405-407 速度オーバー` … 296.8km / 260分 (別運行では距離の 17.5%)
+ * - `412 アイドリング` … 721分
  *
- * イベントCD 列が無い CSV はそのまま返す (列が無いのに推測で落とさない)。
+ * のように**数字を持つコードが入っている**。隠すのは 急加速/急減速/急カーブ の
+ * ように **0km / 0分 の行だけ**にする。
+ *
+ * 走行・アイドリング・速度超過 のタブに出る行も落とさない (同じ理由 + そもそも
+ * 「イベント」タブに居ない)。イベントCD 列が無い CSV はそのまま返す。
  *
  * **1 行も落ちなければ元の配列をそのまま返す。** 中身が同じでも新しい配列を返すと、
  * 分類が非同期で届いた瞬間に行のまとまりが作り直され、**表で選んでいた行が外れて
@@ -240,11 +244,22 @@ export function dropIgnoredRows(
   const cdIdx = colIndex(headers, 'イベントCD')
   if (cdIdx < 0) return rows
   const nameIdx = colIndex(headers, 'イベント名')
+  const distIdx = colIndex(headers, '区間距離')
+  const durIdx = colIndex(headers, '区間時間')
   const kept = rows.filter(row => !(
     ignored.has((row[cdIdx] ?? '').trim())
     && classifyEventName(nameIdx >= 0 ? (row[nameIdx] ?? '') : '') === 'event'
+    && !hasMeasuredValue(row, distIdx)
+    && !hasMeasuredValue(row, durIdx)
   ))
   return kept.length === rows.length ? rows : kept
+}
+
+/** その列に 0 でない数値が入っているか。列が無い/読めない値は「持っていない」。 */
+export function hasMeasuredValue(row: string[], idx: number): boolean {
+  if (idx < 0) return false
+  const value = Number.parseFloat(row[idx] ?? '')
+  return Number.isFinite(value) && value !== 0
 }
 
 export function filterRowsByCategory(
