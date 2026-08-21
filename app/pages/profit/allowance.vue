@@ -30,7 +30,9 @@
  *
  * **デジタコに運行が 1 件も無い日は、一番星の明細から便を起こす**
  * (`allowance-ichiban-legs.ts`)。デジタコが無いのだから、そこから取るしかない。
- * 起こしたぶんは**デジタコ由来と混ぜず**、別に数えて「合計 (デジタコ + 一番星)」で足す。
+ * 起こしたぶんは**月の行・乗務員ごとの本表・手当表PDF との突合のどれにも同じように
+ * 入れる**。基準が分かれると「結局どれを見ればいいのか」が分からなくなるため。
+ * 内訳は「(デジタコ N ・ 一番星 M)」として併記する。
  *
  * **降しイベントが無い便には、一番星の明細を手で結べる** (強制突合、
  * `allowance-force-match.ts`)。運行終了の後に卸している運行がこれに当たる。
@@ -728,6 +730,44 @@ const ichibanLegs = computed<IchibanLeg[]>(() => {
 })
 const ichibanTotals = computed(() => summarizeIchibanLegs(ichibanLegs.value))
 
+/** 乗務員ごとの「一番星から起こした便」。**本表の行に足すため。** */
+const ichibanByDriver = computed(() => {
+  const map = new Map<string, IchibanLeg[]>()
+  for (const leg of ichibanLegs.value) {
+    const list = map.get(leg.driverName) ?? []
+    list.push(leg)
+    map.set(leg.driverName, list)
+  }
+  return map
+})
+function driverIchiban(d: DriverNode) {
+  return summarizeIchibanLegs(ichibanByDriver.value.get(d.driverName) ?? [])
+}
+
+/**
+ * **乗務員 1 人ぶんの「払う額」。デジタコ由来 + 暫定 + 一番星から起こした便。**
+ *
+ * 本表・合計行・手当表PDF との突合を**同じ基準**に揃えるためのただ 1 か所。
+ * 基準が 3 通りあると「結局どれを見ればいいのか」が分からなくなる。
+ */
+function driverTotals(d: DriverNode) {
+  const prov = driverProvisional(d)
+  const ich = driverIchiban(d)
+  const allowanceYen = d.totalYen + prov.yen + ich.allowanceYen
+  const salesYen = driverSales(d).salesYen + ich.salesYen
+  return {
+    trips: d.trips + prov.trips + ich.trips,
+    allowanceYen,
+    provisionalYen: prov.yen + ich.provisionalYen,
+    provisionalTrips: prov.trips + ich.provisionalTrips,
+    salesYen,
+    marginYen: margin(salesYen, allowanceYen),
+    ichibanTrips: ich.trips,
+    ichibanYen: ich.allowanceYen,
+    ichibanSalesYen: ich.salesYen,
+  }
+}
+
 /**
  * 一番星から起こした便を、デジタコ由来の便と同じ形にする (手当表PDF との突合用)。
  *
@@ -752,7 +792,18 @@ function ichibanLegAsRow(leg: IchibanLeg): AllowanceReportRow {
   }
 }
 
-/** デジタコ由来 + 一番星から起こしたぶん の合計。**画面で足して見せるのはここだけ。** */
+/**
+ * **この画面の基準。** デジタコ由来 + 暫定 + 一番星から起こしたぶん。
+ *
+ * 月の行・乗務員ごとの本表 (`driverTotals`)・手当表PDF との突合が**全部これ**を使う。
+ * 基準が 3 通りあると「結局どれを見ればいいのか」が分からなくなる (オーナー指摘)。
+ */
+/** 暫定の合計 (デジタコ由来 + 一番星から起こしたぶん)。 */
+const combinedProvisional = computed(() => ({
+  trips: monthProvisional.value.trips + ichibanTotals.value.provisionalTrips,
+  yen: monthProvisional.value.yen + ichibanTotals.value.provisionalYen,
+}))
+
 const combined = computed(() => {
   const allowanceYen = monthly.value.totalYen + monthProvisional.value.yen + ichibanTotals.value.allowanceYen
   const salesYen = monthSales.value.salesYen + ichibanTotals.value.salesYen
@@ -1128,7 +1179,7 @@ function downloadCsv() {
       売上は<b>対象乗務員を指定していれば乗務員CD で引きます</b> — その乗務員が
       <b>別の車番で走った日</b>の売上も入ります (車番で引くと丸ごと落ちます)。
       <b>デジタコに運行が 1 件も無い日</b>は、一番星の明細から便を起こして
-      「合計 (デジタコ + 一番星)」に足します。
+      合計に足します (内訳は「デジタコ N ・ 一番星 M」で併記)。
     </p>
 
     <div class="flex flex-wrap gap-3 items-end mb-4">
@@ -1257,34 +1308,28 @@ function downloadCsv() {
       <template v-else>
         <div class="mb-3 flex flex-wrap gap-6 text-sm items-center">
           <span class="font-semibold">{{ shownYm }}</span>
-          <span>便 <b>{{ monthly.trips }}</b></span>
           <span>
-            手当 <b>{{ yen(monthly.totalYen + monthProvisional.yen) }}</b>
+            便 <b>{{ combined.trips }}</b>
             <span
-              v-if="monthProvisional.trips > 0"
+              v-if="ichibanTotals.trips > 0"
+              class="text-gray-400"
+              title="内訳。合計はデジタコ由来と一番星から起こしたぶんの両方です"
+            >(デジタコ {{ monthly.trips + monthProvisional.trips }} ・ 一番星 {{ ichibanTotals.trips }})</span>
+          </span>
+          <span>
+            手当 <b>{{ yen(combined.allowanceYen) }}</b>
+            <span
+              v-if="combinedProvisional.trips > 0"
               class="text-amber-600 dark:text-amber-400"
               title="マスタに無いので手で入れた暫定額。上の手当・収支に含まれています"
-            >うち暫定 {{ yen(monthProvisional.yen) }} ({{ monthProvisional.trips }}便)</span>
+            >うち暫定 {{ yen(combinedProvisional.yen) }} ({{ combinedProvisional.trips }}便)</span>
           </span>
-          <span>売上 <b>{{ hasSales ? yen(monthSales.salesYen) : '-' }}</b></span>
-          <span>収支 <b :class="margin(monthSales.salesYen, monthly.totalYen + monthProvisional.yen) < 0 ? 'text-red-600 dark:text-red-400' : ''">
-            {{ hasSales ? yen(margin(monthSales.salesYen, monthly.totalYen + monthProvisional.yen)) : '-' }}
+          <span>売上 <b>{{ hasSales ? yen(combined.salesYen) : '-' }}</b></span>
+          <span>収支 <b :class="combined.marginYen < 0 ? 'text-red-600 dark:text-red-400' : ''">
+            {{ hasSales ? yen(combined.marginYen) : '-' }}
           </b></span>
           <span :class="monthly.irregularTrips > 0 ? 'text-amber-600 dark:text-amber-400' : ''">
             未確定 <b>{{ monthly.irregularTrips }}</b> 便
-          </span>
-          <span
-            v-if="ichibanTotals.trips > 0"
-            class="text-teal-600 dark:text-teal-400"
-            title="デジタコに運行が無い日の便を、一番星の明細から起こしたぶん。上の便数・手当・売上・収支には入っていません (下の「合計」に入ります)"
-          >
-            一番星から <b>{{ ichibanTotals.trips }}</b> 便
-            (手当 {{ yen(ichibanTotals.allowanceYen) }}<span
-              v-if="ichibanTotals.provisionalTrips > 0"
-            > うち暫定 {{ yen(ichibanTotals.provisionalYen) }} ({{ ichibanTotals.provisionalTrips }}便)</span>
-            ・ 売上 {{ yen(ichibanTotals.salesYen) }}<span
-              v-if="ichibanTotals.unknownTrips > 0"
-            > ・未確定 {{ ichibanTotals.unknownTrips }}</span>)
           </span>
           <span
             v-if="excludedRows.length > 0"
@@ -1325,20 +1370,6 @@ function downloadCsv() {
           </label>
         </div>
 
-        <div v-if="ichibanTotals.trips > 0" class="mb-3 flex flex-wrap gap-6 text-sm items-center border-t border-gray-200 dark:border-gray-800 pt-2">
-          <span class="font-semibold">合計 (デジタコ + 一番星)</span>
-          <span>便 <b>{{ combined.trips }}</b></span>
-          <span>手当 <b>{{ yen(combined.allowanceYen) }}</b></span>
-          <span>売上 <b>{{ hasSales ? yen(combined.salesYen) : '-' }}</b></span>
-          <span>収支 <b :class="combined.marginYen < 0 ? 'text-red-600 dark:text-red-400' : ''">
-            {{ hasSales ? yen(combined.marginYen) : '-' }}
-          </b></span>
-          <span class="text-gray-400">
-            デジタコから {{ monthly.trips + monthProvisional.trips }} 便 ・
-            一番星から {{ ichibanTotals.trips }} 便
-          </span>
-        </div>
-
         <p v-if="visibleDrivers.length === 0" class="text-xs text-gray-400">
           未確定の便はありません
         </p>
@@ -1367,23 +1398,30 @@ function downloadCsv() {
                     {{ d.driverName || '(不明)' }}
                   </td>
                   <td class="px-3 py-2 text-right">{{ d.operations.length }}</td>
-                  <td class="px-3 py-2 text-right">{{ d.trips }}</td>
                   <td class="px-3 py-2 text-right whitespace-nowrap">
-                    {{ yen(d.totalYen + driverProvisional(d).yen) }}
+                    {{ driverTotals(d).trips }}
                     <span
-                      v-if="driverProvisional(d).trips > 0"
+                      v-if="driverTotals(d).ichibanTrips > 0"
+                      class="text-teal-600 dark:text-teal-400"
+                      :title="`うち ${driverTotals(d).ichibanTrips} 便は デジタコに運行が無い日を一番星から起こしたもの (手当 ${yen(driverTotals(d).ichibanYen)})`"
+                    >(一番星 {{ driverTotals(d).ichibanTrips }})</span>
+                  </td>
+                  <td class="px-3 py-2 text-right whitespace-nowrap">
+                    {{ yen(driverTotals(d).allowanceYen) }}
+                    <span
+                      v-if="driverTotals(d).provisionalTrips > 0"
                       class="text-amber-600 dark:text-amber-400"
-                      :title="`うち暫定 ${yen(driverProvisional(d).yen)} (${driverProvisional(d).trips}便)`"
+                      :title="`うち暫定 ${yen(driverTotals(d).provisionalYen)} (${driverTotals(d).provisionalTrips}便)`"
                     >暫定</span>
                   </td>
                   <td class="px-3 py-2 text-right whitespace-nowrap">
-                    {{ hasSales ? yen(driverSales(d).salesYen) : '-' }}
+                    {{ hasSales ? yen(driverTotals(d).salesYen) : '-' }}
                   </td>
                   <td
                     class="px-3 py-2 text-right whitespace-nowrap"
-                    :class="margin(driverSales(d).salesYen, d.totalYen + driverProvisional(d).yen) < 0 ? 'text-red-600 dark:text-red-400' : ''"
+                    :class="driverTotals(d).marginYen < 0 ? 'text-red-600 dark:text-red-400' : ''"
                   >
-                    {{ hasSales ? yen(margin(driverSales(d).salesYen, d.totalYen + driverProvisional(d).yen)) : '-' }}
+                    {{ hasSales ? yen(driverTotals(d).marginYen) : '-' }}
                   </td>
                   <td
                     class="px-3 py-2 text-right"
@@ -1554,6 +1592,23 @@ function downloadCsv() {
                             </td>
                           </tr>
                         </template>
+                        <tr
+                          v-if="driverTotals(d).ichibanTrips > 0"
+                          class="border-t border-gray-100 dark:border-gray-800/70 bg-teal-50/60 dark:bg-teal-950/30"
+                        >
+                          <td class="pl-8 pr-3 py-1.5 whitespace-nowrap text-teal-700 dark:text-teal-300" colspan="3">
+                            一番星から起こした便 (デジタコに運行が無い日)
+                          </td>
+                          <td class="px-3 py-1.5 text-right">{{ driverTotals(d).ichibanTrips }}</td>
+                          <td class="px-3 py-1.5 text-right whitespace-nowrap">{{ yen(driverTotals(d).ichibanYen) }}</td>
+                          <td class="px-3 py-1.5 text-right whitespace-nowrap">{{ yen(driverTotals(d).ichibanSalesYen) }}</td>
+                          <td class="px-3 py-1.5 text-right whitespace-nowrap">
+                            {{ yen(margin(driverTotals(d).ichibanSalesYen, driverTotals(d).ichibanYen)) }}
+                          </td>
+                          <td class="px-3 py-1.5" />
+                          <td class="px-3 py-1.5" />
+                          <td class="px-3 py-1.5 text-right whitespace-nowrap text-gray-400">下に一覧</td>
+                        </tr>
                       </tbody>
                     </table>
                   </td>
