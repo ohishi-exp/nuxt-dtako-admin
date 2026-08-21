@@ -2,32 +2,34 @@
 /**
  * 運行手当 (デジタコ → 給与) ページ。
  *
- * 期間で運行を引き、各運行のイベントCSV から便を切り出して、料金・給与マスタから
+ * 月を指定して運行を引き、各運行のイベントCSV から便を切り出して、料金・給与マスタから
  * 1 便あたりの手当を引く。**PDF の手当表を待たずにデジタコだけで給与を出す**のが狙い。
  *
- * マスタで金額が決まらない便は合計に入れず「要確認」として残す (推測した数字を給与に
- * 混ぜない)。イベントCSV が引けない運行も、隠さず理由付きで表に出す。
+ * 表示は **乗務員 → 運行 → 便** の 3 段。上から順に開いて、最後は運行詳細へ飛べる。
+ * マスタで金額が決まらない便 (未確定) は合計に入れず、各段に件数を出す。
+ * イベントCSV が引けない運行も、隠さず理由付きで残す。
  */
 import { getOperations, getOperationCsv } from '~/utils/api'
 import { extractAllowanceLegs, allowanceForLegs } from '~/utils/allowance-trips'
 import {
-  toReportRows,
-  summarizeByDriver,
+  buildMonthlyAllowance,
+  monthReadingRange,
   reportRowsToCsvLines,
   type OperationAllowance,
   type AllowanceReportRow,
+  type DriverNode,
+  type OperationNode,
 } from '~/utils/allowance-report'
 
 /** イベントCSV を同時に引く本数。alc を叩きすぎないための上限。 */
 const CSV_CONCURRENCY = 4
 
-function todayYmd(offsetDays = 0): string {
-  const d = new Date(Date.now() + offsetDays * 86400_000)
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+function currentYm(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
 }
 
-const from = ref(todayYmd(-30))
-const to = ref(todayYmd())
+const ym = ref(currentYm())
 const vehicle = ref('')
 const driver = ref('')
 
@@ -36,17 +38,46 @@ const status = ref<Status>('idle')
 const errorMessage = ref<string | null>(null)
 const progress = ref('')
 const operations = ref<OperationAllowance[]>([])
+/** 集計を実行したときの月。表と入力欄がずれないように保持する。 */
+const shownYm = ref('')
 
-const rows = computed<AllowanceReportRow[]>(() => toReportRows(operations.value))
-/** 「要確認」だけに絞る。合計や乗務員ごとの集計は絞らない (給与の額は変わらない)。 */
+/** 未確定 (金額が決まらない便 / 便を取れなかった運行) だけに絞る。 */
 const onlyIrregular = ref(false)
-const visibleRows = computed(() => (onlyIrregular.value
-  ? rows.value.filter(r => r.status !== 'ok')
-  : rows.value))
-const drivers = computed(() => summarizeByDriver(rows.value))
-const grandTotal = computed(() => drivers.value.reduce((sum, d) => sum + d.totalYen, 0))
-const irregularTotal = computed(() => drivers.value.reduce((sum, d) => sum + d.irregularTrips, 0))
-const failedOperations = computed(() => operations.value.filter(op => op.error !== null))
+
+const monthly = computed(() => buildMonthlyAllowance(operations.value, shownYm.value))
+
+function opHasIssue(op: OperationNode): boolean {
+  return op.irregularTrips > 0 || op.error !== null
+}
+function driverHasIssue(d: DriverNode): boolean {
+  return d.irregularTrips > 0 || d.failedOperations > 0
+}
+
+const visibleDrivers = computed(() => (onlyIrregular.value
+  ? monthly.value.drivers.filter(driverHasIssue)
+  : monthly.value.drivers))
+
+function visibleOperations(d: DriverNode): OperationNode[] {
+  return onlyIrregular.value ? d.operations.filter(opHasIssue) : d.operations
+}
+function visibleRows(op: OperationNode): AllowanceReportRow[] {
+  return onlyIrregular.value ? op.rows.filter(r => r.status !== 'ok') : op.rows
+}
+
+const csvRows = computed(() => visibleDrivers.value
+  .flatMap(d => visibleOperations(d).flatMap(op => visibleRows(op))))
+
+// --- 開閉 ---
+const openDrivers = reactive<Record<string, boolean>>({})
+const openOps = reactive<Record<string, boolean>>({})
+
+/** 1 人だけなら最初から開いておく (毎回クリックさせない)。 */
+function autoOpen() {
+  for (const key of Object.keys(openDrivers)) delete openDrivers[key]
+  for (const key of Object.keys(openOps)) delete openOps[key]
+  const only = monthly.value.drivers
+  if (only.length === 1) openDrivers[only[0]!.driverName] = true
+}
 
 /** 1 運行ぶんのイベントCSV を引いて便に切り出す。失敗は握りつぶさず error に残す。 */
 async function resolveOperation(op: {
@@ -82,9 +113,10 @@ async function run() {
   operations.value = []
   progress.value = '運行を検索中...'
   try {
+    const range = monthReadingRange(ym.value)
     const res = await getOperations({
-      date_from: from.value,
-      date_to: to.value,
+      date_from: range.from,
+      date_to: range.to,
       vehicle_cd: vehicle.value.trim() || undefined,
       driver_cd: driver.value.trim() || undefined,
       per_page: 500,
@@ -97,6 +129,8 @@ async function run() {
       resolved.push(...await Promise.all(chunk.map(resolveOperation)))
     }
     operations.value = resolved
+    shownYm.value = ym.value
+    autoOpen()
     progress.value = ''
     status.value = 'ready'
   }
@@ -106,25 +140,25 @@ async function run() {
   }
 }
 
+const router = useRouter()
+
+/** その便を含む運行の詳細へ飛ぶ (`類似運行検索・比較` と同じ作法)。 */
+function goToOperation(unkoNo: string) {
+  router.push(`/operations/${unkoNo}`)
+}
+
 function downloadCsv() {
-  const blob = new Blob([`﻿${reportRowsToCsvLines(visibleRows.value).join('\r\n')}\r\n`],
+  const blob = new Blob([`﻿${reportRowsToCsvLines(csvRows.value).join('\r\n')}\r\n`],
     { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `運行手当${onlyIrregular.value ? '_要確認' : ''}_${from.value}_${to.value}.csv`
+  a.download = `運行手当${onlyIrregular.value ? '_未確定' : ''}_${shownYm.value}.csv`
   a.click()
   URL.revokeObjectURL(url)
 }
 
 const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
-
-const router = useRouter()
-
-/** 便の行から、その便を含む運行の詳細へ飛ぶ (`類似運行検索・比較` と同じ作法)。 */
-function goToOperation(unkoNo: string) {
-  router.push(`/operations/${unkoNo}`)
-}
 </script>
 
 <template>
@@ -134,16 +168,12 @@ function goToOperation(unkoNo: string) {
     </h1>
     <p class="text-xs text-gray-500 mb-4">
       デジタコの積み/降しから便を切り出し、料金・給与マスタで 1 便あたりの手当を引きます。
-      マスタで金額が決まらない便は合計に入れず「要確認」に出します。行をクリックすると
-      その便を含む運行の詳細を開きます。
+      乗務員 → 運行 → 便 の順に開けます。マスタで金額が決まらない便は合計に入れず「未確定」に数えます。
     </p>
 
     <div class="flex flex-wrap gap-3 items-end mb-4">
-      <label class="text-xs text-gray-500">読取日 from
-        <input v-model="from" type="date" class="block text-sm border rounded px-2 py-1 dark:bg-gray-900">
-      </label>
-      <label class="text-xs text-gray-500">to
-        <input v-model="to" type="date" class="block text-sm border rounded px-2 py-1 dark:bg-gray-900">
+      <label class="text-xs text-gray-500">月
+        <input v-model="ym" type="month" class="block text-sm border rounded px-2 py-1 dark:bg-gray-900">
       </label>
       <label class="text-xs text-gray-500">車輌CD
         <input v-model="vehicle" placeholder="1109" class="block text-sm border rounded px-2 py-1 w-28 dark:bg-gray-900">
@@ -159,11 +189,11 @@ function goToOperation(unkoNo: string) {
         {{ status === 'loading' ? '集計中...' : '集計' }}
       </button>
       <button
-        v-if="visibleRows.length > 0"
+        v-if="csvRows.length > 0"
         class="text-sm px-4 py-1.5 rounded bg-gray-600 hover:bg-gray-700 text-white"
         @click="downloadCsv"
       >
-        CSV出力{{ onlyIrregular ? ' (要確認のみ)' : '' }}
+        CSV出力{{ onlyIrregular ? ' (未確定のみ)' : '' }}
       </button>
     </div>
 
@@ -175,113 +205,159 @@ function goToOperation(unkoNo: string) {
     </p>
 
     <template v-if="status === 'ready'">
-      <p v-if="rows.length === 0" class="text-xs text-gray-400">
-        条件に一致する便が見つかりませんでした
+      <p v-if="monthly.drivers.length === 0" class="text-xs text-gray-400">
+        {{ shownYm }} に該当する運行が見つかりませんでした
       </p>
       <template v-else>
-        <div class="mb-4 flex flex-wrap gap-6 text-sm">
-          <span>便 <b>{{ rows.length }}</b></span>
-          <span>手当合計 <b>{{ yen(grandTotal) }}</b></span>
-          <span :class="irregularTotal > 0 ? 'text-amber-600 dark:text-amber-400' : ''">
-            要確認 <b>{{ irregularTotal }}</b> 便
+        <div class="mb-3 flex flex-wrap gap-6 text-sm items-center">
+          <span class="font-semibold">{{ shownYm }}</span>
+          <span>便 <b>{{ monthly.trips }}</b></span>
+          <span>手当合計 <b>{{ yen(monthly.totalYen) }}</b></span>
+          <span :class="monthly.irregularTrips > 0 ? 'text-amber-600 dark:text-amber-400' : ''">
+            未確定 <b>{{ monthly.irregularTrips }}</b> 便
           </span>
+          <span v-if="monthly.failedOperations > 0" class="text-amber-600 dark:text-amber-400">
+            便を取れなかった運行 <b>{{ monthly.failedOperations }}</b>
+          </span>
+          <span v-if="monthly.outOfMonthTrips > 0" class="text-gray-400" title="月末の運行が翌月に食い込むぶん。この月の合計には入れていません">
+            翌月にかかる便 {{ monthly.outOfMonthTrips }}
+          </span>
+          <label class="text-xs text-gray-500 flex items-center gap-1.5 cursor-pointer select-none">
+            <input v-model="onlyIrregular" type="checkbox" class="cursor-pointer">
+            未確定だけ表示
+          </label>
         </div>
 
-        <h2 class="text-sm font-semibold mb-2">
-          乗務員ごとの合計
-        </h2>
-        <div class="border border-gray-200 dark:border-gray-800 rounded-lg overflow-x-auto mb-6">
+        <p v-if="visibleDrivers.length === 0" class="text-xs text-gray-400">
+          未確定の便はありません
+        </p>
+        <div v-else class="border border-gray-200 dark:border-gray-800 rounded-lg overflow-x-auto">
           <table class="w-full text-xs">
             <thead class="bg-gray-50 dark:bg-gray-800">
               <tr>
                 <th class="text-left px-3 py-2 font-medium text-gray-500">乗務員</th>
+                <th class="text-right px-3 py-2 font-medium text-gray-500">運行</th>
                 <th class="text-right px-3 py-2 font-medium text-gray-500">便</th>
                 <th class="text-right px-3 py-2 font-medium text-gray-500">手当合計</th>
-                <th class="text-right px-3 py-2 font-medium text-gray-500">要確認</th>
+                <th class="text-right px-3 py-2 font-medium text-gray-500">未確定</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="d in drivers" :key="d.driverName" class="border-t border-gray-100 dark:border-gray-800">
-                <td class="px-3 py-2">{{ d.driverName || '(不明)' }}</td>
-                <td class="px-3 py-2 text-right">{{ d.trips }}</td>
-                <td class="px-3 py-2 text-right">{{ yen(d.totalYen) }}</td>
-                <td class="px-3 py-2 text-right" :class="d.irregularTrips > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-gray-300'">
-                  {{ d.irregularTrips }}
-                </td>
-              </tr>
+              <template v-for="d in visibleDrivers" :key="d.driverName">
+                <tr
+                  class="border-t border-gray-100 dark:border-gray-800 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50"
+                  @click="openDrivers[d.driverName] = !openDrivers[d.driverName]"
+                >
+                  <td class="px-3 py-2 font-medium">
+                    <span class="text-gray-400 mr-1">{{ openDrivers[d.driverName] ? '▾' : '▸' }}</span>
+                    {{ d.driverName || '(不明)' }}
+                  </td>
+                  <td class="px-3 py-2 text-right">{{ d.operations.length }}</td>
+                  <td class="px-3 py-2 text-right">{{ d.trips }}</td>
+                  <td class="px-3 py-2 text-right">{{ yen(d.totalYen) }}</td>
+                  <td
+                    class="px-3 py-2 text-right"
+                    :class="driverHasIssue(d) ? 'text-amber-600 dark:text-amber-400' : 'text-gray-300 dark:text-gray-700'"
+                  >
+                    {{ d.irregularTrips }}<span v-if="d.failedOperations > 0"> + 運行{{ d.failedOperations }}</span>
+                  </td>
+                </tr>
+
+                <tr v-if="openDrivers[d.driverName]" class="border-t border-gray-100 dark:border-gray-800">
+                  <td colspan="5" class="p-0">
+                    <table class="w-full text-xs">
+                      <thead class="bg-gray-100/60 dark:bg-gray-800/60">
+                        <tr>
+                          <th class="text-left pl-8 pr-3 py-1.5 font-medium text-gray-500">読取日</th>
+                          <th class="text-left px-3 py-1.5 font-medium text-gray-500">運行NO</th>
+                          <th class="text-left px-3 py-1.5 font-medium text-gray-500">車輌</th>
+                          <th class="text-right px-3 py-1.5 font-medium text-gray-500">便</th>
+                          <th class="text-right px-3 py-1.5 font-medium text-gray-500">手当</th>
+                          <th class="text-right px-3 py-1.5 font-medium text-gray-500">未確定</th>
+                          <th class="px-3 py-1.5" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <template v-for="op in visibleOperations(d)" :key="op.unkoNo">
+                          <tr
+                            class="border-t border-gray-100 dark:border-gray-800/70 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/40"
+                            :class="op.error ? 'bg-amber-50 dark:bg-amber-950/30' : ''"
+                            @click="openOps[op.unkoNo] = !openOps[op.unkoNo]"
+                          >
+                            <td class="pl-8 pr-3 py-1.5 whitespace-nowrap">
+                              <span class="text-gray-400 mr-1">{{ openOps[op.unkoNo] ? '▾' : '▸' }}</span>
+                              {{ op.readingDate }}
+                            </td>
+                            <td class="px-3 py-1.5 font-mono text-[11px] whitespace-nowrap">{{ op.unkoNo }}</td>
+                            <td class="px-3 py-1.5 whitespace-nowrap">{{ op.vehicleName || '-' }}</td>
+                            <td class="px-3 py-1.5 text-right">{{ op.rows.length }}</td>
+                            <td class="px-3 py-1.5 text-right whitespace-nowrap">{{ yen(op.totalYen) }}</td>
+                            <td
+                              class="px-3 py-1.5 text-right"
+                              :class="opHasIssue(op) ? 'text-amber-600 dark:text-amber-400' : 'text-gray-300 dark:text-gray-700'"
+                            >
+                              {{ op.irregularTrips }}
+                            </td>
+                            <td class="px-3 py-1.5 text-right whitespace-nowrap">
+                              <button
+                                class="text-blue-500 hover:text-blue-700 hover:underline"
+                                @click.stop="goToOperation(op.unkoNo)"
+                              >
+                                運行を開く
+                              </button>
+                            </td>
+                          </tr>
+
+                          <tr v-if="op.error" class="border-t border-gray-100 dark:border-gray-800/70">
+                            <td colspan="7" class="pl-16 pr-3 py-1.5 text-amber-600 dark:text-amber-400">
+                              便を取れませんでした — {{ op.error }}
+                            </td>
+                          </tr>
+
+                          <tr v-else-if="openOps[op.unkoNo]" class="border-t border-gray-100 dark:border-gray-800/70">
+                            <td colspan="7" class="p-0">
+                              <table class="w-full text-xs">
+                                <thead class="bg-gray-100/40 dark:bg-gray-800/40">
+                                  <tr>
+                                    <th class="text-left pl-16 pr-3 py-1 font-medium text-gray-500">日付</th>
+                                    <th class="text-right px-3 py-1 font-medium text-gray-500">便</th>
+                                    <th class="text-left px-3 py-1 font-medium text-gray-500">積地 → 卸地</th>
+                                    <th class="text-left px-3 py-1 font-medium text-gray-500">マスタ卸地</th>
+                                    <th class="text-right px-3 py-1 font-medium text-gray-500">手当</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  <tr
+                                    v-for="r in visibleRows(op)"
+                                    :key="`${r.unkoNo}-${r.seq}`"
+                                    class="border-t border-gray-100 dark:border-gray-800/50"
+                                    :class="r.status !== 'ok' ? 'bg-amber-50 dark:bg-amber-950/30' : ''"
+                                  >
+                                    <td class="pl-16 pr-3 py-1 whitespace-nowrap">{{ r.date }}</td>
+                                    <td class="px-3 py-1 text-right">{{ r.seq }}</td>
+                                    <td class="px-3 py-1">
+                                      {{ r.originCity || '?' }} → {{ r.destCity || '?' }}
+                                      <span v-if="r.viaCities.includes('>')" class="text-gray-400">({{ r.viaCities }})</span>
+                                    </td>
+                                    <td class="px-3 py-1">{{ r.masterDest || '-' }}</td>
+                                    <td class="px-3 py-1 text-right whitespace-nowrap">
+                                      <span v-if="r.status === 'ok'">{{ yen(r.allowanceYen) }}</span>
+                                      <span v-else class="text-amber-600 dark:text-amber-400" :title="`マスタで決まらない (${r.status})`">未確定</span>
+                                    </td>
+                                  </tr>
+                                </tbody>
+                              </table>
+                            </td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </td>
+                </tr>
+              </template>
             </tbody>
           </table>
         </div>
-
-        <div class="flex items-center gap-4 mb-2">
-          <h2 class="text-sm font-semibold">
-            便ごと
-          </h2>
-          <label class="text-xs text-gray-500 flex items-center gap-1.5 cursor-pointer select-none">
-            <input v-model="onlyIrregular" type="checkbox" class="cursor-pointer">
-            要確認だけ表示 ({{ irregularTotal }})
-          </label>
-          <span v-if="onlyIrregular" class="text-xs text-gray-400">
-            {{ visibleRows.length }} / {{ rows.length }} 便
-          </span>
-        </div>
-        <div class="border border-gray-200 dark:border-gray-800 rounded-lg overflow-x-auto">
-          <table class="w-full text-xs min-w-[880px]">
-            <thead class="bg-gray-50 dark:bg-gray-800">
-              <tr>
-                <th class="text-left px-3 py-2 font-medium text-gray-500">日付</th>
-                <th class="text-left px-3 py-2 font-medium text-gray-500">乗務員</th>
-                <th class="text-left px-3 py-2 font-medium text-gray-500">車輌</th>
-                <th class="text-right px-3 py-2 font-medium text-gray-500">便</th>
-                <th class="text-left px-3 py-2 font-medium text-gray-500">積地 → 卸地</th>
-                <th class="text-left px-3 py-2 font-medium text-gray-500">マスタ卸地</th>
-                <th class="text-right px-3 py-2 font-medium text-gray-500">手当</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="r in visibleRows"
-                :key="`${r.unkoNo}-${r.seq}`"
-                class="border-t border-gray-100 dark:border-gray-800 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50"
-                :class="r.status !== 'ok' ? 'bg-amber-50 dark:bg-amber-950/30' : ''"
-                :title="`運行 ${r.unkoNo} を開く`"
-                @click="goToOperation(r.unkoNo)"
-              >
-                <td class="px-3 py-2 whitespace-nowrap">{{ r.date }}</td>
-                <td class="px-3 py-2 whitespace-nowrap">{{ r.driverName || '-' }}</td>
-                <td class="px-3 py-2 whitespace-nowrap">{{ r.vehicleName || '-' }}</td>
-                <td class="px-3 py-2 text-right">{{ r.seq }}</td>
-                <td class="px-3 py-2">
-                  {{ r.originCity || '?' }} → {{ r.destCity || '?' }}
-                  <span v-if="r.viaCities.includes('>')" class="text-gray-400">({{ r.viaCities }})</span>
-                </td>
-                <td class="px-3 py-2">{{ r.masterDest || '-' }}</td>
-                <td class="px-3 py-2 text-right whitespace-nowrap">
-                  <span v-if="r.status === 'ok'">{{ yen(r.allowanceYen) }}</span>
-                  <span v-else class="text-amber-600 dark:text-amber-400" :title="`マスタで決まらない (${r.status})`">要確認</span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        <template v-if="failedOperations.length > 0">
-          <h2 class="text-sm font-semibold mt-6 mb-2 text-amber-600 dark:text-amber-400">
-            便を取れなかった運行 ({{ failedOperations.length }})
-          </h2>
-          <ul class="text-xs text-gray-500 space-y-1">
-            <li v-for="op in failedOperations" :key="op.unkoNo">
-              {{ op.readingDate }}
-              <button
-                class="text-blue-500 hover:text-blue-700 hover:underline cursor-pointer"
-                @click="goToOperation(op.unkoNo)"
-              >
-                {{ op.unkoNo }}
-              </button>
-              — {{ op.error }}
-            </li>
-          </ul>
-        </template>
       </template>
     </template>
   </div>
