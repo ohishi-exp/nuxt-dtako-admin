@@ -234,6 +234,8 @@ export interface VehicleDailySearchCriteria {
   from: string
   to: string
   vehicle?: string
+  /** `運転手C` (乗務員CD)。ohishi-exp/rust-ichibanboshi#302 で足りた。 */
+  driver?: string
   customer?: string
   origin?: string
   dest?: string
@@ -243,4 +245,19 @@ export async function searchVehicleDailySlips(
   criteria: VehicleDailySearchCriteria,
 ): Promise<VehicleDailySlip[]> {
   return fetchVehicleDailyRows(criteria)
+}
+
+/**
+ * **乗務員 1 人ぶんの明細を車番をまたいで引く** (rust-ichibanboshi#302)。
+ *
+ * 車番で引くと**その日その乗務員が別の車番で走ったぶんが丸ごと見えない**。
+ * 2026-07 の帯広5台の実測で、車番引きでは ¥1,596,721 が画面の外にあった
+ * (西島は `0001-06` に 25 本、`0040-01` に 5 本、柳井は `0040-01` に 13 本)。
+ */
+export async function fetchDriverDailySlips(
+  driver: string,
+  from: string,
+  to: string,
+): Promise<VehicleDailySlip[]> {
+  return fetchVehicleDailyRows({ driver, from, to, limit: '5000' })
 }
