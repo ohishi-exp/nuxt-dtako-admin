@@ -32,7 +32,19 @@ import {
   type DriverNode,
   type OperationNode,
 } from '~/utils/allowance-report'
-import { fetchVehicleDailySlips } from '~/utils/ichiban'
+import { fetchVehicleDailySlips, type VehicleDailySlip } from '~/utils/ichiban'
+import {
+  CACHE_KEY,
+  parseCache,
+  serializeCache,
+  findMonth,
+  putMonth,
+  planOperationFetch,
+  planSlipFetch,
+  savedAtLabel,
+  type CachedOperation,
+  type MonthCache,
+} from '~/utils/allowance-cache'
 import {
   reconcileVehicles,
   reconcileCsvLines,
@@ -57,6 +69,38 @@ const CSV_CONCURRENCY = 4
  * 氏名が `driver_cd` として API に渡って 0 件になる (2026-08-21 に踏んだ)。 */
 const TARGETS_KEY = 'dtako:allowance:driver-cds'
 
+
+/**
+ * 取得結果のキャッシュ (localStorage)。
+ *
+ * 集計はイベントCSV を運行の本数だけ引くので重い。**運行一覧で「引き直しが要るか」を
+ * 見て、要らないものはキャッシュから復元する**。localStorage が使えない環境
+ * (無効化・容量超過) でも集計そのものは動くので、失敗は握って理由だけ出す。
+ */
+const cacheNote = ref<string | null>(null)
+const cachedMonth = ref<MonthCache | null>(null)
+
+function readCache(): MonthCache | null {
+  try {
+    return findMonth(parseCache(localStorage.getItem(CACHE_KEY)), ym.value)
+  }
+  catch (e) {
+    cacheNote.value = `キャッシュを読めませんでした — ${e instanceof Error ? e.message : String(e)}`
+    return null
+  }
+}
+
+function writeCache(month: MonthCache) {
+  try {
+    const file = putMonth(parseCache(localStorage.getItem(CACHE_KEY)), month)
+    localStorage.setItem(CACHE_KEY, serializeCache(file))
+    cachedMonth.value = month
+  }
+  catch (e) {
+    // 容量超過が現実的な失敗。次回また全部引くだけで、画面の数字は正しい。
+    cacheNote.value = `キャッシュを保存できませんでした (次回も取り直します) — ${e instanceof Error ? e.message : String(e)}`
+  }
+}
 
 function currentYm(): string {
   const d = new Date()
@@ -88,6 +132,7 @@ const pendingDriver = ref('')
 
 onMounted(async () => {
   targets.value = parseTargets(localStorage.getItem(TARGETS_KEY))
+  cachedMonth.value = readCache()
   try {
     drivers.value = await getDrivers()
   }
@@ -100,6 +145,11 @@ function toggle(cd: string) {
   targets.value = toggleTarget(targets.value, cd)
   localStorage.setItem(TARGETS_KEY, serializeTargets(targets.value))
 }
+
+// 月を変えたら、その月のキャッシュがあるかを出し直す (押す前に分かる方が親切)。
+watch(ym, () => {
+  cachedMonth.value = readCache()
+})
 
 /** セレクタで選ばれたら対象に足して、次の選択に備えて空に戻す。 */
 watch(pendingDriver, (cd) => {
@@ -162,21 +212,29 @@ function groupRowsByVehicle(rows: AllowanceReportRow[]): Map<string, AllowanceRe
   return groups
 }
 
-async function runReconcile(rows: AllowanceReportRow[]) {
+/**
+ * 一番星の明細を引いて突合する。**キャッシュにある車輌C は引き直さない。**
+ * 明細側には「変わったか」を判定する材料が無いので、取り直しは `force` に任せる。
+ * 使った明細をそのまま返して、呼び出し側がキャッシュに残す。
+ */
+async function runReconcile(
+  rows: AllowanceReportRow[],
+  cachedSlips: Record<string, VehicleDailySlip[]>,
+  force: boolean,
+): Promise<Record<string, VehicleDailySlip[]>> {
   const range = slipDateRange(shownYm.value)
-  const inputs: VehicleReconcileInput[] = []
   const ordered = [...groupRowsByVehicle(rows)].sort((a, b) => (a[0] > b[0] ? 1 : -1))
-  for (const [vehicle, vehicleRows] of ordered) {
-    progress.value = `一番星の明細を取得中 車輌${vehicle}`
-    inputs.push({
-      vehicle,
-      rows: vehicleRows,
-      slips: tradableSlips(await fetchVehicleDailySlips(vehicle, range.from, range.to)),
-    })
+  const vehicles = [...ordered.map(([vehicle]) => vehicle), POOL_VEHICLE]
+  const plan = planSlipFetch(vehicles, cachedSlips, force)
+  const slips: Record<string, VehicleDailySlip[]> = { ...plan.reuse }
+  for (const vehicle of plan.fetch) {
+    progress.value = `一番星の明細を取得中 ${vehicle === POOL_VEHICLE ? `受け皿(${POOL_VEHICLE})` : `車輌${vehicle}`}`
+    slips[vehicle] = tradableSlips(await fetchVehicleDailySlips(vehicle, range.from, range.to))
   }
-  progress.value = `一番星の明細を取得中 受け皿(${POOL_VEHICLE})`
-  const pool = tradableSlips(await fetchVehicleDailySlips(POOL_VEHICLE, range.from, range.to))
-  reconciled.value = reconcileVehicles(inputs, pool)
+  const inputs: VehicleReconcileInput[] = ordered
+    .map(([vehicle, vehicleRows]) => ({ vehicle, rows: vehicleRows, slips: slips[vehicle] ?? [] }))
+  reconciled.value = reconcileVehicles(inputs, slips[POOL_VEHICLE] ?? [])
+  return slips
 }
 
 const monthSales = computed(() => summarizeSales(allRows(), byLeg.value))
@@ -319,10 +377,41 @@ async function resolveOperation(op: {
   }
 }
 
-async function run() {
+/** キャッシュに残す形 (引いた材料だけ)。**手当の金額は残さない** — マスタを直したのに
+ * 画面が変わらない、という壊れ方をするため。読み込み時に引き直す。 */
+function toCached(op: OperationAllowance, hasKudgivt: boolean): CachedOperation {
+  return {
+    unkoNo: op.unkoNo,
+    readingDate: op.readingDate,
+    operationDate: op.operationDate,
+    driverName: op.driverName,
+    vehicleName: op.vehicleName,
+    hasKudgivt,
+    legs: op.legs.map(item => item.leg),
+    carryIn: op.carryIn,
+    error: op.error,
+  }
+}
+
+/** キャッシュから戻す。手当はここで引き直す。 */
+function fromCached(op: CachedOperation): OperationAllowance {
+  return {
+    unkoNo: op.unkoNo,
+    readingDate: op.readingDate,
+    operationDate: op.operationDate,
+    driverName: op.driverName,
+    vehicleName: op.vehicleName,
+    legs: allowanceForLegs(op.legs),
+    carryIn: op.carryIn,
+    error: op.error,
+  }
+}
+
+async function run(force = false) {
   status.value = 'loading'
   errorMessage.value = null
   salesError.value = null
+  cacheNote.value = null
   operations.value = []
   reconciled.value = null
   progress.value = '運行を検索中...'
@@ -338,24 +427,40 @@ async function run() {
         found.push(...await fetchOperationsFor(range, cd))
       }
     }
+
+    // **引き直しが要るかは運行一覧で決まる。** 運行NO と has_kudgivt が一致していれば
+    // 前に切り出した便をそのまま使う (取り込み直しが走れば has_kudgivt が戻るので当たらない)。
+    const cached = readCache()
+    const plan = planOperationFetch(found, cached?.operations ?? [], force)
+    const hasKudgivtOf = new Map(found.map(o => [o.unko_no, o.has_kudgivt]))
+    const reused = plan.reuse.map(fromCached)
     const resolved: OperationAllowance[] = []
-    for (let i = 0; i < found.length; i += CSV_CONCURRENCY) {
-      progress.value = `イベントCSV を取得中 ${resolved.length}/${found.length}`
-      const chunk = found.slice(i, i + CSV_CONCURRENCY)
+    for (let i = 0; i < plan.fetch.length; i += CSV_CONCURRENCY) {
+      progress.value = `イベントCSV を取得中 ${resolved.length}/${plan.fetch.length}`
+        + (plan.reuse.length > 0 ? ` (キャッシュから ${plan.reuse.length})` : '')
+      const chunk = plan.fetch.slice(i, i + CSV_CONCURRENCY)
       resolved.push(...await Promise.all(chunk.map(resolveOperation)))
     }
+    const all = [...reused, ...resolved]
     // 積んだまま帰庫した便の卸地は次の運行の先頭にある。全運行を引き終えてから当てる。
-    operations.value = applyCarryOver(resolved)
+    operations.value = applyCarryOver(all)
     shownYm.value = ym.value
     autoOpen()
     status.value = 'ready'
     // 一番星が落ちていても手当は出せる。売上だけ諦めて理由を画面に残す。
+    const slips: Record<string, VehicleDailySlip[]> = {}
     try {
-      await runReconcile(allRows())
+      Object.assign(slips, await runReconcile(allRows(), cached?.slips ?? {}, force))
     }
     catch (e) {
       salesError.value = e instanceof Error ? e.message : String(e)
     }
+    writeCache({
+      ym: ym.value,
+      savedAt: new Date().toISOString(),
+      operations: all.map(op => toCached(op, hasKudgivtOf.get(op.unkoNo) ?? false)),
+      slips,
+    })
     progress.value = ''
   }
   catch (e) {
@@ -364,12 +469,32 @@ async function run() {
   }
 }
 
-const router = useRouter()
+// --- 運行モーダル ---
+// **ページ遷移にしない。** 集計はイベントCSV を運行の本数だけ引くので、
+// `/operations/{運行NO}` へ飛んで戻ると作り直しになる (2026-07 の帯広5台で 90 本)。
+const modalUnkoNo = ref<string | null>(null)
 
-/** その便を含む運行の詳細へ飛ぶ (`類似運行検索・比較` と同じ作法)。 */
-function goToOperation(unkoNo: string) {
-  router.push(`/operations/${unkoNo}`)
+function openOperation(unkoNo: string) {
+  modalUnkoNo.value = unkoNo
 }
+
+const modalTarget = computed(() => {
+  const unkoNo = modalUnkoNo.value
+  if (unkoNo === null) return null
+  for (const d of monthly.value.drivers) {
+    const op = d.operations.find(o => o.unkoNo === unkoNo)
+    if (!op) continue
+    return {
+      unkoNo,
+      readingDate: op.readingDate,
+      vehicleName: op.vehicleName,
+      driverName: d.driverName,
+      error: op.error,
+      entries: op.rows.map(row => ({ row, hit: legHit(row) })),
+    }
+  }
+  return null
+})
 
 function downloadCsv() {
   const blob = new Blob([`﻿${reconcileCsvLines(csvRows.value, byLeg.value).join('\r\n')}\r\n`],
@@ -407,9 +532,17 @@ function downloadCsv() {
       <button
         class="text-sm px-4 py-1.5 rounded bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white"
         :disabled="status === 'loading'"
-        @click="run"
+        @click="run(false)"
       >
         {{ status === 'loading' ? '集計中...' : '集計' }}
+      </button>
+      <button
+        class="text-sm px-3 py-1.5 rounded border border-gray-300 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+        :disabled="status === 'loading'"
+        title="キャッシュを使わず、イベントCSV と一番星の明細を全部取り直します"
+        @click="run(true)"
+      >
+        全部取り直す
       </button>
       <button
         v-if="csvRows.length > 0"
@@ -418,7 +551,29 @@ function downloadCsv() {
       >
         CSV出力{{ onlyIrregular ? ' (未確定のみ)' : '' }}
       </button>
+      <NuxtLink
+        to="/remote-app"
+        target="_blank"
+        class="text-sm px-4 py-1.5 rounded border border-gray-300 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800"
+        title="社内の RemoteApp を別タブで開きます (この画面の集計は保たれます)"
+      >
+        リモートアプリ
+      </NuxtLink>
     </div>
+
+    <p class="text-xs text-gray-500 mb-3">
+      <template v-if="cachedMonth">
+        キャッシュ <b>{{ cachedMonth.ym }}</b> 運行 {{ cachedMonth.operations.length }} 本
+        ({{ savedAtLabel(cachedMonth.savedAt) }} 保存) —
+        <b>集計</b>は運行一覧を見て変わったぶんだけ取り直します。
+      </template>
+      <template v-else>
+        この月のキャッシュはありません。<b>集計</b>で取ったぶんは次回から使い回します。
+      </template>
+    </p>
+    <p v-if="cacheNote" class="text-xs text-amber-600 dark:text-amber-400 mb-3">
+      {{ cacheNote }}
+    </p>
 
     <div class="mb-4 text-xs">
       <div class="flex flex-wrap items-center gap-2">
@@ -604,7 +759,7 @@ function downloadCsv() {
                             <td class="px-3 py-1.5 text-right whitespace-nowrap">
                               <button
                                 class="text-blue-500 hover:text-blue-700 hover:underline"
-                                @click.stop="goToOperation(op.unkoNo)"
+                                @click.stop="openOperation(op.unkoNo)"
                               >
                                 運行を開く
                               </button>
@@ -640,7 +795,7 @@ function downloadCsv() {
                                     class="border-t border-gray-100 dark:border-gray-800/50 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50"
                                     :class="r.status !== 'ok' ? 'bg-amber-50 dark:bg-amber-950/30' : ''"
                                     :title="`運行 ${r.unkoNo} を開く`"
-                                    @click="goToOperation(r.unkoNo)"
+                                    @click="openOperation(r.unkoNo)"
                                   >
                                     <td class="pl-16 pr-3 py-1 whitespace-nowrap">{{ r.date }}</td>
                                     <td class="px-3 py-1 text-right">{{ r.seq }}</td>
@@ -732,7 +887,7 @@ function downloadCsv() {
                     <td class="px-3 py-1">{{ r.masterDest || '-' }}</td>
                     <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(r.allowanceYen) }}</td>
                     <td class="px-3 py-1 text-right whitespace-nowrap">
-                      <button class="text-blue-500 hover:text-blue-700 hover:underline" @click="goToOperation(r.unkoNo)">
+                      <button class="text-blue-500 hover:text-blue-700 hover:underline" @click="openOperation(r.unkoNo)">
                         運行を開く
                       </button>
                     </td>
@@ -848,5 +1003,11 @@ function downloadCsv() {
         </div>
       </template>
     </template>
+
+    <AllowanceOperationModal
+      v-if="modalTarget"
+      v-bind="modalTarget"
+      @close="modalUnkoNo = null"
+    />
   </div>
 </template>
