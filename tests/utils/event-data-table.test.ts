@@ -1092,6 +1092,11 @@ describe('ignoredEventCodes / dropIgnoredRows', () => {
     ])
   })
 
+  it('1 行も落ちなければ元の配列をそのまま返す (選択が飛ばないように)', () => {
+    const rows = [['201', '運転'], ['405', '一般道速度オーバー']]
+    expect(dropIgnoredRows(['イベントCD', 'イベント名'], rows, new Set(['405']))).toBe(rows)
+  })
+
   it('イベント名 列が無ければ「イベント」扱いで落とす', () => {
     expect(dropIgnoredRows(['イベントCD'], [['401'], ['201']], new Set(['401']))).toEqual([['201']])
   })

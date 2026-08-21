@@ -226,6 +226,10 @@ export function ignoredEventCodes(
  * **区間距離も区間時間も 0** なので、隠しても数字は 1 も動かない。
  *
  * イベントCD 列が無い CSV はそのまま返す (列が無いのに推測で落とさない)。
+ *
+ * **1 行も落ちなければ元の配列をそのまま返す。** 中身が同じでも新しい配列を返すと、
+ * 分類が非同期で届いた瞬間に行のまとまりが作り直され、**表で選んでいた行が外れて
+ * 選択が null に戻る** (CI で 2 件落として気付いた)。
  */
 export function dropIgnoredRows(
   headers: string[],
@@ -236,10 +240,11 @@ export function dropIgnoredRows(
   const cdIdx = colIndex(headers, 'イベントCD')
   if (cdIdx < 0) return rows
   const nameIdx = colIndex(headers, 'イベント名')
-  return rows.filter(row => !(
+  const kept = rows.filter(row => !(
     ignored.has((row[cdIdx] ?? '').trim())
     && classifyEventName(nameIdx >= 0 ? (row[nameIdx] ?? '') : '') === 'event'
   ))
+  return kept.length === rows.length ? rows : kept
 }
 
 export function filterRowsByCategory(
