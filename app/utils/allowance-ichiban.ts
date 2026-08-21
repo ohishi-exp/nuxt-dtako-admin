@@ -484,11 +484,20 @@ export function margin(salesYen: number, allowanceYen: number): number {
 
 const CSV_HEADER = [
   '運行NO', '日付', '乗務員', '車輌', '便', '積地(市町村)', '卸地(市町村)', '途中卸し',
-  'マスタ卸地', '卸地の出どころ', '手当', '数量t', '売上', '収支', '突合', '内訳推定',
-  '受け皿', '一番星明細',
+  'マスタ卸地', '卸地の出どころ', '手当', '手当の状態', '数量t', '売上', '収支',
+  '突合', '内訳推定', '受け皿', '一番星明細',
 ]
 
-/** 便 1 行ずつの収支 CSV。値にカンマが入りうるので必ず引用する。 */
+/**
+ * 便 1 行ずつの収支 CSV。値にカンマが入りうるので必ず引用する。
+ *
+ * **`手当の状態` と `突合` は別の軸。** 前者は「マスタで手当が決まったか」
+ * (`ok` / `ambiguous` / `unknown`)、後者は「一番星の明細が当たったか」
+ * (`matched` / `matched_date_shift` / `no_slip`)。**手当が決まらない便は
+ * `allowanceYen` が空になるだけなので、この列が無いと処方が正反対の 2 つを
+ * 見分けられない** — `unknown` は xlsx にマスタ行を足せば直り、`ambiguous` は
+ * 同じ経路に違う金額があるので人が決めるしかない。
+ */
 export function reconcileCsvLines(
   rows: AllowanceReportRow[],
   byLeg: Map<string, LegReconcile>,
@@ -502,7 +511,7 @@ export function reconcileCsvLines(
         r.unkoNo, r.date, r.driverName, r.vehicleName, r.seq, r.originCity, r.destCity,
         r.viaCities, r.masterDest,
         r.destSource === 'carried' ? '次運行の先頭の降し (推定)' : 'イベント',
-        r.allowanceYen, hit.quantity, hit.salesYen,
+        r.allowanceYen, r.status, hit.quantity, hit.salesYen,
         margin(hit.salesYen, r.allowanceYen ?? 0), hit.status,
         hit.split ? '推定' : '', hit.fromPool ? POOL_VEHICLE : '',
         hit.slips.map(s => s.itemName).join('|'),
