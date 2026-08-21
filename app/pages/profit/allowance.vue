@@ -19,6 +19,10 @@
  *
  * **前回の検索 (月・車輌CD) は localStorage に残し、開いたらキャッシュから
  * そのまま出す** (通信しない)。毎回 月を選び直して `集計` を押す手間を無くす。
+ *
+ * **手当表PDF から起こした CSV を読み込むと、便単位で突き合わせる**
+ * (`allowance-pdf-compare.ts`)。PDF は給与の正本なので、デジタコから出したこの画面の
+ * 手当が合っているかを確かめられる唯一の外部の物差し。
  */
 import { getOperations, getOperationCsv, getDrivers } from '~/utils/api'
 import { fetchAllPages } from '~/utils/paged-fetch'
@@ -61,6 +65,16 @@ import {
   unkoNoOfKey,
   type ExcludedMap,
 } from '~/utils/allowance-excluded'
+import {
+  PDF_TRIPS_KEY,
+  decodeCsvBytes,
+  parsePdfAllowanceCsv,
+  parsePdfTripFile,
+  serializePdfTripFile,
+  comparePdfTrips,
+  routeText,
+  type PdfTripFile,
+} from '~/utils/allowance-pdf-compare'
 import {
   LAST_SEARCH_KEY,
   parseLastSearch,
@@ -178,6 +192,45 @@ function toggleRowExclusion(r: AllowanceReportRow) {
   toggleExclusion(excludedKey(r))
 }
 
+// --- 手当表PDF との比較 ---
+// **PDF は給与の正本**で、デジタコから出した手当が合っているかを確かめる唯一の
+// 外部の物差し。CSV に起こしたものを読み込んで、便単位で突き合わせる。
+
+const pdfFile = ref<PdfTripFile | null>(null)
+const pdfNote = ref<string | null>(null)
+const pdfWarnings = ref<string[]>([])
+
+function setPdfFile(file: PdfTripFile | null) {
+  pdfFile.value = file
+  try {
+    if (file) localStorage.setItem(PDF_TRIPS_KEY, serializePdfTripFile(file))
+    else localStorage.removeItem(PDF_TRIPS_KEY)
+  }
+  catch (e) {
+    pdfNote.value = `PDF の便を保存できませんでした (比較はこのまま続けられます) — ${e instanceof Error ? e.message : String(e)}`
+  }
+}
+
+async function onPdfCsvChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  pdfNote.value = null
+  pdfWarnings.value = []
+  try {
+    const text = decodeCsvBytes(new Uint8Array(await file.arrayBuffer()))
+    const parsed = parsePdfAllowanceCsv(text)
+    setPdfFile(parsed.file)
+    pdfWarnings.value = parsed.warnings
+  }
+  catch (err) {
+    setPdfFile(null)
+    pdfNote.value = err instanceof Error ? err.message : String(err)
+  }
+  // 同じファイルを選び直しても change が飛ぶようにする。
+  input.value = ''
+}
+
 function readCache(): MonthCache | null {
   try {
     return findMonth(parseCache(localStorage.getItem(CACHE_KEY)), ym.value)
@@ -239,6 +292,7 @@ onMounted(async () => {
   }
   provisional.value = parseProvisional(localStorage.getItem(PROVISIONAL_KEY))
   excluded.value = parseExcluded(localStorage.getItem(EXCLUDED_KEY))
+  pdfFile.value = parsePdfTripFile(localStorage.getItem(PDF_TRIPS_KEY))
   cachedMonth.value = readCache()
   if (cachedMonth.value) restoreFromCache(cachedMonth.value)
   try {
@@ -430,6 +484,26 @@ const excludedTotals = computed(() => {
   }
   return { allowanceYen, salesYen }
 })
+
+/**
+ * 手当表PDF との突合。**読み込んだ PDF の月と、いま集計している月が違えば比べない**
+ * (別の月どうしを並べると全部「PDF のみ」「画面のみ」になって読めない)。
+ */
+const pdfCompare = computed(() => {
+  const file = pdfFile.value
+  if (!file || file.ym !== shownYm.value) return null
+  return comparePdfTrips(file, allRows().map(row => ({ row, payYen: legPayYen(row) })))
+})
+/** PDF の月と集計中の月が違う。押す前に気付けるように出す。 */
+const pdfMonthMismatch = computed(() =>
+  pdfFile.value !== null && status.value === 'ready' && pdfFile.value.ym !== shownYm.value)
+
+const pdfOnlyEntries = computed(() => (pdfCompare.value?.entries ?? []).filter(e => e.status === 'pdf_only'))
+const screenOnlyEntries = computed(() => (pdfCompare.value?.entries ?? []).filter(e => e.status === 'screen_only'))
+const pdfAmountDiffs = computed(() => (pdfCompare.value?.entries ?? [])
+  .filter(e => e.status === 'matched' && e.diffYen !== null && e.diffYen !== 0))
+const pdfLooseMatches = computed(() => (pdfCompare.value?.entries ?? [])
+  .filter(e => e.status === 'matched' && (e.dateShift || e.routeDiff)))
 
 /** 1 便の手当欄。**未確定は理由まで出す** — `unknown` と `ambiguous` は直し方が逆。 */
 interface LegPayLabel {
@@ -744,6 +818,7 @@ function downloadCsv() {
       突合できなかった便・明細と、マスタの運賃と単価が食い違う明細は、下に件数と一覧で出します。
       <b>降しが 1 つも無い積み</b>のような実在しない便は、便の行 (または運行を開いたところ) の
       <b>除外</b>で集計から外せます。外した便は<b>下の「除外した便」から戻せます</b>。
+      <b>手当表PDF から起こした CSV</b> を読み込むと、便単位で突き合わせて差分を出します。
     </p>
 
     <div class="flex flex-wrap gap-3 items-end mb-4">
@@ -775,6 +850,15 @@ function downloadCsv() {
       >
         CSV出力{{ onlyIrregular ? ' (未確定のみ)' : '' }}
       </button>
+      <label class="text-xs text-gray-500">手当表PDF の CSV
+        <input
+          type="file"
+          accept=".csv,text/csv"
+          class="block text-sm border rounded px-2 py-1 dark:bg-gray-900"
+          title="PDF から起こした手当表 CSV (driver_name / date / origin / dest / allowance_yen 列)"
+          @change="onPdfCsvChange"
+        >
+      </label>
       <NuxtLink
         to="/remote-app"
         target="_blank"
@@ -794,6 +878,21 @@ function downloadCsv() {
       <template v-else>
         この月のキャッシュはありません。<b>集計</b>で取ったぶんは次回から使い回します。
       </template>
+    </p>
+    <p v-if="pdfFile" class="text-xs text-gray-500 mb-3">
+      手当表PDF <b>{{ pdfFile.ym }}</b> {{ pdfFile.trips.length }} 便
+      = <b>{{ yen(pdfFile.trips.reduce((sum, t) => sum + t.allowanceYen, 0)) }}</b> を読み込み済み
+      <button class="ml-2 text-blue-500 hover:text-blue-700 hover:underline" @click="setPdfFile(null)">外す</button>
+      <span v-if="pdfMonthMismatch" class="ml-2 text-amber-600 dark:text-amber-400">
+        — 集計中の <b>{{ shownYm }}</b> と月が違うので比べていません
+      </span>
+    </p>
+    <p v-if="pdfNote" class="text-xs text-amber-600 dark:text-amber-400 mb-3">
+      {{ pdfNote }}
+    </p>
+    <p v-if="pdfWarnings.length > 0" class="text-xs text-amber-600 dark:text-amber-400 mb-3">
+      CSV の {{ pdfWarnings.length }} 行を読み飛ばしました — {{ pdfWarnings.slice(0, 3).join(' / ') }}
+      <span v-if="pdfWarnings.length > 3">ほか</span>
     </p>
     <p v-if="restoredFromCache" class="text-xs text-sky-600 dark:text-sky-400 mb-3">
       前回の検索 (<b>{{ shownYm }}</b>) をキャッシュから<b>そのまま表示</b>しています —
@@ -1116,6 +1215,226 @@ function downloadCsv() {
               </template>
             </tbody>
           </table>
+        </div>
+
+        <div v-if="pdfCompare" class="mt-6 space-y-2 text-xs">
+          <h2 class="text-sm font-semibold">手当表PDF との差分</h2>
+          <p class="text-gray-500">
+            手当表PDF は<b>給与の正本</b>で、デジタコから出したこの画面の手当が合っているかを確かめる
+            <b>唯一の外部の物差し</b>です。乗務員ごとに、<b>日付と経路が合う便どうし</b>を当てています。
+            経路が合って日付が 1 日ずれたもの・日付が合って経路が違うものも当てますが、<b>印を残して</b>下に出します
+            (黙って寄せません)。ここに出ている「PDF にあって画面に無い便」は、
+            <b>デジタコに運行が無い日</b>か<b>alc への取り込み漏れ</b>のどちらかです。
+          </p>
+
+          <div class="flex flex-wrap gap-6 text-sm items-center">
+            <span>PDF <b>{{ pdfCompare.total.pdfTrips }}</b> 便 <b>{{ yen(pdfCompare.total.pdfYen) }}</b></span>
+            <span>画面 <b>{{ pdfCompare.total.screenTrips }}</b> 便 <b>{{ yen(pdfCompare.total.screenYen) }}</b></span>
+            <span :class="pdfCompare.total.screenYen - pdfCompare.total.pdfYen !== 0 ? 'text-amber-600 dark:text-amber-400' : ''">
+              差 <b>{{ pdfCompare.total.screenTrips - pdfCompare.total.pdfTrips }}</b> 便
+              <b>{{ yen(pdfCompare.total.screenYen - pdfCompare.total.pdfYen) }}</b>
+            </span>
+            <span>一致 <b>{{ pdfCompare.total.matched }}</b></span>
+            <span :class="pdfCompare.total.pdfOnly > 0 ? 'text-amber-600 dark:text-amber-400' : ''">
+              PDFのみ <b>{{ pdfCompare.total.pdfOnly }}</b> ({{ yen(pdfCompare.total.pdfOnlyYen) }})
+            </span>
+            <span :class="pdfCompare.total.screenOnly > 0 ? 'text-amber-600 dark:text-amber-400' : ''">
+              画面のみ <b>{{ pdfCompare.total.screenOnly }}</b> ({{ yen(pdfCompare.total.screenOnlyYen) }})
+            </span>
+            <span :class="pdfCompare.total.amountDiff > 0 ? 'text-red-600 dark:text-red-400' : ''">
+              金額違い <b>{{ pdfCompare.total.amountDiff }}</b> ({{ yen(pdfCompare.total.amountDiffYen) }})
+            </span>
+            <span class="text-gray-400" title="経路は合うが日付が 1 日ずれて当てた便 / 日付は合うが経路が違うのに当てた便">
+              1日ずれ {{ pdfCompare.total.dateShift }} ・ 経路違い {{ pdfCompare.total.routeDiff }}
+            </span>
+          </div>
+
+          <div class="overflow-x-auto border border-gray-200 dark:border-gray-800 rounded-lg">
+            <table class="w-full">
+              <thead class="bg-gray-50 dark:bg-gray-800">
+                <tr>
+                  <th class="text-left px-3 py-1.5 font-medium text-gray-500">乗務員</th>
+                  <th class="text-right px-3 py-1.5 font-medium text-gray-500">PDF 便</th>
+                  <th class="text-right px-3 py-1.5 font-medium text-gray-500">PDF 手当</th>
+                  <th class="text-right px-3 py-1.5 font-medium text-gray-500">画面 便</th>
+                  <th class="text-right px-3 py-1.5 font-medium text-gray-500">画面 手当</th>
+                  <th class="text-right px-3 py-1.5 font-medium text-gray-500">差</th>
+                  <th class="text-right px-3 py-1.5 font-medium text-gray-500">一致</th>
+                  <th class="text-right px-3 py-1.5 font-medium text-gray-500" title="PDF にあって画面に無い便">PDFのみ</th>
+                  <th class="text-right px-3 py-1.5 font-medium text-gray-500" title="画面にあって PDF に無い便">画面のみ</th>
+                  <th class="text-right px-3 py-1.5 font-medium text-gray-500">金額違い</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="d in pdfCompare.drivers" :key="d.driverName" class="border-t border-gray-100 dark:border-gray-800/70">
+                  <td class="px-3 py-1 whitespace-nowrap font-medium">{{ d.driverName }}</td>
+                  <td class="px-3 py-1 text-right">{{ d.pdfTrips }}</td>
+                  <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(d.pdfYen) }}</td>
+                  <td class="px-3 py-1 text-right">{{ d.screenTrips }}</td>
+                  <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(d.screenYen) }}</td>
+                  <td
+                    class="px-3 py-1 text-right whitespace-nowrap"
+                    :class="d.screenYen - d.pdfYen !== 0 ? 'text-amber-600 dark:text-amber-400' : 'text-gray-300 dark:text-gray-700'"
+                  >
+                    {{ yen(d.screenYen - d.pdfYen) }}
+                  </td>
+                  <td class="px-3 py-1 text-right">{{ d.matched }}</td>
+                  <td class="px-3 py-1 text-right" :class="d.pdfOnly > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-gray-300 dark:text-gray-700'">
+                    {{ d.pdfOnly }}
+                  </td>
+                  <td class="px-3 py-1 text-right" :class="d.screenOnly > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-gray-300 dark:text-gray-700'">
+                    {{ d.screenOnly }}
+                  </td>
+                  <td class="px-3 py-1 text-right" :class="d.amountDiff > 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-300 dark:text-gray-700'">
+                    {{ d.amountDiff }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <details class="border border-gray-200 dark:border-gray-800 rounded-lg">
+            <summary class="px-3 py-2 cursor-pointer select-none">
+              PDF にあって画面に無い便
+              <b :class="pdfOnlyEntries.length > 0 ? 'text-amber-600 dark:text-amber-400' : ''">{{ pdfOnlyEntries.length }}</b> 便
+              <span class="text-gray-400">(デジタコに運行が無い日か、alc への取り込み漏れ)</span>
+            </summary>
+            <div class="overflow-x-auto border-t border-gray-100 dark:border-gray-800">
+              <table class="w-full">
+                <thead class="bg-gray-50 dark:bg-gray-800">
+                  <tr>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">日付</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">乗務員</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">経路 (PDF)</th>
+                    <th class="text-right px-3 py-1.5 font-medium text-gray-500">手当 (PDF)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(e, i) in pdfOnlyEntries" :key="`po-${i}`" class="border-t border-gray-100 dark:border-gray-800/70">
+                    <td class="px-3 py-1 whitespace-nowrap">{{ e.pdfDate }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ e.driverName }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ routeText(e.pdfRoute) }}</td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(e.pdfYen) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </details>
+
+          <details class="border border-gray-200 dark:border-gray-800 rounded-lg">
+            <summary class="px-3 py-2 cursor-pointer select-none">
+              画面にあって PDF に無い便
+              <b :class="screenOnlyEntries.length > 0 ? 'text-amber-600 dark:text-amber-400' : ''">{{ screenOnlyEntries.length }}</b> 便
+              <span class="text-gray-400">(便の切り出しすぎか、PDF の転記漏れ)</span>
+            </summary>
+            <div class="overflow-x-auto border-t border-gray-100 dark:border-gray-800">
+              <table class="w-full">
+                <thead class="bg-gray-50 dark:bg-gray-800">
+                  <tr>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">日付</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">乗務員</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">経路 (画面)</th>
+                    <th class="text-right px-3 py-1.5 font-medium text-gray-500">手当 (画面)</th>
+                    <th class="px-3 py-1.5" />
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(e, i) in screenOnlyEntries" :key="`so-${i}`" class="border-t border-gray-100 dark:border-gray-800/70">
+                    <td class="px-3 py-1 whitespace-nowrap">{{ e.screenDate }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ e.driverName }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ routeText(e.screenRoute) }}</td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(e.screenYen) }}</td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap">
+                      <button class="text-blue-500 hover:text-blue-700 hover:underline" @click="openOperation(e.unkoNo)">
+                        運行を開く
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </details>
+
+          <details class="border border-gray-200 dark:border-gray-800 rounded-lg">
+            <summary class="px-3 py-2 cursor-pointer select-none">
+              当たったが金額が違う便
+              <b :class="pdfAmountDiffs.length > 0 ? 'text-red-600 dark:text-red-400' : ''">{{ pdfAmountDiffs.length }}</b> 便
+              <span class="text-gray-400">(料金マスタか卸地の引き当てを疑う。暫定額もここに出ます)</span>
+            </summary>
+            <div class="overflow-x-auto border-t border-gray-100 dark:border-gray-800">
+              <table class="w-full">
+                <thead class="bg-gray-50 dark:bg-gray-800">
+                  <tr>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">日付</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">乗務員</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">経路 (PDF)</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">経路 (画面)</th>
+                    <th class="text-right px-3 py-1.5 font-medium text-gray-500">PDF</th>
+                    <th class="text-right px-3 py-1.5 font-medium text-gray-500">画面</th>
+                    <th class="text-right px-3 py-1.5 font-medium text-gray-500">差</th>
+                    <th class="px-3 py-1.5" />
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(e, i) in pdfAmountDiffs" :key="`ad-${i}`" class="border-t border-gray-100 dark:border-gray-800/70">
+                    <td class="px-3 py-1 whitespace-nowrap">{{ e.pdfDate }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ e.driverName }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ routeText(e.pdfRoute) }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap" :class="e.routeDiff ? 'text-amber-600 dark:text-amber-400' : ''">
+                      {{ routeText(e.screenRoute) }}
+                    </td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(e.pdfYen) }}</td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(e.screenYen) }}</td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap text-red-600 dark:text-red-400">{{ yen(e.diffYen) }}</td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap">
+                      <button class="text-blue-500 hover:text-blue-700 hover:underline" @click="openOperation(e.unkoNo)">
+                        運行を開く
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </details>
+
+          <details class="border border-gray-200 dark:border-gray-800 rounded-lg">
+            <summary class="px-3 py-2 cursor-pointer select-none">
+              ゆるく当てた便 <b>{{ pdfLooseMatches.length }}</b> 便
+              <span class="text-gray-400">(日付が 1 日ずれた / 経路が違うのに同じ日で当てた。合計には入れています)</span>
+            </summary>
+            <div class="overflow-x-auto border-t border-gray-100 dark:border-gray-800">
+              <table class="w-full">
+                <thead class="bg-gray-50 dark:bg-gray-800">
+                  <tr>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">乗務員</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">PDF 日付</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">画面 日付</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">経路 (PDF)</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">経路 (画面)</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">当て方</th>
+                    <th class="px-3 py-1.5" />
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(e, i) in pdfLooseMatches" :key="`lm-${i}`" class="border-t border-gray-100 dark:border-gray-800/70">
+                    <td class="px-3 py-1 whitespace-nowrap">{{ e.driverName }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ e.pdfDate }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ e.screenDate }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ routeText(e.pdfRoute) }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ routeText(e.screenRoute) }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap text-amber-600 dark:text-amber-400">
+                      {{ e.dateShift ? '1日ずれ' : '経路違い' }}
+                    </td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap">
+                      <button class="text-blue-500 hover:text-blue-700 hover:underline" @click="openOperation(e.unkoNo)">
+                        運行を開く
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </details>
         </div>
 
         <div v-if="unresolvedRoutes.length > 0" class="mt-6 space-y-2 text-xs">

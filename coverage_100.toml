@@ -230,5 +230,9 @@ path = "app/utils/allowance-last-search.ts"
 branches = true
 
 [[files]]
+path = "app/utils/allowance-pdf-compare.ts"
+branches = true
+
+[[files]]
 path = "app/utils/paged-fetch.ts"
 branches = true
