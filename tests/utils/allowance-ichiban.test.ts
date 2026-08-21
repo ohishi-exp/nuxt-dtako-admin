@@ -6,6 +6,7 @@ import {
   areaTown,
   slipDestKeys,
   legDestAlts,
+  masterDestAlts,
   destMatches,
   dayDiff,
   legKey,
@@ -110,6 +111,17 @@ describe('legDestAlts', () => {
   })
 })
 
+describe('masterDestAlts', () => {
+  it('マスタで決まった卸地だけを候補にする (デジタコの市町村名は入れない)', () => {
+    expect(masterDestAlts({ masterDest: '富士' })).toEqual(['富士'])
+    expect(masterDestAlts({ masterDest: '松山/士幌' })).toEqual(['松山', '士幌'])
+  })
+
+  it('マスタで決まっていなければ空 (1 段目では当てにいかない)', () => {
+    expect(masterDestAlts({ masterDest: '' })).toEqual([])
+  })
+})
+
 describe('destMatches', () => {
   it('完全一致と前方一致で当てる', () => {
     expect(destMatches(['上士幌'], ['上士幌'])).toBe(true)
@@ -194,6 +206,33 @@ describe('reconcileLegs', () => {
     // 合計は分け方に関わらず変わらない
     expect(first.salesYen + second.salesYen).toBe(7000)
     expect(res.leftovers).toEqual([])
+  })
+
+  it('粗い市町村名に細かい卸地を潰させない (富士の便が川西の明細を拾わない)', () => {
+    // 一番星の `destAreaName` は帯広市の中を区別しない。デジタコの住所から取れるのも
+    // `帯広市` までなので、マスタの卸地 (`富士` / `川西`) を先に当てないと取り違える。
+    const fuji = row({
+      seq: 1, masterDest: '富士',
+      originCity: '北海道広尾郡広尾町会所前６', destCity: '北海道帯広市富士町西５線',
+    })
+    const kawanishi = row({
+      seq: 2, masterDest: '川西',
+      originCity: '北海道釧路市西港１-98-41', destCity: '北海道帯広市川西町西３線',
+    })
+    const slips = [
+      slip({ rowId: 'kawanishi', dest: '川西', destAreaName: '北海道帯広市', amount: 34430 }),
+      slip({ rowId: 'fuji', dest: '富士', destAreaName: '北海道帯広市', amount: 25000 }),
+    ]
+    const res = reconcileLegs([fuji, kawanishi], slips)
+    expect(res.byLeg.get(legKey(fuji))!.slips.map(s => s.rowId)).toEqual(['fuji'])
+    expect(res.byLeg.get(legKey(kawanishi))!.slips.map(s => s.rowId)).toEqual(['kawanishi'])
+    expect(res.leftovers).toEqual([])
+  })
+
+  it('マスタの卸地で当たらない明細は市町村名で拾い直す (清水DF ← 清水　ﾉﾍﾞﾙｽﾞDF)', () => {
+    const leg = row({ masterDest: '清水DF', destCity: '北海道上川郡清水町熊牛' })
+    const res = reconcileLegs([leg], [slip({ rowId: 'x', dest: '清水　ﾉﾍﾞﾙｽﾞDF', destAreaName: '北海道清水町' })])
+    expect(res.byLeg.get(legKey(leg))!.slips.map(s => s.rowId)).toEqual(['x'])
   })
 
   it('日付 → 運行NO → 便番号 の順に処理する (渡した順に依存しない)', () => {

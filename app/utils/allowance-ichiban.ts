@@ -67,16 +67,34 @@ export function slipDestKeys(slip: VehicleDailySlip): string[] {
   return [...keys]
 }
 
-/**
- * 便が名乗れる卸地。デジタコの `終了市町村名` (実体は住所) と、マスタで決まった
- * 卸地の両方から作る。`松山/士幌` `清水・富士` のような複数表記は分けて展開する。
- */
-export function legDestAlts(row: Pick<AllowanceReportRow, 'destCity' | 'masterDest'>): string[] {
-  const parts = [addressToCity(row.destCity), row.masterDest]
-    .flatMap(text => normalizePlace(text).split(/[・/]/))
+/** `松山/士幌` `清水・富士` のような複数表記を分けて、市町村語尾も落とした候補にする。 */
+function expandAlts(texts: string[]): string[] {
+  const parts = texts.flatMap(text => normalizePlace(text).split(/[・/]/))
   const alts = new Set(parts.flatMap(part => [part, cityToPlace(part)]))
   alts.delete('')
   return [...alts]
+}
+
+/**
+ * **マスタで決まった卸地だけ**から作る候補。決まっていなければ空。
+ *
+ * こちらを先に当てる。**デジタコの住所から取った市町村名は粗すぎて、
+ * 帯広市の中の 川西・富士・札内 を区別できない** — 一番星の `destAreaName` は
+ * どれも `北海道帯広市` なので、`帯広` を候補に入れると富士行きの便が川西の明細を
+ * 拾ってしまう (2026-07 の実データで発生。`reconcile.py` の README が warn していた罠)。
+ */
+export function masterDestAlts(row: Pick<AllowanceReportRow, 'masterDest'>): string[] {
+  return expandAlts([row.masterDest])
+}
+
+/**
+ * 便が名乗れる卸地。デジタコの `終了市町村名` (実体は住所) と、マスタで決まった
+ * 卸地の両方から作る。**マスタで当たらなかった便の拾い直しに使う** —
+ * 明細が `清水　ﾉﾍﾞﾙｽﾞDF` でマスタの `清水DF` では前方一致しない、のような
+ * 経路があるので、市町村名の候補自体は捨てられない。
+ */
+export function legDestAlts(row: Pick<AllowanceReportRow, 'destCity' | 'masterDest'>): string[] {
+  return expandAlts([addressToCity(row.destCity), row.masterDest])
 }
 
 /**
@@ -162,11 +180,24 @@ function legSortKey(row: AllowanceReportRow): string {
  * 普通** (標茶 8t + 4t = 12t) なので、当たった明細は既定でまとめて 1 便に付ける。
  * ただし同じ日・同じ卸地に便が複数あるときは、その本数で割って先頭から配る
  * (`split: true`)。**合計は変わらず、便ごとの内訳だけが推定になる。**
+ *
+ * **2 段で当てる。**
+ *
+ * 1. **マスタで決まった卸地だけ**で全便を当てる
+ * 2. 残った便を、デジタコの住所から取った市町村名も足して当て直す
+ *
+ * 1 段で混ぜると、粗い市町村名 (`帯広`) が細かい卸地 (`富士` / `川西`) を潰す。
+ * **一番星の `destAreaName` は帯広市の中を区別しない**ので、富士行きの便が川西の
+ * 明細を拾い、本来の富士の明細が「一番星に無し」で余る (2026-07 の実データで発生)。
+ * 市町村名の候補自体は捨てられない — `清水　ﾉﾍﾞﾙｽﾞDF` のようにマスタの卸地では
+ * 前方一致しない明細があるため。**順番だけで解く。**
  */
 export function reconcileLegs(rows: AllowanceReportRow[], slips: VehicleDailySlip[]): ReconcileResult {
   const slipKeys = slips.map(slipDestKeys)
   const used = new Set<number>()
   const ordered = [...rows].sort((a, b) => compareText(legSortKey(a), legSortKey(b)))
+  // 枠 (同じ日・同じ卸地) の識別は広い方の候補で行う。狭い方で組むと、マスタで卸地が
+  // 決まらない便が全部 1 つの枠に落ちて、関係のない便どうしで明細を分け合う。
   const altsOf = new Map(ordered.map(row => [legKey(row), legDestAlts(row)]))
 
   const groupTotal = new Map<string, number>()
@@ -190,23 +221,20 @@ export function reconcileLegs(rows: AllowanceReportRow[], slips: VehicleDailySli
   }
 
   const byLeg = new Map<string, LegReconcile>()
-  for (const row of ordered) {
-    const key = legKey(row)
-    const alts = altsOf.get(key)!
-    const group = groupKey(row, alts)
-    const share = groupLeft.get(group)!
-    groupLeft.set(group, share - 1)
 
+  /** 1 便に明細を割り当てる。当たらなければ何もせず false (次の段に回す)。 */
+  function assign(row: AllowanceReportRow, alts: string[]): boolean {
     let hits = candidates(row.date, alts, 0)
     let status: LegMatchStatus = 'matched'
     if (hits.length === 0) {
       hits = candidates(row.date, alts, DATE_SLACK)
       status = 'matched_date_shift'
     }
-    if (hits.length === 0) {
-      byLeg.set(key, noSlip(key))
-      continue
-    }
+    if (hits.length === 0) return false
+    const key = legKey(row)
+    const group = groupKey(row, altsOf.get(key)!)
+    const share = groupLeft.get(group)!
+    groupLeft.set(group, share - 1)
     const picked = hits.slice(0, Math.ceil(hits.length / share))
     for (const i of picked) used.add(i)
     const chosen = picked.map(i => slips[i]!)
@@ -219,6 +247,21 @@ export function reconcileLegs(rows: AllowanceReportRow[], slips: VehicleDailySli
       split: groupTotal.get(group)! > 1,
       fromPool: false,
     })
+    return true
+  }
+
+  // 1 段目: マスタで決まった卸地だけで当てる (細かい卸地を粗い市町村名に潰させない)
+  for (const row of ordered) assign(row, masterDestAlts(row))
+  // 2 段目: 残った便を市町村名も足して当て直す
+  for (const row of ordered) {
+    const key = legKey(row)
+    if (byLeg.has(key)) continue
+    assign(row, altsOf.get(key)!)
+  }
+  // どちらでも当たらなかった便
+  for (const row of ordered) {
+    const key = legKey(row)
+    if (!byLeg.has(key)) byLeg.set(key, noSlip(key))
   }
 
   return { byLeg, leftovers: slips.filter((_, i) => !used.has(i)) }
