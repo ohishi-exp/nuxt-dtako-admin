@@ -27,6 +27,10 @@
  * **売上 (一番星) は乗務員CD で引く** (rust-ichibanboshi#302 で `driver` が足りた)。
  * 車番で引くと**その日その乗務員が別の車番で走ったぶんが丸ごと見えない** —
  * 2026-07 の帯広5台の実測で ¥1,596,721 が画面の外にあった。
+ *
+ * **デジタコに運行が 1 件も無い日は、一番星の明細から便を起こす**
+ * (`allowance-ichiban-legs.ts`)。デジタコが無いのだから、そこから取るしかない。
+ * 起こしたぶんは**デジタコ由来と混ぜず**、別に数えて「合計 (デジタコ + 一番星)」で足す。
  */
 import { getOperations, getOperationCsv, getDrivers } from '~/utils/api'
 import { fetchAllPages } from '~/utils/paged-fetch'
@@ -69,6 +73,12 @@ import {
   unkoNoOfKey,
   type ExcludedMap,
 } from '~/utils/allowance-excluded'
+import {
+  MAX_LOAD_TONS,
+  buildIchibanLegs,
+  summarizeIchibanLegs,
+  type IchibanLeg,
+} from '~/utils/allowance-ichiban-legs'
 import {
   PDF_TRIPS_KEY,
   decodeCsvBytes,
@@ -373,6 +383,8 @@ const staleExclusions = computed(() => staleExclusionKeys(monthlyAll.value, excl
 // 一番星が引けなくても手当は出せるので、失敗は握りつぶさず別枠で出す。
 const reconciled = ref<VehiclesReconcileResult | null>(null)
 const salesError = ref<string | null>(null)
+/** 引いた一番星の明細 (鍵は `driver:<CD>` か 車番)。**便を起こすのに使う。** */
+const slipsByKey = ref<Record<string, VehicleDailySlip[]>>({})
 
 const byLeg = computed(() => reconciled.value?.byLeg ?? new Map<string, LegReconcile>())
 const hasSales = computed(() => reconciled.value !== null)
@@ -446,6 +458,7 @@ function applyReconcile(
   ordered: [string, AllowanceReportRow[]][],
   slips: Record<string, VehicleDailySlip[]>,
 ) {
+  slipsByKey.value = slips
   const inputs: VehicleReconcileInput[] = ordered
     .map(([vehicle, vehicleRows]) => ({ vehicle, rows: vehicleRows, slips: slips[vehicle] ?? [] }))
   reconciled.value = reconcileVehicles(inputs, slips[POOL_VEHICLE] ?? [])
@@ -550,6 +563,45 @@ function legMarginYen(r: AllowanceReportRow): number | null {
   if (!hit) return null
   return margin(hit.salesYen, legPayYen(r) ?? 0)
 }
+
+/**
+ * **デジタコに運行が無い日の便を、一番星の明細から起こす** (`allowance-ichiban-legs.ts`)。
+ *
+ * デジタコを積んでいない車輌 (`0001`) や、その日の運行が alc に無い車番 (`0040`) で
+ * 走った日は運行データが無く、便が作れない。それでも仕事はしていて売上も立っている。
+ * 2026-07 の帯広5台では手当表PDF の **39 便 ¥344,000** がこれに当たり、合計から
+ * 落ちていた。**一番星から起こすと便数がぴったり 39 で一致する** (金額もマスタに無い
+ * 1 便を除いて一致)。
+ *
+ * **乗務員で引けているときだけ。** 車番引きでは、その乗務員が別の車番で走った日の
+ * 明細を持っていないので、起こすべき便が見えない。
+ */
+const ichibanLegs = computed<IchibanLeg[]>(() => {
+  if (!canFetchByDriver.value) return []
+  const out: IchibanLeg[] = []
+  for (const d of monthly.value.drivers) {
+    const cd = driverCdByName.value.get(d.driverName)
+    if (cd === undefined) continue
+    const slips = slipsByKey.value[driverSlipKey(cd)] ?? []
+    // **デジタコの便がある日は触らない。** 一部だけ取れている日に足すと二重に載る。
+    const covered = new Set(d.operations.flatMap(op => op.rows.map(r => r.date)))
+    out.push(...buildIchibanLegs(d.driverName, slips, covered, shownYm.value))
+  }
+  return out
+})
+const ichibanTotals = computed(() => summarizeIchibanLegs(ichibanLegs.value))
+
+/** デジタコ由来 + 一番星から起こしたぶん の合計。**画面で足して見せるのはここだけ。** */
+const combined = computed(() => {
+  const allowanceYen = monthly.value.totalYen + monthProvisional.value.yen + ichibanTotals.value.allowanceYen
+  const salesYen = monthSales.value.salesYen + ichibanTotals.value.salesYen
+  return {
+    trips: monthly.value.trips + monthProvisional.value.trips + ichibanTotals.value.trips,
+    allowanceYen,
+    salesYen,
+    marginYen: margin(salesYen, allowanceYen),
+  }
+})
 
 /**
  * 外した便が持っていた手当・売上。**「黙って消えた額」を出すため**に数える。
@@ -901,6 +953,8 @@ function downloadCsv() {
       <b>手当表PDF から起こした CSV</b> を読み込むと、便単位で突き合わせて差分を出します。
       売上は<b>対象乗務員を指定していれば乗務員CD で引きます</b> — その乗務員が
       <b>別の車番で走った日</b>の売上も入ります (車番で引くと丸ごと落ちます)。
+      <b>デジタコに運行が 1 件も無い日</b>は、一番星の明細から便を起こして
+      「合計 (デジタコ + 一番星)」に足します。
     </p>
 
     <div class="flex flex-wrap gap-3 items-end mb-4">
@@ -1046,6 +1100,16 @@ function downloadCsv() {
             未確定 <b>{{ monthly.irregularTrips }}</b> 便
           </span>
           <span
+            v-if="ichibanTotals.trips > 0"
+            class="text-teal-600 dark:text-teal-400"
+            title="デジタコに運行が無い日の便を、一番星の明細から起こしたぶん。上の便数・手当・売上・収支には入っていません (下の「合計」に入ります)"
+          >
+            一番星から <b>{{ ichibanTotals.trips }}</b> 便
+            (手当 {{ yen(ichibanTotals.allowanceYen) }} ・ 売上 {{ yen(ichibanTotals.salesYen) }}<span
+              v-if="ichibanTotals.unknownTrips > 0"
+            > ・未確定 {{ ichibanTotals.unknownTrips }}</span>)
+          </span>
+          <span
             v-if="excludedRows.length > 0"
             class="text-purple-600 dark:text-purple-400"
             title="「便ではない」と印を付けて外した便。上の便数・手当・売上・収支・未確定のどれにも入っていません。下の「除外した便」から戻せます"
@@ -1082,6 +1146,20 @@ function downloadCsv() {
             <input v-model="onlyIrregular" type="checkbox" class="cursor-pointer">
             未確定だけ表示
           </label>
+        </div>
+
+        <div v-if="ichibanTotals.trips > 0" class="mb-3 flex flex-wrap gap-6 text-sm items-center border-t border-gray-200 dark:border-gray-800 pt-2">
+          <span class="font-semibold">合計 (デジタコ + 一番星)</span>
+          <span>便 <b>{{ combined.trips }}</b></span>
+          <span>手当 <b>{{ yen(combined.allowanceYen) }}</b></span>
+          <span>売上 <b>{{ hasSales ? yen(combined.salesYen) : '-' }}</b></span>
+          <span>収支 <b :class="combined.marginYen < 0 ? 'text-red-600 dark:text-red-400' : ''">
+            {{ hasSales ? yen(combined.marginYen) : '-' }}
+          </b></span>
+          <span class="text-gray-400">
+            デジタコから {{ monthly.trips + monthProvisional.trips }} 便 ・
+            一番星から {{ ichibanTotals.trips }} 便
+          </span>
         </div>
 
         <p v-if="visibleDrivers.length === 0" class="text-xs text-gray-400">
@@ -1306,6 +1384,58 @@ function downloadCsv() {
               </template>
             </tbody>
           </table>
+        </div>
+
+        <div v-if="ichibanLegs.length > 0" class="mt-6 space-y-2 text-xs">
+          <h2 class="text-sm font-semibold">一番星から起こした便</h2>
+          <p class="text-gray-500">
+            <b>デジタコに運行が 1 件も無い日</b>の便です。デジタコを積んでいない車輌 (車番 <code>0001</code>) や、
+            その日の運行が alc に入っていない車番 (<code>0040</code> 等) で走った日は、
+            <b>運行データが無いので便が作れません</b>。それでも仕事はしていて売上も立っているので、
+            <b>一番星の明細から便を起こしています</b>。
+            同じ日・同じ<b>積地</b>の明細を畳み、積載量が 1 台ぶん ({{ MAX_LOAD_TONS }}t) を超えたら分けます
+            (<b>卸地では分けません</b> — 手当表は <code>広尾 → 札内・音更</code> のような複数卸しを 1 便として扱うため)。
+            手当は<b>最終卸し地</b>でマスタから引き、<b>決まらなければ未確定のまま</b>にします (推測で金額を作りません)。
+            <b>デジタコの便がある日は触っていません</b> — 一部だけ取れている日に足すと同じ仕事が二重に載るためです。
+          </p>
+          <div class="overflow-x-auto border border-gray-200 dark:border-gray-800 rounded-lg">
+            <table class="w-full">
+              <thead class="bg-gray-50 dark:bg-gray-800">
+                <tr>
+                  <th class="text-left px-3 py-1.5 font-medium text-gray-500">日付</th>
+                  <th class="text-left px-3 py-1.5 font-medium text-gray-500">乗務員</th>
+                  <th class="text-left px-3 py-1.5 font-medium text-gray-500">車番</th>
+                  <th class="text-left px-3 py-1.5 font-medium text-gray-500">積地 → 卸地</th>
+                  <th class="text-left px-3 py-1.5 font-medium text-gray-500">マスタ卸地</th>
+                  <th class="text-right px-3 py-1.5 font-medium text-gray-500">数量</th>
+                  <th class="text-right px-3 py-1.5 font-medium text-gray-500">手当</th>
+                  <th class="text-right px-3 py-1.5 font-medium text-gray-500">売上</th>
+                  <th class="text-left px-3 py-1.5 font-medium text-gray-500">一番星の明細</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="(l, i) in ichibanLegs"
+                  :key="`il-${i}`"
+                  class="border-t border-gray-100 dark:border-gray-800/70"
+                  :class="l.allowanceYen === null ? 'bg-amber-50 dark:bg-amber-950/30' : ''"
+                >
+                  <td class="px-3 py-1 whitespace-nowrap">{{ l.date }}</td>
+                  <td class="px-3 py-1 whitespace-nowrap">{{ l.driverName }}</td>
+                  <td class="px-3 py-1 whitespace-nowrap">{{ l.vehicleNumber }}</td>
+                  <td class="px-3 py-1 whitespace-nowrap">{{ l.origin || '?' }} → {{ l.dest || '?' }}</td>
+                  <td class="px-3 py-1 whitespace-nowrap">{{ l.masterDest || '-' }}</td>
+                  <td class="px-3 py-1 text-right whitespace-nowrap text-gray-500">{{ tons(l.quantity) }}</td>
+                  <td class="px-3 py-1 text-right whitespace-nowrap">
+                    <span v-if="l.allowanceYen !== null">{{ yen(l.allowanceYen) }}</span>
+                    <span v-else class="text-amber-600 dark:text-amber-400">未確定 ({{ l.status }})</span>
+                  </td>
+                  <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(l.salesYen) }}</td>
+                  <td class="px-3 py-1">{{ l.slips.map(sl => `${sl.dest} ${sl.itemName} ${tons(sl.quantity)}`).join(' / ') }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <div v-if="pdfCompare" class="mt-6 space-y-2 text-xs">
