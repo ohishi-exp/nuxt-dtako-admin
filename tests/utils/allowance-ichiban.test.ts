@@ -63,6 +63,7 @@ function row(over: Partial<AllowanceReportRow> = {}): AllowanceReportRow {
     masterDest: '上士幌',
     allowanceYen: 9000,
     status: 'ok',
+    destSource: 'event',
     ...over,
   }
 }
@@ -396,7 +397,7 @@ describe('reconcileCsvLines', () => {
     const res = reconcileLegs(rows, [slip({ amount: 36000, quantity: 12 })])
     const lines = reconcileCsvLines(rows, res.byLeg)
     expect(lines[0]).toContain('"収支"')
-    expect(lines[1]).toContain('"9000","12","36000","27000","matched","",""')
+    expect(lines[1]).toContain('"イベント","9000","12","36000","27000","matched","",""')
   })
 
   it('推定・受け皿の印と、手当が決まらない便を出せる', () => {
@@ -410,6 +411,11 @@ describe('reconcileCsvLines', () => {
   it('突合結果に無い便は未突合として出す (合計から黙って消さない)', () => {
     const lines = reconcileCsvLines([row()], new Map())
     expect(lines[1]).toContain('"9000","0","0","-9000","no_slip"')
+  })
+
+  it('卸地を次の運行から引き継いだ便はその旨を出す (#726 の列を落とさない)', () => {
+    const lines = reconcileCsvLines([row({ destSource: 'carried' })], new Map())
+    expect(lines[1]).toContain('"次運行の先頭の降し (推定)"')
   })
 })
 
