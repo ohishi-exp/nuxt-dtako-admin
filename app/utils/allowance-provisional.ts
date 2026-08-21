@@ -131,6 +131,18 @@ export function summarizeProvisional(
   return totals
 }
 
+/**
+ * 経路キー → 表示 (`広尾|芽室` → `広尾 → 芽室`)。
+ *
+ * **片側が取れていなければ `(不明)` と書く。** デジタコに降しイベントが無い便は
+ * 卸地が空になり、そのまま繋ぐと `釧路 → ` と出て**壊れているのか卸地が無いのかが
+ * 読めない** (2026-07 の実データに 1 便あり、本番で見つけた)。
+ */
+export function routeLabel(key: string): string {
+  const [origin = '', dest = ''] = key.split('|')
+  return `${origin || '(不明)'} → ${dest || '(不明)'}`
+}
+
 /** 暫定を入れられる経路の一覧 (同じ経路は 1 行に畳む)。入力欄を並べるのに使う。 */
 export interface ProvisionalRoute {
   key: string
@@ -152,7 +164,7 @@ export function provisionalRoutes(
     const key = routeKey(row)
     if (!key) continue
     const hit = byKey.get(key)
-      ?? { key, trips: 0, yen: map[key] ?? null, label: key.replace('|', ' → ') }
+      ?? { key, trips: 0, yen: map[key] ?? null, label: routeLabel(key) }
     hit.trips += 1
     byKey.set(key, hit)
   }
