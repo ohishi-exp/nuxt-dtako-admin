@@ -34,6 +34,16 @@ import {
 } from '~/utils/allowance-report'
 import { fetchVehicleDailySlips, type VehicleDailySlip } from '~/utils/ichiban'
 import {
+  PROVISIONAL_KEY,
+  parseProvisional,
+  serializeProvisional,
+  setProvisional,
+  provisionalFor,
+  summarizeProvisional,
+  provisionalRoutes,
+  type ProvisionalMap,
+} from '~/utils/allowance-provisional'
+import {
   CACHE_KEY,
   parseCache,
   serializeCache,
@@ -79,6 +89,29 @@ const TARGETS_KEY = 'dtako:allowance:driver-cds'
  */
 const cacheNote = ref<string | null>(null)
 const cachedMonth = ref<MonthCache | null>(null)
+
+/**
+ * マスタで手当が決まらない経路に入れる**暫定の手当** (経路キー → 円/便)。
+ *
+ * マスタ (xlsx) に穴があり (実例 `広尾 → 芽室`)、給与明細では金額が分かっている
+ * ことがある。**合計には入れるが、必ず「うち暫定」を併記する**。
+ */
+const provisional = ref<ProvisionalMap>({})
+
+function saveProvisional(key: string, yen: number) {
+  provisional.value = setProvisional(provisional.value, key, yen)
+  try {
+    localStorage.setItem(PROVISIONAL_KEY, serializeProvisional(provisional.value))
+  }
+  catch (e) {
+    cacheNote.value = `暫定手当を保存できませんでした — ${e instanceof Error ? e.message : String(e)}`
+  }
+}
+
+/** 入力欄 (文字列) → 円。空・数でない値は「消す」扱いの 0 にする。 */
+function onProvisionalInput(key: string, raw: string) {
+  saveProvisional(key, Math.trunc(Number(raw)) || 0)
+}
 
 function readCache(): MonthCache | null {
   try {
@@ -133,6 +166,7 @@ const pendingDriver = ref('')
 onMounted(async () => {
   targets.value = parseTargets(localStorage.getItem(TARGETS_KEY))
   cachedMonth.value = readCache()
+  provisional.value = parseProvisional(localStorage.getItem(PROVISIONAL_KEY))
   try {
     drivers.value = await getDrivers()
   }
@@ -238,6 +272,32 @@ async function runReconcile(
 }
 
 const monthSales = computed(() => summarizeSales(allRows(), byLeg.value))
+
+// --- 手当 (確定 + 暫定) ---
+// **表示する手当・収支は暫定込み。** ただし「うち暫定」を必ず併記して、
+// 確定と混ざったまま読まれないようにする。
+
+const monthProvisional = computed(() => summarizeProvisional(allRows(), provisional.value))
+function driverProvisional(d: DriverNode) {
+  return summarizeProvisional(d.operations.flatMap(op => op.rows), provisional.value)
+}
+function opProvisional(op: OperationNode) {
+  return summarizeProvisional(op.rows, provisional.value)
+}
+
+/** 1 便の暫定手当。マスタで決まっている便には当たらない。 */
+function legProvisionalYen(r: AllowanceReportRow): number | null {
+  return provisionalFor(r, provisional.value)
+}
+
+/** 1 便の「支払う手当」= 確定があればそれ、無ければ暫定。どちらも無ければ null。 */
+function legPayYen(r: AllowanceReportRow): number | null {
+  if (r.allowanceYen !== null) return r.allowanceYen
+  return legProvisionalYen(r)
+}
+
+/** 手当が決まらない経路の一覧 (暫定を入れる欄を並べる)。 */
+const unresolvedRoutes = computed(() => provisionalRoutes(allRows(), provisional.value))
 function driverSales(d: DriverNode) {
   return summarizeSales(d.operations.flatMap(op => op.rows), byLeg.value)
 }
@@ -255,7 +315,30 @@ function legSalesYen(r: AllowanceReportRow): number | null {
 function legMarginYen(r: AllowanceReportRow): number | null {
   const hit = legHit(r)
   if (!hit) return null
-  return margin(hit.salesYen, r.allowanceYen ?? 0)
+  return margin(hit.salesYen, legPayYen(r) ?? 0)
+}
+
+/** 1 便の手当欄。**未確定は理由まで出す** — `unknown` と `ambiguous` は直し方が逆。 */
+interface LegPayLabel {
+  text: string
+  /** 確定でないので色を変える。 */
+  warn: boolean
+  title: string
+}
+function legPayLabel(r: AllowanceReportRow): LegPayLabel {
+  if (r.allowanceYen !== null) return { text: yen(r.allowanceYen), warn: false, title: 'マスタで決まった手当' }
+  const provisionalYen = legProvisionalYen(r)
+  if (provisionalYen !== null) {
+    return {
+      text: `${yen(provisionalYen)} (暫定)`,
+      warn: true,
+      title: 'マスタに無いので手で入れた暫定額。合計に入っていますが「うち暫定」に数えています',
+    }
+  }
+  if (r.status === 'ambiguous') {
+    return { text: '未確定 (ambiguous)', warn: true, title: 'マスタに同じ経路で違う金額が複数あります。人が決めるしかありません' }
+  }
+  return { text: '未確定 (unknown)', warn: true, title: 'マスタにこの経路がありません。料金表に行を足すか、暫定額を入れてください' }
 }
 function legQuantityLabel(r: AllowanceReportRow): string {
   const hit = legHit(r)
@@ -497,7 +580,7 @@ const modalTarget = computed(() => {
 })
 
 function downloadCsv() {
-  const blob = new Blob([`﻿${reconcileCsvLines(csvRows.value, byLeg.value).join('\r\n')}\r\n`],
+  const blob = new Blob([`﻿${reconcileCsvLines(csvRows.value, byLeg.value, provisional.value).join('\r\n')}\r\n`],
     { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -620,10 +703,17 @@ function downloadCsv() {
         <div class="mb-3 flex flex-wrap gap-6 text-sm items-center">
           <span class="font-semibold">{{ shownYm }}</span>
           <span>便 <b>{{ monthly.trips }}</b></span>
-          <span>手当 <b>{{ yen(monthly.totalYen) }}</b></span>
+          <span>
+            手当 <b>{{ yen(monthly.totalYen + monthProvisional.yen) }}</b>
+            <span
+              v-if="monthProvisional.trips > 0"
+              class="text-amber-600 dark:text-amber-400"
+              title="マスタに無いので手で入れた暫定額。上の手当・収支に含まれています"
+            >うち暫定 {{ yen(monthProvisional.yen) }} ({{ monthProvisional.trips }}便)</span>
+          </span>
           <span>売上 <b>{{ hasSales ? yen(monthSales.salesYen) : '-' }}</b></span>
-          <span>収支 <b :class="margin(monthSales.salesYen, monthly.totalYen) < 0 ? 'text-red-600 dark:text-red-400' : ''">
-            {{ hasSales ? yen(margin(monthSales.salesYen, monthly.totalYen)) : '-' }}
+          <span>収支 <b :class="margin(monthSales.salesYen, monthly.totalYen + monthProvisional.yen) < 0 ? 'text-red-600 dark:text-red-400' : ''">
+            {{ hasSales ? yen(margin(monthSales.salesYen, monthly.totalYen + monthProvisional.yen)) : '-' }}
           </b></span>
           <span :class="monthly.irregularTrips > 0 ? 'text-amber-600 dark:text-amber-400' : ''">
             未確定 <b>{{ monthly.irregularTrips }}</b> 便
@@ -679,15 +769,22 @@ function downloadCsv() {
                   </td>
                   <td class="px-3 py-2 text-right">{{ d.operations.length }}</td>
                   <td class="px-3 py-2 text-right">{{ d.trips }}</td>
-                  <td class="px-3 py-2 text-right whitespace-nowrap">{{ yen(d.totalYen) }}</td>
+                  <td class="px-3 py-2 text-right whitespace-nowrap">
+                    {{ yen(d.totalYen + driverProvisional(d).yen) }}
+                    <span
+                      v-if="driverProvisional(d).trips > 0"
+                      class="text-amber-600 dark:text-amber-400"
+                      :title="`うち暫定 ${yen(driverProvisional(d).yen)} (${driverProvisional(d).trips}便)`"
+                    >暫定</span>
+                  </td>
                   <td class="px-3 py-2 text-right whitespace-nowrap">
                     {{ hasSales ? yen(driverSales(d).salesYen) : '-' }}
                   </td>
                   <td
                     class="px-3 py-2 text-right whitespace-nowrap"
-                    :class="margin(driverSales(d).salesYen, d.totalYen) < 0 ? 'text-red-600 dark:text-red-400' : ''"
+                    :class="margin(driverSales(d).salesYen, d.totalYen + driverProvisional(d).yen) < 0 ? 'text-red-600 dark:text-red-400' : ''"
                   >
-                    {{ hasSales ? yen(margin(driverSales(d).salesYen, d.totalYen)) : '-' }}
+                    {{ hasSales ? yen(margin(driverSales(d).salesYen, d.totalYen + driverProvisional(d).yen)) : '-' }}
                   </td>
                   <td
                     class="px-3 py-2 text-right"
@@ -734,15 +831,22 @@ function downloadCsv() {
                             <td class="px-3 py-1.5 font-mono text-[11px] whitespace-nowrap">{{ op.unkoNo }}</td>
                             <td class="px-3 py-1.5 whitespace-nowrap">{{ op.vehicleName || '-' }}</td>
                             <td class="px-3 py-1.5 text-right">{{ op.rows.length }}</td>
-                            <td class="px-3 py-1.5 text-right whitespace-nowrap">{{ yen(op.totalYen) }}</td>
+                            <td class="px-3 py-1.5 text-right whitespace-nowrap">
+                              {{ yen(op.totalYen + opProvisional(op).yen) }}
+                              <span
+                                v-if="opProvisional(op).trips > 0"
+                                class="text-amber-600 dark:text-amber-400"
+                                :title="`うち暫定 ${yen(opProvisional(op).yen)} (${opProvisional(op).trips}便)`"
+                              >暫定</span>
+                            </td>
                             <td class="px-3 py-1.5 text-right whitespace-nowrap">
                               {{ hasSales ? yen(opSales(op).salesYen) : '-' }}
                             </td>
                             <td
                               class="px-3 py-1.5 text-right whitespace-nowrap"
-                              :class="margin(opSales(op).salesYen, op.totalYen) < 0 ? 'text-red-600 dark:text-red-400' : ''"
+                              :class="margin(opSales(op).salesYen, op.totalYen + opProvisional(op).yen) < 0 ? 'text-red-600 dark:text-red-400' : ''"
                             >
-                              {{ hasSales ? yen(margin(opSales(op).salesYen, op.totalYen)) : '-' }}
+                              {{ hasSales ? yen(margin(opSales(op).salesYen, op.totalYen + opProvisional(op).yen)) : '-' }}
                             </td>
                             <td
                               class="px-3 py-1.5 text-right"
@@ -810,8 +914,10 @@ function downloadCsv() {
                                     </td>
                                     <td class="px-3 py-1">{{ r.masterDest || '-' }}</td>
                                     <td class="px-3 py-1 text-right whitespace-nowrap">
-                                      <span v-if="r.status === 'ok'">{{ yen(r.allowanceYen) }}</span>
-                                      <span v-else class="text-amber-600 dark:text-amber-400" :title="`マスタで決まらない (${r.status})`">未確定</span>
+                                      <span
+                                        :class="legPayLabel(r).warn ? 'text-amber-600 dark:text-amber-400' : ''"
+                                        :title="legPayLabel(r).title"
+                                      >{{ legPayLabel(r).text }}</span>
                                     </td>
                                     <td class="px-3 py-1 text-right whitespace-nowrap text-gray-500">
                                       {{ legQuantityLabel(r) }}
@@ -846,6 +952,52 @@ function downloadCsv() {
               </template>
             </tbody>
           </table>
+        </div>
+
+        <div v-if="unresolvedRoutes.length > 0" class="mt-6 space-y-2 text-xs">
+          <h2 class="text-sm font-semibold">手当が決まらない経路</h2>
+          <p class="text-gray-500">
+            料金・給与マスタ (xlsx) に無い経路です。<b>金額が分かっているなら暫定額を入れられます</b> —
+            入れると上の手当・収支に<b>入り</b>ますが、<b>「うち暫定」として別に数え続けます</b>。
+            経路ごとに効くので、同じ経路の便は一度入れれば全部そろいます。
+            <b>直し方が正反対</b>なので状態も見てください —
+            <code>unknown</code> は料金表に行を足せば直り、<code>ambiguous</code> は同じ経路に違う金額があるので人が決めるしかありません。
+          </p>
+          <div class="overflow-x-auto border border-gray-200 dark:border-gray-800 rounded-lg">
+            <table class="w-full">
+              <thead class="bg-gray-50 dark:bg-gray-800">
+                <tr>
+                  <th class="text-left px-3 py-1.5 font-medium text-gray-500">経路 (積地 → 卸地)</th>
+                  <th class="text-right px-3 py-1.5 font-medium text-gray-500">便</th>
+                  <th class="text-left px-3 py-1.5 font-medium text-gray-500">暫定の手当 (円/便)</th>
+                  <th class="text-right px-3 py-1.5 font-medium text-gray-500">小計</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="route in unresolvedRoutes" :key="route.key" class="border-t border-gray-100 dark:border-gray-800/70">
+                  <td class="px-3 py-1 whitespace-nowrap">{{ route.label }}</td>
+                  <td class="px-3 py-1 text-right">{{ route.trips }}</td>
+                  <td class="px-3 py-1">
+                    <input
+                      :value="route.yen ?? ''"
+                      type="number"
+                      min="0"
+                      step="500"
+                      placeholder="9000"
+                      class="w-28 border rounded px-2 py-0.5 dark:bg-gray-900"
+                      @change="onProvisionalInput(route.key, ($event.target as HTMLInputElement).value)"
+                    >
+                  </td>
+                  <td class="px-3 py-1 text-right whitespace-nowrap">
+                    <span v-if="route.yen !== null" class="text-amber-600 dark:text-amber-400">
+                      {{ yen(route.yen * route.trips) }}
+                    </span>
+                    <span v-else class="text-gray-400">-</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <div v-if="hasSales" class="mt-6 space-y-2 text-xs">
@@ -885,7 +1037,9 @@ function downloadCsv() {
                     <td class="px-3 py-1 whitespace-nowrap">{{ r.vehicleName }}</td>
                     <td class="px-3 py-1">{{ r.originCity || '?' }} → {{ r.destCity || '?' }}</td>
                     <td class="px-3 py-1">{{ r.masterDest || '-' }}</td>
-                    <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(r.allowanceYen) }}</td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap">
+                      <span :class="legPayLabel(r).warn ? 'text-amber-600 dark:text-amber-400' : ''">{{ legPayLabel(r).text }}</span>
+                    </td>
                     <td class="px-3 py-1 text-right whitespace-nowrap">
                       <button class="text-blue-500 hover:text-blue-700 hover:underline" @click="openOperation(r.unkoNo)">
                         運行を開く
@@ -1007,7 +1161,9 @@ function downloadCsv() {
     <AllowanceOperationModal
       v-if="modalTarget"
       v-bind="modalTarget"
+      :provisional="provisional"
       @close="modalUnkoNo = null"
+      @update-provisional="onProvisionalInput"
     />
   </div>
 </template>

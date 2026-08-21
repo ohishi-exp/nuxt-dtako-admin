@@ -24,6 +24,7 @@ import { normalizePlace, lookupFare } from './allowance-rate'
 import { RATE_MASTER, type RateRow } from './allowance-rate-master'
 import { addressToCity, cityToPlace, CITY_TO_DEST } from './allowance-trips'
 import { compareText, type AllowanceReportRow } from './allowance-report'
+import { provisionalFor, type ProvisionalMap } from './allowance-provisional'
 
 /** 一番星の売上年月日と便の日付のズレ許容 (日)。手当表が翌日に押し出されるのと同じ揺れ。 */
 export const DATE_SLACK = 1
@@ -484,7 +485,7 @@ export function margin(salesYen: number, allowanceYen: number): number {
 
 const CSV_HEADER = [
   '運行NO', '日付', '乗務員', '車輌', '便', '積地(市町村)', '卸地(市町村)', '途中卸し',
-  'マスタ卸地', '卸地の出どころ', '手当', '手当の状態', '数量t', '売上', '収支',
+  'マスタ卸地', '卸地の出どころ', '手当', '手当の状態', '暫定手当', '数量t', '売上', '収支',
   '突合', '内訳推定', '受け皿', '一番星明細',
 ]
 
@@ -501,18 +502,23 @@ const CSV_HEADER = [
 export function reconcileCsvLines(
   rows: AllowanceReportRow[],
   byLeg: Map<string, LegReconcile>,
+  provisional: ProvisionalMap,
 ): string[] {
   const quote = (v: string | number | null) => `"${String(v ?? '').replace(/"/g, '""')}"`
   return [
     CSV_HEADER.map(quote).join(','),
     ...rows.map((r) => {
       const hit = byLeg.get(legKey(r)) ?? noSlip(legKey(r))
+      // **暫定は手当の列に混ぜない。** 確定と見分けが付かなくなるので別の列に出し、
+      // 収支だけ「確定 + 暫定」で引く (画面の収支と揃える)。
+      const provisionalYen = provisionalFor(r, provisional)
+      const payYen = (r.allowanceYen ?? 0) + (provisionalYen ?? 0)
       return [
         r.unkoNo, r.date, r.driverName, r.vehicleName, r.seq, r.originCity, r.destCity,
         r.viaCities, r.masterDest,
         r.destSource === 'carried' ? '次運行の先頭の降し (推定)' : 'イベント',
-        r.allowanceYen, r.status, hit.quantity, hit.salesYen,
-        margin(hit.salesYen, r.allowanceYen ?? 0), hit.status,
+        r.allowanceYen, r.status, provisionalYen, hit.quantity, hit.salesYen,
+        margin(hit.salesYen, payYen), hit.status,
         hit.split ? '推定' : '', hit.fromPool ? POOL_VEHICLE : '',
         hit.slips.map(s => s.itemName).join('|'),
       ].map(quote).join(',')
