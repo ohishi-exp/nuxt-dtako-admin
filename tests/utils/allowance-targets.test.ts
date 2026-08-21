@@ -1,29 +1,26 @@
 import { describe, it, expect } from 'vitest'
 import {
-  normalizeDriverName,
+  normalizeDriverCd,
   parseTargets,
   serializeTargets,
   toggleTarget,
-  matchesTargets,
-  filterByTargets,
-  driverCandidates,
+  driverLabel,
 } from '~/utils/allowance-targets'
 
-describe('normalizeDriverName', () => {
-  it('全角スペースを倒して連続空白を 1 つに潰す', () => {
-    expect(normalizeDriverName('中村　　一由')).toBe('中村 一由')
-    expect(normalizeDriverName('  柳井 亮祐 ')).toBe('柳井 亮祐')
+describe('normalizeDriverCd', () => {
+  it('前後の空白を落とす', () => {
+    expect(normalizeDriverCd(' 1412 ')).toBe('1412')
   })
 
   it('null / undefined は空文字', () => {
-    expect(normalizeDriverName(null)).toBe('')
-    expect(normalizeDriverName(undefined)).toBe('')
+    expect(normalizeDriverCd(null)).toBe('')
+    expect(normalizeDriverCd(undefined)).toBe('')
   })
 })
 
 describe('parseTargets', () => {
-  it('保存済みの配列を正規化・重複排除・昇順で返す', () => {
-    expect(parseTargets('["柳井 亮祐","中村　一由","中村 一由"]')).toEqual(['中村 一由', '柳井 亮祐'])
+  it('保存済みの配列を重複排除・昇順で返す', () => {
+    expect(parseTargets('["1732","1412"," 1412 "]')).toEqual(['1412', '1732'])
   })
 
   it('未保存・空・壊れた値・配列でない値は対象なしにする', () => {
@@ -34,68 +31,40 @@ describe('parseTargets', () => {
   })
 
   it('文字列でない要素と空文字は落とす', () => {
-    expect(parseTargets('[1,null,"","  ","中村 一由"]')).toEqual(['中村 一由'])
+    expect(parseTargets('[1,null,""," ","1412"]')).toEqual(['1412'])
   })
 })
 
 describe('serializeTargets', () => {
   it('正規化した配列を JSON にする', () => {
-    expect(serializeTargets(['柳井 亮祐', '中村　一由'])).toBe('["中村 一由","柳井 亮祐"]')
+    expect(serializeTargets(['1732', ' 1412 '])).toBe('["1412","1732"]')
   })
 })
 
 describe('toggleTarget', () => {
   it('入っていなければ足し、入っていれば外す', () => {
-    expect(toggleTarget([], '中村 一由')).toEqual(['中村 一由'])
-    expect(toggleTarget(['中村 一由', '柳井 亮祐'], '中村 一由')).toEqual(['柳井 亮祐'])
+    expect(toggleTarget([], '1412')).toEqual(['1412'])
+    expect(toggleTarget(['1412', '1732'], '1412')).toEqual(['1732'])
   })
 
-  it('表記ゆれを吸収して同じものとして扱う', () => {
-    expect(toggleTarget(['中村 一由'], '中村　一由')).toEqual([])
+  it('空白は吸収して同じものとして扱う', () => {
+    expect(toggleTarget(['1412'], ' 1412 ')).toEqual([])
   })
 
-  it('空の名前は何もしない', () => {
-    expect(toggleTarget(['中村 一由'], '   ')).toEqual(['中村 一由'])
-  })
-})
-
-describe('matchesTargets', () => {
-  it('対象が空なら全員が対象', () => {
-    expect(matchesTargets([], '誰でも')).toBe(true)
-    expect(matchesTargets([], null)).toBe(true)
-  })
-
-  it('対象に入っているかで判定する', () => {
-    expect(matchesTargets(['中村 一由'], '中村　一由')).toBe(true)
-    expect(matchesTargets(['中村 一由'], '柳井 亮祐')).toBe(false)
-    expect(matchesTargets(['中村 一由'], null)).toBe(false)
+  it('空の CD は何もしない', () => {
+    expect(toggleTarget(['1412'], '   ')).toEqual(['1412'])
   })
 })
 
-describe('filterByTargets', () => {
-  const ops = [
-    { driver_name: '中村　一由', unko_no: 'A' },
-    { driver_name: '柳井 亮祐', unko_no: 'B' },
-    { driver_name: null, unko_no: 'C' },
-  ]
+describe('driverLabel', () => {
+  const drivers = [{ driver_cd: '1412', driver_name: '中村　一由' }]
 
-  it('対象の運行だけ残す', () => {
-    expect(filterByTargets(ops, ['中村 一由']).map(o => o.unko_no)).toEqual(['A'])
+  it('乗務員マスタから CD と氏名を並べる', () => {
+    expect(driverLabel(drivers, '1412')).toBe('1412 中村　一由')
+    expect(driverLabel(drivers, ' 1412 ')).toBe('1412 中村　一由')
   })
 
-  it('対象が空なら全部残す', () => {
-    expect(filterByTargets(ops, [])).toHaveLength(3)
-  })
-})
-
-describe('driverCandidates', () => {
-  it('重複を畳んで昇順で返し、名前の無い運行は落とす', () => {
-    expect(driverCandidates([
-      { driver_name: '柳井 亮祐' },
-      { driver_name: '中村　一由' },
-      { driver_name: '中村 一由' },
-      { driver_name: null },
-      { driver_name: '  ' },
-    ])).toEqual(['中村 一由', '柳井 亮祐'])
+  it('マスタに無い CD は CD だけ返す', () => {
+    expect(driverLabel(drivers, '9999')).toBe('9999')
   })
 })

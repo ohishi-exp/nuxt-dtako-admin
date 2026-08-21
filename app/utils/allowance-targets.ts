@@ -1,21 +1,22 @@
 /**
  * 運行手当の「対象乗務員」の保存 (pure)。
  *
- * 全社を集計すると、帯広のバルク車以外の運行まで引き当てにいって未確定が数百件になる
- * (2026-07 の実測で 便45 / 未確定472)。**対象の乗務員を保存して、その人の運行だけを
- * 集計する**ための最小の道具。
+ * 全乗務員を集計すると、帯広のバルク車以外の運行まで引き当てにいって未確定が数百件に
+ * なる (2026-07 の実測で 便45 / 未確定472)。**対象を保存して、その乗務員の運行だけを
+ * `/api/operations` に引かせる**ための道具。
  *
- * キーは**乗務員名**。`/api/operations` の一覧が返すのは `driver_name` だけで
- * 乗務員CD は入っていないため、一覧から選ばせるにはこれしか無い。表記ゆれは
- * `normalizeDriverName` で吸収する (給与大臣由来の名前は全角スペースの数が揺れる)。
+ * **キーは乗務員CD。** 名前で保存して一覧を全件取ってから絞る作りにしていたが、
+ * `/api/operations` は `per_page` を 200 に丸めるので月の後ろ 200 件しか返らず、
+ * 月の前半がまるごと落ちていた (2026-07 は全社 1142 運行)。CD なら
+ * `driver_cd` を渡して**サーバ側で絞れる**ので、対象 5 人なら 5 回の呼び出しで済む。
  */
 
-/** 全角スペースを半角へ倒し、連続空白を 1 つに潰して trim する。 */
-export function normalizeDriverName(name: string | null | undefined): string {
-  return (name ?? '').replace(/[\s　]+/g, ' ').trim()
+/** 保存・比較に使う形。前後の空白だけ落とす (CD は数字文字列)。 */
+export function normalizeDriverCd(cd: string | null | undefined): string {
+  return (cd ?? '').trim()
 }
 
-/** 保存済みの対象乗務員を読む。壊れた値・空は「対象なし」として扱う。 */
+/** 保存済みの対象乗務員CD を読む。壊れた値・空は「対象なし」として扱う。 */
 export function parseTargets(raw: string | null | undefined): string[] {
   if (!raw) return []
   let parsed: unknown
@@ -26,48 +27,29 @@ export function parseTargets(raw: string | null | undefined): string[] {
     return []
   }
   if (!Array.isArray(parsed)) return []
-  const names = parsed
+  const codes = parsed
     .filter((v): v is string => typeof v === 'string')
-    .map(normalizeDriverName)
-    .filter(name => name !== '')
-  return [...new Set(names)].sort()
+    .map(normalizeDriverCd)
+    .filter(cd => cd !== '')
+  return [...new Set(codes)].sort()
 }
 
-export function serializeTargets(names: string[]): string {
-  return JSON.stringify(parseTargets(JSON.stringify(names)))
+export function serializeTargets(codes: string[]): string {
+  return JSON.stringify(parseTargets(JSON.stringify(codes)))
 }
 
 /** 対象に入っていれば外し、入っていなければ足す。 */
-export function toggleTarget(names: string[], name: string): string[] {
-  const key = normalizeDriverName(name)
-  if (key === '') return names
-  const set = new Set(names.map(normalizeDriverName))
+export function toggleTarget(codes: string[], cd: string): string[] {
+  const key = normalizeDriverCd(cd)
+  if (key === '') return codes
+  const set = new Set(codes.map(normalizeDriverCd))
   if (set.has(key)) set.delete(key)
   else set.add(key)
   return [...set].sort()
 }
 
-/**
- * 対象に入っているか。**対象が空なら全員が対象** — 保存前の状態で何も出ないより、
- * 全部出て「絞り込みが要る」と分かる方がよい。
- */
-export function matchesTargets(targets: string[], name: string | null | undefined): boolean {
-  if (targets.length === 0) return true
-  return targets.includes(normalizeDriverName(name))
-}
-
-/** 運行一覧から対象乗務員のぶんだけ残す。**イベントCSV を引く前に通す** (重い処理を減らす)。 */
-export function filterByTargets<T extends { driver_name: string | null }>(
-  operations: T[],
-  targets: string[],
-): T[] {
-  return operations.filter(op => matchesTargets(targets, op.driver_name))
-}
-
-/** 運行一覧に出てくる乗務員名を重複なく昇順で返す (対象を選ばせる候補)。 */
-export function driverCandidates(operations: { driver_name: string | null }[]): string[] {
-  const names = operations
-    .map(op => normalizeDriverName(op.driver_name))
-    .filter(name => name !== '')
-  return [...new Set(names)].sort()
+/** 乗務員CD → 表示名 (`1412 中村 一由`)。マスタに無い CD は CD だけ返す。 */
+export function driverLabel(drivers: { driver_cd: string, driver_name: string }[], cd: string): string {
+  const hit = drivers.find(d => normalizeDriverCd(d.driver_cd) === normalizeDriverCd(cd))
+  return hit ? `${hit.driver_cd} ${hit.driver_name}` : cd
 }
