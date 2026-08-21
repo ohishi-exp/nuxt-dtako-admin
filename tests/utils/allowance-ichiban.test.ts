@@ -395,32 +395,39 @@ describe('reconcileCsvLines', () => {
   it('便 1 行ずつに 手当・売上・収支・突合の状態を並べる', () => {
     const rows = [row()]
     const res = reconcileLegs(rows, [slip({ amount: 36000, quantity: 12 })])
-    const lines = reconcileCsvLines(rows, res.byLeg)
+    const lines = reconcileCsvLines(rows, res.byLeg, {})
     expect(lines[0]).toContain('"収支"')
-    expect(lines[1]).toContain('"イベント","9000","ok","12","36000","27000","matched","",""')
+    expect(lines[1]).toContain('"イベント","9000","ok","","12","36000","27000","matched","",""')
   })
 
   it('推定・受け皿の印と、手当が決まらない便を出せる', () => {
     const rows = [row({ seq: 1, allowanceYen: null }), row({ seq: 2, allowanceYen: null })]
     const pool = [slip({ rowId: 'p1', amount: 1000 }), slip({ rowId: 'p2', amount: 2000 })]
     const res = reconcileWithPool(rows, [], pool)
-    const lines = reconcileCsvLines(rows, res.byLeg)
+    const lines = reconcileCsvLines(rows, res.byLeg, {})
     expect(lines[1]).toContain(`"1000","1000","matched","推定","${POOL_VEHICLE}"`)
   })
 
+  it('暫定手当は手当の列に混ぜず別の列に出し、収支だけ引く', () => {
+    const lines = reconcileCsvLines([row({ allowanceYen: null, status: 'unknown', masterDest: '' })],
+      new Map(), { '釧路|上士幌': 9000 })
+    expect(lines[1]).toContain('"","unknown","9000"')
+    expect(lines[1]).toContain('"-9000"')
+  })
+
   it('突合結果に無い便は未突合として出す (合計から黙って消さない)', () => {
-    const lines = reconcileCsvLines([row()], new Map())
-    expect(lines[1]).toContain('"9000","ok","0","0","-9000","no_slip"')
+    const lines = reconcileCsvLines([row()], new Map(), {})
+    expect(lines[1]).toContain('"9000","ok","","0","0","-9000","no_slip"')
   })
 
   it('卸地を次の運行から引き継いだ便はその旨を出す (#726 の列を落とさない)', () => {
-    const lines = reconcileCsvLines([row({ destSource: 'carried' })], new Map())
+    const lines = reconcileCsvLines([row({ destSource: 'carried' })], new Map(), {})
     expect(lines[1]).toContain('"次運行の先頭の降し (推定)"')
   })
 
   it('手当が決まらない理由 (unknown / ambiguous) を突合の状態と別の列で出す', () => {
-    const unknown = reconcileCsvLines([row({ allowanceYen: null, status: 'unknown' })], new Map())
-    const ambiguous = reconcileCsvLines([row({ allowanceYen: null, status: 'ambiguous' })], new Map())
+    const unknown = reconcileCsvLines([row({ allowanceYen: null, status: 'unknown' })], new Map(), {})
+    const ambiguous = reconcileCsvLines([row({ allowanceYen: null, status: 'ambiguous' })], new Map(), {})
     expect(unknown[1]).toContain('"","unknown"')
     expect(ambiguous[1]).toContain('"","ambiguous"')
   })

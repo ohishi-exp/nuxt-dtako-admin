@@ -13,6 +13,7 @@ import { getOperationCsv } from '~/utils/api'
 import type { CsvJsonResponse } from '~/types'
 import type { AllowanceReportRow } from '~/utils/allowance-report'
 import { margin, type LegReconcile } from '~/utils/allowance-ichiban'
+import { provisionalFor, routeKey, type ProvisionalMap } from '~/utils/allowance-provisional'
 
 /** 便 1 行と、その突合結果。`<script setup>` は export を持てないのでローカル型。 */
 interface AllowanceModalEntry {
@@ -28,9 +29,15 @@ const props = defineProps<{
   /** 便が取れなかった理由。取れていれば null。 */
   error: string | null
   entries: AllowanceModalEntry[]
+  /** 経路キー → 暫定の手当。マスタに無い経路の金額を手で入れたもの。 */
+  provisional: ProvisionalMap
 }>()
 
-const emit = defineEmits<{ close: [] }>()
+const emit = defineEmits<{
+  close: []
+  /** 暫定の手当を入れ直した (保存は呼び出し側)。 */
+  'update-provisional': [key: string, raw: string]
+}>()
 
 const csv = ref<CsvJsonResponse | null>(null)
 const csvError = ref<string | null>(null)
@@ -61,14 +68,32 @@ function onKeydown(e: KeyboardEvent) {
 onMounted(() => window.addEventListener('keydown', onKeydown))
 onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
+/** 1 便の暫定手当。マスタで決まっている便には当たらない。 */
+function legProvisionalYen(e: AllowanceModalEntry): number | null {
+  return provisionalFor(e.row, props.provisional)
+}
+
+/** 1 便の「支払う手当」= 確定があればそれ、無ければ暫定。 */
+function legPayYen(e: AllowanceModalEntry): number | null {
+  if (e.row.allowanceYen !== null) return e.row.allowanceYen
+  return legProvisionalYen(e)
+}
+
 const totals = computed(() => {
   let allowanceYen = 0
+  let provisionalYen = 0
   let salesYen = 0
   for (const e of props.entries) {
     allowanceYen += e.row.allowanceYen ?? 0
+    provisionalYen += legProvisionalYen(e) ?? 0
     salesYen += e.hit?.salesYen ?? 0
   }
-  return { allowanceYen, salesYen, marginYen: margin(salesYen, allowanceYen) }
+  return {
+    allowanceYen: allowanceYen + provisionalYen,
+    provisionalYen,
+    salesYen,
+    marginYen: margin(salesYen, allowanceYen + provisionalYen),
+  }
 })
 
 const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
@@ -80,7 +105,20 @@ function legSales(e: AllowanceModalEntry): number | null {
 }
 function legMargin(e: AllowanceModalEntry): number | null {
   if (!e.hit) return null
-  return margin(e.hit.salesYen, e.row.allowanceYen ?? 0)
+  return margin(e.hit.salesYen, legPayYen(e) ?? 0)
+}
+
+/** 手当が決まらない便かどうか (暫定の入力欄を出す対象)。 */
+function isUnresolved(e: AllowanceModalEntry): boolean {
+  return e.row.allowanceYen === null
+}
+function legRouteKey(e: AllowanceModalEntry): string {
+  return routeKey(e.row)
+}
+/** 未確定の理由。**`unknown` と `ambiguous` は直し方が正反対**なので分けて出す。 */
+function unresolvedReason(e: AllowanceModalEntry): string {
+  if (e.row.status === 'ambiguous') return '未確定 (ambiguous) マスタに同じ経路で違う金額があります'
+  return '未確定 (unknown) マスタにこの経路がありません'
 }
 function legSlipLabel(e: AllowanceModalEntry): string {
   if (!e.hit) return '-'
@@ -128,7 +166,14 @@ function legSlipLabel(e: AllowanceModalEntry): string {
         <div v-else>
           <div class="mb-2 flex flex-wrap gap-4 text-xs">
             <span>便 <b>{{ entries.length }}</b></span>
-            <span>手当 <b>{{ yen(totals.allowanceYen) }}</b></span>
+            <span>
+              手当 <b>{{ yen(totals.allowanceYen) }}</b>
+              <span
+                v-if="totals.provisionalYen > 0"
+                class="text-amber-600 dark:text-amber-400"
+                title="マスタに無いので手で入れた暫定額。上の手当・収支に含まれています"
+              >うち暫定 {{ yen(totals.provisionalYen) }}</span>
+            </span>
             <span>売上 <b>{{ yen(totals.salesYen) }}</b></span>
             <span>収支 <b :class="totals.marginYen < 0 ? 'text-red-600 dark:text-red-400' : ''">{{ yen(totals.marginYen) }}</b></span>
           </div>
@@ -156,7 +201,24 @@ function legSlipLabel(e: AllowanceModalEntry): string {
                   <td class="px-3 py-1 text-right">{{ e.row.seq }}</td>
                   <td class="px-3 py-1">{{ e.row.originCity || '?' }} → {{ e.row.destCity || '?' }}</td>
                   <td class="px-3 py-1">{{ e.row.masterDest || '-' }}</td>
-                  <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(e.row.allowanceYen) }}</td>
+                  <td class="px-3 py-1 whitespace-nowrap">
+                    <span v-if="!isUnresolved(e)">{{ yen(e.row.allowanceYen) }}</span>
+                    <span v-else class="flex items-center justify-end gap-1.5">
+                      <span class="text-amber-600 dark:text-amber-400" :title="unresolvedReason(e)">
+                        {{ unresolvedReason(e).split(' ')[0] }} {{ unresolvedReason(e).split(' ')[1] }}
+                      </span>
+                      <input
+                        :value="legProvisionalYen(e) ?? ''"
+                        type="number"
+                        min="0"
+                        step="500"
+                        placeholder="暫定"
+                        class="w-20 border rounded px-1.5 py-0.5 text-right dark:bg-gray-900"
+                        :title="`${legRouteKey(e)} の暫定手当。同じ経路の便すべてに効きます`"
+                        @change="emit('update-provisional', legRouteKey(e), ($event.target as HTMLInputElement).value)"
+                      >
+                    </span>
+                  </td>
                   <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(legSales(e)) }}</td>
                   <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(legMargin(e)) }}</td>
                   <td class="px-3 py-1">{{ legSlipLabel(e) }}</td>

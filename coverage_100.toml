@@ -218,5 +218,9 @@ path = "app/utils/allowance-cache.ts"
 branches = true
 
 [[files]]
+path = "app/utils/allowance-provisional.ts"
+branches = true
+
+[[files]]
 path = "app/utils/paged-fetch.ts"
 branches = true
