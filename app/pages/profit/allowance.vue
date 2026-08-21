@@ -945,9 +945,24 @@ function driverHasIssue(d: DriverNode): boolean {
   return d.irregularTrips > 0 || d.failedOperations > 0
 }
 
-const visibleDrivers = computed(() => (onlyIrregular.value
-  ? monthly.value.drivers.filter(driverHasIssue)
-  : monthly.value.drivers))
+/**
+ * 表示する乗務員。**社員番号 (乗務員CD) 順に並べる。**
+ *
+ * `allowance-report.ts` は氏名の文字コード順で返す — あの層は乗務員CD を持って
+ * いないため (`localeCompare` は使わない、ICU の照合順が環境で入れ替わるので)。
+ * 給与の画面としては**社員番号順が自然**なので、CD を持っているここで並べ直す。
+ * **CD が引けない乗務員は後ろに回し、その中では氏名順**を保つ (順番が消えないように)。
+ */
+const visibleDrivers = computed(() => {
+  const shown = onlyIrregular.value
+    ? monthly.value.drivers.filter(driverHasIssue)
+    : monthly.value.drivers
+  const keyOf = (name: string) => {
+    const cd = driverCdByName.value.get(name)
+    return cd === undefined ? `9${name}` : `0${cd.padStart(8, '0')}`
+  }
+  return [...shown].sort((a, b) => (keyOf(a.driverName) > keyOf(b.driverName) ? 1 : -1))
+})
 
 function visibleOperations(d: DriverNode): OperationNode[] {
   return onlyIrregular.value ? d.operations.filter(opHasIssue) : d.operations
