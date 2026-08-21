@@ -164,7 +164,8 @@ function groupRowsByVehicle(rows: AllowanceReportRow[]): Map<string, AllowanceRe
 async function runReconcile(rows: AllowanceReportRow[]) {
   const range = slipDateRange(shownYm.value)
   const inputs: VehicleReconcileInput[] = []
-  for (const [vehicle, vehicleRows] of [...groupRowsByVehicle(rows)].sort()) {
+  const ordered = [...groupRowsByVehicle(rows)].sort((a, b) => (a[0] > b[0] ? 1 : -1))
+  for (const [vehicle, vehicleRows] of ordered) {
     progress.value = `一番星の明細を取得中 車輌${vehicle}`
     inputs.push({
       vehicle,
