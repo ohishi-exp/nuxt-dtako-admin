@@ -196,3 +196,7 @@ branches = true
 
 [[files]]
 path = "app/utils/allowance-rate-master.ts"
+
+[[files]]
+path = "app/utils/allowance-trips.ts"
+branches = true
