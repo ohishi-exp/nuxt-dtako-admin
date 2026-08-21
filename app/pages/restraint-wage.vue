@@ -5258,7 +5258,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 :label="`${m}月`"
                 @click="selectedMonthNo = m"
               />
-              <span class="flex gap-0.5 h-1.5">
+              <span class="flex items-center gap-0.5 h-3">
                 <span
                   v-if="monthHasKintai(selectedYear, m)"
                   class="w-1.5 h-1.5 rounded-full bg-sky-500"
@@ -5294,14 +5294,18 @@ watch([compMap, kyuyoSyncedKeys], () => {
                      wage-report から丸ごと落ちるので、**丸を出さないと誰も
                      気づけない** (実際に 3 週間気づかれなかった)。
                      打刻すら無い月 (out-of-scope) には出さない — 過去の全月を
-                     警告で埋めると、本当に押すべき月が埋もれる -->
+                     警告で埋めると、本当に押すべき月が埋もれる。
+                     ★ **丸ではなく ✕** (2026-08-21 ユーザー指摘)。他のバッジと同じ
+                     1.5px の丸だと色が違うだけで、並んだ中に紛れて警告に見えない -->
                 <button
                   v-if="monthTheearthSync(selectedYear, m) === 'unsynced'"
                   type="button"
-                  class="w-1.5 h-1.5 rounded-full bg-orange-500 cursor-pointer"
+                  class="flex items-center cursor-pointer text-orange-500 hover:text-orange-400"
                   title="この月はデジタコ拘束時間管理表を一度も取り込んでいません — 打刻を持たない乗務員 (本社以外の営業所) が表に 1 行も出ていません。無人で埋まる経路はありません: クリックで『拘束CSV取得』へ (対象年月を選択済みで開きます)"
                   @click="jumpToRestraintFetch(selectedYear, m)"
-                />
+                >
+                  <UIcon name="i-lucide-x" class="size-3" />
+                </button>
                 <!-- オンプレ vs GCP の畳み直し状況 (Refs #620)。**塗るのは
                      stale_drivers > 0 だけ** — 「GCPにしか無い運行」は混ぜない
                      (#620 の決定、毎月点灯する無意味な警告を避ける)。
@@ -5329,7 +5333,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
             <span class="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 align-middle ml-1" /> 給与
             <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 align-middle ml-1" /> デジタコ同期済み (キャッシュ有り)
             <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 opacity-50 align-middle ml-1" /> デジタコ同期済み
-            <span class="inline-block w-1.5 h-1.5 rounded-full bg-orange-500 align-middle ml-1" /> デジタコ未取り込み (要 拘束CSV取得)
+            <UIcon name="i-lucide-x" class="size-3 text-orange-500 align-middle ml-1" /> デジタコ未取り込み (要 拘束CSV取得)
             <span class="inline-block w-1.5 h-1.5 rounded-full bg-red-500 align-middle ml-1" /> 畳み直しが要る (オンプレ vs GCP)
             <span class="inline-block w-1.5 h-1.5 rounded-full bg-gray-400 align-middle ml-1" /> GCP側データ無し
           </span>
@@ -5345,7 +5349,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
             :label="`キャッシュを温める (${warmTargetMonths.length} ヶ月)`"
             :loading="warming"
             :disabled="warming"
-            title="上流の版が変わると全月のキャッシュが無効になるので、月を順番に取り直します (1 ヶ月あたり数秒)。★ デジタコ拘束時間管理表の取り込みは進みません — 橙の丸が付いた月は『拘束CSV取得』で取り込む必要があります"
+            title="上流の版が変わると全月のキャッシュが無効になるので、月を順番に取り直します (1 ヶ月あたり数秒)。★ デジタコ拘束時間管理表の取り込みは進みません — ✕ が付いた月は『拘束CSV取得』で取り込む必要があります"
             @click="warmKintaiCache"
           />
           <span v-if="warmProgress" class="text-xs text-gray-500">{{ warmProgress }}</span>
