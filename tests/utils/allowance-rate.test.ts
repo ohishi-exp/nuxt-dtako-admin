@@ -106,7 +106,8 @@ describe('lookupAllowance', () => {
       .reduce((sum, g) => sum + g.trips, 0)
     const total = ALLOWANCE_GOLDEN_2026_07.reduce((sum, g) => sum + g.trips, 0)
     expect(total).toBe(313)
-    expect(covered).toBe(294)
+    // 294 → 295: `釧路〜駒場（別海）` (1 便) をマスタへ足した (2026-08-21)。
+    expect(covered).toBe(295)
   })
 
   it('マスタに無い経路は推測せず unknown を返す', () => {
@@ -154,7 +155,8 @@ describe('lookupFare', () => {
 
 describe('RATE_MASTER', () => {
   it('積地・卸地・給与が埋まっている (結合セルの引き継ぎ漏れ検知)', () => {
-    expect(RATE_MASTER.length).toBe(60)
+    // 60 → 61: `釧路〜駒場（別海）` を足した (2026-08-21、xlsx 未収載の実在経路)。
+    expect(RATE_MASTER.length).toBe(61)
     for (const r of RATE_MASTER) {
       expect(r.origin).not.toBe('')
       expect(r.dest).not.toBe('')
