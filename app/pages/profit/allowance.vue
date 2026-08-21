@@ -230,10 +230,19 @@ const unmatchedLegs = computed(() => (hasSales.value
   ? allRows().filter(r => byLeg.value.get(legKey(r))?.status === 'no_slip')
   : []))
 
-/** どの便にも当たらなかった一番星明細 (車輌ごと)。 */
+/**
+ * どの便にも当たらなかった一番星明細 (車輌ごと)。
+ *
+ * **多くは「デジタコ非搭載の車輌に乗った日」で、欠陥ではない** (2026-08-21 オーナー判断)。
+ * その日の運行は alc に 1 件も無いので便が作れず、売上だけが一番星に残る。
+ * **追いかける対象ではなく、この画面の収支の外にあるもの**として見せる。
+ */
 const leftoverSlips = computed(() => (reconciled.value?.leftovers ?? [])
   .flatMap(l => l.slips.map(slip => ({ vehicle: l.vehicle, slip })))
   .sort((a, b) => (a.slip.saleDate > b.slip.saleDate ? 1 : -1)))
+
+/** 便に当たらなかった明細の売上合計。**この画面の収支に入っていない額**。 */
+const leftoverYen = computed(() => leftoverSlips.value.reduce((sum, l) => sum + l.slip.amount, 0))
 
 const fareChecks = computed(() => [
   ...checkFares(allRows(), byLeg.value),
@@ -690,6 +699,11 @@ function downloadCsv() {
             ここに出ているものは<b>売上・収支の合計に入っていません</b> (単価の食い違いを除く)。
             便と明細のどちらが正しいかは人が決めます。
           </p>
+          <p class="text-gray-500">
+            上の収支は<b>デジタコで見えている運行だけの収支</b>で、その乗務員の月の収支ではありません。
+            <b>デジタコ非搭載の車輌に乗った日</b>は運行が 1 件も無いので便が作れず、売上だけが下の
+            「どの便にも当たらなかった一番星明細」に残ります。<b>これは欠陥ではなく、追いかける対象でもありません。</b>
+          </p>
 
           <details class="border border-gray-200 dark:border-gray-800 rounded-lg">
             <summary class="px-3 py-2 cursor-pointer select-none">
@@ -731,8 +745,11 @@ function downloadCsv() {
           <details class="border border-gray-200 dark:border-gray-800 rounded-lg">
             <summary class="px-3 py-2 cursor-pointer select-none">
               どの便にも当たらなかった一番星明細
-              <b :class="leftoverSlips.length > 0 ? 'text-amber-600 dark:text-amber-400' : ''">{{ leftoverSlips.length }}</b> 本
-              <span class="text-gray-400">(便に無い仕事か、便の取りこぼし。受け皿の車番の残りは含みません)</span>
+              <b>{{ leftoverSlips.length }}</b> 本 = <b>{{ yen(leftoverYen) }}</b>
+              <span class="text-gray-400">
+                (収支の外。デジタコ非搭載の車輌に乗った日はここに出るのが正常です。
+                受け皿の車番の残りは含みません)
+              </span>
             </summary>
             <div class="overflow-x-auto border-t border-gray-100 dark:border-gray-800">
               <table class="w-full">
