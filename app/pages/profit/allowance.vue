@@ -38,6 +38,11 @@ const progress = ref('')
 const operations = ref<OperationAllowance[]>([])
 
 const rows = computed<AllowanceReportRow[]>(() => toReportRows(operations.value))
+/** 「要確認」だけに絞る。合計や乗務員ごとの集計は絞らない (給与の額は変わらない)。 */
+const onlyIrregular = ref(false)
+const visibleRows = computed(() => (onlyIrregular.value
+  ? rows.value.filter(r => r.status !== 'ok')
+  : rows.value))
 const drivers = computed(() => summarizeByDriver(rows.value))
 const grandTotal = computed(() => drivers.value.reduce((sum, d) => sum + d.totalYen, 0))
 const irregularTotal = computed(() => drivers.value.reduce((sum, d) => sum + d.irregularTrips, 0))
@@ -102,17 +107,24 @@ async function run() {
 }
 
 function downloadCsv() {
-  const blob = new Blob([`﻿${reportRowsToCsvLines(rows.value).join('\r\n')}\r\n`],
+  const blob = new Blob([`﻿${reportRowsToCsvLines(visibleRows.value).join('\r\n')}\r\n`],
     { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `運行手当_${from.value}_${to.value}.csv`
+  a.download = `運行手当${onlyIrregular.value ? '_要確認' : ''}_${from.value}_${to.value}.csv`
   a.click()
   URL.revokeObjectURL(url)
 }
 
 const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
+
+const router = useRouter()
+
+/** 便の行から、その便を含む運行の詳細へ飛ぶ (`類似運行検索・比較` と同じ作法)。 */
+function goToOperation(unkoNo: string) {
+  router.push(`/operations/${unkoNo}`)
+}
 </script>
 
 <template>
@@ -122,7 +134,8 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
     </h1>
     <p class="text-xs text-gray-500 mb-4">
       デジタコの積み/降しから便を切り出し、料金・給与マスタで 1 便あたりの手当を引きます。
-      マスタで金額が決まらない便は合計に入れず「要確認」に出します。
+      マスタで金額が決まらない便は合計に入れず「要確認」に出します。行をクリックすると
+      その便を含む運行の詳細を開きます。
     </p>
 
     <div class="flex flex-wrap gap-3 items-end mb-4">
@@ -146,11 +159,11 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
         {{ status === 'loading' ? '集計中...' : '集計' }}
       </button>
       <button
-        v-if="rows.length > 0"
+        v-if="visibleRows.length > 0"
         class="text-sm px-4 py-1.5 rounded bg-gray-600 hover:bg-gray-700 text-white"
         @click="downloadCsv"
       >
-        CSV出力
+        CSV出力{{ onlyIrregular ? ' (要確認のみ)' : '' }}
       </button>
     </div>
 
@@ -200,9 +213,18 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
           </table>
         </div>
 
-        <h2 class="text-sm font-semibold mb-2">
-          便ごと
-        </h2>
+        <div class="flex items-center gap-4 mb-2">
+          <h2 class="text-sm font-semibold">
+            便ごと
+          </h2>
+          <label class="text-xs text-gray-500 flex items-center gap-1.5 cursor-pointer select-none">
+            <input v-model="onlyIrregular" type="checkbox" class="cursor-pointer">
+            要確認だけ表示 ({{ irregularTotal }})
+          </label>
+          <span v-if="onlyIrregular" class="text-xs text-gray-400">
+            {{ visibleRows.length }} / {{ rows.length }} 便
+          </span>
+        </div>
         <div class="border border-gray-200 dark:border-gray-800 rounded-lg overflow-x-auto">
           <table class="w-full text-xs min-w-[880px]">
             <thead class="bg-gray-50 dark:bg-gray-800">
@@ -218,10 +240,12 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
             </thead>
             <tbody>
               <tr
-                v-for="r in rows"
+                v-for="r in visibleRows"
                 :key="`${r.unkoNo}-${r.seq}`"
-                class="border-t border-gray-100 dark:border-gray-800"
+                class="border-t border-gray-100 dark:border-gray-800 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50"
                 :class="r.status !== 'ok' ? 'bg-amber-50 dark:bg-amber-950/30' : ''"
+                :title="`運行 ${r.unkoNo} を開く`"
+                @click="goToOperation(r.unkoNo)"
               >
                 <td class="px-3 py-2 whitespace-nowrap">{{ r.date }}</td>
                 <td class="px-3 py-2 whitespace-nowrap">{{ r.driverName || '-' }}</td>
@@ -247,7 +271,14 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
           </h2>
           <ul class="text-xs text-gray-500 space-y-1">
             <li v-for="op in failedOperations" :key="op.unkoNo">
-              {{ op.readingDate }} {{ op.unkoNo }} — {{ op.error }}
+              {{ op.readingDate }}
+              <button
+                class="text-blue-500 hover:text-blue-700 hover:underline cursor-pointer"
+                @click="goToOperation(op.unkoNo)"
+              >
+                {{ op.unkoNo }}
+              </button>
+              — {{ op.error }}
             </li>
           </ul>
         </template>
