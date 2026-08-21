@@ -10,7 +10,7 @@ import {
   selectedRowsLocationRange,
   filterRowsByCategory,
   countRowsByCategory,
-  rowIndicesInTimeRange,
+  rowIndicesInTimeRanges,
   EVENT_CATEGORY_ORDER,
   EVENT_CATEGORY_LABELS,
 } from '~/utils/event-data-table'
@@ -20,8 +20,12 @@ const props = defineProps<{
   headers: string[]
   /** 一番星の伝票から提案された区間 (Refs proposeFromSlips)。値が変わるたびに
    * filteredRows 内で対応する行をチェック状態にする。手動選択とは独立した
-   * 「外部からの選択指示」チャネルとして扱う (null は「指示なし」で無視する)。 */
-  proposedRange?: { fromTs: number, toTs: number } | null
+   * 「外部からの選択指示」チャネルとして扱う (null は「指示なし」で無視する)。
+   *
+   * **`legs` があればそちらをレグごとに選ぶ。** `fromTs`〜`toTs` は全レグの union
+   * なので、レグの間に挟まった無関係な別レグまで選択に入ってしまう
+   * (`rowIndicesInTimeRanges` の実運用回帰を参照)。 */
+  proposedRange?: { fromTs: number, toTs: number, legs?: { fromTs: number, toTs: number }[] } | null
 }>()
 
 const emit = defineEmits<{
@@ -67,7 +71,7 @@ watch(activeCategory, clearSelection)
 // 含まれるため、通常はカテゴリ切替不要でそのまま一致する。
 watch(() => props.proposedRange, (range) => {
   if (!range) return
-  const idx = rowIndicesInTimeRange(props.headers, filteredRows.value, range.fromTs, range.toTs)
+  const idx = rowIndicesInTimeRanges(props.headers, filteredRows.value, range.legs ?? [range])
   selectedRows.value = new Set(idx)
 })
 

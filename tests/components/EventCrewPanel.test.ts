@@ -155,6 +155,28 @@ describe('EventCrewPanel', () => {
       })
     })
 
+    it('proposedRange.legs があればレグごとに選ぶ (間に挟まった別レグは選択に入らない、実運用回帰 2026-08-21)', async () => {
+      const rows = [
+        ['2026/03/07 08:00:00', '2026/03/07 08:30:00', '01', '積み', '30', '1', '釧路市', '釧路市', '', '', '1'],
+        ['2026/03/07 09:00:00', '2026/03/07 09:30:00', '01', '降し', '30', '1', '釧路市', '標茶町', '', '', '1'],
+        ['2026/03/07 10:00:00', '2026/03/07 10:30:00', '01', '降し', '30', '1', '釧路市', '士幌町', '', '', '1'],
+        ['2026/03/07 11:00:00', '2026/03/07 11:30:00', '01', '積み', '30', '1', '釧路市', '釧路市', '', '', '1'],
+        ['2026/03/07 12:00:00', '2026/03/07 12:30:00', '01', '降し', '30', '1', '釧路市', '標茶町', '', '', '1'],
+      ]
+      const wrapper = createWrapper(makeGroup(rows))
+      const ts = (h: number, m: number) => Date.UTC(2026, 2, 7, h, m, 0) / 1000
+      await wrapper.setProps({
+        proposedRange: {
+          fromTs: ts(8, 0),
+          toTs: ts(12, 30),
+          legs: [{ fromTs: ts(8, 0), toTs: ts(9, 30) }, { fromTs: ts(11, 0), toTs: ts(12, 30) }],
+        },
+      })
+      expect(wrapper.text()).toContain('4行選択中')
+      const checked = wrapper.findAll('tbody input[type="checkbox"]').map(i => (i.element as HTMLInputElement).checked)
+      expect(checked).toEqual([true, true, false, true, true])
+    })
+
     it('proposedRange が (再) 提案なしで null になった場合は選択状態を変更しない', async () => {
       const wrapper = createWrapper(makeGroup([makeRow('休憩')]))
       await wrapper.setProps({ proposedRange: null })
