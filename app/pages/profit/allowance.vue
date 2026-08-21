@@ -5,9 +5,13 @@
  * 月を指定して運行を引き、各運行のイベントCSV から便を切り出して、料金・給与マスタから
  * 1 便あたりの手当を引く。**PDF の手当表を待たずにデジタコだけで給与を出す**のが狙い。
  *
+ * 売上は**一番星の運転日報明細**から取る (デジタコに積載量が無いため)。便と明細を
+ * 突合して `売上` を出し、`収支 = 売上 − 手当` を 3 段すべてに並べる。
+ *
  * 表示は **乗務員 → 運行 → 便** の 3 段。上から順に開いて、最後は運行詳細へ飛べる。
  * マスタで金額が決まらない便 (未確定) は合計に入れず、各段に件数を出す。
- * イベントCSV が引けない運行も、隠さず理由付きで残す。
+ * イベントCSV が引けない運行も、**突合できなかった便・明細・単価の食い違いも**、
+ * 隠さず件数と一覧で残す。
  */
 import { getOperations, getOperationCsv, getDrivers } from '~/utils/api'
 import { fetchAllPages } from '~/utils/paged-fetch'
@@ -23,12 +27,28 @@ import {
   applyCarryOver,
   buildMonthlyAllowance,
   monthReadingRange,
-  reportRowsToCsvLines,
   type OperationAllowance,
   type AllowanceReportRow,
   type DriverNode,
   type OperationNode,
 } from '~/utils/allowance-report'
+import { fetchVehicleDailySlips } from '~/utils/ichiban'
+import {
+  reconcileVehicles,
+  reconcileCsvLines,
+  summarizeSales,
+  checkFares,
+  checkLeftoverFares,
+  tradableSlips,
+  slipDateRange,
+  vehicleCodeFromUnkoNo,
+  legKey,
+  margin,
+  POOL_VEHICLE,
+  type VehicleReconcileInput,
+  type VehiclesReconcileResult,
+  type LegReconcile,
+} from '~/utils/allowance-ichiban'
 
 /** イベントCSV を同時に引く本数。alc を叩きすぎないための上限。 */
 const CSV_CONCURRENCY = 4
@@ -112,7 +132,117 @@ function fetchOperationsFor(range: { from: string, to: string }, driverCd?: stri
   })
 }
 
+const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
+const tons = (v: number) => `${Math.round(v * 100) / 100}t`
+
 const monthly = computed(() => buildMonthlyAllowance(operations.value, shownYm.value))
+
+// --- 売上 (一番星との突合) ---
+// デジタコには積載量が無いので、売上は一番星の `amount` をそのまま使う。
+// 一番星が引けなくても手当は出せるので、失敗は握りつぶさず別枠で出す。
+const reconciled = ref<VehiclesReconcileResult | null>(null)
+const salesError = ref<string | null>(null)
+
+const byLeg = computed(() => reconciled.value?.byLeg ?? new Map<string, LegReconcile>())
+const hasSales = computed(() => reconciled.value !== null)
+
+function allRows(): AllowanceReportRow[] {
+  return monthly.value.drivers.flatMap(d => d.operations.flatMap(op => op.rows))
+}
+
+/** 便を車輌ごとに分ける。**車輌CD は運行NO から取る** (一覧の応答に列が無いため)。 */
+function groupRowsByVehicle(rows: AllowanceReportRow[]): Map<string, AllowanceReportRow[]> {
+  const groups = new Map<string, AllowanceReportRow[]>()
+  for (const row of rows) {
+    const code = vehicleCodeFromUnkoNo(row.unkoNo)
+    const list = groups.get(code) ?? []
+    list.push(row)
+    groups.set(code, list)
+  }
+  return groups
+}
+
+async function runReconcile(rows: AllowanceReportRow[]) {
+  const range = slipDateRange(shownYm.value)
+  const inputs: VehicleReconcileInput[] = []
+  const ordered = [...groupRowsByVehicle(rows)].sort((a, b) => (a[0] > b[0] ? 1 : -1))
+  for (const [vehicle, vehicleRows] of ordered) {
+    progress.value = `一番星の明細を取得中 車輌${vehicle}`
+    inputs.push({
+      vehicle,
+      rows: vehicleRows,
+      slips: tradableSlips(await fetchVehicleDailySlips(vehicle, range.from, range.to)),
+    })
+  }
+  progress.value = `一番星の明細を取得中 受け皿(${POOL_VEHICLE})`
+  const pool = tradableSlips(await fetchVehicleDailySlips(POOL_VEHICLE, range.from, range.to))
+  reconciled.value = reconcileVehicles(inputs, pool)
+}
+
+const monthSales = computed(() => summarizeSales(allRows(), byLeg.value))
+function driverSales(d: DriverNode) {
+  return summarizeSales(d.operations.flatMap(op => op.rows), byLeg.value)
+}
+function opSales(op: OperationNode) {
+  return summarizeSales(op.rows, byLeg.value)
+}
+function legHit(r: AllowanceReportRow): LegReconcile | undefined {
+  return byLeg.value.get(legKey(r))
+}
+function legSalesYen(r: AllowanceReportRow): number | null {
+  const hit = legHit(r)
+  if (!hit) return null
+  return hit.salesYen
+}
+function legMarginYen(r: AllowanceReportRow): number | null {
+  const hit = legHit(r)
+  if (!hit) return null
+  return margin(hit.salesYen, r.allowanceYen ?? 0)
+}
+function legQuantityLabel(r: AllowanceReportRow): string {
+  const hit = legHit(r)
+  if (!hit) return '-'
+  return tons(hit.quantity)
+}
+
+/** 便 1 行の「突合」欄。**テンプレートに `!` を書かずに済むよう、ここで形にする。** */
+interface LegMatchLabel {
+  text: string
+  /** 日付ずれ / 推定 / 受け皿 のような但し書き。 */
+  flags: string[]
+  warn: boolean
+}
+function legMatchLabel(r: AllowanceReportRow): LegMatchLabel {
+  const hit = legHit(r)
+  if (!hit) return { text: '-', flags: [], warn: false }
+  if (hit.status === 'no_slip') return { text: '一番星に無し', flags: [], warn: true }
+  const flags: string[] = []
+  if (hit.status === 'matched_date_shift') flags.push('日付ずれ')
+  if (hit.split) flags.push('推定')
+  if (hit.fromPool) flags.push('受け皿')
+  return { text: `${hit.slips.length}明細`, flags, warn: false }
+}
+
+// --- 突合できなかったもの (黙って合計から抜かない) ---
+
+/** 一番星に対応する明細が無かった便。 */
+const unmatchedLegs = computed(() => (hasSales.value
+  ? allRows().filter(r => byLeg.value.get(legKey(r))?.status === 'no_slip')
+  : []))
+
+/** どの便にも当たらなかった一番星明細 (車輌ごと)。 */
+const leftoverSlips = computed(() => (reconciled.value?.leftovers ?? [])
+  .flatMap(l => l.slips.map(slip => ({ vehicle: l.vehicle, slip })))
+  .sort((a, b) => (a.slip.saleDate > b.slip.saleDate ? 1 : -1)))
+
+const fareChecks = computed(() => [
+  ...checkFares(allRows(), byLeg.value),
+  ...(reconciled.value?.leftovers ?? []).flatMap(l => checkLeftoverFares(l.slips)),
+])
+/** マスタの運賃と単価が食い違う明細。**料金改定の検知に使う。** */
+const fareMismatches = computed(() => fareChecks.value.filter(f => f.status === 'mismatch'))
+/** マスタに載っていない銘柄・経路。未確定ではなく「対象外」。 */
+const outOfMaster = computed(() => fareChecks.value.filter(f => f.status === 'no_master'))
 
 function opHasIssue(op: OperationNode): boolean {
   return op.irregularTrips > 0 || op.error !== null
@@ -183,7 +313,9 @@ async function resolveOperation(op: {
 async function run() {
   status.value = 'loading'
   errorMessage.value = null
+  salesError.value = null
   operations.value = []
+  reconciled.value = null
   progress.value = '運行を検索中...'
   try {
     const range = monthReadingRange(ym.value)
@@ -207,8 +339,15 @@ async function run() {
     operations.value = applyCarryOver(resolved)
     shownYm.value = ym.value
     autoOpen()
-    progress.value = ''
     status.value = 'ready'
+    // 一番星が落ちていても手当は出せる。売上だけ諦めて理由を画面に残す。
+    try {
+      await runReconcile(allRows())
+    }
+    catch (e) {
+      salesError.value = e instanceof Error ? e.message : String(e)
+    }
+    progress.value = ''
   }
   catch (e) {
     errorMessage.value = e instanceof Error ? e.message : String(e)
@@ -224,17 +363,16 @@ function goToOperation(unkoNo: string) {
 }
 
 function downloadCsv() {
-  const blob = new Blob([`﻿${reportRowsToCsvLines(csvRows.value).join('\r\n')}\r\n`],
+  const blob = new Blob([`﻿${reconcileCsvLines(csvRows.value, byLeg.value).join('\r\n')}\r\n`],
     { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `運行手当${onlyIrregular.value ? '_未確定' : ''}_${shownYm.value}.csv`
+  a.download = `運行手当収支${onlyIrregular.value ? '_未確定' : ''}_${shownYm.value}.csv`
   a.click()
   URL.revokeObjectURL(url)
 }
 
-const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
 </script>
 
 <template>
@@ -244,7 +382,10 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
     </h1>
     <p class="text-xs text-gray-500 mb-4">
       デジタコの積み/降しから便を切り出し、料金・給与マスタで 1 便あたりの手当を引きます。
+      売上はデジタコに無い (積載量を持たない) ので、<b>一番星の運転日報明細</b>と突合して
+      その税抜売上をそのまま使い、<b>収支 = 売上 − 手当</b>を出します。
       乗務員 → 運行 → 便 の順に開けます。マスタで金額が決まらない便は合計に入れず「未確定」に数えます。
+      突合できなかった便・明細と、マスタの運賃と単価が食い違う明細は、下に件数と一覧で出します。
     </p>
 
     <div class="flex flex-wrap gap-3 items-end mb-4">
@@ -303,6 +444,9 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
     <p v-if="status === 'error'" class="text-sm text-red-600 dark:text-red-400 mb-4">
       {{ errorMessage }}
     </p>
+    <p v-if="salesError" class="text-sm text-red-600 dark:text-red-400 mb-4">
+      売上 (一番星) が引けませんでした — {{ salesError }} (手当だけ表示しています)
+    </p>
 
     <template v-if="status === 'ready'">
       <p v-if="monthly.drivers.length === 0" class="text-xs text-gray-400">
@@ -312,7 +456,11 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
         <div class="mb-3 flex flex-wrap gap-6 text-sm items-center">
           <span class="font-semibold">{{ shownYm }}</span>
           <span>便 <b>{{ monthly.trips }}</b></span>
-          <span>手当合計 <b>{{ yen(monthly.totalYen) }}</b></span>
+          <span>手当 <b>{{ yen(monthly.totalYen) }}</b></span>
+          <span>売上 <b>{{ hasSales ? yen(monthSales.salesYen) : '-' }}</b></span>
+          <span>収支 <b :class="margin(monthSales.salesYen, monthly.totalYen) < 0 ? 'text-red-600 dark:text-red-400' : ''">
+            {{ hasSales ? yen(margin(monthSales.salesYen, monthly.totalYen)) : '-' }}
+          </b></span>
           <span :class="monthly.irregularTrips > 0 ? 'text-amber-600 dark:text-amber-400' : ''">
             未確定 <b>{{ monthly.irregularTrips }}</b> 便
           </span>
@@ -328,6 +476,9 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
           </span>
           <span v-if="monthly.outOfMonthTrips > 0" class="text-gray-400" title="月末の運行が翌月に食い込むぶん。この月の合計には入れていません">
             翌月にかかる便 {{ monthly.outOfMonthTrips }}
+          </span>
+          <span v-if="hasSales" class="text-gray-400" title="日付が1日ずれて当たった / 同日同卸地で明細を件数で分けた (内訳が推定) / 受け皿の車番から拾った">
+            日付ずれ {{ monthSales.dateShiftTrips }} ・ 内訳推定 {{ monthSales.splitTrips }} ・ 受け皿 {{ monthSales.poolTrips }}
           </span>
           <label class="text-xs text-gray-500 flex items-center gap-1.5 cursor-pointer select-none">
             <input v-model="onlyIrregular" type="checkbox" class="cursor-pointer">
@@ -345,8 +496,11 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
                 <th class="text-left px-3 py-2 font-medium text-gray-500">乗務員</th>
                 <th class="text-right px-3 py-2 font-medium text-gray-500">運行</th>
                 <th class="text-right px-3 py-2 font-medium text-gray-500">便</th>
-                <th class="text-right px-3 py-2 font-medium text-gray-500">手当合計</th>
+                <th class="text-right px-3 py-2 font-medium text-gray-500">手当</th>
+                <th class="text-right px-3 py-2 font-medium text-gray-500">売上</th>
+                <th class="text-right px-3 py-2 font-medium text-gray-500">収支</th>
                 <th class="text-right px-3 py-2 font-medium text-gray-500">未確定</th>
+                <th class="text-right px-3 py-2 font-medium text-gray-500" title="一番星に対応する明細が無かった便">未突合</th>
               </tr>
             </thead>
             <tbody>
@@ -361,17 +515,32 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
                   </td>
                   <td class="px-3 py-2 text-right">{{ d.operations.length }}</td>
                   <td class="px-3 py-2 text-right">{{ d.trips }}</td>
-                  <td class="px-3 py-2 text-right">{{ yen(d.totalYen) }}</td>
+                  <td class="px-3 py-2 text-right whitespace-nowrap">{{ yen(d.totalYen) }}</td>
+                  <td class="px-3 py-2 text-right whitespace-nowrap">
+                    {{ hasSales ? yen(driverSales(d).salesYen) : '-' }}
+                  </td>
+                  <td
+                    class="px-3 py-2 text-right whitespace-nowrap"
+                    :class="margin(driverSales(d).salesYen, d.totalYen) < 0 ? 'text-red-600 dark:text-red-400' : ''"
+                  >
+                    {{ hasSales ? yen(margin(driverSales(d).salesYen, d.totalYen)) : '-' }}
+                  </td>
                   <td
                     class="px-3 py-2 text-right"
                     :class="driverHasIssue(d) ? 'text-amber-600 dark:text-amber-400' : 'text-gray-300 dark:text-gray-700'"
                   >
                     {{ d.irregularTrips }}<span v-if="d.failedOperations > 0"> + 運行{{ d.failedOperations }}</span>
                   </td>
+                  <td
+                    class="px-3 py-2 text-right"
+                    :class="driverSales(d).unmatchedTrips > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-gray-300 dark:text-gray-700'"
+                  >
+                    {{ hasSales ? driverSales(d).unmatchedTrips : '-' }}
+                  </td>
                 </tr>
 
                 <tr v-if="openDrivers[d.driverName]" class="border-t border-gray-100 dark:border-gray-800">
-                  <td colspan="5" class="p-0">
+                  <td colspan="8" class="p-0">
                     <table class="w-full text-xs">
                       <thead class="bg-gray-100/60 dark:bg-gray-800/60">
                         <tr>
@@ -380,7 +549,10 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
                           <th class="text-left px-3 py-1.5 font-medium text-gray-500">車輌</th>
                           <th class="text-right px-3 py-1.5 font-medium text-gray-500">便</th>
                           <th class="text-right px-3 py-1.5 font-medium text-gray-500">手当</th>
+                          <th class="text-right px-3 py-1.5 font-medium text-gray-500">売上</th>
+                          <th class="text-right px-3 py-1.5 font-medium text-gray-500">収支</th>
                           <th class="text-right px-3 py-1.5 font-medium text-gray-500">未確定</th>
+                          <th class="text-right px-3 py-1.5 font-medium text-gray-500" title="一番星に対応する明細が無かった便">未突合</th>
                           <th class="px-3 py-1.5" />
                         </tr>
                       </thead>
@@ -399,11 +571,26 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
                             <td class="px-3 py-1.5 whitespace-nowrap">{{ op.vehicleName || '-' }}</td>
                             <td class="px-3 py-1.5 text-right">{{ op.rows.length }}</td>
                             <td class="px-3 py-1.5 text-right whitespace-nowrap">{{ yen(op.totalYen) }}</td>
+                            <td class="px-3 py-1.5 text-right whitespace-nowrap">
+                              {{ hasSales ? yen(opSales(op).salesYen) : '-' }}
+                            </td>
+                            <td
+                              class="px-3 py-1.5 text-right whitespace-nowrap"
+                              :class="margin(opSales(op).salesYen, op.totalYen) < 0 ? 'text-red-600 dark:text-red-400' : ''"
+                            >
+                              {{ hasSales ? yen(margin(opSales(op).salesYen, op.totalYen)) : '-' }}
+                            </td>
                             <td
                               class="px-3 py-1.5 text-right"
                               :class="opHasIssue(op) ? 'text-amber-600 dark:text-amber-400' : 'text-gray-300 dark:text-gray-700'"
                             >
                               {{ op.irregularTrips }}
+                            </td>
+                            <td
+                              class="px-3 py-1.5 text-right"
+                              :class="opSales(op).unmatchedTrips > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-gray-300 dark:text-gray-700'"
+                            >
+                              {{ hasSales ? opSales(op).unmatchedTrips : '-' }}
                             </td>
                             <td class="px-3 py-1.5 text-right whitespace-nowrap">
                               <button
@@ -416,13 +603,13 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
                           </tr>
 
                           <tr v-if="op.error" class="border-t border-gray-100 dark:border-gray-800/70">
-                            <td colspan="7" class="pl-16 pr-3 py-1.5 text-amber-600 dark:text-amber-400">
+                            <td colspan="10" class="pl-16 pr-3 py-1.5 text-amber-600 dark:text-amber-400">
                               便を取れませんでした — {{ op.error }}
                             </td>
                           </tr>
 
                           <tr v-else-if="openOps[op.unkoNo]" class="border-t border-gray-100 dark:border-gray-800/70">
-                            <td colspan="7" class="p-0">
+                            <td colspan="10" class="p-0">
                               <table class="w-full text-xs">
                                 <thead class="bg-gray-100/40 dark:bg-gray-800/40">
                                   <tr>
@@ -431,6 +618,10 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
                                     <th class="text-left px-3 py-1 font-medium text-gray-500">積地 → 卸地</th>
                                     <th class="text-left px-3 py-1 font-medium text-gray-500">マスタ卸地</th>
                                     <th class="text-right px-3 py-1 font-medium text-gray-500">手当</th>
+                                    <th class="text-right px-3 py-1 font-medium text-gray-500">数量</th>
+                                    <th class="text-right px-3 py-1 font-medium text-gray-500">売上</th>
+                                    <th class="text-right px-3 py-1 font-medium text-gray-500">収支</th>
+                                    <th class="text-left px-3 py-1 font-medium text-gray-500">突合</th>
                                   </tr>
                                 </thead>
                                 <tbody>
@@ -458,6 +649,26 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
                                       <span v-if="r.status === 'ok'">{{ yen(r.allowanceYen) }}</span>
                                       <span v-else class="text-amber-600 dark:text-amber-400" :title="`マスタで決まらない (${r.status})`">未確定</span>
                                     </td>
+                                    <td class="px-3 py-1 text-right whitespace-nowrap text-gray-500">
+                                      {{ legQuantityLabel(r) }}
+                                    </td>
+                                    <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(legSalesYen(r)) }}</td>
+                                    <td
+                                      class="px-3 py-1 text-right whitespace-nowrap"
+                                      :class="(legMarginYen(r) ?? 0) < 0 ? 'text-red-600 dark:text-red-400' : ''"
+                                    >
+                                      {{ yen(legMarginYen(r)) }}
+                                    </td>
+                                    <td class="px-3 py-1 whitespace-nowrap">
+                                      <span :class="legMatchLabel(r).warn ? 'text-amber-600 dark:text-amber-400' : 'text-gray-500'">
+                                        {{ legMatchLabel(r).text }}
+                                      </span>
+                                      <span
+                                        v-for="flag in legMatchLabel(r).flags"
+                                        :key="flag"
+                                        class="ml-1 text-amber-600 dark:text-amber-400"
+                                      >{{ flag }}</span>
+                                    </td>
                                   </tr>
                                 </tbody>
                               </table>
@@ -471,6 +682,152 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
               </template>
             </tbody>
           </table>
+        </div>
+
+        <div v-if="hasSales" class="mt-6 space-y-2 text-xs">
+          <h2 class="text-sm font-semibold">突合できなかったもの</h2>
+          <p class="text-gray-500">
+            ここに出ているものは<b>売上・収支の合計に入っていません</b> (単価の食い違いを除く)。
+            便と明細のどちらが正しいかは人が決めます。
+          </p>
+
+          <details class="border border-gray-200 dark:border-gray-800 rounded-lg">
+            <summary class="px-3 py-2 cursor-pointer select-none">
+              一番星に対応する明細が無い便
+              <b :class="unmatchedLegs.length > 0 ? 'text-amber-600 dark:text-amber-400' : ''">{{ unmatchedLegs.length }}</b> 便
+            </summary>
+            <div class="overflow-x-auto border-t border-gray-100 dark:border-gray-800">
+              <table class="w-full">
+                <thead class="bg-gray-50 dark:bg-gray-800">
+                  <tr>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">日付</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">乗務員</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">車輌</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">積地 → 卸地</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">マスタ卸地</th>
+                    <th class="text-right px-3 py-1.5 font-medium text-gray-500">手当</th>
+                    <th class="px-3 py-1.5" />
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="r in unmatchedLegs" :key="legKey(r)" class="border-t border-gray-100 dark:border-gray-800/70">
+                    <td class="px-3 py-1 whitespace-nowrap">{{ r.date }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ r.driverName }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ r.vehicleName }}</td>
+                    <td class="px-3 py-1">{{ r.originCity || '?' }} → {{ r.destCity || '?' }}</td>
+                    <td class="px-3 py-1">{{ r.masterDest || '-' }}</td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(r.allowanceYen) }}</td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap">
+                      <button class="text-blue-500 hover:text-blue-700 hover:underline" @click="goToOperation(r.unkoNo)">
+                        運行を開く
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </details>
+
+          <details class="border border-gray-200 dark:border-gray-800 rounded-lg">
+            <summary class="px-3 py-2 cursor-pointer select-none">
+              どの便にも当たらなかった一番星明細
+              <b :class="leftoverSlips.length > 0 ? 'text-amber-600 dark:text-amber-400' : ''">{{ leftoverSlips.length }}</b> 本
+              <span class="text-gray-400">(便に無い仕事か、便の取りこぼし。受け皿の車番の残りは含みません)</span>
+            </summary>
+            <div class="overflow-x-auto border-t border-gray-100 dark:border-gray-800">
+              <table class="w-full">
+                <thead class="bg-gray-50 dark:bg-gray-800">
+                  <tr>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">車輌C</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">売上年月日</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">得意先</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">着地</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">銘柄</th>
+                    <th class="text-right px-3 py-1.5 font-medium text-gray-500">数量</th>
+                    <th class="text-right px-3 py-1.5 font-medium text-gray-500">単価</th>
+                    <th class="text-right px-3 py-1.5 font-medium text-gray-500">売上</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="l in leftoverSlips" :key="l.slip.rowId" class="border-t border-gray-100 dark:border-gray-800/70">
+                    <td class="px-3 py-1 whitespace-nowrap">{{ l.vehicle }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ l.slip.saleDate }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ l.slip.customerName }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ l.slip.dest }}<span class="text-gray-400"> ({{ l.slip.destAreaName }})</span></td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ l.slip.itemName }}</td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap">{{ tons(l.slip.quantity) }}</td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(l.slip.unitPrice) }}</td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(l.slip.amount) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </details>
+
+          <details class="border border-gray-200 dark:border-gray-800 rounded-lg">
+            <summary class="px-3 py-2 cursor-pointer select-none">
+              マスタの運賃と単価が食い違う明細
+              <b :class="fareMismatches.length > 0 ? 'text-amber-600 dark:text-amber-400' : ''">{{ fareMismatches.length }}</b> 本
+              <span class="text-gray-400">(料金改定か入力ミスの疑い。売上は一番星の金額をそのまま使っています)</span>
+            </summary>
+            <div class="overflow-x-auto border-t border-gray-100 dark:border-gray-800">
+              <table class="w-full">
+                <thead class="bg-gray-50 dark:bg-gray-800">
+                  <tr>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">売上年月日</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">乗務員</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">着地</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">銘柄</th>
+                    <th class="text-right px-3 py-1.5 font-medium text-gray-500">数量</th>
+                    <th class="text-right px-3 py-1.5 font-medium text-gray-500">一番星の単価</th>
+                    <th class="text-right px-3 py-1.5 font-medium text-gray-500">マスタの運賃</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(f, i) in fareMismatches" :key="`${f.legKey}-${f.itemName}-${i}`" class="border-t border-gray-100 dark:border-gray-800/70">
+                    <td class="px-3 py-1 whitespace-nowrap">{{ f.date }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ f.driverName || '(便に無し)' }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ f.dest }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ f.itemName }}</td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap">{{ tons(f.quantity) }}</td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap text-amber-600 dark:text-amber-400">{{ yen(f.unitPrice) }}</td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap">{{ f.masterFares.map(v => yen(v)).join(' / ') }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </details>
+
+          <details class="border border-gray-200 dark:border-gray-800 rounded-lg">
+            <summary class="px-3 py-2 cursor-pointer select-none">
+              マスタに無い銘柄・経路 (対象外) <b>{{ outOfMaster.length }}</b> 本
+              <span class="text-gray-400">(肉牛・素牛・N搾乳 等。料金表が A飼料 系しか無いための対象外で、未確定とは別)</span>
+            </summary>
+            <div class="overflow-x-auto border-t border-gray-100 dark:border-gray-800">
+              <table class="w-full">
+                <thead class="bg-gray-50 dark:bg-gray-800">
+                  <tr>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">売上年月日</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">乗務員</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">着地</th>
+                    <th class="text-left px-3 py-1.5 font-medium text-gray-500">銘柄</th>
+                    <th class="text-right px-3 py-1.5 font-medium text-gray-500">数量</th>
+                    <th class="text-right px-3 py-1.5 font-medium text-gray-500">単価</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(f, i) in outOfMaster" :key="`${f.legKey}-${f.itemName}-${i}`" class="border-t border-gray-100 dark:border-gray-800/70">
+                    <td class="px-3 py-1 whitespace-nowrap">{{ f.date }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ f.driverName || '(便に無し)' }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ f.dest }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ f.itemName }}</td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap">{{ tons(f.quantity) }}</td>
+                    <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(f.unitPrice) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </details>
         </div>
       </template>
     </template>
