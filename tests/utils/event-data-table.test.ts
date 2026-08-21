@@ -26,6 +26,8 @@ import {
   rowIndicesInTimeRange,
   rowIndicesInTimeRanges,
   eventHeaders,
+  ignoredEventCodes,
+  dropIgnoredRows,
 } from '~/utils/event-data-table'
 
 describe('colIndex', () => {
@@ -1046,5 +1048,73 @@ describe('rowIndicesInTimeRanges', () => {
 
   it('レグが空なら空配列', () => {
     expect(rowIndicesInTimeRanges(headers, rows, [])).toEqual([])
+  })
+})
+
+describe('ignoredEventCodes / dropIgnoredRows', () => {
+  const classifications = [
+    { event_cd: '201', classification: 'work' },
+    { event_cd: '401', classification: 'ignore' },
+    { event_cd: '403', classification: 'ignore' },
+    { event_cd: ' ', classification: 'ignore' },
+  ]
+
+  it('「無視」にされたイベントCD だけを集める (空の CD は入れない)', () => {
+    expect([...ignoredEventCodes(classifications)]).toEqual(['401', '403'])
+    expect(ignoredEventCodes([]).size).toBe(0)
+  })
+
+  it('「イベント」タブに出る無視行だけ落とす', () => {
+    const headers = ['イベントCD', 'イベント名']
+    const rows = [['201', '運転'], ['401', '急加速'], ['403', '急カーブ']]
+    expect(dropIgnoredRows(headers, rows, ignoredEventCodes(classifications))).toEqual([['201', '運転']])
+  })
+
+  it('走行・アイドリング・速度超過 の無視行は落とさない (区間距離/区間時間 の材料)', () => {
+    // 実測: 無視に設定された 405/412 が 1 運行の距離の 17.5%・時間の 27% を占める。
+    // 落とすと 円/km・円/時間 が静かに狂う。
+    const headers = ['イベントCD', 'イベント名']
+    const ignored = ignoredEventCodes([
+      { event_cd: '405', classification: 'ignore' },
+      { event_cd: '412', classification: 'ignore' },
+      { event_cd: '401', classification: 'ignore' },
+    ])
+    const rows = [
+      ['405', '一般道速度オーバー'],
+      ['412', 'アイドリング'],
+      ['401', '急加速'],
+      ['201', '一般道実車'],
+    ]
+    expect(dropIgnoredRows(headers, rows, ignored)).toEqual([
+      ['405', '一般道速度オーバー'],
+      ['412', 'アイドリング'],
+      ['201', '一般道実車'],
+    ])
+  })
+
+  it('1 行も落ちなければ元の配列をそのまま返す (選択が飛ばないように)', () => {
+    const rows = [['201', '運転'], ['405', '一般道速度オーバー']]
+    expect(dropIgnoredRows(['イベントCD', 'イベント名'], rows, new Set(['405']))).toBe(rows)
+  })
+
+  it('セルが欠けている行でも落ちない (イベントCD も イベント名 も空扱い)', () => {
+    // CSV の行が header より短いことが実在する。`row[i]` が undefined になる側。
+    const headers = ['イベントCD', 'イベント名']
+    const rows: string[][] = [[], ['401']]
+    expect(dropIgnoredRows(headers, rows, new Set(['401']))).toEqual([[]])
+  })
+
+  it('イベント名 列が無ければ「イベント」扱いで落とす', () => {
+    expect(dropIgnoredRows(['イベントCD'], [['401'], ['201']], new Set(['401']))).toEqual([['201']])
+  })
+
+  it('無視が無ければそのまま返す', () => {
+    const rows = [['401', '急加速']]
+    expect(dropIgnoredRows(['イベントCD'], rows, new Set())).toBe(rows)
+  })
+
+  it('イベントCD 列が無ければそのまま返す (推測で落とさない)', () => {
+    const rows = [['急加速']]
+    expect(dropIgnoredRows(['イベント名'], rows, new Set(['401']))).toBe(rows)
   })
 })

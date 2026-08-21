@@ -190,6 +190,63 @@ export function classifyEventName(name: string): EventCategory {
   return 'event'
 }
 
+/**
+ * イベント分類 (`/event-classifications`) で「無視」に指定された値。
+ * **保存されているのはラベル (`無視`) ではなく値 (`ignore`)。**
+ */
+export const IGNORE_CLASSIFICATION = 'ignore'
+
+/** 「無視」にされたイベントCD の集合。 */
+export function ignoredEventCodes(
+  classifications: { event_cd: string, classification: string }[],
+): Set<string> {
+  return new Set(
+    classifications
+      .filter(c => c.classification === IGNORE_CLASSIFICATION)
+      .map(c => c.event_cd.trim())
+      .filter(cd => cd !== ''),
+  )
+}
+
+/**
+ * 「無視」のイベント行を**「イベント」タブからだけ**落とす。
+ *
+ * **イベント分類の設定は保存できるだけで、どこからも読まれていなかった**
+ * (2026-08-21 に判明)。急加速・急減速・急カーブを `無視` にしてあるのに、
+ * イベントタブに 260 件並んで 積み/降し/運行開始 が埋もれていた。
+ *
+ * **走行・アイドリング・速度超過 のタブに出る行は落とさない。** これらは
+ * **区間距離と区間時間を持っていて、選択すると 円/km・円/時間 の材料になる**。
+ * 実測 (2026-07 の 1 運行) では、無視に設定された 46 行が
+ * **296.8km / 981分** = その運行の距離の 17.5%・時間の 27% を占めていた
+ * (405 速度オーバー 247.1km、412 アイドリング 721分)。
+ * 全部落とすと収支の指標が静かに狂う。
+ *
+ * 一方「イベント」タブに落ちる無視行 (急加速/急減速/急カーブ) は
+ * **区間距離も区間時間も 0** なので、隠しても数字は 1 も動かない。
+ *
+ * イベントCD 列が無い CSV はそのまま返す (列が無いのに推測で落とさない)。
+ *
+ * **1 行も落ちなければ元の配列をそのまま返す。** 中身が同じでも新しい配列を返すと、
+ * 分類が非同期で届いた瞬間に行のまとまりが作り直され、**表で選んでいた行が外れて
+ * 選択が null に戻る** (CI で 2 件落として気付いた)。
+ */
+export function dropIgnoredRows(
+  headers: string[],
+  rows: string[][],
+  ignored: Set<string>,
+): string[][] {
+  if (ignored.size === 0) return rows
+  const cdIdx = colIndex(headers, 'イベントCD')
+  if (cdIdx < 0) return rows
+  const nameIdx = colIndex(headers, 'イベント名')
+  const kept = rows.filter(row => !(
+    ignored.has((row[cdIdx] ?? '').trim())
+    && classifyEventName(nameIdx >= 0 ? (row[nameIdx] ?? '') : '') === 'event'
+  ))
+  return kept.length === rows.length ? rows : kept
+}
+
 export function filterRowsByCategory(
   rows: string[][],
   eventNameIdx: number,
