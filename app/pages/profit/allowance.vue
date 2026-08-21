@@ -575,17 +575,25 @@ function legMarginYen(r: AllowanceReportRow): number | null {
  *
  * **乗務員で引けているときだけ。** 車番引きでは、その乗務員が別の車番で走った日の
  * 明細を持っていないので、起こすべき便が見えない。
+ *
+ * **「デジタコの便が 1 つも無い日」に限らない。** どのデジタコ便にも当たらなかった
+ * 明細から起こすので、一部だけ取れている日の欠けも埋まる。当たった明細は触らないので
+ * 二重には載らない。
  */
 const ichibanLegs = computed<IchibanLeg[]>(() => {
   if (!canFetchByDriver.value) return []
   const out: IchibanLeg[] = []
+  // **デジタコ便に当たった明細だけを除く。** 日単位で避けると、一部だけ取れている日の
+  // 起こし損ねた便が永久に埋まらない (2026-07 に残った 4 便が全部この形だった)。
+  const used = new Set<string>()
+  for (const hit of byLeg.value.values()) {
+    for (const slip of hit.slips) used.add(slip.rowId)
+  }
   for (const d of monthly.value.drivers) {
     const cd = driverCdByName.value.get(d.driverName)
     if (cd === undefined) continue
     const slips = slipsByKey.value[driverSlipKey(cd)] ?? []
-    // **デジタコの便がある日は触らない。** 一部だけ取れている日に足すと二重に載る。
-    const covered = new Set(d.operations.flatMap(op => op.rows.map(r => r.date)))
-    out.push(...buildIchibanLegs(d.driverName, slips, covered, shownYm.value))
+    out.push(...buildIchibanLegs(d.driverName, slips, used, shownYm.value, provisional.value))
   }
   return out
 })
@@ -1134,7 +1142,10 @@ function downloadCsv() {
             title="デジタコに運行が無い日の便を、一番星の明細から起こしたぶん。上の便数・手当・売上・収支には入っていません (下の「合計」に入ります)"
           >
             一番星から <b>{{ ichibanTotals.trips }}</b> 便
-            (手当 {{ yen(ichibanTotals.allowanceYen) }} ・ 売上 {{ yen(ichibanTotals.salesYen) }}<span
+            (手当 {{ yen(ichibanTotals.allowanceYen) }}<span
+              v-if="ichibanTotals.provisionalTrips > 0"
+            > うち暫定 {{ yen(ichibanTotals.provisionalYen) }} ({{ ichibanTotals.provisionalTrips }}便)</span>
+            ・ 売上 {{ yen(ichibanTotals.salesYen) }}<span
               v-if="ichibanTotals.unknownTrips > 0"
             > ・未確定 {{ ichibanTotals.unknownTrips }}</span>)
           </span>
@@ -1424,8 +1435,9 @@ function downloadCsv() {
             <b>一番星の明細から便を起こしています</b>。
             同じ日・同じ<b>積地</b>の明細を畳み、積載量が 1 台ぶん ({{ MAX_LOAD_TONS }}t) を超えたら分けます
             (<b>卸地では分けません</b> — 手当表は <code>広尾 → 札内・音更</code> のような複数卸しを 1 便として扱うため)。
-            手当は<b>最終卸し地</b>でマスタから引き、<b>決まらなければ未確定のまま</b>にします (推測で金額を作りません)。
-            <b>デジタコの便がある日は触っていません</b> — 一部だけ取れている日に足すと同じ仕事が二重に載るためです。
+            手当は<b>最終卸し地</b>でマスタから引き、決まらなければ<b>暫定手当</b>を経路キーで引きます。
+            それも無ければ<b>未確定のまま</b>にします (推測で金額を作りません)。
+            <b>デジタコ便に当たった明細は触っていません</b>ので、同じ仕事が二重に載ることはありません。
           </p>
           <div class="overflow-x-auto border border-gray-200 dark:border-gray-800 rounded-lg">
             <table class="w-full">
@@ -1456,7 +1468,9 @@ function downloadCsv() {
                   <td class="px-3 py-1 whitespace-nowrap">{{ l.masterDest || '-' }}</td>
                   <td class="px-3 py-1 text-right whitespace-nowrap text-gray-500">{{ tons(l.quantity) }}</td>
                   <td class="px-3 py-1 text-right whitespace-nowrap">
-                    <span v-if="l.allowanceYen !== null">{{ yen(l.allowanceYen) }}</span>
+                    <span v-if="l.allowanceYen !== null" :class="l.isProvisional ? 'text-amber-600 dark:text-amber-400' : ''">
+                      {{ yen(l.allowanceYen) }}<span v-if="l.isProvisional"> (暫定)</span>
+                    </span>
                     <span v-else class="text-amber-600 dark:text-amber-400">未確定 ({{ l.status }})</span>
                   </td>
                   <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(l.salesYen) }}</td>
