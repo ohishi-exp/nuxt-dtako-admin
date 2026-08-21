@@ -23,6 +23,10 @@
  * **手当表PDF から起こした CSV を読み込むと、便単位で突き合わせる**
  * (`allowance-pdf-compare.ts`)。PDF は給与の正本なので、デジタコから出したこの画面の
  * 手当が合っているかを確かめられる唯一の外部の物差し。
+ *
+ * **売上 (一番星) は乗務員CD で引く** (rust-ichibanboshi#302 で `driver` が足りた)。
+ * 車番で引くと**その日その乗務員が別の車番で走ったぶんが丸ごと見えない** —
+ * 2026-07 の帯広5台の実測で ¥1,596,721 が画面の外にあった。
  */
 import { getOperations, getOperationCsv, getDrivers } from '~/utils/api'
 import { fetchAllPages } from '~/utils/paged-fetch'
@@ -43,7 +47,7 @@ import {
   type DriverNode,
   type OperationNode,
 } from '~/utils/allowance-report'
-import { fetchVehicleDailySlips, type VehicleDailySlip } from '~/utils/ichiban'
+import { fetchVehicleDailySlips, fetchDriverDailySlips, type VehicleDailySlip } from '~/utils/ichiban'
 import {
   PROVISIONAL_KEY,
   parseProvisional,
@@ -293,14 +297,17 @@ onMounted(async () => {
   provisional.value = parseProvisional(localStorage.getItem(PROVISIONAL_KEY))
   excluded.value = parseExcluded(localStorage.getItem(EXCLUDED_KEY))
   pdfFile.value = parsePdfTripFile(localStorage.getItem(PDF_TRIPS_KEY))
-  cachedMonth.value = readCache()
-  if (cachedMonth.value) restoreFromCache(cachedMonth.value)
+  // **乗務員マスタはキャッシュ復元より先に読む。** 一番星を乗務員で引いた月の
+  // キャッシュは `driver:<CD>` を鍵にしているので、氏名→CD が引けないと
+  // 復元した表の売上がまるごと空になる。
   try {
     drivers.value = await getDrivers()
   }
   catch {
     // 乗務員マスタが引けなくても CD だけで動く (表示が CD のままになるだけ)
   }
+  cachedMonth.value = readCache()
+  if (cachedMonth.value) restoreFromCache(cachedMonth.value)
 })
 
 function toggle(cd: string) {
@@ -391,6 +398,49 @@ function orderedVehicleRows(rows: AllowanceReportRow[]): [string, AllowanceRepor
   return [...groupRowsByVehicle(rows)].sort((a, b) => (a[0] > b[0] ? 1 : -1))
 }
 
+/**
+ * キャッシュの明細がどちらの鍵で入っているかを見て、突合の入力を組み直す。
+ * **鍵は保存した時の引き方で決まる** (`driver:<CD>` なら乗務員引き、それ以外は車番)。
+ */
+function orderedForSlips(
+  rows: AllowanceReportRow[],
+  slips: Record<string, VehicleDailySlip[]>,
+): [string, AllowanceReportRow[]][] {
+  if (!Object.keys(slips).some(key => key.startsWith('driver:'))) return orderedVehicleRows(rows)
+  return orderedDriverRows(rows).map(([cd, r]) => [driverSlipKey(cd), r])
+}
+
+/** 乗務員名 → 乗務員CD。一番星を乗務員で引くのに要る。 */
+const driverCdByName = computed(() => {
+  const map = new Map<string, string>()
+  for (const d of drivers.value) map.set(d.driver_name.trim(), d.driver_cd.trim())
+  return map
+})
+
+/**
+ * **一番星を乗務員で引けるか。** 対象乗務員が指定されていて、乗務員マスタから
+ * 全員の CD が引けるときだけ。どちらか欠けたら車番で引く旧経路に落ちる。
+ */
+const canFetchByDriver = computed(() => targets.value.length > 0
+  && monthly.value.drivers.every(d => driverCdByName.value.has(d.driverName)))
+
+/** キャッシュのキー。車番と混ざらないよう前置きを付ける。 */
+function driverSlipKey(cd: string): string {
+  return `driver:${cd}`
+}
+
+/** 便を乗務員ごとに分けて、乗務員CD の昇順に並べる。 */
+function orderedDriverRows(rows: AllowanceReportRow[]): [string, AllowanceReportRow[]][] {
+  const groups = new Map<string, AllowanceReportRow[]>()
+  for (const row of rows) {
+    const cd = driverCdByName.value.get(row.driverName) ?? ''
+    const list = groups.get(cd) ?? []
+    list.push(row)
+    groups.set(cd, list)
+  }
+  return [...groups].sort((a, b) => (a[0] > b[0] ? 1 : -1))
+}
+
 /** **手元にある明細だけで突合する (通信しない)。** キャッシュからの復元と共用。 */
 function applyReconcile(
   ordered: [string, AllowanceReportRow[]][],
@@ -412,6 +462,8 @@ async function runReconcile(
   force: boolean,
 ): Promise<Record<string, VehicleDailySlip[]>> {
   const range = slipDateRange(shownYm.value)
+  if (canFetchByDriver.value) return runReconcileByDriver(rows, cachedSlips, force, range)
+
   const ordered = orderedVehicleRows(rows)
   const vehicles = [...ordered.map(([vehicle]) => vehicle), POOL_VEHICLE]
   const plan = planSlipFetch(vehicles, cachedSlips, force)
@@ -421,6 +473,34 @@ async function runReconcile(
     slips[vehicle] = tradableSlips(await fetchVehicleDailySlips(vehicle, range.from, range.to))
   }
   applyReconcile(ordered, slips)
+  return slips
+}
+
+/**
+ * **一番星を乗務員で引いて突合する** (rust-ichibanboshi#302 で `driver` が足りた)。
+ *
+ * 車番で引くと**その日その乗務員が別の車番で走ったぶんが丸ごと見えない**。
+ * 2026-07 の帯広5台の実測で、車番引きでは **¥1,596,721 が画面の外**にあった
+ * (西島は `0001-06` に 25 本・`0040-01` に 5 本、柳井は `0040-01` に 13 本)。
+ *
+ * **受け皿 (`POOL_VEHICLE`) は使わない。** 乗務員で引けば、その乗務員が乗った車番の
+ * 明細は最初から全部入っているので、他人の売上を拾いにいく必要が無い。
+ */
+async function runReconcileByDriver(
+  rows: AllowanceReportRow[],
+  cachedSlips: Record<string, VehicleDailySlip[]>,
+  force: boolean,
+  range: { from: string, to: string },
+): Promise<Record<string, VehicleDailySlip[]>> {
+  const ordered = orderedDriverRows(rows)
+  const plan = planSlipFetch(ordered.map(([cd]) => driverSlipKey(cd)), cachedSlips, force)
+  const slips: Record<string, VehicleDailySlip[]> = { ...plan.reuse }
+  for (const key of plan.fetch) {
+    const cd = key.slice('driver:'.length)
+    progress.value = `一番星の明細を取得中 ${labelOf(cd)}`
+    slips[key] = tradableSlips(await fetchDriverDailySlips(cd, range.from, range.to))
+  }
+  applyReconcile(ordered.map(([cd, r]) => [driverSlipKey(cd), r]), slips)
   return slips
 }
 
@@ -696,7 +776,7 @@ function restoreFromCache(month: MonthCache) {
   restoredFromCache.value = true
   // **明細を 1 車輌ぶんも持っていない月は突合しない。** 全部「一番星に無し」に見えて、
   // 売上ゼロの月と区別が付かなくなる (一番星が落ちていた回のキャッシュがこれ)。
-  if (Object.keys(month.slips).length > 0) applyReconcile(orderedVehicleRows(allRows()), month.slips)
+  if (Object.keys(month.slips).length > 0) applyReconcile(orderedForSlips(allRows(), month.slips), month.slips)
 }
 
 async function run(force = false) {
@@ -819,6 +899,8 @@ function downloadCsv() {
       <b>降しが 1 つも無い積み</b>のような実在しない便は、便の行 (または運行を開いたところ) の
       <b>除外</b>で集計から外せます。外した便は<b>下の「除外した便」から戻せます</b>。
       <b>手当表PDF から起こした CSV</b> を読み込むと、便単位で突き合わせて差分を出します。
+      売上は<b>対象乗務員を指定していれば乗務員CD で引きます</b> — その乗務員が
+      <b>別の車番で走った日</b>の売上も入ります (車番で引くと丸ごと落ちます)。
     </p>
 
     <div class="flex flex-wrap gap-3 items-end mb-4">
@@ -986,6 +1068,15 @@ function downloadCsv() {
           </span>
           <span v-if="hasSales" class="text-gray-400" title="日付が1日ずれて当たった / 同日同卸地で明細を件数で分けた (内訳が推定) / 受け皿の車番から拾った">
             日付ずれ {{ monthSales.dateShiftTrips }} ・ 内訳推定 {{ monthSales.splitTrips }} ・ 受け皿 {{ monthSales.poolTrips }}
+          </span>
+          <span
+            v-if="hasSales"
+            :class="canFetchByDriver ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'"
+            :title="canFetchByDriver
+              ? '一番星を乗務員CD で引いています。その乗務員が別の車番で走った日の売上も入ります'
+              : '一番星を車番で引いています。その日その乗務員が別の車番で走ったぶんは入りません (対象乗務員を指定し、乗務員マスタが引けると乗務員で引きます)'"
+          >
+            売上の引き方 <b>{{ canFetchByDriver ? '乗務員' : '車番' }}</b>
           </span>
           <label class="text-xs text-gray-500 flex items-center gap-1.5 cursor-pointer select-none">
             <input v-model="onlyIrregular" type="checkbox" class="cursor-pointer">
@@ -1627,7 +1718,7 @@ function downloadCsv() {
                 </thead>
                 <tbody>
                   <tr v-for="l in leftoverSlips" :key="l.slip.rowId" class="border-t border-gray-100 dark:border-gray-800/70">
-                    <td class="px-3 py-1 whitespace-nowrap">{{ l.vehicle }}</td>
+                    <td class="px-3 py-1 whitespace-nowrap">{{ l.slip.vehicleNumber }}</td>
                     <td class="px-3 py-1 whitespace-nowrap">{{ l.slip.saleDate }}</td>
                     <td class="px-3 py-1 whitespace-nowrap">{{ l.slip.customerName }}</td>
                     <td class="px-3 py-1 whitespace-nowrap">{{ l.slip.dest }}<span class="text-gray-400"> ({{ l.slip.destAreaName }})</span></td>
