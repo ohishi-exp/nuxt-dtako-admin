@@ -484,7 +484,8 @@ export function margin(salesYen: number, allowanceYen: number): number {
 
 const CSV_HEADER = [
   '運行NO', '日付', '乗務員', '車輌', '便', '積地(市町村)', '卸地(市町村)', '途中卸し',
-  'マスタ卸地', '手当', '数量t', '売上', '収支', '突合', '内訳推定', '受け皿', '一番星明細',
+  'マスタ卸地', '卸地の出どころ', '手当', '数量t', '売上', '収支', '突合', '内訳推定',
+  '受け皿', '一番星明細',
 ]
 
 /** 便 1 行ずつの収支 CSV。値にカンマが入りうるので必ず引用する。 */
@@ -499,7 +500,9 @@ export function reconcileCsvLines(
       const hit = byLeg.get(legKey(r)) ?? noSlip(legKey(r))
       return [
         r.unkoNo, r.date, r.driverName, r.vehicleName, r.seq, r.originCity, r.destCity,
-        r.viaCities, r.masterDest, r.allowanceYen, hit.quantity, hit.salesYen,
+        r.viaCities, r.masterDest,
+        r.destSource === 'carried' ? '次運行の先頭の降し (推定)' : 'イベント',
+        r.allowanceYen, hit.quantity, hit.salesYen,
         margin(hit.salesYen, r.allowanceYen ?? 0), hit.status,
         hit.split ? '推定' : '', hit.fromPool ? POOL_VEHICLE : '',
         hit.slips.map(s => s.itemName).join('|'),
