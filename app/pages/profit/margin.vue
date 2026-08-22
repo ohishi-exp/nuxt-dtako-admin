@@ -152,6 +152,11 @@ const pct = (v: number | null) => (v === null ? '-' : `${Math.round(v * 1000) / 
 const num = (v: number | null, digits = 1) => (v === null ? '-' : String(Math.round(v * 10 ** digits) / 10 ** digits))
 /** 走行km の内訳は 1 桁でも読み切れないので整数で出す (列を増やさず 2 行目に畳むため)。 */
 const kmInt = (v: number) => String(Math.round(v))
+/**
+ * 内訳の各項が走行km 全体に占める割合 (整数 %)。
+ * **分母が 0 の運行では呼ばない** (`NaN%` を見せないため、テンプレート側で `v-if` を掛ける)。
+ */
+const kmPct = (part: number, totalKm: number) => `${Math.round((part / totalKm) * 100)}%`
 /** 内訳の見出しの意味。**列を増やさない**代わりに、数字の意味をここで説明する。 */
 const KM_BREAKDOWN_TITLE = '積前=始業→最初の積み / 売上=積み→降し / 便間=降し→次の積み / 降後=最後の降し→終業'
 const OTHER_KM_TITLE = '降しが記録されていない便の走行 (分類不能)'
@@ -1065,13 +1070,13 @@ function downloadCsv() {
                   <td class="px-3 py-2 text-right">
                     {{ km(d.totals.totalKm) }}
                     <span class="block text-xs text-gray-400 dark:text-gray-500" :title="KM_BREAKDOWN_TITLE">
-                      積前 {{ kmInt(d.totals.preLoadKm) }} / 売上 {{ kmInt(d.totals.haulKm) }}
-                      / 便間 {{ kmInt(d.totals.betweenKm) }} / 降後 {{ kmInt(d.totals.postUnloadKm) }}
+                      積前 {{ kmInt(d.totals.preLoadKm) }}<template v-if="d.totals.totalKm > 0"> ({{ kmPct(d.totals.preLoadKm, d.totals.totalKm) }})</template> / 売上 {{ kmInt(d.totals.haulKm) }}<template v-if="d.totals.totalKm > 0"> ({{ kmPct(d.totals.haulKm, d.totals.totalKm) }})</template>
+                      / 便間 {{ kmInt(d.totals.betweenKm) }}<template v-if="d.totals.totalKm > 0"> ({{ kmPct(d.totals.betweenKm, d.totals.totalKm) }})</template> / 降後 {{ kmInt(d.totals.postUnloadKm) }}<template v-if="d.totals.totalKm > 0"> ({{ kmPct(d.totals.postUnloadKm, d.totals.totalKm) }})</template>
                       <span
                         v-if="d.totals.otherKm > 0"
                         class="text-amber-600 dark:text-amber-400"
                         :title="OTHER_KM_TITLE"
-                      >/ 他 {{ kmInt(d.totals.otherKm) }}</span>
+                      >/ 他 {{ kmInt(d.totals.otherKm) }}<template v-if="d.totals.totalKm > 0"> ({{ kmPct(d.totals.otherKm, d.totals.totalKm) }})</template></span>
                     </span>
                   </td>
                   <td class="px-3 py-2 text-right">{{ yen(d.totals.salesYen) }}</td>
@@ -1137,13 +1142,13 @@ function downloadCsv() {
                       一覧 {{ num(m.listedTotalKm) }}km とずれ
                     </span>
                     <span class="block text-xs text-gray-400 dark:text-gray-500" :title="KM_BREAKDOWN_TITLE">
-                      積前 {{ kmInt(m.kmBreakdown.preLoadKm) }} / 売上 {{ kmInt(m.kmBreakdown.haulKm) }}
-                      / 便間 {{ kmInt(m.kmBreakdown.betweenKm) }} / 降後 {{ kmInt(m.kmBreakdown.postUnloadKm) }}
+                      積前 {{ kmInt(m.kmBreakdown.preLoadKm) }}<template v-if="m.totalKm > 0"> ({{ kmPct(m.kmBreakdown.preLoadKm, m.totalKm) }})</template> / 売上 {{ kmInt(m.kmBreakdown.haulKm) }}<template v-if="m.totalKm > 0"> ({{ kmPct(m.kmBreakdown.haulKm, m.totalKm) }})</template>
+                      / 便間 {{ kmInt(m.kmBreakdown.betweenKm) }}<template v-if="m.totalKm > 0"> ({{ kmPct(m.kmBreakdown.betweenKm, m.totalKm) }})</template> / 降後 {{ kmInt(m.kmBreakdown.postUnloadKm) }}<template v-if="m.totalKm > 0"> ({{ kmPct(m.kmBreakdown.postUnloadKm, m.totalKm) }})</template>
                       <span
                         v-if="m.kmBreakdown.otherKm > 0"
                         class="text-amber-600 dark:text-amber-400"
                         :title="OTHER_KM_TITLE"
-                      >/ 他 {{ kmInt(m.kmBreakdown.otherKm) }}</span>
+                      >/ 他 {{ kmInt(m.kmBreakdown.otherKm) }}<template v-if="m.totalKm > 0"> ({{ kmPct(m.kmBreakdown.otherKm, m.totalKm) }})</template></span>
                     </span>
                   </td>
                   <td class="px-3 py-1.5 text-right">{{ yen(m.salesYen) }}</td>
