@@ -2,6 +2,8 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   getDtakoScrapeStatusTool,
   getKosokuEventsTool,
+  getIchibanCostsTool,
+  getIchibanSalesTool,
   getRestDiffTool,
   runDtakoScrapeTool,
   getTimecardDiffTool,
@@ -1076,6 +1078,395 @@ describe("get_timecard_diff (mode=summary)", () => {
   });
 });
 
+
+// ===== get_ichiban_costs / get_ichiban_sales =================================
+//
+// `fetchIchibanJson` の失敗系 (未設定・接続不能・非 2xx・非 JSON) は
+// get_kosoku_events で見ているので、ここは **この 2 本に固有のもの**に絞る:
+// 引数の必須判定・クエリの組み立て・集計・行の pass-through。
+
+/** 上流 (rust-ichibanboshi) の応答を返す fetch を立て、叩かれた URL を集める。 */
+function stubIchibanJson(body: unknown, status = 200): string[] {
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", async (url: string) => {
+    urls.push(url);
+    return new Response(JSON.stringify(body), { status });
+  });
+  return urls;
+}
+
+const COST_ROW = {
+  operation_date: "2026-07-03",
+  vehicle_number: "1420",
+  vehicle_branch: "01",
+  driver_code: "1656",
+  cost_code: "0301",
+  cost_name: "修理代",
+  cost_kind: "03",
+  cost_kind_name: "車輌修繕費(変動)",
+  quantity: 1,
+  unit_price: 240060,
+  amount: 240060,
+  diesel_tax: 0,
+  km: 0,
+  is_fixed: false,
+  row_id: "20260703-000123",
+  // 上流 (#760-11) がこれから足す列。pass-through なのでそのまま出るはず
+  remarks: "西島 パンク修理",
+};
+
+const FUEL_ROW = {
+  ...COST_ROW,
+  operation_date: "2026-07-05",
+  cost_code: "0101",
+  cost_name: "軽油",
+  cost_kind: "01",
+  cost_kind_name: "燃料ｵｲﾙ代",
+  quantity: 300,
+  unit_price: 110,
+  amount: 33000,
+  diesel_tax: 9660,
+  is_fixed: false,
+  row_id: "20260705-000456",
+  remarks: "",
+};
+
+const FIXED_ROW = {
+  ...COST_ROW,
+  operation_date: "2026-07-05",
+  cost_code: "0901",
+  cost_name: "保険料",
+  cost_kind: "09",
+  cost_kind_name: "保険料",
+  quantity: 1,
+  unit_price: 12000,
+  amount: 12000,
+  diesel_tax: 0,
+  is_fixed: true,
+  row_id: "20260705-000789",
+  remarks: "",
+};
+
+describe("get_ichiban_costs", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("requires vehicle or driver before touching upstream", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    await expect(
+      getIchibanCostsTool.execute(kosokuEnv(), { from: "2026-07-01", to: "2026-08-01" }),
+    ).rejects.toThrow("どちらかは必須");
+    // kind だけでは通さない (上流は許すが、全社ぶんは重い)
+    await expect(
+      getIchibanCostsTool.execute(kosokuEnv(), {
+        from: "2026-07-01",
+        to: "2026-08-01",
+        kind: "03",
+      }),
+    ).rejects.toThrow("どちらかは必須");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("builds the query with only the filters that were given (vehicle)", async () => {
+    const urls = stubIchibanJson({ source_table: "経費明細", data: [] });
+    await getIchibanCostsTool.execute(kosokuEnv(), {
+      from: "2026-07-01",
+      to: "2026-08-01",
+      vehicle: "1420",
+    });
+    expect(urls[0]).toBe(
+      "https://rust-ichiban.example.com/api/costs/vehicle-daily" +
+        "?from=2026-07-01&to=2026-08-01&vehicle=1420",
+    );
+  });
+
+  it("builds the query with driver and kind when those are given", async () => {
+    const urls = stubIchibanJson({ source_table: "経費明細", data: [] });
+    await getIchibanCostsTool.execute(kosokuEnv(), {
+      from: "2026-07-01",
+      to: "2026-08-01",
+      driver: "1656",
+      kind: "03",
+    });
+    expect(urls[0]).toBe(
+      "https://rust-ichiban.example.com/api/costs/vehicle-daily" +
+        "?from=2026-07-01&to=2026-08-01&driver=1656&kind=03",
+    );
+  });
+
+  it("passes rows through untouched and aggregates by kind and by date", async () => {
+    stubIchibanJson({
+      source_table: "経費明細 + 経費ﾏｽﾀ + 経費種別ﾏｽﾀ",
+      data: [COST_ROW, FUEL_ROW, FIXED_ROW],
+    });
+    const res = (await getIchibanCostsTool.execute(kosokuEnv(), {
+      from: "2026-07-01",
+      to: "2026-08-01",
+      vehicle: "1420",
+    })) as {
+      source_table: unknown;
+      vehicle: string | null;
+      driver: string | null;
+      kind: string | null;
+      rows: unknown[];
+      summary: {
+        rows: number;
+        total_amount: number;
+        total_diesel_tax: number;
+        fixed_amount: number;
+        by_kind: unknown[];
+        by_date: unknown[];
+        truncated: boolean;
+      };
+    };
+
+    expect(res.source_table).toBe("経費明細 + 経費ﾏｽﾀ + 経費種別ﾏｽﾀ");
+    expect(res.vehicle).toBe("1420");
+    expect(res.driver).toBeNull();
+    expect(res.kind).toBeNull();
+    // **pass-through**: 上流が足した列 (remarks) を落とさない
+    expect(res.rows).toEqual([COST_ROW, FUEL_ROW, FIXED_ROW]);
+    expect(res.summary.rows).toBe(3);
+    expect(res.summary.total_amount).toBe(240060 + 33000 + 12000);
+    expect(res.summary.total_diesel_tax).toBe(9660);
+    expect(res.summary.fixed_amount).toBe(12000);
+    expect(res.summary.truncated).toBe(false);
+    // 区分コード昇順
+    expect(res.summary.by_kind).toEqual([
+      { cost_kind: "01", cost_kind_name: "燃料ｵｲﾙ代", amount: 33000, diesel_tax: 9660, rows: 1 },
+      {
+        cost_kind: "03",
+        cost_kind_name: "車輌修繕費(変動)",
+        amount: 240060,
+        diesel_tax: 0,
+        rows: 1,
+      },
+      { cost_kind: "09", cost_kind_name: "保険料", amount: 12000, diesel_tax: 0, rows: 1 },
+    ]);
+    // 日付昇順、同じ日は畳む
+    expect(res.summary.by_date).toEqual([
+      { date: "2026-07-03", amount: 240060, diesel_tax: 0, rows: 1 },
+      { date: "2026-07-05", amount: 45000, diesel_tax: 9660, rows: 2 },
+    ]);
+  });
+
+  it("survives rows that are not objects or miss fields instead of returning NaN", async () => {
+    stubIchibanJson({
+      // source_table が無い応答 (形が変わっても集計は続ける)
+      data: [null, "oops", { amount: "1000", cost_kind: 3, is_fixed: "1" }],
+    });
+    const res = (await getIchibanCostsTool.execute(kosokuEnv(), {
+      from: "2026-07-01",
+      to: "2026-08-01",
+      driver: "1656",
+    })) as {
+      source_table: unknown;
+      summary: { total_amount: number; fixed_amount: number; by_kind: unknown[] };
+    };
+    expect(res.source_table).toBeNull();
+    expect(res.summary.total_amount).toBe(0);
+    // is_fixed は bool の true だけを固定費に数える ("1" は数えない)
+    expect(res.summary.fixed_amount).toBe(0);
+    // 型違い・欠けはすべて空キーに畳まれる (3 行が 1 区分)
+    expect(res.summary.by_kind).toEqual([
+      { cost_kind: "", cost_kind_name: "", amount: 0, diesel_tax: 0, rows: 3 },
+    ]);
+  });
+
+  it("returns empty aggregates when upstream data is not an array", async () => {
+    stubIchibanJson({ source_table: "経費明細", data: { unexpected: true } });
+    const res = (await getIchibanCostsTool.execute(kosokuEnv(), {
+      from: "2026-07-01",
+      to: "2026-08-01",
+      vehicle: "1420",
+    })) as { rows: unknown[]; summary: { rows: number; by_kind: unknown[]; by_date: unknown[] } };
+    expect(res.rows).toEqual([]);
+    expect(res.summary).toMatchObject({ rows: 0, by_kind: [], by_date: [] });
+  });
+
+  it("flags truncation when upstream returns its default limit (500 rows)", async () => {
+    stubIchibanJson({
+      source_table: "経費明細",
+      data: Array.from({ length: 500 }, (_, i) => ({ ...COST_ROW, row_id: `20260703-${i}` })),
+    });
+    const res = (await getIchibanCostsTool.execute(kosokuEnv(), {
+      from: "2026-01-01",
+      to: "2026-08-01",
+      vehicle: "1420",
+    })) as { summary: { rows: number; truncated: boolean } };
+    expect(res.summary).toMatchObject({ rows: 500, truncated: true });
+  });
+
+  it("surfaces an upstream failure (non-2xx) as a throw", async () => {
+    stubIchibanJson({ error: "bad request" }, 400);
+    await expect(
+      getIchibanCostsTool.execute(kosokuEnv(), {
+        from: "2026-07-01",
+        to: "2026-08-01",
+        vehicle: "1420",
+      }),
+    ).rejects.toThrow("rust-ichibanboshi が 400 を返しました");
+  });
+});
+
+const SALE_ROW = {
+  sale_date: "2026-07-03",
+  vehicle_number: "1420",
+  vehicle_branch: "01",
+  customer_code: "001234",
+  customer_name: "テスト商事",
+  origin_area_name: "釧路",
+  dest_area_name: "帯広",
+  origin: "釧路港",
+  dest: "駒場",
+  is_subcontracted: false,
+  amount: 43750,
+  item_code: "01",
+  item_name: "飼料",
+  quantity: 12.5,
+  unit_price: 3500,
+  unit: "t",
+  row_id: "20260703-000001",
+  driver_code: "1656",
+  driver_name: "西島　太郎",
+  request_kind: "0",
+};
+
+describe("get_ichiban_sales", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("requires vehicle or driver before touching upstream", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    await expect(
+      getIchibanSalesTool.execute(kosokuEnv(), { from: "2026-07-01", to: "2026-08-01" }),
+    ).rejects.toThrow("どちらかは必須");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("builds the query with only the filters that were given (vehicle)", async () => {
+    const urls = stubIchibanJson({ source_table: "運行日報明細", data: [] });
+    await getIchibanSalesTool.execute(kosokuEnv(), {
+      from: "2026-07-01",
+      to: "2026-08-01",
+      vehicle: "1420",
+    });
+    expect(urls[0]).toBe(
+      "https://rust-ichiban.example.com/api/sales/vehicle-daily" +
+        "?from=2026-07-01&to=2026-08-01&vehicle=1420",
+    );
+  });
+
+  it("builds the query with driver when that is given", async () => {
+    const urls = stubIchibanJson({ source_table: "運行日報明細", data: [] });
+    await getIchibanSalesTool.execute(kosokuEnv(), {
+      from: "2026-07-01",
+      to: "2026-08-01",
+      driver: "1656",
+    });
+    expect(urls[0]).toBe(
+      "https://rust-ichiban.example.com/api/sales/vehicle-daily" +
+        "?from=2026-07-01&to=2026-08-01&driver=1656",
+    );
+  });
+
+  it("passes rows through and aggregates by date and by request kind", async () => {
+    stubIchibanJson({
+      source_table: "運行日報明細",
+      data: [
+        SALE_ROW,
+        { ...SALE_ROW, row_id: "20260703-000002", amount: 21750, request_kind: "2" },
+        { ...SALE_ROW, sale_date: "2026-07-04", row_id: "20260704-000001", amount: 22000 },
+      ],
+    });
+    const res = (await getIchibanSalesTool.execute(kosokuEnv(), {
+      from: "2026-07-01",
+      to: "2026-08-01",
+      driver: "1656",
+    })) as {
+      vehicle: string | null;
+      driver: string | null;
+      rows: unknown[];
+      summary: {
+        rows: number;
+        total_amount: number;
+        by_date: unknown[];
+        by_request_kind: unknown[];
+        truncated: boolean;
+      };
+    };
+
+    expect(res.vehicle).toBeNull();
+    expect(res.driver).toBe("1656");
+    expect(res.rows).toHaveLength(3);
+    expect(res.rows[0]).toEqual(SALE_ROW);
+    expect(res.summary.rows).toBe(3);
+    expect(res.summary.total_amount).toBe(43750 + 21750 + 22000);
+    expect(res.summary.truncated).toBe(false);
+    expect(res.summary.by_date).toEqual([
+      { date: "2026-07-03", amount: 65500, rows: 2 },
+      { date: "2026-07-04", amount: 22000, rows: 1 },
+    ]);
+    expect(res.summary.by_request_kind).toEqual([
+      { request_kind: "0", amount: 65750, rows: 2 },
+      { request_kind: "2", amount: 21750, rows: 1 },
+    ]);
+  });
+
+  it("omits by_request_kind when no row carries 請求K", async () => {
+    // source_table も無い応答 (形が変わっても集計は続ける)
+    stubIchibanJson({
+      // 上流から request_kind が消えた / 空文字の行しか無い場合
+      data: [{ sale_date: "2026-07-03", amount: 1000 }, null],
+    });
+    const res = (await getIchibanSalesTool.execute(kosokuEnv(), {
+      from: "2026-07-01",
+      to: "2026-08-01",
+      vehicle: "1420",
+    })) as { source_table: unknown; summary: Record<string, unknown> };
+    expect(res.source_table).toBeNull();
+    expect(res.summary.by_request_kind).toBeUndefined();
+    expect(res.summary.total_amount).toBe(1000);
+    expect(res.summary.by_date).toEqual([
+      { date: "", amount: 0, rows: 1 },
+      { date: "2026-07-03", amount: 1000, rows: 1 },
+    ]);
+  });
+
+  it("flags truncation when upstream returns its default limit (500 rows)", async () => {
+    stubIchibanJson({
+      source_table: "運行日報明細",
+      data: Array.from({ length: 500 }, (_, i) => ({ ...SALE_ROW, row_id: `x-${i}` })),
+    });
+    const res = (await getIchibanSalesTool.execute(kosokuEnv(), {
+      from: "2026-01-01",
+      to: "2026-08-01",
+      driver: "1656",
+    })) as { summary: { truncated: boolean } };
+    expect(res.summary.truncated).toBe(true);
+  });
+
+  it("surfaces a non-JSON upstream body as a throw", async () => {
+    vi.stubGlobal(
+      "fetch",
+      async () => new Response("<!DOCTYPE html><html>Access denied</html>", { status: 200 }),
+    );
+    await expect(
+      getIchibanSalesTool.execute(kosokuEnv(), {
+        from: "2026-07-01",
+        to: "2026-08-01",
+        vehicle: "1420",
+      }),
+    ).rejects.toThrow("応答が JSON ではありません");
+  });
+});
+
 describe("ALL_TOOLS", () => {
   /** 読むだけの tool。scope を要求しない (binding_jwt が valid なら誰でも呼べる)。 */
   const READ_ONLY = [
@@ -1086,6 +1477,9 @@ describe("ALL_TOOLS", () => {
     // 1 バイトも書かない (Refs ohishi-exp/rust-ichibanboshi#205 の 50)
     "get_kintai_diff",
     "get_kosoku_events",
+    // 一番星の経費/売上明細を読むだけ (Refs #760 の 12)。上流は GET のみ
+    "get_ichiban_costs",
+    "get_ichiban_sales",
     // 休息のずれの診断 (Refs ohishi-exp/rust-ichibanboshi#205 の 41)。
     // 上流に GET しか無く、判定にも入らない素の観測なので read-only
     "get_dtako_scrape_status",

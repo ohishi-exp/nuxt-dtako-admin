@@ -1988,6 +1988,300 @@ export const getKintaiDiffTool = {
   },
 } satisfies ToolEntry<typeof getKintaiDiffArgs>;
 
+// ===== get_ichiban_costs / get_ichiban_sales =================================
+//
+// 一番星 (rust-ichibanboshi) の **経費明細 / 売上明細** を読む 2 本 (Refs #760)。
+// 粗利タブ (`app/utils/margin.ts`) が画面で組み立てている材料を、集計される前の
+// **生の行**として出すのが目的 — 「この車輌の直課経費が多いのは何の区分か」を
+// 画面のフィルタに縛られずに数えるため。
+//
+// **行は pass-through で返す。** ここでフィールドを選ぶと、上流が足した列
+// (`remarks` / `vendor_name` / `entered_date` 等) が静かに落ちる。tool が足すのは
+// 集計 (`summary`) だけで、行そのものは上流の形を変えない。
+
+/** 日付 (YYYY-MM-DD)。暦としての妥当性は上流に任せる (既存 tool と同じ扱い)。 */
+const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** 車輌C / 乗務員CD (数字)。車番は実務上 4 桁だが桁を決め打ちしない
+ *  (`COMP_ID_PATTERN` と同じ判断 — 上流は完全一致で引くだけ)。 */
+const ICHIBAN_CODE_RE = /^\d{1,10}$/;
+
+/** 上流が `limit` 未指定のときに返す最大件数 (rust-ichibanboshi の default 500)。
+ *  ここに達したら**黙って切られている**ので `summary.truncated` で表に出す。 */
+const ICHIBAN_DEFAULT_LIMIT = 500;
+
+/** `row[key]` を安全に読む (上流の行は pass-through なので型を仮定しない)。 */
+function fieldOf(row: unknown, key: string): unknown {
+  return typeof row === "object" && row !== null
+    ? (row as Record<string, unknown>)[key]
+    : undefined;
+}
+/** 数値フィールド。欠け・型違いは 0 に倒す (集計が NaN で全滅するのを避ける)。 */
+function numField(row: unknown, key: string): number {
+  const v = fieldOf(row, key);
+  return typeof v === "number" ? v : 0;
+}
+/** 文字列フィールド。欠け・型違いは空文字 (集計キーとして使うため null を混ぜない)。 */
+function strField(row: unknown, key: string): string {
+  const v = fieldOf(row, key);
+  return typeof v === "string" ? v : "";
+}
+/** 上流応答 `{ source_table, data: Row[] }` の `data`。形が違えば空配列。 */
+function ichibanRows(parsed: unknown): unknown[] {
+  const data = fieldOf(parsed, "data");
+  return Array.isArray(data) ? data : [];
+}
+/** 上流の default limit に達している = 切られている疑い。 */
+function truncatedAt(rows: unknown[]): boolean {
+  return rows.length >= ICHIBAN_DEFAULT_LIMIT;
+}
+/** Map の値をキー昇順で配列にする (応答を決定的にするため)。 */
+function sortedByKey<T>(map: Map<string, T>): T[] {
+  return [...map.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, v]) => v);
+}
+/** `from`/`to` に、値のある絞り込みだけを足したクエリ文字列を組む。 */
+function ichibanRangeQuery(
+  path: string,
+  from: string,
+  to: string,
+  filters: Record<string, string | undefined>,
+): string {
+  const qs = new URLSearchParams({ from, to });
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined) qs.set(key, value);
+  }
+  return `${path}?${qs.toString()}`;
+}
+/** 期間だけの全社スキャンを拒む (上流にとって重く、読む側も使い道が無い)。 */
+function requireVehicleOrDriver(args: { vehicle?: string; driver?: string }): void {
+  if (!args.vehicle && !args.driver) {
+    throw new Error(
+      "vehicle (車輌C) か driver (乗務員CD) のどちらかは必須です " +
+        "— 期間だけの全社ぶんは重いので受け付けません",
+    );
+  }
+}
+
+const getIchibanCostsArgs = z
+  .object({
+    from: z.string().regex(YMD_RE).describe("運行年月日の下限 (YYYY-MM-DD、**含む**)"),
+    to: z
+      .string()
+      .regex(YMD_RE)
+      .describe("運行年月日の上限 (YYYY-MM-DD、**含まない** — 半開区間。月なら翌月1日)"),
+    vehicle: z
+      .string()
+      .regex(ICHIBAN_CODE_RE)
+      .optional()
+      .describe("車輌C (車番。実務上 4 桁)。driver とどちらか必須"),
+    driver: z
+      .string()
+      .regex(ICHIBAN_CODE_RE)
+      .optional()
+      .describe("乗務員CD。vehicle とどちらか必須"),
+    kind: z
+      .string()
+      .regex(/^\d{2}$/)
+      .optional()
+      .describe("経費種別C (2桁。燃料 01 / 通行料 04 等)。省略すると全区分"),
+  })
+  .strict();
+
+export const getIchibanCostsTool = {
+  name: "get_ichiban_costs",
+  description:
+    "一番星 (販売管理) の**経費明細**を、期間 × 車輌 or 乗務員で**行のまま**返す (Refs #760)。" +
+    "粗利タブ (/margin) が経費として引いているのと同じ口 (`GET /api/costs/vehicle-daily`) なので、" +
+    "「直課経費が多いのはどの区分・どの日か」を画面のフィルタ抜きで数えられる。" +
+    "**行 (`rows`) は上流の pass-through** — 列が増えたらそのまま増える。tool が足すのは `summary` だけ。" +
+    "**`amount` は税抜金額**、**`diesel_tax` (軽油引取税) は `amount` に含まれない別立て**で、" +
+    "実額は `amount + diesel_tax` (粗利タブの `costYen` と同じ。燃料以外はふつう 0)。" +
+    "`summary` は `amount` と `diesel_tax` を**別々に**合計するので、突合するときは足してから比べること。" +
+    "**`is_fixed` は `固定経費K == \"1\"`** (保険料・リース等の月極め) — 運行に紐づかないため、" +
+    "粗利タブはこれを走行距離の比で按分している (運行単位に素直に足すと 1 運行だけが赤くなる)。" +
+    "**粗利タブは `01 燃料ｵｲﾙ代` / `08 給与(人件費)` / `11 賞与・調整金` / `15 アドブルー` を粗利の経費から除いている** " +
+    "(燃料系は走行距離から出し、人件費は運行手当と二重になるため)。画面の粗利と突き合わせるなら " +
+    "`summary.by_kind` からこの 4 区分を引くこと。" +
+    "`vehicle` / `driver` は**どちらか必須** (期間だけの全社スキャンは拒否)。`to` は**含まない**半開区間。" +
+    "上流は limit 未指定で **500 件**で切るので、`summary.truncated` が true なら期間を割って引き直すこと。",
+  inputSchema: getIchibanCostsArgs,
+  execute: async (env: Env, args) => {
+    requireVehicleOrDriver(args);
+    const parsed = await fetchIchibanJson(
+      env,
+      ichibanRangeQuery("/api/costs/vehicle-daily", args.from, args.to, {
+        vehicle: args.vehicle,
+        driver: args.driver,
+        kind: args.kind,
+      }),
+      "ichiban_costs",
+    );
+    const rows = ichibanRows(parsed);
+
+    interface KindAgg {
+      cost_kind: string;
+      cost_kind_name: string;
+      amount: number;
+      diesel_tax: number;
+      rows: number;
+    }
+    interface DateAgg {
+      date: string;
+      amount: number;
+      diesel_tax: number;
+      rows: number;
+    }
+    const byKind = new Map<string, KindAgg>();
+    const byDate = new Map<string, DateAgg>();
+    let totalAmount = 0;
+    let totalDieselTax = 0;
+    let fixedAmount = 0;
+
+    for (const row of rows) {
+      const amount = numField(row, "amount");
+      const dieselTax = numField(row, "diesel_tax");
+      totalAmount += amount;
+      totalDieselTax += dieselTax;
+      // `is_fixed` は上流が bool 化済み。真偽が読めない行は変動費側に倒す。
+      if (fieldOf(row, "is_fixed") === true) fixedAmount += amount;
+
+      const kind = strField(row, "cost_kind");
+      const kindAgg = byKind.get(kind) ?? {
+        cost_kind: kind,
+        cost_kind_name: strField(row, "cost_kind_name"),
+        amount: 0,
+        diesel_tax: 0,
+        rows: 0,
+      };
+      kindAgg.amount += amount;
+      kindAgg.diesel_tax += dieselTax;
+      kindAgg.rows += 1;
+      byKind.set(kind, kindAgg);
+
+      const date = strField(row, "operation_date");
+      const dateAgg = byDate.get(date) ?? { date, amount: 0, diesel_tax: 0, rows: 0 };
+      dateAgg.amount += amount;
+      dateAgg.diesel_tax += dieselTax;
+      dateAgg.rows += 1;
+      byDate.set(date, dateAgg);
+    }
+
+    return {
+      source_table: fieldOf(parsed, "source_table") ?? null,
+      from: args.from,
+      to: args.to,
+      vehicle: args.vehicle ?? null,
+      driver: args.driver ?? null,
+      kind: args.kind ?? null,
+      rows,
+      summary: {
+        rows: rows.length,
+        total_amount: totalAmount,
+        total_diesel_tax: totalDieselTax,
+        fixed_amount: fixedAmount,
+        by_kind: sortedByKey(byKind),
+        by_date: sortedByKey(byDate),
+        truncated: truncatedAt(rows),
+      },
+    };
+  },
+} satisfies ToolEntry<typeof getIchibanCostsArgs>;
+
+const getIchibanSalesArgs = z
+  .object({
+    from: z.string().regex(YMD_RE).describe("売上年月日の下限 (YYYY-MM-DD、**含む**)"),
+    to: z
+      .string()
+      .regex(YMD_RE)
+      .describe("売上年月日の上限 (YYYY-MM-DD、**含まない** — 半開区間)"),
+    vehicle: z
+      .string()
+      .regex(ICHIBAN_CODE_RE)
+      .optional()
+      .describe("車輌C (車番)。driver とどちらか必須"),
+    driver: z
+      .string()
+      .regex(ICHIBAN_CODE_RE)
+      .optional()
+      .describe("乗務員CD。vehicle とどちらか必須"),
+  })
+  .strict();
+
+export const getIchibanSalesTool = {
+  name: "get_ichiban_sales",
+  description:
+    "一番星 (販売管理) の**売上明細**を、期間 × 車輌 or 乗務員で**行のまま**返す (Refs #760)。" +
+    "粗利タブ (/margin) が売上として引いているのと同じ口 (`GET /api/sales/vehicle-daily`)。" +
+    "**行 (`rows`) は上流の pass-through**、tool が足すのは `summary` だけ。" +
+    "**`driver` (乗務員CD) で引くと、その乗務員が別の車番で走った日の売上も入る。" +
+    "`vehicle` (車番) で引くと、その日の明細がまるごと落ちる**" +
+    " — デジタコを積んでいない車輌等に売上が載ることがあるため (粗利タブと同じ注意、Refs #741)。" +
+    "`amount` は税抜で、自車/傭車のどちらを使うかは上流が `is_subcontracted` で選択済み。" +
+    "**`request_kind` (請求K)** は `\"0\"` 通常運送 / `\"1\"` 請求のみ (運送を伴わない請求行) / " +
+    "`\"2\"` 非請求 (車輌収支用の按分行)。**`\"1\"` と `\"2\"` は同じ荷の表裏になりうるので、" +
+    "車輌ごとの収支に両方足すと二重計上になる** (走っていないのは `\"1\"` の方)。" +
+    "`vehicle` / `driver` は**どちらか必須**。`to` は**含まない**半開区間。" +
+    "上流は limit 未指定で **500 件**で切るので、`summary.truncated` が true なら期間を割って引き直すこと。",
+  inputSchema: getIchibanSalesArgs,
+  execute: async (env: Env, args) => {
+    requireVehicleOrDriver(args);
+    const parsed = await fetchIchibanJson(
+      env,
+      ichibanRangeQuery("/api/sales/vehicle-daily", args.from, args.to, {
+        vehicle: args.vehicle,
+        driver: args.driver,
+      }),
+      "ichiban_sales",
+    );
+    const rows = ichibanRows(parsed);
+
+    const byDate = new Map<string, { date: string; amount: number; rows: number }>();
+    const byRequestKind = new Map<string, { request_kind: string; amount: number; rows: number }>();
+    let totalAmount = 0;
+
+    for (const row of rows) {
+      const amount = numField(row, "amount");
+      totalAmount += amount;
+
+      const date = strField(row, "sale_date");
+      const dateAgg = byDate.get(date) ?? { date, amount: 0, rows: 0 };
+      dateAgg.amount += amount;
+      dateAgg.rows += 1;
+      byDate.set(date, dateAgg);
+
+      // 上流が `request_kind` を持たない (列が消えた/古い) ときは by_request_kind ごと出さない
+      // — 空の区分に全額が寄って「全部が通常運送」に見えるのを避ける。
+      const requestKind = strField(row, "request_kind");
+      if (requestKind !== "") {
+        const kindAgg = byRequestKind.get(requestKind) ?? {
+          request_kind: requestKind,
+          amount: 0,
+          rows: 0,
+        };
+        kindAgg.amount += amount;
+        kindAgg.rows += 1;
+        byRequestKind.set(requestKind, kindAgg);
+      }
+    }
+
+    return {
+      source_table: fieldOf(parsed, "source_table") ?? null,
+      from: args.from,
+      to: args.to,
+      vehicle: args.vehicle ?? null,
+      driver: args.driver ?? null,
+      rows,
+      summary: {
+        rows: rows.length,
+        total_amount: totalAmount,
+        by_date: sortedByKey(byDate),
+        ...(byRequestKind.size > 0 ? { by_request_kind: sortedByKey(byRequestKind) } : {}),
+        truncated: truncatedAt(rows),
+      },
+    };
+  },
+} satisfies ToolEntry<typeof getIchibanSalesArgs>;
+
 export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   listCompaniesTool as unknown as ToolEntry<z.ZodTypeAny>,
   listMonthsTool as unknown as ToolEntry<z.ZodTypeAny>,
@@ -2007,4 +2301,6 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getOperationZipTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDtakoReimportTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDtakoAlcUploadTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getIchibanCostsTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getIchibanSalesTool as unknown as ToolEntry<z.ZodTypeAny>,
 ];
