@@ -175,7 +175,13 @@ export interface FuelRate {
   kmPerLiter: number | null
   /**
    * 軽油引取税 (円/L)。**参考表示専用で燃料代の計算には入っていない。**
-   * 実際に払っている 円/L は `yenPerLiter + dieselTaxPerLiter`。
+   *
+   * **2026-07 の実データでは全社 1,427 件すべて `diesel_tax = 0`** で、税抜でも税込でも
+   * 単価は 122.95 円/L と 1 円も変わらなかった (帯広5台の実測)。つまりこの帳簿では
+   * 軽油引取税は**別立てで計上されていない** (`amount` に含まれているか、そもそも無い)。
+   * **0 が異常ではない。** ここを足す式に変えると、将来 `diesel_tax` が入り始めた
+   * 瞬間に二重計上になる。**0 と表示され続けること自体が「別立てで来ていない」証拠**
+   * なので、消さずに出す。
    */
   dieselTaxPerLiter: number | null
 }
@@ -194,6 +200,13 @@ export function emptyFuelRate(): FuelRate {
  * 給油量 (`Σ quantity`) が 0 なら単価も燃費も出せない。走行距離が 0 なら燃費だけ
  * 出せない (単価は給油実績から出るので残す) — **0 km/L を返して燃料代を ∞ に
  * しない**ため。
+ *
+ * **分母に入れるのは `01 燃料ｵｲﾙ代` だけ。** `15 アドブルー` にも数量 (L) が入って
+ * いる (2026-07 の車0016 で 220.0 L) が、軽油ではないので分母に足すと km/L が狂う。
+ *
+ * **行ごとの単価 (`unit_price`) は使えない。** 2026-07 の実データで行単価は
+ * `133.74` (885 件) と `130.44` (542 件) の 2 種類しかなく、月平均 121.83 円/L は
+ * **そのどちらとも一致しない**。`Σ金額 ÷ Σ数量` でしか出せない。
  */
 export function deriveFuelRate(costs: CostRow[], totalKm: number): FuelRate {
   let liters = 0
@@ -349,6 +362,15 @@ export interface OperationMargin {
   laborYen: number
   /** その運行に使った燃費・単価 (上書き後)。画面の欄に出す。 */
   fuelRate: FuelRate
+  /**
+   * **その車輌・その月の経費を 1 件も持っていない。** このとき `marginYen` は `null`。
+   *
+   * 経費が 1 件も無いのは普通に起こる (一番星が引けなかった / その月その車輌に計上が
+   * 無い)。**経費 0 円として粗利を出すと「売上そのまま」が粗利に見える** —
+   * いちばん悪い壊れ方なので、燃費・単価を人が上書きして燃料代が出せるときでも
+   * 粗利は出さない。
+   */
+  costsMissing: boolean
 }
 
 /** 粗利の式。**1 か所にだけ置く** — 合計と行で式が分かれると静かにずれる。 */
@@ -480,6 +502,13 @@ export function buildOperationMargins(
     ratesByVehicle.set(vehicle, effectiveFuelRate(derived, overrides[vehicle]))
   }
 
+  // **その車輌の経費を 1 件も持っていないか。** 種別で絞る**前**に数える —
+  // 燃料しか無い車輌も「経費は来ている」ので、粗利を出さない理由にはならない。
+  const costCountByVehicle = new Map<string, number>()
+  for (const row of costs) {
+    costCountByVehicle.set(row.vehicleNumber, (costCountByVehicle.get(row.vehicleNumber) ?? 0) + 1)
+  }
+
   const costRows = costs.filter(row => !EXCLUDED_KINDS.includes(row.costKind))
   const laborRows = costs.filter(row => LABOR_KINDS.includes(row.costKind))
   const spreadCost = spreadCosts(ops, costRows, opsByVehicle)
@@ -493,6 +522,7 @@ export function buildOperationMargins(
     const fuelYen = fuelYenFor(op.totalKm, fuelRate)
     const directCostYen = spreadCost.direct[i]!
     const allocatedCostYen = spreadCost.allocated[i]!
+    const costsMissing = (costCountByVehicle.get(op.vehicleCode) ?? 0) === 0
     return {
       unkoNo: op.unkoNo,
       date: op.date,
@@ -505,11 +535,13 @@ export function buildOperationMargins(
       fuelYen,
       directCostYen,
       allocatedCostYen,
-      marginYen: fuelYen === null
+      // **燃費が出せない運行と、経費を 1 件も持っていない運行は粗利を出さない。**
+      marginYen: fuelYen === null || costsMissing
         ? null
         : marginOf(op.salesYen, op.allowanceYen, fuelYen, directCostYen, allocatedCostYen),
       laborYen: spreadLabor.direct[i]! + spreadLabor.allocated[i]!,
       fuelRate,
+      costsMissing,
     }
   })
 
@@ -527,28 +559,103 @@ export function buildOperationMargins(
   }
 }
 
+/**
+ * **粗利を出せない理由。** 出せていれば空文字。
+ *
+ * 画面と CSV で語彙を分けないよう 1 か所に置く。**「経費が来ていない」と
+ * 「燃費が出せない」は直し方が正反対** — 前者は一番星側 (計上・API) の話で、
+ * 後者はこの画面の上書き欄に人が入れれば済む。
+ */
+export function noMarginReason(m: Pick<OperationMargin, 'marginYen' | 'costsMissing' | 'fuelRate'>): string {
+  if (m.marginYen !== null) return ''
+  if (m.costsMissing) return 'この車輌・この月の経費を 1 件も引けていません'
+  if (m.fuelRate.yenPerLiter === null) return 'この月・この車輌に燃料 (01) の給油実績がありません'
+  return '走行距離が 0 で燃費が出せません'
+}
+
+/** 理由ごとの「粗利を出せなかった運行」。 */
+export interface NoMarginGroup {
+  reason: string
+  operations: number
+  /** その運行たちの売上。**粗利の内訳に入っていない額**。 */
+  salesYen: number
+}
+
+/**
+ * 粗利を出せなかった運行を**理由ごとに数える**。
+ *
+ * **理由を運行の行に埋めるだけでは足りない。** 乗務員の段が畳まれていると、
+ * 人は運行を開かずに合計だけを見て「なぜ `-` なのか」を確かめない。月の合計の
+ * すぐ横に理由と件数を出す。
+ *
+ * 並べ替えない — 渡された運行の順がそのまま理由の初出順になり、決まった順になる
+ * (`localeCompare` を避けるための文字列比較も要らない)。
+ */
+export function summarizeNoMarginReasons(margins: OperationMargin[]): NoMarginGroup[] {
+  const byReason = new Map<string, NoMarginGroup>()
+  for (const m of margins) {
+    const reason = noMarginReason(m)
+    if (reason === '') continue
+    const hit = byReason.get(reason) ?? { reason, operations: 0, salesYen: 0 }
+    hit.operations += 1
+    hit.salesYen += m.salesYen
+    byReason.set(reason, hit)
+  }
+  return [...byReason.values()]
+}
+
 /** 粗利率 = 粗利 ÷ 売上。**売上 0 と粗利不明はどちらも null** (画面では `-`)。 */
 export function marginRate(m: Pick<OperationMargin, 'salesYen' | 'marginYen'>): number | null {
   if (m.marginYen === null || m.salesYen === 0) return null
   return m.marginYen / m.salesYen
 }
 
+/**
+ * 月 / 乗務員の合計。
+ *
+ * **2 段に分かれている。** 上 4 つは**渡した運行ぜんぶ**、`margin*` から下は
+ * **粗利を出せた運行ぶんだけ**。混ぜると
+ * 「売上 − 手当 − 経費 が画面の粗利と合わない」という、人が検算した瞬間に
+ * 信用を失う表になる (粗利を出せない運行の売上だけが合計に混ざるため)。
+ *
+ * 下の 6 つは
+ * `marginSalesYen − marginAllowanceYen − fuelYen − directCostYen − allocatedCostYen
+ *  === marginYen` が**必ず成り立つ**。
+ */
 export interface MarginTotals {
+  /** 運行の本数 (**ぜんぶ**)。 */
   operations: number
+  /** 走行距離の合計 (**ぜんぶ**)。 */
   totalKm: number
+  /** 売上の合計 (**ぜんぶ**)。 */
   salesYen: number
+  /** 手当の合計 (**ぜんぶ**)。人件費の別枠比較に使うので、粗利の可否で欠かさない。 */
   allowanceYen: number
-  /** 燃費が出せた運行ぶんだけの合計。 */
-  fuelYen: number
-  directCostYen: number
-  allocatedCostYen: number
-  /** **燃費が出せた運行ぶんだけの粗利。** 出せない運行は下の件数で数える。 */
-  marginYen: number
+  /** 一番星の人件費 (**ぜんぶ**)。参考表示で、粗利には入れない。 */
   laborYen: number
-  /** 燃費が出せず粗利を出せなかった運行の本数。**黙って 0 円に倒さない。** */
-  unknownFuelOperations: number
+
+  /** 粗利を出せた運行の本数。 */
+  marginOperations: number
+  /** 粗利を出せた運行ぶんの売上。**粗利率の分母。** */
+  marginSalesYen: number
+  /** 粗利を出せた運行ぶんの手当。 */
+  marginAllowanceYen: number
+  /** 粗利を出せた運行ぶんの燃料代。 */
+  fuelYen: number
+  /** 粗利を出せた運行ぶんの直課経費。 */
+  directCostYen: number
+  /** 粗利を出せた運行ぶんの按分経費。 */
+  allocatedCostYen: number
+  /** 粗利。上の 5 つから引き算で出る。 */
+  marginYen: number
+
+  /**
+   * **粗利を出せなかった運行の本数** (燃費が出せない / その車輌の経費が 1 件も無い)。
+   * **黙って 0 円に倒さない。**
+   */
+  noMarginOperations: number
   /** その運行たちの売上。**粗利の合計に入っていない売上**がいくらかを出す。 */
-  unknownFuelSalesYen: number
+  noMarginSalesYen: number
 }
 
 export function emptyMarginTotals(): MarginTotals {
@@ -557,22 +664,25 @@ export function emptyMarginTotals(): MarginTotals {
     totalKm: 0,
     salesYen: 0,
     allowanceYen: 0,
+    laborYen: 0,
+    marginOperations: 0,
+    marginSalesYen: 0,
+    marginAllowanceYen: 0,
     fuelYen: 0,
     directCostYen: 0,
     allocatedCostYen: 0,
     marginYen: 0,
-    laborYen: 0,
-    unknownFuelOperations: 0,
-    unknownFuelSalesYen: 0,
+    noMarginOperations: 0,
+    noMarginSalesYen: 0,
   }
 }
 
 /**
  * 運行の粗利を合計する。
  *
- * **燃料代が出せない運行は粗利の合計に入れない** — 燃料 0 円として足すと、
- * その車輌だけ粗利が良く見える。売上・手当・経費は合計に入れたうえで、
- * 「粗利を出せなかった運行が何本・売上いくら」を併記する。
+ * **粗利が出せない運行は粗利の内訳に入れない** — 燃料 0 円・経費 0 円として足すと、
+ * その車輌だけ粗利が良く見える。運行の本数・走行距離・売上・手当・人件費は
+ * **ぜんぶ**数えたうえで、「粗利を出せなかった運行が何本・売上いくら」を併記する。
  */
 export function summarizeMargins(margins: OperationMargin[]): MarginTotals {
   const totals = emptyMarginTotals()
@@ -581,17 +691,23 @@ export function summarizeMargins(margins: OperationMargin[]): MarginTotals {
     totals.totalKm += m.totalKm
     totals.salesYen += m.salesYen
     totals.allowanceYen += m.allowanceYen
-    totals.directCostYen += m.directCostYen
-    totals.allocatedCostYen += m.allocatedCostYen
     totals.laborYen += m.laborYen
     const fuelYen = m.fuelYen
-    if (fuelYen === null) {
-      totals.unknownFuelOperations += 1
-      totals.unknownFuelSalesYen += m.salesYen
+    const marginYen = m.marginYen
+    if (fuelYen === null || marginYen === null) {
+      totals.noMarginOperations += 1
+      totals.noMarginSalesYen += m.salesYen
       continue
     }
+    // **経費も粗利を出せた運行ぶんだけ足す。** ここで全運行ぶんを足すと
+    // 「売上 − 手当 − 経費」が画面の粗利と合わなくなる。
+    totals.marginOperations += 1
+    totals.marginSalesYen += m.salesYen
+    totals.marginAllowanceYen += m.allowanceYen
+    totals.directCostYen += m.directCostYen
+    totals.allocatedCostYen += m.allocatedCostYen
     totals.fuelYen += fuelYen
-    totals.marginYen += marginOf(m.salesYen, m.allowanceYen, fuelYen, m.directCostYen, m.allocatedCostYen)
+    totals.marginYen += marginYen
   }
   return totals
 }
@@ -624,8 +740,8 @@ export function groupMarginsByDriver(margins: OperationMargin[]): DriverMargin[]
 
 const CSV_HEADER = [
   '運行NO', '日付', '乗務員', '車輌C', '走行km', '月・車輌の走行km', '売上', '手当',
-  '燃料代', '直課経費', '按分経費', '粗利', '粗利率', '一番星の人件費(参考)',
-  '単価(円/L)', '燃費(km/L)',
+  '燃料代', '直課経費', '按分経費', '粗利', '粗利率', '粗利が出せない理由',
+  '一番星の人件費(参考)', '単価(円/L)', '燃費(km/L)',
 ]
 
 /** 運行 1 行ずつの粗利 CSV。値にカンマが入りうるので必ず引用する。 */
@@ -638,8 +754,8 @@ export function marginCsvLines(margins: OperationMargin[]): string[] {
     ...margins.map(m => [
       m.unkoNo, m.date, m.driverName, m.vehicleCode, m.totalKm, m.vehicleTotalKm,
       m.salesYen, m.allowanceYen, round(m.fuelYen), round(m.directCostYen),
-      round(m.allocatedCostYen), round(m.marginYen), rate(marginRate(m)), round(m.laborYen),
-      round(m.fuelRate.yenPerLiter), round(m.fuelRate.kmPerLiter),
+      round(m.allocatedCostYen), round(m.marginYen), rate(marginRate(m)), noMarginReason(m),
+      round(m.laborYen), round(m.fuelRate.yenPerLiter), round(m.fuelRate.kmPerLiter),
     ].map(quote).join(',')),
   ]
 }

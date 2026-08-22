@@ -17,6 +17,8 @@ import {
   emptyMarginTotals,
   groupMarginsByDriver,
   marginCsvLines,
+  noMarginReason,
+  summarizeNoMarginReasons,
   parseMarginCache,
   serializeMarginCache,
   EXCLUDED_KINDS,
@@ -479,7 +481,45 @@ describe('buildOperationMargins', () => {
     const res = buildOperationMargins([op({ totalKm: 100 })], [], {})
     expect(res.operations[0]!.fuelYen).toBeNull()
     expect(res.operations[0]!.marginYen).toBeNull()
+    expect(res.operations[0]!.costsMissing).toBe(true)
     expect(res.ratesByVehicle.get('1109')).toEqual(emptyFuelRate())
+  })
+
+  it('**経費を 1 件も持っていない車輌は、燃費を上書きしても粗利を出さない**', () => {
+    // 経費 0 円のまま粗利を出すと「売上そのまま」が粗利に見える = いちばん悪い壊れ方。
+    const res = buildOperationMargins(
+      [op({ totalKm: 100, salesYen: 50000 })],
+      [],
+      { 1109: { yenPerLiter: 130, kmPerLiter: 4 } },
+    )
+    const m = res.operations[0]!
+    expect(m.fuelYen).toBe((100 / 4) * 130)   // 燃料代そのものは出る
+    expect(m.costsMissing).toBe(true)
+    expect(m.marginYen).toBeNull()            // **粗利は出さない**
+    expect(noMarginReason(m)).toBe('この車輌・この月の経費を 1 件も引けていません')
+  })
+
+  it('燃料しか無い車輌は「経費は来ている」ので粗利を出す', () => {
+    const res = buildOperationMargins(
+      [op({ totalKm: 100, salesYen: 50000, allowanceYen: 8000 })],
+      [cost({ costKind: '01', quantity: 20, amount: 2400 })],
+      {},
+    )
+    const m = res.operations[0]!
+    expect(m.costsMissing).toBe(false)
+    // 単価 2400÷20 = 120 円/L、燃費 100÷20 = 5 km/L → 燃料 100÷5×120 = ¥2,400
+    expect(m.marginYen).toBe(50000 - 8000 - 2400)
+    expect(noMarginReason(m)).toBe('')
+  })
+
+  it('他の車輌の経費しか無ければ、その車輌は経費なし扱い', () => {
+    const res = buildOperationMargins(
+      [op({ vehicleCode: '1109', totalKm: 100 })],
+      [cost({ costKind: '04', vehicleNumber: '9999', amount: 1000 })],
+      { 1109: { yenPerLiter: 130, kmPerLiter: 4 } },
+    )
+    expect(res.operations[0]!.costsMissing).toBe(true)
+    expect(res.operations[0]!.marginYen).toBeNull()
   })
 
   it('上書きがあれば実績より優先し、実績も残す', () => {
@@ -543,28 +583,47 @@ describe('summarizeMargins', () => {
     marginYen: 38000,
     laborYen: 30000,
     fuelRate: { yenPerLiter: 120, kmPerLiter: 5, dieselTaxPerLiter: 32.1 },
+    costsMissing: false,
   }
 
   it('空なら 0 だけ', () => {
     expect(summarizeMargins([])).toEqual(emptyMarginTotals())
   })
 
-  it('燃費が出せた運行だけ粗利に足す', () => {
+  it('本数・走行・売上・手当・人件費はぜんぶ数え、粗利の内訳は出せた運行だけ', () => {
     const totals = summarizeMargins([
       base,
       { ...base, unkoNo: 'B', fuelYen: null, marginYen: null, salesYen: 20000 },
     ])
+    // --- ぜんぶ ---
     expect(totals.operations).toBe(2)
+    expect(totals.totalKm).toBe(200)
     expect(totals.salesYen).toBe(70000)
     expect(totals.allowanceYen).toBe(16000)
-    expect(totals.totalKm).toBe(200)
-    expect(totals.fuelYen).toBe(2400)
-    expect(totals.directCostYen).toBe(2000)
-    expect(totals.allocatedCostYen).toBe(1200)
     expect(totals.laborYen).toBe(60000)
-    expect(totals.marginYen).toBe(50000 - 8000 - 2400 - 1000 - 600)
-    expect(totals.unknownFuelOperations).toBe(1)
-    expect(totals.unknownFuelSalesYen).toBe(20000)
+    // --- 粗利を出せた運行ぶんだけ ---
+    expect(totals.marginOperations).toBe(1)
+    expect(totals.marginSalesYen).toBe(50000)
+    expect(totals.marginAllowanceYen).toBe(8000)
+    expect(totals.fuelYen).toBe(2400)
+    expect(totals.directCostYen).toBe(1000)
+    expect(totals.allocatedCostYen).toBe(600)
+    expect(totals.marginYen).toBe(38000)
+    // --- 出せなかったぶん ---
+    expect(totals.noMarginOperations).toBe(1)
+    expect(totals.noMarginSalesYen).toBe(20000)
+  })
+
+  it('**粗利の内訳は引き算がぴったり合う** (人が検算できないと信用されない)', () => {
+    const totals = summarizeMargins([
+      base,
+      { ...base, unkoNo: 'B', salesYen: 30000, allowanceYen: 5000, fuelYen: 1200, directCostYen: 400, allocatedCostYen: 300, marginYen: 23100 },
+      { ...base, unkoNo: 'C', fuelYen: null, marginYen: null, salesYen: 20000 },
+    ])
+    expect(
+      totals.marginSalesYen - totals.marginAllowanceYen - totals.fuelYen
+      - totals.directCostYen - totals.allocatedCostYen,
+    ).toBe(totals.marginYen)
   })
 })
 
@@ -584,6 +643,7 @@ describe('groupMarginsByDriver', () => {
     marginYen: 8500,
     laborYen: 0,
     fuelRate: emptyFuelRate(),
+    costsMissing: false,
   }
 
   it('乗務員ごとに畳んで名前順に並べる', () => {
@@ -618,6 +678,7 @@ describe('marginCsvLines', () => {
     marginYen: 38000,
     laborYen: 30000,
     fuelRate: { yenPerLiter: 120, kmPerLiter: 5, dieselTaxPerLiter: 32.1 },
+    costsMissing: false,
   }
 
   it('ヘッダと 1 行を出し、引用符をエスケープする', () => {
@@ -672,5 +733,110 @@ describe('parseMarginCache', () => {
 
   it('保存時刻が壊れていても空文字にして読む', () => {
     expect(parseMarginCache('{"ym":"2026-07","operations":[],"costs":[]}')!.savedAt).toBe('')
+  })
+})
+
+
+describe('noMarginReason', () => {
+  const base = {
+    marginYen: null as number | null,
+    costsMissing: false,
+    fuelRate: { yenPerLiter: 120, kmPerLiter: 5, dieselTaxPerLiter: 0 },
+  }
+
+  it('粗利が出ていれば空文字', () => {
+    expect(noMarginReason({ ...base, marginYen: 1000 })).toBe('')
+  })
+
+  it('経費が 1 件も無いのが最優先の理由', () => {
+    expect(noMarginReason({ ...base, costsMissing: true }))
+      .toBe('この車輌・この月の経費を 1 件も引けていません')
+  })
+
+  it('給油実績が無ければそう言う', () => {
+    expect(noMarginReason({ ...base, fuelRate: emptyFuelRate() }))
+      .toBe('この月・この車輌に燃料 (01) の給油実績がありません')
+  })
+
+  it('給油はあるが走行距離が 0 のときは別の理由', () => {
+    expect(noMarginReason({ ...base, fuelRate: { yenPerLiter: 120, kmPerLiter: null, dieselTaxPerLiter: 0 } }))
+      .toBe('走行距離が 0 で燃費が出せません')
+  })
+})
+
+// --- 実データ回帰 (2026-07 の一番星、親が実測した値) ---
+// **行ごとの単価は月平均と一致しない** (給油日で単価が動く) ので、
+// `Σ金額 ÷ Σ数量` でしか出せない。ここが回帰したら気づけるように実数を置く。
+
+describe('deriveFuelRate — 2026-07 の実データ', () => {
+  it('車0016: 4395.0L / ¥540,343 → 122.94 円/L (行単価 133.74 とは一致しない)', () => {
+    // 実データは 23 件だが、単価は Σ で決まるので 2 行に畳んで同じ Σ を作る。
+    const rate = deriveFuelRate([
+      cost({ costKind: '01', vehicleNumber: '0016', quantity: 4000, unitPrice: 133.74, amount: 491840, dieselTax: 0 }),
+      cost({ costKind: '01', vehicleNumber: '0016', quantity: 395, unitPrice: 130.44, amount: 48503, dieselTax: 0 }),
+      // **アドブルー (15) は 220.0 L あるが分母に入れない** (軽油ではない)。
+      cost({ costKind: '15', vehicleNumber: '0016', quantity: 220, amount: 19360, dieselTax: 0 }),
+      // 給与・修繕・保険は数量を持たないが、混ざらないことを確かめる。
+      cost({ costKind: '08', vehicleNumber: '0016', amount: 572000, isFixed: true }),
+      cost({ costKind: '03', vehicleNumber: '0016', amount: 41900 }),
+      cost({ costKind: '14', vehicleNumber: '0016', amount: 7090, isFixed: true }),
+    ], 4500)
+    expect(rate.yenPerLiter).toBeCloseTo(122.94, 2)
+    // **行単価のどちらとも一致しない** — これが Σ で出す理由。
+    expect(rate.yenPerLiter).not.toBe(133.74)
+    expect(rate.yenPerLiter).not.toBe(130.44)
+    // 分母がアドブルーを含んでいたら 4615L になり 0.97 km/L になる。
+    expect(rate.kmPerLiter).toBeCloseTo(4500 / 4395, 5)
+    // **軽油引取税は 1 件も入っていない** (この帳簿では別立て計上なし)。
+    expect(rate.dieselTaxPerLiter).toBe(0)
+  })
+
+  it('燃費は 1〜5 km/L に収まる (帯広5台の当たり)', () => {
+    // 車0016 は 4395.0L。月 15,000km 走れば 3.4 km/L。
+    const rate = deriveFuelRate([
+      cost({ costKind: '01', vehicleNumber: '0016', quantity: 4395, amount: 540343 }),
+    ], 15000)
+    expect(rate.kmPerLiter!).toBeGreaterThan(1)
+    expect(rate.kmPerLiter!).toBeLessThan(5)
+    expect(rate.yenPerLiter!).toBeGreaterThan(100)
+    expect(rate.yenPerLiter!).toBeLessThan(150)
+  })
+})
+
+
+describe('summarizeNoMarginReasons', () => {
+  const base: OperationMargin = {
+    unkoNo: 'A',
+    date: '2026-07-01',
+    driverName: '佐竹 繁',
+    vehicleCode: '1109',
+    totalKm: 100,
+    vehicleTotalKm: 100,
+    salesYen: 10000,
+    allowanceYen: 0,
+    fuelYen: 500,
+    directCostYen: 0,
+    allocatedCostYen: 0,
+    marginYen: 9500,
+    laborYen: 0,
+    fuelRate: { yenPerLiter: 120, kmPerLiter: 5, dieselTaxPerLiter: 0 },
+    costsMissing: false,
+  }
+
+  it('粗利が出ている運行しか無ければ空', () => {
+    expect(summarizeNoMarginReasons([base])).toEqual([])
+  })
+
+  it('理由ごとに件数と売上をまとめる (初出順)', () => {
+    const groups = summarizeNoMarginReasons([
+      base,
+      { ...base, unkoNo: 'B', marginYen: null, costsMissing: true, salesYen: 20000 },
+      { ...base, unkoNo: 'C', marginYen: null, fuelRate: emptyFuelRate(), salesYen: 5000 },
+      { ...base, unkoNo: 'D', marginYen: null, costsMissing: true, salesYen: 1000 },
+    ])
+    expect(groups).toEqual([
+      { reason: 'この車輌・この月の経費を 1 件も引けていません', operations: 2, salesYen: 21000 },
+      { reason: 'この月・この車輌に燃料 (01) の給油実績がありません', operations: 1, salesYen: 5000 },
+    ])
   })
 })

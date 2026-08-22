@@ -74,6 +74,8 @@ import {
   summarizeMargins,
   groupMarginsByDriver,
   marginRate,
+  noMarginReason,
+  summarizeNoMarginReasons,
   marginCsvLines,
   type CostRow,
   type FuelRateMap,
@@ -421,8 +423,12 @@ async function run() {
 
 const result = computed(() => buildOperationMargins(inputs.value, costs.value, fuelRates.value))
 const totals = computed(() => summarizeMargins(result.value.operations))
+/** 粗利を出せなかった理由と件数。**畳まれた表の中に隠さず月の合計の横に出す。** */
+const noMarginGroups = computed(() => summarizeNoMarginReasons(result.value.operations))
+/** 粗利率の分母は**粗利を出せた運行ぶんの売上**。全体の売上で割ると、経費が来ていない
+ * 車輌がいるだけで粗利率が実際より低く見える。 */
 const monthMarginRate = computed(() => marginRate({
-  salesYen: totals.value.salesYen - totals.value.unknownFuelSalesYen,
+  salesYen: totals.value.marginSalesYen,
   marginYen: totals.value.marginYen,
 }))
 
@@ -435,8 +441,9 @@ const vehicleRates = computed(() => [...result.value.kmByVehicle.keys()].sort().
   override: fuelRates.value[code],
 })))
 
+/** 粗利を出せなかった運行 (燃費が出せない / その車輌の経費が 1 件も無い)。 */
 function hasIssue(m: OperationMargin): boolean {
-  return m.fuelYen === null
+  return m.marginYen === null
 }
 
 /**
@@ -482,6 +489,8 @@ function downloadCsv() {
       <b>固定費と、日・車輌が運行に一致しない経費は走行距離の比で按分</b>します
       (分母・分子とも表に出しているので検算できます)。
       <b>燃費が出せない車輌の運行は粗利も「-」</b>にします (0 で割った値を混ぜないため)。
+      <b>その車輌・その月の経費を 1 件も引けなかった運行も「-」</b>です —
+      経費 0 円として計算すると<b>売上そのままが粗利に見える</b>ので、理由を出して空けます。
     </p>
 
     <div class="flex flex-wrap gap-3 items-end mb-4">
@@ -556,7 +565,9 @@ function downloadCsv() {
       売上 (一番星) が引けませんでした — {{ salesError }} (売上 0 として扱っているので<b>粗利は正しくありません</b>)
     </p>
     <p v-if="costError" class="text-sm text-red-600 dark:text-red-400 mb-4">
-      経費 (一番星) が引けませんでした — {{ costError }} (経費 0 として扱っているので<b>粗利は正しくありません</b>)
+      経費 (一番星) が引けませんでした — {{ costError }}
+      <b>経費 0 円の粗利は出しません</b> — 該当する車輌の運行は粗利を <b>-</b> にしています
+      (売上そのままが粗利に見えるのを避けるため)。
     </p>
 
     <template v-if="status === 'ready'">
@@ -565,40 +576,64 @@ function downloadCsv() {
       </p>
       <template v-else>
         <!-- 月の合計 -->
-        <div class="mb-3 flex flex-wrap gap-x-6 gap-y-2 text-sm items-center">
+        <div class="mb-2 flex flex-wrap gap-x-6 gap-y-2 text-sm items-center">
           <span class="font-semibold">{{ shownYm }}</span>
           <span>運行 <b>{{ totals.operations }}</b> 本</span>
           <span>走行 <b>{{ km(totals.totalKm) }}</b></span>
           <span>売上 <b>{{ yen(totals.salesYen) }}</b></span>
           <span>手当 <b>{{ yen(totals.allowanceYen) }}</b></span>
-          <span>燃料代 <b>{{ yen(totals.fuelYen) }}</b></span>
-          <span>直課経費 <b>{{ yen(totals.directCostYen) }}</b></span>
-          <span>按分経費 <b>{{ yen(totals.allocatedCostYen) }}</b></span>
-          <span>
-            粗利
-            <b :class="totals.marginYen < 0 ? 'text-red-600 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-400'">
-              {{ yen(totals.marginYen) }}
-            </b>
-            <span class="text-gray-400">({{ pct(monthMarginRate) }})</span>
-          </span>
-          <span
-            v-if="totals.unknownFuelOperations > 0"
-            class="text-amber-600 dark:text-amber-400"
-            title="燃費が出せず粗利を出せなかった運行。上の粗利・粗利率にはこの運行の売上も入っていません"
-          >
-            粗利を出せず <b>{{ totals.unknownFuelOperations }}</b> 本 (売上 {{ yen(totals.unknownFuelSalesYen) }})
-          </span>
-          <span
-            v-if="result.unallocatedCostYen > 0"
-            class="text-amber-600 dark:text-amber-400"
-            title="その車輌の運行が 1 本も無い / 走行距離が 0 で按分できなかった経費。上の粗利から抜けています"
-          >
-            配れなかった経費 <b>{{ yen(result.unallocatedCostYen) }}</b>
-          </span>
           <label class="text-xs text-gray-500 flex items-center gap-1.5 cursor-pointer select-none">
             <input v-model="onlyIssues" type="checkbox" class="cursor-pointer">
             粗利を出せない運行だけ表示
           </label>
+        </div>
+
+        <!-- **粗利の内訳。** ここに出す数だけで引き算がぴったり合うようにしてある
+             (上の「売上」は粗利を出せなかった運行のぶんも含むので使わない)。 -->
+        <div class="mb-4 p-3 rounded-lg border border-gray-200 dark:border-gray-800">
+          <p class="text-xs text-gray-500 mb-2">
+            粗利の内訳 — <b>粗利を出せた {{ totals.marginOperations }} 本ぶん</b>だけの数です。
+            <b>この行だけで引き算が合います</b> (上の「売上」は粗利を出せなかった運行のぶんも
+            含むので、こちらの売上とは一致しません)。
+          </p>
+          <div class="flex flex-wrap gap-x-3 gap-y-2 text-sm items-center">
+            <span>売上 <b>{{ yen(totals.marginSalesYen) }}</b></span>
+            <span class="text-gray-400">−</span>
+            <span>手当 <b>{{ yen(totals.marginAllowanceYen) }}</b></span>
+            <span class="text-gray-400">−</span>
+            <span>燃料代 <b>{{ yen(totals.fuelYen) }}</b></span>
+            <span class="text-gray-400">−</span>
+            <span>直課経費 <b>{{ yen(totals.directCostYen) }}</b></span>
+            <span class="text-gray-400">−</span>
+            <span>按分経費 <b>{{ yen(totals.allocatedCostYen) }}</b></span>
+            <span class="text-gray-400">=</span>
+            <span>
+              粗利
+              <b :class="totals.marginYen < 0 ? 'text-red-600 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-400'">
+                {{ yen(totals.marginYen) }}
+              </b>
+              <span class="text-gray-400">({{ pct(monthMarginRate) }})</span>
+            </span>
+          </div>
+          <div v-if="totals.noMarginOperations > 0" class="text-xs text-amber-600 dark:text-amber-400 mt-2">
+            <p>
+              <b>粗利を出せなかった運行が {{ totals.noMarginOperations }} 本</b>
+              (売上 {{ yen(totals.noMarginSalesYen) }})。上の内訳には入っていません。
+            </p>
+            <ul class="mt-1 ml-4 list-disc">
+              <li v-for="g in noMarginGroups" :key="g.reason">
+                {{ g.reason }} — <b>{{ g.operations }}</b> 本 (売上 {{ yen(g.salesYen) }})
+              </li>
+            </ul>
+          </div>
+          <p
+            v-if="result.unallocatedCostYen > 0"
+            class="text-xs text-amber-600 dark:text-amber-400 mt-2"
+            title="その車輌の運行が 1 本も無い / 走行距離が 0 で按分できなかった経費。上の粗利から抜けています"
+          >
+            どの運行にも配れなかった経費が <b>{{ yen(result.unallocatedCostYen) }}</b> あります
+            (その車輌の運行が 1 本も無い / 走行距離が 0)。上の粗利から抜けています。
+          </p>
         </div>
 
         <!-- 人件費の別枠 -->
@@ -637,7 +672,11 @@ function downloadCsv() {
             <b>既定値は一番星の燃料実績</b> (単価 = Σ税抜金額 ÷ Σ給油量、燃費 = Σ走行距離 ÷ Σ給油量)。
             <b>給油日と運行日がずれる</b>ので単月では燃費が振れます。<b>確定値は下の欄に入れてください</b>
             (このブラウザに保存され、実績より優先します。空にすると実績に戻ります)。
-            <b>軽油引取税は単価に入っていません</b> — 実際に払っている 円/L は「単価 + 軽油引取税」です。
+            <b>軽油引取税は単価に入っていません。</b>
+            ただし <b>2026-07 の実データでは全社 1,427 件すべて ¥0</b> で、税抜でも税込でも
+            単価は 122.95 円/L と 1 円も変わりませんでした — <b>この帳簿では別立てで計上されていない</b>
+            ので、下の「軽油引取税」列が <b>¥0 なのは異常ではありません</b>
+            (0 でない値が出てきたら、そのぶんは単価に足されていないという意味です)。
           </p>
           <div class="border border-gray-200 dark:border-gray-800 rounded-lg overflow-x-auto">
             <table class="w-full text-xs">
@@ -646,7 +685,10 @@ function downloadCsv() {
                   <th class="text-left px-3 py-2 font-medium text-gray-500">車輌C</th>
                   <th class="text-right px-3 py-2 font-medium text-gray-500">月の走行km</th>
                   <th class="text-right px-3 py-2 font-medium text-gray-500">実績 単価(円/L)</th>
-                  <th class="text-right px-3 py-2 font-medium text-gray-500">軽油引取税(円/L)</th>
+                  <th
+                    class="text-right px-3 py-2 font-medium text-gray-500"
+                    title="参考表示。単価には入れていません。この帳簿では別立て計上が無く 0 が正常です"
+                  >軽油引取税(円/L)</th>
                   <th class="text-right px-3 py-2 font-medium text-gray-500">実績 燃費(km/L)</th>
                   <th class="text-right px-3 py-2 font-medium text-gray-500">上書き 単価</th>
                   <th class="text-right px-3 py-2 font-medium text-gray-500">上書き 燃費</th>
@@ -658,7 +700,10 @@ function downloadCsv() {
                   <td class="px-3 py-1.5">{{ v.code }}</td>
                   <td class="px-3 py-1.5 text-right">{{ km(v.totalKm) }}</td>
                   <td class="px-3 py-1.5 text-right">{{ num(v.derived.yenPerLiter) }}</td>
-                  <td class="px-3 py-1.5 text-right text-gray-400">{{ num(v.derived.dieselTaxPerLiter) }}</td>
+                  <td class="px-3 py-1.5 text-right text-gray-400">
+                    {{ num(v.derived.dieselTaxPerLiter) }}
+                    <span v-if="v.derived.dieselTaxPerLiter === 0" class="text-gray-400">(別立て計上なし)</span>
+                  </td>
                   <td class="px-3 py-1.5 text-right">{{ num(v.derived.kmPerLiter, 2) }}</td>
                   <td class="px-3 py-1.5 text-right">
                     <input
@@ -748,13 +793,13 @@ function downloadCsv() {
                   </td>
                   <td class="px-3 py-2 text-right">
                     {{ pct(marginRate({
-                      salesYen: d.totals.salesYen - d.totals.unknownFuelSalesYen,
+                      salesYen: d.totals.marginSalesYen,
                       marginYen: d.totals.marginYen,
                     })) }}
                   </td>
                   <td class="px-3 py-2 text-amber-600 dark:text-amber-400">
-                    <span v-if="d.totals.unknownFuelOperations > 0">
-                      粗利を出せず {{ d.totals.unknownFuelOperations }} 本
+                    <span v-if="d.totals.noMarginOperations > 0">
+                      粗利を出せず {{ d.totals.noMarginOperations }} 本
                     </span>
                   </td>
                   <td class="px-3 py-2 text-right text-gray-400">{{ yen(d.totals.laborYen) }}</td>
@@ -789,7 +834,7 @@ function downloadCsv() {
                   <td
                     class="px-3 py-1.5 text-right font-medium"
                     :class="m.marginYen !== null && m.marginYen < 0 ? 'text-red-600 dark:text-red-400' : ''"
-                    :title="m.marginYen === null ? '燃費が出せないので粗利を出していません' : ''"
+                    :title="noMarginReason(m)"
                   >
                     {{ yen(m.marginYen) }}
                   </td>
@@ -800,6 +845,9 @@ function downloadCsv() {
                       = {{ pct(m.totalKm / m.vehicleTotalKm) }}
                     </span>
                     <span v-else class="text-amber-600 dark:text-amber-400">— 分母 0 なので按分していません</span>
+                    <span v-if="m.marginYen === null" class="block text-amber-600 dark:text-amber-400">
+                      粗利 - : {{ noMarginReason(m) }}
+                    </span>
                   </td>
                   <td class="px-3 py-1.5 text-right text-gray-400">{{ yen(m.laborYen) }}</td>
                 </tr>
