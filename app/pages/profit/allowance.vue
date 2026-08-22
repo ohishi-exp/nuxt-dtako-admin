@@ -661,10 +661,16 @@ function legPayYen(r: AllowanceReportRow): number | null {
  * 暫定が当たった便まで未確定に数えてしまう (強制突合したぶんは `applyForcedLegs` で
  * 便に映してあるので、ここではマスタで決まった便と区別が要らない)。
  * `summarizeProvisional` の `missingTrips` がちょうどこの定義。
+ *
+ * **一番星から起こした便のぶんも足す。** 便数・手当・売上・収支は
+ * デジタコ + 一番星 なのに未確定だけデジタコ由来を数えていると、
+ * **手当が決まっていない便が居るのに `未確定 0 便` と出る** (2026-07 の
+ * `07-17 西島 駒場 → ユナイテッド牧場` が実際にそうなった)。
  */
-const monthUnresolvedTrips = computed(() => monthProvisional.value.missingTrips)
+const monthUnresolvedTrips = computed(() =>
+  monthProvisional.value.missingTrips + ichibanTotals.value.unknownTrips)
 function driverUnresolvedTrips(d: DriverNode): number {
-  return driverProvisional(d).missingTrips
+  return driverProvisional(d).missingTrips + driverIchiban(d).unknownTrips
 }
 function opUnresolvedTrips(op: OperationNode): number {
   return opProvisional(op).missingTrips
@@ -1413,7 +1419,7 @@ function downloadCsv() {
           </b></span>
           <span
             :class="monthUnresolvedTrips > 0 ? 'text-amber-600 dark:text-amber-400' : ''"
-            title="手当が 1 円も決まっていない便。マスタ・暫定・強制突合のどれかで決まった便は入りません"
+            title="手当が 1 円も決まっていない便 (一番星から起こした便のぶんも含みます)。マスタ・暫定・強制突合のどれかで決まった便は入りません"
           >
             未確定 <b>{{ monthUnresolvedTrips }}</b> 便
           </span>
@@ -1696,7 +1702,14 @@ function downloadCsv() {
                           <td class="px-3 py-1.5 text-right whitespace-nowrap">
                             {{ yen(margin(driverTotals(d).ichibanSalesYen, driverTotals(d).ichibanYen)) }}
                           </td>
-                          <td class="px-3 py-1.5" />
+                          <td
+                            class="px-3 py-1.5 text-right"
+                            :class="driverIchiban(d).unknownTrips > 0
+                              ? 'text-amber-600 dark:text-amber-400'
+                              : 'text-gray-300 dark:text-gray-700'"
+                          >
+                            {{ driverIchiban(d).unknownTrips }}
+                          </td>
                           <td class="px-3 py-1.5" />
                           <td class="px-3 py-1.5 text-right whitespace-nowrap text-gray-400">下に一覧</td>
                         </tr>
