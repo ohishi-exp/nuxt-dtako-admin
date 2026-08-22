@@ -36,16 +36,26 @@
 import { getOperations, getOperationCsv, getDrivers } from '~/utils/api'
 import { fetchAllPages } from '~/utils/paged-fetch'
 import type { Driver, OperationListItem } from '~/types'
-import { extractAllowanceLegs, allowanceForLegs } from '~/utils/allowance-trips'
+import { extractAllowanceLegs, extractCarryInUnloads, allowanceForLegs } from '~/utils/allowance-trips'
 import { extractOperationIdle } from '~/utils/allowance-idle'
 import { parseTargets, serializeTargets, toggleTarget, driverLabel } from '~/utils/allowance-targets'
 import {
   applyCarryOver,
   buildMonthlyAllowance,
   monthReadingRange,
+  toReportRows,
   type OperationAllowance,
   type AllowanceReportRow,
+  type MonthlyAllowance,
 } from '~/utils/allowance-report'
+import {
+  FORCE_MATCH_KEY,
+  parseForceMatch,
+  forceMatchKey,
+  resolveForceMatches,
+  applyForcedLegs,
+  type ForcedLeg,
+} from '~/utils/allowance-force-match'
 import { fetchVehicleDailySlips, fetchDriverDailySlips, type VehicleDailySlip } from '~/utils/ichiban'
 import { PROVISIONAL_KEY, parseProvisional, provisionalFor, type ProvisionalMap } from '~/utils/allowance-provisional'
 import { EXCLUDED_KEY, parseExcluded, isExcluded, type ExcludedMap } from '~/utils/allowance-excluded'
@@ -59,6 +69,7 @@ import {
   legKey,
   POOL_VEHICLE,
   type VehicleReconcileInput,
+  type LegReconcile,
 } from '~/utils/allowance-ichiban'
 import {
   FUEL_RATE_KEY,
@@ -284,7 +295,16 @@ async function resolveOperation(op: OperationListItem): Promise<ResolvedOperatio
     const csv = await getOperationCsv(op.unko_no, 'events')
     const idle = extractOperationIdle(csv.headers, csv.rows)
     return {
-      allowance: { ...base, legs: allowanceForLegs(extractAllowanceLegs(csv.headers, csv.rows)) },
+      allowance: {
+        ...base,
+        legs: allowanceForLegs(extractAllowanceLegs(csv.headers, csv.rows)),
+        // **積んだまま帰庫した便の卸地は、次の運行の先頭の降しにある。**
+        // ここで CSV から取らないと `applyCarryOver` が空の `carryIn` しか見られず、
+        // 引き継ぎが 1 便も当たらない (2026-07 / 帯広5台で 10 運行・手当 ¥89,000・
+        // 売上 ¥268,484 が粗利タブだけ落ちていた。運行手当タブ側は L1171 で同じことを
+        // している)。
+        carryIn: extractCarryInUnloads(csv.headers, csv.rows),
+      },
       totalKm: idle.totalKm,
       // 按分の分子の中身。**画面に出すだけ**で、按分そのものは `totalKm` のまま。
       kmBreakdown: {
@@ -299,6 +319,23 @@ async function resolveOperation(op: OperationListItem): Promise<ResolvedOperatio
   catch (e) {
     return { allowance: { ...base, error: e instanceof Error ? e.message : String(e) }, totalKm: 0, kmBreakdown: emptyKmBreakdown() }
   }
+}
+
+/**
+ * 運行NO → その運行の便。**手当は運行手当タブと同じ基準にする** — 除外した便は落とす。
+ * 基準がずれると「手当タブと粗利タブで手当が違う」という直しようのない話になる。
+ */
+function rowsByUnkoOf(monthly: MonthlyAllowance, excluded: ExcludedMap): Map<string, AllowanceReportRow[]> {
+  const map = new Map<string, AllowanceReportRow[]>()
+  for (const d of monthly.drivers) {
+    for (const op of d.operations) map.set(op.unkoNo, op.rows.filter(r => !isExcluded(r, excluded)))
+  }
+  return map
+}
+
+/** 除外を抜いた便を全部。 */
+function rowsOf(monthly: MonthlyAllowance, excluded: ExcludedMap): AllowanceReportRow[] {
+  return [...rowsByUnkoOf(monthly, excluded).values()].flat()
 }
 
 /** 便 1 本の「払う手当」= マスタで決まった額、無ければ暫定。どちらも無ければ 0。 */
@@ -335,45 +372,110 @@ function orderedVehicleRows(rows: AllowanceReportRow[]): [string, AllowanceRepor
   return [...groups].sort((a, b) => (a[0] > b[0] ? 1 : -1))
 }
 
+/** 引いた一番星の明細。 */
+interface SalesSlips {
+  /** 突合の入力の鍵 (乗務員CD か 車輌C) → 明細。 */
+  byKey: Record<string, VehicleDailySlip[]>
+  /** 受け皿 (`POOL_VEHICLE`) の明細。車番で引いたときだけ入る。 */
+  pool: VehicleDailySlip[]
+}
+
 /**
- * 便 → 売上。一番星が引けなければ空の Map (売上 0 として粗利は出さない)。
+ * 一番星の明細を引く。**取得はここだけ** — 突合 (`reconcileSales`) は引いたものを
+ * 使い回して通信しない。
+ *
+ * **強制突合より先に引く必要がある**。人が便に結んだ相手は明細の `rowId` なので、
+ * 明細を持っていないと `resolveForceMatches` が 1 件も解けない。
+ */
+async function fetchSlips(rows: AllowanceReportRow[], byDriver: boolean): Promise<SalesSlips> {
+  const range = slipDateRange(shownYm.value)
+  const byKey: Record<string, VehicleDailySlip[]> = {}
+  if (byDriver) {
+    for (const [cd] of orderedDriverRows(rows)) {
+      progress.value = `一番星の売上を取得中 ${labelOf(cd)}`
+      byKey[cd] = tradableSlips(await fetchDriverDailySlips(cd, range.from, range.to))
+    }
+    return { byKey, pool: [] }
+  }
+  for (const [code] of orderedVehicleRows(rows)) {
+    progress.value = `一番星の売上を取得中 車輌${code}`
+    byKey[code] = tradableSlips(await fetchVehicleDailySlips(code, range.from, range.to))
+  }
+  progress.value = `一番星の売上を取得中 受け皿(${POOL_VEHICLE})`
+  return { byKey, pool: tradableSlips(await fetchVehicleDailySlips(POOL_VEHICLE, range.from, range.to)) }
+}
+
+/** 一番星の明細を `rowId` で引く。強制突合が結んだ相手を取り出すのに使う。 */
+function slipByRowId(byKey: Record<string, VehicleDailySlip[]>): Map<string, VehicleDailySlip> {
+  const map = new Map<string, VehicleDailySlip>()
+  for (const list of Object.values(byKey)) {
+    for (const slip of list) map.set(slip.rowId, slip)
+  }
+  return map
+}
+
+/**
+ * **強制突合で結んだ便の売上を突合結果に上書きする** (運行手当タブの `byLeg` と同じ)。
+ *
+ * 降しが 1 つも無い便は自動では当たらないので、人が結んだ明細をここで `matched` に
+ * して初めて売上が付く。**上書きした結果をそのまま `buildUncoveredLegs` にも渡す** —
+ * 結んだ明細を「デジタコ便に当たった」扱いにしないと、同じ売上が粗利と対象外の
+ * 両方に出る。
+ */
+function applyForcedSales(
+  rows: AllowanceReportRow[],
+  base: Map<string, LegReconcile>,
+  forced: Map<string, ForcedLeg>,
+): Map<string, LegReconcile> {
+  if (forced.size === 0) return base
+  const out = new Map(base)
+  for (const row of rows) {
+    const hit = forced.get(forceMatchKey(row))
+    if (hit === undefined) continue
+    out.set(legKey(row), {
+      key: legKey(row),
+      status: 'matched',
+      slips: hit.slips,
+      quantity: hit.quantity,
+      salesYen: hit.salesYen,
+      split: false,
+      fromPool: false,
+    })
+  }
+  return out
+}
+
+/**
+ * 便 → 売上。**引いてある明細だけで突合する (通信しない)。**
  *
  * **同じ突合の結果から「粗利の対象外の便」も数える** (`buildUncoveredLegs`)。
  * デジタコに運行が無い日の便は粗利に載せられないが、**落ちていることは言う**。
  * 別々に引き直すと、売上の突合とずれた数字を並べることになる。
  */
-async function fetchSales(
+function reconcileSales(
   rows: AllowanceReportRow[],
-  driverNames: string[],
+  slips: SalesSlips,
+  byDriver: boolean,
+  forced: Map<string, ForcedLeg>,
   provisional: ProvisionalMap,
-): Promise<{ salesByLeg: Map<string, number>, uncovered: UncoveredTotals | null }> {
-  const range = slipDateRange(shownYm.value)
-  const inputsForReconcile: VehicleReconcileInput[] = []
-  let pool: VehicleDailySlip[] = []
+): { salesByLeg: Map<string, number>, uncovered: UncoveredTotals | null } {
+  const ordered = byDriver ? orderedDriverRows(rows) : orderedVehicleRows(rows)
+  const inputsForReconcile: VehicleReconcileInput[] = ordered
+    .map(([key, groupRows]) => ({ vehicle: key, rows: groupRows, slips: slips.byKey[key] ?? [] }))
+  const byLeg = applyForcedSales(rows, reconcileVehicles(inputsForReconcile, slips.pool).byLeg, forced)
+  const salesByLeg = new Map<string, number>()
+  for (const [key, hit] of byLeg) salesByLeg.set(key, hit.salesYen)
   // **乗務員で引けているときだけ対象外の便を起こす。** 車番引きでは、その乗務員が
   // 別の車番で走った日の明細を持っていないので、起こすべき便が見えない
   // (運行手当タブの `ichibanLegs` と同じ条件)。
-  const uncoveredInputs: UncoveredDriverInput[] = []
-  if (canFetchByDriver(driverNames)) {
-    for (const [cd, driverRows] of orderedDriverRows(rows)) {
-      progress.value = `一番星の売上を取得中 ${labelOf(cd)}`
-      const slips = tradableSlips(await fetchDriverDailySlips(cd, range.from, range.to))
-      inputsForReconcile.push({ vehicle: cd, rows: driverRows, slips })
-      uncoveredInputs.push({ driverName: driverRows[0]!.driverName, rows: driverRows, slips })
-    }
-  }
-  else {
-    for (const [code, vehicleRows] of orderedVehicleRows(rows)) {
-      progress.value = `一番星の売上を取得中 車輌${code}`
-      inputsForReconcile.push({ vehicle: code, rows: vehicleRows, slips: tradableSlips(await fetchVehicleDailySlips(code, range.from, range.to)) })
-    }
-    progress.value = `一番星の売上を取得中 受け皿(${POOL_VEHICLE})`
-    pool = tradableSlips(await fetchVehicleDailySlips(POOL_VEHICLE, range.from, range.to))
-  }
-  const res = reconcileVehicles(inputsForReconcile, pool)
-  const salesByLeg = new Map<string, number>()
-  for (const [key, hit] of res.byLeg) salesByLeg.set(key, hit.salesYen)
-  const legs = buildUncoveredLegs(uncoveredInputs, [...res.byLeg.values()], shownYm.value, provisional)
+  const uncoveredInputs: UncoveredDriverInput[] = byDriver
+    ? ordered.map(([key, groupRows]) => ({
+        driverName: groupRows[0]!.driverName,
+        rows: groupRows,
+        slips: slips.byKey[key] ?? [],
+      }))
+    : []
+  const legs = buildUncoveredLegs(uncoveredInputs, [...byLeg.values()], shownYm.value, provisional)
   return { salesByLeg, uncovered: summarizeUncoveredLegs(legs) }
 }
 
@@ -417,21 +519,37 @@ async function run() {
     // 基準がずれると「手当タブと粗利タブで手当が違う」という直しようのない話になる。
     const provisional = parseProvisional(localStorage.getItem(PROVISIONAL_KEY))
     const excluded: ExcludedMap = parseExcluded(localStorage.getItem(EXCLUDED_KEY))
-    const monthly = buildMonthlyAllowance(ops, shownYm.value)
-    const rowsByUnko = new Map<string, AllowanceReportRow[]>()
-    const driverNames: string[] = []
-    for (const d of monthly.drivers) {
-      driverNames.push(d.driverName)
-      for (const op of d.operations) {
-        rowsByUnko.set(op.unkoNo, op.rows.filter(r => !isExcluded(r, excluded)))
-      }
-    }
-    const allRows = [...rowsByUnko.values()].flat()
+    // **強制突合を当てる前の集計。** 一番星をどう引くか (乗務員 / 車番) と、どの
+    // 乗務員・車輌ぶんを引くかを決めるのに使う。強制突合は便の卸地・手当を書き換える
+    // だけで、運行も乗務員も増減しないので、ここで決めた引き先は当てた後も変わらない。
+    const base = buildMonthlyAllowance(ops, shownYm.value)
+    const byDriver = canFetchByDriver(base.drivers.map(d => d.driverName))
 
     // 一番星が落ちていても経費と手当は出せる。売上だけ諦めて理由を画面に残す。
+    let monthly = base
     let salesByLeg = new Map<string, number>()
     try {
-      const sales = await fetchSales(allRows, driverNames, provisional)
+      // **明細を先に引く。** 強制突合は明細の `rowId` で結ばれているので、
+      // 集計より前に引いておかないと 1 件も解けない。取得はこの 1 回だけ。
+      const slips = await fetchSlips(rowsOf(base, excluded), byDriver)
+      // **強制突合は乗務員で引けているときだけ効かせる** (運行手当タブと同じ条件)。
+      // 車番引きでは、その乗務員が別の車番で走った日の明細を持っていないので、
+      // 人が結んだ相手が引けない。
+      // **対象月の外の便も含めて引く** (`toReportRows(ops)`) — 月で切ってから引くと、
+      // 月末の運行に結んだぶんが集計に映らない。
+      const forced = byDriver
+        ? resolveForceMatches(
+            toReportRows(ops),
+            parseForceMatch(localStorage.getItem(FORCE_MATCH_KEY)),
+            slipByRowId(slips.byKey),
+            provisional,
+          )
+        : new Map<string, ForcedLeg>()
+      // **集計の前に便へ重ねる** — 卸地・手当・便数・経路キーが 1 か所から追従する。
+      // 結んだ便が無ければ `applyForcedLegs` は同じ配列を返すので、集計し直さない。
+      const opsForced = applyForcedLegs(ops, forced)
+      if (opsForced !== ops) monthly = buildMonthlyAllowance(opsForced, shownYm.value)
+      const sales = reconcileSales(rowsOf(monthly, excluded), slips, byDriver, forced, provisional)
       salesByLeg = sales.salesByLeg
       uncovered.value = sales.uncovered
     }
@@ -439,6 +557,7 @@ async function run() {
       salesError.value = e instanceof Error ? e.message : String(e)
     }
 
+    const rowsByUnko = rowsByUnkoOf(monthly, excluded)
     inputs.value = monthly.drivers.flatMap(d => d.operations.map((op) => {
       const rows = rowsByUnko.get(op.unkoNo) ?? []
       return {
@@ -543,7 +662,8 @@ function downloadCsv() {
     <p class="text-xs text-gray-500 mb-4">
       運行 1 本ごとに <b>売上 − 手当 − 燃料代 − 直課経費 − 按分経費</b> を出します。
       売上は<b>一番星の運転日報明細</b>、手当は<b>料金・給与マスタ</b> (運行手当タブと同じ基準。
-      暫定手当を足し、除外した便は落とします)、経費は<b>一番星の経費明細</b>です。
+      暫定手当を足し、除外した便は落とし、<b>推定卸地の引き継ぎと強制突合も同じに当てます</b>)、
+      経費は<b>一番星の経費明細</b>です。
       <b>燃料代は一番星から取らず、走行距離 ÷ 燃費 × 単価で出します</b> —
       給油日と運行日がずれるので、燃料費をそのまま乗せると給油した日の運行だけが赤くなるためです。
       <b>固定費と、日・車輌が運行に一致しない経費は走行距離の比で按分</b>します
