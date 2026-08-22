@@ -35,7 +35,14 @@ import {
   type OperationMargin,
   type UncoveredDriverInput,
 } from '~/utils/margin'
-import type { AllowanceReportRow } from '~/utils/allowance-report'
+import {
+  applyCarryOver,
+  buildMonthlyAllowance,
+  type AllowanceReportRow,
+  type OperationAllowance,
+} from '~/utils/allowance-report'
+import { extractAllowanceLegs, extractCarryInUnloads, allowanceForLegs } from '~/utils/allowance-trips'
+import { forcedLeg } from '~/utils/allowance-force-match'
 import type { VehicleDailySlip } from '~/utils/ichiban'
 
 function cost(over: Partial<CostRow> = {}): CostRow {
@@ -1097,5 +1104,140 @@ describe('走行km の内訳 (kmBreakdown)', () => {
     // 形を変えたら番号を上げる規約。**上げ忘れると `kmBreakdown` が無い行を画面が読む**
     // (#760 の 4 が v2 を取っているので、内訳を足したこの版は v3)
     expect(MARGIN_CACHE_KEY).toBe('dtako:margin:cache:v3')
+  })
+})
+
+describe('推定卸地の引き継ぎ (carryIn) — 粗利タブが運行手当タブと同じ手当を出す', () => {
+  // **粗利タブは `carryIn` をイベントCSV から取っていなかった** (Refs #760 の 6)。
+  // `resolveOperation` が `{ cities: [], toTs: null }` を入れたままだったので、
+  // 後段の `applyCarryOver` が常に空を見て 1 便も引き継げず、2026-07 / 帯広5台で
+  // 10 運行・手当 ¥89,000・売上 ¥268,484 が運行手当タブとの差になっていた。
+  // ここは**両タブが通る pure な経路そのもの**を、CSV から便を起こすところから
+  // 固定する (画面側は `carryIn:` の 1 行を足すだけになる)。
+  const HEADERS = ['イベント名', '開始日時', '終了日時', '開始市町村名', '終了市町村名']
+
+  /** イベントCSV の 1 行。列は HEADERS の順。 */
+  function ev(name: string, startCity = '', endCity = '', start = '2026/7/6 4:20:0', end = '2026/7/6 6:0:0') {
+    return [name, start, end, startCity, endCity]
+  }
+
+  // 実データ (2026-07 / 帯広800か1109) の形。運行 A の最終便は 07-07 に積んで
+  // **降しが 1 つも無いまま帰庫**しており、その卸地は次の運行 B の先頭の降し
+  // (07-08 4:40 士幌町) にある。
+  const csvA = {
+    headers: HEADERS,
+    rows: [
+      ev('運行開始', '音更町', '', '2026/7/6 4:18:0', '2026/7/6 4:18:0'),
+      ev('積み', '釧路市', '', '2026/7/6 9:31:0', '2026/7/6 10:17:0'),
+      ev('降し', '', '浦幌町', '2026/7/6 13:0:0', '2026/7/6 14:0:0'),
+      ev('積み', '釧路市', '', '2026/7/7 15:21:0', '2026/7/7 16:0:0'),
+      ev('運行終了', '音更町', '', '2026/7/7 20:0:0', '2026/7/7 20:0:0'),
+    ],
+  }
+  const csvB = {
+    headers: HEADERS,
+    rows: [
+      ev('運行開始', '音更町', '', '2026/7/8 4:19:0', '2026/7/8 4:19:0'),
+      ev('降し', '', '士幌町', '2026/7/8 4:40:0', '2026/7/8 5:20:0'),
+      ev('積み', '釧路市', '', '2026/7/8 9:0:0', '2026/7/8 9:40:0'),
+      ev('降し', '', '浦幌町', '2026/7/8 13:0:0', '2026/7/8 14:0:0'),
+    ],
+  }
+
+  /**
+   * 運行 1 本。**`withCarryIn: false` が #760 の 6 以前の粗利タブ** —
+   * `carryIn` を CSV から取らず空のまま渡していた。`true` が運行手当タブと同じ。
+   */
+  function operation(
+    unkoNo: string,
+    readingDate: string,
+    csv: { headers: string[], rows: string[][] },
+    withCarryIn: boolean,
+  ): OperationAllowance {
+    return {
+      unkoNo,
+      readingDate,
+      operationDate: null,
+      driverName: '中村 秀一',
+      vehicleName: '帯広800か1109',
+      legs: allowanceForLegs(extractAllowanceLegs(csv.headers, csv.rows)),
+      carryIn: withCarryIn ? extractCarryInUnloads(csv.headers, csv.rows) : { cities: [], toTs: null },
+      error: null,
+    }
+  }
+
+  function monthlyOf(withCarryIn: boolean) {
+    return buildMonthlyAllowance(applyCarryOver([
+      operation('26070604185900000011091', '2026-07-07', csvA, withCarryIn),
+      operation('26070804190900000011091', '2026-07-08', csvB, withCarryIn),
+    ]), '2026-07')
+  }
+
+  it('carryIn を CSV から取れば、積み残しの便に卸地と手当が付く', () => {
+    const m = monthlyOf(true)
+    const carriedRow = m.drivers[0]!.operations[0]!.rows[1]!
+    expect(carriedRow).toMatchObject({
+      date: '2026-07-07', originCity: '釧路市', destCity: '士幌町',
+      masterDest: '溝口', allowanceYen: 9000, destSource: 'carried',
+    })
+    expect(m).toMatchObject({ trips: 3, totalYen: 27000, irregularTrips: 0, carriedTrips: 1 })
+  })
+
+  it('carryIn が空のままだと 1 便丸ごと落ちる (#760 の 6 以前の粗利タブ)', () => {
+    const m = monthlyOf(false)
+    expect(m.drivers[0]!.operations[0]!.rows[1]).toMatchObject({
+      destCity: '', masterDest: '', allowanceYen: null, destSource: 'event',
+    })
+    // 便は残るが手当が付かない = 運行手当タブとの差になる ¥9,000
+    expect(m).toMatchObject({ trips: 2, totalYen: 18000, irregularTrips: 1, carriedTrips: 0 })
+  })
+
+  it('粗利タブが運行 1 本ぶんに畳む手当も、引き継ぎのぶんだけ増える', () => {
+    // `margin.vue` が `MarginOperationInput.allowanceYen` に入れるのと同じ畳み方。
+    const fold = (withCarryIn: boolean) => monthlyOf(withCarryIn).drivers
+      .flatMap(d => d.operations.map(o => [
+        o.unkoNo,
+        o.rows.reduce((sum, r) => sum + (r.allowanceYen ?? 0), 0),
+      ]))
+    expect(fold(true)).toEqual([['26070604185900000011091', 18000], ['26070804190900000011091', 9000]])
+    expect(fold(false)).toEqual([['26070604185900000011091', 9000], ['26070804190900000011091', 9000]])
+  })
+})
+
+describe('強制突合を重ねた便は粗利の対象外から外れる', () => {
+  // **粗利タブは `forcedLegs` を読んでいなかった** (Refs #760 の 6)。人が一番星の明細を
+  // 結んだ便は売上も手当も付かず、その明細は「デジタコ便に当たっていない」ままなので、
+  // **粗利にも載らないのに対象外にも数えられていた**。粗利タブは `applyForcedSales` で
+  // その明細を `matched` にしてから `buildUncoveredLegs` に渡す。
+  function driver(over: Partial<UncoveredDriverInput> = {}): UncoveredDriverInput {
+    return { driverName: '柳井 亮祐', rows: [], slips: [], ...over }
+  }
+
+  /** 人が便に結んだ明細 (2026-07-15 の柳井の 1 件と同じ ¥21,750)。 */
+  const bound = slip({ rowId: '20260718-9', amount: 21750, quantity: 7.5 })
+  /** どこにも結ばれていない明細。**こちらは対象外のまま残らないといけない。** */
+  const loose = slip({ rowId: '20260718-8' })
+
+  it('forced の slips が matched に入ると、その便だけ対象外から減る', () => {
+    const forced = forcedLeg({ originCity: '北海道釧路市' }, [bound], {})
+    expect(forced.slips.map(s => s.rowId)).toEqual(['20260718-9'])
+
+    const before = buildUncoveredLegs([driver({ slips: [bound, loose] })], [], '2026-07', {})
+    expect(summarizeUncoveredLegs(before)).toEqual({ trips: 2, salesYen: 56153, allowanceYen: 18000 })
+
+    // `applyForcedSales` が `byLeg` に入れる形 (`status: 'matched'`, `slips: forced.slips`)
+    const after = buildUncoveredLegs([driver({ slips: [bound, loose] })], [{ slips: forced.slips }], '2026-07', {})
+    expect(after).toHaveLength(1)
+    // 結んだ明細だけが消え、結んでいない明細は対象外に残る
+    expect(summarizeUncoveredLegs(after)).toEqual({ trips: 1, salesYen: 34403, allowanceYen: 9000 })
+  })
+
+  it('結んだ明細を matched に入れ忘れると、同じ売上が粗利と対象外の両方に出る', () => {
+    const forced = forcedLeg({ originCity: '北海道釧路市' }, [bound], {})
+    // 粗利側には `forced.salesYen` が乗る
+    expect(forced.salesYen).toBe(21750)
+    // 上書きを渡さないと、その ¥21,750 が対象外にも数えられたまま
+    const legs = buildUncoveredLegs([driver({ slips: [bound] })], [], '2026-07', {})
+    expect(summarizeUncoveredLegs(legs)!.salesYen).toBe(21750)
   })
 })
