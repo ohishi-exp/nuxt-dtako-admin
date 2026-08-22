@@ -8,6 +8,8 @@ import {
   putMonth,
   planOperationFetch,
   planSlipFetch,
+  isStaleSlipShape,
+  SLIP_SHAPE_MARKER,
   savedAtLabel,
   CACHE_VERSION,
   MAX_MONTHS,
@@ -40,7 +42,9 @@ function month(over: Partial<MonthCache> = {}): MonthCache {
   }
 }
 
-const slip = { rowId: 'r1' } as VehicleDailySlip
+const slip = { rowId: 'r1', requestKind: '0' } as VehicleDailySlip
+/** `requestKind` を足す前 (2026-08-22) に保存された形。**印のフィールドが無い。** */
+const oldSlip = { rowId: 'r1' } as VehicleDailySlip
 
 describe('parseCache', () => {
   it('保存した形をそのまま読み戻す', () => {
@@ -134,6 +138,36 @@ describe('planSlipFetch', () => {
     const plan = planSlipFetch(['1109'], { 1109: [slip] }, true)
     expect(plan.reuse).toEqual({})
     expect(plan.fetch).toEqual(['1109'])
+  })
+
+  it('形が古い明細は force を押さなくても引き直す', () => {
+    // 2026-08-22 に実際に踏んだ: `requestKind` を足して deploy したのに「集計」では
+    // 直らず、「全部取り直す」を押すまで中継が出なかった。
+    const plan = planSlipFetch(['1109', '0016'], { 1109: [oldSlip], '0016': [slip] }, false)
+    expect(plan.reuse).toEqual({ '0016': [slip] })
+    expect(plan.fetch).toEqual(['1109'])
+  })
+})
+
+describe('isStaleSlipShape', () => {
+  it('印のフィールドが無ければ古い形', () => {
+    expect(isStaleSlipShape([oldSlip])).toBe(true)
+  })
+
+  it('印のフィールドがあれば古くない', () => {
+    expect(isStaleSlipShape([slip])).toBe(false)
+  })
+
+  it('値が空文字でも古くない (上流が請求K を返さないだけで、引き直しても変わらない)', () => {
+    expect(isStaleSlipShape([{ rowId: 'r1', requestKind: '' } as VehicleDailySlip])).toBe(false)
+  })
+
+  it('明細が 0 本の車輌C は古いと言えない (毎回引き直し続けないため)', () => {
+    expect(isStaleSlipShape([])).toBe(false)
+  })
+
+  it('印は VehicleDailySlip のフィールド名', () => {
+    expect(SLIP_SHAPE_MARKER).toBe('requestKind')
   })
 })
 
