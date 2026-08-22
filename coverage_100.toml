@@ -238,6 +238,10 @@ path = "app/utils/allowance-pdf-overpaid.ts"
 branches = true
 
 [[files]]
+path = "app/utils/allowance-relay.ts"
+branches = true
+
+[[files]]
 path = "app/utils/allowance-ichiban-legs.ts"
 branches = true
 

@@ -32,6 +32,7 @@ describe('mapVehicleDailyApiRow', () => {
       unit_price: 6190.47,
       unit: '個',
       row_id: '20260621-1001',
+      request_kind: '0',
     }
     expect(mapVehicleDailyApiRow(row)).toEqual({
       saleDate: '2026-06-21',
@@ -50,10 +51,11 @@ describe('mapVehicleDailyApiRow', () => {
       unitPrice: 6190.47,
       unit: '個',
       rowId: '20260621-1001',
+      requestKind: '0',
     })
   })
 
-  it('品名/数量/単価/単位が応答に無い場合 (rust-ichibanboshi#78 未デプロイ) は既定値で埋める', () => {
+  it('品名/数量/単価/単位/請求区分が応答に無い場合 (rust-ichibanboshi#78/#304 未デプロイ) は既定値で埋める', () => {
     const row: VehicleDailyApiRow = {
       sale_date: '2026-06-20',
       vehicle_number: '8504',
@@ -73,6 +75,9 @@ describe('mapVehicleDailyApiRow', () => {
     expect(slip.quantity).toBe(0)
     expect(slip.unitPrice).toBe(0)
     expect(slip.unit).toBe('')
+    // **請求区分は空文字。** `"0"` (通常運送) と混同しないよう、既定値を作らない
+    // (空を運送扱いにするかは `allowance-relay.ts` が決める)。
+    expect(slip.requestKind).toBe('')
   })
 })
 

@@ -28,6 +28,11 @@ export interface VehicleDailyApiRow {
   unit_price?: number
   unit?: string
   row_id: string
+  /**
+   * `請求K` (請求区分)。`"0"` 通常運送 / `"1"` 請求のみ / `"2"` 非請求 (車輌収支用)。
+   * rust-ichibanboshi#304 未デプロイの間は応答に含まれず undefined になりうる。
+   */
+  request_kind?: string
 }
 
 export interface VehicleDailySlip {
@@ -47,6 +52,12 @@ export interface VehicleDailySlip {
   unitPrice: number
   unit: string
   rowId: string
+  /**
+   * `請求K` (請求区分)。**空文字は「区分が取れなかった」** — 古い API を相手に
+   * したときで、`"0"` (通常運送) と区別が付かないので**空を運送扱いにしない**判定は
+   * 呼び出し側でする (`allowance-relay.ts`)。
+   */
+  requestKind: string
 }
 
 export function mapVehicleDailyApiRow(row: VehicleDailyApiRow): VehicleDailySlip {
@@ -67,6 +78,7 @@ export function mapVehicleDailyApiRow(row: VehicleDailyApiRow): VehicleDailySlip
     unitPrice: row.unit_price ?? 0,
     unit: row.unit ?? '',
     rowId: row.row_id,
+    requestKind: row.request_kind ?? '',
   }
 }
 
