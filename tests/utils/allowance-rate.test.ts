@@ -59,6 +59,14 @@ describe('resolveDest', () => {
     expect(resolveDest('釧路', '川西')).toBe('川西')
   })
 
+  it('中継の両端が同じ卸地に寄る (釧路→駒場→別海)', () => {
+    // 手当表は前半を `釧路〜駒場（別海）`、後半を `駒場（釧路）〜別海` と書く。
+    // 括弧は行き先/来た先の注記なので `placeKey` が落とし、後半の `別海` は
+    // 釧路発と同じ `ユナイテッド牧場` に寄る (一番星の卸地がそう書かれている)。
+    expect(resolveDest('釧路', '駒場（別海）')).toBe('駒場')
+    expect(resolveDest('駒場（釧路）', '別海')).toBe('ユナイテッド牧場')
+  })
+
   it('別名表のキーは必ず 積地|卸地 の形 (卸地だけのキーを混ぜない)', () => {
     for (const key of Object.keys(DEST_ALIASES)) expect(key).toContain('|')
   })
@@ -107,7 +115,9 @@ describe('lookupAllowance', () => {
     const total = ALLOWANCE_GOLDEN_2026_07.reduce((sum, g) => sum + g.trips, 0)
     expect(total).toBe(313)
     // 294 → 295: `釧路〜駒場（別海）` (1 便) をマスタへ足した (2026-08-21)。
-    expect(covered).toBe(295)
+    // 295 → 296: その相方の `駒場（釧路）〜別海` (1 便) を足した (2026-08-22)。
+    // 2 本で 1 つの荷を運ぶ**中継**なので、片方だけ載っている状態が穴だった。
+    expect(covered).toBe(296)
   })
 
   it('マスタに無い経路は推測せず unknown を返す', () => {
@@ -156,7 +166,8 @@ describe('lookupFare', () => {
 describe('RATE_MASTER', () => {
   it('積地・卸地・給与が埋まっている (結合セルの引き継ぎ漏れ検知)', () => {
     // 60 → 61: `釧路〜駒場（別海）` を足した (2026-08-21、xlsx 未収載の実在経路)。
-    expect(RATE_MASTER.length).toBe(61)
+    // 61 → 62: その相方の `駒場（釧路）〜別海` を足した (2026-08-22、同じく xlsx 未収載)。
+    expect(RATE_MASTER.length).toBe(62)
     for (const r of RATE_MASTER) {
       expect(r.origin).not.toBe('')
       expect(r.dest).not.toBe('')

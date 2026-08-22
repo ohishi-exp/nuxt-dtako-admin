@@ -77,7 +77,8 @@ describe('pdfRouteKey', () => {
 
   it('複数卸し・括弧書きは最終卸し地を採る', () => {
     expect(pdfRouteKey({ origin: '苫小牧', dest: '清水・富士' })).toBe('苫小牧|富士')
-    expect(pdfRouteKey({ origin: '駒場（釧路）', dest: '別海' })).toBe('駒場|別海')
+    // 括弧を落としたうえで `駒場|別海` の別名 (中継の後半) が効く。
+    expect(pdfRouteKey({ origin: '駒場（釧路）', dest: '別海' })).toBe('駒場|ユナイテッド牧場')
   })
 })
 
