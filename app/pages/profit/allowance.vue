@@ -2066,11 +2066,17 @@ function downloadCsv() {
                   <td class="px-3 py-1 text-right" :class="d.screenOnly > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-gray-300 dark:text-gray-700'">
                     {{ d.screenOnly }}
                   </td>
-                  <td class="px-3 py-1 text-right" :class="d.amountDiff > 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-300 dark:text-gray-700'">
-                    {{ d.amountDiff }}
+                  <td
+                    class="px-3 py-1 text-right whitespace-nowrap"
+                    :class="d.amountDiff > 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-300 dark:text-gray-700'"
+                  >
+                    {{ d.amountDiff }}<span v-if="d.amountDiff > 0"> ({{ yen(d.amountDiffYen) }})</span>
                   </td>
-                  <td class="px-3 py-1 text-right" :class="d.overpaid > 0 ? 'text-purple-600 dark:text-purple-400' : 'text-gray-300 dark:text-gray-700'">
-                    {{ d.overpaid }}
+                  <td
+                    class="px-3 py-1 text-right whitespace-nowrap"
+                    :class="d.overpaid > 0 ? 'text-purple-600 dark:text-purple-400' : 'text-gray-300 dark:text-gray-700'"
+                  >
+                    {{ d.overpaid }}<span v-if="d.overpaid > 0"> ({{ yen(d.overpaidYen) }})</span>
                   </td>
                 </tr>
               </tbody>
