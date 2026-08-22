@@ -34,6 +34,14 @@
  * ようにしてある (黙って片方だけ見せない)。
  */
 
+import { buildIchibanLegs, summarizeIchibanLegs, type IchibanLeg } from './allowance-ichiban-legs'
+import { transportSlips } from './allowance-relay'
+import { addressToCity, cityToPlace } from './allowance-trips'
+import type { AllowanceReportRow } from './allowance-report'
+import type { LegReconcile } from './allowance-ichiban'
+import type { ProvisionalMap } from './allowance-provisional'
+import type { VehicleDailySlip } from './ichiban'
+
 // --- 経費明細 (rust-ichibanboshi `/api/costs/vehicle-daily`) ---
 
 /** API の応答行 (snake_case)。rust-ichibanboshi#305 の `CostsDailyRow` と 1 対 1。 */
@@ -760,10 +768,91 @@ export function marginCsvLines(margins: OperationMargin[]): string[] {
   ]
 }
 
+// --- 粗利の対象外 (一番星から起こした便) ---
+
+/**
+ * 一番星から便を起こすための、乗務員 1 人ぶんの材料。
+ *
+ * **`reconcileVehicles` に渡したものと同じ**を渡す。売上の突合と別々の入力から
+ * 起こすと、どちらかだけが直ったときに静かにずれる。
+ */
+export interface UncoveredDriverInput {
+  driverName: string
+  /** その乗務員の便 (デジタコ由来)。 */
+  rows: AllowanceReportRow[]
+  /** その乗務員の一番星の明細。 */
+  slips: VehicleDailySlip[]
+}
+
+/**
+ * **粗利の対象外になっている便**を一番星の明細から起こす。
+ *
+ * 粗利は**運行を単位**にしている (走行距離が無いと燃料代も按分も出せない) ので、
+ * **デジタコに運行が 1 件も無い日の便は丸ごと落ちる** — デジタコ非搭載の車番
+ * (`0001`) や、その日その乗務員の運行が alc に無い車番 (`0040`) で走った日。
+ * 2026-07 / 帯広5台の実測で、運行手当タブとの差は売上 ¥1,649,681・手当 ¥413,000
+ * (36 便) あった。**除外そのものは正しい。落ちていると画面が言わないのが問題**で、
+ * ここはその額を数えて見せるためだけにある。**粗利の計算には 1 円も入れない。**
+ *
+ * 組み立ては運行手当タブ (`app/pages/profit/allowance.vue` の `ichibanLegs`) と
+ * 同じ: **請求のみ (`請求K=1`) は落とし**、**デジタコ便に当たった明細 (`matched`) は
+ * 除き**、**デジタコ便がある `日付|積地` も避ける**
+ * (その積地に残った明細は複数卸しの片割れ)。**3 つのどれを落としても数が水増しされる。**
+ */
+export function buildUncoveredLegs(
+  drivers: UncoveredDriverInput[],
+  matched: Pick<LegReconcile, 'slips'>[],
+  ym: string,
+  provisional: ProvisionalMap,
+): IchibanLeg[] {
+  // **デジタコ便に当たった明細だけを除く。** 日単位で避けると、一部だけ取れている日の
+  // 起こし損ねた便が永久に埋まらない。
+  const used = new Set<string>()
+  for (const hit of matched) {
+    for (const slip of hit.slips) used.add(slip.rowId)
+  }
+  const legs: IchibanLeg[] = []
+  for (const d of drivers) {
+    const coveredOrigins = new Set(d.rows.map(r => `${r.date}|${cityToPlace(addressToCity(r.originCity))}`))
+    // **請求のみ (`請求K=1`) からは便を起こさない。** 走っていない請求行なので、
+    // 便にすると存在しない仕事の売上と手当を「対象外」として数えてしまう。
+    legs.push(...buildIchibanLegs(d.driverName, transportSlips(d.slips), used, coveredOrigins, ym, provisional))
+  }
+  return legs
+}
+
+/** 粗利の対象外になっている便の合計。**粗利の内訳とは足し合わせない額。** */
+export interface UncoveredTotals {
+  /** 便数 (運行ではない — 運行が無いからここに落ちている)。 */
+  trips: number
+  salesYen: number
+  /** 確定 + 暫定。金額が決まらなかった便は 0 として数えない。 */
+  allowanceYen: number
+}
+
+/**
+ * 対象外の便を数える。**1 便も無ければ `null`** — 呼び出し側が**枠ごと出さない**ため。
+ *
+ * 「0 便 売上 ¥0」の行を常に出すと、**対象外が有る月と無い月の見分けが付かなくなる**
+ * (人は 0 の行を読み飛ばす)。出ているときだけ意味がある枠にする。
+ */
+export function summarizeUncoveredLegs(legs: IchibanLeg[]): UncoveredTotals | null {
+  if (legs.length === 0) return null
+  const totals = summarizeIchibanLegs(legs)
+  return { trips: totals.trips, salesYen: totals.salesYen, allowanceYen: totals.allowanceYen }
+}
+
 // --- 直前の集計のキャッシュ (localStorage) ---
 
-/** localStorage のキー。**形を変えるときは番号を上げる。** */
-export const MARGIN_CACHE_KEY = 'dtako:margin:cache:v1'
+/**
+ * localStorage のキー。**形を変えるときは番号を上げる。**
+ *
+ * `v2` で**粗利の対象外の便の合計**を足した。`v1` を読めるようにしなかったのは、
+ * 欄が無いキャッシュを「対象外 0 便」と読ませると、**この画面で直したかった誤解が
+ * キャッシュ経路だけに残る**ため。読めない古いキャッシュは無かったことになり、
+ * 一度 **集計** を押せば埋まる。
+ */
+export const MARGIN_CACHE_KEY = 'dtako:margin:cache:v2'
 
 /**
  * 直前の集計。**運行手当タブのキャッシュとはキーを分ける** — あちらは便と明細を
@@ -776,6 +865,14 @@ export interface MarginCache {
   savedAt: string
   operations: MarginOperationInput[]
   costs: CostRow[]
+  /**
+   * 粗利の対象外になっている便の合計。**1 便も無ければ null。**
+   *
+   * 便の元になる一番星の明細はキャッシュに持っていない (量が桁違い) ので、
+   * **合計だけを畳んで持つ。** これが無いと、キャッシュから出したときだけ
+   * 「対象外」の枠が消えて、また売上が合わない画面に戻る。
+   */
+  uncovered: UncoveredTotals | null
 }
 
 /**
@@ -801,6 +898,8 @@ export function parseMarginCache(raw: string | null | undefined): MarginCache | 
     savedAt: typeof cache.savedAt === 'string' ? cache.savedAt : '',
     operations: cache.operations,
     costs: cache.costs,
+    // **null と「入っていない」を同じに倒す。** 対象外が 0 便の月は `null` で保存する。
+    uncovered: typeof cache.uncovered === 'object' && cache.uncovered !== null ? cache.uncovered : null,
   }
 }
 

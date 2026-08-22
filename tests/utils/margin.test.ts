@@ -19,6 +19,8 @@ import {
   marginCsvLines,
   noMarginReason,
   summarizeNoMarginReasons,
+  buildUncoveredLegs,
+  summarizeUncoveredLegs,
   parseMarginCache,
   serializeMarginCache,
   EXCLUDED_KINDS,
@@ -30,7 +32,10 @@ import {
   type CostsDailyApiRow,
   type MarginOperationInput,
   type OperationMargin,
+  type UncoveredDriverInput,
 } from '~/utils/margin'
+import type { AllowanceReportRow } from '~/utils/allowance-report'
+import type { VehicleDailySlip } from '~/utils/ichiban'
 
 function cost(over: Partial<CostRow> = {}): CostRow {
   return {
@@ -62,6 +67,50 @@ function op(over: Partial<MarginOperationInput> = {}): MarginOperationInput {
     totalKm: 100,
     salesYen: 50000,
     allowanceYen: 8000,
+    ...over,
+  }
+}
+
+/** デジタコ由来の便 1 本 (`buildMonthlyAllowance` が返す形)。 */
+function reportRow(over: Partial<AllowanceReportRow> = {}): AllowanceReportRow {
+  return {
+    unkoNo: '2607011000000000001109',
+    date: '2026-07-01',
+    driverName: '佐竹 繁',
+    vehicleName: '1109',
+    seq: 1,
+    fromTs: null,
+    originCity: '北海道釧路市',
+    destCity: '浦幌町',
+    viaCities: '',
+    masterDest: '浦幌',
+    allowanceYen: 9000,
+    status: 'ok',
+    destSource: 'event',
+    ...over,
+  }
+}
+
+/** 一番星の運転日報明細 1 行 (2026-07 の車番 0040 の実データの形)。 */
+function slip(over: Partial<VehicleDailySlip> = {}): VehicleDailySlip {
+  return {
+    saleDate: '2026-07-18',
+    vehicleNumber: '0040',
+    customerCode: '015204',
+    customerName: '大　石　畜　産',
+    originAreaName: '北海道釧路市',
+    destAreaName: '北海道浦幌町',
+    origin: '釧路',
+    dest: '浦幌',
+    isSubcontracted: false,
+    amount: 34403,
+    itemCode: '1516',
+    itemName: '大石後期',
+    quantity: 12.51,
+    unitPrice: 2750,
+    unit: 'ｔ',
+    rowId: '20260718-1',
+    requestKind: '0',
     ...over,
   }
 }
@@ -702,6 +751,7 @@ describe('parseMarginCache', () => {
     savedAt: '2026-08-22T00:00:00.000Z',
     operations: [op()],
     costs: [cost()],
+    uncovered: null,
   }
 
   it('保存したものを読み戻せる', () => {
@@ -733,6 +783,17 @@ describe('parseMarginCache', () => {
 
   it('保存時刻が壊れていても空文字にして読む', () => {
     expect(parseMarginCache('{"ym":"2026-07","operations":[],"costs":[]}')!.savedAt).toBe('')
+  })
+
+  it('粗利の対象外の便の合計も読み戻せる', () => {
+    const withUncovered = { ...cache, uncovered: { trips: 36, salesYen: 1649681, allowanceYen: 413000 } }
+    expect(parseMarginCache(serializeMarginCache(withUncovered))!.uncovered)
+      .toEqual({ trips: 36, salesYen: 1649681, allowanceYen: 413000 })
+  })
+
+  it('対象外の欄が無い / null なら null (欄の欠けを 0 便と読ませない)', () => {
+    expect(parseMarginCache('{"ym":"2026-07","operations":[],"costs":[]}')!.uncovered).toBeNull()
+    expect(parseMarginCache('{"ym":"2026-07","operations":[],"costs":[],"uncovered":null}')!.uncovered).toBeNull()
   })
 })
 
@@ -838,5 +899,103 @@ describe('summarizeNoMarginReasons', () => {
       { reason: 'この車輌・この月の経費を 1 件も引けていません', operations: 2, salesYen: 21000 },
       { reason: 'この月・この車輌に燃料 (01) の給油実績がありません', operations: 1, salesYen: 5000 },
     ])
+  })
+})
+
+describe('buildUncoveredLegs / summarizeUncoveredLegs', () => {
+  /** 乗務員 1 人ぶんの材料 (`reconcileVehicles` に渡したものと同じ形)。 */
+  function driver(over: Partial<UncoveredDriverInput> = {}): UncoveredDriverInput {
+    return { driverName: '柳井 亮祐', rows: [], slips: [], ...over }
+  }
+
+  it('デジタコ便に当たらなかった明細から便を起こし、件数・売上・手当を数える', () => {
+    const legs = buildUncoveredLegs(
+      [driver({ slips: [slip(), slip({ rowId: '20260718-2', amount: 10000 })] })],
+      [],
+      '2026-07',
+      {},
+    )
+    // 同じ日・同じ積地なので 1 便に畳まれる (12.51t + 12.51t は 15t 超なので 2 便)
+    expect(legs).toHaveLength(2)
+    expect(summarizeUncoveredLegs(legs)).toEqual({ trips: 2, salesYen: 44403, allowanceYen: 18000 })
+  })
+
+  it('デジタコ便に当たった明細は数えない (粗利に載っているぶん)', () => {
+    const legs = buildUncoveredLegs(
+      [driver({ slips: [slip()] })],
+      [{ slips: [slip()] }],
+      '2026-07',
+      {},
+    )
+    expect(legs).toEqual([])
+    expect(summarizeUncoveredLegs(legs)).toBeNull()
+  })
+
+  it('デジタコ便がある 日付|積地 の明細は起こさない (複数卸しの片割れ)', () => {
+    const legs = buildUncoveredLegs(
+      [driver({
+        // 便の積地 (`北海道釧路市`) は明細の積地 `釧路` と同じ日・同じ場所
+        rows: [reportRow({ date: '2026-07-18', originCity: '北海道釧路市' })],
+        slips: [slip()],
+      })],
+      [],
+      '2026-07',
+      {},
+    )
+    expect(legs).toEqual([])
+  })
+
+  it('請求のみ (請求K=1) からは便を起こさない (走っていない請求行)', () => {
+    const legs = buildUncoveredLegs(
+      [driver({ slips: [slip({ requestKind: '1' })] })],
+      [],
+      '2026-07',
+      {},
+    )
+    expect(legs).toEqual([])
+    expect(summarizeUncoveredLegs(legs)).toBeNull()
+  })
+
+  it('1 便も無ければ null (0 件の枠を常に出さないため)', () => {
+    expect(summarizeUncoveredLegs([])).toBeNull()
+    expect(summarizeUncoveredLegs(buildUncoveredLegs([], [], '2026-07', {}))).toBeNull()
+  })
+
+  it('乗務員が複数でもまとめて数える', () => {
+    const legs = buildUncoveredLegs([
+      driver({ slips: [slip()] }),
+      driver({ driverName: '中村 秀一', slips: [slip({ rowId: '20260719-1', saleDate: '2026-07-19' })] }),
+    ], [], '2026-07', {})
+    expect(legs.map(l => l.driverName)).toEqual(['柳井 亮祐', '中村 秀一'])
+    expect(summarizeUncoveredLegs(legs)).toEqual({ trips: 2, salesYen: 68806, allowanceYen: 18000 })
+  })
+
+  it('金額が決まらない便は手当に足さない (推測で額を作らない)', () => {
+    const legs = buildUncoveredLegs(
+      [driver({ slips: [slip({ dest: '無い地名', destAreaName: '北海道' })] })],
+      [],
+      '2026-07',
+      {},
+    )
+    expect(legs[0]!.allowanceYen).toBeNull()
+    expect(summarizeUncoveredLegs(legs)).toEqual({ trips: 1, salesYen: 34403, allowanceYen: 0 })
+  })
+
+  it('対象外の便があってもなくても、粗利の計算は 1 円も変わらない', () => {
+    const operations = [op()]
+    const costs = [cost({ costKind: '04', amount: 1000 }), cost({ costKind: FUEL_KIND, quantity: 100, amount: 12000, rowId: 'fuel' })]
+    const before = summarizeMargins(buildOperationMargins(operations, costs, {}).operations)
+
+    const legs = buildUncoveredLegs([driver({ slips: [slip()] })], [], '2026-07', {})
+    const uncovered = summarizeUncoveredLegs(legs)
+    // 対象外の便には売上も手当もある — **それでも粗利の合計は動かない**
+    expect(uncovered!.salesYen).toBe(34403)
+    expect(uncovered!.allowanceYen).toBe(9000)
+
+    const after = summarizeMargins(buildOperationMargins(operations, costs, {}).operations)
+    expect(after).toEqual(before)
+    expect(after.salesYen).toBe(50000)
+    expect(after.allowanceYen).toBe(8000)
+    expect(after.marginYen).toBe(50000 - 8000 - 1000 - 100 * (12000 / 100) / (100 / 100))
   })
 })
