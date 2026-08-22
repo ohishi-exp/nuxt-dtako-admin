@@ -13,6 +13,7 @@ import {
   effectiveFuelRate,
   buildOperationMargins,
   marginRate,
+  kmMismatch,
   summarizeMargins,
   emptyMarginTotals,
   groupMarginsByDriver,
@@ -73,6 +74,8 @@ function op(over: Partial<MarginOperationInput> = {}): MarginOperationInput {
     driverName: '佐竹 繁',
     vehicleCode: '1109',
     totalKm: 100,
+    // 運行一覧の 総走行距離。**`totalKm` と一致するのが正常**で、ずれたら画面が注意を出す。
+    listedTotalKm: 100,
     // 走行km の内訳 (足すと totalKm)。**按分には効かない**が型で必須。
     kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 },
     salesYen: 50000,
@@ -633,6 +636,7 @@ describe('summarizeMargins', () => {
     driverName: '佐竹 繁',
     vehicleCode: '1109',
     totalKm: 100,
+    listedTotalKm: 100,
     // 走行km の内訳 (足すと totalKm)。**按分には効かない**が型で必須。
     kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 },
     vehicleTotalKm: 500,
@@ -695,6 +699,7 @@ describe('groupMarginsByDriver', () => {
     driverName: '安藤',
     vehicleCode: '1109',
     totalKm: 100,
+    listedTotalKm: 100,
     // 走行km の内訳 (足すと totalKm)。**按分には効かない**が型で必須。
     kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 },
     vehicleTotalKm: 100,
@@ -732,6 +737,7 @@ describe('marginCsvLines', () => {
     driverName: '佐竹 繁',
     vehicleCode: '1109',
     totalKm: 100,
+    listedTotalKm: 100,
     // 走行km の内訳 (足すと totalKm)。**按分には効かない**が型で必須。
     kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 },
     vehicleTotalKm: 500,
@@ -888,6 +894,7 @@ describe('summarizeNoMarginReasons', () => {
     driverName: '佐竹 繁',
     vehicleCode: '1109',
     totalKm: 100,
+    listedTotalKm: 100,
     // 走行km の内訳 (足すと totalKm)。**按分には効かない**が型で必須。
     kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 },
     vehicleTotalKm: 100,
@@ -1031,6 +1038,7 @@ describe('走行km の内訳 (kmBreakdown)', () => {
     driverName: '佐竹 繁',
     vehicleCode: '1109',
     totalKm: 100,
+    listedTotalKm: 100,
     kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 },
     vehicleTotalKm: 500,
     salesYen: 50000,
@@ -1100,10 +1108,12 @@ describe('走行km の内訳 (kmBreakdown)', () => {
     expect(row.slice(at, at + 7)).toEqual(['100', '10', '61', '25', '4', '0', '500'])
   })
 
-  it('キャッシュのキーは v3 — 内訳の無い旧キャッシュ (v2) を読ませない', () => {
+  it('キャッシュのキーは v4 — 二重計上された走行km の旧キャッシュ (v3) を読ませない', () => {
     // 形を変えたら番号を上げる規約。**上げ忘れると `kmBreakdown` が無い行を画面が読む**
-    // (#760 の 4 が v2 を取っているので、内訳を足したこの版は v3)
-    expect(MARGIN_CACHE_KEY).toBe('dtako:margin:cache:v3')
+    // (#760 の 4 が v2 を取っているので、内訳を足した版は v3)。
+    // v4 は**走行km の数え方が変わった**版 (重ね掛け行を足さない。#760 の 7)。
+    // v3 を読ませると、燃費が 1.8 倍に見える古い値がキャッシュ経路だけに残る。
+    expect(MARGIN_CACHE_KEY).toBe('dtako:margin:cache:v4')
   })
 })
 
@@ -1239,5 +1249,56 @@ describe('強制突合を重ねた便は粗利の対象外から外れる', () =
     // 上書きを渡さないと、その ¥21,750 が対象外にも数えられたまま
     const legs = buildUncoveredLegs([driver({ slips: [bound] })], [], '2026-07', {})
     expect(summarizeUncoveredLegs(legs)!.salesYen).toBe(21750)
+  })
+})
+
+/**
+ * **走行km と 運行一覧の 総走行距離 のずれ検出** (Refs #760 の 7)。
+ *
+ * `extractOperationIdle` の `totalKm` (タイムライン行だけの Σ区間距離) は KUDGURI の
+ * `総走行距離` = 運行一覧 API の `total_distance` と一致するのが正常 (2026-07 帯広5台
+ * 90 運行で全件一致)。ずれるのは**イベント名の仕分けが実データに追いついていない**とき
+ * なので、按分の値は変えずに画面へ注意だけ出す。
+ */
+describe('kmMismatch — CSV の走行km と 運行一覧の 総走行距離 の突き合わせ', () => {
+  it('一致していればずれ無し', () => {
+    expect(kmMismatch({ totalKm: 12442, listedTotalKm: 12442 })).toBe(false)
+  })
+
+  it('0.1km 以上ずれたら検出する (未知のイベント名で数え落とした疑い)', () => {
+    // 重ね掛け行を足していた頃の値 (23,014 vs 12,442) はもちろん検出される
+    expect(kmMismatch({ totalKm: 23014, listedTotalKm: 12442 })).toBe(true)
+    // **境目ちょうど (0.1) は書かない** — `100.1 - 100` は浮動小数で
+    // 0.09999999999999432 になり、閾値の意図ではなく丸めを試すテストになる
+    expect(kmMismatch({ totalKm: 100, listedTotalKm: 100.5 })).toBe(true)
+    // 向きは問わない (数え過ぎも数え落としも同じ注意)
+    expect(kmMismatch({ totalKm: 100.5, listedTotalKm: 100 })).toBe(true)
+  })
+
+  it('0.1km 未満の丸め差は注意にしない (KUDGURI との実測差は 0.05km 以内)', () => {
+    expect(kmMismatch({ totalKm: 100.05, listedTotalKm: 100 })).toBe(false)
+    expect(kmMismatch({ totalKm: 100, listedTotalKm: 100.05 })).toBe(false)
+  })
+
+  it('運行一覧に 総走行距離 が無ければ比べない (ずれではなく比較相手が無い)', () => {
+    expect(kmMismatch({ totalKm: 12442, listedTotalKm: null })).toBe(false)
+    expect(kmMismatch({ totalKm: 0, listedTotalKm: null })).toBe(false)
+  })
+
+  it('buildOperationMargins は listedTotalKm をそのまま運ぶ (按分には効かない)', () => {
+    const res = buildOperationMargins(
+      [
+        op({ unkoNo: 'A', totalKm: 100, listedTotalKm: 100 }),
+        op({ unkoNo: 'B', date: '2026-07-02', totalKm: 200, listedTotalKm: null }),
+      ],
+      [],
+      {},
+    )
+    expect(res.operations[0]!.listedTotalKm).toBe(100)
+    expect(res.operations[1]!.listedTotalKm).toBeNull()
+    // 按分の分母は `totalKm` の和のまま (`listedTotalKm` は 1 ミリも効かない)
+    expect(res.operations[0]!.vehicleTotalKm).toBe(300)
+    expect(kmMismatch(res.operations[0]!)).toBe(false)
+    expect(kmMismatch(res.operations[1]!)).toBe(false)
   })
 })

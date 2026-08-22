@@ -360,8 +360,18 @@ export interface MarginOperationInput {
   driverName: string
   /** `車輌C` (4桁)。運行NO から取ったもの (`vehicleCodeFromUnkoNo`)。 */
   vehicleCode: string
-  /** その運行の走行距離 (`extractOperationIdle` の `totalKm`)。 */
+  /**
+   * その運行の走行距離 (`extractOperationIdle` の `totalKm` = タイムライン行だけの
+   * Σ区間距離。重ね掛け行は入れない)。**`区間距離` の列が無い CSV では運行一覧の
+   * `total_distance` を入れる** (呼び出し側の受け皿)。
+   */
   totalKm: number
+  /**
+   * 運行一覧 (KUDGURI) の `総走行距離`。**按分には使わない** — `totalKm` と突き合わせて
+   * 「区間距離の数え方が合っていない (未知のイベント名の疑い)」を画面で出すためだけ。
+   * 運行一覧に無ければ null。
+   */
+  listedTotalKm: number | null
   /** `totalKm` の内訳。**按分には効かない** (画面と CSV に出すだけ)。 */
   kmBreakdown: KmBreakdown
   salesYen: number
@@ -376,6 +386,8 @@ export interface OperationMargin {
   vehicleCode: string
   /** **按分の分子。** 画面に出して人が検算できるようにする。 */
   totalKm: number
+  /** 運行一覧の `総走行距離`。`totalKm` との突き合わせ用 (`kmMismatch`)。 */
+  listedTotalKm: number | null
   /**
    * **分子の中身。** 本番実測では `totalKm` の過半が非売上走行 (便間が最大) なので、
    * 分子を人が読めるように内訳を持ち回る (Refs #760)。**按分の式には入らない。**
@@ -564,6 +576,7 @@ export function buildOperationMargins(
       driverName: op.driverName,
       vehicleCode: op.vehicleCode,
       totalKm: op.totalKm,
+      listedTotalKm: op.listedTotalKm,
       kmBreakdown: op.kmBreakdown,
       vehicleTotalKm: kmByVehicle.get(op.vehicleCode)!,
       salesYen: op.salesYen,
@@ -641,6 +654,21 @@ export function summarizeNoMarginReasons(margins: OperationMargin[]): NoMarginGr
 }
 
 /** 粗利率 = 粗利 ÷ 売上。**売上 0 と粗利不明はどちらも null** (画面では `-`)。 */
+/**
+ * CSV から数えた走行距離 (`totalKm`) と運行一覧の `総走行距離` (`listedTotalKm`) の
+ * ずれを **0.1km 以上**で検出する。
+ *
+ * 2 つは同じ値になるはず (`DISTANCE_EVENT_NAMES` の和 = KUDGURI。90 運行で全件一致)。
+ * ずれるのは**区間距離の数え方が合っていない** (新しいイベント名が増えて「数えない」
+ * 側に落ちた等) ときなので、画面に注意を出す。**運行一覧に値が無ければ比べない** (null)。
+ *
+ * **`区間距離` の列が無い CSV は呼び出し側が `totalKm` に `total_distance` を入れる**
+ * (ずれ 0 になる) ので、ここで「列が無い」を区別する必要は無い。
+ */
+export function kmMismatch(m: Pick<OperationMargin, 'totalKm' | 'listedTotalKm'>): boolean {
+  return m.listedTotalKm !== null && Math.abs(m.totalKm - m.listedTotalKm) >= 0.1
+}
+
 export function marginRate(m: Pick<OperationMargin, 'salesYen' | 'marginYen'>): number | null {
   if (m.marginYen === null || m.salesYen === 0) return null
   return m.marginYen / m.salesYen
@@ -910,8 +938,13 @@ export function summarizeUncoveredLegs(legs: IchibanLeg[]): UncoveredTotals | nu
  * `v3` で**走行km の内訳** (`kmBreakdown`) を足した。同じ理由で `v2` も読ませない —
  * 内訳の無い運行を画面が読むと、**内訳の欄で必ず落ちる** (必須フィールドなので
  * `undefined.preLoadKm` になる)。
+ *
+ * `v4` で**走行距離の数え方**を変え (重ね掛け行を足さない。Refs #760 の 7)、運行一覧の
+ * `総走行距離` (`listedTotalKm`) を足した。`v3` を読ませないのは、**二重計上された
+ * `totalKm` がキャッシュ経路だけに残る**ため (燃費が 1.8 倍に見える古い値を、
+ * 「キャッシュから」の注意書きだけで出し続けることになる)。
  */
-export const MARGIN_CACHE_KEY = 'dtako:margin:cache:v3'
+export const MARGIN_CACHE_KEY = 'dtako:margin:cache:v4'
 
 /**
  * 直前の集計。**運行手当タブのキャッシュとはキーを分ける** — あちらは便と明細を

@@ -12,6 +12,8 @@
  * 距離も**同じ CSV に入っている** (`KUDGIVT.csv` の `区間距離`。2026-07-27 の運行で確認)。
  * **燃料代 = 走行距離 × 燃費 × 単価**、**運行に直接紐づかない経費の按分は走行距離の比**
  * と決まったので、CSV を 2 回舐めずに済むようここで一緒に出す。
+ * **ただし全行を足してはいけない** — 距離を数える行は `DISTANCE_EVENT_NAMES` に限る
+ * (重ね掛け行を足すと同じ走行が二重になる。Refs #760 の 7)。
  *
  * 経費を運行ごとに按分する基礎に使う (Refs #760)。**時間側の按分の基準はまだ
  * 決まっていない**ので、ここでは素の値を出すだけで、金額には触らない。
@@ -26,6 +28,35 @@ import { colIndex, classifyTimeCategory, parseEventDatetimeToTs } from './event-
 /** 始業・終業は区分ではなくイベント名で決まる (`classifyTimeCategory` では `other`)。 */
 const OPERATION_START_EVENT = '運行開始'
 const OPERATION_END_EVENT = '運行終了'
+
+/**
+ * **`区間距離` を走行距離に数えるイベント名。** この 8 つ以外の行の距離は 0 とみなす。
+ *
+ * イベントCSV は時間軸を 1 本で刻んだ行 (運転・積み・降し・休憩・休息・アイドリング・
+ * 運行開始・運行終了) のほかに、**同じ走行を別の切り口で重ねて持つ行** (状態の重ね掛け:
+ * `専用道` / `高速道` / `一般道速度オーバー` / `専用道速度オーバー` / `一般道空車` /
+ * `一般道実車` / `連続運転` …) を持つ。重ね掛け行の `区間距離` はタイムライン行と
+ * **同じ走行をもう一度**数えたものなので、足すと二重になる (実例: `運転 22:29→0:45
+ * 132.7km` と運行全体にまたがる `専用道 23:01→翌9:40 452.9km` が共存し、運転行の合計
+ * 478.4 に対して全行Σ 931.3)。
+ *
+ * **KUDGURI.csv の `総走行距離` (= 運行一覧 API の `total_distance`) と一致するのは
+ * この 8 つの和** — 2026-07 帯広5台 90 運行で全件ぴったり (0.05km 以内) 一致を実証。
+ * 全行Σは 101,891km だったが、この 8 つの和 = KUDGURI = 57,350km (Refs #760 の 7)。
+ *
+ * **新しいイベント名が増えたら既定で「数えない」側に落ちる**ので、画面側は
+ * `totalKm` と `total_distance` のずれで検出する (`margin.vue`)。
+ */
+export const DISTANCE_EVENT_NAMES: readonly string[] = [
+  '運転',
+  '積み',
+  '降し',
+  '休憩',
+  '休息',
+  'アイドリング',
+  OPERATION_START_EVENT,
+  OPERATION_END_EVENT,
+]
 
 export interface OperationIdle {
   /** 運行開始の epoch 秒。読めなければ null。 */
@@ -42,8 +73,19 @@ export interface OperationIdle {
   haulSec: number
   /** 運行全体 (startTs → endTs)。どちらか読めなければ null。 */
   totalSec: number | null
-  /** 運行の全イベントの `区間距離` の合計 (km)。 */
+  /**
+   * 運行の走行距離 (km) = **`DISTANCE_EVENT_NAMES` の行**の `区間距離` の合計。
+   * KUDGURI の `総走行距離` (運行一覧の `total_distance`) と一致する値。
+   */
   totalKm: number
+  /**
+   * **数えなかった行** (`DISTANCE_EVENT_NAMES` に無いイベント名) の Σ`区間距離` (km)。
+   *
+   * `totalKm` にも内訳にも `legKm` にも入れていない。画面で「重ね掛け N km を除外」と
+   * 検算できるようにするためだけに出す (`totalKm + overlayKm` = 旧来の全行Σ)。
+   * **`区間距離` の列が無い CSV では 0。**
+   */
+  overlayKm: number
   // --- `totalKm` の内訳。**5 つを足すと `totalKm` に一致する** (丸めない)。---
   // 時間側 (`preLoadSec` 等) と同じ切り方で距離を数えたもの。按分の分子 (`totalKm`)
   // の中身を人が読めるようにするために出す (Refs #760)。**`区間距離` の列が無い CSV
@@ -120,6 +162,7 @@ function emptyIdle(): OperationIdle {
     haulSec: 0,
     totalSec: null,
     totalKm: 0,
+    overlayKm: 0,
     preLoadKm: 0,
     haulKm: 0,
     betweenKm: 0,
@@ -140,6 +183,10 @@ function emptyIdle(): OperationIdle {
  *   呼び出し側が気づけなくなる
  * - `運行開始` / `運行終了` が複数ある運行は、**最初の `運行開始` と最後の `運行終了`**
  * - 降しが 1 つも無い便も `legKm` に **0 を置く** (便の本数を揃える。間引かない)
+ * - **距離は `DISTANCE_EVENT_NAMES` の行だけ数える。** 重ね掛け行 (速度オーバー・
+ *   専用道・一般道空車/実車・連続運転 …) の `区間距離` は **ここ 1 か所で 0 に倒す**ので、
+ *   `totalKm` / `legKm` / 内訳 (`preLoadKm` 等) が別々の判定を持たずに同時に揃う。
+ *   数えなかったぶんは `overlayKm` に別建てで出す。**時間側はイベント名で絞らない**
  */
 export function extractOperationIdle(headers: string[], rows: string[][]): OperationIdle {
   const nameIdx = colIndex(headers, 'イベント名')
@@ -154,13 +201,19 @@ export function extractOperationIdle(headers: string[], rows: string[][]): Opera
   /** 運行の中で**最後**に降ろした時刻。便に属さない (積み残しの) 降しも含む。 */
   let lastUnloadTs: number | null = null
   let totalKm = 0
+  let overlayKm = 0
   /** 最初の積みより前の Σ`区間距離`。積みが 1 行も無ければ運行ぜんぶ。 */
   let preRollKm = 0
   const legs: IdleLeg[] = []
 
   for (const row of rows) {
     const name = cellAt(row, nameIdx).trim()
-    const km = kmAt(row, distIdx)
+    // **重ね掛け行の距離はここで 0 に倒す** — 以降の `km` はぜんぶこの値を使うので、
+    // 合計・便ごと・内訳のどれにも重ね掛け行は入らない (判定はこの 1 行だけ)。
+    const rowKm = kmAt(row, distIdx)
+    let km = 0
+    if (DISTANCE_EVENT_NAMES.includes(name)) km = rowKm
+    else overlayKm += rowKm
     totalKm += km
     const category = classifyTimeCategory(name)
 
@@ -249,6 +302,7 @@ export function extractOperationIdle(headers: string[], rows: string[][]): Opera
     haulSec,
     totalSec: startTs !== null && endTs !== null ? endTs - startTs : null,
     totalKm,
+    overlayKm,
     preLoadKm,
     haulKm,
     betweenKm,
