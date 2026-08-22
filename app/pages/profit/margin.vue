@@ -157,6 +157,12 @@ const kmInt = (v: number) => String(Math.round(v))
  * **分母が 0 の運行では呼ばない** (`NaN%` を見せないため、テンプレート側で `v-if` を掛ける)。
  */
 const kmPct = (part: number, totalKm: number) => `${Math.round((part / totalKm) * 100)}%`
+/**
+ * 金額の列 (手当 / 燃料代 / 回送燃料 / 直課経費 / 固定費按分) がその行の売上に占める割合 (整数 %)。
+ * `kmPct` と同じ流儀で、**売上が 0 以下の行・金額が null の列では呼ばない**
+ * (`NaN%` / `Infinity%` を見せないため、テンプレート側で `v-if` を掛ける)。
+ */
+const yenPct = (part: number, salesYen: number) => `${Math.round((part / salesYen) * 100)}%`
 /** 内訳の見出しの意味。**列を増やさない**代わりに、数字の意味をここで説明する。 */
 const KM_BREAKDOWN_TITLE = '積前=始業→最初の積み / 売上=積み→降し / 便間=降し→次の積み / 降後=最後の降し→終業'
 const OTHER_KM_TITLE = '降しが記録されていない便の走行 (分類不能)'
@@ -855,11 +861,11 @@ function downloadCsv() {
           <div class="flex flex-wrap gap-x-3 gap-y-2 text-sm items-center">
             <span>売上 <b>{{ yen(totals.marginSalesYen) }}</b></span>
             <span class="text-gray-400">−</span>
-            <span>手当 <b>{{ yen(totals.marginAllowanceYen) }}</b></span>
+            <span>手当 <b>{{ yen(totals.marginAllowanceYen) }}</b><span v-if="totals.marginSalesYen > 0" class="text-xs text-gray-400"> ({{ yenPct(totals.marginAllowanceYen, totals.marginSalesYen) }})</span></span>
             <span class="text-gray-400">−</span>
-            <span :title="FUEL_HAUL_TITLE">燃料代(売上走行) <b>{{ yen(totals.fuelHaulYen) }}</b></span>
+            <span :title="FUEL_HAUL_TITLE">燃料代(売上走行) <b>{{ yen(totals.fuelHaulYen) }}</b><span v-if="totals.marginSalesYen > 0" class="text-xs text-gray-400"> ({{ yenPct(totals.fuelHaulYen, totals.marginSalesYen) }})</span></span>
             <span class="text-gray-400">−</span>
-            <span :title="FUEL_DEADHEAD_TITLE">回送燃料(按分) <b>{{ yen(totals.fuelDeadheadYen) }}</b></span>
+            <span :title="FUEL_DEADHEAD_TITLE">回送燃料(按分) <b>{{ yen(totals.fuelDeadheadYen) }}</b><span v-if="totals.marginSalesYen > 0" class="text-xs text-gray-400"> ({{ yenPct(totals.fuelDeadheadYen, totals.marginSalesYen) }})</span></span>
             <!-- **分けられなかった燃料があるときだけ出す。** 0 を常に出すと
                  「分けられている」と読めてしまい、引き算も合わなくなる。 -->
             <template v-if="totals.fuelUnsplitYen > 0">
@@ -869,9 +875,9 @@ function downloadCsv() {
               </span>
             </template>
             <span class="text-gray-400">−</span>
-            <span>直課経費 <b>{{ yen(totals.directCostYen) }}</b></span>
+            <span>直課経費 <b>{{ yen(totals.directCostYen) }}</b><span v-if="totals.marginSalesYen > 0" class="text-xs text-gray-400"> ({{ yenPct(totals.directCostYen, totals.marginSalesYen) }})</span></span>
             <span class="text-gray-400">−</span>
-            <span :title="FIXED_POOL_TITLE">固定費按分 <b>{{ yen(totals.allocatedCostYen) }}</b></span>
+            <span :title="FIXED_POOL_TITLE">固定費按分 <b>{{ yen(totals.allocatedCostYen) }}</b><span v-if="totals.marginSalesYen > 0" class="text-xs text-gray-400"> ({{ yenPct(totals.allocatedCostYen, totals.marginSalesYen) }})</span></span>
             <span class="text-gray-400">=</span>
             <span>
               粗利
@@ -1080,9 +1086,13 @@ function downloadCsv() {
                     </span>
                   </td>
                   <td class="px-3 py-2 text-right">{{ yen(d.totals.salesYen) }}</td>
-                  <td class="px-3 py-2 text-right">{{ yen(d.totals.allowanceYen) }}</td>
+                  <td class="px-3 py-2 text-right">
+                    {{ yen(d.totals.allowanceYen) }}
+                    <span v-if="d.totals.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(d.totals.allowanceYen, d.totals.salesYen) }})</span>
+                  </td>
                   <td class="px-3 py-2 text-right" :title="FUEL_HAUL_TITLE">
                     {{ yen(d.totals.fuelHaulYen) }}
+                    <span v-if="d.totals.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(d.totals.fuelHaulYen, d.totals.salesYen) }})</span>
                     <!-- **分けられなかったぶんは黙って落とさない。** 2 列の和が
                          燃料代に足りない理由がここにしか無い。 -->
                     <span
@@ -1093,10 +1103,15 @@ function downloadCsv() {
                   </td>
                   <td class="px-3 py-2 text-right" :title="FUEL_DEADHEAD_TITLE">
                     {{ yen(d.totals.fuelDeadheadYen) }}
+                    <span v-if="d.totals.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(d.totals.fuelDeadheadYen, d.totals.salesYen) }})</span>
                   </td>
-                  <td class="px-3 py-2 text-right">{{ yen(d.totals.directCostYen) }}</td>
+                  <td class="px-3 py-2 text-right">
+                    {{ yen(d.totals.directCostYen) }}
+                    <span v-if="d.totals.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(d.totals.directCostYen, d.totals.salesYen) }})</span>
+                  </td>
                   <td class="px-3 py-2 text-right" :title="fixedPoolTitle(d.operations)">
                     {{ yen(d.totals.allocatedCostYen) }}
+                    <span v-if="d.totals.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(d.totals.allocatedCostYen, d.totals.salesYen) }})</span>
                   </td>
                   <td
                     class="px-3 py-2 text-right font-medium"
@@ -1152,13 +1167,17 @@ function downloadCsv() {
                     </span>
                   </td>
                   <td class="px-3 py-1.5 text-right">{{ yen(m.salesYen) }}</td>
-                  <td class="px-3 py-1.5 text-right">{{ yen(m.allowanceYen) }}</td>
+                  <td class="px-3 py-1.5 text-right">
+                    {{ yen(m.allowanceYen) }}
+                    <span v-if="m.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(m.allowanceYen, m.salesYen) }})</span>
+                  </td>
                   <td
                     class="px-3 py-1.5 text-right"
                     :class="m.fuelHaulYen === null ? 'text-amber-600 dark:text-amber-400' : ''"
                     :title="fuelCellTitle(m)"
                   >
                     {{ yen(m.fuelHaulYen) }}
+                    <span v-if="m.fuelHaulYen !== null && m.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(m.fuelHaulYen, m.salesYen) }})</span>
                   </td>
                   <td
                     class="px-3 py-1.5 text-right"
@@ -1166,10 +1185,15 @@ function downloadCsv() {
                     :title="fuelCellTitle(m)"
                   >
                     {{ yen(m.fuelDeadheadYen) }}
+                    <span v-if="m.fuelDeadheadYen !== null && m.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(m.fuelDeadheadYen, m.salesYen) }})</span>
                   </td>
-                  <td class="px-3 py-1.5 text-right">{{ yen(m.directCostYen) }}</td>
+                  <td class="px-3 py-1.5 text-right">
+                    {{ yen(m.directCostYen) }}
+                    <span v-if="m.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(m.directCostYen, m.salesYen) }})</span>
+                  </td>
                   <td class="px-3 py-1.5 text-right" :title="fixedPoolTitle([m])">
                     {{ yen(m.allocatedCostYen) }}
+                    <span v-if="m.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(m.allocatedCostYen, m.salesYen) }})</span>
                   </td>
                   <td
                     class="px-3 py-1.5 text-right font-medium"
