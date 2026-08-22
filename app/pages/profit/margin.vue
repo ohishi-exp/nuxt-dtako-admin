@@ -156,6 +156,42 @@ const kmInt = (v: number) => String(Math.round(v))
 const KM_BREAKDOWN_TITLE = '積前=始業→最初の積み / 売上=積み→降し / 便間=降し→次の積み / 降後=最後の降し→終業'
 const OTHER_KM_TITLE = '降しが記録されていない便の走行 (分類不能)'
 
+const FUEL_HAUL_TITLE = '売上走行 (積み→降し) の走行ぶんの燃料代 = 燃料代 × 売上走行km ÷ 走行km'
+const FUEL_DEADHEAD_TITLE
+  = '回送 (始業→積み・便間・降し→終業・分類不能) の走行ぶんの燃料代。'
+    + '売上が立たない移動の経費なので、これを按分として見せています (燃料代 − 売上走行ぶん)'
+const FUEL_UNSPLIT_TITLE
+  = '区間距離が無い運行 (運行一覧の総走行距離で代用したもの) の燃料代。'
+    + '売上走行と回送に分けられないので、0 に倒さず別に出しています'
+const FUEL_UNSPLIT_CELL_TITLE = '区間距離が無い運行なので売上走行と回送に分けられません'
+const FIXED_POOL_TITLE
+  = 'リース・保険・通信などの固定費と、運行の無い日の修繕など直課できない経費を、'
+    + '月・その車輌の総走行距離で割ったもの'
+
+/** 燃料代の 2 列の title。**分けられない運行だけ理由を出す。** */
+function fuelCellTitle(m: OperationMargin): string {
+  if (m.fuelYen === null) return 'この車輌の燃費が出せないので燃料代を出していません'
+  if (m.fuelHaulYen === null) return FUEL_UNSPLIT_CELL_TITLE
+  return `燃料代 ${yen(m.fuelYen)} を 売上走行km ${kmInt(m.kmBreakdown.haulKm)} / 走行km ${kmInt(m.totalKm)} で割ったもの`
+}
+
+/**
+ * **固定費按分の中身**を title に列挙する。
+ *
+ * 額は乗務員 (運行) に配ったぶんだが、ここに出すのは**車輌の月ぶんの一覧**
+ * (何を按分しているのかが分からないと、人は数字を信用できない)。走行距離の比で
+ * 配っていることを頭に書いて、取り違えないようにする。
+ */
+function fixedPoolTitle(operations: OperationMargin[]): string {
+  const vehicles = [...new Set(operations.map(m => m.vehicleCode))].sort()
+  const rows = vehicles.flatMap(code => result.value.fixedPoolByVehicle.get(code) ?? [])
+  if (rows.length === 0) return '按分に回った経費はありません'
+  const body = rows.map(r => (r.isFixed
+    ? `${r.costKindName} ${yen(r.yen)}`
+    : `${r.date.slice(5)} ${r.costName}(変動) ${yen(r.yen)} (運行の無い日)`)).join(' / ')
+  return `固定費按分の中身 — 車輌${vehicles.join('･')} の月ぶん (走行距離の比で配っています)\n${body}`
+}
+
 /**
  * 走行km が運行一覧の 総走行距離 とずれた運行に出す注意 (`kmMismatch` が true の行)。
  *
@@ -688,7 +724,7 @@ function downloadCsv() {
       粗利 (売上 − 手当 − 経費)
     </h1>
     <p class="text-xs text-gray-500 mb-4">
-      運行 1 本ごとに <b>売上 − 手当 − 燃料代 − 直課経費 − 按分経費</b> を出します。
+      運行 1 本ごとに <b>売上 − 手当 − 燃料代 − 直課経費 − 固定費按分</b> を出します。
       売上は<b>一番星の運転日報明細</b>、手当は<b>料金・給与マスタ</b> (運行手当タブと同じ基準。
       暫定手当を足し、除外した便は落とし、<b>推定卸地の引き継ぎと強制突合も同じに当てます</b>)、
       経費は<b>一番星の経費明細</b>です。
@@ -698,6 +734,11 @@ function downloadCsv() {
       (速度オーバー・専用道などの重ね掛け行は足しません。運行一覧の総走行距離と一致します)。
       <b>固定費と、日・車輌が運行に一致しない経費は走行距離の比で按分</b>します
       (分母・分子とも表に出しているので検算できます)。
+      <b>回送燃料 = 始業→積み・便間・降し→終業 の走行ぶんの燃料</b>で、
+      <b>売上が立たない移動の経費</b>を按分として見せています
+      (燃料代を売上走行ぶんと回送ぶんに割っただけなので、<b>粗利の額は変わりません</b>)。
+      <b>固定費按分 = リース・保険・通信と、運行の無い日の修繕など直課できない経費を
+      総走行距離で割ったもの</b>です (乗務員の行にカーソルを当てると中身が出ます)。
       <b>燃費が出せない車輌の運行は粗利も「-」</b>にします (0 で割った値を混ぜないため)。
       <b>その車輌・その月の経費を 1 件も引けなかった運行も「-」</b>です —
       経費 0 円として計算すると<b>売上そのままが粗利に見える</b>ので、理由を出して空けます。
@@ -811,11 +852,21 @@ function downloadCsv() {
             <span class="text-gray-400">−</span>
             <span>手当 <b>{{ yen(totals.marginAllowanceYen) }}</b></span>
             <span class="text-gray-400">−</span>
-            <span>燃料代 <b>{{ yen(totals.fuelYen) }}</b></span>
+            <span :title="FUEL_HAUL_TITLE">燃料代(売上走行) <b>{{ yen(totals.fuelHaulYen) }}</b></span>
+            <span class="text-gray-400">−</span>
+            <span :title="FUEL_DEADHEAD_TITLE">回送燃料(按分) <b>{{ yen(totals.fuelDeadheadYen) }}</b></span>
+            <!-- **分けられなかった燃料があるときだけ出す。** 0 を常に出すと
+                 「分けられている」と読めてしまい、引き算も合わなくなる。 -->
+            <template v-if="totals.fuelUnsplitYen > 0">
+              <span class="text-gray-400">−</span>
+              <span class="text-amber-600 dark:text-amber-400" :title="FUEL_UNSPLIT_TITLE">
+                燃料代(未分割) <b>{{ yen(totals.fuelUnsplitYen) }}</b>
+              </span>
+            </template>
             <span class="text-gray-400">−</span>
             <span>直課経費 <b>{{ yen(totals.directCostYen) }}</b></span>
             <span class="text-gray-400">−</span>
-            <span>按分経費 <b>{{ yen(totals.allocatedCostYen) }}</b></span>
+            <span :title="FIXED_POOL_TITLE">固定費按分 <b>{{ yen(totals.allocatedCostYen) }}</b></span>
             <span class="text-gray-400">=</span>
             <span>
               粗利
@@ -985,9 +1036,16 @@ function downloadCsv() {
                 <th class="text-right px-3 py-2 font-medium text-gray-500">走行km</th>
                 <th class="text-right px-3 py-2 font-medium text-gray-500">売上</th>
                 <th class="text-right px-3 py-2 font-medium text-gray-500">手当</th>
-                <th class="text-right px-3 py-2 font-medium text-gray-500">燃料代</th>
+                <th class="text-right px-3 py-2 font-medium text-gray-500" :title="FUEL_HAUL_TITLE">
+                  燃料代 (売上走行)
+                </th>
+                <th class="text-right px-3 py-2 font-medium text-gray-500" :title="FUEL_DEADHEAD_TITLE">
+                  回送燃料 (按分)
+                </th>
                 <th class="text-right px-3 py-2 font-medium text-gray-500">直課経費</th>
-                <th class="text-right px-3 py-2 font-medium text-gray-500">按分経費</th>
+                <th class="text-right px-3 py-2 font-medium text-gray-500" :title="FIXED_POOL_TITLE">
+                  固定費按分
+                </th>
                 <th class="text-right px-3 py-2 font-medium text-gray-500">粗利</th>
                 <th class="text-right px-3 py-2 font-medium text-gray-500">粗利率</th>
                 <th class="text-left px-3 py-2 font-medium text-gray-500">按分 (分子/分母)</th>
@@ -1018,9 +1076,23 @@ function downloadCsv() {
                   </td>
                   <td class="px-3 py-2 text-right">{{ yen(d.totals.salesYen) }}</td>
                   <td class="px-3 py-2 text-right">{{ yen(d.totals.allowanceYen) }}</td>
-                  <td class="px-3 py-2 text-right">{{ yen(d.totals.fuelYen) }}</td>
+                  <td class="px-3 py-2 text-right" :title="FUEL_HAUL_TITLE">
+                    {{ yen(d.totals.fuelHaulYen) }}
+                    <!-- **分けられなかったぶんは黙って落とさない。** 2 列の和が
+                         燃料代に足りない理由がここにしか無い。 -->
+                    <span
+                      v-if="d.totals.fuelUnsplitYen > 0"
+                      class="block text-xs text-amber-600 dark:text-amber-400"
+                      :title="FUEL_UNSPLIT_TITLE"
+                    >未分割 {{ yen(d.totals.fuelUnsplitYen) }}</span>
+                  </td>
+                  <td class="px-3 py-2 text-right" :title="FUEL_DEADHEAD_TITLE">
+                    {{ yen(d.totals.fuelDeadheadYen) }}
+                  </td>
                   <td class="px-3 py-2 text-right">{{ yen(d.totals.directCostYen) }}</td>
-                  <td class="px-3 py-2 text-right">{{ yen(d.totals.allocatedCostYen) }}</td>
+                  <td class="px-3 py-2 text-right" :title="fixedPoolTitle(d.operations)">
+                    {{ yen(d.totals.allocatedCostYen) }}
+                  </td>
                   <td
                     class="px-3 py-2 text-right font-medium"
                     :class="d.totals.marginYen < 0 ? 'text-red-600 dark:text-red-400' : ''"
@@ -1078,13 +1150,22 @@ function downloadCsv() {
                   <td class="px-3 py-1.5 text-right">{{ yen(m.allowanceYen) }}</td>
                   <td
                     class="px-3 py-1.5 text-right"
-                    :class="m.fuelYen === null ? 'text-amber-600 dark:text-amber-400' : ''"
-                    :title="m.fuelYen === null ? 'この車輌の燃費が出せないので燃料代を出していません' : ''"
+                    :class="m.fuelHaulYen === null ? 'text-amber-600 dark:text-amber-400' : ''"
+                    :title="fuelCellTitle(m)"
                   >
-                    {{ yen(m.fuelYen) }}
+                    {{ yen(m.fuelHaulYen) }}
+                  </td>
+                  <td
+                    class="px-3 py-1.5 text-right"
+                    :class="m.fuelDeadheadYen === null ? 'text-amber-600 dark:text-amber-400' : ''"
+                    :title="fuelCellTitle(m)"
+                  >
+                    {{ yen(m.fuelDeadheadYen) }}
                   </td>
                   <td class="px-3 py-1.5 text-right">{{ yen(m.directCostYen) }}</td>
-                  <td class="px-3 py-1.5 text-right">{{ yen(m.allocatedCostYen) }}</td>
+                  <td class="px-3 py-1.5 text-right" :title="fixedPoolTitle([m])">
+                    {{ yen(m.allocatedCostYen) }}
+                  </td>
                   <td
                     class="px-3 py-1.5 text-right font-medium"
                     :class="m.marginYen !== null && m.marginYen < 0 ? 'text-red-600 dark:text-red-400' : ''"
@@ -1093,7 +1174,7 @@ function downloadCsv() {
                     {{ yen(m.marginYen) }}
                   </td>
                   <td class="px-3 py-1.5 text-right">{{ pct(marginRate(m)) }}</td>
-                  <td class="px-3 py-1.5 text-gray-500" :title="'按分 = 車輌の按分対象の経費 × (この運行の走行km ÷ 月・この車輌の走行km)'">
+                  <td class="px-3 py-1.5 text-gray-500" :title="'固定費按分 = 車輌の按分対象の経費 × (この運行の走行km ÷ 月・この車輌の走行km)'">
                     {{ num(m.totalKm) }} / {{ num(m.vehicleTotalKm) }} km
                     <span v-if="m.vehicleTotalKm > 0" class="text-gray-400">
                       = {{ pct(m.totalKm / m.vehicleTotalKm) }}

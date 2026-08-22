@@ -15,6 +15,11 @@
  *    なる。別枠で「一番星の人件費」と「運行手当」を並べて出し、どちらが正しいかは
  *    人が判断する
  * 4. 粗利は運行手当タブの中の節ではなく**独立したタブ**
+ * 5. (2026-08-22) **「リース・保険・通信・車輌修繕は固定費だから総走行距離で割る。
+ *    按分経費は主に燃費のはずで、売上前後の移動にかかる経費を載せたい」** —
+ *    2 の距離按分は**「固定費按分」と名前を改め**、オーナーの言う「按分経費」は
+ *    **回送 (売上が立たない移動) の燃料**として燃料代を割って見せる (`splitFuelYen`)。
+ *    **粗利の額は 1 円も動かさない。分け方と見せ方だけを変える**
  *
  * ## 燃費と単価は一番星の燃料実績から出す (既定値)
  *
@@ -245,6 +250,36 @@ export function fuelYenFor(km: number, rate: FuelRate): number | null {
   return (km / rate.kmPerLiter) * rate.yenPerLiter
 }
 
+/**
+ * 燃料代を **売上走行ぶん**と**回送ぶん**に割る (Refs #760 の 8)。
+ *
+ * オーナーの言う「按分経費 = 売上前後の移動にかかる経費」は、実体としては
+ * **売上が立たない走行 (始業→積み・便間・降し→終業・分類不能) の燃料**。固定費
+ * (リース・保険・通信・車輌修繕) の距離按分とは性質が違うので、同じ「按分経費」の
+ * 欄に混ぜず、燃料代の方を 2 つに割って見せる。
+ *
+ * - `haul` = 燃料代 × 売上走行km ÷ **内訳の和**
+ * - `deadhead` = 燃料代 − `haul` (**引き算で出す** — `haul + deadhead === fuelYen` が
+ *   丸め誤差なしで必ず成り立つ)
+ *
+ * **分母は `totalKm` ではなく内訳 5 つの和。** 2 つは同じ値になるはず (`KmBreakdown`
+ * の doc) だが、グループを変えて足し直しているぶんの丸め誤差があり、和を使えば
+ * 比が 1 を超えない。
+ *
+ * **和が 0 なら両方 `null`。** `区間距離` の列が無い CSV では呼び出し側が `totalKm` に
+ * 運行一覧の `total_distance` を入れる (内訳は 0 のまま) ので、**分けられない運行**が
+ * 実在する。**黙って全部を売上走行に倒さない** — 回送が 0 km の運行に見えてしまう。
+ */
+export function splitFuelYen(
+  fuelYen: number | null,
+  km: KmBreakdown,
+): { haul: number | null, deadhead: number | null } {
+  const sum = km.preLoadKm + km.haulKm + km.betweenKm + km.postUnloadKm + km.otherKm
+  if (fuelYen === null || sum <= 0) return { haul: null, deadhead: null }
+  const haul = fuelYen * (km.haulKm / sum)
+  return { haul, deadhead: fuelYen - haul }
+}
+
 // --- 燃費・単価の上書き (localStorage) ---
 
 /** localStorage のキー。**形を変えるときは番号を上げる。** */
@@ -337,7 +372,11 @@ export function effectiveFuelRate(derived: FuelRate, override: FuelRateOverride 
  *
  * **按分の分子 (`totalKm`) の中身**。5 つを足すと `totalKm` になる (浮動小数の
  * 丸め誤差ぶんだけずれることはある — グループを変えて足し直しているため)。
- * **按分には使わない** — 分子は今までどおり `totalKm` で、これは人が読むためだけ。
+ * **経費の按分には使わない** — 分子は今までどおり `totalKm`。
+ *
+ * ただし **`haulKm` だけは燃料代の分割に効く** (`splitFuelYen`。Refs #760 の 8) —
+ * 燃料代を「売上走行ぶん」と「回送ぶん」に割るときの比。**粗利の額は動かない**
+ * (引くのは分ける前の `fuelYen` のまま)。
  */
 export interface KmBreakdown {
   /** 始業 → 最初の積み。 */
@@ -390,15 +429,29 @@ export interface OperationMargin {
   listedTotalKm: number | null
   /**
    * **分子の中身。** 本番実測では `totalKm` の過半が非売上走行 (便間が最大) なので、
-   * 分子を人が読めるように内訳を持ち回る (Refs #760)。**按分の式には入らない。**
+   * 分子を人が読めるように内訳を持ち回る (Refs #760)。**経費の按分の式には入らない**
+   * (`haulKm` は燃料代の分割にだけ効く。`splitFuelYen`)。
    */
   kmBreakdown: KmBreakdown
   /** **按分の分母。** その月・その車輌の運行の走行距離の合計。 */
   vehicleTotalKm: number
   salesYen: number
   allowanceYen: number
-  /** 燃料代。`FuelRate` が出せなければ null。 */
+  /** 燃料代。`FuelRate` が出せなければ null。**下の 2 つの和** (分けられれば)。 */
   fuelYen: number | null
+  /**
+   * **売上走行 (積み→降し) ぶんの燃料代。** `fuelYen × 売上走行km ÷ 内訳の和`。
+   *
+   * `fuelYen` が null のとき、および**内訳の和が 0 の運行** (`区間距離` の列が無い
+   * CSV) は `null`。粗利には効かない (`fuelYen` を引いているだけ)。
+   */
+  fuelHaulYen: number | null
+  /**
+   * **回送 (始業→積み・便間・降し→終業・分類不能) ぶんの燃料代** = `fuelYen − fuelHaulYen`。
+   *
+   * オーナーの言う「売上前後の移動にかかる経費」。`fuelHaulYen` と同時に null になる。
+   */
+  fuelDeadheadYen: number | null
   /** 直課できた経費 (日・車輌が一致する変動費)。 */
   directCostYen: number
   /** 距離比で按分した経費 (固定費 + 直課できなかったぶん)。 */
@@ -431,6 +484,26 @@ function marginOf(
   return salesYen - allowanceYen - fuelYen - directCostYen - allocatedCostYen
 }
 
+/**
+ * 按分に回した経費 1 行 (**画面で中身を見せるためだけ**。計算には使わない)。
+ *
+ * 「固定費按分」の欄に何が入っているのかが分からないと、人は数字を信用できない。
+ * 実例 (2026-07 / 車1109) は **固定費 ¥79,690 (リース・任意保険・デジタコ通信費) +
+ * 07-24 の車輌修繕費 ¥97,195** で、後者は `isFixed=false` の変動費が
+ * **その日に運行が無かったので直課できず按分に回った**もの。**性質が違う 2 つが
+ * 同じ額に畳まれている**ので、`isFixed` で区別できる形で持ち回る。
+ */
+export interface FixedPoolRow {
+  /** `運行年月日`。固定費は月初などの計上日で、直課できなかった変動費は走った日。 */
+  date: string
+  costKindName: string
+  costName: string
+  /** 実額 (`costYen` = 税抜金額 + 軽油引取税)。 */
+  yen: number
+  /** `true` = 月極めの固定費 / `false` = 直課できなかった変動費。 */
+  isFixed: boolean
+}
+
 /** 経費の一群を運行へ配った結果 (添字は渡した運行と同じ)。 */
 interface Spread {
   /** 日・車輌が一致する変動費として直課した額。 */
@@ -439,6 +512,11 @@ interface Spread {
   allocated: number[]
   /** **どの運行にも配れなかった額。** 黙って消さずに数える。 */
   dropped: number
+  /**
+   * 車輌C → 按分に回した行の一覧。**`pool` と 1 対 1** (配れずに `dropped` へ
+   * 落ちたぶんも残る — 「按分に回した」ことは同じで、見せる先が無いだけ)。
+   */
+  poolRows: Map<string, FixedPoolRow[]>
 }
 
 /**
@@ -471,6 +549,8 @@ function spreadCosts(
 
   /** 按分に回す額 (車輌C → 円)。直課できなかったものが溜まる。 */
   const pool = new Map<string, number>()
+  /** 同じものの**行の一覧**。額は `pool` が正で、こちらは画面に中身を出すため。 */
+  const poolRows = new Map<string, FixedPoolRow[]>()
   for (const row of rows) {
     const yen = costYen(row)
     const hits = row.isFixed ? [] : (byDayVehicle.get(`${row.operationDate}|${row.vehicleNumber}`) ?? [])
@@ -480,6 +560,9 @@ function spreadCosts(
       continue
     }
     pool.set(row.vehicleNumber, (pool.get(row.vehicleNumber) ?? 0) + yen)
+    const list = poolRows.get(row.vehicleNumber) ?? []
+    list.push({ date: row.operationDate, costKindName: row.costKindName, costName: row.costName, yen, isFixed: row.isFixed })
+    poolRows.set(row.vehicleNumber, list)
   }
 
   for (const [vehicle, yen] of pool) {
@@ -498,7 +581,7 @@ function spreadCosts(
     for (const i of idx) allocated[i]! += yen * (ops[i]!.totalKm / denom)
   }
 
-  return { direct, allocated, dropped }
+  return { direct, allocated, dropped, poolRows }
 }
 
 export interface MarginResult {
@@ -510,6 +593,13 @@ export interface MarginResult {
   derivedByVehicle: Map<string, FuelRate>
   /** 車輌C → 月の走行距離合計 (= **按分の分母**)。 */
   kmByVehicle: Map<string, number>
+  /**
+   * 車輌C → **固定費按分の中身** (按分に回した経費の行)。
+   *
+   * 額は `allocatedCostYen` が正で、これは画面の title に列挙するためだけ。
+   * **人件費 (`08`/`11`) は入らない** — 粗利の経費だけを配った側の pool。
+   */
+  fixedPoolByVehicle: Map<string, FixedPoolRow[]>
   /** どの運行にも配れなかった経費 (円)。**粗利から抜けているぶん。** */
   unallocatedCostYen: number
   /** どの運行にも配れなかった人件費 (円)。 */
@@ -567,6 +657,9 @@ export function buildOperationMargins(
     // 構造上ありえないので、`??` の受け皿を置くと通らない枝が残る。
     const fuelRate = ratesByVehicle.get(op.vehicleCode)!
     const fuelYen = fuelYenFor(op.totalKm, fuelRate)
+    // **粗利は `fuelYen` から出す。** 分けた 2 つは見せるためだけで、和は `fuelYen`
+    // に一致する (分けられない運行は両方 null)。
+    const fuelSplit = splitFuelYen(fuelYen, op.kmBreakdown)
     const directCostYen = spreadCost.direct[i]!
     const allocatedCostYen = spreadCost.allocated[i]!
     const costsMissing = (costCountByVehicle.get(op.vehicleCode) ?? 0) === 0
@@ -582,6 +675,8 @@ export function buildOperationMargins(
       salesYen: op.salesYen,
       allowanceYen: op.allowanceYen,
       fuelYen,
+      fuelHaulYen: fuelSplit.haul,
+      fuelDeadheadYen: fuelSplit.deadhead,
       directCostYen,
       allocatedCostYen,
       // **燃費が出せない運行と、経費を 1 件も持っていない運行は粗利を出さない。**
@@ -599,6 +694,7 @@ export function buildOperationMargins(
     ratesByVehicle,
     derivedByVehicle,
     kmByVehicle,
+    fixedPoolByVehicle: spreadCost.poolRows,
     unallocatedCostYen: spreadCost.dropped,
     unallocatedLaborYen: spreadLabor.dropped,
     ichibanLaborYen: laborRows.reduce((sum, row) => sum + costYen(row), 0),
@@ -684,7 +780,9 @@ export function marginRate(m: Pick<OperationMargin, 'salesYen' | 'marginYen'>): 
  *
  * 下の 6 つは
  * `marginSalesYen − marginAllowanceYen − fuelYen − directCostYen − allocatedCostYen
- *  === marginYen` が**必ず成り立つ**。
+ *  === marginYen` が**必ず成り立つ**。燃料代の分割 (`fuelHaulYen` /
+ * `fuelDeadheadYen` / `fuelUnsplitYen`) も `fuelYen` の内訳なので、
+ * **3 つの和 === `fuelYen`** が成り立つ (Refs #760 の 8)。
  */
 export interface MarginTotals {
   /** 運行の本数 (**ぜんぶ**)。 */
@@ -715,11 +813,23 @@ export interface MarginTotals {
   marginSalesYen: number
   /** 粗利を出せた運行ぶんの手当。 */
   marginAllowanceYen: number
-  /** 粗利を出せた運行ぶんの燃料代。 */
+  /** 粗利を出せた運行ぶんの燃料代。**下の 3 つの和** (不変条件)。 */
   fuelYen: number
+  /** そのうち**売上走行 (積み→降し) ぶん**。 */
+  fuelHaulYen: number
+  /** そのうち**回送ぶん** (始業→積み・便間・降し→終業・分類不能)。 */
+  fuelDeadheadYen: number
+  /**
+   * **売上走行と回送に分けられなかった運行の燃料代。**
+   *
+   * `区間距離` の列が無い CSV で来た運行 (内訳の和が 0)。**0 に倒さず数える** —
+   * 足し忘れると `fuelHaulYen + fuelDeadheadYen` が `fuelYen` より小さくなり、
+   * 画面の引き算が合わなくなる。
+   */
+  fuelUnsplitYen: number
   /** 粗利を出せた運行ぶんの直課経費。 */
   directCostYen: number
-  /** 粗利を出せた運行ぶんの按分経費。 */
+  /** 粗利を出せた運行ぶんの**固定費按分** (固定費 + 直課できなかった経費の距離按分)。 */
   allocatedCostYen: number
   /** 粗利。上の 5 つから引き算で出る。 */
   marginYen: number
@@ -749,6 +859,9 @@ export function emptyMarginTotals(): MarginTotals {
     marginSalesYen: 0,
     marginAllowanceYen: 0,
     fuelYen: 0,
+    fuelHaulYen: 0,
+    fuelDeadheadYen: 0,
+    fuelUnsplitYen: 0,
     directCostYen: 0,
     allocatedCostYen: 0,
     marginYen: 0,
@@ -793,6 +906,16 @@ export function summarizeMargins(margins: OperationMargin[]): MarginTotals {
     totals.directCostYen += m.directCostYen
     totals.allocatedCostYen += m.allocatedCostYen
     totals.fuelYen += fuelYen
+    // **分けられた運行だけ 2 つに足し、分けられない運行は `fuelUnsplitYen` へ。**
+    // `fuelYen === fuelHaulYen + fuelDeadheadYen + fuelUnsplitYen` を保つ。
+    const haul = m.fuelHaulYen
+    if (haul === null) totals.fuelUnsplitYen += fuelYen
+    else {
+      totals.fuelHaulYen += haul
+      // `fuelHaulYen` が非 null なら `fuelDeadheadYen` も非 null (`splitFuelYen` が
+      // 同時に決める)。受け皿を置くと通らない枝が残る。
+      totals.fuelDeadheadYen += m.fuelDeadheadYen!
+    }
     totals.marginYen += marginYen
   }
   return totals
@@ -828,7 +951,8 @@ const CSV_HEADER = [
   '運行NO', '日付', '乗務員', '車輌C', '走行km',
   '始業→積みkm', '売上走行km', '便間km', '降し→終業km', '分類不能km',
   '月・車輌の走行km', '売上', '手当',
-  '燃料代', '直課経費', '按分経費', '粗利', '粗利率', '粗利が出せない理由',
+  '燃料代', '燃料代(売上走行)', '燃料代(回送=按分)',
+  '直課経費', '固定費按分', '粗利', '粗利率', '粗利が出せない理由',
   '一番星の人件費(参考)', '単価(円/L)', '燃費(km/L)',
 ]
 
@@ -844,7 +968,8 @@ export function marginCsvLines(margins: OperationMargin[]): string[] {
       round(m.kmBreakdown.preLoadKm), round(m.kmBreakdown.haulKm), round(m.kmBreakdown.betweenKm),
       round(m.kmBreakdown.postUnloadKm), round(m.kmBreakdown.otherKm),
       m.vehicleTotalKm,
-      m.salesYen, m.allowanceYen, round(m.fuelYen), round(m.directCostYen),
+      m.salesYen, m.allowanceYen,
+      round(m.fuelYen), round(m.fuelHaulYen), round(m.fuelDeadheadYen), round(m.directCostYen),
       round(m.allocatedCostYen), round(m.marginYen), rate(marginRate(m)), noMarginReason(m),
       round(m.laborYen), round(m.fuelRate.yenPerLiter), round(m.fuelRate.kmPerLiter),
     ].map(quote).join(',')),
