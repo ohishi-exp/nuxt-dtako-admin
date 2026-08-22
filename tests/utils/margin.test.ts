@@ -18,6 +18,7 @@ import {
   emptyMarginTotals,
   groupMarginsByDriver,
   marginCsvLines,
+  splitFuelYen,
   noMarginReason,
   summarizeNoMarginReasons,
   buildUncoveredLegs,
@@ -643,6 +644,9 @@ describe('summarizeMargins', () => {
     salesYen: 50000,
     allowanceYen: 8000,
     fuelYen: 2400,
+    // 燃料代の内訳 (売上走行 60km / 走行 100km → 1440 : 960)。**和は fuelYen。**
+    fuelHaulYen: 1440,
+    fuelDeadheadYen: 960,
     directCostYen: 1000,
     allocatedCostYen: 600,
     marginYen: 38000,
@@ -658,7 +662,7 @@ describe('summarizeMargins', () => {
   it('本数・走行・売上・手当・人件費はぜんぶ数え、粗利の内訳は出せた運行だけ', () => {
     const totals = summarizeMargins([
       base,
-      { ...base, unkoNo: 'B', fuelYen: null, marginYen: null, salesYen: 20000 },
+      { ...base, unkoNo: 'B', fuelYen: null, fuelHaulYen: null, fuelDeadheadYen: null, marginYen: null, salesYen: 20000 },
     ])
     // --- ぜんぶ ---
     expect(totals.operations).toBe(2)
@@ -682,8 +686,8 @@ describe('summarizeMargins', () => {
   it('**粗利の内訳は引き算がぴったり合う** (人が検算できないと信用されない)', () => {
     const totals = summarizeMargins([
       base,
-      { ...base, unkoNo: 'B', salesYen: 30000, allowanceYen: 5000, fuelYen: 1200, directCostYen: 400, allocatedCostYen: 300, marginYen: 23100 },
-      { ...base, unkoNo: 'C', fuelYen: null, marginYen: null, salesYen: 20000 },
+      { ...base, unkoNo: 'B', salesYen: 30000, allowanceYen: 5000, fuelYen: 1200, fuelHaulYen: 720, fuelDeadheadYen: 480, directCostYen: 400, allocatedCostYen: 300, marginYen: 23100 },
+      { ...base, unkoNo: 'C', fuelYen: null, fuelHaulYen: null, fuelDeadheadYen: null, marginYen: null, salesYen: 20000 },
     ])
     expect(
       totals.marginSalesYen - totals.marginAllowanceYen - totals.fuelYen
@@ -706,6 +710,8 @@ describe('groupMarginsByDriver', () => {
     salesYen: 10000,
     allowanceYen: 1000,
     fuelYen: 500,
+    fuelHaulYen: 300,
+    fuelDeadheadYen: 200,
     directCostYen: 0,
     allocatedCostYen: 0,
     marginYen: 8500,
@@ -744,6 +750,8 @@ describe('marginCsvLines', () => {
     salesYen: 50000,
     allowanceYen: 8000,
     fuelYen: 2400.6,
+    fuelHaulYen: 1440.36,
+    fuelDeadheadYen: 960.24,
     directCostYen: 1000,
     allocatedCostYen: 600,
     marginYen: 38000,
@@ -761,7 +769,7 @@ describe('marginCsvLines', () => {
   })
 
   it('粗利が出せない運行は金額も率も空にする', () => {
-    const lines = marginCsvLines([{ ...base, fuelYen: null, marginYen: null }])
+    const lines = marginCsvLines([{ ...base, fuelYen: null, fuelHaulYen: null, fuelDeadheadYen: null, marginYen: null }])
     expect(lines[1]!.endsWith('"120","5"')).toBe(true)
     expect(lines[1]).toContain('"","1000"')
   })
@@ -901,6 +909,8 @@ describe('summarizeNoMarginReasons', () => {
     salesYen: 10000,
     allowanceYen: 0,
     fuelYen: 500,
+    fuelHaulYen: 300,
+    fuelDeadheadYen: 200,
     directCostYen: 0,
     allocatedCostYen: 0,
     marginYen: 9500,
@@ -1044,6 +1054,9 @@ describe('走行km の内訳 (kmBreakdown)', () => {
     salesYen: 50000,
     allowanceYen: 8000,
     fuelYen: 2400,
+    // 燃料代の内訳 (売上走行 60km / 走行 100km → 1440 : 960)。**和は fuelYen。**
+    fuelHaulYen: 1440,
+    fuelDeadheadYen: 960,
     directCostYen: 1000,
     allocatedCostYen: 600,
     marginYen: 38000,
@@ -1072,6 +1085,8 @@ describe('走行km の内訳 (kmBreakdown)', () => {
         ...base,
         unkoNo: 'B',
         fuelYen: null,
+        fuelHaulYen: null,
+        fuelDeadheadYen: null,
         marginYen: null,
         kmBreakdown: { preLoadKm: 1, haulKm: 2, betweenKm: 3, postUnloadKm: 4, otherKm: 5 },
         totalKm: 15,
@@ -1300,5 +1315,215 @@ describe('kmMismatch — CSV の走行km と 運行一覧の 総走行距離 の
     expect(res.operations[0]!.vehicleTotalKm).toBe(300)
     expect(kmMismatch(res.operations[0]!)).toBe(false)
     expect(kmMismatch(res.operations[1]!)).toBe(false)
+  })
+})
+
+/**
+ * 燃料代を **売上走行**と**回送**に分ける (Refs #760 の 8)。
+ *
+ * オーナー指示: 「リース・保険・通信・車輌修繕は固定費だから総走行距離で割りたい。
+ * 按分経費は主に燃費のはずで、売上前後の移動にかかる経費を載せたい」。
+ *
+ * **粗利は 1 円も動かさない。** 引くのは分ける前の `fuelYen` のままで、
+ * 分けた 2 つは見せるためだけ。だから**このブロックのテストが全部通っても、
+ * 既存の粗利のテストの期待値は 1 つも動かない**ことが不変の証拠になる。
+ */
+describe('燃料代の分割 (売上走行 / 回送)', () => {
+  it('売上走行km の比で割り、和は必ず元の燃料代に戻る', () => {
+    const km = { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 }
+    const split = splitFuelYen(2400, km)
+    expect(split.haul).toBe(1440)
+    expect(split.deadhead).toBe(960)
+    expect(split.haul! + split.deadhead!).toBe(2400)
+  })
+
+  it('回送は 引き算で出す — 割り切れなくても和が 1 円もずれない', () => {
+    // 3 で割り切れない比 (haul 1 / 和 3)。比から 2 つとも計算すると和がずれる。
+    const km = { preLoadKm: 1, haulKm: 1, betweenKm: 1, postUnloadKm: 0, otherKm: 0 }
+    const split = splitFuelYen(1000, km)
+    expect(split.haul! + split.deadhead!).toBe(1000)
+  })
+
+  it('燃料代が null なら 2 つとも null', () => {
+    const km = { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 }
+    expect(splitFuelYen(null, km)).toEqual({ haul: null, deadhead: null })
+  })
+
+  it('内訳の和が 0 なら 2 つとも null (黙って全部を売上走行に倒さない)', () => {
+    // `区間距離` の列が無い CSV。呼び出し側が totalKm に 運行一覧の総走行距離を入れる
+    // ので、**走っているのに内訳だけ 0** という運行が実在する。
+    const zero = { preLoadKm: 0, haulKm: 0, betweenKm: 0, postUnloadKm: 0, otherKm: 0 }
+    expect(splitFuelYen(2400, zero)).toEqual({ haul: null, deadhead: null })
+  })
+
+  it('分類不能 (otherKm) は回送に入る — 売上が立っていないので', () => {
+    const km = { preLoadKm: 0, haulKm: 50, betweenKm: 0, postUnloadKm: 0, otherKm: 50 }
+    const split = splitFuelYen(1000, km)
+    expect(split.haul).toBe(500)
+    expect(split.deadhead).toBe(500)
+  })
+
+  it('buildOperationMargins は運行ごとに分け、粗利は分ける前の燃料代で出す', () => {
+    const res = buildOperationMargins(
+      [op({ totalKm: 100, kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 } })],
+      [cost({ costKind: '01', quantity: 20, amount: 2400 })],
+      {},
+    )
+    const m = res.operations[0]!
+    // 単価 120 円/L・燃費 5 km/L → 100km で 2400 円
+    expect(m.fuelYen).toBe(2400)
+    expect(m.fuelHaulYen).toBe(1440)
+    expect(m.fuelDeadheadYen).toBe(960)
+    // **不変条件**: 分けた 2 つの和は元の燃料代
+    expect(m.fuelHaulYen! + m.fuelDeadheadYen!).toBe(m.fuelYen)
+    // **粗利は分ける前の燃料代で出す** (回送ぶんを二重に引かない)
+    expect(m.marginYen).toBe(50000 - 8000 - 2400 - 0 - 0)
+  })
+
+  it('内訳の和が 0 で走行距離がある運行は分けられない (null) が、燃料代と粗利は出る', () => {
+    const zero = { preLoadKm: 0, haulKm: 0, betweenKm: 0, postUnloadKm: 0, otherKm: 0 }
+    const res = buildOperationMargins(
+      [op({ totalKm: 100, kmBreakdown: zero })],
+      [cost({ costKind: '01', quantity: 20, amount: 2400 })],
+      {},
+    )
+    const m = res.operations[0]!
+    expect(m.fuelYen).toBe(2400)
+    expect(m.fuelHaulYen).toBeNull()
+    expect(m.fuelDeadheadYen).toBeNull()
+    expect(m.marginYen).toBe(50000 - 8000 - 2400)
+  })
+
+  it('燃料代が出せない運行は 2 つとも null', () => {
+    // 給油実績が無い → 単価が出せない
+    const res = buildOperationMargins([op({ totalKm: 100 })], [cost({ costKind: '04', amount: 1000 })], {})
+    const m = res.operations[0]!
+    expect(m.fuelYen).toBeNull()
+    expect(m.fuelHaulYen).toBeNull()
+    expect(m.fuelDeadheadYen).toBeNull()
+  })
+
+  it('合計は 売上走行 + 回送 + 未分割 === 燃料代 (不変条件)', () => {
+    const zero = { preLoadKm: 0, haulKm: 0, betweenKm: 0, postUnloadKm: 0, otherKm: 0 }
+    const res = buildOperationMargins(
+      [
+        // 分けられる運行
+        op({ unkoNo: 'A', totalKm: 100, kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 } }),
+        // 内訳が無い運行 (`total_distance` の受け皿で来たもの)
+        op({ unkoNo: 'B', date: '2026-07-02', totalKm: 100, kmBreakdown: zero }),
+      ],
+      [cost({ costKind: '01', quantity: 40, amount: 4800 })],
+      {},
+    )
+    const totals = summarizeMargins(res.operations)
+    expect(totals.fuelYen).toBe(4800)
+    expect(totals.fuelHaulYen).toBe(1440)
+    expect(totals.fuelDeadheadYen).toBe(960)
+    // **未分割を 0 に倒さない。** 倒すと 2 列の和が燃料代に足りない理由が消える
+    expect(totals.fuelUnsplitYen).toBe(2400)
+    expect(totals.fuelHaulYen + totals.fuelDeadheadYen + totals.fuelUnsplitYen).toBe(totals.fuelYen)
+  })
+
+  it('emptyMarginTotals は分割の 3 つも 0 で始まる', () => {
+    const empty = emptyMarginTotals()
+    expect(empty.fuelHaulYen).toBe(0)
+    expect(empty.fuelDeadheadYen).toBe(0)
+    expect(empty.fuelUnsplitYen).toBe(0)
+  })
+
+  it('CSV は 燃料代 の直後に 売上走行 / 回送 の 2 列を出し、按分経費 は 固定費按分 に改名', () => {
+    const res = buildOperationMargins(
+      [op({ totalKm: 100, kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 } })],
+      [cost({ costKind: '01', quantity: 20, amount: 2400 }), cost({ costKind: '13', amount: 1000, isFixed: true })],
+      {},
+    )
+    const lines = marginCsvLines(res.operations)
+    const header = lines[0]!.split(',').map(v => v.replace(/"/g, ''))
+    const row = lines[1]!.split(',').map(v => v.replace(/"/g, ''))
+    const at = header.indexOf('燃料代')
+    expect(header.slice(at, at + 5)).toEqual([
+      '燃料代', '燃料代(売上走行)', '燃料代(回送=按分)', '直課経費', '固定費按分',
+    ])
+    expect(row.slice(at, at + 5)).toEqual(['2400', '1440', '960', '0', '1000'])
+    // **「按分経費」は消える** — 中身が固定費の按分だと分かる名前にした
+    expect(header).not.toContain('按分経費')
+  })
+
+  it('CSV は 分けられない運行の 2 列を空にする (0 と書かない)', () => {
+    const zero = { preLoadKm: 0, haulKm: 0, betweenKm: 0, postUnloadKm: 0, otherKm: 0 }
+    const res = buildOperationMargins(
+      [op({ totalKm: 100, kmBreakdown: zero })],
+      [cost({ costKind: '01', quantity: 20, amount: 2400 })],
+      {},
+    )
+    const lines = marginCsvLines(res.operations)
+    const header = lines[0]!.split(',').map(v => v.replace(/"/g, ''))
+    const row = lines[1]!.split(',').map(v => v.replace(/"/g, ''))
+    const at = header.indexOf('燃料代')
+    expect(row.slice(at, at + 3)).toEqual(['2400', '', ''])
+  })
+})
+
+/**
+ * **固定費按分の中身**を画面に出せる形で返す (Refs #760 の 8)。
+ *
+ * 実例 (2026-07 / 車1109) は 固定費 3 行 + **運行の無い日の車輌修繕費** 1 行。
+ * 性質が違う 2 つが同じ額に畳まれているので、`isFixed` で区別できないと
+ * 「固定費按分」という名前そのものが嘘になる。
+ */
+describe('固定費按分の中身 (fixedPoolByVehicle)', () => {
+  it('固定費と、運行の無い日の変動費を、車輌ごとに両方持つ', () => {
+    const res = buildOperationMargins(
+      [op({ date: '2026-07-01', totalKm: 100 })],
+      [
+        // 固定費 (リース) — 日が運行に当たっていても按分に回る
+        cost({ costKind: '13', costKindName: 'リース･償却費', costName: 'リース料', operationDate: '2026-07-01', amount: 70000, isFixed: true }),
+        // **運行の無い日の変動費** — 直課できないので按分に回る (実例 07-24 の車輌修繕)
+        cost({ costKind: '05', costKindName: '車輌修繕費', costName: '車輌修繕', operationDate: '2026-07-24', amount: 97195, isFixed: false }),
+        // 日・車輌が当たる変動費 → 直課。**pool には入らない**
+        cost({ costKind: '04', costKindName: '通行料', operationDate: '2026-07-01', amount: 3000 }),
+      ],
+      {},
+    )
+    const rows = res.fixedPoolByVehicle.get('1109')!
+    expect(rows).toEqual([
+      { date: '2026-07-01', costKindName: 'リース･償却費', costName: 'リース料', yen: 70000, isFixed: true },
+      { date: '2026-07-24', costKindName: '車輌修繕費', costName: '車輌修繕', yen: 97195, isFixed: false },
+    ])
+    // 直課した通行料は入っていない (按分に回っていないので)
+    expect(rows.map(r => r.costKindName)).not.toContain('通行料')
+    // 額は今までどおり — 行の一覧を返しても按分の計算は 1 ミリも変えていない
+    expect(res.operations[0]!.allocatedCostYen).toBe(167195)
+    expect(res.operations[0]!.directCostYen).toBe(3000)
+  })
+
+  it('軽油引取税を足した実額で持つ (画面の額と食い違わせない)', () => {
+    const res = buildOperationMargins(
+      [op({ totalKm: 100 })],
+      [cost({ costKind: '13', amount: 1000, dieselTax: 200, isFixed: true })],
+      {},
+    )
+    expect(res.fixedPoolByVehicle.get('1109')![0]!.yen).toBe(1200)
+  })
+
+  it('按分に回った経費が無い車輌は空 (キーそのものが無い)', () => {
+    const res = buildOperationMargins(
+      [op({ date: '2026-07-01', totalKm: 100 })],
+      [cost({ costKind: '04', operationDate: '2026-07-01', amount: 3000 })],
+      {},
+    )
+    expect(res.fixedPoolByVehicle.get('1109')).toBeUndefined()
+  })
+
+  it('配れなかった経費も残る (どの運行にも当たらない車輌のぶん)', () => {
+    // **`dropped` に落ちたぶんも「按分に回した」ことは同じ。** 一覧から消すと
+    // 「配れなかった経費が ¥X あります」の中身が画面から辿れなくなる。
+    const res = buildOperationMargins(
+      [op({ vehicleCode: '1109' })],
+      [cost({ costKind: '13', vehicleNumber: '9999', amount: 1000, isFixed: true })],
+      {},
+    )
+    expect(res.unallocatedCostYen).toBe(1000)
+    expect(res.fixedPoolByVehicle.get('9999')).toHaveLength(1)
   })
 })
