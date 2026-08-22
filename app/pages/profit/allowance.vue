@@ -98,6 +98,11 @@ import {
   type ForceMatchMap,
 } from '~/utils/allowance-force-match'
 import {
+  findRelayGroups,
+  transportSlips,
+  type RelayGroup,
+} from '~/utils/allowance-relay'
+import {
   MAX_LOAD_TONS,
   buildIchibanLegs,
   summarizeIchibanLegs,
@@ -756,7 +761,10 @@ const usedSlipRowIds = computed(() => {
 function candidatesFor(r: AllowanceReportRow): VehicleDailySlip[] {
   const cd = driverCdByName.value.get(r.driverName)
   if (cd === undefined) return []
-  const slips = slipsByKey.value[driverSlipKey(cd)] ?? []
+  // **請求のみ (請求K=1) は候補に出さない。** 運送を伴わない請求行なので、結ぶと
+  // 中継では脚とあわせて売上が二重に乗る (実例 07-16 の 通し ¥43,750 と
+  // 脚 ¥21,750+¥22,000)。
+  const slips = transportSlips(slipsByKey.value[driverSlipKey(cd)] ?? [])
   return forceMatchCandidates(r, slips, usedSlipRowIds.value, forcedRowIds(r))
 }
 
@@ -810,7 +818,9 @@ const ichibanLegs = computed<IchibanLeg[]>(() => {
   for (const d of monthly.value.drivers) {
     const cd = driverCdByName.value.get(d.driverName)
     if (cd === undefined) continue
-    const slips = slipsByKey.value[driverSlipKey(cd)] ?? []
+    // **請求のみ (請求K=1) からは便を起こさない。** 走っていない行なので、
+    // 便にすると存在しない仕事に手当が付く。
+    const slips = transportSlips(slipsByKey.value[driverSlipKey(cd)] ?? [])
     // **デジタコ便がある `日付|積地`。** その積地に残った明細は複数卸しの片割れ。
     const coveredOrigins = new Set(d.operations.flatMap(op => op.rows
       .map(r => `${r.date}|${cityToPlace(addressToCity(r.originCity))}`)))
@@ -819,6 +829,28 @@ const ichibanLegs = computed<IchibanLeg[]>(() => {
   return out
 })
 const ichibanTotals = computed(() => summarizeIchibanLegs(ichibanLegs.value))
+
+/**
+ * **中継** — 1 つの荷を 2 台以上でつないだ運行。
+ *
+ * 一番星は伝票を「通しの請求 1 本 (`請求K=1`) + 車輌ごとの按分 N 本 (`請求K=2`)」に
+ * 割る。通しは走っていないので便にせず、**手当と売上は脚それぞれが持つ**。
+ * ここに出すのは、通しが「どの便にも当たらなかった明細」に紛れて
+ * **取り込み漏れに見えるのを防ぐ**ため。
+ */
+const relayGroups = computed<RelayGroup[]>(() => {
+  const seen = new Set<string>()
+  const slips: VehicleDailySlip[] = []
+  // 乗務員ごとに引いた明細をならす。**同じ明細が 2 人に出ることがある**ので rowId で畳む。
+  for (const list of Object.values(slipsByKey.value)) {
+    for (const slip of list) {
+      if (seen.has(slip.rowId)) continue
+      seen.add(slip.rowId)
+      slips.push(slip)
+    }
+  }
+  return findRelayGroups(slips)
+})
 
 /** 乗務員ごとの「一番星から起こした便」。**本表の行に足すため。** */
 const ichibanByDriver = computed(() => {
@@ -1852,6 +1884,51 @@ function downloadCsv() {
                   {{ tons(c.quantity) }} {{ yen(c.amount) }}
                   <span class="text-gray-400">{{ c.itemName }} 車{{ c.vehicleNumber }}</span>
                 </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="relayGroups.length > 0" class="mt-6 space-y-2 text-xs">
+          <h2 class="text-sm font-semibold">中継 (1 つの荷を複数の車輌でつないだ運行)</h2>
+          <p class="text-gray-500">
+            一番星は 1 運行を 2 台以上で分けたとき、伝票を
+            <b>通しの請求 1 本 (<code>請求K=1</code>)</b> と
+            <b>車輌ごとの按分 N 本 (<code>請求K=2</code>)</b> に割ります。
+            <b>走ったのは按分の方</b>なので、手当も売上も按分の便が持ちます。
+            <b>通しの請求は便にしません</b> — 足すと同じ仕事の売上が二重に乗ります。
+            ここに出しているのは、通しの請求が下の「どの便にも当たらなかった一番星明細」に紛れて
+            <b>取り込み漏れに見えるのを防ぐ</b>ためです。
+            組にできるのは<b>按分の合計が通しとぴったり一致したものだけ</b>で、
+            一致しなければ組にせず「請求のみ」として扱います (推測で束ねません)。
+          </p>
+          <div class="space-y-2">
+            <div
+              v-for="(g, i) in relayGroups"
+              :key="`rl-${i}`"
+              class="border border-gray-200 dark:border-gray-800 rounded-lg px-3 py-2 space-y-1"
+            >
+              <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span class="text-gray-400">通しの請求</span>
+                <span>{{ g.through.saleDate }}</span>
+                <span>車{{ g.through.vehicleNumber }}</span>
+                <span>{{ g.through.customerName }}</span>
+                <span>{{ g.through.origin || '?' }} → {{ g.through.dest || '?' }}</span>
+                <span class="text-gray-500">{{ g.through.itemName }} {{ tons(g.through.quantity) }}</span>
+                <b>{{ yen(g.through.amount) }}</b>
+                <span class="text-gray-400">(便にしていません)</span>
+              </div>
+              <div
+                v-for="(l, j) in g.legs"
+                :key="`rl-${i}-${j}`"
+                class="flex flex-wrap items-center gap-x-3 gap-y-1 pl-4 text-gray-600 dark:text-gray-300"
+              >
+                <span class="text-gray-400">└ 走った便</span>
+                <span>{{ l.saleDate }}</span>
+                <span>車{{ l.vehicleNumber }}</span>
+                <span>{{ l.origin || '?' }} → {{ l.dest || '?' }}</span>
+                <span class="text-gray-500">{{ tons(l.quantity) }}</span>
+                <span>{{ yen(l.amount) }}</span>
               </div>
             </div>
           </div>
