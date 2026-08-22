@@ -97,7 +97,7 @@ describe('extractOperationIdle', () => {
     expect(extractOperationIdle(['イベント名', '終了日時'], rows)).toEqual(ALL_EMPTY)
   })
 
-  it('区間距離 の列だけ無い CSV は距離だけ 0 にして時間は出す', () => {
+  it('区間距離 の列だけ無い CSV は距離だけ 0 / 空配列 にして時間は出す', () => {
     const idle = extractOperationIdle(TIME_ONLY_HEADERS, [
       ['運行開始', hm(4), hm(4)],
       ['積み', hm(5), hm(6)],
@@ -113,7 +113,8 @@ describe('extractOperationIdle', () => {
       haulSec: at(9) - at(5),
       totalSec: at(12) - at(4),
       totalKm: 0,
-      legKm: [0],
+      // 「全便が 0km 走った」ではなく「距離が分からない」。便の数とは揃えない
+      legKm: [],
     })
   })
 

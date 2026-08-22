@@ -44,7 +44,13 @@ export interface OperationIdle {
   totalSec: number | null
   /** 運行の全イベントの `区間距離` の合計 (km)。 */
   totalKm: number
-  /** 便ごとの走行距離 (km)。`extractAllowanceLegs` が返す便と**同じ順・同じ本数**。 */
+  /**
+   * 便ごとの走行距離 (km)。**便の数え方は `haulSec` と同じ**で、降しが無い便も 0 を
+   * 置いて間引かない (`extractAllowanceLegs` が返す便と**同じ順・同じ本数**)。
+   *
+   * **`区間距離` の列が無い CSV では空配列**。「全便が 0km 走った」と
+   * 「距離が分からない」を呼び出し側が区別できるようにする。
+   */
   legKm: number[]
 }
 
@@ -95,7 +101,7 @@ function emptyIdle(): OperationIdle {
  *
  * - 必要な列 (`イベント名` / `開始日時` / `終了日時`) が無い CSV は**全部 null / 0**
  *   を返す。推測しない (`extractAllowanceLegs` が空配列を返すのと同じ方針)。
- *   `区間距離` は必須ではなく、**無ければ距離だけ 0** で時間は出す
+ *   `区間距離` は必須ではなく、**無ければ距離だけ 0 / `legKm` は空配列**で時間は出す
  * - 時刻が読めない区間は**その区間だけ** null / 加算しない。運行まるごとは捨てない
  * - **負の秒は 0 に丸めない。** イベントの順序が壊れている運行を黙って正常に見せると、
  *   呼び出し側が気づけなくなる
@@ -180,6 +186,7 @@ export function extractOperationIdle(headers: string[], rows: string[][]): Opera
     haulSec,
     totalSec: startTs !== null && endTs !== null ? endTs - startTs : null,
     totalKm,
-    legKm: legs.map(leg => leg.unloadKm),
+    // 距離の列そのものが無い CSV は空配列。「全便 0km」と混同させない。
+    legKm: distIdx < 0 ? [] : legs.map(leg => leg.unloadKm),
   }
 }
