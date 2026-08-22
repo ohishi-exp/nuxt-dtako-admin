@@ -113,7 +113,17 @@ import {
   driverKey,
   routeText,
   type PdfTripFile,
+  type PdfCompareEntry,
 } from '~/utils/allowance-pdf-compare'
+import {
+  OVERPAID_KEY,
+  parseOverpaid,
+  serializeOverpaid,
+  toggleOverpaid,
+  staleOverpaidKeys,
+  overpaidKeyText,
+  type OverpaidMap,
+} from '~/utils/allowance-pdf-overpaid'
 import {
   LAST_SEARCH_KEY,
   parseLastSearch,
@@ -212,6 +222,38 @@ function onProvisionalInput(key: string, raw: string) {
  * 外した件数を出し、下の一覧から戻せるようにする。
  */
 const excluded = ref<ExcludedMap>({})
+
+/**
+ * **手当表PDF 側が誤っている便**の印 (キー → 付けたときの経路・金額)。
+ *
+ * 手当表は給与の正本だが、正本が間違っていることがある (実例 `2026-07-27 佐竹 繁`
+ * の 2 便目 — デジタコの GPS 住所も一番星の明細も 富士 ¥8,000 を指すのに、
+ * 手当表は `広尾〜士幌 ¥9,000` で払っている)。**画面を PDF に寄せて直すのではなく、
+ * 過払いとして別に数える**。
+ */
+const pdfOverpaid = ref<OverpaidMap>({})
+
+function persistOverpaid(next: OverpaidMap) {
+  pdfOverpaid.value = next
+  try {
+    localStorage.setItem(OVERPAID_KEY, serializeOverpaid(next))
+  }
+  catch (e) {
+    cacheNote.value = `過払いの印を保存できませんでした — ${e instanceof Error ? e.message : String(e)}`
+  }
+}
+
+/** 「過払いにする」/「戻す」。同じボタンで往復できる。 */
+function onToggleOverpaid(entry: PdfCompareEntry) {
+  persistOverpaid(toggleOverpaid(pdfOverpaid.value, entry))
+}
+
+/** 当たらなくなった印をキーで消す (`staleOverpaid` の行から呼ぶ)。 */
+function onDropOverpaid(key: string) {
+  const next = { ...pdfOverpaid.value }
+  delete next[key]
+  persistOverpaid(next)
+}
 
 function persistExcluded(next: ExcludedMap) {
   excluded.value = next
@@ -356,6 +398,7 @@ onMounted(async () => {
   }
   provisional.value = parseProvisional(localStorage.getItem(PROVISIONAL_KEY))
   excluded.value = parseExcluded(localStorage.getItem(EXCLUDED_KEY))
+  pdfOverpaid.value = parseOverpaid(localStorage.getItem(OVERPAID_KEY))
   forceMatch.value = parseForceMatch(localStorage.getItem(FORCE_MATCH_KEY))
   pdfFile.value = parsePdfTripFile(localStorage.getItem(PDF_TRIPS_KEY))
   // **乗務員マスタはキャッシュ復元より先に読む。** 一番星を乗務員で引いた月の
@@ -888,7 +931,7 @@ const pdfCompare = computed(() => {
     // **一番星から起こした便も比べる。** 入れないと、埋めたはずの便が
     // 「PDF にあって画面に無い便」に出続けて、直ったことが分からない。
     ...ichibanLegs.value.map(leg => ({ row: ichibanLegAsRow(leg), payYen: leg.allowanceYen })),
-  ])
+  ], pdfOverpaid.value)
 })
 /** PDF の月と集計中の月が違う。押す前に気付けるように出す。 */
 const pdfMonthMismatch = computed(() =>
@@ -918,7 +961,16 @@ const pdfCompareDrivers = computed(() => {
 const pdfOnlyEntries = computed(() => (pdfCompare.value?.entries ?? []).filter(e => e.status === 'pdf_only'))
 const screenOnlyEntries = computed(() => (pdfCompare.value?.entries ?? []).filter(e => e.status === 'screen_only'))
 const pdfAmountDiffs = computed(() => (pdfCompare.value?.entries ?? [])
-  .filter(e => e.status === 'matched' && e.diffYen !== null && e.diffYen !== 0))
+  .filter(e => e.status === 'matched' && e.diffYen !== null && e.diffYen !== 0 && !e.overpaid))
+/** 手当表PDF 側が誤っていると確認した便。**黙って消さず、ここで数え続ける。** */
+const pdfOverpaidEntries = computed(() => (pdfCompare.value?.entries ?? []).filter(e => e.overpaid))
+const pdfOverpaidYen = computed(() => pdfOverpaidEntries.value.reduce((sum, e) => sum + (e.diffYen ?? 0), 0))
+/**
+ * **印は付いているのに中身が食い違う便。** CSV を起こし直して便番号がずれると起きる。
+ * 黙って効かなくするのではなく画面に出す (除外の `staleExclusions` と同じ方針)。
+ */
+const staleOverpaid = computed(() =>
+  staleOverpaidKeys(pdfOverpaid.value, pdfCompare.value?.entries ?? []))
 const pdfLooseMatches = computed(() => (pdfCompare.value?.entries ?? [])
   .filter(e => e.status === 'matched' && (e.dateShift || e.routeDiff)))
 
@@ -1888,6 +1940,13 @@ function downloadCsv() {
             <span :class="pdfCompare.total.amountDiff > 0 ? 'text-red-600 dark:text-red-400' : ''">
               金額違い <b>{{ pdfCompare.total.amountDiff }}</b> ({{ yen(pdfCompare.total.amountDiffYen) }})
             </span>
+            <span
+              v-if="pdfCompare.total.overpaid > 0"
+              class="text-purple-600 dark:text-purple-400"
+              title="手当表PDF 側が誤っていると人が確認した便。金額違いには数えていません"
+            >
+              過払い <b>{{ pdfCompare.total.overpaid }}</b> ({{ yen(pdfCompare.total.overpaidYen) }})
+            </span>
             <span class="text-gray-400" title="経路は合うが日付が 1 日ずれて当てた便 / 日付は合うが経路が違うのに当てた便">
               1日ずれ {{ pdfCompare.total.dateShift }} ・ 経路違い {{ pdfCompare.total.routeDiff }}
             </span>
@@ -1907,6 +1966,7 @@ function downloadCsv() {
                   <th class="text-right px-3 py-1.5 font-medium text-gray-500" title="PDF にあって画面に無い便">PDFのみ</th>
                   <th class="text-right px-3 py-1.5 font-medium text-gray-500" title="画面にあって PDF に無い便">画面のみ</th>
                   <th class="text-right px-3 py-1.5 font-medium text-gray-500">金額違い</th>
+                  <th class="text-right px-3 py-1.5 font-medium text-gray-500" title="手当表PDF 側が誤っていると確認した便">過払い</th>
                 </tr>
               </thead>
               <tbody>
@@ -1931,6 +1991,9 @@ function downloadCsv() {
                   </td>
                   <td class="px-3 py-1 text-right" :class="d.amountDiff > 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-300 dark:text-gray-700'">
                     {{ d.amountDiff }}
+                  </td>
+                  <td class="px-3 py-1 text-right" :class="d.overpaid > 0 ? 'text-purple-600 dark:text-purple-400' : 'text-gray-300 dark:text-gray-700'">
+                    {{ d.overpaid }}
                   </td>
                 </tr>
               </tbody>
@@ -2003,7 +2066,10 @@ function downloadCsv() {
             <summary class="px-3 py-2 cursor-pointer select-none">
               当たったが金額が違う便
               <b :class="pdfAmountDiffs.length > 0 ? 'text-red-600 dark:text-red-400' : ''">{{ pdfAmountDiffs.length }}</b> 便
-              <span class="text-gray-400">(料金マスタか卸地の引き当てを疑う。暫定額もここに出ます)</span>
+              <span class="text-gray-400">
+                (料金マスタか卸地の引き当てを疑う。暫定額もここに出ます。
+                実データで<b>PDF 側が誤っている</b>と分かったら「過払いにする」で下へ移せます)
+              </span>
             </summary>
             <div class="overflow-x-auto border-t border-gray-100 dark:border-gray-800">
               <table class="w-full">
@@ -2030,14 +2096,95 @@ function downloadCsv() {
                     <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(e.pdfYen) }}</td>
                     <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(e.screenYen) }}</td>
                     <td class="px-3 py-1 text-right whitespace-nowrap text-red-600 dark:text-red-400">{{ yen(e.diffYen) }}</td>
-                    <td class="px-3 py-1 text-right whitespace-nowrap">
+                    <td class="px-3 py-1 text-right whitespace-nowrap space-x-3">
                       <button class="text-blue-500 hover:text-blue-700 hover:underline" @click="openOperation(e.unkoNo)">
                         運行を開く
+                      </button>
+                      <button
+                        class="text-purple-500 hover:text-purple-700 hover:underline"
+                        title="デジタコ・一番星の実データで画面側が正しいと確かめた便に付けます。金額違いから抜けて「過払い」に移ります"
+                        @click="onToggleOverpaid(e)"
+                      >
+                        過払いにする
                       </button>
                     </td>
                   </tr>
                 </tbody>
               </table>
+            </div>
+          </details>
+
+          <details
+            v-if="pdfOverpaidEntries.length > 0 || staleOverpaid.length > 0"
+            class="border border-gray-200 dark:border-gray-800 rounded-lg"
+          >
+            <summary class="px-3 py-2 cursor-pointer select-none">
+              手当表PDF 側の過払い
+              <b class="text-purple-600 dark:text-purple-400">{{ pdfOverpaidEntries.length }}</b> 便
+              <b class="text-purple-600 dark:text-purple-400">{{ yen(pdfOverpaidYen) }}</b>
+              <span class="text-gray-400">(画面側が正しいと確かめた便。金額違いには数えていません)</span>
+            </summary>
+            <div class="border-t border-gray-100 dark:border-gray-800 px-3 py-2 space-y-2">
+              <p class="text-gray-500">
+                手当表PDF は<b>給与の正本</b>ですが、<b>正本が間違っていることがあります</b>。
+                デジタコの<b>卸地の住所</b>と<b>一番星の明細</b>の両方が画面側の金額を指しているのに
+                手当表だけ違う便に、この印を付けます。<b>実データで裏を取ってから付けてください</b> —
+                画面をPDFに寄せて直すと、同じ経路の他の便まで一緒に化けます。
+                印はこのブラウザに保存され、<b>氏名・日付・その日の何便目か</b>で便を指します。
+                <b>黙って消してはいません</b> — いつでも戻せます。
+              </p>
+
+              <p v-if="staleOverpaid.length > 0" class="text-amber-600 dark:text-amber-400">
+                <b>{{ staleOverpaid.length }} 件</b>の印が、いまの便に当たっていません
+                (同じ便番号に<b>別の経路・別の金額</b>が来ているので、<b>PDF の CSV を起こし直した</b>疑いがあります)。
+                中身を確かめて、要らなければ消してください。
+              </p>
+              <ul v-if="staleOverpaid.length > 0" class="space-y-1">
+                <li v-for="key in staleOverpaid" :key="key" class="flex flex-wrap items-center gap-2">
+                  <code class="font-mono text-[11px]">{{ overpaidKeyText(key) }}</code>
+                  <button class="text-purple-500 hover:text-purple-700 hover:underline" @click="onDropOverpaid(key)">
+                    この印を消す
+                  </button>
+                </li>
+              </ul>
+
+              <div v-if="pdfOverpaidEntries.length > 0" class="overflow-x-auto">
+                <table class="w-full">
+                  <thead class="bg-gray-50 dark:bg-gray-800">
+                    <tr>
+                      <th class="text-left px-3 py-1.5 font-medium text-gray-500">日付</th>
+                      <th class="text-left px-3 py-1.5 font-medium text-gray-500">乗務員</th>
+                      <th class="text-right px-3 py-1.5 font-medium text-gray-500">便</th>
+                      <th class="text-left px-3 py-1.5 font-medium text-gray-500">経路 (PDF)</th>
+                      <th class="text-left px-3 py-1.5 font-medium text-gray-500">経路 (画面)</th>
+                      <th class="text-right px-3 py-1.5 font-medium text-gray-500">PDF</th>
+                      <th class="text-right px-3 py-1.5 font-medium text-gray-500">画面</th>
+                      <th class="text-right px-3 py-1.5 font-medium text-gray-500">差</th>
+                      <th class="px-3 py-1.5" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(e, i) in pdfOverpaidEntries" :key="`op-${i}`" class="border-t border-gray-100 dark:border-gray-800/70">
+                      <td class="px-3 py-1 whitespace-nowrap">{{ e.pdfDate }}</td>
+                      <td class="px-3 py-1 whitespace-nowrap">{{ e.driverName }}</td>
+                      <td class="px-3 py-1 text-right whitespace-nowrap text-gray-500">{{ e.pdfSeq }}</td>
+                      <td class="px-3 py-1 whitespace-nowrap">{{ routeText(e.pdfRoute) }}</td>
+                      <td class="px-3 py-1 whitespace-nowrap">{{ routeText(e.screenRoute) }}</td>
+                      <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(e.pdfYen) }}</td>
+                      <td class="px-3 py-1 text-right whitespace-nowrap">{{ yen(e.screenYen) }}</td>
+                      <td class="px-3 py-1 text-right whitespace-nowrap text-purple-600 dark:text-purple-400">{{ yen(e.diffYen) }}</td>
+                      <td class="px-3 py-1 text-right whitespace-nowrap space-x-3">
+                        <button class="text-blue-500 hover:text-blue-700 hover:underline" @click="openOperation(e.unkoNo)">
+                          運行を開く
+                        </button>
+                        <button class="text-purple-500 hover:text-purple-700 hover:underline" @click="onToggleOverpaid(e)">
+                          戻す
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
           </details>
 
