@@ -25,6 +25,7 @@
  */
 import { placeKey, resolveDest, normalizePlace } from './allowance-rate'
 import { routeKey } from './allowance-provisional'
+import { isOverpaid, type OverpaidMap } from './allowance-pdf-overpaid'
 import { splitDelimitedLine } from './salary-compare'
 import type { AllowanceReportRow } from './allowance-report'
 
@@ -168,7 +169,14 @@ export interface PdfCompareEntry {
   dateShift: boolean
   /** 日付は合うが経路が違うのに当てた。**人が中身を見る対象。** */
   routeDiff: boolean
+  /**
+   * **手当表PDF 側が誤っていると人が確認した便** (`allowance-pdf-overpaid.ts`)。
+   * 「金額が違う便」からは抜くが、`overpaid` / `overpaidYen` で数え続ける。
+   */
+  overpaid: boolean
   pdfDate: string
+  /** その乗務員のその日の何便目か (1 始まり)。**過払いの印の鍵**になる。 */
+  pdfSeq: number
   pdfRoute: string
   pdfYen: number | null
   screenDate: string
@@ -193,9 +201,12 @@ export interface PdfCompareDriver {
   pdfOnlyYen: number
   screenOnly: number
   screenOnlyYen: number
-  /** 当たったが金額が違う便。 */
+  /** 当たったが金額が違う便。**過払いと確認済みの便は入らない。** */
   amountDiff: number
   amountDiffYen: number
+  /** 手当表PDF 側が誤っていると確認した便 (画面 − PDF なので普通は負)。 */
+  overpaid: number
+  overpaidYen: number
   dateShift: number
   routeDiff: number
 }
@@ -227,6 +238,8 @@ function emptyDriver(driverName: string): PdfCompareDriver {
     screenOnlyYen: 0,
     amountDiff: 0,
     amountDiffYen: 0,
+    overpaid: 0,
+    overpaidYen: 0,
     dateShift: 0,
     routeDiff: 0,
   }
@@ -238,9 +251,30 @@ interface Slot {
   used: boolean
 }
 
+/**
+ * PDF の便に**その日の何便目か** (1 始まり) を振る。手当表の 1便/2便/3便 の列に当たる。
+ * 過払いの印の鍵になるので、**渡された順** (= CSV の行順) で数える。
+ */
+function seqByDate(pdf: PdfTrip[]): Map<PdfTrip, number> {
+  const seen = new Map<string, number>()
+  const out = new Map<PdfTrip, number>()
+  for (const trip of pdf) {
+    const next = (seen.get(trip.date) ?? 0) + 1
+    seen.set(trip.date, next)
+    out.set(trip, next)
+  }
+  return out
+}
+
 /** 1 乗務員ぶんを突き合わせる。3 段階 (日付+経路 → 経路+±1日 → 日付のみ) の順に当てる。 */
-function matchOne(driverName: string, pdf: PdfTrip[], screen: ScreenTrip[]): PdfCompareEntry[] {
+function matchOne(
+  driverName: string,
+  pdf: PdfTrip[],
+  screen: ScreenTrip[],
+  overpaidMap: OverpaidMap,
+): PdfCompareEntry[] {
   const slots: Slot[] = screen.map(trip => ({ trip, route: routeKey(trip.row), used: false }))
+  const seqOf = seqByDate(pdf)
   const entries: PdfCompareEntry[] = []
   const rest: PdfTrip[] = []
 
@@ -275,14 +309,21 @@ function matchOne(driverName: string, pdf: PdfTrip[], screen: ScreenTrip[]): Pdf
       continue
     }
     const { row, payYen } = hit.slot.trip
-    entries.push({
+    // **過払いの印は当たった便にだけ効かせる。** `pdf_only` (画面に無い便) は
+    // 差の出どころが別 (取り込み漏れ) なので、同じ印で畳むと原因が混ざる。
+    const target = {
       driverName,
+      pdfDate: trip.date,
+      pdfSeq: seqOf.get(trip)!,
+      pdfRoute: pdfRouteKey(trip),
+      pdfYen: trip.allowanceYen,
+    }
+    entries.push({
+      ...target,
       status: 'matched',
       dateShift: hit.pass === 2,
       routeDiff: hit.pass === 3,
-      pdfDate: trip.date,
-      pdfRoute: pdfRouteKey(trip),
-      pdfYen: trip.allowanceYen,
+      overpaid: isOverpaid(overpaidMap, target),
       screenDate: row.date,
       screenRoute: hit.slot.route,
       screenYen: payYen,
@@ -297,7 +338,9 @@ function matchOne(driverName: string, pdf: PdfTrip[], screen: ScreenTrip[]): Pdf
       status: 'pdf_only',
       dateShift: false,
       routeDiff: false,
+      overpaid: false,
       pdfDate: trip.date,
+      pdfSeq: seqOf.get(trip)!,
       pdfRoute: pdfRouteKey(trip),
       pdfYen: trip.allowanceYen,
       screenDate: '',
@@ -315,7 +358,11 @@ function matchOne(driverName: string, pdf: PdfTrip[], screen: ScreenTrip[]): Pdf
       status: 'screen_only',
       dateShift: false,
       routeDiff: false,
+      overpaid: false,
       pdfDate: '',
+      // PDF 側が無いので便番号も無い。**0 は「PDF の便ではない」印**で、
+      // `overpaidKey` がこの行に当たることは無い (キーが 1 始まりのため)。
+      pdfSeq: 0,
       pdfRoute: '',
       pdfYen: null,
       screenDate: slot.trip.row.date,
@@ -347,8 +394,16 @@ function tally(target: PdfCompareDriver, e: PdfCompareEntry) {
     if (e.routeDiff) target.routeDiff += 1
     // 手当が決まっていない便 (`diffYen` が null) は「金額違い」に数えない。
     if (e.diffYen !== null && e.diffYen !== 0) {
-      target.amountDiff += 1
-      target.amountDiffYen += e.diffYen
+      // **過払いと確認した便は「金額違い」から抜くが、消さずに別に数える。**
+      // 除外・暫定手当と同じで、黙って合計から消える額を作らない。
+      if (e.overpaid) {
+        target.overpaid += 1
+        target.overpaidYen += e.diffYen
+      }
+      else {
+        target.amountDiff += 1
+        target.amountDiffYen += e.diffYen
+      }
     }
   }
   else if (e.status === 'pdf_only') target.pdfOnly += 1
@@ -363,8 +418,15 @@ function tally(target: PdfCompareDriver, e: PdfCompareEntry) {
  *
  * **PDF の月に入る便だけを見る。** 画面が翌月に回した便 (積みが翌月 1 日になった運行) は
  * ここには出てこないので、`screen` に何を渡すかは呼び出し側が決める。
+ *
+ * `overpaidMap` は**手当表PDF 側が誤っていると人が確認した便**の印
+ * (`allowance-pdf-overpaid.ts`)。渡さなければ全便を素の差として出す。
  */
-export function comparePdfTrips(file: PdfTripFile, screen: ScreenTrip[]): PdfCompareResult {
+export function comparePdfTrips(
+  file: PdfTripFile,
+  screen: ScreenTrip[],
+  overpaidMap: OverpaidMap = {},
+): PdfCompareResult {
   const pdfBy = new Map<string, PdfTrip[]>()
   for (const trip of file.trips) {
     const list = pdfBy.get(trip.driverName) ?? []
@@ -383,7 +445,7 @@ export function comparePdfTrips(file: PdfTripFile, screen: ScreenTrip[]): PdfCom
   const drivers: PdfCompareDriver[] = []
   const total = emptyDriver('合計')
   for (const name of names) {
-    const mine = matchOne(name, pdfBy.get(name) ?? [], screenBy.get(name) ?? [])
+    const mine = matchOne(name, pdfBy.get(name) ?? [], screenBy.get(name) ?? [], overpaidMap)
     const driver = emptyDriver(name)
     for (const e of mine) {
       tally(driver, e)

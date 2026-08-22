@@ -263,4 +263,61 @@ describe('comparePdfTrips', () => {
     expect(r.drivers).toEqual([])
     expect(r.total).toMatchObject({ pdfTrips: 0, screenTrips: 0, matched: 0 })
   })
+
+  it('PDF の便に「その日の何便目か」を振る (過払いの印の鍵)', () => {
+    const r = comparePdfTrips(
+      file([trip(), trip({ dest: '標茶', allowanceYen: 8000 }), trip({ date: '2026-07-02' })]),
+      [],
+    )
+    expect(r.entries.map(e => [e.pdfDate, e.pdfSeq])).toEqual([
+      ['2026-07-01', 1], ['2026-07-01', 2], ['2026-07-02', 1],
+    ])
+  })
+
+  it('画面にしかない便には便番号を振らない (PDF の便ではない)', () => {
+    const r = comparePdfTrips(file([]), [screen()])
+    expect(r.entries[0]).toMatchObject({ status: 'screen_only', pdfSeq: 0, overpaid: false })
+  })
+})
+
+describe('comparePdfTrips (手当表PDF 側の過払い)', () => {
+  const OVERPAID = { '佐竹繁|2026-07-27|2': { pdfRoute: '広尾|松山/士幌', pdfYen: 9000 } }
+
+  /** 実データ: `2026-07-27 佐竹 繁` の 2 便目。PDF `広尾〜士幌 ¥9,000` / 画面 `広尾→富士 ¥8,000`。 */
+  const satake = () => comparePdfTrips(
+    file([
+      trip({ driverName: '佐竹繁', date: '2026-07-27', origin: '苫小牧', dest: '富士', allowanceYen: 12000 }),
+      trip({ driverName: '佐竹繁', date: '2026-07-27', origin: '広尾', dest: '士幌', allowanceYen: 9000 }),
+    ]),
+    [
+      screen({ driverName: '佐竹 繁', date: '2026-07-27', originCity: '北海道苫小牧市晴海町43-45', destCity: '北海道帯広市富士町西５線', masterDest: '富士' }, 12000),
+      screen({ driverName: '佐竹 繁', date: '2026-07-27', seq: 2, originCity: '北海道広尾郡広尾町会所前６', destCity: '北海道帯広市富士町西５線', masterDest: '富士' }, 8000),
+    ],
+    OVERPAID,
+  )
+
+  it('印が無ければ素の「金額違い」として出す', () => {
+    const r = comparePdfTrips(
+      file([trip({ dest: '標茶', allowanceYen: 8000 })]),
+      [screen()],
+    )
+    expect(r.entries[0]).toMatchObject({ overpaid: false, diffYen: 1000 })
+    expect(r.total).toMatchObject({ amountDiff: 1, amountDiffYen: 1000, overpaid: 0, overpaidYen: 0 })
+  })
+
+  it('印を付けた便は「金額違い」から抜けて「過払い」に移る', () => {
+    const r = satake()
+    const marked = r.entries.find(e => e.overpaid)!
+    expect(marked).toMatchObject({ pdfSeq: 2, pdfRoute: '広尾|松山/士幌', screenRoute: '広尾|富士', diffYen: -1000 })
+    expect(r.total).toMatchObject({ amountDiff: 0, amountDiffYen: 0, overpaid: 1, overpaidYen: -1000 })
+  })
+
+  it('合計は動かさない (黙って消さない)', () => {
+    const r = satake()
+    expect(r.total).toMatchObject({ matched: 2, pdfYen: 21000, screenYen: 20000 })
+  })
+
+  it('乗務員ごとにも数える', () => {
+    expect(satake().drivers[0]).toMatchObject({ driverName: '佐竹繁', amountDiff: 0, overpaid: 1, overpaidYen: -1000 })
+  })
 })
