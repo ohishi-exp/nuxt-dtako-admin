@@ -4,10 +4,26 @@ name: Preview Deploy
 # Refs ippoan/secrets-inventory#85)。test/typecheck は回さない。main への
 # push/PR は test.yml (frontend-ci.yml) の staging deploy が別途担う。
 # backend は staging をそのまま再利用する (wrangler.toml の [env.preview] 参照)。
-
+#
+# **push では自動起動しない (2026-08-22、オーナー指示)。**
+#
+# この repo は **auto tag** — PR が auto-merge されると `Tag Release` が自動で
+# dispatch され、連番タグ (`v0.0.*`) が打たれて Release Wave まで流れる。実測では
+# **マージから数十秒で本番に出る** (2026-08-22 の v0.0.460〜463 は 4 本とも
+# 誰も手で押していない)。
+#
+# そのため **「マージ前に preview で見る」がほぼ成立しない**:
+#
+# - 本番の方が先に見られる状態になる。preview を待つぶん遅い
+# - preview は **`auth-staging` の別レルム** で、本番のセッションが効かない。
+#   見るのに Google ログインをやり直す必要があり、**エージェントは代行できない**
+# - その結果「preview を見に行って詰まってから PR に戻る」が繰り返し起きた
+#   (実害: PR 作成が preview 待ちで遅れる。何度も同じ形で踏んだ)
+#
+# **見たいときは手で回す。** Actions から `Run workflow` で branch を選べば
+# 従来どおり `https://dtako-preview.ippoan.org` に出る。
 on:
-  push:
-    branches-ignore: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
