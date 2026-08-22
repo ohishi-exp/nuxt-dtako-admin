@@ -142,11 +142,47 @@ export interface SlipPlan {
 }
 
 /**
+ * **キャッシュの明細が古い形かどうかを見分ける印。**
+ *
+ * `VehicleDailySlip` にフィールドが増えても、このキャッシュは**古い形のまま
+ * 配り続ける** — 明細は `force` でしか引き直さないため (下の `planSlipFetch` 参照)。
+ * 2026-08-22 に実際に踏んだ: `requestKind` (請求区分) を足して deploy したのに、
+ * 「集計」を押しても中継が出ず、**「全部取り直す」を押すまで直らなかった**。
+ *
+ * localStorage のキーの版番号 (`CACHE_VERSION`) を上げれば直るが、**月のキャッシュを
+ * まるごと捨てる**ことになる (運行の再取得は数十秒かかる)。そこで、**印のフィールドが
+ * 無い車輌C だけを引き直す**ことで自己修復させる。
+ *
+ * **`VehicleDailySlip` にフィールドを足したら、この印を新しいフィールド名に移すこと。**
+ * 新しい形なら古いフィールドも必ず入っているので、印は 1 つで足りる。
+ */
+export const SLIP_SHAPE_MARKER: keyof VehicleDailySlip = 'requestKind'
+
+/**
+ * キャッシュの明細が古い形か。
+ *
+ * **中身が空の車輌C は「古い」と言えない**ので false を返す。ここで true にすると、
+ * その月に 1 本も明細が無い乗務員を毎回引き直し続ける (直る当てが無いのに)。
+ *
+ * **値が空文字なのは「古い」ではない。** 上流 (rust-ichibanboshi) が古くて
+ * `請求K` を返さなかった場合で、引き直しても同じ結果にしかならない。見るのは
+ * **フィールドが在るかどうか**だけにする。
+ */
+export function isStaleSlipShape(slips: VehicleDailySlip[]): boolean {
+  const first = slips[0]
+  if (first === undefined) return false
+  return !(SLIP_SHAPE_MARKER in first)
+}
+
+/**
  * 一番星の明細をどの車輌C ぶん引き直すか決める。
  *
  * **明細には「変わったか」を判定する材料が無い** (運行の `has_kudgivt` にあたるものが
  * 無い) ので、月のキャッシュがあればそのまま使い、**取り直しは `force` に任せる**。
  * 推測で期限を切ると、直したのに反映されない/毎回引き直すのどちらかに倒れる。
+ *
+ * **ただし形が古い明細は引き直す** (`isStaleSlipShape`)。値が古いかは分からなくても、
+ * **フィールドが足りないことは分かる**ので、これは推測ではない。
  */
 export function planSlipFetch(
   vehicles: string[],
@@ -157,7 +193,7 @@ export function planSlipFetch(
   const fetch: string[] = []
   for (const vehicle of vehicles) {
     const hit = force ? undefined : cached[vehicle]
-    if (hit) reuse[vehicle] = hit
+    if (hit !== undefined && !isStaleSlipShape(hit)) reuse[vehicle] = hit
     else fetch.push(vehicle)
   }
   return { reuse, fetch }
