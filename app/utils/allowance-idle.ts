@@ -44,6 +44,25 @@ export interface OperationIdle {
   totalSec: number | null
   /** 運行の全イベントの `区間距離` の合計 (km)。 */
   totalKm: number
+  // --- `totalKm` の内訳。**5 つを足すと `totalKm` に一致する** (丸めない)。---
+  // 時間側 (`preLoadSec` 等) と同じ切り方で距離を数えたもの。按分の分子 (`totalKm`)
+  // の中身を人が読めるようにするために出す (Refs #760)。**`区間距離` の列が無い CSV
+  // では 5 つとも 0** (`totalKm` も 0 になるのと整合)。
+  /** 運行開始 → 最初の積みの行の手前 の Σ区間距離 (km)。積み残しの降しもここ。 */
+  preLoadKm: number
+  /** 積みの行 → その便の最後の降しの行 の Σ区間距離 (km) = **売上が立つ走行**。`legKm` の和。 */
+  haulKm: number
+  /** 便の最後の降しの次 → 次の積みの手前 の Σ区間距離 (km)。 */
+  betweenKm: number
+  /** 最後の便の最後の降しの次 → 末尾 の Σ区間距離 (km)。 */
+  postUnloadKm: number
+  /**
+   * **どの区間とも呼べない走行 (km)。** 内訳を足して `totalKm` に合わせるための受け皿。
+   *
+   * - 降しが 1 つも無い便 (積んだまま帰庫した便) の 積み → 次の積みの手前
+   * - `積み` が 1 行も無い運行の走行ぜんぶ
+   */
+  otherKm: number
   /**
    * 便ごとの走行距離 (km)。**便の数え方は `haulSec` と同じ**で、降しが無い便も 0 を
    * 置いて間引かない (`extractAllowanceLegs` が返す便と**同じ順・同じ本数**)。
@@ -64,6 +83,15 @@ interface IdleLeg {
   runningKm: number
   /** 積みの行から**その便の最後の降しの行**までの Σ`区間距離`。降しが無ければ 0。 */
   unloadKm: number
+  /**
+   * **その便の最後の降しの行より後**の Σ`区間距離` (降しがまだ無ければ積みの行から)。
+   *
+   * 引き算 (`runningKm - unloadKm`) で出さない — 行の順に足した値でないと
+   * 内訳の合計が `totalKm` と 1 ビットずれる。
+   */
+  tailKm: number
+  /** その便に降しの行が 1 つでもあったか。**時刻が読めない降しも数える** (`unloadTs` は null になる)。 */
+  hasUnload: boolean
 }
 
 function cellAt(row: string[], idx: number): string {
@@ -92,6 +120,11 @@ function emptyIdle(): OperationIdle {
     haulSec: 0,
     totalSec: null,
     totalKm: 0,
+    preLoadKm: 0,
+    haulKm: 0,
+    betweenKm: 0,
+    postUnloadKm: 0,
+    otherKm: 0,
     legKm: [],
   }
 }
@@ -121,6 +154,8 @@ export function extractOperationIdle(headers: string[], rows: string[][]): Opera
   /** 運行の中で**最後**に降ろした時刻。便に属さない (積み残しの) 降しも含む。 */
   let lastUnloadTs: number | null = null
   let totalKm = 0
+  /** 最初の積みより前の Σ`区間距離`。積みが 1 行も無ければ運行ぜんぶ。 */
+  let preRollKm = 0
   const legs: IdleLeg[] = []
 
   for (const row of rows) {
@@ -136,13 +171,20 @@ export function extractOperationIdle(headers: string[], rows: string[][]): Opera
         unloadTs: null,
         runningKm: km,
         unloadKm: 0,
+        tailKm: km,
+        hasUnload: false,
       })
       continue
     }
 
     // 積みより後の行は、その便が走った距離として積む。
     const current = legs[legs.length - 1]
-    if (current) current.runningKm += km
+    if (current) {
+      current.runningKm += km
+      current.tailKm += km
+    }
+    // 最初の積みより前 (運行開始・積み残しの降し) の走行。どの便にも属さない。
+    else preRollKm += km
 
     if (name === OPERATION_START_EVENT) {
       // 最初の 運行開始 を採る。2 つ目以降で上書きしない。
@@ -164,16 +206,37 @@ export function extractOperationIdle(headers: string[], rows: string[][]): Opera
     if (!current) continue
     current.unloadTs = unloadTs
     current.unloadKm = current.runningKm
+    current.hasUnload = true
+    // ここまでが売上走行。以降は「次の積みまで」か「終業まで」に付け替える。
+    current.tailKm = 0
   }
 
   let betweenSec = 0
   let haulSec = 0
+  let haulKm = 0
+  let betweenKm = 0
+  let postUnloadKm = 0
+  let otherKm = 0
   for (let i = 0; i < legs.length; i++) {
     const leg = legs[i]!
     if (leg.loadTs !== null && leg.unloadTs !== null) haulSec += leg.unloadTs - leg.loadTs
     const prev = legs[i - 1]
     // 積みが連続した便 (前の便に降しが無い) は「便と便の間」に数えない。
     if (prev && prev.unloadTs !== null && leg.loadTs !== null) betweenSec += leg.loadTs - prev.unloadTs
+    // 距離は**時刻が読めたかに関わらず**数える (`legKm` と同じ規則)。
+    haulKm += leg.unloadKm
+    // 降しが 1 つも無い便は、積み以降がまるごと分類不能 (`unloadKm` は 0 なので二重に数えない)。
+    if (!leg.hasUnload) otherKm += leg.tailKm
+    // 降しの後に次の便があれば便間、無ければ 降し→終業。
+    else if (i < legs.length - 1) betweenKm += leg.tailKm
+    else postUnloadKm += leg.tailKm
+  }
+
+  let preLoadKm = preRollKm
+  if (legs.length === 0) {
+    // 積みが 1 行も無い運行に「始業 → 積み」は無い。走ったぶんは分類不能に寄せる。
+    otherKm += preRollKm
+    preLoadKm = 0
   }
 
   const firstLoadTs = legs.length > 0 ? legs[0]!.loadTs : null
@@ -186,6 +249,11 @@ export function extractOperationIdle(headers: string[], rows: string[][]): Opera
     haulSec,
     totalSec: startTs !== null && endTs !== null ? endTs - startTs : null,
     totalKm,
+    preLoadKm,
+    haulKm,
+    betweenKm,
+    postUnloadKm,
+    otherKm,
     // 距離の列そのものが無い CSV は空配列。「全便 0km」と混同させない。
     legKm: distIdx < 0 ? [] : legs.map(leg => leg.unloadKm),
   }
