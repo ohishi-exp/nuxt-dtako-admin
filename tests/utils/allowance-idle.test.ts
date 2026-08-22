@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { extractOperationIdle } from '~/utils/allowance-idle'
+import { extractOperationIdle, DISTANCE_EVENT_NAMES } from '~/utils/allowance-idle'
 import { extractAllowanceLegs } from '~/utils/allowance-trips'
 
 const HEADERS = ['イベント名', '開始日時', '終了日時', '区間距離']
@@ -37,6 +37,7 @@ const ALL_EMPTY = {
   haulSec: 0,
   totalSec: null,
   totalKm: 0,
+  overlayKm: 0,
   preLoadKm: 0,
   haulKm: 0,
   betweenKm: 0,
@@ -70,8 +71,10 @@ describe('extractOperationIdle', () => {
       // 最後の降し終了 → 終業
       postUnloadSec: at(15, 30) - at(14),
       totalSec: at(15, 30) - at(4),
-      // 全イベントの Σ区間距離 (回送も帰庫も入る)
+      // 距離を数える行 (運転・積み・降し・…) の Σ区間距離。回送も帰庫も入る
       totalKm: 302,
+      // 重ね掛け行 (速度オーバー等) はこのフィクスチャに無いので 0
+      overlayKm: 0,
       // 距離の内訳。**5 つ足すと totalKm** (始業0 + 売上222 + 便間60 + 降後20 + 他0)
       preLoadKm: 0,
       haulKm: 222,
@@ -124,6 +127,7 @@ describe('extractOperationIdle', () => {
       haulSec: at(9) - at(5),
       totalSec: at(12) - at(4),
       totalKm: 0,
+      overlayKm: 0,
       preLoadKm: 0,
       haulKm: 0,
       betweenKm: 0,
@@ -168,6 +172,7 @@ describe('extractOperationIdle', () => {
       haulSec: at(9) - at(5),
       totalSec: null,
       totalKm: 0,
+      overlayKm: 0,
       preLoadKm: 0,
       haulKm: 0,
       betweenKm: 0,
@@ -192,6 +197,7 @@ describe('extractOperationIdle', () => {
       haulSec: at(9) - at(5),
       totalSec: null,
       totalKm: 0,
+      overlayKm: 0,
       preLoadKm: 0,
       haulKm: 0,
       betweenKm: 0,
@@ -216,6 +222,7 @@ describe('extractOperationIdle', () => {
       haulSec: 0,
       totalSec: at(12) - at(4),
       totalKm: 0,
+      overlayKm: 0,
       preLoadKm: 0,
       haulKm: 0,
       betweenKm: 0,
@@ -246,6 +253,7 @@ describe('extractOperationIdle', () => {
       postUnloadSec: at(15) - at(13),
       totalSec: at(15) - at(4),
       totalKm: 0,
+      overlayKm: 0,
       preLoadKm: 0,
       haulKm: 0,
       betweenKm: 0,
@@ -555,5 +563,134 @@ describe('extractOperationIdle の走行距離の内訳', () => {
     const idle = extractOperationIdle(HEADERS, [])
     expect(breakdown(idle)).toEqual({ preLoadKm: 0, haulKm: 0, betweenKm: 0, postUnloadKm: 0, otherKm: 0 })
     expect(sumBreakdown(idle)).toBe(idle.totalKm)
+  })
+})
+
+/**
+ * **重ね掛け行を走行距離に足さない** (Refs #760 の 7)。
+ *
+ * イベントCSV は同じ走行を別の切り口で重ねて持つ行 (`専用道` / `一般道速度オーバー` /
+ * `連続運転` …) を持ち、全行の `区間距離` を足すと同じ走行を二度数える。実測 (2026-07
+ * 帯広5台 90 運行) で **全行Σ 101,891km に対して KUDGURI の 総走行距離 は 57,350km**、
+ * `DISTANCE_EVENT_NAMES` の 8 つだけを足すと**全件ぴったり一致**した。
+ *
+ * 数えなかったぶんは `overlayKm` に出して、呼び出し側が
+ * 「`totalKm + overlayKm` = 旧来の全行Σ」で検算できるようにする。
+ */
+describe('extractOperationIdle の重ね掛け行 (走行距離の二重計上)', () => {
+  it('運転 132.7 と 専用道 452.9 が共存する運行は 運転 だけを数え、専用道 は overlayKm へ', () => {
+    // 実データ (`2607312229040000001318`) と同じ形。専用道 は運行全体にまたがる 1 行
+    const idle = extractOperationIdle(HEADERS, [
+      ev('運転', hm(22, 29), hm(23, 45), '132.7'),
+      ev('専用道', hm(23, 1), hm(23, 40), '452.9'),
+    ])
+    expect(idle.totalKm).toBe(132.7)
+    expect(idle.overlayKm).toBe(452.9)
+    // 旧来の全行Σ = 数えた分 + 数えなかった分。呼び出し側が検算できる
+    // (足す順が違うので最下位ビットはずれる。#767 の内訳の不変条件と同じ扱い)
+    expect(Math.abs(idle.totalKm + idle.overlayKm - 585.6)).toBeLessThan(1e-9)
+  })
+
+  it('便の中の速度オーバー行は legKm にも haulKm にも入らない (判定が 1 か所にある)', () => {
+    const idle = extractOperationIdle(HEADERS, [
+      ev('運行開始', hm(4), hm(4), '3'),
+      ev('積み', hm(5), hm(6), '1'),
+      ev('運転', hm(6), hm(8), '100'),
+      ev('一般道速度オーバー', hm(6, 30), hm(7), '80'), // 上の運転と同じ走行の重ね掛け
+      ev('降し', hm(8), hm(9), '1'),
+      ev('運行終了', hm(15), hm(15), '5'),
+    ])
+    expect(idle.legKm).toEqual([102])
+    expect(idle.haulKm).toBe(102)
+    expect(idle.totalKm).toBe(110)
+    expect(idle.overlayKm).toBe(80)
+    // 時間側は 1 ミリも変わらない (重ね掛け行はもともと便にも区間にも効かない)
+    expect(idle.haulSec).toBe(at(9) - at(5))
+    expect(idle.preLoadSec).toBe(at(5) - at(4))
+    expect(idle.postUnloadSec).toBe(at(15) - at(9))
+  })
+
+  it('既知の重ね掛け 6 名 + 未知のイベント名 は 0 として扱い、内訳のどこにも入れない', () => {
+    // 実測で出た 6 名 (90 運行の合計 km 順) + 将来増えうる未知の名前
+    const overlays = [
+      '専用道',
+      '一般道速度オーバー',
+      '連続運転',
+      '専用道速度オーバー',
+      '一般道空車',
+      '一般道実車',
+      'まだ知らないイベント',
+    ]
+    const idle = extractOperationIdle(HEADERS, [
+      ev('運行開始', hm(4), hm(4), '2'),
+      ev('積み', hm(5), hm(6), '1'),
+      ev('降し', hm(8), hm(9), '9'),
+      ev('運行終了', hm(15), hm(15), '4'),
+      ...overlays.map((name, i) => ev(name, hm(5), hm(9), String((i + 1) * 10))),
+    ])
+    expect(idle.totalKm).toBe(16)
+    // 10+20+...+70
+    expect(idle.overlayKm).toBe(280)
+    expect(idle.preLoadKm + idle.haulKm + idle.betweenKm + idle.postUnloadKm + idle.otherKm).toBe(16)
+    expect(idle.legKm).toEqual([10])
+  })
+
+  it('休憩 / 休息 / アイドリング は距離を数える側 (KUDGURI と一致するのはこの 8 つ)', () => {
+    expect([...DISTANCE_EVENT_NAMES]).toEqual([
+      '運転', '積み', '降し', '休憩', '休息', 'アイドリング', '運行開始', '運行終了',
+    ])
+    const idle = extractOperationIdle(HEADERS, [
+      ev('運行開始', hm(4), hm(4), '1'),
+      ev('休憩', hm(5), hm(6), '2'),
+      ev('休息', hm(6), hm(7), '3'),
+      ev('アイドリング', hm(7), hm(8), '4'),
+      ev('運行終了', hm(15), hm(15), '5'),
+    ])
+    expect(idle.totalKm).toBe(15)
+    expect(idle.overlayKm).toBe(0)
+    // 積みが 1 行も無い運行なので内訳は otherKm にまとまる (#767 の規則そのまま)
+    expect(idle.otherKm).toBe(15)
+  })
+
+  it('区間距離 の列が無い CSV は overlayKm も 0 (「重ね掛けが 0km」ではなく距離が分からない)', () => {
+    const idle = extractOperationIdle(TIME_ONLY_HEADERS, [
+      ['運行開始', hm(4), hm(4)],
+      ['専用道', hm(5), hm(9)],
+      ['運行終了', hm(12), hm(12)],
+    ])
+    expect(idle.totalKm).toBe(0)
+    expect(idle.overlayKm).toBe(0)
+  })
+
+  it('重ね掛け行の 区間距離 が数として読めなくても overlayKm を NaN にしない', () => {
+    const idle = extractOperationIdle(HEADERS, [
+      ev('運行開始', hm(4), hm(4), '1'),
+      ev('専用道', hm(5), hm(9), 'abc'),
+      ev('連続運転', hm(5), hm(9), '7'),
+    ])
+    expect(idle.totalKm).toBe(1)
+    expect(idle.overlayKm).toBe(7)
+    expect(Number.isNaN(idle.overlayKm)).toBe(false)
+  })
+
+  it('**不変条件** 重ね掛け行があっても 内訳 5 つの和は totalKm のまま (#767 のテストが通り続ける)', () => {
+    const idle = extractOperationIdle(HEADERS, [
+      ev('運行開始', hm(4), hm(4), '3'),
+      ev('専用道', hm(4), hm(15), '452.9'),
+      ev('積み', hm(5), hm(6), '0.5'),
+      ev('運転', hm(6), hm(8), '120'),
+      ev('一般道速度オーバー', hm(6), hm(8), '11.5'),
+      ev('降し', hm(8), hm(9), '0.5'),
+      ev('運転', hm(9), hm(10), '60'),
+      ev('積み', hm(10), hm(11), '0.5'),
+      ev('運転', hm(11), hm(13), '100'),
+      ev('降し', hm(13), hm(14), '0.5'),
+      ev('運行終了', hm(15), hm(15, 30), '20'),
+    ])
+    const sum = idle.preLoadKm + idle.haulKm + idle.betweenKm + idle.postUnloadKm + idle.otherKm
+    expect(sum).toBe(idle.totalKm)
+    expect(idle.totalKm).toBe(305)
+    expect(idle.overlayKm).toBe(464.4)
+    expect(idle.haulKm).toBe(idle.legKm.reduce((a, b) => a + b, 0))
   })
 })

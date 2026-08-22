@@ -85,6 +85,7 @@ import {
   summarizeMargins,
   groupMarginsByDriver,
   marginRate,
+  kmMismatch,
   noMarginReason,
   summarizeNoMarginReasons,
   buildUncoveredLegs,
@@ -154,6 +155,17 @@ const kmInt = (v: number) => String(Math.round(v))
 /** 内訳の見出しの意味。**列を増やさない**代わりに、数字の意味をここで説明する。 */
 const KM_BREAKDOWN_TITLE = '積前=始業→最初の積み / 売上=積み→降し / 便間=降し→次の積み / 降後=最後の降し→終業'
 const OTHER_KM_TITLE = '降しが記録されていない便の走行 (分類不能)'
+
+/**
+ * 走行km が運行一覧の 総走行距離 とずれた運行に出す注意 (`kmMismatch` が true の行)。
+ *
+ * 2 つは一致するはずの値 (`DISTANCE_EVENT_NAMES` の和 = KUDGURI の 総走行距離)。
+ * ずれるのは**イベント名の仕分けが実データに追いついていない**とき。
+ */
+function kmMismatchTitle(m: OperationMargin): string {
+  return `CSV の走行km ${num(m.totalKm)} / 運行一覧の総走行距離 ${num(m.listedTotalKm)}`
+    + ' — 区間距離の数え方が合っていない (未知のイベント名の疑い)'
+}
 
 onMounted(async () => {
   targets.value = parseTargets(localStorage.getItem(TARGETS_KEY))
@@ -263,6 +275,8 @@ function fetchOperationsFor(range: { from: string, to: string }, driverCd?: stri
 interface ResolvedOperation {
   allowance: OperationAllowance
   totalKm: number
+  /** 運行一覧 (KUDGURI) の `総走行距離`。`totalKm` と突き合わせるためだけに運ぶ。 */
+  listedTotalKm: number | null
   kmBreakdown: KmBreakdown
 }
 
@@ -278,6 +292,9 @@ function emptyKmBreakdown(): KmBreakdown {
  * 2 回引かない (運行手当タブの実測で 90 本引くのに数分かかる)。
  */
 async function resolveOperation(op: OperationListItem): Promise<ResolvedOperation> {
+  // **運行一覧の `総走行距離`。** CSV から数えた `totalKm` と一致するはずの値
+  // (`DISTANCE_EVENT_NAMES` の和 = KUDGURI。2026-07 帯広5台 90 運行で全件一致)。
+  const listedTotalKm = op.total_distance
   const base: OperationAllowance = {
     unkoNo: op.unko_no,
     readingDate: op.reading_date,
@@ -289,7 +306,9 @@ async function resolveOperation(op: OperationListItem): Promise<ResolvedOperatio
     error: null,
   }
   if (!op.has_kudgivt) {
-    return { allowance: { ...base, error: 'イベントCSV が未取り込み (has_kudgivt=false)' }, totalKm: 0, kmBreakdown: emptyKmBreakdown() }
+    // **CSV が無い運行は突き合わせない** (`listedTotalKm: null`) — 数え方のずれでは
+    // なく CSV が来ていないだけなので、注意を出しても直しようが無い。
+    return { allowance: { ...base, error: 'イベントCSV が未取り込み (has_kudgivt=false)' }, totalKm: 0, listedTotalKm: null, kmBreakdown: emptyKmBreakdown() }
   }
   try {
     const csv = await getOperationCsv(op.unko_no, 'events')
@@ -305,7 +324,12 @@ async function resolveOperation(op: OperationListItem): Promise<ResolvedOperatio
         // している)。
         carryIn: extractCarryInUnloads(csv.headers, csv.rows),
       },
-      totalKm: idle.totalKm,
+      // **`区間距離` の列が無い CSV は運行一覧の `総走行距離` を受け皿にする。**
+      // 列が 1 つ無いだけで按分の分子を 0 にすると、その運行だけ経費が付かない
+      // (`legKm` が空 かつ `totalKm` が 0 が「列が無い」の印。`kmBreakdown` は
+      // 内訳を作れないので 0 のまま — 合計と内訳がずれるが、内訳は按分に効かない)。
+      totalKm: idle.legKm.length === 0 && idle.totalKm === 0 ? (listedTotalKm ?? 0) : idle.totalKm,
+      listedTotalKm,
       // 按分の分子の中身。**画面に出すだけ**で、按分そのものは `totalKm` のまま。
       kmBreakdown: {
         preLoadKm: idle.preLoadKm,
@@ -317,7 +341,8 @@ async function resolveOperation(op: OperationListItem): Promise<ResolvedOperatio
     }
   }
   catch (e) {
-    return { allowance: { ...base, error: e instanceof Error ? e.message : String(e) }, totalKm: 0, kmBreakdown: emptyKmBreakdown() }
+    // CSV を読めなかった運行も同じ (数え方の問題ではない)。
+    return { allowance: { ...base, error: e instanceof Error ? e.message : String(e) }, totalKm: 0, listedTotalKm: null, kmBreakdown: emptyKmBreakdown() }
   }
 }
 
@@ -510,6 +535,8 @@ async function run() {
       resolved.push(...await Promise.all(found.slice(i, i + CSV_CONCURRENCY).map(resolveOperation)))
     }
     const kmByUnko = new Map(resolved.map(r => [r.allowance.unkoNo, r.totalKm]))
+    // 運行一覧の 総走行距離 (突き合わせ用)。**引けなかった運行は null で、比べない。**
+    const listedKmByUnko = new Map(resolved.map(r => [r.allowance.unkoNo, r.listedTotalKm]))
     const kmBreakdownByUnko = new Map(resolved.map(r => [r.allowance.unkoNo, r.kmBreakdown]))
     // 積んだまま帰庫した便の卸地は次の運行の先頭にある。全運行を引き終えてから当てる。
     const ops = applyCarryOver(resolved.map(r => r.allowance))
@@ -567,6 +594,7 @@ async function run() {
         driverName: d.driverName,
         vehicleCode: vehicleCodeFromUnkoNo(op.unkoNo),
         totalKm: kmByUnko.get(op.unkoNo) ?? 0,
+        listedTotalKm: listedKmByUnko.get(op.unkoNo) ?? null,
         kmBreakdown: kmBreakdownByUnko.get(op.unkoNo) ?? emptyKmBreakdown(),
         salesYen: rows.reduce((sum, r) => sum + (salesByLeg.get(legKey(r)) ?? 0), 0),
         allowanceYen: rows.reduce((sum, r) => sum + legPayYen(r, provisional), 0),
@@ -666,6 +694,8 @@ function downloadCsv() {
       経費は<b>一番星の経費明細</b>です。
       <b>燃料代は一番星から取らず、走行距離 ÷ 燃費 × 単価で出します</b> —
       給油日と運行日がずれるので、燃料費をそのまま乗せると給油した日の運行だけが赤くなるためです。
+      <b>走行距離はデジタコの運転・積み・降し・休憩の行だけを足した値</b>です
+      (速度オーバー・専用道などの重ね掛け行は足しません。運行一覧の総走行距離と一致します)。
       <b>固定費と、日・車輌が運行に一致しない経費は走行距離の比で按分</b>します
       (分母・分子とも表に出しているので検算できます)。
       <b>燃費が出せない車輌の運行は粗利も「-」</b>にします (0 で割った値を混ぜないため)。
@@ -1025,8 +1055,15 @@ function downloadCsv() {
                     </NuxtLink>
                     <span class="text-gray-400 ml-2">車輌{{ m.vehicleCode }}</span>
                   </td>
-                  <td class="px-3 py-1.5 text-right">
+                  <td
+                    class="px-3 py-1.5 text-right"
+                    :class="kmMismatch(m) ? 'text-amber-600 dark:text-amber-400' : ''"
+                    :title="kmMismatch(m) ? kmMismatchTitle(m) : ''"
+                  >
                     {{ km(m.totalKm) }}
+                    <span v-if="kmMismatch(m)" class="block text-xs text-amber-600 dark:text-amber-400">
+                      一覧 {{ num(m.listedTotalKm) }}km とずれ
+                    </span>
                     <span class="block text-xs text-gray-400 dark:text-gray-500" :title="KM_BREAKDOWN_TITLE">
                       積前 {{ kmInt(m.kmBreakdown.preLoadKm) }} / 売上 {{ kmInt(m.kmBreakdown.haulKm) }}
                       / 便間 {{ kmInt(m.kmBreakdown.betweenKm) }} / 降後 {{ kmInt(m.kmBreakdown.postUnloadKm) }}
