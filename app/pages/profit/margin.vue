@@ -76,12 +76,16 @@ import {
   marginRate,
   noMarginReason,
   summarizeNoMarginReasons,
+  buildUncoveredLegs,
+  summarizeUncoveredLegs,
   marginCsvLines,
   type CostRow,
   type FuelRateMap,
   type MarginCache,
   type MarginOperationInput,
   type OperationMargin,
+  type UncoveredDriverInput,
+  type UncoveredTotals,
 } from '~/utils/margin'
 
 /** イベントCSV を同時に引く本数。alc を叩きすぎないための上限 (運行手当タブと同じ)。 */
@@ -115,6 +119,12 @@ const inputs = ref<MarginOperationInput[]>([])
 const costs = ref<CostRow[]>([])
 /** 車輌C → 人が入れた燃費・単価 (localStorage)。既定値は実績。 */
 const fuelRates = ref<FuelRateMap>({})
+/**
+ * **粗利の対象外になっている便**の合計 (`buildUncoveredLegs`)。1 便も無ければ null。
+ *
+ * 粗利には入れない — **数えて画面に出すためだけ**に持つ。
+ */
+const uncovered = ref<UncoveredTotals | null>(null)
 
 const targets = ref<string[]>([])
 const drivers = ref<Driver[]>([])
@@ -158,6 +168,7 @@ function restoreFromCache() {
   if (!cache || cache.ym !== ym.value) return
   inputs.value = cache.operations
   costs.value = cache.costs
+  uncovered.value = cache.uncovered
   shownYm.value = cache.ym
   savedAt.value = cache.savedAt
   restoredFromCache.value = true
@@ -172,6 +183,7 @@ function writeCache() {
       savedAt: now,
       operations: inputs.value,
       costs: costs.value,
+      uncovered: uncovered.value,
     }))
     savedAt.value = now
   }
@@ -297,15 +309,31 @@ function orderedVehicleRows(rows: AllowanceReportRow[]): [string, AllowanceRepor
   return [...groups].sort((a, b) => (a[0] > b[0] ? 1 : -1))
 }
 
-/** 便 → 売上。一番星が引けなければ空の Map (売上 0 として粗利は出さない)。 */
-async function fetchSales(rows: AllowanceReportRow[], driverNames: string[]): Promise<Map<string, number>> {
+/**
+ * 便 → 売上。一番星が引けなければ空の Map (売上 0 として粗利は出さない)。
+ *
+ * **同じ突合の結果から「粗利の対象外の便」も数える** (`buildUncoveredLegs`)。
+ * デジタコに運行が無い日の便は粗利に載せられないが、**落ちていることは言う**。
+ * 別々に引き直すと、売上の突合とずれた数字を並べることになる。
+ */
+async function fetchSales(
+  rows: AllowanceReportRow[],
+  driverNames: string[],
+  provisional: ProvisionalMap,
+): Promise<{ salesByLeg: Map<string, number>, uncovered: UncoveredTotals | null }> {
   const range = slipDateRange(shownYm.value)
   const inputsForReconcile: VehicleReconcileInput[] = []
   let pool: VehicleDailySlip[] = []
+  // **乗務員で引けているときだけ対象外の便を起こす。** 車番引きでは、その乗務員が
+  // 別の車番で走った日の明細を持っていないので、起こすべき便が見えない
+  // (運行手当タブの `ichibanLegs` と同じ条件)。
+  const uncoveredInputs: UncoveredDriverInput[] = []
   if (canFetchByDriver(driverNames)) {
     for (const [cd, driverRows] of orderedDriverRows(rows)) {
       progress.value = `一番星の売上を取得中 ${labelOf(cd)}`
-      inputsForReconcile.push({ vehicle: cd, rows: driverRows, slips: tradableSlips(await fetchDriverDailySlips(cd, range.from, range.to)) })
+      const slips = tradableSlips(await fetchDriverDailySlips(cd, range.from, range.to))
+      inputsForReconcile.push({ vehicle: cd, rows: driverRows, slips })
+      uncoveredInputs.push({ driverName: driverRows[0]!.driverName, rows: driverRows, slips })
     }
   }
   else {
@@ -319,7 +347,8 @@ async function fetchSales(rows: AllowanceReportRow[], driverNames: string[]): Pr
   const res = reconcileVehicles(inputsForReconcile, pool)
   const salesByLeg = new Map<string, number>()
   for (const [key, hit] of res.byLeg) salesByLeg.set(key, hit.salesYen)
-  return salesByLeg
+  const legs = buildUncoveredLegs(uncoveredInputs, [...res.byLeg.values()], shownYm.value, provisional)
+  return { salesByLeg, uncovered: summarizeUncoveredLegs(legs) }
 }
 
 async function run() {
@@ -331,6 +360,7 @@ async function run() {
   cacheNote.value = null
   inputs.value = []
   costs.value = []
+  uncovered.value = null
   progress.value = '運行を検索中...'
   try {
     localStorage.setItem(LAST_SEARCH_KEY, serializeLastSearch({ ym: ym.value, vehicle: vehicle.value }))
@@ -374,7 +404,9 @@ async function run() {
     // 一番星が落ちていても経費と手当は出せる。売上だけ諦めて理由を画面に残す。
     let salesByLeg = new Map<string, number>()
     try {
-      salesByLeg = await fetchSales(allRows, driverNames)
+      const sales = await fetchSales(allRows, driverNames, provisional)
+      salesByLeg = sales.salesByLeg
+      uncovered.value = sales.uncovered
     }
     catch (e) {
       salesError.value = e instanceof Error ? e.message : String(e)
@@ -625,6 +657,21 @@ function downloadCsv() {
                 {{ g.reason }} — <b>{{ g.operations }}</b> 本 (売上 {{ yen(g.salesYen) }})
               </li>
             </ul>
+          </div>
+          <!-- **粗利の対象外になっている便。** 運行が無いので粗利は出せないが、
+               **落ちていることは言う** — 運行手当タブと突き合わせた人が
+               「売上が 15% 少ない」理由を読めないのが本当の欠陥だった (Refs #760 の 4)。 -->
+          <div v-if="uncovered" class="text-xs text-amber-600 dark:text-amber-400 mt-2">
+            <p>
+              <b>一番星から起こした便が {{ uncovered.trips }} 便</b>
+              (売上 {{ yen(uncovered.salesYen) }} ・ 手当 {{ yen(uncovered.allowanceYen) }})。上の内訳には入っていません。
+            </p>
+            <p class="mt-1 text-gray-500">
+              デジタコに運行が無い日の便です (非搭載の車番 0001、alc に運行が無い 0040 等)。
+              <b>運行が無いので走行距離が出せず、燃料代も按分も計算できないため粗利の対象外</b>です。
+              この売上・手当は上の合計に入っていません。<b>運行手当タブでは入っています</b> —
+              2 つのタブで売上が違うのはこのぶんです。
+            </p>
           </div>
           <p
             v-if="result.unallocatedCostYen > 0"
