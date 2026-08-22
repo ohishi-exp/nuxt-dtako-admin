@@ -121,6 +121,19 @@ describe('findRelayGroups', () => {
     expect(findRelayGroups([through, leg])).toEqual([])
   })
 
+  it('按分が 1 本も無い請求のみは組にしない (脚の受け皿が空の側を通す)', () => {
+    // 2026-07 の実データでは 116 件中 104 件がこの形 (中継料・燃料調整金・保管料 等)。
+    const through = slip({ requestKind: KIND_BILLING_ONLY, amount: 10000, itemName: '素牛中継料', rowId: 't' })
+    expect(findRelayGroups([through, slip({ rowId: 'x' })])).toEqual([])
+  })
+
+  it('按分の和が通しを超える組は採らない (打ち切りの側を通す)', () => {
+    const through = slip({ requestKind: KIND_BILLING_ONLY, amount: 30000, rowId: 't' })
+    const legs = [20000, 20000].map((amount, i) =>
+      slip({ requestKind: KIND_UNBILLED, amount, rowId: `l${i}` }))
+    expect(findRelayGroups([through, ...legs])).toEqual([])
+  })
+
   it('通常運送 (請求K=0) だけなら組は出ない', () => {
     expect(findRelayGroups([slip(), slip()])).toEqual([])
     expect(findRelayGroups([])).toEqual([])
