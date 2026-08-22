@@ -6,6 +6,9 @@
  * `irregular: true` はマスタに載っていない経路 (2026-08-21 時点)。
  * `釧路〜駒場（別海）` は 2026-08-21 に xlsx 未収載のままマスタへ足した
  * (実在する経路で、手当表PDF に金額がある。詳細は `rate_master.json` の `note`)。
+ * その相方の `駒場（釧路）〜別海` を 2026-08-22 に足した — **同じ荷の中継**で、
+ * 07-16 柳井が 釧路→駒場 まで、07-17 西島が 駒場→別海 まで運び、**片道ずつ ¥4,500**。
+ * 一番星の通し請求 ¥43,750 が内訳 ¥21,750 + ¥22,000 に割れていることで裏が取れる。
  */
 export interface AllowanceGoldenRow {
   origin: string
@@ -42,5 +45,5 @@ export const ALLOWANCE_GOLDEN_2026_07: AllowanceGoldenRow[] = [
   { origin: '広尾', dest: '浦幌', allowanceYen: 9000, trips: 1, irregular: false },
   { origin: '苫小牧', dest: '（清水）・富士', allowanceYen: 12000, trips: 1, irregular: false },
   { origin: '釧路', dest: '駒場（別海）', allowanceYen: 4500, trips: 1, irregular: false },
-  { origin: '駒場（釧路）', dest: '別海', allowanceYen: 4500, trips: 1, irregular: true },
+  { origin: '駒場（釧路）', dest: '別海', allowanceYen: 4500, trips: 1, irregular: false },
 ]

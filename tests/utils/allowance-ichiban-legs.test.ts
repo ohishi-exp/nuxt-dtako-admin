@@ -159,10 +159,11 @@ describe('buildIchibanLegs', () => {
   })
 
   it('マスタに無い経路は推測せず未確定にする', () => {
-    // 西島 07-17 の実データ (駒場 → 別海)。マスタに `駒場|ユナイテッド牧場` が無い
-    const legs = build([slip({ saleDate: '2026-07-17', origin: '駒場', dest: 'ユナイテッド牧場', destAreaName: '北海道', quantity: 12.5, unit: 't' })])
+    // 増地 07-04 等の実データ (広尾 → 芽室)。マスタには広尾発の卸地が 12 通り
+    // 載っているのに芽室が 1 行も無い (`allowance-provisional.ts` の実例)。
+    const legs = build([slip({ saleDate: '2026-07-17', origin: '広尾', dest: '芽室', destAreaName: '北海道芽室町', quantity: 12.5, unit: 't' })])
     expect(legs[0]).toMatchObject({ status: 'unknown', allowanceYen: null, masterDest: '' })
-    expect(legs[0]!.dest).toBe('ユナイテッド牧場')
+    expect(legs[0]!.dest).toBe('芽室')
   })
 
   it('卸地の手がかりがまったく無い明細も落とさない', () => {
@@ -202,7 +203,7 @@ describe('summarizeIchibanLegs', () => {
   it('手当が決まった便と決まらなかった便を分けて数える', () => {
     const legs = build([
       slip(),
-      slip({ saleDate: '2026-07-17', origin: '駒場', dest: 'ユナイテッド牧場', destAreaName: '北海道', unit: 't', amount: 22000 }),
+      slip({ saleDate: '2026-07-17', origin: '広尾', dest: '芽室', destAreaName: '北海道芽室町', unit: 't', amount: 22000 }),
     ])
     expect(summarizeIchibanLegs(legs)).toEqual({
       trips: 2,

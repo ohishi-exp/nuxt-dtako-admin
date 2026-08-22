@@ -7,7 +7,7 @@
  * - `farePerT` (運賃) は 円/t。売上 = `farePerT` × 数量。一番星の `unit_price` と
  *   一致することを 2026-07 の実データ 275 本中 255 本で確認済み
  * - `allowanceYen` (給与) は 1 便あたりの定額 = 運転手の運行手当。手当表PDF の金額と
- *   一致することを 2026-07 の 313 便中 295 便で確認済み (**食い違いは 0 件**)
+ *   一致することを 2026-07 の 313 便中 296 便で確認済み (**食い違いは 0 件**)
  * - この表は「A飼料」系のみ。肉牛・素牛・N搾乳・FMメイズ 等の銘柄は載っていない
  */
 
@@ -93,5 +93,6 @@ export const RATE_MASTER: RateRow[] = [
   { shipper: '丸勝', customer: '丸勝', loader: '丸勝', origin: '帯広', dest: '鹿追', brand: '', farePerT: 3800, allowanceYen: 10000, note: '解体' },
   { shipper: '丸勝', customer: '丸勝', loader: '丸勝', origin: '帯広', dest: '士幌', brand: '', farePerT: 3800, allowanceYen: 10000, note: '解体' },
   { shipper: '丸勝', customer: '丸勝', loader: '中部飼料(株)', origin: '釧路', dest: '鹿追', brand: '', farePerT: 3900, allowanceYen: 9000, note: '' },
-  { shipper: '大石グループ', customer: '大石畜産', loader: '中部飼料', origin: '釧路', dest: '駒場', brand: '', farePerT: null, allowanceYen: 4500, note: '手当表PDF 2026-07 柳井 07-16 『釧路〜駒場（別海）』より。xlsx 未収載' },
+  { shipper: '大石グループ', customer: '大石畜産', loader: '中部飼料', origin: '釧路', dest: '駒場', brand: '', farePerT: null, allowanceYen: 4500, note: '手当表PDF 2026-07 柳井 07-16 『釧路〜駒場（別海）』より。xlsx 未収載。釧路→駒場→別海 の中継の前半' },
+  { shipper: 'タイセイ飼料', customer: 'タイセイ飼料', loader: '', origin: '駒場', dest: 'ユナイテッド牧場', brand: '', farePerT: null, allowanceYen: 4500, note: '手当表PDF 2026-07 西島 07-17 『駒場（釧路）〜別海』より。xlsx 未収載。釧路→駒場→別海 の中継の後半で、前半は 釧路→駒場 (¥4,500)。一番星の通し請求 釧路→ユナイテッド牧場 12.5t @3500 ¥43,750 が、中継の内訳 釧路→駒場 ¥21,750 と 駒場→ユナイテッド牧場 ¥22,000 に割れている (和が通しと一致)。運賃は内訳側に単価が無い (一式) ので null' },
 ]
