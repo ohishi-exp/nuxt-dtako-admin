@@ -37,6 +37,11 @@ const ALL_EMPTY = {
   haulSec: 0,
   totalSec: null,
   totalKm: 0,
+  preLoadKm: 0,
+  haulKm: 0,
+  betweenKm: 0,
+  postUnloadKm: 0,
+  otherKm: 0,
   legKm: [],
 }
 
@@ -67,6 +72,12 @@ describe('extractOperationIdle', () => {
       totalSec: at(15, 30) - at(4),
       // 全イベントの Σ区間距離 (回送も帰庫も入る)
       totalKm: 302,
+      // 距離の内訳。**5 つ足すと totalKm** (始業0 + 売上222 + 便間60 + 降後20 + 他0)
+      preLoadKm: 0,
+      haulKm: 222,
+      betweenKm: 60,
+      postUnloadKm: 20,
+      otherKm: 0,
       // 便ごとは 積みの行 → その便の最後の降しの行 まで
       legKm: [121, 101],
     })
@@ -113,6 +124,11 @@ describe('extractOperationIdle', () => {
       haulSec: at(9) - at(5),
       totalSec: at(12) - at(4),
       totalKm: 0,
+      preLoadKm: 0,
+      haulKm: 0,
+      betweenKm: 0,
+      postUnloadKm: 0,
+      otherKm: 0,
       // 「全便が 0km 走った」ではなく「距離が分からない」。便の数とは揃えない
       legKm: [],
     })
@@ -152,6 +168,11 @@ describe('extractOperationIdle', () => {
       haulSec: at(9) - at(5),
       totalSec: null,
       totalKm: 0,
+      preLoadKm: 0,
+      haulKm: 0,
+      betweenKm: 0,
+      postUnloadKm: 0,
+      otherKm: 0,
       legKm: [0],
     })
   })
@@ -171,6 +192,11 @@ describe('extractOperationIdle', () => {
       haulSec: at(9) - at(5),
       totalSec: null,
       totalKm: 0,
+      preLoadKm: 0,
+      haulKm: 0,
+      betweenKm: 0,
+      postUnloadKm: 0,
+      otherKm: 0,
       legKm: [0],
     })
   })
@@ -190,6 +216,11 @@ describe('extractOperationIdle', () => {
       haulSec: 0,
       totalSec: at(12) - at(4),
       totalKm: 0,
+      preLoadKm: 0,
+      haulKm: 0,
+      betweenKm: 0,
+      postUnloadKm: 0,
+      otherKm: 0,
       legKm: [],
     })
   })
@@ -215,6 +246,11 @@ describe('extractOperationIdle', () => {
       postUnloadSec: at(15) - at(13),
       totalSec: at(15) - at(4),
       totalKm: 0,
+      preLoadKm: 0,
+      haulKm: 0,
+      betweenKm: 0,
+      postUnloadKm: 0,
+      otherKm: 0,
       // 時刻が読めなくても距離は数える (便3 は降しが無いので 0)
       legKm: [0, 0, 0],
     })
@@ -321,5 +357,203 @@ describe('extractOperationIdle', () => {
     expect(idle.haulSec).toBe(at(4) - at(5))
     expect(idle.postUnloadSec).toBe(at(2) - at(4))
     expect(idle.totalSec).toBe(at(2) - at(6))
+  })
+})
+
+/**
+ * 走行距離の内訳 (Refs #760 の 5)。
+ *
+ * 本番実測 (中村一由 CD1412 / 2026-07 / 14運行 20,800.6km) では `totalKm` の
+ * **過半が非売上走行**で、最大の内訳が便間だった。按分の分子 (`totalKm`) の中身を
+ * 人が読めるようにするための値なので、**分類の取りこぼしを合計で検出できること**
+ * (5 つ足すと `totalKm`) を最優先で固定する。
+ */
+describe('extractOperationIdle の走行距離の内訳', () => {
+  /** 内訳の 5 つ。テストの意図 (どこに入ったか) を 1 行で読めるようにする。 */
+  function breakdown(idle: ReturnType<typeof extractOperationIdle>) {
+    return {
+      preLoadKm: idle.preLoadKm,
+      haulKm: idle.haulKm,
+      betweenKm: idle.betweenKm,
+      postUnloadKm: idle.postUnloadKm,
+      otherKm: idle.otherKm,
+    }
+  }
+
+  function sumBreakdown(idle: ReturnType<typeof extractOperationIdle>): number {
+    return idle.preLoadKm + idle.haulKm + idle.betweenKm + idle.postUnloadKm + idle.otherKm
+  }
+
+  const ORDINARY = [
+    ev('運行開始', hm(4), hm(4), '3'),
+    ev('積み', hm(5), hm(6), '0.5'),
+    ev('運転', hm(6), hm(8), '120'),
+    ev('降し', hm(8), hm(9), '0.5'),
+    ev('運転', hm(9), hm(10), '60'), // 便間の回送
+    ev('積み', hm(10), hm(11), '0.5'),
+    ev('運転', hm(11), hm(13), '100'),
+    ev('降し', hm(13), hm(14), '0.5'),
+    ev('運行終了', hm(15), hm(15, 30), '20'),
+  ]
+
+  it('**不変条件** 5 つを足すと totalKm になる (分類の取りこぼしが起きていない)', () => {
+    const idle = extractOperationIdle(HEADERS, ORDINARY)
+    expect(breakdown(idle)).toEqual({
+      preLoadKm: 3, // 運行開始 の行 (最初の積みより前)
+      haulKm: 222, // 便1 121 + 便2 101
+      betweenKm: 60, // 降し → 次の積み の回送
+      postUnloadKm: 20, // 最後の降し → 運行終了
+      otherKm: 0,
+    })
+    expect(sumBreakdown(idle)).toBe(idle.totalKm)
+    expect(idle.totalKm).toBe(305)
+  })
+
+  it('**不変条件** haulKm は legKm の和に一致する (便の数え方が 2 つに割れていない)', () => {
+    const idle = extractOperationIdle(HEADERS, ORDINARY)
+    expect(idle.haulKm).toBe(idle.legKm.reduce((a, b) => a + b, 0))
+    expect(idle.legKm).toEqual([121, 101])
+  })
+
+  it('**不変条件** 区間距離 の列が無い CSV は内訳も 5 つとも 0 (totalKm が 0 なのと整合)', () => {
+    const idle = extractOperationIdle(TIME_ONLY_HEADERS, [
+      ['運行開始', hm(4), hm(4)],
+      ['積み', hm(5), hm(6)],
+      ['降し', hm(8), hm(9)],
+      ['積み', hm(10), hm(11)],
+      ['運行終了', hm(12), hm(12)],
+    ])
+    expect(breakdown(idle)).toEqual({ preLoadKm: 0, haulKm: 0, betweenKm: 0, postUnloadKm: 0, otherKm: 0 })
+    expect(idle.totalKm).toBe(0)
+    // 「距離が分からない」ので便ごとの配列は空のまま。haulKm (=0) とも矛盾しない
+    expect(idle.legKm).toEqual([])
+    expect(idle.haulKm).toBe(idle.legKm.reduce((a, b) => a + b, 0))
+  })
+
+  /**
+   * **合計の一致は「丸め誤差の範囲」でしか保証できない。**
+   *
+   * `totalKm` は全行を行順に 1 本で足した値、内訳は同じ加数を 5 つに分けて足した値。
+   * 浮動小数の加算に結合則が無いので、**同じ加数でもグループが違えば最下位ビットが
+   * ずれる** (実測: 1桁小数・最大 61 行の運行 20,000 件で 59% が不一致、最大差 5.5e-12 km)。
+   * 逃げ道 (totalKm を内訳の和で作り直す / otherKm を残差にする) は、按分の分子を
+   * 動かす・通常運行の `otherKm` を 1e-13 にして画面の警告を常時点灯させるので採らない。
+   */
+  it('**不変条件** 行数が多く端数のある運行でも、内訳の合計と totalKm の差は丸め誤差の範囲', () => {
+    // 決まった順で作る (乱数を使わない — 落ちたときに再現できないテストにしない)
+    const rows: string[][] = [ev('運行開始', hm(4), hm(4), '1.3')]
+    for (let i = 0; i < 40; i++) {
+      const km = String(Math.round((i * 37.7 + 0.1) * 10) / 10)
+      const name = i % 7 === 0 ? '積み' : i % 5 === 0 ? '降し' : '運転'
+      rows.push(ev(name, hm(5), hm(6), km))
+    }
+    rows.push(ev('運行終了', hm(20), hm(20), '2.7'))
+    const idle = extractOperationIdle(HEADERS, rows)
+    expect(idle.totalKm).toBeGreaterThan(0)
+    expect(Math.abs(sumBreakdown(idle) - idle.totalKm)).toBeLessThan(1e-9)
+    expect(idle.haulKm).toBe(idle.legKm.reduce((a, b) => a + b, 0))
+  })
+
+  it('降しが 1 つも無い便の走行は otherKm に入れる (売上走行にも便間にも数えない)', () => {
+    const idle = extractOperationIdle(HEADERS, [
+      ev('運行開始', hm(4), hm(4), '0'),
+      ev('積み', hm(5), hm(6), '1'),
+      ev('運転', hm(6), hm(8), '100'),
+      ev('降し', hm(8), hm(9), '1'),
+      ev('運転', hm(9, 30), hm(10), '7'), // 便間の回送
+      // 積んだまま帰庫した便 (降しが無い)
+      ev('積み', hm(10), hm(11), '1'),
+      ev('運転', hm(11), hm(14), '50'),
+      ev('運行終了', hm(15), hm(15), '5'),
+    ])
+    expect(breakdown(idle)).toEqual({
+      preLoadKm: 0,
+      haulKm: 102,
+      betweenKm: 7,
+      // 降しが無い便なので「降し → 終業」ではなく分類不能
+      postUnloadKm: 0,
+      otherKm: 56, // 積み1 + 運転50 + 運行終了5
+    })
+    expect(sumBreakdown(idle)).toBe(idle.totalKm)
+    expect(idle.legKm).toEqual([102, 0])
+  })
+
+  it('積みが 1 行も無い運行は走行ぜんぶが otherKm (始業→積み とは呼べない)', () => {
+    const idle = extractOperationIdle(HEADERS, [
+      ev('運行開始', hm(4), hm(4), '1'),
+      ev('運転', hm(5), hm(6), '9'),
+      ev('運行終了', hm(12), hm(12), '2'),
+    ])
+    expect(breakdown(idle)).toEqual({
+      preLoadKm: 0,
+      haulKm: 0,
+      betweenKm: 0,
+      postUnloadKm: 0,
+      otherKm: 12,
+    })
+    expect(sumBreakdown(idle)).toBe(idle.totalKm)
+    expect(idle.legKm).toEqual([])
+  })
+
+  it('最初の積みより前の降し (前の運行の積み残し) の走行は preLoadKm に入る', () => {
+    const idle = extractOperationIdle(HEADERS, [
+      ev('運行開始', hm(4), hm(4), '2'),
+      ev('降し', hm(4, 30), hm(5), '9'), // 便に属さない降し
+      ev('積み', hm(6), hm(7), '1'),
+      ev('降し', hm(8), hm(9), '2'),
+      ev('運行終了', hm(15), hm(15), '4'),
+    ])
+    expect(breakdown(idle)).toEqual({
+      preLoadKm: 11, // 運行開始 2 + 積み残しの降し 9
+      haulKm: 3,
+      betweenKm: 0,
+      postUnloadKm: 4,
+      otherKm: 0,
+    })
+    expect(sumBreakdown(idle)).toBe(idle.totalKm)
+    expect(idle.legKm).toEqual([3])
+  })
+
+  it('降しの時刻が読めない便でも距離は売上走行に数える (legKm と同じ規則)', () => {
+    const idle = extractOperationIdle(HEADERS, [
+      ev('運行開始', hm(4), hm(4), '0'),
+      ev('積み', hm(5), hm(6), '1'),
+      ev('降し', hm(8), '', '9'), // 終了日時 が読めない
+      ev('運行終了', hm(15), hm(15), '5'),
+    ])
+    // 時間は出せない (haulSec 0) が、距離は 10km を売上走行に数える
+    expect(idle.haulSec).toBe(0)
+    expect(breakdown(idle)).toEqual({
+      preLoadKm: 0,
+      haulKm: 10,
+      betweenKm: 0,
+      postUnloadKm: 5,
+      otherKm: 0,
+    })
+    expect(idle.haulKm).toBe(idle.legKm.reduce((a, b) => a + b, 0))
+  })
+
+  it('積みが連続した (降しを挟まない) 便の走行は otherKm に落ちる', () => {
+    const idle = extractOperationIdle(HEADERS, [
+      ev('運行開始', hm(4), hm(4), '0'),
+      ev('積み', hm(5), hm(6), '2'),
+      ev('積み', hm(7), hm(8), '3'),
+      ev('降し', hm(9), hm(10), '4'),
+      ev('運行終了', hm(15), hm(15), '5'),
+    ])
+    expect(breakdown(idle)).toEqual({
+      preLoadKm: 0,
+      haulKm: 7, // 便2 (積み3 + 降し4)
+      betweenKm: 0,
+      postUnloadKm: 5,
+      otherKm: 2, // 降しの無い便1
+    })
+    expect(sumBreakdown(idle)).toBe(idle.totalKm)
+  })
+
+  it('イベントが 0 行なら内訳も 5 つとも 0', () => {
+    const idle = extractOperationIdle(HEADERS, [])
+    expect(breakdown(idle)).toEqual({ preLoadKm: 0, haulKm: 0, betweenKm: 0, postUnloadKm: 0, otherKm: 0 })
+    expect(sumBreakdown(idle)).toBe(idle.totalKm)
   })
 })

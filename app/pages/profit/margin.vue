@@ -81,6 +81,7 @@ import {
   marginCsvLines,
   type CostRow,
   type FuelRateMap,
+  type KmBreakdown,
   type MarginCache,
   type MarginOperationInput,
   type OperationMargin,
@@ -137,6 +138,11 @@ const yen = (v: number | null) => (v === null ? '-' : `¥${Math.round(v).toLocal
 const km = (v: number) => `${Math.round(v * 10) / 10}km`
 const pct = (v: number | null) => (v === null ? '-' : `${Math.round(v * 1000) / 10}%`)
 const num = (v: number | null, digits = 1) => (v === null ? '-' : String(Math.round(v * 10 ** digits) / 10 ** digits))
+/** 走行km の内訳は 1 桁でも読み切れないので整数で出す (列を増やさず 2 行目に畳むため)。 */
+const kmInt = (v: number) => String(Math.round(v))
+/** 内訳の見出しの意味。**列を増やさない**代わりに、数字の意味をここで説明する。 */
+const KM_BREAKDOWN_TITLE = '積前=始業→最初の積み / 売上=積み→降し / 便間=降し→次の積み / 降後=最後の降し→終業'
+const OTHER_KM_TITLE = '降しが記録されていない便の走行 (分類不能)'
 
 onMounted(async () => {
   targets.value = parseTargets(localStorage.getItem(TARGETS_KEY))
@@ -242,13 +248,25 @@ function fetchOperationsFor(range: { from: string, to: string }, driverCd?: stri
   })
 }
 
+/** 1 運行ぶんの解決結果 (便 + 走行距離 + その内訳)。 */
+interface ResolvedOperation {
+  allowance: OperationAllowance
+  totalKm: number
+  kmBreakdown: KmBreakdown
+}
+
+/** CSV を読めなかった運行の内訳。**距離 0 と同じ扱い** (`totalKm: 0` と揃える)。 */
+function emptyKmBreakdown(): KmBreakdown {
+  return { preLoadKm: 0, haulKm: 0, betweenKm: 0, postUnloadKm: 0, otherKm: 0 }
+}
+
 /**
  * 1 運行ぶんのイベントCSV を引いて、**便 (手当) と走行距離を一度に**取り出す。
  *
  * `extractAllowanceLegs` と `extractOperationIdle` は同じ CSV を読むので、
  * 2 回引かない (運行手当タブの実測で 90 本引くのに数分かかる)。
  */
-async function resolveOperation(op: OperationListItem): Promise<{ allowance: OperationAllowance, totalKm: number }> {
+async function resolveOperation(op: OperationListItem): Promise<ResolvedOperation> {
   const base: OperationAllowance = {
     unkoNo: op.unko_no,
     readingDate: op.reading_date,
@@ -260,7 +278,7 @@ async function resolveOperation(op: OperationListItem): Promise<{ allowance: Ope
     error: null,
   }
   if (!op.has_kudgivt) {
-    return { allowance: { ...base, error: 'イベントCSV が未取り込み (has_kudgivt=false)' }, totalKm: 0 }
+    return { allowance: { ...base, error: 'イベントCSV が未取り込み (has_kudgivt=false)' }, totalKm: 0, kmBreakdown: emptyKmBreakdown() }
   }
   try {
     const csv = await getOperationCsv(op.unko_no, 'events')
@@ -268,10 +286,18 @@ async function resolveOperation(op: OperationListItem): Promise<{ allowance: Ope
     return {
       allowance: { ...base, legs: allowanceForLegs(extractAllowanceLegs(csv.headers, csv.rows)) },
       totalKm: idle.totalKm,
+      // 按分の分子の中身。**画面に出すだけ**で、按分そのものは `totalKm` のまま。
+      kmBreakdown: {
+        preLoadKm: idle.preLoadKm,
+        haulKm: idle.haulKm,
+        betweenKm: idle.betweenKm,
+        postUnloadKm: idle.postUnloadKm,
+        otherKm: idle.otherKm,
+      },
     }
   }
   catch (e) {
-    return { allowance: { ...base, error: e instanceof Error ? e.message : String(e) }, totalKm: 0 }
+    return { allowance: { ...base, error: e instanceof Error ? e.message : String(e) }, totalKm: 0, kmBreakdown: emptyKmBreakdown() }
   }
 }
 
@@ -376,12 +402,13 @@ async function run() {
       }
     }
 
-    const resolved: { allowance: OperationAllowance, totalKm: number }[] = []
+    const resolved: ResolvedOperation[] = []
     for (let i = 0; i < found.length; i += CSV_CONCURRENCY) {
       progress.value = `イベントCSV を取得中 ${resolved.length}/${found.length}`
       resolved.push(...await Promise.all(found.slice(i, i + CSV_CONCURRENCY).map(resolveOperation)))
     }
     const kmByUnko = new Map(resolved.map(r => [r.allowance.unkoNo, r.totalKm]))
+    const kmBreakdownByUnko = new Map(resolved.map(r => [r.allowance.unkoNo, r.kmBreakdown]))
     // 積んだまま帰庫した便の卸地は次の運行の先頭にある。全運行を引き終えてから当てる。
     const ops = applyCarryOver(resolved.map(r => r.allowance))
     shownYm.value = ym.value
@@ -421,6 +448,7 @@ async function run() {
         driverName: d.driverName,
         vehicleCode: vehicleCodeFromUnkoNo(op.unkoNo),
         totalKm: kmByUnko.get(op.unkoNo) ?? 0,
+        kmBreakdown: kmBreakdownByUnko.get(op.unkoNo) ?? emptyKmBreakdown(),
         salesYen: rows.reduce((sum, r) => sum + (salesByLeg.get(legKey(r)) ?? 0), 0),
         allowanceYen: rows.reduce((sum, r) => sum + legPayYen(r, provisional), 0),
       }
@@ -826,7 +854,18 @@ function downloadCsv() {
                     {{ openDrivers[d.driverName] ? '▾' : '▸' }} {{ d.driverName }}
                     <span class="text-gray-400">({{ d.totals.operations }}運行)</span>
                   </td>
-                  <td class="px-3 py-2 text-right">{{ km(d.totals.totalKm) }}</td>
+                  <td class="px-3 py-2 text-right">
+                    {{ km(d.totals.totalKm) }}
+                    <span class="block text-xs text-gray-400 dark:text-gray-500" :title="KM_BREAKDOWN_TITLE">
+                      積前 {{ kmInt(d.totals.preLoadKm) }} / 売上 {{ kmInt(d.totals.haulKm) }}
+                      / 便間 {{ kmInt(d.totals.betweenKm) }} / 降後 {{ kmInt(d.totals.postUnloadKm) }}
+                      <span
+                        v-if="d.totals.otherKm > 0"
+                        class="text-amber-600 dark:text-amber-400"
+                        :title="OTHER_KM_TITLE"
+                      >/ 他 {{ kmInt(d.totals.otherKm) }}</span>
+                    </span>
+                  </td>
                   <td class="px-3 py-2 text-right">{{ yen(d.totals.salesYen) }}</td>
                   <td class="px-3 py-2 text-right">{{ yen(d.totals.allowanceYen) }}</td>
                   <td class="px-3 py-2 text-right">{{ yen(d.totals.fuelYen) }}</td>
@@ -866,7 +905,18 @@ function downloadCsv() {
                     </NuxtLink>
                     <span class="text-gray-400 ml-2">車輌{{ m.vehicleCode }}</span>
                   </td>
-                  <td class="px-3 py-1.5 text-right">{{ km(m.totalKm) }}</td>
+                  <td class="px-3 py-1.5 text-right">
+                    {{ km(m.totalKm) }}
+                    <span class="block text-xs text-gray-400 dark:text-gray-500" :title="KM_BREAKDOWN_TITLE">
+                      積前 {{ kmInt(m.kmBreakdown.preLoadKm) }} / 売上 {{ kmInt(m.kmBreakdown.haulKm) }}
+                      / 便間 {{ kmInt(m.kmBreakdown.betweenKm) }} / 降後 {{ kmInt(m.kmBreakdown.postUnloadKm) }}
+                      <span
+                        v-if="m.kmBreakdown.otherKm > 0"
+                        class="text-amber-600 dark:text-amber-400"
+                        :title="OTHER_KM_TITLE"
+                      >/ 他 {{ kmInt(m.kmBreakdown.otherKm) }}</span>
+                    </span>
+                  </td>
                   <td class="px-3 py-1.5 text-right">{{ yen(m.salesYen) }}</td>
                   <td class="px-3 py-1.5 text-right">{{ yen(m.allowanceYen) }}</td>
                   <td

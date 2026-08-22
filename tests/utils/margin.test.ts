@@ -28,6 +28,7 @@ import {
   FUEL_KIND,
   ADBLUE_KIND,
   FUEL_RATE_KEY,
+  MARGIN_CACHE_KEY,
   type CostRow,
   type CostsDailyApiRow,
   type MarginOperationInput,
@@ -65,6 +66,8 @@ function op(over: Partial<MarginOperationInput> = {}): MarginOperationInput {
     driverName: '佐竹 繁',
     vehicleCode: '1109',
     totalKm: 100,
+    // 走行km の内訳 (足すと totalKm)。**按分には効かない**が型で必須。
+    kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 },
     salesYen: 50000,
     allowanceYen: 8000,
     ...over,
@@ -623,6 +626,8 @@ describe('summarizeMargins', () => {
     driverName: '佐竹 繁',
     vehicleCode: '1109',
     totalKm: 100,
+    // 走行km の内訳 (足すと totalKm)。**按分には効かない**が型で必須。
+    kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 },
     vehicleTotalKm: 500,
     salesYen: 50000,
     allowanceYen: 8000,
@@ -683,6 +688,8 @@ describe('groupMarginsByDriver', () => {
     driverName: '安藤',
     vehicleCode: '1109',
     totalKm: 100,
+    // 走行km の内訳 (足すと totalKm)。**按分には効かない**が型で必須。
+    kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 },
     vehicleTotalKm: 100,
     salesYen: 10000,
     allowanceYen: 1000,
@@ -718,6 +725,8 @@ describe('marginCsvLines', () => {
     driverName: '佐竹 繁',
     vehicleCode: '1109',
     totalKm: 100,
+    // 走行km の内訳 (足すと totalKm)。**按分には効かない**が型で必須。
+    kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 },
     vehicleTotalKm: 500,
     salesYen: 50000,
     allowanceYen: 8000,
@@ -872,6 +881,8 @@ describe('summarizeNoMarginReasons', () => {
     driverName: '佐竹 繁',
     vehicleCode: '1109',
     totalKm: 100,
+    // 走行km の内訳 (足すと totalKm)。**按分には効かない**が型で必須。
+    kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 },
     vehicleTotalKm: 100,
     salesYen: 10000,
     allowanceYen: 0,
@@ -997,5 +1008,94 @@ describe('buildUncoveredLegs / summarizeUncoveredLegs', () => {
     expect(after.salesYen).toBe(50000)
     expect(after.allowanceYen).toBe(8000)
     expect(after.marginYen).toBe(50000 - 8000 - 1000 - 100 * (12000 / 100) / (100 / 100))
+  })
+})
+
+/**
+ * 走行km の内訳 (Refs #760 の 5)。
+ *
+ * **按分の式は 1 ミリも変えない** — 分子は今までどおり `totalKm`。内訳は
+ * 「その分子の中身」を画面と CSV に出すためだけに運ぶ。
+ */
+describe('走行km の内訳 (kmBreakdown)', () => {
+  const base: OperationMargin = {
+    unkoNo: 'A',
+    date: '2026-07-01',
+    driverName: '佐竹 繁',
+    vehicleCode: '1109',
+    totalKm: 100,
+    kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 },
+    vehicleTotalKm: 500,
+    salesYen: 50000,
+    allowanceYen: 8000,
+    fuelYen: 2400,
+    directCostYen: 1000,
+    allocatedCostYen: 600,
+    marginYen: 38000,
+    laborYen: 30000,
+    fuelRate: { yenPerLiter: 120, kmPerLiter: 5, dieselTaxPerLiter: 32.1 },
+    costsMissing: false,
+  }
+
+  it('入力の内訳をそのまま運行の粗利に運ぶ (按分の分子は totalKm のまま)', () => {
+    const res = buildOperationMargins(
+      [op({ totalKm: 100, kmBreakdown: { preLoadKm: 3, haulKm: 60, betweenKm: 30, postUnloadKm: 5, otherKm: 2 } })],
+      [cost({ amount: 1000 })],
+      {},
+    )
+    expect(res.operations[0]!.kmBreakdown).toEqual({ preLoadKm: 3, haulKm: 60, betweenKm: 30, postUnloadKm: 5, otherKm: 2 })
+    // 分子・分母は内訳を足したものではなく `totalKm` のまま
+    expect(res.operations[0]!.totalKm).toBe(100)
+    expect(res.operations[0]!.vehicleTotalKm).toBe(100)
+  })
+
+  it('合計は **ぜんぶ** 側 — 粗利を出せなかった運行の内訳も足す', () => {
+    const totals = summarizeMargins([
+      base,
+      // 粗利を出せない運行 (燃費が出せない)。走行と内訳は数えるが経費は数えない
+      {
+        ...base,
+        unkoNo: 'B',
+        fuelYen: null,
+        marginYen: null,
+        kmBreakdown: { preLoadKm: 1, haulKm: 2, betweenKm: 3, postUnloadKm: 4, otherKm: 5 },
+        totalKm: 15,
+      },
+    ])
+    expect(totals.totalKm).toBe(115)
+    expect(totals.preLoadKm).toBe(11)
+    expect(totals.haulKm).toBe(62)
+    expect(totals.betweenKm).toBe(28)
+    expect(totals.postUnloadKm).toBe(9)
+    expect(totals.otherKm).toBe(5)
+    // 粗利の内訳は今までどおり「出せた運行ぶんだけ」
+    expect(totals.marginOperations).toBe(1)
+  })
+
+  it('emptyMarginTotals は内訳も 0 で始まる', () => {
+    const empty = emptyMarginTotals()
+    expect(empty.preLoadKm).toBe(0)
+    expect(empty.haulKm).toBe(0)
+    expect(empty.betweenKm).toBe(0)
+    expect(empty.postUnloadKm).toBe(0)
+    expect(empty.otherKm).toBe(0)
+  })
+
+  it('CSV は 走行km の直後に内訳 5 列を整数で出す', () => {
+    const lines = marginCsvLines([{ ...base, kmBreakdown: { preLoadKm: 10.4, haulKm: 60.5, betweenKm: 25, postUnloadKm: 4.1, otherKm: 0 } }])
+    const header = lines[0]!.split(',').map(v => v.replace(/"/g, ''))
+    const row = lines[1]!.split(',').map(v => v.replace(/"/g, ''))
+    const at = header.indexOf('走行km')
+    expect(header.slice(at, at + 7)).toEqual([
+      '走行km', '始業→積みkm', '売上走行km', '便間km', '降し→終業km', '分類不能km', '月・車輌の走行km',
+    ])
+    // 小数は整数に丸める (画面と同じ粒度)。0.5 は JS の丸めで 1 に上がる
+    expect(row.slice(at, at + 7)).toEqual(['100', '10', '61', '25', '4', '0', '500'])
+  })
+
+  it('キャッシュのキーは v3 — 内訳の無い旧キャッシュ (v2) を読ませない', () => {
+    // 形を変えたら番号を上げる規約。**上げ忘れると `kmBreakdown` が無い行を画面が読む**
+    // (#760 の 4 が v2 を取っているので、内訳を足したこの版は v3)
+    expect(MARGIN_CACHE_KEY).toBe('dtako:margin:cache:v3')
   })
 })

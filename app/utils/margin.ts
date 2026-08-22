@@ -332,6 +332,26 @@ export function effectiveFuelRate(derived: FuelRate, override: FuelRateOverride 
 
 // --- 運行ごとの粗利 ---
 
+/**
+ * 走行距離の内訳 (`extractOperationIdle` の同名フィールドをそのまま運ぶ)。
+ *
+ * **按分の分子 (`totalKm`) の中身**。5 つを足すと `totalKm` になる (浮動小数の
+ * 丸め誤差ぶんだけずれることはある — グループを変えて足し直しているため)。
+ * **按分には使わない** — 分子は今までどおり `totalKm` で、これは人が読むためだけ。
+ */
+export interface KmBreakdown {
+  /** 始業 → 最初の積み。 */
+  preLoadKm: number
+  /** 積み → その便の最後の降し = **売上が立つ走行**。 */
+  haulKm: number
+  /** 降し → 次の積み (便間の回送)。 */
+  betweenKm: number
+  /** 最後の降し → 終業。 */
+  postUnloadKm: number
+  /** 分類不能 (降しが記録されていない便 / 積みが 1 行も無い運行)。 */
+  otherKm: number
+}
+
 /** 粗利を出す 1 運行ぶんの入力。売上・手当・距離は呼び出し側が既に持っている。 */
 export interface MarginOperationInput {
   unkoNo: string
@@ -342,6 +362,8 @@ export interface MarginOperationInput {
   vehicleCode: string
   /** その運行の走行距離 (`extractOperationIdle` の `totalKm`)。 */
   totalKm: number
+  /** `totalKm` の内訳。**按分には効かない** (画面と CSV に出すだけ)。 */
+  kmBreakdown: KmBreakdown
   salesYen: number
   allowanceYen: number
 }
@@ -354,6 +376,11 @@ export interface OperationMargin {
   vehicleCode: string
   /** **按分の分子。** 画面に出して人が検算できるようにする。 */
   totalKm: number
+  /**
+   * **分子の中身。** 本番実測では `totalKm` の過半が非売上走行 (便間が最大) なので、
+   * 分子を人が読めるように内訳を持ち回る (Refs #760)。**按分の式には入らない。**
+   */
+  kmBreakdown: KmBreakdown
   /** **按分の分母。** その月・その車輌の運行の走行距離の合計。 */
   vehicleTotalKm: number
   salesYen: number
@@ -537,6 +564,7 @@ export function buildOperationMargins(
       driverName: op.driverName,
       vehicleCode: op.vehicleCode,
       totalKm: op.totalKm,
+      kmBreakdown: op.kmBreakdown,
       vehicleTotalKm: kmByVehicle.get(op.vehicleCode)!,
       salesYen: op.salesYen,
       allowanceYen: op.allowanceYen,
@@ -635,6 +663,17 @@ export interface MarginTotals {
   operations: number
   /** 走行距離の合計 (**ぜんぶ**)。 */
   totalKm: number
+  // 走行距離の内訳の合計 (**ぜんぶ** — `totalKm` と同じで粗利の可否では欠かさない)。
+  /** 始業 → 最初の積み の合計。 */
+  preLoadKm: number
+  /** 売上が立つ走行 (積み → 降し) の合計。 */
+  haulKm: number
+  /** 便間 (降し → 次の積み) の合計。 */
+  betweenKm: number
+  /** 最後の降し → 終業 の合計。 */
+  postUnloadKm: number
+  /** 分類不能な走行の合計。 */
+  otherKm: number
   /** 売上の合計 (**ぜんぶ**)。 */
   salesYen: number
   /** 手当の合計 (**ぜんぶ**)。人件費の別枠比較に使うので、粗利の可否で欠かさない。 */
@@ -670,6 +709,11 @@ export function emptyMarginTotals(): MarginTotals {
   return {
     operations: 0,
     totalKm: 0,
+    preLoadKm: 0,
+    haulKm: 0,
+    betweenKm: 0,
+    postUnloadKm: 0,
+    otherKm: 0,
     salesYen: 0,
     allowanceYen: 0,
     laborYen: 0,
@@ -697,6 +741,12 @@ export function summarizeMargins(margins: OperationMargin[]): MarginTotals {
   for (const m of margins) {
     totals.operations += 1
     totals.totalKm += m.totalKm
+    // 内訳も `totalKm` と同じ扱い — 粗利を出せない運行のぶんも数える。
+    totals.preLoadKm += m.kmBreakdown.preLoadKm
+    totals.haulKm += m.kmBreakdown.haulKm
+    totals.betweenKm += m.kmBreakdown.betweenKm
+    totals.postUnloadKm += m.kmBreakdown.postUnloadKm
+    totals.otherKm += m.kmBreakdown.otherKm
     totals.salesYen += m.salesYen
     totals.allowanceYen += m.allowanceYen
     totals.laborYen += m.laborYen
@@ -747,7 +797,9 @@ export function groupMarginsByDriver(margins: OperationMargin[]): DriverMargin[]
 // --- CSV ---
 
 const CSV_HEADER = [
-  '運行NO', '日付', '乗務員', '車輌C', '走行km', '月・車輌の走行km', '売上', '手当',
+  '運行NO', '日付', '乗務員', '車輌C', '走行km',
+  '始業→積みkm', '売上走行km', '便間km', '降し→終業km', '分類不能km',
+  '月・車輌の走行km', '売上', '手当',
   '燃料代', '直課経費', '按分経費', '粗利', '粗利率', '粗利が出せない理由',
   '一番星の人件費(参考)', '単価(円/L)', '燃費(km/L)',
 ]
@@ -760,7 +812,10 @@ export function marginCsvLines(margins: OperationMargin[]): string[] {
   return [
     CSV_HEADER.map(quote).join(','),
     ...margins.map(m => [
-      m.unkoNo, m.date, m.driverName, m.vehicleCode, m.totalKm, m.vehicleTotalKm,
+      m.unkoNo, m.date, m.driverName, m.vehicleCode, m.totalKm,
+      round(m.kmBreakdown.preLoadKm), round(m.kmBreakdown.haulKm), round(m.kmBreakdown.betweenKm),
+      round(m.kmBreakdown.postUnloadKm), round(m.kmBreakdown.otherKm),
+      m.vehicleTotalKm,
       m.salesYen, m.allowanceYen, round(m.fuelYen), round(m.directCostYen),
       round(m.allocatedCostYen), round(m.marginYen), rate(marginRate(m)), noMarginReason(m),
       round(m.laborYen), round(m.fuelRate.yenPerLiter), round(m.fuelRate.kmPerLiter),
@@ -851,8 +906,12 @@ export function summarizeUncoveredLegs(legs: IchibanLeg[]): UncoveredTotals | nu
  * 欄が無いキャッシュを「対象外 0 便」と読ませると、**この画面で直したかった誤解が
  * キャッシュ経路だけに残る**ため。読めない古いキャッシュは無かったことになり、
  * 一度 **集計** を押せば埋まる。
+ *
+ * `v3` で**走行km の内訳** (`kmBreakdown`) を足した。同じ理由で `v2` も読ませない —
+ * 内訳の無い運行を画面が読むと、**内訳の欄で必ず落ちる** (必須フィールドなので
+ * `undefined.preLoadKm` になる)。
  */
-export const MARGIN_CACHE_KEY = 'dtako:margin:cache:v2'
+export const MARGIN_CACHE_KEY = 'dtako:margin:cache:v3'
 
 /**
  * 直前の集計。**運行手当タブのキャッシュとはキーを分ける** — あちらは便と明細を
