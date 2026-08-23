@@ -1549,6 +1549,140 @@ export function customerRouteCsvLines(summary: CustomerRouteSummary): string[] {
   ]
 }
 
+// --- 売上の内訳 (取引先ごとの 100% 積み上げ棒、Refs #760 の 17) ---
+
+/** 棒の区分。表の列 (手当 / 燃料代(売上走行) / 回送燃料 / 運行経費の配分 / 粗利) と同じ 5 つ。 */
+export type ShareSegmentKey = 'allowance' | 'fuelHaul' | 'fuelDeadhead' | 'runCost' | 'margin'
+
+/** 画面の凡例・title に使う区分名。順序は棒の左から右。 */
+export const SHARE_SEGMENT_LABELS: { key: ShareSegmentKey, label: string }[] = [
+  { key: 'allowance', label: '手当' },
+  { key: 'fuelHaul', label: '燃料代(売上走行)' },
+  { key: 'fuelDeadhead', label: '回送燃料' },
+  { key: 'runCost', label: '運行経費の配分' },
+  { key: 'margin', label: '粗利' },
+]
+
+export interface ShareSegment {
+  key: ShareSegmentKey
+  yen: number
+  /** `yen ÷ 売上 × 100`。**丸めない** (表示側で小数 1 桁)。費用超過の行は縮めた後の値。 */
+  pct: number
+}
+
+/** 棒 1 本 (合計 / 取引先 / 経路)。`segments` は `SHARE_SEGMENT_LABELS` の順。 */
+export interface ShareBar {
+  /** 合計は `total`、取引先は `code` (表と同じ。`(突合なし)` は `''`)、経路は `code|積地|卸地`。 */
+  key: string
+  label: string
+  legs: number
+  salesYen: number
+  segments: ShareSegment[]
+  /**
+   * 費用 4 区分の和が売上を超えた行 (粗利 < 0) の超過分 `(Σ費用 − 売上) ÷ 売上 × 100`。
+   * 棒は 100 に縮めてあるので、画面はこれを「赤字 −x%」で添える。超えていなければ 0。
+   */
+  overflowPct: number
+  /** 粗利が出せない便の数 (`CustomerRouteTotals.unsplitLegs`)。> 0 の行は棒が 100% に届かない。 */
+  unsplitLegs: number
+  /** 取引先の棒だけ持つ。経路ごとの棒 (売上の降順、売上 0 の経路は除く)。 */
+  routes?: ShareBar[]
+}
+
+export interface CustomerShareBars {
+  /** 先頭は「合計」、続けて取引先 (表と同じ順 = 売上の降順)。売上 0 の行は入らない。 */
+  bars: ShareBar[]
+  /** 売上 0 の行 (取引先 + 経路) で棒にしなかった数。 */
+  skipped: number
+}
+
+/**
+ * 1 行を棒にする。売上 0 以下は棒にしない (null)。
+ *
+ * - 粗利 segment の `yen` = `grossMarginYen ?? (売上 − 4 区分の和)` (全便の粗利が出せない行は
+ *   残りを粗利と見る — その行は `unsplitLegs` が付くので画面で `*` が出る)
+ * - **4 区分の和が売上を超えた** (`costSum > salesYen`) 行は、粗利の pct を 0 にし、4 区分の pct を
+ *   `salesYen ÷ costSum` で縮めて合計 100 にする (棒をはみ出させない)。超過分は `overflowPct`
+ * - 粗利を出せない便 (`unsplitLegs > 0`) が混ざる行は、その便の売上ぶんだけ棒が 100% に届かない
+ *   (4 区分にも粗利にも入っていない売上なので、どの色にも塗らない)。粗利が負でも和が売上を
+ *   超えていなければ縮めない — 粗利の pct だけ 0 に止める
+ */
+function shareBarOf(key: string, label: string, t: CustomerRouteTotals): ShareBar | null {
+  if (t.salesYen <= 0) return null
+  const costs: { key: ShareSegmentKey, yen: number }[] = [
+    { key: 'allowance', yen: t.allowanceYen },
+    { key: 'fuelHaul', yen: t.fuelHaulYen },
+    { key: 'fuelDeadhead', yen: t.fuelDeadheadYen },
+    { key: 'runCost', yen: t.runCostShareYen },
+  ]
+  const costSum = costs.reduce((sum, c) => sum + c.yen, 0)
+  const marginYen = t.grossMarginYen ?? (t.salesYen - costSum)
+  const overflow = costSum > t.salesYen
+  const scale = overflow ? t.salesYen / costSum : 1
+  return {
+    key,
+    label,
+    legs: t.legs,
+    salesYen: t.salesYen,
+    segments: [
+      ...costs.map(c => ({ key: c.key, yen: c.yen, pct: (c.yen * 100 * scale) / t.salesYen })),
+      { key: 'margin', yen: marginYen, pct: (Math.max(0, marginYen) * 100) / t.salesYen },
+    ],
+    overflowPct: overflow ? ((costSum - t.salesYen) * 100) / t.salesYen : 0,
+    unsplitLegs: t.unsplitLegs,
+  }
+}
+
+/**
+ * 取引先別の表の下に出す **売上 = 100% の横積み上げ棒** (Refs #760 の 17)。
+ *
+ * オーナー (2026-08-23): 「この下に 100% 割合グラフを追加」 — 取引先ごとに売上に対する
+ * 手当 / 燃料代(売上走行) / 回送燃料 / 運行経費の配分 / 粗利 の構成比を並べ、取引先間の違い
+ * (手当率が高い / 回送が重い / 配分が重い) を一目で比べる。
+ *
+ * - 先頭の 1 本は**合計** (全取引先の Σ。`grossMarginYen` の null は 0 として足す)。続けて
+ *   `summary.customers` を表と同じ順 (売上の降順) で 1 本ずつ。取引先の棒は `routes` に経路の棒を持つ
+ * - **売上 0 以下の行は棒にしない** (`(突合なし)` 売上 ¥0 など。0 で割らない) → `skipped` に数える
+ *   (取引先が棒にならなければその経路は数えない — どのみち出ない)。合計には入れる (売上 0 でも費用は乗っている)
+ * - pct は丸めない。縮め方・超過分・粗利が出せない便の扱いは `shareBarOf` のとおり
+ *
+ * 表の数字・検算・CSV は触らない (表示専用)。
+ */
+export function customerShareBars(summary: CustomerRouteSummary): CustomerShareBars {
+  let skipped = 0
+  const total = emptyCustomerRouteTotals()
+  const bars: ShareBar[] = []
+  for (const c of summary.customers) {
+    total.legs += c.legs
+    total.unsplitLegs += c.unsplitLegs
+    total.salesYen += c.salesYen
+    total.allowanceYen += c.allowanceYen
+    total.haulKm += c.haulKm
+    total.deadheadKm += c.deadheadKm
+    total.fuelHaulYen += c.fuelHaulYen
+    total.fuelDeadheadYen += c.fuelDeadheadYen
+    total.runCostShareYen += c.runCostShareYen
+    total.grossMarginYen = (total.grossMarginYen ?? 0) + (c.grossMarginYen ?? 0)
+    const bar = shareBarOf(c.code, c.name, c)
+    if (bar === null) {
+      skipped += 1
+      continue
+    }
+    bar.routes = []
+    for (const r of c.routes) {
+      const rb = shareBarOf(`${c.code}|${r.from}|${r.to}`, `${r.from} → ${r.to}`, r)
+      if (rb === null) {
+        skipped += 1
+        continue
+      }
+      bar.routes.push(rb)
+    }
+    bars.push(bar)
+  }
+  const totalBar = shareBarOf('total', '合計', total)
+  return { bars: totalBar === null ? bars : [totalBar, ...bars], skipped }
+}
+
 // --- 粗利の対象外 (一番星から起こした便) ---
 
 /**
