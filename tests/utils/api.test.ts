@@ -42,6 +42,7 @@ import {
   buildScraperZipUrl,
   buildEtcCsvDownloadUrl,
   operationCsvDataZipUrl,
+  postNet780Archive,
   splitCsvAllStream,
   getDtakoEventsEtags,
 } from '~/utils/api'
@@ -1334,6 +1335,61 @@ describe('api', () => {
       expect(operationCsvDataZipUrl('2607060418590000001109')).toBe(
         '/api/operations/2607060418590000001109/csvdata-zip',
       )
+    })
+  })
+
+  // front worker の server route (`/api/net780/archive`) を同一オリジンで叩く。
+  // `request()` (backend 向け) は通らないので、Authorization の付け方と
+  // エラーの読み方をここで固定する (Refs #760 の 27)。
+  describe.runIf(!isLive)('postNet780Archive', () => {
+    const UNKO_22 = '2607060418590000001109'
+    const relayResult = {
+      ok: true,
+      comp_id: '27324455',
+      results: [{ ope_no: UNKO_22, status: 'archived', bytes: 1 }],
+      success_count: 1,
+      failure_count: 0,
+      truncated: false,
+      remaining: 0,
+      theearth_logins: 1,
+      theearth_kicked: false,
+    }
+
+    it('POST /api/net780/archive に operationNos を JSON で送り、Bearer を明示して relay の応答を返す', async () => {
+      initApi(API_BASE, () => 'tok-1', undefined, () => 'test-tenant')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => relayResult })
+      const result = await postNet780Archive([UNKO_22])
+      expect(result).toEqual(relayResult)
+      const [url, opts] = mockFetch.mock.calls[0]
+      expect(url).toBe('/api/net780/archive')
+      expect(opts.method).toBe('POST')
+      expect(opts.headers['content-type']).toBe('application/json')
+      expect(opts.headers['authorization']).toBe('Bearer tok-1')
+      expect(JSON.parse(opts.body)).toEqual({ operationNos: [UNKO_22] })
+    })
+
+    it('token が無ければ Authorization を付けない (cookie だけで通す経路)', async () => {
+      initApi(API_BASE, () => null, undefined, () => 'test-tenant')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => relayResult })
+      await postNet780Archive([UNKO_22])
+      expect(mockFetch.mock.calls[0][1].headers['authorization']).toBeUndefined()
+    })
+
+    it('非 2xx は statusMessage → message → HTTP n の順でメッセージにして投げる', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 404, json: async () => ({ statusMessage: 'relay: 不明なエンドポイントです', message: 'x' }) })
+      await expect(postNet780Archive([UNKO_22])).rejects.toThrow('relay: 不明なエンドポイントです')
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 400, json: async () => ({ message: 'operationNos が空です' }) })
+      await expect(postNet780Archive([])).rejects.toThrow('operationNos が空です')
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 401, json: async () => ({}) })
+      await expect(postNet780Archive([UNKO_22])).rejects.toThrow('HTTP 401')
+      // 本文が JSON でなくても HTTP n で落とす
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 502, json: async () => { throw new Error('not json') } })
+      await expect(postNet780Archive([UNKO_22])).rejects.toThrow('HTTP 502')
+    })
+
+    it('2xx なのに JSON でなければ投げる (null を返さない)', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => { throw new Error('not json') } })
+      await expect(postNet780Archive([UNKO_22])).rejects.toThrow('JSON')
     })
   })
 

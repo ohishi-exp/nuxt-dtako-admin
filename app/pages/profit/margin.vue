@@ -33,7 +33,7 @@
  * (localStorage、`allowance-provisional.ts` と同じ方式)。
  * **分母が 0 の車輌は燃料代を出さず、粗利も `-` にする。**
  */
-import { getOperations, getOperationCsv, getDrivers, operationCsvDataZipUrl, currentAccessToken } from '~/utils/api'
+import { getOperations, getOperationCsv, getDrivers, operationCsvDataZipUrl, currentAccessToken, postNet780Archive } from '~/utils/api'
 import { downloadBlobResponse } from '~/utils/download-blob'
 import { fetchAllPages } from '~/utils/paged-fetch'
 import type { Driver, OperationListItem } from '~/types'
@@ -55,6 +55,7 @@ import {
 } from '~/utils/operation-route-map'
 import { bundleZips, bulkZipFilename } from '~/utils/operation-zip-bundle'
 import { filterValidGpsPoints } from '~/utils/net780'
+import { NET780_ARCHIVE_MAX_ITEMS, chunk, remainingNet780ArchiveTargets, summarizeNet780ArchiveResults, formatNet780ArchiveSummary, type Net780ArchiveResultItem } from '~/utils/net780-archive'
 import { parseTargets, serializeTargets, toggleTarget, driverLabel } from '~/utils/allowance-targets'
 import {
   applyCarryOver,
@@ -970,6 +971,12 @@ const routeModal = ref<{
   unkoNos: string[]
   /** 一括 zip のファイル名 (`bulkZipFilename`)。運行 1 本なら使わない (単体 zip の名前は運行NO から)。 */
   bulkZipName: string
+  /**
+   * NET780 のアーカイブが **無かった** (`not-found`) 運行NO (Refs #760 の 27)。見出しの
+   * 「NET780 を取得 (未取得 N 運行)」の N と、押したときに relay へ渡す対象。NET780 を
+   * 引き終わるまで undefined (`error` の運行は入れない — 取りに行っても直らない)。
+   */
+  net780Missing?: string[]
 } | null>(null)
 
 /**
@@ -991,19 +998,30 @@ function setRouteMapLayers(layers: RouteMapLayers) {
 }
 
 /**
+ * いま開いている地図を**同じ引数で開き直す**関数 (Refs #760 の 27)。`openRouteMap` /
+ * `openLegRefsMap` が自分を束縛して置き、NET780 取得が終わったあとに呼んで NET780 軌跡に
+ * 切り替える (`useNet780OperationData` の cache は `not-found` を毎回 fetch し直す設計
+ * なので、新しく archive された運行は開き直せば `ready` になる)。
+ */
+let routeModalReopen: (() => Promise<void>) | null = null
+
+/**
  * 運行 1 本の NET780 の道なり軌跡 (Refs #760 の 21)。アーカイブがあれば (`ready`) 有効な
  * GPS を便の時間窓 (`route.windows`) で切って `trackHaul` / `trackDeadhead` の区切りにする。
  * **404 (`not-found`) は正常系** — 2026-07 帯広 5 台 91 運行のうちアーカイブがあるのは
- * 2 本だけ。`error` も軌跡無し扱い (地図はイベント線で出ている)。どちらも null を返す。
+ * 2 本だけ。`error` も軌跡無し扱い (地図はイベント線で出ている)。どちらも `track: null`。
+ * `missing` は 404 (`not-found`) のときだけ true — 「NET780 を取得」(Refs #760 の 27) の対象。
  * wasm parse が走るのは ready の運行だけ (composable が 404 で早期 return する)。
  */
-async function fetchNet780Track(unkoNo: string, windows: LegWindow[]): Promise<RouteSegment[] | null> {
+async function fetchNet780Track(unkoNo: string, windows: LegWindow[]): Promise<{ track: RouteSegment[] | null, missing: boolean }> {
   const net780 = useNet780OperationData(unkoNo)
   await net780.ensureLoaded()
   const result = net780.result.value
-  if (net780.status.value !== 'ready' || result === null) return null
+  // `missing` = アーカイブが無い (404)。「NET780 を取得」の対象 (Refs #760 の 27)。
+  const missing = net780.status.value === 'not-found'
+  if (net780.status.value !== 'ready' || result === null) return { track: null, missing }
   const points = filterValidGpsPoints(result.gps, result.events).map(p => ({ ts: p.ts, lat: p.lat, lng: p.lon }))
-  return splitTrackByWindows(points, windows)
+  return { track: splitTrackByWindows(points, windows), missing }
 }
 
 /** イベント線の route に軌跡 (NET780 / イベント) の区切りを足す (pointCount はイベント線の点数のまま)。 */
@@ -1041,6 +1059,7 @@ async function openRouteMap(m: OperationMargin) {
   const title = `運行 ${m.date} ${m.driverName} 車輌 ${m.vehicleCode} — 便 ${m.legs.length} 本`
   const single = { unkoNos: [m.unkoNo], bulkZipName: `csvdata-${m.unkoNo}.zip` }
   routeModal.value = { key, title, route: null, loading: true, error: null, trackNote: null, ...single }
+  routeModalReopen = () => openRouteMap(m)
   let route: OperationRoute | null = null
   let eventTrack: RouteSegment[] = []
   let error: string | null = null
@@ -1058,12 +1077,13 @@ async function openRouteMap(m: OperationMargin) {
   if (route === null) return
   // NET780 は後から重ねる (遅くても地図は先にイベント線で出す)。**NET780 が無い運行だけ**
   // 重ね掛け行のイベント軌跡を敷く (Refs #760 の 24。二重に敷かない)。
-  const track = await fetchNet780Track(m.unkoNo, route.windows)
+  const { track, missing } = await fetchNet780Track(m.unkoNo, route.windows)
   if (routeModal.value?.key !== key) return
   routeModal.value = {
     ...routeModal.value,
     route: appendTrack(route, track ?? eventTrack),
     trackNote: trackNoteFor(track === null ? 0 : 1, track === null && eventTrack.length > 0 ? 1 : 0),
+    net780Missing: missing ? [m.unkoNo] : [],
   }
 }
 
@@ -1199,6 +1219,7 @@ async function openLegRefsMap(key: string, title: string, legRefs: LegRef[], bul
   const zipInfo = { unkoNos: entries.map(([unkoNo]) => unkoNo), bulkZipName }
   const withProgress = (done: number) => `${title} (読み込み中 ${done}/${entries.length})`
   routeModal.value = { key, title: withProgress(0), route: null, loading: true, error: null, trackNote: null, ...zipInfo }
+  routeModalReopen = () => openLegRefsMap(key, title, legRefs, bulkZipName)
 
   const picked: Array<{ unkoNo: string, route: OperationRoute, eventTrack: RouteSegment[] }> = []
   let failed = 0
@@ -1229,13 +1250,15 @@ async function openLegRefsMap(key: string, title: string, legRefs: LegRef[], bul
   // NET780 は後から重ねる (Refs #760 の 21)。運行ごとに引き (CSV と同じ並列数)、アーカイブが
   // ある運行 (ready) だけ軌跡を足す。404 が大半で軽い。揃ったら route を差し替える。
   const tracks = new Map<string, RouteSegment[]>()
+  const net780Missing: string[] = []
   for (let i = 0; i < picked.length; i += CSV_CONCURRENCY) {
     const batch = picked.slice(i, i + CSV_CONCURRENCY)
     const results = await Promise.all(batch.map(p => fetchNet780Track(p.unkoNo, p.route.windows)))
     if (routeModal.value?.key !== key) return
     batch.forEach((p, j) => {
-      const t = results[j]
-      if (t) tracks.set(p.unkoNo, t)
+      const r = results[j]
+      if (r?.track) tracks.set(p.unkoNo, r.track)
+      if (r?.missing) net780Missing.push(p.unkoNo)
     })
     routeModal.value = { ...routeModal.value, trackNote: `NET780 確認中 ${Math.min(i + CSV_CONCURRENCY, picked.length)}/${picked.length}` }
   }
@@ -1246,8 +1269,78 @@ async function openLegRefsMap(key: string, title: string, legRefs: LegRef[], bul
     ...routeModal.value,
     route: mergeRoutes(overlaid.map(o => appendTrack(o.p.route, o.net780 ?? o.p.eventTrack))),
     trackNote: trackNoteFor(tracks.size, overlaid.filter(o => o.net780 === null && o.p.eventTrack.length > 0).length),
+    net780Missing,
   }
 }
+
+/**
+ * 地図モーダルの「NET780 を取得 (未取得 N 運行)」(Refs #760 の 27)。オーナー:
+ * 「relay と取れてない奴 一括ダウンロード機能も付けて」。
+ *
+ * いま開いている地図で NET780 が無かった運行 (`routeModal.net780Missing`) を
+ * `POST /api/net780/archive` (→ relay の `/kintai-relay/net780-archive`、#760-26) に
+ * **20 件ずつ直列**で投げ、relay が theearth から取って R2 に保存する。1 件 数秒〜十数秒
+ * なので進捗 (`k/N`) を見出し横に出し、終わったら結果 (`archived a / already b /
+ * not_found c / error d`) を出して**同じ地図を開き直す** (`routeModalReopen`) —
+ * 取れた運行の軌跡が NET780 に切り替わる。
+ *
+ * relay が時間切れで途中までしか処理しないこと (`truncated`) があるので、`results` に
+ * 載らなかった運行は続けて投げる。**1 回の応答で 1 件も進まなければ止める** (無限ループ
+ * 防止。relay が全件を error にした場合は `results` に載るので「進んだ」扱い — 再投入せず
+ * 結果に error として数える)。
+ *
+ * モーダルを閉じた / 別の地図を開いたら (key が変わる) 進捗は出さず、開き直しもしない
+ * (relay 側の処理は止まらない — 次に開けば R2 にあるぶんは `ready` になる)。
+ */
+const net780Archive = ref<{ key: string, running: boolean, text: string } | null>(null)
+
+async function archiveRouteModalNet780() {
+  const modal = routeModal.value
+  const targets = modal?.net780Missing ?? []
+  if (modal === null || targets.length === 0 || net780Archive.value?.running) return
+  const key = modal.key
+  const reopen = routeModalReopen
+  const total = targets.length
+  const all: Net780ArchiveResultItem[] = []
+  let queue: string[] = [...targets]
+  let stalled = false
+  let failure: string | null = null
+  net780Archive.value = { key, running: true, text: `NET780 取得中 0/${total}` }
+  try {
+    while (queue.length > 0) {
+      const batch = chunk(queue, NET780_ARCHIVE_MAX_ITEMS)[0] ?? []
+      const res = await postNet780Archive(batch)
+      all.push(...res.results)
+      const rest = remainingNet780ArchiveTargets(queue, res.results)
+      if (rest.length === queue.length) {
+        stalled = true
+        break
+      }
+      queue = rest
+      net780Archive.value = { key, running: true, text: `NET780 取得中 ${total - queue.length}/${total}` }
+    }
+  }
+  catch (e) {
+    failure = e instanceof Error ? e.message : String(e)
+  }
+  const parts = [`NET780 取得: ${formatNet780ArchiveSummary(summarizeNet780ArchiveResults(all))}`]
+  if (stalled) parts.push(`進まないため中断 (残り ${queue.length} 運行)`)
+  if (failure !== null) parts.push(`失敗 — ${failure} (残り ${queue.length} 運行)`)
+  net780Archive.value = { key, running: false, text: parts.join(' / ') }
+  // 同じ地図がまだ開いているときだけ開き直す (閉じた / 別のを開いたなら触らない)。
+  if (routeModal.value?.key === key && reopen !== null) await reopen()
+}
+
+/** 見出し横に出す NET780 取得の進捗 / 結果 (いま開いている地図のぶんだけ)。 */
+const net780ArchiveProgress = computed(() => {
+  const a = net780Archive.value
+  return a !== null && a.key === routeModal.value?.key ? a.text : null
+})
+/** いま開いている地図の NET780 取得が走っている (ボタンを押せなくする)。 */
+const net780Archiving = computed(() => {
+  const a = net780Archive.value
+  return a !== null && a.running && a.key === routeModal.value?.key
+})
 
 /** 経路行の「地図」。タイトルは `取引先 積地 → 卸地 — 便 N 本 (運行 M 本)`。 */
 function openRouteLegsMap(c: CustomerSummary, r: RouteSummary) {
@@ -2171,10 +2264,14 @@ function downloadCustomerRouteCsv() {
       :unko-count="routeModal.unkoNos.length"
       :zip-loading="zipDownloading !== null"
       :bulk-zip-progress="bulkZipProgress"
+      :net780-missing-count="routeModal.net780Missing?.length ?? 0"
+      :net780-archive-progress="net780ArchiveProgress"
+      :net780-archiving="net780Archiving"
       @close="routeModal = null"
       @download-zip="downloadRouteModalZip"
       @download-zip-all="downloadAllZips"
       @update:layers="setRouteMapLayers"
+      @archive-net780="archiveRouteModalNet780"
     />
   </div>
 </template>
