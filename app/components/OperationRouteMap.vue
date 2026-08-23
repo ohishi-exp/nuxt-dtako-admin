@@ -9,12 +9,15 @@
  * 開閉は `AllowanceOperationModal.vue` と同じ (呼び出し側の `v-if` で出し入れ、
  * Esc / 背景クリック / ✕ で `close`)。
  *
+ * 描く層は `layers` で絞る (Refs #760 の 25。既定は軌跡 + マーカーだけで、イベント線
+ * (始点→終点の直線) は凡例のチェックで出す)。絞り込みは `filterRouteByLayers` (pure)。
+ *
  * データ変換 (GPS の換算・便の切り方) はぜんぶ `app/utils/operation-route-map.ts` (pure、
  * カバレッジ gate 対象) が持ち、このコンポーネントは描画に専念する (dumb component、
  * Google Maps 描画コンポーネントは他と同様 unit test 対象外)。
  */
 import { Loader } from '@googlemaps/js-api-loader'
-import type { OperationRoute, RouteMarker, RouteSegment } from '~/utils/operation-route-map'
+import { filterRouteByLayers, type OperationRoute, type RouteMarker, type RouteSegment, type RouteMapLayers } from '~/utils/operation-route-map'
 
 const props = defineProps<{
   /** 描く経路。まだ無ければ null (読み込み中 / 失敗)。 */
@@ -30,16 +33,30 @@ const props = defineProps<{
    */
   trackNote?: string | null
   /**
-   * 見出しに csvdata.zip のダウンロードボタンを出すか (Refs #760 の 23)。
-   * **運行 1 本のモーダルのときだけ true** — 経路 (取引先) の重ね合わせは複数運行なので、
-   * どの運行の zip を落とすのか決められない。取得ロジックは呼び出し側 (`margin.vue`) が持つ。
+   * どの層を描くか (Refs #760 の 25)。凡例の各行がチェックボックス兼用で、切り替えは
+   * `update:layers` で親に返す (保存 (localStorage) は親の仕事)。
    */
-  canDownloadZip?: boolean
+  layers: RouteMapLayers
+  /**
+   * この地図に載っている運行の本数 (Refs #760 の 23・25)。1 なら見出しに「zip」
+   * (運行 1 本の csvdata.zip)、2 以上なら「zip 一括 (N 運行)」(運行ごとの csvdata.zip を
+   * 1 つの zip に同梱)。0 なら出さない。取得ロジックは呼び出し側 (`margin.vue`) が持つ。
+   */
+  unkoCount: number
   /** zip の取得中 (theearth への自前ログインを伴うので数秒かかる。連打させない)。 */
   zipLoading?: boolean
+  /** 一括 zip の進捗 (`3/12` のような文字列)。取っていないときは null。見出しのボタンに添える。 */
+  bulkZipProgress?: string | null
 }>()
 
-const emit = defineEmits<{ close: [], 'download-zip': [] }>()
+const emit = defineEmits<{
+  'close': []
+  /** 運行 1 本の csvdata.zip (`unkoCount === 1`)。 */
+  'download-zip': []
+  /** 運行 N 本の csvdata.zip を 1 つに同梱 (`unkoCount >= 2`)。 */
+  'download-zip-all': []
+  'update:layers': [layers: RouteMapLayers]
+}>()
 
 /**
  * 線の色 (凡例と同じ)。haul = 売上走行 / deadhead = 回送 / other = 降しの無い便など分類不能。
@@ -58,6 +75,9 @@ const SEGMENT_STYLE: Record<RouteSegment['kind'], { color: string, weight: numbe
   trackHaul: { color: '#047857', weight: 2, opacity: 0.9, dashed: false, zIndex: 0, label: '軌跡 (便の時間帯)' },
   trackDeadhead: { color: '#4b5563', weight: 2, opacity: 0.8, dashed: false, zIndex: 0, label: '軌跡 (回送の時間帯)' },
 }
+
+/** マーカーの重なり順。積み 4 / 降し 3 (重なったとき積みが上) / 開始・終了 2。 */
+const MARKER_Z: Record<RouteMarker['kind'], number> = { load: 4, unload: 3, start: 2, end: 2 }
 
 const mapEl = ref<HTMLDivElement | null>(null)
 const loadError = ref<string | null>(null)
@@ -108,7 +128,11 @@ function clearOverlays() {
   markers = []
 }
 
-/** マーカーの見た目: start/end = 小さい丸、load = ▲ 緑、unload = ▼ 青 (便番号を添える)。 */
+/**
+ * マーカーの見た目: start/end = 小さい丸 (黒 ● / 白 ○)、load = 緑の ▲ 20px (白縁取り)、
+ * unload = 青の ■ 20px に白抜きの便番号 (Refs #760 の 25。▲/▼ だと重ねたときに
+ * 見分けにくいので形を変え、少し大きくした)。便番号は積みは右に添え、降しは ■ の中。
+ */
 function markerContent(mk: RouteMarker): HTMLElement {
   const el = document.createElement('div')
   el.style.display = 'flex'
@@ -117,7 +141,6 @@ function markerContent(mk: RouteMarker): HTMLElement {
   el.style.fontSize = '13px'
   el.style.fontWeight = '700'
   el.style.lineHeight = '1'
-  el.style.textShadow = '0 0 3px #fff, 0 0 3px #fff'
   if (mk.kind === 'start' || mk.kind === 'end') {
     const dot = document.createElement('span')
     dot.style.display = 'inline-block'
@@ -129,15 +152,37 @@ function markerContent(mk: RouteMarker): HTMLElement {
     el.appendChild(dot)
     return el
   }
-  const glyph = document.createElement('span')
-  glyph.textContent = mk.kind === 'load' ? '▲' : '▼'
-  glyph.style.color = mk.kind === 'load' ? '#059669' : '#2563eb'
-  glyph.style.fontSize = '16px'
-  el.appendChild(glyph)
-  const seq = document.createElement('span')
-  seq.textContent = String(mk.legSeq ?? '')
-  seq.style.color = mk.kind === 'load' ? '#065f46' : '#1e40af'
-  el.appendChild(seq)
+  const seqText = String(mk.legSeq ?? '')
+  if (mk.kind === 'load') {
+    const glyph = document.createElement('span')
+    glyph.textContent = '▲'
+    glyph.style.color = '#059669'
+    glyph.style.fontSize = '20px'
+    // 白縁取り (地図の緑の上でも形が立つように)。
+    glyph.style.textShadow = '0 0 2px #fff, 0 0 2px #fff, 1px 1px 0 #fff, -1px -1px 0 #fff'
+    el.appendChild(glyph)
+    const seq = document.createElement('span')
+    seq.textContent = seqText
+    seq.style.color = '#065f46'
+    seq.style.textShadow = '0 0 3px #fff, 0 0 3px #fff'
+    el.appendChild(seq)
+    return el
+  }
+  // unload: 青の ■ に白抜きの便番号。
+  const box = document.createElement('span')
+  box.style.display = 'inline-flex'
+  box.style.alignItems = 'center'
+  box.style.justifyContent = 'center'
+  box.style.width = '20px'
+  box.style.height = '20px'
+  box.style.borderRadius = '3px'
+  box.style.background = '#2563eb'
+  box.style.border = '2px solid #fff'
+  box.style.boxSizing = 'border-box'
+  box.style.color = '#fff'
+  box.style.fontSize = '11px'
+  box.textContent = seqText
+  el.appendChild(box)
   return el
 }
 
@@ -150,8 +195,13 @@ async function redraw() {
   // `pointCount` はイベント線の点数 (NET780 軌跡は数えない) なので、描くものの有無は segments で見る。
   if (!route || route.segments.length === 0) return
 
+  // 層で絞る (Refs #760 の 25)。fitBounds は**描画対象が空でなければ描画対象だけ**で、
+  // 全部 OFF にして空なら全要素で (何も描かれない地図がどこか分からない場所に飛ばないように)。
+  const shown = filterRouteByLayers(route, props.layers)
+  const fit = shown.segments.length > 0 || shown.markers.length > 0 ? shown : route
+
   const bounds = new google.maps.LatLngBounds()
-  for (const seg of route.segments) {
+  for (const seg of shown.segments) {
     const style = SEGMENT_STYLE[seg.kind]
     polylines.push(new google.maps.Polyline({
       path: seg.path,
@@ -165,19 +215,21 @@ async function redraw() {
       zIndex: style.zIndex,
       map: m,
     }))
-    for (const p of seg.path) bounds.extend(p)
   }
 
-  for (const mk of route.markers) {
+  for (const mk of shown.markers) {
     markers.push(new markerLib.AdvancedMarkerElement({
       position: { lat: mk.lat, lng: mk.lng },
       map: m,
       title: mk.ts ? `${mk.label} ${mk.ts}` : mk.label,
       content: markerContent(mk),
-      zIndex: mk.kind === 'load' || mk.kind === 'unload' ? 3 : 2,
+      // 積み 4 / 降し 3 (重なったとき積みが上) / 開始・終了 2。
+      zIndex: MARKER_Z[mk.kind],
     }))
   }
 
+  for (const seg of fit.segments) for (const p of seg.path) bounds.extend(p)
+  for (const mk of fit.markers) bounds.extend({ lat: mk.lat, lng: mk.lng })
   m.fitBounds(bounds)
   const listener = google.maps.event.addListenerOnce(m, 'bounds_changed', () => {
     if (m && (m.getZoom() ?? 0) > 16) m.setZoom(16)
@@ -185,7 +237,13 @@ async function redraw() {
   void listener
 }
 
+/** 層の切替 (凡例の各行 = チェックボックス)。親が保存して `layers` を差し替え、watch で描き直す。 */
+function toggleLayer(key: keyof RouteMapLayers) {
+  emit('update:layers', { ...props.layers, [key]: !props.layers[key] })
+}
+
 watch(() => props.route, redraw)
+watch(() => props.layers, redraw)
 onMounted(redraw)
 onBeforeUnmount(clearOverlays)
 
@@ -213,9 +271,26 @@ const emptyReason = computed(() => {
   return 'イベントCSV に GPS 列が無いか、行がありません'
 })
 
-const legendKinds: RouteSegment['kind'][] = ['haul', 'deadhead', 'other']
-/** 軌跡の凡例 (1 行)。運行ごとに NET780 かイベント軌跡のどちらかが乗る (内訳は `trackNote`)。 */
-const trackKinds: RouteSegment['kind'][] = ['trackHaul', 'trackDeadhead']
+/**
+ * 凡例 = レイヤのチェックボックス (Refs #760 の 25)。線の層は 1 行に 1 層で、
+ * 直線 2 層は見本の色を `SEGMENT_STYLE` から、軌跡は便 / 回送の 2 色を並べる。
+ */
+const LINE_LAYERS: Array<{ key: keyof RouteMapLayers, label: string, kinds: RouteSegment['kind'][] }> = [
+  { key: 'track', label: '軌跡 (経路)', kinds: ['trackHaul', 'trackDeadhead'] },
+  { key: 'haulLine', label: '売上走行の直線', kinds: ['haul'] },
+  { key: 'deadheadLine', label: '回送の直線', kinds: ['deadhead', 'other'] },
+]
+
+const zipLabel = computed(() => {
+  if (props.bulkZipProgress) return props.bulkZipProgress
+  if (props.zipLoading) return '…'
+  return props.unkoCount >= 2 ? `zip 一括 (${props.unkoCount} 運行)` : 'zip'
+})
+
+function onZipClick() {
+  if (props.unkoCount >= 2) emit('download-zip-all')
+  else emit('download-zip')
+}
 </script>
 
 <template>
@@ -230,14 +305,16 @@ const trackKinds: RouteSegment['kind'][] = ['trackHaul', 'trackDeadhead']
         </h2>
         <span v-if="trackNote" class="text-xs text-gray-500">{{ trackNote }}</span>
         <button
-          v-if="canDownloadZip"
+          v-if="unkoCount > 0"
           type="button"
           class="rounded border border-gray-300 dark:border-gray-700 px-1.5 py-0.5 text-[11px] text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
-          title="この運行の csvdata.zip (KUDGFUL/KUDGIVT/KUDGURI/SokudoData) をダウンロード"
+          :title="unkoCount >= 2
+            ? `この地図の運行 ${unkoCount} 本の csvdata.zip を 1 つの zip にまとめてダウンロード (運行ごとに順番に取るので時間がかかります)`
+            : 'この運行の csvdata.zip (KUDGFUL/KUDGIVT/KUDGURI/SokudoData) をダウンロード'"
           :disabled="zipLoading"
-          @click="emit('download-zip')"
+          @click="onZipClick"
         >
-          {{ zipLoading ? '…' : 'zip' }}
+          {{ zipLabel }}
         </button>
         <span class="ml-auto flex items-center gap-3 text-xs">
           <span v-if="route" class="text-gray-500">
@@ -278,29 +355,35 @@ const trackKinds: RouteSegment['kind'][] = ['trackHaul', 'trackDeadhead']
       </div>
 
       <div class="flex flex-wrap items-center gap-4 px-4 py-2 text-[11px] text-gray-500 border-t border-gray-100 dark:border-gray-800">
-        <span v-for="k in legendKinds" :key="k" class="flex items-center gap-1">
+        <label v-for="l in LINE_LAYERS" :key="l.key" class="flex items-center gap-1 cursor-pointer select-none">
+          <input type="checkbox" class="size-3" :checked="layers[l.key]" @change="toggleLayer(l.key)">
           <span
-            class="inline-block w-5 rounded"
+            v-for="k in l.kinds"
+            :key="k"
+            class="inline-block w-4 rounded"
             :style="{
               height: `${SEGMENT_STYLE[k].weight}px`,
               background: SEGMENT_STYLE[k].dashed ? 'transparent' : SEGMENT_STYLE[k].color,
               borderTop: SEGMENT_STYLE[k].dashed ? `${SEGMENT_STYLE[k].weight}px dashed ${SEGMENT_STYLE[k].color}` : 'none',
             }"
-          />{{ SEGMENT_STYLE[k].label }}
-        </span>
-        <span class="flex items-center gap-1"><span class="text-emerald-600 font-bold">▲</span>積み (便番号)</span>
-        <span class="flex items-center gap-1"><span class="text-blue-600 font-bold">▼</span>降し (便の最後)</span>
-        <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full bg-gray-900 dark:bg-gray-100" />運行開始</span>
-        <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full border-2 border-gray-900 dark:border-gray-100" />運行終了</span>
+          />{{ l.label }}
+        </label>
+        <label class="flex items-center gap-1 cursor-pointer select-none">
+          <input type="checkbox" class="size-3" :checked="layers.load" @change="toggleLayer('load')">
+          <span class="text-emerald-600 font-bold text-base leading-none">▲</span>積み (便番号)
+        </label>
+        <label class="flex items-center gap-1 cursor-pointer select-none">
+          <input type="checkbox" class="size-3" :checked="layers.unload" @change="toggleLayer('unload')">
+          <span class="inline-flex items-center justify-center w-3.5 h-3.5 rounded-sm bg-blue-600 text-white text-[9px] font-bold leading-none">1</span>降し (便の最後)
+        </label>
+        <label class="flex items-center gap-1 cursor-pointer select-none">
+          <input type="checkbox" class="size-3" :checked="layers.startEnd" @change="toggleLayer('startEnd')">
+          <span class="inline-block w-2.5 h-2.5 rounded-full bg-gray-900 dark:bg-gray-100" />運行開始
+          <span class="inline-block w-2.5 h-2.5 rounded-full border-2 border-gray-900 dark:border-gray-100" />運行終了
+        </label>
       </div>
-      <div class="flex flex-wrap items-center gap-4 px-4 pb-2 text-[11px] text-gray-500">
-        <span>軌跡 (NET780 / イベント):</span>
-        <span v-for="k in trackKinds" :key="k" class="flex items-center gap-1">
-          <span
-            class="inline-block w-5 rounded"
-            :style="{ height: `${SEGMENT_STYLE[k].weight}px`, background: SEGMENT_STYLE[k].color }"
-          />{{ SEGMENT_STYLE[k].label }}
-        </span>
+      <div class="flex flex-wrap items-center gap-4 px-4 pb-2 text-[11px] text-gray-400">
+        <span>軌跡 = NET780 の道なり GPS か、重ね掛け行も混ぜたイベント軌跡 (濃い緑 = 便の時間帯 / 濃い灰 = 回送の時間帯)。直線 = イベント行の始点→終点 (既定 OFF)</span>
       </div>
     </div>
   </div>

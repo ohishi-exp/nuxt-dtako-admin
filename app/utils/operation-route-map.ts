@@ -428,3 +428,98 @@ export function mergeRoutes(routes: OperationRoute[]): OperationRoute {
   }
   return merged
 }
+
+/**
+ * 地図のレイヤ切替 (Refs #760 の 25)。オーナー: 「無駄な直線 出てない?」 — 運行 12 本を
+ * 重ねると回送の直線 (帯広・音更・上士幌 → 釧路 …) が地図を横切って散らかるので、
+ * **経路は軌跡 (`trackHaul` / `trackDeadhead`) だけにして、イベント線 (始点→終点の直線) は
+ * 既定で消す**。消した線も凡例のチェックで出し直せる。
+ *
+ * - `track` = 軌跡 (`trackHaul` / `trackDeadhead`)
+ * - `haulLine` = 売上走行の直線 (`haul`)
+ * - `deadheadLine` = 回送の直線 (`deadhead` / `other` — 分類不能も直線なので同じ層)
+ * - `load` / `unload` = 積み ▲ / 降し ■ のマーカー
+ * - `startEnd` = 運行開始 ● / 運行終了 ○ のマーカー
+ */
+export interface RouteMapLayers {
+  track: boolean
+  haulLine: boolean
+  deadheadLine: boolean
+  load: boolean
+  unload: boolean
+  startEnd: boolean
+}
+
+/** 既定: 軌跡 ON / 直線 2 つ OFF / 積み・降し ON / 開始終了 ON。 */
+export const DEFAULT_ROUTE_MAP_LAYERS: Readonly<RouteMapLayers> = Object.freeze({
+  track: true,
+  haulLine: false,
+  deadheadLine: false,
+  load: true,
+  unload: true,
+  startEnd: true,
+})
+
+/** localStorage のキー (`allowance-provisional.ts` と同じ `dtako:` 接頭辞)。 */
+export const ROUTE_MAP_LAYERS_KEY = 'dtako:margin:routeMapLayers'
+
+/** 区切りの kind → どの層か。 */
+export const SEGMENT_LAYER: Readonly<Record<RouteSegment['kind'], keyof RouteMapLayers>> = Object.freeze({
+  haul: 'haulLine',
+  deadhead: 'deadheadLine',
+  other: 'deadheadLine',
+  trackHaul: 'track',
+  trackDeadhead: 'track',
+})
+
+/** マーカーの kind → どの層か。 */
+export const MARKER_LAYER: Readonly<Record<RouteMarker['kind'], keyof RouteMapLayers>> = Object.freeze({
+  start: 'startEnd',
+  end: 'startEnd',
+  load: 'load',
+  unload: 'unload',
+})
+
+const LAYER_KEYS = Object.keys(DEFAULT_ROUTE_MAP_LAYERS) as Array<keyof RouteMapLayers>
+
+/**
+ * localStorage の文字列 → `RouteMapLayers`。null / JSON でない / object でない → 既定。
+ * **キーごと**に boolean でなければそのキーだけ既定に倒す (後から層を足しても、
+ * 保存済みの古い値が丸ごと捨てられない)。余分なキーは無視する。
+ */
+export function parseRouteMapLayers(raw: string | null): RouteMapLayers {
+  let parsed: unknown = null
+  try {
+    parsed = raw === null ? null : JSON.parse(raw)
+  }
+  catch {
+    parsed = null
+  }
+  const src: Record<string, unknown> = typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {}
+  const out = { ...DEFAULT_ROUTE_MAP_LAYERS }
+  for (const k of LAYER_KEYS) {
+    const v = src[k]
+    if (typeof v === 'boolean') out[k] = v
+  }
+  return out
+}
+
+export function serializeRouteMapLayers(layers: RouteMapLayers): string {
+  return JSON.stringify(layers)
+}
+
+/**
+ * `layers` で OFF の層の区切り・マーカーを落とす (描画用。元の route は変えない)。
+ * `pointCount` は**残した** `segments` の点数 (`pickLegsFromRoute` と同じ)。`droppedRows` /
+ * `windows` はそのまま (何行 GPS が使えなかったか・便の時間窓は層で変わらない)。
+ */
+export function filterRouteByLayers(route: OperationRoute, layers: RouteMapLayers): OperationRoute {
+  const segments = route.segments.filter(s => layers[SEGMENT_LAYER[s.kind]])
+  return {
+    segments,
+    markers: route.markers.filter(m => layers[MARKER_LAYER[m.kind]]),
+    pointCount: segments.reduce((sum, s) => sum + s.path.length, 0),
+    droppedRows: route.droppedRows,
+    windows: route.windows,
+  }
+}

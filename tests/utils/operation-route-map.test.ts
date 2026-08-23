@@ -1,5 +1,22 @@
 import { describe, it, expect } from 'vitest'
-import { buildOperationRoute, buildOverlayTrack, pickLegsFromRoute, mergeRoutes, splitTrackByWindows, type LegWindow, type OperationRoute, type RouteSegment } from '~/utils/operation-route-map'
+import {
+  buildOperationRoute,
+  buildOverlayTrack,
+  pickLegsFromRoute,
+  mergeRoutes,
+  splitTrackByWindows,
+  parseRouteMapLayers,
+  serializeRouteMapLayers,
+  filterRouteByLayers,
+  DEFAULT_ROUTE_MAP_LAYERS,
+  ROUTE_MAP_LAYERS_KEY,
+  SEGMENT_LAYER,
+  MARKER_LAYER,
+  type LegWindow,
+  type OperationRoute,
+  type RouteSegment,
+  type RouteMapLayers,
+} from '~/utils/operation-route-map'
 import { extractOperationIdle } from '~/utils/allowance-idle'
 import { toLatLng, parseEventDatetimeToTs } from '~/utils/event-data-table'
 
@@ -568,5 +585,95 @@ describe('buildOverlayTrack (重ね掛け行も混ぜた軌跡、Refs #760 の 2
     // 重ね掛け行を混ぜても buildOperationRoute の点列は DISTANCE_EVENT_NAMES の行だけ。
     const timelineOnly = ONE_LEG.filter(r => !['高速道', '一般道実車'].includes(r[0]!))
     expect(buildOperationRoute(HEADERS, timelineOnly)).toEqual(before)
+  })
+})
+
+describe('parseRouteMapLayers / serializeRouteMapLayers (レイヤ切替の保存、Refs #760 の 25)', () => {
+  it('既定は 軌跡 ON / 直線 2 つ OFF / 積み・降し ON / 開始終了 ON', () => {
+    expect(DEFAULT_ROUTE_MAP_LAYERS).toEqual<RouteMapLayers>({
+      track: true, haulLine: false, deadheadLine: false, load: true, unload: true, startEnd: true,
+    })
+    expect(ROUTE_MAP_LAYERS_KEY).toBe('dtako:margin:routeMapLayers')
+  })
+
+  it('null (未保存) / JSON でない / object でない (数値・null・配列) は既定', () => {
+    for (const raw of [null, 'not json', '5', 'null', '"str"', 'true']) {
+      expect(parseRouteMapLayers(raw)).toEqual(DEFAULT_ROUTE_MAP_LAYERS)
+    }
+    // 配列は object だがキーが無いので既定に倒れる。
+    expect(parseRouteMapLayers('[true,false]')).toEqual(DEFAULT_ROUTE_MAP_LAYERS)
+    // 既定そのものは凍結しているが、返すのは別オブジェクト (書き換えて壊さない)。
+    expect(parseRouteMapLayers(null)).not.toBe(DEFAULT_ROUTE_MAP_LAYERS)
+  })
+
+  it('保存した値を往復できる (serialize → parse)', () => {
+    const layers: RouteMapLayers = { track: false, haulLine: true, deadheadLine: true, load: false, unload: true, startEnd: false }
+    expect(parseRouteMapLayers(serializeRouteMapLayers(layers))).toEqual(layers)
+  })
+
+  it('キーごとに boolean でなければそのキーだけ既定。余分なキーは無視', () => {
+    expect(parseRouteMapLayers(JSON.stringify({ deadheadLine: true, track: 'yes', load: 0, foo: false }))).toEqual({
+      ...DEFAULT_ROUTE_MAP_LAYERS,
+      deadheadLine: true,
+    })
+    expect(parseRouteMapLayers('{}')).toEqual(DEFAULT_ROUTE_MAP_LAYERS)
+  })
+})
+
+describe('filterRouteByLayers (レイヤで絞る、Refs #760 の 25)', () => {
+  /** イベント線 + 軌跡 + マーカー全種が揃った route。 */
+  function fullRoute(): OperationRoute {
+    const base = buildOperationRoute(HEADERS, TWO_LEGS)
+    const track = splitTrackByWindows(buildOverlayTrack(HEADERS, TWO_LEGS), base.windows)
+    return { ...base, segments: [...base.segments, ...track] }
+  }
+
+  it('kind → 層の対応: 直線 haul = 売上走行の直線 / deadhead・other = 回送の直線 / track* = 軌跡、マーカー start・end = 開始終了', () => {
+    expect(SEGMENT_LAYER).toEqual({ haul: 'haulLine', deadhead: 'deadheadLine', other: 'deadheadLine', trackHaul: 'track', trackDeadhead: 'track' })
+    expect(MARKER_LAYER).toEqual({ start: 'startEnd', end: 'startEnd', load: 'load', unload: 'unload' })
+  })
+
+  it('既定 (直線 OFF) では軌跡とマーカーだけ残り、イベント線は全部落ちる。pointCount は残した点数', () => {
+    const route = fullRoute()
+    const kindsBefore = new Set(route.segments.map(s => s.kind))
+    expect([...kindsBefore].sort()).toEqual(['deadhead', 'haul', 'trackDeadhead', 'trackHaul'])
+    const shown = filterRouteByLayers(route, DEFAULT_ROUTE_MAP_LAYERS)
+    expect([...new Set(shown.segments.map(s => s.kind))].sort()).toEqual(['trackDeadhead', 'trackHaul'])
+    expect(shown.markers).toEqual(route.markers)
+    expect(shown.pointCount).toBe(shown.segments.reduce((n, s) => n + s.path.length, 0))
+    // 層で変わらないものはそのまま。
+    expect(shown.droppedRows).toBe(route.droppedRows)
+    expect(shown.windows).toEqual(route.windows)
+    // 元は変えない (pure)。
+    expect(route.segments.some(s => s.kind === 'haul')).toBe(true)
+  })
+
+  it('回送の直線だけ ON にすると deadhead (と other) のイベント線が戻る。売上走行の直線は別の層', () => {
+    const route = fullRoute()
+    const deadheadOnly = filterRouteByLayers(route, { ...DEFAULT_ROUTE_MAP_LAYERS, deadheadLine: true })
+    expect([...new Set(deadheadOnly.segments.map(s => s.kind))].sort()).toEqual(['deadhead', 'trackDeadhead', 'trackHaul'])
+    const haulOnly = filterRouteByLayers(route, { ...DEFAULT_ROUTE_MAP_LAYERS, track: false, haulLine: true })
+    expect([...new Set(haulOnly.segments.map(s => s.kind))]).toEqual(['haul'])
+    // other (降しの無い便) は回送の直線の層。
+    const withOther: OperationRoute = { ...route, segments: [{ kind: 'other', legSeq: 1, path: [pt(KUSHIRO), pt(SHIHORO)] }] }
+    expect(filterRouteByLayers(withOther, { ...DEFAULT_ROUTE_MAP_LAYERS, deadheadLine: true }).segments).toEqual(withOther.segments)
+    expect(filterRouteByLayers(withOther, DEFAULT_ROUTE_MAP_LAYERS).segments).toEqual([])
+  })
+
+  it('マーカーは 積み / 降し / 開始終了 の 3 層で別々に落とせる', () => {
+    const route = fullRoute()
+    const kinds = (l: RouteMapLayers) => filterRouteByLayers(route, l).markers.map(m => m.kind)
+    expect(kinds({ ...DEFAULT_ROUTE_MAP_LAYERS, load: false })).toEqual(route.markers.filter(m => m.kind !== 'load').map(m => m.kind))
+    expect(kinds({ ...DEFAULT_ROUTE_MAP_LAYERS, unload: false })).toEqual(route.markers.filter(m => m.kind !== 'unload').map(m => m.kind))
+    expect(kinds({ ...DEFAULT_ROUTE_MAP_LAYERS, startEnd: false })).toEqual(['load', 'load', 'unload', 'unload'])
+    expect(kinds({ ...DEFAULT_ROUTE_MAP_LAYERS, load: false, unload: false, startEnd: false })).toEqual([])
+  })
+
+  it('全部 OFF なら segments も markers も空 (pointCount 0)。全部 ON なら元のまま', () => {
+    const route = fullRoute()
+    const none: RouteMapLayers = { track: false, haulLine: false, deadheadLine: false, load: false, unload: false, startEnd: false }
+    expect(filterRouteByLayers(route, none)).toEqual({ ...route, segments: [], markers: [], pointCount: 0 })
+    const all: RouteMapLayers = { track: true, haulLine: true, deadheadLine: true, load: true, unload: true, startEnd: true }
+    expect(filterRouteByLayers(route, all)).toEqual({ ...route, pointCount: route.segments.reduce((n, s) => n + s.path.length, 0) })
   })
 })

@@ -284,12 +284,22 @@ branches = true
 # allowance-idle.ts と同じ行。取引先 × 経路の行から「この経路の便を全部重ねた地図」を
 # 描く pickLegsFromRoute / mergeRoutes も持つ (Refs #760 の 19)。
 # 重ね掛け行も混ぜて軌跡を密にする buildOverlayTrack も持つ (Refs #760 の 24)。
+# 地図のレイヤ切替 (軌跡 / 直線 / マーカー) の parseRouteMapLayers / filterRouteByLayers
+# も持つ (Refs #760 の 25)。
 # branches: BR() で包んだ instrumented コピーで
 # 61 条件 (`if` / 三項 / `&&` `||` `??` の各項。#760 の 19 で 37 → 41、#760 の 21 で
 # NET780 軌跡の時間窓 windows / splitTrackByWindows を足して 53、#760 の 24 で
-# buildOverlayTrack のぶん 61) すべて両側 OK。
+# buildOverlayTrack のぶん 61) すべて両側 OK。#760 の 25 は TS compiler API で
+# if / 三項 / && || の左 / ?? を機械的に包み直して 64 条件すべて両側 OK。
 [[files]]
 path = "app/utils/operation-route-map.ts"
+branches = true
+
+# 運行 N 本の csvdata.zip を JSZip で 1 つに同梱する bundleZips と、一括 zip のファイル名
+# bulkZipFilename (Refs #760 の 25)。JSZip はテストでモック。
+# branches: 同じ instrument で 1 条件 (`route ?? 'all'`) 両側 OK。
+[[files]]
+path = "app/utils/operation-zip-bundle.ts"
 branches = true
 
 # 運行NO から csvdata.zip 取得の引数 (`ope_no_22` / `start_ope`) を組む pure util
