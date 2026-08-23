@@ -104,6 +104,39 @@ export function legDate(op: OperationAllowance, fromTs: number | null): string {
   return op.operationDate ?? op.readingDate
 }
 
+/**
+ * **運行を月に振り分けるための日付** (`YYYY-MM-DD`)。粗利タブが使う (Refs #760 の 16)。
+ *
+ * `legDate` (便の日付) とは目的が違う — あちらは便 1 本がいつの仕事かで、こちらは
+ * **運行 1 本をどの月に数えるか**。月末に始まって翌月へ食い込む運行を、便ごとに
+ * 割らずに**まるごと開始月へ**入れるために使う。
+ *
+ * 1. **運行開始** (`OperationIdle.startTs` = イベントCSV の `運行開始` 行)
+ * 2. 運行日 (`operationDate`。alc が持っていれば)
+ * 3. 運行NO の先頭 6 桁 (`YYMMDD`)
+ *
+ * **読取日には落とさない。** 日跨ぎ運行は翌日に読まれる (2026-05 実測で 52.8%) ので、
+ * 月末の運行が読取日だと翌月に着いてしまい、月の切り方としては使えない。
+ * どれも読めなければ `null` — **どの月にも入れない** (推測で振り分けない)。
+ */
+export function operationRunDate(startTs: number | null, operationDate: string | null, unkoNo: string): string | null {
+  if (startTs !== null) return epochToYmd(startTs)
+  if (operationDate !== null) return operationDate
+  return runDateFromUnkoNo(unkoNo)
+}
+
+/**
+ * 運行NO の先頭 6 桁 (`YYMMDD`) → `YYYY-MM-DD`。22 桁でも 23 桁でもなければ `null`。
+ *
+ * `kintai-candidate-diff.ts` の `kintaiCandidateDiffDateFromUnkoNo` が同じ変換を
+ * 持っているが、**独立に書く** — あちらは勤怠 (オンプレ/GCP の突合) の口で、ここは
+ * 手当・粗利の口。同じ理由で `kintai-diff-view.ts` も乗務員CD の正規化を書き直している。
+ */
+function runDateFromUnkoNo(unkoNo: string): string | null {
+  if (!/^\d{22}$/.test(unkoNo) && !/^\d{23}$/.test(unkoNo)) return null
+  return `${2000 + Number(unkoNo.slice(0, 2))}-${unkoNo.slice(2, 4)}-${unkoNo.slice(4, 6)}`
+}
+
 /** 運行ごとの引き当て結果を、便 1 行ずつの表に開く。 */
 export function toReportRows(ops: OperationAllowance[]): AllowanceReportRow[] {
   const rows: AllowanceReportRow[] = []
@@ -283,13 +316,30 @@ function emptyOperationNode(op: OperationAllowance): OperationNode {
 export function buildMonthlyAllowance(ops: OperationAllowance[], ym: string): MonthlyAllowance {
   const allRows = toReportRows(ops)
   const inMonth = allRows.filter(r => r.date.startsWith(ym))
+  return aggregateMonthly(ops, groupRowsByUnko(inMonth), allRows.length - inMonth.length)
+}
+
+/** 便を運行NO ごとに束ねる (順は入力のまま)。 */
+function groupRowsByUnko(rows: AllowanceReportRow[]): Map<string, AllowanceReportRow[]> {
   const rowsByUnko = new Map<string, AllowanceReportRow[]>()
-  for (const row of inMonth) {
+  for (const row of rows) {
     const list = rowsByUnko.get(row.unkoNo) ?? []
     list.push(row)
     rowsByUnko.set(row.unkoNo, list)
   }
+  return rowsByUnko
+}
 
+/**
+ * 乗務員 → 運行 → 便 の 3 段に畳む。**どの便を対象月と見るかは呼び出し側が決める**
+ * (`rowsByUnko` に入れて渡す) — 月の切り方が 2 つある (便の積み日 / 運行の開始日) ので、
+ * 畳み方だけをここに 1 つ置く。
+ */
+function aggregateMonthly(
+  ops: OperationAllowance[],
+  rowsByUnko: Map<string, AllowanceReportRow[]>,
+  outOfMonthTrips: number,
+): MonthlyAllowance {
   const byDriver = new Map<string, DriverNode>()
   for (const op of ops) {
     const rows = rowsByUnko.get(op.unkoNo) ?? []
@@ -327,6 +377,74 @@ export function buildMonthlyAllowance(ops: OperationAllowance[], ym: string): Mo
     irregularTrips: drivers.reduce((sum, d) => sum + d.irregularTrips, 0),
     carriedTrips: drivers.reduce((sum, d) => sum + d.carriedTrips, 0),
     failedOperations: drivers.reduce((sum, d) => sum + d.failedOperations, 0),
-    outOfMonthTrips: allRows.length - inMonth.length,
+    outOfMonthTrips,
+  }
+}
+
+/**
+ * **運行が月を跨いだぶん** (`buildMonthlyAllowanceByOperationDate` が返す注記の材料)。
+ *
+ * 運行の開始日で月を切ると、**便の日付は月からはみ出す**。何本・いくらぶんはみ出した
+ * のかを画面に出さないと、運行手当タブ (便の積み日で切る) との差が読めない。
+ */
+export interface CrossMonthLegs {
+  /** 対象月の運行が持つ、**翌月日付の便**の数。合計には入っている。 */
+  nextMonthLegs: number
+  /** その便の手当 (マスタで決まったぶんだけ。決まらなかった便は 0)。 */
+  nextMonthAllowanceYen: number
+  /** **前月 (以前) 開始の運行**が持つ、対象月日付の便の数。合計には入っていない。 */
+  prevMonthOpsLegsInMonth: number
+  /** その便の手当。 */
+  prevMonthOpsAllowanceYen: number
+}
+
+export interface MonthlyAllowanceByOperationDate extends MonthlyAllowance {
+  crossMonth: CrossMonthLegs
+}
+
+/** 便の手当の合計。**マスタで決まらなかった便は 0** (暫定はここでは足さない)。 */
+function sumAllowanceYen(rows: AllowanceReportRow[]): number {
+  return rows.reduce((sum, r) => sum + (r.allowanceYen ?? 0), 0)
+}
+
+/**
+ * **運行の開始日**で月を切る (Refs #760 の 16)。粗利タブ専用で、運行手当タブは
+ * `buildMonthlyAllowance` (便の積み日) のまま。
+ *
+ * 粗利は**運行を単位**にしていて、燃料代は運行まるごとの走行km から出る。便だけを
+ * 積み日で切ると、月末に始まって翌月へ食い込む運行が「当月の売上・手当」と
+ * 「運行まるごとの燃料」を一緒に抱え、**取引先別の検算が必ずその運行のぶんだけ
+ * 合わない** (2026-07 帯広5台で 運行 2 本・¥38,295)。**運行を丸ごと開始月に入れれば、
+ * 便の側も運行の側も同じ範囲を見る**ので検算は自然に閉じる (2026-08-23 オーナー判断)。
+ *
+ * `startTsByUnko` は運行NO → 運行開始の epoch 秒 (イベントCSV 由来)。**入っていない
+ * 運行は `operationRunDate` が運行日 → 運行NO に落とす。**
+ *
+ * 選んだ運行の便は**日付で切らない** (翌月日付の便も合計に入る) ので
+ * `outOfMonthTrips` は常に 0 — はみ出したぶんは `crossMonth` で数える。
+ */
+export function buildMonthlyAllowanceByOperationDate(
+  ops: OperationAllowance[],
+  ym: string,
+  startTsByUnko: ReadonlyMap<string, number | null>,
+): MonthlyAllowanceByOperationDate {
+  const selected: OperationAllowance[] = []
+  const others: OperationAllowance[] = []
+  for (const op of ops) {
+    const date = operationRunDate(startTsByUnko.get(op.unkoNo) ?? null, op.operationDate, op.unkoNo)
+    if (date !== null && date.startsWith(ym)) selected.push(op)
+    else others.push(op)
+  }
+  const rows = toReportRows(selected)
+  const nextMonth = rows.filter(r => !r.date.startsWith(ym))
+  const prevMonthOps = toReportRows(others).filter(r => r.date.startsWith(ym))
+  return {
+    ...aggregateMonthly(selected, groupRowsByUnko(rows), 0),
+    crossMonth: {
+      nextMonthLegs: nextMonth.length,
+      nextMonthAllowanceYen: sumAllowanceYen(nextMonth),
+      prevMonthOpsLegsInMonth: prevMonthOps.length,
+      prevMonthOpsAllowanceYen: sumAllowanceYen(prevMonthOps),
+    },
   }
 }

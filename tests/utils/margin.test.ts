@@ -849,6 +849,8 @@ describe('parseMarginCache', () => {
     operations: [op()],
     costs: [cost()],
     uncovered: null,
+    // 月またぎの注記 (Refs #760 の 16)。`uncovered` と同じくキャッシュに持つ
+    crossMonth: null,
   }
 
   it('保存したものを読み戻せる', () => {
@@ -891,6 +893,16 @@ describe('parseMarginCache', () => {
   it('対象外の欄が無い / null なら null (欄の欠けを 0 便と読ませない)', () => {
     expect(parseMarginCache('{"ym":"2026-07","operations":[],"costs":[]}')!.uncovered).toBeNull()
     expect(parseMarginCache('{"ym":"2026-07","operations":[],"costs":[],"uncovered":null}')!.uncovered).toBeNull()
+  })
+
+  it('月またぎの注記も読み戻せる (Refs #760 の 16)', () => {
+    const crossMonth = { nextMonthLegs: 2, nextMonthAllowanceYen: 18000, prevMonthOpsLegsInMonth: 1, prevMonthOpsAllowanceYen: 9000 }
+    expect(parseMarginCache(serializeMarginCache({ ...cache, crossMonth }))!.crossMonth).toEqual(crossMonth)
+  })
+
+  it('月またぎの欄が無い / null なら null (古いキャッシュを「月またぎなし」と読ませない)', () => {
+    expect(parseMarginCache('{"ym":"2026-07","operations":[],"costs":[]}')!.crossMonth).toBeNull()
+    expect(parseMarginCache('{"ym":"2026-07","operations":[],"costs":[],"crossMonth":null}')!.crossMonth).toBeNull()
   })
 })
 
@@ -1192,12 +1204,14 @@ describe('走行km の内訳 (kmBreakdown)', () => {
     expect(row.slice(at, at + 7)).toEqual(['100', '10', '61', '25', '4', '0', '500'])
   })
 
-  it('キャッシュのキーは v7 — 取引先の無い旧キャッシュ (v6) を読ませない', () => {
+  it('キャッシュのキーは v8 — 便の積み日で切った旧キャッシュ (v7) を読ませない', () => {
     // 形を変えたら番号を上げる規約。**上げ忘れると `kmBreakdown`/`legs`/`remarks`/
     // `customers` が無い行を画面が読む** (#760 の 4 が v2、7 が v4、13 が v5。経費の行に
     // `remarks`/`vendorName` を足した版は v6 (#760 の 14)、便に `customers` を足した版は
     // v7 (#760 の 15))。
-    expect(MARGIN_CACHE_KEY).toBe('dtako:margin:cache:v7')
+    // v8 は月の切り方を運行の開始日に変えた版 (#760 の 16) — v7 を読むと月跨ぎの運行が
+    // 翌月便ぶんの燃料だけを抱えた古い集計のまま残る。
+    expect(MARGIN_CACHE_KEY).toBe('dtako:margin:cache:v8')
   })
 })
 
