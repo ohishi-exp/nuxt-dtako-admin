@@ -2149,6 +2149,37 @@ describe('summarizeByCustomerRoute — 取引先別 × 経路別 (Refs #760 の 
     expect(sum.customers.map(c => c.allowanceYen)).toEqual([1500, 1500])
   })
 
+  it('legRefs に「どの運行のどの便か」が入る。2 取引先に当たった便は両方に入る (Refs #760 の 19)', () => {
+    const res = buildOperationMargins(
+      [
+        op({ unkoNo: 'A', legs: [
+          leg({ seq: 1, originCity: '北海道釧路市', destCity: '川西町', customers: [kawanishi] }),
+          leg({ seq: 2, originCity: '北海道釧路市', destCity: '川西町', customers: [kawanishi] }),
+        ] }),
+        op({ unkoNo: 'B', date: '2026-07-02', legs: [
+          // 2 取引先に当たった便 (売上の比で分ける) は**両方の取引先**の legRefs に入る。
+          leg({ seq: 1, originCity: '北海道釧路市', destCity: '川西町', customers: [kawanishi, kamishihoro] }),
+        ] }),
+      ],
+      baseCosts,
+      {},
+    )
+    const sum = summarizeByCustomerRoute(res.operations)
+    const byCode = new Map(sum.customers.map(c => [c.code, c]))
+    expect(byCode.get('K')!.legRefs).toEqual([
+      { unkoNo: 'A', seq: 1 }, { unkoNo: 'A', seq: 2 }, { unkoNo: 'B', seq: 1 },
+    ])
+    expect(byCode.get('S')!.legRefs).toEqual([{ unkoNo: 'B', seq: 1 }])
+    // 経路行の legRefs は、その経路に入っている便だけ。取引先行はその和。
+    expect(byCode.get('K')!.routes.map(r => [r.from, r.to, r.legRefs])).toEqual([
+      ['釧路', '川西', [{ unkoNo: 'A', seq: 1 }, { unkoNo: 'A', seq: 2 }, { unkoNo: 'B', seq: 1 }]],
+    ])
+    // 便数と本数が一致する (行の数え方と同じ)。
+    for (const c of sum.customers) expect(c.legRefs).toHaveLength(c.legs)
+    // CSV には出さない (列は 14 のまま)。
+    expect(customerRouteCsvLines(sum)[0]!.split(',')).toHaveLength(14)
+  })
+
   it('当たっていない便 (customers: []) は (突合なし) に入る', () => {
     const res = buildOperationMargins(
       [op({ legs: [leg({ customers: [] })] })],
@@ -2404,9 +2435,10 @@ describe('customerShareBars — 売上の内訳の 100% 積み上げ棒 (Refs #7
     legs: 1, unsplitLegs: 0, salesYen: 100000, allowanceYen: 28000, haulKm: 100, deadheadKm: 50,
     fuelHaulYen: 16000, fuelDeadheadYen: 13000, runCostShareYen: 9000, grossMarginYen: 34000,
   }
-  const totals = (over: Partial<RouteSummary> = {}): RouteSummary => ({ ...baseTotals, from: '釧路', to: '川西', ...over })
+  // `legRefs` は地図用の居場所 (Refs #760 の 19)。棒の値には効かないので空でよい。
+  const totals = (over: Partial<RouteSummary> = {}): RouteSummary => ({ ...baseTotals, from: '釧路', to: '川西', legRefs: [], ...over })
   const cust = (code: string, name: string, over: Partial<CustomerSummary> = {}, routes: RouteSummary[] = [totals()]): CustomerSummary =>
-    ({ ...baseTotals, code, name, routes, ...over })
+    ({ ...baseTotals, code, name, routes, legRefs: [], ...over })
   const summary = (customers: CustomerSummary[]): CustomerRouteSummary => ({
     customers,
     noLegOperations: { operations: 0, salesYen: 0, allowanceYen: 0, fuelYen: 0, directCostYen: 0, allocatedCostYen: 0, marginYen: 0 },

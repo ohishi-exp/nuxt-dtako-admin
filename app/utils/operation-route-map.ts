@@ -232,3 +232,49 @@ function labelWithCity(base: string, city: string): string {
   const trimmed = city.trim()
   return trimmed === '' ? base : `${base} ${trimmed}`
 }
+
+/**
+ * 運行 1 本の経路から、**指定した便のぶんだけ**を残す (Refs #760 の 19)。
+ * 取引先 × 経路の行から「この経路の便を全部重ねた地図」を描くのに使う —
+ * 経路行に入っている便 (`RouteSummary.legRefs`) の `seq` を渡すと、その便の売上走行と
+ * **その便へ向かう回送**だけが残る。
+ *
+ * - `segments`: `legSeq` が `seqs` にあるものだけ。回送も `legSeq` が同じ便へ向かう
+ *   移動なのでそのまま残る (`haul` / `deadhead` / `other` を区別しない — `other` も
+ *   `legSeq` が一致するときだけ残る。`legSeq` が null の区切りは常に落ちる)
+ * - `markers`: `load` / `unload` で `legSeq` が `seqs` にあるものだけ。
+ *   **`start` / `end` (運行開始・運行終了) は落とす** — 便を重ねる地図では、
+ *   その便と関係ない運行の起終点が並ぶだけで読めなくなる
+ * - `pointCount` は**残した** `segments` の点数、`droppedRows` は運行ぶんをそのまま
+ *   (何行 GPS が使えなかったかは便で割れない)
+ */
+export function pickLegsFromRoute(route: OperationRoute, seqs: number[]): OperationRoute {
+  // `Set<number | null>` にしておくと `legSeq` の null を素直に落とせる (`seqs` に null は
+  // 入らないので `keep.has(null)` は必ず false)。`legSeq !== null &&` を書くと、
+  // 実データでは false にならない分岐が 1 つ増えるだけになる。
+  const keep = new Set<number | null>(seqs)
+  const segments = route.segments.filter(s => keep.has(s.legSeq))
+  return {
+    segments,
+    markers: route.markers.filter(m => (m.kind === 'load' || m.kind === 'unload') && keep.has(m.legSeq)),
+    pointCount: segments.reduce((sum, s) => sum + s.path.length, 0),
+    droppedRows: route.droppedRows,
+  }
+}
+
+/**
+ * 複数の運行の経路を 1 枚に重ねる (Refs #760 の 19)。`segments` / `markers` をそのまま
+ * 連結し、`pointCount` / `droppedRows` は和。**便番号は運行ごとに 1 から振り直されている**
+ * ので、重ねた後の `legSeq` は「何本目の便か」ではなくなる (マーカーの `label` も同じ) —
+ * 描くのに要るのは色と位置だけなので、振り直さない。
+ */
+export function mergeRoutes(routes: OperationRoute[]): OperationRoute {
+  const merged = emptyRoute()
+  for (const r of routes) {
+    merged.segments.push(...r.segments)
+    merged.markers.push(...r.markers)
+    merged.pointCount += r.pointCount
+    merged.droppedRows += r.droppedRows
+  }
+  return merged
+}
