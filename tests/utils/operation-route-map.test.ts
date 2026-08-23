@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildOperationRoute, pickLegsFromRoute, mergeRoutes, splitTrackByWindows, type LegWindow, type OperationRoute, type RouteSegment } from '~/utils/operation-route-map'
+import { buildOperationRoute, buildOverlayTrack, pickLegsFromRoute, mergeRoutes, splitTrackByWindows, type LegWindow, type OperationRoute, type RouteSegment } from '~/utils/operation-route-map'
 import { extractOperationIdle } from '~/utils/allowance-idle'
 import { toLatLng, parseEventDatetimeToTs } from '~/utils/event-data-table'
 
@@ -451,5 +451,122 @@ describe('mergeRoutes', () => {
 
   it('空配列なら空の route', () => {
     expect(mergeRoutes([])).toEqual(EMPTY_ROUTE)
+  })
+})
+
+describe('buildOverlayTrack (重ね掛け行も混ぜた軌跡、Refs #760 の 24)', () => {
+  // 重ね掛け行だけが持つ点 (高速道の出入口・速度オーバー区間の両端)。
+  const IC_IN: Gps = { lat: '42580000', lng: '143400000' }
+  const IC_OUT: Gps = { lat: '43050000', lng: '144000000' }
+  const PASS_A: Gps = { lat: '43020000', lng: '143480000' }
+  const PASS_B: Gps = { lat: '43080000', lng: '143300000' }
+
+  /** 便 1 本。回送に 高速道、売上走行に 一般道実車 の重ね掛け行が挟まる。 */
+  const ONE_LEG: string[][] = [
+    ev('運行開始', OBIHIRO, OBIHIRO, { ts: ['2026/7/1 5:00:00', '2026/7/1 5:00:00'] }),
+    ev('運転', OBIHIRO, KUSHIRO, { ts: ['2026/7/1 5:00:00', '2026/7/1 8:00:00'] }),
+    ev('高速道', IC_IN, IC_OUT, { ts: ['2026/7/1 6:00:00', '2026/7/1 7:00:00'] }),
+    ev('積み', KUSHIRO, KUSHIRO, { ts: ['2026/7/1 8:00:00', '2026/7/1 8:30:00'] }),
+    ev('運転', KUSHIRO, SHIHORO, { ts: ['2026/7/1 8:30:00', '2026/7/1 11:00:00'] }),
+    ev('一般道実車', PASS_A, PASS_B, { ts: ['2026/7/1 9:00:00', '2026/7/1 10:00:00'] }),
+    ev('降し', SHIHORO, SHIHORO, { ts: ['2026/7/1 11:00:00', '2026/7/1 11:30:00'] }),
+    ev('運行終了', SHIHORO, SHIHORO, { ts: ['2026/7/1 12:00:00', '2026/7/1 12:00:00'] }),
+  ]
+
+  it('重ね掛け行の始点・終点も点になる (イベント線より点が増える)', () => {
+    const rows = [
+      ev('運転', OBIHIRO, KUSHIRO, { ts: ['2026/7/1 8:00:00', '2026/7/1 12:00:00'] }),
+      ev('高速道', IC_IN, IC_OUT, { ts: ['2026/7/1 9:00:00', '2026/7/1 11:00:00'] }),
+    ]
+    expect(buildOverlayTrack(HEADERS, rows)).toEqual([
+      { ts: T('2026/7/1 8:00:00'), ...pt(OBIHIRO) },
+      { ts: T('2026/7/1 9:00:00'), ...pt(IC_IN) },
+      { ts: T('2026/7/1 11:00:00'), ...pt(IC_OUT) },
+      { ts: T('2026/7/1 12:00:00'), ...pt(KUSHIRO) },
+    ])
+    // 同じ CSV でも buildOperationRoute は 運転 の 2 点だけ (距離の二重計上を避ける判定はそのまま)。
+    expect(buildOperationRoute(HEADERS, rows).pointCount).toBeLessThan(buildOverlayTrack(HEADERS, rows).length)
+  })
+
+  it('GPS 無効 (有効=0 / 値 0) の点と、日時が読めない点は捨てる', () => {
+    const rows = [
+      ev('運転', { ...OBIHIRO, valid: '0' }, KUSHIRO, { ts: ['2026/7/1 8:00:00', '2026/7/1 9:00:00'] }),
+      ev('高速道', SHIHORO, NOWHERE, { ts: ['2026/7/1 10:00:00', '2026/7/1 11:00:00'] }),
+      ev('専用道', SHIMIZU, SHIMIZU, { ts: ['', 'まだ運行中'] }),
+    ]
+    expect(buildOverlayTrack(HEADERS, rows)).toEqual([
+      { ts: T('2026/7/1 9:00:00'), ...pt(KUSHIRO) },
+      { ts: T('2026/7/1 10:00:00'), ...pt(SHIHORO) },
+    ])
+  })
+
+  it('ts 昇順に並べ替える。同じ時刻の点は CSV の行順のまま (安定ソート)', () => {
+    const rows = [
+      // 重ね掛け行は運行全体にまたがるので、CSV の行順は時刻順ではない。
+      ev('専用道', SHIMIZU, SHIMIZU, { ts: ['2026/7/1 20:00:00', '2026/7/1 20:00:00'] }),
+      ev('運転', OBIHIRO, KUSHIRO, { ts: ['2026/7/1 8:00:00', '2026/7/1 9:00:00'] }),
+    ]
+    expect(buildOverlayTrack(HEADERS, rows)).toEqual([
+      { ts: T('2026/7/1 8:00:00'), ...pt(OBIHIRO) },
+      { ts: T('2026/7/1 9:00:00'), ...pt(KUSHIRO) },
+      { ts: T('2026/7/1 20:00:00'), ...pt(SHIMIZU) },
+    ])
+    const sameTs = [
+      ev('運転', OBIHIRO, KUSHIRO, { ts: ['2026/7/1 8:00:00', '2026/7/1 8:00:00'] }),
+      ev('高速道', SHIHORO, SHIMIZU, { ts: ['2026/7/1 8:00:00', '2026/7/1 8:00:00'] }),
+    ]
+    expect(buildOverlayTrack(HEADERS, sameTs).map(p => p.lat))
+      .toEqual([OBIHIRO, KUSHIRO, SHIHORO, SHIMIZU].map(g => pt(g).lat))
+  })
+
+  it('同一の (ts, lat, lng) は 1 つに畳む。時刻か場所が違えば別の点', () => {
+    const rows = [
+      ev('運行開始', OBIHIRO, OBIHIRO, { ts: ['2026/7/1 5:00:00', '2026/7/1 5:00:00'] }),
+      // 重ね掛け行はタイムライン行と同じ時刻・同じ点をもう一度持つ (畳まないと点が倍になる)。
+      ev('連続運転', OBIHIRO, KUSHIRO, { ts: ['2026/7/1 5:00:00', '2026/7/1 9:00:00'] }),
+      ev('運転', OBIHIRO, KUSHIRO, { ts: ['2026/7/1 5:00:00', '2026/7/1 9:00:00'] }),
+      // 同じ場所に別の時刻で戻ってきた点は残る (畳むのは ts も同じときだけ)。
+      ev('休憩', OBIHIRO, OBIHIRO, { ts: ['2026/7/1 12:00:00', '2026/7/1 12:00:00'] }),
+    ]
+    expect(buildOverlayTrack(HEADERS, rows)).toEqual([
+      { ts: T('2026/7/1 5:00:00'), ...pt(OBIHIRO) },
+      { ts: T('2026/7/1 9:00:00'), ...pt(KUSHIRO) },
+      { ts: T('2026/7/1 12:00:00'), ...pt(OBIHIRO) },
+    ])
+  })
+
+  it('イベント名 列 / GPS 列 / 日時 列が無い CSV・短い行は空 (buildOperationRoute と同じ判定)', () => {
+    const noGps = ['イベント名', '開始日時', '終了日時', '開始GPS緯度', '開始GPS経度', '開始GPS有効']
+    expect(buildOverlayTrack(noGps, [['運転', '2026/7/1 8:00:00', '2026/7/1 9:00:00', KUSHIRO.lat, KUSHIRO.lng, '1']])).toEqual([])
+    expect(buildOverlayTrack(HEADERS.filter(h => h !== 'イベント名'), [HEADERS.map(() => '1')])).toEqual([])
+    // GPS 列はあるが日時の列が無い → 時刻が読めないので点にならない。
+    const noTs = ['イベント名', '開始GPS緯度', '開始GPS経度', '終了GPS緯度', '終了GPS経度']
+    expect(buildOverlayTrack(noTs, [['運転', OBIHIRO.lat, OBIHIRO.lng, KUSHIRO.lat, KUSHIRO.lng]])).toEqual([])
+    // 日時の列まで届かない短い行・空の行でも落ちない。
+    expect(buildOverlayTrack(HEADERS, [['運転'], []])).toEqual([])
+  })
+
+  it('windows で切ると便の色が付いた trackHaul / trackDeadhead になり、イベント線より折れ点が増える', () => {
+    const route = buildOperationRoute(HEADERS, ONE_LEG)
+    const track = splitTrackByWindows(buildOverlayTrack(HEADERS, ONE_LEG), route.windows)
+    expect(track.map(s => `${s.kind}${s.legSeq}`)).toEqual(['trackDeadhead1', 'trackHaul1'])
+    // 回送の時間帯には 高速道 の出入口が挟まる。
+    expect(track[0]!.path).toEqual([pt(OBIHIRO), pt(IC_IN), pt(IC_OUT), pt(KUSHIRO)])
+    // 売上走行の時間帯には 一般道実車 の両端が挟まる (イベント線は 積み → 降し の 2 点だけ)。
+    const haul = route.segments.find(s => s.kind === 'haul')!
+    expect(haul.path).toEqual([pt(KUSHIRO), pt(SHIHORO)])
+    expect(track[1]!.path).toEqual([pt(KUSHIRO), pt(PASS_A), pt(PASS_B), pt(SHIHORO)])
+    expect(track[1]!.path.length).toBeGreaterThan(haul.path.length)
+    // 帰庫の窓 (降し → 運行終了) は同じ場所に居ただけ → 1 点に畳まれて線にならない。
+    expect(route.windows.map(w => `${w.kind}${w.legSeq}`)).toEqual(['deadhead1', 'haul1', 'deadhead1'])
+  })
+
+  it('既存の segments / markers / pointCount / droppedRows / windows は変えない', () => {
+    const before = buildOperationRoute(HEADERS, ONE_LEG)
+    buildOverlayTrack(HEADERS, ONE_LEG)
+    expect(buildOperationRoute(HEADERS, ONE_LEG)).toEqual(before)
+    // 重ね掛け行を混ぜても buildOperationRoute の点列は DISTANCE_EVENT_NAMES の行だけ。
+    const timelineOnly = ONE_LEG.filter(r => !['高速道', '一般道実車'].includes(r[0]!))
+    expect(buildOperationRoute(HEADERS, timelineOnly)).toEqual(before)
   })
 })

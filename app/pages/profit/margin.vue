@@ -38,7 +38,7 @@ import { fetchAllPages } from '~/utils/paged-fetch'
 import type { Driver, OperationListItem } from '~/types'
 import { extractAllowanceLegs, extractCarryInUnloads, allowanceForLegs } from '~/utils/allowance-trips'
 import { extractOperationIdle, type LegKmDetail } from '~/utils/allowance-idle'
-import { buildOperationRoute, pickLegsFromRoute, mergeRoutes, splitTrackByWindows, type OperationRoute, type LegWindow, type RouteSegment } from '~/utils/operation-route-map'
+import { buildOperationRoute, buildOverlayTrack, pickLegsFromRoute, mergeRoutes, splitTrackByWindows, type OperationRoute, type LegWindow, type RouteSegment } from '~/utils/operation-route-map'
 import { filterValidGpsPoints } from '~/utils/net780'
 import { parseTargets, serializeTargets, toggleTarget, driverLabel } from '~/utils/allowance-targets'
 import {
@@ -944,7 +944,7 @@ const routeModal = ref<{
   route: OperationRoute | null
   loading: boolean
   error: string | null
-  /** NET780 軌跡の有無 (`NET780 軌跡: N 運行ぶん` / `NET780 なし`)。引き終わるまで null。 */
+  /** 軌跡の内訳 (`NET780 軌跡: N 運行ぶん / イベント軌跡: M 運行ぶん`)。引き終わるまで null。 */
   trackNote: string | null
 } | null>(null)
 
@@ -964,14 +964,34 @@ async function fetchNet780Track(unkoNo: string, windows: LegWindow[]): Promise<R
   return splitTrackByWindows(points, windows)
 }
 
-/** イベント線の route に NET780 軌跡の区切りを足す (pointCount はイベント線の点数のまま)。 */
+/** イベント線の route に軌跡 (NET780 / イベント) の区切りを足す (pointCount はイベント線の点数のまま)。 */
 function appendTrack(route: OperationRoute, track: RouteSegment[]): OperationRoute {
   return { ...route, segments: [...route.segments, ...track] }
 }
 
-/** 見出し横の NET780 の有無。 */
-function trackNoteFor(found: number): string {
-  return found === 0 ? 'NET780 なし' : `NET780 軌跡: ${found} 運行ぶん`
+/**
+ * 軌跡をどちらで敷いたかの内訳 (Refs #760 の 24)。運行ごとに **NET780 が優先**で、
+ * 無い運行だけイベント軌跡になるので、両方が並ぶことがある (経路を重ねた地図)。
+ */
+function trackNoteFor(net780: number, overlay: number): string {
+  const parts: string[] = []
+  if (net780 > 0) parts.push(`NET780 軌跡: ${net780} 運行ぶん`)
+  if (overlay > 0) parts.push(`イベント軌跡: ${overlay} 運行ぶん`)
+  return parts.length === 0 ? '軌跡なし' : parts.join(' / ')
+}
+
+/**
+ * **重ね掛け行も混ぜたイベント軌跡** (Refs #760 の 24)。地図を開くときに引いた
+ * **同じ CSV** から作るので追加の fetch は無い。`buildOperationRoute` のイベント線が
+ * `DISTANCE_EVENT_NAMES` の行だけを結ぶのに対し、こちらは重ね掛け行 (高速道の出入口・
+ * 速度オーバー区間の両端 …) の GPS も混ぜるので、折れ点が増えて経路のスケッチが密になる。
+ *
+ * **NET780 のアーカイブがある運行では使わない** (2026-07 帯広 91 運行中 2 本)。
+ * 道なりの実測が既にあるところに同じ道をもう 1 本敷いても読めなくなるだけなので、
+ * `openRouteMap` / `openLegRefsMap` は NET780 が引けた運行だけ NET780 を採る。
+ */
+function buildEventTrack(headers: string[], rows: string[][], windows: LegWindow[]): RouteSegment[] {
+  return splitTrackByWindows(buildOverlayTrack(headers, rows), windows)
 }
 
 async function openRouteMap(m: OperationMargin) {
@@ -979,10 +999,12 @@ async function openRouteMap(m: OperationMargin) {
   const title = `運行 ${m.date} ${m.driverName} 車輌 ${m.vehicleCode} — 便 ${m.legs.length} 本`
   routeModal.value = { key, title, route: null, loading: true, error: null, trackNote: null }
   let route: OperationRoute | null = null
+  let eventTrack: RouteSegment[] = []
   let error: string | null = null
   try {
     const csv = await getOperationCsv(m.unkoNo, 'events')
     route = buildOperationRoute(csv.headers, csv.rows)
+    eventTrack = buildEventTrack(csv.headers, csv.rows, route.windows)
   }
   catch (e) {
     error = e instanceof Error ? e.message : String(e)
@@ -991,13 +1013,14 @@ async function openRouteMap(m: OperationMargin) {
   if (routeModal.value?.key !== key) return
   routeModal.value = { key, title, route, loading: false, error, trackNote: null }
   if (route === null) return
-  // NET780 は後から重ねる (遅くても地図は先にイベント線で出す。無ければ直線のまま)。
+  // NET780 は後から重ねる (遅くても地図は先にイベント線で出す)。**NET780 が無い運行だけ**
+  // 重ね掛け行のイベント軌跡を敷く (Refs #760 の 24。二重に敷かない)。
   const track = await fetchNet780Track(m.unkoNo, route.windows)
   if (routeModal.value?.key !== key) return
   routeModal.value = {
     ...routeModal.value,
-    route: track === null ? route : appendTrack(route, track),
-    trackNote: trackNoteFor(track === null ? 0 : 1),
+    route: appendTrack(route, track ?? eventTrack),
+    trackNote: trackNoteFor(track === null ? 0 : 1, track === null && eventTrack.length > 0 ? 1 : 0),
   }
 }
 
@@ -1024,13 +1047,15 @@ async function openLegRefsMap(key: string, title: string, legRefs: LegRef[]) {
   const withProgress = (done: number) => `${title} (読み込み中 ${done}/${entries.length})`
   routeModal.value = { key, title: withProgress(0), route: null, loading: true, error: null, trackNote: null }
 
-  const picked: Array<{ unkoNo: string, route: OperationRoute }> = []
+  const picked: Array<{ unkoNo: string, route: OperationRoute, eventTrack: RouteSegment[] }> = []
   let failed = 0
   for (let i = 0; i < entries.length; i += CSV_CONCURRENCY) {
     const results = await Promise.all(entries.slice(i, i + CSV_CONCURRENCY).map(async ([unkoNo, seqs]) => {
       try {
         const csv = await getOperationCsv(unkoNo, 'events')
-        return { unkoNo, route: pickLegsFromRoute(buildOperationRoute(csv.headers, csv.rows), seqs) }
+        // イベント軌跡もここで作る (同じ CSV。**この運行の該当する便の窓だけ**で切る)。
+        const route = pickLegsFromRoute(buildOperationRoute(csv.headers, csv.rows), seqs)
+        return { unkoNo, route, eventTrack: buildEventTrack(csv.headers, csv.rows, route.windows) }
       }
       catch {
         return null
@@ -1061,10 +1086,13 @@ async function openLegRefsMap(key: string, title: string, legRefs: LegRef[]) {
     })
     routeModal.value = { ...routeModal.value, trackNote: `NET780 確認中 ${Math.min(i + CSV_CONCURRENCY, picked.length)}/${picked.length}` }
   }
+  // NET780 が引けた運行はそれを、引けなかった運行は重ね掛け行のイベント軌跡を敷く
+  // (Refs #760 の 24)。同じ運行に 2 本敷かない。
+  const overlaid = picked.map(p => ({ p, net780: tracks.get(p.unkoNo) ?? null }))
   routeModal.value = {
     ...routeModal.value,
-    route: mergeRoutes(picked.map(p => appendTrack(p.route, tracks.get(p.unkoNo) ?? []))),
-    trackNote: trackNoteFor(tracks.size),
+    route: mergeRoutes(overlaid.map(o => appendTrack(o.p.route, o.net780 ?? o.p.eventTrack))),
+    trackNote: trackNoteFor(tracks.size, overlaid.filter(o => o.net780 === null && o.p.eventTrack.length > 0).length),
   }
 }
 

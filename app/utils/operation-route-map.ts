@@ -14,7 +14,9 @@
  *   (`OperationIdle.otherKm` と同じ受け皿)。**ここで便の数え方を新しく作らない** —
  *   `legSeq` は 1 始まりで `MarginLegInput.seq` / `LegKmDetail` の index (+1) と一致する
  * - **点列に入れる行は `DISTANCE_EVENT_NAMES` の行だけ。** 重ね掛け行 (速度オーバー・
- *   専用道・高速道 …) は同じ走行をもう一度なぞるだけなので描かない (距離と同じ判定)
+ *   専用道・高速道 …) は同じ走行をもう一度なぞるだけなので描かない (距離と同じ判定)。
+ *   ただし重ね掛け行の GPS も「その時刻にそこに居た」実測点なので、**別関数**
+ *   `buildOverlayTrack` が全行を点列にして、この線の下に軌跡として敷ける (Refs #760 の 24)
  * - **度分形式 → 十進は `getGpsForCell` に任せる** (`GPS有効 === '0'` の点は捨てる)。
  *   自前で換算しない
  * - GPS 列 (緯度・経度 4 列) が無い CSV は `segments: [] / markers: []`、
@@ -322,6 +324,53 @@ export function splitTrackByWindows(
     segments.push({ kind: w.kind === 'haul' ? 'trackHaul' : 'trackDeadhead', legSeq: w.legSeq, path })
   }
   return segments
+}
+
+/**
+ * **全行**の始点・終点 GPS を時刻順に並べた点列 (Refs #760 の 24)。`splitTrackByWindows`
+ * に掛けると `buildOperationRoute` のイベント線より**密な**軌跡になる。
+ *
+ * `buildOperationRoute` の点列は `DISTANCE_EVENT_NAMES` の行 (運転・積み・降し・休憩・
+ * 休息・アイドリング・運行開始・運行終了) だけを結ぶ。重ね掛け行 (速度オーバー / 専用道 /
+ * 高速道 / 一般道空車・実車 / 連続運転 …) を**距離**から外しているのは同じ走行の二重計上を
+ * 避けるためで (`DISTANCE_EVENT_NAMES` の doc 参照)、**位置としては正しい実測点**である
+ * ことに変わりはない。⇒ 距離には足さないまま、点列にだけ混ぜる。高速道の出入口や
+ * 速度オーバー区間の両端がそのぶん増え、直線のスケッチが道の形に近づく。
+ *
+ * - **イベント名で行を選り好みしない** (ここが `buildOperationRoute` との唯一の違い)
+ * - `GPS有効 = 0` / 度分が読めない点、`開始日時` / `終了日時` が読めない点は捨てる
+ *   (`getGpsForCell` / `parseEventDatetimeToTs` に任せる。自前で換算・0 埋めしない)
+ * - **ts 昇順に安定ソート**する (`Array.prototype.sort` は安定なので、同じ時刻の点は
+ *   CSV の行順のまま残る)。同一の `(ts, lat, lng)` は 1 つに畳む — 重ね掛け行は
+ *   タイムライン行と同じ時刻・同じ点をもう一度持つので、畳まないと点が倍になる
+ * - イベント名列 / GPS 列が無い CSV は `[]` (`buildOperationRoute` の判定と同じ)
+ *
+ * **距離・時間の集計 (`allowance-idle.ts`) には一切関係しない。** 表・検算・棒グラフの
+ * 数字は動かない。
+ */
+export function buildOverlayTrack(headers: string[], rows: string[][]): Array<{ ts: number, lat: number, lng: number }> {
+  const nameIdx = colIndex(headers, 'イベント名')
+  const startTsIdx = colIndex(headers, '開始日時')
+  const endTsIdx = colIndex(headers, '終了日時')
+  const gpsCols = ['開始GPS緯度', '開始GPS経度', '終了GPS緯度', '終了GPS経度']
+  if (nameIdx < 0 || gpsCols.some(c => colIndex(headers, c) < 0)) return []
+
+  const points: Array<{ ts: number, lat: number, lng: number }> = []
+  const seen = new Set<string>()
+  const push = (ts: number | null, gps: LatLng | null) => {
+    if (ts === null || gps === null) return
+    const key = `${ts},${gps.lat},${gps.lng}`
+    if (seen.has(key)) return
+    seen.add(key)
+    points.push({ ts, lat: gps.lat, lng: gps.lng })
+  }
+  for (const row of rows) {
+    push(parseEventDatetimeToTs(cellAt(row, startTsIdx)), getGpsForCell(headers, row, '開始市町村名'))
+    push(parseEventDatetimeToTs(cellAt(row, endTsIdx)), getGpsForCell(headers, row, '終了市町村名'))
+  }
+  // CSV の行順は時刻順とは限らない (重ね掛け行は運行全体にまたがる行が途中に挟まる)。
+  points.sort((a, b) => a.ts - b.ts)
+  return points
 }
 
 /** `便 1 積み 釧路市` のように市町村名を添える。無ければ名前だけ。 */
