@@ -1,8 +1,10 @@
 /**
- * 運行NO から csvdata.zip 取得の引数 (`ope_no_22` / `start_ope`) を組み立てる純関数
+ * 運行NO から csvdata.zip 取得の引数 (`ope_no` / `start_ope`) を組み立てる純関数
  * (Refs #760 の 23)。`server/api/operations/[unko]/csvdata-zip.get.ts` が使う。
  *
- * relay の `POST /kintai-relay/operation-zip` は `{ ope_no_22, start_ope }` を要求する。
+ * relay の `POST /kintai-relay/operation-zip` は **`{ ope_no, start_ope }`** を要求する
+ * (DO の `parseOperationZipRequest` が読むキー名。`ope_no_22` は kyuyo-mcp の
+ * *tool 引数名*で、MCP 側が `ope_no` に詰め替えている — 取り違えると 400)。
  * **出庫日時は運行NO の先頭 12 桁 `YYMMDDHHmmss` から機械的に組める** ので、画面から
  * 運行NO 1 本だけを受け取れば足りる (relay の `deriveOpeNoFromUnkoNo`
  * (`workers/dtako-scraper-relay/src/kintai-diff.ts`) と同じ導出。あちらは別 worker・
@@ -29,7 +31,7 @@ function inRange(s: string, min: number, max: number): boolean {
 }
 
 /**
- * 運行NO を relay の `ope_no_22` (22 桁) に正規化する。23 桁なら末尾 1 桁
+ * 運行NO を relay の `ope_no` (22 桁) に正規化する。23 桁なら末尾 1 桁
  * (対象乗務員CD) を落とす。22/23 桁の数字でなければ `null`。
  */
 export function opeNo22FromUnkoNo(unkoNo: string): string | null {

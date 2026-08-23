@@ -141,13 +141,16 @@ describe('GET /api/operations/:unko/csvdata-zip', () => {
     await expect(call(eventWith({ INTERNAL_SHARED_SECRET: 'secret-x' }))).rejects.toMatchObject({ statusCode: 503 })
   })
 
-  it('運行NO から ope_no_22 / start_ope を組んで relay を叩き、zip を返す', async () => {
+  // relay の DO (`cron-batch.ts` の `parseOperationZipRequest`) が読むキーは
+  // **`ope_no`** (`ope_no_22` は kyuyo-mcp の tool 引数名)。ここを取り違えると
+  // 本番で 400 になるので、body のキー名を丸ごと固定する。
+  it('運行NO から ope_no / start_ope を組んで relay を叩き、zip を返す', async () => {
     const fetchMock = vi.fn().mockResolvedValue(okRelay())
     const result = await call(eventWith(envWithRelay(fetchMock), `${UNKO_22}1`)) as Uint8Array
     const [url, init] = fetchMock.mock.calls[0]!
     expect(url).toBe('https://relay.internal/kintai-relay/operation-zip')
     expect(init.method).toBe('POST')
-    expect(JSON.parse(init.body)).toEqual({ ope_no_22: UNKO_22, start_ope: '2026/07/06 4:18:59' })
+    expect(JSON.parse(init.body)).toEqual({ ope_no: UNKO_22, start_ope: '2026/07/06 4:18:59' })
     expect(new TextDecoder().decode(result)).toBe('zip!')
     const headers = Object.fromEntries(setHeaderMock.mock.calls)
     expect(headers['content-type']).toBe('application/zip')
