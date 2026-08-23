@@ -8,11 +8,22 @@ name: kyuyo-mcp worker
 # pull_request: typecheck + test (coverage 100% gate) のみ、deploy は skip。
 # push(main/tag) / workflow_dispatch: 上記 gate に加えて deploy を実行。
 #
-# ロジックが依存する dtako-scraper-relay の pure ロジック (cron.ts / kosoku-daily.ts /
-# restraint-wage.ts / theearth-restraint-client.ts / timecard-compare.ts) の変更でも
-# 再デプロイされるよう path filter に含める。tools.ts が import する relay ソースを
-# 増やしたら、ここにも必ず足すこと — 漏れると relay 側の修正が MCP に届かない
-# (#511 の month-boundary が get_timecard_diff に反映されず気付いた)。
+# ロジックが依存する dtako-scraper-relay の pure ロジックの変更でも再デプロイされる
+# よう path filter に含める。ここは**個別列挙をやめて `src/**` の glob** にしてある。
+#
+# 個別列挙は原理的に維持できないため:
+#   - kyuyo-mcp から辿れる relay ソースの閉包は実測 12 ファイル。うち 4 件
+#     (branch-prefecture / phase-timing / theearth-client / theearth-venus-client) は
+#     **推移依存で、tools.ts を読んでも見えない**。「tools.ts が import する相手を
+#     増やしたら足す」という運用ルールでは取り逃す。
+#   - 実際、その運用で列挙は 5 件しか無く **7 件漏れていた** (直接 import の
+#     gcp-day-summaries / theearth-report-client / cron-batch すら漏れていた)。
+#
+# glob の代償は「kyuyo-mcp と無関係な relay の変更でも gate が回る」= CI 時間だけ。
+# kyuyo-mcp は single-env の read-only worker なので再デプロイに実害は無い。
+# 対して列挙の失敗モードは「relay の修正が MCP に反映されないまま気付かない」で、
+# #511 の month-boundary が get_timecard_diff に反映されず実際に踏んだ。
+# 取りこぼす損の方が明確に高くつくので、余分に回る CI 時間を払う。
 #
 # `tests/fixtures/kushiro-loading/**` も同じ理由で入れてある (Refs #760 の 34)。
 # kyuyo-mcp のテストは画面側 util と**同じ共有 fixture + 同じ golden**を読んで双子の
@@ -25,21 +36,13 @@ on:
     tags: ['v*']
     paths:
       - 'workers/kyuyo-mcp/**'
-      - 'workers/dtako-scraper-relay/src/cron.ts'
-      - 'workers/dtako-scraper-relay/src/kosoku-daily.ts'
-      - 'workers/dtako-scraper-relay/src/restraint-wage.ts'
-      - 'workers/dtako-scraper-relay/src/theearth-restraint-client.ts'
-      - 'workers/dtako-scraper-relay/src/timecard-compare.ts'
+      - 'workers/dtako-scraper-relay/src/**'
       - 'tests/fixtures/kushiro-loading/**'
       - '.github/workflows/kyuyo-mcp-deploy.yml'
   pull_request:
     paths:
       - 'workers/kyuyo-mcp/**'
-      - 'workers/dtako-scraper-relay/src/cron.ts'
-      - 'workers/dtako-scraper-relay/src/kosoku-daily.ts'
-      - 'workers/dtako-scraper-relay/src/restraint-wage.ts'
-      - 'workers/dtako-scraper-relay/src/theearth-restraint-client.ts'
-      - 'workers/dtako-scraper-relay/src/timecard-compare.ts'
+      - 'workers/dtako-scraper-relay/src/**'
       - 'tests/fixtures/kushiro-loading/**'
       - '.github/workflows/kyuyo-mcp-deploy.yml'
   workflow_dispatch:
