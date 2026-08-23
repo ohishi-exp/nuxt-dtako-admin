@@ -318,3 +318,14 @@ branches = true
 [[files]]
 path = "server/utils/net780-archive.ts"
 branches = true
+
+# 釧路営業所 (暫定) 試算の土台 (Refs #760 の 32)。営業所マスタは作らず、起終点の座標を
+# 差し替えて回送距離を試算するための pure util — 座標定数 (`KUSHIRO_CITY_HALL` /
+# `OBIHIRO_DEPOT`) + `isValidLatLng` + 直線距離 `haversineKm` (欠測・範囲外は 0 ではなく
+# null)。座標型は新設せず `operation-route-map.ts` の `LatLng` (= `getGpsForCell` の
+# 戻り値) を type-only import している。
+# branches: BR() で包んだ instrumented コピーで **9 分岐 (`if` 5 + `||` の左右 4)
+# すべて両側 OK** を実測してから登録した (V8 の未実行レンジも 0)。
+[[files]]
+path = "app/utils/depot-distance.ts"
+branches = true
