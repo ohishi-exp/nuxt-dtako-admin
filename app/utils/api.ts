@@ -690,6 +690,14 @@ export function buildEtcCsvDownloadUrl(key: string): string {
   return `/api/etc-csv/download?key=${encodeURIComponent(key)}`
 }
 
+/** 運行 1 本の csvdata.zip (theearth 原本) を落とす front worker の server route
+ * (`server/api/operations/[unko]/csvdata-zip.get.ts`、Refs #760 の 23)。
+ * relay の read-only な口を `requireAuth` の後ろで叩くので、**ブラウザは
+ * theearth セッションも `X-Alc-Proxy-Secret` も持たなくてよい**。 */
+export function operationCsvDataZipUrl(unkoNo: string): string {
+  return `/api/operations/${encodeURIComponent(unkoNo)}/csvdata-zip`
+}
+
 /** `zip_url` (relay 相対 path) を、ダウンロード可能な絶対 https URL に変換する。
  * `scraperRelayUrl` は WS 接続用に `wss://`/`ws://` scheme で保持しているため、
  * 通常の GET には https/http に変換する必要がある。 */
