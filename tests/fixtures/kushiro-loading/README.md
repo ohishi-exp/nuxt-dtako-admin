@@ -1,15 +1,18 @@
 # kushiro-loading 共有 fixture (Refs #760 の 33)
 
 釧路営業所 (暫定) 試算の中核 util (`app/utils/kushiro-loading-legs.ts`) の入力。
-**後続 PR で kyuyo-mcp 側の双子実装が同じ fixture を読んで bit 一致を検証する**ため、
-入力は静的 JSON が正 (`tests/fixtures/restraint-wage/` と同じ流儀)。
+**kyuyo-mcp 側の双子実装が同じ fixture と同じ golden を読んで bit 一致を検証する**ため
+(Refs #760 の 34 で接続済み)、入力は静的 JSON が正 (`tests/fixtures/restraint-wage/` と同じ流儀)。
 
 | ファイル | 中身 | 消費者 |
 |---|---|---|
-| `operations-2026-07.json` | 運行 91 本 / 便 284 本。`app/utils/margin.ts` の `OperationMargin` / `LegMargin` の部分型 + 積地・卸地の GPS 2 点 (`KushiroOperationInput`) | `tests/utils/kushiro-loading-legs.test.ts`、kyuyo-mcp の双子実装 (予定) |
+| `operations-2026-07.json` | 運行 91 本 / 便 284 本。`app/utils/margin.ts` の `OperationMargin` / `LegMargin` の部分型 + 積地・卸地の GPS 2 点 (`KushiroOperationInput`) | `tests/utils/kushiro-loading-legs.test.ts`、`workers/kyuyo-mcp/test/kushiro-loading-legs.test.ts` (双子) |
 | `deadhead-idle-2026-07.json` | 同じ 91 運行の `preLoadKm`/`postUnloadKm`/`preLoadSec`/`postUnloadSec` (`allowance-idle.ts` の `OperationIdle` の部分型)。**回送の平均速度を実測から出す**ための入力 | 同上 |
-| `measured-2026-07.json` | **本番 2026-07 の実測** (`dtako:margin:cache:v9`、2026-08-23)。全体・うち釧路積み・pure 38 運行の km 内訳・乗務員別便数・**釧路積みの経路別 17 本**。回帰の的で、手で書いた唯一のファイル | 同上 |
+| `measured-2026-07.json` | **本番 2026-07 の実測** (`dtako:margin:cache:v9`、2026-08-23)。全体・うち釧路積み・pure 38 運行の km 内訳・乗務員別便数・**釧路積みの経路別 17 本**。回帰の的で、**手で書いたファイル** (もう 1 つは `doto-measured-2026-07.json`) | 同上 |
 | `golden/summary-2026-07.json` | `summarizeKushiroLoading` + `depotShiftDiff` + `deadheadSpeedKmh` の出力 golden — **手で編集しない** | 同上 |
+| `doto-operations-2026-07.json` | **道東卸し (積地=釧路 かつ 卸地=標茶/別海) の 38 便 / 23 運行** (Refs #760 の 34)。上の `KushiroOperationInput` に、便ごとの積地・卸地 GPS と 走行秒・回送秒 を足した `RebuildOperationInput` | `tests/utils/kushiro-doto-rebuild.test.ts`、`workers/kyuyo-mcp/test/kushiro-doto-rebuild.test.ts` |
+| `doto-measured-2026-07.json` | 同じ 38 便のオーナー実測集計 (2026-08-23 報告)。回帰の的。**手で書いたファイル** | 同上 |
+| `golden/doto-2026-07.json` | `summarizeDotoRebuild` ほかの出力 golden + `kushiroLoaders` — **手で編集しない** | 同上 |
 
 ## この fixture の性格 (必ず読むこと)
 
@@ -72,3 +75,43 @@ UPDATE_GOLDEN=1 npx vitest run tests/utils/kushiro-loading-legs.test.ts
 `operations-2026-07.json` を触るなら、経路別 17 本と全体の合計に戻ることを
 テスト (`共有 fixture が本番実測の集計に戻る`) で必ず確かめる — 集計器を通さない
 裏取り (fixture から直接数える) も同じテストに入っている。
+
+
+## 道東卸しの fixture (`doto-*` / `golden/doto-2026-07.json`、Refs #760 の 34)
+
+`operations-2026-07.json` は**釧路積み vs 十勝卸し**を再現するために組んであり、
+**卸地に道東 (標茶・別海) が 1 本も無い**。オーナーが実測した「道東に降ろす便 38 本」は
+そこに入っていないので、**別ファイルとして足した** (既存 fixture は 1 バイトも触っていない)。
+
+作りは `operations-2026-07.json` と同じ流儀 — **中身は合成だが実測集計にぴったり戻る**:
+
+- 38 便 / 23 運行 / 売上 ¥1,420,245 / 手当 ¥311,000 / 売上走行 2,361.6km / 回送 4,288.9km /
+  走行 92.5h / 回送 173.9h
+- 卸地 標茶町多和星空の黒牛 21 / 標茶町多和 8 / 別海町中西別 7 / 標茶町西熊牛原野 2
+- 乗務員 中村 29 / 柳井 4 / 西島 4 / 佐竹 1
+- **23 運行すべてが `mixed`** (`pure` が 0) — 道東卸しの便と十勝卸しの便、さらに釧路積みでない
+  便 (広尾積み) が同じ運行に混ざる。**だから営業所の差し替えでは動かせず、便を切り出して
+  組み直すしかない**という前提そのものを fixture が持っている
+
+**手当の合計が手当マスタで説明が付く**のがこの fixture のいちばん強い裏取り —
+`RATE_MASTER` の `釧路 → FCS標茶 ¥8,000` × 31 便 + `釧路 → ユナイテッド牧場 (別海) ¥9,000` × 7 便
+= **¥311,000** で、オーナーの実測とぴったり一致する (テスト `手当の合計は 手当マスタ … で説明が付く`)。
+
+座標と住所は実在のもの (積地は釧路西港の 3 社、卸地は標茶町多和・西熊牛原野、別海町中西別、
+比較用の十勝は音更町駒場・帯広市川西町、非釧路積みは広尾町)。走行km は直線距離の 1.34 倍前後
+(道なり係数) で置いてあるので、**回送の推定と 推定 ÷ 実測 の比は地理的に本物**。
+
+意図的な欠測は**すべて釧路積みの十勝卸し便に仕込んである** (道東の実測合計を汚さないため):
+積地 GPS 欠け 1 本 / 卸地 GPS 欠け 1 本 / 走行秒 欠け 1 本 / 回送秒 欠け 1 本。
+`dest_area: 'all'` で拾うと欠測の扱い (0km に倒さない・速度を壊さない) が検証される。
+
+### golden の再生成
+
+```sh
+UPDATE_GOLDEN=1 npx vitest run tests/utils/kushiro-doto-rebuild.test.ts
+```
+
+**golden の正本は app 側**。`workers/kyuyo-mcp` の双子テストは再生成せず、読んで一致だけを見る
+(`workers/kyuyo-mcp/test/kushiro-doto-rebuild.test.ts` / `kushiro-loading-legs.test.ts`)。
+`golden/doto-2026-07.json` の `kushiroLoaders` は、**app 側が `RATE_MASTER` から導出した値**を
+双子側の literal と突き合わせるためだけに入っている — マスタが動けば両側とも落ちる。

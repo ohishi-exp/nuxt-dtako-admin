@@ -1480,6 +1480,9 @@ describe("ALL_TOOLS", () => {
     // 一番星の経費/売上明細を読むだけ (Refs #760 の 12)。上流は GET のみ
     "get_ichiban_costs",
     "get_ichiban_sales",
+    // 釧路営業所 (暫定) の試算 (Refs #760 の 34)。**pure な計算 + R2 の最低賃金マスタと
+    // 一番星の売上を読むだけ**で、上流に POST を 1 本も投げない
+    "get_kushiro_branch_estimate",
     // 休息のずれの診断 (Refs ohishi-exp/rust-ichibanboshi#205 の 41)。
     // 上流に GET しか無く、判定にも入らない素の観測なので read-only
     "get_dtako_scrape_status",
