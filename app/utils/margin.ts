@@ -430,6 +430,18 @@ export interface MarginLegInput {
    */
   deadheadKm: number
   /**
+   * その便の売上時間 (`legKmDetail[seq-1].haulSec`、秒)。**読めなければ null**
+   * (0 に倒さない — 拘束時間比の配分をその運行だけ km 比に落とす判断に使う)。
+   */
+  haulSec: number | null
+  /**
+   * その便の回送時間 (`approachSec + tailSec`、秒)。どちらか読めなければ null。
+   *
+   * **`otherSec` は無い** — 降しの無い便の時間は `haulSec` が null になる形で既に
+   * 「読めない」と表現されている。
+   */
+  deadheadSec: number | null
+  /**
    * その便の売上に当たった一番星の明細の取引先 (Refs #760 の 15)。**`customersOfSlips`
    * で畳んだもの**で、`Σ yen === salesYen` (明細の `amount` を取引先で束ねただけ)。
    * 当たっていない便は `[]`。**運行の粗利にも便の収支にも 1 円も効かない** —
@@ -550,6 +562,14 @@ export interface OperationMargin {
    */
   costsMissing: boolean
   /**
+   * **拘束時間比を選んだのに、この運行だけ走行km比で配った** (Refs #760 の 22)。
+   *
+   * 便の秒 (`haulSec`/`deadheadSec`) が 1 便でも読めない運行と、秒の和が 0 の運行が
+   * これになる。**黙って 0 円を配らない** — 落としたことを画面に出すためのフラグ。
+   * 走行km比・便数比を選んでいるときは常に `false`。
+   */
+  runCostShareFallback: boolean
+  /**
    * 便ごとの粗利 (Refs #760 の 13)。**運行の `fuelYen`/`marginYen` には 1 円も
    * 効かない** — 直課経費・固定費按分は便に割らず、運行の段に残す (便の収支は
    * 「売上 − 手当 − 燃料」であって粗利ではない)。便が揃っている運行では
@@ -582,9 +602,11 @@ export interface LegMargin {
   customers: LegCustomerShare[]
   /**
    * **運行の経費 (直課 + 固定費按分) のうち、この便に配った額** (Refs #760 の 15)
-   * = `(directCostYen + allocatedCostYen) × (haulKm + deadheadKm) ÷ Σ(運行の全便の haulKm + deadheadKm)`。
+   * = `(directCostYen + allocatedCostYen) × この便の重み`。**重みは `RunCostShareMode`
+   * で切り替わる** (走行km比 / 便数比 / 拘束時間比。Refs #760 の 22) が、どのモードでも
+   * **Σ (運行の全便) = 運行の経費**は変わらない (配れる運行なら重みの和が 1)。
    *
-   * 分母 (便の走行km の和) が 0 なら 0 — **配れない運行の経費は便に載らない**
+   * 走行km比で分母 (便の走行km の和) が 0 なら 0 — **配れない運行の経費は便に載らない**
    * (`summarizeByCustomerRoute` の検算で差として見える。黙って全便に均等には割らない)。
    * **便の無い運行の経費も便に載らない** (`noLegOperations` に残す)。
    * `marginYen` (収支) とは違って**運行の `marginYen` が null でも 0 ではなく額を持つ**
@@ -757,6 +779,11 @@ function spreadCosts(
 export interface MarginResult {
   /** 運行ごとの粗利 (渡した順のまま)。 */
   operations: OperationMargin[]
+  /**
+   * **拘束時間比を選んだのに走行km比で配った運行の数** (Refs #760 の 22)。
+   * 走行km比・便数比では常に 0。画面に注記を出すためだけの値。
+   */
+  runCostShareFallbackOperations: number
   /** 車輌C → 実際に使った燃費・単価 (上書き後)。画面の欄に出す。 */
   ratesByVehicle: Map<string, FuelRate>
   /** 車輌C → 実績から出した燃費・単価 (上書き前)。「既定値は実績」を見せるため。 */
@@ -789,6 +816,71 @@ export interface MarginResult {
 }
 
 /**
+ * **運行経費 (直課 + 固定費按分) を便に配る比** (Refs #760 の 22)。
+ *
+ * 走行km比だと**短距離便がほとんど固定費を負担しない** (2026-07 帯広 5 台の実測で、
+ * 粗利率 55% 以上の短距離経路は配分が売上の 1%、他は 11%)。按分の方法で粗利率の
+ * 見え方がどれだけ変わるかを人が確かめられるように、比を切り替えられるようにする。
+ *
+ * **どのモードでも運行の段 (`marginYen` 等) は 1 円も動かない** — 配り方を変えるのは
+ * 便の `runCostShareYen` と、そこから出る取引先 × 経路の粗利だけ。
+ */
+export type RunCostShareMode = 'km' | 'legs' | 'time'
+
+/** 画面の select と CSV のファイル名に使う名前。 */
+export const RUN_COST_SHARE_MODE_LABELS: Record<RunCostShareMode, string> = {
+  km: '走行km比',
+  legs: '便数比',
+  time: '拘束時間比',
+}
+
+/** `RunCostShareMode` の既定 (今までの挙動)。 */
+export const DEFAULT_RUN_COST_SHARE_MODE: RunCostShareMode = 'km'
+
+/**
+ * 保存してある配分モードを読む (localStorage)。**知らない値・空は既定 (走行km比)**。
+ *
+ * 落ちない — 読めない値で画面が出なくなるより、既定に戻る方がまし。
+ */
+export function parseRunCostShareMode(raw: string | null | undefined): RunCostShareMode {
+  return raw === 'legs' || raw === 'time' ? raw : DEFAULT_RUN_COST_SHARE_MODE
+}
+
+/** 便 1 本ぶんの拘束秒 = 売上時間 + 回送時間。どちらか読めなければ null。 */
+function legSecOf(leg: MarginLegInput): number | null {
+  return leg.haulSec === null || leg.deadheadSec === null ? null : leg.haulSec + leg.deadheadSec
+}
+
+/** 便の走行km (売上走行 + 回送) の比。**和が 0 の運行は配らない (全部 0)** — #770 からの挙動。 */
+function kmShareWeights(legs: MarginLegInput[]): number[] {
+  const total = legs.reduce((sum, leg) => sum + leg.haulKm + leg.deadheadKm, 0)
+  return legs.map(leg => (total > 0 ? (leg.haulKm + leg.deadheadKm) / total : 0))
+}
+
+/**
+ * 運行の経費を便に配る重み (`Σ = 1`。配れない運行だけ全部 0)。
+ *
+ * - `km` — 便の走行km (売上走行 + 回送) の比。**分母 0 の運行は配らない** (据え置き)
+ * - `legs` — 便数の比 (`1 ÷ 便数`)。距離も時間も見ない
+ * - `time` — 便の拘束時間 (売上時間 + 回送時間) の比。**1 便でも秒が読めない運行と、
+ *   秒の和が 0 の運行は走行km比に落とす** (`fallback`)。0 円を黙って配らない
+ *
+ * **便の無い運行はどのモードでも配る先が無い** ので `fallback` にも数えない
+ * (数えると「拘束時間が取れない運行」の件数に、時間と関係のない運行が混ざる)。
+ */
+function legShareWeights(legs: MarginLegInput[], mode: RunCostShareMode): { weights: number[], fallback: boolean } {
+  if (legs.length === 0) return { weights: [], fallback: false }
+  if (mode === 'legs') return { weights: legs.map(() => 1 / legs.length), fallback: false }
+  if (mode === 'time') {
+    const secs = legs.map(legSecOf)
+    const total = secs.reduce((sum: number, sec) => sum + (sec ?? 0), 0)
+    if (!secs.includes(null) && total > 0) return { weights: secs.map(sec => sec! / total), fallback: false }
+    return { weights: kmShareWeights(legs), fallback: true }
+  }
+  return { weights: kmShareWeights(legs), fallback: false }
+}
+
+/**
  * 便ごとの粗利を出す (Refs #760 の 13)。**運行と同じ `fuelRate` (単価・燃費)** を使う —
  * 便だけ別の単価で出すと、Σ便の燃料代が運行の燃料代からずれる理由が「便が違う単価を
  * 使っているから」になり、検算できなくなる。
@@ -797,20 +889,23 @@ export interface MarginResult {
  * 「売上 − 手当 − 燃料」の収支**。
  *
  * ただし取引先別の集計 (Refs #760 の 15) のために、**運行の経費 (直課 + 固定費按分)
- * を便の走行km (売上走行 + 回送) の比で便に配った `runCostShareYen`** と、それを
- * 収支から引いた **`grossMarginYen` (便の粗利)** も持たせる。`runCostYen` は運行の
+ * を `mode` の比で便に配った `runCostShareYen`** と、それを収支から引いた
+ * **`grossMarginYen` (便の粗利)** も持たせる。`runCostYen` は運行の
  * `directCostYen + allocatedCostYen`、`opMarginYen` は運行の `marginYen`
  * (null なら便の粗利も null)。**運行の段の数字には 1 円も効かない。**
+ *
+ * `mode` は既定が今までどおり走行km比 (Refs #760 の 22)。**拘束時間比を選んでも秒が
+ * 読めない運行は走行km比に落とし**、落としたことを `runCostShareFallback` で返す。
  */
 function buildLegMargins(
   legs: MarginLegInput[],
   fuelRate: FuelRate,
   runCostYen: number,
   opMarginYen: number | null,
-): LegMargin[] {
-  // 配分の分母 = 運行の全便の走行km (売上走行 + 回送)。0 なら配らない (0 除算しない)。
-  const legKmTotal = legs.reduce((sum, leg) => sum + leg.haulKm + leg.deadheadKm, 0)
-  return legs.map((leg) => {
+  mode: RunCostShareMode = 'km',
+): { legs: LegMargin[], runCostShareFallback: boolean } {
+  const share = legShareWeights(legs, mode)
+  const built = legs.map((leg, i) => {
     const fuelHaulYen = fuelYenFor(leg.haulKm, fuelRate)
     const fuelDeadheadYen = fuelYenFor(leg.deadheadKm, fuelRate)
     // **燃料代が出せなければ収支も出さない。** `fuelHaulYen`/`fuelDeadheadYen` は
@@ -818,7 +913,11 @@ function buildLegMargins(
     const marginYen = fuelHaulYen === null || fuelDeadheadYen === null
       ? null
       : leg.salesYen - leg.allowanceYen - fuelHaulYen - fuelDeadheadYen
-    const runCostShareYen = legKmTotal > 0 ? runCostYen * ((leg.haulKm + leg.deadheadKm) / legKmTotal) : 0
+    // **重みの和が 1 なので Σ = 運行の経費。** どのモードでも同じ (配れない運行は全部 0)。
+    // 重み 0 は `runCostYen * 0` にしない — 経費が負の運行で `-0` になり、画面に
+    // 「¥-0」と出る (`Math.round(-0).toLocaleString()`)。
+    const weight = share.weights[i]!
+    const runCostShareYen = weight === 0 ? 0 : runCostYen * weight
     return {
       seq: leg.seq,
       date: leg.date,
@@ -839,6 +938,7 @@ function buildLegMargins(
       grossMarginYen: opMarginYen === null ? null : marginYen! - runCostShareYen,
     }
   })
+  return { legs: built, runCostShareFallback: share.fallback }
 }
 
 /**
@@ -851,6 +951,7 @@ export function buildOperationMargins(
   ops: MarginOperationInput[],
   costs: CostRow[],
   overrides: FuelRateMap,
+  runCostShareMode: RunCostShareMode = 'km',
 ): MarginResult {
   const opsByVehicle = new Map<string, number[]>()
   ops.forEach((op, i) => {
@@ -898,6 +999,9 @@ export function buildOperationMargins(
     const marginYen = fuelYen === null || costsMissing
       ? null
       : marginOf(op.salesYen, op.allowanceYen, fuelYen, directCostYen, allocatedCostYen)
+    // 便には運行の経費 (直課 + 固定費按分) を `runCostShareMode` の比で配る
+    // (Refs #760 の 15・22)。**運行の段の数字には 1 円も効かない。**
+    const legShare = buildLegMargins(op.legs, fuelRate, directCostYen + allocatedCostYen, marginYen, runCostShareMode)
     return {
       unkoNo: op.unkoNo,
       date: op.date,
@@ -918,13 +1022,14 @@ export function buildOperationMargins(
       laborYen: spreadLabor.direct[i]! + spreadLabor.allocated[i]!,
       fuelRate,
       costsMissing,
-      // 便には運行の経費 (直課 + 固定費按分) を走行km の比で配る (Refs #760 の 15)。
-      legs: buildLegMargins(op.legs, fuelRate, directCostYen + allocatedCostYen, marginYen),
+      runCostShareFallback: legShare.runCostShareFallback,
+      legs: legShare.legs,
     }
   })
 
   return {
     operations,
+    runCostShareFallbackOperations: operations.filter(m => m.runCostShareFallback).length,
     ratesByVehicle,
     derivedByVehicle,
     kmByVehicle,
@@ -1546,11 +1651,21 @@ export function summarizeByCustomerRoute(margins: OperationMargin[]): CustomerRo
   }
 }
 
-const CUSTOMER_ROUTE_CSV_HEADER = [
-  '取引先C', '取引先', '積地', '卸地', '便数', '売上走行km', '回送km',
-  '売上', '手当', '燃料代(売上走行)', '回送燃料', '運行経費の配分', '粗利', '粗利率',
-  '売上/売上走行km',
-]
+/**
+ * 取引先 × 経路 CSV の見出し。**`mode` は「運行経費の配分」の列名にだけ効く** —
+ * 列の数も並びも変わらない (Refs #760 の 22)。
+ *
+ * ファイルを開いた人が「どの比で配った数字か」を CSV 単体で判別できるようにする
+ * (ファイル名だけだと、開いた後・コピーした後に分からなくなる)。
+ */
+export function customerRouteCsvHeader(mode: RunCostShareMode = 'km'): string[] {
+  return [
+    '取引先C', '取引先', '積地', '卸地', '便数', '売上走行km', '回送km',
+    '売上', '手当', '燃料代(売上走行)', '回送燃料',
+    `運行経費の配分(${RUN_COST_SHARE_MODE_LABELS[mode]})`, '粗利', '粗利率',
+    '売上/売上走行km',
+  ]
+}
 
 /**
  * **売上の距離あたり単価** (円 / 売上走行km、Refs #760 の 20)。丸めない。
@@ -1588,13 +1703,16 @@ export function marginRateTone(rate: number | null): 'high' | 'low' | null {
 /**
  * 取引先 × 経路 の CSV (Refs #760 の 15)。**1 行 = 取引先 1 つ × 経路 1 本** (取引先の
  * 小計行は出さない — 表計算で取引先C でまとめれば出る)。値にカンマが入りうるので必ず引用する。
+ *
+ * `mode` は**見出しの列名にだけ**出る (`customerRouteCsvHeader`)。値は既に配分済みの
+ * `runCostShareYen` を書くだけなので、ここで比を計算し直すことはない。
  */
-export function customerRouteCsvLines(summary: CustomerRouteSummary): string[] {
+export function customerRouteCsvLines(summary: CustomerRouteSummary, mode: RunCostShareMode = 'km'): string[] {
   const quote = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`
   const rate = (v: number | null) => (v === null ? '' : `${Math.round(v * 1000) / 10}%`)
   const round = (v: number | null) => (v === null ? '' : Math.round(v))
   return [
-    CUSTOMER_ROUTE_CSV_HEADER.map(quote).join(','),
+    customerRouteCsvHeader(mode).map(quote).join(','),
     ...summary.customers.flatMap(c => c.routes.map(r => [
       c.code, c.name, r.from, r.to, r.legs, round(r.haulKm), round(r.deadheadKm),
       round(r.salesYen), round(r.allowanceYen), round(r.fuelHaulYen), round(r.fuelDeadheadYen),
@@ -1848,8 +1966,14 @@ export function summarizeUncoveredLegs(legs: IchibanLeg[]): UncoveredTotals | nu
  * **便の積み日で切った古い集計**がキャッシュ経路だけに残るため — 月跨ぎの運行が
  * 翌月便ぶんの燃料だけを抱えたままになり、取引先別の検算がその運行のぶんだけ
  * 合わない画面に戻る (`crossMonth` の注記も出ない)。
+ *
+ * `v9` で便に**拘束秒** (`haulSec`/`deadheadSec`) を足した (Refs #760 の 22)。
+ * `v8` を読ませないのは、**秒の無い便を読むと拘束時間比が全運行フォールバックになり**、
+ * 走行km比と同じ数字が「拘束時間比」の名前で出てしまうため (キャッシュ経路だけ
+ * 切り替えが効かない画面に戻る)。**キャッシュを読む側にバージョン判定は無い** —
+ * 形が変わったらこのキーを上げる、が唯一の作法。
  */
-export const MARGIN_CACHE_KEY = 'dtako:margin:cache:v8'
+export const MARGIN_CACHE_KEY = 'dtako:margin:cache:v9'
 
 /**
  * 直前の集計。**運行手当タブのキャッシュとはキーを分ける** — あちらは便と明細を

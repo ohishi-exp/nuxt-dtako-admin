@@ -249,6 +249,11 @@ branches = true
 path = "app/utils/allowance-force-match.ts"
 branches = true
 
+# デジタコのイベントCSV から 1 運行の非売上時間・走行距離・**便ごとの内訳**を出す pure util。
+# branches: TypeScript の AST で `if` / 三項 / `&&` `||` `??` / `?.` を `BR`/`NC` で包んだ
+# instrumented コピーを流して、**46 分岐すべて両側 OK** (#760 の 22 で 便ごとの拘束秒
+# `haulSec`/`approachSec`/`tailSec` を足して 40 → 46)。計測器は、通らない暗黙 else・
+# 評価されない `??` の右側・片側だけの三項を仕込んだ probe で先に検出できることを確かめてある。
 [[files]]
 path = "app/utils/allowance-idle.ts"
 branches = true
@@ -264,12 +269,12 @@ branches = true
 # (#757 で `branches 96.15%` を落とした反省。計測器そのものも、通らない暗黙 else と
 # 評価されない `??` の右側を仕込んだ probe で検出できることを先に確かめてある)。
 #
-# **#760 の 4 で数え直した** (`?` の出現を token で洗い、`?.` と optional な型注釈を
-# 分けた): 条件 33 個 (`if` 23 + 三項 8 + `?.` 2) × 両側 + 論理演算子の右側 27 個
-# (`??` 11 + `||` 12 + `&&` 4) = **93 分岐すべて両側 OK**。
-# (以前の登録時は 92 分岐と書いてあったが、内訳の数え方が違うだけで、
-# 増えたのは `summarizeUncoveredLegs` の `if` と `parseMarginCache` の
-# 三項 + `&&` の 3 か所。)
+# **#760 の 22 で AST で数え直した** (手で token を洗うのをやめ、TypeScript の
+# AST を歩いて `if` / 三項 / `&&` `||` `??` の左辺 / `?.` を機械的に列挙した):
+# `if` 44 + 三項 25 + `&&` 7 + `||` 16 + `??` 27 + `?.` 2 = **121 分岐すべて両側 OK**。
+# (以前は「条件 33 個 × 両側 + 論理演算子の右側 27 個 = 93 分岐」と書いてあった。
+# 数え方が違うだけで対象は同じ — AST はネストした三項や arrow の中の `if` も
+# 取りこぼさないので、こちらの方が多く出る。)
 [[files]]
 path = "app/utils/margin.ts"
 branches = true
