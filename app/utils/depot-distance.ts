@@ -23,6 +23,13 @@
  * 0 を返すと「営業所のすぐ隣で走り始めた」という**実在しうる値**に化けて、
  * 回送距離が静かに過小になる。最低賃金チェックで「欠測を 0 分に倒さない」のと同じ思想
  * (memory `wage-report-restraint-source.md`)。
+ *
+ * ## 推定 (直線) と 実測 を混ぜない
+ *
+ * **この util が出すのは推定 (直線距離) であって、実績の回送km ではない。** 実績は
+ * デジタコのイベント CSV を積算した実測 (`allowance-idle.ts` の `preRollKm` / `legKmDetail`) 側にある。
+ * **推定と実測を並べて引き算しない** — 「帯広 = 実測 / 釧路 = 推定」の比較は営業所の差ではなく
+ * 測り方の差 (直線は道なりの下限) を見ていることになる。比較するなら両方を同じ方法で出すこと。
  */
 
 // 座標型は新設しない。`event-data-table.ts` の `getGpsForCell` が返す形そのもの
@@ -73,6 +80,22 @@ export const KUSHIRO_CITY_HALL: LatLng = { lat: 42.9849, lng: 144.3817 }
  * 距離の**相手側**に渡すのが正しい使い分け (`haversineKm(OBIHIRO_DEPOT, 実測点)`)。
  */
 export const OBIHIRO_DEPOT: LatLng = { lat: 42.9240, lng: 143.1964 }
+
+/**
+ * 営業所をキーで選べる形 (Refs #760 の 32)。後続 PR が「帯広と釧路を**同じ手続きで**
+ * 回して差を出す」ために使う — 呼ぶ側が個別定数を if で振り分けると、片方だけ
+ * 更新し忘れる形になりやすい。
+ *
+ * **これは営業所マスタではない。** 座標を差し替えて試算するための一覧であって、
+ * 所属乗務員も車輌も持たない。増やすときは上の定数を足してここに載せるだけ。
+ */
+export const DEPOTS = {
+  obihiro: OBIHIRO_DEPOT,
+  kushiro: KUSHIRO_CITY_HALL,
+} as const
+
+/** `DEPOTS` のキー (`'obihiro' | 'kushiro'`)。 */
+export type DepotKey = keyof typeof DEPOTS
 
 /**
  * 座標として使える値か。`null` / `undefined` / `NaN` / `Infinity` / 範囲外を弾く。

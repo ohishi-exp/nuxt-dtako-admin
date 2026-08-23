@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import {
+  DEPOTS,
   EARTH_RADIUS_KM,
   KUSHIRO_CITY_HALL,
   OBIHIRO_DEPOT,
   isValidLatLng,
   haversineKm,
 } from '~/utils/depot-distance'
+import type { DepotKey, LatLng } from '~/utils/depot-distance'
 import { getGpsForCell } from '~/utils/event-data-table'
 
 describe('座標定数', () => {
@@ -21,6 +23,30 @@ describe('座標定数', () => {
 
   it('地球半径は IUGG の平均半径 R1', () => {
     expect(EARTH_RADIUS_KM).toBe(6371.0088)
+  })
+})
+
+describe('DEPOTS (営業所をキーで選ぶ)', () => {
+  it('個別定数と同じ座標を指している', () => {
+    expect(DEPOTS.obihiro).toBe(OBIHIRO_DEPOT)
+    expect(DEPOTS.kushiro).toBe(KUSHIRO_CITY_HALL)
+  })
+
+  it('キーは帯広と釧路の 2 つ', () => {
+    expect(Object.keys(DEPOTS).sort().join(',')).toBe('kushiro,obihiro')
+  })
+
+  it('キーで回して両営業所を同じ手続きで扱える', () => {
+    const from: LatLng = { lat: 42.99, lng: 144.38 } // 釧路市内の積地を想定
+    const keys = Object.keys(DEPOTS) as DepotKey[]
+    const km = keys.map(k => haversineKm(DEPOTS[k], from))
+    expect(km.length).toBe(2)
+    for (const v of km) {
+      expect(v).not.toBeNull()
+      expect(v!).toBeGreaterThan(-1)
+    }
+    // 釧路の積地なら 釧路営業所 の方が近い (起点を変えると回送距離が変わる、の最小の形)
+    expect(haversineKm(DEPOTS.kushiro, from)!).toBeLessThan(haversineKm(DEPOTS.obihiro, from)!)
   })
 })
 
