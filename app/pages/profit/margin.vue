@@ -39,7 +39,21 @@ import { fetchAllPages } from '~/utils/paged-fetch'
 import type { Driver, OperationListItem } from '~/types'
 import { extractAllowanceLegs, extractCarryInUnloads, allowanceForLegs } from '~/utils/allowance-trips'
 import { extractOperationIdle, type LegKmDetail } from '~/utils/allowance-idle'
-import { buildOperationRoute, buildOverlayTrack, pickLegsFromRoute, mergeRoutes, splitTrackByWindows, type OperationRoute, type LegWindow, type RouteSegment } from '~/utils/operation-route-map'
+import {
+  buildOperationRoute,
+  buildOverlayTrack,
+  pickLegsFromRoute,
+  mergeRoutes,
+  splitTrackByWindows,
+  parseRouteMapLayers,
+  serializeRouteMapLayers,
+  ROUTE_MAP_LAYERS_KEY,
+  type OperationRoute,
+  type LegWindow,
+  type RouteSegment,
+  type RouteMapLayers,
+} from '~/utils/operation-route-map'
+import { bundleZips, bulkZipFilename } from '~/utils/operation-zip-bundle'
 import { filterValidGpsPoints } from '~/utils/net780'
 import { parseTargets, serializeTargets, toggleTarget, driverLabel } from '~/utils/allowance-targets'
 import {
@@ -291,6 +305,7 @@ onMounted(async () => {
   }
   fuelRates.value = parseFuelRates(localStorage.getItem(FUEL_RATE_KEY))
   runCostShareMode.value = parseRunCostShareMode(localStorage.getItem(RUN_COST_SHARE_MODE_KEY))
+  routeMapLayers.value = parseRouteMapLayers(localStorage.getItem(ROUTE_MAP_LAYERS_KEY))
   try {
     drivers.value = await getDrivers()
   }
@@ -947,7 +962,33 @@ const routeModal = ref<{
   error: string | null
   /** 軌跡の内訳 (`NET780 軌跡: N 運行ぶん / イベント軌跡: M 運行ぶん`)。引き終わるまで null。 */
   trackNote: string | null
+  /**
+   * この地図に載っている運行NO (Refs #760 の 25)。運行 1 本なら 1 要素 (見出しの「zip」=
+   * その運行の csvdata.zip)、経路 / 取引先の重ね合わせなら N 要素 (「zip 一括 (N 運行)」=
+   * 運行ごとの csvdata.zip を 1 つに同梱)。
+   */
+  unkoNos: string[]
+  /** 一括 zip のファイル名 (`bulkZipFilename`)。運行 1 本なら使わない (単体 zip の名前は運行NO から)。 */
+  bulkZipName: string
 } | null>(null)
+
+/**
+ * 地図のレイヤ (Refs #760 の 25)。既定は軌跡 ON / 直線 OFF / マーカー ON
+ * (`DEFAULT_ROUTE_MAP_LAYERS`)。localStorage `ROUTE_MAP_LAYERS_KEY` に保存し、
+ * 不正値は `parseRouteMapLayers` が既定に倒す。描画側の絞り込みは `OperationRouteMap.vue`
+ * (`filterRouteByLayers`)。
+ */
+const routeMapLayers = ref<RouteMapLayers>(parseRouteMapLayers(null))
+
+function setRouteMapLayers(layers: RouteMapLayers) {
+  routeMapLayers.value = layers
+  try {
+    localStorage.setItem(ROUTE_MAP_LAYERS_KEY, serializeRouteMapLayers(layers))
+  }
+  catch {
+    // 保存できなくても今の地図は切り替わる (次に開いたとき既定に戻るだけ)。
+  }
+}
 
 /**
  * 運行 1 本の NET780 の道なり軌跡 (Refs #760 の 21)。アーカイブがあれば (`ready`) 有効な
@@ -998,7 +1039,8 @@ function buildEventTrack(headers: string[], rows: string[][], windows: LegWindow
 async function openRouteMap(m: OperationMargin) {
   const key = `op:${m.unkoNo}`
   const title = `運行 ${m.date} ${m.driverName} 車輌 ${m.vehicleCode} — 便 ${m.legs.length} 本`
-  routeModal.value = { key, title, route: null, loading: true, error: null, trackNote: null }
+  const single = { unkoNos: [m.unkoNo], bulkZipName: `csvdata-${m.unkoNo}.zip` }
+  routeModal.value = { key, title, route: null, loading: true, error: null, trackNote: null, ...single }
   let route: OperationRoute | null = null
   let eventTrack: RouteSegment[] = []
   let error: string | null = null
@@ -1012,7 +1054,7 @@ async function openRouteMap(m: OperationMargin) {
   }
   // 待っている間に別の運行を開いた / 閉じたなら、古い結果で上書きしない。
   if (routeModal.value?.key !== key) return
-  routeModal.value = { key, title, route, loading: false, error, trackNote: null }
+  routeModal.value = { key, title, route, loading: false, error, trackNote: null, ...single }
   if (route === null) return
   // NET780 は後から重ねる (遅くても地図は先にイベント線で出す)。**NET780 が無い運行だけ**
   // 重ね掛け行のイベント軌跡を敷く (Refs #760 の 24。二重に敷かない)。
@@ -1072,18 +1114,65 @@ async function downloadOperationZip(unkoNo: string) {
   }
 }
 
-/** 地図モーダルの見出しに zip ボタンを出すか (運行 1 本のときだけ。経路の重ね合わせは
- *  複数運行なので出さない) と、その運行NO。 */
-const routeModalUnkoNo = computed(() => {
-  const key = routeModal.value?.key ?? ''
-  return key.startsWith('op:') ? key.slice(3) : null
-})
-
-/** 地図モーダルの見出しの「zip」。運行 1 本のときしかボタンを出さないので、
- *  ここに来る時点で `routeModalUnkoNo` は必ず非 null (型の都合で見る)。 */
+/** 地図モーダルの見出しの「zip」(運行 1 本のとき。`unkoNos` が 1 要素)。 */
 function downloadRouteModalZip() {
-  const unkoNo = routeModalUnkoNo.value
-  if (unkoNo !== null) void downloadOperationZip(unkoNo)
+  const unkoNo = routeModal.value?.unkoNos[0]
+  if (unkoNo !== undefined) void downloadOperationZip(unkoNo)
+}
+
+/** 一括 zip の進捗 (`3/12`)。取っていなければ null。見出しのボタンに出す。 */
+const bulkZipProgress = ref<string | null>(null)
+
+/**
+ * 地図モーダルの見出しの「zip 一括 (N 運行)」(Refs #760 の 25)。経路 / 取引先の
+ * 重ね合わせに載っている運行ぜんぶの csvdata.zip を**直列 (同時 1)** で引き
+ * (relay が 1 運行ごとに theearth にログインしうるので並列にしない)、`bundleZips`
+ * (JSZip) で `csvdata-<運行NO>.zip` × N を 1 つの zip にまとめて保存する。
+ * 引けなかった運行は抜いて、最後に何本落ちたかを `zipError` に出す (黙って少ない
+ * 本数を詰めない)。1 本も引けなければ zip は作らない。押下中は `zipDownloading` で
+ * 全部の zip ボタンを止める (単体 zip と同じ鍵)。
+ */
+async function downloadAllZips() {
+  const modal = routeModal.value
+  if (modal === null || zipDownloading.value !== null) return
+  const unkoNos = modal.unkoNos
+  zipDownloading.value = modal.key
+  zipError.value = null
+  bulkZipProgress.value = `0/${unkoNos.length}`
+  const entries: Array<{ name: string, bytes: ArrayBuffer }> = []
+  const failed: string[] = []
+  try {
+    const token = currentAccessToken()
+    const headers: Record<string, string> = {}
+    if (token) headers['authorization'] = `Bearer ${token}`
+    for (let i = 0; i < unkoNos.length; i++) {
+      const unkoNo = unkoNos[i]!
+      try {
+        const res = await fetch(operationCsvDataZipUrl(unkoNo), { headers })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        entries.push({ name: `csvdata-${unkoNo}.zip`, bytes: await res.arrayBuffer() })
+      }
+      catch {
+        failed.push(unkoNo)
+      }
+      bulkZipProgress.value = `${i + 1}/${unkoNos.length}`
+    }
+    if (entries.length > 0) {
+      const blob = await bundleZips(entries)
+      await downloadBlobResponse(new Response(blob), modal.bulkZipName)
+    }
+    if (failed.length > 0) {
+      zipError.value = `運行 ${unkoNos.length} 本のうち ${failed.length} 本の csvdata.zip が引けませんでした (${failed.join(', ')})`
+        + (entries.length > 0 ? ' — 引けた分だけ zip にまとめました' : '')
+    }
+  }
+  catch (e) {
+    zipError.value = `csvdata.zip の一括ダウンロードに失敗しました — ${e instanceof Error ? e.message : String(e)}`
+  }
+  finally {
+    zipDownloading.value = null
+    bulkZipProgress.value = null
+  }
 }
 
 /**
@@ -1098,7 +1187,7 @@ function downloadRouteModalZip() {
  * 引けなかった運行はそのぶんを抜いて描き、何本落としたかを `error` に出す
  * (**黙って少ない本数を重ねない** — 形を比べるのが目的なので、欠けを見せる)。
  */
-async function openLegRefsMap(key: string, title: string, legRefs: LegRef[]) {
+async function openLegRefsMap(key: string, title: string, legRefs: LegRef[], bulkZipName: string) {
   const byUnkoNo = new Map<string, number[]>()
   for (const ref of legRefs) {
     const seqs = byUnkoNo.get(ref.unkoNo) ?? []
@@ -1106,8 +1195,10 @@ async function openLegRefsMap(key: string, title: string, legRefs: LegRef[]) {
     byUnkoNo.set(ref.unkoNo, seqs)
   }
   const entries = [...byUnkoNo.entries()]
+  // 一括 zip (Refs #760 の 25) に渡す運行NO。`legRefs` の運行ごと (重複なし)。
+  const zipInfo = { unkoNos: entries.map(([unkoNo]) => unkoNo), bulkZipName }
   const withProgress = (done: number) => `${title} (読み込み中 ${done}/${entries.length})`
-  routeModal.value = { key, title: withProgress(0), route: null, loading: true, error: null, trackNote: null }
+  routeModal.value = { key, title: withProgress(0), route: null, loading: true, error: null, trackNote: null, ...zipInfo }
 
   const picked: Array<{ unkoNo: string, route: OperationRoute, eventTrack: RouteSegment[] }> = []
   let failed = 0
@@ -1129,10 +1220,10 @@ async function openLegRefsMap(key: string, title: string, legRefs: LegRef[]) {
       if (r === null) failed += 1
       else picked.push(r)
     }
-    routeModal.value = { key, title: withProgress(picked.length + failed), route: null, loading: true, error: null, trackNote: null }
+    routeModal.value = { key, title: withProgress(picked.length + failed), route: null, loading: true, error: null, trackNote: null, ...zipInfo }
   }
   const error = failed === 0 ? null : `運行 ${entries.length} 本のうち ${failed} 本のイベントCSVが引けませんでした`
-  routeModal.value = { key, title, route: picked.length === 0 ? null : mergeRoutes(picked.map(p => p.route)), loading: false, error, trackNote: null }
+  routeModal.value = { key, title, route: picked.length === 0 ? null : mergeRoutes(picked.map(p => p.route)), loading: false, error, trackNote: null, ...zipInfo }
   if (picked.length === 0) return
 
   // NET780 は後から重ねる (Refs #760 の 21)。運行ごとに引き (CSV と同じ並列数)、アーカイブが
@@ -1162,14 +1253,14 @@ async function openLegRefsMap(key: string, title: string, legRefs: LegRef[]) {
 function openRouteLegsMap(c: CustomerSummary, r: RouteSummary) {
   const operations = new Set(r.legRefs.map(ref => ref.unkoNo)).size
   const title = `${c.name} ${r.from} → ${r.to} — 便 ${r.legRefs.length} 本 (運行 ${operations} 本)`
-  return openLegRefsMap(`route:${c.code}:${r.from}→${r.to}`, title, r.legRefs)
+  return openLegRefsMap(`route:${c.code}:${r.from}→${r.to}`, title, r.legRefs, bulkZipFilename(c.code || c.name, `${r.from}→${r.to}`, ym.value))
 }
 
 /** 取引先行の「地図」。その取引先の**全経路**を 1 枚に重ねる。 */
 function openCustomerLegsMap(c: CustomerSummary) {
   const operations = new Set(c.legRefs.map(ref => ref.unkoNo)).size
   const title = `${c.name} — 便 ${c.legRefs.length} 本 (経路 ${c.routes.length} 本・運行 ${operations} 本)`
-  return openLegRefsMap(`customer:${c.code}`, title, c.legRefs)
+  return openLegRefsMap(`customer:${c.code}`, title, c.legRefs, bulkZipFilename(c.code || c.name, null, ym.value))
 }
 /** 運行行の開閉 (3 段目の便を出す)。**乗務員行の `openDrivers` と同じ流儀。** */
 const openOperations = reactive<Record<string, boolean>>({})
@@ -2076,10 +2167,14 @@ function downloadCustomerRouteCsv() {
       :loading="routeModal.loading"
       :error="routeModal.error"
       :track-note="routeModal.trackNote"
-      :can-download-zip="routeModalUnkoNo !== null"
-      :zip-loading="routeModalUnkoNo !== null && zipDownloading === routeModalUnkoNo"
+      :layers="routeMapLayers"
+      :unko-count="routeModal.unkoNos.length"
+      :zip-loading="zipDownloading !== null"
+      :bulk-zip-progress="bulkZipProgress"
       @close="routeModal = null"
       @download-zip="downloadRouteModalZip"
+      @download-zip-all="downloadAllZips"
+      @update:layers="setRouteMapLayers"
     />
   </div>
 </template>
