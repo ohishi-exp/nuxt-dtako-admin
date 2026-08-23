@@ -61,6 +61,7 @@ import {
   type RouteSegment,
   type RouteMapLayers,
 } from '~/utils/operation-route-map'
+import { driverShareBars } from '~/utils/margin-driver-share'
 import { filterValidGpsPoints } from '~/utils/net780'
 import { NET780_ARCHIVE_BATCH_SIZE, chunk, remainingNet780ArchiveTargets, summarizeNet780ArchiveResults, formatNet780ArchiveSummary, type Net780ArchiveResultItem } from '~/utils/net780-archive'
 import { parseTargets, serializeTargets, toggleTarget, driverLabel } from '~/utils/allowance-targets'
@@ -1075,6 +1076,12 @@ const visibleDrivers = computed(() => {
 const openDrivers = reactive<Record<string, boolean>>({})
 
 /**
+ * 乗務員ごとの 100% 積み上げ棒 (乗務員/運行 の表の直後、Refs #760 の 39)。
+ * **表と同じ `visibleDrivers`** から出す (並びも絞り込みも表と揃う)。
+ */
+const driverBars = computed(() => driverShareBars(visibleDrivers.value))
+
+/**
  * 運行行の「地図」モーダル (Refs #760 の 18)。イベントCSV を **その場で 1 回引く**
  * (`resolveOperation` の集計とは別の呼び出し。運行 1 本の 1 呼び出しなので cache には
  * 入れない — `MARGIN_CACHE_KEY` の形を変えない)。描く形への変換は
@@ -2027,6 +2034,58 @@ function downloadCustomerRouteCsv() {
           </table>
         </div>
 
+        <!-- 乗務員ごとの 100% 積み上げ棒 (Refs #760 の 39)。**乗務員/運行 の表の直後**。
+             区分・色・凡例・先頭に「合計」を置く流儀は「売上の内訳 (取引先ごと)」と同じで、
+             素材は `margin-driver-share.ts` (pure) が作る。印刷は `margin-print-keep` で
+             **凡例ごと 1 枚に収める**だけにして、**紙は改めない** — 乗務員/運行 の表と
+             同じ紙に載るのが自然で、入りきらなければブラウザが次の紙へ送る。 -->
+        <div v-if="driverBars.bars.length > 0" class="margin-print-keep mt-3">
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500 mb-2">
+            <span class="font-medium">売上の内訳 (乗務員ごと、売上 = 100%)</span>
+            <span v-for="lg in SHARE_SEGMENT_LABELS" :key="lg.key" class="inline-flex items-center gap-1">
+              <span class="inline-block w-3 h-3 rounded-sm" :class="SHARE_SEGMENT_CLASS[lg.key]" />{{ lg.label }}
+            </span>
+          </div>
+          <div class="space-y-1">
+            <div
+              v-for="bar in driverBars.bars"
+              :key="bar.key"
+              class="margin-print-bar flex items-center gap-2 text-xs"
+              :class="bar.key === 'total' ? 'font-medium' : ''"
+            >
+              <span class="w-56 shrink-0 truncate" :title="`${bar.label} (運行 ${bar.operations})`">
+                {{ bar.label }} <span class="text-gray-400">(運行 {{ bar.operations }})</span>
+                <span
+                  v-if="bar.noMarginOperations > 0"
+                  class="text-amber-600 dark:text-amber-400"
+                  :title="`粗利を出せない運行 ${bar.noMarginOperations} 本 — その売上ぶんはどの色にも塗っていません`"
+                >*</span>
+                <span
+                  v-if="bar.fuelUnsplitYen > 0"
+                  class="text-amber-600 dark:text-amber-400"
+                  :title="`${FUEL_UNSPLIT_TITLE} (${yen(bar.fuelUnsplitYen)})。2 つの燃料区分のどちらにも入っていないので、そのぶん棒が 100% に届きません`"
+                >†</span>
+              </span>
+              <div class="flex-1 flex h-4 rounded overflow-hidden bg-gray-100 dark:bg-gray-800">
+                <div
+                  v-for="s in bar.segments"
+                  :key="s.key"
+                  class="h-full text-[10px] leading-4 text-white text-center overflow-hidden whitespace-nowrap"
+                  :class="SHARE_SEGMENT_CLASS[s.key]"
+                  :style="{ width: `${s.pct}%` }"
+                  :title="`${shareSegmentLabel(s.key)} ${yen(s.yen)} (${pct1(s.pct)})`"
+                >
+                  <template v-if="s.pct >= 7">{{ Math.round(s.pct) }}%</template>
+                </div>
+              </div>
+              <span v-if="bar.overflowPct > 0" class="shrink-0 text-red-600 dark:text-red-400" title="費用 (手当 + 燃料 + 運行経費の配分) が売上を超えた分">赤字 −{{ pct1(bar.overflowPct) }}</span>
+            </div>
+          </div>
+          <p v-if="driverBars.skipped > 0" class="text-xs text-gray-400 mt-1">
+            売上 0 の乗務員 {{ driverBars.skipped }} 人は棒にしていません
+          </p>
+        </div>
+
         <!-- 取引先別 × 経路別 (Refs #760 の 15)。乗務員の表の下。 -->
         <div class="margin-print-page mt-6">
           <div class="margin-print-head flex flex-wrap items-center gap-2 mb-1">
@@ -2350,8 +2409,10 @@ function downloadCustomerRouteCsv() {
   .margin-print-page:first-child { break-before: auto; }
 
   /* 割れると読めなくなる区画 (月の合計・粗利の内訳・人件費・燃費と単価・
-     売上の内訳の棒ひとまとまり・2 営業所のカード・棒 1 本) は途中で割らない。
-     入りきらなければブラウザが次の紙へ丸ごと送る。 */
+     売上の内訳の棒ひとまとまり (取引先ごと / **乗務員ごと** の両方)・2 営業所のカード・
+     棒 1 本) は途中で割らない。入りきらなければブラウザが次の紙へ丸ごと送る。
+     **乗務員ごとの棒 (Refs #760 の 39) は `break-inside: avoid` だけで、紙は改めない** —
+     乗務員/運行 の表と同じ紙に載るのが自然なため (改ページを足すのは上の 4 区画のまま)。 */
   .margin-print-block,
   .margin-print-keep,
   .margin-print-bar,

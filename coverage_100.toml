@@ -390,3 +390,16 @@ branches = true
 [[files]]
 path = "app/components/KushiroBranchPanel.vue"
 branches = true
+
+# 乗務員ごとの 100% 積み上げ棒の素材 (Refs #760 の 39)。既存の「売上の内訳 (取引先ごと)」
+# (`margin.ts` の `customerShareBars`) の乗務員版で、**新しい計算は 1 つも無い** —
+# 表がそのまま使っている `DriverMargin.totals` を棒の形に並べ替え、合計は
+# `summarizeMargins` (中核) にもう一度畳ませるだけ。棒の 5 区分は表の 5 列そのもので、
+# 直課経費 + 固定費按分だけ取引先版と同じ「運行経費の配分」1 区分に束ねる。
+# branches: probe (`if` の暗黙 else / `??` の右 / 三項の false / `&&` の右) を刺して
+# **v8 は `if` の暗黙 else を UNCOVERED に出さない** ことを実測 (20 分岐中 5 件しか
+# 落ちず、`if` の行だけ Uncovered に出なかった) してから、BR() で包んだ instrumented
+# コピーで **5 条件すべてが true/false 両方を通る**ことを数えて登録した。
+[[files]]
+path = "app/utils/margin-driver-share.ts"
+branches = true
