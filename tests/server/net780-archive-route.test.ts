@@ -49,7 +49,7 @@ function eventWith(env: Record<string, unknown>, body: unknown = { operationNos:
 
 const call = (event: TestEvent) => (handler as unknown as (e: TestEvent) => Promise<unknown>)(event)
 
-/** 投げられた H3Error の status とメッセージ本文 (ASCII の目印で見る。csvdata-zip のテストと同じ理由)。 */
+/** 投げられた H3Error の status とメッセージ本文 (日本語メッセージは ASCII の目印で見る)。 */
 async function rejection(p: Promise<unknown>): Promise<{ statusCode: number, text: string }> {
   try {
     await p

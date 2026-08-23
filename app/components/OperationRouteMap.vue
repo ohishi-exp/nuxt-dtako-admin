@@ -38,16 +38,6 @@ const props = defineProps<{
    */
   layers: RouteMapLayers
   /**
-   * この地図に載っている運行の本数 (Refs #760 の 23・25)。1 なら見出しに「zip」
-   * (運行 1 本の csvdata.zip)、2 以上なら「zip 一括 (N 運行)」(運行ごとの csvdata.zip を
-   * 1 つの zip に同梱)。0 なら出さない。取得ロジックは呼び出し側 (`margin.vue`) が持つ。
-   */
-  unkoCount: number
-  /** zip の取得中 (theearth への自前ログインを伴うので数秒かかる。連打させない)。 */
-  zipLoading?: boolean
-  /** 一括 zip の進捗 (`3/12` のような文字列)。取っていないときは null。見出しのボタンに添える。 */
-  bulkZipProgress?: string | null
-  /**
    * NET780 のアーカイブが無かった運行の数 (Refs #760 の 27)。0 (または未指定) なら
    * 「NET780 を取得」ボタンを出さない。取得そのもの (relay へ 20 件ずつ投げる・
    * 終わったら地図を開き直す) は呼び出し側 (`margin.vue`) が持つ。
@@ -64,10 +54,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'close': []
-  /** 運行 1 本の csvdata.zip (`unkoCount === 1`)。 */
-  'download-zip': []
-  /** 運行 N 本の csvdata.zip を 1 つに同梱 (`unkoCount >= 2`)。 */
-  'download-zip-all': []
   'update:layers': [layers: RouteMapLayers]
   /** 見出しの「NET780 を取得 (未取得 N 運行)」(Refs #760 の 27)。 */
   'archive-net780': []
@@ -295,17 +281,6 @@ const LINE_LAYERS: Array<{ key: keyof RouteMapLayers, label: string, kinds: Rout
   { key: 'haulLine', label: '売上走行の直線', kinds: ['haul'] },
   { key: 'deadheadLine', label: '回送の直線', kinds: ['deadhead', 'other'] },
 ]
-
-const zipLabel = computed(() => {
-  if (props.bulkZipProgress) return props.bulkZipProgress
-  if (props.zipLoading) return '…'
-  return props.unkoCount >= 2 ? `zip 一括 (${props.unkoCount} 運行)` : 'zip'
-})
-
-function onZipClick() {
-  if (props.unkoCount >= 2) emit('download-zip-all')
-  else emit('download-zip')
-}
 </script>
 
 <template>
@@ -319,18 +294,6 @@ function onZipClick() {
           {{ title }}
         </h2>
         <span v-if="trackNote" class="text-xs text-gray-500">{{ trackNote }}</span>
-        <button
-          v-if="unkoCount > 0"
-          type="button"
-          class="rounded border border-gray-300 dark:border-gray-700 px-1.5 py-0.5 text-[11px] text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
-          :title="unkoCount >= 2
-            ? `この地図の運行 ${unkoCount} 本の csvdata.zip を 1 つの zip にまとめてダウンロード (運行ごとに順番に取るので時間がかかります)`
-            : 'この運行の csvdata.zip (KUDGFUL/KUDGIVT/KUDGURI/SokudoData) をダウンロード'"
-          :disabled="zipLoading"
-          @click="onZipClick"
-        >
-          {{ zipLabel }}
-        </button>
         <button
           v-if="(net780MissingCount ?? 0) > 0"
           type="button"

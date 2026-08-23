@@ -691,22 +691,14 @@ export function buildEtcCsvDownloadUrl(key: string): string {
   return `/api/etc-csv/download?key=${encodeURIComponent(key)}`
 }
 
-/** 運行 1 本の csvdata.zip (theearth 原本) を落とす front worker の server route
- * (`server/api/operations/[unko]/csvdata-zip.get.ts`、Refs #760 の 23)。
- * relay の read-only な口を `requireAuth` の後ろで叩くので、**ブラウザは
- * theearth セッションも `X-Alc-Proxy-Secret` も持たなくてよい**。 */
-export function operationCsvDataZipUrl(unkoNo: string): string {
-  return `/api/operations/${encodeURIComponent(unkoNo)}/csvdata-zip`
-}
-
 /**
  * NET780 のアーカイブが無い運行を relay に取りに行かせて R2 に保存する front worker の
  * server route (`server/api/net780/archive.post.ts`、Refs #760 の 27)。
  * 1 回 **1〜20 件** (超過は 400)。relay の応答 (`Net780ArchiveResult`) をそのまま返す。
  *
- * 同一オリジンの fetch なので cookie (`logi_auth_token`) は自動で載るが、
- * `downloadOperationZip` (margin.vue) と同じく閲覧モードのように cookie が無い経路でも
- * 通るよう `Authorization: Bearer` も明示する (`requireAuth` は cookie 優先 + Bearer 併用)。
+ * 同一オリジンの fetch なので cookie (`logi_auth_token`) は自動で載るが、閲覧モードの
+ * ように cookie が無い経路でも通るよう `Authorization: Bearer` も明示する
+ * (`requireAuth` は cookie 優先 + Bearer 併用)。
  * `request()` (rust-alc-api 向けの `createAuthFetch`) は base URL が backend なので使わない。
  *
  * 非 2xx は server route の `statusMessage` (relay の理由に `relay:` 前置) を

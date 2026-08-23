@@ -13,7 +13,7 @@
  *         relay 側の口 (#760-26) がまだ無ければ relay の 404 がそのまま出る)
  *   503 — SCRAPER_RELAY / INTERNAL_SHARED_SECRET binding 未設定
  *
- * ## なぜ server route を挟むか (`operations/[unko]/csvdata-zip.get.ts` と同じ)
+ * ## なぜ server route を挟むか
  *
  * relay の `POST /kintai-relay/net780-archive` は `X-Alc-Proxy-Secret`
  * (= `INTERNAL_SHARED_SECRET`) の worker→worker 経路で、ブラウザから直接は叩けない。

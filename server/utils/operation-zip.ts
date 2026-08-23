@@ -1,6 +1,7 @@
 /**
  * 運行NO から csvdata.zip 取得の引数 (`ope_no` / `start_ope`) を組み立てる純関数
- * (Refs #760 の 23)。`server/api/operations/[unko]/csvdata-zip.get.ts` が使う。
+ * (Refs #760 の 23)。NET780 一括取得 (`server/utils/net780-archive.ts` →
+ * `server/api/net780/archive.post.ts`、Refs #760 の 27) が使う。
  *
  * relay の `POST /kintai-relay/operation-zip` は **`{ ope_no, start_ope }`** を要求する
  * (DO の `parseOperationZipRequest` が読むキー名。`ope_no_22` は kyuyo-mcp の

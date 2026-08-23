@@ -33,8 +33,7 @@
  * (localStorage、`allowance-provisional.ts` と同じ方式)。
  * **分母が 0 の車輌は燃料代を出さず、粗利も `-` にする。**
  */
-import { getOperations, getOperationCsv, getDrivers, operationCsvDataZipUrl, currentAccessToken, postNet780Archive } from '~/utils/api'
-import { downloadBlobResponse } from '~/utils/download-blob'
+import { getOperations, getOperationCsv, getDrivers, postNet780Archive } from '~/utils/api'
 import { fetchAllPages } from '~/utils/paged-fetch'
 import type { Driver, OperationListItem } from '~/types'
 import { extractAllowanceLegs, extractCarryInUnloads, allowanceForLegs } from '~/utils/allowance-trips'
@@ -53,7 +52,6 @@ import {
   type RouteSegment,
   type RouteMapLayers,
 } from '~/utils/operation-route-map'
-import { bundleZips, bulkZipFilename } from '~/utils/operation-zip-bundle'
 import { filterValidGpsPoints } from '~/utils/net780'
 import { NET780_ARCHIVE_MAX_ITEMS, chunk, remainingNet780ArchiveTargets, summarizeNet780ArchiveResults, formatNet780ArchiveSummary, type Net780ArchiveResultItem } from '~/utils/net780-archive'
 import { parseTargets, serializeTargets, toggleTarget, driverLabel } from '~/utils/allowance-targets'
@@ -964,14 +962,6 @@ const routeModal = ref<{
   /** 軌跡の内訳 (`NET780 軌跡: N 運行ぶん / イベント軌跡: M 運行ぶん`)。引き終わるまで null。 */
   trackNote: string | null
   /**
-   * この地図に載っている運行NO (Refs #760 の 25)。運行 1 本なら 1 要素 (見出しの「zip」=
-   * その運行の csvdata.zip)、経路 / 取引先の重ね合わせなら N 要素 (「zip 一括 (N 運行)」=
-   * 運行ごとの csvdata.zip を 1 つに同梱)。
-   */
-  unkoNos: string[]
-  /** 一括 zip のファイル名 (`bulkZipFilename`)。運行 1 本なら使わない (単体 zip の名前は運行NO から)。 */
-  bulkZipName: string
-  /**
    * NET780 のアーカイブが **無かった** (`not-found`) 運行NO (Refs #760 の 27)。見出しの
    * 「NET780 を取得 (未取得 N 運行)」の N と、押したときに relay へ渡す対象。NET780 を
    * 引き終わるまで undefined (`error` の運行は入れない — 取りに行っても直らない)。
@@ -1057,8 +1047,7 @@ function buildEventTrack(headers: string[], rows: string[][], windows: LegWindow
 async function openRouteMap(m: OperationMargin) {
   const key = `op:${m.unkoNo}`
   const title = `運行 ${m.date} ${m.driverName} 車輌 ${m.vehicleCode} — 便 ${m.legs.length} 本`
-  const single = { unkoNos: [m.unkoNo], bulkZipName: `csvdata-${m.unkoNo}.zip` }
-  routeModal.value = { key, title, route: null, loading: true, error: null, trackNote: null, ...single }
+  routeModal.value = { key, title, route: null, loading: true, error: null, trackNote: null }
   routeModalReopen = () => openRouteMap(m)
   let route: OperationRoute | null = null
   let eventTrack: RouteSegment[] = []
@@ -1073,7 +1062,7 @@ async function openRouteMap(m: OperationMargin) {
   }
   // 待っている間に別の運行を開いた / 閉じたなら、古い結果で上書きしない。
   if (routeModal.value?.key !== key) return
-  routeModal.value = { key, title, route, loading: false, error, trackNote: null, ...single }
+  routeModal.value = { key, title, route, loading: false, error, trackNote: null }
   if (route === null) return
   // NET780 は後から重ねる (遅くても地図は先にイベント線で出す)。**NET780 が無い運行だけ**
   // 重ね掛け行のイベント軌跡を敷く (Refs #760 の 24。二重に敷かない)。
@@ -1084,114 +1073,6 @@ async function openRouteMap(m: OperationMargin) {
     route: appendTrack(route, track ?? eventTrack),
     trackNote: trackNoteFor(track === null ? 0 : 1, track === null && eventTrack.length > 0 ? 1 : 0),
     net780Missing: missing ? [m.unkoNo] : [],
-  }
-}
-
-/** csvdata.zip を落としている運行NO (null なら誰も落としていない)。 */
-const zipDownloading = ref<string | null>(null)
-/** 直近の zip ダウンロードの失敗理由 (表の上に 1 行出す。次の押下で消える)。 */
-const zipError = ref<string | null>(null)
-
-/**
- * 運行 1 本の **csvdata.zip (theearth の原本)** を落とす (Refs #760 の 23)。オーナー:
- * 「地図の近くに zip ダウンロード機能つけて」。中身は `KUDGFUL.csv` (給油) /
- * `KUDGIVT.csv` (イベント、始点終点 GPS つき) / `KUDGURI.csv` (運行集計) /
- * `SokudoData.csv` (速度帯) で、**1 秒刻みの GPS は入っていない** — 経路の密度を
- * 上げるためではなく、原本を手元で見るための口。
- *
- * 取得は front の server route (`/api/operations/:unko/csvdata-zip`) 経由。relay が
- * theearth に自前ログインするので**ブラウザの theearth セッションは要らない**
- * (日報編集の `/daily-report-api/zip` とは別経路)。theearth へのログインを伴って
- * 1 回数秒かかるので、**取得中は全部の zip ボタンを押せなくする** (`zipDownloading`)。
- *
- * 認証は **cookie (`logi_auth_token`、`.ippoan.org` 共有) と `Authorization: Bearer`
- * の両方**が通る — server route の `requireAuth` が cookie を先に見て、無ければ
- * Bearer を introspect する (`@ippoan/auth-client` の `server/auth.mjs`)。同一
- * オリジンの fetch なので cookie は自動で載るが、`/scraper` の ETC CSV が素の
- * `<a href>` (cookie だけ) で通しているのに対し、こちらは**閲覧モードのように
- * cookie が無い経路でも通るよう Bearer も明示する**。
- */
-async function downloadOperationZip(unkoNo: string) {
-  if (zipDownloading.value !== null) return
-  zipDownloading.value = unkoNo
-  zipError.value = null
-  try {
-    const token = currentAccessToken()
-    const headers: Record<string, string> = {}
-    if (token) headers['authorization'] = `Bearer ${token}`
-    const res = await fetch(operationCsvDataZipUrl(unkoNo), { headers })
-    if (!res.ok) {
-      const body = await res.json().catch(() => null) as { statusMessage?: string, message?: string } | null
-      throw new Error(body?.statusMessage ?? body?.message ?? `HTTP ${res.status}`)
-    }
-    await downloadBlobResponse(res, `csvdata-${unkoNo}.zip`)
-  }
-  catch (e) {
-    zipError.value = `運行 ${unkoNo} の csvdata.zip を落とせませんでした — ${e instanceof Error ? e.message : String(e)}`
-  }
-  finally {
-    zipDownloading.value = null
-  }
-}
-
-/** 地図モーダルの見出しの「zip」(運行 1 本のとき。`unkoNos` が 1 要素)。 */
-function downloadRouteModalZip() {
-  const unkoNo = routeModal.value?.unkoNos[0]
-  if (unkoNo !== undefined) void downloadOperationZip(unkoNo)
-}
-
-/** 一括 zip の進捗 (`3/12`)。取っていなければ null。見出しのボタンに出す。 */
-const bulkZipProgress = ref<string | null>(null)
-
-/**
- * 地図モーダルの見出しの「zip 一括 (N 運行)」(Refs #760 の 25)。経路 / 取引先の
- * 重ね合わせに載っている運行ぜんぶの csvdata.zip を**直列 (同時 1)** で引き
- * (relay が 1 運行ごとに theearth にログインしうるので並列にしない)、`bundleZips`
- * (JSZip) で `csvdata-<運行NO>.zip` × N を 1 つの zip にまとめて保存する。
- * 引けなかった運行は抜いて、最後に何本落ちたかを `zipError` に出す (黙って少ない
- * 本数を詰めない)。1 本も引けなければ zip は作らない。押下中は `zipDownloading` で
- * 全部の zip ボタンを止める (単体 zip と同じ鍵)。
- */
-async function downloadAllZips() {
-  const modal = routeModal.value
-  if (modal === null || zipDownloading.value !== null) return
-  const unkoNos = modal.unkoNos
-  zipDownloading.value = modal.key
-  zipError.value = null
-  bulkZipProgress.value = `0/${unkoNos.length}`
-  const entries: Array<{ name: string, bytes: ArrayBuffer }> = []
-  const failed: string[] = []
-  try {
-    const token = currentAccessToken()
-    const headers: Record<string, string> = {}
-    if (token) headers['authorization'] = `Bearer ${token}`
-    for (let i = 0; i < unkoNos.length; i++) {
-      const unkoNo = unkoNos[i]!
-      try {
-        const res = await fetch(operationCsvDataZipUrl(unkoNo), { headers })
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        entries.push({ name: `csvdata-${unkoNo}.zip`, bytes: await res.arrayBuffer() })
-      }
-      catch {
-        failed.push(unkoNo)
-      }
-      bulkZipProgress.value = `${i + 1}/${unkoNos.length}`
-    }
-    if (entries.length > 0) {
-      const blob = await bundleZips(entries)
-      await downloadBlobResponse(new Response(blob), modal.bulkZipName)
-    }
-    if (failed.length > 0) {
-      zipError.value = `運行 ${unkoNos.length} 本のうち ${failed.length} 本の csvdata.zip が引けませんでした (${failed.join(', ')})`
-        + (entries.length > 0 ? ' — 引けた分だけ zip にまとめました' : '')
-    }
-  }
-  catch (e) {
-    zipError.value = `csvdata.zip の一括ダウンロードに失敗しました — ${e instanceof Error ? e.message : String(e)}`
-  }
-  finally {
-    zipDownloading.value = null
-    bulkZipProgress.value = null
   }
 }
 
@@ -1207,7 +1088,7 @@ async function downloadAllZips() {
  * 引けなかった運行はそのぶんを抜いて描き、何本落としたかを `error` に出す
  * (**黙って少ない本数を重ねない** — 形を比べるのが目的なので、欠けを見せる)。
  */
-async function openLegRefsMap(key: string, title: string, legRefs: LegRef[], bulkZipName: string) {
+async function openLegRefsMap(key: string, title: string, legRefs: LegRef[]) {
   const byUnkoNo = new Map<string, number[]>()
   for (const ref of legRefs) {
     const seqs = byUnkoNo.get(ref.unkoNo) ?? []
@@ -1215,11 +1096,9 @@ async function openLegRefsMap(key: string, title: string, legRefs: LegRef[], bul
     byUnkoNo.set(ref.unkoNo, seqs)
   }
   const entries = [...byUnkoNo.entries()]
-  // 一括 zip (Refs #760 の 25) に渡す運行NO。`legRefs` の運行ごと (重複なし)。
-  const zipInfo = { unkoNos: entries.map(([unkoNo]) => unkoNo), bulkZipName }
   const withProgress = (done: number) => `${title} (読み込み中 ${done}/${entries.length})`
-  routeModal.value = { key, title: withProgress(0), route: null, loading: true, error: null, trackNote: null, ...zipInfo }
-  routeModalReopen = () => openLegRefsMap(key, title, legRefs, bulkZipName)
+  routeModal.value = { key, title: withProgress(0), route: null, loading: true, error: null, trackNote: null }
+  routeModalReopen = () => openLegRefsMap(key, title, legRefs)
 
   const picked: Array<{ unkoNo: string, route: OperationRoute, eventTrack: RouteSegment[] }> = []
   let failed = 0
@@ -1241,10 +1120,10 @@ async function openLegRefsMap(key: string, title: string, legRefs: LegRef[], bul
       if (r === null) failed += 1
       else picked.push(r)
     }
-    routeModal.value = { key, title: withProgress(picked.length + failed), route: null, loading: true, error: null, trackNote: null, ...zipInfo }
+    routeModal.value = { key, title: withProgress(picked.length + failed), route: null, loading: true, error: null, trackNote: null }
   }
   const error = failed === 0 ? null : `運行 ${entries.length} 本のうち ${failed} 本のイベントCSVが引けませんでした`
-  routeModal.value = { key, title, route: picked.length === 0 ? null : mergeRoutes(picked.map(p => p.route)), loading: false, error, trackNote: null, ...zipInfo }
+  routeModal.value = { key, title, route: picked.length === 0 ? null : mergeRoutes(picked.map(p => p.route)), loading: false, error, trackNote: null }
   if (picked.length === 0) return
 
   // NET780 は後から重ねる (Refs #760 の 21)。運行ごとに引き (CSV と同じ並列数)、アーカイブが
@@ -1346,14 +1225,14 @@ const net780Archiving = computed(() => {
 function openRouteLegsMap(c: CustomerSummary, r: RouteSummary) {
   const operations = new Set(r.legRefs.map(ref => ref.unkoNo)).size
   const title = `${c.name} ${r.from} → ${r.to} — 便 ${r.legRefs.length} 本 (運行 ${operations} 本)`
-  return openLegRefsMap(`route:${c.code}:${r.from}→${r.to}`, title, r.legRefs, bulkZipFilename(c.code || c.name, `${r.from}→${r.to}`, ym.value))
+  return openLegRefsMap(`route:${c.code}:${r.from}→${r.to}`, title, r.legRefs)
 }
 
 /** 取引先行の「地図」。その取引先の**全経路**を 1 枚に重ねる。 */
 function openCustomerLegsMap(c: CustomerSummary) {
   const operations = new Set(c.legRefs.map(ref => ref.unkoNo)).size
   const title = `${c.name} — 便 ${c.legRefs.length} 本 (経路 ${c.routes.length} 本・運行 ${operations} 本)`
-  return openLegRefsMap(`customer:${c.code}`, title, c.legRefs, bulkZipFilename(c.code || c.name, null, ym.value))
+  return openLegRefsMap(`customer:${c.code}`, title, c.legRefs)
 }
 /** 運行行の開閉 (3 段目の便を出す)。**乗務員行の `openDrivers` と同じ流儀。** */
 const openOperations = reactive<Record<string, boolean>>({})
@@ -1549,9 +1428,6 @@ function downloadCustomerRouteCsv() {
     </p>
     <p v-if="status === 'error'" class="text-sm text-red-600 dark:text-red-400 mb-4">
       {{ errorMessage }}
-    </p>
-    <p v-if="zipError" class="text-sm text-red-600 dark:text-red-400 mb-4">
-      {{ zipError }}
     </p>
     <p v-if="salesError" class="text-sm text-red-600 dark:text-red-400 mb-4">
       売上 (一番星) が引けませんでした — {{ salesError }} (売上 0 として扱っているので<b>粗利は正しくありません</b>)
@@ -1896,15 +1772,6 @@ function downloadCustomerRouteCsv() {
                         @click.stop="openRouteMap(m)"
                       >
                         地図
-                      </button>
-                      <button
-                        type="button"
-                        class="ml-1 rounded border border-gray-300 dark:border-gray-700 px-1.5 py-0.5 text-[11px] text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
-                        title="この運行の csvdata.zip (KUDGFUL/KUDGIVT/KUDGURI/SokudoData) をダウンロード"
-                        :disabled="zipDownloading !== null"
-                        @click.stop="downloadOperationZip(m.unkoNo)"
-                      >
-                        {{ zipDownloading === m.unkoNo ? '…' : 'zip' }}
                       </button>
                     </td>
                     <td
@@ -2261,15 +2128,10 @@ function downloadCustomerRouteCsv() {
       :error="routeModal.error"
       :track-note="routeModal.trackNote"
       :layers="routeMapLayers"
-      :unko-count="routeModal.unkoNos.length"
-      :zip-loading="zipDownloading !== null"
-      :bulk-zip-progress="bulkZipProgress"
       :net780-missing-count="routeModal.net780Missing?.length ?? 0"
       :net780-archive-progress="net780ArchiveProgress"
       :net780-archiving="net780Archiving"
       @close="routeModal = null"
-      @download-zip="downloadRouteModalZip"
-      @download-zip-all="downloadAllZips"
       @update:layers="setRouteMapLayers"
       @archive-net780="archiveRouteModalNet780"
     />
