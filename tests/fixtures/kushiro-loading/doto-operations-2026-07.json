@@ -3,1147 +3,8 @@
   "unkoNo": "2607010615000000001101",
   "driverName": "中村 一由",
   "kmBreakdown": {
-   "preLoadKm": 141.3,
-   "haulKm": 325.2,
-   "betweenKm": 194.8,
-   "postUnloadKm": 41.6,
-   "otherKm": 12.0
-  },
-  "firstLoadPoint": {
-   "lat": 42.98,
-   "lng": 144.335
-  },
-  "lastUnloadPoint": {
-   "lat": 42.9086,
-   "lng": 143.1583
-  },
-  "legs": [
-   {
-    "seq": 1,
-    "originCity": "北海道釧路市西港1-98-41",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 34800,
-    "allowanceYen": 8000,
-    "haulKm": 55.2,
-    "deadheadKm": 141.3,
-    "loadPoint": {
-     "lat": 42.98,
-     "lng": 144.335
-    },
-    "unloadPoint": {
-     "lat": 43.28,
-     "lng": 144.63
-    },
-    "haulSec": 7787,
-    "deadheadSec": 20624
-   },
-   {
-    "seq": 2,
-    "originCity": "北海道釧路市西港2-101-1",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 35700,
-    "allowanceYen": 8000,
-    "haulKm": 55.8,
-    "deadheadKm": 63.1,
-    "loadPoint": {
-     "lat": 42.9785,
-     "lng": 144.329
-    },
-    "unloadPoint": {
-     "lat": 43.28,
-     "lng": 144.63
-    },
-    "haulSec": 7867,
-    "deadheadSec": 9211
-   },
-   {
-    "seq": 3,
-    "originCity": "北海道釧路市西港1",
-    "destCity": "北海道河東郡音更町駒場",
-    "salesYen": 30000,
-    "allowanceYen": 4500,
-    "haulKm": 119.7,
-    "deadheadKm": 54.5,
-    "loadPoint": null,
-    "unloadPoint": {
-     "lat": 43.0806,
-     "lng": 143.25
-    },
-    "haulSec": 7200,
-    "deadheadSec": 5400
-   },
-   {
-    "seq": 4,
-    "originCity": "北海道広尾郡広尾町白樺通",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 28000,
-    "allowanceYen": 8000,
-    "haulKm": 94.5,
-    "deadheadKm": 118.8,
-    "loadPoint": {
-     "lat": 42.2846,
-     "lng": 143.3122
-    },
-    "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
-    },
-    "haulSec": 6600,
-    "deadheadSec": 6000
-   }
-  ]
- },
- {
-  "unkoNo": "2607020616000000001102",
-  "driverName": "中村 一由",
-  "kmBreakdown": {
-   "preLoadKm": 140.5,
-   "haulKm": 332.7,
-   "betweenKm": 177.2,
-   "postUnloadKm": 33.1,
-   "otherKm": 13.3
-  },
-  "firstLoadPoint": {
-   "lat": 42.9785,
-   "lng": 144.329
-  },
-  "lastUnloadPoint": {
-   "lat": 42.9086,
-   "lng": 143.1583
-  },
-  "legs": [
-   {
-    "seq": 1,
-    "originCity": "北海道釧路市西港2-101-1",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 36600,
-    "allowanceYen": 8000,
-    "haulKm": 55.8,
-    "deadheadKm": 140.5,
-    "loadPoint": {
-     "lat": 42.9785,
-     "lng": 144.329
-    },
-    "unloadPoint": {
-     "lat": 43.28,
-     "lng": 144.63
-    },
-    "haulSec": 7867,
-    "deadheadSec": 20513
-   },
-   {
-    "seq": 2,
-    "originCity": "北海道釧路市西港1",
-    "destCity": "北海道川上郡標茶町多和",
-    "salesYen": 37500,
-    "allowanceYen": 8000,
-    "haulKm": 53.6,
-    "deadheadKm": 61.8,
-    "loadPoint": {
-     "lat": 42.9815,
-     "lng": 144.341
-    },
-    "unloadPoint": {
-     "lat": 43.276,
-     "lng": 144.621
-    },
-    "haulSec": 7559,
-    "deadheadSec": 9025
-   },
-   {
-    "seq": 3,
-    "originCity": "北海道釧路市西港1-98-41",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 30500,
-    "allowanceYen": 9000,
-    "haulKm": 128.8,
-    "deadheadKm": 54.0,
-    "loadPoint": {
-     "lat": 42.98,
-     "lng": 144.335
-    },
-    "unloadPoint": null,
-    "haulSec": 7500,
-    "deadheadSec": 6000
-   },
-   {
-    "seq": 4,
-    "originCity": "北海道広尾郡広尾町白樺通",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 28700,
-    "allowanceYen": 8000,
-    "haulKm": 94.5,
-    "deadheadKm": 94.5,
-    "loadPoint": {
-     "lat": 42.2846,
-     "lng": 143.3122
-    },
-    "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
-    },
-    "haulSec": 7050,
-    "deadheadSec": 6700
-   }
-  ]
- },
- {
-  "unkoNo": "2607030617000000001103",
-  "driverName": "中村 一由",
-  "kmBreakdown": {
-   "preLoadKm": 142.0,
-   "haulKm": 368.1,
-   "betweenKm": 240.3,
-   "postUnloadKm": 41.6,
-   "otherKm": 14.6
-  },
-  "firstLoadPoint": {
-   "lat": 42.9815,
-   "lng": 144.341
-  },
-  "lastUnloadPoint": {
-   "lat": 42.9086,
-   "lng": 143.1583
-  },
-  "legs": [
-   {
-    "seq": 1,
-    "originCity": "北海道釧路市西港1",
-    "destCity": "北海道川上郡標茶町多和",
-    "salesYen": 38400,
-    "allowanceYen": 8000,
-    "haulKm": 53.6,
-    "deadheadKm": 142.0,
-    "loadPoint": {
-     "lat": 42.9815,
-     "lng": 144.341
-    },
-    "unloadPoint": {
-     "lat": 43.276,
-     "lng": 144.621
-    },
-    "haulSec": 7559,
-    "deadheadSec": 20734
-   },
-   {
-    "seq": 2,
-    "originCity": "北海道釧路市西港1-98-41",
-    "destCity": "北海道野付郡別海町中西別",
-    "salesYen": 40600,
-    "allowanceYen": 9000,
-    "haulKm": 101.5,
-    "deadheadKm": 61.3,
-    "loadPoint": {
-     "lat": 42.98,
-     "lng": 144.335
-    },
-    "unloadPoint": {
-     "lat": 43.47,
-     "lng": 144.98
-    },
-    "haulSec": 14318,
-    "deadheadSec": 8943
-   },
-   {
-    "seq": 3,
-    "originCity": "北海道釧路市西港2-101-1",
-    "destCity": "北海道河東郡音更町駒場",
-    "salesYen": 31000,
-    "allowanceYen": 4500,
-    "haulKm": 118.5,
-    "deadheadKm": 101.8,
-    "loadPoint": {
-     "lat": 42.9785,
-     "lng": 144.329
-    },
-    "unloadPoint": {
-     "lat": 43.0806,
-     "lng": 143.25
-    },
-    "haulSec": null,
-    "deadheadSec": 6600
-   },
-   {
-    "seq": 4,
-    "originCity": "北海道広尾郡広尾町白樺通",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 29400,
-    "allowanceYen": 8000,
-    "haulKm": 94.5,
-    "deadheadKm": 118.8,
-    "loadPoint": {
-     "lat": 42.2846,
-     "lng": 143.3122
-    },
-    "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
-    },
-    "haulSec": 7500,
-    "deadheadSec": 7400
-   }
-  ]
- },
- {
-  "unkoNo": "2607040618000000001104",
-  "driverName": "中村 一由",
-  "kmBreakdown": {
-   "preLoadKm": 141.3,
-   "haulKm": 335.0,
-   "betweenKm": 179.0,
-   "postUnloadKm": 33.1,
-   "otherKm": 15.9
-  },
-  "firstLoadPoint": {
-   "lat": 42.98,
-   "lng": 144.335
-  },
-  "lastUnloadPoint": {
-   "lat": 42.9086,
-   "lng": 143.1583
-  },
-  "legs": [
-   {
-    "seq": 1,
-    "originCity": "北海道釧路市西港1-98-41",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 36300,
-    "allowanceYen": 8000,
-    "haulKm": 55.2,
-    "deadheadKm": 141.3,
-    "loadPoint": {
-     "lat": 42.98,
-     "lng": 144.335
-    },
-    "unloadPoint": {
-     "lat": 43.28,
-     "lng": 144.63
-    },
-    "haulSec": 7787,
-    "deadheadSec": 20624
-   },
-   {
-    "seq": 2,
-    "originCity": "北海道釧路市西港2-101-1",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 37200,
-    "allowanceYen": 8000,
-    "haulKm": 55.8,
-    "deadheadKm": 63.1,
-    "loadPoint": {
-     "lat": 42.9785,
-     "lng": 144.329
-    },
-    "unloadPoint": {
-     "lat": 43.28,
-     "lng": 144.63
-    },
-    "haulSec": 7867,
-    "deadheadSec": 9211
-   },
-   {
-    "seq": 3,
-    "originCity": "北海道釧路市西港1",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 31500,
-    "allowanceYen": 9000,
-    "haulKm": 129.5,
-    "deadheadKm": 54.5,
-    "loadPoint": {
-     "lat": 42.9815,
-     "lng": 144.341
-    },
-    "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
-    },
-    "haulSec": 8100,
-    "deadheadSec": null
-   },
-   {
-    "seq": 4,
-    "originCity": "北海道広尾郡広尾町白樺通",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 30100,
-    "allowanceYen": 8000,
-    "haulKm": 94.5,
-    "deadheadKm": 94.5,
-    "loadPoint": {
-     "lat": 42.2846,
-     "lng": 143.3122
-    },
-    "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
-    },
-    "haulSec": 7950,
-    "deadheadSec": 6000
-   }
-  ]
- },
- {
-  "unkoNo": "2607050619000000001105",
-  "driverName": "中村 一由",
-  "kmBreakdown": {
-   "preLoadKm": 140.5,
-   "haulKm": 323.0,
-   "betweenKm": 193.0,
-   "postUnloadKm": 41.6,
-   "otherKm": 17.2
-  },
-  "firstLoadPoint": {
-   "lat": 42.9785,
-   "lng": 144.329
-  },
-  "lastUnloadPoint": {
-   "lat": 42.9086,
-   "lng": 143.1583
-  },
-  "legs": [
-   {
-    "seq": 1,
-    "originCity": "北海道釧路市西港2-101-1",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 38100,
-    "allowanceYen": 8000,
-    "haulKm": 55.8,
-    "deadheadKm": 140.5,
-    "loadPoint": {
-     "lat": 42.9785,
-     "lng": 144.329
-    },
-    "unloadPoint": {
-     "lat": 43.28,
-     "lng": 144.63
-    },
-    "haulSec": 7867,
-    "deadheadSec": 20513
-   },
-   {
-    "seq": 2,
-    "originCity": "北海道釧路市西港1",
-    "destCity": "北海道川上郡標茶町多和",
-    "salesYen": 35095,
-    "allowanceYen": 8000,
-    "haulKm": 53.6,
-    "deadheadKm": 61.8,
-    "loadPoint": {
-     "lat": 42.9815,
-     "lng": 144.341
-    },
-    "unloadPoint": {
-     "lat": 43.276,
-     "lng": 144.621
-    },
-    "haulSec": 7559,
-    "deadheadSec": 9025
-   },
-   {
-    "seq": 3,
-    "originCity": "北海道釧路市西港1-98-41",
-    "destCity": "北海道河東郡音更町駒場",
-    "salesYen": 32000,
-    "allowanceYen": 4500,
-    "haulKm": 119.1,
-    "deadheadKm": 54.0,
-    "loadPoint": {
-     "lat": 42.98,
-     "lng": 144.335
-    },
-    "unloadPoint": {
-     "lat": 43.0806,
-     "lng": 143.25
-    },
-    "haulSec": 8400,
-    "deadheadSec": 5400
-   },
-   {
-    "seq": 4,
-    "originCity": "北海道広尾郡広尾町白樺通",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 30800,
-    "allowanceYen": 8000,
-    "haulKm": 94.5,
-    "deadheadKm": 118.8,
-    "loadPoint": {
-     "lat": 42.2846,
-     "lng": 143.3122
-    },
-    "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
-    },
-    "haulSec": 6600,
-    "deadheadSec": 6700
-   }
-  ]
- },
- {
-  "unkoNo": "2607060620000000001101",
-  "driverName": "中村 一由",
-  "kmBreakdown": {
-   "preLoadKm": 142.0,
-   "haulKm": 351.9,
-   "betweenKm": 205.0,
-   "postUnloadKm": 33.1,
-   "otherKm": 18.5
-  },
-  "firstLoadPoint": {
-   "lat": 42.9815,
-   "lng": 144.341
-  },
-  "lastUnloadPoint": {
-   "lat": 42.9086,
-   "lng": 143.1583
-  },
-  "legs": [
-   {
-    "seq": 1,
-    "originCity": "北海道釧路市西港1",
-    "destCity": "北海道野付郡別海町中西別",
-    "salesYen": 41300,
-    "allowanceYen": 9000,
-    "haulKm": 100.9,
-    "deadheadKm": 142.0,
-    "loadPoint": {
-     "lat": 42.9815,
-     "lng": 144.341
-    },
-    "unloadPoint": {
-     "lat": 43.47,
-     "lng": 144.98
-    },
-    "haulSec": 14231,
-    "deadheadSec": 20734
-   },
-   {
-    "seq": 2,
-    "originCity": "北海道釧路市西港1-98-41",
-    "destCity": "北海道川上郡標茶町西熊牛原野",
-    "salesYen": 36600,
-    "allowanceYen": 8000,
-    "haulKm": 28.4,
-    "deadheadKm": 114.9,
-    "loadPoint": {
-     "lat": 42.98,
-     "lng": 144.335
-    },
-    "unloadPoint": {
-     "lat": 43.15,
-     "lng": 144.45
-    },
-    "haulSec": 3999,
-    "deadheadSec": 16765
-   },
-   {
-    "seq": 3,
-    "originCity": "北海道釧路市西港2-101-1",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 32500,
-    "allowanceYen": 9000,
-    "haulKm": 128.1,
-    "deadheadKm": 28.7,
-    "loadPoint": {
-     "lat": 42.9785,
-     "lng": 144.329
-    },
-    "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
-    },
-    "haulSec": 7200,
-    "deadheadSec": 6000
-   },
-   {
-    "seq": 4,
-    "originCity": "北海道広尾郡広尾町白樺通",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 28000,
-    "allowanceYen": 8000,
-    "haulKm": 94.5,
-    "deadheadKm": 94.5,
-    "loadPoint": {
-     "lat": 42.2846,
-     "lng": 143.3122
-    },
-    "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
-    },
-    "haulSec": 7050,
-    "deadheadSec": 7400
-   }
-  ]
- },
- {
-  "unkoNo": "2607070621000000001102",
-  "driverName": "中村 一由",
-  "kmBreakdown": {
-   "preLoadKm": 141.3,
-   "haulKm": 325.2,
-   "betweenKm": 194.8,
-   "postUnloadKm": 41.6,
-   "otherKm": 12.0
-  },
-  "firstLoadPoint": {
-   "lat": 42.98,
-   "lng": 144.335
-  },
-  "lastUnloadPoint": {
-   "lat": 42.9086,
-   "lng": 143.1583
-  },
-  "legs": [
-   {
-    "seq": 1,
-    "originCity": "北海道釧路市西港1-98-41",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 37500,
-    "allowanceYen": 8000,
-    "haulKm": 55.2,
-    "deadheadKm": 141.3,
-    "loadPoint": {
-     "lat": 42.98,
-     "lng": 144.335
-    },
-    "unloadPoint": {
-     "lat": 43.28,
-     "lng": 144.63
-    },
-    "haulSec": 7787,
-    "deadheadSec": 20624
-   },
-   {
-    "seq": 2,
-    "originCity": "北海道釧路市西港2-101-1",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 34500,
-    "allowanceYen": 8000,
-    "haulKm": 55.8,
-    "deadheadKm": 63.1,
-    "loadPoint": {
-     "lat": 42.9785,
-     "lng": 144.329
-    },
-    "unloadPoint": {
-     "lat": 43.28,
-     "lng": 144.63
-    },
-    "haulSec": 7867,
-    "deadheadSec": 9211
-   },
-   {
-    "seq": 3,
-    "originCity": "北海道釧路市西港1",
-    "destCity": "北海道河東郡音更町駒場",
-    "salesYen": 33000,
-    "allowanceYen": 4500,
-    "haulKm": 119.7,
-    "deadheadKm": 54.5,
-    "loadPoint": {
-     "lat": 42.9815,
-     "lng": 144.341
-    },
-    "unloadPoint": {
-     "lat": 43.0806,
-     "lng": 143.25
-    },
-    "haulSec": 7500,
-    "deadheadSec": 6600
-   },
-   {
-    "seq": 4,
-    "originCity": "北海道広尾郡広尾町白樺通",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 28700,
-    "allowanceYen": 8000,
-    "haulKm": 94.5,
-    "deadheadKm": 118.8,
-    "loadPoint": {
-     "lat": 42.2846,
-     "lng": 143.3122
-    },
-    "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
-    },
-    "haulSec": 7500,
-    "deadheadSec": 6000
-   }
-  ]
- },
- {
-  "unkoNo": "2607080622000000001103",
-  "driverName": "中村 一由",
-  "kmBreakdown": {
-   "preLoadKm": 140.5,
-   "haulKm": 332.7,
-   "betweenKm": 177.2,
-   "postUnloadKm": 33.1,
-   "otherKm": 13.3
-  },
-  "firstLoadPoint": {
-   "lat": 42.9785,
-   "lng": 144.329
-  },
-  "lastUnloadPoint": {
-   "lat": 42.9086,
-   "lng": 143.1583
-  },
-  "legs": [
-   {
-    "seq": 1,
-    "originCity": "北海道釧路市西港2-101-1",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 35400,
-    "allowanceYen": 8000,
-    "haulKm": 55.8,
-    "deadheadKm": 140.5,
-    "loadPoint": {
-     "lat": 42.9785,
-     "lng": 144.329
-    },
-    "unloadPoint": {
-     "lat": 43.28,
-     "lng": 144.63
-    },
-    "haulSec": 7867,
-    "deadheadSec": 20513
-   },
-   {
-    "seq": 2,
-    "originCity": "北海道釧路市西港1",
-    "destCity": "北海道川上郡標茶町多和",
-    "salesYen": 36300,
-    "allowanceYen": 8000,
-    "haulKm": 53.6,
-    "deadheadKm": 61.8,
-    "loadPoint": {
-     "lat": 42.9815,
-     "lng": 144.341
-    },
-    "unloadPoint": {
-     "lat": 43.276,
-     "lng": 144.621
-    },
-    "haulSec": 7559,
-    "deadheadSec": 9025
-   },
-   {
-    "seq": 3,
-    "originCity": "北海道釧路市西港1-98-41",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 30000,
-    "allowanceYen": 9000,
-    "haulKm": 128.8,
-    "deadheadKm": 54.0,
-    "loadPoint": {
-     "lat": 42.98,
-     "lng": 144.335
-    },
-    "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
-    },
-    "haulSec": 7800,
-    "deadheadSec": 7200
-   },
-   {
-    "seq": 4,
-    "originCity": "北海道広尾郡広尾町白樺通",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 29400,
-    "allowanceYen": 8000,
-    "haulKm": 94.5,
-    "deadheadKm": 94.5,
-    "loadPoint": {
-     "lat": 42.2846,
-     "lng": 143.3122
-    },
-    "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
-    },
-    "haulSec": 7950,
-    "deadheadSec": 6700
-   }
-  ]
- },
- {
-  "unkoNo": "2607090623000000001104",
-  "driverName": "中村 一由",
-  "kmBreakdown": {
-   "preLoadKm": 142.0,
-   "haulKm": 342.3,
-   "betweenKm": 220.8,
-   "postUnloadKm": 41.6,
-   "otherKm": 14.6
-  },
-  "firstLoadPoint": {
-   "lat": 42.9815,
-   "lng": 144.341
-  },
-  "lastUnloadPoint": {
-   "lat": 42.9086,
-   "lng": 143.1583
-  },
-  "legs": [
-   {
-    "seq": 1,
-    "originCity": "北海道釧路市西港1",
-    "destCity": "北海道野付郡別海町中西別",
-    "salesYen": 43050,
-    "allowanceYen": 9000,
-    "haulKm": 100.9,
-    "deadheadKm": 142.0,
-    "loadPoint": {
-     "lat": 42.9815,
-     "lng": 144.341
-    },
-    "unloadPoint": {
-     "lat": 43.47,
-     "lng": 144.98
-    },
-    "haulSec": 14231,
-    "deadheadSec": 20734
-   },
-   {
-    "seq": 2,
-    "originCity": "北海道釧路市西港1-98-41",
-    "destCity": "北海道川上郡標茶町西熊牛原野",
-    "salesYen": 38100,
-    "allowanceYen": 8000,
-    "haulKm": 28.4,
-    "deadheadKm": 114.9,
-    "loadPoint": {
-     "lat": 42.98,
-     "lng": 144.335
-    },
-    "unloadPoint": {
-     "lat": 43.15,
-     "lng": 144.45
-    },
-    "haulSec": 3999,
-    "deadheadSec": 16765
-   },
-   {
-    "seq": 3,
-    "originCity": "北海道釧路市西港2-101-1",
-    "destCity": "北海道河東郡音更町駒場",
-    "salesYen": 30500,
-    "allowanceYen": 4500,
-    "haulKm": 118.5,
-    "deadheadKm": 28.7,
-    "loadPoint": {
-     "lat": 42.9785,
-     "lng": 144.329
-    },
-    "unloadPoint": {
-     "lat": 43.0806,
-     "lng": 143.25
-    },
-    "haulSec": 8100,
-    "deadheadSec": 5400
-   },
-   {
-    "seq": 4,
-    "originCity": "北海道広尾郡広尾町白樺通",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 30100,
-    "allowanceYen": 8000,
-    "haulKm": 94.5,
-    "deadheadKm": 118.8,
-    "loadPoint": {
-     "lat": 42.2846,
-     "lng": 143.3122
-    },
-    "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
-    },
-    "haulSec": 6600,
-    "deadheadSec": 7400
-   }
-  ]
- },
- {
-  "unkoNo": "2607100624000000001105",
-  "driverName": "中村 一由",
-  "kmBreakdown": {
-   "preLoadKm": 141.3,
-   "haulKm": 335.0,
-   "betweenKm": 179.0,
-   "postUnloadKm": 33.1,
-   "otherKm": 15.9
-  },
-  "firstLoadPoint": {
-   "lat": 42.98,
-   "lng": 144.335
-  },
-  "lastUnloadPoint": {
-   "lat": 42.9086,
-   "lng": 143.1583
-  },
-  "legs": [
-   {
-    "seq": 1,
-    "originCity": "北海道釧路市西港1-98-41",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 35100,
-    "allowanceYen": 8000,
-    "haulKm": 55.2,
-    "deadheadKm": 141.3,
-    "loadPoint": {
-     "lat": 42.98,
-     "lng": 144.335
-    },
-    "unloadPoint": {
-     "lat": 43.28,
-     "lng": 144.63
-    },
-    "haulSec": 7787,
-    "deadheadSec": 20624
-   },
-   {
-    "seq": 2,
-    "originCity": "北海道釧路市西港2-101-1",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 36000,
-    "allowanceYen": 8000,
-    "haulKm": 55.8,
-    "deadheadKm": 63.1,
-    "loadPoint": {
-     "lat": 42.9785,
-     "lng": 144.329
-    },
-    "unloadPoint": {
-     "lat": 43.28,
-     "lng": 144.63
-    },
-    "haulSec": 7867,
-    "deadheadSec": 9211
-   },
-   {
-    "seq": 3,
-    "originCity": "北海道釧路市西港1",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 31000,
-    "allowanceYen": 9000,
-    "haulKm": 129.5,
-    "deadheadKm": 54.5,
-    "loadPoint": {
-     "lat": 42.9815,
-     "lng": 144.341
-    },
-    "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
-    },
-    "haulSec": 8400,
-    "deadheadSec": 6000
-   },
-   {
-    "seq": 4,
-    "originCity": "北海道広尾郡広尾町白樺通",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 30800,
-    "allowanceYen": 8000,
-    "haulKm": 94.5,
-    "deadheadKm": 94.5,
-    "loadPoint": {
-     "lat": 42.2846,
-     "lng": 143.3122
-    },
-    "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
-    },
-    "haulSec": 7050,
-    "deadheadSec": 6000
-   }
-  ]
- },
- {
-  "unkoNo": "2607110625000000001101",
-  "driverName": "中村 一由",
-  "kmBreakdown": {
-   "preLoadKm": 140.5,
-   "haulKm": 323.0,
-   "betweenKm": 193.0,
-   "postUnloadKm": 41.6,
-   "otherKm": 17.2
-  },
-  "firstLoadPoint": {
-   "lat": 42.9785,
-   "lng": 144.329
-  },
-  "lastUnloadPoint": {
-   "lat": 42.9086,
-   "lng": 143.1583
-  },
-  "legs": [
-   {
-    "seq": 1,
-    "originCity": "北海道釧路市西港2-101-1",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 36900,
-    "allowanceYen": 8000,
-    "haulKm": 55.8,
-    "deadheadKm": 140.5,
-    "loadPoint": {
-     "lat": 42.9785,
-     "lng": 144.329
-    },
-    "unloadPoint": {
-     "lat": 43.28,
-     "lng": 144.63
-    },
-    "haulSec": 7867,
-    "deadheadSec": 20513
-   },
-   {
-    "seq": 2,
-    "originCity": "北海道釧路市西港1",
-    "destCity": "北海道川上郡標茶町多和",
-    "salesYen": 37800,
-    "allowanceYen": 8000,
-    "haulKm": 53.6,
-    "deadheadKm": 61.8,
-    "loadPoint": {
-     "lat": 42.9815,
-     "lng": 144.341
-    },
-    "unloadPoint": {
-     "lat": 43.276,
-     "lng": 144.621
-    },
-    "haulSec": 7559,
-    "deadheadSec": 9025
-   },
-   {
-    "seq": 3,
-    "originCity": "北海道釧路市西港1-98-41",
-    "destCity": "北海道河東郡音更町駒場",
-    "salesYen": 31500,
-    "allowanceYen": 4500,
-    "haulKm": 119.1,
-    "deadheadKm": 54.0,
-    "loadPoint": {
-     "lat": 42.98,
-     "lng": 144.335
-    },
-    "unloadPoint": {
-     "lat": 43.0806,
-     "lng": 143.25
-    },
-    "haulSec": 7200,
-    "deadheadSec": 6600
-   },
-   {
-    "seq": 4,
-    "originCity": "北海道広尾郡広尾町白樺通",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 28000,
-    "allowanceYen": 8000,
-    "haulKm": 94.5,
-    "deadheadKm": 118.8,
-    "loadPoint": {
-     "lat": 42.2846,
-     "lng": 143.3122
-    },
-    "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
-    },
-    "haulSec": 7500,
-    "deadheadSec": 6700
-   }
-  ]
- },
- {
-  "unkoNo": "2607120626000000001102",
-  "driverName": "中村 一由",
-  "kmBreakdown": {
-   "preLoadKm": 142.0,
-   "haulKm": 324.2,
-   "betweenKm": 162.6,
-   "postUnloadKm": 33.1,
-   "otherKm": 18.5
-  },
-  "firstLoadPoint": {
-   "lat": 42.9815,
-   "lng": 144.341
-  },
-  "lastUnloadPoint": {
-   "lat": 42.9086,
-   "lng": 143.1583
-  },
-  "legs": [
-   {
-    "seq": 1,
-    "originCity": "北海道釧路市西港1",
-    "destCity": "北海道野付郡別海町中西別",
-    "salesYen": 40250,
-    "allowanceYen": 9000,
-    "haulKm": 100.9,
-    "deadheadKm": 142.0,
-    "loadPoint": {
-     "lat": 42.9815,
-     "lng": 144.341
-    },
-    "unloadPoint": {
-     "lat": 43.47,
-     "lng": 144.98
-    },
-    "haulSec": 14231,
-    "deadheadSec": 20734
-   },
-   {
-    "seq": 2,
-    "originCity": "北海道釧路市西港1-98-41",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 32000,
-    "allowanceYen": 9000,
-    "haulKm": 128.8,
-    "deadheadKm": 101.2,
-    "loadPoint": {
-     "lat": 42.98,
-     "lng": 144.335
-    },
-    "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
-    },
-    "haulSec": 7500,
-    "deadheadSec": 7200
-   },
-   {
-    "seq": 3,
-    "originCity": "北海道広尾郡広尾町白樺通",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 28700,
-    "allowanceYen": 8000,
-    "haulKm": 94.5,
-    "deadheadKm": 94.5,
-    "loadPoint": {
-     "lat": 42.2846,
-     "lng": 143.3122
-    },
-    "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
-    },
-    "haulSec": 7950,
-    "deadheadSec": 7400
-   }
-  ]
- },
- {
-  "unkoNo": "2607130627000000001103",
-  "driverName": "中村 一由",
-  "kmBreakdown": {
-   "preLoadKm": 141.3,
-   "haulKm": 268.2,
+   "preLoadKm": 104.4,
+   "haulKm": 272.8,
    "betweenKm": 132.8,
    "postUnloadKm": 41.6,
    "otherKm": 12.0
@@ -1160,11 +21,11 @@
    {
     "seq": 1,
     "originCity": "北海道釧路市西港1-98-41",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 35700,
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 35874,
     "allowanceYen": 8000,
-    "haulKm": 55.2,
-    "deadheadKm": 141.3,
+    "haulKm": 59.8,
+    "deadheadKm": 104.4,
     "loadPoint": {
      "lat": 42.98,
      "lng": 144.335
@@ -1173,33 +34,30 @@
      "lat": 43.28,
      "lng": 144.63
     },
-    "haulSec": 7787,
-    "deadheadSec": 20624
+    "haulSec": 8432,
+    "deadheadSec": 15239
    },
    {
     "seq": 2,
     "originCity": "北海道釧路市西港2-101-1",
     "destCity": "北海道河東郡音更町駒場",
-    "salesYen": 32500,
+    "salesYen": 30000,
     "allowanceYen": 4500,
     "haulKm": 118.5,
     "deadheadKm": 55.6,
-    "loadPoint": {
-     "lat": 42.9785,
-     "lng": 144.329
-    },
+    "loadPoint": null,
     "unloadPoint": {
      "lat": 43.0806,
      "lng": 143.25
     },
-    "haulSec": 7800,
+    "haulSec": 7200,
     "deadheadSec": 5400
    },
    {
     "seq": 3,
     "originCity": "北海道広尾郡広尾町白樺通",
     "destCity": "北海道帯広市川西町",
-    "salesYen": 29400,
+    "salesYen": 30500,
     "allowanceYen": 8000,
     "haulKm": 94.5,
     "deadheadKm": 118.8,
@@ -1211,17 +69,17 @@
      "lat": 42.9086,
      "lng": 143.1583
     },
-    "haulSec": 6600,
+    "haulSec": 7500,
     "deadheadSec": 6000
    }
   ]
  },
  {
-  "unkoNo": "2607140628000000001104",
+  "unkoNo": "2607020616000000001102",
   "driverName": "中村 一由",
   "kmBreakdown": {
-   "preLoadKm": 140.5,
-   "haulKm": 279.8,
+   "preLoadKm": 93.2,
+   "haulKm": 281.1,
    "betweenKm": 115.9,
    "postUnloadKm": 33.1,
    "otherKm": 13.3
@@ -1238,11 +96,11 @@
    {
     "seq": 1,
     "originCity": "北海道釧路市西港2-101-1",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 36600,
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 34110,
     "allowanceYen": 8000,
-    "haulKm": 55.8,
-    "deadheadKm": 140.5,
+    "haulKm": 57.1,
+    "deadheadKm": 93.2,
     "loadPoint": {
      "lat": 42.9785,
      "lng": 144.329
@@ -1251,11 +109,1039 @@
      "lat": 43.28,
      "lng": 144.63
     },
-    "haulSec": 7867,
-    "deadheadSec": 20513
+    "haulSec": 8051,
+    "deadheadSec": 13604
    },
    {
     "seq": 2,
+    "originCity": "北海道釧路市西港1",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 30500,
+    "allowanceYen": 9000,
+    "haulKm": 129.5,
+    "deadheadKm": 54.5,
+    "loadPoint": {
+     "lat": 42.9815,
+     "lng": 144.341
+    },
+    "unloadPoint": null,
+    "haulSec": 7500,
+    "deadheadSec": 6000
+   },
+   {
+    "seq": 3,
+    "originCity": "北海道広尾郡広尾町白樺通",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 31000,
+    "allowanceYen": 8000,
+    "haulKm": 94.5,
+    "deadheadKm": 94.5,
+    "loadPoint": {
+     "lat": 42.2846,
+     "lng": 143.3122
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 7800,
+    "deadheadSec": 6600
+   }
+  ]
+ },
+ {
+  "unkoNo": "2607030617000000001103",
+  "driverName": "中村 一由",
+  "kmBreakdown": {
+   "preLoadKm": 102.8,
+   "haulKm": 279.4,
+   "betweenKm": 138.4,
+   "postUnloadKm": 44.9,
+   "otherKm": 14.6
+  },
+  "firstLoadPoint": {
+   "lat": 42.9815,
+   "lng": 144.341
+  },
+  "lastUnloadPoint": {
+   "lat": 42.9086,
+   "lng": 143.1583
+  },
+  "legs": [
+   {
+    "seq": 1,
+    "originCity": "北海道釧路市西港1",
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 38226,
+    "allowanceYen": 8000,
+    "haulKm": 63.3,
+    "deadheadKm": 102.8,
+    "loadPoint": {
+     "lat": 42.9815,
+     "lng": 144.341
+    },
+    "unloadPoint": {
+     "lat": 43.28,
+     "lng": 144.63
+    },
+    "haulSec": 8926,
+    "deadheadSec": 15005
+   },
+   {
+    "seq": 2,
+    "originCity": "北海道釧路市西港1-98-41",
+    "destCity": "北海道河東郡士幌町士幌",
+    "salesYen": 31000,
+    "allowanceYen": 9000,
+    "haulKm": 121.6,
+    "deadheadKm": 55.0,
+    "loadPoint": {
+     "lat": 42.98,
+     "lng": 144.335
+    },
+    "unloadPoint": {
+     "lat": 43.1443,
+     "lng": 143.2411
+    },
+    "haulSec": null,
+    "deadheadSec": 6600
+   },
+   {
+    "seq": 3,
+    "originCity": "北海道広尾郡広尾町白樺通",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 31500,
+    "allowanceYen": 8000,
+    "haulKm": 94.5,
+    "deadheadKm": 128.3,
+    "loadPoint": {
+     "lat": 42.2846,
+     "lng": 143.3122
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 8100,
+    "deadheadSec": 7200
+   }
+  ]
+ },
+ {
+  "unkoNo": "2607040618000000001104",
+  "driverName": "中村 一由",
+  "kmBreakdown": {
+   "preLoadKm": 116.2,
+   "haulKm": 274.1,
+   "betweenKm": 131.7,
+   "postUnloadKm": 41.6,
+   "otherKm": 15.9
+  },
+  "firstLoadPoint": {
+   "lat": 42.98,
+   "lng": 144.335
+  },
+  "lastUnloadPoint": {
+   "lat": 42.9086,
+   "lng": 143.1583
+  },
+  "legs": [
+   {
+    "seq": 1,
+    "originCity": "北海道釧路市西港1-98-41",
+    "destCity": "北海道川上郡標茶町多和",
+    "salesYen": 37974,
+    "allowanceYen": 8000,
+    "haulKm": 61.1,
+    "deadheadKm": 116.2,
+    "loadPoint": {
+     "lat": 42.98,
+     "lng": 144.335
+    },
+    "unloadPoint": {
+     "lat": 43.276,
+     "lng": 144.621
+    },
+    "haulSec": 8615,
+    "deadheadSec": 16961
+   },
+   {
+    "seq": 2,
+    "originCity": "北海道釧路市西港2-101-1",
+    "destCity": "北海道河東郡音更町駒場",
+    "salesYen": 31500,
+    "allowanceYen": 4500,
+    "haulKm": 118.5,
+    "deadheadKm": 54.5,
+    "loadPoint": {
+     "lat": 42.9785,
+     "lng": 144.329
+    },
+    "unloadPoint": {
+     "lat": 43.0806,
+     "lng": 143.25
+    },
+    "haulSec": 8100,
+    "deadheadSec": null
+   },
+   {
+    "seq": 3,
+    "originCity": "北海道広尾郡広尾町白樺通",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 32000,
+    "allowanceYen": 8000,
+    "haulKm": 94.5,
+    "deadheadKm": 118.8,
+    "loadPoint": {
+     "lat": 42.2846,
+     "lng": 143.3122
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 8400,
+    "deadheadSec": 5400
+   }
+  ]
+ },
+ {
+  "unkoNo": "2607050619000000001105",
+  "driverName": "中村 一由",
+  "kmBreakdown": {
+   "preLoadKm": 99.9,
+   "haulKm": 280.5,
+   "betweenKm": 114.8,
+   "postUnloadKm": 33.1,
+   "otherKm": 17.2
+  },
+  "firstLoadPoint": {
+   "lat": 42.9785,
+   "lng": 144.329
+  },
+  "lastUnloadPoint": {
+   "lat": 42.9086,
+   "lng": 143.1583
+  },
+  "legs": [
+   {
+    "seq": 1,
+    "originCity": "北海道釧路市西港2-101-1",
+    "destCity": "北海道川上郡標茶町多和",
+    "salesYen": 34914,
+    "allowanceYen": 8000,
+    "haulKm": 56.5,
+    "deadheadKm": 99.9,
+    "loadPoint": {
+     "lat": 42.9785,
+     "lng": 144.329
+    },
+    "unloadPoint": {
+     "lat": 43.276,
+     "lng": 144.621
+    },
+    "haulSec": 7967,
+    "deadheadSec": 14582
+   },
+   {
+    "seq": 2,
+    "originCity": "北海道釧路市西港1",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 32000,
+    "allowanceYen": 9000,
+    "haulKm": 129.5,
+    "deadheadKm": 53.4,
+    "loadPoint": {
+     "lat": 42.9815,
+     "lng": 144.341
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 8400,
+    "deadheadSec": 5400
+   },
+   {
+    "seq": 3,
+    "originCity": "北海道広尾郡広尾町白樺通",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 32500,
+    "allowanceYen": 8000,
+    "haulKm": 94.5,
+    "deadheadKm": 94.5,
+    "loadPoint": {
+     "lat": 42.2846,
+     "lng": 143.3122
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 7200,
+    "deadheadSec": 6000
+   }
+  ]
+ },
+ {
+  "unkoNo": "2607060620000000001101",
+  "driverName": "中村 一由",
+  "kmBreakdown": {
+   "preLoadKm": 154.0,
+   "haulKm": 168.8,
+   "betweenKm": 149.5,
+   "postUnloadKm": 80.5,
+   "otherKm": 18.5
+  },
+  "firstLoadPoint": {
+   "lat": 42.9815,
+   "lng": 144.341
+  },
+  "lastUnloadPoint": {
+   "lat": 42.9086,
+   "lng": 143.1583
+  },
+  "legs": [
+   {
+    "seq": 1,
+    "originCity": "北海道釧路市西港1",
+    "destCity": "北海道野付郡別海町中西別",
+    "salesYen": 42500,
+    "allowanceYen": 9000,
+    "haulKm": 74.3,
+    "deadheadKm": 154.0,
+    "loadPoint": {
+     "lat": 42.9815,
+     "lng": 144.341
+    },
+    "unloadPoint": {
+     "lat": 43.33,
+     "lng": 144.86
+    },
+    "haulSec": 10477,
+    "deadheadSec": 22479
+   },
+   {
+    "seq": 2,
+    "originCity": "北海道広尾郡広尾町白樺通",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 32500,
+    "allowanceYen": 8000,
+    "haulKm": 94.5,
+    "deadheadKm": 230.0,
+    "loadPoint": {
+     "lat": 42.2846,
+     "lng": 143.3122
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 7200,
+    "deadheadSec": 6000
+   }
+  ]
+ },
+ {
+  "unkoNo": "2607070621000000001102",
+  "driverName": "中村 一由",
+  "kmBreakdown": {
+   "preLoadKm": 94.8,
+   "haulKm": 152.5,
+   "betweenKm": 134.4,
+   "postUnloadKm": 72.4,
+   "otherKm": 12.0
+  },
+  "firstLoadPoint": {
+   "lat": 42.98,
+   "lng": 144.335
+  },
+  "lastUnloadPoint": {
+   "lat": 42.9086,
+   "lng": 143.1583
+  },
+  "legs": [
+   {
+    "seq": 1,
+    "originCity": "北海道釧路市西港1-98-41",
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 34698,
+    "allowanceYen": 8000,
+    "haulKm": 58.0,
+    "deadheadKm": 94.8,
+    "loadPoint": {
+     "lat": 42.98,
+     "lng": 144.335
+    },
+    "unloadPoint": {
+     "lat": 43.28,
+     "lng": 144.63
+    },
+    "haulSec": 8178,
+    "deadheadSec": 13838
+   },
+   {
+    "seq": 2,
+    "originCity": "北海道広尾郡広尾町白樺通",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 33000,
+    "allowanceYen": 8000,
+    "haulKm": 94.5,
+    "deadheadKm": 206.8,
+    "loadPoint": {
+     "lat": 42.2846,
+     "lng": 143.3122
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 7500,
+    "deadheadSec": 6600
+   }
+  ]
+ },
+ {
+  "unkoNo": "2607080622000000001103",
+  "driverName": "中村 一由",
+  "kmBreakdown": {
+   "preLoadKm": 101.2,
+   "haulKm": 157.0,
+   "betweenKm": 134.4,
+   "postUnloadKm": 72.4,
+   "otherKm": 13.3
+  },
+  "firstLoadPoint": {
+   "lat": 42.9785,
+   "lng": 144.329
+  },
+  "lastUnloadPoint": {
+   "lat": 42.9086,
+   "lng": 143.1583
+  },
+  "legs": [
+   {
+    "seq": 1,
+    "originCity": "北海道釧路市西港2-101-1",
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 37638,
+    "allowanceYen": 8000,
+    "haulKm": 62.5,
+    "deadheadKm": 101.2,
+    "loadPoint": {
+     "lat": 42.9785,
+     "lng": 144.329
+    },
+    "unloadPoint": {
+     "lat": 43.28,
+     "lng": 144.63
+    },
+    "haulSec": 8813,
+    "deadheadSec": 14772
+   },
+   {
+    "seq": 2,
+    "originCity": "北海道広尾郡広尾町白樺通",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 30000,
+    "allowanceYen": 8000,
+    "haulKm": 94.5,
+    "deadheadKm": 206.8,
+    "loadPoint": {
+     "lat": 42.2846,
+     "lng": 143.3122
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 7800,
+    "deadheadSec": 7200
+   }
+  ]
+ },
+ {
+  "unkoNo": "2607090623000000001104",
+  "driverName": "中村 一由",
+  "kmBreakdown": {
+   "preLoadKm": 96.4,
+   "haulKm": 148.8,
+   "betweenKm": 134.4,
+   "postUnloadKm": 72.4,
+   "otherKm": 14.6
+  },
+  "firstLoadPoint": {
+   "lat": 42.9815,
+   "lng": 144.341
+  },
+  "lastUnloadPoint": {
+   "lat": 42.9086,
+   "lng": 143.1583
+  },
+  "legs": [
+   {
+    "seq": 1,
+    "originCity": "北海道釧路市西港1",
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 32345,
+    "allowanceYen": 8000,
+    "haulKm": 54.3,
+    "deadheadKm": 96.4,
+    "loadPoint": {
+     "lat": 42.9815,
+     "lng": 144.341
+    },
+    "unloadPoint": {
+     "lat": 43.28,
+     "lng": 144.63
+    },
+    "haulSec": 7657,
+    "deadheadSec": 14071
+   },
+   {
+    "seq": 2,
+    "originCity": "北海道広尾郡広尾町白樺通",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 30500,
+    "allowanceYen": 8000,
+    "haulKm": 94.5,
+    "deadheadKm": 206.8,
+    "loadPoint": {
+     "lat": 42.2846,
+     "lng": 143.3122
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 8100,
+    "deadheadSec": 5400
+   }
+  ]
+ },
+ {
+  "unkoNo": "2607100624000000001105",
+  "driverName": "中村 一由",
+  "kmBreakdown": {
+   "preLoadKm": 101.7,
+   "haulKm": 477.9,
+   "betweenKm": 425.6,
+   "postUnloadKm": 33.1,
+   "otherKm": 15.9
+  },
+  "firstLoadPoint": {
+   "lat": 42.98,
+   "lng": 144.335
+  },
+  "lastUnloadPoint": {
+   "lat": 42.9086,
+   "lng": 143.1583
+  },
+  "legs": [
+   {
+    "seq": 1,
+    "originCity": "北海道釧路市西港1-98-41",
+    "destCity": "北海道川上郡標茶町多和",
+    "salesYen": 35526,
+    "allowanceYen": 8000,
+    "haulKm": 57.5,
+    "deadheadKm": 101.7,
+    "loadPoint": {
+     "lat": 42.98,
+     "lng": 144.335
+    },
+    "unloadPoint": {
+     "lat": 43.276,
+     "lng": 144.621
+    },
+    "haulSec": 8108,
+    "deadheadSec": 14845
+   },
+   {
+    "seq": 2,
+    "originCity": "北海道釧路市西港2-101-1",
+    "destCity": "北海道野付郡別海町中西別",
+    "salesYen": 44624,
+    "allowanceYen": 9000,
+    "haulKm": 77.9,
+    "deadheadKm": 166.6,
+    "loadPoint": {
+     "lat": 42.9785,
+     "lng": 144.329
+    },
+    "unloadPoint": {
+     "lat": 43.33,
+     "lng": 144.86
+    },
+    "haulSec": 10984,
+    "deadheadSec": 24318
+   },
+   {
+    "seq": 3,
+    "originCity": "北海道釧路市西港2-101-1",
+    "destCity": "北海道河東郡音更町駒場",
+    "salesYen": 31000,
+    "allowanceYen": 4500,
+    "haulKm": 118.5,
+    "deadheadKm": 77.9,
+    "loadPoint": {
+     "lat": 42.9785,
+     "lng": 144.329
+    },
+    "unloadPoint": {
+     "lat": 43.0806,
+     "lng": 143.25
+    },
+    "haulSec": 8400,
+    "deadheadSec": 6000
+   },
+   {
+    "seq": 4,
+    "originCity": "北海道釧路市西港1",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 31500,
+    "allowanceYen": 9000,
+    "haulKm": 129.5,
+    "deadheadKm": 119.7,
+    "loadPoint": {
+     "lat": 42.9815,
+     "lng": 144.341
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 7200,
+    "deadheadSec": 6600
+   },
+   {
+    "seq": 5,
+    "originCity": "北海道広尾郡広尾町白樺通",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 32000,
+    "allowanceYen": 8000,
+    "haulKm": 94.5,
+    "deadheadKm": 94.5,
+    "loadPoint": {
+     "lat": 42.2846,
+     "lng": 143.3122
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 7500,
+    "deadheadSec": 7200
+   }
+  ]
+ },
+ {
+  "unkoNo": "2607110625000000001101",
+  "driverName": "中村 一由",
+  "kmBreakdown": {
+   "preLoadKm": 126.1,
+   "haulKm": 476.8,
+   "betweenKm": 374.3,
+   "postUnloadKm": 44.9,
+   "otherKm": 17.2
+  },
+  "firstLoadPoint": {
+   "lat": 42.9785,
+   "lng": 144.329
+  },
+  "lastUnloadPoint": {
+   "lat": 42.9086,
+   "lng": 143.1583
+  },
+  "legs": [
+   {
+    "seq": 1,
+    "originCity": "北海道釧路市西港2-101-1",
+    "destCity": "北海道川上郡標茶町西熊牛原野",
+    "salesYen": 46797,
+    "allowanceYen": 8000,
+    "haulKm": 69.6,
+    "deadheadKm": 126.1,
+    "loadPoint": {
+     "lat": 42.9785,
+     "lng": 144.329
+    },
+    "unloadPoint": {
+     "lat": 43.35,
+     "lng": 144.52
+    },
+    "haulSec": 9814,
+    "deadheadSec": 18407
+   },
+   {
+    "seq": 2,
+    "originCity": "北海道釧路市西港1",
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 37050,
+    "allowanceYen": 8000,
+    "haulKm": 61.6,
+    "deadheadKm": 107.6,
+    "loadPoint": {
+     "lat": 42.9815,
+     "lng": 144.341
+    },
+    "unloadPoint": {
+     "lat": 43.28,
+     "lng": 144.63
+    },
+    "haulSec": 8686,
+    "deadheadSec": 15706
+   },
+   {
+    "seq": 3,
+    "originCity": "北海道釧路市西港1",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 31500,
+    "allowanceYen": 9000,
+    "haulKm": 129.5,
+    "deadheadKm": 54.5,
+    "loadPoint": {
+     "lat": 42.9815,
+     "lng": 144.341
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 7200,
+    "deadheadSec": 6600
+   },
+   {
+    "seq": 4,
+    "originCity": "北海道釧路市西港1-98-41",
+    "destCity": "北海道河東郡士幌町士幌",
+    "salesYen": 32000,
+    "allowanceYen": 9000,
+    "haulKm": 121.6,
+    "deadheadKm": 128.8,
+    "loadPoint": {
+     "lat": 42.98,
+     "lng": 144.335
+    },
+    "unloadPoint": {
+     "lat": 43.1443,
+     "lng": 143.2411
+    },
+    "haulSec": 7500,
+    "deadheadSec": 7200
+   },
+   {
+    "seq": 5,
+    "originCity": "北海道広尾郡広尾町白樺通",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 32500,
+    "allowanceYen": 8000,
+    "haulKm": 94.5,
+    "deadheadKm": 128.3,
+    "loadPoint": {
+     "lat": 42.2846,
+     "lng": 143.3122
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 7800,
+    "deadheadSec": 5400
+   }
+  ]
+ },
+ {
+  "unkoNo": "2607120626000000001102",
+  "driverName": "中村 一由",
+  "kmBreakdown": {
+   "preLoadKm": 98.0,
+   "haulKm": 450.5,
+   "betweenKm": 359.2,
+   "postUnloadKm": 41.6,
+   "otherKm": 18.5
+  },
+  "firstLoadPoint": {
+   "lat": 42.9815,
+   "lng": 144.341
+  },
+  "lastUnloadPoint": {
+   "lat": 42.9086,
+   "lng": 143.1583
+  },
+  "legs": [
+   {
+    "seq": 1,
+    "originCity": "北海道釧路市西港1",
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 32934,
+    "allowanceYen": 8000,
+    "haulKm": 55.3,
+    "deadheadKm": 98.0,
+    "loadPoint": {
+     "lat": 42.9815,
+     "lng": 144.341
+    },
+    "unloadPoint": {
+     "lat": 43.28,
+     "lng": 144.63
+    },
+    "haulSec": 7798,
+    "deadheadSec": 14305
+   },
+   {
+    "seq": 2,
+    "originCity": "北海道釧路市西港1-98-41",
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 36461,
+    "allowanceYen": 8000,
+    "haulKm": 60.6,
+    "deadheadKm": 106.0,
+    "loadPoint": {
+     "lat": 42.98,
+     "lng": 144.335
+    },
+    "unloadPoint": {
+     "lat": 43.28,
+     "lng": 144.63
+    },
+    "haulSec": 8545,
+    "deadheadSec": 15473
+   },
+   {
+    "seq": 3,
+    "originCity": "北海道釧路市西港1-98-41",
+    "destCity": "北海道河東郡士幌町士幌",
+    "salesYen": 32000,
+    "allowanceYen": 9000,
+    "haulKm": 121.6,
+    "deadheadKm": 55.0,
+    "loadPoint": {
+     "lat": 42.98,
+     "lng": 144.335
+    },
+    "unloadPoint": {
+     "lat": 43.1443,
+     "lng": 143.2411
+    },
+    "haulSec": 7500,
+    "deadheadSec": 7200
+   },
+   {
+    "seq": 4,
+    "originCity": "北海道釧路市西港2-101-1",
+    "destCity": "北海道河東郡音更町駒場",
+    "salesYen": 32500,
+    "allowanceYen": 4500,
+    "haulKm": 118.5,
+    "deadheadKm": 121.0,
+    "loadPoint": {
+     "lat": 42.9785,
+     "lng": 144.329
+    },
+    "unloadPoint": {
+     "lat": 43.0806,
+     "lng": 143.25
+    },
+    "haulSec": 7800,
+    "deadheadSec": 5400
+   },
+   {
+    "seq": 5,
+    "originCity": "北海道広尾郡広尾町白樺通",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 33000,
+    "allowanceYen": 8000,
+    "haulKm": 94.5,
+    "deadheadKm": 118.8,
+    "loadPoint": {
+     "lat": 42.2846,
+     "lng": 143.3122
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 8100,
+    "deadheadSec": 6000
+   }
+  ]
+ },
+ {
+  "unkoNo": "2607130627000000001103",
+  "driverName": "中村 一由",
+  "kmBreakdown": {
+   "preLoadKm": 110.7,
+   "haulKm": 476.1,
+   "betweenKm": 400.6,
+   "postUnloadKm": 33.1,
+   "otherKm": 12.0
+  },
+  "firstLoadPoint": {
+   "lat": 42.98,
+   "lng": 144.335
+  },
+  "lastUnloadPoint": {
+   "lat": 42.9086,
+   "lng": 143.1583
+  },
+  "legs": [
+   {
+    "seq": 1,
+    "originCity": "北海道釧路市西港1-98-41",
+    "destCity": "北海道川上郡標茶町多和",
+    "salesYen": 39198,
+    "allowanceYen": 8000,
+    "haulKm": 62.9,
+    "deadheadKm": 110.7,
+    "loadPoint": {
+     "lat": 42.98,
+     "lng": 144.335
+    },
+    "unloadPoint": {
+     "lat": 43.276,
+     "lng": 144.621
+    },
+    "haulSec": 8869,
+    "deadheadSec": 16159
+   },
+   {
+    "seq": 2,
+    "originCity": "北海道釧路市西港2-101-1",
+    "destCity": "北海道野付郡別海町中西別",
+    "salesYen": 40376,
+    "allowanceYen": 9000,
+    "haulKm": 70.7,
+    "deadheadKm": 141.6,
+    "loadPoint": {
+     "lat": 42.9785,
+     "lng": 144.329
+    },
+    "unloadPoint": {
+     "lat": 43.33,
+     "lng": 144.86
+    },
+    "haulSec": 9969,
+    "deadheadSec": 20669
+   },
+   {
+    "seq": 3,
+    "originCity": "北海道釧路市西港2-101-1",
+    "destCity": "北海道河東郡音更町駒場",
+    "salesYen": 32500,
+    "allowanceYen": 4500,
+    "haulKm": 118.5,
+    "deadheadKm": 77.9,
+    "loadPoint": {
+     "lat": 42.9785,
+     "lng": 144.329
+    },
+    "unloadPoint": {
+     "lat": 43.0806,
+     "lng": 143.25
+    },
+    "haulSec": 7800,
+    "deadheadSec": 5400
+   },
+   {
+    "seq": 4,
+    "originCity": "北海道釧路市西港1",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 33000,
+    "allowanceYen": 9000,
+    "haulKm": 129.5,
+    "deadheadKm": 119.7,
+    "loadPoint": {
+     "lat": 42.9815,
+     "lng": 144.341
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 8100,
+    "deadheadSec": 6000
+   },
+   {
+    "seq": 5,
+    "originCity": "北海道広尾郡広尾町白樺通",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 30000,
+    "allowanceYen": 8000,
+    "haulKm": 94.5,
+    "deadheadKm": 94.5,
+    "loadPoint": {
+     "lat": 42.2846,
+     "lng": 143.3122
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 8400,
+    "deadheadSec": 6600
+   }
+  ]
+ },
+ {
+  "unkoNo": "2607140628000000001104",
+  "driverName": "中村 一由",
+  "kmBreakdown": {
+   "preLoadKm": 122.0,
+   "haulKm": 463.3,
+   "betweenKm": 358.3,
+   "postUnloadKm": 44.9,
+   "otherKm": 13.3
+  },
+  "firstLoadPoint": {
+   "lat": 42.9785,
+   "lng": 144.329
+  },
+  "lastUnloadPoint": {
+   "lat": 42.9086,
+   "lng": 143.1583
+  },
+  "legs": [
+   {
+    "seq": 1,
+    "originCity": "北海道釧路市西港2-101-1",
+    "destCity": "北海道川上郡標茶町西熊牛原野",
+    "salesYen": 40948,
+    "allowanceYen": 8000,
+    "haulKm": 61.5,
+    "deadheadKm": 122.0,
+    "loadPoint": {
+     "lat": 42.9785,
+     "lng": 144.329
+    },
+    "unloadPoint": {
+     "lat": 43.35,
+     "lng": 144.52
+    },
+    "haulSec": 8671,
+    "deadheadSec": 17807
+   },
+   {
+    "seq": 2,
+    "originCity": "北海道釧路市西港1",
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 33522,
+    "allowanceYen": 8000,
+    "haulKm": 56.2,
+    "deadheadKm": 91.6,
+    "loadPoint": {
+     "lat": 42.9815,
+     "lng": 144.341
+    },
+    "unloadPoint": {
+     "lat": 43.28,
+     "lng": 144.63
+    },
+    "haulSec": 7925,
+    "deadheadSec": 13371
+   },
+   {
+    "seq": 3,
     "originCity": "北海道釧路市西港1",
     "destCity": "北海道帯広市川西町",
     "salesYen": 33000,
@@ -1274,13 +1160,32 @@
     "deadheadSec": 6000
    },
    {
-    "seq": 3,
+    "seq": 4,
+    "originCity": "北海道釧路市西港1-98-41",
+    "destCity": "北海道河東郡士幌町士幌",
+    "salesYen": 30000,
+    "allowanceYen": 9000,
+    "haulKm": 121.6,
+    "deadheadKm": 128.8,
+    "loadPoint": {
+     "lat": 42.98,
+     "lng": 144.335
+    },
+    "unloadPoint": {
+     "lat": 43.1443,
+     "lng": 143.2411
+    },
+    "haulSec": 8400,
+    "deadheadSec": 6600
+   },
+   {
+    "seq": 5,
     "originCity": "北海道広尾郡広尾町白樺通",
     "destCity": "北海道帯広市川西町",
-    "salesYen": 30100,
+    "salesYen": 30500,
     "allowanceYen": 8000,
     "haulKm": 94.5,
-    "deadheadKm": 94.5,
+    "deadheadKm": 128.3,
     "loadPoint": {
      "lat": 42.2846,
      "lng": 143.3122
@@ -1289,8 +1194,8 @@
      "lat": 42.9086,
      "lng": 143.1583
     },
-    "haulSec": 7050,
-    "deadheadSec": 6700
+    "haulSec": 7200,
+    "deadheadSec": 7200
    }
   ]
  },
@@ -1298,10 +1203,10 @@
   "unkoNo": "2607150629000000001105",
   "driverName": "中村 一由",
   "kmBreakdown": {
-   "preLoadKm": 142.0,
-   "haulKm": 268.3,
-   "betweenKm": 132.2,
-   "postUnloadKm": 41.6,
+   "preLoadKm": 104.4,
+   "haulKm": 580.9,
+   "betweenKm": 450.3,
+   "postUnloadKm": 33.1,
    "otherKm": 14.6
   },
   "firstLoadPoint": {
@@ -1316,11 +1221,11 @@
    {
     "seq": 1,
     "originCity": "北海道釧路市西港1",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 37500,
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 35874,
     "allowanceYen": 8000,
-    "haulKm": 54.7,
-    "deadheadKm": 142.0,
+    "haulKm": 59.8,
+    "deadheadKm": 104.4,
     "loadPoint": {
      "lat": 42.9815,
      "lng": 144.341
@@ -1329,36 +1234,93 @@
      "lat": 43.28,
      "lng": 144.63
     },
-    "haulSec": 7707,
-    "deadheadSec": 20734
+    "haulSec": 8432,
+    "deadheadSec": 15239
    },
    {
     "seq": 2,
     "originCity": "北海道釧路市西港1-98-41",
-    "destCity": "北海道河東郡音更町駒場",
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 34109,
+    "allowanceYen": 8000,
+    "haulKm": 57.0,
+    "deadheadKm": 93.2,
+    "loadPoint": {
+     "lat": 42.98,
+     "lng": 144.335
+    },
+    "unloadPoint": {
+     "lat": 43.28,
+     "lng": 144.63
+    },
+    "haulSec": 8037,
+    "deadheadSec": 13604
+   },
+   {
+    "seq": 3,
+    "originCity": "北海道釧路市西港1-98-41",
+    "destCity": "北海道河東郡士幌町士幌",
     "salesYen": 30000,
-    "allowanceYen": 4500,
-    "haulKm": 119.1,
+    "allowanceYen": 9000,
+    "haulKm": 121.6,
     "deadheadKm": 55.0,
     "loadPoint": {
      "lat": 42.98,
      "lng": 144.335
     },
     "unloadPoint": {
-     "lat": 43.0806,
-     "lng": 143.25
+     "lat": 43.1443,
+     "lng": 143.2411
     },
     "haulSec": 8400,
     "deadheadSec": 6600
    },
    {
-    "seq": 3,
+    "seq": 4,
+    "originCity": "北海道釧路市西港2-101-1",
+    "destCity": "北海道河東郡音更町駒場",
+    "salesYen": 30500,
+    "allowanceYen": 4500,
+    "haulKm": 118.5,
+    "deadheadKm": 121.0,
+    "loadPoint": {
+     "lat": 42.9785,
+     "lng": 144.329
+    },
+    "unloadPoint": {
+     "lat": 43.0806,
+     "lng": 143.25
+    },
+    "haulSec": 7200,
+    "deadheadSec": 7200
+   },
+   {
+    "seq": 5,
+    "originCity": "北海道釧路市西港1",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 31000,
+    "allowanceYen": 9000,
+    "haulKm": 129.5,
+    "deadheadKm": 119.7,
+    "loadPoint": {
+     "lat": 42.9815,
+     "lng": 144.341
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 7500,
+    "deadheadSec": 5400
+   },
+   {
+    "seq": 6,
     "originCity": "北海道広尾郡広尾町白樺通",
     "destCity": "北海道帯広市川西町",
-    "salesYen": 30800,
+    "salesYen": 31500,
     "allowanceYen": 8000,
     "haulKm": 94.5,
-    "deadheadKm": 118.8,
+    "deadheadKm": 94.5,
     "loadPoint": {
      "lat": 42.2846,
      "lng": 143.3122
@@ -1367,8 +1329,8 @@
      "lat": 42.9086,
      "lng": 143.1583
     },
-    "haulSec": 7500,
-    "deadheadSec": 7400
+    "haulSec": 7800,
+    "deadheadSec": 6000
    }
   ]
  },
@@ -1376,10 +1338,10 @@
   "unkoNo": "2607160630000000001101",
   "driverName": "中村 一由",
   "kmBreakdown": {
-   "preLoadKm": 141.3,
-   "haulKm": 276.8,
-   "betweenKm": 115.9,
-   "postUnloadKm": 33.1,
+   "preLoadKm": 107.1,
+   "haulKm": 600.1,
+   "betweenKm": 568.8,
+   "postUnloadKm": 44.9,
    "otherKm": 15.9
   },
   "firstLoadPoint": {
@@ -1395,10 +1357,10 @@
     "seq": 1,
     "originCity": "北海道釧路市西港1-98-41",
     "destCity": "北海道川上郡標茶町多和",
-    "salesYen": 34500,
+    "salesYen": 34302,
     "allowanceYen": 8000,
-    "haulKm": 54.2,
-    "deadheadKm": 141.3,
+    "haulKm": 55.7,
+    "deadheadKm": 107.1,
     "loadPoint": {
      "lat": 42.98,
      "lng": 144.335
@@ -1407,36 +1369,93 @@
      "lat": 43.276,
      "lng": 144.621
     },
-    "haulSec": 7638,
-    "deadheadSec": 20624
+    "haulSec": 7854,
+    "deadheadSec": 15633
    },
    {
     "seq": 2,
     "originCity": "北海道釧路市西港2-101-1",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 30500,
+    "destCity": "北海道野付郡別海町中西別",
+    "salesYen": 46040,
     "allowanceYen": 9000,
-    "haulKm": 128.1,
-    "deadheadKm": 54.5,
+    "haulKm": 80.3,
+    "deadheadKm": 159.0,
     "loadPoint": {
      "lat": 42.9785,
      "lng": 144.329
     },
     "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
+     "lat": 43.33,
+     "lng": 144.86
+    },
+    "haulSec": 11323,
+    "deadheadSec": 23209
+   },
+   {
+    "seq": 3,
+    "originCity": "北海道釧路市西港2-101-1",
+    "destCity": "北海道河東郡音更町駒場",
+    "salesYen": 30500,
+    "allowanceYen": 4500,
+    "haulKm": 118.5,
+    "deadheadKm": 77.9,
+    "loadPoint": {
+     "lat": 42.9785,
+     "lng": 144.329
+    },
+    "unloadPoint": {
+     "lat": 43.0806,
+     "lng": 143.25
     },
     "haulSec": 7200,
     "deadheadSec": 7200
    },
    {
-    "seq": 3,
+    "seq": 4,
+    "originCity": "北海道釧路市西港1",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 31000,
+    "allowanceYen": 9000,
+    "haulKm": 129.5,
+    "deadheadKm": 119.7,
+    "loadPoint": {
+     "lat": 42.9815,
+     "lng": 144.341
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 7500,
+    "deadheadSec": 5400
+   },
+   {
+    "seq": 5,
+    "originCity": "北海道釧路市西港1-98-41",
+    "destCity": "北海道河東郡士幌町士幌",
+    "salesYen": 31500,
+    "allowanceYen": 9000,
+    "haulKm": 121.6,
+    "deadheadKm": 128.8,
+    "loadPoint": {
+     "lat": 42.98,
+     "lng": 144.335
+    },
+    "unloadPoint": {
+     "lat": 43.1443,
+     "lng": 143.2411
+    },
+    "haulSec": 7800,
+    "deadheadSec": 6000
+   },
+   {
+    "seq": 6,
     "originCity": "北海道広尾郡広尾町白樺通",
     "destCity": "北海道帯広市川西町",
-    "salesYen": 28000,
+    "salesYen": 32000,
     "allowanceYen": 8000,
     "haulKm": 94.5,
-    "deadheadKm": 94.5,
+    "deadheadKm": 128.3,
     "loadPoint": {
      "lat": 42.2846,
      "lng": 143.3122
@@ -1445,8 +1464,8 @@
      "lat": 42.9086,
      "lng": 143.1583
     },
-    "haulSec": 7950,
-    "deadheadSec": 6000
+    "haulSec": 8100,
+    "deadheadSec": 6600
    }
   ]
  },
@@ -1454,10 +1473,10 @@
   "unkoNo": "2607170631000000001102",
   "driverName": "中村 一由",
   "kmBreakdown": {
-   "preLoadKm": 140.5,
-   "haulKm": 316.4,
-   "betweenKm": 177.8,
-   "postUnloadKm": 41.6,
+   "preLoadKm": 102.8,
+   "haulKm": 529.4,
+   "betweenKm": 462.6,
+   "postUnloadKm": 44.9,
    "otherKm": 17.2
   },
   "firstLoadPoint": {
@@ -1472,49 +1491,106 @@
    {
     "seq": 1,
     "originCity": "北海道釧路市西港2-101-1",
-    "destCity": "北海道野付郡別海町中西別",
-    "salesYen": 40950,
-    "allowanceYen": 9000,
-    "haulKm": 102.2,
-    "deadheadKm": 140.5,
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 38226,
+    "allowanceYen": 8000,
+    "haulKm": 63.4,
+    "deadheadKm": 102.8,
     "loadPoint": {
      "lat": 42.9785,
      "lng": 144.329
     },
     "unloadPoint": {
-     "lat": 43.47,
-     "lng": 144.98
+     "lat": 43.28,
+     "lng": 144.63
     },
-    "haulSec": 14405,
-    "deadheadSec": 20513
+    "haulSec": 8940,
+    "deadheadSec": 15005
    },
    {
     "seq": 2,
     "originCity": "北海道釧路市西港1",
-    "destCity": "北海道河東郡音更町駒場",
-    "salesYen": 31000,
-    "allowanceYen": 4500,
-    "haulKm": 119.7,
-    "deadheadKm": 100.6,
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 34698,
+    "allowanceYen": 8000,
+    "haulKm": 58.0,
+    "deadheadKm": 94.8,
     "loadPoint": {
      "lat": 42.9815,
      "lng": 144.341
     },
     "unloadPoint": {
-     "lat": 43.0806,
-     "lng": 143.25
+     "lat": 43.28,
+     "lng": 144.63
+    },
+    "haulSec": 8178,
+    "deadheadSec": 13838
+   },
+   {
+    "seq": 3,
+    "originCity": "北海道釧路市西港1-98-41",
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 37637,
+    "allowanceYen": 8000,
+    "haulKm": 62.4,
+    "deadheadKm": 101.1,
+    "loadPoint": {
+     "lat": 42.98,
+     "lng": 144.335
+    },
+    "unloadPoint": {
+     "lat": 43.28,
+     "lng": 144.63
+    },
+    "haulSec": 8799,
+    "deadheadSec": 14757
+   },
+   {
+    "seq": 4,
+    "originCity": "北海道釧路市西港1",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 31000,
+    "allowanceYen": 9000,
+    "haulKm": 129.5,
+    "deadheadKm": 54.5,
+    "loadPoint": {
+     "lat": 42.9815,
+     "lng": 144.341
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
     },
     "haulSec": 7500,
     "deadheadSec": 5400
    },
    {
-    "seq": 3,
+    "seq": 5,
+    "originCity": "北海道釧路市西港1-98-41",
+    "destCity": "北海道河東郡士幌町士幌",
+    "salesYen": 31500,
+    "allowanceYen": 9000,
+    "haulKm": 121.6,
+    "deadheadKm": 128.8,
+    "loadPoint": {
+     "lat": 42.98,
+     "lng": 144.335
+    },
+    "unloadPoint": {
+     "lat": 43.1443,
+     "lng": 143.2411
+    },
+    "haulSec": 7800,
+    "deadheadSec": 6000
+   },
+   {
+    "seq": 6,
     "originCity": "北海道広尾郡広尾町白樺通",
     "destCity": "北海道帯広市川西町",
-    "salesYen": 28700,
+    "salesYen": 32000,
     "allowanceYen": 8000,
     "haulKm": 94.5,
-    "deadheadKm": 118.8,
+    "deadheadKm": 128.3,
     "loadPoint": {
      "lat": 42.2846,
      "lng": 143.3122
@@ -1523,8 +1599,8 @@
      "lat": 42.9086,
      "lng": 143.1583
     },
-    "haulSec": 6600,
-    "deadheadSec": 6700
+    "haulSec": 8100,
+    "deadheadSec": 6600
    }
   ]
  },
@@ -1532,10 +1608,10 @@
   "unkoNo": "2607180632000000001103",
   "driverName": "中村 一由",
   "kmBreakdown": {
-   "preLoadKm": 142.0,
-   "haulKm": 278.0,
-   "betweenKm": 116.4,
-   "postUnloadKm": 33.1,
+   "preLoadKm": 114.3,
+   "haulKm": 517.5,
+   "betweenKm": 498.6,
+   "postUnloadKm": 41.6,
    "otherKm": 18.5
   },
   "firstLoadPoint": {
@@ -1550,49 +1626,106 @@
    {
     "seq": 1,
     "originCity": "北海道釧路市西港1",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 36300,
+    "destCity": "北海道川上郡標茶町多和",
+    "salesYen": 37362,
     "allowanceYen": 8000,
-    "haulKm": 54.7,
-    "deadheadKm": 142.0,
+    "haulKm": 60.2,
+    "deadheadKm": 114.3,
     "loadPoint": {
      "lat": 42.9815,
      "lng": 144.341
     },
     "unloadPoint": {
-     "lat": 43.28,
-     "lng": 144.63
+     "lat": 43.276,
+     "lng": 144.621
     },
-    "haulSec": 7707,
-    "deadheadSec": 20734
+    "haulSec": 8489,
+    "deadheadSec": 16684
    },
    {
     "seq": 2,
     "originCity": "北海道釧路市西港1-98-41",
-    "destCity": "北海道帯広市川西町",
+    "destCity": "北海道野付郡別海町中西別",
+    "salesYen": 38960,
+    "allowanceYen": 9000,
+    "haulKm": 68.3,
+    "deadheadKm": 149.0,
+    "loadPoint": {
+     "lat": 42.98,
+     "lng": 144.335
+    },
+    "unloadPoint": {
+     "lat": 43.33,
+     "lng": 144.86
+    },
+    "haulSec": 9631,
+    "deadheadSec": 21749
+   },
+   {
+    "seq": 3,
+    "originCity": "北海道釧路市西港2-101-1",
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 32346,
+    "allowanceYen": 8000,
+    "haulKm": 54.4,
+    "deadheadKm": 96.4,
+    "loadPoint": {
+     "lat": 42.9785,
+     "lng": 144.329
+    },
+    "unloadPoint": {
+     "lat": 43.28,
+     "lng": 144.63
+    },
+    "haulSec": 7671,
+    "deadheadSec": 14071
+   },
+   {
+    "seq": 4,
+    "originCity": "北海道釧路市西港1-98-41",
+    "destCity": "北海道河東郡士幌町士幌",
     "salesYen": 31500,
     "allowanceYen": 9000,
-    "haulKm": 128.8,
+    "haulKm": 121.6,
     "deadheadKm": 55.0,
     "loadPoint": {
      "lat": 42.98,
      "lng": 144.335
     },
     "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
+     "lat": 43.1443,
+     "lng": 143.2411
     },
     "haulSec": 7800,
     "deadheadSec": 6000
    },
    {
-    "seq": 3,
+    "seq": 5,
+    "originCity": "北海道釧路市西港2-101-1",
+    "destCity": "北海道河東郡音更町駒場",
+    "salesYen": 32000,
+    "allowanceYen": 4500,
+    "haulKm": 118.5,
+    "deadheadKm": 121.0,
+    "loadPoint": {
+     "lat": 42.9785,
+     "lng": 144.329
+    },
+    "unloadPoint": {
+     "lat": 43.0806,
+     "lng": 143.25
+    },
+    "haulSec": 8100,
+    "deadheadSec": 6600
+   },
+   {
+    "seq": 6,
     "originCity": "北海道広尾郡広尾町白樺通",
     "destCity": "北海道帯広市川西町",
-    "salesYen": 29400,
+    "salesYen": 32500,
     "allowanceYen": 8000,
     "haulKm": 94.5,
-    "deadheadKm": 94.5,
+    "deadheadKm": 118.8,
     "loadPoint": {
      "lat": 42.2846,
      "lng": 143.3122
@@ -1601,8 +1734,8 @@
      "lat": 42.9086,
      "lng": 143.1583
     },
-    "haulSec": 7050,
-    "deadheadSec": 7400
+    "haulSec": 8400,
+    "deadheadSec": 7200
    }
   ]
  },
@@ -1610,10 +1743,10 @@
   "unkoNo": "2607190633000000001104",
   "driverName": "柳井 亮祐",
   "kmBreakdown": {
-   "preLoadKm": 141.3,
-   "haulKm": 325.2,
-   "betweenKm": 194.8,
-   "postUnloadKm": 41.6,
+   "preLoadKm": 107.6,
+   "haulKm": 580.9,
+   "betweenKm": 485.4,
+   "postUnloadKm": 44.9,
    "otherKm": 12.0
   },
   "firstLoadPoint": {
@@ -1628,11 +1761,11 @@
    {
     "seq": 1,
     "originCity": "北海道釧路市西港1-98-41",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 37200,
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 37050,
     "allowanceYen": 8000,
-    "haulKm": 55.2,
-    "deadheadKm": 141.3,
+    "haulKm": 61.6,
+    "deadheadKm": 107.6,
     "loadPoint": {
      "lat": 42.98,
      "lng": 144.335
@@ -1641,17 +1774,17 @@
      "lat": 43.28,
      "lng": 144.63
     },
-    "haulSec": 7787,
-    "deadheadSec": 20624
+    "haulSec": 8686,
+    "deadheadSec": 15706
    },
    {
     "seq": 2,
     "originCity": "北海道釧路市西港2-101-1",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 38100,
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 32933,
     "allowanceYen": 8000,
-    "haulKm": 55.8,
-    "deadheadKm": 63.1,
+    "haulKm": 55.2,
+    "deadheadKm": 97.9,
     "loadPoint": {
      "lat": 42.9785,
      "lng": 144.329
@@ -1660,20 +1793,20 @@
      "lat": 43.28,
      "lng": 144.63
     },
-    "haulSec": 7867,
-    "deadheadSec": 9211
+    "haulSec": 7784,
+    "deadheadSec": 14290
    },
    {
     "seq": 3,
-    "originCity": "北海道釧路市西港1",
+    "originCity": "北海道釧路市西港2-101-1",
     "destCity": "北海道河東郡音更町駒場",
     "salesYen": 32000,
     "allowanceYen": 4500,
-    "haulKm": 119.7,
-    "deadheadKm": 54.5,
+    "haulKm": 118.5,
+    "deadheadKm": 55.6,
     "loadPoint": {
-     "lat": 42.9815,
-     "lng": 144.341
+     "lat": 42.9785,
+     "lng": 144.329
     },
     "unloadPoint": {
      "lat": 43.0806,
@@ -1684,12 +1817,50 @@
    },
    {
     "seq": 4,
+    "originCity": "北海道釧路市西港1",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 32500,
+    "allowanceYen": 9000,
+    "haulKm": 129.5,
+    "deadheadKm": 119.7,
+    "loadPoint": {
+     "lat": 42.9815,
+     "lng": 144.341
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 8400,
+    "deadheadSec": 7200
+   },
+   {
+    "seq": 5,
+    "originCity": "北海道釧路市西港1-98-41",
+    "destCity": "北海道河東郡士幌町士幌",
+    "salesYen": 33000,
+    "allowanceYen": 9000,
+    "haulKm": 121.6,
+    "deadheadKm": 128.8,
+    "loadPoint": {
+     "lat": 42.98,
+     "lng": 144.335
+    },
+    "unloadPoint": {
+     "lat": 43.1443,
+     "lng": 143.2411
+    },
+    "haulSec": 7200,
+    "deadheadSec": 5400
+   },
+   {
+    "seq": 6,
     "originCity": "北海道広尾郡広尾町白樺通",
     "destCity": "北海道帯広市川西町",
-    "salesYen": 30100,
+    "salesYen": 30000,
     "allowanceYen": 8000,
     "haulKm": 94.5,
-    "deadheadKm": 118.8,
+    "deadheadKm": 128.3,
     "loadPoint": {
      "lat": 42.2846,
      "lng": 143.3122
@@ -1707,9 +1878,9 @@
   "unkoNo": "2607200634000000001105",
   "driverName": "柳井 亮祐",
   "kmBreakdown": {
-   "preLoadKm": 140.5,
-   "haulKm": 378.9,
-   "betweenKm": 223.2,
+   "preLoadKm": 103.5,
+   "haulKm": 359.1,
+   "betweenKm": 302.1,
    "postUnloadKm": 33.1,
    "otherKm": 13.3
   },
@@ -1726,10 +1897,10 @@
     "seq": 1,
     "originCity": "北海道釧路市西港2-101-1",
     "destCity": "北海道川上郡標茶町多和",
-    "salesYen": 35100,
+    "salesYen": 36138,
     "allowanceYen": 8000,
-    "haulKm": 54.7,
-    "deadheadKm": 140.5,
+    "haulKm": 58.4,
+    "deadheadKm": 103.5,
     "loadPoint": {
      "lat": 42.9785,
      "lng": 144.329
@@ -1738,39 +1909,39 @@
      "lat": 43.276,
      "lng": 144.621
     },
-    "haulSec": 7717,
-    "deadheadSec": 20513
+    "haulSec": 8235,
+    "deadheadSec": 15108
    },
    {
     "seq": 2,
     "originCity": "北海道釧路市西港1",
     "destCity": "北海道野付郡別海町中西別",
-    "salesYen": 41650,
+    "salesYen": 43916,
     "allowanceYen": 9000,
-    "haulKm": 100.9,
-    "deadheadKm": 60.6,
+    "haulKm": 76.7,
+    "deadheadKm": 164.0,
     "loadPoint": {
      "lat": 42.9815,
      "lng": 144.341
     },
     "unloadPoint": {
-     "lat": 43.47,
-     "lng": 144.98
+     "lat": 43.33,
+     "lng": 144.86
     },
-    "haulSec": 14231,
-    "deadheadSec": 8851
+    "haulSec": 10815,
+    "deadheadSec": 23939
    },
    {
     "seq": 3,
-    "originCity": "北海道釧路市西港1-98-41",
+    "originCity": "北海道釧路市西港1",
     "destCity": "北海道帯広市川西町",
     "salesYen": 32500,
     "allowanceYen": 9000,
-    "haulKm": 128.8,
-    "deadheadKm": 101.2,
+    "haulKm": 129.5,
+    "deadheadKm": 76.7,
     "loadPoint": {
-     "lat": 42.98,
-     "lng": 144.335
+     "lat": 42.9815,
+     "lng": 144.341
     },
     "unloadPoint": {
      "lat": 42.9086,
@@ -1783,7 +1954,7 @@
     "seq": 4,
     "originCity": "北海道広尾郡広尾町白樺通",
     "destCity": "北海道帯広市川西町",
-    "salesYen": 30800,
+    "salesYen": 33000,
     "allowanceYen": 8000,
     "haulKm": 94.5,
     "deadheadKm": 94.5,
@@ -1795,8 +1966,8 @@
      "lat": 42.9086,
      "lng": 143.1583
     },
-    "haulSec": 7950,
-    "deadheadSec": 6700
+    "haulSec": 7200,
+    "deadheadSec": 5400
    }
   ]
  },
@@ -1804,10 +1975,10 @@
   "unkoNo": "2607210635000000001101",
   "driverName": "西島 健太",
   "kmBreakdown": {
-   "preLoadKm": 142.0,
-   "haulKm": 322.9,
-   "betweenKm": 195.3,
-   "postUnloadKm": 41.6,
+   "preLoadKm": 106.0,
+   "haulKm": 524.8,
+   "betweenKm": 357.1,
+   "postUnloadKm": 33.1,
    "otherKm": 14.6
   },
   "firstLoadPoint": {
@@ -1822,11 +1993,11 @@
    {
     "seq": 1,
     "originCity": "北海道釧路市西港1",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 36900,
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 36462,
     "allowanceYen": 8000,
-    "haulKm": 54.7,
-    "deadheadKm": 142.0,
+    "haulKm": 60.7,
+    "deadheadKm": 106.0,
     "loadPoint": {
      "lat": 42.9815,
      "lng": 144.341
@@ -1835,36 +2006,36 @@
      "lat": 43.28,
      "lng": 144.63
     },
-    "haulSec": 7707,
-    "deadheadSec": 20734
+    "haulSec": 8559,
+    "deadheadSec": 15473
    },
    {
     "seq": 2,
     "originCity": "北海道釧路市西港1-98-41",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 37800,
-    "allowanceYen": 8000,
-    "haulKm": 55.2,
-    "deadheadKm": 62.5,
+    "destCity": "北海道河東郡士幌町士幌",
+    "salesYen": 33000,
+    "allowanceYen": 9000,
+    "haulKm": 121.6,
+    "deadheadKm": 55.0,
     "loadPoint": {
      "lat": 42.98,
      "lng": 144.335
     },
     "unloadPoint": {
-     "lat": 43.28,
-     "lng": 144.63
+     "lat": 43.1443,
+     "lng": 143.2411
     },
-    "haulSec": 7787,
-    "deadheadSec": 9118
+    "haulSec": 7200,
+    "deadheadSec": 5400
    },
    {
     "seq": 3,
     "originCity": "北海道釧路市西港2-101-1",
     "destCity": "北海道河東郡音更町駒場",
-    "salesYen": 33000,
+    "salesYen": 30000,
     "allowanceYen": 4500,
     "haulKm": 118.5,
-    "deadheadKm": 55.6,
+    "deadheadKm": 121.0,
     "loadPoint": {
      "lat": 42.9785,
      "lng": 144.329
@@ -1873,17 +2044,36 @@
      "lat": 43.0806,
      "lng": 143.25
     },
-    "haulSec": 7200,
-    "deadheadSec": 5400
+    "haulSec": 7500,
+    "deadheadSec": 6000
    },
    {
     "seq": 4,
+    "originCity": "北海道釧路市西港1",
+    "destCity": "北海道帯広市川西町",
+    "salesYen": 30500,
+    "allowanceYen": 9000,
+    "haulKm": 129.5,
+    "deadheadKm": 119.7,
+    "loadPoint": {
+     "lat": 42.9815,
+     "lng": 144.341
+    },
+    "unloadPoint": {
+     "lat": 42.9086,
+     "lng": 143.1583
+    },
+    "haulSec": 7800,
+    "deadheadSec": 6600
+   },
+   {
+    "seq": 5,
     "originCity": "北海道広尾郡広尾町白樺通",
     "destCity": "北海道帯広市川西町",
-    "salesYen": 28000,
+    "salesYen": 31000,
     "allowanceYen": 8000,
     "haulKm": 94.5,
-    "deadheadKm": 118.8,
+    "deadheadKm": 94.5,
     "loadPoint": {
      "lat": 42.2846,
      "lng": 143.3122
@@ -1892,8 +2082,8 @@
      "lat": 42.9086,
      "lng": 143.1583
     },
-    "haulSec": 6600,
-    "deadheadSec": 7400
+    "haulSec": 8100,
+    "deadheadSec": 7200
    }
   ]
  },
@@ -1901,10 +2091,10 @@
   "unkoNo": "2607220636000000001102",
   "driverName": "西島 健太",
   "kmBreakdown": {
-   "preLoadKm": 141.3,
-   "haulKm": 333.9,
-   "betweenKm": 177.9,
-   "postUnloadKm": 33.1,
+   "preLoadKm": 91.6,
+   "haulKm": 389.9,
+   "betweenKm": 349.1,
+   "postUnloadKm": 41.6,
    "otherKm": 15.9
   },
   "firstLoadPoint": {
@@ -1919,11 +2109,11 @@
    {
     "seq": 1,
     "originCity": "北海道釧路市西港1-98-41",
-    "destCity": "北海道川上郡標茶町多和星空の黒牛",
-    "salesYen": 34800,
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 33522,
     "allowanceYen": 8000,
-    "haulKm": 55.2,
-    "deadheadKm": 141.3,
+    "haulKm": 56.2,
+    "deadheadKm": 91.6,
     "loadPoint": {
      "lat": 42.98,
      "lng": 144.335
@@ -1932,55 +2122,74 @@
      "lat": 43.28,
      "lng": 144.63
     },
-    "haulSec": 7787,
-    "deadheadSec": 20624
+    "haulSec": 7925,
+    "deadheadSec": 13371
    },
    {
     "seq": 2,
     "originCity": "北海道釧路市西港2-101-1",
-    "destCity": "北海道川上郡標茶町多和",
-    "salesYen": 35700,
+    "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+    "salesYen": 35285,
     "allowanceYen": 8000,
-    "haulKm": 54.7,
-    "deadheadKm": 63.1,
+    "haulKm": 58.8,
+    "deadheadKm": 99.5,
     "loadPoint": {
      "lat": 42.9785,
      "lng": 144.329
     },
     "unloadPoint": {
-     "lat": 43.276,
-     "lng": 144.621
+     "lat": 43.28,
+     "lng": 144.63
     },
-    "haulSec": 7717,
-    "deadheadSec": 9211
+    "haulSec": 8291,
+    "deadheadSec": 14524
    },
    {
     "seq": 3,
     "originCity": "北海道釧路市西港1",
-    "destCity": "北海道帯広市川西町",
-    "salesYen": 30000,
-    "allowanceYen": 9000,
-    "haulKm": 129.5,
-    "deadheadKm": 53.4,
+    "destCity": "北海道川上郡標茶町多和",
+    "salesYen": 38586,
+    "allowanceYen": 8000,
+    "haulKm": 61.9,
+    "deadheadKm": 117.9,
     "loadPoint": {
      "lat": 42.9815,
      "lng": 144.341
     },
     "unloadPoint": {
-     "lat": 42.9086,
-     "lng": 143.1583
+     "lat": 43.276,
+     "lng": 144.621
+    },
+    "haulSec": 8728,
+    "deadheadSec": 17210
+   },
+   {
+    "seq": 4,
+    "originCity": "北海道釧路市西港2-101-1",
+    "destCity": "北海道河東郡音更町駒場",
+    "salesYen": 30000,
+    "allowanceYen": 4500,
+    "haulKm": 118.5,
+    "deadheadKm": 54.5,
+    "loadPoint": {
+     "lat": 42.9785,
+     "lng": 144.329
+    },
+    "unloadPoint": {
+     "lat": 43.0806,
+     "lng": 143.25
     },
     "haulSec": 7500,
     "deadheadSec": 6000
    },
    {
-    "seq": 4,
+    "seq": 5,
     "originCity": "北海道広尾郡広尾町白樺通",
     "destCity": "北海道帯広市川西町",
-    "salesYen": 28700,
+    "salesYen": 30500,
     "allowanceYen": 8000,
     "haulKm": 94.5,
-    "deadheadKm": 94.5,
+    "deadheadKm": 118.8,
     "loadPoint": {
      "lat": 42.2846,
      "lng": 143.3122
@@ -1989,8 +2198,8 @@
      "lat": 42.9086,
      "lng": 143.1583
     },
-    "haulSec": 7050,
-    "deadheadSec": 6000
+    "haulSec": 7800,
+    "deadheadSec": 6600
    }
   ]
  },
@@ -1998,9 +2207,9 @@
   "unkoNo": "2607230637000000001103",
   "driverName": "佐竹 繁",
   "kmBreakdown": {
-   "preLoadKm": 141.0,
-   "haulKm": 316.4,
-   "betweenKm": 177.8,
+   "preLoadKm": 144.0,
+   "haulKm": 536.0,
+   "betweenKm": 403.7,
    "postUnloadKm": 41.6,
    "otherKm": 17.2
   },
@@ -2017,45 +2226,83 @@
     "seq": 1,
     "originCity": "北海道釧路市西港2-101-1",
     "destCity": "北海道野付郡別海町中西別",
-    "salesYen": 42350,
+    "salesYen": 41084,
     "allowanceYen": 9000,
-    "haulKm": 102.2,
-    "deadheadKm": 141.0,
+    "haulKm": 71.9,
+    "deadheadKm": 144.0,
     "loadPoint": {
      "lat": 42.9785,
      "lng": 144.329
     },
     "unloadPoint": {
-     "lat": 43.47,
-     "lng": 144.98
+     "lat": 43.33,
+     "lng": 144.86
     },
-    "haulSec": 14401,
-    "deadheadSec": 20511
+    "haulSec": 10138,
+    "deadheadSec": 21019
    },
    {
     "seq": 2,
     "originCity": "北海道釧路市西港1",
-    "destCity": "北海道河東郡音更町駒場",
+    "destCity": "北海道帯広市川西町",
     "salesYen": 30500,
-    "allowanceYen": 4500,
-    "haulKm": 119.7,
-    "deadheadKm": 100.6,
+    "allowanceYen": 9000,
+    "haulKm": 129.5,
+    "deadheadKm": 76.7,
     "loadPoint": {
      "lat": 42.9815,
      "lng": 144.341
     },
     "unloadPoint": {
-     "lat": 43.0806,
-     "lng": 143.25
+     "lat": 42.9086,
+     "lng": 143.1583
     },
     "haulSec": 7800,
     "deadheadSec": 6600
    },
    {
     "seq": 3,
+    "originCity": "北海道釧路市西港1-98-41",
+    "destCity": "北海道河東郡士幌町士幌",
+    "salesYen": 31000,
+    "allowanceYen": 9000,
+    "haulKm": 121.6,
+    "deadheadKm": 128.8,
+    "loadPoint": {
+     "lat": 42.98,
+     "lng": 144.335
+    },
+    "unloadPoint": {
+     "lat": 43.1443,
+     "lng": 143.2411
+    },
+    "haulSec": 8100,
+    "deadheadSec": 7200
+   },
+   {
+    "seq": 4,
+    "originCity": "北海道釧路市西港2-101-1",
+    "destCity": "北海道河東郡音更町駒場",
+    "salesYen": 31500,
+    "allowanceYen": 4500,
+    "haulKm": 118.5,
+    "deadheadKm": 121.0,
+    "loadPoint": {
+     "lat": 42.9785,
+     "lng": 144.329
+    },
+    "unloadPoint": {
+     "lat": 43.0806,
+     "lng": 143.25
+    },
+    "haulSec": 8400,
+    "deadheadSec": 5400
+   },
+   {
+    "seq": 5,
     "originCity": "北海道広尾郡広尾町白樺通",
     "destCity": "北海道帯広市川西町",
-    "salesYen": 29400,
+    "salesYen": 32000,
     "allowanceYen": 8000,
     "haulKm": 94.5,
     "deadheadKm": 118.8,
@@ -2067,8 +2314,8 @@
      "lat": 42.9086,
      "lng": 143.1583
     },
-    "haulSec": 7500,
-    "deadheadSec": 6700
+    "haulSec": 7200,
+    "deadheadSec": 6000
    }
   ]
  }

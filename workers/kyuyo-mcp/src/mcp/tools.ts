@@ -54,7 +54,9 @@ import {
 import {
   DEFAULT_DEST_AREA,
   DEFAULT_LEGS_PER_DRIVER_MONTH,
+  DEFAULT_RUNS_PER_DRIVER_MONTH,
   DEST_AREAS,
+  breakEvenLegsPerDay,
   estimateCalibrationRatio,
   haulSpeedKmh,
   hourlyWageYen,
@@ -64,9 +66,17 @@ import {
   rebuiltRuns,
   requiredDrivers,
   restraintHours,
+  runsForLegsPerDay,
+  sensitivityGrid,
   summarizeDotoRebuild,
 } from "../kushiro-doto-rebuild";
-import type { DepotPoints, RebuildOperationInput, RebuildTotals } from "../kushiro-doto-rebuild";
+import type {
+  DepotPoints,
+  RebuildOperationInput,
+  RebuildTotals,
+  SensitivityInput,
+  SensitivityRow,
+} from "../kushiro-doto-rebuild";
 import { DEPOT_KEYS, deadheadFuelYen } from "../kushiro-loading-legs";
 import { DEPOTS, isValidLatLng } from "../depot-distance";
 import type { DepotKey } from "../depot-distance";
@@ -2314,6 +2324,22 @@ const OBIHIRO_DRIVER_CDS: readonly string[] = ["1412", "1587", "1656", "1732", "
 /** 対象運行の上限。**超えたら期間を割って呼び直す** — 黙って切り詰めない。 */
 const KUSHIRO_ESTIMATE_MAX_OPERATIONS = 500;
 
+/** 一番星の経費区分 `08 給与(人件費)`。粗利タブが粗利の経費から外している区分
+ *  (運行手当と二重になるため) で、**人件費の実績はここにある**。 */
+const ICHIBAN_LABOR_COST_KIND = "08";
+
+/**
+ * 所属がマスタに無いときに最低賃金を引く都道府県の既定 = **北海道**。
+ *
+ * **釧路営業所は実在しない**ので、社員マスタ由来の `branchToPrefecture` には
+ * 未来永劫載らない。最低賃金は**就業地の県**で決まるので、県が分かれば額は引ける —
+ * 帯広も釧路もどちらも北海道なので、会社の所在都道府県をそのまま既定にする。
+ * **額 (円) は定数にしない**方針はそのまま — ここで決めているのは県の名前だけで、
+ * 額は R2 の min-wage マスタ (厚労省の一覧の取り込み結果) から引く。
+ * 引数 `prefecture` で上書きできる。
+ */
+const DEFAULT_MIN_WAGE_PREFECTURE = "北海道";
+
 const latLngArgs = z.object({ lat: z.number(), lng: z.number() }).strict();
 
 const kushiroLegArgs = z
@@ -2391,20 +2417,59 @@ const getKushiroBranchEstimateArgs = z
       .enum(DEST_AREAS)
       .optional()
       .describe("卸地の絞り込み。既定 doto (道東卸しだけ) / all で釧路積みぜんぶ"),
-    legs_per_run: z
+    legs_per_day: z
       .number()
       .positive()
       .optional()
-      .describe("組み直し後の 1 運行あたり便数。**省略時は実測の分布の平均** (定数で埋めない)"),
+      .describe(
+        "**1 日に何便まわすか** (組み直しは日帰りなので 1 運行 = 1 日)。" +
+          "**省略時は実測の分布の平均** (定数で埋めない)。応答の `legs_per_day.source` で " +
+          "`measured` / `given` のどちらだったか分かる。**これは固定の想定値ではなく変数** — " +
+          "`sensitivity[]` で複数点を同時に見ること。",
+      ),
+    sensitivity_legs_per_day: z
+      .array(z.number().positive())
+      .min(1)
+      .max(12)
+      .optional()
+      .describe(
+        "感度分析で並べる 便/日 の候補。省略時は **1 / 実測平均 / 2 / 3** の 4 点。" +
+          "昇順・重複除去して返す。",
+      ),
     legs_per_driver_month: z
       .number()
       .positive()
       .optional()
-      .describe(`乗務員 1 名あたりの月間便数。省略時 ${DEFAULT_LEGS_PER_DRIVER_MONTH} (帯広実績 284 便 ÷ 5 名)`),
+      .describe(`乗務員 1 名あたりの月間**便数**の上限。省略時 ${DEFAULT_LEGS_PER_DRIVER_MONTH} (帯広実績 284 便 ÷ 5 名)`),
+    runs_per_driver_month: z
+      .number()
+      .positive()
+      .optional()
+      .describe(
+        "乗務員 1 名あたりの月間**運行数 (稼働日数)** の上限。省略時 18.2 (帯広実績 91 運行 ÷ 5 名)。" +
+          "**便/日 が必要乗務員数に効くのはこちら** — 便だけで数えると便/日 を変えても人数が動かない。",
+      ),
+    monthly_labor_cost_yen: z
+      .number()
+      .optional()
+      .describe(
+        "乗務員 1 名あたりの月間人件費。**省略時は一番星の経費区分 `08 給与(人件費)` を " +
+          "`from`〜`to` × `driver` で引いて 1 名あたりに均す** (実績から取る。定数で埋めない)。" +
+          "`sales_cross_check: false` で上流を止めているときは引けないので、損益分岐は出さない。",
+      ),
     branch: z
       .string()
       .optional()
-      .describe("最低賃金を引く所属名。既定 `釧路営業所`。マスタに無ければ default 県で近似し警告する"),
+      .describe("最低賃金を引く所属名。既定 `釧路営業所`。**実在しない営業所はマスタに無い**ので、その場合は `prefecture` で引く"),
+    prefecture: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "`branch` が最低賃金マスタの branch→都道府県表に無いときに使う都道府県。" +
+          `既定 ${DEFAULT_MIN_WAGE_PREFECTURE} (会社の所在都道府県)。**額ではなく県の名前だけ**を決める引数で、` +
+          "額は R2 の min-wage マスタから引く。どの経路で県が決まったかは `min_wage.prefecture_source` に載る",
+      ),
     assumed_monthly_wage_yen: z
       .number()
       .optional()
@@ -2462,7 +2527,25 @@ export const getKushiroBranchEstimateTool = {
     "という向きで読む (`restraint_is_lower_bound` が必ず立つ)。" +
     "最低賃金は R2 の min-wage マスタ (厚労省の一覧の取り込み結果) から引くので、額は定数ではない。\n" +
     "**燃料代を出す場合も実績の燃料代とは別立て** — 月の燃料総額は給油実績で固定されており、" +
-    "回送km が減っても実績側は 1 円も動かない。",
+    "回送km が減っても実績側は 1 円も動かない。\n" +
+    "**「1 日に何便まわすか」は固定の想定値ではなく変数** (オーナー指示 2026-08-23)。" +
+    "`legs_per_day` を渡さなければ実測の平均 (`legs_per_day.source: \"measured\"`) を使い、" +
+    "**`sensitivity[]` に 1 / 実測平均 / 2 / 3 便/日 の 4 点**を必ず並べる (候補は " +
+    "`sensitivity_legs_per_day` で差し替え可)。便数を変えると**動く**のは 組み直し後の回送km → " +
+    "回送時間 → 拘束 → 換算時給 / 燃料代 / 稼働日数 → 必要乗務員数 → 人件費 で、**動かない**のは " +
+    "売上・手当 (便あたり定額) と 売上走行km・走行時間。`break_even_legs_per_day` は " +
+    "**営業利益 (売上 − 手当 − 燃料 − 人件費) が 0 以上になる最小の 便/日**で、人件費は " +
+    "一番星の経費区分 08 (給与) の実績から取る (定数で埋めない)。\n" +
+    "**現状の回送 (`measured_deadhead_km`) と組み直し後の推定をそのまま引き算しないこと** — " +
+    "実データの道東卸しは運行の途中にあり、降ろした後は必ず十勝へ戻ってきている " +
+    "(帰庫は 27km/運行しかない)。この試算は現状からの差分ではなく**新しい運行を 1 から組んだ姿**。" +
+    "受け取った運行ペイロードは `input` にそのまま数え直して返すので、貼り間違いはそこで気付ける。\n" +
+    "**最低賃金は「所属 → 都道府県 → 額」の順に引く。** 釧路営業所は実在しないので " +
+    "branch→都道府県表には載らず、その場合は `prefecture` (既定 " +
+    `${DEFAULT_MIN_WAGE_PREFECTURE}` + ") で引く。決まった経路は `min_wage.prefecture_source` " +
+    "(`branch` / `argument` / `company-default`) に、額が引けなかったときの切り分け用に " +
+    "その県の改定発効日が `min_wage.master_effective_froms` に載る。**額は必ず R2 の " +
+    "min-wage マスタ (厚労省の一覧の取り込み結果) から引き、定数で埋めない。**",
   inputSchema: getKushiroBranchEstimateArgs,
   execute: async (env: Env, args: z.infer<typeof getKushiroBranchEstimateArgs>) => {
     const parsed = parseYm(args.from.slice(0, 7));
@@ -2477,6 +2560,8 @@ export const getKushiroBranchEstimateTool = {
     const drivers = args.driver ?? OBIHIRO_DRIVER_CDS;
     const branch = args.branch ?? "釧路営業所";
     const legsPerDriverMonth = args.legs_per_driver_month ?? DEFAULT_LEGS_PER_DRIVER_MONTH;
+    const runsPerDriverMonth = args.runs_per_driver_month ?? DEFAULT_RUNS_PER_DRIVER_MONTH;
+    const capacity = { legsPerDriverMonth, runsPerDriverMonth };
     const warnings: string[] = [];
 
     // 営業所の座標。上書きは `depot` で選んだ側にだけ効く (もう片方は比較の基準なので動かさない)。
@@ -2503,7 +2588,7 @@ export const getKushiroBranchEstimateTool = {
 
     const summary = summarizeDotoRebuild(operations, {
       area,
-      ...(args.legs_per_run === undefined ? {} : { legsPerRun: args.legs_per_run }),
+      ...(args.legs_per_day === undefined ? {} : { legsPerRun: args.legs_per_day }),
       depots,
     });
     const n = summary.legsPerRun;
@@ -2541,12 +2626,49 @@ export const getKushiroBranchEstimateTool = {
     } else {
       minWageMaster = normalizeMinWageMaster(rawMinWage);
     }
-    const lookup = minWageForBranch(minWageMaster, branch, parsed.year, parsed.month);
-    if (!lookup.mapped && lookup.prefecture !== null) {
-      warnings.push(`所属 "${branch}" が最低賃金マスタに無いため ${lookup.prefecture} で近似しています`);
+    // まず所属で引く。**実在しない営業所 (釧路営業所) はマスタに載りようが無い**ので、
+    // 引けなければ都道府県を直接指定して引き直す — `branchToPrefecture` にその所属の
+    // 行を差し込んで**同じ関数をもう一度通す**ことで、額の選び方 (改定履歴から対象月に
+    // 有効な行を採る) を書き写さずに済ませる。
+    const byBranch = minWageForBranch(minWageMaster, branch, parsed.year, parsed.month);
+    const prefectureArg = args.prefecture;
+    const prefectureSource = byBranch.mapped
+      ? "branch"
+      : prefectureArg === undefined
+        ? "company-default"
+        : "argument";
+    const prefecture = prefectureArg ?? DEFAULT_MIN_WAGE_PREFECTURE;
+    const lookup = byBranch.mapped
+      ? byBranch
+      : minWageForBranch(
+          {
+            ...minWageMaster,
+            branchToPrefecture: { ...minWageMaster.branchToPrefecture, [branch]: prefecture },
+          },
+          branch,
+          parsed.year,
+          parsed.month,
+        );
+    if (!byBranch.mapped) {
+      warnings.push(
+        `所属 "${branch}" は最低賃金マスタの branch→都道府県表にありません ` +
+          `(実在しない営業所なので当然)。${prefecture} (${prefectureSource}) で引きました`,
+      );
     }
+    // `mapped` が true なら県は必ず決まっている (`minWageForBranch` は空文字の県を
+    // `mapped: false` に落とす)。決まっていなければ上で差し込んだ `prefecture`。
+    // ⇒ **この tool では県が null になる道が無い**ので、額が引けない = マスタ側の
+    // 取り込み漏れ、と一意に読める。
+    const resolvedPrefecture = byBranch.mapped ? byBranch.prefecture! : prefecture;
+    const masterEffectiveFroms = (minWageMaster.prefectures[resolvedPrefecture] ?? [])
+      .map((e) => e.effectiveFrom)
+      .sort();
     if (lookup.rate === null) {
-      warnings.push("対象月に有効な最低賃金が引けませんでした (マスタの改定履歴を確認してください)");
+      warnings.push(
+        `${resolvedPrefecture} の最低賃金マスタに ${args.from.slice(0, 7)} 時点で有効な行がありません ` +
+          `(マスタが持つ発効日: ${masterEffectiveFroms.join(", ") || "1 件も無い"})。` +
+          "min-wage の取り込みを確認してください",
+      );
     }
 
     const fuelYen =
@@ -2556,6 +2678,10 @@ export const getKushiroBranchEstimateTool = {
             kmPerLiter: args.km_per_liter,
             yenPerLiter: args.yen_per_liter,
           });
+
+    // 人件費は実績 (一番星の `08 給与(人件費)`) から取る。**引数があればそれが優先。**
+    let laborCostYen: number | null = args.monthly_labor_cost_yen ?? null;
+    let laborCostSource = args.monthly_labor_cost_yen === undefined ? "none" : "argument";
 
     // 一番星の売上との突合 (対象便がその乗務員たちの期間売上のどれくらいか)。
     let salesCrossCheck: unknown = null;
@@ -2586,29 +2712,125 @@ export const getKushiroBranchEstimateTool = {
         // 対象便の売上が、その乗務員たちの期間売上に占める割合。0 除算はしない。
         target_share: total > 0 ? summary.totals.salesYen / total : null,
       };
+
+      if (laborCostSource === "none") {
+        // 経費区分 08 = 給与(人件費)。粗利タブが粗利の経費から外している区分で、
+        // **運行手当とは別立ての実績**。1 名あたりに均して人件費の前提に使う。
+        const costs = await Promise.all(
+          drivers.map(async (driverCd) => {
+            const body = await fetchIchibanJson(
+              env,
+              ichibanRangeQuery("/api/costs/vehicle-daily", args.from, args.to, {
+                driver: driverCd,
+                kind: ICHIBAN_LABOR_COST_KIND,
+              }),
+              "kushiro_estimate_labor",
+            );
+            return ichibanRows(body).reduce((acc: number, row) => acc + numField(row, "amount"), 0);
+          }),
+        );
+        const totalLabor = costs.reduce((acc: number, v) => acc + v, 0);
+        if (totalLabor > 0) {
+          laborCostYen = totalLabor / drivers.length;
+          laborCostSource = "ichiban";
+        } else {
+          warnings.push(
+            `一番星の経費区分 ${ICHIBAN_LABOR_COST_KIND} (給与) が ${args.from}〜${args.to} に 1 円もありません。` +
+              "人件費の前提が無いので営業利益と損益分岐は出していません",
+          );
+        }
+      }
     }
+    if (laborCostSource === "none") {
+      warnings.push(
+        "人件費の前提がありません (`monthly_labor_cost_yen` を渡すか、`sales_cross_check` を有効にして " +
+          "一番星から引かせてください)。**推測で埋めないので**営業利益と損益分岐は null です",
+      );
+    }
+
+    // --- 便/日 の感度分析 (オーナー指示「1 日何便まわすかは変数にして」) ---
+    const sensitivityInput: SensitivityInput = {
+      capacity,
+      monthlyWageYen: wageYen,
+      minWageYen: lookup.rate,
+      fuel: { kmPerLiter: args.km_per_liter ?? null, yenPerLiter: args.yen_per_liter ?? null },
+      monthlyLaborCostYen: laborCostYen,
+    };
+    // 既定の候補は **1 / 実測平均 / 2 / 3**。実測平均が出せない (対象 0 便) ときは整数 3 点だけ。
+    const candidates = args.sensitivity_legs_per_day
+      ?? (summary.distribution.mean === null ? [1, 2, 3] : [1, summary.distribution.mean, 2, 3]);
+    const sensitivity = sensitivityGrid(summary.totals, depot, candidates, sensitivityInput);
+    const breakEven = breakEvenLegsPerDay(summary.totals, depot, candidates, sensitivityInput);
+
+    /** 感度分析 1 行を応答用に落とす。 */
+    const sensitivityJson = (row: SensitivityRow) => ({
+      legs_per_day: row.legsPerDay,
+      runs: row.runs,
+      required_drivers: {
+        by_legs: row.requiredDrivers.byLegs,
+        by_runs: row.requiredDrivers.byRuns,
+        drivers: row.requiredDrivers.drivers,
+      },
+      rebuilt_deadhead_km: row.rebuiltDeadheadKm,
+      restraint_hours: row.restraint.rebuiltTotalHours,
+      restraint_hours_per_driver: row.restraintHoursPerDriver,
+      hourly_yen: row.hourlyYen,
+      min_wage_diff_yen: row.minWageDiffYen,
+      below_min_wage: row.belowMinWage,
+      fuel_yen: row.fuelYen,
+      margin_yen: row.marginYen,
+      labor_cost_yen: row.laborCostYen,
+      operating_margin_yen: row.operatingMarginYen,
+    });
 
     return {
       // **実在しない営業所の試算**であることを、応答だけ見て取り違えないための旗。
       estimated: true,
       estimate_note:
         "釧路営業所は実在しない。起終点は釧路市役所の暫定座標で、距離は直線 (道なりの下限)。" +
-        "拘束時間は 走行 + 回送 のみで荷役・待機を含まない下限、換算時給はその上限。",
+        "拘束時間は 走行 + 回送 のみで荷役・待機を含まない下限、換算時給はその上限。" +
+        "**現状の回送 (measured_deadhead_km) は十勝への戻りを含む** — 実データの道東卸しは" +
+        "運行の途中にあり、降ろした後は必ず十勝へ戻ってきている (帰庫は 27km/運行しかない)。" +
+        "だからこれは現状からの差分ではなく**新しい運行を 1 から組んだ姿**で、" +
+        "`measured_deadhead_km` と `rebuilt_deadhead_km` をそのまま引き算して削減量と読まないこと。" +
+        "同じ方法どうしの引き算として成立するのは `depot_diff_km` (帯広発 vs 釧路発) だけ。",
+      // 貼り間違いに気づけるよう、**受け取った運行ペイロードをそのまま数え直して返す**
+      // (絞り込み前の全便。`summary` は積地=釧路 かつ 卸地=dest_area で絞った後の値)。
+      input: {
+        operations: args.operations.length,
+        legs: args.operations.reduce((acc: number, op) => acc + op.legs.length, 0),
+        sales_yen: args.operations.reduce(
+          (acc: number, op) => acc + op.legs.reduce((a: number, l) => a + l.salesYen, 0), 0),
+        allowance_yen: args.operations.reduce(
+          (acc: number, op) => acc + op.legs.reduce((a: number, l) => a + l.allowanceYen, 0), 0),
+      },
       company: args.company,
       from: args.from,
       to: args.to,
       depot,
       depot_points: depots,
       dest_area: area,
-      legs_per_run: {
-        used: n,
+      // **1 日に何便まわすか。想定値を固定しない** (オーナー指示 2026-08-23)。
+      legs_per_day: {
+        value: n,
+        source: args.legs_per_day === undefined ? "measured" : "given",
         measured_mean: summary.distribution.mean,
-        source: args.legs_per_run === undefined ? "measured" : "argument",
         operations: summary.distribution.operations,
         buckets: summary.distribution.buckets.map((b) => ({
           legs_in_operation: b.legsInOperation,
           operations: b.operations,
         })),
+      },
+      // 便/日 を振ったときの姿。**どの前提でも 1 つの表で比べられるようにするためのもの。**
+      sensitivity: sensitivity.map(sensitivityJson),
+      // 営業利益が 0 以上になる最小の 便/日。候補の中に無ければ null (外挿しない)。
+      break_even_legs_per_day: breakEven,
+      labor_cost: {
+        monthly_per_driver_yen: laborCostYen,
+        source: laborCostSource,
+        note:
+          "一番星の経費区分 08 (給与) を from〜to × driver で合計し、乗務員数で均した実績。" +
+          "運行手当 (allowance_yen) とは別立て — 粗利タブも 08 を粗利の経費から外している。",
       },
       summary: {
         ...kushiroTotalsJson(summary.totals, n),
@@ -2632,15 +2854,27 @@ export const getKushiroBranchEstimateTool = {
               rebuilt_total: hours.rebuiltTotalHours,
               restraint_is_lower_bound: hours.restraintIsLowerBound,
             },
+        // **便の量だけで数えた人数** (便/日 に依らない)。便/日 を効かせた人数は
+        // `sensitivity[].required_drivers` を見ること。
         required_drivers: needDrivers,
         legs_per_driver_month: legsPerDriverMonth,
+        runs_per_driver_month: runsPerDriverMonth,
+        // この便/日 で組んだときの稼働日数 (= 運行数)。**座標が欠けた便も運ぶ。**
+        runs_for_legs_per_day: n === null ? null : runsForLegsPerDay(summary.totals.legs, n),
         // 差km の金額化。**実績の燃料代とは足し引きしない別立ての紙。**
         deadhead_fuel_yen: fuelYen,
       },
       min_wage: {
         branch,
-        prefecture: lookup.prefecture,
-        mapped: lookup.mapped,
+        prefecture: resolvedPrefecture,
+        /** 県がどう決まったか。`branch` = マスタの branch→都道府県表に当たった /
+         *  `argument` = 引数の `prefecture` / `company-default` = 会社の所在都道府県。 */
+        prefecture_source: prefectureSource,
+        /** **所属名**でマスタに当たったか。実在しない営業所では常に false。 */
+        mapped: byBranch.mapped,
+        /** その県について マスタが持つ改定の発効日。**`rate` が null のときの切り分け用** —
+         *  空なら取り込み漏れ、未来の日付だけなら対象月にはまだ効いていない。 */
+        master_effective_froms: masterEffectiveFroms,
         rate: lookup.rate,
         rate_effective_from: lookup.rateEffectiveFrom ?? null,
         assumed_monthly_wage_yen: wageYen,

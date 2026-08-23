@@ -5,7 +5,7 @@
  * **`app/utils/kushiro-doto-rebuild.ts` の双子** — ロジックは 1 行も変えていない。
  * 移植の理由は `route-place.ts` の冒頭と同じ (worker から app 側は import できない、
  * Refs #268)。**変更する時は両方に反映すること。** 双子であることは共有 fixture +
- * golden (`tests/fixtures/kushiro-loading/`) で `test/kushiro-twin-parity.test.ts` が固定する。
+ * golden (`tests/fixtures/kushiro-loading/`) で `test/kushiro-doto-rebuild.test.ts` が固定する。
  *
  * オーナー (2026-08-23):「**道東に降ろす便 (標茶・別海、38 便) → 釧路営業所が有利。
  * だけにして**」。#796 (`kushiro-loading-legs.ts`) が数えた「釧路積み」のうち、
@@ -52,6 +52,23 @@
  * — それは測り方の差 (直線は道なりの下限)。橋渡しは `推定 ÷ 実測` の比
  * (`estimateCalibrationRatio`) で見る。
  *
+ * ## 1 運行 = 1 日。「1 日に何便まわすか」は**変数**
+ *
+ * 組み直しは日帰り (営業所を出て営業所へ戻る) なので、**`legsPerRun` は画面・MCP tool が
+ * 言う「便/日」と同じ値**。オーナー (2026-08-23):「**1 日何便まわす想定か → これは変数にして**」。
+ * ⇒ **想定値を固定しないこと自体が要件**なので、`sensitivityGrid` / `breakEvenLegsPerDay` は
+ * **便/日 を引数で受け取るだけの純粋関数**にしてある (既定値をこのファイルに埋めない —
+ * 既定を決めるのは呼び出し側 = tool / 画面の責務。画面はここをスライダーにする)。
+ *
+ * ## 現状の回送 (実測) をそのまま引き算しない
+ *
+ * 実データの道東卸しは**運行の途中**にあり、降ろした後は必ず十勝へ戻ってきている
+ * (#797 の実測: 道東卸し 38 便に対し帰庫は 27km/運行しかない)。⇒ **現状の回送
+ * 4,288.9km には十勝への戻りが含まれる**ので、組み直し後の推定との差をそのまま
+ * 「削減量」と読んではいけない。この試算は**現状からの差分ではなく、新しい運行を
+ * 1 から組んだ姿**。営業所どうしの比較 (`rebuiltDepotDiffKm`) だけが同じ方法どうしの
+ * 引き算として成立する。
+ *
  * ## 魔法の定数を埋めない
  *
  * `legsPerRun` の既定は**実測の分布から出す** (`legsPerRunDistribution().mean`)。
@@ -67,9 +84,13 @@
  */
 import { DEPOTS, haversineKm, isValidLatLng } from "./depot-distance";
 import type { DepotKey, LatLng } from "./depot-distance";
-import { DEPOT_KEYS, SECONDS_PER_HOUR, isKushiroLoadingLeg } from "./kushiro-loading-legs";
-import type { KushiroLegInput, KushiroOperationInput } from "./kushiro-loading-legs";
+import { DEPOT_KEYS, SECONDS_PER_HOUR, deadheadFuelYen, isKushiroLoadingLeg } from "./kushiro-loading-legs";
+import type { FuelRate, KushiroLegInput, KushiroOperationInput } from "./kushiro-loading-legs";
 import { routePlace } from "./route-place";
+// **`FuelRate` の出どころだけ app 側と違う。** app 側は `margin.ts` が宣言していて
+// `kushiro-loading-legs.ts` は type-only import しているだけ (再 export していない) ので
+// 宣言元から取る。worker には `margin.ts` が無いので、双子の `kushiro-loading-legs.ts` が
+// 同じ形の型を宣言していて、それを使う。**値の挙動は同じ。**
 
 /**
  * **道東 = 釧路総合振興局 + 根室振興局の全市町村** (`routePlace` の語彙 = 市/町/村 を
@@ -564,4 +585,181 @@ export function summarizeDotoRebuild(
     routes: rowKeyOrder([...routeRows.values()]),
     drivers: rowKeyOrder([...driverRows.values()]),
   }
+}
+
+// --- 「1 日に何便まわすか」を振る (感度分析) ---------------------------------
+
+/**
+ * 乗務員 1 名が 1 か月に回せる**運行数 (= 日数)** の既定 = **91 ÷ 5 = 18.2**。
+ *
+ * 由来は帯広の実績 (`tests/fixtures/kushiro-loading/operations-2026-07.json` の
+ * 2026-07 実測): **運行 91 本 ÷ 乗務員 5 名**。`DEFAULT_LEGS_PER_DRIVER_MONTH`
+ * (便の量の上限) と**両方**が要る — 便/日 を増やすと同じ便数でも運行数が減るので、
+ * 便だけで数えると必要乗務員数が便/日 に反応しない。
+ */
+export const DEFAULT_RUNS_PER_DRIVER_MONTH = 91 / 5
+
+/** 乗務員 1 名の月間キャパ。**どちらも呼び出し側が渡す** (このファイルに既定は無い)。 */
+export interface DriverCapacity {
+  /** 便の量の上限 (便/名/月)。 */
+  legsPerDriverMonth: number
+  /** 運行 (日) の量の上限 (運行/名/月)。 */
+  runsPerDriverMonth: number
+}
+
+/** 必要乗務員数の内訳。**便の量と 日数 の両方で要る人数を出し、多い方を採る。** */
+export interface RequiredDriverBreakdown {
+  /** 便の量から (`便数 ÷ 便/名/月` の切り上げ)。 */
+  byLegs: number | null
+  /** 日数から (`運行数 ÷ 運行/名/月` の切り上げ)。便/日 が効くのはこちら。 */
+  byRuns: number | null
+  /** 実際に要る人数 = 上 2 つの大きい方。両方 null なら null。 */
+  drivers: number | null
+}
+
+/**
+ * 組み直し後の**運行数 (= 稼働日数)** = 対象便数 ÷ 1 日あたり便数。
+ *
+ * `rebuiltRuns` (推定を出せた便で数える) とは**母集団が違う** — こちらは人繰りの話なので
+ * **座標が欠けた便も運ぶ**。便/日 が正でなければ `null`。
+ */
+export function runsForLegsPerDay(legs: number, legsPerDay: number): number | null {
+  if (!(legsPerDay > 0)) return null
+  return legs / legsPerDay
+}
+
+/** 必要乗務員数を 便の量と 日数の両方から出す。 */
+export function requiredDriversFor(
+  totals: RebuildTotals,
+  legsPerDay: number,
+  capacity: DriverCapacity,
+): RequiredDriverBreakdown {
+  const byLegs = requiredDrivers(totals.legs, capacity.legsPerDriverMonth)
+  const runs = runsForLegsPerDay(totals.legs, legsPerDay)
+  const byRuns = runs === null || !(capacity.runsPerDriverMonth > 0)
+    ? null
+    : Math.ceil(runs / capacity.runsPerDriverMonth)
+  if (byLegs === null) return { byLegs, byRuns, drivers: byRuns }
+  if (byRuns === null) return { byLegs, byRuns, drivers: byLegs }
+  return { byLegs, byRuns, drivers: Math.max(byLegs, byRuns) }
+}
+
+/** 感度分析 1 行を出すために呼び出し側が渡す前提。**既定はここに置かない。** */
+export interface SensitivityInput {
+  capacity: DriverCapacity
+  /** 想定の月間賃金 (対象便ぜんぶの総額)。 */
+  monthlyWageYen: number
+  /** 比較する最低賃金 (円/h)。引けなければ `null` (**0 で埋めない**)。 */
+  minWageYen: number | null
+  /** 燃費・単価。片方でも無ければ燃料と粗利は `null`。 */
+  fuel: Pick<FuelRate, 'kmPerLiter' | 'yenPerLiter'>
+  /** 乗務員 1 名あたりの月間人件費。無ければ営業利益は `null` (**推測で埋めない**)。 */
+  monthlyLaborCostYen: number | null
+}
+
+/** 便/日 を 1 点固定したときの姿。 */
+export interface SensitivityRow {
+  /** この行の 便/日。 */
+  legsPerDay: number
+  /** 組み直し後の運行数 (= 稼働日数)。 */
+  runs: number | null
+  requiredDrivers: RequiredDriverBreakdown
+  /** 組み直し後の回送km (推定)。 */
+  rebuiltDeadheadKm: number | null
+  /** 拘束時間 (走行 + 回送 の**下限**)。 */
+  restraint: RestraintHours
+  /** 1 名あたりの月間拘束時間。 */
+  restraintHoursPerDriver: number | null
+  /** 換算時給 = 想定賃金 ÷ 拘束。**拘束が下限なので上限。** */
+  hourlyYen: number | null
+  /** 最低賃金との差 (円/h)。プラスなら上回る。 */
+  minWageDiffYen: number | null
+  /** 最低賃金を割るか。額が引けなければ `null` (**false に倒さない**)。 */
+  belowMinWage: boolean | null
+  /** 燃料代 (売上走行 + 組み直し回送) の**試算**。実績の燃料代とは別の紙。 */
+  fuelYen: number | null
+  /** 粗利 = 売上 − 手当 − 燃料 (試算)。 */
+  marginYen: number | null
+  /** 人件費 = 1 名あたり × 必要乗務員数。 */
+  laborCostYen: number | null
+  /** 営業利益 = 粗利 − 人件費。**これが 0 以上になる最小の 便/日 が損益分岐。** */
+  operatingMarginYen: number | null
+}
+
+/**
+ * 便/日 を 1 点に固定したときの姿を出す。**便/日 は引数で、既定は無い。**
+ *
+ * 便数を変えたときに**何が動いて何が動かないか**:
+ * - 動かない … 売上 / 手当 (便あたり定額なので便数に比例するだけ) / 売上走行km / 走行時間
+ * - 動く … 組み直し後の回送km (便/日 が増えるほど運行の端が減る) → 回送時間 → 拘束 →
+ *   換算時給 / 燃料代 / 稼働日数 → 必要乗務員数 → 人件費
+ */
+export function sensitivityRow(
+  totals: RebuildTotals,
+  depot: DepotKey,
+  legsPerDay: number,
+  input: SensitivityInput,
+): SensitivityRow {
+  const restraint = restraintHours(totals, depot, legsPerDay)
+  const need = requiredDriversFor(totals, legsPerDay, input.capacity)
+  const km = rebuiltDeadheadKm(totals, depot, legsPerDay)
+  const total = restraint.rebuiltTotalHours
+  // **`total` が出ている時点で対象便が 1 本以上ある**ので `drivers` は 1 以上
+  // (便が 0 なら回送の実測秒が無く、速度が出ず `rebuiltTotalHours` が null になる)。
+  // ⇒ ここで `drivers > 0` を足すと到達しない分岐が増えるだけなので置かない。
+  const hoursPerDriver = total === null || need.drivers === null ? null : total / need.drivers
+  const hourlyYen = hourlyWageYen(input.monthlyWageYen, total)
+  // 燃料は 売上走行 + 組み直し回送 の両方。式は #796 と同じ (km ÷ 燃費 × 単価)。
+  const fuelYen = km === null ? null : deadheadFuelYen(totals.haulKm + km, input.fuel)
+  const marginYen = fuelYen === null ? null : totals.salesYen - totals.allowanceYen - fuelYen
+  const laborCostYen = input.monthlyLaborCostYen === null || need.drivers === null
+    ? null
+    : input.monthlyLaborCostYen * need.drivers
+  return {
+    legsPerDay,
+    runs: runsForLegsPerDay(totals.legs, legsPerDay),
+    requiredDrivers: need,
+    rebuiltDeadheadKm: km,
+    restraint,
+    restraintHoursPerDriver: hoursPerDriver,
+    hourlyYen,
+    minWageDiffYen: hourlyYen === null || input.minWageYen === null ? null : hourlyYen - input.minWageYen,
+    belowMinWage: hourlyYen === null || input.minWageYen === null ? null : hourlyYen < input.minWageYen,
+    fuelYen,
+    marginYen,
+    laborCostYen,
+    operatingMarginYen: marginYen === null || laborCostYen === null ? null : marginYen - laborCostYen,
+  }
+}
+
+/**
+ * 便/日 の候補を並べた表。**候補は呼び出し側が渡す** (このファイルに既定のグリッドは無い)。
+ * 昇順・重複除去してから回すので、実測平均を混ぜてもそのまま渡せる。
+ */
+export function sensitivityGrid(
+  totals: RebuildTotals,
+  depot: DepotKey,
+  candidates: readonly number[],
+  input: SensitivityInput,
+): SensitivityRow[] {
+  const uniq = [...new Set(candidates)].filter(n => n > 0).sort((a, b) => a - b)
+  return uniq.map(n => sensitivityRow(totals, depot, n, input))
+}
+
+/**
+ * **1 名分の人件費を賄える最小の 便/日** = `営業利益 ≥ 0` になる最小の候補。
+ *
+ * 候補の中に無ければ `null` (**外挿しない** — 候補の外は測っていない)。人件費・燃費・単価が
+ * 無ければ営業利益が出ないので `null` になる。
+ */
+export function breakEvenLegsPerDay(
+  totals: RebuildTotals,
+  depot: DepotKey,
+  candidates: readonly number[],
+  input: SensitivityInput,
+): number | null {
+  for (const row of sensitivityGrid(totals, depot, candidates, input)) {
+    if (row.operatingMarginYen !== null && row.operatingMarginYen >= 0) return row.legsPerDay
+  }
+  return null
 }

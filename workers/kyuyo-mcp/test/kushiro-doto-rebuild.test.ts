@@ -15,6 +15,8 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_DEST_AREA,
   DEFAULT_LEGS_PER_DRIVER_MONTH,
+  DEFAULT_RUNS_PER_DRIVER_MONTH,
+  breakEvenLegsPerDay,
   DEST_AREAS,
   DOTO_PLACES,
   addRebuildLeg,
@@ -32,7 +34,11 @@ import {
   rebuiltDepotDiffKm,
   rebuiltRuns,
   requiredDrivers,
+  requiredDriversFor,
   restraintHours,
+  runsForLegsPerDay,
+  sensitivityGrid,
+  sensitivityRow,
   selectRebuildLegs,
   summarizeDotoRebuild,
 } from '../src/kushiro-doto-rebuild'
@@ -40,6 +46,7 @@ import type {
   RebuildLegInput,
   RebuildOperationInput,
   RebuildTotals,
+  SensitivityInput,
 } from '../src/kushiro-doto-rebuild'
 import { classifyKushiroOperation, KUSHIRO_LOADERS } from '../src/kushiro-loading-legs'
 import { DEPOTS, haversineKm } from '../src/depot-distance'
@@ -479,7 +486,8 @@ describe('共有 fixture が本番実測 (2026-07 の道東卸し 38 便) の集
         driverCounts.set(op.driverName, (driverCounts.get(op.driverName) ?? 0) + 1)
       }
     }
-    expect(Object.fromEntries(destCounts)).toEqual(measured.destLegs)
+    expect(Object.fromEntries(destCounts))
+      .toEqual(Object.fromEntries(measured.routes.map(r => [r.destCity, r.legs])))
     expect(Object.fromEntries(driverCounts)).toEqual(measured.driverLegs)
     expect(Object.fromEntries(summary.drivers.map(d => [d.driverName, d.totals.legs])))
       .toEqual(measured.driverLegs)
@@ -487,17 +495,52 @@ describe('共有 fixture が本番実測 (2026-07 の道東卸し 38 便) の集
 
   it('23 運行すべてが混在運行 (pure は 0) — だから営業所の差し替えでは動かせない', () => {
     const kinds = operations.map(op => classifyKushiroOperation(op.legs))
-    expect(kinds.filter(k => k === 'pure')).toHaveLength(measured.pureOperations)
+    expect(kinds.filter(k => k === 'pure')).toHaveLength(0)
     expect(kinds.filter(k => k === 'mixed')).toHaveLength(measured.operations)
+    // 「全便が道東」という運行は 1 つも無い (これが実測の `pure = 0` の中身)
+    const allDoto = operations.filter(op => op.legs.every(l => isDotoDest(l.destCity)))
+    expect(allDoto).toHaveLength(measured.allDotoOperations)
   })
 
   it('1 運行あたりの対象便数の分布 (legsPerRun の既定の根拠)', () => {
     expect(summary.distribution.buckets).toEqual([
-      { legsInOperation: 1, operations: 8 },
-      { legsInOperation: 2, operations: 15 },
+      { legsInOperation: 1, operations: 11 },
+      { legsInOperation: 2, operations: 9 },
+      { legsInOperation: 3, operations: 3 },
     ])
+    expect(Object.fromEntries(summary.distribution.buckets.map(b => [String(b.legsInOperation), b.operations])))
+      .toEqual(measured.legsPerOperation)
     expect(summary.distribution.buckets.reduce((a, b) => a + b.legsInOperation * b.operations, 0))
       .toBe(measured.legs)
+  })
+
+  it('経路別 実測 4 本にそのまま戻る (便数 / 売上 / 手当 / 売上走行km / 回送km)', () => {
+    const legs = operations.flatMap(op => op.legs)
+      .filter(l => l.originCity.includes('釧路市西港') && isDotoDest(l.destCity))
+    const seen = new Set<string>()
+    for (const route of measured.routes) {
+      const hit = legs.filter(l => l.destCity === route.destCity)
+      seen.add(route.destCity)
+      expect({ dest: route.destCity, legs: hit.length }).toEqual({ dest: route.destCity, legs: route.legs })
+      expect(hit.reduce((sum, l) => sum + l.salesYen, 0)).toBe(route.salesYen)
+      expect(hit.reduce((sum, l) => sum + l.allowanceYen, 0)).toBe(route.allowanceYen)
+      // km の実測は 1km 丸め。**全体の合計 (2,361.6 / 4,288.9) は厳密に合わせてある**ので、
+      // 経路ごとは 0.5km 以内 (= 丸めて実測の整数に戻る) を見る。
+      expect(hit.reduce((sum, l) => sum + l.haulKm, 0)).toBeCloseTo(route.haulKm, 0)
+      expect(hit.reduce((sum, l) => sum + l.deadheadKm, 0)).toBeCloseTo(route.deadheadKm, 0)
+    }
+    expect(seen.size).toBe(measured.routes.length)
+    expect(legs.filter(l => !seen.has(l.destCity))).toEqual([])
+  })
+
+  it('1 運行の 道東便/全便 の組み合わせも実測どおり', () => {
+    const combos: Record<string, number> = {}
+    for (const op of operations) {
+      const doto = op.legs.filter(l => l.originCity.includes('釧路市西港') && isDotoDest(l.destCity)).length
+      const key = `${doto}/${op.legs.length}`
+      combos[key] = (combos[key] ?? 0) + 1
+    }
+    expect(combos).toEqual(measured.dotoOverTotalLegs)
   })
 
   it('手当の合計は 手当マスタ (標茶 ¥8,000 / 別海 ¥9,000) で説明が付く', () => {
@@ -523,6 +566,136 @@ describe('共有 fixture が本番実測 (2026-07 の道東卸し 38 便) の集
     expect(all.totals.legs - all.totals.estimatedLegs).toBe(2)
     // 道東だけに絞れば欠測は無い (実測集計がそのまま出る)
     expect(summary.totals.missingLegs).toBe(0)
+  })
+})
+
+// --- 「1 日に何便まわすか」を振る -----------------------------------------------
+
+const CAPACITY = { legsPerDriverMonth: 57, runsPerDriverMonth: DEFAULT_RUNS_PER_DRIVER_MONTH }
+
+function sensInput(over: Partial<SensitivityInput> = {}): SensitivityInput {
+  return {
+    capacity: CAPACITY,
+    monthlyWageYen: 311000,
+    minWageYen: 1010,
+    fuel: { kmPerLiter: 3, yenPerLiter: 150 },
+    monthlyLaborCostYen: 400000,
+    ...over,
+  }
+}
+
+describe('便/日 を変数として扱う', () => {
+  const totals = summarizeDotoRebuild(operations).totals
+
+  it('既定の運行/名/月 は帯広実績 (91 運行 ÷ 5 名) の商', () => {
+    expect(DEFAULT_RUNS_PER_DRIVER_MONTH).toBeCloseTo(
+      measured.obihiroRunsPerDriverMonth.operations / measured.obihiroRunsPerDriverMonth.drivers, 12)
+  })
+
+  it('稼働日数 = 対象便数 ÷ 便/日。正でなければ null', () => {
+    expect(runsForLegsPerDay(38, 2)).toBe(19)
+    expect(runsForLegsPerDay(38, 0)).toBeNull()
+  })
+
+  it('必要乗務員数は 便の量と 日数 の両方から出し、多い方を採る', () => {
+    // 便/日 = 1 → 38 日ぶん → 38 ÷ 18.2 = 3 名。便の量では 1 名なので 3 名が効く
+    const one = requiredDriversFor(totals, 1, CAPACITY)
+    expect(one.byLegs).toBe(1)
+    expect(one.byRuns).toBe(3)
+    expect(one.drivers).toBe(3)
+    // 便/日 = 3 → 12.67 日 → 1 名。便の量も 1 名
+    const three = requiredDriversFor(totals, 3, CAPACITY)
+    expect(three.byRuns).toBe(1)
+    expect(three.drivers).toBe(1)
+  })
+
+  it('便/日 か 運行キャパが不正なら、その側は null にして残った側を使う', () => {
+    expect(requiredDriversFor(totals, 0, CAPACITY)).toEqual({ byLegs: 1, byRuns: null, drivers: 1 })
+    expect(requiredDriversFor(totals, 2, { ...CAPACITY, runsPerDriverMonth: 0 }))
+      .toEqual({ byLegs: 1, byRuns: null, drivers: 1 })
+    expect(requiredDriversFor(totals, 2, { ...CAPACITY, legsPerDriverMonth: 0 }).byLegs).toBeNull()
+    expect(requiredDriversFor(totals, 2, { ...CAPACITY, legsPerDriverMonth: 0 }).drivers).toBe(2)
+    expect(requiredDriversFor(totals, 0, { legsPerDriverMonth: 0, runsPerDriverMonth: 0 }))
+      .toEqual({ byLegs: null, byRuns: null, drivers: null })
+  })
+
+  it('便/日 を増やすと回送と拘束が減り、換算時給が上がる', () => {
+    const rows = sensitivityGrid(totals, 'kushiro', [1, 2, 3], sensInput())
+    expect(rows.map(r => r.legsPerDay)).toEqual([1, 2, 3])
+    for (let i = 1; i < rows.length; i += 1) {
+      expect(rows[i]!.rebuiltDeadheadKm!).toBeLessThan(rows[i - 1]!.rebuiltDeadheadKm!)
+      expect(rows[i]!.restraint.rebuiltTotalHours!).toBeLessThan(rows[i - 1]!.restraint.rebuiltTotalHours!)
+      expect(rows[i]!.hourlyYen!).toBeGreaterThan(rows[i - 1]!.hourlyYen!)
+    }
+    // 売上・手当・売上走行km は便/日 で動かない (粗利 + 燃料 = 売上 − 手当 で一定)
+    for (const row of rows) {
+      expect(row.marginYen! + row.fuelYen!).toBeCloseTo(totals.salesYen - totals.allowanceYen, 6)
+    }
+  })
+
+  it('候補は昇順・重複除去し、0 以下は落とす', () => {
+    expect(sensitivityGrid(totals, 'kushiro', [3, 1, 3, 0, -1, 2], sensInput()).map(r => r.legsPerDay))
+      .toEqual([1, 2, 3])
+    expect(sensitivityGrid(totals, 'kushiro', [], sensInput())).toEqual([])
+  })
+
+  it('1 行の中身 (拘束・人件費・粗利・最低賃金との差)', () => {
+    const row = sensitivityRow(totals, 'kushiro', 2, sensInput())
+    expect(row.runs).toBe(19)
+    expect(row.restraint.restraintIsLowerBound).toBe(true)
+    expect(row.restraintHoursPerDriver).toBeCloseTo(row.restraint.rebuiltTotalHours! / row.requiredDrivers.drivers!, 9)
+    expect(row.hourlyYen).toBeCloseTo(311000 / row.restraint.rebuiltTotalHours!, 9)
+    expect(row.minWageDiffYen).toBeCloseTo(row.hourlyYen! - 1010, 9)
+    expect(row.belowMinWage).toBe(row.hourlyYen! < 1010)
+    expect(row.fuelYen).toBeCloseTo((totals.haulKm + row.rebuiltDeadheadKm!) / 3 * 150, 9)
+    expect(row.marginYen).toBeCloseTo(totals.salesYen - totals.allowanceYen - row.fuelYen!, 9)
+    expect(row.laborCostYen).toBe(400000 * row.requiredDrivers.drivers!)
+    expect(row.operatingMarginYen).toBeCloseTo(row.marginYen! - row.laborCostYen!, 9)
+  })
+
+  it('前提が欠けたところは null にする (0 や推測で埋めない)', () => {
+    const noFuel = sensitivityRow(totals, 'kushiro', 2, sensInput({ fuel: { kmPerLiter: null, yenPerLiter: 150 } }))
+    expect(noFuel.fuelYen).toBeNull()
+    expect(noFuel.marginYen).toBeNull()
+    expect(noFuel.operatingMarginYen).toBeNull()
+    const noLabor = sensitivityRow(totals, 'kushiro', 2, sensInput({ monthlyLaborCostYen: null }))
+    expect(noLabor.laborCostYen).toBeNull()
+    expect(noLabor.operatingMarginYen).toBeNull()
+    const noMin = sensitivityRow(totals, 'kushiro', 2, sensInput({ minWageYen: null }))
+    expect(noMin.minWageDiffYen).toBeNull()
+    expect(noMin.belowMinWage).toBeNull()
+    // 便/日 が不正だと推定そのものが出ない
+    const bad = sensitivityRow(totals, 'kushiro', 0, sensInput())
+    expect(bad.rebuiltDeadheadKm).toBeNull()
+    expect(bad.restraintHoursPerDriver).toBeNull()
+    expect(bad.hourlyYen).toBeNull()
+    expect(bad.minWageDiffYen).toBeNull()
+    expect(bad.belowMinWage).toBeNull()
+    expect(bad.fuelYen).toBeNull()
+    // 乗務員数が出せなければ 1 名あたりの拘束も人件費も出さない
+    const noCap = sensitivityRow(totals, 'kushiro', 2,
+      sensInput({ capacity: { legsPerDriverMonth: 0, runsPerDriverMonth: 0 } }))
+    expect(noCap.requiredDrivers.drivers).toBeNull()
+    expect(noCap.restraintHoursPerDriver).toBeNull()
+    expect(noCap.laborCostYen).toBeNull()
+    // 対象 0 便なら人数が 0 になり、1 名あたりの拘束は出さない (0 除算をしない)
+    const empty = sensitivityRow(emptyRebuildTotals(), 'kushiro', 2, sensInput())
+    expect(empty.requiredDrivers.drivers).toBe(0)
+    expect(empty.restraintHoursPerDriver).toBeNull()
+  })
+
+  it('損益分岐は 営業利益 ≥ 0 になる最小の候補。無ければ null (外挿しない)', () => {
+    const cheap = breakEvenLegsPerDay(totals, 'kushiro', [1, 2, 3], sensInput({ monthlyLaborCostYen: 100000 }))
+    expect(cheap).toBe(1)
+    // 人件費 ¥400,000/名 なら 1 便/日 (3 名) では赤字、2 便/日 (2 名) で黒字に転じる
+    const mid = breakEvenLegsPerDay(totals, 'kushiro', [1, 2, 3], sensInput())
+    expect(mid).toBe(2)
+    const dear = breakEvenLegsPerDay(totals, 'kushiro', [1, 2, 3], sensInput({ monthlyLaborCostYen: 900000 }))
+    expect(dear).toBe(3)
+    expect(breakEvenLegsPerDay(totals, 'kushiro', [1, 2, 3], sensInput({ monthlyLaborCostYen: 99000000 })))
+      .toBeNull()
+    expect(breakEvenLegsPerDay(totals, 'kushiro', [1, 2, 3], sensInput({ monthlyLaborCostYen: null })))
+      .toBeNull()
   })
 })
 
@@ -556,6 +729,9 @@ describe('双子の出力が app 側 golden と 1 ビットも違わない', () 
         kushiro: restraintHours(summary.totals, 'kushiro', n),
       },
       requiredDrivers: requiredDrivers(summary.totals.legs, DEFAULT_LEGS_PER_DRIVER_MONTH),
+      sensitivity: sensitivityGrid(summary.totals, 'kushiro', [1, n, 2, 3], sensInput()),
+      sensitivityObihiro: sensitivityGrid(summary.totals, 'obihiro', [1, n, 2, 3], sensInput()),
+      breakEvenLegsPerDay: breakEvenLegsPerDay(summary.totals, 'kushiro', [1, n, 2, 3], sensInput()),
     },
     all: { legsPerRun: all.legsPerRun, totals: all.totals, routes: all.routes },
   }

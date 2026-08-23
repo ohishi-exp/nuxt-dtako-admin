@@ -15,11 +15,15 @@
     "buckets": [
      {
       "legsInOperation": 1,
-      "operations": 8
+      "operations": 11
      },
      {
       "legsInOperation": 2,
-      "operations": 15
+      "operations": 9
+     },
+     {
+      "legsInOperation": 3,
+      "operations": 3
      }
     ],
     "mean": 1.6521739130434783
@@ -28,23 +32,23 @@
     "legs": 38,
     "salesYen": 1420245,
     "allowanceYen": 311000,
-    "haulKm": 2361.5999999999995,
-    "deadheadKm": 4288.900000000001,
+    "haulKm": 2361.6000000000004,
+    "deadheadKm": 4288.9,
     "haulSec": 333000,
-    "haulKmTimed": 2361.5999999999995,
+    "haulKmTimed": 2361.6000000000004,
     "deadheadSec": 626040,
-    "deadheadKmTimed": 4288.900000000001,
+    "deadheadKmTimed": 4288.9,
     "estimatedLegs": 38,
     "missingLegs": 0,
-    "comparableDeadheadKm": 4288.900000000001,
-    "destToLoadKm": 1755.8884688691346,
+    "comparableDeadheadKm": 4288.9,
+    "destToLoadKm": 1676.6418350303652,
     "depotToLoadKm": {
      "obihiro": 3528.25237272291,
      "kushiro": 146.8793016135071
     },
     "destToDepotKm": {
-     "obihiro": 4866.029256295267,
-     "kushiro": 1656.6103559798614
+     "obihiro": 4789.739324086885,
+     "kushiro": 1576.8177504326302
     }
    },
    "routes": [
@@ -54,25 +58,25 @@
      "doto": true,
      "totals": {
       "legs": 31,
-      "salesYen": 1130095,
+      "salesYen": 1122745,
       "allowanceYen": 248000,
-      "haulKm": 1652.1000000000004,
-      "deadheadKm": 3459.5,
-      "haulSec": 232952,
-      "haulKmTimed": 1652.1000000000004,
-      "deadheadSec": 505020,
-      "deadheadKmTimed": 3459.5,
+      "haulKm": 1841.5000000000005,
+      "deadheadKm": 3210.7000000000003,
+      "haulSec": 259663,
+      "haulKmTimed": 1841.5000000000005,
+      "deadheadSec": 468658,
+      "deadheadKmTimed": 3210.7000000000003,
       "estimatedLegs": 31,
       "missingLegs": 0,
-      "comparableDeadheadKm": 3459.5,
-      "destToLoadKm": 1228.3218875358043,
+      "comparableDeadheadKm": 3210.7000000000003,
+      "destToLoadKm": 1271.8595006015814,
       "depotToLoadKm": {
-       "obihiro": 2877.133307522261,
-       "kushiro": 121.02118280513648
+       "obihiro": 2879.122361515778,
+       "kushiro": 118.99438990277896
       },
       "destToDepotKm": {
-       "obihiro": 3768.378808750971,
-       "kushiro": 1148.9598388980376
+       "obihiro": 3793.2626788460284,
+       "kushiro": 1194.8395338864543
       }
      }
     },
@@ -82,25 +86,25 @@
      "doto": true,
      "totals": {
       "legs": 7,
-      "salesYen": 290150,
+      "salesYen": 297500,
       "allowanceYen": 63000,
-      "haulKm": 709.5000000000001,
-      "deadheadKm": 829.4,
-      "haulSec": 100048,
-      "haulKmTimed": 709.5000000000001,
-      "deadheadSec": 121020,
-      "deadheadKmTimed": 829.4,
+      "haulKm": 520.1,
+      "deadheadKm": 1078.2,
+      "haulSec": 73337,
+      "haulKmTimed": 520.1,
+      "deadheadSec": 157382,
+      "deadheadKmTimed": 1078.2,
       "estimatedLegs": 7,
       "missingLegs": 0,
-      "comparableDeadheadKm": 829.4,
-      "destToLoadKm": 527.5665813333303,
+      "comparableDeadheadKm": 1078.2,
+      "destToLoadKm": 404.7823344287839,
       "depotToLoadKm": {
-       "obihiro": 651.1190652006485,
-       "kushiro": 25.85811880837068
+       "obihiro": 649.1300112071316,
+       "kushiro": 27.884911710728158
       },
       "destToDepotKm": {
-       "obihiro": 1097.6504475442941,
-       "kushiro": 507.6505170818237
+       "obihiro": 996.476645240855,
+       "kushiro": 381.97821654617604
       }
      }
     }
@@ -110,25 +114,25 @@
      "driverName": "中村 一由",
      "totals": {
       "legs": 29,
-      "salesYen": 1080645,
+      "salesYen": 1085269,
       "allowanceYen": 237000,
-      "haulKm": 1773.0000000000002,
-      "deadheadKm": 3333.5000000000005,
-      "haulSec": 249999,
-      "haulKmTimed": 1773.0000000000002,
-      "deadheadSec": 486643,
-      "deadheadKmTimed": 3333.5000000000005,
+      "haulKm": 1800.2000000000003,
+      "deadheadKm": 3256.9,
+      "haulSec": 253839,
+      "haulKmTimed": 1800.2000000000003,
+      "deadheadSec": 475400,
+      "deadheadKmTimed": 3256.9,
       "estimatedLegs": 29,
       "missingLegs": 0,
-      "comparableDeadheadKm": 3333.5000000000005,
-      "destToLoadKm": 1318.2093319776116,
+      "comparableDeadheadKm": 3256.9,
+      "destToLoadKm": 1274.9885511494367,
       "depotToLoadKm": {
-       "obihiro": 2693.372648254175,
-       "kushiro": 111.31891015383611
+       "obihiro": 2692.875294457749,
+       "kushiro": 111.82438568971725
       },
       "destToDepotKm": {
-       "obihiro": 3693.522875976505,
-       "kushiro": 1243.543083038665
+       "obihiro": 3646.1397444262484,
+       "kushiro": 1199.6568490730474
       }
      }
     },
@@ -136,25 +140,25 @@
      "driverName": "柳井 亮祐",
      "totals": {
       "legs": 4,
-      "salesYen": 152050,
+      "salesYen": 150037,
       "allowanceYen": 33000,
-      "haulKm": 266.6,
-      "deadheadKm": 405.5,
-      "haulSec": 37602,
-      "haulKmTimed": 266.6,
-      "deadheadSec": 59199,
-      "deadheadKmTimed": 405.5,
+      "haulKm": 251.90000000000003,
+      "deadheadKm": 473,
+      "haulSec": 35520,
+      "haulKmTimed": 251.90000000000003,
+      "deadheadSec": 69043,
+      "deadheadKmTimed": 473,
       "estimatedLegs": 4,
       "missingLegs": 0,
-      "comparableDeadheadKm": 405.5,
-      "destToLoadKm": 198.27204387745036,
+      "comparableDeadheadKm": 473,
+      "destToLoadKm": 180.45101787716595,
       "depotToLoadKm": {
        "obihiro": 371.00243391896646,
        "kushiro": 15.861325792599795
       },
       "destToDepotKm": {
-       "obihiro": 524.7850169939575,
-       "kushiro": 187.28063990051658
+       "obihiro": 510.3316166648948,
+       "kushiro": 169.32745410970978
       }
      }
     },
@@ -162,21 +166,21 @@
      "driverName": "西島 健太",
      "totals": {
       "legs": 4,
-      "salesYen": 145200,
+      "salesYen": 143855,
       "allowanceYen": 32000,
-      "haulKm": 219.8,
-      "deadheadKm": 408.90000000000003,
-      "haulSec": 30998,
-      "haulKmTimed": 219.8,
-      "deadheadSec": 59687,
-      "deadheadKmTimed": 408.90000000000003,
+      "haulKm": 237.6,
+      "deadheadKm": 415,
+      "haulSec": 33503,
+      "haulKmTimed": 237.6,
+      "deadheadSec": 60578,
+      "deadheadKmTimed": 415,
       "estimatedLegs": 4,
       "missingLegs": 0,
-      "comparableDeadheadKm": 408.90000000000003,
-      "destToLoadKm": 163.452396106824,
+      "comparableDeadheadKm": 415,
+      "destToLoadKm": 163.03889878269786,
       "depotToLoadKm": {
-       "obihiro": 371.49960711929884,
-       "kushiro": 15.35340487730219
+       "obihiro": 371.99696091572486,
+       "kushiro": 14.847929341421054
       },
       "destToDepotKm": {
        "obihiro": 490.91415653276147,
@@ -188,25 +192,25 @@
      "driverName": "佐竹 繁",
      "totals": {
       "legs": 1,
-      "salesYen": 42350,
+      "salesYen": 41084,
       "allowanceYen": 9000,
-      "haulKm": 102.2,
-      "deadheadKm": 141,
-      "haulSec": 14401,
-      "haulKmTimed": 102.2,
-      "deadheadSec": 20511,
-      "deadheadKmTimed": 141,
+      "haulKm": 71.9,
+      "deadheadKm": 144,
+      "haulSec": 10138,
+      "haulKmTimed": 71.9,
+      "deadheadSec": 21019,
+      "deadheadKmTimed": 144,
       "estimatedLegs": 1,
       "missingLegs": 0,
-      "comparableDeadheadKm": 141,
-      "destToLoadKm": 75.95469690724897,
+      "comparableDeadheadKm": 144,
+      "destToLoadKm": 58.16336722106456,
       "depotToLoadKm": {
        "obihiro": 92.37768343046889,
        "kushiro": 4.345660789769035
       },
       "destToDepotKm": {
-       "obihiro": 156.80720679204202,
-       "kushiro": 72.52150244026053
+       "obihiro": 142.3538064629793,
+       "kushiro": 54.56831664945372
       }
      }
     }
@@ -215,61 +219,274 @@
   "legsPerRun": 1.6521739130434783,
   "runs": 23,
   "rebuiltDeadheadKm": {
-   "obihiro": 5773.863276327766,
-   "kushiro": 1784.6997146759077
+   "obihiro": 5696.406225054758,
+   "kushiro": 1705.1226242767536
   },
-  "depotDiffKm": -3989.163561651858,
+  "depotDiffKm": -3991.2836007780043,
   "calibrationRatio": {
-   "obihiro": 1.3462340638223704,
-   "kushiro": 0.4161206170990015
+   "obihiro": 1.3281741763750048,
+   "kushiro": 0.39756642129141595
   },
   "speedKmh": {
-   "haul": 25.530810810810806,
-   "deadhead": 24.663024726854516
+   "haul": 25.530810810810816,
+   "deadhead": 24.663024726854513
   },
   "restraint": {
    "obihiro": {
     "haulHours": 92.5,
     "measuredDeadheadHours": 173.9,
     "measuredTotalHours": 266.4,
-    "rebuiltDeadheadHours": 234.11010369871025,
-    "rebuiltTotalHours": 326.61010369871025,
+    "rebuiltDeadheadHours": 230.96948927161333,
+    "rebuiltTotalHours": 323.4694892716133,
     "restraintIsLowerBound": true
    },
    "kushiro": {
     "haulHours": 92.5,
     "measuredDeadheadHours": 173.9,
     "measuredTotalHours": 266.4,
-    "rebuiltDeadheadHours": 72.36337531351636,
-    "rebuiltTotalHours": 164.86337531351637,
+    "rebuiltDeadheadHours": 69.13680066257723,
+    "rebuiltTotalHours": 161.63680066257723,
     "restraintIsLowerBound": true
    }
   },
-  "requiredDrivers": 1
+  "requiredDrivers": 1,
+  "sensitivity": [
+   {
+    "legsPerDay": 1,
+    "runs": 38,
+    "requiredDrivers": {
+     "byLegs": 1,
+     "byRuns": 3,
+     "drivers": 3
+    },
+    "rebuiltDeadheadKm": 1723.6970520461373,
+    "restraint": {
+     "haulHours": 92.5,
+     "measuredDeadheadHours": 173.9,
+     "measuredTotalHours": 266.4,
+     "rebuiltDeadheadHours": 69.88992920115258,
+     "rebuiltTotalHours": 162.3899292011526,
+     "restraintIsLowerBound": true
+    },
+    "restraintHoursPerDriver": 54.1299764003842,
+    "hourlyYen": 1915.1433930041555,
+    "minWageDiffYen": 905.1433930041555,
+    "belowMinWage": false,
+    "fuelYen": 204264.8526023069,
+    "marginYen": 904980.1473976931,
+    "laborCostYen": 1200000,
+    "operatingMarginYen": -295019.85260230687
+   },
+   {
+    "legsPerDay": 1.6521739130434783,
+    "runs": 23,
+    "requiredDrivers": {
+     "byLegs": 1,
+     "byRuns": 2,
+     "drivers": 2
+    },
+    "rebuiltDeadheadKm": 1705.1226242767536,
+    "restraint": {
+     "haulHours": 92.5,
+     "measuredDeadheadHours": 173.9,
+     "measuredTotalHours": 266.4,
+     "rebuiltDeadheadHours": 69.13680066257723,
+     "rebuiltTotalHours": 161.63680066257723,
+     "restraintIsLowerBound": true
+    },
+    "restraintHoursPerDriver": 80.81840033128861,
+    "hourlyYen": 1924.0667887829823,
+    "minWageDiffYen": 914.0667887829823,
+    "belowMinWage": false,
+    "fuelYen": 203336.13121383768,
+    "marginYen": 905908.8687861623,
+    "laborCostYen": 800000,
+    "operatingMarginYen": 105908.86878616235
+   },
+   {
+    "legsPerDay": 2,
+    "runs": 19,
+    "requiredDrivers": {
+     "byLegs": 1,
+     "byRuns": 2,
+     "drivers": 2
+    },
+    "rebuiltDeadheadKm": 1700.1694435382512,
+    "restraint": {
+     "haulHours": 92.5,
+     "measuredDeadheadHours": 173.9,
+     "measuredTotalHours": 266.4,
+     "rebuiltDeadheadHours": 68.9359663856238,
+     "rebuiltTotalHours": 161.4359663856238,
+     "restraintIsLowerBound": true
+    },
+    "restraintHoursPerDriver": 80.7179831928119,
+    "hourlyYen": 1926.460422438399,
+    "minWageDiffYen": 916.4604224383991,
+    "belowMinWage": false,
+    "fuelYen": 203088.4721769126,
+    "marginYen": 906156.5278230874,
+    "laborCostYen": 800000,
+    "operatingMarginYen": 106156.52782308741
+   },
+   {
+    "legsPerDay": 3,
+    "runs": 12.666666666666666,
+    "requiredDrivers": {
+     "byLegs": 1,
+     "byRuns": 1,
+     "drivers": 1
+    },
+    "rebuiltDeadheadKm": 1692.326907368956,
+    "restraint": {
+     "haulHours": 92.5,
+     "measuredDeadheadHours": 173.9,
+     "measuredTotalHours": 266.4,
+     "rebuiltDeadheadHours": 68.61797878044754,
+     "rebuiltTotalHours": 161.11797878044754,
+     "restraintIsLowerBound": true
+    },
+    "restraintHoursPerDriver": 161.11797878044754,
+    "hourlyYen": 1930.2625464523353,
+    "minWageDiffYen": 920.2625464523353,
+    "belowMinWage": false,
+    "fuelYen": 202696.34536844783,
+    "marginYen": 906548.6546315522,
+    "laborCostYen": 400000,
+    "operatingMarginYen": 506548.65463155217
+   }
+  ],
+  "sensitivityObihiro": [
+   {
+    "legsPerDay": 1,
+    "runs": 38,
+    "requiredDrivers": {
+     "byLegs": 1,
+     "byRuns": 3,
+     "drivers": 3
+    },
+    "rebuiltDeadheadKm": 8317.991696809795,
+    "restraint": {
+     "haulHours": 92.5,
+     "measuredDeadheadHours": 173.9,
+     "measuredTotalHours": 266.4,
+     "rebuiltDeadheadHours": 337.26567559869045,
+     "rebuiltTotalHours": 429.76567559869045,
+     "restraintIsLowerBound": true
+    },
+    "restraintHoursPerDriver": 143.25522519956348,
+    "hourlyYen": 723.6501602105789,
+    "minWageDiffYen": -286.34983978942114,
+    "belowMinWage": true,
+    "fuelYen": 533979.5848404898,
+    "marginYen": 575265.4151595102,
+    "laborCostYen": 1200000,
+    "operatingMarginYen": -624734.5848404898
+   },
+   {
+    "legsPerDay": 1.6521739130434783,
+    "runs": 23,
+    "requiredDrivers": {
+     "byLegs": 1,
+     "byRuns": 2,
+     "drivers": 2
+    },
+    "rebuiltDeadheadKm": 5696.406225054758,
+    "restraint": {
+     "haulHours": 92.5,
+     "measuredDeadheadHours": 173.9,
+     "measuredTotalHours": 266.4,
+     "rebuiltDeadheadHours": 230.96948927161333,
+     "rebuiltTotalHours": 323.4694892716133,
+     "restraintIsLowerBound": true
+    },
+    "restraintHoursPerDriver": 161.73474463580666,
+    "hourlyYen": 961.4508023625596,
+    "minWageDiffYen": -48.54919763744044,
+    "belowMinWage": true,
+    "fuelYen": 402900.3112527379,
+    "marginYen": 706344.6887472621,
+    "laborCostYen": 800000,
+    "operatingMarginYen": -93655.31125273788
+   },
+   {
+    "legsPerDay": 2,
+    "runs": 19,
+    "requiredDrivers": {
+     "byLegs": 1,
+     "byRuns": 2,
+     "drivers": 2
+    },
+    "rebuiltDeadheadKm": 4997.316765920081,
+    "restraint": {
+     "haulHours": 92.5,
+     "measuredDeadheadHours": 173.9,
+     "measuredTotalHours": 266.4,
+     "rebuiltDeadheadHours": 202.62383958439275,
+     "rebuiltTotalHours": 295.1238395843927,
+     "restraintIsLowerBound": true
+    },
+    "restraintHoursPerDriver": 147.56191979219636,
+    "hourlyYen": 1053.7949100891506,
+    "minWageDiffYen": 43.79491008915056,
+    "belowMinWage": false,
+    "fuelYen": 367945.83829600405,
+    "marginYen": 741299.1617039959,
+    "laborCostYen": 800000,
+    "operatingMarginYen": -58700.838296004105
+   },
+   {
+    "legsPerDay": 3,
+    "runs": 12.666666666666666,
+    "requiredDrivers": {
+     "byLegs": 1,
+     "byRuns": 1,
+     "drivers": 1
+    },
+    "rebuiltDeadheadKm": 3890.4251222901753,
+    "restraint": {
+     "haulHours": 92.5,
+     "measuredDeadheadHours": 173.9,
+     "measuredTotalHours": 266.4,
+     "rebuiltDeadheadHours": 157.74322757962685,
+     "rebuiltTotalHours": 250.24322757962685,
+     "restraintIsLowerBound": true
+    },
+    "restraintHoursPerDriver": 250.24322757962685,
+    "hourlyYen": 1242.7908759330578,
+    "minWageDiffYen": 232.7908759330578,
+    "belowMinWage": false,
+    "fuelYen": 312601.2561145088,
+    "marginYen": 796643.7438854913,
+    "laborCostYen": 400000,
+    "operatingMarginYen": 396643.7438854913
+   }
+  ],
+  "breakEvenLegsPerDay": 1.6521739130434783
  },
  "all": {
-  "legsPerRun": 2.652173913043478,
+  "legsPerRun": 3.217391304347826,
   "totals": {
-   "legs": 61,
-   "salesYen": 2142245,
-   "allowanceYen": 464000,
-   "haulKm": 5209.599999999998,
-   "deadheadKm": 5723.800000000002,
-   "haulSec": 503700,
-   "haulKmTimed": 5091.0999999999985,
-   "deadheadSec": 762840,
-   "deadheadKmTimed": 5669.300000000002,
-   "estimatedLegs": 59,
+   "legs": 74,
+   "salesYen": 2551245,
+   "allowanceYen": 581000,
+   "haulKm": 6804.699999999999,
+   "deadheadKm": 7538.6,
+   "haulSec": 605400,
+   "haulKmTimed": 6683.099999999999,
+   "deadheadSec": 843840,
+   "deadheadKmTimed": 7484.1,
+   "estimatedLegs": 72,
    "missingLegs": 2,
-   "comparableDeadheadKm": 5615.300000000002,
-   "destToLoadKm": 3695.8365724666537,
+   "comparableDeadheadKm": 7428.5,
+   "destToLoadKm": 4806.714444530045,
    "depotToLoadKm": {
-    "obihiro": 5479.6201531391525,
-    "kushiro": 226.4755601821437
+    "obihiro": 6686.4968385236125,
+    "kushiro": 276.8838809832358
    },
    "destToDepotKm": {
-    "obihiro": 5098.921612115202,
-    "kushiro": 3674.541136285262
+    "obihiro": 5302.125810860144,
+    "kushiro": 4832.345636075831
    }
   },
   "routes": [
@@ -279,25 +496,53 @@
     "doto": true,
     "totals": {
      "legs": 31,
-     "salesYen": 1130095,
+     "salesYen": 1122745,
      "allowanceYen": 248000,
-     "haulKm": 1652.1000000000004,
-     "deadheadKm": 3459.5,
-     "haulSec": 232952,
-     "haulKmTimed": 1652.1000000000004,
-     "deadheadSec": 505020,
-     "deadheadKmTimed": 3459.5,
+     "haulKm": 1841.5000000000005,
+     "deadheadKm": 3210.7000000000003,
+     "haulSec": 259663,
+     "haulKmTimed": 1841.5000000000005,
+     "deadheadSec": 468658,
+     "deadheadKmTimed": 3210.7000000000003,
      "estimatedLegs": 31,
      "missingLegs": 0,
-     "comparableDeadheadKm": 3459.5,
-     "destToLoadKm": 1228.3218875358043,
+     "comparableDeadheadKm": 3210.7000000000003,
+     "destToLoadKm": 1271.8595006015814,
      "depotToLoadKm": {
-      "obihiro": 2877.133307522261,
-      "kushiro": 121.02118280513648
+      "obihiro": 2879.122361515778,
+      "kushiro": 118.99438990277896
      },
      "destToDepotKm": {
-      "obihiro": 3768.378808750971,
-      "kushiro": 1148.9598388980376
+      "obihiro": 3793.2626788460284,
+      "kushiro": 1194.8395338864543
+     }
+    }
+   },
+   {
+    "from": "釧路",
+    "to": "帯広",
+    "doto": false,
+    "totals": {
+     "legs": 13,
+     "salesYen": 410500,
+     "allowanceYen": 117000,
+     "haulKm": 1683.5,
+     "deadheadKm": 1143.0000000000002,
+     "haulSec": 101400,
+     "haulKmTimed": 1683.5,
+     "deadheadSec": 80400,
+     "deadheadKmTimed": 1143.0000000000002,
+     "estimatedLegs": 12,
+     "missingLegs": 1,
+     "comparableDeadheadKm": 1088.5000000000002,
+     "destToLoadKm": 1159.277736764391,
+     "depotToLoadKm": {
+      "obihiro": 1120.4665251267284,
+      "kushiro": 39.987172063083534
+     },
+     "destToDepotKm": {
+      "obihiro": 42.52571555779844,
+      "kushiro": 1199.2384952528676
      }
     }
    },
@@ -307,21 +552,21 @@
     "doto": false,
     "totals": {
      "legs": 12,
-     "salesYen": 377000,
+     "salesYen": 374000,
      "allowanceYen": 54000,
-     "haulKm": 1429.8000000000002,
-     "deadheadKm": 769.4000000000001,
-     "haulSec": 85200,
-     "haulKmTimed": 1311.3000000000002,
-     "deadheadSec": 72000,
-     "deadheadKmTimed": 769.4000000000001,
+     "haulKm": 1422,
+     "deadheadKm": 1058.9,
+     "haulSec": 93300,
+     "haulKmTimed": 1422,
+     "deadheadSec": 67200,
+     "deadheadKmTimed": 1004.4,
      "estimatedLegs": 11,
      "missingLegs": 1,
-     "comparableDeadheadKm": 714.9000000000001,
-     "destToLoadKm": 977.8781312737337,
+     "comparableDeadheadKm": 1003.3000000000001,
+     "destToLoadKm": 972.7996995650702,
      "depotToLoadKm": {
-      "obihiro": 1021.6241453231889,
-      "kushiro": 42.22492013685161
+      "obihiro": 1016.1545177351578,
+      "kushiro": 47.80226868745938
      },
      "destToDepotKm": {
       "obihiro": 197.45425952176748,
@@ -331,29 +576,29 @@
    },
    {
     "from": "釧路",
-    "to": "帯広",
+    "to": "士幌",
     "doto": false,
     "totals": {
      "legs": 11,
-     "salesYen": 345000,
+     "salesYen": 346500,
      "allowanceYen": 99000,
-     "haulKm": 1418.1999999999998,
-     "deadheadKm": 665.5,
-     "haulSec": 85500,
-     "haulKmTimed": 1418.1999999999998,
-     "deadheadSec": 64800,
-     "deadheadKmTimed": 611,
-     "estimatedLegs": 10,
-     "missingLegs": 1,
-     "comparableDeadheadKm": 611.5,
-     "destToLoadKm": 962.0699723237843,
+     "haulKm": 1337.6,
+     "deadheadKm": 1047.8,
+     "haulSec": 77700,
+     "haulKmTimed": 1216,
+     "deadheadSec": 70200,
+     "deadheadKmTimed": 1047.8,
+     "estimatedLegs": 11,
+     "missingLegs": 0,
+     "comparableDeadheadKm": 1047.8,
+     "destToLoadKm": 997.9951731702182,
      "depotToLoadKm": {
-      "obihiro": 929.7436350930523,
-      "kushiro": 37.37133843178496
+      "obihiro": 1021.6234229388145,
+      "kushiro": 42.21513861918574
      },
      "destToDepotKm": {
-      "obihiro": 35.43809629816537,
-      "kushiro": 999.365412710723
+      "obihiro": 272.40651169369187,
+      "kushiro": 1037.7240227956563
      }
     }
    },
@@ -363,25 +608,25 @@
     "doto": true,
     "totals": {
      "legs": 7,
-     "salesYen": 290150,
+     "salesYen": 297500,
      "allowanceYen": 63000,
-     "haulKm": 709.5000000000001,
-     "deadheadKm": 829.4,
-     "haulSec": 100048,
-     "haulKmTimed": 709.5000000000001,
-     "deadheadSec": 121020,
-     "deadheadKmTimed": 829.4,
+     "haulKm": 520.1,
+     "deadheadKm": 1078.2,
+     "haulSec": 73337,
+     "haulKmTimed": 520.1,
+     "deadheadSec": 157382,
+     "deadheadKmTimed": 1078.2,
      "estimatedLegs": 7,
      "missingLegs": 0,
-     "comparableDeadheadKm": 829.4,
-     "destToLoadKm": 527.5665813333303,
+     "comparableDeadheadKm": 1078.2,
+     "destToLoadKm": 404.7823344287839,
      "depotToLoadKm": {
-      "obihiro": 651.1190652006485,
-      "kushiro": 25.85811880837068
+      "obihiro": 649.1300112071316,
+      "kushiro": 27.884911710728158
      },
      "destToDepotKm": {
-      "obihiro": 1097.6504475442941,
-      "kushiro": 507.6505170818237
+      "obihiro": 996.476645240855,
+      "kushiro": 381.97821654617604
      }
     }
    }
