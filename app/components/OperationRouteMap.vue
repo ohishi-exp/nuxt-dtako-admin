@@ -380,7 +380,7 @@ const LINE_LAYERS: Array<{ key: keyof RouteMapLayers, label: string, kinds: Rout
         </label>
       </div>
       <div class="flex flex-wrap items-center gap-4 px-4 pb-2 text-[11px] text-gray-400">
-        <span>軌跡 = NET780 の道なり GPS か、重ね掛け行も混ぜたイベント軌跡 (濃い緑 = 便の時間帯 / 濃い灰 = 回送の時間帯)。直線 = イベント行の始点→終点 (既定 OFF)</span>
+        <span>軌跡 = NET780 の道なり GPS か、重ね掛け行も混ぜたイベント軌跡 (紫 = 便の時間帯 / マゼンタ = 回送の時間帯)。直線 = イベント行の始点→終点 (既定 OFF)</span>
       </div>
     </div>
   </div>
