@@ -366,3 +366,27 @@ branches = true
 [[files]]
 path = "app/utils/margin-rebuild-input.ts"
 branches = true
+
+# 粗利タブ「釧路積み (釧路営業所試算)」区画の表示素材 (Refs #760 の 36)。計算は
+# `kushiro-doto-rebuild.ts` (golden で固定済み) が持ち、ここは**画面が並べる形に畳むだけ**。
+# 独自に持つのは (1) 便/日 のスライダーの上下限・候補を**実測分布から**出すこと、
+# (2) 最低賃金マスタの**キーの流儀が 2 つある**問題 (本番 R2 は県名キー / フロントの
+# 単価マスタタブは `全社共通`) を吸収して額を引くこと、(3) 最低賃金をちょうど満たす 便/日
+# を解析的に解くこと の 3 つだけ。欠測は 0 に倒さず `null` のまま返す。
+# branches: probe (`if` の暗黙 else / `??` の右 / 三項の false / `&&` の右) を先に刺して
+# 計測器が 4/8 を UNCOVERED と出すことを確認したうえで、BR() で包んだ instrumented コピーで
+# **30 条件すべてが true/false 両方を通る**ことを実測してから登録した。
+# v8 が 100% と言った状態でも `entryAt` の「より新しいか」の false 側と
+# `master?.branchToPrefecture?.` の undefined 側が**片側しか通っていなかった** —
+# v8 は `||` の右「項が評価されたか」しか数えず、その**結果**は数えない。
+[[files]]
+path = "app/utils/kushiro-branch-view.ts"
+branches = true
+
+# 上の素材を並べるだけの表示専用コンポーネント (Refs #760 の 36)。計算はしない。
+# 「実在しない試算」バッジは**条件分岐なしで固定表示** (オーナー要件)。
+# branches: テンプレートの `v-if` は三項にコンパイルされ、上の probe で v8 が三項の
+# 通らない側を検出できることを確認済み。両側を通すテストを置いてある。
+[[files]]
+path = "app/components/KushiroBranchPanel.vue"
+branches = true

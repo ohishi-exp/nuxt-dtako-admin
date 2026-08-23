@@ -33,7 +33,7 @@
  * (localStorage、`allowance-provisional.ts` と同じ方式)。
  * **分母が 0 の車輌は燃料代を出さず、粗利も `-` にする。**
  */
-import { getOperations, getOperationCsv, getDrivers, postNet780Archive } from '~/utils/api'
+import { getOperations, getOperationCsv, getDrivers, postNet780Archive, currentAccessToken } from '~/utils/api'
 import { fetchAllPages } from '~/utils/paged-fetch'
 import type { Driver, OperationListItem } from '~/types'
 import { extractAllowanceLegs, extractCarryInUnloads, allowanceForLegs } from '~/utils/allowance-trips'
@@ -146,6 +146,9 @@ import {
   type UncoveredDriverInput,
   type UncoveredTotals,
 } from '~/utils/margin'
+import { buildKushiroBranchView, readViewerCompId } from '~/utils/kushiro-branch-view'
+import { b64urlUtf8 } from '~/composables/useTheearthSession'
+import type { MinWageMaster } from '~/utils/restraint-wage-view'
 
 /** イベントCSV を同時に引く本数。alc を叩きすぎないための上限 (運行手当タブと同じ)。 */
 const CSV_CONCURRENCY = 4
@@ -328,6 +331,8 @@ onMounted(async () => {
     // 乗務員マスタが引けなくても CD だけで動く (表示が CD のままになるだけ)
   }
   restoreFromCache()
+  // 釧路区画の最低賃金。**粗利の集計とは独立**なので await しない (失敗しても粗利は出る)。
+  loadKushiroMinWageMaster()
 })
 
 /** **前回の集計をそのまま出す (通信しない)。** 月・車輌が違うキャッシュは使わない。 */
@@ -951,6 +956,64 @@ const result = computed(() => buildOperationMargins(inputs.value, costs.value, f
  * `deadheadSec` が生きている側) から組む: 計算結果の `LegMargin` には秒が無い。
  */
 const rebuildInputs = computed(() => buildRebuildOperationInputs(inputs.value, legPointsByUnko.value))
+
+// --- 釧路積み (釧路営業所試算) の区画 (Refs #760 の 36) ---------------------
+// **粗利の数字には 1 円も効かない。** 入力は上の `rebuildInputs` だけで、
+// `result` / `totals` / `customerSummary` は 1 つも読まない。計算は
+// `kushiro-branch-view.ts` (さらにその下は `kushiro-doto-rebuild.ts`) が持ち、
+// `KushiroBranchPanel.vue` は返ってきた plain object を並べるだけ。
+
+/** スライダーで選んだ 便/日。**`null` = 実測平均** (既定値を定数で持たない)。 */
+const kushiroLegsPerDay = ref<number | null>(null)
+/**
+ * 最低賃金マスタ (`GET /restraint-api/min-wage`)。取れるまで `null` で、
+ * **取れなくても区画は出す** (額の列だけ「−」になる)。
+ */
+const kushiroMinWageMaster = ref<MinWageMaster | null>(null)
+/** マスタを読めなかった理由 (画面に出す。黙って「−」にしない)。 */
+const kushiroMinWageError = ref('')
+
+/**
+ * 最低賃金マスタを読む。**会社ID は拘束時間・賃金タブが localStorage に残したものを借りる**
+ * — 粗利タブは theearth ログインを持たないので、ここで新しいログイン導線は作らない。
+ *
+ * **成功したときだけ「読んだ」と印を付ける** — mount の時点では JWT がまだ入って
+ * いないことがあるので、集計が終わったタイミングでもう一度呼べるようにしてある。
+ */
+async function loadKushiroMinWageMaster() {
+  if (kushiroMinWageMaster.value !== null) return
+  const compId = readViewerCompId(localStorage)
+  const token = currentAccessToken()
+  if (!compId || !token) {
+    kushiroMinWageError.value = '最低賃金マスタを読めませんでした — 会社IDが分かりません。拘束時間・賃金タブを一度開いてください'
+    return
+  }
+  try {
+    const res = await $fetch<{ exists: boolean, data: MinWageMaster | null }>('/restraint-api/min-wage', {
+      headers: {
+        'X-Theearth-Comp-Id': compId,
+        'X-Theearth-User-B64': b64urlUtf8('viewer'),
+        'Authorization': `Bearer ${token}`,
+      },
+    })
+    kushiroMinWageMaster.value = res.data
+    kushiroMinWageError.value = res.data === null ? '最低賃金マスタが R2 にありません (拘束時間・賃金タブの単価マスタで登録できます)' : ''
+  }
+  catch (e) {
+    kushiroMinWageError.value = `最低賃金マスタを読めませんでした — ${e instanceof Error ? e.message : String(e)}`
+  }
+}
+
+// 集計が終わった時点でもう一度だけ試す (mount 時に JWT が揃っていないことがある)。
+watch(status, (s) => {
+  if (s === 'ready') loadKushiroMinWageMaster()
+})
+
+const kushiroView = computed(() => buildKushiroBranchView(rebuildInputs.value, {
+  ym: shownYm.value,
+  legsPerDay: kushiroLegsPerDay.value,
+  minWageMaster: kushiroMinWageMaster.value,
+}))
 
 /** 配分の比を変える。**保存に失敗しても画面の数字は正しい**ので握る (燃費の上書きと同じ)。 */
 function onRunCostShareModeChange(raw: string) {
@@ -2205,6 +2268,27 @@ function downloadCustomerRouteCsv() {
             </p>
           </div>
         </div>
+
+        <!-- 釧路積み (釧路営業所試算)。**表示専用のコンポーネントに切り出してある** —
+             このページは 2200 行を超えているので、これ以上インラインで足さない。
+             数字は `kushiroView` (= `kushiro-branch-view.ts`) が作る -->
+        <KushiroBranchPanel
+          :empty="kushiroView.empty"
+          :summary="kushiroView.summary"
+          :slider="kushiroView.slider"
+          :legs-per-day="kushiroView.legsPerDay"
+          :selected="kushiroView.selected"
+          :grid="kushiroView.grid"
+          :routes="kushiroView.routes"
+          :drivers="kushiroView.drivers"
+          :min-wage="kushiroView.minWage"
+          :min-wage-legs-per-day="kushiroView.minWageLegsPerDay"
+          :break-even-legs-per-day="kushiroView.breakEvenLegsPerDay"
+          :assumptions="kushiroView.assumptions"
+          :master-error="kushiroMinWageError"
+          @update:legs-per-day="kushiroLegsPerDay = $event"
+          @reset="kushiroLegsPerDay = null"
+        />
       </template>
     </template>
 
