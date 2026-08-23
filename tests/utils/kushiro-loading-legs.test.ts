@@ -3,6 +3,9 @@
 // 共有 fixture は `tests/fixtures/kushiro-loading/` — **後続 PR の kyuyo-mcp 側
 // 双子実装が同じ fixture を読んで bit 一致を検証する**ので、入力はここでも
 // 静的 JSON が正 (`tests/fixtures/restraint-wage/` と同じ流儀)。
+// **釧路積みの 169 便は本番 2026-07 の経路別 実測** (17 経路)。期待値は
+// `measured-2026-07.json` に置き、テストは fixture から数え直して突き合わせる
+// (件数・金額をテストに直書きしない)。
 //
 // golden (`golden/summary-2026-07.json`) は本物の `summarizeKushiroLoading` の出力。
 // 意図したロジック変更のときは (repo ルートで)
@@ -32,6 +35,7 @@ import type {
   KushiroOperationInput,
 } from '../../app/utils/kushiro-loading-legs'
 import { DEPOTS, haversineKm } from '../../app/utils/depot-distance'
+import { UNKNOWN_PLACE, routePlace } from '../../app/utils/margin'
 import type { OperationMargin } from '../../app/utils/margin'
 import { RATE_MASTER } from '../../app/utils/allowance-rate-master'
 import rawOperations from '../fixtures/kushiro-loading/operations-2026-07.json'
@@ -354,6 +358,46 @@ describe('共有 fixture が本番実測の集計に戻る', () => {
     expect(t.otherKm).toBeCloseTo(measured.pure.otherKm, 1)
   })
 
+  it('経路別 実測 17 本にそのまま戻る (便数 / 売上 / 手当 / 売上走行km / 回送km)', () => {
+    const legs = operations.flatMap(op => op.legs.filter(isKushiroLoadingLeg))
+    const seen = new Set<string>()
+    for (const route of measured.routes) {
+      const hit = legs.filter(l => l.destCity === route.destCity)
+      seen.add(route.destCity)
+      expect({ dest: route.dest, legs: hit.length }).toEqual({ dest: route.dest, legs: route.legs })
+      expect(hit.reduce((sum, l) => sum + l.salesYen, 0)).toBe(route.salesYen)
+      expect(hit.reduce((sum, l) => sum + l.allowanceYen, 0)).toBe(route.allowanceYen)
+      expect(hit.reduce((sum, l) => sum + l.haulKm, 0)).toBeCloseTo(route.haulKm, 1)
+      expect(hit.reduce((sum, l) => sum + l.deadheadKm, 0)).toBeCloseTo(route.deadheadKm, 1)
+    }
+    // 実測の 17 経路で釧路積み便を過不足なく覆う
+    expect(seen.size).toBe(measured.routes.length)
+    expect(legs.filter(l => !seen.has(l.destCity))).toEqual([])
+  })
+
+  it('手当は経路ごとの定額 — 駒場だけ ¥4,500 (暫定手当)', () => {
+    const legs = operations.flatMap(op => op.legs.filter(isKushiroLoadingLeg))
+    for (const route of measured.routes) {
+      const rates = new Set(legs.filter(l => l.destCity === route.destCity).map(l => l.allowanceYen))
+      expect(rates.size).toBe(1)
+      expect([...rates][0]).toBe(route.allowanceYen / route.legs)
+    }
+    const komaba = measured.routes.find(r => r.dest === '駒場')!
+    expect(komaba.allowanceYen / komaba.legs).toBe(4500)
+    // 他の経路は 9,000 / 8,000 (と 卸地なしの 0)。定額でも経路で額が違う
+    const rates = new Set(measured.routes.map(r => r.allowanceYen / r.legs))
+    expect([...rates].sort((a, b) => a - b)).toEqual([0, 4500, 8000, 9000])
+  })
+
+  it('卸地の無い便 (売上 0 / 売上走行 0 / 回送 232km) が 1 本ある', () => {
+    const noDest = operations.flatMap(op => op.legs).filter(l => routePlace(l.destCity) === UNKNOWN_PLACE)
+    expect(noDest).toHaveLength(1)
+    expect(noDest[0]!.salesYen).toBe(0)
+    expect(noDest[0]!.allowanceYen).toBe(0)
+    expect(noDest[0]!.haulKm).toBe(0)
+    expect(noDest[0]!.deadheadKm).toBeGreaterThan(0)
+  })
+
   it('乗務員別の釧路積み便数', () => {
     const byDriver: Record<string, number> = {}
     for (const row of summary.drivers) {
@@ -412,6 +456,35 @@ describe('営業所を釧路にすると回送はどれだけ変わるか (fixtu
 
   it('全運行で見ると、釧路積み以外の運行のぶんだけ回送はむしろ増える', () => {
     expect(depotShiftDiff(summary.totals.all, 'obihiro', 'kushiro').totalKm).toBeGreaterThan(0)
+  })
+
+  it('経路ごとに符号が反転する — 道東の卸地は近くなり、十勝の卸地は遠くなる', () => {
+    const inbound = (row: { totals: Parameters<typeof depotShiftDiff>[0] }) =>
+      depotShiftDiff(row.totals, 'obihiro', 'kushiro').inboundKm
+    const ending = summary.routes.filter(row => row.totals.inbound.estimatedOperations > 0)
+    // 道東 (標茶・別海) で終わる運行は帰庫が**短くなる** = マイナス
+    for (const to of ['標茶', '別海']) {
+      const row = ending.find(r => r.from === '釧路' && r.to === to)!
+      expect(inbound(row)).toBeLessThan(0)
+    }
+    // 十勝 (帯広・士幌・音更・鹿追) で終わる運行は帰庫が**伸びる** = プラス
+    for (const to of ['帯広', '士幌', '音更', '鹿追']) {
+      const row = ending.find(r => r.from === '釧路' && r.to === to)!
+      expect(inbound(row)).toBeGreaterThan(0)
+    }
+    // **合計では十勝側が勝つ** — 卸地が十勝に集中しているから
+    expect(depotShiftDiff(summary.totals.pure, 'obihiro', 'kushiro').inboundKm).toBeGreaterThan(0)
+  })
+
+  it('卸地の座標が無い運行は帰庫の推定に入れず、欠測として数える (落ちない)', () => {
+    const noDestOp = operations.find(op => routePlace(op.legs[op.legs.length - 1]!.destCity) === UNKNOWN_PLACE)!
+    expect(noDestOp.lastUnloadPoint ?? null).toBeNull()
+    // 出庫は出せるので、出庫の欠測より帰庫の欠測が多い
+    expect(summary.totals.all.inbound.missingOperations)
+      .toBeGreaterThan(summary.totals.all.outbound.missingOperations)
+    // 欠測ぶんは実測にだけ入っていて、較正の分母には入らない
+    expect(summary.totals.all.inbound.measuredKm)
+      .toBeGreaterThan(summary.totals.all.inbound.comparableMeasuredKm)
   })
 
   it('便間と分類不能は営業所を変えても動かない', () => {

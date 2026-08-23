@@ -1,23 +1,23 @@
 {
- "speedKmh": 43.70015920060816,
+ "speedKmh": 43.69926028817208,
  "shift": {
   "pure": {
    "outboundKm": -3368.6994475478305,
-   "inboundKm": 2704.669568258845,
-   "totalKm": -664.0298792889853,
-   "hours": -15.195136389337094
+   "inboundKm": 2723.5632345334034,
+   "totalKm": -645.1362130144271,
+   "hours": -14.763092298590779
   },
   "kushiroOnly": {
    "outboundKm": -6385.842298497513,
-   "inboundKm": 5041.9230942443055,
-   "totalKm": -1343.9192042532077,
-   "hours": -30.753187833569832
+   "inboundKm": 5615.343937310094,
+   "totalKm": -770.4983611874195,
+   "hours": -17.631839900868243
   },
   "all": {
    "outboundKm": -5567.944901306535,
-   "inboundKm": 6299.68658533169,
-   "totalKm": 731.7416840251553,
-   "hours": 16.744599960518492
+   "inboundKm": 7289.127635070439,
+   "totalKm": 1721.1827337639043,
+   "hours": 39.386999285884265
   }
  },
  "summary": {
@@ -32,12 +32,12 @@
     "operations": 38,
     "legs": 124,
     "kushiroLegs": 124,
-    "salesYen": 4526751,
-    "allowanceYen": 1077600,
-    "haulKm": 10950.6,
-    "deadheadKm": 14453.399999999992,
-    "betweenKm": 7421.499999999999,
-    "otherKm": 1055.1,
+    "salesYen": 4537396,
+    "allowanceYen": 1081500,
+    "haulKm": 10950.600000000004,
+    "deadheadKm": 14453.400000000003,
+    "betweenKm": 7421.500000000001,
+    "otherKm": 1055.1000000000001,
     "outbound": {
      "measuredKm": 4938.499999999999,
      "estimatedOperations": 38,
@@ -49,13 +49,13 @@
      }
     },
     "inbound": {
-     "measuredKm": 1038.3000000000002,
-     "estimatedOperations": 38,
-     "missingOperations": 0,
-     "comparableMeasuredKm": 1038.3000000000002,
+     "measuredKm": 1038.3,
+     "estimatedOperations": 37,
+     "missingOperations": 1,
+     "comparableMeasuredKm": 1038.3,
      "estimatedKm": {
-      "obihiro": 723.2195007435361,
-      "kushiro": 3427.8890690023813
+      "obihiro": 842.65420611258,
+      "kushiro": 3566.2174406459835
      }
     }
    },
@@ -63,30 +63,30 @@
     "operations": 34,
     "legs": 79,
     "kushiroLegs": 45,
-    "salesYen": 2834123,
-    "allowanceYen": 699300,
-    "haulKm": 8429.5,
+    "salesYen": 2728234,
+    "allowanceYen": 701000,
+    "haulKm": 8429.500000000002,
     "deadheadKm": 7899.999999999998,
-    "betweenKm": 2400.0000000000005,
-    "otherKm": 200,
+    "betweenKm": 2876.0999999999995,
+    "otherKm": 103,
     "outbound": {
-     "measuredKm": 4420.000000000001,
+     "measuredKm": 4468.4,
      "estimatedOperations": 34,
      "missingOperations": 0,
-     "comparableMeasuredKm": 4420.000000000001,
+     "comparableMeasuredKm": 4468.4,
      "estimatedKm": {
       "obihiro": 3152.5813020943688,
       "kushiro": 135.4384511446838
      }
     },
     "inbound": {
-     "measuredKm": 880,
+     "measuredKm": 452.5000000000001,
      "estimatedOperations": 33,
      "missingOperations": 1,
-     "comparableMeasuredKm": 854.9999999999999,
+     "comparableMeasuredKm": 444.7000000000001,
      "estimatedKm": {
-      "obihiro": 662.6600732664103,
-      "kushiro": 2999.9135992518754
+      "obihiro": 359.648735729864,
+      "kushiro": 3251.4294385065546
      }
     }
    },
@@ -94,30 +94,30 @@
     "operations": 19,
     "legs": 81,
     "kushiroLegs": 0,
-    "salesYen": 2899391,
-    "allowanceYen": 722600,
+    "salesYen": 2994635,
+    "allowanceYen": 717000,
     "haulKm": 9701.2,
     "deadheadKm": 6394.7,
-    "betweenKm": 3794.699999999999,
-    "otherKm": 200,
+    "betweenKm": 4079.3,
+    "otherKm": 134.89999999999998,
     "outbound": {
      "measuredKm": 1900,
      "estimatedOperations": 18,
      "missingOperations": 1,
-     "comparableMeasuredKm": 1812,
+     "comparableMeasuredKm": 1793,
      "estimatedKm": {
       "obihiro": 1285.6880510952506,
       "kushiro": 2103.585448286225
      }
     },
     "inbound": {
-     "measuredKm": 500,
+     "measuredKm": 280.50000000000006,
      "estimatedOperations": 19,
      "missingOperations": 0,
-     "comparableMeasuredKm": 500,
+     "comparableMeasuredKm": 280.50000000000006,
      "estimatedKm": {
-      "obihiro": 416.4467030200142,
-      "kushiro": 1674.2101941074022
+      "obihiro": 226.90161534876665,
+      "kushiro": 1900.6853131091111
      }
     }
    },
@@ -127,28 +127,28 @@
     "kushiroLegs": 169,
     "salesYen": 10260265,
     "allowanceYen": 2499500,
-    "haulKm": 29081.299999999996,
-    "deadheadKm": 28748.100000000002,
-    "betweenKm": 13616.200000000008,
-    "otherKm": 1455.0999999999997,
+    "haulKm": 29081.30000000001,
+    "deadheadKm": 28748.10000000001,
+    "betweenKm": 14376.900000000001,
+    "otherKm": 1293.0000000000002,
     "outbound": {
-     "measuredKm": 11258.499999999996,
+     "measuredKm": 11306.900000000001,
      "estimatedOperations": 90,
      "missingOperations": 1,
-     "comparableMeasuredKm": 11170.499999999996,
+     "comparableMeasuredKm": 11199.900000000003,
      "estimatedKm": {
       "obihiro": 7960.035851757509,
       "kushiro": 2392.090950450973
      }
     },
     "inbound": {
-     "measuredKm": 2418.2999999999997,
-     "estimatedOperations": 90,
-     "missingOperations": 1,
-     "comparableMeasuredKm": 2393.3,
+     "measuredKm": 1771.2999999999995,
+     "estimatedOperations": 89,
+     "missingOperations": 2,
+     "comparableMeasuredKm": 1763.4999999999993,
      "estimatedKm": {
-      "obihiro": 1802.3262770299605,
-      "kushiro": 8102.012862361651
+      "obihiro": 1429.20455719121,
+      "kushiro": 8718.332192261649
      }
     }
    }
@@ -159,280 +159,64 @@
    "kushiroLegs": 169,
    "salesYen": 6165630,
    "allowanceYen": 1476500,
-   "haulKm": 15980.099999999999,
-   "deadheadKm": 19793.8,
-   "betweenKm": 9821.5,
-   "otherKm": 1255.1,
+   "haulKm": 15980.100000000006,
+   "deadheadKm": 19793.800000000003,
+   "betweenKm": 10297.600000000004,
+   "otherKm": 1158.1000000000001,
    "outbound": {
-    "measuredKm": 9358.5,
+    "measuredKm": 9406.900000000001,
     "estimatedOperations": 72,
     "missingOperations": 0,
-    "comparableMeasuredKm": 9358.5,
+    "comparableMeasuredKm": 9406.900000000001,
     "estimatedKm": {
      "obihiro": 6674.347800662262,
      "kushiro": 288.5055021647489
     }
    },
    "inbound": {
-    "measuredKm": 1918.3000000000002,
-    "estimatedOperations": 71,
-    "missingOperations": 1,
-    "comparableMeasuredKm": 1893.3000000000002,
+    "measuredKm": 1490.7999999999995,
+    "estimatedOperations": 70,
+    "missingOperations": 2,
+    "comparableMeasuredKm": 1482.9999999999995,
     "estimatedKm": {
-     "obihiro": 1385.8795740099465,
-     "kushiro": 6427.802668254252
+     "obihiro": 1202.3029418424435,
+     "kushiro": 6817.646879152537
     }
    }
   },
   "routes": [
    {
-    "kind": "pure",
-    "from": "釧路",
-    "to": "帯広",
+    "kind": "none",
+    "from": "広尾",
+    "to": "音更",
     "totals": {
-     "operations": 10,
-     "legs": 29,
-     "kushiroLegs": 29,
-     "salesYen": 1068210,
-     "allowanceYen": 252200,
-     "haulKm": 2579.5,
-     "deadheadKm": 3273.6000000000004,
-     "betweenKm": 1972.1000000000001,
-     "otherKm": 279.1,
+     "operations": 8,
+     "legs": 32,
+     "kushiroLegs": 0,
+     "salesYen": 1170825,
+     "allowanceYen": 283000,
+     "haulKm": 3842.1,
+     "deadheadKm": 2545.9999999999995,
+     "betweenKm": 1785.6999999999998,
+     "otherKm": 59.2,
      "outbound": {
-      "measuredKm": 1263.9,
-      "estimatedOperations": 10,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 1263.9,
+      "measuredKm": 840,
+      "estimatedOperations": 7,
+      "missingOperations": 1,
+      "comparableMeasuredKm": 733,
       "estimatedKm": {
-       "obihiro": 923.9033719194565,
-       "kushiro": 43.14948452229006
+       "obihiro": 499.9897976481528,
+       "kushiro": 818.0610076668656
       }
      },
      "inbound": {
-      "measuredKm": 222.4,
-      "estimatedOperations": 8,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 222.4,
-      "estimatedKm": {
-       "obihiro": 91.1183395045783,
-       "kushiro": 846.0371797940915
-      }
-     }
-    }
-   },
-   {
-    "kind": "pure",
-    "from": "釧路",
-    "to": "音更",
-    "totals": {
-     "operations": 7,
-     "legs": 29,
-     "kushiroLegs": 29,
-     "salesYen": 1066019,
-     "allowanceYen": 251600,
-     "haulKm": 2503.6,
-     "deadheadKm": 3418.7000000000007,
-     "betweenKm": 1405.8000000000002,
-     "otherKm": 206.70000000000002,
-     "outbound": {
-      "measuredKm": 897.1999999999999,
+      "measuredKm": 65.39999999999999,
       "estimatedOperations": 7,
       "missingOperations": 0,
-      "comparableMeasuredKm": 897.1999999999999,
+      "comparableMeasuredKm": 65.39999999999999,
       "estimatedKm": {
-       "obihiro": 653.3297655917456,
-       "kushiro": 23.63059136412662
-      }
-     },
-     "inbound": {
-      "measuredKm": 273.4,
-      "estimatedOperations": 10,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 273.4,
-      "estimatedKm": {
-       "obihiro": 84.50967134532499,
-       "kushiro": 963.6894618996961
-      }
-     }
-    }
-   },
-   {
-    "kind": "none",
-    "from": "広尾",
-    "to": "音更",
-    "totals": {
-     "operations": 5,
-     "legs": 18,
-     "kushiroLegs": 0,
-     "salesYen": 641950,
-     "allowanceYen": 161000,
-     "haulKm": 2201.6,
-     "deadheadKm": 1356.8999999999999,
-     "betweenKm": 1016.1999999999999,
-     "otherKm": 53.9,
-     "outbound": {
-      "measuredKm": 475,
-      "estimatedOperations": 5,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 475,
-      "estimatedKm": {
-       "obihiro": 357.13556974868055,
-       "kushiro": 584.3292911906183
-      }
-     },
-     "inbound": {
-      "measuredKm": 78.80000000000001,
-      "estimatedOperations": 3,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 78.80000000000001,
-      "estimatedKm": {
-       "obihiro": 25.352901403597492,
-       "kushiro": 289.1068385699088
-      }
-     }
-    }
-   },
-   {
-    "kind": "none",
-    "from": "広尾",
-    "to": "帯広",
-    "totals": {
-     "operations": 3,
-     "legs": 16,
-     "kushiroLegs": 0,
-     "salesYen": 583913,
-     "allowanceYen": 141500,
-     "haulKm": 1921.6000000000001,
-     "deadheadKm": 1183.1,
-     "betweenKm": 578.4,
-     "otherKm": 33.400000000000006,
-     "outbound": {
-      "measuredKm": 311,
-      "estimatedOperations": 3,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 311,
-      "estimatedKm": {
-       "obihiro": 214.28134184920833,
-       "kushiro": 350.5975747143709
-      }
-     },
-     "inbound": {
-      "measuredKm": 56.5,
-      "estimatedOperations": 2,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 56.5,
-      "estimatedKm": {
-       "obihiro": 22.779584876144572,
-       "kushiro": 211.50929494852286
-      }
-     }
-    }
-   },
-   {
-    "kind": "pure",
-    "from": "釧路",
-    "to": "浦幌",
-    "totals": {
-     "operations": 4,
-     "legs": 15,
-     "kushiroLegs": 15,
-     "salesYen": 545414,
-     "allowanceYen": 130700,
-     "haulKm": 1360.1000000000001,
-     "deadheadKm": 1674.5,
-     "betweenKm": 808.3,
-     "otherKm": 117.6,
-     "outbound": {
-      "measuredKm": 510.40000000000003,
-      "estimatedOperations": 4,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 510.40000000000003,
-      "estimatedKm": {
-       "obihiro": 367.29601208873305,
-       "kushiro": 19.541168286755564
-      }
-     },
-     "inbound": {
-      "measuredKm": 134.9,
-      "estimatedOperations": 5,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 134.9,
-      "estimatedKm": {
-       "obihiro": 197.67875832982472,
-       "kushiro": 312.6390327547552
-      }
-     }
-    }
-   },
-   {
-    "kind": "pure",
-    "from": "釧路",
-    "to": "豊頃",
-    "totals": {
-     "operations": 5,
-     "legs": 15,
-     "kushiroLegs": 15,
-     "salesYen": 537750,
-     "allowanceYen": 131600,
-     "haulKm": 1321.0000000000002,
-     "deadheadKm": 1712.4,
-     "betweenKm": 1003.7,
-     "otherKm": 135.1,
-     "outbound": {
-      "measuredKm": 623.4,
-      "estimatedOperations": 5,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 623.4,
-      "estimatedKm": {
-       "obihiro": 464.78335680854025,
-       "kushiro": 18.723024163845608
-      }
-     },
-     "inbound": {
-      "measuredKm": 111.19999999999999,
-      "estimatedOperations": 4,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 111.19999999999999,
-      "estimatedKm": {
-       "obihiro": 90.44378210023838,
-       "kushiro": 315.6719707809914
-      }
-     }
-    }
-   },
-   {
-    "kind": "pure",
-    "from": "釧路",
-    "to": "幕別",
-    "totals": {
-     "operations": 4,
-     "legs": 12,
-     "kushiroLegs": 12,
-     "salesYen": 452384,
-     "allowanceYen": 105000,
-     "haulKm": 1030.8999999999999,
-     "deadheadKm": 1456.5000000000002,
-     "betweenKm": 734.0999999999999,
-     "otherKm": 98.4,
-     "outbound": {
-      "measuredKm": 541.4,
-      "estimatedOperations": 4,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 541.4,
-      "estimatedKm": {
-       "obihiro": 371.8266854468322,
-       "kushiro": 14.978419331076486
-      }
-     },
-     "inbound": {
-      "measuredKm": 105.7,
-      "estimatedOperations": 4,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 105.7,
-      "estimatedKm": {
-       "obihiro": 53.17937717846437,
-       "kushiro": 334.91362737858196
+       "obihiro": 52.77746748870282,
+       "kushiro": 671.4180215744386
       }
      }
     }
@@ -442,33 +226,69 @@
     "from": "釧路",
     "to": "上士幌",
     "totals": {
-     "operations": 4,
-     "legs": 12,
-     "kushiroLegs": 12,
-     "salesYen": 433047,
-     "allowanceYen": 100300,
-     "haulKm": 1061.8000000000002,
-     "deadheadKm": 1395.8,
-     "betweenKm": 745.8,
-     "otherKm": 100.1,
+     "operations": 12,
+     "legs": 27,
+     "kushiroLegs": 27,
+     "salesYen": 923008,
+     "allowanceYen": 243000,
+     "haulKm": 1847.6000000000001,
+     "deadheadKm": 2923.9,
+     "betweenKm": 2363,
+     "otherKm": 340.80000000000007,
      "outbound": {
-      "measuredKm": 549.2,
-      "estimatedOperations": 4,
+      "measuredKm": 1660.4999999999998,
+      "estimatedOperations": 12,
       "missingOperations": 0,
-      "comparableMeasuredKm": 549.2,
+      "comparableMeasuredKm": 1660.4999999999998,
       "estimatedKm": {
-       "obihiro": 373.3312946238546,
-       "kushiro": 13.503195065215213
+       "obihiro": 1112.8301444536755,
+       "kushiro": 47.65397661658194
       }
      },
      "inbound": {
-      "measuredKm": 83.4,
+      "measuredKm": 0,
+      "estimatedOperations": 0,
+      "missingOperations": 0,
+      "comparableMeasuredKm": 0,
+      "estimatedKm": {
+       "obihiro": 0,
+       "kushiro": 0
+      }
+     }
+    }
+   },
+   {
+    "kind": "pure",
+    "from": "釧路",
+    "to": "帯広",
+    "totals": {
+     "operations": 3,
+     "legs": 25,
+     "kushiroLegs": 25,
+     "salesYen": 858364,
+     "allowanceYen": 225000,
+     "haulKm": 3222.599999999999,
+     "deadheadKm": 2967.1,
+     "betweenKm": 508.6,
+     "otherKm": 58.900000000000006,
+     "outbound": {
+      "measuredKm": 409.9,
       "estimatedOperations": 3,
       "missingOperations": 0,
-      "comparableMeasuredKm": 83.4,
+      "comparableMeasuredKm": 409.9,
       "estimatedKm": {
-       "obihiro": 107.23265894194466,
-       "kushiro": 277.58360628675496
+       "obihiro": 279.24616637937976,
+       "kushiro": 10.865008431842046
+      }
+     },
+     "inbound": {
+      "measuredKm": 253.49999999999994,
+      "estimatedOperations": 18,
+      "missingOperations": 0,
+      "comparableMeasuredKm": 253.49999999999994,
+      "estimatedKm": {
+       "obihiro": 205.01626388530113,
+       "kushiro": 1903.5836545367058
       }
      }
     }
@@ -479,32 +299,104 @@
     "to": "士幌",
     "totals": {
      "operations": 4,
-     "legs": 12,
-     "kushiroLegs": 12,
-     "salesYen": 423927,
-     "allowanceYen": 106200,
-     "haulKm": 1093.7,
-     "deadheadKm": 1521.8999999999999,
-     "betweenKm": 751.7,
-     "otherKm": 118.1,
+     "legs": 18,
+     "kushiroLegs": 18,
+     "salesYen": 785208,
+     "allowanceYen": 162000,
+     "haulKm": 1919.1000000000001,
+     "deadheadKm": 1810.9,
+     "betweenKm": 778,
+     "otherKm": 98.2,
      "outbound": {
-      "measuredKm": 553,
+      "measuredKm": 443.59999999999997,
       "estimatedOperations": 4,
       "missingOperations": 0,
-      "comparableMeasuredKm": 553,
+      "comparableMeasuredKm": 443.59999999999997,
       "estimatedKm": {
-       "obihiro": 367.29601208873305,
-       "kushiro": 19.541168286755564
+       "obihiro": 368.42868042825785,
+       "kushiro": 18.400481047835797
       }
      },
      "inbound": {
-      "measuredKm": 107.30000000000001,
-      "estimatedOperations": 4,
+      "measuredKm": 191.4,
+      "estimatedOperations": 10,
       "missingOperations": 0,
-      "comparableMeasuredKm": 107.30000000000001,
+      "comparableMeasuredKm": 191.4,
       "estimatedKm": {
-       "obihiro": 99.05691334316067,
-       "kushiro": 377.3541901075114
+       "obihiro": 156.04872255889322,
+       "kushiro": 944.9412098984541
+      }
+     }
+    }
+   },
+   {
+    "kind": "pure",
+    "from": "釧路",
+    "to": "標茶",
+    "totals": {
+     "operations": 8,
+     "legs": 21,
+     "kushiroLegs": 21,
+     "salesYen": 758372,
+     "allowanceYen": 168000,
+     "haulKm": 1245.1000000000001,
+     "deadheadKm": 2221.2999999999997,
+     "betweenKm": 1434.9,
+     "otherKm": 179.6,
+     "outbound": {
+      "measuredKm": 859.0999999999999,
+      "estimatedOperations": 8,
+      "missingOperations": 0,
+      "comparableMeasuredKm": 859.0999999999999,
+      "estimatedKm": {
+       "obihiro": 741.7641865088704,
+       "kushiro": 31.869407073527192
+      }
+     },
+     "inbound": {
+      "measuredKm": 282.8,
+      "estimatedOperations": 2,
+      "missingOperations": 0,
+      "comparableMeasuredKm": 282.8,
+      "estimatedKm": {
+       "obihiro": 229.4736999703642,
+       "kushiro": 55.36887979648083
+      }
+     }
+    }
+   },
+   {
+    "kind": "pure",
+    "from": "釧路",
+    "to": "浦幌",
+    "totals": {
+     "operations": 9,
+     "legs": 20,
+     "kushiroLegs": 20,
+     "salesYen": 712616,
+     "allowanceYen": 180000,
+     "haulKm": 1601.1000000000001,
+     "deadheadKm": 2616,
+     "betweenKm": 1831.5,
+     "otherKm": 227.8,
+     "outbound": {
+      "measuredKm": 1283.8,
+      "estimatedOperations": 9,
+      "missingOperations": 0,
+      "comparableMeasuredKm": 1283.8,
+      "estimatedKm": {
+       "obihiro": 835.8493147533452,
+       "kushiro": 34.50759370690035
+      }
+     },
+     "inbound": {
+      "measuredKm": 0,
+      "estimatedOperations": 0,
+      "missingOperations": 0,
+      "comparableMeasuredKm": 0,
+      "estimatedKm": {
+       "obihiro": 0,
+       "kushiro": 0
       }
      }
     }
@@ -512,107 +404,35 @@
    {
     "kind": "none",
     "from": "広尾",
-    "to": "士幌",
-    "totals": {
-     "operations": 2,
-     "legs": 11,
-     "kushiroLegs": 0,
-     "salesYen": 402687,
-     "allowanceYen": 96300,
-     "haulKm": 1271.9000000000003,
-     "deadheadKm": 883.2999999999998,
-     "betweenKm": 411.29999999999995,
-     "otherKm": 20.5,
-     "outbound": {
-      "measuredKm": 211,
-      "estimatedOperations": 2,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 211,
-      "estimatedKm": {
-       "obihiro": 142.85422789947222,
-       "kushiro": 233.7317164762473
-      }
-     },
-     "inbound": {
-      "measuredKm": 81.9,
-      "estimatedOperations": 3,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 81.9,
-      "estimatedKm": {
-       "obihiro": 74.29268500737051,
-       "kushiro": 283.01564258063354
-      }
-     }
-    }
-   },
-   {
-    "kind": "mixed",
-    "from": "釧路",
     "to": "帯広",
     "totals": {
-     "operations": 8,
-     "legs": 11,
-     "kushiroLegs": 11,
-     "salesYen": 399485,
-     "allowanceYen": 96700,
-     "haulKm": 1200.3,
-     "deadheadKm": 1319.6,
-     "betweenKm": 508.00000000000006,
-     "otherKm": 45.5,
+     "operations": 4,
+     "legs": 17,
+     "kushiroLegs": 0,
+     "salesYen": 647069,
+     "allowanceYen": 150000,
+     "haulKm": 2035.1000000000001,
+     "deadheadKm": 1332.7,
+     "betweenKm": 858.2,
+     "otherKm": 28,
      "outbound": {
-      "measuredKm": 1064.7,
-      "estimatedOperations": 8,
+      "measuredKm": 394,
+      "estimatedOperations": 4,
       "missingOperations": 0,
-      "comparableMeasuredKm": 1064.7,
+      "comparableMeasuredKm": 394,
       "estimatedKm": {
-       "obihiro": 739.1226975355653,
-       "kushiro": 34.51958761783205
+       "obihiro": 285.70845579894444,
+       "kushiro": 467.4634329524946
       }
      },
      "inbound": {
-      "measuredKm": 0,
-      "estimatedOperations": 0,
+      "measuredKm": 41.5,
+      "estimatedOperations": 5,
       "missingOperations": 0,
-      "comparableMeasuredKm": 0,
+      "comparableMeasuredKm": 41.5,
       "estimatedKm": {
-       "obihiro": 0,
-       "kushiro": 0
-      }
-     }
-    }
-   },
-   {
-    "kind": "mixed",
-    "from": "釧路",
-    "to": "音更",
-    "totals": {
-     "operations": 8,
-     "legs": 10,
-     "kushiroLegs": 10,
-     "salesYen": 361906,
-     "allowanceYen": 86600,
-     "haulKm": 1152.2,
-     "deadheadKm": 1234.7,
-     "betweenKm": 497.49999999999994,
-     "otherKm": 47.1,
-     "outbound": {
-      "measuredKm": 1063.4,
-      "estimatedOperations": 8,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 1063.4,
-      "estimatedKm": {
-       "obihiro": 746.6625892477093,
-       "kushiro": 27.00639013043042
-      }
-     },
-     "inbound": {
-      "measuredKm": 0,
-      "estimatedOperations": 0,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 0,
-      "estimatedKm": {
-       "obihiro": 0,
-       "kushiro": 0
+       "obihiro": 33.630402940344524,
+       "kushiro": 504.43831503582544
       }
      }
     }
@@ -622,30 +442,30 @@
     "from": "広尾",
     "to": "幕別",
     "totals": {
-     "operations": 2,
-     "legs": 10,
+     "operations": 3,
+     "legs": 16,
      "kushiroLegs": 0,
-     "salesYen": 347971,
-     "allowanceYen": 97600,
-     "haulKm": 1237,
-     "deadheadKm": 797.8,
-     "betweenKm": 393.29999999999995,
-     "otherKm": 19.6,
+     "salesYen": 595950,
+     "allowanceYen": 142000,
+     "haulKm": 1880.8000000000002,
+     "deadheadKm": 1271.1,
+     "betweenKm": 615.1,
+     "otherKm": 21.3,
      "outbound": {
-      "measuredKm": 202,
-      "estimatedOperations": 2,
+      "measuredKm": 303,
+      "estimatedOperations": 3,
       "missingOperations": 0,
-      "comparableMeasuredKm": 202,
+      "comparableMeasuredKm": 303,
       "estimatedKm": {
-       "obihiro": 142.85422789947222,
-       "kushiro": 233.7317164762473
+       "obihiro": 214.28134184920833,
+       "kushiro": 350.5975747143709
       }
      },
      "inbound": {
-      "measuredKm": 73.9,
+      "measuredKm": 49.199999999999996,
       "estimatedOperations": 3,
       "missingOperations": 0,
-      "comparableMeasuredKm": 73.9,
+      "comparableMeasuredKm": 49.199999999999996,
       "estimatedKm": {
        "obihiro": 39.88453288384828,
        "kushiro": 251.18522053393647
@@ -656,71 +476,35 @@
    {
     "kind": "none",
     "from": "広尾",
-    "to": "浦幌",
+    "to": "清水",
     "totals": {
-     "operations": 3,
-     "legs": 9,
+     "operations": 4,
+     "legs": 16,
      "kushiroLegs": 0,
-     "salesYen": 324001,
-     "allowanceYen": 77100,
-     "haulKm": 1036.2,
-     "deadheadKm": 745.6999999999999,
-     "betweenKm": 600.9,
-     "otherKm": 29.9,
+     "salesYen": 580791,
+     "allowanceYen": 142000,
+     "haulKm": 1943.2,
+     "deadheadKm": 1244.8999999999999,
+     "betweenKm": 820.3,
+     "otherKm": 26.400000000000002,
      "outbound": {
-      "measuredKm": 293,
-      "estimatedOperations": 2,
-      "missingOperations": 1,
-      "comparableMeasuredKm": 205,
+      "measuredKm": 363,
+      "estimatedOperations": 4,
+      "missingOperations": 0,
+      "comparableMeasuredKm": 363,
       "estimatedKm": {
-       "obihiro": 142.85422789947222,
-       "kushiro": 233.7317164762473
+       "obihiro": 285.70845579894444,
+       "kushiro": 467.4634329524946
       }
      },
      "inbound": {
-      "measuredKm": 55.7,
-      "estimatedOperations": 2,
+      "measuredKm": 124.4,
+      "estimatedOperations": 4,
       "missingOperations": 0,
-      "comparableMeasuredKm": 55.7,
+      "comparableMeasuredKm": 124.4,
       "estimatedKm": {
-       "obihiro": 79.07150333192989,
-       "kushiro": 125.05561310190208
-      }
-     }
-    }
-   },
-   {
-    "kind": "none",
-    "from": "広尾",
-    "to": "上士幌",
-    "totals": {
-     "operations": 2,
-     "legs": 9,
-     "kushiroLegs": 0,
-     "salesYen": 308691,
-     "allowanceYen": 78800,
-     "haulKm": 1053,
-     "deadheadKm": 745.6,
-     "betweenKm": 377.29999999999995,
-     "otherKm": 21.9,
-     "outbound": {
-      "measuredKm": 194,
-      "estimatedOperations": 2,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 194,
-      "estimatedKm": {
-       "obihiro": 142.85422789947222,
-       "kushiro": 233.7317164762473
-      }
-     },
-     "inbound": {
-      "measuredKm": 78.4,
-      "estimatedOperations": 3,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 78.4,
-      "estimatedKm": {
-       "obihiro": 107.23265894194466,
-       "kushiro": 277.58360628675496
+       "obihiro": 100.60921203587101,
+       "kushiro": 473.6437559649109
       }
      }
     }
@@ -731,12 +515,12 @@
     "to": "音更",
     "totals": {
      "operations": 0,
-     "legs": 8,
+     "legs": 17,
      "kushiroLegs": 0,
-     "salesYen": 291601,
-     "allowanceYen": 68000,
-     "haulKm": 789,
-     "deadheadKm": 604.1,
+     "salesYen": 545770,
+     "allowanceYen": 153000,
+     "haulKm": 1722,
+     "deadheadKm": 1273.6999999999998,
      "betweenKm": 0,
      "otherKm": 0,
      "outbound": {
@@ -750,49 +534,13 @@
       }
      },
      "inbound": {
-      "measuredKm": 207.7,
-      "estimatedOperations": 8,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 207.7,
+      "measuredKm": 156.89999999999998,
+      "estimatedOperations": 16,
+      "missingOperations": 1,
+      "comparableMeasuredKm": 149.10000000000002,
       "estimatedKm": {
-       "obihiro": 67.60773707625998,
-       "kushiro": 770.9515695197568
-      }
-     }
-    }
-   },
-   {
-    "kind": "none",
-    "from": "広尾",
-    "to": "豊頃",
-    "totals": {
-     "operations": 2,
-     "legs": 8,
-     "kushiroLegs": 0,
-     "salesYen": 290178,
-     "allowanceYen": 70300,
-     "haulKm": 979.9000000000001,
-     "deadheadKm": 682.3,
-     "betweenKm": 417.29999999999995,
-     "otherKm": 20.8,
-     "outbound": {
-      "measuredKm": 214,
-      "estimatedOperations": 2,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 214,
-      "estimatedKm": {
-       "obihiro": 142.85422789947222,
-       "kushiro": 233.7317164762473
-      }
-     },
-     "inbound": {
-      "measuredKm": 74.80000000000001,
-      "estimatedOperations": 3,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 74.80000000000001,
-      "estimatedKm": {
-       "obihiro": 67.83283657517879,
-       "kushiro": 236.75397808574354
+       "obihiro": 120.33043509546243,
+       "kushiro": 1534.5190682770333
       }
      }
     }
@@ -800,25 +548,25 @@
    {
     "kind": "mixed",
     "from": "釧路",
-    "to": "幕別",
+    "to": "上士幌",
     "totals": {
-     "operations": 4,
-     "legs": 6,
-     "kushiroLegs": 6,
-     "salesYen": 225180,
-     "allowanceYen": 58900,
-     "haulKm": 662.8000000000001,
-     "deadheadKm": 653.3000000000001,
-     "betweenKm": 244.60000000000002,
-     "otherKm": 26.5,
+     "operations": 11,
+     "legs": 15,
+     "kushiroLegs": 15,
+     "salesYen": 512782,
+     "allowanceYen": 135000,
+     "haulKm": 2545.6,
+     "deadheadKm": 1845.9,
+     "betweenKm": 1196.8999999999999,
+     "otherKm": 40.900000000000006,
      "outbound": {
-      "measuredKm": 487.5,
-      "estimatedOperations": 4,
+      "measuredKm": 1525.5,
+      "estimatedOperations": 11,
       "missingOperations": 0,
-      "comparableMeasuredKm": 487.5,
+      "comparableMeasuredKm": 1525.5,
       "estimatedKm": {
-       "obihiro": 371.8266854468322,
-       "kushiro": 14.978419331076486
+       "obihiro": 1021.0061414314923,
+       "kushiro": 42.76868454489305
       }
      },
      "inbound": {
@@ -829,6 +577,114 @@
       "estimatedKm": {
        "obihiro": 0,
        "kushiro": 0
+      }
+     }
+    }
+   },
+   {
+    "kind": "mixed",
+    "from": "釧路",
+    "to": "浦幌",
+    "totals": {
+     "operations": 9,
+     "legs": 11,
+     "kushiroLegs": 11,
+     "salesYen": 393088,
+     "allowanceYen": 99000,
+     "haulKm": 876.5,
+     "deadheadKm": 1463,
+     "betweenKm": 685.1,
+     "otherKm": 24,
+     "outbound": {
+      "measuredKm": 1276.9,
+      "estimatedOperations": 9,
+      "missingOperations": 0,
+      "comparableMeasuredKm": 1276.9,
+      "estimatedKm": {
+       "obihiro": 831.6990051462597,
+       "kushiro": 38.6672675565903
+      }
+     },
+     "inbound": {
+      "measuredKm": 0,
+      "estimatedOperations": 0,
+      "missingOperations": 0,
+      "comparableMeasuredKm": 0,
+      "estimatedKm": {
+       "obihiro": 0,
+       "kushiro": 0
+      }
+     }
+    }
+   },
+   {
+    "kind": "mixed",
+    "from": "釧路",
+    "to": "標茶",
+    "totals": {
+     "operations": 7,
+     "legs": 10,
+     "kushiroLegs": 10,
+     "salesYen": 364373,
+     "allowanceYen": 80000,
+     "haulKm": 596.3000000000001,
+     "deadheadKm": 988.7,
+     "betweenKm": 506.99999999999994,
+     "otherKm": 18.999999999999996,
+     "outbound": {
+      "measuredKm": 782.6,
+      "estimatedOperations": 7,
+      "missingOperations": 0,
+      "comparableMeasuredKm": 782.6,
+      "estimatedKm": {
+       "obihiro": 648.4271513961487,
+       "kushiro": 28.5278773467472
+      }
+     },
+     "inbound": {
+      "measuredKm": 0,
+      "estimatedOperations": 0,
+      "missingOperations": 0,
+      "comparableMeasuredKm": 0,
+      "estimatedKm": {
+       "obihiro": 0,
+       "kushiro": 0
+      }
+     }
+    }
+   },
+   {
+    "kind": "pure",
+    "from": "釧路",
+    "to": "別海",
+    "totals": {
+     "operations": 2,
+     "legs": 6,
+     "kushiroLegs": 6,
+     "salesYen": 255000,
+     "allowanceYen": 54000,
+     "haulKm": 445.8,
+     "deadheadKm": 937.2,
+     "betweenKm": 505.5,
+     "otherKm": 149.8,
+     "outbound": {
+      "measuredKm": 281.6,
+      "estimatedOperations": 2,
+      "missingOperations": 0,
+      "comparableMeasuredKm": 281.6,
+      "estimatedKm": {
+       "obihiro": 183.64800604436653,
+       "kushiro": 9.770584143377782
+      }
+     },
+     "inbound": {
+      "measuredKm": 197.4,
+      "estimatedOperations": 1,
+      "missingOperations": 0,
+      "comparableMeasuredKm": 197.4,
+      "estimatedKm": {
+       "obihiro": 160.09185807988908,
+       "kushiro": 74.12512341978213
       }
      }
     }
@@ -839,12 +695,12 @@
     "to": "帯広",
     "totals": {
      "operations": 0,
-     "legs": 6,
+     "legs": 7,
      "kushiroLegs": 0,
-     "salesYen": 211846,
-     "allowanceYen": 54000,
-     "haulKm": 611,
-     "deadheadKm": 430.2,
+     "salesYen": 218372,
+     "allowanceYen": 63000,
+     "haulKm": 735,
+     "deadheadKm": 504.29999999999995,
      "betweenKm": 0,
      "otherKm": 0,
      "outbound": {
@@ -858,49 +714,13 @@
       }
      },
      "inbound": {
-      "measuredKm": 148.79999999999998,
-      "estimatedOperations": 6,
+      "measuredKm": 58.099999999999994,
+      "estimatedOperations": 7,
       "missingOperations": 0,
-      "comparableMeasuredKm": 148.79999999999998,
+      "comparableMeasuredKm": 58.099999999999994,
       "estimatedKm": {
-       "obihiro": 68.33875462843372,
-       "kushiro": 634.5278848455686
-      }
-     }
-    }
-   },
-   {
-    "kind": "mixed",
-    "from": "釧路",
-    "to": "上士幌",
-    "totals": {
-     "operations": 4,
-     "legs": 5,
-     "kushiroLegs": 5,
-     "salesYen": 188980,
-     "allowanceYen": 42600,
-     "haulKm": 565,
-     "deadheadKm": 611.3,
-     "betweenKm": 244.20000000000002,
-     "otherKm": 23.3,
-     "outbound": {
-      "measuredKm": 525.2,
-      "estimatedOperations": 4,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 525.2,
-      "estimatedKm": {
-       "obihiro": 373.3312946238546,
-       "kushiro": 13.503195065215213
-      }
-     },
-     "inbound": {
-      "measuredKm": 0,
-      "estimatedOperations": 0,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 0,
-      "estimatedKm": {
-       "obihiro": 0,
-       "kushiro": 0
+       "obihiro": 47.08256411648233,
+       "kushiro": 706.2136410501556
       }
      }
     }
@@ -910,23 +730,23 @@
     "from": "釧路",
     "to": "士幌",
     "totals": {
-     "operations": 4,
-     "legs": 5,
-     "kushiroLegs": 5,
-     "salesYen": 179858,
-     "allowanceYen": 45700,
-     "haulKm": 537,
-     "deadheadKm": 569,
-     "betweenKm": 372.6,
-     "otherKm": 21.700000000000003,
+     "operations": 3,
+     "legs": 4,
+     "kushiroLegs": 4,
+     "salesYen": 178152,
+     "allowanceYen": 36000,
+     "haulKm": 421.20000000000005,
+     "deadheadKm": 404.1,
+     "betweenKm": 265.1,
+     "otherKm": 9.7,
      "outbound": {
-      "measuredKm": 488.79999999999995,
-      "estimatedOperations": 4,
+      "measuredKm": 332.70000000000005,
+      "estimatedOperations": 3,
       "missingOperations": 0,
-      "comparableMeasuredKm": 488.79999999999995,
+      "comparableMeasuredKm": 332.70000000000005,
       "estimatedKm": {
-       "obihiro": 367.29601208873305,
-       "kushiro": 19.541168286755564
+       "obihiro": 279.62231867363533,
+       "kushiro": 10.496202365376728
       }
      },
      "inbound": {
@@ -944,15 +764,15 @@
    {
     "kind": "mixed",
     "from": "士幌",
-    "to": "上士幌",
+    "to": "清水",
     "totals": {
      "operations": 0,
      "legs": 5,
      "kushiroLegs": 0,
-     "salesYen": 174462,
-     "allowanceYen": 43600,
-     "haulKm": 507,
-     "deadheadKm": 402,
+     "salesYen": 170219,
+     "allowanceYen": 45000,
+     "haulKm": 459,
+     "deadheadKm": 392.20000000000005,
      "betweenKm": 0,
      "otherKm": 0,
      "outbound": {
@@ -966,13 +786,85 @@
       }
      },
      "inbound": {
-      "measuredKm": 132.2,
+      "measuredKm": 155.5,
       "estimatedOperations": 5,
       "missingOperations": 0,
-      "comparableMeasuredKm": 132.2,
+      "comparableMeasuredKm": 155.5,
       "estimatedKm": {
-       "obihiro": 178.72109823657442,
-       "kushiro": 462.6393438112583
+       "obihiro": 125.76151504483876,
+       "kushiro": 592.0546949561386
+      }
+     }
+    }
+   },
+   {
+    "kind": "mixed",
+    "from": "士幌",
+    "to": "幕別",
+    "totals": {
+     "operations": 0,
+     "legs": 5,
+     "kushiroLegs": 0,
+     "salesYen": 165639,
+     "allowanceYen": 45000,
+     "haulKm": 484,
+     "deadheadKm": 389.4,
+     "betweenKm": 0,
+     "otherKm": 0,
+     "outbound": {
+      "measuredKm": 0,
+      "estimatedOperations": 0,
+      "missingOperations": 0,
+      "comparableMeasuredKm": 0,
+      "estimatedKm": {
+       "obihiro": 0,
+       "kushiro": 0
+      }
+     },
+     "inbound": {
+      "measuredKm": 82,
+      "estimatedOperations": 5,
+      "missingOperations": 0,
+      "comparableMeasuredKm": 82,
+      "estimatedKm": {
+       "obihiro": 66.47422147308046,
+       "kushiro": 418.6420342232275
+      }
+     }
+    }
+   },
+   {
+    "kind": "pure",
+    "from": "釧路",
+    "to": "鹿追",
+    "totals": {
+     "operations": 0,
+     "legs": 3,
+     "kushiroLegs": 3,
+     "salesYen": 140478,
+     "allowanceYen": 27000,
+     "haulKm": 436.20000000000005,
+     "deadheadKm": 329,
+     "betweenKm": 0,
+     "otherKm": 0,
+     "outbound": {
+      "measuredKm": 0,
+      "estimatedOperations": 0,
+      "missingOperations": 0,
+      "comparableMeasuredKm": 0,
+      "estimatedKm": {
+       "obihiro": 0,
+       "kushiro": 0
+      }
+     },
+     "inbound": {
+      "measuredKm": 69.5,
+      "estimatedOperations": 3,
+      "missingOperations": 0,
+      "comparableMeasuredKm": 69.5,
+      "estimatedKm": {
+       "obihiro": 56.49375267476026,
+       "kushiro": 306.9077534882928
       }
      }
     }
@@ -980,22 +872,22 @@
    {
     "kind": "mixed",
     "from": "釧路",
-    "to": "豊頃",
+    "to": "帯広",
     "totals": {
      "operations": 3,
      "legs": 4,
      "kushiroLegs": 4,
-     "salesYen": 150308,
-     "allowanceYen": 32200,
-     "haulKm": 489.09999999999997,
-     "deadheadKm": 473.3,
-     "betweenKm": 225.1,
-     "otherKm": 18.3,
+     "salesYen": 137339,
+     "allowanceYen": 36000,
+     "haulKm": 515.6,
+     "deadheadKm": 497.9,
+     "betweenKm": 149.6,
+     "otherKm": 6.8999999999999995,
      "outbound": {
-      "measuredKm": 382.2,
+      "measuredKm": 409.9,
       "estimatedOperations": 3,
       "missingOperations": 0,
-      "comparableMeasuredKm": 382.2,
+      "comparableMeasuredKm": 409.9,
       "estimatedKm": {
        "obihiro": 278.8700140851241,
        "kushiro": 11.233814498307364
@@ -1014,17 +906,17 @@
     }
    },
    {
-    "kind": "mixed",
-    "from": "士幌",
-    "to": "士幌",
+    "kind": "pure",
+    "from": "釧路",
+    "to": "音更",
     "totals": {
      "operations": 0,
-     "legs": 4,
-     "kushiroLegs": 0,
-     "salesYen": 143843,
-     "allowanceYen": 34900,
-     "haulKm": 387,
-     "deadheadKm": 300.3,
+     "legs": 2,
+     "kushiroLegs": 2,
+     "salesYen": 82600,
+     "allowanceYen": 18000,
+     "haulKm": 233.10000000000002,
+     "deadheadKm": 181,
      "betweenKm": 0,
      "otherKm": 0,
      "outbound": {
@@ -1038,49 +930,13 @@
       }
      },
      "inbound": {
-      "measuredKm": 110.10000000000001,
-      "estimatedOperations": 4,
+      "measuredKm": 33.2,
+      "estimatedOperations": 2,
       "missingOperations": 0,
-      "comparableMeasuredKm": 110.10000000000001,
+      "comparableMeasuredKm": 33.2,
       "estimatedKm": {
-       "obihiro": 99.05691334316067,
-       "kushiro": 377.3541901075114
-      }
-     }
-    }
-   },
-   {
-    "kind": "mixed",
-    "from": "士幌",
-    "to": "浦幌",
-    "totals": {
-     "operations": 0,
-     "legs": 4,
-     "kushiroLegs": 0,
-     "salesYen": 137434,
-     "allowanceYen": 35900,
-     "haulKm": 362,
-     "deadheadKm": 302.3,
-     "betweenKm": 0,
-     "otherKm": 0,
-     "outbound": {
-      "measuredKm": 0,
-      "estimatedOperations": 0,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 0,
-      "estimatedKm": {
-       "obihiro": 0,
-       "kushiro": 0
-      }
-     },
-     "inbound": {
-      "measuredKm": 103.5,
-      "estimatedOperations": 3,
-      "missingOperations": 1,
-      "comparableMeasuredKm": 78.5,
-      "estimatedKm": {
-       "obihiro": 118.60725499789484,
-       "kushiro": 187.58341965285314
+       "obihiro": 27.078941808839637,
+       "kushiro": 184.92187331629924
       }
      }
     }
@@ -1088,25 +944,25 @@
    {
     "kind": "mixed",
     "from": "釧路",
-    "to": "浦幌",
+    "to": "別海",
     "totals": {
-     "operations": 3,
-     "legs": 4,
-     "kushiroLegs": 4,
-     "salesYen": 133162,
-     "allowanceYen": 36200,
-     "haulKm": 423.1,
-     "deadheadKm": 479.19999999999993,
-     "betweenKm": 308,
-     "otherKm": 17.6,
+     "operations": 1,
+     "legs": 1,
+     "kushiroLegs": 1,
+     "salesYen": 42500,
+     "allowanceYen": 9000,
+     "haulKm": 74.3,
+     "deadheadKm": 140.8,
+     "betweenKm": 72.4,
+     "otherKm": 2.5,
      "outbound": {
-      "measuredKm": 408.19999999999993,
-      "estimatedOperations": 3,
+      "measuredKm": 140.8,
+      "estimatedOperations": 1,
       "missingOperations": 0,
-      "comparableMeasuredKm": 408.19999999999993,
+      "comparableMeasuredKm": 140.8,
       "estimatedKm": {
-       "obihiro": 275.4720090665498,
-       "kushiro": 14.655876215066673
+       "obihiro": 92.95667136170805,
+       "kushiro": 3.7446048327691215
       }
      },
      "inbound": {
@@ -1122,17 +978,17 @@
     }
    },
    {
-    "kind": "mixed",
-    "from": "士幌",
-    "to": "豊頃",
+    "kind": "pure",
+    "from": "釧路",
+    "to": "駒場",
     "totals": {
      "operations": 0,
-     "legs": 4,
-     "kushiroLegs": 0,
-     "salesYen": 129244,
-     "allowanceYen": 36700,
-     "haulKm": 427,
-     "deadheadKm": 283.4,
+     "legs": 1,
+     "kushiroLegs": 1,
+     "salesYen": 21750,
+     "allowanceYen": 4500,
+     "haulKm": 0,
+     "deadheadKm": 235,
      "betweenKm": 0,
      "otherKm": 0,
      "outbound": {
@@ -1146,29 +1002,29 @@
       }
      },
      "inbound": {
-      "measuredKm": 96.3,
-      "estimatedOperations": 4,
+      "measuredKm": 10.5,
+      "estimatedOperations": 1,
       "missingOperations": 0,
-      "comparableMeasuredKm": 96.3,
+      "comparableMeasuredKm": 10.5,
       "estimatedKm": {
-       "obihiro": 90.44378210023838,
-       "kushiro": 315.6719707809914
+       "obihiro": 8.450967134532497,
+       "kushiro": 96.3689461899696
       }
      }
     }
    },
    {
-    "kind": "mixed",
-    "from": "士幌",
-    "to": "幕別",
+    "kind": "pure",
+    "from": "釧路",
+    "to": "(不明)",
     "totals": {
      "operations": 0,
-     "legs": 3,
-     "kushiroLegs": 0,
-     "salesYen": 106814,
-     "allowanceYen": 27300,
-     "haulKm": 317,
-     "deadheadKm": 237.3,
+     "legs": 1,
+     "kushiroLegs": 1,
+     "salesYen": 0,
+     "allowanceYen": 0,
+     "haulKm": 0,
+     "deadheadKm": 232,
      "betweenKm": 0,
      "otherKm": 0,
      "outbound": {
@@ -1182,13 +1038,13 @@
       }
      },
      "inbound": {
-      "measuredKm": 81.4,
-      "estimatedOperations": 3,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 81.4,
+      "measuredKm": 0,
+      "estimatedOperations": 0,
+      "missingOperations": 1,
+      "comparableMeasuredKm": 0,
       "estimatedKm": {
-       "obihiro": 39.88453288384828,
-       "kushiro": 251.18522053393647
+       "obihiro": 0,
+       "kushiro": 0
       }
      }
     }
@@ -1202,30 +1058,30 @@
      "operations": 16,
      "legs": 52,
      "kushiroLegs": 52,
-     "salesYen": 1899281,
-     "allowanceYen": 451600,
-     "haulKm": 4569.599999999999,
-     "deadheadKm": 6074.6,
-     "betweenKm": 3110.2999999999997,
-     "otherKm": 444.09999999999997,
+     "salesYen": 1841486,
+     "allowanceYen": 460000,
+     "haulKm": 4580.3,
+     "deadheadKm": 5742.799999999999,
+     "betweenKm": 2979.8000000000006,
+     "otherKm": 429.90000000000003,
      "outbound": {
-      "measuredKm": 2080.2,
+      "measuredKm": 2088.9,
       "estimatedOperations": 16,
       "missingOperations": 0,
-      "comparableMeasuredKm": 2080.2,
+      "comparableMeasuredKm": 2088.9,
       "estimatedKm": {
        "obihiro": 1483.5241615609827,
        "kushiro": 63.773083186578184
       }
      },
      "inbound": {
-      "measuredKm": 440.00000000000006,
+      "measuredKm": 244.2,
       "estimatedOperations": 16,
       "missingOperations": 0,
-      "comparableMeasuredKm": 440.00000000000006,
+      "comparableMeasuredKm": 244.2,
       "estimatedKm": {
-       "obihiro": 253.2925087864693,
-       "kushiro": 1493.7464582004504
+       "obihiro": 197.70670270691275,
+       "kushiro": 1657.6091423067041
       }
      }
     }
@@ -1237,30 +1093,30 @@
      "operations": 8,
      "legs": 27,
      "kushiroLegs": 27,
-     "salesYen": 983204,
-     "allowanceYen": 234900,
-     "haulKm": 2378.4000000000005,
-     "deadheadKm": 3034.2000000000003,
-     "betweenKm": 1565.9,
-     "otherKm": 227.89999999999998,
+     "salesYen": 1030418,
+     "allowanceYen": 239000,
+     "haulKm": 2615.4999999999995,
+     "deadheadKm": 2914.1999999999994,
+     "betweenKm": 1617.1999999999998,
+     "otherKm": 189.9,
      "outbound": {
-      "measuredKm": 1027.1999999999998,
+      "measuredKm": 969.6999999999999,
       "estimatedOperations": 8,
       "missingOperations": 0,
-      "comparableMeasuredKm": 1027.1999999999998,
+      "comparableMeasuredKm": 969.6999999999999,
       "estimatedKm": {
        "obihiro": 741.0076704636012,
        "kushiro": 32.64128824598164
       }
      },
      "inbound": {
-      "measuredKm": 213.2,
+      "measuredKm": 137.4,
       "estimatedOperations": 8,
       "missingOperations": 0,
-      "comparableMeasuredKm": 213.2,
+      "comparableMeasuredKm": 137.4,
       "estimatedKm": {
-       "obihiro": 201.70377663421914,
-       "kushiro": 662.4959071614666
+       "obihiro": 111.74503776825316,
+       "kushiro": 800.0835567521194
       }
      }
     }
@@ -1272,30 +1128,30 @@
      "operations": 12,
      "legs": 31,
      "kushiroLegs": 19,
-     "salesYen": 1116461,
-     "allowanceYen": 270100,
-     "haulKm": 3339.2999999999997,
-     "deadheadKm": 3082.8,
-     "betweenKm": 1137.5,
-     "otherKm": 69.39999999999999,
+     "salesYen": 1036337,
+     "allowanceYen": 275000,
+     "haulKm": 3874.000000000001,
+     "deadheadKm": 3041.6,
+     "betweenKm": 1229.5,
+     "otherKm": 43.199999999999996,
      "outbound": {
-      "measuredKm": 1565.2,
+      "measuredKm": 1602.3999999999999,
       "estimatedOperations": 12,
       "missingOperations": 0,
-      "comparableMeasuredKm": 1565.2,
+      "comparableMeasuredKm": 1602.3999999999999,
       "estimatedKm": {
        "obihiro": 1112.4539921594198,
        "kushiro": 48.02278268304726
       }
      },
      "inbound": {
-      "measuredKm": 310.70000000000005,
+      "measuredKm": 166.49999999999997,
       "estimatedOperations": 11,
       "missingOperations": 1,
-      "comparableMeasuredKm": 285.7,
+      "comparableMeasuredKm": 158.7,
       "estimatedKm": {
-       "obihiro": 242.517232523964,
-       "kushiro": 988.9581105638761
+       "obihiro": 128.3484231539516,
+       "kushiro": 1085.7890141323587
       }
      }
     }
@@ -1307,30 +1163,30 @@
      "operations": 6,
      "legs": 18,
      "kushiroLegs": 18,
-     "salesYen": 659603,
-     "allowanceYen": 155800,
-     "haulKm": 1607.1000000000001,
-     "deadheadKm": 2299.2999999999997,
-     "betweenKm": 1173.5,
-     "otherKm": 157.8,
+     "salesYen": 668347,
+     "allowanceYen": 159000,
+     "haulKm": 1558.7,
+     "deadheadKm": 2227.4,
+     "betweenKm": 1022.6999999999999,
+     "otherKm": 126.50000000000001,
      "outbound": {
-      "measuredKm": 799.8,
+      "measuredKm": 847.5999999999999,
       "estimatedOperations": 6,
       "missingOperations": 0,
-      "comparableMeasuredKm": 799.8,
+      "comparableMeasuredKm": 847.5999999999999,
       "estimatedKm": {
        "obihiro": 556.2269960797099,
        "kushiro": 24.011391341523627
       }
      },
      "inbound": {
-      "measuredKm": 168.20000000000002,
+      "measuredKm": 230.60000000000002,
       "estimatedOperations": 6,
       "missingOperations": 0,
-      "comparableMeasuredKm": 168.20000000000002,
+      "comparableMeasuredKm": 230.60000000000002,
       "estimatedKm": {
-       "obihiro": 142.49590474673437,
-       "kushiro": 530.4358091995595
+       "obihiro": 187.40098557240722,
+       "kushiro": 518.3735485822631
       }
      }
     }
@@ -1342,30 +1198,30 @@
      "operations": 5,
      "legs": 16,
      "kushiroLegs": 16,
-     "salesYen": 582991,
-     "allowanceYen": 140800,
-     "haulKm": 1394.3,
-     "deadheadKm": 1887.3,
-     "betweenKm": 970.3999999999999,
-     "otherKm": 139.1,
+     "salesYen": 627821,
+     "allowanceYen": 140000,
+     "haulKm": 1468.4,
+     "deadheadKm": 2050.5000000000005,
+     "betweenKm": 918.8,
+     "otherKm": 107.29999999999998,
      "outbound": {
-      "measuredKm": 641.5,
+      "measuredKm": 630.6999999999999,
       "estimatedOperations": 5,
       "missingOperations": 0,
-      "comparableMeasuredKm": 641.5,
+      "comparableMeasuredKm": 630.6999999999999,
       "estimatedKm": {
        "obihiro": 462.8941724237463,
        "kushiro": 20.63559257521983
       }
      },
      "inbound": {
-      "measuredKm": 136.3,
+      "measuredKm": 393.70000000000005,
       "estimatedOperations": 5,
       "missingOperations": 0,
-      "comparableMeasuredKm": 136.3,
+      "comparableMeasuredKm": 393.70000000000005,
       "estimatedKm": {
-       "obihiro": 52.976363439825654,
-       "kushiro": 487.9755941731076
+       "obihiro": 319.55658421023304,
+       "kushiro": 392.47778281401526
       }
      }
     }
@@ -1377,30 +1233,30 @@
      "operations": 3,
      "legs": 11,
      "kushiroLegs": 11,
-     "salesYen": 401672,
-     "allowanceYen": 94500,
-     "haulKm": 1001.2,
-     "deadheadKm": 1158,
-     "betweenKm": 601.4,
-     "otherKm": 86.2,
+     "salesYen": 369324,
+     "allowanceYen": 83500,
+     "haulKm": 727.6999999999999,
+     "deadheadKm": 1518.5,
+     "betweenKm": 883,
+     "otherKm": 201.5,
      "outbound": {
-      "measuredKm": 389.8,
+      "measuredKm": 401.59999999999997,
       "estimatedOperations": 3,
       "missingOperations": 0,
-      "comparableMeasuredKm": 389.8,
+      "comparableMeasuredKm": 401.59999999999997,
       "estimatedKm": {
        "obihiro": 278.11349803985496,
        "kushiro": 12.005695670761815
       }
      },
      "inbound": {
-      "measuredKm": 80.6,
-      "estimatedOperations": 3,
-      "missingOperations": 0,
-      "comparableMeasuredKm": 80.6,
+      "measuredKm": 32.4,
+      "estimatedOperations": 2,
+      "missingOperations": 1,
+      "comparableMeasuredKm": 32.4,
       "estimatedKm": {
-       "obihiro": 72.7509471362876,
-       "kushiro": 253.2353002677985
+       "obihiro": 26.244895854773862,
+       "kushiro": 197.6734101908828
       }
      }
     }
@@ -1412,30 +1268,30 @@
      "operations": 7,
      "legs": 16,
      "kushiroLegs": 9,
-     "salesYen": 576203,
-     "allowanceYen": 138900,
-     "haulKm": 1701.9999999999998,
-     "deadheadKm": 1561.0000000000002,
-     "betweenKm": 459.3,
-     "otherKm": 40.4,
+     "salesYen": 554687,
+     "allowanceYen": 142000,
+     "haulKm": 1589.7,
+     "deadheadKm": 1553.2,
+     "betweenKm": 583.6,
+     "otherKm": 21,
      "outbound": {
-      "measuredKm": 880.0999999999999,
+      "measuredKm": 856.1999999999999,
       "estimatedOperations": 7,
       "missingOperations": 0,
-      "comparableMeasuredKm": 880.0999999999999,
+      "comparableMeasuredKm": 856.1999999999999,
       "estimatedKm": {
        "obihiro": 649.5598197356736,
        "kushiro": 27.387190107827433
       }
      },
      "inbound": {
-      "measuredKm": 181.2,
+      "measuredKm": 92.4,
       "estimatedOperations": 7,
       "missingOperations": 0,
-      "comparableMeasuredKm": 181.2,
+      "comparableMeasuredKm": 92.4,
       "estimatedKm": {
-       "obihiro": 119.96693779093381,
-       "kushiro": 616.7808540739824
+       "obihiro": 74.7242281277663,
+       "kushiro": 686.3930590993508
       }
      }
     }
@@ -1447,30 +1303,30 @@
      "operations": 6,
      "legs": 13,
      "kushiroLegs": 7,
-     "salesYen": 460900,
-     "allowanceYen": 122400,
-     "haulKm": 1353.2,
-     "deadheadKm": 1335.7,
-     "betweenKm": 341.30000000000007,
-     "otherKm": 37.6,
+     "salesYen": 471186,
+     "allowanceYen": 114000,
+     "haulKm": 1102.1,
+     "deadheadKm": 1313.7000000000003,
+     "betweenKm": 426.8,
+     "otherKm": 15.799999999999999,
      "outbound": {
-      "measuredKm": 798.2,
+      "measuredKm": 786.5,
       "estimatedOperations": 6,
       "missingOperations": 0,
-      "comparableMeasuredKm": 798.2,
+      "comparableMeasuredKm": 786.5,
       "estimatedKm": {
        "obihiro": 556.2269960797099,
        "kushiro": 24.011391341523627
       }
      },
      "inbound": {
-      "measuredKm": 158.60000000000002,
+      "measuredKm": 84.6,
       "estimatedOperations": 6,
       "missingOperations": 0,
-      "comparableMeasuredKm": 158.60000000000002,
+      "comparableMeasuredKm": 84.6,
       "estimatedKm": {
-       "obihiro": 127.48321964109701,
-       "kushiro": 587.2725261898736
+       "obihiro": 68.39969514424202,
+       "kushiro": 591.0789801611642
       }
      }
     }
@@ -1482,30 +1338,30 @@
      "operations": 4,
      "legs": 9,
      "kushiroLegs": 5,
-     "salesYen": 321627,
-     "allowanceYen": 80100,
-     "haulKm": 969.3,
-     "deadheadKm": 912.3,
-     "betweenKm": 258.5,
-     "otherKm": 23.4,
+     "salesYen": 316977,
+     "allowanceYen": 81000,
+     "haulKm": 790.1,
+     "deadheadKm": 995.0999999999999,
+     "betweenKm": 346.5,
+     "otherKm": 11.799999999999999,
      "outbound": {
-      "measuredKm": 530.4,
+      "measuredKm": 601.9,
       "estimatedOperations": 4,
       "missingOperations": 0,
-      "comparableMeasuredKm": 530.4,
+      "comparableMeasuredKm": 601.9,
       "estimatedKm": {
        "obihiro": 369.9375010620382,
        "kushiro": 16.890987742450704
       }
      },
      "inbound": {
-      "measuredKm": 100.00000000000001,
+      "measuredKm": 34.900000000000006,
       "estimatedOperations": 4,
       "missingOperations": 0,
-      "comparableMeasuredKm": 100.00000000000001,
+      "comparableMeasuredKm": 34.900000000000006,
       "estimatedKm": {
-       "obihiro": 91.57036064269714,
-       "kushiro": 362.153355174347
+       "obihiro": 28.227661294194583,
+       "kushiro": 393.4583511424865
       }
      }
     }
@@ -1517,30 +1373,30 @@
      "operations": 5,
      "legs": 10,
      "kushiroLegs": 5,
-     "salesYen": 358932,
-     "allowanceYen": 87800,
-     "haulKm": 1065.7,
-     "deadheadKm": 1008.2,
-     "betweenKm": 203.39999999999998,
-     "otherKm": 29.2,
+     "salesYen": 349047,
+     "allowanceYen": 89000,
+     "haulKm": 1073.6,
+     "deadheadKm": 996.4,
+     "betweenKm": 289.7,
+     "otherKm": 11.200000000000001,
      "outbound": {
-      "measuredKm": 646.1000000000001,
+      "measuredKm": 621.4000000000001,
       "estimatedOperations": 5,
       "missingOperations": 0,
-      "comparableMeasuredKm": 646.1000000000001,
+      "comparableMeasuredKm": 621.4000000000001,
       "estimatedKm": {
        "obihiro": 464.40299305752666,
        "kushiro": 19.12609926983474
       }
      },
      "inbound": {
-      "measuredKm": 129.5,
+      "measuredKm": 74.1,
       "estimatedOperations": 5,
       "missingOperations": 0,
-      "comparableMeasuredKm": 129.5,
+      "comparableMeasuredKm": 74.1,
       "estimatedKm": {
-       "obihiro": 81.12232266771832,
-       "kushiro": 444.7487532497972
+       "obihiro": 59.94872800970953,
+       "kushiro": 494.7100339711946
       }
      }
     }
@@ -1552,30 +1408,30 @@
      "operations": 5,
      "legs": 22,
      "kushiroLegs": 0,
-     "salesYen": 784367,
-     "allowanceYen": 195500,
-     "haulKm": 2644.3,
-     "deadheadKm": 1683.5,
-     "betweenKm": 1000.2,
-     "otherKm": 53,
+     "salesYen": 818506,
+     "allowanceYen": 198000,
+     "haulKm": 2620.4,
+     "deadheadKm": 1751.3999999999999,
+     "betweenKm": 1098.9,
+     "otherKm": 37.199999999999996,
      "outbound": {
-      "measuredKm": 498,
+      "measuredKm": 512,
       "estimatedOperations": 4,
       "missingOperations": 1,
-      "comparableMeasuredKm": 410,
+      "comparableMeasuredKm": 405,
       "estimatedKm": {
        "obihiro": 285.70845579894444,
        "kushiro": 467.4634329524946
       }
      },
      "inbound": {
-      "measuredKm": 132.3,
+      "measuredKm": 103.30000000000001,
       "estimatedOperations": 5,
       "missingOperations": 0,
-      "comparableMeasuredKm": 132.3,
+      "comparableMeasuredKm": 103.30000000000001,
       "estimatedKm": {
-       "obihiro": 134.0449376122019,
-       "kushiro": 434.06686300958984
+       "obihiro": 83.6203751952366,
+       "kushiro": 505.1663546789115
       }
      }
     }
@@ -1587,30 +1443,30 @@
      "operations": 4,
      "legs": 17,
      "kushiroLegs": 0,
-     "salesYen": 613110,
-     "allowanceYen": 149900,
-     "haulKm": 2032.9,
-     "deadheadKm": 1350.0000000000002,
-     "betweenKm": 816.6,
-     "otherKm": 40.7,
+     "salesYen": 624048,
+     "allowanceYen": 153000,
+     "haulKm": 2024.5,
+     "deadheadKm": 1333.6000000000001,
+     "betweenKm": 831.3,
+     "otherKm": 28.3,
      "outbound": {
-      "measuredKm": 388,
+      "measuredKm": 393,
       "estimatedOperations": 4,
       "missingOperations": 0,
-      "comparableMeasuredKm": 388,
+      "comparableMeasuredKm": 393,
       "estimatedKm": {
        "obihiro": 285.70845579894444,
        "kushiro": 467.4634329524946
       }
      },
      "inbound": {
-      "measuredKm": 104.7,
+      "measuredKm": 81,
       "estimatedOperations": 4,
       "missingOperations": 0,
-      "comparableMeasuredKm": 104.7,
+      "comparableMeasuredKm": 81,
       "estimatedKm": {
-       "obihiro": 91.57036064269714,
-       "kushiro": 362.153355174347
+       "obihiro": 65.48165374053691,
+       "kushiro": 434.0784871795901
       }
      }
     }
@@ -1622,30 +1478,30 @@
      "operations": 4,
      "legs": 17,
      "kushiroLegs": 0,
-     "salesYen": 608837,
-     "allowanceYen": 148800,
-     "haulKm": 2042.3999999999999,
-     "deadheadKm": 1352,
-     "betweenKm": 792.6,
-     "otherKm": 42.6,
+     "salesYen": 638462,
+     "allowanceYen": 153000,
+     "haulKm": 2034.1,
+     "deadheadKm": 1356.1000000000001,
+     "betweenKm": 880.9,
+     "otherKm": 28.299999999999997,
      "outbound": {
-      "measuredKm": 407,
+      "measuredKm": 412,
       "estimatedOperations": 4,
       "missingOperations": 0,
-      "comparableMeasuredKm": 407,
+      "comparableMeasuredKm": 412,
       "estimatedKm": {
        "obihiro": 285.70845579894444,
        "kushiro": 467.4634329524946
       }
      },
      "inbound": {
-      "measuredKm": 109.8,
+      "measuredKm": 34.900000000000006,
       "estimatedOperations": 4,
       "missingOperations": 0,
-      "comparableMeasuredKm": 109.8,
+      "comparableMeasuredKm": 34.900000000000006,
       "estimatedKm": {
-       "obihiro": 57.899832203011044,
-       "kushiro": 380.1905480357544
+       "obihiro": 28.227661294194583,
+       "kushiro": 393.4583511424865
       }
      }
     }
@@ -1657,30 +1513,30 @@
      "operations": 3,
      "legs": 13,
      "kushiroLegs": 0,
-     "salesYen": 461078,
-     "allowanceYen": 115800,
-     "haulKm": 1530.4,
-     "deadheadKm": 988.8000000000001,
-     "betweenKm": 571,
-     "otherKm": 31.6,
+     "salesYen": 475800,
+     "allowanceYen": 117000,
+     "haulKm": 1556.6,
+     "deadheadKm": 1013.4,
+     "betweenKm": 652.4000000000001,
+     "otherKm": 21.3,
      "outbound": {
-      "measuredKm": 309,
+      "measuredKm": 305,
       "estimatedOperations": 3,
       "missingOperations": 0,
-      "comparableMeasuredKm": 309,
+      "comparableMeasuredKm": 305,
       "estimatedKm": {
        "obihiro": 214.28134184920833,
        "kushiro": 350.5975747143709
       }
      },
      "inbound": {
-      "measuredKm": 77.19999999999999,
+      "measuredKm": 34.699999999999996,
       "estimatedOperations": 3,
       "missingOperations": 0,
-      "comparableMeasuredKm": 77.19999999999999,
+      "comparableMeasuredKm": 34.699999999999996,
       "estimatedKm": {
-       "obihiro": 71.65000946699057,
-       "kushiro": 255.17426830214498
+       "obihiro": 28.070344412672863,
+       "kushiro": 275.4114319728018
       }
      }
     }
@@ -1692,30 +1548,30 @@
      "operations": 3,
      "legs": 12,
      "kushiroLegs": 0,
-     "salesYen": 431999,
-     "allowanceYen": 112600,
-     "haulKm": 1451.2,
-     "deadheadKm": 1020.4,
-     "betweenKm": 614.3,
-     "otherKm": 32.099999999999994,
+     "salesYen": 437819,
+     "allowanceYen": 96000,
+     "haulKm": 1465.6000000000001,
+     "deadheadKm": 940.2,
+     "betweenKm": 615.8,
+     "otherKm": 19.8,
      "outbound": {
-      "measuredKm": 298,
+      "measuredKm": 278,
       "estimatedOperations": 3,
       "missingOperations": 0,
-      "comparableMeasuredKm": 298,
+      "comparableMeasuredKm": 278,
       "estimatedKm": {
        "obihiro": 214.28134184920833,
        "kushiro": 350.5975747143709
       }
      },
      "inbound": {
-      "measuredKm": 76,
+      "measuredKm": 26.6,
       "estimatedOperations": 3,
       "missingOperations": 0,
-      "comparableMeasuredKm": 76,
+      "comparableMeasuredKm": 26.6,
       "estimatedKm": {
-       "obihiro": 61.28156309511353,
-       "kushiro": 242.62515958556614
+       "obihiro": 21.50158070612568,
+       "kushiro": 292.5706881353214
       }
      }
     }
