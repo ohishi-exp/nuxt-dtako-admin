@@ -92,7 +92,10 @@ import {
   summarizeUncoveredLegs,
   marginCsvLines,
   marginLegCsvLines,
+  operationDirectCostTitle,
+  driverDirectCostTitle,
   type CostRow,
+  type DriverMargin,
   type FuelRateMap,
   type KmBreakdown,
   type MarginCache,
@@ -203,6 +206,19 @@ function fixedPoolTitle(operations: OperationMargin[]): string {
     ? `${r.costKindName} ${yen(r.yen)}`
     : `${r.date.slice(5)} ${r.costName}(変動) ${yen(r.yen)} (運行の無い日)`)).join(' / ')
   return `固定費按分の中身 — 車輌${vehicles.join('･')} の月ぶん (走行距離の比で配っています)\n${body}`
+}
+
+/**
+ * **直課経費の中身**を title に列挙する (Refs #760 の 14)。本体は pure に `margin.ts` へ
+ * 置いてテストしている — ここは `result` の Map を渡すだけ (`fixedPoolTitle` と同じ流儀)。
+ */
+function directCostTitle(m: OperationMargin): string {
+  return operationDirectCostTitle(m, result.value.directRowsByUnko)
+}
+
+/** 乗務員行の直課経費セルの title。種別ごとの合計と、金額の大きい順の上位 10 行。 */
+function driverDirectTitle(d: DriverMargin): string {
+  return driverDirectCostTitle(d, result.value.directRowsByUnko)
 }
 
 /**
@@ -1185,7 +1201,7 @@ function downloadLegCsv() {
                     {{ yen(d.totals.fuelDeadheadYen) }}
                     <span v-if="d.totals.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(d.totals.fuelDeadheadYen, d.totals.salesYen) }})</span>
                   </td>
-                  <td class="px-3 py-2 text-right">
+                  <td class="px-3 py-2 text-right" :title="driverDirectTitle(d)">
                     {{ yen(d.totals.directCostYen) }}
                     <span v-if="d.totals.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(d.totals.directCostYen, d.totals.salesYen) }})</span>
                   </td>
@@ -1270,7 +1286,7 @@ function downloadLegCsv() {
                       {{ yen(m.fuelDeadheadYen) }}
                       <span v-if="m.fuelDeadheadYen !== null && m.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(m.fuelDeadheadYen, m.salesYen) }})</span>
                     </td>
-                    <td class="px-3 py-1.5 text-right">
+                    <td class="px-3 py-1.5 text-right" :title="directCostTitle(m)">
                       {{ yen(m.directCostYen) }}
                       <span v-if="m.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(m.directCostYen, m.salesYen) }})</span>
                     </td>

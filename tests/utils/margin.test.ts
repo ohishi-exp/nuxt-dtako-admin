@@ -32,6 +32,10 @@ import {
   ADBLUE_KIND,
   FUEL_RATE_KEY,
   MARGIN_CACHE_KEY,
+  operationDirectCostTitle,
+  driverDirectCostTitle,
+  NO_DIRECT_COST_TITLE,
+  DIRECT_COST_TITLE_TOP,
   type CostRow,
   type CostsDailyApiRow,
   type MarginOperationInput,
@@ -66,6 +70,8 @@ function cost(over: Partial<CostRow> = {}): CostRow {
     km: 0,
     isFixed: false,
     rowId: '20260701-1',
+    remarks: '',
+    vendorName: '',
     ...over,
   }
 }
@@ -165,6 +171,8 @@ describe('mapCostApiRow', () => {
       km: 12345.6,
       is_fixed: false,
       row_id: '20260705-1001',
+      remarks: 'ﾀｲﾔ 4本',
+      vendor_name: 'トーヨータイヤ',
     }
     expect(mapCostApiRow(row)).toEqual({
       operationDate: '2026-07-05',
@@ -182,7 +190,32 @@ describe('mapCostApiRow', () => {
       km: 12345.6,
       isFixed: false,
       rowId: '20260705-1001',
+      remarks: 'ﾀｲﾔ 4本',
+      vendorName: 'トーヨータイヤ',
     })
+  })
+
+  it('remarks / vendor_name が無い行 (rust-ichibanboshi#306 より前の binary) は空文字にする', () => {
+    const row: CostsDailyApiRow = {
+      operation_date: '2026-07-05',
+      vehicle_number: '1109',
+      vehicle_branch: '01',
+      driver_code: '0123',
+      cost_code: '0621',
+      cost_name: '軽油費',
+      cost_kind: '01',
+      cost_kind_name: '燃料ｵｲﾙ代',
+      quantity: 1,
+      unit_price: 1,
+      amount: 1,
+      diesel_tax: 0,
+      km: 0,
+      is_fixed: false,
+      row_id: '20260705-1001',
+    }
+    const mapped = mapCostApiRow(row)
+    expect(mapped.remarks).toBe('')
+    expect(mapped.vendorName).toBe('')
   })
 })
 
@@ -1146,10 +1179,11 @@ describe('走行km の内訳 (kmBreakdown)', () => {
     expect(row.slice(at, at + 7)).toEqual(['100', '10', '61', '25', '4', '0', '500'])
   })
 
-  it('キャッシュのキーは v5 — 便ごとの入力が無い旧キャッシュ (v4) を読ませない', () => {
-    // 形を変えたら番号を上げる規約。**上げ忘れると `kmBreakdown`/`legs` が無い行を
-    // 画面が読む** (#760 の 4 が v2、7 が v4。便ごとの入力を足した版は v5、#760 の 13)。
-    expect(MARGIN_CACHE_KEY).toBe('dtako:margin:cache:v5')
+  it('キャッシュのキーは v6 — 備考・支払先の無い旧キャッシュ (v5) を読ませない', () => {
+    // 形を変えたら番号を上げる規約。**上げ忘れると `kmBreakdown`/`legs`/`remarks` が
+    // 無い行を画面が読む** (#760 の 4 が v2、7 が v4、13 が v5。経費の行に
+    // `remarks`/`vendorName` を足した版は v6、#760 の 14)。
+    expect(MARGIN_CACHE_KEY).toBe('dtako:margin:cache:v6')
   })
 })
 
@@ -1546,6 +1580,186 @@ describe('固定費按分の中身 (fixedPoolByVehicle)', () => {
     )
     expect(res.unallocatedCostYen).toBe(1000)
     expect(res.fixedPoolByVehicle.get('9999')).toHaveLength(1)
+  })
+})
+
+/**
+ * 直課経費の中身 (Refs #760 の 14)。
+ *
+ * `fixedPoolByVehicle` (#770) の直課版。**按分・粗利の計算には 1 円も効かない** —
+ * 画面の title に「何を直課したか」を列挙するためだけに持ち回る。
+ */
+describe('直課経費の中身 (directRowsByUnko)', () => {
+  /** 2026-07 の実例 (車輌1420 07-13 / 車輌1109 07-15) の形。 */
+  const repair = (over: Partial<CostRow> = {}) => cost({
+    costKind: '05', costKindName: '車輌修繕費(変動)', costName: '一般修理費',
+    operationDate: '2026-07-13', vehicleNumber: '1420', amount: 206060,
+    remarks: 'ﾄﾞｰｼﾞﾝｸﾞﾕﾆｯﾄ交換', vendorName: '三菱ふそう', ...over,
+  })
+
+  it('直課した行だけを運行NO ごとに持つ (固定費・運行の無い日の行は入らない)', () => {
+    const res = buildOperationMargins(
+      [op({ unkoNo: 'A', date: '2026-07-13', vehicleCode: '1420', totalKm: 100 })],
+      [
+        repair(),
+        repair({ costName: '一般修理費', amount: 12000, remarks: 'ﾊｰﾈｽ配線修理' }),
+        // 固定費 → 按分に回る。直課の一覧には入らない
+        cost({ costKind: '13', costKindName: 'リース･償却費', operationDate: '2026-07-13', vehicleNumber: '1420', amount: 70000, isFixed: true }),
+        // 運行の無い日の変動費 → 按分に回る
+        repair({ operationDate: '2026-07-24', amount: 97195 }),
+        // 別の車輌 → 当たらない
+        repair({ vehicleNumber: '1109', amount: 5000 }),
+      ],
+      {},
+    )
+    expect(res.directRowsByUnko.get('A')).toEqual([
+      { date: '2026-07-13', costKindName: '車輌修繕費(変動)', costName: '一般修理費', yen: 206060, remarks: 'ﾄﾞｰｼﾞﾝｸﾞﾕﾆｯﾄ交換', vendorName: '三菱ふそう' },
+      { date: '2026-07-13', costKindName: '車輌修繕費(変動)', costName: '一般修理費', yen: 12000, remarks: 'ﾊｰﾈｽ配線修理', vendorName: '三菱ふそう' },
+    ])
+    // 額は今までどおり (一覧を返しても直課の計算は 1 ミリも変えていない)
+    expect(res.operations[0]!.directCostYen).toBe(218060)
+    // 按分に回った側は fixedPoolByVehicle に (こちらに remarks は要らない)
+    expect(res.fixedPoolByVehicle.get('1420')!.map(r => r.yen)).toEqual([70000, 97195])
+  })
+
+  it('同じ日・同じ車輌に運行が 2 本あれば、行の yen はその運行に乗ったぶん (距離比で割った後)', () => {
+    const res = buildOperationMargins(
+      [op({ unkoNo: 'A', totalKm: 300 }), op({ unkoNo: 'B', totalKm: 100 })],
+      [cost({ costKind: '04', costName: '通行料', amount: 4000 })],
+      {},
+    )
+    expect(res.directRowsByUnko.get('A')![0]!.yen).toBe(3000)
+    expect(res.directRowsByUnko.get('B')![0]!.yen).toBe(1000)
+    // 行の額の和 = directCostYen
+    expect(res.operations[0]!.directCostYen).toBe(3000)
+    expect(res.operations[1]!.directCostYen).toBe(1000)
+  })
+
+  it('軽油引取税を足した実額で持つ', () => {
+    const res = buildOperationMargins(
+      [op({ totalKm: 100 })],
+      [cost({ costKind: '04', amount: 1000, dieselTax: 200 })],
+      {},
+    )
+    expect(res.directRowsByUnko.get('2607011000000000001109')![0]!.yen).toBe(1200)
+  })
+
+  it('直課した行が無い運行はキーそのものが無い', () => {
+    const res = buildOperationMargins(
+      [op({ totalKm: 100 })],
+      [cost({ costKind: '13', amount: 1000, isFixed: true })],
+      {},
+    )
+    expect(res.directRowsByUnko.get('2607011000000000001109')).toBeUndefined()
+  })
+
+  it('人件費 (08/11) の直課は入らない (粗利の経費だけ)', () => {
+    const res = buildOperationMargins(
+      [op({ totalKm: 100 })],
+      [cost({ costKind: '08', costKindName: '給与', amount: 300000 })],
+      {},
+    )
+    expect(res.directRowsByUnko.size).toBe(0)
+  })
+
+  describe('運行行の title (operationDirectCostTitle)', () => {
+    const m = (over: Partial<OperationMargin> = {}): OperationMargin => ({
+      ...buildOperationMargins([op({ unkoNo: 'A', date: '2026-07-13', vehicleCode: '1420' })], [cost()], {}).operations[0]!,
+      ...over,
+    })
+
+    it('頭に運行と基準、以下 1 行ずつ「経費名 金額 備考 (支払先)」', () => {
+      const res = buildOperationMargins(
+        [op({ unkoNo: 'A', date: '2026-07-13', vehicleCode: '1420', totalKm: 100 })],
+        [repair(), repair({ amount: 12000, remarks: 'ﾊｰﾈｽ配線修理' })],
+        {},
+      )
+      expect(operationDirectCostTitle(res.operations[0]!, res.directRowsByUnko)).toBe(
+        '直課経費の中身 — 運行 2026-07-13 車輌1420 (日・車輌が一致した変動費)\n'
+        + '一般修理費 ¥206,060 ﾄﾞｰｼﾞﾝｸﾞﾕﾆｯﾄ交換 (三菱ふそう)\n'
+        + '一般修理費 ¥12,000 ﾊｰﾈｽ配線修理 (三菱ふそう)',
+      )
+    })
+
+    it('備考が空なら省く、支払先が空なら括弧ごと省く', () => {
+      const byUnko = new Map([['A', [
+        { date: '2026-07-15', costKindName: '車輌修繕費', costName: 'ﾀｲﾔ･ﾊﾞｯﾃﾘｰ', yen: 129600, remarks: 'ﾀｲﾔ 4本', vendorName: 'トーヨータイヤ' },
+        { date: '2026-07-15', costKindName: '車輌修繕費', costName: 'ﾀｲﾔ･ﾊﾞｯﾃﾘｰ', yen: 68200, remarks: 'ﾀｲﾔ 2本', vendorName: '' },
+        { date: '2026-07-15', costKindName: '通行料', costName: '通行料', yen: 3000, remarks: '', vendorName: 'NEXCO' },
+        { date: '2026-07-15', costKindName: '通行料', costName: '通行料', yen: 2000.4, remarks: '', vendorName: '' },
+      ]]])
+      expect(operationDirectCostTitle(m({ unkoNo: 'A', date: '2026-07-15', vehicleCode: '1109' }), byUnko).split('\n')).toEqual([
+        '直課経費の中身 — 運行 2026-07-15 車輌1109 (日・車輌が一致した変動費)',
+        'ﾀｲﾔ･ﾊﾞｯﾃﾘｰ ¥129,600 ﾀｲﾔ 4本 (トーヨータイヤ)',
+        'ﾀｲﾔ･ﾊﾞｯﾃﾘｰ ¥68,200 ﾀｲﾔ 2本',
+        '通行料 ¥3,000 (NEXCO)',
+        '通行料 ¥2,000',
+      ])
+    })
+
+    it('直課した行が無ければ「直課経費なし」', () => {
+      expect(operationDirectCostTitle(m({ unkoNo: 'Z' }), new Map())).toBe('直課経費なし')
+      expect(NO_DIRECT_COST_TITLE).toBe('直課経費なし')
+    })
+  })
+
+  describe('乗務員行の title (driverDirectCostTitle)', () => {
+    it('頭に乗務員と運行数、種別ごとの合計と件数 (種別名は cost_kind_name そのまま)、金額の大きい順の行 (日付付き)', () => {
+      const res = buildOperationMargins(
+        [
+          op({ unkoNo: 'A', date: '2026-07-13', vehicleCode: '1420', driverName: '西島', totalKm: 100 }),
+          op({ unkoNo: 'B', date: '2026-07-15', vehicleCode: '1420', driverName: '西島', totalKm: 100 }),
+        ],
+        [
+          repair(),
+          cost({ costKind: '04', costKindName: '通行料', costName: '通行料', operationDate: '2026-07-15', vehicleNumber: '1420', amount: 3000 }),
+          repair({ amount: 12000, remarks: 'ﾊｰﾈｽ配線修理' }),
+        ],
+        {},
+      )
+      const [d] = groupMarginsByDriver(res.operations)
+      expect(driverDirectCostTitle(d!, res.directRowsByUnko).split('\n')).toEqual([
+        '直課経費の中身 — 西島 の 2 運行ぶん',
+        // **「(変動)」は後付けしない** — 経費種別ﾏｽﾀの名前が既に「車輌修繕費(変動)」
+        '車輌修繕費(変動) ¥218,060 (2 件)',
+        '通行料 ¥3,000 (1 件)',
+        '07-13 一般修理費 ¥206,060 ﾄﾞｰｼﾞﾝｸﾞﾕﾆｯﾄ交換 (三菱ふそう)',
+        '07-13 一般修理費 ¥12,000 ﾊｰﾈｽ配線修理 (三菱ふそう)',
+        '07-15 通行料 ¥3,000',
+      ])
+    })
+
+    it('11 行目以降は「…他 N 行」に畳む (上位 10 行は金額の大きい順)', () => {
+      // 通行料 ¥100〜¥1,300 の 13 行 (順番はわざと昇順で入れる → title は降順)
+      const rows = Array.from({ length: 13 }, (_, i) => cost({
+        costKind: '04', costKindName: '通行料', costName: '通行料', amount: (i + 1) * 100, rowId: `r${i}`,
+      }))
+      const res = buildOperationMargins([op({ unkoNo: 'A', totalKm: 100 })], rows, {})
+      const [d] = groupMarginsByDriver(res.operations)
+      const lines = driverDirectCostTitle(d!, res.directRowsByUnko).split('\n')
+      expect(DIRECT_COST_TITLE_TOP).toBe(10)
+      expect(lines).toHaveLength(1 + 1 + 10 + 1)
+      expect(lines[0]).toBe('直課経費の中身 — 佐竹 繁 の 1 運行ぶん')
+      expect(lines[1]).toBe('通行料 ¥9,100 (13 件)')
+      expect(lines[2]).toBe('07-01 通行料 ¥1,300')
+      expect(lines[11]).toBe('07-01 通行料 ¥400')
+      expect(lines[12]).toBe('…他 3 行')
+    })
+
+    it('ちょうど 10 行なら「…他」は出さない', () => {
+      const rows = Array.from({ length: 10 }, (_, i) => cost({ costKind: '04', amount: (i + 1) * 100, rowId: `r${i}` }))
+      const res = buildOperationMargins([op({ unkoNo: 'A', totalKm: 100 })], rows, {})
+      const [d] = groupMarginsByDriver(res.operations)
+      const lines = driverDirectCostTitle(d!, res.directRowsByUnko).split('\n')
+      expect(lines).toHaveLength(12)
+      expect(lines[11]).toBe('07-01 軽油費 ¥100')
+    })
+
+    it('直課した行が無ければ「直課経費なし」', () => {
+      const res = buildOperationMargins([op({ totalKm: 100 })], [cost({ costKind: '13', isFixed: true })], {})
+      const [d] = groupMarginsByDriver(res.operations)
+      expect(driverDirectCostTitle(d!, res.directRowsByUnko)).toBe('直課経費なし')
+    })
   })
 })
 

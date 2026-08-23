@@ -66,6 +66,14 @@ export interface CostsDailyApiRow {
   km: number
   is_fixed: boolean
   row_id: string
+  /**
+   * 備考 (rust-ichibanboshi#306 で追加)。**古い binary は返さない**ので optional —
+   * `vendor_code` / `vendor_branch` / `entered_date` も同時に増えたが、画面で使うのは
+   * `remarks` と `vendor_name` だけなのでここには 2 つだけ置く。
+   */
+  remarks?: string
+  /** 未払先名 (支払先)。`remarks` と同じく rust-ichibanboshi#306。 */
+  vendor_name?: string
 }
 
 /** 経費 1 行 (API の camelCase 版)。 */
@@ -92,6 +100,13 @@ export interface CostRow {
   /** `固定経費K`。**月極めの固定費**は運行に直課せず距離比で按分する。 */
   isFixed: boolean
   rowId: string
+  /**
+   * 備考 (`remarks`)。実例は `ﾄﾞｰｼﾞﾝｸﾞﾕﾆｯﾄ交換` / `ﾀｲﾔ 4本`。**API に無ければ空文字**
+   * (計算には使わない。直課経費の中身を title に出すためだけ。Refs #760 の 14)。
+   */
+  remarks: string
+  /** 未払先名 (`vendor_name`)。実例は `三菱ふそう` / `トーヨータイヤ`。無ければ空文字。 */
+  vendorName: string
 }
 
 export function mapCostApiRow(row: CostsDailyApiRow): CostRow {
@@ -111,6 +126,10 @@ export function mapCostApiRow(row: CostsDailyApiRow): CostRow {
     km: row.km,
     isFixed: row.is_fixed,
     rowId: row.row_id,
+    // **無ければ空文字に倒す。** 古い binary (#306 より前) や、この 2 列を返さない
+    // 呼び出し元から来た行でも落ちないように。
+    remarks: row.remarks ?? '',
+    vendorName: row.vendor_name ?? '',
   }
 }
 
@@ -559,6 +578,29 @@ export interface FixedPoolRow {
   isFixed: boolean
 }
 
+/**
+ * 運行に直課した経費 1 行 (**画面で中身を見せるためだけ**。計算には使わない。Refs #760 の 14)。
+ *
+ * `FixedPoolRow` の直課版。実例 (2026-07 / 車輌1420 07-13) は
+ * **一般修理費 ¥206,060 `ﾄﾞｰｼﾞﾝｸﾞﾕﾆｯﾄ交換` (三菱ふそう)** で、備考と支払先が無いと
+ * 「修繕費 20 万」が何の修理だったのか画面から辿れない。
+ */
+export interface DirectCostRow {
+  /** `運行年月日` (= 直課した運行の日)。 */
+  date: string
+  costKindName: string
+  costName: string
+  /**
+   * **その運行に乗った額** (`costYen` = 税抜金額 + 軽油引取税)。同じ日・同じ車輌に
+   * 運行が 2 本あって距離比で割ったときは、**割った後の額** (行の全額ではない)。
+   */
+  yen: number
+  /** 備考。無ければ空文字。 */
+  remarks: string
+  /** 未払先名。無ければ空文字。 */
+  vendorName: string
+}
+
 /** 経費の一群を運行へ配った結果 (添字は渡した運行と同じ)。 */
 interface Spread {
   /** 日・車輌が一致する変動費として直課した額。 */
@@ -572,6 +614,8 @@ interface Spread {
    * 落ちたぶんも残る — 「按分に回した」ことは同じで、見せる先が無いだけ)。
    */
   poolRows: Map<string, FixedPoolRow[]>
+  /** 運行NO → 直課した行の一覧。**`direct` と 1 対 1** (額の和が `direct[i]`)。 */
+  directRows: Map<string, DirectCostRow[]>
 }
 
 /**
@@ -606,12 +650,28 @@ function spreadCosts(
   const pool = new Map<string, number>()
   /** 同じものの**行の一覧**。額は `pool` が正で、こちらは画面に中身を出すため。 */
   const poolRows = new Map<string, FixedPoolRow[]>()
+  /** 直課した行の一覧 (運行NO 別)。額は `direct` が正で、こちらは画面に中身を出すため。 */
+  const directRows = new Map<string, DirectCostRow[]>()
   for (const row of rows) {
     const yen = costYen(row)
     const hits = row.isFixed ? [] : (byDayVehicle.get(`${row.operationDate}|${row.vehicleNumber}`) ?? [])
     const hitKm = hits.reduce((sum, i) => sum + ops[i]!.totalKm, 0)
     if (hits.length > 0 && hitKm > 0) {
-      for (const i of hits) direct[i]! += yen * (ops[i]!.totalKm / hitKm)
+      for (const i of hits) {
+        // **同じ式のまま。** 行に残す額も、`direct` に足す額と同じ値 (按分後)。
+        const share = yen * (ops[i]!.totalKm / hitKm)
+        direct[i]! += share
+        const list = directRows.get(ops[i]!.unkoNo) ?? []
+        list.push({
+          date: row.operationDate,
+          costKindName: row.costKindName,
+          costName: row.costName,
+          yen: share,
+          remarks: row.remarks,
+          vendorName: row.vendorName,
+        })
+        directRows.set(ops[i]!.unkoNo, list)
+      }
       continue
     }
     pool.set(row.vehicleNumber, (pool.get(row.vehicleNumber) ?? 0) + yen)
@@ -636,7 +696,7 @@ function spreadCosts(
     for (const i of idx) allocated[i]! += yen * (ops[i]!.totalKm / denom)
   }
 
-  return { direct, allocated, dropped, poolRows }
+  return { direct, allocated, dropped, poolRows, directRows }
 }
 
 export interface MarginResult {
@@ -655,6 +715,14 @@ export interface MarginResult {
    * **人件費 (`08`/`11`) は入らない** — 粗利の経費だけを配った側の pool。
    */
   fixedPoolByVehicle: Map<string, FixedPoolRow[]>
+  /**
+   * 運行NO → **直課経費の中身** (日・車輌が一致して直課した変動費の行)。
+   *
+   * 額は `directCostYen` が正で、これは画面の title に列挙するためだけ
+   * (`fixedPoolByVehicle` と同じ方式。Refs #760 の 14)。**人件費は入らない。**
+   * 直課した行が 1 本も無い運行はキーそのものが無い。
+   */
+  directRowsByUnko: Map<string, DirectCostRow[]>
   /** どの運行にも配れなかった経費 (円)。**粗利から抜けているぶん。** */
   unallocatedCostYen: number
   /** どの運行にも配れなかった人件費 (円)。 */
@@ -783,6 +851,7 @@ export function buildOperationMargins(
     derivedByVehicle,
     kmByVehicle,
     fixedPoolByVehicle: spreadCost.poolRows,
+    directRowsByUnko: spreadCost.directRows,
     unallocatedCostYen: spreadCost.dropped,
     unallocatedLaborYen: spreadLabor.dropped,
     ichibanLaborYen: laborRows.reduce((sum, row) => sum + costYen(row), 0),
@@ -1033,6 +1102,72 @@ export function groupMarginsByDriver(margins: OperationMargin[]): DriverMargin[]
     .sort((a, b) => (a.driverName > b.driverName ? 1 : -1))
 }
 
+// --- 直課経費の中身 (title) ---
+
+/** title 用の金額表記。画面のセル (`margin.vue` の `yen`) と同じ丸めと桁区切り。 */
+function titleYen(v: number): string {
+  return `¥${Math.round(v).toLocaleString()}`
+}
+
+/**
+ * 直課した 1 行の見せ方: `一般修理費 ¥206,060 ﾄﾞｰｼﾞﾝｸﾞﾕﾆｯﾄ交換 (三菱ふそう)`。
+ * **備考が空なら省く、支払先が空なら括弧ごと省く** (空の括弧を出さない)。
+ */
+function directRowLabel(r: DirectCostRow): string {
+  return `${r.costName} ${titleYen(r.yen)}`
+    + (r.remarks ? ` ${r.remarks}` : '')
+    + (r.vendorName ? ` (${r.vendorName})` : '')
+}
+
+/** 直課した行が 1 本も無いときの title。 */
+export const NO_DIRECT_COST_TITLE = '直課経費なし'
+
+/** 乗務員行の title に列挙する上位の行数 (金額の大きい順)。残りは「…他 N 行」に畳む。 */
+export const DIRECT_COST_TITLE_TOP = 10
+
+/**
+ * **運行行**の直課経費セルの title (Refs #760 の 14)。
+ *
+ * 頭に「どの運行に、どういう基準で乗せたか」を書いて、固定費按分と取り違えないようにする。
+ * 行は直課した順 (= 経費明細の順) のまま。
+ */
+export function operationDirectCostTitle(m: OperationMargin, byUnko: Map<string, DirectCostRow[]>): string {
+  const rows = byUnko.get(m.unkoNo) ?? []
+  if (rows.length === 0) return NO_DIRECT_COST_TITLE
+  return `直課経費の中身 — 運行 ${m.date} 車輌${m.vehicleCode} (日・車輌が一致した変動費)\n`
+    + rows.map(directRowLabel).join('\n')
+}
+
+/**
+ * **乗務員行**の直課経費セルの title (Refs #760 の 14)。
+ *
+ * 運行が十数本あると行が多すぎて読めないので、**経費種別ごとの合計と件数**を先に出し、
+ * そのあと**金額の大きい順に上位 `DIRECT_COST_TITLE_TOP` 行**だけ (日付付きで) 並べる。
+ * 種別も金額の大きい順。同額は元の順 (sort は安定)。
+ */
+export function driverDirectCostTitle(d: DriverMargin, byUnko: Map<string, DirectCostRow[]>): string {
+  const rows = d.operations.flatMap(m => byUnko.get(m.unkoNo) ?? [])
+  if (rows.length === 0) return NO_DIRECT_COST_TITLE
+  const byKind = new Map<string, { yen: number, count: number }>()
+  for (const r of rows) {
+    const entry = byKind.get(r.costKindName) ?? { yen: 0, count: 0 }
+    entry.yen += r.yen
+    entry.count += 1
+    byKind.set(r.costKindName, entry)
+  }
+  const kinds = [...byKind.entries()]
+    .sort((a, b) => b[1].yen - a[1].yen)
+    // `cost_kind_name` をそのまま出す。実値は **既に「車輌修繕費(変動)」の形** (経費種別ﾏｽﾀ)
+    // なので、ここで「(変動)」を後付けすると二重になる。
+    .map(([kind, e]) => `${kind} ${titleYen(e.yen)} (${e.count} 件)`)
+  const sorted = [...rows].sort((a, b) => b.yen - a.yen)
+  const top = sorted.slice(0, DIRECT_COST_TITLE_TOP).map(r => `${r.date.slice(5)} ${directRowLabel(r)}`)
+  const rest = sorted.length - top.length
+  const lines = [`直課経費の中身 — ${d.driverName} の ${d.operations.length} 運行ぶん`, ...kinds, ...top]
+  if (rest > 0) lines.push(`…他 ${rest} 行`)
+  return lines.join('\n')
+}
+
 // --- CSV ---
 
 const CSV_HEADER = [
@@ -1182,8 +1317,12 @@ export function summarizeUncoveredLegs(legs: IchibanLeg[]): UncoveredTotals | nu
  * `v5` で**便ごとの入力** (`MarginOperationInput.legs`) を足した (Refs #760 の 13)。
  * `v4` を読ませないのは、**便の段の欄が無いキャッシュを読むと便が 1 本も出ない**
  * (`legs: undefined` を空配列にできず、画面の新しい段だけ永久に空くため)。
+ *
+ * `v6` で `costs` の行に **`remarks` / `vendorName`** を足した (Refs #760 の 14)。
+ * `v5` を読ませないのは、**備考・支払先の無い行を読むと直課経費の title に
+ * `undefined` が混ざる**ため (取り込み直せば付く)。
  */
-export const MARGIN_CACHE_KEY = 'dtako:margin:cache:v5'
+export const MARGIN_CACHE_KEY = 'dtako:margin:cache:v6'
 
 /**
  * 直前の集計。**運行手当タブのキャッシュとはキーを分ける** — あちらは便と明細を
