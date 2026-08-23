@@ -1,5 +1,5 @@
 {
- "source": "オーナーが本番 2026-07 で実測した集計 (2026-08-23 報告)",
+ "source": "本番 2026-07 の実測 (dtako:margin:cache:v9、2026-08-23)",
  "all": {
   "operations": 91,
   "legs": 284,
@@ -33,5 +33,160 @@
   "増地 誠": 23,
   "佐竹 繁": 21,
   "西島 健太": 18
- }
+ },
+ "routes": [
+  {
+   "dest": "河東郡上士幌町上士幌東",
+   "destCity": "北海道河東郡上士幌町上士幌東3線",
+   "legs": 42,
+   "salesYen": 1435790,
+   "allowanceYen": 378000,
+   "haulKm": 4393.2,
+   "deadheadKm": 4769.8
+  },
+  {
+   "dest": "帯広市川西町西",
+   "destCity": "北海道帯広市川西町西2線",
+   "legs": 29,
+   "salesYen": 995703,
+   "allowanceYen": 261000,
+   "haulKm": 3738.2,
+   "deadheadKm": 3465.0
+  },
+  {
+   "dest": "川上郡標茶町多和星空の黒",
+   "destCity": "北海道川上郡標茶町多和1-1",
+   "legs": 21,
+   "salesYen": 741000,
+   "allowanceYen": 168000,
+   "haulKm": 1236.2,
+   "deadheadKm": 2091.0
+  },
+  {
+   "dest": "河東郡士幌町中士幌",
+   "destCity": "北海道河東郡士幌町中士幌",
+   "legs": 20,
+   "salesYen": 890760,
+   "allowanceYen": 180000,
+   "haulKm": 2106.2,
+   "deadheadKm": 1980.0
+  },
+  {
+   "dest": "十勝郡浦幌町川流布",
+   "destCity": "北海道十勝郡浦幌町川流布",
+   "legs": 12,
+   "salesYen": 411074,
+   "allowanceYen": 108000,
+   "haulKm": 950.2,
+   "deadheadKm": 1489.0
+  },
+  {
+   "dest": "十勝郡浦幌町統太",
+   "destCity": "北海道十勝郡浦幌町統太",
+   "legs": 9,
+   "salesYen": 326830,
+   "allowanceYen": 81000,
+   "haulKm": 771.2,
+   "deadheadKm": 1264.0
+  },
+  {
+   "dest": "川上郡標茶町多和",
+   "destCity": "北海道川上郡標茶町多和",
+   "legs": 8,
+   "salesYen": 294000,
+   "allowanceYen": 64000,
+   "haulKm": 474.1,
+   "deadheadKm": 871.0
+  },
+  {
+   "dest": "野付郡別海町中西別",
+   "destCity": "北海道野付郡別海町中西別",
+   "legs": 7,
+   "salesYen": 297500,
+   "allowanceYen": 63000,
+   "haulKm": 520.1,
+   "deadheadKm": 1078.0
+  },
+  {
+   "dest": "十勝郡浦幌町相川",
+   "destCity": "北海道十勝郡浦幌町相川",
+   "legs": 5,
+   "salesYen": 187500,
+   "allowanceYen": 45000,
+   "haulKm": 381.1,
+   "deadheadKm": 688.0
+  },
+  {
+   "dest": "十勝郡浦幌町川上",
+   "destCity": "北海道十勝郡浦幌町川上",
+   "legs": 5,
+   "salesYen": 180300,
+   "allowanceYen": 45000,
+   "haulKm": 375.1,
+   "deadheadKm": 638.0
+  },
+  {
+   "dest": "河東郡音更町豊田東",
+   "destCity": "北海道河東郡音更町豊田東",
+   "legs": 2,
+   "salesYen": 82600,
+   "allowanceYen": 18000,
+   "haulKm": 233.1,
+   "deadheadKm": 181.0
+  },
+  {
+   "dest": "川上郡標茶町西熊牛原野",
+   "destCity": "北海道川上郡標茶町西熊牛原野",
+   "legs": 2,
+   "salesYen": 87745,
+   "allowanceYen": 16000,
+   "haulKm": 131.1,
+   "deadheadKm": 248.0
+  },
+  {
+   "dest": "河東郡鹿追町鹿追北",
+   "destCity": "北海道河東郡鹿追町鹿追北",
+   "legs": 2,
+   "salesYen": 93990,
+   "allowanceYen": 18000,
+   "haulKm": 287.1,
+   "deadheadKm": 234.0
+  },
+  {
+   "dest": "河東郡士幌町中音更",
+   "destCity": "北海道河東郡士幌町中音更",
+   "legs": 2,
+   "salesYen": 72600,
+   "allowanceYen": 18000,
+   "haulKm": 234.1,
+   "deadheadKm": 235.0
+  },
+  {
+   "dest": "(卸地なし)",
+   "destCity": "",
+   "legs": 1,
+   "salesYen": 0,
+   "allowanceYen": 0,
+   "haulKm": 0.0,
+   "deadheadKm": 232.0
+  },
+  {
+   "dest": "駒場",
+   "destCity": "駒場",
+   "legs": 1,
+   "salesYen": 21750,
+   "allowanceYen": 4500,
+   "haulKm": 0.0,
+   "deadheadKm": 235.0
+  },
+  {
+   "dest": "河東郡鹿追町西町",
+   "destCity": "北海道河東郡鹿追町西町",
+   "legs": 1,
+   "salesYen": 46488,
+   "allowanceYen": 9000,
+   "haulKm": 149.1,
+   "deadheadKm": 95.0
+  }
+ ]
 }
