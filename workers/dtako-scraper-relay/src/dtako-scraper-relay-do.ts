@@ -349,7 +349,6 @@ import {
   parseNet780ArchiveRequest,
   pickNet780RowForOperation,
   retryNet780Download,
-  shouldNarrowNet780Search,
   summarizeNet780ArchiveBatch,
   type Net780ArchiveItem,
   type Net780ArchiveResult,
@@ -1775,8 +1774,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 各 item は `net780-archive.ts` のヘッダコメントの手順:
    *
    * 1. D1 カタログに単一運行の行が既にあれば `already` (theearth に行かない)
-   * 2. 読取日 [開始日, +窓] + 車輌CD で `searchNet780` → `operationNo` 一致行。
-   *    一覧が上限件数で不一致なら窓を絞って 1 回だけ取り直す。無ければ `not_found`
+   * 2. 読取日 [開始日, +2 日] + 車輌CD で `searchNet780` → `operationNo` 一致行
+   *    (一致判定は operationNo だけ)。無ければ [開始日, +14 日] でもう 1 回。
+   *    それでも無ければ `not_found` (`net780ArchiveSearchPlan`)
    * 3. `downloadNet780Zip` (503 が多いので `retryNet780Download`) →
    *    `saveNet780ToR2` を **`await`** (`waitUntil` だと D1 書き込みが消える実害、
    *    `saveNet780ToR2` の doc comment) → `archived` + `bytes`
@@ -1806,7 +1806,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         lastParams = params;
         lastRowCount = rows.length;
         row = pickNet780RowForOperation(rows, item.opeNo);
-        if (row || !shouldNarrowNet780Search(rows.length, NET780_SEARCH_MAX_ROWS)) break;
+        if (row) break;
       }
       if (!row) {
         const message = describeNet780NotFound(key, lastParams!, lastRowCount, NET780_SEARCH_MAX_ROWS);

@@ -13,7 +13,7 @@ import {
   net780DownloadTargetFromRow,
   parseNet780ArchiveRequest,
   pickNet780RowForOperation,
-  shouldNarrowNet780Search,
+  isNet780SearchCapped,
   summarizeNet780ArchiveBatch,
   type Net780ArchiveItem,
   type Net780ArchiveResult,
@@ -166,11 +166,11 @@ describe("buildNet780ArchiveSearchParams / net780ArchiveSearchPlan", () => {
     });
   });
 
-  it("plan は 広い窓 → 絞り直し窓 の順で、窓の日数は定数どおり", () => {
+  it("plan は 狭い窓 → 広い窓 の順 (親指示: 多数派を先に拾い theearth 往復と上限到達を減らす)、窓の日数は定数どおり", () => {
     const plan = net780ArchiveSearchPlan(key);
     expect(plan.map((p) => p.operationDateTo)).toEqual([
-      addDaysIso(key.startDate, NET780_ARCHIVE_WINDOW_DAYS),
       addDaysIso(key.startDate, NET780_ARCHIVE_NARROW_WINDOW_DAYS),
+      addDaysIso(key.startDate, NET780_ARCHIVE_WINDOW_DAYS),
     ]);
     expect(NET780_ARCHIVE_WINDOW_DAYS).toBeGreaterThan(NET780_ARCHIVE_NARROW_WINDOW_DAYS);
     for (const p of plan) {
@@ -181,12 +181,12 @@ describe("buildNet780ArchiveSearchParams / net780ArchiveSearchPlan", () => {
   });
 });
 
-describe("shouldNarrowNet780Search", () => {
+describe("isNet780SearchCapped", () => {
   it("一覧が上限に達していれば true (取りこぼしの可能性)、未満なら false (全件見えている)", () => {
-    expect(shouldNarrowNet780Search(30, 30)).toBe(true);
-    expect(shouldNarrowNet780Search(31, 30)).toBe(true);
-    expect(shouldNarrowNet780Search(29, 30)).toBe(false);
-    expect(shouldNarrowNet780Search(0, 30)).toBe(false);
+    expect(isNet780SearchCapped(30, 30)).toBe(true);
+    expect(isNet780SearchCapped(31, 30)).toBe(true);
+    expect(isNet780SearchCapped(29, 30)).toBe(false);
+    expect(isNet780SearchCapped(0, 30)).toBe(false);
   });
 });
 

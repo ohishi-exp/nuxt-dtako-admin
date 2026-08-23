@@ -18,13 +18,14 @@
  * の定番原因)」、kintai-ops skill「読取日 != 運行開始日 52.8%」)。そのため
  * `start_ope` 当日だけで検索すると約半分が `not_found` になる。
  *
- * ここでは **[開始日, 開始日 + `NET780_ARCHIVE_WINDOW_DAYS`] の読取日 range +
- * 車輌CD** (運行NO の 13〜22 桁目、先頭 0 落とし) で検索し、`operationNo` が
- * 一致する行を拾う。一覧は 1 ページ最大 `NET780_SEARCH_MAX_ROWS` 件で
- * ページング未実装のため、**上限に達して不一致なら窓を
- * [開始日, 開始日 + `NET780_ARCHIVE_NARROW_WINDOW_DAYS`] に絞って 1 回だけ
- * 取り直す** (`net780ArchiveSearchPlan`)。上限未満で不一致なら一覧は全件見えて
- * いるので絞り直しても増えない → その時点で `not_found`。
+ * ここでは **読取日 range + 車輌CD** (運行NO の 13〜22 桁目、先頭 0 落とし) で
+ * 検索し、`operationNo` が一致する行を拾う (一致判定は `operationNo` だけ、日付では
+ * 弾かない)。窓は **まず [開始日, 開始日 + `NET780_ARCHIVE_NARROW_WINDOW_DAYS`]
+ * (多数派の当日〜翌々日読取をここで拾う)、見つからなければ
+ * [開始日, 開始日 + `NET780_ARCHIVE_WINDOW_DAYS`]** の順 (`net780ArchiveSearchPlan`、
+ * 親指示 2026-08-23 — 狭い窓を先にすることで theearth の往復と 1 ページ上限
+ * `NET780_SEARCH_MAX_ROWS` 件に当たる確率を減らす)。両方で不一致なら `not_found`
+ * — 最後の一覧が上限に達していたら message に取りこぼしの可能性を明記する。
  *
  * ## 契約 (front #760-27 と共有)
  *
@@ -40,12 +41,12 @@ import { TheearthClientError } from "./theearth-client";
 import { VenusSessionExpiredError } from "./theearth-venus-client";
 import type { BatchRunResult } from "./cron-batch";
 
-/** 読取日の検索窓 (開始日からの日数)。長距離運行の退社が開始の 8 日後だった
+/** 最初に引く狭い読取日窓 (開始日からの日数)。日跨ぎ運行 (翌日読取) が大半なので
+ * 開始日+2 日までで多数派を拾える。 */
+export const NET780_ARCHIVE_NARROW_WINDOW_DAYS = 2;
+/** 狭い窓で見つからなかった時の広い窓。長距離運行の退社が開始の 8 日後だった
  * 実例 (theearth-venus skill、出庫 06/28 退社 07/06) を余裕を持って覆う値。 */
 export const NET780_ARCHIVE_WINDOW_DAYS = 14;
-/** 一覧が上限件数に達して不一致だった時の絞り直し窓。日跨ぎ運行 (翌日読取) が
- * 大半なので 開始日+2 日までで十分に多数派を拾える。 */
-export const NET780_ARCHIVE_NARROW_WINDOW_DAYS = 2;
 
 export interface Net780ArchiveItem {
   opeNo: string;
@@ -120,18 +121,18 @@ export function buildNet780ArchiveSearchParams(key: Net780ArchiveSearchKey, wind
   };
 }
 
-/** 検索する窓の並び (広い窓 → 絞り直し窓)。呼び出し元は先頭から順に検索し、
- * 一致行が出るか `shouldNarrowNet780Search` が false を返した時点で止める。 */
+/** 検索する窓の並び (狭い窓 → 広い窓)。呼び出し元は先頭から順に検索し、一致行が
+ * 出た時点で止める。全部外れたら `not_found`。 */
 export function net780ArchiveSearchPlan(key: Net780ArchiveSearchKey): Net780SearchParams[] {
   return [
-    buildNet780ArchiveSearchParams(key, NET780_ARCHIVE_WINDOW_DAYS),
     buildNet780ArchiveSearchParams(key, NET780_ARCHIVE_NARROW_WINDOW_DAYS),
+    buildNet780ArchiveSearchParams(key, NET780_ARCHIVE_WINDOW_DAYS),
   ];
 }
 
-/** 一覧が 1 ページの上限に達していれば「取りこぼしの可能性あり」で窓を絞って
- * 取り直す価値がある。上限未満なら全件見えているので絞っても増えない。 */
-export function shouldNarrowNet780Search(rowCount: number, maxRows: number): boolean {
+/** 一覧が 1 ページの上限に達していれば、見えていない行に目当ての運行が居る
+ * 可能性がある (ページング未実装)。`not_found` の理由文に使う。 */
+export function isNet780SearchCapped(rowCount: number, maxRows: number): boolean {
   return rowCount >= maxRows;
 }
 
@@ -139,7 +140,7 @@ export function shouldNarrowNet780Search(rowCount: number, maxRows: number): boo
  * (黙って not_found にすると「NET780 が無い」と誤読される)。 */
 export function describeNet780NotFound(key: Net780ArchiveSearchKey, params: Net780SearchParams, rowCount: number, maxRows: number): string {
   const range = `読取日 ${params.operationDateFrom}〜${params.operationDateTo} / 車輌CD ${key.vehicleCd}`;
-  if (shouldNarrowNet780Search(rowCount, maxRows)) {
+  if (isNet780SearchCapped(rowCount, maxRows)) {
     return `${range} の一覧が上限 ${maxRows} 件に達しており、取りこぼしの可能性があります (NET780 が無いとは限りません)`;
   }
   return `${range} の一覧 (${rowCount} 件) に該当する運行がありません`;
