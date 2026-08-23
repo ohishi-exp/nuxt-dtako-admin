@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { buildOperationRoute, pickLegsFromRoute, mergeRoutes, type OperationRoute, type RouteSegment } from '~/utils/operation-route-map'
+import { buildOperationRoute, pickLegsFromRoute, mergeRoutes, splitTrackByWindows, type LegWindow, type OperationRoute, type RouteSegment } from '~/utils/operation-route-map'
 import { extractOperationIdle } from '~/utils/allowance-idle'
-import { toLatLng } from '~/utils/event-data-table'
+import { toLatLng, parseEventDatetimeToTs } from '~/utils/event-data-table'
 
 const HEADERS = [
   'イベント名', '開始日時', '終了日時', '開始市町村名', '終了市町村名',
@@ -56,6 +56,13 @@ const TWO_LEGS: string[][] = [
 function shape(segs: RouteSegment[]) {
   return segs.map(s => ({ kind: s.kind, legSeq: s.legSeq, n: s.path.length }))
 }
+
+/** `2026/7/1 8:00:00` → epoch 秒 (窓の期待値用)。 */
+function T(s: string): number {
+  return parseEventDatetimeToTs(s)!
+}
+
+const EMPTY_ROUTE: OperationRoute = { segments: [], markers: [], pointCount: 0, droppedRows: 0, windows: [] }
 
 describe('buildOperationRoute', () => {
   it('便 2 本: 積前・便間・降後が回送、積み → 最後の降し が売上走行。便番号は extractOperationIdle と同じ本数', () => {
@@ -134,10 +141,8 @@ describe('buildOperationRoute', () => {
 
   it('GPS 列が無い / イベント名 列が無い CSV は空 (点 0、落とした行 0)', () => {
     const noGps = ['イベント名', '開始日時', '終了日時', '開始GPS緯度', '開始GPS経度', '開始GPS有効']
-    expect(buildOperationRoute(noGps, [['運転', '', '', '42590000', '144230000', '1']]))
-      .toEqual({ segments: [], markers: [], pointCount: 0, droppedRows: 0 })
-    expect(buildOperationRoute(HEADERS.filter(h => h !== 'イベント名'), [HEADERS.map(() => '1')]))
-      .toEqual({ segments: [], markers: [], pointCount: 0, droppedRows: 0 })
+    expect(buildOperationRoute(noGps, [['運転', '', '', '42590000', '144230000', '1']])).toEqual(EMPTY_ROUTE)
+    expect(buildOperationRoute(HEADERS.filter(h => h !== 'イベント名'), [HEADERS.map(() => '1')])).toEqual(EMPTY_ROUTE)
   })
 
   it('重ね掛け行 (DISTANCE_EVENT_NAMES に無い) は点列に入れない', () => {
@@ -235,7 +240,128 @@ describe('buildOperationRoute', () => {
   })
 
   it('行が無ければ空', () => {
-    expect(buildOperationRoute(HEADERS, [])).toEqual({ segments: [], markers: [], pointCount: 0, droppedRows: 0 })
+    expect(buildOperationRoute(HEADERS, [])).toEqual(EMPTY_ROUTE)
+  })
+})
+
+describe('buildOperationRoute / windows (NET780 軌跡を切る時間窓)', () => {
+  it('便 2 本: 運行開始→積み1 / 積み1→降し1 / 降し1→積み2 / 積み2→最後の降し2 / 降し2→運行終了', () => {
+    const route = buildOperationRoute(HEADERS, TWO_LEGS)
+    expect(route.windows).toEqual<LegWindow[]>([
+      { legSeq: 1, kind: 'deadhead', fromTs: T('2026/7/1 5:00:00'), toTs: T('2026/7/1 8:00:00') },
+      { legSeq: 1, kind: 'haul', fromTs: T('2026/7/1 8:00:00'), toTs: T('2026/7/1 11:30:00') },
+      { legSeq: 2, kind: 'deadhead', fromTs: T('2026/7/1 11:30:00'), toTs: T('2026/7/1 14:00:00') },
+      { legSeq: 2, kind: 'haul', fromTs: T('2026/7/1 14:00:00'), toTs: T('2026/7/1 18:30:00') },
+      { legSeq: 2, kind: 'deadhead', fromTs: T('2026/7/1 18:30:00'), toTs: T('2026/7/1 20:00:00') },
+    ])
+    // 既存の segments / markers / pointCount / droppedRows は変わらない (別の describe で検証)。
+    expect(route.pointCount).toBe(11)
+  })
+
+  it('時刻が読めない行の窓は作らない (積み 2 の開始日時が空 → 便 2 の回送と売上走行が無い。他は残る)', () => {
+    const rows = TWO_LEGS.map(r => [...r])
+    rows[6]![1] = '' // 2 つ目の 積み の 開始日時
+    const route = buildOperationRoute(HEADERS, rows)
+    expect(route.windows.map(w => `${w.kind}${w.legSeq}`)).toEqual(['deadhead1', 'haul1', 'deadhead2'])
+    expect(route.windows[2]).toEqual({ legSeq: 2, kind: 'deadhead', fromTs: T('2026/7/1 18:30:00'), toTs: T('2026/7/1 20:00:00') })
+    // 運行開始 の開始日時が読めない → 便 1 の回送だけ無い。
+    const rows2 = TWO_LEGS.map(r => [...r])
+    rows2[0]![1] = 'x'
+    expect(buildOperationRoute(HEADERS, rows2).windows.map(w => `${w.kind}${w.legSeq}`))
+      .toEqual(['haul1', 'deadhead2', 'haul2', 'deadhead2'])
+    // 運行終了 の終了日時が読めない → 帰庫の回送だけ無い。
+    const rows3 = TWO_LEGS.map(r => [...r])
+    rows3[12]![2] = ''
+    expect(buildOperationRoute(HEADERS, rows3).windows.map(w => `${w.kind}${w.legSeq}`))
+      .toEqual(['deadhead1', 'haul1', 'deadhead2', 'haul2'])
+    // segments / markers は時刻に依らない。
+    expect(shape(route.segments)).toEqual(shape(buildOperationRoute(HEADERS, TWO_LEGS).segments))
+  })
+
+  it('運行開始 / 運行終了 の行が無ければ、最初の回送と帰庫の回送は無い', () => {
+    const rows = TWO_LEGS.slice(1, 12)
+    expect(buildOperationRoute(HEADERS, rows).windows.map(w => `${w.kind}${w.legSeq}`))
+      .toEqual(['haul1', 'deadhead2', 'haul2'])
+    // 運行開始 が 2 つなら最初、運行終了 が 2 つなら最後 (マーカーと同じ)。
+    const twoStarts = [
+      ev('運行開始', OBIHIRO, OBIHIRO, { ts: ['2026/7/1 4:00:00', '2026/7/1 4:00:00'] }),
+      ev('運行開始', OBIHIRO, OBIHIRO, { ts: ['2026/7/1 4:30:00', '2026/7/1 4:30:00'] }),
+      ...TWO_LEGS.slice(1, 12),
+      ev('運行終了', OBIHIRO, OBIHIRO, { ts: ['2026/7/1 19:00:00', '2026/7/1 19:00:00'] }),
+      ev('運行終了', OBIHIRO, OBIHIRO, { ts: ['2026/7/1 21:00:00', '2026/7/1 21:00:00'] }),
+    ]
+    const windows = buildOperationRoute(HEADERS, twoStarts).windows
+    expect(windows[0]).toEqual({ legSeq: 1, kind: 'deadhead', fromTs: T('2026/7/1 4:00:00'), toTs: T('2026/7/1 8:00:00') })
+    expect(windows[4]).toEqual({ legSeq: 2, kind: 'deadhead', fromTs: T('2026/7/1 18:30:00'), toTs: T('2026/7/1 21:00:00') })
+  })
+
+  it('降しの無い便は売上走行の窓が無く、次の便の回送も前の便の降しが無いので無い。最後の便なら帰庫も無い', () => {
+    const rows = [
+      ev('運行開始', OBIHIRO, OBIHIRO, { ts: ['2026/7/1 5:00:00', '2026/7/1 5:00:00'] }),
+      ev('積み', KUSHIRO, KUSHIRO, { ts: ['2026/7/1 6:00:00', '2026/7/1 6:10:00'] }), // 降し無し
+      ev('積み', SHIHORO, SHIHORO, { ts: ['2026/7/1 7:00:00', '2026/7/1 7:10:00'] }),
+      ev('降し', SHIMIZU, SHIMIZU, { ts: ['2026/7/1 8:00:00', '2026/7/1 8:10:00'] }),
+      ev('積み', OBIHIRO, OBIHIRO, { ts: ['2026/7/1 9:00:00', '2026/7/1 9:10:00'] }), // 降し無し (最後の便)
+      ev('運行終了', KUSHIRO, KUSHIRO, { ts: ['2026/7/1 10:00:00', '2026/7/1 10:00:00'] }),
+    ]
+    expect(buildOperationRoute(HEADERS, rows).windows).toEqual<LegWindow[]>([
+      { legSeq: 1, kind: 'deadhead', fromTs: T('2026/7/1 5:00:00'), toTs: T('2026/7/1 6:00:00') },
+      { legSeq: 2, kind: 'haul', fromTs: T('2026/7/1 7:00:00'), toTs: T('2026/7/1 8:10:00') },
+      { legSeq: 3, kind: 'deadhead', fromTs: T('2026/7/1 8:10:00'), toTs: T('2026/7/1 9:00:00') },
+    ])
+  })
+
+  it('日時の列が無い CSV / 積みが 1 行も無い運行は窓が無い', () => {
+    const headers = ['イベント名', '開始GPS緯度', '開始GPS経度', '終了GPS緯度', '終了GPS経度']
+    const rows = [
+      ['運行開始', OBIHIRO.lat, OBIHIRO.lng, OBIHIRO.lat, OBIHIRO.lng],
+      ['積み', KUSHIRO.lat, KUSHIRO.lng, KUSHIRO.lat, KUSHIRO.lng],
+      ['降し', SHIHORO.lat, SHIHORO.lng, SHIHORO.lat, SHIHORO.lng],
+    ]
+    expect(buildOperationRoute(headers, rows).windows).toEqual([])
+    expect(buildOperationRoute(HEADERS, [ev('運行開始', OBIHIRO, OBIHIRO), ev('運転', OBIHIRO, KUSHIRO)]).windows).toEqual([])
+  })
+})
+
+describe('splitTrackByWindows', () => {
+  const P = (ts: number, lat: number, lng = 143) => ({ ts, lat, lng })
+  const windows: LegWindow[] = [
+    { legSeq: 1, kind: 'deadhead', fromTs: 100, toTs: 200 },
+    { legSeq: 1, kind: 'haul', fromTs: 200, toTs: 300 },
+  ]
+
+  it('窓に入る点を窓ごとに 1 本の軌跡にし、窓の外は捨てる。境界 (両端) は含む', () => {
+    const points = [P(50, 1), P(100, 2), P(150, 3), P(200, 4), P(250, 5), P(300, 6), P(350, 7)]
+    expect(splitTrackByWindows(points, windows)).toEqual<RouteSegment[]>([
+      { kind: 'trackDeadhead', legSeq: 1, path: [{ lat: 2, lng: 143 }, { lat: 3, lng: 143 }, { lat: 4, lng: 143 }] },
+      { kind: 'trackHaul', legSeq: 1, path: [{ lat: 4, lng: 143 }, { lat: 5, lng: 143 }, { lat: 6, lng: 143 }] },
+    ])
+  })
+
+  it('点が 1 つしか残らない窓は線にしない (同じ点が続けば 1 つにまとめる)。窓も点も無ければ空', () => {
+    // deadhead 窓は 1 点だけ、haul 窓は 3 点とも同じ場所 (止まっていただけ) → どちらも線にならない。
+    const points = [P(150, 1), P(210, 5), P(220, 5), P(230, 5)]
+    expect(splitTrackByWindows(points, windows)).toEqual([])
+    // 同じ点のまとめ: 緯度だけ同じは別の点。
+    const moved = [P(210, 5), P(220, 5), P(230, 5, 144), P(240, 5, 144)]
+    expect(splitTrackByWindows(moved, windows)).toEqual<RouteSegment[]>([
+      { kind: 'trackHaul', legSeq: 1, path: [{ lat: 5, lng: 143 }, { lat: 5, lng: 144 }] },
+    ])
+    expect(splitTrackByWindows([], windows)).toEqual([])
+    expect(splitTrackByWindows(points, [])).toEqual([])
+  })
+
+  it('legSeq は窓のもの。buildOperationRoute の windows にそのまま掛けられる', () => {
+    const route = buildOperationRoute(HEADERS, TWO_LEGS)
+    const points = [
+      P(T('2026/7/1 6:00:00'), 42.9), P(T('2026/7/1 7:00:00'), 42.8), // 便 1 の回送
+      P(T('2026/7/1 15:00:00'), 43.0), P(T('2026/7/1 16:00:00'), 43.1), // 便 2 の売上走行
+      P(T('2026/7/1 19:00:00'), 42.95), // 帰庫 (1 点だけ → 線にしない)
+    ]
+    expect(shape(splitTrackByWindows(points, route.windows))).toEqual([
+      { kind: 'trackDeadhead', legSeq: 1, n: 2 },
+      { kind: 'trackHaul', legSeq: 2, n: 2 },
+    ])
   })
 })
 
@@ -253,12 +379,28 @@ describe('pickLegsFromRoute', () => {
     expect(picked.markers.map(m => `${m.kind}${m.legSeq ?? ''}`)).toEqual(['load2', 'unload2'])
     expect(picked.pointCount).toBe(7)
     expect(picked.droppedRows).toBe(route.droppedRows)
+    // windows もその便のぶんだけ (NET780 軌跡を便 2 だけに切れる)。
+    expect(picked.windows.map(w => `${w.kind}${w.legSeq}`)).toEqual(['deadhead2', 'haul2', 'deadhead2'])
   })
 
-  it('seqs が空なら segments も markers も空 (pointCount 0、droppedRows はそのまま)', () => {
+  it('seqs が空なら segments も markers も windows も空 (pointCount 0、droppedRows はそのまま)', () => {
     const withDropped: OperationRoute = { ...route, droppedRows: 3 }
     const picked = pickLegsFromRoute(withDropped, [])
-    expect(picked).toEqual({ segments: [], markers: [], pointCount: 0, droppedRows: 3 })
+    expect(picked).toEqual({ segments: [], markers: [], pointCount: 0, droppedRows: 3, windows: [] })
+  })
+
+  it('NET780 軌跡 (trackHaul / trackDeadhead) も legSeq が一致すれば haul / deadhead と同じに残る', () => {
+    const track: RouteSegment[] = [
+      { kind: 'trackDeadhead', legSeq: 1, path: [{ lat: 1, lng: 1 }, { lat: 2, lng: 2 }] },
+      { kind: 'trackHaul', legSeq: 2, path: [{ lat: 3, lng: 3 }, { lat: 4, lng: 4 }] },
+    ]
+    const withTrack: OperationRoute = { ...route, segments: [...route.segments, ...track] }
+    expect(shape(pickLegsFromRoute(withTrack, [2]).segments)).toEqual([
+      { kind: 'deadhead', legSeq: 2, n: 2 },
+      { kind: 'haul', legSeq: 2, n: 3 },
+      { kind: 'deadhead', legSeq: 2, n: 2 },
+      { kind: 'trackHaul', legSeq: 2, n: 2 },
+    ])
   })
 
   it('複数の便を渡すと両方残る', () => {
@@ -288,7 +430,7 @@ describe('pickLegsFromRoute', () => {
     expect(shape(built.segments)).toEqual([{ kind: 'other', legSeq: null, n: 2 }])
     expect(built.markers.map(m => m.kind)).toEqual(['start'])
     // legSeq null の区切りも、start マーカーも落ちる。
-    expect(pickLegsFromRoute(built, [1])).toEqual({ segments: [], markers: [], pointCount: 0, droppedRows: 0 })
+    expect(pickLegsFromRoute(built, [1])).toEqual(EMPTY_ROUTE)
   })
 })
 
@@ -301,11 +443,13 @@ describe('mergeRoutes', () => {
     expect(merged.markers).toEqual([...a.markers, ...b.markers])
     expect(merged.pointCount).toBe(a.pointCount + b.pointCount)
     expect(merged.droppedRows).toBe(a.droppedRows + 2)
+    expect(merged.windows).toEqual([...a.windows, ...b.windows])
+    expect(merged.windows.length).toBe(5)
     // 元は変えない (pure)。
     expect(a.segments.length).toBe(2)
   })
 
   it('空配列なら空の route', () => {
-    expect(mergeRoutes([])).toEqual({ segments: [], markers: [], pointCount: 0, droppedRows: 0 })
+    expect(mergeRoutes([])).toEqual(EMPTY_ROUTE)
   })
 })

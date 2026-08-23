@@ -38,7 +38,8 @@ import { fetchAllPages } from '~/utils/paged-fetch'
 import type { Driver, OperationListItem } from '~/types'
 import { extractAllowanceLegs, extractCarryInUnloads, allowanceForLegs } from '~/utils/allowance-trips'
 import { extractOperationIdle, type LegKmDetail } from '~/utils/allowance-idle'
-import { buildOperationRoute, pickLegsFromRoute, mergeRoutes, type OperationRoute } from '~/utils/operation-route-map'
+import { buildOperationRoute, pickLegsFromRoute, mergeRoutes, splitTrackByWindows, type OperationRoute, type LegWindow, type RouteSegment } from '~/utils/operation-route-map'
+import { filterValidGpsPoints } from '~/utils/net780'
 import { parseTargets, serializeTargets, toggleTarget, driverLabel } from '~/utils/allowance-targets'
 import {
   applyCarryOver,
@@ -907,12 +908,40 @@ const routeModal = ref<{
   route: OperationRoute | null
   loading: boolean
   error: string | null
+  /** NET780 軌跡の有無 (`NET780 軌跡: N 運行ぶん` / `NET780 なし`)。引き終わるまで null。 */
+  trackNote: string | null
 } | null>(null)
+
+/**
+ * 運行 1 本の NET780 の道なり軌跡 (Refs #760 の 21)。アーカイブがあれば (`ready`) 有効な
+ * GPS を便の時間窓 (`route.windows`) で切って `trackHaul` / `trackDeadhead` の区切りにする。
+ * **404 (`not-found`) は正常系** — 2026-07 帯広 5 台 91 運行のうちアーカイブがあるのは
+ * 2 本だけ。`error` も軌跡無し扱い (地図はイベント線で出ている)。どちらも null を返す。
+ * wasm parse が走るのは ready の運行だけ (composable が 404 で早期 return する)。
+ */
+async function fetchNet780Track(unkoNo: string, windows: LegWindow[]): Promise<RouteSegment[] | null> {
+  const net780 = useNet780OperationData(unkoNo)
+  await net780.ensureLoaded()
+  const result = net780.result.value
+  if (net780.status.value !== 'ready' || result === null) return null
+  const points = filterValidGpsPoints(result.gps, result.events).map(p => ({ ts: p.ts, lat: p.lat, lng: p.lon }))
+  return splitTrackByWindows(points, windows)
+}
+
+/** イベント線の route に NET780 軌跡の区切りを足す (pointCount はイベント線の点数のまま)。 */
+function appendTrack(route: OperationRoute, track: RouteSegment[]): OperationRoute {
+  return { ...route, segments: [...route.segments, ...track] }
+}
+
+/** 見出し横の NET780 の有無。 */
+function trackNoteFor(found: number): string {
+  return found === 0 ? 'NET780 なし' : `NET780 軌跡: ${found} 運行ぶん`
+}
 
 async function openRouteMap(m: OperationMargin) {
   const key = `op:${m.unkoNo}`
   const title = `運行 ${m.date} ${m.driverName} 車輌 ${m.vehicleCode} — 便 ${m.legs.length} 本`
-  routeModal.value = { key, title, route: null, loading: true, error: null }
+  routeModal.value = { key, title, route: null, loading: true, error: null, trackNote: null }
   let route: OperationRoute | null = null
   let error: string | null = null
   try {
@@ -924,7 +953,16 @@ async function openRouteMap(m: OperationMargin) {
   }
   // 待っている間に別の運行を開いた / 閉じたなら、古い結果で上書きしない。
   if (routeModal.value?.key !== key) return
-  routeModal.value = { key, title, route, loading: false, error }
+  routeModal.value = { key, title, route, loading: false, error, trackNote: null }
+  if (route === null) return
+  // NET780 は後から重ねる (遅くても地図は先にイベント線で出す。無ければ直線のまま)。
+  const track = await fetchNet780Track(m.unkoNo, route.windows)
+  if (routeModal.value?.key !== key) return
+  routeModal.value = {
+    ...routeModal.value,
+    route: track === null ? route : appendTrack(route, track),
+    trackNote: trackNoteFor(track === null ? 0 : 1),
+  }
 }
 
 /**
@@ -948,15 +986,15 @@ async function openLegRefsMap(key: string, title: string, legRefs: LegRef[]) {
   }
   const entries = [...byUnkoNo.entries()]
   const withProgress = (done: number) => `${title} (読み込み中 ${done}/${entries.length})`
-  routeModal.value = { key, title: withProgress(0), route: null, loading: true, error: null }
+  routeModal.value = { key, title: withProgress(0), route: null, loading: true, error: null, trackNote: null }
 
-  const picked: OperationRoute[] = []
+  const picked: Array<{ unkoNo: string, route: OperationRoute }> = []
   let failed = 0
   for (let i = 0; i < entries.length; i += CSV_CONCURRENCY) {
     const results = await Promise.all(entries.slice(i, i + CSV_CONCURRENCY).map(async ([unkoNo, seqs]) => {
       try {
         const csv = await getOperationCsv(unkoNo, 'events')
-        return pickLegsFromRoute(buildOperationRoute(csv.headers, csv.rows), seqs)
+        return { unkoNo, route: pickLegsFromRoute(buildOperationRoute(csv.headers, csv.rows), seqs) }
       }
       catch {
         return null
@@ -968,14 +1006,29 @@ async function openLegRefsMap(key: string, title: string, legRefs: LegRef[]) {
       if (r === null) failed += 1
       else picked.push(r)
     }
-    routeModal.value = { key, title: withProgress(picked.length + failed), route: null, loading: true, error: null }
+    routeModal.value = { key, title: withProgress(picked.length + failed), route: null, loading: true, error: null, trackNote: null }
+  }
+  const error = failed === 0 ? null : `運行 ${entries.length} 本のうち ${failed} 本のイベントCSVが引けませんでした`
+  routeModal.value = { key, title, route: picked.length === 0 ? null : mergeRoutes(picked.map(p => p.route)), loading: false, error, trackNote: null }
+  if (picked.length === 0) return
+
+  // NET780 は後から重ねる (Refs #760 の 21)。運行ごとに引き (CSV と同じ並列数)、アーカイブが
+  // ある運行 (ready) だけ軌跡を足す。404 が大半で軽い。揃ったら route を差し替える。
+  const tracks = new Map<string, RouteSegment[]>()
+  for (let i = 0; i < picked.length; i += CSV_CONCURRENCY) {
+    const batch = picked.slice(i, i + CSV_CONCURRENCY)
+    const results = await Promise.all(batch.map(p => fetchNet780Track(p.unkoNo, p.route.windows)))
+    if (routeModal.value?.key !== key) return
+    batch.forEach((p, j) => {
+      const t = results[j]
+      if (t) tracks.set(p.unkoNo, t)
+    })
+    routeModal.value = { ...routeModal.value, trackNote: `NET780 確認中 ${Math.min(i + CSV_CONCURRENCY, picked.length)}/${picked.length}` }
   }
   routeModal.value = {
-    key,
-    title,
-    route: picked.length === 0 ? null : mergeRoutes(picked),
-    loading: false,
-    error: failed === 0 ? null : `運行 ${entries.length} 本のうち ${failed} 本のイベントCSVが引けませんでした`,
+    ...routeModal.value,
+    route: mergeRoutes(picked.map(p => appendTrack(p.route, tracks.get(p.unkoNo) ?? []))),
+    trackNote: trackNoteFor(tracks.size),
   }
 }
 
@@ -1864,6 +1917,7 @@ function downloadCustomerRouteCsv() {
       :title="routeModal.title"
       :loading="routeModal.loading"
       :error="routeModal.error"
+      :track-note="routeModal.trackNote"
       @close="routeModal = null"
     />
   </div>

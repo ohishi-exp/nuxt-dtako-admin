@@ -24,6 +24,11 @@ const props = defineProps<{
   loading: boolean
   /** イベントCSV が引けなかった理由。引けていれば null。 */
   error: string | null
+  /**
+   * NET780 軌跡の有無 (例 `NET780 軌跡: 2 運行ぶん` / `NET780 なし`)。まだ引いていなければ null。
+   * 見出しの横に出すだけ (Refs #760 の 21)。
+   */
+  trackNote?: string | null
 }>()
 
 const emit = defineEmits<{ close: [] }>()
@@ -35,10 +40,14 @@ const emit = defineEmits<{ close: [] }>()
  * 重ねた地図」は同じ道を 28 本重ねることがあり、不透明だと 1 本目しか見えない。
  * 重なりの濃さで本数が読めるように、回送 (背景) をさらに薄くする。運行 1 本のときも同じ。
  */
-const SEGMENT_STYLE: Record<RouteSegment['kind'], { color: string, weight: number, opacity: number, dashed: boolean, label: string }> = {
-  haul: { color: '#10b981', weight: 5, opacity: 0.7, dashed: false, label: '売上走行 (積み → 降し)' },
-  deadhead: { color: '#9ca3af', weight: 3, opacity: 0.5, dashed: false, label: '回送' },
-  other: { color: '#f59e0b', weight: 3, opacity: 0.7, dashed: true, label: '降しの無い便 / 分類不能' },
+const SEGMENT_STYLE: Record<RouteSegment['kind'], { color: string, weight: number, opacity: number, dashed: boolean, zIndex: number, label: string }> = {
+  haul: { color: '#10b981', weight: 5, opacity: 0.7, dashed: false, zIndex: 2, label: '売上走行 (積み → 降し)' },
+  deadhead: { color: '#9ca3af', weight: 3, opacity: 0.5, dashed: false, zIndex: 1, label: '回送' },
+  other: { color: '#f59e0b', weight: 3, opacity: 0.7, dashed: true, zIndex: 1, label: '降しの無い便 / 分類不能' },
+  // NET780 の道なり軌跡 (Refs #760 の 21)。イベント線 (始点・終点を結んだ直線) の**下**に
+  // 細く濃い色で描く — 直線のスケッチと、実際に走った道の両方が読めるように。
+  trackHaul: { color: '#047857', weight: 2, opacity: 0.9, dashed: false, zIndex: 0, label: 'NET780 軌跡 (便の時間帯)' },
+  trackDeadhead: { color: '#4b5563', weight: 2, opacity: 0.8, dashed: false, zIndex: 0, label: 'NET780 軌跡 (回送の時間帯)' },
 }
 
 const mapEl = ref<HTMLDivElement | null>(null)
@@ -129,7 +138,8 @@ async function redraw() {
   clearOverlays()
 
   const route = props.route
-  if (!route || route.pointCount === 0) return
+  // `pointCount` はイベント線の点数 (NET780 軌跡は数えない) なので、描くものの有無は segments で見る。
+  if (!route || route.segments.length === 0) return
 
   const bounds = new google.maps.LatLngBounds()
   for (const seg of route.segments) {
@@ -143,7 +153,7 @@ async function redraw() {
       icons: style.dashed
         ? [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: style.opacity, strokeColor: style.color, scale: 3 }, offset: '0', repeat: '14px' }]
         : undefined,
-      zIndex: seg.kind === 'haul' ? 2 : 1,
+      zIndex: style.zIndex,
       map: m,
     }))
     for (const p of seg.path) bounds.extend(p)
@@ -183,7 +193,7 @@ const overlayKind = computed<OverlayKind>(() => {
   if (props.loading) return 'loading'
   if (props.error) return 'error'
   if (loadError.value) return 'map-error'
-  if (!props.route || props.route.pointCount === 0) return 'empty'
+  if (!props.route || props.route.segments.length === 0) return 'empty'
   return null
 })
 
@@ -195,6 +205,8 @@ const emptyReason = computed(() => {
 })
 
 const legendKinds: RouteSegment['kind'][] = ['haul', 'deadhead', 'other']
+/** NET780 軌跡の凡例 (1 行)。アーカイブがある運行だけ乗る。 */
+const trackKinds: RouteSegment['kind'][] = ['trackHaul', 'trackDeadhead']
 </script>
 
 <template>
@@ -207,6 +219,7 @@ const legendKinds: RouteSegment['kind'][] = ['haul', 'deadhead', 'other']
         <h2 class="text-sm font-semibold">
           {{ title }}
         </h2>
+        <span v-if="trackNote" class="text-xs text-gray-500">{{ trackNote }}</span>
         <span class="ml-auto flex items-center gap-3 text-xs">
           <span v-if="route" class="text-gray-500">
             点 {{ route.pointCount }}<template v-if="route.droppedRows > 0"> / GPS 無効の行 {{ route.droppedRows }}</template>
@@ -260,6 +273,15 @@ const legendKinds: RouteSegment['kind'][] = ['haul', 'deadhead', 'other']
         <span class="flex items-center gap-1"><span class="text-blue-600 font-bold">▼</span>降し (便の最後)</span>
         <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full bg-gray-900 dark:bg-gray-100" />運行開始</span>
         <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full border-2 border-gray-900 dark:border-gray-100" />運行終了</span>
+      </div>
+      <div class="flex flex-wrap items-center gap-4 px-4 pb-2 text-[11px] text-gray-500">
+        <span>NET780 軌跡 (アーカイブがある運行だけ):</span>
+        <span v-for="k in trackKinds" :key="k" class="flex items-center gap-1">
+          <span
+            class="inline-block w-5 rounded"
+            :style="{ height: `${SEGMENT_STYLE[k].weight}px`, background: SEGMENT_STYLE[k].color }"
+          />{{ SEGMENT_STYLE[k].label }}
+        </span>
       </div>
     </div>
   </div>
