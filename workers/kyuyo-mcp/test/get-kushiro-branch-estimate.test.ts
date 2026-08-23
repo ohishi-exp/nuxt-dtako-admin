@@ -83,7 +83,11 @@ type Result = Awaited<ReturnType<typeof getKushiroBranchEstimateTool.execute>> &
   warnings: string[];
   summary: Record<string, unknown>;
   min_wage: Record<string, unknown>;
-  legs_per_run: Record<string, unknown>;
+  legs_per_day: Record<string, unknown>;
+  sensitivity: Record<string, unknown>[];
+  break_even_legs_per_day: number | null;
+  labor_cost: Record<string, unknown>;
+  input: Record<string, number>;
   depot: string;
   depot_points: Record<string, { lat: number; lng: number }>;
   dest_area: string;
@@ -119,15 +123,26 @@ describe("get_kushiro_branch_estimate — 既定の呼び出し", () => {
     expect(res.summary.missing_legs).toBe(0);
   });
 
-  it("legsPerRun は実測の分布の平均 (定数で埋めない)", async () => {
+  it("便/日 の既定は実測の分布の平均 (定数で埋めない)", async () => {
     const res = await run(env(), baseArgs());
-    expect(res.legs_per_run.source).toBe("measured");
-    expect(res.legs_per_run.used).toBeCloseTo(measured.legs / measured.operations, 12);
-    expect(res.legs_per_run.measured_mean).toBe(res.legs_per_run.used);
-    expect(res.legs_per_run.buckets).toEqual([
-      { legs_in_operation: 1, operations: 8 },
-      { legs_in_operation: 2, operations: 15 },
+    expect(res.legs_per_day.source).toBe("measured");
+    expect(res.legs_per_day.value).toBeCloseTo(measured.legs / measured.operations, 12);
+    expect(res.legs_per_day.measured_mean).toBe(res.legs_per_day.value);
+    expect(res.legs_per_day.buckets).toEqual([
+      { legs_in_operation: 1, operations: 11 },
+      { legs_in_operation: 2, operations: 9 },
+      { legs_in_operation: 3, operations: 3 },
     ]);
+    expect(res.summary.runs_for_legs_per_day).toBeCloseTo(measured.operations, 9);
+  });
+
+  it("受け取った運行ペイロードをそのまま数え直して返す (貼り間違いに気づけるように)", async () => {
+    const res = await run(env(), baseArgs());
+    expect(res.input.operations).toBe(measured.operations);
+    // 絞り込み前なので、道東 38 便より多い (十勝卸し・広尾積みも入っている)
+    expect(res.input.legs).toBeGreaterThan(measured.legs);
+    expect(res.input.sales_yen).toBeGreaterThan(measured.salesYen);
+    expect(res.input.allowance_yen).toBeGreaterThan(measured.allowanceYen);
   });
 
   it("回送の推定・差・較正比は双子 util の golden と同じ値を返す", async () => {
@@ -174,22 +189,25 @@ describe("get_kushiro_branch_estimate — 既定の呼び出し", () => {
     expect(res.drivers[0]!.driver_name).toBe("中村 一由");
   });
 
-  it("警告は無い (対象が揃っているとき)", async () => {
+  it("警告は 人件費の前提が無いことだけ (対象と座標は揃っている)", async () => {
     const res = await run(env(), baseArgs());
-    expect(res.warnings).toEqual([]);
+    expect(res.warnings).toHaveLength(1);
+    expect(res.warnings[0]).toContain("人件費の前提がありません");
+    const withCost = await run(env(), baseArgs({ monthly_labor_cost_yen: 400000 }));
+    expect(withCost.warnings).toEqual([]);
   });
 });
 
 describe("引数", () => {
-  it("depot / dest_area / legs_per_run / branch を上書きできる", async () => {
+  it("depot / dest_area / legs_per_day / branch を上書きできる", async () => {
     const res = await run(
       env(),
-      baseArgs({ depot: "obihiro", dest_area: "all", legs_per_run: 2, branch: "帯広" }),
+      baseArgs({ depot: "obihiro", dest_area: "all", legs_per_day: 2, branch: "帯広" }),
     );
     expect(res.depot).toBe("obihiro");
     expect(res.dest_area).toBe("all");
-    expect(res.legs_per_run.used).toBe(2);
-    expect(res.legs_per_run.source).toBe("argument");
+    expect(res.legs_per_day.value).toBe(2);
+    expect(res.legs_per_day.source).toBe("given");
     expect(res.min_wage.branch).toBe("帯広");
     // 十勝卸しの便が混ざるので便数が増え、卸地に道東でない行が出る
     expect(res.summary.legs).toBeGreaterThan(measured.legs);
@@ -273,7 +291,8 @@ describe("引数", () => {
       }),
     );
     expect(res.summary.legs).toBe(0);
-    expect(res.legs_per_run.used).toBeNull();
+    expect(res.legs_per_day.value).toBeNull();
+    expect(res.summary.runs_for_legs_per_day).toBeNull();
     expect(res.summary.rebuilt_deadhead_km).toEqual({ obihiro: null, kushiro: null });
     expect(res.summary.rebuilt_minus_measured_km).toBeNull();
     expect(res.summary.depot_diff_km).toBeNull();
@@ -282,6 +301,144 @@ describe("引数", () => {
     expect(res.summary.restraint_hours).toBeNull();
     expect(res.summary.deadhead_fuel_yen).toBeNull();
     expect(res.warnings.some((w) => w.includes("便が 1 本もありません"))).toBe(true);
+  });
+});
+
+describe("便/日 の感度分析 (想定値を固定しない)", () => {
+  it("既定は 1 / 実測平均 / 2 / 3 の 4 点", async () => {
+    const res = await run(env(), baseArgs());
+    expect(res.sensitivity.map((r) => r.legs_per_day)).toEqual([
+      1,
+      measured.legs / measured.operations,
+      2,
+      3,
+    ]);
+    expect(res.sensitivity.map((r) => r.legs_per_day)).toEqual(
+      golden.doto.sensitivity.map((r) => r.legsPerDay),
+    );
+  });
+
+  it("便/日 を増やすと 稼働日数・回送・拘束が減り、換算時給が上がる", async () => {
+    const res = await run(env(), baseArgs());
+    const rows = res.sensitivity;
+    for (let i = 1; i < rows.length; i += 1) {
+      expect(rows[i]!.runs as number).toBeLessThan(rows[i - 1]!.runs as number);
+      expect(rows[i]!.rebuilt_deadhead_km as number).toBeLessThan(rows[i - 1]!.rebuilt_deadhead_km as number);
+      expect(rows[i]!.restraint_hours as number).toBeLessThan(rows[i - 1]!.restraint_hours as number);
+      expect(rows[i]!.hourly_yen as number).toBeGreaterThan(rows[i - 1]!.hourly_yen as number);
+    }
+    // 必要乗務員数は 便/日 で動く (便の量だけで数えると動かない)
+    const drivers = rows.map((r) => (r.required_drivers as Record<string, number>).drivers);
+    expect(drivers[0]).toBeGreaterThan(drivers[drivers.length - 1]!);
+    expect(res.summary.required_drivers).toBe(1);
+  });
+
+  it("双子 util の golden と同じ値を返す", async () => {
+    const res = await run(env(), baseArgs());
+    for (const [i, row] of res.sensitivity.entries()) {
+      const g = golden.doto.sensitivity[i]!;
+      expect(row.rebuilt_deadhead_km as number).toBeCloseTo(g.rebuiltDeadheadKm, 9);
+      expect(row.restraint_hours as number).toBeCloseTo(g.restraint.rebuiltTotalHours, 9);
+      expect(row.hourly_yen as number).toBeCloseTo(g.hourlyYen, 9);
+      expect((row.required_drivers as Record<string, number>).drivers).toBe(g.requiredDrivers.drivers);
+    }
+  });
+
+  it("候補は引数で差し替えられる (昇順・重複除去)", async () => {
+    const res = await run(env(), baseArgs({ sensitivity_legs_per_day: [4, 1, 4] }));
+    expect(res.sensitivity.map((r) => r.legs_per_day)).toEqual([1, 4]);
+  });
+
+  it("運行キャパも引数で上書きできる (便/日 が人数に効く経路)", async () => {
+    const res = await run(env(), baseArgs({ runs_per_driver_month: 5 }));
+    expect(res.summary.runs_per_driver_month).toBe(5);
+    // 1 便/日 = 38 日 → 38 ÷ 5 = 8 名
+    expect((res.sensitivity[0]!.required_drivers as Record<string, number>).by_runs).toBe(8);
+  });
+
+  it("対象便が 0 なら実測平均が無いので整数 3 点だけ並べる", async () => {
+    const res = await run(
+      env(),
+      baseArgs({
+        operations: [
+          {
+            driverName: "試験 太郎",
+            legs: [
+              {
+                seq: 1,
+                originCity: "北海道広尾郡広尾町白樺通",
+                destCity: "北海道帯広市川西町",
+                salesYen: 1,
+                allowanceYen: 1,
+                haulKm: 1,
+                deadheadKm: 1,
+              },
+            ],
+          },
+        ] as unknown as Args["operations"],
+      }),
+    );
+    expect(res.sensitivity.map((r) => r.legs_per_day)).toEqual([1, 2, 3]);
+  });
+});
+
+describe("人件費と損益分岐", () => {
+  it("引数があればそれを使い、営業利益と損益分岐を出す", async () => {
+    const res = await run(env(), baseArgs({
+      monthly_labor_cost_yen: 400000,
+      km_per_liter: 3,
+      yen_per_liter: 150,
+    }));
+    expect(res.labor_cost.source).toBe("argument");
+    expect(res.labor_cost.monthly_per_driver_yen).toBe(400000);
+    expect(res.break_even_legs_per_day).toBe(golden.doto.breakEvenLegsPerDay);
+    const row = res.sensitivity[0]!;
+    expect(row.labor_cost_yen).toBe(400000 * (row.required_drivers as Record<string, number>).drivers);
+    expect(row.operating_margin_yen).toBeCloseTo(
+      (row.margin_yen as number) - (row.labor_cost_yen as number), 6);
+  });
+
+  it("引数が無ければ一番星の経費区分 08 (給与) を実績から引く", async () => {
+    // 売上 5 本 → 経費 5 本 の順で返す
+    let call = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        call += 1;
+        const isCost = String(url).includes("/api/costs/");
+        expect(String(url).includes("kind=08")).toBe(isCost);
+        return new Response(
+          JSON.stringify(isCost ? { data: [{ amount: 500000 }] } : salesBody(1000000)),
+          { status: 200 },
+        );
+      }),
+    );
+    const res = await run(env(), baseArgs({
+      sales_cross_check: undefined,
+      km_per_liter: 3,
+      yen_per_liter: 150,
+    }));
+    expect(call).toBe(10);
+    expect(res.labor_cost.source).toBe("ichiban");
+    expect(res.labor_cost.monthly_per_driver_yen).toBe(500000);
+    expect(res.break_even_legs_per_day).not.toBeNull();
+  });
+
+  it("一番星に給与が 1 円も無ければ人件費を推測せず警告する", async () => {
+    mockIchiban([{ data: [{ amount: 0 }] }]);
+    const res = await run(env(), baseArgs({ sales_cross_check: undefined, driver: ["1412"] }));
+    expect(res.labor_cost.source).toBe("none");
+    expect(res.labor_cost.monthly_per_driver_yen).toBeNull();
+    expect(res.break_even_legs_per_day).toBeNull();
+    expect(res.warnings.some((w) => w.includes("給与"))).toBe(true);
+  });
+
+  it("上流を止めていて人件費の引数も無ければ、営業利益は出さず警告する", async () => {
+    const res = await run(env(), baseArgs());
+    expect(res.labor_cost.source).toBe("none");
+    expect(res.break_even_legs_per_day).toBeNull();
+    expect(res.sensitivity[0]!.operating_margin_yen).toBeNull();
+    expect(res.warnings.some((w) => w.includes("人件費の前提がありません"))).toBe(true);
   });
 });
 

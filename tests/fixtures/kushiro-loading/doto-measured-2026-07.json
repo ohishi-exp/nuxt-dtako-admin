@@ -2,18 +2,61 @@
  "source": "オーナーが本番 2026-07 で実測した『積地=釧路 かつ 卸地=道東』の便 (2026-08-23 報告)",
  "legs": 38,
  "operations": 23,
- "pureOperations": 0,
+ "allDotoOperations": 0,
  "salesYen": 1420245,
  "allowanceYen": 311000,
  "haulKm": 2361.6,
  "deadheadKm": 4288.9,
  "haulHours": 92.5,
  "deadheadHours": 173.9,
- "destLegs": {
-  "北海道川上郡標茶町多和星空の黒牛": 21,
-  "北海道川上郡標茶町多和": 8,
-  "北海道野付郡別海町中西別": 7,
-  "北海道川上郡標茶町西熊牛原野": 2
+ "routes": [
+  {
+   "destCity": "北海道川上郡標茶町多和星空の黒牛加工・直売所",
+   "legs": 21,
+   "salesYen": 741000,
+   "allowanceYen": 168000,
+   "haulKm": 1236,
+   "deadheadKm": 2091
+  },
+  {
+   "destCity": "北海道川上郡標茶町多和",
+   "legs": 8,
+   "salesYen": 294000,
+   "allowanceYen": 64000,
+   "haulKm": 474,
+   "deadheadKm": 871
+  },
+  {
+   "destCity": "北海道野付郡別海町中西別",
+   "legs": 7,
+   "salesYen": 297500,
+   "allowanceYen": 63000,
+   "haulKm": 520,
+   "deadheadKm": 1078
+  },
+  {
+   "destCity": "北海道川上郡標茶町西熊牛原野",
+   "legs": 2,
+   "salesYen": 87745,
+   "allowanceYen": 16000,
+   "haulKm": 131,
+   "deadheadKm": 248
+  }
+ ],
+ "legsPerOperation": {
+  "1": 11,
+  "2": 9,
+  "3": 3
+ },
+ "dotoOverTotalLegs": {
+  "2/5": 5,
+  "1/3": 5,
+  "1/2": 4,
+  "2/6": 3,
+  "3/6": 2,
+  "1/5": 2,
+  "2/4": 1,
+  "3/5": 1
  },
  "driverLegs": {
   "中村 一由": 29,
@@ -23,6 +66,10 @@
  },
  "obihiroLegsPerDriverMonth": {
   "legs": 284,
+  "drivers": 5
+ },
+ "obihiroRunsPerDriverMonth": {
+  "operations": 91,
   "drivers": 5
  }
 }
