@@ -569,11 +569,23 @@ describe('共有 fixture が本番実測 (2026-07 の道東卸し 38 便) の集
 
 const CAPACITY = { legsPerDriverMonth: 57, runsPerDriverMonth: DEFAULT_RUNS_PER_DRIVER_MONTH }
 
+/**
+ * 北海道の最低賃金 **¥1,075 (2025-10-04 発効)**。
+ *
+ * **本番の min-wage マスタの実測**を写したもの (2026-08-23 に本番の
+ * `get_kushiro_branch_estimate` を叩いて `rate: 1075` /
+ * `master_effective_froms: ["2025-10-04"]` を確認)。**額をここでずらすと結論が変わる** —
+ * 旧テストは ¥1,010 で書いてあり、そのせいで「帯広発 2 便/日 は最低賃金を上回る」と
+ * 読めてしまっていた (実際は割る)。テスト `最低賃金の額で 帯広発 2 便/日 の判定が反転する`
+ * がその関係そのものを固定している。
+ */
+const HOKKAIDO_MIN_WAGE_YEN = 1075
+
 function sensInput(over: Partial<SensitivityInput> = {}): SensitivityInput {
   return {
     capacity: CAPACITY,
     monthlyWageYen: 311000,
-    minWageYen: 1010,
+    minWageYen: HOKKAIDO_MIN_WAGE_YEN,
     fuel: { kmPerLiter: 3, yenPerLiter: 150 },
     monthlyLaborCostYen: 400000,
     ...over,
@@ -641,8 +653,8 @@ describe('便/日 を変数として扱う', () => {
     expect(row.restraint.restraintIsLowerBound).toBe(true)
     expect(row.restraintHoursPerDriver).toBeCloseTo(row.restraint.rebuiltTotalHours! / row.requiredDrivers.drivers!, 9)
     expect(row.hourlyYen).toBeCloseTo(311000 / row.restraint.rebuiltTotalHours!, 9)
-    expect(row.minWageDiffYen).toBeCloseTo(row.hourlyYen! - 1010, 9)
-    expect(row.belowMinWage).toBe(row.hourlyYen! < 1010)
+    expect(row.minWageDiffYen).toBeCloseTo(row.hourlyYen! - HOKKAIDO_MIN_WAGE_YEN, 9)
+    expect(row.belowMinWage).toBe(row.hourlyYen! < HOKKAIDO_MIN_WAGE_YEN)
     expect(row.fuelYen).toBeCloseTo((totals.haulKm + row.rebuiltDeadheadKm!) / 3 * 150, 9)
     expect(row.marginYen).toBeCloseTo(totals.salesYen - totals.allowanceYen - row.fuelYen!, 9)
     expect(row.laborCostYen).toBe(400000 * row.requiredDrivers.drivers!)
@@ -678,6 +690,35 @@ describe('便/日 を変数として扱う', () => {
     const empty = sensitivityRow(emptyRebuildTotals(), 'kushiro', 2, sensInput())
     expect(empty.requiredDrivers.drivers).toBe(0)
     expect(empty.restraintHoursPerDriver).toBeNull()
+  })
+
+  it('最低賃金の額で 帯広発 2 便/日 の判定が反転する (実測 ¥1,075 では割れる)', () => {
+    const old1010 = sensitivityRow(totals, 'obihiro', 2, sensInput({ minWageYen: 1010 }))
+    const now1075 = sensitivityRow(totals, 'obihiro', 2, sensInput())
+    // 換算時給そのものは最低賃金に依らない (分子も分母も同じ)
+    expect(now1075.hourlyYen).toBeCloseTo(old1010.hourlyYen!, 12)
+    // **同じ時給が、額を実測に直した途端に「割る」側へ回る**
+    expect(old1010.belowMinWage).toBe(false)
+    expect(old1010.minWageDiffYen!).toBeGreaterThan(0)
+    expect(now1075.belowMinWage).toBe(true)
+    expect(now1075.minWageDiffYen!).toBeLessThan(0)
+    // 釧路発は同じ額でも割らない (この案件の結論)
+    expect(sensitivityRow(totals, 'kushiro', 2, sensInput()).belowMinWage).toBe(false)
+    // 帯広発でも 3 便/日 まで積めば上回る — **どこで反転するかが判断の分かれ目**
+    expect(sensitivityRow(totals, 'obihiro', 3, sensInput()).belowMinWage).toBe(false)
+    expect(sensitivityRow(totals, 'obihiro', 1, sensInput()).belowMinWage).toBe(true)
+  })
+
+  it('最低賃金の境界は 帯広発 ≒ 2.09 便/日。釧路発は便数をいくら落としても割らない', () => {
+    // 二分探索で求めた実測の境界は **2.0904 便/日** (そこでの換算時給が ちょうど ¥1,075)。
+    // 浮動小数を直接ピン留めせず、**境界を挟む 2 点**で位置を固定する。
+    const belowAt = (depot: 'obihiro' | 'kushiro', n: number) =>
+      sensitivityRow(totals, depot, n, sensInput()).belowMinWage
+    expect(belowAt('obihiro', 2.08)).toBe(true)
+    expect(belowAt('obihiro', 2.10)).toBe(false)
+    // 釧路発は営業所と積地が 4km 弱しか離れておらず、便数を落としても拘束が伸びない
+    expect(belowAt('kushiro', 0.05)).toBe(false)
+    expect(belowAt('kushiro', 1)).toBe(false)
   })
 
   it('損益分岐は 営業利益 ≥ 0 になる最小の候補。無ければ null (外挿しない)', () => {

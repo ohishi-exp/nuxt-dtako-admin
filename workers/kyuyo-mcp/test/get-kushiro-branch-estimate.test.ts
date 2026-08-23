@@ -28,14 +28,16 @@ const OPERATIONS = rawOperations as unknown as Args["operations"];
  */
 const MIN_WAGE_MASTER = {
   prefectures: {
-    北海道: [
-      { effectiveFrom: "2025-10-01", rate: 1010 },
-      { effectiveFrom: "2026-10-01", rate: 1075 },
-    ],
+    // **本番の実測をそのまま写した** (2026-08-23、`master_effective_froms: ["2025-10-04"]` /
+    // `rate: 1075`)。額をずらすと結論が変わるので、実測から動かさないこと。
+    北海道: [{ effectiveFrom: "2025-10-04", rate: 1075 }],
     東京都: [{ effectiveFrom: "2025-10-01", rate: 1226 }],
   },
   branchToPrefecture: { 帯広: "北海道", 本社: "東京都" },
 };
+
+/** 北海道の最低賃金 (本番実測)。テストの期待値に直書きしないための 1 か所。 */
+const HOKKAIDO_MIN_WAGE_YEN = 1075;
 
 function env(over: Partial<Env> = {}, master: unknown = MIN_WAGE_MASTER): Env {
   return {
@@ -447,6 +449,38 @@ describe("便/日 の感度分析 (想定値を固定しない)", () => {
   });
 });
 
+describe("最低賃金の額が結論を変える (本番実測 ¥1,075 で固定)", () => {
+  it("帯広発 2 便/日 は最低賃金を割り、釧路発はどの便/日 でも割らない", async () => {
+    const res = await run(env(), baseArgs());
+    const at = (depot: string, n: number) =>
+      res.sensitivity[depot]!.find((r) => r.legs_per_day === n)!;
+    // **旧テストの ¥1,010 なら +44 で「足りている」と読めた行が、実測の ¥1,075 では割る**
+    expect(at("obihiro", 2).below_min_wage).toBe(true);
+    expect(at("obihiro", 2).min_wage_diff_yen as number).toBeLessThan(0);
+    expect(at("obihiro", 2).hourly_yen as number).toBeGreaterThan(1010);
+    // 帯広発でも 3 便/日 まで積めば上回る (どこで反転するかが判断の分かれ目)
+    expect(at("obihiro", 3).below_min_wage).toBe(false);
+    expect(at("obihiro", 1).below_min_wage).toBe(true);
+    for (const row of res.sensitivity.kushiro!) {
+      expect(row.below_min_wage).toBe(false);
+    }
+  });
+
+  it("マスタの額を ¥1,010 に戻すと 帯広発 2 便/日 の判定が反転する (額が結論を決める)", async () => {
+    const cheap = await run(
+      env({}, {
+        prefectures: { 北海道: [{ effectiveFrom: "2025-10-04", rate: 1010 }] },
+        branchToPrefecture: {},
+      }),
+      baseArgs(),
+    );
+    const row = cheap.sensitivity.obihiro!.find((r) => r.legs_per_day === 2)!;
+    expect(cheap.min_wage.rate).toBe(1010);
+    expect(row.below_min_wage).toBe(false);
+    expect(row.min_wage_diff_yen as number).toBeGreaterThan(0);
+  });
+});
+
 describe("人件費と損益分岐", () => {
   it("引数があればそれを使い、営業利益と損益分岐を出す", async () => {
     const res = await run(env(), baseArgs({
@@ -516,7 +550,8 @@ describe("最低賃金 (額は R2 のマスタから引く)", () => {
     // それでも県が決まり、額が引ける — **ここが null のままでは要件を満たさない**
     expect(res.min_wage.prefecture).toBe("北海道");
     expect(res.min_wage.prefecture_source).toBe("company-default");
-    expect(res.min_wage.rate).toBe(1010);
+    expect(res.min_wage.rate).toBe(HOKKAIDO_MIN_WAGE_YEN);
+    expect(res.min_wage.master_effective_froms).toEqual(["2025-10-04"]);
     expect((res.min_wage.diff_yen as Record<string, number>).kushiro).not.toBeNull();
     expect((res.min_wage.below_min_wage as Record<string, boolean>).kushiro).toBe(false);
     expect(res.warnings.some((w) => w.includes("branch→都道府県表にありません"))).toBe(true);
@@ -528,9 +563,9 @@ describe("最低賃金 (額は R2 のマスタから引く)", () => {
     expect(res.min_wage.prefecture).toBe("北海道");
     expect(res.min_wage.mapped).toBe(true);
     expect(res.min_wage.prefecture_source).toBe("branch");
-    // 2026-07 時点で有効なのは 2025-10-01 発効の 1010 円 (2026-10-01 はまだ先)
-    expect(res.min_wage.rate).toBe(1010);
-    expect(res.min_wage.rate_effective_from).toBe("2025-10-01");
+    // 2026-07 時点で有効なのは 2025-10-04 発効の 1,075 円 (本番実測と同じ)
+    expect(res.min_wage.rate).toBe(HOKKAIDO_MIN_WAGE_YEN);
+    expect(res.min_wage.rate_effective_from).toBe("2025-10-04");
     expect(res.min_wage.wage_basis).toBe("allowance-only");
     expect(res.min_wage.assumed_monthly_wage_yen).toBe(measured.allowanceYen);
     const hourly = (res.min_wage.hourly_yen as Record<string, number>).kushiro!;
@@ -538,8 +573,10 @@ describe("最低賃金 (額は R2 のマスタから引く)", () => {
       measured.allowanceYen / golden.doto.restraint.kushiro.rebuiltTotalHours,
       6,
     );
-    expect((res.min_wage.diff_yen as Record<string, number>).kushiro).toBeCloseTo(hourly - 1010, 6);
-    expect((res.min_wage.below_min_wage as Record<string, boolean>).kushiro).toBe(hourly < 1010);
+    expect((res.min_wage.diff_yen as Record<string, number>).kushiro)
+      .toBeCloseTo(hourly - HOKKAIDO_MIN_WAGE_YEN, 6);
+    expect((res.min_wage.below_min_wage as Record<string, boolean>).kushiro)
+      .toBe(hourly < HOKKAIDO_MIN_WAGE_YEN);
   });
 
   it("想定賃金は引数で上書きできる (手当だけでは下限なので)", async () => {
