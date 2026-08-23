@@ -122,7 +122,15 @@ export default defineEventHandler(async (event) => {
   const res = await relay.fetch('https://relay.internal/kintai-relay/operation-zip', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'X-Alc-Proxy-Secret': sharedSecret },
-    body: JSON.stringify({ ope_no_22: opeNo22, start_ope: startOpe }),
+    // ★ キー名は **`ope_no`**。`ope_no_22` は kyuyo-mcp の *tool 引数名* であって
+    // relay の body の名前ではない (`workers/kyuyo-mcp/src/mcp/tools.ts` が
+    // `ope_no: item.ope_no_22` に詰め替えている)。relay の proxy
+    // (`handleOperationZip`) は body をフィールド単位で組み直さず素通しするので、
+    // ここで `ope_no_22` と書くと DO の `parseOperationZipRequest`
+    // (`cron-batch.ts`) が読めず **400 `comp_id / ope_no / start_ope が必要です`**
+    // になる (本番 v0.0.487 で実際に踏んだ)。
+    // `comp_id` は relay の proxy が `KINTAI_COMP_ID` で補完するので送らない。
+    body: JSON.stringify({ ope_no: opeNo22, start_ope: startOpe }),
   })
   const data = await res.json().catch(() => null) as OperationZipResponse | null
   if (!res.ok) {
