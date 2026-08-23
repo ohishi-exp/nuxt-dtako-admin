@@ -1496,7 +1496,7 @@ function downloadCustomerRouteCsv() {
       取引先別の粗利 + 便の無い運行の粗利 = 粗利タブの粗利 になるのを頭の 1 行で検算しています。
     </p>
 
-    <div class="flex flex-wrap gap-3 items-end mb-4">
+    <div class="margin-print-controls flex flex-wrap gap-3 items-end mb-4">
       <label class="text-xs text-gray-500">月
         <input v-model="ym" type="month" class="block text-sm border rounded px-2 py-1 dark:bg-gray-900">
       </label>
@@ -1542,7 +1542,7 @@ function downloadCustomerRouteCsv() {
       </NuxtLink>
     </div>
 
-    <div class="mb-4 text-xs">
+    <div class="margin-print-targets mb-4 text-xs">
       <div class="flex flex-wrap items-center gap-2">
         <span class="text-gray-500">対象乗務員</span>
         <DriverSearchSelect
@@ -1595,13 +1595,13 @@ function downloadCustomerRouteCsv() {
       </p>
       <template v-else>
         <!-- 月の合計 -->
-        <div class="mb-2 flex flex-wrap gap-x-6 gap-y-2 text-sm items-center">
+        <div class="margin-print-block mb-2 flex flex-wrap gap-x-6 gap-y-2 text-sm items-center">
           <span class="font-semibold">{{ shownYm }}</span>
           <span>運行 <b>{{ totals.operations }}</b> 本</span>
           <span>走行 <b>{{ km(totals.totalKm) }}</b></span>
           <span>売上 <b>{{ yen(totals.salesYen) }}</b></span>
           <span>手当 <b>{{ yen(totals.allowanceYen) }}</b></span>
-          <label class="text-xs text-gray-500 flex items-center gap-1.5 cursor-pointer select-none">
+          <label class="margin-print-hide text-xs text-gray-500 flex items-center gap-1.5 cursor-pointer select-none">
             <input v-model="onlyIssues" type="checkbox" class="cursor-pointer">
             粗利を出せない運行だけ表示
           </label>
@@ -1609,7 +1609,7 @@ function downloadCustomerRouteCsv() {
 
         <!-- **粗利の内訳。** ここに出す数だけで引き算がぴったり合うようにしてある
              (上の「売上」は粗利を出せなかった運行のぶんも含むので使わない)。 -->
-        <div class="mb-4 p-3 rounded-lg border border-gray-200 dark:border-gray-800">
+        <div class="margin-print-block mb-4 p-3 rounded-lg border border-gray-200 dark:border-gray-800">
           <p class="text-xs text-gray-500 mb-2">
             粗利の内訳 — <b>粗利を出せた {{ totals.marginOperations }} 本ぶん</b>だけの数です。
             <b>この行だけで引き算が合います</b> (上の「売上」は粗利を出せなかった運行のぶんも
@@ -1691,7 +1691,7 @@ function downloadCustomerRouteCsv() {
         </div>
 
         <!-- 人件費の別枠 -->
-        <div class="mb-4 p-3 rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/30">
+        <div class="margin-print-block mb-4 p-3 rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/30">
           <p class="text-xs font-medium mb-2">
             人件費 — <b>どちらも上の粗利には入れていません</b>
           </p>
@@ -1718,7 +1718,7 @@ function downloadCustomerRouteCsv() {
         </div>
 
         <!-- 燃費・単価 -->
-        <div class="mb-4">
+        <div class="margin-print-page mb-4">
           <p class="text-xs font-medium mb-1">
             燃費・単価 (車輌ごと)
           </p>
@@ -1732,7 +1732,7 @@ function downloadCustomerRouteCsv() {
             ので、下の「軽油引取税」列が <b>¥0 なのは異常ではありません</b>
             (0 でない値が出てきたら、そのぶんは単価に足されていないという意味です)。
           </p>
-          <div class="border border-gray-200 dark:border-gray-800 rounded-lg overflow-x-auto">
+          <div class="margin-print-tablewrap border border-gray-200 dark:border-gray-800 rounded-lg overflow-x-auto">
             <table class="w-full text-xs">
               <thead class="bg-gray-50 dark:bg-gray-800">
                 <tr>
@@ -1806,7 +1806,7 @@ function downloadCustomerRouteCsv() {
         <p v-if="visibleDrivers.length === 0" class="text-xs text-gray-400">
           粗利を出せない運行はありません
         </p>
-        <div v-else class="border border-gray-200 dark:border-gray-800 rounded-lg overflow-x-auto">
+        <div v-else class="margin-print-page margin-print-tablewrap border border-gray-200 dark:border-gray-800 rounded-lg overflow-x-auto">
           <table class="w-full text-xs">
             <thead class="bg-gray-50 dark:bg-gray-800">
               <tr>
@@ -2028,13 +2028,13 @@ function downloadCustomerRouteCsv() {
         </div>
 
         <!-- 取引先別 × 経路別 (Refs #760 の 15)。乗務員の表の下。 -->
-        <div class="mt-6">
+        <div class="margin-print-page mt-6">
           <div class="flex flex-wrap items-center gap-2 mb-1">
             <p class="text-xs font-medium">
               取引先別 (便を一番星の取引先で束ねたもの)
             </p>
             <!-- 運行経費の配分の比 (Refs #760 の 22)。運行・乗務員の段には効かない。 -->
-            <label class="text-xs text-gray-500 flex items-center gap-1" :title="RUN_COST_SHARE_MODE_TITLE">
+            <label class="margin-print-hide text-xs text-gray-500 flex items-center gap-1" :title="RUN_COST_SHARE_MODE_TITLE">
               運行経費の配分:
               <select
                 class="border border-gray-300 dark:border-gray-700 rounded px-1 py-0.5 bg-white dark:bg-gray-900"
@@ -2087,7 +2087,7 @@ function downloadCustomerRouteCsv() {
           <p v-if="customerSummary.customers.length === 0" class="text-xs text-gray-400">
             便のある運行がありません
           </p>
-          <div v-else class="border border-gray-200 dark:border-gray-800 rounded-lg overflow-x-auto">
+          <div v-else class="margin-print-tablewrap border border-gray-200 dark:border-gray-800 rounded-lg overflow-x-auto">
             <table class="w-full text-xs">
               <thead class="bg-gray-50 dark:bg-gray-800">
                 <tr>
@@ -2217,7 +2217,7 @@ function downloadCustomerRouteCsv() {
             </div>
             <div class="space-y-1">
               <template v-for="bar in shareBars.bars" :key="bar.key">
-                <div class="flex items-center gap-2 text-xs" :class="bar.key === 'total' ? 'font-medium' : ''">
+                <div class="margin-print-bar flex items-center gap-2 text-xs" :class="bar.key === 'total' ? 'font-medium' : ''">
                   <span class="w-56 shrink-0 truncate" :title="`${bar.label} (便 ${bar.legs})`">
                     {{ bar.label }} <span class="text-gray-400">(便 {{ bar.legs }})</span>
                     <span v-if="bar.unsplitLegs > 0" class="text-amber-600 dark:text-amber-400" :title="`粗利が出せない便 ${bar.unsplitLegs}`">*</span>
@@ -2240,7 +2240,7 @@ function downloadCustomerRouteCsv() {
                   <div
                     v-for="r in bar.routes"
                     :key="r.key"
-                    class="flex items-center gap-2 text-xs pl-6 text-gray-600 dark:text-gray-300"
+                    class="margin-print-bar flex items-center gap-2 text-xs pl-6 text-gray-600 dark:text-gray-300"
                   >
                     <span class="w-56 shrink-0 truncate" :title="`${r.label} (便 ${r.legs})`">
                       {{ r.label }} <span class="text-gray-400">(便 {{ r.legs }})</span>
@@ -2273,6 +2273,7 @@ function downloadCustomerRouteCsv() {
              このページは 2200 行を超えているので、これ以上インラインで足さない。
              数字は `kushiroView` (= `kushiro-branch-view.ts`) が作る -->
         <KushiroBranchPanel
+          class="margin-print-page margin-print-kushiro"
           :empty="kushiroView.empty"
           :summary="kushiroView.summary"
           :slider="kushiroView.slider"
@@ -2309,3 +2310,61 @@ function downloadCustomerRouteCsv() {
     />
   </div>
 </template>
+
+<style>
+/* 印刷: **区画の意味の切れ目でちょうど改ページする**。
+   規則は全部 @media print の中に閉じてあるので、**画面表示は 1px も変わらない**。
+   色はページ側で触らない — ダークモード中でもライト配色に倒すのは
+   `app/assets/css/main.css` の print ブロックの仕事 (Refs #760 の 37)。
+   A4 横向き想定 (`restraint-wage.vue` と同じ。ブラウザの印刷ダイアログで横向きを選ぶ)。
+   `@page` は scoped では効かないので、この style は非 scoped。 */
+@media print {
+  aside { display: none !important; }
+
+  /* 操作用の枠 (月・車輌CD・集計・CSV・リンク・絞り込みチェック・配分の select) は
+     紙に要らない。**便/日 のスライダーだけは値が判断材料**なので、つまみと
+     「実測平均に戻す」を消して、隣の `〇.〇〇 便/日` のテキストは残す。 */
+  .margin-print-controls,
+  .margin-print-hide,
+  .margin-print-targets input,
+  .kushiro-print-slider input[type="range"],
+  .kushiro-print-hide { display: none !important; }
+
+  /* **改ページする区画**: 燃費・単価 / 乗務員・運行 / 取引先別 / 釧路積み。
+     `break-before: page` には打ち消しを対で置く (この repo の作法) — 区画が紙の
+     先頭に来たときに白紙が 1 枚出るのを防ぐ。集計前 (運行 0 本) は
+     この class の付いた区画自体が描画されないので、白紙だらけにはならない。 */
+  .margin-print-page { break-before: page; }
+  .margin-print-page:first-child { break-before: auto; }
+
+  /* 見出し・注記だけが前の紙に取り残されないように */
+  .margin-print-page > p:first-child,
+  .margin-print-page > div:first-child,
+  .margin-print-kushiro h3 { break-after: avoid; }
+
+  /* 小さい枠 (月の合計・粗利の内訳・人件費・2 営業所のカード・売上の棒 1 本) は
+     途中で割らない */
+  .margin-print-block,
+  .margin-print-bar,
+  .kushiro-print-depots > div { break-inside: avoid; }
+
+  /* **表は紙の境目で行が割れないようにする。** 横スクロールの器は紙だと中身が
+     切れるだけなので可視に戻す。列見出しは Chrome が thead を各ページの頭に
+     繰り返してくれる。列数が多いので字を詰める。 */
+  .margin-print-tablewrap,
+  .margin-print-kushiro .overflow-x-auto { overflow: visible !important; }
+  .margin-print-tablewrap tr,
+  .margin-print-kushiro tr { break-inside: avoid; }
+  .margin-print-tablewrap table,
+  .margin-print-kushiro table { font-size: 9px; }
+  .margin-print-tablewrap th, .margin-print-tablewrap td,
+  .margin-print-kushiro th, .margin-print-kushiro td { padding: 2px 3px; border: 1px solid #999; }
+
+  /* 釧路積みは**実在しない試算**。粗利の実績と同じ紙に混ざると誤読されるので
+     必ず紙を改め、**バッジと読み方の注記は本体と同じページに載せる**。 */
+  .margin-print-kushiro .kushiro-print-badge,
+  .margin-print-kushiro .kushiro-print-note { break-after: avoid; break-inside: avoid; }
+
+  @page { size: A4 landscape; margin: 8mm; }
+}
+</style>
