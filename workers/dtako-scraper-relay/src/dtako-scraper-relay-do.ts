@@ -333,11 +333,27 @@ import {
   net780R2IndexBody,
   net780R2Paths,
   Net780ParamError,
+  NET780_SEARCH_MAX_ROWS,
   searchNet780,
   validateNet780DownloadTargets,
   type Net780DownloadTarget,
+  type Net780Row,
   type Net780SearchParams,
 } from "./theearth-net780-client";
+import {
+  deriveNet780ArchiveSearchKey,
+  describeNet780NotFound,
+  isNet780CatalogRowUsable,
+  net780ArchiveSearchPlan,
+  net780DownloadTargetFromRow,
+  parseNet780ArchiveRequest,
+  pickNet780RowForOperation,
+  retryNet780Download,
+  shouldNarrowNet780Search,
+  summarizeNet780ArchiveBatch,
+  type Net780ArchiveItem,
+  type Net780ArchiveResult,
+} from "./net780-archive";
 
 /** `DTAKO_ACCOUNTS` (dtako-scraper の Rust 版と同一 JSON shape) の1エントリ。 */
 interface DtakoAccountRaw {
@@ -786,6 +802,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 認証は index.ts の /kintai-relay/dtako-alc-upload 側 (X-Alc-Proxy-Secret) が持つ。
     if (url.pathname === "/cron/dtako/alc-upload" && request.method === "POST") {
       return this.handleCronDtakoAlcUpload(request);
+    }
+    // NET780 生データを無人で 検索→ダウンロード→R2/D1 アーカイブする (Refs #760 の 26)。
+    // 書き込みは R2 + D1 のアーカイブだけ (theearth 側は読むだけ)。同一 comp_id への
+    // theearth 並行アクセスは hang/500 するので `scrapeQueue` で直列化する。
+    // 認証は index.ts の /kintai-relay/net780-archive 側 (X-Alc-Proxy-Secret) が持つ。
+    if (url.pathname === "/cron/dtako/net780-archive" && request.method === "POST") {
+      return this.handleCronDtakoNet780Archive(request);
     }
     if (url.pathname === "/cron/etc" && request.method === "POST") {
       return this.handleCronEtc(request);
@@ -1679,6 +1702,159 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       failure_count: batch.results.length - successCount,
       truncated: batch.truncated,
       remaining: batch.remaining,
+      theearth_logins: jobState.logins.length,
+      theearth_kicked: jobState.logins.some((l) => l.kicked),
+    });
+  }
+
+  /**
+   * POST /cron/dtako/net780-archive — body {comp_id, items: [{ope_no, start_ope},
+   * ...]} (Refs #760 の 26)。運行NO の一覧ぶんの NET780 生データを**自前ログイン**で
+   * 検索 → ダウンロード → R2 + D1 にアーカイブする。粗利タブの地図 (#783) が道なり
+   * の軌跡を重ねられるようにするための無人経路 — 今まではブラウザの theearth
+   * セッションで `/net780` 画面から 1 件ずつ「保存」するしかなかった。
+   *
+   * - 認証は worker 側 (`index.ts` `handleNet780Archive`、`X-Alc-Proxy-Secret`)
+   * - body の解釈・件数上限は pure (`net780-archive.ts` / `cron-batch.ts`)
+   * - **`scrapeQueue` (`enqueueScrape`) で直列化** — 同一 comp_id への theearth 並行
+   *   アクセスは hang/500 する (`handleCronDtakoOperationZip` と同じキュー)
+   * - 書き込みは R2 + D1 のアーカイブ (`saveNet780ToR2`) だけ。theearth 側は読むだけ
+   */
+  private async handleCronDtakoNet780Archive(request: Request): Promise<Response> {
+    let body: { comp_id?: unknown; items?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return Response.json({ error: "JSON body が必要です" }, { status: 400 });
+    }
+    const parsed = parseNet780ArchiveRequest(body);
+    if ("error" in parsed) {
+      return Response.json({ error: parsed.error }, { status: 400 });
+    }
+    try {
+      assertBatchSizeWithinLimit(parsed.items.length);
+    } catch (err) {
+      if (err instanceof BatchTooLargeError) return Response.json({ error: err.message }, { status: 400 });
+      throw err;
+    }
+    // R2 が無い環境では `saveNet780ToR2` が何も保存しない — theearth に行く前に断る
+    // (「archived」と報告しながら何も残らない状態を作らない)。
+    if (!this.env.DTAKO_R2) {
+      return Response.json({ error: "アーカイブ先 (DTAKO_R2) が未設定です" }, { status: 503 });
+    }
+    const account = await this.resolveAccount(parsed.compId);
+    if (!account) {
+      return Response.json({ error: `comp_id=${parsed.compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
+    }
+    return this.enqueueScrape(() => this.runNet780ArchiveBatch(account, parsed.items));
+  }
+
+  /** D1 カタログ (`dtako_uploads`) に operation_no が**単一運行として**既にあるか
+   * (`/api/net780/by-operation` が 200 を返す条件と同じ。`operation_count !== 1` の
+   * 旧 archive は使えないので false → 取り直す)。D1 未 binding や読み出し失敗は
+   * false (= theearth から取り直す側に倒す。アーカイブは冪等なので二重取得の害は
+   * R2 の dedup で吸収される)。 */
+  private async isNet780Archived(operationNo: string): Promise<boolean> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return false;
+    try {
+      const row = await db
+        .prepare(`SELECT operation_count FROM dtako_uploads WHERE dataset = 'net780' AND operation_no = ? LIMIT 1`)
+        .bind(operationNo)
+        .first<{ operation_count: number | null }>();
+      return isNet780CatalogRowUsable(row);
+    } catch (err) {
+      console.error(JSON.stringify({ net780_archive: "catalog_lookup_failed", operation_no: operationNo, error: describeUnknownError(err) }));
+      return false;
+    }
+  }
+
+  /**
+   * `items` を 1 job (= 1 回の `enqueueScrape`) の中で直列に処理する。ログイン
+   * セッション (`jobState`) を全件で共有するので theearth へのログインは通常 1 回。
+   * 各 item は `net780-archive.ts` のヘッダコメントの手順:
+   *
+   * 1. D1 カタログに単一運行の行が既にあれば `already` (theearth に行かない)
+   * 2. 読取日 [開始日, +窓] + 車輌CD で `searchNet780` → `operationNo` 一致行。
+   *    一覧が上限件数で不一致なら窓を絞って 1 回だけ取り直す。無ければ `not_found`
+   * 3. `downloadNet780Zip` (503 が多いので `retryNet780Download`) →
+   *    `saveNet780ToR2` を **`await`** (`waitUntil` だと D1 書き込みが消える実害、
+   *    `saveNet780ToR2` の doc comment) → `archived` + `bytes`
+   * 4. 例外は `runBatchSequential` が `error` として積んで次へ。session 切れ
+   *    (`VenusSessionExpiredError`、`withTheearthLoginSession` の再ログイン予算も
+   *    尽きた後) は残りを打ち切り `truncated` + `remaining`
+   */
+  private async runNet780ArchiveBatch(account: DtakoAccountRaw, items: Net780ArchiveItem[]): Promise<Response> {
+    const jobState = this.makeTheearthLoginJobState();
+    const batch = await runBatchSequential<Net780ArchiveItem, Net780ArchiveResult>(items, async (item, index) => {
+      if (await this.isNet780Archived(item.opeNo)) {
+        return { ope_no: item.opeNo, status: "already" };
+      }
+      const key = deriveNet780ArchiveSearchKey(item);
+      if (!key) {
+        return {
+          ope_no: item.opeNo,
+          status: "error",
+          message: "運行NO から車輌CD を取り出せません (13〜22 桁目が 0 のみ、または 8 桁超)",
+        };
+      }
+      let row: Net780Row | null = null;
+      let lastParams: Net780SearchParams | null = null;
+      let lastRowCount = 0;
+      for (const params of net780ArchiveSearchPlan(key)) {
+        const rows = await this.withTheearthLoginSession(account, jobState, (jar) => searchNet780(jar, params));
+        lastParams = params;
+        lastRowCount = rows.length;
+        row = pickNet780RowForOperation(rows, item.opeNo);
+        if (row || !shouldNarrowNet780Search(rows.length, NET780_SEARCH_MAX_ROWS)) break;
+      }
+      if (!row) {
+        const message = describeNet780NotFound(key, lastParams!, lastRowCount, NET780_SEARCH_MAX_ROWS);
+        console.log(
+          JSON.stringify({ net780_archive: "not_found", comp_id: account.comp_id, ope_no: item.opeNo, index, message }),
+        );
+        return { ope_no: item.opeNo, status: "not_found", message };
+      }
+      const target = net780DownloadTargetFromRow(row);
+      const zip = await retryNet780Download(() =>
+        this.withTheearthLoginSession(account, jobState, (jar) => downloadNet780Zip(jar, [target])),
+      );
+      const saved = await this.saveNet780ToR2(account.comp_id, [target], zip);
+      if (!saved.ok) {
+        return { ope_no: item.opeNo, status: "error", message: `アーカイブの保存に失敗しました (${saved.error})` };
+      }
+      console.log(
+        JSON.stringify({
+          net780_archive: "archived",
+          comp_id: account.comp_id,
+          ope_no: item.opeNo,
+          index,
+          bytes: zip.byteLength,
+          zip_key: saved.zipKey,
+          dedup: saved.dedup,
+        }),
+      );
+      return { ope_no: item.opeNo, status: "archived", bytes: zip.byteLength };
+    });
+
+    const summary = summarizeNet780ArchiveBatch(items, batch);
+    console.log(
+      JSON.stringify({
+        net780_archive: "done",
+        comp_id: account.comp_id,
+        item_count: items.length,
+        success_count: summary.success_count,
+        failure_count: summary.failure_count,
+        truncated: summary.truncated,
+        remaining: summary.remaining,
+        theearth_logins: jobState.logins.length,
+        theearth_kicked: jobState.logins.some((l) => l.kicked),
+      }),
+    );
+    return Response.json({
+      ok: true,
+      comp_id: account.comp_id,
+      ...summary,
       theearth_logins: jobState.logins.length,
       theearth_kicked: jobState.logins.some((l) => l.kicked),
     });
@@ -7897,48 +8073,39 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
 
     const jar: CookieJar = { cookies: new Map(record.cookies) };
-    const maxAttempts = 3;
-    let lastErr: unknown;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        const zip = await downloadNet780Zip(jar, targets);
-        this.ctx.waitUntil(
-          this.ctx.storage.put<TheearthSessionRecord>(THEEARTH_SESSION_KEY, {
-            ...record,
-            cookies: Array.from(jar.cookies.entries()),
-          }),
-        );
-        // ダウンロードできた ZIP をそのまま R2 にアーカイブする (Refs #302 続き)。
-        // 応答をブロックしない best-effort — 保存失敗はログのみ。
-        this.ctx.waitUntil(this.saveNet780ToR2(record.compId, targets, zip));
-        return new Response(zip, {
-          headers: {
-            "content-type": "application/zip",
-            "content-disposition": `attachment; filename="net780-${targets[0]!.operationNo}.zip"`,
-            "cache-control": "no-store",
-          },
-        });
-      } catch (err) {
-        lastErr = err;
-        if (err instanceof VenusSessionExpiredError) {
-          await this.ctx.storage.delete(THEEARTH_SESSION_KEY);
-          return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
-        }
-        // HTTP 503 等の一時的な不安定さ (theearth-net780-client.ts 実機確定) は
-        // 間隔を空けてリトライする。それ以外のエラーは即座に諦める。
-        if (attempt < maxAttempts && err instanceof TheearthClientError) {
-          await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
-          continue;
-        }
-        break;
+    try {
+      // HTTP 503 等の一時的な不安定さ (theearth-net780-client.ts 実機確定) は
+      // 間隔を空けてリトライする (`retryNet780Download`、無人アーカイブ
+      // `runNet780ArchiveBatch` と共通)。session 切れ・それ以外のエラーは即座に諦める。
+      const zip = await retryNet780Download(() => downloadNet780Zip(jar, targets));
+      this.ctx.waitUntil(
+        this.ctx.storage.put<TheearthSessionRecord>(THEEARTH_SESSION_KEY, {
+          ...record,
+          cookies: Array.from(jar.cookies.entries()),
+        }),
+      );
+      // ダウンロードできた ZIP をそのまま R2 にアーカイブする (Refs #302 続き)。
+      // 応答をブロックしない best-effort — 保存失敗はログのみ。
+      this.ctx.waitUntil(this.saveNet780ToR2(record.compId, targets, zip));
+      return new Response(zip, {
+        headers: {
+          "content-type": "application/zip",
+          "content-disposition": `attachment; filename="net780-${targets[0]!.operationNo}.zip"`,
+          "cache-control": "no-store",
+        },
+      });
+    } catch (err) {
+      if (err instanceof VenusSessionExpiredError) {
+        await this.ctx.storage.delete(THEEARTH_SESSION_KEY);
+        return dvrJsonError(401, THEEARTH_SESSION_EXPIRED_MESSAGE);
       }
+      console.error("Net780 download error:", err);
+      const message =
+        err instanceof TheearthClientError
+          ? err.message
+          : `NET780 ダウンロードに失敗しました (${describeUnknownError(err)})`;
+      return dvrJsonError(502, message);
     }
-    console.error("Net780 download error:", lastErr);
-    const message =
-      lastErr instanceof TheearthClientError
-        ? lastErr.message
-        : `NET780 ダウンロードに失敗しました (${describeUnknownError(lastErr)})`;
-    return dvrJsonError(502, message);
   }
 
   /** ダウンロードできた NET780 ZIP (常に単一運行、Refs #299) を R2 にアーカイブ
@@ -7957,14 +8124,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * (`await` で直列化済み) は毎回成功するのに D1 書き込みだけが消えるという
    * 症状が実際に発生した (`dtako_uploads` に対象 operation_no の行が一切
    * 作られない)。`await` で直列化し、この関数自体の完了を D1 書き込み完了まで
-   * 待つようにして解消した。 */
+   * 待つようにして解消した。
+   *
+   * 戻り値は保存の成否 (Refs #760 の 26)。ブラウザ経路 (`handleNet780Download`)
+   * は従来どおり無視する (best-effort のまま) が、無人アーカイブ
+   * (`runNet780ArchiveBatch`) は `ok: false` をその運行の `status: "error"` に
+   * 載せる — 保存できていないのに `archived` と報告しないため。例外は従来どおり
+   * ここで握って投げない。 */
   private async saveNet780ToR2(
     compId: string,
     targets: Net780DownloadTarget[],
     zipBytes: ArrayBuffer,
-  ): Promise<void> {
+  ): Promise<{ ok: true; zipKey: string; dedup: boolean } | { ok: false; error: string }> {
     const bucket = this.env.DTAKO_R2;
-    if (!bucket) return; // R2 未 binding の環境ではアーカイブなし (ダウンロード自体は成功させる)
+    // R2 未 binding の環境ではアーカイブなし (ダウンロード自体は成功させる)
+    if (!bucket) return { ok: false, error: "R2 (DTAKO_R2) が未設定です" };
     const prefix = this.env.NET780_R2_PREFIX || "net780";
     const paths = net780R2Paths(prefix, compId);
     const fetchedAt = new Date().toISOString();
@@ -7994,8 +8168,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       console.log(
         JSON.stringify({ net780_r2: "done", zipKey, operations: targets.length, dedup: !!existing }),
       );
+      return { ok: true, zipKey, dedup: !!existing };
     } catch (err) {
-      console.error(JSON.stringify({ net780_r2: "error", error: describeUnknownError(err) }));
+      const error = describeUnknownError(err);
+      console.error(JSON.stringify({ net780_r2: "error", error }));
+      return { ok: false, error };
     }
   }
 

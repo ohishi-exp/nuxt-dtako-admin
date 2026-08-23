@@ -291,9 +291,14 @@ function findSelectNameById(html: string, id: string): string | null {
   return nameMatch ? nameMatch[1] : null;
 }
 
-/** 1ページあたりの表示件数を最大 (30件) に設定してから一覧を取り直す。件数
- * select が見つからない場合は既定件数のまま緩やかに続行する (検索自体を
- * 止めるほどの問題ではないため loud fail にしない)。 */
+/** F-VOS3020 一覧の 1 ページあたり最大表示件数 (`ddlRowCount` の最大値)。
+ * ページング全件収集は未実装なので、`searchNet780` の結果がこの件数に達して
+ * いたら取りこぼしの可能性がある (呼び出し側は窓を絞る等で対処すること)。 */
+export const NET780_SEARCH_MAX_ROWS = 30;
+
+/** 1ページあたりの表示件数を最大 (`NET780_SEARCH_MAX_ROWS` 件) に設定してから
+ * 一覧を取り直す。件数 select が見つからない場合は既定件数のまま緩やかに続行する
+ * (検索自体を止めるほどの問題ではないため loud fail にしない)。 */
 async function applyMaxRowCount(
   jar: CookieJar,
   listHtml: string,
@@ -307,7 +312,7 @@ async function applyMaxRowCount(
   const url = `${BASE_URL}${NET780_LIST_PATH}`;
   const body = new URLSearchParams({
     ...serializeFormFields(listHtml),
-    [ddlName]: "30",
+    [ddlName]: String(NET780_SEARCH_MAX_ROWS),
     [btn.name]: btn.value || "表示",
   });
   const res = await postForm(jar, url, body, fetchImpl, timeoutMs);
