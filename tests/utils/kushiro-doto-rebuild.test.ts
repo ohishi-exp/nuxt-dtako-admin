@@ -709,6 +709,18 @@ describe('便/日 を変数として扱う', () => {
     expect(sensitivityRow(totals, 'obihiro', 1, sensInput()).belowMinWage).toBe(true)
   })
 
+  it('最低賃金の境界は 帯広発 ≒ 2.09 便/日。釧路発は便数をいくら落としても割らない', () => {
+    // 二分探索で求めた実測の境界は **2.0904 便/日** (そこでの換算時給が ちょうど ¥1,075)。
+    // 浮動小数を直接ピン留めせず、**境界を挟む 2 点**で位置を固定する。
+    const belowAt = (depot: 'obihiro' | 'kushiro', n: number) =>
+      sensitivityRow(totals, depot, n, sensInput()).belowMinWage
+    expect(belowAt('obihiro', 2.08)).toBe(true)
+    expect(belowAt('obihiro', 2.10)).toBe(false)
+    // 釧路発は営業所と積地が 4km 弱しか離れておらず、便数を落としても拘束が伸びない
+    expect(belowAt('kushiro', 0.05)).toBe(false)
+    expect(belowAt('kushiro', 1)).toBe(false)
+  })
+
   it('損益分岐は 営業利益 ≥ 0 になる最小の候補。無ければ null (外挿しない)', () => {
     const cheap = breakEvenLegsPerDay(totals, 'kushiro', [1, 2, 3], sensInput({ monthlyLaborCostYen: 100000 }))
     expect(cheap).toBe(1)
