@@ -23,6 +23,11 @@ import {
   routePlace,
   summarizeByCustomerRoute,
   customerRouteCsvLines,
+  customerRouteCsvHeader,
+  parseRunCostShareMode,
+  RUN_COST_SHARE_MODE_LABELS,
+  DEFAULT_RUN_COST_SHARE_MODE,
+  type RunCostShareMode,
   salesPerHaulKm,
   marginRateTone,
   MARGIN_RATE_HIGH,
@@ -121,6 +126,9 @@ function leg(over: Partial<MarginLegInput> = {}): MarginLegInput {
     allowanceYen: 3000,
     haulKm: 40,
     deadheadKm: 15,
+    // 拘束秒 (Refs #760 の 22)。**既定は読める値** — 秒が null のケースは各テストで明示する。
+    haulSec: 3600,
+    deadheadSec: 1800,
     customers: [],
     ...over,
   }
@@ -726,6 +734,7 @@ describe('summarizeMargins', () => {
     laborYen: 30000,
     fuelRate: { yenPerLiter: 120, kmPerLiter: 5, dieselTaxPerLiter: 32.1 },
     costsMissing: false,
+    runCostShareFallback: false,
     legs: [],
   }
 
@@ -792,6 +801,7 @@ describe('groupMarginsByDriver', () => {
     laborYen: 0,
     fuelRate: emptyFuelRate(),
     costsMissing: false,
+    runCostShareFallback: false,
     legs: [],
   }
 
@@ -833,6 +843,7 @@ describe('marginCsvLines', () => {
     laborYen: 30000,
     fuelRate: { yenPerLiter: 120, kmPerLiter: 5, dieselTaxPerLiter: 32.1 },
     costsMissing: false,
+    runCostShareFallback: false,
     legs: [],
   }
 
@@ -920,6 +931,7 @@ describe('noMarginReason', () => {
   const base = {
     marginYen: null as number | null,
     costsMissing: false,
+    runCostShareFallback: false,
     fuelRate: { yenPerLiter: 120, kmPerLiter: 5, dieselTaxPerLiter: 0 },
   }
 
@@ -1005,6 +1017,7 @@ describe('summarizeNoMarginReasons', () => {
     laborYen: 0,
     fuelRate: { yenPerLiter: 120, kmPerLiter: 5, dieselTaxPerLiter: 0 },
     costsMissing: false,
+    runCostShareFallback: false,
     legs: [],
   }
 
@@ -1152,6 +1165,7 @@ describe('走行km の内訳 (kmBreakdown)', () => {
     laborYen: 30000,
     fuelRate: { yenPerLiter: 120, kmPerLiter: 5, dieselTaxPerLiter: 32.1 },
     costsMissing: false,
+    runCostShareFallback: false,
     legs: [],
   }
 
@@ -1213,14 +1227,16 @@ describe('走行km の内訳 (kmBreakdown)', () => {
     expect(row.slice(at, at + 7)).toEqual(['100', '10', '61', '25', '4', '0', '500'])
   })
 
-  it('キャッシュのキーは v8 — 便の積み日で切った旧キャッシュ (v7) を読ませない', () => {
+  it('キャッシュのキーは v9 — 便に拘束秒の無い旧キャッシュ (v8) を読ませない', () => {
     // 形を変えたら番号を上げる規約。**上げ忘れると `kmBreakdown`/`legs`/`remarks`/
     // `customers` が無い行を画面が読む** (#760 の 4 が v2、7 が v4、13 が v5。経費の行に
     // `remarks`/`vendorName` を足した版は v6 (#760 の 14)、便に `customers` を足した版は
     // v7 (#760 の 15))。
     // v8 は月の切り方を運行の開始日に変えた版 (#760 の 16) — v7 を読むと月跨ぎの運行が
     // 翌月便ぶんの燃料だけを抱えた古い集計のまま残る。
-    expect(MARGIN_CACHE_KEY).toBe('dtako:margin:cache:v8')
+    // v9 は便に拘束秒 (`haulSec`/`deadheadSec`) を足した版 (#760 の 22) — v8 を読むと
+    // 拘束時間比が全運行フォールバックになり、走行km比と同じ数字が別の名前で出る。
+    expect(MARGIN_CACHE_KEY).toBe('dtako:margin:cache:v9')
   })
 })
 
@@ -2364,11 +2380,14 @@ describe('summarizeByCustomerRoute — 取引先別 × 経路別 (Refs #760 の 
     const sum = summarizeByCustomerRoute(res.operations)
     const lines = customerRouteCsvLines(sum)
     expect(lines).toHaveLength(3)
-    expect(lines[0]).toBe([
+    // 見出しは `customerRouteCsvHeader` が正 (列数も並びもここで直書きしない。#781/#782)
+    expect(lines[0]).toBe(customerRouteCsvHeader().map(v => `"${v}"`).join(','))
+    // 既定 (走行km比) の列名。配分の比は見出しにだけ出る (Refs #760 の 22)
+    expect(customerRouteCsvHeader()).toEqual([
       '取引先C', '取引先', '積地', '卸地', '便数', '売上走行km', '回送km',
-      '売上', '手当', '燃料代(売上走行)', '回送燃料', '運行経費の配分', '粗利', '粗利率',
+      '売上', '手当', '燃料代(売上走行)', '回送燃料', '運行経費の配分(走行km比)', '粗利', '粗利率',
       '売上/売上走行km',
-    ].map(v => `"${v}"`).join(','))
+    ])
     // 売上の降順なので 上士幌 (30000) が先。
     // 便 2: 売上走行 30÷5×120=720 / 回送 30÷5×120=720 / 配分 3000×60/100.4 /
     // 粗利 = 30000−5000−720−720−配分
@@ -2585,5 +2604,211 @@ describe('customerShareBars — 売上の内訳の 100% 積み上げ棒 (Refs #7
     // 合計 = 運行の売上 50000、手当 8000 → 16%
     expect(bars.bars[0]!.salesYen).toBe(50000)
     expect(pcts(bars.bars[0]!).allowance).toBeCloseTo(16, 9)
+  })
+})
+
+/**
+ * 運行経費の配分の比を切り替える (Refs #760 の 22)。
+ *
+ * 走行km比だと**短距離便がほとんど固定費を負担しない** (本番実測で、粗利率 55% 以上の
+ * 短距離経路は配分が売上の 1%)。按分方法の影響を見えるようにするための切り替えで、
+ * **どのモードでも運行の段・乗務員の段の数字は 1 円も動かない**。
+ */
+describe('運行経費の配分モード (RunCostShareMode) — Refs #760 の 22', () => {
+  /** 単価 120 円/L・燃費 5 km/L + 直課 ¥1,000 + 固定費 ¥3,000 (運行 1 本なので全額按分)。 */
+  const costsWith = [
+    cost({ costKind: FUEL_KIND, quantity: 20, amount: 2400 }),
+    cost({ costKind: '04', operationDate: '2026-07-01', amount: 1000 }),
+    cost({ costKind: '06', isFixed: true, amount: 3000 }),
+  ]
+  /** 配る額 = 直課 1000 + 固定費按分 3000。 */
+  const RUN_COST = 4000
+
+  /**
+   * 便が揃った 2 便の運行。**走行km と拘束時間の比がわざと違う** —
+   * km は 40 : 60、便数は 1 : 1、秒は 3600 : 7800。
+   */
+  function twoLegOp(over: Partial<MarginLegInput>[] = [{}, {}]) {
+    return op({
+      totalKm: 100,
+      salesYen: 50000,
+      allowanceYen: 8000,
+      kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 },
+      legs: [
+        leg({ seq: 1, haulKm: 30, deadheadKm: 10, haulSec: 3000, deadheadSec: 600, salesYen: 20000, allowanceYen: 3000, ...over[0] }),
+        leg({ seq: 2, haulKm: 30, deadheadKm: 30, haulSec: 3000, deadheadSec: 4800, salesYen: 30000, allowanceYen: 5000, ...over[1] }),
+      ],
+    })
+  }
+
+  function sharesOf(mode: RunCostShareMode | undefined, ops = [twoLegOp()]) {
+    const res = mode === undefined
+      ? buildOperationMargins(ops, costsWith, {})
+      : buildOperationMargins(ops, costsWith, {}, mode)
+    return { res, shares: res.operations[0]!.legs.map(l => l.runCostShareYen) }
+  }
+
+  it('既定 (引数を省く) は走行km比 — #782 までと同じ配分', () => {
+    const { shares, res } = sharesOf(undefined)
+    // 4000 × 40/100 / 4000 × 60/100
+    expect(shares[0]).toBeCloseTo(1600, 6)
+    expect(shares[1]).toBeCloseTo(2400, 6)
+    expect(res.runCostShareFallbackOperations).toBe(0)
+    expect(res.operations[0]!.runCostShareFallback).toBe(false)
+  })
+
+  it("'km' を明示しても既定と同じ", () => {
+    expect(sharesOf('km').shares).toEqual(sharesOf(undefined).shares)
+  })
+
+  it("'legs' (便数比) は km も秒も見ずに 1 ÷ 便数 で配る", () => {
+    const { shares, res } = sharesOf('legs')
+    expect(shares[0]).toBeCloseTo(RUN_COST / 2, 6)
+    expect(shares[1]).toBeCloseTo(RUN_COST / 2, 6)
+    // 短距離便 (便1) の負担が km 比 1600 より増える = この機能の目的
+    expect(shares[0]!).toBeGreaterThan(1600)
+    expect(res.runCostShareFallbackOperations).toBe(0)
+  })
+
+  it("'time' (拘束時間比) は 売上時間 + 回送時間 の比で配る", () => {
+    const { shares, res } = sharesOf('time')
+    expect(shares[0]).toBeCloseTo(RUN_COST * (3600 / 11400), 6)
+    expect(shares[1]).toBeCloseTo(RUN_COST * (7800 / 11400), 6)
+    expect(res.runCostShareFallbackOperations).toBe(0)
+    expect(res.operations[0]!.runCostShareFallback).toBe(false)
+  })
+
+  it('**不変条件** どのモードでも Σ便の配分 = 運行の経費 (直課 + 固定費按分)', () => {
+    for (const mode of Object.keys(RUN_COST_SHARE_MODE_LABELS) as RunCostShareMode[]) {
+      const { res } = sharesOf(mode)
+      const m = res.operations[0]!
+      const sum = m.legs.reduce((acc, l) => acc + l.runCostShareYen, 0)
+      expect(Math.abs(sum - (m.directCostYen + m.allocatedCostYen))).toBeLessThan(1e-9)
+    }
+  })
+
+  it('**不変条件** 運行の段 (売上・燃料・直課・按分・粗利) はどのモードでも 1 円も動かない', () => {
+    const base = sharesOf('km').res.operations[0]!
+    for (const mode of ['legs', 'time'] as RunCostShareMode[]) {
+      const m = sharesOf(mode).res.operations[0]!
+      expect([m.salesYen, m.fuelYen, m.directCostYen, m.allocatedCostYen, m.marginYen])
+        .toEqual([base.salesYen, base.fuelYen, base.directCostYen, base.allocatedCostYen, base.marginYen])
+    }
+  })
+
+  it('**不変条件** 取引先別の検算 (diffYen) はどのモードでも 0 のまま', () => {
+    for (const mode of Object.keys(RUN_COST_SHARE_MODE_LABELS) as RunCostShareMode[]) {
+      const res = buildOperationMargins([twoLegOp()], costsWith, {}, mode)
+      expect(Math.abs(summarizeByCustomerRoute(res.operations).diffYen)).toBeLessThan(1e-9)
+    }
+  })
+
+  it("'time' で 1 便でも売上時間が読めない運行は走行km比に落とし、フォールバックを立てる", () => {
+    const { shares, res } = sharesOf('time', [twoLegOp([{ haulSec: null }, {}])])
+    // 0 円を配らずに km 比 (1600 / 2400) へ
+    expect(shares[0]).toBeCloseTo(1600, 6)
+    expect(shares[1]).toBeCloseTo(2400, 6)
+    expect(res.operations[0]!.runCostShareFallback).toBe(true)
+    expect(res.runCostShareFallbackOperations).toBe(1)
+  })
+
+  it("'time' で回送時間が読めない便がある運行も同じくフォールバックする", () => {
+    const { shares, res } = sharesOf('time', [twoLegOp([{}, { deadheadSec: null }])])
+    expect(shares[0]).toBeCloseTo(1600, 6)
+    expect(res.operations[0]!.runCostShareFallback).toBe(true)
+  })
+
+  it("'time' で秒の和が 0 の運行 (全便 0 秒) も走行km比に落とす — 0 で割らない", () => {
+    const { shares, res } = sharesOf('time', [twoLegOp([
+      { haulSec: 0, deadheadSec: 0 },
+      { haulSec: 0, deadheadSec: 0 },
+    ])])
+    expect(shares[0]).toBeCloseTo(1600, 6)
+    expect(res.operations[0]!.runCostShareFallback).toBe(true)
+  })
+
+  it('走行km比・便数比では秒が読めなくてもフォールバックしない (秒を見ていないので)', () => {
+    for (const mode of ['km', 'legs'] as RunCostShareMode[]) {
+      const { res } = sharesOf(mode, [twoLegOp([{ haulSec: null, deadheadSec: null }, {}])])
+      expect(res.operations[0]!.runCostShareFallback).toBe(false)
+      expect(res.runCostShareFallbackOperations).toBe(0)
+    }
+  })
+
+  it('便の走行km の和が 0 の運行は、どのモードでも配れない側だけ 0 (km は据え置き / time はフォールバックして 0)', () => {
+    const zeroKm = op({
+      totalKm: 100,
+      legs: [
+        leg({ seq: 1, haulKm: 0, deadheadKm: 0, haulSec: null, deadheadSec: null }),
+        leg({ seq: 2, haulKm: 0, deadheadKm: 0, haulSec: null, deadheadSec: null }),
+      ],
+    })
+    expect(sharesOf('km', [zeroKm]).shares).toEqual([0, 0])
+    const timed = sharesOf('time', [zeroKm])
+    expect(timed.shares).toEqual([0, 0])
+    // 秒が無くて km でも配れない — **黙って 0 にせず、落としたことは残す**
+    expect(timed.res.operations[0]!.runCostShareFallback).toBe(true)
+    // 便数比だけは配れる (距離も時間も見ない)
+    expect(sharesOf('legs', [zeroKm]).shares.every(v => v > 0)).toBe(true)
+  })
+
+  it('便の無い運行はどのモードでも配る先が無い — フォールバックにも数えない', () => {
+    for (const mode of Object.keys(RUN_COST_SHARE_MODE_LABELS) as RunCostShareMode[]) {
+      const res = buildOperationMargins([op({ totalKm: 100, legs: [] })], costsWith, {}, mode)
+      expect(res.operations[0]!.legs).toEqual([])
+      expect(res.operations[0]!.runCostShareFallback).toBe(false)
+      expect(res.runCostShareFallbackOperations).toBe(0)
+    }
+  })
+
+  it('フォールバックした運行だけを数える (揃っている運行は数えない)', () => {
+    const res = buildOperationMargins(
+      [
+        op({ unkoNo: 'U1', totalKm: 100, legs: twoLegOp().legs }),
+        op({ unkoNo: 'U2', totalKm: 100, legs: twoLegOp([{ haulSec: null }, {}]).legs }),
+      ],
+      costsWith,
+      {},
+      'time',
+    )
+    expect(res.operations.map(m => m.runCostShareFallback)).toEqual([false, true])
+    expect(res.runCostShareFallbackOperations).toBe(1)
+  })
+
+  it('parseRunCostShareMode は知っている値だけ通し、それ以外は既定 (走行km比)', () => {
+    expect(parseRunCostShareMode('km')).toBe('km')
+    expect(parseRunCostShareMode('legs')).toBe('legs')
+    expect(parseRunCostShareMode('time')).toBe('time')
+    expect(parseRunCostShareMode('こわれた')).toBe(DEFAULT_RUN_COST_SHARE_MODE)
+    expect(parseRunCostShareMode('')).toBe(DEFAULT_RUN_COST_SHARE_MODE)
+    expect(parseRunCostShareMode(null)).toBe(DEFAULT_RUN_COST_SHARE_MODE)
+    expect(parseRunCostShareMode(undefined)).toBe(DEFAULT_RUN_COST_SHARE_MODE)
+    expect(DEFAULT_RUN_COST_SHARE_MODE).toBe('km')
+  })
+
+  it('ラベルは 3 モードぶんあり、画面と CSV で同じ語彙を使う', () => {
+    expect(RUN_COST_SHARE_MODE_LABELS).toEqual({ km: '走行km比', legs: '便数比', time: '拘束時間比' })
+  })
+
+  it('CSV の見出しは 配分の比だけ差し替わる — 列の数も並びも変わらない', () => {
+    const base = customerRouteCsvHeader()
+    for (const mode of Object.keys(RUN_COST_SHARE_MODE_LABELS) as RunCostShareMode[]) {
+      const header = customerRouteCsvHeader(mode)
+      expect(header).toHaveLength(base.length)
+      // 差し替わるのは「運行経費の配分」の 1 列だけ
+      const diff = header.filter((v, i) => v !== base[i])
+      expect(diff).toEqual(mode === 'km' ? [] : [`運行経費の配分(${RUN_COST_SHARE_MODE_LABELS[mode]})`])
+      expect(header.filter(v => v.startsWith('運行経費の配分'))).toHaveLength(1)
+    }
+  })
+
+  it('customerRouteCsvLines は mode を見出しにだけ出す (行の列数は見出しと同じ)', () => {
+    const res = buildOperationMargins([twoLegOp()], costsWith, {}, 'time')
+    const sum = summarizeByCustomerRoute(res.operations)
+    const lines = customerRouteCsvLines(sum, 'time')
+    expect(lines[0]).toBe(customerRouteCsvHeader('time').map(v => `"${v}"`).join(','))
+    for (const line of lines.slice(1)) expect(line.split(',')).toHaveLength(lines[0]!.split(',').length)
+    // mode を省くと既定 (走行km比) の見出し。**値は既に配分済みなので行は変わらない**
+    expect(customerRouteCsvLines(sum).slice(1)).toEqual(lines.slice(1))
   })
 })

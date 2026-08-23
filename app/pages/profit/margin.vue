@@ -99,6 +99,8 @@ import {
   customersOfSlips,
   summarizeByCustomerRoute,
   customerRouteCsvLines,
+  parseRunCostShareMode,
+  RUN_COST_SHARE_MODE_LABELS,
   customerShareBars,
   SHARE_SEGMENT_LABELS,
   operationDirectCostTitle,
@@ -115,6 +117,7 @@ import {
   type LegRef,
   type OperationMargin,
   type RouteSummary,
+  type RunCostShareMode,
   type ShareSegmentKey,
   type UncoveredDriverInput,
   type UncoveredTotals,
@@ -125,6 +128,8 @@ const CSV_CONCURRENCY = 4
 /** 対象乗務員 (乗務員CD)。**運行手当タブと同じキーを読む** — 対象は同じ人たちなので、
  * 2 つの画面で別々に選び直させる意味が無い。 */
 const TARGETS_KEY = 'dtako:allowance:driver-cds'
+/** 運行経費の配分の比 (走行km比 / 便数比 / 拘束時間比)。**この画面だけの設定**。 */
+const RUN_COST_SHARE_MODE_KEY = 'dtako:margin:runCostShareMode'
 
 function currentYm(): string {
   const d = new Date()
@@ -151,6 +156,11 @@ const inputs = ref<MarginOperationInput[]>([])
 const costs = ref<CostRow[]>([])
 /** 車輌C → 人が入れた燃費・単価 (localStorage)。既定値は実績。 */
 const fuelRates = ref<FuelRateMap>({})
+/**
+ * 運行経費 (直課 + 固定費按分) を便に配る比 (Refs #760 の 22)。**既定は今までどおり
+ * 走行km比** — 切り替えても運行の段・乗務員の段の数字は 1 円も動かない。
+ */
+const runCostShareMode = ref<RunCostShareMode>(parseRunCostShareMode(null))
 /**
  * **粗利の対象外になっている便**の合計 (`buildUncoveredLegs`)。1 便も無ければ null。
  *
@@ -278,6 +288,7 @@ onMounted(async () => {
     vehicle.value = last.vehicle
   }
   fuelRates.value = parseFuelRates(localStorage.getItem(FUEL_RATE_KEY))
+  runCostShareMode.value = parseRunCostShareMode(localStorage.getItem(RUN_COST_SHARE_MODE_KEY))
   try {
     drivers.value = await getDrivers()
   }
@@ -533,6 +544,12 @@ function buildMarginLegs(
       allowanceYen: legPayYen(r, provisional),
       haulKm: detail?.haulKm ?? 0,
       deadheadKm: detail ? detail.approachKm + detail.tailKm + detail.otherKm : 0,
+      // 秒は**読めなければ null のまま運ぶ** (0 に倒すと「拘束 0 分の便」に化けて、
+      // 拘束時間比がその便に 1 円も配らない画面になる。Refs #760 の 22)。
+      haulSec: detail?.haulSec ?? null,
+      deadheadSec: detail && detail.approachSec !== null && detail.tailSec !== null
+        ? detail.approachSec + detail.tailSec
+        : null,
       // 売上に当たった一番星の取引先 (Refs #760 の 15)。当たっていない便は `[]`。
       customers: customersByLeg.get(legKey(r)) ?? [],
     }
@@ -851,7 +868,26 @@ async function run() {
 
 // --- 表示 ---
 
-const result = computed(() => buildOperationMargins(inputs.value, costs.value, fuelRates.value))
+const result = computed(() => buildOperationMargins(inputs.value, costs.value, fuelRates.value, runCostShareMode.value))
+
+/** 配分の比を変える。**保存に失敗しても画面の数字は正しい**ので握る (燃費の上書きと同じ)。 */
+function onRunCostShareModeChange(raw: string) {
+  runCostShareMode.value = parseRunCostShareMode(raw)
+  try {
+    localStorage.setItem(RUN_COST_SHARE_MODE_KEY, runCostShareMode.value)
+  }
+  catch (e) {
+    cacheNote.value = `運行経費の配分の設定を保存できませんでした — ${e instanceof Error ? e.message : String(e)}`
+  }
+}
+
+/** select の title と、便の段の列見出しに出す「いまどの比で配っているか」。 */
+const RUN_COST_SHARE_MODE_TITLE = [
+  '運行経費 (直課 + 固定費按分) を便に配る比:',
+  '走行km比 = (売上走行km + 回送km) ÷ 運行の全便の和',
+  '便数比 = 1 ÷ 運行の便数',
+  '拘束時間比 = (売上時間 + 回送時間) ÷ 運行の全便の和',
+].join('\n')
 const totals = computed(() => summarizeMargins(result.value.operations))
 /** 粗利を出せなかった理由と件数。**畳まれた表の中に隠さず月の合計の横に出す。** */
 const noMarginGroups = computed(() => summarizeNoMarginReasons(result.value.operations))
@@ -1054,11 +1090,11 @@ function downloadLegCsv() {
 
 /** 取引先 × 経路 の CSV (Refs #760 の 15)。 */
 function downloadCustomerRouteCsv() {
-  const blob = new Blob([`﻿${customerRouteCsvLines(customerSummary.value).join('\r\n')}\r\n`], { type: 'text/csv;charset=utf-8' })
+  const blob = new Blob([`﻿${customerRouteCsvLines(customerSummary.value, runCostShareMode.value).join('\r\n')}\r\n`], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `粗利_取引先×経路_${shownYm.value}.csv`
+  a.download = `粗利_取引先×経路_${shownYm.value}_配分${RUN_COST_SHARE_MODE_LABELS[runCostShareMode.value]}.csv`
   a.click()
   URL.revokeObjectURL(url)
 }
@@ -1135,7 +1171,7 @@ function downloadCustomerRouteCsv() {
       <button
         v-if="result.operations.length > 0"
         class="text-sm px-4 py-1.5 rounded bg-gray-600 hover:bg-gray-700 text-white"
-        title="取引先 × 経路 (積地 → 卸地) ごとの便数・売上・手当・燃料・運行経費の配分・粗利の CSV"
+        :title="`取引先 × 経路 (積地 → 卸地) ごとの便数・売上・手当・燃料・運行経費の配分・粗利の CSV (配分: ${RUN_COST_SHARE_MODE_LABELS[runCostShareMode]})`"
         @click="downloadCustomerRouteCsv"
       >
         取引先×経路 CSV
@@ -1636,9 +1672,29 @@ function downloadCustomerRouteCsv() {
 
         <!-- 取引先別 × 経路別 (Refs #760 の 15)。乗務員の表の下。 -->
         <div class="mt-6">
-          <p class="text-xs font-medium mb-1">
-            取引先別 (便を一番星の取引先で束ねたもの)
-          </p>
+          <div class="flex flex-wrap items-center gap-2 mb-1">
+            <p class="text-xs font-medium">
+              取引先別 (便を一番星の取引先で束ねたもの)
+            </p>
+            <!-- 運行経費の配分の比 (Refs #760 の 22)。運行・乗務員の段には効かない。 -->
+            <label class="text-xs text-gray-500 flex items-center gap-1" :title="RUN_COST_SHARE_MODE_TITLE">
+              運行経費の配分:
+              <select
+                class="border border-gray-300 dark:border-gray-700 rounded px-1 py-0.5 bg-white dark:bg-gray-900"
+                :value="runCostShareMode"
+                @change="onRunCostShareModeChange(($event.target as HTMLSelectElement).value)"
+              >
+                <option v-for="(label, key) in RUN_COST_SHARE_MODE_LABELS" :key="key" :value="key">{{ label }}</option>
+              </select>
+            </label>
+            <span
+              v-if="result.runCostShareFallbackOperations > 0"
+              class="text-xs text-amber-600 dark:text-amber-400"
+              title="便の拘束時間 (売上時間 + 回送時間) が読めない運行は、走行km比で配っています (0 円は配りません)"
+            >
+              拘束時間が取れない運行 {{ result.runCostShareFallbackOperations }} 本は走行km比で配分
+            </span>
+          </div>
           <p
             class="text-xs mb-2"
             :class="customerCheckOk ? 'text-gray-500' : 'text-amber-600 dark:text-amber-400'"
@@ -1685,8 +1741,8 @@ function downloadCustomerRouteCsv() {
                   <th class="text-right px-3 py-2 font-medium text-gray-500" :title="FUEL_DEADHEAD_TITLE">回送燃料</th>
                   <th
                     class="text-right px-3 py-2 font-medium text-gray-500"
-                    title="運行の直課経費 + 固定費按分 を、運行の便の走行km (売上走行 + 回送) の比で便に配った額"
-                  >運行経費の配分</th>
+                    :title="`運行の直課経費 + 固定費按分 を、運行の便に配った額。いまの配分: ${RUN_COST_SHARE_MODE_LABELS[runCostShareMode]}\n${RUN_COST_SHARE_MODE_TITLE}`"
+                  >運行経費の配分 ({{ RUN_COST_SHARE_MODE_LABELS[runCostShareMode] }})</th>
                   <th class="text-right px-3 py-2 font-medium text-gray-500" title="売上 − 手当 − 燃料 − 運行経費の配分">粗利</th>
                   <th
                     class="text-right px-3 py-2 font-medium text-gray-500"

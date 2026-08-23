@@ -132,11 +132,27 @@ export interface OperationIdle {
    * `Σ approachKm === preLoadKm + betweenKm` / `Σ tailKm === postUnloadKm` /
    * `Σ otherKm === otherKm`。**運行の燃料代・回送燃料・粗利は 1 円も変えない**
    * (`margin.ts` は運行の段の計算式をそのまま使い、便の段はこの内訳から独立に出す)。
+   *
+   * 秒も同じ形 (全便の時刻が読める運行): `Σ haulSec === haulSec` /
+   * `Σ approachSec === preLoadSec + betweenSec` / `Σ tailSec === postUnloadSec`。
+   * **最後の便に降しが無い運行だけ 3 つ目が成り立たない** — `postUnloadSec` は
+   * 運行の中で最後に降ろした時刻から数えるのに対し、`tailSec` は km の `tailKm` と
+   * 同じ判定 (最後の便に降しがあるときだけ) で 0 になるため。km 側は `postUnloadKm`
+   * も同時に 0 になるので、ずれるのは秒だけ。
    */
   legKmDetail: LegKmDetail[]
 }
 
-/** 便 1 本ぶんの走行距離の内訳 (`OperationIdle.legKmDetail` の要素)。 */
+/**
+ * 便 1 本ぶんの走行距離と**拘束時間**の内訳 (`OperationIdle.legKmDetail` の要素)。
+ *
+ * 秒 (`haulSec`/`approachSec`/`tailSec`) は km の 3 つと**同じ判定・同じ区間**で数えた
+ * 時間 (Refs #760 の 22)。運行経費を**拘束時間の比**で便に配れるようにするためだけに
+ * 出すもので、**km 側の値・運行の段の秒 (`haulSec` 等) は 1 つも変えない**。
+ *
+ * **時刻が読めない区間は null** (0 に倒さない) — 呼び出し側が「秒が取れない運行」を
+ * 見分けて別の比に落とせるようにする。
+ */
 export interface LegKmDetail {
   /** その便の売上走行km (= `legKm[i]` と同じ値)。 */
   haulKm: number
@@ -146,6 +162,19 @@ export interface LegKmDetail {
   tailKm: number
   /** 降しが無い便の走行 (分類不能)。その便自身に乗る。降しがあれば 0。 */
   otherKm: number
+  /** その便の売上時間 (積み開始 → その便の最後の降し終了、秒)。どちらか読めなければ null。 */
+  haulSec: number | null
+  /**
+   * その便へ向かう移動の秒 (`approachKm` と同じ区間)。1 便目は 運行開始 → 積み開始、
+   * 2 便目以降は 前の便の降し終了 → 積み開始。**前の便に降しが無ければ 0**
+   * (その時間は前の便自身に乗っている)。必要な時刻が読めなければ null。
+   */
+  approachSec: number | null
+  /**
+   * 最後の便だけ乗る、降し終了 → 運行終了 の秒 (`tailKm` と同じ判定)。それ以外は 0。
+   * 必要な時刻が読めなければ null。
+   */
+  tailSec: number | null
 }
 
 /** 便 = 積み 1 つと、その便の最後の降しまでの時刻・距離。 */
@@ -325,11 +354,24 @@ export function extractOperationIdle(headers: string[], rows: string[][]): Opera
     // 便間ぶん (前の便に降しがあれば `prev.tailKm`、無ければ 0 — その走行は前の便の
     // `otherKm` 側にもう乗っている)。最後の便だけ帰庫ぶん (`postUnloadKm` に乗るのと
     // 同じ判定) を `tailKm` に足す。降しが無い便の走行は常にその便自身の `otherKm`。
+    //
+    // **秒は km と同じ行・同じ判定で決める** (Refs #760 の 22)。距離が「どの区間の
+    // 走行か」を決めているのと同じ切り方で時間も切らないと、2 つの内訳が別々の
+    // 規則を持って静かにずれる。**読めない時刻は 0 ではなく null。**
     legKmDetail.push({
       haulKm: leg.unloadKm,
       approachKm: i === 0 ? preRollKm : (prev!.hasUnload ? prev!.tailKm : 0),
       tailKm: i === legs.length - 1 && leg.hasUnload ? leg.tailKm : 0,
       otherKm: leg.hasUnload ? 0 : leg.tailKm,
+      haulSec: leg.loadTs !== null && leg.unloadTs !== null ? leg.unloadTs - leg.loadTs : null,
+      approachSec: i === 0
+        ? (startTs !== null && leg.loadTs !== null ? leg.loadTs - startTs : null)
+        : (prev!.hasUnload
+            ? (prev!.unloadTs !== null && leg.loadTs !== null ? leg.loadTs - prev!.unloadTs : null)
+            : 0),
+      tailSec: i === legs.length - 1 && leg.hasUnload
+        ? (endTs !== null && leg.unloadTs !== null ? endTs - leg.unloadTs : null)
+        : 0,
     })
   }
 

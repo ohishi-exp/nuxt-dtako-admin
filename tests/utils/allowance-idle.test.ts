@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { extractOperationIdle, DISTANCE_EVENT_NAMES } from '~/utils/allowance-idle'
+import { extractOperationIdle, DISTANCE_EVENT_NAMES, type LegKmDetail } from '~/utils/allowance-idle'
 import { extractAllowanceLegs } from '~/utils/allowance-trips'
 
 const HEADERS = ['イベント名', '開始日時', '終了日時', '区間距離']
@@ -47,6 +47,29 @@ const ALL_EMPTY = {
   legKmDetail: [],
 }
 
+/**
+ * 4 便: 1便目 (積前ぶんの回送) / 2便目 (便間ぶんの回送) / 3便目 (降しが無い便、
+ * 走行はその便自身の `otherKm` に。次の便への回送は 0 — 降しが無いので「便間」が
+ * 成立しない) / 4便目 (最後の便、降後ぶんの回送が乗る)。#767 のケースを合成した形。
+ */
+const FOUR_LEGS = [
+  ev('運行開始', hm(4), hm(4), '2'), // 積前
+  ev('積み', hm(5), hm(5, 10), '1'),
+  ev('運転', hm(5, 10), hm(6), '10'),
+  ev('降し', hm(6), hm(6, 10), '1'), // 便1 (haul = 1+10+1 = 12)
+  ev('運転', hm(6, 10), hm(7), '5'), // 便1→便2 の便間
+  ev('積み', hm(7), hm(7, 10), '1'),
+  ev('運転', hm(7, 10), hm(8), '20'),
+  ev('降し', hm(8), hm(8, 10), '1'), // 便2 (haul = 1+20+1 = 22)
+  ev('運転', hm(8, 10), hm(9), '7'), // 便2→便3 の便間
+  ev('積み', hm(9), hm(9, 10), '1'),
+  ev('運転', hm(9, 10), hm(10), '30'), // 便3 は積んだまま (降し無し)
+  ev('積み', hm(10), hm(10, 10), '1'),
+  ev('運転', hm(10, 10), hm(11), '15'),
+  ev('降し', hm(11), hm(11, 10), '1'), // 便4 (haul = 1+15+1 = 17)
+  ev('運行終了', hm(12), hm(12), '9'), // 降後
+]
+
 describe('extractOperationIdle', () => {
   it('運行開始 → 積み → 降し → 積み → 降し → 運行終了 を売上時間と非売上時間に切り分ける', () => {
     const idle = extractOperationIdle(HEADERS, [
@@ -86,9 +109,11 @@ describe('extractOperationIdle', () => {
       legKm: [121, 101],
       // 便ごとの内訳 (Refs #760 の 13)。1 便目は積前 (preLoadKm=0) を回送に、
       // 2 便目は便間 (betweenKm=60) を回送に、最後の便 (2便目) に降後 (postUnloadKm=20) が乗る
+      // 秒も同じ切り方 (Refs #760 の 22)。1 便目の approach は 始業 → 積み、
+      // 2 便目の approach は 便1の降し → 便2の積み、tail は最後の便だけ 降し → 終業
       legKmDetail: [
-        { haulKm: 121, approachKm: 0, tailKm: 0, otherKm: 0 },
-        { haulKm: 101, approachKm: 60, tailKm: 20, otherKm: 0 },
+        { haulKm: 121, approachKm: 0, tailKm: 0, otherKm: 0, haulSec: at(9) - at(5), approachSec: at(5) - at(4), tailSec: 0 },
+        { haulKm: 101, approachKm: 60, tailKm: 20, otherKm: 0, haulSec: at(14) - at(10), approachSec: at(10) - at(9), tailSec: at(15, 30) - at(14) },
       ],
     })
   })
@@ -187,7 +212,8 @@ describe('extractOperationIdle', () => {
       postUnloadKm: 0,
       otherKm: 0,
       legKm: [0],
-      legKmDetail: [{ haulKm: 0, approachKm: 0, tailKm: 0, otherKm: 0 }],
+      // 運行開始 が読めないので、その便へ向かう移動 (approachSec) も出せない
+      legKmDetail: [{ haulKm: 0, approachKm: 0, tailKm: 0, otherKm: 0, haulSec: at(9) - at(5), approachSec: null, tailSec: at(12) - at(9) }],
     })
   })
 
@@ -213,7 +239,8 @@ describe('extractOperationIdle', () => {
       postUnloadKm: 0,
       otherKm: 0,
       legKm: [0],
-      legKmDetail: [{ haulKm: 0, approachKm: 0, tailKm: 0, otherKm: 0 }],
+      // 運行終了 が読めないので、最後の便の帰庫ぶん (tailSec) も出せない
+      legKmDetail: [{ haulKm: 0, approachKm: 0, tailKm: 0, otherKm: 0, haulSec: at(9) - at(5), approachSec: at(5) - at(4), tailSec: null }],
     })
   })
 
@@ -272,10 +299,13 @@ describe('extractOperationIdle', () => {
       otherKm: 0,
       // 時刻が読めなくても距離は数える (便3 は降しが無いので 0)
       legKm: [0, 0, 0],
+      // 秒も**その便の分だけ** null。便1 の approach (始業 → 積み) だけは読める
       legKmDetail: [
-        { haulKm: 0, approachKm: 0, tailKm: 0, otherKm: 0 },
-        { haulKm: 0, approachKm: 0, tailKm: 0, otherKm: 0 },
-        { haulKm: 0, approachKm: 0, tailKm: 0, otherKm: 0 },
+        { haulKm: 0, approachKm: 0, tailKm: 0, otherKm: 0, haulSec: null, approachSec: at(5) - at(4), tailSec: 0 },
+        // 便2: 前の便の降しの終了が読めないので approach も出せない
+        { haulKm: 0, approachKm: 0, tailKm: 0, otherKm: 0, haulSec: null, approachSec: null, tailSec: 0 },
+        // 便3: 前の便の降しは読めるが、自分の積みが読めない。降しが無いので tail は 0
+        { haulKm: 0, approachKm: 0, tailKm: 0, otherKm: 0, haulSec: null, approachSec: null, tailSec: 0 },
       ],
     })
   })
@@ -370,7 +400,7 @@ describe('extractOperationIdle', () => {
     expect(idle).toEqual({
       ...ALL_EMPTY,
       legKm: [0],
-      legKmDetail: [{ haulKm: 0, approachKm: 0, tailKm: 0, otherKm: 0 }],
+      legKmDetail: [{ haulKm: 0, approachKm: 0, tailKm: 0, otherKm: 0, haulSec: null, approachSec: null, tailSec: null }],
     })
   })
 
@@ -724,7 +754,7 @@ describe('extractOperationIdle の重ね掛け行 (走行距離の二重計上)'
  */
 describe('extractOperationIdle の legKmDetail (便ごとの回送内訳、Refs #760 の 13)', () => {
   /** 便ごとの内訳を運行ぶんに足し戻した値。**不変条件の検証に使う。** */
-  function sums(detail: { haulKm: number, approachKm: number, tailKm: number, otherKm: number }[]) {
+  function sums(detail: LegKmDetail[]) {
     return detail.reduce(
       (acc, d) => ({
         haulKm: acc.haulKm + d.haulKm,
@@ -735,29 +765,6 @@ describe('extractOperationIdle の legKmDetail (便ごとの回送内訳、Refs 
       { haulKm: 0, approachKm: 0, tailKm: 0, otherKm: 0 },
     )
   }
-
-  /**
-   * 4 便: 1便目 (積前ぶんの回送) / 2便目 (便間ぶんの回送) / 3便目 (降しが無い便、
-   * 走行はその便自身の `otherKm` に。次の便への回送は 0 — 降しが無いので「便間」が
-   * 成立しない) / 4便目 (最後の便、降後ぶんの回送が乗る)。#767 のケースを合成した形。
-   */
-  const FOUR_LEGS = [
-    ev('運行開始', hm(4), hm(4), '2'), // 積前
-    ev('積み', hm(5), hm(5, 10), '1'),
-    ev('運転', hm(5, 10), hm(6), '10'),
-    ev('降し', hm(6), hm(6, 10), '1'), // 便1 (haul = 1+10+1 = 12)
-    ev('運転', hm(6, 10), hm(7), '5'), // 便1→便2 の便間
-    ev('積み', hm(7), hm(7, 10), '1'),
-    ev('運転', hm(7, 10), hm(8), '20'),
-    ev('降し', hm(8), hm(8, 10), '1'), // 便2 (haul = 1+20+1 = 22)
-    ev('運転', hm(8, 10), hm(9), '7'), // 便2→便3 の便間
-    ev('積み', hm(9), hm(9, 10), '1'),
-    ev('運転', hm(9, 10), hm(10), '30'), // 便3 は積んだまま (降し無し)
-    ev('積み', hm(10), hm(10, 10), '1'),
-    ev('運転', hm(10, 10), hm(11), '15'),
-    ev('降し', hm(11), hm(11, 10), '1'), // 便4 (haul = 1+15+1 = 17)
-    ev('運行終了', hm(12), hm(12), '9'), // 降後
-  ]
 
   it('1 便目に積前・2 便目に便間・降し無し便にその走行・最後の便に降後が乗る', () => {
     const idle = extractOperationIdle(HEADERS, FOUR_LEGS)
@@ -771,15 +778,16 @@ describe('extractOperationIdle の legKmDetail (便ごとの回送内訳、Refs 
     }).toEqual({ preLoadKm: 2, haulKm: 51, betweenKm: 12, postUnloadKm: 9, otherKm: 31 })
     expect(idle.legKmDetail).toEqual([
       // 1 便目: 積前がそのまま回送になる
-      { haulKm: 12, approachKm: 2, tailKm: 0, otherKm: 0 },
+      { haulKm: 12, approachKm: 2, tailKm: 0, otherKm: 0, haulSec: at(6, 10) - at(5), approachSec: at(5) - at(4), tailSec: 0 },
       // 2 便目: 直前 (1便目) の便間ぶんが回送になる
-      { haulKm: 22, approachKm: 5, tailKm: 0, otherKm: 0 },
+      { haulKm: 22, approachKm: 5, tailKm: 0, otherKm: 0, haulSec: at(8, 10) - at(7), approachSec: at(7) - at(6, 10), tailSec: 0 },
       // 3 便目: 降しが無いので、走行はぜんぶ自分の otherKm。回送 (approach) は
-      // 直前の便間ぶん (2便目→3便目、7km) を受け取るが、tail/other は自分の分だけ
-      { haulKm: 0, approachKm: 7, tailKm: 0, otherKm: 31 },
+      // 直前の便間ぶん (2便目→3便目、7km) を受け取るが、tail/other は自分の分だけ。
+      // **降しが無い = 売上時間の終わりが無い**ので haulSec は null (0 ではない)
+      { haulKm: 0, approachKm: 7, tailKm: 0, otherKm: 31, haulSec: null, approachSec: at(9) - at(8, 10), tailSec: 0 },
       // 4 便目 (最後): 3便目に降しが無いので approach は 0 (その走行は 3 便目の
       // otherKm 側に既に乗っている)。降後 (9km) は最後の便の tailKm に乗る
-      { haulKm: 17, approachKm: 0, tailKm: 9, otherKm: 0 },
+      { haulKm: 17, approachKm: 0, tailKm: 9, otherKm: 0, haulSec: at(11, 10) - at(10), approachSec: 0, tailSec: at(12) - at(11, 10) },
     ])
   })
 
@@ -830,5 +838,102 @@ describe('extractOperationIdle の legKmDetail (便ごとの回送内訳、Refs 
     expect(idle.legKm).toEqual([])
     expect(idle.legKmDetail).toEqual([])
     expect(idle.otherKm).toBe(12)
+  })
+})
+
+/**
+ * 便ごとの**拘束時間**の内訳 (`haulSec` / `approachSec` / `tailSec`。Refs #760 の 22)。
+ *
+ * km の 3 つと同じ判定・同じ区間で数えた秒。運行経費を拘束時間の比で便に配れるように
+ * するためだけに出すもので、**km 側・運行の段の秒は 1 つも変えない** (上の describe が
+ * 変わらず通ることで確認済み)。
+ */
+describe('extractOperationIdle の legKmDetail の秒 (Refs #760 の 22)', () => {
+  /** 全便に降しがあり、時刻が全部読める 3 便の運行。**不変条件はこの形で成り立つ。** */
+  const THREE_LEGS = [
+    ev('運行開始', hm(4), hm(4), '2'),
+    ev('積み', hm(5), hm(5, 10), '1'),
+    ev('降し', hm(6), hm(6, 10), '10'), // 便1
+    ev('運転', hm(6, 10), hm(7), '5'), // 便間
+    ev('積み', hm(7), hm(7, 10), '1'),
+    ev('降し', hm(8), hm(8, 10), '20'), // 便2
+    ev('運転', hm(8, 10), hm(9), '7'), // 便間
+    ev('積み', hm(9), hm(9, 10), '1'),
+    ev('降し', hm(11), hm(11, 10), '15'), // 便3 (最後)
+    ev('運行終了', hm(12), hm(12), '9'), // 降後
+  ]
+
+  it('**不変条件** 3 つ: Σhaul=haulSec / Σapproach=preLoadSec+betweenSec / Σtail=postUnloadSec', () => {
+    const idle = extractOperationIdle(HEADERS, THREE_LEGS)
+    const detail = idle.legKmDetail
+    // 全便の時刻が読める運行なので、秒はどれも null にならない
+    expect(detail.map(d => [d.haulSec, d.approachSec, d.tailSec].every(v => v !== null))).toEqual([true, true, true])
+    const sum = (pick: (d: LegKmDetail) => number | null) => detail.reduce((acc, d) => acc + pick(d)!, 0)
+    expect(sum(d => d.haulSec)).toBe(idle.haulSec)
+    expect(sum(d => d.approachSec)).toBe(idle.preLoadSec! + idle.betweenSec)
+    expect(sum(d => d.tailSec)).toBe(idle.postUnloadSec)
+  })
+
+  it('**不変条件** 降しの無い便がある運行でも approach と tail は運行の段に足し戻る', () => {
+    const idle = extractOperationIdle(HEADERS, FOUR_LEGS)
+    const detail = idle.legKmDetail
+    expect(detail.reduce((acc, d) => acc + d.approachSec!, 0)).toBe(idle.preLoadSec! + idle.betweenSec)
+    expect(detail.reduce((acc, d) => acc + d.tailSec!, 0)).toBe(idle.postUnloadSec)
+    // haulSec だけは**降しの無い便が null** なので、null を除いた和が運行の段に一致する
+    expect(detail.filter(d => d.haulSec !== null).reduce((acc, d) => acc + d.haulSec!, 0)).toBe(idle.haulSec)
+  })
+
+  it('1 便目の積みの時刻が読めなければ approachSec は null (運行開始は読めていても)', () => {
+    const idle = extractOperationIdle(HEADERS, [
+      ev('運行開始', hm(4), hm(4), '1'),
+      ev('積み', 'こわれた', hm(6), '1'),
+      ev('降し', hm(8), hm(9), '10'),
+      ev('運行終了', hm(12), hm(12), '2'),
+    ])
+    expect(idle.startTs).toBe(at(4))
+    expect(idle.legKmDetail).toEqual([
+      { haulKm: 11, approachKm: 1, tailKm: 2, otherKm: 0, haulSec: null, approachSec: null, tailSec: at(12) - at(9) },
+    ])
+  })
+
+  it('最後の便の降しの終了が読めなければ tailSec は null (運行終了は読めていても)', () => {
+    const idle = extractOperationIdle(HEADERS, [
+      ev('運行開始', hm(4), hm(4), '1'),
+      ev('積み', hm(5), hm(6), '1'),
+      ev('降し', hm(8), '', '10'), // 降しの終了だけ読めない
+      ev('運行終了', hm(12), hm(12), '2'),
+    ])
+    expect(idle.endTs).toBe(at(12))
+    expect(idle.legKmDetail).toEqual([
+      { haulKm: 11, approachKm: 1, tailKm: 2, otherKm: 0, haulSec: null, approachSec: at(5) - at(4), tailSec: null },
+    ])
+  })
+
+  it('最後の便に降しが無ければ tailSec は 0 — postUnloadSec (運行の最後の降しから数える) とはずれる', () => {
+    const idle = extractOperationIdle(HEADERS, [
+      ev('運行開始', hm(4), hm(4), '1'),
+      ev('積み', hm(5), hm(6), '1'),
+      ev('降し', hm(8), hm(9), '10'),
+      ev('積み', hm(10), hm(11), '1'), // 積んだまま帰庫する便 (降し無し)
+      ev('運転', hm(11), hm(13), '50'),
+      ev('運行終了', hm(15), hm(15), '2'),
+    ])
+    // 運行の段は「最後に降ろした時刻 → 終業」なので 0 にはならない
+    expect(idle.postUnloadSec).toBe(at(15) - at(9))
+    // 便の段は km の tailKm と同じ判定 (最後の便に降しがあるときだけ) なので 0。
+    // km 側は postUnloadKm も 0 になるが、秒は運行の段が 0 にならないのでここだけずれる
+    expect(idle.postUnloadKm).toBe(0)
+    expect(idle.legKmDetail.map(d => d.tailSec)).toEqual([0, 0])
+    expect(idle.legKmDetail.map(d => d.haulSec)).toEqual([at(9) - at(5), null])
+  })
+
+  it('負の秒は便の段でも 0 に丸めない (運行の段と同じ扱い)', () => {
+    const idle = extractOperationIdle(HEADERS, [
+      ev('運行開始', hm(6), hm(6), '1'), // 始業より前に積んでいる壊れた運行
+      ev('積み', hm(5), hm(5, 30), '1'),
+      ev('降し', hm(8), hm(9), '10'),
+      ev('運行終了', hm(12), hm(12), '2'),
+    ])
+    expect(idle.legKmDetail[0]!.approachSec).toBe(at(5) - at(6))
   })
 })
