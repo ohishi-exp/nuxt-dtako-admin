@@ -87,6 +87,10 @@ import type { DepotKey, LatLng } from "./depot-distance";
 import { DEPOT_KEYS, SECONDS_PER_HOUR, deadheadFuelYen, isKushiroLoadingLeg } from "./kushiro-loading-legs";
 import type { FuelRate, KushiroLegInput, KushiroOperationInput } from "./kushiro-loading-legs";
 import { routePlace } from "./route-place";
+// **`FuelRate` の出どころだけ app 側と違う。** app 側は `margin.ts` が宣言していて
+// `kushiro-loading-legs.ts` は type-only import しているだけ (再 export していない) ので
+// 宣言元から取る。worker には `margin.ts` が無いので、双子の `kushiro-loading-legs.ts` が
+// 同じ形の型を宣言していて、それを使う。**値の挙動は同じ。**
 
 /**
  * **道東 = 釧路総合振興局 + 根室振興局の全市町村** (`routePlace` の語彙 = 市/町/村 を

@@ -80,8 +80,14 @@
 import { DEPOTS, haversineKm, isValidLatLng } from './depot-distance'
 import type { DepotKey, LatLng } from './depot-distance'
 import { DEPOT_KEYS, SECONDS_PER_HOUR, deadheadFuelYen, isKushiroLoadingLeg } from './kushiro-loading-legs'
-import type { FuelRate, KushiroLegInput, KushiroOperationInput } from './kushiro-loading-legs'
+import type { KushiroLegInput, KushiroOperationInput } from './kushiro-loading-legs'
 import { routePlace } from './margin'
+// `FuelRate` は `margin.ts` が持つ型。`kushiro-loading-legs.ts` は type-only import
+// しているだけで再 export していないので、**宣言元から直接取る**
+// (#796 のファイルに re-export を足すより、型の出どころが 1 か所で分かる)。
+// 双子 (`workers/kyuyo-mcp/src/kushiro-doto-rebuild.ts`) は worker に `margin.ts` が
+// 無いので、双子の `kushiro-loading-legs.ts` が宣言する同名の型を使う。
+import type { FuelRate } from './margin'
 
 /**
  * **道東 = 釧路総合振興局 + 根室振興局の全市町村** (`routePlace` の語彙 = 市/町/村 を
