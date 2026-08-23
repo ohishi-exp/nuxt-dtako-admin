@@ -23,6 +23,10 @@ import {
   routePlace,
   summarizeByCustomerRoute,
   customerRouteCsvLines,
+  salesPerHaulKm,
+  marginRateTone,
+  MARGIN_RATE_HIGH,
+  MARGIN_RATE_LOW,
   customerShareBars,
   SHARE_SEGMENT_LABELS,
   type CustomerRouteSummary,
@@ -2308,7 +2312,7 @@ describe('summarizeByCustomerRoute — 取引先別 × 経路別 (Refs #760 の 
     })
   })
 
-  it('customerRouteCsvLines は 取引先 × 経路 で 1 行、列は 取引先C / 取引先 / 積地 / 卸地 / 便数 / 売上走行km / 回送km / 売上 / 手当 / 燃料代(売上走行) / 回送燃料 / 運行経費の配分 / 粗利 / 粗利率', () => {
+  it('customerRouteCsvLines は 取引先 × 経路 で 1 行、列は 取引先C / 取引先 / 積地 / 卸地 / 便数 / 売上走行km / 回送km / 売上 / 手当 / 燃料代(売上走行) / 回送燃料 / 運行経費の配分 / 粗利 / 粗利率 / 売上/売上走行km', () => {
     const res = buildOperationMargins(
       [op({
         totalKm: 100,
@@ -2328,6 +2332,7 @@ describe('summarizeByCustomerRoute — 取引先別 × 経路別 (Refs #760 の 
     expect(lines[0]).toBe([
       '取引先C', '取引先', '積地', '卸地', '便数', '売上走行km', '回送km',
       '売上', '手当', '燃料代(売上走行)', '回送燃料', '運行経費の配分', '粗利', '粗利率',
+      '売上/売上走行km',
     ].map(v => `"${v}"`).join(','))
     // 売上の降順なので 上士幌 (30000) が先。
     // 便 2: 売上走行 30÷5×120=720 / 回送 30÷5×120=720 / 配分 3000×60/100.4 /
@@ -2338,6 +2343,7 @@ describe('summarizeByCustomerRoute — 取引先別 × 経路別 (Refs #760 の 
       '"S"', '"上士幌"', '"釧路"', '"上士幌"', '"1"', '"30"', '"30"',
       '"30000"', '"5000"', '"720"', '"720"', `"${Math.round(share2)}"`, `"${Math.round(gross2)}"`,
       `"${Math.round((gross2 / 30000) * 1000) / 10}%"`,
+      '"1000"', // 売上 30000 ÷ 売上走行 30km
     ].join(','))
     // 引用符は "" にエスケープ
     expect(lines[2]!.startsWith('"K""1","川西","釧路","川西","1","30","10","20000","3000"')).toBe(true)
@@ -2350,7 +2356,45 @@ describe('summarizeByCustomerRoute — 取引先別 × 経路別 (Refs #760 の 
       {},
     )
     const line = customerRouteCsvLines(summarizeByCustomerRoute(res.operations))[1]!
-    expect(line.endsWith(',"0","0","0","",""')).toBe(true)
+    // 粗利・粗利率は空、売上/売上走行km は 20000 ÷ 40km = 500 (粗利と無関係なので出る)
+    expect(line.endsWith(',"0","0","0","","","500"')).toBe(true)
+  })
+})
+
+describe('salesPerHaulKm / marginRateTone — 売上/売上走行km と粗利率の色分け (Refs #760 の 20)', () => {
+  it('売上走行km が 0 なら割れないので null', () => {
+    expect(salesPerHaulKm(30000, 0)).toBeNull()
+  })
+
+  it('売上走行km が負でも null (回送だけの行を色付けしない)', () => {
+    expect(salesPerHaulKm(30000, -5)).toBeNull()
+  })
+
+  it('売上 ÷ 売上走行km を丸めずに返す', () => {
+    // 士幌 → 清水 相当: 短距離便ほど 1km あたりが高い。
+    expect(salesPerHaulKm(35112, 38)).toBeCloseTo(924, 6)
+    expect(salesPerHaulKm(10000, 3)).toBeCloseTo(3333.3333333, 6)
+  })
+
+  it('粗利率が null (粗利が出せない / 売上 0) なら色を付けない', () => {
+    expect(marginRateTone(null)).toBeNull()
+  })
+
+  it('55% 以上は high、その手前は色なし', () => {
+    expect(marginRateTone(MARGIN_RATE_HIGH)).toBe('high')
+    expect(marginRateTone(54.9)).toBeNull()
+    expect(marginRateTone(66.7)).toBe('high')
+  })
+
+  it('30% 未満は low、30% ちょうどは色なし', () => {
+    expect(marginRateTone(MARGIN_RATE_LOW)).toBeNull()
+    expect(marginRateTone(29.9)).toBe('low')
+    expect(marginRateTone(23.2)).toBe('low')
+  })
+
+  it('閾値は 55 / 30', () => {
+    expect(MARGIN_RATE_HIGH).toBe(55)
+    expect(MARGIN_RATE_LOW).toBe(30)
   })
 })
 

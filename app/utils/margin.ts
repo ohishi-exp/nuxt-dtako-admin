@@ -1528,7 +1528,41 @@ export function summarizeByCustomerRoute(margins: OperationMargin[]): CustomerRo
 const CUSTOMER_ROUTE_CSV_HEADER = [
   '取引先C', '取引先', '積地', '卸地', '便数', '売上走行km', '回送km',
   '売上', '手当', '燃料代(売上走行)', '回送燃料', '運行経費の配分', '粗利', '粗利率',
+  '売上/売上走行km',
 ]
+
+/**
+ * **売上の距離あたり単価** (円 / 売上走行km、Refs #760 の 20)。丸めない。
+ *
+ * 便の単価は距離に比例していないので、**短距離便ほど 1km あたりの売上が高く、粗利率も高い**
+ * (2026-07 帯広 5 台: 士幌 → 清水 38km で ¥924/km・粗利率 66.7%、対して 200km 級は
+ * ¥120〜170/km)。粗利率の高低がどこから来ているかを、表の 1 列で見えるようにするための値。
+ *
+ * `haulKm <= 0` は割れないので `null` (回送だけの行・便の km が取れていない CSV)。
+ */
+export function salesPerHaulKm(salesYen: number, haulKm: number): number | null {
+  if (haulKm <= 0) return null
+  return salesYen / haulKm
+}
+
+/** 粗利率 (%) の色分けの境目。**以上**が緑。 */
+export const MARGIN_RATE_HIGH = 55
+
+/** 粗利率 (%) の色分けの境目。**未満**が赤。 */
+export const MARGIN_RATE_LOW = 30
+
+/**
+ * 粗利率の色分け (Refs #760 の 20)。**単位は % で受ける** — `marginRate` は比 (0.55) を
+ * 返すので、呼び出し側で 100 倍すること。
+ *
+ * `null` (粗利が出せない / 売上 0) は色を付けない。
+ */
+export function marginRateTone(rate: number | null): 'high' | 'low' | null {
+  if (rate === null) return null
+  if (rate >= MARGIN_RATE_HIGH) return 'high'
+  if (rate < MARGIN_RATE_LOW) return 'low'
+  return null
+}
 
 /**
  * 取引先 × 経路 の CSV (Refs #760 の 15)。**1 行 = 取引先 1 つ × 経路 1 本** (取引先の
@@ -1545,6 +1579,7 @@ export function customerRouteCsvLines(summary: CustomerRouteSummary): string[] {
       round(r.salesYen), round(r.allowanceYen), round(r.fuelHaulYen), round(r.fuelDeadheadYen),
       round(r.runCostShareYen), round(r.grossMarginYen),
       rate(marginRate({ salesYen: r.salesYen, marginYen: r.grossMarginYen })),
+      round(salesPerHaulKm(r.salesYen, r.haulKm)),
     ].map(quote).join(','))),
   ]
 }
