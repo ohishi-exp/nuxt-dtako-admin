@@ -38,6 +38,7 @@ import { fetchAllPages } from '~/utils/paged-fetch'
 import type { Driver, OperationListItem } from '~/types'
 import { extractAllowanceLegs, extractCarryInUnloads, allowanceForLegs } from '~/utils/allowance-trips'
 import { extractOperationIdle, type LegKmDetail } from '~/utils/allowance-idle'
+import { buildOperationRoute, type OperationRoute } from '~/utils/operation-route-map'
 import { parseTargets, serializeTargets, toggleTarget, driverLabel } from '~/utils/allowance-targets'
 import {
   applyCarryOver,
@@ -873,6 +874,37 @@ const visibleDrivers = computed(() => {
 })
 
 const openDrivers = reactive<Record<string, boolean>>({})
+
+/**
+ * 運行行の「地図」モーダル (Refs #760 の 18)。イベントCSV を **その場で 1 回引く**
+ * (`resolveOperation` の集計とは別の呼び出し。運行 1 本の 1 呼び出しなので cache には
+ * 入れない — `MARGIN_CACHE_KEY` の形を変えない)。描く形への変換は
+ * `buildOperationRoute` (pure)、描画は `OperationRouteMap.vue` (dumb)。
+ */
+const routeModal = ref<{
+  unkoNo: string
+  title: string
+  route: OperationRoute | null
+  loading: boolean
+  error: string | null
+} | null>(null)
+
+async function openRouteMap(m: OperationMargin) {
+  const title = `運行 ${m.date} ${m.driverName} 車輌 ${m.vehicleCode} — 便 ${m.legs.length} 本`
+  routeModal.value = { unkoNo: m.unkoNo, title, route: null, loading: true, error: null }
+  let route: OperationRoute | null = null
+  let error: string | null = null
+  try {
+    const csv = await getOperationCsv(m.unkoNo, 'events')
+    route = buildOperationRoute(csv.headers, csv.rows)
+  }
+  catch (e) {
+    error = e instanceof Error ? e.message : String(e)
+  }
+  // 待っている間に別の運行を開いた / 閉じたなら、古い結果で上書きしない。
+  if (routeModal.value?.unkoNo !== m.unkoNo) return
+  routeModal.value = { unkoNo: m.unkoNo, title, route, loading: false, error }
+}
 /** 運行行の開閉 (3 段目の便を出す)。**乗務員行の `openDrivers` と同じ流儀。** */
 const openOperations = reactive<Record<string, boolean>>({})
 
@@ -1404,6 +1436,14 @@ function downloadCustomerRouteCsv() {
                         {{ m.date }}
                       </NuxtLink>
                       <span class="text-gray-400 ml-2">車輌{{ m.vehicleCode }}</span>
+                      <button
+                        type="button"
+                        class="ml-2 rounded border border-gray-300 dark:border-gray-700 px-1.5 py-0.5 text-[11px] text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
+                        title="この運行の経路を地図で見る"
+                        @click.stop="openRouteMap(m)"
+                      >
+                        地図
+                      </button>
                     </td>
                     <td
                       class="px-3 py-1.5 text-right"
@@ -1708,5 +1748,14 @@ function downloadCustomerRouteCsv() {
         </div>
       </template>
     </template>
+
+    <OperationRouteMap
+      v-if="routeModal"
+      :route="routeModal.route"
+      :title="routeModal.title"
+      :loading="routeModal.loading"
+      :error="routeModal.error"
+      @close="routeModal = null"
+    />
   </div>
 </template>
