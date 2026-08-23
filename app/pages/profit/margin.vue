@@ -2028,7 +2028,7 @@ function downloadCustomerRouteCsv() {
         </div>
 
         <!-- 取引先別 × 経路別 (Refs #760 の 15)。乗務員の表の下。 -->
-        <div class="mt-6">
+        <div class="margin-print-page mt-6">
           <div class="margin-print-head flex flex-wrap items-center gap-2 mb-1">
             <p class="text-xs font-medium">
               取引先別 (便を一番星の取引先で束ねたもの)
@@ -2208,7 +2208,7 @@ function downloadCustomerRouteCsv() {
               </tbody>
             </table>
           </div>
-          <div v-if="shareBars.bars.length > 0" class="margin-print-keep mt-3">
+          <div v-if="shareBars.bars.length > 0" class="margin-print-page margin-print-keep mt-3">
             <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500 mb-2">
               <span class="font-medium">売上の内訳 (取引先ごと、売上 = 100%)</span>
               <span v-for="lg in SHARE_SEGMENT_LABELS" :key="lg.key" class="inline-flex items-center gap-1">
@@ -2313,10 +2313,13 @@ function downloadCustomerRouteCsv() {
 
 <style>
 /* 印刷: **区画の切れ目で紙を改める**。ただし**強制改ページは最小限**にして、
-   5 行の表のために 1 枚使うような紙の無駄を出さない (実機 7 枚 → 5 枚。Refs #760 の 37)。
+   5 行の表のために 1 枚使うような紙の無駄を出さない (Refs #760 の 37)。
    小さい区画は `break-inside: avoid` で「割れない」ようにするだけにし、入りきらなければ
-   ブラウザに自然に送らせる。**紙を改めるのは釧路積み (実在しない試算) の手前と、
-   その中の 経路別 の手前だけ**。
+   ブラウザに自然に送らせる。**紙を改めるのは、前の紙に食い込むと表が分断される
+   4 区画だけ** (取引先別 / 売上の内訳 / 釧路積み / 最低賃金の比較)。
+   **どこで改ページするかはオーナーが実際に刷って決めた** — 想定は
+   P1 見出し〜人件費 / P2 燃費・単価 + 乗務員・運行 / P3 取引先別 / P4 売上の内訳 /
+   P5 釧路積み / P6 最低賃金の比較 + 経路別 + 乗務員別 の 6 枚。
    規則は全部 @media print の中に閉じてあるので、**画面表示は 1px も変わらない**。
    色はページ側で触らない — ダークモード中でもライト配色に倒すのは
    `app/assets/css/main.css` の print ブロックの仕事。
@@ -2335,10 +2338,14 @@ function downloadCustomerRouteCsv() {
   .kushiro-print-slider input[type="range"],
   .kushiro-print-hide { display: none !important; }
 
-  /* **紙を改めるのは釧路積みの手前だけ。**「実在しない試算」なので粗利の実績と
-     同じ紙に混ざると誤読される。`break-before: page` には打ち消しを対で置く
-     (この repo の作法) — 区画が紙の先頭に来たときに白紙が 1 枚出るのを防ぐ。
-     集計前 (運行 0 本) はこの区画自体が描画されないので白紙だらけにはならない。 */
+  /* **紙を改める区画** (オーナーが刷って決めた 4 つ。Refs #760 の 37):
+     取引先別 / 売上の内訳 (棒) / 釧路積み / 最低賃金の比較。
+     どれも**前の紙に食い込むと表が分断される**ので紙を改める
+     (釧路積みは加えて「実在しない試算」なので実績と混ぜない)。
+     それ以外は `break-inside: avoid` だけにして紙の無駄を出さない。
+     `break-before: page` には打ち消しを対で置く (この repo の作法) — 区画が紙の
+     先頭に来たときに白紙が 1 枚出るのを防ぐ。集計前 (運行 0 本) はこれらの区画
+     自体が描画されないので白紙だらけにはならない。 */
   .margin-print-page { break-before: page; }
   .margin-print-page:first-child { break-before: auto; }
 
@@ -2370,12 +2377,14 @@ function downloadCustomerRouteCsv() {
   .margin-print-tablewrap th, .margin-print-tablewrap td,
   .margin-print-kushiro th, .margin-print-kushiro td { padding: 2px 3px; border: 1px solid #999; }
 
-  /* 釧路積みの中: **損益分岐の 1 行を最低賃金の表から切り離さない** (次の紙の頭に
-     1 行だけ取り残されていた)。経路別からは紙を改めて、経路別 + 乗務員別 を
-     1 枚にまとめる。ここも打ち消しを対で置く。 */
+  /* 釧路積みの中: **最低賃金の比較から紙を改める** (表が 2 枚に分断され、残り 1 行の
+     ために 9 割余白の紙が出ていた)。**経路別の手前では紙を改めない** — 最低賃金の
+     比較が独立した紙になるので、経路別・乗務員別はその続きに載る。
+     損益分岐の 1 行は最低賃金の表から切り離さない (次の紙の頭に 1 行だけ
+     取り残されていた)。ここも打ち消しを対で置く。 */
+  .margin-print-kushiro .kushiro-print-minwage { break-before: page; }
+  .margin-print-kushiro .kushiro-print-minwage:first-child { break-before: auto; }
   .margin-print-kushiro .kushiro-print-breakeven { break-before: avoid; break-inside: avoid; }
-  .margin-print-kushiro .kushiro-print-routes { break-before: page; }
-  .margin-print-kushiro .kushiro-print-routes:first-child { break-before: auto; }
 
   @page { size: A4 landscape; margin: 8mm; }
 }
