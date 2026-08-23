@@ -1561,7 +1561,7 @@ function downloadCustomerRouteCsv() {
           title="クリックで対象から外す (運行手当タブと共通の設定です)"
           @click="toggle(cd)"
         >
-          {{ labelOf(cd) }} ✕
+          {{ labelOf(cd) }} <span class="margin-print-hide">✕</span>
         </button>
       </div>
     </div>
@@ -1718,7 +1718,7 @@ function downloadCustomerRouteCsv() {
         </div>
 
         <!-- 燃費・単価 -->
-        <div class="margin-print-page mb-4">
+        <div class="margin-print-keep mb-4">
           <p class="text-xs font-medium mb-1">
             燃費・単価 (車輌ごと)
           </p>
@@ -1806,7 +1806,7 @@ function downloadCustomerRouteCsv() {
         <p v-if="visibleDrivers.length === 0" class="text-xs text-gray-400">
           粗利を出せない運行はありません
         </p>
-        <div v-else class="margin-print-page margin-print-tablewrap border border-gray-200 dark:border-gray-800 rounded-lg overflow-x-auto">
+        <div v-else class="margin-print-tablewrap border border-gray-200 dark:border-gray-800 rounded-lg overflow-x-auto">
           <table class="w-full text-xs">
             <thead class="bg-gray-50 dark:bg-gray-800">
               <tr>
@@ -2028,8 +2028,8 @@ function downloadCustomerRouteCsv() {
         </div>
 
         <!-- 取引先別 × 経路別 (Refs #760 の 15)。乗務員の表の下。 -->
-        <div class="margin-print-page mt-6">
-          <div class="flex flex-wrap items-center gap-2 mb-1">
+        <div class="mt-6">
+          <div class="margin-print-head flex flex-wrap items-center gap-2 mb-1">
             <p class="text-xs font-medium">
               取引先別 (便を一番星の取引先で束ねたもの)
             </p>
@@ -2208,7 +2208,7 @@ function downloadCustomerRouteCsv() {
               </tbody>
             </table>
           </div>
-          <div v-if="shareBars.bars.length > 0" class="mt-3">
+          <div v-if="shareBars.bars.length > 0" class="margin-print-keep mt-3">
             <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500 mb-2">
               <span class="font-medium">売上の内訳 (取引先ごと、売上 = 100%)</span>
               <span v-for="lg in SHARE_SEGMENT_LABELS" :key="lg.key" class="inline-flex items-center gap-1">
@@ -2312,41 +2312,51 @@ function downloadCustomerRouteCsv() {
 </template>
 
 <style>
-/* 印刷: **区画の意味の切れ目でちょうど改ページする**。
+/* 印刷: **区画の切れ目で紙を改める**。ただし**強制改ページは最小限**にして、
+   5 行の表のために 1 枚使うような紙の無駄を出さない (実機 7 枚 → 5 枚。Refs #760 の 37)。
+   小さい区画は `break-inside: avoid` で「割れない」ようにするだけにし、入りきらなければ
+   ブラウザに自然に送らせる。**紙を改めるのは釧路積み (実在しない試算) の手前と、
+   その中の 経路別 の手前だけ**。
    規則は全部 @media print の中に閉じてあるので、**画面表示は 1px も変わらない**。
    色はページ側で触らない — ダークモード中でもライト配色に倒すのは
-   `app/assets/css/main.css` の print ブロックの仕事 (Refs #760 の 37)。
+   `app/assets/css/main.css` の print ブロックの仕事。
    A4 横向き想定 (`restraint-wage.vue` と同じ。ブラウザの印刷ダイアログで横向きを選ぶ)。
    `@page` は scoped では効かないので、この style は非 scoped。 */
 @media print {
   aside { display: none !important; }
 
-  /* 操作用の枠 (月・車輌CD・集計・CSV・リンク・絞り込みチェック・配分の select) は
-     紙に要らない。**便/日 のスライダーだけは値が判断材料**なので、つまみと
-     「実測平均に戻す」を消して、隣の `〇.〇〇 便/日` のテキストは残す。 */
+  /* 操作用の枠 (月・車輌CD・集計・CSV・リンク・絞り込みチェック・配分の select・
+     乗務員の検索欄・対象チップの ✕) は紙に要らない。**対象乗務員の名前そのものは残す** —
+     誰を集計したかは紙に要る情報。**便/日 のスライダーも値は判断材料**なので、
+     つまみと「実測平均に戻す」だけ消して隣の `〇.〇〇 便/日` のテキストは残す。 */
   .margin-print-controls,
   .margin-print-hide,
   .margin-print-targets input,
   .kushiro-print-slider input[type="range"],
   .kushiro-print-hide { display: none !important; }
 
-  /* **改ページする区画**: 燃費・単価 / 乗務員・運行 / 取引先別 / 釧路積み。
-     `break-before: page` には打ち消しを対で置く (この repo の作法) — 区画が紙の
-     先頭に来たときに白紙が 1 枚出るのを防ぐ。集計前 (運行 0 本) は
-     この class の付いた区画自体が描画されないので、白紙だらけにはならない。 */
+  /* **紙を改めるのは釧路積みの手前だけ。**「実在しない試算」なので粗利の実績と
+     同じ紙に混ざると誤読される。`break-before: page` には打ち消しを対で置く
+     (この repo の作法) — 区画が紙の先頭に来たときに白紙が 1 枚出るのを防ぐ。
+     集計前 (運行 0 本) はこの区画自体が描画されないので白紙だらけにはならない。 */
   .margin-print-page { break-before: page; }
   .margin-print-page:first-child { break-before: auto; }
 
-  /* 見出し・注記だけが前の紙に取り残されないように */
-  .margin-print-page > p:first-child,
-  .margin-print-page > div:first-child,
-  .margin-print-kushiro h3 { break-after: avoid; }
-
-  /* 小さい枠 (月の合計・粗利の内訳・人件費・2 営業所のカード・売上の棒 1 本) は
-     途中で割らない */
+  /* 割れると読めなくなる区画 (月の合計・粗利の内訳・人件費・燃費と単価・
+     売上の内訳の棒ひとまとまり・2 営業所のカード・棒 1 本) は途中で割らない。
+     入りきらなければブラウザが次の紙へ丸ごと送る。 */
   .margin-print-block,
+  .margin-print-keep,
   .margin-print-bar,
   .kushiro-print-depots > div { break-inside: avoid; }
+
+  /* 見出し・注記だけが前の紙に取り残されないように */
+  .margin-print-head,
+  .margin-print-kushiro h3,
+  .margin-print-kushiro .kushiro-print-badge,
+  .margin-print-kushiro .kushiro-print-note { break-after: avoid; }
+  .margin-print-kushiro .kushiro-print-badge,
+  .margin-print-kushiro .kushiro-print-note { break-inside: avoid; }
 
   /* **表は紙の境目で行が割れないようにする。** 横スクロールの器は紙だと中身が
      切れるだけなので可視に戻す。列見出しは Chrome が thead を各ページの頭に
@@ -2360,10 +2370,12 @@ function downloadCustomerRouteCsv() {
   .margin-print-tablewrap th, .margin-print-tablewrap td,
   .margin-print-kushiro th, .margin-print-kushiro td { padding: 2px 3px; border: 1px solid #999; }
 
-  /* 釧路積みは**実在しない試算**。粗利の実績と同じ紙に混ざると誤読されるので
-     必ず紙を改め、**バッジと読み方の注記は本体と同じページに載せる**。 */
-  .margin-print-kushiro .kushiro-print-badge,
-  .margin-print-kushiro .kushiro-print-note { break-after: avoid; break-inside: avoid; }
+  /* 釧路積みの中: **損益分岐の 1 行を最低賃金の表から切り離さない** (次の紙の頭に
+     1 行だけ取り残されていた)。経路別からは紙を改めて、経路別 + 乗務員別 を
+     1 枚にまとめる。ここも打ち消しを対で置く。 */
+  .margin-print-kushiro .kushiro-print-breakeven { break-before: avoid; break-inside: avoid; }
+  .margin-print-kushiro .kushiro-print-routes { break-before: page; }
+  .margin-print-kushiro .kushiro-print-routes:first-child { break-before: auto; }
 
   @page { size: A4 landscape; margin: 8mm; }
 }

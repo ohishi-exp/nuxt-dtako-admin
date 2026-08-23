@@ -252,7 +252,7 @@ const TONE_CLASS: Record<Tone, string> = {
           </tbody>
         </table>
       </div>
-      <p class="text-[11px] text-gray-500 mb-4">
+      <p class="kushiro-print-breakeven text-[11px] text-gray-500 mb-4">
         <span v-for="d in selected.depots" :key="d.depot" class="mr-3">
           {{ d.label }}: 最低賃金をちょうど満たす 便/日 <b>{{ fmtNum(minWageLegsPerDay[d.depot], 2) }}</b> ·
           営業利益 0 以上になる最小の候補 <b>{{ fmtNum(breakEvenLegsPerDay[d.depot], 3) }}</b>
@@ -263,7 +263,7 @@ const TONE_CLASS: Record<Tone, string> = {
       </p>
 
       <!-- 経路別 -->
-      <h3 class="text-xs font-semibold mb-1">
+      <h3 class="kushiro-print-routes text-xs font-semibold mb-1">
         経路別 (積地 → 卸地)
       </h3>
       <div class="overflow-x-auto mb-4">
