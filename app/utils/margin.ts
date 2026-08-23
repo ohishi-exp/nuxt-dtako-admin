@@ -1157,7 +1157,9 @@ export function driverDirectCostTitle(d: DriverMargin, byUnko: Map<string, Direc
   }
   const kinds = [...byKind.entries()]
     .sort((a, b) => b[1].yen - a[1].yen)
-    .map(([kind, e]) => `${kind}(変動) ${titleYen(e.yen)} (${e.count} 件)`)
+    // `cost_kind_name` をそのまま出す。実値は **既に「車輌修繕費(変動)」の形** (経費種別ﾏｽﾀ)
+    // なので、ここで「(変動)」を後付けすると二重になる。
+    .map(([kind, e]) => `${kind} ${titleYen(e.yen)} (${e.count} 件)`)
   const sorted = [...rows].sort((a, b) => b.yen - a.yen)
   const top = sorted.slice(0, DIRECT_COST_TITLE_TOP).map(r => `${r.date.slice(5)} ${directRowLabel(r)}`)
   const rest = sorted.length - top.length

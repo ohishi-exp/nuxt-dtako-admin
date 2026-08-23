@@ -1592,7 +1592,7 @@ describe('固定費按分の中身 (fixedPoolByVehicle)', () => {
 describe('直課経費の中身 (directRowsByUnko)', () => {
   /** 2026-07 の実例 (車輌1420 07-13 / 車輌1109 07-15) の形。 */
   const repair = (over: Partial<CostRow> = {}) => cost({
-    costKind: '05', costKindName: '車輌修繕費', costName: '一般修理費',
+    costKind: '05', costKindName: '車輌修繕費(変動)', costName: '一般修理費',
     operationDate: '2026-07-13', vehicleNumber: '1420', amount: 206060,
     remarks: 'ﾄﾞｰｼﾞﾝｸﾞﾕﾆｯﾄ交換', vendorName: '三菱ふそう', ...over,
   })
@@ -1613,8 +1613,8 @@ describe('直課経費の中身 (directRowsByUnko)', () => {
       {},
     )
     expect(res.directRowsByUnko.get('A')).toEqual([
-      { date: '2026-07-13', costKindName: '車輌修繕費', costName: '一般修理費', yen: 206060, remarks: 'ﾄﾞｰｼﾞﾝｸﾞﾕﾆｯﾄ交換', vendorName: '三菱ふそう' },
-      { date: '2026-07-13', costKindName: '車輌修繕費', costName: '一般修理費', yen: 12000, remarks: 'ﾊｰﾈｽ配線修理', vendorName: '三菱ふそう' },
+      { date: '2026-07-13', costKindName: '車輌修繕費(変動)', costName: '一般修理費', yen: 206060, remarks: 'ﾄﾞｰｼﾞﾝｸﾞﾕﾆｯﾄ交換', vendorName: '三菱ふそう' },
+      { date: '2026-07-13', costKindName: '車輌修繕費(変動)', costName: '一般修理費', yen: 12000, remarks: 'ﾊｰﾈｽ配線修理', vendorName: '三菱ふそう' },
     ])
     // 額は今までどおり (一覧を返しても直課の計算は 1 ミリも変えていない)
     expect(res.operations[0]!.directCostYen).toBe(218060)
@@ -1704,7 +1704,7 @@ describe('直課経費の中身 (directRowsByUnko)', () => {
   })
 
   describe('乗務員行の title (driverDirectCostTitle)', () => {
-    it('頭に乗務員と運行数、種別ごとの合計と件数、金額の大きい順の行 (日付付き)', () => {
+    it('頭に乗務員と運行数、種別ごとの合計と件数 (種別名は cost_kind_name そのまま)、金額の大きい順の行 (日付付き)', () => {
       const res = buildOperationMargins(
         [
           op({ unkoNo: 'A', date: '2026-07-13', vehicleCode: '1420', driverName: '西島', totalKm: 100 }),
@@ -1720,8 +1720,9 @@ describe('直課経費の中身 (directRowsByUnko)', () => {
       const [d] = groupMarginsByDriver(res.operations)
       expect(driverDirectCostTitle(d!, res.directRowsByUnko).split('\n')).toEqual([
         '直課経費の中身 — 西島 の 2 運行ぶん',
+        // **「(変動)」は後付けしない** — 経費種別ﾏｽﾀの名前が既に「車輌修繕費(変動)」
         '車輌修繕費(変動) ¥218,060 (2 件)',
-        '通行料(変動) ¥3,000 (1 件)',
+        '通行料 ¥3,000 (1 件)',
         '07-13 一般修理費 ¥206,060 ﾄﾞｰｼﾞﾝｸﾞﾕﾆｯﾄ交換 (三菱ふそう)',
         '07-13 一般修理費 ¥12,000 ﾊｰﾈｽ配線修理 (三菱ふそう)',
         '07-15 通行料 ¥3,000',
@@ -1739,7 +1740,7 @@ describe('直課経費の中身 (directRowsByUnko)', () => {
       expect(DIRECT_COST_TITLE_TOP).toBe(10)
       expect(lines).toHaveLength(1 + 1 + 10 + 1)
       expect(lines[0]).toBe('直課経費の中身 — 佐竹 繁 の 1 運行ぶん')
-      expect(lines[1]).toBe('通行料(変動) ¥9,100 (13 件)')
+      expect(lines[1]).toBe('通行料 ¥9,100 (13 件)')
       expect(lines[2]).toBe('07-01 通行料 ¥1,300')
       expect(lines[11]).toBe('07-01 通行料 ¥400')
       expect(lines[12]).toBe('…他 3 行')
