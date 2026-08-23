@@ -391,6 +391,27 @@ export interface KmBreakdown {
   otherKm: number
 }
 
+/**
+ * 便 1 本ぶんの粗利の入力 (Refs #760 の 13)。運行の売上・手当と同じ基準
+ * (除外した便・対象月外の便は入れない) で、`rowsByUnko` が持つ便と 1 対 1。
+ */
+export interface MarginLegInput {
+  /** `AllowanceReportRow.seq` (1 始まり、積みの順番 = `legKm` の index + 1)。 */
+  seq: number
+  date: string
+  originCity: string
+  destCity: string
+  salesYen: number
+  allowanceYen: number
+  /** その便の売上走行km (`legKmDetail[seq-1].haulKm`)。 */
+  haulKm: number
+  /**
+   * その便の回送km (`approachKm + tailKm + otherKm`)。**その便へ向かう移動**
+   * (1 便目は積前、2 便目以降は直前の便間) に、最後の便だけ帰庫ぶんが乗る。
+   */
+  deadheadKm: number
+}
+
 /** 粗利を出す 1 運行ぶんの入力。売上・手当・距離は呼び出し側が既に持っている。 */
 export interface MarginOperationInput {
   unkoNo: string
@@ -415,6 +436,11 @@ export interface MarginOperationInput {
   kmBreakdown: KmBreakdown
   salesYen: number
   allowanceYen: number
+  /**
+   * 便ごとの入力 (Refs #760 の 13)。**運行の粗利には 1 円も効かない** — 便の段は
+   * この入力から独立に出す (運行の燃料・按分の式は #770 のまま動かさない)。
+   */
+  legs: MarginLegInput[]
 }
 
 /** 運行 1 本の粗利。 */
@@ -471,6 +497,35 @@ export interface OperationMargin {
    * 粗利は出さない。
    */
   costsMissing: boolean
+  /**
+   * 便ごとの粗利 (Refs #760 の 13)。**運行の `fuelYen`/`marginYen` には 1 円も
+   * 効かない** — 直課経費・固定費按分は便に割らず、運行の段に残す (便の収支は
+   * 「売上 − 手当 − 燃料」であって粗利ではない)。便が揃っている運行では
+   * `Σ fuelDeadheadYen ≈ 運行の fuelDeadheadYen` (丸めの範囲)。**除外・対象月外で
+   * 便が欠ける運行や、便の無い運行では一致しない** — 正常。
+   */
+  legs: LegMargin[]
+}
+
+/** 便 1 本ぶんの粗利 (`OperationMargin.legs` の要素)。 */
+export interface LegMargin {
+  seq: number
+  date: string
+  originCity: string
+  destCity: string
+  salesYen: number
+  allowanceYen: number
+  haulKm: number
+  deadheadKm: number
+  /** 売上走行ぶんの燃料代 = `haulKm ÷ kmPerLiter × yenPerLiter`。`FuelRate` が無ければ null。 */
+  fuelHaulYen: number | null
+  /** 回送 (その便へ向かう移動) ぶんの燃料代。`fuelHaulYen` と同時に null になる。 */
+  fuelDeadheadYen: number | null
+  /**
+   * その便の収支 = 売上 − 手当 − 燃料 (売上走行 + 回送)。**粗利ではない** —
+   * 直課経費・固定費按分は便に割らず運行の段に残す。`FuelRate` が無ければ null。
+   */
+  marginYen: number | null
 }
 
 /** 粗利の式。**1 か所にだけ置く** — 合計と行で式が分かれると静かにずれる。 */
@@ -611,6 +666,38 @@ export interface MarginResult {
 }
 
 /**
+ * 便ごとの粗利を出す (Refs #760 の 13)。**運行と同じ `fuelRate` (単価・燃費)** を使う —
+ * 便だけ別の単価で出すと、Σ便の燃料代が運行の燃料代からずれる理由が「便が違う単価を
+ * 使っているから」になり、検算できなくなる。
+ *
+ * 直課経費・固定費按分は便に割らない (運行の段に残す)。**`marginYen` は粗利ではなく
+ * 「売上 − 手当 − 燃料」の収支**。
+ */
+function buildLegMargins(legs: MarginLegInput[], fuelRate: FuelRate): LegMargin[] {
+  return legs.map((leg) => {
+    const fuelHaulYen = fuelYenFor(leg.haulKm, fuelRate)
+    const fuelDeadheadYen = fuelYenFor(leg.deadheadKm, fuelRate)
+    return {
+      seq: leg.seq,
+      date: leg.date,
+      originCity: leg.originCity,
+      destCity: leg.destCity,
+      salesYen: leg.salesYen,
+      allowanceYen: leg.allowanceYen,
+      haulKm: leg.haulKm,
+      deadheadKm: leg.deadheadKm,
+      fuelHaulYen,
+      fuelDeadheadYen,
+      // **燃料代が出せなければ収支も出さない。** `fuelHaulYen`/`fuelDeadheadYen` は
+      // 同じ `fuelRate` から出るので同時に null になる (`fuelYenFor` の仕様)。
+      marginYen: fuelHaulYen === null || fuelDeadheadYen === null
+        ? null
+        : leg.salesYen - leg.allowanceYen - fuelHaulYen - fuelDeadheadYen,
+    }
+  })
+}
+
+/**
  * 運行ごとの粗利を出す。
  *
  * `costs` は対象月・対象車輌の経費明細をぜんぶ (種別で絞らずに) 渡す —
@@ -686,6 +773,7 @@ export function buildOperationMargins(
       laborYen: spreadLabor.direct[i]! + spreadLabor.allocated[i]!,
       fuelRate,
       costsMissing,
+      legs: buildLegMargins(op.legs, fuelRate),
     }
   })
 
@@ -976,6 +1064,28 @@ export function marginCsvLines(margins: OperationMargin[]): string[] {
   ]
 }
 
+const LEG_CSV_HEADER = [
+  '運行NO', '日付', '乗務員', '車輌C', '便', '積地', '卸地',
+  '売上走行km', '回送km', '売上', '手当', '燃料代(売上走行)', '回送燃料', '便の収支',
+]
+
+/**
+ * 便 1 行ずつの粗利 CSV (Refs #760 の 13)。**運行の CSV とは別の関数** — 運行の
+ * `marginCsvLines` はここでは触らない。値にカンマが入りうるので必ず引用する。
+ */
+export function marginLegCsvLines(margins: OperationMargin[]): string[] {
+  const quote = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`
+  const round = (v: number | null) => (v === null ? '' : Math.round(v))
+  return [
+    LEG_CSV_HEADER.map(quote).join(','),
+    ...margins.flatMap(m => m.legs.map(leg => [
+      m.unkoNo, leg.date, m.driverName, m.vehicleCode, leg.seq, leg.originCity, leg.destCity,
+      round(leg.haulKm), round(leg.deadheadKm), leg.salesYen, leg.allowanceYen,
+      round(leg.fuelHaulYen), round(leg.fuelDeadheadYen), round(leg.marginYen),
+    ].map(quote).join(','))),
+  ]
+}
+
 // --- 粗利の対象外 (一番星から起こした便) ---
 
 /**
@@ -1068,8 +1178,12 @@ export function summarizeUncoveredLegs(legs: IchibanLeg[]): UncoveredTotals | nu
  * `総走行距離` (`listedTotalKm`) を足した。`v3` を読ませないのは、**二重計上された
  * `totalKm` がキャッシュ経路だけに残る**ため (燃費が 1.8 倍に見える古い値を、
  * 「キャッシュから」の注意書きだけで出し続けることになる)。
+ *
+ * `v5` で**便ごとの入力** (`MarginOperationInput.legs`) を足した (Refs #760 の 13)。
+ * `v4` を読ませないのは、**便の段の欄が無いキャッシュを読むと便が 1 本も出ない**
+ * (`legs: undefined` を空配列にできず、画面の新しい段だけ永久に空くため)。
  */
-export const MARGIN_CACHE_KEY = 'dtako:margin:cache:v4'
+export const MARGIN_CACHE_KEY = 'dtako:margin:cache:v5'
 
 /**
  * 直前の集計。**運行手当タブのキャッシュとはキーを分ける** — あちらは便と明細を
