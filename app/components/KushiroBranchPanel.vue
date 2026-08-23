@@ -203,7 +203,7 @@ const TONE_CLASS: Record<Tone, string> = {
       </div>
 
       <!-- 最低賃金の比較 -->
-      <h3 class="text-xs font-semibold mb-1">
+      <h3 class="kushiro-print-minwage text-xs font-semibold mb-1">
         最低賃金の比較 (帯広発 vs 釧路発)
       </h3>
       <p class="text-[11px] text-gray-500 mb-1">
@@ -263,7 +263,7 @@ const TONE_CLASS: Record<Tone, string> = {
       </p>
 
       <!-- 経路別 -->
-      <h3 class="kushiro-print-routes text-xs font-semibold mb-1">
+      <h3 class="text-xs font-semibold mb-1">
         経路別 (積地 → 卸地)
       </h3>
       <div class="overflow-x-auto mb-4">
