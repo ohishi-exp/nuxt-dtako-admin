@@ -113,6 +113,39 @@ export interface OperationIdle {
    * 「距離が分からない」を呼び出し側が区別できるようにする。
    */
   legKm: number[]
+  /**
+   * 便ごとの走行距離の内訳 (Refs #760 の 13)。**`legKm` と同じ順・同じ本数**
+   * (`区間距離` の列が無い CSV では空配列)。
+   *
+   * `haulKm`/`approachKm`/`tailKm`/`otherKm` は既存フィールド (`preLoadKm` 等) から
+   * **後付けで派生**させたもので、便の数え方・既存フィールドの値には一切影響しない。
+   *
+   * 回送 (売上が立たない移動) を**その便へ向かう移動**として便に割り当てる規則:
+   * - 1 便目の `approachKm` = 運行の `preLoadKm` (始業 → 最初の積み)
+   * - 2 便目以降の `approachKm` = 直前の便の `betweenKm` ぶん (前の便の最後の降し →
+   *   この便の積み)
+   * - **最後の便だけ** `tailKm` に `postUnloadKm` (最後の降し → 終業) が乗る
+   * - 降しの無い便の走行 (`otherKm`) は、その便自身に乗る (どの便にも回送として
+   *   割り当てない)
+   *
+   * 不変条件 (便がある運行、丸めなし): `Σ haulKm === kmBreakdown.haulKm` /
+   * `Σ approachKm === preLoadKm + betweenKm` / `Σ tailKm === postUnloadKm` /
+   * `Σ otherKm === otherKm`。**運行の燃料代・回送燃料・粗利は 1 円も変えない**
+   * (`margin.ts` は運行の段の計算式をそのまま使い、便の段はこの内訳から独立に出す)。
+   */
+  legKmDetail: LegKmDetail[]
+}
+
+/** 便 1 本ぶんの走行距離の内訳 (`OperationIdle.legKmDetail` の要素)。 */
+export interface LegKmDetail {
+  /** その便の売上走行km (= `legKm[i]` と同じ値)。 */
+  haulKm: number
+  /** その便へ向かう回送km (1 便目は積前、2 便目以降は直前の便間)。 */
+  approachKm: number
+  /** 最後の便だけ乗る、帰庫ぶん (降後) の回送km。それ以外の便は 0。 */
+  tailKm: number
+  /** 降しが無い便の走行 (分類不能)。その便自身に乗る。降しがあれば 0。 */
+  otherKm: number
 }
 
 /** 便 = 積み 1 つと、その便の最後の降しまでの時刻・距離。 */
@@ -169,6 +202,7 @@ function emptyIdle(): OperationIdle {
     postUnloadKm: 0,
     otherKm: 0,
     legKm: [],
+    legKmDetail: [],
   }
 }
 
@@ -270,6 +304,9 @@ export function extractOperationIdle(headers: string[], rows: string[][]): Opera
   let betweenKm = 0
   let postUnloadKm = 0
   let otherKm = 0
+  // 便ごとの回送内訳 (Refs #760 の 13)。上のループが出す値から**後付けで派生**させる
+  // だけで、上のループ自体・その結果 (haulKm 等) には一切手を加えない。
+  const legKmDetail: LegKmDetail[] = []
   for (let i = 0; i < legs.length; i++) {
     const leg = legs[i]!
     if (leg.loadTs !== null && leg.unloadTs !== null) haulSec += leg.unloadTs - leg.loadTs
@@ -283,6 +320,17 @@ export function extractOperationIdle(headers: string[], rows: string[][]): Opera
     // 降しの後に次の便があれば便間、無ければ 降し→終業。
     else if (i < legs.length - 1) betweenKm += leg.tailKm
     else postUnloadKm += leg.tailKm
+
+    // **その便へ向かう回送**: 1 便目は積前 (`preRollKm`)、2 便目以降は直前の便の
+    // 便間ぶん (前の便に降しがあれば `prev.tailKm`、無ければ 0 — その走行は前の便の
+    // `otherKm` 側にもう乗っている)。最後の便だけ帰庫ぶん (`postUnloadKm` に乗るのと
+    // 同じ判定) を `tailKm` に足す。降しが無い便の走行は常にその便自身の `otherKm`。
+    legKmDetail.push({
+      haulKm: leg.unloadKm,
+      approachKm: i === 0 ? preRollKm : (prev!.hasUnload ? prev!.tailKm : 0),
+      tailKm: i === legs.length - 1 && leg.hasUnload ? leg.tailKm : 0,
+      otherKm: leg.hasUnload ? 0 : leg.tailKm,
+    })
   }
 
   let preLoadKm = preRollKm
@@ -310,5 +358,6 @@ export function extractOperationIdle(headers: string[], rows: string[][]): Opera
     otherKm,
     // 距離の列そのものが無い CSV は空配列。「全便 0km」と混同させない。
     legKm: distIdx < 0 ? [] : legs.map(leg => leg.unloadKm),
+    legKmDetail: distIdx < 0 ? [] : legKmDetail,
   }
 }

@@ -18,6 +18,7 @@ import {
   emptyMarginTotals,
   groupMarginsByDriver,
   marginCsvLines,
+  marginLegCsvLines,
   splitFuelYen,
   noMarginReason,
   summarizeNoMarginReasons,
@@ -34,6 +35,7 @@ import {
   type CostRow,
   type CostsDailyApiRow,
   type MarginOperationInput,
+  type MarginLegInput,
   type OperationMargin,
   type UncoveredDriverInput,
 } from '~/utils/margin'
@@ -81,6 +83,22 @@ function op(over: Partial<MarginOperationInput> = {}): MarginOperationInput {
     kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 },
     salesYen: 50000,
     allowanceYen: 8000,
+    legs: [],
+    ...over,
+  }
+}
+
+/** 便 1 本ぶんの入力 (Refs #760 の 13)。 */
+function leg(over: Partial<MarginLegInput> = {}): MarginLegInput {
+  return {
+    seq: 1,
+    date: '2026-07-01',
+    originCity: '北海道釧路市',
+    destCity: '浦幌町',
+    salesYen: 20000,
+    allowanceYen: 3000,
+    haulKm: 40,
+    deadheadKm: 15,
     ...over,
   }
 }
@@ -653,6 +671,7 @@ describe('summarizeMargins', () => {
     laborYen: 30000,
     fuelRate: { yenPerLiter: 120, kmPerLiter: 5, dieselTaxPerLiter: 32.1 },
     costsMissing: false,
+    legs: [],
   }
 
   it('空なら 0 だけ', () => {
@@ -718,6 +737,7 @@ describe('groupMarginsByDriver', () => {
     laborYen: 0,
     fuelRate: emptyFuelRate(),
     costsMissing: false,
+    legs: [],
   }
 
   it('乗務員ごとに畳んで名前順に並べる', () => {
@@ -758,6 +778,7 @@ describe('marginCsvLines', () => {
     laborYen: 30000,
     fuelRate: { yenPerLiter: 120, kmPerLiter: 5, dieselTaxPerLiter: 32.1 },
     costsMissing: false,
+    legs: [],
   }
 
   it('ヘッダと 1 行を出し、引用符をエスケープする', () => {
@@ -917,6 +938,7 @@ describe('summarizeNoMarginReasons', () => {
     laborYen: 0,
     fuelRate: { yenPerLiter: 120, kmPerLiter: 5, dieselTaxPerLiter: 0 },
     costsMissing: false,
+    legs: [],
   }
 
   it('粗利が出ている運行しか無ければ空', () => {
@@ -1063,6 +1085,7 @@ describe('走行km の内訳 (kmBreakdown)', () => {
     laborYen: 30000,
     fuelRate: { yenPerLiter: 120, kmPerLiter: 5, dieselTaxPerLiter: 32.1 },
     costsMissing: false,
+    legs: [],
   }
 
   it('入力の内訳をそのまま運行の粗利に運ぶ (按分の分子は totalKm のまま)', () => {
@@ -1123,12 +1146,10 @@ describe('走行km の内訳 (kmBreakdown)', () => {
     expect(row.slice(at, at + 7)).toEqual(['100', '10', '61', '25', '4', '0', '500'])
   })
 
-  it('キャッシュのキーは v4 — 二重計上された走行km の旧キャッシュ (v3) を読ませない', () => {
-    // 形を変えたら番号を上げる規約。**上げ忘れると `kmBreakdown` が無い行を画面が読む**
-    // (#760 の 4 が v2 を取っているので、内訳を足した版は v3)。
-    // v4 は**走行km の数え方が変わった**版 (重ね掛け行を足さない。#760 の 7)。
-    // v3 を読ませると、燃費が 1.8 倍に見える古い値がキャッシュ経路だけに残る。
-    expect(MARGIN_CACHE_KEY).toBe('dtako:margin:cache:v4')
+  it('キャッシュのキーは v5 — 便ごとの入力が無い旧キャッシュ (v4) を読ませない', () => {
+    // 形を変えたら番号を上げる規約。**上げ忘れると `kmBreakdown`/`legs` が無い行を
+    // 画面が読む** (#760 の 4 が v2、7 が v4。便ごとの入力を足した版は v5、#760 の 13)。
+    expect(MARGIN_CACHE_KEY).toBe('dtako:margin:cache:v5')
   })
 })
 
@@ -1525,5 +1546,117 @@ describe('固定費按分の中身 (fixedPoolByVehicle)', () => {
     )
     expect(res.unallocatedCostYen).toBe(1000)
     expect(res.fixedPoolByVehicle.get('9999')).toHaveLength(1)
+  })
+})
+
+/**
+ * 便ごとの粗利 (Refs #760 の 13)。
+ *
+ * **運行の粗利には 1 円も効かない** — 便の段はこの入力から独立に出す
+ * (直課経費・固定費按分は便に割らず、運行の段に残す)。
+ */
+describe('便ごとの粗利 (legs)', () => {
+  it('便ごとの燃料代・収支を計算する (運行と同じ単価・燃費)', () => {
+    const res = buildOperationMargins(
+      [op({
+        totalKm: 100,
+        legs: [leg({ seq: 1, haulKm: 40, deadheadKm: 20, salesYen: 20000, allowanceYen: 3000 })],
+      })],
+      // 単価 2400÷20 = 120 円/L、燃費 100÷20 = 5 km/L (運行と同じ経費から出す)
+      [cost({ costKind: FUEL_KIND, quantity: 20, amount: 2400 })],
+      {},
+    )
+    const l = res.operations[0]!.legs[0]!
+    expect(l.seq).toBe(1)
+    // 40÷5×120 = 960 / 20÷5×120 = 480
+    expect(l.fuelHaulYen).toBe(960)
+    expect(l.fuelDeadheadYen).toBe(480)
+    expect(l.marginYen).toBe(20000 - 3000 - 960 - 480)
+  })
+
+  it('**不変条件** 便が揃っている運行では Σ便の回送燃料 が運行の回送燃料と 1 円未満で一致する', () => {
+    const res = buildOperationMargins(
+      [op({
+        totalKm: 100,
+        // preLoad10 + between25 + postUnload5 = 40 (回送) / haul60 (売上走行)
+        kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 },
+        legs: [
+          // 1 便目: 積前 (10) ぶんの回送
+          leg({ seq: 1, haulKm: 30, deadheadKm: 10 }),
+          // 2 便目 (最後): 便間 + 降後 (25+5=30) ぶんの回送
+          leg({ seq: 2, haulKm: 30, deadheadKm: 30 }),
+        ],
+      })],
+      [cost({ costKind: FUEL_KIND, quantity: 20, amount: 2400 })],
+      {},
+    )
+    const m = res.operations[0]!
+    const legSum = m.legs.reduce((sum, l) => sum + (l.fuelDeadheadYen ?? 0), 0)
+    expect(Math.abs(legSum - m.fuelDeadheadYen!)).toBeLessThan(1)
+    // 便の合計 haulKm/deadheadKm も運行の内訳に一致する (このテストの前提)
+    expect(m.legs.reduce((sum, l) => sum + l.haulKm, 0)).toBe(m.kmBreakdown.haulKm)
+  })
+
+  it('FuelRate が出せない (燃料の給油実績が無い) 運行は便の燃料も収支も null', () => {
+    const res = buildOperationMargins(
+      [op({ totalKm: 100, legs: [leg()] })],
+      [], // 経費 0 件 → 燃費が出せない
+      {},
+    )
+    const l = res.operations[0]!.legs[0]!
+    expect(l.fuelHaulYen).toBeNull()
+    expect(l.fuelDeadheadYen).toBeNull()
+    expect(l.marginYen).toBeNull()
+  })
+
+  it('便の無い運行 (legs: []) は legs が空配列のまま', () => {
+    const res = buildOperationMargins([op({ totalKm: 100, legs: [] })], [], {})
+    expect(res.operations[0]!.legs).toEqual([])
+  })
+
+  it('marginLegCsvLines は便ごとに 1 行、運行の CSV とは別の列を出す', () => {
+    const res = buildOperationMargins(
+      [op({
+        unkoNo: 'A"1',
+        totalKm: 100,
+        legs: [leg({
+          seq: 1, date: '2026-07-01', originCity: '北海道釧路市', destCity: '浦幌町',
+          haulKm: 40.5, deadheadKm: 20.4, salesYen: 20000, allowanceYen: 3000,
+        })],
+      })],
+      [cost({ costKind: FUEL_KIND, quantity: 20, amount: 2400 })],
+      {},
+    )
+    const lines = marginLegCsvLines(res.operations)
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toBe([
+      '運行NO', '日付', '乗務員', '車輌C', '便', '積地', '卸地',
+      '売上走行km', '回送km', '売上', '手当', '燃料代(売上走行)', '回送燃料', '便の収支',
+    ].map(v => `"${v}"`).join(','))
+    // 引用符のエスケープは運行の CSV と同じ流儀 (運行NO に " が入る → "" にエスケープ)。
+    // 40.5÷5×120=972 (売上走行) / 20.4÷5×120=489.6→490 (回送) /
+    // 20000−3000−972−489.6=15538.4→15538 (丸め前の値で計算する便の収支)
+    expect(lines[1]).toBe([
+      '"A""1"', '"2026-07-01"', '"佐竹 繁"', '"1109"', '"1"', '"北海道釧路市"', '"浦幌町"',
+      '"41"', '"20"', '"20000"', '"3000"', '"972"', '"490"', '"15538"',
+    ].join(','))
+  })
+
+  it('便が無い運行は marginLegCsvLines に 1 行も出ない (ヘッダだけ)', () => {
+    const res = buildOperationMargins([op({ totalKm: 100, legs: [] })], [], {})
+    expect(marginLegCsvLines(res.operations)).toHaveLength(1)
+  })
+
+  it('FuelRate が出せない便は marginLegCsvLines の燃料・収支の列を空にする', () => {
+    const res = buildOperationMargins(
+      [op({ totalKm: 100, legs: [leg({ haulKm: 40, deadheadKm: 20 })] })],
+      [], // 経費 0 件 → 燃費が出せない
+      {},
+    )
+    const row = marginLegCsvLines(res.operations)[1]!
+    expect(row).toBe([
+      '"2607011000000000001109"', '"2026-07-01"', '"佐竹 繁"', '"1109"', '"1"',
+      '"北海道釧路市"', '"浦幌町"', '"40"', '"20"', '"20000"', '"3000"', '""', '""', '""',
+    ].join(','))
   })
 })
