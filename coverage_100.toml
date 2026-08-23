@@ -357,3 +357,12 @@ branches = true
 [[files]]
 path = "app/utils/kushiro-doto-rebuild.ts"
 branches = true
+
+# 粗利タブの入力 → 釧路営業所の組み直し試算の入力 (Refs #760 の 35)。marker を便ごとに
+# 畳む mapper と、`MarginOperationInput[]` + 座標 → `RebuildOperationInput[]` の組み立て、
+# 保存 (別キー) だけの pure util。**共有 fixture (道東 23 運行) に 1 バイトも違わず戻る**
+# ことをテストが固定している。
+# branches: BR() で包んだ instrumented コピーで**全分岐の両側**を実測してから登録。
+[[files]]
+path = "app/utils/margin-rebuild-input.ts"
+branches = true

@@ -39,6 +39,15 @@ import type { Driver, OperationListItem } from '~/types'
 import { extractAllowanceLegs, extractCarryInUnloads, allowanceForLegs } from '~/utils/allowance-trips'
 import { extractOperationIdle, type LegKmDetail } from '~/utils/allowance-idle'
 import {
+  legPointsByLegSeq,
+  buildRebuildOperationInputs,
+  parseLegPoints,
+  serializeLegPoints,
+  MARGIN_LEG_POINTS_KEY,
+  type LegPoints,
+  type LegPointsCache,
+} from '~/utils/margin-rebuild-input'
+import {
   buildOperationRoute,
   buildOverlayTrack,
   pickLegsFromRoute,
@@ -169,6 +178,13 @@ const savedAt = ref('')
 /** 粗利の入力 (運行 1 本 = 1 行) と、対象月・対象車輌の経費明細。 */
 const inputs = ref<MarginOperationInput[]>([])
 const costs = ref<CostRow[]>([])
+/**
+ * 運行NO → 便 (`seq`) → 積地・卸地の実測 GPS (Refs #760 の 35)。**粗利の数字には
+ * 1 円も効かない** — 釧路営業所の組み直し試算 (`rebuildInputs`) の材料にするだけ。
+ * `MARGIN_CACHE_KEY` とは**別のキー**に保存する (粗利の集計は GPS を 1 つも見ない
+ * ので、片方が壊れてももう片方は動く)。
+ */
+const legPointsByUnko = ref<Map<string, Map<number, LegPoints>>>(new Map())
 /** 車輌C → 人が入れた燃費・単価 (localStorage)。既定値は実績。 */
 const fuelRates = ref<FuelRateMap>({})
 /**
@@ -327,12 +343,30 @@ function restoreFromCache() {
   if (!cache || cache.ym !== ym.value) return
   inputs.value = cache.operations
   costs.value = cache.costs
+  legPointsByUnko.value = restoredLegPoints(cache.ym)
   uncovered.value = cache.uncovered
   crossMonth.value = cache.crossMonth
   shownYm.value = cache.ym
   savedAt.value = cache.savedAt
   restoredFromCache.value = true
   status.value = 'ready'
+}
+
+/**
+ * 保存済みの便ごとの GPS。**読めなくても粗利の画面は 1 円も変わらない**ので、
+ * 注記も出さずに空で返す (組み直し試算が「座標の欠測」として数える)。
+ */
+function restoredLegPoints(ym: string): Map<string, Map<number, LegPoints>> {
+  let stored: LegPointsCache | null = null
+  try {
+    stored = parseLegPoints(localStorage.getItem(MARGIN_LEG_POINTS_KEY))
+  }
+  catch {
+    return new Map()
+  }
+  // **月が違うキャッシュは使わない** (`MarginCache` と同じ判断)。
+  if (!stored || stored.ym !== ym) return new Map()
+  return stored.points
 }
 
 function writeCache() {
@@ -351,6 +385,14 @@ function writeCache() {
   catch (e) {
     // 容量超過が現実的な失敗。次回また全部引くだけで、画面の数字は正しい。
     cacheNote.value = `キャッシュを保存できませんでした (次回も取り直します) — ${e instanceof Error ? e.message : String(e)}`
+  }
+  // **GPS は別のキー・別の try** (Refs #760 の 35)。ここが溢れても粗利の
+  // キャッシュは残す — 粗利の集計は GPS を 1 つも見ないため。
+  try {
+    localStorage.setItem(MARGIN_LEG_POINTS_KEY, serializeLegPoints({ ym: shownYm.value, points: legPointsByUnko.value }))
+  }
+  catch {
+    // 保存できなくても画面の数字は正しい (組み直し試算だけが取り直しになる)。
   }
 }
 
@@ -424,6 +466,13 @@ interface ResolvedOperation {
    * 読めなかった運行では空配列** (`legKm` と同じ扱い)。
    */
   legKmDetail: LegKmDetail[]
+  /**
+   * 便ごとの積地・卸地の実測 GPS (Refs #760 の 35)。**同じ CSV から `buildOperationRoute`
+   * の marker を畳んだだけ**で、追加の fetch も新しい CSV 解析も無い。粗利の数字には
+   * 1 円も効かない — 釧路営業所の組み直し試算 (`kushiro-doto-rebuild.ts`) の入力にする。
+   * CSV が無い / 読めなかった運行、GPS 列の無い CSV では空。
+   */
+  legPoints: Map<number, LegPoints>
 }
 
 /** CSV を読めなかった運行の内訳。**距離 0 と同じ扱い** (`totalKm: 0` と揃える)。 */
@@ -462,6 +511,7 @@ async function resolveOperation(op: OperationListItem): Promise<ResolvedOperatio
       listedTotalKm: null,
       kmBreakdown: emptyKmBreakdown(),
       legKmDetail: [],
+      legPoints: new Map(),
     }
   }
   try {
@@ -497,6 +547,9 @@ async function resolveOperation(op: OperationListItem): Promise<ResolvedOperatio
       },
       // 便ごとの回送内訳 (Refs #760 の 13)。`legKm` と同じ順・同じ本数。
       legKmDetail: idle.legKmDetail,
+      // 便ごとの積地・卸地 GPS (Refs #760 の 35)。**便の切り方は `extractOperationIdle`
+      // と同じ行**なので `legSeq` は `legKmDetail` の index + 1 と一致する。
+      legPoints: legPointsByLegSeq(buildOperationRoute(csv.headers, csv.rows).markers),
     }
   }
   catch (e) {
@@ -509,6 +562,7 @@ async function resolveOperation(op: OperationListItem): Promise<ResolvedOperatio
       listedTotalKm: null,
       kmBreakdown: emptyKmBreakdown(),
       legKmDetail: [],
+      legPoints: new Map(),
     }
   }
 }
@@ -753,6 +807,7 @@ async function run() {
   cacheNote.value = null
   inputs.value = []
   costs.value = []
+  legPointsByUnko.value = new Map()
   uncovered.value = null
   crossMonth.value = null
   progress.value = '運行を検索中...'
@@ -781,6 +836,8 @@ async function run() {
     const kmBreakdownByUnko = new Map(resolved.map(r => [r.allowance.unkoNo, r.kmBreakdown]))
     // 便ごとの回送内訳 (Refs #760 の 13)。
     const legKmDetailByUnko = new Map(resolved.map(r => [r.allowance.unkoNo, r.legKmDetail]))
+    // 便ごとの積地・卸地 GPS (Refs #760 の 35)。**同じ CSV から取っていて追加の fetch は無い。**
+    legPointsByUnko.value = new Map(resolved.map(r => [r.allowance.unkoNo, r.legPoints]))
     // 積んだまま帰庫した便の卸地は次の運行の先頭にある。全運行を引き終えてから当てる。
     const ops = applyCarryOver(resolved.map(r => r.allowance))
     shownYm.value = ym.value
@@ -885,6 +942,15 @@ async function run() {
 // --- 表示 ---
 
 const result = computed(() => buildOperationMargins(inputs.value, costs.value, fuelRates.value, runCostShareMode.value))
+
+/**
+ * **釧路営業所発の組み直し試算 (`kushiro-doto-rebuild.ts`) の入力** (Refs #760 の 35)。
+ *
+ * 粗利の集計 (`result`) とは**独立**で、画面には 1 文字も出ない — 次の PR の
+ * 釧路営業所タブが prop で受け取る。`inputs` (= `MarginLegInput` に `haulSec` /
+ * `deadheadSec` が生きている側) から組む: 計算結果の `LegMargin` には秒が無い。
+ */
+const rebuildInputs = computed(() => buildRebuildOperationInputs(inputs.value, legPointsByUnko.value))
 
 /** 配分の比を変える。**保存に失敗しても画面の数字は正しい**ので握る (燃費の上書きと同じ)。 */
 function onRunCostShareModeChange(raw: string) {
