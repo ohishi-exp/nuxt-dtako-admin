@@ -273,3 +273,11 @@ branches = true
 [[files]]
 path = "app/utils/margin.ts"
 branches = true
+
+# 粗利タブの運行行「地図」(Refs #760 の 18)。イベントCSV の GPS を便ごとに色分け
+# (haul / deadhead / other) した点列とマーカーに畳む pure util。便の切り方は
+# allowance-idle.ts と同じ行。branches: BR() で包んだ instrumented コピーで
+# 37 条件 (`if` / 三項 / `&&` `||` `??` の各項) すべて両側 OK。
+[[files]]
+path = "app/utils/operation-route-map.ts"
+branches = true

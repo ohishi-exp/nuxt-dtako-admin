@@ -1,0 +1,260 @@
+<script setup lang="ts">
+/**
+ * 粗利タブの運行行「地図」: 1 運行の経路を便ごとに色分けして Google Map に描くモーダル
+ * (Refs #760 の 18)。
+ *
+ * `EventSpeedMapPanel.vue` と同じローダ方式 (@googlemaps/js-api-loader、
+ * `/api/vid-check/map-key`、`DEMO_MAP_ID`) を踏襲し、`buildOperationRoute` が出した
+ * `segments` を kind 別の色で Polyline に、`markers` を `AdvancedMarkerElement` に置く。
+ * 開閉は `AllowanceOperationModal.vue` と同じ (呼び出し側の `v-if` で出し入れ、
+ * Esc / 背景クリック / ✕ で `close`)。
+ *
+ * データ変換 (GPS の換算・便の切り方) はぜんぶ `app/utils/operation-route-map.ts` (pure、
+ * カバレッジ gate 対象) が持ち、このコンポーネントは描画に専念する (dumb component、
+ * Google Maps 描画コンポーネントは他と同様 unit test 対象外)。
+ */
+import { Loader } from '@googlemaps/js-api-loader'
+import type { OperationRoute, RouteMarker, RouteSegment } from '~/utils/operation-route-map'
+
+const props = defineProps<{
+  /** 描く経路。まだ無ければ null (読み込み中 / 失敗)。 */
+  route: OperationRoute | null
+  /** 見出し (例: `運行 2026-07-01 中村 車輌 1109 — 便 4 本`)。 */
+  title: string
+  loading: boolean
+  /** イベントCSV が引けなかった理由。引けていれば null。 */
+  error: string | null
+}>()
+
+const emit = defineEmits<{ close: [] }>()
+
+/** 線の色 (凡例と同じ)。haul = 売上走行 / deadhead = 回送 / other = 降しの無い便など分類不能。 */
+const SEGMENT_STYLE: Record<RouteSegment['kind'], { color: string, weight: number, dashed: boolean, label: string }> = {
+  haul: { color: '#10b981', weight: 5, dashed: false, label: '売上走行 (積み → 降し)' },
+  deadhead: { color: '#9ca3af', weight: 3, dashed: false, label: '回送' },
+  other: { color: '#f59e0b', weight: 3, dashed: true, label: '降しの無い便 / 分類不能' },
+}
+
+const mapEl = ref<HTMLDivElement | null>(null)
+const loadError = ref<string | null>(null)
+
+let map: google.maps.Map | null = null
+let markerLib: google.maps.MarkerLibrary | null = null
+let polylines: google.maps.Polyline[] = []
+let markers: google.maps.marker.AdvancedMarkerElement[] = []
+/** 作成中の Map。`onMounted` と `route` の watch が同時に走っても Map を 2 つ作らない。 */
+let mapPromise: Promise<google.maps.Map | null> | null = null
+
+function ensureMap(): Promise<google.maps.Map | null> {
+  if (!mapPromise) mapPromise = createMap()
+  return mapPromise
+}
+
+async function createMap(): Promise<google.maps.Map | null> {
+  try {
+    // GOOGLEMAP_KEY_SECRET は Cloudflare Secrets Store binding なので server route
+    // 経由で解決した文字列を取得する (vid-check / net780 と同じ endpoint を共用)。
+    const { key } = await $fetch('/api/vid-check/map-key')
+    if (!key) {
+      loadError.value = 'Google Maps API key が未設定です (GOOGLEMAP_KEY_SECRET)'
+      return null
+    }
+    const loader = new Loader({ apiKey: key, version: 'weekly' })
+    const { Map } = await loader.importLibrary('maps')
+    markerLib = await loader.importLibrary('marker')
+    if (!mapEl.value) return null
+    map = new Map(mapEl.value, {
+      center: { lat: 43.0, lng: 143.2 },
+      zoom: 7,
+      // AdvancedMarkerElement は有効な mapId を要求する (DEMO_MAP_ID で登録不要)。
+      mapId: 'DEMO_MAP_ID',
+    })
+    return map
+  }
+  catch (e) {
+    loadError.value = e instanceof Error ? e.message : String(e)
+    return null
+  }
+}
+
+function clearOverlays() {
+  for (const line of polylines) line.setMap(null)
+  polylines = []
+  for (const m of markers) m.map = null
+  markers = []
+}
+
+/** マーカーの見た目: start/end = 小さい丸、load = ▲ 緑、unload = ▼ 青 (便番号を添える)。 */
+function markerContent(mk: RouteMarker): HTMLElement {
+  const el = document.createElement('div')
+  el.style.display = 'flex'
+  el.style.alignItems = 'center'
+  el.style.gap = '2px'
+  el.style.fontSize = '13px'
+  el.style.fontWeight = '700'
+  el.style.lineHeight = '1'
+  el.style.textShadow = '0 0 3px #fff, 0 0 3px #fff'
+  if (mk.kind === 'start' || mk.kind === 'end') {
+    const dot = document.createElement('span')
+    dot.style.display = 'inline-block'
+    dot.style.width = '10px'
+    dot.style.height = '10px'
+    dot.style.borderRadius = '9999px'
+    dot.style.background = mk.kind === 'start' ? '#111827' : '#ffffff'
+    dot.style.border = '2px solid #111827'
+    el.appendChild(dot)
+    return el
+  }
+  const glyph = document.createElement('span')
+  glyph.textContent = mk.kind === 'load' ? '▲' : '▼'
+  glyph.style.color = mk.kind === 'load' ? '#059669' : '#2563eb'
+  glyph.style.fontSize = '16px'
+  el.appendChild(glyph)
+  const seq = document.createElement('span')
+  seq.textContent = String(mk.legSeq ?? '')
+  seq.style.color = mk.kind === 'load' ? '#065f46' : '#1e40af'
+  el.appendChild(seq)
+  return el
+}
+
+async function redraw() {
+  const m = await ensureMap()
+  if (!m || !markerLib) return
+  clearOverlays()
+
+  const route = props.route
+  if (!route || route.pointCount === 0) return
+
+  const bounds = new google.maps.LatLngBounds()
+  for (const seg of route.segments) {
+    const style = SEGMENT_STYLE[seg.kind]
+    polylines.push(new google.maps.Polyline({
+      path: seg.path,
+      strokeColor: style.color,
+      strokeOpacity: style.dashed ? 0 : 0.9,
+      strokeWeight: style.weight,
+      // 破線は Google Maps の定番 (strokeOpacity 0 + 短い線のアイコンを繰り返す)。
+      icons: style.dashed
+        ? [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 0.9, strokeColor: style.color, scale: 3 }, offset: '0', repeat: '14px' }]
+        : undefined,
+      zIndex: seg.kind === 'haul' ? 2 : 1,
+      map: m,
+    }))
+    for (const p of seg.path) bounds.extend(p)
+  }
+
+  for (const mk of route.markers) {
+    markers.push(new markerLib.AdvancedMarkerElement({
+      position: { lat: mk.lat, lng: mk.lng },
+      map: m,
+      title: mk.ts ? `${mk.label} ${mk.ts}` : mk.label,
+      content: markerContent(mk),
+      zIndex: mk.kind === 'load' || mk.kind === 'unload' ? 3 : 2,
+    }))
+  }
+
+  m.fitBounds(bounds)
+  const listener = google.maps.event.addListenerOnce(m, 'bounds_changed', () => {
+    if (m && (m.getZoom() ?? 0) > 16) m.setZoom(16)
+  })
+  void listener
+}
+
+watch(() => props.route, redraw)
+onMounted(redraw)
+onBeforeUnmount(clearOverlays)
+
+/** Esc で閉じる。モーダルの外に出る唯一の副作用なので、外したら必ず戻す。 */
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') emit('close')
+}
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onUnmounted(() => window.removeEventListener('keydown', onKeydown))
+
+type OverlayKind = 'loading' | 'error' | 'map-error' | 'empty' | null
+
+const overlayKind = computed<OverlayKind>(() => {
+  if (props.loading) return 'loading'
+  if (props.error) return 'error'
+  if (loadError.value) return 'map-error'
+  if (!props.route || props.route.pointCount === 0) return 'empty'
+  return null
+})
+
+/** 「点が無い」の理由。GPS 列が無い CSV (落とした行 0) と、GPS が全部無効 (落とした行 > 0) を分ける。 */
+const emptyReason = computed(() => {
+  if (!props.route) return 'この運行の経路はありません'
+  if (props.route.droppedRows > 0) return `GPS が有効な行がありません (GPS 無効の行 ${props.route.droppedRows})`
+  return 'イベントCSV に GPS 列が無いか、行がありません'
+})
+
+const legendKinds: RouteSegment['kind'][] = ['haul', 'deadhead', 'other']
+</script>
+
+<template>
+  <div
+    class="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-4 overflow-y-auto"
+    @click.self="emit('close')"
+  >
+    <div class="w-full max-w-5xl my-8 rounded-lg bg-white dark:bg-gray-900 shadow-xl">
+      <div class="flex flex-wrap items-center gap-3 border-b border-gray-200 dark:border-gray-800 px-4 py-3">
+        <h2 class="text-sm font-semibold">
+          {{ title }}
+        </h2>
+        <span class="ml-auto flex items-center gap-3 text-xs">
+          <span v-if="route" class="text-gray-500">
+            点 {{ route.pointCount }}<template v-if="route.droppedRows > 0"> / GPS 無効の行 {{ route.droppedRows }}</template>
+          </span>
+          <button
+            class="rounded px-2 py-1 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"
+            aria-label="閉じる"
+            @click="emit('close')"
+          >
+            ✕
+          </button>
+        </span>
+      </div>
+
+      <div class="relative w-full h-[70vh] min-h-[360px] bg-gray-100 dark:bg-gray-800">
+        <div ref="mapEl" class="w-full h-full" />
+        <div
+          v-if="overlayKind"
+          class="absolute inset-0 flex items-center justify-center text-sm px-4 text-center bg-white/90 dark:bg-gray-900/90"
+        >
+          <div class="space-y-2 text-gray-500">
+            <p v-if="overlayKind === 'loading'" class="flex items-center gap-2 justify-center">
+              <UIcon name="i-lucide-loader-circle" class="animate-spin size-4" />
+              イベントCSV を取得中...
+            </p>
+            <p v-else-if="overlayKind === 'error'" class="text-red-600 dark:text-red-400">
+              {{ error }}
+            </p>
+            <p v-else-if="overlayKind === 'map-error'" class="text-red-600 dark:text-red-400">
+              {{ loadError }}
+            </p>
+            <p v-else-if="overlayKind === 'empty'">
+              {{ emptyReason }}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-4 px-4 py-2 text-[11px] text-gray-500 border-t border-gray-100 dark:border-gray-800">
+        <span v-for="k in legendKinds" :key="k" class="flex items-center gap-1">
+          <span
+            class="inline-block w-5 rounded"
+            :style="{
+              height: `${SEGMENT_STYLE[k].weight}px`,
+              background: SEGMENT_STYLE[k].dashed ? 'transparent' : SEGMENT_STYLE[k].color,
+              borderTop: SEGMENT_STYLE[k].dashed ? `${SEGMENT_STYLE[k].weight}px dashed ${SEGMENT_STYLE[k].color}` : 'none',
+            }"
+          />{{ SEGMENT_STYLE[k].label }}
+        </span>
+        <span class="flex items-center gap-1"><span class="text-emerald-600 font-bold">▲</span>積み (便番号)</span>
+        <span class="flex items-center gap-1"><span class="text-blue-600 font-bold">▼</span>降し (便の最後)</span>
+        <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full bg-gray-900 dark:bg-gray-100" />運行開始</span>
+        <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full border-2 border-gray-900 dark:border-gray-100" />運行終了</span>
+      </div>
+    </div>
+  </div>
+</template>
