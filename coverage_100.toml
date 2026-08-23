@@ -289,3 +289,12 @@ branches = true
 [[files]]
 path = "app/utils/operation-route-map.ts"
 branches = true
+
+# 運行NO から csvdata.zip 取得の引数 (`ope_no_22` / `start_ope`) を組む pure util
+# (Refs #760 の 23)。relay の `deriveOpeNoFromUnkoNo` と同じ導出に、画面から任意の
+# 値が来る前提の範囲検証 (月日時分秒) を足したもの。
+# branches: BR() で包んだ instrumented コピーで **9 分岐 (`if` 7 + `&&` の左右)
+# すべて両側 OK** を実測してから登録した。
+[[files]]
+path = "server/utils/operation-zip.ts"
+branches = true

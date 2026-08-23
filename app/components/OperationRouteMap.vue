@@ -29,9 +29,17 @@ const props = defineProps<{
    * 見出しの横に出すだけ (Refs #760 の 21)。
    */
   trackNote?: string | null
+  /**
+   * 見出しに csvdata.zip のダウンロードボタンを出すか (Refs #760 の 23)。
+   * **運行 1 本のモーダルのときだけ true** — 経路 (取引先) の重ね合わせは複数運行なので、
+   * どの運行の zip を落とすのか決められない。取得ロジックは呼び出し側 (`margin.vue`) が持つ。
+   */
+  canDownloadZip?: boolean
+  /** zip の取得中 (theearth への自前ログインを伴うので数秒かかる。連打させない)。 */
+  zipLoading?: boolean
 }>()
 
-const emit = defineEmits<{ close: [] }>()
+const emit = defineEmits<{ close: [], 'download-zip': [] }>()
 
 /**
  * 線の色 (凡例と同じ)。haul = 売上走行 / deadhead = 回送 / other = 降しの無い便など分類不能。
@@ -220,6 +228,16 @@ const trackKinds: RouteSegment['kind'][] = ['trackHaul', 'trackDeadhead']
           {{ title }}
         </h2>
         <span v-if="trackNote" class="text-xs text-gray-500">{{ trackNote }}</span>
+        <button
+          v-if="canDownloadZip"
+          type="button"
+          class="rounded border border-gray-300 dark:border-gray-700 px-1.5 py-0.5 text-[11px] text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+          title="この運行の csvdata.zip (KUDGFUL/KUDGIVT/KUDGURI/SokudoData) をダウンロード"
+          :disabled="zipLoading"
+          @click="emit('download-zip')"
+        >
+          {{ zipLoading ? '…' : 'zip' }}
+        </button>
         <span class="ml-auto flex items-center gap-3 text-xs">
           <span v-if="route" class="text-gray-500">
             点 {{ route.pointCount }}<template v-if="route.droppedRows > 0"> / GPS 無効の行 {{ route.droppedRows }}</template>

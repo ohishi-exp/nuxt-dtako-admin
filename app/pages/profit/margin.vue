@@ -33,7 +33,8 @@
  * (localStorage、`allowance-provisional.ts` と同じ方式)。
  * **分母が 0 の車輌は燃料代を出さず、粗利も `-` にする。**
  */
-import { getOperations, getOperationCsv, getDrivers } from '~/utils/api'
+import { getOperations, getOperationCsv, getDrivers, operationCsvDataZipUrl, currentAccessToken } from '~/utils/api'
+import { downloadBlobResponse } from '~/utils/download-blob'
 import { fetchAllPages } from '~/utils/paged-fetch'
 import type { Driver, OperationListItem } from '~/types'
 import { extractAllowanceLegs, extractCarryInUnloads, allowanceForLegs } from '~/utils/allowance-trips'
@@ -1001,6 +1002,60 @@ async function openRouteMap(m: OperationMargin) {
   }
 }
 
+/** csvdata.zip を落としている運行NO (null なら誰も落としていない)。 */
+const zipDownloading = ref<string | null>(null)
+/** 直近の zip ダウンロードの失敗理由 (表の上に 1 行出す。次の押下で消える)。 */
+const zipError = ref<string | null>(null)
+
+/**
+ * 運行 1 本の **csvdata.zip (theearth の原本)** を落とす (Refs #760 の 23)。オーナー:
+ * 「地図の近くに zip ダウンロード機能つけて」。中身は `KUDGFUL.csv` (給油) /
+ * `KUDGIVT.csv` (イベント、始点終点 GPS つき) / `KUDGURI.csv` (運行集計) /
+ * `SokudoData.csv` (速度帯) で、**1 秒刻みの GPS は入っていない** — 経路の密度を
+ * 上げるためではなく、原本を手元で見るための口。
+ *
+ * 取得は front の server route (`/api/operations/:unko/csvdata-zip`) 経由。relay が
+ * theearth に自前ログインするので**ブラウザの theearth セッションは要らない**
+ * (日報編集の `/daily-report-api/zip` とは別経路)。theearth へのログインを伴って
+ * 1 回数秒かかるので、**取得中は全部の zip ボタンを押せなくする** (`zipDownloading`)。
+ */
+async function downloadOperationZip(unkoNo: string) {
+  if (zipDownloading.value !== null) return
+  zipDownloading.value = unkoNo
+  zipError.value = null
+  try {
+    const token = currentAccessToken()
+    const headers: Record<string, string> = {}
+    if (token) headers['authorization'] = `Bearer ${token}`
+    const res = await fetch(operationCsvDataZipUrl(unkoNo), { headers })
+    if (!res.ok) {
+      const body = await res.json().catch(() => null) as { statusMessage?: string, message?: string } | null
+      throw new Error(body?.statusMessage ?? body?.message ?? `HTTP ${res.status}`)
+    }
+    await downloadBlobResponse(res, `csvdata-${unkoNo}.zip`)
+  }
+  catch (e) {
+    zipError.value = `運行 ${unkoNo} の csvdata.zip を落とせませんでした — ${e instanceof Error ? e.message : String(e)}`
+  }
+  finally {
+    zipDownloading.value = null
+  }
+}
+
+/** 地図モーダルの見出しに zip ボタンを出すか (運行 1 本のときだけ。経路の重ね合わせは
+ *  複数運行なので出さない) と、その運行NO。 */
+const routeModalUnkoNo = computed(() => {
+  const key = routeModal.value?.key ?? ''
+  return key.startsWith('op:') ? key.slice(3) : null
+})
+
+/** 地図モーダルの見出しの「zip」。運行 1 本のときしかボタンを出さないので、
+ *  ここに来る時点で `routeModalUnkoNo` は必ず非 null (型の都合で見る)。 */
+function downloadRouteModalZip() {
+  const unkoNo = routeModalUnkoNo.value
+  if (unkoNo !== null) void downloadOperationZip(unkoNo)
+}
+
 /**
  * **この経路 (取引先) の便を全部重ねた地図** (Refs #760 の 19)。オーナー: 「粗利率の高い
  * 短距離経路と低い長距離経路の形を、便を重ねて比べたい」。
@@ -1275,6 +1330,9 @@ function downloadCustomerRouteCsv() {
     </p>
     <p v-if="status === 'error'" class="text-sm text-red-600 dark:text-red-400 mb-4">
       {{ errorMessage }}
+    </p>
+    <p v-if="zipError" class="text-sm text-red-600 dark:text-red-400 mb-4">
+      {{ zipError }}
     </p>
     <p v-if="salesError" class="text-sm text-red-600 dark:text-red-400 mb-4">
       売上 (一番星) が引けませんでした — {{ salesError }} (売上 0 として扱っているので<b>粗利は正しくありません</b>)
@@ -1619,6 +1677,15 @@ function downloadCustomerRouteCsv() {
                         @click.stop="openRouteMap(m)"
                       >
                         地図
+                      </button>
+                      <button
+                        type="button"
+                        class="ml-1 rounded border border-gray-300 dark:border-gray-700 px-1.5 py-0.5 text-[11px] text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+                        title="この運行の csvdata.zip (KUDGFUL/KUDGIVT/KUDGURI/SokudoData) をダウンロード"
+                        :disabled="zipDownloading !== null"
+                        @click.stop="downloadOperationZip(m.unkoNo)"
+                      >
+                        {{ zipDownloading === m.unkoNo ? '…' : 'zip' }}
                       </button>
                     </td>
                     <td
@@ -1974,7 +2041,10 @@ function downloadCustomerRouteCsv() {
       :loading="routeModal.loading"
       :error="routeModal.error"
       :track-note="routeModal.trackNote"
+      :can-download-zip="routeModalUnkoNo !== null"
+      :zip-loading="routeModalUnkoNo !== null && zipDownloading === routeModalUnkoNo"
       @close="routeModal = null"
+      @download-zip="downloadRouteModalZip"
     />
   </div>
 </template>
