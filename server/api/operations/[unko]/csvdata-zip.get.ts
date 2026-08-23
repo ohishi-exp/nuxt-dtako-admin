@@ -21,7 +21,10 @@
  * worker→worker)。secret をブラウザに出さないため、Nitro 側で `requireAuth`
  * (auth-worker ログイン必須) を通してから service binding で relay を呼ぶ。
  * gate の組み方は `server/api/etc-csv/download.get.ts` と同じ (R2 read と同様、
- * backend に認証を委譲できない経路なのでここで gate する)。
+ * backend に認証を委譲できない経路なのでここで gate する)。`requireAuth` は
+ * **cookie `logi_auth_token` を優先し、無ければ `Authorization: Bearer`** を
+ * auth-worker の `/auth/introspect` に掛ける (`@ippoan/auth-client` の
+ * `server/auth.mjs`) ので、呼び出し側はどちらでもよい (画面は両方載せている)。
  *
  * 日報編集 (`/daily-report-edit`) の `GET /daily-report-api/zip` は同じ zip を
  * **ブラウザの theearth セッション**で取る別経路。粗利タブは theearth セッションを

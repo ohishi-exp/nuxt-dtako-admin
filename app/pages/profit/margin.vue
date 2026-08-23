@@ -1018,6 +1018,13 @@ const zipError = ref<string | null>(null)
  * theearth に自前ログインするので**ブラウザの theearth セッションは要らない**
  * (日報編集の `/daily-report-api/zip` とは別経路)。theearth へのログインを伴って
  * 1 回数秒かかるので、**取得中は全部の zip ボタンを押せなくする** (`zipDownloading`)。
+ *
+ * 認証は **cookie (`logi_auth_token`、`.ippoan.org` 共有) と `Authorization: Bearer`
+ * の両方**が通る — server route の `requireAuth` が cookie を先に見て、無ければ
+ * Bearer を introspect する (`@ippoan/auth-client` の `server/auth.mjs`)。同一
+ * オリジンの fetch なので cookie は自動で載るが、`/scraper` の ETC CSV が素の
+ * `<a href>` (cookie だけ) で通しているのに対し、こちらは**閲覧モードのように
+ * cookie が無い経路でも通るよう Bearer も明示する**。
  */
 async function downloadOperationZip(unkoNo: string) {
   if (zipDownloading.value !== null) return
