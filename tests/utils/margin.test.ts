@@ -23,6 +23,11 @@ import {
   routePlace,
   summarizeByCustomerRoute,
   customerRouteCsvLines,
+  customerShareBars,
+  SHARE_SEGMENT_LABELS,
+  type CustomerRouteSummary,
+  type CustomerSummary,
+  type RouteSummary,
   NO_CUSTOMER_NAME,
   UNKNOWN_PLACE,
   splitFuelYen,
@@ -2346,5 +2351,159 @@ describe('summarizeByCustomerRoute — 取引先別 × 経路別 (Refs #760 の 
     )
     const line = customerRouteCsvLines(summarizeByCustomerRoute(res.operations))[1]!
     expect(line.endsWith(',"0","0","0","",""')).toBe(true)
+  })
+})
+
+describe('customerShareBars — 売上の内訳の 100% 積み上げ棒 (Refs #760 の 17)', () => {
+  /** 大石畜産(飼料北海道) に近い比率: 手当 28% / 燃料 16% / 回送 13% / 配分 9% / 粗利 34%。 */
+  const baseTotals = {
+    legs: 1, unsplitLegs: 0, salesYen: 100000, allowanceYen: 28000, haulKm: 100, deadheadKm: 50,
+    fuelHaulYen: 16000, fuelDeadheadYen: 13000, runCostShareYen: 9000, grossMarginYen: 34000,
+  }
+  const totals = (over: Partial<RouteSummary> = {}): RouteSummary => ({ ...baseTotals, from: '釧路', to: '川西', ...over })
+  const cust = (code: string, name: string, over: Partial<CustomerSummary> = {}, routes: RouteSummary[] = [totals()]): CustomerSummary =>
+    ({ ...baseTotals, code, name, routes, ...over })
+  const summary = (customers: CustomerSummary[]): CustomerRouteSummary => ({
+    customers,
+    noLegOperations: { operations: 0, salesYen: 0, allowanceYen: 0, fuelYen: 0, directCostYen: 0, allocatedCostYen: 0, marginYen: 0 },
+    unsplitLegs: { legs: 0, salesYen: 0 },
+    totalMarginYen: 0,
+    diffYen: 0,
+  })
+  const pcts = (bar: { segments: { key: string, pct: number }[] }) => Object.fromEntries(bar.segments.map(s => [s.key, s.pct]))
+
+  it('先頭は合計 (全取引先の Σ)、続けて取引先を表と同じ順 (売上降順のまま) で 1 本ずつ。segments は凡例の順', () => {
+    const res = customerShareBars(summary([
+      cust('A', '甲', { salesYen: 300000, allowanceYen: 60000, fuelHaulYen: 30000, fuelDeadheadYen: 15000, runCostShareYen: 45000, grossMarginYen: 150000, legs: 3 }),
+      cust('B', '乙', { salesYen: 100000, allowanceYen: 28000, fuelHaulYen: 16000, fuelDeadheadYen: 13000, runCostShareYen: 9000, grossMarginYen: 34000, legs: 1 }),
+    ]))
+    expect(res.skipped).toBe(0)
+    expect(res.bars.map(b => [b.key, b.label, b.legs, b.salesYen])).toEqual([
+      ['total', '合計', 4, 400000],
+      ['A', '甲', 3, 300000],
+      ['B', '乙', 1, 100000],
+    ])
+    expect(res.bars.map(b => b.segments.map(s => s.key))).toEqual(Array(3).fill(SHARE_SEGMENT_LABELS.map(l => l.key)))
+    // 合計の yen は Σ
+    expect(res.bars[0]!.segments.map(s => s.yen)).toEqual([88000, 46000, 28000, 54000, 184000])
+    expect(pcts(res.bars[0]!)).toEqual({ allowance: 22, fuelHaul: 11.5, fuelDeadhead: 7, runCost: 13.5, margin: 46 })
+    expect(res.bars[0]!.overflowPct).toBe(0)
+    expect(res.bars[0]!.routes).toBeUndefined()
+    // 合計は開閉の対象ではないので routes を持たない。取引先は持つ
+    expect(res.bars[1]!.routes).toHaveLength(1)
+  })
+
+  it('pct = yen ÷ 売上 × 100 を丸めない (表示側で 1 桁に丸める)', () => {
+    const res = customerShareBars(summary([cust('A', '甲', { salesYen: 3, allowanceYen: 1, fuelHaulYen: 0, fuelDeadheadYen: 0, runCostShareYen: 0, grossMarginYen: 2 })]))
+    const a = res.bars[1]!
+    expect(pcts(a).allowance).toBeCloseTo(33.333333333, 9)
+    expect(pcts(a).margin).toBeCloseTo(66.666666667, 9)
+    expect(pcts(a).allowance).not.toBe(33.3)
+  })
+
+  it('粗利 null の行は 売上 − 4 区分の和 を粗利 segment にする (unsplitLegs も持つ)', () => {
+    const res = customerShareBars(summary([cust('A', '甲', { grossMarginYen: null, unsplitLegs: 1, allowanceYen: 30000, fuelHaulYen: 0, fuelDeadheadYen: 0, runCostShareYen: 0 })]))
+    const a = res.bars[1]!
+    expect(a.unsplitLegs).toBe(1)
+    expect(a.segments.find(s => s.key === 'margin')).toEqual({ key: 'margin', yen: 70000, pct: 70 })
+    // 合計は null を 0 として足す → 合計の粗利 segment は 0 (残りは塗らない = 棒が 100% に届かない)
+    expect(res.bars[0]!.segments.find(s => s.key === 'margin')).toEqual({ key: 'margin', yen: 0, pct: 0 })
+    expect(res.bars[0]!.unsplitLegs).toBe(1)
+  })
+
+  it('粗利が出せない便が混ざる行 (粗利 非 null) は 4 区分 + 粗利 の和が売上に届かない (その便の売上ぶんは塗らない)', () => {
+    // 2 便、1 便は出せない (売上 40000 ぶんが 4 区分にも粗利にも入っていない)
+    const res = customerShareBars(summary([cust('A', '甲', { legs: 2, unsplitLegs: 1, salesYen: 100000, allowanceYen: 20000, fuelHaulYen: 10000, fuelDeadheadYen: 5000, runCostShareYen: 5000, grossMarginYen: 20000 })]))
+    const a = res.bars[1]!
+    expect(a.segments.reduce((sum, s) => sum + s.pct, 0)).toBeCloseTo(60, 9)
+    expect(a.overflowPct).toBe(0)
+    expect(a.unsplitLegs).toBe(1)
+  })
+
+  it('粗利が負でも 4 区分の和が売上を超えていなければ縮めず、粗利の pct だけ 0 (overflowPct 0)', () => {
+    // 出せる便 (売上 30000、費用 50000 → 粗利 −20000) + 出せない便 (売上 70000)
+    const res = customerShareBars(summary([cust('A', '甲', { legs: 2, unsplitLegs: 1, salesYen: 100000, allowanceYen: 50000, fuelHaulYen: 0, fuelDeadheadYen: 0, runCostShareYen: 0, grossMarginYen: -20000 })]))
+    const a = res.bars[1]!
+    expect(pcts(a)).toEqual({ allowance: 50, fuelHaul: 0, fuelDeadhead: 0, runCost: 0, margin: 0 })
+    expect(a.segments.find(s => s.key === 'margin')!.yen).toBe(-20000)
+    expect(a.overflowPct).toBe(0)
+  })
+
+  it('売上 0 の行 (例: (突合なし) 売上 ¥0) は棒にせず skipped に数える。合計には入れる', () => {
+    const res = customerShareBars(summary([
+      cust('A', '甲'),
+      cust('', NO_CUSTOMER_NAME, { salesYen: 0, allowanceYen: 5000, fuelHaulYen: 0, fuelDeadheadYen: 0, runCostShareYen: 0, grossMarginYen: -5000 },
+        [totals({ salesYen: 0, allowanceYen: 5000, fuelHaulYen: 0, fuelDeadheadYen: 0, runCostShareYen: 0, grossMarginYen: -5000 })]),
+    ]))
+    // 取引先 1 本が skipped (その経路はどのみち出ないので数えない)。合計の手当は 28000 + 5000
+    expect(res.skipped).toBe(1)
+    expect(res.bars.map(b => b.key)).toEqual(['total', 'A'])
+    expect(res.bars[0]!.segments.find(s => s.key === 'allowance')!.yen).toBe(33000)
+    expect(res.bars[0]!.legs).toBe(2)
+  })
+
+  it('売上 0 の経路だけ skipped に数え、その取引先の棒は残る', () => {
+    const res = customerShareBars(summary([cust('A', '甲', {}, [totals({ salesYen: 60000 }), totals({ salesYen: 0, to: '帯広' })])]))
+    expect(res.skipped).toBe(1)
+    expect(res.bars[1]!.routes!.map(r => r.key)).toEqual(['A|釧路|川西'])
+  })
+
+  it('費用の和 > 売上 (粗利 < 0) の行は 4 区分を 売上 ÷ Σ費用 で縮めて合計 100、粗利 pct 0、overflowPct = 超過分 ÷ 売上', () => {
+    // 売上 100000、費用 60000 + 30000 + 20000 + 15000 = 125000 → 粗利 −25000、縮め 0.8、超過 25%
+    const res = customerShareBars(summary([cust('A', '甲', { allowanceYen: 60000, fuelHaulYen: 30000, fuelDeadheadYen: 20000, runCostShareYen: 15000, grossMarginYen: -25000 })]))
+    const a = res.bars[1]!
+    expect(pcts(a)).toEqual({ allowance: 48, fuelHaul: 24, fuelDeadhead: 16, runCost: 12, margin: 0 })
+    expect(a.segments.reduce((sum, s) => sum + s.pct, 0)).toBeCloseTo(100, 9)
+    expect(a.segments.map(s => s.yen)).toEqual([60000, 30000, 20000, 15000, -25000])
+    expect(a.overflowPct).toBe(25)
+    // 1 取引先しか無いので合計の棒も同じ
+    expect(a.segments.map(s => s.pct)).toEqual(res.bars[0]!.segments.map(s => s.pct))
+    expect(res.bars[0]!.overflowPct).toBe(25)
+  })
+
+  it('取引先の棒には routes (経路の棒、表と同じ順) が付き、key は code|積地|卸地、label は 積地 → 卸地', () => {
+    const res = customerShareBars(summary([cust('A', '甲', { salesYen: 100000, allowanceYen: 30000 }, [
+      totals({ salesYen: 60000, allowanceYen: 12000, fuelHaulYen: 6000, fuelDeadheadYen: 6000, runCostShareYen: 6000, grossMarginYen: 30000, legs: 2 }),
+      totals({ salesYen: 40000, allowanceYen: 18000, fuelHaulYen: 10000, fuelDeadheadYen: 7000, runCostShareYen: 3000, grossMarginYen: 2000, to: '帯広' }),
+    ])]))
+    const routes = res.bars[1]!.routes!
+    expect(routes.map(r => [r.key, r.label, r.legs, r.salesYen])).toEqual([
+      ['A|釧路|川西', '釧路 → 川西', 2, 60000],
+      ['A|釧路|帯広', '釧路 → 帯広', 1, 40000],
+    ])
+    expect(pcts(routes[0]!)).toEqual({ allowance: 20, fuelHaul: 10, fuelDeadhead: 10, runCost: 10, margin: 50 })
+    expect(pcts(routes[1]!)).toEqual({ allowance: 45, fuelHaul: 25, fuelDeadhead: 17.5, runCost: 7.5, margin: 5 })
+    expect(routes[0]!.routes).toBeUndefined()
+  })
+
+  it('空の summary は棒 0 本 (合計も出さない)、skipped 0', () => {
+    expect(customerShareBars(summarizeByCustomerRoute([]))).toEqual({ bars: [], skipped: 0 })
+  })
+
+  it('実データ経由 (summarizeByCustomerRoute の出力) でも表の値と一致する', () => {
+    const res = buildOperationMargins(
+      [op({
+        totalKm: 100,
+        salesYen: 50000,
+        allowanceYen: 8000,
+        legs: [
+          leg({ seq: 1, originCity: '北海道釧路市', destCity: '川西町', haulKm: 30, deadheadKm: 10, salesYen: 20000, allowanceYen: 3000, customers: [customer({ code: 'K', name: '川西', yen: 20000 })] }),
+          leg({ seq: 2, originCity: '北海道釧路市', destCity: '北海道河東郡上士幌町', haulKm: 30, deadheadKm: 30, salesYen: 30000, allowanceYen: 5000, customers: [customer({ code: 'S', name: '上士幌', yen: 30000 })] }),
+        ],
+      })],
+      [cost({ costKind: FUEL_KIND, quantity: 20, amount: 2400 }), cost({ costKind: '06', isFixed: true, amount: 3000 })],
+      {},
+    )
+    const sum = summarizeByCustomerRoute(res.operations)
+    const bars = customerShareBars(sum)
+    expect(bars.bars.map(b => b.key)).toEqual(['total', 'S', 'K'])
+    const k = sum.customers[1]!
+    const kb = bars.bars[2]!
+    expect(kb.segments.map(s => s.yen)).toEqual([k.allowanceYen, k.fuelHaulYen, k.fuelDeadheadYen, k.runCostShareYen, k.grossMarginYen])
+    expect(kb.segments.reduce((s, x) => s + x.pct, 0)).toBeCloseTo(100, 9)
+    expect(pcts(kb).allowance).toBeCloseTo(15, 9)
+    // 合計 = 運行の売上 50000、手当 8000 → 16%
+    expect(bars.bars[0]!.salesYen).toBe(50000)
+    expect(pcts(bars.bars[0]!).allowance).toBeCloseTo(16, 9)
   })
 })

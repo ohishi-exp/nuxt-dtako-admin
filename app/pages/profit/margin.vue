@@ -96,6 +96,8 @@ import {
   customersOfSlips,
   summarizeByCustomerRoute,
   customerRouteCsvLines,
+  customerShareBars,
+  SHARE_SEGMENT_LABELS,
   operationDirectCostTitle,
   driverDirectCostTitle,
   type CostRow,
@@ -107,6 +109,7 @@ import {
   type MarginLegInput,
   type LegCustomerShare,
   type OperationMargin,
+  type ShareSegmentKey,
   type UncoveredDriverInput,
   type UncoveredTotals,
 } from '~/utils/margin'
@@ -890,6 +893,23 @@ const customerSalesCheckOk = computed(() => Math.abs(customerSalesSum.value + cu
 /** 取引先行の開閉 (経路の行を出す)。鍵は取引先C (突合なしは空文字)。 */
 const openCustomers = reactive<Record<string, boolean>>({})
 
+/** 売上の内訳の棒 (取引先別の表の下、Refs #760 の 17)。表と同じ `customerSummary` から出す。 */
+const shareBars = computed(() => customerShareBars(customerSummary.value))
+
+/** 棒の区分の色 (凡例と同じ)。Tailwind の既存クラスだけ (chart ライブラリは入れない)。 */
+const SHARE_SEGMENT_CLASS: Record<ShareSegmentKey, string> = {
+  allowance: 'bg-amber-400 dark:bg-amber-500',
+  fuelHaul: 'bg-sky-500 dark:bg-sky-600',
+  fuelDeadhead: 'bg-sky-300 dark:bg-sky-400',
+  runCost: 'bg-violet-400 dark:bg-violet-500',
+  margin: 'bg-emerald-500 dark:bg-emerald-600',
+}
+
+const shareSegmentLabel = (key: ShareSegmentKey) => SHARE_SEGMENT_LABELS.find(s => s.key === key)!.label
+
+/** 棒の title 用 (小数 1 桁)。`pct` は比 (0〜1) を受けるので別に持つ。 */
+const pct1 = (v: number) => `${Math.round(v * 10) / 10}%`
+
 function downloadCsv() {
   const rows = visibleDrivers.value.flatMap(d => d.operations)
   const blob = new Blob([`﻿${marginCsvLines(rows).join('\r\n')}\r\n`], { type: 'text/csv;charset=utf-8' })
@@ -1625,6 +1645,65 @@ function downloadCustomerRouteCsv() {
                 </template>
               </tbody>
             </table>
+          </div>
+          <div v-if="shareBars.bars.length > 0" class="mt-3">
+            <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500 mb-2">
+              <span class="font-medium">売上の内訳 (取引先ごと、売上 = 100%)</span>
+              <span v-for="lg in SHARE_SEGMENT_LABELS" :key="lg.key" class="inline-flex items-center gap-1">
+                <span class="inline-block w-3 h-3 rounded-sm" :class="SHARE_SEGMENT_CLASS[lg.key]" />{{ lg.label }}
+              </span>
+            </div>
+            <div class="space-y-1">
+              <template v-for="bar in shareBars.bars" :key="bar.key">
+                <div class="flex items-center gap-2 text-xs" :class="bar.key === 'total' ? 'font-medium' : ''">
+                  <span class="w-56 shrink-0 truncate" :title="`${bar.label} (便 ${bar.legs})`">
+                    {{ bar.label }} <span class="text-gray-400">(便 {{ bar.legs }})</span>
+                    <span v-if="bar.unsplitLegs > 0" class="text-amber-600 dark:text-amber-400" :title="`粗利が出せない便 ${bar.unsplitLegs}`">*</span>
+                  </span>
+                  <div class="flex-1 flex h-4 rounded overflow-hidden bg-gray-100 dark:bg-gray-800">
+                    <div
+                      v-for="s in bar.segments"
+                      :key="s.key"
+                      class="h-full text-[10px] leading-4 text-white text-center overflow-hidden whitespace-nowrap"
+                      :class="SHARE_SEGMENT_CLASS[s.key]"
+                      :style="{ width: `${s.pct}%` }"
+                      :title="`${shareSegmentLabel(s.key)} ${yen(s.yen)} (${pct1(s.pct)})`"
+                    >
+                      <template v-if="s.pct >= 7">{{ Math.round(s.pct) }}%</template>
+                    </div>
+                  </div>
+                  <span v-if="bar.overflowPct > 0" class="shrink-0 text-red-600 dark:text-red-400" title="費用 (手当 + 燃料 + 運行経費の配分) が売上を超えた分">赤字 −{{ pct1(bar.overflowPct) }}</span>
+                </div>
+                <template v-if="bar.routes && openCustomers[bar.key]">
+                  <div
+                    v-for="r in bar.routes"
+                    :key="r.key"
+                    class="flex items-center gap-2 text-xs pl-6 text-gray-600 dark:text-gray-300"
+                  >
+                    <span class="w-56 shrink-0 truncate" :title="`${r.label} (便 ${r.legs})`">
+                      {{ r.label }} <span class="text-gray-400">(便 {{ r.legs }})</span>
+                      <span v-if="r.unsplitLegs > 0" class="text-amber-600 dark:text-amber-400" :title="`粗利が出せない便 ${r.unsplitLegs}`">*</span>
+                    </span>
+                    <div class="flex-1 flex h-4 rounded overflow-hidden bg-gray-100 dark:bg-gray-800">
+                      <div
+                        v-for="s in r.segments"
+                        :key="s.key"
+                        class="h-full text-[10px] leading-4 text-white text-center overflow-hidden whitespace-nowrap"
+                        :class="SHARE_SEGMENT_CLASS[s.key]"
+                        :style="{ width: `${s.pct}%` }"
+                        :title="`${shareSegmentLabel(s.key)} ${yen(s.yen)} (${pct1(s.pct)})`"
+                      >
+                        <template v-if="s.pct >= 7">{{ Math.round(s.pct) }}%</template>
+                      </div>
+                    </div>
+                    <span v-if="r.overflowPct > 0" class="shrink-0 text-red-600 dark:text-red-400" title="費用 (手当 + 燃料 + 運行経費の配分) が売上を超えた分">赤字 −{{ pct1(r.overflowPct) }}</span>
+                  </div>
+                </template>
+              </template>
+            </div>
+            <p v-if="shareBars.skipped > 0" class="text-xs text-gray-400 mt-1">
+              売上 0 の行 {{ shareBars.skipped }} 本は棒にしていません
+            </p>
           </div>
         </div>
       </template>
