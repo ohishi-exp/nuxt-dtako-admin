@@ -84,7 +84,7 @@ const TONE_CLASS: Record<Tone, string> = {
   <div class="mt-6 p-3 rounded-lg border border-amber-300 dark:border-amber-800">
     <!-- ★ バッジは条件分岐なしで常に出す (オーナー要件「必須表示」)。
          釧路営業所は実在せず、この区画の数字は実績ではない -->
-    <div class="flex flex-wrap items-center gap-2 mb-2">
+    <div class="kushiro-print-badge flex flex-wrap items-center gap-2 mb-2">
       <h2 class="text-sm font-semibold">
         釧路積み (釧路営業所試算)
       </h2>
@@ -103,7 +103,7 @@ const TONE_CLASS: Record<Tone, string> = {
 
     <template v-else>
       <!-- 読み方 — ここを読まずに数字だけ持ち出されると必ず誤読される -->
-      <div class="text-[11px] text-gray-500 space-y-1 mb-3">
+      <div class="kushiro-print-note text-[11px] text-gray-500 space-y-1 mb-3">
         <p>
           対象 <b>{{ summary.legs }}</b> 便 / 元の運行 <b>{{ summary.operations }}</b> 本
           (うち<b>道東卸しだけで閉じている運行 {{ summary.pureOperations }} 本</b> /
@@ -145,7 +145,7 @@ const TONE_CLASS: Record<Tone, string> = {
 
       <!-- 便/日 を振る -->
       <div class="flex flex-wrap items-center gap-3 mb-3">
-        <label class="text-xs text-gray-500 flex items-center gap-2">
+        <label class="kushiro-print-slider text-xs text-gray-500 flex items-center gap-2">
           1 日あたり便数
           <input
             type="range"
@@ -160,7 +160,7 @@ const TONE_CLASS: Record<Tone, string> = {
         </label>
         <span class="text-sm font-semibold">{{ fmtNum(legsPerDay, 2) }} 便/日</span>
         <button
-          class="text-xs px-2 py-0.5 rounded border border-gray-300 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800"
+          class="kushiro-print-hide text-xs px-2 py-0.5 rounded border border-gray-300 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800"
           :title="`実測平均 ${fmtNum(slider.mean, 3)} 便/日 に戻します`"
           @click="emit('reset')"
         >
@@ -173,7 +173,7 @@ const TONE_CLASS: Record<Tone, string> = {
       </div>
 
       <!-- 選んだ 便/日 での 2 営業所 -->
-      <div class="grid gap-2 sm:grid-cols-2 mb-4">
+      <div class="kushiro-print-depots grid gap-2 sm:grid-cols-2 mb-4">
         <div
           v-for="d in selected.depots"
           :key="d.depot"
