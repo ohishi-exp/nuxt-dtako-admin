@@ -13,6 +13,12 @@ name: kyuyo-mcp worker
 # 再デプロイされるよう path filter に含める。tools.ts が import する relay ソースを
 # 増やしたら、ここにも必ず足すこと — 漏れると relay 側の修正が MCP に届かない
 # (#511 の month-boundary が get_timecard_diff に反映されず気付いた)。
+#
+# `tests/fixtures/kushiro-loading/**` も同じ理由で入れてある (Refs #760 の 34)。
+# kyuyo-mcp のテストは画面側 util と**同じ共有 fixture + 同じ golden**を読んで双子の
+# bit 一致を見るので、fixture / golden だけが動いたときにこの gate が回らないと、
+# 双子がずれたまま気付けない。
+
 on:
   push:
     branches: [main]
@@ -24,6 +30,7 @@ on:
       - 'workers/dtako-scraper-relay/src/restraint-wage.ts'
       - 'workers/dtako-scraper-relay/src/theearth-restraint-client.ts'
       - 'workers/dtako-scraper-relay/src/timecard-compare.ts'
+      - 'tests/fixtures/kushiro-loading/**'
       - '.github/workflows/kyuyo-mcp-deploy.yml'
   pull_request:
     paths:
@@ -33,6 +40,7 @@ on:
       - 'workers/dtako-scraper-relay/src/restraint-wage.ts'
       - 'workers/dtako-scraper-relay/src/theearth-restraint-client.ts'
       - 'workers/dtako-scraper-relay/src/timecard-compare.ts'
+      - 'tests/fixtures/kushiro-loading/**'
       - '.github/workflows/kyuyo-mcp-deploy.yml'
   workflow_dispatch:
 

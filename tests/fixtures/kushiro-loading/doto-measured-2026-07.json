@@ -1,0 +1,28 @@
+{
+ "source": "オーナーが本番 2026-07 で実測した『積地=釧路 かつ 卸地=道東』の便 (2026-08-23 報告)",
+ "legs": 38,
+ "operations": 23,
+ "pureOperations": 0,
+ "salesYen": 1420245,
+ "allowanceYen": 311000,
+ "haulKm": 2361.6,
+ "deadheadKm": 4288.9,
+ "haulHours": 92.5,
+ "deadheadHours": 173.9,
+ "destLegs": {
+  "北海道川上郡標茶町多和星空の黒牛": 21,
+  "北海道川上郡標茶町多和": 8,
+  "北海道野付郡別海町中西別": 7,
+  "北海道川上郡標茶町西熊牛原野": 2
+ },
+ "driverLegs": {
+  "中村 一由": 29,
+  "柳井 亮祐": 4,
+  "西島 健太": 4,
+  "佐竹 繁": 1
+ },
+ "obihiroLegsPerDriverMonth": {
+  "legs": 284,
+  "drivers": 5
+ }
+}

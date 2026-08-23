@@ -8,6 +8,7 @@
 import { z } from "zod";
 import {
   computeWageRow,
+  minWageForBranch,
   normalizeMinWageMaster,
   normalizeWageConfig,
   normalizeWageMaster,
@@ -50,6 +51,25 @@ import {
   type CompareResult,
   type CompareSummaryRow,
 } from "../../../dtako-scraper-relay/src/timecard-compare";
+import {
+  DEFAULT_DEST_AREA,
+  DEFAULT_LEGS_PER_DRIVER_MONTH,
+  DEST_AREAS,
+  estimateCalibrationRatio,
+  haulSpeedKmh,
+  hourlyWageYen,
+  rebuildDeadheadSpeedKmh,
+  rebuiltDeadheadKm,
+  rebuiltDepotDiffKm,
+  rebuiltRuns,
+  requiredDrivers,
+  restraintHours,
+  summarizeDotoRebuild,
+} from "../kushiro-doto-rebuild";
+import type { DepotPoints, RebuildOperationInput, RebuildTotals } from "../kushiro-doto-rebuild";
+import { DEPOT_KEYS, deadheadFuelYen } from "../kushiro-loading-legs";
+import { DEPOTS, isValidLatLng } from "../depot-distance";
+import type { DepotKey } from "../depot-distance";
 import type { Env } from "../env";
 import {
   companiesListPrefix,
@@ -2282,6 +2302,370 @@ export const getIchibanSalesTool = {
   },
 } satisfies ToolEntry<typeof getIchibanSalesArgs>;
 
+// ===== get_kushiro_branch_estimate ===========================================
+
+/**
+ * 帯広の乗務員 5 名 (オーナー 2026-08-23 の比較基準)。**この試算そのものには使わず**、
+ * 一番星の売上と突き合わせて「対象便がその乗務員たちの期間売上のどれくらいか」を
+ * 出すためだけに使う。
+ */
+const OBIHIRO_DRIVER_CDS: readonly string[] = ["1412", "1587", "1656", "1732", "1742"];
+
+/** 対象運行の上限。**超えたら期間を割って呼び直す** — 黙って切り詰めない。 */
+const KUSHIRO_ESTIMATE_MAX_OPERATIONS = 500;
+
+const latLngArgs = z.object({ lat: z.number(), lng: z.number() }).strict();
+
+const kushiroLegArgs = z
+  .object({
+    seq: z.number().int().describe("便の順番 (1 始まり)"),
+    originCity: z.string().describe("積地。**住所そのまま可** (`北海道釧路市西港1-98-41`)"),
+    destCity: z.string().describe("卸地。**住所そのまま可** (`北海道川上郡標茶町多和`)"),
+    salesYen: z.number(),
+    allowanceYen: z.number().describe("運行手当 (便あたり定額)"),
+    haulKm: z.number().describe("売上走行km (積み → その便の最後の降し)"),
+    deadheadKm: z.number().describe("**その便に割り付いた回送km** (その便へ向かう移動 + 最終便の帰庫)"),
+    loadPoint: latLngArgs.nullish().describe("積地の実測 GPS。取れなければ null (**0 に倒さない**)"),
+    unloadPoint: latLngArgs.nullish().describe("卸地の実測 GPS。取れなければ null"),
+    haulSec: z.number().nullish().describe("売上走行の実測秒。読めなければ null"),
+    deadheadSec: z.number().nullish().describe("回送の実測秒 (approachSec + tailSec)。読めなければ null"),
+  })
+  .strict();
+
+const kushiroOperationArgs = z
+  .object({
+    unkoNo: z.string().optional().describe("運行NO (追跡用。計算には使わない)"),
+    driverName: z.string().describe("乗務員名。`drivers[]` の行のキー"),
+    legs: z.array(kushiroLegArgs).describe("その運行の便 (**釧路積み以外・道東卸し以外も入れてよい** — tool が絞る)"),
+    // 以下 3 つは**この tool は読まない**。画面 (/profit/margin) の運行ペイロードや
+    // 共有 fixture をそのまま貼れるように受け付けるだけ (組み直しは便に割り付いた
+    // 回送km と便ごとの GPS しか見ない)。
+    kmBreakdown: z
+      .object({
+        preLoadKm: z.number(),
+        haulKm: z.number(),
+        betweenKm: z.number(),
+        postUnloadKm: z.number(),
+        otherKm: z.number(),
+      })
+      .strict()
+      .optional()
+      .describe("運行単位の km 内訳。**この tool は読まない** (そのまま貼れるように受けるだけ)"),
+    firstLoadPoint: latLngArgs.nullish().describe("最初の積地の GPS。**この tool は読まない**"),
+    lastUnloadPoint: latLngArgs.nullish().describe("最後の卸地の GPS。**この tool は読まない**"),
+  })
+  .strict();
+
+const getKushiroBranchEstimateArgs = z
+  .object({
+    company: z
+      .string()
+      .regex(COMP_ID_PATTERN)
+      .describe("会社コード。**最低賃金マスタ (R2) を引くためだけ**に使う"),
+    from: z.string().regex(YMD_RE).describe("対象期間の下限 (YYYY-MM-DD、**含む**)。最低賃金はこの月で引く"),
+    to: z
+      .string()
+      .regex(YMD_RE)
+      .describe("対象期間の上限 (YYYY-MM-DD、**含まない** — 半開区間。月なら翌月1日)"),
+    operations: z
+      .array(kushiroOperationArgs)
+      .min(1)
+      .max(KUSHIRO_ESTIMATE_MAX_OPERATIONS)
+      .describe(
+        "対象期間の運行。**必須** — この worker から運行一覧を引く口が無いため " +
+          "(理由は tool の説明を参照)。`tests/fixtures/kushiro-loading/doto-operations-2026-07.json` と同じ形。",
+      ),
+    driver: z
+      .array(z.string().regex(ICHIBAN_CODE_RE))
+      .min(1)
+      .max(20)
+      .optional()
+      .describe(`一番星の売上と突き合わせる乗務員CD。省略時は帯広 5 名 (${OBIHIRO_DRIVER_CDS.join(",")})`),
+    depot: z
+      .enum(DEPOT_KEYS as [string, ...string[]])
+      .optional()
+      .describe("試算する営業所。既定 kushiro。**両営業所ぶん返すので、これは「どちらを本命として読むか」だけ**"),
+    depot_lat: z.number().optional().describe("`depot` の緯度を上書き (正式所在地が決まったとき用)。lng と対で指定"),
+    depot_lng: z.number().optional().describe("`depot` の経度を上書き。lat と対で指定"),
+    dest_area: z
+      .enum(DEST_AREAS)
+      .optional()
+      .describe("卸地の絞り込み。既定 doto (道東卸しだけ) / all で釧路積みぜんぶ"),
+    legs_per_run: z
+      .number()
+      .positive()
+      .optional()
+      .describe("組み直し後の 1 運行あたり便数。**省略時は実測の分布の平均** (定数で埋めない)"),
+    legs_per_driver_month: z
+      .number()
+      .positive()
+      .optional()
+      .describe(`乗務員 1 名あたりの月間便数。省略時 ${DEFAULT_LEGS_PER_DRIVER_MONTH} (帯広実績 284 便 ÷ 5 名)`),
+    branch: z
+      .string()
+      .optional()
+      .describe("最低賃金を引く所属名。既定 `釧路営業所`。マスタに無ければ default 県で近似し警告する"),
+    assumed_monthly_wage_yen: z
+      .number()
+      .optional()
+      .describe("換算時給の分子。**省略時は対象便の運行手当の合計** (= 手当のみの下限)"),
+    km_per_liter: z.number().optional().describe("燃費。`yen_per_liter` と対で渡すと差km の燃料代を別立てで出す"),
+    yen_per_liter: z.number().optional().describe("軽油単価。`km_per_liter` と対"),
+    sales_cross_check: z
+      .boolean()
+      .optional()
+      .describe("一番星の売上と突き合わせるか。既定 true。**false にすると上流を 1 回も叩かない** (完全オフライン)"),
+  })
+  .strict();
+
+/** `RebuildTotals` を応答用の snake_case に落とす (行と summary で同じ形にする)。 */
+function kushiroTotalsJson(totals: RebuildTotals, legsPerRun: number | null) {
+  const n = legsPerRun;
+  const rebuilt = (depot: DepotKey) => (n === null ? null : rebuiltDeadheadKm(totals, depot, n));
+  return {
+    legs: totals.legs,
+    sales_yen: totals.salesYen,
+    allowance_yen: totals.allowanceYen,
+    haul_km: totals.haulKm,
+    measured_deadhead_km: totals.deadheadKm,
+    estimated_legs: totals.estimatedLegs,
+    missing_legs: totals.missingLegs,
+    comparable_measured_deadhead_km: totals.comparableDeadheadKm,
+    rebuilt_deadhead_km: { obihiro: rebuilt("obihiro"), kushiro: rebuilt("kushiro") },
+    rebuilt_minus_measured_km:
+      n === null ? null : rebuiltDeadheadKm(totals, "kushiro", n)! - totals.comparableDeadheadKm,
+    depot_diff_km: n === null ? null : rebuiltDepotDiffKm(totals, "obihiro", "kushiro", n),
+  };
+}
+
+export const getKushiroBranchEstimateTool = {
+  name: "get_kushiro_branch_estimate",
+  description:
+    "**釧路営業所 (実在しない・暫定) の試算**を検算するための tool (Refs #760 の 34)。" +
+    "積地 = 釧路 かつ 卸地 = 道東 (標茶・別海 等) の便を切り出し、**釧路市役所を起終点とする " +
+    "新しい運行として組み直したときの回送km・拘束時間・換算時給**を、帯広営業所で同じように " +
+    "組み直した場合と並べて返す。**応答の `estimated` は常に true — これは実績ではない。**\n" +
+    "**なぜ営業所の差し替えではなく『組み直し』か**: 本番 2026-07 の対象 38 便は 23 運行すべてが " +
+    "道東卸しと十勝卸しの混在運行で、道東だけで閉じた運行が 1 本も無い。既存の運行の起終点を " +
+    "差し替えるモデルでは 1 便も動かせない。\n" +
+    "**`operations` は必須** — この worker から『その月の運行一覧』を引く口が無いため " +
+    "(上流は R2 / dtako-scraper-relay / rust-ichibanboshi の 3 つだけで、運行一覧は " +
+    "rust-alc-api 直 fetch = 画面側の経路)。便の積地・卸地・売上・手当・km・GPS を呼び出し側が渡す。" +
+    "画面 (/profit/margin) が出したのと同じ入力を渡せば、**画面と同じ数字が出ることを確かめられる** " +
+    "(`tests/fixtures/kushiro-loading/doto-operations-2026-07.json` がその形の実例)。\n" +
+    "**距離は直線 (haversine)**。道なりではないので実距離は必ずこれ以上。" +
+    "**営業所どうしの差 (`depot_diff_km`) は両側とも推定**なので引き算してよいが、" +
+    "**`rebuilt_minus_measured_km` は推定と実測の差**で、営業所の差ではなく測り方の差が混ざる — " +
+    "橋渡しは `calibration_ratio` (推定 ÷ 実測) で見ること。\n" +
+    "**拘束時間は 走行 + 回送 だけ**で積込・荷降ろしの待機を含まない (入力に無い) ので**下限**。" +
+    "したがって換算時給は**上限**で、『この上限でも最低賃金を割っているなら確実に割っている』" +
+    "という向きで読む (`restraint_is_lower_bound` が必ず立つ)。" +
+    "最低賃金は R2 の min-wage マスタ (厚労省の一覧の取り込み結果) から引くので、額は定数ではない。\n" +
+    "**燃料代を出す場合も実績の燃料代とは別立て** — 月の燃料総額は給油実績で固定されており、" +
+    "回送km が減っても実績側は 1 円も動かない。",
+  inputSchema: getKushiroBranchEstimateArgs,
+  execute: async (env: Env, args: z.infer<typeof getKushiroBranchEstimateArgs>) => {
+    const parsed = parseYm(args.from.slice(0, 7));
+    if (!parsed) throw new Error("from は YYYY-MM-DD で指定してください");
+    if (args.to <= args.from) throw new Error("to は from より後 (半開区間) にしてください");
+    if ((args.depot_lat === undefined) !== (args.depot_lng === undefined)) {
+      throw new Error("depot_lat と depot_lng は対で指定してください (片方だけでは座標になりません)");
+    }
+
+    const depot = (args.depot ?? "kushiro") as DepotKey;
+    const area = args.dest_area ?? DEFAULT_DEST_AREA;
+    const drivers = args.driver ?? OBIHIRO_DRIVER_CDS;
+    const branch = args.branch ?? "釧路営業所";
+    const legsPerDriverMonth = args.legs_per_driver_month ?? DEFAULT_LEGS_PER_DRIVER_MONTH;
+    const warnings: string[] = [];
+
+    // 営業所の座標。上書きは `depot` で選んだ側にだけ効く (もう片方は比較の基準なので動かさない)。
+    const depots: DepotPoints = { ...DEPOTS };
+    if (args.depot_lat !== undefined && args.depot_lng !== undefined) {
+      const override = { lat: args.depot_lat, lng: args.depot_lng };
+      if (!isValidLatLng(override)) throw new Error("depot_lat / depot_lng が座標の範囲外です");
+      depots[depot] = override;
+    }
+
+    const operations: RebuildOperationInput[] = args.operations.map((op) => ({
+      unkoNo: op.unkoNo ?? "",
+      driverName: op.driverName,
+      // 組み直しは運行単位の km 内訳を読まない (便に割り付いた回送km だけを見る)。
+      kmBreakdown: { preLoadKm: 0, haulKm: 0, betweenKm: 0, postUnloadKm: 0, otherKm: 0 },
+      legs: op.legs.map((leg) => ({
+        ...leg,
+        loadPoint: leg.loadPoint ?? null,
+        unloadPoint: leg.unloadPoint ?? null,
+        haulSec: leg.haulSec ?? null,
+        deadheadSec: leg.deadheadSec ?? null,
+      })),
+    }));
+
+    const summary = summarizeDotoRebuild(operations, {
+      area,
+      ...(args.legs_per_run === undefined ? {} : { legsPerRun: args.legs_per_run }),
+      depots,
+    });
+    const n = summary.legsPerRun;
+    if (n === null) {
+      warnings.push(
+        `対象 (積地=釧路 / 卸地=${area}) の便が 1 本もありません。組み直しの推定は出していません`,
+      );
+    }
+    if (summary.totals.missingLegs > 0) {
+      warnings.push(
+        `座標が欠けた便が ${summary.totals.missingLegs} 本あります。**0km に倒さず推定から外している**ので、` +
+          `推定の母集団は ${summary.totals.estimatedLegs} 便です`,
+      );
+    }
+
+    const hours = n === null ? null : restraintHours(summary.totals, depot, n);
+    const needDrivers = requiredDrivers(summary.totals.legs, legsPerDriverMonth);
+    const wageYen = args.assumed_monthly_wage_yen ?? summary.totals.allowanceYen;
+    const restraintTotal = hours === null ? null : hours.rebuiltTotalHours;
+    // 1 名あたりの月間拘束時間。**`restraintTotal` が出ている時点で対象便が 1 本以上あり、
+    // `legs_per_driver_month` は zod が正数を保証するので `needDrivers` は 1 以上**
+    // (回送の実測秒が 1 秒も無ければ速度が出ず `restraintTotal` が null になる)。
+    const hoursPerDriver = restraintTotal === null ? null : restraintTotal / needDrivers!;
+    // 換算時給は「総賃金 ÷ 総拘束」= 「1 名あたりの賃金 ÷ 1 名あたりの拘束」で同じ値。
+    const hourly = hourlyWageYen(wageYen, restraintTotal);
+
+    // 最低賃金は R2 のマスタから引く (額を定数で埋めない)。
+    const rawMinWage = await getJson<unknown>(
+      env.DTAKO_R2,
+      wageMasterR2Paths(r2Prefix(env), args.company, "min-wage").latest,
+    );
+    let minWageMaster: MinWageMaster = { prefectures: {}, branchToPrefecture: {} };
+    if (rawMinWage === null) {
+      warnings.push("最低賃金マスタ (min-wage/latest.json) が R2 にありません。最低賃金の比較は出していません");
+    } else {
+      minWageMaster = normalizeMinWageMaster(rawMinWage);
+    }
+    const lookup = minWageForBranch(minWageMaster, branch, parsed.year, parsed.month);
+    if (!lookup.mapped && lookup.prefecture !== null) {
+      warnings.push(`所属 "${branch}" が最低賃金マスタに無いため ${lookup.prefecture} で近似しています`);
+    }
+    if (lookup.rate === null) {
+      warnings.push("対象月に有効な最低賃金が引けませんでした (マスタの改定履歴を確認してください)");
+    }
+
+    const fuelYen =
+      args.km_per_liter === undefined || args.yen_per_liter === undefined || n === null
+        ? null
+        : deadheadFuelYen(rebuiltDepotDiffKm(summary.totals, "obihiro", "kushiro", n)!, {
+            kmPerLiter: args.km_per_liter,
+            yenPerLiter: args.yen_per_liter,
+          });
+
+    // 一番星の売上との突合 (対象便がその乗務員たちの期間売上のどれくらいか)。
+    let salesCrossCheck: unknown = null;
+    if (args.sales_cross_check !== false) {
+      const rows = await Promise.all(
+        drivers.map(async (driverCd) => {
+          const body = await fetchIchibanJson(
+            env,
+            ichibanRangeQuery("/api/sales/vehicle-daily", args.from, args.to, { driver: driverCd }),
+            "kushiro_estimate_sales",
+          );
+          const list = ichibanRows(body);
+          return {
+            driver: driverCd,
+            rows: list.length,
+            amount: list.reduce((acc: number, row) => acc + numField(row, "amount"), 0),
+            truncated: truncatedAt(list),
+          };
+        }),
+      );
+      const total = rows.reduce((acc: number, r) => acc + r.amount, 0);
+      if (rows.some((r) => r.truncated)) {
+        warnings.push("一番星の売上が上流の 500 件で切られています。期間を割って引き直すこと");
+      }
+      salesCrossCheck = {
+        drivers: rows,
+        total_amount: total,
+        // 対象便の売上が、その乗務員たちの期間売上に占める割合。0 除算はしない。
+        target_share: total > 0 ? summary.totals.salesYen / total : null,
+      };
+    }
+
+    return {
+      // **実在しない営業所の試算**であることを、応答だけ見て取り違えないための旗。
+      estimated: true,
+      estimate_note:
+        "釧路営業所は実在しない。起終点は釧路市役所の暫定座標で、距離は直線 (道なりの下限)。" +
+        "拘束時間は 走行 + 回送 のみで荷役・待機を含まない下限、換算時給はその上限。",
+      company: args.company,
+      from: args.from,
+      to: args.to,
+      depot,
+      depot_points: depots,
+      dest_area: area,
+      legs_per_run: {
+        used: n,
+        measured_mean: summary.distribution.mean,
+        source: args.legs_per_run === undefined ? "measured" : "argument",
+        operations: summary.distribution.operations,
+        buckets: summary.distribution.buckets.map((b) => ({
+          legs_in_operation: b.legsInOperation,
+          operations: b.operations,
+        })),
+      },
+      summary: {
+        ...kushiroTotalsJson(summary.totals, n),
+        operations: summary.distribution.operations,
+        rebuilt_operations: n === null ? null : rebuiltRuns(summary.totals, n),
+        calibration_ratio: {
+          obihiro: n === null ? null : estimateCalibrationRatio(summary.totals, "obihiro", n),
+          kushiro: n === null ? null : estimateCalibrationRatio(summary.totals, "kushiro", n),
+        },
+        measured_speed_kmh: {
+          haul: haulSpeedKmh(summary.totals),
+          deadhead: rebuildDeadheadSpeedKmh(summary.totals),
+        },
+        restraint_hours: hours === null
+          ? null
+          : {
+              measured_haul: hours.haulHours,
+              measured_deadhead: hours.measuredDeadheadHours,
+              measured_total: hours.measuredTotalHours,
+              rebuilt_deadhead: hours.rebuiltDeadheadHours,
+              rebuilt_total: hours.rebuiltTotalHours,
+              restraint_is_lower_bound: hours.restraintIsLowerBound,
+            },
+        required_drivers: needDrivers,
+        legs_per_driver_month: legsPerDriverMonth,
+        // 差km の金額化。**実績の燃料代とは足し引きしない別立ての紙。**
+        deadhead_fuel_yen: fuelYen,
+      },
+      min_wage: {
+        branch,
+        prefecture: lookup.prefecture,
+        mapped: lookup.mapped,
+        rate: lookup.rate,
+        rate_effective_from: lookup.rateEffectiveFrom ?? null,
+        assumed_monthly_wage_yen: wageYen,
+        wage_basis: args.assumed_monthly_wage_yen === undefined ? "allowance-only" : "argument",
+        restraint_hours_per_driver: hoursPerDriver,
+        hourly_yen: hourly,
+        diff_yen: hourly === null || lookup.rate === null ? null : hourly - lookup.rate,
+        below_min_wage: hourly === null || lookup.rate === null ? null : hourly < lookup.rate,
+      },
+      routes: summary.routes.map((row) => ({
+        from: row.from,
+        to: row.to,
+        doto: row.doto,
+        ...kushiroTotalsJson(row.totals, n),
+      })),
+      drivers: summary.drivers.map((row) => ({
+        driver_name: row.driverName,
+        ...kushiroTotalsJson(row.totals, n),
+      })),
+      sales_cross_check: salesCrossCheck,
+      warnings,
+    };
+  },
+} satisfies ToolEntry<typeof getKushiroBranchEstimateArgs>;
+
 export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   listCompaniesTool as unknown as ToolEntry<z.ZodTypeAny>,
   listMonthsTool as unknown as ToolEntry<z.ZodTypeAny>,
@@ -2303,4 +2687,5 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   runDtakoAlcUploadTool as unknown as ToolEntry<z.ZodTypeAny>,
   getIchibanCostsTool as unknown as ToolEntry<z.ZodTypeAny>,
   getIchibanSalesTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getKushiroBranchEstimateTool as unknown as ToolEntry<z.ZodTypeAny>,
 ];

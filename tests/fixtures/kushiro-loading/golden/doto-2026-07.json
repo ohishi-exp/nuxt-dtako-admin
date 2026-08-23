@@ -1,0 +1,390 @@
+{
+ "kushiroLoaders": [
+  "中部飼料",
+  "釧路飼料",
+  "道東飼料",
+  "中部飼料(株)"
+ ],
+ "doto": {
+  "summary": {
+   "area": "doto",
+   "legsPerRun": 1.6521739130434783,
+   "distribution": {
+    "operations": 23,
+    "legs": 38,
+    "buckets": [
+     {
+      "legsInOperation": 1,
+      "operations": 8
+     },
+     {
+      "legsInOperation": 2,
+      "operations": 15
+     }
+    ],
+    "mean": 1.6521739130434783
+   },
+   "totals": {
+    "legs": 38,
+    "salesYen": 1420245,
+    "allowanceYen": 311000,
+    "haulKm": 2361.5999999999995,
+    "deadheadKm": 4288.900000000001,
+    "haulSec": 333000,
+    "haulKmTimed": 2361.5999999999995,
+    "deadheadSec": 626040,
+    "deadheadKmTimed": 4288.900000000001,
+    "estimatedLegs": 38,
+    "missingLegs": 0,
+    "comparableDeadheadKm": 4288.900000000001,
+    "destToLoadKm": 1755.8884688691346,
+    "depotToLoadKm": {
+     "obihiro": 3528.25237272291,
+     "kushiro": 146.8793016135071
+    },
+    "destToDepotKm": {
+     "obihiro": 4866.029256295267,
+     "kushiro": 1656.6103559798614
+    }
+   },
+   "routes": [
+    {
+     "from": "釧路",
+     "to": "標茶",
+     "doto": true,
+     "totals": {
+      "legs": 31,
+      "salesYen": 1130095,
+      "allowanceYen": 248000,
+      "haulKm": 1652.1000000000004,
+      "deadheadKm": 3459.5,
+      "haulSec": 232952,
+      "haulKmTimed": 1652.1000000000004,
+      "deadheadSec": 505020,
+      "deadheadKmTimed": 3459.5,
+      "estimatedLegs": 31,
+      "missingLegs": 0,
+      "comparableDeadheadKm": 3459.5,
+      "destToLoadKm": 1228.3218875358043,
+      "depotToLoadKm": {
+       "obihiro": 2877.133307522261,
+       "kushiro": 121.02118280513648
+      },
+      "destToDepotKm": {
+       "obihiro": 3768.378808750971,
+       "kushiro": 1148.9598388980376
+      }
+     }
+    },
+    {
+     "from": "釧路",
+     "to": "別海",
+     "doto": true,
+     "totals": {
+      "legs": 7,
+      "salesYen": 290150,
+      "allowanceYen": 63000,
+      "haulKm": 709.5000000000001,
+      "deadheadKm": 829.4,
+      "haulSec": 100048,
+      "haulKmTimed": 709.5000000000001,
+      "deadheadSec": 121020,
+      "deadheadKmTimed": 829.4,
+      "estimatedLegs": 7,
+      "missingLegs": 0,
+      "comparableDeadheadKm": 829.4,
+      "destToLoadKm": 527.5665813333303,
+      "depotToLoadKm": {
+       "obihiro": 651.1190652006485,
+       "kushiro": 25.85811880837068
+      },
+      "destToDepotKm": {
+       "obihiro": 1097.6504475442941,
+       "kushiro": 507.6505170818237
+      }
+     }
+    }
+   ],
+   "drivers": [
+    {
+     "driverName": "中村 一由",
+     "totals": {
+      "legs": 29,
+      "salesYen": 1080645,
+      "allowanceYen": 237000,
+      "haulKm": 1773.0000000000002,
+      "deadheadKm": 3333.5000000000005,
+      "haulSec": 249999,
+      "haulKmTimed": 1773.0000000000002,
+      "deadheadSec": 486643,
+      "deadheadKmTimed": 3333.5000000000005,
+      "estimatedLegs": 29,
+      "missingLegs": 0,
+      "comparableDeadheadKm": 3333.5000000000005,
+      "destToLoadKm": 1318.2093319776116,
+      "depotToLoadKm": {
+       "obihiro": 2693.372648254175,
+       "kushiro": 111.31891015383611
+      },
+      "destToDepotKm": {
+       "obihiro": 3693.522875976505,
+       "kushiro": 1243.543083038665
+      }
+     }
+    },
+    {
+     "driverName": "柳井 亮祐",
+     "totals": {
+      "legs": 4,
+      "salesYen": 152050,
+      "allowanceYen": 33000,
+      "haulKm": 266.6,
+      "deadheadKm": 405.5,
+      "haulSec": 37602,
+      "haulKmTimed": 266.6,
+      "deadheadSec": 59199,
+      "deadheadKmTimed": 405.5,
+      "estimatedLegs": 4,
+      "missingLegs": 0,
+      "comparableDeadheadKm": 405.5,
+      "destToLoadKm": 198.27204387745036,
+      "depotToLoadKm": {
+       "obihiro": 371.00243391896646,
+       "kushiro": 15.861325792599795
+      },
+      "destToDepotKm": {
+       "obihiro": 524.7850169939575,
+       "kushiro": 187.28063990051658
+      }
+     }
+    },
+    {
+     "driverName": "西島 健太",
+     "totals": {
+      "legs": 4,
+      "salesYen": 145200,
+      "allowanceYen": 32000,
+      "haulKm": 219.8,
+      "deadheadKm": 408.90000000000003,
+      "haulSec": 30998,
+      "haulKmTimed": 219.8,
+      "deadheadSec": 59687,
+      "deadheadKmTimed": 408.90000000000003,
+      "estimatedLegs": 4,
+      "missingLegs": 0,
+      "comparableDeadheadKm": 408.90000000000003,
+      "destToLoadKm": 163.452396106824,
+      "depotToLoadKm": {
+       "obihiro": 371.49960711929884,
+       "kushiro": 15.35340487730219
+      },
+      "destToDepotKm": {
+       "obihiro": 490.91415653276147,
+       "kushiro": 153.26513060041913
+      }
+     }
+    },
+    {
+     "driverName": "佐竹 繁",
+     "totals": {
+      "legs": 1,
+      "salesYen": 42350,
+      "allowanceYen": 9000,
+      "haulKm": 102.2,
+      "deadheadKm": 141,
+      "haulSec": 14401,
+      "haulKmTimed": 102.2,
+      "deadheadSec": 20511,
+      "deadheadKmTimed": 141,
+      "estimatedLegs": 1,
+      "missingLegs": 0,
+      "comparableDeadheadKm": 141,
+      "destToLoadKm": 75.95469690724897,
+      "depotToLoadKm": {
+       "obihiro": 92.37768343046889,
+       "kushiro": 4.345660789769035
+      },
+      "destToDepotKm": {
+       "obihiro": 156.80720679204202,
+       "kushiro": 72.52150244026053
+      }
+     }
+    }
+   ]
+  },
+  "legsPerRun": 1.6521739130434783,
+  "runs": 23,
+  "rebuiltDeadheadKm": {
+   "obihiro": 5773.863276327766,
+   "kushiro": 1784.6997146759077
+  },
+  "depotDiffKm": -3989.163561651858,
+  "calibrationRatio": {
+   "obihiro": 1.3462340638223704,
+   "kushiro": 0.4161206170990015
+  },
+  "speedKmh": {
+   "haul": 25.530810810810806,
+   "deadhead": 24.663024726854516
+  },
+  "restraint": {
+   "obihiro": {
+    "haulHours": 92.5,
+    "measuredDeadheadHours": 173.9,
+    "measuredTotalHours": 266.4,
+    "rebuiltDeadheadHours": 234.11010369871025,
+    "rebuiltTotalHours": 326.61010369871025,
+    "restraintIsLowerBound": true
+   },
+   "kushiro": {
+    "haulHours": 92.5,
+    "measuredDeadheadHours": 173.9,
+    "measuredTotalHours": 266.4,
+    "rebuiltDeadheadHours": 72.36337531351636,
+    "rebuiltTotalHours": 164.86337531351637,
+    "restraintIsLowerBound": true
+   }
+  },
+  "requiredDrivers": 1
+ },
+ "all": {
+  "legsPerRun": 2.652173913043478,
+  "totals": {
+   "legs": 61,
+   "salesYen": 2142245,
+   "allowanceYen": 464000,
+   "haulKm": 5209.599999999998,
+   "deadheadKm": 5723.800000000002,
+   "haulSec": 503700,
+   "haulKmTimed": 5091.0999999999985,
+   "deadheadSec": 762840,
+   "deadheadKmTimed": 5669.300000000002,
+   "estimatedLegs": 59,
+   "missingLegs": 2,
+   "comparableDeadheadKm": 5615.300000000002,
+   "destToLoadKm": 3695.8365724666537,
+   "depotToLoadKm": {
+    "obihiro": 5479.6201531391525,
+    "kushiro": 226.4755601821437
+   },
+   "destToDepotKm": {
+    "obihiro": 5098.921612115202,
+    "kushiro": 3674.541136285262
+   }
+  },
+  "routes": [
+   {
+    "from": "釧路",
+    "to": "標茶",
+    "doto": true,
+    "totals": {
+     "legs": 31,
+     "salesYen": 1130095,
+     "allowanceYen": 248000,
+     "haulKm": 1652.1000000000004,
+     "deadheadKm": 3459.5,
+     "haulSec": 232952,
+     "haulKmTimed": 1652.1000000000004,
+     "deadheadSec": 505020,
+     "deadheadKmTimed": 3459.5,
+     "estimatedLegs": 31,
+     "missingLegs": 0,
+     "comparableDeadheadKm": 3459.5,
+     "destToLoadKm": 1228.3218875358043,
+     "depotToLoadKm": {
+      "obihiro": 2877.133307522261,
+      "kushiro": 121.02118280513648
+     },
+     "destToDepotKm": {
+      "obihiro": 3768.378808750971,
+      "kushiro": 1148.9598388980376
+     }
+    }
+   },
+   {
+    "from": "釧路",
+    "to": "音更",
+    "doto": false,
+    "totals": {
+     "legs": 12,
+     "salesYen": 377000,
+     "allowanceYen": 54000,
+     "haulKm": 1429.8000000000002,
+     "deadheadKm": 769.4000000000001,
+     "haulSec": 85200,
+     "haulKmTimed": 1311.3000000000002,
+     "deadheadSec": 72000,
+     "deadheadKmTimed": 769.4000000000001,
+     "estimatedLegs": 11,
+     "missingLegs": 1,
+     "comparableDeadheadKm": 714.9000000000001,
+     "destToLoadKm": 977.8781312737337,
+     "depotToLoadKm": {
+      "obihiro": 1021.6241453231889,
+      "kushiro": 42.22492013685161
+     },
+     "destToDepotKm": {
+      "obihiro": 197.45425952176748,
+      "kushiro": 1018.5653675946803
+     }
+    }
+   },
+   {
+    "from": "釧路",
+    "to": "帯広",
+    "doto": false,
+    "totals": {
+     "legs": 11,
+     "salesYen": 345000,
+     "allowanceYen": 99000,
+     "haulKm": 1418.1999999999998,
+     "deadheadKm": 665.5,
+     "haulSec": 85500,
+     "haulKmTimed": 1418.1999999999998,
+     "deadheadSec": 64800,
+     "deadheadKmTimed": 611,
+     "estimatedLegs": 10,
+     "missingLegs": 1,
+     "comparableDeadheadKm": 611.5,
+     "destToLoadKm": 962.0699723237843,
+     "depotToLoadKm": {
+      "obihiro": 929.7436350930523,
+      "kushiro": 37.37133843178496
+     },
+     "destToDepotKm": {
+      "obihiro": 35.43809629816537,
+      "kushiro": 999.365412710723
+     }
+    }
+   },
+   {
+    "from": "釧路",
+    "to": "別海",
+    "doto": true,
+    "totals": {
+     "legs": 7,
+     "salesYen": 290150,
+     "allowanceYen": 63000,
+     "haulKm": 709.5000000000001,
+     "deadheadKm": 829.4,
+     "haulSec": 100048,
+     "haulKmTimed": 709.5000000000001,
+     "deadheadSec": 121020,
+     "deadheadKmTimed": 829.4,
+     "estimatedLegs": 7,
+     "missingLegs": 0,
+     "comparableDeadheadKm": 829.4,
+     "destToLoadKm": 527.5665813333303,
+     "depotToLoadKm": {
+      "obihiro": 651.1190652006485,
+      "kushiro": 25.85811880837068
+     },
+     "destToDepotKm": {
+      "obihiro": 1097.6504475442941,
+      "kushiro": 507.6505170818237
+     }
+    }
+   }
+  ]
+ }
+}

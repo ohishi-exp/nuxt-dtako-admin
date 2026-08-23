@@ -340,3 +340,16 @@ branches = true
 [[files]]
 path = "app/utils/kushiro-loading-legs.ts"
 branches = true
+
+# 道東卸しの便を釧路営業所発で組み直す試算 (Refs #760 の 34)。道東 (釧路+根室 2 振興局)
+# の判定を 1 定数 (`DOTO_PLACES`) に集め、判定は `routePlace` に乗せる (新しい住所パーサを
+# 作らない)。組み直し後の回送は `Σ(卸地→積地) + (Σ(営業所→積地)+Σ(卸地→営業所)−Σ(卸地→積地)) ÷ legsPerRun`
+# で、和のまま持つので**行を足すと全体に戻る** (按分が要らない)。`legsPerRun` の既定は
+# 実測の分布の平均、回送→時間 の速度も実測から。定数は `DEFAULT_LEGS_PER_DRIVER_MONTH`
+# (帯広実績 284 便 ÷ 5 名) だけで、それも引数で上書きできる。
+# branches: BR() で包んだ instrumented コピーで **34 分岐 (`if` 12 + `||`/`&&` の各項 12 +
+# 三項 4 + `??` 相当 5 + 既定引数 1) すべて両側 OK** を実測してから登録した
+# (probe を 1 本刺して branches が 98.55% に落ちることを先に確認済み。V8 の未実行レンジも 0)。
+[[files]]
+path = "app/utils/kushiro-doto-rebuild.ts"
+branches = true
