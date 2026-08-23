@@ -41,12 +41,13 @@ import { extractOperationIdle, type LegKmDetail } from '~/utils/allowance-idle'
 import { parseTargets, serializeTargets, toggleTarget, driverLabel } from '~/utils/allowance-targets'
 import {
   applyCarryOver,
-  buildMonthlyAllowance,
+  buildMonthlyAllowanceByOperationDate,
   monthReadingRange,
   toReportRows,
   type OperationAllowance,
   type AllowanceReportRow,
   type MonthlyAllowance,
+  type CrossMonthLegs,
 } from '~/utils/allowance-report'
 import {
   FORCE_MATCH_KEY,
@@ -56,7 +57,7 @@ import {
   applyForcedLegs,
   type ForcedLeg,
 } from '~/utils/allowance-force-match'
-import { fetchVehicleDailySlips, fetchDriverDailySlips, type VehicleDailySlip } from '~/utils/ichiban'
+import { fetchVehicleDailySlips, fetchDriverDailySlips, epochToYmd, type VehicleDailySlip } from '~/utils/ichiban'
 import { PROVISIONAL_KEY, parseProvisional, provisionalFor, type ProvisionalMap } from '~/utils/allowance-provisional'
 import { EXCLUDED_KEY, parseExcluded, isExcluded, type ExcludedMap } from '~/utils/allowance-excluded'
 import { LAST_SEARCH_KEY, parseLastSearch, serializeLastSearch } from '~/utils/allowance-last-search'
@@ -147,6 +148,12 @@ const fuelRates = ref<FuelRateMap>({})
  * 粗利には入れない — **数えて画面に出すためだけ**に持つ。
  */
 const uncovered = ref<UncoveredTotals | null>(null)
+/**
+ * **運行が月を跨いだぶん** (Refs #760 の 16)。集計前 / 古いキャッシュからは null。
+ *
+ * 粗利には効かない — 「この月に何が入って何が入っていないか」を書くためだけ。
+ */
+const crossMonth = ref<CrossMonthLegs | null>(null)
 
 const targets = ref<string[]>([])
 const drivers = ref<Driver[]>([])
@@ -175,6 +182,11 @@ const yenPct = (part: number, salesYen: number) => `${Math.round((part / salesYe
 /** 内訳の見出しの意味。**列を増やさない**代わりに、数字の意味をここで説明する。 */
 const KM_BREAKDOWN_TITLE = '積前=始業→最初の積み / 売上=積み→降し / 便間=降し→次の積み / 降後=最後の降し→終業'
 const OTHER_KM_TITLE = '降しが記録されていない便の走行 (分類不能)'
+/** 月の切り方の注記の title (Refs #760 の 16)。 */
+const MONTH_CUT_TITLE
+  = '粗利タブは運行の開始日 (イベントCSV の 運行開始) でその運行をどの月に数えるかを決め、'
+    + '選んだ運行の便は日付で切らずに全部この月に入れます。'
+    + '燃料代が運行まるごとの走行km から出るので、便だけを月で切ると月跨ぎの運行で必ず検算が合わないためです'
 
 const FUEL_HAUL_TITLE = '売上走行 (積み→降し) の走行ぶんの燃料代 = 燃料代 × 売上走行km ÷ 走行km'
 const FUEL_DEADHEAD_TITLE
@@ -267,6 +279,7 @@ function restoreFromCache() {
   inputs.value = cache.operations
   costs.value = cache.costs
   uncovered.value = cache.uncovered
+  crossMonth.value = cache.crossMonth
   shownYm.value = cache.ym
   savedAt.value = cache.savedAt
   restoredFromCache.value = true
@@ -282,6 +295,7 @@ function writeCache() {
       operations: inputs.value,
       costs: costs.value,
       uncovered: uncovered.value,
+      crossMonth: crossMonth.value,
     }))
     savedAt.value = now
   }
@@ -343,6 +357,14 @@ function fetchOperationsFor(range: { from: string, to: string }, driverCd?: stri
 /** 1 運行ぶんの解決結果 (便 + 走行距離 + その内訳)。 */
 interface ResolvedOperation {
   allowance: OperationAllowance
+  /**
+   * 運行開始の epoch 秒 (`OperationIdle.startTs`)。**月の切り方の鍵** (Refs #760 の 16) —
+   * 粗利タブは運行の開始日で月を切る。CSV が無い / 読めない運行では null で、
+   * `operationRunDate` が運行日 → 運行NO に落とす。
+   */
+  startTs: number | null
+  /** 運行終了の epoch 秒。**一番星の明細を引く期間の上端**に使う (翌月へ食い込むため)。 */
+  endTs: number | null
   totalKm: number
   /** 運行一覧 (KUDGURI) の `総走行距離`。`totalKm` と突き合わせるためだけに運ぶ。 */
   listedTotalKm: number | null
@@ -385,6 +407,8 @@ async function resolveOperation(op: OperationListItem): Promise<ResolvedOperatio
     // なく CSV が来ていないだけなので、注意を出しても直しようが無い。
     return {
       allowance: { ...base, error: 'イベントCSV が未取り込み (has_kudgivt=false)' },
+      startTs: null,
+      endTs: null,
       totalKm: 0,
       listedTotalKm: null,
       kmBreakdown: emptyKmBreakdown(),
@@ -405,6 +429,9 @@ async function resolveOperation(op: OperationListItem): Promise<ResolvedOperatio
         // している)。
         carryIn: extractCarryInUnloads(csv.headers, csv.rows),
       },
+      // 運行開始・運行終了 (月の切り方と、一番星を引く期間に使う。Refs #760 の 16)。
+      startTs: idle.startTs,
+      endTs: idle.endTs,
       // **`区間距離` の列が無い CSV は運行一覧の `総走行距離` を受け皿にする。**
       // 列が 1 つ無いだけで按分の分子を 0 にすると、その運行だけ経費が付かない
       // (`legKm` が空 かつ `totalKm` が 0 が「列が無い」の印。`kmBreakdown` は
@@ -427,6 +454,8 @@ async function resolveOperation(op: OperationListItem): Promise<ResolvedOperatio
     // CSV を読めなかった運行も同じ (数え方の問題ではない)。
     return {
       allowance: { ...base, error: e instanceof Error ? e.message : String(e) },
+      startTs: null,
+      endTs: null,
       totalKm: 0,
       listedTotalKm: null,
       kmBreakdown: emptyKmBreakdown(),
@@ -525,6 +554,34 @@ interface SalesSlips {
   pool: VehicleDailySlip[]
 }
 
+/** 1 日 (秒)。半開区間の上端を「終了日の翌日」にするのに使う。 */
+const ONE_DAY_SECONDS = 24 * 60 * 60
+
+/**
+ * 一番星の明細を引く期間 (`from` 以上 `to` 未満)。**運行の開始日〜終了日を覆う**まで
+ * 広げる (Refs #760 の 16)。
+ *
+ * 月の切り方が**運行の開始日**になったので、対象月の運行は翌月の日付の便を持ちうる。
+ * その便の売上が引けないと、便には売上が付かないのに運行の段には燃料が乗る
+ * (= 取引先別の検算がまた合わない)。
+ *
+ * **`slipDateRange(ym)` (月の前後 1 日) より狭くしない。** 対象外の枠
+ * (一番星から起こした便) の範囲がここで決まっているので、狭めるとその額が動く。
+ * 日数を足し込んで当てるのではなく、**運行終了の実日付**の翌日を上端にする
+ * (`to` は「未満」なので、終了日そのものを含めるには翌日が要る)。
+ */
+function slipRangeForOperations(ym: string, resolved: ResolvedOperation[], picked: Set<string>): { from: string, to: string } {
+  const base = slipDateRange(ym)
+  let from = base.from
+  let to = base.to
+  for (const r of resolved) {
+    if (!picked.has(r.allowance.unkoNo)) continue
+    if (r.startTs !== null && epochToYmd(r.startTs) < from) from = epochToYmd(r.startTs)
+    if (r.endTs !== null && epochToYmd(r.endTs + ONE_DAY_SECONDS) > to) to = epochToYmd(r.endTs + ONE_DAY_SECONDS)
+  }
+  return { from, to }
+}
+
 /**
  * 一番星の明細を引く。**取得はここだけ** — 突合 (`reconcileSales`) は引いたものを
  * 使い回して通信しない。
@@ -532,8 +589,7 @@ interface SalesSlips {
  * **強制突合より先に引く必要がある**。人が便に結んだ相手は明細の `rowId` なので、
  * 明細を持っていないと `resolveForceMatches` が 1 件も解けない。
  */
-async function fetchSlips(rows: AllowanceReportRow[], byDriver: boolean): Promise<SalesSlips> {
-  const range = slipDateRange(shownYm.value)
+async function fetchSlips(rows: AllowanceReportRow[], byDriver: boolean, range: { from: string, to: string }): Promise<SalesSlips> {
   const byKey: Record<string, VehicleDailySlip[]> = {}
   if (byDriver) {
     for (const [cd] of orderedDriverRows(rows)) {
@@ -643,6 +699,7 @@ async function run() {
   inputs.value = []
   costs.value = []
   uncovered.value = null
+  crossMonth.value = null
   progress.value = '運行を検索中...'
   try {
     localStorage.setItem(LAST_SEARCH_KEY, serializeLastSearch({ ym: ym.value, vehicle: vehicle.value }))
@@ -677,10 +734,15 @@ async function run() {
     // 基準がずれると「手当タブと粗利タブで手当が違う」という直しようのない話になる。
     const provisional = parseProvisional(localStorage.getItem(PROVISIONAL_KEY))
     const excluded: ExcludedMap = parseExcluded(localStorage.getItem(EXCLUDED_KEY))
+    // **月の切り方は運行の開始日** (Refs #760 の 16)。運行手当タブ (便の積み日) とは
+    // わざと違う — 粗利は運行を単位にしていて燃料代が運行まるごとの走行km から出るので、
+    // 便だけ月で切ると月跨ぎの運行で必ず検算が合わない。CSV から取れた `運行開始` を
+    // 渡し、取れない運行は `operationRunDate` が 運行日 → 運行NO に落とす。
+    const startTsByUnko = new Map(resolved.map(r => [r.allowance.unkoNo, r.startTs]))
     // **強制突合を当てる前の集計。** 一番星をどう引くか (乗務員 / 車番) と、どの
     // 乗務員・車輌ぶんを引くかを決めるのに使う。強制突合は便の卸地・手当を書き換える
     // だけで、運行も乗務員も増減しないので、ここで決めた引き先は当てた後も変わらない。
-    const base = buildMonthlyAllowance(ops, shownYm.value)
+    const base = buildMonthlyAllowanceByOperationDate(ops, shownYm.value, startTsByUnko)
     const byDriver = canFetchByDriver(base.drivers.map(d => d.driverName))
 
     // 一番星が落ちていても経費と手当は出せる。売上だけ諦めて理由を画面に残す。
@@ -690,7 +752,10 @@ async function run() {
     try {
       // **明細を先に引く。** 強制突合は明細の `rowId` で結ばれているので、
       // 集計より前に引いておかないと 1 件も解けない。取得はこの 1 回だけ。
-      const slips = await fetchSlips(rowsOf(base, excluded), byDriver)
+      // **明細の期間は選んだ運行の 開始日〜終了日 まで広げる** — 翌月日付の便の売上も要る。
+      const picked = new Set(base.drivers.flatMap(d => d.operations.map(o => o.unkoNo)))
+      const slips = await fetchSlips(
+        rowsOf(base, excluded), byDriver, slipRangeForOperations(shownYm.value, resolved, picked))
       // **強制突合は乗務員で引けているときだけ効かせる** (運行手当タブと同じ条件)。
       // 車番引きでは、その乗務員が別の車番で走った日の明細を持っていないので、
       // 人が結んだ相手が引けない。
@@ -707,7 +772,7 @@ async function run() {
       // **集計の前に便へ重ねる** — 卸地・手当・便数・経路キーが 1 か所から追従する。
       // 結んだ便が無ければ `applyForcedLegs` は同じ配列を返すので、集計し直さない。
       const opsForced = applyForcedLegs(ops, forced)
-      if (opsForced !== ops) monthly = buildMonthlyAllowance(opsForced, shownYm.value)
+      if (opsForced !== ops) monthly = buildMonthlyAllowanceByOperationDate(opsForced, shownYm.value, startTsByUnko)
       const sales = reconcileSales(rowsOf(monthly, excluded), slips, byDriver, forced, provisional)
       salesByLeg = sales.salesByLeg
       customersByLeg = sales.customersByLeg
@@ -717,6 +782,8 @@ async function run() {
       salesError.value = e instanceof Error ? e.message : String(e)
     }
 
+    // 運行が月を跨いだぶんの注記 (Refs #760 の 16)。**キャッシュにも入れる。**
+    crossMonth.value = monthly.crossMonth
     const rowsByUnko = rowsByUnkoOf(monthly, excluded)
     inputs.value = monthly.drivers.flatMap(d => d.operations.map((op) => {
       const rows = rowsByUnko.get(op.unkoNo) ?? []
@@ -1071,6 +1138,16 @@ function downloadCustomerRouteCsv() {
               2 つのタブで売上が違うのはこのぶんです。
             </p>
           </div>
+          <!-- **月の切り方**。運行手当タブ (便の積み日) と粗利タブ (運行の開始日) で
+               わざと違うので、何が入って何が入っていないかを数で書く (Refs #760 の 16)。 -->
+          <p class="text-xs text-gray-500 dark:text-gray-400 mt-2" :title="MONTH_CUT_TITLE">
+            <b>月の切り方: 運行日 (運行手当タブは便の積み日)</b>。
+            <template v-if="crossMonth && (crossMonth.nextMonthLegs > 0 || crossMonth.prevMonthOpsLegsInMonth > 0)">
+              翌月日付の便 {{ crossMonth.nextMonthLegs }} 本 (手当 {{ yen(crossMonth.nextMonthAllowanceYen) }}) を含み、
+              前月運行の当月便 {{ crossMonth.prevMonthOpsLegsInMonth }} 本 (手当 {{ yen(crossMonth.prevMonthOpsAllowanceYen) }}) を含みません。
+            </template>
+            <template v-else-if="crossMonth">月またぎなし。</template>
+          </p>
           <p
             v-if="result.unallocatedCostYen > 0"
             class="text-xs text-amber-600 dark:text-amber-400 mt-2"

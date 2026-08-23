@@ -42,7 +42,7 @@
 import { buildIchibanLegs, summarizeIchibanLegs, type IchibanLeg } from './allowance-ichiban-legs'
 import { transportSlips } from './allowance-relay'
 import { addressToCity, cityToPlace } from './allowance-trips'
-import type { AllowanceReportRow } from './allowance-report'
+import type { AllowanceReportRow, CrossMonthLegs } from './allowance-report'
 import type { LegReconcile } from './allowance-ichiban'
 import type { ProvisionalMap } from './allowance-provisional'
 import type { VehicleDailySlip } from './ichiban'
@@ -1653,8 +1653,13 @@ export function summarizeUncoveredLegs(legs: IchibanLeg[]): UncoveredTotals | nu
  * `v7` で便に **`customers`** (売上に当たった一番星の取引先) を足した (Refs #760 の 15)。
  * `v6` を読ませないのは、**取引先の無い便を読むと取引先別の集計が全便 `(突合なし)`
  * になる** (`customers: undefined` で `customerWeights` が落ちる) ため。
+ *
+ * `v8` で**月の切り方を運行の開始日に変えた** (Refs #760 の 16)。`v7` を読ませないのは、
+ * **便の積み日で切った古い集計**がキャッシュ経路だけに残るため — 月跨ぎの運行が
+ * 翌月便ぶんの燃料だけを抱えたままになり、取引先別の検算がその運行のぶんだけ
+ * 合わない画面に戻る (`crossMonth` の注記も出ない)。
  */
-export const MARGIN_CACHE_KEY = 'dtako:margin:cache:v7'
+export const MARGIN_CACHE_KEY = 'dtako:margin:cache:v8'
 
 /**
  * 直前の集計。**運行手当タブのキャッシュとはキーを分ける** — あちらは便と明細を
@@ -1675,6 +1680,12 @@ export interface MarginCache {
    * 「対象外」の枠が消えて、また売上が合わない画面に戻る。
    */
   uncovered: UncoveredTotals | null
+  /**
+   * 運行が月を跨いだぶんの注記 (Refs #760 の 16)。**`uncovered` と同じ理由で持つ** —
+   * これが無いと、キャッシュから出したときだけ「月の切り方」の注記が消えて、
+   * 運行手当タブとの差を読めない画面に戻る。**古いキャッシュには無い**ので null 可。
+   */
+  crossMonth: CrossMonthLegs | null
 }
 
 /**
@@ -1702,6 +1713,7 @@ export function parseMarginCache(raw: string | null | undefined): MarginCache | 
     costs: cache.costs,
     // **null と「入っていない」を同じに倒す。** 対象外が 0 便の月は `null` で保存する。
     uncovered: typeof cache.uncovered === 'object' && cache.uncovered !== null ? cache.uncovered : null,
+    crossMonth: typeof cache.crossMonth === 'object' && cache.crossMonth !== null ? cache.crossMonth : null,
   }
 }
 
