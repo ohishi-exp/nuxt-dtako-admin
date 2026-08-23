@@ -1212,121 +1212,121 @@ function downloadLegCsv() {
                   </td>
                   <td class="px-3 py-2 text-right text-gray-400">{{ yen(d.totals.laborYen) }}</td>
                 </tr>
-                <tr
-                  v-for="m in (openDrivers[d.driverName] ? d.operations : [])"
-                  :key="m.unkoNo"
-                  class="border-t border-gray-100 dark:border-gray-800 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-900/40"
-                  :title="m.legs.length > 0 ? 'クリックで便の内訳を開閉' : ''"
-                  @click="openOperations[m.unkoNo] = !openOperations[m.unkoNo]"
-                >
-                  <td class="px-3 py-1.5 pl-8">
-                    <span v-if="m.legs.length > 0" class="text-gray-400 mr-1">{{ openOperations[m.unkoNo] ? '▾' : '▸' }}</span>
-                    <NuxtLink
-                      :to="`/operations/${m.unkoNo}`"
-                      target="_blank"
-                      class="text-blue-500 hover:text-blue-700 hover:underline"
-                      @click.stop
+                <template v-for="m in (openDrivers[d.driverName] ? d.operations : [])" :key="m.unkoNo">
+                  <tr
+                    class="border-t border-gray-100 dark:border-gray-800 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-900/40"
+                    :title="m.legs.length > 0 ? 'クリックで便の内訳を開閉' : ''"
+                    @click="openOperations[m.unkoNo] = !openOperations[m.unkoNo]"
+                  >
+                    <td class="px-3 py-1.5 pl-8">
+                      <span v-if="m.legs.length > 0" class="text-gray-400 mr-1">{{ openOperations[m.unkoNo] ? '▾' : '▸' }}</span>
+                      <NuxtLink
+                        :to="`/operations/${m.unkoNo}`"
+                        target="_blank"
+                        class="text-blue-500 hover:text-blue-700 hover:underline"
+                        @click.stop
+                      >
+                        {{ m.date }}
+                      </NuxtLink>
+                      <span class="text-gray-400 ml-2">車輌{{ m.vehicleCode }}</span>
+                    </td>
+                    <td
+                      class="px-3 py-1.5 text-right"
+                      :class="kmMismatch(m) ? 'text-amber-600 dark:text-amber-400' : ''"
+                      :title="kmMismatch(m) ? kmMismatchTitle(m) : ''"
                     >
-                      {{ m.date }}
-                    </NuxtLink>
-                    <span class="text-gray-400 ml-2">車輌{{ m.vehicleCode }}</span>
-                  </td>
-                  <td
-                    class="px-3 py-1.5 text-right"
-                    :class="kmMismatch(m) ? 'text-amber-600 dark:text-amber-400' : ''"
-                    :title="kmMismatch(m) ? kmMismatchTitle(m) : ''"
+                      {{ km(m.totalKm) }}
+                      <span v-if="kmMismatch(m)" class="block text-xs text-amber-600 dark:text-amber-400">
+                        一覧 {{ num(m.listedTotalKm) }}km とずれ
+                      </span>
+                      <span class="block text-xs text-gray-400 dark:text-gray-500" :title="KM_BREAKDOWN_TITLE">
+                        積前 {{ kmInt(m.kmBreakdown.preLoadKm) }}<template v-if="m.totalKm > 0"> ({{ kmPct(m.kmBreakdown.preLoadKm, m.totalKm) }})</template> / 売上 {{ kmInt(m.kmBreakdown.haulKm) }}<template v-if="m.totalKm > 0"> ({{ kmPct(m.kmBreakdown.haulKm, m.totalKm) }})</template>
+                        / 便間 {{ kmInt(m.kmBreakdown.betweenKm) }}<template v-if="m.totalKm > 0"> ({{ kmPct(m.kmBreakdown.betweenKm, m.totalKm) }})</template> / 降後 {{ kmInt(m.kmBreakdown.postUnloadKm) }}<template v-if="m.totalKm > 0"> ({{ kmPct(m.kmBreakdown.postUnloadKm, m.totalKm) }})</template>
+                        <span
+                          v-if="m.kmBreakdown.otherKm > 0"
+                          class="text-amber-600 dark:text-amber-400"
+                          :title="OTHER_KM_TITLE"
+                        >/ 他 {{ kmInt(m.kmBreakdown.otherKm) }}<template v-if="m.totalKm > 0"> ({{ kmPct(m.kmBreakdown.otherKm, m.totalKm) }})</template></span>
+                      </span>
+                    </td>
+                    <td class="px-3 py-1.5 text-right">{{ yen(m.salesYen) }}</td>
+                    <td class="px-3 py-1.5 text-right">
+                      {{ yen(m.allowanceYen) }}
+                      <span v-if="m.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(m.allowanceYen, m.salesYen) }})</span>
+                    </td>
+                    <td
+                      class="px-3 py-1.5 text-right"
+                      :class="m.fuelHaulYen === null ? 'text-amber-600 dark:text-amber-400' : ''"
+                      :title="fuelCellTitle(m)"
+                    >
+                      {{ yen(m.fuelHaulYen) }}
+                      <span v-if="m.fuelHaulYen !== null && m.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(m.fuelHaulYen, m.salesYen) }})</span>
+                    </td>
+                    <td
+                      class="px-3 py-1.5 text-right"
+                      :class="m.fuelDeadheadYen === null ? 'text-amber-600 dark:text-amber-400' : ''"
+                      :title="fuelCellTitle(m)"
+                    >
+                      {{ yen(m.fuelDeadheadYen) }}
+                      <span v-if="m.fuelDeadheadYen !== null && m.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(m.fuelDeadheadYen, m.salesYen) }})</span>
+                    </td>
+                    <td class="px-3 py-1.5 text-right">
+                      {{ yen(m.directCostYen) }}
+                      <span v-if="m.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(m.directCostYen, m.salesYen) }})</span>
+                    </td>
+                    <td class="px-3 py-1.5 text-right" :title="fixedPoolTitle([m])">
+                      {{ yen(m.allocatedCostYen) }}
+                      <span v-if="m.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(m.allocatedCostYen, m.salesYen) }})</span>
+                    </td>
+                    <td
+                      class="px-3 py-1.5 text-right font-medium"
+                      :class="m.marginYen !== null && m.marginYen < 0 ? 'text-red-600 dark:text-red-400' : ''"
+                      :title="noMarginReason(m)"
+                    >
+                      {{ yen(m.marginYen) }}
+                    </td>
+                    <td class="px-3 py-1.5 text-right">{{ pct(marginRate(m)) }}</td>
+                    <td class="px-3 py-1.5 text-gray-500" :title="'固定費按分 = 車輌の按分対象の経費 × (この運行の走行km ÷ 月・この車輌の走行km)'">
+                      {{ num(m.totalKm) }} / {{ num(m.vehicleTotalKm) }} km
+                      <span v-if="m.vehicleTotalKm > 0" class="text-gray-400">
+                        = {{ pct(m.totalKm / m.vehicleTotalKm) }}
+                      </span>
+                      <span v-else class="text-amber-600 dark:text-amber-400">— 分母 0 なので按分していません</span>
+                      <span v-if="m.marginYen === null" class="block text-amber-600 dark:text-amber-400">
+                        粗利 - : {{ noMarginReason(m) }}
+                      </span>
+                    </td>
+                    <td class="px-3 py-1.5 text-right text-gray-400">{{ yen(m.laborYen) }}</td>
+                  </tr>
+                  <!-- 便 (3 段目)。運行の行をクリックで開閉。Refs #760 の 13 -->
+                  <tr
+                    v-for="l in (openOperations[m.unkoNo] ? m.legs : [])"
+                    :key="`${m.unkoNo}#${l.seq}`"
+                    class="border-t border-gray-50 dark:border-gray-800/60 text-gray-500 dark:text-gray-400"
                   >
-                    {{ km(m.totalKm) }}
-                    <span v-if="kmMismatch(m)" class="block text-xs text-amber-600 dark:text-amber-400">
-                      一覧 {{ num(m.listedTotalKm) }}km とずれ
-                    </span>
-                    <span class="block text-xs text-gray-400 dark:text-gray-500" :title="KM_BREAKDOWN_TITLE">
-                      積前 {{ kmInt(m.kmBreakdown.preLoadKm) }}<template v-if="m.totalKm > 0"> ({{ kmPct(m.kmBreakdown.preLoadKm, m.totalKm) }})</template> / 売上 {{ kmInt(m.kmBreakdown.haulKm) }}<template v-if="m.totalKm > 0"> ({{ kmPct(m.kmBreakdown.haulKm, m.totalKm) }})</template>
-                      / 便間 {{ kmInt(m.kmBreakdown.betweenKm) }}<template v-if="m.totalKm > 0"> ({{ kmPct(m.kmBreakdown.betweenKm, m.totalKm) }})</template> / 降後 {{ kmInt(m.kmBreakdown.postUnloadKm) }}<template v-if="m.totalKm > 0"> ({{ kmPct(m.kmBreakdown.postUnloadKm, m.totalKm) }})</template>
-                      <span
-                        v-if="m.kmBreakdown.otherKm > 0"
-                        class="text-amber-600 dark:text-amber-400"
-                        :title="OTHER_KM_TITLE"
-                      >/ 他 {{ kmInt(m.kmBreakdown.otherKm) }}<template v-if="m.totalKm > 0"> ({{ kmPct(m.kmBreakdown.otherKm, m.totalKm) }})</template></span>
-                    </span>
-                  </td>
-                  <td class="px-3 py-1.5 text-right">{{ yen(m.salesYen) }}</td>
-                  <td class="px-3 py-1.5 text-right">
-                    {{ yen(m.allowanceYen) }}
-                    <span v-if="m.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(m.allowanceYen, m.salesYen) }})</span>
-                  </td>
-                  <td
-                    class="px-3 py-1.5 text-right"
-                    :class="m.fuelHaulYen === null ? 'text-amber-600 dark:text-amber-400' : ''"
-                    :title="fuelCellTitle(m)"
-                  >
-                    {{ yen(m.fuelHaulYen) }}
-                    <span v-if="m.fuelHaulYen !== null && m.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(m.fuelHaulYen, m.salesYen) }})</span>
-                  </td>
-                  <td
-                    class="px-3 py-1.5 text-right"
-                    :class="m.fuelDeadheadYen === null ? 'text-amber-600 dark:text-amber-400' : ''"
-                    :title="fuelCellTitle(m)"
-                  >
-                    {{ yen(m.fuelDeadheadYen) }}
-                    <span v-if="m.fuelDeadheadYen !== null && m.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(m.fuelDeadheadYen, m.salesYen) }})</span>
-                  </td>
-                  <td class="px-3 py-1.5 text-right">
-                    {{ yen(m.directCostYen) }}
-                    <span v-if="m.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(m.directCostYen, m.salesYen) }})</span>
-                  </td>
-                  <td class="px-3 py-1.5 text-right" :title="fixedPoolTitle([m])">
-                    {{ yen(m.allocatedCostYen) }}
-                    <span v-if="m.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(m.allocatedCostYen, m.salesYen) }})</span>
-                  </td>
-                  <td
-                    class="px-3 py-1.5 text-right font-medium"
-                    :class="m.marginYen !== null && m.marginYen < 0 ? 'text-red-600 dark:text-red-400' : ''"
-                    :title="noMarginReason(m)"
-                  >
-                    {{ yen(m.marginYen) }}
-                  </td>
-                  <td class="px-3 py-1.5 text-right">{{ pct(marginRate(m)) }}</td>
-                  <td class="px-3 py-1.5 text-gray-500" :title="'固定費按分 = 車輌の按分対象の経費 × (この運行の走行km ÷ 月・この車輌の走行km)'">
-                    {{ num(m.totalKm) }} / {{ num(m.vehicleTotalKm) }} km
-                    <span v-if="m.vehicleTotalKm > 0" class="text-gray-400">
-                      = {{ pct(m.totalKm / m.vehicleTotalKm) }}
-                    </span>
-                    <span v-else class="text-amber-600 dark:text-amber-400">— 分母 0 なので按分していません</span>
-                    <span v-if="m.marginYen === null" class="block text-amber-600 dark:text-amber-400">
-                      粗利 - : {{ noMarginReason(m) }}
-                    </span>
-                  </td>
-                  <td class="px-3 py-1.5 text-right text-gray-400">{{ yen(m.laborYen) }}</td>
-                </tr>
-                <!-- 便 (3 段目)。運行の行をクリックで開閉。Refs #760 の 13 -->
-                <tr
-                  v-for="l in (openOperations[m.unkoNo] ? m.legs : [])"
-                  :key="`${m.unkoNo}#${l.seq}`"
-                  class="border-t border-gray-50 dark:border-gray-800/60 text-gray-500 dark:text-gray-400"
-                >
-                  <td class="px-3 py-1 pl-14">
-                    便{{ l.seq }} {{ l.originCity }}→{{ l.destCity }}
-                  </td>
-                  <td class="px-3 py-1 text-right">
-                    売上 {{ kmInt(l.haulKm) }} / 回送 {{ kmInt(l.deadheadKm) }}
-                  </td>
-                  <td class="px-3 py-1 text-right">{{ yen(l.salesYen) }}</td>
-                  <td class="px-3 py-1 text-right">{{ yen(l.allowanceYen) }}</td>
-                  <td class="px-3 py-1 text-right" :title="FUEL_HAUL_TITLE">{{ yen(l.fuelHaulYen) }}</td>
-                  <td class="px-3 py-1 text-right" :title="FUEL_DEADHEAD_TITLE">{{ yen(l.fuelDeadheadYen) }}</td>
-                  <td class="px-3 py-1 text-right">—</td>
-                  <td class="px-3 py-1 text-right">—</td>
-                  <td
-                    class="px-3 py-1 text-right"
-                    :title="'売上 − 手当 − 燃料。直課・固定費按分は運行の段'"
-                  >
-                    {{ yen(l.marginYen) }}
-                  </td>
-                  <td class="px-3 py-1" />
-                  <td class="px-3 py-1" />
-                  <td class="px-3 py-1" />
-                </tr>
+                    <td class="px-3 py-1 pl-14">
+                      便{{ l.seq }} {{ l.originCity }}→{{ l.destCity }}
+                    </td>
+                    <td class="px-3 py-1 text-right">
+                      売上 {{ kmInt(l.haulKm) }} / 回送 {{ kmInt(l.deadheadKm) }}
+                    </td>
+                    <td class="px-3 py-1 text-right">{{ yen(l.salesYen) }}</td>
+                    <td class="px-3 py-1 text-right">{{ yen(l.allowanceYen) }}</td>
+                    <td class="px-3 py-1 text-right" :title="FUEL_HAUL_TITLE">{{ yen(l.fuelHaulYen) }}</td>
+                    <td class="px-3 py-1 text-right" :title="FUEL_DEADHEAD_TITLE">{{ yen(l.fuelDeadheadYen) }}</td>
+                    <td class="px-3 py-1 text-right">—</td>
+                    <td class="px-3 py-1 text-right">—</td>
+                    <td
+                      class="px-3 py-1 text-right"
+                      :title="'売上 − 手当 − 燃料。直課・固定費按分は運行の段'"
+                    >
+                      {{ yen(l.marginYen) }}
+                    </td>
+                    <td class="px-3 py-1" />
+                    <td class="px-3 py-1" />
+                    <td class="px-3 py-1" />
+                  </tr>
+                </template>
               </template>
             </tbody>
           </table>
