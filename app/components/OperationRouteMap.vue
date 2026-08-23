@@ -47,6 +47,19 @@ const props = defineProps<{
   zipLoading?: boolean
   /** 一括 zip の進捗 (`3/12` のような文字列)。取っていないときは null。見出しのボタンに添える。 */
   bulkZipProgress?: string | null
+  /**
+   * NET780 のアーカイブが無かった運行の数 (Refs #760 の 27)。0 (または未指定) なら
+   * 「NET780 を取得」ボタンを出さない。取得そのもの (relay へ 20 件ずつ投げる・
+   * 終わったら地図を開き直す) は呼び出し側 (`margin.vue`) が持つ。
+   */
+  net780MissingCount?: number
+  /**
+   * NET780 取得の進捗 / 結果 (例 `NET780 取得中 20/32` → `NET780 取得: archived 3 / already 0 /
+   * not_found 29 / error 0`)。見出しの横に出すだけ。走っていなければ null。
+   */
+  net780ArchiveProgress?: string | null
+  /** NET780 取得が走っている間 true (ボタンを押せなくする)。 */
+  net780Archiving?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -56,6 +69,8 @@ const emit = defineEmits<{
   /** 運行 N 本の csvdata.zip を 1 つに同梱 (`unkoCount >= 2`)。 */
   'download-zip-all': []
   'update:layers': [layers: RouteMapLayers]
+  /** 見出しの「NET780 を取得 (未取得 N 運行)」(Refs #760 の 27)。 */
+  'archive-net780': []
 }>()
 
 /**
@@ -316,6 +331,17 @@ function onZipClick() {
         >
           {{ zipLabel }}
         </button>
+        <button
+          v-if="(net780MissingCount ?? 0) > 0"
+          type="button"
+          class="rounded border border-gray-300 dark:border-gray-700 px-1.5 py-0.5 text-[11px] text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+          title="NET780 のアーカイブが無い運行を relay に取りに行かせて R2 に保存する (1 運行 数秒〜十数秒)。終わると地図を引き直す"
+          :disabled="net780Archiving"
+          @click="emit('archive-net780')"
+        >
+          {{ net780Archiving ? '…' : `NET780 を取得 (未取得 ${net780MissingCount} 運行)` }}
+        </button>
+        <span v-if="net780ArchiveProgress" class="text-xs text-gray-500">{{ net780ArchiveProgress }}</span>
         <span class="ml-auto flex items-center gap-3 text-xs">
           <span v-if="route" class="text-gray-500">
             点 {{ route.pointCount }}<template v-if="route.droppedRows > 0"> / GPS 無効の行 {{ route.droppedRows }}</template>

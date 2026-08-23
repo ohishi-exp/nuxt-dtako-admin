@@ -15,6 +15,7 @@ import type {
   YTimeExportResponse,
 } from '~/types'
 import { createAuthFetch } from '@ippoan/auth-client'
+import type { Net780ArchiveResult } from '~/utils/net780-archive'
 
 let apiBase = ''
 let getAccessToken: (() => string | null) | null = null
@@ -696,6 +697,32 @@ export function buildEtcCsvDownloadUrl(key: string): string {
  * theearth セッションも `X-Alc-Proxy-Secret` も持たなくてよい**。 */
 export function operationCsvDataZipUrl(unkoNo: string): string {
   return `/api/operations/${encodeURIComponent(unkoNo)}/csvdata-zip`
+}
+
+/**
+ * NET780 のアーカイブが無い運行を relay に取りに行かせて R2 に保存する front worker の
+ * server route (`server/api/net780/archive.post.ts`、Refs #760 の 27)。
+ * 1 回 **1〜20 件** (超過は 400)。relay の応答 (`Net780ArchiveResult`) をそのまま返す。
+ *
+ * 同一オリジンの fetch なので cookie (`logi_auth_token`) は自動で載るが、
+ * `downloadOperationZip` (margin.vue) と同じく閲覧モードのように cookie が無い経路でも
+ * 通るよう `Authorization: Bearer` も明示する (`requireAuth` は cookie 優先 + Bearer 併用)。
+ * `request()` (rust-alc-api 向けの `createAuthFetch`) は base URL が backend なので使わない。
+ *
+ * 非 2xx は server route の `statusMessage` (relay の理由に `relay:` 前置) を
+ * `Error.message` にして投げる。
+ */
+export async function postNet780Archive(operationNos: string[]): Promise<Net780ArchiveResult> {
+  const token = currentAccessToken()
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  if (token) headers['authorization'] = `Bearer ${token}`
+  const res = await fetch('/api/net780/archive', { method: 'POST', headers, body: JSON.stringify({ operationNos }) })
+  const body = await res.json().catch(() => null) as { statusMessage?: string, message?: string } | null
+  if (!res.ok) {
+    throw new Error(body?.statusMessage ?? body?.message ?? `HTTP ${res.status}`)
+  }
+  if (body === null) throw new Error('NET780 取得の応答が JSON ではありません')
+  return body as unknown as Net780ArchiveResult
 }
 
 /** `zip_url` (relay 相対 path) を、ダウンロード可能な絶対 https URL に変換する。
