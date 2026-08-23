@@ -2176,8 +2176,12 @@ describe('summarizeByCustomerRoute — 取引先別 × 経路別 (Refs #760 の 
     ])
     // 便数と本数が一致する (行の数え方と同じ)。
     for (const c of sum.customers) expect(c.legRefs).toHaveLength(c.legs)
-    // CSV には出さない (列は 14 のまま)。
-    expect(customerRouteCsvLines(sum)[0]!.split(',')).toHaveLength(14)
+    // CSV には出さない — 見出しと同じ列数のまま、運行NO ("A" / "B") はどこにも出ない
+    // (列数を直書きすると、列を足す隣のタスクと衝突する。#760 の 20 が 15 列目を足した
+    //  ときに実際に落ちた — 両方の PR が rebase 無しで通ったため CI では捕まらなかった)。
+    const lines = customerRouteCsvLines(sum)
+    for (const line of lines.slice(1)) expect(line.split(',')).toHaveLength(lines[0]!.split(',').length)
+    expect(lines.some(l => l.includes('"A"') || l.includes('"B"'))).toBe(false)
   })
 
   it('当たっていない便 (customers: []) は (突合なし) に入る', () => {
