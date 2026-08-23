@@ -429,6 +429,39 @@ export interface MarginLegInput {
    * (1 便目は積前、2 便目以降は直前の便間) に、最後の便だけ帰庫ぶんが乗る。
    */
   deadheadKm: number
+  /**
+   * その便の売上に当たった一番星の明細の取引先 (Refs #760 の 15)。**`customersOfSlips`
+   * で畳んだもの**で、`Σ yen === salesYen` (明細の `amount` を取引先で束ねただけ)。
+   * 当たっていない便は `[]`。**運行の粗利にも便の収支にも 1 円も効かない** —
+   * 取引先別の集計 (`summarizeByCustomerRoute`) の鍵にするだけ。
+   */
+  customers: LegCustomerShare[]
+}
+
+/** 便 1 本に当たった取引先 1 つぶん (`MarginLegInput.customers` の要素)。 */
+export interface LegCustomerShare {
+  /** `取引先C`。 */
+  code: string
+  /** 取引先名 (最初に見た明細のもの)。 */
+  name: string
+  /** その取引先の明細の `amount` の和 (円)。**便の売上のうちこの取引先ぶん。** */
+  yen: number
+}
+
+/**
+ * 便に当たった明細を取引先で畳む (Refs #760 の 15)。順は明細の初出順。
+ *
+ * **名前は最初に見たもの**を使う — 同じ `customerCode` で名前の表記が揺れても
+ * 1 行にまとめる (鍵は `code`)。`amount` が 0 の明細も「当たった」ので落とさない。
+ */
+export function customersOfSlips(slips: Pick<VehicleDailySlip, 'customerCode' | 'customerName' | 'amount'>[]): LegCustomerShare[] {
+  const byCode = new Map<string, LegCustomerShare>()
+  for (const slip of slips) {
+    const hit = byCode.get(slip.customerCode) ?? { code: slip.customerCode, name: slip.customerName, yen: 0 }
+    hit.yen += slip.amount
+    byCode.set(slip.customerCode, hit)
+  }
+  return [...byCode.values()]
 }
 
 /** 粗利を出す 1 運行ぶんの入力。売上・手当・距離は呼び出し側が既に持っている。 */
@@ -545,6 +578,28 @@ export interface LegMargin {
    * 直課経費・固定費按分は便に割らず運行の段に残す。`FuelRate` が無ければ null。
    */
   marginYen: number | null
+  /** 便の売上に当たった取引先 (`MarginLegInput.customers` をそのまま運ぶ)。 */
+  customers: LegCustomerShare[]
+  /**
+   * **運行の経費 (直課 + 固定費按分) のうち、この便に配った額** (Refs #760 の 15)
+   * = `(directCostYen + allocatedCostYen) × (haulKm + deadheadKm) ÷ Σ(運行の全便の haulKm + deadheadKm)`。
+   *
+   * 分母 (便の走行km の和) が 0 なら 0 — **配れない運行の経費は便に載らない**
+   * (`summarizeByCustomerRoute` の検算で差として見える。黙って全便に均等には割らない)。
+   * **便の無い運行の経費も便に載らない** (`noLegOperations` に残す)。
+   * `marginYen` (収支) とは違って**運行の `marginYen` が null でも 0 ではなく額を持つ**
+   * (経費は配れる。粗利が出せないのは燃料の側の事情)。
+   */
+  runCostShareYen: number
+  /**
+   * **便の粗利** = `marginYen − runCostShareYen`。**運行の粗利が出せない運行
+   * (`OperationMargin.marginYen === null`) の便は null** — 燃費が出せない運行は
+   * `marginYen` も null だが、**経費を 1 件も持たない運行 (`costsMissing`) は便の収支が
+   * 出ていても粗利は出さない** (運行の段と同じ判断。売上そのままが粗利に見えるため)。
+   *
+   * 不変条件: 便が揃っている運行で `Σ grossMarginYen ≈ 運行の marginYen` (|差| < 1 円)。
+   */
+  grossMarginYen: number | null
 }
 
 /** 粗利の式。**1 か所にだけ置く** — 合計と行で式が分かれると静かにずれる。 */
@@ -740,11 +795,30 @@ export interface MarginResult {
  *
  * 直課経費・固定費按分は便に割らない (運行の段に残す)。**`marginYen` は粗利ではなく
  * 「売上 − 手当 − 燃料」の収支**。
+ *
+ * ただし取引先別の集計 (Refs #760 の 15) のために、**運行の経費 (直課 + 固定費按分)
+ * を便の走行km (売上走行 + 回送) の比で便に配った `runCostShareYen`** と、それを
+ * 収支から引いた **`grossMarginYen` (便の粗利)** も持たせる。`runCostYen` は運行の
+ * `directCostYen + allocatedCostYen`、`opMarginYen` は運行の `marginYen`
+ * (null なら便の粗利も null)。**運行の段の数字には 1 円も効かない。**
  */
-function buildLegMargins(legs: MarginLegInput[], fuelRate: FuelRate): LegMargin[] {
+function buildLegMargins(
+  legs: MarginLegInput[],
+  fuelRate: FuelRate,
+  runCostYen: number,
+  opMarginYen: number | null,
+): LegMargin[] {
+  // 配分の分母 = 運行の全便の走行km (売上走行 + 回送)。0 なら配らない (0 除算しない)。
+  const legKmTotal = legs.reduce((sum, leg) => sum + leg.haulKm + leg.deadheadKm, 0)
   return legs.map((leg) => {
     const fuelHaulYen = fuelYenFor(leg.haulKm, fuelRate)
     const fuelDeadheadYen = fuelYenFor(leg.deadheadKm, fuelRate)
+    // **燃料代が出せなければ収支も出さない。** `fuelHaulYen`/`fuelDeadheadYen` は
+    // 同じ `fuelRate` から出るので同時に null になる (`fuelYenFor` の仕様)。
+    const marginYen = fuelHaulYen === null || fuelDeadheadYen === null
+      ? null
+      : leg.salesYen - leg.allowanceYen - fuelHaulYen - fuelDeadheadYen
+    const runCostShareYen = legKmTotal > 0 ? runCostYen * ((leg.haulKm + leg.deadheadKm) / legKmTotal) : 0
     return {
       seq: leg.seq,
       date: leg.date,
@@ -756,11 +830,13 @@ function buildLegMargins(legs: MarginLegInput[], fuelRate: FuelRate): LegMargin[
       deadheadKm: leg.deadheadKm,
       fuelHaulYen,
       fuelDeadheadYen,
-      // **燃料代が出せなければ収支も出さない。** `fuelHaulYen`/`fuelDeadheadYen` は
-      // 同じ `fuelRate` から出るので同時に null になる (`fuelYenFor` の仕様)。
-      marginYen: fuelHaulYen === null || fuelDeadheadYen === null
-        ? null
-        : leg.salesYen - leg.allowanceYen - fuelHaulYen - fuelDeadheadYen,
+      marginYen,
+      customers: leg.customers,
+      runCostShareYen,
+      // **運行の粗利が null なら便の粗利も null。** 運行の `marginYen` が非 null なら
+      // `fuelRate` は出せている (= 便の `marginYen` も非 null) ので、ここで便の
+      // `marginYen` の null を別に見る必要は無い (見ると通らない枝が残る)。
+      grossMarginYen: opMarginYen === null ? null : marginYen! - runCostShareYen,
     }
   })
 }
@@ -818,6 +894,10 @@ export function buildOperationMargins(
     const directCostYen = spreadCost.direct[i]!
     const allocatedCostYen = spreadCost.allocated[i]!
     const costsMissing = (costCountByVehicle.get(op.vehicleCode) ?? 0) === 0
+    // **燃費が出せない運行と、経費を 1 件も持っていない運行は粗利を出さない。**
+    const marginYen = fuelYen === null || costsMissing
+      ? null
+      : marginOf(op.salesYen, op.allowanceYen, fuelYen, directCostYen, allocatedCostYen)
     return {
       unkoNo: op.unkoNo,
       date: op.date,
@@ -834,14 +914,12 @@ export function buildOperationMargins(
       fuelDeadheadYen: fuelSplit.deadhead,
       directCostYen,
       allocatedCostYen,
-      // **燃費が出せない運行と、経費を 1 件も持っていない運行は粗利を出さない。**
-      marginYen: fuelYen === null || costsMissing
-        ? null
-        : marginOf(op.salesYen, op.allowanceYen, fuelYen, directCostYen, allocatedCostYen),
+      marginYen,
       laborYen: spreadLabor.direct[i]! + spreadLabor.allocated[i]!,
       fuelRate,
       costsMissing,
-      legs: buildLegMargins(op.legs, fuelRate),
+      // 便には運行の経費 (直課 + 固定費按分) を走行km の比で配る (Refs #760 の 15)。
+      legs: buildLegMargins(op.legs, fuelRate, directCostYen + allocatedCostYen, marginYen),
     }
   })
 
@@ -1221,6 +1299,256 @@ export function marginLegCsvLines(margins: OperationMargin[]): string[] {
   ]
 }
 
+// --- 取引先別 × 経路別 (Refs #760 の 15) ---
+
+/** 一番星の明細が 1 件も当たっていない便を束ねる取引先の名前。`code` は空文字。 */
+export const NO_CUSTOMER_NAME = '(突合なし)'
+
+/** 積地・卸地が空の便の経路の端。 */
+export const UNKNOWN_PLACE = '(不明)'
+
+/**
+ * 経路の端の正規化。**運行手当タブの「広尾 → 富士」と同じ語彙**
+ * (`cityToPlace(addressToCity(city))` = 手当マスタの引き方)。空なら `(不明)`。
+ */
+export function routePlace(city: string): string {
+  const place = cityToPlace(addressToCity(city))
+  return place === '' ? UNKNOWN_PLACE : place
+}
+
+/**
+ * 取引先の行・経路の行に共通の列。
+ *
+ * **2 段に分かれている** (`MarginTotals` と同じ流儀)。`legs` 〜 `deadheadKm` は
+ * **束ねた便ぜんぶ**、`fuelHaulYen` 〜 `grossMarginYen` は**粗利を出せた便ぶんだけ**
+ * (`LegMargin.grossMarginYen` が null の便 = 運行の粗利が出せない便は入れない)。
+ * 混ぜると「売上 − 手当 − 燃料 − 経費配分 が粗利と合わない」行になる。
+ *
+ * **2 取引先に当たった便は売上の比で割って両方に足す** (便数だけは両方に 1 ずつ)。
+ */
+export interface CustomerRouteTotals {
+  /** 便数 (**ぜんぶ**)。2 取引先に当たった便はどちらにも 1 と数える。 */
+  legs: number
+  /** そのうち粗利を出せなかった便の数 (運行の粗利が null)。下 4 列に入っていない便。 */
+  unsplitLegs: number
+  salesYen: number
+  allowanceYen: number
+  haulKm: number
+  deadheadKm: number
+  /** 売上走行ぶんの燃料代 (粗利を出せた便ぶん)。 */
+  fuelHaulYen: number
+  /** 回送ぶんの燃料代 (粗利を出せた便ぶん)。 */
+  fuelDeadheadYen: number
+  /** 運行の経費 (直課 + 固定費按分) のうち便に配られた額 (粗利を出せた便ぶん)。 */
+  runCostShareYen: number
+  /**
+   * 粗利 = Σ `LegMargin.grossMarginYen` (null の便を除く)。**1 便も出せなければ null**
+   * (0 にすると「粗利 0 円」と読める。出せない便の数は `unsplitLegs`)。
+   */
+  grossMarginYen: number | null
+}
+
+/** 経路 1 本 (積地 → 卸地) の行。 */
+export interface RouteSummary extends CustomerRouteTotals {
+  /** 積地 (`routePlace(originCity)`)。 */
+  from: string
+  /** 卸地 (`routePlace(destCity)`)。 */
+  to: string
+}
+
+/** 取引先 1 つの行。`routes` は売上の降順。 */
+export interface CustomerSummary extends CustomerRouteTotals {
+  code: string
+  name: string
+  routes: RouteSummary[]
+}
+
+/**
+ * **便の無い運行**の合計。便が無いので取引先にも経路にも結べない — 別に出して、
+ * 取引先別の粗利と足せば粗利タブの粗利に戻るようにする。
+ *
+ * `operations` / `salesYen` / `allowanceYen` は**ぜんぶ**、`fuelYen` 〜 `marginYen` は
+ * **粗利を出せた運行ぶんだけ** (`MarginTotals` と同じ 2 段)。
+ */
+export interface NoLegOperationTotals {
+  operations: number
+  salesYen: number
+  allowanceYen: number
+  fuelYen: number
+  directCostYen: number
+  allocatedCostYen: number
+  marginYen: number
+}
+
+export interface CustomerRouteSummary {
+  /** 取引先 (売上の降順)。 */
+  customers: CustomerSummary[]
+  noLegOperations: NoLegOperationTotals
+  /**
+   * **粗利が出せない便** (運行の粗利が null) の数と売上。取引先の行の `legs`/`salesYen`
+   * には入っているが、`grossMarginYen` には入っていない。2 取引先の便も 1 と数える。
+   */
+  unsplitLegs: { legs: number, salesYen: number }
+  /** 粗利タブの粗利 (`summarizeMargins(margins).marginYen`)。検算の右辺。 */
+  totalMarginYen: number
+  /**
+   * 検算の差 = `totalMarginYen − (Σ取引先.grossMarginYen + noLegOperations.marginYen)`。
+   * **全便が揃っている月は 0** (|差| < 1 円)。便の走行km が取れていない運行
+   * (`区間距離` の列が無い CSV で便の km が 0) があると、運行の燃料と Σ便の燃料が
+   * ずれるぶんだけ差が出る — 画面は amber で出す。
+   */
+  diffYen: number
+}
+
+function emptyCustomerRouteTotals(): CustomerRouteTotals {
+  return {
+    legs: 0,
+    unsplitLegs: 0,
+    salesYen: 0,
+    allowanceYen: 0,
+    haulKm: 0,
+    deadheadKm: 0,
+    fuelHaulYen: 0,
+    fuelDeadheadYen: 0,
+    runCostShareYen: 0,
+    grossMarginYen: null,
+  }
+}
+
+/**
+ * 便の取引先と、その便の額をどの比で分けるか。
+ *
+ * - 当たっていない便 (`customers` が空) は `(突合なし)` に全額
+ * - 通常は 1 取引先で比 1
+ * - 2 取引先以上は `yen` の比。**`yen` の和が 0 なら等分** (当たった明細が全部 0 円 —
+ *   実データでは見ていないが、0 で割って NaN を粗利に混ぜない)
+ */
+function customerWeights(customers: LegCustomerShare[]): { code: string, name: string, weight: number }[] {
+  if (customers.length === 0) return [{ code: '', name: NO_CUSTOMER_NAME, weight: 1 }]
+  const total = customers.reduce((sum, c) => sum + c.yen, 0)
+  return customers.map(c => ({
+    code: c.code,
+    name: c.name,
+    weight: total > 0 ? c.yen / total : 1 / customers.length,
+  }))
+}
+
+/** 便 1 本を比 `weight` で行に足す。 */
+function addLegTo(t: CustomerRouteTotals, l: LegMargin, weight: number): void {
+  t.legs += 1
+  t.salesYen += l.salesYen * weight
+  t.allowanceYen += l.allowanceYen * weight
+  t.haulKm += l.haulKm * weight
+  t.deadheadKm += l.deadheadKm * weight
+  if (l.grossMarginYen === null) {
+    t.unsplitLegs += 1
+    return
+  }
+  // `grossMarginYen` が非 null なら燃料代も非 null (`buildLegMargins` の仕様)。
+  t.fuelHaulYen += l.fuelHaulYen! * weight
+  t.fuelDeadheadYen += l.fuelDeadheadYen! * weight
+  t.runCostShareYen += l.runCostShareYen * weight
+  t.grossMarginYen = (t.grossMarginYen ?? 0) + l.grossMarginYen * weight
+}
+
+/**
+ * 便を**一番星の取引先**で束ね、取引先の中を**経路 (積地 → 卸地)** で束ねる (Refs #760 の 15)。
+ *
+ * オーナー: 「取引先毎の利益率の集計 + 運行経路毎の集計。同じ取引先でも何個か組み合わせで
+ * 経路ができているはずで、どこから出発・どこで終了で経費・粗利が変わるはず」。
+ *
+ * - 取引先 = 便の売上に当たった明細の `取引先C` (`LegMargin.customers`)。当たっていない
+ *   便は `(突合なし)`。2 取引先に当たった便は売上の比で分ける
+ * - 経路 = `routePlace(originCity) → routePlace(destCity)` (手当マスタと同じ正規化)
+ * - 便の粗利 = 収支 − 運行の経費の配分 (`LegMargin.grossMarginYen`)
+ * - **便の無い運行**は取引先に結べないので `noLegOperations` に別に出す
+ * - **検算**: `Σ取引先.grossMarginYen + noLegOperations.marginYen === summarizeMargins(margins).marginYen`
+ *   (`diffYen` が 0。全便が揃っている月)
+ *
+ * 取引先も経路も**売上の降順**。同額は初出順 (sort は安定)。
+ */
+export function summarizeByCustomerRoute(margins: OperationMargin[]): CustomerRouteSummary {
+  const customers = new Map<string, CustomerSummary & { routeMap: Map<string, RouteSummary> }>()
+  const noLegOperations: NoLegOperationTotals = {
+    operations: 0, salesYen: 0, allowanceYen: 0, fuelYen: 0, directCostYen: 0, allocatedCostYen: 0, marginYen: 0,
+  }
+  const unsplitLegs = { legs: 0, salesYen: 0 }
+
+  for (const m of margins) {
+    if (m.legs.length === 0) {
+      noLegOperations.operations += 1
+      noLegOperations.salesYen += m.salesYen
+      noLegOperations.allowanceYen += m.allowanceYen
+      // 経費・粗利は**粗利を出せた運行ぶんだけ** (`summarizeMargins` と同じ)。
+      if (m.marginYen !== null) {
+        noLegOperations.fuelYen += m.fuelYen!
+        noLegOperations.directCostYen += m.directCostYen
+        noLegOperations.allocatedCostYen += m.allocatedCostYen
+        noLegOperations.marginYen += m.marginYen
+      }
+      continue
+    }
+    for (const l of m.legs) {
+      if (l.grossMarginYen === null) {
+        unsplitLegs.legs += 1
+        unsplitLegs.salesYen += l.salesYen
+      }
+      const from = routePlace(l.originCity)
+      const to = routePlace(l.destCity)
+      for (const w of customerWeights(l.customers)) {
+        const customer = customers.get(w.code)
+          ?? { ...emptyCustomerRouteTotals(), code: w.code, name: w.name, routes: [], routeMap: new Map<string, RouteSummary>() }
+        customers.set(w.code, customer)
+        addLegTo(customer, l, w.weight)
+        const routeKey = `${from}|${to}`
+        const route = customer.routeMap.get(routeKey) ?? { ...emptyCustomerRouteTotals(), from, to }
+        customer.routeMap.set(routeKey, route)
+        addLegTo(route, l, w.weight)
+      }
+    }
+  }
+
+  const sorted = [...customers.values()]
+    .map(({ routeMap, ...c }) => ({
+      ...c,
+      routes: [...routeMap.values()].sort((a, b) => b.salesYen - a.salesYen),
+    }))
+    .sort((a, b) => b.salesYen - a.salesYen)
+  const grossSum = sorted.reduce((sum, c) => sum + (c.grossMarginYen ?? 0), 0)
+  const totalMarginYen = summarizeMargins(margins).marginYen
+  return {
+    customers: sorted,
+    noLegOperations,
+    unsplitLegs,
+    totalMarginYen,
+    diffYen: totalMarginYen - (grossSum + noLegOperations.marginYen),
+  }
+}
+
+const CUSTOMER_ROUTE_CSV_HEADER = [
+  '取引先C', '取引先', '積地', '卸地', '便数', '売上走行km', '回送km',
+  '売上', '手当', '燃料代(売上走行)', '回送燃料', '運行経費の配分', '粗利', '粗利率',
+]
+
+/**
+ * 取引先 × 経路 の CSV (Refs #760 の 15)。**1 行 = 取引先 1 つ × 経路 1 本** (取引先の
+ * 小計行は出さない — 表計算で取引先C でまとめれば出る)。値にカンマが入りうるので必ず引用する。
+ */
+export function customerRouteCsvLines(summary: CustomerRouteSummary): string[] {
+  const quote = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`
+  const rate = (v: number | null) => (v === null ? '' : `${Math.round(v * 1000) / 10}%`)
+  const round = (v: number | null) => (v === null ? '' : Math.round(v))
+  return [
+    CUSTOMER_ROUTE_CSV_HEADER.map(quote).join(','),
+    ...summary.customers.flatMap(c => c.routes.map(r => [
+      c.code, c.name, r.from, r.to, r.legs, round(r.haulKm), round(r.deadheadKm),
+      round(r.salesYen), round(r.allowanceYen), round(r.fuelHaulYen), round(r.fuelDeadheadYen),
+      round(r.runCostShareYen), round(r.grossMarginYen),
+      rate(marginRate({ salesYen: r.salesYen, marginYen: r.grossMarginYen })),
+    ].map(quote).join(','))),
+  ]
+}
+
 // --- 粗利の対象外 (一番星から起こした便) ---
 
 /**
@@ -1321,8 +1649,12 @@ export function summarizeUncoveredLegs(legs: IchibanLeg[]): UncoveredTotals | nu
  * `v6` で `costs` の行に **`remarks` / `vendorName`** を足した (Refs #760 の 14)。
  * `v5` を読ませないのは、**備考・支払先の無い行を読むと直課経費の title に
  * `undefined` が混ざる**ため (取り込み直せば付く)。
+ *
+ * `v7` で便に **`customers`** (売上に当たった一番星の取引先) を足した (Refs #760 の 15)。
+ * `v6` を読ませないのは、**取引先の無い便を読むと取引先別の集計が全便 `(突合なし)`
+ * になる** (`customers: undefined` で `customerWeights` が落ちる) ため。
  */
-export const MARGIN_CACHE_KEY = 'dtako:margin:cache:v6'
+export const MARGIN_CACHE_KEY = 'dtako:margin:cache:v7'
 
 /**
  * 直前の集計。**運行手当タブのキャッシュとはキーを分ける** — あちらは便と明細を

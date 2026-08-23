@@ -19,6 +19,12 @@ import {
   groupMarginsByDriver,
   marginCsvLines,
   marginLegCsvLines,
+  customersOfSlips,
+  routePlace,
+  summarizeByCustomerRoute,
+  customerRouteCsvLines,
+  NO_CUSTOMER_NAME,
+  UNKNOWN_PLACE,
   splitFuelYen,
   noMarginReason,
   summarizeNoMarginReasons,
@@ -40,6 +46,7 @@ import {
   type CostsDailyApiRow,
   type MarginOperationInput,
   type MarginLegInput,
+  type LegCustomerShare,
   type OperationMargin,
   type UncoveredDriverInput,
 } from '~/utils/margin'
@@ -105,8 +112,14 @@ function leg(over: Partial<MarginLegInput> = {}): MarginLegInput {
     allowanceYen: 3000,
     haulKm: 40,
     deadheadKm: 15,
+    customers: [],
     ...over,
   }
+}
+
+/** 便に当たった取引先 1 つ (Refs #760 の 15)。 */
+function customer(over: Partial<LegCustomerShare> = {}): LegCustomerShare {
+  return { code: '015204', name: '大石畜産', yen: 20000, ...over }
 }
 
 /** デジタコ由来の便 1 本 (`buildMonthlyAllowance` が返す形)。 */
@@ -1179,11 +1192,12 @@ describe('走行km の内訳 (kmBreakdown)', () => {
     expect(row.slice(at, at + 7)).toEqual(['100', '10', '61', '25', '4', '0', '500'])
   })
 
-  it('キャッシュのキーは v6 — 備考・支払先の無い旧キャッシュ (v5) を読ませない', () => {
-    // 形を変えたら番号を上げる規約。**上げ忘れると `kmBreakdown`/`legs`/`remarks` が
-    // 無い行を画面が読む** (#760 の 4 が v2、7 が v4、13 が v5。経費の行に
-    // `remarks`/`vendorName` を足した版は v6、#760 の 14)。
-    expect(MARGIN_CACHE_KEY).toBe('dtako:margin:cache:v6')
+  it('キャッシュのキーは v7 — 取引先の無い旧キャッシュ (v6) を読ませない', () => {
+    // 形を変えたら番号を上げる規約。**上げ忘れると `kmBreakdown`/`legs`/`remarks`/
+    // `customers` が無い行を画面が読む** (#760 の 4 が v2、7 が v4、13 が v5。経費の行に
+    // `remarks`/`vendorName` を足した版は v6 (#760 の 14)、便に `customers` を足した版は
+    // v7 (#760 の 15))。
+    expect(MARGIN_CACHE_KEY).toBe('dtako:margin:cache:v7')
   })
 })
 
@@ -1872,5 +1886,451 @@ describe('便ごとの粗利 (legs)', () => {
       '"2607011000000000001109"', '"2026-07-01"', '"佐竹 繁"', '"1109"', '"1"',
       '"北海道釧路市"', '"浦幌町"', '"40"', '"20"', '"20000"', '"3000"', '""', '""', '""',
     ].join(','))
+  })
+})
+
+describe('便への運行経費の配分 (runCostShareYen / grossMarginYen) — Refs #760 の 15', () => {
+  /** 単価 120 円/L・燃費 5 km/L + 直課 ¥1,000 (07-01) + 固定費 ¥3,000 (按分。運行 1 本なので全額)。 */
+  const costsWith = [
+    cost({ costKind: FUEL_KIND, quantity: 20, amount: 2400 }),
+    cost({ costKind: '04', operationDate: '2026-07-01', amount: 1000 }),
+    cost({ costKind: '06', isFixed: true, amount: 3000 }),
+  ]
+
+  it('直課 + 固定費按分 を便の走行km (売上走行 + 回送) の比で配る', () => {
+    const res = buildOperationMargins(
+      [op({
+        totalKm: 100,
+        legs: [
+          leg({ seq: 1, haulKm: 30, deadheadKm: 10 }), // 40 km
+          leg({ seq: 2, haulKm: 30, deadheadKm: 30 }), // 60 km
+        ],
+      })],
+      costsWith,
+      {},
+    )
+    const m = res.operations[0]!
+    expect(m.directCostYen).toBe(1000)
+    expect(m.allocatedCostYen).toBe(3000)
+    // 4000 × 40/100 = 1600 / 4000 × 60/100 = 2400
+    expect(m.legs[0]!.runCostShareYen).toBeCloseTo(1600, 6)
+    expect(m.legs[1]!.runCostShareYen).toBeCloseTo(2400, 6)
+    // 便の粗利 = 収支 − 配分
+    expect(m.legs[0]!.grossMarginYen).toBeCloseTo(m.legs[0]!.marginYen! - 1600, 6)
+    expect(m.legs[1]!.grossMarginYen).toBeCloseTo(m.legs[1]!.marginYen! - 2400, 6)
+    // 運行の段の数字は 1 円も変わらない (売上 50000 − 手当 8000 − 燃料 2400 − 1000 − 3000)
+    expect(m.marginYen).toBe(50000 - 8000 - 2400 - 1000 - 3000)
+  })
+
+  it('**不変条件** 便が揃っている運行では Σ便の grossMarginYen が運行の marginYen と 1 円未満で一致する', () => {
+    const res = buildOperationMargins(
+      [op({
+        totalKm: 100,
+        salesYen: 50000,
+        allowanceYen: 8000,
+        kmBreakdown: { preLoadKm: 10, haulKm: 60, betweenKm: 25, postUnloadKm: 5, otherKm: 0 },
+        legs: [
+          leg({ seq: 1, haulKm: 30, deadheadKm: 10, salesYen: 20000, allowanceYen: 3000 }),
+          leg({ seq: 2, haulKm: 30, deadheadKm: 30, salesYen: 30000, allowanceYen: 5000 }),
+        ],
+      })],
+      costsWith,
+      {},
+    )
+    const m = res.operations[0]!
+    const legSum = m.legs.reduce((sum, l) => sum + l.grossMarginYen!, 0)
+    expect(Math.abs(legSum - m.marginYen!)).toBeLessThan(1)
+  })
+
+  it('便の走行km の和が 0 (区間距離の列が無い CSV) なら配分は 0 — 0 で割らない', () => {
+    const res = buildOperationMargins(
+      [op({ totalKm: 100, legs: [leg({ haulKm: 0, deadheadKm: 0 }), leg({ seq: 2, haulKm: 0, deadheadKm: 0 })] })],
+      costsWith,
+      {},
+    )
+    const m = res.operations[0]!
+    expect(m.legs.map(l => l.runCostShareYen)).toEqual([0, 0])
+    // 便の粗利は出るが、配分 0 なので Σ は運行の粗利と合わない (差 = 直課 + 按分)。正常。
+    expect(m.legs[0]!.grossMarginYen).toBe(m.legs[0]!.marginYen)
+  })
+
+  it('便の無い運行 (legs: []) は legs が空のまま — 直課・固定費按分は便に載らない', () => {
+    const res = buildOperationMargins([op({ totalKm: 100, legs: [] })], costsWith, {})
+    expect(res.operations[0]!.legs).toEqual([])
+    expect(res.operations[0]!.allocatedCostYen).toBe(3000)
+  })
+
+  it('運行の粗利が null (燃費が出せない) なら便の grossMarginYen も null、配分の額は持つ', () => {
+    const res = buildOperationMargins(
+      [op({ totalKm: 100, legs: [leg({ haulKm: 40, deadheadKm: 20 })] })],
+      // 燃料 (01) 無し → FuelRate が出せない。直課 ¥1,000 は配れる。
+      [cost({ costKind: '04', operationDate: '2026-07-01', amount: 1000 })],
+      {},
+    )
+    const l = res.operations[0]!.legs[0]!
+    expect(res.operations[0]!.marginYen).toBeNull()
+    expect(l.marginYen).toBeNull()
+    expect(l.runCostShareYen).toBe(1000)
+    expect(l.grossMarginYen).toBeNull()
+  })
+
+  it('経費を 1 件も持たない運行 (costsMissing) は、上書きで便の収支が出ていても便の粗利は null', () => {
+    const res = buildOperationMargins(
+      [op({ totalKm: 100, legs: [leg({ haulKm: 40, deadheadKm: 20 })] })],
+      [],
+      { 1109: { yenPerLiter: 120, kmPerLiter: 5 } },
+    )
+    const m = res.operations[0]!
+    const l = m.legs[0]!
+    expect(m.costsMissing).toBe(true)
+    expect(m.marginYen).toBeNull()
+    expect(l.marginYen).toBe(20000 - 3000 - 960 - 480)
+    expect(l.runCostShareYen).toBe(0)
+    expect(l.grossMarginYen).toBeNull()
+  })
+
+  it('便の customers は入力をそのまま運ぶ', () => {
+    const res = buildOperationMargins(
+      [op({ legs: [leg({ customers: [customer()] })] })],
+      costsWith,
+      {},
+    )
+    expect(res.operations[0]!.legs[0]!.customers).toEqual([customer()])
+  })
+})
+
+describe('customersOfSlips — 便に当たった明細を取引先で畳む', () => {
+  it('同じ取引先C は 1 行にまとめ、amount を足す。名前は最初に見たもの', () => {
+    expect(customersOfSlips([
+      slip({ customerCode: 'A', customerName: '川西', amount: 100 }),
+      slip({ customerCode: 'B', customerName: '浦幌', amount: 50 }),
+      slip({ customerCode: 'A', customerName: '川西(表記揺れ)', amount: 25 }),
+    ])).toEqual([
+      { code: 'A', name: '川西', yen: 125 },
+      { code: 'B', name: '浦幌', yen: 50 },
+    ])
+  })
+
+  it('明細が無ければ空配列', () => {
+    expect(customersOfSlips([])).toEqual([])
+  })
+})
+
+describe('routePlace — 経路の端の正規化 (手当マスタと同じ)', () => {
+  it('住所 → 市町村 → 市町村を落とした地名 (「北海道釧路市」→「釧路」、「浦幌町」→「浦幌」)', () => {
+    expect(routePlace('北海道釧路市')).toBe('釧路')
+    expect(routePlace('浦幌町')).toBe('浦幌')
+    expect(routePlace('北海道河東郡上士幌町')).toBe('上士幌')
+  })
+
+  it('空なら (不明)', () => {
+    expect(routePlace('')).toBe(UNKNOWN_PLACE)
+    expect(routePlace('  ')).toBe(UNKNOWN_PLACE)
+  })
+})
+
+describe('summarizeByCustomerRoute — 取引先別 × 経路別 (Refs #760 の 15)', () => {
+  /** 単価 120 円/L・燃費 5 km/L (totalKm 100 ÷ 20 L) + 固定費 ¥3,000。 */
+  const baseCosts = [
+    cost({ costKind: FUEL_KIND, quantity: 20, amount: 2400 }),
+    cost({ costKind: '06', isFixed: true, amount: 3000 }),
+  ]
+  const kawanishi = customer({ code: 'K', name: '川西', yen: 20000 })
+  const kamishihoro = customer({ code: 'S', name: '上士幌', yen: 30000 })
+
+  it('1 取引先の便はその取引先に全額。経路は 積地 → 卸地 の正規化キーで束ねる', () => {
+    const res = buildOperationMargins(
+      [op({
+        totalKm: 100,
+        salesYen: 50000,
+        allowanceYen: 8000,
+        legs: [
+          leg({ seq: 1, originCity: '北海道釧路市', destCity: '川西町', haulKm: 30, deadheadKm: 10, salesYen: 20000, allowanceYen: 3000, customers: [kawanishi] }),
+          leg({ seq: 2, originCity: '北海道釧路市', destCity: '北海道河東郡上士幌町', haulKm: 30, deadheadKm: 30, salesYen: 30000, allowanceYen: 5000, customers: [kamishihoro] }),
+        ],
+      })],
+      baseCosts,
+      {},
+    )
+    const sum = summarizeByCustomerRoute(res.operations)
+    // 売上の降順: 上士幌 30000 → 川西 20000
+    expect(sum.customers.map(c => [c.code, c.name, c.legs, c.salesYen])).toEqual([
+      ['S', '上士幌', 1, 30000],
+      ['K', '川西', 1, 20000],
+    ])
+    expect(sum.customers[0]!.routes).toHaveLength(1)
+    expect(sum.customers[0]!.routes[0]!.from).toBe('釧路')
+    expect(sum.customers[0]!.routes[0]!.to).toBe('上士幌')
+    expect(sum.customers[1]!.routes[0]!.to).toBe('川西')
+    // 取引先の行 = 便の額そのまま
+    const m = res.operations[0]!
+    const c = sum.customers[1]!
+    expect(c.allowanceYen).toBe(3000)
+    expect(c.haulKm).toBe(30)
+    expect(c.deadheadKm).toBe(10)
+    expect(c.fuelHaulYen).toBeCloseTo(m.legs[0]!.fuelHaulYen!, 6)
+    expect(c.fuelDeadheadYen).toBeCloseTo(m.legs[0]!.fuelDeadheadYen!, 6)
+    expect(c.runCostShareYen).toBeCloseTo(m.legs[0]!.runCostShareYen, 6)
+    expect(c.grossMarginYen).toBeCloseTo(m.legs[0]!.grossMarginYen!, 6)
+    expect(c.unsplitLegs).toBe(0)
+    // 経路の行も同じ額
+    expect(c.routes[0]!.grossMarginYen).toBeCloseTo(c.grossMarginYen!, 6)
+    // 検算: Σ取引先の粗利 = 運行の粗利 (便の無い運行 0)
+    expect(sum.noLegOperations.operations).toBe(0)
+    expect(sum.unsplitLegs).toEqual({ legs: 0, salesYen: 0 })
+    expect(sum.totalMarginYen).toBe(summarizeMargins(res.operations).marginYen)
+    expect(Math.abs(sum.diffYen)).toBeLessThan(1)
+  })
+
+  it('2 取引先に当たった便は売上の比で分ける (便数はどちらにも 1)', () => {
+    const res = buildOperationMargins(
+      [op({
+        totalKm: 100,
+        salesYen: 40000,
+        allowanceYen: 4000,
+        legs: [leg({
+          haulKm: 60, deadheadKm: 40, salesYen: 40000, allowanceYen: 4000,
+          // 30000 : 10000 = 3 : 1
+          customers: [customer({ code: 'A', name: '甲', yen: 30000 }), customer({ code: 'B', name: '乙', yen: 10000 })],
+        })],
+      })],
+      baseCosts,
+      {},
+    )
+    const sum = summarizeByCustomerRoute(res.operations)
+    const l = res.operations[0]!.legs[0]!
+    expect(sum.customers.map(c => c.code)).toEqual(['A', 'B'])
+    const [a, b] = sum.customers as [typeof sum.customers[0], typeof sum.customers[0]]
+    expect(a.legs).toBe(1)
+    expect(b.legs).toBe(1)
+    expect(a.salesYen).toBeCloseTo(30000, 6)
+    expect(b.salesYen).toBeCloseTo(10000, 6)
+    expect(a.allowanceYen).toBeCloseTo(3000, 6)
+    expect(b.allowanceYen).toBeCloseTo(1000, 6)
+    expect(a.haulKm).toBeCloseTo(45, 6)
+    expect(b.deadheadKm).toBeCloseTo(10, 6)
+    expect(a.fuelHaulYen + b.fuelHaulYen).toBeCloseTo(l.fuelHaulYen!, 6)
+    expect(a.runCostShareYen + b.runCostShareYen).toBeCloseTo(l.runCostShareYen, 6)
+    expect(a.grossMarginYen! + b.grossMarginYen!).toBeCloseTo(l.grossMarginYen!, 6)
+    expect(a.grossMarginYen!).toBeCloseTo(l.grossMarginYen! * 0.75, 6)
+    expect(Math.abs(sum.diffYen)).toBeLessThan(1)
+  })
+
+  it('2 取引先で yen の和が 0 なら等分する (0 で割らない)', () => {
+    const res = buildOperationMargins(
+      [op({ legs: [leg({ salesYen: 0, customers: [customer({ code: 'A', yen: 0 }), customer({ code: 'B', yen: 0 })] })] })],
+      baseCosts,
+      {},
+    )
+    const sum = summarizeByCustomerRoute(res.operations)
+    expect(sum.customers.map(c => c.allowanceYen)).toEqual([1500, 1500])
+  })
+
+  it('当たっていない便 (customers: []) は (突合なし) に入る', () => {
+    const res = buildOperationMargins(
+      [op({ legs: [leg({ customers: [] })] })],
+      baseCosts,
+      {},
+    )
+    const sum = summarizeByCustomerRoute(res.operations)
+    expect(sum.customers).toHaveLength(1)
+    expect(sum.customers[0]!.code).toBe('')
+    expect(sum.customers[0]!.name).toBe(NO_CUSTOMER_NAME)
+    expect(sum.customers[0]!.salesYen).toBe(20000)
+  })
+
+  it('同じ取引先の便は 1 行に束ね、経路は積地 → 卸地 ごとに分かれて売上の降順', () => {
+    const res = buildOperationMargins(
+      [
+        // 便の売上・手当・km の和 = 運行の売上・手当・totalKm にしてある (便が揃っている運行)
+        op({
+          unkoNo: 'U1',
+          salesYen: 40000,
+          allowanceYen: 6000,
+          legs: [
+            leg({ seq: 1, originCity: '北海道釧路市', destCity: '川西町', haulKm: 40, deadheadKm: 10, salesYen: 10000, customers: [kawanishi] }),
+            leg({ seq: 2, originCity: '北海道広尾郡広尾町', destCity: '川西町', haulKm: 40, deadheadKm: 10, salesYen: 30000, customers: [kawanishi] }),
+          ],
+        }),
+        op({
+          unkoNo: 'U2',
+          salesYen: 15000,
+          allowanceYen: 3000,
+          legs: [leg({ seq: 1, originCity: '北海道釧路市', destCity: '川西町', haulKm: 80, deadheadKm: 20, salesYen: 15000, customers: [kawanishi] })],
+        }),
+      ],
+      baseCosts,
+      {},
+    )
+    const sum = summarizeByCustomerRoute(res.operations)
+    expect(sum.customers).toHaveLength(1)
+    const c = sum.customers[0]!
+    expect(c.legs).toBe(3)
+    expect(c.salesYen).toBe(55000)
+    expect(c.routes.map(r => [r.from, r.to, r.legs, r.salesYen])).toEqual([
+      ['広尾', '川西', 1, 30000],
+      ['釧路', '川西', 2, 25000],
+    ])
+    expect(Math.abs(sum.diffYen)).toBeLessThan(1)
+  })
+
+  it('積地・卸地が空の便の経路は (不明)', () => {
+    const res = buildOperationMargins(
+      [op({ legs: [leg({ originCity: '', destCity: '', customers: [kawanishi] })] })],
+      baseCosts,
+      {},
+    )
+    const r = summarizeByCustomerRoute(res.operations).customers[0]!.routes[0]!
+    expect(r.from).toBe(UNKNOWN_PLACE)
+    expect(r.to).toBe(UNKNOWN_PLACE)
+  })
+
+  it('便の無い運行は noLegOperations に別に出し、検算の式 Σ取引先 + 便の無い運行 = 粗利タブの粗利 が成り立つ', () => {
+    const res = buildOperationMargins(
+      [
+        op({ unkoNo: 'L', totalKm: 60, salesYen: 20000, allowanceYen: 3000, legs: [leg({ haulKm: 40, deadheadKm: 20, customers: [kawanishi] })] }),
+        // 便の無い運行 (同じ車輌なので固定費 3000 は 60:40 で按分される)
+        op({ unkoNo: 'N', date: '2026-07-02', totalKm: 40, salesYen: 30000, allowanceYen: 5000, legs: [] }),
+      ],
+      [
+        ...baseCosts,
+        // 便の無い運行に直課される変動費
+        cost({ costKind: '04', operationDate: '2026-07-02', amount: 500 }),
+      ],
+      {},
+    )
+    const sum = summarizeByCustomerRoute(res.operations)
+    const n = res.operations[1]!
+    expect(sum.noLegOperations).toEqual({
+      operations: 1,
+      salesYen: 30000,
+      allowanceYen: 5000,
+      fuelYen: n.fuelYen!,
+      directCostYen: 500,
+      allocatedCostYen: n.allocatedCostYen,
+      marginYen: n.marginYen!,
+    })
+    const grossSum = sum.customers.reduce((s, c) => s + c.grossMarginYen!, 0)
+    const totals = summarizeMargins(res.operations)
+    expect(sum.totalMarginYen).toBe(totals.marginYen)
+    expect(Math.abs(grossSum + sum.noLegOperations.marginYen - totals.marginYen)).toBeLessThan(1)
+    expect(Math.abs(sum.diffYen)).toBeLessThan(1)
+  })
+
+  it('便の無い運行で粗利が出せないものは operations/売上/手当だけ数え、経費・粗利は足さない', () => {
+    const res = buildOperationMargins(
+      [op({ totalKm: 100, salesYen: 30000, allowanceYen: 5000, legs: [] })],
+      [], // 経費 0 件 → 粗利 null
+      {},
+    )
+    const sum = summarizeByCustomerRoute(res.operations)
+    expect(sum.noLegOperations).toEqual({
+      operations: 1, salesYen: 30000, allowanceYen: 5000, fuelYen: 0, directCostYen: 0, allocatedCostYen: 0, marginYen: 0,
+    })
+    expect(sum.customers).toEqual([])
+    expect(sum.totalMarginYen).toBe(0)
+    expect(sum.diffYen).toBe(0)
+  })
+
+  it('粗利が出せない便は unsplitLegs に数え、取引先の行では便数・売上に入るが粗利 (null) には入らない', () => {
+    const res = buildOperationMargins(
+      [
+        // 燃費が出せる運行 (車輌 1109)
+        op({ unkoNo: 'A', vehicleCode: '1109', salesYen: 20000, allowanceYen: 3000, legs: [leg({ haulKm: 60, deadheadKm: 40, customers: [kawanishi] })] }),
+        // 燃料の給油実績が無い車輌 (1110) → 粗利 null。固定費は車輌別に按分される
+        op({
+          unkoNo: 'B',
+          vehicleCode: '1110',
+          legs: [
+            leg({ salesYen: 5000, customers: [kawanishi] }),
+            leg({ seq: 2, salesYen: 7000, customers: [customer({ code: 'X', name: '別', yen: 7000 })] }),
+          ],
+        }),
+      ],
+      [...baseCosts, cost({ vehicleNumber: '1110', costKind: '06', isFixed: true, amount: 100 })],
+      {},
+    )
+    const sum = summarizeByCustomerRoute(res.operations)
+    expect(sum.unsplitLegs).toEqual({ legs: 2, salesYen: 12000 })
+    const k = sum.customers.find(c => c.code === 'K')!
+    expect(k.legs).toBe(2)
+    expect(k.unsplitLegs).toBe(1)
+    expect(k.salesYen).toBe(25000)
+    // 粗利は出せた 1 便ぶんだけ
+    expect(k.grossMarginYen).toBeCloseTo(res.operations[0]!.legs[0]!.grossMarginYen!, 6)
+    // 全便が出せない取引先は粗利 null (0 ではない)
+    const x = sum.customers.find(c => c.code === 'X')!
+    expect(x.legs).toBe(1)
+    expect(x.unsplitLegs).toBe(1)
+    expect(x.grossMarginYen).toBeNull()
+    expect(x.routes[0]!.grossMarginYen).toBeNull()
+    // 検算: 出せない便は両辺に入らないので差 0
+    expect(Math.abs(sum.diffYen)).toBeLessThan(1)
+  })
+
+  it('便の走行km が取れていない運行があると検算の差が出る (diffYen ≠ 0) — 黙って合わせない', () => {
+    const res = buildOperationMargins(
+      [op({ totalKm: 100, salesYen: 20000, allowanceYen: 3000, legs: [leg({ haulKm: 0, deadheadKm: 0, customers: [kawanishi] })] })],
+      baseCosts,
+      {},
+    )
+    const sum = summarizeByCustomerRoute(res.operations)
+    // 運行の燃料 2400 + 固定費 3000 が便に載らない → 差 = 5400 (右辺が小さい)
+    expect(sum.diffYen).toBeCloseTo(-(2400 + 3000), 6)
+  })
+
+  it('運行が 1 本も無ければ空', () => {
+    expect(summarizeByCustomerRoute([])).toEqual({
+      customers: [],
+      noLegOperations: { operations: 0, salesYen: 0, allowanceYen: 0, fuelYen: 0, directCostYen: 0, allocatedCostYen: 0, marginYen: 0 },
+      unsplitLegs: { legs: 0, salesYen: 0 },
+      totalMarginYen: 0,
+      diffYen: 0,
+    })
+  })
+
+  it('customerRouteCsvLines は 取引先 × 経路 で 1 行、列は 取引先C / 取引先 / 積地 / 卸地 / 便数 / 売上走行km / 回送km / 売上 / 手当 / 燃料代(売上走行) / 回送燃料 / 運行経費の配分 / 粗利 / 粗利率', () => {
+    const res = buildOperationMargins(
+      [op({
+        totalKm: 100,
+        salesYen: 50000,
+        allowanceYen: 8000,
+        legs: [
+          leg({ seq: 1, originCity: '北海道釧路市', destCity: '川西町', haulKm: 30.4, deadheadKm: 10, salesYen: 20000, allowanceYen: 3000, customers: [customer({ code: 'K"1', name: '川西', yen: 20000 })] }),
+          leg({ seq: 2, originCity: '北海道釧路市', destCity: '上士幌町', haulKm: 30, deadheadKm: 30, salesYen: 30000, allowanceYen: 5000, customers: [kamishihoro] }),
+        ],
+      })],
+      baseCosts,
+      {},
+    )
+    const sum = summarizeByCustomerRoute(res.operations)
+    const lines = customerRouteCsvLines(sum)
+    expect(lines).toHaveLength(3)
+    expect(lines[0]).toBe([
+      '取引先C', '取引先', '積地', '卸地', '便数', '売上走行km', '回送km',
+      '売上', '手当', '燃料代(売上走行)', '回送燃料', '運行経費の配分', '粗利', '粗利率',
+    ].map(v => `"${v}"`).join(','))
+    // 売上の降順なので 上士幌 (30000) が先。
+    // 便 2: 売上走行 30÷5×120=720 / 回送 30÷5×120=720 / 配分 3000×60/100.4 /
+    // 粗利 = 30000−5000−720−720−配分
+    const share2 = 3000 * (60 / 100.4)
+    const gross2 = 30000 - 5000 - 720 - 720 - share2
+    expect(lines[1]).toBe([
+      '"S"', '"上士幌"', '"釧路"', '"上士幌"', '"1"', '"30"', '"30"',
+      '"30000"', '"5000"', '"720"', '"720"', `"${Math.round(share2)}"`, `"${Math.round(gross2)}"`,
+      `"${Math.round((gross2 / 30000) * 1000) / 10}%"`,
+    ].join(','))
+    // 引用符は "" にエスケープ
+    expect(lines[2]!.startsWith('"K""1","川西","釧路","川西","1","30","10","20000","3000"')).toBe(true)
+  })
+
+  it('customerRouteCsvLines は粗利が出せない経路の粗利・粗利率を空にする', () => {
+    const res = buildOperationMargins(
+      [op({ legs: [leg({ customers: [kawanishi] })] })],
+      [], // 経費 0 件 → 粗利 null
+      {},
+    )
+    const line = customerRouteCsvLines(summarizeByCustomerRoute(res.operations))[1]!
+    expect(line.endsWith(',"0","0","0","",""')).toBe(true)
   })
 })

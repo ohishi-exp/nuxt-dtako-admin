@@ -92,6 +92,9 @@ import {
   summarizeUncoveredLegs,
   marginCsvLines,
   marginLegCsvLines,
+  customersOfSlips,
+  summarizeByCustomerRoute,
+  customerRouteCsvLines,
   operationDirectCostTitle,
   driverDirectCostTitle,
   type CostRow,
@@ -101,6 +104,7 @@ import {
   type MarginCache,
   type MarginOperationInput,
   type MarginLegInput,
+  type LegCustomerShare,
   type OperationMargin,
   type UncoveredDriverInput,
   type UncoveredTotals,
@@ -464,6 +468,7 @@ function buildMarginLegs(
   rows: AllowanceReportRow[],
   legKmDetail: LegKmDetail[],
   salesByLeg: Map<string, number>,
+  customersByLeg: Map<string, LegCustomerShare[]>,
   provisional: ProvisionalMap,
 ): MarginLegInput[] {
   return rows.map((r) => {
@@ -477,6 +482,8 @@ function buildMarginLegs(
       allowanceYen: legPayYen(r, provisional),
       haulKm: detail?.haulKm ?? 0,
       deadheadKm: detail ? detail.approachKm + detail.tailKm + detail.otherKm : 0,
+      // 売上に当たった一番星の取引先 (Refs #760 の 15)。当たっていない便は `[]`。
+      customers: customersByLeg.get(legKey(r)) ?? [],
     }
   })
 }
@@ -596,13 +603,22 @@ function reconcileSales(
   byDriver: boolean,
   forced: Map<string, ForcedLeg>,
   provisional: ProvisionalMap,
-): { salesByLeg: Map<string, number>, uncovered: UncoveredTotals | null } {
+): {
+  salesByLeg: Map<string, number>
+  /** 便 → 売上に当たった明細の取引先 (Refs #760 の 15)。**`salesByLeg` と同じ突合結果から畳む。** */
+  customersByLeg: Map<string, LegCustomerShare[]>
+  uncovered: UncoveredTotals | null
+} {
   const ordered = byDriver ? orderedDriverRows(rows) : orderedVehicleRows(rows)
   const inputsForReconcile: VehicleReconcileInput[] = ordered
     .map(([key, groupRows]) => ({ vehicle: key, rows: groupRows, slips: slips.byKey[key] ?? [] }))
   const byLeg = applyForcedSales(rows, reconcileVehicles(inputsForReconcile, slips.pool).byLeg, forced)
   const salesByLeg = new Map<string, number>()
-  for (const [key, hit] of byLeg) salesByLeg.set(key, hit.salesYen)
+  const customersByLeg = new Map<string, LegCustomerShare[]>()
+  for (const [key, hit] of byLeg) {
+    salesByLeg.set(key, hit.salesYen)
+    customersByLeg.set(key, customersOfSlips(hit.slips))
+  }
   // **乗務員で引けているときだけ対象外の便を起こす。** 車番引きでは、その乗務員が
   // 別の車番で走った日の明細を持っていないので、起こすべき便が見えない
   // (運行手当タブの `ichibanLegs` と同じ条件)。
@@ -614,7 +630,7 @@ function reconcileSales(
       }))
     : []
   const legs = buildUncoveredLegs(uncoveredInputs, [...byLeg.values()], shownYm.value, provisional)
-  return { salesByLeg, uncovered: summarizeUncoveredLegs(legs) }
+  return { salesByLeg, customersByLeg, uncovered: summarizeUncoveredLegs(legs) }
 }
 
 async function run() {
@@ -670,6 +686,7 @@ async function run() {
     // 一番星が落ちていても経費と手当は出せる。売上だけ諦めて理由を画面に残す。
     let monthly = base
     let salesByLeg = new Map<string, number>()
+    let customersByLeg = new Map<string, LegCustomerShare[]>()
     try {
       // **明細を先に引く。** 強制突合は明細の `rowId` で結ばれているので、
       // 集計より前に引いておかないと 1 件も解けない。取得はこの 1 回だけ。
@@ -693,6 +710,7 @@ async function run() {
       if (opsForced !== ops) monthly = buildMonthlyAllowance(opsForced, shownYm.value)
       const sales = reconcileSales(rowsOf(monthly, excluded), slips, byDriver, forced, provisional)
       salesByLeg = sales.salesByLeg
+      customersByLeg = sales.customersByLeg
       uncovered.value = sales.uncovered
     }
     catch (e) {
@@ -713,7 +731,7 @@ async function run() {
         kmBreakdown: kmBreakdownByUnko.get(op.unkoNo) ?? emptyKmBreakdown(),
         salesYen: rows.reduce((sum, r) => sum + (salesByLeg.get(legKey(r)) ?? 0), 0),
         allowanceYen: rows.reduce((sum, r) => sum + legPayYen(r, provisional), 0),
-        legs: buildMarginLegs(rows, legKmDetailByUnko.get(op.unkoNo) ?? [], salesByLeg, provisional),
+        legs: buildMarginLegs(rows, legKmDetailByUnko.get(op.unkoNo) ?? [], salesByLeg, customersByLeg, provisional),
       }
     }))
 
@@ -788,6 +806,23 @@ const openDrivers = reactive<Record<string, boolean>>({})
 /** 運行行の開閉 (3 段目の便を出す)。**乗務員行の `openDrivers` と同じ流儀。** */
 const openOperations = reactive<Record<string, boolean>>({})
 
+/**
+ * 取引先別 × 経路別 (Refs #760 の 15)。**月の全運行から出す** (「粗利を出せない運行だけ
+ * 表示」の絞り込みは乗務員の表だけ) — 検算の右辺が粗利タブの粗利そのものでないと
+ * 意味が無い。
+ */
+const customerSummary = computed(() => summarizeByCustomerRoute(result.value.operations))
+/** 検算の左辺 = Σ取引先の粗利 (出せない取引先は 0)。 */
+const customerGrossSum = computed(() => customerSummary.value.customers.reduce((sum, c) => sum + (c.grossMarginYen ?? 0), 0))
+/** 検算が 1 円未満で合っているか。合わなければ amber で出す。 */
+const customerCheckOk = computed(() => Math.abs(customerSummary.value.diffYen) < 1)
+/** 売上の検算の左辺 = Σ取引先の売上 (便ぜんぶ。2 取引先の便は比で分けた後の和なので便の売上に戻る)。 */
+const customerSalesSum = computed(() => customerSummary.value.customers.reduce((sum, c) => sum + c.salesYen, 0))
+/** 売上の検算: Σ取引先の売上 + 便の無い運行の売上 = 粗利タブの売上 (運行ぜんぶの `totals.salesYen`)。 */
+const customerSalesCheckOk = computed(() => Math.abs(customerSalesSum.value + customerSummary.value.noLegOperations.salesYen - totals.value.salesYen) < 1)
+/** 取引先行の開閉 (経路の行を出す)。鍵は取引先C (突合なしは空文字)。 */
+const openCustomers = reactive<Record<string, boolean>>({})
+
 function downloadCsv() {
   const rows = visibleDrivers.value.flatMap(d => d.operations)
   const blob = new Blob([`﻿${marginCsvLines(rows).join('\r\n')}\r\n`], { type: 'text/csv;charset=utf-8' })
@@ -807,6 +842,17 @@ function downloadLegCsv() {
   const a = document.createElement('a')
   a.href = url
   a.download = `粗利_便_${shownYm.value}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+/** 取引先 × 経路 の CSV (Refs #760 の 15)。 */
+function downloadCustomerRouteCsv() {
+  const blob = new Blob([`﻿${customerRouteCsvLines(customerSummary.value).join('\r\n')}\r\n`], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `粗利_取引先×経路_${shownYm.value}.csv`
   a.click()
   URL.revokeObjectURL(url)
 }
@@ -842,6 +888,14 @@ function downloadLegCsv() {
       <b>その車輌・その月の経費を 1 件も引けなかった運行も「-」</b>です —
       経費 0 円として計算すると<b>売上そのままが粗利に見える</b>ので、理由を出して空けます。
     </p>
+    <p class="text-xs text-gray-500 mb-4">
+      いちばん下の<b>取引先別</b>は、<b>便の売上に当たった一番星の明細の取引先で便を束ねた</b>ものです
+      (取引先の行を開くと<b>積地 → 卸地 の経路ごと</b>に分かれます)。
+      <b>2 取引先に当たった便は売上の比で分けます。</b>
+      <b>直課経費・固定費按分は運行の走行km (売上走行 + 回送) の比で便に配ります</b>
+      (便の無い運行は配れないので「便の無い運行」として別に出します)。
+      取引先別の粗利 + 便の無い運行の粗利 = 粗利タブの粗利 になるのを頭の 1 行で検算しています。
+    </p>
 
     <div class="flex flex-wrap gap-3 items-end mb-4">
       <label class="text-xs text-gray-500">月
@@ -871,6 +925,14 @@ function downloadLegCsv() {
         @click="downloadLegCsv"
       >
         便CSV
+      </button>
+      <button
+        v-if="result.operations.length > 0"
+        class="text-sm px-4 py-1.5 rounded bg-gray-600 hover:bg-gray-700 text-white"
+        title="取引先 × 経路 (積地 → 卸地) ごとの便数・売上・手当・燃料・運行経費の配分・粗利の CSV"
+        @click="downloadCustomerRouteCsv"
+      >
+        取引先×経路 CSV
       </button>
       <NuxtLink
         to="/profit/allowance"
@@ -1346,6 +1408,147 @@ function downloadLegCsv() {
               </template>
             </tbody>
           </table>
+        </div>
+
+        <!-- 取引先別 × 経路別 (Refs #760 の 15)。乗務員の表の下。 -->
+        <div class="mt-6">
+          <p class="text-xs font-medium mb-1">
+            取引先別 (便を一番星の取引先で束ねたもの)
+          </p>
+          <p
+            class="text-xs mb-2"
+            :class="customerCheckOk ? 'text-gray-500' : 'text-amber-600 dark:text-amber-400'"
+            title="取引先別の粗利 (Σ便の粗利) + 便の無い運行の粗利 = 粗利タブの粗利。便の走行km が取れていない運行があると運行の燃料と Σ便の燃料がずれるぶん差が出ます"
+          >
+            検算: 取引先別の粗利 <b>{{ yen(customerGrossSum) }}</b>
+            + 便の無い運行 <b>{{ yen(customerSummary.noLegOperations.marginYen) }}</b>
+            <template v-if="customerSummary.unsplitLegs.legs > 0">
+              (+ 粗利が出せない便 {{ customerSummary.unsplitLegs.legs }} 便 ・ 売上 {{ yen(customerSummary.unsplitLegs.salesYen) }})
+            </template>
+            = 粗利タブの粗利 <b>{{ yen(customerSummary.totalMarginYen) }}</b>
+            <span v-if="customerCheckOk">— 合っています</span>
+            <span v-else>— <b>{{ yen(customerSummary.diffYen) }} 合いません</b> (便の走行km が取れていない運行がある可能性)</span>
+          </p>
+          <p
+            class="text-xs mb-2"
+            :class="customerSalesCheckOk ? 'text-gray-500' : 'text-amber-600 dark:text-amber-400'"
+            title="便の売上は運行の売上と同じ突合結果から出ているので、全運行の売上に必ず戻る"
+          >
+            売上の検算: 取引先別の売上 <b>{{ yen(customerSalesSum) }}</b>
+            + 便の無い運行 <b>{{ yen(customerSummary.noLegOperations.salesYen) }}</b>
+            = 粗利タブの売上 <b>{{ yen(totals.salesYen) }}</b>
+            <span v-if="customerSalesCheckOk">— 合っています</span>
+            <span v-else>— <b>{{ yen(customerSalesSum + customerSummary.noLegOperations.salesYen - totals.salesYen) }} 合いません</b></span>
+          </p>
+          <p v-if="customerSummary.noLegOperations.operations > 0" class="text-xs text-gray-500 mb-2">
+            便の無い運行 <b>{{ customerSummary.noLegOperations.operations }}</b> 本
+            (売上 {{ yen(customerSummary.noLegOperations.salesYen) }} ・ 手当 {{ yen(customerSummary.noLegOperations.allowanceYen) }}
+            ・ 燃料 {{ yen(customerSummary.noLegOperations.fuelYen) }} ・ 直課 {{ yen(customerSummary.noLegOperations.directCostYen) }}
+            ・ 固定費按分 {{ yen(customerSummary.noLegOperations.allocatedCostYen) }} ・ 粗利 {{ yen(customerSummary.noLegOperations.marginYen) }})
+            は取引先に結べないので下の表には入っていません。
+          </p>
+          <p v-if="customerSummary.customers.length === 0" class="text-xs text-gray-400">
+            便のある運行がありません
+          </p>
+          <div v-else class="border border-gray-200 dark:border-gray-800 rounded-lg overflow-x-auto">
+            <table class="w-full text-xs">
+              <thead class="bg-gray-50 dark:bg-gray-800">
+                <tr>
+                  <th class="text-left px-3 py-2 font-medium text-gray-500">取引先 / 積地 → 卸地</th>
+                  <th class="text-right px-3 py-2 font-medium text-gray-500">売上</th>
+                  <th class="text-right px-3 py-2 font-medium text-gray-500">手当</th>
+                  <th class="text-right px-3 py-2 font-medium text-gray-500" :title="FUEL_HAUL_TITLE">燃料代 (売上走行)</th>
+                  <th class="text-right px-3 py-2 font-medium text-gray-500" :title="FUEL_DEADHEAD_TITLE">回送燃料</th>
+                  <th
+                    class="text-right px-3 py-2 font-medium text-gray-500"
+                    title="運行の直課経費 + 固定費按分 を、運行の便の走行km (売上走行 + 回送) の比で便に配った額"
+                  >運行経費の配分</th>
+                  <th class="text-right px-3 py-2 font-medium text-gray-500" title="売上 − 手当 − 燃料 − 運行経費の配分">粗利</th>
+                  <th class="text-right px-3 py-2 font-medium text-gray-500" title="粗利 ÷ 売上">粗利率</th>
+                  <th class="text-right px-3 py-2 font-medium text-gray-500" title="売上走行km ÷ 便数">平均 売上走行km</th>
+                  <th class="text-right px-3 py-2 font-medium text-gray-500" title="回送km ÷ 便数">平均 回送km</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template v-for="c in customerSummary.customers" :key="c.code">
+                  <tr
+                    class="border-t border-gray-100 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-900/40 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800"
+                    title="クリックで経路 (積地 → 卸地) の内訳を開閉"
+                    @click="openCustomers[c.code] = !openCustomers[c.code]"
+                  >
+                    <td class="px-3 py-2 font-medium">
+                      {{ openCustomers[c.code] ? '▾' : '▸' }} {{ c.name }}
+                      <span class="text-gray-400">(便 {{ c.legs }}<template v-if="c.code">, {{ c.code }}</template>)</span>
+                      <span v-if="c.unsplitLegs > 0" class="text-amber-600 dark:text-amber-400 ml-1">粗利が出せない便 {{ c.unsplitLegs }}</span>
+                    </td>
+                    <td class="px-3 py-2 text-right">{{ yen(c.salesYen) }}</td>
+                    <td class="px-3 py-2 text-right">
+                      {{ yen(c.allowanceYen) }}
+                      <span v-if="c.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(c.allowanceYen, c.salesYen) }})</span>
+                    </td>
+                    <td class="px-3 py-2 text-right" :title="FUEL_HAUL_TITLE">
+                      {{ yen(c.fuelHaulYen) }}
+                      <span v-if="c.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(c.fuelHaulYen, c.salesYen) }})</span>
+                    </td>
+                    <td class="px-3 py-2 text-right" :title="FUEL_DEADHEAD_TITLE">
+                      {{ yen(c.fuelDeadheadYen) }}
+                      <span v-if="c.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(c.fuelDeadheadYen, c.salesYen) }})</span>
+                    </td>
+                    <td class="px-3 py-2 text-right">
+                      {{ yen(c.runCostShareYen) }}
+                      <span v-if="c.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(c.runCostShareYen, c.salesYen) }})</span>
+                    </td>
+                    <td
+                      class="px-3 py-2 text-right font-medium"
+                      :class="c.grossMarginYen !== null && c.grossMarginYen < 0 ? 'text-red-600 dark:text-red-400' : ''"
+                    >
+                      {{ yen(c.grossMarginYen) }}
+                    </td>
+                    <td class="px-3 py-2 text-right">{{ pct(marginRate({ salesYen: c.salesYen, marginYen: c.grossMarginYen })) }}</td>
+                    <td class="px-3 py-2 text-right">{{ kmInt(c.haulKm / c.legs) }}</td>
+                    <td class="px-3 py-2 text-right">{{ kmInt(c.deadheadKm / c.legs) }}</td>
+                  </tr>
+                  <tr
+                    v-for="r in (openCustomers[c.code] ? c.routes : [])"
+                    :key="`${c.code}|${r.from}|${r.to}`"
+                    class="border-t border-gray-50 dark:border-gray-800/60 text-gray-600 dark:text-gray-300"
+                  >
+                    <td class="px-3 py-1.5 pl-8">
+                      {{ r.from }} → {{ r.to }}
+                      <span class="text-gray-400">(便 {{ r.legs }})</span>
+                      <span v-if="r.unsplitLegs > 0" class="text-amber-600 dark:text-amber-400 ml-1">粗利が出せない便 {{ r.unsplitLegs }}</span>
+                    </td>
+                    <td class="px-3 py-1.5 text-right">{{ yen(r.salesYen) }}</td>
+                    <td class="px-3 py-1.5 text-right">
+                      {{ yen(r.allowanceYen) }}
+                      <span v-if="r.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(r.allowanceYen, r.salesYen) }})</span>
+                    </td>
+                    <td class="px-3 py-1.5 text-right" :title="FUEL_HAUL_TITLE">
+                      {{ yen(r.fuelHaulYen) }}
+                      <span v-if="r.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(r.fuelHaulYen, r.salesYen) }})</span>
+                    </td>
+                    <td class="px-3 py-1.5 text-right" :title="FUEL_DEADHEAD_TITLE">
+                      {{ yen(r.fuelDeadheadYen) }}
+                      <span v-if="r.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(r.fuelDeadheadYen, r.salesYen) }})</span>
+                    </td>
+                    <td class="px-3 py-1.5 text-right">
+                      {{ yen(r.runCostShareYen) }}
+                      <span v-if="r.salesYen > 0" class="block text-xs text-gray-400 dark:text-gray-500">({{ yenPct(r.runCostShareYen, r.salesYen) }})</span>
+                    </td>
+                    <td
+                      class="px-3 py-1.5 text-right font-medium"
+                      :class="r.grossMarginYen !== null && r.grossMarginYen < 0 ? 'text-red-600 dark:text-red-400' : ''"
+                    >
+                      {{ yen(r.grossMarginYen) }}
+                    </td>
+                    <td class="px-3 py-1.5 text-right">{{ pct(marginRate({ salesYen: r.salesYen, marginYen: r.grossMarginYen })) }}</td>
+                    <td class="px-3 py-1.5 text-right">{{ kmInt(r.haulKm / r.legs) }}</td>
+                    <td class="px-3 py-1.5 text-right">{{ kmInt(r.deadheadKm / r.legs) }}</td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
         </div>
       </template>
     </template>
