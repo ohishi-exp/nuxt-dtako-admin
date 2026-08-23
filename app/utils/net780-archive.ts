@@ -1,7 +1,7 @@
 /**
  * NET780 一括取得 (Refs #760 の 27) の **画面側と server route が共有する pure な部品**。
- * relay の `POST /kintai-relay/net780-archive` (#760-26) の応答の型と、画面が 20 件ずつ
- * 直列に呼ぶための分割・残りの計算・結果の集計を持つ。
+ * relay の `POST /kintai-relay/net780-archive` (#760-26) の応答の型と、画面が
+ * `NET780_ARCHIVE_BATCH_SIZE` 件ずつ直列に呼ぶための分割・残りの計算・結果の集計を持つ。
  *
  * body の検証 (運行NO → `ope_no` / `start_ope`) は `server/utils/net780-archive.ts`
  * (server 側だけが使う。`server/utils/operation-zip.ts` に依存するので app に置かない)。
@@ -32,6 +32,14 @@
 
 /** relay が 1 回の呼び出しで受ける `items` の上限 (超過は relay が 400)。 */
 export const NET780_ARCHIVE_MAX_ITEMS = 20
+
+/**
+ * 画面が 1 回の呼び出しに載せる件数 (Refs #760 の 29)。relay は 1 運行ずつ theearth を
+ * 検索→ダウンロード→R2 保存 (1 運行 約 5 秒、同時 1) なので、上限の 20 件をまとめて
+ * 投げると 1 分以上「0/N」のまま動かず、進んでいるのか分からない (オーナー 2026-08-23)。
+ * 4 件なら 20 秒前後ごとに `k/N` が進む。`NET780_ARCHIVE_MAX_ITEMS` 以下であること。
+ */
+export const NET780_ARCHIVE_BATCH_SIZE = 4
 
 /** relay が返す運行 1 本ぶんの結果。 */
 export type Net780ArchiveStatus = 'archived' | 'already' | 'not_found' | 'error'

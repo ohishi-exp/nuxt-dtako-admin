@@ -70,11 +70,13 @@ const SEGMENT_STYLE: Record<RouteSegment['kind'], { color: string, weight: numbe
   haul: { color: '#10b981', weight: 5, opacity: 0.7, dashed: false, zIndex: 2, label: '売上走行 (積み → 降し)' },
   deadhead: { color: '#9ca3af', weight: 3, opacity: 0.5, dashed: false, zIndex: 1, label: '回送' },
   other: { color: '#f59e0b', weight: 3, opacity: 0.7, dashed: true, zIndex: 1, label: '降しの無い便 / 分類不能' },
-  // 軌跡 (Refs #760 の 21・24)。イベント線 (始点・終点を結んだ直線) の**下**に細く濃い色で
+  // 軌跡 (Refs #760 の 21・24)。イベント線 (始点・終点を結んだ直線) の**下**に濃い色で
   // 描く — 直線のスケッチと、実際に通った点の両方が読めるように。NET780 の道なり GPS
   // (アーカイブがある運行) と、重ね掛け行も混ぜたイベント軌跡 (それ以外の運行) の**どちらか**。
-  trackHaul: { color: '#047857', weight: 2, opacity: 0.9, dashed: false, zIndex: 0, label: '軌跡 (便の時間帯)' },
-  trackDeadhead: { color: '#4b5563', weight: 2, opacity: 0.8, dashed: false, zIndex: 0, label: '軌跡 (回送の時間帯)' },
+  // 太さは 2 では見づらいという指摘 (オーナー 2026-08-23「GPS の線を少し太く」) で 3.5。
+  // 直線の haul 5 より細いままなので、上に重なる直線は隠れない。凡例の見本もここから描く。
+  trackHaul: { color: '#047857', weight: 3.5, opacity: 0.9, dashed: false, zIndex: 0, label: '軌跡 (便の時間帯)' },
+  trackDeadhead: { color: '#4b5563', weight: 3.5, opacity: 0.8, dashed: false, zIndex: 0, label: '軌跡 (回送の時間帯)' },
 }
 
 /** マーカーの重なり順。積み 4 / 降し 3 (重なったとき積みが上) / 開始・終了 2。 */

@@ -22,7 +22,8 @@
  * binding で relay を呼ぶ。`comp_id` は relay が `KINTAI_COMP_ID` で補完するので送らない。
  *
  * 1 件ごとに theearth を検索してダウンロードするので **1 回 (最大 20 件) で数分かかりうる**。
- * 画面は 20 件ずつ直列に呼び、`results` に載らなかった運行 (`truncated`) を続けて呼ぶ。
+ * 画面は `NET780_ARCHIVE_BATCH_SIZE` 件ずつ直列に呼び (進捗が動く間隔を短くするため
+ * 上限より小さい、Refs #760 の 29)、`results` に載らなかった運行 (`truncated`) を続けて呼ぶ。
  */
 
 import type { H3Event } from 'h3'
