@@ -20,6 +20,12 @@ type Args = Parameters<typeof getKushiroBranchEstimateTool.execute>[1];
 /** 共有 fixture をそのまま tool の引数に渡せる (`kmBreakdown` 等も受け付ける)。 */
 const OPERATIONS = rawOperations as unknown as Args["operations"];
 
+/**
+ * **本番と同じ形の min-wage マスタ** — `branchToPrefecture` は社員マスタ由来なので
+ * **実在しない `釧路営業所` は載らない**し、`defaultPrefecture` も無い。
+ * 2026-08-24 に本番で `get_kushiro_branch_estimate` を叩いたら、この形のせいで
+ * `prefecture: null / rate: null` になり最低賃金の比較が丸ごと出なかった。
+ */
 const MIN_WAGE_MASTER = {
   prefectures: {
     北海道: [
@@ -28,8 +34,7 @@ const MIN_WAGE_MASTER = {
     ],
     東京都: [{ effectiveFrom: "2025-10-01", rate: 1226 }],
   },
-  branchToPrefecture: { 釧路営業所: "北海道", 帯広: "北海道" },
-  defaultPrefecture: "東京都",
+  branchToPrefecture: { 帯広: "北海道", 本社: "東京都" },
 };
 
 function env(over: Partial<Env> = {}, master: unknown = MIN_WAGE_MASTER): Env {
@@ -189,12 +194,14 @@ describe("get_kushiro_branch_estimate — 既定の呼び出し", () => {
     expect(res.drivers[0]!.driver_name).toBe("中村 一由");
   });
 
-  it("警告は 人件費の前提が無いことだけ (対象と座標は揃っている)", async () => {
+  it("警告は 所属がマスタに無いことと 人件費の前提が無いことだけ (対象と座標は揃っている)", async () => {
     const res = await run(env(), baseArgs());
-    expect(res.warnings).toHaveLength(1);
-    expect(res.warnings[0]).toContain("人件費の前提がありません");
-    const withCost = await run(env(), baseArgs({ monthly_labor_cost_yen: 400000 }));
-    expect(withCost.warnings).toEqual([]);
+    expect(res.warnings).toHaveLength(2);
+    expect(res.warnings[0]).toContain("branch→都道府県表にありません");
+    expect(res.warnings[1]).toContain("人件費の前提がありません");
+    // 所属がマスタにある乗務員 + 人件費を渡せば警告は消える
+    const clean = await run(env(), baseArgs({ branch: "帯広", monthly_labor_cost_yen: 400000 }));
+    expect(clean.warnings).toEqual([]);
   });
 });
 
@@ -443,11 +450,26 @@ describe("人件費と損益分岐", () => {
 });
 
 describe("最低賃金 (額は R2 のマスタから引く)", () => {
-  it("所属がマスタにあれば、その県の対象月の額で比べる", async () => {
+  it("実在しない営業所でも、会社の所在都道府県で額を引いて比べる (本番で出た欠陥の回帰)", async () => {
     const res = await run(env(), baseArgs());
     expect(res.min_wage.branch).toBe("釧路営業所");
+    // 所属ではマスタに当たらない (実在しない営業所なので当然)
+    expect(res.min_wage.mapped).toBe(false);
+    // それでも県が決まり、額が引ける — **ここが null のままでは要件を満たさない**
+    expect(res.min_wage.prefecture).toBe("北海道");
+    expect(res.min_wage.prefecture_source).toBe("company-default");
+    expect(res.min_wage.rate).toBe(1010);
+    expect(res.min_wage.diff_yen).not.toBeNull();
+    expect(res.min_wage.below_min_wage).toBe(false);
+    expect(res.warnings.some((w) => w.includes("branch→都道府県表にありません"))).toBe(true);
+  });
+
+  it("所属がマスタにあれば、その県の対象月の額で比べる", async () => {
+    const res = await run(env(), baseArgs({ branch: "帯広" }));
+    expect(res.min_wage.branch).toBe("帯広");
     expect(res.min_wage.prefecture).toBe("北海道");
     expect(res.min_wage.mapped).toBe(true);
+    expect(res.min_wage.prefecture_source).toBe("branch");
     // 2026-07 時点で有効なのは 2025-10-01 発効の 1010 円 (2026-10-01 はまだ先)
     expect(res.min_wage.rate).toBe(1010);
     expect(res.min_wage.rate_effective_from).toBe("2025-10-01");
@@ -469,30 +491,42 @@ describe("最低賃金 (額は R2 のマスタから引く)", () => {
     expect(res.min_wage.below_min_wage).toBe(true);
   });
 
-  it("所属がマスタに無ければ default 県で近似し、警告する", async () => {
-    const res = await run(env(), baseArgs({ branch: "存在しない営業所" }));
-    expect(res.min_wage.mapped).toBe(false);
+  it("都道府県は引数で指定できる (正式所在地が別の県になったとき用)", async () => {
+    const res = await run(env(), baseArgs({ prefecture: "東京都" }));
     expect(res.min_wage.prefecture).toBe("東京都");
-    expect(res.warnings.some((w) => w.includes("で近似"))).toBe(true);
+    expect(res.min_wage.prefecture_source).toBe("argument");
+    expect(res.min_wage.rate).toBe(1226);
   });
 
-  it("対象月に有効な額が無ければ null にして警告する (0 円にしない)", async () => {
+  it("対象月に有効な額が無ければ null にし、マスタが持つ発効日を出して切り分けられるようにする", async () => {
     const res = await run(
-      env({}, { prefectures: { 北海道: [{ effectiveFrom: "2027-10-01", rate: 1100 }] }, branchToPrefecture: { 釧路営業所: "北海道" } }),
+      env({}, { prefectures: { 北海道: [{ effectiveFrom: "2027-10-01", rate: 1100 }] }, branchToPrefecture: {} }),
       baseArgs(),
     );
+    // 県は決まっている (= 取り込み漏れ側の問題だと分かる)
+    expect(res.min_wage.prefecture).toBe("北海道");
     expect(res.min_wage.rate).toBeNull();
     expect(res.min_wage.rate_effective_from).toBeNull();
     expect(res.min_wage.diff_yen).toBeNull();
     expect(res.min_wage.below_min_wage).toBeNull();
-    expect(res.warnings.some((w) => w.includes("最低賃金が引けませんでした"))).toBe(true);
+    expect(res.min_wage.master_effective_froms).toEqual(["2027-10-01"]);
+    expect(res.warnings.some((w) => w.includes("2026-07 時点で有効な行がありません"))).toBe(true);
+  });
+
+  it("その県がマスタに 1 行も無ければ、それも警告で分かる", async () => {
+    const res = await run(env({}, { prefectures: {}, branchToPrefecture: {} }), baseArgs());
+    expect(res.min_wage.prefecture).toBe("北海道");
+    expect(res.min_wage.master_effective_froms).toEqual([]);
+    expect(res.warnings.some((w) => w.includes("1 件も無い"))).toBe(true);
   });
 
   it("マスタが R2 に無ければ比較を出さず警告する", async () => {
     const res = await run(env({}, null), baseArgs());
-    expect(res.min_wage.prefecture).toBeNull();
+    // 県は決まるが、額の表が空なので rate は出せない
+    expect(res.min_wage.prefecture).toBe("北海道");
     expect(res.min_wage.mapped).toBe(false);
     expect(res.min_wage.rate).toBeNull();
+    expect(res.min_wage.master_effective_froms).toEqual([]);
     expect(res.warnings.some((w) => w.includes("min-wage/latest.json"))).toBe(true);
   });
 });

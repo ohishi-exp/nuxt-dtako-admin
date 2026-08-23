@@ -2328,6 +2328,18 @@ const KUSHIRO_ESTIMATE_MAX_OPERATIONS = 500;
  *  (運行手当と二重になるため) で、**人件費の実績はここにある**。 */
 const ICHIBAN_LABOR_COST_KIND = "08";
 
+/**
+ * 所属がマスタに無いときに最低賃金を引く都道府県の既定 = **北海道**。
+ *
+ * **釧路営業所は実在しない**ので、社員マスタ由来の `branchToPrefecture` には
+ * 未来永劫載らない。最低賃金は**就業地の県**で決まるので、県が分かれば額は引ける —
+ * 帯広も釧路もどちらも北海道なので、会社の所在都道府県をそのまま既定にする。
+ * **額 (円) は定数にしない**方針はそのまま — ここで決めているのは県の名前だけで、
+ * 額は R2 の min-wage マスタ (厚労省の一覧の取り込み結果) から引く。
+ * 引数 `prefecture` で上書きできる。
+ */
+const DEFAULT_MIN_WAGE_PREFECTURE = "北海道";
+
 const latLngArgs = z.object({ lat: z.number(), lng: z.number() }).strict();
 
 const kushiroLegArgs = z
@@ -2448,7 +2460,16 @@ const getKushiroBranchEstimateArgs = z
     branch: z
       .string()
       .optional()
-      .describe("最低賃金を引く所属名。既定 `釧路営業所`。マスタに無ければ default 県で近似し警告する"),
+      .describe("最低賃金を引く所属名。既定 `釧路営業所`。**実在しない営業所はマスタに無い**ので、その場合は `prefecture` で引く"),
+    prefecture: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "`branch` が最低賃金マスタの branch→都道府県表に無いときに使う都道府県。" +
+          `既定 ${DEFAULT_MIN_WAGE_PREFECTURE} (会社の所在都道府県)。**額ではなく県の名前だけ**を決める引数で、` +
+          "額は R2 の min-wage マスタから引く。どの経路で県が決まったかは `min_wage.prefecture_source` に載る",
+      ),
     assumed_monthly_wage_yen: z
       .number()
       .optional()
@@ -2518,7 +2539,13 @@ export const getKushiroBranchEstimateTool = {
     "**現状の回送 (`measured_deadhead_km`) と組み直し後の推定をそのまま引き算しないこと** — " +
     "実データの道東卸しは運行の途中にあり、降ろした後は必ず十勝へ戻ってきている " +
     "(帰庫は 27km/運行しかない)。この試算は現状からの差分ではなく**新しい運行を 1 から組んだ姿**。" +
-    "受け取った運行ペイロードは `input` にそのまま数え直して返すので、貼り間違いはそこで気付ける。",
+    "受け取った運行ペイロードは `input` にそのまま数え直して返すので、貼り間違いはそこで気付ける。\n" +
+    "**最低賃金は「所属 → 都道府県 → 額」の順に引く。** 釧路営業所は実在しないので " +
+    "branch→都道府県表には載らず、その場合は `prefecture` (既定 " +
+    `${DEFAULT_MIN_WAGE_PREFECTURE}` + ") で引く。決まった経路は `min_wage.prefecture_source` " +
+    "(`branch` / `argument` / `company-default`) に、額が引けなかったときの切り分け用に " +
+    "その県の改定発効日が `min_wage.master_effective_froms` に載る。**額は必ず R2 の " +
+    "min-wage マスタ (厚労省の一覧の取り込み結果) から引き、定数で埋めない。**",
   inputSchema: getKushiroBranchEstimateArgs,
   execute: async (env: Env, args: z.infer<typeof getKushiroBranchEstimateArgs>) => {
     const parsed = parseYm(args.from.slice(0, 7));
@@ -2599,12 +2626,49 @@ export const getKushiroBranchEstimateTool = {
     } else {
       minWageMaster = normalizeMinWageMaster(rawMinWage);
     }
-    const lookup = minWageForBranch(minWageMaster, branch, parsed.year, parsed.month);
-    if (!lookup.mapped && lookup.prefecture !== null) {
-      warnings.push(`所属 "${branch}" が最低賃金マスタに無いため ${lookup.prefecture} で近似しています`);
+    // まず所属で引く。**実在しない営業所 (釧路営業所) はマスタに載りようが無い**ので、
+    // 引けなければ都道府県を直接指定して引き直す — `branchToPrefecture` にその所属の
+    // 行を差し込んで**同じ関数をもう一度通す**ことで、額の選び方 (改定履歴から対象月に
+    // 有効な行を採る) を書き写さずに済ませる。
+    const byBranch = minWageForBranch(minWageMaster, branch, parsed.year, parsed.month);
+    const prefectureArg = args.prefecture;
+    const prefectureSource = byBranch.mapped
+      ? "branch"
+      : prefectureArg === undefined
+        ? "company-default"
+        : "argument";
+    const prefecture = prefectureArg ?? DEFAULT_MIN_WAGE_PREFECTURE;
+    const lookup = byBranch.mapped
+      ? byBranch
+      : minWageForBranch(
+          {
+            ...minWageMaster,
+            branchToPrefecture: { ...minWageMaster.branchToPrefecture, [branch]: prefecture },
+          },
+          branch,
+          parsed.year,
+          parsed.month,
+        );
+    if (!byBranch.mapped) {
+      warnings.push(
+        `所属 "${branch}" は最低賃金マスタの branch→都道府県表にありません ` +
+          `(実在しない営業所なので当然)。${prefecture} (${prefectureSource}) で引きました`,
+      );
     }
+    // `mapped` が true なら県は必ず決まっている (`minWageForBranch` は空文字の県を
+    // `mapped: false` に落とす)。決まっていなければ上で差し込んだ `prefecture`。
+    // ⇒ **この tool では県が null になる道が無い**ので、額が引けない = マスタ側の
+    // 取り込み漏れ、と一意に読める。
+    const resolvedPrefecture = byBranch.mapped ? byBranch.prefecture! : prefecture;
+    const masterEffectiveFroms = (minWageMaster.prefectures[resolvedPrefecture] ?? [])
+      .map((e) => e.effectiveFrom)
+      .sort();
     if (lookup.rate === null) {
-      warnings.push("対象月に有効な最低賃金が引けませんでした (マスタの改定履歴を確認してください)");
+      warnings.push(
+        `${resolvedPrefecture} の最低賃金マスタに ${args.from.slice(0, 7)} 時点で有効な行がありません ` +
+          `(マスタが持つ発効日: ${masterEffectiveFroms.join(", ") || "1 件も無い"})。` +
+          "min-wage の取り込みを確認してください",
+      );
     }
 
     const fuelYen =
@@ -2802,8 +2866,15 @@ export const getKushiroBranchEstimateTool = {
       },
       min_wage: {
         branch,
-        prefecture: lookup.prefecture,
-        mapped: lookup.mapped,
+        prefecture: resolvedPrefecture,
+        /** 県がどう決まったか。`branch` = マスタの branch→都道府県表に当たった /
+         *  `argument` = 引数の `prefecture` / `company-default` = 会社の所在都道府県。 */
+        prefecture_source: prefectureSource,
+        /** **所属名**でマスタに当たったか。実在しない営業所では常に false。 */
+        mapped: byBranch.mapped,
+        /** その県について マスタが持つ改定の発効日。**`rate` が null のときの切り分け用** —
+         *  空なら取り込み漏れ、未来の日付だけなら対象月にはまだ効いていない。 */
+        master_effective_froms: masterEffectiveFroms,
         rate: lookup.rate,
         rate_effective_from: lookup.rateEffectiveFrom ?? null,
         assumed_monthly_wage_yen: wageYen,
