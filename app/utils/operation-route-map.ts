@@ -20,8 +20,13 @@
  * - GPS 列 (緯度・経度 4 列) が無い CSV は `segments: [] / markers: []`、
  *   `pointCount 0 / droppedRows 0`。**GPS 列はあるが全行無効**なら `droppedRows > 0`
  *   になるので、呼び出し側が「GPS 列なし」と「GPS が全部無効」を区別できる
+ * - **`windows` は便ごとの時間窓** (Refs #760 の 21)。NET780 の道なり GPS (`.spd`) を
+ *   同じ便の色で重ねるために、売上走行 = 積みの `開始日時` 〜 その便の最後の降しの
+ *   `終了日時`、回送 = 運行開始 / 前の便の最後の降し 〜 積み、最後の便の降し 〜 運行終了
+ *   を epoch 秒で持つ。時刻が読めない行の窓は作らない (黙って 0 にしない)。
+ *   点列を窓で切るのは `splitTrackByWindows`
  */
-import { colIndex, classifyTimeCategory, getGpsForCell } from './event-data-table'
+import { colIndex, classifyTimeCategory, getGpsForCell, parseEventDatetimeToTs } from './event-data-table'
 import { DISTANCE_EVENT_NAMES } from './allowance-idle'
 
 /** 始業・終業はイベント名で決まる (`classifyTimeCategory` では `other`)。`allowance-idle.ts` と同じ。 */
@@ -35,8 +40,12 @@ export interface LatLng {
 
 /** 経路の一区切り。同じ `kind` / `legSeq` が続く行を 1 本の線にまとめたもの。 */
 export interface RouteSegment {
-  /** `haul` = 積み → その便の最後の降し (売上走行) / `deadhead` = 回送 / `other` = 降しの無い便の走行・積みの無い運行。 */
-  kind: 'haul' | 'deadhead' | 'other'
+  /**
+   * `haul` = 積み → その便の最後の降し (売上走行) / `deadhead` = 回送 / `other` = 降しの無い便の
+   * 走行・積みの無い運行。`trackHaul` / `trackDeadhead` は **NET780 の道なり軌跡** (`splitTrackByWindows`)
+   * で、イベント線の下に細く描く (`buildOperationRoute` は出さない)。
+   */
+  kind: 'haul' | 'deadhead' | 'other' | 'trackHaul' | 'trackDeadhead'
   /**
    * 属する便 (1 始まり)。回送はその便へ向かう移動として **次の便** に付く (1 便目の
    * 積前は 1、最後の便の降後 (帰庫) は最後の便 = `LegKmDetail.approachKm / tailKm` と
@@ -59,6 +68,20 @@ export interface RouteMarker {
   ts: string
 }
 
+/**
+ * 便 1 本の時間窓 (epoch 秒、`parseEventDatetimeToTs` と同じ「JST の壁時計を UTC として
+ * 読んだ値」。NET780 の `ts` も同じ流儀なのでそのまま比べられる)。
+ * `haul` = 積みの `開始日時` 〜 その便の最後の降しの `終了日時`。`deadhead` = その便へ向かう
+ * 移動 (1 便目は 運行開始 の `開始日時` 〜 積み、2 便目以降は前の便の最後の降しの `終了日時`
+ * 〜 積み) と、最後の便の降し 〜 運行終了 の `終了日時` (`legSeq` は最後の便)。
+ */
+export interface LegWindow {
+  legSeq: number
+  kind: 'haul' | 'deadhead'
+  fromTs: number
+  toTs: number
+}
+
 export interface OperationRoute {
   segments: RouteSegment[]
   markers: RouteMarker[]
@@ -66,6 +89,8 @@ export interface OperationRoute {
   pointCount: number
   /** タイムライン行 (`DISTANCE_EVENT_NAMES`) のうち、開始・終了どちらかの GPS が使えなかった行数。 */
   droppedRows: number
+  /** 便ごとの時間窓 (NET780 軌跡を切るため)。時刻が読めない便の窓は入らない。 */
+  windows: LegWindow[]
 }
 
 /** 行ごとの分類 (1 回目の走査で便を確定させてから 2 回目で線にする)。 */
@@ -92,7 +117,50 @@ function samePoint(a: LatLng | undefined, b: LatLng): boolean {
 }
 
 function emptyRoute(): OperationRoute {
-  return { segments: [], markers: [], pointCount: 0, droppedRows: 0 }
+  return { segments: [], markers: [], pointCount: 0, droppedRows: 0, windows: [] }
+}
+
+/** 行の `開始日時` / `終了日時` を epoch 秒に。列が無い・読めない → null。 */
+function rowTs(row: string[] | undefined, idx: number): number | null {
+  return row === undefined ? null : parseEventDatetimeToTs(cellAt(row, idx))
+}
+
+/**
+ * 便ごとの時間窓。`legs` / `timeline` は `buildOperationRoute` の 1 回目の走査の結果。
+ * 運行開始は最初の行、運行終了は最後の行 (マーカーと同じ採り方)。どちらかの時刻が
+ * 読めない窓は作らない。
+ */
+function buildLegWindows(
+  timeline: string[][],
+  legs: LegRows[],
+  nameIdx: number,
+  startTsIdx: number,
+  endTsIdx: number,
+): LegWindow[] {
+  const isEvent = (name: string) => (row: string[]) => cellAt(row, nameIdx).trim() === name
+  const startRow = timeline.find(isEvent(OPERATION_START_EVENT))
+  const endRow = [...timeline].reverse().find(isEvent(OPERATION_END_EVENT))
+  const windows: LegWindow[] = []
+  const push = (legSeq: number, kind: LegWindow['kind'], fromTs: number | null, toTs: number | null) => {
+    if (fromTs !== null && toTs !== null) windows.push({ legSeq, kind, fromTs, toTs })
+  }
+  for (let i = 0; i < legs.length; i++) {
+    const leg = legs[i]!
+    const seq = i + 1
+    const prev = legs[i - 1]
+    const loadTs = rowTs(timeline[leg.loadAt], startTsIdx)
+    const unloadTs = leg.lastUnloadAt === null ? null : rowTs(timeline[leg.lastUnloadAt], endTsIdx)
+    // その便へ向かう回送: 1 便目は運行開始から、2 便目以降は前の便の最後の降しから
+    // (前の便に降しが無ければ `other` のままで窓にしない — segments の塗り方と同じ)。
+    const approachFrom = prev
+      ? (prev.lastUnloadAt === null ? null : rowTs(timeline[prev.lastUnloadAt], endTsIdx))
+      : rowTs(startRow, startTsIdx)
+    push(seq, 'deadhead', approachFrom, loadTs)
+    push(seq, 'haul', loadTs, unloadTs)
+    // 最後の便の降し → 運行終了 (帰庫) は最後の便の回送。
+    if (i === legs.length - 1) push(seq, 'deadhead', unloadTs, rowTs(endRow, endTsIdx))
+  }
+  return windows
 }
 
 export function buildOperationRoute(headers: string[], rows: string[][]): OperationRoute {
@@ -224,7 +292,36 @@ export function buildOperationRoute(headers: string[], rows: string[][]): Operat
     })
   }
   // 点を 1 つも置けなかった区切りは捨てる (線にならない)。
-  return { segments: segments.filter(s => s.path.length > 0), markers, pointCount, droppedRows }
+  return {
+    segments: segments.filter(s => s.path.length > 0),
+    markers,
+    pointCount,
+    droppedRows,
+    windows: buildLegWindows(timeline, legs, nameIdx, startTsIdx, endTsIdx),
+  }
+}
+
+/**
+ * NET780 の道なり GPS 点列 (ts 昇順) を便の時間窓で切り、窓ごとに 1 本の軌跡にする
+ * (Refs #760 の 21)。窓の外の点は捨て、窓の境界で区切る。同じ点が続けば 1 つにまとめ、
+ * 点が 1 つしか残らない窓 (止まっていただけ) は線にしない。`legSeq` は窓のもの。
+ * `kind` は `haul` → `trackHaul` / `deadhead` → `trackDeadhead` (イベント線の下に描く用)。
+ */
+export function splitTrackByWindows(
+  points: Array<{ ts: number, lat: number, lng: number }>,
+  windows: LegWindow[],
+): RouteSegment[] {
+  const segments: RouteSegment[] = []
+  for (const w of windows) {
+    const path: LatLng[] = []
+    for (const p of points) {
+      if (p.ts < w.fromTs || p.ts > w.toTs || samePoint(path[path.length - 1], p)) continue
+      path.push({ lat: p.lat, lng: p.lng })
+    }
+    if (path.length < 2) continue
+    segments.push({ kind: w.kind === 'haul' ? 'trackHaul' : 'trackDeadhead', legSeq: w.legSeq, path })
+  }
+  return segments
 }
 
 /** `便 1 積み 釧路市` のように市町村名を添える。無ければ名前だけ。 */
@@ -247,6 +344,8 @@ function labelWithCity(base: string, city: string): string {
  *   その便と関係ない運行の起終点が並ぶだけで読めなくなる
  * - `pointCount` は**残した** `segments` の点数、`droppedRows` は運行ぶんをそのまま
  *   (何行 GPS が使えなかったかは便で割れない)
+ * - `windows`: `legSeq` が `seqs` にある窓だけ (NET780 軌跡もその便のぶんだけ切れるように)。
+ *   `trackHaul` / `trackDeadhead` の区切りも `legSeq` で同じに残る
  */
 export function pickLegsFromRoute(route: OperationRoute, seqs: number[]): OperationRoute {
   // `Set<number | null>` にしておくと `legSeq` の null を素直に落とせる (`seqs` に null は
@@ -259,12 +358,13 @@ export function pickLegsFromRoute(route: OperationRoute, seqs: number[]): Operat
     markers: route.markers.filter(m => (m.kind === 'load' || m.kind === 'unload') && keep.has(m.legSeq)),
     pointCount: segments.reduce((sum, s) => sum + s.path.length, 0),
     droppedRows: route.droppedRows,
+    windows: route.windows.filter(w => keep.has(w.legSeq)),
   }
 }
 
 /**
  * 複数の運行の経路を 1 枚に重ねる (Refs #760 の 19)。`segments` / `markers` をそのまま
- * 連結し、`pointCount` / `droppedRows` は和。**便番号は運行ごとに 1 から振り直されている**
+ * 連結し (`windows` も)、`pointCount` / `droppedRows` は和。**便番号は運行ごとに 1 から振り直されている**
  * ので、重ねた後の `legSeq` は「何本目の便か」ではなくなる (マーカーの `label` も同じ) —
  * 描くのに要るのは色と位置だけなので、振り直さない。
  */
@@ -273,6 +373,7 @@ export function mergeRoutes(routes: OperationRoute[]): OperationRoute {
   for (const r of routes) {
     merged.segments.push(...r.segments)
     merged.markers.push(...r.markers)
+    merged.windows.push(...r.windows)
     merged.pointCount += r.pointCount
     merged.droppedRows += r.droppedRows
   }

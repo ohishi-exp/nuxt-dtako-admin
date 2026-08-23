@@ -279,7 +279,8 @@ branches = true
 # allowance-idle.ts と同じ行。取引先 × 経路の行から「この経路の便を全部重ねた地図」を
 # 描く pickLegsFromRoute / mergeRoutes も持つ (Refs #760 の 19)。
 # branches: BR() で包んだ instrumented コピーで
-# 41 条件 (`if` / 三項 / `&&` `||` `??` の各項。#760 の 19 で 37 → 41) すべて両側 OK。
+# 53 条件 (`if` / 三項 / `&&` `||` `??` の各項。#760 の 19 で 37 → 41、#760 の 21 で
+# NET780 軌跡の時間窓 windows / splitTrackByWindows を足して 53) すべて両側 OK。
 [[files]]
 path = "app/utils/operation-route-map.ts"
 branches = true
