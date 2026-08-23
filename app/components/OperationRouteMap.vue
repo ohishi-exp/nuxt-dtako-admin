@@ -25,8 +25,8 @@ const props = defineProps<{
   /** イベントCSV が引けなかった理由。引けていれば null。 */
   error: string | null
   /**
-   * NET780 軌跡の有無 (例 `NET780 軌跡: 2 運行ぶん` / `NET780 なし`)。まだ引いていなければ null。
-   * 見出しの横に出すだけ (Refs #760 の 21)。
+   * 軌跡の内訳 (例 `NET780 軌跡: 2 運行ぶん / イベント軌跡: 5 運行ぶん`)。まだ引いていなければ null。
+   * 見出しの横に出すだけ (Refs #760 の 21・24)。
    */
   trackNote?: string | null
 }>()
@@ -44,10 +44,11 @@ const SEGMENT_STYLE: Record<RouteSegment['kind'], { color: string, weight: numbe
   haul: { color: '#10b981', weight: 5, opacity: 0.7, dashed: false, zIndex: 2, label: '売上走行 (積み → 降し)' },
   deadhead: { color: '#9ca3af', weight: 3, opacity: 0.5, dashed: false, zIndex: 1, label: '回送' },
   other: { color: '#f59e0b', weight: 3, opacity: 0.7, dashed: true, zIndex: 1, label: '降しの無い便 / 分類不能' },
-  // NET780 の道なり軌跡 (Refs #760 の 21)。イベント線 (始点・終点を結んだ直線) の**下**に
-  // 細く濃い色で描く — 直線のスケッチと、実際に走った道の両方が読めるように。
-  trackHaul: { color: '#047857', weight: 2, opacity: 0.9, dashed: false, zIndex: 0, label: 'NET780 軌跡 (便の時間帯)' },
-  trackDeadhead: { color: '#4b5563', weight: 2, opacity: 0.8, dashed: false, zIndex: 0, label: 'NET780 軌跡 (回送の時間帯)' },
+  // 軌跡 (Refs #760 の 21・24)。イベント線 (始点・終点を結んだ直線) の**下**に細く濃い色で
+  // 描く — 直線のスケッチと、実際に通った点の両方が読めるように。NET780 の道なり GPS
+  // (アーカイブがある運行) と、重ね掛け行も混ぜたイベント軌跡 (それ以外の運行) の**どちらか**。
+  trackHaul: { color: '#047857', weight: 2, opacity: 0.9, dashed: false, zIndex: 0, label: '軌跡 (便の時間帯)' },
+  trackDeadhead: { color: '#4b5563', weight: 2, opacity: 0.8, dashed: false, zIndex: 0, label: '軌跡 (回送の時間帯)' },
 }
 
 const mapEl = ref<HTMLDivElement | null>(null)
@@ -205,7 +206,7 @@ const emptyReason = computed(() => {
 })
 
 const legendKinds: RouteSegment['kind'][] = ['haul', 'deadhead', 'other']
-/** NET780 軌跡の凡例 (1 行)。アーカイブがある運行だけ乗る。 */
+/** 軌跡の凡例 (1 行)。運行ごとに NET780 かイベント軌跡のどちらかが乗る (内訳は `trackNote`)。 */
 const trackKinds: RouteSegment['kind'][] = ['trackHaul', 'trackDeadhead']
 </script>
 
@@ -275,7 +276,7 @@ const trackKinds: RouteSegment['kind'][] = ['trackHaul', 'trackDeadhead']
         <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full border-2 border-gray-900 dark:border-gray-100" />運行終了</span>
       </div>
       <div class="flex flex-wrap items-center gap-4 px-4 pb-2 text-[11px] text-gray-500">
-        <span>NET780 軌跡 (アーカイブがある運行だけ):</span>
+        <span>軌跡 (NET780 / イベント):</span>
         <span v-for="k in trackKinds" :key="k" class="flex items-center gap-1">
           <span
             class="inline-block w-5 rounded"

@@ -283,9 +283,11 @@ branches = true
 # (haul / deadhead / other) した点列とマーカーに畳む pure util。便の切り方は
 # allowance-idle.ts と同じ行。取引先 × 経路の行から「この経路の便を全部重ねた地図」を
 # 描く pickLegsFromRoute / mergeRoutes も持つ (Refs #760 の 19)。
+# 重ね掛け行も混ぜて軌跡を密にする buildOverlayTrack も持つ (Refs #760 の 24)。
 # branches: BR() で包んだ instrumented コピーで
-# 53 条件 (`if` / 三項 / `&&` `||` `??` の各項。#760 の 19 で 37 → 41、#760 の 21 で
-# NET780 軌跡の時間窓 windows / splitTrackByWindows を足して 53) すべて両側 OK。
+# 61 条件 (`if` / 三項 / `&&` `||` `??` の各項。#760 の 19 で 37 → 41、#760 の 21 で
+# NET780 軌跡の時間窓 windows / splitTrackByWindows を足して 53、#760 の 24 で
+# buildOverlayTrack のぶん 61) すべて両側 OK。
 [[files]]
 path = "app/utils/operation-route-map.ts"
 branches = true
