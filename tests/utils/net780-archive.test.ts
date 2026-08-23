@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  NET780_ARCHIVE_BATCH_SIZE,
   NET780_ARCHIVE_MAX_ITEMS,
   chunk,
   formatNet780ArchiveSummary,
@@ -42,6 +43,27 @@ describe('chunk', () => {
   it('size 未満は 1 塊', () => {
     const items = unkoNos(NET780_ARCHIVE_MAX_ITEMS - 1)
     expect(chunk(items, NET780_ARCHIVE_MAX_ITEMS)).toEqual([items])
+  })
+})
+
+describe('NET780_ARCHIVE_BATCH_SIZE', () => {
+  it('relay の上限以下で、1 件以上 (Refs #760 の 29)', () => {
+    expect(NET780_ARCHIVE_BATCH_SIZE).toBeGreaterThanOrEqual(1)
+    expect(NET780_ARCHIVE_BATCH_SIZE).toBeLessThanOrEqual(NET780_ARCHIVE_MAX_ITEMS)
+  })
+
+  it('上限より小さい — 進捗が動かない時間を短くするのが目的なので、まとめて投げない', () => {
+    expect(NET780_ARCHIVE_BATCH_SIZE).toBeLessThan(NET780_ARCHIVE_MAX_ITEMS)
+  })
+
+  it('画面の chunk はこの件数で割る (端数は最後の 1 塊)', () => {
+    const items = unkoNos(NET780_ARCHIVE_BATCH_SIZE * 2 + 1)
+    const out = chunk(items, NET780_ARCHIVE_BATCH_SIZE)
+    expect(out).toHaveLength(3)
+    expect(out.flat()).toEqual(items)
+    expect(out[0]).toHaveLength(NET780_ARCHIVE_BATCH_SIZE)
+    expect(out[1]).toHaveLength(NET780_ARCHIVE_BATCH_SIZE)
+    expect(out.at(-1)).toHaveLength(1)
   })
 })
 

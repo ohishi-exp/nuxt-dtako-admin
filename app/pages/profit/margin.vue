@@ -53,7 +53,7 @@ import {
   type RouteMapLayers,
 } from '~/utils/operation-route-map'
 import { filterValidGpsPoints } from '~/utils/net780'
-import { NET780_ARCHIVE_MAX_ITEMS, chunk, remainingNet780ArchiveTargets, summarizeNet780ArchiveResults, formatNet780ArchiveSummary, type Net780ArchiveResultItem } from '~/utils/net780-archive'
+import { NET780_ARCHIVE_BATCH_SIZE, chunk, remainingNet780ArchiveTargets, summarizeNet780ArchiveResults, formatNet780ArchiveSummary, type Net780ArchiveResultItem } from '~/utils/net780-archive'
 import { parseTargets, serializeTargets, toggleTarget, driverLabel } from '~/utils/allowance-targets'
 import {
   applyCarryOver,
@@ -1158,9 +1158,12 @@ async function openLegRefsMap(key: string, title: string, legRefs: LegRef[]) {
  *
  * いま開いている地図で NET780 が無かった運行 (`routeModal.net780Missing`) を
  * `POST /api/net780/archive` (→ relay の `/kintai-relay/net780-archive`、#760-26) に
- * **20 件ずつ直列**で投げ、relay が theearth から取って R2 に保存する。1 件 数秒〜十数秒
- * なので進捗 (`k/N`) を見出し横に出し、終わったら結果 (`archived a / already b /
- * not_found c / error d`) を出して**同じ地図を開き直す** (`routeModalReopen`) —
+ * **`NET780_ARCHIVE_BATCH_SIZE` 件ずつ直列**で投げ、relay が theearth から取って R2 に
+ * 保存する。relay は 1 運行ずつ (同時 1、1 運行 約 5 秒) 処理するので、**1 回に載せる
+ * 件数がそのまま「進捗が動かない時間」**になる — 上限の 20 件を投げると 12 運行で
+ * 1 分以上 `0/12` のまま止まって見えた (オーナー 2026-08-23「進まないのかわからない」)。
+ * 進捗 (`k/N` と押してからの経過秒) を見出し横に出し、終わったら結果 (`archived a /
+ * already b / not_found c / error d`) を出して**同じ地図を開き直す** (`routeModalReopen`) —
  * 取れた運行の軌跡が NET780 に切り替わる。
  *
  * relay が時間切れで途中までしか処理しないこと (`truncated`) があるので、`results` に
@@ -1173,6 +1176,15 @@ async function openLegRefsMap(key: string, title: string, legRefs: LegRef[]) {
  */
 const net780Archive = ref<{ key: string, running: boolean, text: string } | null>(null)
 
+/**
+ * 走行中の 1 行 (`NET780 取得中 4/12 (経過 21秒、1 運行 約 5 秒)`)。**経過秒は 1 秒ごとに
+ * 動く** — バッチの途中 (最大 20 秒) は `k/N` が止まったままなので、動いている目印が
+ * これしか無い。`done` は済んだバッチの `results.length` の和。
+ */
+function net780ArchiveProgressText(done: number, total: number, elapsedMs: number): string {
+  return `NET780 取得中 ${done}/${total} (経過 ${Math.floor(elapsedMs / 1000)}秒、1 運行 約 5 秒)`
+}
+
 async function archiveRouteModalNet780() {
   const modal = routeModal.value
   const targets = modal?.net780Missing ?? []
@@ -1184,10 +1196,17 @@ async function archiveRouteModalNet780() {
   let queue: string[] = [...targets]
   let stalled = false
   let failure: string | null = null
-  net780Archive.value = { key, running: true, text: `NET780 取得中 0/${total}` }
+  const startedAt = Date.now()
+  // 済んだ件数と経過秒を今の値で書き直す (1 秒ごと + バッチが返るたび)。
+  const tick = () => {
+    net780Archive.value = { key, running: true, text: net780ArchiveProgressText(all.length, total, Date.now() - startedAt) }
+  }
+  tick()
+  // 終了・失敗のどちらでも必ず止める (finally)。
+  const timer = setInterval(tick, 1000)
   try {
     while (queue.length > 0) {
-      const batch = chunk(queue, NET780_ARCHIVE_MAX_ITEMS)[0] ?? []
+      const batch = chunk(queue, NET780_ARCHIVE_BATCH_SIZE)[0] ?? []
       const res = await postNet780Archive(batch)
       all.push(...res.results)
       const rest = remainingNet780ArchiveTargets(queue, res.results)
@@ -1196,11 +1215,14 @@ async function archiveRouteModalNet780() {
         break
       }
       queue = rest
-      net780Archive.value = { key, running: true, text: `NET780 取得中 ${total - queue.length}/${total}` }
+      tick()
     }
   }
   catch (e) {
     failure = e instanceof Error ? e.message : String(e)
+  }
+  finally {
+    clearInterval(timer)
   }
   const parts = [`NET780 取得: ${formatNet780ArchiveSummary(summarizeNet780ArchiveResults(all))}`]
   if (stalled) parts.push(`進まないため中断 (残り ${queue.length} 運行)`)

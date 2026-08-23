@@ -305,8 +305,8 @@ branches = true
 path = "server/utils/operation-zip.ts"
 branches = true
 
-# NET780 一括取得 (Refs #760 の 27) の pure な部品。relay の応答の型と、画面が 20 件ずつ
-# 直列に呼ぶための分割 (`chunk`)・残りの計算 (`remainingNet780ArchiveTargets`)・
+# NET780 一括取得 (Refs #760 の 27) の pure な部品。relay の応答の型と、画面が
+# `NET780_ARCHIVE_BATCH_SIZE` 件ずつ直列に呼ぶための分割 (`chunk`)・残りの計算 (`remainingNet780ArchiveTargets`)・
 # 結果の集計 (`summarizeNet780ArchiveResults` / `formatNet780ArchiveSummary`)。
 # branches: BR() で包んだ instrumented コピーで全分岐両側 OK を実測してから登録した。
 [[files]]
