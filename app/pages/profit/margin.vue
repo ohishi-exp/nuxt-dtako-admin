@@ -816,6 +816,10 @@ const customerSummary = computed(() => summarizeByCustomerRoute(result.value.ope
 const customerGrossSum = computed(() => customerSummary.value.customers.reduce((sum, c) => sum + (c.grossMarginYen ?? 0), 0))
 /** 検算が 1 円未満で合っているか。合わなければ amber で出す。 */
 const customerCheckOk = computed(() => Math.abs(customerSummary.value.diffYen) < 1)
+/** 売上の検算の左辺 = Σ取引先の売上 (便ぜんぶ。2 取引先の便は比で分けた後の和なので便の売上に戻る)。 */
+const customerSalesSum = computed(() => customerSummary.value.customers.reduce((sum, c) => sum + c.salesYen, 0))
+/** 売上の検算: Σ取引先の売上 + 便の無い運行の売上 = 粗利タブの売上 (運行ぜんぶの `totals.salesYen`)。 */
+const customerSalesCheckOk = computed(() => Math.abs(customerSalesSum.value + customerSummary.value.noLegOperations.salesYen - totals.value.salesYen) < 1)
 /** 取引先行の開閉 (経路の行を出す)。鍵は取引先C (突合なしは空文字)。 */
 const openCustomers = reactive<Record<string, boolean>>({})
 
@@ -1424,6 +1428,17 @@ function downloadCustomerRouteCsv() {
             = 粗利タブの粗利 <b>{{ yen(customerSummary.totalMarginYen) }}</b>
             <span v-if="customerCheckOk">— 合っています</span>
             <span v-else>— <b>{{ yen(customerSummary.diffYen) }} 合いません</b> (便の走行km が取れていない運行がある可能性)</span>
+          </p>
+          <p
+            class="text-xs mb-2"
+            :class="customerSalesCheckOk ? 'text-gray-500' : 'text-amber-600 dark:text-amber-400'"
+            title="便の売上は運行の売上と同じ突合結果から出ているので、全運行の売上に必ず戻る"
+          >
+            売上の検算: 取引先別の売上 <b>{{ yen(customerSalesSum) }}</b>
+            + 便の無い運行 <b>{{ yen(customerSummary.noLegOperations.salesYen) }}</b>
+            = 粗利タブの売上 <b>{{ yen(totals.salesYen) }}</b>
+            <span v-if="customerSalesCheckOk">— 合っています</span>
+            <span v-else>— <b>{{ yen(customerSalesSum + customerSummary.noLegOperations.salesYen - totals.salesYen) }} 合いません</b></span>
           </p>
           <p v-if="customerSummary.noLegOperations.operations > 0" class="text-xs text-gray-500 mb-2">
             便の無い運行 <b>{{ customerSummary.noLegOperations.operations }}</b> 本
