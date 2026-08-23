@@ -28,11 +28,17 @@ const props = defineProps<{
 
 const emit = defineEmits<{ close: [] }>()
 
-/** 線の色 (凡例と同じ)。haul = 売上走行 / deadhead = 回送 / other = 降しの無い便など分類不能。 */
-const SEGMENT_STYLE: Record<RouteSegment['kind'], { color: string, weight: number, dashed: boolean, label: string }> = {
-  haul: { color: '#10b981', weight: 5, dashed: false, label: '売上走行 (積み → 降し)' },
-  deadhead: { color: '#9ca3af', weight: 3, dashed: false, label: '回送' },
-  other: { color: '#f59e0b', weight: 3, dashed: true, label: '降しの無い便 / 分類不能' },
+/**
+ * 線の色 (凡例と同じ)。haul = 売上走行 / deadhead = 回送 / other = 降しの無い便など分類不能。
+ *
+ * `opacity` は**半透明**にしてある (Refs #760 の 19)。経路行の「この経路の便を全部
+ * 重ねた地図」は同じ道を 28 本重ねることがあり、不透明だと 1 本目しか見えない。
+ * 重なりの濃さで本数が読めるように、回送 (背景) をさらに薄くする。運行 1 本のときも同じ。
+ */
+const SEGMENT_STYLE: Record<RouteSegment['kind'], { color: string, weight: number, opacity: number, dashed: boolean, label: string }> = {
+  haul: { color: '#10b981', weight: 5, opacity: 0.7, dashed: false, label: '売上走行 (積み → 降し)' },
+  deadhead: { color: '#9ca3af', weight: 3, opacity: 0.5, dashed: false, label: '回送' },
+  other: { color: '#f59e0b', weight: 3, opacity: 0.7, dashed: true, label: '降しの無い便 / 分類不能' },
 }
 
 const mapEl = ref<HTMLDivElement | null>(null)
@@ -131,11 +137,11 @@ async function redraw() {
     polylines.push(new google.maps.Polyline({
       path: seg.path,
       strokeColor: style.color,
-      strokeOpacity: style.dashed ? 0 : 0.9,
+      strokeOpacity: style.dashed ? 0 : style.opacity,
       strokeWeight: style.weight,
       // 破線は Google Maps の定番 (strokeOpacity 0 + 短い線のアイコンを繰り返す)。
       icons: style.dashed
-        ? [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 0.9, strokeColor: style.color, scale: 3 }, offset: '0', repeat: '14px' }]
+        ? [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: style.opacity, strokeColor: style.color, scale: 3 }, offset: '0', repeat: '14px' }]
         : undefined,
       zIndex: seg.kind === 'haul' ? 2 : 1,
       map: m,

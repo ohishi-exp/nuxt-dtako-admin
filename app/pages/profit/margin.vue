@@ -38,7 +38,7 @@ import { fetchAllPages } from '~/utils/paged-fetch'
 import type { Driver, OperationListItem } from '~/types'
 import { extractAllowanceLegs, extractCarryInUnloads, allowanceForLegs } from '~/utils/allowance-trips'
 import { extractOperationIdle, type LegKmDetail } from '~/utils/allowance-idle'
-import { buildOperationRoute, type OperationRoute } from '~/utils/operation-route-map'
+import { buildOperationRoute, pickLegsFromRoute, mergeRoutes, type OperationRoute } from '~/utils/operation-route-map'
 import { parseTargets, serializeTargets, toggleTarget, driverLabel } from '~/utils/allowance-targets'
 import {
   applyCarryOver,
@@ -108,8 +108,11 @@ import {
   type MarginCache,
   type MarginOperationInput,
   type MarginLegInput,
+  type CustomerSummary,
   type LegCustomerShare,
+  type LegRef,
   type OperationMargin,
+  type RouteSummary,
   type ShareSegmentKey,
   type UncoveredDriverInput,
   type UncoveredTotals,
@@ -882,7 +885,9 @@ const openDrivers = reactive<Record<string, boolean>>({})
  * `buildOperationRoute` (pure)、描画は `OperationRouteMap.vue` (dumb)。
  */
 const routeModal = ref<{
-  unkoNo: string
+  /** 何を開いているか (`op:<運行NO>` / `route:<取引先C>:<積地>→<卸地>` / `customer:<取引先C>`)。
+   *  待っている間に別のを開いた / 閉じたときに、古い結果で上書きしないための鍵。 */
+  key: string
   title: string
   route: OperationRoute | null
   loading: boolean
@@ -890,8 +895,9 @@ const routeModal = ref<{
 } | null>(null)
 
 async function openRouteMap(m: OperationMargin) {
+  const key = `op:${m.unkoNo}`
   const title = `運行 ${m.date} ${m.driverName} 車輌 ${m.vehicleCode} — 便 ${m.legs.length} 本`
-  routeModal.value = { unkoNo: m.unkoNo, title, route: null, loading: true, error: null }
+  routeModal.value = { key, title, route: null, loading: true, error: null }
   let route: OperationRoute | null = null
   let error: string | null = null
   try {
@@ -902,8 +908,74 @@ async function openRouteMap(m: OperationMargin) {
     error = e instanceof Error ? e.message : String(e)
   }
   // 待っている間に別の運行を開いた / 閉じたなら、古い結果で上書きしない。
-  if (routeModal.value?.unkoNo !== m.unkoNo) return
-  routeModal.value = { unkoNo: m.unkoNo, title, route, loading: false, error }
+  if (routeModal.value?.key !== key) return
+  routeModal.value = { key, title, route, loading: false, error }
+}
+
+/**
+ * **この経路 (取引先) の便を全部重ねた地図** (Refs #760 の 19)。オーナー: 「粗利率の高い
+ * 短距離経路と低い長距離経路の形を、便を重ねて比べたい」。
+ *
+ * `legRefs` を運行ごとにまとめ、運行 1 本につきイベントCSV を 1 回引いて
+ * (`CSV_CONCURRENCY` で並列)、`pickLegsFromRoute` でその運行の**該当する便だけ**を
+ * 残してから `mergeRoutes` で 1 枚に重ねる。**運行行の地図と同じモーダル**
+ * (`routeModal`) に出す。cache には入れない (`MARGIN_CACHE_KEY` の形を変えない)。
+ *
+ * 引けなかった運行はそのぶんを抜いて描き、何本落としたかを `error` に出す
+ * (**黙って少ない本数を重ねない** — 形を比べるのが目的なので、欠けを見せる)。
+ */
+async function openLegRefsMap(key: string, title: string, legRefs: LegRef[]) {
+  const byUnkoNo = new Map<string, number[]>()
+  for (const ref of legRefs) {
+    const seqs = byUnkoNo.get(ref.unkoNo) ?? []
+    seqs.push(ref.seq)
+    byUnkoNo.set(ref.unkoNo, seqs)
+  }
+  const entries = [...byUnkoNo.entries()]
+  const withProgress = (done: number) => `${title} (読み込み中 ${done}/${entries.length})`
+  routeModal.value = { key, title: withProgress(0), route: null, loading: true, error: null }
+
+  const picked: OperationRoute[] = []
+  let failed = 0
+  for (let i = 0; i < entries.length; i += CSV_CONCURRENCY) {
+    const results = await Promise.all(entries.slice(i, i + CSV_CONCURRENCY).map(async ([unkoNo, seqs]) => {
+      try {
+        const csv = await getOperationCsv(unkoNo, 'events')
+        return pickLegsFromRoute(buildOperationRoute(csv.headers, csv.rows), seqs)
+      }
+      catch {
+        return null
+      }
+    }))
+    // 待っている間に別のを開いた / 閉じたなら、古い結果で上書きしない (残りも引かない)。
+    if (routeModal.value?.key !== key) return
+    for (const r of results) {
+      if (r === null) failed += 1
+      else picked.push(r)
+    }
+    routeModal.value = { key, title: withProgress(picked.length + failed), route: null, loading: true, error: null }
+  }
+  routeModal.value = {
+    key,
+    title,
+    route: picked.length === 0 ? null : mergeRoutes(picked),
+    loading: false,
+    error: failed === 0 ? null : `運行 ${entries.length} 本のうち ${failed} 本のイベントCSVが引けませんでした`,
+  }
+}
+
+/** 経路行の「地図」。タイトルは `取引先 積地 → 卸地 — 便 N 本 (運行 M 本)`。 */
+function openRouteLegsMap(c: CustomerSummary, r: RouteSummary) {
+  const operations = new Set(r.legRefs.map(ref => ref.unkoNo)).size
+  const title = `${c.name} ${r.from} → ${r.to} — 便 ${r.legRefs.length} 本 (運行 ${operations} 本)`
+  return openLegRefsMap(`route:${c.code}:${r.from}→${r.to}`, title, r.legRefs)
+}
+
+/** 取引先行の「地図」。その取引先の**全経路**を 1 枚に重ねる。 */
+function openCustomerLegsMap(c: CustomerSummary) {
+  const operations = new Set(c.legRefs.map(ref => ref.unkoNo)).size
+  const title = `${c.name} — 便 ${c.legRefs.length} 本 (経路 ${c.routes.length} 本・運行 ${operations} 本)`
+  return openLegRefsMap(`customer:${c.code}`, title, c.legRefs)
 }
 /** 運行行の開閉 (3 段目の便を出す)。**乗務員行の `openDrivers` と同じ流儀。** */
 const openOperations = reactive<Record<string, boolean>>({})
@@ -1617,6 +1689,14 @@ function downloadCustomerRouteCsv() {
                       {{ openCustomers[c.code] ? '▾' : '▸' }} {{ c.name }}
                       <span class="text-gray-400">(便 {{ c.legs }}<template v-if="c.code">, {{ c.code }}</template>)</span>
                       <span v-if="c.unsplitLegs > 0" class="text-amber-600 dark:text-amber-400 ml-1">粗利が出せない便 {{ c.unsplitLegs }}</span>
+                      <button
+                        type="button"
+                        class="ml-2 rounded border border-gray-300 dark:border-gray-700 px-1.5 py-0.5 text-[11px] text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
+                        title="この取引先の便を全部重ねて地図で見る"
+                        @click.stop="openCustomerLegsMap(c)"
+                      >
+                        地図
+                      </button>
                     </td>
                     <td class="px-3 py-2 text-right">{{ yen(c.salesYen) }}</td>
                     <td class="px-3 py-2 text-right">
@@ -1654,6 +1734,14 @@ function downloadCustomerRouteCsv() {
                       {{ r.from }} → {{ r.to }}
                       <span class="text-gray-400">(便 {{ r.legs }})</span>
                       <span v-if="r.unsplitLegs > 0" class="text-amber-600 dark:text-amber-400 ml-1">粗利が出せない便 {{ r.unsplitLegs }}</span>
+                      <button
+                        type="button"
+                        class="ml-2 rounded border border-gray-300 dark:border-gray-700 px-1.5 py-0.5 text-[11px] text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
+                        title="この経路の便を全部重ねて地図で見る"
+                        @click.stop="openRouteLegsMap(c, r)"
+                      >
+                        地図
+                      </button>
                     </td>
                     <td class="px-3 py-1.5 text-right">{{ yen(r.salesYen) }}</td>
                     <td class="px-3 py-1.5 text-right">

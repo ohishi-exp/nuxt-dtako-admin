@@ -1348,12 +1348,28 @@ export interface CustomerRouteTotals {
   grossMarginYen: number | null
 }
 
+/**
+ * その行に入っている便 1 本の**居場所** (Refs #760 の 19)。行の数字には効かない —
+ * 画面が「この経路の便を全部重ねた地図」を描くときに、どの運行のイベントCSV を引いて
+ * どの便を残すかを知るためだけに持つ。
+ *
+ * **2 取引先に当たった便は両方の取引先 (と経路) に入る** (`legs` の数え方と同じ)。
+ * CSV (`customerRouteCsvLines`) には出さない。
+ */
+export interface LegRef {
+  unkoNo: string
+  /** `LegMargin.seq` (1 始まり)。`OperationRoute.segments[].legSeq` と同じ番号。 */
+  seq: number
+}
+
 /** 経路 1 本 (積地 → 卸地) の行。 */
 export interface RouteSummary extends CustomerRouteTotals {
   /** 積地 (`routePlace(originCity)`)。 */
   from: string
   /** 卸地 (`routePlace(destCity)`)。 */
   to: string
+  /** この経路に入っている便 (行の数字には効かない。地図用)。 */
+  legRefs: LegRef[]
 }
 
 /** 取引先 1 つの行。`routes` は売上の降順。 */
@@ -1361,6 +1377,8 @@ export interface CustomerSummary extends CustomerRouteTotals {
   code: string
   name: string
   routes: RouteSummary[]
+  /** この取引先に入っている便 (全経路ぶん。行の数字には効かない。地図用)。 */
+  legRefs: LegRef[]
 }
 
 /**
@@ -1497,13 +1515,16 @@ export function summarizeByCustomerRoute(margins: OperationMargin[]): CustomerRo
       const to = routePlace(l.destCity)
       for (const w of customerWeights(l.customers)) {
         const customer = customers.get(w.code)
-          ?? { ...emptyCustomerRouteTotals(), code: w.code, name: w.name, routes: [], routeMap: new Map<string, RouteSummary>() }
+          ?? { ...emptyCustomerRouteTotals(), code: w.code, name: w.name, routes: [], legRefs: [], routeMap: new Map<string, RouteSummary>() }
         customers.set(w.code, customer)
         addLegTo(customer, l, w.weight)
         const routeKey = `${from}|${to}`
-        const route = customer.routeMap.get(routeKey) ?? { ...emptyCustomerRouteTotals(), from, to }
+        const route = customer.routeMap.get(routeKey) ?? { ...emptyCustomerRouteTotals(), from, to, legRefs: [] }
         customer.routeMap.set(routeKey, route)
         addLegTo(route, l, w.weight)
+        // 地図用の居場所 (Refs #760 の 19)。`addLegTo` は額を足す係なので、こちらは分けて持つ。
+        customer.legRefs.push({ unkoNo: m.unkoNo, seq: l.seq })
+        route.legRefs.push({ unkoNo: m.unkoNo, seq: l.seq })
       }
     }
   }

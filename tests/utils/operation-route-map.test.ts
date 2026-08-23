@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildOperationRoute, type RouteSegment } from '~/utils/operation-route-map'
+import { buildOperationRoute, pickLegsFromRoute, mergeRoutes, type OperationRoute, type RouteSegment } from '~/utils/operation-route-map'
 import { extractOperationIdle } from '~/utils/allowance-idle'
 import { toLatLng } from '~/utils/event-data-table'
 
@@ -236,5 +236,76 @@ describe('buildOperationRoute', () => {
 
   it('行が無ければ空', () => {
     expect(buildOperationRoute(HEADERS, [])).toEqual({ segments: [], markers: [], pointCount: 0, droppedRows: 0 })
+  })
+})
+
+describe('pickLegsFromRoute', () => {
+  const route = buildOperationRoute(HEADERS, TWO_LEGS)
+
+  it('seqs にある便の売上走行と、その便へ向かう回送だけを残す (start / end は落とす)', () => {
+    const picked = pickLegsFromRoute(route, [2])
+    expect(shape(picked.segments)).toEqual([
+      { kind: 'deadhead', legSeq: 2, n: 2 }, // 便 2 へ向かう回送 (士幌 → 釧路)
+      { kind: 'haul', legSeq: 2, n: 3 },
+      { kind: 'deadhead', legSeq: 2, n: 2 }, // 便 2 の降後 (帰庫)
+    ])
+    // 運行開始 / 運行終了 のマーカーは出さない。積み・降しはその便のぶんだけ。
+    expect(picked.markers.map(m => `${m.kind}${m.legSeq ?? ''}`)).toEqual(['load2', 'unload2'])
+    expect(picked.pointCount).toBe(7)
+    expect(picked.droppedRows).toBe(route.droppedRows)
+  })
+
+  it('seqs が空なら segments も markers も空 (pointCount 0、droppedRows はそのまま)', () => {
+    const withDropped: OperationRoute = { ...route, droppedRows: 3 }
+    const picked = pickLegsFromRoute(withDropped, [])
+    expect(picked).toEqual({ segments: [], markers: [], pointCount: 0, droppedRows: 3 })
+  })
+
+  it('複数の便を渡すと両方残る', () => {
+    expect(shape(pickLegsFromRoute(route, [1, 2]).segments)).toEqual(shape(route.segments))
+    expect(pickLegsFromRoute(route, [1, 2]).markers.map(m => `${m.kind}${m.legSeq ?? ''}`))
+      .toEqual(['load1', 'load2', 'unload1', 'unload2'])
+  })
+
+  it('other は legSeq が一致するときだけ残る (降しの無い便)', () => {
+    const rows = [
+      ev('積み', KUSHIRO, KUSHIRO),
+      ev('運転', KUSHIRO, SHIHORO), // 降し無し便 → other legSeq 1
+      ev('積み', SHIHORO, SHIHORO),
+      ev('降し', SHIMIZU, SHIMIZU),
+    ]
+    const built = buildOperationRoute(HEADERS, rows)
+    expect(shape(built.segments)).toEqual([
+      { kind: 'other', legSeq: 1, n: 2 },
+      { kind: 'haul', legSeq: 2, n: 2 },
+    ])
+    expect(shape(pickLegsFromRoute(built, [1]).segments)).toEqual([{ kind: 'other', legSeq: 1, n: 2 }])
+    expect(shape(pickLegsFromRoute(built, [2]).segments)).toEqual([{ kind: 'haul', legSeq: 2, n: 2 }])
+  })
+
+  it('legSeq が null の区切り (積みが 1 行も無い運行) は何を渡しても残らない', () => {
+    const built = buildOperationRoute(HEADERS, [ev('運行開始', OBIHIRO, OBIHIRO), ev('運転', OBIHIRO, KUSHIRO)])
+    expect(shape(built.segments)).toEqual([{ kind: 'other', legSeq: null, n: 2 }])
+    expect(built.markers.map(m => m.kind)).toEqual(['start'])
+    // legSeq null の区切りも、start マーカーも落ちる。
+    expect(pickLegsFromRoute(built, [1])).toEqual({ segments: [], markers: [], pointCount: 0, droppedRows: 0 })
+  })
+})
+
+describe('mergeRoutes', () => {
+  it('2 本を連結し、pointCount / droppedRows は和', () => {
+    const a = pickLegsFromRoute(buildOperationRoute(HEADERS, TWO_LEGS), [1])
+    const b: OperationRoute = { ...pickLegsFromRoute(buildOperationRoute(HEADERS, TWO_LEGS), [2]), droppedRows: 2 }
+    const merged = mergeRoutes([a, b])
+    expect(shape(merged.segments)).toEqual([...shape(a.segments), ...shape(b.segments)])
+    expect(merged.markers).toEqual([...a.markers, ...b.markers])
+    expect(merged.pointCount).toBe(a.pointCount + b.pointCount)
+    expect(merged.droppedRows).toBe(a.droppedRows + 2)
+    // 元は変えない (pure)。
+    expect(a.segments.length).toBe(2)
+  })
+
+  it('空配列なら空の route', () => {
+    expect(mergeRoutes([])).toEqual({ segments: [], markers: [], pointCount: 0, droppedRows: 0 })
   })
 })
