@@ -87,6 +87,8 @@ import {
   summarizeMargins,
   groupMarginsByDriver,
   marginRate,
+  salesPerHaulKm,
+  marginRateTone,
   kmMismatch,
   noMarginReason,
   summarizeNoMarginReasons,
@@ -183,6 +185,19 @@ const kmPct = (part: number, totalKm: number) => `${Math.round((part / totalKm) 
  * (`NaN%` / `Infinity%` を見せないため、テンプレート側で `v-if` を掛ける)。
  */
 const yenPct = (part: number, salesYen: number) => `${Math.round((part / salesYen) * 100)}%`
+/**
+ * 粗利率のセルの色 (Refs #760 の 20)。**取引先の行と経路の行で同じ式**なので関数に出す
+ * (テンプレートで `marginRate` を 2 度呼ばないため)。`marginRateTone` は % で受けるので 100 倍する。
+ */
+const MARGIN_TONE_CLASS: Record<'high' | 'low', string> = {
+  high: 'text-emerald-600 dark:text-emerald-400 font-medium',
+  low: 'text-red-600 dark:text-red-400 font-medium',
+}
+const marginRateClass = (salesYen: number, marginYen: number | null): string => {
+  const rate = marginRate({ salesYen, marginYen })
+  const tone = marginRateTone(rate === null ? null : rate * 100)
+  return tone === null ? '' : MARGIN_TONE_CLASS[tone]
+}
 /** 内訳の見出しの意味。**列を増やさない**代わりに、数字の意味をここで説明する。 */
 const KM_BREAKDOWN_TITLE = '積前=始業→最初の積み / 売上=積み→降し / 便間=降し→次の積み / 降後=最後の降し→終業'
 const OTHER_KM_TITLE = '降しが記録されていない便の走行 (分類不能)'
@@ -1601,9 +1616,13 @@ function downloadCustomerRouteCsv() {
                     title="運行の直課経費 + 固定費按分 を、運行の便の走行km (売上走行 + 回送) の比で便に配った額"
                   >運行経費の配分</th>
                   <th class="text-right px-3 py-2 font-medium text-gray-500" title="売上 − 手当 − 燃料 − 運行経費の配分">粗利</th>
-                  <th class="text-right px-3 py-2 font-medium text-gray-500" title="粗利 ÷ 売上">粗利率</th>
+                  <th
+                    class="text-right px-3 py-2 font-medium text-gray-500"
+                    title="粗利 ÷ 売上。55% 以上は緑、30% 未満は赤"
+                  >粗利率</th>
                   <th class="text-right px-3 py-2 font-medium text-gray-500" title="売上走行km ÷ 便数">平均 売上走行km</th>
                   <th class="text-right px-3 py-2 font-medium text-gray-500" title="回送km ÷ 便数">平均 回送km</th>
+                  <th class="text-right px-3 py-2 font-medium text-gray-500" title="売上 ÷ 売上走行km">売上/売上走行km</th>
                 </tr>
               </thead>
               <tbody>
@@ -1641,9 +1660,10 @@ function downloadCustomerRouteCsv() {
                     >
                       {{ yen(c.grossMarginYen) }}
                     </td>
-                    <td class="px-3 py-2 text-right">{{ pct(marginRate({ salesYen: c.salesYen, marginYen: c.grossMarginYen })) }}</td>
+                    <td class="px-3 py-2 text-right" :class="marginRateClass(c.salesYen, c.grossMarginYen)">{{ pct(marginRate({ salesYen: c.salesYen, marginYen: c.grossMarginYen })) }}</td>
                     <td class="px-3 py-2 text-right">{{ kmInt(c.haulKm / c.legs) }}</td>
                     <td class="px-3 py-2 text-right">{{ kmInt(c.deadheadKm / c.legs) }}</td>
+                    <td class="px-3 py-2 text-right">{{ yen(salesPerHaulKm(c.salesYen, c.haulKm)) }}</td>
                   </tr>
                   <tr
                     v-for="r in (openCustomers[c.code] ? c.routes : [])"
@@ -1678,9 +1698,10 @@ function downloadCustomerRouteCsv() {
                     >
                       {{ yen(r.grossMarginYen) }}
                     </td>
-                    <td class="px-3 py-1.5 text-right">{{ pct(marginRate({ salesYen: r.salesYen, marginYen: r.grossMarginYen })) }}</td>
+                    <td class="px-3 py-1.5 text-right" :class="marginRateClass(r.salesYen, r.grossMarginYen)">{{ pct(marginRate({ salesYen: r.salesYen, marginYen: r.grossMarginYen })) }}</td>
                     <td class="px-3 py-1.5 text-right">{{ kmInt(r.haulKm / r.legs) }}</td>
                     <td class="px-3 py-1.5 text-right">{{ kmInt(r.deadheadKm / r.legs) }}</td>
+                    <td class="px-3 py-1.5 text-right">{{ yen(salesPerHaulKm(r.salesYen, r.haulKm)) }}</td>
                   </tr>
                 </template>
               </tbody>
