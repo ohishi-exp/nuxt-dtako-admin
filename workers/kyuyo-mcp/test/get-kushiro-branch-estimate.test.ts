@@ -89,8 +89,8 @@ type Result = Awaited<ReturnType<typeof getKushiroBranchEstimateTool.execute>> &
   summary: Record<string, unknown>;
   min_wage: Record<string, unknown>;
   legs_per_day: Record<string, unknown>;
-  sensitivity: Record<string, unknown>[];
-  break_even_legs_per_day: number | null;
+  sensitivity: Record<string, Record<string, unknown>[]>;
+  break_even_legs_per_day: Record<string, number | null>;
   labor_cost: Record<string, unknown>;
   input: Record<string, number>;
   depot: string;
@@ -164,11 +164,18 @@ describe("get_kushiro_branch_estimate — 既定の呼び出し", () => {
 
   it("拘束は下限であることを旗で明示し、実測の速度も出す", async () => {
     const res = await run(env(), baseArgs());
-    const hours = res.summary.restraint_hours as Record<string, unknown>;
+    const byDepot = res.summary.restraint_hours as Record<string, Record<string, unknown>>;
+    // **両営業所ぶん返る** (片側だけ返すと「帯広を基準に比較」ができない)
+    expect(Object.keys(byDepot).sort()).toEqual(["kushiro", "obihiro"]);
+    const hours = byDepot.kushiro!;
     expect(hours.restraint_is_lower_bound).toBe(true);
-    expect(hours.measured_haul).toBeCloseTo(measured.haulHours, 6);
-    expect(hours.measured_deadhead).toBeCloseTo(measured.deadheadHours, 6);
+    // 実測は組み直し前の話なので、どちらの営業所でも同じ値
+    for (const d of ["kushiro", "obihiro"]) {
+      expect(byDepot[d]!.measured_haul).toBeCloseTo(measured.haulHours, 6);
+      expect(byDepot[d]!.measured_deadhead).toBeCloseTo(measured.deadheadHours, 6);
+    }
     expect(hours.rebuilt_total).toBeCloseTo(golden.doto.restraint.kushiro.rebuiltTotalHours, 9);
+    expect(byDepot.obihiro!.rebuilt_total).toBeCloseTo(golden.doto.restraint.obihiro.rebuiltTotalHours, 9);
     const speed = res.summary.measured_speed_kmh as Record<string, number>;
     expect(speed.deadhead).toBeCloseTo(measured.deadheadKm / measured.deadheadHours, 6);
   });
@@ -202,6 +209,54 @@ describe("get_kushiro_branch_estimate — 既定の呼び出し", () => {
     // 所属がマスタにある乗務員 + 人件費を渡せば警告は消える
     const clean = await run(env(), baseArgs({ branch: "帯広", monthly_labor_cost_yen: 400000 }));
     expect(clean.warnings).toEqual([]);
+  });
+});
+
+describe("両営業所ぶん返る (帯広の乗務員を基準に比較できる)", () => {
+  /** 片側しか返らない値があると、画面が「両方出ている」と誤解する。 */
+  it("回送km・拘束・時給・最賃差・感度分析・損益分岐が 1 回の呼び出しで両方そろう", async () => {
+    const res = await run(env(), baseArgs({ depot: "kushiro" }));
+    const keys = ["kushiro", "obihiro"];
+    for (const field of [
+      res.summary.rebuilt_deadhead_km,
+      res.summary.calibration_ratio,
+      res.summary.restraint_hours,
+      res.min_wage.hourly_yen,
+      res.min_wage.restraint_hours_per_driver,
+      res.min_wage.diff_yen,
+      res.min_wage.below_min_wage,
+      res.sensitivity,
+      res.break_even_legs_per_day,
+    ]) {
+      expect(Object.keys(field as Record<string, unknown>).sort()).toEqual(keys);
+    }
+  });
+
+  it("換算時給は両営業所とも双子 util の golden と一致する", async () => {
+    const res = await run(env(), baseArgs());
+    const hourly = res.min_wage.hourly_yen as Record<string, number>;
+    for (const d of ["kushiro", "obihiro"] as const) {
+      expect(hourly[d]).toBeCloseTo(
+        measured.allowanceYen / golden.doto.restraint[d].rebuiltTotalHours, 6);
+    }
+    // 釧路の方が拘束が短いぶん時給は高く出る (この案件の結論そのもの)
+    expect(hourly.kushiro!).toBeGreaterThan(hourly.obihiro!);
+  });
+
+  it("depot を変えても両営業所の値は変わらない (本命のラベルが変わるだけ)", async () => {
+    const k = await run(env(), baseArgs({ depot: "kushiro" }));
+    const o = await run(env(), baseArgs({ depot: "obihiro" }));
+    expect(o.depot).toBe("obihiro");
+    expect(o.min_wage.hourly_yen).toEqual(k.min_wage.hourly_yen);
+    expect(o.summary.restraint_hours).toEqual(k.summary.restraint_hours);
+    expect(o.sensitivity).toEqual(k.sensitivity);
+    expect(o.break_even_legs_per_day).toEqual(k.break_even_legs_per_day);
+  });
+
+  it("depot が効くのは座標の上書き先だけ", async () => {
+    const res = await run(env(), baseArgs({ depot: "obihiro", depot_lat: 43.0, depot_lng: 144.4 }));
+    expect(res.depot_points.obihiro).toEqual({ lat: 43.0, lng: 144.4 });
+    expect(res.depot_points.kushiro).toEqual(DEPOTS.kushiro);
   });
 });
 
@@ -268,11 +323,14 @@ describe("引数", () => {
     expect(res.summary.estimated_legs).toBe(0);
     expect(res.warnings.some((w) => w.includes("座標が欠けた便"))).toBe(true);
     // 秒が 1 つも無いので速度が出ず、組み直し後の拘束は null (既定値に落とさない)
-    expect((res.summary.restraint_hours as Record<string, unknown>).rebuilt_total).toBeNull();
-    expect(res.min_wage.hourly_yen).toBeNull();
-    expect(res.min_wage.restraint_hours_per_driver).toBeNull();
-    expect(res.min_wage.diff_yen).toBeNull();
-    expect(res.min_wage.below_min_wage).toBeNull();
+    const hoursByDepot = res.summary.restraint_hours as Record<string, Record<string, unknown>>;
+    for (const d of ["kushiro", "obihiro"]) {
+      expect(hoursByDepot[d]!.rebuilt_total).toBeNull();
+      expect((res.min_wage.hourly_yen as Record<string, unknown>)[d]).toBeNull();
+      expect((res.min_wage.restraint_hours_per_driver as Record<string, unknown>)[d]).toBeNull();
+      expect((res.min_wage.diff_yen as Record<string, unknown>)[d]).toBeNull();
+      expect((res.min_wage.below_min_wage as Record<string, unknown>)[d]).toBeNull();
+    }
   });
 
   it("対象便が 1 本も無ければ推定を出さず、警告を出す", async () => {
@@ -305,7 +363,7 @@ describe("引数", () => {
     expect(res.summary.depot_diff_km).toBeNull();
     expect(res.summary.rebuilt_operations).toBeNull();
     expect(res.summary.calibration_ratio).toEqual({ obihiro: null, kushiro: null });
-    expect(res.summary.restraint_hours).toBeNull();
+    expect(res.summary.restraint_hours).toEqual({ obihiro: null, kushiro: null });
     expect(res.summary.deadhead_fuel_yen).toBeNull();
     expect(res.warnings.some((w) => w.includes("便が 1 本もありません"))).toBe(true);
   });
@@ -314,20 +372,20 @@ describe("引数", () => {
 describe("便/日 の感度分析 (想定値を固定しない)", () => {
   it("既定は 1 / 実測平均 / 2 / 3 の 4 点", async () => {
     const res = await run(env(), baseArgs());
-    expect(res.sensitivity.map((r) => r.legs_per_day)).toEqual([
+    expect(res.sensitivity.kushiro!.map((r) => r.legs_per_day)).toEqual([
       1,
       measured.legs / measured.operations,
       2,
       3,
     ]);
-    expect(res.sensitivity.map((r) => r.legs_per_day)).toEqual(
+    expect(res.sensitivity.kushiro!.map((r) => r.legs_per_day)).toEqual(
       golden.doto.sensitivity.map((r) => r.legsPerDay),
     );
   });
 
   it("便/日 を増やすと 稼働日数・回送・拘束が減り、換算時給が上がる", async () => {
     const res = await run(env(), baseArgs());
-    const rows = res.sensitivity;
+    const rows = res.sensitivity.kushiro!;
     for (let i = 1; i < rows.length; i += 1) {
       expect(rows[i]!.runs as number).toBeLessThan(rows[i - 1]!.runs as number);
       expect(rows[i]!.rebuilt_deadhead_km as number).toBeLessThan(rows[i - 1]!.rebuilt_deadhead_km as number);
@@ -342,7 +400,7 @@ describe("便/日 の感度分析 (想定値を固定しない)", () => {
 
   it("双子 util の golden と同じ値を返す", async () => {
     const res = await run(env(), baseArgs());
-    for (const [i, row] of res.sensitivity.entries()) {
+    for (const [i, row] of res.sensitivity.kushiro!.entries()) {
       const g = golden.doto.sensitivity[i]!;
       expect(row.rebuilt_deadhead_km as number).toBeCloseTo(g.rebuiltDeadheadKm, 9);
       expect(row.restraint_hours as number).toBeCloseTo(g.restraint.rebuiltTotalHours, 9);
@@ -353,14 +411,14 @@ describe("便/日 の感度分析 (想定値を固定しない)", () => {
 
   it("候補は引数で差し替えられる (昇順・重複除去)", async () => {
     const res = await run(env(), baseArgs({ sensitivity_legs_per_day: [4, 1, 4] }));
-    expect(res.sensitivity.map((r) => r.legs_per_day)).toEqual([1, 4]);
+    expect(res.sensitivity.kushiro!.map((r) => r.legs_per_day)).toEqual([1, 4]);
   });
 
   it("運行キャパも引数で上書きできる (便/日 が人数に効く経路)", async () => {
     const res = await run(env(), baseArgs({ runs_per_driver_month: 5 }));
     expect(res.summary.runs_per_driver_month).toBe(5);
     // 1 便/日 = 38 日 → 38 ÷ 5 = 8 名
-    expect((res.sensitivity[0]!.required_drivers as Record<string, number>).by_runs).toBe(8);
+    expect((res.sensitivity.kushiro![0]!.required_drivers as Record<string, number>).by_runs).toBe(8);
   });
 
   it("対象便が 0 なら実測平均が無いので整数 3 点だけ並べる", async () => {
@@ -385,7 +443,7 @@ describe("便/日 の感度分析 (想定値を固定しない)", () => {
         ] as unknown as Args["operations"],
       }),
     );
-    expect(res.sensitivity.map((r) => r.legs_per_day)).toEqual([1, 2, 3]);
+    expect(res.sensitivity.kushiro!.map((r) => r.legs_per_day)).toEqual([1, 2, 3]);
   });
 });
 
@@ -398,8 +456,8 @@ describe("人件費と損益分岐", () => {
     }));
     expect(res.labor_cost.source).toBe("argument");
     expect(res.labor_cost.monthly_per_driver_yen).toBe(400000);
-    expect(res.break_even_legs_per_day).toBe(golden.doto.breakEvenLegsPerDay);
-    const row = res.sensitivity[0]!;
+    expect(res.break_even_legs_per_day.kushiro).toBe(golden.doto.breakEvenLegsPerDay);
+    const row = res.sensitivity.kushiro![0]!;
     expect(row.labor_cost_yen).toBe(400000 * (row.required_drivers as Record<string, number>).drivers);
     expect(row.operating_margin_yen).toBeCloseTo(
       (row.margin_yen as number) - (row.labor_cost_yen as number), 6);
@@ -428,7 +486,7 @@ describe("人件費と損益分岐", () => {
     expect(call).toBe(10);
     expect(res.labor_cost.source).toBe("ichiban");
     expect(res.labor_cost.monthly_per_driver_yen).toBe(500000);
-    expect(res.break_even_legs_per_day).not.toBeNull();
+    expect(res.break_even_legs_per_day.kushiro).not.toBeNull();
   });
 
   it("一番星に給与が 1 円も無ければ人件費を推測せず警告する", async () => {
@@ -436,15 +494,15 @@ describe("人件費と損益分岐", () => {
     const res = await run(env(), baseArgs({ sales_cross_check: undefined, driver: ["1412"] }));
     expect(res.labor_cost.source).toBe("none");
     expect(res.labor_cost.monthly_per_driver_yen).toBeNull();
-    expect(res.break_even_legs_per_day).toBeNull();
+    expect(res.break_even_legs_per_day.kushiro).toBeNull();
     expect(res.warnings.some((w) => w.includes("給与"))).toBe(true);
   });
 
   it("上流を止めていて人件費の引数も無ければ、営業利益は出さず警告する", async () => {
     const res = await run(env(), baseArgs());
     expect(res.labor_cost.source).toBe("none");
-    expect(res.break_even_legs_per_day).toBeNull();
-    expect(res.sensitivity[0]!.operating_margin_yen).toBeNull();
+    expect(res.break_even_legs_per_day.kushiro).toBeNull();
+    expect(res.sensitivity.kushiro![0]!.operating_margin_yen).toBeNull();
     expect(res.warnings.some((w) => w.includes("人件費の前提がありません"))).toBe(true);
   });
 });
@@ -459,8 +517,8 @@ describe("最低賃金 (額は R2 のマスタから引く)", () => {
     expect(res.min_wage.prefecture).toBe("北海道");
     expect(res.min_wage.prefecture_source).toBe("company-default");
     expect(res.min_wage.rate).toBe(1010);
-    expect(res.min_wage.diff_yen).not.toBeNull();
-    expect(res.min_wage.below_min_wage).toBe(false);
+    expect((res.min_wage.diff_yen as Record<string, number>).kushiro).not.toBeNull();
+    expect((res.min_wage.below_min_wage as Record<string, boolean>).kushiro).toBe(false);
     expect(res.warnings.some((w) => w.includes("branch→都道府県表にありません"))).toBe(true);
   });
 
@@ -475,20 +533,20 @@ describe("最低賃金 (額は R2 のマスタから引く)", () => {
     expect(res.min_wage.rate_effective_from).toBe("2025-10-01");
     expect(res.min_wage.wage_basis).toBe("allowance-only");
     expect(res.min_wage.assumed_monthly_wage_yen).toBe(measured.allowanceYen);
-    const hourly = res.min_wage.hourly_yen as number;
+    const hourly = (res.min_wage.hourly_yen as Record<string, number>).kushiro!;
     expect(hourly).toBeCloseTo(
       measured.allowanceYen / golden.doto.restraint.kushiro.rebuiltTotalHours,
       6,
     );
-    expect(res.min_wage.diff_yen).toBeCloseTo(hourly - 1010, 6);
-    expect(res.min_wage.below_min_wage).toBe(hourly < 1010);
+    expect((res.min_wage.diff_yen as Record<string, number>).kushiro).toBeCloseTo(hourly - 1010, 6);
+    expect((res.min_wage.below_min_wage as Record<string, boolean>).kushiro).toBe(hourly < 1010);
   });
 
   it("想定賃金は引数で上書きできる (手当だけでは下限なので)", async () => {
     const res = await run(env(), baseArgs({ assumed_monthly_wage_yen: 100000 }));
     expect(res.min_wage.wage_basis).toBe("argument");
     expect(res.min_wage.assumed_monthly_wage_yen).toBe(100000);
-    expect(res.min_wage.below_min_wage).toBe(true);
+    expect((res.min_wage.below_min_wage as Record<string, boolean>).kushiro).toBe(true);
   });
 
   it("都道府県は引数で指定できる (正式所在地が別の県になったとき用)", async () => {
@@ -507,8 +565,8 @@ describe("最低賃金 (額は R2 のマスタから引く)", () => {
     expect(res.min_wage.prefecture).toBe("北海道");
     expect(res.min_wage.rate).toBeNull();
     expect(res.min_wage.rate_effective_from).toBeNull();
-    expect(res.min_wage.diff_yen).toBeNull();
-    expect(res.min_wage.below_min_wage).toBeNull();
+    expect((res.min_wage.diff_yen as Record<string, unknown>).kushiro).toBeNull();
+    expect((res.min_wage.below_min_wage as Record<string, unknown>).kushiro).toBeNull();
     expect(res.min_wage.master_effective_froms).toEqual(["2027-10-01"]);
     expect(res.warnings.some((w) => w.includes("2026-07 時点で有効な行がありません"))).toBe(true);
   });

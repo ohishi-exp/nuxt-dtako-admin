@@ -2410,7 +2410,11 @@ const getKushiroBranchEstimateArgs = z
     depot: z
       .enum(DEPOT_KEYS as [string, ...string[]])
       .optional()
-      .describe("試算する営業所。既定 kushiro。**両営業所ぶん返すので、これは「どちらを本命として読むか」だけ**"),
+      .describe(
+        "本命として読む営業所。既定 kushiro。**回送km・拘束時間・換算時給・最低賃金差・" +
+          "感度分析・損益分岐はすべて両営業所ぶん返る**ので、この引数が実際に効くのは " +
+          "`depot_lat` / `depot_lng` でどちらの座標を差し替えるかだけ。",
+      ),
     depot_lat: z.number().optional().describe("`depot` の緯度を上書き (正式所在地が決まったとき用)。lng と対で指定"),
     depot_lng: z.number().optional().describe("`depot` の経度を上書き。lat と対で指定"),
     dest_area: z
@@ -2518,6 +2522,11 @@ export const getKushiroBranchEstimateTool = {
     "rust-alc-api 直 fetch = 画面側の経路)。便の積地・卸地・売上・手当・km・GPS を呼び出し側が渡す。" +
     "画面 (/profit/margin) が出したのと同じ入力を渡せば、**画面と同じ数字が出ることを確かめられる** " +
     "(`tests/fixtures/kushiro-loading/doto-operations-2026-07.json` がその形の実例)。\n" +
+    "**回送km・拘束時間・換算時給・最低賃金との差・感度分析・損益分岐は、すべて " +
+    "`{ obihiro, kushiro }` の両営業所ぶん返る** — オーナーの要件が「帯広の乗務員を基準に " +
+    "比較」なので、1 回の呼び出しで両側が並ぶ。`depot` は本命のラベルと座標上書きの対象を " +
+    "決めるだけで、片側しか返らない値は無い。**実測 (`measured_*`) は組み直し前の話なので " +
+    "どちらの営業所でも同じ値**で、営業所で変わるのは `rebuilt_*` だけ。\n" +
     "**距離は直線 (haversine)**。道なりではないので実距離は必ずこれ以上。" +
     "**営業所どうしの差 (`depot_diff_km`) は両側とも推定**なので引き算してよいが、" +
     "**`rebuilt_minus_measured_km` は推定と実測の差**で、営業所の差ではなく測り方の差が混ざる — " +
@@ -2604,16 +2613,29 @@ export const getKushiroBranchEstimateTool = {
       );
     }
 
-    const hours = n === null ? null : restraintHours(summary.totals, depot, n);
     const needDrivers = requiredDrivers(summary.totals.legs, legsPerDriverMonth);
     const wageYen = args.assumed_monthly_wage_yen ?? summary.totals.allowanceYen;
-    const restraintTotal = hours === null ? null : hours.rebuiltTotalHours;
-    // 1 名あたりの月間拘束時間。**`restraintTotal` が出ている時点で対象便が 1 本以上あり、
+    /**
+     * **拘束時間と換算時給を両営業所ぶん出す** (Refs #760 の 34)。
+     *
+     * `depot` を「どちらを本命として読むか」だけの引数にしておきながら、拘束と時給が
+     * 選んだ側しか返らないと、**画面が片側だけ見て「両方出ている」と誤解する**。
+     * オーナーの要件も「帯広の乗務員を基準に比較」なので、1 回の呼び出しで両側が
+     * 並ぶ形にする (`rebuilt_deadhead_km` が既にそうなっているのと同じ形)。
+     */
+    const perDepot = <T>(pick: (d: DepotKey) => T): Record<DepotKey, T> =>
+      Object.fromEntries(DEPOT_KEYS.map((d) => [d, pick(d)])) as Record<DepotKey, T>;
+
+    const hoursByDepot = perDepot((d) => (n === null ? null : restraintHours(summary.totals, d, n)));
+    // 1 名あたりの月間拘束時間。**拘束が出ている時点で対象便が 1 本以上あり、
     // `legs_per_driver_month` は zod が正数を保証するので `needDrivers` は 1 以上**
-    // (回送の実測秒が 1 秒も無ければ速度が出ず `restraintTotal` が null になる)。
-    const hoursPerDriver = restraintTotal === null ? null : restraintTotal / needDrivers!;
+    // (回送の実測秒が 1 秒も無ければ速度が出ず `rebuiltTotalHours` が null になる)。
+    const restraintTotalByDepot = perDepot((d) => hoursByDepot[d]?.rebuiltTotalHours ?? null);
+    const hoursPerDriverByDepot = perDepot((d) =>
+      restraintTotalByDepot[d] === null ? null : restraintTotalByDepot[d]! / needDrivers!,
+    );
     // 換算時給は「総賃金 ÷ 総拘束」= 「1 名あたりの賃金 ÷ 1 名あたりの拘束」で同じ値。
-    const hourly = hourlyWageYen(wageYen, restraintTotal);
+    const hourlyByDepot = perDepot((d) => hourlyWageYen(wageYen, restraintTotalByDepot[d]));
 
     // 最低賃金は R2 のマスタから引く (額を定数で埋めない)。
     const rawMinWage = await getJson<unknown>(
@@ -2759,8 +2781,12 @@ export const getKushiroBranchEstimateTool = {
     // 既定の候補は **1 / 実測平均 / 2 / 3**。実測平均が出せない (対象 0 便) ときは整数 3 点だけ。
     const candidates = args.sensitivity_legs_per_day
       ?? (summary.distribution.mean === null ? [1, 2, 3] : [1, summary.distribution.mean, 2, 3]);
-    const sensitivity = sensitivityGrid(summary.totals, depot, candidates, sensitivityInput);
-    const breakEven = breakEvenLegsPerDay(summary.totals, depot, candidates, sensitivityInput);
+    const sensitivityByDepot = perDepot((d) =>
+      sensitivityGrid(summary.totals, d, candidates, sensitivityInput),
+    );
+    const breakEvenByDepot = perDepot((d) =>
+      breakEvenLegsPerDay(summary.totals, d, candidates, sensitivityInput),
+    );
 
     /** 感度分析 1 行を応答用に落とす。 */
     const sensitivityJson = (row: SensitivityRow) => ({
@@ -2822,9 +2848,10 @@ export const getKushiroBranchEstimateTool = {
         })),
       },
       // 便/日 を振ったときの姿。**どの前提でも 1 つの表で比べられるようにするためのもの。**
-      sensitivity: sensitivity.map(sensitivityJson),
+      // **両営業所ぶん返す** — 片側だけだと「帯広を基準に比較」ができない。
+      sensitivity: perDepot((d) => sensitivityByDepot[d].map(sensitivityJson)),
       // 営業利益が 0 以上になる最小の 便/日。候補の中に無ければ null (外挿しない)。
-      break_even_legs_per_day: breakEven,
+      break_even_legs_per_day: breakEvenByDepot,
       labor_cost: {
         monthly_per_driver_yen: laborCostYen,
         source: laborCostSource,
@@ -2844,16 +2871,21 @@ export const getKushiroBranchEstimateTool = {
           haul: haulSpeedKmh(summary.totals),
           deadhead: rebuildDeadheadSpeedKmh(summary.totals),
         },
-        restraint_hours: hours === null
-          ? null
-          : {
-              measured_haul: hours.haulHours,
-              measured_deadhead: hours.measuredDeadheadHours,
-              measured_total: hours.measuredTotalHours,
-              rebuilt_deadhead: hours.rebuiltDeadheadHours,
-              rebuilt_total: hours.rebuiltTotalHours,
-              restraint_is_lower_bound: hours.restraintIsLowerBound,
-            },
+        // **両営業所ぶん。** `measured_*` は実測なので営業所に依らず同じ値が入る
+        // (組み直し前の話なので当然)。**営業所で変わるのは `rebuilt_*` だけ。**
+        restraint_hours: perDepot((d) => {
+          const h = hoursByDepot[d];
+          return h === null
+            ? null
+            : {
+                measured_haul: h.haulHours,
+                measured_deadhead: h.measuredDeadheadHours,
+                measured_total: h.measuredTotalHours,
+                rebuilt_deadhead: h.rebuiltDeadheadHours,
+                rebuilt_total: h.rebuiltTotalHours,
+                restraint_is_lower_bound: h.restraintIsLowerBound,
+              };
+        }),
         // **便の量だけで数えた人数** (便/日 に依らない)。便/日 を効かせた人数は
         // `sensitivity[].required_drivers` を見ること。
         required_drivers: needDrivers,
@@ -2879,10 +2911,16 @@ export const getKushiroBranchEstimateTool = {
         rate_effective_from: lookup.rateEffectiveFrom ?? null,
         assumed_monthly_wage_yen: wageYen,
         wage_basis: args.assumed_monthly_wage_yen === undefined ? "allowance-only" : "argument",
-        restraint_hours_per_driver: hoursPerDriver,
-        hourly_yen: hourly,
-        diff_yen: hourly === null || lookup.rate === null ? null : hourly - lookup.rate,
-        below_min_wage: hourly === null || lookup.rate === null ? null : hourly < lookup.rate,
+        // **ここから下は両営業所ぶん。** 「帯広の乗務員を基準に比較」が要件なので、
+        // 1 回の呼び出しで両側の時給が並ぶようにする。
+        restraint_hours_per_driver: hoursPerDriverByDepot,
+        hourly_yen: hourlyByDepot,
+        diff_yen: perDepot((d) =>
+          hourlyByDepot[d] === null || lookup.rate === null ? null : hourlyByDepot[d]! - lookup.rate,
+        ),
+        below_min_wage: perDepot((d) =>
+          hourlyByDepot[d] === null || lookup.rate === null ? null : hourlyByDepot[d]! < lookup.rate,
+        ),
       },
       routes: summary.routes.map((row) => ({
         from: row.from,
