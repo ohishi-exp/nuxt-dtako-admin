@@ -8,7 +8,13 @@ import { describe, expect, it, vi } from "vitest";
 // this test; we only need the 3 kintai-relay proxy handlers below it).
 vi.mock("cloudflare:workers", () => ({ DurableObject: class {} }));
 
-import { handleOperationZip, handleDtakoReimport, handleDtakoAlcUpload, type RelayWorkerEnv } from "../src/index";
+import {
+  handleOperationZip,
+  handleDtakoReimport,
+  handleDtakoAlcUpload,
+  handleNet780Archive,
+  type RelayWorkerEnv,
+} from "../src/index";
 
 const SECRET = "internal-shared-secret";
 const OPE_NO = "2606050753300000004286";
@@ -312,6 +318,85 @@ describe("handleDtakoAlcUpload body 素通し (Refs #633-24a)", () => {
       env,
     );
     expect(res.status).toBe(401);
+    expect(doFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleNet780Archive body 素通し (Refs #760 の 26)", () => {
+  const items = [
+    { ope_no: OPE_NO, start_ope: START_OPE },
+    { ope_no: "2606050753300000004287", start_ope: "2026/07/08 8:00:00" },
+  ];
+
+  it("items 配列を含む body を 1 バイトも変えず DO の /cron/dtako/net780-archive へ転送する", async () => {
+    const { env, doFetch, relay } = fakeEnv();
+    const res = await handleNet780Archive(
+      post("https://relay.internal/kintai-relay/net780-archive", { comp_id: "0100", items }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(relay.idFromName).toHaveBeenCalledWith("scraper-comp-0100");
+    expect(doFetch.mock.calls[0][0]).toBe("https://relay.internal/cron/dtako/net780-archive");
+    const body = JSON.parse((doFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(body).toEqual({ comp_id: "0100", items });
+  });
+
+  it("comp_id 省略時は KINTAI_COMP_ID で補完する (それ以外のフィールドはそのまま)", async () => {
+    const { env, doFetch } = fakeEnv({ KINTAI_COMP_ID: "0200" });
+    await handleNet780Archive(post("https://relay.internal/kintai-relay/net780-archive", { items }), env);
+    const body = JSON.parse((doFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(body).toEqual({ comp_id: "0200", items });
+  });
+
+  it("DO の応答 (400 の文言も) をそのまま素通しする", async () => {
+    const doFetch = vi.fn(async () => new Response(JSON.stringify({ error: "items は最大 20 件までです" }), { status: 400 }));
+    const { env } = fakeEnv({ doFetch });
+    const res = await handleNet780Archive(
+      post("https://relay.internal/kintai-relay/net780-archive", { comp_id: "0100", items }),
+      env,
+    );
+    expect(res.status).toBe(400);
+    expect(await jsonOf(res)).toEqual({ error: "items は最大 20 件までです" });
+  });
+
+  it("comp_id が無ければ503 (DO を叩かない)", async () => {
+    const { env, doFetch } = fakeEnv();
+    const res = await handleNet780Archive(post("https://relay.internal/kintai-relay/net780-archive", { items }), env);
+    expect(res.status).toBe(503);
+    expect(doFetch).not.toHaveBeenCalled();
+  });
+
+  it("X-Alc-Proxy-Secret 不一致は401 (DO を叩かない)", async () => {
+    const { env, doFetch } = fakeEnv();
+    const res = await handleNet780Archive(
+      post("https://relay.internal/kintai-relay/net780-archive", { comp_id: "1", items }, { "X-Alc-Proxy-Secret": "wrong" }),
+      env,
+    );
+    expect(res.status).toBe(401);
+    expect(doFetch).not.toHaveBeenCalled();
+  });
+
+  it("INTERNAL_SHARED_SECRET 未設定は503", async () => {
+    const { env, doFetch } = fakeEnv({ INTERNAL_SHARED_SECRET: undefined });
+    const res = await handleNet780Archive(
+      post("https://relay.internal/kintai-relay/net780-archive", { comp_id: "1", items }),
+      env,
+    );
+    expect(res.status).toBe(503);
+    expect(doFetch).not.toHaveBeenCalled();
+  });
+
+  it("JSON でない body は400", async () => {
+    const { env, doFetch } = fakeEnv();
+    const res = await handleNet780Archive(
+      new Request("https://relay.internal/kintai-relay/net780-archive", {
+        method: "POST",
+        headers: { "X-Alc-Proxy-Secret": SECRET },
+        body: "not json",
+      }),
+      env,
+    );
+    expect(res.status).toBe(400);
     expect(doFetch).not.toHaveBeenCalled();
   });
 });

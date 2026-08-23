@@ -133,6 +133,14 @@ export default {
       return handleDtakoAlcUpload(request, env);
     }
 
+    if (url.pathname === "/kintai-relay/net780-archive" && request.method === "POST") {
+      // 運行NO の一覧ぶんの NET780 生データを自前ログインで 検索→ダウンロード→
+      // R2/D1 アーカイブする (Refs #760 の 26)。**同期。** 書き込みは自前の
+      // アーカイブだけ (theearth は読むだけ) なので `/kintai-relay/operation-zip`
+      // と同じ型 — 粗利タブの一括取得ボタン (#760-27) が叩く
+      return handleNet780Archive(request, env);
+    }
+
     if (url.pathname === "/kintai-relay/restraint-sync" && request.method === "POST") {
       // 拘束サマリの写し (R2 kintai/ prefix) を無人で押し直す (Refs #606-6)。
       // 画面の「取り込み」ボタン (POST /restraint-api/kintai/fetch) と同じ処理を
@@ -648,6 +656,64 @@ export async function handleDtakoAlcUpload(request: Request, env: RelayWorkerEnv
 
   const id = env.RELAY.idFromName(`scraper-comp-${compId}`);
   const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/dtako/alc-upload", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    // body を素通しし、comp_id だけ解決値で上書きする (フィールド単位の組み直しはしない)。
+    body: JSON.stringify({ ...body, comp_id: compId }),
+  });
+  // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
+  return new Response(res.body, {
+    status: res.status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * `POST /kintai-relay/net780-archive` — 運行NO の一覧ぶん (`items`、上限は DO 側の
+ * `CRON_BATCH_MAX_ITEMS`) の NET780 生データを**自前ログイン**で 検索 →
+ * ダウンロード → R2 + D1 `dtako_uploads` にアーカイブする (Refs #760 の 26)。
+ * 粗利タブの地図 (#783) の「NET780 を一括取得」ボタン (#760-27) が server route
+ * 経由で叩く。
+ *
+ * **body は素通しする** (`handleOperationZip` の doc comment 参照 — フィールド
+ * 単位の組み直しで新フィールドが消えるバグを 2 回踏んだ教訓、Refs #633-24)。
+ * `items` の検証 (22 桁 / `start_ope` 形式 / 上限) は全て DO 側
+ * `/cron/dtako/net780-archive` (`parseNet780ArchiveRequest`、`net780-archive.ts`)
+ * に委ねる。
+ *
+ * **同期で返す。** theearth 側は読むだけ (書き込みは自前の R2/D1 だけ) なので
+ * `/kintai-relay/operation-zip` と同じ型。応答 (200) は
+ * `{ok, comp_id, results[{ope_no, status: archived|already|not_found|error,
+ * bytes?, message?}], success_count, failure_count, truncated, remaining,
+ * theearth_logins}`。
+ *
+ * 認証・tenant フォールバックは `/kintai-relay/operation-zip` と同じ
+ * (`X-Alc-Proxy-Secret` の constant-time 検証、`comp_id` 省略時は `KINTAI_COMP_ID`)。
+ */
+export async function handleNet780Archive(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  let body: Record<string, unknown>;
+  try {
+    body = (await request.json()) as Record<string, unknown>;
+  } catch {
+    return fail(400, "body must be JSON");
+  }
+  const compId =
+    (typeof body.comp_id === "string" && body.comp_id.trim()) || (env.KINTAI_COMP_ID ?? "").trim();
+  if (!compId) return fail(503, "comp_id が解決できません");
+
+  const id = env.RELAY.idFromName(`scraper-comp-${compId}`);
+  const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/dtako/net780-archive", {
     method: "POST",
     headers: { "content-type": "application/json" },
     // body を素通しし、comp_id だけ解決値で上書きする (フィールド単位の組み直しはしない)。

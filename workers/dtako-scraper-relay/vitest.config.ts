@@ -54,6 +54,7 @@ export default defineConfig({
         'src/theearth-login-session.ts',
         'src/scrape-error-artifact.ts',
         'src/cron-batch.ts',
+        'src/net780-archive.ts',
       ],
       thresholds: {
         lines: 100,
