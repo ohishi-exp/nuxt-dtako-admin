@@ -9,6 +9,14 @@ name: dtako-scraper-relay DO worker
 # (Cloudflare error 10211: migration は non-versioned deployment 必須)。よって
 # この worker だけは frontend-ci.yml を使わず bespoke に `wrangler deploy` する。
 
+# `tests/fixtures/restraint-wage/**` も path filter に入れてある (Refs #760 の 34)。
+# relay のテスト (restraint-wage-golden / restraint-wage-source / restraint-d1 /
+# restraint-push / timecard-summary-golden) は repo ルートのこの共有 fixture + golden を
+# 直接 import している。relay のテストは root の `npm test` では回らない (別
+# vitest.config.ts) ので、fixture だけを触った PR でこの gate が回らないと、fixture と
+# relay のコードがずれたまま main に入る。relay のテストが新しい共有ファイルを
+# 読み始めたら、ここにも必ず足すこと — kyuyo-mcp-deploy.yml と同じ理由・同じ落とし穴。
+
 # pull_request: typecheck + test (coverage 100% gate) のみ実行し deploy は skip。
 # push(main/tag) / workflow_dispatch: 上記 gate に加えて deploy を実行。
 on:
@@ -19,12 +27,14 @@ on:
       - 'workers/dtako-scraper-relay/**'
       - 'migrations/**'
       - 'scripts/d1/**'
+      - 'tests/fixtures/restraint-wage/**'
       - '.github/workflows/dtako-scraper-relay-deploy.yml'
   pull_request:
     paths:
       - 'workers/dtako-scraper-relay/**'
       - 'migrations/**'
       - 'scripts/d1/**'
+      - 'tests/fixtures/restraint-wage/**'
       - '.github/workflows/dtako-scraper-relay-deploy.yml'
   workflow_dispatch:
 
