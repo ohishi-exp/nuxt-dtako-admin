@@ -1,0 +1,37 @@
+{
+ "source": "オーナーが本番 2026-07 で実測した集計 (2026-08-23 報告)",
+ "all": {
+  "operations": 91,
+  "legs": 284,
+  "salesYen": 10260265,
+  "allowanceYen": 2499500,
+  "haulKm": 29081.3,
+  "deadheadKm": 28748.1
+ },
+ "kushiro": {
+  "legs": 169,
+  "operations": 72,
+  "pureOperations": 38,
+  "mixedOperations": 34,
+  "salesYen": 6165630,
+  "allowanceYen": 1476500,
+  "haulKm": 15980.1,
+  "deadheadKm": 19793.8
+ },
+ "pure": {
+  "operations": 38,
+  "legs": 124,
+  "preLoadKm": 4938.5,
+  "haulKm": 10950.6,
+  "betweenKm": 7421.5,
+  "postUnloadKm": 1038.3,
+  "otherKm": 1055.1
+ },
+ "driverKushiroLegs": {
+  "中村 一由": 71,
+  "柳井 亮祐": 36,
+  "増地 誠": 23,
+  "佐竹 繁": 21,
+  "西島 健太": 18
+ }
+}
