@@ -126,6 +126,16 @@ function formatYen(v: number): string {
       運行詳細の収支パネルで保存した検証結果を新しい順に表示します。行をクリックすると元の運行詳細に移動します。
     </p>
 
+    <!-- 区画が黙って消えると「廃止された」と「壊れている・読み込めていない」が同じ見た目に
+         なるので、消えたことと**次にどこを見ればよいか**を画面で言う (Refs #859)。
+         **時期を書いてあるのは、あとで消してよい注記だと次の人に分かるようにするため。** -->
+    <p class="text-xs text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-800 rounded px-3 py-2 mb-4">
+      この画面にあった「一番星マッチ率検証 (月次)」の比較は
+      <strong>2026-08 に廃止しました</strong>。突合の現況は
+      <NuxtLink to="/profit/margin" class="text-blue-600 dark:text-blue-400 hover:underline">粗利タブ</NuxtLink>
+      で見てください (運行単位なら運行詳細の「粗利タブの計上額」)。
+    </p>
+
     <div class="flex items-end gap-3 mb-3">
       <div>
         <label class="text-xs text-gray-500 block mb-1">車輌CD (絞り込み)</label>

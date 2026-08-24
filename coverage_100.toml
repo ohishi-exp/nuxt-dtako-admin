@@ -195,12 +195,14 @@ branches = true
 # 既存のスナップショットは**消さない** (人が確認した作業の記録、#820)。
 # **`summarizeMonthly` / `MonthlySummary` は #859 (PR-4b) で消えた** — 読み口の
 # `GET /api/profit/monthly` ごと廃止 (分子だけ凍結し分母が増え続ける誤診を生む形だった)。
-# **`monthRange` は残したが本体からの呼び出し元は無い** (テストのみ、#820 の続きで判断)。
 # **`combinedMatchLevel` は #858 で収支パネルの根拠バッジからも呼ばれるようになった** —
 # 保存済み一覧と収支パネルで**同じ言葉が同じ意味**になるための 1 か所。
-# branches: instrumented コピーで**16 分岐すべてが true/false 両方を通る**ことを数えた
-# (#858 時点で 20 → 16。`buildProfitSnapshot` のぶんが減った)。**#859 でも 16 のまま** —
-# 消した `summarizeMonthly` は分岐を持たず、畳み方は `combinedMatchLevel` 側にあるため。
+# branches: instrumented コピーで**14 分岐すべてが true/false 両方を通る**ことを数えた
+# (#858 時点で 20 → 16、#859 で 16 → 14)。消した `summarizeMonthly` は分岐を持たず
+# (畳み方は `combinedMatchLevel` 側)、減った 2 は `monthRange` の年またぎの三項 2 つ。
+# **`monthRange` も #859 で消した** — 唯一の呼び出し元だった `monthly.get.ts` と一緒に死に、
+# `restraint-wage-view.ts` に**同名で引数の違う関数**があって auto-import で取り違える罠
+# だったため (`buildProfitSnapshot` を #858 で消したのと同じ扱い)。
 # **その `combinedMatchLevel` の 3 段は `toSnapshotListItem` 側のテストで固定し直した** —
 # `summarizeMonthly` のテストを消したままだと、`profit-r2.test.ts` 単独では none 側 3 分岐と
 # `&&` の右辺 false が片側になる (実測)。repo 全体では他ファイルのテストが通していて

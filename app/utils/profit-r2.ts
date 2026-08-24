@@ -134,26 +134,7 @@ export interface ProfitSnapshot {
   savedAt: string
 }
 
-// --- 月キー・マッチレベル (Refs #330 PR4) ---
-
-/**
- * 月キー (YYYY-MM) から vehicle-daily API に渡す半開区間の from/to を算出する。
- * `vehicleDailyDateRange` (選択区間の epoch 秒から算出) とは入力が異なるため別関数にする。
- *
- * **#859 で唯一の呼び出し元 (`server/api/profit/monthly.get.ts`) が消えたので、いま本体からは
- * 呼ばれていない** (テストのみ)。残すか消すかは #820 の続きで決める — **消すときは
- * `restraint-wage-view.ts` の同名 (引数も戻り値も別物) と取り違えないこと。**
- */
-export function monthRange(ym: string): { from: string, to: string } {
-  const [yStr, mStr] = ym.split('-')
-  const y = Number(yStr)
-  const m = Number(mStr)
-  const from = `${yStr}-${mStr}-01`
-  const nextY = m === 12 ? y + 1 : y
-  const nextM = m === 12 ? 1 : m + 1
-  const to = `${nextY}-${String(nextM).padStart(2, '0')}-01`
-  return { from, to }
-}
+// --- 突合レベル (Refs #330 PR4) ---
 
 export interface MonthlyMatchCounts {
   exact: number

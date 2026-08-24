@@ -5,7 +5,6 @@ import {
   profitYm,
   profitVersionTimestamp,
   appendProfitHistoryJsonl,
-  monthRange,
   toSnapshotListItem,
   sortSnapshotListBySavedAtDesc,
   isProfitSnapshotKey,
@@ -67,16 +66,6 @@ describe('appendProfitHistoryJsonl', () => {
 
   it('既存が空行のみでも壊れない', () => {
     expect(appendProfitHistoryJsonl('\n\n', '{"a":1}')).toBe('{"a":1}\n')
-  })
-})
-
-describe('monthRange', () => {
-  it('通常月は同年内の翌月1日を to にする', () => {
-    expect(monthRange('2026-06')).toEqual({ from: '2026-06-01', to: '2026-07-01' })
-  })
-
-  it('12月は年またぎで翌年1月1日を to にする', () => {
-    expect(monthRange('2026-12')).toEqual({ from: '2026-12-01', to: '2027-01-01' })
   })
 })
 

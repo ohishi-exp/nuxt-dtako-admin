@@ -58,10 +58,23 @@ describe('/profit/monthly の保存済み検証一覧', () => {
     fetchMock.mockResolvedValue(listResult())
     const w = mountPage()
     await flushPromises()
-    expect(w.text()).not.toContain('一番星マッチ率検証')
-    expect(w.text()).not.toContain('一番星 月計')
+    // **文言ではなく区画の中身で見る** — 下の注記が「一番星マッチ率検証 (月次)」という
+    // 消えたものの名前を出すので、その語の有無では区画の生死を判定できない。
+    expect(w.text()).not.toContain('集計する')      // 比較セクション唯一のボタン
+    expect(w.text()).not.toContain('一番星 月計')   // 3 枚のカード
     expect(w.text()).not.toContain('確認済み合計')
+    expect(w.text()).not.toContain('差額')
     expect(fetchMock.mock.calls.every(([url]) => url !== '/api/profit/monthly')).toBe(true)
+  })
+
+  // 区画が黙って消えると「廃止された」と「壊れている・読み込めていない」が同じ見た目に
+  // なる。**消えたことだけでなく、次にどこを見ればよいか**まで画面で言う。
+  it('消えた区画のかわりにどこを見ればよいかを画面で言う', async () => {
+    fetchMock.mockResolvedValue(listResult())
+    const w = mountPage()
+    await flushPromises()
+    expect(w.text()).toContain('2026-08 に廃止しました')
+    expect(w.text()).toContain('粗利タブ')
   })
 
   it('一覧そのものを読めなかったときは前の件数を持ち越さない', async () => {
