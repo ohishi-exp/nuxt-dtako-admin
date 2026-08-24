@@ -74,6 +74,12 @@ import {
   type ProvisionalMap,
 } from '~/utils/allowance-provisional'
 import {
+  ALLOWANCE_OVERRIDE_SCHEMA_VERSION,
+  allowanceOverrideMigrationNote,
+  allowanceOverrideSaveNote,
+  type AllowanceOverrideSaveResult,
+} from '~/utils/allowance-overrides-r2'
+import {
   EXCLUDED_KEY,
   parseExcluded,
   serializeExcluded,
@@ -212,11 +218,88 @@ function saveProvisional(key: string, yen: number) {
   catch (e) {
     cacheNote.value = `暫定手当を保存できませんでした — ${e instanceof Error ? e.message : String(e)}`
   }
+  // **この端末の記録 (localStorage) が先で、R2 は後。** R2 が落ちても画面は今までどおり
+  // 動く (`pushProvisionalOverride` は注記を出すだけで、集計のコードパスに入らない)。
+  // 送るのは**いまこの鍵がどうなったか** 1 件だけ — 入力欄を空にした回は `null`
+  // (= 消した) として送る。**全体マップは送らない** (2 台目が相手の確定を消すため)。
+  void pushProvisionalOverride(key, provisional.value[key] ?? null)
 }
 
 /** 入力欄 (文字列) → 円。空・数でない値は「消す」扱いの 0 にする。 */
 function onProvisionalInput(key: string, raw: string) {
   saveProvisional(key, Math.trunc(Number(raw)) || 0)
+}
+
+// --- 暫定手当を R2 (全員で共有) に残す (Refs #845) ---
+// **端末依存をやめる**ための口。localStorage は**消さない** — 「この端末が最後に何を
+// 選んだか」の記録として残し、**この画面の集計は今までどおりそちらから出す**
+// (この PR ではロード時の自動 fetch を入れないので、R2 は共有の控え)。
+
+/** R2 への保存の注記。**失敗を黙らせない** (黙ると「共有できている」と誤読する)。 */
+const overrideNote = ref('')
+/** 失敗と分かる色で出すため (`marginR2Failed` と同じ方針)。 */
+const overrideFailed = ref(false)
+/** 移行ボタンを押している間 (1 件ずつ直列に送るので、二重に押させない)。 */
+const sendingOverrides = ref(false)
+
+/** この端末に残っている暫定手当の件数 (移行ボタンに出す)。 */
+const provisionalEntryCount = computed(() => Object.keys(provisional.value).length)
+
+/** **1 件の操作**を送る。全体マップを送る口はサーバー側にも無い。 */
+function postProvisionalOverride(key: string, value: number | null) {
+  return $fetch<AllowanceOverrideSaveResult>('/api/profit/allowance-override', {
+    method: 'POST',
+    body: { schemaVersion: ALLOWANCE_OVERRIDE_SCHEMA_VERSION, kind: 'provisional', key, value },
+  })
+}
+
+/**
+ * 入力のたびに 1 件だけ R2 へ送る。**投げっぱなしにしないが、致命傷にもしない** —
+ * 失敗しても localStorage には入っているので、集計はそのまま続けられる。
+ */
+async function pushProvisionalOverride(key: string, value: number | null) {
+  // 経路キーが空の行には暫定を当てられない (`setProvisional` も入れない)。
+  if (!key) return
+  try {
+    overrideNote.value = allowanceOverrideSaveNote(await postProvisionalOverride(key, value), null)
+    overrideFailed.value = false
+  }
+  catch (e) {
+    overrideNote.value = allowanceOverrideSaveNote(null, e instanceof Error ? e.message : String(e))
+    overrideFailed.value = true
+  }
+}
+
+/**
+ * **この端末のぶんを R2 へ送る** (移行の窓)。
+ *
+ * **日付を決めた一斉カットオーバーはしない** (押し忘れを検知する手段がコード側に無い)。
+ * **既存の各エントリを 1 件ずつの操作として送る** ので、途中で失敗しても送れたぶんは
+ * R2 に残り、もう一度押せば残りだけが通る。
+ */
+async function sendProvisionalToR2() {
+  sendingOverrides.value = true
+  let sent = 0
+  let failed = 0
+  let entries = 0
+  let firstError = ''
+  // 送るのは**この端末に残っているぶん**。型を明示するのは、`Object.entries` の推論が
+  // 落ちると `yen` が `unknown` になって「何を送るか」が読めなくなるため。
+  const local: [string, number][] = Object.entries(provisional.value)
+  for (const [key, yen] of local) {
+    try {
+      const result = await postProvisionalOverride(key, yen)
+      entries = result.entries
+      sent += 1
+    }
+    catch (e) {
+      failed += 1
+      if (firstError === '') firstError = e instanceof Error ? e.message : String(e)
+    }
+  }
+  sendingOverrides.value = false
+  overrideNote.value = allowanceOverrideMigrationNote({ sent, failed, entries, firstError })
+  overrideFailed.value = failed > 0
 }
 
 /**
@@ -1462,6 +1545,29 @@ function downloadCsv() {
           {{ labelOf(cd) }} ✕
         </button>
       </div>
+    </div>
+
+    <!--
+      暫定手当を R2 (全員で共有) へ送る (Refs #845)。**集計を回す前でも押せる** —
+      暫定はこの画面を開いた時点で localStorage から読めていて、月にも紐づかないため。
+    -->
+    <div v-if="provisionalEntryCount > 0 || overrideNote" class="mb-4 text-xs space-y-1">
+      <div class="flex flex-wrap items-center gap-2">
+        <button
+          class="px-2 py-1 rounded border border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50"
+          :disabled="sendingOverrides || provisionalEntryCount === 0"
+          title="この端末に入っている暫定手当を 1 件ずつ R2 へ送ります。端末の記録は消しません"
+          @click="sendProvisionalToR2"
+        >
+          {{ sendingOverrides ? '送信中…' : `この端末の暫定手当を R2 へ送る (${provisionalEntryCount} 件)` }}
+        </button>
+        <span class="text-gray-500">
+          暫定手当は<b>この端末にしか無い</b>ので、他の人の画面には出ません。送ると<b>全員で共有</b>できます。
+        </span>
+      </div>
+      <p v-if="overrideNote" :class="overrideFailed ? 'text-red-600 dark:text-red-400' : 'text-gray-500'">
+        {{ overrideNote }}
+      </p>
     </div>
 
     <p v-if="progress" class="text-xs text-gray-400 mb-3">
