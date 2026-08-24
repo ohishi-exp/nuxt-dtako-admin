@@ -297,6 +297,70 @@ describe('groupMinWageRows', () => {
     expect(group([])).toEqual([])
   })
 
+  // ---- 片側しか通っていなかった分岐 (Refs #825) ----
+  // v8 の branches は 100% でも、`??`/`||` は「右の項が評価されたか」しか数えないので
+  // 下の 7 側は 1 度も通っていなかった。**起こり得る側だけ**をここで通す
+  // (`branchRank.get(an) ?? inf` の右は構造上あり得ないので、テストではなくコードを直した)。
+
+  it('並び順の golden — 会社 → 区分 → 営業所 (最小所属コード) → 乗務員CD', () => {
+    // 比較関数を触るときに、**並び順が 1 つも動いていない**ことを固定する土台
+    const list = rows('2001', '1006', '1005', '1004', '1003', '1002', '1001', '9999')
+    expect(group(list).map(s => `${s.company ?? '会社不明'}/${s.jobGroup}:${s.rows.map(r => r.cd).join(',')}`))
+      .toEqual([
+        '0100/clerical:1001',
+        '0100/worker:1004',
+        '0100/maintenance:1005',
+        '0100/driver:1002,1003',
+        '0100/other:1006',
+        '0200/driver:2001',
+        '会社不明/other:9999',
+      ])
+  })
+
+  it('社員マスタで引けない行 (attrs が null) が同じ区画に複数あっても比較関数が壊れない', () => {
+    // attrs が丸ごと null の行と、attrs は在るが会社が引けない行はどちらも
+    // 「会社不明 × その他」の 1 区画に入る。**`aa`/`ba` が null 側の比較**は
+    // 区画に 2 行以上 無いと 1 度も通らない (1 行なら sort が比較関数を呼ばない)
+    const nulls: Record<string, MinWageRowAttrs | null> = {
+      n1: null,
+      n2: null,
+      x1: { company: null, branchCode: 5, branchName: '本社', jobName: '役員' },
+    }
+    const sections = groupMinWageRows(rows('n2', 'x1', 'n1'), r => r.cd, r => nulls[r.cd] ?? null)
+    expect(sections).toHaveLength(1)
+    // 本社 (所属コード 5) が先、営業所名を持たない行 ('' = 順位 Infinity) が後ろで CD 順
+    expect(sections[0]!.rows.map(r => r.cd)).toEqual(['x1', 'n1', 'n2'])
+  })
+
+  it('所属コードを持たない営業所が 2 つあると営業所名順で並ぶ (順位が同値のときの第 2 キー)', () => {
+    // どちらも順位が Infinity で同値 → 第 2 キーの営業所名で決まる。
+    // これが「所属コードをまったく持たない営業所は営業所名順で末尾へ」の本体
+    const noCode: Record<string, MinWageRowAttrs> = {
+      h: { company: '0100', branchCode: null, branchName: '本社', jobName: '乗務員' },
+      s: { company: '0100', branchCode: null, branchName: '佐賀営業所', jobName: '乗務員' },
+    }
+    const sections = groupMinWageRows(rows('h', 's'), r => r.cd, r => noCode[r.cd] ?? null)
+    expect(sections[0]!.rows.map(r => r.cd)).toEqual(['s', 'h'])
+  })
+
+  it('会社が引けない区画が 2 つ (職員区分違い) あっても職員区分の順に並ぶ', () => {
+    // 区画の並びの第 1 キー (会社不明を末尾へ) と第 2 キー (会社コード) がどちらも
+    // 同値になる唯一の形。**`a.company ?? ''` の右側**はここでしか通らない
+    const noCompany: Record<string, MinWageRowAttrs> = {
+      d: { company: null, branchCode: 1, branchName: '本社', jobName: '乗務員' },
+      c: { company: null, branchCode: 1, branchName: '本社', jobName: '一般管理事務' },
+    }
+    const sections = groupMinWageRows(rows('d', 'c'), r => r.cd, r => noCompany[r.cd] ?? null)
+    expect(sections.map(s => [s.company, s.jobGroup])).toEqual([[null, 'clerical'], [null, 'driver']])
+  })
+
+  it('同じ乗務員CD の行が 2 つ来ても落とさない (比較は 0 = 完全同値)', () => {
+    // 上流が重複行を返した時に**行が消えない**ことの固定 (比較関数の最終項が 0 になる形)
+    const dup: MinWageRowAttrs = { company: '0100', branchCode: 1, branchName: '本社', jobName: '乗務員' }
+    const sections = groupMinWageRows(rows('1002', '1002'), r => r.cd, () => dup)
+    expect(sections[0]!.rows.map(r => r.cd)).toEqual(['1002', '1002'])
+  })
+
   it('区分の見出しは 事務員 / 作業員 / 整備 / 乗務員 / その他', () => {
     expect(MIN_WAGE_JOB_GROUP_LABEL.clerical).toBe('事務員')
     expect(MIN_WAGE_JOB_GROUP_LABEL.worker).toBe('作業員')
