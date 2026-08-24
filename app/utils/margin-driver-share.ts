@@ -113,6 +113,8 @@ function driverShareBarOf(key: string, label: string, t: MarginTotals): DriverSh
     salesYen: t.salesYen,
     segments: [
       ...costs.map(c => ({ key: c.key, yen: c.yen, pct: (c.yen * 100 * scale) / t.salesYen })),
+      // ★ `-0` 対策で潰さない — 理由は `margin.ts` の `shareBarOf` の同じ行のとおり (Refs #840)。
+      // `totals.marginYen` は Σ の尾つきの負で `-0` ではなく、`¥-0` は表示側の `Math.round` が作る。
       { key: 'margin', yen: t.marginYen, pct: (Math.max(0, t.marginYen) * 100) / t.salesYen },
     ],
     overflowPct: overflow ? ((costSum - t.salesYen) * 100) / t.salesYen : 0,

@@ -1792,8 +1792,9 @@ export interface CustomerShareBars {
  *
  * ★ **判定は厳しくなる方向にしか動かない。** `Math.round` は単調非減少なので
  * `a ≤ b ⟹ round(a) ≤ round(b)`、その対偶が `round(a) > round(b) ⟹ a > b` —
- * つまり**丸めた判定は生の判定の部分集合**で、**赤字を新たに出すことは無い**
- * (実測: 生 true → 丸め false は起きるが、その逆は 0 件)。だから `overflow` が true の回は
+ * つまり**新しい判定は古い判定の部分集合**で、**赤字と言う回は減る方向にしか動かない**
+ * (尾だけの超過をやめるのが目的なので、それでよい。実測: 生 true → 丸め false は起きるが、
+ * その逆は 0 件)。だから `overflow` が true の回は
  * 必ず `costSum > t.salesYen` で、`scale = salesYen ÷ costSum` は (0,1)、`overflowPct` は正 —
  * **`scale` / `overflowPct` の式はそのままでよい。**
  *
@@ -1841,6 +1842,12 @@ function shareBarOf(key: string, label: string, t: CustomerRouteTotals): ShareBa
     salesYen: t.salesYen,
     segments: [
       ...costs.map(c => ({ key: c.key, yen: c.yen, pct: (c.yen * 100 * scale) / t.salesYen })),
+      // ★ `marginYen` を `-0` 対策で潰さない (Refs #840)。粗利ちょうど 0 の行の値は
+      // `-4.66e-10` のような**尾つきの負**で、**`-0` ではない** (`Object.is(marginYen, -0)` は
+      // false。実測)。画面の `¥-0` は**表示側の `Math.round` が `-0` を作る**ことで出るので、
+      // `margin.vue` の `yen()` で `+ 0` して寄せてある。ここで潰すと**額そのものが動く**うえ、
+      // **表の粗利の列 (同じ値を `yen()` に渡す) には `¥-0` が残る**ので直ったことにならない。
+      // `:918` の `weight === 0 ? 0 : …` は**値が本当に `-0` になる**別の話 (あちらは正しい)。
       { key: 'margin', yen: marginYen, pct: (Math.max(0, marginYen) * 100) / t.salesYen },
     ],
     overflowPct: overflow ? ((costSum - t.salesYen) * 100) / t.salesYen : 0,
