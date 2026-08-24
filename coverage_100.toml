@@ -284,10 +284,20 @@ branches = true
 # `costExceedsSalesAtYen(costSum, salesYen)` (= `Math.round` どうしの `>`。画面の `yen()` と
 # 同じ丸め) に預けた。**`margin-driver-share.ts` も同じこの 1 つを使う** — 片方だけ直すと
 # 取引先別と乗務員別で挙動が割れる。**金額には当てない** (丸めるのは比較の 2 値だけ)。
-# `Math.round` は単調なので**判定は緩む方向にしか動かない** → `scale` / `overflowPct` の式は
-# そのまま (`overflow` が false なら `scale = 1` / `overflowPct = 0`)。
+# **★ 判定は「厳しくなる」方向にしか動かない** (`Math.round` は単調非減少 → 対偶で
+# `round(a) > round(b) ⟹ a > b`。**丸めた判定は生の判定の部分集合**で、赤字を新たに出さない)。
+# だから `overflow` が true の回は必ず `costSum > salesYen` で、`scale` / `overflowPct` の式は
+# そのままでよい。**逆に true → false に転ぶ行はある** (超過が ¥1 未満の行) ので、
+# その回の `scale` は `salesYen ÷ costSum` → 厳密な `1` に変わる。**幅の差は全区分の合計でも
+# `100 ÷ costSum` %pt 未満** (売上 ¥100,000 の行で 0.001%pt 未満 = 幅 1000px で 0.005px 未満。実測)。
 # branches: `costExceedsSalesAtYen` は**分岐を 1 つも増やさない** (AST の数え上げでも 142 で
 # 変わらず)。`overflow` の三項 2 本は**両側とも実測**。v8 も 100%/100%/100%/100%。
+#
+# **同じ欠陥の 2 つ目の出口は `margin.vue` の `yen()` だった** (Refs #840)。`marginYen` は
+# `grossMarginYen ?? (salesYen − costSum)` で粗利ちょうど 0 の行では `-4.66e-10` のような
+# **尾つきの負**になり、`Math.round` が **`-0`** を返し **`(-0).toLocaleString()` は `"-0"`** なので
+# 画面に **`¥-0`** と出ていた。`yen()` 側で `+ 0` して `+0` に寄せた (**`margin.ts` は無関係**)。
+# この癖は `toLocaleString` にしか無い — `${-0}` は `"0"` なので `km()` / `pct()` / `pct1()` は無傷 (実測)。
 [[files]]
 path = "app/utils/margin.ts"
 branches = true

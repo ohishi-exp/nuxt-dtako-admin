@@ -931,9 +931,25 @@ R2 スナップショットを force-match へ自動移植してはいけない 
   片方だけ直すと挙動が割れる。**`margin-diff.ts` は差分専用なので import しない**
   (`marginDiffDisplayDelta` は「単位ごと」の丸めを持つ差分の道具で、棒は円しか要らない)。
   **★ 金額には当てない** — 丸めるのは**比較の 2 値だけ**で、`segments[].yen` にも粗利にも
-  1 円も効かない。`Math.round` は**単調**なので判定は緩む方向にしか動かず、
+  1 円も効かない。
+  **★ 判定は「厳しくなる」方向にしか動かない (緩む方向ではない — 向きを間違えないこと)。**
+  `Math.round` は単調非減少なので `a ≤ b ⟹ round(a) ≤ round(b)`、その対偶が
+  `round(a) > round(b) ⟹ a > b` — **丸めた判定は生の判定の部分集合**で、**赤字を新たに出さない**。
+  だから `overflow` が true の回は必ず `costSum > salesYen` で、
   `scale` / `overflowPct` の式は**現状のまま**でよい (`overflow` が false → `scale = 1` /
-  `overflowPct = 0`)。棒の幅の差は 15 桁目 (1000px の棒で `1e-12` px 未満、実測)。
+  `overflowPct = 0`)。**逆に true → false に転ぶ行はある** — 転ぶのは**超過が ¥1 未満**の行だけ
+  なので `1 − scale < 1 ÷ costSum`、**棒の幅の差は全区分の合計でも `100 ÷ costSum` %pt 未満**
+  (売上 ¥100,000 の行で幅 1000px の棒の 0.005px 未満。尾だけの回なら 15 桁目 = `1e-13` px 未満。実測)。
+- **★ 同じ欠陥の 2 つ目の出口が `margin.vue` の `yen()` にあった — `¥-0`** (Refs #840)。
+  `marginYen = grossMarginYen ?? (salesYen − costSum)` は**どちらの辺も足し順の違う和**なので、
+  粗利ちょうど 0 の行では `-4.66e-10` のような**尾つきの負**になる (**それ自体は正常**)。
+  `yen()` は `Math.round(v).toLocaleString()` で、**`Math.round` は `-0.5 < v ≤ 0` で `-0` を返し、
+  `(-0).toLocaleString()` は `"-0"`** — だから積み上げ棒の title と表の粗利に **`¥-0`** と出ていた。
+  **`Math.round(v) + 0` で `+0` に寄せる** (`-0 + 0` は IEEE 754 で `+0`)。
+  **★ この癖は `toLocaleString` にしか無い** — テンプレートリテラルの `${-0}` は `"0"` なので、
+  隣の `km()` / `pct()` / `pct1()` は無傷 (実測)。**変わるのは `-0.5 < v ≤ 0` の回だけ**で、
+  `-0.6` は `Math.round` が `-1` を返すので `¥-1` のまま (本当に −1 円の行は消えない)。
+  **`app/pages/operations/[unko_no].vue` の `yen()` も同じ形**だが、#840 の範囲外なので触っていない。
 
 ### 保存先 (localStorage キー)
 

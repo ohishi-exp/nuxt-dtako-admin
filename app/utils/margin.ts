@@ -1788,9 +1788,20 @@ export interface CustomerShareBars {
  * 実際に違うときだけ**になる。
  *
  * **許容誤差 (`> salesYen + 1e-6` のような定数) にはしない。**「いくつ未満なら同じか」を
- * 画面と切れた定数で決めることになるため。丸めは `Math.round` なので**単調** —
- * `Math.round(costSum) > Math.round(salesYen)` は `costSum > salesYen` を必ず含む
- * (**判定が緩む方向にしか動かない**)。したがって `scale` / `overflowPct` の式はそのままでよい。
+ * 画面と切れた定数で決めることになるため。
+ *
+ * ★ **判定は厳しくなる方向にしか動かない。** `Math.round` は単調非減少なので
+ * `a ≤ b ⟹ round(a) ≤ round(b)`、その対偶が `round(a) > round(b) ⟹ a > b` —
+ * つまり**丸めた判定は生の判定の部分集合**で、**赤字を新たに出すことは無い**
+ * (実測: 生 true → 丸め false は起きるが、その逆は 0 件)。だから `overflow` が true の回は
+ * 必ず `costSum > t.salesYen` で、`scale = salesYen ÷ costSum` は (0,1)、`overflowPct` は正 —
+ * **`scale` / `overflowPct` の式はそのままでよい。**
+ *
+ * 逆に **true → false に転ぶ行はある** (生では超過があった行)。そこでは `scale` が
+ * `salesYen ÷ costSum` から厳密な `1` に変わるが、転ぶのは**超過が ¥1 未満のときだけ**なので
+ * `1 − scale = 超過 ÷ costSum < 1 ÷ costSum`。**棒の幅の差は全区分の合計でも
+ * `100 ÷ costSum` %ポイント未満** (売上 ¥100,000 の行なら 0.001%pt 未満 = 幅 1000px の棒で
+ * 0.01px 未満。実測)。
  *
  * **金額そのものには当てない。** 丸めるのは**比較の 2 値だけ**で、`segments[].yen` にも
  * `overflowPct` の分子にも、粗利にも 1 円も効かない。
