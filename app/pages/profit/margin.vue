@@ -183,6 +183,14 @@ import {
   marginSummarySaveNote,
   type MarginSummarySaveResult,
 } from '~/utils/margin-r2'
+import {
+  marginVersionOmittedNote,
+  marginVersionUnreadableNote,
+  MARGIN_VERSION_TOTALS_STATE_LABELS,
+  MARGIN_VERSION_TOTALS_STATE_TITLES,
+  type MarginVersionItem,
+  type MarginVersionListResult,
+} from '~/utils/margin-versions'
 import { buildKushiroBranchView, readViewerCompId } from '~/utils/kushiro-branch-view'
 import { b64urlUtf8 } from '~/composables/useTheearthSession'
 import type { MinWageMaster } from '~/utils/restraint-wage-view'
@@ -222,6 +230,23 @@ const savedAt = ref('')
 const marginR2Note = ref('')
 /** 上の注記が「残せなかった」側か。色を分けるためだけ (数字には効かない)。 */
 const marginR2Failed = ref(false)
+/**
+ * **R2 に残っている版の一覧** (Refs #833)。「いつ変わったのか追えるようにしたい」の
+ * 読む側。**この一覧は粗利の数字に 1 円も効かない** — 既に残っている版を並べるだけで、
+ * 突合も集計もやり直さない。
+ */
+const marginVersions = ref<MarginVersionItem[]>([])
+/** 上限 (`MARGIN_VERSION_BODY_LIMIT`) に当たって金額を省いた旨。省いていなければ空文字。 */
+const marginVersionsNote = ref('')
+/**
+ * **本文を読めなかった版がある旨** (Refs #833)。上の「省いた」注記と**分けて持つ** —
+ * 省いたのは正常 (次に読めば出る)、読めなかったのは異常。混ぜると異常が流れる。
+ */
+const marginVersionsUnreadableNote = ref('')
+/** 一覧を読めなかった理由。**黙らない** — 空の一覧を「版が無い」と誤読させないため。 */
+const marginVersionsError = ref('')
+/** 一覧を読んでいる最中か (0 本と「まだ読んでいない」を画面で分けるため)。 */
+const marginVersionsLoading = ref(false)
 /**
  * **この bundle を作ったコードの版** (`nuxt.config.ts` のビルド時定数、Refs #826)。
  * タグリリース以外のビルドでは空で、保存側が `unknown` に倒す。
@@ -434,6 +459,10 @@ function restoreFromCache() {
   savedAt.value = cache.savedAt
   restoredFromCache.value = true
   status.value = 'ready'
+  // **キャッシュから出しただけの回にも版の一覧は読む** (Refs #833)。端末のキャッシュは
+  // 写しで、いつ変わったかを追える記録は R2 の版の方 — ここで読まないと、
+  // 集計し直すまで**追える記録が画面に出ない**。
+  void loadMarginVersions(cache.ym)
 }
 
 /**
@@ -967,6 +996,11 @@ async function run() {
   cacheNote.value = null
   marginR2Note.value = ''
   marginR2Failed.value = false
+  // **前の月の版を残したまま集計しない** (一覧は集計の最後に読み直す)。
+  marginVersions.value = []
+  marginVersionsNote.value = ''
+  marginVersionsUnreadableNote.value = ''
+  marginVersionsError.value = ''
   inputs.value = []
   costs.value = []
   legPointsByUnko.value = new Map()
@@ -1227,6 +1261,39 @@ async function saveMarginSummaryToR2() {
   catch (e) {
     marginR2Note.value = marginSummarySaveNote(null, e instanceof Error ? e.message : String(e))
     marginR2Failed.value = true
+  }
+  // **保存の成否によらず一覧を読み直す。** 保存が失敗した回でも、それより前に残した版は
+  // R2 にある — 読まないと「版が 1 つも無い」ように見える。
+  await loadMarginVersions(shownYm.value)
+}
+
+/**
+ * **R2 に残っている版の一覧を読む** (Refs #833)。金額まで出るのは新しい方から
+ * `MARGIN_VERSION_BODY_LIMIT` 本ぶんで、それより古いのはラベル (時刻) だけ
+ * — **省いたことは注記で言う** (黙って切ると「全部出ている」と誤読される)。
+ *
+ * **投げない**: 読めなくても粗利の画面は落とさず、理由を注記に出す。
+ */
+async function loadMarginVersions(ymValue: string) {
+  marginVersionsLoading.value = true
+  try {
+    const res = await $fetch<MarginVersionListResult>('/api/profit/margin-snapshots', {
+      query: { ym: ymValue },
+    })
+    marginVersions.value = res.items
+    marginVersionsNote.value = marginVersionOmittedNote(res.omitted, res.bodyLimit)
+    marginVersionsUnreadableNote.value = marginVersionUnreadableNote(res.unreadable)
+    marginVersionsError.value = ''
+  }
+  catch (e) {
+    // **空の一覧に倒さない** — 「読めなかった」と「版が無い」は別のこと。
+    marginVersions.value = []
+    marginVersionsNote.value = ''
+    marginVersionsUnreadableNote.value = ''
+    marginVersionsError.value = `R2 に残した版の一覧を読めませんでした — ${e instanceof Error ? e.message : String(e)}`
+  }
+  finally {
+    marginVersionsLoading.value = false
   }
 }
 
@@ -2031,6 +2098,70 @@ function downloadCustomerRouteCsv() {
     >
       {{ marginR2Note }}
     </p>
+    <!--
+      R2 に残っている版の一覧 (Refs #833)。**保存の注記のすぐ隣**に置く — 「いま残した版」と
+      「今まで残っている版」は同じ話で、離すと別々の機能に見える。**印刷には出さない**
+      (紙に要るのはその月の数字であって、版の履歴ではない)。
+      **何が変わったか (差分) はここには無い** — 版が何本あって、いつ増えたかまで。
+    -->
+    <section
+      v-if="marginVersionsLoading || marginVersionsError !== '' || marginVersions.length > 0"
+      class="margin-print-hide mb-3"
+    >
+      <h3 class="text-xs font-semibold text-gray-600 dark:text-gray-300 mb-1">
+        R2 に残っている版
+        <span v-if="marginVersions.length > 0" class="font-normal text-gray-400">({{ marginVersions.length }} 本、新しい順)</span>
+      </h3>
+      <p v-if="marginVersionsError !== ''" class="text-xs text-amber-600 dark:text-amber-400">
+        {{ marginVersionsError }}
+      </p>
+      <p v-else-if="marginVersionsLoading" class="text-xs text-gray-400">
+        版の一覧を読み込み中...
+      </p>
+      <template v-else>
+        <table class="text-xs">
+          <thead class="text-gray-500">
+            <tr class="border-b border-gray-200 dark:border-gray-800">
+              <th class="text-left py-1 pr-3" title="保存した時刻 (JST)。保存の注記に出る版の名前と同じものです">版</th>
+              <th class="text-right py-1 px-2">運行</th>
+              <th class="text-right py-1 px-2">売上</th>
+              <th class="text-right py-1 px-2">手当</th>
+              <th class="text-right py-1 pl-2">粗利</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="v in marginVersions" :key="v.key" class="border-b border-gray-100 dark:border-gray-800/60">
+              <td class="py-1 pr-3 font-mono">{{ v.label }}</td>
+              <template v-if="v.totals">
+                <td class="text-right py-1 px-2">{{ v.totals.operations }} 本</td>
+                <td class="text-right py-1 px-2">{{ yen(v.totals.salesYen) }}</td>
+                <td class="text-right py-1 px-2">{{ yen(v.totals.allowanceYen) }}</td>
+                <td class="text-right py-1 pl-2">{{ yen(v.totals.marginYen) }}</td>
+              </template>
+              <!--
+                金額が無い理由は 2 つある (上限より古いので**読まなかった** /
+                **読めなかった**)。**同じ見た目にしない** — 同じだと、読む人には
+                なぜその行だけ金額が無いのかが分からない。
+              -->
+              <td
+                v-else
+                colspan="4"
+                class="text-right py-1 pl-2"
+                :class="v.totalsState === 'unreadable' ? 'text-amber-600 dark:text-amber-400' : 'text-gray-400'"
+                :title="MARGIN_VERSION_TOTALS_STATE_TITLES[v.totalsState]"
+              >{{ MARGIN_VERSION_TOTALS_STATE_LABELS[v.totalsState] }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-if="marginVersionsNote" class="text-xs text-gray-400 mt-1">
+          {{ marginVersionsNote }}
+        </p>
+        <!-- **読めなかったぶんは失敗と分かる色で。** 省いたぶんと同じ灰色にしない。 -->
+        <p v-if="marginVersionsUnreadableNote" class="text-xs text-amber-600 dark:text-amber-400 mt-1">
+          {{ marginVersionsUnreadableNote }}
+        </p>
+      </template>
+    </section>
     <p v-if="cacheNote" class="text-xs text-amber-600 dark:text-amber-400 mb-3">
       {{ cacheNote }}
     </p>

@@ -532,6 +532,34 @@ branches = true
 path = "server/api/profit/margin-summary.post.ts"
 branches = true
 
+# R2 に残した**粗利の集計の版**を一覧する口 (Refs #833)。保存 (#826 / #828 / #830) は
+# 本番に入っていたが**読む口が画面に無かった**ぶんの前半で、**差分 (何が変わったか) は
+# ここに無い** — 版が何本あって、いつ増えたかまで。
+# `app/utils/margin-versions.ts` は版キーの判定 (`v-*.json` だけ。`latest.json` /
+# `history.jsonl` は版ではない)・新しい順の並べ替え・本文を読む上限
+# (`MARGIN_VERSION_BODY_LIMIT = 20`) と省いた本数・その注記だけを持つ pure util で、
+# **粗利の数字を 1 円も作らない・変えない** (`margin.ts` / `MarginCache` /
+# `reconcileVehicles` は 1 行も触っていない)。server route は `snapshots.get.ts` と同じ作りで、
+# **`head()` を版の数だけ叩かない** (list に customMetadata が載らないため codeVersion には
+# N 回の head が要るが、その価値は無い) / **本文を読むのは新しい方から 20 本まで** /
+# 読めなかった版は**金額 0 に倒さず null**。
+# **`totals: null` の理由を 1 つに潰さない** (`totalsState`) — 上限より古いので**読まなかった**
+# (正常) と、list に出たのに `get()` が返さず**読めなかった** (異常) は意味が違い、同じ見た目で
+# 描くと「なぜこの行だけ金額が無いのか」が読む人に分からない (#831 で直した「穴が別の意味に
+# 読める」型と同じ)。注記も本数も**別勘定** (`omitted` / `unreadable`)。文言は定数
+# (`MARGIN_VERSION_TOTALS_STATE_LABELS` / `..._TITLES`) にして**変異テストで固定**した。
+# branches: BR/BRN 計測器を **2 段の probe** で先に検証 — ①片側だけ通した `if` が `[true]`、
+# 両側が `[true,false]` を返すこと ②instrumented コピーでも `||` `??` `?:` の**返り値が
+# 素の実装と一致**すること — したうえで、AST で機械的に包んだコピーでテストを流し、
+# **8 分岐すべてが true/false 両方**を通ることを数えた (v8 も 100%/100%、テスト 29 本)。
+[[files]]
+path = "app/utils/margin-versions.ts"
+branches = true
+
+[[files]]
+path = "server/api/profit/margin-snapshots.get.ts"
+branches = true
+
 # /restraint-wage 系の共有型・表示ヘルパ (Refs #244 / gate 登録は #825)。書式 (分 / 円 /
 # R2 版タイムスタンプ / 月)、月の範囲、月タブのバッジ 3 種、最低賃金チェックの並び
 # (`groupMinWageRows`)、計算 ⇄ 給与の突合行、0 行の理由 (Refs #812) を持つ pure util。

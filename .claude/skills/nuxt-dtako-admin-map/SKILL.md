@@ -880,7 +880,15 @@ R2 スナップショットを force-match へ自動移植してはいけない 
   新しい版なら**版の名前** (`v-20260824T102030`)、増えなかった回は**どの版から
   変わっていないか**、失敗なら「端末のキャッシュだけ」と**失敗と分かる色**で。
   `console.error` だけで済ませると、**履歴に穴が空いたことに誰も気づけない**
-- 版の一覧・差分ビューは未実装 (このデータを使う後続 PR)
+- **版の一覧は画面に出ている** (Refs #833)。粗利タブの保存の注記の隣に、`GET /api/profit/
+  margin-snapshots?ym=` が返す版を**新しい順**で出す。金額まで出るのは**新しい方から
+  `MARGIN_VERSION_BODY_LIMIT` (20) 本**で、それより古いのはラベル (時刻) だけ —
+  **省いたことは画面が言う** (黙って切ると「全部出ている」と誤読される)。**「読まなかった」と
+  「読めなかった」は別勘定** (`totalsState` / `omitted` と `unreadable`) — 混ぜると異常が正常に
+  見える。**金額は 0 に倒さない**。pure は
+  `app/utils/margin-versions.ts`。**`history.jsonl` は版の一覧に使わない**
+  (行数上限で落ちる / `changed:false` の回も 1 行使う / `versionKey` を持たない)。
+  **差分ビュー (何が変わったか) はまだ無い**
 
 ### 保存先 (localStorage キー)
 
@@ -903,6 +911,7 @@ R2 スナップショットを force-match へ自動移植してはいけない 
 | `GET/POST/DELETE /api/profit/snapshot` | 検証スナップショット 1 件の read/write/delete (`PROFIT_R2`、`savedAt` はサーバーが埋める) |
 | `POST /api/profit/margin-summary` | **粗利の集計そのもの**の版管理保存 (上記、`savedAt` はサーバー / `codeVersion` は画面が名乗り サーバーが正規化) |
 | `GET /api/profit/snapshots?ym=&vehicle=&limit=` | スナップショット一覧 (`SnapshotListItem`) |
+| `GET /api/profit/margin-snapshots?ym=` | **粗利の集計の版**の一覧 (`v-*.json` だけ・新しい順。金額は新しい方 20 本ぶんだけ・`head()` は叩かない) |
 | `GET /api/profit/monthly?vehicle=&ym=` | 一番星側月計 vs `confirmedAmount` 合算 の差額 + マッチレベル内訳 |
 | `GET /api/ichiban/api/sales/vehicle-daily` | 一番星 売上明細 (proxy 経由、client 側も `api/` を含めて呼ぶ) |
 | `GET /api/ichiban/api/costs/vehicle-daily` | 一番星 経費明細 (給与・燃料等)。**`limit` 未指定だと上流が 500 件で切る** |
