@@ -1237,8 +1237,10 @@ const WAGE_MIX_METHODS: WageMixMethod[] = ['hours', 'days']
  * nightMinutes 7884 / workDays 23 が MCP の返り値と 1 分の狂いもなく一致)。
  *
  * **拘束×賃金タブの `wage-report` (「現行」) とは経路が違う** — あちらは ichiban の
- * 写し (`wage-source`) を読むので、写しが未同期だと 2026-07 が 0 行になり
- * 「アーカイブにありません」と出る。R2 には在る。
+ * 写し (`wage-source`) を読む。2026-07 が 0 行になり「アーカイブにありません」と
+ * 出ていたのは**未同期だからではなく、同期済み (`synced_at` 非 null) なのに写しが
+ * 空**で、R2 に在るのに読みに行かなかったため (#812 で relay 側にフォールバックを
+ * 足し、文言も切り分け可能なものへ直した)。この口は昔から R2 直読みなので無関係。
  */
 const restraintByCd = ref<Map<string, WageMixRestraint> | null>(null)
 const loadingRestraint = ref(false)

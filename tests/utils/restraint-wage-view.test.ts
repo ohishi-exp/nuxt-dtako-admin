@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from 'vitest'
 import type { MinWageRowAttrs } from '../../app/utils/restraint-wage-view'
-import { fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, groupMinWageRows, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
+import { EMPTY_WAGE_REPORT_NOTICE, emptyWageReportCause, fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, groupMinWageRows, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
 
 describe('fmtMinutes', () => {
   it('時間+分を "XhYYm" 表記にする', () => {
@@ -346,5 +346,34 @@ describe('minWageCompareRow', () => {
     expect(r.diffOvertime).toBeNull()
     expect(r.diffTotal).toBeNull()
     expect(r.paidTotal).toBe(300)
+  })
+})
+
+describe('emptyWageReportCause', () => {
+  // 本番 2026-07 (#812): 「アーカイブにありません」と出ていたのに
+  // /restraint-api/archive/summaries は 111 名ぶんを完全に返していた
+  it('アーカイブに在る月で 0 行なら archive-present (取り込み漏れと言わない)', () => {
+    expect(emptyWageReportCause('2026-07', ['2026-06', '2026-07'], true)).toBe('archive-present')
+  })
+
+  it('アーカイブに無い月なら no-archive', () => {
+    expect(emptyWageReportCause('2026-07', ['2026-06'], true)).toBe('no-archive')
+    expect(emptyWageReportCause('2026-07', [], true)).toBe('no-archive')
+  })
+
+  it('アーカイブ月一覧が未読なら loading-archive-months (空配列を「無い」と読まない)', () => {
+    expect(emptyWageReportCause('2026-07', [], false)).toBe('loading-archive-months')
+    expect(emptyWageReportCause('2026-07', ['2026-07'], false)).toBe('loading-archive-months')
+  })
+
+  it('文言は 3 通りぶん揃っており、archive-present は「無い」と言わない', () => {
+    expect(Object.keys(EMPTY_WAGE_REPORT_NOTICE).sort()).toStrictEqual([
+      'archive-present', 'loading-archive-months', 'no-archive',
+    ])
+    expect(EMPTY_WAGE_REPORT_NOTICE['no-archive']).toContain('アーカイブにありません (')
+    // ★ ここが #812 の本体 — 「在るのに 0 行」を「無い」と言わせない
+    expect(EMPTY_WAGE_REPORT_NOTICE['archive-present']).toContain('アーカイブに在る')
+    expect(EMPTY_WAGE_REPORT_NOTICE['archive-present']).toContain('開発へ報告')
+    expect(EMPTY_WAGE_REPORT_NOTICE['loading-archive-months']).toContain('読み込み中')
   })
 })

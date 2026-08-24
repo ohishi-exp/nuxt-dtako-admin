@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   isWageSourceResponse,
+  wageSourceMonthR2Fallback,
   wageSourceMonthToSummaries,
   type WageSourceMonthWire,
 } from '../src/restraint-wage-source'
@@ -75,6 +76,16 @@ describe('isWageSourceResponse', () => {
         prev_timecard: { summaries: 'broken', no_data_drivers: [] },
       }),
     ).toBe(false)
+    // no_data_drivers 側が配列でない場合 (`&&` の右辺 false — 短絡のせいで
+    // v8 の branches 100% では見えない側)
+    expect(
+      isWageSourceResponse({
+        current_theearth: month,
+        current_timecard: month,
+        prev_theearth: month,
+        prev_timecard: { summaries: [], no_data_drivers: 'broken' },
+      }),
+    ).toBe(false)
     expect(
       isWageSourceResponse({
         current_theearth: null,
@@ -83,5 +94,38 @@ describe('isWageSourceResponse', () => {
         prev_timecard: month,
       }),
     ).toBe(false)
+  })
+})
+
+describe('wageSourceMonthR2Fallback', () => {
+  // 本番 2026-07 の欠陥 (#812): synced_at は立っているのに写しが空で、R2 には
+  // 111 名ぶん在るのに「アーカイブにありません」と出て表が空になっていた。
+  const month = (over: Partial<WageSourceMonthWire> = {}): WageSourceMonthWire => ({
+    summaries: [],
+    no_data_drivers: [],
+    synced_at: '2026-07-03T00:00:00Z',
+    ...over,
+  })
+
+  it('未 push (synced_at null) は落ちる — 従来のタグのまま', () => {
+    expect(wageSourceMonthR2Fallback(month({ synced_at: null }))).toBe('r2-piece-fallback')
+  })
+
+  it('push 済みなのに summaries 0 かつ no_data_drivers 0 は落ちる — 別タグ', () => {
+    expect(wageSourceMonthR2Fallback(month())).toBe('r2-empty-copy-fallback')
+  })
+
+  it('summaries 0 でも no_data_drivers があれば落ちない (「調べて 0 名」を信じる)', () => {
+    // ここを summaries.length === 0 だけで落とすと、本当に 0 名の月で毎回
+    // R2 fan-out (約300 GET) を叩くことになる
+    expect(wageSourceMonthR2Fallback(month({ no_data_drivers: ['9901'] }))).toBeNull()
+  })
+
+  it('通常 (push 済み・summaries あり) は落ちない', () => {
+    const wire = wireOf([theearthSummaries[0]!])
+    expect(wire.synced_at).not.toBeNull()
+    expect(wageSourceMonthR2Fallback(wire)).toBeNull()
+    // no_data_drivers が空でも summaries が在れば写しを使う (短絡の左側)
+    expect(wageSourceMonthR2Fallback(month({ summaries: wire.summaries }))).toBeNull()
   })
 })
