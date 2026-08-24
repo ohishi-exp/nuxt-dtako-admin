@@ -2792,6 +2792,14 @@ describe('costExceedsSalesAtYen — 赤字の判定を円の精度でやる (Ref
  */
 describe('¥-0 — 粗利ちょうど 0 の行の 2 つ目の出口 (Refs #840)', () => {
   const tail = -4.656612873077393e-10
+  const marginOp = (over: Partial<OperationMargin>): OperationMargin => ({
+    unkoNo: 'U1', date: '2026-07-01', driverName: '甲', vehicleCode: '1109', totalKm: 150, listedTotalKm: 150,
+    kmBreakdown: { preLoadKm: 20, haulKm: 100, betweenKm: 10, postUnloadKm: 20, otherKm: 0 }, vehicleTotalKm: 1000,
+    salesYen: 139000, allowanceYen: 16000, fuelYen: 16722.9 + 8934.6, fuelHaulYen: 16722.9, fuelDeadheadYen: 8934.6,
+    directCostYen: 7304.4, allocatedCostYen: 90038.1, marginYen: 0, laborYen: 30000,
+    fuelRate: { yenPerLiter: 120, kmPerLiter: 3, dieselTaxPerLiter: 0 },
+    costsMissing: false, runCostShareFallback: false, legs: [], ...over,
+  })
 
   it('棒の粗利 segment に尾つきの負が載る (`??` の右辺 = grossMarginYen が null の行)', () => {
     const t = {
@@ -2807,8 +2815,26 @@ describe('¥-0 — 粗利ちょうど 0 の行の 2 つ目の出口 (Refs #840)'
     })
     const m = res.bars[1]!.segments.find(s => s.key === 'margin')!
     expect(m.yen).toBe(-2.9103830456733704e-11)   // 売上 − Σ費用 の尾
-    expect(Math.round(m.yen)).toBe(-0)            // ← ここが `¥-0` の素
+    // ★ **セグメントの値は `-0` ではない。`-0` は表示側の `Math.round` が作る。**
+    // だから `shareBarOf` 側で潰すことはできない (潰すと額そのものが動く)。
+    // `margin.ts:918` の `weight === 0 ? 0 : …` は**値が本当に `-0` になる**別の話。
+    expect(Object.is(m.yen, -0)).toBe(false)
     expect(Object.is(Math.round(m.yen), -0)).toBe(true)
+  })
+
+  it('★ 乗務員の棒も同じ — `totals.marginYen` は Σ の尾つきの負で `-0` ではない', () => {
+    const t = summarizeMargins([
+      marginOp({ unkoNo: 'Z1', marginYen: 1e-10 }),
+      marginOp({ unkoNo: 'Z2', marginYen: -5.656612873077393e-10 }),
+    ])
+    expect(t.marginYen).toBe(-4.656612873077394e-10)
+    expect(Object.is(t.marginYen, -0)).toBe(false)
+    expect(Object.is(Math.round(t.marginYen), -0)).toBe(true)
+  })
+
+  it('★ 表の粗利の列も同じ値を `yen()` に渡す (棒だけ直しても表に `¥-0` が残る)', () => {
+    const before = (v: number | null) => (v === null ? '-' : `¥${Math.round(v).toLocaleString()}`)
+    expect(before(-4.656612873077393e-10)).toBe('¥-0')   // 直す前は表にもこう出ていた
   })
 
   it('★ 画面の `yen()` (margin.vue の実物) は尾つきの負を `¥0` と出す (`¥-0` にしない)', () => {
