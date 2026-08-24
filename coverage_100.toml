@@ -653,3 +653,44 @@ branches = true
 [[files]]
 path = "app/utils/restraint-wage-view.ts"
 branches = true
+
+# **人が手で確定したもの**を端末 (localStorage) から R2 (全員で共有) へ移す土台
+# (Refs #845 / Refs #820)。この PR で移すのは **暫定手当 (`provisional`) だけ**で、
+# `excluded` / `force-match` は後続 (PR-3b / PR-3c) が同じ土台に載せる。
+#
+# ★ **「いまは端末が 1 台」を設計の前提にしない** — この機能の目的そのものが
+# 「端末依存をやめて全員で共有する」ことなので、うまくいけば必ず複数端末になる。
+# 壊れ方を 2 つとも先に潰してある:
+# - **全体マップをまるごと置換しない** (2 台目が現れた瞬間、片方が押すたびに相手の確定を
+#   消す) → 送るのは **1 件だけ** (`AllowanceOverrideOperation`)、**畳み込みはサーバー側**
+#   (`applyAllowanceOverrideOperation`)。全体マップを受ける口はサーバーにも無い
+# - **単純な和集合にもしない** (`toggleExcluded` は `delete` するだけで消した痕跡を残さない
+#   ので、union だと「解除した除外」が他端末の push で復活する) → **消したことを値として
+#   残す** (`value: null` = tombstone)。**鍵が無いこと ≠ 消したこと** が根治
+#
+# 月で割らない (3 種とも月に紐づかない。暫定の経路キー `広尾|芽室` に月が無い)。
+# `putVersionedProfit` / `appendProfitHistory` / `profitVersionTimestamp` / `ProfitR2Paths` は
+# **既存をそのまま使う** (`marginR2Paths` が手本)。**手当の金額を 1 円も作らない・変えない**
+# (`reconcileVehicles` も `margin.ts` も 1 行も触っていない)。画面の読みは今までどおり
+# localStorage なので、**移行の前後で粗利タブの `totals` は動きようが無い**。
+# ハッシュは**値だけ** (`savedAt` と entry ごとの `by`/`at` を外し、鍵を並べ替える) —
+# 同じ値の送り直しで版が増えると R2 が「押した回数」で伸びる。誰がいつ触ったかは
+# `history.jsonl` が全部持つ。
+#
+# branches: BR/BRV/BRN 計測器を **2 段の probe** で先に検証 — ①片側だけ通した `if` が
+# `[true]`、両側が `[true,false]` ②instrumented コピーでも `||` `??` `?:` の**返り値が
+# 素の実装と一致**すること — したうえで AST で機械的に包んだコピーでテストを流し、
+# **全分岐が true/false 両方**を通ることを数えた (v8 も 100%/100%)。
+[[files]]
+path = "app/utils/allowance-overrides-r2.ts"
+branches = true
+
+# 上の口 (`POST /api/profit/allowance-override`)。**新設する route にだけ `requireAuth`**
+# を付ける — 権限範囲が「その端末の人だけ」→「R2 に触れる人全員」に広がるので、
+# **誰が触ったか** (`by` = email) を履歴の 1 行に残す。**既存の `snapshot.post.ts` /
+# `margin-summary.post.ts` には足していない** (スコープ外)。
+# `codeVersion` は刻まない — 値は**人が入力した数そのもの**でコードが作っていないため
+# (`margin-summary` が刻むのは「同じ入力でもロジックが変われば数字が動く」から)。
+[[files]]
+path = "server/api/profit/allowance-override.post.ts"
+branches = true
