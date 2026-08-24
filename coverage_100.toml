@@ -136,6 +136,15 @@ branches = true
 path = "app/utils/profit-compare.ts"
 branches = true
 
+# **確定が①の強制突合になった** (突合一本化 PR-2、#848)。書き先は `FORCE_MATCH_KEY`
+# だけで、検証スナップショット (`/api/profit/snapshot`) は**読みも書きもしない** —
+# 読んで初期値にすると②の確定を①へ機械的に移植したのと同じで、二重計上を生む。
+# **中核の分岐は「候補を出してよいか」**: ①の使用済み明細が読めないとき
+# (キーが無い / 月が違う / 壊れている / localStorage 自体が読めない) は
+# **空の候補一覧ではなく理由**を出す。branches: script ブロックを instrumented コピー
+# (`operation-leg-sales.ts` と同じ計測器) に差し替えてテストを流し、**21 分岐のうち
+# 実分岐 19 が true/false 両方**を通ることを数えた (残る 2 は
+# `leg.originCity || '?'` の**右辺の文字列リテラル** = 常に真で経路が分かれない)。
 [[files]]
 path = "app/components/ProfitPanel.vue"
 branches = true
@@ -146,10 +155,6 @@ branches = true
 
 [[files]]
 path = "server/utils/profit-r2-io.ts"
-branches = true
-
-[[files]]
-path = "server/api/profit/snapshot.post.ts"
 branches = true
 
 [[files]]
@@ -519,13 +524,35 @@ branches = true
 # 意味がある: 当たっていない便の売上を `null` にする / 1 便も当たっていない運行の合計を
 # `null` にする / 鍵が無い (`missing`) とその運行が突合結果に居ない (`not-aggregated`) を
 # 分ける / 壊れた保存の便を丸ごと落とす (読めたぶんだけ足して額を下げない)。
+# **突合一本化 PR-2 (#848) で `lookupUsedSlipIds` / `usedSlipsNote` を足した。**
+# 「①が既にどこかの便へ当てた明細」(`byUnko` 全体の `slipIds` の和集合) を収支パネルへ
+# 渡すための読みで、**ここだけ `parseOperationLegSales` より厳しい** — あちらは表示用で
+# 「読めた便だけ出す」(欠けても画面が金額を語らないだけ) だが、こちらは**1 便でも
+# 読めなければ全部やめる**。読めなかった便が当てていた明細が「まだ空いている」ように
+# 見えると、人がそれを結んで**同じ売上が 2 つの便に乗る**ため。**空の `Set` に倒さない**
+# (`missing` / `not-aggregated` を返して呼び出し側に候補欄ごと出させない) 分岐が中核。
 # branches: BR() 計測器を probe (片側だけ通る `if` / 両側通る `if` / 右を評価しない
 # `??` を仕込んだ .ts) で**両方向に**検証 — 片側の probe が `[true]`、両側の probe が
-# `[true,false]`、`??` の左が `[true]` を返すことを実測してから、instrumented コピー
-# (TypeScript の AST で機械挿入) でテストを流し、**40 分岐すべてが true/false 両方を
-# 通る**ことを数えた (v8 も 100%/100%、テスト 30 本)。
+# `[true,false]`、`??` の左が `[true]` を返すことと、**計測器が値を壊していないこと**
+# (`pick(0,7) === 0` / `orValue(0,7) === 7`) を実測してから、instrumented コピー
+# (TypeScript の AST で機械挿入) でテストを流し、**56 分岐すべてが true/false 両方を
+# 通る**ことを数えた (v8 も 100%/100%、テスト 42 本)。
 [[files]]
 path = "app/utils/operation-leg-sales.ts"
+branches = true
+
+# 収支パネル (`ProfitPanel`) が**どの便に結ぶか**を決める素材 (突合一本化 PR-2、#848)。
+# **突合も候補ロジックも 1 行も持たない** — 便の切り出しは `extractAllowanceLegs`、
+# 鍵は `forceMatchKey`、候補は `forceMatchCandidates` のもので、ここにあるのは
+# 「選択区間に入る便を出す」「結んである明細を必ず外せるように並べる」「引けなかった
+# ぶんを黙って落とさず数える」の 3 点だけ。**中核の分岐は「黙って落とさない」側**:
+# 開始日時が読めない積みを `undated` に数える (落とすと便が 1 本しか無いように読める) /
+# 日付 ±1 日の外に結んだ明細も並べる (候補に出ないので外せなくなる) /
+# 結んであるのに手元に無い明細を `missing` に数える (「結びつけが消えた」と読ませない)。
+# branches: 上と同じ instrumented コピーで**9 分岐すべてが true/false 両方を通る**
+# ことを数えた (v8 も 100%/100%、テスト 20 本)。
+[[files]]
+path = "app/utils/profit-panel-legs.ts"
 branches = true
 
 # 粗利の集計結果 (`MarginCache`) を R2 に版管理で残す口 (Refs #826)。**確定ボタンは
@@ -695,8 +722,9 @@ branches = true
 
 # 上の口 (`POST /api/profit/allowance-override`)。**新設する route にだけ `requireAuth`**
 # を付ける — 権限範囲が「その端末の人だけ」→「R2 に触れる人全員」に広がるので、
-# **誰が触ったか** (`by` = email) を履歴の 1 行に残す。**既存の `snapshot.post.ts` /
-# `margin-summary.post.ts` には足していない** (スコープ外)。
+# **誰が触ったか** (`by` = email) を履歴の 1 行に残す。**既存の
+# `margin-summary.post.ts` には足していない** (スコープ外。`snapshot.post.ts` は
+# 突合一本化 PR-2 (#848) で撤去した)。
 # `codeVersion` は刻まない — 値は**人が入力した数そのもの**でコードが作っていないため
 # (`margin-summary` が刻むのは「同じ入力でもロジックが変われば数字が動く」から)。
 [[files]]

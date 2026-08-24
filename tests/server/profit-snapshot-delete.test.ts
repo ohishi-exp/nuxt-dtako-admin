@@ -1,10 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
 
-import postHandler from '../../server/api/profit/snapshot.post'
 import deleteHandler from '../../server/api/profit/snapshot.delete'
-import type { R2BucketLite, R2ObjectLite } from '../../server/utils/profit-r2-io'
+import { profitR2Paths, profitVersionTimestamp } from '../../app/utils/profit-r2'
+import { putVersionedProfit, appendProfitHistory, type R2BucketLite, type R2ObjectLite } from '../../server/utils/profit-r2-io'
 
-const callPost = (event: unknown) => (postHandler as unknown as (e: unknown) => Promise<unknown>)(event)
 const callDelete = (event: unknown) => (deleteHandler as unknown as (e: unknown) => Promise<unknown>)(event)
 
 vi.mock('h3', async (importOriginal) => {
@@ -68,6 +67,27 @@ function validSnapshotInput(overrides: Record<string, unknown> = {}) {
   }
 }
 
+/**
+ * **保存済みのスナップショットを直に置く。**
+ *
+ * 元は `POST /api/profit/snapshot` を呼んで作っていたが、**書き込みの口は
+ * 突合一本化 PR-2 (#848) で撤去**した (人の確定は①の強制突合に一本化)。
+ * **消す口は残す** — 既存のスナップショットは人の確認作業の記録なので、
+ * 「もう増えないが、消せる」状態を保つ。だから置き方だけ POST と同じ形に真似る。
+ */
+async function seedSnapshot(bucket: FakeR2Bucket) {
+  const savedAt = '2026-06-21T00:00:00.000Z'
+  const snapshot = { ...validSnapshotInput(), savedAt }
+  const paths = profitR2Paths('2026-06', '8504', 'unko-1', '0-3600')
+  const ts = profitVersionTimestamp(new Date(savedAt))
+  await putVersionedProfit(
+    bucket, paths.latest, paths.version(ts), JSON.stringify(snapshot),
+    JSON.stringify(validSnapshotInput()), savedAt)
+  await appendProfitHistory(bucket, paths.history, JSON.stringify({
+    ts: savedAt, changed: true, confirmedAmount: 65000, confirmedCount: 1,
+  }))
+}
+
 describe('DELETE /api/profit/snapshot', () => {
   it('PROFIT_R2 未設定なら 503', async () => {
     const event = { context: {}, _query: { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
@@ -88,8 +108,7 @@ describe('DELETE /api/profit/snapshot', () => {
 
   it('保存済みスナップショットを削除すると latest.json が消え、一覧に出なくなる', async () => {
     const bucket = new FakeR2Bucket()
-    const postEvent = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _body: validSnapshotInput() }
-    await callPost(postEvent)
+    await seedSnapshot(bucket)
     expect(await bucket.get('profit/2026-06/8504/unko-1/0-3600/latest.json')).not.toBeNull()
 
     const deleteEvent = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _query: { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
@@ -101,8 +120,7 @@ describe('DELETE /api/profit/snapshot', () => {
 
   it('v-*.json の版履歴は削除しない (監査証跡として残す)', async () => {
     const bucket = new FakeR2Bucket()
-    const postEvent = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _body: validSnapshotInput() }
-    await callPost(postEvent)
+    await seedSnapshot(bucket)
     const versionKeys = [...bucket.store.keys()].filter(k => k.includes('/v-'))
     expect(versionKeys.length).toBeGreaterThan(0)
 
@@ -116,8 +134,7 @@ describe('DELETE /api/profit/snapshot', () => {
 
   it('history.jsonl に削除イベントが追記される', async () => {
     const bucket = new FakeR2Bucket()
-    const postEvent = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _body: validSnapshotInput() }
-    await callPost(postEvent)
+    await seedSnapshot(bucket)
 
     const deleteEvent = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _query: { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
     await callDelete(deleteEvent)

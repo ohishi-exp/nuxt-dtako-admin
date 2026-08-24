@@ -336,3 +336,82 @@ export function lookupOperationLegSales(
     unmatchedLegs: legs.length - matchedLegs,
   }
 }
+
+/**
+ * **①が既にどこかの便へ当てた明細**を引いた結果 (Refs #848)。
+ * `forceMatchCandidates` の `usedRowIds` に渡すためだけのもの。
+ */
+export type UsedSlipsLookup =
+  /** 突合結果が無い / 読めない。**候補を出してはいけない。** */
+  | { status: 'missing' }
+  /** 突合結果はあるが、その運行が入っていない (別の月を集計している等)。**候補を出してはいけない。** */
+  | { status: 'not-aggregated', ym: string }
+  /** 使用済みの `rowId` が全部揃った。**このときだけ候補を出してよい。** */
+  | { status: 'ready', ym: string, usedRowIds: Set<string> }
+
+/**
+ * **既にどこかの便に当たっている明細の `rowId`** を、保存済みの要約から集める
+ * (Refs #848)。`byUnko` 全体の `slipIds` の和集合で、運行手当タブの
+ * `usedSlipRowIds` (`byLeg` 全体の `slips[].rowId`) と同じもの — どちらも①の
+ * `byLeg` から作られている。**①を回し直さない。**
+ *
+ * ## ★ 空集合に倒さない (倒すと同じ売上が 2 つの便に乗る)
+ *
+ * `forceMatchCandidates` は `usedRowIds` に入っていない明細を候補に出す。空を渡すと
+ * **①が既に別の便へ当てた明細まで候補に並び**、人がそれを結べば**二重計上**になる。
+ * だから読めないときは空の `Set` を返さず `missing` / `not-aggregated` を返し、
+ * 呼び出し側に**候補欄そのものを出させない** (`usedSlipsNote` を出す)。
+ *
+ * ## ★ `parseOperationLegSales` より厳しい
+ *
+ * あちらは表示用で「読めた便だけ出す」(欠けても画面が金額を語らないだけ)。こちらは
+ * **1 便でも読めなければ全部やめる** — 読めなかった便が当てていた明細が「まだ誰にも
+ * 当たっていない」ように見え、そこが二重計上の口になるため。
+ *
+ * **その運行が入っているかどうかで分ける** — 月の判定を自前でやらない理由は
+ * `lookupOperationLegSales` と同じ (粗利タブの月の切り方は運行の開始日で、
+ * 運行詳細が持つ読取日とは 1 日ずれうる)。
+ */
+export function lookupUsedSlipIds(raw: string | null | undefined, unkoNo: string): UsedSlipsLookup {
+  if (!raw) return { status: 'missing' }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  }
+  catch {
+    return { status: 'missing' }
+  }
+  if (typeof parsed !== 'object' || parsed === null) return { status: 'missing' }
+  const cache = parsed as { ym?: unknown, legs?: unknown }
+  if (typeof cache.ym !== 'string') return { status: 'missing' }
+  if (typeof cache.legs !== 'object' || cache.legs === null) return { status: 'missing' }
+  const usedRowIds = new Set<string>()
+  let hasOperation = false
+  for (const [key, list] of Object.entries(cache.legs as Record<string, unknown>)) {
+    if (!Array.isArray(list)) return { status: 'missing' }
+    for (const value of list as unknown[]) {
+      const leg = storedLeg(value)
+      if (leg === null) return { status: 'missing' }
+      for (const id of leg.slipIds) usedRowIds.add(id)
+    }
+    if (key === unkoNo && list.length > 0) hasOperation = true
+  }
+  if (!hasOperation) return { status: 'not-aggregated', ym: cache.ym }
+  return { status: 'ready', ym: cache.ym, usedRowIds }
+}
+
+/**
+ * 候補を出せないときに**画面へ必ず出す一言** (Refs #848)。`ready` なら `null`。
+ *
+ * **空の候補一覧を「結べる明細が無い」と読ませない。** 出していないのは
+ * 「どれが空いているか分からないから」で、**明細が無いからではない**。
+ */
+export function usedSlipsNote(lookup: UsedSlipsLookup): string | null {
+  if (lookup.status === 'missing') {
+    return 'このブラウザの粗利タブでこの月を集計すると、結べる候補が出ます (どの明細が既に他の便に当たっているかが分からないため、候補を出していません)'
+  }
+  if (lookup.status === 'not-aggregated') {
+    return `粗利タブの突合結果 (${lookup.ym}) にこの運行はありません。この運行の月を粗利タブで集計すると、結べる候補が出ます (どの明細が既に他の便に当たっているかが分からないため、候補を出していません)`
+  }
+  return null
+}

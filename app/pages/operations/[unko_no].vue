@@ -6,12 +6,11 @@ import {
   summarizeSelectedRows,
   selectedRowsLocationRange,
   proposeEventRowRange,
-  groupLegsByDate,
   rowIndicesInTimeRanges,
   type SelectedRowsSummary,
   type SelectedRowsLocationRange,
 } from '~/utils/event-data-table'
-import type { ProfitPanelLegGroup } from '~/utils/profit-r2'
+import { extractAllowanceLegs } from '~/utils/allowance-trips'
 import { fetchVehicleDailySlips } from '~/utils/ichiban'
 import { shiftYmd } from '~/utils/profit-compare'
 import {
@@ -188,13 +187,6 @@ const proposedLegCount = ref(0)
  * 別に持つ — 同じ ref を双方向に使うと EventCrewPanel 側の emit が上書きし合い
  * 無限ループ/競合の元になる。 */
 const proposedEventRange = ref<{ fromTs: number, toTs: number, legs?: { fromTs: number, toTs: number }[] } | null>(null)
-/** 日付をまたぐレグがある場合の日付ごとのデジタコ実績 (Refs #356 派生要望:
- * 「日付が違う部分を分けて別々に登録したい」)。ProfitPanel に渡し、伝票候補を
- * 日付ごとにグループ化して個別に保存できるようにする。日付が1つしか無ければ
- * (同日往復のみ、または通常の単一レグ) 空配列にし、ProfitPanel は従来通りの
- * 単一保存フローのままにする。 */
-const proposedLegGroups = ref<ProfitPanelLegGroup[]>([])
-
 interface ProposeCandidate {
   originCity: string
   destCity: string
@@ -222,25 +214,12 @@ function applyProposedRange(
   net780Data.ensureLoaded()
 }
 
-/** `プロポーズしたレグを日付ごとに union し、それぞれの区間のデジタコ実績を計算する。
- * 日付が1つだけなら (同日往復のみ) 分割保存の余地が無いため空配列を返す。 */
-function buildLegGroups(headers: string[], rows: string[][], legs: { fromTs: number, toTs: number }[]): ProfitPanelLegGroup[] {
-  const dateGroups = groupLegsByDate(legs)
-  if (dateGroups.length <= 1) return []
-  return dateGroups.map(({ date, fromTs, toTs, legs: dateLegs }) => ({
-    date,
-    range: { fromTs, toTs },
-    summary: summarizeSelectedRows(headers, rows, rowIndicesInTimeRanges(headers, rows, dateLegs)),
-  }))
-}
-
 /** 提案の適用本体。区間・レグ日付グループを反映し `proposeStatus` を確定させる。
  * 候補が1件だけの通常ケースと、複数候補からユーザーが選んだケースの両方から呼ぶ。 */
 function applyProposeCandidate(headers: string[], rows: string[][], candidate: ProposeCandidate) {
   applyProposedRange(headers, rows, candidate.range)
   activeTab.value = 'events'
   proposedLegCount.value = candidate.range.legs.length
-  proposedLegGroups.value = buildLegGroups(headers, rows, candidate.range.legs)
   proposeCandidates.value = []
   proposeStatus.value = 'done'
 }
@@ -299,15 +278,16 @@ async function proposeFromSlips() {
   }
 }
 
-/** ProfitPanel に渡す日付グループ。手動でイベント選択を変えた後は提案時のレグ
- * 情報が現在の選択と対応しなくなるため (提案区間そのままの間だけ有効)、
- * `selectedEventRange` が `proposedEventRange` と一致する間だけ渡す。 */
-const profitPanelLegGroups = computed(() => {
-  const proposed = proposedEventRange.value
-  const selected = selectedEventRange.value
-  if (!proposed || !selected) return []
-  if (proposed.fromTs !== selected.fromTs || proposed.toTs !== selected.toTs) return []
-  return proposedLegGroups.value
+/**
+ * **この運行の便** (`extractAllowanceLegs` = 積みイベント 1 つ = 1 便、Refs #848)。
+ * 収支パネルが「選択区間に入る便」を出して、そこに一番星の明細を結ぶのに使う。
+ * **便の切り方も鍵も①(粗利タブ・運行手当タブ)と同じ関数**で作る — 別に切り直すと
+ * 結んだ相手が①に届かない。
+ */
+const eventLegs = computed(() => {
+  const csv = csvData.value.events
+  if (!csv) return []
+  return extractAllowanceLegs(csv.headers, csv.rows)
 })
 
 /** 選択区間の積地・卸地で `/profit/compare` (類似運行検索) に飛ぶためのクエリ。
@@ -576,12 +556,12 @@ function formatDatetime(val: string | null): string {
 
     <ProfitPanel
       v-if="activeTab === 'events' && selectedEventSummary && !profitPanelDismissed"
-      :vehicle-code="net780VehicleCd"
       :unko-no="unkoNo"
+      :driver-cd="net780DriverCd"
       :range="selectedEventRange"
       :location="selectedEventLocation"
       :summary="selectedEventSummary"
-      :leg-groups="profitPanelLegGroups"
+      :legs="eventLegs"
       @close="profitPanelDismissed = true"
     />
 
