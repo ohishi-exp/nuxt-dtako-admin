@@ -311,6 +311,12 @@ export function sortSnapshotListBySavedAtDesc(items: SnapshotListItem[]): Snapsh
  * 付かなくなる。`{ym}` だけは `\d{4}-\d{2}` まで見る: 段数が同じでも月ではない枝
  * (`profit/allowance-overrides/{kind}/{a}/{b}/latest.json` のような、この先増えうる形) を
  * スナップショットとして読まないため。
+ *
+ * **この先の増加に耐えることを確認済み。** 人の確定の R2 移行は `{kind}` を増やしていく
+ * 連載で (#845 PR-3a の `provisional` に PR-3b の `excluded` / PR-3c の `force-match` が
+ * 続く)、版管理 PR-4 も `profit/` 配下に `latest.json` を足す。`{kind}` が何種類増えても
+ * `profit/allowance-overrides/...` は**2 段目が `YYYY-MM` にならない**ので、段数が 6 段に
+ * なる枝が生えても弾かれる。**新しい種類を足す側は、このファイルを直さなくてよい。**
  */
 const PROFIT_SNAPSHOT_KEY_RE = /^profit\/\d{4}-\d{2}\/[^/]+\/[^/]+\/[^/]+\/latest\.json$/
 

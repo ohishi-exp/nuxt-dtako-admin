@@ -373,6 +373,14 @@ describe('isProfitSnapshotKey', () => {
     expect(isProfitSnapshotKey('profit/2026-7/8504/unko-1/0-3600/latest.json')).toBe(false)
   })
 
+  it('人の確定の {kind} が増えても弾き続ける (#845 PR-3b/PR-3c で増える)', () => {
+    for (const kind of ['provisional', 'excluded', 'force-match']) {
+      expect(isProfitSnapshotKey(`profit/allowance-overrides/${kind}/latest.json`)).toBe(false)
+      // 将来その下に枝が生えて 6 段になっても、2 段目が YYYY-MM でないので通らない。
+      expect(isProfitSnapshotKey(`profit/allowance-overrides/${kind}/2026-07/8504/latest.json`)).toBe(false)
+    }
+  })
+
   it('同じディレクトリの版・履歴は通さない', () => {
     const paths = profitR2Paths('2026-07', '8504', 'unko-1', '0-3600')
     expect(isProfitSnapshotKey(paths.version('20260719T000000'))).toBe(false)
