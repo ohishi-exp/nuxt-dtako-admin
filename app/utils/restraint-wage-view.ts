@@ -499,3 +499,45 @@ export function groupMinWageRows<T>(
       || TIMECARD_JOB_GROUPS.indexOf(a.jobGroup) - TIMECARD_JOB_GROUPS.indexOf(b.jobGroup))
     .map(s => ({ ...s, rows: [...s.rows].sort(byRow) }))
 }
+
+// ---- 表が 0 行のときの文言 (Refs #812) ----
+
+/**
+ * 表が 0 行だった理由の切り分け (pure、Refs #812)。
+ *
+ * - `loading-archive-months`: アーカイブ月一覧をまだ読めていない — **どちらとも
+ *   言えない**
+ * - `no-archive`: この月の R2 アーカイブが無い = 取り込み (`/restraint-fetch`) 漏れ
+ * - `archive-present`: **アーカイブには在るのに 0 行** = 読み先の不具合
+ */
+export type EmptyWageReportCause = 'loading-archive-months' | 'no-archive' | 'archive-present'
+
+/**
+ * 表が 0 行のときに出す文言 (pure、Refs #812)。
+ *
+ * ★ **「アーカイブにありません」と言い切ってはいけない。** 本番 2026-07 で
+ * 「この月の summary がアーカイブにありません」と出ていたのに、同じ月の
+ * `/restraint-api/archive/summaries` は 111 名ぶんを完全に返していた
+ * (原因は relay が ichiban の空の写しを掴んで R2 へ落ちなかったこと)。
+ * **文言が原因の切り分けを妨げ、調査に半日かかった。**
+ * `archiveMonths` を突き合わせて「取り込み漏れ」と「読み先の不具合」を
+ * 分けて出す。
+ */
+export function emptyWageReportCause(
+  ym: string,
+  archiveMonths: readonly string[],
+  archiveMonthsLoaded: boolean,
+): EmptyWageReportCause {
+  if (!archiveMonthsLoaded) return 'loading-archive-months'
+  return archiveMonths.includes(ym) ? 'archive-present' : 'no-archive'
+}
+
+/** `emptyWageReportCause` に対応する画面文言 (pure、Refs #812)。 */
+export const EMPTY_WAGE_REPORT_NOTICE: Record<EmptyWageReportCause, string> = {
+  'loading-archive-months':
+    '集計が 0 行で返りました (アーカイブ月の一覧を読み込み中のため、取り込み漏れかどうかはまだ判定できません)',
+  'no-archive':
+    'この月の summary がアーカイブにありません (/restraint-fetch で取得するか、アーカイブタブで再計算してください)',
+  'archive-present':
+    'この月の summary はアーカイブに在るのに、集計が 0 行で返りました — 「アーカイブにありません」ではありません。取り込みではなく読み先の不具合 (ichiban の写しが空のまま同期済みになっている等) が疑われるので、再取得ではなく開発へ報告してください',
+}

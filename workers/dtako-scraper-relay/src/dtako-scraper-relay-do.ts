@@ -278,6 +278,7 @@ import { buildRestraintD1Statements, type RestraintD1Entry } from "./restraint-d
 import { buildRestraintPushBodies } from "./restraint-push";
 import {
   isWageSourceResponse,
+  wageSourceMonthR2Fallback,
   wageSourceMonthToSummaries,
   type WageSourceMonthWire,
   type WageSourceResponseWire,
@@ -7023,8 +7024,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * (theearth 側にのみ適用。timecard 側は下記の通り別扱い):
    *
    * - fetch 自体の失敗 / 未設定環境 → 全部 R2 (従来経路そのまま)
-   * - fetch は成功したが特定の (source, 月) が未 push (`synced_at` null) →
-   *   その piece だけ R2 から読む (push が追い付くまでの過渡期・新月の初回)
+   * - fetch は成功したが特定の (source, 月) の**写しを信じられない** →
+   *   その piece だけ R2 から読む。判定は `wageSourceMonthR2Fallback` (pure):
+   *   未 push (`synced_at` null、過渡期・新月の初回) と、**push 済みなのに写しが
+   *   summaries も no_data_drivers も空** (#812 — R2 に在るのに表が空になっていた)。
+   *   理由はログのタグ (`r2-piece-fallback` / `r2-empty-copy-fallback`) で分かれる。
    *
    * **timecard 側** (`kintaiCurrent` / `kintaiPrev`) は **`buildKintaiSummariesLive`
    * の成否だけで決める** (2026-08-03 決定、#606-5 — 写しフォールバックを撤去)。
@@ -7158,7 +7162,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return allR2();
     }
 
-    // 未 push (synced_at null) の piece だけ R2 へ (過渡期・新月初回) — **theearth 側のみ**。
+    // 写しを信じられない piece だけ R2 へ — **theearth 側のみ**。判定は pure な
+    // `wageSourceMonthR2Fallback` (未 push / 写しが空、理由別タグはそこの docstring)。
     // timecard 側 (`wire.current_timecard` / `wire.prev_timecard`) はここでは一切読まない
     // (#606-5 — 上の docstring 参照。読むと化石スナップショットが表示に混ざる)
     const pick = async (
@@ -7166,8 +7171,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       fallback: () => ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>,
       label: string,
     ) => {
-      if (month.synced_at !== null) return wageSourceMonthToSummaries(month);
-      console.log(JSON.stringify({ wage_report_source: "r2-piece-fallback", comp_id: compId, piece: label }));
+      const reason = wageSourceMonthR2Fallback(month);
+      if (reason === null) return wageSourceMonthToSummaries(month);
+      console.log(JSON.stringify({ wage_report_source: reason, comp_id: compId, piece: label }));
       return fallback();
     };
     const [current, prev, liveParts] = await Promise.all([

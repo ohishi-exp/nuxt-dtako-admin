@@ -32,6 +32,8 @@ import type {
   WageReportRow,
 } from '~/utils/restraint-wage-view'
 import {
+  EMPTY_WAGE_REPORT_NOTICE,
+  emptyWageReportCause,
   fastBadgeState,
   groupMinWageRows,
   isTimecardSynced,
@@ -377,6 +379,20 @@ function monthTheearthSync(year: number, monthNo: number): TheearthSyncState {
     kintaiMonths.value,
   )
 }
+
+/** 表が 0 行のときの文言 (Refs #812)。判定は pure な `emptyWageReportCause`
+ * (app/utils/restraint-wage-view.ts)。
+ *
+ * ★ **「アーカイブにありません」と言い切っていた文言を捨てたのが要点。**
+ * 本番 2026-07 でそう出ていたのに `/restraint-api/archive/summaries` は
+ * 111 名ぶんを完全に返していた (relay が ichiban の空の写しを掴んで R2 へ
+ * 落ちなかった、#812)。**取り込み漏れと読み先の不具合を混ぜて出すと、
+ * 「もう一度取り込む」という効かない手に人を送り込む。** */
+const emptyReportNotice = computed(
+  () => EMPTY_WAGE_REPORT_NOTICE[
+    emptyWageReportCause(month.value, archiveMonths.value, archiveMonthsLoaded.value)
+  ],
+)
 
 /** 未同期の月から拘束CSV取得画面へ、対象年月を選択済みで飛ぶ (Refs #712)。
  * 別画面で年月を選び直す一手間を挟むと、気づいても押されずに終わる。 */
@@ -5682,7 +5698,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
             </p>
 
             <p v-if="!displayReport?.rows.length && !displayLoading && !gcpReportError" class="text-sm text-gray-500">
-              この月の summary がアーカイブにありません (/restraint-fetch で取得するか、アーカイブタブで再計算してください)
+              {{ emptyReportNotice }}
             </p>
 
             <!-- 初回読み込み中 (report がまだ無い) は下の staleReport に該当せず、
@@ -6653,7 +6669,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
             </div>
 
             <p v-else-if="!salaryComparison" class="text-sm text-gray-500">
-              この月の summary がアーカイブにありません (/restraint-fetch で取得するか、アーカイブタブで再計算してください)
+              {{ emptyReportNotice }}
             </p>
             <template v-else>
               <!-- 絞り込み・並べ替え (Refs #449)。単価マスタ・社員マスタと同じ作法 -->
