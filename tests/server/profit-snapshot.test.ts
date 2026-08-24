@@ -1,10 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
 
-import postHandler from '../../server/api/profit/snapshot.post'
 import getHandler from '../../server/api/profit/snapshot.get'
-import type { R2BucketLite, R2ObjectLite } from '../../server/utils/profit-r2-io'
+import { profitR2Paths, profitVersionTimestamp } from '../../app/utils/profit-r2'
+import { putVersionedProfit, type R2BucketLite, type R2ObjectLite } from '../../server/utils/profit-r2-io'
 
-const callPost = (event: unknown) => (postHandler as unknown as (e: unknown) => Promise<unknown>)(event)
 const callGet = (event: unknown) => (getHandler as unknown as (e: unknown) => Promise<unknown>)(event)
 
 vi.mock('h3', async (importOriginal) => {
@@ -68,66 +67,25 @@ function validSnapshotInput(overrides: Record<string, unknown> = {}) {
   }
 }
 
-describe('POST /api/profit/snapshot', () => {
-  it('PROFIT_R2 未設定なら 503', async () => {
-    const event = { context: {}, _body: validSnapshotInput() }
-    await expect(callPost(event)).rejects.toMatchObject({ statusCode: 503 })
-  })
-
-  it('必須フィールドが欠けていれば 400', async () => {
-    const bucket = new FakeR2Bucket()
-    const event = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _body: { vehicleCode: '8504' } }
-    await expect(callPost(event)).rejects.toMatchObject({ statusCode: 400 })
-  })
-
-  it('body が無ければ 400', async () => {
-    const bucket = new FakeR2Bucket()
-    const event = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _body: null }
-    await expect(callPost(event)).rejects.toMatchObject({ statusCode: 400 })
-  })
-
-  it('ym の形式が不正なら 400', async () => {
-    const bucket = new FakeR2Bucket()
-    const event = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _body: validSnapshotInput({ ym: '2026/06' }) }
-    await expect(callPost(event)).rejects.toMatchObject({ statusCode: 400 })
-  })
-
-  it('正常な入力なら保存し savedAt を実行時刻で埋めて返す', async () => {
-    const bucket = new FakeR2Bucket()
-    const event = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _body: validSnapshotInput() }
-    const result = await callPost(event) as { saved: boolean, changed: boolean, savedAt: string }
-
-    expect(result.saved).toBe(true)
-    expect(result.changed).toBe(true)
-    expect(result.savedAt).toBeTruthy()
-
-    const stored = await bucket.get('profit/2026-06/8504/unko-1/0-3600/latest.json')
-    const parsed = JSON.parse((await stored!.text()))
-    expect(parsed.confirmedAmount).toBe(65000)
-    expect(parsed.savedAt).toBe(result.savedAt)
-  })
-
-  it('同一内容を2回保存しても2回目は changed=false', async () => {
-    const bucket = new FakeR2Bucket()
-    const event1 = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _body: validSnapshotInput() }
-    await callPost(event1)
-    // savedAt はサーバー側で都度上書きされるが、比較対象の body 自体 (savedAt 抜き) は同一
-    const event2 = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _body: validSnapshotInput() }
-    const result2 = await callPost(event2) as { changed: boolean }
-    expect(result2.changed).toBe(false)
-  })
-
-  it('history.jsonl に保存イベントが追記される', async () => {
-    const bucket = new FakeR2Bucket()
-    const event = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _body: validSnapshotInput() }
-    await callPost(event)
-    const history = await bucket.get('profit/2026-06/8504/unko-1/0-3600/history.jsonl')
-    expect(history).not.toBeNull()
-    const line = JSON.parse((await history!.text()).trim())
-    expect(line.confirmedAmount).toBe(65000)
-    expect(line.confirmedCount).toBe(1)
-  })
-})
+/**
+ * **保存済みのスナップショットを直に置く。**
+ *
+ * 元は `POST /api/profit/snapshot` を呼んで作っていたが、**書き込みの口は
+ * 突合一本化 PR-2 (#848) で撤去**した (人の確定は①の強制突合に一本化)。
+ * **読む口は残す** — 既存のスナップショットは人の確認作業の記録で、消さないと決めてある。
+ */
+async function seedSnapshot(bucket: FakeR2Bucket) {
+  const savedAt = '2026-06-21T00:00:00.000Z'
+  const paths = profitR2Paths('2026-06', '8504', 'unko-1', '0-3600')
+  await putVersionedProfit(
+    bucket,
+    paths.latest,
+    paths.version(profitVersionTimestamp(new Date(savedAt))),
+    JSON.stringify({ ...validSnapshotInput(), savedAt }),
+    JSON.stringify(validSnapshotInput()),
+    savedAt,
+  )
+}
 
 describe('GET /api/profit/snapshot', () => {
   it('PROFIT_R2 未設定なら 503', async () => {
@@ -155,8 +113,7 @@ describe('GET /api/profit/snapshot', () => {
 
   it('保存済みなら latest の内容を返す', async () => {
     const bucket = new FakeR2Bucket()
-    const postEvent = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _body: validSnapshotInput() }
-    await callPost(postEvent)
+    await seedSnapshot(bucket)
 
     const getEvent = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _query: { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
     const result = await callGet(getEvent) as { confirmedAmount: number }

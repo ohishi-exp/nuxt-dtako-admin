@@ -9,8 +9,10 @@ import {
   legSaleYen,
   legSalesNote,
   lookupOperationLegSales,
+  lookupUsedSlipIds,
   parseOperationLegSales,
   serializeOperationLegSales,
+  usedSlipsNote,
   type LegSalesInput,
   type OperationLegSalesCache,
 } from '~/utils/operation-leg-sales'
@@ -336,5 +338,94 @@ describe('通し — 粗利タブが出した額がそのまま運行詳細に�
       matchedLegs: 2,
       unmatchedLegs: 1,
     })
+  })
+})
+
+/**
+ * **①が既にどこかの便へ当てた明細** (突合一本化 PR-2、Refs #848)。
+ *
+ * `forceMatchCandidates` の `usedRowIds` に渡すためだけの読み。**空集合に倒したら
+ * 二重計上**なので、テストは「読めないときに `ready` を返さないこと」に寄せてある。
+ * `parseOperationLegSales` (表示用・読めた便だけ出す) との**厳しさの違い**もここで固定する。
+ */
+describe('lookupUsedSlipIds — 候補を出してよいかの門番', () => {
+  const cache = serializeOperationLegSales({
+    ym: '2026-07',
+    byUnko: {
+      [OP_A]: [
+        { seq: 1, customers: [{ name: '○○牧場', yen: 41250 }], slipIds: ['20260703-12'] },
+        { seq: 2, customers: [], slipIds: [] },
+      ],
+      [OP_B]: [{ seq: 1, customers: [{ name: '△△商事', yen: 50000 }], slipIds: ['20260711-30', '20260711-31'] }],
+    },
+  })
+
+  it('★ byUnko 全体の slipIds の和集合を返す (別の運行が当てた明細も「使用済み」)', () => {
+    const hit = lookupUsedSlipIds(cache, OP_A)
+    expect(hit.status).toBe('ready')
+    expect(hit.status === 'ready' && [...hit.usedRowIds].sort()).toEqual(['20260703-12', '20260711-30', '20260711-31'])
+    expect(hit.status === 'ready' && hit.ym).toBe('2026-07')
+  })
+
+  it('★ キーが無ければ missing (空の Set を返さない — 空だと①が当てた明細まで候補に並ぶ)', () => {
+    expect(lookupUsedSlipIds(null, OP_A)).toEqual({ status: 'missing' })
+    expect(lookupUsedSlipIds('', OP_A)).toEqual({ status: 'missing' })
+  })
+
+  it('JSON として壊れていれば missing (投げない)', () => {
+    expect(lookupUsedSlipIds('{壊れ', OP_A)).toEqual({ status: 'missing' })
+  })
+
+  it('object でない / null の JSON も missing', () => {
+    expect(lookupUsedSlipIds('5', OP_A)).toEqual({ status: 'missing' })
+    expect(lookupUsedSlipIds('null', OP_A)).toEqual({ status: 'missing' })
+  })
+
+  it('ym が無い / legs が object でない / legs が null なら missing', () => {
+    expect(lookupUsedSlipIds(JSON.stringify({ legs: {} }), OP_A)).toEqual({ status: 'missing' })
+    expect(lookupUsedSlipIds(JSON.stringify({ ym: '2026-07', legs: 'x' }), OP_A)).toEqual({ status: 'missing' })
+    expect(lookupUsedSlipIds(JSON.stringify({ ym: '2026-07', legs: null }), OP_A)).toEqual({ status: 'missing' })
+  })
+
+  it('★ 便が 1 つでも読めなければ全部やめる (parseOperationLegSales より厳しい)', () => {
+    const broken = JSON.stringify({ ym: '2026-07', legs: { [OP_A]: [{ s: 1, r: ['20260703-12'] }, { s: 'x' }] } })
+    // 表示用は読めた便だけ出す (金額を語らないだけで害が無い)。
+    expect(parseOperationLegSales(broken)?.byUnko[OP_A]).toHaveLength(1)
+    // こちらは候補を出さない — 読めなかった便が当てた明細が「未使用」に見えると二重計上になる。
+    expect(lookupUsedSlipIds(broken, OP_A)).toEqual({ status: 'missing' })
+  })
+
+  it('★ 便の一覧が配列でなければ missing (読めた運行だけで済ませない)', () => {
+    const broken = JSON.stringify({ ym: '2026-07', legs: { [OP_A]: [{ s: 1 }], [OP_B]: 3 } })
+    expect(lookupUsedSlipIds(broken, OP_A)).toEqual({ status: 'missing' })
+  })
+
+  it('★ その運行が突合結果に居なければ not-aggregated (月違い。ym を添えて出す)', () => {
+    expect(lookupUsedSlipIds(cache, '2608011000000000001109')).toEqual({ status: 'not-aggregated', ym: '2026-07' })
+  })
+
+  it('その運行の便が 0 本でも not-aggregated (突合済みで便が無い、とは読ませない)', () => {
+    const empty = JSON.stringify({ ym: '2026-07', legs: { [OP_A]: [] } })
+    expect(lookupUsedSlipIds(empty, OP_A)).toEqual({ status: 'not-aggregated', ym: '2026-07' })
+  })
+})
+
+describe('usedSlipsNote — 空の候補一覧を「結べる明細が無い」と読ませない', () => {
+  it('★ missing は「このブラウザの粗利タブで集計すると出る」と理由まで言う', () => {
+    const note = usedSlipsNote({ status: 'missing' })
+    expect(note).toContain('このブラウザの粗利タブ')
+    expect(note).toContain('結べる候補が出ます')
+    expect(note).toContain('候補を出していません')
+  })
+
+  it('★ not-aggregated はどの月の突合結果を見ているかを言う', () => {
+    const note = usedSlipsNote({ status: 'not-aggregated', ym: '2026-06' })
+    expect(note).toContain('2026-06')
+    expect(note).toContain('この運行はありません')
+    expect(note).toContain('候補を出していません')
+  })
+
+  it('ready のときは何も言わない (候補を出せている)', () => {
+    expect(usedSlipsNote({ status: 'ready', ym: '2026-07', usedRowIds: new Set() })).toBeNull()
   })
 })
