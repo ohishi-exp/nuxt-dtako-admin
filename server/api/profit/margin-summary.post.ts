@@ -80,5 +80,5 @@ export default defineEventHandler(async (event) => {
   )
   await appendProfitHistory(r2, paths.history, JSON.stringify(marginSummaryHistoryLine(snapshot, result.changed)))
 
-  return { saved: true, changed: result.changed, savedAt, codeVersion }
+  return { saved: true, changed: result.changed, savedAt, codeVersion, versionKey: result.versionKey }
 })

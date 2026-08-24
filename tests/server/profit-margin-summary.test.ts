@@ -121,15 +121,18 @@ describe('POST /api/profit/margin-summary', () => {
     })))).rejects.toMatchObject({ statusCode: 400 })
   })
 
-  it('latest + v-{ts} + history に書く', async () => {
+  it('latest + v-{ts} + history に書き、書いた版のキーを返す', async () => {
     const bucket = new FakeR2Bucket()
-    const res = await callPost(eventWith(bucket, validInput())) as { saved: boolean, changed: boolean, codeVersion: string }
+    const res = await callPost(eventWith(bucket, validInput())) as { saved: boolean, changed: boolean, codeVersion: string, versionKey: string }
     expect(res.saved).toBe(true)
     expect(res.changed).toBe(true)
     expect(res.codeVersion).toBe('v0.0.517')
     expect(bucket.store.has(latestKey)).toBe(true)
     expect(versionKeys(bucket)).toHaveLength(1)
     expect(bucket.store.has(historyKey)).toBe(true)
+    // 画面が「どの版になったか」を人に見せられる (Refs #826、親の指摘)
+    expect(res.versionKey).toBe(versionKeys(bucket)[0])
+    expect(res.versionKey).toMatch(/^profit\/2026-07\/margin-summary\/v-\d{8}T\d{6}\.json$/)
   })
 
   it('★ 本番値をそのまま保存する (1 円も動かさない)', async () => {
@@ -171,10 +174,12 @@ describe('POST /api/profit/margin-summary', () => {
 
   it('★ 同じ内容を再送しても版は増えない (sha256 差分検知)', async () => {
     const bucket = new FakeR2Bucket()
-    await callPost(eventWith(bucket, validInput()))
-    const res = await callPost(eventWith(bucket, validInput())) as { changed: boolean }
+    const first = await callPost(eventWith(bucket, validInput())) as { versionKey: string }
+    const res = await callPost(eventWith(bucket, validInput())) as { changed: boolean, versionKey: string }
     expect(res.changed).toBe(false)
     expect(versionKeys(bucket)).toHaveLength(1)
+    // ★ 増えなかった回も「どの版と同じか」を返す (画面が名前を出せる)
+    expect(res.versionKey).toBe(first.versionKey)
   })
 
   it('★ 保存時刻だけ違う再送でも版は増えない', async () => {

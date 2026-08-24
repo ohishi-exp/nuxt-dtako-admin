@@ -96,13 +96,48 @@ describe('putVersionedProfit', () => {
     expect((await bucket.get('dir/v-2.json'))?.text()).resolves.toBe('{"a":2}')
   })
 
+  // --- versionKey (Refs #826) ---
+
+  it('書いた版のキーを返し、customMetadata にも残す', async () => {
+    const bucket = new FakeR2Bucket()
+    const result = await putVersionedProfit(bucket, 'dir/latest.json', 'dir/v-1.json', '{"a":1}', '{"a":1}', '2026-07-19T00:00:00Z')
+    expect(result.versionKey).toBe('dir/v-1.json')
+    expect((await bucket.head('dir/latest.json'))?.customMetadata?.versionKey).toBe('dir/v-1.json')
+  })
+
+  it('★ 版を増やさなかった回は「既にある版」のキーを返す (新しい方ではない)', async () => {
+    const bucket = new FakeR2Bucket()
+    await putVersionedProfit(bucket, 'dir/latest.json', 'dir/v-1.json', '{"a":1}', '{"a":1}', '2026-07-19T00:00:00Z')
+    const result = await putVersionedProfit(bucket, 'dir/latest.json', 'dir/v-2.json', '{"a":1}', '{"a":1}', '2026-07-19T01:00:00Z')
+    expect(result.changed).toBe(false)
+    expect(result.versionKey).toBe('dir/v-1.json')
+  })
+
+  it('版キーを持たない古い保存に当たっても空文字で返す (投げない)', async () => {
+    const bucket = new FakeR2Bucket()
+    // この機能より前に書かれた latest (versionKey 無し) を模す
+    const hash = await sha256Hex(new TextEncoder().encode('{"a":1}'))
+    await bucket.put('dir/latest.json', '{"a":1}', { customMetadata: { sha256: hash, fetchedAt: '2026-07-19T00:00:00Z' } })
+    const result = await putVersionedProfit(bucket, 'dir/latest.json', 'dir/v-2.json', '{"a":1}', '{"a":1}', '2026-07-19T01:00:00Z')
+    expect(result.changed).toBe(false)
+    expect(result.versionKey).toBe('')
+  })
+
+  it('内容が変われば新しい版のキーに切り替わる', async () => {
+    const bucket = new FakeR2Bucket()
+    await putVersionedProfit(bucket, 'dir/latest.json', 'dir/v-1.json', '{"a":1}', '{"a":1}', '2026-07-19T00:00:00Z')
+    const result = await putVersionedProfit(bucket, 'dir/latest.json', 'dir/v-2.json', '{"a":2}', '{"a":2}', '2026-07-19T01:00:00Z')
+    expect(result.changed).toBe(true)
+    expect(result.versionKey).toBe('dir/v-2.json')
+  })
+
   // --- codeVersion (Refs #826) ---
 
   it('codeVersion を渡さなければ customMetadata は従来どおり (空文字も undefined も混ざらない)', async () => {
     const bucket = new FakeR2Bucket()
     await putVersionedProfit(bucket, 'dir/latest.json', 'dir/v-1.json', '{"a":1}', '{"a":1}', '2026-07-19T00:00:00Z')
     const meta = (await bucket.head('dir/latest.json'))?.customMetadata
-    expect(Object.keys(meta!).sort()).toEqual(['fetchedAt', 'lastVerifiedAt', 'sha256'])
+    expect(Object.keys(meta!).sort()).toEqual(['fetchedAt', 'lastVerifiedAt', 'sha256', 'versionKey'])
   })
 
   it('空文字の codeVersion も混ざらない (呼び出し側が unknown に倒す前提)', async () => {

@@ -8,7 +8,9 @@ import {
   marginSummaryHashInput,
   marginSummaryHistoryLine,
   marginSummarySaveNote,
+  marginVersionLabel,
   resolveCodeVersion,
+  ciBuildCodeVersion,
   type MarginSummarySnapshot,
 } from '../../app/utils/margin-r2'
 import { emptyMarginTotals, type MarginCache, type MarginTotals } from '../../app/utils/margin'
@@ -80,6 +82,50 @@ describe('resolveCodeVersion — 空文字や undefined を版に混ぜない', 
   it('「不明」は空文字ではない (版のキーが消えない)', () => {
     expect(UNKNOWN_CODE_VERSION).toBe('unknown')
     expect(UNKNOWN_CODE_VERSION.length).toBeGreaterThan(0)
+  })
+})
+
+describe('ciBuildCodeVersion — タグ以外のビルドで版に名前を付けない', () => {
+  it('タグリリースだけが値を持つ', () => {
+    expect(ciBuildCodeVersion('tag', 'v0.0.517')).toBe('v0.0.517')
+  })
+
+  it('★ staging (main への push) は空文字 — `main` は中身が動き続ける名前で「版」ではない', () => {
+    expect(ciBuildCodeVersion('branch', 'main')).toBe('')
+  })
+
+  it('★ preview (branch への push) も空文字', () => {
+    expect(ciBuildCodeVersion('branch', 'claude/loving-shannon-125496')).toBe('')
+  })
+
+  it('★ CI の外 (env が無い) は空文字 — undefined を版に混ぜない', () => {
+    expect(ciBuildCodeVersion(undefined, undefined)).toBe('')
+    expect(ciBuildCodeVersion(undefined, 'v0.0.517')).toBe('')
+  })
+
+  it('タグなのに名前が無い / 空白だけなら空文字', () => {
+    expect(ciBuildCodeVersion('tag', undefined)).toBe('')
+    expect(ciBuildCodeVersion('tag', '   ')).toBe('')
+  })
+
+  it('★ 空文字はそのままでは版にならない (resolveCodeVersion が unknown に倒す)', () => {
+    expect(resolveCodeVersion(ciBuildCodeVersion('branch', 'main'))).toBe(UNKNOWN_CODE_VERSION)
+    expect(resolveCodeVersion(ciBuildCodeVersion(undefined, undefined))).toBe(UNKNOWN_CODE_VERSION)
+    expect(resolveCodeVersion(ciBuildCodeVersion('tag', 'v0.0.517'))).toBe('v0.0.517')
+  })
+})
+
+describe('marginVersionLabel — 人に見せる版の名前', () => {
+  it('R2 キーから v-{ts} だけ取る', () => {
+    expect(marginVersionLabel('profit/2026-07/margin-summary/v-20260824T102030.json')).toBe('v-20260824T102030')
+  })
+
+  it('版キーを持たない古い保存は空文字のまま', () => {
+    expect(marginVersionLabel('')).toBe('')
+  })
+
+  it('.json が付いていなくても壊れない', () => {
+    expect(marginVersionLabel('v-20260824T102030')).toBe('v-20260824T102030')
   })
 })
 
@@ -199,19 +245,33 @@ describe('marginSummaryHistoryLine — 1 行は小さく保つ', () => {
 })
 
 describe('marginSummarySaveNote — どちらが正かを画面で明示する', () => {
-  const result = { saved: true, changed: true, savedAt: '2026-08-24T10:20:30.000Z', codeVersion: 'v0.0.517' }
+  const result = {
+    saved: true,
+    changed: true,
+    savedAt: '2026-08-24T10:20:30.000Z',
+    codeVersion: 'v0.0.517',
+    versionKey: 'profit/2026-07/margin-summary/v-20260824T102030.json',
+  }
 
-  it('新しい版を残せたら、追えるのは R2 の版だと言う', () => {
+  it('★ 新しい版を残せたら、版の名前を出す (「保存しました」だけにしない)', () => {
     const note = marginSummarySaveNote(result, null)
-    expect(note).toContain('新しい版')
+    expect(note).toContain('新しい版 v-20260824T102030 として保存しました')
     expect(note).toContain('v0.0.517')
     expect(note).toContain('R2 の版で追えます')
   })
 
-  it('内容が同じなら版を増やしていないと言う', () => {
+  it('★ 内容が同じなら「どの版から変わっていないか」を名前で出す', () => {
     const note = marginSummarySaveNote({ ...result, changed: false }, null)
+    expect(note).toContain('前回の版 v-20260824T102030 から変わっていない')
     expect(note).toContain('版は増やしていません')
     expect(note).toContain('R2 の版で追えます')
+  })
+
+  it('版キーを持たない古い保存でも文が壊れない (名前だけ落ちる)', () => {
+    expect(marginSummarySaveNote({ ...result, versionKey: '' }, null))
+      .toContain('新しい版 として保存しました')
+    expect(marginSummarySaveNote({ ...result, changed: false, versionKey: '' }, null))
+      .toContain('前回の版 から変わっていない')
   })
 
   it('★ 残せなかったら黙らない (端末のキャッシュだけだと言う)', () => {
