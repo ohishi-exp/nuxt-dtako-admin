@@ -752,6 +752,47 @@ describe('ProfitPanel', () => {
       expect(wrapper.text()).not.toContain('部分一致')
     })
 
+    /**
+     * **`combinedMatchLevel` は片方でも none なら none に畳む。**「積地は合っている明細」と
+     * 「何も合っていない明細」が同じ「根拠なし」になるので、**候補を選ぶ手掛かりが消える。**
+     * 本番 2026-07 の候補一覧では 1,971 件中 589 件 (29.9%) がこの状態で、候補が 2 件以上
+     * ある便 471 本のうち **113 本**がバッジ一色になっていた。畳んだ側を 1 行で言わせる。
+     */
+    it('★★ 「根拠なし」でも積地だけ当たっていれば、そう言う (畳んだことを黙らない、Refs #858)', async () => {
+      fetchDriverDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'a', originAreaName: '釧路市', destAreaName: '別海町', dest: '別海町' }),
+        slip({ rowId: 'b', originAreaName: '苫小牧市', origin: '苫小牧', destAreaName: '千歳市', dest: '千歳' }),
+      ])
+      const wrapper = createWrapper()
+      await flushPromises()
+      const cells = wrapper.findAll('tbody tr').map(tr => tr.text())
+      // 積地だけ当たっている行 = バッジは「根拠なし」だが、畳んだ側を言う
+      expect(cells.some(t => t.includes('根拠なし') && t.includes('積地のみ一致'))).toBe(true)
+      // 何も当たっていない行 = 足さない (全行に同じ文字が並ぶと候補一覧が読みにくい)
+      expect(cells.some(t => t.includes('根拠なし') && !t.includes('積地のみ一致') && !t.includes('卸地のみ一致'))).toBe(true)
+    })
+
+    it('★ 卸地だけ当たっていれば「卸地のみ一致」と言う', async () => {
+      fetchDriverDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'a', originAreaName: '東京都', origin: '東京', destAreaName: '上士幌町' }),
+      ])
+      const wrapper = createWrapper()
+      await flushPromises()
+      expect(wrapper.text()).toContain('根拠なし')
+      expect(wrapper.text()).toContain('卸地のみ一致')
+    })
+
+    it('両側とも当たっている行には側の一言を足さない (畳んで隠したものが無い)', async () => {
+      fetchDriverDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'a', originAreaName: '釧路市', destAreaName: '上士幌町' }),
+      ])
+      const wrapper = createWrapper()
+      await flushPromises()
+      expect(wrapper.text()).toContain('完全一致')
+      expect(wrapper.text()).not.toContain('積地のみ一致')
+      expect(wrapper.text()).not.toContain('卸地のみ一致')
+    })
+
     it('選択区間の積地・卸地が取れていなくても出せる (根拠は付かない)', async () => {
       fetchDriverDailySlipsMock.mockResolvedValue([slip()])
       const wrapper = createWrapper({ location: null })

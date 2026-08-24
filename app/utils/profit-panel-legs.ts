@@ -179,6 +179,16 @@ function bestMatch(dtakoName: string, areaName: string, freeText: string): Locat
   return matchLocationLevel(dtakoName, freeText)
 }
 
+/** 明細 1 件の突合結果。**畳んだ `badge` と、畳む前の両側**を必ずセットで持つ。 */
+export interface SlipMatch {
+  /** `combinedMatchLevel` の 3 段。**`/profit/monthly` の一覧と同じ言葉・同じ意味。** */
+  badge: SlipBadge
+  /** 選択区間の積地 vs 明細の積地。 */
+  originMatch: LocationMatchLevel
+  /** 選択区間の卸地 vs 明細の卸地。 */
+  destMatch: LocationMatchLevel
+}
+
 /**
  * 根拠バッジ。**候補の並べ替えには使わない** — 並びは `forceMatchCandidates`
  * (積地が一致する明細が先) のもので、こちらは目印だけ。
@@ -195,17 +205,40 @@ function bestMatch(dtakoName: string, areaName: string, freeText: string): Locat
  *
  * - **both partial (や exact+partial) → 「完全一致」から「部分一致」へ。**壊れたのではなく、
  *   いままでが嘘だった
- * - **片側だけ当たり (もう片方が none) → 「部分一致」から「根拠なし」へ。**
- *   `combinedMatchLevel` は「片方でも none なら根拠なし」。積地しか合っていない明細を
- *   「部分的な根拠がある」と読ませない
+ * - **片側だけ当たり (もう片方が none) → 「部分一致」から「根拠なし」へ**
+ *
+ * ## ★ 畳んだ両側を捨てない (`slipSideNote`)
+ *
+ * 後者は**候補一覧の 3 割**に当たる (本番 2026-07 で 1,971 候補中 589 件)。バッジだけに
+ * すると「積地は合っている明細」と「何も合っていない明細」が**同じ「根拠なし」に潰れる** —
+ * 候補が 2 件以上ある便 471 本のうち **113 本**が、バッジ一色なのに両側を見れば
+ * 見分けが付く状態になる。**畳んだことを黙らない**ために両側を返し、
+ * `slipSideNote` が「片側だけ当たり」を画面に言わせる。
  *
  * 選択区間の積地・卸地が取れていない (`location` が `null`) ときは、突合する相手が
  * 無いので全件 `none` — 「根拠が無い」であって「結べない」ではない。
  */
-export function slipBadge(location: SelectedRowsLocationRange | null, slip: VehicleDailySlip): SlipBadge {
+export function slipMatch(location: SelectedRowsLocationRange | null, slip: VehicleDailySlip): SlipMatch {
   const originMatch = bestMatch(location?.originCity ?? '', slip.originAreaName, slip.origin)
   const destMatch = bestMatch(location?.destCity ?? '', slip.destAreaName, slip.dest)
-  return combinedMatchLevel(originMatch, destMatch)
+  return { badge: combinedMatchLevel(originMatch, destMatch), originMatch, destMatch }
+}
+
+/**
+ * バッジが**畳んで隠した**ことを言う一言。隠していなければ `null` (何も出さない)。
+ *
+ * `combinedMatchLevel` は「片方でも `none` なら根拠なし」なので、**積地だけ当たっている
+ * 明細と、何ひとつ当たっていない明細が同じ「根拠なし」になる。**候補を選ぶ人にとっては
+ * これが唯一の手掛かりであることがあるので、**その 1 行だけは残す。**
+ *
+ * **バッジが `none` でないときは `null`** — 両側とも当たっているので畳んで隠したものが
+ * 無く、書くと全行に同じ文字が並んで候補一覧が読みにくくなるだけ。
+ */
+export function slipSideNote(match: SlipMatch): string | null {
+  if (match.badge !== 'none') return null
+  if (match.originMatch !== 'none') return '積地のみ一致'
+  if (match.destMatch !== 'none') return '卸地のみ一致'
+  return null
 }
 
 /**
