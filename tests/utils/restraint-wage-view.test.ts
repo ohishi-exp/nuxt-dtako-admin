@@ -376,4 +376,31 @@ describe('emptyWageReportCause', () => {
     expect(EMPTY_WAGE_REPORT_NOTICE['archive-present']).toContain('開発へ報告')
     expect(EMPTY_WAGE_REPORT_NOTICE['loading-archive-months']).toContain('読み込み中')
   })
+
+  // ★ 画面が実際に評価する合成 (cause → 文言) をそのまま固定する。上の 2 つを
+  // 別々に見るだけだと「対応表が入れ替わる」壊し方に対して間接的な守りしか無い。
+  // **文言が逆に出るのは #812 と同じ種類の事故** (原因の切り分けを妨げ、
+  // 効かない手 = 再取得へ人を送り込む) なので、両側を直接押さえる。
+  const notice = (ym: string, months: readonly string[], loaded = true) =>
+    EMPTY_WAGE_REPORT_NOTICE[emptyWageReportCause(ym, months, loaded)]
+
+  it('アーカイブに在る月の文言は「ありません」と言わず、再取得へ送らない', () => {
+    const text = notice('2026-07', ['2026-07'])
+    expect(text).toContain('アーカイブに在る')
+    expect(text).not.toContain('アーカイブにありません')
+    expect(text).not.toContain('/restraint-fetch')
+  })
+
+  it('アーカイブに無い月の文言は「ありません」と言い、再取得へ送る', () => {
+    const text = notice('2026-07', ['2026-06'])
+    expect(text).toContain('アーカイブにありません')
+    expect(text).toContain('/restraint-fetch')
+    expect(text).not.toContain('アーカイブに在る')
+  })
+
+  it('一覧が未読のあいだは、どちらとも言わない', () => {
+    const text = notice('2026-07', [], false)
+    expect(text).not.toContain('アーカイブにありません')
+    expect(text).not.toContain('アーカイブに在る')
+  })
 })
