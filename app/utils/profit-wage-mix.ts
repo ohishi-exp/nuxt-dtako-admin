@@ -168,6 +168,18 @@ export interface WageMixRow {
   statutoryHours: number | null
   /** 割増係数 (時間)。時間外×1.25 + 深夜×0.25 + 法定休日×0.35。 */
   premiumHours: number | null
+  /**
+   * 割増係数の**内訳** (時間、Refs #816)。表に列は無いが、基本給・残業の
+   * セルにホバーで出す計算式 (`profit-wage-formula.ts`) が当てはめる値。
+   * 割増係数 137.1h だけでは時間外と深夜の内訳が読めないため持たせている。
+   *
+   * **金額には 1 円も効かない** — `premiumHours` を分解して置いただけ。
+   * **`statutoryHours` 〜 `overtimeYen` と一緒に null になる** (欠測を 0 に倒さない)。
+   */
+  overtimeHours: number | null
+  nightHours: number | null
+  /** 法定休日 (時間)。拘束時間サマリは持たないので通常 0。 */
+  holidayHours: number | null
   workDays: number | null
   baseWageYen: number | null
   overtimeYen: number | null
@@ -220,6 +232,9 @@ export function computeWageMixRow(input: WageMixInput, settings: WageMixSettings
     travelYen,
     statutoryHours: null,
     premiumHours: null,
+    overtimeHours: null,
+    nightHours: null,
+    holidayHours: null,
     workDays: null,
     baseWageYen: null,
     overtimeYen: null,
@@ -260,6 +275,9 @@ export function computeWageMixRow(input: WageMixInput, settings: WageMixSettings
     travelYen,
     statutoryHours,
     premiumHours,
+    overtimeHours: r.overtimeMinutes / 60,
+    nightHours: r.nightMinutes / 60,
+    holidayHours: holidayMinutes / 60,
     workDays: r.workDays,
     baseWageYen,
     overtimeYen,

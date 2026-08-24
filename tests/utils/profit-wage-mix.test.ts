@@ -321,6 +321,7 @@ describe('summarizeWageMix', () => {
     const totals = summarizeWageMix([{
       driverCd: '1', driverName: 'x', allowanceBaseYen: 0, travelYen: 0,
       statutoryHours: null, premiumHours: null, workDays: null,
+      overtimeHours: null, nightHours: null, holidayHours: null,
       baseWageYen: null, overtimeYen: null, totalYen: 10, currentYen: 0, diffYen: null,
       currentEstimated: false, currentReason: null, missingReason: null,
     }])
