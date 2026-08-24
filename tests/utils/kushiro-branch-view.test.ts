@@ -54,8 +54,11 @@ const PROD_MASTER: MinWageMaster = {
 
 const YM = '2026-07'
 
-function view(over: Partial<Parameters<typeof buildKushiroBranchView>[1]> = {}) {
-  return buildKushiroBranchView(operations, { ym: YM, minWageMaster: PROD_MASTER, ...over })
+function view(
+  over: Partial<Parameters<typeof buildKushiroBranchView>[1]> & { operations?: RebuildOperationInput[] } = {},
+) {
+  const { operations: ops = operations, ...options } = over
+  return buildKushiroBranchView(ops, { ym: YM, minWageMaster: PROD_MASTER, ...options })
 }
 
 function distribution(over: Partial<LegsPerRunDistribution> = {}): LegsPerRunDistribution {
@@ -324,8 +327,28 @@ describe('画面に渡す形に畳む', () => {
     expect(s.allowanceYen).toBe(golden.doto.summary.totals.allowanceYen)
     expect(s.measuredDeadheadKm).toBeCloseTo(4288.9, 6)
     expect(s.missingLegs).toBe(0)
+    // 共有 fixture の卸地はぜんぶ実測 (運行終了の代用は 1 本も無い)。
+    expect(s.substitutedUnloadLegs).toBe(0)
     expect(s.haulSpeedKmh).toBeCloseTo(golden.doto.speedKmh.haul, 9)
     expect(s.deadheadSpeedKmh).toBeCloseTo(golden.doto.speedKmh.deadhead, 9)
+  })
+
+  it('卸地を運行終了で代用した便は、サマリにも 経路別・乗務員別 にも数が出る (黙って混ぜない)', () => {
+    const marked: RebuildOperationInput[] = operations.map(op => ({
+      ...op,
+      legs: op.legs.map(l => ({ ...l, unloadFromOperationEnd: true })),
+    }))
+    const v = view({ operations: marked })
+    expect(v.summary.legs).toBe(38)
+    expect(v.summary.missingLegs).toBe(0)
+    // 推定に入った便ぜんぶが代用 (欠測 0 なので 38 便すべて)。
+    expect(v.summary.substitutedUnloadLegs).toBe(38)
+    for (const rows of [v.routes, v.drivers]) {
+      expect(rows.reduce((a, r) => a + r.substitutedUnloadLegs, 0)).toBe(38)
+    }
+    // **推定の数字そのものは 1 つも動かない** (代用は印であって座標ではない)。
+    expect(v.selected).toEqual(view().selected)
+    expect(v.routes.map(r => r.depotDiffKm)).toEqual(view().routes.map(r => r.depotDiffKm))
   })
 
   it('経路別・乗務員別を足すと全体に戻る (行の推定を足しても全体の推定になる)', () => {

@@ -343,6 +343,12 @@ export interface KushiroBreakdownRow {
   depotDiffKm: number | null
   /** 座標が欠けて推定に入れられなかった便数。 */
   missingLegs: number
+  /**
+   * そのうち、**卸地を運行終了の位置で代用**した便数 (Refs #760 の 38)。
+   * **`missingLegs` とは別物** — 代用した便は推定に入っている。実測の卸地だけの
+   * 推定に戻したい読み手のために、混ぜたまま黙らせない。
+   */
+  substitutedUnloadLegs: number
 }
 
 /** 便/日 を 1 点に固定したときの、営業所 1 つぶんの姿 (`SensitivityRow` を平らにしたもの)。 */
@@ -385,6 +391,12 @@ export interface KushiroBranchSummary {
   haulKm: number
   measuredDeadheadKm: number
   missingLegs: number
+  /**
+   * そのうち、**卸地を運行終了の位置で代用**した便数 (Refs #760 の 38)。
+   * **`missingLegs` とは別物** — 代用した便は推定に入っている。実測の卸地だけの
+   * 推定に戻したい読み手のために、混ぜたまま黙らせない。
+   */
+  substitutedUnloadLegs: number
   haulSpeedKmh: number | null
   deadheadSpeedKmh: number | null
 }
@@ -475,6 +487,7 @@ function breakdownRow(
     rebuiltDeadheadKm: mapDepots(d => rebuiltDeadheadKm(totals, d, legsPerDay)),
     depotDiffKm: rebuiltDepotDiffKm(totals, 'obihiro', 'kushiro', legsPerDay),
     missingLegs: totals.missingLegs,
+    substitutedUnloadLegs: totals.substitutedUnloadLegs,
   }
 }
 
@@ -562,6 +575,7 @@ export function buildKushiroBranchView(
       haulKm: totals.haulKm,
       measuredDeadheadKm: totals.deadheadKm,
       missingLegs: totals.missingLegs,
+      substitutedUnloadLegs: totals.substitutedUnloadLegs,
       haulSpeedKmh: totals.haulSec <= 0 ? null : totals.haulKmTimed / hoursOfSeconds(totals.haulSec),
       deadheadSpeedKmh: rebuildDeadheadSpeedKmh(totals),
     },

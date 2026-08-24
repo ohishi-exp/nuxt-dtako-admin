@@ -10,7 +10,7 @@
 | `deadhead-idle-2026-07.json` | 同じ 91 運行の `preLoadKm`/`postUnloadKm`/`preLoadSec`/`postUnloadSec` (`allowance-idle.ts` の `OperationIdle` の部分型)。**回送の平均速度を実測から出す**ための入力 | 同上 |
 | `measured-2026-07.json` | **本番 2026-07 の実測** (`dtako:margin:cache:v9`、2026-08-23)。全体・うち釧路積み・pure 38 運行の km 内訳・乗務員別便数・**釧路積みの経路別 17 本**。回帰の的で、**手で書いたファイル** (もう 1 つは `doto-measured-2026-07.json`) | 同上 |
 | `golden/summary-2026-07.json` | `summarizeKushiroLoading` + `depotShiftDiff` + `deadheadSpeedKmh` の出力 golden — **手で編集しない** | 同上 |
-| `doto-operations-2026-07.json` | **道東卸し (積地=釧路 かつ 卸地=標茶/別海) の 38 便 / 23 運行** (Refs #760 の 34)。上の `KushiroOperationInput` に、便ごとの積地・卸地 GPS と 走行秒・回送秒 を足した `RebuildOperationInput` | `tests/utils/kushiro-doto-rebuild.test.ts`、`workers/kyuyo-mcp/test/kushiro-doto-rebuild.test.ts` |
+| `doto-operations-2026-07.json` | **道東卸し (積地=釧路 かつ 卸地=標茶/別海) の 38 便 / 23 運行** (Refs #760 の 34)。上の `KushiroOperationInput` に、便ごとの積地・卸地 GPS と 走行秒・回送秒 を足した `RebuildOperationInput`。**卸地はぜんぶ実測**なので `unloadFromOperationEnd` は全便 `false` (Refs #760 の 38) | `tests/utils/kushiro-doto-rebuild.test.ts`、`workers/kyuyo-mcp/test/kushiro-doto-rebuild.test.ts` |
 | `doto-measured-2026-07.json` | 同じ 38 便のオーナー実測集計 (2026-08-23 報告)。回帰の的。**手で書いたファイル** | 同上 |
 | `golden/doto-2026-07.json` | `summarizeDotoRebuild` ほかの出力 golden + `kushiroLoaders` — **手で編集しない** | 同上 |
 
@@ -47,6 +47,19 @@ other 1,055.1。乗務員別の釧路積み便数も実測どおり (中村 71 /
 
 同じ理由で、運行の `postUnloadKm` + `otherKm` は**最終便の `deadheadKm` の内側**に
 収めてある (`allowance-idle.ts` の `tailKm` / `otherKm` はその便に乗る値)。
+
+### 本番との違い (Refs #760 の 38)
+
+**本番 2026-07 の道東 38 便は「実測の卸地 37 / 運行終了で代用 1」**
+(`001420` 西島 07-13 の別海便。降しイベントが 1 行も無い最終便で、運行終了は標茶町 =
+卸地の約 20km 手前)。**この fixture は 38 便とも実測の卸地**なので
+`golden/doto-2026-07.json` の `substitutedUnloadLegs` は 0。
+
+**便数 (38) と欠測 (0) は本番と揃っている** — 揃っていないのは代用の内訳だけで、
+座標が実在の卸地である以上、幾何の不変条件 (下記) を保つには fixture 側を
+実測のままにしておく方が正しい。代用の数え方そのものは
+`kushiro-doto-rebuild.test.ts` / `kushiro-branch-view.test.ts` /
+`KushiroBranchPanel.test.ts` の専用テストが固定している。
 
 意図的に仕込んである欠測:
 

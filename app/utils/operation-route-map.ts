@@ -93,6 +93,15 @@ export interface OperationRoute {
   droppedRows: number
   /** 便ごとの時間窓 (NET780 軌跡を切るため)。時刻が読めない便の窓は入らない。 */
   windows: LegWindow[]
+  /**
+   * この運行が何便に割れたか (`extractOperationIdle` の `legKmDetail` と同じ本数)。
+   *
+   * **`markers` から数え直せない。** 積みの GPS が無効な便には `load` marker が出ない
+   * ので、marker の `legSeq` の最大値は最終便とは限らない。「この便は運行の最終便か」を
+   * 判定する側 (`margin-rebuild-input.ts` の卸地の代用) がここを見る — **便の数え方を
+   * 呼び出し側で作り直さないため**の 1 フィールド。GPS 列が無い CSV は 0。
+   */
+  legCount: number
 }
 
 /** 行ごとの分類 (1 回目の走査で便を確定させてから 2 回目で線にする)。 */
@@ -119,7 +128,7 @@ function samePoint(a: LatLng | undefined, b: LatLng): boolean {
 }
 
 function emptyRoute(): OperationRoute {
-  return { segments: [], markers: [], pointCount: 0, droppedRows: 0, windows: [] }
+  return { segments: [], markers: [], pointCount: 0, droppedRows: 0, windows: [], legCount: 0 }
 }
 
 /** 行の `開始日時` / `終了日時` を epoch 秒に。列が無い・読めない → null。 */
@@ -300,6 +309,7 @@ export function buildOperationRoute(headers: string[], rows: string[][]): Operat
     pointCount,
     droppedRows,
     windows: buildLegWindows(timeline, legs, nameIdx, startTsIdx, endTsIdx),
+    legCount: legs.length,
   }
 }
 
@@ -395,6 +405,8 @@ function labelWithCity(base: string, city: string): string {
  *   (何行 GPS が使えなかったかは便で割れない)
  * - `windows`: `legSeq` が `seqs` にある窓だけ (NET780 軌跡もその便のぶんだけ切れるように)。
  *   `trackHaul` / `trackDeadhead` の区切りも `legSeq` で同じに残る
+ * - `legCount` は**運行ぶんをそのまま**運ぶ (元の運行が何便だったか。絞り込んだ本数では
+ *   ない — `droppedRows` と同じ扱い)
  */
 export function pickLegsFromRoute(route: OperationRoute, seqs: number[]): OperationRoute {
   // `Set<number | null>` にしておくと `legSeq` の null を素直に落とせる (`seqs` に null は
@@ -408,6 +420,7 @@ export function pickLegsFromRoute(route: OperationRoute, seqs: number[]): Operat
     pointCount: segments.reduce((sum, s) => sum + s.path.length, 0),
     droppedRows: route.droppedRows,
     windows: route.windows.filter(w => keep.has(w.legSeq)),
+    legCount: route.legCount,
   }
 }
 
@@ -416,6 +429,11 @@ export function pickLegsFromRoute(route: OperationRoute, seqs: number[]): Operat
  * 連結し (`windows` も)、`pointCount` / `droppedRows` は和。**便番号は運行ごとに 1 から振り直されている**
  * ので、重ねた後の `legSeq` は「何本目の便か」ではなくなる (マーカーの `label` も同じ) —
  * 描くのに要るのは色と位置だけなので、振り直さない。
+ *
+ * **`legCount` は 0 のまま** (和にしない)。上のとおり重ねた後の `legSeq` は運行を
+ * またいで衝突しているので、「最終便はどれか」を決められない。0 にしておけば
+ * `legPointsByLegSeq` の代用は**何も起きない** — 重ねた地図から卸地を推定しない、
+ * という意味で安全側。
  */
 export function mergeRoutes(routes: OperationRoute[]): OperationRoute {
   const merged = emptyRoute()
@@ -511,7 +529,8 @@ export function serializeRouteMapLayers(layers: RouteMapLayers): string {
 /**
  * `layers` で OFF の層の区切り・マーカーを落とす (描画用。元の route は変えない)。
  * `pointCount` は**残した** `segments` の点数 (`pickLegsFromRoute` と同じ)。`droppedRows` /
- * `windows` はそのまま (何行 GPS が使えなかったか・便の時間窓は層で変わらない)。
+ * `windows` / `legCount` はそのまま (何行 GPS が使えなかったか・便の時間窓・便の本数は
+ * 層で変わらない)。
  */
 export function filterRouteByLayers(route: OperationRoute, layers: RouteMapLayers): OperationRoute {
   const segments = route.segments.filter(s => layers[SEGMENT_LAYER[s.kind]])
@@ -521,5 +540,6 @@ export function filterRouteByLayers(route: OperationRoute, layers: RouteMapLayer
     pointCount: segments.reduce((sum, s) => sum + s.path.length, 0),
     droppedRows: route.droppedRows,
     windows: route.windows,
+    legCount: route.legCount,
   }
 }

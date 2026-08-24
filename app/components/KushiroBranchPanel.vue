@@ -132,6 +132,12 @@ const TONE_CLASS: Record<Tone, string> = {
           座標が取れず推定に入れられなかった便が <b>{{ summary.missingLegs }}</b> 本あります
           (0km に倒さず母集団から外しています)。
         </p>
+        <p v-if="summary.substitutedUnloadLegs > 0" class="text-amber-600 dark:text-amber-400">
+          推定に入れた便のうち <b>{{ summary.substitutedUnloadLegs }}</b> 本は<b>降しの記録が無い最終便</b>で、
+          <b>運行終了の位置を卸地として代用</b>しています (実測の卸地ではありません)。
+          運行終了が中継拠点であれば荷を降ろした場所そのものですが、そうでない運行では
+          実際の卸地より手前になります。
+        </p>
       </div>
 
       <!-- 実測の合計 -->
@@ -286,6 +292,7 @@ const TONE_CLASS: Record<Tone, string> = {
               <td class="px-2 py-1 whitespace-nowrap">
                 {{ r.label }}
                 <span v-if="r.missingLegs > 0" class="text-amber-600 dark:text-amber-400" :title="`座標が欠けて推定に入れられなかった便 ${r.missingLegs}`">*</span>
+                <span v-if="r.substitutedUnloadLegs > 0" class="text-amber-600 dark:text-amber-400" :title="`卸地を運行終了の位置で代用した便 ${r.substitutedUnloadLegs}`">&dagger;</span>
               </td>
               <td class="px-2 py-1 text-right">{{ r.legs }}</td>
               <td class="px-2 py-1 text-right">{{ fmtYen(r.salesYen) }}</td>
@@ -324,6 +331,7 @@ const TONE_CLASS: Record<Tone, string> = {
               <td class="px-2 py-1 whitespace-nowrap">
                 {{ d.label }}
                 <span v-if="d.missingLegs > 0" class="text-amber-600 dark:text-amber-400" :title="`座標が欠けて推定に入れられなかった便 ${d.missingLegs}`">*</span>
+                <span v-if="d.substitutedUnloadLegs > 0" class="text-amber-600 dark:text-amber-400" :title="`卸地を運行終了の位置で代用した便 ${d.substitutedUnloadLegs}`">&dagger;</span>
               </td>
               <td class="px-2 py-1 text-right">{{ d.legs }}</td>
               <td class="px-2 py-1 text-right">{{ fmtYen(d.salesYen) }}</td>

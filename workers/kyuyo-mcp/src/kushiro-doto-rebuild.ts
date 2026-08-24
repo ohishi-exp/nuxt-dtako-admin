@@ -148,6 +148,16 @@ export interface RebuildLegInput extends KushiroLegInput {
   loadPoint?: LatLng | null
   /** 卸地の実測 GPS。取れなければ `null`。 */
   unloadPoint?: LatLng | null
+  /**
+   * `unloadPoint` が実測の降しではなく、**運行終了の位置で代用**したものか
+   * (`margin-rebuild-input.ts` の `substituteOperationEnd`、Refs #760 の 38)。
+   *
+   * **推定には入れるが、混ぜたまま黙らせない。** 実測 2026-07 の代用 12 本のうち
+   * 11 本は運行終了が中継拠点 (音更町駒場) で卸地そのものだが、1 本 (別海便) は
+   * 卸地の約 20km 手前で運行が終わっている。`RebuildTotals.substitutedUnloadLegs`
+   * が数えるので、読み手が「実測だけの推定」に絞り直せる。
+   */
+  unloadFromOperationEnd?: boolean
   /** 売上走行の実測秒 (`LegKmDetail.haulSec`)。読めなければ `null`。 */
   haulSec?: number | null
   /**
@@ -267,6 +277,12 @@ export interface RebuildTotals {
   estimatedLegs: number
   /** 座標が欠けていて推定を出せなかった便数。**黙って 0km にしない。** */
   missingLegs: number
+  /**
+   * `estimatedLegs` のうち、**卸地を運行終了の位置で代用した**便数
+   * (`RebuildLegInput.unloadFromOperationEnd`)。実測の卸地から出した推定と
+   * 区別できるようにするためだけの数で、**推定の値そのものには効かない。**
+   */
+  substitutedUnloadLegs: number
   /** 推定を出せた便だけの実測回送km (較正の分母)。 */
   comparableDeadheadKm: number
   /** Σ(卸地 → 積地) の直線距離。**営業所に依らない** (便間の回送)。 */
@@ -295,6 +311,7 @@ export function emptyRebuildTotals(): RebuildTotals {
     deadheadKmTimed: 0,
     estimatedLegs: 0,
     missingLegs: 0,
+    substitutedUnloadLegs: 0,
     comparableDeadheadKm: 0,
     destToLoadKm: 0,
     depotToLoadKm: mapDepots(() => 0),
@@ -335,6 +352,9 @@ export function addRebuildLeg(
     return
   }
   totals.estimatedLegs += 1
+  // **推定に入った便だけ数える** — 欠測のまま外した便を「代用した」と数えると、
+  // 代用の本数が推定の母集団と合わなくなる。
+  if (leg.unloadFromOperationEnd === true) totals.substitutedUnloadLegs += 1
   totals.comparableDeadheadKm += leg.deadheadKm
   totals.destToLoadKm += haversineKm(leg.unloadPoint, leg.loadPoint)!
   for (const depot of DEPOT_KEYS) {

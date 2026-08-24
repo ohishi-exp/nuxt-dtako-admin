@@ -554,7 +554,10 @@ async function resolveOperation(op: OperationListItem): Promise<ResolvedOperatio
       legKmDetail: idle.legKmDetail,
       // 便ごとの積地・卸地 GPS (Refs #760 の 35)。**便の切り方は `extractOperationIdle`
       // と同じ行**なので `legSeq` は `legKmDetail` の index + 1 と一致する。
-      legPoints: legPointsByLegSeq(buildOperationRoute(csv.headers, csv.rows).markers),
+      // 降しの記録が無い最終便は、`legPointsByLegSeq` が**運行終了の位置を卸地として
+      // 代用**する (Refs #760 の 38)。代用したかは `LegPoints.unloadFromOperationEnd`
+      // に残る — **km には 1 つも効かない** (座標だけ)。
+      legPoints: legPointsByLegSeq(buildOperationRoute(csv.headers, csv.rows)),
     }
   }
   catch (e) {

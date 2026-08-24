@@ -40,6 +40,7 @@
     "deadheadKmTimed": 4288.9,
     "estimatedLegs": 38,
     "missingLegs": 0,
+    "substitutedUnloadLegs": 0,
     "comparableDeadheadKm": 4288.9,
     "destToLoadKm": 1676.6418350303652,
     "depotToLoadKm": {
@@ -68,6 +69,7 @@
       "deadheadKmTimed": 3210.7000000000003,
       "estimatedLegs": 31,
       "missingLegs": 0,
+      "substitutedUnloadLegs": 0,
       "comparableDeadheadKm": 3210.7000000000003,
       "destToLoadKm": 1271.8595006015814,
       "depotToLoadKm": {
@@ -96,6 +98,7 @@
       "deadheadKmTimed": 1078.2,
       "estimatedLegs": 7,
       "missingLegs": 0,
+      "substitutedUnloadLegs": 0,
       "comparableDeadheadKm": 1078.2,
       "destToLoadKm": 404.7823344287839,
       "depotToLoadKm": {
@@ -124,6 +127,7 @@
       "deadheadKmTimed": 3256.9,
       "estimatedLegs": 29,
       "missingLegs": 0,
+      "substitutedUnloadLegs": 0,
       "comparableDeadheadKm": 3256.9,
       "destToLoadKm": 1274.9885511494367,
       "depotToLoadKm": {
@@ -150,6 +154,7 @@
       "deadheadKmTimed": 473,
       "estimatedLegs": 4,
       "missingLegs": 0,
+      "substitutedUnloadLegs": 0,
       "comparableDeadheadKm": 473,
       "destToLoadKm": 180.45101787716595,
       "depotToLoadKm": {
@@ -176,6 +181,7 @@
       "deadheadKmTimed": 415,
       "estimatedLegs": 4,
       "missingLegs": 0,
+      "substitutedUnloadLegs": 0,
       "comparableDeadheadKm": 415,
       "destToLoadKm": 163.03889878269786,
       "depotToLoadKm": {
@@ -202,6 +208,7 @@
       "deadheadKmTimed": 144,
       "estimatedLegs": 1,
       "missingLegs": 0,
+      "substitutedUnloadLegs": 0,
       "comparableDeadheadKm": 144,
       "destToLoadKm": 58.16336722106456,
       "depotToLoadKm": {
@@ -478,6 +485,7 @@
    "deadheadKmTimed": 7484.1,
    "estimatedLegs": 72,
    "missingLegs": 2,
+   "substitutedUnloadLegs": 0,
    "comparableDeadheadKm": 7428.5,
    "destToLoadKm": 4806.714444530045,
    "depotToLoadKm": {
@@ -506,6 +514,7 @@
      "deadheadKmTimed": 3210.7000000000003,
      "estimatedLegs": 31,
      "missingLegs": 0,
+     "substitutedUnloadLegs": 0,
      "comparableDeadheadKm": 3210.7000000000003,
      "destToLoadKm": 1271.8595006015814,
      "depotToLoadKm": {
@@ -534,6 +543,7 @@
      "deadheadKmTimed": 1143.0000000000002,
      "estimatedLegs": 12,
      "missingLegs": 1,
+     "substitutedUnloadLegs": 0,
      "comparableDeadheadKm": 1088.5000000000002,
      "destToLoadKm": 1159.277736764391,
      "depotToLoadKm": {
@@ -562,6 +572,7 @@
      "deadheadKmTimed": 1004.4,
      "estimatedLegs": 11,
      "missingLegs": 1,
+     "substitutedUnloadLegs": 0,
      "comparableDeadheadKm": 1003.3000000000001,
      "destToLoadKm": 972.7996995650702,
      "depotToLoadKm": {
@@ -590,6 +601,7 @@
      "deadheadKmTimed": 1047.8,
      "estimatedLegs": 11,
      "missingLegs": 0,
+     "substitutedUnloadLegs": 0,
      "comparableDeadheadKm": 1047.8,
      "destToLoadKm": 997.9951731702182,
      "depotToLoadKm": {
@@ -618,6 +630,7 @@
      "deadheadKmTimed": 1078.2,
      "estimatedLegs": 7,
      "missingLegs": 0,
+     "substitutedUnloadLegs": 0,
      "comparableDeadheadKm": 1078.2,
      "destToLoadKm": 404.7823344287839,
      "depotToLoadKm": {
