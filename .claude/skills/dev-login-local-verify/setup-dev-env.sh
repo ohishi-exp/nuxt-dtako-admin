@@ -16,10 +16,13 @@
 #   --no-build        nuxt build を強制スキップ
 #   --build           nuxt build を強制実行
 #
-# build の既定は「.output/server/index.mjs が無い時だけ実行」。hybrid では UI は
-# nuxt dev (:3000) が配信するため、wrangler 側の .output は binding 依存 route
-# (/api/proxy, /__dev) を動かすためだけに必要 — UI が古くても問題ない。
-# server/ 配下や依存 (auth-client 等) を変えた時だけ --build を付けること。
+# build の既定は「.output/server/index.mjs が無い時だけ実行」。**いつ --build が要るかは
+# hybrid かどうかで変わる**:
+#   --hybrid あり: UI は nuxt dev (:3000) が配信するので .output が古くても問題ない。
+#                  server/ 配下や依存 (auth-client 等) を変えた時だけ --build。
+#   --hybrid なし: **.output が UI そのもの**。app/ の .vue・画面の文言を変えたら
+#                  --build が要る。付け忘れると **古いバンドルを配信したまま測ってしまう**
+#                  (chunk のハッシュが変わらないのが唯一の手掛かり。2026-08-24 に実害)。
 #
 # やること: git fetch → worktree add/更新 (origin/main detached) → node_modules を
 # donor から junction (0秒) or npm install (gh auth token) → wrangler.prebuilt.toml 生成
@@ -141,7 +144,12 @@ fi
 if [ "$BUILD" = auto ]; then
   if [ -f "$WT/.output/server/index.mjs" ]; then
     BUILD=0
-    echo "== [5/6] nuxt build スキップ (.output あり。server/ や依存を変えた時は --build)"
+    if [ "$HYBRID" = 1 ]; then
+      echo "== [5/6] nuxt build スキップ (.output あり。UI は nuxt dev が配信。server/ や依存を変えた時は --build)"
+    else
+      echo "== [5/6] nuxt build スキップ (.output あり)"
+      echo "!! この .output が UI を配信する。app/ を変えたなら --build が要る (古いバンドルを配信したまま測ることになる)"
+    fi
   else
     BUILD=1
   fi

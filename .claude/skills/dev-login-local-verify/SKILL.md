@@ -160,6 +160,13 @@ bash .claude/skills/dev-login-local-verify/setup-dev-env.sh --hybrid   # + nuxt 
    ```
    - `wrangler.prebuilt.toml` は使い捨て生成物 (コミットしない)。wrangler.toml を
      変えたら sed から再生成する。
+   - **★ `setup-dev-env.sh` で立て直しても build は走らない。** 既定は
+     「`.output/server/index.mjs` が無い時だけ build」なので、**再起動しただけでは
+     古いバンドルを配信し続ける** (`--hybrid` なら UI は nuxt dev が配信するので
+     問題にならないが、**hybrid でないと `.output` が UI そのもの**)。
+     画面の文言を変えたのに配信物に出てこない、というときはまずこれを疑う —
+     **chunk のハッシュが変わらないのが唯一の手掛かり**。`--build` を付けるか、
+     手で `npx nuxt build` してから reload を待つこと (2026-08-24 に実害)。
    - **ソース (app/server/auth-client) を変えたら手順3の `npx nuxt build` を
      再実行するだけでよい — wrangler dev の再起動は不要**。wrangler は bundle
      入力 (`.output/**`) を watch しており、`.output` の変化を検知して自動で
