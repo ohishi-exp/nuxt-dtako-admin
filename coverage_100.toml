@@ -447,3 +447,20 @@ branches = true
 [[files]]
 path = "app/utils/profit-actual-wage.ts"
 branches = true
+
+# 賃金構成の表で、基本給・残業の金額に**ホバーしたときに出す計算式**を組み立てる
+# (Refs #816)。表の下の注記が書けるのは式の一般形だけなので、ここは**その乗務員の
+# 数字を当てはめた式**を返す。**金額は 1 円も再計算しない** — `=` の右は
+# `computeWageMixRow` が出した `baseWageYen` / `overtimeYen` をそのまま出す
+# (掛け直すと表とホバーで金額が食い違う)。
+# **欠測 (拘束が引けず金額 null) の行は式を出さない**分岐と、**法定休日の項は
+# 有るときだけ並べる**分岐が中核なので、その両側を数えることに意味がある。
+# branches: BR() 計測器を probe (片側だけ通る `if` / 両側通る `if` / 右を評価しない
+# `??` を仕込んだ .ts) で**両方向に**検証 — 片側の probe が `[true]`、両側の probe が
+# `[true,false]`、`??` の左が `[true]` を返すことを実測してから、instrumented コピー
+# (TypeScript の AST で機械挿入) でテストを流し、**`profit-wage-formula.ts` の 5 分岐
+# + `profit-wage-mix.ts` の 24 分岐 = 29 分岐すべてが true/false 両方を通る**ことを
+# 数えた (v8 も 100%/100%)。
+[[files]]
+path = "app/utils/profit-wage-formula.ts"
+branches = true

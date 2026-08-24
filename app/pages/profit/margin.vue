@@ -106,6 +106,7 @@ import {
   type WageMixMethod,
   type WageMixRestraint,
 } from '~/utils/profit-wage-mix'
+import { wageMixBaseFormula, wageMixOvertimeFormula } from '~/utils/profit-wage-formula'
 import { fetchActualWageByDriver } from '~/utils/profit-actual-wage'
 import { EXCLUDED_KEY, parseExcluded, isExcluded, type ExcludedMap } from '~/utils/allowance-excluded'
 import { LAST_SEARCH_KEY, parseLastSearch, serializeLastSearch } from '~/utils/allowance-last-search'
@@ -2542,8 +2543,18 @@ function downloadCustomerRouteCsv() {
                   <td class="text-right py-1 px-2">{{ row.workDays ?? '-' }}</td>
                   <td class="text-right py-1 px-2">{{ hours(row.statutoryHours) }}</td>
                   <td class="text-right py-1 px-2">{{ hours(row.premiumHours) }}</td>
-                  <td class="text-right py-1 px-2">{{ yen(row.baseWageYen) }}</td>
-                  <td class="text-right py-1 px-2">{{ yen(row.overtimeYen) }}</td>
+                  <!-- 基本給・残業は**ホバー**でその乗務員の数字を当てはめた式を出す (Refs #816)。
+                       行は増やさない — 印刷の紙割りが動くため。式の一般形は表の下の注記に残す -->
+                  <td
+                    class="text-right py-1 px-2"
+                    :class="{ 'cursor-help': row.baseWageYen !== null }"
+                    :title="wageMixBaseFormula(row, wageMix) ?? undefined"
+                  >{{ yen(row.baseWageYen) }}</td>
+                  <td
+                    class="text-right py-1 px-2"
+                    :class="{ 'cursor-help': row.overtimeYen !== null }"
+                    :title="wageMixOvertimeFormula(row, wageMix) ?? undefined"
+                  >{{ yen(row.overtimeYen) }}</td>
                   <td class="text-right py-1 px-2">{{ yen(row.travelYen) }}</td>
                   <td class="text-right py-1 px-2 font-medium">{{ yen(row.totalYen) }}</td>
                   <td class="text-right py-1 px-2" :class="row.currentEstimated ? 'text-amber-600 dark:text-amber-400' : 'text-gray-500'">
