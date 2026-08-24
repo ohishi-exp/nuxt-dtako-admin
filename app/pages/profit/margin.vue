@@ -63,6 +63,13 @@ import {
 } from '~/utils/operation-route-map'
 import { driverShareBars } from '~/utils/margin-driver-share'
 import { routeOperationRows, runDatesByUnkoNo } from '~/utils/margin-route-operations'
+import {
+  OPERATION_LEG_SALES_KEY,
+  buildOperationLegSales,
+  serializeOperationLegSales,
+  type LegSalesInput,
+  type OperationLegSalesByUnko,
+} from '~/utils/operation-leg-sales'
 import { filterValidGpsPoints } from '~/utils/net780'
 import { NET780_ARCHIVE_BATCH_SIZE, chunk, remainingNet780ArchiveTargets, summarizeNet780ArchiveResults, formatNet780ArchiveSummary, type Net780ArchiveResultItem } from '~/utils/net780-archive'
 import { parseTargets, serializeTargets, toggleTarget, driverLabel } from '~/utils/allowance-targets'
@@ -238,6 +245,19 @@ const uncovered = ref<UncoveredTotals | null>(null)
  * 対象外便の多い乗務員 (2026-07 の西島は手当の 4 割) の旅費が黙って低く出る。
  */
 const uncoveredByDriver = ref<Record<string, number> | null>(null)
+/**
+ * **運行NO → 便ごとに当たった一番星の売上の要約** (Refs #820)。運行詳細
+ * (`/operations/{運行NO}`) が読む — この画面には 1 文字も出ない。
+ *
+ * 粗利の数字には **1 円も効かない**。`MARGIN_CACHE_KEY` とは**別のキー**
+ * (`OPERATION_LEG_SALES_KEY`) に書く — `MarginCache` は明細を持たない (量が桁違い)
+ * 形のまま変えず、片方が壊れてももう片方は動くようにする
+ * (`MARGIN_LEG_POINTS_KEY` / `UNCOVERED_BY_DRIVER_KEY` と同じ作法)。
+ *
+ * **一番星が落ちて突合できなかったときは `null`** = 書かない。空を書くと、運行詳細が
+ * 「突合済みで 1 便も当たらなかった」と読んでしまう。
+ */
+const legSalesByUnko = ref<OperationLegSalesByUnko | null>(null)
 /**
  * **運行が月を跨いだぶん** (Refs #760 の 16)。集計前 / 古いキャッシュからは null。
  *
@@ -464,6 +484,20 @@ function writeCache() {
     }
     catch {
       // 保存できなくても画面の数字は正しい (次に集計すればまた埋まる)。
+    }
+  }
+  // **便ごとの売上要約も別のキー・別の try** (Refs #820)。運行詳細だけが読むので、
+  // ここが溢れても粗利のキャッシュは残す。**突合できていない (null) ときは書かない** —
+  // 空を書くと運行詳細が「突合済みで 1 便も当たらなかった」と読む。
+  if (legSalesByUnko.value !== null) {
+    try {
+      localStorage.setItem(
+        OPERATION_LEG_SALES_KEY,
+        serializeOperationLegSales({ ym: shownYm.value, byUnko: legSalesByUnko.value }),
+      )
+    }
+    catch {
+      // 保存できなくても粗利タブの数字は正しい (運行詳細が「集計すると出ます」に戻るだけ)。
     }
   }
 }
@@ -850,6 +884,11 @@ function reconcileSales(
   uncovered: UncoveredTotals | null
   /** 乗務員CD → 対象外便の手当 (Refs #760 の 40)。旅費の母数に使う。 */
   uncoveredByDriver: Record<string, number>
+  /**
+   * 運行NO → 便ごとの売上要約 (Refs #820)。**運行詳細が別キーから読むためだけ**に
+   * 畳む — この画面の数字には 1 円も効かない。
+   */
+  legSales: OperationLegSalesByUnko
 } {
   const ordered = byDriver ? orderedDriverRows(rows) : orderedVehicleRows(rows)
   const inputsForReconcile: VehicleReconcileInput[] = ordered
@@ -857,9 +896,14 @@ function reconcileSales(
   const byLeg = applyForcedSales(rows, reconcileVehicles(inputsForReconcile, slips.pool).byLeg, forced)
   const salesByLeg = new Map<string, number>()
   const customersByLeg = new Map<string, LegCustomerShare[]>()
+  // 運行詳細に渡す便ごとの要約 (Refs #820)。**同じ突合結果・同じ `customersOfSlips` から
+  // 作る** — 別に畳むと粗利タブと違う金額を出す画面になる。
+  const legSalesInputs: LegSalesInput[] = []
   for (const [key, hit] of byLeg) {
     salesByLeg.set(key, hit.salesYen)
-    customersByLeg.set(key, customersOfSlips(hit.slips))
+    const customers = customersOfSlips(hit.slips)
+    customersByLeg.set(key, customers)
+    legSalesInputs.push({ key, customers, slipIds: hit.slips.map(s => s.rowId) })
   }
   // **乗務員で引けているときだけ対象外の便を起こす。** 車番引きでは、その乗務員が
   // 別の車番で走った日の明細を持っていないので、起こすべき便が見えない
@@ -879,6 +923,8 @@ function reconcileSales(
     // **乗務員別も同時に畳む** (Refs #760 の 40)。`UncoveredTotals` は合計しか持たず、
     // その形は `margin.ts` (触らない) にあるので、別の器で持つ。旅費の母数に要る。
     uncoveredByDriver: sumUncoveredByDriver(legs, driverCdByName.value),
+    // **運行詳細のための要約** (Refs #820)。突合はここでやり直さない。
+    legSales: buildOperationLegSales(legSalesInputs),
   }
 }
 
@@ -894,6 +940,7 @@ async function run() {
   legPointsByUnko.value = new Map()
   uncovered.value = null
   uncoveredByDriver.value = null
+  legSalesByUnko.value = null
   crossMonth.value = null
   progress.value = '運行を検索中...'
   try {
@@ -975,6 +1022,7 @@ async function run() {
       customersByLeg = sales.customersByLeg
       uncovered.value = sales.uncovered
       uncoveredByDriver.value = sales.uncoveredByDriver
+      legSalesByUnko.value = sales.legSales
     }
     catch (e) {
       salesError.value = e instanceof Error ? e.message : String(e)

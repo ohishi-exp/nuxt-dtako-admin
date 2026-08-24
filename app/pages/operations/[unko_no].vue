@@ -14,6 +14,16 @@ import {
 import type { ProfitPanelLegGroup } from '~/utils/profit-r2'
 import { fetchVehicleDailySlips } from '~/utils/ichiban'
 import { shiftYmd } from '~/utils/profit-compare'
+import {
+  OPERATION_LEG_SALES_KEY,
+  LEG_SALES_TITLE,
+  LEG_SALES_SNAPSHOT_NOTE,
+  parseOperationLegSales,
+  lookupOperationLegSales,
+  legSaleYen,
+  legSalesNote,
+  type OperationLegSalesLookup,
+} from '~/utils/operation-leg-sales'
 
 const route = useRoute()
 const router = useRouter()
@@ -43,8 +53,47 @@ const activeTab = ref<CsvType | 'net780'>('events')
 const csvData = ref<Record<string, CsvJsonResponse>>({})
 const csvLoading = ref(false)
 
+// --- 便ごとの「粗利タブの計上額」 (突合一本化 PR-1、Refs #820) ---------------
+// **突合はここでやり直さない。** `reconcileVehicles` は明細のプールを順に消費するので、
+// 1 運行だけで突合し直すと月次の突合が別の運行に割り当てた明細に当たり得る (粗利タブと
+// 違う金額が出る画面になる)。**粗利タブが突合したときに別キーへ書いた要約を読むだけ。**
+//
+// **画面には突合の数字が 2 つ並ぶ。** こちらが「粗利タブの計上額」(粗利・乗務員別・
+// 取引先別・印刷に乗る値)、画面下の `ProfitPanel` が「検証スナップショット」(車番だけで
+// 引いた候補を人が確認した記録)。**乖離が見えること自体が PR-1 の目的**なので
+// `ProfitPanel` は残す — ただし `LEG_SALES_SNAPSHOT_NOTE` で毎回どちらが計上値かを言う。
+//
+// 「一番星の伝票から区間を提案」も**別のもの** (伝票から区間を当てる提案で、突合結果
+// ではない)。区画も見出しも分けてある。
+const legSales = ref<OperationLegSalesLookup>({ status: 'missing' })
+
+/** 粗利タブが書いた要約。**読めなければ `missing`** (「粗利タブで集計すると出ます」)。 */
+function readLegSales(): OperationLegSalesLookup {
+  try {
+    return lookupOperationLegSales(parseOperationLegSales(localStorage.getItem(OPERATION_LEG_SALES_KEY)), unkoNo)
+  }
+  catch {
+    // localStorage 自体が読めない環境。突合し直して埋めることはしない。
+    return { status: 'missing' }
+  }
+}
+
+/** 突合結果が無いときに出す一言。あるときは `null` (便を並べる)。 */
+const legSalesMissingNote = computed(() => legSalesNote(legSales.value))
+/** 突合結果があるときだけの中身 (template で union を絞らずに読むため)。 */
+const legSalesReady = computed(() => (legSales.value.status === 'ready' ? legSales.value : null))
+/**
+ * 便ごとの表示行。**`yen` が `null` の便は「当たっていません」**と出す —
+ * ¥0 と出すと「売上 0 円の便」に読めてしまう。
+ */
+const legSaleRows = computed(() =>
+  (legSalesReady.value?.legs ?? []).map(leg => ({ ...leg, yen: legSaleYen(leg) })))
+
+const yen = (v: number) => `¥${Math.round(v).toLocaleString()}`
+
 // Fetch operation detail
 onMounted(async () => {
+  legSales.value = readLegSales()
   try {
     operations.value = await getOperation(unkoNo)
   } catch (e) {
@@ -430,6 +479,54 @@ function formatDatetime(val: string | null): string {
               類似運行を探す →
             </NuxtLink>
           </div>
+        </div>
+        <!-- 便ごとに当たった一番星の売上 (Refs #820)。粗利タブの突合結果を読むだけで、
+             この画面では突合し直さない。上の「区間を提案」(提案) とは別物。 -->
+        <div
+          v-if="activeTab === 'events'"
+          class="border-b border-gray-200 dark:border-gray-800 px-4 py-3 text-xs"
+        >
+          <div class="flex items-baseline gap-2 flex-wrap">
+            <span class="font-medium text-gray-700 dark:text-gray-300">{{ LEG_SALES_TITLE }}</span>
+            <span v-if="legSalesReady" class="text-gray-400">便ごと ({{ legSalesReady.ym }} の突合)</span>
+            <span v-if="legSalesReady" class="ml-auto">
+              <template v-if="legSalesReady.salesYen !== null">
+                合計 <b class="tabular-nums">{{ yen(legSalesReady.salesYen) }}</b>
+              </template>
+              <span v-else class="text-gray-400">どの便も一番星の明細に当たっていません</span>
+            </span>
+          </div>
+          <p v-if="legSalesMissingNote" class="text-gray-400 mt-1">
+            {{ legSalesMissingNote }}
+          </p>
+          <ul v-else class="mt-1 space-y-0.5">
+            <li v-for="leg in legSaleRows" :key="leg.seq" class="flex items-baseline gap-2 flex-wrap">
+              <span class="text-gray-500 shrink-0">便{{ leg.seq }}</span>
+              <template v-if="leg.yen !== null">
+                <span class="font-medium tabular-nums">{{ yen(leg.yen) }}</span>
+                <span class="text-gray-600 dark:text-gray-300">
+                  <template v-for="(c, i) in leg.customers" :key="i">
+                    <span v-if="i > 0" class="text-gray-300 dark:text-gray-600"> / </span>
+                    <span>{{ c.name }}</span>
+                    <!-- 取引先が 2 つ以上ある便だけ内訳の金額も出す (1 つなら便の金額と同じ)。
+                         **`&nbsp;` で離す** — 素の空白は template のコンパイル時に落ちて
+                         「△△商事¥50,000」と繋がる (mount で実測)。 -->
+                    <span
+                      v-if="leg.customers.length > 1"
+                      class="text-gray-500 tabular-nums"
+                    >&nbsp;{{ yen(c.yen) }}</span>
+                  </template>
+                </span>
+                <span v-if="leg.slipIds.length > 0" class="text-gray-400">伝票 {{ leg.slipIds.join(', ') }}</span>
+              </template>
+              <span v-else class="text-gray-400">一番星の明細に当たっていません</span>
+            </li>
+          </ul>
+          <!-- 突合の数字が 2 つ並ぶので、**どちらが計上値か**を毎回言う (混ぜると誤読される)。
+               計上額を出しているときだけ添える (何も出ていない区画に他の区画の話は要らない)。 -->
+          <p v-if="legSalesReady" class="text-gray-400 mt-1.5">
+            {{ LEG_SALES_SNAPSHOT_NOTE }}
+          </p>
         </div>
         <Net780OperationSummary
           v-if="activeTab === 'net780'"
