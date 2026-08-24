@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { legKey } from '~/utils/allowance-ichiban'
 import { customersOfSlips } from '~/utils/margin'
 import {
-  LEG_SALES_SNAPSHOT_NOTE,
+  LEG_SALES_PANEL_NOTE,
   LEG_SALES_TITLE,
   OPERATION_LEG_SALES_KEY,
   buildOperationLegSales,
@@ -40,19 +40,36 @@ describe('OPERATION_LEG_SALES_KEY — MarginCache とは別のキー', () => {
 })
 
 /**
- * 運行詳細には**突合の数字が 2 つ並ぶ** — こちら (粗利タブの計上額) と `ProfitPanel` の
- * 検証スナップショット。構造的に違う額なので、**ラベルが混ざったら誤読される。**
- * 文言が黙って変わらないよう CI で固定する。
+ * 運行詳細には**数字が 2 か所に出る** — こちら (粗利タブの計上額 = ①の集計結果) と、
+ * 画面下の収支パネル (**①への人の上書き**)。#849 より前は本当に別のエンジン
+ * (②の検証スナップショット) だったが、いまは**結ぶとこちらも動く**。
+ *
+ * **文言が事実とずれると嘘になる** — #851 で実際に本番へ出た (「収支パネルで結んでも
+ * 粗利には乗らない」と読める注記が、#849 の後も残っていた)。CI で固定する。
  */
-describe('ラベル — 2 つの突合結果を混ぜて読ませない', () => {
-  it('★ 見出しは「粗利タブの計上額」と言い切る (「一番星売上」では検証スナップショットと区別が付かない)', () => {
+describe('ラベル — 2 か所の数字の関係を毎回言う', () => {
+  it('★ 見出しは「粗利タブの計上額」と言い切る (「一番星売上」では何の額か分からない)', () => {
     expect(LEG_SALES_TITLE).toBe('粗利タブの計上額')
   })
 
-  it('★ 注記が「収支パネル」を名指しし、どちらが粗利・印刷に乗るかまで言う', () => {
-    expect(LEG_SALES_SNAPSHOT_NOTE).toContain('収支パネル')
-    expect(LEG_SALES_SNAPSHOT_NOTE).toContain('検証スナップショット')
-    expect(LEG_SALES_SNAPSHOT_NOTE).toContain('印刷に乗るのはこちらの計上額')
+  it('★ 注記が「収支パネル」を名指しし、結んだ内容がこの計上額に反映されると言う', () => {
+    expect(LEG_SALES_PANEL_NOTE).toContain('収支パネル')
+    expect(LEG_SALES_PANEL_NOTE).toContain('人の上書き')
+    expect(LEG_SALES_PANEL_NOTE).toContain('この計上額へ反映されます')
+  })
+
+  it('★★ 「粗利には乗らない」と読める言い方をしていない (#849 で嘘になった文言)', () => {
+    expect(LEG_SALES_PANEL_NOTE).not.toContain('検証スナップショット')
+    expect(LEG_SALES_PANEL_NOTE).not.toContain('別の突合')
+  })
+
+  it('★ 置き換えであって足し算ではないと言う (結ぶと①が当てた明細が外れる)', () => {
+    expect(LEG_SALES_PANEL_NOTE).toContain('置き換えであって足し算ではありません')
+  })
+
+  it('★ 結んだ直後にこの額が動かないのは正常だと言う (直さないと今度は逆向きに誤読される)', () => {
+    expect(LEG_SALES_PANEL_NOTE).toContain('結んだ直後にこの額が動かないのは正常')
+    expect(LEG_SALES_PANEL_NOTE).toContain('粗利タブで集計し直してからこの画面を開き直して')
   })
 })
 

@@ -16,7 +16,7 @@ import { shiftYmd } from '~/utils/profit-compare'
 import {
   OPERATION_LEG_SALES_KEY,
   LEG_SALES_TITLE,
-  LEG_SALES_SNAPSHOT_NOTE,
+  LEG_SALES_PANEL_NOTE,
   parseOperationLegSales,
   lookupOperationLegSales,
   legSaleYen,
@@ -57,10 +57,11 @@ const csvLoading = ref(false)
 // 1 運行だけで突合し直すと月次の突合が別の運行に割り当てた明細に当たり得る (粗利タブと
 // 違う金額が出る画面になる)。**粗利タブが突合したときに別キーへ書いた要約を読むだけ。**
 //
-// **画面には突合の数字が 2 つ並ぶ。** こちらが「粗利タブの計上額」(粗利・乗務員別・
-// 取引先別・印刷に乗る値)、画面下の `ProfitPanel` が「検証スナップショット」(車番だけで
-// 引いた候補を人が確認した記録)。**乖離が見えること自体が PR-1 の目的**なので
-// `ProfitPanel` は残す — ただし `LEG_SALES_SNAPSHOT_NOTE` で毎回どちらが計上値かを言う。
+// **画面には数字が 2 か所に出るが、別のエンジンではない** (#849 で変わった)。こちらが
+// 「粗利タブの計上額」(①が月全体を回した結果のうちこの運行のぶん)、画面下の
+// `ProfitPanel` が**その①への人の上書き** (`FORCE_MATCH_KEY`)。**結ぶとこちらも動く**
+// — ただし**次に粗利タブで集計してから**なので、`LEG_SALES_PANEL_NOTE` で毎回
+// 「結んだ直後に動かないのは正常」まで言う (#851)。
 //
 // 「一番星の伝票から区間を提案」も**別のもの** (伝票から区間を当てる提案で、突合結果
 // ではない)。区画も見出しも分けてある。
@@ -505,7 +506,7 @@ function formatDatetime(val: string | null): string {
           <!-- 突合の数字が 2 つ並ぶので、**どちらが計上値か**を毎回言う (混ぜると誤読される)。
                計上額を出しているときだけ添える (何も出ていない区画に他の区画の話は要らない)。 -->
           <p v-if="legSalesReady" class="text-gray-400 mt-1.5">
-            {{ LEG_SALES_SNAPSHOT_NOTE }}
+            {{ LEG_SALES_PANEL_NOTE }}
           </p>
         </div>
         <Net780OperationSummary
