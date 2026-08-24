@@ -288,3 +288,93 @@ export function toSnapshotListItem(snapshot: ProfitSnapshot): SnapshotListItem {
 export function sortSnapshotListBySavedAtDesc(items: SnapshotListItem[]): SnapshotListItem[] {
   return [...items].sort((a, b) => b.savedAt.localeCompare(a.savedAt))
 }
+
+// --- 一覧に載せてよいものの見分け (Refs #850) ---
+
+/**
+ * R2 のキーが**保存済み検証スナップショットのもの**か。
+ *
+ * 一覧 (`snapshots.get.ts`) はもともと「`profit/` 配下で `/latest.json` で終わるキー」を
+ * 全部スナップショットとして読んでいたが、**`profit/` の下に別種の `latest.json` が
+ * 増えた**ため、`ProfitSnapshot` ではない JSON まで `toSnapshotListItem` に渡って
+ * 500 になっていた (#850)。実際に踏んだのは 2 つ:
+ *
+ * - `profit/{ym}/margin-summary/latest.json` (#826 粗利集計の版管理) — `?ym=` で踏む
+ * - `profit/allowance-overrides/{kind}/latest.json` (#845 人の確定の R2 移行) — `ym` 無しで踏む
+ *
+ * **「`/latest.json` で終わる」では見分けられない。** スナップショットのキーは
+ * `profitR2Paths` が組む `profit/{ym}/{vehicleCode}/{unkoNo}/{segmentId}/latest.json` で
+ * **段数が決まっている**ので、そこで弾く。上の 2 つはどちらも 4 段なので落ちる。
+ *
+ * 段ごとに `if` で割らず 1 本の正規表現にするのは `isMarginVersionKey` と同じ理由 —
+ * 割ると「今のキーでは片側が永久に通らない `if`」が並び、効いている判定と見分けが
+ * 付かなくなる。`{ym}` だけは `\d{4}-\d{2}` まで見る: 段数が同じでも月ではない枝
+ * (`profit/allowance-overrides/{kind}/{a}/{b}/latest.json` のような、この先増えうる形) を
+ * スナップショットとして読まないため。
+ */
+const PROFIT_SNAPSHOT_KEY_RE = /^profit\/\d{4}-\d{2}\/[^/]+\/[^/]+\/[^/]+\/latest\.json$/
+
+export function isProfitSnapshotKey(key: string): boolean {
+  return PROFIT_SNAPSHOT_KEY_RE.test(key)
+}
+
+/**
+ * 本文が**一覧が読む形をしているか**。`isProfitSnapshotKey` で形は合っていても、
+ * 中身まで `ProfitSnapshot` である保証は無い (キーの形は同じで中身が別物、壊れた JSON) ため
+ * 二重に見る。
+ *
+ * 見るのは**一覧が実際に触る 2 つだけ**: `confirmedSlips` (`toSnapshotListItem` の
+ * `.map`。#850 で落ちたのはここ) と `savedAt` (`sortSnapshotListBySavedAtDesc` の
+ * `.localeCompare`)。ほかの欄は写して出すだけで、欠けても一覧は壊れない —
+ * **欠けているだけの古い保存を「読めなかった」に倒さない**ため、そこまでは見ない。
+ */
+function isProfitSnapshotShape(value: unknown): value is ProfitSnapshot {
+  if (typeof value !== 'object') return false
+  if (value === null) return false
+  const v = value as Partial<ProfitSnapshot>
+  if (!Array.isArray(v.confirmedSlips)) return false
+  return typeof v.savedAt === 'string'
+}
+
+/**
+ * スナップショットの本文 (JSON 文字列) を読む。**読めなければ `null`** — 例外を投げない。
+ *
+ * 投げると 1 件の壊れた本文で一覧全体が 500 になる (#850 で起きたこと)。呼び出し側は
+ * `null` を**数えて画面に出す** — 黙って飛ばすと「この条件では保存が無い」と
+ * 「読めなかった」が同じ見た目になる。
+ */
+export function parseProfitSnapshot(text: string): ProfitSnapshot | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  }
+  catch {
+    return null
+  }
+  return isProfitSnapshotShape(parsed) ? parsed : null
+}
+
+/** `GET /api/profit/snapshots` の応答。 */
+export interface SnapshotListResult {
+  items: SnapshotListItem[]
+  /** 条件に一致した保存済みスナップショットの件数 (`limit` で絞る前)。 */
+  total: number
+  /**
+   * **キーの形はスナップショットなのに本文を読めなかった件数** (削除 race、壊れた本文)。
+   *
+   * **形で弾いたもの (`margin-summary` / `allowance-overrides` 等) は含まない** —
+   * そもそもスナップショットではないので「欠けている」ではない。こちらは本当の欠測。
+   */
+  unreadable: number
+}
+
+/**
+ * **本文を読めなかった保存があることを画面に出す**ための文言。無ければ空文字。
+ * `marginVersionUnreadableNote` (margin-versions.ts) と同じ役目・同じ言い切り方で、
+ * **「保存が無い」と読ませない**ことをはっきり書く。
+ */
+export function snapshotUnreadableNote(unreadable: number): string {
+  if (unreadable <= 0) return ''
+  return `${unreadable} 件は保存の本文を R2 から読めませんでした — この条件で保存が無いのではなく、読めていません`
+    + ' (保存そのものは R2 に残っています)。'
+}

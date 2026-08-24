@@ -137,18 +137,77 @@ describe('GET /api/profit/snapshots', () => {
     expect(result.items).toHaveLength(1)
   })
 
-  it('list に出るが get すると null (削除race等) なキーはスキップする', async () => {
+  it('limit=0 なら既定の上限を使う (0 件表示に倒さない)', async () => {
+    const bucket = new FakeR2Bucket()
+    await putSnapshot(bucket, '2026-06', '8504', 'unko-1', '0-3600')
+
+    const result = await call(eventWith({ PROFIT_R2: bucket }, { limit: '0' })) as { items: unknown[] }
+    expect(result.items).toHaveLength(1)
+  })
+
+  it('list に出るが get すると null (削除race等) なキーは一覧から外し、「読めなかった」として数える', async () => {
     const bucket = new FakeR2Bucket()
     bucket.phantomKeys.push('profit/2026-06/8504/unko-1/0-3600/latest.json')
-    const result = await call(eventWith({ PROFIT_R2: bucket })) as { items: unknown[], total: number }
+    const result = await call(eventWith({ PROFIT_R2: bucket })) as { items: unknown[], total: number, unreadable: number }
     expect(result.items).toEqual([])
     expect(result.total).toBe(0)
+    // **黙って飛ばさない** — 「保存が無い」と「読めなかった」を同じ見た目にしない (Refs #850)。
+    expect(result.unreadable).toBe(1)
   })
 
   it('保存済みが無ければ空配列を返す', async () => {
     const bucket = new FakeR2Bucket()
-    const result = await call(eventWith({ PROFIT_R2: bucket })) as { items: unknown[], total: number }
+    const result = await call(eventWith({ PROFIT_R2: bucket })) as { items: unknown[], total: number, unreadable: number }
     expect(result.items).toEqual([])
     expect(result.total).toBe(0)
+    expect(result.unreadable).toBe(0)
+  })
+
+  // --- profit/ 配下の別種の latest.json (Refs #850) ---
+
+  it('profit/{ym}/margin-summary/latest.json (#826) を読まない — `?ym=` が 500 だった原因', async () => {
+    const bucket = new FakeR2Bucket()
+    await putSnapshot(bucket, '2026-07', '8504', 'unko-1', '0-3600')
+    // 粗利集計の版 (MarginSummarySnapshot)。confirmedSlips を持たないので
+    // ProfitSnapshot として読むと toSnapshotListItem の .map で落ちる。
+    await bucket.put('profit/2026-07/margin-summary/latest.json', JSON.stringify({ ym: '2026-07', totals: { operations: 91, salesYen: 10260265, allowanceYen: 2499500, marginYen: 4467597 } }))
+
+    const result = await call(eventWith({ PROFIT_R2: bucket }, { ym: '2026-07' })) as { items: Array<{ unkoNo: string }>, total: number, unreadable: number }
+    expect(result.items.map(i => i.unkoNo)).toEqual(['unko-1'])
+    expect(result.total).toBe(1)
+    // **仲間ではないので「欠けている」ではない。** 数えない。
+    expect(result.unreadable).toBe(0)
+  })
+
+  it('profit/allowance-overrides/{kind}/latest.json (#845) を読まない — `ym` 無しが 500 だった原因', async () => {
+    const bucket = new FakeR2Bucket()
+    await putSnapshot(bucket, '2026-07', '8504', 'unko-1', '0-3600')
+    await bucket.put('profit/allowance-overrides/provisional/latest.json', JSON.stringify({ kind: 'provisional', entries: [] }))
+
+    const result = await call(eventWith({ PROFIT_R2: bucket })) as { items: Array<{ unkoNo: string }>, total: number, unreadable: number }
+    expect(result.items.map(i => i.unkoNo)).toEqual(['unko-1'])
+    expect(result.total).toBe(1)
+    expect(result.unreadable).toBe(0)
+  })
+
+  it('スナップショットのキーなのに本文が壊れていれば数えて返す (投げない)', async () => {
+    const bucket = new FakeR2Bucket()
+    await putSnapshot(bucket, '2026-06', '8504', 'unko-1', '0-3600')
+    await bucket.put('profit/2026-06/8504/unko-2/100-200/latest.json', '{壊れた')
+
+    const result = await call(eventWith({ PROFIT_R2: bucket })) as { items: Array<{ unkoNo: string }>, total: number, unreadable: number }
+    expect(result.items.map(i => i.unkoNo)).toEqual(['unko-1'])
+    expect(result.total).toBe(1)
+    expect(result.unreadable).toBe(1)
+  })
+
+  it('スナップショットのキーなのに中身が ProfitSnapshot でなければ数えて返す', async () => {
+    const bucket = new FakeR2Bucket()
+    await bucket.put('profit/2026-06/8504/unko-2/100-200/latest.json', JSON.stringify({ ym: '2026-06' }))
+
+    const result = await call(eventWith({ PROFIT_R2: bucket })) as { items: unknown[], total: number, unreadable: number }
+    expect(result.items).toEqual([])
+    expect(result.total).toBe(0)
+    expect(result.unreadable).toBe(1)
   })
 })
