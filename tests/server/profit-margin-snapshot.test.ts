@@ -130,6 +130,27 @@ describe('GET /api/profit/margin-snapshot', () => {
     expect(bucket.gotKeys).toEqual([`${DIR_2607}/v-20260824T190153.json`])
   })
 
+  it('★ 同居している別系統 (検証スナップショット) には届かない', async () => {
+    // `PROFIT_R2` には `profit/{ym}/{車輌CD}/{運行NO}/{segmentId}/latest.json` (突合 2 系統目)
+    // が同居している。**キーを受けずに `ym` + 版の名前から組む**ので、`version` に何を入れても
+    // `profit/{ym}/margin-summary/v-*.json` 以外は組み上がらない。
+    const bucket = new FakeR2Bucket()
+    await bucket.put('profit/2026-07/0040/20260703-0040-1/seg1/latest.json', '{"secret":1}')
+    for (const version of [
+      '../0040/20260703-0040-1/seg1/latest',
+      'v-20260824T190153/../../../0040/20260703-0040-1/seg1/latest',
+      '..%2F..%2Fsecret',
+    ]) {
+      await expect(call(eventWith({ PROFIT_R2: bucket }, { ym: '2026-07', version })))
+        .rejects.toMatchObject({ statusCode: 400 })
+    }
+    // 通った要求も **margin-summary の枝しか組まない**。
+    await expect(call(eventWith({ PROFIT_R2: bucket }, { ym: '2026-07', version: 'v-20260703T000000' })))
+      .rejects.toMatchObject({ statusCode: 404 })
+    expect(bucket.gotKeys).toEqual([`${DIR_2607}/v-20260703T000000.json`])
+    expect(bucket.gotKeys.every(k => k.startsWith(`${DIR_2607}/`))).toBe(true)
+  })
+
   it('★ 一覧に出ていても本文が無ければ 404 (空の版に倒さない)', async () => {
     const bucket = new FakeR2Bucket()
     await expect(call(eventWith({ PROFIT_R2: bucket }, { ym: '2026-07', version: 'v-20260101T000000' })))
