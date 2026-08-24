@@ -132,6 +132,17 @@ bash .claude/skills/dev-login-local-verify/setup-dev-env.sh --hybrid   # + nuxt 
    リンクすると npm install の待ち時間を避けられる (Windows なら
    `New-Item -ItemType Junction`)。ソースが違っても node_modules の中身は
    基本同じなので使い回して問題ない。
+
+   **★ 2 つ罠がある。どちらも「コードが壊れている」ように見える。**
+
+   - **worktree は repo の中に置く** (`.claude/worktrees/<name>`)。`/tmp` 等
+     repo の外に置くと、symlink 越しの `node_modules` を vite が `/@fs/…` で
+     解決できず**テストが全ファイル import に失敗する**
+   - **`npm test` の前に `npx nuxt prepare`。** `.nuxt/tsconfig.json` が無いと
+     vitest が `Cannot find module './.nuxt/tsconfig.json'` で**全 113 file
+     failed / `Tests: no tests`** になる。**`no tests` = 1 本も走っていない**
+     ので、テストが落ちているのではなく**環境が立っていない**。数える前に
+     `Tests` 行を読むこと (2026-08-24 に 2 回踏んだ)
 3. **Nuxt をビルドする**:
    ```bash
    npx nuxt build
@@ -211,6 +222,35 @@ tool。claude.ai のカスタムコネクタとしてこの URL を追加し、G
 いずれも呼び出し元 (このMCPセッション) の Google アカウントが
 `DEV_LOGIN_ALLOWED_SUBJECTS` (auth-worker側 KV) に事前登録されている必要がある
 (issue #423 参照)。
+
+### `google_sub_not_cached` で 403 になったら — 登録は消えていない (30日 TTL 切れ)
+
+**これは設定ミスではなく、ほぼ必ず「最後に Google 認可してから 30 日以上経った」だけ。**
+`mint` の関門は 3 つあり (`auth-worker/src/lib/dev-login.ts`)、**`google_sub_not_cached`
+まで来ている時点で前の 2 つは通過**している:
+
+| 関門 | 落ちたときの error | 通過が意味すること |
+|---|---|---|
+| `allowlist.includes(payload.sub)` | `not_in_allowlist` | アカウントは **`dev_login_allowed_subjects` に登録済み** |
+| `payload.email` の有無 | `google_login_required` | コネクタは既に **`/mcp/google` 経由** (GitHub flow ではない) |
+| `MCP_OAUTH_KV.get('google_sub:' + email)` | **`google_sub_not_cached`** | — |
+
+この KV は **Google OAuth の callback でしか書かれず**
+(`src/handlers/mcp-auth-callback-google.ts:207-209`)、TTL は 30 日:
+
+```ts
+const GOOGLE_SUB_CACHE_TTL_SEC = 60 * 60 * 24 * 30;   // mcp-auth-callback-google.ts:50
+```
+
+**直し方は claude.ai のコネクタ設定で `https://auth.ippoan.org/mcp/google` を認可し直すだけ。**
+再接続すると callback が走って 30 日ぶん入り直す。**KV への再投入も allowlist の追加も不要。**
+「登録が消えた」「設定が壊れた」と誤診して余計な投入をしないこと (2026-08-24 に実際に踏んだ)。
+
+**再連携の直前に起動したセッションでも、そのまま呼べるようになる。**
+コネクタを認可し直すと **走行中のセッションにも MCP の一覧が配り直され**、
+`issue_dev_login_url` / `issue_dev_token` が途中から現れる (2026-08-24 実測)。
+**tool が無いのを見て「このセッションでは無理」と判断してセッションを起こし直さないこと。**
+`issue_dev_token({})` を 1 回叩いて 403 が消えたかで判定する。
 
 ## hybrid dev: nuxt dev (HMR) + wrangler dev 並走 (2026-07-25 実測で確立)
 
