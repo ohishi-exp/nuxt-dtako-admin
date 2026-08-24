@@ -28,7 +28,7 @@ dtako (デジタコ運行データ) 管理画面。Nuxt 4 + Nitro `cloudflare_mo
 | **components** | `app/components/Event*.vue` `VehicleSettings*.vue` `CsvDataTable.vue` `DriverSearchSelect.vue` `ProfitPanel.vue` `AllowanceOperationModal.vue` | イベント表 / 車両設定 表示・diff / CSV テーブル / 運行詳細の収支パネル (検証スナップショット、下記) / 運行手当タブの運行モーダル |
 | **server/api (proxy)** | `server/api/proxy/[...path].ts` `server/utils/alc-proxy.ts` | `/api/proxy/*` → auth-worker `/alc-proxy/*` (introspect / ACL / OIDC mint / identity 注入を集約) → rust-alc-api `/api/*` (createAuthWorkerProxyHandler、#434 step 3 方式 B)。consumer は AUTH_WORKER service binding に X-Alc-Proxy-Secret + browser JWT を thin-forward するだけ。`alc-proxy.ts` の `alcProxyFetch` は R2 が要る route が同じ `/alc-proxy` 経由で backend を叩き Response を受け取るヘルパ (lockdown 後も OIDC 不要で通る。旧 `identity.ts` の直叩き+resolveIdentityHeaders を置換、#434 caller #2) |
 | **server/api (ichiban/kyuyo proxy)** | `server/api/ichiban/[...path].get.ts` `server/api/kyuyo/[...path].get.ts` `server/utils/ichiban-upstream.ts` | rust-ichibanboshi への thin proxy (CF Access Service Token 付与、#330/#369)。kyuyo 側は upstream パスを `api/kyuyo/` 配下に固定し、ブラウザの `Authorization: Bearer <JWT>` を素通し転送 — 給与の認可は upstream の introspect + email allowlist (rust-ichibanboshi#82) が担う |
-| **server/api (粗利/検証スナップショット)** | `server/api/profit/{snapshot.get,snapshot.post,snapshot.delete,snapshots.get,monthly.get}.ts` `server/utils/profit-r2-io.ts` | `PROFIT_R2` への検証スナップショット read/write/list と車輌×月サマリ。R2 binding が要るので Worker 側 (pure は `app/utils/profit-r2.ts`) |
+| **server/api (粗利/検証スナップショット)** | `server/api/profit/{snapshot.get,snapshot.post,snapshot.delete,snapshots.get,monthly.get,margin-summary.post}.ts` `server/utils/profit-r2-io.ts` | `PROFIT_R2` への検証スナップショット read/write/list と車輌×月サマリ、**粗利の集計そのものの版管理保存** (Refs #826)。R2 binding が要るので Worker 側 (pure は `app/utils/{profit-r2,margin-r2}.ts`) |
 | **server/api (kyuyo-master)** | `server/api/kyuyo-master/{companies.get,refresh.post,refresh-full.post}.ts` `server/utils/kyuyo-master-db.ts` | D1 `kyuyo_companies` (migration 0005、会社×年度リスト・金額なし) の読み/差分更新 (rust `/api/kyuyo/databases` 高速一覧)/フル更新 (会社名+権限、遅い)。消費者は `/kyuyo-fetch` ページ (#369 PR-B1)。取得済み明細は sessionStorage (タブ限り、別ユーザー検知で purge、pure ロジックは `app/utils/kyuyo-fetch.ts`) |
 | **server/api (Y時間)** | `server/api/y-time-export.post.ts` `y-time-template.{get,put}.ts` | backend GET→R2 テンプレ→ExcelJS xlsx 生成 (R2 が要るので Worker 側)。backend GET は `alcProxyFetch` で /alc-proxy 経由 |
 | **server/api (車両設定)** | `server/api/vehicle-settings/{extract.post,history.get,object.get,unconfirmed.get}.ts` | 車両設定 抽出・履歴・取得。unconfirmed は backend `/api/dtako/vehicles` を `alcProxyFetch` (/alc-proxy 経由) で叩く |
@@ -123,7 +123,8 @@ Environment Variable であり、wrangler.toml には無い (git 履歴に平文
 - `DTAKO_R2` → `dtako-uploads` バケット — Y時間 テンプレ xlsx の配置先 (`templates/...`)。
   本番 / staging 共用 (read-only)。
 - `PROFIT_R2` → `dtako-ichiban-verify` バケット (staging / preview は `dtako-ichiban-verify-staging`) —
-  一番星マッチ率の**検証スナップショット** (`profit/{ym}/{車輌CD}/{運行NO}/{segmentId}/`)。下記の粗利区画。
+  一番星マッチ率の**検証スナップショット** (`profit/{ym}/{車輌CD}/{運行NO}/{segmentId}/`) と、
+  **粗利の集計そのものの版** (`profit/{ym}/margin-summary/`、Refs #826)。下記の粗利区画。
 
 ## D1 binding と migration (Refs #367)
 
@@ -857,6 +858,26 @@ N:1 が現実に存在する (本番で 5 件、うち社員C 1619 鵜瀬裕一�
 R2 スナップショットを force-match へ自動移植してはいけない (2 は車番のみ・プールなしで確定して
 いるので、1 が別の便に割り当て済みの明細を指しうる = 二重計上)。
 
+### ★ 粗利の集計そのものの版管理 (`margin-summary`、Refs #826)
+
+**人が確定する場所ではない。確定ボタンは無い。** 粗利タブが**再計算するたび**に、いま画面に
+出ている集計 (`MarginCache` + `summarizeMargins` の `totals`) を
+`POST /api/profit/margin-summary` へ送り、R2 `profit/{ym}/margin-summary/` に
+`latest.json` + `v-{ts}.json` + `history.jsonl` で残す。作法は検証スナップショットと同じ
+(`putVersionedProfit` の sha256 差分検知)。**内容が同じなら版は増えない**ので、R2 の容量は
+「数字が変わった回数」ぶんしか伸びない。
+
+- **1 (`reconcileVehicles`) の出力を残すだけ。突合は 1 行もやり直さない** — 数字を作り直すと
+  画面と版で額が食い違う
+- **`codeVersion`** (`v0.0.517` / `unknown`) を `customMetadata` に刻む。**同じ入力でも
+  ロジックが変われば数字は動く**ため。ビルド時定数は `nuxt.config.ts` の
+  `runtimeConfig.public.codeVersion` (`GITHUB_REF_TYPE === 'tag'` のときだけ値が入る)。
+  数字が動かないまま版だけ上がった回は `lastVerifiedCodeVersion` に入り、
+  **「その数字を作った版」(`codeVersion`) は上書きしない**
+- **localStorage の `dtako:margin:cache:v9` は残す** — R2 が落ちても画面は死なない。
+  画面は「追えるのは R2 の版、端末のキャッシュは表示を速くするための写し」と断る
+- 版の一覧・差分ビューは未実装 (このデータを使う後続 PR)
+
 ### 保存先 (localStorage キー)
 
 | キー | 中身 | 定義 |
@@ -876,6 +897,7 @@ R2 スナップショットを force-match へ自動移植してはいけない 
 | 口 | 用途 |
 |---|---|
 | `GET/POST/DELETE /api/profit/snapshot` | 検証スナップショット 1 件の read/write/delete (`PROFIT_R2`、`savedAt` はサーバーが埋める) |
+| `POST /api/profit/margin-summary` | **粗利の集計そのもの**の版管理保存 (上記、`savedAt` はサーバー / `codeVersion` は画面が名乗り サーバーが正規化) |
 | `GET /api/profit/snapshots?ym=&vehicle=&limit=` | スナップショット一覧 (`SnapshotListItem`) |
 | `GET /api/profit/monthly?vehicle=&ym=` | 一番星側月計 vs `confirmedAmount` 合算 の差額 + マッチレベル内訳 |
 | `GET /api/ichiban/api/sales/vehicle-daily` | 一番星 売上明細 (proxy 経由、client 側も `api/` を含めて呼ぶ) |

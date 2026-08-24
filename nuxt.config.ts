@@ -4,6 +4,18 @@
 const relayPort = process.env.NUXT_DEV_RELAY_PORT || '8787'
 const frontPort = process.env.NUXT_DEV_FRONT_PORT || '8787'
 
+/**
+ * **この bundle を作ったコードの版** (`v0.0.517`)。粗利の集計を R2 に版管理で残すとき
+ * (Refs #826)、「同じ入力でもロジックが変われば数字は動く」ぶんを区別するために刻む。
+ *
+ * GitHub Actions は全ての step に `GITHUB_REF_TYPE` / `GITHUB_REF_NAME` を渡すので、
+ * **タグリリース (`v*` push) のビルドだけ**が値を持つ。**branch のビルド
+ * (preview / staging / ローカル) は空文字**にする — `main` や branch 名を版として
+ * 記録すると、中身が動き続ける名前を「版」と読んでしまう。空文字は保存側が
+ * `resolveCodeVersion` で `unknown` に倒すので、undefined も空文字も版には混ざらない。
+ */
+const codeVersion = process.env.GITHUB_REF_TYPE === 'tag' ? (process.env.GITHUB_REF_NAME || '') : ''
+
 export default defineNuxtConfig({
   compatibilityDate: '2025-07-15',
   devtools: { enabled: true },
@@ -25,6 +37,10 @@ export default defineNuxtConfig({
       // RemoteApp ビューアが繋ぐ RDP 中継 (Cloudflare Access が守る公開ホスト名)。
       // 画面から直接張る (app/utils/rdp-access.ts)。Worker はこの経路に居ない。
       rdpRelayUrl: process.env.NUXT_PUBLIC_RDP_RELAY_URL || '',
+      // 上の `codeVersion` (ビルド時定数)。粗利タブが R2 の版に刻む (Refs #826)。
+      // **public に置く**のは、数字を計算するのが画面 (client bundle) だから —
+      // 画面が名乗る版が、その数字を作った版そのものになる。
+      codeVersion,
     },
   },
 

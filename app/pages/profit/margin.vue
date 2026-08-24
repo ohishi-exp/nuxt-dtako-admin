@@ -178,6 +178,11 @@ import {
   type UncoveredDriverInput,
   type UncoveredTotals,
 } from '~/utils/margin'
+import {
+  buildMarginSummaryInput,
+  marginSummarySaveNote,
+  type MarginSummarySaveResult,
+} from '~/utils/margin-r2'
 import { buildKushiroBranchView, readViewerCompId } from '~/utils/kushiro-branch-view'
 import { b64urlUtf8 } from '~/composables/useTheearthSession'
 import type { MinWageMaster } from '~/utils/restraint-wage-view'
@@ -209,6 +214,22 @@ const progress = ref('')
 /** 前回の集計をキャッシュから出しているだけ (= 通信していない) か。画面に出す。 */
 const restoredFromCache = ref(false)
 const savedAt = ref('')
+/**
+ * R2 に版として残した結果 (Refs #826)。**どちらが正かを画面に出す**ために持つ —
+ * localStorage は端末ローカルの写しで、「いつ変わったか」を辿れるのは R2 の版の方。
+ * 集計する前は空文字 (何も出さない)。
+ */
+const marginR2Note = ref('')
+/** 上の注記が「残せなかった」側か。色を分けるためだけ (数字には効かない)。 */
+const marginR2Failed = ref(false)
+/**
+ * **この bundle を作ったコードの版** (`nuxt.config.ts` のビルド時定数、Refs #826)。
+ * タグリリース以外のビルドでは空で、保存側が `unknown` に倒す。
+ *
+ * **setup のうちに読んでおく** — `useRuntimeConfig()` は nuxt instance を要るので、
+ * 集計 (何度も await した後) の中から呼ぶのは筋が悪い。
+ */
+const codeVersion = useRuntimeConfig().public.codeVersion
 
 /** 粗利の入力 (運行 1 本 = 1 行) と、対象月・対象車輌の経費明細。 */
 const inputs = ref<MarginOperationInput[]>([])
@@ -449,17 +470,26 @@ function restoredUncoveredByDriver(ym: string): Record<string, number> | null {
   return stored.byDriver
 }
 
+/**
+ * いま画面に出ている集計を `MarginCache` の形にする。**localStorage の写しと R2 の版で
+ * 同じ中身を使う**ための 1 か所 (Refs #826) — 2 か所で組むと、片方だけ項目を足したときに
+ * 黙って中身の違う 2 つが残る。`MarginCache` の形は変えない。
+ */
+function currentMarginCache(savedAtIso: string): MarginCache {
+  return {
+    ym: shownYm.value,
+    savedAt: savedAtIso,
+    operations: inputs.value,
+    costs: costs.value,
+    uncovered: uncovered.value,
+    crossMonth: crossMonth.value,
+  }
+}
+
 function writeCache() {
   const now = new Date().toISOString()
   try {
-    localStorage.setItem(MARGIN_CACHE_KEY, serializeMarginCache({
-      ym: shownYm.value,
-      savedAt: now,
-      operations: inputs.value,
-      costs: costs.value,
-      uncovered: uncovered.value,
-      crossMonth: crossMonth.value,
-    }))
+    localStorage.setItem(MARGIN_CACHE_KEY, serializeMarginCache(currentMarginCache(now)))
     savedAt.value = now
   }
   catch (e) {
@@ -935,6 +965,8 @@ async function run() {
   salesError.value = null
   costError.value = null
   cacheNote.value = null
+  marginR2Note.value = ''
+  marginR2Failed.value = false
   inputs.value = []
   costs.value = []
   legPointsByUnko.value = new Map()
@@ -1066,6 +1098,10 @@ async function run() {
     status.value = 'ready'
     progress.value = ''
     writeCache()
+    // **R2 の版はここで残す** (Refs #826)。確定ボタンは無く、再計算するたびに送って
+    // 内容が同じなら版は増えない。**await しない** — R2 が落ちていても粗利の画面は
+    // 出し切る (端末のキャッシュだけが残る旨を注記が言う)。
+    void saveMarginSummaryToR2()
   }
   catch (e) {
     errorMessage.value = e instanceof Error ? e.message : String(e)
@@ -1163,6 +1199,37 @@ const RUN_COST_SHARE_MODE_TITLE = [
   '拘束時間比 = (売上時間 + 回送時間) ÷ 運行の全便の和',
 ].join('\n')
 const totals = computed(() => summarizeMargins(result.value.operations))
+/**
+ * **いま画面に出ている集計を R2 に版として残す** (Refs #826)。確定ボタンは作らず、
+ * 再計算のたびに送る — 内容が同じなら `putVersionedProfit` の sha256 差分検知が
+ * 版を増やさない (R2 の容量は「変わった回数」ぶんしか伸びない)。
+ *
+ * **粗利の数字は 1 円も作り直さない。** 送るのは localStorage に書くのと同じ
+ * `MarginCache` と、画面に出ている `totals` (`summarizeMargins` の結果) そのまま。
+ *
+ * **投げない**: 失敗しても画面は落とさず注記だけ出す。localStorage の写しは
+ * 残っているので、R2 が使えなくても画面は死なない。
+ */
+async function saveMarginSummaryToR2() {
+  const input = buildMarginSummaryInput({
+    cache: currentMarginCache(savedAt.value),
+    totals: totals.value,
+    codeVersion,
+  })
+  try {
+    const res = await $fetch<MarginSummarySaveResult>('/api/profit/margin-summary', {
+      method: 'POST',
+      body: input,
+    })
+    marginR2Note.value = marginSummarySaveNote(res, null)
+    marginR2Failed.value = false
+  }
+  catch (e) {
+    marginR2Note.value = marginSummarySaveNote(null, e instanceof Error ? e.message : String(e))
+    marginR2Failed.value = true
+  }
+}
+
 /** 粗利を出せなかった理由と件数。**畳まれた表の中に隠さず月の合計の横に出す。** */
 const noMarginGroups = computed(() => summarizeNoMarginReasons(result.value.operations))
 /** 粗利率の分母は**粗利を出せた運行ぶんの売上**。全体の売上で割ると、経費が来ていない
@@ -1952,8 +2019,17 @@ function downloadCustomerRouteCsv() {
     </p>
     <p v-if="restoredFromCache" class="text-xs text-sky-600 dark:text-sky-400 mb-3">
       前回の集計 (<b>{{ shownYm }}</b>{{ savedAt ? ` ${savedAtLabel(savedAt)} 保存` : '' }}) を
-      <b>そのまま表示</b>しています — <b>通信していない</b>ので、保存後に取り込み直しがあれば
-      古いままです。最新にするには <b>集計</b> を押してください。
+      <b>この端末のキャッシュ</b>から<b>そのまま表示</b>しています — <b>通信していない</b>ので、
+      保存後に取り込み直しがあれば古いままです。最新にするには <b>集計</b> を押してください。
+      <b>いつ変わったかを追える記録は R2 の版の方</b>です (この表示はその写しではなく、
+      この端末だけに残っている前回の結果です)。
+    </p>
+    <p
+      v-if="marginR2Note"
+      class="text-xs mb-3"
+      :class="marginR2Failed ? 'text-amber-600 dark:text-amber-400' : 'text-sky-600 dark:text-sky-400'"
+    >
+      {{ marginR2Note }}
     </p>
     <p v-if="cacheNote" class="text-xs text-amber-600 dark:text-amber-400 mb-3">
       {{ cacheNote }}
