@@ -177,7 +177,8 @@ export interface MarginSummarySaveResult {
  * 版の R2 キーから、人に見せる版の名前 (`v-20260824T102030`) を取り出す。
  * **キーそのものを画面に出さない** — `profit/{ym}/margin-summary/` の部分は
  * 画面が既に月として出しているぶんの重複で、長いだけで読めない。
- * 空文字 (版キーを持たない古い保存) は空文字のまま返す。
+ * 空文字 (版キーを持たない古い保存) は空文字のまま返す — 名前が無いことを
+ * 言葉で出すのは注記側の仕事 (`MARGIN_VERSION_UNNAMED`)。
  */
 export function marginVersionLabel(versionKey: string): string {
   // `lastIndexOf` は見つからなければ -1 なので、`/` が無いときは丸ごと残る。
@@ -185,6 +186,17 @@ export function marginVersionLabel(versionKey: string): string {
   const base = versionKey.slice(versionKey.lastIndexOf('/') + 1)
   return base.endsWith('.json') ? base.slice(0, -'.json'.length) : base
 }
+
+/**
+ * 版キーを持たない古い保存 (この機能より前に書かれたもの) で、**版の名前の代わりに置く言葉**
+ * (Refs #831)。
+ *
+ * **空白で埋めない。**「前回の版 から」と穴が空くと、値の埋め込みに失敗した
+ * **レンダリングの不具合にしか読めない** — 実際に本番 v0.0.522 でそう見えた。
+ * 名前が無い理由まで書くのは、次に内容が変われば `v-…` の付いた版になり、
+ * **この文言が自然に消える**ため (人が何かを直す必要は無い、と読めるようにする)。
+ */
+export const MARGIN_VERSION_UNNAMED = '(この機能より前に保存されたため名前がありません)'
 
 /**
  * **どちらが正かを画面で明示する**ための文言 (Refs #826 の要件)。
@@ -200,9 +212,12 @@ export function marginSummarySaveNote(result: MarginSummarySaveResult | null, er
   }
   if (result === null) return ''
   // **どの版になったかを名前で出す。**「保存しました」だけだと、版が増えなかった回に
-  // どの版と同じなのかが人に分からない (版キーを持たない古い保存では名前が出せない)。
+  // どの版と同じなのかが人に分からない。版キーを持たない古い保存には名前が無いので、
+  // **空白ではなく言葉**を置く (Refs #831)。`changed` で分けないのは、新しい版を書いた回
+  // (`changed: true`) の版キーは `putVersionedProfit` が受け取った `paths.version(ts)` を
+  // そのまま返すもので、**空になりようが無い**ため (分けると死に分岐になる)。
   const label = marginVersionLabel(result.versionKey)
-  const version = label === '' ? '' : ` ${label}`
+  const version = label === '' ? ` ${MARGIN_VERSION_UNNAMED}` : ` ${label}`
   const tail = 'いつ変わったかは R2 の版で追えます (端末のキャッシュは表示を速くするための写しです)。'
   if (result.changed) {
     return `この集計を R2 に新しい版${version} として保存しました (コード版 ${result.codeVersion})。${tail}`
