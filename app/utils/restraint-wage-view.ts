@@ -487,7 +487,13 @@ export function groupMinWageRows<T>(
     const an = aa?.branchName ?? ''
     const bn = ba?.branchName ?? ''
     const inf = Number.POSITIVE_INFINITY
-    return cmpNum(branchRank.get(an) ?? inf, branchRank.get(bn) ?? inf)
+    // `branchRank` は**この `rows` の全行**を同じ式 (`attrsOf(row)?.branchName ?? ''`) で
+    // 舐めて作り、`sort` の対象は区画の行 = 舐めた行の部分集合なので、`byRow` が見る
+    // 営業所名は必ずキーに在る。以前ここに書いてあった `?? Infinity` は**構造上通らない
+    // 死に分岐**だったので落とした (Refs #825) — 通らない fallback が残っていると、
+    // 下の `branchCode ?? inf` (**実際に効いている** 「所属コードを持たない営業所は末尾」)
+    // と見分けが付かない。
+    return cmpNum(branchRank.get(an)!, branchRank.get(bn)!)
       || an.localeCompare(bn, 'ja')
       || cmpNum(aa?.branchCode ?? inf, ba?.branchCode ?? inf)
       || driverCdOf(a).localeCompare(driverCdOf(b), undefined, { numeric: true })

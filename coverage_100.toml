@@ -521,3 +521,33 @@ branches = true
 [[files]]
 path = "server/api/profit/margin-summary.post.ts"
 branches = true
+
+# /restraint-wage 系の共有型・表示ヘルパ (Refs #244 / gate 登録は #825)。書式 (分 / 円 /
+# R2 版タイムスタンプ / 月)、月の範囲、月タブのバッジ 3 種、最低賃金チェックの並び
+# (`groupMinWageRows`)、計算 ⇄ 給与の突合行、0 行の理由 (Refs #812) を持つ pure util。
+#
+# branches: BR/BRV/BRN 計測器を **2 段の probe** で先に検証 — ①片側だけ通した `if` が
+# `[true]`、両側が `[true,false]` を返すこと ②instrumented コピーでも `||` `??` `?:` の
+# **返り値が素の実装と一致**すること (計測器が値を Boolean に化かすバグを踏んでいる) —
+# したうえで、`if` / 三項の条件 / `&&` `||` の両辺 / `??` の左辺 / `?.` を TypeScript の
+# AST で機械的に包んだコピーでテストを流し、**72 分岐中 71 が true/false 両方**を通る
+# ことを数えた (v8 も 100%/100%)。
+#
+# ★ **v8 が 100% と言っていた状態で、片側しか通っていない分岐が 11 側あった** (#825)。
+# 内訳と処置 (「テストで埋める」より先に「反対側が起こり得るか」を判定した):
+# - **死に分岐 → コードを直した**: `branchRank.get(an) ?? Infinity` の右 (a/b の 2 側)。
+#   `branchRank` は**同じ `rows` を同じ式で舐めて**作り、`sort` の対象はその部分集合なので
+#   キーは必ず在る。`?? Infinity` は構造上通らないので落とした (`!` で読む)。
+#   **並び順は 1 つも動いていない** — 追加した golden を含む 61 本が
+#   `origin/main` の実装でもそのまま通ることで固定してある
+# - **起こり得る → テストを足した** (7 側): `attrsOf` が null の行が同じ区画に 2 行以上
+#   ある形 (`aa?.branchName` / `aa?.branchCode` の null 側 4 つ)、所属コードを持たない
+#   営業所が 2 つある形 (順位が同値 → 営業所名で決まる第 2 キー)、会社が引けない区画が
+#   2 つある形 (`a.company ?? ''` の右 2 つ)
+# - **分岐ではないので何もしない** (2 側): `||` 連鎖の**最終項**の真偽 (下流が無いので
+#   どちらでも経路が変わらない)。乗務員CD 側は「同一CD が 2 行」の形でテストを足したが、
+#   区画側 (`TIMECARD_JOB_GROUPS.indexOf` の差が 0) は**構造上あり得ない** —
+#   区画は `company|jobGroup` で一意なので、両方同値なら同じ区画になる
+[[files]]
+path = "app/utils/restraint-wage-view.ts"
+branches = true
