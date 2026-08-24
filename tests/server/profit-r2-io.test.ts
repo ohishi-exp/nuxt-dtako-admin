@@ -95,6 +95,55 @@ describe('putVersionedProfit', () => {
     expect((await bucket.get('dir/v-1.json'))?.text()).resolves.toBe('{"a":1}') // 旧版は残る
     expect((await bucket.get('dir/v-2.json'))?.text()).resolves.toBe('{"a":2}')
   })
+
+  // --- codeVersion (Refs #826) ---
+
+  it('codeVersion を渡さなければ customMetadata は従来どおり (空文字も undefined も混ざらない)', async () => {
+    const bucket = new FakeR2Bucket()
+    await putVersionedProfit(bucket, 'dir/latest.json', 'dir/v-1.json', '{"a":1}', '{"a":1}', '2026-07-19T00:00:00Z')
+    const meta = (await bucket.head('dir/latest.json'))?.customMetadata
+    expect(Object.keys(meta!).sort()).toEqual(['fetchedAt', 'lastVerifiedAt', 'sha256'])
+  })
+
+  it('空文字の codeVersion も混ざらない (呼び出し側が unknown に倒す前提)', async () => {
+    const bucket = new FakeR2Bucket()
+    await putVersionedProfit(bucket, 'dir/latest.json', 'dir/v-1.json', '{"a":1}', '{"a":1}', '2026-07-19T00:00:00Z', '')
+    expect((await bucket.head('dir/latest.json'))?.customMetadata).not.toHaveProperty('codeVersion')
+  })
+
+  it('新しい版には codeVersion を刻む (latest と v-{ts} の両方)', async () => {
+    const bucket = new FakeR2Bucket()
+    await putVersionedProfit(bucket, 'dir/latest.json', 'dir/v-1.json', '{"a":1}', '{"a":1}', '2026-07-19T00:00:00Z', 'v0.0.517')
+    expect((await bucket.head('dir/latest.json'))?.customMetadata?.codeVersion).toBe('v0.0.517')
+    expect((await bucket.head('dir/v-1.json'))?.customMetadata?.codeVersion).toBe('v0.0.517')
+  })
+
+  it('★ 内容が同じなら codeVersion を上書きせず lastVerifiedCodeVersion に入れる', async () => {
+    const bucket = new FakeR2Bucket()
+    await putVersionedProfit(bucket, 'dir/latest.json', 'dir/v-1.json', '{"a":1}', '{"a":1}', '2026-07-19T00:00:00Z', 'v0.0.517')
+    const result = await putVersionedProfit(bucket, 'dir/latest.json', 'dir/v-2.json', '{"a":1}', '{"a":1}', '2026-07-19T01:00:00Z', 'v0.0.518')
+
+    expect(result.changed).toBe(false)
+    const meta = (await bucket.head('dir/latest.json'))?.customMetadata
+    // 「その数字を作った版」は消さない。新しい方は「同じ数字を最後に確かめた版」。
+    expect(meta?.codeVersion).toBe('v0.0.517')
+    expect(meta?.lastVerifiedCodeVersion).toBe('v0.0.518')
+  })
+
+  it('内容が同じで codeVersion を渡さなければ lastVerifiedCodeVersion は付かない', async () => {
+    const bucket = new FakeR2Bucket()
+    await putVersionedProfit(bucket, 'dir/latest.json', 'dir/v-1.json', '{"a":1}', '{"a":1}', '2026-07-19T00:00:00Z', 'v0.0.517')
+    await putVersionedProfit(bucket, 'dir/latest.json', 'dir/v-2.json', '{"a":1}', '{"a":1}', '2026-07-19T01:00:00Z')
+    expect((await bucket.head('dir/latest.json'))?.customMetadata).not.toHaveProperty('lastVerifiedCodeVersion')
+  })
+
+  it('内容が変われば新しい版の codeVersion で置き換わる', async () => {
+    const bucket = new FakeR2Bucket()
+    await putVersionedProfit(bucket, 'dir/latest.json', 'dir/v-1.json', '{"a":1}', '{"a":1}', '2026-07-19T00:00:00Z', 'v0.0.517')
+    await putVersionedProfit(bucket, 'dir/latest.json', 'dir/v-2.json', '{"a":2}', '{"a":2}', '2026-07-19T01:00:00Z', 'v0.0.518')
+    expect((await bucket.head('dir/latest.json'))?.customMetadata?.codeVersion).toBe('v0.0.518')
+    expect((await bucket.head('dir/v-1.json'))?.customMetadata?.codeVersion).toBe('v0.0.517')
+  })
 })
 
 describe('listAllProfit', () => {

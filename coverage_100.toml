@@ -501,3 +501,23 @@ branches = true
 [[files]]
 path = "app/utils/operation-leg-sales.ts"
 branches = true
+
+# 粗利の集計結果 (`MarginCache`) を R2 に版管理で残す口 (Refs #826)。**確定ボタンは
+# 無い** — 粗利タブが再計算するたびに送り、`putVersionedProfit` の sha256 差分検知が
+# 内容不変なら版を増やさない。`app/utils/margin-r2.ts` はパス組み立て・コード版の
+# 正規化・保存する形への変換・差分判定の入力・履歴 1 行・画面の注記だけを持つ pure util で、
+# **粗利の数字を 1 円も作らない** (`margin.ts` / `reconcileVehicles` は 1 行も触っていない)。
+# **0 や空文字に倒さない**分岐が中核: コード版が空/非文字列なら `unknown` (欄を消さない)、
+# 保存に失敗したら黙らず「端末のキャッシュだけ」と言う、保存時刻とコード版はハッシュから
+# 外す (毎回版が増えて R2 が青天井になるのを防ぐ)。
+# branches: BR() 計測器を probe (片側だけ通る `if` / 両側通る `if` / 右を評価しない `??`)
+# で**両方向に**検証し、さらに**計測器が値を壊していないこと** (`||` / `??` / 三項の
+# 返り値が素の実装と一致) を確かめてから、instrumented コピー (TypeScript の AST で
+# 機械挿入) でテストを流して**全分岐が true/false 両方を通る**ことを数えた。
+[[files]]
+path = "app/utils/margin-r2.ts"
+branches = true
+
+[[files]]
+path = "server/api/profit/margin-summary.post.ts"
+branches = true
