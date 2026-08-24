@@ -191,6 +191,15 @@ import {
   type MarginVersionItem,
   type MarginVersionListResult,
 } from '~/utils/margin-versions'
+import {
+  buildMarginDiff,
+  marginDiffLegCountNote,
+  marginDiffNeedsMoreVersionsNote,
+  MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE,
+  type MarginDiff,
+  type MarginDiffRow,
+  type MarginDiffSnapshot,
+} from '~/utils/margin-diff'
 import { buildKushiroBranchView, readViewerCompId } from '~/utils/kushiro-branch-view'
 import { b64urlUtf8 } from '~/composables/useTheearthSession'
 import type { MinWageMaster } from '~/utils/restraint-wage-view'
@@ -247,6 +256,27 @@ const marginVersionsUnreadableNote = ref('')
 const marginVersionsError = ref('')
 /** 一覧を読んでいる最中か (0 本と「まだ読んでいない」を画面で分けるため)。 */
 const marginVersionsLoading = ref(false)
+/**
+ * **選んだ 2 版の差分** (Refs #834)。「いつ変わったのか追えるようにしたい」の後半。
+ * **この差分も粗利の数字に 1 円も効かない** — 保存済みの版どうしを引き算するだけで、
+ * 突合も集計もやり直さない (`buildOperationMargins` は呼ばない)。
+ */
+const marginDiffBeforeLabel = ref('')
+const marginDiffAfterLabel = ref('')
+const marginDiff = ref<MarginDiff | null>(null)
+const marginDiffLoading = ref(false)
+/** 差分を出せなかった理由。**黙らない** — 空の差分を「変わっていない」と誤読させないため。 */
+const marginDiffError = ref('')
+/**
+ * 差分の運行行の開閉 (**開いたときだけ便を展開する**、Refs #834)。
+ * **取引先行の `openCustomers` / 経路行の `openRoutes` と同じ流儀** (既定は畳んだ状態)。
+ */
+const openDiffOps = reactive<Record<string, boolean>>({})
+/**
+ * **版が 2 本に足りないときに何が足りないかを言う** (本番 2026-07 は版が 1 本しかない)。
+ * 選択肢が 1 つしか無い画面を**黙って空にしない**。
+ */
+const marginDiffNeedsMore = computed(() => marginDiffNeedsMoreVersionsNote(marginVersions.value.length))
 /**
  * **この bundle を作ったコードの版** (`nuxt.config.ts` のビルド時定数、Refs #826)。
  * タグリリース以外のビルドでは空で、保存側が `unknown` に倒す。
@@ -1001,6 +1031,8 @@ async function run() {
   marginVersionsNote.value = ''
   marginVersionsUnreadableNote.value = ''
   marginVersionsError.value = ''
+  // **前の月の差分も一緒に捨てる** — 別の月の版どうしの差が残ると、月を跨いだ数字に見える。
+  resetMarginDiff()
   inputs.value = []
   costs.value = []
   legPointsByUnko.value = new Map()
@@ -1294,7 +1326,84 @@ async function loadMarginVersions(ymValue: string) {
   }
   finally {
     marginVersionsLoading.value = false
+    // 一覧が入れ替わったら、選んでいた版はもう一覧に無いかもしれない。**選び直す。**
+    resetMarginDiff()
+    pickDefaultMarginDiffVersions()
   }
+}
+
+/**
+ * **差分の状態をまるごと捨てる** (Refs #834)。月を替えたとき・一覧を読み直したときに呼ぶ。
+ * 選んだ版のラベルは残さない — 一覧に無い版を選んだままにすると、押した瞬間 404 になる。
+ */
+function resetMarginDiff() {
+  marginDiff.value = null
+  marginDiffError.value = ''
+  marginDiffBeforeLabel.value = ''
+  marginDiffAfterLabel.value = ''
+  for (const key of Object.keys(openDiffOps)) delete openDiffOps[key]
+}
+
+/**
+ * **既定は「いちばん新しい 2 本」** (一覧は新しい順)。よく見たいのは直近の変化なので、
+ * 毎回 2 回選ばせない。版が 2 本に足りなければ選ばない (`marginDiffNeedsMore` が言う)。
+ */
+function pickDefaultMarginDiffVersions() {
+  const items = marginVersions.value
+  const [newest, previous] = items
+  if (newest === undefined || previous === undefined) return
+  marginDiffAfterLabel.value = newest.label
+  marginDiffBeforeLabel.value = previous.label
+}
+
+/**
+ * **選んだ 2 版の本文を読んで突き合わせる** (Refs #834)。
+ *
+ * **差分を作るのはここ (画面) で、server route は本文を返すだけ。**
+ * `buildOperationMargins` は呼ばない — 燃費の上書きと運行経費の配分は**その端末にしか無い
+ * 設定**で版に入っておらず、運行 1 本の粗利を版から厳密に再現できないため。
+ *
+ * **投げない**: 読めなくても粗利の画面は落とさず、理由を注記に出す。
+ */
+async function runMarginDiff() {
+  marginDiffLoading.value = true
+  marginDiffError.value = ''
+  try {
+    const [before, after] = await Promise.all([
+      $fetch<MarginDiffSnapshot>('/api/profit/margin-snapshot', {
+        query: { ym: shownYm.value, version: marginDiffBeforeLabel.value },
+      }),
+      $fetch<MarginDiffSnapshot>('/api/profit/margin-snapshot', {
+        query: { ym: shownYm.value, version: marginDiffAfterLabel.value },
+      }),
+    ])
+    marginDiff.value = buildMarginDiff(
+      { label: marginDiffBeforeLabel.value, snapshot: before },
+      { label: marginDiffAfterLabel.value, snapshot: after },
+    )
+  }
+  catch (e) {
+    // **空の差分に倒さない** — 「読めなかった」と「変わっていない」は別のこと。
+    marginDiff.value = null
+    marginDiffError.value = `選んだ版の本文を読めませんでした — ${e instanceof Error ? e.message : String(e)}`
+  }
+  finally {
+    marginDiffLoading.value = false
+  }
+}
+
+/** 差分の 1 項目の値。**書式は表と同じ `yen()` / `km()`** (差分だけ別の丸め方にしない)。 */
+function marginDiffValueText(row: MarginDiffRow, value: number): string {
+  if (row.unit === 'yen') return yen(value)
+  if (row.unit === 'km') return km(value)
+  return String(value)
+}
+
+/** 差そのもの。**符号を必ず付ける** — `¥-500` ではどちらへ動いたか読み違える。 */
+function marginDiffDeltaText(row: MarginDiffRow): string {
+  if (row.delta === 0) return '±0'
+  const sign = row.delta > 0 ? '+' : '-'
+  return `${sign}${marginDiffValueText(row, Math.abs(row.delta))}`
 }
 
 /** 粗利を出せなかった理由と件数。**畳まれた表の中に隠さず月の合計の横に出す。** */
@@ -2160,6 +2269,221 @@ function downloadCustomerRouteCsv() {
         <p v-if="marginVersionsUnreadableNote" class="text-xs text-amber-600 dark:text-amber-400 mt-1">
           {{ marginVersionsUnreadableNote }}
         </p>
+      </template>
+    </section>
+    <!--
+      **選んだ 2 版の差分** (Refs #834)。「いつ変わったのか追えるようにしたい」の後半で、
+      **一覧のすぐ下**に置く (一覧で見つけた版をそのまま選ぶ流れなので、離すと別機能に見える)。
+      **印刷には出さない** (紙に要るのはその月の数字であって、版の履歴ではない)。
+      **運行 1 本ごとの粗利は出さない** — 燃費の上書きと運行経費の配分は集計した端末にしか
+      無い設定で版に入っておらず、版から厳密に再現できないため (`MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE`)。
+    -->
+    <section v-if="marginVersions.length > 0" class="margin-print-hide mb-3">
+      <h3 class="text-xs font-semibold text-gray-600 dark:text-gray-300 mb-1">版どうしの差分</h3>
+      <!--
+        **版が 2 本に足りないときに黙って空にしない** (本番 2026-07 は版が 1 本しかない)。
+        何が足りないのか・どうすれば版が増えるのかまで言葉で出す。
+      -->
+      <p v-if="marginDiffNeedsMore !== ''" class="text-xs text-gray-500 dark:text-gray-400">
+        {{ marginDiffNeedsMore }}
+      </p>
+      <template v-else>
+        <div class="flex flex-wrap items-center gap-2 text-xs mb-1">
+          <label class="flex items-center gap-1">
+            <span class="text-gray-500">旧</span>
+            <select
+              v-model="marginDiffBeforeLabel"
+              class="rounded border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 px-1.5 py-0.5 font-mono"
+            >
+              <option v-for="v in marginVersions" :key="`b-${v.key}`" :value="v.label">{{ v.label }}</option>
+            </select>
+          </label>
+          <span class="text-gray-400">→</span>
+          <label class="flex items-center gap-1">
+            <span class="text-gray-500">新</span>
+            <select
+              v-model="marginDiffAfterLabel"
+              class="rounded border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 px-1.5 py-0.5 font-mono"
+            >
+              <option v-for="v in marginVersions" :key="`a-${v.key}`" :value="v.label">{{ v.label }}</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            class="rounded border border-gray-300 dark:border-gray-700 px-2 py-0.5 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+            :disabled="marginDiffLoading"
+            @click="runMarginDiff()"
+          >差分を出す</button>
+        </div>
+        <!-- **同じ版どうしを選べてしまう。**「差が 0」を「変わっていない」と誤読させない。 -->
+        <p
+          v-if="marginDiffBeforeLabel === marginDiffAfterLabel"
+          class="text-xs text-gray-500 dark:text-gray-400 mb-1"
+        >
+          旧と新に同じ版を選んでいます — 差はすべて 0 になります (数字が変わっていないのではなく、同じ版どうしです)。
+        </p>
+        <p v-if="marginDiffError !== ''" class="text-xs text-amber-600 dark:text-amber-400">
+          {{ marginDiffError }}
+        </p>
+        <p v-else-if="marginDiffLoading" class="text-xs text-gray-400">
+          選んだ版の本文を読み込み中...
+        </p>
+        <p v-else-if="!marginDiff" class="text-xs text-gray-400">
+          2 版を選んで <b>差分を出す</b> を押してください。
+        </p>
+        <div v-else class="text-xs">
+          <!-- **形式が違う版は比べない。** 黙って旧形式を無視した差分を出すと数字が動いたように見える。 -->
+          <p v-if="marginDiff.blockedNote !== ''" class="text-amber-600 dark:text-amber-400">
+            {{ marginDiff.blockedNote }}
+          </p>
+          <template v-else>
+            <!-- 月全体。**保存された実測値そのもの**なので、粗利もここでは出してよい。 -->
+            <table class="mb-1">
+              <thead class="text-gray-500">
+                <tr class="border-b border-gray-200 dark:border-gray-800">
+                  <th class="text-left py-1 pr-3">月全体</th>
+                  <th class="text-right py-1 px-2 font-mono font-normal">{{ marginDiff.before.label }}</th>
+                  <th class="text-right py-1 px-2 font-mono font-normal">{{ marginDiff.after.label }}</th>
+                  <th class="text-right py-1 pl-2">差</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in marginDiff.totals" :key="row.key" class="border-b border-gray-100 dark:border-gray-800/60">
+                  <td class="py-1 pr-3">{{ row.label }}</td>
+                  <td class="text-right py-1 px-2">{{ marginDiffValueText(row, row.before) }}</td>
+                  <td class="text-right py-1 px-2">{{ marginDiffValueText(row, row.after) }}</td>
+                  <td
+                    class="text-right py-1 pl-2"
+                    :class="row.delta === 0 ? 'text-gray-400' : 'font-semibold'"
+                  >{{ marginDiffDeltaText(row) }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-if="marginDiff.codeVersionNote !== ''" class="text-gray-500 dark:text-gray-400 mt-1">
+              {{ marginDiff.codeVersionNote }}
+            </p>
+            <!-- **端末の設定でも版は増える。** 失敗と分かる色で断る (根本の解は別 PR)。 -->
+            <p v-if="marginDiff.overrideCaveat !== ''" class="text-amber-600 dark:text-amber-400 mt-1">
+              {{ marginDiff.overrideCaveat }}
+            </p>
+            <p v-if="marginDiff.uncoveredNote !== ''" class="text-gray-500 dark:text-gray-400 mt-1">
+              {{ marginDiff.uncoveredNote }}
+            </p>
+            <p v-if="marginDiff.crossMonthNote !== ''" class="text-gray-500 dark:text-gray-400 mt-1">
+              {{ marginDiff.crossMonthNote }}
+            </p>
+            <p class="text-gray-500 dark:text-gray-400 mt-1">{{ MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE }}</p>
+
+            <h4 class="font-semibold text-gray-600 dark:text-gray-300 mt-2 mb-1">
+              運行
+              <span class="font-normal text-gray-400">
+                (追加 {{ marginDiff.added.length }} / 削除 {{ marginDiff.removed.length }}
+                / 変更 {{ marginDiff.changed.length }} / 変わっていない {{ marginDiff.unchangedOperations }})
+              </span>
+            </h4>
+            <p
+              v-if="marginDiff.added.length === 0 && marginDiff.removed.length === 0 && marginDiff.changed.length === 0"
+              class="text-gray-500 dark:text-gray-400"
+            >
+              運行の追加・削除・変更はありません ({{ marginDiff.unchangedOperations }} 本とも同じでした)。
+            </p>
+            <template v-else>
+              <table class="w-full">
+                <thead class="text-gray-500">
+                  <tr class="border-b border-gray-200 dark:border-gray-800">
+                    <th class="text-left py-1 pr-3">運行NO</th>
+                    <th class="text-left py-1 px-2">日付</th>
+                    <th class="text-left py-1 px-2">乗務員</th>
+                    <th class="text-left py-1 pl-2">動いたもの</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="op in marginDiff.added"
+                    :key="`add-${op.unkoNo}`"
+                    class="border-b border-gray-100 dark:border-gray-800/60"
+                  >
+                    <td class="py-1 pr-3 font-mono">{{ op.unkoNo }}</td>
+                    <td class="py-1 px-2">{{ op.date }}</td>
+                    <td class="py-1 px-2">{{ op.driverName }}</td>
+                    <td class="py-1 pl-2">
+                      <span class="text-emerald-600 dark:text-emerald-400 font-semibold mr-1">追加</span>
+                      売上 {{ yen(op.salesYen) }} / 手当 {{ yen(op.allowanceYen) }} / {{ km(op.totalKm) }} / 便 {{ op.legCount }}
+                    </td>
+                  </tr>
+                  <tr
+                    v-for="op in marginDiff.removed"
+                    :key="`del-${op.unkoNo}`"
+                    class="border-b border-gray-100 dark:border-gray-800/60"
+                  >
+                    <td class="py-1 pr-3 font-mono">{{ op.unkoNo }}</td>
+                    <td class="py-1 px-2">{{ op.date }}</td>
+                    <td class="py-1 px-2">{{ op.driverName }}</td>
+                    <td class="py-1 pl-2">
+                      <span class="text-rose-600 dark:text-rose-400 font-semibold mr-1">削除</span>
+                      売上 {{ yen(op.salesYen) }} / 手当 {{ yen(op.allowanceYen) }} / {{ km(op.totalKm) }} / 便 {{ op.legCount }}
+                    </td>
+                  </tr>
+                  <!--
+                    変更された運行の行と、その下の便の行 (Refs #834) は**同じ `v-for` の中**に
+                    置く。便の行を兄弟の `<tr>` にすると `op` が範囲外になる (#818 で踏んだ)。
+                  -->
+                  <template v-for="op in marginDiff.changed" :key="`chg-${op.unkoNo}`">
+                    <tr
+                      class="border-b border-gray-100 dark:border-gray-800/60 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-900/40"
+                      title="クリックでこの運行の便の差分を開閉"
+                      @click="openDiffOps[op.unkoNo] = !openDiffOps[op.unkoNo]"
+                    >
+                      <td class="py-1 pr-3 font-mono">
+                        <span class="text-gray-400 mr-1">{{ openDiffOps[op.unkoNo] ? '▾' : '▸' }}</span>{{ op.unkoNo }}
+                      </td>
+                      <td class="py-1 px-2">{{ op.date }}</td>
+                      <td class="py-1 px-2">{{ op.driverName }}</td>
+                      <td class="py-1 pl-2">
+                        <span v-for="row in op.rows" :key="row.key" class="mr-2">
+                          {{ row.label }} {{ marginDiffValueText(row, row.before) }} → {{ marginDiffValueText(row, row.after) }}
+                          <b>({{ marginDiffDeltaText(row) }})</b>
+                        </span>
+                        <!-- 運行の合計は同じでも便の間で動いていることがある。**黙って畳まない。** -->
+                        <span v-if="op.rows.length === 0" class="text-gray-500 dark:text-gray-400">
+                          運行の合計は同じで、便の中身が動いています
+                        </span>
+                      </td>
+                    </tr>
+                    <tr v-if="openDiffOps[op.unkoNo]" class="border-b border-gray-100 dark:border-gray-800/60">
+                      <td colspan="4" class="py-1 pl-8">
+                        <!-- **便数が違えば便ごとの数値は出さない** (seq は積みの順番でしかない)。 -->
+                        <p v-if="marginDiffLegCountNote(op.legs) !== ''" class="text-amber-600 dark:text-amber-400">
+                          {{ marginDiffLegCountNote(op.legs) }}
+                        </p>
+                        <p v-else-if="op.legs.legs.length === 0" class="text-gray-500 dark:text-gray-400">
+                          便ごとの数値は変わっていません (便数 {{ op.legs.afterCount }})。
+                        </p>
+                        <template v-else>
+                        <p
+                          v-for="leg in op.legs.legs"
+                          :key="`${op.unkoNo}-${leg.seq}`"
+                          class="text-gray-600 dark:text-gray-300"
+                        >
+                          <span class="text-gray-400 mr-1">便 {{ leg.seq }}</span>
+                          <template v-if="leg.routeChanged">
+                            <span class="text-amber-600 dark:text-amber-400">{{ leg.beforeLabel }} → {{ leg.afterLabel }} (別の便になっています)</span>
+                          </template>
+                          <template v-else>{{ leg.afterLabel }}</template>
+                          <span v-for="row in leg.rows" :key="row.key" class="ml-2">
+                            {{ row.label }} {{ marginDiffValueText(row, row.before) }} → {{ marginDiffValueText(row, row.after) }}
+                            <b>({{ marginDiffDeltaText(row) }})</b>
+                          </span>
+                        </p>
+                        </template>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </template>
+          </template>
+        </div>
       </template>
     </section>
     <p v-if="cacheNote" class="text-xs text-amber-600 dark:text-amber-400 mb-3">

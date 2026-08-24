@@ -560,6 +560,34 @@ branches = true
 path = "server/api/profit/margin-snapshots.get.ts"
 branches = true
 
+# 選んだ**2 版の差分** (Refs #834)。#833 の一覧の続きで、「いつ変わったのか追えるように
+# したい」がこれで画面上で完結する。**新しいデータ取得は無い** — 版 (`MarginSummarySnapshot`)
+# の中身だけを読む。
+# `app/utils/margin-diff.ts` は pure。**運行 1 本の `marginYen` を出さない** —
+# `buildOperationMargins` の `overrides` (燃費の上書き) と `runCostShareMode` は
+# **集計した端末の localStorage にしか無く版に入っていない**ので、保存済みの版から
+# 運行 1 本の粗利は厳密に再現できない (再計算すると画面が見た `totals.marginYen` と
+# ズレる数字を作りかねない)。運行単位は**生の入力値**まで、月全体は保存された実測値で見せる。
+# **便は `seq` のまま** — 便数が違えば便ごとの数値は出さず「便数が X → Y に変わった」だけ
+# (`date`+`originCity`+`destCity` で寄せると往復や同一区間で別の便を誤って対応付ける)。
+# **`schemaVersion` が違えば比べない** (黙って旧形式を無視すると、形が変わっただけなのに
+# 数字が動いたように見える)。**粗利の数字を 1 円も作らない・変えない。**
+# server route は**版 1 本の本文を返すだけ** — 差分のロジックは持たせない (画面が 2 本取って
+# `margin-diff.ts` を呼ぶ)。**画面が持つ R2 のキーをそのまま鍵にしない** (ym と版の名前を
+# 受けて `marginR2Paths` で組み直す = そのまま境界になる)。
+# branches: 計測器の **2 段 probe** を先に回した — ①片側だけ通した `if` が `[true]`、両側が
+# `[true,false]` ②instrumented コピーでも `||` `??` `?:` の**返り値が素の実装と一致**
+# (`pick(0,7)===7` / `nn(null)==='fb'` / `andv('','b')===''`) — そのうえで AST で機械的に
+# 包んだコピーでテストを流し、**24 分岐すべてが true/false 両方**を通ることを数えた
+# (v8 も 100%/100%、テスト 41 本)。
+[[files]]
+path = "app/utils/margin-diff.ts"
+branches = true
+
+[[files]]
+path = "server/api/profit/margin-snapshot.get.ts"
+branches = true
+
 # /restraint-wage 系の共有型・表示ヘルパ (Refs #244 / gate 登録は #825)。書式 (分 / 円 /
 # R2 版タイムスタンプ / 月)、月の範囲、月タブのバッジ 3 種、最低賃金チェックの並び
 # (`groupMinWageRows`)、計算 ⇄ 給与の突合行、0 行の理由 (Refs #812) を持つ pure util。
