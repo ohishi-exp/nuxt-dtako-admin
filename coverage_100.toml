@@ -411,3 +411,22 @@ branches = true
 [[files]]
 path = "app/utils/margin-driver-share.ts"
 branches = true
+
+# 乗務員別の賃金構成 (基本給 ＋ 残業 ＋ 旅費、Refs #760 の 40) の pure 部分。
+# `profit-allowance-base.ts` は旅費の母数 (粗利タブの手当 − 翌月日付の便 + 対象外便) を
+# 乗務員別に組み、`profit-wage-mix.ts` が三段に分ける。**どちらも粗利の数字には
+# 1 円も効かない** (`margin.ts` は 1 行も触っていない)。
+# **欠測を 0 に倒さない**分岐 (拘束が引けない乗務員 / 対象外便が取れていない月 /
+# 金額の決まらなかった便) が中核なので、その両側を数えることに意味がある。
+# branches: BR() 計測器を probe (片側しか通らない `if` を仕込んだ .ts) で先に検証して
+# から、`??` `||` `&&` `?:` と全 `if` を BR() で包んだ instrumented コピーで **52 分岐
+# すべてが true/false 両方を通る**ことを数えた。**v8 が branches 100% を出した状態でも
+# 片側しか通っていない分岐が 2 件あった** (`Number.isFinite(month)` の false 側と
+# `Number.isFinite(yen)` の false 側 — どちらも `||` / `&&` の短絡で評価されていなかった)。
+[[files]]
+path = "app/utils/profit-allowance-base.ts"
+branches = true
+
+[[files]]
+path = "app/utils/profit-wage-mix.ts"
+branches = true
