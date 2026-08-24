@@ -40,9 +40,7 @@
 import {
   fetchDriverDailySlips,
   vehicleDailyDateRange,
-  scoreVehicleDailySlips,
   calcProfitEfficiency,
-  type ScoredVehicleDailySlip,
   type VehicleDailySlip,
 } from '~/utils/ichiban'
 import type { SelectedRowsSummary, SelectedRowsLocationRange } from '~/utils/event-data-table'
@@ -69,7 +67,9 @@ import {
   boundSlips,
   slipRows,
   sumAmount,
-  slipBadge,
+  slipMatch,
+  slipSideNote,
+  type SlipMatch,
   effectiveSlipIds,
   ownSlipIds,
   seedForceMatch,
@@ -121,8 +121,6 @@ const activeKey = computed(() => {
 })
 
 const byRowId = computed(() => new Map(slips.value.map(s => [s.rowId, s])))
-/** 根拠バッジ用のスコア。**並べ替えには使わない** (並びは `forceMatchCandidates` のもの)。 */
-const scoreByRowId = ref<Map<string, ScoredVehicleDailySlip>>(new Map())
 
 /** 候補を出せない理由。出せるときは `null`。 */
 const usedNote = computed(() => usedSlipsNote(used.value))
@@ -204,7 +202,6 @@ async function load() {
   if (!props.driverCd || !props.range) {
     status.value = 'no-driver'
     slips.value = []
-    scoreByRowId.value = new Map()
     return
   }
   status.value = 'loading'
@@ -218,9 +215,6 @@ async function load() {
     // **請求のみ (`請求K=1`) は候補に出さない。** 中継では脚とあわせて売上が二重に乗る。
     // 「休み」行も便ではない (①の `tradableSlips` と同じ)。
     slips.value = transportSlips(tradableSlips(fetched))
-    scoreByRowId.value = new Map(
-      scoreVehicleDailySlips(props.location?.originCity ?? '', props.location?.destCity ?? '', slips.value)
-        .map(s => [s.slip.rowId, s]))
     status.value = 'ready'
   }
   catch (e) {
@@ -279,8 +273,18 @@ const matchBadgeClass: Record<string, string> = {
 
 const matchBadgeLabel: Record<string, string> = { exact: '完全一致', partial: '部分一致', none: '根拠なし' }
 
-function badgeOf(rowId: string) {
-  return slipBadge(scoreByRowId.value.get(rowId))
+/**
+ * 根拠。**その場で計算する** (Refs #858) — ②の `scoreVehicleDailySlips` を撤去して
+ * `rowId` → スコアの `Map` を持つ必要が無くなった。**「完全一致」は積地・卸地の両方が
+ * exact のときだけ** (`combinedMatchLevel` と同じ) で、`/profit/monthly` の保存済み一覧と
+ * 同じ言葉が同じ意味になる。
+ *
+ * **バッジだけにしない** — `combinedMatchLevel` は片方でも `none` なら `none` に畳むので、
+ * 「積地は合っている明細」と「何も合っていない明細」が同じ「根拠なし」になる。畳んだ側は
+ * `slipSideNote` が一言で言う (本番 2026-07 では候補の約 3 割がこれに当たる)。
+ */
+function matchOf(slip: VehicleDailySlip): SlipMatch {
+  return slipMatch(props.location, slip)
 }
 
 /** 便の見出し (`便2 07-16 釧路市 → (卸地なし)`)。 */
@@ -403,8 +407,11 @@ function legNote(leg: ProfitPanelLeg): string {
                     <td class="px-2 py-1.5 whitespace-nowrap">{{ formatItem(s) }}</td>
                     <td class="px-2 py-1.5 text-right whitespace-nowrap">{{ formatYen(s.amount) }}</td>
                     <td class="px-2 py-1.5 text-center">
-                      <span class="px-1.5 py-0.5 rounded text-[10px]" :class="matchBadgeClass[badgeOf(s.rowId)]">
-                        {{ matchBadgeLabel[badgeOf(s.rowId)] }}
+                      <span class="px-1.5 py-0.5 rounded text-[10px]" :class="matchBadgeClass[matchOf(s).badge]">
+                        {{ matchBadgeLabel[matchOf(s).badge] }}
+                      </span>
+                      <span v-if="slipSideNote(matchOf(s))" class="block mt-0.5 text-[10px] text-gray-400 whitespace-nowrap">
+                        {{ slipSideNote(matchOf(s)) }}
                       </span>
                     </td>
                   </tr>

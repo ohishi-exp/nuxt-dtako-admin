@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { forceMatchKey } from '~/utils/allowance-force-match'
 import type { AllowanceLeg } from '~/utils/allowance-trips'
-import type { ScoredVehicleDailySlip, VehicleDailySlip } from '~/utils/ichiban'
+import type { VehicleDailySlip } from '~/utils/ichiban'
 import {
   FORCE_MATCH_FROZEN_NOTE,
   FORCE_MATCH_ICHIBAN_NOTE,
@@ -12,7 +12,8 @@ import {
   legsInSelection,
   ownSlipIds,
   seedForceMatch,
-  slipBadge,
+  slipMatch,
+  slipSideNote,
   slipRows,
   sumAmount,
 } from '~/utils/profit-panel-legs'
@@ -163,25 +164,110 @@ describe('sumAmount', () => {
   })
 })
 
-describe('slipBadge — 根拠バッジ', () => {
-  function scored(score: number, suggested: boolean): Pick<ScoredVehicleDailySlip, 'score' | 'suggested'> {
-    return { score, suggested }
-  }
+describe('slipMatch — 根拠バッジ (Refs #858)', () => {
+  /**
+   * **②の `scoreVehicleDailySlips` を撤去して `combinedMatchLevel` に寄せた。**
+   * 撤去前は `suggested` (= 積地・卸地の両方が none でない) を `exact` として出していたので、
+   * **partial + partial が画面に「完全一致」と出ていた**。`/profit/monthly` の保存済み一覧は
+   * 同じものを `combinedMatchLevel` で「部分」と数えており、**同じ言葉が 2 画面で違う意味**
+   * だった。ここで固定するのは「**両方 exact のときだけ完全一致**」。
+   */
+  const badge = (loc: { originCity: string, destCity: string } | null, sl: VehicleDailySlip) =>
+    slipMatch(loc, sl).badge
 
-  it('積地・卸地とも当たれば完全一致', () => {
-    expect(slipBadge(scored(4, true))).toBe('exact')
+  it('積地・卸地とも完全一致のときだけ「完全一致」', () => {
+    const s = slip({ originAreaName: '北海道釧路市', destAreaName: '福岡県北九州市' })
+    expect(badge({ originCity: '北海道釧路市', destCity: '福岡県北九州市' }, s)).toBe('exact')
   })
 
-  it('片側だけ当たれば部分一致', () => {
-    expect(slipBadge(scored(1, false))).toBe('partial')
+  it('★ 両方 partial は「部分一致」— 撤去前は「完全一致」と出ていた嘘 (帯広の実データで日常的に出る)', () => {
+    const s = slip({ originAreaName: '北海道釧路市', destAreaName: '北海道標茶町' })
+    expect(badge({ originCity: '北海道釧路市西港２-101-1', destCity: '北海道川上郡標茶町多和' }, s))
+      .toBe('partial')
   })
 
-  it('どちらも当たらなければ根拠なし', () => {
-    expect(slipBadge(scored(0, false))).toBe('none')
+  it('片方が exact でももう片方が partial なら「部分一致」', () => {
+    const s = slip({ originAreaName: '北海道釧路市', destAreaName: '北海道標茶町' })
+    expect(badge({ originCity: '北海道釧路市', destCity: '北海道川上郡標茶町多和' }, s)).toBe('partial')
   })
 
-  it('スコアを持っていない明細は「根拠なし」(「結べない」ではない)', () => {
-    expect(slipBadge(undefined)).toBe('none')
+  it('★ 片側だけ当たり (もう片方が none) は「根拠なし」— 撤去前は「部分一致」と出ていた', () => {
+    const s = slip({ originAreaName: '北海道釧路市', destAreaName: '東京都' })
+    expect(badge({ originCity: '北海道釧路市', destCity: '福岡県北九州市' }, s)).toBe('none')
+  })
+
+  it('どちらも当たらなければ「根拠なし」', () => {
+    const s = slip({ originAreaName: '東京都', destAreaName: '大阪府' })
+    expect(badge({ originCity: '北海道釧路市', destCity: '福岡県北九州市' }, s)).toBe('none')
+  })
+
+  it('地域ﾏｽﾀ (`originAreaName`) が空なら自由記述 (`origin`) で判定する — ②から引き取った作法', () => {
+    const s = slip({ originAreaName: '', origin: '北海道釧路市', destAreaName: '福岡県北九州市' })
+    expect(badge({ originCity: '北海道釧路市', destCity: '福岡県北九州市' }, s)).toBe('exact')
+  })
+
+  it('地域ﾏｽﾀが当たらなければ自由記述を見る (地域ﾏｽﾀ優先は「空なら」ではなく「none なら」)', () => {
+    const s = slip({ originAreaName: '東京都', origin: '北海道釧路市', destAreaName: '福岡県北九州市' })
+    expect(badge({ originCity: '北海道釧路市', destCity: '福岡県北九州市' }, s)).toBe('exact')
+  })
+
+  it('地域ﾏｽﾀが当たっていれば自由記述は見ない (先に決まる)', () => {
+    const s = slip({ originAreaName: '北海道釧路市', origin: '東京都', destAreaName: '福岡県北九州市' })
+    expect(badge({ originCity: '北海道釧路市', destCity: '福岡県北九州市' }, s)).toBe('exact')
+  })
+
+  it('選択区間の積地・卸地が取れていない (`location` が null) なら「根拠なし」— 「結べない」ではない', () => {
+    const s = slip({ originAreaName: '北海道釧路市', destAreaName: '福岡県北九州市' })
+    expect(badge(null, s)).toBe('none')
+  })
+
+  it('卸地だけ取れていない選択区間は「根拠なし」(積地が完全一致でも)', () => {
+    const s = slip({ originAreaName: '北海道釧路市', destAreaName: '福岡県北九州市' })
+    expect(badge({ originCity: '北海道釧路市', destCity: '' }, s)).toBe('none')
+  })
+
+  it('★ 畳む前の両側を必ず返す (バッジだけにしない)', () => {
+    const s = slip({ originAreaName: '北海道釧路市', destAreaName: '東京都' })
+    expect(slipMatch({ originCity: '北海道釧路市', destCity: '福岡県北九州市' }, s))
+      .toEqual({ badge: 'none', originMatch: 'exact', destMatch: 'none' })
+  })
+})
+
+describe('slipSideNote — 畳んで隠したことを言う一言 (Refs #858)', () => {
+  /**
+   * `combinedMatchLevel` は「片方でも none なら none」なので、**積地だけ当たっている明細と
+   * 何ひとつ当たっていない明細が同じ「根拠なし」**になる。本番 2026-07 の候補一覧では
+   * 1,971 件中 589 件 (29.9%) がこれに当たり、候補が 2 件以上ある便 471 本のうち
+   * **113 本**がバッジ一色なのに両側を見れば見分けが付く状態だった。**その 1 行は残す。**
+   */
+  const note = (o: string, d: string) => slipSideNote({ badge: 'none', originMatch: o as never, destMatch: d as never })
+
+  it('積地だけ当たっている明細は「積地のみ一致」と言う', () => {
+    expect(note('partial', 'none')).toBe('積地のみ一致')
+    expect(note('exact', 'none')).toBe('積地のみ一致')
+  })
+
+  it('卸地だけ当たっている明細は「卸地のみ一致」と言う', () => {
+    expect(note('none', 'partial')).toBe('卸地のみ一致')
+  })
+
+  it('何も当たっていない明細には何も足さない (バッジが隠したものが無い)', () => {
+    expect(note('none', 'none')).toBeNull()
+  })
+
+  it('★ バッジが none でなければ何も足さない — 両側とも当たっており、畳んで隠したものが無い', () => {
+    expect(slipSideNote({ badge: 'partial', originMatch: 'partial', destMatch: 'partial' })).toBeNull()
+    expect(slipSideNote({ badge: 'exact', originMatch: 'exact', destMatch: 'exact' })).toBeNull()
+  })
+
+  it('★ 実物の突合結果とつないでも同じことを言う (本番 2026-07 の実データ形)', () => {
+    const onlyOrigin = slip({ originAreaName: '北海道釧路市', origin: '北海道釧路市', destAreaName: '東京都', dest: '東京都' })
+    // **自由記述 (`origin` / `dest`) も潰しておく** — 素の `slip()` は `origin: '釧路'` なので、
+    // 地域ﾏｽﾀが外れると `bestMatch` がそちらで partial を拾い「何も当たらない」にならない。
+    const neither = slip({ originAreaName: '東京都', origin: '東京都', destAreaName: '大阪府', dest: '大阪府' })
+    const loc = { originCity: '北海道釧路市西港２-101-1', destCity: '北海道川上郡標茶町多和' }
+    expect(slipSideNote(slipMatch(loc, onlyOrigin))).toBe('積地のみ一致')
+    expect(slipSideNote(slipMatch(loc, neither))).toBeNull()
   })
 })
 

@@ -120,6 +120,16 @@ branches = true
 path = "app/utils/salary-file.ts"
 branches = true
 
+# 一番星 (販売管理) の明細を引く口と、地名の正規化・突合 (`normalizeLocationName` /
+# `stripGun` / `matchLocationLevel`)。
+# **#858 (PR-4a) で②の突合エンジンを撤去した** — `scoreVehicleDailySlips` /
+# `bestMatch` / `ScoredVehicleDailySlip` / `MATCH_LEVEL_SCORE` はもう無い。
+# **残っているのは `matchLocationLevel` までの「1 対 1 の地名判定」だけ**で、これは
+# ②とは別物 (`event-data-table.ts` の `proposeEventRowRange` が使用中)。
+# 「どの明細をどの便に当てるか」は①(`allowance-ichiban.ts` / `reconcileVehicles`) が
+# 唯一の突合であり、**このファイルは 1 件も当てない**。
+# branches: instrumented コピーで**17 分岐すべてが true/false 両方を通る**ことを数えた
+# (origin/main では 20。撤去した②のぶんが減った)。
 [[files]]
 path = "app/utils/ichiban.ts"
 branches = true
@@ -147,14 +157,42 @@ branches = true
 # フィルタ条件は緩めていない** (緩めると他の便の明細まで候補に出て二重計上になる)。
 # 直したのは**渡す `ownRowIds`** の側だけ。**`FORCE_MATCH_KEY` への書き込みは
 # `toggleBind` の 1 か所だけ** = 人が押すまで 1 文字も書かない (テストで固定)。
+# **#858 (PR-4a) で②の `scoreVehicleDailySlips` が消え、`scoreByRowId` の `Map` も消えた。**
+# 根拠は `slipMatch(props.location, slip)` で**その場で計算**する。
+# **「完全一致」は積地・卸地の両方が exact のときだけ** (`combinedMatchLevel` と同じ) —
+# 撤去前は「両方が none でない」を `exact` にしていたので **partial + partial が画面に
+# 「完全一致」**と出ていた。`/profit/monthly` の保存済み一覧は同じものを「部分」と
+# 数えており、**同じ言葉が 2 画面で違う意味**だった。テストで両方向を固定してある。
+# **★ バッジだけにしない。**`combinedMatchLevel` は片方でも `none` なら `none` に畳むので、
+# 「積地は合っている明細」と「何も合っていない明細」が同じ「根拠なし」になる。本番
+# 2026-07 の候補一覧では 1,971 件中 589 件 (29.9%) がこれに当たり、候補が 2 件以上ある便
+# 471 本のうち **113 本**がバッジ一色で見分け不能になっていた。`slipSideNote` の 1 行
+# (「積地のみ一致」/「卸地のみ一致」) を足すと**見分け不能な便は 0 本**になる (実測)。
+# **両側とも当たっている行には足さない** — 畳んで隠したものが無く、全行に同じ文字が
+# 並ぶと候補一覧が読みにくくなるだけ。
 # branches: script ブロックを instrumented コピー
-# (`operation-leg-sales.ts` と同じ計測器) に差し替えてテストを流し、**23 分岐のうち
-# 実分岐 21 が true/false 両方**を通ることを数えた (残る 2 は
-# `leg.originCity || '?'` の**右辺の文字列リテラル** = 常に真で経路が分かれない)。
+# (`operation-leg-sales.ts` と同じ計測器) に差し替えてテストを流し、**21 分岐のうち
+# 実分岐 19 が true/false 両方**を通ることを数えた (origin/main では 25 分岐。
+# `props.location?.originCity ?? ''` 2 組 = 4 分岐が `slipMatch` 側へ移った)。
+# **側の一言の `v-if` は template 側**なので BR には出ない (compile 後の render 関数)。
+# 出る行・出ない行の両方を component テストで踏んで v8 の branches で見ている。
+# **残る 2 は `leg.originCity || '?'` の右辺の文字列リテラル** = 常に真で経路が分かれない
+# (v8 も分岐に数えないので gate は 100%。埋めようとすると通らないテストを書くことになる)。
 [[files]]
 path = "app/components/ProfitPanel.vue"
 branches = true
 
+# ②の**検証スナップショット** (R2、区間ごと) の形とパス、および月次集計。
+# **もう誰も書かない** — 書き口 (`POST /api/profit/snapshot`) は #849 (PR-2) で、
+# 組み立ての `buildProfitSnapshot` は #858 (PR-4a) で消えた (production から呼ばれて
+# いない死んだ export で、`ScoredVehicleDailySlip` を引数に取っていた)。
+# **`ProfitSnapshot` / `ProfitSnapshotSlip` 型は残す** — 既存の R2 オブジェクトを読む
+# `snapshot.get.ts` / `snapshots.get.ts` / `snapshot.delete.ts` と `/profit/monthly` が
+# 使っている。既存のスナップショットは**消さない** (人が確認した作業の記録、#820)。
+# **`combinedMatchLevel` は #858 で収支パネルの根拠バッジからも呼ばれるようになった** —
+# 保存済み一覧と収支パネルで**同じ言葉が同じ意味**になるための 1 か所。
+# branches: instrumented コピーで**16 分岐すべてが true/false 両方を通る**ことを数えた
+# (origin/main では 20。`buildProfitSnapshot` のぶんが減った)。
 [[files]]
 path = "app/utils/profit-r2.ts"
 branches = true
@@ -570,8 +608,27 @@ branches = true
 # 分けてある** — 流用すると、人が①の明細を外した瞬間にそれが `own` から外れ、
 # `usedRowIds` には残っているので候補からも消えて**その場で戻せなくなる**
 # (「結ぶと戻せない」が符号を変えて残る)。
-# branches: 上と同じ instrumented コピーで**15 分岐すべてが true/false 両方を通る**
-# ことを数えた (v8 も 100%/100%、テスト 39 本)。
+# **#858 (PR-4a) で根拠バッジ (`slipMatch`) がここへ移ってきた。** ②の
+# `scoreVehicleDailySlips` (NFKC スコアリング) を撤去し、バッジは `matchLocationLevel` +
+# `combinedMatchLevel` (`profit-r2.ts`) から出す。**引き取ったのは「地域ﾏｽﾀ
+# (`originAreaName`) を優先し、`none` なら自由記述 (`origin`) で見る」作法だけ**
+# (`bestMatch`) — 消えたのは exact=2/partial=1 の合算と並べ替えであって、地名突合の
+# 作法ではない。**`bestMatch` は写しではなく移動** (`ichiban.ts` から消してある) で、
+# 地名突合が 2 か所に分かれないようにしてある。
+# **「完全一致」は両方 exact のときだけ**にした。撤去前は `suggested` (= 両方が none で
+# ない) を `exact` にしていたので **partial + partial が「完全一致」**と出ており、
+# 帯広の実データ (`北海道釧路市西港２-101-1` vs `北海道釧路市`) は partial が主なので
+# **日常的に出る嘘**だった。`/profit/monthly` の一覧と**同じ言葉が同じ意味**になる。
+# **★ 中核の分岐は「畳んだことを黙らない」側**: `slipMatch` は畳んだ `badge` と**畳む前の
+# 両側**を必ずセットで返し、`slipSideNote` が「積地のみ一致」/「卸地のみ一致」を言う。
+# `combinedMatchLevel` は片方でも `none` なら `none` なので、これが無いと**積地だけ
+# 当たっている明細と何も当たっていない明細が同じ「根拠なし」に潰れる** (本番 2026-07 の
+# 候補 1,971 件中 589 件 = 29.9% がこの状態で、候補 2 件以上の便 471 本のうち 113 本が
+# 見分け不能になっていた。一言を足すと 0 本)。**バッジが `none` でないときは足さない** —
+# 隠したものが無く、全行に同じ文字が並ぶと読みにくくなるだけ。
+# branches: 上と同じ instrumented コピーで**20 分岐すべてが true/false 両方を通る**
+# ことを数えた (origin/main では 15。`bestMatch` の `if` / `location?.` / `slipSideNote`
+# の 3 段の `if` が増えた)。
 [[files]]
 path = "app/utils/profit-panel-legs.ts"
 branches = true

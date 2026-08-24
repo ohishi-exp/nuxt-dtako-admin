@@ -4,13 +4,11 @@ import {
   vehicleDailyDateRange,
   normalizeLocationName,
   matchLocationLevel,
-  scoreVehicleDailySlips,
   calcProfitEfficiency,
   fetchVehicleDailySlips,
   fetchDriverDailySlips,
   searchVehicleDailySlips,
   type VehicleDailyApiRow,
-  type VehicleDailySlip,
 } from '~/utils/ichiban'
 
 describe('mapVehicleDailyApiRow', () => {
@@ -148,65 +146,6 @@ describe('matchLocationLevel', () => {
   it('郡を含まない市 (政令市等) の突合は郡除去の影響を受けない', () => {
     expect(matchLocationLevel('北海道釧路市西港２-101-1', '北海道釧路市')).toBe('partial')
     expect(matchLocationLevel('福岡県北九州市', '北九州市')).toBe('partial')
-  })
-})
-
-describe('scoreVehicleDailySlips', () => {
-  function slip(overrides: Partial<VehicleDailySlip> = {}): VehicleDailySlip {
-    return {
-      saleDate: '2026-06-21',
-      vehicleNumber: '8504',
-      customerCode: '000001',
-      customerName: 'テスト得意先',
-      originAreaName: '',
-      destAreaName: '',
-      origin: '',
-      dest: '',
-      isSubcontracted: false,
-      amount: 10000,
-      itemCode: '',
-      itemName: '',
-      quantity: 0,
-      unitPrice: 0,
-      unit: '',
-      rowId: 'row-1',
-      ...overrides,
-    }
-  }
-
-  it('積地・卸地とも一致する伝票が最上位 (score降順) にソートされる', () => {
-    const noMatch = slip({ rowId: 'no-match', originAreaName: '東京都', destAreaName: '大阪府' })
-    const bothMatch = slip({ rowId: 'both-match', originAreaName: '長崎県', destAreaName: '福岡県北九州市' })
-    const partialMatch = slip({ rowId: 'partial', originAreaName: '長崎県', destAreaName: '' })
-
-    const result = scoreVehicleDailySlips('長崎県', '北九州市', [noMatch, bothMatch, partialMatch])
-
-    expect(result[0]!.slip.rowId).toBe('both-match')
-    // origin: '長崎県' 完全一致(exact=2)、dest: '北九州市'⊂'福岡県北九州市'(partial=1) → 計3
-    expect(result[0]!.score).toBe(3)
-    expect(result[0]!.suggested).toBe(true)
-  })
-
-  it('origin_area_name が空なら origin (発地N) にフォールバックする', () => {
-    const s = slip({ originAreaName: '', origin: '釧路', destAreaName: '福岡県北九州市' })
-    const [scored] = scoreVehicleDailySlips('釧路', '北九州市', [s])
-    expect(scored!.originMatch).toBe('exact')
-    expect(scored!.destMatch).toBe('partial')
-    expect(scored!.suggested).toBe(true)
-  })
-
-  it('片方だけ一致では suggested は false', () => {
-    const s = slip({ originAreaName: '長崎県', destAreaName: '東京都' })
-    const [scored] = scoreVehicleDailySlips('長崎県', '北九州市', [s])
-    expect(scored!.destMatch).toBe('none')
-    expect(scored!.suggested).toBe(false)
-  })
-
-  it('dtako 側の地名が空文字なら常に none 判定 (何も一致させない)', () => {
-    const s = slip({ originAreaName: '長崎県', destAreaName: '福岡県北九州市' })
-    const [scored] = scoreVehicleDailySlips('', '', [s])
-    expect(scored!.score).toBe(0)
-    expect(scored!.suggested).toBe(false)
   })
 })
 

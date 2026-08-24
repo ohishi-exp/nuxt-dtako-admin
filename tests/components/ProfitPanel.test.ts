@@ -716,7 +716,7 @@ describe('ProfitPanel', () => {
     it('★ 根拠バッジは 3 段 (完全一致 / 部分一致 / 根拠なし)', async () => {
       fetchDriverDailySlipsMock.mockResolvedValue([
         slip({ rowId: 'a', originAreaName: '釧路市', destAreaName: '上士幌町' }),
-        slip({ rowId: 'b', originAreaName: '釧路市', destAreaName: '別海町', dest: '別海町' }),
+        slip({ rowId: 'b', originAreaName: '北海道釧路市', destAreaName: '上士幌町' }),
         slip({ rowId: 'c', originAreaName: '苫小牧市', origin: '苫小牧', destAreaName: '千歳市', dest: '千歳' }),
       ])
       const wrapper = createWrapper()
@@ -724,6 +724,73 @@ describe('ProfitPanel', () => {
       expect(wrapper.text()).toContain('完全一致')
       expect(wrapper.text()).toContain('部分一致')
       expect(wrapper.text()).toContain('根拠なし')
+    })
+
+    /**
+     * **②の `scoreVehicleDailySlips` を撤去して `combinedMatchLevel` に寄せた** (Refs #858)。
+     * 撤去前は「積地・卸地の両方が none でない」を `exact` にしていたので、**両方 partial でも
+     * 画面に「完全一致」**と出ていた。帯広の実データ (`北海道釧路市西港２-101-1` vs
+     * `北海道釧路市`) は partial が主で、**日常的に出ていた嘘**。
+     */
+    it('★★ 両方 partial は「部分一致」— 撤去前は「完全一致」と出ていた (Refs #858)', async () => {
+      fetchDriverDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'a', originAreaName: '北海道釧路市', destAreaName: '北海道上士幌町' }),
+      ])
+      const wrapper = createWrapper({ location: { originCity: '釧路市', destCity: '上士幌町' } })
+      await flushPromises()
+      expect(wrapper.text()).toContain('部分一致')
+      expect(wrapper.text()).not.toContain('完全一致')
+    })
+
+    it('★ 片側だけ当たる明細は「根拠なし」— 撤去前は「部分一致」と出ていた (Refs #858)', async () => {
+      fetchDriverDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'a', originAreaName: '釧路市', destAreaName: '別海町', dest: '別海町' }),
+      ])
+      const wrapper = createWrapper()
+      await flushPromises()
+      expect(wrapper.text()).toContain('根拠なし')
+      expect(wrapper.text()).not.toContain('部分一致')
+    })
+
+    /**
+     * **`combinedMatchLevel` は片方でも none なら none に畳む。**「積地は合っている明細」と
+     * 「何も合っていない明細」が同じ「根拠なし」になるので、**候補を選ぶ手掛かりが消える。**
+     * 本番 2026-07 の候補一覧では 1,971 件中 589 件 (29.9%) がこの状態で、候補が 2 件以上
+     * ある便 471 本のうち **113 本**がバッジ一色になっていた。畳んだ側を 1 行で言わせる。
+     */
+    it('★★ 「根拠なし」でも積地だけ当たっていれば、そう言う (畳んだことを黙らない、Refs #858)', async () => {
+      fetchDriverDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'a', originAreaName: '釧路市', destAreaName: '別海町', dest: '別海町' }),
+        slip({ rowId: 'b', originAreaName: '苫小牧市', origin: '苫小牧', destAreaName: '千歳市', dest: '千歳' }),
+      ])
+      const wrapper = createWrapper()
+      await flushPromises()
+      const cells = wrapper.findAll('tbody tr').map(tr => tr.text())
+      // 積地だけ当たっている行 = バッジは「根拠なし」だが、畳んだ側を言う
+      expect(cells.some(t => t.includes('根拠なし') && t.includes('積地のみ一致'))).toBe(true)
+      // 何も当たっていない行 = 足さない (全行に同じ文字が並ぶと候補一覧が読みにくい)
+      expect(cells.some(t => t.includes('根拠なし') && !t.includes('積地のみ一致') && !t.includes('卸地のみ一致'))).toBe(true)
+    })
+
+    it('★ 卸地だけ当たっていれば「卸地のみ一致」と言う', async () => {
+      fetchDriverDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'a', originAreaName: '東京都', origin: '東京', destAreaName: '上士幌町' }),
+      ])
+      const wrapper = createWrapper()
+      await flushPromises()
+      expect(wrapper.text()).toContain('根拠なし')
+      expect(wrapper.text()).toContain('卸地のみ一致')
+    })
+
+    it('両側とも当たっている行には側の一言を足さない (畳んで隠したものが無い)', async () => {
+      fetchDriverDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'a', originAreaName: '釧路市', destAreaName: '上士幌町' }),
+      ])
+      const wrapper = createWrapper()
+      await flushPromises()
+      expect(wrapper.text()).toContain('完全一致')
+      expect(wrapper.text()).not.toContain('積地のみ一致')
+      expect(wrapper.text()).not.toContain('卸地のみ一致')
     })
 
     it('選択区間の積地・卸地が取れていなくても出せる (根拠は付かない)', async () => {

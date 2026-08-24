@@ -66,10 +66,11 @@ export const OPERATION_LEG_SALES_KEY = 'dtako:operations:leg-sales:v1'
  * 「収支パネル」は**その①に対する人の上書き** (`allowance-force-match.ts` の
  * `FORCE_MATCH_KEY`)。**結ぶとこちらの額も動く** (次の集計から)。
  *
- * **#849 より前は本当に別物だった** — あちらは②(`scoreVehicleDailySlips`、車番だけで
- * 引いた候補) の**検証スナップショット**で、`/profit/monthly` のマッチ率にしか効かず、
- * 粗利にも印刷にも乗らなかった。②はもう突合には使っていない (根拠バッジの目印にだけ
- * 残っている。撤去は PR-4)。**この doc と `LEG_SALES_PANEL_NOTE` が②の説明のままだと、
+ * **#849 より前は本当に別物だった** — あちらは②(車番だけで引いた候補を NFKC で
+ * スコアリングする `scoreVehicleDailySlips`) の**検証スナップショット**で、
+ * `/profit/monthly` のマッチ率にしか効かず、粗利にも印刷にも乗らなかった。
+ * **②は #858 (PR-4a) で撤去済み** — 根拠バッジだけが `combinedMatchLevel` に寄せた形で
+ * 残っている。**この doc と `LEG_SALES_PANEL_NOTE` が②の説明のままだと、
  * 「収支パネルで結んでも粗利には乗らない」という嘘になる** (#851 で実際に本番へ出た)。
  *
  * それでも**ラベルは分ける** — 「集計の結果」と「その結果への上書きの入力」は役割が
