@@ -75,6 +75,7 @@ import {
   FORCE_MATCH_PANEL_NOTE,
   FORCE_MATCH_OVERRIDE_NOTE,
   FORCE_MATCH_ICHIBAN_NOTE,
+  FORCE_MATCH_FROZEN_NOTE,
   type ProfitPanelLeg,
 } from '~/utils/profit-panel-legs'
 
@@ -294,7 +295,20 @@ function boundLabel(leg: ProfitPanelLeg): string {
 
 const panelNote = FORCE_MATCH_PANEL_NOTE
 const overrideNote = FORCE_MATCH_OVERRIDE_NOTE
-const ichibanNote = FORCE_MATCH_ICHIBAN_NOTE
+
+/**
+ * その便に出す注記。**触る前と触った後で言うことが違う** (Refs #854)。
+ *
+ * - `ichiban` — 触るとどうなるか (①の追従をやめる / 全部外すと戻る)
+ * - `forced` — **もう①には追従していない** (集計し直しても変わらない) / 戻し方
+ * - `none` — 言うことは無い (①も当てていない便)
+ */
+function legNote(leg: ProfitPanelLeg): string {
+  const { source } = effectiveOf(leg)
+  if (source === 'ichiban') return FORCE_MATCH_ICHIBAN_NOTE
+  if (source === 'forced') return FORCE_MATCH_FROZEN_NOTE
+  return ''
+}
 </script>
 
 <template>
@@ -348,8 +362,8 @@ const ichibanNote = FORCE_MATCH_ICHIBAN_NOTE
             </button>
 
             <template v-if="leg.key === activeKey">
-              <p v-if="effectiveOf(leg).source === 'ichiban'" class="px-3 py-1.5 text-[10px] text-blue-700 dark:text-blue-400">
-                {{ ichibanNote }}
+              <p v-if="legNote(leg)" class="px-3 py-1.5 text-[10px] text-blue-700 dark:text-blue-400">
+                {{ legNote(leg) }}
               </p>
               <p v-if="boundOf(leg).missing > 0" class="px-3 py-1 text-[10px] text-amber-700 dark:text-amber-400">
                 この便に当たっている明細のうち {{ boundOf(leg).missing }} 件がこの検索結果に見当たりません (記録は残っています。日付の範囲外か、別の乗務員で引かれた明細です)

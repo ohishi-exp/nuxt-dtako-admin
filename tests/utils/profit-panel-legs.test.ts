@@ -3,6 +3,7 @@ import { forceMatchKey } from '~/utils/allowance-force-match'
 import type { AllowanceLeg } from '~/utils/allowance-trips'
 import type { ScoredVehicleDailySlip, VehicleDailySlip } from '~/utils/ichiban'
 import {
+  FORCE_MATCH_FROZEN_NOTE,
   FORCE_MATCH_ICHIBAN_NOTE,
   FORCE_MATCH_OVERRIDE_NOTE,
   FORCE_MATCH_PANEL_NOTE,
@@ -205,12 +206,23 @@ describe('画面の文言 — 何がどう変わったかを読めるように�
     expect(FORCE_MATCH_OVERRIDE_NOTE).not.toContain('他の便に当たっていない明細だけ')
   })
 
-  it('★★ ①が当てている便では「土台にする」と「全部外すと①に戻る」を両方言う (Refs #854)', () => {
-    expect(FORCE_MATCH_ICHIBAN_NOTE).toContain('粗利タブが当てた明細')
+  it('★★ ①が当てている便では「土台にする」「追従をやめる」「全部外すと①に戻る」を言う (Refs #854)', () => {
+    expect(FORCE_MATCH_ICHIBAN_NOTE).toContain('粗利タブが当てたもの')
     expect(FORCE_MATCH_ICHIBAN_NOTE).toContain('土台にした上書き')
+    // ★ **触ると①の追従が止まる。**「置き換えです」だけだと「今回の集計で置き換わる」と
+    // 読まれ、**次の月次で伝票が直っても反映されない**ことに気づけない。
+    expect(FORCE_MATCH_ICHIBAN_NOTE).toContain('粗利タブの集計に追従しなくなります')
     // **外し方の帰結を言わないと次の誤読が生まれる** — 空にはならず①の結果に戻る。
     expect(FORCE_MATCH_ICHIBAN_NOTE).toContain('全部外すと粗利タブの結果に戻ります')
     expect(FORCE_MATCH_ICHIBAN_NOTE).toContain('売上 0 円にすることはできません')
+  })
+
+  it('★★ 触った便では「もう追従していない」と戻し方を言う (Refs #854)', () => {
+    expect(FORCE_MATCH_FROZEN_NOTE).toContain('人の上書きです')
+    expect(FORCE_MATCH_FROZEN_NOTE).toContain('集計し直しても')
+    expect(FORCE_MATCH_FROZEN_NOTE).toContain('伝票が直っても')
+    expect(FORCE_MATCH_FROZEN_NOTE).toContain('追従しません')
+    expect(FORCE_MATCH_FROZEN_NOTE).toContain('全部外すと粗利タブの結果に戻ります')
   })
 })
 

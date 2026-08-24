@@ -148,8 +148,8 @@ branches = true
 # 直したのは**渡す `ownRowIds`** の側だけ。**`FORCE_MATCH_KEY` への書き込みは
 # `toggleBind` の 1 か所だけ** = 人が押すまで 1 文字も書かない (テストで固定)。
 # branches: script ブロックを instrumented コピー
-# (`operation-leg-sales.ts` と同じ計測器) に差し替えてテストを流し、**21 分岐のうち
-# 実分岐 19 が true/false 両方**を通ることを数えた (残る 2 は
+# (`operation-leg-sales.ts` と同じ計測器) に差し替えてテストを流し、**23 分岐のうち
+# 実分岐 21 が true/false 両方**を通ることを数えた (残る 2 は
 # `leg.originCity || '?'` の**右辺の文字列リテラル** = 常に真で経路が分かれない)。
 [[files]]
 path = "app/components/ProfitPanel.vue"

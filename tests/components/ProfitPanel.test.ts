@@ -518,12 +518,39 @@ describe('ProfitPanel', () => {
       expect(wrapper.find('tbody input[type="checkbox"]').element as HTMLInputElement).toMatchObject({ checked: true })
     })
 
-    it('★ 土台になること・全部外すと①に戻ることを画面で言う', async () => {
+    it('★ 土台になること・追従が止まること・全部外すと①に戻ることを画面で言う', async () => {
       writeIchibanHit()
       fetchDriverDailySlipsMock.mockResolvedValue([slip()])
       const wrapper = createWrapper()
       await flushPromises()
+      expect(wrapper.text()).toContain('土台にした上書き')
+      expect(wrapper.text()).toContain('粗利タブの集計に追従しなくなります')
       expect(wrapper.text()).toContain('全部外すと粗利タブの結果に戻ります')
+    })
+
+    it('★★ 触ったあとは「もう①には追従しない」に言い方が変わる (集計し直しても直らない理由が読めるように)', async () => {
+      writeIchibanHit()
+      fetchDriverDailySlipsMock.mockResolvedValue([
+        slip(),
+        slip({ rowId: '20260716-77', customerName: '追加分', amount: 8000 }),
+      ])
+      const wrapper = createWrapper()
+      await flushPromises()
+      expect(wrapper.text()).toContain('この便の明細は粗利タブが当てたものです')
+
+      await wrapper.findAll('tbody tr')[1]!.trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).toContain('伝票が直っても、内容はこのままです')
+      expect(wrapper.text()).not.toContain('この便の明細は粗利タブが当てたものです')
+    })
+
+    it('①も当てていない便には、その手の注記を出さない', async () => {
+      writeAggregated()
+      fetchDriverDailySlipsMock.mockResolvedValue([slip()])
+      const wrapper = createWrapper()
+      await flushPromises()
+      expect(wrapper.text()).not.toContain('全部外すと粗利タブの結果に戻ります')
+      expect(wrapper.text()).not.toContain('追従しません')
     })
 
     it('★★ 別の明細を足すと、①が当てたぶんを土台にして保存される (置き換えで消さない)', async () => {
