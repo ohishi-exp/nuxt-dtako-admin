@@ -480,13 +480,15 @@ branches = true
 path = "app/utils/margin-route-operations.ts"
 branches = true
 
-# 運行詳細 (`/operations/{運行NO}`) で**便ごとに当たった一番星の売上**を出す素材
-# (Refs #820)。**突合を 1 行も持たない** — `reconcileVehicles` は明細のプールを順に
-# 消費する (`pool = res.poolLeftovers`) ので、1 運行だけで突合し直すと月次の突合が
-# 別の運行に割り当てた明細に当たり得る。粗利タブが突合したときに `customersOfSlips` で
-# 畳んだ `{ name, yen }` を**別キー** (`dtako:operations:leg-sales:v1`) へ書き、
-# こちらは読んで畳むだけなので**金額を 1 円も作らない・変えない**
-# (`MarginCache` / `margin.ts` は 1 行も触っていない)。
+# 運行詳細 (`/operations/{運行NO}`) に**粗利タブの計上額**を便ごとに映す素材
+# (突合一本化 PR-1、Refs #820)。**突合を 1 行も持たない** — `reconcileVehicles` は明細の
+# プールを順に消費する (`pool = res.poolLeftovers`) ので、1 運行だけ / 1 車輌だけで
+# 回し直すと消費順序が変わり、粗利タブと違う金額が出る。粗利タブが突合したときに
+# `customersOfSlips` で畳んだ `{ name, yen }` を**別キー**
+# (`dtako:operations:leg-sales:v1`) へ書き、こちらは読んで畳むだけなので
+# **金額を 1 円も作らない・変えない** (`MarginCache` / `margin.ts` は 1 行も触っていない)。
+# 画面には突合の数字が 2 つ並ぶ (もう 1 つは `ProfitPanel` の検証スナップショット) ので、
+# **ラベルの文言も定数にして固定**してある — 混ぜて読ませたら PR-1 の目的が壊れる。
 # **中核の分岐は「無いものを 0 円と読ませない」側**なので、その両側を数えることに
 # 意味がある: 当たっていない便の売上を `null` にする / 1 便も当たっていない運行の合計を
 # `null` にする / 鍵が無い (`missing`) とその運行が突合結果に居ない (`not-aggregated`) を
@@ -495,7 +497,7 @@ branches = true
 # `??` を仕込んだ .ts) で**両方向に**検証 — 片側の probe が `[true]`、両側の probe が
 # `[true,false]`、`??` の左が `[true]` を返すことを実測してから、instrumented コピー
 # (TypeScript の AST で機械挿入) でテストを流し、**40 分岐すべてが true/false 両方を
-# 通る**ことを数えた (v8 も 100%/100%、テスト 28 本)。
+# 通る**ことを数えた (v8 も 100%/100%、テスト 30 本)。
 [[files]]
 path = "app/utils/operation-leg-sales.ts"
 branches = true

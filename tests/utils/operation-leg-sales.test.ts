@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { legKey } from '~/utils/allowance-ichiban'
 import { customersOfSlips } from '~/utils/margin'
 import {
+  LEG_SALES_SNAPSHOT_NOTE,
+  LEG_SALES_TITLE,
   OPERATION_LEG_SALES_KEY,
   buildOperationLegSales,
   legSaleYen,
@@ -32,6 +34,23 @@ function input(unkoNo: string, seq: number, customers: { name: string, yen: numb
 describe('OPERATION_LEG_SALES_KEY — MarginCache とは別のキー', () => {
   it('★ 別キーであることを固定する (MarginCache の形は変えない作法)', () => {
     expect(OPERATION_LEG_SALES_KEY).toBe('dtako:operations:leg-sales:v1')
+  })
+})
+
+/**
+ * 運行詳細には**突合の数字が 2 つ並ぶ** — こちら (粗利タブの計上額) と `ProfitPanel` の
+ * 検証スナップショット。構造的に違う額なので、**ラベルが混ざったら誤読される。**
+ * 文言が黙って変わらないよう CI で固定する。
+ */
+describe('ラベル — 2 つの突合結果を混ぜて読ませない', () => {
+  it('★ 見出しは「粗利タブの計上額」と言い切る (「一番星売上」では検証スナップショットと区別が付かない)', () => {
+    expect(LEG_SALES_TITLE).toBe('粗利タブの計上額')
+  })
+
+  it('★ 注記が「収支パネル」を名指しし、どちらが粗利・印刷に乗るかまで言う', () => {
+    expect(LEG_SALES_SNAPSHOT_NOTE).toContain('収支パネル')
+    expect(LEG_SALES_SNAPSHOT_NOTE).toContain('検証スナップショット')
+    expect(LEG_SALES_SNAPSHOT_NOTE).toContain('印刷に乗るのはこちらの計上額')
   })
 })
 
@@ -259,8 +278,11 @@ describe('lookupOperationLegSales — 運行NO で引く', () => {
 })
 
 describe('legSalesNote — 無いときに「無い」と言う', () => {
-  it('★ キーが無いときは「粗利タブで集計すると出ます」', () => {
-    expect(legSalesNote({ status: 'missing' })).toBe('粗利タブで集計すると出ます (便ごとの突合結果がまだありません)')
+  it('★ キーが無いときは「このブラウザの粗利タブで集計すると出ます」', () => {
+    // **「このブラウザの」を落とさない** — 保存先が localStorage なので、他端末・他ブラウザ
+    // からは必ず空に見える (PR-1 の既知の弱点)。「集計されていない」と言い切ると嘘になる。
+    expect(legSalesNote({ status: 'missing' }))
+      .toBe('このブラウザの粗利タブで集計すると出ます (便ごとの突合結果がまだありません)')
   })
 
   it('★ その運行が突合結果に無いときは、集計済みの月を添えて言う', () => {

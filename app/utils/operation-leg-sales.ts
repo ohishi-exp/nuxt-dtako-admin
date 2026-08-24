@@ -56,6 +56,27 @@ import type { LegCustomerShare } from './margin'
  */
 export const OPERATION_LEG_SALES_KEY = 'dtako:operations:leg-sales:v1'
 
+/**
+ * 画面の見出し。**「粗利タブの計上額」と言い切る** (突合一本化 PR-1)。
+ *
+ * 運行詳細には**もう 1 つ別の突合の数字**が出る — `ProfitPanel` (画面下の「収支パネル」)
+ * の検証スナップショットで、あちらは**車番だけで引いた候補を人が確認した記録**。
+ * 引き先 (乗務員 vs 車番のみ・受け皿を見ない)・明細の一意性 (月次だけが 1 度しか
+ * 使わない)・同日同卸地の件数分割 が違うので、**構造的に違う額になる。**
+ * ラベルを分けないと必ず誤読されるため、定数にして固定する。
+ */
+export const LEG_SALES_TITLE = '粗利タブの計上額'
+
+/**
+ * 計上額を出しているときだけ添える注記。**「下の収支パネルとは別の数字」**と言う。
+ *
+ * どちらが粗利・印刷に乗るのかまで書く — オーナーの言葉は「異なる突合結果を別画面で
+ * 持ってるのはおかしい」で、PR-1 は**乖離を画面上で見えるようにする**段階なので、
+ * 2 つ並ぶこと自体は正しい。並ぶなら**どちらが計上値かを毎回言う。**
+ */
+export const LEG_SALES_SNAPSHOT_NOTE
+  = '※ 画面下の「収支パネル」に出る額は検証スナップショット (別の突合) です。粗利・乗務員別・取引先別・印刷に乗るのはこちらの計上額です。'
+
 /** 便に当たった取引先 1 つぶん。`LegCustomerShare` の表示に要る 2 列だけ。 */
 export interface OperationLegSaleCustomer {
   /** 取引先名 (粗利タブが `customersOfSlips` で採った、最初に見た明細のもの)。 */
@@ -270,9 +291,13 @@ export type OperationLegSalesLookup =
  *
  * **推測で突合し直して埋めない**ので、「無い」ことを言うのがこの画面の仕事になる。
  * 何も言わずに空にすると「この運行には売上が無い (0 円)」と読まれる。
+ *
+ * **`missing` は「このブラウザの」と言う** — 保存先が localStorage なので、他端末・
+ * 他ブラウザ・別の人からは必ず空に見える (PR-1 の既知の弱点。R2 へ移すのは PR-3)。
+ * 「集計されていない」ではなく「この端末では集計されていない」が事実。
  */
 export function legSalesNote(lookup: OperationLegSalesLookup): string | null {
-  if (lookup.status === 'missing') return '粗利タブで集計すると出ます (便ごとの突合結果がまだありません)'
+  if (lookup.status === 'missing') return 'このブラウザの粗利タブで集計すると出ます (便ごとの突合結果がまだありません)'
   if (lookup.status === 'not-aggregated') {
     return `粗利タブの突合結果 (${lookup.ym}) にこの運行はありません。この運行の月を粗利タブで集計すると出ます`
   }
