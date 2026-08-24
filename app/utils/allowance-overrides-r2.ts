@@ -316,10 +316,58 @@ export interface AllowanceOverrideSaveResult {
   savedAt: string
   by: string
   key: string
-  /** 保存の後で R2 に生きている鍵の数。 */
+  /**
+   * **R2 に保存された後の値** (`null` は消した)。
+   *
+   * **画面が送った値のエコーではない** — サーバーが畳み込んだ後の全体像から
+   * `allowanceOverrideValue` で読み直したもの。**この PR には読む口 (GET) が無い**ので、
+   * 「サーバーが実際に何を保存したか」を確かめられるのはここだけになる。
+   * エコーにすると、サーバー側が値を取り違えても画面には正しく見えてしまう
+   * (#833 の「金額を省いた」と「読めなかった」が同じ見た目だったのと同じ型の穴)。
+   */
+  value: number | null
+  /** 保存の後で R2 に生きている鍵の数 (**tombstone は数えない**)。 */
   entries: number
   /** `latest` がいま指している版の R2 キー。古い保存には無いので空文字になりうる。 */
   versionKey: string
+}
+
+/** 保存された 1 件 (鍵と、**R2 が返した**値)。移行ボタンの注記に並べる。 */
+export interface AllowanceOverrideSavedValue {
+  key: string
+  value: number | null
+}
+
+/**
+ * 注記に並べる保存済みの値の上限。**黙って切らない** — 超えたぶんは件数で言う
+ * (`MARGIN_VERSION_BODY_LIMIT` と同じ方針。黙って切ると「全部出ている」と誤読される)。
+ */
+export const ALLOWANCE_OVERRIDE_NOTE_MAX_ITEMS = 20
+
+/** 保存された値の見せ方。**消した回を空白にしない** (欠落と区別が付かなくなる)。 */
+export function allowanceOverrideValueText(value: number | null): string {
+  if (value === null) return '(消しました)'
+  return `¥${value.toLocaleString('ja-JP')}`
+}
+
+/**
+ * **R2 に実際に入った 鍵 = 値**を注記に並べる。
+ *
+ * 件数だけだと**値が正しいかは分からない**。読む口が無いこの PR では、本番で
+ * 「移行が本当に入ったか」を確かめる手段がここしか無いので、鍵と値をそのまま出す。
+ * 1 件も入らなかった (全部失敗した) ときは**何も足さない** — 空の一覧を出すと
+ * 「入ったが中身が無い」に読める。
+ */
+export function allowanceOverrideSavedList(saved: AllowanceOverrideSavedValue[]): string {
+  if (saved.length === 0) return ''
+  const shown = saved.slice(0, ALLOWANCE_OVERRIDE_NOTE_MAX_ITEMS)
+  const list = shown.map(item => `${item.key} = ${allowanceOverrideValueText(item.value)}`).join(' / ')
+  const omitted = saved.length - shown.length
+  if (omitted > 0) {
+    return ` R2 に入ったのは ${list} …ほか ${omitted} 件`
+      + ` (この注記には ${ALLOWANCE_OVERRIDE_NOTE_MAX_ITEMS} 件まで出しています)。`
+  }
+  return ` R2 に入ったのは ${list}。`
 }
 
 /**
@@ -337,12 +385,14 @@ export function allowanceOverrideSaveNote(result: AllowanceOverrideSaveResult | 
       + '集計はこのまま続けられます。あとでもう一度送ってください。'
   }
   if (result === null) return ''
+  // **サーバーが保存した値をそのまま出す。**「送った値」と食い違っていれば人が気づける。
+  const stored = `${result.key} = ${allowanceOverrideValueText(result.value)}`
   const tail = `R2 にはいま ${result.entries} 件の暫定手当があります。`
     + 'この画面の集計はこの端末の記録から出しています (R2 は共有の控えです)。'
   if (result.changed) {
-    return `暫定手当を R2 (共有) に送りました (${result.by})。${tail}`
+    return `暫定手当を R2 (共有) に保存しました — ${stored} (${result.by})。${tail}`
   }
-  return `暫定手当は R2 (共有) の値と同じだったので、版は増やしていません (${result.by})。${tail}`
+  return `暫定手当は R2 (共有) の値と同じでした — ${stored} なので版は増やしていません (${result.by})。${tail}`
 }
 
 /**
@@ -357,11 +407,16 @@ export function allowanceOverrideMigrationNote(params: {
   failed: number
   entries: number
   firstError: string
+  /** **R2 が返した**鍵と値 (送った値のエコーではない)。落ちたぶんは入らない。 */
+  saved: AllowanceOverrideSavedValue[]
 }): string {
+  const stored = allowanceOverrideSavedList(params.saved)
   if (params.failed > 0) {
     return `${params.sent + params.failed} 件のうち ${params.failed} 件を R2 (共有) に送れませんでした`
       + ` (${params.firstError}) — この端末の記録はそのままです。もう一度押せば、送れなかったぶんだけ送り直せます。`
+      + stored
   }
   return `${params.sent} 件を R2 (共有) に送りました。R2 にはいま ${params.entries} 件の暫定手当があります。`
     + 'この端末の記録は消していません — この画面の集計は今までどおりそちらから出しています。'
+    + stored
 }

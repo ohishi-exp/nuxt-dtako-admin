@@ -199,7 +199,7 @@ describe('POST /api/profit/allowance-override — 1 件を畳み込む', () => {
     const bucket = new FakeR2Bucket()
     const res = await call(eventWith(okEnv(bucket)))
 
-    expect(res).toMatchObject({ saved: true, changed: true, by: 'me@example.com', key: HIROO_MEMURO, entries: 1 })
+    expect(res).toMatchObject({ saved: true, changed: true, by: 'me@example.com', key: HIROO_MEMURO, value: 9000, entries: 1 })
     expect(res.versionKey).toMatch(/^profit\/allowance-overrides\/provisional\/v-\d{8}T\d{6}\.json$/)
 
     const latest = latestOf(bucket)
@@ -246,6 +246,7 @@ describe('POST /api/profit/allowance-override — 1 件を畳み込む', () => {
     expect(HIROO_MEMURO in latest.entries).toBe(true)
     expect(latest.entries[HIROO_MEMURO]!.value).toBeNull()
     expect(res.entries).toBe(0)
+    expect(res.value).toBeNull()
     expect(historyLines(bucket)[1]).toMatchObject({ before: 9000, after: null, entries: 0 })
   })
 
@@ -270,6 +271,19 @@ describe('POST /api/profit/allowance-override — 1 件を畳み込む', () => {
     expect(res.changed).toBe(true)
     expect(versionKeys(bucket).length).toBeGreaterThanOrEqual(1)
     expect(latestOf(bucket).entries[HIROO_MEMURO]!.value).toBe(8000)
+  })
+
+  it('★ 応答の value は「保存された後の値」— 送った値のエコーではない', async () => {
+    const bucket = new FakeR2Bucket()
+    // 先に別の値を入れておき、上書きの回に **latest の中身** が返ることを見る。
+    await call(eventWith(okEnv(bucket), validBody({ value: 8000 })))
+    const res = await call(eventWith(okEnv(bucket), validBody({ value: 9000 })))
+    expect(res.value).toBe(9000)
+    expect(res.value).toBe(latestOf(bucket).entries[HIROO_MEMURO]!.value)
+    // 別の鍵を触った回は、その鍵の値が返る (取り違えていたら気づける)。
+    const other = await call(eventWith(okEnv(bucket), validBody({ key: '釧路|帯広', value: 12000 })))
+    expect(other).toMatchObject({ key: '釧路|帯広', value: 12000 })
+    expect(latestOf(bucket).entries[HIROO_MEMURO]!.value).toBe(9000)
   })
 
   it('★ 壊れた latest.json は空として扱い、投げない (画面を止めない)', async () => {
