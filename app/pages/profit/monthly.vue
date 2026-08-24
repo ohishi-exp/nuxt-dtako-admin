@@ -7,7 +7,7 @@
  * マッチ率検証の集計結果を見るための画面)。集計本体は
  * `server/api/profit/monthly.get.ts` + `app/utils/profit-r2.ts::summarizeMonthly`。
  */
-import type { MonthlySummary, SnapshotListItem } from '~/utils/profit-r2'
+import { snapshotUnreadableNote, type MonthlySummary, type SnapshotListItem, type SnapshotListResult } from '~/utils/profit-r2'
 import { shiftYmd } from '~/utils/profit-compare'
 
 /** 保存済み検証スナップショットの車輌・期間で `/profit/compare` (類似運行検索) に
@@ -59,6 +59,9 @@ type SnapshotListStatus = 'idle' | 'loading' | 'ready' | 'error'
 const snapshotListStatus = ref<SnapshotListStatus>('idle')
 const snapshotListError = ref<string | null>(null)
 const snapshotItems = ref<SnapshotListItem[]>([])
+/** **本文を読めなかった保存**があることを人に言うための注記 (Refs #850)。無ければ空文字。
+ * 空の一覧を「この条件では保存が無い」と読ませないため、**0 件のときも出す**。 */
+const snapshotUnreadable = ref('')
 const snapshotFilterVehicle = ref('')
 const snapshotFilterYm = ref('')
 
@@ -69,11 +72,15 @@ async function loadSnapshotList() {
     const query: Record<string, string> = {}
     if (snapshotFilterVehicle.value) query.vehicle = snapshotFilterVehicle.value
     if (snapshotFilterYm.value) query.ym = snapshotFilterYm.value
-    const res = await $fetch<{ items: SnapshotListItem[], total: number }>('/api/profit/snapshots', { query })
+    const res = await $fetch<SnapshotListResult>('/api/profit/snapshots', { query })
     snapshotItems.value = res.items
+    snapshotUnreadable.value = snapshotUnreadableNote(res.unreadable)
     snapshotListStatus.value = 'ready'
   }
   catch (e) {
+    // 一覧そのものを読めなかったときは注記を残さない — こちらは `snapshotListError`
+    // が理由を言う。前の検索で出た件数を持ち越すと、今の結果の話に読める。
+    snapshotUnreadable.value = ''
     snapshotListError.value = e instanceof Error ? e.message : String(e)
     snapshotListStatus.value = 'error'
   }
@@ -187,6 +194,9 @@ function pct(count: number): string {
       </button>
     </div>
 
+    <p v-if="snapshotUnreadable" class="text-xs text-amber-600 dark:text-amber-400 mb-3">
+      {{ snapshotUnreadable }}
+    </p>
     <p v-if="snapshotListStatus === 'error'" class="text-sm text-red-600 dark:text-red-400 mb-6">
       {{ snapshotListError }}
     </p>

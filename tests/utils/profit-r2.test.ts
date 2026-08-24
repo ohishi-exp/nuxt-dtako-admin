@@ -10,6 +10,9 @@ import {
   summarizeMonthly,
   toSnapshotListItem,
   sortSnapshotListBySavedAtDesc,
+  isProfitSnapshotKey,
+  parseProfitSnapshot,
+  snapshotUnreadableNote,
   type ProfitSnapshotSlip,
   type ProfitSnapshot,
 } from '~/utils/profit-r2'
@@ -348,5 +351,106 @@ describe('sortSnapshotListBySavedAtDesc', () => {
     const original = [...items]
     sortSnapshotListBySavedAtDesc(items)
     expect(items).toEqual(original)
+  })
+})
+
+// --- 一覧に載せてよいものの見分け (Refs #850) ---
+
+describe('isProfitSnapshotKey', () => {
+  it('profitR2Paths が組んだ latest.json を通す', () => {
+    expect(isProfitSnapshotKey(profitR2Paths('2026-07', '8504', 'unko-1', '0-3600').latest)).toBe(true)
+  })
+
+  it('#850 で 500 の原因になった別種の latest.json を弾く (段数が違う)', () => {
+    // profit/{ym}/margin-summary/latest.json (#826) — `?ym=2026-07` で踏む
+    expect(isProfitSnapshotKey('profit/2026-07/margin-summary/latest.json')).toBe(false)
+    // profit/allowance-overrides/{kind}/latest.json (#845) — `ym` 無しで踏む
+    expect(isProfitSnapshotKey('profit/allowance-overrides/provisional/latest.json')).toBe(false)
+  })
+
+  it('段数が同じでも 2 段目が YYYY-MM でなければ弾く', () => {
+    expect(isProfitSnapshotKey('profit/allowance-overrides/provisional/a/b/latest.json')).toBe(false)
+    expect(isProfitSnapshotKey('profit/2026-7/8504/unko-1/0-3600/latest.json')).toBe(false)
+  })
+
+  it('人の確定の {kind} が増えても弾き続ける (#845 PR-3b/PR-3c で増える)', () => {
+    for (const kind of ['provisional', 'excluded', 'force-match']) {
+      expect(isProfitSnapshotKey(`profit/allowance-overrides/${kind}/latest.json`)).toBe(false)
+      // 将来その下に枝が生えて 6 段になっても、2 段目が YYYY-MM でないので通らない。
+      expect(isProfitSnapshotKey(`profit/allowance-overrides/${kind}/2026-07/8504/latest.json`)).toBe(false)
+    }
+  })
+
+  it('同じディレクトリの版・履歴は通さない', () => {
+    const paths = profitR2Paths('2026-07', '8504', 'unko-1', '0-3600')
+    expect(isProfitSnapshotKey(paths.version('20260719T000000'))).toBe(false)
+    expect(isProfitSnapshotKey(paths.history)).toBe(false)
+  })
+
+  it('段数が足りない・多いキーを弾く', () => {
+    expect(isProfitSnapshotKey('profit/2026-07/8504/unko-1/latest.json')).toBe(false)
+    expect(isProfitSnapshotKey('profit/2026-07/8504/unko-1/0-3600/extra/latest.json')).toBe(false)
+  })
+
+  it('profit/ 配下でないキーを弾く', () => {
+    expect(isProfitSnapshotKey('restraint/2026-07/8504/unko-1/0-3600/latest.json')).toBe(false)
+  })
+
+  it('途中の段が空文字のキーを弾く', () => {
+    expect(isProfitSnapshotKey('profit/2026-07//unko-1/0-3600/latest.json')).toBe(false)
+  })
+})
+
+describe('parseProfitSnapshot', () => {
+  it('スナップショットの JSON をそのまま返す', () => {
+    const snapshot = profitSnapshot()
+    expect(parseProfitSnapshot(JSON.stringify(snapshot))).toEqual(snapshot)
+  })
+
+  it('壊れた JSON でも投げずに null を返す (1 件で一覧全体を落とさない)', () => {
+    expect(parseProfitSnapshot('{')).toBeNull()
+    expect(parseProfitSnapshot('')).toBeNull()
+  })
+
+  it('オブジェクトでない JSON は null', () => {
+    expect(parseProfitSnapshot('"文字列"')).toBeNull()
+    expect(parseProfitSnapshot('123')).toBeNull()
+  })
+
+  it('null は null (typeof null === "object" をすり抜けさせない)', () => {
+    expect(parseProfitSnapshot('null')).toBeNull()
+  })
+
+  it('confirmedSlips が配列でなければ null (#850 で落ちた .map の手前で止める)', () => {
+    expect(parseProfitSnapshot(JSON.stringify({ savedAt: '2026-07-19T00:00:00.000Z' }))).toBeNull()
+    expect(parseProfitSnapshot(JSON.stringify({ confirmedSlips: {}, savedAt: '2026-07-19T00:00:00.000Z' }))).toBeNull()
+  })
+
+  it('savedAt が文字列でなければ null (並べ替えの .localeCompare の手前で止める)', () => {
+    expect(parseProfitSnapshot(JSON.stringify({ confirmedSlips: [] }))).toBeNull()
+    expect(parseProfitSnapshot(JSON.stringify({ confirmedSlips: [], savedAt: 123 }))).toBeNull()
+  })
+
+  it('一覧が読まない欄が欠けているだけの保存は読めたことにする (欠測に倒さない)', () => {
+    const parsed = parseProfitSnapshot(JSON.stringify({ confirmedSlips: [], savedAt: '2026-07-19T00:00:00.000Z' }))
+    expect(parsed).not.toBeNull()
+    expect(toSnapshotListItem(parsed!).slipCount).toBe(0)
+  })
+})
+
+describe('snapshotUnreadableNote', () => {
+  it('0 件なら何も言わない', () => {
+    expect(snapshotUnreadableNote(0)).toBe('')
+  })
+
+  it('負の数でも何も言わない', () => {
+    expect(snapshotUnreadableNote(-1)).toBe('')
+  })
+
+  it('件数と「保存が無いのではない」ことを言う', () => {
+    const note = snapshotUnreadableNote(2)
+    expect(note).toContain('2 件')
+    expect(note).toContain('読めていません')
+    expect(note).toContain('R2 に残っています')
   })
 })
