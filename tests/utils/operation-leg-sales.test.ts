@@ -425,6 +425,21 @@ describe('lookupUsedSlipIds — 候補を出してよいかの門番', () => {
     const empty = JSON.stringify({ ym: '2026-07', legs: { [OP_A]: [] } })
     expect(lookupUsedSlipIds(empty, OP_A)).toEqual({ status: 'not-aggregated', ym: '2026-07' })
   })
+
+  it('★ 便ごとの slipIds も同じ読みから返す (収支パネルが①の結果を映すのに要る、Refs #854)', () => {
+    const hit = lookupUsedSlipIds(cache, OP_A)
+    expect(hit.status === 'ready' && [...hit.slipIdsBySeq]).toEqual([[1, ['20260703-12']], [2, []]])
+  })
+
+  it('★ 別の運行の便は入れない (この便の「当たっている」に他の運行のぶんを混ぜない)', () => {
+    const hit = lookupUsedSlipIds(cache, OP_B)
+    expect(hit.status === 'ready' && [...hit.slipIdsBySeq]).toEqual([[1, ['20260711-30', '20260711-31']]])
+  })
+
+  it('★ 同じ seq が 2 つある保存は読まない (どちらがその便のものか決められない)', () => {
+    const dup = JSON.stringify({ ym: '2026-07', legs: { [OP_A]: [{ s: 1, r: ['x'] }, { s: 1, r: ['y'] }] } })
+    expect(lookupUsedSlipIds(dup, OP_A)).toEqual({ status: 'missing' })
+  })
 })
 
 describe('usedSlipsNote — 空の候補一覧を「結べる明細が無い」と読ませない', () => {

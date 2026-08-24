@@ -141,9 +141,15 @@ branches = true
 # 読んで初期値にすると②の確定を①へ機械的に移植したのと同じで、二重計上を生む。
 # **中核の分岐は「候補を出してよいか」**: ①の使用済み明細が読めないとき
 # (キーが無い / 月が違う / 壊れている / localStorage 自体が読めない) は
-# **空の候補一覧ではなく理由**を出す。branches: script ブロックを instrumented コピー
-# (`operation-leg-sales.ts` と同じ計測器) に差し替えてテストを流し、**21 分岐のうち
-# 実分岐 19 が true/false 両方**を通ることを数えた (残る 2 は
+# **空の候補一覧ではなく理由**を出す。
+# **#854 で①が当てた明細を映すようにした** — `ownRowIds` / `boundOf` / チェック状態を
+# `effectiveSlipIds` (人の上書き > ①の結果) から取る。**`forceMatchCandidates` の
+# フィルタ条件は緩めていない** (緩めると他の便の明細まで候補に出て二重計上になる)。
+# 直したのは**渡す `ownRowIds`** の側だけ。**`FORCE_MATCH_KEY` への書き込みは
+# `toggleBind` の 1 か所だけ** = 人が押すまで 1 文字も書かない (テストで固定)。
+# branches: script ブロックを instrumented コピー
+# (`operation-leg-sales.ts` と同じ計測器) に差し替えてテストを流し、**23 分岐のうち
+# 実分岐 21 が true/false 両方**を通ることを数えた (残る 2 は
 # `leg.originCity || '?'` の**右辺の文字列リテラル** = 常に真で経路が分かれない)。
 [[files]]
 path = "app/components/ProfitPanel.vue"
@@ -535,8 +541,13 @@ branches = true
 # `??` を仕込んだ .ts) で**両方向に**検証 — 片側の probe が `[true]`、両側の probe が
 # `[true,false]`、`??` の左が `[true]` を返すことと、**計測器が値を壊していないこと**
 # (`pick(0,7) === 0` / `orValue(0,7) === 7`) を実測してから、instrumented コピー
-# (TypeScript の AST で機械挿入) でテストを流し、**56 分岐すべてが true/false 両方を
-# 通る**ことを数えた (v8 も 100%/100%、テスト 42 本)。
+# (TypeScript の AST で機械挿入) でテストを流し、**58 分岐すべてが true/false 両方を
+# 通る**ことを数えた (v8 も 100%/100%、テスト 46 本)。
+# **#854 で `slipIdsBySeq` (便ごとの `slipIds`) を同じ返り値に足した。** 収支パネルは
+# 「候補から外す相手」(和集合) と「この便に①が当てたもの」(per-leg) の**両方**が要る。
+# **別の関数から取らない** — `parseOperationLegSales` は読めた便だけ返す緩い読みなので、
+# 片方に居て片方に居ない明細ができると、そこが二重計上の口になる。**同じ seq が 2 つある
+# 保存は読まない** (どちらがその便のものか決められず、選ぶと片方の売上を落とす)。
 [[files]]
 path = "app/utils/operation-leg-sales.ts"
 branches = true
@@ -549,8 +560,18 @@ branches = true
 # 開始日時が読めない積みを `undated` に数える (落とすと便が 1 本しか無いように読める) /
 # 日付 ±1 日の外に結んだ明細も並べる (候補に出ないので外せなくなる) /
 # 結んであるのに手元に無い明細を `missing` に数える (「結びつけが消えた」と読ませない)。
-# branches: 上と同じ instrumented コピーで**9 分岐すべてが true/false 両方を通る**
-# ことを数えた (v8 も 100%/100%、テスト 20 本)。
+# **#854 で `effectiveSlipIds` / `seedForceMatch` を足した。** 収支パネルが①の結果を
+# 映していなかったので、①が当てている便が「結び 0 件・0 円」に見え、そのまま 1 件結ぶと
+# `applyForcedSales` の置き換えで①の売上が消え、消えた明細は `usedRowIds` に居るので
+# **候補にも出ず戻せなかった** (本番 v0.0.532 で実際にこの状態)。**土台を敷いてから
+# 差分を乗せる** (`seedForceMatch`) のが中核で、**書くのは人が触った瞬間だけ** —
+# ①の結果を先回りして保存すると「人が確定した」ことになってしまう。
+# **`ownSlipIds` (候補に出してよい相手) と `effectiveSlipIds` (いま当たっている) を
+# 分けてある** — 流用すると、人が①の明細を外した瞬間にそれが `own` から外れ、
+# `usedRowIds` には残っているので候補からも消えて**その場で戻せなくなる**
+# (「結ぶと戻せない」が符号を変えて残る)。
+# branches: 上と同じ instrumented コピーで**15 分岐すべてが true/false 両方を通る**
+# ことを数えた (v8 も 100%/100%、テスト 39 本)。
 [[files]]
 path = "app/utils/profit-panel-legs.ts"
 branches = true

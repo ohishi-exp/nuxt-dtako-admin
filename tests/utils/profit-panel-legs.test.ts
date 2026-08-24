@@ -3,10 +3,15 @@ import { forceMatchKey } from '~/utils/allowance-force-match'
 import type { AllowanceLeg } from '~/utils/allowance-trips'
 import type { ScoredVehicleDailySlip, VehicleDailySlip } from '~/utils/ichiban'
 import {
+  FORCE_MATCH_FROZEN_NOTE,
+  FORCE_MATCH_ICHIBAN_NOTE,
   FORCE_MATCH_OVERRIDE_NOTE,
   FORCE_MATCH_PANEL_NOTE,
   boundSlips,
+  effectiveSlipIds,
   legsInSelection,
+  ownSlipIds,
+  seedForceMatch,
   slipBadge,
   slipRows,
   sumAmount,
@@ -188,9 +193,123 @@ describe('画面の文言 — 何がどう変わったかを読めるように�
     expect(FORCE_MATCH_PANEL_NOTE).toContain('これ以降は増えません')
   })
 
-  it('★ 結ぶと「置き換わる」と言い切る (足し算だと読まれると金額が下がった理由が分からない)', () => {
-    expect(FORCE_MATCH_OVERRIDE_NOTE).toContain('置き換わります')
+  it('★ 上書きであって足し算ではないと言い切る (金額が下がった理由が分からなくなる)', () => {
+    expect(FORCE_MATCH_OVERRIDE_NOTE).toContain('上書きとして保存されます')
     expect(FORCE_MATCH_OVERRIDE_NOTE).toContain('足し算ではありません')
-    expect(FORCE_MATCH_OVERRIDE_NOTE).toContain('他の便に当たっていない明細だけ')
+  })
+
+  it('★★ 「①が当てた明細はチェック済みで出ている」と言う (Refs #854)', () => {
+    expect(FORCE_MATCH_OVERRIDE_NOTE).toContain('チェック済みで出ています')
+  })
+
+  it('★★ 候補の範囲を「どの便にも」と言う (「他の便に」だと、①が当てた明細が候補に無いのを取りこぼしと読む)', () => {
+    expect(FORCE_MATCH_OVERRIDE_NOTE).toContain('まだどの便にも当たっていない明細だけ')
+    expect(FORCE_MATCH_OVERRIDE_NOTE).not.toContain('他の便に当たっていない明細だけ')
+  })
+
+  it('★★ ①が当てている便では「土台にする」「追従をやめる」「全部外すと①に戻る」を言う (Refs #854)', () => {
+    expect(FORCE_MATCH_ICHIBAN_NOTE).toContain('粗利タブが当てたもの')
+    expect(FORCE_MATCH_ICHIBAN_NOTE).toContain('土台にした上書き')
+    // ★ **触ると①の追従が止まる。**「置き換えです」だけだと「今回の集計で置き換わる」と
+    // 読まれ、**次の月次で伝票が直っても反映されない**ことに気づけない。
+    expect(FORCE_MATCH_ICHIBAN_NOTE).toContain('粗利タブの集計に追従しなくなります')
+    // **外し方の帰結を言わないと次の誤読が生まれる** — 空にはならず①の結果に戻る。
+    expect(FORCE_MATCH_ICHIBAN_NOTE).toContain('全部外すと粗利タブの結果に戻ります')
+    expect(FORCE_MATCH_ICHIBAN_NOTE).toContain('売上 0 円にすることはできません')
+  })
+
+  it('★★ 触った便では「もう追従していない」と戻し方を言う (Refs #854)', () => {
+    expect(FORCE_MATCH_FROZEN_NOTE).toContain('人の上書きです')
+    expect(FORCE_MATCH_FROZEN_NOTE).toContain('集計し直しても')
+    expect(FORCE_MATCH_FROZEN_NOTE).toContain('伝票が直っても')
+    expect(FORCE_MATCH_FROZEN_NOTE).toContain('追従しません')
+    expect(FORCE_MATCH_FROZEN_NOTE).toContain('全部外すと粗利タブの結果に戻ります')
+  })
+})
+
+/**
+ * **①が当てた明細を画面に映す** (Refs #854)。#849 の収支パネルは `FORCE_MATCH_KEY` しか
+ * 見ておらず、①が当てている便が「結び 0 件・0 円」に見えた。そのまま 1 件結ぶと
+ * `applyForcedSales` の置き換えで①の売上が消え、消えた明細は `usedRowIds` に居るので
+ * **候補にも出ず戻せない** (本番 v0.0.532 で実際にこの状態だった)。
+ */
+describe('effectiveSlipIds — その便にいま当たっている明細', () => {
+  it('★ 人の上書きがあればそれが全部 (①の結果は効いていない = 置き換え)', () => {
+    expect(effectiveSlipIds(['x'], ['a', 'b'])).toEqual({ ids: ['x'], source: 'forced' })
+  })
+
+  it('★ 上書きが無ければ①の結果 (「結び 0 件」に見せない)', () => {
+    expect(effectiveSlipIds(undefined, ['a', 'b'])).toEqual({ ids: ['a', 'b'], source: 'ichiban' })
+  })
+
+  it('どちらも無ければ空 (source も none — 誰かが当てたことにしない)', () => {
+    expect(effectiveSlipIds(undefined, [])).toEqual({ ids: [], source: 'none' })
+  })
+
+  it('★ 元の配列を持ち回らない (呼び出し側の書き換えが保存済みの値に漏れない)', () => {
+    const ichiban = ['a']
+    const out = effectiveSlipIds(undefined, ichiban)
+    out.ids.push('b')
+    expect(ichiban).toEqual(['a'])
+  })
+})
+
+/**
+ * **`own` は「いま当たっている」ではない** (Refs #854)。`effectiveSlipIds().ids` を
+ * 流用すると、人が①の明細を外した瞬間にそれが `own` から外れ、`usedRowIds` には
+ * 残っているので**候補からも消える** = その場で戻せない。
+ */
+describe('ownSlipIds — その便に出してよい相手', () => {
+  it('★★ 人が外した①の明細も出してよい (外すと候補からも消えると押し間違いが取り返せない)', () => {
+    // ①が {a,b} を当てていて、人が a を外して {b} にした状態。
+    expect(ownSlipIds(['b'], ['a', 'b'])).toEqual(['b', 'a'])
+  })
+
+  it('上書きが無ければ①の結果がそのまま (触る前の便)', () => {
+    expect(ownSlipIds(undefined, ['a', 'b'])).toEqual(['a', 'b'])
+  })
+
+  it('①が当てていなければ人の上書きだけ (降しの記録が無い便)', () => {
+    expect(ownSlipIds(['x'], [])).toEqual(['x'])
+  })
+
+  it('どちらも無ければ空 (①も人も当てていない便)', () => {
+    expect(ownSlipIds(undefined, [])).toEqual([])
+  })
+
+  it('重複は 1 つに畳む (同じ明細が 2 行並ばない)', () => {
+    expect(ownSlipIds(['a'], ['a'])).toEqual(['a'])
+  })
+
+  it('★ 他の便の明細は 1 件も入らない — 入れるのは渡された 2 つだけ (フィルタは緩めない)', () => {
+    // 引数に無い `z` (他の便のもの) が混ざらないことを、返り値の集合で固定する。
+    expect(new Set(ownSlipIds(['a'], ['b']))).toEqual(new Set(['a', 'b']))
+  })
+})
+
+describe('seedForceMatch — 人が触った瞬間に①の結果を土台として書き起こす', () => {
+  it('★★ ①が当てている便を触ると、その結果が土台になる (土台なしだと 1 件足すだけで残りが消える)', () => {
+    expect(seedForceMatch({}, 'op#t1', ['a', 'b'])).toEqual({ 'op#t1': ['a', 'b'] })
+  })
+
+  it('★ 既に人の上書きがある便は触らない (人が外したものを勝手に戻さない)', () => {
+    const map = { 'op#t1': ['a'] }
+    expect(seedForceMatch(map, 'op#t1', ['a', 'b'])).toBe(map)
+  })
+
+  it('★ ①も当てていない便は書き起こさない (同じ参照を返す)', () => {
+    const map = {}
+    expect(seedForceMatch(map, 'op#t1', [])).toBe(map)
+  })
+
+  it('★ 他の便の上書きは巻き込まない', () => {
+    expect(seedForceMatch({ 'op#t9': ['z'] }, 'op#t1', ['a'])).toEqual({ 'op#t9': ['z'], 'op#t1': ['a'] })
+  })
+
+  it('★ 土台は写しで持つ (①の結果の配列をそのまま参照しない)', () => {
+    const ichiban = ['a']
+    const next = seedForceMatch({}, 'op#t1', ichiban)
+    next['op#t1']!.push('b')
+    expect(ichiban).toEqual(['a'])
   })
 })
