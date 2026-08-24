@@ -30,6 +30,16 @@
  * 往復や同一区間を複数回通る運行で複数の便が同じキーになり、**別の便どうしを誤って
  * 対応付ける**。ずれた対応を差分として出すより、出さない方が安全側。
  *
+ * ## ★ 動いたかどうかは「画面に出る精度」で決める (Refs #838)
+ *
+ * 保存された `totals.marginYen` は按分が割り算を含むぶん `4467597.000000001` のような
+ * 浮動小数の尾を持つ (**それ自体は正常**)。厳密比較で「動いた」を決めると、
+ * **合計の足し順が変わるだけのリファクタ**で「粗利が **¥0** 動いた」と出る。
+ * だから**単位ごとに画面の精度へ丸めてから引く** (`marginDiffDisplayDelta`)。
+ * **金額・距離・本数を 1 つの丸め方でまとめない** — 距離を金額と同じに丸めると
+ * 0.4km の実変化が消える。**数字そのものは 1 円も変えていない** (直したのは比べ方だけで、
+ * `before` / `after` は生値のまま返す)。
+ *
  * ## 出さないもの
  *
  * - `costs` (`CostRow`) の明細 diff — 経費明細の増減がノイズとして大量に出る割に月次の
@@ -105,10 +115,52 @@ export interface MarginDiffRow {
   key: string
   label: string
   unit: MarginDiffUnit
+  /** 版に保存された**生値そのまま**。丸めない。 */
   before: number
   after: number
-  /** `after - before`。 */
+  /**
+   * ★ **画面に出ている数字どうしの差** (`marginDiffDisplayDelta`)。
+   * **`after - before` の生の引き算ではない** — `before` / `after` は生値のままなので、
+   * 両者を厳密に引き算した値とは円未満 / 0.1km 未満で食い違いうる (Refs #838)。
+   */
   delta: number
+}
+
+/**
+ * ★ **その単位が画面に出る精度**に載せる (Refs #838)。**画面の丸め方をそのまま写す** —
+ * 金額は `yen()` の `Math.round`、距離は `km()` の `Math.round(v * 10) / 10`。
+ *
+ * **3 つの単位を 1 つの丸め方でまとめない。** 距離に金額と同じ `Math.round` を当てると
+ * **0.4km の実変化が消える** (走行 57,829.0km → 57,829.4km が「動いていない」になる。実測)。
+ * 本数 (`count`) は運行本数・便数で**整数しか取らない**ので**何もしない** — 変わらないものに
+ * 丸めを足すと「丸めてあるから安全」という誤った読みだけが残る。
+ */
+function atDisplayPrecision(unit: MarginDiffUnit, v: number): number {
+  if (unit === 'yen') return Math.round(v)
+  if (unit === 'km') return Math.round(v * 10) / 10
+  return v
+}
+
+/**
+ * ★ **各版を画面の精度に丸めてから引く** (Refs #838)。
+ *
+ * 保存された `totals.marginYen` は按分が割り算を含むぶん `4467597.000000001` のような
+ * 浮動小数の尾を持つ (**これ自体は正常**)。生のまま `delta !== 0` で比べると、
+ * **合計の足し順が変わるだけのリファクタ**で `9.31e-10` の差が「動いた」と判定され、
+ * 表示は円に丸まるので**「粗利: ¥0」**と出る (本番 v0.0.526 の値で実測)。
+ *
+ * **「丸めてから引く」であって「差を丸める」ではない。** 実測した反例:
+ * `before = 100.4` (画面 `¥100`) / `after = 100.6` (画面 `¥101`) のとき
+ * `Math.round(after - before) = Math.round(0.19999999999998863) = 0` となり
+ * **「動いていない」**になる — **画面に出ている 2 つの数字は 1 円違うのに差は 0**、という
+ * 食い違いが起きる。丸めてから引けば `101 - 100 = 1` で、**人が画面の数字でやる検算と一致**する。
+ *
+ * 引き算そのものがまた尾を作る (`57829.4 - 57829.1 = 0.3000000000029104`) ので、
+ * **結果も同じ格子に載せ直す**。**これで 0 に潰れることはない** — 0.1km 格子の 2 点の差は
+ * 最小 0.1 で、丸めの粒 0.05 より大きい (実測)。
+ */
+export function marginDiffDisplayDelta(unit: MarginDiffUnit, before: number, after: number): number {
+  return atDisplayPrecision(unit, atDisplayPrecision(unit, after) - atDisplayPrecision(unit, before))
 }
 
 /**
@@ -129,11 +181,17 @@ function diffRows<K extends string>(
     unit: spec.unit,
     before: before[spec.key],
     after: after[spec.key],
-    delta: after[spec.key] - before[spec.key],
+    delta: marginDiffDisplayDelta(spec.unit, before[spec.key], after[spec.key]),
   }))
 }
 
-/** 上のうち**動いた行だけ**。運行・便の一覧はこちら (動いていない行を並べると読めない)。 */
+/**
+ * 上のうち**動いた行だけ**。運行・便の一覧はこちら (動いていない行を並べると読めない)。
+ *
+ * `delta` は既に**画面に出る精度**なので、ここは**厳密比較のままでよい** (Refs #838) —
+ * 画面に出る精度で同じなら `delta` はきっちり `0` になる。ここで改めて丸めると
+ * **単位ごとの精度が消える** (`Math.round(0.4) === 0` で 0.4km の実変化が落ちる)。
+ */
 function changedRows<K extends string>(
   specs: readonly MarginDiffFieldSpec<K>[],
   before: Record<K, number>,
@@ -371,6 +429,10 @@ export const MARGIN_DIFF_OVERRIDE_CAVEAT
     + '燃費の上書きと運行経費の配分は集計した端末にしか無い設定で、版には残っていません。'
     + 'データが 1 円も変わっていないのに版が増えていることがあります。'
 
+/**
+ * ★ **渡すのは「画面に出る精度の粗利の差」** (`marginDiffDisplayDelta('yen', …)` の結果)。
+ * 生の引き算を渡すと浮動小数の尾で「¥0 動いた」回にも注記が出る (Refs #838)。
+ */
 export function marginDiffOverrideCaveat(marginDelta: number): string {
   if (marginDelta === 0) return ''
   return MARGIN_DIFF_OVERRIDE_CAVEAT
@@ -498,6 +560,6 @@ export function buildMarginDiff(before: MarginDiffSide, after: MarginDiffSide): 
     uncoveredNote: marginDiffUncoveredNote(before.snapshot.cache.uncovered, after.snapshot.cache.uncovered),
     crossMonthNote: marginDiffCrossMonthNote(before.snapshot.cache.crossMonth, after.snapshot.cache.crossMonth),
     codeVersionNote: marginDiffCodeVersionNote(refs.before, refs.after),
-    overrideCaveat: marginDiffOverrideCaveat(afterTotals.marginYen - beforeTotals.marginYen),
+    overrideCaveat: marginDiffOverrideCaveat(marginDiffDisplayDelta('yen', beforeTotals.marginYen, afterTotals.marginYen)),
   }
 }

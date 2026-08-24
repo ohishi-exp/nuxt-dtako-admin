@@ -9,6 +9,7 @@ import {
   buildMarginDiff,
   marginDiffCodeVersionNote,
   marginDiffCrossMonthNote,
+  marginDiffDisplayDelta,
   marginDiffLegCountNote,
   marginDiffLegLabel,
   marginDiffNeedsMoreVersionsNote,
@@ -202,6 +203,139 @@ describe('月全体 (totals) の差', () => {
       side(NEW, snapshot({ totals: { marginYen: 4467597 } })),
     )
     expect(diff.totals[3]).toMatchObject({ key: 'marginYen', delta: -532403 })
+  })
+})
+
+// --- 浮動小数の尾 (Refs #838) ---
+
+/**
+ * 本番 v0.0.526 の 2026-07 に**実際に保存されている**粗利。按分 (`fuelHaul` / `runCost`) が
+ * 割り算を含むので尾が付く。**これ自体は正常**で、直すのは比べ方だけ。
+ */
+const PROD_MARGIN_YEN = 4467597.000000001
+/** その隣の double。**合計の足し順が変わるだけのリファクタ**でこの程度は動く。 */
+const NEXT_DOUBLE = 4467597.000000002
+
+describe('★ 動いたかどうかは「画面に出る精度」で決める (Refs #838)', () => {
+  it('前提: 本番の値には尾があり、厳密比較なら「動いた」になってしまう', () => {
+    // `===` を直に書くと tsc がリテラル型で「重ならない比較」と言う (TS2367) ので値で比べる。
+    expect(PROD_MARGIN_YEN).not.toBe(NEXT_DOUBLE)
+    expect(NEXT_DOUBLE - PROD_MARGIN_YEN).not.toBe(0)
+    // どちらも画面には同じ ¥4,467,597 と出る = 「粗利: ¥0 動いた」の正体。
+    expect(Math.round(PROD_MARGIN_YEN)).toBe(4467597)
+    expect(Math.round(NEXT_DOUBLE)).toBe(4467597)
+  })
+
+  it('前提: 合計の足し順を変えるだけで合計が変わる (実測)', () => {
+    const xs = [1193630.4, 1174178.3, 567715.2, 357645.1]
+    const forward = xs.reduce((s, x) => s + x, 0)
+    const backward = [...xs].reverse().reduce((s, x) => s + x, 0)
+    expect(forward === backward).toBe(false)
+    // 足し順を変えただけの版どうしは「動いていない」。
+    expect(marginDiffDisplayDelta('yen', forward, backward)).toBe(0)
+  })
+
+  it('★ 尾だけの違いは「動いていない」— 月全体の粗利の delta が 0 になる', () => {
+    const diff = buildMarginDiff(
+      side(OLD, snapshot({ totals: { marginYen: PROD_MARGIN_YEN } })),
+      side(NEW, snapshot({ totals: { marginYen: NEXT_DOUBLE } })),
+    )
+    // 月全体は 4 項目とも出す仕様なので**行は在る**。中の `delta` が 0 になる。
+    expect(diff.totals[3]).toMatchObject({ key: 'marginYen', unit: 'yen', delta: 0 })
+    // **生値は捨てない** — 丸めた値に差し替えると検算できなくなる。
+    expect(diff.totals[3]!.before).toBe(PROD_MARGIN_YEN)
+    expect(diff.totals[3]!.after).toBe(NEXT_DOUBLE)
+    // 「粗利が ¥0 動いた」回に燃費上書きの注記も出さない。
+    expect(diff.overrideCaveat).toBe('')
+  })
+
+  it('★ 運行の一覧に「¥0 動いた」行を出さない (動いていない運行として数える)', () => {
+    const diff = buildMarginDiff(
+      side(OLD, snapshot({ operations: [op({ salesYen: 100000.000000001, totalKm: 300.00000000001 })] })),
+      side(NEW, snapshot({ operations: [op({ salesYen: 100000.000000002, totalKm: 300 })] })),
+    )
+    expect(diff.changed).toEqual([])
+    expect(diff.unchangedOperations).toBe(1)
+  })
+
+  it('★ 便の一覧にも「¥0 動いた」行を出さない', () => {
+    const before = op({ legs: [leg({ seq: 1, salesYen: 60000.000000001, haulKm: 200.00000000001 })] })
+    const after = op({ legs: [leg({ seq: 1, salesYen: 60000.000000002, haulKm: 200 })] })
+    const diff = buildMarginDiff(side(OLD, snapshot({ operations: [before] })), side(NEW, snapshot({ operations: [after] })))
+    expect(diff.changed).toEqual([])
+    expect(diff.unchangedOperations).toBe(1)
+  })
+
+  it('★ 採ったのは「丸めてから引く」— 「差を丸める」だと画面の 2 数と食い違う', () => {
+    // 画面は `¥100` と `¥101`。**1 円違って見えている。**
+    const before = 100.4
+    const after = 100.6
+    expect(Math.round(before)).toBe(100)
+    expect(Math.round(after)).toBe(101)
+    // 案 2 (差を丸める) — **「動いていない」**になる。画面の 2 数は 1 円違うのに。
+    expect(Math.round(after - before)).toBe(0)
+    // 案 1 (各版を丸めてから引く) — 画面の数字どうしの引き算と一致する。
+    expect(marginDiffDisplayDelta('yen', before, after)).toBe(1)
+    const diff = buildMarginDiff(
+      side(OLD, snapshot({ totals: { marginYen: before } })),
+      side(NEW, snapshot({ totals: { marginYen: after } })),
+    )
+    expect(diff.totals[3]).toMatchObject({ key: 'marginYen', delta: 1 })
+    expect(diff.overrideCaveat).toBe(MARGIN_DIFF_OVERRIDE_CAVEAT)
+  })
+
+  it('★ 距離は 0.1km まで — 金額と同じ丸め方にすると 0.4km の実変化が消える', () => {
+    expect(marginDiffDisplayDelta('km', 57829.0, 57829.4)).toBe(0.4)
+    // 一律 `Math.round` にしていたらこうなっていた (0.4km が落ちる)。
+    expect(Math.round(57829.4) - Math.round(57829.0)).toBe(0)
+    // 距離でも尾だけの違いは落とす。
+    expect(marginDiffDisplayDelta('km', 200.00000000001, 200)).toBe(0)
+    // 画面に出ない 0.05km 未満は「動いていない」、出る側は出す。
+    expect(marginDiffDisplayDelta('km', 200, 200.04)).toBe(0)
+    expect(marginDiffDisplayDelta('km', 200, 200.06)).toBe(0.1)
+  })
+
+  it('★ 距離の実変化は運行・便の行として出る (尾を落としても実変化は落とさない)', () => {
+    const diff = buildMarginDiff(
+      side(OLD, snapshot({ operations: [op({ totalKm: 300, legs: [leg({ haulKm: 200, deadheadKm: 30 })] })] })),
+      side(NEW, snapshot({ operations: [op({ totalKm: 300.4, legs: [leg({ haulKm: 200.4, deadheadKm: 30 })] })] })),
+    )
+    expect(diff.changed[0]!.rows).toEqual([
+      { key: 'totalKm', label: '走行km', unit: 'km', before: 300, after: 300.4, delta: 0.4 },
+    ])
+    expect(diff.changed[0]!.legs.legs[0]!.rows).toEqual([
+      { key: 'haulKm', label: '売上km', unit: 'km', before: 200, after: 200.4, delta: 0.4 },
+    ])
+  })
+
+  it('本数 (count) は整数しか取らないので何もしない (厳密比較のまま)', () => {
+    expect(marginDiffDisplayDelta('count', 90, 91)).toBe(1)
+    expect(marginDiffDisplayDelta('count', 91, 91)).toBe(0)
+    expect(marginDiffDisplayDelta('count', 91, 90)).toBe(-1)
+  })
+
+  it('引き算そのものが作る尾も同じ格子に載せ直す — **0 には潰れない**', () => {
+    // 丸めた後でも `q(0.3) - q(0.1) === 0.19999999999999998` になる。
+    expect(Math.round(0.3 * 10) / 10 - Math.round(0.1 * 10) / 10).not.toBe(0.2)
+    expect(marginDiffDisplayDelta('km', 0.1, 0.3)).toBe(0.2)
+    expect(marginDiffDisplayDelta('km', 57829.1, 57829.4)).toBe(0.3)
+    // 0.1km 格子の**最小差**が 0 に潰れないこと (丸めの粒 0.05 より大きい)。
+    expect(marginDiffDisplayDelta('km', 0, 0.1)).toBe(0.1)
+    expect(marginDiffDisplayDelta('km', 57829.3, 57829.4)).toBe(0.1)
+  })
+
+  it('★ 2026-07 の本番値は 1 円も動かない (同じ版どうしの差はすべて 0)', () => {
+    const prod = snapshot({
+      totals: { operations: 91, totalKm: 57829.4, salesYen: 10260265, allowanceYen: 2499500, marginYen: PROD_MARGIN_YEN },
+      operations: [op({ totalKm: 57829.4, salesYen: 10260265, allowanceYen: 2499500 })],
+    })
+    const diff = buildMarginDiff(side(OLD, prod), side(NEW, prod))
+    expect(diff.totals.map(r => r.delta)).toEqual([0, 0, 0, 0])
+    // **保存された生値のまま返している** (丸めた値に差し替えていない)。
+    expect(diff.totals.map(r => r.after)).toEqual([91, 10260265, 2499500, PROD_MARGIN_YEN])
+    expect(diff.changed).toEqual([])
+    expect(diff.unchangedOperations).toBe(1)
+    expect(diff.overrideCaveat).toBe('')
   })
 })
 
