@@ -91,9 +91,49 @@ export function pickMarginVersionTotals(totals: MarginTotals): MarginVersionTota
   }
 }
 
-/** 一覧の 1 行。**上限より古い版は `totals: null`** (ラベルだけ)。 */
+/**
+ * 金額の欄がどうなっているか。**`totals: null` の理由を 1 つに潰さない** (Refs #833)。
+ *
+ * `null` になる理由は **2 つあって意味が違う**:
+ * - `over-limit` — 上限より古いので**読まなかった** (次に読めば出る。異常ではない)
+ * - `unreadable` — list に出たのに `get()` が返さなかった (**読めなかった**。異常)
+ *
+ * 同じ見た目で描くと、読む人には**なぜその行だけ金額が無いのか**が分からない
+ * (`MARGIN_VERSION_UNNAMED` で直したのと同じ「穴が別の意味に読める」型)。
+ * `read` は**金額が出ている行**で、理由が無いことを `null` ではなく状態として持つ —
+ * 画面が `Record` で引くだけで済み、**通らない `null` 分岐を書かずに済む**。
+ */
+export type MarginVersionTotalsState = 'read' | 'over-limit' | 'unreadable'
+
+/** 金額の代わりに置く言葉。**空白で埋めない** (穴はレンダリングの不具合にしか読めない)。 */
+export const MARGIN_VERSION_TOTALS_STATE_LABELS: Record<MarginVersionTotalsState, string> = {
+  // 金額そのものを出す行なので、代わりに置く言葉は要らない。
+  read: '',
+  'over-limit': '金額は省略',
+  // **「0 円」と読ませない。** 読めなかったことを言葉で言う。
+  unreadable: '金額を読めませんでした',
+}
+
+/** 上の言葉の補足 (`title`)。**版そのものは残っている**ことを両方で断る。 */
+export const MARGIN_VERSION_TOTALS_STATE_TITLES: Record<MarginVersionTotalsState, string> = {
+  read: '',
+  'over-limit': 'この一覧では本文を読んでいません (版そのものは R2 に残っています)',
+  unreadable: 'この版の本文を R2 から読めませんでした — 金額が 0 円なのではありません (版そのものは R2 に残っています)',
+}
+
+/** 一覧の 1 行。**金額が無い行は理由まで持つ** (`totalsState`)。 */
 export interface MarginVersionItem extends MarginVersionEntry {
+  /** **読めた金額。読めていない行は 0 に倒さず `null`。** */
   totals: MarginVersionTotals | null
+  totalsState: MarginVersionTotalsState
+}
+
+/**
+ * 本文を読めなかった版の本数。**上限で省いたぶん (`omitted`) とは別に数える** —
+ * 片方に混ぜると「省いた」と「読めなかった」が 1 つの数字になり、異常が正常に見える。
+ */
+export function countUnreadableMarginVersions(items: MarginVersionItem[]): number {
+  return items.filter(item => item.totalsState === 'unreadable').length
 }
 
 /** `GET /api/profit/margin-snapshots?ym=` の応答。 */
@@ -104,8 +144,10 @@ export interface MarginVersionListResult {
   total: number
   /** 本文を読んだ本数の上限 (`MARGIN_VERSION_BODY_LIMIT`)。画面が注記に使う。 */
   bodyLimit: number
-  /** 金額を省いた本数 (`total - bodyLimit`、上限に届かなければ 0)。 */
+  /** 金額を省いた本数 (`total - bodyLimit`、上限に届かなければ 0)。**読めなかったぶんは含まない。** */
   omitted: number
+  /** **本文を読めなかった**本数 (削除 race 等)。上限で省いたぶんとは別勘定。 */
+  unreadable: number
 }
 
 /** 金額を省いた本数。**負にしない** (版が上限に届かない月では 0)。 */
@@ -123,5 +165,18 @@ export function marginVersionOmittedCount(total: number, limit: number): number 
 export function marginVersionOmittedNote(omitted: number, limit: number): string {
   if (omitted <= 0) return ''
   return `古い ${omitted} 本は金額を省いています — この一覧が本文を読むのは新しい ${limit} 本までです`
+    + ' (版そのものは R2 に残っています)。'
+}
+
+/**
+ * **本文を読めなかった版があることを画面に出す**ための文言。無ければ空文字。
+ *
+ * 上限で省いたぶん (`marginVersionOmittedNote`) と**見出しも文も分ける** — 省いたのは
+ * 正常 (次に読めば出る) で、読めなかったのは異常。1 つの注記に混ぜると、異常が
+ * 「そういうもの」として流れる。**0 円と読ませない**ことをここでも言う。
+ */
+export function marginVersionUnreadableNote(unreadable: number): string {
+  if (unreadable <= 0) return ''
+  return `${unreadable} 本は版の本文を R2 から読めませんでした — 金額が 0 円なのではなく、読めていません`
     + ' (版そのものは R2 に残っています)。'
 }

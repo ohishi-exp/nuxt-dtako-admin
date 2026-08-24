@@ -115,6 +115,8 @@ describe('GET /api/profit/margin-snapshots', () => {
       allowanceYen: 2499500,
       marginYen: 4467597,
     })
+    expect(result.items.map(i => i.totalsState)).toEqual(['read', 'read'])
+    expect(result.unreadable).toBe(0)
     // **latest.json / history.jsonl の本文は読まない。**
     expect(bucket.gotKeys).toEqual([
       `${dirOf('2026-07')}/v-20260824T102030.json`,
@@ -147,6 +149,9 @@ describe('GET /api/profit/margin-snapshots', () => {
     // 新しい方 20 本は金額つき、それより古い 3 本は null。
     expect(result.items.slice(0, MARGIN_VERSION_BODY_LIMIT).every(i => i.totals !== null)).toBe(true)
     expect(result.items.slice(MARGIN_VERSION_BODY_LIMIT).every(i => i.totals === null)).toBe(true)
+    // **読まなかった (正常) は `unreadable` に数えない。**
+    expect(result.items.slice(MARGIN_VERSION_BODY_LIMIT).every(i => i.totalsState === 'over-limit')).toBe(true)
+    expect(result.unreadable).toBe(0)
     // **本数によらず一定の回数**しか本文を読まない。
     expect(bucket.gotKeys).toHaveLength(MARGIN_VERSION_BODY_LIMIT)
   })
@@ -159,6 +164,10 @@ describe('GET /api/profit/margin-snapshots', () => {
     const result = await call(eventWith({ PROFIT_R2: bucket }, { ym: '2026-07' }))
     expect(result.items.map(i => i.totals === null)).toEqual([true, false])
     expect(result.total).toBe(2)
+    // **上限で省いたのと別勘定。** 読まなかった (正常) と読めなかった (異常) を混ぜない。
+    expect(result.items.map(i => i.totalsState)).toEqual(['unreadable', 'read'])
+    expect(result.unreadable).toBe(1)
+    expect(result.omitted).toBe(0)
   })
 
   it('版が 1 つも無ければ空配列', async () => {
@@ -167,5 +176,6 @@ describe('GET /api/profit/margin-snapshots', () => {
     expect(result.items).toEqual([])
     expect(result.total).toBe(0)
     expect(result.omitted).toBe(0)
+    expect(result.unreadable).toBe(0)
   })
 })

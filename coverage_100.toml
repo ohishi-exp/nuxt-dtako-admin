@@ -542,11 +542,16 @@ branches = true
 # `reconcileVehicles` は 1 行も触っていない)。server route は `snapshots.get.ts` と同じ作りで、
 # **`head()` を版の数だけ叩かない** (list に customMetadata が載らないため codeVersion には
 # N 回の head が要るが、その価値は無い) / **本文を読むのは新しい方から 20 本まで** /
-# 省いた版は**金額 0 に倒さず null** (画面は「金額は省略」と出す)。
+# 読めなかった版は**金額 0 に倒さず null**。
+# **`totals: null` の理由を 1 つに潰さない** (`totalsState`) — 上限より古いので**読まなかった**
+# (正常) と、list に出たのに `get()` が返さず**読めなかった** (異常) は意味が違い、同じ見た目で
+# 描くと「なぜこの行だけ金額が無いのか」が読む人に分からない (#831 で直した「穴が別の意味に
+# 読める」型と同じ)。注記も本数も**別勘定** (`omitted` / `unreadable`)。文言は定数
+# (`MARGIN_VERSION_TOTALS_STATE_LABELS` / `..._TITLES`) にして**変異テストで固定**した。
 # branches: BR/BRN 計測器を **2 段の probe** で先に検証 — ①片側だけ通した `if` が `[true]`、
 # 両側が `[true,false]` を返すこと ②instrumented コピーでも `||` `??` `?:` の**返り値が
 # 素の実装と一致**すること — したうえで、AST で機械的に包んだコピーでテストを流し、
-# **7 分岐すべてが true/false 両方**を通ることを数えた (v8 も 100%/100%、テスト 22 本)。
+# **8 分岐すべてが true/false 両方**を通ることを数えた (v8 も 100%/100%、テスト 29 本)。
 [[files]]
 path = "app/utils/margin-versions.ts"
 branches = true

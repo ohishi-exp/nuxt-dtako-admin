@@ -13,7 +13,8 @@
  *
  * 本文 (`get()`) を読むのは**新しい方から `MARGIN_VERSION_BODY_LIMIT` 本まで**。版が何本
  * あるかは月によって違い事前には分からないので、**本数によらず一定の回数**で済ませる。
- * 省いた本数は `omitted` で返し、**画面がそれを人に言う**。
+ * 省いた本数は `omitted` で返し、**画面がそれを人に言う**。**読めなかった版は別勘定**
+ * (`unreadable`) — 読まなかった (正常) と読めなかった (異常) を 1 つの数字に混ぜない。
  *
  * **`history.jsonl` を版の一覧に使わない** (Refs #833 の条件): ① `PROFIT_HISTORY_MAX_LINES`
  * で古い行が落ちるが**版そのものは消えない** ② `changed:false` の回も 1 行使う
@@ -26,6 +27,7 @@ import { defineEventHandler, getQuery, createError } from 'h3'
 import { listAllProfit, type R2BucketLite } from '../../utils/profit-r2-io'
 import { marginR2Paths, type MarginSummarySnapshot } from '~/utils/margin-r2'
 import {
+  countUnreadableMarginVersions,
   listMarginVersionEntries,
   marginVersionOmittedCount,
   pickMarginVersionTotals,
@@ -60,18 +62,20 @@ export default defineEventHandler(async (event): Promise<MarginVersionListResult
   for (const [i, entry] of entries.entries()) {
     if (i >= MARGIN_VERSION_BODY_LIMIT) {
       // **上限より古い版はラベルだけ。** 本文は読まない (省いたことは `omitted` で言う)。
-      items.push({ ...entry, totals: null })
+      items.push({ ...entry, totals: null, totalsState: 'over-limit' })
       continue
     }
     const body = await r2.get(entry.key)
     // list に出たのに get が null になるのは削除 race 等。**金額を 0 に倒さず**
     // 「読めなかった」として null のまま出す (`snapshots.get.ts` と同じ防御)。
+    // **`over-limit` と同じ形にしない** — 読まなかった (正常) と読めなかった (異常) は
+    // 別のことで、同じ見た目にすると読む人が理由を判別できない。
     if (!body) {
-      items.push({ ...entry, totals: null })
+      items.push({ ...entry, totals: null, totalsState: 'unreadable' })
       continue
     }
     const snapshot = JSON.parse(await body.text()) as MarginSummarySnapshot
-    items.push({ ...entry, totals: pickMarginVersionTotals(snapshot.totals) })
+    items.push({ ...entry, totals: pickMarginVersionTotals(snapshot.totals), totalsState: 'read' })
   }
 
   return {
@@ -80,5 +84,6 @@ export default defineEventHandler(async (event): Promise<MarginVersionListResult
     total: entries.length,
     bodyLimit: MARGIN_VERSION_BODY_LIMIT,
     omitted: marginVersionOmittedCount(entries.length, MARGIN_VERSION_BODY_LIMIT),
+    unreadable: countUnreadableMarginVersions(items),
   }
 })

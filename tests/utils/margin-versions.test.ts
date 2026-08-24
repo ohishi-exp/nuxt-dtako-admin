@@ -2,12 +2,17 @@ import { describe, it, expect } from 'vitest'
 
 import {
   MARGIN_VERSION_BODY_LIMIT,
+  MARGIN_VERSION_TOTALS_STATE_LABELS,
+  MARGIN_VERSION_TOTALS_STATE_TITLES,
+  countUnreadableMarginVersions,
   isMarginVersionKey,
   listMarginVersionEntries,
   marginVersionOmittedCount,
   marginVersionOmittedNote,
+  marginVersionUnreadableNote,
   pickMarginVersionTotals,
   sortMarginVersionsDesc,
+  type MarginVersionItem,
 } from '../../app/utils/margin-versions'
 import { emptyMarginTotals } from '../../app/utils/margin'
 
@@ -122,5 +127,62 @@ describe('marginVersionOmittedNote', () => {
 
   it('省いていなければ空文字 (何も出さない)', () => {
     expect(marginVersionOmittedNote(0, 20)).toBe('')
+  })
+})
+
+describe('金額が無い行の理由 (MARGIN_VERSION_TOTALS_STATE_*)', () => {
+  it('「読まなかった」と「読めなかった」を別の言葉で出す', () => {
+    // **同じ見た目にしない** — 同じだと、読む人にはなぜその行だけ金額が無いのか分からない。
+    expect(MARGIN_VERSION_TOTALS_STATE_LABELS['over-limit']).toBe('金額は省略')
+    expect(MARGIN_VERSION_TOTALS_STATE_LABELS.unreadable).toBe('金額を読めませんでした')
+    expect(MARGIN_VERSION_TOTALS_STATE_LABELS['over-limit'])
+      .not.toBe(MARGIN_VERSION_TOTALS_STATE_LABELS.unreadable)
+  })
+
+  it('金額が出ている行には理由の言葉を置かない', () => {
+    expect(MARGIN_VERSION_TOTALS_STATE_LABELS.read).toBe('')
+    expect(MARGIN_VERSION_TOTALS_STATE_TITLES.read).toBe('')
+  })
+
+  it('補足はどちらも「版そのものは残っている」と断り、読めなかった方は 0 円を否定する', () => {
+    expect(MARGIN_VERSION_TOTALS_STATE_TITLES['over-limit']).toContain('版そのものは R2 に残っています')
+    expect(MARGIN_VERSION_TOTALS_STATE_TITLES.unreadable).toContain('版そのものは R2 に残っています')
+    expect(MARGIN_VERSION_TOTALS_STATE_TITLES.unreadable).toContain('0 円なのではありません')
+  })
+})
+
+describe('countUnreadableMarginVersions', () => {
+  const item = (label: string, totalsState: MarginVersionItem['totalsState']): MarginVersionItem => ({
+    key: `${DIR}/${label}.json`,
+    label,
+    totals: totalsState === 'read' ? { operations: 1, salesYen: 2, allowanceYen: 3, marginYen: 4 } : null,
+    totalsState,
+  })
+
+  it('読めなかったぶんだけを数える (上限で省いたぶんは混ぜない)', () => {
+    expect(countUnreadableMarginVersions([
+      item('v-20260824T102030', 'read'),
+      item('v-20260810T000000', 'unreadable'),
+      item('v-20260801T000000', 'over-limit'),
+      item('v-20260701T000000', 'unreadable'),
+    ])).toBe(2)
+  })
+
+  it('無ければ 0', () => {
+    expect(countUnreadableMarginVersions([item('v-20260824T102030', 'read')])).toBe(0)
+  })
+})
+
+describe('marginVersionUnreadableNote', () => {
+  it('読めなかった本数を言い、0 円ではないと断る', () => {
+    const note = marginVersionUnreadableNote(2)
+    expect(note).toContain('2 本は版の本文を R2 から読めませんでした')
+    expect(note).toContain('0 円なのではなく')
+    // **省いた注記と混ぜない** — 省いたのは正常、読めなかったのは異常。
+    expect(note).not.toContain('省いています')
+  })
+
+  it('無ければ空文字 (何も出さない)', () => {
+    expect(marginVersionUnreadableNote(0)).toBe('')
   })
 })

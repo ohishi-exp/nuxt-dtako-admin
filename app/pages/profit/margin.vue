@@ -185,6 +185,9 @@ import {
 } from '~/utils/margin-r2'
 import {
   marginVersionOmittedNote,
+  marginVersionUnreadableNote,
+  MARGIN_VERSION_TOTALS_STATE_LABELS,
+  MARGIN_VERSION_TOTALS_STATE_TITLES,
   type MarginVersionItem,
   type MarginVersionListResult,
 } from '~/utils/margin-versions'
@@ -235,6 +238,11 @@ const marginR2Failed = ref(false)
 const marginVersions = ref<MarginVersionItem[]>([])
 /** 上限 (`MARGIN_VERSION_BODY_LIMIT`) に当たって金額を省いた旨。省いていなければ空文字。 */
 const marginVersionsNote = ref('')
+/**
+ * **本文を読めなかった版がある旨** (Refs #833)。上の「省いた」注記と**分けて持つ** —
+ * 省いたのは正常 (次に読めば出る)、読めなかったのは異常。混ぜると異常が流れる。
+ */
+const marginVersionsUnreadableNote = ref('')
 /** 一覧を読めなかった理由。**黙らない** — 空の一覧を「版が無い」と誤読させないため。 */
 const marginVersionsError = ref('')
 /** 一覧を読んでいる最中か (0 本と「まだ読んでいない」を画面で分けるため)。 */
@@ -991,6 +999,7 @@ async function run() {
   // **前の月の版を残したまま集計しない** (一覧は集計の最後に読み直す)。
   marginVersions.value = []
   marginVersionsNote.value = ''
+  marginVersionsUnreadableNote.value = ''
   marginVersionsError.value = ''
   inputs.value = []
   costs.value = []
@@ -1273,12 +1282,14 @@ async function loadMarginVersions(ymValue: string) {
     })
     marginVersions.value = res.items
     marginVersionsNote.value = marginVersionOmittedNote(res.omitted, res.bodyLimit)
+    marginVersionsUnreadableNote.value = marginVersionUnreadableNote(res.unreadable)
     marginVersionsError.value = ''
   }
   catch (e) {
     // **空の一覧に倒さない** — 「読めなかった」と「版が無い」は別のこと。
     marginVersions.value = []
     marginVersionsNote.value = ''
+    marginVersionsUnreadableNote.value = ''
     marginVersionsError.value = `R2 に残した版の一覧を読めませんでした — ${e instanceof Error ? e.message : String(e)}`
   }
   finally {
@@ -2127,17 +2138,27 @@ function downloadCustomerRouteCsv() {
                 <td class="text-right py-1 px-2">{{ yen(v.totals.allowanceYen) }}</td>
                 <td class="text-right py-1 pl-2">{{ yen(v.totals.marginYen) }}</td>
               </template>
+              <!--
+                金額が無い理由は 2 つある (上限より古いので**読まなかった** /
+                **読めなかった**)。**同じ見た目にしない** — 同じだと、読む人には
+                なぜその行だけ金額が無いのかが分からない。
+              -->
               <td
                 v-else
                 colspan="4"
-                class="text-right py-1 pl-2 text-gray-400"
-                title="この一覧では本文を読んでいません (版そのものは R2 に残っています)"
-              >金額は省略</td>
+                class="text-right py-1 pl-2"
+                :class="v.totalsState === 'unreadable' ? 'text-amber-600 dark:text-amber-400' : 'text-gray-400'"
+                :title="MARGIN_VERSION_TOTALS_STATE_TITLES[v.totalsState]"
+              >{{ MARGIN_VERSION_TOTALS_STATE_LABELS[v.totalsState] }}</td>
             </tr>
           </tbody>
         </table>
         <p v-if="marginVersionsNote" class="text-xs text-gray-400 mt-1">
           {{ marginVersionsNote }}
+        </p>
+        <!-- **読めなかったぶんは失敗と分かる色で。** 省いたぶんと同じ灰色にしない。 -->
+        <p v-if="marginVersionsUnreadableNote" class="text-xs text-amber-600 dark:text-amber-400 mt-1">
+          {{ marginVersionsUnreadableNote }}
         </p>
       </template>
     </section>
