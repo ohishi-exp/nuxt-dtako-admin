@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 
 import {
+  ALLOWANCE_OVERRIDE_NOTE_MAX_ITEMS,
   ALLOWANCE_OVERRIDE_SCHEMA_VERSION,
   UNKNOWN_OVERRIDE_BY,
   allowanceOverrideHashInput,
@@ -8,7 +9,9 @@ import {
   allowanceOverrideMigrationNote,
   allowanceOverrideR2Paths,
   allowanceOverrideSaveNote,
+  allowanceOverrideSavedList,
   allowanceOverrideValue,
+  allowanceOverrideValueText,
   applyAllowanceOverrideOperation,
   emptyAllowanceOverrideSnapshot,
   isProvisionalOverrideValue,
@@ -341,6 +344,7 @@ describe('allowanceOverrideSaveNote — 失敗を黙らせない', () => {
     savedAt: '2026-08-24T04:00:00.000Z',
     by: 'me@example.com',
     key: HIROO_MEMURO,
+    value: 9000,
     entries: 1,
     versionKey: 'profit/allowance-overrides/provisional/v-20260824T130000.json',
     ...o,
@@ -358,16 +362,26 @@ describe('allowanceOverrideSaveNote — 失敗を黙らせない', () => {
 
   it('★ 成功しても「集計はこの端末の記録から出している」と断る (自動 fetch を入れていないため)', () => {
     const note = allowanceOverrideSaveNote(result(), null)
-    expect(note).toContain('送りました')
+    expect(note).toContain('保存しました')
     expect(note).toContain('me@example.com')
     expect(note).toContain('1 件')
     expect(note).toContain('この端末の記録から出しています')
   })
 
-  it('値が同じだった回は「版は増やしていません」', () => {
+  it('★ 保存された 鍵と値 をそのまま出す — 読む口 (GET) が無いので確かめられるのはここだけ', () => {
+    expect(allowanceOverrideSaveNote(result(), null)).toContain(`${HIROO_MEMURO} = ¥9,000`)
+  })
+
+  it('★ 消した回は空白ではなく「(消しました)」と書く (欠落と区別が付くように)', () => {
+    const note = allowanceOverrideSaveNote(result({ value: null, entries: 0 }), null)
+    expect(note).toContain(`${HIROO_MEMURO} = (消しました)`)
+  })
+
+  it('値が同じだった回は「版は増やしていません」。そこにも値を出す', () => {
     const note = allowanceOverrideSaveNote(result({ changed: false, entries: 3 }), null)
     expect(note).toContain('版は増やしていません')
     expect(note).toContain('3 件')
+    expect(note).toContain(`${HIROO_MEMURO} = ¥9,000`)
   })
 
   it('注記に markdown の強調記号を混ぜない (そのまま画面に出るため)', () => {
@@ -376,23 +390,68 @@ describe('allowanceOverrideSaveNote — 失敗を黙らせない', () => {
   })
 })
 
+describe('allowanceOverrideValueText / allowanceOverrideSavedList', () => {
+  it('値は ¥ 付きで、消した回は言葉で書く', () => {
+    expect(allowanceOverrideValueText(9000)).toBe('¥9,000')
+    expect(allowanceOverrideValueText(null)).toBe('(消しました)')
+  })
+
+  it('保存された 鍵 = 値 を並べる', () => {
+    const list = allowanceOverrideSavedList([{ key: HIROO_MEMURO, value: 9000 }, { key: '釧路|帯広', value: null }])
+    expect(list).toContain(`${HIROO_MEMURO} = ¥9,000`)
+    expect(list).toContain('釧路|帯広 = (消しました)')
+  })
+
+  it('★ 1 件も入らなかったときは何も足さない (空の一覧は「入ったが中身が無い」に読める)', () => {
+    expect(allowanceOverrideSavedList([])).toBe('')
+  })
+
+  it('★ 上限を超えたぶんは黙って切らず、件数で言う', () => {
+    const many = Array.from({ length: ALLOWANCE_OVERRIDE_NOTE_MAX_ITEMS + 3 }, (_, i) => ({ key: `k${i}`, value: i + 1 }))
+    const list = allowanceOverrideSavedList(many)
+    expect(list).toContain('…ほか 3 件')
+    expect(list).toContain(`${ALLOWANCE_OVERRIDE_NOTE_MAX_ITEMS} 件まで出しています`)
+    expect(list).toContain('k0 = ¥1')
+    expect(list).not.toContain(`k${ALLOWANCE_OVERRIDE_NOTE_MAX_ITEMS} =`)
+  })
+
+  it('上限ちょうどなら「ほか」を出さない', () => {
+    const exact = Array.from({ length: ALLOWANCE_OVERRIDE_NOTE_MAX_ITEMS }, (_, i) => ({ key: `k${i}`, value: i + 1 }))
+    expect(allowanceOverrideSavedList(exact)).not.toContain('ほか')
+  })
+})
+
 describe('allowanceOverrideMigrationNote — この端末のぶんを送る', () => {
+  const saved = [{ key: HIROO_MEMURO, value: 9000 }]
+
   it('全部送れたら件数と R2 の件数を出し、端末の記録を消していないと言う', () => {
-    const note = allowanceOverrideMigrationNote({ sent: 1, failed: 0, entries: 1, firstError: '' })
+    const note = allowanceOverrideMigrationNote({ sent: 1, failed: 0, entries: 1, firstError: '', saved })
     expect(note).toContain('1 件を R2')
     expect(note).toContain('この端末の記録は消していません')
   })
 
+  it('★ R2 に入った 鍵と値 を出す (件数だけだと値が正しいか分からない)', () => {
+    const note = allowanceOverrideMigrationNote({ sent: 1, failed: 0, entries: 1, firstError: '', saved })
+    expect(note).toContain(`${HIROO_MEMURO} = ¥9,000`)
+  })
+
   it('★ 失敗した回は「もう一度押せば送れなかったぶんだけ送り直せる」— 1 件ずつにした利点', () => {
-    const note = allowanceOverrideMigrationNote({ sent: 2, failed: 1, entries: 2, firstError: 'HTTP 401' })
+    const note = allowanceOverrideMigrationNote({ sent: 2, failed: 1, entries: 2, firstError: 'HTTP 401', saved })
     expect(note).toContain('3 件のうち 1 件')
     expect(note).toContain('HTTP 401')
     expect(note).toContain('送り直せます')
+    // 落ちた回でも、入ったぶんは出す。
+    expect(note).toContain(`${HIROO_MEMURO} = ¥9,000`)
+  })
+
+  it('全部落ちた回は一覧を足さない', () => {
+    const note = allowanceOverrideMigrationNote({ sent: 0, failed: 1, entries: 0, firstError: 'x', saved: [] })
+    expect(note).not.toContain('R2 に入ったのは')
   })
 
   it('注記に markdown の強調記号を混ぜない', () => {
-    expect(allowanceOverrideMigrationNote({ sent: 1, failed: 0, entries: 1, firstError: '' })).not.toContain('**')
-    expect(allowanceOverrideMigrationNote({ sent: 0, failed: 1, entries: 0, firstError: 'x' })).not.toContain('**')
+    expect(allowanceOverrideMigrationNote({ sent: 1, failed: 0, entries: 1, firstError: '', saved })).not.toContain('**')
+    expect(allowanceOverrideMigrationNote({ sent: 0, failed: 1, entries: 0, firstError: 'x', saved: [] })).not.toContain('**')
   })
 })
 

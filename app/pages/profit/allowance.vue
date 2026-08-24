@@ -77,6 +77,7 @@ import {
   ALLOWANCE_OVERRIDE_SCHEMA_VERSION,
   allowanceOverrideMigrationNote,
   allowanceOverrideSaveNote,
+  type AllowanceOverrideSavedValue,
   type AllowanceOverrideSaveResult,
 } from '~/utils/allowance-overrides-r2'
 import {
@@ -242,7 +243,13 @@ const overrideFailed = ref(false)
 /** 移行ボタンを押している間 (1 件ずつ直列に送るので、二重に押させない)。 */
 const sendingOverrides = ref(false)
 
-/** この端末に残っている暫定手当の件数 (移行ボタンに出す)。 */
+/**
+ * この端末に残っている暫定手当の件数 (移行ボタンに出す)。
+ *
+ * **tombstone は含まれない** — 人が見るのは「送るものが何件あるか」で、`ProvisionalMap`
+ * は消した鍵を `delete` する (`setProvisional`) ので、そもそも入りようが無い。
+ * 「消した」を値として持つのは **R2 側だけ**の話。
+ */
 const provisionalEntryCount = computed(() => Object.keys(provisional.value).length)
 
 /** **1 件の操作**を送る。全体マップを送る口はサーバー側にも無い。 */
@@ -283,13 +290,19 @@ async function sendProvisionalToR2() {
   let failed = 0
   let entries = 0
   let firstError = ''
+  // **R2 が返した**鍵と値を貯める (送った値のエコーではない)。読む口が無いこの PR では、
+  // 「移行が本当に入ったか」を確かめられるのがここだけになるため。
+  const saved: AllowanceOverrideSavedValue[] = []
   // 送るのは**この端末に残っているぶん**。型を明示するのは、`Object.entries` の推論が
   // 落ちると `yen` が `unknown` になって「何を送るか」が読めなくなるため。
+  // **tombstone は入らない** — localStorage の `ProvisionalMap` は消した鍵を
+  // `delete` するので (`setProvisional`)、件数も一覧も「生きているぶん」だけになる。
   const local: [string, number][] = Object.entries(provisional.value)
   for (const [key, yen] of local) {
     try {
       const result = await postProvisionalOverride(key, yen)
       entries = result.entries
+      saved.push({ key: result.key, value: result.value })
       sent += 1
     }
     catch (e) {
@@ -298,7 +311,7 @@ async function sendProvisionalToR2() {
     }
   }
   sendingOverrides.value = false
-  overrideNote.value = allowanceOverrideMigrationNote({ sent, failed, entries, firstError })
+  overrideNote.value = allowanceOverrideMigrationNote({ sent, failed, entries, firstError, saved })
   overrideFailed.value = failed > 0
 }
 

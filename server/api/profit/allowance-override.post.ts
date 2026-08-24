@@ -30,7 +30,8 @@
  * 動く**ため。こちらの値は**人が入力した数そのもの**でコードが作っていないので、
  * 版に刻んでも「いつ変わったか」の役に立たない。
  *
- *   200 — `{saved, changed, savedAt, by, key, entries, versionKey}`
+ *   200 — `{saved, changed, savedAt, by, key, value, entries, versionKey}`
+ *         (`value` は**保存された後の値**。送った値のエコーではない)
  *   400 — body の形式不正 (`kind` は provisional のみ / `value` は正の整数か null)
  *   401 — 未ログイン (`requireAuth`)
  *   503 — INTERNAL_SHARED_SECRET / PROFIT_R2 binding 未設定
@@ -137,6 +138,10 @@ export default defineEventHandler(async (event) => {
     savedAt,
     by,
     key: parsed.key,
+    // **保存した後の全体像から読み直す。**受け取った `parsed.value` をそのまま返す
+    // (エコー) と、畳み込みが値を取り違えても応答は正しく見える。**この PR には
+    // 読む口 (GET) が無い**ので、R2 に何が入ったかを確かめられるのはここだけになる。
+    value: allowanceOverrideValue(after, parsed.key),
     entries: liveAllowanceOverrideCount(after),
     versionKey: result.versionKey,
   }
