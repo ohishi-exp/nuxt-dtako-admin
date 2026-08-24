@@ -430,3 +430,20 @@ branches = true
 [[files]]
 path = "app/utils/profit-wage-mix.ts"
 branches = true
+
+# 賃金構成の「現状」を**実支給**にする口 (Refs #814)。一番星の経費明細の
+# **経費種別 08 給与(人件費)** を乗務員CD で畳む。2026-07 / 帯広5名で上司向け資料の
+# 支給額と一円まで一致する (計 ¥2,815,000)。**車輌ではなく乗務員CD で引く** —
+# 中村・柳井・西島は車輌をまたいで行が 2 本に分かれるため。
+# **粗利の数字には 1 円も効かない** (`margin.ts` は 1 行も触っていない)。
+# **0 に倒さない**分岐 (行が無い乗務員は鍵を作らない / 乗務員CD が空の行は落とす /
+# 上限で切れたら期間を割って引き直し、割れなければ投げる) が中核。
+# branches: BR() 計測器を probe (片側しか通らない `if` と、評価されない `??` の右を
+# 仕込んだ .ts) で**両方向に**検証 — 片側だけ通した probe が `[true]` を、両側通した
+# probe が `[true,false]` を返すことを実測してから、`if` / 三項 / `&&` `||` の両辺 /
+# `??` の左辺 を BR() で包んだ instrumented コピー (TypeScript の AST で機械的に挿入)
+# でテストを流し、**`profit-actual-wage.ts` の 9 分岐 + `profit-wage-mix.ts` の 24 分岐
+# = 33 分岐すべてが true/false 両方を通る**ことを数えた (v8 も 100%/100%)。
+[[files]]
+path = "app/utils/profit-actual-wage.ts"
+branches = true

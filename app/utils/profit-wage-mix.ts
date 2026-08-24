@@ -36,6 +36,19 @@
  * 柳井 86.5h / 実績 264.5h = 33%)。archive の値は MCP `get_restraint_summary` と
  * 同一の R2 キーを読むことを本番で実測済み。
  *
+ * ## 現状 (実支給) の出どころ (Refs #814)
+ *
+ * 「現状」の列は**一番星の経費明細 `08 給与(人件費)` を乗務員CD で畳んだ実支給**
+ * (`profit-actual-wage.ts` が引く)。2026-07 / 帯広5名で上司向け資料の支給額と
+ * **一円まで一致**する (計 ¥2,815,000)。**過払いも調整せずそのまま出す**
+ * (佐竹の 07-27 ¥1,000。オーナー判断)。
+ *
+ * **引けなかった乗務員は 0 に倒さず、推計 (旅費の母数 ＋ 一律残業代) に落として理由を
+ * 画面に出す。** 0 を現状として出すと「試算 − 現状」の差が丸ごと嘘になる。
+ * 一律残業代は**入力のまま**残してある (`WageMixSettings.flatOvertimeYen`) — 推計の
+ * 仮定をコードに固定すると画面から動かせなくなるため。**画面は推計が 1 人でも居る
+ * ときだけこの入力を出す。**
+ *
  * **拘束が引けない乗務員は金額を出さず `null`。0 分に倒さない** — 0 で計算すると
  * 「働いていないから安い」という嘘の数字が出て、最低賃金割れの判定まで嘘になる
  * (この repo の思想。拘束×賃金タブも同じ扱い)。**旅費だけは出す** — 旅費は便で
@@ -62,7 +75,14 @@ export const HOLIDAY_MULTIPLIER = 0.35
 export const TRAVEL_RATE_PRESETS = [0.35, 0.4] as const
 export const DEFAULT_TRAVEL_RATE = 0.35
 
-/** 現状の一律残業代 (全員一律で乗っている額)。**現状の推計にだけ使う。** */
+/**
+ * 現状の一律残業代の**既定値** (全員一律で乗っている額)。
+ *
+ * **実支給を引けなかった乗務員の推計にだけ効く** (Refs #814)。実支給が引けていれば
+ * 1 円も使わない。**入力として振れる値のまま残す** — 推計に落ちたときの仮定を
+ * コードに固定すると、画面から動かせない前提になって後退する。画面は
+ * **推計が 1 人でも居るときだけ**この入力を出す。
+ */
 export const DEFAULT_FLAT_OVERTIME_YEN = 10000
 
 /** 賃金の計算方式。`hours` = 方式A (時間で決める) / `days` = 方式B (日数で決める)。 */
@@ -95,6 +115,20 @@ export interface WageMixInput {
   allowanceBaseYen: number
   /** 拘束時間サマリ。**引けていなければ null** (0 に倒さない)。 */
   restraint: WageMixRestraint | null
+  /**
+   * **実支給** (一番星の経費明細 `08 給与(人件費)` を乗務員CD で畳んだ額、Refs #814)。
+   *
+   * **引けていなければ null。0 に倒さない** — 0 を実支給として出すと「試算 − 現状」の
+   * 差が丸ごと嘘になる。null なら推計 (母数 ＋ 一律残業代) に落として理由を出す。
+   * **過払いは調整しない** (2026-07 佐竹の ¥1,000 はオーナー判断でそのまま)。
+   */
+  actualPayYen: number | null
+  /**
+   * `actualPayYen` が null の理由。**月ぜんぶが引けていない** (経費明細の取得に
+   * 失敗した) ときに呼び出し側が差し替える。省略すると
+   * `NO_ACTUAL_PAY_REASON` (この乗務員の行が無い) になる。
+   */
+  actualPayReason?: string
 }
 
 export interface WageMixSettings {
@@ -105,7 +139,10 @@ export interface WageMixSettings {
   dailyRateYen: number
   /** 旅費率 (0.35 = 35%)。 */
   travelRate: number
-  /** 現状の一律残業代 (円/人)。現状の推計にだけ効く。 */
+  /**
+   * 現状の一律残業代 (円/人)。**実支給を引けなかった乗務員の推計にだけ効く。**
+   * 実支給が引けていれば 1 円も使わない。
+   */
   flatOvertimeYen: number
 }
 
@@ -136,8 +173,15 @@ export interface WageMixRow {
   overtimeYen: number | null
   /** 基本給 + 残業 + 旅費。**拘束が引けていなければ null。** */
   totalYen: number | null
-  /** 現状の推計 (母数 + 一律残業代)。 */
+  /**
+   * 現状。**実支給** (経費明細 08 を乗務員CD で畳んだ額)。引けていなければ
+   * 推計 (母数 ＋ 一律残業代) に落ちる (`currentEstimated` が true)。
+   */
   currentYen: number
+  /** `currentYen` が実支給でなく推計か。**画面で必ず断る。** */
+  currentEstimated: boolean
+  /** 推計に落ちた理由。実支給が引けていれば null。 */
+  currentReason: string | null
   /** 試算 − 現状。`totalYen` が null なら null。 */
   diffYen: number | null
   /** 拘束が引けていない理由。引けていれば null。 */
@@ -147,6 +191,9 @@ export interface WageMixRow {
 /** 拘束が引けていない乗務員に出す理由 (画面にそのまま出す)。 */
 export const NO_RESTRAINT_REASON = '拘束時間が取れていない (拘束時間サマリに行が無い)'
 export const PARTIAL_RESTRAINT_REASON = '拘束時間が取れていない (実働 / 時間外 / 深夜 のいずれかが空)'
+
+/** 実支給が引けていない乗務員に出す理由 (画面にそのまま出す)。 */
+export const NO_ACTUAL_PAY_REASON = '実支給が取れていない (経費明細 08 給与(人件費) にこの乗務員の行が無い)'
 
 /** 円に丸める。表示と合計で同じ丸めを使う (合計 ≠ 各行の和 を作らない)。 */
 function yen(value: number): number {
@@ -161,7 +208,11 @@ function yen(value: number): number {
  */
 export function computeWageMixRow(input: WageMixInput, settings: WageMixSettings): WageMixRow {
   const travelYen = yen(input.allowanceBaseYen * settings.travelRate)
-  const currentYen = input.allowanceBaseYen + settings.flatOvertimeYen
+  // **現状は実支給。** 引けていなければ推計 (母数 ＋ 一律残業代) に落とすが、
+  // **0 には倒さない** — 0 を現状として出すと差が丸ごと嘘になる。
+  const currentEstimated = input.actualPayYen === null
+  const currentYen = input.actualPayYen ?? (input.allowanceBaseYen + settings.flatOvertimeYen)
+  const currentReason = currentEstimated ? (input.actualPayReason ?? NO_ACTUAL_PAY_REASON) : null
   const missing: WageMixRow = {
     driverCd: input.driverCd,
     driverName: input.driverName,
@@ -174,6 +225,8 @@ export function computeWageMixRow(input: WageMixInput, settings: WageMixSettings
     overtimeYen: null,
     totalYen: null,
     currentYen,
+    currentEstimated,
+    currentReason,
     diffYen: null,
     missingReason: NO_RESTRAINT_REASON,
   }
@@ -212,6 +265,8 @@ export function computeWageMixRow(input: WageMixInput, settings: WageMixSettings
     overtimeYen,
     totalYen,
     currentYen,
+    currentEstimated,
+    currentReason,
     diffYen: totalYen - currentYen,
     missingReason: null,
   }
@@ -225,6 +280,15 @@ export interface WageMixTotals {
   computed: number
   /** 拘束が取れず金額を出せなかった乗務員名。**画面に必ず出す。** */
   missingDrivers: string[]
+  /**
+   * 実支給を引けず**現状が推計に落ちた乗務員名** (Refs #814)。**画面に必ず出す。**
+   * 拘束が取れず合計から外れた乗務員も含める — 表にはその行の現状が出るため。
+   */
+  estimatedDrivers: string[]
+  /** そのうち**合計に入っている**人数 (拘束が取れて金額を出せた乗務員)。 */
+  estimatedComputed: number
+  /** **合計の `currentYen` に含まれている推計の額。** 混在を画面に出すために使う。 */
+  estimatedCurrentYen: number
   allowanceBaseYen: number
   travelYen: number
   baseWageYen: number
@@ -245,6 +309,9 @@ export function summarizeWageMix(rows: readonly WageMixRow[]): WageMixTotals {
     drivers: rows.length,
     computed: 0,
     missingDrivers: [],
+    estimatedDrivers: [],
+    estimatedComputed: 0,
+    estimatedCurrentYen: 0,
     allowanceBaseYen: 0,
     travelYen: 0,
     baseWageYen: 0,
@@ -258,12 +325,19 @@ export function summarizeWageMix(rows: readonly WageMixRow[]): WageMixTotals {
     missingTravelYen: 0,
   }
   for (const row of rows) {
+    // **合計に入る行かどうかに関わらず数える** — 表に出る現状はどの行も出るため。
+    if (row.currentEstimated) totals.estimatedDrivers.push(row.driverName)
     if (row.totalYen === null) {
       totals.missingDrivers.push(row.driverName)
       totals.missingTravelYen += row.travelYen
       continue
     }
     totals.computed += 1
+    // **混ぜたなら混ざったと言う。** 合計の現状のうち推計ぶんを別に持つ。
+    if (row.currentEstimated) {
+      totals.estimatedComputed += 1
+      totals.estimatedCurrentYen += row.currentYen
+    }
     totals.allowanceBaseYen += row.allowanceBaseYen
     totals.travelYen += row.travelYen
     totals.baseWageYen += row.baseWageYen ?? 0
