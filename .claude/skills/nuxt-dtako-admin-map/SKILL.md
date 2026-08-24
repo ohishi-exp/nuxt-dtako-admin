@@ -887,8 +887,21 @@ R2 スナップショットを force-match へ自動移植してはいけない 
   「読めなかった」は別勘定** (`totalsState` / `omitted` と `unreadable`) — 混ぜると異常が正常に
   見える。**金額は 0 に倒さない**。pure は
   `app/utils/margin-versions.ts`。**`history.jsonl` は版の一覧に使わない**
-  (行数上限で落ちる / `changed:false` の回も 1 行使う / `versionKey` を持たない)。
-  **差分ビュー (何が変わったか) はまだ無い**
+  (行数上限で落ちる / `changed:false` の回も 1 行使う / `versionKey` を持たない)
+- **選んだ 2 版の差分も画面に出ている** (Refs #834)。一覧のすぐ下で 旧/新 を選び、
+  `GET /api/profit/margin-snapshot?ym=&version=` で**2 版の本文を画面が取って**
+  `app/utils/margin-diff.ts` を呼ぶ (**差分のロジックを server route に置かない**)。
+  出すのは ① `totals` の 4 項目 ② 運行 (`unkoNo`) の 追加/削除/変更 ③ 開いた運行の便。
+  **★ 運行 1 本の `marginYen` は出さない** — `buildOperationMargins` の `overrides`
+  (燃費の上書き) と `runCostShareMode` は**集計した端末の localStorage にしか無く版に
+  入っていない**ので、版から運行 1 本の粗利を厳密に再現できない。運行単位は**生の入力値**
+  (`salesYen`/`allowanceYen`/`totalKm`/便数) まで、月全体は保存された実測値で見せる。
+  **★ 便は `seq` のまま** — 便数が違えば便ごとの数値は出さず「便数が X → Y」だけ
+  (`date`+`originCity`+`destCity` で寄せると往復や同一区間で別の便を誤って対応付ける)。
+  **★ `schemaVersion` が違えば比べない**。**★ 版そのものが端末の設定で増えることがある**
+  (`marginSummaryHashInput` は `totals` を含むのに燃費の上書きは端末ローカル) ので、
+  粗利が動いた回は**その旨を画面で断る** — 根本の解 (版に入力の指紋を残す) は PR-4 の担当で、
+  **`slipsFingerprint` だけでなく `fuelRateOverrides` と `runCostShareMode` も指紋に含める**必要がある
 
 ### 保存先 (localStorage キー)
 
@@ -912,6 +925,7 @@ R2 スナップショットを force-match へ自動移植してはいけない 
 | `POST /api/profit/margin-summary` | **粗利の集計そのもの**の版管理保存 (上記、`savedAt` はサーバー / `codeVersion` は画面が名乗り サーバーが正規化) |
 | `GET /api/profit/snapshots?ym=&vehicle=&limit=` | スナップショット一覧 (`SnapshotListItem`) |
 | `GET /api/profit/margin-snapshots?ym=` | **粗利の集計の版**の一覧 (`v-*.json` だけ・新しい順。金額は新しい方 20 本ぶんだけ・`head()` は叩かない) |
+| `GET /api/profit/margin-snapshot?ym=&version=` | **粗利の集計の版 1 本の本文** (差分ビューが 2 回叩く。**差分のロジックは持たない**。キーはクエリで受けず `marginR2Paths` で組み直す) |
 | `GET /api/profit/monthly?vehicle=&ym=` | 一番星側月計 vs `confirmedAmount` 合算 の差額 + マッチレベル内訳 |
 | `GET /api/ichiban/api/sales/vehicle-daily` | 一番星 売上明細 (proxy 経由、client 側も `api/` を含めて呼ぶ) |
 | `GET /api/ichiban/api/costs/vehicle-daily` | 一番星 経費明細 (給与・燃料等)。**`limit` 未指定だと上流が 500 件で切る** |
