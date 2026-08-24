@@ -5,7 +5,6 @@ import {
   profitYm,
   profitVersionTimestamp,
   appendProfitHistoryJsonl,
-  buildProfitSnapshot,
   monthRange,
   summarizeMonthly,
   toSnapshotListItem,
@@ -16,7 +15,7 @@ import {
   type ProfitSnapshotSlip,
   type ProfitSnapshot,
 } from '~/utils/profit-r2'
-import type { ScoredVehicleDailySlip, VehicleDailySlip } from '~/utils/ichiban'
+import type { VehicleDailySlip } from '~/utils/ichiban'
 
 describe('profitR2Paths', () => {
   it('ym/vehicleCode/unkoNo/segmentId から latest/version/history のキーを組み立てる', () => {
@@ -70,86 +69,6 @@ describe('appendProfitHistoryJsonl', () => {
 
   it('既存が空行のみでも壊れない', () => {
     expect(appendProfitHistoryJsonl('\n\n', '{"a":1}')).toBe('{"a":1}\n')
-  })
-})
-
-function slip(overrides: Partial<VehicleDailySlip> = {}): VehicleDailySlip {
-  return {
-    saleDate: '2026-06-21',
-    vehicleNumber: '8504',
-    customerCode: '000001',
-    customerName: '㈱田浦畜産',
-    originAreaName: '長崎県長崎市',
-    destAreaName: '福岡県北九州市',
-    origin: '釧路',
-    dest: '福岡県北九州市',
-    isSubcontracted: false,
-    amount: 65000,
-    itemCode: '0001',
-    itemName: '冷凍食品',
-    quantity: 10.5,
-    unitPrice: 6190,
-    unit: '個',
-    rowId: 'row-1',
-    ...overrides,
-  }
-}
-
-function scored(overrides: Partial<VehicleDailySlip> = {}): ScoredVehicleDailySlip {
-  return {
-    slip: slip(overrides),
-    originMatch: 'exact',
-    destMatch: 'exact',
-    score: 4,
-    suggested: true,
-  }
-}
-
-describe('buildProfitSnapshot', () => {
-  it('確認済み (confirmedRowIds に含まれる) 伝票だけを confirmedSlips に含める', () => {
-    const included = scored({ rowId: 'row-1' })
-    const excluded = scored({ rowId: 'row-2' })
-    const snapshot = buildProfitSnapshot({
-      vehicleCode: '8504',
-      unkoNo: 'unko-1',
-      range: { fromTs: 0, toTs: 3600 },
-      location: { originCity: '長崎市', destCity: '北九州市' },
-      summary: { distanceKm: 100, durationMin: 480, byCategory: { drive: 300, loading: 60, unloading: 60, rest: 60, idle: 0, other: 0 }, rowCount: 2 },
-      scoredSlips: [included, excluded],
-      confirmedRowIds: new Set(['row-1']),
-      confirmedAmount: 65000,
-      efficiency: { yenPerKm: 650, yenPerHourBound: 8125, yenPerHourDrive: 13000 },
-      savedAt: '2026-07-19T00:00:00.000Z',
-    })
-
-    expect(snapshot.schemaVersion).toBe(1)
-    expect(snapshot.ym).toBe('1970-01')
-    expect(snapshot.segmentId).toBe('0-3600')
-    expect(snapshot.confirmedSlips).toHaveLength(1)
-    const confirmedSlip = snapshot.confirmedSlips[0] as ProfitSnapshotSlip
-    expect(confirmedSlip.rowId).toBe('row-1')
-    expect(confirmedSlip.itemName).toBe('冷凍食品')
-    expect(confirmedSlip.quantity).toBe(10.5)
-    expect(confirmedSlip.originMatch).toBe('exact')
-    expect(snapshot.confirmedAmount).toBe(65000)
-    expect(snapshot.savedAt).toBe('2026-07-19T00:00:00.000Z')
-  })
-
-  it('location が null なら originCity/destCity を空文字で埋める', () => {
-    const snapshot = buildProfitSnapshot({
-      vehicleCode: '8504',
-      unkoNo: 'unko-1',
-      range: { fromTs: 0, toTs: 3600 },
-      location: null,
-      summary: { distanceKm: 0, durationMin: 0, byCategory: { drive: 0, loading: 0, unloading: 0, rest: 0, idle: 0, other: 0 }, rowCount: 0 },
-      scoredSlips: [],
-      confirmedRowIds: new Set(),
-      confirmedAmount: 0,
-      efficiency: { yenPerKm: null, yenPerHourBound: null, yenPerHourDrive: null },
-      savedAt: '2026-07-19T00:00:00.000Z',
-    })
-    expect(snapshot.location).toEqual({ originCity: '', destCity: '' })
-    expect(snapshot.confirmedSlips).toEqual([])
   })
 })
 

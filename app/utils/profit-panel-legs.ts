@@ -22,7 +22,9 @@
  */
 import { forceMatchKey, type ForceMatchMap } from './allowance-force-match'
 import type { AllowanceLeg } from './allowance-trips'
-import { epochToYmd, type ScoredVehicleDailySlip, type VehicleDailySlip } from './ichiban'
+import { epochToYmd, matchLocationLevel, type LocationMatchLevel, type VehicleDailySlip } from './ichiban'
+import { combinedMatchLevel } from './profit-r2'
+import type { SelectedRowsLocationRange } from './event-data-table'
 
 /** 収支パネルが結び先として出す便 1 本。 */
 export interface ProfitPanelLeg {
@@ -157,20 +159,53 @@ export const FORCE_MATCH_PANEL_NOTE
 export const FORCE_MATCH_OVERRIDE_NOTE
   = 'その便に粗利タブが既に当てている明細は、チェック済みで出ています。チェックを変えると、その内容を土台にした上書きとして保存されます (足し算ではありません)。候補として新しく出るのは、同じ乗務員・日付 ±1 日で、まだどの便にも当たっていない明細だけです。'
 
-/** 明細に出す「根拠」バッジ。`scoreVehicleDailySlips` の結果を 3 段に畳んだもの。 */
-export type SlipBadge = 'exact' | 'partial' | 'none'
+/**
+ * 明細に出す「根拠」バッジ。**`combinedMatchLevel` と同じ 3 段**なので、
+ * `/profit/monthly` の保存済み一覧と**同じ言葉が同じ意味**になる (Refs #858)。
+ */
+export type SlipBadge = LocationMatchLevel
+
+/**
+ * `origin_area_name` (地域ﾏｽﾀ由来) を優先し、`none` なら `origin` (発地N) で判定する。
+ *
+ * ②の `scoreVehicleDailySlips` を撤去したとき (#858) に**この作法だけ引き取った** —
+ * 消えたのはスコアリング (exact=2/partial=1 の合算と並べ替え) であって、**地域マスタが
+ * 空なら自由記述で見る**という地名突合の作法ではない。一番星の `dest_area_name` は
+ * 地域マスタに載っていない地名だと空で返り、そのとき手入力の `dest` にしか手掛かりが無い。
+ */
+function bestMatch(dtakoName: string, areaName: string, freeText: string): LocationMatchLevel {
+  const primary = matchLocationLevel(dtakoName, areaName)
+  if (primary !== 'none') return primary
+  return matchLocationLevel(dtakoName, freeText)
+}
 
 /**
  * 根拠バッジ。**候補の並べ替えには使わない** — 並びは `forceMatchCandidates`
  * (積地が一致する明細が先) のもので、こちらは目印だけ。
  *
- * スコアを持っていない明細 (`undefined`) は `none` — 「根拠が無い」であって
- * 「結べない」ではない。
+ * ## ★★ 「完全一致」は**両方 exact のときだけ** (Refs #858)
+ *
+ * 撤去前は②の `suggested` (= 積地・卸地の**両方が none でない**) をそのまま `exact` =
+ * 「完全一致」として出していたので、**partial + partial も「完全一致」**と表示されていた。
+ * 帯広の実データは `北海道釧路市西港２-101-1` vs `北海道釧路市` のような partial が主で、
+ * **日常的に出る嘘**だった。一方で `/profit/monthly` の保存済み一覧は同じものを
+ * `combinedMatchLevel` で「部分」と数えていて、**同じ言葉が 2 画面で違う意味**だった。
+ *
+ * ⇒ **`combinedMatchLevel` に寄せた。**変わるのは 2 か所:
+ *
+ * - **both partial (や exact+partial) → 「完全一致」から「部分一致」へ。**壊れたのではなく、
+ *   いままでが嘘だった
+ * - **片側だけ当たり (もう片方が none) → 「部分一致」から「根拠なし」へ。**
+ *   `combinedMatchLevel` は「片方でも none なら根拠なし」。積地しか合っていない明細を
+ *   「部分的な根拠がある」と読ませない
+ *
+ * 選択区間の積地・卸地が取れていない (`location` が `null`) ときは、突合する相手が
+ * 無いので全件 `none` — 「根拠が無い」であって「結べない」ではない。
  */
-export function slipBadge(scored: Pick<ScoredVehicleDailySlip, 'score' | 'suggested'> | undefined): SlipBadge {
-  if (scored === undefined) return 'none'
-  if (scored.suggested) return 'exact'
-  return scored.score > 0 ? 'partial' : 'none'
+export function slipBadge(location: SelectedRowsLocationRange | null, slip: VehicleDailySlip): SlipBadge {
+  const originMatch = bestMatch(location?.originCity ?? '', slip.originAreaName, slip.origin)
+  const destMatch = bestMatch(location?.destCity ?? '', slip.destAreaName, slip.dest)
+  return combinedMatchLevel(originMatch, destMatch)
 }
 
 /**

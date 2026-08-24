@@ -12,7 +12,7 @@
  * R2 binding にアクセスできないため、`server/utils/profit-r2-io.ts` に分離する。
  */
 import { epochToYmd } from './ichiban'
-import type { LocationMatchLevel, ProfitEfficiency, ScoredVehicleDailySlip, VehicleDailySlip } from './ichiban'
+import type { LocationMatchLevel, ProfitEfficiency, VehicleDailySlip } from './ichiban'
 import type { SelectedRowsLocationRange, SelectedRowsSummary } from './event-data-table'
 
 // --- キー設計 ---
@@ -108,6 +108,15 @@ export interface ProfitPanelLegGroup {
   summary: SelectedRowsSummary
 }
 
+/**
+ * 保存済みの**検証スナップショット** (②の遺物、Refs #858)。
+ *
+ * **もう誰も書かない** — 書き口の `POST /api/profit/snapshot` は #849 (PR-2) で、
+ * 組み立ての `buildProfitSnapshot` は #858 (PR-4a) で消えた。**型が残っているのは
+ * 既存の R2 のオブジェクトを読むため**で、`snapshot.get.ts` / `snapshots.get.ts` /
+ * `snapshot.delete.ts` と `/profit/monthly` の集計がこれを読む。
+ * **消さない** — 人が確認した作業の記録だから (#820 の明記)。
+ */
 export interface ProfitSnapshot {
   schemaVersion: 1
   vehicleCode: string
@@ -121,61 +130,6 @@ export interface ProfitSnapshot {
   confirmedAmount: number
   efficiency: ProfitEfficiency
   savedAt: string
-}
-
-/**
- * ProfitPanel の現在の確認状態からスナップショットを組み立てる。
- * `savedAt` だけ呼び出し側 (server route) が実行時刻で埋める — この関数自体は
- * `new Date()` に依存しない pure 関数のままにする (テスト容易性のため)。
- */
-export function buildProfitSnapshot(params: {
-  vehicleCode: string
-  unkoNo: string
-  range: { fromTs: number, toTs: number }
-  location: SelectedRowsLocationRange | null
-  summary: SelectedRowsSummary
-  scoredSlips: ScoredVehicleDailySlip[]
-  confirmedRowIds: Set<string>
-  confirmedAmount: number
-  efficiency: ProfitEfficiency
-  savedAt: string
-}): ProfitSnapshot {
-  const confirmedSlips: ProfitSnapshotSlip[] = params.scoredSlips
-    .filter(s => params.confirmedRowIds.has(s.slip.rowId))
-    .map(s => ({
-      rowId: s.slip.rowId,
-      saleDate: s.slip.saleDate,
-      customerCode: s.slip.customerCode,
-      customerName: s.slip.customerName,
-      originAreaName: s.slip.originAreaName,
-      destAreaName: s.slip.destAreaName,
-      origin: s.slip.origin,
-      dest: s.slip.dest,
-      isSubcontracted: s.slip.isSubcontracted,
-      amount: s.slip.amount,
-      itemCode: s.slip.itemCode,
-      itemName: s.slip.itemName,
-      quantity: s.slip.quantity,
-      unitPrice: s.slip.unitPrice,
-      unit: s.slip.unit,
-      originMatch: s.originMatch,
-      destMatch: s.destMatch,
-    }))
-
-  return {
-    schemaVersion: 1,
-    vehicleCode: params.vehicleCode,
-    unkoNo: params.unkoNo,
-    segmentId: segmentId(params.range.fromTs, params.range.toTs),
-    ym: profitYm(params.range.fromTs),
-    range: params.range,
-    location: { originCity: params.location?.originCity ?? '', destCity: params.location?.destCity ?? '' },
-    dtakoSummary: params.summary,
-    confirmedSlips,
-    confirmedAmount: params.confirmedAmount,
-    efficiency: params.efficiency,
-    savedAt: params.savedAt,
-  }
 }
 
 // --- 月次検証 (Refs #330 PR4) ---

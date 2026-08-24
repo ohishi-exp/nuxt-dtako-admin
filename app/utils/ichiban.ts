@@ -143,49 +143,6 @@ export function matchLocationLevel(dtakoName: string | null | undefined, ichiban
   return 'none'
 }
 
-/** `origin_area_name` (地域ﾏｽﾀ由来) を優先し、空文字なら `origin` (発地N) で判定する。 */
-function bestMatch(dtakoName: string, areaName: string, freeText: string): LocationMatchLevel {
-  const primary = matchLocationLevel(dtakoName, areaName)
-  if (primary !== 'none') return primary
-  return matchLocationLevel(dtakoName, freeText)
-}
-
-export interface ScoredVehicleDailySlip {
-  slip: VehicleDailySlip
-  originMatch: LocationMatchLevel
-  destMatch: LocationMatchLevel
-  /** exact=2 / partial=1 / none=0 を積地・卸地で合算 (0〜4)。ソート用。 */
-  score: number
-  /** 積地・卸地の両方が none でない (= 何らかの根拠がある) 場合に自動チェック候補にする。 */
-  suggested: boolean
-}
-
-const MATCH_LEVEL_SCORE: Record<LocationMatchLevel, number> = { exact: 2, partial: 1, none: 0 }
-
-/**
- * 伝票候補を dtako 側の積地・卸地でスコアリングし、スコア降順に並べる
- * (同スコアは元の並び順を維持、`Array.prototype.sort` の安定ソートに依存)。
- */
-export function scoreVehicleDailySlips(
-  originCity: string,
-  destCity: string,
-  slips: VehicleDailySlip[],
-): ScoredVehicleDailySlip[] {
-  return slips
-    .map((slip) => {
-      const originMatch = bestMatch(originCity, slip.originAreaName, slip.origin)
-      const destMatch = bestMatch(destCity, slip.destAreaName, slip.dest)
-      return {
-        slip,
-        originMatch,
-        destMatch,
-        score: MATCH_LEVEL_SCORE[originMatch] + MATCH_LEVEL_SCORE[destMatch],
-        suggested: originMatch !== 'none' && destMatch !== 'none',
-      }
-    })
-    .sort((a, b) => b.score - a.score)
-}
-
 // --- 効率指標 (円/km・円/時間) ---
 
 export interface ProfitEfficiency {
