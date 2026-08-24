@@ -442,8 +442,8 @@ branches = true
 # 仕込んだ .ts) で**両方向に**検証 — 片側だけ通した probe が `[true]` を、両側通した
 # probe が `[true,false]` を返すことを実測してから、`if` / 三項 / `&&` `||` の両辺 /
 # `??` の左辺 を BR() で包んだ instrumented コピー (TypeScript の AST で機械的に挿入)
-# でテストを流し、**`profit-actual-wage.ts` の 9 分岐 + `profit-wage-mix.ts` の 23 分岐
-# = 32 分岐すべてが true/false 両方を通る**ことを数えた (v8 も 100%/100%)。
+# でテストを流し、**`profit-actual-wage.ts` の 9 分岐 + `profit-wage-mix.ts` の 24 分岐
+# = 33 分岐すべてが true/false 両方を通る**ことを数えた (v8 も 100%/100%)。
 [[files]]
 path = "app/utils/profit-actual-wage.ts"
 branches = true

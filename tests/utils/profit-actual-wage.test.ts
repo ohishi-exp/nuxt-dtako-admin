@@ -100,13 +100,22 @@ describe('splitCostDateRange', () => {
 })
 
 describe('foldSalaryByDriver', () => {
-  it('★ 車輌をまたいで分かれた行を乗務員CD で合算する (中村・柳井・西島は 2 行)', () => {
+  it('★ 車輌をまたいで分かれた行を乗務員CD で合算する (中村・柳井・西島は 2 行、佐竹・増地は 1 行)', () => {
     const rows = [
+      // 2 行に分かれる 3 名 — **車番で畳むと片方しか出ない。**
       cost({ driverCode: '1412', vehicleNumber: '0001', amount: 500000 }),
       cost({ driverCode: '1412', vehicleNumber: '0040', amount: 119000 }),
+      cost({ driverCode: '1587', vehicleNumber: '0001', amount: 300000 }),
+      cost({ driverCode: '1587', vehicleNumber: '0040', amount: 262500 }),
+      cost({ driverCode: '1656', vehicleNumber: '0001', amount: 350000 }),
+      cost({ driverCode: '1656', vehicleNumber: '0040', amount: 202500 }),
+      // 1 行だけの 2 名。
+      cost({ driverCode: '1732', vehicleNumber: '0003', amount: 572000 }),
       cost({ driverCode: '1742', vehicleNumber: '0002', amount: 509000 }),
     ]
-    expect(foldSalaryByDriver(rows)).toEqual({ '1412': 619000, '1742': 509000 })
+    expect(foldSalaryByDriver(rows)).toEqual({
+      '1412': 619000, '1587': 562500, '1656': 552500, '1732': 572000, '1742': 509000,
+    })
   })
 
   it('★ 2026-07 の帯広5名で計 ¥2,815,000 (上司向け資料の支給額と一円まで一致)', () => {
@@ -189,6 +198,35 @@ describe('fetchSalaryCostRows', () => {
     expect(fetchMock.mock.calls[2]![1].query).toMatchObject({ from: '2026-07-16', to: '2026-08-01' })
     expect(rows.map(r => r.rowId)).toEqual(['a', 'b'])
     expect(foldSalaryByDriver(rows)).toEqual({ '1412': 619000 })
+  })
+
+  it('★ 割って引き直した結果は、切れずに 1 回で引けたときと一致する', async () => {
+    // 同じ 1 か月ぶんの実データ (中村 ¥619,000 が 3 行に散っている)。
+    const fixture = [
+      apiRow({ row_id: 'a', operation_date: '2026-07-05', amount: 200000 }),
+      apiRow({ row_id: 'b', operation_date: '2026-07-20', amount: 300000 }),
+      apiRow({ row_id: 'c', operation_date: '2026-07-25', amount: 119000 }),
+    ]
+    const inRange = (from: string, to: string) =>
+      fixture.filter(r => r.operation_date >= from && r.operation_date < to)
+
+    // ① 切れずに 1 回で引けた場合。
+    fetchMock.mockResolvedValueOnce({ source_table: '経費明細', data: fixture })
+    const once = await fetchSalaryCostRows('1412', '2026-07-01', '2026-08-01')
+
+    // ② 月ぜんぶを引くと上限で切れ、割って引き直した場合。
+    fetchMock.mockReset()
+    const full = Array.from({ length: SALARY_FETCH_LIMIT }, (_, i) => apiRow({ row_id: `full-${i}` }))
+    fetchMock.mockImplementation((_url: string, opts: { query: { from: string, to: string } }) => {
+      const { from, to } = opts.query
+      const truncated = from === '2026-07-01' && to === '2026-08-01'
+      return Promise.resolve({ source_table: '経費明細', data: truncated ? full : inRange(from, to) })
+    })
+    const split = await fetchSalaryCostRows('1412', '2026-07-01', '2026-08-01')
+
+    expect(split.map(r => r.rowId)).toEqual(once.map(r => r.rowId))
+    expect(foldSalaryByDriver(split)).toEqual(foldSalaryByDriver(once))
+    expect(foldSalaryByDriver(split)).toEqual({ '1412': 619000 })
   })
 
   it('★ 1 日まで割っても切れるなら投げる (切れた行を落として実支給と名乗らせない)', async () => {

@@ -6,7 +6,7 @@ import {
   minWageWarning,
   MIN_DAILY_WAGE_YEN,
   MIN_HOURLY_WAGE_YEN,
-  ESTIMATED_FLAT_OVERTIME_YEN,
+  DEFAULT_FLAT_OVERTIME_YEN,
   NO_ACTUAL_PAY_REASON,
   NO_RESTRAINT_REASON,
   PARTIAL_RESTRAINT_REASON,
@@ -45,14 +45,14 @@ describe('定数', () => {
     expect(MIN_DAILY_WAGE_YEN).toBe(8600)
   })
 
-  it('既定は 方式A・最低賃金ちょうど・旅費 35% (一律残業代は入力にしない)', () => {
+  it('既定は 方式A・最低賃金ちょうど・旅費 35%・一律残業代 ¥10,000', () => {
     expect(defaultWageMixSettings()).toEqual({
-      method: 'hours', hourlyRateYen: 1075, dailyRateYen: 8600, travelRate: 0.35,
+      method: 'hours', hourlyRateYen: 1075, dailyRateYen: 8600, travelRate: 0.35, flatOvertimeYen: 10000,
     })
   })
 
-  it('推計に落ちたときの一律残業代は ¥10,000', () => {
-    expect(ESTIMATED_FLAT_OVERTIME_YEN).toBe(10000)
+  it('推計に落ちたときの一律残業代の既定は ¥10,000', () => {
+    expect(DEFAULT_FLAT_OVERTIME_YEN).toBe(10000)
   })
 
   it('方式のラベルが両方ある', () => {
@@ -93,7 +93,7 @@ describe('computeWageMixRow — 方式B (日数) は資料の数字を再現す�
 
   it('★ 佐竹だけ実支給 ¥572,000 が推計 ¥571,000 (母数 + 一律残業代) を ¥1,000 上回る', () => {
     expect(rows[3]!.currentYen).toBe(572000)
-    expect(rows[3]!.allowanceBaseYen + ESTIMATED_FLAT_OVERTIME_YEN).toBe(571000)
+    expect(rows[3]!.allowanceBaseYen + DEFAULT_FLAT_OVERTIME_YEN).toBe(571000)
   })
 
   it('差は 試算 − 現状', () => {
@@ -238,6 +238,18 @@ describe('computeWageMixRow — 実支給が引けなければ推計に落とす
     const row = computeWageMixRow(DRIVERS[3]!, settings({ method: 'days' }))
     expect(row.diffYen).toBe(row.totalYen! - 572000)
   })
+
+  it('★ 一律残業代は入力のまま — 推計に落ちた乗務員の額が入力どおり動く', () => {
+    const row = computeWageMixRow({ ...DRIVERS[3]!, actualPayYen: null }, settings({ flatOvertimeYen: 25000 }))
+    expect(row.currentYen).toBe(586000)
+  })
+
+  it('★ 一律残業代は実支給が引けた乗務員には 1 円も効かない', () => {
+    const a = computeWageMixRow(DRIVERS[3]!, settings({ flatOvertimeYen: 10000 }))
+    const b = computeWageMixRow(DRIVERS[3]!, settings({ flatOvertimeYen: 999999 }))
+    expect(a.currentYen).toBe(572000)
+    expect(b.currentYen).toBe(572000)
+  })
 })
 
 describe('summarizeWageMix', () => {
@@ -247,7 +259,7 @@ describe('summarizeWageMix', () => {
       drivers: 5, computed: 5, missingDrivers: [], missingTravelYen: 0,
       allowanceBaseYen: 2764000, travelYen: 967400, baseWageYen: 1049200,
       overtimeYen: 687117, totalYen: 2703717, currentYen: 2815000, diffYen: -111283,
-      estimatedDrivers: [],
+      estimatedDrivers: [], estimatedComputed: 0, estimatedCurrentYen: 0,
       workDays: 122,
     })
   })
@@ -274,7 +286,10 @@ describe('summarizeWageMix', () => {
     expect(totals.missingDrivers).toEqual(['拘束なし'])
     expect(totals.missingTravelYen).toBe(35000)
     // 合計から外れた行でも、表に現状が出るので推計は名指しする。
+    // ただし**合計には入っていない**ので、混在の額 (estimatedCurrentYen) は 0。
     expect(totals.estimatedDrivers).toEqual(['拘束なし'])
+    expect(totals.estimatedComputed).toBe(0)
+    expect(totals.estimatedCurrentYen).toBe(0)
     expect(totals.allowanceBaseYen).toBe(609000)
     expect(totals.travelYen).toBe(213150)
   })
@@ -287,11 +302,16 @@ describe('summarizeWageMix', () => {
     const totals = summarizeWageMix(rows)
     expect(totals.estimatedDrivers).toEqual(['柳井　亮祐'])
     expect(totals.currentYen).toBe(619000 + 562500)
+    // **混ざったなら混ざったと言えるだけの材料を持つ。**
+    expect(totals.estimatedComputed).toBe(1)
+    expect(totals.estimatedCurrentYen).toBe(562500)
+    expect(totals.currentYen - totals.estimatedCurrentYen).toBe(619000)
   })
 
   it('1 人も居なければ全部 0', () => {
     expect(summarizeWageMix([])).toEqual({
-      drivers: 0, computed: 0, missingDrivers: [], estimatedDrivers: [], allowanceBaseYen: 0, travelYen: 0,
+      drivers: 0, computed: 0, missingDrivers: [], estimatedDrivers: [],
+      estimatedComputed: 0, estimatedCurrentYen: 0, allowanceBaseYen: 0, travelYen: 0,
       baseWageYen: 0, overtimeYen: 0, totalYen: 0, currentYen: 0, diffYen: 0,
       statutoryHours: 0, premiumHours: 0, workDays: 0, missingTravelYen: 0,
     })

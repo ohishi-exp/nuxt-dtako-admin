@@ -94,7 +94,6 @@ import {
   type AllowanceBaseRow,
 } from '~/utils/profit-allowance-base'
 import {
-  ESTIMATED_FLAT_OVERTIME_YEN,
   MIN_DAILY_WAGE_YEN,
   MIN_HOURLY_WAGE_YEN,
   TRAVEL_RATE_PRESETS,
@@ -1359,7 +1358,7 @@ const allowanceBaseTotals = computed(() => {
 })
 
 /** 数値入力を受ける (負・NaN は 0 に倒す。クランプは**しない** — 警告で出す)。 */
-function onWageMixNumber(field: 'hourlyRateYen' | 'dailyRateYen', raw: string) {
+function onWageMixNumber(field: 'hourlyRateYen' | 'dailyRateYen' | 'flatOvertimeYen', raw: string) {
   wageMix.value = { ...wageMix.value, [field]: Math.max(0, Number(raw) || 0) }
 }
 
@@ -2406,7 +2405,7 @@ function downloadCustomerRouteCsv() {
           <div class="margin-print-head flex flex-wrap items-baseline gap-x-3 gap-y-1 mb-1">
             <p class="text-xs font-medium">賃金構成の試算 (基本給 ＋ 残業 ＋ 旅費)</p>
             <span class="text-xs text-gray-500">
-              いまは運行手当がそのまま基本給として支給され、上に全員一律 {{ yen(ESTIMATED_FLAT_OVERTIME_YEN) }} の残業代が乗っているだけ。
+              いまは運行手当がそのまま基本給として支給され、上に全員一律 {{ yen(wageMix.flatOvertimeYen) }} の残業代が乗っているだけ。
               これを三段に組み直すとどうなるかの試算で、<b>粗利の数字には 1 円も効きません</b>
             </span>
           </div>
@@ -2459,6 +2458,25 @@ function downloadCustomerRouteCsv() {
                 @click="setTravelRate(r)"
               />
             </span>
+            <!-- 一律残業代は**実支給を引けなかった乗務員の推計にだけ**効く。
+                 全員ぶん引けていれば出さない (使われない入力を置かない) が、
+                 **推計が 1 人でも居るときは出す** — 推計の仮定を画面から動かせなく
+                 すると後退するため。 -->
+            <label
+              v-if="wageMixTotals.estimatedDrivers.length > 0"
+              class="flex items-center gap-1"
+              title="実支給を引けなかった乗務員の推計にだけ効きます (実支給が引けている乗務員には 1 円も効きません)"
+            >
+              <span class="text-gray-500">推計の一律残業代:</span>
+              <input
+                type="number"
+                step="1000"
+                min="0"
+                class="w-24 text-right border rounded px-1 py-0.5 dark:bg-gray-900"
+                :value="wageMix.flatOvertimeYen"
+                @input="onWageMixNumber('flatOvertimeYen', ($event.target as HTMLInputElement).value)"
+              >
+            </label>
             <UButton
               size="xs" variant="outline" icon="i-lucide-refresh-cw" label="拘束時間・実支給を再読込"
               :loading="loadingRestraint || loadingActualPay"
@@ -2564,8 +2582,13 @@ function downloadCustomerRouteCsv() {
           </p>
           <p v-if="wageMixTotals.estimatedDrivers.length > 0" class="text-xs text-amber-600 dark:text-amber-400 mt-1">
             ⚠ <b>実支給を引けなかった乗務員 {{ wageMixTotals.estimatedDrivers.length }} 人</b>
-            ({{ wageMixTotals.estimatedDrivers.join('・') }}) の現状は<b>推計 (旅費の母数 ＋ 一律残業代 {{ yen(ESTIMATED_FLAT_OVERTIME_YEN) }})</b> です
-            (<code>*</code> を付けた行)。<b>0 円には倒していません</b> — 0 を現状として出すと「試算 − 現状」の差が丸ごと嘘になるためです
+            ({{ wageMixTotals.estimatedDrivers.join('・') }}) の現状は<b>推計 (旅費の母数 ＋ 一律残業代 {{ yen(wageMix.flatOvertimeYen) }})</b> です
+            (<code>*</code> を付けた行)。<b>0 円には倒していません</b> — 0 を現状として出すと「試算 − 現状」の差が丸ごと嘘になるためです。
+            <template v-if="wageMixTotals.estimatedComputed > 0">
+              <b>合計の「現状」{{ yen(wageMixTotals.currentYen) }} は混在です</b> —
+              実支給 {{ wageMixTotals.computed - wageMixTotals.estimatedComputed }} 人 {{ yen(wageMixTotals.currentYen - wageMixTotals.estimatedCurrentYen) }}
+              ＋ 推計 {{ wageMixTotals.estimatedComputed }} 人 {{ yen(wageMixTotals.estimatedCurrentYen) }}
+            </template>
           </p>
           <p class="text-xs text-gray-400 mt-1">
             基本給 = <template v-if="wageMix.method === 'hours'">法定内時間 (実働 − 時間外) × 単価</template><template v-else>日額 × 稼働日数</template>。

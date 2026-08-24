@@ -43,8 +43,11 @@
  * **一円まで一致**する (計 ¥2,815,000)。**過払いも調整せずそのまま出す**
  * (佐竹の 07-27 ¥1,000。オーナー判断)。
  *
- * **引けなかった乗務員は 0 に倒さず、推計 (旅費の母数 ＋ 一律残業代 ¥10,000) に
- * 落として理由を画面に出す。** 0 を現状として出すと「試算 − 現状」の差が丸ごと嘘になる。
+ * **引けなかった乗務員は 0 に倒さず、推計 (旅費の母数 ＋ 一律残業代) に落として理由を
+ * 画面に出す。** 0 を現状として出すと「試算 − 現状」の差が丸ごと嘘になる。
+ * 一律残業代は**入力のまま**残してある (`WageMixSettings.flatOvertimeYen`) — 推計の
+ * 仮定をコードに固定すると画面から動かせなくなるため。**画面は推計が 1 人でも居る
+ * ときだけこの入力を出す。**
  *
  * **拘束が引けない乗務員は金額を出さず `null`。0 分に倒さない** — 0 で計算すると
  * 「働いていないから安い」という嘘の数字が出て、最低賃金割れの判定まで嘘になる
@@ -73,13 +76,14 @@ export const TRAVEL_RATE_PRESETS = [0.35, 0.4] as const
 export const DEFAULT_TRAVEL_RATE = 0.35
 
 /**
- * 現状の一律残業代 (全員一律で乗っている額)。
+ * 現状の一律残業代の**既定値** (全員一律で乗っている額)。
  *
- * **実支給を引けなかったときの推計にだけ使う** (Refs #814)。現状の列はふつう
- * 一番星の経費明細 `08 給与(人件費)` の実支給なので、この定数は出番が無い。
- * 画面の入力にはしない — 入れ替えられる値ではなく「いまこうなっている」という事実。
+ * **実支給を引けなかった乗務員の推計にだけ効く** (Refs #814)。実支給が引けていれば
+ * 1 円も使わない。**入力として振れる値のまま残す** — 推計に落ちたときの仮定を
+ * コードに固定すると、画面から動かせない前提になって後退する。画面は
+ * **推計が 1 人でも居るときだけ**この入力を出す。
  */
-export const ESTIMATED_FLAT_OVERTIME_YEN = 10000
+export const DEFAULT_FLAT_OVERTIME_YEN = 10000
 
 /** 賃金の計算方式。`hours` = 方式A (時間で決める) / `days` = 方式B (日数で決める)。 */
 export type WageMixMethod = 'hours' | 'days'
@@ -135,6 +139,11 @@ export interface WageMixSettings {
   dailyRateYen: number
   /** 旅費率 (0.35 = 35%)。 */
   travelRate: number
+  /**
+   * 現状の一律残業代 (円/人)。**実支給を引けなかった乗務員の推計にだけ効く。**
+   * 実支給が引けていれば 1 円も使わない。
+   */
+  flatOvertimeYen: number
 }
 
 export function defaultWageMixSettings(): WageMixSettings {
@@ -143,6 +152,7 @@ export function defaultWageMixSettings(): WageMixSettings {
     hourlyRateYen: MIN_HOURLY_WAGE_YEN,
     dailyRateYen: MIN_DAILY_WAGE_YEN,
     travelRate: DEFAULT_TRAVEL_RATE,
+    flatOvertimeYen: DEFAULT_FLAT_OVERTIME_YEN,
   }
 }
 
@@ -201,7 +211,7 @@ export function computeWageMixRow(input: WageMixInput, settings: WageMixSettings
   // **現状は実支給。** 引けていなければ推計 (母数 ＋ 一律残業代) に落とすが、
   // **0 には倒さない** — 0 を現状として出すと差が丸ごと嘘になる。
   const currentEstimated = input.actualPayYen === null
-  const currentYen = input.actualPayYen ?? (input.allowanceBaseYen + ESTIMATED_FLAT_OVERTIME_YEN)
+  const currentYen = input.actualPayYen ?? (input.allowanceBaseYen + settings.flatOvertimeYen)
   const currentReason = currentEstimated ? (input.actualPayReason ?? NO_ACTUAL_PAY_REASON) : null
   const missing: WageMixRow = {
     driverCd: input.driverCd,
@@ -275,6 +285,10 @@ export interface WageMixTotals {
    * 拘束が取れず合計から外れた乗務員も含める — 表にはその行の現状が出るため。
    */
   estimatedDrivers: string[]
+  /** そのうち**合計に入っている**人数 (拘束が取れて金額を出せた乗務員)。 */
+  estimatedComputed: number
+  /** **合計の `currentYen` に含まれている推計の額。** 混在を画面に出すために使う。 */
+  estimatedCurrentYen: number
   allowanceBaseYen: number
   travelYen: number
   baseWageYen: number
@@ -296,6 +310,8 @@ export function summarizeWageMix(rows: readonly WageMixRow[]): WageMixTotals {
     computed: 0,
     missingDrivers: [],
     estimatedDrivers: [],
+    estimatedComputed: 0,
+    estimatedCurrentYen: 0,
     allowanceBaseYen: 0,
     travelYen: 0,
     baseWageYen: 0,
@@ -317,6 +333,11 @@ export function summarizeWageMix(rows: readonly WageMixRow[]): WageMixTotals {
       continue
     }
     totals.computed += 1
+    // **混ぜたなら混ざったと言う。** 合計の現状のうち推計ぶんを別に持つ。
+    if (row.currentEstimated) {
+      totals.estimatedComputed += 1
+      totals.estimatedCurrentYen += row.currentYen
+    }
     totals.allowanceBaseYen += row.allowanceBaseYen
     totals.travelYen += row.travelYen
     totals.baseWageYen += row.baseWageYen ?? 0
