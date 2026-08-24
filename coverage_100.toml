@@ -566,8 +566,12 @@ branches = true
 # **候補にも出ず戻せなかった** (本番 v0.0.532 で実際にこの状態)。**土台を敷いてから
 # 差分を乗せる** (`seedForceMatch`) のが中核で、**書くのは人が触った瞬間だけ** —
 # ①の結果を先回りして保存すると「人が確定した」ことになってしまう。
-# branches: 上と同じ instrumented コピーで**13 分岐すべてが true/false 両方を通る**
-# ことを数えた (v8 も 100%/100%、テスト 32 本)。
+# **`ownSlipIds` (候補に出してよい相手) と `effectiveSlipIds` (いま当たっている) を
+# 分けてある** — 流用すると、人が①の明細を外した瞬間にそれが `own` から外れ、
+# `usedRowIds` には残っているので候補からも消えて**その場で戻せなくなる**
+# (「結ぶと戻せない」が符号を変えて残る)。
+# branches: 上と同じ instrumented コピーで**15 分岐すべてが true/false 両方を通る**
+# ことを数えた (v8 も 100%/100%、テスト 39 本)。
 [[files]]
 path = "app/utils/profit-panel-legs.ts"
 branches = true

@@ -71,6 +71,7 @@ import {
   sumAmount,
   slipBadge,
   effectiveSlipIds,
+  ownSlipIds,
   seedForceMatch,
   FORCE_MATCH_PANEL_NOTE,
   FORCE_MATCH_OVERRIDE_NOTE,
@@ -151,8 +152,10 @@ function boundOf(leg: ProfitPanelLeg) {
  * その便に並べる明細。**結んである明細が先、候補が後ろ。**
  * 候補は①の使用済みが分かるときだけ (`usedRowIds` を空で渡さない)。
  *
- * **`ownRowIds` には「いま当たっている」ぶんを渡す** (Refs #854) — ①が当てた明細は
- * `usedRowIds` にも居るので、渡さないと**この便自身の明細が候補から消える**。
+ * **`ownRowIds` には `ownSlipIds` を渡す** (Refs #854) — ①が当てた明細は `usedRowIds`
+ * にも居るので、渡さないと**この便自身の明細が候補から消える**。**「いま当たっている」
+ * (`effectiveOf`) を流用しない** — 人が外した瞬間に `own` から外れ、外した明細が
+ * どこにも出なくなって**その場で戻せなくなる**。
  * **フィルタの条件は緩めない** (緩めると他の便の明細まで出て二重計上になる)。
  */
 function rowsOf(leg: ProfitPanelLeg): VehicleDailySlip[] {
@@ -163,7 +166,7 @@ function rowsOf(leg: ProfitPanelLeg): VehicleDailySlip[] {
     { originCity: leg.originCity, date: leg.date },
     slips.value,
     usedLookup.usedRowIds,
-    effectiveOf(leg).ids,
+    ownSlipIds(forceMatch.value[leg.key], ichibanIdsOf(leg)),
   )
   return slipRows(bound, candidates)
 }

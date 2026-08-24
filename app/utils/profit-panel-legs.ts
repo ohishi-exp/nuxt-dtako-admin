@@ -214,6 +214,35 @@ export function effectiveSlipIds(
 }
 
 /**
+ * **その便に出してよい相手** (`forceMatchCandidates` の `ownRowIds`、Refs #854)。
+ *
+ * ## ★ `effectiveSlipIds().ids` を流用してはいけない
+ *
+ * あちらは「**いま当たっている**」(表示・合計)、こちらは「**この便に出してよい**」で
+ * 意味が違う。流用すると、**人が①の明細を外した瞬間にそれが `own` から外れ**、
+ * `usedRowIds` (キャッシュはまだ①の結果) に残っているので**候補からも消える** —
+ * `bound` にも `候補` にも居ない = **その場では戻せない**。#854 で直したはずの
+ * 「結ぶと戻せない」が符号を変えて残る形になる (押し間違いが取り返せない)。
+ *
+ * **`forced ∪ ①がこの便に当てたぶん`** を返す。**他の便の明細は 1 件も入らない**ので、
+ * `forceMatchCandidates` のフィルタ (`own.has(...) || !usedRowIds.has(...)`) を
+ * **1 文字も緩めずに**、二重計上の口も開かない。
+ */
+export function ownSlipIds(
+  forced: readonly string[] | undefined,
+  ichibanIds: readonly string[],
+): string[] {
+  const out = [...(forced ?? [])]
+  const seen = new Set(out)
+  for (const id of ichibanIds) {
+    if (seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+  }
+  return out
+}
+
+/**
  * **人が触った瞬間に、①の結果を土台として書き起こす** (Refs #854)。
  *
  * `applyForcedSales` は置き換えなので、①が {A,B,C} を当てている便で人が B だけ外したい

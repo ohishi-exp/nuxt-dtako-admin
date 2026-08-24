@@ -586,6 +586,36 @@ describe('ProfitPanel', () => {
         .toEqual({ [`${UNKO}#t${LEG1_TS}`]: ['20260716-77'] })
     })
 
+    it('★★ 自分で外した明細をその場で戻せる (外すと候補からも消えると押し間違いが取り返せない)', async () => {
+      writeLegSales({ [UNKO]: [{ seq: 1, slipIds: ['20260716-12', '20260716-77'] }] })
+      fetchDriverDailySlipsMock.mockResolvedValue([
+        slip(),
+        slip({ rowId: '20260716-77', customerName: '残す分', amount: 8000 }),
+      ])
+      const wrapper = createWrapper()
+      await flushPromises()
+
+      // ①が当てた 2 件を外す方向に 1 つ触る。
+      await wrapper.findAll('tbody tr')[0]!.trigger('click')
+      await flushPromises()
+      expect(parseForceMatch(localStorage.getItem(FORCE_MATCH_KEY)))
+        .toEqual({ [`${UNKO}#t${LEG1_TS}`]: ['20260716-77'] })
+
+      // ★ 外した明細は `usedRowIds` (キャッシュはまだ①の結果) に居るので、`own` に
+      // 入れ直さないと候補からも消えて**その場では戻せない**。
+      // 並びは「結んである明細が先」なので、外したぶんは後ろに回る。
+      const rows = wrapper.findAll('tbody tr')
+      expect(rows).toHaveLength(2)
+      const dropped = rows.find(r => r.text().includes('㈱田浦畜産'))!
+      expect(dropped).toBeDefined()
+      expect((dropped.find('input').element as HTMLInputElement).checked).toBe(false)
+
+      // もう一度押せば戻る。
+      await dropped.trigger('click')
+      expect(parseForceMatch(localStorage.getItem(FORCE_MATCH_KEY)))
+        .toEqual({ [`${UNKO}#t${LEG1_TS}`]: ['20260716-77', '20260716-12'] })
+    })
+
     it('★ 触るまでは FORCE_MATCH_KEY に 1 文字も書かない (「人が確定した」ことにしない)', async () => {
       writeIchibanHit()
       fetchDriverDailySlipsMock.mockResolvedValue([slip()])
@@ -594,7 +624,7 @@ describe('ProfitPanel', () => {
       expect(localStorage.getItem(FORCE_MATCH_KEY)).toBeNull()
     })
 
-    it('★ 人の上書きがある便では①の結果を混ぜ戻さない (外したものが戻ってこない)', async () => {
+    it('★ 人の上書きがある便では、①の結果を「当たっている」に混ぜ戻さない (合計に勝手に足さない)', async () => {
       writeIchibanHit()
       localStorage.setItem(FORCE_MATCH_KEY, JSON.stringify({ [`${UNKO}#t${LEG1_TS}`]: ['20260716-77'] }))
       fetchDriverDailySlipsMock.mockResolvedValue([
@@ -603,11 +633,17 @@ describe('ProfitPanel', () => {
       ])
       const wrapper = createWrapper()
       await flushPromises()
+
+      // 当たっているのは人が結んだ 1 件だけ (①の ¥41,250 は効いていない)。
       expect(wrapper.text()).toContain('結び 1 件')
       expect(wrapper.text()).not.toContain('粗利タブが当てた')
-      // ①の 20260716-12 は「他の便に当たっている」ではなくこの便のものだが、
-      // **人が外したもの**なので候補には出す (own には居ないが used には居る → 出ない)。
-      expect(wrapper.text()).not.toContain('㈱田浦畜産')
+      expect(wrapper.text()).toContain('8,000')
+      expect(wrapper.text()).not.toContain('49,250')
+
+      // ★ ただし①の明細は**候補としては出す** — 外したものをその場で戻せるように。
+      const ichibanRow = wrapper.findAll('tbody tr').find(r => r.text().includes('㈱田浦畜産'))
+      expect(ichibanRow).toBeDefined()
+      expect((ichibanRow!.find('input').element as HTMLInputElement).checked).toBe(false)
     })
 
     it('★ 別の便に①が当てた明細は、この便の「当たっている」に混ざらない', async () => {

@@ -10,6 +10,7 @@ import {
   boundSlips,
   effectiveSlipIds,
   legsInSelection,
+  ownSlipIds,
   seedForceMatch,
   slipBadge,
   slipRows,
@@ -250,6 +251,39 @@ describe('effectiveSlipIds — その便にいま当たっている明細', () =
     const out = effectiveSlipIds(undefined, ichiban)
     out.ids.push('b')
     expect(ichiban).toEqual(['a'])
+  })
+})
+
+/**
+ * **`own` は「いま当たっている」ではない** (Refs #854)。`effectiveSlipIds().ids` を
+ * 流用すると、人が①の明細を外した瞬間にそれが `own` から外れ、`usedRowIds` には
+ * 残っているので**候補からも消える** = その場で戻せない。
+ */
+describe('ownSlipIds — その便に出してよい相手', () => {
+  it('★★ 人が外した①の明細も出してよい (外すと候補からも消えると押し間違いが取り返せない)', () => {
+    // ①が {a,b} を当てていて、人が a を外して {b} にした状態。
+    expect(ownSlipIds(['b'], ['a', 'b'])).toEqual(['b', 'a'])
+  })
+
+  it('上書きが無ければ①の結果がそのまま (触る前の便)', () => {
+    expect(ownSlipIds(undefined, ['a', 'b'])).toEqual(['a', 'b'])
+  })
+
+  it('①が当てていなければ人の上書きだけ (降しの記録が無い便)', () => {
+    expect(ownSlipIds(['x'], [])).toEqual(['x'])
+  })
+
+  it('どちらも無ければ空 (①も人も当てていない便)', () => {
+    expect(ownSlipIds(undefined, [])).toEqual([])
+  })
+
+  it('重複は 1 つに畳む (同じ明細が 2 行並ばない)', () => {
+    expect(ownSlipIds(['a'], ['a'])).toEqual(['a'])
+  })
+
+  it('★ 他の便の明細は 1 件も入らない — 入れるのは渡された 2 つだけ (フィルタは緩めない)', () => {
+    // 引数に無い `z` (他の便のもの) が混ざらないことを、返り値の集合で固定する。
+    expect(new Set(ownSlipIds(['a'], ['b']))).toEqual(new Set(['a', 'b']))
   })
 })
 
