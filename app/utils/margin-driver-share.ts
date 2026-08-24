@@ -46,6 +46,7 @@
  * 表の数字・検算・CSV は触らない (表示専用)。
  */
 import {
+  costExceedsSalesAtYen,
   summarizeMargins,
   type DriverMargin,
   type MarginTotals,
@@ -83,10 +84,15 @@ export interface DriverShareBars {
 /**
  * 1 行を棒にする。売上 0 以下は棒にしない (null — 0 で割らない)。
  *
- * **4 区分の和が売上を超えた** (`costSum > salesYen`) 行は、粗利の pct を 0 にし、
- * 4 区分の pct を `salesYen ÷ costSum` で縮めて合計 100 にする (棒をはみ出させない)。
- * 超過分は `overflowPct` に出す。粗利が負でも和が売上を超えていなければ縮めない —
+ * **4 区分の和が売上を超えた** 行は、粗利の pct を 0 にし、4 区分の pct を
+ * `salesYen ÷ costSum` で縮めて合計 100 にする (棒をはみ出させない)。超過分は
+ * `overflowPct` に出す。粗利が負でも和が売上を超えていなければ縮めない —
  * 粗利の pct だけ 0 に止める。**`customerShareBars` の `shareBarOf` と同じ**。
+ *
+ * ★ **超えたかどうかは `costExceedsSalesAtYen` (円に丸めてから比べる) で決める** (Refs #840)。
+ * 判定を `margin.ts` と**同じ 1 つの関数**に預けてあるので、取引先別と乗務員別で挙動が割れない
+ * (生の `costSum > salesYen` だと、粗利がちょうど 0 の行で尾だけの超過を拾って
+ * **「赤字 −0%」が赤で出る**)。
  */
 function driverShareBarOf(key: string, label: string, t: MarginTotals): DriverShareBar | null {
   if (t.salesYen <= 0) return null
@@ -98,7 +104,7 @@ function driverShareBarOf(key: string, label: string, t: MarginTotals): DriverSh
     { key: 'runCost', yen: t.directCostYen + t.allocatedCostYen },
   ]
   const costSum = costs.reduce((sum, c) => sum + c.yen, 0)
-  const overflow = costSum > t.salesYen
+  const overflow = costExceedsSalesAtYen(costSum, t.salesYen)
   const scale = overflow ? t.salesYen / costSum : 1
   return {
     key,

@@ -275,6 +275,19 @@ branches = true
 # (以前は「条件 33 個 × 両側 + 論理演算子の右側 27 個 = 93 分岐」と書いてあった。
 # 数え方が違うだけで対象は同じ — AST はネストした三項や arrow の中の `if` も
 # 取りこぼさないので、こちらの方が多く出る。)
+#
+# **積み上げ棒の「赤字」判定は、画面に出る円の精度で決める** (Refs #840)。`shareBarOf` の
+# `costSum` は**費用 4 区分をその場で足し直したもの**、比べる相手の売上から出る粗利は
+# **運行 1 本ずつ足し込んだもの** — **同じ量を別の足し順で出した 2 つ**なので double では
+# 一致しない。生の `costSum > salesYen` だと**粗利ちょうど 0 の行**で尾だけの超過を拾い、
+# `overflowPct` が `1.1e-14` になって画面が**「赤字 −0%」を赤で出す** (超えた額は ¥0)。
+# `costExceedsSalesAtYen(costSum, salesYen)` (= `Math.round` どうしの `>`。画面の `yen()` と
+# 同じ丸め) に預けた。**`margin-driver-share.ts` も同じこの 1 つを使う** — 片方だけ直すと
+# 取引先別と乗務員別で挙動が割れる。**金額には当てない** (丸めるのは比較の 2 値だけ)。
+# `Math.round` は単調なので**判定は緩む方向にしか動かない** → `scale` / `overflowPct` の式は
+# そのまま (`overflow` が false なら `scale = 1` / `overflowPct = 0`)。
+# branches: `costExceedsSalesAtYen` は**分岐を 1 つも増やさない** (AST の数え上げでも 142 で
+# 変わらず)。`overflow` の三項 2 本は**両側とも実測**。v8 も 100%/100%/100%/100%。
 [[files]]
 path = "app/utils/margin.ts"
 branches = true
@@ -408,6 +421,9 @@ branches = true
 # **v8 は `if` の暗黙 else を UNCOVERED に出さない** ことを実測 (20 分岐中 5 件しか
 # 落ちず、`if` の行だけ Uncovered に出なかった) してから、BR() で包んだ instrumented
 # コピーで **5 条件すべてが true/false 両方を通る**ことを数えて登録した。
+# **赤字の判定は `margin.ts` の `costExceedsSalesAtYen` に預けてある** (Refs #840) —
+# **取引先版と同じ 1 つの関数**を通すので、片方だけ直して挙動が割れることが無い。
+# 分岐は 5 のまま (判定に分岐は無い)。`overflow` の三項 2 本は両側とも実測。
 [[files]]
 path = "app/utils/margin-driver-share.ts"
 branches = true

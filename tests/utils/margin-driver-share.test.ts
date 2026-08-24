@@ -177,6 +177,66 @@ describe('driverShareBars — 乗務員ごとの 100% 積み上げ棒 (Refs #760
     expect(a.overflowPct).toBe(50)
   })
 
+  // ★ 赤字の判定は「画面に出る円の精度」でやる (Refs #840)。
+  //
+  // 棒の `costSum` は**費用 4 区分をその場で足し直したもの**、比べる相手の売上から出る粗利は
+  // **運行 1 本ずつ足し込んだもの** (`summarizeMargins` の `totals.marginYen`) — 同じ量を
+  // 別の足し順で出した 2 つなので double では一致しない。下の 2 本は**1 本ずつ見ると
+  // 粗利ちょうど 0** (十進で費用が売上をちょうど使い切る) なのに、**列ごとに足し直すと
+  // 1 ulp だけ売上を超える**。取引先別 (`margin.ts` の `shareBarOf`) と同じ穴なので、
+  // **同じ 1 つの `costExceedsSalesAtYen`** に判定を預けてある。
+  const tailOps = () => [
+    op({ driverName: '甲', unkoNo: 'T1', salesYen: 139000, allowanceYen: 16000, fuelYen: 16722.9 + 8934.6, fuelHaulYen: 16722.9, fuelDeadheadYen: 8934.6, directCostYen: 7304.4, allocatedCostYen: 90038.1, marginYen: 0 }),
+    op({ driverName: '甲', unkoNo: 'T2', salesYen: 122000, allowanceYen: 19000, fuelYen: 15002.7 + 9223, fuelHaulYen: 15002.7, fuelDeadheadYen: 9223, directCostYen: 7217.3, allocatedCostYen: 71557, marginYen: 0 }),
+  ]
+
+  it('★ 粗利ちょうど 0 の乗務員の「尾だけの超過」を赤字にしない (Refs #840)', () => {
+    const ops = tailOps()
+    // 運行 1 本ずつは 売上 − 手当 − 燃料 − 直課 − 按分 = ちょうど 0 (画面と同じ足し順)
+    for (const o of ops) expect(o.salesYen - o.allowanceYen - o.fuelYen! - o.directCostYen - o.allocatedCostYen).toBe(0)
+    const t = summarizeMargins(ops)
+    expect(t.marginYen).toBe(0)
+    // ところが棒の側で列ごとに足し直すと 1 ulp 超える (= 直す前の判定は true)
+    const costSum = t.allowanceYen + t.fuelHaulYen + t.fuelDeadheadYen + (t.directCostYen + t.allocatedCostYen)
+    expect(costSum).toBe(261000.00000000003)
+    expect(costSum > t.salesYen).toBe(true)
+    expect(Math.round(costSum)).toBe(Math.round(t.salesYen))     // 画面はどちらも ¥261,000
+
+    const res = driverShareBars(groupMarginsByDriver(ops))
+    const a = res.bars[1]!
+    expect(a.overflowPct).toBe(0)          // 画面の v-if="bar.overflowPct > 0" が false
+    expect(res.bars[0]!.overflowPct).toBe(0)
+  })
+
+  it('★ 尾だけの超過を落としても棒の幅は動かない (scale が ≒1 から厳密な 1 になるだけ、Refs #840)', () => {
+    const ops = tailOps()
+    const t = summarizeMargins(ops)
+    const costs = [t.allowanceYen, t.fuelHaulYen, t.fuelDeadheadYen, t.directCostYen + t.allocatedCostYen]
+    const costSum = costs.reduce((sum, c) => sum + c, 0)
+    const a = driverShareBars(groupMarginsByDriver(ops)).bars[1]!
+    // 額は 1 円も動いていない (丸めたのは比較の 2 値だけ)
+    expect(a.segments.map(s => s.yen)).toEqual([...costs, 0])
+    const after = costs.map(c => (c * 100) / t.salesYen)
+    expect(a.segments.slice(0, 4).map(s => s.pct)).toEqual(after)
+    expect(a.segments.reduce((sum, s) => sum + s.pct, 0)).toBe(100)
+    // 直す前 (scale = 売上 ÷ Σ費用 ≒ 1) との差は 15 桁目だけ。画面の書式では区別が付かない
+    const before = costs.map(c => (c * 100 * (t.salesYen / costSum)) / t.salesYen)
+    expect(before).not.toEqual(after)
+    const pct1 = (v: number) => `${Math.round(v * 10) / 10}%`
+    expect(before.map(pct1)).toEqual(after.map(pct1))
+    for (const [i, v] of after.entries()) expect(Math.abs(v - before[i]!) * 10).toBeLessThan(1e-12)   // 1000px の棒での px 差
+  })
+
+  it('★ 円の精度で超えていれば これまでどおり赤字。境界は 0.5 円 (Refs #840)', () => {
+    const bar = (runCostExtra: number) => driverShareBars(groupMarginsByDriver([
+      op({ driverName: '甲', salesYen: 100000, allowanceYen: 30000, fuelYen: 50000, fuelHaulYen: 30000, fuelDeadheadYen: 20000, directCostYen: 20000, allocatedCostYen: runCostExtra, marginYen: -runCostExtra }),
+    ])).bars[1]!
+    // 0.6 円超過 → 画面の円は ¥100,001 と ¥100,000 で**実際に違う** → 赤字のまま
+    expect(bar(0.6).overflowPct).toBeGreaterThan(0)
+    // 0.4 円超過 → 画面の円はどちらも ¥100,000 → 赤字にしない (**ここが変わったところ**)
+    expect(bar(0.4).overflowPct).toBe(0)
+  })
+
   it('粗利が負でも 4 区分の和が売上を超えていなければ縮めず、粗利の pct だけ 0', () => {
     // 出せる運行 (売上 30000・手当 50000 → 粗利 −20000) + 出せない運行 (売上 70000)
     const res = driverShareBars(groupMarginsByDriver([
