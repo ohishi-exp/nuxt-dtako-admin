@@ -1771,12 +1771,53 @@ export interface CustomerShareBars {
 }
 
 /**
+ * ★ **費用が売上を超えたか (= 赤字か) を「画面に出る円の精度」で決める** (Refs #840)。
+ *
+ * `costSum` は**費用 4 区分をその場で足し直したもの**、比べる相手の `salesYen` から出る粗利は
+ * **運行 1 本ずつ `売上 − 手当 − 燃料 − 直課 − 按分` を足し込んだもの** —
+ * **同じ量を別の足し順で出した 2 つ**なので、double では一致しない (`margin-driver-share.ts`
+ * の doc が `marginSalesYen − marginAllowanceYen − fuelYen − directCostYen − allocatedCostYen
+ * === marginYen` と恒等式を明記しているとおり)。生のまま `costSum > salesYen` で比べると、
+ * **粗利がちょうど 0 の行**で尾だけの超過を拾って画面が**「赤字 −0%」を赤で出す** (実測:
+ * 売上 ¥261,000 に対し 4 区分の和 `261000.00000000003`、`overflowPct` は `1.1e-14` で
+ * 画面の `pct1()` が `0%` に丸める)。**「超えた」と赤で言っているのに超えた額は ¥0**。
+ *
+ * だから**両方を円に丸めてから比べる** — #838 の `marginDiffDisplayDelta` と同じ
+ * 「**単位ごとに画面に出る精度へ丸めてから比べる**」考え方で、丸め方は画面の `yen()` の
+ * `Math.round` をそのまま写す。**赤字のバッジが出るのは、画面に出ている 2 つの円が
+ * 実際に違うときだけ**になる。
+ *
+ * **許容誤差 (`> salesYen + 1e-6` のような定数) にはしない。**「いくつ未満なら同じか」を
+ * 画面と切れた定数で決めることになるため。
+ *
+ * ★ **判定は厳しくなる方向にしか動かない。** `Math.round` は単調非減少なので
+ * `a ≤ b ⟹ round(a) ≤ round(b)`、その対偶が `round(a) > round(b) ⟹ a > b` —
+ * つまり**丸めた判定は生の判定の部分集合**で、**赤字を新たに出すことは無い**
+ * (実測: 生 true → 丸め false は起きるが、その逆は 0 件)。だから `overflow` が true の回は
+ * 必ず `costSum > t.salesYen` で、`scale = salesYen ÷ costSum` は (0,1)、`overflowPct` は正 —
+ * **`scale` / `overflowPct` の式はそのままでよい。**
+ *
+ * 逆に **true → false に転ぶ行はある** (生では超過があった行)。そこでは `scale` が
+ * `salesYen ÷ costSum` から厳密な `1` に変わるが、転ぶのは**超過が ¥1 未満のときだけ**なので
+ * `1 − scale = 超過 ÷ costSum < 1 ÷ costSum`。**棒の幅の差は全区分の合計でも
+ * `100 ÷ costSum` %ポイント未満** (売上 ¥100,000 の行なら 0.001%pt 未満 = 幅 1000px の棒で
+ * 0.01px 未満。実測)。
+ *
+ * **金額そのものには当てない。** 丸めるのは**比較の 2 値だけ**で、`segments[].yen` にも
+ * `overflowPct` の分子にも、粗利にも 1 円も効かない。
+ */
+export function costExceedsSalesAtYen(costSum: number, salesYen: number): boolean {
+  return Math.round(costSum) > Math.round(salesYen)
+}
+
+/**
  * 1 行を棒にする。売上 0 以下は棒にしない (null)。
  *
  * - 粗利 segment の `yen` = `grossMarginYen ?? (売上 − 4 区分の和)` (全便の粗利が出せない行は
  *   残りを粗利と見る — その行は `unsplitLegs` が付くので画面で `*` が出る)
- * - **4 区分の和が売上を超えた** (`costSum > salesYen`) 行は、粗利の pct を 0 にし、4 区分の pct を
- *   `salesYen ÷ costSum` で縮めて合計 100 にする (棒をはみ出させない)。超過分は `overflowPct`
+ * - **4 区分の和が売上を超えた** 行 (`costExceedsSalesAtYen` — **円に丸めてから比べる**。Refs #840)
+ *   は、粗利の pct を 0 にし、4 区分の pct を `salesYen ÷ costSum` で縮めて合計 100 にする
+ *   (棒をはみ出させない)。超過分は `overflowPct`
  * - 粗利を出せない便 (`unsplitLegs > 0`) が混ざる行は、その便の売上ぶんだけ棒が 100% に届かない
  *   (4 区分にも粗利にも入っていない売上なので、どの色にも塗らない)。粗利が負でも和が売上を
  *   超えていなければ縮めない — 粗利の pct だけ 0 に止める
@@ -1791,7 +1832,7 @@ function shareBarOf(key: string, label: string, t: CustomerRouteTotals): ShareBa
   ]
   const costSum = costs.reduce((sum, c) => sum + c.yen, 0)
   const marginYen = t.grossMarginYen ?? (t.salesYen - costSum)
-  const overflow = costSum > t.salesYen
+  const overflow = costExceedsSalesAtYen(costSum, t.salesYen)
   const scale = overflow ? t.salesYen / costSum : 1
   return {
     key,

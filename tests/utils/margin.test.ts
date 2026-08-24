@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import {
   mapCostApiRow,
   fetchVehicleCosts,
@@ -32,6 +34,7 @@ import {
   marginRateTone,
   MARGIN_RATE_HIGH,
   MARGIN_RATE_LOW,
+  costExceedsSalesAtYen,
   customerShareBars,
   SHARE_SEGMENT_LABELS,
   type CustomerRouteSummary,
@@ -2560,6 +2563,76 @@ describe('customerShareBars — 売上の内訳の 100% 積み上げ棒 (Refs #7
     expect(res.bars[0]!.overflowPct).toBe(25)
   })
 
+  // ★ 赤字の判定は「画面に出る円の精度」でやる (Refs #840)。
+  //
+  // `costSum` は**費用 4 区分をその場で足し直したもの**、比べる相手の売上から出る粗利は
+  // **運行 1 本ずつ足し込んだもの** — 同じ量を別の足し順で出した 2 つなので double では
+  // 一致しない。下の 2 本は 1 本ずつ見ると**十進で費用が売上をちょうど使い切る**
+  // (粗利 ちょうど 0) のに、**列ごとに足し直すと 1 ulp だけ売上を超える**。
+  const TAIL_SALES_YEN = 139000 + 122000
+  const tailTotals = {
+    legs: 2,
+    salesYen: TAIL_SALES_YEN,
+    allowanceYen: 16000 + 19000,
+    fuelHaulYen: 16722.9 + 15002.7,
+    fuelDeadheadYen: 8934.6 + 9223,
+    // 表の 直課経費 + 固定費按分 (`summarizeMargins` と同じ足し順)
+    runCostShareYen: (7304.4 + 7217.3) + (90038.1 + 71557),
+    grossMarginYen: 0,
+  }
+  const tailCostSum = tailTotals.allowanceYen + tailTotals.fuelHaulYen + tailTotals.fuelDeadheadYen + tailTotals.runCostShareYen
+
+  it('★ 粗利ちょうど 0 の行の「尾だけの超過」を赤字にしない — 判定は画面に出る円の精度 (Refs #840)', () => {
+    // 直す前の判定 (生の `costSum > salesYen`) は true になる。だが画面に出る円は同じ ¥261,000 で、
+    // 超えた額は ¥0 — それを「赤字 −0%」と赤で出していたのがこの欠陥
+    expect(tailCostSum).toBe(261000.00000000003)
+    expect(tailCostSum > tailTotals.salesYen).toBe(true)
+    expect(Math.round(tailCostSum)).toBe(Math.round(tailTotals.salesYen))
+    const oldOverflowPct = ((tailCostSum - tailTotals.salesYen) * 100) / tailTotals.salesYen
+    expect(oldOverflowPct).toBe(1.115089289530027e-14)
+    expect(`${Math.round(oldOverflowPct * 10) / 10}%`).toBe('0%')   // 画面の pct1()
+
+    const res = customerShareBars(summary([cust('A', '甲', tailTotals, [totals(tailTotals)])]))
+    const a = res.bars[1]!
+    // 画面の `v-if="bar.overflowPct > 0"` が false = 「赤字 −0%」が出ない。合計・経路の棒も同じ
+    expect(a.overflowPct).toBe(0)
+    expect(res.bars[0]!.overflowPct).toBe(0)
+    expect(a.routes![0]!.overflowPct).toBe(0)
+  })
+
+  it('★ 尾だけの超過を落としても棒の幅は動かない (scale が ≒1 から厳密な 1 になるだけ、Refs #840)', () => {
+    const a = customerShareBars(summary([cust('A', '甲', tailTotals, [totals(tailTotals)])])).bars[1]!
+    const costs = [tailTotals.allowanceYen, tailTotals.fuelHaulYen, tailTotals.fuelDeadheadYen, tailTotals.runCostShareYen]
+    // 額は 1 円も動いていない (丸めたのは比較の 2 値だけ)
+    expect(a.segments.map(s => s.yen)).toEqual([...costs, 0])
+    // 直したあと: scale = 1 なので pct は 円 × 100 ÷ 売上 そのもの。5 区分の和はちょうど 100
+    const after = costs.map(c => (c * 100) / tailTotals.salesYen)
+    expect(a.segments.slice(0, 4).map(s => s.pct)).toEqual(after)
+    expect(a.segments.reduce((sum, s) => sum + s.pct, 0)).toBe(100)
+    // 直す前: scale = 売上 ÷ Σ費用 (≒1)。**違うのは 15 桁目だけ**
+    const before = costs.map(c => (c * 100 * (tailTotals.salesYen / tailCostSum)) / tailTotals.salesYen)
+    expect(before).not.toEqual(after)
+    for (const [i, v] of after.entries()) expect(Math.abs(v - before[i]!)).toBeLessThan(1e-13)
+    // 画面に出る形 (CSS の width:% / title の pct1 / 棒の中の整数%) はどちらも同じ
+    const pct1 = (v: number) => `${Math.round(v * 10) / 10}%`
+    expect(before.map(pct1)).toEqual(after.map(pct1))
+    expect(before.map(v => Math.round(v))).toEqual(after.map(v => Math.round(v)))
+    // 幅 1000px の棒に置いても差は 1e-12 px 未満 (= 描き分けようがない)
+    for (const [i, v] of after.entries()) expect(Math.abs(v - before[i]!) * 10).toBeLessThan(1e-12)
+  })
+
+  it('★ 円の精度で超えていれば これまでどおり赤字。境界は 0.5 円 (Refs #840)', () => {
+    const base = { salesYen: 100000, allowanceYen: 30000, fuelHaulYen: 30000, fuelDeadheadYen: 20000 }
+    // 0.6 円超過 → 画面の円は ¥100,001 と ¥100,000 で**実際に違う** → 赤字のまま
+    const over = customerShareBars(summary([cust('A', '甲', { ...base, runCostShareYen: 20000.6, grossMarginYen: -0.6 })])).bars[1]!
+    expect(over.overflowPct).toBeGreaterThan(0)
+    expect(over.segments.reduce((sum, s) => sum + s.pct, 0)).toBeCloseTo(100, 9)
+    // 0.4 円超過 → 画面の円はどちらも ¥100,000 → 赤字にしない (**ここが変わったところ**)
+    const under = customerShareBars(summary([cust('A', '甲', { ...base, runCostShareYen: 20000.4, grossMarginYen: -0.4 })])).bars[1]!
+    expect(under.overflowPct).toBe(0)
+    expect(under.segments.map(s => s.pct)).toEqual([30, 30, 20, 20.000400000000003, 0])
+  })
+
   it('取引先の棒には routes (経路の棒、表と同じ順) が付き、key は code|積地|卸地、label は 積地 → 卸地', () => {
     const res = customerShareBars(summary([cust('A', '甲', { salesYen: 100000, allowanceYen: 30000 }, [
       totals({ salesYen: 60000, allowanceYen: 12000, fuelHaulYen: 6000, fuelDeadheadYen: 6000, runCostShareYen: 6000, grossMarginYen: 30000, legs: 2 }),
@@ -2604,6 +2677,183 @@ describe('customerShareBars — 売上の内訳の 100% 積み上げ棒 (Refs #7
     // 合計 = 運行の売上 50000、手当 8000 → 16%
     expect(bars.bars[0]!.salesYen).toBe(50000)
     expect(pcts(bars.bars[0]!).allowance).toBeCloseTo(16, 9)
+  })
+})
+
+/**
+ * ★ 赤字を出すかどうかを「画面に出る円の精度」で決める (Refs #840)。
+ *
+ * #838 の `marginDiffDisplayDelta` と同じ考え方 (**単位ごとに画面に出る精度へ丸めてから比べる**)
+ * を、積み上げ棒の赤字判定に当てたもの。`margin.ts` の `shareBarOf` と
+ * `margin-driver-share.ts` の `driverShareBarOf` が**同じこの関数**を使う。
+ */
+describe('costExceedsSalesAtYen — 赤字の判定を円の精度でやる (Refs #840)', () => {
+  it('尾だけの超過は「超えていない」— 画面に出る円が同じなら赤字にしない', () => {
+    const salesYen = 261000
+    const costSum = 261000.00000000003
+    expect(costSum > salesYen).toBe(true)              // 直す前の判定
+    expect(costExceedsSalesAtYen(costSum, salesYen)).toBe(false)
+  })
+
+  it('画面に出る円が違えば「超えている」— 境界は 0.5 円 (画面の yen() と同じ Math.round)', () => {
+    expect(costExceedsSalesAtYen(100000.6, 100000)).toBe(true)    // ¥100,001 > ¥100,000
+    expect(costExceedsSalesAtYen(100000.5, 100000)).toBe(true)    // Math.round(100000.5) = 100001
+    expect(costExceedsSalesAtYen(100000.4, 100000)).toBe(false)   // どちらも ¥100,000
+    expect(costExceedsSalesAtYen(100001, 100000)).toBe(true)
+    // 売上の側も丸める (売上に尾が乗る回もあるため)
+    expect(costExceedsSalesAtYen(100001, 100000.6)).toBe(false)   // どちらも ¥100,001
+  })
+
+  it('true になるとき、画面に出る超過額は必ず ¥1 以上 (整数どうしの > なので)', () => {
+    for (const [c, s] of [[100000.5, 100000], [100001, 100000], [125000, 100000]] as const) {
+      expect(costExceedsSalesAtYen(c, s)).toBe(true)
+      expect(Math.round(c) - Math.round(s)).toBeGreaterThanOrEqual(1)
+    }
+  })
+
+  it('★ Math.round は単調なので、判定は「厳しくなる」方向にしか動かない (赤字を新たに出さない)', () => {
+    // `a ≤ b ⟹ round(a) ≤ round(b)` の対偶が `round(a) > round(b) ⟹ a > b`。
+    // つまり**丸めた判定は生の判定の部分集合**。0.05 円刻みで ±2 円ぶん総当たりして、
+    // **生 false → 丸め true (赤字が新たに出る) が 0 件**であることを固定する。
+    let stricter = 0      // 生 true → 丸め false (赤字をやめる側。**これは起きる**)
+    let looser = 0        // 生 false → 丸め true (**起きてはいけない**)
+    for (let i = -40; i <= 40; i++) {
+      const salesYen = 261000
+      const costSum = salesYen + i / 20
+      const raw = costSum > salesYen
+      const rounded = costExceedsSalesAtYen(costSum, salesYen)
+      if (rounded) expect(raw).toBe(true)     // 丸め true ⇒ 生 true (部分集合)
+      if (raw && !rounded) stricter += 1
+      if (!raw && rounded) looser += 1
+    }
+    expect(looser).toBe(0)
+    expect(stricter).toBe(9)   // +0.05 〜 +0.45 の 9 通り (+0.5 は Math.round が繰り上がるので赤字のまま)
+  })
+
+  it('★ true → false に転ぶのは超過が ¥1 未満のときだけ。棒の幅の差は 100 ÷ costSum %pt 未満', () => {
+    // 生では ¥0.22 の超過があるのに、画面の円はどちらも ¥908,879 で同じ → 赤字をやめる回
+    const salesYen = 908879.1377949576
+    const costSum = 908879.3580798063
+    expect(costSum > salesYen).toBe(true)
+    expect(costExceedsSalesAtYen(costSum, salesYen)).toBe(false)
+    expect(Math.round(costSum)).toBe(Math.round(salesYen))
+    const scaleBefore = salesYen / costSum
+    expect(scaleBefore).toBe(0.9999997576302655)          // 直したあとは 厳密な 1
+    // 区分の比を本番相当 (手当24% 燃料16% 回送9% 配分51%) に置いた実測
+    const costs = [0.24, 0.16, 0.09, 0.51].map(r => costSum * r)
+    const after = costs.map(c => (c * 100) / salesYen)
+    const before = costs.map(c => (c * 100 * scaleBefore) / salesYen)
+    const pct1 = (v: number) => `${Math.round(v * 10) / 10}%`
+    expect(before.map(pct1)).toEqual(after.map(pct1))                          // 画面の書式は同じ
+    expect(before.map(v => Math.round(v))).toEqual(after.map(v => Math.round(v)))
+    // 幅 1000px の棒に置いた差 (最大の区分でも 0.0002px 未満)
+    for (const [i, a] of after.entries()) expect(Math.abs(a - before[i]!) * 10).toBeLessThan(2e-4)
+    // 全区分の合計でも 100 ÷ costSum %pt 未満 — 転ぶのは超過 ¥1 未満のときだけなので上限が付く
+    const totalDiff = after.reduce((sum, v, i) => sum + (v - before[i]!), 0)
+    expect(totalDiff).toBeLessThan(100 / costSum)
+    expect(totalDiff).toBeCloseTo(2.4237e-5, 8)
+  })
+
+  // ★ 転ぶ回の上限は 売上 で決まる (超過 < ¥1 なので `1 − scale < 1 ÷ costSum`)。
+  // 幅 1000px の棒に置いた「全区分の合計の差」を売上の桁ごとに実測して残す。
+  it('★ 棒の幅の差の上限は売上で決まる (売上が小さい行ほど大きいが、¥10,000 で 0.1px 未満)', () => {
+    const worst = (salesYen: number) => {
+      const costSum = salesYen + 0.49            // 転べる最大に近い超過 (Math.round が繰り上がらない)
+      expect(costExceedsSalesAtYen(costSum, salesYen)).toBe(false)
+      expect(costSum > salesYen).toBe(true)
+      return (100 - (100 * salesYen) / costSum) * 10   // 幅 1000px 換算の px 差 (全区分の合計)
+    }
+    expect(worst(10260265)).toBeLessThan(0.0005)   // 2026-07 の本番の合計行
+    expect(worst(100000)).toBeLessThan(0.005)
+    expect(worst(10000)).toBeLessThan(0.05)
+    expect(worst(1000)).toBeLessThan(0.5)          // 売上 ¥1,000 の行でも 0.5px 未満
+  })
+
+  it('2026-07 の本番規模 (売上 ¥10,260,265 / 粗利 ¥4,467,597) はどちらの比べ方でも赤字にならない', () => {
+    const salesYen = 10260265
+    // 本番 v0.0.526 の `totals.marginYen` は尾つきの 4467597.000000001
+    const costSum = salesYen - 4467597.000000001
+    expect(costSum > salesYen).toBe(false)
+    expect(costExceedsSalesAtYen(costSum, salesYen)).toBe(false)
+  })
+})
+
+/**
+ * ★ **同じ欠陥の 2 つ目の出口 — 粗利ちょうど 0 の行が `¥-0` と出ていた** (Refs #840)。
+ *
+ * `marginYen` は `grossMarginYen ?? (salesYen − costSum)` で、どちらの辺も**足し順の違う和**
+ * なので、粗利ちょうど 0 の行では `-4.66e-10` のような**尾つきの負**になる (**それ自体は正常**)。
+ * 画面の `yen()` (`margin.vue`) は `Math.round(v).toLocaleString()` で、
+ * **`Math.round` は `-0.5 < v ≤ 0` で `-0` を返し、`(-0).toLocaleString()` は `"-0"`** なので
+ * **`¥-0`** と出ていた (積み上げ棒の title `${yen(s.yen)}` と、表の粗利)。
+ *
+ * この癖は **`toLocaleString` にしかない** — テンプレートリテラルの `${-0}` は `"0"` なので、
+ * 隣の `km()` / `pct()` / `pct1()` は影響を受けない (実測)。だから直したのは `yen()` の 1 箇所だけ。
+ */
+describe('¥-0 — 粗利ちょうど 0 の行の 2 つ目の出口 (Refs #840)', () => {
+  const tail = -4.656612873077393e-10
+
+  it('棒の粗利 segment に尾つきの負が載る (`??` の右辺 = grossMarginYen が null の行)', () => {
+    const t = {
+      legs: 2, unsplitLegs: 2, salesYen: 261000, allowanceYen: 35000, haulKm: 100, deadheadKm: 50,
+      fuelHaulYen: 16722.9 + 15002.7, fuelDeadheadYen: 8934.6 + 9223,
+      runCostShareYen: (7304.4 + 7217.3) + (90038.1 + 71557), grossMarginYen: null,
+      from: '釧路', to: '川西', legRefs: [],
+    }
+    const res = customerShareBars({
+      customers: [{ ...t, code: 'A', name: '甲', routes: [t] }],
+      noLegOperations: { operations: 0, salesYen: 0, allowanceYen: 0, fuelYen: 0, directCostYen: 0, allocatedCostYen: 0, marginYen: 0 },
+      unsplitLegs: { legs: 0, salesYen: 0 }, totalMarginYen: 0, diffYen: 0,
+    })
+    const m = res.bars[1]!.segments.find(s => s.key === 'margin')!
+    expect(m.yen).toBe(-2.9103830456733704e-11)   // 売上 − Σ費用 の尾
+    expect(Math.round(m.yen)).toBe(-0)            // ← ここが `¥-0` の素
+    expect(Object.is(Math.round(m.yen), -0)).toBe(true)
+  })
+
+  it('★ 画面の `yen()` (margin.vue の実物) は尾つきの負を `¥0` と出す (`¥-0` にしない)', () => {
+    // **実ファイルから機械抽出して評価する** — 手写しにすると直っていない実物を通してしまう
+    const src = readFileSync(resolve(__dirname, '../../app/pages/profit/margin.vue'), 'utf8')
+    const line = src.match(/^const yen = .*$/m)
+    expect(line).not.toBeNull()
+    const yen = new Function(`${line![0].replace(': number | null', '')}; return yen`)() as (v: number | null) => string
+
+    expect(yen(tail)).toBe('¥0')
+    expect(yen(-2.9103830456733704e-11)).toBe('¥0')
+    expect(yen(-0)).toBe('¥0')
+    expect(yen(0)).toBe('¥0')
+    // ★ 本当に −1 円の行は消えない (潰しているのは `Math.round` が `-0` を返す範囲だけ)
+    expect(yen(-0.6)).toBe('¥-1')
+    expect(yen(-1)).toBe('¥-1')
+    expect(yen(-1234567)).toBe('¥-1,234,567')
+    // 既存の振る舞いは素通し
+    expect(yen(null)).toBe('-')
+    expect(yen(1234567)).toBe('¥1,234,567')
+    expect(yen(0.4)).toBe('¥0')
+  })
+
+  it('★ 影響範囲は `-0.5 < v ≤ 0` の回だけ (それ以外は 1 文字も変わらない)', () => {
+    const src = readFileSync(resolve(__dirname, '../../app/pages/profit/margin.vue'), 'utf8')
+    const yen = new Function(`${src.match(/^const yen = .*$/m)![0].replace(': number | null', '')}; return yen`)() as (v: number | null) => string
+    const before = (v: number | null) => (v === null ? '-' : `¥${Math.round(v).toLocaleString()}`)   // 直す前の実装
+    const changed: number[] = []
+    for (let i = -3000; i <= 3000; i++) {
+      const v = i / 1000          // −3.000 〜 +3.000 を 0.001 刻み
+      if (yen(v) !== before(v)) changed.push(v)
+    }
+    // 変わったのはすべて `Math.round` が `-0` を返す回で、変化は `¥-0` → `¥0` だけ
+    for (const v of changed) {
+      expect(Object.is(Math.round(v), -0)).toBe(true)
+      expect(before(v)).toBe('¥-0')
+      expect(yen(v)).toBe('¥0')
+    }
+    expect(changed.length).toBe(500)                       // −0.500 〜 −0.001 (v = 0 / −0 は元から `¥0`)
+    expect(Math.min(...changed)).toBeCloseTo(-0.5, 10)
+    expect(Math.max(...changed)).toBeCloseTo(-0.001, 10)
+    // 境界: −0.5 は `Math.round` が `-0`、−0.501 は `-1`
+    expect(yen(-0.5)).toBe('¥0')
+    expect(yen(-0.501)).toBe('¥-1')
+    expect(before(-0.5)).toBe('¥-0')
   })
 })
 

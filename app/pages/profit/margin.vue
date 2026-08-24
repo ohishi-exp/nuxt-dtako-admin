@@ -348,7 +348,19 @@ const pendingDriver = ref('')
 /** 粗利を出せない運行だけに絞る (燃費が出せない / 経費が配れない)。 */
 const onlyIssues = ref(false)
 
-const yen = (v: number | null) => (v === null ? '-' : `¥${Math.round(v).toLocaleString()}`)
+/**
+ * ★ **`+ 0` は `-0` を `+0` に寄せるためのもの (Refs #840)。消さないこと。**
+ *
+ * `Math.round` は `-0.5 < v ≤ 0` で **`-0`** を返し、**`(-0).toLocaleString()` は `"-0"`**
+ * (`(0).toLocaleString()` は `"0"`。テンプレートリテラルの `${-0}` は `"0"` なので、この癖は
+ * `toLocaleString` にしか無い — 隣の `km()` / `pct()` / `pct1()` は影響を受けない)。
+ * 粗利がちょうど 0 の行の `marginYen` は按分の足し順のぶん `-4.66e-10` のような
+ * **尾つきの負**になる (それ自体は正常) ので、そのまま出すと積み上げ棒の title や
+ * 表の粗利に **`¥-0`** と出ていた。`-0 + 0` は IEEE 754 で `+0`。
+ * **変わるのは `-0.5 < v ≤ 0` の回だけ** (`¥-0` → `¥0`)。`-0.6` は `Math.round` が `-1` を
+ * 返すので **`¥-1` のまま**で、本当に −1 円の行は消えない。
+ */
+const yen = (v: number | null) => (v === null ? '-' : `¥${(Math.round(v) + 0).toLocaleString()}`)
 const km = (v: number) => `${Math.round(v * 10) / 10}km`
 const pct = (v: number | null) => (v === null ? '-' : `${Math.round(v * 1000) / 10}%`)
 const num = (v: number | null, digits = 1) => (v === null ? '-' : String(Math.round(v * 10 ** digits) / 10 ** digits))
