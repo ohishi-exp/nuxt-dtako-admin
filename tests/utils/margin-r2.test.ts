@@ -9,6 +9,7 @@ import {
   marginSummaryHistoryLine,
   marginSummarySaveNote,
   marginVersionLabel,
+  MARGIN_VERSION_UNNAMED,
   resolveCodeVersion,
   ciBuildCodeVersion,
   type MarginSummarySnapshot,
@@ -267,11 +268,27 @@ describe('marginSummarySaveNote — どちらが正かを画面で明示する',
     expect(note).toContain('R2 の版で追えます')
   })
 
-  it('版キーを持たない古い保存でも文が壊れない (名前だけ落ちる)', () => {
-    expect(marginSummarySaveNote({ ...result, versionKey: '' }, null))
-      .toContain('新しい版 として保存しました')
-    expect(marginSummarySaveNote({ ...result, changed: false, versionKey: '' }, null))
-      .toContain('前回の版 から変わっていない')
+  it('★ 版キーを持たない古い保存では、空白ではなく言葉で「名前が無い」と出す (Refs #831)', () => {
+    const note = marginSummarySaveNote({ ...result, changed: false, versionKey: '' }, null)
+    expect(note).toContain(`前回の版 ${MARGIN_VERSION_UNNAMED} から変わっていない`)
+    // **穴が空かないこと自体を固定する。** 本番 v0.0.522 は「前回の版 から」と
+    // 空いていて、レンダリングの不具合にしか読めなかった。
+    expect(note).not.toContain('前回の版 から')
+    expect(note).toContain('版は増やしていません')
+    expect(note).toContain('R2 の版で追えます')
+  })
+
+  it('★ 名前あり ⇄ 名前なし で文言が入れ替わる (どちらか一方を出しっぱなしにしない)', () => {
+    const named = marginSummarySaveNote({ ...result, changed: false }, null)
+    const unnamed = marginSummarySaveNote({ ...result, changed: false, versionKey: '' }, null)
+    expect(named).toContain('v-20260824T102030')
+    expect(named).not.toContain(MARGIN_VERSION_UNNAMED)
+    expect(unnamed).toContain(MARGIN_VERSION_UNNAMED)
+    expect(unnamed).not.toContain('v-20260824T102030')
+  })
+
+  it('文言は定数で固定する (画面の文と定数がずれない)', () => {
+    expect(MARGIN_VERSION_UNNAMED).toBe('(この機能より前に保存されたため名前がありません)')
   })
 
   it('★ 残せなかったら黙らない (端末のキャッシュだけだと言う)', () => {
