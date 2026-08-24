@@ -367,7 +367,22 @@ export type UsedSlipsLookup =
   /** 突合結果はあるが、その運行が入っていない (別の月を集計している等)。**候補を出してはいけない。** */
   | { status: 'not-aggregated', ym: string }
   /** 使用済みの `rowId` が全部揃った。**このときだけ候補を出してよい。** */
-  | { status: 'ready', ym: string, usedRowIds: Set<string> }
+  | {
+    status: 'ready'
+    ym: string
+    /** **運行をまたいだ和集合。** 候補から外す相手 (`forceMatchCandidates` の `usedRowIds`)。 */
+    usedRowIds: Set<string>
+    /**
+     * **この運行の便ごと**に①が当てた明細 (`seq` → `rowId`、Refs #854)。
+     *
+     * 和集合だけでは**この便に①が当てた明細**と**他の便のもの**が区別できず、
+     * 収支パネルが①の結果を映せない (「結び 0 件・0 円」に見え、結ぶと置き換えで
+     * 消えたうえ候補にも出ないので戻せない)。**同じ厳格な読みから一緒に返す** —
+     * 和集合と per-leg を別の関数 (緩い `parseOperationLegSales`) から取ると、
+     * 食い違ったときにそこが二重計上の口になる。
+     */
+    slipIdsBySeq: Map<number, string[]>
+  }
 
 /**
  * **既にどこかの便に当たっている明細の `rowId`** を、保存済みの要約から集める
@@ -391,6 +406,13 @@ export type UsedSlipsLookup =
  * **その運行が入っているかどうかで分ける** — 月の判定を自前でやらない理由は
  * `lookupOperationLegSales` と同じ (粗利タブの月の切り方は運行の開始日で、
  * 運行詳細が持つ読取日とは 1 日ずれうる)。
+ *
+ * ## ★ 和集合と per-leg を**同じ読みから**返す (Refs #854)
+ *
+ * 収支パネルは 2 つ要る — 候補から外す相手 (**和集合**) と、その便に①が当てたもの
+ * (**per-leg**)。**別々の関数から取ってはいけない** (`parseOperationLegSales` は
+ * 読めた便だけ返す緩い読み)。片方に入っていて片方に無い明細ができると、
+ * 「候補に出るのに①も当てている」= **二重計上の口**になる。
  */
 export function lookupUsedSlipIds(raw: string | null | undefined, unkoNo: string): UsedSlipsLookup {
   if (!raw) return { status: 'missing' }
@@ -406,6 +428,7 @@ export function lookupUsedSlipIds(raw: string | null | undefined, unkoNo: string
   if (typeof cache.ym !== 'string') return { status: 'missing' }
   if (typeof cache.legs !== 'object' || cache.legs === null) return { status: 'missing' }
   const usedRowIds = new Set<string>()
+  const slipIdsBySeq = new Map<number, string[]>()
   let hasOperation = false
   for (const [key, list] of Object.entries(cache.legs as Record<string, unknown>)) {
     if (!Array.isArray(list)) return { status: 'missing' }
@@ -413,11 +436,16 @@ export function lookupUsedSlipIds(raw: string | null | undefined, unkoNo: string
       const leg = storedLeg(value)
       if (leg === null) return { status: 'missing' }
       for (const id of leg.slipIds) usedRowIds.add(id)
+      if (key !== unkoNo) continue
+      // **同じ便が 2 つある保存は読まない。** どちらがその便のものか決められず、
+      // 選ぶと片方の売上を落とす (`storedLeg` が読めない便を落とさないのと同じ理由)。
+      if (slipIdsBySeq.has(leg.seq)) return { status: 'missing' }
+      slipIdsBySeq.set(leg.seq, leg.slipIds)
     }
     if (key === unkoNo && list.length > 0) hasOperation = true
   }
   if (!hasOperation) return { status: 'not-aggregated', ym: cache.ym }
-  return { status: 'ready', ym: cache.ym, usedRowIds }
+  return { status: 'ready', ym: cache.ym, usedRowIds, slipIdsBySeq }
 }
 
 /**

@@ -70,8 +70,11 @@ import {
   slipRows,
   sumAmount,
   slipBadge,
+  effectiveSlipIds,
+  seedForceMatch,
   FORCE_MATCH_PANEL_NOTE,
   FORCE_MATCH_OVERRIDE_NOTE,
+  FORCE_MATCH_ICHIBAN_NOTE,
   type ProfitPanelLeg,
 } from '~/utils/profit-panel-legs'
 
@@ -122,13 +125,34 @@ const scoreByRowId = ref<Map<string, ScoredVehicleDailySlip>>(new Map())
 /** 候補を出せない理由。出せるときは `null`。 */
 const usedNote = computed(() => usedSlipsNote(used.value))
 
+/**
+ * **その便に①が当てた明細** (Refs #854)。読めていなければ空。
+ *
+ * **和集合 (`usedRowIds`) と同じ 1 回の厳格な読みから取る** — 別の (緩い) 読みと
+ * 混ぜると、片方に居て片方に居ない明細が二重計上の口になる。
+ */
+function ichibanIdsOf(leg: ProfitPanelLeg): string[] {
+  const usedLookup = used.value
+  if (usedLookup.status !== 'ready') return []
+  return usedLookup.slipIdsBySeq.get(leg.seq) ?? []
+}
+
+/** その便に**いま当たっている**明細 (人の上書き > ①の結果)。 */
+function effectiveOf(leg: ProfitPanelLeg) {
+  return effectiveSlipIds(forceMatch.value[leg.key], ichibanIdsOf(leg))
+}
+
 function boundOf(leg: ProfitPanelLeg) {
-  return boundSlips(forceMatch.value[leg.key] ?? [], byRowId.value)
+  return boundSlips(effectiveOf(leg).ids, byRowId.value)
 }
 
 /**
  * その便に並べる明細。**結んである明細が先、候補が後ろ。**
  * 候補は①の使用済みが分かるときだけ (`usedRowIds` を空で渡さない)。
+ *
+ * **`ownRowIds` には「いま当たっている」ぶんを渡す** (Refs #854) — ①が当てた明細は
+ * `usedRowIds` にも居るので、渡さないと**この便自身の明細が候補から消える**。
+ * **フィルタの条件は緩めない** (緩めると他の便の明細まで出て二重計上になる)。
  */
 function rowsOf(leg: ProfitPanelLeg): VehicleDailySlip[] {
   const bound = boundOf(leg).slips
@@ -138,7 +162,7 @@ function rowsOf(leg: ProfitPanelLeg): VehicleDailySlip[] {
     { originCity: leg.originCity, date: leg.date },
     slips.value,
     usedLookup.usedRowIds,
-    forceMatch.value[leg.key] ?? [],
+    effectiveOf(leg).ids,
   )
   return slipRows(bound, candidates)
 }
@@ -203,9 +227,17 @@ async function load() {
 
 watch([() => props.driverCd, () => props.range], load, { immediate: true })
 
-/** 結ぶ / 外す。**同じ明細をもう一度押せば外れる** (①の運行手当タブと同じ)。 */
+/**
+ * 結ぶ / 外す。**同じ明細をもう一度押せば外れる** (①の運行手当タブと同じ)。
+ *
+ * **①が当てている便は、触った瞬間にその結果を土台として書き起こす**
+ * (`seedForceMatch`、Refs #854)。土台無しで 1 件足すと `applyForcedSales` の置き換えで
+ * **①が当てていた売上が消える**。**書くのは人が触ったこの瞬間だけ** — 先回りして
+ * 保存すると「人が確定した」ことになってしまう。
+ */
 function toggleBind(leg: ProfitPanelLeg, rowId: string) {
-  const next = toggleForceMatch(forceMatch.value, leg.key, rowId)
+  const seeded = seedForceMatch(forceMatch.value, leg.key, ichibanIdsOf(leg))
+  const next = toggleForceMatch(seeded, leg.key, rowId)
   forceMatch.value = next
   try {
     localStorage.setItem(FORCE_MATCH_KEY, serializeForceMatch(next))
@@ -216,8 +248,9 @@ function toggleBind(leg: ProfitPanelLeg, rowId: string) {
   }
 }
 
+/** チェックが付くのは**いま当たっている**明細 (①が当てたぶんも含む)。 */
 function isBound(leg: ProfitPanelLeg, rowId: string): boolean {
-  return (forceMatch.value[leg.key] ?? []).includes(rowId)
+  return effectiveOf(leg).ids.includes(rowId)
 }
 
 function formatYen(v: number | null): string {
@@ -251,8 +284,17 @@ function legLabel(leg: ProfitPanelLeg): string {
   return `便${leg.seq} ${leg.date.slice(5)} ${leg.originCity || '?'} → ${leg.destCity || '(卸地なし)'}`
 }
 
+/**
+ * 件数の頭に付ける言葉。**誰が当てたのかを混ぜない** (Refs #854) —
+ * ①が当てたぶんを「結び」と書くと、人が結んだ覚えが無いのに「結び 1 件」と出る。
+ */
+function boundLabel(leg: ProfitPanelLeg): string {
+  return effectiveOf(leg).source === 'ichiban' ? '粗利タブが当てた' : '結び'
+}
+
 const panelNote = FORCE_MATCH_PANEL_NOTE
 const overrideNote = FORCE_MATCH_OVERRIDE_NOTE
+const ichibanNote = FORCE_MATCH_ICHIBAN_NOTE
 </script>
 
 <template>
@@ -301,13 +343,16 @@ const overrideNote = FORCE_MATCH_OVERRIDE_NOTE
             >
               <span>{{ legLabel(leg) }}</span>
               <span class="whitespace-nowrap text-gray-500">
-                結び {{ (forceMatch[leg.key] ?? []).length }} 件 ・ {{ formatYen(boundYen(leg)) }} 円
+                {{ boundLabel(leg) }} {{ effectiveOf(leg).ids.length }} 件 ・ {{ formatYen(boundYen(leg)) }} 円
               </span>
             </button>
 
             <template v-if="leg.key === activeKey">
+              <p v-if="effectiveOf(leg).source === 'ichiban'" class="px-3 py-1.5 text-[10px] text-blue-700 dark:text-blue-400">
+                {{ ichibanNote }}
+              </p>
               <p v-if="boundOf(leg).missing > 0" class="px-3 py-1 text-[10px] text-amber-700 dark:text-amber-400">
-                結んである明細のうち {{ boundOf(leg).missing }} 件がこの検索結果に見当たりません (保存は残っています。日付の範囲外か、別の乗務員で引かれた明細です)
+                この便に当たっている明細のうち {{ boundOf(leg).missing }} 件がこの検索結果に見当たりません (記録は残っています。日付の範囲外か、別の乗務員で引かれた明細です)
               </p>
               <p v-if="usedNote" class="px-3 py-2 text-[10px] text-amber-700 dark:text-amber-400">
                 {{ usedNote }}

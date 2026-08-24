@@ -157,11 +157,11 @@ describe('ProfitPanel', () => {
       expect(wrapper.text()).toContain('これ以降は増えません')
     })
 
-    it('★ 結ぶと「置き換わる」と出す (足し算ではない)', async () => {
+    it('★ 上書きであって足し算ではないと出す', async () => {
       writeAggregated()
       const wrapper = createWrapper()
       await flushPromises()
-      expect(wrapper.text()).toContain('置き換わります')
+      expect(wrapper.text()).toContain('足し算ではありません')
     })
 
     it('★ どの乗務員CD で候補を引いたかを出す (CD 違いで候補が空になったのを「明細が無い」と読ませない)', async () => {
@@ -477,7 +477,7 @@ describe('ProfitPanel', () => {
       fetchDriverDailySlipsMock.mockResolvedValue([slip()])
       const wrapper = createWrapper()
       await flushPromises()
-      expect(wrapper.text()).toContain('結んである明細のうち 1 件がこの検索結果に見当たりません')
+      expect(wrapper.text()).toContain('この便に当たっている明細のうち 1 件がこの検索結果に見当たりません')
     })
 
     it('全部引けていればその注記は出さない', async () => {
@@ -486,6 +486,111 @@ describe('ProfitPanel', () => {
       const wrapper = createWrapper()
       await flushPromises()
       expect(wrapper.text()).not.toContain('見当たりません')
+    })
+  })
+
+  /**
+   * **①が当てた明細を映す** (Refs #854)。#849 では `FORCE_MATCH_KEY` しか見ておらず、
+   * ①が当てている便が「結び 0 件・0 円」に見えた。そのまま 1 件結ぶと置き換えで
+   * ①の売上が消え、消えた明細は候補にも出ないので戻せなかった (本番 v0.0.532)。
+   */
+  describe('★★ ①が当てている便 (Refs #854)', () => {
+    /** ①が便1 に `20260716-12` (¥41,250) を当てている状態。 */
+    function writeIchibanHit() {
+      writeLegSales({ [UNKO]: [{ seq: 1, slipIds: ['20260716-12'] }] })
+    }
+
+    it('★ 「結び 0 件・0 円」に見せない — ①が当てた明細を金額つきで出す', async () => {
+      writeIchibanHit()
+      fetchDriverDailySlipsMock.mockResolvedValue([slip()])
+      const wrapper = createWrapper()
+      await flushPromises()
+      expect(wrapper.text()).toContain('粗利タブが当てた 1 件')
+      expect(wrapper.text()).toContain('41,250')
+      expect(wrapper.text()).not.toContain('結び 0 件')
+    })
+
+    it('★ ①が当てた明細はチェック済みで出る (候補から消えない)', async () => {
+      writeIchibanHit()
+      fetchDriverDailySlipsMock.mockResolvedValue([slip()])
+      const wrapper = createWrapper()
+      await flushPromises()
+      expect(wrapper.find('tbody input[type="checkbox"]').element as HTMLInputElement).toMatchObject({ checked: true })
+    })
+
+    it('★ 土台になること・全部外すと①に戻ることを画面で言う', async () => {
+      writeIchibanHit()
+      fetchDriverDailySlipsMock.mockResolvedValue([slip()])
+      const wrapper = createWrapper()
+      await flushPromises()
+      expect(wrapper.text()).toContain('全部外すと粗利タブの結果に戻ります')
+    })
+
+    it('★★ 別の明細を足すと、①が当てたぶんを土台にして保存される (置き換えで消さない)', async () => {
+      writeIchibanHit()
+      fetchDriverDailySlipsMock.mockResolvedValue([
+        slip(),
+        slip({ rowId: '20260716-77', customerName: '追加分', amount: 8000 }),
+      ])
+      const wrapper = createWrapper()
+      await flushPromises()
+
+      const rows = wrapper.findAll('tbody tr')
+      expect(rows).toHaveLength(2)
+      await rows[1]!.trigger('click')
+
+      // ★ ①の 20260716-12 が残っていること。落ちていたら ¥41,250 が消える。
+      expect(parseForceMatch(localStorage.getItem(FORCE_MATCH_KEY)))
+        .toEqual({ [`${UNKO}#t${LEG1_TS}`]: ['20260716-12', '20260716-77'] })
+      expect(wrapper.text()).toContain('49,250')
+    })
+
+    it('★ ①が当てた明細を外すと、その 1 件だけが落ちた上書きになる', async () => {
+      writeLegSales({ [UNKO]: [{ seq: 1, slipIds: ['20260716-12', '20260716-77'] }] })
+      fetchDriverDailySlipsMock.mockResolvedValue([
+        slip(),
+        slip({ rowId: '20260716-77', customerName: '残す分', amount: 8000 }),
+      ])
+      const wrapper = createWrapper()
+      await flushPromises()
+      await wrapper.findAll('tbody tr')[0]!.trigger('click')
+
+      expect(parseForceMatch(localStorage.getItem(FORCE_MATCH_KEY)))
+        .toEqual({ [`${UNKO}#t${LEG1_TS}`]: ['20260716-77'] })
+    })
+
+    it('★ 触るまでは FORCE_MATCH_KEY に 1 文字も書かない (「人が確定した」ことにしない)', async () => {
+      writeIchibanHit()
+      fetchDriverDailySlipsMock.mockResolvedValue([slip()])
+      createWrapper()
+      await flushPromises()
+      expect(localStorage.getItem(FORCE_MATCH_KEY)).toBeNull()
+    })
+
+    it('★ 人の上書きがある便では①の結果を混ぜ戻さない (外したものが戻ってこない)', async () => {
+      writeIchibanHit()
+      localStorage.setItem(FORCE_MATCH_KEY, JSON.stringify({ [`${UNKO}#t${LEG1_TS}`]: ['20260716-77'] }))
+      fetchDriverDailySlipsMock.mockResolvedValue([
+        slip(),
+        slip({ rowId: '20260716-77', customerName: '人が結んだ分', amount: 8000 }),
+      ])
+      const wrapper = createWrapper()
+      await flushPromises()
+      expect(wrapper.text()).toContain('結び 1 件')
+      expect(wrapper.text()).not.toContain('粗利タブが当てた')
+      // ①の 20260716-12 は「他の便に当たっている」ではなくこの便のものだが、
+      // **人が外したもの**なので候補には出す (own には居ないが used には居る → 出ない)。
+      expect(wrapper.text()).not.toContain('㈱田浦畜産')
+    })
+
+    it('★ 別の便に①が当てた明細は、この便の「当たっている」に混ざらない', async () => {
+      writeLegSales({ [UNKO]: [{ seq: 1, slipIds: [] }, { seq: 2, slipIds: ['20260716-12'] }] })
+      fetchDriverDailySlipsMock.mockResolvedValue([slip()])
+      const wrapper = createWrapper({ legs: [leg(), leg({ fromTs: LEG2_TS })] })
+      await flushPromises()
+      // 先頭の便 (seq 1) が開いている。seq 2 のぶんを引き込んでいないこと。
+      expect(wrapper.text()).toContain('結び 0 件')
+      expect(wrapper.text()).toContain('結べる明細がありません')
     })
   })
 

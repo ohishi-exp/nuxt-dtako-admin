@@ -20,7 +20,7 @@
  * 「入っていない」ではなく「**判定できない**」ので、件数を返して画面に言わせる。
  * 落として黙ると「この区間には便が 1 本しかない」と読めてしまう。
  */
-import { forceMatchKey } from './allowance-force-match'
+import { forceMatchKey, type ForceMatchMap } from './allowance-force-match'
 import type { AllowanceLeg } from './allowance-trips'
 import { epochToYmd, type ScoredVehicleDailySlip, type VehicleDailySlip } from './ichiban'
 
@@ -141,9 +141,21 @@ export const FORCE_MATCH_PANEL_NOTE
  *
  * `applyForcedSales` は結んだ明細で便の突合結果を**丸ごと差し替える**ので、①が既に
  * 当てていた明細があれば外れる。「足される」と読まれると金額が下がった理由が分からなくなる。
+ *
+ * ## ★ 「他の便に」ではなく「どの便にも」 (Refs #854)
+ *
+ * `forceMatchCandidates` が外すのは `usedRowIds` **全部** = ①が当てた明細の
+ * **運行をまたいだ和集合**で、例外は `ownRowIds` だけ。#854 で `ownRowIds` に
+ * **その便に①が当てた明細**を混ぜたので、いまは**この便のぶんは「結んである」側に出る**。
+ * 候補に出ないのは**他の便に当たっているもの**だけになった。
+ *
+ * **直す前は「他の便に当たっていない明細だけ」と書いてあった** — 実際にはこの便に①が
+ * 当てた明細も候補から外れていたので、**上の「粗利タブの計上額」に出ている伝票が候補に
+ * 無い**のを見た人が「取りこぼしでは」と読める状態だった (本番 2026-08-24、運行
+ * `2607010419590000001109` 便1 = 伝票 `20260701-154`)。
  */
 export const FORCE_MATCH_OVERRIDE_NOTE
-  = 'その便に粗利タブが既に当てている明細があるときは、結んだ内容で置き換わります (足し算ではありません)。候補は同じ乗務員・日付 ±1 日で、他の便に当たっていない明細だけです。'
+  = 'その便に粗利タブが既に当てている明細は、チェック済みで出ています。チェックを変えると、その内容を土台にした上書きとして保存されます (足し算ではありません)。候補として新しく出るのは、同じ乗務員・日付 ±1 日で、まだどの便にも当たっていない明細だけです。'
 
 /** 明細に出す「根拠」バッジ。`scoreVehicleDailySlips` の結果を 3 段に畳んだもの。 */
 export type SlipBadge = 'exact' | 'partial' | 'none'
@@ -160,3 +172,77 @@ export function slipBadge(scored: Pick<ScoredVehicleDailySlip, 'score' | 'sugges
   if (scored.suggested) return 'exact'
   return scored.score > 0 ? 'partial' : 'none'
 }
+
+/**
+ * その便の「結んである」の**出どころ** (Refs #854)。
+ *
+ * - `ichiban` — **①が当てた** (`OPERATION_LEG_SALES_KEY` の per-leg `slipIds`)。
+ *   `FORCE_MATCH_KEY` には 1 文字も入っていない
+ * - `forced` — **人が結んだ** (`FORCE_MATCH_KEY`)。`applyForcedSales` は便の突合結果を
+ *   **丸ごと差し替える**ので、こちらがあるときは①の結果はもう効いていない
+ * - `none` — どちらも無い
+ */
+export type BoundSource = 'forced' | 'ichiban' | 'none'
+
+export interface EffectiveSlipIds {
+  ids: string[]
+  source: BoundSource
+}
+
+/**
+ * その便に**いま当たっている**明細。**人の上書き > ①の結果**の順に採る (Refs #854)。
+ *
+ * これを画面に映さないと、①が当てている便が「**結び 0 件・0 円**」に見える。そのまま
+ * 何か 1 件結ぶと**置き換えで①の売上が消え**、消えた明細は `usedRowIds` に居るので
+ * **候補にも出ず戻せない** (本番 v0.0.532 で実際にこの状態だった)。
+ *
+ * **①の結果を `FORCE_MATCH_KEY` から読まない** — そこには書いていない。読むのは
+ * `lookupUsedSlipIds` の `slipIdsBySeq` で、**書き込みは人が触るまで起こさない**
+ * (`seedForceMatch`)。
+ *
+ * **空配列の上書き (`forced: []`) は「人が空にした」ではない** — `toggleForceMatch` は
+ * 最後の 1 件を外すとキーごと消すので、そもそも空配列は保存されない。`undefined`
+ * (キーが無い) だけが「上書きしていない」。
+ */
+export function effectiveSlipIds(
+  forced: readonly string[] | undefined,
+  ichibanIds: readonly string[],
+): EffectiveSlipIds {
+  if (forced !== undefined) return { ids: [...forced], source: 'forced' }
+  if (ichibanIds.length > 0) return { ids: [...ichibanIds], source: 'ichiban' }
+  return { ids: [], source: 'none' }
+}
+
+/**
+ * **人が触った瞬間に、①の結果を土台として書き起こす** (Refs #854)。
+ *
+ * `applyForcedSales` は置き換えなので、①が {A,B,C} を当てている便で人が B だけ外したい
+ * とき、土台が無いまま `toggleForceMatch` すると **`{B}` だけが残って A と C が消える**
+ * (= #854 の欠陥そのもの)。**土台を敷いてから差分を乗せる。**
+ *
+ * **触るまでは書かない。**①の結果を先回りして保存すると「人が確定した」ことになって
+ * しまう (#854 の禁止事項)。既に上書きがある便・①も当てていない便では**同じ参照を
+ * そのまま返す** (無駄に identity を変えない)。
+ *
+ * **全部外すと `toggleForceMatch` がキーごと消す = ①の結果に戻る。**「売上 0 の便」には
+ * できない (`ForceMatchMap` が「空 = 結んでいない」形なので構造上そうなる)。
+ * **画面でそう言うのは呼び出し側の責務** (`FORCE_MATCH_ICHIBAN_NOTE`)。
+ */
+export function seedForceMatch(
+  map: ForceMatchMap,
+  legKey: string,
+  ichibanIds: readonly string[],
+): ForceMatchMap {
+  if (map[legKey] !== undefined) return map
+  if (ichibanIds.length === 0) return map
+  return { ...map, [legKey]: [...ichibanIds] }
+}
+
+/**
+ * ①が当てている便を開いたときに出す一言 (Refs #854)。
+ *
+ * **「結び 0 件」ではなく「①が当てている」と言う**のが本題だが、**外し方の帰結**まで
+ * 言わないと次の誤読が生まれる — 全部外すと空にはならず**①の結果に戻る**。
+ */
+export const FORCE_MATCH_ICHIBAN_NOTE
+  = 'この便は粗利タブが当てた明細です (まだ人の上書きはありません)。チェックを変えると、この内容を土台にした上書きとして保存されます。全部外すと粗利タブの結果に戻ります — この便を売上 0 円にすることはできません。'
