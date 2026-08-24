@@ -2,7 +2,7 @@
 name: nuxt-dtako-admin-map
 generated-from: nuxt-dtako-admin:2b9f72a885a55d6c5f3e9ad73912a04ed7738baa
 paths: [app/, server/]
-description: ippoan/nuxt-dtako-admin (dtako デジタコ運行データ管理画面、Nuxt 4 + Cloudflare Workers) の構造ナビゲーション。rust-alc-api を直 fetch する frontend と、R2 binding が要る Y時間 Excel export、ブラウザ内完結の NET780 ビューア (net780-wasm 経由) の server route / page 配置を 1 枚にまとめる。トリガー:「dtako」「nuxt-dtako-admin」「Y時間 export」「y-time-export」「vehicle-settings」「DTAKO_R2」「運行データ」「dtako.ippoan.org」「net780」「NET780」「net780-wasm」「remote-app」「RemoteApp」「IronRDP」「RDP」「rdp.ippoan.org」「Cloudflare Access」等。
+description: ippoan/nuxt-dtako-admin (dtako デジタコ運行データ管理画面、Nuxt 4 + Cloudflare Workers) の構造ナビゲーション。rust-alc-api を直 fetch する frontend と、R2 binding が要る Y時間 Excel export、ブラウザ内完結の NET780 ビューア (net780-wasm 経由) の server route / page 配置、一番星 (rust-ichibanboshi) の売上と便を突き合わせる粗利・運行手当の区画を 1 枚にまとめる。トリガー:「dtako」「nuxt-dtako-admin」「Y時間 export」「y-time-export」「vehicle-settings」「DTAKO_R2」「運行データ」「dtako.ippoan.org」「net780」「NET780」「net780-wasm」「remote-app」「RemoteApp」「IronRDP」「RDP」「rdp.ippoan.org」「Cloudflare Access」「粗利」「margin」「profit」「運行手当」「allowance」「一番星」「ichiban」「突合」「reconcileVehicles」「ProfitPanel」「スナップショット」「ProfitSnapshot」「force-match」「強制突合」「マッチ率」「売上」「取引先」「便」「運転日報明細」等。
 ---
 
 # nuxt-dtako-admin-map — ippoan/nuxt-dtako-admin 構造ナビゲーション
@@ -20,17 +20,20 @@ dtako (デジタコ運行データ) 管理画面。Nuxt 4 + Nitro `cloudflare_mo
 |---|---|---|
 | **pages (運行系)** | `app/pages/{index,upload,scraper,net780}.vue` `operations/{index,[unko_no]}.vue` | 運行一覧 / アップロード / スクレイパ / NET780 生データビューア / 運行詳細 |
 | **pages (時間集計)** | `app/pages/{daily-hours/index,restraint-compare,restraint-report,restraint-fetch,y-time-export}.vue` | 日別時間 / 拘束時間 比較・レポート / 拘束CSV取得 (theearth F-ERS2010、下記) / Y時間 export UI |
+| **pages (粗利・突合)** | `app/pages/profit/{margin,allowance,monthly,compare}.vue` | 粗利 (売上−手当−経費) / 運行手当 / 検証スナップショットのマッチ率 月次 / 類似運行検索。**一番星の売上と便の突合はここが本体** (下記) |
 | **pages (車両設定)** | `app/pages/vehicle-settings/{index,diff,history,unconfirmed}.vue` | デジタコ車両設定の閲覧・差分・履歴・未確認 |
 | **pages (管理/認証)** | `app/pages/{members,api-tokens,event-classifications,login}.vue` `auth/callback.vue` `ichiban-health.vue` | メンバ / API トークン / イベント分類 / login / 一番星ヘルスチェック (`/ichiban-health` — rust-ichibanboshi の既存 API と給与読み取り API を一括疎通確認、pure ロジックは `app/utils/ichiban-health.ts`、Refs #369) |
 | **pages (社内リモート)** | `app/pages/remote-app.vue` | ブラウザ内 RemoteApp ビューア (IronRDP/WASM、Refs #693)。**中継は Cloudflare Access が守る公開ホスト名へ直結** — Worker はデータ経路に居ない (下記) |
 | **pages (外部利用者)** | `app/pages/dvr-viewer.vue` | DVR 動画ビューア (Refs #90)。theearth credential pass-through ログイン (auth-worker 不要、`auth.global.ts` の publicPaths + `layout: false`、サイドバー「DVR 動画」タブからも遷移可)。`/dvr-api/*` は worker/index.ts → SCRAPER_RELAY service binding → `workers/dtako-scraper-relay` の DO (`theearth-session.ts` / `theearth-venus-client.ts`) |
-| **components** | `app/components/Event*.vue` `VehicleSettings*.vue` `CsvDataTable.vue` `DriverSearchSelect.vue` | イベント表 / 車両設定 表示・diff / CSV テーブル |
+| **components** | `app/components/Event*.vue` `VehicleSettings*.vue` `CsvDataTable.vue` `DriverSearchSelect.vue` `ProfitPanel.vue` `AllowanceOperationModal.vue` | イベント表 / 車両設定 表示・diff / CSV テーブル / 運行詳細の収支パネル (検証スナップショット、下記) / 運行手当タブの運行モーダル |
 | **server/api (proxy)** | `server/api/proxy/[...path].ts` `server/utils/alc-proxy.ts` | `/api/proxy/*` → auth-worker `/alc-proxy/*` (introspect / ACL / OIDC mint / identity 注入を集約) → rust-alc-api `/api/*` (createAuthWorkerProxyHandler、#434 step 3 方式 B)。consumer は AUTH_WORKER service binding に X-Alc-Proxy-Secret + browser JWT を thin-forward するだけ。`alc-proxy.ts` の `alcProxyFetch` は R2 が要る route が同じ `/alc-proxy` 経由で backend を叩き Response を受け取るヘルパ (lockdown 後も OIDC 不要で通る。旧 `identity.ts` の直叩き+resolveIdentityHeaders を置換、#434 caller #2) |
 | **server/api (ichiban/kyuyo proxy)** | `server/api/ichiban/[...path].get.ts` `server/api/kyuyo/[...path].get.ts` `server/utils/ichiban-upstream.ts` | rust-ichibanboshi への thin proxy (CF Access Service Token 付与、#330/#369)。kyuyo 側は upstream パスを `api/kyuyo/` 配下に固定し、ブラウザの `Authorization: Bearer <JWT>` を素通し転送 — 給与の認可は upstream の introspect + email allowlist (rust-ichibanboshi#82) が担う |
+| **server/api (粗利/検証スナップショット)** | `server/api/profit/{snapshot.get,snapshot.post,snapshot.delete,snapshots.get,monthly.get}.ts` `server/utils/profit-r2-io.ts` | `PROFIT_R2` への検証スナップショット read/write/list と車輌×月サマリ。R2 binding が要るので Worker 側 (pure は `app/utils/profit-r2.ts`) |
 | **server/api (kyuyo-master)** | `server/api/kyuyo-master/{companies.get,refresh.post,refresh-full.post}.ts` `server/utils/kyuyo-master-db.ts` | D1 `kyuyo_companies` (migration 0005、会社×年度リスト・金額なし) の読み/差分更新 (rust `/api/kyuyo/databases` 高速一覧)/フル更新 (会社名+権限、遅い)。消費者は `/kyuyo-fetch` ページ (#369 PR-B1)。取得済み明細は sessionStorage (タブ限り、別ユーザー検知で purge、pure ロジックは `app/utils/kyuyo-fetch.ts`) |
 | **server/api (Y時間)** | `server/api/y-time-export.post.ts` `y-time-template.{get,put}.ts` | backend GET→R2 テンプレ→ExcelJS xlsx 生成 (R2 が要るので Worker 側)。backend GET は `alcProxyFetch` で /alc-proxy 経由 |
 | **server/api (車両設定)** | `server/api/vehicle-settings/{extract.post,history.get,object.get,unconfirmed.get}.ts` | 車両設定 抽出・履歴・取得。unconfirmed は backend `/api/dtako/vehicles` を `alcProxyFetch` (/alc-proxy 経由) で叩く |
 | **utils** | `app/utils/{api,event-data-table,y-time-xlsx,vehicle-settings-*,net780}.ts` | API ラッパ / 表整形 / JSZip writer / 車両設定 cfg・diff・labels / net780-wasm ラッパー |
+| **utils (粗利・突合)** | `app/utils/{allowance-*,margin*,profit-*,ichiban,operation-leg-sales}.ts` | 便の切り出し・手当・突合・粗利・賃金構成の pure ロジック (下記に主要 3 本) |
 | **middleware** | `app/middleware/auth.global.ts` | 全 page の JWT gate |
 | **assets** | `app/assets/css/main.css` | Tailwind/Nuxt UI entry。印刷はダークモードでもライト配色に固定 (dark variant を `@media not print` に限定 + Nuxt UI `--ui-*` 変数の print 上書き。後者は @nuxt/ui 更新時に追従が必要)。`<main>` の bg-gray-50 も印刷では白固定 |
 
@@ -119,6 +122,8 @@ Environment Variable であり、wrangler.toml には無い (git 履歴に平文
 
 - `DTAKO_R2` → `dtako-uploads` バケット — Y時間 テンプレ xlsx の配置先 (`templates/...`)。
   本番 / staging 共用 (read-only)。
+- `PROFIT_R2` → `dtako-ichiban-verify` バケット (staging / preview は `dtako-ichiban-verify-staging`) —
+  一番星マッチ率の**検証スナップショット** (`profit/{ym}/{車輌CD}/{運行NO}/{segmentId}/`)。下記の粗利区画。
 
 ## D1 binding と migration (Refs #367)
 
@@ -806,6 +811,77 @@ N:1 が現実に存在する (本番で 5 件、うち社員C 1619 鵜瀬裕一�
 | `app/utils/salary-compare.ts` | 給与明細 CSV 解析 + 5 区分集計 + 突合 + 37条チェック + `computeSysBase` (給与区分で単価の掛け方を分岐) (pure) |
 | `workers/dtako-scraper-relay/src/restraint-wage.ts` | 賃金計算 pure (100% gate) |
 | `workers/dtako-scraper-relay/src/theearth-restraint-client.ts` | summary v2 (日別 + 派生指標) |
+
+## 粗利・一番星突合 (`/profit/*`、Refs #330 / #760 / #820)
+
+一番星 (rust-ichibanboshi) の**運転日報明細**を売上として、デジタコの便に突き合わせる区画。
+デジタコに積載量が無いので、売上は一番星から取るしかない。
+
+| ページ | 役割 |
+|---|---|
+| `app/pages/profit/margin.vue` | **粗利 (売上 − 手当 − 経費)**。乗務員別の賃金構成・取引先別・経路・印刷まで全部ここ (Refs #760) |
+| `app/pages/profit/allowance.vue` | **運行手当** (デジタコ → 給与)。乗務員 → 運行 → 便 の 3 段。強制突合 (下記) を人が操作するのもここ |
+| `app/pages/profit/monthly.vue` | 車輌×月の**検証スナップショット**マッチ率サマリ (一番星側月計との差額・積地卸地マッチレベル内訳) |
+| `app/pages/profit/compare.vue` | 類似運行検索。**一番星をインデックスに使う** (伝票で車番×日を確定してから dtako 運行を引く) |
+| `app/pages/operations/[unko_no].vue` | 運行詳細。便ごとの「粗利タブの計上額」を**映すだけ** + `ProfitPanel` + 「伝票から区間を提案」 |
+
+### ★ 突合は 2 系統ある — 混ぜない (#820 の事故の核心)
+
+同じ運行に**違う伝票・違う金額**を出し得る。**新しい 3 つ目を作らないこと。**
+
+1. **`reconcileVehicles` (`app/utils/allowance-ichiban.ts`) — 粗利タブの月次突合。これが正。**
+   **乗務員CD 単位でグループ化するのが既定** (乗務員CD が引けないときだけ車番単位)。
+   グループぶんの明細を先に当て、余った便だけ受け皿の車番 (`POOL_VEHICLE = '0001'`) で拾い直す。
+   **明細のプールを順に消費する** (`pool = res.poolLeftovers`) ので同じ明細が 2 台に二重計上されない。日付は ±`DATE_SLACK` 日まで許容し、同日同卸地に便が
+   複数あれば件数で機械分割する (`split`)。**この金額が粗利・乗務員別・取引先別・印刷に乗る。**
+   呼び元は `profit/margin.vue` と `profit/allowance.vue` の 2 つだけ
+2. **`ProfitPanel.vue` + `scoreVehicleDailySlips` (`app/utils/ichiban.ts`) — 検証スナップショット。**
+   **常に車番のみ・受け皿なし・明細の一意性なし**で候補を出し、人がチェックした伝票を R2 に残す。
+   `confirmedAmount` の消費者は **`/profit/monthly` のマッチ率表示だけ** — 粗利にも印刷にも波及しない
+
+**「1 車輌・1 月に絞って 1 を回し直す」は不可** (プールの消費順序が変わって粗利タブと違う額が出る)。
+運行詳細は突合を 1 行もやらず、粗利タブが別キーに書いた要約 (`app/utils/operation-leg-sales.ts`) を
+読むだけにしてある。**2 つ並べるときはラベルを必ず分ける** — 「粗利タブの計上額」と「検証スナップショット」。
+一本化の計画は issue #820 (PR-1 = #821 完了)。
+
+> `proposeFromSlips` (`operations/[unko_no].vue`) は**どちらでもない** — 伝票の積地・卸地から
+> イベント行の区間を当てる**提案**で、突合結果ではない。既知の穴は issue #822。
+
+### 人が確定する場所も 2 か所
+
+| 何 | どこ | 効く先 |
+|---|---|---|
+| **強制突合** (降しイベントが無い便に人が明細を結ぶ) | `dtako:allowance:force-match:v1` (localStorage、`app/utils/allowance-force-match.ts`) | **1 にしか効かない。** 運行手当タブで結び、粗利タブが読む |
+| **検証スナップショット** (`ProfitSnapshot`) | R2 `profit/{ym}/{車輌CD}/{運行NO}/{segmentId}/latest.json` (+ `v-{ts}.json` / `history.jsonl`) | **2 にしか効かない** |
+
+R2 スナップショットを force-match へ自動移植してはいけない (2 は車番のみ・プールなしで確定して
+いるので、1 が別の便に割り当て済みの明細を指しうる = 二重計上)。
+
+### 保存先 (localStorage キー)
+
+| キー | 中身 | 定義 |
+|---|---|---|
+| `dtako:margin:cache:v9` | 粗利の集計キャッシュ。**明細は持たない** (量が桁違い、合計だけ畳む) | `app/utils/margin.ts` |
+| `dtako:margin:leg-points:v1` | 便の積地・卸地の座標 | `app/utils/margin-rebuild-input.ts` |
+| `dtako:profit:uncovered-by-driver:v1` | 乗務員CD → 粗利対象外の便の手当 (旅費の母数) | `app/utils/profit-allowance-base.ts` |
+| `dtako:operations:leg-sales:v1` | 便ごとの売上要約 (運行詳細が読むためだけ、Refs #820) | `app/utils/operation-leg-sales.ts` |
+| `dtako:allowance:force-match:v1` | 強制突合 (上記) | `app/utils/allowance-force-match.ts` |
+
+`dtako:allowance:{cache,excluded,provisional,pdf,pdf-overpaid,last-search,driver-cds}` / `dtako:margin:{fuel-rate,routeMapLayers,runCostShareMode}` も同じ流儀。
+**キーは形を変えるときに番号を上げる** (`MarginCache` の形は変えず別キーを足すのが作法 — 片方が壊れても
+もう片方は動く)。**localStorage なので他端末からは空に見える** — 画面でその旨を断ること。
+
+### API
+
+| 口 | 用途 |
+|---|---|
+| `GET/POST/DELETE /api/profit/snapshot` | 検証スナップショット 1 件の read/write/delete (`PROFIT_R2`、`savedAt` はサーバーが埋める) |
+| `GET /api/profit/snapshots?ym=&vehicle=&limit=` | スナップショット一覧 (`SnapshotListItem`) |
+| `GET /api/profit/monthly?vehicle=&ym=` | 一番星側月計 vs `confirmedAmount` 合算 の差額 + マッチレベル内訳 |
+| `GET /api/ichiban/api/sales/vehicle-daily` | 一番星 売上明細 (proxy 経由、client 側も `api/` を含めて呼ぶ) |
+| `GET /api/ichiban/api/costs/vehicle-daily` | 一番星 経費明細 (給与・燃料等)。**`limit` 未指定だと上流が 500 件で切る** |
+
+R2 binding は `PROFIT_R2` → `dtako-ichiban-verify` (staging/preview は `-staging`)。
 
 ## スクレイパ (`/scraper` ページ + `workers/dtako-scraper-relay/`)
 
