@@ -62,6 +62,7 @@ import {
   type RouteMapLayers,
 } from '~/utils/operation-route-map'
 import { driverShareBars } from '~/utils/margin-driver-share'
+import { routeOperationRows, runDatesByUnkoNo } from '~/utils/margin-route-operations'
 import { filterValidGpsPoints } from '~/utils/net780'
 import { NET780_ARCHIVE_BATCH_SIZE, chunk, remainingNet780ArchiveTargets, summarizeNet780ArchiveResults, formatNet780ArchiveSummary, type Net780ArchiveResultItem } from '~/utils/net780-archive'
 import { parseTargets, serializeTargets, toggleTarget, driverLabel } from '~/utils/allowance-targets'
@@ -1723,6 +1724,18 @@ const customerSalesCheckOk = computed(() => Math.abs(customerSalesSum.value + cu
 /** 取引先行の開閉 (経路の行を出す)。鍵は取引先C (突合なしは空文字)。 */
 const openCustomers = reactive<Record<string, boolean>>({})
 
+/**
+ * 経路行の開閉 (**その経路の売上が出た運行**を出す、Refs #818)。
+ * **取引先行の `openCustomers` と同じ流儀** (既定は畳んだ状態なので印刷には出ない)。
+ */
+const openRoutes = reactive<Record<string, boolean>>({})
+/** 経路行の鍵 (`v-for` の `:key` と同じ)。 */
+const routeKey = (c: CustomerSummary, r: RouteSummary) => `${c.code}|${r.from}|${r.to}`
+/** 運行NO → 運行日。**表と同じ `result.operations`** から引く (取れない運行は鍵が無い)。 */
+const runDates = computed(() => runDatesByUnkoNo(result.value.operations))
+/** その経路の便が入っている運行 (運行日の昇順、`legRefs` を畳むだけ。数字には効かない)。 */
+const routeOperations = (r: RouteSummary) => routeOperationRows(r.legRefs, runDates.value)
+
 /** 売上の内訳の棒 (取引先別の表の下、Refs #760 の 17)。表と同じ `customerSummary` から出す。 */
 const shareBars = computed(() => customerShareBars(customerSummary.value))
 
@@ -2743,12 +2756,18 @@ function downloadCustomerRouteCsv() {
                     <td class="px-3 py-2 text-right">{{ kmInt(c.deadheadKm / c.legs) }}</td>
                     <td class="px-3 py-2 text-right">{{ yen(salesPerHaulKm(c.salesYen, c.haulKm)) }}</td>
                   </tr>
+                  <!--
+                    経路の行と、その下の運行の行 (Refs #818) は**同じ `v-for` の中**に
+                    置く。運行の行を兄弟の `<tr>` にすると `r` が範囲外になる。
+                  -->
+                  <template v-for="r in (openCustomers[c.code] ? c.routes : [])" :key="`${c.code}|${r.from}|${r.to}`">
                   <tr
-                    v-for="r in (openCustomers[c.code] ? c.routes : [])"
-                    :key="`${c.code}|${r.from}|${r.to}`"
-                    class="border-t border-gray-50 dark:border-gray-800/60 text-gray-600 dark:text-gray-300"
+                    class="border-t border-gray-50 dark:border-gray-800/60 text-gray-600 dark:text-gray-300 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-900/40"
+                    title="クリックでこの経路の売上が出た運行を開閉"
+                    @click="openRoutes[routeKey(c, r)] = !openRoutes[routeKey(c, r)]"
                   >
                     <td class="px-3 py-1.5 pl-8">
+                      <span class="text-gray-400 mr-1">{{ openRoutes[routeKey(c, r)] ? '▾' : '▸' }}</span>
                       {{ r.from }} → {{ r.to }}
                       <span class="text-gray-400">(便 {{ r.legs }})</span>
                       <span v-if="r.unsplitLegs > 0" class="text-amber-600 dark:text-amber-400 ml-1">粗利が出せない便 {{ r.unsplitLegs }}</span>
@@ -2789,6 +2808,30 @@ function downloadCustomerRouteCsv() {
                     <td class="px-3 py-1.5 text-right">{{ kmInt(r.deadheadKm / r.legs) }}</td>
                     <td class="px-3 py-1.5 text-right">{{ yen(salesPerHaulKm(r.salesYen, r.haulKm)) }}</td>
                   </tr>
+                  <!--
+                    経路の行 → その売上が出た運行 (Refs #818)。**運行日の昇順**に並べる
+                    (「実運行を流れで見たい」)。畳む・並べる・文字を作るのは
+                    `margin-route-operations.ts` (pure)。数字は 1 つも出さない。
+                  -->
+                  <tr
+                    v-for="op in (openRoutes[routeKey(c, r)] ? routeOperations(r) : [])"
+                    :key="`${c.code}|${r.from}|${r.to}|${op.unkoNo}`"
+                    class="border-t border-gray-50 dark:border-gray-800/40 text-xs text-gray-500 dark:text-gray-400"
+                  >
+                    <td class="px-3 py-1 pl-14" colspan="11">
+                      <span :class="op.date === null ? 'text-amber-600 dark:text-amber-400' : ''">{{ op.dateLabel }}</span>
+                      <NuxtLink
+                        :to="`/operations/${op.unkoNo}`"
+                        target="_blank"
+                        class="ml-2 text-blue-500 hover:text-blue-700 hover:underline"
+                        title="この運行の詳細を別のタブで開く"
+                      >
+                        運行NO {{ op.unkoNo }}
+                      </NuxtLink>
+                      <span class="ml-2 text-gray-400">{{ op.seqLabel }}</span>
+                    </td>
+                  </tr>
+                  </template>
                 </template>
               </tbody>
             </table>
