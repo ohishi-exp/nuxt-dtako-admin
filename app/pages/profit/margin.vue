@@ -94,6 +94,7 @@ import {
   type AllowanceBaseRow,
 } from '~/utils/profit-allowance-base'
 import {
+  ESTIMATED_FLAT_OVERTIME_YEN,
   MIN_DAILY_WAGE_YEN,
   MIN_HOURLY_WAGE_YEN,
   TRAVEL_RATE_PRESETS,
@@ -106,6 +107,7 @@ import {
   type WageMixMethod,
   type WageMixRestraint,
 } from '~/utils/profit-wage-mix'
+import { fetchActualWageByDriver } from '~/utils/profit-actual-wage'
 import { EXCLUDED_KEY, parseExcluded, isExcluded, type ExcludedMap } from '~/utils/allowance-excluded'
 import { LAST_SEARCH_KEY, parseLastSearch, serializeLastSearch } from '~/utils/allowance-last-search'
 import { savedAtLabel } from '~/utils/allowance-cache'
@@ -1268,12 +1270,74 @@ async function loadRestraint(force = false) {
 const allowanceBase = computed<AllowanceBaseRow[]>(() =>
   buildAllowanceBase(inputs.value, shownYm.value, driverCdByName.value, uncoveredByDriver.value))
 
+/**
+ * **実支給** (乗務員CD → 円、Refs #814)。素材は一番星の経費明細の
+ * **経費種別 `08 給与(人件費)`** を乗務員CD で畳んだ額。
+ *
+ * **粗利のために引いている経費 (`costs`) は使わない** — あちらは**車番**で引くので、
+ * その月に粗利へ乗っていない車輌に給与が付いている乗務員を取りこぼす。中村・柳井・
+ * 西島は車輌をまたいで給与の行が 2 本に分かれる (2026-07 実測)。**乗務員CD で引く。**
+ *
+ * **引けなければ null のまま。0 に倒さない** — 賃金構成の行が推計に落ちて理由が出る。
+ */
+const actualPayByCd = ref<Map<string, number> | null>(null)
+const loadingActualPay = ref(false)
+/** 実支給を読めなかった理由。**黙って空にしない** (画面に出す)。 */
+const actualPayError = ref('')
+/** 読み込み済みの月 (月を変えたら取り直す)。 */
+const actualPayYm = ref('')
+
+/**
+ * 実支給を読む。**乗務員CD を引けた乗務員だけ**を対象にする
+ * (CD が無ければ経費明細を絞れないので、その行は推計に落ちる)。
+ *
+ * **失敗しても 0 に倒さない。** 理由を `actualPayError` に残し、表は推計に落ちる。
+ */
+async function loadActualPay(force = false) {
+  const target = shownYm.value
+  if (!target) return
+  if (!force && actualPayYm.value === target && actualPayByCd.value !== null) return
+  const cds = [...new Set(allowanceBase.value.map(row => row.driverCd))].filter(cd => cd !== '')
+  if (cds.length === 0) return
+  loadingActualPay.value = true
+  actualPayError.value = ''
+  try {
+    const range = monthCostRange(target)
+    const byDriver = await fetchActualWageByDriver(cds, range.from, range.to)
+    // 月を変えた後に古い応答が返ってきたら捨てる (latest-wins、拘束と同じ)。
+    if (shownYm.value !== target) return
+    actualPayByCd.value = new Map(Object.entries(byDriver))
+    actualPayYm.value = target
+  }
+  catch (e) {
+    if (shownYm.value !== target) return
+    actualPayByCd.value = null
+    actualPayError.value = `実支給 (一番星の経費明細 08 給与) を読めませんでした — ${e instanceof Error ? e.message : String(e)}`
+  }
+  finally {
+    loadingActualPay.value = false
+  }
+}
+
+/** 賃金構成の素材 (拘束時間・実支給) をまとめて取り直す。 */
+function reloadWageMixSources() {
+  loadRestraint(true)
+  loadActualPay(true)
+}
+
+/** 実支給が**月ぜんぶ**引けていないときの理由 (行ごとの理由を差し替える)。 */
+const actualPayMonthReason = computed(() => actualPayByCd.value === null
+  ? '実支給が取れていない (一番星の経費明細を読めていない — 「再読込」で取り直せます)'
+  : undefined)
+
 /** 賃金構成の行。拘束が引けない乗務員は金額 `null` (0 に倒さない)。 */
 const wageMixRows = computed(() => allowanceBase.value.map(base => computeWageMixRow({
   driverCd: base.driverCd,
   driverName: base.driverName,
   allowanceBaseYen: base.baseYen,
   restraint: restraintByCd.value?.get(base.driverCd) ?? null,
+  actualPayYen: actualPayByCd.value?.get(base.driverCd) ?? null,
+  actualPayReason: actualPayMonthReason.value,
 }, wageMix.value)))
 
 const wageMixTotals = computed(() => summarizeWageMix(wageMixRows.value))
@@ -1295,7 +1359,7 @@ const allowanceBaseTotals = computed(() => {
 })
 
 /** 数値入力を受ける (負・NaN は 0 に倒す。クランプは**しない** — 警告で出す)。 */
-function onWageMixNumber(field: 'hourlyRateYen' | 'dailyRateYen' | 'flatOvertimeYen', raw: string) {
+function onWageMixNumber(field: 'hourlyRateYen' | 'dailyRateYen', raw: string) {
   wageMix.value = { ...wageMix.value, [field]: Math.max(0, Number(raw) || 0) }
 }
 
@@ -1325,6 +1389,7 @@ function signedYen(v: number | null): string {
 watch([() => inputs.value.length, shownYm], ([count]) => {
   if (count === 0) return
   loadRestraint()
+  loadActualPay()
 })
 
 /**
@@ -2341,7 +2406,7 @@ function downloadCustomerRouteCsv() {
           <div class="margin-print-head flex flex-wrap items-baseline gap-x-3 gap-y-1 mb-1">
             <p class="text-xs font-medium">賃金構成の試算 (基本給 ＋ 残業 ＋ 旅費)</p>
             <span class="text-xs text-gray-500">
-              いまは運行手当がそのまま基本給として支給され、上に全員一律 {{ yen(wageMix.flatOvertimeYen) }} の残業代が乗っているだけ。
+              いまは運行手当がそのまま基本給として支給され、上に全員一律 {{ yen(ESTIMATED_FLAT_OVERTIME_YEN) }} の残業代が乗っているだけ。
               これを三段に組み直すとどうなるかの試算で、<b>粗利の数字には 1 円も効きません</b>
             </span>
           </div>
@@ -2394,27 +2459,19 @@ function downloadCustomerRouteCsv() {
                 @click="setTravelRate(r)"
               />
             </span>
-            <label class="flex items-center gap-1" title="いま全員一律で乗っている残業代。現状の推計にだけ効きます">
-              <span class="text-gray-500">現状の一律残業代:</span>
-              <input
-                type="number"
-                step="1000"
-                min="0"
-                class="w-24 text-right border rounded px-1 py-0.5 dark:bg-gray-900"
-                :value="wageMix.flatOvertimeYen"
-                @input="onWageMixNumber('flatOvertimeYen', ($event.target as HTMLInputElement).value)"
-              >
-            </label>
             <UButton
-              size="xs" variant="outline" icon="i-lucide-refresh-cw" label="拘束時間を再読込"
-              :loading="loadingRestraint" @click="loadRestraint(true)"
+              size="xs" variant="outline" icon="i-lucide-refresh-cw" label="拘束時間・実支給を再読込"
+              :loading="loadingRestraint || loadingActualPay"
+              @click="reloadWageMixSources"
             />
           </div>
 
           <!-- 単価が最低賃金を下回っていれば言う。**クランプはしない** -->
           <p v-if="wageMixWarning" class="text-xs text-red-600 dark:text-red-400 mb-1">⚠ {{ wageMixWarning }}</p>
           <p v-if="restraintError" class="text-xs text-red-600 dark:text-red-400 mb-1">⚠ {{ restraintError }}</p>
+          <p v-if="actualPayError" class="text-xs text-red-600 dark:text-red-400 mb-1">⚠ {{ actualPayError }}</p>
           <p v-if="loadingRestraint" class="text-xs text-gray-500 mb-1">拘束時間サマリを読み込んでいます…</p>
+          <p v-if="loadingActualPay" class="text-xs text-gray-500 mb-1">実支給 (一番星の経費明細 08 給与) を読み込んでいます…</p>
 
           <!-- 母数を必ず名乗る。どの母数か書いていない数字がいちばん危ない -->
           <p class="text-xs text-gray-500 mb-1">
@@ -2449,7 +2506,7 @@ function downloadCustomerRouteCsv() {
                   <th class="text-right py-1 px-2">残業</th>
                   <th class="text-right py-1 px-2">旅費</th>
                   <th class="text-right py-1 px-2">計</th>
-                  <th class="text-right py-1 px-2">現状 (推計)</th>
+                  <th class="text-right py-1 px-2" title="一番星の経費明細 経費種別 08 給与(人件費) を乗務員CDで畳んだ実支給">現状 (実支給)</th>
                   <th class="text-right py-1 pl-2">差</th>
                 </tr>
               </thead>
@@ -2471,7 +2528,9 @@ function downloadCustomerRouteCsv() {
                   <td class="text-right py-1 px-2">{{ yen(row.overtimeYen) }}</td>
                   <td class="text-right py-1 px-2">{{ yen(row.travelYen) }}</td>
                   <td class="text-right py-1 px-2 font-medium">{{ yen(row.totalYen) }}</td>
-                  <td class="text-right py-1 px-2 text-gray-500">{{ yen(row.currentYen) }}</td>
+                  <td class="text-right py-1 px-2" :class="row.currentEstimated ? 'text-amber-600 dark:text-amber-400' : 'text-gray-500'">
+                    {{ yen(row.currentYen) }}<span v-if="row.currentReason" :title="row.currentReason">*</span>
+                  </td>
                   <td
                     class="text-right py-1 pl-2"
                     :class="row.diffYen !== null && row.diffYen < 0 ? 'text-red-600 dark:text-red-400' : ''"
@@ -2488,7 +2547,7 @@ function downloadCustomerRouteCsv() {
                   <td class="text-right py-1 px-2">{{ yen(wageMixTotals.overtimeYen) }}</td>
                   <td class="text-right py-1 px-2">{{ yen(wageMixTotals.travelYen) }}</td>
                   <td class="text-right py-1 px-2">{{ yen(wageMixTotals.totalYen) }}</td>
-                  <td class="text-right py-1 px-2 text-gray-500">{{ yen(wageMixTotals.currentYen) }}</td>
+                  <td class="text-right py-1 px-2" :class="wageMixTotals.estimatedDrivers.length > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-gray-500'">{{ yen(wageMixTotals.currentYen) }}</td>
                   <td
                     class="text-right py-1 pl-2"
                     :class="wageMixTotals.diffYen < 0 ? 'text-red-600 dark:text-red-400' : ''"
@@ -2503,11 +2562,17 @@ function downloadCustomerRouteCsv() {
             ({{ wageMixTotals.missingDrivers.join('・') }}) は<b>金額を出していません</b> — 0 分として計算すると
             「働いていないから安い」という嘘の数字になるためです。この人たちの旅費 {{ yen(wageMixTotals.missingTravelYen) }} も合計に入っていません
           </p>
+          <p v-if="wageMixTotals.estimatedDrivers.length > 0" class="text-xs text-amber-600 dark:text-amber-400 mt-1">
+            ⚠ <b>実支給を引けなかった乗務員 {{ wageMixTotals.estimatedDrivers.length }} 人</b>
+            ({{ wageMixTotals.estimatedDrivers.join('・') }}) の現状は<b>推計 (旅費の母数 ＋ 一律残業代 {{ yen(ESTIMATED_FLAT_OVERTIME_YEN) }})</b> です
+            (<code>*</code> を付けた行)。<b>0 円には倒していません</b> — 0 を現状として出すと「試算 − 現状」の差が丸ごと嘘になるためです
+          </p>
           <p class="text-xs text-gray-400 mt-1">
             基本給 = <template v-if="wageMix.method === 'hours'">法定内時間 (実働 − 時間外) × 単価</template><template v-else>日額 × 稼働日数</template>。
             残業 = (時間外 × 1.25 ＋ 深夜 × 0.25) × <template v-if="wageMix.method === 'hours'">単価</template><template v-else>日額 ÷ 8</template>。
             旅費 = 運行手当テーブルの {{ travelRateLabel(wageMix.travelRate) }}。
-            現状 (推計) = 旅費の母数 ＋ 一律残業代。
+            <b>現状 (実支給)</b> = 一番星の経費明細の<b>経費種別 08 給与(人件費)</b> を乗務員CDで畳んだ額
+            (車輌をまたぐ乗務員は行が分かれるので合算しています)。<b>過払いも調整せずそのまま</b>出します。
             <b>総額を現状に合わせることは要件にしていません</b> — 残業に応じて総額が動くのが判例上の要請のためです (最高裁 2020-03-30)。
             旅費を走行距離に比例させる案は採れません (手当 ¥4,500 で走行 0km の便が実在するため)。
           </p>
