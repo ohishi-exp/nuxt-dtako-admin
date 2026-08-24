@@ -457,6 +457,13 @@ export interface MinWageSection<T> {
  *   2026-04 の本番データで 0200 の乗務員が 本社 → 諸富 → 大阪 → 本社 → 北九州 →
  *   大阪 と割れて出たので、営業所単位のまとめに直した
  * - 所属コードをまったく持たない営業所 (再取り込み前) は営業所名順で区分の末尾へ
+ *
+ * ★ **`attrsOf` は同じ行に同じ値を返すこと** (Refs #825)。1 回の呼び出しの中で 2 回呼ぶ
+ *   — 営業所の順位 (`branchRank`) を作る走査と、行を並べる比較関数の中で。順位の索引は
+ *   **この関数の中でこの `rows` から作る**ので呼び元からは差し替えられないが、`attrsOf`
+ *   が呼ぶたび違う営業所を返すと索引と比較がずれる。**その形は fallback では救えない**
+ *   (比較関数の推移律が壊れて並びが不定になる) ので、索引の欠けを既定値で埋める書き方は
+ *   置かない。本番の呼び元はどちらも Map 引き / プロパティ読みで純粋。
  */
 export function groupMinWageRows<T>(
   rows: readonly T[],
@@ -488,11 +495,12 @@ export function groupMinWageRows<T>(
     const bn = ba?.branchName ?? ''
     const inf = Number.POSITIVE_INFINITY
     // `branchRank` は**この `rows` の全行**を同じ式 (`attrsOf(row)?.branchName ?? ''`) で
-    // 舐めて作り、`sort` の対象は区画の行 = 舐めた行の部分集合なので、`byRow` が見る
-    // 営業所名は必ずキーに在る。以前ここに書いてあった `?? Infinity` は**構造上通らない
-    // 死に分岐**だったので落とした (Refs #825) — 通らない fallback が残っていると、
-    // 下の `branchCode ?? inf` (**実際に効いている** 「所属コードを持たない営業所は末尾」)
-    // と見分けが付かない。
+    // 舐めて作る**関数内の索引** (引数ではないので、呼び元が別の索引を渡すことはできない)。
+    // `sort` の対象は区画の行 = 舐めた行の部分集合なので、`byRow` が見る営業所名は必ず
+    // キーに在る。以前ここに書いてあった `?? Infinity` は**構造上通らない死に分岐**
+    // だったので落とした (Refs #825) — 通らない fallback が残っていると、下の
+    // `branchCode ?? inf` (**実際に効いている** 「所属コードを持たない営業所は末尾」) と
+    // 見分けが付かない。唯一の前提 (`attrsOf` が同じ行に同じ値を返す) は上の doc に書いた。
     return cmpNum(branchRank.get(an)!, branchRank.get(bn)!)
       || an.localeCompare(bn, 'ja')
       || cmpNum(aa?.branchCode ?? inf, ba?.branchCode ?? inf)
