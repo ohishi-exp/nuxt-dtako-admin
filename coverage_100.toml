@@ -518,6 +518,16 @@ branches = true
 path = "app/utils/margin-r2.ts"
 branches = true
 
+# コード版の決め方だけを切り出した **import を 1 つも持たない** ファイル (Refs #826)。
+# `nuxt.config.ts` が `ciBuildCodeVersion` を直接 import してビルド時定数を組むため、
+# 依存を持たせられない (持たせると設定の読み込みが画面側の依存グラフを引きずり込む)。
+# **タグ以外のビルド (staging = `main` push / preview / ローカル) で空文字になり、
+# それが `unknown` に倒れる**ことをテストが固定している — `main` は中身が動き続ける
+# 名前なので、版として記録すると「いつ変わったか」を辿れなくなる。
+[[files]]
+path = "app/utils/code-version.ts"
+branches = true
+
 [[files]]
 path = "server/api/profit/margin-summary.post.ts"
 branches = true

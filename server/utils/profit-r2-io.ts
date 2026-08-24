@@ -59,6 +59,12 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
  * `codeVersion` が「この数字を作った版」だからで、上書きすると作った版が消える。
  * **渡さなければ customMetadata は従来どおり**で、空文字や undefined は混ぜない
  * (呼び出し側が `resolveCodeVersion` で `unknown` に倒してから渡す)。
+ *
+ * 返す `versionKey` は **`latest` がいま指している版のキー** (Refs #826)。新しい版を
+ * 書いたときはそれ自身、内容が同じで版を増やさなかったときは**既にある版のキー**を
+ * customMetadata から読んで返す — 画面が「どの版になったか」を人に見せるため
+ * (「保存した」とだけ出すと、増えなかった回にどの版と同じなのか分からない)。
+ * `versionKey` を持たない古い保存 (この機能より前に書かれたもの) では空文字。
  */
 export async function putVersionedProfit(
   bucket: R2BucketLite,
@@ -68,7 +74,7 @@ export async function putVersionedProfit(
   hashInput: string,
   fetchedAt: string,
   codeVersion?: string,
-): Promise<{ changed: boolean, sha256: string }> {
+): Promise<{ changed: boolean, sha256: string, versionKey: string }> {
   const hash = await sha256Hex(new TextEncoder().encode(hashInput))
   const bytes = new TextEncoder().encode(body)
   const latest = await bucket.head(latestKey)
@@ -81,7 +87,7 @@ export async function putVersionedProfit(
         ...(codeVersion ? { lastVerifiedCodeVersion: codeVersion } : {}),
       },
     })
-    return { changed: false, sha256: hash }
+    return { changed: false, sha256: hash, versionKey: latest.customMetadata?.versionKey ?? '' }
   }
   const options: R2PutOptions = {
     httpMetadata: { contentType: 'application/json' },
@@ -89,12 +95,13 @@ export async function putVersionedProfit(
       sha256: hash,
       fetchedAt,
       lastVerifiedAt: fetchedAt,
+      versionKey,
       ...(codeVersion ? { codeVersion } : {}),
     },
   }
   await bucket.put(latestKey, bytes, options)
   await bucket.put(versionKey, bytes, options)
-  return { changed: true, sha256: hash }
+  return { changed: true, sha256: hash, versionKey }
 }
 
 /** R2 list を cursor で全件回す。 */

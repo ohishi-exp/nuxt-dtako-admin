@@ -16,6 +16,7 @@
  * IO (R2 read/write) はここに置かない。R2 binding は Nitro server route からしか
  * 触れないので `server/api/profit/margin-summary.post.ts` が持つ (`profit-r2.ts` と同じ分け方)。
  */
+import { resolveCodeVersion } from './code-version'
 import type { MarginCache, MarginTotals } from './margin'
 import type { ProfitR2Paths } from './profit-r2'
 
@@ -42,28 +43,11 @@ export function marginR2Paths(ym: string): ProfitR2Paths {
 // --- コード版 ---
 
 /**
- * ビルド時定数が入らなかったときの版。**空文字や `undefined` を版に混ぜない**ため、
- * 「不明」を 1 つの文字列に倒す (preview / staging / ローカル dev はすべてこれ)。
+ * コード版の決め方は `code-version.ts` (import を 1 つも持たない) が持つ —
+ * `nuxt.config.ts` がビルド時定数を組むために直接 import する必要があるため。
+ * ここからは**そのまま re-export** して、粗利側の呼び出し元が輸入元を意識しないで済むようにする。
  */
-export const UNKNOWN_CODE_VERSION = 'unknown'
-
-/**
- * ビルド時に埋めた `GITHUB_REF_NAME` (例 `v0.0.517`) を版として使える形にする。
- *
- * **同じ入力でもロジックが変われば数字は動く**ので、版には「どのコードが出した数字か」が
- * 要る。タグリリース以外のビルド (preview / staging / ローカル) では値が無いので、
- * **空文字・空白・非文字列はすべて `unknown`** に倒す — 落とすのではなく「不明」と記録する
- * (キーが消えると「昔の版か、埋め忘れか」を後から区別できない)。
- *
- * **画面 (client bundle) 側とサーバー route 側の両方で通す。** 数字を計算するのは画面
- * なので版の出どころも画面だが、古いタブが開きっぱなしの端末から何が飛んでくるか
- * 分からない — 受け取る側でも同じ関数で正規化して、空文字を版に混ぜない。
- */
-export function resolveCodeVersion(raw: unknown): string {
-  if (typeof raw !== 'string') return UNKNOWN_CODE_VERSION
-  const trimmed = raw.trim()
-  return trimmed === '' ? UNKNOWN_CODE_VERSION : trimmed
-}
+export { UNKNOWN_CODE_VERSION, resolveCodeVersion, ciBuildCodeVersion } from './code-version'
 
 // --- 保存する形 ---
 
@@ -181,6 +165,25 @@ export interface MarginSummarySaveResult {
   changed: boolean
   savedAt: string
   codeVersion: string
+  /**
+   * **`latest` がいま指している版の R2 キー**。新しい版を書いた回はそれ自身、
+   * 版が増えなかった回は**同じ内容だった既存の版**。この機能より前に書かれた
+   * 保存には無いので空文字になりうる。
+   */
+  versionKey: string
+}
+
+/**
+ * 版の R2 キーから、人に見せる版の名前 (`v-20260824T102030`) を取り出す。
+ * **キーそのものを画面に出さない** — `profit/{ym}/margin-summary/` の部分は
+ * 画面が既に月として出しているぶんの重複で、長いだけで読めない。
+ * 空文字 (版キーを持たない古い保存) は空文字のまま返す。
+ */
+export function marginVersionLabel(versionKey: string): string {
+  // `lastIndexOf` は見つからなければ -1 なので、`/` が無いときは丸ごと残る。
+  // (`split('/').pop()` だと **到達しない** `?? ''` を書くことになるので使わない。)
+  const base = versionKey.slice(versionKey.lastIndexOf('/') + 1)
+  return base.endsWith('.json') ? base.slice(0, -'.json'.length) : base
 }
 
 /**
@@ -196,9 +199,13 @@ export function marginSummarySaveNote(result: MarginSummarySaveResult | null, er
       + '他の端末からは見えず、いつ変わったかも追えません。'
   }
   if (result === null) return ''
+  // **どの版になったかを名前で出す。**「保存しました」だけだと、版が増えなかった回に
+  // どの版と同じなのかが人に分からない (版キーを持たない古い保存では名前が出せない)。
+  const label = marginVersionLabel(result.versionKey)
+  const version = label === '' ? '' : ` ${label}`
   const tail = 'いつ変わったかは R2 の版で追えます (端末のキャッシュは表示を速くするための写しです)。'
   if (result.changed) {
-    return `この集計を R2 に新しい版として残しました (コード版 ${result.codeVersion})。${tail}`
+    return `この集計を R2 に新しい版${version} として保存しました (コード版 ${result.codeVersion})。${tail}`
   }
-  return `この集計は R2 の最新版と同じ内容だったので、版は増やしていません (コード版 ${result.codeVersion})。${tail}`
+  return `この集計は前回の版${version} から変わっていないので、版は増やしていません (コード版 ${result.codeVersion})。${tail}`
 }

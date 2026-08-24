@@ -1,4 +1,6 @@
 // https://nuxt.com/docs/api/configuration/nuxt-config
+import { ciBuildCodeVersion } from './app/utils/code-version'
+
 /** wrangler dev のポート (dev-login-local-verify skill)。relay と front worker を
  * 同時に立てる時だけ NUXT_DEV_FRONT_PORT で分ける。 */
 const relayPort = process.env.NUXT_DEV_RELAY_PORT || '8787'
@@ -8,13 +10,11 @@ const frontPort = process.env.NUXT_DEV_FRONT_PORT || '8787'
  * **この bundle を作ったコードの版** (`v0.0.517`)。粗利の集計を R2 に版管理で残すとき
  * (Refs #826)、「同じ入力でもロジックが変われば数字は動く」ぶんを区別するために刻む。
  *
- * GitHub Actions は全ての step に `GITHUB_REF_TYPE` / `GITHUB_REF_NAME` を渡すので、
- * **タグリリース (`v*` push) のビルドだけ**が値を持つ。**branch のビルド
- * (preview / staging / ローカル) は空文字**にする — `main` や branch 名を版として
- * 記録すると、中身が動き続ける名前を「版」と読んでしまう。空文字は保存側が
- * `resolveCodeVersion` で `unknown` に倒すので、undefined も空文字も版には混ざらない。
+ * 決め方は `app/utils/code-version.ts` が持つ (**import を 1 つも持たないファイル**に
+ * 分けてあるのは、ここから直接 import しても画面側の依存グラフを引きずり込まないため)。
+ * **タグ以外のビルドで空文字になること**はテストが固定している。
  */
-const codeVersion = process.env.GITHUB_REF_TYPE === 'tag' ? (process.env.GITHUB_REF_NAME || '') : ''
+const codeVersion = ciBuildCodeVersion(process.env.GITHUB_REF_TYPE, process.env.GITHUB_REF_NAME)
 
 export default defineNuxtConfig({
   compatibilityDate: '2025-07-15',
