@@ -1,5 +1,6 @@
 /**
- * 一番星マッチ率検証スナップショットの取得 (Refs #330 PR3)。
+ * 検証スナップショットの取得 (Refs #330 PR3、**#859 より前の名前は「一番星マッチ率検証
+ * スナップショット」**)。
  *
  * GET /api/profit/snapshot?ym=&vehicle=&unkoNo=&segmentId= → 保存済みなら
  * `latest.json` を返す (ProfitPanel の確認状態復元用)。未保存は 404。

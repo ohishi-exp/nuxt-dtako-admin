@@ -12,8 +12,10 @@
  * 正規化するだけで、**空文字や undefined を版に混ぜない**。
  *
  * 作りは `snapshot.post.ts` (検証スナップショット) と同じ。**別の口にしてある**のは
- * 突合が 2 系統あるためで、混ぜると `/profit/monthly` のマッチ率が粗利の数字を
- * 読み始める (map skill「突合は 2 系統ある — 混ぜない」)。
+ * 突合が 2 系統あるためで、混ぜると**保存済み検証一覧**が粗利の集計をスナップショットとして
+ * 読み始める (map skill「突合は 2 系統ある — 混ぜない」。**#850 で実際に踏んだ形**で、
+ * #856 の `isProfitSnapshotKey` が今はそこを弾く)。**#859 でマッチ率の月次比較が消えた後も
+ * この境界は要る** — 読み手が一覧に変わっただけで、混ぜたときの壊れ方は同じ。
  */
 import type { H3Event } from 'h3'
 import { defineEventHandler, readBody, createError } from 'h3'
