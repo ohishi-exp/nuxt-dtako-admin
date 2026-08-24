@@ -49,6 +49,21 @@ describe('/profit/monthly の保存済み検証一覧', () => {
     expect(w.text()).not.toContain('読めていません')
   })
 
+  // #859: 「一番星マッチ率検証 (月次)」の比較セクションは廃止した。#849 で書き込みを
+  // 止めた結果、分子 (確認済み合計) が凍結する一方で分母 (一番星月計、毎回ライブ) だけが
+  // 増え続け、「マッチできていない量が増え続けている」という誤診を生む形だったため。
+  // **この画面から `/api/profit/monthly` を叩かないこと**まで見る (route ごと消えており、
+  // 叩けば 404 になる)。
+  it('マッチ率の比較セクションは出ず、/api/profit/monthly も叩かない', async () => {
+    fetchMock.mockResolvedValue(listResult())
+    const w = mountPage()
+    await flushPromises()
+    expect(w.text()).not.toContain('一番星マッチ率検証')
+    expect(w.text()).not.toContain('一番星 月計')
+    expect(w.text()).not.toContain('確認済み合計')
+    expect(fetchMock.mock.calls.every(([url]) => url !== '/api/profit/monthly')).toBe(true)
+  })
+
   it('一覧そのものを読めなかったときは前の件数を持ち越さない', async () => {
     fetchMock.mockResolvedValueOnce(listResult({ unreadable: 3 }))
     const w = mountPage()

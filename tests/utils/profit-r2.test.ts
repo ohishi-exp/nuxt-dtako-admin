@@ -6,7 +6,6 @@ import {
   profitVersionTimestamp,
   appendProfitHistoryJsonl,
   monthRange,
-  summarizeMonthly,
   toSnapshotListItem,
   sortSnapshotListBySavedAtDesc,
   isProfitSnapshotKey,
@@ -15,7 +14,6 @@ import {
   type ProfitSnapshotSlip,
   type ProfitSnapshot,
 } from '~/utils/profit-r2'
-import type { VehicleDailySlip } from '~/utils/ichiban'
 
 describe('profitR2Paths', () => {
   it('ym/vehicleCode/unkoNo/segmentId から latest/version/history のキーを組み立てる', () => {
@@ -123,92 +121,6 @@ function profitSnapshot(overrides: Partial<ProfitSnapshot> = {}): ProfitSnapshot
   }
 }
 
-function ichibanSlip(overrides: Partial<VehicleDailySlip> = {}): VehicleDailySlip {
-  return {
-    saleDate: '2026-06-21',
-    vehicleNumber: '8504',
-    customerCode: '000001',
-    customerName: '㈱田浦畜産',
-    originAreaName: '長崎県長崎市',
-    destAreaName: '福岡県北九州市',
-    origin: '釧路',
-    dest: '福岡県北九州市',
-    isSubcontracted: false,
-    amount: 65000,
-    itemCode: '',
-    itemName: '',
-    quantity: 0,
-    unitPrice: 0,
-    unit: '',
-    rowId: 'row-1',
-    ...overrides,
-  }
-}
-
-describe('summarizeMonthly', () => {
-  it('一番星月計 (全伝票合算) と確認済み合計・差額を計算する', () => {
-    const ichibanRows = [ichibanSlip({ amount: 65000 }), ichibanSlip({ rowId: 'row-2', amount: 20000 })]
-    const snapshots = [profitSnapshot({ confirmedAmount: 65000 })]
-    const result = summarizeMonthly(ichibanRows, snapshots)
-    expect(result.ichibanTotal).toBe(85000)
-    expect(result.confirmedTotal).toBe(65000)
-    expect(result.diff).toBe(20000)
-    expect(result.snapshotCount).toBe(1)
-  })
-
-  it('両方 exact なら exact に集計する', () => {
-    const snapshots = [profitSnapshot({ confirmedSlips: [snapshotSlip({ originMatch: 'exact', destMatch: 'exact' })] })]
-    const result = summarizeMonthly([], snapshots)
-    expect(result.matchCounts).toEqual({ exact: 1, partial: 0, none: 0 })
-  })
-
-  it('片方でも partial なら partial に集計する', () => {
-    const snapshots = [profitSnapshot({ confirmedSlips: [snapshotSlip({ originMatch: 'exact', destMatch: 'partial' })] })]
-    const result = summarizeMonthly([], snapshots)
-    expect(result.matchCounts).toEqual({ exact: 0, partial: 1, none: 0 })
-  })
-
-  it('destMatch が none なら none に集計する (originMatch が partial でも none 優先)', () => {
-    const snapshots = [profitSnapshot({ confirmedSlips: [snapshotSlip({ originMatch: 'partial', destMatch: 'none' })] })]
-    const result = summarizeMonthly([], snapshots)
-    expect(result.matchCounts).toEqual({ exact: 0, partial: 0, none: 1 })
-  })
-
-  it('originMatch が none なら none に集計する', () => {
-    const snapshots = [profitSnapshot({ confirmedSlips: [snapshotSlip({ originMatch: 'none', destMatch: 'exact' })] })]
-    const result = summarizeMonthly([], snapshots)
-    expect(result.matchCounts).toEqual({ exact: 0, partial: 0, none: 1 })
-  })
-
-  it('originMatch が exact でも destMatch が exact でなければ partial (AND の左辺true・右辺false)', () => {
-    const snapshots = [profitSnapshot({ confirmedSlips: [snapshotSlip({ originMatch: 'exact', destMatch: 'partial' })] })]
-    const result = summarizeMonthly([], snapshots)
-    expect(result.matchCounts).toEqual({ exact: 0, partial: 1, none: 0 })
-  })
-
-  it('originMatch が exact でなければ destMatch が exact でも partial (AND の左辺false)', () => {
-    const snapshots = [profitSnapshot({ confirmedSlips: [snapshotSlip({ originMatch: 'partial', destMatch: 'exact' })] })]
-    const result = summarizeMonthly([], snapshots)
-    expect(result.matchCounts).toEqual({ exact: 0, partial: 1, none: 0 })
-  })
-
-  it('スナップショット・一番星行がどちらも空でも壊れない', () => {
-    const result = summarizeMonthly([], [])
-    expect(result).toEqual({ ichibanTotal: 0, confirmedTotal: 0, diff: 0, matchCounts: { exact: 0, partial: 0, none: 0 }, snapshotCount: 0 })
-  })
-
-  it('複数スナップショット・複数伝票を横断して集計する', () => {
-    const snapshots = [
-      profitSnapshot({ confirmedAmount: 65000, confirmedSlips: [snapshotSlip({ rowId: 'a', originMatch: 'exact', destMatch: 'exact' })] }),
-      profitSnapshot({ confirmedAmount: 20000, confirmedSlips: [snapshotSlip({ rowId: 'b', originMatch: 'none', destMatch: 'none' })] }),
-    ]
-    const result = summarizeMonthly([ichibanSlip({ amount: 100000 })], snapshots)
-    expect(result.confirmedTotal).toBe(85000)
-    expect(result.matchCounts).toEqual({ exact: 1, partial: 0, none: 1 })
-    expect(result.snapshotCount).toBe(2)
-  })
-})
-
 describe('toSnapshotListItem', () => {
   it('確認済み伝票から一覧表示用の要約を作る', () => {
     const snapshot = profitSnapshot({
@@ -251,6 +163,24 @@ describe('toSnapshotListItem', () => {
     const snapshot = profitSnapshot({ confirmedSlips: [snapshotSlip({ customerName: '' })] })
     const item = toSnapshotListItem(snapshot)
     expect(item.customerNames).toEqual([])
+  })
+
+  // `combinedMatchLevel` の 3 段を**一覧側から**固定する。#859 で `summarizeMonthly` を
+  // 消したので、この関数がリポジトリ内で唯一この畳み方を通す口になった
+  // (収支パネルの根拠バッジ #858 は `profit-panel-legs.ts` 側で別に固定してある)。
+  it('積地が none なら none に数える (卸地が exact でも none 優先)', () => {
+    const snapshot = profitSnapshot({ confirmedSlips: [snapshotSlip({ originMatch: 'none', destMatch: 'exact' })] })
+    expect(toSnapshotListItem(snapshot).matchCounts).toEqual({ exact: 0, partial: 0, none: 1 })
+  })
+
+  it('卸地が none なら none に数える (積地が partial でも none 優先)', () => {
+    const snapshot = profitSnapshot({ confirmedSlips: [snapshotSlip({ originMatch: 'partial', destMatch: 'none' })] })
+    expect(toSnapshotListItem(snapshot).matchCounts).toEqual({ exact: 0, partial: 0, none: 1 })
+  })
+
+  it('積地が exact でも卸地が exact でなければ partial に数える', () => {
+    const snapshot = profitSnapshot({ confirmedSlips: [snapshotSlip({ originMatch: 'exact', destMatch: 'partial' })] })
+    expect(toSnapshotListItem(snapshot).matchCounts).toEqual({ exact: 0, partial: 1, none: 0 })
   })
 })
 

@@ -14,7 +14,8 @@
  * binding 未設定は 503、fetch 自体の失敗 (tunnel down 等) は 502 で弾く。
  *
  * CF Access トークン付与ロジック本体は `server/utils/ichiban-upstream.ts` に集約
- * (server/api/profit/monthly.get.ts と共有、Refs #330 PR4)。
+ * (もとは server/api/profit/monthly.get.ts と共有していたが、そちらは #859 で廃止。
+ * Refs #330 PR4)。
  */
 import type { H3Event } from 'h3'
 import { defineEventHandler, getRequestURL, getRouterParam, createError, setResponseStatus, setHeader } from 'h3'

@@ -24,7 +24,7 @@ const navigation = [
   { label: '日報編集', icon: 'i-lucide-file-edit', to: '/daily-report-edit' },
   { label: '拘束CSV取得', icon: 'i-lucide-timer', to: '/restraint-fetch' },
   { label: '拘束×賃金', icon: 'i-lucide-japanese-yen', to: '/restraint-wage' },
-  { label: '一番星マッチ率検証', icon: 'i-lucide-scale', to: '/profit/monthly' },
+  { label: '保存済み検証一覧', icon: 'i-lucide-clipboard-list', to: '/profit/monthly' },
   { label: '類似運行検索・比較', icon: 'i-lucide-search', to: '/profit/compare' },
   { label: '運行手当', icon: 'i-lucide-coins', to: '/profit/allowance' },
   { label: '粗利', icon: 'i-lucide-trending-up', to: '/profit/margin' },
