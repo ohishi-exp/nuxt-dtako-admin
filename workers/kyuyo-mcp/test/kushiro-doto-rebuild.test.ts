@@ -238,6 +238,28 @@ describe('addRebuildLeg', () => {
     expect(totals.estimatedLegs).toBe(0)
   })
 
+  it('卸地を運行終了で代用した便は数える (実測の卸地と区別できるようにする)', () => {
+    const totals = emptyRebuildTotals()
+    addRebuildLeg(totals, leg({ unloadFromOperationEnd: true }))
+    addRebuildLeg(totals, leg())
+    expect(totals.estimatedLegs).toBe(2)
+    expect(totals.substitutedUnloadLegs).toBe(1)
+    // **推定の値そのものには効かない** — 座標が同じなら距離も同じ。
+    const measuredOnly = emptyRebuildTotals()
+    addRebuildLeg(measuredOnly, leg())
+    addRebuildLeg(measuredOnly, leg())
+    expect(totals.destToLoadKm).toBe(measuredOnly.destToLoadKm)
+    expect(totals.destToDepotKm).toEqual(measuredOnly.destToDepotKm)
+  })
+
+  it('代用の印が付いていても座標が欠けていれば数えない (母集団は推定に入った便だけ)', () => {
+    const totals = emptyRebuildTotals()
+    addRebuildLeg(totals, leg({ unloadPoint: null, unloadFromOperationEnd: true }))
+    expect(totals.missingLegs).toBe(1)
+    expect(totals.estimatedLegs).toBe(0)
+    expect(totals.substitutedUnloadLegs).toBe(0)
+  })
+
   it('時刻が読めない便は km も秒も数えない (速度が壊れるため)', () => {
     const totals = emptyRebuildTotals()
     // `null` (読めなかった) も `undefined` (列そのものが無い) も同じ扱い

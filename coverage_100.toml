@@ -354,6 +354,9 @@ branches = true
 # 三項 7 + `??` 相当 5 + 既定引数 1) すべて両側 OK** を実測してから登録した
 # (probe を 1 本刺して branches が 98.55% に落ちることを先に確認済み。V8 の未実行レンジも 0。
 # `sensitivityRow` の `drivers > 0` は到達しない分岐だったので、ガードごと外した)。
+# Refs #760 の 38 で `substitutedUnloadLegs` (卸地を運行終了で代用した便の数) を足した。
+# 数えるのは**推定に入った便だけ**なので、`addRebuildLeg` の新しい `if` は
+# 「代用あり」「代用あり かつ 座標欠け」「代用なし」の 3 本で両側を通してある。
 [[files]]
 path = "app/utils/kushiro-doto-rebuild.ts"
 branches = true
@@ -363,6 +366,11 @@ branches = true
 # 保存 (別キー) だけの pure util。**共有 fixture (道東 23 運行) に 1 バイトも違わず戻る**
 # ことをテストが固定している。
 # branches: BR() で包んだ instrumented コピーで**全分岐の両側**を実測してから登録。
+# Refs #760 の 38 で「降しの記録が無い最終便の卸地を運行終了で代用する」を足した。
+# 新しい分岐 (`legCount <= 0` / `operationEnd === null` / `最終便に卸地がある` /
+# `最終便の枠そのものが無い` / marker が `end` か) は**片側ずつ専用テストを置いてある**。
+# 到達しない分岐を 1 本刺すと v8 が branches 97.82% / 該当行 UNCOVERED を出すことを
+# probe で確認済み (2026-08-24)。
 [[files]]
 path = "app/utils/margin-rebuild-input.ts"
 branches = true

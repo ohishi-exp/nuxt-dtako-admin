@@ -2499,6 +2499,8 @@ function kushiroTotalsJson(totals: RebuildTotals, legsPerRun: number | null) {
     measured_deadhead_km: totals.deadheadKm,
     estimated_legs: totals.estimatedLegs,
     missing_legs: totals.missingLegs,
+    /** `estimated_legs` のうち、卸地を運行終了の位置で代用した便 (Refs #760 の 38)。 */
+    substituted_unload_legs: totals.substitutedUnloadLegs,
     comparable_measured_deadhead_km: totals.comparableDeadheadKm,
     rebuilt_deadhead_km: { obihiro: rebuilt("obihiro"), kushiro: rebuilt("kushiro") },
     rebuilt_minus_measured_km:
@@ -2610,6 +2612,13 @@ export const getKushiroBranchEstimateTool = {
       warnings.push(
         `座標が欠けた便が ${summary.totals.missingLegs} 本あります。**0km に倒さず推定から外している**ので、` +
           `推定の母集団は ${summary.totals.estimatedLegs} 便です`,
+      );
+    }
+    if (summary.totals.substitutedUnloadLegs > 0) {
+      warnings.push(
+        `推定の母集団 ${summary.totals.estimatedLegs} 便のうち ${summary.totals.substitutedUnloadLegs} 本は、` +
+          `**降しの記録が無い最終便**で卸地を**運行終了の位置で代用**しています (実測の卸地ではありません)。` +
+          `運行終了が中継拠点なら荷を降ろした場所そのものですが、そうでない運行では実際の卸地より手前になります`,
       );
     }
 

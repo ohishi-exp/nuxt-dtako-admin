@@ -100,6 +100,24 @@ describe('KushiroBranchPanel', () => {
     expect(doto.findAll(mark)).toHaveLength(0)
   })
 
+  it('卸地を運行終了で代用した便があれば件数を出し、行にも別の印を付ける (Refs #760 の 38)', () => {
+    const mark = 'span[title^="卸地を運行終了の位置で代用した便"]'
+    const substituted = operations.map(op => ({
+      ...op,
+      legs: op.legs.map(l => ({ ...l, unloadFromOperationEnd: true })),
+    }))
+    const w = mountPanel(propsFor(substituted))
+    expect(w.text()).toContain('降しの記録が無い最終便')
+    expect(w.text()).toContain('運行終了の位置を卸地として代用')
+    const tables = w.findAll('table')
+    expect(tables[1]!.findAll(mark).length).toBeGreaterThan(0)
+    expect(tables[2]!.findAll(mark).length).toBeGreaterThan(0)
+    // 代用が 1 本も無ければ注記も印も出ない (共有 fixture はぜんぶ実測)
+    const measured = mountPanel(propsFor(operations))
+    expect(measured.text()).not.toContain('運行終了の位置を卸地として代用')
+    expect(measured.findAll(mark)).toHaveLength(0)
+  })
+
   it('つまみを動かすと 便/日 を親へ返す', async () => {
     const w = mountPanel(propsFor(operations))
     const range = w.get('input[type="range"]')

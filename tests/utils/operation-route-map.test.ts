@@ -79,7 +79,7 @@ function T(s: string): number {
   return parseEventDatetimeToTs(s)!
 }
 
-const EMPTY_ROUTE: OperationRoute = { segments: [], markers: [], pointCount: 0, droppedRows: 0, windows: [] }
+const EMPTY_ROUTE: OperationRoute = { segments: [], markers: [], pointCount: 0, droppedRows: 0, windows: [], legCount: 0 }
 
 describe('buildOperationRoute', () => {
   it('便 2 本: 積前・便間・降後が回送、積み → 最後の降し が売上走行。便番号は extractOperationIdle と同じ本数', () => {
@@ -259,6 +259,23 @@ describe('buildOperationRoute', () => {
   it('行が無ければ空', () => {
     expect(buildOperationRoute(HEADERS, [])).toEqual(EMPTY_ROUTE)
   })
+
+  it('legCount は `extractOperationIdle` と同じ便の本数 (marker の legSeq の最大値ではない)', () => {
+    const route = buildOperationRoute(HEADERS, TWO_LEGS)
+    expect(route.legCount).toBe(extractOperationIdle(HEADERS, TWO_LEGS).legKmDetail.length)
+    expect(route.legCount).toBe(2)
+  })
+
+  it('最後の便の積みの GPS が無効でも legCount は減らない (marker は出ないが便はある)', () => {
+    const rows = TWO_LEGS.map(r => [...r])
+    // 2 便目の積みだけ GPS 無効にする。marker が出なくなるので `legSeq` の最大値は 1。
+    const loadAt = rows.findIndex((r, i) => r[0] === '積み' && i > 3)
+    rows[loadAt] = [...rows[loadAt]!]
+    rows[loadAt]![7] = '0'
+    const route = buildOperationRoute(HEADERS, rows)
+    expect(Math.max(...route.markers.filter(m => m.kind === 'load').map(m => m.legSeq!))).toBe(1)
+    expect(route.legCount).toBe(2)
+  })
 })
 
 describe('buildOperationRoute / windows (NET780 軌跡を切る時間窓)', () => {
@@ -400,10 +417,14 @@ describe('pickLegsFromRoute', () => {
     expect(picked.windows.map(w => `${w.kind}${w.legSeq}`)).toEqual(['deadhead2', 'haul2', 'deadhead2'])
   })
 
-  it('seqs が空なら segments も markers も windows も空 (pointCount 0、droppedRows はそのまま)', () => {
+  it('seqs が空なら segments も markers も windows も空 (pointCount 0、droppedRows / legCount はそのまま)', () => {
     const withDropped: OperationRoute = { ...route, droppedRows: 3 }
     const picked = pickLegsFromRoute(withDropped, [])
-    expect(picked).toEqual({ segments: [], markers: [], pointCount: 0, droppedRows: 3, windows: [] })
+    expect(picked).toEqual({
+      segments: [], markers: [], pointCount: 0, droppedRows: 3, windows: [], legCount: route.legCount,
+    })
+    // 絞り込んでも「元の運行が何便だったか」は変わらない (`droppedRows` と同じ扱い)。
+    expect(route.legCount).toBe(2)
   })
 
   it('NET780 軌跡 (trackHaul / trackDeadhead) も legSeq が一致すれば haul / deadhead と同じに残る', () => {

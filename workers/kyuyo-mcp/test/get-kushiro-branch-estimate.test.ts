@@ -335,6 +335,23 @@ describe("引数", () => {
     }
   });
 
+  it("卸地を運行終了で代用した便は件数と警告を返す (実測の卸地と混ぜたまま黙らせない)", async () => {
+    const substituted = (OPERATIONS as unknown as Array<{ legs: unknown[] }>).map((op) => ({
+      ...op,
+      legs: op.legs.map((l) => ({ ...(l as object), unloadFromOperationEnd: true })),
+    })) as unknown as Args["operations"];
+    const res = await run(env(), baseArgs({ operations: substituted }));
+    expect(res.summary.missing_legs).toBe(0);
+    expect(res.summary.substituted_unload_legs).toBe(res.summary.estimated_legs);
+    expect(res.warnings.some((w) => w.includes("運行終了の位置で代用"))).toBe(true);
+    // 代用は印であって座標ではない — 推定の数字は 1 つも動かない
+    const measured = await run(env(), baseArgs());
+    expect(measured.summary.substituted_unload_legs).toBe(0);
+    expect(measured.warnings.some((w) => w.includes("運行終了の位置で代用"))).toBe(false);
+    expect(res.summary.rebuilt_deadhead_km).toEqual(measured.summary.rebuilt_deadhead_km);
+    expect(res.summary.depot_diff_km).toBe(measured.summary.depot_diff_km);
+  });
+
   it("対象便が 1 本も無ければ推定を出さず、警告を出す", async () => {
     const res = await run(
       env(),

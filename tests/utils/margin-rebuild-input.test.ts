@@ -65,42 +65,132 @@ const TWO_LEGS: string[][] = [
   ev('運行終了', OBIHIRO, OBIHIRO, '帯広市'),
 ]
 
+/** 降しが 1 行も無い便を最後に置いた運行 (`rows` の末尾に 運行終了 を足すかは呼び側)。 */
+const NO_UNLOAD_TAIL: string[][] = [
+  ...TWO_LEGS.slice(0, 7), // 1 便目 (釧路→士幌) + 2 便目の積みまで
+  ev('運転', KUSHIRO, OBIHIRO),
+  ev('運行終了', OBIHIRO, OBIHIRO, '帯広市'),
+]
+
+/** 実測の卸地。 */
+function measured(load: Gps | null, unload: Gps) {
+  return { loadPoint: load === null ? null : pt(load), unloadPoint: pt(unload), unloadFromOperationEnd: false }
+}
+
 describe('legPointsByLegSeq', () => {
   it('積み・降しの marker を便ごとに畳む (最後の降しが卸地)', () => {
-    const points = legPointsByLegSeq(buildOperationRoute(HEADERS, TWO_LEGS).markers)
+    const points = legPointsByLegSeq(buildOperationRoute(HEADERS, TWO_LEGS))
     expect([...points]).toEqual([
-      [1, { loadPoint: pt(KUSHIRO), unloadPoint: pt(SHIHORO) }],
-      [2, { loadPoint: pt(KUSHIRO), unloadPoint: pt(SHIMIZU) }],
+      [1, measured(KUSHIRO, SHIHORO)],
+      [2, measured(KUSHIRO, SHIMIZU)],
     ])
   })
 
-  it('運行開始・運行終了 (legSeq が null) は入らない', () => {
-    const markers = buildOperationRoute(HEADERS, TWO_LEGS).markers
-    expect(markers.filter(m => m.legSeq === null).map(m => m.kind)).toEqual(['start', 'end'])
-    expect(legPointsByLegSeq(markers).size).toBe(2)
+  it('運行開始・運行終了 (legSeq が null) は便として入らない', () => {
+    const route = buildOperationRoute(HEADERS, TWO_LEGS)
+    expect(route.markers.filter(m => m.legSeq === null).map(m => m.kind)).toEqual(['start', 'end'])
+    expect(legPointsByLegSeq(route).size).toBe(2)
   })
 
   it('legSeq は `extractOperationIdle` の便と同じ数え方 (便の切り方を二重化しない)', () => {
     const idle = extractOperationIdle(HEADERS, TWO_LEGS)
-    const points = legPointsByLegSeq(buildOperationRoute(HEADERS, TWO_LEGS).markers)
+    const points = legPointsByLegSeq(buildOperationRoute(HEADERS, TWO_LEGS))
     expect([...points.keys()]).toEqual(idle.legKmDetail.map((_, i) => i + 1))
-  })
-
-  it('降しの無い便は卸地が null (0 に倒さない)', () => {
-    const rows = TWO_LEGS.slice(0, 7) // 2 便目の積みまで (降し無し)
-    const points = legPointsByLegSeq(buildOperationRoute(HEADERS, rows).markers)
-    expect(points.get(2)).toEqual({ loadPoint: pt(KUSHIRO), unloadPoint: null })
   })
 
   it('積みの GPS が無効な便は積地が null', () => {
     const rows = TWO_LEGS.map(r => [...r])
     rows[2] = ev('積み', { ...KUSHIRO, valid: '0' }, { ...KUSHIRO, valid: '0' }, '釧路市')
-    const points = legPointsByLegSeq(buildOperationRoute(HEADERS, rows).markers)
-    expect(points.get(1)).toEqual({ loadPoint: null, unloadPoint: pt(SHIHORO) })
+    const points = legPointsByLegSeq(buildOperationRoute(HEADERS, rows))
+    expect(points.get(1)).toEqual(measured(null, SHIHORO))
   })
 
   it('GPS 列の無い CSV は空 (marker が 1 つも無い)', () => {
-    expect(legPointsByLegSeq(buildOperationRoute(['イベント名', '区間距離'], [['積み', '10']]).markers).size).toBe(0)
+    expect(legPointsByLegSeq(buildOperationRoute(['イベント名', '区間距離'], [['積み', '10']])).size).toBe(0)
+  })
+})
+
+// --- 降しの記録が無い最終便に 運行終了 を代用する (Refs #760 の 38) ---
+
+describe('legPointsByLegSeq / 運行終了を卸地として代用', () => {
+  it('降しの記録が無い最終便は 運行終了 の位置が卸地になり、代用の印が付く', () => {
+    const points = legPointsByLegSeq(buildOperationRoute(HEADERS, NO_UNLOAD_TAIL))
+    expect(points.get(2)).toEqual({
+      loadPoint: pt(KUSHIRO),
+      unloadPoint: pt(OBIHIRO),
+      unloadFromOperationEnd: true,
+    })
+    // **1 便目 (実測の降しがある便) には触らない。**
+    expect(points.get(1)).toEqual(measured(KUSHIRO, SHIHORO))
+  })
+
+  it('降しが実測できている最終便は代用しない (実測が最優先)', () => {
+    const points = legPointsByLegSeq(buildOperationRoute(HEADERS, TWO_LEGS))
+    expect(points.get(2)!.unloadPoint).toEqual(pt(SHIMIZU))
+    expect(points.get(2)!.unloadFromOperationEnd).toBe(false)
+  })
+
+  it('★ 途中便には適用しない — 降しが無いのが最終便でなければ卸地は null のまま', () => {
+    const rows: string[][] = [
+      ev('運行開始', OBIHIRO, OBIHIRO, '帯広市'),
+      ev('積み', KUSHIRO, KUSHIRO, '釧路市'), // 便 1: 降し無し (途中便)
+      ev('運転', KUSHIRO, SHIHORO),
+      ev('積み', SHIHORO, SHIHORO, '士幌町'), // 便 2: 降しあり (最終便)
+      ev('運転', SHIHORO, SHIMIZU),
+      ev('降し', SHIMIZU, SHIMIZU, '清水町'),
+      ev('運行終了', OBIHIRO, OBIHIRO, '帯広市'),
+    ]
+    const points = legPointsByLegSeq(buildOperationRoute(HEADERS, rows))
+    expect(points.get(1)).toEqual({ loadPoint: pt(KUSHIRO), unloadPoint: null, unloadFromOperationEnd: false })
+    expect(points.get(2)).toEqual(measured(SHIHORO, SHIMIZU))
+  })
+
+  it('運行終了 の GPS が無効なら代用しない (0 に倒さない)', () => {
+    const rows = NO_UNLOAD_TAIL.map(r => [...r])
+    rows[rows.length - 1] = ev('運行終了', { ...OBIHIRO, valid: '0' }, { ...OBIHIRO, valid: '0' }, '帯広市')
+    const points = legPointsByLegSeq(buildOperationRoute(HEADERS, rows))
+    expect(points.get(2)).toEqual({ loadPoint: pt(KUSHIRO), unloadPoint: null, unloadFromOperationEnd: false })
+  })
+
+  it('運行終了 の行が無くても代用しない', () => {
+    const points = legPointsByLegSeq(buildOperationRoute(HEADERS, NO_UNLOAD_TAIL.slice(0, -1)))
+    expect(points.get(2)).toEqual({ loadPoint: pt(KUSHIRO), unloadPoint: null, unloadFromOperationEnd: false })
+  })
+
+  it('積みの GPS も無効な最終便は、枠ごと作って卸地だけ入る (積地は null のまま = 欠測)', () => {
+    const rows = NO_UNLOAD_TAIL.map(r => [...r])
+    rows[6] = ev('積み', { ...KUSHIRO, valid: '0' }, { ...KUSHIRO, valid: '0' }, '釧路市')
+    const route = buildOperationRoute(HEADERS, rows)
+    // marker は 1 つも出ていないのに、便は 2 本ある (`legCount` で判定している証拠)。
+    expect(route.markers.filter(m => m.legSeq === 2)).toEqual([])
+    expect(route.legCount).toBe(2)
+    expect(legPointsByLegSeq(route).get(2)).toEqual({
+      loadPoint: null,
+      unloadPoint: pt(OBIHIRO),
+      unloadFromOperationEnd: true,
+    })
+  })
+
+  it('積みが 1 行も無い運行 (legCount 0) は 運行終了 があっても代用しない', () => {
+    const rows: string[][] = [
+      ev('運行開始', OBIHIRO, OBIHIRO, '帯広市'),
+      ev('運転', OBIHIRO, KUSHIRO),
+      ev('運行終了', KUSHIRO, KUSHIRO, '釧路市'),
+    ]
+    const route = buildOperationRoute(HEADERS, rows)
+    expect(route.legCount).toBe(0)
+    expect(route.markers.some(m => m.kind === 'end')).toBe(true)
+    expect(legPointsByLegSeq(route).size).toBe(0)
+  })
+
+  it('km には 1 つも効かない — 代用しても `extractOperationIdle` の内訳は同じ', () => {
+    const idle = extractOperationIdle(HEADERS, NO_UNLOAD_TAIL)
+    // 降しの無い便の走行は `otherKm`、帰庫 (`postUnloadKm`) は 0 のまま。
+    expect(idle.postUnloadKm).toBe(0)
+    expect(idle.otherKm).toBeGreaterThan(0)
+    expect(legPointsByLegSeq(buildOperationRoute(HEADERS, NO_UNLOAD_TAIL)).get(2)!.unloadFromOperationEnd).toBe(true)
+    // 代用の前後で内訳が動いていないこと (この util は CSV を書き換えない)。
+    expect(extractOperationIdle(HEADERS, NO_UNLOAD_TAIL)).toEqual(idle)
   })
 })
 
@@ -140,7 +230,11 @@ function marginOperationOf(op: RebuildOperationInput): MarginOperationInput {
 
 /** fixture の座標を `legPointsByLegSeq` が返すのと同じ形に戻す。 */
 function pointsOf(op: RebuildOperationInput): Map<number, LegPoints> {
-  return new Map(op.legs.map(l => [l.seq, { loadPoint: l.loadPoint ?? null, unloadPoint: l.unloadPoint ?? null }]))
+  return new Map(op.legs.map(l => [l.seq, {
+    loadPoint: l.loadPoint ?? null,
+    unloadPoint: l.unloadPoint ?? null,
+    unloadFromOperationEnd: l.unloadFromOperationEnd ?? false,
+  }]))
 }
 
 const marginInputs = fixture.map(marginOperationOf)
@@ -195,7 +289,7 @@ describe('buildRebuildOperationInputs', () => {
     const op = fixture[0]!
     const holed = new Map(pointsByUnko)
     holed.set(op.unkoNo, new Map([...pointsOf(op)].map(([seq, p]) =>
-      [seq, seq === 1 ? { loadPoint: null, unloadPoint: p.unloadPoint } : p])))
+      [seq, seq === 1 ? { ...p, loadPoint: null } : p])))
     const built = buildRebuildOperationInputs([marginInputs[0]!], holed)[0]!
     expect(built.firstLoadPoint).toBeNull()
     expect(built.legs[2]!.loadPoint).toEqual(op.legs[2]!.loadPoint)
@@ -205,7 +299,7 @@ describe('buildRebuildOperationInputs', () => {
     const op = fixture[0]!
     const holed = new Map(pointsByUnko)
     holed.set(op.unkoNo, new Map([...pointsOf(op)].map(([seq, p]) =>
-      [seq, seq === 3 ? { loadPoint: p.loadPoint, unloadPoint: null } : p])))
+      [seq, seq === 3 ? { ...p, unloadPoint: null } : p])))
     expect(buildRebuildOperationInputs([marginInputs[0]!], holed)[0]!.lastUnloadPoint).toBeNull()
   })
 })
@@ -222,6 +316,27 @@ describe('serializeLegPoints / parseLegPoints', () => {
     expect(parsed!.ym).toBe('2026-07')
     expect(parsed!.points).toEqual(pointsByUnko)
     expect(buildRebuildOperationInputs(marginInputs, parsed!.points)).toEqual(fixture)
+  })
+
+  it('代用の印も往復する (保存から復元した画面でも「代用 N 本」が出る)', () => {
+    const points = new Map([['u', new Map([
+      [1, { loadPoint: pt(KUSHIRO), unloadPoint: pt(OBIHIRO), unloadFromOperationEnd: true }],
+      [2, measured(KUSHIRO, SHIHORO)],
+    ])]])
+    const parsed = parseLegPoints(serializeLegPoints({ ym: '2026-07', points }))
+    expect(parsed!.points).toEqual(points)
+  })
+
+  it('印を持たない旧 v1 の保存は「代用なし」として読む (キーは上げないので捨てない)', () => {
+    const raw = JSON.stringify({
+      ym: '2026-07',
+      points: { u: [{ seq: 1, loadPoint: { lat: 43, lng: 143 }, unloadPoint: { lat: 42, lng: 144 } }] },
+    })
+    expect(parseLegPoints(raw)!.points.get('u')!.get(1)).toEqual({
+      loadPoint: { lat: 43, lng: 143 },
+      unloadPoint: { lat: 42, lng: 144 },
+      unloadFromOperationEnd: false,
+    })
   })
 
   it('空・壊れた JSON・配列・オブジェクトでないものは null', () => {
@@ -246,6 +361,8 @@ describe('serializeLegPoints / parseLegPoints', () => {
       ym: '2026-07',
       points: { u: [{ seq: 1, loadPoint: { lat: 999, lng: 0 }, unloadPoint: 'x' }] },
     }))
-    expect(parsed!.points.get('u')!.get(1)).toEqual({ loadPoint: null, unloadPoint: null })
+    expect(parsed!.points.get('u')!.get(1)).toEqual({
+      loadPoint: null, unloadPoint: null, unloadFromOperationEnd: false,
+    })
   })
 })
