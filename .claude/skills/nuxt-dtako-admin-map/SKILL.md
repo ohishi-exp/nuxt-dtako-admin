@@ -20,7 +20,7 @@ dtako (デジタコ運行データ) 管理画面。Nuxt 4 + Nitro `cloudflare_mo
 |---|---|---|
 | **pages (運行系)** | `app/pages/{index,upload,scraper,net780}.vue` `operations/{index,[unko_no]}.vue` | 運行一覧 / アップロード / スクレイパ / NET780 生データビューア / 運行詳細 |
 | **pages (時間集計)** | `app/pages/{daily-hours/index,restraint-compare,restraint-report,restraint-fetch,y-time-export}.vue` | 日別時間 / 拘束時間 比較・レポート / 拘束CSV取得 (theearth F-ERS2010、下記) / Y時間 export UI |
-| **pages (粗利・突合)** | `app/pages/profit/{margin,allowance,monthly,compare}.vue` | 粗利 (売上−手当−経費) / 運行手当 / 検証スナップショットのマッチ率 月次 / 類似運行検索。**一番星の売上と便の突合はここが本体** (下記) |
+| **pages (粗利・突合)** | `app/pages/profit/{margin,allowance,monthly,compare}.vue` | 粗利 (売上−手当−経費) / 運行手当 / **保存済み検証一覧** (`monthly.vue`、過去の確認記録のアーカイブ。月次マッチ率の比較は #859 で廃止) / 類似運行検索。**一番星の売上と便の突合はここが本体** (下記) |
 | **pages (車両設定)** | `app/pages/vehicle-settings/{index,diff,history,unconfirmed}.vue` | デジタコ車両設定の閲覧・差分・履歴・未確認 |
 | **pages (管理/認証)** | `app/pages/{members,api-tokens,event-classifications,login}.vue` `auth/callback.vue` `ichiban-health.vue` | メンバ / API トークン / イベント分類 / login / 一番星ヘルスチェック (`/ichiban-health` — rust-ichibanboshi の既存 API と給与読み取り API を一括疎通確認、pure ロジックは `app/utils/ichiban-health.ts`、Refs #369) |
 | **pages (社内リモート)** | `app/pages/remote-app.vue` | ブラウザ内 RemoteApp ビューア (IronRDP/WASM、Refs #693)。**中継は Cloudflare Access が守る公開ホスト名へ直結** — Worker はデータ経路に居ない (下記) |
@@ -822,7 +822,7 @@ N:1 が現実に存在する (本番で 5 件、うち社員C 1619 鵜瀬裕一�
 |---|---|
 | `app/pages/profit/margin.vue` | **粗利 (売上 − 手当 − 経費)**。乗務員別の賃金構成・取引先別・経路・印刷まで全部ここ (Refs #760) |
 | `app/pages/profit/allowance.vue` | **運行手当** (デジタコ → 給与)。乗務員 → 運行 → 便 の 3 段。強制突合 (下記) を人が操作するのもここ |
-| `app/pages/profit/monthly.vue` | 車輌×月の**検証スナップショット**マッチ率サマリ (一番星側月計との差額・積地卸地マッチレベル内訳) |
+| `app/pages/profit/monthly.vue` | **保存済み検証一覧** (過去に人が確認して保存した**検証スナップショット**のアーカイブ。マッチレベルは保存時に焼き込んだ値)。**車輌×月のマッチ率サマリ (一番星側月計との差額) は #859 で廃止** — 分子だけ凍結し分母が増え続ける誤診を生むため。突合の現況は粗利タブ |
 | `app/pages/profit/compare.vue` | 類似運行検索。**一番星をインデックスに使う** (伝票で車番×日を確定してから dtako 運行を引く) |
 | `app/pages/operations/[unko_no].vue` | 運行詳細。便ごとの「粗利タブの計上額」を**映すだけ** + `ProfitPanel` + 「伝票から区間を提案」 |
 
@@ -838,7 +838,7 @@ N:1 が現実に存在する (本番で 5 件、うち社員C 1619 鵜瀬裕一�
    呼び元は `profit/margin.vue` と `profit/allowance.vue` の 2 つだけ
 2. **`ProfitPanel.vue` + `scoreVehicleDailySlips` (`app/utils/ichiban.ts`) — 検証スナップショット。**
    **常に車番のみ・受け皿なし・明細の一意性なし**で候補を出し、人がチェックした伝票を R2 に残す。
-   `confirmedAmount` の消費者は **`/profit/monthly` のマッチ率表示だけ** — 粗利にも印刷にも波及しない
+   `confirmedAmount` の消費者は **`/profit/monthly` の保存済み一覧の表示だけ** (マッチ率表示は #859 で廃止) — 粗利にも印刷にも波及しない
 
 **「1 車輌・1 月に絞って 1 を回し直す」は不可** (プールの消費順序が変わって粗利タブと違う額が出る)。
 運行詳細は突合を 1 行もやらず、粗利タブが別キーに書いた要約 (`app/utils/operation-leg-sales.ts`) を
@@ -974,7 +974,6 @@ R2 スナップショットを force-match へ自動移植してはいけない 
 | `GET /api/profit/snapshots?ym=&vehicle=&limit=` | スナップショット一覧 (`SnapshotListItem`) |
 | `GET /api/profit/margin-snapshots?ym=` | **粗利の集計の版**の一覧 (`v-*.json` だけ・新しい順。金額は新しい方 20 本ぶんだけ・`head()` は叩かない) |
 | `GET /api/profit/margin-snapshot?ym=&version=` | **粗利の集計の版 1 本の本文** (差分ビューが 2 回叩く。**差分のロジックは持たない**。キーはクエリで受けず `marginR2Paths` で組み直す) |
-| `GET /api/profit/monthly?vehicle=&ym=` | 一番星側月計 vs `confirmedAmount` 合算 の差額 + マッチレベル内訳 |
 | `GET /api/ichiban/api/sales/vehicle-daily` | 一番星 売上明細 (proxy 経由、client 側も `api/` を含めて呼ぶ) |
 | `GET /api/ichiban/api/costs/vehicle-daily` | 一番星 経費明細 (給与・燃料等)。**`limit` 未指定だと上流が 500 件で切る** |
 

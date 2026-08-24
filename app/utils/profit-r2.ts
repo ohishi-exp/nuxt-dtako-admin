@@ -1,5 +1,7 @@
 /**
- * 一番星マッチ率検証結果の R2 永続化 (Refs #330 PR3)。
+ * 一番星の売上と便の**検証スナップショット**の R2 永続化 (Refs #330 PR3)。
+ * (**#859 より前は「一番星マッチ率検証結果」と呼んでいた** — その「マッチ率」を出す
+ * 月次比較は廃止し、残るのは `/profit/monthly` の**保存済み検証一覧**だけ。)
  *
  * ProfitPanel で確認 (チェック) した伝票の一覧を「検証スナップショット」として
  * R2 に保存し、リロードで確認状態が消えないようにする。バージョン管理は
@@ -12,7 +14,7 @@
  * R2 binding にアクセスできないため、`server/utils/profit-r2-io.ts` に分離する。
  */
 import { epochToYmd } from './ichiban'
-import type { LocationMatchLevel, ProfitEfficiency, VehicleDailySlip } from './ichiban'
+import type { LocationMatchLevel, ProfitEfficiency } from './ichiban'
 import type { SelectedRowsLocationRange, SelectedRowsSummary } from './event-data-table'
 
 // --- キー設計 ---
@@ -132,22 +134,7 @@ export interface ProfitSnapshot {
   savedAt: string
 }
 
-// --- 月次検証 (Refs #330 PR4) ---
-
-/**
- * 月キー (YYYY-MM) から vehicle-daily API に渡す半開区間の from/to を算出する。
- * `vehicleDailyDateRange` (選択区間の epoch 秒から算出) とは入力が異なるため別関数にする。
- */
-export function monthRange(ym: string): { from: string, to: string } {
-  const [yStr, mStr] = ym.split('-')
-  const y = Number(yStr)
-  const m = Number(mStr)
-  const from = `${yStr}-${mStr}-01`
-  const nextY = m === 12 ? y + 1 : y
-  const nextM = m === 12 ? 1 : m + 1
-  const to = `${nextY}-${String(nextM).padStart(2, '0')}-01`
-  return { from, to }
-}
+// --- 突合レベル (Refs #330 PR4) ---
 
 export interface MonthlyMatchCounts {
   exact: number
@@ -155,46 +142,11 @@ export interface MonthlyMatchCounts {
   none: number
 }
 
-export interface MonthlySummary {
-  /** 一番星側の月計 (vehicle-daily を月全体で合算、月計一致ルール適用済み)。 */
-  ichibanTotal: number
-  /** 保存済み検証スナップショットの確認済み金額合計。 */
-  confirmedTotal: number
-  /** ichibanTotal - confirmedTotal (未確認分・誤マッチ等の差異)。 */
-  diff: number
-  /** 確認済み伝票の積地・卸地マッチレベル内訳 (どちらかが none なら none、両方 exact なら exact、それ以外 partial)。 */
-  matchCounts: MonthlyMatchCounts
-  /** 集計対象になった検証スナップショット数 (= 確認済み運行区間の数)。 */
-  snapshotCount: number
-}
-
 /** 積地・卸地の突合レベルを1つに統合する。片方でも none なら根拠なし、両方 exact のみ exact、それ以外 partial。 */
 export function combinedMatchLevel(originMatch: LocationMatchLevel, destMatch: LocationMatchLevel): LocationMatchLevel {
   if (originMatch === 'none' || destMatch === 'none') return 'none'
   if (originMatch === 'exact' && destMatch === 'exact') return 'exact'
   return 'partial'
-}
-
-/**
- * 車輌+月単位で、一番星側の月計と保存済み検証スナップショットの確認済み金額を
- * 突き合わせる (Task #1: 実データでのマッチ率検証の集計本体)。
- */
-export function summarizeMonthly(ichibanRows: VehicleDailySlip[], snapshots: ProfitSnapshot[]): MonthlySummary {
-  const ichibanTotal = ichibanRows.reduce((sum, r) => sum + r.amount, 0)
-  const confirmedTotal = snapshots.reduce((sum, s) => sum + s.confirmedAmount, 0)
-  const matchCounts: MonthlyMatchCounts = { exact: 0, partial: 0, none: 0 }
-  for (const snapshot of snapshots) {
-    for (const slip of snapshot.confirmedSlips) {
-      matchCounts[combinedMatchLevel(slip.originMatch, slip.destMatch)]++
-    }
-  }
-  return {
-    ichibanTotal,
-    confirmedTotal,
-    diff: ichibanTotal - confirmedTotal,
-    matchCounts,
-    snapshotCount: snapshots.length,
-  }
 }
 
 // --- 保存済みスナップショット一覧 (Refs #330、「マッチ率よりまず保存したやつから検索したい」要望) ---

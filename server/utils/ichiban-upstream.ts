@@ -2,7 +2,8 @@
  * rust-ichibanboshi (一番星売上 API、CAPE#01 経由) への upstream fetch 共通処理
  * (Refs #330 PR4)。CF Access Service Token 付与ロジックが
  * `server/api/ichiban/[...path].get.ts` (thin proxy) と `server/api/profit/monthly.get.ts`
- * (月次集計、vehicle-daily を直接叩く) の両方で重複していたため抽出した。
+ * (月次集計) の両方で重複していたため抽出した。**後者は #859 で廃止したので、いまの
+ * 呼び出し元は thin proxy だけ。**
  */
 
 interface SecretBinding { get(): Promise<string> }

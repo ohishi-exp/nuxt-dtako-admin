@@ -68,7 +68,8 @@ export const OPERATION_LEG_SALES_KEY = 'dtako:operations:leg-sales:v1'
  *
  * **#849 より前は本当に別物だった** — あちらは②(車番だけで引いた候補を NFKC で
  * スコアリングする `scoreVehicleDailySlips`) の**検証スナップショット**で、
- * `/profit/monthly` のマッチ率にしか効かず、粗利にも印刷にも乗らなかった。
+ * `/profit/monthly` のマッチ率にしか効かず、粗利にも印刷にも乗らなかった
+ * (**そのマッチ率の月次比較も #859 で廃止**。あの画面に残るのは保存済み検証一覧だけ)。
  * **②は #858 (PR-4a) で撤去済み** — 根拠バッジだけが `combinedMatchLevel` に寄せた形で
  * 残っている。**この doc と `LEG_SALES_PANEL_NOTE` が②の説明のままだと、
  * 「収支パネルで結んでも粗利には乗らない」という嘘になる** (#851 で実際に本番へ出た)。

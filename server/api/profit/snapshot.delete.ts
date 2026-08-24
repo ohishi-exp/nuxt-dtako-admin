@@ -1,5 +1,5 @@
 /**
- * 一番星マッチ率検証スナップショットの削除 (Refs #330 保存済み一覧からの削除アクション)。
+ * 検証スナップショットの削除 (Refs #330 保存済み一覧からの削除アクション)。
  *
  * DELETE /api/profit/snapshot?ym=&vehicle=&unkoNo=&segmentId= → `latest.json` を削除し
  * 一覧 (`/api/profit/snapshots`) から消す。`v-*.json` の版履歴と history.jsonl は監査証跡

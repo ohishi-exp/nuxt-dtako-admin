@@ -1,5 +1,6 @@
 /**
- * 一番星マッチ率検証スナップショット (Refs #330 PR3) の R2 IO。
+ * 検証スナップショット (Refs #330 PR3) の R2 IO。**#859 でマッチ率の月次比較が消えたので、
+ * この IO の読み手は保存済み検証一覧と ProfitPanel の復元だけ。**
  * バージョン管理ロジックは workers/dtako-scraper-relay/src/dtako-scraper-relay-do.ts の
  * putVersionedR2/listAllR2 と同じ設計 (sha256差分検知、latest+v-{ts})。DO の private
  * メソッドで export されておらず import できないため、Nitro server route 用に移植する。
