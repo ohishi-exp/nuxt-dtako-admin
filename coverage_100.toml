@@ -464,3 +464,18 @@ branches = true
 [[files]]
 path = "app/utils/profit-wage-formula.ts"
 branches = true
+
+# 経路の行 (`広尾 → 士幌`) から**その売上が出た運行**へ辿る素材 (Refs #818)。
+# `RouteSummary.legRefs` (`{ unkoNo, seq }`) を運行NO で畳んで**運行日の昇順**に並べ、
+# 便の番号を文字にするだけ。**粗利の数字には 1 円も効かない** (`margin.ts` は 1 行も
+# 触っていない。`legRefs` は行の数字に効かない「便の居場所」で、地図も同じものを読む)。
+# **運行日が引けない運行を 0 や空文字に潰さず `null` で末尾へ寄せる**分岐が中核なので、
+# その両側を数えることに意味がある (空文字にするとどの日付より小さく、月初に並ぶ)。
+# branches: BR() 計測器を probe (片側だけ通る `if` / 両側通る `if` / 右を評価しない
+# `??` を仕込んだ .ts) で**両方向に**検証 — 片側の probe が `[true]`、両側の probe が
+# `[true,false]`、`??` の左が `[true]` を返すことを実測してから、instrumented コピー
+# (TypeScript の AST で機械挿入) でテストを流し、**9 分岐すべてが true/false 両方を
+# 通る**ことを数えた (v8 も 100%/100%)。
+[[files]]
+path = "app/utils/margin-route-operations.ts"
+branches = true
