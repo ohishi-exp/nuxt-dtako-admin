@@ -354,6 +354,26 @@ import {
   type Net780ArchiveItem,
   type Net780ArchiveResult,
 } from "./net780-archive";
+import {
+  LineworksBotClient,
+  parseLineworksBotConfig,
+  type LineworksBotConfig,
+} from "./lineworks-client";
+import {
+  fetchBranchDailyReport,
+  generateDailyReportPdf,
+  type BranchDailyReport,
+} from "./daily-report-pdf";
+import {
+  registerPdf as netprintRegisterPdf,
+  waitForReservation as netprintWaitForReservation,
+} from "./netprint-client";
+import {
+  formatDateSlash,
+  runNetprintTargets,
+  type NetprintCronDeps,
+  type NetprintTarget,
+} from "./netprint-cron";
 
 /** `DTAKO_ACCOUNTS` (dtako-scraper の Rust 版と同一 JSON shape) の1エントリ。 */
 interface DtakoAccountRaw {
@@ -567,6 +587,13 @@ export interface RelayEnv {
    * 投入は CI (`dtako-scraper-relay-deploy.yml`)。
    */
   DTAKO_CONFIG_KV?: unknown;
+  /**
+   * LINE WORKS Bot の credential 一式 (JSON: client_id / client_secret /
+   * service_account / private_key / bot_id) の CF Secrets Store binding
+   * (Refs #874)。netprint cron の予約番号通知に使う。未設定/不正は
+   * `/cron/netprint` が 503 で fail-closed (`parseLineworksBotConfig`)。
+   */
+  LINEWORKS_BOT?: unknown;
   /**
    * ローカル開発専用: restraint viewer 経路 (Refs #272) の introspect を短絡して
    * この comp を許可する。`wrangler dev --var RESTRAINT_DEV_VIEWER_COMP:<comp>`
@@ -820,6 +847,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 自身からしか到達できない) は /cron/dtako/* と同じなのでこの並びに置く。
     if (url.pathname === "/cron/restraint-sync" && request.method === "POST") {
       return this.handleCronRestraintSync(request);
+    }
+
+    // 前日分の運転日報を netprint へ登録し予約番号を LINE WORKS へ通知する
+    // (Refs #874)。この worker 自身 (scheduled handler) からしか到達できない。
+    if (url.pathname === "/cron/netprint" && request.method === "POST") {
+      return this.handleCronNetprint(request);
     }
 
     // ETC 全アカウント一括実行 (kind=etc-all) のディスパッチャ DO インスタンス
@@ -4627,6 +4660,120 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       `https://relay.internal/restraint-api/kintai/fetch?month=${encodeURIComponent(month)}`,
     );
     return this.handleKintaiFetch(record, url);
+  }
+
+  /**
+   * POST /cron/netprint — body {comp_id, branch_cd, channel_id, branch_name?,
+   * date}。対象日 (前日 JST、計算は cron.ts) の運転日報を対象営業所に絞って
+   * PDF 化し、かんたんnetprint へ登録して予約番号を LINE WORKS へ通知する
+   * (Refs #874)。
+   *
+   * 反復・通知文・失敗の畳み方は pure な `netprint-cron.ts`
+   * (`runNetprintTargets`) — ここは theearth ログイン (`withTheearthLoginSession`)
+   * と #874-1〜3 のヘルパを deps として束ねる配線だけ。`scrapeQueue` で他の
+   * theearth ジョブと直列化しつつ、`/cron/dtako/reimport` と同じく応答は同期で
+   * 返す (scheduled handler の ctx.waitUntil が await する。netprint の status
+   * poll 込みで数分かかりうるが、202 + storage queue の機構 (`scrape-queue.ts`)
+   * は dtako スクレイプの進捗形に特化しているため持ち込まない)。
+   */
+  private async handleCronNetprint(request: Request): Promise<Response> {
+    let body: {
+      comp_id?: unknown;
+      branch_cd?: unknown;
+      channel_id?: unknown;
+      branch_name?: unknown;
+      date?: unknown;
+    };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return Response.json({ error: "JSON body が必要です" }, { status: 400 });
+    }
+    const compId = typeof body.comp_id === "string" ? body.comp_id : "";
+    const branchCd = typeof body.branch_cd === "string" ? body.branch_cd : "";
+    const channelId = typeof body.channel_id === "string" ? body.channel_id : "";
+    const branchName =
+      typeof body.branch_name === "string" && body.branch_name !== "" ? body.branch_name : undefined;
+    const date = typeof body.date === "string" ? body.date : "";
+    if (!compId || !branchCd || !channelId || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return Response.json(
+        { error: "comp_id / branch_cd / channel_id / date (YYYY-MM-DD) が必要です" },
+        { status: 400 },
+      );
+    }
+
+    const account = await this.resolveAccount(compId);
+    if (!account) {
+      return Response.json(
+        { error: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` },
+        { status: 500 },
+      );
+    }
+
+    // LINE WORKS credential — 未設定/不正なら実行前に fail-closed (通知できない
+    // まま netprint 登録だけ走る、を作らない)。Secrets Store binding は
+    // 「宣言はあるが解決できない」時に throw するので、それも同じ扱いに倒す
+    // (`handleCronDtakoReimport` の ICHIBAN secret と同じ)。
+    let botConfig: LineworksBotConfig;
+    try {
+      botConfig = parseLineworksBotConfig(await resolveSecretBinding(this.env.LINEWORKS_BOT));
+    } catch (err) {
+      console.error(
+        JSON.stringify({ netprint_cron: "lineworks-config-error", error: describeUnknownError(err) }),
+      );
+      return Response.json({ error: "LINEWORKS_BOT が未設定または不正です" }, { status: 503 });
+    }
+
+    const target: NetprintTarget = { branch_cd: branchCd, channel_id: channelId, branch_name: branchName };
+    return this.enqueueScrape(() =>
+      this.runNetprintJob(account, target, date, new LineworksBotClient(botConfig)),
+    );
+  }
+
+  /** netprint cron 1 target ぶんの実行 (`scrapeQueue` の直列化の中で呼ばれる)。 */
+  private async runNetprintJob(
+    account: DtakoAccountRaw,
+    target: NetprintTarget,
+    dateYmd: string,
+    bot: LineworksBotClient,
+  ): Promise<Response> {
+    const jobState = this.makeTheearthLoginJobState();
+    const deps: NetprintCronDeps<BranchDailyReport> = {
+      fetchReport: (d, branchCd) =>
+        this.withTheearthLoginSession(account, jobState, (jar) =>
+          fetchBranchDailyReport(jar, { dateJst: formatDateSlash(d), branchCd }),
+        ),
+      generatePdf: (report, branchName, d) =>
+        generateDailyReportPdf({
+          rows: report.rows,
+          workRows: report.workRows,
+          branchName,
+          dateJst: formatDateSlash(d),
+        }),
+      registerPdf: async (pdf, fileName) => {
+        const id = await netprintRegisterPdf(pdf, fileName);
+        const reservation = await netprintWaitForReservation(id);
+        return { printId: reservation.printId, endDate: reservation.endDate, page: reservation.page };
+      },
+      sendText: (channelId, text) => bot.sendText(channelId, text),
+    };
+    const results = await runNetprintTargets(deps, [target], dateYmd);
+    for (const result of results) {
+      const line = JSON.stringify({
+        netprint_cron: result.ok ? "done" : "error",
+        comp_id: account.comp_id,
+        date: dateYmd,
+        theearth_logins: jobState.logins.length,
+        ...result,
+      });
+      if (result.ok) console.log(line);
+      else console.error(line);
+    }
+    const ok = results.every((result) => result.ok);
+    return Response.json(
+      { ok, results, theearth_logins: jobState.logins.length },
+      { status: ok ? 200 : 502 },
+    );
   }
 
   /** 勤怠サマリ計算の入力 (所定マスタ・休日出勤の承認・社員のスコープ・夜勤者) を
