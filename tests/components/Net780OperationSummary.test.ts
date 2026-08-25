@@ -66,6 +66,30 @@ describe('Net780OperationSummary', () => {
       await flushPromises()
       expect(wrapper.find('a').attributes('href')).toBe('/net780?readingDate=2026-07-04')
     })
+
+    // Refs #873: **ボタンを黙って消さない。**「未アーカイブなので出せない」と語で言い、
+    // 同じ画面に出ている /net780 検索リンクへ誘導する。
+    it('未アーカイブでも zip の区画は消えず、出せない理由を語で言う', async () => {
+      const wrapper = createWrapper({ readingDate: '2026-07-04' })
+      await flushPromises()
+      expect(wrapper.find('[data-test="net780-zip"]').exists()).toBe(true)
+      expect(wrapper.find('[data-test="net780-zip-download"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="net780-zip-reason"]').text())
+        .toContain('まだアーカイブされていないため、zip を出せません')
+      // 誘導先 (/net780 検索) が同じ画面に出ていること。
+      expect(wrapper.find('a').attributes('href')).toContain('/net780?')
+    })
+  })
+
+  describe('取得に失敗したとき (Refs #873)', () => {
+    it('未アーカイブとは別の文言になり、赤字で出る', async () => {
+      vi.stubGlobal('$fetch', vi.fn().mockRejectedValue(new Error('boom')))
+      const wrapper = createWrapper()
+      await flushPromises()
+      const reason = wrapper.find('[data-test="net780-zip-reason"]')
+      expect(reason.text()).toBe('NET780 データの取得に失敗したため、zip を出せません')
+      expect(reason.classes().join(' ')).toContain('text-red-600')
+    })
   })
 
   describe('アーカイブ済み時の速度チャート ←→ キー操作', () => {
@@ -131,6 +155,52 @@ describe('Net780OperationSummary', () => {
       await svg.trigger('keydown', { key: 'ArrowLeft' })
       expect(wrapper.find('[data-test="net780-map"]').attributes('data-current-time'))
         .toBe(String(gpsPoints[1]!.ts))
+    })
+
+    // Refs #873: アーカイブ済みなら zip を出す。**原本を取り直す** (composable は
+    // `Net780ParseResult` しか持たない = 生バイトを常駐させない)。
+    it('zip はボタンを押したときに /api/net780/by-operation を叩き直し、運行NO 入りの名前で落とす', async () => {
+      const createObjectURL = vi.fn(() => 'blob:net780')
+      const revokeObjectURL = vi.fn()
+      vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+      const wrapper = createWrapper({ readingDate: date })
+      for (let i = 0; i < 10 && wrapper.find('[data-test="net780-zip-download"]').exists() === false; i++) {
+        await flushPromises()
+      }
+
+      const button = wrapper.find('[data-test="net780-zip-download"]')
+      expect(button.exists()).toBe(true)
+      // 「出せない理由」は出ない (出せるのだから)。
+      expect(wrapper.find('[data-test="net780-zip-reason"]').exists()).toBe(false)
+
+      const fetchMock = vi.mocked(globalThis.$fetch)
+      const before = fetchMock.mock.calls.length
+      const clicked: HTMLAnchorElement[] = []
+      const origCreate = document.createElement.bind(document)
+      vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
+        const el = origCreate(tag)
+        if (tag === 'a') {
+          const a = el as HTMLAnchorElement
+          a.click = () => { clicked.push(a) }
+        }
+        return el
+      })
+
+      await button.trigger('click')
+      await flushPromises()
+
+      const call = fetchMock.mock.calls[before]
+      expect(call?.[0]).toBe('/api/net780/by-operation')
+      // **原本 (R2 のバイト) をそのまま blob で受ける** — 解いて詰め直した zip ではない。
+      expect(call?.[1]).toMatchObject({
+        query: { operationNo: '2607030428090000001109' },
+        responseType: 'blob',
+      })
+      expect(clicked[0]?.download).toBe('net780-2607030428090000001109.zip')
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:net780')
+      vi.mocked(document.createElement).mockRestore()
+      vi.unstubAllGlobals()
     })
   })
 })

@@ -16,6 +16,7 @@ import {
   formatNet780Ts,
 } from '~/utils/net780'
 import type { Net780GpsPoint } from '~/utils/net780'
+import { net780ZipAvailability, net780ZipFileName } from '~/utils/operation-detail-view'
 
 const props = defineProps<{
   operationNo: string
@@ -44,6 +45,55 @@ const error = net780Data.error
 watch(() => props.operationNo, (v) => { if (v) net780Data.ensureLoaded() }, { immediate: true })
 
 const summary = computed(() => (result.value ? buildNet780Summary(result.value) : null))
+
+// --- NET780 生データ zip のダウンロード (Refs #873) ---------------------------
+//
+// **出すのは R2 の原本 (`/api/net780/by-operation` の応答そのもの)。**
+// `extractSingleOperationZip` を通した後の zip ではない。実測 (2026-08-25、
+// 運行 2607010121120000001318) で:
+//
+// | | bytes | 中身 |
+// |---|---|---|
+// | 原本 | **60,803** | `{車輌CD}/{運行開始日時}-{端末ID}-{車輌CD}/` の下に 8 ファイル (deflate) |
+// | `extractSingleOperationZip` 後 | 185,707 | フォルダを剥いだ 8 ファイルを平置き (JSZip 既定 = 無圧縮) |
+//
+// 原本は **1/3 のサイズ**で、**運行を識別するフォルダ名が残る**。「生データ」として
+// 渡すなら原本が正しい。
+//
+// **bytes は composable に持たせない。**押されたときに取り直す —
+// `useNet780OperationData` は `Net780ParseResult` を返すモジュール scope の cache
+// (evict 無し) で、そこへ運行ごとに数十〜数百 KB の生バイトを載せると開いた運行のぶん
+// だけ常駐する。ダウンロードは人が押したときだけの操作なので、取り直す方が安い
+// (**cache / dedup の方針にも 1 行も触らずに済む**)。
+const zip = computed(() => net780ZipAvailability(net780Data.status.value))
+const zipDownloading = ref(false)
+/** ダウンロードそのものの失敗 (取得状態 `error` とは別物なので別に持つ)。 */
+const zipError = ref<string | null>(null)
+
+async function downloadZip() {
+  zipDownloading.value = true
+  zipError.value = null
+  try {
+    const blob = await $fetch<Blob>('/api/net780/by-operation', {
+      query: { operationNo: props.operationNo },
+      responseType: 'blob',
+    })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    // zip の中に運行NO は出てこない (車輌CD と運行開始日時のフォルダ名だけ) ので、
+    // **外側のファイル名で運行NO が読める**ようにする。
+    a.download = net780ZipFileName(props.operationNo)
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+  catch (e) {
+    zipError.value = e instanceof Error ? e.message : 'zip のダウンロードに失敗しました'
+  }
+  finally {
+    zipDownloading.value = false
+  }
+}
 
 // --- 速度チャート (簡易 SVG polyline、外部ライブラリ非依存) + GPS 軌跡 (Google Map) ---
 // 暦日ごとに「チャート (クリック/ドラッグでシーク可能)」と「地図 (シーク位置を
@@ -154,6 +204,36 @@ function stepSeek(view: DailyView, delta: number) {
 
 <template>
   <div class="p-4 space-y-4">
+    <!-- NET780 生データ zip (Refs #873)。**どの状態でもこの行は消えない** —
+         ボタンが黙って消えると「この機能は無い」に読める。出せない状態は
+         `net780ZipAvailability` が 5 状態それぞれ別の文言で言う (未アーカイブは
+         下の検索リンクへ誘導する)。 -->
+    <div class="flex items-center gap-2 flex-wrap text-sm" data-test="net780-zip">
+      <span class="font-medium text-gray-700 dark:text-gray-300">NET780 生データ zip</span>
+      <button
+        v-if="zip.canDownload"
+        type="button"
+        class="rounded border border-gray-300 dark:border-gray-700 px-2 py-0.5 text-xs text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+        :disabled="zipDownloading"
+        data-test="net780-zip-download"
+        @click="downloadZip"
+      >
+        {{ zipDownloading ? 'ダウンロード中...' : 'zip をダウンロード' }}
+      </button>
+      <span
+        v-else
+        class="text-xs"
+        :class="zip.tone === 'error' ? 'text-red-600 dark:text-red-400' : 'text-gray-500'"
+        data-test="net780-zip-reason"
+      >{{ zip.reason }}</span>
+      <span v-if="zipError" class="text-xs text-red-600 dark:text-red-400" data-test="net780-zip-error">
+        {{ zipError }}
+      </span>
+      <span class="text-xs text-gray-400">
+        アーカイブされた原本をそのまま出します (中身は 車輌CD / 運行開始日時-端末ID-車輌CD のフォルダ)
+      </span>
+    </div>
+
     <div v-if="loading" class="flex items-center gap-2 text-sm text-gray-500">
       <UIcon name="i-lucide-loader-circle" class="animate-spin size-4" />
       NET780 データを取得中...

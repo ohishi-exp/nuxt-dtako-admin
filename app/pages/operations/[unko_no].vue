@@ -31,6 +31,18 @@ import {
   type OperationLegSalesR2,
 } from '~/utils/operation-leg-sales-r2'
 import { operationRunDate } from '~/utils/allowance-report'
+import {
+  buildOperationRoute,
+  buildOverlayTrack,
+  splitTrackByWindows,
+  parseRouteMapLayers,
+  serializeRouteMapLayers,
+  ROUTE_MAP_LAYERS_KEY,
+  type OperationRoute,
+  type RouteMapLayers,
+  type RouteSegment,
+} from '~/utils/operation-route-map'
+import { operationTrackNote } from '~/utils/operation-detail-view'
 
 const route = useRoute()
 const router = useRouter()
@@ -59,6 +71,13 @@ const allTabs: { key: CsvType | 'net780'; label: string }[] = [
 const activeTab = ref<CsvType | 'net780'>('events')
 const csvData = ref<Record<string, CsvJsonResponse>>({})
 const csvLoading = ref(false)
+/**
+ * CSV が**引けなかった**理由 (種類ごと)。`loadCsv` は失敗を空 CSV
+ * (`{ headers: [], rows: [] }`) で握り潰すので、これが無いと経路地図が
+ * 「取得に失敗した」と「GPS 列が無い / 行が無い」を**同じ見た目**で出してしまう
+ * (Refs #873)。表 (`EventDataTable` / `CsvDataTable`) の挙動は変えない — 読むだけ足す。
+ */
+const csvError = ref<Record<string, string>>({})
 
 // --- 便ごとの「粗利タブの計上額」 (突合一本化 PR-1、Refs #820) ---------------
 // **突合はここでやり直さない。** `reconcileVehicles` は明細のプールを順に消費するので、
@@ -155,6 +174,13 @@ const yen = (v: number) => `¥${Math.round(v).toLocaleString()}`
 onMounted(async () => {
   legSales.value = readLegSales()
   try {
+    // 地図のレイヤは粗利タブと同じキーを共有する (Refs #873)。読めない環境なら既定のまま。
+    routeMapLayers.value = parseRouteMapLayers(localStorage.getItem(ROUTE_MAP_LAYERS_KEY))
+  }
+  catch {
+    // localStorage が読めなくても地図は既定のレイヤで出る。
+  }
+  try {
     operations.value = await getOperation(unkoNo)
   } catch (e) {
     console.error('Failed to fetch operation:', e)
@@ -173,6 +199,9 @@ async function loadCsv(csvType: CsvType) {
     csvData.value[csvType] = await getOperationCsv(unkoNo, csvType)
   } catch (e) {
     console.error(`Failed to load ${csvType}:`, e)
+    // **引けなかったことを覚える** (Refs #873)。表は従来どおり空で出すが、経路地図は
+    // 「取得に失敗した」と「GPS が無い」を言い分けられるようになる。
+    csvError.value = { ...csvError.value, [csvType]: e instanceof Error ? e.message : String(e) }
     csvData.value[csvType] = { headers: [], rows: [] }
   } finally {
     csvLoading.value = false
@@ -394,6 +423,103 @@ const net780SearchLink = computed(() => buildNet780SearchLink({
   driverCd: net780DriverCd.value,
 }))
 
+// --- 運行全体の経路地図 (Refs #873) ------------------------------------------
+//
+// **粗利タブ (`margin.vue`) の運行行「地図」と同じものを、運行詳細からも開けるようにする。**
+// これまで運行詳細にあった地図は `EventSpeedMapPanel` (イベントタブで行を選んだときだけ出る
+// 速度カラー地図) だけで、**運行全体を便ごとに色分けした経路**は粗利タブにしかなかった。
+//
+// **どう出すか = ヘッダの常設ボタン → 既存 `OperationRouteMap.vue` をモーダルで開く。**理由:
+//
+// 1. `OperationRouteMap.vue` は `fixed inset-0` + 背景クリック + Esc の**モーダル前提の作り**。
+//    タブや常設パネルに埋めるにはあのコンポーネントを改造することになり、**粗利タブの地図の
+//    見た目まで動く** (触ってはいけない側に波及する)。**改造ゼロで再利用できるのはモーダルだけ**
+// 2. 経路地図は「運行全体」の話で、イベントタブの持ち物ではない。タブに紐づけず、どのタブから
+//    でも開ける常設ボタンにする
+//
+// **経路の組み立て・便の切り方・色分けは `operation-route-map.ts` (pure) が正**で、ここでは
+// 作り直さない — 画面の「便」とお金の「便」を別の意味にしないため。**追加の fetch も無い**
+// (イベントタブが既に読んでいる CSV をそのまま渡す。他タブから開いたときだけ `loadCsv` が 1 回)。
+const routeMapOpen = ref(false)
+const routeMapLoading = ref(false)
+
+/** 地図のレイヤ (`margin.vue` と同じ localStorage キーを共有 = 片方で切り替えたら両方に効く)。 */
+const routeMapLayers = ref<RouteMapLayers>(parseRouteMapLayers(null))
+
+function setRouteMapLayers(layers: RouteMapLayers) {
+  routeMapLayers.value = layers
+  try {
+    localStorage.setItem(ROUTE_MAP_LAYERS_KEY, serializeRouteMapLayers(layers))
+  }
+  catch {
+    // 保存できなくても今の地図は切り替わる (次に開いたとき既定に戻るだけ)。
+  }
+}
+
+/** イベントCSV から組み立てた運行全体の経路。CSV をまだ読んでいなければ null。 */
+const operationRoute = computed<OperationRoute | null>(() => {
+  const csv = csvData.value.events
+  return csv ? buildOperationRoute(csv.headers, csv.rows) : null
+})
+
+/**
+ * NET780 の道なり軌跡 (`margin.vue` の `fetchNet780Track` と同じ形)。アーカイブがある
+ * (`ready`) ときだけ、有効な GPS を便の時間窓で切って出す。
+ */
+const routeNet780Track = computed<RouteSegment[]>(() => {
+  const route = operationRoute.value
+  const result = net780Data.result.value
+  if (!route || net780Data.status.value !== 'ready' || result === null) return []
+  const points = filterValidGpsPoints(result.gps, result.events).map(p => ({ ts: p.ts, lat: p.lat, lng: p.lon }))
+  return splitTrackByWindows(points, route.windows)
+})
+
+/** NET780 が無い運行のための、重ね掛け行も混ぜたイベント軌跡 (同じ CSV から作る)。 */
+const routeEventTrack = computed<RouteSegment[]>(() => {
+  const csv = csvData.value.events
+  const route = operationRoute.value
+  if (!csv || !route) return []
+  return splitTrackByWindows(buildOverlayTrack(csv.headers, csv.rows), route.windows)
+})
+
+/**
+ * 軌跡の出どころを言う 1 行 (判断は pure 側 `operationTrackNote`)。
+ * **NET780 が無い運行で黙って線を消さない** — 消えると「走っていない」に読める。
+ */
+const routeTrackNote = computed(() => operationTrackNote({
+  status: net780Data.status.value,
+  net780Segments: routeNet780Track.value.length,
+  eventSegments: routeEventTrack.value.length,
+}))
+
+/** 地図に渡す経路 (イベント線 + 軌跡)。NET780 が採れた運行はそれを、無ければイベント軌跡を敷く。 */
+const routeMapRoute = computed<OperationRoute | null>(() => {
+  const route = operationRoute.value
+  if (!route) return null
+  const track = routeNet780Track.value.length > 0 ? routeNet780Track.value : routeEventTrack.value
+  return { ...route, segments: [...route.segments, ...track] }
+})
+
+const routeMapTitle = computed(() => {
+  const route = operationRoute.value
+  const head = `運行 ${unkoNo} (読取日 ${primary.value?.reading_date ?? '-'})`
+  return route ? `${head} — 便 ${route.legCount} 本` : head
+})
+
+/** イベントCSV が**引けなかった**ときだけ理由を出す (GPS が無いのとは別物)。 */
+const routeMapError = computed(() => csvError.value.events ?? null)
+
+async function openRouteMap() {
+  routeMapOpen.value = true
+  // イベントタブを開いていれば既に読み込み済み (`loadCsv` は冪等なので追加 fetch は無い)。
+  routeMapLoading.value = true
+  await loadCsv('events')
+  routeMapLoading.value = false
+  // NET780 は後から重なる (軌跡が来るまではイベント軌跡で描いておく)。
+  // dedup は composable 任せ (`ready` / `loading` は再 fetch しない)。
+  void net780Data.ensureLoaded()
+}
+
 async function handleDelete() {
   deleting.value = true
   try {
@@ -466,13 +592,24 @@ function formatDatetime(val: string | null): string {
             </div>
           </div>
 
-          <UButton
-            label="削除"
-            icon="i-lucide-trash-2"
-            color="error"
-            variant="outline"
-            @click="deleteConfirm = true"
-          />
+          <div class="flex items-center gap-2 shrink-0">
+            <!-- 運行全体の経路地図 (Refs #873)。**どのタブからでも開ける常設ボタン** —
+                 経路はイベントタブの持ち物ではなく運行全体の話なので、タブに紐づけない。
+                 中身は粗利タブと同じ `OperationRouteMap` (便ごとの色分けも同じ規則)。 -->
+            <UButton
+              label="経路地図"
+              icon="i-lucide-map"
+              variant="outline"
+              @click="openRouteMap"
+            />
+            <UButton
+              label="削除"
+              icon="i-lucide-trash-2"
+              color="error"
+              variant="outline"
+              @click="deleteConfirm = true"
+            />
+          </div>
         </div>
       </div>
 
@@ -607,6 +744,21 @@ function formatDatetime(val: string | null): string {
     <div v-else class="text-center py-12 text-gray-400">
       運行データが見つかりません
     </div>
+
+    <!-- 運行全体の経路地図 (Refs #873)。粗利タブと同じモーダル・同じレイヤ設定を共有する。
+         `net780-missing-count` は渡さない — NET780 の一括取得 (relay へ投げる) は粗利タブの
+         仕事で、ここでは**読むだけ**。 -->
+    <OperationRouteMap
+      v-if="routeMapOpen"
+      :route="routeMapRoute"
+      :title="routeMapTitle"
+      :loading="routeMapLoading"
+      :error="routeMapError"
+      :track-note="routeTrackNote.text"
+      :layers="routeMapLayers"
+      @close="routeMapOpen = false"
+      @update:layers="setRouteMapLayers"
+    />
 
     <EventSpeedMapPanel
       v-if="activeTab === 'events' && selectedEventRange"

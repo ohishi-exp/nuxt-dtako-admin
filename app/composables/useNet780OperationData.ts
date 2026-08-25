@@ -1,8 +1,13 @@
 /**
  * 運行No単位の NET780 生データ (ZIP fetch + wasm parse) を取得・キャッシュする
- * composable。`Net780OperationSummary.vue` (NET780タブ) と、イベントタブの行選択
- * → 速度カラー Map の両方から同じ運行Noで呼ばれうるため、モジュールスコープの
- * cache で dedup する (先に呼んだ方が fetch、以降は結果を再利用する)。
+ * composable。`Net780OperationSummary.vue` (NET780タブ)・イベントタブの行選択
+ * → 速度カラー Map・**ヘッダの「経路地図」の道なり軌跡** (Refs #873) と、同じ運行No で
+ * 複数箇所から呼ばれうるため、モジュールスコープの cache で dedup する
+ * (先に呼んだ方が fetch、以降は結果を再利用する)。
+ *
+ * **生の ZIP バイトはここに残さない** (`Net780ParseResult` だけ持つ)。NET780 タブの
+ * 「zip をダウンロード」は `/api/net780/by-operation` を**押されたときに叩き直す** —
+ * cache に evict が無いので、開いた運行のぶんだけ数十〜数百 KB が常駐するのを避ける。
  */
 import { extractSingleOperationZip, parseNet780Zip } from '~/utils/net780'
 import type { Net780ParseResult } from '~/utils/net780'
