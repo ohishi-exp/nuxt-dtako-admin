@@ -220,6 +220,44 @@ describe('EventDataTable', () => {
       expect(wrapper.text()).not.toContain('判定できなかった')
     })
 
+    // 差分レビューで実際に測られた 8 行をそのまま固定する (Refs #868 F1)。
+    // **既定で開くイベントタブに 252.9km の `連続運転` が居て、売上区間と同じ
+    // 塗りつぶしで「便1」と出ていた**のがこの回帰の中身。お金 (`extractOperationIdle`)
+    // はその 252.9km を `overlayKm` に逃がして便1 の `haulKm` に入れていない。
+    it('重ね掛け行は 3 タブとも塗りつぶさず「便1 重ね掛け」と出る', async () => {
+      const rows = [
+        makeRow({ 'イベント名': '運行開始' }),
+        makeRow({ 'イベント名': '積み' }),
+        makeRow({ 'イベント名': '連続運転', '区間距離': '252.9' }),
+        makeRow({ 'イベント名': '一般道実車', '区間距離': '99' }),
+        makeRow({ 'イベント名': '一般道実車速度オーバー', '区間距離': '88' }),
+        makeRow({ 'イベント名': '運転', '区間距離': '30' }),
+        makeRow({ 'イベント名': '降し' }),
+        makeRow({ 'イベント名': '運行終了' }),
+      ]
+      const wrapper = mountLive(reactive({ headers: fullHeaders, rows }))
+      await flushPromises()
+
+      const tabs = () => wrapper.findAll('div.ml-auto button')
+      const filled = () => wrapper.findAll('tbody tr')
+        .map(tr => tr.findAll('td')[2]!.find('span').classes().join(' '))
+
+      // イベントタブ (既定): 連続運転 だけが重ね掛け。
+      expect(legCells(wrapper)).toEqual(['便1 回送', '便1', '便1 重ね掛け', '便1', '便1', '便1 帰庫'])
+      expect(filled()[2]).not.toContain('bg-blue-100')
+      expect(filled()[2]).toContain('border-dashed')
+      // 売上区間の行は塗りつぶしのまま (重ね掛けの直し方が売上区間まで薄くしていない)。
+      expect(filled()[1]).toContain('bg-blue-100')
+
+      for (const i of [1, 3]) { // 走行 / 速度超過
+        await tabs()[i]!.trigger('click')
+        await nextTick()
+        expect(legCells(wrapper)).toEqual(['便1 重ね掛け'])
+        expect(filled()[0]).not.toContain('bg-blue-100')
+        expect(filled()[0]).toContain('border-dashed')
+      }
+    })
+
     it('「無視した行も表示」を切り替えても便番号が動かない', async () => {
       // 401 (急加速) は `ignore` 指定。**イベントタブに出るが 0km/0分 なので落ちる。**
       const rows = [
