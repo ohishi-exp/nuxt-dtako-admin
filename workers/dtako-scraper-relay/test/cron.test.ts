@@ -470,6 +470,20 @@ describe('resolveNetprintTargetsRaw', () => {
     expect(results[0].detail).toContain('NETPRINT_TARGETS 未設定')
   })
 
+  it('KV の読み取りが例外なら握らず投げる (古い plain 変数に落とさない)', async () => {
+    // 落とすと「消えたはずの宛先」へ日報が飛ぶ。宛先が確定できないなら動かない方を選ぶ。
+    const broken = {
+      get: async () => {
+        throw new Error('KV unavailable')
+      },
+    }
+    await expect(resolveNetprintTargetsRaw(broken, VAR_JSON)).rejects.toThrow('KV unavailable')
+    // DTAKO_ACCOUNTS も同じ方針であることを固定する (共通化で挙動が割れていないこと)
+    await expect(resolveDtakoAccountsRaw(broken, '[{"comp_id":"old"}]')).rejects.toThrow(
+      'KV unavailable',
+    )
+  })
+
   it('DTAKO_ACCOUNTS と別のキーを読む (取り違えない)', async () => {
     const accountsOnly = {
       get: async (key: string) => (key === DTAKO_ACCOUNTS_KV_KEY ? '[{"comp_id":"1"}]' : null),

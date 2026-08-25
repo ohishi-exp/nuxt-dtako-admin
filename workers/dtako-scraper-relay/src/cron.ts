@@ -149,6 +149,15 @@ export const NETPRINT_TARGETS_KV_KEY = "netprint_targets";
  * しまう)。CI は `dtako-scraper-relay-deploy.yml` で**存在を検証して落とす**だけ。
  * 空のまま黙って動かなくなるのが事故の形なので、呼び出し側は loud fail
  * (console.error) するか、意図した skip であることを結果に載せること。
+ *
+ * **KV の読み取りが例外で失敗したら握らずそのまま投げる** (`kv.get` を try/catch
+ * しないのは意図的)。fallback に落としてよいのは「KV に値が無い」と**確認できた**
+ * ときだけで、「値があるか分からない」ときに古い plain 変数で走ると、
+ * `netprint_targets` なら**意図しない宛先へ日報が飛び**、`dtako_accounts` なら
+ * 消えたはずの認証情報で theearth に入りにいく。**宛先/資格が確定できないなら
+ * 動かない**方を選ぶ。呼び出し側は 2 つとも同じ方針:
+ * - scheduled handler: 伝播させて cron の実行ごと失敗させる (Observability に出る)
+ * - `handleNetprintRun`: 503 + `netprint_run: "targets-kv-error"` で loud fail
  */
 export async function resolveKvConfigRaw(
   kv: unknown,
