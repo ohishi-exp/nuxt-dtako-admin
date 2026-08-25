@@ -26,6 +26,7 @@ import {
   legSalesYmCandidates,
   pickBestR2LegSales,
   resolveLegSalesPanel,
+  shouldLoadLegSalesFromR2,
   type LegSalesR2Fetch,
   type OperationLegSalesR2,
 } from '~/utils/operation-leg-sales-r2'
@@ -121,7 +122,9 @@ const legSaleRows = computed(() =>
  * (月末・月初の運行を 1 か月だけ見ると「版にこの運行はありません」と嘘をつく)。
  */
 async function loadLegSalesFromR2() {
-  if (legSales.value.status === 'ready') return
+  // 判断は pure 側 1 か所 (`shouldLoadLegSalesFromR2`) — **両側をテストで固定してある**。
+  // ここが壊れると集計直後の結果を古い版で上書きする (一番危ない事故)。
+  if (!shouldLoadLegSalesFromR2(legSales.value)) return
   const date = operationRunDate(null, primary.value?.operation_date ?? null, unkoNo)
   const yms = legSalesYmCandidates(date)
   if (yms.length === 0) {

@@ -20,7 +20,7 @@
  *
  * `leg-sales` (localStorage) にあって版に無いのは `slipIds` ただ 1 つ。計上額パネルは
  * 使っていないので足りるが、**穴を黙らない** — R2 から読んだ回は便ごとの「伝票 …」が
- * 出ないので、**出どころの注記でその理由まで言う** (`LEG_SALES_R2_NOTE`)。
+ * 出ないので、**出どころの注記でその理由まで言う** (`legSalesR2Note`)。
  * 空欄を「伝票が無い便」と読ませない。
  *
  * **収支パネルの候補ゲート (`lookupUsedSlipIds`) はここに乗せない。** あちらは
@@ -57,10 +57,12 @@
  * - 数字が出ているときに「ありません」を横に残さない (`note` は `null` のまま)
  * - **見出しで両方の月を名乗る** (`legSalesSourceLabel` の `localYm`) — 版の月しか
  *   名乗らないと、この端末のキャッシュが別の月だという事実が消える
- * - 注記で**逆方向の誤読も潰す** (`legSalesLocalOtherYmNote`) — 「R2 から出した」だけだと
- *   この端末の集計が別の月である事実が消え、`LEG_SALES_R2_NOTE` の
- *   「この端末の粗利タブで集計すると切り替わります」も**2026-06 を集計し直しても
- *   切り替わらない**ので、切り替わる月を名指しし直す
+ * - **嘘になる文は「訂正を後ろに足す」のではなく、その文を直す** — `legSalesR2Note` は
+ *   #865 では「この端末の粗利タブで集計すると切り替わります」と言っていたが、
+ *   **2026-06 を集計し直しても切り替わらない**。**この運行の月を名乗らせて**正した
+ *   (`missing` でも正しく、しかも精密になるので場合分けは増えない)
+ * - 注記に足すのは**この端末が持っている月**という新しい事実 1 つだけ
+ *   (`legSalesLocalOtherYmNote`) — 出どころと計上額の月は見出しと 1 文目が既に言う
  */
 
 import { shiftYmd } from './profit-compare'
@@ -129,7 +131,7 @@ function snapshotLegs(value: unknown): OperationLegSale[] | null {
     const read = snapshotCustomers(customers)
     if (read === null) return null
     // **`slipIds` は版に持っていない。** 空で埋めるが、空欄が「伝票の無い便」に
-    // 読まれないよう、出どころの注記 (`LEG_SALES_R2_NOTE`) が理由を言う。
+    // 読まれないよう、出どころの注記 (`legSalesR2Note`) が理由を言う。
     out.push({ seq, customers: read, slipIds: [] })
   }
   return out
@@ -256,7 +258,7 @@ export const LEG_SALES_SOURCE_NAMES: Record<LegSalesSource, string> = {
 }
 
 /**
- * R2 から読んだ回にだけ添える注記 (Refs #865)。
+ * R2 から読んだ回にだけ添える注記 (Refs #865 / Refs #867)。
  *
  * **local 側には付けない** — 見出しの出どころ名で足りるうえ、この区画には既に
  * `LEG_SALES_PANEL_NOTE` (収支パネルとの関係) が出ている。R2 の回だけ**この出どころに
@@ -268,13 +270,31 @@ export const LEG_SALES_SOURCE_NAMES: Record<LegSalesSource, string> = {
  *
  * 切り替わる条件 (この端末で集計し直せば local に戻る) も書く — 書かないと
  * 「なぜ数字が変わったのか」が後から読めない。
+ *
+ * ## ★ 定数ではなく関数 (`ym` を取る、Refs #867)
+ *
+ * #865 では 3 文目が「**この端末の粗利タブで集計すると**、この画面はそちらの結果に
+ * 切り替わります」だった。**`not-aggregated` の端末ではこれが嘘になる** — その端末は
+ * **既に集計してある** (別の月) ので、その月を集計し直しても切り替わらない。
+ *
+ * **後ろに訂正文を足す形にしない。**先に読まれる方が間違ったままなら、1 文目で止まった
+ * 読者は誤解して終わる (#851 と同じ型)。**その文自体を正しくする** —
+ * **この運行の月 (`ym`) を名乗らせる**と `not-aggregated` で正しくなり、`missing` でも
+ * 正しい (しかもどの月を集計すればよいかまで言えるので今より精密)。**場合分けは増えない。**
+ *
+ * **中身が可変になったので名前も定数のままにしない** (`LEG_SALES_R2_NOTE` →
+ * `legSalesR2Note(ym)`) — 名前だけ残すと次の人が「固定文言だ」と誤解する。
+ *
+ * @param ym **この運行が入っていた版の月** (= 出した計上額の月)。**この端末の
+ *   キャッシュの月ではない** — 集計すべきなのはこちら。
  */
-export const LEG_SALES_R2_NOTE
-  = '※ この計上額は、この端末ではなく R2 に保存された版から読んでいます。'
+export function legSalesR2Note(ym: string): string {
+  return '※ この計上額は、この端末ではなく R2 に保存された版から読んでいます。'
     + '最後に誰かが粗利タブで集計して保存した時点のものなので、それ以降に取り込んだデータは入っていません。'
-    + 'この端末の粗利タブで集計すると、この画面はそちらの結果に切り替わります。'
+    + `この運行の月 (${ym}) をこの端末の粗利タブで集計すると、この画面はそちらの結果に切り替わります。`
     + 'なお、この版は伝票番号を持っていないため便ごとの「伝票 …」は出ません '
     + '(計上額の内訳には要らないので保存していません — 伝票が無いという意味ではありません)。'
+}
 
 /** 計上額パネルが出すもの。**`ready` が無いときは必ず `note` を出す** (黙ると 0 円に読まれる)。 */
 export interface LegSalesPanelState {
@@ -322,25 +342,39 @@ export function legSalesSourceLabel(
 }
 
 /**
- * `not-aggregated` の端末が R2 の版から出したときに、`LEG_SALES_R2_NOTE` の**後ろへ
- * 足す**一言 (Refs #867)。
+ * `not-aggregated` の端末が R2 の版から出したときに、`legSalesR2Note` の**後ろへ足す**
+ * 一言 (Refs #867)。
  *
- * **誤読が 2 方向あるので両方塞ぐ:**
+ * **足すのは「この出どころにしか無い新しい事実」1 つだけ** — **この端末は既に集計して
+ * あるが、それは別の月で、この運行はそこに入っていない**。書かないと、
+ * 「R2 から出した」だけが読まれて**この端末の集計が別の月だという事実が消える**
+ * (次に粗利タブを開いた人が「もう集計してある」と読む)。
  *
- * 1. **「R2 から出した」だけだと、この端末の集計が別の月だという事実が消える。**
- *    次に粗利タブを開いた人が「もう集計してある」と読む
- * 2. **`LEG_SALES_R2_NOTE` の「この端末の粗利タブで集計すると切り替わります」は、
- *    この状態では不正確。** `${localYm}` を集計し直しても切り替わらない —
- *    切り替わるのは**この運行の月 (`${r2Ym}`)** を集計したときだけ。
- *    後ろに置いて名指しし直す (前に置くと、一般文の方が後から上書きして読める)
+ * **出どころと計上額の月は繰り返さない** — 見出し (`legSalesSourceLabel`) と
+ * `legSalesR2Note` の 1 文目が既に言っている。**同じことを 3 か所で言うと、どれが本文か
+ * 分からなくなる。**
  *
- * **否定は「そちら (この端末の別の月の突合) に入っていない」と出どころを名指しした形
- * だけ**にする。裸の「ありません」を金額の横に置かない。
+ * **否定は「そこ (この端末の別の月の突合) に入っていない」と出どころを名指しした形だけ**
+ * にする。裸の「ありません」を金額の横に置かない。
  */
-export function legSalesLocalOtherYmNote(localYm: string, r2Ym: string): string {
-  return `この端末の粗利タブが集計してあるのは ${localYm} の突合で、そちらにこの運行が入っていないため、`
-    + `この計上額は R2 の ${r2Ym} の版から出しています。`
-    + `この画面がこの端末の結果に切り替わるのは、この運行の月 (${r2Ym}) をこの端末の粗利タブで集計したときです。`
+export function legSalesLocalOtherYmNote(localYm: string): string {
+  return `この端末の粗利タブが集計してあるのは ${localYm} の突合で、そこにこの運行は入っていません。`
+}
+
+/**
+ * R2 の版を見に行ってよいか (Refs #867)。**見ないのは `ready` のときだけ** —
+ * この端末でこの運行を集計してあるので、**古い版で上書きしない**。
+ *
+ * **`missing` と `not-aggregated` はどちらも「この端末に**この運行の**答えが無い」**ので
+ * 見に行く。#865 は `missing` だけを見ており、別の月を集計してある端末では
+ * **R2 に版があるのに**「この運行はありません」しか出なかった (#867)。
+ *
+ * **画面 (`[unko_no].vue`) の取得ゲートはこの 1 行に寄せてある** — ここが壊れると
+ * **集計直後の結果を古い版で上書きする**という一番危ない事故になるので、
+ * 判断を画面側に散らさずテストで両側を固定する。
+ */
+export function shouldLoadLegSalesFromR2(local: OperationLegSalesLookup): boolean {
+  return local.status !== 'ready'
 }
 
 /** 見に行った月を名乗る (Refs #867 で `checkedYmsSuffix` から切り出した)。 */
@@ -423,10 +457,10 @@ export function resolveLegSalesPanel(
       ready: legSalesReadyLookup(r.ym, r.legs),
       source: 'r2',
       sourceLabel: legSalesSourceLabel('r2', r.ym, r.savedAt, localYm),
-      // **この端末の事情は R2 の注記の後ろへ足す** — 前に置くと
-      // `LEG_SALES_R2_NOTE` の一般文 (「この端末で集計すると切り替わります」) が
-      // 後から読めてしまい、**別の月を集計し直しても切り替わらない**ことが伝わらない。
-      sourceNote: localYm === null ? LEG_SALES_R2_NOTE : LEG_SALES_R2_NOTE + legSalesLocalOtherYmNote(localYm, r.ym),
+      // **`legSalesR2Note` 自身が「この運行の月 (`r.ym`) を集計すると切り替わる」と
+      // 言う** ので、この端末が別の月を集計してあっても嘘にならない (#867)。
+      // 足すのは**この端末が持っている月**という新しい事実 1 つだけ。
+      sourceNote: legSalesR2Note(r.ym) + (localYm === null ? '' : legSalesLocalOtherYmNote(localYm)),
       note: null,
     }
   }
