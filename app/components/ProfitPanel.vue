@@ -46,7 +46,6 @@ import {
 import type { SelectedRowsSummary, SelectedRowsLocationRange } from '~/utils/event-data-table'
 import type { AllowanceLeg } from '~/utils/allowance-trips'
 import { DATE_SLACK, tradableSlips } from '~/utils/allowance-ichiban'
-import { describeApiError } from '~/utils/api-error'
 import { transportSlips } from '~/utils/allowance-relay'
 import { shiftYmd } from '~/utils/profit-compare'
 import {
@@ -219,11 +218,7 @@ async function load() {
     status.value = 'ready'
   }
   catch (e) {
-    // **このファイルに `$fetch` は無いが中身は自前の server route** (Refs #890)。
-    // `fetchDriverDailySlips` → `utils/ichiban.ts` の
-    // `$fetch('/api/ichiban/api/sales/vehicle-daily')` で、理由は JSON 本文にしか
-    // 残らない。**`localStorage` の `:245` は触らない** (HTTP ではない)。
-    errorMessage.value = describeApiError(e)
+    errorMessage.value = e instanceof Error ? e.message : String(e)
     status.value = 'error'
   }
 }
