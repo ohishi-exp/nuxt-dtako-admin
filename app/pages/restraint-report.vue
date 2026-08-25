@@ -114,6 +114,29 @@ const recalcLoading = ref(false)
 const recalcResult = ref('')
 const recalcError = ref('')
 
+/**
+ * 再計算ストリームが**例外で終わった**ときに人に見せる 1 文 (Refs #890)。
+ *
+ * 以前は `catch` が例外を丸ごと握り潰して `'バックグラウンドで処理中...完了までお待ち
+ * ください'` と出していた。**再計算が始まってすらいない回でも「処理中」と読める**ので、
+ * 失敗した人はそのまま待ち続ける。握り潰しではなく**嘘**なのでやめる。
+ *
+ * **逆方向の誤読も同時に潰す** — 進捗イベントを 1 つでも受け取っていれば、
+ * **切れたのは接続だけで、サーバ側は走り続けている**ことがある。断定できないので
+ * 「判らない」と書き、確かめ方まで出す。
+ *
+ * `recalculateStream` / `recalculateDriverStream` は生 `fetch` なので `e` は素の `Error`。
+ * **`describeApiError` を通しても 1 文字も変わらない** (#890 の分類 (B))。理由が
+ * `再計算に失敗: 503` と status だけになるのは `app/utils/api.ts` が非 2xx の本文を
+ * 読んでいないためで、そちらは別 issue。
+ */
+function recalcStreamFailure(e: unknown, gotAnyEvent: boolean): string {
+  const reason = e instanceof Error ? e.message : String(e)
+  return gotAnyEvent
+    ? `再計算の途中で接続が切れました (${reason})。サーバ側で続いているかどうかはこの画面では判りません — しばらく後に月を選び直して結果を確認してください`
+    : `再計算を開始できませんでした (${reason})`
+}
+
 async function runRecalculate() {
   if (!selectedMonth.value) return
   const [y = 0, m = 0] = selectedMonth.value.split('-').map(Number)
@@ -122,8 +145,11 @@ async function runRecalculate() {
   recalcResult.value = '準備中...'
   recalcError.value = ''
   let gotDone = false
+  /** 進捗を 1 つでも受け取ったか (= 再計算が始まってはいた)。 */
+  let gotAnyEvent = false
   try {
     await recalculateStream(y, m, (evt: RecalcProgressEvent) => {
+      gotAnyEvent = true
       if (evt.event === 'progress') {
         const stepLabel = evt.step === 'download' ? 'DL' : evt.step === 'save' ? '保存' : '処理'
         recalcResult.value = `再計算中 (${evt.current}/${evt.total}) ${stepLabel}中...`
@@ -141,7 +167,10 @@ async function runRecalculate() {
     }
   } catch (e: unknown) {
     if (!gotDone) {
-      recalcResult.value = 'バックグラウンドで処理中...完了までお待ちください'
+      // 進捗の途中経過 (「再計算中 (3/10) 処理中...」) が残っていると、それ自体が
+      // 「動いている」と読める。消してから理由を出す。
+      recalcResult.value = ''
+      recalcError.value = recalcStreamFailure(e, gotAnyEvent)
     }
   } finally {
     recalcLoading.value = false
@@ -162,8 +191,11 @@ async function runDriverRecalculate() {
   recalcResult.value = '準備中...'
   recalcError.value = ''
   let gotDone = false
+  /** 進捗を 1 つでも受け取ったか (= 再計算が始まってはいた)。 */
+  let gotAnyEvent = false
   try {
     await recalculateDriverStream(y, m, selectedDriverId.value, (evt: RecalcProgressEvent) => {
+      gotAnyEvent = true
       if (evt.event === 'progress') {
         const stepLabel = evt.step === 'download' ? 'DL' : evt.step === 'save' ? '保存' : '処理'
         recalcResult.value = `再計算中 (${evt.current}/${evt.total}) ${stepLabel}中...`
@@ -181,7 +213,9 @@ async function runDriverRecalculate() {
     }
   } catch (e: unknown) {
     if (!gotDone) {
-      recalcResult.value = 'エラーが発生しました'
+      // 以前は理由を捨てて `'エラーが発生しました'` だけを出していた。
+      recalcResult.value = ''
+      recalcError.value = recalcStreamFailure(e, gotAnyEvent)
     }
   } finally {
     driverRecalcLoading.value = false
