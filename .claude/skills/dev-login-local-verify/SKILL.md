@@ -22,6 +22,96 @@ description: ohishi-exp/nuxt-dtako-admin の **front worker + 画面**をロー�
 bash <skill>/setup-dev-env.sh --here --hybrid    # いま居る worktree = 自分のブランチ
 ```
 
+## ★★ 上の 1 行が通らない 2 つの詰まり (2026-08-25 #874-5 で両方踏んだ)
+
+**「dev が立たないので実機確認は諦めました」と書く前に、下の ①→② を辿ること。**
+どちらの詰まりも**設定ミスではない**ので、直そうとすると時間が溶ける。
+
+| 詰まり | 実際に起きること |
+|---|---|
+| **`setup-dev-env.sh` は `wrangler dev --remote`** を使う = worker が**エッジで動く** | `dtako.ippoan.org` が Cloudflare Access 配下になった 2026-08-25 以降、**`127.0.0.1:8787` 宛でも 302 + `WWW-Authenticate: Cloudflare-Access`** になる (詳細は `nuxt-dtako-admin-map` skill / memory `dtako-prod-behind-access`) |
+| **`issue_dev_login_url` / `issue_dev_token` (auth-worker の MCP surface) が<br>セッションに無いことがある** | `ToolSearch` にも出てこない。コネクタの再認可は**対話フロー**なので子セッションでは踏めない。**「30 日 TTL 切れ」(下の `google_sub_not_cached` 節) とは別件** — あちらは tool が有ればの話 |
+
+#### ★ 順序を間違えないこと: ① tool を叩き直す → ② それでも駄目なら代替経路
+
+**代替経路は第一選択ではない。** MCP tool は**後から現れる** — コネクタが認可され直すと
+**走行中のセッションにも一覧が配り直される** (下の
+「再連携の直前に起動したセッションでも、そのまま呼べるようになる」節。
+**tool が無いのを見てセッションを起こし直さないこと**もそこに書いてある)。
+
+**2026-08-25 #874-5 で実際にこれを踏んだ**: 着手時は `ToolSearch` に出てこないので
+下の代替経路で通したが、**作業の終盤に一覧が配り直されて 2 つとも現れた**。
+
+⇒ 詰まったら、**まず `issue_dev_token({})` を 1 回叩き直す**。通れば
+`setup-dev-env.sh` の本来の手順に戻れる (`--remote` が Access に捕まる方の詰まりは
+残るので、そこは下の 1 の `remote = true` だけ流用する)。**403 や tool 不在が続いたときに
+初めて代替経路へ移る。**
+
+### 代替 (① が駄目なとき): worker はローカル、binding だけ本番、認証は自分で作る
+
+**この 5 点セットで「本物のビルドの画面を実際にクリックする」ところまで行ける。**
+本物でないのは **introspect と (成功系を見たいときだけ) relay** の 2 つだけ。
+
+1. **使い捨て config で `wrangler dev` (`--remote` を付けない)。** 必要な binding にだけ
+   **`remote = true`** を書く (`[[services]]` / `[[d1_databases]]` / `[[r2_buckets]]`)。
+   worker はローカル workerd で動くので **Access を通らない**。
+   起動ログの binding 表に **`Mode: remote`** と出るのを必ず目で見る
+   (`experimental_remote` は `Unexpected fields` の warning を出して黙って無視される)
+2. **★ Secrets Store binding はローカルで必ず落ちる。** `.get()` が
+   `Secret "INTERNAL_SHARED_SECRET" not found` を投げ、**その route が 500 になる**
+   (`remote = true` も `secrets_store_secrets` では `Unexpected fields` で効かない)。
+   **config から `[[secrets_store_secrets]]` を消して、同名の `--var` を渡す**:
+   `--var 'INTERNAL_SHARED_SECRET:dev-local-not-a-real-secret'`。
+   **本物の secret を引っ張り出す必要は無い** — 下の 5 のとおり、ダミーで足りる
+   - **★ 自分のコードの欠陥と誤診しないための比較材料**: この 500 は
+     **既存の `/api/net780/archive` でも同じように起きる**。新しい route が 500 に
+     なったら、まず既存 route を同じ dev に投げて**両方 500 なら環境要因**と切り分ける
+3. **`requireAuth` の introspect だけローカルスタブで肩代わりする。**
+   `--var NUXT_PUBLIC_AUTH_WORKER_URL:http://127.0.0.1:9998` を渡し、
+   `POST /auth/introspect` に `{active:true, tenant_id, role, email, sub, exp}` を返す
+   20 行の `node:http` サーバを立てるだけ (`@ippoan/auth-client` の
+   `introspectCore.mjs` の契約)。ローカル workerd から `127.0.0.1` へは fetch できる
+4. **SPA のログイン状態は `localStorage.logi_auth` を仕込んで作る。**
+   `{token, orgId, expiresAt (未来), username, provider, orgSlug}` の JSON。
+   `auth.global.ts` → `useAuth().isAuthenticated` は **`expiresAt > now` しか見ない**ので
+   これで `/login` へ飛ばされなくなり、`currentAccessToken()` がその token を
+   `Authorization: Bearer` に載せて 3 のスタブへ届く
+5. **本番の口に届いたかは「エラーの種類」で裏を取る。** 1 の `remote = true` のまま
+   ダミー secret で叩くと、本番 relay は **401 `{"error":"Unauthorized"}`** を返す。
+   relay は**未知パスだと 404 のテキスト**を返すので、**401 の JSON が返ること自体が
+   「その口が実在して届いている」証明**になる (副作用ゼロで確かめられる)。
+   **成功系の表示を見たいときは、本番と同じ `name` のローカル worker を別 port で
+   `wrangler dev`** し、front 側の `remote = true` を外す (`local [connected]` になる)
+
+### ブラウザはこの Linux 機のヘッドレス Chrome (Windows の Chrome MCP は届かない)
+
+Chrome MCP が繋がるのは**ユーザーの Windows の Chrome** で、**この Linux 機の
+`127.0.0.1` には届かない**。だが **`google-chrome` / `chromium` はこの機に入っている**:
+
+```bash
+google-chrome --headless=new --disable-gpu --no-sandbox \
+  --remote-debugging-port=9222 --user-data-dir=<scratchpad>/chrome-profile about:blank
+```
+
+**Node 24 は `WebSocket` が global なので、puppeteer を入れずに 60 行の CDP ドライバ**
+が書ける。`PUT /json/new?about:blank` → `webSocketDebuggerUrl` に接続 →
+`Page.enable` / `Runtime.enable` → **`Page.addScriptToEvaluateOnNewDocument` で 4 の
+localStorage を仕込む** → `Page.navigate` → `Runtime.evaluate` で
+`document.querySelector(...).click()` → `Page.captureScreenshot`。
+
+- **判定は `innerText` で行う。スクショの日本語は豆腐になる** (この機の headless Chrome に
+  日本語フォントが無いだけで、アプリの欠陥ではない)
+- **`disabled` なボタンは DOM の `.click()` でも発火しない**ので、#419 型
+  (「押せないまま」) はこの方法でも捕まる
+- 後片付けの `pgrep -f '<pattern>'` は**自分の bash も一致して exit 144 で落ちる**。
+  `worker[d]` のように文字クラスで書く
+
+### preview は代わりにならない
+
+`.github/workflows/preview-deploy.yml` に**「エージェントは preview を見られない
+(`auth-staging` の Google ログインを代行できない)。見に行かず、PR を先に作ること」**と
+明記がある。**preview を実機確認の代替にしないこと。**
+
 ### この dev で検証できるのは front worker + 画面だけ (2026-07-25 ユーザー指摘)
 
 **relay (`workers/dtako-scraper-relay`) は含まれない。** `wrangler dev --remote` が

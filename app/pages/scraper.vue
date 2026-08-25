@@ -838,7 +838,7 @@ onMounted(() => {
           運転日報を netprint に登録 (手動実行)
         </h2>
         <p class="text-xs text-gray-500 mb-3">
-          対象日の運転日報を PDF にして かんたんnetprint に登録し、プリント予約番号を LINE WORKS へ通知します
+          対象日の運転日報を PDF にして かんたんnetprint に登録し、プリント予約番号を営業所へ通知します
           (毎朝 6:30 の cron と同じ経路)。対象営業所と通知先は relay の <code>NETPRINT_TARGETS</code> 設定に従います。
           <strong>netprint の変換完了まで待つので数分かかります</strong> — 押したままお待ちください。
         </p>
@@ -858,7 +858,7 @@ onMounted(() => {
 
         <div v-if="netprintRunning" class="text-sm text-gray-500 flex items-center gap-2">
           <UIcon name="i-lucide-loader-circle" class="animate-spin size-4" />
-          実行中... ({{ netprintElapsed }} 秒経過 / theearth 取得 → PDF 生成 → netprint 登録 → LINE WORKS 通知)
+          実行中... ({{ netprintElapsed }} 秒経過 / theearth 取得 → PDF 生成 → netprint 登録 → 予約番号を通知)
         </div>
 
         <div v-if="netprintFetchError" class="text-sm text-red-500">
