@@ -554,13 +554,30 @@ describe('注記', () => {
     // **触っていない文言が嘘になる型** (map skill の「PR の基準」(7)) なので、
     // 「版には残っていません」を言い切らないことを固定する。
     expect(MARGIN_DIFF_OVERRIDE_CAVEAT).not.toContain('版には残っていません')
-    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).toContain('形式 2 以降の版は端末の設定')
-    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).toContain('指紋として持っています')
-    // **逆方向の誤読も潰す。**「指紋が入ったから差の理由が分かる」と読ませない —
-    // この画面はまだ指紋を突き合わせていない。
-    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).toContain('この画面はまだ指紋を突き合わせていません')
-    // **非対称性まで書く。** 形式 1 の版は永久に確かめられない。
-    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).toContain('形式 1 の版には指紋そのものが無い')
+  })
+
+  it('★★ この注記は「版に有る/無い」を語らない — 版によって真偽が変わる文にしない (Refs #886)', () => {
+    // 「版には残っていません」は**形式 2 どうしなら偽・形式 1 が絡めば真**。
+    // 定数として成立しないので、**版に依存しない事実** (この差分が何を出しているか) で書く。
+    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).toContain('この差分は保存された値を引き算するだけなので')
+    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).toContain('どちらが原因だったかまでは出していません')
+    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).not.toContain('形式 1')
+    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).not.toContain('形式 2')
+  })
+
+  it('★★ 逆方向の誤読を潰す — 「記録されるようになった」と読ませない (#854 の型)', () => {
+    // 「指紋が記録されるようになりました」と書くと「じゃあ差分に出るはず」と期待されるが、
+    // `buildMarginDiff` は指紋を突き合わせない (この PR ではロジック無改変)。
+    // **出ないものを出るように読ませない。**
+    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).not.toContain('指紋')
+    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).not.toContain('記録されるようになりました')
+    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).not.toContain('残るようになりました')
+  })
+
+  it('★ 版が増えること自体は指紋を足しても止まらない — その 1 文は残す (Refs #886)', () => {
+    // 指紋が入って変わったのは「増えた理由が版に残る」ことだけで、
+    // **増えること自体は止まらない**。ここは今も真なので消さない。
+    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).toContain('データが 1 円も変わっていないのに版が増えていることがあります')
   })
 
   it('粗利が動いていない回は出さない (常に出すと読み飛ばされる)', () => {
@@ -583,13 +600,21 @@ describe('注記', () => {
     expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).toContain('月全体の粗利は保存された実測値です')
   })
 
-  it('★★ 指紋が入った後の非対称性まで書く — 「版に入っていない」で止めない (Refs #886)', () => {
-    // 形式 2 の版は指紋を持つ。**「版に入っていない」は形式 1 についてしか成り立たない。**
+  it('★★ 出していない理由は 2 段 — 版に依存しない方を先に書く (Refs #886)', () => {
+    // 形式 2 の版は指紋を持つので、**「版に入っていない」は形式 1 についてしか成り立たない。**
     expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).not.toContain('版に入っていない')
-    expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).toContain('形式 2 以降の版は燃費の上書きと運行経費の配分を指紋として持っています')
-    // **「再現できるようになった」とも書かない。** 形式 1 の版は永久に再現できない。
-    expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).toContain('形式 1 の版には無く')
+    // ① 版に依存しない本体の理由 (この差分は再計算しない)。
+    expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).toContain('この差分は保存された値を引き算するだけで、粗利を計算し直さないためです')
+    // ② 形式 1 はそもそも再現できない。**「再現できるようになった」とは書かない。**
+    expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).toContain('形式 1 の版は燃費の上書きと運行経費の配分を持たない')
     expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).toContain('厳密に再現できません')
+  })
+
+  it('★★ 非対称性はここに 1 か所だけ残す — 過去の版には遡って付かない (Refs #886)', () => {
+    // 指紋が付くのは**これから保存される版だけ**。この 1 文をどこかに残すのが #886 の条件で、
+    // 置き場所はこの注記 (もう一方の注記は版に依存しない書き方に寄せた)。
+    expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).toContain('指紋が付くのは形式 2 以降に保存された版だけ')
+    expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).toContain('過去の版に遡って付けることはできません')
   })
 
   it('コード版が違えば断る (同じ入力でもロジックが変われば数字は動く)', () => {
