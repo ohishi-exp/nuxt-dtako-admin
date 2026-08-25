@@ -1249,7 +1249,12 @@ async function loadKushiroMinWageMaster() {
     kushiroMinWageError.value = res.data === null ? '最低賃金マスタが R2 にありません (拘束時間・賃金タブの単価マスタで登録できます)' : ''
   }
   catch (e) {
-    kushiroMinWageError.value = `最低賃金マスタを読めませんでした — ${e instanceof Error ? e.message : String(e)}`
+    // **`/restraint-api/**` は Nitro ではない** (Refs #890)。`worker/index.ts` が
+    // relay worker (`SCRAPER_RELAY`) へ転送しており、本文は Nitro の
+    // `{error: true, …}` ではなく relay の **`{error: '<日本語>'}`**
+    // (`dtako-scraper-relay-do.ts` の `dvrJsonError`)。`describeApiError` は
+    // `d.error` を最初に見るので、この形なら 1 発で拾える。
+    kushiroMinWageError.value = `最低賃金マスタを読めませんでした — ${describeApiError(e)}`
   }
 }
 
@@ -1591,7 +1596,8 @@ async function loadRestraint(force = false) {
   catch (e) {
     if (shownYm.value !== target) return
     restraintByCd.value = null
-    restraintError.value = `拘束時間を読めませんでした — ${e instanceof Error ? e.message : String(e)}`
+    // 最低賃金マスタと同じ relay 経由 (`{error: '<日本語>'}`、Refs #890)。
+    restraintError.value = `拘束時間を読めませんでした — ${describeApiError(e)}`
   }
   finally {
     loadingRestraint.value = false
