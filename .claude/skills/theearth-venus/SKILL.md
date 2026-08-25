@@ -724,7 +724,9 @@ Worker 実装は「PageLoad を再現するのではなく、実ブラウザと�
 
 ### 運転日報 F-NRS1010 = 作業時間の一括取得元
 
-> consumer: `workers/dtako-scraper-relay/src/theearth-report-client.ts` (`harvestDailyReport`)
+> consumer: `workers/dtako-scraper-relay/src/theearth-report-client.ts` (`harvestDailyOperationReport`。
+> `harvestDailyReport` は名前に反して F-DES1010 の一覧を収集する別関数 — 上の
+> 「F-DES1010 の実グリッド構造」節参照)
 
 指定期間の全運行を 1 つの HTML グリッドで返す **サーバー描画レポート** (JSON/CSV/VenusBridge
 なし、CSV/印刷ボタンも無い)。行 id は `MainContent_T1_lstOperation_lbl<Field>_<row>`:

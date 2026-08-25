@@ -12,18 +12,22 @@
  * xref テーブルを持つ正規の PDF (`useObjectStreams: false`) — かんたんnetprint は
  * 壊れた PDF を受付 200 の後段で「エラー」にするため (issue #874 親の実測)。
  *
- * 作業1〜5時間・燃料 (自社/他社) の列は F-DES1010 の一覧に存在しない (F-NRS1010
- * 固有フィールド、theearth-venus skill「F-DES1010 の実グリッド構造」節)。列枠は
- * 設けた上で、`DailyReportRow` から埋められないセルは空欄にしている。
+ * 作業1〜5時間・燃料 (自社/他社) の列は F-DES1010 の一覧に存在しない F-NRS1010
+ * 固有フィールドのため、`harvestDailyOperationReport` (F-NRS1010、theearth-venus
+ * skill の「運転日報 F-NRS1010 = 作業時間の一括取得元」節参照) で別途 harvest し、
+ * `operationNo` で F-DES1010 の行に突き合わせて埋める (F-NRS1010 は乗務員名・
+ * 営業所などの表示列を持たない)。
  */
 import { PDFDocument, rgb } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import notoSansJpFontData from "../assets/NotoSansJP-Regular.otf";
 import type { CookieJar, FetchLike } from "./theearth-client";
 import {
+  harvestDailyOperationReport,
   harvestDailyReport,
   ReportParamError,
   withDisplayNarrow,
+  type DailyOperationReportRow,
   type DailyReportRow,
   type HarvestRange,
 } from "./theearth-report-client";
@@ -52,29 +56,56 @@ export interface FetchBranchDailyReportParams {
   branchCd: string;
 }
 
+export interface BranchDailyReport {
+  /** F-DES1010 の行 (対象営業所のみ、退社日時=読取日が対象日の範囲)。 */
+  rows: DailyReportRow[];
+  /** `rows` の運行に対応する F-NRS1010 行 (作業1〜5時間・燃料)。`rows` が 0 件の
+   * ときは F-NRS1010 を読まず空になる。 */
+  workRows: DailyOperationReportRow[];
+}
+
+/** F-NRS1010 行を、F-DES1010 側で残った運行の分だけに絞る。 */
+export function filterWorkRowsForRows(
+  rows: readonly DailyReportRow[],
+  workRows: readonly DailyOperationReportRow[],
+): DailyOperationReportRow[] {
+  const opNos = new Set(rows.map((r) => r.operationNo));
+  return workRows.filter((w) => opNos.has(w.operationNo));
+}
+
 /**
- * 指定日 (読取日 = 退社日時) の全行を harvest し、対象営業所の行だけ返す。
- * `jar` はログイン済みセッションの cookie jar (ログインは呼び出し側の責務)。
- * theearth へのアクセスはすべて `fetchImpl` 経由 (テストは注入で実 theearth を叩かない)。
+ * 指定日 (読取日 = 退社日時) の全行を harvest し、対象営業所の行と、その運行の
+ * F-NRS1010 行 (作業時間・燃料) を返す。`jar` はログイン済みセッションの cookie jar
+ * (ログインは呼び出し側の責務)。theearth へのアクセスはすべて `fetchImpl` 経由
+ * (テストは注入で実 theearth を叩かない)。2 つの harvest は同一セッションを
+ * 直列で使う (theearth のセッションロックを避けるため並列にしない)。
  */
-export async function fetchBranchDailyReportRows(
+export async function fetchBranchDailyReport(
   jar: CookieJar,
   params: FetchBranchDailyReportParams,
   fetchImpl: FetchLike = fetch,
   timeoutMs?: number,
-): Promise<DailyReportRow[]> {
+): Promise<BranchDailyReport> {
   if (!BRANCH_CD_RE.test(params.branchCd)) {
     throw new ReportParamError(`営業所CD は 8 桁以内の数値で指定してください: "${params.branchCd}"`);
   }
   const range = dailyReportReadDateRange(params.dateJst);
-  const rows = await withDisplayNarrow(
+  return withDisplayNarrow(
     jar,
     { readDate: range },
-    (j, firstPageHtml) => harvestDailyReport(j, range, fetchImpl, timeoutMs, firstPageHtml),
+    async (j, firstPageHtml) => {
+      const desRows = await harvestDailyReport(j, range, fetchImpl, timeoutMs, firstPageHtml);
+      const rows = desRows.filter((r) => r.branchCd === params.branchCd);
+      if (rows.length === 0) {
+        // 0 行なら PDF を作らない (呼び出し側判断) — F-NRS1010 を読む必要も無い。
+        return { rows, workRows: [] };
+      }
+      const workAll = await harvestDailyOperationReport(j, range, fetchImpl, timeoutMs);
+      return { rows, workRows: filterWorkRowsForRows(rows, workAll) };
+    },
     fetchImpl,
     timeoutMs,
   );
-  return rows.filter((r) => r.branchCd === params.branchCd);
 }
 
 // ---------------------------------------------------------------------------
@@ -108,9 +139,18 @@ export function stripYear(dateTime: string): string {
   return m ? m[1] : dateTime;
 }
 
-/** `DailyReportRow` (F-DES1010) → PDF 行。F-DES1010 に無い列 (作業1〜5・燃料) は
- * 空欄になる。 */
-export function toPdfRow(row: DailyReportRow): DailyReportPdfRow {
+/** F-NRS1010 行を運行No で引ける index にする (同一運行が重複していれば後勝ち)。 */
+export function indexWorkRows(
+  workRows: readonly DailyOperationReportRow[],
+): Map<string, DailyOperationReportRow> {
+  const index = new Map<string, DailyOperationReportRow>();
+  for (const w of workRows) index.set(w.operationNo, w);
+  return index;
+}
+
+/** `DailyReportRow` (F-DES1010) + 対応する F-NRS1010 行 → PDF 行。作業1〜5・燃料は
+ * F-NRS1010 側からしか埋まらない (無ければ空欄)。 */
+export function toPdfRow(row: DailyReportRow, work?: DailyOperationReportRow): DailyReportPdfRow {
   return {
     driverName: row.driverName1 ?? "",
     vehicleName: row.vehicleName ?? "",
@@ -119,13 +159,13 @@ export function toPdfRow(row: DailyReportRow): DailyReportPdfRow {
     opeStart: row.operationStartDateTime ?? "",
     opeEnd: row.operationEndDateTime ?? "",
     totalDist: row.totalRunningDist ?? "",
-    work1: "",
-    work2: "",
-    work3: "",
-    work4: "",
-    work5: "",
-    fuelOwn: "",
-    fuelOther: "",
+    work1: work?.driverState1Min ?? "",
+    work2: work?.driverState2Min ?? "",
+    work3: work?.driverState3Min ?? "",
+    work4: work?.driverState4Min ?? "",
+    work5: work?.driverState5Min ?? "",
+    fuelOwn: work?.intankFuel1 ?? "",
+    fuelOther: work?.ssFuel1 ?? "",
   };
 }
 
@@ -224,6 +264,9 @@ export function fitText(
 export interface GenerateDailyReportPdfParams {
   /** 1 行以上であること (0 行のときは呼び出し側が生成をスキップする判断をする)。 */
   rows: readonly DailyReportRow[];
+  /** `rows` の運行に対応する F-NRS1010 行 (作業1〜5時間・燃料)。省略時は当該列が
+   * 空欄になる。 */
+  workRows?: readonly DailyOperationReportRow[];
   branchName: string;
   /** 対象日 (JST) "YYYY/MM/DD"。タイトルに入る。 */
   dateJst: string;
@@ -241,7 +284,8 @@ export async function generateDailyReportPdf(
     );
   }
   const generatedAt = params.generatedAt ?? new Date();
-  const pdfRows = params.rows.map(toPdfRow);
+  const workIndex = indexWorkRows(params.workRows ?? []);
+  const pdfRows = params.rows.map((row) => toPdfRow(row, workIndex.get(row.operationNo)));
   const pages = paginate(pdfRows, rowsPerPage());
 
   const doc = await PDFDocument.create();

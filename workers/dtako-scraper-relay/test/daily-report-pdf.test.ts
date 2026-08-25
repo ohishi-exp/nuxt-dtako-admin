@@ -4,10 +4,12 @@ import {
   buildTitle,
   CONTENT_WIDTH,
   dailyReportReadDateRange,
-  fetchBranchDailyReportRows,
+  fetchBranchDailyReport,
+  filterWorkRowsForRows,
   fitText,
   formatGeneratedAtJst,
   generateDailyReportPdf,
+  indexWorkRows,
   PAGE_HEIGHT,
   PAGE_WIDTH,
   paginate,
@@ -16,7 +18,11 @@ import {
   stripYear,
   toPdfRow,
 } from "../src/daily-report-pdf";
-import { ReportParamError, type DailyReportRow } from "../src/theearth-report-client";
+import {
+  ReportParamError,
+  type DailyOperationReportRow,
+  type DailyReportRow,
+} from "../src/theearth-report-client";
 import { createCookieJar, type FetchLike } from "../src/theearth-client";
 
 function html(body: string): Response {
@@ -44,6 +50,22 @@ function makeRow(overrides: Partial<DailyReportRow> = {}): DailyReportRow {
     totalRunningDist: "312.4",
     salesFlag: "未",
     expenseFlag: "未",
+    ...overrides,
+  };
+}
+
+function makeWorkRow(overrides: Partial<DailyOperationReportRow> = {}): DailyOperationReportRow {
+  return {
+    operationNo: "2608240612340000006572",
+    startDateTime: "2026/08/24 6:12:34",
+    workEndDateTime: "2026/08/24 18:30",
+    driverState1Min: "8:10",
+    driverState2Min: "1:20",
+    driverState3Min: "0:30",
+    driverState4Min: "0:00",
+    driverState5Min: "2:40",
+    intankFuel1: "120.5",
+    ssFuel1: "30.0",
     ...overrides,
   };
 }
@@ -76,8 +98,8 @@ describe("stripYear", () => {
 });
 
 describe("toPdfRow", () => {
-  it("maps the F-DES1010 row fields and leaves work/fuel columns empty", () => {
-    const pdfRow = toPdfRow(makeRow());
+  it("maps the F-DES1010 fields and fills work/fuel columns from the F-NRS1010 row", () => {
+    const pdfRow = toPdfRow(makeRow(), makeWorkRow());
     expect(pdfRow).toEqual({
       driverName: "松尾　等",
       vehicleName: "佐賀100あ6572",
@@ -86,26 +108,45 @@ describe("toPdfRow", () => {
       opeStart: "08/24 06:12",
       opeEnd: "08/24 18:10",
       totalDist: "312.4",
-      work1: "",
-      work2: "",
-      work3: "",
-      work4: "",
-      work5: "",
-      fuelOwn: "",
-      fuelOther: "",
+      work1: "8:10",
+      work2: "1:20",
+      work3: "0:30",
+      work4: "0:00",
+      work5: "2:40",
+      fuelOwn: "120.5",
+      fuelOther: "30.0",
     });
   });
 
-  it("falls back to empty strings for nullable fields", () => {
-    const pdfRow = toPdfRow(makeRow({
-      driverName1: null,
-      vehicleName: null,
-      workStartDateTime: null,
-      workEndDateTime: "",
-      operationStartDateTime: null,
-      operationEndDateTime: null,
-      totalRunningDist: null,
-    }));
+  it("leaves work/fuel columns empty without a matching F-NRS1010 row", () => {
+    const pdfRow = toPdfRow(makeRow());
+    expect(pdfRow.work1).toBe("");
+    expect(pdfRow.work5).toBe("");
+    expect(pdfRow.fuelOwn).toBe("");
+    expect(pdfRow.fuelOther).toBe("");
+  });
+
+  it("falls back to empty strings for nullable fields on both sides", () => {
+    const pdfRow = toPdfRow(
+      makeRow({
+        driverName1: null,
+        vehicleName: null,
+        workStartDateTime: null,
+        workEndDateTime: "",
+        operationStartDateTime: null,
+        operationEndDateTime: null,
+        totalRunningDist: null,
+      }),
+      makeWorkRow({
+        driverState1Min: null,
+        driverState2Min: null,
+        driverState3Min: null,
+        driverState4Min: null,
+        driverState5Min: null,
+        intankFuel1: null,
+        ssFuel1: null,
+      }),
+    );
     expect(pdfRow.driverName).toBe("");
     expect(pdfRow.vehicleName).toBe("");
     expect(pdfRow.workStart).toBe("");
@@ -113,6 +154,26 @@ describe("toPdfRow", () => {
     expect(pdfRow.opeStart).toBe("");
     expect(pdfRow.opeEnd).toBe("");
     expect(pdfRow.totalDist).toBe("");
+    expect(pdfRow.work1).toBe("");
+    expect(pdfRow.work4).toBe("");
+    expect(pdfRow.fuelOwn).toBe("");
+    expect(pdfRow.fuelOther).toBe("");
+  });
+});
+
+describe("indexWorkRows / filterWorkRowsForRows", () => {
+  it("indexes by operationNo with the last duplicate winning", () => {
+    const a = makeWorkRow({ operationNo: "OP-A", intankFuel1: "1" });
+    const a2 = makeWorkRow({ operationNo: "OP-A", intankFuel1: "2" });
+    const index = indexWorkRows([a, a2]);
+    expect(index.size).toBe(1);
+    expect(index.get("OP-A")?.intankFuel1).toBe("2");
+  });
+
+  it("keeps only work rows whose operation survived the branch filter", () => {
+    const rows = [makeRow({ operationNo: "OP-A" })];
+    const workRows = [makeWorkRow({ operationNo: "OP-A" }), makeWorkRow({ operationNo: "OP-B" })];
+    expect(filterWorkRowsForRows(rows, workRows).map((w) => w.operationNo)).toEqual(["OP-A"]);
   });
 });
 
@@ -187,6 +248,7 @@ describe("generateDailyReportPdf", () => {
     ];
     const bytes = await generateDailyReportPdf({
       rows,
+      workRows: [makeWorkRow()],
       branchName: "大石運輸倉庫㈱　本社営業所",
       dateJst: "2026/08/24",
       generatedAt: new Date("2026-08-24T21:30:00Z"),
@@ -226,7 +288,7 @@ describe("generateDailyReportPdf", () => {
 
 // --- データ取得 (fetchImpl 注入、実 theearth は叩かない) ----------------------
 
-describe("fetchBranchDailyReportRows", () => {
+describe("fetchBranchDailyReport", () => {
   function listHtml(): string {
     return `<html><body><form>
       <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-DES" />
@@ -279,7 +341,7 @@ describe("fetchBranchDailyReportRows", () => {
       <span id="${id("lblTotalRunningDist")}">312.4</span>`;
   }
 
-  /** 退社日時降順 3 行: 対象営業所 (1) / 別営業所 (8) / 前日行 (早期打ち切り用)。 */
+  /** F-DES1010: 退社日時降順 3 行: 対象営業所 (1) / 別営業所 (8) / 前日行 (早期打ち切り用)。 */
   function gridPageHtml(): string {
     return `<html><body><form>
       <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-GRID" />
@@ -289,7 +351,29 @@ describe("fetchBranchDailyReportRows", () => {
     </form></body></html>`;
   }
 
-  it("narrows by read date, harvests, and keeps only the requested branch", async () => {
+  /** F-NRS1010 (`MainContent_T1_lstOperation_`): 対象運行 + 別営業所運行 + 前日行。 */
+  function nrsRowHtml(i: number, v: { opNo: string; workEndRaw: string }): string {
+    const id = (f: string): string => `MainContent_T1_lstOperation_${f}_${i}`;
+    return `
+      <span id="${id("lblOperationNo")}">${v.opNo}</span>
+      <span id="${id("lblStartDateTime")}">2026/08/24 6:12:34</span>
+      <span id="${id("lblWorkEndDateTime")}">${v.workEndRaw}</span>
+      <span id="${id("lblDriverState1Min")}">8:10</span>
+      <span id="${id("lblDriverState5Min")}">2:40</span>
+      <span id="${id("lblIntankFuel1")}">120.5</span>
+      <span id="${id("lblSSFuel1")}">30.0</span>`;
+  }
+
+  function nrsPageHtml(): string {
+    return `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-NRS" />
+      ${nrsRowHtml(0, { opNo: "2608240612340000006572", workEndRaw: "08/24 18:30" })}
+      ${nrsRowHtml(1, { opNo: "2608240712340000001101", workEndRaw: "08/24 17:00" })}
+      ${nrsRowHtml(2, { opNo: "2608230512340000002202", workEndRaw: "08/23 23:50" })}
+    </form></body></html>`;
+  }
+
+  it("narrows by read date, harvests both grids, and joins per branch", async () => {
     const jar = createCookieJar();
     const bodies: string[] = [];
     let call = 0;
@@ -297,21 +381,33 @@ describe("fetchBranchDailyReportRows", () => {
       call += 1;
       if (call === 1) return html(listHtml());
       if (call === 2) return html(configHtml());
+      if (call === 3) {
+        bodies.push(String(init?.body ?? ""));
+        return html("applied"); // F-GOS0030 適用
+      }
+      if (call === 4) {
+        bodies.push(String(init?.body ?? ""));
+        return html(gridPageHtml()); // btnUpdate → F-DES1010 1 ページ目
+      }
+      if (call === 5) return html(nrsPageHtml()); // plain GET → F-NRS1010
       bodies.push(String(init?.body ?? ""));
-      if (call === 4) return html(gridPageHtml());
-      return html("applied");
+      return html("applied"); // 復元
     }) as FetchLike;
 
-    const rows = await fetchBranchDailyReportRows(
+    const report = await fetchBranchDailyReport(
       jar,
       { dateJst: "2026/08/24", branchCd: "1" },
       fetchImpl,
     );
 
-    expect(rows).toHaveLength(1);
-    expect(rows[0].operationNo).toBe("2608240612340000006572");
-    expect(rows[0].branchCd).toBe("1");
-    expect(rows[0].workEndDateTime).toBe("2026/08/24 18:30");
+    expect(report.rows).toHaveLength(1);
+    expect(report.rows[0].operationNo).toBe("2608240612340000006572");
+    expect(report.rows[0].branchCd).toBe("1");
+    expect(report.rows[0].workEndDateTime).toBe("2026/08/24 18:30");
+    // F-NRS1010 側は対象営業所の運行分だけに絞られる (別営業所 1101 は落ちる)。
+    expect(report.workRows.map((w) => w.operationNo)).toEqual(["2608240612340000006572"]);
+    expect(report.workRows[0].driverState1Min).toBe("8:10");
+    expect(report.workRows[0].intankFuel1).toBe("120.5");
 
     // 読取日 range が F-GOS0030 の ReadNo 行 (2 行目) に上書きされていること。
     const applyBody = new URLSearchParams(bodies[0]);
@@ -320,14 +416,36 @@ describe("fetchBranchDailyReportRows", () => {
     expect(applyBody.get("ucStartDate2$txtDay")).toBe("24");
     expect(applyBody.get("ucEndDate2$txtDay")).toBe("24");
     expect(applyBody.get("btnOK")).toBe("適用");
-    // 全 5 リクエスト (GET 一覧 / GET 設定 / 適用 / btnUpdate / 復元) で完結。
+    // 全 6 リクエスト (GET 一覧 / GET 設定 / 適用 / btnUpdate / NRS GET / 復元)。
+    expect(call).toBe(6);
+  });
+
+  it("skips the F-NRS1010 harvest when no row matches the branch", async () => {
+    const jar = createCookieJar();
+    let call = 0;
+    const fetchImpl = (async () => {
+      call += 1;
+      if (call === 1) return html(listHtml());
+      if (call === 2) return html(configHtml());
+      if (call === 4) return html(gridPageHtml());
+      return html("applied");
+    }) as FetchLike;
+
+    const report = await fetchBranchDailyReport(
+      jar,
+      { dateJst: "2026/08/24", branchCd: "9" },
+      fetchImpl,
+    );
+    expect(report.rows).toEqual([]);
+    expect(report.workRows).toEqual([]);
+    // F-NRS1010 の GET が挟まらない (適用/btnUpdate/復元のみの 5 リクエスト)。
     expect(call).toBe(5);
   });
 
   it("rejects an invalid branch cd before touching theearth (fetchImpl 省略で既定引数も通す)", async () => {
     const jar = createCookieJar();
     await expect(
-      fetchBranchDailyReportRows(jar, { dateJst: "2026/08/24", branchCd: "本社" }),
+      fetchBranchDailyReport(jar, { dateJst: "2026/08/24", branchCd: "本社" }),
     ).rejects.toThrow(ReportParamError);
   });
 
@@ -337,7 +455,7 @@ describe("fetchBranchDailyReportRows", () => {
       throw new Error("fetch されないはず");
     }) as FetchLike;
     await expect(
-      fetchBranchDailyReportRows(jar, { dateJst: "2026/08/32 00:00", branchCd: "1" }, neverFetch),
+      fetchBranchDailyReport(jar, { dateJst: "2026/08/32 00:00", branchCd: "1" }, neverFetch),
     ).rejects.toThrow(ReportParamError);
   });
 });

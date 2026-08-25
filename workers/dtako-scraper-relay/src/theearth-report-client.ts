@@ -53,6 +53,7 @@ import {
 import { isLoginRedirect, VenusSessionExpiredError } from "./theearth-venus-client";
 
 const DAILY_REPORT_PATH = "/F-DES1010[OperationEdit].aspx";
+const NRS_DAILY_REPORT_PATH = "/F-NRS1010[DailyOperationReport].aspx";
 const DISPLAY_CONFIG_PATH = "/F-GOS0030[DataDisplayConfig].aspx";
 const OPERATION_LIST_PATH = "/F-DES1010[OperationEdit].aspx";
 const EXPENSE_EDIT_PATH = "/F-DES1012[OperationExpenseEdit].aspx";
@@ -1609,8 +1610,14 @@ export interface DailyReportRow {
   expenseFlag: string | null;
 }
 
-function extractReportCell(html: string, field: string, row: number): string | null {
-  const m = html.match(new RegExp(`id="MainContent_lstOperation_${field}_${row}"[^>]*>([\\s\\S]*?)</span>`));
+/** F-DES1010 の行 id prefix。F-NRS1010 (`MainContent_T1_lstOperation_`) と紛らわしい
+ * が別物 (theearth-venus skill「F-DES1010 の実グリッド構造」節)。 */
+const DES_ROW_ID_PREFIX = "MainContent_lstOperation_";
+/** F-NRS1010 [運転日報] の行 id prefix (`T1_` あり)。 */
+const NRS_ROW_ID_PREFIX = "MainContent_T1_lstOperation_";
+
+function extractReportCell(html: string, prefix: string, field: string, row: number): string | null {
+  const m = html.match(new RegExp(`id="${prefix}${field}_${row}"[^>]*>([\\s\\S]*?)</span>`));
   if (!m) return null;
   const v = m[1].replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ").trim();
   return v === "" ? null : v;
@@ -1634,42 +1641,101 @@ function normalizeWorkEndDateTime(workEndRaw: string, startDateTimeFull: string)
   return `${year}/${mm.padStart(2, "0")}/${dd.padStart(2, "0")} ${hh.padStart(2, "0")}:${min}`;
 }
 
+/** harvest 対象グリッド行の共通形 (早期打ち切り・範囲フィルタ・重複排除に使う)。 */
+interface GridRowBase {
+  operationNo: string;
+  startDateTime: string;
+  workEndDateTime: string;
+}
+
 /** 行集合の中で最小の workEndDateTime ("YYYY/MM/DD HH:mm" はゼロ埋めなので
  * 文字列比較がそのまま時系列比較になる)。空なら null。 */
-function minWorkEndDateTime(rows: DailyReportRow[]): string | null {
+function minWorkEndDateTime(rows: GridRowBase[]): string | null {
   return rows.reduce<string | null>(
     (min, r) => (min === null || r.workEndDateTime < min ? r.workEndDateTime : min),
     null,
   );
 }
 
-function parseDailyReportRows(html: string): DailyReportRow[] {
-  const indexes = [...html.matchAll(/id="MainContent_lstOperation_lblOperationNo_(\d+)"/g)].map((m) =>
+/** グリッド行の index を数え上げ、キー 3 フィールド (運行No / 開始日時 / 年補正済み
+ * 退社日時) を prefix 指定で共通に読む。 */
+function scanGridRows<T>(
+  html: string,
+  prefix: string,
+  build: (i: number, base: GridRowBase) => T,
+): T[] {
+  const indexes = [...html.matchAll(new RegExp(`id="${prefix}lblOperationNo_(\\d+)"`, "g"))].map((m) =>
     Number(m[1]),
   );
   return indexes.map((i) => {
-    const startDateTime = extractReportCell(html, "lblStartDateTime", i) ?? "";
-    const workEndRaw = extractReportCell(html, "lblWorkEndDateTime", i);
-    return {
-      operationNo: extractReportCell(html, "lblOperationNo", i) ?? "",
+    const startDateTime = extractReportCell(html, prefix, "lblStartDateTime", i) ?? "";
+    const workEndRaw = extractReportCell(html, prefix, "lblWorkEndDateTime", i);
+    return build(i, {
+      operationNo: extractReportCell(html, prefix, "lblOperationNo", i) ?? "",
       startDateTime,
-      exclusionFlag: extractReportCell(html, "lblExclusionFlag", i) === "1",
-      operationDate: extractReportCell(html, "lblOperationDate", i),
-      branchCd: extractReportCell(html, "lblBranchCD", i),
-      branchName: extractReportCell(html, "lblDisplayName", i),
-      vehicleCd: extractReportCell(html, "lblVehicleCD", i),
-      vehicleName: extractReportCell(html, "lblVehicleName", i),
-      driverCd1: extractReportCell(html, "lblDriverCD1", i),
-      driverName1: extractReportCell(html, "lblDriverName1", i),
-      workStartDateTime: extractReportCell(html, "lblWorkStartDateTime", i),
       workEndDateTime: workEndRaw ? normalizeWorkEndDateTime(workEndRaw, startDateTime) : "",
-      operationStartDateTime: extractReportCell(html, "lblOperationStartDateTime", i),
-      operationEndDateTime: extractReportCell(html, "lblOperationEndDateTime", i),
-      totalRunningDist: extractReportCell(html, "lblTotalRunningDist", i),
-      salesFlag: extractReportCell(html, "lblSalesFlag", i),
-      expenseFlag: extractReportCell(html, "lblExpenseFlag", i),
-    };
+    });
   });
+}
+
+function parseDailyReportRows(html: string): DailyReportRow[] {
+  const cell = (field: string, i: number): string | null => extractReportCell(html, DES_ROW_ID_PREFIX, field, i);
+  return scanGridRows(html, DES_ROW_ID_PREFIX, (i, base) => ({
+    ...base,
+    exclusionFlag: cell("lblExclusionFlag", i) === "1",
+    operationDate: cell("lblOperationDate", i),
+    branchCd: cell("lblBranchCD", i),
+    branchName: cell("lblDisplayName", i),
+    vehicleCd: cell("lblVehicleCD", i),
+    vehicleName: cell("lblVehicleName", i),
+    driverCd1: cell("lblDriverCD1", i),
+    driverName1: cell("lblDriverName1", i),
+    workStartDateTime: cell("lblWorkStartDateTime", i),
+    operationStartDateTime: cell("lblOperationStartDateTime", i),
+    operationEndDateTime: cell("lblOperationEndDateTime", i),
+    totalRunningDist: cell("lblTotalRunningDist", i),
+    salesFlag: cell("lblSalesFlag", i),
+    expenseFlag: cell("lblExpenseFlag", i),
+  }));
+}
+
+/**
+ * F-NRS1010 [運転日報] のグリッド行 (theearth-venus skill の「運転日報 F-NRS1010 =
+ * 作業時間の一括取得元」節参照)。作業1〜5時間・燃料 (自社/他社) は F-DES1010 の
+ * 一覧に無い F-NRS1010 固有フィールド。乗務員名・営業所などの表示列は持たないため、
+ * F-DES1010 の行と `operationNo` で突き合わせて使う (daily-report-pdf.ts、Refs #874-2)。
+ */
+export interface DailyOperationReportRow {
+  /** 運行No (22桁、F-DES1010 の行と同じキー)。 */
+  operationNo: string;
+  /** 出庫 (full year "YYYY/MM/DD H:mm:ss")。 */
+  startDateTime: string;
+  /** 退社日時 (=読取日)。年補正済み "YYYY/MM/DD HH:mm"。 */
+  workEndDateTime: string;
+  /** 作業1〜5時間 ("H:mm"、再集計で変わる本体)。 */
+  driverState1Min: string | null;
+  driverState2Min: string | null;
+  driverState3Min: string | null;
+  driverState4Min: string | null;
+  driverState5Min: string | null;
+  /** 燃料 自社。 */
+  intankFuel1: string | null;
+  /** 燃料 他社。 */
+  ssFuel1: string | null;
+}
+
+function parseDailyOperationReportRows(html: string): DailyOperationReportRow[] {
+  const cell = (field: string, i: number): string | null => extractReportCell(html, NRS_ROW_ID_PREFIX, field, i);
+  return scanGridRows(html, NRS_ROW_ID_PREFIX, (i, base) => ({
+    ...base,
+    driverState1Min: cell("lblDriverState1Min", i),
+    driverState2Min: cell("lblDriverState2Min", i),
+    driverState3Min: cell("lblDriverState3Min", i),
+    driverState4Min: cell("lblDriverState4Min", i),
+    driverState5Min: cell("lblDriverState5Min", i),
+    intankFuel1: cell("lblIntankFuel1", i),
+    ssFuel1: cell("lblSSFuel1", i),
+  }));
 }
 
 interface PagerLink {
@@ -1834,11 +1900,62 @@ export async function harvestDailyReport(
   timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
   initialHtml?: string,
 ): Promise<DailyReportRow[]> {
+  return harvestGrid(
+    jar,
+    range,
+    { path: DAILY_REPORT_PATH, parseRows: parseDailyReportRows, label: "harvestDailyReport" },
+    fetchImpl,
+    timeoutMs,
+    initialHtml,
+  );
+}
+
+/**
+ * F-NRS1010 [運転日報] を全ページ収集する (theearth-venus skill の「運転日報
+ * F-NRS1010 = 作業時間の一括取得元」節参照)。ページャ・退社日時降順のランタイム
+ * 検証 (単調性が崩れたら早期打ち切りを無効化して全ページ走査)・重複排除は
+ * `harvestDailyReport` (F-DES1010) と同じ実装 (`harvestGrid`) を共有する。
+ * F-GOS0030 の読取日 range がサーバー側絞込として plain GET に反映されるかは
+ * 未検証のため、正しさは範囲フィルタ + 降順早期打ち切りにのみ依存させる
+ * (絞込はページ数削減の最適化としてだけ効く)。
+ */
+export async function harvestDailyOperationReport(
+  jar: CookieJar,
+  range: HarvestRange,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+  initialHtml?: string,
+): Promise<DailyOperationReportRow[]> {
+  return harvestGrid(
+    jar,
+    range,
+    { path: NRS_DAILY_REPORT_PATH, parseRows: parseDailyOperationReportRows, label: "harvestDailyOperationReport" },
+    fetchImpl,
+    timeoutMs,
+    initialHtml,
+  );
+}
+
+/** harvest 対象グリッドの定義 (URL / 行パーサ / 診断ログ用ラベル)。 */
+interface GridHarvestSpec<T extends GridRowBase> {
+  path: string;
+  parseRows: (html: string) => T[];
+  label: string;
+}
+
+async function harvestGrid<T extends GridRowBase>(
+  jar: CookieJar,
+  range: HarvestRange,
+  spec: GridHarvestSpec<T>,
+  fetchImpl: FetchLike,
+  timeoutMs: number,
+  initialHtml?: string,
+): Promise<T[]> {
   if (!RANGE_BOUND_RE.test(range.from) || !RANGE_BOUND_RE.test(range.to)) {
     throw new ReportParamError('期間は "YYYY/MM/DD HH:mm" 形式で指定してください');
   }
 
-  const url = `${BASE_URL}${DAILY_REPORT_PATH}`;
+  const url = `${BASE_URL}${spec.path}`;
   let html: string;
   if (initialHtml !== undefined) {
     html = initialHtml;
@@ -1864,13 +1981,13 @@ export async function harvestDailyReport(
     html = await postPagerSubmitButton(jar, url, html, firstButton, fetchImpl, timeoutMs);
   }
 
-  const rows: DailyReportRow[] = [];
+  const rows: T[] = [];
   let monotonic = true;
   let prevWorkEnd: string | null = null;
   let currentPage = extractCurrentPageNumber(html) ?? 1;
 
   for (let pageCount = 0; pageCount < MAX_HARVEST_PAGES; pageCount++) {
-    const pageRows = parseDailyReportRows(html);
+    const pageRows = spec.parseRows(html);
     for (const row of pageRows) {
       if (prevWorkEnd !== null && row.workEndDateTime > prevWorkEnd) {
         monotonic = false;
@@ -1941,7 +2058,7 @@ export async function harvestDailyReport(
           ? ` pager=${html.match(/.{0,200}gCurrentPage[\s\S]{0,400}/)?.[0]?.replace(/\s+/g, " ") ?? "(gCurrentPage 無し)"}`
           : "";
         console.warn(
-          `harvestDailyReport: 次ページ手段なしで打ち切り page=${currentPage} pages=${pageCount + 1} ` +
+          `${spec.label}: 次ページ手段なしで打ち切り page=${currentPage} pages=${pageCount + 1} ` +
             `rowsSoFar=${rows.length} links=[${links.map((l) => JSON.stringify(l.text)).join(",")}] ` +
             `buttons=[${buttonValues.join(",")}]${detail}`,
         );
