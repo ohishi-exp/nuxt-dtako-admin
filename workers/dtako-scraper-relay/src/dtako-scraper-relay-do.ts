@@ -4655,11 +4655,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /**
-   * POST /cron/netprint — body {comp_id, branch_cd, channel_id, branch_name?,
-   * date}。対象日 (前日 JST、計算は cron.ts) の運転日報を対象営業所に絞って
-   * PDF 化し、かんたんnetprint へ登録して予約番号を LINE WORKS へ通知する
-   * (Refs #874)。`channel_id` は DB `lineworks_channels` の行 id (Uuid) で、
-   * 通知は rust-alc-api の internal API 経由 (#874-8)。
+   * POST /cron/netprint — body {comp_id, branch_cd, channel_id | recipient_id,
+   * branch_name?, date}。対象日 (前日 JST、計算は cron.ts) の運転日報を対象営業所に
+   * 絞って PDF 化し、かんたんnetprint へ登録して予約番号を LINE WORKS へ通知する
+   * (Refs #874)。**宛先はトークルーム (`channel_id` = DB `lineworks_channels` の
+   * 行 id) か個人 (`recipient_id` = DB `notify_recipients` の行 id) のどちらか一方**
+   * (#874-10)。通知は rust-alc-api の internal API 経由 (#874-8/9)。
+   *
+   * ここで 400 にするのは「宛先が 1 つも無い」まで — **どちらか一方だけ / Uuid か**
+   * の判定は `runNetprintTargets` (cron 経路と同じ規則) に任せ、target ごとの
+   * `detail` として応答に載せる。
    *
    * 反復・通知文・失敗の畳み方は pure な `netprint-cron.ts`
    * (`runNetprintTargets`) — ここは theearth ログイン (`withTheearthLoginSession`)
@@ -4674,6 +4679,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       comp_id?: unknown;
       branch_cd?: unknown;
       channel_id?: unknown;
+      recipient_id?: unknown;
       branch_name?: unknown;
       date?: unknown;
     };
@@ -4685,12 +4691,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const compId = typeof body.comp_id === "string" ? body.comp_id : "";
     const branchCd = typeof body.branch_cd === "string" ? body.branch_cd : "";
     const channelId = typeof body.channel_id === "string" ? body.channel_id : "";
+    const recipientId = typeof body.recipient_id === "string" ? body.recipient_id : "";
     const branchName =
       typeof body.branch_name === "string" && body.branch_name !== "" ? body.branch_name : undefined;
     const date = typeof body.date === "string" ? body.date : "";
-    if (!compId || !branchCd || !channelId || !NETPRINT_DATE_RE.test(date)) {
+    if (!compId || !branchCd || (!channelId && !recipientId) || !NETPRINT_DATE_RE.test(date)) {
       return Response.json(
-        { error: "comp_id / branch_cd / channel_id / date (YYYY-MM-DD) が必要です" },
+        {
+          error:
+            "comp_id / branch_cd / channel_id か recipient_id のどちらか / date (YYYY-MM-DD) が必要です",
+        },
         { status: 400 },
       );
     }
@@ -4717,7 +4727,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       );
     }
 
-    const target: NetprintTarget = { branch_cd: branchCd, channel_id: channelId, branch_name: branchName };
+    const target: NetprintTarget = { branch_cd: branchCd, branch_name: branchName };
+    // 指定された側のキーだけを立てる (空文字を残すと「両方指定」に見える)。
+    if (channelId) target.channel_id = channelId;
+    if (recipientId) target.recipient_id = recipientId;
     return this.enqueueScrape(() => this.runNetprintJob(account, target, date, sharedSecret));
   }
 
@@ -4746,9 +4759,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         const reservation = await netprintWaitForReservation(id);
         return { printId: reservation.printId, endDate: reservation.endDate, page: reservation.page };
       },
-      sendText: (channelId, text) =>
+      sendText: (destination, text) =>
         sendLineworksTextViaAlcInternalProxy(
-          { sharedSecret, channelId, text },
+          { sharedSecret, destination, text },
           this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER),
         ),
     };

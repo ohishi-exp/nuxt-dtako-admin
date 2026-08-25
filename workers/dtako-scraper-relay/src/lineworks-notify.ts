@@ -23,8 +23,22 @@
  * forward する。`X-Internal-Shared-Secret` も `X-Tenant-ID` も relay は付けない
  * (付けても forward されない — tenant は rust が channel の id 引きで解決する)。
  *
+ * **宛先はトークルーム (channel) と個人 (recipient) の 2 種類**があり、rust 側は
+ * `{channel_id?, recipient_id?, text}` の**どちらか一方だけ**を受ける (両方 / 両方
+ * 無しは 400、Refs #874 の 9)。実運用ではトークルームが 1 件も登録されておらず
+ * `notify_recipients` の個人宛が使われるため、relay 側も両方を渡せる必要がある。
+ * 「どちらの id か」を呼び出し側が取り違えると**別人へ誤配して取り消せない**ので、
+ * 文字列 1 本ではなく [`LineworksDestination`] (種別 + id) で受ける。
+ *
  * 非 2xx は本文付き loud fail (`alc-internal-upload.ts` と同じ流儀 — 通知が
- * 飛ばなかったことを黙って握らない)。
+ * 飛ばなかったことを黙って握らない)。**種別も message に載せる** — 同じ Uuid 形式
+ * なので、id だけでは「channel の id を recipient として送った」を読み取れない。
+ *
+ * **rust が返す error code (`recipient_not_found` / `recipient_disabled` /
+ * `recipient_not_lineworks` / `target_ambiguous` 等) で relay 側は分岐しない**
+ * (#887 で確立した方針)。status と本文をそのまま detail に載せれば、運用者は
+ * #874 の表を見て原因を特定できる — 「行が無い」と「無効化されている」を別 code に
+ * 分けているのは、まさにその切り分けのためで、relay がそれを畳むと情報が減る。
  */
 
 /** service binding fetch 用の絶対 URL base。host は binding が無視するが path が
@@ -45,18 +59,36 @@ export class LineworksNotifyError extends Error {
 
 export type FetchLike = typeof fetch;
 
+/** 送信先の種別。**どちらも Uuid で見分けが付かない**ので、id と対で運ぶ。
+ *
+ * - `channel` — DB `lineworks_channels` の行 id。**LINE WORKS の channelId そのもの
+ *   ではない** (Bot / tenant / 実チャンネルの対応は rust 側が DB で引く)
+ * - `recipient` — DB `notify_recipients` の行 id (個人宛)
+ */
+export type LineworksDestinationKind = "channel" | "recipient";
+
+/** 送信先 1 件。`kind` がそのまま rust 側の body キー (`channel_id` /
+ * `recipient_id`) を決める。 */
+export interface LineworksDestination {
+  kind: LineworksDestinationKind;
+  id: string;
+}
+
 export interface LineworksNotifyInput {
   /** `INTERNAL_SHARED_SECRET` (consumer worker proof)。 */
   sharedSecret: string;
-  /** DB `lineworks_channels` の行 id (Uuid)。**LINE WORKS の channelId そのもの
-   * ではない** — Bot / tenant / 実チャンネルの対応は rust 側が DB で引く。 */
-  channelId: string;
+  /** トークルーム宛か個人宛か + その行 id。 */
+  destination: LineworksDestination;
   text: string;
 }
 
-/** `POST /api/internal/lineworks/send` の request body。 */
-export function buildLineworksSendBody(channelId: string, text: string): string {
-  return JSON.stringify({ channel_id: channelId, text });
+/** `POST /api/internal/lineworks/send` の request body。**指定した側のキーだけを
+ * 出す** — rust 側は「両方あり」を 400 にするので、`null` を載せて片方を明示的に
+ * 空にする形は取らない (#874-9)。 */
+export function buildLineworksSendBody(destination: LineworksDestination, text: string): string {
+  const target =
+    destination.kind === "channel" ? { channel_id: destination.id } : { recipient_id: destination.id };
+  return JSON.stringify({ ...target, text });
 }
 
 /**
@@ -75,12 +107,13 @@ export async function sendLineworksTextViaAlcInternalProxy(
       "X-Alc-Proxy-Secret": input.sharedSecret,
       "Content-Type": "application/json",
     },
-    body: buildLineworksSendBody(input.channelId, input.text),
+    body: buildLineworksSendBody(input.destination, input.text),
   });
   if (!res.ok) {
     const text = await res.text();
+    const { kind, id } = input.destination;
     throw new LineworksNotifyError(
-      `LINE WORKS 送信失敗 (HTTP ${res.status}, channel ${input.channelId}): ${text.slice(0, 300)}`,
+      `LINE WORKS 送信失敗 (HTTP ${res.status}, ${kind} ${id}): ${text.slice(0, 300)}`,
     );
   }
 }
