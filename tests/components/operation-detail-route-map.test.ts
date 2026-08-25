@@ -169,4 +169,90 @@ describe('運行詳細の経路地図 (Refs #873)', () => {
     await flushPromises()
     expect(routeMapProps[0]!.net780MissingCount).toBeUndefined()
   })
+
+  // ★ 親の指摘 (a): GPS が読めない運行で**空の地図**が出ると「走っていない」に読める。
+  describe('GPS が読めない運行', () => {
+    it('GPS 列が無い CSV は「便 0 本」と名乗らない (数えられなかっただけ)', async () => {
+      getOperationCsvMock.mockReset().mockResolvedValue({
+        headers: ['イベント名', '開始日時', '終了日時'],
+        rows: [['積み', '2026/7/1 8:00:00', '2026/7/1 8:30:00']],
+      })
+      const w = mountPage()
+      await flushPromises()
+      await w.findAll('button').find(b => b.text() === '経路地図')!.trigger('click')
+      await flushPromises()
+      const props = routeMapProps[0]!
+      const route = props.route as ReturnType<typeof buildOperationRoute>
+      // `buildOperationRoute` は GPS 列が無いと emptyRoute() を返す = 描くものが無い。
+      expect(route.segments).toEqual([])
+      expect(route.droppedRows).toBe(0)
+      // **見出しで「便 0 本」と嘘をつかない。**「なぜ空か」はモーダルの overlay が言う
+      // (`OperationRouteMap.vue` の `emptyReason`: GPS 列が無いか、行がありません)。
+      expect(props.title).toBe(`運行 ${UNKO_NO} (読取日 2026-07-01)`)
+      // **取得の失敗ではない** (error は null のまま = overlay が「引けなかった」に倒れない)。
+      expect(props.error).toBeNull()
+    })
+
+    it('GPS 列はあるが全行無効なら、落とした行数が route に乗る (画面が数を出せる)', async () => {
+      const dead = { ...EVENTS_CSV, rows: EVENTS_CSV.rows.map(r => [...r.slice(0, 5), '0', '0', '0', '0', '0', '0', r[11]!]) }
+      getOperationCsvMock.mockReset().mockResolvedValue(dead)
+      const w = mountPage()
+      await flushPromises()
+      await w.findAll('button').find(b => b.text() === '経路地図')!.trigger('click')
+      await flushPromises()
+      const route = routeMapProps[0]!.route as ReturnType<typeof buildOperationRoute>
+      expect(route.segments).toEqual([])
+      // **黙って 0 にしない** — `OperationRouteMap` の overlay が
+      // 「GPS が有効な行がありません (GPS 無効の行 N)」を出せる材料。
+      expect(route.droppedRows).toBeGreaterThan(0)
+      // 便は数えられている (GPS ではなくイベント名で切るため) ので本数は出す。
+      expect(routeMapProps[0]!.title).toContain('便 2 本')
+    })
+  })
+
+  // ★ 親の指摘 (b): イベントタブを開いていない状態で押すと、そこで CSV を取りに行く。
+  it('CSV 未取得のまま押しても無反応にならない (取得中は loading を渡す)', async () => {
+    let release: ((v: CsvJsonResponse) => void) | null = null
+    getOperationCsvMock.mockReset().mockImplementation(() => new Promise<CsvJsonResponse>((r) => { release = r }))
+    const w = mountPage()
+    await flushPromises()
+    await w.findAll('button').find(b => b.text() === '経路地図')!.trigger('click')
+    await flushPromises()
+    // モーダルは**押した直後に開く**。中は「イベントCSV を取得中...」の overlay。
+    expect(routeMapProps).toHaveLength(1)
+    expect(routeMapProps[0]!.loading).toBe(true)
+    expect(routeMapProps[0]!.route).toBeNull()
+    release!(EVENTS_CSV)
+    await flushPromises()
+    expect(routeMapProps[0]!.loading).toBe(false)
+    expect(routeMapProps[0]!.route).not.toBeNull()
+  })
+
+  // ★ 親の検証項目: 便が多い運行 (積み 12) で色分け・便番号が破綻しないか。
+  it('積み 12 便でも便番号は 1..12 のまま (イベント表の 5 色循環に引きずられない)', async () => {
+    const rows: string[][] = [ev('運行開始', OBIHIRO, OBIHIRO, '帯広市', '', ['2026/7/1 5:00:00', '2026/7/1 5:00:00'])]
+    for (let i = 0; i < 12; i++) {
+      const h = 6 + i
+      rows.push(ev('積み', KUSHIRO, KUSHIRO, '釧路市', '', [`2026/7/1 ${h}:00:00`, `2026/7/1 ${h}:10:00`]))
+      rows.push(ev('運転', KUSHIRO, SHIHORO, '', '', [`2026/7/1 ${h}:10:00`, `2026/7/1 ${h}:30:00`]))
+      rows.push(ev('降し', SHIHORO, SHIHORO, '', '士幌町', [`2026/7/1 ${h}:30:00`, `2026/7/1 ${h}:40:00`]))
+      rows.push(ev('運転', SHIHORO, KUSHIRO, '', '', [`2026/7/1 ${h}:40:00`, `2026/7/1 ${h}:55:00`]))
+    }
+    rows.push(ev('運行終了', OBIHIRO, OBIHIRO, '', '帯広市', ['2026/7/1 20:00:00', '2026/7/1 20:00:00']))
+    getOperationCsvMock.mockReset().mockResolvedValue({ headers: HEADERS, rows })
+    const w = mountPage()
+    await flushPromises()
+    await w.findAll('button').find(b => b.text() === '経路地図')!.trigger('click')
+    await flushPromises()
+    const route = routeMapProps[0]!.route as ReturnType<typeof buildOperationRoute>
+    expect(route.legCount).toBe(12)
+    // **地図は便を色ではなく数字で出す** (`OperationRouteMap` の marker ラベル)。
+    // 5 で circulate するのはイベント表のセル色 (`LEG_COLOR_COUNT`) だけで、
+    // 便番号そのものは 1..12 が別々に残る。
+    expect(route.markers.filter(m => m.kind === 'load').map(m => m.legSeq))
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+    expect(route.markers.filter(m => m.kind === 'unload').map(m => m.legSeq))
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+    expect(routeMapProps[0]!.title).toContain('便 12 本')
+  })
 })

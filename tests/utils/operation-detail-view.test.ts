@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   operationTrackNote,
+  operationRouteMapTitle,
   net780ZipAvailability,
   net780ZipFileName,
 } from '~/utils/operation-detail-view'
@@ -53,6 +54,41 @@ describe('operationTrackNote', () => {
       .toBe('軌跡なし — NET780 はありますが、便の時間帯に有効な GPS がありません')
     expect(operationTrackNote({ status: 'error', net780Segments: 0, eventSegments: 0 }).text)
       .toBe('軌跡なし — NET780 の取得に失敗しました')
+  })
+})
+
+describe('operationRouteMapTitle', () => {
+  const base = { unkoNo: '2607010121120000001318', readingDate: '2026-07-01' }
+
+  it('便を数えられたときだけ本数を出す', () => {
+    expect(operationRouteMapTitle({ ...base, legCount: 2 }))
+      .toBe('運行 2607010121120000001318 (読取日 2026-07-01) — 便 2 本')
+  })
+
+  it('★ GPS 列が無い CSV (legCount 0) で「便 0 本」と名乗らない', () => {
+    // `buildOperationRoute` は GPS 列が無いと `emptyRoute()` = legCount 0 を返す。
+    // そのまま出すと「便が 1 本も無い運行」に読めるが、実際は**数えられなかった**だけ。
+    const title = operationRouteMapTitle({ ...base, legCount: 0 })
+    expect(title).toBe('運行 2607010121120000001318 (読取日 2026-07-01)')
+    expect(title).not.toContain('便')
+  })
+
+  it('CSV をまだ読んでいない (null) ときも本数を出さない', () => {
+    expect(operationRouteMapTitle({ ...base, legCount: null }))
+      .toBe('運行 2607010121120000001318 (読取日 2026-07-01)')
+  })
+
+  it('読取日が無ければ - にする (空欄で詰めない)', () => {
+    expect(operationRouteMapTitle({ ...base, readingDate: null, legCount: 3 }))
+      .toBe('運行 2607010121120000001318 (読取日 -) — 便 3 本')
+    expect(operationRouteMapTitle({ ...base, readingDate: undefined, legCount: 3 }))
+      .toBe('運行 2607010121120000001318 (読取日 -) — 便 3 本')
+  })
+
+  it('便が多い運行でも本数はそのまま出る (5 で回さない)', () => {
+    // イベント表の便の色は 5 色循環 (`LEG_COLOR_COUNT`) だが、**地図側は色で便を
+    // 表さない** (色は 種別、便は数字)。本数・便番号は循環させない。
+    expect(operationRouteMapTitle({ ...base, legCount: 12 })).toContain('便 12 本')
   })
 })
 

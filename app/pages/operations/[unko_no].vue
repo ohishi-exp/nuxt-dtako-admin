@@ -42,7 +42,7 @@ import {
   type RouteMapLayers,
   type RouteSegment,
 } from '~/utils/operation-route-map'
-import { operationTrackNote } from '~/utils/operation-detail-view'
+import { operationTrackNote, operationRouteMapTitle } from '~/utils/operation-detail-view'
 
 const route = useRoute()
 const router = useRouter()
@@ -500,11 +500,11 @@ const routeMapRoute = computed<OperationRoute | null>(() => {
   return { ...route, segments: [...route.segments, ...track] }
 })
 
-const routeMapTitle = computed(() => {
-  const route = operationRoute.value
-  const head = `運行 ${unkoNo} (読取日 ${primary.value?.reading_date ?? '-'})`
-  return route ? `${head} — 便 ${route.legCount} 本` : head
-})
+const routeMapTitle = computed(() => operationRouteMapTitle({
+  unkoNo,
+  readingDate: primary.value?.reading_date,
+  legCount: operationRoute.value?.legCount ?? null,
+}))
 
 /** イベントCSV が**引けなかった**ときだけ理由を出す (GPS が無いのとは別物)。 */
 const routeMapError = computed(() => csvError.value.events ?? null)
@@ -553,7 +553,21 @@ function formatDatetime(val: string | null): string {
       <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6">
         <div class="flex items-start justify-between">
           <div>
-            <h2 class="text-xl font-bold mb-4">運行 {{ unkoNo }}</h2>
+            <div class="flex items-center gap-3 mb-4 flex-wrap">
+              <h2 class="text-xl font-bold">運行 {{ unkoNo }}</h2>
+              <!-- 運行全体の経路地図 (Refs #873)。**どのタブからでも開ける常設ボタン** —
+                   経路はイベントタブの持ち物ではなく運行全体の話なので、タブに紐づけない。
+                   中身は粗利タブと同じ `OperationRouteMap` (便ごとの色分けも同じ規則)。
+                   **削除ボタンの隣には置かない** — 削除は戻せない操作なので、その隣に
+                   押す用のボタンを増やすと誤クリックの的になる。見出しの側に置く。 -->
+              <UButton
+                label="経路地図"
+                icon="i-lucide-map"
+                variant="outline"
+                size="xs"
+                @click="openRouteMap"
+              />
+            </div>
             <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
               <div>
                 <span class="text-gray-500 block">読取日</span>
@@ -592,24 +606,13 @@ function formatDatetime(val: string | null): string {
             </div>
           </div>
 
-          <div class="flex items-center gap-2 shrink-0">
-            <!-- 運行全体の経路地図 (Refs #873)。**どのタブからでも開ける常設ボタン** —
-                 経路はイベントタブの持ち物ではなく運行全体の話なので、タブに紐づけない。
-                 中身は粗利タブと同じ `OperationRouteMap` (便ごとの色分けも同じ規則)。 -->
-            <UButton
-              label="経路地図"
-              icon="i-lucide-map"
-              variant="outline"
-              @click="openRouteMap"
-            />
-            <UButton
-              label="削除"
-              icon="i-lucide-trash-2"
-              color="error"
-              variant="outline"
-              @click="deleteConfirm = true"
-            />
-          </div>
+          <UButton
+            label="削除"
+            icon="i-lucide-trash-2"
+            color="error"
+            variant="outline"
+            @click="deleteConfirm = true"
+          />
         </div>
       </div>
 

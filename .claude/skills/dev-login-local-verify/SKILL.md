@@ -195,6 +195,57 @@ bash .claude/skills/dev-login-local-verify/setup-dev-env.sh --hybrid   # + nuxt 
      一致させること。
 5. ログに `[wrangler:info] Ready on http://127.0.0.1:8787` が出れば起動完了。
 
+## ★★ Access 導入後 (2026-08-25〜): `--remote` は 302 になる。binding だけ remote にする
+
+**`setup-dev-env.sh` が使う `wrangler dev --remote` は、Access の裏では使えなくなった。**
+`--remote` は worker を **Cloudflare のエッジで**動かすので、`127.0.0.1:8787` 宛でも
+実体は `dtako.ippoan.org` を通り、Access に捕まる (2026-08-25 実測、Refs #873):
+
+```
+curl http://127.0.0.1:8787/api/net780/by-operation?operationNo=...
+→ 302  Location: https://mtamaramu.cloudflareaccess.com/cdn-cgi/access/login/dtako.ippoan.org?...
+   WWW-Authenticate: Cloudflare-Access
+```
+
+ブラウザなら Access のセッションで通るが、**無人 (curl / vitest) で server route を
+測る経路はこれで塞がる。**
+
+### 回避路: `wrangler dev` (ローカル workerd) + D1/R2 の binding だけ `remote = true`
+
+**worker はローカルで動く = Access を通らない。D1 / R2 だけ本番を読む。**
+`--remote` より測る対象が絞れるので、server route の検証はむしろこちらが正確。
+
+```bash
+# 1) 検証専用の一時 config を作る (**repo の wrangler.toml は絶対に触らない**)
+sed '/^\[build\]$/,/^$/d' wrangler.toml > wrangler.devlocal.toml
+#    → [[r2_buckets]] DTAKO_R2 と [[d1_databases]] DTAKO_DB の節に 1 行ずつ足す:
+#         remote = true
+# 2) --remote **を付けずに**起動する (既定 = ローカル workerd + 宣言した binding だけ remote)
+npx wrangler dev -c wrangler.devlocal.toml --var DEV_LOGIN:true --port 8788
+# 3) 認証なしでそのまま叩ける
+curl -s -o out.zip -w '%{http_code} %{size_download}\n' \
+  'http://127.0.0.1:8788/api/net780/by-operation?operationNo=2607010121120000001318'
+```
+
+- **★ キーは `remote`。`experimental_remote` ではない。**wrangler 4.72 は
+  `experimental_remote` を `Unexpected fields found in r2_buckets[0]` の **warning だけ出して
+  黙って無視**する (=「ローカルの空 DB を読んで `no such table: dtako_uploads`」になり、
+  設定したつもりで効いていない。30 分溶かした)
+- **`wrangler dev --local` は使えない。**`-l/--local` は "remote bindings **disabled**" なので
+  `remote = true` ごと無効化され、同じく `no such table` になる
+- **`wrangler.devlocal.toml` は commit しない** (検証専用)。`.gitignore` には入っていないので
+  `git add -A` のときに拾わないよう注意する
+- **`.output` を作り直す (`nuxt build`) と、この dev worker は落ちることがある。**
+  build のあとは**起動し直してから**測る
+- **これで測れないもの: `/api/proxy/*`** (rust-alc-api への proxy)。browser JWT の
+  introspect が要るので **401**。イベントCSV 等はこの経路では取れない —
+  `issue_dev_token` の Bearer が要る (下記)。**タスクセッションにはその MCP tool が
+  無いことがある**ので、無いなら「測れなかった範囲」として報告する
+- **wrangler / R2 / D1 を直接読むのも手** (認証済み CLI):
+  `wrangler d1 execute <db> --remote --command 'SELECT ...'` /
+  `wrangler r2 object get <bucket>/<key> --file out.zip --remote`。
+  **route の応答と md5 が一致するか**まで確かめられる (Refs #873 で bulk zip の同一性を確認)
+
 ## dev-login token の発行 (MCP 経由)
 
 `issue_dev_login_url` / `issue_dev_token` は auth-worker 自身の Google IdP 専用
