@@ -25,16 +25,37 @@ export const UIconStub = { template: '<span />' }
  * - **`USelect` の根は本物の `<select>` + `<option>`** — `setValue()` が本物の
  *   `change` を起こして `update:modelValue` が出るので、`v-model` と
  *   `@update:model-value` の**配線**をテストから叩ける
+ *
+ * ## ★★ 全部 stub することで**測れなくなるもの** (型と一緒に必ず読むこと)
+ *
+ * stub は「本物が何を描くか」を再現しない。**測れる範囲がここで切れる:**
+ *
+ * 1. **色・見た目そのものは測れない。** `:color="statusColor(item.status)"` を渡しても
+ *    本物のような赤や緑にはならない。⇒ **渡した prop の値で見る**
+ *    (`w.findAllComponents({ name: 'UBadge' })[0].props('color') === 'warning'`)。
+ *    **だから `color` を props に宣言してある** — 宣言が無いと `attrs` に落ちて
+ *    `props()` から消え、「色を出し分ける関数が実行されただけ」で緑になる
+ *    (v8 の行カバレッジは通るが、戻り値が何であってもテストは落ちない)
+ * 2. **本物のコンポーネント内部の分岐は 1 つも通らない。** ただしこれは
+ *    `coverage.include: ['app/**']` の外なので gate には影響しない
+ * 3. **`v-if` の中身や `:color` の出し分けは template 側**なので、`BR()` の
+ *    instrumented 計測 (= `<script setup>` ブロックだけ) には**出ない**。
+ *    template 側の分岐は **v8 の branches でしか見えない** (`SKILL.md` の
+ *    「側の一言の `v-if` は template 側」と同じ話)
+ * 4. **`w.text()` は textContent の連結**なので、隣り合う区画の文字がくっついて
+ *    存在しない語ができる (実測: 見出し「アップロード履歴 / CSV分割」+ 直後のバッジ
+ *    「完了」で `w.text()` には**常に**「分割完了」が現れる)。
+ *    ⇒ **区画の生死は文言ではなく、その区画の要素で見る**
  */
 export const NUXT_UI_PAGE_STUBS = {
   UIcon: UIconStub,
   UButton: { name: 'UButton', props: ['label'], template: '<button><slot />{{ label }}</button>' },
   UAlert: {
     name: 'UAlert',
-    props: ['title', 'description'],
+    props: ['title', 'description', 'color'],
     template: '<div><slot />{{ title }} {{ description }}</div>',
   },
-  UBadge: { name: 'UBadge', template: '<span><slot /></span>' },
+  UBadge: { name: 'UBadge', props: ['color'], template: '<span><slot /></span>' },
   UCard: { name: 'UCard', template: '<div><slot /></div>' },
   USelect: {
     name: 'USelect',

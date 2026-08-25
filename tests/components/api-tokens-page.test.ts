@@ -145,6 +145,13 @@ describe('/api-tokens APIトークン管理', () => {
       expect(rows[1]!.text()).toContain('期限切れ')
       expect(rows[2]!.text()).toContain('有効')
       expect(rows[3]!.text()).toContain('有効')
+      // **文言だけでなく色も撃ち分ける** — ここを見ないと `tokenStatus` の `color` は
+      // 「実行されただけ」になり、3 状態が全部同じ色でもテストが通る。
+      const color = (i: number) => rows[i]!.find('td:nth-child(3) span').classes()
+      expect(color(0)).toContain('text-red-500')
+      expect(color(1)).toContain('text-orange-500')
+      expect(color(2)).toContain('text-green-600')
+      expect(color(3)).toContain('text-green-600')
     })
 
     it('失効済みの行だけ薄くし、失効ボタンを出さない', async () => {

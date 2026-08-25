@@ -210,7 +210,10 @@ describe('/upload デジタコ CSV アップロード', () => {
       expect(w.text()).toContain('91 件の運行データを取り込みました')
       expect(w.text()).toContain('CSV分割が 3 件失敗しました')
       expect(w.text()).toContain('一覧にも欠け検知にも出てきません')
-      expect(w.text()).toContain('CSV分割')
+      // **緑と赤で別物として読ませる。**色は stub では描かれないので prop で見る
+      // (同じ色で 2 枚並ぶと「取り込みも失敗した」に読める)。
+      const alerts = w.findAllComponents({ name: 'UAlert' })
+      expect(alerts.map((a) => a.props('color'))).toEqual(['success', 'error'])
     })
 
     it('分割が 0 件失敗なら赤は出さない', async () => {
@@ -264,6 +267,14 @@ describe('/upload デジタコ CSV アップロード', () => {
       // 知らない状態は生の値をそのまま出す (勝手に「失敗」に寄せない)
       expect(rows[3]!.text()).toContain('processing')
       expect(rows[3]!.classes()).not.toContain('border-red-200')
+
+      // **バッジの色は stub では描かれない**ので、渡した prop の値で見る。
+      // ここを見ないと `statusColor` は「実行されただけ」で緑になり、
+      // 何色を返しても落ちないテストになる (NUXT_UI_PAGE_STUBS の doc 参照)。
+      const badges = w.findAllComponents({ name: 'UBadge' })
+      expect(badges.map((b) => b.props('color'))).toEqual([
+        'success', 'warning', 'error', 'neutral',
+      ])
     })
 
     it('リランは pending_retry / failed にだけ出す', async () => {
