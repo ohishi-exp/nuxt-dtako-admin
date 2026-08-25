@@ -200,7 +200,7 @@ function fuelRateFingerprint(map: FuelRateMap): Array<[string, number | null, nu
  * `MarginCache.savedAt` は再計算のたびに `new Date().toISOString()` で埋まるので、
  * そのままハッシュすると**毎回「内容が変わった」ことになり版が無限に増える**
  * (= dedup が死に、R2 の容量が青天井になる)。`codeVersion` も外す — 版を分けるのは
- * **数字が動いたとき**であって、数字が同じままコードだけ上がったのは
+ * **中身が動いたとき**であって、中身が同じままコードだけ上がったのは
  * `lastVerifiedCodeVersion` (customMetadata) で足りる。
  *
  * ★ **指紋 (`fuelRateOverrides` / `runCostShareMode`) は逆にハッシュへ入れる** (Refs #886)。
