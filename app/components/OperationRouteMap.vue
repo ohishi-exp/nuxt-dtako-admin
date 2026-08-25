@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /**
- * 粗利タブの運行行「地図」: 1 運行の経路を便ごとに色分けして Google Map に描くモーダル
- * (Refs #760 の 18)。
+ * 1 運行の経路を便ごとに色分けして Google Map に描くモーダル (Refs #760 の 18)。
+ * 粗利タブの運行行「地図」と、運行詳細 (`/operations/[unko_no]`) のヘッダ「経路地図」
+ * (Refs #873) の**両方**が開く。レイヤ設定 (`ROUTE_MAP_LAYERS_KEY`) も共有する。
  *
  * `EventSpeedMapPanel.vue` と同じローダ方式 (@googlemaps/js-api-loader、
  * `/api/vid-check/map-key`、`DEMO_MAP_ID`) を踏襲し、`buildOperationRoute` が出した
