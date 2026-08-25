@@ -15,9 +15,15 @@
  *
  * IO (R2 read/write) はここに置かない。R2 binding は Nitro server route からしか
  * 触れないので `server/api/profit/margin-summary.post.ts` が持つ (`profit-r2.ts` と同じ分け方)。
+ *
+ * ★ **形式 2 から「その版を作った端末の設定」の指紋を持つ** (Refs #886) —
+ * 燃費の上書き (`fuelRateOverrides`) と運行経費の配分の比 (`runCostShareMode`)。
+ * どちらも localStorage 由来で、**版に入っていないと「なぜその数字になったか」が
+ * 版のどこにも残らない**。ここでも**数字は 1 円も作らない** — 画面が計算に渡したものを
+ * そのまま持ち回るだけ (`margin.ts` は 1 行も触っていない)。
  */
 import { resolveCodeVersion } from './code-version'
-import type { MarginCache, MarginTotals } from './margin'
+import type { FuelRateMap, MarginCache, MarginTotals, RunCostShareMode } from './margin'
 import type { ProfitR2Paths } from './profit-r2'
 
 // --- キー設計 ---
@@ -51,7 +57,17 @@ export { UNKNOWN_CODE_VERSION, resolveCodeVersion, ciBuildCodeVersion } from './
 
 // --- 保存する形 ---
 
-export const MARGIN_SUMMARY_SCHEMA_VERSION = 1
+/**
+ * 保存する形の版。**`1` → `2` で「その版を作った端末の設定」の指紋
+ * (`fuelRateOverrides` / `runCostShareMode`) が入った** (Refs #886)。
+ *
+ * ★ **形式 1 の版に指紋を後から足すことはできない。** 上書きした値は集計した端末の
+ * localStorage にしか無く、版を保存した時点で失われている。**指紋が付くのはこれから
+ * 保存される版だけ**で、形式 1 の版は永久に「なぜその数字になったか」を持たない。
+ * 形式が違う版どうしは差分にしない (`marginDiffSchemaMismatchNote`) — 片方にしか
+ * 指紋が無い 2 版を並べても、意味のある比較にならないため。
+ */
+export const MARGIN_SUMMARY_SCHEMA_VERSION = 2
 
 /**
  * 画面が送る中身。**`savedAt` と `codeVersion` は入っていない** — 時計もビルド時定数も
@@ -80,6 +96,35 @@ export interface MarginSummaryInput {
    * R2 の容量が運行本数×月で膨らまないのはこの設計のおかげなので、**明細を足さない**。
    */
   cache: MarginCache
+  /**
+   * ★ **その版を作った端末の燃費・単価の上書き** (`FuelRateMap`、localStorage
+   * `FUEL_RATE_KEY` = `dtako:margin:fuel-rate:v1`。Refs #886)。
+   * `buildOperationMargins` の 3 つ目の引数**そのまま**。
+   *
+   * **`totals` を動かす** (`fuelYenFor` → `marginYen` → `summarizeMargins`) ので、
+   * 燃費を上書きした端末で集計すると**取り込みデータが 1 円も変わっていないのに版が増える**。
+   * その理由が版のどこにも残っていなかったのが #886 の実害で、**この欄が理由を名乗る。**
+   *
+   * **`cache.operations` からは復元できない** — あちらは `MarginOperationInput[]` =
+   * 生の入力で、上書きを適用した後の `OperationMargin.fuelRate` を持たない
+   * (`margin.ts` の `MarginCache`)。だから別の欄として持つ。
+   *
+   * **上書きが 1 台も無ければ空オブジェクト** (`{}`)。**null に倒さない** —
+   * 「上書きしていない」と「指紋そのものが無い (形式 1)」は別の意味で、混ぜると
+   * 版を読む人が区別できなくなる。形式 1 かどうかは `schemaVersion` が言う。
+   */
+  fuelRateOverrides: FuelRateMap
+  /**
+   * ★ **その版を作った端末の運行経費の配分の比** (`RunCostShareMode`、localStorage
+   * 粗利タブの `RUN_COST_SHARE_MODE_KEY` = `dtako:margin:runCostShareMode`。Refs #886)。
+   * `buildOperationMargins` の 4 つ目の引数そのまま。
+   *
+   * こちらは **`totals` を 1 円も動かさない** — `buildLegMargins` にしか流れず、
+   * `marginYen` はその**前**に確定する。動くのは**便 (leg) の内訳**だけで、その内訳は
+   * `MarginCache` に保存されない。⇒ 指紋が無いと**版から便の内訳を再現できない**という、
+   * 燃費の上書きとは別の (静かな) 穴になる。**2 つの影響は同じではない。**
+   */
+  runCostShareMode: RunCostShareMode
 }
 
 /** R2 に置く JSON。`MarginSummaryInput` にサーバーが保存時刻を足しただけ。 */
@@ -97,6 +142,13 @@ export function buildMarginSummaryInput(params: {
   cache: MarginCache
   totals: MarginTotals
   codeVersion: unknown
+  /**
+   * **画面が `buildOperationMargins` に渡したものと同じ参照を渡す** (Refs #886)。
+   * ここで作り直したり既定に倒したりしない — 版が名乗る指紋は
+   * **その数字を実際に作った設定**でなければ意味が無い。
+   */
+  fuelRateOverrides: FuelRateMap
+  runCostShareMode: RunCostShareMode
 }): MarginSummaryInput {
   return {
     schemaVersion: MARGIN_SUMMARY_SCHEMA_VERSION,
@@ -104,7 +156,32 @@ export function buildMarginSummaryInput(params: {
     codeVersion: resolveCodeVersion(params.codeVersion),
     totals: params.totals,
     cache: params.cache,
+    fuelRateOverrides: params.fuelRateOverrides,
+    runCostShareMode: params.runCostShareMode,
   }
+}
+
+/**
+ * **`FuelRateMap` のキーの順番をハッシュから外す** (Refs #886)。
+ *
+ * ★ **車輌C によって並びの決まり方が違う** (node で実測):
+ * `{'1234':…,'5678':…}` のような**整数として正規な文字列**のキーは JS が**昇順に揃える**ので
+ * 入れた順に依存しない。ところが `vehicleCodeFromUnkoNo` は `padStart(4, '0')` を通すので
+ * **車輌C が 1000 未満だと `'0123'` になり、これは整数として正規ではない** —
+ * `Object.keys({'0456':…,'0123':…})` は `['0456','0123']` のまま、つまり**入れた順**になる。
+ * ⇒ 4 桁目に 0 が立つ車輌の上書きを 1 台消して入れ直すだけで `JSON.stringify` の文字列が変わり、
+ * **中身が同じなのに版が増える**。`marginSummaryHashInput` が防いでいるもの (理由の無い版)
+ * そのものなので、ここで並べ直す。値も `[車輌C, 円/L, km/L]` の順に組み直して、
+ * 欄の並びにも依存しないようにする。
+ *
+ * **保存する本文 (`MarginSummaryInput.fuelRateOverrides`) は並べ替えない** — 版には
+ * 端末が持っていたものをそのまま残す。並べ直すのは**比べるときだけ**。
+ */
+function fuelRateFingerprint(map: FuelRateMap): Array<[string, number | null, number | null]> {
+  return Object.keys(map).sort().map((vehicle) => {
+    const override = map[vehicle]!
+    return [vehicle, override.yenPerLiter, override.kmPerLiter]
+  })
 }
 
 /**
@@ -115,14 +192,42 @@ export function buildMarginSummaryInput(params: {
  * (= dedup が死に、R2 の容量が青天井になる)。`codeVersion` も外す — 版を分けるのは
  * **数字が動いたとき**であって、数字が同じままコードだけ上がったのは
  * `lastVerifiedCodeVersion` (customMetadata) で足りる。
+ *
+ * ★ **指紋 (`fuelRateOverrides` / `runCostShareMode`) は逆にハッシュへ入れる** (Refs #886)。
+ * 入れないと**版の本文とハッシュの対象が食い違い**、「本文は違うのに同じ版」が生まれる
+ * (= 指紋を足した意味が消える)。**これで挙動が 1 つ変わる**: 運行経費の配分の比だけを
+ * 変えて集計し直すと、**`totals` は 1 円も動かないのに版が 1 本増える**。それが正しい —
+ * 便の内訳は実際に変わっており、その内訳は版の外 (画面) にしか無いので、
+ * **指紋が違えば別の版として残す**以外に後から見分ける術が無い。
  */
 export function marginSummaryHashInput(input: MarginSummaryInput): string {
   return JSON.stringify({
     schemaVersion: input.schemaVersion,
     ym: input.ym,
     totals: input.totals,
+    fuelRateOverrides: fuelRateFingerprint(input.fuelRateOverrides),
+    runCostShareMode: input.runCostShareMode,
     cache: { ...input.cache, savedAt: '' },
   })
+}
+
+/**
+ * **`RunCostShareMode` の値を型の側から数え上げた表** (Refs #886)。値は使わずキーだけ引く。
+ *
+ * `margin.ts` を**値として import しない**ためにここで持つ (型は erase されるので
+ * 依存が増えない。`margin.ts` は粗利の計算そのもので、保存の口が引きずり込むには重い)。
+ * それでも取りこぼさないのは `Record<RunCostShareMode, true>` が**両方向に効く**ため —
+ * `margin.ts` に比が 1 つ増えれば「欠けている」で、消えれば「余分」で型検査が落ちる。
+ */
+const RUN_COST_SHARE_MODES: Record<RunCostShareMode, true> = { km: true, legs: true, time: true }
+
+/**
+ * 受け取った値が `RunCostShareMode` か。**既定に倒さない** — `parseRunCostShareMode`
+ * (画面側) は読めない値を `km` に丸めるが、**保存の口で丸めると嘘の指紋を版に刻む**。
+ * 版は「その数字を実際に作った設定」を名乗るものなので、名乗れないものは受けない。
+ */
+export function isRunCostShareMode(value: unknown): value is RunCostShareMode {
+  return typeof value === 'string' && Object.hasOwn(RUN_COST_SHARE_MODES, value)
 }
 
 /** `history.jsonl` の 1 行。**本文は入れない** (版そのものは `v-{ts}.json` に有る)。 */

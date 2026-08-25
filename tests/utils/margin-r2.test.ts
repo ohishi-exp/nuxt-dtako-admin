@@ -4,6 +4,7 @@ import {
   MARGIN_SUMMARY_SCHEMA_VERSION,
   UNKNOWN_CODE_VERSION,
   buildMarginSummaryInput,
+  isRunCostShareMode,
   marginR2Paths,
   marginSummaryHashInput,
   marginSummaryHistoryLine,
@@ -14,7 +15,7 @@ import {
   ciBuildCodeVersion,
   type MarginSummarySnapshot,
 } from '../../app/utils/margin-r2'
-import { emptyMarginTotals, type MarginCache, type MarginTotals } from '../../app/utils/margin'
+import { emptyMarginTotals, type FuelRateMap, type MarginCache, type MarginTotals, type RunCostShareMode } from '../../app/utils/margin'
 import { PROFIT_HISTORY_MAX_LINES, appendProfitHistoryJsonl } from '../../app/utils/profit-r2'
 
 function cache(overrides: Partial<MarginCache> = {}): MarginCache {
@@ -42,6 +43,27 @@ function productionTotals(): MarginTotals {
     allowanceYen: 2499500,
     marginYen: 4467597,
   }
+}
+
+/**
+ * `buildMarginSummaryInput` の呼び出しを 1 か所に畳む。**指紋 2 欄の既定は「上書きなし・
+ * 既定の配分」** (Refs #886) — 大半のテストは指紋そのものが主題ではないので、
+ * 指紋を見るテストだけが明示的に渡す形にする。
+ */
+function input(params: {
+  cache?: MarginCache
+  totals?: MarginTotals
+  codeVersion?: unknown
+  fuelRateOverrides?: FuelRateMap
+  runCostShareMode?: RunCostShareMode
+} = {}) {
+  return buildMarginSummaryInput({
+    cache: params.cache ?? cache(),
+    totals: params.totals ?? emptyMarginTotals(),
+    codeVersion: params.codeVersion ?? 'v0.0.517',
+    fuelRateOverrides: params.fuelRateOverrides ?? {},
+    runCostShareMode: params.runCostShareMode ?? 'km',
+  })
 }
 
 describe('marginR2Paths — 検証スナップショットと同じ作法・別の枝', () => {
@@ -132,81 +154,181 @@ describe('marginVersionLabel — 人に見せる版の名前', () => {
 
 describe('buildMarginSummaryInput', () => {
   it('月は cache.ym から採る (保存先と中身の月がずれない)', () => {
-    const input = buildMarginSummaryInput({ cache: cache({ ym: '2026-06' }), totals: emptyMarginTotals(), codeVersion: 'v0.0.517' })
-    expect(input.ym).toBe('2026-06')
-    expect(input.schemaVersion).toBe(MARGIN_SUMMARY_SCHEMA_VERSION)
+    const built = input({ cache: cache({ ym: '2026-06' }) })
+    expect(built.ym).toBe('2026-06')
+    expect(built.schemaVersion).toBe(MARGIN_SUMMARY_SCHEMA_VERSION)
   })
 
   it('コード版はここで正規化する', () => {
-    expect(buildMarginSummaryInput({ cache: cache(), totals: emptyMarginTotals(), codeVersion: '' }).codeVersion)
-      .toBe(UNKNOWN_CODE_VERSION)
-    expect(buildMarginSummaryInput({ cache: cache(), totals: emptyMarginTotals(), codeVersion: 'v0.0.517' }).codeVersion)
-      .toBe('v0.0.517')
+    expect(input({ codeVersion: '' }).codeVersion).toBe(UNKNOWN_CODE_VERSION)
+    expect(input({ codeVersion: 'v0.0.517' }).codeVersion).toBe('v0.0.517')
   })
 
   it('★ 2026-07 の本番値を 1 円も動かさない (合計をそのまま持ち回るだけ)', () => {
-    const input = buildMarginSummaryInput({ cache: cache(), totals: productionTotals(), codeVersion: 'v0.0.517' })
-    expect(input.totals.operations).toBe(91)
-    expect(input.totals.salesYen).toBe(10260265)
-    expect(input.totals.allowanceYen).toBe(2499500)
-    expect(input.totals.marginYen).toBe(4467597)
+    const built = input({ totals: productionTotals() })
+    expect(built.totals.operations).toBe(91)
+    expect(built.totals.salesYen).toBe(10260265)
+    expect(built.totals.allowanceYen).toBe(2499500)
+    expect(built.totals.marginYen).toBe(4467597)
+
+    // ★ 指紋が入っても合計は動かない。**上書きが「入っている」場合も**同じことを見る —
+    // `buildMarginSummaryInput` は指紋を持ち回るだけで、`totals` を作り直さない。
+    const withOverrides = input({
+      totals: productionTotals(),
+      fuelRateOverrides: { '1234': { yenPerLiter: 150, kmPerLiter: 3.2 } },
+      runCostShareMode: 'time',
+    })
+    expect(withOverrides.totals).toEqual(built.totals)
   })
 
   it('MarginCache は形も中身も変えずそのまま入れる', () => {
     const c = cache({ uncovered: { trips: 36, salesYen: 1649681, allowanceYen: 413000 } })
-    expect(buildMarginSummaryInput({ cache: c, totals: emptyMarginTotals(), codeVersion: 'v1' }).cache).toEqual(c)
+    expect(input({ cache: c }).cache).toEqual(c)
+  })
+
+  it('★ その端末の設定を指紋としてそのまま入れる (Refs #886)', () => {
+    const overrides: FuelRateMap = { '1234': { yenPerLiter: 150, kmPerLiter: null }, '5678': { yenPerLiter: null, kmPerLiter: 3.2 } }
+    const built = input({ fuelRateOverrides: overrides, runCostShareMode: 'time' })
+    expect(built.fuelRateOverrides).toEqual(overrides)
+    expect(built.runCostShareMode).toBe('time')
+  })
+
+  it('★ 上書きが 1 台も無ければ空オブジェクト — null に倒さない', () => {
+    // 「上書きしていない」と「指紋そのものが無い (形式 1)」は別の意味。
+    // 形式 1 かどうかを言うのは `schemaVersion` の仕事で、この欄ではない。
+    const built = input({ fuelRateOverrides: {} })
+    expect(built.fuelRateOverrides).toEqual({})
+    expect(built.fuelRateOverrides).not.toBeNull()
+  })
+
+  it('★ 指紋を既定に倒したり作り直したりしない (渡されたものを名乗る)', () => {
+    // 版が名乗る指紋は**その数字を実際に作った設定**でなければ意味が無いので、
+    // 既定 (`km`) 以外もそのまま通ることを固定する。
+    expect(input({ runCostShareMode: 'legs' }).runCostShareMode).toBe('legs')
+    expect(input({ runCostShareMode: 'km' }).runCostShareMode).toBe('km')
+  })
+
+  it('★ 形式は 2 (指紋が入った版)', () => {
+    expect(MARGIN_SUMMARY_SCHEMA_VERSION).toBe(2)
+    expect(input().schemaVersion).toBe(2)
+  })
+})
+
+describe('isRunCostShareMode — 保存の口で既定に倒さない (Refs #886)', () => {
+  it('3 つの比だけ通す', () => {
+    expect(isRunCostShareMode('km')).toBe(true)
+    expect(isRunCostShareMode('legs')).toBe(true)
+    expect(isRunCostShareMode('time')).toBe(true)
+  })
+
+  it('★ 知らない文字列は通さない (`parseRunCostShareMode` と違って km に丸めない)', () => {
+    // 画面側の `parseRunCostShareMode` は読めない値を既定に丸めるが、**保存の口で丸めると
+    // 嘘の指紋を版に刻む**。版は「その数字を実際に作った設定」を名乗るものなので、
+    // 名乗れないものは受けない。
+    expect(isRunCostShareMode('KM')).toBe(false)
+    expect(isRunCostShareMode('')).toBe(false)
+    expect(isRunCostShareMode('toString')).toBe(false)
+  })
+
+  it('文字列でないものも通さない', () => {
+    expect(isRunCostShareMode(undefined)).toBe(false)
+    expect(isRunCostShareMode(null)).toBe(false)
+    expect(isRunCostShareMode(0)).toBe(false)
+    expect(isRunCostShareMode({ km: true })).toBe(false)
   })
 })
 
 describe('marginSummaryHashInput — 差分検知', () => {
-  const base = buildMarginSummaryInput({ cache: cache(), totals: productionTotals(), codeVersion: 'v0.0.517' })
+  const base = input({ totals: productionTotals() })
 
   it('保存時刻が違うだけなら同じ (毎回版が増えるのを防ぐ)', () => {
-    const later = buildMarginSummaryInput({
-      cache: cache({ savedAt: '2026-08-25T09:00:00.000Z' }),
-      totals: productionTotals(),
-      codeVersion: 'v0.0.517',
-    })
+    const later = input({ cache: cache({ savedAt: '2026-08-25T09:00:00.000Z' }), totals: productionTotals() })
     expect(marginSummaryHashInput(later)).toBe(marginSummaryHashInput(base))
   })
 
   it('コード版が違うだけなら同じ (数字が動いていないのに版を増やさない)', () => {
-    const newer = buildMarginSummaryInput({ cache: cache(), totals: productionTotals(), codeVersion: 'v0.0.518' })
+    const newer = input({ totals: productionTotals(), codeVersion: 'v0.0.518' })
     expect(marginSummaryHashInput(newer)).toBe(marginSummaryHashInput(base))
   })
 
   it('合計が 1 円でも動けば違う', () => {
-    const moved = buildMarginSummaryInput({
-      cache: cache(),
-      totals: { ...productionTotals(), marginYen: 4467598 },
-      codeVersion: 'v0.0.517',
-    })
+    const moved = input({ totals: { ...productionTotals(), marginYen: 4467598 } })
     expect(marginSummaryHashInput(moved)).not.toBe(marginSummaryHashInput(base))
   })
 
   it('キャッシュの中身が変われば違う (合計が同じでも内訳の差を拾う)', () => {
-    const moved = buildMarginSummaryInput({
+    const moved = input({
       cache: cache({ uncovered: { trips: 36, salesYen: 1649681, allowanceYen: 413000 } }),
       totals: productionTotals(),
-      codeVersion: 'v0.0.517',
     })
     expect(marginSummaryHashInput(moved)).not.toBe(marginSummaryHashInput(base))
   })
 
   it('月が変われば違う', () => {
-    const other = buildMarginSummaryInput({ cache: cache({ ym: '2026-06' }), totals: productionTotals(), codeVersion: 'v0.0.517' })
+    const other = input({ cache: cache({ ym: '2026-06' }), totals: productionTotals() })
     expect(marginSummaryHashInput(other)).not.toBe(marginSummaryHashInput(base))
   })
 
   it('保存時刻はハッシュ対象の文字列に残らない', () => {
     expect(marginSummaryHashInput(base)).not.toContain('2026-08-24T01:23:45.000Z')
   })
+
+  it('★ 燃費の上書きが変われば違う (版が増えた理由を版が名乗れるようにする、Refs #886)', () => {
+    const overridden = input({ totals: productionTotals(), fuelRateOverrides: { '1234': { yenPerLiter: 150, kmPerLiter: null } } })
+    expect(marginSummaryHashInput(overridden)).not.toBe(marginSummaryHashInput(base))
+  })
+
+  it('★★ 配分の比だけ変わっても違う — `totals` が 1 円も動かない回でも版を分ける (Refs #886)', () => {
+    // `runCostShareMode` は `buildLegMargins` にしか流れず `totals` を動かさない。
+    // だからハッシュに入れないと**本文は違うのに同じ版**になり、指紋を足した意味が消える。
+    // 便の内訳は実際に変わっているので、版が 1 本増えるのが正しい。
+    const timeShare = input({ totals: productionTotals(), runCostShareMode: 'time' })
+    expect(timeShare.totals).toEqual(base.totals)
+    expect(marginSummaryHashInput(timeShare)).not.toBe(marginSummaryHashInput(base))
+  })
+
+  it('★ 上書きの入れた順が違うだけなら同じ (中身が同じなのに版を増やさない)', () => {
+    // ★ **車輌C が 1000 未満だと並びが入れた順になる。** `vehicleCodeFromUnkoNo` は
+    // `padStart(4, '0')` を通すので `'0123'` になり、これは整数として正規な文字列ではない
+    // ので JS が昇順に揃えてくれない (`'1234'` のような 4 桁は揃う)。
+    // 1 台消して入れ直すだけで版が増えると、**理由の無い版**がまた溜まる。
+    const a = input({ totals: productionTotals(), fuelRateOverrides: {
+      '0123': { yenPerLiter: 150, kmPerLiter: null },
+      '0456': { yenPerLiter: null, kmPerLiter: 3.2 },
+    } })
+    const b = input({ totals: productionTotals(), fuelRateOverrides: {
+      '0456': { yenPerLiter: null, kmPerLiter: 3.2 },
+      '0123': { yenPerLiter: 150, kmPerLiter: null },
+    } })
+    // 前提 (この差が実在すること) をまず固定する — 消えたらこのテストが空回りする。
+    expect(JSON.stringify(a.fuelRateOverrides)).not.toBe(JSON.stringify(b.fuelRateOverrides))
+    expect(marginSummaryHashInput(a)).toBe(marginSummaryHashInput(b))
+  })
+
+  it('4 桁が全部数字なら JS が元から昇順に揃える (こちらは並べ直さなくても同じ)', () => {
+    // **測ってから書く。** `'1234'` / `'5678'` は整数として正規な文字列なので、
+    // 入れた順に関わらず `Object.keys` は昇順になる (node で実測)。
+    // 上のテストが `'0123'` を使っているのはそのため。
+    const literalOrder = { '5678': { yenPerLiter: 1, kmPerLiter: 2 }, '1234': { yenPerLiter: 3, kmPerLiter: 4 } }
+    expect(Object.keys(literalOrder)).toEqual(['1234', '5678'])
+  })
+
+  it('★ 並べ直すのは比べるときだけ — 保存する本文は端末が持っていた順のまま', () => {
+    const built = input({ fuelRateOverrides: { '0456': { yenPerLiter: 1, kmPerLiter: 2 }, '0123': { yenPerLiter: 3, kmPerLiter: 4 } } })
+    expect(Object.keys(built.fuelRateOverrides)).toEqual(['0456', '0123'])
+  })
+
+  it('上書きの値が動けば違う (キーの数が同じでも拾う)', () => {
+    const a = input({ totals: productionTotals(), fuelRateOverrides: { '1234': { yenPerLiter: 150, kmPerLiter: null } } })
+    const b = input({ totals: productionTotals(), fuelRateOverrides: { '1234': { yenPerLiter: 151, kmPerLiter: null } } })
+    expect(marginSummaryHashInput(a)).not.toBe(marginSummaryHashInput(b))
+  })
 })
 
 describe('marginSummaryHistoryLine — 1 行は小さく保つ', () => {
   function snapshot(overrides: Partial<MarginSummarySnapshot> = {}): MarginSummarySnapshot {
     return {
-      ...buildMarginSummaryInput({ cache: cache(), totals: productionTotals(), codeVersion: 'v0.0.517' }),
+      ...input({ totals: productionTotals() }),
       savedAt: '2026-08-24T10:20:30.000Z',
       ...overrides,
     }

@@ -1285,6 +1285,12 @@ const totals = computed(() => summarizeMargins(result.value.operations))
  * **粗利の数字は 1 円も作り直さない。** 送るのは localStorage に書くのと同じ
  * `MarginCache` と、画面に出ている `totals` (`summarizeMargins` の結果) そのまま。
  *
+ * ★ **形式 2 からは「この端末の設定」も一緒に送る** (Refs #886) — 燃費の上書き
+ * (`fuelRates`) と運行経費の配分の比 (`runCostShareMode`)。どちらも localStorage 由来で
+ * **この端末にしか無い**ので、送らないと**版が増えた理由が版のどこにも残らない**。
+ * **これで版が増える条件が 1 つ増える**: 配分の比だけを変えて集計し直すと、
+ * `totals` は 1 円も動かないのに版が 1 本増える (便の内訳は実際に変わっているので、それが正しい)。
+ *
  * **投げない**: 失敗しても画面は落とさず注記だけ出す。localStorage の写しは
  * 残っているので、R2 が使えなくても画面は死なない。
  */
@@ -1293,6 +1299,11 @@ async function saveMarginSummaryToR2() {
     cache: currentMarginCache(savedAt.value),
     totals: totals.value,
     codeVersion,
+    // ★ **`result` (= `buildOperationMargins`) に渡したのと同じ 2 つ** (Refs #886)。
+    // ここで既定に倒したり作り直したりしない — 版が名乗る指紋は
+    // **その数字を実際に作った設定**でなければ意味が無い。
+    fuelRateOverrides: fuelRates.value,
+    runCostShareMode: runCostShareMode.value,
   })
   try {
     const res = await $fetch<MarginSummarySaveResult>('/api/profit/margin-summary', {
@@ -1372,8 +1383,12 @@ function pickDefaultMarginDiffVersions() {
  * **選んだ 2 版の本文を読んで突き合わせる** (Refs #834)。
  *
  * **差分を作るのはここ (画面) で、server route は本文を返すだけ。**
- * `buildOperationMargins` は呼ばない — 燃費の上書きと運行経費の配分は**その端末にしか無い
- * 設定**で版に入っておらず、運行 1 本の粗利を版から厳密に再現できないため。
+ * `buildOperationMargins` は呼ばない — **この画面は保存された値を引き算するだけ**で、
+ * 粗利を計算し直さないため。**形式 2 の版は燃費の上書きと運行経費の配分を指紋として
+ * 持っている**ので原理的には計算し直せるが、**形式 1 の版は指紋そのものを持たない**
+ * (集計した端末の localStorage にしか無く、保存した時点で失われている) ので、
+ * **そちらは永久に運行 1 本の粗利を厳密に再現できない** (Refs #886)。
+ * 指紋を突き合わせて差の理由まで言うのは別 PR。
  *
  * **投げない**: 読めなくても粗利の画面は落とさず、理由を注記に出す。
  */
@@ -2287,8 +2302,10 @@ function downloadCustomerRouteCsv() {
       **選んだ 2 版の差分** (Refs #834)。「いつ変わったのか追えるようにしたい」の後半で、
       **一覧のすぐ下**に置く (一覧で見つけた版をそのまま選ぶ流れなので、離すと別機能に見える)。
       **印刷には出さない** (紙に要るのはその月の数字であって、版の履歴ではない)。
-      **運行 1 本ごとの粗利は出さない** — 燃費の上書きと運行経費の配分は集計した端末にしか
-      無い設定で版に入っておらず、版から厳密に再現できないため (`MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE`)。
+      **運行 1 本ごとの粗利は出さない** — この画面は保存された値を引き算するだけで、粗利を
+      計算し直さないため。**形式 2 の版は燃費の上書きと運行経費の配分を指紋として持つ**が、
+      **形式 1 の版には無く、そちらは版から厳密に再現できない** (Refs #886。文言は
+      `MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE`)。
     -->
     <section v-if="marginVersions.length > 0" class="margin-print-hide mb-3">
       <h3 class="text-xs font-semibold text-gray-600 dark:text-gray-300 mb-1">版どうしの差分</h3>

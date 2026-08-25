@@ -7,6 +7,14 @@
  * `lastVerifiedCodeVersion` のみ更新)。履歴 (`history.jsonl`) にも 1 行追記する。
  * **確定ボタンは無い** — 粗利タブが再計算するたびにここへ来る。
  *
+ * ★ **形式 2 から「その版を作った端末の設定」の指紋も受ける** (Refs #886) —
+ * 燃費の上書き (`fuelRateOverrides`) と運行経費の配分の比 (`runCostShareMode`)。
+ * どちらも localStorage 由来で画面にしか無く、**版に入っていないと「なぜその数字に
+ * なったか」が版のどこにも残らない**。ここでも**数字は 1 円も作らない** — 受け取った値を
+ * そのまま本文に載せ、`marginSummaryHashInput` 経由で差分検知の対象に含めるだけ。
+ * **形式 1 の body はここで 400 になる** (`schemaVersion` の厳格一致)。既に R2 にある
+ * 形式 1 の版はそのまま残り、遡って指紋は付かない。
+ *
  * `codeVersion` (ビルド時定数) は**画面が名乗る** — 数字を計算するのは画面なので、
  * 画面の版がその数字を作った版そのものになる。ここでは `resolveCodeVersion` で
  * 正規化するだけで、**空文字や undefined を版に混ぜない**。
@@ -20,6 +28,7 @@
 import type { H3Event } from 'h3'
 import { defineEventHandler, readBody, createError } from 'h3'
 import {
+  isRunCostShareMode,
   marginR2Paths,
   marginSummaryHashInput,
   marginSummaryHistoryLine,
@@ -40,6 +49,16 @@ function getR2Binding(event: H3Event): R2BucketLite | null {
  * **月の集計そのもの**が要る。`cache.ym` が body の `ym` と違うものは受けない —
  * 保存先 (`profit/{ym}/margin-summary/`) と中身の月がずれると、後から版を読んだ側が
  * 別の月の数字を見る。
+ *
+ * ★ **形式 2 から指紋 2 欄を必須にする** (Refs #886)。**欠けた body を受けて既定で埋めない** —
+ * 埋めると「上書きしていない端末が集計した」という**嘘の指紋**が版に残り、指紋を足した意味が
+ * 逆転する (理由の分からない版が、理由を偽った版になる)。形式 1 の body は
+ * `schemaVersion` の厳格一致でここまで来ない。
+ *
+ * `fuelRateOverrides` の中身までは検めない (`totals` / `cache` と同じ深さ) —
+ * 組むのは画面の `parseFuelRates` で、そこで既に正の有限数以外は落ちている。
+ * ここで深く検めて 400 にすると、**指紋が少し変でも版そのものが残らなくなる**方が損失が大きい。
+ * `runCostShareMode` だけは値が 3 つしか無い列挙なので厳格に見る (`isRunCostShareMode`)。
  */
 function isValidInput(body: unknown): body is MarginSummaryInput {
   if (!body || typeof body !== 'object') return false
@@ -49,6 +68,8 @@ function isValidInput(body: unknown): body is MarginSummaryInput {
   if (!b.totals || typeof b.totals !== 'object') return false
   if (!b.cache || typeof b.cache !== 'object') return false
   if (b.cache.ym !== b.ym) return false
+  if (!b.fuelRateOverrides || typeof b.fuelRateOverrides !== 'object') return false
+  if (!isRunCostShareMode(b.runCostShareMode)) return false
   return Array.isArray(b.cache.operations) && Array.isArray(b.cache.costs)
 }
 
@@ -60,7 +81,11 @@ export default defineEventHandler(async (event) => {
 
   const body = await readBody(event)
   if (!isValidInput(body)) {
-    throw createError({ statusCode: 400, statusMessage: 'schemaVersion/ym/totals/cache (ym 一致) が必要です' })
+    throw createError({
+      statusCode: 400,
+      statusMessage: `schemaVersion(=${MARGIN_SUMMARY_SCHEMA_VERSION})/ym/totals/cache (ym 一致)`
+        + '/fuelRateOverrides/runCostShareMode が必要です',
+    })
   }
 
   // 画面が名乗るビルド時定数。タグリリース以外のビルドでは空で来るので、
