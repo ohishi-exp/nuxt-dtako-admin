@@ -86,10 +86,14 @@ const activeGroup = computed(() => crewGroups.value.find(g => g.crewRole === act
         </button>
       </div>
 
+      <!-- `all-rows` は **`visibleRows` ではなく CSV 全行**を渡す (Refs #868)。便の数え方を
+           粗利の按分 (`extractOperationIdle(csv.headers, csv.rows)`) と 1 行もずらさない
+           ため — 「無視」で落とした行や別乗務員の行を先に間引くと、便番号がずれうる。 -->
       <EventCrewPanel
         v-if="activeGroup"
         :group="activeGroup"
         :headers="data.headers"
+        :all-rows="data.rows"
         :proposed-range="proposedRange"
         @update:selected-range="emit('update:selectedRange', $event)"
         @update:selected-summary="emit('update:selectedSummary', $event)"

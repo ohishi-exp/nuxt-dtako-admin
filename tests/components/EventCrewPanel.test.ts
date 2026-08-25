@@ -330,4 +330,78 @@ describe('EventCrewPanel', () => {
       expect(wrapper.text()).not.toContain('行選択中')
     })
   })
+
+  describe('便の列 (Refs #868)', () => {
+    /** 便の列のセルだけを行順に取り出す (checkbox / # の次)。 */
+    function legCells(wrapper: ReturnType<typeof createWrapper>): string[] {
+      return wrapper.findAll('tbody tr').map(tr => tr.findAll('td')[2]!.text())
+    }
+
+    const twoLegRows = [
+      makeRow('運行開始'), makeRow('運転'),
+      makeRow('積み'), makeRow('運転'), makeRow('降し'),
+      makeRow('運転'), makeRow('休憩'),
+      makeRow('積み'), makeRow('降し'), makeRow('降し'),
+      makeRow('運転'), makeRow('運行終了'),
+    ]
+
+    it('見出しに「便」が出る', () => {
+      const wrapper = createWrapper(makeGroup([makeRow('休憩')]))
+      expect(wrapper.findAll('thead th')[2]!.text()).toBe('便')
+    })
+
+    it('売上区間・回送・帰庫が語で分かれて出る (色だけに頼らない)', () => {
+      const wrapper = createWrapper(makeGroup(twoLegRows))
+      expect(legCells(wrapper)).toEqual([
+        '便1 回送', '便1 回送',
+        '便1', '便1', '便1',
+        '便2 回送', '便2 回送',
+        '便2', '便2', '便2',
+        '便2 帰庫', '便2 帰庫',
+      ])
+    })
+
+    it('便ごとに色が変わり、回送は同じ色の薄い版になる', () => {
+      const wrapper = createWrapper(makeGroup(twoLegRows))
+      const spans = wrapper.findAll('tbody tr').map(tr => tr.findAll('td')[2]!.find('span').classes().join(' '))
+      // 便1 の売上区間 = 塗りつぶし / 便1 の回送 = 同じ色の文字だけ
+      expect(spans[2]).toContain('bg-blue-100')
+      expect(spans[0]).toContain('text-blue-600')
+      expect(spans[0]).not.toContain('bg-blue-100')
+      // 便2 は別の色
+      expect(spans[7]).toContain('bg-orange-100')
+      expect(spans[5]).toContain('text-orange-600')
+    })
+
+    it('積みが 1 行も無い運行は空欄にせず「便なし」と出す', () => {
+      const wrapper = createWrapper(makeGroup([makeRow('運行開始'), makeRow('運転')]))
+      expect(legCells(wrapper)).toEqual(['便なし', '便なし'])
+    })
+
+    it('allRows を渡すと、便番号は絞り込み前の全行から数える (別乗務員の積みも数える)', () => {
+      // 表示するのは 2 行だけだが、CSV 全体では手前にもう 1 便ある運行。
+      const shown = [makeRow('積み'), makeRow('降し')]
+      const allRows = [makeRow('積み'), makeRow('降し'), ...shown]
+      const wrapper = mount(EventCrewPanel, {
+        props: { group: makeGroup(shown), headers, allRows },
+        global: { stubs: { UIcon: UIconStub } },
+      })
+      expect(legCells(wrapper)).toEqual(['便2', '便2'])
+      // allRows 無しだと同じ行が 便1 になる (= お金と食い違う) ことを対比で示す。
+      expect(legCells(createWrapper(makeGroup(shown)))).toEqual(['便1', '便1'])
+    })
+
+    it('allRows に無い行は空欄にせず「判定不能」と出す', () => {
+      const wrapper = mount(EventCrewPanel, {
+        props: { group: makeGroup([makeRow('積み')]), headers, allRows: [makeRow('積み')] },
+        global: { stubs: { UIcon: UIconStub } },
+      })
+      expect(legCells(wrapper)).toEqual(['判定不能'])
+    })
+
+    it('行が 0 本のときの colspan が「便」の列ぶんを含む', () => {
+      const wrapper = createWrapper(makeGroup([makeRow('一般道空車')]))
+      expect(wrapper.find('tbody td').attributes('colspan')).toBe(String(8 + 3))
+    })
+  })
 })

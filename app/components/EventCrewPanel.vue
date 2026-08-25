@@ -14,10 +14,20 @@ import {
   EVENT_CATEGORY_ORDER,
   EVENT_CATEGORY_LABELS,
 } from '~/utils/event-data-table'
+import { rowLegLookup, legCellClass, legLabel, legTitle, UNKNOWN_LEG_ROW } from '~/utils/event-row-legs'
 
 const props = defineProps<{
   group: CrewGroup
   headers: string[]
+  /** **便の列の元になる「運行 1 本の CSV 全行」** (Refs #868)。粗利の按分
+   * (`extractOperationIdle`) が便を数えるのと**同じ配列**を渡すこと。
+   *
+   * `group.rows` ではなく全行なのは、**KUDGIVT.csv が 1 運行分の全乗務員 (運転手 = 1 /
+   * 副運転手 = 2) の行を持つ**ため — 乗務員タブで絞った配列から数え直すと、絞られた側に
+   * 積みがある運行で**画面の便番号がお金の便番号とずれる**。
+   *
+   * 省略時は `group.rows` から数える (乗務員が 1 人の運行では同じ結果になる)。 */
+  allRows?: string[][]
   /** 一番星の伝票から提案された区間 (Refs proposeFromSlips)。値が変わるたびに
    * filteredRows 内で対応する行をチェック状態にする。手動選択とは独立した
    * 「外部からの選択指示」チャネルとして扱う (null は「指示なし」で無視する)。
@@ -52,6 +62,14 @@ const categoryCounts = computed(() => {
 })
 
 const displayColumns = computed(() => getDisplayColumns(props.headers))
+
+/** 行オブジェクトそのものを key にした便の引き当て表 (index はタブで絞るとずれるので使わない)。 */
+const legLookup = computed(() => rowLegLookup(props.headers, props.allRows ?? props.group.rows))
+
+/** 表示行 → 便。表に無い行 (引き当て表に載っていない) は**空欄にせず**「判定不能」を出す。 */
+function legOf(row: string[]) {
+  return legLookup.value.get(row) ?? UNKNOWN_LEG_ROW
+}
 
 /** 選択行 index (filteredRows 基準)。地図パネル (速度カラー) に渡す時刻レンジの元。 */
 const selectedRows = ref<Set<number>>(new Set())
@@ -122,6 +140,7 @@ watch(selectedRows, (rows) => {
       <tr>
         <th class="text-left px-3 py-2 font-medium text-gray-500 whitespace-nowrap w-8" />
         <th class="text-left px-3 py-2 font-medium text-gray-500 whitespace-nowrap">#</th>
+        <th class="text-left px-3 py-2 font-medium text-gray-500 whitespace-nowrap">便</th>
         <th
           v-for="col in displayColumns"
           :key="col.header"
@@ -144,6 +163,13 @@ watch(selectedRows, (rows) => {
           <input type="checkbox" :checked="selectedRows.has(ri)" class="cursor-pointer" @click.stop="toggleRow(ri)">
         </td>
         <td class="px-3 py-1.5 text-gray-400">{{ ri + 1 }}</td>
+        <!-- 便の列。**色はこのセルだけに載せる** (行の背景は 積み/降し/休息 で使用済み)。
+             色が読めない環境でも分かるよう、語 (`便2` / `便2 回送` / `便2 帰庫`) でも分ける。 -->
+        <td class="px-3 py-1.5 whitespace-nowrap">
+          <span class="px-1.5 py-0.5 rounded" :class="legCellClass(legOf(row))" :title="legTitle(legOf(row))">
+            {{ legLabel(legOf(row)) }}
+          </span>
+        </td>
         <td
           v-for="col in displayColumns"
           :key="col.header"
@@ -159,7 +185,7 @@ watch(selectedRows, (rows) => {
         </td>
       </tr>
       <tr v-if="filteredRows.length === 0">
-        <td :colspan="displayColumns.length + 2" class="px-3 py-8 text-center text-gray-400">
+        <td :colspan="displayColumns.length + 3" class="px-3 py-8 text-center text-gray-400">
           データがありません
         </td>
       </tr>
