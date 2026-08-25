@@ -17,6 +17,7 @@ import type {
 import { createAuthFetch } from '@ippoan/auth-client'
 import type { Net780ArchiveResult } from '~/utils/net780-archive'
 import { normalizeNetprintRunOutcome, type NetprintRunInput, type NetprintRunOutcome } from '~/utils/netprint-run'
+import type { NetprintTargetPayloadItem } from '~/utils/netprint-targets'
 
 let apiBase = ''
 let getAccessToken: (() => string | null) | null = null
@@ -736,6 +737,62 @@ export async function postNetprintRun(input: NetprintRunInput): Promise<Netprint
   const res = await fetch('/api/netprint/run', { method: 'POST', headers, body: JSON.stringify(input) })
   const body = await res.json().catch(() => null) as unknown
   return normalizeNetprintRunOutcome(res.status, res.ok, body)
+}
+
+/** front worker の server route (`/api/netprint/*`) 向けヘッダ。同一オリジンなので
+ * cookie (`logi_auth_token`) は自動で載るが、cookie の無い経路でも通るよう
+ * `Authorization: Bearer` も明示する (`postNet780Archive` と同じ扱い)。 */
+function netprintRouteHeaders(): Record<string, string> {
+  const token = currentAccessToken()
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  if (token) headers['authorization'] = `Bearer ${token}`
+  return headers
+}
+
+/** `/api/netprint/targets` の応答を読む。非 2xx は server route の `statusMessage`
+ * (relay の理由に `relay:` 前置) を `Error.message` にして投げる — 通知先の設定は
+ * 「保存できたのか分からない」が一番困るので、成否を曖昧にしない。 */
+async function readNetprintTargetsResponse(res: Response, label: string): Promise<unknown> {
+  const body = await res.json().catch(() => null) as { statusMessage?: string, message?: string } | null
+  if (!res.ok) {
+    throw new Error(body?.statusMessage ?? body?.message ?? `HTTP ${res.status}`)
+  }
+  if (body === null) throw new Error(`${label}の応答が JSON ではありません`)
+  return body
+}
+
+/**
+ * 日報 netprint の通知先設定を読む (`server/api/netprint/targets.get.ts`、
+ * Refs #874 の 12)。応答は KV `netprint_targets` の生 JSON 配列 (未設定は `[]`)。
+ */
+export async function getNetprintTargets(): Promise<unknown> {
+  const res = await fetch('/api/netprint/targets', { headers: netprintRouteHeaders() })
+  return readNetprintTargetsResponse(res, '通知先の設定')
+}
+
+/**
+ * 日報 netprint の通知先設定を保存する (**全体置き換え**、Refs #874 の 12)。
+ * 中身の検証は relay (cron と同じ部品) が行い、落ちた理由が `Error.message` に載る。
+ */
+export async function putNetprintTargets(targets: NetprintTargetPayloadItem[]): Promise<unknown> {
+  const res = await fetch('/api/netprint/targets', {
+    method: 'PUT',
+    headers: netprintRouteHeaders(),
+    body: JSON.stringify(targets),
+  })
+  return readNetprintTargetsResponse(res, '通知先の保存')
+}
+
+/** 通知先候補 (個人) の一覧。alc の tenant API を `/api/proxy` 経由で叩く
+ * (Refs #874 の 12)。`provider` の絞り込みは画面側 (`netprintRecipientOptions`)。 */
+export async function getNotifyRecipients(): Promise<unknown> {
+  return request<unknown>('/api/notify/recipients')
+}
+
+/** 通知先候補 (トークルーム) の一覧。Bot が招待されたトークルームだけが載る
+ * (Refs #874 の 12)。 */
+export async function getLineworksChannels(): Promise<unknown> {
+  return request<unknown>('/api/notify/lineworks/channels')
 }
 
 /** `zip_url` (relay 相対 path) を、ダウンロード可能な絶対 https URL に変換する。

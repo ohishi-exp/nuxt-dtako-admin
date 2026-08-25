@@ -43,6 +43,10 @@ import {
   buildEtcCsvDownloadUrl,
   postNet780Archive,
   postNetprintRun,
+  getNetprintTargets,
+  putNetprintTargets,
+  getNotifyRecipients,
+  getLineworksChannels,
   splitCsvAllStream,
   getDtakoEventsEtags,
 } from '~/utils/api'
@@ -1441,6 +1445,78 @@ describe('api', () => {
       const result = await postNetprintRun({})
       expect(result.error).toBe('HTTP 401')
       expect(result.results).toEqual([])
+    })
+  })
+
+  // 日報 netprint の通知先設定 (Refs #874 の 12)。**成否を曖昧にしない** —
+  // 「保存できたのか分からない」が一番困るので、非 2xx は必ず投げる。
+  describe.runIf(!isLive)('getNetprintTargets / putNetprintTargets', () => {
+    const RCP_HONDA = 'e553efc9-4dff-4171-a06d-d3c127b14b94'
+    const TARGETS = [{ branch_cd: '1', recipient_id: RCP_HONDA, branch_name: '本社営業所' }]
+
+    it('GET /api/netprint/targets を Bearer 付きで叩き、KV の生 JSON をそのまま返す', async () => {
+      initApi(API_BASE, () => 'tok-1', undefined, () => 'test-tenant')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => TARGETS })
+      expect(await getNetprintTargets()).toEqual(TARGETS)
+      const [url, opts] = mockFetch.mock.calls[0]
+      expect(url).toBe('/api/netprint/targets')
+      expect(opts.method).toBeUndefined()
+      expect(opts.headers['authorization']).toBe('Bearer tok-1')
+    })
+
+    it('PUT /api/netprint/targets に配列を JSON で送る (全体置き換え)', async () => {
+      initApi(API_BASE, () => 'tok-1', undefined, () => 'test-tenant')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ ok: true, targets: TARGETS }) })
+      expect(await putNetprintTargets(TARGETS)).toEqual({ ok: true, targets: TARGETS })
+      const [url, opts] = mockFetch.mock.calls[0]
+      expect(url).toBe('/api/netprint/targets')
+      expect(opts.method).toBe('PUT')
+      expect(opts.headers['content-type']).toBe('application/json')
+      expect(JSON.parse(opts.body)).toEqual(TARGETS)
+    })
+
+    it('token が無ければ Authorization を付けない (cookie だけで通す経路)', async () => {
+      initApi(API_BASE, () => null, undefined, () => 'test-tenant')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => [] })
+      await getNetprintTargets()
+      expect(mockFetch.mock.calls[0][1].headers['authorization']).toBeUndefined()
+    })
+
+    it('非 2xx は statusMessage → message → HTTP n の順でメッセージにして投げる', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 400, json: async () => ({ statusMessage: 'relay: 1 件目 (営業所 1): channel_id が UUID 形式ではありません' }) })
+      await expect(putNetprintTargets(TARGETS)).rejects.toThrow('1 件目 (営業所 1)')
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({ message: 'DTAKO_CONFIG_KV binding が未設定です' }) })
+      await expect(getNetprintTargets()).rejects.toThrow('DTAKO_CONFIG_KV')
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 401, json: async () => ({}) })
+      await expect(getNetprintTargets()).rejects.toThrow('HTTP 401')
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 502, json: async () => { throw new Error('not json') } })
+      await expect(putNetprintTargets([])).rejects.toThrow('HTTP 502')
+    })
+
+    it('2xx なのに JSON でなければ投げる (読めたことにしない)', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => { throw new Error('not json') } })
+      await expect(getNetprintTargets()).rejects.toThrow('通知先の設定の応答が JSON ではありません')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => { throw new Error('not json') } })
+      await expect(putNetprintTargets([])).rejects.toThrow('通知先の保存の応答が JSON ではありません')
+    })
+  })
+
+  // 通知先の候補 (alc の tenant API)。`/api/proxy` 経由なので `request()` を通る。
+  describe('getNotifyRecipients / getLineworksChannels', () => {
+    it('個人の候補は backend の /api/notify/recipients を叩く', async () => {
+      stubOk([{ id: 'r-1', name: '本多 優鷹', provider: 'lineworks' }])
+      await callApi(() => getNotifyRecipients())
+      assertMock(() => {
+        expect(mockFetch.mock.calls[0][0]).toBe(`${API_BASE}/api/notify/recipients`)
+      })
+    })
+
+    it('トークルームの候補は backend の /api/notify/lineworks/channels を叩く', async () => {
+      stubOk([])
+      await callApi(() => getLineworksChannels())
+      assertMock(() => {
+        expect(mockFetch.mock.calls[0][0]).toBe(`${API_BASE}/api/notify/lineworks/channels`)
+      })
     })
   })
 

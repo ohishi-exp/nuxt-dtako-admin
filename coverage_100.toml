@@ -980,3 +980,17 @@ branches = true
 [[files]]
 path = "server/utils/netprint-run.ts"
 branches = true
+
+# 日報 netprint の通知先設定 (Refs #874 の 12) の画面側 pure 部品。KV の生 JSON ⇄
+# 画面の行、通知先 select の候補作り (`provider === 'lineworks'` の絞り込み込み)。
+# **検証は持たない** — 宛先の排他・Uuid は relay の `validateNetprintTargetsPayload`
+# (cron と同じ部品) が正で、ここは「未選択なら宛先キーを立てない」までしかしない。
+[[files]]
+path = "app/utils/netprint-targets.ts"
+branches = true
+
+# `GET/PUT /api/netprint/targets` が relay の失敗応答を 1 行にする部分。
+# **検証ロジックは持たない** ので、ここにあるのは `describeNetprintTargetsFailure` だけ。
+[[files]]
+path = "server/utils/netprint-targets.ts"
+branches = true

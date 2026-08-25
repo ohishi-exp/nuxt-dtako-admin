@@ -107,6 +107,57 @@ export function parseNetprintTargets(raw: string | undefined): NetprintTarget[] 
   return parsed as NetprintTarget[];
 }
 
+export type NetprintTargetsValidation =
+  | { ok: true; targets: NetprintTarget[] }
+  | { ok: false; error: string };
+
+/**
+ * 画面から保存される `NETPRINT_TARGETS` (KV `netprint_targets`) の生 JSON を
+ * **KV に書く前に**検証し、正規化した配列にする (Refs #874 の 12)。
+ *
+ * **検証は cron 経路と同じ部品を使う** (`parseNetprintTargets` で JSON 配列の形、
+ * `resolveNetprintDestination` で宛先の排他 + Uuid)。画面側に同じ規則を書き写すと、
+ * 「画面では保存できたのに cron が落とす」設定が作れてしまう — 通す/落とすの
+ * 判断はここ 1 か所に閉じる。
+ *
+ * 正規化では**知っているキーだけを残す** — 画面が知らないキーを混ぜても KV に
+ * 溜まらないようにするため。エラーは「何件目の誰か」まで書く (画面がそのまま
+ * 出せば、設定した人が直す行を特定できる)。
+ */
+export function validateNetprintTargetsPayload(raw: string): NetprintTargetsValidation {
+  let parsed: unknown[];
+  try {
+    parsed = parseNetprintTargets(raw) as unknown[];
+  } catch (err) {
+    // `parseNetprintTargets` が投げるのは `CronConfigError` だけ (JSON 不正 / 非配列)。
+    // `instanceof Error` で分けると**片側が死に分岐**になるので分けない。
+    return { ok: false, error: (err as CronConfigError).message };
+  }
+  const targets: NetprintTarget[] = [];
+  for (const [index, entry] of parsed.entries()) {
+    const label = `${index + 1} 件目`;
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      return { ok: false, error: `${label}: JSON オブジェクトで指定してください` };
+    }
+    const candidate = entry as NetprintTarget;
+    const branchCd = typeof candidate.branch_cd === "string" ? candidate.branch_cd.trim() : "";
+    if (branchCd === "") {
+      return { ok: false, error: `${label}: branch_cd (営業所コード) は必須です` };
+    }
+    const resolved = resolveNetprintDestination(candidate);
+    if (!resolved.ok) {
+      return { ok: false, error: `${label} (営業所 ${branchCd}): ${resolved.error}` };
+    }
+    const target: NetprintTarget = { branch_cd: branchCd };
+    if (resolved.destination.kind === "channel") target.channel_id = resolved.destination.id;
+    else target.recipient_id = resolved.destination.id;
+    const branchName = typeof candidate.branch_name === "string" ? candidate.branch_name.trim() : "";
+    if (branchName !== "") target.branch_name = branchName;
+    targets.push(target);
+  }
+  return { ok: true, targets };
+}
+
 /** 対象日 (JST) の受け渡し形式。cron が渡す値も手動実行の `date` も同じ。 */
 export const NETPRINT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
