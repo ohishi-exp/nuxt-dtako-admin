@@ -943,12 +943,17 @@ export async function handleNetprintTargetsPut(
  * `POST /kintai-relay/netprint-run` — 運転日報の netprint 登録 + LINE WORKS 通知を
  * cron (JST 6:30) を待たずに 1 回走らせる (Refs #874)。
  *
- * body は全部省略可 `{date?, branch_cd?, channel_id?, recipient_id?, branch_name?, comp_id?}`:
+ * body は全部省略可
+ * `{date?, branch_cd?, channel_id?, recipient_id?, branch_name?, operation_no?, comp_id?}`:
  * - `date` 省略で**前日 (JST)** = cron と同じ対象日。指定は `YYYY-MM-DD`
  * - `branch_cd` + 宛先 (`channel_id` か `recipient_id` の**どちらか一方**) を
  *   **揃えて**渡すとその 1 件だけ走る (`NETPRINT_TARGETS` を触らずに試験用の宛先へ
  *   流せる)。片方だけ / 宛先の両方指定は 400
  * - どちらも省略で `NETPRINT_TARGETS` の全 target = cron と同じ動き
+ * - `operation_no` (22 桁数字) で**その 1 運行だけ**にする (Refs #913)。営業所で
+ *   絞った後にもう一段掛かるので、通知先の解決は変わらない (単独指定なら
+ *   `NETPRINT_TARGETS` のまま)。**一致 0 件は 400** — 「運行はありませんでした」を
+ *   実在の担当者へ送らないため、通知は 1 通も出さずに理由だけ返す
  * - `comp_id` 省略時は `KINTAI_COMP_ID` (他の `/kintai-relay/*` と同じ)
  *
  * **cron と同じ DO route (`/cron/netprint`) を叩く** — 実機確認が「cron でだけ
@@ -976,6 +981,7 @@ export async function handleNetprintRun(request: Request, env: RelayWorkerEnv): 
     channel_id?: unknown;
     recipient_id?: unknown;
     branch_name?: unknown;
+    operation_no?: unknown;
     comp_id?: unknown;
   };
   try {
@@ -1012,7 +1018,7 @@ export async function handleNetprintRun(request: Request, env: RelayWorkerEnv): 
   }
   if ("error" in plan) return fail(400, plan.error);
 
-  const results = await dispatchNetprintTargets(compId, plan.targets, plan.date, async (doKey, path, doBody) => {
+  const results = await dispatchNetprintTargets(compId, plan.targets, plan.date, plan.operationNo, async (doKey, path, doBody) => {
     const id = env.RELAY.idFromName(doKey);
     const res = await env.RELAY.get(id).fetch(`https://relay.internal${path}`, {
       method: "POST",
@@ -1026,10 +1032,15 @@ export async function handleNetprintRun(request: Request, env: RelayWorkerEnv): 
     if (result.ok) console.log(line);
     else console.error(line);
   }
+  const ok = results.every((r) => r.ok);
+  // **DO の 400 は 400 のまま返す** (Refs #913)。これが出るのは「指定された運行NO が
+  // 対象日・営業所に無い」だけで、直すのは呼んだ人の入力 — 502 に丸めると
+  // 「theearth か netprint がまた落ちた」と読まれ、無関係な所を調べさせる。
+  const allBadRequest = results.every((r) => r.status === 400);
   return new Response(
-    JSON.stringify({ ok: results.every((r) => r.ok), date: plan.date, results }),
+    JSON.stringify({ ok, date: plan.date, results }),
     {
-      status: results.every((r) => r.ok) ? 200 : 502,
+      status: ok ? 200 : allBadRequest ? 400 : 502,
       headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
     },
   );

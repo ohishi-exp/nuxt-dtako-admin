@@ -4656,7 +4656,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
   /**
    * POST /cron/netprint — body {comp_id, branch_cd, channel_id | recipient_id,
-   * branch_name?, date}。対象日 (前日 JST、計算は cron.ts) の運転日報を対象営業所に
+   * branch_name?, date, operation_no?}。対象日 (前日 JST、計算は cron.ts) の運転日報を対象営業所に
    * 絞って PDF 化し、かんたんnetprint へ登録して予約番号を LINE WORKS へ通知する
    * (Refs #874)。**宛先はトークルーム (`channel_id` = DB `lineworks_channels` の
    * 行 id) か個人 (`recipient_id` = DB `notify_recipients` の行 id) のどちらか一方**
@@ -4665,6 +4665,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * ここで 400 にするのは「宛先が 1 つも無い」まで — **どちらか一方だけ / Uuid か**
    * の判定は `runNetprintTargets` (cron 経路と同じ規則) に任せ、target ごとの
    * `detail` として応答に載せる。
+   *
+   * `operation_no` (空文字 = 全運行) は手動実行の「1 運行だけ」指定 (Refs #913)。
+   * **形式 (22 桁数字) の検証は relay の `planNetprintRun` 側**で、ここは素通し —
+   * この route は relay からしか到達できず (workers_dev=false)、同じ検証を 2 か所に
+   * 書き写すと片方だけ直る事故が起きる。
    *
    * 反復・通知文・失敗の畳み方は pure な `netprint-cron.ts`
    * (`runNetprintTargets`) — ここは theearth ログイン (`withTheearthLoginSession`)
@@ -4682,6 +4687,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       recipient_id?: unknown;
       branch_name?: unknown;
       date?: unknown;
+      operation_no?: unknown;
     };
     try {
       body = (await request.json()) as typeof body;
@@ -4695,6 +4701,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const branchName =
       typeof body.branch_name === "string" && body.branch_name !== "" ? body.branch_name : undefined;
     const date = typeof body.date === "string" ? body.date : "";
+    const operationNo = typeof body.operation_no === "string" ? body.operation_no : "";
     if (!compId || !branchCd || (!channelId && !recipientId) || !NETPRINT_DATE_RE.test(date)) {
       return Response.json(
         {
@@ -4731,14 +4738,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 指定された側のキーだけを立てる (空文字を残すと「両方指定」に見える)。
     if (channelId) target.channel_id = channelId;
     if (recipientId) target.recipient_id = recipientId;
-    return this.enqueueScrape(() => this.runNetprintJob(account, target, date, sharedSecret));
+    return this.enqueueScrape(() =>
+      this.runNetprintJob(account, target, date, operationNo, sharedSecret),
+    );
   }
 
-  /** netprint cron 1 target ぶんの実行 (`scrapeQueue` の直列化の中で呼ばれる)。 */
+  /** netprint cron 1 target ぶんの実行 (`scrapeQueue` の直列化の中で呼ばれる)。
+   * `operationNo` が空文字でなければその 1 運行だけ (Refs #913)。 */
   private async runNetprintJob(
     account: DtakoAccountRaw,
     target: NetprintTarget,
     dateYmd: string,
+    operationNo: string,
     sharedSecret: string,
   ): Promise<Response> {
     const jobState = this.makeTheearthLoginJobState();
@@ -4770,7 +4781,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER),
         ),
     };
-    const results = await runNetprintTargets(deps, [target], dateYmd);
+    const results = await runNetprintTargets(deps, [target], dateYmd, operationNo);
     for (const result of results) {
       const line = JSON.stringify({
         netprint_cron: result.ok ? "done" : "error",
@@ -4782,6 +4793,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       if (result.ok) console.log(line);
       else console.error(line);
     }
+    // 指定された運行NO が対象日・営業所に無いのは**呼んだ人の入力違い**なので
+    // 400 + `{error}` で返す (Refs #913)。`{error}` にするのは、relay が応答本文を
+    // 200 字で切って画面へ渡すため — `results` の形のままだと途中で切れて JSON に
+    // ならず、画面に生の断片が出る。
+    const notFound = results.find((result) => result.operation_not_found);
+    if (notFound) return Response.json({ error: notFound.detail }, { status: 400 });
     const ok = results.every((result) => result.ok);
     return Response.json(
       { ok, results, theearth_logins: jobState.logins.length },

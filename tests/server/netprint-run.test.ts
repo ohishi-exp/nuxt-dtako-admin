@@ -115,6 +115,27 @@ describe('parseNetprintRunBody', () => {
     expect(result.ok === false && result.error).toContain('branch_name だけ')
   })
 
+  it('operation_no は単独で指定できる (通知先は relay の NETPRINT_TARGETS 任せ、Refs #913)', () => {
+    expect(parsed({ date: '2026-08-24', operation_no: ' 2608240638160000003821 ' })).toEqual({
+      date: '2026-08-24',
+      operation_no: '2608240638160000003821',
+    })
+  })
+
+  it('operation_no が 22 桁の数字でなければ 400 (theearth ログイン前に返す)', () => {
+    for (const operation_no of ['3821', '26082406381600000038210', '260824063816000000382X']) {
+      const result = parseNetprintRunBody({ operation_no })
+      expect(result.ok).toBe(false)
+      expect(result.ok === false && result.error).toBe(
+        'operation_no は 22 桁の数字 (theearth の運行No) で指定してください',
+      )
+    }
+  })
+
+  it('operation_no の空文字はキーごと送らない (= 従来どおり全運行)', () => {
+    expect(parsed({ date: '2026-08-24', operation_no: '  ' })).toEqual({ date: '2026-08-24' })
+  })
+
   it('comp_id は単独で指定できる', () => {
     expect(parsed({ comp_id: '27324455' })).toEqual({ comp_id: '27324455' })
   })

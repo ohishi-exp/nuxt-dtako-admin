@@ -502,8 +502,77 @@ describe("handleNetprintRun (POST /kintai-relay/netprint-run)", () => {
       channel_id: CH_TEST,
       recipient_id: "",
       branch_name: "テスト用",
+      operation_no: "",
       date: "2026-08-20",
     });
+  });
+
+  it("operation_no をそのまま DO へ渡す (通知先の解決は NETPRINT_TARGETS のまま、Refs #913)", async () => {
+    const { env, doFetch } = fakeEnv({ NETPRINT_TARGETS: TARGETS, KINTAI_COMP_ID: "27324455" });
+    const res = await handleNetprintRun(
+      post("https://relay.internal/kintai-relay/netprint-run", {
+        date: "2026-08-24",
+        operation_no: "2608240638160000003821",
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    const [, init] = doFetch.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      branch_cd: "1",
+      channel_id: CH_HONSHA,
+      operation_no: "2608240638160000003821",
+      date: "2026-08-24",
+    });
+  });
+
+  it("operation_no の形式違いは400 (DO を叩かない — 全運行の処理に化けさせない)", async () => {
+    const { env, doFetch } = fakeEnv({ NETPRINT_TARGETS: TARGETS, KINTAI_COMP_ID: "27324455" });
+    const res = await handleNetprintRun(
+      post("https://relay.internal/kintai-relay/netprint-run", { operation_no: "3821" }),
+      env,
+    );
+    expect(res.status).toBe(400);
+    expect(await jsonOf(res)).toEqual({
+      error: "operation_no は 22 桁の数字 (theearth の運行No) で指定してください",
+    });
+    expect(doFetch).not.toHaveBeenCalled();
+  });
+
+  it("DO が 400 (指定の運行NO が無い) を返したら 400 のまま返す — 502 に丸めない", async () => {
+    // 502 に丸めると「theearth か netprint がまた落ちた」と読まれ、実際に直す所
+    // (呼んだ人の入力) から目が逸れる (Refs #913)。
+    const doFetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: "運行NO 2608240000000000000000 は 2026/08/24 の 本社営業所 に見つかりません" }), {
+          status: 400,
+        }),
+    );
+    const { env } = fakeEnv({ NETPRINT_TARGETS: TARGETS, KINTAI_COMP_ID: "27324455", doFetch });
+    const res = await handleNetprintRun(
+      post("https://relay.internal/kintai-relay/netprint-run", {
+        date: "2026-08-24",
+        operation_no: "2608240000000000000000",
+      }),
+      env,
+    );
+    expect(res.status).toBe(400);
+    const body = (await jsonOf(res)) as { ok: boolean; results: { detail: string }[] };
+    expect(body.ok).toBe(false);
+    // 理由は target ごとの detail の**先頭**に出る (relay がここを 200 字で切る)。
+    expect(body.results[0].detail).toContain("見つかりません");
+  });
+
+  it("DO の失敗が 400 以外なら従来どおり 502", async () => {
+    const doFetch = vi.fn(
+      async () => new Response(JSON.stringify({ error: "theearth login failed" }), { status: 502 }),
+    );
+    const { env } = fakeEnv({ NETPRINT_TARGETS: TARGETS, KINTAI_COMP_ID: "27324455", doFetch });
+    const res = await handleNetprintRun(
+      post("https://relay.internal/kintai-relay/netprint-run", { date: "2026-08-24" }),
+      env,
+    );
+    expect(res.status).toBe(502);
   });
 
   it("片方だけの指定 / date 形式違いは400 (DO を叩かない)", async () => {

@@ -3,12 +3,16 @@
  * cron (JST 6:30) を待たずに 1 回走らせる endpoint (Refs #874 の 5)。
  * スクレイプ画面 (`/scraper`) の「日報netprint」タブが叩く。
  *
- * POST /api/netprint/run   body `{date?, branch_cd?, channel_id?, recipient_id?, branch_name?, comp_id?}`
+ * POST /api/netprint/run
+ *   body `{date?, branch_cd?, channel_id?, recipient_id?, branch_name?, operation_no?, comp_id?}`
  *   (宛先は `channel_id` = トークルーム / `recipient_id` = 個人 の**どちらか一方**、Refs #874 の 10)
+ *   (`operation_no` = 22 桁の運行No。指定するとその**1 運行だけ**、Refs #913)
  *   200 — relay の応答 JSON をそのまま (`{ok, date, results[]}`。`results[].detail` に
  *         DO の応答本文 = 予約番号を含む JSON が畳まれている)
  *   400 — body の形式不正 (JSON でない / date が YYYY-MM-DD でない /
- *         branch_cd と宛先の片方だけ / channel_id と recipient_id の両方指定)
+ *         branch_cd と宛先の片方だけ / channel_id と recipient_id の両方指定 /
+ *         operation_no が 22 桁数字でない)、または **relay の 400**
+ *         (= 指定された運行NO が対象日・営業所に無い。理由は `data.results[].detail`)
  *   401 — 未ログイン (`requireAuth`)
  *   4xx/5xx — relay の応答をそのまま (status + `relay:` 前置のメッセージ。
  *         **`data` に relay の応答本文を載せる** ので、一部の営業所だけ失敗した 502 でも
