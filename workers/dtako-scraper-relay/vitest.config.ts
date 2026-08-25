@@ -77,7 +77,7 @@ export default defineConfig({
         'src/scrape-error-artifact.ts',
         'src/cron-batch.ts',
         'src/net780-archive.ts',
-        'src/lineworks-client.ts',
+        'src/lineworks-notify.ts',
         'src/netprint-client.ts',
         'src/daily-report-pdf.ts',
         'src/netprint-cron.ts',

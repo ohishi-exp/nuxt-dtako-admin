@@ -339,7 +339,7 @@ describe('runScheduledCron: netprint', () => {
   })
 
   it('DO が non-2xx を返したら ok=false で status を detail に載せる', async () => {
-    const call: CronDoCall = async () => ({ ok: false, status: 503, text: 'LINEWORKS_BOT 未設定' })
+    const call: CronDoCall = async () => ({ ok: false, status: 503, text: 'INTERNAL_SHARED_SECRET 未設定' })
     const results = await runScheduledCron(
       NETPRINT_CRON,
       { netprintTargetsRaw: TARGETS_JSON, kintaiCompId: '27324455' },

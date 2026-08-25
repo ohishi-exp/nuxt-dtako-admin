@@ -354,11 +354,7 @@ import {
   type Net780ArchiveItem,
   type Net780ArchiveResult,
 } from "./net780-archive";
-import {
-  LineworksBotClient,
-  parseLineworksBotConfig,
-  type LineworksBotConfig,
-} from "./lineworks-client";
+import { sendLineworksTextViaAlcInternalProxy } from "./lineworks-notify";
 import {
   fetchBranchDailyReport,
   generateDailyReportPdf,
@@ -550,8 +546,10 @@ export interface RelayEnv {
    * (service binding は host を無視するため、値そのものは到達性に影響しない)。 */
   NUXT_PUBLIC_AUTH_WORKER_URL?: string;
   /** auth-worker への service binding (Worker→Worker in-process fetch)。
-   * `/auth/introspect` と `/alc-internal-proxy/api/upload`
-   * (ohishi-exp/dtako-scraper#22 の自動アップロード) の両方をこれ経由で叩く。 */
+   * `/auth/introspect` / `/alc-internal-proxy/api/upload`
+   * (ohishi-exp/dtako-scraper#22 の自動アップロード) /
+   * `/alc-internal-proxy/api/internal/lineworks/send` (#874-8 の通知) を
+   * これ経由で叩く。 */
   AUTH_WORKER: Fetcher;
   /**
    * Workers VPC binding (beta) — kagoya_tunnel (Tunnel ID
@@ -588,13 +586,6 @@ export interface RelayEnv {
    * 投入は CI (`dtako-scraper-relay-deploy.yml`)。
    */
   DTAKO_CONFIG_KV?: unknown;
-  /**
-   * LINE WORKS Bot の credential 一式 (JSON: client_id / client_secret /
-   * service_account / private_key / bot_id) の CF Secrets Store binding
-   * (Refs #874)。netprint cron の予約番号通知に使う。未設定/不正は
-   * `/cron/netprint` が 503 で fail-closed (`parseLineworksBotConfig`)。
-   */
-  LINEWORKS_BOT?: unknown;
   /**
    * ローカル開発専用: restraint viewer 経路 (Refs #272) の introspect を短絡して
    * この comp を許可する。`wrangler dev --var RESTRAINT_DEV_VIEWER_COMP:<comp>`
@@ -4667,11 +4658,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * POST /cron/netprint — body {comp_id, branch_cd, channel_id, branch_name?,
    * date}。対象日 (前日 JST、計算は cron.ts) の運転日報を対象営業所に絞って
    * PDF 化し、かんたんnetprint へ登録して予約番号を LINE WORKS へ通知する
-   * (Refs #874)。
+   * (Refs #874)。`channel_id` は DB `lineworks_channels` の行 id (Uuid) で、
+   * 通知は rust-alc-api の internal API 経由 (#874-8)。
    *
    * 反復・通知文・失敗の畳み方は pure な `netprint-cron.ts`
    * (`runNetprintTargets`) — ここは theearth ログイン (`withTheearthLoginSession`)
-   * と #874-1〜3 のヘルパを deps として束ねる配線だけ。`scrapeQueue` で他の
+   * と #874-2/3/8 のヘルパを deps として束ねる配線だけ。`scrapeQueue` で他の
    * theearth ジョブと直列化しつつ、`/cron/dtako/reimport` と同じく応答は同期で
    * 返す (scheduled handler の ctx.waitUntil が await する。netprint の status
    * poll 込みで数分かかりうるが、202 + storage queue の機構 (`scrape-queue.ts`)
@@ -4711,24 +4703,22 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       );
     }
 
-    // LINE WORKS credential — 未設定/不正なら実行前に fail-closed (通知できない
-    // まま netprint 登録だけ走る、を作らない)。Secrets Store binding は
-    // 「宣言はあるが解決できない」時に throw するので、それも同じ扱いに倒す
-    // (`handleCronDtakoReimport` の ICHIBAN secret と同じ)。
-    let botConfig: LineworksBotConfig;
-    try {
-      botConfig = parseLineworksBotConfig(await resolveSecretBinding(this.env.LINEWORKS_BOT));
-    } catch (err) {
-      console.error(
-        JSON.stringify({ netprint_cron: "lineworks-config-error", error: describeUnknownError(err) }),
+    // LINE WORKS 通知は rust-alc-api の internal API を alc-internal-proxy 経由で
+    // 叩く (#874-8)。relay が持つ資格情報は consumer worker proof
+    // (`INTERNAL_SHARED_SECRET`) だけ — Bot credential も通知先チャンネルも DB 側。
+    // 未設定なら実行前に fail-closed (通知できないまま netprint 登録だけ走る、を
+    // 作らない)。
+    const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
+    if (!sharedSecret) {
+      console.error(JSON.stringify({ netprint_cron: "shared-secret-missing" }));
+      return Response.json(
+        { error: "INTERNAL_SHARED_SECRET 未設定のため LINE WORKS へ通知できません" },
+        { status: 503 },
       );
-      return Response.json({ error: "LINEWORKS_BOT が未設定または不正です" }, { status: 503 });
     }
 
     const target: NetprintTarget = { branch_cd: branchCd, channel_id: channelId, branch_name: branchName };
-    return this.enqueueScrape(() =>
-      this.runNetprintJob(account, target, date, new LineworksBotClient(botConfig)),
-    );
+    return this.enqueueScrape(() => this.runNetprintJob(account, target, date, sharedSecret));
   }
 
   /** netprint cron 1 target ぶんの実行 (`scrapeQueue` の直列化の中で呼ばれる)。 */
@@ -4736,7 +4726,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     account: DtakoAccountRaw,
     target: NetprintTarget,
     dateYmd: string,
-    bot: LineworksBotClient,
+    sharedSecret: string,
   ): Promise<Response> {
     const jobState = this.makeTheearthLoginJobState();
     const deps: NetprintCronDeps<BranchDailyReport> = {
@@ -4756,7 +4746,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         const reservation = await netprintWaitForReservation(id);
         return { printId: reservation.printId, endDate: reservation.endDate, page: reservation.page };
       },
-      sendText: (channelId, text) => bot.sendText(channelId, text),
+      sendText: (channelId, text) =>
+        sendLineworksTextViaAlcInternalProxy(
+          { sharedSecret, channelId, text },
+          this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER),
+        ),
     };
     const results = await runNetprintTargets(deps, [target], dateYmd);
     for (const result of results) {
