@@ -940,16 +940,20 @@ path = "app/utils/event-row-legs.ts"
 branches = true
 
 # 運行詳細 (`/operations/[unko_no]`) が**状態で言い分ける文言** (Refs #873)。
-# ①経路地図の軌跡の出どころ (`operationTrackNote`) と ②NET780 生データ zip の可否
-# (`net780ZipAvailability` / `net780ZipFileName`)。**経路そのもの・便の切り方は
-# `operation-route-map.ts` が正**で、ここは作り直さない。
+# ①経路地図の軌跡の出どころ (`operationTrackNote`) と見出し (`operationRouteMapTitle`)、
+# ②NET780 生データ zip の可否 (`net780ZipAvailability` / `net780ZipFileName`)。
+# **経路そのもの・便の切り方は `operation-route-map.ts` が正**で、ここは作り直さない。
 # この画面で一番踏みやすいのが「出ていないものが別の意味に読める」型の欠陥
-# (黙って線が消えると「走っていない」に読める / 未アーカイブと取得失敗が同じ見た目)
-# なので、**5 状態を 1 つも同じ文言にしない**ことをテストで固定している。
-# branches: BR() で包んだ instrumented コピーで **4 条件 (`if` の `&&` 左右 2 +
-# 三項 1 + `if` 1) すべて両側 OK** を実測してから登録した。
+# (黙って線が消えると「走っていない」に読める / 未アーカイブと取得失敗が同じ見た目 /
+# **GPS 列が無い CSV の `emptyRoute()` を「便 0 本」と出すと「便が無い運行」に読める**)
+# なので、**5 状態を 1 つも同じ文言にしない**ことと**数えられないときは本数を名乗らない**
+# ことをテストで固定している。
+# branches: BR() で包んだ instrumented コピーで **7 条件 (`operationTrackNote` の
+# `&&` 左右 2 + 三項 1 + `if` 1、`operationRouteMapTitle` の `??` 1 + `&&` 左右 2)
+# すべて両側 OK** を実測してから登録した (probe 2 段 + 陰性対照つき)。
 # `net780ZipAvailability` / `net780ZipFileName` は条件 0 (Record 引き + テンプレート
-# 文字列) — 状態ごとの分岐を作らないことで死に分岐が生まれない形にしてある。
+# 文字列) — 状態ごとに `if` を並べると `idle` が死に分岐になるので、**分岐を作らない
+# 構造にした** (死に分岐をテストで埋めない、の 3 段判定 → 構造上なのでコードの側を直した)。
 [[files]]
 path = "app/utils/operation-detail-view.ts"
 branches = true

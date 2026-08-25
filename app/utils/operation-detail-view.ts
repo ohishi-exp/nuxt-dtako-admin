@@ -64,6 +64,29 @@ export function operationTrackNote(input: {
   return { source: 'none', text: `軌跡なし — ${why}` }
 }
 
+/**
+ * 経路地図モーダルの見出し (Refs #873)。
+ *
+ * **「便 0 本」と名乗らない。** `buildOperationRoute` は **GPS 列が無い CSV で
+ * `emptyRoute()` (= `legCount 0`) を返す**ので、素直に出すと「便が 1 本も無い運行」に
+ * 読める — 実際には**便の本数が分からなかった**だけで、この 2 つは別物
+ * (この repo で最も多い欠陥の型)。**数えられたときだけ本数を出す。**
+ *
+ * 「なぜ地図が空なのか」は `OperationRouteMap.vue` の overlay が言う
+ * (`GPS が有効な行がありません (GPS 無効の行 N)` / `イベントCSV に GPS 列が無いか、
+ * 行がありません`)。見出しでは**嘘をつかない**ことだけを担う。
+ */
+export function operationRouteMapTitle(input: {
+  unkoNo: string
+  readingDate: string | null | undefined
+  /** まだ CSV を読んでいなければ null。 */
+  legCount: number | null
+}): string {
+  const head = `運行 ${input.unkoNo} (読取日 ${input.readingDate ?? '-'})`
+  // 0 は「便が無い」ではなく「数えられなかった」でもあるので、本数を名乗らない。
+  return input.legCount !== null && input.legCount > 0 ? `${head} — 便 ${input.legCount} 本` : head
+}
+
 /** NET780 生データ zip を出せるか / 出せないなら何と言うか。 */
 export interface Net780ZipAvailability {
   canDownload: boolean
