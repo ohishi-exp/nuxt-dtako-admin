@@ -40,8 +40,10 @@
  *   言えるようにする。**空欄を 0 円と読ませない** — `legSaleYen()` は空の便に `null` を
  *   返し、`lookupOperationLegSales()` は 1 便も当たっていない運行の合計を `null` にする
  * - **無い運行は「無い」と言う。** 鍵が無ければ `missing`、鍵はあるがその運行が
- *   突合結果に居なければ `not-aggregated` (どちらも画面は「粗利タブで集計すると出ます」)。
- *   **推測で埋めない**
+ *   突合結果に居なければ `not-aggregated`。**推測で埋めない**。
+ *   **どちらも「この端末には答えが無い」**ので、画面は R2 に保存された版へ落ちる
+ *   (`resolveLegSalesPanel`、Refs #867) — **ここの一言が出るのは R2 でも出せなかったとき
+ *   だけ**で、「粗利タブで集計すると出ます」しか言えない状態ではない
  * - **月違いを「運行の月 vs `ym`」で判定しない。** 粗利タブの月の切り方は運行の開始日
  *   (`buildMonthlyAllowanceByOperationDate`) で、運行詳細が持つ読取日とは 1 日ずれうる。
  *   独自の月判定を足すと「入っているのに月が違うと言う」偽の欠測が出るので、
@@ -321,6 +323,10 @@ export type OperationLegSalesReady = Extract<OperationLegSalesLookup, { status: 
  * 他ブラウザ・別の人からは必ず空に見える (PR-1 の既知の弱点)。
  * 「集計されていない」ではなく「この端末では集計されていない」が事実。
  *
+ * **文末に `。` を付けてある** (Refs #867) — この一言は単独では出ず、必ず
+ * `resolveLegSalesPanel` が **R2 側の事情と繋げた 1 文**として出す。付けないと
+ * 「…集計すると出ます R2 の版 (…) にもこの運行はありません」と繋がって読めなくなる。
+ *
  * ## ★ 「R2 へ移すのは PR-3」は誤りだった (#865 で訂正)
  *
  * **PR-3 (#845 系) は `leg-sales` を移さない。** あちらが移すのは**人が手で確定したもの**
@@ -342,9 +348,9 @@ export type OperationLegSalesReady = Extract<OperationLegSalesLookup, { status: 
  * ままにしてある** (別 issue)。
  */
 export function legSalesNote(lookup: OperationLegSalesLookup): string | null {
-  if (lookup.status === 'missing') return 'このブラウザの粗利タブで集計すると出ます (便ごとの突合結果がまだありません)'
+  if (lookup.status === 'missing') return 'このブラウザの粗利タブで集計すると出ます (便ごとの突合結果がまだありません)。'
   if (lookup.status === 'not-aggregated') {
-    return `粗利タブの突合結果 (${lookup.ym}) にこの運行はありません。この運行の月を粗利タブで集計すると出ます`
+    return `粗利タブの突合結果 (${lookup.ym}) にこの運行はありません。この運行の月を粗利タブで集計すると出ます。`
   }
   return null
 }

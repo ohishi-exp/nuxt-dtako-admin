@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
-  LEG_SALES_R2_NOTE,
   LEG_SALES_SOURCE_NAMES,
+  legSalesLocalOtherYmNote,
+  legSalesR2Note,
   legSalesSourceLabel,
   legSalesYmCandidates,
   pickBestR2LegSales,
   pickOperationLegSalesFromSnapshot,
   resolveLegSalesPanel,
+  shouldLoadLegSalesFromR2,
   type LegSalesR2Fetch,
   type OperationLegSalesR2,
 } from '~/utils/operation-leg-sales-r2'
@@ -195,21 +197,84 @@ describe('出どころのラベル — この端末で集計した結果 / R2 �
     expect(legSalesSourceLabel('r2', '2026-07', 'こわれた'))
       .toBe('R2 に保存された版 (2026-07 の突合 / 保存時刻が読めません)')
   })
-})
 
-describe('LEG_SALES_R2_NOTE — R2 から読んだ回にしか無い事実を言う', () => {
-  it('★ 版が古いことがある (最後に集計して保存した時点) と言う', () => {
-    expect(LEG_SALES_R2_NOTE).toContain('R2 に保存された版から読んでいます')
-    expect(LEG_SALES_R2_NOTE).toContain('それ以降に取り込んだデータは入っていません')
+  it('★★ この端末が別の月を集計しているときは、両方の月を名乗る (Refs #867)', () => {
+    // 版の月しか名乗らないと、**この端末のキャッシュが別の月だという事実が消える**。
+    expect(legSalesSourceLabel('r2', '2026-07', 'こわれた', '2026-06'))
+      .toBe('R2 に保存された版 (2026-07 の突合 / 保存時刻が読めません / この端末の集計は 2026-06)')
   })
 
-  it('★ この端末で集計すると切り替わると言う (数字が変わる理由が後から読めるように)', () => {
-    expect(LEG_SALES_R2_NOTE).toContain('この端末の粗利タブで集計すると')
+  it('★ 見出しには否定語を入れない (金額が出ている行の横に「ありません」を置かない)', () => {
+    const label = legSalesSourceLabel('r2', '2026-07', SAVED_AT, '2026-06')
+    expect(label).not.toContain('ありません')
+    expect(label).not.toContain('無し')
+  })
+
+  it('この端末に突合結果そのものが無いとき (missing) は名乗る月が無い', () => {
+    expect(legSalesSourceLabel('r2', '2026-07', 'こわれた', null))
+      .toBe('R2 に保存された版 (2026-07 の突合 / 保存時刻が読めません)')
+  })
+})
+
+describe('legSalesLocalOtherYmNote — 別の月を集計してある端末で R2 から出した回 (Refs #867)', () => {
+  const note = legSalesLocalOtherYmNote('2026-06')
+
+  it('★ この端末が持っている月を名乗る (「R2 から出した」だけだとこの事実が消える)', () => {
+    expect(note).toBe('この端末の粗利タブが集計してあるのは 2026-06 の突合で、そこにこの運行は入っていません。')
+  })
+
+  it('★★ 出どころと計上額の月は繰り返さない (見出しと 1 文目が既に言っている)', () => {
+    // **同じことを 3 か所で言うと、どれが本文か分からなくなる。**
+    // ここが足すのは「この端末は別の月を集計してある」という新しい事実 1 つだけ。
+    expect(note).not.toContain('R2')
+    expect(note).not.toContain('2026-07')
+  })
+
+  it('★ 否定は出どころを名指しした形だけ (裸の「ありません」を金額の横に置かない)', () => {
+    expect(note).toContain('そこにこの運行は入っていません')
+    expect(note).not.toContain('ありません')
+  })
+})
+
+describe('legSalesR2Note — R2 から読んだ回にしか無い事実を言う', () => {
+  const note = legSalesR2Note('2026-07')
+
+  it('★ 版が古いことがある (最後に集計して保存した時点) と言う', () => {
+    expect(note).toContain('R2 に保存された版から読んでいます')
+    expect(note).toContain('それ以降に取り込んだデータは入っていません')
+  })
+
+  it('★★ 切り替わる条件は「この運行の月を集計したとき」と言う (Refs #867)', () => {
+    // #865 は「**この端末の粗利タブで集計すると**切り替わります」だった。
+    // **別の月を集計してある端末 (`not-aggregated`) ではこれが嘘** — その月を
+    // 集計し直しても切り替わらない。**訂正を後ろに足すのではなく、この文を直す**
+    // (先に読まれる方が間違ったままなら、1 文目で止まった読者は誤解して終わる)。
+    expect(note).toContain('この運行の月 (2026-07) をこの端末の粗利タブで集計すると、この画面はそちらの結果に切り替わります')
+  })
+
+  it('★ 月は「この運行が入っていた版の月」を名乗る (この端末のキャッシュの月ではない)', () => {
+    expect(legSalesR2Note('2026-08')).toContain('この運行の月 (2026-08) を')
   })
 
   it('★★ 「伝票 …」が出ない理由を言う (伝票が無いという意味ではない)', () => {
-    expect(LEG_SALES_R2_NOTE).toContain('伝票番号を持っていない')
-    expect(LEG_SALES_R2_NOTE).toContain('伝票が無いという意味ではありません')
+    expect(note).toContain('伝票番号を持っていない')
+    expect(note).toContain('伝票が無いという意味ではありません')
+  })
+})
+
+describe('shouldLoadLegSalesFromR2 — R2 を見ないのは ready のときだけ (Refs #867)', () => {
+  it('★★ この端末でこの運行を集計してあるなら見に行かない (古い版で上書きしない)', () => {
+    // **ここが壊れると集計直後の結果を古い版で上書きする** — 一番危ない事故なので、
+    // 判断を画面に散らさずここで両側を固定する。
+    expect(shouldLoadLegSalesFromR2(LOCAL_READY)).toBe(false)
+  })
+
+  it('この端末に突合結果が無い (missing) なら見に行く', () => {
+    expect(shouldLoadLegSalesFromR2({ status: 'missing' })).toBe(true)
+  })
+
+  it('★ 別の月を集計してある (not-aggregated) なら見に行く — これが #867', () => {
+    expect(shouldLoadLegSalesFromR2({ status: 'not-aggregated', ym: '2026-06' })).toBe(true)
   })
 })
 
@@ -241,19 +306,103 @@ describe('resolveLegSalesPanel — localStorage を先に見る順序は変え�
     expect(panel.note).toBeNull()
   })
 
-  it('★ not-aggregated (別の月を集計してある) は今までどおりの一言。R2 へは落ちない', () => {
+  it('★ R2 を見ないのは ready のときだけ (not-aggregated は落ちる、Refs #867)', () => {
+    // `missing` と `not-aggregated` は**どちらも「この端末に答えが無い」**。
+    // ここを `missing` だけにしていたのが #867 の正体。
     const panel = resolveLegSalesPanel({ status: 'not-aggregated', ym: '2026-06' }, LOADING)
     expect(panel.ready).toBeNull()
-    expect(panel.source).toBeNull()
-    expect(panel.note).toBe('粗利タブの突合結果 (2026-06) にこの運行はありません。この運行の月を粗利タブで集計すると出ます')
-    expect(panel.note).not.toContain('R2')
+    expect(panel.note).toContain('R2 に保存された版を確認しています')
+  })
+})
+
+/**
+ * ★ #867 の本体。**この端末には 2026-06 の結果があり、R2 の 2026-07 の版から出した**
+ * という状態が新しく生まれる。**黙って混ぜない。**
+ */
+describe('resolveLegSalesPanel — 別の月を集計してある端末 (not-aggregated) でも R2 から出す', () => {
+  const LOCAL_OTHER: OperationLegSalesLookup = { status: 'not-aggregated', ym: '2026-06' }
+  const R2_READY: LegSalesR2Fetch = {
+    state: 'done',
+    checkedYms: ['2026-07'],
+    result: {
+      status: 'ready',
+      ym: '2026-07',
+      savedAt: SAVED_AT,
+      legs: [
+        { seq: 1, customers: [{ name: '○○牧場', yen: 41250 }], slipIds: [] },
+        { seq: 2, customers: [], slipIds: [] },
+      ],
+    },
+  }
+
+  it('★★ R2 に版があれば出す (これが直したこと)', () => {
+    const panel = resolveLegSalesPanel(LOCAL_OTHER, R2_READY)
+    expect(panel.source).toBe('r2')
+    expect(panel.ready).toMatchObject({ ym: '2026-07', salesYen: 41250, matchedLegs: 1, unmatchedLegs: 1 })
+  })
+
+  it('★★ 数字が出ているときに「ありません」を同じ画面に残さない', () => {
+    // 出ているものが別の意味に読める — この repo で最も多い欠陥の型 (#851 / #854 / #861)。
+    const panel = resolveLegSalesPanel(LOCAL_OTHER, R2_READY)
+    expect(panel.note).toBeNull()
+    expect(panel.sourceLabel).not.toContain('ありません')
+    // **裸の「この運行はありません」を出さない** — 出ている金額に掛かって読める。
+    // (`legSalesR2Note` の「伝票が無いという意味ではありません」等は**否定する対象を
+    // 名指ししている**ので別物。ここで見ているのは「この運行が無い」の方。)
+    expect(panel.sourceNote).not.toContain('この運行はありません')
+  })
+
+  it('★★ この端末のキャッシュの月と、出した版の月の両方が画面から読める', () => {
+    const panel = resolveLegSalesPanel(LOCAL_OTHER, R2_READY)
+    expect(panel.sourceLabel).toContain('2026-07 の突合')
+    expect(panel.sourceLabel).toContain('この端末の集計は 2026-06')
+    expect(panel.sourceNote).toContain('2026-06 の突合')
+  })
+
+  it('★★ 逆方向の誤読も潰す — 注記そのものが両方を正しく言う', () => {
+    const panel = resolveLegSalesPanel(LOCAL_OTHER, R2_READY)
+    // 版が古いこと・伝票が出ない理由 (R2 の回にしか無い事実) は今までどおり出す。
+    expect(panel.sourceNote.startsWith(legSalesR2Note('2026-07'))).toBe(true)
+    // **切り替わる条件は本文自身が正しい** — この端末が 2026-06 を集計し直しても
+    // 切り替わらないことが、訂正文なしで読める (#867)。
+    expect(panel.sourceNote).toContain('この運行の月 (2026-07) をこの端末の粗利タブで集計すると')
+    expect(panel.sourceNote).toBe(legSalesR2Note('2026-07') + legSalesLocalOtherYmNote('2026-06'))
+  })
+
+  it('★ この端末に何も無いとき (missing) は端末側の事情を足さない (名乗る月が無い)', () => {
+    const panel = resolveLegSalesPanel({ status: 'missing' }, R2_READY)
+    expect(panel.sourceNote).toBe(legSalesR2Note('2026-07'))
+    expect(panel.sourceLabel).not.toContain('この端末の集計は')
+  })
+
+  it('★★ R2 も出せなかったら、この端末の事情と R2 の事情を両方言う (合成後の 1 文で判断)', () => {
+    const note = resolveLegSalesPanel(LOCAL_OTHER, {
+      state: 'done',
+      checkedYms: ['2026-07', '2026-06'],
+      result: { status: 'not-aggregated', ym: '2026-07', savedAt: SAVED_AT },
+    }).note
+    // 「この運行の月を粗利タブで集計すると出ます。」だけで終わると、**R2 を見たことが
+    // 伝わらない**。文末の `。` はこの連結のためにある (繋がって読めなくならないように)。
+    expect(note).toContain('粗利タブの突合結果 (2026-06) にこの運行はありません。')
+    expect(note).toContain('この運行の月を粗利タブで集計すると出ます。')
+    expect(note).toContain('R2 の版 (2026-07')
+    expect(note).toContain('にもこの運行はありません (確認した月: 2026-07 / 2026-06)。')
+    expect(note).not.toContain('出ますR2')
+  })
+
+  it('★ R2 の取得が失敗した回も両方言う', () => {
+    const note = resolveLegSalesPanel(LOCAL_OTHER, {
+      state: 'failed', message: '503', checkedYms: ['2026-07'],
+    }).note
+    expect(note).toContain('粗利タブの突合結果 (2026-06) にこの運行はありません。')
+    expect(note).toContain('R2 に保存された版 (確認した月: 2026-07) も読めませんでした (503)')
   })
 })
 
 describe('resolveLegSalesPanel — この端末に無いとき (missing) だけ R2 へ落ちる', () => {
   const MISSING: OperationLegSalesLookup = { status: 'missing' }
   /** `legSalesNote(missing)` の一言。**先頭に必ず付く** (どちらの事情も言う)。 */
-  const LOCAL_HEAD = 'このブラウザの粗利タブで集計すると出ます (便ごとの突合結果がまだありません)'
+  const LOCAL_HEAD = 'このブラウザの粗利タブで集計すると出ます (便ごとの突合結果がまだありません)。'
 
   it('★★ R2 に版があればそこから出す — 合計は local と同じ式で畳む', () => {
     const panel = resolveLegSalesPanel(MISSING, {
@@ -273,7 +422,7 @@ describe('resolveLegSalesPanel — この端末に無いとき (missing) だけ 
     expect(panel.note).toBeNull()
     expect(panel.ready).toMatchObject({ ym: '2026-07', salesYen: 41250, matchedLegs: 1, unmatchedLegs: 1 })
     expect(panel.sourceLabel).toContain('R2 に保存された版 (2026-07 の突合 /')
-    expect(panel.sourceNote).toBe(LEG_SALES_R2_NOTE)
+    expect(panel.sourceNote).toBe(legSalesR2Note('2026-07'))
   })
 
   it('★ 1 便も当たっていない版の合計は null (0 円と読ませない)', () => {
@@ -297,8 +446,17 @@ describe('resolveLegSalesPanel — この端末に無いとき (missing) だけ 
   })
 
   it('★ 取得が失敗したら黙らない (0 円ではない)', () => {
-    const note = resolveLegSalesPanel(MISSING, { state: 'failed', message: '503' }).note
-    expect(note).toBe(`${LOCAL_HEAD} R2 に保存された版も読めませんでした (503) — 計上額が 0 円なのではありません。`)
+    const note = resolveLegSalesPanel(MISSING, { state: 'failed', message: '503', checkedYms: ['2026-07'] }).note
+    expect(note).toBe(`${LOCAL_HEAD} R2 に保存された版 (確認した月: 2026-07) も読めませんでした (503) — 計上額が 0 円なのではありません。`)
+  })
+
+  it('★★ 失敗した回も「どの月を見に行ったか」を言う (見に行かなかったのと区別が付かない、Refs #867)', () => {
+    // 失敗の文言は本文のどこにも月を書かないので、**1 つでも必ず名乗る**
+    // (`checkedYmsSuffix` を省けるのは、本文がその月を書いている回だけ)。
+    const note = resolveLegSalesPanel(MISSING, {
+      state: 'failed', message: 'Failed to fetch', checkedYms: ['2026-07', '2026-06'],
+    }).note
+    expect(note).toContain('(確認した月: 2026-07 / 2026-06)')
   })
 
   it('版が無い月は「集計すれば残る」まで言う', () => {
@@ -349,7 +507,7 @@ describe('resolveLegSalesPanel — この端末に無いとき (missing) だけ 
     const fetches: LegSalesR2Fetch[] = [
       LOADING,
       { state: 'no-date' },
-      { state: 'failed', message: 'x' },
+      { state: 'failed', message: 'x', checkedYms: ['2026-07'] },
       { state: 'done', checkedYms: ['2026-07'], result: { status: 'no-version', ym: '2026-07' } },
       { state: 'done', checkedYms: ['2026-07'], result: { status: 'unreadable', ym: '2026-07' } },
       { state: 'done', checkedYms: ['2026-07'], result: { status: 'not-aggregated', ym: '2026-07', savedAt: SAVED_AT } },

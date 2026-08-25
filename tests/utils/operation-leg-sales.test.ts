@@ -301,12 +301,24 @@ describe('legSalesNote — 無いときに「無い」と言う', () => {
     // **「このブラウザの」を落とさない** — 保存先が localStorage なので、他端末・他ブラウザ
     // からは必ず空に見える (PR-1 の既知の弱点)。「集計されていない」と言い切ると嘘になる。
     expect(legSalesNote({ status: 'missing' }))
-      .toBe('このブラウザの粗利タブで集計すると出ます (便ごとの突合結果がまだありません)')
+      .toBe('このブラウザの粗利タブで集計すると出ます (便ごとの突合結果がまだありません)。')
   })
 
   it('★ その運行が突合結果に無いときは、集計済みの月を添えて言う', () => {
     expect(legSalesNote({ status: 'not-aggregated', ym: '2026-07' }))
-      .toBe('粗利タブの突合結果 (2026-07) にこの運行はありません。この運行の月を粗利タブで集計すると出ます')
+      .toBe('粗利タブの突合結果 (2026-07) にこの運行はありません。この運行の月を粗利タブで集計すると出ます。')
+  })
+
+  it('★★ 文末に `。` を付ける (R2 側の事情と 1 文に繋がるため、Refs #867)', () => {
+    // この一言は**単独では画面に出ない** — `resolveLegSalesPanel` が
+    // `${legSalesNote(local)} ${r2Note(fetch)}` と繋いで出す。付いていないと
+    // 「…集計すると出ます R2 の版 (…) にもこの運行はありません」と繋がって読めなくなる。
+    for (const lookup of [
+      { status: 'missing' } as const,
+      { status: 'not-aggregated', ym: '2026-07' } as const,
+    ]) {
+      expect(legSalesNote(lookup)?.endsWith('。')).toBe(true)
+    }
   })
 
   it('便が読めているときは何も言わない (便を並べる)', () => {
