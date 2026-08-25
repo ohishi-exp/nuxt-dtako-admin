@@ -24,7 +24,7 @@ bash <skill>/setup-dev-env.sh --here --hybrid    # いま居る worktree = 自�
 
 ## ★★ 上の 1 行が通らない 2 つの詰まり (2026-08-25 #874-5 で両方踏んだ)
 
-**「dev が立たないので実機確認は諦めました」と書く前に、下の代替経路まで辿ること。**
+**「dev が立たないので実機確認は諦めました」と書く前に、下の ①→② を辿ること。**
 どちらの詰まりも**設定ミスではない**ので、直そうとすると時間が溶ける。
 
 | 詰まり | 実際に起きること |
@@ -32,7 +32,22 @@ bash <skill>/setup-dev-env.sh --here --hybrid    # いま居る worktree = 自�
 | **`setup-dev-env.sh` は `wrangler dev --remote`** を使う = worker が**エッジで動く** | `dtako.ippoan.org` が Cloudflare Access 配下になった 2026-08-25 以降、**`127.0.0.1:8787` 宛でも 302 + `WWW-Authenticate: Cloudflare-Access`** になる (詳細は `nuxt-dtako-admin-map` skill / memory `dtako-prod-behind-access`) |
 | **`issue_dev_login_url` / `issue_dev_token` (auth-worker の MCP surface) が<br>セッションに無いことがある** | `ToolSearch` にも出てこない。コネクタの再認可は**対話フロー**なので子セッションでは踏めない。**「30 日 TTL 切れ」(下の `google_sub_not_cached` 節) とは別件** — あちらは tool が有ればの話 |
 
-### 代替: worker はローカル、binding だけ本番、認証は自分で作る
+#### ★ 順序を間違えないこと: ① tool を叩き直す → ② それでも駄目なら代替経路
+
+**代替経路は第一選択ではない。** MCP tool は**後から現れる** — コネクタが認可され直すと
+**走行中のセッションにも一覧が配り直される** (下の
+「再連携の直前に起動したセッションでも、そのまま呼べるようになる」節。
+**tool が無いのを見てセッションを起こし直さないこと**もそこに書いてある)。
+
+**2026-08-25 #874-5 で実際にこれを踏んだ**: 着手時は `ToolSearch` に出てこないので
+下の代替経路で通したが、**作業の終盤に一覧が配り直されて 2 つとも現れた**。
+
+⇒ 詰まったら、**まず `issue_dev_token({})` を 1 回叩き直す**。通れば
+`setup-dev-env.sh` の本来の手順に戻れる (`--remote` が Access に捕まる方の詰まりは
+残るので、そこは下の 1 の `remote = true` だけ流用する)。**403 や tool 不在が続いたときに
+初めて代替経路へ移る。**
+
+### 代替 (① が駄目なとき): worker はローカル、binding だけ本番、認証は自分で作る
 
 **この 5 点セットで「本物のビルドの画面を実際にクリックする」ところまで行ける。**
 本物でないのは **introspect と (成功系を見たいときだけ) relay** の 2 つだけ。
