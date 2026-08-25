@@ -169,34 +169,54 @@ branches = true
 # これに当たり、候補が 2 件以上ある便 380 本のうち **41 本**がバッジ一色で見分け不能に
 # なっていた (旧バッジで潰れていたのは 1 本)。`slipSideNote` の 1 行
 # (「積地のみ一致」/「卸地のみ一致」) を足すと**見分け不能な便は 0 本**になる (実測)。
-# **★ この数字は選択の取り方に丸ごと依存する。**`location` は**選択区間**の積地・卸地
-# なので、運行まるごとを選ぶと車庫→車庫になりほぼ全件 `none` になる。**測るときは選択の
-# 条件を必ず書く** (詳しくは `profit-panel-legs.ts` の `slipMatch` の doc)。
+# **★★ #860 でバッジの相手が「選択区間」から「その便」に変わった。**候補は
+# `forceMatchCandidates` が**便ごと** (`leg.originCity` / `leg.date`) に出しているのに、
+# そこへ貼る根拠だけが選択区間を相手にしていた (**同じ表の中で並びは便基準・ラベルは
+# 区間基準**)。⇒ `matchOf(leg, slip)` = `slipMatch(legMatchTarget(leg), slip)`。
+# **上の実測 (1,668 件) は「選択区間をその便だけにしたとき」のもので、それは #860 の後の
+# 姿と同じ**なので**そのまま読める** (選択の取り方によらず常にそうなった)。
+# 「運行まるごとを選ぶと車庫→車庫でほぼ全件 `none`」はもう起きない。
+# **相手を画面にも出す** — 表の見出しは `根拠 (この便の積地・卸地)`、便ごとに
+# `badgeTargetNote` が「この便 X → Y / 選択した区間は A → B」と言う。
+# **「以前は選択区間と比べていた」という過去は画面に置かない** (現在の解釈に効かないため。
+# 経緯は `profit-panel-legs.ts` の doc と PR に残す)。
+# **卸地が取れていない便** (`destCity` が空 = 降しイベントが無い) は積地が完全一致でも
+# `combinedMatchLevel` が必ず `none` になる。**消えるのはバッジ色の区別だけで
+# `slipSideNote` の「積地のみ一致」は残る**が、一色になった理由を出さないと
+# 「この便には根拠のある候補が 1 つも無い」と誤読されるので `LEG_DEST_MISSING_NOTE` を
+# **便あたり 1 行**出す (`destCity` は便の性質なので行ごとに繰り返さない)。
 # **両側とも当たっている行には足さない** — 畳んで隠したものが無く、全行に同じ文字が
 # 並ぶと候補一覧が読みにくくなるだけ。
 # branches: script ブロックを instrumented コピー
-# (`operation-leg-sales.ts` と同じ計測器) に差し替えてテストを流し、**BR site 20 のうち
-# 18 が true/false 両方**を通ることを数えた (#890、`tests/components/ProfitPanel.test.ts`
-# + `operation-detail-route-map.test.ts` の 69 本を流して実測)。
-# **★ 数字の指標を取り違えないこと。**この repo では 3 通りの数え方が同居している:
+# (`operation-leg-sales.ts` と同じ計測器) に差し替えてテストを流し、**BR site 16 すべてが
+# true/false 両方**を通ることを数えた (#860、`tests/components/ProfitPanel.test.ts`
+# + `operation-detail-route-map.test.ts` の **77 本**を流して実測。#890 の時点では
+# 20 site / 両側 18 で、片側だけの 2 つは `legLabel` の `||` の右辺の文字列リテラルだった)。
+# **#860 で `legLabel` が `legRouteLabel` (pure 側) を呼ぶ形になり、その 2 つを含む
+# `||` 4 site が丸ごと `profit-panel-legs.ts` へ移った** — この画面に**片側だけの分岐は
+# 1 つも残っていない**。埋めるべき分岐が増えたのではなく、場所が動いただけ。
+# **★ 数字の指標を取り違えないこと。**この repo では 4 通りの数え方が同居している:
 #
-# | 指標 | 数え方 | #890 の前 | #890 の後 |
+# | 指標 | 数え方 | #890 の後 | **#860 の後 (いま)** |
 # |---|---|---|---|
-# | **BR() instrumented site** (この注記が言っているもの) | `if`/三項の条件 + `&&`/`\|\|` の両辺 + `??` の左辺 | **21** (両側 19) | **20** (両側 18) |
-# | v8 の branch **site** | `Object.keys(cov.b).length` | 43 | 42 |
-# | v8 の branch **arm** | `Object.values(cov.b).flat().length` | 83 | 81 |
+# | **BR() instrumented site** (この注記が言っているもの) | `if`/三項の条件 + `&&`/`\|\|` の両辺 + `??` の左辺 | **20** (両側 18) | **16** (両側 **16**) |
+# | v8 の branch **site** | `Object.keys(cov.b).length` | 42 | **42** |
+# | v8 の branch **arm** | `Object.values(cov.b).flat().length` | 81 | **81** |
+# | AST の**構文上の分岐** (`margin.ts` の節が使う) | `if` + 三項 + `&&`/`\|\|`/`??` の**左辺** + **`?.`** | — | — |
 #
-# **#890 で `e instanceof Error ? … : …` を 1 つ消した**ので BR site が 1 つ (v8 の arm では
-# 2 つ) **減っている**。**増えていない** — 埋めるべき新しい分岐は無い。
-# (それ以前: origin/main で 25 分岐だった頃から `props.location?.originCity ?? ''` 2 組
-# = 4 分岐が `slipMatch` 側へ移って 21 になった。)
-# **側の一言の `v-if` は template 側**なので BR には出ない (compile 後の render 関数)。
-# 出る行・出ない行の両方を component テストで踏んで v8 の branches で見ている。
-# **残る 2 は `legLabel` の 1 行 (`:297`) にある `||` の右辺の文字列リテラル 2 つ**
-# = `leg.originCity || '?'` と `leg.destCity || '(卸地なし)'`。常に真で経路が分かれない
-# (v8 も分岐に数えないので gate は 100%。埋めようとすると通らないテストを書くことになる)。
-# **★ 同じ `||` の 2 辺ではなく、別々の `||` の右辺が 1 つずつ**である
-# (#890 で数え直したときに位置まで確認した。前の注記は `originCity` 側しか挙げていなかった)。
+# **★ 4 つ目は `?.` を数え、`&&`/`\|\|` を 1 site と数える**ので BR site とは別物
+# (`margin.ts` の節が「120 分岐 / BR site 140」と**両方を名乗って**書き分けているのが手本)。
+# この画面では `?.` を数えていないので上の表には値を入れていない。
+#
+# **★ BR が 4 減っても v8 が動かないのは、v8 が template の render 関数まで数えるから。**
+# script から `||` 4 site (8 arm) が消えた一方で、template に
+# `v-if="!legDestKnown(leg)"` 等が増えている。**2 つの指標は足し引きが噛み合わない** ので、
+# **数字を引用するときは必ずどちらの指標か名乗ること** (この表がある理由)。
+# **v8 site 42 / arm 81 は `origin/main` (09f6d55) と `#860` の両方で実測して同じ値**。
+# (履歴: #890 で `e instanceof Error ? … : …` を 1 つ消して BR 21→20。
+# それ以前は `props.location?.originCity ?? ''` 2 組 = 4 分岐が `slipMatch` 側へ移って 25→21。)
+# **template の `v-if` は BR には出ない** (compile 後の render 関数)。出る行・出ない行の
+# 両方を component テストで踏んで v8 の branches で見ている。
 [[files]]
 path = "app/components/ProfitPanel.vue"
 branches = true
@@ -796,14 +816,35 @@ branches = true
 # `combinedMatchLevel` は片方でも `none` なら `none` なので、これが無いと**積地だけ
 # 当たっている明細と何も当たっていない明細が同じ「根拠なし」に潰れる** (本番 2026-07 の
 # 候補 1,668 件中 455 件 = 27.3% がこの状態で、候補 2 件以上の便 380 本のうち 41 本が
-# 見分け不能になっていた。一言を足すと 0 本。**★ この実測は「選択区間をその便だけに
-# したとき」のもの** — `location` は選択区間の積地・卸地なので、**選択の取り方で分布が
-# まるごと変わる** (運行まるごとを選ぶと車庫→車庫になりほぼ全件 `none`)。**測り直すときは
-# 選択の条件を必ず書く**)。**バッジが `none` でないときは足さない** —
+# 見分け不能になっていた。一言を足すと 0 本。**★ この実測の母集団は「候補一覧」であって
+# 「確定済み明細」ではない** (後者は人が既に選んだ後なのでよく一致する)。**入力は「選択区間を
+# その便だけにしたとき」** — #858 の時点では `location` が選択区間だったので、
+# 運行まるごとを選ぶと車庫→車庫でほぼ全件 `none` になり、**選択の取り方で分布がまるごと
+# 変わった**。**#860 で相手が便になったので、この「その便だけ」の条件が常に成り立つ
+# = あの実測がそのまま変更後の分布として読める**)。**バッジが `none` でないときは足さない** —
 # 隠したものが無く、全行に同じ文字が並ぶと読みにくくなるだけ。
-# branches: 上と同じ instrumented コピーで**20 分岐すべてが true/false 両方を通る**
-# ことを数えた (origin/main では 15。`bestMatch` の `if` / `location?.` / `slipSideNote`
-# の 3 段の `if` が増えた)。
+# **#860 で根拠バッジの相手が「選択区間」から「その便」になった。** 候補は
+# `forceMatchCandidates` が便ごとに出しているのに根拠だけが区間基準で、**同じ明細が
+# 選択の取り方だけで別のバッジ**になっていた。足したのは 4 つとも pure:
+# `legMatchTarget` (相手 = その便の積地・卸地) / `legDestKnown` (卸地が取れているか) /
+# `legRouteLabel` (区間の書き方を 1 か所に) / `badgeTargetNote` (何と比べたかを画面に出す)
+# + `LEG_DEST_MISSING_NOTE`。**`slipMatch` / `combinedMatchLevel` は 1 行も変えていない** —
+# 変わったのは**呼び出し側が渡す相手**だけ。
+# **`legRouteLabel` は `allowance-provisional.ts` の `routeLabel` とは別物**なので名前を
+# 分けてある (あちらはキー 1 本を受けて `(不明)`、こちらは 2 引数で `(積地なし)` /
+# `(卸地なし)` = 「分からない」ではなく「そのイベントが無い」)。同名だと Nuxt の
+# auto-import が片方を黙って捨てる (`Duplicated imports` の WARN) ので実害もある。
+# branches: 上と同じ instrumented コピーで**BR site 23 のうち 21 が true/false 両方**を
+# 通ることを数えた (#860、`tests/utils/profit-panel-legs.test.ts` +
+# `tests/components/ProfitPanel.test.ts` の **129 本**を流して実測)。
+# **片側だけの 2 つは `legRouteLabel` の `||` の右辺の文字列リテラル**
+# (`'(積地なし)'` / `'(卸地なし)'`) で、常に真なので経路が分かれない。
+# **これは `ProfitPanel.vue` の `legLabel` から移ってきたもの** — repo 全体で見れば
+# 死に分岐は増えていない (v8 も数えないので gate は 100%)。
+# **★ 前の注記の「20 分岐」は再現できなかった。** origin/main (09f6d55) で測り直すと
+# **BR site 18 (両側 18) / v8 site 17 / v8 arm 34** で、20 はどの指標とも一致しない
+# (#860 の後は BR 23 / v8 site 20 / v8 arm 40)。**指標を名乗らずに数字だけ書いたのが
+# 原因**なので、以後この注記は**必ず「BR site」か「v8 site/arm」かを書く。**
 [[files]]
 path = "app/utils/profit-panel-legs.ts"
 branches = true

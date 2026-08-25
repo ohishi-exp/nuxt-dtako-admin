@@ -70,6 +70,11 @@ import {
   sumAmount,
   slipMatch,
   slipSideNote,
+  legMatchTarget,
+  legDestKnown,
+  legRouteLabel,
+  badgeTargetNote,
+  LEG_DEST_MISSING_NOTE,
   type SlipMatch,
   effectiveSlipIds,
   ownSlipIds,
@@ -86,7 +91,11 @@ const props = defineProps<{
   /** 運行の乗務員CD (`raw_data.対象乗務員CD` / `乗務員CD1`)。取れなければ null。 */
   driverCd: string | null
   range: { fromTs: number, toTs: number } | null
-  /** 選択区間の積地・卸地。**根拠バッジにしか使わない** (候補の並びは `forceMatchCandidates`)。 */
+  /**
+   * 選択区間の積地・卸地。**根拠バッジの相手ではない** (Refs #860) — バッジは
+   * **その便の積地・卸地** (`legMatchTarget`) と突合する。ここで受けたものは
+   * **「何と比べたのか」を画面に出す一言** (`badgeTargetNote`) にしか使わない。
+   */
   location: SelectedRowsLocationRange | null
   summary: SelectedRowsSummary
   /** この運行の便 (`extractAllowanceLegs` の結果)。**便の切り方は①のもの。** */
@@ -287,14 +296,26 @@ const matchBadgeLabel: Record<string, string> = { exact: '完全一致', partial
  * **バッジだけにしない** — `combinedMatchLevel` は片方でも `none` なら `none` に畳むので、
  * 「積地は合っている明細」と「何も合っていない明細」が同じ「根拠なし」になる。畳んだ側は
  * `slipSideNote` が一言で言う (本番 2026-07 では候補の約 3 割がこれに当たる)。
+ *
+ * ## ★ 相手は**その便**の積地・卸地 (`props.location` ではない、Refs #860)
+ *
+ * 候補は `forceMatchCandidates` が**便ごと**に出している (`leg.originCity` / `leg.date` で
+ * 絞り、便の積地が一致する明細を先頭に並べる) のに、そこへ貼る根拠だけが選択区間を
+ * 相手にしていた。**同じ表の中で並びとラベルの基準が違う**状態だった。
+ * **選択がその便 1 本だけのときは変わらない** — 変わるのは複数の便をまたいで選んだとき。
  */
-function matchOf(slip: VehicleDailySlip): SlipMatch {
-  return slipMatch(props.location, slip)
+function matchOf(leg: ProfitPanelLeg, slip: VehicleDailySlip): SlipMatch {
+  return slipMatch(legMatchTarget(leg), slip)
 }
 
-/** 便の見出し (`便2 07-16 釧路市 → (卸地なし)`)。 */
+/**
+ * 便の見出し (`便2 07-16 釧路市 → (卸地なし)`)。
+ *
+ * **区間の書き方は `legRouteLabel` に寄せてある** (Refs #860) — 同じ便が見出しと
+ * `badgeTargetNote` で違う書き方 (`?` と `(積地なし)`) に見えないようにするため。
+ */
 function legLabel(leg: ProfitPanelLeg): string {
-  return `便${leg.seq} ${leg.date.slice(5)} ${leg.originCity || '?'} → ${leg.destCity || '(卸地なし)'}`
+  return `便${leg.seq} ${leg.date.slice(5)} ${legRouteLabel(leg.originCity, leg.destCity)}`
 }
 
 /**
@@ -307,6 +328,7 @@ function boundLabel(leg: ProfitPanelLeg): string {
 
 const panelNote = FORCE_MATCH_PANEL_NOTE
 const overrideNote = FORCE_MATCH_OVERRIDE_NOTE
+const legDestMissingNote = LEG_DEST_MISSING_NOTE
 
 /**
  * その便に出す注記。**触る前と触った後で言うことが違う** (Refs #854)。
@@ -383,6 +405,12 @@ function legNote(leg: ProfitPanelLeg): string {
               <p v-if="usedNote" class="px-3 py-2 text-[10px] text-amber-700 dark:text-amber-400">
                 {{ usedNote }}
               </p>
+              <p class="px-3 py-1 text-[10px] text-gray-500">
+                {{ badgeTargetNote(location, leg) }}
+              </p>
+              <p v-if="!legDestKnown(leg)" class="px-3 py-1 text-[10px] text-amber-700 dark:text-amber-400">
+                {{ legDestMissingNote }}
+              </p>
               <table v-if="rowsOf(leg).length > 0" class="w-full text-xs min-w-[640px]">
                 <thead class="bg-gray-50 dark:bg-gray-800">
                   <tr>
@@ -392,7 +420,7 @@ function legNote(leg: ProfitPanelLeg): string {
                     <th class="text-left px-2 py-1.5 font-medium text-gray-500">積地→卸地</th>
                     <th class="text-left px-2 py-1.5 font-medium text-gray-500">品名 (数量@単価)</th>
                     <th class="text-right px-2 py-1.5 font-medium text-gray-500">金額</th>
-                    <th class="text-center px-2 py-1.5 font-medium text-gray-500">根拠</th>
+                    <th class="text-center px-2 py-1.5 font-medium text-gray-500">根拠 (この便の積地・卸地)</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -412,11 +440,11 @@ function legNote(leg: ProfitPanelLeg): string {
                     <td class="px-2 py-1.5 whitespace-nowrap">{{ formatItem(s) }}</td>
                     <td class="px-2 py-1.5 text-right whitespace-nowrap">{{ formatYen(s.amount) }}</td>
                     <td class="px-2 py-1.5 text-center">
-                      <span class="px-1.5 py-0.5 rounded text-[10px]" :class="matchBadgeClass[matchOf(s).badge]">
-                        {{ matchBadgeLabel[matchOf(s).badge] }}
+                      <span class="px-1.5 py-0.5 rounded text-[10px]" :class="matchBadgeClass[matchOf(leg, s).badge]">
+                        {{ matchBadgeLabel[matchOf(leg, s).badge] }}
                       </span>
-                      <span v-if="slipSideNote(matchOf(s))" class="block mt-0.5 text-[10px] text-gray-400 whitespace-nowrap">
-                        {{ slipSideNote(matchOf(s)) }}
+                      <span v-if="slipSideNote(matchOf(leg, s))" class="block mt-0.5 text-[10px] text-gray-400 whitespace-nowrap">
+                        {{ slipSideNote(matchOf(leg, s)) }}
                       </span>
                     </td>
                   </tr>

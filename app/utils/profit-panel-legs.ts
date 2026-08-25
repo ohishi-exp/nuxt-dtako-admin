@@ -183,9 +183,9 @@ function bestMatch(dtakoName: string, areaName: string, freeText: string): Locat
 export interface SlipMatch {
   /** `combinedMatchLevel` の 3 段。**`/profit/monthly` の一覧と同じ言葉・同じ意味。** */
   badge: SlipBadge
-  /** 選択区間の積地 vs 明細の積地。 */
+  /** **その便の**積地 vs 明細の積地 (Refs #860)。 */
   originMatch: LocationMatchLevel
-  /** 選択区間の卸地 vs 明細の卸地。 */
+  /** **その便の**卸地 vs 明細の卸地。**便の卸地が空なら常に `none`** (`legDestKnown`)。 */
   destMatch: LocationMatchLevel
 }
 
@@ -217,22 +217,30 @@ export interface SlipMatch {
  *
  * ## ★★ 上の数字は「**選択区間をその便だけにしたとき**」のもの (Refs #858)
  *
- * **`location` は選択区間の積地・卸地であって、便のものではない。**だから
- * **選択の取り方を変えると分布がまるごと変わる。**測り直すときは**必ず選択の条件を書くこと。**
+ * **母集団は「候補一覧」** (`forceMatchCandidates` が返した明細) で、**「確定済み明細」
+ * ではない** — 後者は人が既に選んだ後なのでよく一致する。**母集団を書き替えると結論が変わる。**
  *
  * 同じ運行 (`2607010419590000001109` 便1、候補 10 件) を 2 通りの選択で数えた実測:
  *
- * | 選択 | `location` | 畳む前の当たり方 |
+ * | 選択 | 相手 | 畳む前の当たり方 |
  * |---|---|---|
  * | その便だけ | `北海道釧路市西港２-101-1` → `上士幌町上士幌東３線` | 両側 3 / 積地のみ 7 / 無 0 |
  * | 運行まるごと | **`音更町駒場北町` → `音更町駒場北町`** (車庫→車庫) | 両側 0 / 積地のみ 0 / **無 10** |
  *
- * **運行まるごとを選ぶと `location` が車庫→車庫になり、ほぼ全件 `none` になる。**
  * この条件を書かずに数えたせいで、一度**別の数字 (1,971 候補 / 589 件 / 29.9%) を実測値として
  * 書いてしまった。**数字だけ直しても、次に測る人がまた別の選択で別の数字を出す。
  *
- * 選択区間の積地・卸地が取れていない (`location` が `null`) ときは、突合する相手が
- * 無いので全件 `none` — 「根拠が無い」であって「結べない」ではない。
+ * ## ★ #860 で相手が**便**になった — 上の実測はそのまま生きる
+ *
+ * 呼び出し側が渡すのは `legMatchTarget(leg)` = **その便の積地・卸地**で、
+ * **選択区間ではない。**上の表の「その便だけ」の行は**選択の取り方によらず常にこれ**に
+ * なったので、**あの実測 (候補 1,668 件) が変更後の分布としてそのまま読める。**
+ * 「運行まるごと」の行は**もう起きない**(それが #860 の直したこと)。
+ *
+ * この関数自体は相手が何かを知らない (`SelectedRowsLocationRange` を受けるだけ)。
+ * **相手が空 (`null` / 空文字) なら突合する相手が無いので `none`** — 「根拠が無い」であって
+ * 「結べない」ではない。**便の卸地が空のときにそう言うのは呼び出し側の責務**
+ * (`legDestKnown` / `LEG_DEST_MISSING_NOTE`)。
  */
 export function slipMatch(location: SelectedRowsLocationRange | null, slip: VehicleDailySlip): SlipMatch {
   const originMatch = bestMatch(location?.originCity ?? '', slip.originAreaName, slip.origin)
@@ -256,6 +264,92 @@ export function slipSideNote(match: SlipMatch): string | null {
   if (match.destMatch !== 'none') return '卸地のみ一致'
   return null
 }
+
+/**
+ * 「積地 → 卸地」の 1 行。**取れていない側は伏せず言葉にする** (Refs #860)。
+ *
+ * 便の見出し (`legLabel`) と根拠の相手を言う一言 (`badgeTargetNote`) の**両方が同じ
+ * 書き方**をするための 1 か所。分けて書くと、同じ便が見出しでは `?`・注記では空欄の
+ * ように**同じものが 2 通りに見える**。
+ *
+ * **★ `allowance-provisional.ts` の `routeLabel` とは別物なので名前を分けてある。**
+ * あちらは `広尾|芽室` の**キー 1 本**を受けて欠けた側を `(不明)` と書く。こちらは
+ * **積地・卸地の 2 引数**で、欠けた側は `(積地なし)` / `(卸地なし)` — 「分からない」ではなく
+ * **「そのイベントが無い」**という別の事実を言う。同じ名前にすると Nuxt の auto-import が
+ * 片方を黙って捨てる (`Duplicated imports` の WARN) ので、実害もある。
+ */
+export function legRouteLabel(originCity: string, destCity: string): string {
+  return `${originCity || '(積地なし)'} → ${destCity || '(卸地なし)'}`
+}
+
+/**
+ * 根拠バッジの**突合の相手** = **その便の積地・卸地** (Refs #860)。
+ *
+ * ## ★ 相手は「選択区間」ではなく「便」
+ *
+ * 候補は**便ごと**に出ている (`forceMatchCandidates` は `leg.originCity` / `leg.date` で
+ * 絞り、**便の積地が一致する明細を先頭に並べる**)。にもかかわらず、そこへ貼る根拠だけが
+ * **選択区間 1 つぶんの積地・卸地** (`SelectedRowsLocationRange`) を相手にしていた。
+ * **同じ表の中で、並びは便基準・ラベルは区間基準**という食い違いだった (#860)。
+ *
+ * 選択が便をまたぐと `SelectedRowsLocationRange.destCity` は**最後の便の卸地**になるので、
+ * **手前の便の候補は構造的に「積地だけ当たり」**になる。運行まるごとを選ぶと車庫→車庫に
+ * なり、**同じ明細が選択の取り方だけで別のバッジ**になっていた (#858 / #860 の実測)。
+ *
+ * **選択がその便 1 本だけのときは、変える前と 1 文字も変わらない** — `location` と便の
+ * 積地・卸地が同じものになるため。**変わるのは複数の便をまたいで選んだときだけ。**
+ */
+export function legMatchTarget(leg: Pick<ProfitPanelLeg, 'originCity' | 'destCity'>): SelectedRowsLocationRange {
+  return { originCity: leg.originCity, destCity: leg.destCity }
+}
+
+/**
+ * その便の**卸地が取れているか** (Refs #860)。`destCity` が空 = **降しイベントが無い便**。
+ *
+ * `matchLocationLevel` は片方が空なら無条件で `none` を返し、`combinedMatchLevel` は
+ * 片方でも `none` なら `none` に畳む。⇒ **卸地が取れていない便は、積地がどれだけ
+ * 当たっていても全行が「根拠なし」**になる。**「卸地が合わない」ではなく「卸地を見ていない」**
+ * なので、そう言わないと**「この便には根拠のある候補が 1 つも無い」と誤読される**
+ * (`LEG_DEST_MISSING_NOTE`)。
+ */
+export function legDestKnown(leg: Pick<ProfitPanelLeg, 'destCity'>): boolean {
+  return leg.destCity.trim() !== ''
+}
+
+/**
+ * **何を相手に突合したのか**を便ごとに言う一言 (Refs #860)。
+ *
+ * #860 の本題は「バッジの相手が違う」ことではなく、**画面に相手が出ていない**ことだった。
+ * 相手を便に変えるだけだと、**昨日「根拠なし」だった行が今日「部分一致」**になる理由が
+ * どこにも出ない。**選択区間と便の両方を並べて出す** — どちらも「いま何と比べているか」の
+ * 説明なので、直したあとも腐らない (「以前は選択区間と比べていた」という**過去の履歴は
+ * 画面に置かない** — 現在の解釈に何も効かないため。経緯はこの doc と PR に残す)。
+ *
+ * **★ 逆方向の誤読も同時に潰す。**複数便を選んでいると黄 (「部分一致」) が一気に増えるので、
+ * **「確認済み」と読まれない**よう、地名だけの目安であることを同じ 1 行で言う。
+ * (`exact` は #858 の実測で候補 1,668 件中 **0 件** — dtako 側が住所
+ * `北海道釧路市西港２-101-1`、一番星側が市町村名 `北海道釧路市` なので、増えるのは
+ * 「完全一致」ではなく「部分一致」の方。)
+ */
+export function badgeTargetNote(location: SelectedRowsLocationRange | null, leg: ProfitPanelLeg): string {
+  const target = `根拠はこの便の積地・卸地 (${legRouteLabel(leg.originCity, leg.destCity)}) と比べた結果です`
+  const selected = location === null
+    ? ' (選択した区間の積地・卸地は取れていません)'
+    : ` (選択した区間は ${legRouteLabel(location.originCity, location.destCity)})`
+  return `${target}${selected}。地名だけの目安なので、金額・品名・日付は必ず自分で確かめてください。`
+}
+
+/**
+ * **卸地が取れていない便**に出す一言 (Refs #860)。**便あたり 1 行**で足りる —
+ * `destCity` は便の性質なので、その便の候補は**全行が同じ状態**になる。行ごとに繰り返すと
+ * 候補一覧が読めなくなるだけ。
+ *
+ * **消えるのはバッジ色の区別だけで、側注 (`slipSideNote` の「積地のみ一致」) は残る。**
+ * それでも一言が要るのは、**バッジが一色になった理由**が画面のどこにも出ないと
+ * 「この便には根拠のある候補が 1 つも無い」と読めてしまうため。
+ */
+export const LEG_DEST_MISSING_NOTE
+  = 'この便は降しイベントが無く卸地が取れていないため、根拠は積地だけで見ています (卸地は突合していません)。バッジは全件「根拠なし」に畳まれますが、積地が当たっている明細には「積地のみ一致」が付きます。'
 
 /**
  * その便の「結んである」の**出どころ** (Refs #854)。
