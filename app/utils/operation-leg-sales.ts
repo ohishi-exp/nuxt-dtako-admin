@@ -308,6 +308,9 @@ export type OperationLegSalesLookup =
     unmatchedLegs: number
   }
 
+/** `OperationLegSalesLookup` の `ready` だけ (画面と R2 側が受け渡す形)。 */
+export type OperationLegSalesReady = Extract<OperationLegSalesLookup, { status: 'ready' }>
+
 /**
  * 突合結果が引けないときに**画面へ必ず出す一言** (Refs #820)。`ready` なら `null`。
  *
@@ -315,8 +318,28 @@ export type OperationLegSalesLookup =
  * 何も言わずに空にすると「この運行には売上が無い (0 円)」と読まれる。
  *
  * **`missing` は「このブラウザの」と言う** — 保存先が localStorage なので、他端末・
- * 他ブラウザ・別の人からは必ず空に見える (PR-1 の既知の弱点。R2 へ移すのは PR-3)。
+ * 他ブラウザ・別の人からは必ず空に見える (PR-1 の既知の弱点)。
  * 「集計されていない」ではなく「この端末では集計されていない」が事実。
+ *
+ * ## ★ 「R2 へ移すのは PR-3」は誤りだった (#865 で訂正)
+ *
+ * **PR-3 (#845 系) は `leg-sales` を移さない。** あちらが移すのは**人が手で確定したもの**
+ * で、`allowance-overrides-r2.ts` の `kind` は `'provisional' | 'excluded' | 'force-match'`
+ * の 3 つ。`leg-sales` (①の集計結果) はどれでもない。⇒ **PR-3b / PR-3c が終わっても
+ * この文言は消えない。**
+ *
+ * **そして「移す」必要も無い。必要なデータは既に R2 にある** —
+ * `MarginCache.operations[].legs` (= `MarginLegInput[]`) が #826 で
+ * `profit/{ym}/margin-summary/latest.json` に入っており、**`customers`
+ * (`LegCustomerShare` = `code`+`name`+`yen`) を持っている**。計上額パネルが使うのは
+ * `leg.customers` と `legSaleYen(leg)` だけなので、**新しいデータは 1 バイトも要らない。
+ * 読む経路が無かっただけ。** その経路は `operation-leg-sales-r2.ts` +
+ * `GET /api/profit/operation-leg-sales`。
+ *
+ * **`slipIds` だけは R2 に無い** (`leg-sales` にあって版に無いのはこれ 1 つ)。計上額
+ * パネルは使っていないので足りるが、**収支パネルの候補ゲート (`lookupUsedSlipIds`) は
+ * R2 に落とせない** — 和集合が欠けると二重計上の口になる。**あちらは localStorage の
+ * ままにしてある** (別 issue)。
  */
 export function legSalesNote(lookup: OperationLegSalesLookup): string | null {
   if (lookup.status === 'missing') return 'このブラウザの粗利タブで集計すると出ます (便ごとの突合結果がまだありません)'
@@ -339,6 +362,18 @@ export function lookupOperationLegSales(
   if (cache === null) return { status: 'missing' }
   const legs = cache.byUnko[unkoNo]
   if (legs === undefined) return { status: 'not-aggregated', ym: cache.ym }
+  return legSalesReadyLookup(cache.ym, legs)
+}
+
+/**
+ * 便の列 → 画面が受け取る `ready` (Refs #865)。**合計の式をここ 1 か所にする。**
+ *
+ * localStorage から読んだ便も、R2 の版から読んだ便 (`operation-leg-sales-r2.ts`) も
+ * **同じ式で畳む** — 出どころで合計の出し方が分かれると、「端末を替えたら合計が変わった」
+ * の原因が突合なのか畳み方なのか読めなくなる。**足し算そのものはしていない**
+ * (`legSaleYen` が便ごとに出した額を足すだけで、金額は①が出したまま)。
+ */
+export function legSalesReadyLookup(ym: string, legs: OperationLegSale[]): OperationLegSalesReady {
   let salesYen = 0
   let matchedLegs = 0
   for (const leg of legs) {
@@ -349,7 +384,7 @@ export function lookupOperationLegSales(
   }
   return {
     status: 'ready',
-    ym: cache.ym,
+    ym,
     legs,
     // **1 便も当たっていない運行の合計は `null`。** 0 と出すと「この運行の売上は
     // 0 円」と読めるが、実際は「一番星の明細に当たっていない」だけ。
