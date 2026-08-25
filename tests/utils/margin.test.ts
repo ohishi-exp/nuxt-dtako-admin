@@ -1793,6 +1793,43 @@ describe('直課経費の中身 (directRowsByUnko)', () => {
       expect(operationDirectCostTitle(m({ unkoNo: 'Z' }), new Map())).toBe('直課経費なし')
       expect(NO_DIRECT_COST_TITLE).toBe('直課経費なし')
     })
+
+    /**
+     * **`¥-0` を出さない** (Refs #843 / #840)。直課の 1 行は
+     * `costYen(row) * (totalKm / hitKm)` の**按分後の端数つき**で、経費は負にもなるので
+     * ちょうど 0 の行が `-4.66e-10` のような**尾つきの負**になる。`Math.round` はそれを
+     * `-0` にし、`(-0).toLocaleString()` が **`"-0"`** を返すため title に `¥-0` と載っていた。
+     *
+     * **陽性対照 (`-0.6` → `¥-1`) を必ず置く。** `Math.abs` のような「符号ごと消す」直しでも
+     * 通ってしまうテストにしないため — 本当に負の経費は負のまま出なければならない。
+     */
+    describe('`¥-0` を出さない (Refs #843)', () => {
+      const titleOf = (yen: number) => operationDirectCostTitle(
+        m({ unkoNo: 'A', date: '2026-07-15', vehicleCode: '1109' }),
+        new Map([['A', [{ date: '2026-07-15', costKindName: '通行料', costName: '通行料', yen, remarks: '', vendorName: '' }]]]),
+      ).split('\n')[1]
+
+      it.each([
+        ['-0.4 (Math.round が -0 を返す窓)', -0.4, '通行料 ¥0'],
+        ['-0.5 (窓の端。Math.round(-0.5) は -0)', -0.5, '通行料 ¥0'],
+        ['-0.0004 (端数つきの負。丸めずに出すと "-0")', -0.0004, '通行料 ¥0'],
+        ['-4.66e-10 (按分の足し順で出る実際の形)', -4.66e-10, '通行料 ¥0'],
+        ['-0 そのもの', -0, '通行料 ¥0'],
+        ['0 (退行なし)', 0, '通行料 ¥0'],
+      ])('%s → ¥0', (_name, yen, expected) => {
+        expect(titleOf(yen)).toBe(expected)
+      })
+
+      it('陽性対照: 本当に負の額は負のまま (-0.6 → ¥-1、-206,060 → ¥-206,060)', () => {
+        expect(titleOf(-0.6)).toBe('通行料 ¥-1')
+        expect(titleOf(-206060)).toBe('通行料 ¥-206,060')
+      })
+
+      it('正の額は 1 円も動かない', () => {
+        expect(titleOf(0.6)).toBe('通行料 ¥1')
+        expect(titleOf(206060)).toBe('通行料 ¥206,060')
+      })
+    })
   })
 
   describe('乗務員行の title (driverDirectCostTitle)', () => {

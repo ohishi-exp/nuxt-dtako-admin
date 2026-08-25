@@ -123,7 +123,13 @@ const totals = computed(() => {
   }
 })
 
-const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
+/**
+ * 金額。**`-0` を `+0` に畳んでから出す** (Refs #843)。収支の列 (`marginYen`) は
+ * **負になり得る** (下の表は `marginYen < 0` で赤くしている) ので、0 のときに **`¥-0`**
+ * と出ていた。**`Math.round` も併せて足した理由**は `profit/allowance.vue` の `yen` に同じ
+ * — `+ 0` だけでは端数つきの負 (`-0.0005 < v < 0`) が `"-0"` のまま残る。
+ */
+const yen = (v: number | null) => (v === null ? '-' : `¥${(Math.round(v) + 0).toLocaleString()}`)
 const tons = (v: number) => `${Math.round(v * 100) / 100}t`
 
 function legSales(e: AllowanceModalEntry): number | null {

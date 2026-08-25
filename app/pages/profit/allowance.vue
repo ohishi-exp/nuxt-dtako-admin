@@ -561,7 +561,19 @@ function fetchOperationsFor(range: { from: string, to: string }, driverCd?: stri
   })
 }
 
-const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
+/**
+ * 金額。**`-0` を `+0` に畳んでから出す** (Refs #843)。収支 (`margin()` = 売上 − 手当) と
+ * PDF との差 (`screenYen - pdfYen`) を出すので**負になり得る**列で、0 のときに **`¥-0`** と
+ * 出ていた。
+ *
+ * **`Math.round` も併せて足した。** `+ 0` は `-0` **そのもの**しか畳まないので、
+ * `toLocaleString` の既定 (`maximumFractionDigits: 3`) が `"-0"` に丸めてしまう
+ * `-0.0005 < v < 0` の**端数つきの負**には効かない (`(-0.0004 + 0).toLocaleString()`
+ * は `"-0"` のまま)。丸めてから畳めば窓ごと閉じる。
+ * 実データは全て整数円 (売上・手当とも一番星の `amount` の和で割り算が挟まらない) なので
+ * **表示は 1 文字も変わらない**。`-0.6` → `¥-1` で、本当に負の額は負のまま。
+ */
+const yen = (v: number | null) => (v === null ? '-' : `¥${(Math.round(v) + 0).toLocaleString()}`)
 const tons = (v: number) => `${Math.round(v * 100) / 100}t`
 
 // --- 一番星の明細と、強制突合 (降しが無い便に明細を手で結ぶ) ---

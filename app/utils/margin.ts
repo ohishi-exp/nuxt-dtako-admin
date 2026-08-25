@@ -1289,9 +1289,17 @@ export function groupMarginsByDriver(margins: OperationMargin[]): DriverMargin[]
 
 // --- 直課経費の中身 (title) ---
 
-/** title 用の金額表記。画面のセル (`margin.vue` の `yen`) と同じ丸めと桁区切り。 */
+/**
+ * title 用の金額表記。画面のセル (`margin.vue` の `yen`) と同じ丸めと桁区切り。
+ * **`+ 0` で `-0` を `+0` に畳む** (Refs #843)。直課の 1 行は
+ * `costYen(row) * (totalKm / hitKm)` の**按分後の端数つき**で、経費は負になり得る
+ * (上の `buildLegMargins` が `runCostYen * 0` を避けているのと同じ事情) ため、
+ * ちょうど 0 の行が `-4.66e-10` のような**尾つきの負**になる。`Math.round` はそれを
+ * `-0` にし、`(-0).toLocaleString()` が **`"-0"`** を出すので title に `¥-0` と載っていた。
+ * `-0.6` は `¥-1` のまま (本当に負の経費は負のまま出る)。
+ */
 function titleYen(v: number): string {
-  return `¥${Math.round(v).toLocaleString()}`
+  return `¥${(Math.round(v) + 0).toLocaleString()}`
 }
 
 /**

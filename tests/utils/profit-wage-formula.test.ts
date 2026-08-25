@@ -168,3 +168,61 @@ describe('hasWageMixAmounts — 時間と金額は一緒に埋まるか、一緒
       .toBeCloseTo(row.premiumHours!, 9)
   })
 })
+
+/**
+ * **式の注記に `¥-0` を出さない** (Refs #843 / #840)。
+ *
+ * `yen()` は `Math.round(value).toLocaleString()` だったので、`-0.5 ≤ value < 0` の回に
+ * `Math.round` が **`-0`** を返し、`(-0).toLocaleString()` が **`"-0"`** を返していた。
+ * 割増ぶん (`overtimeYen`) は `premiumHours * unitYen` の**端数つき**なので、拘束の集計が
+ * 負の分を出した月 (`timecard-compare-view.ts` の「nginx 側の異常 (負の拘束など)」と
+ * 同じ事情) にこの窓へ落ちる。
+ *
+ * **陽性対照 (`-0.6` → `¥-1`) を必ず置く** — `Math.abs` のような「符号ごと消す」直しでも
+ * 通ってしまうテストにしないため。
+ */
+describe('式の金額に `¥-0` を出さない (Refs #843)', () => {
+  /** 基本給の式の右辺 (`… = ¥N` の `¥N`)。 */
+  const baseAmount = (baseWageYen: number) =>
+    wageMixBaseFormula({ ...rowOf(), baseWageYen }, settings())!.split(' = ')[1]
+  /** 残業の式の右辺。 */
+  const overtimeAmount = (overtimeYen: number) =>
+    wageMixOvertimeFormula({ ...rowOf(), overtimeYen }, settings())!.split(' = ')[1]
+
+  it.each([
+    ['-0.4 (Math.round が -0 を返す窓)', -0.4],
+    ['-0.5 (窓の端。Math.round(-0.5) は -0)', -0.5],
+    ['-0.0004 (端数つきの負。丸めずに出すと "-0")', -0.0004],
+    ['-0 そのもの', -0],
+    ['0 (退行なし)', 0],
+  ])('%s → ¥0', (_name, v) => {
+    expect(baseAmount(v)).toBe('¥0')
+    expect(overtimeAmount(v)).toBe('¥0')
+  })
+
+  it('陽性対照: 本当に負の額は負のまま (-0.6 → ¥-1)', () => {
+    expect(baseAmount(-0.6)).toBe('¥-1')
+    expect(overtimeAmount(-0.6)).toBe('¥-1')
+    expect(baseAmount(-225338)).toBe('¥-225,338')
+  })
+
+  it('正の額は 1 円も動かない', () => {
+    expect(baseAmount(0.6)).toBe('¥1')
+    expect(baseAmount(225338)).toBe('¥225,338')
+  })
+
+  /**
+   * **`computeWageMixRow` から実際に届く経路**でも `¥0` になること。
+   * `premiumMinutes = -0.024 × 1.25 = -0.03` → `premiumHours = -0.0005` →
+   * `× 単価 1,000 = -0.5` → `Math.round(-0.5)` は **`-0`**。
+   */
+  it('負の拘束が来た月でも `¥-0` にならない (計算から届く経路)', () => {
+    const st = settings({ method: 'hours', hourlyRateYen: 1000 })
+    const row = computeWageMixRow(
+      { ...NAKAMURA, restraint: { workingMinutes: 0, overtimeMinutes: -0.024, nightMinutes: 0, workDays: 0 } },
+      st,
+    )
+    expect(Object.is(row.overtimeYen, -0)).toBe(true)
+    expect(wageMixOvertimeFormula(row, st)!.split(' = ')[1]).toBe('¥0')
+  })
+})

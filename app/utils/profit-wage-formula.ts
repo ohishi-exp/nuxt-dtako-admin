@@ -58,9 +58,17 @@ export function hasWageMixAmounts(row: WageMixRow): row is ComputedWageMixRow {
   return row.baseWageYen !== null
 }
 
-/** 金額 (`¥225,338`)。表の `yen()` と同じ形。 */
+/**
+ * 金額 (`¥225,338`)。表の `yen()` と同じ形。
+ * **`+ 0` で `-0` を `+0` に畳む** (Refs #843)。割増ぶん (`overtimeYen`) は
+ * `premiumHours * unitYen` の**端数つき**で、拘束の集計は負の分を出すことがある
+ * (`timecard-compare-view.ts` の「nginx 側の異常 (負の拘束など)」と同じ事情) ため
+ * `-0.5 ≤ v < 0` に落ちうる。`Math.round` はそこで `-0` を返し、
+ * `(-0).toLocaleString()` が **`"-0"`** を出すので式の注記に `¥-0` と載っていた。
+ * `-0.6` は `¥-1` のまま。
+ */
 function yen(value: number): string {
-  return `¥${Math.round(value).toLocaleString()}`
+  return `¥${(Math.round(value) + 0).toLocaleString()}`
 }
 
 /** 時間 (`209.6h`)。**表の「法定内」「割増係数」と同じ丸め** (小数第1位)。 */
