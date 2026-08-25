@@ -909,10 +909,12 @@ function buildLegMargins(
     const fuelHaulYen = fuelYenFor(leg.haulKm, fuelRate)
     const fuelDeadheadYen = fuelYenFor(leg.deadheadKm, fuelRate)
     // **燃料代が出せなければ収支も出さない。** `fuelHaulYen`/`fuelDeadheadYen` は
-    // 同じ `fuelRate` から出るので同時に null になる (`fuelYenFor` の仕様)。
-    const marginYen = fuelHaulYen === null || fuelDeadheadYen === null
+    // 同じ `fuelRate` から出るので同時に null になる — `fuelYenFor` が null を返すのは
+    // `rate` の 2 つのどちらかが null のときだけで、**km には依らない**。だから
+    // `fuelDeadheadYen === null` を別に見ない (見ると通らない枝が残る。Refs #842)。
+    const marginYen = fuelHaulYen === null
       ? null
-      : leg.salesYen - leg.allowanceYen - fuelHaulYen - fuelDeadheadYen
+      : leg.salesYen - leg.allowanceYen - fuelHaulYen - fuelDeadheadYen!
     // **重みの和が 1 なので Σ = 運行の経費。** どのモードでも同じ (配れない運行は全部 0)。
     // 重み 0 は `runCostYen * 0` にしない — 経費が負の運行で `-0` になり、画面に
     // 「¥-0」と出る (`Math.round(-0).toLocaleString()`)。

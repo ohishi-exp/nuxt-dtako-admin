@@ -415,8 +415,12 @@ describe('parseFuelRates', () => {
   it('数でない / NaN / 0 以下 はどれも入っていない扱い', () => {
     expect(parseFuelRates('{"a":{"yenPerLiter":"x","kmPerLiter":5}}').a)
       .toEqual({ yenPerLiter: null, kmPerLiter: 5 })
-    // JSON に NaN は書けないので Infinity 相当を JSON.parse を通さずに確かめる
-    expect(parseFuelRates(JSON.stringify({ b: { yenPerLiter: 1e999, kmPerLiter: 5 } })).b)
+    // **JSON にも Infinity は入ってくる** — `1e999` は JSON 的には正しい数の綴りで、
+    // `JSON.parse` は倍精度に丸めて `Infinity` を返す (Refs #842)。
+    // (`JSON.stringify({ x: 1e999 })` は `{"x":null}` なので、往復させると
+    // `typeof !== 'number'` の方で落ちてしまい **`Number.isFinite` の判定を通らない**。
+    // ここは生の JSON 文字列で書くのが要点。)
+    expect(parseFuelRates('{"b":{"yenPerLiter":1e999,"kmPerLiter":5}}').b)
       .toEqual({ yenPerLiter: null, kmPerLiter: 5 })
     expect(parseFuelRates('{"c":{"yenPerLiter":-1,"kmPerLiter":5}}').c)
       .toEqual({ yenPerLiter: null, kmPerLiter: 5 })
@@ -458,6 +462,13 @@ describe('setFuelRate', () => {
     const map = { 1109: { yenPerLiter: 130, kmPerLiter: null } }
     setFuelRate(map, '1109', 'kmPerLiter', 4.2)
     expect(map).toEqual({ 1109: { yenPerLiter: 130, kmPerLiter: null } })
+  })
+
+  // 画面は `Number(raw) || 0` で渡す (`margin.vue`)。**`Number('1e999')` は `Infinity`** で、
+  // `Infinity || 0` は `Infinity` のまま — 入力欄からも有限でない数が来る (Refs #842)。
+  it('Infinity は「消す」扱い (入力欄に 1e999 と打てる)', () => {
+    expect(setFuelRate({ 1109: { yenPerLiter: 130, kmPerLiter: 4.2 } }, '1109', 'yenPerLiter', Number('1e999')))
+      .toEqual({ 1109: { yenPerLiter: null, kmPerLiter: 4.2 } })
   })
 })
 
@@ -767,6 +778,31 @@ describe('summarizeMargins', () => {
     // --- 出せなかったぶん ---
     expect(totals.noMarginOperations).toBe(1)
     expect(totals.noMarginSalesYen).toBe(20000)
+  })
+
+  // **`fuelYen` が出せていても粗利が出せない運行がある** (Refs #842)。経費を 1 件も
+  // 引けていない車輌に人が上書き欄で燃費と単価を入れると、`fuelYen` は出るが
+  // `costsMissing` で `marginYen` は null のまま。手で組んだ `OperationMargin` ではなく
+  // **`buildOperationMargins` から起こして**、この状態が実在することごと固定する。
+  it('燃費だけ上書きで出せて経費が 1 件も無い運行は、粗利を出せなかった側に数える', () => {
+    const res = buildOperationMargins(
+      [op({ totalKm: 100, salesYen: 50000, allowanceYen: 8000 })],
+      [],
+      { 1109: { yenPerLiter: 150, kmPerLiter: 5 } },
+    )
+    const m = res.operations[0]!
+    expect(m.fuelYen).toBe(3000)
+    expect(m.costsMissing).toBe(true)
+    expect(m.marginYen).toBeNull()
+
+    const totals = summarizeMargins(res.operations)
+    expect(totals.operations).toBe(1)
+    expect(totals.noMarginOperations).toBe(1)
+    expect(totals.noMarginSalesYen).toBe(50000)
+    // 燃料代は**粗利を出せた運行ぶんだけ**なので、出ていても足さない。
+    expect(totals.marginOperations).toBe(0)
+    expect(totals.fuelYen).toBe(0)
+    expect(totals.marginYen).toBe(0)
   })
 
   it('**粗利の内訳は引き算がぴったり合う** (人が検算できないと信用されない)', () => {
