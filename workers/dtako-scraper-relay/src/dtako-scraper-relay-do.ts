@@ -357,9 +357,9 @@ import {
 import { sendLineworksTextViaAlcInternalProxy } from "./lineworks-notify";
 import {
   fetchBranchDailyReport,
-  generateDailyReportPdf,
+  fetchDailyReportPdf,
   type BranchDailyReport,
-} from "./daily-report-pdf";
+} from "./daily-report-preview";
 import {
   registerPdf as netprintRegisterPdf,
   waitForReservation as netprintWaitForReservation,
@@ -4747,13 +4747,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         this.withTheearthLoginSession(account, jobState, (jar) =>
           fetchBranchDailyReport(jar, { dateJst: formatDateSlash(d), branchCd }),
         ),
-      generatePdf: (report, branchName, d) =>
-        generateDailyReportPdf({
-          rows: report.rows,
-          workRows: report.workRows,
-          branchName,
-          dateJst: formatDateSlash(d),
-        }),
+      // PDF は theearth が出す公式の「運転日報」帳票をそのまま取る (#874-13)。
+      // **1 運行 = 1 PDF = 1 予約番号** なので、選択に渡すのは行 1 件だけ
+      // (営業所名も日付も乗務員も帳票側が印字する)。営業所の絞り込みは
+      // `fetchReport` が済ませてある。
+      // **同じログインセッションを使い回す** — `fetchReport` と同じ jobState を
+      // 渡すことで、1 target あたりの theearth ログインは 1 回のままになる
+      // (dev 実機で `theearth_logins: 1` を確認。theearth は同時ログインを
+      // 許さず、増やすと実在の利用者を蹴る)。
+      generatePdf: (operation) =>
+        this.withTheearthLoginSession(account, jobState, (jar) =>
+          fetchDailyReportPdf(jar, { rows: [operation] }),
+        ),
       registerPdf: async (pdf, fileName) => {
         const id = await netprintRegisterPdf(pdf, fileName);
         const reservation = await netprintWaitForReservation(id);
