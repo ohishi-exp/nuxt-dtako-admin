@@ -178,6 +178,7 @@ import {
   type UncoveredDriverInput,
   type UncoveredTotals,
 } from '~/utils/margin'
+import { describeApiError } from '~/utils/api-error'
 import {
   buildMarginSummaryInput,
   marginSummarySaveNote,
@@ -1314,7 +1315,10 @@ async function saveMarginSummaryToR2() {
     marginR2Failed.value = false
   }
   catch (e) {
-    marginR2Note.value = marginSummarySaveNote(null, e instanceof Error ? e.message : String(e))
+    // **`e.message` は使わない** (Refs #890)。ofetch は HTTP の reason phrase から
+    // message を組むので、`createError` に書いた日本語がそこで丸ごと落ちる
+    // (「cache (ym 一致)」が「cache (ym )」になる)。理由は JSON 本文に残っている。
+    marginR2Note.value = marginSummarySaveNote(null, describeApiError(e))
     marginR2Failed.value = true
   }
   // **保存の成否によらず一覧を読み直す。** 保存が失敗した回でも、それより前に残した版は

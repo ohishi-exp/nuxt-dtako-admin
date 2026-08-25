@@ -358,31 +358,3 @@ export function defaultRange(selectedMonth: string): { from: string, to: string 
   const year = selectedMonth.slice(0, 4)
   return { from: `${year}-01`, to: selectedMonth }
 }
-
-/**
- * `$fetch` のエラーから**人が読める理由**を作る (Refs #677)。
- *
- * 既定の `e.message` は `[GET] "/api/kyuyo/wage-range?…": 503` のように
- * **status しか出ない**。proxy は upstream の本文をそのまま passthrough している
- * ので、理由はそちらにある (「[kintai_push] が無効です」「kyuyo 認可が未設定です」等)。
- * 拾わないと、画面を見ても何が起きたのか判らないまま調査に入ることになる。
- */
-export function describeApiError(e: unknown): string {
-  const err = (e ?? {}) as {
-    statusCode?: number
-    statusMessage?: string
-    data?: unknown
-    message?: string
-  }
-  let fromData = ''
-  if (typeof err.data === 'string') {
-    fromData = err.data
-  }
-  else if (typeof err.data === 'object' && err.data !== null) {
-    const d = err.data as Record<string, unknown>
-    const picked = d.error ?? d.message ?? d.statusMessage
-    if (typeof picked === 'string') fromData = picked
-  }
-  const detail = fromData || err.statusMessage || err.message || String(e)
-  return err.statusCode ? `${err.statusCode} ${detail}` : detail
-}

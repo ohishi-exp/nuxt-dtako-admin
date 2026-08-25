@@ -154,10 +154,10 @@ import type { KintaiAlcUploadResult } from '~/utils/kintai-alc-upload'
 import { parseKintaiAlcUploadResult } from '~/utils/kintai-alc-upload'
 import type { SnapshotSourceRow } from '~/utils/wage-snapshot-client'
 import { buildSnapshotPayload, contentHash, WAGE_LOGIC_VERSION } from '~/utils/wage-snapshot-client'
+import { describeApiError } from '~/utils/api-error'
 import type { WageRangeResponse } from '~/utils/wage-range-view'
 import {
   defaultRange,
-  describeApiError,
   emptyRowsNote,
   filterNegativeDiffRows,
   monthBadgeLabel,

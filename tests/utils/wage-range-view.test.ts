@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest'
 
 import {
   defaultRange,
-  describeApiError,
   emptyRowsNote,
   filterNegativeDiffRows,
   monthBadgeLabel,
@@ -378,37 +377,5 @@ describe('defaultRange', () => {
     expect(defaultRange('2026-06')).toEqual({ from: '2026-01', to: '2026-06' })
     expect(defaultRange('2026-01')).toEqual({ from: '2026-01', to: '2026-01' })
     expect(defaultRange('2025-12')).toEqual({ from: '2025-01', to: '2025-12' })
-  })
-})
-
-describe('describeApiError', () => {
-  /** 既定の message は status しか持たない。**理由は upstream の本文にある。** */
-  it('本文の error を拾って status と並べる', () => {
-    expect(describeApiError({
-      statusCode: 503,
-      data: { error: '[kintai_push] が無効です (書き先がありません)' },
-      message: '[GET] "/api/kyuyo/wage-range": 503',
-    })).toBe('503 [kintai_push] が無効です (書き先がありません)')
-  })
-
-  it('本文が文字列でも拾う', () => {
-    expect(describeApiError({ statusCode: 502, data: 'upstream down' })).toBe('502 upstream down')
-  })
-
-  it('data.message / statusMessage にも落ちる', () => {
-    expect(describeApiError({ statusCode: 400, data: { message: 'month は YYYY-MM' } }))
-      .toBe('400 month は YYYY-MM')
-    expect(describeApiError({ statusCode: 401, statusMessage: 'Unauthorized' }))
-      .toBe('401 Unauthorized')
-  })
-
-  it('status が無ければ理由だけ', () => {
-    expect(describeApiError(new Error('Failed to fetch'))).toBe('Failed to fetch')
-  })
-
-  it('何も無くても文字列を返す', () => {
-    expect(describeApiError(null)).toBe('null')
-    // 拾える文言が無ければ String(e) に落ちる (黙って空文字にしない)
-    expect(describeApiError({ statusCode: 500, data: {} })).toBe('500 [object Object]')
   })
 })
