@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest'
 import {
   assignRowsToLegs,
   rowLegLookup,
+  countUnassigned,
+  unassignedNotice,
   legCellClass,
   legLabel,
   legTitle,
@@ -11,7 +13,7 @@ import {
   type EventRowLeg,
 } from '~/utils/event-row-legs'
 import { extractOperationIdle, DISTANCE_EVENT_NAMES } from '~/utils/allowance-idle'
-import { colIndex } from '~/utils/event-data-table'
+import { colIndex, dropIgnoredRows, groupByCrewRole, filterRowsByCategory, classifyEventName } from '~/utils/event-data-table'
 
 const headers = ['開始日時', '終了日時', 'イベント名', '区間距離', '開始市町村名', '終了市町村名']
 
@@ -270,5 +272,92 @@ describe('legLabel / legTitle / legCellClass', () => {
   it('便に入らない行は色を持たない', () => {
     expect(legCellClass(NO_LEG_ROW)).toBe('text-gray-400 dark:text-gray-500')
     expect(legCellClass(UNKNOWN_LEG_ROW)).toBe('text-gray-400 dark:text-gray-500')
+  })
+})
+
+// --- **identity を「はず」で通さないための固定** (Refs #868、親の指摘)。
+//     引き当て表を CSV 全行から作り、絞り込んだ行から引く設計は
+//     「3 段の絞り込みが行オブジェクトを持ち回る」ことに乗っている。
+//     その性質そのものをテストにしておけば、壊れたら CI で落ちる。
+
+describe('絞り込み 3 段は行オブジェクトの identity と順序を保つ', () => {
+  const wide = ['開始日時', '終了日時', 'イベントCD', 'イベント名', '区間時間', '区間距離', '対象乗務員区分']
+  function wideRow(name: string, role: string, cd = '01'): string[] {
+    return ['2026/07/01 00:00:00', '2026/07/01 01:00:00', cd, name, '0', '0', role]
+  }
+  const all = [
+    wideRow('運行開始', '1'), wideRow('急加速', '1', '401'), wideRow('積み', '1'),
+    wideRow('一般道空車', '1'), wideRow('降し', '1'), wideRow('積み', '2'),
+    wideRow('降し', '2'), wideRow('運行終了', '1'),
+  ]
+
+  it('dropIgnoredRows → groupByCrewRole → filterRowsByCategory の後も `===` で元の行', () => {
+    const kept = dropIgnoredRows(wide, all, new Set(['401']))
+    // 急加速 (401、0km/0分) が落ちていること = このテストが素通りしていない担保。
+    expect(kept.length).toBe(all.length - 1)
+    const groups = groupByCrewRole(wide, kept)
+    expect(groups.length).toBeGreaterThan(1)
+    const nameIdx = colIndex(wide, 'イベント名')
+    for (const g of groups) {
+      const shown = filterRowsByCategory(g.rows, nameIdx, 'event')
+      expect(shown.length).toBeGreaterThan(0)
+      for (const r of shown) {
+        // `includes` は `===` 比較。中身が同じ別オブジェクトでは通らない。
+        expect(all.includes(r)).toBe(true)
+      }
+    }
+  })
+
+  it('その identity の上で、便番号は CSV 全行基準になる (乗務員 2 のぶんが 便2)', () => {
+    const lookup = rowLegLookup(wide, all)
+    const nameIdx = colIndex(wide, 'イベント名')
+    const crew2 = groupByCrewRole(wide, all).find(g => g.crewRole === '2')!
+    const shown = filterRowsByCategory(crew2.rows, nameIdx, 'event')
+    expect(shown.map(r => lookup.get(r))).toEqual([
+      { legSeq: 2, kind: 'haul' }, { legSeq: 2, kind: 'haul' },
+    ])
+  })
+})
+
+describe('countUnassigned / unassignedNotice', () => {
+  it('便が全部付いていれば注意書きは出ない (null)', () => {
+    const assigned = assignRowsToLegs(headers, rows(EXAMPLE_1318))
+    expect(countUnassigned(assigned)).toEqual({ noLeg: 0, unknown: 0 })
+    expect(unassignedNotice(countUnassigned(assigned))).toBeNull()
+  })
+
+  it('判定できなかった行と、便に属さない行を別々に数えて言う', () => {
+    expect(unassignedNotice({ unknown: 3, noLeg: 0 })).toBe('便を判定できなかった行 3 件')
+    expect(unassignedNotice({ unknown: 0, noLeg: 2 })).toBe('積みが 1 行も無いため便に属さない行 2 件')
+    expect(unassignedNotice({ unknown: 3, noLeg: 2 }))
+      .toBe('便を判定できなかった行 3 件 / 積みが 1 行も無いため便に属さない行 2 件')
+  })
+
+  it('積みが 1 行も無い運行は noLeg として数える (unknown ではない)', () => {
+    const assigned = assignRowsToLegs(headers, rows([['運行開始'], ['運転', '3']]))
+    expect(countUnassigned(assigned)).toEqual({ noLeg: 2, unknown: 0 })
+  })
+})
+
+describe('イベントタブに出る行の範囲 (buildOperationRoute の走査を流用できない理由)', () => {
+  it('連続運転・急加速系は `event` に落ちてイベントタブに並ぶ', () => {
+    for (const name of ['連続運転', '急加速', '急減速', '急カーブ']) {
+      expect(classifyEventName(name)).toBe('event')
+    }
+  })
+
+  it('その 4 つは DISTANCE_EVENT_NAMES に無い — 流用すると便が付かない行になる', () => {
+    for (const name of ['連続運転', '急加速', '急減速', '急カーブ']) {
+      expect(DISTANCE_EVENT_NAMES).not.toContain(name)
+    }
+  })
+
+  it('連続運転の行にも位置で便が付く', () => {
+    const assigned = assignRowsToLegs(headers, rows([
+      ['運行開始'], ['積み'], ['連続運転', '252.9'], ['降し'], ['運行終了'],
+    ]))
+    expect(shape(assigned)).toEqual([
+      '便1:approach', '便1:haul', '便1:haul', '便1:haul', '便1:tail',
+    ])
   })
 })

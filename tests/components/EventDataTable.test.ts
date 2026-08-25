@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
-import { nextTick } from 'vue'
+import { nextTick, reactive } from 'vue'
 import EventDataTable from '~/components/EventDataTable.vue'
 import type { CsvJsonResponse } from '~/types'
 import { UIconStub } from '../helpers/stubs'
@@ -179,5 +179,67 @@ describe('EventDataTable', () => {
       },
     })
     expect(wrapper.find('tbody input[type="checkbox"]').element.checked).toBe(true)
+  })
+
+  // --- 便の列を **深い reactive の props** で通す (Refs #868、親の指摘)。
+  //     ページ側 (`[unko_no].vue`) の `csvData` は `ref<Record<string, CsvJsonResponse>>` で、
+  //     `props.data.rows` の**要素まで reactive proxy** になる。引き当て表を作る側と引く側で
+  //     proxy と raw が混ざると**全行が引けなくなる**ので、`toRaw` を両側に挟んである。
+  //     **その保証をここで固定する** — 壊れたら「判定不能 N 件」が出てこのテストが落ちる。
+  describe('便の列 (Refs #868)', () => {
+    function mountLive(data: CsvJsonResponse) {
+      return mount(EventDataTable, {
+        props: { data },
+        global: { stubs: { UIcon: UIconStub } },
+      })
+    }
+
+    function legCells(wrapper: ReturnType<typeof mountLive>): string[] {
+      return wrapper.findAll('tbody tr').map(tr => tr.findAll('td')[2]!.text())
+    }
+
+    const twoLegRows = [
+      makeRow({ 'イベント名': '運行開始' }),
+      makeRow({ 'イベント名': '運転' }),
+      makeRow({ 'イベント名': '積み' }),
+      makeRow({ 'イベント名': '降し' }),
+      makeRow({ 'イベント名': '運転' }),
+      makeRow({ 'イベント名': '積み' }),
+      makeRow({ 'イベント名': '降し' }),
+      makeRow({ 'イベント名': '運行終了' }),
+    ]
+
+    it('深い reactive の data でも便が引ける (proxy と raw が混ざらない)', async () => {
+      const wrapper = mountLive(reactive({ headers: fullHeaders, rows: twoLegRows }))
+      await flushPromises()
+      expect(legCells(wrapper)).toEqual([
+        '便1 回送', '便1 回送', '便1', '便1',
+        '便2 回送', '便2', '便2', '便2 帰庫',
+      ])
+      // 引けなかった行が 1 つも無いこと (identity が破れると全行がこちらに倒れる)。
+      expect(wrapper.text()).not.toContain('判定できなかった')
+    })
+
+    it('「無視した行も表示」を切り替えても便番号が動かない', async () => {
+      // 401 (急加速) は `ignore` 指定。**イベントタブに出るが 0km/0分 なので落ちる。**
+      const rows = [
+        makeRow({ 'イベント名': '運行開始' }),
+        // `dropIgnoredRows` が落とすのは **0km / 0分 の行だけ** (数字を持つ行は隠さない)。
+        makeRow({ 'イベント名': '急加速', 'イベントCD': '401', '区間時間': '0', '区間距離': '0' }),
+        makeRow({ 'イベント名': '積み' }),
+        makeRow({ 'イベント名': '降し' }),
+        makeRow({ 'イベント名': '運行終了' }),
+      ]
+      const wrapper = mountLive(reactive({ headers: fullHeaders, rows }))
+      await flushPromises()
+      const before = legCells(wrapper)
+      expect(before).toEqual(['便1 回送', '便1', '便1', '便1 帰庫'])
+
+      await wrapper.find('div.overflow-auto > label input').setValue(true)
+      await nextTick()
+      // 落としていた 急加速 の 1 行が増えるだけで、他の行の便番号は 1 つも動かない。
+      expect(legCells(wrapper)).toEqual(['便1 回送', '便1 回送', '便1', '便1', '便1 帰庫'])
+      expect(wrapper.text()).not.toContain('判定できなかった')
+    })
   })
 })

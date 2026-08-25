@@ -32,10 +32,18 @@
  * の 2 つだけで、**どちらも空欄にせず語で出す**。空欄にすると「まだ判定していない」と
  * 「割り当てられない」が同じ見た目になる。
  *
- * **重ね掛け行 (速度オーバー・一般道実車・連続運転 …) も落とさずに位置で分類する。**
- * `extractOperationIdle` が全行を順に舐めるのと揃えるため (重ね掛け行の距離は
- * あちらが 0 に倒す)。イベントタブは `filterRowsByCategory` でタイムライン行しか
- * 出さないので、この列に重ね掛け行が並ぶことは無い。
+ * **重ね掛け行も落とさずに位置で分類する。** `extractOperationIdle` が全行を順に舐めるのと
+ * 揃えるため (重ね掛け行の距離はあちらが 0 に倒す)。
+ *
+ * **★ 「重ね掛け行はイベントタブに出ない」は正しくない** (2026-08-25 に `classifyEventName`
+ * を実際に通して確認)。`filterRowsByCategory` が別タブへ送るのは **速度オーバー / 一般道空車・
+ * 実車 / 専用道 / 高速道 / アイドリング だけ**で、**`連続運転` `急加速` `急減速` `急カーブ` は
+ * `event` に落ちてイベントタブに並ぶ**。しかも `連続運転` は 252.9km / 288分 を持つので
+ * `dropIgnoredRows` でも落ちない (`dropIgnoredRows` の doc 参照)。
+ *
+ * ⇒ **`buildOperationRoute` の 1 回目の走査は流用できない。** あちらは
+ * `DISTANCE_EVENT_NAMES` の 8 種だけを `timeline` に残すので、`連続運転` の行が
+ * 落ちて便が付かない。ここは全行を対象にする (`extractOperationIdle` と同じ範囲)。
  */
 import { colIndex, classifyTimeCategory } from './event-data-table'
 
@@ -123,14 +131,49 @@ export function assignRowsToLegs(headers: string[], rows: string[][]): EventRowL
  *
  * `dropIgnoredRows` / `groupByCrewRole` / `filterRowsByCategory` はどれも `filter` /
  * `push` で**同じ行オブジェクトを持ち回る**ので、3 段絞った後の行からでも元の行の
- * 割り当てを引ける。**index で持たない**のは、絞るたびに index がずれるため
+ * 割り当てを引ける (`tests/utils/event-row-legs.test.ts` でこの性質自体を固定してある)。
+ * **index で持たない**のは、絞るたびに index がずれるため
  * (`EventCrewPanel` の「filteredRows の並びが変わると選択 index がずれる」と同じ罠)。
+ *
+ * **呼び出し側は Vue の reactive proxy を剥がしてから渡すこと** (`toRaw`)。引く側も
+ * 同じく剥がす。proxy と raw が混ざると全行が引けなくなるが、**その時は黙って別の
+ * 便番号が付くのではなく「判定不能 N 件」と画面が言う** (`countUnassigned`)。
  */
 export function rowLegLookup(headers: string[], rows: string[][]): Map<string[], EventRowLeg> {
   const assigned = assignRowsToLegs(headers, rows)
   const map = new Map<string[], EventRowLeg>()
   rows.forEach((row, i) => map.set(row, assigned[i]!))
   return map
+}
+
+export interface UnassignedCounts {
+  /** 積みが 1 行も無い運行の行 (属する便が無い、という**確定した答え**)。 */
+  noLeg: number
+  /** 便を**判定できなかった**行。`イベント名` の列が無い CSV か、引き当て表に無い行。 */
+  unknown: number
+}
+
+export function countUnassigned(legs: Iterable<EventRowLeg>): UnassignedCounts {
+  const counts: UnassignedCounts = { noLeg: 0, unknown: 0 }
+  for (const leg of legs) {
+    if (leg.kind === 'noLeg') counts.noLeg++
+    else if (leg.kind === 'unknown') counts.unknown++
+  }
+  return counts
+}
+
+/**
+ * 便が付かなかった行の**件数を画面に言わせる**ための 1 行 (無ければ null)。
+ *
+ * **「判定できなかった」を黙らせないための検知器**でもある。引き当て表と表示行の
+ * 行オブジェクトが食い違えば**全行が `unknown` に倒れる**ので、誤った便番号が静かに
+ * 出るのではなく、件数として画面に出る。
+ */
+export function unassignedNotice(counts: UnassignedCounts): string | null {
+  const parts: string[] = []
+  if (counts.unknown > 0) parts.push(`便を判定できなかった行 ${counts.unknown} 件`)
+  if (counts.noLeg > 0) parts.push(`積みが 1 行も無いため便に属さない行 ${counts.noLeg} 件`)
+  return parts.length === 0 ? null : parts.join(' / ')
 }
 
 /**

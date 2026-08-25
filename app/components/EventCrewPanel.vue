@@ -14,20 +14,23 @@ import {
   EVENT_CATEGORY_ORDER,
   EVENT_CATEGORY_LABELS,
 } from '~/utils/event-data-table'
-import { rowLegLookup, legCellClass, legLabel, legTitle, UNKNOWN_LEG_ROW } from '~/utils/event-row-legs'
+import { toRaw } from 'vue'
+import type { EventRowLeg } from '~/utils/event-row-legs'
+import { legCellClass, legLabel, legTitle, countUnassigned, unassignedNotice, UNKNOWN_LEG_ROW } from '~/utils/event-row-legs'
 
 const props = defineProps<{
   group: CrewGroup
   headers: string[]
-  /** **便の列の元になる「運行 1 本の CSV 全行」** (Refs #868)。粗利の按分
-   * (`extractOperationIdle`) が便を数えるのと**同じ配列**を渡すこと。
+  /** **行 → 便 の引き当て表** (Refs #868)。`EventDataTable` が **CSV 全行**
+   * (`props.data.rows`) から `rowLegLookup` で 1 回だけ作って渡す。
    *
-   * `group.rows` ではなく全行なのは、**KUDGIVT.csv が 1 運行分の全乗務員 (運転手 = 1 /
-   * 副運転手 = 2) の行を持つ**ため — 乗務員タブで絞った配列から数え直すと、絞られた側に
-   * 積みがある運行で**画面の便番号がお金の便番号とずれる**。
+   * **ここで `group.rows` から数え直さない。** KUDGIVT.csv は 1 運行分の**全乗務員**
+   * (運転手 = 1 / 副運転手 = 2) の行を持つので、乗務員タブで絞った配列から数えると、
+   * 絞られた側に積みがある運行で**画面の便番号がお金の便番号とずれる**。
+   * 数え直す口をそもそも持たないことで、**「間違った配列から数える」事故を構造的に消す**。
    *
-   * 省略時は `group.rows` から数える (乗務員が 1 人の運行では同じ結果になる)。 */
-  allRows?: string[][]
+   * **省略時は全行が `判定不能`** (勝手に別の数え方に落ちない)。 */
+  rowLegs?: Map<string[], EventRowLeg>
   /** 一番星の伝票から提案された区間 (Refs proposeFromSlips)。値が変わるたびに
    * filteredRows 内で対応する行をチェック状態にする。手動選択とは独立した
    * 「外部からの選択指示」チャネルとして扱う (null は「指示なし」で無視する)。
@@ -63,13 +66,20 @@ const categoryCounts = computed(() => {
 
 const displayColumns = computed(() => getDisplayColumns(props.headers))
 
-/** 行オブジェクトそのものを key にした便の引き当て表 (index はタブで絞るとずれるので使わない)。 */
-const legLookup = computed(() => rowLegLookup(props.headers, props.allRows ?? props.group.rows))
-
-/** 表示行 → 便。表に無い行 (引き当て表に載っていない) は**空欄にせず**「判定不能」を出す。 */
-function legOf(row: string[]) {
-  return legLookup.value.get(row) ?? UNKNOWN_LEG_ROW
+/**
+ * 表示行 → 便。**`toRaw` で reactive proxy を剥がしてから引く** — 表を作る側
+ * (`EventDataTable`) も同じく剥がしている。proxy と raw が混ざる経路を構造的に消すため。
+ *
+ * 引けなかった行は**空欄にせず**「判定不能」。万一 表と表示行の行オブジェクトが
+ * 食い違えば全行がこちらに倒れるので、**誤った便番号が静かに出る代わりに
+ * 「判定できなかった行 N 件」が画面に出る** (下の `legNotice`)。
+ */
+function legOf(row: string[]): EventRowLeg {
+  return props.rowLegs?.get(toRaw(row)) ?? UNKNOWN_LEG_ROW
 }
+
+/** **便が付かなかった行を黙らせない。** 表示している行だけを数える。 */
+const legNotice = computed(() => unassignedNotice(countUnassigned(filteredRows.value.map(legOf))))
 
 /** 選択行 index (filteredRows 基準)。地図パネル (速度カラー) に渡す時刻レンジの元。 */
 const selectedRows = ref<Set<number>>(new Set())
@@ -127,6 +137,12 @@ watch(selectedRows, (rows) => {
       </button>
     </div>
   </div>
+
+  <!-- 便が付かなかった行は件数を出す (Refs #868)。**空欄のまま黙らない** — 引き当て表と
+       表示行が食い違ったときも、誤った便番号ではなくこの行が出る。 -->
+  <p v-if="legNotice" class="px-4 pt-2 text-xs text-gray-500">
+    {{ legNotice }}
+  </p>
 
   <p v-if="selectedRows.size > 0" class="px-4 pt-2 text-xs text-gray-500">
     {{ selectedRows.size }}行選択中
