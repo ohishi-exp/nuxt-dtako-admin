@@ -240,10 +240,25 @@ export interface CronRunResult {
   detail: string;
 }
 
+/** `dispatchNetprintTargets` の 1 件。`CronRunResult` に **DO の HTTP status** を
+ * 足したもの。
+ *
+ * status が要るのは手動実行だけ — 「指定された運行NO が対象日・営業所に無い」
+ * (DO の 400) を relay の応答でも 400 のまま返すため (Refs #913)。502 に丸めると
+ * 「theearth か netprint がまた落ちた」と読まれるが、実際に直すのは呼んだ人の入力。
+ * cron 経路は `CronRunResult` として読むだけで status を見ない。 */
+export interface NetprintDispatchResult extends CronRunResult {
+  /** DO の応答 status。DO を呼ぶ前に例外になったら null。 */
+  status: number | null;
+}
+
 /**
  * netprint の対象 (営業所) ごとに comp_id 単位 DO の `/cron/netprint` を叩く
  * (Refs #874)。**cron 経路と手動実行 (`POST /kintai-relay/netprint-run`) の
  * 両方がこれを使う** — 「cron でだけ通る道」を作らないため。
+ *
+ * `operationNo` は手動実行の「1 運行だけ」指定 (Refs #913)。**cron は必ず空文字**
+ * を渡す (cron から 1 運行に絞る経路は作らない)。
  *
  * target 間で失敗を伝播させない (1 件の throw はその target の結果に閉じる) のは
  * dtako/etc/restraint の各 cron と同じ。DO 側は同一 comp_id なので `scrapeQueue`
@@ -253,19 +268,22 @@ export async function dispatchNetprintTargets(
   compId: string,
   targets: NetprintTarget[],
   date: string,
+  operationNo: string,
   callDo: CronDoCall,
-): Promise<CronRunResult[]> {
+): Promise<NetprintDispatchResult[]> {
   return Promise.all(
-    targets.map(async (target): Promise<CronRunResult> => {
+    targets.map(async (target): Promise<NetprintDispatchResult> => {
       try {
         // 宛先は channel か recipient のどちらか一方 (#874-10)。指定の無い側は
         // 空文字で渡す — DO 側が「指定なし」と読む形を 1 つに揃える。
+        // `operation_no` も同じ流儀 (空文字 = 全運行)。
         const res = await callDo(`scraper-comp-${compId}`, "/cron/netprint", {
           comp_id: compId,
           branch_cd: target.branch_cd,
           channel_id: target.channel_id ?? "",
           recipient_id: target.recipient_id ?? "",
           branch_name: target.branch_name ?? "",
+          operation_no: operationNo,
           date,
         });
         return {
@@ -273,6 +291,7 @@ export async function dispatchNetprintTargets(
           target: `${compId}|${target.branch_cd}`,
           ok: res.ok,
           detail: `HTTP ${res.status}: ${res.text.slice(0, 200)}`,
+          status: res.status,
         };
       } catch (err) {
         return {
@@ -280,6 +299,7 @@ export async function dispatchNetprintTargets(
           target: `${compId}|${target.branch_cd}`,
           ok: false,
           detail: err instanceof Error ? err.message : String(err),
+          status: null,
         };
       }
     }),
@@ -425,7 +445,8 @@ export async function runScheduledCron(
       // ので、targets 未設定 = 上の skip で終わるのが正常系)。
       return [{ kind: "netprint", target: "*", ok: false, detail: "KINTAI_COMP_ID 未設定のため netprint cron を実行できません" }];
     }
-    return dispatchNetprintTargets(compId, targets, yesterdayJst(now), callDo);
+    // cron から 1 運行に絞る経路は作らない (Refs #913) — 空文字 = 全運行。
+    return dispatchNetprintTargets(compId, targets, yesterdayJst(now), "", callDo);
   }
 
   return [{ kind: "none", target: cron, ok: false, detail: "未知の cron 式です (wrangler.toml の triggers と cron.ts の定数がズレています)" }];

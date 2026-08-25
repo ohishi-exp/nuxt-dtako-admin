@@ -3,7 +3,8 @@
  * 1 行にまとめる部分 (pure)。`server/api/netprint/run.post.ts` が使う。
  *
  * body は relay の `POST /kintai-relay/netprint-run` と同じ
- * `{date?, branch_cd?, channel_id?, recipient_id?, branch_name?, comp_id?}` を素通しする。
+ * `{date?, branch_cd?, channel_id?, recipient_id?, branch_name?, operation_no?, comp_id?}`
+ * を素通しする。
  * **relay 側にも同じガードがあるが、front でも持つ** — `branch_cd` と宛先は「両方
  * 揃っているか、両方無いか」で、片方だけを黙って補完すると**設定側の target と混ざって
  * 意図しない宛先へ送りうる**。誤配は取り消せないので二重に弾く (relay の
@@ -14,17 +15,17 @@
  *
  * 型 (`NetprintRunInput`) は画面と共有する `~/utils/netprint-run` が持つ
  * (`server/utils/net780-archive.ts` と同じ向き)。**`recipient_id` は画面が送らない**
- * (画面は `date` だけ送り、宛先は relay の `NETPRINT_TARGETS` 任せ) ので、共有型では
- * なくこちらで拡張して閉じる。
+ * (画面が送るのは `date` と `operation_no` だけで、宛先は relay の `NETPRINT_TARGETS`
+ * 任せ) ので、共有型ではなくこちらで拡張して閉じる。
  */
 
-import { NETPRINT_DATE_RE, type NetprintRunInput } from '~/utils/netprint-run'
+import { NETPRINT_DATE_RE, NETPRINT_OPERATION_NO_RE, type NetprintRunInput } from '~/utils/netprint-run'
 
 /** relay へ素通しする body。画面が使う `NetprintRunInput` + `recipient_id`。 */
 export type NetprintRunBody = NetprintRunInput & { recipient_id?: string }
 
 /** 素通しする body のキー。全部 optional な文字列。 */
-const BODY_KEYS = ['date', 'branch_cd', 'channel_id', 'recipient_id', 'branch_name', 'comp_id'] as const
+const BODY_KEYS = ['date', 'branch_cd', 'channel_id', 'recipient_id', 'branch_name', 'operation_no', 'comp_id'] as const
 
 export type NetprintRunBodyParse
   = { ok: true, body: NetprintRunBody }
@@ -79,6 +80,12 @@ export function parseNetprintRunBody(body: unknown): NetprintRunBodyParse {
   }
   if (fields.branch_name !== '' && branchCd === '') {
     return { ok: false, error: 'branch_name だけの指定はできません (branch_cd と宛先 (channel_id か recipient_id) と一緒に指定してください)' }
+  }
+  // 運行NO は 22 桁の数字 (Refs #913)。**桁数まで見る** — 打ち間違いをここで返せば、
+  // theearth ログイン込みで数十秒待たされた末に「見つかりません」と言われずに済む。
+  const operationNo = fields.operation_no!
+  if (operationNo !== '' && !NETPRINT_OPERATION_NO_RE.test(operationNo)) {
+    return { ok: false, error: 'operation_no は 22 桁の数字 (theearth の運行No) で指定してください' }
   }
 
   const out: NetprintRunBody = {}

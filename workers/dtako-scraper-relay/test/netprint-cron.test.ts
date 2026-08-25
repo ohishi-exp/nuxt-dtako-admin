@@ -11,6 +11,7 @@ import {
   buildNetprintOperationFailureNotification,
   buildNoOperationsNotification,
   describeOperation,
+  describeOperationNotFound,
   formatDateSlash,
   formatMonthDay,
   netprintPdfFileName,
@@ -165,6 +166,7 @@ describe('planNetprintRun (手動実行の body 解釈)', () => {
         { branch_cd: '1', channel_id: CH_HONSHA },
         { branch_cd: '2', channel_id: CH_OBIHIRO },
       ],
+      operationNo: '',
     })
   })
 
@@ -193,6 +195,7 @@ describe('planNetprintRun (手動実行の body 解釈)', () => {
       date: '2026-08-24',
       // 指定しなかった側のキーは立てない (「両方指定」に見せない)。
       targets: [{ branch_cd: '1', recipient_id: RCP_HONDA, branch_name: undefined }],
+      operationNo: '',
     })
   })
 
@@ -224,6 +227,7 @@ describe('planNetprintRun (手動実行の body 解釈)', () => {
     ).toEqual({
       date: '2026-08-24',
       targets: [{ branch_cd: '1', channel_id: CH_TEST, branch_name: '本社営業所' }],
+      operationNo: '',
     })
   })
 
@@ -233,7 +237,47 @@ describe('planNetprintRun (手動実行の body 解釈)', () => {
     ).toEqual({
       date: '2026-08-24',
       targets: [{ branch_cd: '2', channel_id: CH_OBIHIRO, branch_name: undefined }],
+      operationNo: '',
     })
+  })
+
+  it('operation_no を渡すと plan に載る (前後の空白は落とす)', () => {
+    expect(
+      planNetprintRun({ operation_no: ` ${OPE_HAYASHIDA} ` }, CONFIGURED, '2026-08-24'),
+    ).toEqual({
+      date: '2026-08-24',
+      // 通知先の解決は変えない — operation_no 単独なら NETPRINT_TARGETS のまま
+      // (Refs #913 の決めごと)。
+      targets: [
+        { branch_cd: '1', channel_id: CH_HONSHA },
+        { branch_cd: '2', channel_id: CH_OBIHIRO },
+      ],
+      operationNo: OPE_HAYASHIDA,
+    })
+  })
+
+  it('operation_no は branch_cd + 宛先と併用もできる', () => {
+    expect(
+      planNetprintRun(
+        { branch_cd: '1', recipient_id: RCP_HONDA, operation_no: OPE_MATSUO },
+        CONFIGURED,
+        '2026-08-24',
+      ),
+    ).toEqual({
+      date: '2026-08-24',
+      targets: [{ branch_cd: '1', recipient_id: RCP_HONDA, branch_name: undefined }],
+      operationNo: OPE_MATSUO,
+    })
+  })
+
+  it('operation_no の形式違い / 空文字 / 非文字列は 400 相当の error (無指定に倒さない)', () => {
+    // 無指定に倒すと「1 件だけのつもり」が全運行の処理に化け、実在の担当者へ
+    // 運行数ぶん通知が飛ぶ (Refs #913 の発端)。
+    for (const operation_no of ['26082406381600000038', '260824063816000000382X', '', 2608 as unknown]) {
+      expect(planNetprintRun({ operation_no }, CONFIGURED, '2026-08-24')).toEqual({
+        error: 'operation_no は 22 桁の数字 (theearth の運行No) で指定してください',
+      })
+    }
   })
 
   it('branch_name 省略 / 空文字は undefined (行から引くフォールバックに任せる)', () => {
@@ -245,6 +289,7 @@ describe('planNetprintRun (手動実行の body 解釈)', () => {
     expect(plan).toEqual({
       date: '2026-08-24',
       targets: [{ branch_cd: '1', channel_id: CH_TEST, branch_name: undefined }],
+      operationNo: '',
     })
   })
 
@@ -397,6 +442,124 @@ describe('summarizeOperations', () => {
   })
 })
 
+describe('runNetprintTargets: operation_no で 1 運行だけ (Refs #913)', () => {
+  /** 本社 (branch_cd=1) に 2 運行ある日。指定なしなら 2 通、指定ありなら 1 通。 */
+  function makeTwoRowDeps() {
+    return makeDeps({
+      fetchReport: async () => ({
+        rows: [
+          row('1', '本社営業所'),
+          row('1', '本社営業所', {
+            operationNo: OPE_MATSUO,
+            driverName1: '松尾 一',
+            vehicleName: '長崎100か6572',
+          }),
+        ],
+      }),
+    })
+  }
+
+  it('指定なし (空文字) は従来どおり全運行 — 運行数だけ通知が飛ぶ', async () => {
+    const { deps, sent } = makeTwoRowDeps()
+    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24', '')
+    expect(results[0].rows).toBe(2)
+    expect(results[0].operations).toHaveLength(2)
+    expect(sent).toHaveLength(2)
+  })
+
+  it('一致した 1 運行だけ PDF 化・登録・通知する (通知 1 通 / 予約番号 1 個)', async () => {
+    const pdfCalls: string[] = []
+    const base = makeTwoRowDeps()
+    const deps: NetprintCronDeps = {
+      ...base.deps,
+      generatePdf: async (operation) => {
+        pdfCalls.push(operation.operationNo)
+        return new Uint8Array([0x25])
+      },
+    }
+    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24', OPE_MATSUO)
+    expect(pdfCalls).toEqual([OPE_MATSUO])
+    expect(base.sent).toHaveLength(1)
+    expect(base.sent[0].text).toContain('松尾 一')
+    expect(results[0]).toMatchObject({
+      ok: true,
+      // 「全 N 運行」と揃う実処理件数を返す (営業所ぶん走ったように見せない)。
+      rows: 1,
+      operation_not_found: false,
+      detail: '成功 1 / 失敗 0 (全 1 運行) 予約番号 J5JZPEQJ',
+    })
+    expect(results[0].operations.map((o) => o.operation_no)).toEqual([OPE_MATSUO])
+  })
+
+  it('絞り込みは営業所で絞った後に掛かる (他営業所の同 No は拾わない)', async () => {
+    const fetched: string[] = []
+    const { deps, sent } = makeDeps({
+      // fetchReport は営業所で絞り込み済みの行を返す契約 (帯広は 0 行)。
+      fetchReport: async (_d, branchCd) => {
+        fetched.push(branchCd)
+        return { rows: branchCd === '1' ? [row('1', '本社営業所')] : [] }
+      },
+    })
+    const results = await runNetprintTargets(
+      deps,
+      [{ branch_cd: '2', channel_id: CH_OBIHIRO, branch_name: '帯広営業所' }],
+      '2026-08-24',
+      OPE_HAYASHIDA,
+    )
+    expect(fetched).toEqual(['2'])
+    expect(results[0].operation_not_found).toBe(true)
+    // **0 行の日でも「運行はありませんでした」を送らない** — 試験のつもりの実行で
+    // 本番と同じ文面を実在の担当者へ送らないため (Refs #913)。
+    expect(sent).toEqual([])
+  })
+
+  it('一致 0 件は ok: false + operation_not_found、通知は 1 通も出さない', async () => {
+    const { deps, sent } = makeTwoRowDeps()
+    const missing = '2608240000000000000000'
+    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24', missing)
+    expect(sent).toEqual([])
+    expect(results[0]).toMatchObject({
+      ok: false,
+      operation_not_found: true,
+      // 絞る前の行数を残す (次に見るのは「その日その営業所に何件あるか」)。
+      rows: 2,
+      operations: [],
+    })
+    expect(results[0].detail).toBe(
+      `運行NO ${missing} は 2026/08/24 の 本社営業所 に見つかりません (この日の運行は 2 件。日付は読取日=退社日時)`,
+    )
+  })
+
+  it('一致 0 件でも他の target は止めない (target 独立)', async () => {
+    const { deps, sent } = makeDeps({
+      fetchReport: async (_d, branchCd) => ({
+        rows: branchCd === '1' ? [row('1', '本社営業所')] : [],
+      }),
+    })
+    const results = await runNetprintTargets(
+      deps,
+      [{ branch_cd: '1', channel_id: CH_HONSHA }, { branch_cd: '2', channel_id: CH_OBIHIRO }],
+      '2026-08-24',
+      OPE_HAYASHIDA,
+    )
+    expect(results[0]).toMatchObject({ ok: true, rows: 1, operation_not_found: false })
+    expect(results[1]).toMatchObject({ ok: false, operation_not_found: true })
+    expect(sent).toHaveLength(1)
+  })
+})
+
+describe('describeOperationNotFound', () => {
+  it('対象日・営業所・運行NO・件数を 1 行に載せる (relay の 200 字切りに収まる)', () => {
+    const text = describeOperationNotFound('本社営業所', '2026-08-24', OPE_HAYASHIDA, 9)
+    expect(text).toBe(
+      `運行NO ${OPE_HAYASHIDA} は 2026/08/24 の 本社営業所 に見つかりません (この日の運行は 9 件。日付は読取日=退社日時)`,
+    )
+    // DO は `{"error":"..."}` に包んで返し、relay が 200 字で切る。包んだ状態で
+    // JSON として壊れないこと = 画面に生の断片ではなく理由が出ること。
+    expect(JSON.stringify({ error: text }).length).toBeLessThanOrEqual(200)
+  })
+})
+
 describe('runNetprintTargets', () => {
   it('1 運行 = 1 PDF = 1 予約番号 = 通知 1 通 (generatePdf には行 1 件を渡す)', async () => {
     const pdfCalls: string[] = []
@@ -409,7 +572,7 @@ describe('runNetprintTargets', () => {
       },
     }
     const { sent } = base
-    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24')
+    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24', '')
     expect(pdfCalls).toEqual([OPE_HAYASHIDA])
     expect(results).toEqual([
       {
@@ -428,6 +591,7 @@ describe('runNetprintTargets', () => {
             detail: '',
           },
         ],
+        operation_not_found: false,
       },
     ])
     expect(sent).toHaveLength(1)
@@ -454,7 +618,7 @@ describe('runNetprintTargets', () => {
         return { printId: `J5JZPEQ${registered.length}`, endDate: '2026/08/26 23:59', page: 2 }
       },
     })
-    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24')
+    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24', '')
     // ファイル名は運行ごとに変わる (netprint の登録一覧で見分けるため)。
     expect(registered).toEqual([
       `nippo_20260824_${OPE_HAYASHIDA}.pdf`,
@@ -474,6 +638,7 @@ describe('runNetprintTargets', () => {
       deps,
       [{ branch_cd: '00000001', channel_id: CH_HONSHA }],
       '2026-08-24',
+      '',
     )
     expect(fetched).toEqual([{ dateYmd: '2026-08-24', branchCd: '1' }])
     expect(results[0].ok).toBe(true)
@@ -488,7 +653,7 @@ describe('runNetprintTargets', () => {
         throw new Error('呼ばれてはいけない')
       },
     })
-    const results = await runNetprintTargets(deps, [TARGET], '2026-08-04')
+    const results = await runNetprintTargets(deps, [TARGET], '2026-08-04', '')
     expect(results[0]).toMatchObject({ ok: true, rows: 0, operations: [] })
     expect(sent).toEqual([
       {
@@ -513,7 +678,7 @@ describe('runNetprintTargets', () => {
         return new Uint8Array([0x25])
       },
     })
-    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24')
+    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24', '')
     // 1 件でも届いていれば「営業所ぜんぶ失敗」とは報告しない。
     expect(results[0].ok).toBe(true)
     expect(results[0].operations.map((o) => o.ok)).toEqual([false, true])
@@ -534,7 +699,7 @@ describe('runNetprintTargets', () => {
       },
     })
     const second: NetprintTarget = { branch_cd: '2', channel_id: CH_OBIHIRO }
-    const results = await runNetprintTargets(deps, [TARGET, second], '2026-08-24')
+    const results = await runNetprintTargets(deps, [TARGET, second], '2026-08-24', '')
     expect(results[0].ok).toBe(false)
     expect(results[0].rows).toBe(1)
     expect(results[0].detail).toContain('netprint 受付エラー code=11202')
@@ -553,7 +718,7 @@ describe('runNetprintTargets', () => {
         throw new Error('lineworks down')
       },
     })
-    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24')
+    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24', '')
     expect(results[0].ok).toBe(false)
     expect(results[0].operations[0]).toMatchObject({ ok: false, print_id: 'J5JZPEQJ' })
     expect(results[0].operations[0].detail).toBe(
@@ -571,7 +736,7 @@ describe('runNetprintTargets', () => {
         throw new Error('lineworks down')
       },
     })
-    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24')
+    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24', '')
     expect(results[0]).toMatchObject({ ok: false, rows: 0, operations: [] })
     expect(results[0].detail).toContain('lineworks down')
     expect(results[0].detail).toContain('エラー通知も失敗')
@@ -583,7 +748,7 @@ describe('runNetprintTargets', () => {
         throw new Error('theearth login failed')
       },
     })
-    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24')
+    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24', '')
     expect(results[0]).toMatchObject({ ok: false, rows: null, operations: [] })
     expect(results[0].detail).toContain('theearth login failed')
     expect(sent[0].text).toContain('営業所コード1')
@@ -592,7 +757,7 @@ describe('runNetprintTargets', () => {
 
   it('recipient_id 指定の target は個人宛で送る (channel_id は結果に null で残る)', async () => {
     const { deps, sent, fetched } = makeDeps()
-    const results = await runNetprintTargets(deps, [TARGET_RCP], '2026-08-24')
+    const results = await runNetprintTargets(deps, [TARGET_RCP], '2026-08-24', '')
     expect(fetched).toEqual([{ dateYmd: '2026-08-24', branchCd: '1' }])
     expect(results[0]).toMatchObject({
       branch_cd: '1',
@@ -612,7 +777,7 @@ describe('runNetprintTargets', () => {
     const { deps, sent, fetched } = makeDeps()
     const both: NetprintTarget = { branch_cd: '1', channel_id: CH_HONSHA, recipient_id: RCP_HONDA }
     const second: NetprintTarget = { branch_cd: '2', recipient_id: RCP_HONDA }
-    const results = await runNetprintTargets(deps, [both, second], '2026-08-24')
+    const results = await runNetprintTargets(deps, [both, second], '2026-08-24', '')
     expect(results[0]).toEqual({
       detail: 'channel_id と recipient_id はどちらか一方だけ指定してください',
       branch_cd: '1',
@@ -621,6 +786,7 @@ describe('runNetprintTargets', () => {
       ok: false,
       rows: null,
       operations: [],
+      operation_not_found: false,
     })
     // 他の target は止めない (branch 2 は 0 行 → 「運行なし」通知で成功)。
     expect(fetched).toEqual([{ dateYmd: '2026-08-24', branchCd: '2' }])
@@ -634,6 +800,7 @@ describe('runNetprintTargets', () => {
       deps,
       [{ branch_cd: '1', recipient_id: 'honda' }],
       '2026-08-24',
+      '',
     )
     expect(results[0]).toMatchObject({
       channel_id: null,
@@ -648,7 +815,7 @@ describe('runNetprintTargets', () => {
     const { deps, sent, fetched } = makeDeps()
     const broken: NetprintTarget = { branch_cd: '1', channel_id: 'ch-honsha' }
     const second: NetprintTarget = { branch_cd: '2', channel_id: CH_OBIHIRO }
-    const results = await runNetprintTargets(deps, [broken, second], '2026-08-24')
+    const results = await runNetprintTargets(deps, [broken, second], '2026-08-24', '')
     expect(results[0]).toEqual({
       detail: 'channel_id が UUID 形式ではありません (lineworks_channels の行 id を指定してください)',
       branch_cd: '1',
@@ -657,6 +824,7 @@ describe('runNetprintTargets', () => {
       ok: false,
       rows: null,
       operations: [],
+      operation_not_found: false,
     })
     // 宛先が無い以上 harvest も PDF 登録もエラー通知もしない (確実に失敗する送信を試さない)。
     expect(fetched).toEqual([{ dateYmd: '2026-08-24', branchCd: '2' }])
@@ -670,6 +838,7 @@ describe('runNetprintTargets', () => {
       deps,
       [{ branch_cd: '1' } as unknown as NetprintTarget],
       '2026-08-24',
+      '',
     )
     expect(results[0]).toMatchObject({ ok: false, rows: null, operations: [] })
     expect(fetched).toEqual([])
@@ -690,7 +859,7 @@ describe('runNetprintTargets', () => {
           alcFetch,
         ),
     })
-    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24')
+    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24', '')
     expect(results[0]).toMatchObject({ ok: false, rows: 1 })
     expect(results[0].detail).toContain('HTTP 500')
     expect(results[0].detail).toContain('relation lineworks_channels does not exist')
@@ -708,7 +877,7 @@ describe('runNetprintTargets', () => {
         throw new Error('lineworks down')
       },
     })
-    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24')
+    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24', '')
     expect(results[0].ok).toBe(false)
     expect(results[0].detail).toContain('not-an-error')
     expect(results[0].detail).toContain('エラー通知も失敗')

@@ -10,7 +10,7 @@
  * ## 応答が 2 段に畳まれている
  *
  * ```
- * front  POST /api/netprint/run            {date?, branch_cd?, channel_id?, branch_name?, comp_id?}
+ * front  POST /api/netprint/run            {date?, branch_cd?, channel_id?, branch_name?, operation_no?, comp_id?}
  *   └ relay POST /kintai-relay/netprint-run
  *       └ DO POST /cron/netprint           ← cron と同じ道 (#874-4)
  * ```
@@ -35,6 +35,11 @@
 /** `date` に受け付ける形式 (relay の `NETPRINT_DATE_RE` と同じ)。 */
 export const NETPRINT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
+/** `operation_no` に受け付ける形式 = theearth の運行No 22 桁 (relay の
+ * `NETPRINT_OPERATION_NO_RE` と同じ。実測 `2608241017180000003046` =
+ * 読取日 2026-08-24 / 本社営業所 の 1 運行)。 */
+export const NETPRINT_OPERATION_NO_RE = /^\d{22}$/
+
 /** `POST /api/netprint/run` の body。**全部省略可** (relay と同じ契約)。
  * `branch_cd` と `channel_id` は「両方揃っているか、両方無いか」。 */
 export interface NetprintRunInput {
@@ -43,6 +48,13 @@ export interface NetprintRunInput {
   branch_cd?: string
   channel_id?: string
   branch_name?: string
+  /** 運行No (22 桁)。指定するとその**1 運行だけ**を登録・通知する (Refs #913)。
+   *
+   * #902 以降は 1 運行 = 1 PDF = 1 予約番号 = 通知 1 通なので、これが無いと
+   * 「1 件だけ試す」ができず、**その日その営業所の運行数だけ実在の担当者へ通知が
+   * 飛ぶ** (本番で 3 通飛ばした)。営業所の絞り込みの後に掛かるので、通知先の
+   * 解決 (`NETPRINT_TARGETS`) は変わらない。 */
+  operation_no?: string
   comp_id?: string
 }
 

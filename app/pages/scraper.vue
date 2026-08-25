@@ -124,6 +124,10 @@ async function handleEtcRunAll(month: 'current' | 'previous') {
 // ことが分かるよう経過秒を出し、`netprintRunning` で二重送信を止める。
 
 const netprintDate = ref(yesterdayJstYmd(new Date()))
+/** 運行NO (任意)。空なら従来どおり対象日・営業所の全運行 (Refs #913)。
+ * #902 以降は 1 運行 = 1 予約番号 = 通知 1 通なので、空のまま押すと**その日その
+ * 営業所の運行数だけ実在の担当者へ通知が飛ぶ**。1 件だけ試すための口。 */
+const netprintOperationNo = ref('')
 const netprintRunning = ref(false)
 /** 実行中の経過秒 (数分かかるので「止まっていない」ことを見せる)。 */
 const netprintElapsed = ref(0)
@@ -142,7 +146,12 @@ async function handleNetprintRun() {
   netprintOutcome.value = null
   const timer = setInterval(() => { netprintElapsed.value += 1 }, 1000)
   try {
-    netprintOutcome.value = await postNetprintRun({ date: netprintDate.value })
+    // 空文字のキーは server route (`parseNetprintRunBody`) が落とすので、
+    // ここで分岐せずそのまま渡す。
+    netprintOutcome.value = await postNetprintRun({
+      date: netprintDate.value,
+      operation_no: netprintOperationNo.value,
+    })
   }
   catch (e) {
     netprintFetchError.value = e instanceof Error ? e.message : '実行に失敗しました'
@@ -950,10 +959,24 @@ onMounted(() => {
           (毎朝 6:30 の cron と同じ経路)。対象営業所と通知先は<strong>下の「通知先の設定」</strong>に従います。
           <strong>netprint の変換完了まで待つので数分かかります</strong> — 押したままお待ちください。
         </p>
+        <p class="text-xs text-gray-500 mb-3">
+          <strong>運行NO は 1 件だけ試したいときに使います</strong> — 指定するとその運行だけを登録・通知します
+          (空なら対象日・営業所の全運行。1 運行ごとに通知が 1 通飛ぶので、9 運行の日は 9 通届きます)。
+          対象日は<strong>読取日 (退社日時)</strong> で、運行日ではありません。
+        </p>
         <div class="flex flex-wrap gap-2 items-end mb-4">
           <div>
             <label class="block text-sm font-medium mb-1">対象日 (既定: 前日)</label>
             <UInput v-model="netprintDate" type="date" class="w-40" :disabled="netprintRunning" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">運行NO (任意)</label>
+            <UInput
+              v-model="netprintOperationNo"
+              placeholder="2608241017180000003046"
+              class="w-56 font-mono"
+              :disabled="netprintRunning"
+            />
           </div>
           <UButton
             label="日報を netprint に登録"

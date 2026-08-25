@@ -167,6 +167,15 @@ export function validateNetprintTargetsPayload(raw: string): NetprintTargetsVali
 /** 対象日 (JST) の受け渡し形式。cron が渡す値も手動実行の `date` も同じ。 */
 export const NETPRINT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+/** 運行No の形式 (theearth の 22 桁数字。実測 `2608241017180000003046` =
+ * 読取日 2026-08-24 / 本社営業所 (`branch_cd=1`) / 浦田　広行 / 長崎100か3046)。
+ *
+ * 手動実行で **1 運行だけ**を対象にするための `operation_no` に使う (Refs #913)。
+ * 桁数まで見るのは、打ち間違いを「一致 0 件」ではなく**入力の誤り**として
+ * 手前で返すため — harvest (theearth ログイン) まで進んでから落とすと、
+ * 数十秒待たされた上に理由が「見つかりません」に化けて読み違えられる。 */
+export const NETPRINT_OPERATION_NO_RE = /^\d{22}$/;
+
 /** 営業所コードの表記ゆれ吸収。theearth の事業所コードはマスタ上 8 桁ゼロ埋め
  * (`00000001`) だが F-DES1010 の行には非パディング (`1`) で載るため、先頭の 0 を
  * 落としてから比較する。 */
@@ -235,6 +244,27 @@ export function buildNoOperationsNotification(branchName: string, dateYmd: strin
   return `${branchName} ${formatMonthDay(dateYmd)}分の運行はありませんでした`;
 }
 
+/**
+ * `operation_no` 指定に一致する運行が無かった時の理由 (Refs #913)。
+ *
+ * **通知はしない** — 試験のつもりの実行で本番と同じ文面 (「運行はありませんでした」)
+ * を実在の担当者へ送らないため。行き先は画面 (relay が `detail` を 200 字で切るので
+ * 短く前に置く) と Tail Worker のログだけ。
+ *
+ * 「対象日・営業所・指定された運行NO」を全部書くのは、外した理由がこの 3 つの
+ * どれかにしかないから — 日付軸は**読取日 (退社日時)** で運行日ではなく、
+ * 営業所は `NETPRINT_TARGETS` 側の設定で決まるので、どちらもすぐには思い出せない。
+ * 件数を添えるのは「その日その営業所に運行が何件あるか」が次に見る値になるため。
+ */
+export function describeOperationNotFound(
+  branchName: string,
+  dateYmd: string,
+  operationNo: string,
+  rowCount: number,
+): string {
+  return `運行NO ${operationNo} は ${formatDateSlash(dateYmd)} の ${branchName} に見つかりません (この日の運行は ${rowCount} 件。日付は読取日=退社日時)`;
+}
+
 /** 途中失敗の通知文 (console.error に加えて可能なら LINE WORKS へも知らせる)。
  * harvest 自体が落ちた等、**営業所まるごと出せなかった**時に使う。 */
 export function buildNetprintErrorNotification(
@@ -264,8 +294,14 @@ export function buildNetprintOperationFailureNotification(
   ].join("\n");
 }
 
-/** 手動実行 (`POST /kintai-relay/netprint-run`) の実行計画。 */
-export type NetprintRunPlan = { error: string } | { date: string; targets: NetprintTarget[] };
+/** 手動実行 (`POST /kintai-relay/netprint-run`) の実行計画。
+ *
+ * `operationNo` は「1 運行だけ処理する」指定 (Refs #913)。**指定なしは空文字**で、
+ * DO へ渡す body でも同じ表現を使う (`channel_id` / `recipient_id` と同じ流儀 —
+ * 「無い」の表し方を 1 つに揃えて、undefined と "" の 2 通りを作らない)。 */
+export type NetprintRunPlan =
+  | { error: string }
+  | { date: string; targets: NetprintTarget[]; operationNo: string };
 
 /**
  * 手動実行の body を実行計画に落とす (cron を待たずに 1 回走らせるための口、
@@ -279,6 +315,12 @@ export type NetprintRunPlan = { error: string } | { date: string; targets: Netpr
  *   「意図しない宛先へ送る」が起きうるため、黙って補完しない。宛先の排他と Uuid
  *   の検証は `resolveNetprintDestination` (cron 経路と同じ規則・同じ文言)。
  * - どちらも省略すると `NETPRINT_TARGETS` の全 target を使う (= cron と同じ動き)。
+ * - `operation_no` (22 桁数字) を指定すると、**営業所で絞った結果からさらにその
+ *   1 運行だけ**を処理する (Refs #913)。`branch_cd` との併用が本来の使い方だが、
+ *   **単独でも受ける** — その場合の対象営業所と通知先は `NETPRINT_TARGETS` のまま
+ *   (通知先の解決は変えない)。#902 以降は 1 運行 = 1 予約番号 = 通知 1 通なので、
+ *   これが無いと**その日その営業所の運行数だけ実在の担当者へ通知が飛ぶ** —
+ *   試験や再現調査のたびに人へ余分な通知を送らないための口。
  *
  * `NETPRINT_TARGETS` が不正 JSON なら `parseNetprintTargets` がそのまま throw する
  * (呼び出し側が loud fail に落とす)。
@@ -290,6 +332,7 @@ export function planNetprintRun(
     channel_id?: unknown;
     recipient_id?: unknown;
     branch_name?: unknown;
+    operation_no?: unknown;
   },
   configuredTargetsRaw: string | undefined,
   defaultDate: string,
@@ -300,6 +343,16 @@ export function planNetprintRun(
       return { error: "date は YYYY-MM-DD で指定してください" };
     }
     date = body.date;
+  }
+  // **キーがあるなら形まで正しいことを要求する** (空文字も非文字列も 400)。
+  // 他のキーのように「読めない値は無指定に倒す」をここでやると、絞ったつもりの
+  // 呼び出しが**全運行の処理**に化けて実在の担当者へ通知が飛ぶ (Refs #913)。
+  let operationNo = "";
+  if (body.operation_no !== undefined) {
+    if (typeof body.operation_no !== "string" || !NETPRINT_OPERATION_NO_RE.test(body.operation_no.trim())) {
+      return { error: "operation_no は 22 桁の数字 (theearth の運行No) で指定してください" };
+    }
+    operationNo = body.operation_no.trim();
   }
   const branchCd = typeof body.branch_cd === "string" ? body.branch_cd.trim() : "";
   const channelId = typeof body.channel_id === "string" ? body.channel_id.trim() : "";
@@ -320,7 +373,7 @@ export function planNetprintRun(
     if (recipientId !== "") target.recipient_id = recipientId;
     const resolved = resolveNetprintDestination(target);
     if (!resolved.ok) return { error: resolved.error };
-    return { date, targets: [target] };
+    return { date, targets: [target], operationNo };
   }
   const targets = parseNetprintTargets(configuredTargetsRaw);
   if (targets.length === 0) {
@@ -329,7 +382,7 @@ export function planNetprintRun(
         "NETPRINT_TARGETS が未設定です — branch_cd と channel_id (または recipient_id) を body で指定してください",
     };
   }
-  return { date, targets };
+  return { date, targets, operationNo };
 }
 
 /** 日報行のうちこの cron が読む部分 (`DailyReportRow` の構造的部分型)。 */
@@ -401,6 +454,12 @@ export interface NetprintTargetResult {
    * **画面はここの `print_id` を全部拾って並べる** (`viewNetprintRunResult` が
    * 応答本文から `"print_id"` を全件マッチする)。 */
   operations: NetprintOperationResult[];
+  /** `operation_no` 指定に一致する運行が 1 件も無かったか (Refs #913)。
+   *
+   * **この失敗だけ HTTP 400 に振り分ける**ため他の失敗と区別する — 直すのは
+   * 呼んだ人 (日付か営業所か運行NO の取り違え) であって、theearth や netprint が
+   * 壊れているわけではない。502 に丸めると「また落ちた」と読まれる。 */
+  operation_not_found: boolean;
 }
 
 function describeError(err: unknown): string {
@@ -496,6 +555,11 @@ async function runOneOperation<Harvest extends NetprintHarvest>(
  * 「営業所ぜんぶ失敗」と報告しないため)。失敗した運行があれば、成功ぶんの通知とは
  * 別に**まとめて 1 通**エラーを送る (`buildNetprintOperationFailureNotification`)。
  *
+ * `operationNo` (空文字 = 指定なし) を渡すと、**営業所で絞った行からさらにその
+ * 1 運行だけ**を処理する (Refs #913)。一致 0 件は `operation_not_found: true` の
+ * `ok: false` で返し、**LINE WORKS へは何も送らない** — 呼んだ人の入力違いなので、
+ * 実在の担当者に「運行はありませんでした」を送る筋合いが無い。
+ *
  * 宛先 (`channel_id` / `recipient_id`) の指定が不正な target は **harvest も PDF
  * 取得もせずに** `ok: false` にする — 通知先が無い以上 netprint に登録しても誰にも
  * 番号が届かないし、エラー通知の送り先も同じく無いため (送ろうとしても確実に失敗
@@ -505,6 +569,7 @@ export async function runNetprintTargets<Harvest extends NetprintHarvest>(
   deps: NetprintCronDeps<Harvest>,
   targets: NetprintTarget[],
   dateYmd: string,
+  operationNo: string,
 ): Promise<NetprintTargetResult[]> {
   const results: NetprintTargetResult[] = [];
   for (const target of targets) {
@@ -518,6 +583,7 @@ export async function runNetprintTargets<Harvest extends NetprintHarvest>(
         ok: false,
         rows: null,
         operations: [],
+        operation_not_found: false,
       });
       continue;
     }
@@ -528,7 +594,27 @@ export async function runNetprintTargets<Harvest extends NetprintHarvest>(
       // ゼロ埋め表記 (`00000001`) をここで揃えてから絞り込みに渡す。
       report = await deps.fetchReport(dateYmd, normalizeBranchCd(target.branch_cd));
       const branchName = resolveBranchDisplayName(target, report.rows);
-      if (report.rows.length === 0) {
+      // 運行NO 指定は**営業所で絞った後**にもう一段掛ける (Refs #913)。0 行の分岐
+      // より手前に置くのが肝 — 後ろに置くと「その日の運行が 0 件」と「指定した
+      // 運行が無い」が同じ「運行はありませんでした」通知に潰れ、試験のつもりの
+      // 実行で本番と同じ文面が実在の担当者へ飛ぶ。
+      let targetRows: readonly Harvest["rows"][number][] = report.rows;
+      if (operationNo !== "") {
+        targetRows = report.rows.filter((row) => row.operationNo === operationNo);
+        if (targetRows.length === 0) {
+          results.push({
+            detail: describeOperationNotFound(branchName, dateYmd, operationNo, report.rows.length),
+            branch_cd: target.branch_cd,
+            ...ids,
+            ok: false,
+            rows: report.rows.length,
+            operations: [],
+            operation_not_found: true,
+          });
+          continue;
+        }
+      }
+      if (targetRows.length === 0) {
         await deps.sendText(destination, buildNoOperationsNotification(branchName, dateYmd));
         results.push({
           detail: "運行 0 行 — 「運行はありませんでした」を通知",
@@ -537,11 +623,12 @@ export async function runNetprintTargets<Harvest extends NetprintHarvest>(
           ok: true,
           rows: 0,
           operations: [],
+          operation_not_found: false,
         });
         continue;
       }
       const operations: NetprintOperationResult[] = [];
-      for (const row of report.rows) {
+      for (const row of targetRows) {
         operations.push(await runOneOperation(deps, destination, branchName, dateYmd, row));
       }
       const failures = operations.filter((o) => !o.ok);
@@ -564,8 +651,11 @@ export async function runNetprintTargets<Harvest extends NetprintHarvest>(
         ...ids,
         // 全件失敗した時だけ営業所ごと失敗にする (1 件でも届いていれば ok)。
         ok: failures.length < operations.length,
-        rows: report.rows.length,
+        // **実際に処理した行数**を返す (運行NO 指定なら 1)。画面の「全 N 運行」と
+        // 揃っていないと、絞ったのに営業所ぶん走ったように読めてしまう。
+        rows: targetRows.length,
         operations,
+        operation_not_found: false,
       });
     } catch (err) {
       const detail = describeError(err);
@@ -591,6 +681,7 @@ export async function runNetprintTargets<Harvest extends NetprintHarvest>(
         ok: false,
         rows: report === null ? null : report.rows.length,
         operations: [],
+        operation_not_found: false,
       });
     }
   }
