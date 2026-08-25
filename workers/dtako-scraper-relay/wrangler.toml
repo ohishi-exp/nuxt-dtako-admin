@@ -48,6 +48,15 @@ binding = "ICHIBAN_CF_ACCESS_CLIENT_SECRET"
 store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
 secret_name = "CF_ACCESS_CLIENT_SECRET"
 
+# LINE WORKS Bot の credential 一式 (JSON: client_id / client_secret /
+# service_account / private_key / bot_id、Refs #874)。運転日報 netprint cron の
+# 予約番号通知に使う。未設定 (解決不可) 時は fail-closed で通知せずエラーを
+# 残す (lineworks-client.ts)。
+[[secrets_store_secrets]]
+binding = "LINEWORKS_BOT"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "LINEWORKS_BOT"
+
 # auth-worker への service binding。/auth/introspect と
 # /alc-internal-proxy/api/upload (ohishi-exp/dtako-scraper#22 の自動アップロード)
 # の両方をこれ経由で叩く (Worker→Worker in-process fetch、公開 fetch より低遅延)。
@@ -84,11 +93,16 @@ service = "nuxt-dtako-admin-scraper-relay-tail"
 #                          当月ぶん無人で押し直す (Refs #606-6)。dtako 日次の後・ETC の
 #                          前を選んだ (打刻が入った後に畳み直せる)。DTAKO_ACCOUNTS 設定時
 #                          のみ実走。
+# - "30 21 * * *"        = 06:30 JST。前日分の運転日報を netprint へ登録し予約番号を
+#                          LINE WORKS へ通知する (Refs #874)。dtako 日次で前日分が
+#                          theearth に揃った後・営業所の始業前。NETPRINT_TARGETS
+#                          (dashboard plain var) 設定時のみ実走。
 [triggers]
 crons = [
   "0 16 * * *",
   "0 21,22,23,0 * * *",
   "0 19 * * *",
+  "30 21 * * *",
 ]
 
 # ETC 明細 CSV の保存先 (app 本体の DTAKO_R2 と同じ dtako-uploads bucket)。
@@ -185,6 +199,14 @@ binding = "ICHIBAN_CF_ACCESS_CLIENT_SECRET"
 store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
 secret_name = "CF_ACCESS_CLIENT_SECRET"
 
+# LINE WORKS Bot credential (Refs #874)。本番と同じ entry を binding するだけ —
+# staging は NETPRINT_TARGETS を設定しない限り netprint cron が skip されるので
+# 通知は飛ばない。
+[[env.staging.secrets_store_secrets]]
+binding = "LINEWORKS_BOT"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "LINEWORKS_BOT"
+
 [[env.staging.services]]
 binding = "AUTH_WORKER"
 service = "auth-worker-staging"
@@ -209,6 +231,7 @@ crons = [
   "0 16 * * *",
   "0 21,22,23,0 * * *",
   "0 19 * * *",
+  "30 21 * * *",
 ]
 
 # staging も同じ dtako-uploads bucket を使うが、key prefix (`etc-staging/`) で
@@ -287,6 +310,13 @@ secret_name = "INTERNAL_SHARED_SECRET"
 binding = "ICHIBAN_CF_ACCESS_CLIENT_SECRET"
 store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
 secret_name = "CF_ACCESS_CLIENT_SECRET"
+
+# LINE WORKS Bot credential (Refs #874)。preview は crons = [] のため netprint
+# cron 自体が走らない — binding は本番と宣言を揃えるためだけに置く。
+[[env.preview.secrets_store_secrets]]
+binding = "LINEWORKS_BOT"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "LINEWORKS_BOT"
 
 [[env.preview.services]]
 binding = "AUTH_WORKER"

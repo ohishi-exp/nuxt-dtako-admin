@@ -45,6 +45,9 @@ export interface RelayWorkerEnv {
   KINTAI_COMP_ID?: string;
   /** auth-worker の origin。introspect の絶対 URL 組み立てにのみ使う。 */
   NUXT_PUBLIC_AUTH_WORKER_URL?: string;
+  /** 運転日報 netprint cron の対象 (dashboard plain 変数、JSON 配列
+   * `[{branch_cd, channel_id}, ...]`、Refs #874)。未設定は cron skip。 */
+  NETPRINT_TARGETS?: unknown;
 }
 
 export default {
@@ -218,6 +221,8 @@ export default {
             scraperMode: env.SCRAPER_MODE,
             dtakoAccountsRaw: await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS),
             etcAccountsRaw: await resolveSecretBinding(env.ETC_ACCOUNTS),
+            netprintTargetsRaw: await resolveSecretBinding(env.NETPRINT_TARGETS),
+            kintaiCompId: env.KINTAI_COMP_ID,
           },
           async (doKey, path, body) => {
             const id = env.RELAY.idFromName(doKey);

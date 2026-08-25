@@ -18,6 +18,8 @@
  * 実際の配線 (RELAY.idFromName → DO.fetch) は index.ts の scheduled handler。
  */
 
+import { parseNetprintTargets } from "./netprint-cron";
+
 /** dtako 日次スクレイプの cron 式 (UTC)。VPS cron `0 1 * * *` JST と同時刻。 */
 export const DTAKO_CRON = "0 16 * * *";
 /** ETC 明細スクレイプの cron 式 (UTC)。GCE cron と同じ JST 6,7,8,9 時。 */
@@ -26,6 +28,10 @@ export const ETC_CRON = "0 21,22,23,0 * * *";
  * dtako 日次 (JST 1:00) の後で ETC (JST 6,7,8,9 時) の前、既存 2 本と重ならない
  * 時間帯 (Refs #606-6)。 */
 export const RESTRAINT_SYNC_CRON = "0 19 * * *";
+/** 運転日報 netprint 登録 + LINE WORKS 通知の cron 式 (UTC)。JST 6:30 —
+ * dtako 日次 (JST 1:00) で前日分が theearth に揃った後、営業所の始業前
+ * (Refs #874)。 */
+export const NETPRINT_CRON = "30 21 * * *";
 
 export interface DtakoAccountEntry {
   comp_id: string;
@@ -164,10 +170,16 @@ export interface CronEnvValues {
   scraperMode?: string;
   dtakoAccountsRaw?: string;
   etcAccountsRaw?: string;
+  /** `NETPRINT_TARGETS` (plain 変数)。未設定は netprint cron skip (Refs #874)。 */
+  netprintTargetsRaw?: string;
+  /** netprint cron が theearth ログインに使う会社 (`KINTAI_COMP_ID` var)。日報を
+   * 持つのは打刻と同じ大石運輸倉庫 1 社なので同じ var を読む。未設定は
+   * fail-closed (Refs #874)。 */
+  kintaiCompId?: string;
 }
 
 export interface CronRunResult {
-  kind: "dtako" | "etc" | "restraint" | "none";
+  kind: "dtako" | "etc" | "restraint" | "netprint" | "none";
   target: string;
   ok: boolean;
   detail: string;
@@ -292,6 +304,47 @@ export async function runScheduledCron(
           return {
             kind: "restraint",
             target: `${account.comp_id}|${month}`,
+            ok: false,
+            detail: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }),
+    );
+  }
+
+  if (cron === NETPRINT_CRON) {
+    const targets = parseNetprintTargets(env.netprintTargetsRaw);
+    if (targets.length === 0) {
+      return [{ kind: "netprint", target: "*", ok: true, detail: "NETPRINT_TARGETS 未設定のため skip" }];
+    }
+    const compId = (env.kintaiCompId ?? "").trim();
+    if (!compId) {
+      // NETPRINT_TARGETS があるのに theearth ログインの会社が引けないのは設定漏れ
+      // — 黙って skip せず loud fail (staging は KINTAI_COMP_ID を意図的に持たない
+      // ので、targets 未設定 = 上の skip で終わるのが正常系)。
+      return [{ kind: "netprint", target: "*", ok: false, detail: "KINTAI_COMP_ID 未設定のため netprint cron を実行できません" }];
+    }
+    const date = yesterdayJst(now);
+    return Promise.all(
+      targets.map(async (target): Promise<CronRunResult> => {
+        try {
+          const res = await callDo(`scraper-comp-${compId}`, "/cron/netprint", {
+            comp_id: compId,
+            branch_cd: target.branch_cd,
+            channel_id: target.channel_id,
+            branch_name: target.branch_name ?? "",
+            date,
+          });
+          return {
+            kind: "netprint",
+            target: `${compId}|${target.branch_cd}`,
+            ok: res.ok,
+            detail: `HTTP ${res.status}: ${res.text.slice(0, 200)}`,
+          };
+        } catch (err) {
+          return {
+            kind: "netprint",
+            target: `${compId}|${target.branch_cd}`,
             ok: false,
             detail: err instanceof Error ? err.message : String(err),
           };
