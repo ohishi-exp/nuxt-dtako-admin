@@ -1011,16 +1011,24 @@ R2 スナップショットを force-match へ自動移植してはいけない 
   `GET /api/profit/margin-snapshot?ym=&version=` で**2 版の本文を画面が取って**
   `app/utils/margin-diff.ts` を呼ぶ (**差分のロジックを server route に置かない**)。
   出すのは ① `totals` の 4 項目 ② 運行 (`unkoNo`) の 追加/削除/変更 ③ 開いた運行の便。
-  **★ 運行 1 本の `marginYen` は出さない** — `buildOperationMargins` の `overrides`
-  (燃費の上書き) と `runCostShareMode` は**集計した端末の localStorage にしか無く版に
-  入っていない**ので、版から運行 1 本の粗利を厳密に再現できない。運行単位は**生の入力値**
+  **★ 運行 1 本の `marginYen` は出さない** — この画面は保存された値を引き算するだけで
+  粗利を計算し直さないため。**形式 2 の版は `buildOperationMargins` の `overrides`
+  (燃費の上書き) と `runCostShareMode` を指紋として持つ** (Refs #886) が、**形式 1 の版には
+  無く、そちらは版から運行 1 本の粗利を永久に厳密に再現できない**。運行単位は**生の入力値**
   (`salesYen`/`allowanceYen`/`totalKm`/便数) まで、月全体は保存された実測値で見せる。
   **★ 便は `seq` のまま** — 便数が違えば便ごとの数値は出さず「便数が X → Y」だけ
   (`date`+`originCity`+`destCity` で寄せると往復や同一区間で別の便を誤って対応付ける)。
   **★ `schemaVersion` が違えば比べない**。**★ 版そのものが端末の設定で増えることがある**
-  (`marginSummaryHashInput` は `totals` を含むのに燃費の上書きは端末ローカル) ので、
-  粗利が動いた回は**その旨を画面で断る** — 根本の解 (版に入力の指紋を残す) は PR-4 の担当で、
-  **`slipsFingerprint` だけでなく `fuelRateOverrides` と `runCostShareMode` も指紋に含める**必要がある
+  (`marginSummaryHashInput` は `totals` を含み、燃費の上書きは `totals` を動かす) ので、
+  粗利が動いた回は**その旨を画面で断る**。
+  **★ 根本の解 (版に入力の指紋を残す) は #886 で入った** — `MARGIN_SUMMARY_SCHEMA_VERSION`
+  が `2` になり、`fuelRateOverrides` (燃費の上書き) と `runCostShareMode` (運行経費の配分の比)
+  が版の本文と `marginSummaryHashInput` の両方に入る。**指紋が付くのはこれから保存される版だけ**
+  で、**形式 1 の既存の版には遡って付かない** (端末の localStorage にしか無い値なので原理的に不可)。
+  ⇒ **形式 1 と形式 2 は差分にできない** (`schemaVersion` 不一致で `schema-mismatch`)。
+  **`margin-diff.ts` はまだ指紋を突き合わせていない** — 差の理由まで言うのは別 PR。
+  **副作用が 1 つある**: 配分の比だけを変えて集計し直すと、`totals` は 1 円も動かないのに
+  版が 1 本増える (便の内訳は実際に変わっているので、それが正しい)
 - **★ 差分の「動いた」は「画面に出る精度」で決める** (Refs #838)。保存された
   `totals.marginYen` は按分が割り算を含むぶん `4467597.000000001` のような浮動小数の尾を持つ
   (**それ自体は正常**。本番 v0.0.526 で実測)。厳密比較 (`delta !== 0`) のままだと
@@ -1034,10 +1042,11 @@ R2 スナップショットを force-match へ自動移植してはいけない 
   / `after=100.6` (画面 `¥101`) が `Math.round(0.2)=0` で「動いていない」になり、
   **画面に出ている 2 つの数字は 1 円違うのに差分は動いていないと言う**食い違いが起きる。
   **`before` / `after` は生値のまま返す** (丸めた値に差し替えると検算できない)。
-  **★ `marginSummaryHashInput` は別勘定で、まだ直していない** — 同じ尾の違いで
+  **★ `marginSummaryHashInput` の丸めは別勘定で、まだ直していない** — 同じ尾の違いで
   **版そのものも 1 本増える** (`totals` をハッシュ対象に含めるため)。ここを安易に丸めると
   **版の本文 (`totals` の生値) とハッシュの対象が食い違い**、「本文は違うのに同じ版」が
-  生まれるので、直すなら**別 issue で**。
+  生まれるので、直すなら**別 issue で**。#886 で足した指紋は逆に**本文とハッシュの両方に
+  入れてある** — 片方だけに入れると、まさにこの食い違いが起きるため。
 - **★ 積み上げ棒の「赤字」も同じ精度で決める** (Refs #840。#838 と**まったく同じ型**)。
   `shareBarOf` (`margin.ts`) / `driverShareBarOf` (`margin-driver-share.ts`) の `costSum` は
   **費用 4 区分をその場で足し直したもの**、比べる相手の売上から出る粗利は

@@ -55,9 +55,13 @@ function productionTotals() {
   return { ...emptyMarginTotals(), operations: 91, salesYen: 10260265, allowanceYen: 2499500, marginYen: 4467597 }
 }
 
+/**
+ * 形式 2 の body (Refs #886)。**指紋 2 欄 (`fuelRateOverrides` / `runCostShareMode`) が
+ * 必須**で、ここでの既定は「上書きなし・既定の配分」。
+ */
 function validInput(overrides: Record<string, unknown> = {}) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     ym: '2026-07',
     codeVersion: 'v0.0.517',
     totals: productionTotals(),
@@ -69,6 +73,8 @@ function validInput(overrides: Record<string, unknown> = {}) {
       uncovered: null,
       crossMonth: null,
     },
+    fuelRateOverrides: {},
+    runCostShareMode: 'km',
     ...overrides,
   }
 }
@@ -94,7 +100,7 @@ describe('POST /api/profit/margin-summary', () => {
     const bucket = new FakeR2Bucket()
     await expect(callPost(eventWith(bucket, null))).rejects.toMatchObject({ statusCode: 400 })
     await expect(callPost(eventWith(bucket, 'x'))).rejects.toMatchObject({ statusCode: 400 })
-    await expect(callPost(eventWith(bucket, validInput({ schemaVersion: 2 })))).rejects.toMatchObject({ statusCode: 400 })
+    await expect(callPost(eventWith(bucket, validInput({ schemaVersion: 3 })))).rejects.toMatchObject({ statusCode: 400 })
     await expect(callPost(eventWith(bucket, validInput({ ym: '2026-7' })))).rejects.toMatchObject({ statusCode: 400 })
     await expect(callPost(eventWith(bucket, validInput({ ym: 99 })))).rejects.toMatchObject({ statusCode: 400 })
     await expect(callPost(eventWith(bucket, validInput({ totals: null })))).rejects.toMatchObject({ statusCode: 400 })
@@ -109,6 +115,39 @@ describe('POST /api/profit/margin-summary', () => {
     const body = validInput()
     ;(body.cache as { ym: string }).ym = '2026-06'
     await expect(callPost(eventWith(bucket, body))).rejects.toMatchObject({ statusCode: 400 })
+  })
+
+  it('★ 形式 1 の body は 400 — 指紋の無い版を新しく増やさない (Refs #886)', async () => {
+    // #886 より前の画面 (古いタブが残っている等) が送ってくる形。**受けて既定で埋めない** —
+    // 埋めると「上書きしていない端末が集計した」という**嘘の指紋**が版に残り、
+    // 理由の分からない版が理由を偽った版になる。
+    const bucket = new FakeR2Bucket()
+    const legacy = validInput({ schemaVersion: 1 }) as Record<string, unknown>
+    delete legacy.fuelRateOverrides
+    delete legacy.runCostShareMode
+    await expect(callPost(eventWith(bucket, legacy))).rejects.toMatchObject({ statusCode: 400 })
+    expect(bucket.store.size).toBe(0)
+  })
+
+  it('★ 指紋の欄が欠けていれば 400 (形式 2 を名乗っていても)', async () => {
+    const bucket = new FakeR2Bucket()
+    const noFuel = validInput() as Record<string, unknown>
+    delete noFuel.fuelRateOverrides
+    await expect(callPost(eventWith(bucket, noFuel))).rejects.toMatchObject({ statusCode: 400 })
+    const noMode = validInput() as Record<string, unknown>
+    delete noMode.runCostShareMode
+    await expect(callPost(eventWith(bucket, noMode))).rejects.toMatchObject({ statusCode: 400 })
+    expect(bucket.store.size).toBe(0)
+  })
+
+  it('★ 指紋の形が違えば 400 (既定に丸めない)', async () => {
+    const bucket = new FakeR2Bucket()
+    await expect(callPost(eventWith(bucket, validInput({ fuelRateOverrides: null })))).rejects.toMatchObject({ statusCode: 400 })
+    await expect(callPost(eventWith(bucket, validInput({ fuelRateOverrides: 'x' })))).rejects.toMatchObject({ statusCode: 400 })
+    // `parseRunCostShareMode` (画面側) は読めない値を km に丸めるが、保存の口は丸めない。
+    await expect(callPost(eventWith(bucket, validInput({ runCostShareMode: 'KM' })))).rejects.toMatchObject({ statusCode: 400 })
+    await expect(callPost(eventWith(bucket, validInput({ runCostShareMode: 99 })))).rejects.toMatchObject({ statusCode: 400 })
+    expect(bucket.store.size).toBe(0)
   })
 
   it('operations / costs が配列でなければ 400', async () => {
@@ -146,6 +185,18 @@ describe('POST /api/profit/margin-summary', () => {
     // MarginCache は形も中身も変えずそのまま入っている
     expect(saved.cache).toEqual(validInput().cache)
     expect(saved.savedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+  })
+
+  it('★ その端末の設定を指紋として本文に残す (Refs #886)', async () => {
+    const bucket = new FakeR2Bucket()
+    const overrides = { '1234': { yenPerLiter: 150, kmPerLiter: null } }
+    await callPost(eventWith(bucket, validInput({ fuelRateOverrides: overrides, runCostShareMode: 'time' })))
+    const saved = JSON.parse(bucket.store.get(latestKey)!.body) as MarginSummarySnapshot
+    expect(saved.schemaVersion).toBe(2)
+    expect(saved.fuelRateOverrides).toEqual(overrides)
+    expect(saved.runCostShareMode).toBe('time')
+    // **数字は 1 円も作り直さない。** 指紋を受けても合計は送られてきたまま。
+    expect(saved.totals.marginYen).toBe(4467597)
   })
 
   it('customMetadata に codeVersion を刻む', async () => {
@@ -221,6 +272,58 @@ describe('POST /api/profit/margin-summary', () => {
     const [oldKey, newKey] = versionKeys(bucket).sort()
     expect(JSON.parse(bucket.store.get(oldKey!)!.body).totals.marginYen).toBe(4467597)
     expect(JSON.parse(bucket.store.get(newKey!)!.body).totals.marginYen).toBe(4467598)
+  })
+
+  it('★★ 配分の比だけ変えた再送は、合計が 1 円も動かなくても版が 1 本増える (Refs #886)', async () => {
+    // `runCostShareMode` は `totals` を動かさない (`buildLegMargins` にしか流れない) が、
+    // **便の内訳は実際に変わる**。指紋をハッシュに入れていないと「本文は違うのに同じ版」が
+    // 生まれて、指紋を足した意味が消える。
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-24T10:20:30.000Z'))
+    const bucket = new FakeR2Bucket()
+    await callPost(eventWith(bucket, validInput()))
+    vi.setSystemTime(new Date('2026-08-24T10:21:30.000Z'))
+    const res = await callPost(eventWith(bucket, validInput({ runCostShareMode: 'time' }))) as { changed: boolean }
+    expect(res.changed).toBe(true)
+    expect(versionKeys(bucket)).toHaveLength(2)
+    const [oldKey, newKey] = versionKeys(bucket).sort()
+    const before = JSON.parse(bucket.store.get(oldKey!)!.body) as MarginSummarySnapshot
+    const after = JSON.parse(bucket.store.get(newKey!)!.body) as MarginSummarySnapshot
+    expect(before.runCostShareMode).toBe('km')
+    expect(after.runCostShareMode).toBe('time')
+    // ★ 合計は 1 円も動いていない (動いたのは指紋だけ)。
+    expect(after.totals).toEqual(before.totals)
+    expect(after.totals.marginYen).toBe(4467597)
+  })
+
+  it('★ 燃費の上書きが変われば版が増える', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-24T10:20:30.000Z'))
+    const bucket = new FakeR2Bucket()
+    await callPost(eventWith(bucket, validInput()))
+    vi.setSystemTime(new Date('2026-08-24T10:21:30.000Z'))
+    const res = await callPost(eventWith(bucket, validInput({
+      fuelRateOverrides: { '1234': { yenPerLiter: 150, kmPerLiter: null } },
+    }))) as { changed: boolean }
+    expect(res.changed).toBe(true)
+    expect(versionKeys(bucket)).toHaveLength(2)
+  })
+
+  it('★ 上書きの入れた順が違うだけの再送では版は増えない', async () => {
+    // 車輌C は `padStart(4, '0')` を通るので 1000 未満だと `'0123'` になり、
+    // **整数として正規な文字列ではない**ぶん `Object.keys` が入れた順のままになる
+    // (`'1234'` のような 4 桁は JS が昇順に揃える)。並べ直していないと版が増える。
+    const bucket = new FakeR2Bucket()
+    await callPost(eventWith(bucket, validInput({ fuelRateOverrides: {
+      '0123': { yenPerLiter: 150, kmPerLiter: null },
+      '0456': { yenPerLiter: null, kmPerLiter: 3.2 },
+    } })))
+    const res = await callPost(eventWith(bucket, validInput({ fuelRateOverrides: {
+      '0456': { yenPerLiter: null, kmPerLiter: 3.2 },
+      '0123': { yenPerLiter: 150, kmPerLiter: null },
+    } }))) as { changed: boolean }
+    expect(res.changed).toBe(false)
+    expect(versionKeys(bucket)).toHaveLength(1)
   })
 
   it('history.jsonl は再送のたびに 1 行増える (changed の別なく)', async () => {

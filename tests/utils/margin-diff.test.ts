@@ -20,7 +20,7 @@ import {
   type MarginDiffSnapshot,
 } from '../../app/utils/margin-diff'
 import { emptyMarginTotals, type MarginLegInput, type MarginOperationInput } from '../../app/utils/margin'
-import { MARGIN_SUMMARY_SCHEMA_VERSION, type MarginSummarySnapshot } from '../../app/utils/margin-r2'
+import { MARGIN_SUMMARY_SCHEMA_VERSION, buildMarginSummaryInput, type MarginSummarySnapshot } from '../../app/utils/margin-r2'
 
 // --- 版の材料 ---
 
@@ -98,10 +98,12 @@ describe('比べる項目の定義', () => {
     expect(MARGIN_DIFF_TOTALS_FIELDS.map(f => f.key)).toEqual(['operations', 'salesYen', 'allowanceYen', 'marginYen'])
   })
 
-  it('★ 運行 1 本には marginYen が無い (版から厳密に再現できないので出さない)', () => {
-    // `buildOperationMargins` の `overrides` (燃費の上書き) と `runCostShareMode` は
-    // **その端末の localStorage にしか無く版に入っていない**。再計算すると画面が実際に
-    // 見た `totals.marginYen` とズレる数字を作りかねないので、運行単位は生の入力値まで。
+  it('★ 運行 1 本には marginYen が無い (この画面は粗利を計算し直さないので出さない)', () => {
+    // この画面は保存された値を引き算するだけ。再計算すると画面が実際に見た
+    // `totals.marginYen` とズレる数字を作りかねないので、運行単位は生の入力値まで。
+    // **形式 2 の版は `buildOperationMargins` の `overrides` (燃費の上書き) と
+    // `runCostShareMode` を指紋として持つ** (Refs #886) が、**形式 1 の版には無く、
+    // そちらは版から運行 1 本の粗利を永久に厳密に再現できない。**
     expect(MARGIN_DIFF_OPERATION_FIELDS.map(f => f.key)).toEqual(['salesYen', 'allowanceYen', 'totalKm', 'legCount'])
     expect(MARGIN_DIFF_OPERATION_FIELDS.some(f => f.key === 'marginYen' as string)).toBe(false)
   })
@@ -161,7 +163,7 @@ describe('schemaVersion が違う版どうし', () => {
 
   it('MarginSummarySnapshot をそのまま渡せる (保存の型と差分の型が食い違わない)', () => {
     // R2 が返すのは `MarginSummarySnapshot`。**代入できることを型でも固定する** —
-    // `schemaVersion` をリテラル `1` のまま受けると「形式が違う 2 版」が型の上で
+    // `schemaVersion` をリテラル (いまは `2`) のまま受けると「形式が違う 2 版」が型の上で
     // 存在しなくなり、上の判定が死ぬので、差分側は `number` で受けている。
     const saved: MarginSummarySnapshot = {
       schemaVersion: MARGIN_SUMMARY_SCHEMA_VERSION,
@@ -170,9 +172,74 @@ describe('schemaVersion が違う版どうし', () => {
       savedAt: '2026-08-24T10:01:53.000Z',
       totals: emptyMarginTotals(),
       cache: { ym: '2026-07', savedAt: '', operations: [], costs: [], uncovered: null, crossMonth: null },
+      fuelRateOverrides: {},
+      runCostShareMode: 'km',
     }
     const asDiffInput: MarginDiffSnapshot = saved
     expect(buildMarginDiff(side(OLD, asDiffInput), side(NEW, asDiffInput)).state).toBe('ready')
+  })
+
+  it('★★ 形式 1 の既存版 × 形式 2 の新版 — クラッシュせず理由を出す (Refs #886)', () => {
+    // #886 で `MARGIN_SUMMARY_SCHEMA_VERSION` が 2 になり、指紋 2 欄が版に入った。
+    // **R2 には形式 1 の版が既に残っている**ので、この 2 つを並べる操作は実際に起きる。
+    // `margin-diff.ts` は無改修のまま、既存の不一致メッセージ経路で扱えること
+    // (= 落ちない・黙らない・理由を出す) を固定する。
+
+    // 形式 1 の版: **指紋の欄そのものが無い。** R2 から読んだ過去の JSON を模す
+    // (いまのコードでは組めない形なので、型を通さず手で作る)。
+    const legacy = {
+      schemaVersion: 1,
+      ym: '2026-07',
+      codeVersion: 'v0.0.524',
+      savedAt: '2026-08-24T10:01:53.000Z',
+      totals: { ...emptyMarginTotals(), operations: 91, salesYen: 10260265, allowanceYen: 2499500, marginYen: 4467597 },
+      cache: { ym: '2026-07', savedAt: '', operations: [op()], costs: [], uncovered: null, crossMonth: null },
+    } as unknown as MarginDiffSnapshot
+    expect('fuelRateOverrides' in (legacy as object)).toBe(false)
+
+    // 形式 2 の版: **いまのコードが実際に組む形**を通す (指紋つき)。
+    const current: MarginDiffSnapshot = {
+      ...buildMarginSummaryInput({
+        cache: { ym: '2026-07', savedAt: '', operations: [op()], costs: [], uncovered: null, crossMonth: null },
+        totals: { ...emptyMarginTotals(), operations: 91, salesYen: 10260265, allowanceYen: 2499500, marginYen: 4467597 },
+        codeVersion: 'v0.0.542',
+        fuelRateOverrides: { '1234': { yenPerLiter: 150, kmPerLiter: null } },
+        runCostShareMode: 'time',
+      }),
+      savedAt: '2026-08-25T10:01:53.000Z',
+    }
+    expect(current.schemaVersion).toBe(2)
+
+    const diff = buildMarginDiff(side(OLD, legacy), side(NEW, current))
+    expect(diff.state).toBe('schema-mismatch')
+    // **黙って旧形式を無視した差分を出さない。** 数字の行を 1 つも作らない。
+    expect(diff.totals).toEqual([])
+    expect(diff.added).toEqual([])
+    expect(diff.removed).toEqual([])
+    expect(diff.changed).toEqual([])
+    expect(diff.unchangedOperations).toBe(0)
+    // **理由を出す。** 空の差分を「変わっていない」と誤読させない。
+    expect(diff.blockedNote).toContain('比較できません (版の形式が違います)')
+    expect(diff.blockedNote).toContain(`${OLD} は形式 1`)
+    expect(diff.blockedNote).toContain(`${NEW} は形式 2`)
+    // どの 2 版を選んだかは返る (画面の見出しと符号が食い違わない)。
+    expect(diff.before.schemaVersion).toBe(1)
+    expect(diff.after.schemaVersion).toBe(2)
+    // ★ **合計は 4 項目とも同じ値**なのに差分を出さない。「形が違えば比べない」は
+    // 「壊れた」ではなく「そもそも指紋の文脈を持たない版を意味のある形で差分にできない」。
+    expect(current.totals).toEqual(legacy.totals)
+    // 形式が違う回に**他の注記を混ぜない**。
+    expect(diff.codeVersionNote).toBe('')
+    expect(diff.overrideCaveat).toBe('')
+  })
+
+  it('★ 逆向き (形式 2 が古い方) でも同じ経路で理由を出す', () => {
+    const legacy = { ...snapshot(), schemaVersion: 1 }
+    const current = snapshot({ schemaVersion: MARGIN_SUMMARY_SCHEMA_VERSION })
+    const diff = buildMarginDiff(side(OLD, current), side(NEW, legacy))
+    expect(diff.state).toBe('schema-mismatch')
+    expect(diff.blockedNote).toContain(`${OLD} は形式 2`)
+    expect(diff.blockedNote).toContain(`${NEW} は形式 1`)
   })
 })
 
@@ -482,6 +549,37 @@ describe('注記', () => {
     expect(MARGIN_DIFF_OVERRIDE_CAVEAT).toContain('データが 1 円も変わっていないのに版が増えていることがあります')
   })
 
+  it('★★ 指紋が入った後も「版には残っていない」と言い続けない (Refs #886)', () => {
+    // #886 で形式 2 の版は指紋 (燃費の上書き・運行経費の配分) を持つようになった。
+    // **触っていない文言が嘘になる型** (map skill の「PR の基準」(7)) なので、
+    // 「版には残っていません」を言い切らないことを固定する。
+    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).not.toContain('版には残っていません')
+  })
+
+  it('★★ この注記は「版に有る/無い」を語らない — 版によって真偽が変わる文にしない (Refs #886)', () => {
+    // 「版には残っていません」は**形式 2 どうしなら偽・形式 1 が絡めば真**。
+    // 定数として成立しないので、**版に依存しない事実** (この差分が何を出しているか) で書く。
+    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).toContain('この差分は保存された値を引き算するだけなので')
+    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).toContain('どちらが原因だったかまでは出していません')
+    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).not.toContain('形式 1')
+    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).not.toContain('形式 2')
+  })
+
+  it('★★ 逆方向の誤読を潰す — 「記録されるようになった」と読ませない (#854 の型)', () => {
+    // 「指紋が記録されるようになりました」と書くと「じゃあ差分に出るはず」と期待されるが、
+    // `buildMarginDiff` は指紋を突き合わせない (この PR ではロジック無改変)。
+    // **出ないものを出るように読ませない。**
+    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).not.toContain('指紋')
+    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).not.toContain('記録されるようになりました')
+    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).not.toContain('残るようになりました')
+  })
+
+  it('★ 版が増えること自体は指紋を足しても止まらない — その 1 文は残す (Refs #886)', () => {
+    // 指紋が入って変わったのは「増えた理由が版に残る」ことだけで、
+    // **増えること自体は止まらない**。ここは今も真なので消さない。
+    expect(MARGIN_DIFF_OVERRIDE_CAVEAT).toContain('データが 1 円も変わっていないのに版が増えていることがあります')
+  })
+
   it('粗利が動いていない回は出さない (常に出すと読み飛ばされる)', () => {
     expect(marginDiffOverrideCaveat(0)).toBe('')
   })
@@ -498,8 +596,25 @@ describe('注記', () => {
 
   it('★ 運行 1 本ごとの粗利を出していない理由を画面に出す文言がある', () => {
     expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).toContain('運行 1 本ごとの粗利')
-    expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).toContain('版に入っていない')
+    expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).toContain('粗利を計算し直さない')
     expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).toContain('月全体の粗利は保存された実測値です')
+  })
+
+  it('★★ 出していない理由は 2 段 — 版に依存しない方を先に書く (Refs #886)', () => {
+    // 形式 2 の版は指紋を持つので、**「版に入っていない」は形式 1 についてしか成り立たない。**
+    expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).not.toContain('版に入っていない')
+    // ① 版に依存しない本体の理由 (この差分は再計算しない)。
+    expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).toContain('この差分は保存された値を引き算するだけで、粗利を計算し直さないためです')
+    // ② 形式 1 はそもそも再現できない。**「再現できるようになった」とは書かない。**
+    expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).toContain('形式 1 の版は燃費の上書きと運行経費の配分を持たない')
+    expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).toContain('厳密に再現できません')
+  })
+
+  it('★★ 非対称性はここに 1 か所だけ残す — 過去の版には遡って付かない (Refs #886)', () => {
+    // 指紋が付くのは**これから保存される版だけ**。この 1 文をどこかに残すのが #886 の条件で、
+    // 置き場所はこの注記 (もう一方の注記は版に依存しない書き方に寄せた)。
+    expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).toContain('指紋が付くのは形式 2 以降に保存された版だけ')
+    expect(MARGIN_DIFF_NO_OPERATION_MARGIN_NOTE).toContain('過去の版に遡って付けることはできません')
   })
 
   it('コード版が違えば断る (同じ入力でもロジックが変われば数字は動く)', () => {
