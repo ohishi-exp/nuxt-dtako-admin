@@ -214,6 +214,10 @@ export function unassignedNotice(counts: UnassignedCounts): string | null {
  * 便の色。**既存の 4 色 (緑=積み / 黄=降し / 紫=休息 / 青緑=休憩、`eventCellStyleMap`) を
  * 使わない**ので、青・橙・桃・藍・赤 で回す。**便が多い運行では色が一周する**が、
  * ラベルに必ず便番号が入るので読み分けられる (色だけに情報を載せない)。
+ *
+ * **経路地図 (`OperationRouteMap.vue`) は逆に 色 → 種別**で、便は marker の数字で名乗る
+ * (Refs #884)。ここの色を変える / 足すときも**地図の色に合わせようとしない** — 対応は
+ * 便の本数で循環して運行ごとに変わるので、そもそも固定できない。
  */
 export const LEG_COLOR_COUNT = 5
 

@@ -361,8 +361,9 @@ branches = true
 path = "app/utils/margin.ts"
 branches = true
 
-# 粗利タブの運行行「地図」(Refs #760 の 18)。イベントCSV の GPS を便ごとに色分け
-# (haul / deadhead / other) した点列とマーカーに畳む pure util。便の切り方は
+# 粗利タブの運行行「地図」(Refs #760 の 18)。イベントCSV の GPS を**便で区切り、種別ごとに
+# 色分け** (haul / deadhead / other) した点列とマーカーに畳む pure util (**色 → 種別**。
+# 便は marker の数字で名乗る。イベント表の 色 → 便 とは別の規則、Refs #884)。便の切り方は
 # allowance-idle.ts と同じ行。取引先 × 経路の行から「この経路の便を全部重ねた地図」を
 # 描く pickLegsFromRoute / mergeRoutes も持つ (Refs #760 の 19)。
 # 重ね掛け行も混ぜて軌跡を密にする buildOverlayTrack も持つ (Refs #760 の 24)。
