@@ -11,12 +11,16 @@ const error = ref<string | null>(null)
 // --- Pending uploads ---
 const pendingUploads = ref<PendingUpload[]>([])
 const pendingLoading = ref(false)
+// 取得に失敗した理由 (Refs #911)。**空配列だけでは「0 件」と区別が付かない**ので、
+// 「読めなかった」ことを状態として持つ。成功したら必ず null に戻す。
+const pendingError = ref<string | null>(null)
 const rerunningId = ref<string | null>(null)
 const rerunResult = ref<{ id: string; success: boolean; message: string } | null>(null)
 
 // --- Upload history (CSV split) ---
 const uploads = ref<any[]>([])
 const uploadsLoading = ref(false)
+const uploadsError = ref<string | null>(null)
 const splittingId = ref<string | null>(null)
 const splitResults = ref<Record<string, { success: boolean; message: string }>>({})
 
@@ -62,12 +66,55 @@ async function handleUpload(file: File) {
   }
 }
 
+/**
+ * 一覧の取得失敗を 1 行にする (Refs #911)。
+ *
+ * ## ★ `describeApiError` を当てていない — **当て忘れではない** (Refs #890 / #904)
+ *
+ * `getPendingUploads` / `getUploads` は `app/utils/api.ts` の `request()` →
+ * `@ippoan/auth-client` の `createAuthFetch` 経由で、そこは非 2xx を
+ * `new Error(`API エラー (${status}): ${body || statusText}`)` に組んで投げる
+ * (`createAuthFetch.ts:56`)。**ofetch の `FetchError` ではない**ので `statusCode` も
+ * `data` も持たず、`describeApiError` は `err.message` をそのまま返すだけになる
+ * ⇒ **当てても 1 文字も変わらない** (#910 が (B) 経路 28 箇所で実測済み)。
+ * 機械的に当てると「理由が良くなった」と誤読させるだけなので当てない。
+ *
+ * ## いま実際に出る文字列 (dev の実機で実測、2026-08-25)
+ *
+ * **「status しか出ない」ではない** — `createAuthFetch` は本文を読むので
+ * **status + 応答本文まるごと**が出る。合成後の 1 文はこうなる:
+ *
+ * ```
+ * 保留中のアップロードを取得できませんでした (API エラー (503): { "error": true,
+ *   "url": "…/api/proxy/api/internal/pending", "statusCode": 503,
+ *   "statusMessage": "INTERNAL_SHARED_SECRET binding が未設定です", … })
+ * ```
+ *
+ * **理由を 1 行に畳むのは #904 (`api.ts` 側) の担当**で、ここで JSON を読み直すと
+ * 二重実装になるのでやっていない。#904 が入れば `e.message` の中身がそのまま良くなる。
+ *
+ * ## ★ ここでは塞げない穴 (#904 に申し送り、未測定)
+ *
+ * 本番は HTTP/3 で reason phrase が空 (`res.statusText === ''`) なので、
+ * **本文が空の非 2xx では `e.message` が `API エラー (503): ` (コロンの後ろが空)** に
+ * なる。`api.ts` / `createAuthFetch` に触らずには塞げない。dev は HTTP/1.1 なので
+ * この形は踏めず、**実測できていない**。
+ */
+function describeListFailure(e: unknown): string {
+  return e instanceof Error ? e.message : '理由を読めませんでした'
+}
+
 async function loadPending() {
   pendingLoading.value = true
+  pendingError.value = null
   try {
     pendingUploads.value = await getPendingUploads()
-  } catch {
+  } catch (e) {
+    // 一覧は空に戻す (前回読めた内容を残すと「いま読めた分」に見える)。
+    // **ただし空にした理由を必ず持つ** — 空配列だけだと画面が「保留中は無い」と
+    // 読まれ、API が落ちて読めなかっただけの回と区別が付かない (Refs #911)。
     pendingUploads.value = []
+    pendingError.value = describeListFailure(e)
   } finally {
     pendingLoading.value = false
   }
@@ -121,10 +168,13 @@ function formatDatetime(iso: string) {
 
 async function loadUploads() {
   uploadsLoading.value = true
+  uploadsError.value = null
   try {
     uploads.value = await getUploads()
-  } catch {
+  } catch (e) {
+    // loadPending と同じ理由 (Refs #911)。
     uploads.value = []
+    uploadsError.value = describeListFailure(e)
   } finally {
     uploadsLoading.value = false
   }
@@ -235,6 +285,18 @@ onMounted(() => {
         読み込み中...
       </div>
 
+      <!-- ★ 「読めなかった」と「0 件」を別の文にする (Refs #911)。理由だけ出すと
+           **本当に 0 件の回**まで異常に見えるので、0 件の文はそのまま残し、
+           失敗の回は**判らないと言って確かめ方まで出す** (#910 と同じ形)。 -->
+      <div v-else-if="pendingError" class="py-8 text-center text-sm space-y-1">
+        <p class="text-red-600 dark:text-red-400 break-words">
+          保留中のアップロードを取得できませんでした ({{ pendingError }})
+        </p>
+        <p class="text-gray-400">
+          0 件なのか読めなかっただけなのかは、この画面では判りません — 再読み込みを押して確かめてください
+        </p>
+      </div>
+
       <div v-else-if="pendingUploads.length === 0" class="py-8 text-center text-gray-400 text-sm">
         保留中のアップロードはありません
       </div>
@@ -305,6 +367,16 @@ onMounted(() => {
 
       <div v-if="uploadsLoading && uploads.length === 0" class="py-4 text-center text-gray-400 text-sm">
         読み込み中...
+      </div>
+
+      <!-- 上と同じ (Refs #911)。 -->
+      <div v-else-if="uploadsError" class="py-4 text-center text-sm space-y-1">
+        <p class="text-red-600 dark:text-red-400 break-words">
+          アップロード履歴を取得できませんでした ({{ uploadsError }})
+        </p>
+        <p class="text-gray-400">
+          0 件なのか読めなかっただけなのかは、この画面では判りません — 再読み込みを押して確かめてください
+        </p>
       </div>
 
       <div v-else-if="uploads.length === 0" class="py-4 text-center text-gray-400 text-sm">

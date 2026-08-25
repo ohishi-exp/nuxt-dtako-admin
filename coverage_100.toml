@@ -1095,11 +1095,20 @@ branches = true
 # デジタコ CSV アップロード。要は **「取り込みは成功したが CSV 分割が失敗した」を
 # 取り込みの緑とは別枠で出す**こと (Refs ohishi-exp/rust-ichibanboshi#205 の 40) —
 # 分割に失敗した運行は `has_kudgivt = FALSE` のまま読み取り側 3 クエリから消える。
-# **`loadPending` / `loadUploads` の `catch` は握りつぶして空配列にする**ので、
-# 取得失敗と 0 件が同じ見た目になる。#903 の制約 (テストのために本番コードを
-# 変えない) によりコードは触らず、**現状の挙動としてテストで固定**してある。
-# branches: **BR() instrumented site 9、9 site とも両側**。
-# **v8 branch site 39 / arm 82、すべて被覆。死に分岐 0 件**
+# **`loadPending` / `loadUploads` の取得失敗は `pendingError` / `uploadsError` に
+# 残して画面に出す** (Refs #911)。以前は `catch` を握り潰して空配列にするだけで、
+# **取得失敗と本当の 0 件が同じ見た目**だった (#912 はその挙動をテストで固定していた —
+# #911 でテストごと書き換えてある)。**逆方向も固定してある**: 本当に 0 件の回は
+# 今までどおり「ありません」だけを出し、失敗の文言を混ぜない。
+# `describeApiError` は**当てていない** — この経路 (`createAuthFetch`) の例外は
+# ofetch の `FetchError` ではないので当てても 1 文字も変わらない (理由は
+# `describeListFailure` の doc コメント、直すのは #904 側)。
+# branches: **BR() instrumented site 10、10 site とも両側** (#911 の前は 9 / 9)。
+# **v8 branch site 45 / arm 94、すべて被覆。死に分岐 0 件** (#911 の前は 39 site / 82 arm)。
+# 内訳も実測済み: **script 10 site / 24 arm + template 35 site / 70 arm**
+# (#911 の前は script 9/22 + template 30/60) ⇒ 増えた分は
+# **script +1 site (`describeListFailure` の三項) と template +5 site
+# (`v-else-if` 2 本を足したことによる v-if 連鎖の組み替え)**
 # (`statusColor` / `statusLabel` の switch は default を含む 4 アームとも通す。
 # switch は BR() の対象外・v8 の branch でもあるので、両方の指標で数えている)。
 [[files]]
