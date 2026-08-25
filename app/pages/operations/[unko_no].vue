@@ -269,8 +269,15 @@ function onSelectedLocationChange(location: SelectedRowsLocationRange | null) {
 //     EventCrewPanel に渡し、対応する filteredRows のチェックボックスにも反映する
 //     (以前はページ側の ref だけ更新してチェックボックスが連動しない実運用回帰があった)。
 
-type ProposeStatus = 'idle' | 'loading' | 'done' | 'not-found' | 'error' | 'ambiguous'
+/** `'unavailable'` は **`'error'` とは別物** (Refs #822 ①): `'error'`/`'not-found'` は
+ * 「一番星を呼んだ結果」なので押し直せば変わりうるが、`'unavailable'` は**呼ぶための
+ * 材料 (車輌CD / 運行日) がそもそも無い**状態で、何度押しても永久に変わらない。
+ * 同じ見た目にすると「もう一度押せば直るかも」と読ませてしまう。 */
+type ProposeStatus = 'idle' | 'loading' | 'done' | 'not-found' | 'error' | 'ambiguous' | 'unavailable'
 const proposeStatus = ref<ProposeStatus>('idle')
+/** `'unavailable'` のとき**何が欠けているか**。車輌CD と運行日は片方だけ欠けることも
+ * 両方欠けることもあり、どちらか分からないと直しようがないので文言を出し分ける。 */
+const proposeUnavailableReason = ref('')
 /** 直近の提案で union した積み/降しペアの件数 (Refs #356: 同日往復2回等で2以上に
  * なる場合、レグを1本しか提案できていないと誤解されないよう画面に通知する)。 */
 const proposedLegCount = ref(0)
@@ -326,7 +333,17 @@ function selectProposeCandidate(candidate: ProposeCandidate) {
 async function proposeFromSlips() {
   const vehicleCode = net780VehicleCd.value
   const opDate = primary.value?.operation_date ?? primary.value?.reading_date
-  if (!vehicleCode || !opDate) return
+  // 一番星の検索キーが無い運行 (raw_data に `車輌CD` が入っていない等)。**黙って
+  // return すると、押しても表示が一切変わらず「ボタンが壊れている」としか読めない**
+  // (Refs #822 ①)。`proposeStatus` を立てる前に return していたのが原因なので、
+  // 立ててから理由まで出す。押し直しても変わらないことが伝わるよう `'error'` には
+  // 相乗りさせない。
+  if (!vehicleCode || !opDate) {
+    const missing = [!vehicleCode ? '車輌CD' : null, !opDate ? '運行日' : null].filter(Boolean).join('と')
+    proposeUnavailableReason.value = `この運行は${missing}が無いため提案できません`
+    proposeStatus.value = 'unavailable'
+    return
+  }
   proposeStatus.value = 'loading'
   proposeCandidates.value = []
   try {
@@ -642,6 +659,8 @@ function formatDatetime(val: string | null): string {
             </button>
             <span v-if="proposeStatus === 'not-found'" class="text-xs text-gray-400">一致する伝票が見つかりませんでした</span>
             <span v-else-if="proposeStatus === 'error'" class="text-xs text-red-500">提案に失敗しました</span>
+            <!-- 「呼んで駄目だった」(赤/灰) と**色も文も分ける** — 押し直しても変わらない。 -->
+            <span v-else-if="proposeStatus === 'unavailable'" class="text-xs text-amber-600 dark:text-amber-400">{{ proposeUnavailableReason }}</span>
             <span v-else-if="proposeStatus === 'done' && proposedLegCount > 1" class="text-xs text-amber-600 dark:text-amber-400">
               同一区間のレグが{{ proposedLegCount }}件見つかったため全て選択範囲に含めました
             </span>
