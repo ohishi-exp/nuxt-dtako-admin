@@ -236,6 +236,26 @@ describe('一括再計算 (recalcDiffsOnly)', () => {
     expect(alertTitles(w).join(' ')).toBe('')
   })
 
+  it('一括再計算は通って再比較だけ落ちた回は、そう書く (もう一度 全員ぶん回せとは読ませない)', async () => {
+    compareRestraintCsv.mockResolvedValueOnce(withUnknownDiff()).mockRejectedValue(new Error('比較に失敗: 500'))
+    recalculateDriversBatch.mockImplementation(async (_y: number, _m: number, _ids: string[], onProgress: (e: BatchRecalcEvent) => void) => {
+      onProgress({ event: 'progress', current: 1, total: 1 })
+      onProgress({ event: 'batch_done', total: 1 })
+    })
+
+    const w = mountPage()
+    await selectCsv(w)
+    await clickLabel(w, BATCH_LABEL)
+    await flushPromises()
+
+    expect(alertTitles(w)).toContain('一括再計算は終わりましたが再比較に失敗しました (比較に失敗: 500)')
+    // 理由を 2 つの UAlert で言わない (素の `比較に失敗: 500` は畳んである)。
+    expect(alertTitles(w)).not.toContain('比較に失敗: 500')
+    // 再計算は終わっている。「再計算に失敗」系の文言を出さない。
+    expect(alertTitles(w).join(' ')).not.toContain('再計算を開始できませんでした')
+    expect(alertTitles(w).join(' ')).not.toContain('再計算が途中で切れました')
+  })
+
   it('始まってすらいない失敗は理由を捨てない', async () => {
     compareRestraintCsv.mockResolvedValue(withUnknownDiff())
     recalculateDriversBatch.mockRejectedValue(new Error('再計算に失敗: 502'))

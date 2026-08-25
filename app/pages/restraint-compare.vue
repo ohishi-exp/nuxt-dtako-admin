@@ -126,10 +126,27 @@ async function recalcDiffsOnly() {
         batchRecalcError.value = evt.message || '一括再計算に失敗しました'
       }
     })
-    // 失敗した回に再比較すると、**再計算されていない古い値**で結果が出る。続行しない。
-    if (!batchFailed) await runCompare()
   } catch (e: unknown) {
     if (!batchFailed) batchRecalcError.value = recalcStreamFailure(e, gotAnyEvent)
+    batchFailed = true
+  }
+
+  try {
+    // 失敗した回に再比較すると、**再計算されていない古い値**で結果が出る。続行しない。
+    if (batchFailed) return
+
+    // ★ ここから先で落ちたのは**再比較**であって再計算ではない。`recalcDriver` と
+    //   同じ扱いにする — 「再計算に失敗」と読めると、**もう一度 全員ぶん回さないと
+    //   直らない**ように見える (Refs #917)。
+    //   なお `runCompare()` は自分で catch して `error` に入れる (**throw しない**)
+    //   ので、例外ではなく `error` を見て判定する。throw するように変えるなら
+    //   ここも直すこと。
+    await runCompare()
+    if (error.value) {
+      batchRecalcError.value = `一括再計算は終わりましたが再比較に失敗しました (${error.value})`
+      // 同じことを 2 つの UAlert で言わない (理由は上の 1 文に畳んである)。
+      error.value = ''
+    }
   } finally {
     batchRecalcRunning.value = false
     // 進捗はボタンのラベルなので消してよい。**理由は batchRecalcError に残る。**
