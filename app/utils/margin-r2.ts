@@ -176,11 +176,21 @@ export function buildMarginSummaryInput(params: {
  *
  * **保存する本文 (`MarginSummaryInput.fuelRateOverrides`) は並べ替えない** — 版には
  * 端末が持っていたものをそのまま残す。並べ直すのは**比べるときだけ**。
+ *
+ * ★ **欄を落としたまま気づかない事故を型で止める** (親のレビュー、Refs #886)。
+ * `FuelRateOverride` に欄が 1 つ増えたとき、ここに書き足すのを忘れると
+ * **その欄は本文には載るのにハッシュには入らない** — 「本文は違うのに同じ版」が生まれ、
+ * 指紋を足した意味が消える (この関数のすぐ下、`marginSummaryHashInput` の doc が
+ * 警戒しているのとまったく同じ失敗で、**テストは緑のまま通る**)。
+ * `_exhaustive` の代入がその歯止め: 残りの欄 (`rest`) が空でなくなった瞬間に
+ * **型検査が落ちる**。`RunCostShareMode` に `RUN_COST_SHARE_MODES` を置いたのと同じ規律。
+ * **実行時の値は 1 ミリも変わらない** (載せる欄も並びも同じ)。
  */
 function fuelRateFingerprint(map: FuelRateMap): Array<[string, number | null, number | null]> {
   return Object.keys(map).sort().map((vehicle) => {
-    const override = map[vehicle]!
-    return [vehicle, override.yenPerLiter, override.kmPerLiter]
+    const { yenPerLiter, kmPerLiter, ...rest } = map[vehicle]!
+    const _exhaustive: Record<string, never> = rest
+    return [vehicle, yenPerLiter, kmPerLiter]
   })
 }
 

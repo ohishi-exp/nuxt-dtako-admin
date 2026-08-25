@@ -318,6 +318,28 @@ describe('marginSummaryHashInput — 差分検知', () => {
     expect(Object.keys(built.fuelRateOverrides)).toEqual(['0456', '0123'])
   })
 
+  it('★★ 指紋の並びを文字列として固定する — 載せる欄・並び・型が変わったら落ちる (Refs #886)', () => {
+    // `fuelRateFingerprint` に型の歯止め (`_exhaustive`) を足したとき、**実行時の値が
+    // 1 ミリも変わっていないこと**を示すために置いた literal。以後この文字列が動いたら、
+    // **既存の版の重複判定が変わる** (同じ内容が別の版になる / 別の内容が同じ版になる)
+    // ということなので、意図した変更かを必ず確かめること。
+    const built = input({ fuelRateOverrides: {
+      '0456': { yenPerLiter: null, kmPerLiter: 3.2 },
+      '0123': { yenPerLiter: 150, kmPerLiter: null },
+    }, runCostShareMode: 'time' })
+    expect(marginSummaryHashInput(built)).toContain(
+      '"fuelRateOverrides":[["0123",150,null],["0456",null,3.2]],"runCostShareMode":"time"',
+    )
+  })
+
+  it('★ 欄が両方 null の車輌も指紋に残す (「上書きしていない」と混ぜない)', () => {
+    const built = input({ fuelRateOverrides: { '0001': { yenPerLiter: null, kmPerLiter: null } } })
+    expect(marginSummaryHashInput(built)).toContain('"fuelRateOverrides":[["0001",null,null]]')
+    // 上書きが 1 台も無い版とは別物 (空配列になる)。
+    expect(marginSummaryHashInput(input())).toContain('"fuelRateOverrides":[]')
+    expect(marginSummaryHashInput(built)).not.toBe(marginSummaryHashInput(input()))
+  })
+
   it('上書きの値が動けば違う (キーの数が同じでも拾う)', () => {
     const a = input({ totals: productionTotals(), fuelRateOverrides: { '1234': { yenPerLiter: 150, kmPerLiter: null } } })
     const b = input({ totals: productionTotals(), fuelRateOverrides: { '1234': { yenPerLiter: 151, kmPerLiter: null } } })
