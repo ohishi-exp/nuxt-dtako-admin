@@ -14,14 +14,20 @@ import {
   tenantForCompId,
 } from "./kintai-relay";
 import {
+  asWritableConfigKv,
   dispatchNetprintTargets,
+  NETPRINT_TARGETS_KV_KEY,
   resolveDtakoAccountsRaw,
   resolveNetprintTargetsRaw,
   resolveSecretBinding,
   runScheduledCron,
   yesterdayJst,
 } from "./cron";
-import { planNetprintRun } from "./netprint-cron";
+import {
+  parseNetprintTargets,
+  planNetprintRun,
+  validateNetprintTargetsPayload,
+} from "./netprint-cron";
 import {
   countSplitFailed,
   DEFAULT_HISTORY_LIMIT,
@@ -163,6 +169,18 @@ export default {
       // DO 内部 (/cron/restraint-sync) へ転送するだけ — auth-worker JWT / theearth
       // セッション前提の /restraint-api/* とは別の、機械呼び出し用の名前空間
       return handleRestraintSync(request, env);
+    }
+
+    if (url.pathname === "/kintai-relay/netprint-targets" && request.method === "GET") {
+      // 日報 netprint の通知先設定 (KV `netprint_targets`) を読む (Refs #874 の 12)。
+      // 画面 (`/scraper` の「日報netprint」タブ) が編集するための口
+      return handleNetprintTargetsGet(request, env);
+    }
+
+    if (url.pathname === "/kintai-relay/netprint-targets" && request.method === "PUT") {
+      // 同上の保存。**全体置き換え** — 差分更新にすると「消したはずの営業所が
+      // 残る」が作れるため
+      return handleNetprintTargetsPut(request, env);
     }
 
     if (url.pathname === "/kintai-relay/netprint-run" && request.method === "POST") {
@@ -807,6 +825,116 @@ async function handleRestraintSync(request: Request, env: RelayWorkerEnv): Promi
   // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
   return new Response(res.body, {
     status: res.status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
+/** `netprint-targets` の 2 route が共通で使う関門。secret 未設定は 503、
+ * 呼び出し元の proof 不一致は 401、KV が書けない形なら 503 (Refs #874 の 12)。
+ * 通れば書き込み可能な KV binding を返す。 */
+async function guardNetprintTargets(
+  request: Request,
+  env: RelayWorkerEnv,
+): Promise<Response | { kv: { get(key: string): Promise<string | null>; put(key: string, value: string): Promise<void> } }> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  const kv = asWritableConfigKv(env.DTAKO_CONFIG_KV);
+  if (!kv) return fail(503, "DTAKO_CONFIG_KV binding が未設定です");
+  return { kv };
+}
+
+/**
+ * `GET /kintai-relay/netprint-targets` — 日報 netprint の通知先設定を読む
+ * (Refs #874 の 12)。応答は KV `netprint_targets` の**生 JSON 配列**、キーが
+ * 無ければ `[]`。
+ *
+ * **plain 変数 (`NETPRINT_TARGETS`) には落とさない** — cron 経路の
+ * `resolveNetprintTargetsRaw` は KV → plain 変数の順に見るが、**画面が編集するのは
+ * KV の値だけ**なので、KV が空のときに変数の値を見せると「保存したのに一覧が
+ * 変わらない」(実は変数の値を見ている) が起きる。読む場所と書く場所は必ず揃える。
+ *
+ * 中身の検証 (宛先の排他・Uuid) はここではしない — 不正な値が入っていても
+ * **画面に出して直せる**方が、500 で読めなくするより運用が進む。落とすのは保存時
+ * (`PUT`) で、そちらは cron と同じ規則で弾く。
+ */
+export async function handleNetprintTargetsGet(
+  request: Request,
+  env: RelayWorkerEnv,
+): Promise<Response> {
+  const guarded = await guardNetprintTargets(request, env);
+  if (guarded instanceof Response) return guarded;
+
+  const json = (status: number, body: string) =>
+    new Response(body, {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  let raw: string | null;
+  try {
+    raw = await guarded.kv.get(NETPRINT_TARGETS_KV_KEY);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(JSON.stringify({ netprint_targets: "kv-get-error", error: detail }));
+    return json(503, JSON.stringify({ error: `KV の読み取りに失敗しました: ${detail}` }));
+  }
+  try {
+    // JSON 配列であることだけ確認する (cron と同じ `parseNetprintTargets`)。
+    // 壊れた値をそのまま画面へ流すと `res.json()` が理由の無い失敗になるため。
+    parseNetprintTargets(raw ?? undefined);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return json(500, JSON.stringify({ error: detail }));
+  }
+  return json(200, raw && raw.trim() !== "" ? raw : "[]");
+}
+
+/**
+ * `PUT /kintai-relay/netprint-targets` — 日報 netprint の通知先設定を保存する
+ * (Refs #874 の 12)。body は KV に入るのと同じ **JSON 配列**
+ * `[{branch_cd, channel_id | recipient_id, branch_name?}, ...]` で、**全体置き換え**。
+ *
+ * 検証は `validateNetprintTargetsPayload` = cron 経路と同じ部品。不正なら 400 に
+ * 理由 (何件目のどの営業所か) を載せて**KV は一切触らない** — 一部だけ書けた状態を
+ * 作らないため。保存するのは正規化後の値 (知らないキーを KV に溜めない)。
+ */
+export async function handleNetprintTargetsPut(
+  request: Request,
+  env: RelayWorkerEnv,
+): Promise<Response> {
+  const guarded = await guardNetprintTargets(request, env);
+  if (guarded instanceof Response) return guarded;
+
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const raw = await request.text();
+  const validation = validateNetprintTargetsPayload(raw);
+  if (!validation.ok) return fail(400, validation.error);
+
+  const normalized = JSON.stringify(validation.targets);
+  try {
+    await guarded.kv.put(NETPRINT_TARGETS_KV_KEY, normalized);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(JSON.stringify({ netprint_targets: "kv-put-error", error: detail }));
+    return fail(503, `KV への保存に失敗しました: ${detail}`);
+  }
+  console.log(JSON.stringify({ netprint_targets: "put", count: validation.targets.length }));
+  return new Response(JSON.stringify({ ok: true, targets: validation.targets }), {
+    status: 200,
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
   });
 }

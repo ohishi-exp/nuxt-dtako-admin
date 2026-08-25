@@ -18,6 +18,7 @@ import {
   resolveBranchDisplayName,
   resolveNetprintDestination,
   runNetprintTargets,
+  validateNetprintTargetsPayload,
   type NetprintCronDeps,
   type NetprintReportRow,
   type NetprintTarget,
@@ -540,5 +541,112 @@ describe('runNetprintTargets', () => {
     expect(results[0].detail).toContain('not-an-error')
     expect(results[0].detail).toContain('エラー通知も失敗')
     expect(results[0].detail).toContain('lineworks down')
+  })
+})
+
+// 画面 (`/scraper` の「日報netprint」タブ) から保存される設定の検証 (Refs #874 の 12)。
+// **cron 経路と同じ部品**を使うことが要点 — 通す/落とすの規則が割れると
+// 「画面では保存できたのに cron が落とす」設定が作れる。
+describe('validateNetprintTargetsPayload', () => {
+  it('正しい設定は正規化して通す (知らないキーは落とし、空白は trim)', () => {
+    const raw = JSON.stringify([
+      { branch_cd: ' 1 ', channel_id: ` ${CH_HONSHA} `, branch_name: ' 本社営業所 ', junk: 'x' },
+      { branch_cd: '8', recipient_id: RCP_HONDA },
+    ])
+    const result = validateNetprintTargetsPayload(raw)
+    expect(result).toEqual({
+      ok: true,
+      targets: [
+        { branch_cd: '1', channel_id: CH_HONSHA, branch_name: '本社営業所' },
+        { branch_cd: '8', recipient_id: RCP_HONDA },
+      ],
+    })
+  })
+
+  it('空文字 / 空配列は「設定なし」として通す (全部消す操作ができる)', () => {
+    expect(validateNetprintTargetsPayload('')).toEqual({ ok: true, targets: [] })
+    expect(validateNetprintTargetsPayload('[]')).toEqual({ ok: true, targets: [] })
+  })
+
+  it('空の branch_name は入れない (KV に空文字を溜めない)', () => {
+    const raw = JSON.stringify([{ branch_cd: '1', channel_id: CH_HONSHA, branch_name: '  ' }])
+    const result = validateNetprintTargetsPayload(raw)
+    expect(result).toEqual({ ok: true, targets: [{ branch_cd: '1', channel_id: CH_HONSHA }] })
+    // 非文字列の branch_name も同じく落ちる (型が言うほど string とは限らない)。
+    const numeric = JSON.stringify([{ branch_cd: '1', channel_id: CH_HONSHA, branch_name: 7 }])
+    expect(validateNetprintTargetsPayload(numeric)).toEqual({
+      ok: true,
+      targets: [{ branch_cd: '1', channel_id: CH_HONSHA }],
+    })
+  })
+
+  it('JSON として読めない / 配列でないものは parseNetprintTargets の文言で落とす', () => {
+    expect(validateNetprintTargetsPayload('{')).toEqual({
+      ok: false,
+      error: 'NETPRINT_TARGETS が JSON としてパースできません',
+    })
+    expect(validateNetprintTargetsPayload('{"branch_cd":"1"}')).toEqual({
+      ok: false,
+      error: 'NETPRINT_TARGETS は JSON 配列である必要があります',
+    })
+  })
+
+  it('要素がオブジェクトでなければ何件目かを添えて落とす', () => {
+    for (const bad of ['"x"', 'null', '[]', '3']) {
+      const result = validateNetprintTargetsPayload(`[{"branch_cd":"1","channel_id":"${CH_HONSHA}"},${bad}]`)
+      expect(result).toEqual({ ok: false, error: '2 件目: JSON オブジェクトで指定してください' })
+    }
+  })
+
+  it('branch_cd が無い / 空白だけ / 文字列でない行は落とす', () => {
+    for (const bad of ['{}', '{"branch_cd":"   "}', '{"branch_cd":9}']) {
+      expect(validateNetprintTargetsPayload(`[${bad}]`)).toEqual({
+        ok: false,
+        error: '1 件目: branch_cd (営業所コード) は必須です',
+      })
+    }
+  })
+
+  it('宛先の規則は cron 経路と同じ (resolveNetprintDestination の文言をそのまま運ぶ)', () => {
+    const both = JSON.stringify([
+      { branch_cd: '1', channel_id: CH_HONSHA, recipient_id: RCP_HONDA },
+    ])
+    expect(validateNetprintTargetsPayload(both)).toEqual({
+      ok: false,
+      error: '1 件目 (営業所 1): channel_id と recipient_id はどちらか一方だけ指定してください',
+    })
+    const none = JSON.stringify([{ branch_cd: '1' }])
+    expect(validateNetprintTargetsPayload(none)).toEqual({
+      ok: false,
+      error: '1 件目 (営業所 1): channel_id と recipient_id のどちらか一方を指定してください',
+    })
+    // LINE WORKS の channelId をそのまま貼った (Uuid でない) 事故もここで止まる。
+    const notUuid = JSON.stringify([{ branch_cd: '1', channel_id: 'abcdefg' }])
+    expect(validateNetprintTargetsPayload(notUuid)).toEqual({
+      ok: false,
+      error:
+        '1 件目 (営業所 1): channel_id が UUID 形式ではありません (lineworks_channels の行 id を指定してください)',
+    })
+    const badRcp = JSON.stringify([{ branch_cd: '2', recipient_id: 'nope' }])
+    expect(validateNetprintTargetsPayload(badRcp)).toEqual({
+      ok: false,
+      error:
+        '1 件目 (営業所 2): recipient_id が UUID 形式ではありません (notify_recipients の行 id を指定してください)',
+    })
+  })
+
+  it('通した設定はそのまま cron が走らせられる (parseNetprintTargets と往復する)', () => {
+    const result = validateNetprintTargetsPayload(
+      JSON.stringify([{ branch_cd: '1', recipient_id: RCP_HONDA, branch_name: '本社営業所' }]),
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('unreachable')
+    // KV に入るのは正規化後の JSON。それを cron 経路が読み直しても同じ target になる。
+    const roundTrip = parseNetprintTargets(JSON.stringify(result.targets))
+    expect(roundTrip).toEqual(result.targets)
+    expect(resolveNetprintDestination(roundTrip[0]!)).toEqual({
+      ok: true,
+      destination: { kind: 'recipient', id: RCP_HONDA },
+    })
   })
 })

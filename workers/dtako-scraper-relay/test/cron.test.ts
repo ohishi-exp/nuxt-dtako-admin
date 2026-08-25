@@ -12,6 +12,7 @@ import {
   parseEtcAccounts,
   prevYm,
   resolveDtakoAccountsRaw,
+  asWritableConfigKv,
   resolveNetprintTargetsRaw,
   resolveSecretBinding,
   DTAKO_ACCOUNTS_KV_KEY,
@@ -490,5 +491,24 @@ describe('resolveNetprintTargetsRaw', () => {
     }
     expect(await resolveNetprintTargetsRaw(accountsOnly, undefined)).toBe('')
     expect(await resolveDtakoAccountsRaw(kv(KV_JSON), undefined)).toBe('')
+  })
+})
+
+// 画面から `netprint_targets` を保存する経路 (Refs #874 の 12) が使う binding 判定。
+describe('asWritableConfigKv', () => {
+  it('get と put の両方を持つ binding だけを返す', () => {
+    const kv = { get: async () => null, put: async () => {} }
+    expect(asWritableConfigKv(kv)).toBe(kv)
+  })
+
+  it('未設定 (undefined / null) は null', () => {
+    expect(asWritableConfigKv(undefined)).toBeNull()
+    expect(asWritableConfigKv(null)).toBeNull()
+  })
+
+  it('read-only な binding は null — 保存できないのに 200 を返さないため', () => {
+    // 「保存したのに変わらない」が一番たちが悪い (宛先が古いまま日報が飛ぶ)。
+    expect(asWritableConfigKv({ get: async () => null })).toBeNull()
+    expect(asWritableConfigKv({ put: async () => {} })).toBeNull()
   })
 })

@@ -130,6 +130,32 @@ export interface DtakoConfigKvBinding {
   get(key: string): Promise<string | null>;
 }
 
+/**
+ * KV binding の**書き込みもできる**形 (Refs #874 の 12)。`netprint_targets` は
+ * 画面 (`/scraper` の「日報netprint」タブ) から編集する唯一の設定なので、read の
+ * `DtakoConfigKvBinding` とは別に書き込み側を型で表す。
+ *
+ * **`dtako_accounts` にはこれを使わない** — あちらは「投入は 1 回だけ・CI も
+ * デプロイも書き換えない」が規範 (CLAUDE.md)。書ける口を型ごと分けておくことで、
+ * 誤って認証情報側に put する経路が生えないようにする。
+ */
+export interface DtakoConfigKvWritableBinding extends DtakoConfigKvBinding {
+  put(key: string, value: string): Promise<void>;
+}
+
+/**
+ * binding が実際に読み書きできる KV かを見る。**未設定や `put` を持たない形は
+ * null** — 保存の口が無いのに 200 を返して「保存したのに変わらない」を作らないため
+ * (呼び出し側は 503 で loud fail する)。
+ */
+export function asWritableConfigKv(kv: unknown): DtakoConfigKvWritableBinding | null {
+  const candidate = kv as DtakoConfigKvWritableBinding | null | undefined;
+  if (!candidate) return null;
+  if (typeof candidate.get !== "function") return null;
+  if (typeof candidate.put !== "function") return null;
+  return candidate;
+}
+
 /** `DTAKO_ACCOUNTS` を置く KV のキー名。 */
 export const DTAKO_ACCOUNTS_KV_KEY = "dtako_accounts";
 

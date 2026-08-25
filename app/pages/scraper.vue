@@ -1,6 +1,15 @@
 <script setup lang="ts">
-import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl, saveScrapeHistory, buildScraperZipUrl, buildEtcCsvDownloadUrl, splitCsv, splitCsvAllStream, getDtakoEventsEtags, postNetprintRun } from '~/utils/api'
+import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl, saveScrapeHistory, buildScraperZipUrl, buildEtcCsvDownloadUrl, splitCsv, splitCsvAllStream, getDtakoEventsEtags, postNetprintRun, getNetprintTargets, putNetprintTargets, getNotifyRecipients, getLineworksChannels } from '~/utils/api'
 import { yesterdayJstYmd, viewNetprintRunResult, type NetprintRunOutcome } from '~/utils/netprint-run'
+import {
+  emptyNetprintTargetRow,
+  netprintDestinationOptions,
+  netprintTargetRows,
+  netprintTargetsPayload,
+  netprintUnknownDestinationNote,
+  NETPRINT_DESTINATION_NONE,
+  type NetprintTargetRow,
+} from '~/utils/netprint-targets'
 import type { ScrapeResult, ScrapeHistoryItem, PendingUpload, ScrapeStatusEntry } from '~/types'
 import type { ScrapeProgressEvent } from '~/utils/api'
 import {
@@ -141,6 +150,95 @@ async function handleNetprintRun() {
   finally {
     clearInterval(timer)
     netprintRunning.value = false
+  }
+}
+
+// --- 運転日報 netprint の通知先設定 (Refs #874 の 12) ---
+// 設定の正は relay の KV (`DTAKO_CONFIG_KV` の `netprint_targets`)。ここは
+// `GET/PUT /api/netprint/targets` 経由でそれを読み書きする。
+// **通知先は select から選ぶ** — `channel_id` / `recipient_id` は alc の DB の行 id
+// (Uuid) で、手で貼ると取り違えても画面上はそれらしく見え、間違った人に日報が届く。
+// **検証は relay 任せ** (cron と同じ部品)。ここは理由を表示するだけ。
+
+const netprintTargetsRows = ref<NetprintTargetRow[]>([])
+const netprintTargetsLoading = ref(false)
+/** 一覧の読み込みに失敗した理由 (保存の失敗は netprintTargetsSaveError)。 */
+const netprintTargetsError = ref('')
+const netprintTargetsSaving = ref(false)
+const netprintTargetsSaveError = ref('')
+const netprintTargetsSaved = ref(false)
+/** 通知先候補 (個人 + トークルーム)。取得に失敗しても一覧の表示は続ける。 */
+const netprintDestinations = ref<{ label: string, value: string }[]>([])
+const netprintDestinationsError = ref('')
+
+/** select に渡す項目。「未選択」は sentinel value (USelect は空文字 value を拒む)。 */
+const netprintDestinationItems = computed(() => [
+  { label: '（未選択）', value: NETPRINT_DESTINATION_NONE },
+  ...netprintDestinations.value,
+])
+
+/** 保存済みの宛先が候補一覧に無い行の注記 (行と同じ並び)。 */
+const netprintUnknownNotes = computed(() =>
+  netprintTargetsRows.value.map(row => netprintUnknownDestinationNote(row, netprintDestinations.value)),
+)
+
+async function loadNetprintTargets() {
+  netprintTargetsLoading.value = true
+  netprintTargetsError.value = ''
+  try {
+    netprintTargetsRows.value = netprintTargetRows(await getNetprintTargets())
+  }
+  catch (e) {
+    netprintTargetsError.value = e instanceof Error ? e.message : '通知先の設定を読めませんでした'
+  }
+  finally {
+    netprintTargetsLoading.value = false
+  }
+}
+
+/** 通知先の候補を alc から取る。個人とトークルームは別 API なので、片方が落ちても
+ * もう片方は出す (トークルームは Bot 招待前だと 0 件なのが正常)。 */
+async function loadNetprintDestinations() {
+  netprintDestinationsError.value = ''
+  const [recipients, channels] = await Promise.all([
+    getNotifyRecipients().catch((e: unknown) => {
+      netprintDestinationsError.value = e instanceof Error ? e.message : '受信者一覧を読めませんでした'
+      return []
+    }),
+    getLineworksChannels().catch((e: unknown) => {
+      netprintDestinationsError.value = e instanceof Error ? e.message : 'トークルーム一覧を読めませんでした'
+      return []
+    }),
+  ])
+  netprintDestinations.value = netprintDestinationOptions(recipients, channels)
+}
+
+function addNetprintTargetRow() {
+  netprintTargetsRows.value = [...netprintTargetsRows.value, emptyNetprintTargetRow()]
+  netprintTargetsSaved.value = false
+}
+
+function removeNetprintTargetRow(index: number) {
+  netprintTargetsRows.value = netprintTargetsRows.value.filter((_, i) => i !== index)
+  netprintTargetsSaved.value = false
+}
+
+async function saveNetprintTargets() {
+  if (netprintTargetsSaving.value) return
+  netprintTargetsSaving.value = true
+  netprintTargetsSaveError.value = ''
+  netprintTargetsSaved.value = false
+  try {
+    await putNetprintTargets(netprintTargetsPayload(netprintTargetsRows.value))
+    netprintTargetsSaved.value = true
+    // 保存後は KV の値を読み直す (正規化で落ちたキーや trim 結果を画面に反映する)。
+    await loadNetprintTargets()
+  }
+  catch (e) {
+    netprintTargetsSaveError.value = e instanceof Error ? e.message : '保存に失敗しました'
+  }
+  finally {
+    netprintTargetsSaving.value = false
   }
 }
 
@@ -791,6 +889,16 @@ const completedCount = computed(() => tasks.value.filter(t => t.status === 'succ
 const successCount = computed(() => tasks.value.filter(t => t.status === 'success').length)
 const errorCount = computed(() => tasks.value.filter(t => t.status === 'error').length)
 
+/** 「日報netprint」タブを開いたときだけ通知先を読む (他のタブしか使わない人に
+ * alc への呼び出しを増やさない)。読み込み済みなら再取得しない。 */
+const netprintTargetsLoaded = ref(false)
+watch(activeTab, (tab) => {
+  if (tab !== 'netprint' || netprintTargetsLoaded.value) return
+  netprintTargetsLoaded.value = true
+  loadNetprintTargets()
+  loadNetprintDestinations()
+}, { immediate: true })
+
 onMounted(() => {
   loadCalendar()
   loadHistory()
@@ -832,14 +940,14 @@ onMounted(() => {
       </button>
     </div>
 
-    <div v-show="activeTab === 'netprint'">
+    <div v-show="activeTab === 'netprint'" class="space-y-4">
       <UCard>
         <h2 class="font-bold mb-1">
           運転日報を netprint に登録 (手動実行)
         </h2>
         <p class="text-xs text-gray-500 mb-3">
           対象日の運転日報を PDF にして かんたんnetprint に登録し、プリント予約番号を営業所へ通知します
-          (毎朝 6:30 の cron と同じ経路)。対象営業所と通知先は relay の <code>NETPRINT_TARGETS</code> 設定に従います。
+          (毎朝 6:30 の cron と同じ経路)。対象営業所と通知先は<strong>下の「通知先の設定」</strong>に従います。
           <strong>netprint の変換完了まで待つので数分かかります</strong> — 押したままお待ちください。
         </p>
         <div class="flex flex-wrap gap-2 items-end mb-4">
@@ -893,6 +1001,100 @@ onMounted(() => {
             relay から営業所ごとの結果が返りませんでした。
           </p>
         </div>
+      </UCard>
+
+      <!-- 通知先の設定 (Refs #874 の 12)。上の実行ボタンと同じ画面で
+           「設定 → 実行」が完結するように直下に置く。 -->
+      <UCard>
+        <h2 class="font-bold mb-1">
+          通知先の設定
+        </h2>
+        <p class="text-xs text-gray-500 mb-3">
+          営業所ごとに、日報の予約番号をどこへ通知するかを設定します
+          (上の手動実行と毎朝 6:30 の cron が同じ設定を使います)。
+          <strong>通知先は一覧から選んでください</strong> — id を手で貼ると取り違えても画面上はそれらしく見え、
+          間違った相手に日報が届きます。営業所名は 0 件の日の文面に使う任意項目です。
+        </p>
+
+        <div v-if="netprintTargetsLoading" class="text-sm text-gray-500 flex items-center gap-2 mb-3">
+          <UIcon name="i-lucide-loader-circle" class="animate-spin size-4" />
+          設定を読み込み中...
+        </div>
+        <div v-if="netprintTargetsError" class="text-sm text-red-500 mb-3 break-all">
+          [エラー] {{ netprintTargetsError }}
+        </div>
+        <div v-if="netprintDestinationsError" class="text-sm text-amber-600 dark:text-amber-400 mb-3 break-all">
+          [注意] 通知先の候補を取得できませんでした: {{ netprintDestinationsError }}
+        </div>
+
+        <div class="space-y-3">
+          <div
+            v-for="(row, i) in netprintTargetsRows"
+            :key="i"
+            class="flex flex-wrap gap-2 items-end border-b border-gray-100 dark:border-gray-800 pb-3"
+          >
+            <div>
+              <label class="block text-xs font-medium mb-1">営業所コード</label>
+              <UInput v-model="row.branchCd" class="w-28" placeholder="1" :disabled="netprintTargetsSaving" />
+            </div>
+            <div>
+              <label class="block text-xs font-medium mb-1">営業所名 (任意)</label>
+              <UInput v-model="row.branchName" class="w-44" placeholder="本社営業所" :disabled="netprintTargetsSaving" />
+            </div>
+            <div>
+              <label class="block text-xs font-medium mb-1">通知先</label>
+              <USelect
+                v-model="row.destination"
+                :items="netprintDestinationItems"
+                class="w-72"
+                :disabled="netprintTargetsSaving"
+              />
+            </div>
+            <UButton
+              color="error"
+              variant="ghost"
+              icon="i-lucide-trash-2"
+              :disabled="netprintTargetsSaving"
+              @click="removeNetprintTargetRow(i)"
+            />
+            <p v-if="netprintUnknownNotes[i]" class="w-full text-xs text-amber-600 dark:text-amber-400 break-all">
+              {{ netprintUnknownNotes[i] }}
+            </p>
+          </div>
+          <p v-if="!netprintTargetsRows.length && !netprintTargetsLoading" class="text-sm text-gray-500">
+            通知先が 1 件も設定されていません (この状態では毎朝の cron は何もしません)。
+          </p>
+        </div>
+
+        <div class="flex flex-wrap gap-2 items-center mt-4">
+          <UButton
+            label="行を追加"
+            icon="i-lucide-plus"
+            variant="outline"
+            :disabled="netprintTargetsSaving"
+            @click="addNetprintTargetRow"
+          />
+          <UButton
+            label="保存"
+            icon="i-lucide-save"
+            :loading="netprintTargetsSaving"
+            :disabled="netprintTargetsSaving || netprintTargetsLoading"
+            @click="saveNetprintTargets"
+          />
+          <UButton
+            label="再読み込み"
+            icon="i-lucide-refresh-cw"
+            variant="ghost"
+            :disabled="netprintTargetsSaving || netprintTargetsLoading"
+            @click="loadNetprintTargets"
+          />
+          <span v-if="netprintTargetsSaved" class="text-sm text-green-600 dark:text-green-400">
+            保存しました
+          </span>
+        </div>
+        <p v-if="netprintTargetsSaveError" class="text-sm text-red-500 mt-2 break-all">
+          [保存エラー] {{ netprintTargetsSaveError }}
+        </p>
       </UCard>
     </div>
 
