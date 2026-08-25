@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   NETPRINT_BASE_URL,
   NETPRINT_LITE_ID,
+  NETPRINT_USER_AGENT,
   NETPRINT_MAINTENANCE_CODE,
   NETPRINT_MAX_PDF_BYTES,
   NETPRINT_POLL_INTERVAL_MS,
@@ -140,7 +141,7 @@ describe("parseRegisterResponse", () => {
 });
 
 describe("registerPdf", () => {
-  it("register-file へ X-NPS-LITE-ID 付き multipart POST し id を返す", async () => {
+  it("register-file へ X-NPS-LITE-ID + User-Agent 付き multipart POST し id を返す", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse(200, { id: "reg-id", fileName: "a.pdf" }));
     await expect(registerPdf(PDF, "a.pdf", { fetchImpl })).resolves.toBe("reg-id");
     expect(fetchImpl).toHaveBeenCalledTimes(1);
@@ -148,6 +149,8 @@ describe("registerPdf", () => {
     expect(url).toBe(`${NETPRINT_BASE_URL}/api/register-file`);
     expect(init.method).toBe("POST");
     expect((init.headers as Record<string, string>)["X-NPS-LITE-ID"]).toBe(NETPRINT_LITE_ID);
+    // UA が無いと上流は HTTP 500 code=99999 を返す (Refs #874-13、dev 実機で確定)。
+    expect((init.headers as Record<string, string>)["User-Agent"]).toBe(NETPRINT_USER_AGENT);
     expect(init.body).toBeInstanceOf(FormData);
     expect((init.body as FormData).get("fileName")).toBe("a.pdf");
   });
@@ -260,6 +263,8 @@ describe("waitForReservation", () => {
     expect(url).toBe(`${NETPRINT_BASE_URL}/api/registration-status/reg%2Fid`);
     expect(init.method).toBe("GET");
     expect((init.headers as Record<string, string>)["X-NPS-LITE-ID"]).toBe(NETPRINT_LITE_ID);
+    // UA が無いと上流は HTTP 500 code=99999 を返す (Refs #874-13、dev 実機で確定)。
+    expect((init.headers as Record<string, string>)["User-Agent"]).toBe(NETPRINT_USER_AGENT);
     expect(sleepImpl).toHaveBeenCalledTimes(2);
     expect(sleepImpl).toHaveBeenCalledWith(NETPRINT_POLL_INTERVAL_MS);
   });

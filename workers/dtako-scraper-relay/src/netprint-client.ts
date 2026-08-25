@@ -8,6 +8,9 @@
  * JSON でない / 想定フィールドが欠けている場合は必ず throw する
  * (theearth-client.ts / etc-meisai-client.ts と同じ方針)。
  *
+ * **どちらのエンドポイントも `User-Agent` を要求する** (無いと HTTP 500
+ * `code=99999`)。`NETPRINT_USER_AGENT` の doc 参照。
+ *
  * API 契約 (#874 で確定):
  * - `POST /api/register-file` — multipart で PDF を登録。成功 200 JSON
  *   `{id, fileName, …}`。**この id は登録確認 ID であって予約番号ではない。**
@@ -25,6 +28,33 @@ export const NETPRINT_BASE_URL = "https://lite.printing.ne.jp";
 
 /** Web 版バンドルに焼き込まれた静的 ID (全クライアント共通、#874 で確認)。 */
 export const NETPRINT_LITE_ID = "86bcdc8d-5635-410a-bcdc-8c49b9fe9b0c";
+
+/**
+ * **User-Agent は必須** (Refs #874 の 13、dev 実機 2026-08-25 で確定)。
+ *
+ * Cloudflare Workers の `fetch()` は User-Agent を付けない。かんたんnetprint の
+ * API は UA 無しのリクエストに対して `register-file` / `registration-status`
+ * のどちらも **HTTP 500 `{"code":99999,"message":"内部エラーが発生しました。"}`**
+ * を返す。curl で UA だけを動かして両側を確認済み:
+ *
+ *     curl -X POST .../api/register-file -H 'User-Agent:'      → 500 code=99999
+ *     curl -X POST .../api/register-file -H 'User-Agent: Moz…' → 200 {"id":…}
+ *
+ * この 99999 は長らく「自作 PDF が壊れている」と読まれていたが、**同じ PDF が
+ * 素の Node (undici は `user-agent: node` を付ける) からは 200 で通る**ことで
+ * 切り分けが付いた。エラー本文が「内部エラー」としか言わないため、ファイルの
+ * 内容を疑う方向に何度でも誘導される — **消す前にここを読むこと。**
+ *
+ * `theearth-client.ts` の `DEFAULT_USER_AGENT` と同じ趣旨 (上流が UA を見て壊れる)
+ * だが、相手も理由も別サービスなので定数は共有しない。
+ */
+export const NETPRINT_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+/** 両エンドポイント共通のリクエストヘッダ (静的 ID + User-Agent)。 */
+function netprintHeaders(): Record<string, string> {
+  return { "X-NPS-LITE-ID": NETPRINT_LITE_ID, "User-Agent": NETPRINT_USER_AGENT };
+}
 
 /** register-file の上限 (10MB)。超過分は送らずに事前 throw する。 */
 export const NETPRINT_MAX_PDF_BYTES = 10_485_760;
@@ -152,7 +182,7 @@ export async function registerPdf(
   const fetchImpl = opts.fetchImpl ?? fetch;
   const res = await fetchImpl(`${NETPRINT_BASE_URL}/api/register-file`, {
     method: "POST",
-    headers: { "X-NPS-LITE-ID": NETPRINT_LITE_ID },
+    headers: netprintHeaders(),
     body: form,
   });
   return parseRegisterResponse(res.status, await res.text());
@@ -232,7 +262,7 @@ export async function waitForReservation(id: string, opts: NetprintPollOptions =
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const res = await fetchImpl(`${NETPRINT_BASE_URL}/api/registration-status/${encodeURIComponent(id)}`, {
       method: "GET",
-      headers: { "X-NPS-LITE-ID": NETPRINT_LITE_ID },
+      headers: netprintHeaders(),
     });
     const result = parseStatusResponse(res.status, await res.text());
     if (result.done) {
