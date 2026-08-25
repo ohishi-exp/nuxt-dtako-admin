@@ -3,8 +3,10 @@ import {
   CronConfigError,
   DTAKO_CRON,
   ETC_CRON,
+  NETPRINT_CRON,
   RESTRAINT_SYNC_CRON,
   currentYmJst,
+  dispatchNetprintTargets,
   etcCsvKey,
   parseDtakoAccounts,
   parseEtcAccounts,
@@ -259,6 +261,125 @@ describe('runScheduledCron: restraint', () => {
       now,
     )
     expect(results.every((r) => r.ok === false && r.detail.includes('HTTP 500'))).toBe(true)
+  })
+})
+
+describe('runScheduledCron: netprint', () => {
+  const now = new Date('2026-08-24T21:30:00Z') // 2026-08-25 06:30 JST → 前日 = 2026-08-24
+  const TARGETS_JSON = JSON.stringify([{ branch_cd: '1', channel_id: 'ch-honsha' }])
+
+  it('NETPRINT_TARGETS 未設定は skip する', async () => {
+    const results = await runScheduledCron(NETPRINT_CRON, { kintaiCompId: '27324455' }, okDoCall([]), now)
+    expect(results).toHaveLength(1)
+    expect(results[0].kind).toBe('netprint')
+    expect(results[0].ok).toBe(true)
+    expect(results[0].detail).toContain('NETPRINT_TARGETS 未設定')
+  })
+
+  it('targets があるのに KINTAI_COMP_ID が無ければ loud fail する', async () => {
+    for (const env of [
+      { netprintTargetsRaw: TARGETS_JSON, kintaiCompId: ' ' },
+      { netprintTargetsRaw: TARGETS_JSON }, // undefined
+    ]) {
+      const results = await runScheduledCron(NETPRINT_CRON, env, okDoCall([]), now)
+      expect(results).toHaveLength(1)
+      expect(results[0].ok).toBe(false)
+      expect(results[0].detail).toContain('KINTAI_COMP_ID 未設定')
+    }
+  })
+
+  it('target ごとに comp_id 単位 DO へ /cron/netprint を投げる (対象日 = 前日 JST)', async () => {
+    const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+    const targets = JSON.stringify([
+      { branch_cd: '1', channel_id: 'c1', branch_name: '本社営業所' },
+      { branch_cd: '2', channel_id: 'c2' },
+    ])
+    const results = await runScheduledCron(
+      NETPRINT_CRON,
+      { netprintTargetsRaw: targets, kintaiCompId: '27324455' },
+      okDoCall(calls),
+      now,
+    )
+    expect(results).toHaveLength(2)
+    expect(results.every((r) => r.kind === 'netprint' && r.ok)).toBe(true)
+    expect(results.map((r) => r.target)).toEqual(['27324455|1', '27324455|2'])
+    expect(calls).toEqual([
+      {
+        doKey: 'scraper-comp-27324455',
+        path: '/cron/netprint',
+        body: { comp_id: '27324455', branch_cd: '1', channel_id: 'c1', branch_name: '本社営業所', date: '2026-08-24' },
+      },
+      {
+        doKey: 'scraper-comp-27324455',
+        path: '/cron/netprint',
+        body: { comp_id: '27324455', branch_cd: '2', channel_id: 'c2', branch_name: '', date: '2026-08-24' },
+      },
+    ])
+  })
+
+  it('DO 呼び出しの失敗 (throw) は per-target の error result になる', async () => {
+    const targets = JSON.stringify([
+      { branch_cd: '1', channel_id: 'c1' },
+      { branch_cd: '2', channel_id: 'c2' },
+    ])
+    const failCall: CronDoCall = async (_doKey, _path, body) => {
+      if (body.branch_cd === '1') throw new Error('do down')
+      throw 'string error'
+    }
+    const results = await runScheduledCron(
+      NETPRINT_CRON,
+      { netprintTargetsRaw: targets, kintaiCompId: '27324455' },
+      failCall,
+      now,
+    )
+    expect(results.map((r) => [r.ok, r.detail])).toEqual([
+      [false, 'do down'],
+      [false, 'string error'],
+    ])
+  })
+
+  it('DO が non-2xx を返したら ok=false で status を detail に載せる', async () => {
+    const call: CronDoCall = async () => ({ ok: false, status: 503, text: 'LINEWORKS_BOT 未設定' })
+    const results = await runScheduledCron(
+      NETPRINT_CRON,
+      { netprintTargetsRaw: TARGETS_JSON, kintaiCompId: '27324455' },
+      call,
+      now,
+    )
+    expect(results[0].ok).toBe(false)
+    expect(results[0].detail).toContain('HTTP 503')
+  })
+})
+
+describe('dispatchNetprintTargets (cron と手動実行が共有する dispatch)', () => {
+  it('target ごとに DO を叩き、対象日をそのまま渡す (手動実行は前日以外も指定できる)', async () => {
+    const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+    const results = await dispatchNetprintTargets(
+      '27324455',
+      [{ branch_cd: '1', channel_id: 'ch-test', branch_name: '本社営業所' }],
+      '2026-08-20',
+      okDoCall(calls),
+    )
+    expect(calls).toEqual([
+      {
+        doKey: 'scraper-comp-27324455',
+        path: '/cron/netprint',
+        body: {
+          comp_id: '27324455',
+          branch_cd: '1',
+          channel_id: 'ch-test',
+          branch_name: '本社営業所',
+          date: '2026-08-20',
+        },
+      },
+    ])
+    expect(results[0]).toMatchObject({ kind: 'netprint', target: '27324455|1', ok: true })
+  })
+
+  it('target が空なら DO を 1 度も叩かない', async () => {
+    const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+    expect(await dispatchNetprintTargets('27324455', [], '2026-08-20', okDoCall(calls))).toEqual([])
+    expect(calls).toHaveLength(0)
   })
 })
 

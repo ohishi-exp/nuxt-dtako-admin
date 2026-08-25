@@ -80,6 +80,7 @@ export default defineConfig({
         'src/lineworks-client.ts',
         'src/netprint-client.ts',
         'src/daily-report-pdf.ts',
+        'src/netprint-cron.ts',
       ],
       thresholds: {
         lines: 100,

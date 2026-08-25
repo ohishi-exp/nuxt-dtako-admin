@@ -13,7 +13,14 @@ import {
   relayKintaiWindow,
   tenantForCompId,
 } from "./kintai-relay";
-import { resolveDtakoAccountsRaw, resolveSecretBinding, runScheduledCron } from "./cron";
+import {
+  dispatchNetprintTargets,
+  resolveDtakoAccountsRaw,
+  resolveSecretBinding,
+  runScheduledCron,
+  yesterdayJst,
+} from "./cron";
+import { planNetprintRun } from "./netprint-cron";
 import {
   countSplitFailed,
   DEFAULT_HISTORY_LIMIT,
@@ -45,6 +52,9 @@ export interface RelayWorkerEnv {
   KINTAI_COMP_ID?: string;
   /** auth-worker の origin。introspect の絶対 URL 組み立てにのみ使う。 */
   NUXT_PUBLIC_AUTH_WORKER_URL?: string;
+  /** 運転日報 netprint cron の対象 (dashboard plain 変数、JSON 配列
+   * `[{branch_cd, channel_id}, ...]`、Refs #874)。未設定は cron skip。 */
+  NETPRINT_TARGETS?: unknown;
 }
 
 export default {
@@ -149,6 +159,13 @@ export default {
       return handleRestraintSync(request, env);
     }
 
+    if (url.pathname === "/kintai-relay/netprint-run" && request.method === "POST") {
+      // 運転日報 netprint 登録 + LINE WORKS 通知を、cron (JST 6:30) を待たずに
+      // 1 回走らせる (Refs #874)。cron 経路と同じ DO route (/cron/netprint) へ
+      // 転送する — 実機確認が「cron でだけ通る道」にならないようにするため
+      return handleNetprintRun(request, env);
+    }
+
     if (url.pathname === "/ws/scraper") {
       // SCRAPER_MODE=http (Refs ohishi-exp/dtako-scraper#22) は comp_id 単位で
       // DO を分けることで同一企業への並列リクエストを自然に直列化する。comp_id が
@@ -218,6 +235,8 @@ export default {
             scraperMode: env.SCRAPER_MODE,
             dtakoAccountsRaw: await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS),
             etcAccountsRaw: await resolveSecretBinding(env.ETC_ACCOUNTS),
+            netprintTargetsRaw: await resolveSecretBinding(env.NETPRINT_TARGETS),
+            kintaiCompId: env.KINTAI_COMP_ID,
           },
           async (doKey, path, body) => {
             const id = env.RELAY.idFromName(doKey);
@@ -778,6 +797,92 @@ async function handleRestraintSync(request: Request, env: RelayWorkerEnv): Promi
     status: res.status,
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
   });
+}
+
+/**
+ * `POST /kintai-relay/netprint-run` — 運転日報の netprint 登録 + LINE WORKS 通知を
+ * cron (JST 6:30) を待たずに 1 回走らせる (Refs #874)。
+ *
+ * body は全部省略可 `{date?, branch_cd?, channel_id?, branch_name?, comp_id?}`:
+ * - `date` 省略で**前日 (JST)** = cron と同じ対象日。指定は `YYYY-MM-DD`
+ * - `branch_cd` + `channel_id` を**揃えて**渡すとその 1 件だけ走る
+ *   (`NETPRINT_TARGETS` を触らずに試験用チャンネルへ流せる)。片方だけは 400
+ * - どちらも省略で `NETPRINT_TARGETS` の全 target = cron と同じ動き
+ * - `comp_id` 省略時は `KINTAI_COMP_ID` (他の `/kintai-relay/*` と同じ)
+ *
+ * **cron と同じ DO route (`/cron/netprint`) を叩く** — 実機確認が「cron でだけ
+ * 通る道」にならないようにするため。認証は他の `/kintai-relay/*` と同じ
+ * `X-Alc-Proxy-Secret` の constant-time 検証。
+ *
+ * **応答は同期** (netprint の status poll 完了まで待つので数分かかりうる)。
+ * 各 target の結果 (`ok` / `detail` / 予約番号は DO 側 detail に載る) を返す。
+ */
+export async function handleNetprintRun(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  let body: {
+    date?: unknown;
+    branch_cd?: unknown;
+    channel_id?: unknown;
+    branch_name?: unknown;
+    comp_id?: unknown;
+  };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return fail(400, "body must be JSON");
+  }
+
+  const compId =
+    (typeof body.comp_id === "string" && body.comp_id.trim()) || (env.KINTAI_COMP_ID ?? "").trim();
+  if (!compId) return fail(503, "comp_id が解決できません");
+
+  let plan;
+  try {
+    plan = planNetprintRun(
+      body,
+      await resolveSecretBinding(env.NETPRINT_TARGETS),
+      yesterdayJst(new Date()),
+    );
+  } catch (err) {
+    // NETPRINT_TARGETS の JSON 不正 (CronConfigError)。cron 側と同じく loud fail —
+    // 手動実行では応答にも理由を載せる (叩いた人がその場で直せるように)。
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(JSON.stringify({ netprint_run: "targets-config-error", error: detail }));
+    return fail(503, detail);
+  }
+  if ("error" in plan) return fail(400, plan.error);
+
+  const results = await dispatchNetprintTargets(compId, plan.targets, plan.date, async (doKey, path, doBody) => {
+    const id = env.RELAY.idFromName(doKey);
+    const res = await env.RELAY.get(id).fetch(`https://relay.internal${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(doBody),
+    });
+    return { ok: res.ok, status: res.status, text: await res.text() };
+  });
+  for (const result of results) {
+    const line = JSON.stringify({ netprint_run: "manual", date: plan.date, ...result });
+    if (result.ok) console.log(line);
+    else console.error(line);
+  }
+  return new Response(
+    JSON.stringify({ ok: results.every((r) => r.ok), date: plan.date, results }),
+    {
+      status: results.every((r) => r.ok) ? 200 : 502,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    },
+  );
 }
 
 /**
