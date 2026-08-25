@@ -601,9 +601,15 @@ branches = true
 # 付けた。この一言は単独では出ず、`resolveLegSalesPanel` が
 # `${legSalesNote(local)} ${r2Note(fetch)}` と **R2 側の事情と 1 文に繋げて**出すため
 # (付いていないと「…集計すると出ます R2 の版 (…) にもこの運行はありません」と繋がる)。
-# **分岐は 1 つも増減していない** (再計測: if/?:/&&/||/?? を機械挿入する計測器で 50 分岐、
-# 全部が true/false 両方を通る。上の 58 は `?.` 等も数えた別の計測器の値で、
-# **同じものを数えていない** — どちらも 100%)。
+# **分岐は 1 つも増減していない。** #867 で再計測したときの値は
+# **`if` / `?:` / `&&` / `||` / `??` を TypeScript の AST で機械挿入する計測器で 50 分岐、
+# 全部が true/false 両方を通る**。**上の 58 とは数え方が違う** (差の内訳は未確認) ので、
+# **2 つの数字を直接引き算しない** — どちらも「自分が数えた分岐が全部両側を通った」を
+# 言っているだけで、母数の定義が違う。
+# ★ **#867 で一度「差は `?.` 等を数えたぶんだ」と書いたが、これは測らずに書いた推測で、
+# しかも成り立たない** — このファイルの `?.` は **1 個**しかなく、差 8 を説明できない。
+# **数字の差に因果を付けるなら、同じ定義で数え直してからにする** (#858 で 3 者が 3 通りの
+# 数字を出したとき壊れたのは、数字ではなく**因果の推論**の方だった)。
 [[files]]
 path = "app/utils/operation-leg-sales.ts"
 branches = true
@@ -664,12 +670,20 @@ branches = true
 # ★ **収支パネルの候補ゲート (`lookupUsedSlipIds`) はここに乗せない。** あちらは
 # 「①が既にどこかの便へ当てた明細」の**和集合**が要り、版は `slipIds` を持たないので
 # 落とすと空集合になり**必ず**二重計上の口になる。localStorage のままにしてある (別 issue)。
-# branches: instrumented コピー (`operation-leg-sales.ts` と同じ計測器を TypeScript の AST で
-# 機械挿入) でテストを流し、**44 分岐すべてが true/false 両方を通る**ことを数えた
-# (origin/main de2db18 では 42 — #867 で `localYm` の 2 分岐が増え、`not-aggregated` の
-# 早期 return が三項に替わった)。probe 2 段 (片側だけ通る `if` が `[true]` / 両側が
-# `[true,false]`、`pick(0,7)===7` `orValue(0,7)===0` `andValue(0,7)===false` で
-# **計測器が値を壊していない**こと) と**陰性対照**も取ってある —
+# branches: instrumented コピー (`if` / `?:` / `&&` / `||` / `??` を TypeScript の AST で
+# 機械挿入する計測器) でテストを流し、**44 分岐すべてが true/false 両方を通る**ことを数えた。
+# **origin/main de2db18 を同じ計測器で測ると 42** で、差 2 の内訳も突き合わせてある
+# (分岐の式を機械比較した結果): **増えたのは `localYm !== null` と `localYm === null` の 2 つ
+# だけ**。`legSalesSourceLabel` の `savedAt === null`(三項) → `savedAt !== null`(if) と、
+# `local.status === 'not-aggregated'` の早期 return → 三項は**書き方が変わっただけで数は同じ**
+# (だから差には寄与していない)。**別々の計測器の数字は引き算しない**が、これは
+# 両方を同じ計測器で測っているので比較が成立する。
+# probe 2 段 (片側だけ通る `if` が `[true]` / 両側が `[true,false]`、
+# `pick(0,7)===7` `pick(3,7)===3` `orValue(0,7)===0` `orValue(null,7)===7`
+# `andValue(0,7)===false` `andValue(1,7)===7` で**計測器が値を壊していない**こと。
+# ★ `pick` / `orValue` の中身は上の `operation-leg-sales.ts` の注記と**入れ替わっている**
+# — あちらの `orValue` は `||`、こちらの `orValue` は `??`。**同じ名前で別の式**なので、
+# probe の値を比べるときは定義から見ること) と**陰性対照**も取ってある —
 # `not-aggregated` の describe を外すと `localYm === null` が `true のみ` に落ち、
 # 両側は 44 → 43 になる。
 [[files]]
