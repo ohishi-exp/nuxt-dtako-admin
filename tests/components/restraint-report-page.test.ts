@@ -169,15 +169,66 @@ describe('/restraint-report ドライバー一覧の取得', () => {
     expect(w.find('.driver-count').text()).toBe('2')
   })
 
-  it('★ 取得に失敗しても画面は開く (現状の挙動 — 一覧が空になるだけで理由は出ない)', async () => {
-    // `onMounted` の `.catch(() => {})` が握り潰す。**失敗と「乗務員が 0 人」が
-    // 同じ見た目**になるが、直すのは挙動の変更なのでここでは固定するだけ (Refs #903)。
-    api.getDrivers.mockRejectedValue(new Error('API エラー (503): '))
-    const w = mountPage()
-    await flushPromises()
+  /**
+   * ★ **ここは #912 で「現状の挙動」として固定していたものを書き換えた** (Refs #920)。
+   *
+   * 元のテストは `onMounted` の `.catch(() => {})` が握り潰す挙動 —
+   * 「取得に失敗した」と「乗務員が 0 人」が同じ見た目になること — を assert して
+   * いた。**その挙動自体が欠陥**なので、`SKILL.md` §7 の「その語を固定していた
+   * テストは**今の嘘**を固定している。書き換えになるのが正しい」に当たる。
+   *
+   * **逆方向も同じだけ大事**で、失敗の文言だけ足すと**本当に 0 人の回**まで
+   * 異常に見える。両方向を撃ち分けるところまでがこの節の担当。
+   */
+  describe('★ 「取得に失敗した」と「本当に 0 人」を別の文にする (Refs #920)', () => {
+    it('失敗したら理由を出す (画面自体は今までどおり開く)', async () => {
+      api.getDrivers.mockRejectedValue(new Error('API エラー (503): DB に繋がりません'))
+      const w = mountPage()
+      await flushPromises()
 
-    expect(w.find('.driver-count').text()).toBe('0')
-    expect(w.text()).toContain('ドライバーと月を選択してください')
+      expect(w.text()).toContain('乗務員一覧を取得できませんでした (API エラー (503): DB に繋がりません)')
+      // **断定しない。**確かめ方まで出す (#911 / #915 と同じ形)
+      expect(w.text()).toContain('0 人なのか読めなかっただけなのかは、この画面では判りません')
+      expect(w.text()).toContain('ページを再読み込みして確かめてください')
+      // 画面は今までどおり開く (選択肢が空になるだけ)
+      expect(w.find('.driver-count').text()).toBe('0')
+      expect(w.text()).toContain('ドライバーと月を選択してください')
+    })
+
+    it('★ 逆方向: 取得できて 0 人だった回は警告を出さない (異常に見せない)', async () => {
+      api.getDrivers.mockResolvedValue([])
+      const w = mountPage()
+      await flushPromises()
+
+      expect(w.find('.driver-count').text()).toBe('0')
+      expect(w.text()).not.toContain('取得できませんでした')
+      expect(w.text()).not.toContain('判りません')
+      expect(w.text()).toContain('ドライバーと月を選択してください')
+    })
+
+    it('Error 以外で失敗しても黙らず、[object Object] も出さない', async () => {
+      api.getDrivers.mockRejectedValue({ status: 503 })
+      const w = mountPage()
+      await flushPromises()
+
+      expect(w.text()).toContain('乗務員一覧を取得できませんでした (理由を読めませんでした)')
+      expect(w.text()).not.toContain('[object Object]')
+    })
+
+    it('乗務員一覧が読めなくても、月報の取得エラーとは別の文として出る', async () => {
+      // 同じ画面に 2 種類の失敗が出る。**混ざると「どっちが落ちたのか」が消える。**
+      api.getDrivers.mockRejectedValue(new Error('一覧が落ちた'))
+      api.getRestraintReport.mockRejectedValue(new Error('月報が落ちた'))
+      const w = mountPage()
+      await flushPromises()
+      await setMonth(w)
+      await pickDriver(w)
+
+      const alerts = w.findAllComponents({ name: 'UAlert' })
+      const titles = alerts.map(a => a.props('title'))
+      expect(titles).toContain('乗務員一覧を取得できませんでした (一覧が落ちた)')
+      expect(titles).toContain('月報が落ちた')
+    })
   })
 })
 

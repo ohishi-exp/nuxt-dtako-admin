@@ -16,6 +16,9 @@ const perPage = 50
 const items = ref<DailyWorkHours[]>([])
 const total = ref(0)
 const drivers = ref<Driver[]>([])
+// 乗務員一覧が**取得できなかった**理由 (Refs #920)。**空配列だけでは「0 人」と
+// 区別が付かない**ので、「読めなかった」ことを状態として持つ。
+const driversError = ref<string | null>(null)
 const workTimeItems = ref<WorkTimeItem[]>([])
 const wtTotal = ref(0)
 const loading = ref(false)
@@ -57,8 +60,26 @@ async function fetchData() {
   }
 }
 
+/**
+ * 一覧の取得失敗を 1 行にする (Refs #920)。
+ * **`describeApiError` を当てていないのは当て忘れではない** — 理由は
+ * `app/pages/restraint-report.vue` の同名関数の doc コメント (この経路の例外は
+ * ofetch の `FetchError` ではないので当てても 1 文字も変わらない。直すのは #904)。
+ */
+function describeListFailure(e: unknown): string {
+  return e instanceof Error ? e.message : '理由を読めませんでした'
+}
+
 onMounted(async () => {
-  await getDrivers().then(d => drivers.value = d).catch(() => {})
+  try {
+    drivers.value = await getDrivers()
+  }
+  catch (e) {
+    // 一覧は空に戻すが、**空にした理由を必ず持つ** — 空配列だけだと選択肢が出ないのを
+    // 「乗務員が 0 人」と読まれ、読めなかっただけの回と区別が付かない (Refs #920)。
+    drivers.value = []
+    driversError.value = describeListFailure(e)
+  }
   await fetchData()
 })
 
@@ -108,6 +129,18 @@ function onTabChange() {
 <template>
   <div class="space-y-4">
     <h2 class="text-xl font-bold">日別労働時間</h2>
+
+    <!-- ★ 「読めなかった」と「0 人」を別の文にする (Refs #920)。失敗した回にだけ出す
+         (理由だけ出すと**本当に 0 人の回**まで異常に見える)。取りに行くのは
+         `onMounted` の 1 回だけなので、やり直す手段はページの再読み込みしかない。 -->
+    <UAlert
+      v-if="driversError"
+      :title="`乗務員一覧を取得できませんでした (${driversError})`"
+      description="0 人なのか読めなかっただけなのかは、この画面では判りません — ページを再読み込みして確かめてください"
+      color="error"
+      icon="i-lucide-circle-x"
+      variant="subtle"
+    />
 
     <!-- Filters -->
     <div class="flex flex-wrap gap-3 items-end">

@@ -1,0 +1,110 @@
+/**
+ * `/daily-hours` の**乗務員プルダウンの取得失敗**を「0 人」と同じ見た目に
+ * しないか (Refs #920)。
+ *
+ * 直す前は `getDrivers().then(d => drivers.value = d).catch(() => {})` で、
+ * **例外オブジェクトを束縛すらしていない**ので理由は 100% 失われていた。
+ * 残るのは空のプルダウンだけ ⇒ 人は「乗務員が居ない」と読む。
+ *
+ * **逆方向も同じだけ大事**で、失敗の文言だけ足すと**本当に 0 人の回**まで異常に
+ * 見える。ここでは両方向を測る。**カバレッジ目的では増やさない** — この画面の表の
+ * 組み立てや月ゲートは別の担当。
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { mount, flushPromises } from '@vue/test-utils'
+import type { VueWrapper } from '@vue/test-utils'
+import type { Driver } from '~/types'
+import { NUXT_UI_PAGE_STUBS } from '../helpers/stubs'
+
+const { api } = vi.hoisted(() => ({
+  api: {
+    getDailyHours: vi.fn(),
+    getWorkTimes: vi.fn(),
+    getDrivers: vi.fn(),
+  },
+}))
+
+vi.mock('~/utils/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('~/utils/api')>()),
+  getDailyHours: api.getDailyHours,
+  getWorkTimes: api.getWorkTimes,
+  getDrivers: api.getDrivers,
+}))
+
+import Page from '~/pages/daily-hours/index.vue'
+
+function driver(id: string, name: string): Driver {
+  return { id, tenant_id: 't1', driver_cd: id, driver_name: name }
+}
+
+const DriverSearchSelectStub = {
+  name: 'DriverSearchSelect',
+  props: ['modelValue', 'drivers'],
+  template: '<div><span class="driver-count">{{ drivers.length }}</span></div>',
+}
+
+async function mountPage() {
+  const w = mount(Page, {
+    global: { stubs: { ...NUXT_UI_PAGE_STUBS, DriverSearchSelect: DriverSearchSelectStub } },
+  })
+  await flushPromises()
+  return w
+}
+
+/** `UAlert` は stub でも `title` / `description` を prop で受けて描く (helpers/stubs.ts)。 */
+function alertTitles(w: VueWrapper) {
+  return w.findAllComponents({ name: 'UAlert' }).map(a => a.props('title'))
+}
+
+beforeEach(() => {
+  for (const fn of Object.values(api)) fn.mockReset()
+  api.getDailyHours.mockResolvedValue({ items: [], total: 0, page: 1, per_page: 50 })
+  api.getWorkTimes.mockResolvedValue({ items: [], total: 0, page: 1, per_page: 50 })
+  api.getDrivers.mockResolvedValue([driver('d1', '山田 太郎')])
+})
+
+describe('/daily-hours 乗務員一覧の取得', () => {
+  it('取得できたら選択肢に渡す (陽性対照)', async () => {
+    const w = await mountPage()
+
+    expect(w.find('.driver-count').text()).toBe('1')
+    expect(alertTitles(w)).toHaveLength(0)
+  })
+
+  describe('★ 「取得に失敗した」と「本当に 0 人」を別の文にする (Refs #920)', () => {
+    it('失敗したら理由を出す', async () => {
+      api.getDrivers.mockRejectedValue(new Error('API エラー (503): DB に繋がりません'))
+      const w = await mountPage()
+
+      expect(alertTitles(w)).toEqual(['乗務員一覧を取得できませんでした (API エラー (503): DB に繋がりません)'])
+      expect(w.text()).toContain('0 人なのか読めなかっただけなのかは、この画面では判りません')
+      expect(w.text()).toContain('ページを再読み込みして確かめてください')
+    })
+
+    it('★ 逆方向: 取得できて 0 人だった回は警告を出さない (異常に見せない)', async () => {
+      api.getDrivers.mockResolvedValue([])
+      const w = await mountPage()
+
+      expect(w.find('.driver-count').text()).toBe('0')
+      expect(alertTitles(w)).toHaveLength(0)
+      expect(w.text()).not.toContain('取得できませんでした')
+      expect(w.text()).not.toContain('判りません')
+    })
+
+    it('Error 以外で失敗しても黙らず、[object Object] も出さない', async () => {
+      api.getDrivers.mockRejectedValue({ status: 503 })
+      const w = await mountPage()
+
+      expect(alertTitles(w)).toContain('乗務員一覧を取得できませんでした (理由を読めませんでした)')
+      expect(w.text()).not.toContain('[object Object]')
+    })
+
+    it('乗務員一覧が読めなくても表のデータ取得は今までどおり走る', async () => {
+      api.getDrivers.mockRejectedValue(new Error('落ちた'))
+      await mountPage()
+
+      expect(api.getDailyHours).toHaveBeenCalledTimes(1)
+      expect(api.getWorkTimes).toHaveBeenCalledTimes(1)
+    })
+  })
+})
