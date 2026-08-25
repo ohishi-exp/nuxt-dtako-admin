@@ -90,9 +90,11 @@ service = "nuxt-dtako-admin-scraper-relay-tail"
 # - "30 21 * * *"        = 06:30 JST。前日分の運転日報を netprint へ登録し予約番号を
 #                          LINE WORKS へ通知する (Refs #874)。dtako 日次で前日分が
 #                          theearth に揃った後・営業所の始業前。NETPRINT_TARGETS
-#                          (dashboard plain var、[{branch_cd, channel_id,
-#                          branch_name?}]。channel_id は rust-alc-api の DB
-#                          lineworks_channels の行 id = Uuid) 設定時のみ実走。
+#                          (dashboard plain var、[{branch_cd, channel_id |
+#                          recipient_id, branch_name?}]。宛先は rust-alc-api の DB
+#                          lineworks_channels (トークルーム) か notify_recipients
+#                          (個人) の行 id = Uuid で、どちらか一方だけ指定する
+#                          (Refs #874 の 10)) 設定時のみ実走。
 [triggers]
 crons = [
   "0 16 * * *",

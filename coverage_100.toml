@@ -973,8 +973,9 @@ branches = true
 path = "app/utils/netprint-run.ts"
 branches = true
 
-# `POST /api/netprint/run` の body 検証 (date の実在判定、branch_cd と channel_id の
-# 「両方 or 両方無し」ガード) と、relay の失敗応答を 1 行にする `describeNetprintRunFailure`。
+# `POST /api/netprint/run` の body 検証 (date の実在判定、branch_cd と宛先
+# (channel_id か recipient_id) の「両方 or 両方無し」ガード、宛先の排他) と、
+# relay の失敗応答を 1 行にする `describeNetprintRunFailure`。
 [[files]]
 path = "server/utils/netprint-run.ts"
 branches = true

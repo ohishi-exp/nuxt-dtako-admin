@@ -500,6 +500,7 @@ describe("handleNetprintRun (POST /kintai-relay/netprint-run)", () => {
       comp_id: "27324455",
       branch_cd: "2",
       channel_id: CH_TEST,
+      recipient_id: "",
       branch_name: "テスト用",
       date: "2026-08-20",
     });

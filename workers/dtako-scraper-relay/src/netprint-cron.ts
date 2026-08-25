@@ -11,6 +11,7 @@
  */
 
 import { CronConfigError } from "./cron";
+import type { LineworksDestination } from "./lineworks-notify";
 
 /** `NETPRINT_TARGETS` (plain 変数) の 1 エントリ。`branch_cd` は theearth
  * F-DES1010 の行 `lblBranchCD` (非パディング数値) と突き合わせる営業所コード、
@@ -18,27 +19,78 @@ import { CronConfigError } from "./cron";
  * 通知文にも正しい名前を出すための設定で、未設定なら行の `branchName` →
  * `営業所コード{branch_cd}` の順にフォールバックする。
  *
- * **`channel_id` は rust-alc-api の DB テーブル `lineworks_channels` の行 id
- * (Uuid)** であって、LINE WORKS API の channelId そのものではない (Refs #874 の
- * 8 の方針転換)。Bot の credential も実チャンネルも DB 一元管理で、rust 側が
- * この id から tenant ごと解決する。⇒ **通知先を変えるときに触るのは DB (画面)
- * であって、ここの値は「どの行を指すか」だけ**。 */
+ * **宛先は `channel_id` と `recipient_id` のどちらか一方**を指定する (両方 /
+ * 両方無しは設定ミスとしてその target だけ落とす、Refs #874 の 10)。
+ *
+ * - `channel_id` — rust-alc-api の DB テーブル `lineworks_channels` の行 id (Uuid)。
+ *   **LINE WORKS API の channelId そのものではない** (#874 の 8 の方針転換)
+ * - `recipient_id` — 同じく DB `notify_recipients` の行 id (Uuid)。**個人宛**。
+ *   実運用ではトークルームが 1 件も登録されておらず、通知先はこちらになる
+ *
+ * どちらも Bot の credential も実宛先も DB 一元管理で、rust 側が id から tenant
+ * ごと解決する。⇒ **通知先を変えるときに触るのは DB (画面) であって、ここの値は
+ * 「どの行を指すか」だけ**。 */
 export interface NetprintTarget {
   branch_cd: string;
-  channel_id: string;
+  /** `lineworks_channels` の行 id (トークルーム宛)。`recipient_id` と排他。 */
+  channel_id?: string;
+  /** `notify_recipients` の行 id (個人宛)。`channel_id` と排他。 */
+  recipient_id?: string;
   branch_name?: string;
 }
 
-/** `channel_id` (= `lineworks_channels` の行 id) の形。Uuid でないものは DB を
- * 引くまでもなく設定ミスなので、alc へ投げる前に弾く — 「LINE WORKS の
- * channelId をそのまま貼った」を静かに 404 にせず、設定した人に見える形で
- * 落とすため。**この検証をするのはここだけ** — auth-worker の allowlist は
- * path しか見ず (`channel_id` は body にある)、rust 側の 404 は「DB に無い行」と
+/** 宛先 id (`channel_id` / `recipient_id` のどちらも DB の行 id) の形。Uuid で
+ * ないものは DB を引くまでもなく設定ミスなので、alc へ投げる前に弾く —
+ * 「LINE WORKS の channelId をそのまま貼った」を静かに 404 にせず、設定した人に
+ * 見える形で落とすため。**この検証をするのはここだけ** — auth-worker の allowlist
+ * は path しか見ず (宛先は body にある)、rust 側の 404 は「DB に無い行」と
  * 「そもそも id の形ではない」を区別しない。 */
-export const NETPRINT_CHANNEL_ID_RE =
+export const NETPRINT_DESTINATION_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** `NETPRINT_TARGETS` (JSON 配列 `[{branch_cd, channel_id}, ...]`) をパースする。
+export type NetprintDestinationResolution =
+  | { ok: true; destination: LineworksDestination }
+  | { ok: false; error: string };
+
+/**
+ * target の `channel_id` / `recipient_id` から送信先を 1 つ決める。
+ *
+ * **どちらか一方だけ**が要る (rust の `POST /api/internal/lineworks/send` が
+ * 両方 / 両方無しを 400 にするのと同じ規則、#874-9)。ここで弾くのは往復を
+ * 減らすためではなく、**設定した人がその場で直せる日本語**を返すため —
+ * rust の 400 は relay の `detail` を経て画面に出るころには HTTP status に
+ * 潰れている。
+ *
+ * `parseNetprintTargets` は設定 JSON を素通し (`as NetprintTarget[]`) するので、
+ * 型が言うほど string とは限らない。`typeof` で見て非文字列は「無い」に倒す。
+ */
+export function resolveNetprintDestination(target: NetprintTarget): NetprintDestinationResolution {
+  const channelId = typeof target.channel_id === "string" ? target.channel_id.trim() : "";
+  const recipientId = typeof target.recipient_id === "string" ? target.recipient_id.trim() : "";
+  if (channelId !== "" && recipientId !== "") {
+    return { ok: false, error: "channel_id と recipient_id はどちらか一方だけ指定してください" };
+  }
+  if (channelId === "" && recipientId === "") {
+    return { ok: false, error: "channel_id と recipient_id のどちらか一方を指定してください" };
+  }
+  const destination: LineworksDestination =
+    channelId !== "" ? { kind: "channel", id: channelId } : { kind: "recipient", id: recipientId };
+  if (!NETPRINT_DESTINATION_ID_RE.test(destination.id)) {
+    return { ok: false, error: describeBadDestinationId(destination.kind) };
+  }
+  return { ok: true, destination };
+}
+
+/** Uuid でない宛先 id の理由。**どの表を引く id なのか**まで書く (設定した人が
+ * 画面のどこから値を持ってくればよいか分かるように)。 */
+function describeBadDestinationId(kind: LineworksDestination["kind"]): string {
+  return kind === "channel"
+    ? "channel_id が UUID 形式ではありません (lineworks_channels の行 id を指定してください)"
+    : "recipient_id が UUID 形式ではありません (notify_recipients の行 id を指定してください)";
+}
+
+/** `NETPRINT_TARGETS` (JSON 配列 `[{branch_cd, channel_id | recipient_id}, ...]`)
+ * をパースする。
  * 未設定は [] (= cron skip)、JSON 不正は loud fail (`parseDtakoAccounts` と
  * 同じ流儀)。 */
 export function parseNetprintTargets(raw: string | undefined): NetprintTarget[] {
@@ -130,18 +182,24 @@ export type NetprintRunPlan = { error: string } | { date: string; targets: Netpr
  *
  * - `date` 省略で `defaultDate` (呼び出し側が `yesterdayJst` で出した前日 JST)。
  *   指定するなら `YYYY-MM-DD`。
- * - `branch_cd` + `channel_id` を**揃えて**渡すとその 1 件だけを走らせる
- *   (`NETPRINT_TARGETS` を触らずに試験用チャンネルへ流せる)。**片方だけの指定は
- *   受け付けない** — 設定側の target と混ざって「意図しない宛先へ送る」が起きうる
- *   ため、黙って補完しない。`channel_id` は `lineworks_channels` の行 id (Uuid)
- *   なので、形が違えば 400 で返す (叩いた人がその場で直せるように)。
+ * - `branch_cd` + 宛先 (`channel_id` か `recipient_id` の**どちらか一方**) を
+ *   **揃えて**渡すとその 1 件だけを走らせる (`NETPRINT_TARGETS` を触らずに試験用の
+ *   宛先へ流せる)。**片方だけの指定は受け付けない** — 設定側の target と混ざって
+ *   「意図しない宛先へ送る」が起きうるため、黙って補完しない。宛先の排他と Uuid
+ *   の検証は `resolveNetprintDestination` (cron 経路と同じ規則・同じ文言)。
  * - どちらも省略すると `NETPRINT_TARGETS` の全 target を使う (= cron と同じ動き)。
  *
  * `NETPRINT_TARGETS` が不正 JSON なら `parseNetprintTargets` がそのまま throw する
  * (呼び出し側が loud fail に落とす)。
  */
 export function planNetprintRun(
-  body: { date?: unknown; branch_cd?: unknown; channel_id?: unknown; branch_name?: unknown },
+  body: {
+    date?: unknown;
+    branch_cd?: unknown;
+    channel_id?: unknown;
+    recipient_id?: unknown;
+    branch_name?: unknown;
+  },
   configuredTargetsRaw: string | undefined,
   defaultDate: string,
 ): NetprintRunPlan {
@@ -154,24 +212,30 @@ export function planNetprintRun(
   }
   const branchCd = typeof body.branch_cd === "string" ? body.branch_cd.trim() : "";
   const channelId = typeof body.channel_id === "string" ? body.channel_id.trim() : "";
-  if (branchCd !== "" || channelId !== "") {
-    if (branchCd === "" || channelId === "") {
-      return { error: "branch_cd と channel_id は両方まとめて指定してください" };
-    }
-    if (!NETPRINT_CHANNEL_ID_RE.test(channelId)) {
+  const recipientId = typeof body.recipient_id === "string" ? body.recipient_id.trim() : "";
+  const hasDestination = channelId !== "" || recipientId !== "";
+  if (branchCd !== "" || hasDestination) {
+    if (branchCd === "" || !hasDestination) {
       return {
         error:
-          "channel_id が UUID 形式ではありません (lineworks_channels の行 id を指定してください)",
+          "branch_cd と宛先 (channel_id か recipient_id) は両方まとめて指定してください",
       };
     }
     const branchName =
       typeof body.branch_name === "string" && body.branch_name !== "" ? body.branch_name : undefined;
-    return { date, targets: [{ branch_cd: branchCd, channel_id: channelId, branch_name: branchName }] };
+    const target: NetprintTarget = { branch_cd: branchCd, branch_name: branchName };
+    // 指定された側のキーだけを立てる (空文字を残すと「両方指定」に見える)。
+    if (channelId !== "") target.channel_id = channelId;
+    if (recipientId !== "") target.recipient_id = recipientId;
+    const resolved = resolveNetprintDestination(target);
+    if (!resolved.ok) return { error: resolved.error };
+    return { date, targets: [target] };
   }
   const targets = parseNetprintTargets(configuredTargetsRaw);
   if (targets.length === 0) {
     return {
-      error: "NETPRINT_TARGETS が未設定です — branch_cd と channel_id を body で指定してください",
+      error:
+        "NETPRINT_TARGETS が未設定です — branch_cd と channel_id (または recipient_id) を body で指定してください",
     };
   }
   return { date, targets };
@@ -202,15 +266,20 @@ export interface NetprintCronDeps<Harvest extends NetprintHarvest = NetprintHarv
   /** netprint へ登録し status poll 完了まで待つ (#874-3 `registerPdf` +
    * `waitForReservation`)。 */
   registerPdf(pdf: Uint8Array, fileName: string): Promise<NetprintRegistration>;
-  /** LINE WORKS のトークルームへテキストを送る。`channelId` は
-   * `lineworks_channels` の行 id (Uuid) で、実体は rust-alc-api の
-   * `POST /api/internal/lineworks/send` (#874-8 `sendLineworksTextViaAlcInternalProxy`)。 */
-  sendText(channelId: string, text: string): Promise<void>;
+  /** LINE WORKS へテキストを送る。`destination` はトークルーム宛
+   * (`lineworks_channels` の行 id) か個人宛 (`notify_recipients` の行 id) の
+   * どちらかで、実体は rust-alc-api の `POST /api/internal/lineworks/send`
+   * (#874-8/9 `sendLineworksTextViaAlcInternalProxy`)。 */
+  sendText(destination: LineworksDestination, text: string): Promise<void>;
 }
 
 export interface NetprintTargetResult {
   branch_cd: string;
-  channel_id: string;
+  /** トークルーム宛なら設定された `channel_id`、個人宛なら null。
+   * **フィールド名は変えない** — 画面 (#874-5) が読む応答の形を保つため。 */
+  channel_id: string | null;
+  /** 個人宛なら設定された `recipient_id`、トークルーム宛なら null (#874-10 で追加)。 */
+  recipient_id: string | null;
   ok: boolean;
   /** branchCd で絞った後の行数。harvest 前に失敗したら null。 */
   rows: number | null;
@@ -220,6 +289,18 @@ export interface NetprintTargetResult {
 
 function describeError(err: unknown): string {
   return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+}
+
+/** 結果に載せる宛先。**検証前の生値をそのまま**返す (Uuid でない値を弾いたときに
+ * 「何を設定していたか」が結果から読めるように)。非文字列は null。 */
+function destinationFields(target: NetprintTarget): {
+  channel_id: string | null;
+  recipient_id: string | null;
+} {
+  return {
+    channel_id: typeof target.channel_id === "string" ? target.channel_id : null,
+    recipient_id: typeof target.recipient_id === "string" ? target.recipient_id : null,
+  };
 }
 
 /** 通知文に使う営業所名。設定 (`branch_name`) が最優先 — 0 行の日でも同じ
@@ -240,10 +321,10 @@ export function resolveBranchDisplayName(
  * 次の target へ進む。呼び出し側 (DO) は `ok: false` の結果を console.error
  * する (Tail Worker に残す)。
  *
- * `channel_id` が Uuid でない target は **harvest も PDF 生成もせずに** `ok: false`
- * にする — 通知先が無い以上 netprint に登録しても誰にも番号が届かないし、
- * エラー通知の送り先も同じく無いため (送ろうとしても確実に失敗する)。
- * 1 営業所の設定ミスで他の営業所の通知まで止めないのが target 独立の趣旨。
+ * 宛先 (`channel_id` / `recipient_id`) の指定が不正な target は **harvest も PDF
+ * 生成もせずに** `ok: false` にする — 通知先が無い以上 netprint に登録しても誰にも
+ * 番号が届かないし、エラー通知の送り先も同じく無いため (送ろうとしても確実に失敗
+ * する)。1 営業所の設定ミスで他の営業所の通知まで止めないのが target 独立の趣旨。
  */
 export async function runNetprintTargets<Harvest extends NetprintHarvest>(
   deps: NetprintCronDeps<Harvest>,
@@ -252,20 +333,20 @@ export async function runNetprintTargets<Harvest extends NetprintHarvest>(
 ): Promise<NetprintTargetResult[]> {
   const results: NetprintTargetResult[] = [];
   for (const target of targets) {
-    // `parseNetprintTargets` は設定 JSON を素通し (`as NetprintTarget[]`) するので、
-    // 型が言うほど string とは限らない。`test` の String 化に任せて弾く。
-    if (!NETPRINT_CHANNEL_ID_RE.test(target.channel_id)) {
+    const ids = destinationFields(target);
+    const resolved = resolveNetprintDestination(target);
+    if (!resolved.ok) {
       results.push({
         branch_cd: target.branch_cd,
-        channel_id: target.channel_id,
+        ...ids,
         ok: false,
         rows: null,
         print_id: null,
-        detail:
-          "channel_id が UUID 形式ではありません (lineworks_channels の行 id を設定してください)",
+        detail: resolved.error,
       });
       continue;
     }
+    const destination = resolved.destination;
     let report: Harvest | null = null;
     try {
       // F-DES1010 の行の branchCd は非パディング (`1`) なので、設定側の
@@ -273,10 +354,10 @@ export async function runNetprintTargets<Harvest extends NetprintHarvest>(
       report = await deps.fetchReport(dateYmd, normalizeBranchCd(target.branch_cd));
       const branchName = resolveBranchDisplayName(target, report.rows);
       if (report.rows.length === 0) {
-        await deps.sendText(target.channel_id, buildNoOperationsNotification(branchName, dateYmd));
+        await deps.sendText(destination, buildNoOperationsNotification(branchName, dateYmd));
         results.push({
           branch_cd: target.branch_cd,
-          channel_id: target.channel_id,
+          ...ids,
           ok: true,
           rows: 0,
           print_id: null,
@@ -287,12 +368,12 @@ export async function runNetprintTargets<Harvest extends NetprintHarvest>(
       const pdf = await deps.generatePdf(report, branchName, dateYmd);
       const registration = await deps.registerPdf(pdf, netprintPdfFileName(dateYmd));
       await deps.sendText(
-        target.channel_id,
+        destination,
         buildNetprintNotification(branchName, dateYmd, registration),
       );
       results.push({
         branch_cd: target.branch_cd,
-        channel_id: target.channel_id,
+        ...ids,
         ok: true,
         rows: report.rows.length,
         print_id: registration.printId,
@@ -305,7 +386,7 @@ export async function runNetprintTargets<Harvest extends NetprintHarvest>(
       let notifyDetail = "";
       try {
         await deps.sendText(
-          target.channel_id,
+          destination,
           buildNetprintErrorNotification(
             resolveBranchDisplayName(target, report?.rows ?? []),
             dateYmd,
@@ -317,7 +398,7 @@ export async function runNetprintTargets<Harvest extends NetprintHarvest>(
       }
       results.push({
         branch_cd: target.branch_cd,
-        channel_id: target.channel_id,
+        ...ids,
         ok: false,
         rows: report === null ? null : report.rows.length,
         print_id: null,

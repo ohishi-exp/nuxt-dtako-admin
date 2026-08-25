@@ -3,6 +3,7 @@ import { CronConfigError } from '../src/cron'
 import {
   sendLineworksTextViaAlcInternalProxy,
   type FetchLike,
+  type LineworksDestination,
 } from '../src/lineworks-notify'
 import {
   buildNetprintErrorNotification,
@@ -15,6 +16,7 @@ import {
   parseNetprintTargets,
   planNetprintRun,
   resolveBranchDisplayName,
+  resolveNetprintDestination,
   runNetprintTargets,
   type NetprintCronDeps,
   type NetprintReportRow,
@@ -26,8 +28,12 @@ import {
 const CH_HONSHA = '3f2504e0-4f89-41d3-9a0c-0305e82c3301'
 const CH_OBIHIRO = '9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d'
 const CH_TEST = '00000000-0000-4000-8000-000000000001'
+// `recipient_id` は DB `notify_recipients` の行 id (個人宛)。実運用ではトークルームが
+// 1 件も登録されておらず、こちら (本多 優鷹) が通知先になる (Refs #874 の 10)。
+const RCP_HONDA = 'e553efc9-4dff-4171-a06d-d3c127b14b94'
 
 const TARGET: NetprintTarget = { branch_cd: '1', channel_id: CH_HONSHA }
+const TARGET_RCP: NetprintTarget = { branch_cd: '1', recipient_id: RCP_HONDA }
 
 function row(branchCd: string | null, branchName: string | null = null): NetprintReportRow {
   return { branchCd, branchName }
@@ -130,6 +136,38 @@ describe('planNetprintRun (手動実行の body 解釈)', () => {
     })
   })
 
+  it('branch_cd + recipient_id を揃えて渡すと個人宛の 1 件だけ (#874-10)', () => {
+    expect(
+      planNetprintRun(
+        { branch_cd: ' 1 ', recipient_id: ` ${RCP_HONDA} ` },
+        CONFIGURED,
+        '2026-08-24',
+      ),
+    ).toEqual({
+      date: '2026-08-24',
+      // 指定しなかった側のキーは立てない (「両方指定」に見せない)。
+      targets: [{ branch_cd: '1', recipient_id: RCP_HONDA, branch_name: undefined }],
+    })
+  })
+
+  it('channel_id と recipient_id の両方指定は 400 相当の error (rust も 400)', () => {
+    expect(
+      planNetprintRun(
+        { branch_cd: '1', channel_id: CH_TEST, recipient_id: RCP_HONDA },
+        CONFIGURED,
+        '2026-08-24',
+      ),
+    ).toEqual({ error: 'channel_id と recipient_id はどちらか一方だけ指定してください' })
+  })
+
+  it('recipient_id が Uuid でなければ notify_recipients を名指しした error', () => {
+    expect(
+      planNetprintRun({ branch_cd: '1', recipient_id: '本多 優鷹' }, CONFIGURED, '2026-08-24'),
+    ).toEqual({
+      error: 'recipient_id が UUID 形式ではありません (notify_recipients の行 id を指定してください)',
+    })
+  })
+
   it('branch_cd + channel_id を揃えて渡すとその 1 件だけ (NETPRINT_TARGETS は使わない)', () => {
     expect(
       planNetprintRun(
@@ -140,6 +178,15 @@ describe('planNetprintRun (手動実行の body 解釈)', () => {
     ).toEqual({
       date: '2026-08-24',
       targets: [{ branch_cd: '1', channel_id: CH_TEST, branch_name: '本社営業所' }],
+    })
+  })
+
+  it('既存の channel_id 指定はそのまま動く (後方互換)', () => {
+    expect(
+      planNetprintRun({ branch_cd: '2', channel_id: CH_OBIHIRO }, CONFIGURED, '2026-08-24'),
+    ).toEqual({
+      date: '2026-08-24',
+      targets: [{ branch_cd: '2', channel_id: CH_OBIHIRO, branch_name: undefined }],
     })
   })
 
@@ -173,14 +220,18 @@ describe('planNetprintRun (手動実行の body 解釈)', () => {
   })
 
   it('片方だけの指定は受け付けない (設定側の宛先と混ざるのを防ぐ)', () => {
-    const expected = { error: 'branch_cd と channel_id は両方まとめて指定してください' }
+    const expected = {
+      error: 'branch_cd と宛先 (channel_id か recipient_id) は両方まとめて指定してください',
+    }
     expect(planNetprintRun({ branch_cd: '1' }, CONFIGURED, '2026-08-24')).toEqual(expected)
     expect(planNetprintRun({ channel_id: CH_TEST }, CONFIGURED, '2026-08-24')).toEqual(expected)
+    expect(planNetprintRun({ recipient_id: RCP_HONDA }, CONFIGURED, '2026-08-24')).toEqual(expected)
   })
 
   it('NETPRINT_TARGETS 未設定 + 指定なしは error (黙って何もしないにしない)', () => {
     expect(planNetprintRun({}, undefined, '2026-08-24')).toEqual({
-      error: 'NETPRINT_TARGETS が未設定です — branch_cd と channel_id を body で指定してください',
+      error:
+        'NETPRINT_TARGETS が未設定です — branch_cd と channel_id (または recipient_id) を body で指定してください',
     })
   })
 
@@ -204,9 +255,53 @@ describe('resolveBranchDisplayName', () => {
 })
 
 interface SentMessage {
-  channelId: string
+  destination: LineworksDestination
   text: string
 }
+
+describe('resolveNetprintDestination', () => {
+  it('channel_id だけなら channel 宛 / recipient_id だけなら recipient 宛', () => {
+    expect(resolveNetprintDestination({ branch_cd: '1', channel_id: ` ${CH_HONSHA} ` })).toEqual({
+      ok: true,
+      destination: { kind: 'channel', id: CH_HONSHA },
+    })
+    expect(resolveNetprintDestination({ branch_cd: '1', recipient_id: RCP_HONDA })).toEqual({
+      ok: true,
+      destination: { kind: 'recipient', id: RCP_HONDA },
+    })
+  })
+
+  it('両方指定 / 両方無しは運用者が直せる文言で落とす', () => {
+    expect(
+      resolveNetprintDestination({ branch_cd: '1', channel_id: CH_HONSHA, recipient_id: RCP_HONDA }),
+    ).toEqual({ ok: false, error: 'channel_id と recipient_id はどちらか一方だけ指定してください' })
+    expect(resolveNetprintDestination({ branch_cd: '1' })).toEqual({
+      ok: false,
+      error: 'channel_id と recipient_id のどちらか一方を指定してください',
+    })
+  })
+
+  it('設定 JSON は素通しなので非文字列は「無い」に倒す', () => {
+    // parseNetprintTargets は `as NetprintTarget[]` で型を付け替えるだけ。
+    expect(
+      resolveNetprintDestination({ branch_cd: '1', channel_id: 42 } as unknown as NetprintTarget),
+    ).toMatchObject({ ok: false })
+    expect(
+      resolveNetprintDestination({ branch_cd: '1', recipient_id: null } as unknown as NetprintTarget),
+    ).toMatchObject({ ok: false })
+  })
+
+  it('Uuid でない id は「どの表の行 id か」まで書いて落とす', () => {
+    expect(resolveNetprintDestination({ branch_cd: '1', channel_id: 'ch-honsha' })).toEqual({
+      ok: false,
+      error: 'channel_id が UUID 形式ではありません (lineworks_channels の行 id を指定してください)',
+    })
+    expect(resolveNetprintDestination({ branch_cd: '1', recipient_id: 'honda' })).toEqual({
+      ok: false,
+      error: 'recipient_id が UUID 形式ではありません (notify_recipients の行 id を指定してください)',
+    })
+  })
+})
 
 function makeDeps(overrides: Partial<NetprintCronDeps> = {}) {
   const sent: SentMessage[] = []
@@ -218,8 +313,8 @@ function makeDeps(overrides: Partial<NetprintCronDeps> = {}) {
     },
     generatePdf: async () => new Uint8Array([0x25, 0x50, 0x44, 0x46]),
     registerPdf: async () => ({ printId: 'J5JZPEQJ', endDate: '2026/08/26 23:59', page: 1 }),
-    sendText: async (channelId, text) => {
-      sent.push({ channelId, text })
+    sendText: async (destination, text) => {
+      sent.push({ destination, text })
     },
     ...overrides,
   }
@@ -244,6 +339,7 @@ describe('runNetprintTargets', () => {
       {
         branch_cd: '1',
         channel_id: CH_HONSHA,
+        recipient_id: null,
         ok: true,
         rows: 1,
         print_id: 'J5JZPEQJ',
@@ -251,7 +347,7 @@ describe('runNetprintTargets', () => {
       },
     ])
     expect(sent).toHaveLength(1)
-    expect(sent[0].channelId).toBe(CH_HONSHA)
+    expect(sent[0].destination).toEqual({ kind: 'channel', id: CH_HONSHA })
     expect(sent[0].text).toContain('プリント予約番号: J5JZPEQJ')
     expect(sent[0].text).toContain('本社営業所 2026/08/24分')
   })
@@ -279,7 +375,10 @@ describe('runNetprintTargets', () => {
     const results = await runNetprintTargets(deps, [TARGET], '2026-08-04')
     expect(results[0]).toMatchObject({ ok: true, rows: 0, print_id: null })
     expect(sent).toEqual([
-      { channelId: CH_HONSHA, text: '営業所コード1 8/4分の運行はありませんでした' },
+      {
+        destination: { kind: 'channel', id: CH_HONSHA },
+        text: '営業所コード1 8/4分の運行はありませんでした',
+      },
     ])
   })
 
@@ -315,6 +414,63 @@ describe('runNetprintTargets', () => {
     expect(sent[0].text).toContain('営業所コード1')
   })
 
+  it('recipient_id 指定の target は個人宛で送る (channel_id は結果に null で残る)', async () => {
+    const { deps, sent, fetched } = makeDeps()
+    const results = await runNetprintTargets(deps, [TARGET_RCP], '2026-08-24')
+    expect(fetched).toEqual([{ dateYmd: '2026-08-24', branchCd: '1' }])
+    expect(results).toEqual([
+      {
+        branch_cd: '1',
+        // 応答のフィールド名は変えない (画面 #874-5 が読む形を保つ)。
+        channel_id: null,
+        recipient_id: RCP_HONDA,
+        ok: true,
+        rows: 1,
+        print_id: 'J5JZPEQJ',
+        detail: '1 行 / 1 ページを登録し予約番号を通知',
+      },
+    ])
+    expect(sent).toHaveLength(1)
+    expect(sent[0].destination).toEqual({ kind: 'recipient', id: RCP_HONDA })
+    expect(sent[0].text).toContain('プリント予約番号: J5JZPEQJ')
+  })
+
+  it('channel_id と recipient_id の両方を持つ target はその 1 件だけ ok: false', async () => {
+    const { deps, sent, fetched } = makeDeps()
+    const both: NetprintTarget = { branch_cd: '1', channel_id: CH_HONSHA, recipient_id: RCP_HONDA }
+    const second: NetprintTarget = { branch_cd: '2', recipient_id: RCP_HONDA }
+    const results = await runNetprintTargets(deps, [both, second], '2026-08-24')
+    expect(results[0]).toEqual({
+      branch_cd: '1',
+      channel_id: CH_HONSHA,
+      recipient_id: RCP_HONDA,
+      ok: false,
+      rows: null,
+      print_id: null,
+      detail: 'channel_id と recipient_id はどちらか一方だけ指定してください',
+    })
+    // 他の target は止めない (branch 2 は 0 行 → 「運行なし」通知で成功)。
+    expect(fetched).toEqual([{ dateYmd: '2026-08-24', branchCd: '2' }])
+    expect(results[1]).toMatchObject({ ok: true, rows: 0 })
+    expect(sent).toHaveLength(1)
+  })
+
+  it('recipient_id が Uuid でない target も harvest せず ok: false', async () => {
+    const { deps, fetched } = makeDeps()
+    const results = await runNetprintTargets(
+      deps,
+      [{ branch_cd: '1', recipient_id: 'honda' }],
+      '2026-08-24',
+    )
+    expect(results[0]).toMatchObject({
+      channel_id: null,
+      recipient_id: 'honda',
+      ok: false,
+      detail: 'recipient_id が UUID 形式ではありません (notify_recipients の行 id を指定してください)',
+    })
+    expect(fetched).toEqual([])
+  })
+
   it('channel_id が Uuid でない target は harvest せず ok: false — 他の target は止めない', async () => {
     const { deps, sent, fetched } = makeDeps()
     const broken: NetprintTarget = { branch_cd: '1', channel_id: 'ch-honsha' }
@@ -323,14 +479,15 @@ describe('runNetprintTargets', () => {
     expect(results[0]).toEqual({
       branch_cd: '1',
       channel_id: 'ch-honsha',
+      recipient_id: null,
       ok: false,
       rows: null,
       print_id: null,
-      detail: 'channel_id が UUID 形式ではありません (lineworks_channels の行 id を設定してください)',
+      detail: 'channel_id が UUID 形式ではありません (lineworks_channels の行 id を指定してください)',
     })
     // 宛先が無い以上 harvest も PDF 登録もエラー通知もしない (確実に失敗する送信を試さない)。
     expect(fetched).toEqual([{ dateYmd: '2026-08-24', branchCd: '2' }])
-    expect(sent.map((m) => m.channelId)).toEqual([CH_OBIHIRO])
+    expect(sent.map((m) => m.destination.id)).toEqual([CH_OBIHIRO])
     expect(results[1]).toMatchObject({ ok: true, rows: 0 })
   })
 
@@ -354,9 +511,9 @@ describe('runNetprintTargets', () => {
         status: 500,
       })) as FetchLike
     const { deps } = makeDeps({
-      sendText: (channelId, text) =>
+      sendText: (destination, text) =>
         sendLineworksTextViaAlcInternalProxy(
-          { sharedSecret: 'shared-1', channelId, text },
+          { sharedSecret: 'shared-1', destination, text },
           alcFetch,
         ),
     })

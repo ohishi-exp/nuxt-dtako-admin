@@ -3,23 +3,31 @@
  * 1 行にまとめる部分 (pure)。`server/api/netprint/run.post.ts` が使う。
  *
  * body は relay の `POST /kintai-relay/netprint-run` と同じ
- * `{date?, branch_cd?, channel_id?, branch_name?, comp_id?}` を素通しする。**relay 側にも
- * 同じガードがあるが、front でも持つ** — `branch_cd` と `channel_id` は「両方揃っているか、
- * 両方無いか」で、片方だけを黙って補完すると**設定側の target と混ざって意図しない
- * トークルームへ送りうる**。誤配は取り消せないので二重に弾く (relay の
+ * `{date?, branch_cd?, channel_id?, recipient_id?, branch_name?, comp_id?}` を素通しする。
+ * **relay 側にも同じガードがあるが、front でも持つ** — `branch_cd` と宛先は「両方
+ * 揃っているか、両方無いか」で、片方だけを黙って補完すると**設定側の target と混ざって
+ * 意図しない宛先へ送りうる**。誤配は取り消せないので二重に弾く (relay の
  * `planNetprintRun` の doc と同じ理由)。
  *
+ * **宛先は `channel_id` (トークルーム) と `recipient_id` (個人) のどちらか一方**
+ * (Refs #874 の 10)。両方指定は relay / rust とも 400 なので、ここでも弾く。
+ *
  * 型 (`NetprintRunInput`) は画面と共有する `~/utils/netprint-run` が持つ
- * (`server/utils/net780-archive.ts` と同じ向き)。
+ * (`server/utils/net780-archive.ts` と同じ向き)。**`recipient_id` は画面が送らない**
+ * (画面は `date` だけ送り、宛先は relay の `NETPRINT_TARGETS` 任せ) ので、共有型では
+ * なくこちらで拡張して閉じる。
  */
 
 import { NETPRINT_DATE_RE, type NetprintRunInput } from '~/utils/netprint-run'
 
+/** relay へ素通しする body。画面が使う `NetprintRunInput` + `recipient_id`。 */
+export type NetprintRunBody = NetprintRunInput & { recipient_id?: string }
+
 /** 素通しする body のキー。全部 optional な文字列。 */
-const BODY_KEYS = ['date', 'branch_cd', 'channel_id', 'branch_name', 'comp_id'] as const
+const BODY_KEYS = ['date', 'branch_cd', 'channel_id', 'recipient_id', 'branch_name', 'comp_id'] as const
 
 export type NetprintRunBodyParse
-  = { ok: true, body: NetprintRunInput }
+  = { ok: true, body: NetprintRunBody }
     | { ok: false, error: string }
 
 /** `YYYY-MM-DD` で、かつ実在する日付か (`2026-02-31` を relay まで運ばない)。 */
@@ -61,14 +69,19 @@ export function parseNetprintRunBody(body: unknown): NetprintRunBodyParse {
   }
   const branchCd = fields.branch_cd!
   const channelId = fields.channel_id!
-  if ((branchCd === '') !== (channelId === '')) {
-    return { ok: false, error: 'branch_cd と channel_id は両方まとめて指定してください (片方だけだと意図しないトークルームへ送りうるため)' }
+  const recipientId = fields.recipient_id!
+  if (channelId !== '' && recipientId !== '') {
+    return { ok: false, error: 'channel_id と recipient_id はどちらか一方だけ指定してください' }
+  }
+  const hasDestination = channelId !== '' || recipientId !== ''
+  if ((branchCd !== '') !== hasDestination) {
+    return { ok: false, error: 'branch_cd と宛先 (channel_id か recipient_id) は両方まとめて指定してください (片方だけだと意図しない宛先へ送りうるため)' }
   }
   if (fields.branch_name !== '' && branchCd === '') {
-    return { ok: false, error: 'branch_name だけの指定はできません (branch_cd / channel_id と一緒に指定してください)' }
+    return { ok: false, error: 'branch_name だけの指定はできません (branch_cd と宛先 (channel_id か recipient_id) と一緒に指定してください)' }
   }
 
-  const out: NetprintRunInput = {}
+  const out: NetprintRunBody = {}
   for (const key of BODY_KEYS) {
     if (fields[key] !== '') out[key] = fields[key]
   }

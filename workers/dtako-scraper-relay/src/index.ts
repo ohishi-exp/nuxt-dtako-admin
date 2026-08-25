@@ -53,7 +53,9 @@ export interface RelayWorkerEnv {
   /** auth-worker の origin。introspect の絶対 URL 組み立てにのみ使う。 */
   NUXT_PUBLIC_AUTH_WORKER_URL?: string;
   /** 運転日報 netprint cron の対象 (dashboard plain 変数、JSON 配列
-   * `[{branch_cd, channel_id}, ...]`、Refs #874)。未設定は cron skip。 */
+   * `[{branch_cd, channel_id | recipient_id}, ...]`、Refs #874)。宛先は
+   * トークルーム (`channel_id`) か個人 (`recipient_id`) のどちらか一方
+   * (#874-10)。未設定は cron skip。 */
   NETPRINT_TARGETS?: unknown;
 }
 
@@ -803,10 +805,11 @@ async function handleRestraintSync(request: Request, env: RelayWorkerEnv): Promi
  * `POST /kintai-relay/netprint-run` — 運転日報の netprint 登録 + LINE WORKS 通知を
  * cron (JST 6:30) を待たずに 1 回走らせる (Refs #874)。
  *
- * body は全部省略可 `{date?, branch_cd?, channel_id?, branch_name?, comp_id?}`:
+ * body は全部省略可 `{date?, branch_cd?, channel_id?, recipient_id?, branch_name?, comp_id?}`:
  * - `date` 省略で**前日 (JST)** = cron と同じ対象日。指定は `YYYY-MM-DD`
- * - `branch_cd` + `channel_id` を**揃えて**渡すとその 1 件だけ走る
- *   (`NETPRINT_TARGETS` を触らずに試験用チャンネルへ流せる)。片方だけは 400
+ * - `branch_cd` + 宛先 (`channel_id` か `recipient_id` の**どちらか一方**) を
+ *   **揃えて**渡すとその 1 件だけ走る (`NETPRINT_TARGETS` を触らずに試験用の宛先へ
+ *   流せる)。片方だけ / 宛先の両方指定は 400
  * - どちらも省略で `NETPRINT_TARGETS` の全 target = cron と同じ動き
  * - `comp_id` 省略時は `KINTAI_COMP_ID` (他の `/kintai-relay/*` と同じ)
  *
@@ -833,6 +836,7 @@ export async function handleNetprintRun(request: Request, env: RelayWorkerEnv): 
     date?: unknown;
     branch_cd?: unknown;
     channel_id?: unknown;
+    recipient_id?: unknown;
     branch_name?: unknown;
     comp_id?: unknown;
   };

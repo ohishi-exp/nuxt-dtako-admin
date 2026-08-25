@@ -307,12 +307,12 @@ describe('runScheduledCron: netprint', () => {
       {
         doKey: 'scraper-comp-27324455',
         path: '/cron/netprint',
-        body: { comp_id: '27324455', branch_cd: '1', channel_id: 'c1', branch_name: '本社営業所', date: '2026-08-24' },
+        body: { comp_id: '27324455', branch_cd: '1', channel_id: 'c1', recipient_id: '', branch_name: '本社営業所', date: '2026-08-24' },
       },
       {
         doKey: 'scraper-comp-27324455',
         path: '/cron/netprint',
-        body: { comp_id: '27324455', branch_cd: '2', channel_id: 'c2', branch_name: '', date: '2026-08-24' },
+        body: { comp_id: '27324455', branch_cd: '2', channel_id: 'c2', recipient_id: '', branch_name: '', date: '2026-08-24' },
       },
     ])
   })
@@ -368,12 +368,32 @@ describe('dispatchNetprintTargets (cron と手動実行が共有する dispatch)
           comp_id: '27324455',
           branch_cd: '1',
           channel_id: 'ch-test',
+          // 指定の無い側は空文字で渡す — DO 側が「指定なし」と読む形を 1 つに揃える。
+          recipient_id: '',
           branch_name: '本社営業所',
           date: '2026-08-20',
         },
       },
     ])
     expect(results[0]).toMatchObject({ kind: 'netprint', target: '27324455|1', ok: true })
+  })
+
+  it('recipient_id 指定の target は recipient_id 側を埋めて渡す (#874-10)', async () => {
+    const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+    await dispatchNetprintTargets(
+      '27324455',
+      [{ branch_cd: '1', recipient_id: 'e553efc9-4dff-4171-a06d-d3c127b14b94' }],
+      '2026-08-20',
+      okDoCall(calls),
+    )
+    expect(calls[0].body).toEqual({
+      comp_id: '27324455',
+      branch_cd: '1',
+      channel_id: '',
+      recipient_id: 'e553efc9-4dff-4171-a06d-d3c127b14b94',
+      branch_name: '',
+      date: '2026-08-20',
+    })
   })
 
   it('target が空なら DO を 1 度も叩かない', async () => {

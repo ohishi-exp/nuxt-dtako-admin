@@ -67,7 +67,7 @@ describe('parseNetprintRunBody', () => {
   })
 
   it('文字列でない値は 400 (relay に黙って落とさせない)', () => {
-    for (const key of ['date', 'branch_cd', 'channel_id', 'branch_name', 'comp_id']) {
+    for (const key of ['date', 'branch_cd', 'channel_id', 'recipient_id', 'branch_name', 'comp_id']) {
       const result = parseNetprintRunBody({ [key]: 123 })
       expect(result.ok).toBe(false)
       expect(result.ok === false && result.error).toBe(`${key} は文字列で指定してください`)
@@ -81,12 +81,32 @@ describe('parseNetprintRunBody', () => {
     })
   })
 
-  it('branch_cd と channel_id の片方だけは 400', () => {
-    for (const body of [{ branch_cd: '1' }, { channel_id: 'ch-1' }, { branch_cd: '1', channel_id: '  ' }]) {
+  it('branch_cd と宛先の片方だけは 400', () => {
+    for (const body of [
+      { branch_cd: '1' },
+      { channel_id: 'ch-1' },
+      { recipient_id: 'rcp-1' },
+      { branch_cd: '1', channel_id: '  ' },
+      { branch_cd: '1', recipient_id: '  ' },
+    ]) {
       const result = parseNetprintRunBody(body)
       expect(result.ok).toBe(false)
       expect(result.ok === false && result.error).toContain('両方まとめて')
     }
+  })
+
+  // ★ 宛先はトークルーム (channel_id) か個人 (recipient_id) のどちらか一方
+  // (Refs #874 の 10)。relay も rust も両方指定を 400 にするので front でも弾く。
+  it('branch_cd と recipient_id は両方揃っていれば通る (個人宛)', () => {
+    expect(parsed({ branch_cd: '1', recipient_id: 'rcp-1', branch_name: '本社営業所' })).toEqual({
+      branch_cd: '1', recipient_id: 'rcp-1', branch_name: '本社営業所',
+    })
+  })
+
+  it('channel_id と recipient_id の両方指定は 400', () => {
+    const result = parseNetprintRunBody({ branch_cd: '1', channel_id: 'ch-1', recipient_id: 'rcp-1' })
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.error).toBe('channel_id と recipient_id はどちらか一方だけ指定してください')
   })
 
   it('branch_name だけの指定は 400 (どこへ送るか決まらない)', () => {

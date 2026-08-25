@@ -203,10 +203,13 @@ export async function dispatchNetprintTargets(
   return Promise.all(
     targets.map(async (target): Promise<CronRunResult> => {
       try {
+        // 宛先は channel か recipient のどちらか一方 (#874-10)。指定の無い側は
+        // 空文字で渡す — DO 側が「指定なし」と読む形を 1 つに揃える。
         const res = await callDo(`scraper-comp-${compId}`, "/cron/netprint", {
           comp_id: compId,
           branch_cd: target.branch_cd,
-          channel_id: target.channel_id,
+          channel_id: target.channel_id ?? "",
+          recipient_id: target.recipient_id ?? "",
           branch_name: target.branch_name ?? "",
           date,
         });
