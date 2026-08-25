@@ -1406,7 +1406,7 @@ describe('api', () => {
         ok: true,
         status: 200,
         date: '2026-08-24',
-        results: [{ target: '27324455|1', ok: true, detail: 'HTTP 200: {"ok":true}' }],
+        results: [{ target: '27324455|1', ok: true, detail: 'HTTP 200: {"ok":true}', skipped: false }],
         error: null,
       })
       const [url, opts] = mockFetch.mock.calls[0]

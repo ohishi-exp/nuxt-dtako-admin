@@ -952,8 +952,9 @@ export async function handleNetprintTargetsPut(
  * - どちらも省略で `NETPRINT_TARGETS` の全 target = cron と同じ動き
  * - `operation_no` (22 桁数字) で**その 1 運行だけ**にする (Refs #913)。営業所で
  *   絞った後にもう一段掛かるので、通知先の解決は変わらない (単独指定なら
- *   `NETPRINT_TARGETS` のまま)。**一致 0 件は 400** — 「運行はありませんでした」を
- *   実在の担当者へ送らないため、通知は 1 通も出さずに理由だけ返す
+ *   `NETPRINT_TARGETS` のまま)。**一致した営業所だけ処理し、無い営業所は skip**。
+ *   **どの営業所にも無かったときだけ 400** — 通知は 1 通も出さずに理由だけ返す
+ *   (「運行はありませんでした」を実在の担当者へ送らないため)
  * - `comp_id` 省略時は `KINTAI_COMP_ID` (他の `/kintai-relay/*` と同じ)
  *
  * **cron と同じ DO route (`/cron/netprint`) を叩く** — 実機確認が「cron でだけ
@@ -1027,20 +1028,35 @@ export async function handleNetprintRun(request: Request, env: RelayWorkerEnv): 
     });
     return { ok: res.ok, status: res.status, text: await res.text() };
   });
-  for (const result of results) {
-    const line = JSON.stringify({ netprint_run: "manual", date: plan.date, ...result });
-    if (result.ok) console.log(line);
+  // `operation_no` 指定時の DO の 400 は**「その営業所にその運行が無い」だけ**
+  // (body の検証はここで済ませてから DO を呼ぶので、他の 400 は起こらない)。
+  // これは失敗ではなく **skip** — 営業所を 2 つ設定してあれば片方に無いのは当たり前で、
+  // そこで全体を落とすと**もう一方で出せたはずの日報まで出なくなる** (Refs #913)。
+  const rows = results.map((r) => ({
+    ...r,
+    skipped: plan.operationNo !== "" && r.status === 400,
+  }));
+  for (const row of rows) {
+    const line = JSON.stringify({ netprint_run: "manual", date: plan.date, ...row });
+    // skip は「探して無かった」だけなので error にしない (Tail の error を汚さない)。
+    if (row.ok || row.skipped) console.log(line);
     else console.error(line);
   }
-  const ok = results.every((r) => r.ok);
-  // **DO の 400 は 400 のまま返す** (Refs #913)。これが出るのは「指定された運行NO が
-  // 対象日・営業所に無い」だけで、直すのは呼んだ人の入力 — 502 に丸めると
-  // 「theearth か netprint がまた落ちた」と読まれ、無関係な所を調べさせる。
-  const allBadRequest = results.every((r) => r.status === 400);
+  const handled = rows.filter((r) => !r.skipped);
+  if (handled.length === 0) {
+    // どの営業所にも無かった ⇒ 直すのは呼んだ人の入力 (日付か運行NO の取り違え)。
+    // **502 に丸めない** — theearth も netprint も壊れていないのに「また落ちた」と
+    // 読まれ、無関係な所を調べさせることになる。
+    return new Response(JSON.stringify({ ok: false, date: plan.date, results: rows }), {
+      status: 400,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+  }
+  const ok = handled.every((r) => r.ok);
   return new Response(
-    JSON.stringify({ ok, date: plan.date, results }),
+    JSON.stringify({ ok, date: plan.date, results: rows }),
     {
-      status: ok ? 200 : allBadRequest ? 400 : 502,
+      status: ok ? 200 : 502,
       headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
     },
   );

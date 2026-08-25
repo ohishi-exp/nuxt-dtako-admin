@@ -159,6 +159,22 @@ describe('describeNetprintRunFailure', () => {
     expect(describeNetprintRunFailure(data, 502)).toBe('3 件中 2 件の営業所が失敗しました (HTTP 502)')
   })
 
+  it('全 target が skipped の 400 は「営業所が失敗」と書かず、探した営業所の数を出す (Refs #913)', () => {
+    // 「N 件中 N 件の営業所が失敗」だと theearth や netprint を疑わせる。実際は
+    // 指定された運行NO がどこにも無かっただけで、直すのは呼んだ人の入力。
+    expect(describeNetprintRunFailure(
+      { ok: false, results: [{ ok: false, skipped: true }, { ok: false, skipped: true }] },
+      400,
+    )).toBe('指定された運行NO はどの営業所にも見つかりませんでした (2 営業所を探しました。HTTP 400)')
+  })
+
+  it('skipped が混ざっていても全部でなければ従来どおり失敗件数を数える', () => {
+    expect(describeNetprintRunFailure(
+      { ok: false, results: [{ ok: false, skipped: true }, { ok: false }] },
+      502,
+    )).toBe('2 件中 2 件の営業所が失敗しました (HTTP 502)')
+  })
+
   it('results が空配列 / 配列でない / body が JSON でない場合は既定文', () => {
     expect(describeNetprintRunFailure({ results: [] }, 502)).toBe('日報 netprint の実行に失敗しました (HTTP 502)')
     expect(describeNetprintRunFailure({ results: 'x' }, 502)).toContain('HTTP 502')

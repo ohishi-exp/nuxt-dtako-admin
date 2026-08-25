@@ -51,7 +51,7 @@ describe('normalizeNetprintRunOutcome', () => {
       ok: true,
       status: 200,
       date: '2026-08-24',
-      results: [{ target: '27324455|1', ok: true, detail: detail(200, DO_OK) }],
+      results: [{ target: '27324455|1', ok: true, detail: detail(200, DO_OK), skipped: false }],
       error: null,
     })
   })
@@ -103,7 +103,7 @@ describe('normalizeNetprintRunOutcome', () => {
 
   it('results の要素にキーが欠けていても既定値で 1 行にする (黙って消さない)', () => {
     expect(normalizeNetprintRunOutcome(200, true, { results: [{}] }).results)
-      .toEqual([{ target: '', ok: false, detail: '' }])
+      .toEqual([{ target: '', ok: false, detail: '', skipped: false }])
   })
 
   it('date が文字列でなければ null', () => {

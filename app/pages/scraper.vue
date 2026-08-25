@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl, saveScrapeHistory, buildScraperZipUrl, buildEtcCsvDownloadUrl, splitCsv, splitCsvAllStream, getDtakoEventsEtags, postNetprintRun, getNetprintTargets, putNetprintTargets, getNotifyRecipients, getLineworksChannels } from '~/utils/api'
-import { yesterdayJstYmd, viewNetprintRunResult, type NetprintRunOutcome } from '~/utils/netprint-run'
+import { yesterdayJstYmd, viewNetprintRunResult, type NetprintRunOutcome, type NetprintTargetView } from '~/utils/netprint-run'
 import {
   emptyNetprintTargetRow,
   netprintDestinationOptions,
@@ -137,6 +137,13 @@ const netprintOutcome = ref<NetprintRunOutcome | null>(null)
 
 /** 営業所ごとの表示行 (予約番号は relay の detail に畳まれた DO 応答から取り出す)。 */
 const netprintViews = computed(() => (netprintOutcome.value?.results ?? []).map(viewNetprintRunResult))
+
+/** 行の色。**skip を先に見る** — 指定された運行NO を持たない営業所は飛ばしただけで、
+ * 赤 (失敗) でも緑 (成功) でもない (Refs #913)。 */
+function netprintViewClass(view: NetprintTargetView): string {
+  if (view.skipped) return 'text-gray-500'
+  return view.ok ? 'text-green-600 dark:text-green-400' : 'text-red-500'
+}
 
 async function handleNetprintRun() {
   if (netprintRunning.value) return
@@ -1009,8 +1016,10 @@ onMounted(() => {
             class="space-y-2 bg-gray-50 dark:bg-gray-900 rounded-lg p-3 max-h-64 overflow-y-auto"
           >
             <div v-for="(view, i) in netprintViews" :key="i" class="font-mono text-xs break-all">
-              <span :class="view.ok ? 'text-green-600 dark:text-green-400' : 'text-red-500'">
-                [{{ view.ok ? '成功' : '失敗' }}] 営業所 {{ view.branchCd }}
+              <!-- skip は成否のどちらでもない (Refs #913)。運行NO を指定したとき、
+                   その運行を持たない営業所は飛ばすだけなので「失敗」と書かない。 -->
+              <span :class="netprintViewClass(view)">
+                [{{ view.skipped ? 'skip' : view.ok ? '成功' : '失敗' }}] 営業所 {{ view.branchCd }}
               </span>
               <span v-if="view.printIds.length" class="ml-1 font-bold">
                 予約番号 {{ view.printIds.join(' / ') }}

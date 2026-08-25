@@ -245,7 +245,11 @@ export function buildNoOperationsNotification(branchName: string, dateYmd: strin
 }
 
 /**
- * `operation_no` 指定に一致する運行が無かった時の理由 (Refs #913)。
+ * `operation_no` 指定に一致する運行がその営業所に無かった時の理由 (Refs #913)。
+ *
+ * **これ単体は失敗ではなく skip** — 営業所を 2 つ設定してあれば、片方に無いのは
+ * 当たり前だから (どちらに属す運行かは呼ぶ人には分からない)。**どの営業所にも
+ * 無かったときだけ**呼び出し全体が 400 になる (振り分けは `handleNetprintRun`)。
  *
  * **通知はしない** — 試験のつもりの実行で本番と同じ文面 (「運行はありませんでした」)
  * を実在の担当者へ送らないため。行き先は画面 (relay が `detail` を 200 字で切るので
@@ -454,11 +458,14 @@ export interface NetprintTargetResult {
    * **画面はここの `print_id` を全部拾って並べる** (`viewNetprintRunResult` が
    * 応答本文から `"print_id"` を全件マッチする)。 */
   operations: NetprintOperationResult[];
-  /** `operation_no` 指定に一致する運行が 1 件も無かったか (Refs #913)。
+  /** `operation_no` 指定に一致する運行がこの営業所に無かったか (Refs #913)。
    *
-   * **この失敗だけ HTTP 400 に振り分ける**ため他の失敗と区別する — 直すのは
-   * 呼んだ人 (日付か営業所か運行NO の取り違え) であって、theearth や netprint が
-   * 壊れているわけではない。502 に丸めると「また落ちた」と読まれる。 */
+   * **失敗ではなく skip として扱う**ため他の `ok: false` と区別する。営業所が
+   * 2 つ設定してあれば片方に無いのは当たり前で、そこで全体を落とすと**もう一方で
+   * 出せたはずの日報まで出なくなる**。どの営業所にも無かったときだけ呼び出し全体を
+   * 400 にする (振り分けは relay の `handleNetprintRun`) — 直すのは呼んだ人の入力
+   * (日付か運行NO の取り違え) であって、theearth も netprint も壊れていないため、
+   * 502 に丸めない。 */
   operation_not_found: boolean;
 }
 
@@ -557,8 +564,9 @@ async function runOneOperation<Harvest extends NetprintHarvest>(
  *
  * `operationNo` (空文字 = 指定なし) を渡すと、**営業所で絞った行からさらにその
  * 1 運行だけ**を処理する (Refs #913)。一致 0 件は `operation_not_found: true` の
- * `ok: false` で返し、**LINE WORKS へは何も送らない** — 呼んだ人の入力違いなので、
- * 実在の担当者に「運行はありませんでした」を送る筋合いが無い。
+ * `ok: false` で返す — **その営業所を skip したという印**で、失敗かどうかを決める
+ * のは全 target を見渡せる呼び出し側 (relay)。いずれにせよ **LINE WORKS へは何も
+ * 送らない** — 実在の担当者に「運行はありませんでした」を送る筋合いが無い。
  *
  * 宛先 (`channel_id` / `recipient_id`) の指定が不正な target は **harvest も PDF
  * 取得もせずに** `ok: false` にする — 通知先が無い以上 netprint に登録しても誰にも
