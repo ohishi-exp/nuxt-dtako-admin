@@ -86,9 +86,9 @@ beforeEach(() => {
 
 describe('AllowanceOperationModal — 金額に `¥-0` を出さない (Refs #843)', () => {
   it.each([
-    ['-0.4 (Math.round が -0 を返す窓)', -0.4],
-    ['-0.5 (窓の端。Math.round(-0.5) は -0)', -0.5],
-    ['-0.0004 (端数つきの負。丸めずに出すと "-0")', -0.0004],
+    ['-0.0004 (端数つきの負)', -0.0004],
+    ['-0.0004999 (窓の内側の端)', -0.0004999],
+    ['-4.66e-10 (按分の足し順で出る実際の形)', -4.66e-10],
     ['-0 そのもの', -0],
     ['0 (退行なし)', 0],
   ])('売上・収支とも %s → ¥0', async (_name, v) => {
@@ -99,11 +99,22 @@ describe('AllowanceOperationModal — 金額に `¥-0` を出さない (Refs #84
     expect(c.header).toContain('収支 ¥0')
   })
 
-  it('陽性対照: 本当に負の額は負のまま (-0.6 → ¥-1)', async () => {
+  /**
+   * ★ **丸め方を変えていないことの陽性対照** (親の指摘、Refs #843)。
+   * ここは元から丸めていないので、`Math.round` を足すと `¥1,234.5` → `¥1,235` と
+   * 表示が変わる。**小数がそのまま出ること**を固定して、黙って変わらないようにする。
+   */
+  it('陽性対照 (丸めていない): 小数はそのまま出る', async () => {
+    const c = await cellsOf(1234.5)
+    expect(c.sales).toBe('¥1,234.5')
+    expect(c.margin).toBe('¥1,234.5')
+  })
+
+  it('陽性対照: 本当に負の額は負のまま (-0.6 → ¥-0.6、符号も小数も消さない)', async () => {
     const c = await cellsOf(-0.6)
-    expect(c.sales).toBe('¥-1')
-    expect(c.margin).toBe('¥-1')
-    expect(c.header).toContain('収支 ¥-1')
+    expect(c.sales).toBe('¥-0.6')
+    expect(c.margin).toBe('¥-0.6')
+    expect(c.header).toContain('収支 ¥-0.6')
   })
 
   it('陽性対照: 赤字の便は赤字のまま (売上 0・手当 12,000 → 収支 ¥-12,000、赤で塗る)', async () => {

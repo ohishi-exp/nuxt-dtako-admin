@@ -124,12 +124,16 @@ const totals = computed(() => {
 })
 
 /**
- * 金額。**`-0` を `+0` に畳んでから出す** (Refs #843)。収支の列 (`marginYen`) は
- * **負になり得る** (下の表は `marginYen < 0` で赤くしている) ので、0 のときに **`¥-0`**
- * と出ていた。**`Math.round` も併せて足した理由**は `profit/allowance.vue` の `yen` に同じ
- * — `+ 0` だけでは端数つきの負 (`-0.0005 < v < 0`) が `"-0"` のまま残る。
+ * 金額。**`¥-0` だけを潰す** (Refs #843)。収支の列 (`marginYen`) は**負になり得る**
+ * (下の表が `marginYen < 0` で赤く塗っているのがその証拠) ので、0 のときに `¥-0` と
+ * 出ていた。
+ *
+ * **`Math.round` を足して直さない理由**は `profit/allowance.vue` の `yen` に同じ —
+ * 元から丸めていないここに `Math.round` を足すと**丸め方ごと変わる**。
+ * `toLocaleString` が `"-0"` を返した回だけ `"0"` に差し替えるので、
+ * **`¥-0` 以外の出力は 1 文字も変わらない** (`-0.6` は `¥-0.6` のまま = 符号を消さない)。
  */
-const yen = (v: number | null) => (v === null ? '-' : `¥${(Math.round(v) + 0).toLocaleString()}`)
+const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString().replace(/^-0$/, '0')}`)
 const tons = (v: number) => `${Math.round(v * 100) / 100}t`
 
 function legSales(e: AllowanceModalEntry): number | null {
