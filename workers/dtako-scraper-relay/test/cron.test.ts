@@ -12,8 +12,10 @@ import {
   parseEtcAccounts,
   prevYm,
   resolveDtakoAccountsRaw,
+  resolveNetprintTargetsRaw,
   resolveSecretBinding,
   DTAKO_ACCOUNTS_KV_KEY,
+  NETPRINT_TARGETS_KV_KEY,
   runScheduledCron,
   yesterdayJst,
   type CronDoCall,
@@ -436,5 +438,57 @@ describe('resolveDtakoAccountsRaw', () => {
   it('Secrets Store binding (get() 引数なし) にもフォールバックできる', async () => {
     const secretsStore = { get: async () => '[{"comp_id":"secret"}]' }
     expect(await resolveDtakoAccountsRaw(undefined, secretsStore)).toBe('[{"comp_id":"secret"}]')
+  })
+})
+
+describe('resolveNetprintTargetsRaw', () => {
+  const KV_JSON = JSON.stringify([{ branch_cd: '1', channel_id: 'ch-kv' }])
+  const VAR_JSON = JSON.stringify([{ branch_cd: '1', channel_id: 'ch-var' }])
+  const kv = (value: string | null) => ({
+    get: async (key: string) => (key === NETPRINT_TARGETS_KV_KEY ? value : null),
+  })
+
+  it('KV に値があれば KV が勝つ (plain 変数より優先)', async () => {
+    expect(await resolveNetprintTargetsRaw(kv(KV_JSON), VAR_JSON)).toBe(KV_JSON)
+  })
+
+  it('KV が空なら plain 変数にフォールバックする', async () => {
+    expect(await resolveNetprintTargetsRaw(kv(null), VAR_JSON)).toBe(VAR_JSON)
+    expect(await resolveNetprintTargetsRaw(kv(''), VAR_JSON)).toBe(VAR_JSON)
+    expect(await resolveNetprintTargetsRaw(undefined, VAR_JSON)).toBe(VAR_JSON)
+  })
+
+  it('どちらも無ければ空文字 = 呼び出し側は従来どおり skip する', async () => {
+    expect(await resolveNetprintTargetsRaw(kv(null), undefined)).toBe('')
+    const results = await runScheduledCron(
+      NETPRINT_CRON,
+      { netprintTargetsRaw: await resolveNetprintTargetsRaw(kv(null), undefined), kintaiCompId: '27324455' },
+      okDoCall([]),
+      new Date('2026-08-24T21:30:00Z'),
+    )
+    expect(results[0]).toMatchObject({ kind: 'netprint', ok: true })
+    expect(results[0].detail).toContain('NETPRINT_TARGETS 未設定')
+  })
+
+  it('KV の読み取りが例外なら握らず投げる (古い plain 変数に落とさない)', async () => {
+    // 落とすと「消えたはずの宛先」へ日報が飛ぶ。宛先が確定できないなら動かない方を選ぶ。
+    const broken = {
+      get: async () => {
+        throw new Error('KV unavailable')
+      },
+    }
+    await expect(resolveNetprintTargetsRaw(broken, VAR_JSON)).rejects.toThrow('KV unavailable')
+    // DTAKO_ACCOUNTS も同じ方針であることを固定する (共通化で挙動が割れていないこと)
+    await expect(resolveDtakoAccountsRaw(broken, '[{"comp_id":"old"}]')).rejects.toThrow(
+      'KV unavailable',
+    )
+  })
+
+  it('DTAKO_ACCOUNTS と別のキーを読む (取り違えない)', async () => {
+    const accountsOnly = {
+      get: async (key: string) => (key === DTAKO_ACCOUNTS_KV_KEY ? '[{"comp_id":"1"}]' : null),
+    }
+    expect(await resolveNetprintTargetsRaw(accountsOnly, undefined)).toBe('')
+    expect(await resolveDtakoAccountsRaw(kv(KV_JSON), undefined)).toBe('')
   })
 })

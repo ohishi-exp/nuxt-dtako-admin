@@ -90,11 +90,12 @@ service = "nuxt-dtako-admin-scraper-relay-tail"
 # - "30 21 * * *"        = 06:30 JST。前日分の運転日報を netprint へ登録し予約番号を
 #                          LINE WORKS へ通知する (Refs #874)。dtako 日次で前日分が
 #                          theearth に揃った後・営業所の始業前。NETPRINT_TARGETS
-#                          (dashboard plain var、[{branch_cd, channel_id |
-#                          recipient_id, branch_name?}]。宛先は rust-alc-api の DB
-#                          lineworks_channels (トークルーム) か notify_recipients
-#                          (個人) の行 id = Uuid で、どちらか一方だけ指定する
-#                          (Refs #874 の 10)) 設定時のみ実走。
+#                          ([{branch_cd, channel_id | recipient_id, branch_name?}]。
+#                          宛先は rust-alc-api の DB lineworks_channels (トークルーム)
+#                          か notify_recipients (個人) の行 id = Uuid で、どちらか
+#                          一方だけ指定する (Refs #874 の 10)) 設定時のみ実走。
+#                          **KV DTAKO_CONFIG_KV の netprint_targets が正**で、
+#                          dashboard plain var は fallback (Refs #874 の 11)。
 [triggers]
 crons = [
   "0 16 * * *",
@@ -111,7 +112,8 @@ bucket_name = "dtako-uploads"
 
 # NET780 アップロードデータの検索カタログ (app 本体 wrangler.toml と同じ D1、Refs #299)。
 # R2 が正、D1 は車番/乗務員CD/運行No 検索用の再構築可能インデックス。
-# relay の設定 KV (dtako-relay-config)。`dtako_accounts` キーが DTAKO_ACCOUNTS の
+# relay の設定 KV (dtako-relay-config)。`dtako_accounts` キーが DTAKO_ACCOUNTS の、
+# `netprint_targets` キーが NETPRINT_TARGETS の
 # 正 — dashboard の plain 環境変数は deploy で消える実害があったため (2026-07-25、
 # 本番から消えて viewer 認可が全社 401 になった)。**投入は最初の 1 回だけで、CI も
 # deploy も書き換えない**。CI は存在検証だけ行う (dtako-scraper-relay-deploy.yml)。

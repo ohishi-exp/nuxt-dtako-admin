@@ -16,6 +16,7 @@ import {
 import {
   dispatchNetprintTargets,
   resolveDtakoAccountsRaw,
+  resolveNetprintTargetsRaw,
   resolveSecretBinding,
   runScheduledCron,
   yesterdayJst,
@@ -36,8 +37,9 @@ export interface RelayWorkerEnv {
   RELAY: DurableObjectNamespace;
   SCRAPER_MODE?: string;
   DTAKO_ACCOUNTS?: unknown;
-  /** relay の設定 KV (`dtako-relay-config`)。`dtako_accounts` が DTAKO_ACCOUNTS の正
-   * — dashboard の plain 変数は deploy で消える (Refs #367)。 */
+  /** relay の設定 KV (`dtako-relay-config`)。`dtako_accounts` が DTAKO_ACCOUNTS の正、
+   * `netprint_targets` が NETPRINT_TARGETS の正 — dashboard の plain 変数は deploy で
+   * 消える (Refs #367)。 */
   DTAKO_CONFIG_KV?: unknown;
   ETC_ACCOUNTS?: unknown;
   /** auth-worker への service binding。`/ichibanboshi-proxy/*` (OIDC mint) に使う。 */
@@ -52,10 +54,12 @@ export interface RelayWorkerEnv {
   KINTAI_COMP_ID?: string;
   /** auth-worker の origin。introspect の絶対 URL 組み立てにのみ使う。 */
   NUXT_PUBLIC_AUTH_WORKER_URL?: string;
-  /** 運転日報 netprint cron の対象 (dashboard plain 変数、JSON 配列
-   * `[{branch_cd, channel_id | recipient_id}, ...]`、Refs #874)。宛先は
-   * トークルーム (`channel_id`) か個人 (`recipient_id`) のどちらか一方
-   * (#874-10)。未設定は cron skip。 */
+  /** 運転日報 netprint cron の対象 (JSON 配列
+   * `[{branch_cd, channel_id | recipient_id}, ...]`、Refs #874)。
+   * **KV (`DTAKO_CONFIG_KV`) の `netprint_targets` が正で、この plain 変数は
+   * fallback** — dashboard の plain 変数は deploy で消えるため (`dtako_accounts`
+   * と同じ理由、Refs #367)。宛先はトークルーム (`channel_id`) か個人
+   * (`recipient_id`) のどちらか一方 (#874-10)。KV も変数も未設定なら cron skip。 */
   NETPRINT_TARGETS?: unknown;
 }
 
@@ -237,7 +241,13 @@ export default {
             scraperMode: env.SCRAPER_MODE,
             dtakoAccountsRaw: await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS),
             etcAccountsRaw: await resolveSecretBinding(env.ETC_ACCOUNTS),
-            netprintTargetsRaw: await resolveSecretBinding(env.NETPRINT_TARGETS),
+            // KV 読み取りの例外は握らない (`resolveKvConfigRaw` の方針)。伝播させて
+            // cron の実行ごと失敗させる — 宛先が確定できないまま古い plain 変数で
+            // 日報を送るより、送らずに Observability に出す方を選ぶ。
+            netprintTargetsRaw: await resolveNetprintTargetsRaw(
+              env.DTAKO_CONFIG_KV,
+              env.NETPRINT_TARGETS,
+            ),
             kintaiCompId: env.KINTAI_COMP_ID,
           },
           async (doKey, path, body) => {
@@ -850,13 +860,21 @@ export async function handleNetprintRun(request: Request, env: RelayWorkerEnv): 
     (typeof body.comp_id === "string" && body.comp_id.trim()) || (env.KINTAI_COMP_ID ?? "").trim();
   if (!compId) return fail(503, "comp_id が解決できません");
 
+  // KV (`netprint_targets`) の読み取り失敗は **plain 変数に落とさず loud fail**
+  // (`resolveKvConfigRaw` の方針)。古い変数の値で走ると意図しない宛先へ日報が飛ぶ。
+  // 下の JSON 不正とは原因も直し方も違うので、tag を分けて別々に catch する。
+  let targetsRaw: string;
+  try {
+    targetsRaw = await resolveNetprintTargetsRaw(env.DTAKO_CONFIG_KV, env.NETPRINT_TARGETS);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(JSON.stringify({ netprint_run: "targets-kv-error", error: detail }));
+    return fail(503, `NETPRINT_TARGETS (KV) の読み取りに失敗しました: ${detail}`);
+  }
+
   let plan;
   try {
-    plan = planNetprintRun(
-      body,
-      await resolveSecretBinding(env.NETPRINT_TARGETS),
-      yesterdayJst(new Date()),
-    );
+    plan = planNetprintRun(body, targetsRaw, yesterdayJst(new Date()));
   } catch (err) {
     // NETPRINT_TARGETS の JSON 不正 (CronConfigError)。cron 側と同じく loud fail —
     // 手動実行では応答にも理由を載せる (叩いた人がその場で直せるように)。
