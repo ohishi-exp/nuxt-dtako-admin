@@ -984,7 +984,10 @@ R2 スナップショットを force-match へ自動移植してはいけない 
 `POST /api/profit/margin-summary` へ送り、R2 `profit/{ym}/margin-summary/` に
 `latest.json` + `v-{ts}.json` + `history.jsonl` で残す。作法は検証スナップショットと同じ
 (`putVersionedProfit` の sha256 差分検知)。**内容が同じなら版は増えない**ので、R2 の容量は
-「数字が変わった回数」ぶんしか伸びない。
+「**中身が**変わった回数」ぶんしか伸びない。**「数字が変わった回数」ではない** (Refs #891) —
+形式 2 からはハッシュ対象に `schemaVersion` と端末の設定の指紋 (`fuelRateOverrides` /
+`runCostShareMode`) も入るので (Refs #886)、**数字が 1 円も動かなくても版は増える**
+(本番 2026-07 で運行・売上・手当・粗利の 4 項目とも同額の版が 2 本並んだ実測あり)。
 
 - **1 (`reconcileVehicles`) の出力を残すだけ。突合は 1 行もやり直さない** — 数字を作り直すと
   画面と版で額が食い違う
