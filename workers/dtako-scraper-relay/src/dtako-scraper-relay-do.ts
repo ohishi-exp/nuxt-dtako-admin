@@ -370,6 +370,7 @@ import {
 } from "./netprint-client";
 import {
   formatDateSlash,
+  NETPRINT_DATE_RE,
   runNetprintTargets,
   type NetprintCronDeps,
   type NetprintTarget,
@@ -4695,7 +4696,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const branchName =
       typeof body.branch_name === "string" && body.branch_name !== "" ? body.branch_name : undefined;
     const date = typeof body.date === "string" ? body.date : "";
-    if (!compId || !branchCd || !channelId || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    if (!compId || !branchCd || !channelId || !NETPRINT_DATE_RE.test(date)) {
       return Response.json(
         { error: "comp_id / branch_cd / channel_id / date (YYYY-MM-DD) が必要です" },
         { status: 400 },

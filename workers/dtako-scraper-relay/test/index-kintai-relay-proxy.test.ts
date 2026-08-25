@@ -13,6 +13,7 @@ import {
   handleDtakoReimport,
   handleDtakoAlcUpload,
   handleNet780Archive,
+  handleNetprintRun,
   type RelayWorkerEnv,
 } from "../src/index";
 
@@ -398,5 +399,147 @@ describe("handleNet780Archive body 素通し (Refs #760 の 26)", () => {
     );
     expect(res.status).toBe(400);
     expect(doFetch).not.toHaveBeenCalled();
+  });
+});
+
+// 運転日報 netprint の手動実行 (Refs #874)。cron (JST 6:30) を待たずに 1 回
+// 走らせる口で、実機確認はこの route 経由で行う (cron 経路と同じ DO route
+// /cron/netprint を叩くので「cron でだけ通る道」を作らない)。
+describe("handleNetprintRun (POST /kintai-relay/netprint-run)", () => {
+  const TARGETS = JSON.stringify([{ branch_cd: "1", channel_id: "ch-honsha" }]);
+
+  it("X-Alc-Proxy-Secret 不一致は401 (DO を叩かない)", async () => {
+    const { env, doFetch } = fakeEnv({ NETPRINT_TARGETS: TARGETS, KINTAI_COMP_ID: "27324455" });
+    const res = await handleNetprintRun(
+      post("https://relay.internal/kintai-relay/netprint-run", {}, { "X-Alc-Proxy-Secret": "wrong" }),
+      env,
+    );
+    expect(res.status).toBe(401);
+    expect(doFetch).not.toHaveBeenCalled();
+  });
+
+  it("INTERNAL_SHARED_SECRET 未設定は503 (DO を叩かない)", async () => {
+    const { env, doFetch } = fakeEnv({ INTERNAL_SHARED_SECRET: "", NETPRINT_TARGETS: TARGETS });
+    const res = await handleNetprintRun(
+      post("https://relay.internal/kintai-relay/netprint-run", {}),
+      env,
+    );
+    expect(res.status).toBe(503);
+    expect(doFetch).not.toHaveBeenCalled();
+  });
+
+  it("JSON でない body は400 (DO を叩かない)", async () => {
+    const { env, doFetch } = fakeEnv({ NETPRINT_TARGETS: TARGETS, KINTAI_COMP_ID: "27324455" });
+    const res = await handleNetprintRun(
+      new Request("https://relay.internal/kintai-relay/netprint-run", {
+        method: "POST",
+        headers: { "X-Alc-Proxy-Secret": SECRET },
+        body: "not json",
+      }),
+      env,
+    );
+    expect(res.status).toBe(400);
+    expect(doFetch).not.toHaveBeenCalled();
+  });
+
+  it("comp_id が body にも KINTAI_COMP_ID にも無ければ503 (DO を叩かない)", async () => {
+    const { env, doFetch } = fakeEnv({ NETPRINT_TARGETS: TARGETS });
+    const res = await handleNetprintRun(
+      post("https://relay.internal/kintai-relay/netprint-run", {}),
+      env,
+    );
+    expect(res.status).toBe(503);
+    expect(doFetch).not.toHaveBeenCalled();
+  });
+
+  it("body 省略なら NETPRINT_TARGETS + 前日 (JST) で /cron/netprint を叩く", async () => {
+    const { env, doFetch, relay } = fakeEnv({
+      NETPRINT_TARGETS: TARGETS,
+      KINTAI_COMP_ID: "27324455",
+      doFetch: vi.fn(
+        async () => new Response(JSON.stringify({ ok: true, results: [] }), { status: 200 }),
+      ),
+    });
+    const res = await handleNetprintRun(
+      post("https://relay.internal/kintai-relay/netprint-run", {}),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(relay.idFromName).toHaveBeenCalledWith("scraper-comp-27324455");
+    const [url, init] = doFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://relay.internal/cron/netprint");
+    const sent = JSON.parse(init.body as string);
+    expect(sent).toMatchObject({ comp_id: "27324455", branch_cd: "1", channel_id: "ch-honsha" });
+    // 既定の対象日は前日 (JST) — 形式だけ固定し、値そのものは実行時刻に依存させない
+    expect(sent.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect((await jsonOf(res)) as { date: string }).toMatchObject({ date: sent.date });
+  });
+
+  it("branch_cd + channel_id + date を渡すと NETPRINT_TARGETS を使わずその 1 件を叩く", async () => {
+    const { env, doFetch } = fakeEnv({
+      NETPRINT_TARGETS: TARGETS,
+      KINTAI_COMP_ID: "27324455",
+      doFetch: vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })),
+    });
+    const res = await handleNetprintRun(
+      post("https://relay.internal/kintai-relay/netprint-run", {
+        branch_cd: "2",
+        channel_id: "ch-test",
+        branch_name: "テスト用",
+        date: "2026-08-20",
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(doFetch).toHaveBeenCalledTimes(1);
+    const [, init] = doFetch.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({
+      comp_id: "27324455",
+      branch_cd: "2",
+      channel_id: "ch-test",
+      branch_name: "テスト用",
+      date: "2026-08-20",
+    });
+  });
+
+  it("片方だけの指定 / date 形式違いは400 (DO を叩かない)", async () => {
+    const { env, doFetch } = fakeEnv({ NETPRINT_TARGETS: TARGETS, KINTAI_COMP_ID: "27324455" });
+    for (const body of [{ branch_cd: "2" }, { date: "2026/08/20" }]) {
+      const res = await handleNetprintRun(
+        post("https://relay.internal/kintai-relay/netprint-run", body),
+        env,
+      );
+      expect(res.status).toBe(400);
+    }
+    expect(doFetch).not.toHaveBeenCalled();
+  });
+
+  it("NETPRINT_TARGETS が不正 JSON なら503 で理由を返す (DO を叩かない)", async () => {
+    const { env, doFetch } = fakeEnv({ NETPRINT_TARGETS: "not json", KINTAI_COMP_ID: "27324455" });
+    const res = await handleNetprintRun(
+      post("https://relay.internal/kintai-relay/netprint-run", {}),
+      env,
+    );
+    expect(res.status).toBe(503);
+    expect((await jsonOf(res)) as { error: string }).toMatchObject({
+      error: expect.stringContaining("NETPRINT_TARGETS"),
+    });
+    expect(doFetch).not.toHaveBeenCalled();
+  });
+
+  it("DO が非 2xx を返したら 502 で結果を返す (target 間は独立)", async () => {
+    const { env } = fakeEnv({
+      NETPRINT_TARGETS: TARGETS,
+      KINTAI_COMP_ID: "27324455",
+      doFetch: vi.fn(async () => new Response("LINEWORKS_BOT が未設定または不正です", { status: 503 })),
+    });
+    const res = await handleNetprintRun(
+      post("https://relay.internal/kintai-relay/netprint-run", {}),
+      env,
+    );
+    expect(res.status).toBe(502);
+    const body = (await jsonOf(res)) as { ok: boolean; results: Array<{ ok: boolean; detail: string }> };
+    expect(body.ok).toBe(false);
+    expect(body.results[0].detail).toContain("HTTP 503");
   });
 });

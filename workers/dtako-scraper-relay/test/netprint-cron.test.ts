@@ -9,6 +9,7 @@ import {
   netprintPdfFileName,
   normalizeBranchCd,
   parseNetprintTargets,
+  planNetprintRun,
   resolveBranchDisplayName,
   runNetprintTargets,
   type NetprintCronDeps,
@@ -86,6 +87,78 @@ describe('通知文', () => {
     expect(buildNetprintErrorNotification('本社営業所', '2026-08-24', 'boom')).toBe(
       '【運転日報】本社営業所 2026/08/24分の自動登録に失敗しました: boom',
     )
+  })
+})
+
+describe('planNetprintRun (手動実行の body 解釈)', () => {
+  const CONFIGURED = JSON.stringify([
+    { branch_cd: '1', channel_id: 'ch-honsha' },
+    { branch_cd: '2', channel_id: 'ch-obihiro' },
+  ])
+
+  it('全部省略なら前日 (呼び出し側が渡す既定日) + NETPRINT_TARGETS 全件 = cron と同じ', () => {
+    expect(planNetprintRun({}, CONFIGURED, '2026-08-24')).toEqual({
+      date: '2026-08-24',
+      targets: [
+        { branch_cd: '1', channel_id: 'ch-honsha' },
+        { branch_cd: '2', channel_id: 'ch-obihiro' },
+      ],
+    })
+  })
+
+  it('date を指定するとその日を使う', () => {
+    const plan = planNetprintRun({ date: '2026-08-20' }, CONFIGURED, '2026-08-24')
+    expect(plan).toMatchObject({ date: '2026-08-20' })
+  })
+
+  it('date の形式違い / 非文字列は 400 相当の error', () => {
+    expect(planNetprintRun({ date: '2026/08/20' }, CONFIGURED, '2026-08-24')).toEqual({
+      error: 'date は YYYY-MM-DD で指定してください',
+    })
+    expect(planNetprintRun({ date: 20260820 }, CONFIGURED, '2026-08-24')).toEqual({
+      error: 'date は YYYY-MM-DD で指定してください',
+    })
+  })
+
+  it('branch_cd + channel_id を揃えて渡すとその 1 件だけ (NETPRINT_TARGETS は使わない)', () => {
+    expect(
+      planNetprintRun(
+        { branch_cd: ' 1 ', channel_id: ' ch-test ', branch_name: '本社営業所' },
+        CONFIGURED,
+        '2026-08-24',
+      ),
+    ).toEqual({
+      date: '2026-08-24',
+      targets: [{ branch_cd: '1', channel_id: 'ch-test', branch_name: '本社営業所' }],
+    })
+  })
+
+  it('branch_name 省略 / 空文字は undefined (行から引くフォールバックに任せる)', () => {
+    const plan = planNetprintRun(
+      { branch_cd: '1', channel_id: 'ch-test', branch_name: '' },
+      CONFIGURED,
+      '2026-08-24',
+    )
+    expect(plan).toEqual({
+      date: '2026-08-24',
+      targets: [{ branch_cd: '1', channel_id: 'ch-test', branch_name: undefined }],
+    })
+  })
+
+  it('片方だけの指定は受け付けない (設定側の宛先と混ざるのを防ぐ)', () => {
+    const expected = { error: 'branch_cd と channel_id は両方まとめて指定してください' }
+    expect(planNetprintRun({ branch_cd: '1' }, CONFIGURED, '2026-08-24')).toEqual(expected)
+    expect(planNetprintRun({ channel_id: 'ch-test' }, CONFIGURED, '2026-08-24')).toEqual(expected)
+  })
+
+  it('NETPRINT_TARGETS 未設定 + 指定なしは error (黙って何もしないにしない)', () => {
+    expect(planNetprintRun({}, undefined, '2026-08-24')).toEqual({
+      error: 'NETPRINT_TARGETS が未設定です — branch_cd と channel_id を body で指定してください',
+    })
+  })
+
+  it('NETPRINT_TARGETS が不正 JSON なら throw する (呼び出し側が loud fail に落とす)', () => {
+    expect(() => planNetprintRun({}, 'not json', '2026-08-24')).toThrow(CronConfigError)
   })
 })
 

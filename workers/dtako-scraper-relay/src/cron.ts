@@ -18,7 +18,7 @@
  * 実際の配線 (RELAY.idFromName → DO.fetch) は index.ts の scheduled handler。
  */
 
-import { parseNetprintTargets } from "./netprint-cron";
+import { parseNetprintTargets, type NetprintTarget } from "./netprint-cron";
 
 /** dtako 日次スクレイプの cron 式 (UTC)。VPS cron `0 1 * * *` JST と同時刻。 */
 export const DTAKO_CRON = "0 16 * * *";
@@ -186,6 +186,49 @@ export interface CronRunResult {
 }
 
 /**
+ * netprint の対象 (営業所) ごとに comp_id 単位 DO の `/cron/netprint` を叩く
+ * (Refs #874)。**cron 経路と手動実行 (`POST /kintai-relay/netprint-run`) の
+ * 両方がこれを使う** — 「cron でだけ通る道」を作らないため。
+ *
+ * target 間で失敗を伝播させない (1 件の throw はその target の結果に閉じる) のは
+ * dtako/etc/restraint の各 cron と同じ。DO 側は同一 comp_id なので `scrapeQueue`
+ * で直列化される。
+ */
+export async function dispatchNetprintTargets(
+  compId: string,
+  targets: NetprintTarget[],
+  date: string,
+  callDo: CronDoCall,
+): Promise<CronRunResult[]> {
+  return Promise.all(
+    targets.map(async (target): Promise<CronRunResult> => {
+      try {
+        const res = await callDo(`scraper-comp-${compId}`, "/cron/netprint", {
+          comp_id: compId,
+          branch_cd: target.branch_cd,
+          channel_id: target.channel_id,
+          branch_name: target.branch_name ?? "",
+          date,
+        });
+        return {
+          kind: "netprint",
+          target: `${compId}|${target.branch_cd}`,
+          ok: res.ok,
+          detail: `HTTP ${res.status}: ${res.text.slice(0, 200)}`,
+        };
+      } catch (err) {
+        return {
+          kind: "netprint",
+          target: `${compId}|${target.branch_cd}`,
+          ok: false,
+          detail: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }),
+  );
+}
+
+/**
  * cron 式で dispatch し、対象アカウントごとに DO を叩いた結果を返す。
  *
  * DO 側の `/cron/*` は job を受理して即 202 を返し、実処理は DO 内で
@@ -324,33 +367,7 @@ export async function runScheduledCron(
       // ので、targets 未設定 = 上の skip で終わるのが正常系)。
       return [{ kind: "netprint", target: "*", ok: false, detail: "KINTAI_COMP_ID 未設定のため netprint cron を実行できません" }];
     }
-    const date = yesterdayJst(now);
-    return Promise.all(
-      targets.map(async (target): Promise<CronRunResult> => {
-        try {
-          const res = await callDo(`scraper-comp-${compId}`, "/cron/netprint", {
-            comp_id: compId,
-            branch_cd: target.branch_cd,
-            channel_id: target.channel_id,
-            branch_name: target.branch_name ?? "",
-            date,
-          });
-          return {
-            kind: "netprint",
-            target: `${compId}|${target.branch_cd}`,
-            ok: res.ok,
-            detail: `HTTP ${res.status}: ${res.text.slice(0, 200)}`,
-          };
-        } catch (err) {
-          return {
-            kind: "netprint",
-            target: `${compId}|${target.branch_cd}`,
-            ok: false,
-            detail: err instanceof Error ? err.message : String(err),
-          };
-        }
-      }),
-    );
+    return dispatchNetprintTargets(compId, targets, yesterdayJst(now), callDo);
   }
 
   return [{ kind: "none", target: cron, ok: false, detail: "未知の cron 式です (wrangler.toml の triggers と cron.ts の定数がズレています)" }];

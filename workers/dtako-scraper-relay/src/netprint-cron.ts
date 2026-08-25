@@ -41,6 +41,9 @@ export function parseNetprintTargets(raw: string | undefined): NetprintTarget[] 
   return parsed as NetprintTarget[];
 }
 
+/** 対象日 (JST) の受け渡し形式。cron が渡す値も手動実行の `date` も同じ。 */
+export const NETPRINT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
 /** 営業所コードの表記ゆれ吸収。theearth の事業所コードはマスタ上 8 桁ゼロ埋め
  * (`00000001`) だが F-DES1010 の行には非パディング (`1`) で載るため、先頭の 0 を
  * 落としてから比較する。 */
@@ -102,6 +105,55 @@ export function buildNetprintErrorNotification(
   detail: string,
 ): string {
   return `【運転日報】${branchName} ${formatDateSlash(dateYmd)}分の自動登録に失敗しました: ${detail}`;
+}
+
+/** 手動実行 (`POST /kintai-relay/netprint-run`) の実行計画。 */
+export type NetprintRunPlan = { error: string } | { date: string; targets: NetprintTarget[] };
+
+/**
+ * 手動実行の body を実行計画に落とす (cron を待たずに 1 回走らせるための口、
+ * Refs #874)。
+ *
+ * - `date` 省略で `defaultDate` (呼び出し側が `yesterdayJst` で出した前日 JST)。
+ *   指定するなら `YYYY-MM-DD`。
+ * - `branch_cd` + `channel_id` を**揃えて**渡すとその 1 件だけを走らせる
+ *   (`NETPRINT_TARGETS` を触らずに試験用チャンネルへ流せる)。**片方だけの指定は
+ *   受け付けない** — 設定側の target と混ざって「意図しない宛先へ送る」が起きうる
+ *   ため、黙って補完しない。
+ * - どちらも省略すると `NETPRINT_TARGETS` の全 target を使う (= cron と同じ動き)。
+ *
+ * `NETPRINT_TARGETS` が不正 JSON なら `parseNetprintTargets` がそのまま throw する
+ * (呼び出し側が loud fail に落とす)。
+ */
+export function planNetprintRun(
+  body: { date?: unknown; branch_cd?: unknown; channel_id?: unknown; branch_name?: unknown },
+  configuredTargetsRaw: string | undefined,
+  defaultDate: string,
+): NetprintRunPlan {
+  let date = defaultDate;
+  if (body.date !== undefined) {
+    if (typeof body.date !== "string" || !NETPRINT_DATE_RE.test(body.date)) {
+      return { error: "date は YYYY-MM-DD で指定してください" };
+    }
+    date = body.date;
+  }
+  const branchCd = typeof body.branch_cd === "string" ? body.branch_cd.trim() : "";
+  const channelId = typeof body.channel_id === "string" ? body.channel_id.trim() : "";
+  if (branchCd !== "" || channelId !== "") {
+    if (branchCd === "" || channelId === "") {
+      return { error: "branch_cd と channel_id は両方まとめて指定してください" };
+    }
+    const branchName =
+      typeof body.branch_name === "string" && body.branch_name !== "" ? body.branch_name : undefined;
+    return { date, targets: [{ branch_cd: branchCd, channel_id: channelId, branch_name: branchName }] };
+  }
+  const targets = parseNetprintTargets(configuredTargetsRaw);
+  if (targets.length === 0) {
+    return {
+      error: "NETPRINT_TARGETS が未設定です — branch_cd と channel_id を body で指定してください",
+    };
+  }
+  return { date, targets };
 }
 
 /** 日報行のうちこの cron が読む部分 (`DailyReportRow` の構造的部分型)。 */

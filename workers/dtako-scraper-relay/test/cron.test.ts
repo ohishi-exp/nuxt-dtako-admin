@@ -6,6 +6,7 @@ import {
   NETPRINT_CRON,
   RESTRAINT_SYNC_CRON,
   currentYmJst,
+  dispatchNetprintTargets,
   etcCsvKey,
   parseDtakoAccounts,
   parseEtcAccounts,
@@ -347,6 +348,38 @@ describe('runScheduledCron: netprint', () => {
     )
     expect(results[0].ok).toBe(false)
     expect(results[0].detail).toContain('HTTP 503')
+  })
+})
+
+describe('dispatchNetprintTargets (cron と手動実行が共有する dispatch)', () => {
+  it('target ごとに DO を叩き、対象日をそのまま渡す (手動実行は前日以外も指定できる)', async () => {
+    const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+    const results = await dispatchNetprintTargets(
+      '27324455',
+      [{ branch_cd: '1', channel_id: 'ch-test', branch_name: '本社営業所' }],
+      '2026-08-20',
+      okDoCall(calls),
+    )
+    expect(calls).toEqual([
+      {
+        doKey: 'scraper-comp-27324455',
+        path: '/cron/netprint',
+        body: {
+          comp_id: '27324455',
+          branch_cd: '1',
+          channel_id: 'ch-test',
+          branch_name: '本社営業所',
+          date: '2026-08-20',
+        },
+      },
+    ])
+    expect(results[0]).toMatchObject({ kind: 'netprint', target: '27324455|1', ok: true })
+  })
+
+  it('target が空なら DO を 1 度も叩かない', async () => {
+    const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+    expect(await dispatchNetprintTargets('27324455', [], '2026-08-20', okDoCall(calls))).toEqual([])
+    expect(calls).toHaveLength(0)
   })
 })
 
