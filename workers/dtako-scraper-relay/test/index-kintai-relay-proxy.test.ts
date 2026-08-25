@@ -557,10 +557,83 @@ describe("handleNetprintRun (POST /kintai-relay/netprint-run)", () => {
       env,
     );
     expect(res.status).toBe(400);
-    const body = (await jsonOf(res)) as { ok: boolean; results: { detail: string }[] };
+    const body = (await jsonOf(res)) as {
+      ok: boolean;
+      results: { detail: string; skipped: boolean }[];
+    };
     expect(body.ok).toBe(false);
     // 理由は target ごとの detail の**先頭**に出る (relay がここを 200 字で切る)。
     expect(body.results[0].detail).toContain("見つかりません");
+    // 行は skip 印つき (画面が「失敗」と書かないため)。全部 skip なので全体は 400。
+    expect(body.results[0].skipped).toBe(true);
+  });
+
+  it("営業所が 2 つあって片方だけ一致したら 200 — 無い方は skip、出せる日報は出す (Refs #913)", async () => {
+    // 片方に無いのは当たり前 (どちらに属す運行かは呼ぶ人には分からない)。ここで
+    // 全体を落とすと**もう一方で出せたはずの日報まで出なくなる**。
+    const TWO = JSON.stringify([
+      { branch_cd: "1", channel_id: CH_HONSHA },
+      { branch_cd: "2", channel_id: CH_TEST },
+    ]);
+    const doFetch = vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string) as { branch_cd: string };
+      return body.branch_cd === "1"
+        ? new Response(JSON.stringify({ ok: true, results: [{ detail: "成功 1 / 失敗 0 (全 1 運行) 予約番号 GPPE4H6T" }] }), { status: 200 })
+        : new Response(JSON.stringify({ error: "運行NO … は 2026/08/24 の 帯広営業所 に見つかりません" }), { status: 400 });
+    });
+    const { env } = fakeEnv({ NETPRINT_TARGETS: TWO, KINTAI_COMP_ID: "27324455", doFetch });
+    const res = await handleNetprintRun(
+      post("https://relay.internal/kintai-relay/netprint-run", {
+        date: "2026-08-24",
+        operation_no: "2608241017180000003046",
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    const body = (await jsonOf(res)) as { ok: boolean; results: { ok: boolean; skipped: boolean }[] };
+    expect(body.ok).toBe(true);
+    expect(body.results.map((r) => [r.ok, r.skipped])).toEqual([
+      [true, false],
+      [false, true],
+    ]);
+  });
+
+  it("営業所が 2 つでどちらにも無ければ 400 (探した営業所ぶんの行を返す)", async () => {
+    const TWO = JSON.stringify([
+      { branch_cd: "1", channel_id: CH_HONSHA },
+      { branch_cd: "2", channel_id: CH_TEST },
+    ]);
+    const doFetch = vi.fn(
+      async () => new Response(JSON.stringify({ error: "見つかりません" }), { status: 400 }),
+    );
+    const { env } = fakeEnv({ NETPRINT_TARGETS: TWO, KINTAI_COMP_ID: "27324455", doFetch });
+    const res = await handleNetprintRun(
+      post("https://relay.internal/kintai-relay/netprint-run", {
+        date: "2026-08-24",
+        operation_no: "2608241017180000003046",
+      }),
+      env,
+    );
+    expect(res.status).toBe(400);
+    const body = (await jsonOf(res)) as { ok: boolean; results: { skipped: boolean }[] };
+    expect(body.ok).toBe(false);
+    expect(body.results.map((r) => r.skipped)).toEqual([true, true]);
+  });
+
+  it("operation_no 無指定なら DO の 400 は skip にしない (従来どおり 502)", async () => {
+    // skip 印を付ける条件は **operation_no を指定したとき**だけ。無指定の 400 は
+    // 「その営業所にその運行が無い」ではないので、黙って飛ばすと欠陥が隠れる。
+    const doFetch = vi.fn(
+      async () => new Response(JSON.stringify({ error: "comp_id … が必要です" }), { status: 400 }),
+    );
+    const { env } = fakeEnv({ NETPRINT_TARGETS: TARGETS, KINTAI_COMP_ID: "27324455", doFetch });
+    const res = await handleNetprintRun(
+      post("https://relay.internal/kintai-relay/netprint-run", { date: "2026-08-24" }),
+      env,
+    );
+    expect(res.status).toBe(502);
+    const body = (await jsonOf(res)) as { results: { skipped: boolean }[] };
+    expect(body.results[0].skipped).toBe(false);
   });
 
   it("DO の失敗が 400 以外なら従来どおり 502", async () => {

@@ -99,9 +99,14 @@ export function parseNetprintRunBody(body: unknown): NetprintRunBodyParse {
  * relay が非 2xx を返したときに `statusMessage` に載せる 1 行。
  *
  * relay は **`{error}` を返す場合** (401/400/503) と、**target ごとの結果を持ったまま
- * 502 を返す場合** (`{ok: false, date, results}`) がある。後者を「HTTP 502」だけに
+ * 502 / 400 を返す場合** (`{ok: false, date, results}`) がある。後者を「HTTP 502」だけに
  * 潰すと、どの営業所がなぜ失敗したのかが画面から消える — 件数を数えて出し、
  * 内訳は `createError` の `data` (relay の応答そのもの) に載せる。
+ *
+ * **全 target が `skipped` の 400 は「失敗」とは書かない** (Refs #913)。これは
+ * 「指定された運行NO がどの営業所にも無かった」であって、営業所が失敗したのでは
+ * ない — 「N 件中 N 件の営業所が失敗」と出すと、theearth や netprint を疑わせる。
+ * 探した営業所の数を出し、営業所ごとの理由 (件数・日付軸) は行の方に出す。
  */
 export function describeNetprintRunFailure(data: unknown, status: number): string {
   const record = typeof data === 'object' && data !== null ? data as Record<string, unknown> : null
@@ -109,6 +114,9 @@ export function describeNetprintRunFailure(data: unknown, status: number): strin
   if (typeof error === 'string' && error !== '') return error
   const results = record?.results
   if (Array.isArray(results) && results.length > 0) {
+    if (results.every(item => (item as { skipped?: unknown } | null)?.skipped === true)) {
+      return `指定された運行NO はどの営業所にも見つかりませんでした (${results.length} 営業所を探しました。HTTP ${status})`
+    }
     const failed = results.filter(item => (item as { ok?: unknown } | null)?.ok !== true)
     return `${results.length} 件中 ${failed.length} 件の営業所が失敗しました (HTTP ${status})`
   }

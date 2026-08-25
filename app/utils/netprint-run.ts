@@ -58,13 +58,19 @@ export interface NetprintRunInput {
   comp_id?: string
 }
 
-/** relay が返す target 1 件ぶんの結果 (`CronRunResult`)。 */
+/** relay が返す target 1 件ぶんの結果 (`CronRunResult` + `skipped`)。 */
 export interface NetprintRunResultItem {
   /** `${comp_id}|${branch_cd}` */
   target: string
   ok: boolean
   /** `HTTP {status}: {DO の応答本文}`、または relay 側で投げられた例外の message。 */
   detail: string
+  /** `operation_no` 指定で**この営業所には無かった**ので飛ばした (Refs #913)。
+   *
+   * **`ok` とは別の 3 つ目の状態**として持つ。`ok: false` のまま出すと、営業所を
+   * 2 つ設定していて片方だけ一致した日に「成功 (HTTP 200)」の下に「失敗 営業所2」が
+   * 並び、どちらを信じるのか分からない画面になる。 */
+  skipped: boolean
 }
 
 /** 画面が扱う 1 回ぶんの実行結果 (成功も失敗も同じ形。fetch 自体の失敗だけは投げる)。 */
@@ -104,6 +110,7 @@ function readResults(value: unknown): NetprintRunResultItem[] {
       target: typeof r.target === 'string' ? r.target : '',
       ok: r.ok === true,
       detail: typeof r.detail === 'string' ? r.detail : '',
+      skipped: r.skipped === true,
     })
   }
   return items
@@ -140,6 +147,9 @@ export interface NetprintTargetView {
   /** `${comp_id}|${branch_cd}` の営業所コード側。 */
   branchCd: string
   ok: boolean
+  /** 指定された運行NO がこの営業所に無かったので飛ばした (Refs #913)。
+   * **`ok` より先に見る** — skip は成否のどちらでもない。 */
+  skipped: boolean
   /** プリント予約番号 (netprint の `printID`)。取れなければ空配列。 */
   printIds: string[]
   /** 成否の理由として画面に出す 1 行。 */
@@ -192,6 +202,7 @@ export function viewNetprintRunResult(item: NetprintRunResultItem): NetprintTarg
   return {
     branchCd,
     ok: item.ok,
+    skipped: item.skipped,
     printIds: readPrintIds(body),
     message: describeDoBody(parseJsonObject(body)) ?? body,
   }
