@@ -66,8 +66,8 @@ const emit = defineEmits<{
  * 線の色 (凡例と同じ)。haul = 売上走行 / deadhead = 回送 / other = 降しの無い便など分類不能。
  *
  * **★ この地図の色は「便」ではなく「種別」を指す** (marker も 積み = 緑 ▲ / 降し = 青 ■ の
- * 種別で、便は ▲ / ■ の中の数字)。**便が線に効かないわけではない** — `legSeq` が変わると
- * 同じ `kind` でも線は切れる (`buildOperationRoute`)。**分かれ目は便 / 色は種別**の 2 つが
+ * 種別で、便は marker の数字 = ▲ の右・■ の中)。**便が線に効かないわけではない** — `legSeq` が
+ * 変わると同じ `kind` でも線は切れる (`buildOperationRoute`)。**分かれ目は便 / 色は種別**の 2 つが
  * 別々に効いている。**イベント表 (`event-row-legs.ts`) は逆で、色 → 便**
  * (`LEG_COLOR_COUNT` の循環) — 同じ色相が 2 つの区画で違う意味を指す (Refs #884)。
  * 下の「ぶつかりを避ける」規則は**地図の中の色だけ**を対象にしていて、表の 5 色は
@@ -396,7 +396,7 @@ const LINE_LAYERS: Array<{ key: keyof RouteMapLayers, label: string, kinds: Rout
         </label>
       </div>
       <div class="flex flex-wrap items-center gap-4 px-4 pb-2 text-[11px] text-gray-400">
-        <span>色は便ではなく種別 (上の凡例) を表します。便は ▲ / ■ の中の数字で読みます</span>
+        <span>色は便ではなく種別 (上の凡例) を表します。便は marker の数字 (▲ の右・■ の中) で読みます</span>
         <span>軌跡 = NET780 の道なり GPS か、重ね掛け行も混ぜたイベント軌跡 (紫 = 便の時間帯 / マゼンタ = 回送の時間帯)。直線 = イベント行の始点→終点 (既定 OFF)</span>
       </div>
     </div>
