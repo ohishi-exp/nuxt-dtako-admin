@@ -358,4 +358,3 @@ export function defaultRange(selectedMonth: string): { from: string, to: string 
   const year = selectedMonth.slice(0, 4)
   return { from: `${year}-01`, to: selectedMonth }
 }
-
