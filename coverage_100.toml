@@ -1114,3 +1114,25 @@ branches = true
 [[files]]
 path = "app/pages/upload.vue"
 branches = true
+
+# ダウンロード共通処理 (`downloadBlobResponse`、Refs #169 / gate 登録は #903 の 2 段目)。
+# **ファイル名の出どころが 2 つある**のがこの lib の全部 —
+# `content-disposition: … filename="…"` があればそれ、無ければ呼び出し側の fallback。
+# 取り違えると「保存はできたのに名前が中身と合っていない」形の欠陥になるので、
+# **ヘッダ有り / 無し / `filename=` を持たない `content-disposition`** の 3 通りと、
+# **作った Object URL を必ず開放すること**を固定している。
+#
+# **★ この登録は #903 の 2 段目 (`restraint-report.vue` / `y-time-export.vue`) の
+# 副産物**。オーナー方針 (2026-08-25)「**UI は 100% にしないでいい、lib だけ**」により
+# **ページ 2 本は gate に登録していない**。この lib はページのテストを書く過程で
+# 初めて実行され、専用の unit test (`tests/utils/download-blob.test.ts`) だけで
+# 100% に届くことを実測したので、**lib として**登録する
+# (ページテストに依存しない — `tests/utils/download-blob.test.ts` 単独で 9/9 stmt・4/4 arm)。
+#
+# branches: **v8 branch site 2 / arm 4、すべて被覆。死に分岐 0 件。**
+# 内訳は `content-disposition` の `?? ''` (2 arm) と `m ? m[1]! : fallback` (2 arm)。
+# BR() instrumented site は測っていない (`.ts` なので計測器は使えるが、
+# v8 が 2 site しか持たない小さな lib なので指標を増やしていない — **未測定**)。
+[[files]]
+path = "app/utils/download-blob.ts"
+branches = true
