@@ -14,10 +14,25 @@ import {
   EVENT_CATEGORY_ORDER,
   EVENT_CATEGORY_LABELS,
 } from '~/utils/event-data-table'
+import { toRaw } from 'vue'
+import type { EventRowLeg } from '~/utils/event-row-legs'
+import { legCellClass, legLabel, legTitle, countUnassigned, unassignedNotice, UNKNOWN_LEG_ROW } from '~/utils/event-row-legs'
 
 const props = defineProps<{
   group: CrewGroup
   headers: string[]
+  /** **行 → 便 の引き当て表** (Refs #868)。`EventDataTable` が **CSV 全行**
+   * (`props.data.rows`) から `rowLegLookup` で 1 回だけ作って渡す。
+   *
+   * **ここで `group.rows` から数え直さない。** KUDGIVT.csv は 1 運行分の**全乗務員**
+   * (運転手 = 1 / 副運転手 = 2) の行を持つので、乗務員タブで絞った配列から数えると、
+   * 絞られた側に積みがある運行で**画面の便番号がお金の便番号とずれる**。
+   * 数え直す口をそもそも持たないことで、**「間違った配列から数える」事故を構造的に消す**。
+   *
+   * **必須にしてある。** optional にすると「渡し忘れ → エラーにならず・見た目も自然で・
+   * お金とだけ食い違う便番号」が出る経路が既定値として残る。利用箇所は
+   * `EventDataTable.vue` の 1 か所だけなので、必須化しても呼び出し側の変更は無い。 */
+  rowLegs: Map<string[], EventRowLeg>
   /** 一番星の伝票から提案された区間 (Refs proposeFromSlips)。値が変わるたびに
    * filteredRows 内で対応する行をチェック状態にする。手動選択とは独立した
    * 「外部からの選択指示」チャネルとして扱う (null は「指示なし」で無視する)。
@@ -52,6 +67,21 @@ const categoryCounts = computed(() => {
 })
 
 const displayColumns = computed(() => getDisplayColumns(props.headers))
+
+/**
+ * 表示行 → 便。**`toRaw` で reactive proxy を剥がしてから引く** — 表を作る側
+ * (`EventDataTable`) も同じく剥がしている。proxy と raw が混ざる経路を構造的に消すため。
+ *
+ * 引けなかった行は**空欄にせず**「判定不能」。万一 表と表示行の行オブジェクトが
+ * 食い違えば全行がこちらに倒れるので、**誤った便番号が静かに出る代わりに
+ * 「判定できなかった行 N 件」が画面に出る** (下の `legNotice`)。
+ */
+function legOf(row: string[]): EventRowLeg {
+  return props.rowLegs.get(toRaw(row)) ?? UNKNOWN_LEG_ROW
+}
+
+/** **便が付かなかった行を黙らせない。** 表示している行だけを数える。 */
+const legNotice = computed(() => unassignedNotice(countUnassigned(filteredRows.value.map(legOf))))
 
 /** 選択行 index (filteredRows 基準)。地図パネル (速度カラー) に渡す時刻レンジの元。 */
 const selectedRows = ref<Set<number>>(new Set())
@@ -110,6 +140,12 @@ watch(selectedRows, (rows) => {
     </div>
   </div>
 
+  <!-- 便が付かなかった行は件数を出す (Refs #868)。**空欄のまま黙らない** — 引き当て表と
+       表示行が食い違ったときも、誤った便番号ではなくこの行が出る。 -->
+  <p v-if="legNotice" class="px-4 pt-2 text-xs text-gray-500">
+    {{ legNotice }}
+  </p>
+
   <p v-if="selectedRows.size > 0" class="px-4 pt-2 text-xs text-gray-500">
     {{ selectedRows.size }}行選択中
     <button class="ml-2 text-blue-600 dark:text-blue-400 hover:underline" @click="clearSelection">
@@ -122,6 +158,7 @@ watch(selectedRows, (rows) => {
       <tr>
         <th class="text-left px-3 py-2 font-medium text-gray-500 whitespace-nowrap w-8" />
         <th class="text-left px-3 py-2 font-medium text-gray-500 whitespace-nowrap">#</th>
+        <th class="text-left px-3 py-2 font-medium text-gray-500 whitespace-nowrap">便</th>
         <th
           v-for="col in displayColumns"
           :key="col.header"
@@ -144,6 +181,13 @@ watch(selectedRows, (rows) => {
           <input type="checkbox" :checked="selectedRows.has(ri)" class="cursor-pointer" @click.stop="toggleRow(ri)">
         </td>
         <td class="px-3 py-1.5 text-gray-400">{{ ri + 1 }}</td>
+        <!-- 便の列。**色はこのセルだけに載せる** (行の背景は 積み/降し/休息 で使用済み)。
+             色が読めない環境でも分かるよう、語 (`便2` / `便2 回送` / `便2 帰庫`) でも分ける。 -->
+        <td class="px-3 py-1.5 whitespace-nowrap">
+          <span class="px-1.5 py-0.5 rounded" :class="legCellClass(legOf(row))" :title="legTitle(legOf(row))">
+            {{ legLabel(legOf(row)) }}
+          </span>
+        </td>
         <td
           v-for="col in displayColumns"
           :key="col.header"
@@ -159,7 +203,7 @@ watch(selectedRows, (rows) => {
         </td>
       </tr>
       <tr v-if="filteredRows.length === 0">
-        <td :colspan="displayColumns.length + 2" class="px-3 py-8 text-center text-gray-400">
+        <td :colspan="displayColumns.length + 3" class="px-3 py-8 text-center text-gray-400">
           データがありません
         </td>
       </tr>

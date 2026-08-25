@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import type { CsvJsonResponse } from '~/types'
 import type { SelectedRowsSummary, SelectedRowsLocationRange } from '~/utils/event-data-table'
+import { toRaw } from 'vue'
 import { groupByCrewRole, ignoredEventCodes, dropIgnoredRows } from '~/utils/event-data-table'
+import { rowLegLookup } from '~/utils/event-row-legs'
 import { getEventClassifications } from '~/utils/api'
 
 const props = defineProps<{
@@ -40,6 +42,18 @@ const emit = defineEmits<{
   'update:selectedSummary': [summary: SelectedRowsSummary | null]
   'update:selectedLocation': [location: SelectedRowsLocationRange | null]
 }>()
+
+/**
+ * 行 → 便 の引き当て表 (Refs #868)。**`visibleRows` ではなく `props.data.rows`** から作る。
+ *
+ * `visibleRows` は `showIgnored` のチェックで `props.data.rows` と `keptRows` を
+ * 切り替えるので、そこから数えると**「無視した N 件も表示」を押しただけで便番号が
+ * 変わりうる**。表示の切り替えでお金の意味が動いて見えるのは事故なので、
+ * **粗利の按分 (`extractOperationIdle(csv.headers, csv.rows)`) と同じ全行**から 1 回だけ作る。
+ *
+ * `toRaw` で reactive proxy を剥がして key にする (引く側の `EventCrewPanel` も同じ)。
+ */
+const rowLegs = computed(() => rowLegLookup(props.data.headers, toRaw(props.data.rows)))
 
 const crewGroups = computed(() => groupByCrewRole(props.data.headers, visibleRows.value))
 
@@ -90,6 +104,7 @@ const activeGroup = computed(() => crewGroups.value.find(g => g.crewRole === act
         v-if="activeGroup"
         :group="activeGroup"
         :headers="data.headers"
+        :row-legs="rowLegs"
         :proposed-range="proposedRange"
         @update:selected-range="emit('update:selectedRange', $event)"
         @update:selected-summary="emit('update:selectedSummary', $event)"

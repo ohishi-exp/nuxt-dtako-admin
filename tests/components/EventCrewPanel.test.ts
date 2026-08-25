@@ -3,6 +3,7 @@ import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import EventCrewPanel from '~/components/EventCrewPanel.vue'
 import type { CrewGroup } from '~/utils/event-data-table'
+import { rowLegLookup } from '~/utils/event-row-legs'
 import { UIconStub } from '../helpers/stubs'
 
 const headers = [
@@ -18,9 +19,10 @@ function makeGroup(rows: string[][]): CrewGroup {
   return { label: '1番乗務員', crewRole: '1', driverName: '太郎', driverCd: 'D001', officeName: '東京営業所', vehicleName: 'トラックA', rows }
 }
 
-function createWrapper(group: CrewGroup) {
+/** `rowLegs` は必須 prop。既定は「この乗務員の行 = CSV 全行」(乗務員 1 人の運行)。 */
+function createWrapper(group: CrewGroup, allRows: string[][] = group.rows) {
   return mount(EventCrewPanel, {
-    props: { group, headers },
+    props: { group, headers, rowLegs: rowLegLookup(headers, allRows) },
     global: { stubs: { UIcon: UIconStub } },
   })
 }
@@ -328,6 +330,137 @@ describe('EventCrewPanel', () => {
       await toggleButtons[2]!.trigger('click') // アイドリング
       await nextTick()
       expect(wrapper.text()).not.toContain('行選択中')
+    })
+  })
+
+  describe('便の列 (Refs #868)', () => {
+    /** 便の列のセルだけを行順に取り出す (checkbox / # の次)。 */
+    function legCells(wrapper: ReturnType<typeof createWrapper>): string[] {
+      return wrapper.findAll('tbody tr').map(tr => tr.findAll('td')[2]!.text())
+    }
+
+    function legClasses(wrapper: ReturnType<typeof createWrapper>): string[] {
+      return wrapper.findAll('tbody tr').map(tr => tr.findAll('td')[2]!.find('span').classes().join(' '))
+    }
+
+    /** タブ切替 (0=イベント / 1=走行 / 2=アイドリング / 3=速度超過)。 */
+    async function switchTab(wrapper: ReturnType<typeof createWrapper>, i: number) {
+      await wrapper.findAll('div.ml-auto button')[i]!.trigger('click')
+      await nextTick()
+    }
+
+    const twoLegRows = [
+      makeRow('運行開始'), makeRow('運転'),
+      makeRow('積み'), makeRow('運転'), makeRow('降し'),
+      makeRow('運転'), makeRow('休憩'),
+      makeRow('積み'), makeRow('降し'), makeRow('降し'),
+      makeRow('運転'), makeRow('運行終了'),
+    ]
+
+    it('見出しに「便」が出る', () => {
+      expect(createWrapper(makeGroup([makeRow('休憩')])).findAll('thead th')[2]!.text()).toBe('便')
+    })
+
+    it('売上区間・回送・帰庫が語で分かれて出る (色だけに頼らない)', () => {
+      expect(legCells(createWrapper(makeGroup(twoLegRows)))).toEqual([
+        '便1 回送', '便1 回送',
+        '便1', '便1', '便1',
+        '便2 回送', '便2 回送',
+        '便2', '便2', '便2',
+        '便2 帰庫', '便2 帰庫',
+      ])
+    })
+
+    it('便ごとに色が変わり、回送は同じ色の薄い版になる', () => {
+      const spans = legClasses(createWrapper(makeGroup(twoLegRows)))
+      // 便1 の売上区間 = 塗りつぶし / 便1 の回送 = 同じ色の文字だけ
+      expect(spans[2]).toContain('bg-blue-100')
+      expect(spans[0]).toContain('text-blue-600')
+      expect(spans[0]).not.toContain('bg-blue-100')
+      // 便2 は別の色
+      expect(spans[7]).toContain('bg-orange-100')
+      expect(spans[5]).toContain('text-orange-600')
+    })
+
+    it('便番号は CSV 全行から数える — 表示行だけから数え直さない', () => {
+      // 表示するのは 2 行だけだが、CSV 全体では手前にもう 1 便ある運行
+      // (KUDGIVT.csv は 1 運行分の全乗務員の行を持つ)。
+      const shown = [makeRow('積み'), makeRow('降し')]
+      const allRows = [makeRow('積み'), makeRow('降し'), ...shown]
+      expect(legCells(createWrapper(makeGroup(shown), allRows))).toEqual(['便2', '便2'])
+    })
+
+    // --- ★ 便の列は 4 タブすべてに出る (Refs #868 の差分レビュー F1)。
+    //     走行タブと速度超過タブは**全行が重ね掛け行**で、その区間距離は
+    //     `extractOperationIdle` が `overlayKm` に逃がして便の距離に入れていない。
+    //     売上区間と同じ塗りつぶしを付けると「便1 の売上走行」と読めてしまう。
+    describe('重ね掛け行 (走行 / 速度超過 タブ)', () => {
+      const overlayRows = [
+        makeRow('運行開始'), makeRow('積み'), makeRow('一般道実車'),
+        makeRow('一般道実車速度オーバー'), makeRow('運転'), makeRow('降し'), makeRow('運行終了'),
+      ]
+
+      it('走行タブ: 塗りつぶさず「便1 重ね掛け」と出る', async () => {
+        const wrapper = createWrapper(makeGroup(overlayRows))
+        await switchTab(wrapper, 1)
+        expect(legCells(wrapper)).toEqual(['便1 重ね掛け'])
+        const cls = legClasses(wrapper)[0]!
+        expect(cls).not.toContain('bg-blue-100')
+        expect(cls).toContain('border-dashed')
+        expect(cls).toContain('text-blue-600')
+      })
+
+      it('速度超過タブ: 同じく塗りつぶさない', async () => {
+        const wrapper = createWrapper(makeGroup(overlayRows))
+        await switchTab(wrapper, 3)
+        expect(legCells(wrapper)).toEqual(['便1 重ね掛け'])
+        expect(legClasses(wrapper)[0]!).not.toContain('bg-blue-100')
+      })
+
+      it('title に「便のどこに居るか」と「距離が便に入っていない」を両方書く', async () => {
+        const wrapper = createWrapper(makeGroup(overlayRows))
+        await switchTab(wrapper, 1)
+        const title = wrapper.findAll('tbody tr')[0]!.findAll('td')[2]!.find('span').attributes('title')!
+        expect(title).toContain('便1 の売上区間にある重ね掛け行')
+        expect(title).toContain('この行の区間距離は便の走行に入っていない')
+      })
+
+      it('イベントタブに出る重ね掛け行 (連続運転) も同じ扱い', () => {
+        const rows = [makeRow('運行開始'), makeRow('積み'), makeRow('連続運転'), makeRow('降し')]
+        const wrapper = createWrapper(makeGroup(rows))
+        expect(legCells(wrapper)).toEqual(['便1 回送', '便1', '便1 重ね掛け', '便1'])
+        expect(legClasses(wrapper)[2]!).not.toContain('bg-blue-100')
+      })
+
+      it('アイドリングは重ね掛けではない (お金も距離を数えている) ので塗りつぶす', async () => {
+        const rows = [makeRow('積み'), makeRow('アイドリング'), makeRow('降し')]
+        const wrapper = createWrapper(makeGroup(rows))
+        await switchTab(wrapper, 2)
+        expect(legCells(wrapper)).toEqual(['便1'])
+        expect(legClasses(wrapper)[0]!).toContain('bg-blue-100')
+      })
+    })
+
+    it('積みが 1 行も無い運行は空欄にせず「便なし」と出し、件数も言う', () => {
+      const wrapper = createWrapper(makeGroup([makeRow('運行開始'), makeRow('運転')]))
+      expect(legCells(wrapper)).toEqual(['便なし', '便なし'])
+      expect(wrapper.text()).toContain('積みが 1 行も無いため便に属さない行 2 件')
+    })
+
+    it('引き当て表に無い行も空欄にせず「判定不能」(identity が破れたら黙らず件数が出る)', () => {
+      // 中身は同じでも**別オブジェクト**の行を表に入れる = identity が食い違った状態。
+      const wrapper = createWrapper(makeGroup([makeRow('積み')]), [makeRow('積み')])
+      expect(legCells(wrapper)).toEqual(['判定不能'])
+      expect(wrapper.text()).toContain('便を判定できなかった行 1 件')
+    })
+
+    it('便が全部付いていれば注意書きは出ない', () => {
+      expect(createWrapper(makeGroup(twoLegRows)).text()).not.toContain('判定できなかった')
+    })
+
+    it('行が 0 本のときの colspan が「便」の列ぶんを含む', () => {
+      const wrapper = createWrapper(makeGroup([makeRow('一般道空車')]))
+      expect(wrapper.find('tbody td').attributes('colspan')).toBe(String(8 + 3))
     })
   })
 })

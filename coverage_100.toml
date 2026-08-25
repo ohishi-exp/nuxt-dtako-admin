@@ -875,3 +875,11 @@ branches = true
 [[files]]
 path = "server/api/profit/allowance-override.post.ts"
 branches = true
+
+# イベント表の「便」列 (Refs #868)。**割り当ての規則は `allowance-idle.ts` の
+# `legKmDetail` (お金の按分) をそのまま写したもの**で、テストは行ごとの区分の
+# Σ区間距離 が `legKmDetail` と一致することまで検算する (画面の便とお金の便が
+# 別の意味になるのを構造で止める)。
+[[files]]
+path = "app/utils/event-row-legs.ts"
+branches = true
