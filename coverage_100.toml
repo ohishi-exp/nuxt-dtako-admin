@@ -957,3 +957,16 @@ branches = true
 [[files]]
 path = "app/utils/operation-detail-view.ts"
 branches = true
+
+# 運転日報 netprint 手動実行 (Refs #874 の 5) の pure な部品。応答の正規化
+# (`normalizeNetprintRunOutcome`) と、relay が `HTTP {status}: {DO の応答本文}` に畳んだ
+# detail から予約番号・理由を取り出す `viewNetprintRunResult`、対象日の既定 (前日 JST)。
+[[files]]
+path = "app/utils/netprint-run.ts"
+branches = true
+
+# `POST /api/netprint/run` の body 検証 (date の実在判定、branch_cd と channel_id の
+# 「両方 or 両方無し」ガード) と、relay の失敗応答を 1 行にする `describeNetprintRunFailure`。
+[[files]]
+path = "server/utils/netprint-run.ts"
+branches = true
