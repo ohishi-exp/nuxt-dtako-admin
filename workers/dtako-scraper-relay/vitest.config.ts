@@ -56,6 +56,7 @@ export default defineConfig({
         'src/cron-batch.ts',
         'src/net780-archive.ts',
         'src/lineworks-client.ts',
+        'src/netprint-client.ts',
       ],
       thresholds: {
         lines: 100,
