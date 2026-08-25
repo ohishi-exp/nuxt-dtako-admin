@@ -2,7 +2,7 @@
 name: nuxt-dtako-admin-map
 generated-from: nuxt-dtako-admin:2b9f72a885a55d6c5f3e9ad73912a04ed7738baa
 paths: [app/, server/]
-description: ippoan/nuxt-dtako-admin (dtako デジタコ運行データ管理画面、Nuxt 4 + Cloudflare Workers) の構造ナビゲーション。rust-alc-api を直 fetch する frontend と、R2 binding が要る Y時間 Excel export、ブラウザ内完結の NET780 ビューア (net780-wasm 経由) の server route / page 配置、一番星 (rust-ichibanboshi) の売上と便を突き合わせる粗利・運行手当の区画を 1 枚にまとめる。トリガー:「dtako」「nuxt-dtako-admin」「Y時間 export」「y-time-export」「vehicle-settings」「DTAKO_R2」「運行データ」「dtako.ippoan.org」「net780」「NET780」「net780-wasm」「remote-app」「RemoteApp」「IronRDP」「RDP」「rdp.ippoan.org」「Cloudflare Access」「粗利」「margin」「profit」「運行手当」「allowance」「一番星」「ichiban」「突合」「reconcileVehicles」「ProfitPanel」「スナップショット」「ProfitSnapshot」「force-match」「強制突合」「マッチ率」「売上」「取引先」「便」「運転日報明細」等。
+description: ippoan/nuxt-dtako-admin (dtako デジタコ運行データ管理画面、Nuxt 4 + Cloudflare Workers) の構造ナビゲーション。rust-alc-api を直 fetch する frontend と、R2 binding が要る Y時間 Excel export、ブラウザ内完結の NET780 ビューア (net780-wasm 経由) の server route / page 配置、一番星 (rust-ichibanboshi) の売上と便を突き合わせる粗利・運行手当の区画を 1 枚にまとめる。トリガー:「dtako」「nuxt-dtako-admin」「Y時間 export」「y-time-export」「vehicle-settings」「DTAKO_R2」「運行データ」「dtako.ippoan.org」「net780」「NET780」「net780-wasm」「remote-app」「RemoteApp」「IronRDP」「RDP」「rdp.ippoan.org」「Cloudflare Access」「粗利」「margin」「profit」「運行手当」「allowance」「一番星」「ichiban」「突合」「reconcileVehicles」「ProfitPanel」「スナップショット」「ProfitSnapshot」「force-match」「強制突合」「マッチ率」「売上」「取引先」「便」「運転日報明細」等。**この repo で PR を出す/レビューする前にも読む** —「PR の基準」「レビュー基準」「カバレッジ 100%」「検証手順」「実測値」「差分レビュー」でも発動。
 ---
 
 # nuxt-dtako-admin-map — ippoan/nuxt-dtako-admin 構造ナビゲーション
@@ -76,6 +76,125 @@ vitest は `resolve.alias` で `tests/mocks/net780-wasm.ts` に差し替える (
   (コード側は節見出し名まで、doc 側は各節冒頭に `consumer:` 行) で対応させている。
   概念語 (読取日/運行日等) → 実フィールド名の対応表と、横断検索用 `scripts/xref.sh`
   も同 skill の「検索の入口」節を参照。
+
+## ★ PR の基準 (この repo で PR を出す前に必ず読む)
+
+この節は**監督役 (親) の引き継ぎ文に置いていたものを repo に移したもの** (Refs #760)。
+引き継ぎ文に置いている限り交代のたびに抜け落ちる、とオーナーから指摘があったため
+(2026-08-25)。**子タスクにもここを読ませること。**
+
+### (1) PR を作る前に満たっていること (子に渡す検証)
+
+```bash
+ln -sfn <メイン clone>/node_modules node_modules   # 0 秒
+npx nuxt prepare          # ★ 先にこれ。無いと vitest が全ファイル import に失敗する
+npx nuxt typecheck        # エラー 0
+npm test                  # 0 failed
+npm run test:coverage && node scripts/check_coverage_100.mjs   # all 100%
+```
+
+- **★ 基準値 (テスト本数・分岐数) は `origin/main` で毎回自分で測る。**
+  issue や過去の PR に書いてある本数は古い (実害が出ている)。
+- **★ 親も独立に同じ検証を回し、子の報告と数字が一致することを確かめる。**
+  やらないと子の緑を信じるだけになる。
+- 詳細は `nuxt-vitest` skill、実機確認は `dev-login-local-verify` skill。
+
+### (2) カバレッジ 100% gate と分岐
+
+- **`BR()` の instrumented コピーで分岐の両側を数える。**
+  v8 の branches 100% は短絡のせいで死に分岐を見逃す (memory `coverage-branch-instrumentation`)。
+- **probe を 2 段で先に検証**: ①片側だけ通る `if` が `[true]` / 両側が `[true,false]`
+  ②**計測器が値を壊していないか** (`pick(0,7)===0` / `orValue(0,7)===7` の類)。
+- **陰性対照も取ると良い** — 「テストを外すと分岐が N→M に落ちる」。
+  計測が効いていること自体を測れる。
+- **死に分岐はテストで埋めない。**「いまのデータで通らない」/「いまの呼び方では通らない」/
+  「構造上あり得ない」の 3 段で判定し、**構造上ならコードを直す**。
+- **判定表と「書かなかった分岐」の表を PR 本文に残す。**
+- `coverage_100.toml` の注記も、分岐数が動いたら直す。
+
+### (3) 実機確認
+
+- **画面・server route を変えたら dev で測る** (CLAUDE.md の規範)。
+  `dev-login-local-verify` skill の `setup-dev-env.sh` で起動する。**`--build` が要るかは
+  `--hybrid` かどうかで変わる** (hybrid なら UI は nuxt dev が配信するので `server/` や
+  依存を変えた時だけ。hybrid 無しなら `.output` が UI そのものなので `app/` の .vue・
+  画面の文言を変えたら必須)。判断はスクリプト冒頭のコメントが正 (Refs #864)。
+  **付け忘れると古いバンドルを配信したまま測ってしまう。**
+- **dev は立つが、環境によってはブラウザ目視ができない** (Linux 実機が LAN 上にあり
+  Windows の Chrome から `localhost` に届かない構成)。測れるのは 型検査 / テスト /
+  カバレッジ / **server route の応答** / **配信される JS chunk の中身**まで。
+  **測れた範囲と測れなかった範囲を報告に必ず明記する。**
+- **目視は「マージ後・本番・親」。**`Release Wave … completed successfully` が合図。
+  **preview は別レルムなので見ない。**
+
+### (4) 数字 (不変条件)
+
+- **2026-07 の不変条件が動かないことを実測で示す**
+  (運行 91 本 / 走行 57,829.4km / 売上 ¥10,260,265 / 手当 ¥2,499,500 / 粗利 ¥4,467,597)。
+- **読むだけの変更なら「実行される JS の diff が削除行のみ」等、動かないことの積極的な証明**を出す。
+
+### (5) ★ 実測値には測定条件を必ず添える
+
+#858 で 3 者が同じコードについて 3 通りの数字を出した。原因は全部「入力の取り方」で
+**どれも間違っていない**。しかし条件を書かずに残したので、PR 本文・issue・コードのコメントに
+誤った値が入り、因果の推論まで狂った (memory `measurement-needs-its-conditions`
+`pin-the-measurement-condition`)。
+
+- **母集団を書く** — 「候補一覧」と「確定済み明細」は別物。後者は人が既に選んだ後なので
+  よく一致する。**結論が変わる。**
+- **入力の取り方を書く** (「選択区間をその便だけにした」等)。
+- **測定の限界も書く。**
+- **間違えた数字は、間違えた理由ごと 1 か所残す** (消すと同じ失敗が繰り返せる)。
+
+### (6) PR 本文に必ず入れるもの
+
+1. **何を・なぜ** (why が無いと次の人が読めない)
+2. **触っていないもの** (禁止事項を守った証拠)
+3. **検証** ((1)(2)(3)(4) の実測値、測定条件つき)
+4. **★ 測れなかった範囲** (正直に。「ブラウザ目視は未実施」等)
+5. **数字** (1 円も動かないこと、または動く理由)
+6. **画面を変えたなら「人が何を読むか」** — 下記 (7)
+
+### (7) ★★ この repo で最も多い欠陥の型 — 「出ているものが別の意味に読める」
+
+v0.0.531→v0.0.541 の 11 本のうち **6 本がこの型**だった。
+
+- 注記の穴 / 「読まなかった」と「読めなかった」が同じ見た目 / 比べる相手がいないのに空 /
+  動いていないのに「¥0 動いた」/ 超えていないのに「赤字 −0%」/ `¥-0`
+- **#851**: #849 で**触っていないファイルの文言が嘘になった**。差分レビューでは見つからず、
+  **本番の画面を開いて初めて出た** (memory `diff-review-misses-untouched-text`)。
+- **#854**: 「結ぶと戻せない」を直したら**符号を変えて「外すと戻せない」が残った**。
+- **#861**: バッジの「完全一致」が **partial+partial でも出ていた** (保存済み一覧とは別の意味だった)。
+
+**レビューの手順に入れること:**
+
+- **その機能を説明している定数・doc コメントを `git grep` で先に洗う** —
+  「◯◯は別物です」「◯◯には乗りません」の類は、**その関係を変えた瞬間に嘘になる**。
+- **定数名も直す** (中身から語が消えるのに名前だけ残ると、次の人が同じ誤解をする)。
+- **その語を固定していたテストは「今の嘘」を固定している。**書き換えになるのが正しい。
+- **逆方向の誤読も同時に潰す** (「効くようになった」だけ書くと
+  「押したのに変わらない = 効いていない」を踏む)。
+- **黙って落とさず数えて画面に言わせる** (読めなかった件数、判定できなかった件数)。
+
+### (8) 親 (監督役) の作法
+
+- **PR は親が作る。子に `gh pr create` を打たせない。**
+- **★ PR を作る前に必ず差分をレビューする。**CI は PR 作成で 1 回だけ回り、緑なら即マージされる。
+  前任は差分レビューで 3 件止めた (どれもテストが緑のまま通る欠陥)。
+- **★ draft を栓に使わない (却下済み)。**この org の Auto Merge job は draft だと CI が赤くなり、
+  `ready_for_review` が trigger に無いので ready に戻しても再発火しない。
+- **マージは GitHub の auto-merge ではなく CI の `ci / Auto Merge / Auto Merge` job**。
+  `autoMergeRequest = null` は正常 (memory `merge-is-ci-job-not-github-automerge`)。
+  この job が待つ間、CI の running↔queued の往復が何度も届く — 失敗ではない。
+- **`PR Limit Check` の fail は「衝突する open PR がある」の意味。**衝突が解けても CI は
+  自動で回り直さない — 親が `gh run rerun <id> --failed` を打つ。
+- **子の archive は親が打つ。**基準 4 点 (PR MERGED / remote branch 削除 / 申し送り消化 /
+  本番確認) を裏取りしてから。**`archive_session` は worktree を畳まない** —
+  親が `git worktree remove` + `git branch -D` で掃除する。
+  **畳んでよいかを子やユーザーに聞かない** (`task-split` skill に明記)。
+- **★★ 子のブランチが増えたら、まず行き違いを疑う。**指示はキューで届くので
+  子の push と親の指示は普通に交差する (memory `propose-before-push-off-plan`)。
+  **責めてから確かめる順序にしない。**
 
 ## CLAUDE.md から移設 (2026-07-06)
 
