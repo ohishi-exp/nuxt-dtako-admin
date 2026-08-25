@@ -55,6 +55,7 @@ export default defineConfig({
         'src/scrape-error-artifact.ts',
         'src/cron-batch.ts',
         'src/net780-archive.ts',
+        'src/lineworks-client.ts',
       ],
       thresholds: {
         lines: 100,
