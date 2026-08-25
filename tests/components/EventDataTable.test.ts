@@ -280,5 +280,182 @@ describe('EventDataTable', () => {
       expect(legCells(wrapper)).toEqual(['便1 回送', '便1 重ね掛け', '便1', '便1', '便1 帰庫'])
       expect(wrapper.text()).not.toContain('判定できなかった')
     })
+
+    /**
+     * ★ **本番でこの運行を開いたときに実際に通る経路** (Refs #871)。
+     *
+     * 上の 2 本のフィクスチャは 5〜8 行で、**`dropIgnoredRows` が落とす行が 0〜1 件**
+     * しか無い。本番はそこが桁違いで、**85 行落ちてから 14 行になる**:
+     *
+     * ```
+     * 本番 : 102 行 → event 区分 99 行 → dropIgnoredRows が「無視」85 行を落として 14 行
+     * ```
+     *
+     * ### 測定条件 (この数字がどこから来たか)
+     *
+     * 運行 `2607010121120000001318` (2026-07-01) を
+     * `/api/proxy/api/operations/2607010121120000001318/csv/events` から取得。
+     * v0.0.543、ブラウザから、`対象乗務員区分` は `"1"` のみ。**102 行 / 34 列**:
+     *
+     * ```
+     * 運行開始 1 / 運転 6 / 急加速 34 / 急減速 19 / 急カーブ 32 /
+     * 一般道速度オーバー 1 / 専用道 1 / 積み 2 / 降し 3 /
+     * アイドリング 1 / 休憩 1 / 運行終了 1                      = 102
+     *
+     * 急加速・急減速・急カーブ の 85 行は すべて 区間距離 0 かつ 区間時間 0
+     * ```
+     *
+     * `showIgnored` を on にした 99 行での便の内訳 (同じ測定):
+     *
+     * ```
+     * 急加速  → 便1 24 / 便2 10   (計 34)
+     * 急減速  → 便1 13 / 便2  6   (計 19)
+     * 急カーブ → 便1  8 / 便2 24   (計 32)     すべて 便N 重ね掛け + border-dashed
+     * ```
+     *
+     * **測定の限界:** 再現したのは**行の本数と便ごとの内訳だけ**で、**行の並び順は
+     * 本番と同じではない** (本番の 積み/降し は全 102 行中の index 24 / 51 / 73 / 80 / 91)。
+     * 便は行順だけで決まるので、内訳が合っていれば「位置で分類されている」ことは測れる。
+     *
+     * **`一般道空車` は本番のこの運行に 0 本**。theearth の `csvdata.zip`
+     * (`get_operation_zip`) には 51.3km と 0.1km の 2 本があるので、zip と本番で
+     * `totalKm` / `overlayKm` を突き合わせると食い違う (原因は #871 の対象外)。
+     * 経緯は `tests/utils/event-row-legs.test.ts` の訂正 doc。
+     */
+    describe('本番 1318 の主経路 (「無視」85 行が落ちて 14 行、Refs #871)', () => {
+      /** 「無視」対象の 0km / 0分 の行を n 本。**この 3 種が本番の 85 行の中身**。 */
+      const SPIKE_CD: Record<string, string> = { '急加速': '401', '急減速': '402', '急カーブ': '403' }
+      function spikes(name: string, n: number): string[][] {
+        return Array.from({ length: n }, () => makeRow({
+          'イベントCD': SPIKE_CD[name]!, 'イベント名': name, '区間時間': '0', '区間距離': '0',
+        }))
+      }
+
+      /**
+       * 102 行。**便ごとの内訳を本番に合わせる** (急加速 24/10・急減速 13/6・急カーブ 8/24)。
+       * 便1 の 45 本は 回送と売上区間に割り、便2 の 40 本も同じように割ってある
+       * (どちらも `legSeq` は同じなので、割り方はラベルに影響しない)。
+       */
+      function prodRows(): string[][] {
+        return [
+          makeRow({ 'イベント名': '運行開始' }), //                                便1 回送
+          ...spikes('急加速', 12), ...spikes('急減速', 7), ...spikes('急カーブ', 3), // 便1 回送 の重ね掛け 22
+          makeRow({ 'イベント名': '運転', '区間距離': '123.7' }), //                  便1 回送
+          makeRow({ 'イベント名': '積み' }), //                                     便1 (売上区間の開始)
+          ...spikes('急加速', 12), ...spikes('急減速', 6), ...spikes('急カーブ', 5), // 便1 売上区間 の重ね掛け 23
+          makeRow({ 'イベント名': '専用道', '区間距離': '273.2' }), //   走行タブへ (event ではない)
+          makeRow({ 'イベント名': '一般道速度オーバー', '区間距離': '5.2' }), // 速度超過タブへ
+          makeRow({ 'イベント名': '運転', '区間距離': '129.4' }), //                 便1
+          makeRow({ 'イベント名': '降し' }), //                                     便1 (最後の降し)
+          makeRow({ 'イベント名': '運転', '区間距離': '13.2' }), //                  便2 回送
+          makeRow({ 'イベント名': 'アイドリング' }), //                  アイドリングタブへ
+          makeRow({ 'イベント名': '休憩' }), //                                     便2 回送
+          ...spikes('急加速', 4), ...spikes('急減速', 2), ...spikes('急カーブ', 9), //  便2 回送 の重ね掛け 15
+          makeRow({ 'イベント名': '積み' }), //                                     便2
+          ...spikes('急加速', 6), ...spikes('急減速', 4), ...spikes('急カーブ', 15), // 便2 売上区間 の重ね掛け 25
+          makeRow({ 'イベント名': '運転', '区間距離': '33.3' }), //                  便2
+          makeRow({ 'イベント名': '降し' }), //                                     便2
+          makeRow({ 'イベント名': '運転', '区間距離': '4.1' }), //                   便2
+          makeRow({ 'イベント名': '降し' }), //                                     便2 (最後の降し)
+          makeRow({ 'イベント名': '運転', '区間距離': '15.8' }), //                  便2 帰庫
+          makeRow({ 'イベント名': '運行終了' }), //                                  便2 帰庫
+        ]
+      }
+
+      /** 本番の 急加速/急減速/急カーブ を「無視」にした分類 (401 / 402 / 403)。 */
+      function mockIgnoreSpikes() {
+        vi.mocked(getEventClassifications).mockResolvedValueOnce([
+          { event_cd: '401', classification: 'ignore' },
+          { event_cd: '402', classification: 'ignore' },
+          { event_cd: '403', classification: 'ignore' },
+          { event_cd: '202', classification: 'work' },
+        ])
+      }
+
+      /** issue #868 の表の 14 行 (本番でも zip でも、画面に出るのはこの並び)。 */
+      const EXPECTED_14 = [
+        '便1 回送', '便1 回送',
+        '便1', '便1', '便1',
+        '便2 回送', '便2 回送',
+        '便2', '便2', '便2', '便2', '便2',
+        '便2 帰庫', '便2 帰庫',
+      ]
+
+      /** 便セルの class (塗りつぶし / 破線 の見分け用)。 */
+      function legClasses(wrapper: ReturnType<typeof mountLive>): string[] {
+        return wrapper.findAll('tbody tr').map(tr => tr.findAll('td')[2]!.find('span').classes().join(' '))
+      }
+
+      /** `イベント名` 列 (td: 0 checkbox / 1 # / 2 便 / 3 開始日時 / 4 終了日時 / 5 CD / 6 名)。 */
+      function eventNames(wrapper: ReturnType<typeof mountLive>): string[] {
+        return wrapper.findAll('tbody tr').map(tr => tr.findAll('td')[6]!.text())
+      }
+
+      async function mountProd() {
+        mockIgnoreSpikes()
+        const wrapper = mountLive(reactive({ headers: fullHeaders, rows: prodRows() }))
+        await flushPromises()
+        return wrapper
+      }
+
+      it('showIgnored off → 85 行落ちて 14 行、便のラベルが issue #868 の表と一致する', async () => {
+        const wrapper = await mountProd()
+        expect(wrapper.text()).toContain('「無視」にした 85 件も表示')
+        expect(legCells(wrapper)).toEqual(EXPECTED_14)
+        expect(wrapper.text()).not.toContain('判定できなかった')
+      })
+
+      it('showIgnored on → 99 行、増えた 85 行はすべて「便N 重ね掛け」+ 破線で塗りつぶさない', async () => {
+        const wrapper = await mountProd()
+        const off = legCells(wrapper)
+
+        await wrapper.find('div.overflow-auto > label input').setValue(true)
+        await nextTick()
+        const on = legCells(wrapper)
+        expect(on).toHaveLength(99)
+
+        // 増えた 85 行は **すべて** 重ね掛け。便1 と便2 の両方に出る。
+        const overlay = on.filter(l => l.endsWith('重ね掛け'))
+        expect(overlay).toHaveLength(85)
+        expect(new Set(overlay)).toEqual(new Set(['便1 重ね掛け', '便2 重ね掛け']))
+
+        // **14 行の便番号は 1 つも動かない** (引き当て表を `props.data.rows` から
+        // 作っているので、表示の切り替えでお金の意味が動いて見えない)。
+        expect(on.filter(l => !l.endsWith('重ね掛け'))).toEqual(off)
+        expect(wrapper.text()).not.toContain('判定できなかった')
+
+        // 重ね掛け行は **破線の枠だけ**。売上区間の塗りつぶし (`bg-*-100`) は 1 つも付かない。
+        const classes = legClasses(wrapper)
+        const overlayClasses = on.map((l, i) => [l, classes[i]!] as const).filter(([l]) => l.endsWith('重ね掛け'))
+        expect(overlayClasses).toHaveLength(85)
+        for (const [, c] of overlayClasses) {
+          expect(c).toContain('border-dashed')
+          expect(c).not.toMatch(/bg-\w+-100/)
+        }
+        // 逆向きの誤読も潰す: 売上区間の 14 行側は塗りつぶしのまま。
+        expect(classes[on.indexOf('便1')]).toContain('bg-blue-100')
+      })
+
+      it('急加速系が便1 と便2 に分かれる (位置で分類されている証拠)', async () => {
+        const wrapper = await mountProd()
+        await wrapper.find('div.overflow-auto > label input').setValue(true)
+        await nextTick()
+
+        const names = eventNames(wrapper)
+        const legs = legCells(wrapper)
+        const counts: Record<string, Record<string, number>> = {}
+        names.forEach((name, i) => {
+          if (!(name in SPIKE_CD)) return
+          counts[name] ??= {}
+          counts[name]![legs[i]!] = (counts[name]![legs[i]!] ?? 0) + 1
+        })
+        // 本番の内訳 (v0.0.543 の実測、上の doc 参照)。**両方の便に分かれる**。
+        expect(counts).toEqual({
+          '急加速': { '便1 重ね掛け': 24, '便2 重ね掛け': 10 },
+          '急減速': { '便1 重ね掛け': 13, '便2 重ね掛け': 6 },
+          '急カーブ': { '便1 重ね掛け': 8, '便2 重ね掛け': 24 },
+        })
+      })
+    })
   })
 })
