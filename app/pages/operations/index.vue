@@ -17,6 +17,11 @@ const operations = ref<OperationListItem[]>([])
 const total = ref(0)
 const drivers = ref<Driver[]>([])
 const vehicles = ref<Vehicle[]>([])
+// 一覧が**取得できなかった**理由 (Refs #920)。**空配列だけでは「0 人」「0 台」と
+// 区別が付かない**ので、「読めなかった」ことを状態として持つ。**乗務員と車両は
+// 別々に持つ** — 片方だけ落ちたときに、落ちていない側まで疑わせないため。
+const driversError = ref<string | null>(null)
+const vehiclesError = ref<string | null>(null)
 const loading = ref(false)
 const splitLoading = ref(false)
 const splitResult = ref('')
@@ -55,12 +60,45 @@ async function fetchData() {
   }
 }
 
+/**
+ * 一覧の取得失敗を 1 行にする (Refs #920)。
+ * **`describeApiError` を当てていないのは当て忘れではない** — 理由は
+ * `app/pages/restraint-report.vue` の同名関数の doc コメント (この経路の例外は
+ * ofetch の `FetchError` ではないので当てても 1 文字も変わらない。直すのは #904)。
+ */
+function describeListFailure(e: unknown): string {
+  return e instanceof Error ? e.message : '理由を読めませんでした'
+}
+
+async function loadDrivers() {
+  try {
+    drivers.value = await getDrivers()
+  }
+  catch (e) {
+    // 一覧は空に戻すが、**空にした理由を必ず持つ** — 空配列だけだと選択肢が出ないのを
+    // 「乗務員が 0 人」と読まれ、読めなかっただけの回と区別が付かない (Refs #920)。
+    drivers.value = []
+    driversError.value = describeListFailure(e)
+  }
+}
+
+async function loadVehicles() {
+  try {
+    vehicles.value = await getVehicles()
+  }
+  catch (e) {
+    // loadDrivers と同じ理由 (Refs #920)。
+    vehicles.value = []
+    vehiclesError.value = describeListFailure(e)
+  }
+}
+
 // Fetch filter options
+// **`Promise.all` のまま並行に取る** (直列にすると初回表示が遅くなる)。
+// **片方が落ちてももう片方は読める** — catch はそれぞれの中にあるので、
+// `.catch(() => {})` 時代と同じ性質。変えたのは**理由を捨てずに持つ**ところだけ。
 onMounted(async () => {
-  await Promise.all([
-    getDrivers().then(d => drivers.value = d).catch(() => {}),
-    getVehicles().then(v => vehicles.value = v).catch(() => {}),
-  ])
+  await Promise.all([loadDrivers(), loadVehicles()])
   await fetchData()
 })
 
@@ -166,6 +204,28 @@ async function splitAll() {
       />
       <span v-if="splitResult" class="text-xs text-gray-500">{{ splitResult }}</span>
     </div>
+
+    <!-- ★ 「読めなかった」と「0 人 / 0 台」を別の文にする (Refs #920)。失敗した回に
+         だけ出す (理由だけ出すと**本当に 0 件の回**まで異常に見える)。
+         **乗務員と車両で別の文**にしてある — 1 本にまとめると、落ちていない側の
+         選択肢まで信用できないと読める。取りに行くのは `onMounted` の 1 回だけなので、
+         やり直す手段はページの再読み込みしかない。 -->
+    <UAlert
+      v-if="driversError"
+      :title="`乗務員一覧を取得できませんでした (${driversError})`"
+      description="0 人なのか読めなかっただけなのかは、この画面では判りません — ページを再読み込みして確かめてください"
+      color="error"
+      icon="i-lucide-circle-x"
+      variant="subtle"
+    />
+    <UAlert
+      v-if="vehiclesError"
+      :title="`車両一覧を取得できませんでした (${vehiclesError})`"
+      description="0 台なのか読めなかっただけなのかは、この画面では判りません — ページを再読み込みして確かめてください"
+      color="error"
+      icon="i-lucide-circle-x"
+      variant="subtle"
+    />
 
     <!-- Filters -->
     <div class="flex flex-wrap gap-3 items-end">

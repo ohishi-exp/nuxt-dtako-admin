@@ -4,6 +4,9 @@ import type { PdfProgressEvent, RecalcProgressEvent } from '~/utils/api'
 import type { Driver, RestraintReportResponse, RestraintDayRow } from '~/types'
 
 const drivers = ref<Driver[]>([])
+// 乗務員一覧が**取得できなかった**理由 (Refs #920)。**空配列だけでは「0 人」と
+// 区別が付かない**ので、「読めなかった」ことを状態として持つ。
+const driversError = ref<string | null>(null)
 const selectedDriverId = ref('')
 const selectedMonth = ref('')
 const report = ref<RestraintReportResponse | null>(null)
@@ -29,8 +32,53 @@ async function fetchReport() {
   }
 }
 
+/**
+ * 一覧の取得失敗を 1 行にする (Refs #920。**正本は #911 / PR #915 の `upload.vue`**)。
+ *
+ * ## ★ `describeApiError` を当てていない — **当て忘れではない** (Refs #890 / #904)
+ *
+ * `getDrivers` は `app/utils/api.ts` の `request()` → `@ippoan/auth-client` の
+ * `createAuthFetch` 経由で、そこは非 2xx を
+ * `new Error(`API エラー (${status}): ${body || statusText}`)` に組んで投げる。
+ * **ofetch の `FetchError` ではない**ので `statusCode` も `data` も持たず、
+ * `describeApiError` は `err.message` をそのまま返すだけになる ⇒ **当てても
+ * 1 文字も変わらない** (#910 が (B) 経路 28 箇所で実測済み)。機械的に当てると
+ * 「理由が良くなった」と誤読させるだけなので当てない。
+ * **理由を 1 行に畳むのは #904 (`api.ts` 側) の担当。**
+ *
+ * ## いま実際に出る 1 文 (2026-08-25 実測)
+ *
+ * **「status しか出ない」ではない** — `createAuthFetch` は本文を読むので
+ * **status + 応答本文まるごと**が出る。測定条件は
+ * **nuxt dev (:3001) が配信する本物の画面 + CDP の `Fetch.fulfillRequest` で
+ * `/api/proxy/api/drivers` だけを 503 `{"error":"DB に繋がりません"}` に差し替え**:
+ *
+ * ```
+ * 乗務員一覧を取得できませんでした (API エラー (503): {"error":"DB に繋がりません"})
+ * ```
+ *
+ * ## ★ ここでは塞げない穴 (#904 に申し送り、未測定)
+ *
+ * 本番は HTTP/3 で reason phrase が空 (`res.statusText === ''`) なので、**本文が空の
+ * 非 2xx では `e.message` が `API エラー (503): ` (コロンの後ろが空)** になる。
+ * `api.ts` / `createAuthFetch` に触らずには塞げない。
+ */
+function describeListFailure(e: unknown): string {
+  return e instanceof Error ? e.message : '理由を読めませんでした'
+}
+
 onMounted(async () => {
-  await getDrivers().then(d => drivers.value = d).catch(() => {})
+  try {
+    drivers.value = await getDrivers()
+  }
+  catch (e) {
+    // 一覧は空に戻す。**ただし空にした理由を必ず持つ** — 空配列だけだと選択肢が
+    // 出ないのを「乗務員が 0 人」と読まれ、API が落ちて読めなかっただけの回と
+    // 区別が付かない (Refs #920)。以前は `.catch(() => {})` で例外オブジェクトを
+    // **束縛すらしていなかった**ので、理由は 100% 失われていた。
+    drivers.value = []
+    driversError.value = describeListFailure(e)
+  }
 })
 
 watch([selectedDriverId, selectedMonth], () => {
@@ -255,6 +303,19 @@ const monthLabel = computed(() => {
       <span v-if="recalcResult" class="text-xs text-gray-500 self-center">{{ recalcResult }}</span>
     </div>
 
+    <!-- ★ 「読めなかった」と「0 人」を別の文にする (Refs #920)。理由だけ出すと
+         **本当に 0 人の回**まで異常に見えるので、失敗した回にだけ出し、
+         **判らないと言って確かめ方まで出す** (#911 / #915 と同じ形)。
+         乗務員一覧を取りに行くのは `onMounted` の 1 回だけなので、
+         やり直す手段は**ページの再読み込み**しかない。 -->
+    <UAlert
+      v-if="driversError"
+      :title="`乗務員一覧を取得できませんでした (${driversError})`"
+      description="0 人なのか読めなかっただけなのかは、この画面では判りません — ページを再読み込みして確かめてください"
+      color="error"
+      icon="i-lucide-circle-x"
+      variant="subtle"
+    />
     <UAlert v-if="error" :title="error" color="error" icon="i-lucide-circle-x" variant="subtle" />
     <UAlert v-if="pdfError" :title="pdfError" color="error" icon="i-lucide-circle-x" variant="subtle" />
     <UAlert v-if="recalcError" :title="recalcError" color="error" icon="i-lucide-circle-x" variant="subtle" />
