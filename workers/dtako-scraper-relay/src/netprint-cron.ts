@@ -2,9 +2,15 @@
  * 運転日報 netprint cron の 1 回分の実行ロジック (Refs #874)。
  *
  * 毎朝 JST 6:30 (`NETPRINT_CRON`、cron.ts) に前日 (JST) 分の運転日報を
- * 営業所ごとに PDF 化してかんたんnetprint へ登録し、プリント予約番号を
- * LINE WORKS へ通知する。処理の実体 (theearth harvest / PDF 生成 / netprint
- * 登録 / LINE WORKS 送信) は [`NetprintCronDeps`] として注入する —
+ * かんたんnetprint へ登録し、プリント予約番号を LINE WORKS へ通知する。
+ *
+ * **単位は 1 運行 = 1 PDF = 1 予約番号 = 通知 1 通** (ユーザー判断、Refs #874 の 13)。
+ * 営業所ぶんを 1 本の PDF にまとめる案もあり、theearth 側は実際にまとめられる
+ * (`daily-report-preview.ts` の doc 参照) が、**乗務員ごとに自分の日報を取る**
+ * 使い方には 1 運行 1 番号の方が合う。9 運行の日は番号も通知も 9 個になる。
+ *
+ * 処理の実体 (theearth harvest / PDF 取得 / netprint 登録 / LINE WORKS 送信) は
+ * [`NetprintCronDeps`] として注入する —
  * `cron.ts` の `CronDoCall` と同じ流儀で、この module は fetch / DO を
  * 直接触らず node vitest の 100% gate に載せる。配線は
  * `dtako-scraper-relay-do.ts` の `/cron/netprint` handler。
@@ -179,10 +185,19 @@ export function formatMonthDay(dateYmd: string): string {
   return `${Number(month)}/${Number(day)}`;
 }
 
-/** netprint へ登録する PDF のファイル名。表示されるのは登録一覧くらいなので
- * multipart で事故らない ASCII に寄せる。 */
-export function netprintPdfFileName(dateYmd: string): string {
-  return `nippo_${dateYmd.replace(/-/g, "")}.pdf`;
+/** netprint へ登録する PDF のファイル名。**運行ごとに 1 ファイル登録する**ので
+ * 運行No まで入れて区別できるようにする (同じ名前が並ぶと netprint の登録一覧で
+ * どれがどれか分からない)。multipart で事故らない ASCII に寄せる。 */
+export function netprintPdfFileName(dateYmd: string, operationNo: string): string {
+  return `nippo_${dateYmd.replace(/-/g, "")}_${operationNo}.pdf`;
+}
+
+/** 通知文・失敗報告で運行を名指しする短い表示名。**乗務員と車輌が本体** — 9 通
+ * 届いたときに人が仕分けるのに使う。どちらも取れない行は 運行No で代用する
+ * (無言で空欄にすると「誰の日報か分からない通知」になるため)。 */
+export function describeOperation(row: NetprintReportRow): string {
+  const parts = [row.driverName1, row.vehicleName].filter((v): v is string => !!v);
+  return parts.length === 0 ? `運行No ${row.operationNo}` : parts.join(" / ");
 }
 
 /** netprint 登録完了 (status poll 完了) の結果のうち通知文が使う部分。 */
@@ -195,14 +210,19 @@ export interface NetprintRegistration {
   page: number;
 }
 
-/** 予約番号の通知文 (Refs #874 の通知文仕様)。 */
+/** 予約番号の通知文 (運行 1 件 = 1 通)。
+ *
+ * **1 行目に乗務員 / 車輌を置く** — 1 営業所 9 運行なら 9 通届くので、開かずに
+ * 誰の日報か分かる必要がある (Refs #874 の 13、ユーザー判断)。 */
 export function buildNetprintNotification(
   branchName: string,
   dateYmd: string,
+  row: NetprintReportRow,
   registration: NetprintRegistration,
 ): string {
   return [
-    `【運転日報】${branchName} ${formatDateSlash(dateYmd)}分`,
+    `【運転日報】${describeOperation(row)}`,
+    `${branchName} ${formatDateSlash(dateYmd)}分`,
     `プリント予約番号: ${registration.printId}`,
     `有効期限: ${registration.endDate}`,
     `(${registration.page}ページ / A4)`,
@@ -215,13 +235,33 @@ export function buildNoOperationsNotification(branchName: string, dateYmd: strin
   return `${branchName} ${formatMonthDay(dateYmd)}分の運行はありませんでした`;
 }
 
-/** 途中失敗の通知文 (console.error に加えて可能なら LINE WORKS へも知らせる)。 */
+/** 途中失敗の通知文 (console.error に加えて可能なら LINE WORKS へも知らせる)。
+ * harvest 自体が落ちた等、**営業所まるごと出せなかった**時に使う。 */
 export function buildNetprintErrorNotification(
   branchName: string,
   dateYmd: string,
   detail: string,
 ): string {
   return `【運転日報】${branchName} ${formatDateSlash(dateYmd)}分の自動登録に失敗しました: ${detail}`;
+}
+
+/**
+ * 運行ごとの失敗をまとめて 1 通で知らせる文 (`failures` は 1 件以上)。
+ *
+ * **失敗した運行の数だけ通知を送らない。** 成功ぶんは 1 運行 1 通で届くので、
+ * 悪い日に失敗ぶんまで 1 通ずつ出すと通知が二重に溢れて、届いている番号の方が
+ * 埋もれる。代わりに**誰の日報が出なかったかを名指しした 1 通**にまとめる —
+ * 受け取った人がやること (その乗務員のぶんを手で出す) はそれで決まる。
+ */
+export function buildNetprintOperationFailureNotification(
+  branchName: string,
+  dateYmd: string,
+  failures: readonly { label: string; detail: string }[],
+): string {
+  return [
+    `【運転日報】${branchName} ${formatDateSlash(dateYmd)}分のうち ${failures.length} 件を登録できませんでした`,
+    ...failures.map((f) => `・${f.label}: ${f.detail}`),
+  ].join("\n");
 }
 
 /** 手動実行 (`POST /kintai-relay/netprint-run`) の実行計画。 */
@@ -294,13 +334,20 @@ export function planNetprintRun(
 
 /** 日報行のうちこの cron が読む部分 (`DailyReportRow` の構造的部分型)。 */
 export interface NetprintReportRow {
+  /** 運行No (22桁)。1 運行 = 1 PDF = 1 予約番号 の単位であり、失敗した運行を
+   * 名指しするキーでもある。 */
+  operationNo: string;
   branchCd: string | null;
   branchName: string | null;
+  /** 通知文に出す乗務員名・車輌。**9 通届いたときにどれが誰の日報か分けるため
+   * に要る** (番号と期限だけでは配れない)。取れない行もあるので nullable。 */
+  driverName1: string | null;
+  vehicleName: string | null;
 }
 
-/** 1 営業所ぶんの harvest 結果。この cron が読むのは件数と営業所名を出すための
- * `rows` だけで、PDF に要る他の内容 (F-NRS1010 の作業時間・燃料など) は解釈せず
- * そのまま `generatePdf` へ渡す (#874-2 の `BranchDailyReport` が構造的に一致)。 */
+/** 1 営業所ぶんの harvest 結果。この cron が読むのは件数・営業所名・運行ごとの
+ * 表示名だけで、PDF 取得に要る他の内容 (出庫日時など) は解釈せず行ごと
+ * `generatePdf` へ渡す (`BranchDailyReport` が構造的に一致)。 */
 export interface NetprintHarvest {
   rows: readonly NetprintReportRow[];
 }
@@ -312,8 +359,10 @@ export interface NetprintCronDeps<Harvest extends NetprintHarvest = NetprintHarv
    * 込み。実体は `fetchBranchDailyReport`、絞り込みもそちらが持つ)。`branchCd` は
    * 正規化済み (非パディング) の値を渡す。 */
   fetchReport(dateYmd: string, branchCd: string): Promise<Harvest>;
-  /** harvest 結果を A4 の日報 PDF にする (#874-2 `generateDailyReportPdf`)。 */
-  generatePdf(report: Harvest, branchName: string, dateYmd: string): Promise<Uint8Array>;
+  /** **1 運行ぶん**の日報 PDF を取る (#874-13 `fetchDailyReportPdf`)。実体は
+   * theearth が出す公式帳票で、営業所名も日付も乗務員も帳票側が印字するため、
+   * 渡すのは対象の行だけ。 */
+  generatePdf(operation: Harvest["rows"][number]): Promise<Uint8Array>;
   /** netprint へ登録し status poll 完了まで待つ (#874-3 `registerPdf` +
    * `waitForReservation`)。 */
   registerPdf(pdf: Uint8Array, fileName: string): Promise<NetprintRegistration>;
@@ -324,7 +373,21 @@ export interface NetprintCronDeps<Harvest extends NetprintHarvest = NetprintHarv
   sendText(destination: LineworksDestination, text: string): Promise<void>;
 }
 
+/** 運行 1 件ぶんの結果。`print_id` は成功時のみ。 */
+export interface NetprintOperationResult {
+  operation_no: string;
+  /** 乗務員 / 車輌 (`describeOperation`)。失敗した運行を人が特定するのに使う。 */
+  label: string;
+  ok: boolean;
+  print_id: string | null;
+  /** 失敗理由 (成功なら空文字)。 */
+  detail: string;
+}
+
 export interface NetprintTargetResult {
+  /** **`detail` を先頭に置く** — relay (`cron.ts`) はこの応答本文を **200 字で
+   * 切って**画面へ渡すため、後ろのキーほど読めなくなる。効く情報から並べる。 */
+  detail: string;
   branch_cd: string;
   /** トークルーム宛なら設定された `channel_id`、個人宛なら null。
    * **フィールド名は変えない** — 画面 (#874-5) が読む応答の形を保つため。 */
@@ -334,8 +397,10 @@ export interface NetprintTargetResult {
   ok: boolean;
   /** branchCd で絞った後の行数。harvest 前に失敗したら null。 */
   rows: number | null;
-  print_id: string | null;
-  detail: string;
+  /** 運行ごとの成否 (1 運行 = 1 予約番号)。harvest 前に失敗したら空配列。
+   * **画面はここの `print_id` を全部拾って並べる** (`viewNetprintRunResult` が
+   * 応答本文から `"print_id"` を全件マッチする)。 */
+  operations: NetprintOperationResult[];
 }
 
 function describeError(err: unknown): string {
@@ -366,14 +431,73 @@ export function resolveBranchDisplayName(
   return `営業所コード${target.branch_cd}`;
 }
 
+/** 運行ごとの結果から target の `detail` を 1 行にする。
+ *
+ * **並び順が仕様**: relay (`cron.ts`) が応答本文を 200 字で切って画面へ渡すので、
+ * 後ろほど読めない。**人が次に何かする必要がある情報から**並べる —
+ * 件数 → 失敗した運行 (誰の日報が出ていないか) → 予約番号。番号を最後に置くのは、
+ * 番号は LINE WORKS に 1 運行 1 通で届いており画面が唯一の経路ではないため。
+ */
+export function summarizeOperations(operations: readonly NetprintOperationResult[]): string {
+  const ok = operations.filter((o) => o.ok);
+  const failed = operations.filter((o) => !o.ok);
+  const head = `成功 ${ok.length} / 失敗 ${failed.length} (全 ${operations.length} 運行)`;
+  const parts = [head];
+  for (const f of failed) parts.push(`失敗 ${f.label}: ${f.detail}`);
+  if (ok.length > 0) parts.push(`予約番号 ${ok.map((o) => o.print_id).join(" / ")}`);
+  return parts.join(" ");
+}
+
+/**
+ * 運行 1 件を PDF 取得 → netprint 登録 → 予約番号の通知まで進める。
+ *
+ * **throw しない** — 1 運行の失敗で同じ営業所の他の運行を止めないため
+ * (target 独立と同じ考え方をもう一段内側にも適用する)。
+ *
+ * 登録が済んだ後に通知だけ落ちた場合は**失敗として扱いつつ `print_id` を残す** —
+ * 番号自体は有効なので、結果から拾えば人が手で伝えられる。ここで成功に倒すと
+ * 「番号が出たのに誰にも届いていない」が黙って通る。
+ */
+async function runOneOperation<Harvest extends NetprintHarvest>(
+  deps: NetprintCronDeps<Harvest>,
+  destination: LineworksDestination,
+  branchName: string,
+  dateYmd: string,
+  row: Harvest["rows"][number],
+): Promise<NetprintOperationResult> {
+  const base = { operation_no: row.operationNo, label: describeOperation(row) };
+  let printId: string | null = null;
+  try {
+    const pdf = await deps.generatePdf(row);
+    const registration = await deps.registerPdf(pdf, netprintPdfFileName(dateYmd, row.operationNo));
+    printId = registration.printId;
+    await deps.sendText(destination, buildNetprintNotification(branchName, dateYmd, row, registration));
+    return { ...base, ok: true, print_id: printId, detail: "" };
+  } catch (err) {
+    const detail = describeError(err);
+    return {
+      ...base,
+      ok: false,
+      print_id: printId,
+      detail: printId === null ? detail : `予約番号 ${printId} は発行済みだが通知に失敗: ${detail}`,
+    };
+  }
+}
+
 /**
  * 全 target を順に処理する。target 間は独立 — 1 つの失敗 (throw) はその
  * target の結果 (`ok: false` + 可能なら LINE WORKS へのエラー通知) に閉じ、
  * 次の target へ進む。呼び出し側 (DO) は `ok: false` の結果を console.error
  * する (Tail Worker に残す)。
  *
+ * **1 営業所の中は運行ごとに直列**で、1 運行 = 1 PDF = 1 予約番号 = 通知 1 通
+ * (Refs #874 の 13、ユーザー判断)。運行 1 件の失敗は他の運行を止めず、
+ * **全件失敗した時だけ** target を `ok: false` にする (何本かは届いている日を
+ * 「営業所ぜんぶ失敗」と報告しないため)。失敗した運行があれば、成功ぶんの通知とは
+ * 別に**まとめて 1 通**エラーを送る (`buildNetprintOperationFailureNotification`)。
+ *
  * 宛先 (`channel_id` / `recipient_id`) の指定が不正な target は **harvest も PDF
- * 生成もせずに** `ok: false` にする — 通知先が無い以上 netprint に登録しても誰にも
+ * 取得もせずに** `ok: false` にする — 通知先が無い以上 netprint に登録しても誰にも
  * 番号が届かないし、エラー通知の送り先も同じく無いため (送ろうとしても確実に失敗
  * する)。1 営業所の設定ミスで他の営業所の通知まで止めないのが target 独立の趣旨。
  */
@@ -388,12 +512,12 @@ export async function runNetprintTargets<Harvest extends NetprintHarvest>(
     const resolved = resolveNetprintDestination(target);
     if (!resolved.ok) {
       results.push({
+        detail: resolved.error,
         branch_cd: target.branch_cd,
         ...ids,
         ok: false,
         rows: null,
-        print_id: null,
-        detail: resolved.error,
+        operations: [],
       });
       continue;
     }
@@ -407,28 +531,41 @@ export async function runNetprintTargets<Harvest extends NetprintHarvest>(
       if (report.rows.length === 0) {
         await deps.sendText(destination, buildNoOperationsNotification(branchName, dateYmd));
         results.push({
+          detail: "運行 0 行 — 「運行はありませんでした」を通知",
           branch_cd: target.branch_cd,
           ...ids,
           ok: true,
           rows: 0,
-          print_id: null,
-          detail: "運行 0 行 — 「運行はありませんでした」を通知",
+          operations: [],
         });
         continue;
       }
-      const pdf = await deps.generatePdf(report, branchName, dateYmd);
-      const registration = await deps.registerPdf(pdf, netprintPdfFileName(dateYmd));
-      await deps.sendText(
-        destination,
-        buildNetprintNotification(branchName, dateYmd, registration),
-      );
+      const operations: NetprintOperationResult[] = [];
+      for (const row of report.rows) {
+        operations.push(await runOneOperation(deps, destination, branchName, dateYmd, row));
+      }
+      const failures = operations.filter((o) => !o.ok);
+      let notifyDetail = "";
+      if (failures.length > 0) {
+        // 失敗のまとめ通知は best-effort — これ自体が落ちても、成功ぶんの番号は
+        // すでに届いているので結果に併記するだけにする。
+        try {
+          await deps.sendText(
+            destination,
+            buildNetprintOperationFailureNotification(branchName, dateYmd, failures),
+          );
+        } catch (notifyErr) {
+          notifyDetail = ` (失敗のまとめ通知も失敗: ${describeError(notifyErr)})`;
+        }
+      }
       results.push({
+        detail: `${summarizeOperations(operations)}${notifyDetail}`,
         branch_cd: target.branch_cd,
         ...ids,
-        ok: true,
+        // 全件失敗した時だけ営業所ごと失敗にする (1 件でも届いていれば ok)。
+        ok: failures.length < operations.length,
         rows: report.rows.length,
-        print_id: registration.printId,
-        detail: `${report.rows.length} 行 / ${registration.page} ページを登録し予約番号を通知`,
+        operations,
       });
     } catch (err) {
       const detail = describeError(err);
@@ -448,12 +585,12 @@ export async function runNetprintTargets<Harvest extends NetprintHarvest>(
         notifyDetail = ` (エラー通知も失敗: ${describeError(notifyErr)})`;
       }
       results.push({
+        detail: `${detail}${notifyDetail}`,
         branch_cd: target.branch_cd,
         ...ids,
         ok: false,
         rows: report === null ? null : report.rows.length,
-        print_id: null,
-        detail: `${detail}${notifyDetail}`,
+        operations: [],
       });
     }
   }

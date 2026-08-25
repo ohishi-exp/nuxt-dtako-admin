@@ -4,14 +4,6 @@ compatibility_date = "2024-09-19"
 compatibility_flags = ["nodejs_compat"]
 main = "src/index.ts"
 
-# 日報 PDF の日本語フォント (assets/NotoSansJP-Regular.otf) を Data module として
-# バンドルに同梱する (daily-report-pdf.ts が import、Refs #874-2)。rules は
-# inheritable key なので staging / 他の named environment にもそのまま効く
-# ([observability]/[triggers] のような個別再宣言は不要)。
-rules = [
-  { type = "Data", globs = ["**/*.otf"], fallthrough = true },
-]
-
 # DTAKO_ACCOUNTS (dashboard の plain Environment Variable、Refs #83) は
 # wrangler.toml に無いため、これが無いと `wrangler deploy` (この worker は DO
 # migration があり versions upload できないため classic deploy 必須) のたびに

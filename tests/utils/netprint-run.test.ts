@@ -141,6 +141,59 @@ describe('viewNetprintRunResult', () => {
     expect(view.message).toContain('"print_id":"J5JZPEQJ"')
   })
 
+  // 1 運行 = 1 予約番号 (Refs #874 の 13) だと `operations[].print_id` は 200 字の
+  // 打ち切りより後ろへ落ちる。DO は target の detail の先頭付近にも番号を並べるので、
+  // そちらから拾えることを固定する (片方だけだと日によって画面から番号が消える)。
+  it('operations が打ち切られていても detail の「予約番号 A / B / C」から拾う', () => {
+    const body = JSON.stringify({
+      ok: true,
+      results: [{
+        detail: '成功 3 / 失敗 0 (全 3 運行) 予約番号 MTDDF7SN / N4KR8X9S / MPQDFL8G',
+        branch_cd: '1',
+        operations: [{ print_id: 'MTDDF7SN' }],
+      }],
+    })
+    const view = viewNetprintRunResult({ target: '27324455|1', ok: true, detail: detail(200, body.slice(0, 140)) })
+    expect(view.printIds).toEqual(['MTDDF7SN', 'N4KR8X9S', 'MPQDFL8G'])
+  })
+
+  it('JSON と本文テキストの両方に出ている番号は重複させない', () => {
+    const view = viewNetprintRunResult({
+      target: '27324455|1',
+      ok: true,
+      detail: detail(200, {
+        ok: true,
+        results: [{
+          detail: '成功 2 / 失敗 0 (全 2 運行) 予約番号 AAAA1111 / BBBB2222',
+          operations: [{ print_id: 'AAAA1111' }, { print_id: 'BBBB2222' }],
+        }],
+      }),
+    })
+    expect(view.printIds).toEqual(['AAAA1111', 'BBBB2222'])
+  })
+
+  it('打ち切りで途中まで残った番号は出さない (入力しても通らない番号を人に試させない)', () => {
+    const view = viewNetprintRunResult({
+      target: '27324455|1',
+      ok: true,
+      detail: detail(200, '{"ok":true,"results":[{"detail":"成功 2 / 失敗 0 (全 2 運行) 予約番号 AAAA1111 / BBBB'),
+    })
+    expect(view.printIds).toEqual(['AAAA1111'])
+  })
+
+  it('失敗のまとめだけで番号が無ければ printIds は空', () => {
+    const view = viewNetprintRunResult({
+      target: '27324455|1',
+      ok: false,
+      detail: detail(502, {
+        ok: false,
+        results: [{ detail: '成功 0 / 失敗 1 (全 1 運行) 失敗 林田 隆則: Error: boom' }],
+      }),
+    })
+    expect(view.printIds).toEqual([])
+    expect(view.message).toContain('失敗 林田 隆則')
+  })
+
   it('複数営業所ぶんの結果が 1 つの detail に入っていれば全部の予約番号を出す', () => {
     const view = viewNetprintRunResult({
       target: '27324455|1',

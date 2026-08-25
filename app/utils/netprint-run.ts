@@ -18,10 +18,18 @@
  * relay は target ごとに DO を呼び、結果を **`{kind, target: "compId|branchCd", ok,
  * detail: "HTTP {status}: {DO の応答本文を 200 字で切ったもの}"}`** に畳んで返す
  * (`cron.ts` の `dispatchNetprintTargets`)。DO の応答本文は成功なら
- * `{ok, results: [{branch_cd, channel_id, ok, rows, print_id, detail}], theearth_logins}`、
- * 失敗なら `{error}`。**予約番号 (`print_id`) はこの内側にしか無い**ので、画面に出すには
- * ここでほどく必要がある。**200 字打ち切りで JSON として壊れていることがある**ので、
- * JSON にならなくても `print_id` だけは正規表現で拾い、原文も併せて残す。
+ * `{ok, results: [{detail, branch_cd, channel_id, ok, rows, operations}], theearth_logins}`、
+ * 失敗なら `{error}`。**予約番号はこの内側にしか無い**ので、画面に出すにはここで
+ * ほどく必要がある。**200 字打ち切りで JSON として壊れていることがある**ので、
+ * JSON にならなくても予約番号だけは正規表現で拾い、原文も併せて残す。
+ *
+ * ## 予約番号は 2 か所から拾う (Refs #874 の 13)
+ *
+ * **1 運行 = 1 予約番号**になり、番号は `operations[].print_id` に並ぶ。ところが
+ * `operations` は JSON の後ろの方にあり、**9 運行の日は 200 字の打ち切りより後ろへ
+ * 落ちて 1 つも読めない**。DO 側はこれを見越して target の `detail` の先頭付近に
+ * `予約番号 A / B / C` の形でも載せているので、**JSON と本文テキストの両方から拾って
+ * 重複を潰す**。片方だけにすると、日によって番号が画面から消える。
  */
 
 /** `date` に受け付ける形式 (relay の `NETPRINT_DATE_RE` と同じ)。 */
@@ -128,8 +136,19 @@ export interface NetprintTargetView {
 
 /** relay が付ける `HTTP {status}: ` の前置き。 */
 const HTTP_DETAIL_RE = /^HTTP \d{3}: ([\s\S]*)$/
-/** 200 字打ち切りで JSON が壊れていても予約番号だけは拾う。 */
+/** 200 字打ち切りで JSON が壊れていても予約番号だけは拾う (`operations[].print_id`)。 */
 const PRINT_ID_RE = /"print_id"\s*:\s*"([0-9A-Za-z]+)"/g
+/** target の `detail` が先頭付近に載せる `予約番号 A / B / C` から拾う。予約番号は
+ * 8 桁英数固定なので、打ち切りで途中まで残った端数は**マッチさせない** (半端な
+ * 番号を画面に出すと、入力しても通らない番号を人が試すことになる)。 */
+const PRINT_ID_SUMMARY_RE = /予約番号 ([0-9A-Za-z]{8}(?: \/ [0-9A-Za-z]{8})*)/g
+
+/** 応答本文から予約番号を拾う (JSON と本文テキストの両方、出現順で重複を潰す)。 */
+function readPrintIds(body: string): string[] {
+  const ids = [...body.matchAll(PRINT_ID_RE)].map(m => m[1]!)
+  for (const m of body.matchAll(PRINT_ID_SUMMARY_RE)) ids.push(...m[1]!.split(' / '))
+  return [...new Set(ids)]
+}
 
 function parseJsonObject(text: string): Record<string, unknown> | null {
   try {
@@ -158,6 +177,10 @@ export function viewNetprintRunResult(item: NetprintRunResultItem): NetprintTarg
   const matched = HTTP_DETAIL_RE.exec(item.detail)
   // DO を呼ぶ前に relay 側で例外になった場合は前置きが無く、message がそのまま入る。
   const body = matched === null ? item.detail : matched[1]!
-  const printIds = [...body.matchAll(PRINT_ID_RE)].map(m => m[1]!)
-  return { branchCd, ok: item.ok, printIds, message: describeDoBody(parseJsonObject(body)) ?? body }
+  return {
+    branchCd,
+    ok: item.ok,
+    printIds: readPrintIds(body),
+    message: describeDoBody(parseJsonObject(body)) ?? body,
+  }
 }
