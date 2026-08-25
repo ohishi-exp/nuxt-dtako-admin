@@ -20,9 +20,16 @@ import {
   parseOperationLegSales,
   lookupOperationLegSales,
   legSaleYen,
-  legSalesNote,
   type OperationLegSalesLookup,
 } from '~/utils/operation-leg-sales'
+import {
+  legSalesYmCandidates,
+  pickBestR2LegSales,
+  resolveLegSalesPanel,
+  type LegSalesR2Fetch,
+  type OperationLegSalesR2,
+} from '~/utils/operation-leg-sales-r2'
+import { operationRunDate } from '~/utils/allowance-report'
 
 const route = useRoute()
 const router = useRouter()
@@ -78,16 +85,52 @@ function readLegSales(): OperationLegSalesLookup {
   }
 }
 
+// --- この端末で集計していないときの落とし先 (R2 の版、Refs #865) --------------
+// **必要なデータは既に R2 にある** (`MarginCache.operations[].legs` が #826 で
+// `margin-summary` に入っている)。読む経路が無かっただけなので、**読むだけ**足す。
+// **localStorage を先に見る順序は変えない** (集計直後の値が即反映される挙動を壊さない)。
+// **出どころは画面で言い分ける** — 版は古いことがある (最後に誰かが集計した時点)。
+const legSalesR2 = ref<LegSalesR2Fetch>({ state: 'loading' })
+
+/** 計上額パネルが出すもの (中身 / 出どころ / 出せない理由)。判断は pure 側 (テスト済み)。 */
+const legSalesPanel = computed(() => resolveLegSalesPanel(legSales.value, legSalesR2.value))
 /** 突合結果が無いときに出す一言。あるときは `null` (便を並べる)。 */
-const legSalesMissingNote = computed(() => legSalesNote(legSales.value))
+const legSalesMissingNote = computed(() => legSalesPanel.value.note)
 /** 突合結果があるときだけの中身 (template で union を絞らずに読むため)。 */
-const legSalesReady = computed(() => (legSales.value.status === 'ready' ? legSales.value : null))
+const legSalesReady = computed(() => legSalesPanel.value.ready)
 /**
  * 便ごとの表示行。**`yen` が `null` の便は「当たっていません」**と出す —
  * ¥0 と出すと「売上 0 円の便」に読めてしまう。
  */
 const legSaleRows = computed(() =>
   (legSalesReady.value?.legs ?? []).map(leg => ({ ...leg, yen: legSaleYen(leg) })))
+
+/**
+ * R2 の版を見に行く。**この端末に結果があるときは 1 回も叩かない** (古い版で上書きしない)。
+ *
+ * 月は `operationRunDate` (粗利タブと同じ月の切り方の材料) から出し、**前後 1 日ぶんの月も
+ * 候補にする** — 粗利タブは運行の開始日で月を切るので、読取日とは 1 日ずれうる
+ * (月末・月初の運行を 1 か月だけ見ると「版にこの運行はありません」と嘘をつく)。
+ */
+async function loadLegSalesFromR2() {
+  if (legSales.value.status !== 'missing') return
+  const date = operationRunDate(null, primary.value?.operation_date ?? null, unkoNo)
+  const yms = legSalesYmCandidates(date)
+  if (yms.length === 0) {
+    legSalesR2.value = { state: 'no-date' }
+    return
+  }
+  try {
+    const results = await Promise.all(yms.map(ym =>
+      $fetch<OperationLegSalesR2>('/api/profit/operation-leg-sales', { query: { ym, unkoNo } })))
+    // 候補が空になることはない (`yms.length > 0` を上で見ている) ので `pickBest` は必ず値を返す。
+    legSalesR2.value = { state: 'done', result: pickBestR2LegSales(results)!, checkedYms: yms }
+  }
+  catch (e) {
+    // **黙って「集計されていません」に倒さない。** 読めなかったことを画面で言う。
+    legSalesR2.value = { state: 'failed', message: e instanceof Error ? e.message : String(e) }
+  }
+}
 
 const yen = (v: number) => `¥${Math.round(v).toLocaleString()}`
 
@@ -101,6 +144,8 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+  // 運行が読めてからでないと月を決められない (`operation_date`)。**画面の描画は待たせない。**
+  void loadLegSalesFromR2()
   if (activeTab.value !== 'net780') await loadCsv(activeTab.value)
 })
 
@@ -469,7 +514,10 @@ function formatDatetime(val: string | null): string {
         >
           <div class="flex items-baseline gap-2 flex-wrap">
             <span class="font-medium text-gray-700 dark:text-gray-300">{{ LEG_SALES_TITLE }}</span>
-            <span v-if="legSalesReady" class="text-gray-400">便ごと ({{ legSalesReady.ym }} の突合)</span>
+            <!-- **出どころを必ず見出しに出す** (Refs #865)。この端末で集計した結果と R2 に
+                 保存された版は別物で、版は古いことがある。黙って差し替えると数字が変わった
+                 理由が読めなくなる。 -->
+            <span v-if="legSalesReady" class="text-gray-400">便ごと / {{ legSalesPanel.sourceLabel }}</span>
             <span v-if="legSalesReady" class="ml-auto">
               <template v-if="legSalesReady.salesYen !== null">
                 合計 <b class="tabular-nums">{{ yen(legSalesReady.salesYen) }}</b>
@@ -503,6 +551,11 @@ function formatDatetime(val: string | null): string {
               <span v-else class="text-gray-400">一番星の明細に当たっていません</span>
             </li>
           </ul>
+          <!-- R2 の版から読んだ回だけの注記 (Refs #865)。版の古さと、伝票番号が版に
+               入っていないこと (= 「伝票 …」が出ない理由) を言う。 -->
+          <p v-if="legSalesPanel.sourceNote" class="text-gray-400 mt-1.5">
+            {{ legSalesPanel.sourceNote }}
+          </p>
           <!-- 突合の数字が 2 つ並ぶので、**どちらが計上値か**を毎回言う (混ぜると誤読される)。
                計上額を出しているときだけ添える (何も出ていない区画に他の区画の話は要らない)。 -->
           <p v-if="legSalesReady" class="text-gray-400 mt-1.5">
