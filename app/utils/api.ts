@@ -16,6 +16,7 @@ import type {
 } from '~/types'
 import { createAuthFetch } from '@ippoan/auth-client'
 import type { Net780ArchiveResult } from '~/utils/net780-archive'
+import { normalizeNetprintRunOutcome, type NetprintRunInput, type NetprintRunOutcome } from '~/utils/netprint-run'
 
 let apiBase = ''
 let getAccessToken: (() => string | null) | null = null
@@ -715,6 +716,26 @@ export async function postNet780Archive(operationNos: string[]): Promise<Net780A
   }
   if (body === null) throw new Error('NET780 取得の応答が JSON ではありません')
   return body as unknown as Net780ArchiveResult
+}
+
+/**
+ * 運転日報の netprint 登録 + LINE WORKS 通知を 1 回走らせる front worker の server route
+ * (`server/api/netprint/run.post.ts`、Refs #874 の 5)。cron (JST 6:30) と同じ道を通る。
+ *
+ * **成功も失敗も投げずに `NetprintRunOutcome` で返す** — 一部の営業所だけ失敗した 502 でも
+ * 営業所ごとの結果 (予約番号 / 理由) が `data` に載っており、それを画面に出したいため。
+ * fetch 自体の失敗 (ネットワーク断) だけは投げる。
+ *
+ * **status poll 完了まで同期で待つので数分かかりうる** (画面側で二重送信を止めること)。
+ * cookie / Bearer の扱いは `postNet780Archive` と同じ。
+ */
+export async function postNetprintRun(input: NetprintRunInput): Promise<NetprintRunOutcome> {
+  const token = currentAccessToken()
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  if (token) headers['authorization'] = `Bearer ${token}`
+  const res = await fetch('/api/netprint/run', { method: 'POST', headers, body: JSON.stringify(input) })
+  const body = await res.json().catch(() => null) as unknown
+  return normalizeNetprintRunOutcome(res.status, res.ok, body)
 }
 
 /** `zip_url` (relay 相対 path) を、ダウンロード可能な絶対 https URL に変換する。

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl, saveScrapeHistory, buildScraperZipUrl, buildEtcCsvDownloadUrl, splitCsv, splitCsvAllStream, getDtakoEventsEtags } from '~/utils/api'
+import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl, saveScrapeHistory, buildScraperZipUrl, buildEtcCsvDownloadUrl, splitCsv, splitCsvAllStream, getDtakoEventsEtags, postNetprintRun } from '~/utils/api'
+import { yesterdayJstYmd, viewNetprintRunResult, type NetprintRunOutcome } from '~/utils/netprint-run'
 import type { ScrapeResult, ScrapeHistoryItem, PendingUpload, ScrapeStatusEntry } from '~/types'
 import type { ScrapeProgressEvent } from '~/utils/api'
 import {
@@ -56,7 +57,7 @@ const selectedCompId = useState('scraper-compId', () => '')
 // が ETC_ACCOUNTS を解決してアカウントごとに並列実行し、アカウント単位の
 // result イベント (user_id 付き) をそのまま WS で中継する。
 
-const activeTab = useState<'dtako' | 'etc'>('scraper-active-tab', () => 'dtako')
+const activeTab = useState<'dtako' | 'etc' | 'netprint'>('scraper-active-tab', () => 'dtako')
 const etcRunning = ref(false)
 interface EtcLogLine {
   text: string
@@ -103,6 +104,43 @@ async function handleEtcRunAll(month: 'current' | 'previous') {
   finally {
     etcRunning.value = false
     etcRunningMonth.value = null
+  }
+}
+
+// --- 運転日報 netprint 手動実行 (管理タブ、Refs #874 の 5) ---
+// relay の `POST /kintai-relay/netprint-run` は service binding 専用で外から叩けないため、
+// front の `POST /api/netprint/run` を経由する。cron (JST 6:30) と同じ道 (DO の
+// `/cron/netprint`) を通るので、ここで通れば cron も通る。
+// **応答は netprint の status poll 完了まで同期**で数分かかりうる。押した後に処理中である
+// ことが分かるよう経過秒を出し、`netprintRunning` で二重送信を止める。
+
+const netprintDate = ref(yesterdayJstYmd(new Date()))
+const netprintRunning = ref(false)
+/** 実行中の経過秒 (数分かかるので「止まっていない」ことを見せる)。 */
+const netprintElapsed = ref(0)
+/** fetch 自体が失敗した (ネットワーク断など)。route/relay の失敗は outcome 側に入る。 */
+const netprintFetchError = ref('')
+const netprintOutcome = ref<NetprintRunOutcome | null>(null)
+
+/** 営業所ごとの表示行 (予約番号は relay の detail に畳まれた DO 応答から取り出す)。 */
+const netprintViews = computed(() => (netprintOutcome.value?.results ?? []).map(viewNetprintRunResult))
+
+async function handleNetprintRun() {
+  if (netprintRunning.value) return
+  netprintRunning.value = true
+  netprintElapsed.value = 0
+  netprintFetchError.value = ''
+  netprintOutcome.value = null
+  const timer = setInterval(() => { netprintElapsed.value += 1 }, 1000)
+  try {
+    netprintOutcome.value = await postNetprintRun({ date: netprintDate.value })
+  }
+  catch (e) {
+    netprintFetchError.value = e instanceof Error ? e.message : '実行に失敗しました'
+  }
+  finally {
+    clearInterval(timer)
+    netprintRunning.value = false
   }
 }
 
@@ -784,6 +822,78 @@ onMounted(() => {
       >
         ETC
       </button>
+      <button
+        type="button"
+        class="px-4 py-2 text-sm font-medium border-b-2 -mb-px"
+        :class="activeTab === 'netprint' ? 'border-primary-500 text-primary-600 dark:text-primary-400' : 'border-transparent text-gray-500'"
+        @click="activeTab = 'netprint'"
+      >
+        日報netprint
+      </button>
+    </div>
+
+    <div v-show="activeTab === 'netprint'">
+      <UCard>
+        <h2 class="font-bold mb-1">
+          運転日報を netprint に登録 (手動実行)
+        </h2>
+        <p class="text-xs text-gray-500 mb-3">
+          対象日の運転日報を PDF にして かんたんnetprint に登録し、プリント予約番号を LINE WORKS へ通知します
+          (毎朝 6:30 の cron と同じ経路)。対象営業所と通知先は relay の <code>NETPRINT_TARGETS</code> 設定に従います。
+          <strong>netprint の変換完了まで待つので数分かかります</strong> — 押したままお待ちください。
+        </p>
+        <div class="flex flex-wrap gap-2 items-end mb-4">
+          <div>
+            <label class="block text-sm font-medium mb-1">対象日 (既定: 前日)</label>
+            <UInput v-model="netprintDate" type="date" class="w-40" :disabled="netprintRunning" />
+          </div>
+          <UButton
+            label="日報を netprint に登録"
+            icon="i-lucide-printer"
+            :loading="netprintRunning"
+            :disabled="netprintRunning || !netprintDate"
+            @click="handleNetprintRun"
+          />
+        </div>
+
+        <div v-if="netprintRunning" class="text-sm text-gray-500 flex items-center gap-2">
+          <UIcon name="i-lucide-loader-circle" class="animate-spin size-4" />
+          実行中... ({{ netprintElapsed }} 秒経過 / theearth 取得 → PDF 生成 → netprint 登録 → LINE WORKS 通知)
+        </div>
+
+        <div v-if="netprintFetchError" class="text-sm text-red-500">
+          [エラー] {{ netprintFetchError }}
+        </div>
+
+        <div v-if="netprintOutcome" class="space-y-2 text-sm">
+          <div :class="netprintOutcome.ok ? 'text-green-600 dark:text-green-400' : 'text-red-500'">
+            {{ netprintOutcome.ok ? '成功' : '失敗' }} (HTTP {{ netprintOutcome.status }})
+            <span v-if="netprintOutcome.date">— 対象日 {{ netprintOutcome.date }}</span>
+          </div>
+          <div v-if="netprintOutcome.error" class="text-red-500 break-all">
+            {{ netprintOutcome.error }}
+          </div>
+          <div
+            v-if="netprintViews.length"
+            class="space-y-2 bg-gray-50 dark:bg-gray-900 rounded-lg p-3 max-h-64 overflow-y-auto"
+          >
+            <div v-for="(view, i) in netprintViews" :key="i" class="font-mono text-xs break-all">
+              <span :class="view.ok ? 'text-green-600 dark:text-green-400' : 'text-red-500'">
+                [{{ view.ok ? '成功' : '失敗' }}] 営業所 {{ view.branchCd }}
+              </span>
+              <span v-if="view.printIds.length" class="ml-1 font-bold">
+                予約番号 {{ view.printIds.join(' / ') }}
+              </span>
+              <div class="text-gray-500">
+                {{ view.message }}
+              </div>
+            </div>
+          </div>
+          <p v-else-if="!netprintOutcome.error" class="text-gray-500">
+            relay から営業所ごとの結果が返りませんでした。
+          </p>
+        </div>
+      </UCard>
     </div>
 
     <div v-show="activeTab === 'etc'">

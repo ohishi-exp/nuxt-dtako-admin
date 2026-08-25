@@ -42,6 +42,7 @@ import {
   buildScraperZipUrl,
   buildEtcCsvDownloadUrl,
   postNet780Archive,
+  postNetprintRun,
   splitCsvAllStream,
   getDtakoEventsEtags,
 } from '~/utils/api'
@@ -1381,6 +1382,65 @@ describe('api', () => {
     it('2xx なのに JSON でなければ投げる (null を返さない)', async () => {
       mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => { throw new Error('not json') } })
       await expect(postNet780Archive([UNKO_22])).rejects.toThrow('JSON')
+    })
+  })
+
+  // 運転日報 netprint の手動実行 (Refs #874 の 5)。**失敗でも投げない** —
+  // 一部の営業所だけ失敗した 502 の内訳を画面に出すため (`NetprintRunOutcome`)。
+  describe.runIf(!isLive)('postNetprintRun', () => {
+    const relayResult = {
+      ok: true,
+      date: '2026-08-24',
+      results: [{ kind: 'netprint', target: '27324455|1', ok: true, detail: 'HTTP 200: {"ok":true}' }],
+    }
+
+    it('POST /api/netprint/run に body を JSON で送り、Bearer を明示して結果を返す', async () => {
+      initApi(API_BASE, () => 'tok-1', undefined, () => 'test-tenant')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => relayResult })
+      const result = await postNetprintRun({ date: '2026-08-24' })
+      expect(result).toEqual({
+        ok: true,
+        status: 200,
+        date: '2026-08-24',
+        results: [{ target: '27324455|1', ok: true, detail: 'HTTP 200: {"ok":true}' }],
+        error: null,
+      })
+      const [url, opts] = mockFetch.mock.calls[0]
+      expect(url).toBe('/api/netprint/run')
+      expect(opts.method).toBe('POST')
+      expect(opts.headers['content-type']).toBe('application/json')
+      expect(opts.headers['authorization']).toBe('Bearer tok-1')
+      expect(JSON.parse(opts.body)).toEqual({ date: '2026-08-24' })
+    })
+
+    it('token が無ければ Authorization を付けない (cookie だけで通す経路)', async () => {
+      initApi(API_BASE, () => null, undefined, () => 'test-tenant')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => relayResult })
+      await postNetprintRun({})
+      expect(mockFetch.mock.calls[0][1].headers['authorization']).toBeUndefined()
+    })
+
+    it('非 2xx は投げずに error と (あれば) 営業所ごとの結果を返す', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        json: async () => ({
+          statusMessage: 'relay: 1 件中 1 件の営業所が失敗しました (HTTP 502)',
+          data: { ok: false, date: '2026-08-24', results: [{ target: '27324455|1', ok: false, detail: 'HTTP 503: {"error":"x"}' }] },
+        }),
+      })
+      const result = await postNetprintRun({})
+      expect(result.ok).toBe(false)
+      expect(result.status).toBe(502)
+      expect(result.error).toContain('1 件中 1 件')
+      expect(result.results).toHaveLength(1)
+    })
+
+    it('本文が JSON でなくても HTTP n を error にして返す', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 401, json: async () => { throw new Error('not json') } })
+      const result = await postNetprintRun({})
+      expect(result.error).toBe('HTTP 401')
+      expect(result.results).toEqual([])
     })
   })
 
