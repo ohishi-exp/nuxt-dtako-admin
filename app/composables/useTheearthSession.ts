@@ -46,9 +46,51 @@ export function b64urlUtf8(value: string): string {
   return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
+/**
+ * `$fetch` のエラーから**人が読める理由**だけを取り出す (Refs #890)。
+ *
+ * theearth 系ページ (dvr / net780 / daily-report / restraint) は全部この 1 本を
+ * `dvrErrorMessage` / `net780ErrorMessage` / `dailyReportErrorMessage` /
+ * `restraintErrorMessage` という別名で呼んでいる。
+ *
+ * ## ★ 本文の形は**呼び先で 2 通りある** — `error` が真偽値のときに落ちていた
+ *
+ * | 呼び先 | 本文 | `data.error` |
+ * |---|---|---|
+ * | relay (`/dvr-api` `/net780-api` `/daily-report-api` `/restraint-api`) | `{ error: '<日本語>' }` (`dtako-scraper-relay-do.ts` の `dvrJsonError`) | **文字列** |
+ * | 自前 `server/api/**` (`/api/ichiban/**` `/api/kyuyo/**`) | `{ error: true, url, statusCode, statusMessage, message, data }` (`nitropack/dist/runtime/internal/error/prod.mjs`) | **真偽値** |
+ *
+ * 以前は `typeof data.error === 'string'` で当たらなければ `e.message` に落として
+ * いたので、**Nitro 経路では日本語が丸ごと消えていた**。`e.message` は ofetch が
+ * HTTP の reason phrase から組むもので、**本番は HTTP/3 = reason phrase そのものが
+ * 無い**ため `[GET] "…": 503` で終わる (#890 の親コメント、v0.0.563 実測)。
+ * ⇒ **文字列である最初の 1 つ**を選ぶ形にした。`app/utils/api-error.ts` の
+ * `describeApiError` と**同じ規則・同じ順序** (`error` → `message` → `statusMessage`)。
+ * 順序の根拠 (なぜ `message` を `statusMessage` より先に見るか) はそちらの doc を読む。
+ *
+ * relay の `{ error: '<日本語>' }` は `find` の**先頭**で当たるので、**relay 経路の
+ * 出力は 1 文字も変わらない**。
+ *
+ * ## ★ `describeApiError` と違って `statusCode` を前置しない (契約が別)
+ *
+ * この関数の契約は「**理由の文字列だけ**」。呼び出し側は
+ * `expireSession(theearthSessionErrorMessage(e))` のようにセッション失効の説明文へ
+ * 埋めたり、既に status を別に出している注記に足したりする。**揃えようとしないこと。**
+ *
+ * ## ★ `responseType: 'blob'` の呼び出しには効かない (仕様)
+ *
+ * ofetch は**エラー応答の本文も `responseType` で読む** (`ofetch/dist/shared/*.mjs`
+ * の `switch (responseType)` は 4xx/5xx でも通る)。⇒ `net780/index.vue` の
+ * `$fetch<Blob>('/net780-api/…', { responseType: 'blob' })` では `e.data` が **Blob**
+ * になり、ここも `describeApiError` も本文を 1 バイトも読めない (実測、Refs #890)。
+ * その経路は `e.message` に落ちる — **いままでと同じ**で、後退はしない。
+ */
 export function theearthSessionErrorMessage(e: unknown): string {
-  const data = (e as { data?: { error?: unknown } } | null)?.data
-  if (data && typeof data.error === 'string') return data.error
+  const data = (e as { data?: { error?: unknown, message?: unknown, statusMessage?: unknown } } | null)?.data
+  // ★ `??` で繋がない — Nitro の本文は `error` が真偽値なので `true` で止まる
+  //   (`app/utils/api-error.ts` と同じ罠。Refs #890)。
+  const picked = data ? [data.error, data.message, data.statusMessage].find(v => typeof v === 'string') : undefined
+  if (typeof picked === 'string') return picked
   return e instanceof Error ? e.message : String(e)
 }
 
