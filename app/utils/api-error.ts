@@ -23,12 +23,25 @@
  * 実測して分かった (Refs #890)。**`find(typeof … === 'string')` に変えてある。**
  * upstream proxy の `{ error: '…' }` (文字列) を先に見る**順序は変えていない**。
  *
+ * **★ 読むファイルを間違えないこと。**走っているのは
+ * `nitropack/dist/runtime/internal/error/prod.mjs` の `defaultHandler` で、
+ * `runtime/error.mjs` の `defaultNitroErrorHandler` でも h3 の `sendError()` でもない
+ * (`grep -rn 'error: true' node_modules/nitropack/dist/runtime/` → `internal/error/` の
+ * 2 件だけ)。**どれが走るかは読みでは決まらない** — worker を立てて本物の応答を見るまで
+ * 3 通りの「それらしい handler」が候補として並ぶ。
+ *
  * ## ★ `data.message` を `data.statusMessage` より先に見る (順序を変えないこと)
  *
  * いま通っている Nitro のエラーハンドラは本文を sanitize しないので、
  * **`statusMessage` にも `message` にも同じ日本語が載る** (dev の実機 400 で両方確認。
  * h3 の `createError` が `new H3Error(input.message ?? input.statusMessage ?? '')` を
  * 作るので、`message` を渡していなくても `message` 側に同じ文が入る)。
+ *
+ * **`statusMessage` へのフォールバックは無駄ではない** — `prod.mjs` は
+ * `isSensitive = error.unhandled || error.fatal` のとき `message` を `'Server Error'` に
+ * 潰すが、そのとき `statusMessage` も `error.statusMessage || 'Server Error'` なので
+ * **どちらにせよ日本語は無い**。明示的な `createError({ statusCode: 400, … })` は
+ * unhandled でも fatal でもないので、`message` に日本語が入る。
  * だが **`H3Error.toJSON()` の経路は `statusMessage` だけを sanitize して
  * `message` を素通しする** — 日本語は全部落ちる。いまはその経路を通らないが、
  * **`statusMessage` を先に読む実装にすると将来そこで壊れる。**
