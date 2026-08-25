@@ -1,9 +1,31 @@
+import { readFileSync } from 'node:fs'
 import { defineConfig } from 'vitest/config'
 
 // DO worker は親 (nuxt-dtako-admin) の vitest config に吸われないようローカル
 // config を持つ (nuxt-items/workers/items-sync と同型)。auth-decision.ts は
 // pure (cloudflare 非依存) なので素の node 環境でテストできる。
 export default defineConfig({
+  plugins: [
+    {
+      // wrangler の rules (type="Data") と同じ形 (default export = ArrayBuffer) で
+      // .otf を node vitest に解決させる (daily-report-pdf.ts のフォント同梱 import
+      // 用、Refs #874-2)。enforce: 'pre' で vite 標準の asset 解決 (URL 文字列化)
+      // より先に載せる。
+      name: 'otf-data-module',
+      enforce: 'pre',
+      load(id: string) {
+        const file = id.split('?')[0]
+        if (!file.endsWith('.otf')) return null
+        const buf = readFileSync(file)
+        return (
+          `import { readFileSync } from 'node:fs'\n` +
+          `const buf = readFileSync(${JSON.stringify(file)})\n` +
+          `export default buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)\n` +
+          `// bytes: ${buf.byteLength}\n`
+        )
+      },
+    },
+  ],
   test: {
     include: ['test/**/*.test.ts'],
     coverage: {
@@ -57,6 +79,7 @@ export default defineConfig({
         'src/net780-archive.ts',
         'src/lineworks-client.ts',
         'src/netprint-client.ts',
+        'src/daily-report-pdf.ts',
       ],
       thresholds: {
         lines: 100,
