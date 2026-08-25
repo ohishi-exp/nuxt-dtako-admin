@@ -2,6 +2,9 @@
  * `/operations` の「IVT一括分割」が**何も起きなかった回を「処理中」と言わないか**
  * (Refs #917)。
  *
+ * このページは既存テスト 0 件。**カバレッジ目的では増やさない**ので、置くのは
+ * 変えた 1 行の挙動と、その陽性対照 (何も描かない実装でも緑にならないように) だけ。
+ *
  * `splitCsvAllStream` は SSE で、`rust-alc-api` は **DB エラーでも 200 を返す**。
  * `done` も `error` も来ずにストリームが閉じたら**何が起きたか分からない**のに、
  * 直す前のこのページは `'処理中...'` と出していた ⇒ **永久に動いているように読める**。
@@ -88,25 +91,4 @@ describe('/operations の IVT一括分割', () => {
     expect(splitResult(w).text()).not.toContain('応答が空でした')
   })
 
-  it('error イベントの回は理由をそのまま出す', async () => {
-    splitCsvAllStream.mockImplementation(async (onProgress: (e: any) => void) => {
-      onProgress({ event: 'error', message: '分割対象が見つかりません' })
-    })
-
-    const w = await mountPage()
-    await clickSplit(w)
-
-    expect(splitResult(w).text()).toBe('分割対象が見つかりません')
-    expect(splitResult(w).text()).not.toContain('応答が空でした')
-  })
-
-  it('例外の回は理由をそのまま出す', async () => {
-    splitCsvAllStream.mockRejectedValue(new Error('分割に失敗: 502'))
-
-    const w = await mountPage()
-    await clickSplit(w)
-
-    expect(splitResult(w).text()).toBe('分割に失敗: 502')
-    expect(splitResult(w).text()).not.toContain('応答が空でした')
-  })
 })

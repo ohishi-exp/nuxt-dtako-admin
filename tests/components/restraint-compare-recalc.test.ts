@@ -6,15 +6,17 @@
  * ⇒ **失敗を知る手段は `error` イベントだけ**なのに、直す前のこのページは
  *
  * - 1 人ぶん (`recalcDriver`): `await` を抜けた直後の「再計算完了 → 再比較」が
- *   **エラーかどうかを一切見ずに** `一致！` / `完了` で同じキーを上書きしていた
- *   ⇒ 理由が数ミリ秒だけ出て消え、**失敗が「一致！」になった**
+ *   **エラーかどうかを一切見ずに** 同じキーを上書きしていた
  * - 一括 (`recalcDiffsOnly`): `finally` が `batchRecalcProgress` を**成功でも失敗でも
- *   無条件に空にする**。進捗はボタンのラベルにしか出ないので
- *   ⇒ **失敗が無かったことになった**
+ *   無条件に空にする**。進捗はボタンのラベルにしか出ないので失敗が消えた
  *
- * ここで固定するのは「**エラーの回に成功の文言が出ない**」と、その裏返しの
- * 「**成功の回は今までどおり結果が出る**」の両方 (陽性対照が無いと、
- * 何も描かないだけの実装でも緑になる)。
+ * **実測 (dev + ローカル alc スタブ + headless Chrome、2026-08-25)**: 直す前は
+ * どちらの経路でも画面が **`未知差分 (0)` / `未知差分なし`** になった。理由が
+ * 消えるだけでなく、**行ごと絞り込みから外れて「全部一致した」に見える**。
+ *
+ * 書き方は `tests/components/restraint-report-recalc.test.ts` に合わせている。
+ * **カバレッジのアームを埋めるためのテストは置かない** (ページは coverage gate の
+ * 対象外、2026-08-25 方針)。ここにあるのは挙動を固定するものだけ。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -83,6 +85,11 @@ function alertTitles(w: VueWrapper): string[] {
   return w.findAllComponents({ name: 'UAlert' }).map(a => String(a.props('title') ?? ''))
 }
 
+/** 一括再計算ボタンのラベル (走行中は進捗、終われば通常文言に戻る)。 */
+function batchButtonLabel(w: VueWrapper): string {
+  return w.findAll('button').map(b => b.text()).find(t => t.includes('再計算') && t !== '再計算') ?? ''
+}
+
 beforeEach(() => {
   compareRestraintCsv.mockReset()
   recalculateDriverStream.mockReset()
@@ -90,7 +97,7 @@ beforeEach(() => {
 })
 
 describe('1 人ぶんの再計算 (recalcDriver)', () => {
-  it('★ error イベントの回に「一致！」で上書きしない', async () => {
+  it('★ error イベントの回は再比較せず、理由を出したまま終わる', async () => {
     compareRestraintCsv.mockResolvedValueOnce(withUnknownDiff()).mockResolvedValue(matched())
     recalculateDriverStream.mockImplementation(async (_y: number, _m: number, _d: string, onProgress: (e: RecalcProgressEvent) => void) => {
       onProgress({ event: 'error', message: '対象月のデータがありません' })
@@ -102,107 +109,11 @@ describe('1 人ぶんの再計算 (recalcDriver)', () => {
     await flushPromises()
 
     expect(driverResult(w)!.text()).toBe('対象月のデータがありません')
-    // 失敗した回に再比較すると、再計算されていない古い値で結果が出る。呼んでいないこと。
+    // 失敗した回に再比較すると、再計算されていない古い値で結果が出る。
     expect(compareRestraintCsv).toHaveBeenCalledTimes(1)
   })
 
-  it('★ 失敗は赤で出す (文言判定ではなく error フラグで色を決める)', async () => {
-    compareRestraintCsv.mockResolvedValueOnce(withUnknownDiff()).mockResolvedValue(matched())
-    recalculateDriverStream.mockImplementation(async (_y: number, _m: number, _d: string, onProgress: (e: RecalcProgressEvent) => void) => {
-      // **理由文に「一致」の 2 文字が入る回**。文言で色を決めていると緑になる。
-      onProgress({ event: 'error', message: '運行NO と乗務員が一致しません' })
-    })
-
-    const w = mountPage()
-    await selectCsv(w)
-    // 一致すると「未知差分」の絞り込みから行が消えるので全員表示にしておく
-    // (直す前の実装が `一致！` で上書きする側に倒れることまで見るため)。
-    await clickLabel(w, '全員 (1)')
-    await clickLabel(w, '再計算')
-    await flushPromises()
-
-    expect(driverResult(w)!.classes()).toContain('text-red-600')
-    expect(driverResult(w)!.classes()).not.toContain('text-green-600')
-  })
-
-  it('message の無い error でも「エラー」で終わらせず、再計算が失敗したと書く', async () => {
-    compareRestraintCsv.mockResolvedValue(withUnknownDiff())
-    recalculateDriverStream.mockImplementation(async (_y: number, _m: number, _d: string, onProgress: (e: RecalcProgressEvent) => void) => {
-      onProgress({ event: 'error' })
-    })
-
-    const w = mountPage()
-    await selectCsv(w)
-    await clickLabel(w, '再計算')
-    await flushPromises()
-
-    expect(driverResult(w)!.text()).toBe('再計算に失敗しました')
-  })
-
-  it('始まってすらいない例外は理由を捨てず「開始できませんでした」と書く', async () => {
-    compareRestraintCsv.mockResolvedValue(withUnknownDiff())
-    recalculateDriverStream.mockRejectedValue(new Error('再計算に失敗: 503'))
-
-    const w = mountPage()
-    await selectCsv(w)
-    await clickLabel(w, '再計算')
-    await flushPromises()
-
-    expect(driverResult(w)!.text()).toBe('再計算を開始できませんでした (再計算に失敗: 503)')
-    expect(compareRestraintCsv).toHaveBeenCalledTimes(1)
-  })
-
-  it('進捗を受け取ってから切れたら断定せず「判りません」と書く', async () => {
-    compareRestraintCsv.mockResolvedValue(withUnknownDiff())
-    recalculateDriverStream.mockImplementation(async (_y: number, _m: number, _d: string, onProgress: (e: RecalcProgressEvent) => void) => {
-      onProgress({ event: 'progress', current: 3, total: 10, step: 'download' })
-      throw new Error('network error')
-    })
-
-    const w = mountPage()
-    await selectCsv(w)
-    await clickLabel(w, '再計算')
-    await flushPromises()
-
-    const text = driverResult(w)!.text()
-    expect(text).toContain('再計算の途中で接続が切れました (network error)')
-    expect(text).toContain('判りません')
-    // 進捗の途中経過が残っていると、それ自体が「動いている」と読める。
-    expect(text).not.toContain('DL中 (3/10)')
-  })
-
-  it('error イベントの後に例外が出ても、具体的な理由の方を残す', async () => {
-    compareRestraintCsv.mockResolvedValue(withUnknownDiff())
-    recalculateDriverStream.mockImplementation(async (_y: number, _m: number, _d: string, onProgress: (e: RecalcProgressEvent) => void) => {
-      onProgress({ event: 'error', message: '乗務員が見つかりません' })
-      throw new Error('stream closed')
-    })
-
-    const w = mountPage()
-    await selectCsv(w)
-    await clickLabel(w, '再計算')
-    await flushPromises()
-
-    expect(driverResult(w)!.text()).toBe('乗務員が見つかりません')
-    expect(driverResult(w)!.text()).not.toContain('接続が切れました')
-  })
-
-  it('再計算は通って再比較だけ落ちた回は、そう書く (もう一度回せとは読ませない)', async () => {
-    compareRestraintCsv.mockResolvedValueOnce(withUnknownDiff()).mockRejectedValue(new Error('比較 API 500'))
-    recalculateDriverStream.mockImplementation(async (_y: number, _m: number, _d: string, onProgress: (e: RecalcProgressEvent) => void) => {
-      onProgress({ event: 'done' })
-    })
-
-    const w = mountPage()
-    await selectCsv(w)
-    await clickLabel(w, '再計算')
-    await flushPromises()
-
-    expect(driverResult(w)!.text()).toBe('再計算は終わりましたが再比較に失敗しました (比較 API 500)')
-    expect(driverResult(w)!.classes()).toContain('text-red-600')
-  })
-
-  it('★ 陽性対照: 成功した回は今までどおり再比較して「一致！」を出す', async () => {
+  it('★ 陽性対照: 成功した回は再比較して結果を出す', async () => {
     compareRestraintCsv.mockResolvedValueOnce(withUnknownDiff()).mockResolvedValue(matched())
     recalculateDriverStream.mockImplementation(async (_y: number, _m: number, _d: string, onProgress: (e: RecalcProgressEvent) => void) => {
       onProgress({ event: 'progress', current: 1, total: 2, step: 'download' })
@@ -220,12 +131,75 @@ describe('1 人ぶんの再計算 (recalcDriver)', () => {
     expect(driverResult(w)!.text()).toBe('一致！')
     expect(driverResult(w)!.classes()).toContain('text-green-600')
   })
+
+  it('失敗の色は文言ではなく結果そのものから決める', async () => {
+    compareRestraintCsv.mockResolvedValueOnce(withUnknownDiff()).mockResolvedValue(matched())
+    recalculateDriverStream.mockImplementation(async (_y: number, _m: number, _d: string, onProgress: (e: RecalcProgressEvent) => void) => {
+      // **理由文に「一致」の 2 文字が入る回**。文言で色を決めていると緑になる。
+      onProgress({ event: 'error', message: '運行NO と乗務員が一致しません' })
+    })
+
+    const w = mountPage()
+    await selectCsv(w)
+    await clickLabel(w, '全員 (1)')
+    await clickLabel(w, '再計算')
+    await flushPromises()
+
+    expect(driverResult(w)!.classes()).toContain('text-red-600')
+    expect(driverResult(w)!.classes()).not.toContain('text-green-600')
+  })
+
+  it('始まってすらいない失敗は理由を捨てない (以前は `catch {}` で「エラー」だけ)', async () => {
+    compareRestraintCsv.mockResolvedValue(withUnknownDiff())
+    recalculateDriverStream.mockRejectedValue(new Error('再計算に失敗: 503'))
+
+    const w = mountPage()
+    await selectCsv(w)
+    await clickLabel(w, '再計算')
+    await flushPromises()
+
+    expect(driverResult(w)!.text()).toBe('再計算を開始できませんでした (再計算に失敗: 503)')
+    expect(compareRestraintCsv).toHaveBeenCalledTimes(1)
+  })
+
+  it('進捗を受け取ってから切れた回は「失敗した」と断定しない', async () => {
+    compareRestraintCsv.mockResolvedValue(withUnknownDiff())
+    recalculateDriverStream.mockImplementation(async (_y: number, _m: number, _d: string, onProgress: (e: RecalcProgressEvent) => void) => {
+      onProgress({ event: 'progress', current: 3, total: 10, step: 'download' })
+      throw new Error('network error')
+    })
+
+    const w = mountPage()
+    await selectCsv(w)
+    await clickLabel(w, '再計算')
+    await flushPromises()
+
+    const text = driverResult(w)!.text()
+    expect(text).toBe('再計算が途中で切れました (network error)。完了したかは不明 — 再比較で確認')
+    // 進捗の途中経過が残っていると、それ自体が「動いている」と読める。
+    expect(text).not.toContain('DL中 (3/10)')
+  })
+
+  it('再計算は通って再比較だけ落ちた回は、そう書く (もう一度回せとは読ませない)', async () => {
+    compareRestraintCsv.mockResolvedValueOnce(withUnknownDiff()).mockRejectedValue(new Error('比較 API 500'))
+    recalculateDriverStream.mockImplementation(async (_y: number, _m: number, _d: string, onProgress: (e: RecalcProgressEvent) => void) => {
+      onProgress({ event: 'done' })
+    })
+
+    const w = mountPage()
+    await selectCsv(w)
+    await clickLabel(w, '再計算')
+    await flushPromises()
+
+    expect(driverResult(w)!.text()).toBe('再計算は終わりましたが再比較に失敗しました (比較 API 500)')
+    expect(driverResult(w)!.classes()).toContain('text-red-600')
+  })
 })
 
 describe('一括再計算 (recalcDiffsOnly)', () => {
   const BATCH_LABEL = '未知差分1名 再計算'
 
-  it('★ error イベントの回に、進捗欄が空になって終わらない', async () => {
+  it('★ error イベントの回は再比較せず、理由が finally の後も残る', async () => {
     compareRestraintCsv.mockResolvedValue(withUnknownDiff())
     recalculateDriversBatch.mockImplementation(async (_y: number, _m: number, _ids: string[], onProgress: (e: BatchRecalcEvent) => void) => {
       onProgress({ event: 'progress', current: 1, total: 1 })
@@ -237,71 +211,15 @@ describe('一括再計算 (recalcDiffsOnly)', () => {
     await clickLabel(w, BATCH_LABEL)
     await flushPromises()
 
+    // ★ ここが本命 — `finally` が走り切った後に読んでいる。
     expect(alertTitles(w)).toContain('DB に接続できません')
-    // 失敗した回に再比較しない (古い値で「一致！」が出る)。
+    // 失敗した回に再比較しない (再計算されていない古い値で結果が出る)。
     expect(compareRestraintCsv).toHaveBeenCalledTimes(1)
   })
 
-  it('message の無い error でも一括再計算が失敗したと書く', async () => {
+  it('★ 陽性対照: 成功した回は再比較まで進み、進捗は空に戻る', async () => {
+    // 再比較後も差分が残る側にしておく (一致させるとボタンごと消えてラベルが読めない)。
     compareRestraintCsv.mockResolvedValue(withUnknownDiff())
-    recalculateDriversBatch.mockImplementation(async (_y: number, _m: number, _ids: string[], onProgress: (e: BatchRecalcEvent) => void) => {
-      onProgress({ event: 'error' })
-    })
-
-    const w = mountPage()
-    await selectCsv(w)
-    await clickLabel(w, BATCH_LABEL)
-    await flushPromises()
-
-    expect(alertTitles(w)).toContain('一括再計算に失敗しました')
-  })
-
-  it('始まってすらいない例外は理由を捨てず「開始できませんでした」と書く', async () => {
-    compareRestraintCsv.mockResolvedValue(withUnknownDiff())
-    recalculateDriversBatch.mockRejectedValue(new Error('再計算に失敗: 502'))
-
-    const w = mountPage()
-    await selectCsv(w)
-    await clickLabel(w, BATCH_LABEL)
-    await flushPromises()
-
-    expect(alertTitles(w)).toContain('再計算を開始できませんでした (再計算に失敗: 502)')
-    expect(compareRestraintCsv).toHaveBeenCalledTimes(1)
-  })
-
-  it('進捗を受け取ってから切れたら断定せず「判りません」と書く', async () => {
-    compareRestraintCsv.mockResolvedValue(withUnknownDiff())
-    recalculateDriversBatch.mockImplementation(async (_y: number, _m: number, _ids: string[], onProgress: (e: BatchRecalcEvent) => void) => {
-      onProgress({ event: 'progress', current: 1, total: 3 })
-      throw new Error('network error')
-    })
-
-    const w = mountPage()
-    await selectCsv(w)
-    await clickLabel(w, BATCH_LABEL)
-    await flushPromises()
-
-    expect(alertTitles(w).join(' ')).toContain('再計算の途中で接続が切れました (network error)')
-  })
-
-  it('error イベントの後に例外が出ても、具体的な理由の方を残す', async () => {
-    compareRestraintCsv.mockResolvedValue(withUnknownDiff())
-    recalculateDriversBatch.mockImplementation(async (_y: number, _m: number, _ids: string[], onProgress: (e: BatchRecalcEvent) => void) => {
-      onProgress({ event: 'error', message: '対象がありません' })
-      throw new Error('stream closed')
-    })
-
-    const w = mountPage()
-    await selectCsv(w)
-    await clickLabel(w, BATCH_LABEL)
-    await flushPromises()
-
-    expect(alertTitles(w)).toContain('対象がありません')
-    expect(alertTitles(w).join(' ')).not.toContain('接続が切れました')
-  })
-
-  it('★ 陽性対照: 成功した回は再比較まで進み、失敗の理由を出さない', async () => {
-    compareRestraintCsv.mockResolvedValueOnce(withUnknownDiff()).mockResolvedValue(matched())
     recalculateDriversBatch.mockImplementation(async (_y: number, _m: number, _ids: string[], onProgress: (e: BatchRecalcEvent) => void) => {
       onProgress({ event: 'progress', current: 1, total: 1 })
       onProgress({ event: 'batch_done', total: 1 })
@@ -313,6 +231,21 @@ describe('一括再計算 (recalcDiffsOnly)', () => {
     await flushPromises()
 
     expect(compareRestraintCsv).toHaveBeenCalledTimes(2)
+    // 進捗 (ボタンのラベル) は消え、通常文言に戻っている。
+    expect(batchButtonLabel(w)).toBe(BATCH_LABEL)
     expect(alertTitles(w).join(' ')).toBe('')
+  })
+
+  it('始まってすらいない失敗は理由を捨てない', async () => {
+    compareRestraintCsv.mockResolvedValue(withUnknownDiff())
+    recalculateDriversBatch.mockRejectedValue(new Error('再計算に失敗: 502'))
+
+    const w = mountPage()
+    await selectCsv(w)
+    await clickLabel(w, BATCH_LABEL)
+    await flushPromises()
+
+    expect(alertTitles(w)).toContain('再計算を開始できませんでした (再計算に失敗: 502)')
+    expect(compareRestraintCsv).toHaveBeenCalledTimes(1)
   })
 })

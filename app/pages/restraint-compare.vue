@@ -72,14 +72,18 @@ const batchRecalcError = ref('')
 /**
  * 再計算ストリームが**例外で終わった**ときに人に見せる 1 文 (Refs #917)。
  *
- * `app/pages/restraint-report.vue` の同名関数と同じ型 (#890 でそちらに入れたもの)。
  * **進捗を 1 つでも受け取っていれば、切れたのは接続だけでサーバ側は走り続けている
- * ことがある**ので、「失敗しました」と断定せず、確かめ方まで書く。
+ * ことがある**ので、「失敗しました」と断定しない。ここは表の行に出るセルなので
+ * `restraint-report.vue` の長い文面は入らない — 短く、理由は残す。
+ *
+ * ⚠️ `app/pages/restraint-report.vue:133` に同名・同趣旨のローカル関数がある。
+ * **#903 の 2 段目 (あちらを編集中) がマージされたら `app/utils/` へ 1 本に統合する。**
+ * 今そちらを動かすと編集中のファイルと衝突するので、重複を承知でここに置く。
  */
 function recalcStreamFailure(e: unknown, gotAnyEvent: boolean): string {
   const reason = e instanceof Error ? e.message : String(e)
   return gotAnyEvent
-    ? `再計算の途中で接続が切れました (${reason})。サーバ側で続いているかどうかはこの画面では判りません — しばらく後に再比較して結果を確認してください`
+    ? `再計算が途中で切れました (${reason})。完了したかは不明 — 再比較で確認`
     : `再計算を開始できませんでした (${reason})`
 }
 
