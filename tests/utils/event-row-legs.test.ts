@@ -76,6 +76,38 @@ describe('assignRowsToLegs', () => {
     ])
   })
 
+  /**
+   * **同じ運行の CSV 全 19 行**。上の 14 行は、この 19 行のうち
+   * `classifyEventName === 'event'` のぶん (= イベントタブに出る行) だった
+   * (2026-08-25 に本物の KUDGIVT.csv で確認。重ね掛け 4 行 + アイドリング 1 行が差)。
+   * **重ね掛け行の位置が便の割り当てを 1 つも動かさない**ことをここで固定する。
+   */
+  it('重ね掛け行を挟んでも、イベントタブに出る 14 行の便は issue の表と同じ', () => {
+    const src = rows([
+      ['運行開始'], ['一般道空車', '51.3'], ['運転', '123.7'], ['一般道速度オーバー', '5.2'],
+      ['専用道', '273.2'], ['積み', '1'], ['運転', '129.4'], ['降し', '1'],
+      ['運転', '13.2'], ['アイドリング'], ['休憩'], ['積み', '1.1'],
+      ['運転', '33.3'], ['降し', '1'], ['運転', '4.1'], ['降し', '1'],
+      ['運転', '15.8'], ['一般道空車', '0.1'], ['運行終了'],
+    ])
+    const assigned = assignRowsToLegs(headers, src)
+    const nameIdx = colIndex(headers, 'イベント名')
+    const shown = filterRowsByCategory(src, nameIdx, 'event')
+    expect(shown.length).toBe(14)
+    const at = new Map(src.map((r, i) => [r, i]))
+    expect(shown.map(r => legLabel(assigned[at.get(r)!]!))).toEqual([
+      '便1 回送', '便1 回送',
+      '便1', '便1', '便1',
+      '便2 回送', '便2 回送',
+      '便2', '便2', '便2', '便2', '便2',
+      '便2 帰庫', '便2 帰庫',
+    ])
+    // 重ね掛け行は便の中に居るが、売上区間の見た目は取らない。
+    expect(legLabel(assigned[4]!)).toBe('便1 重ね掛け') // 専用道 273.2km
+    // アイドリングは DISTANCE_EVENT_NAMES に有るので重ね掛けではない。
+    expect(legLabel(assigned[9]!)).toBe('便2 回送')
+  })
+
   it('積みが 1 行も無い運行は全行 noLeg (空欄にしない)', () => {
     const assigned = assignRowsToLegs(headers, rows([['運行開始'], ['運転', '10'], ['運行終了']]))
     expect(assigned).toEqual([NO_LEG_ROW, NO_LEG_ROW, NO_LEG_ROW])
