@@ -36,7 +36,8 @@
 export const NETPRINT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
 /** `operation_no` に受け付ける形式 = theearth の運行No 22 桁 (relay の
- * `NETPRINT_OPERATION_NO_RE` と同じ。実測 `2608240638160000003821`)。 */
+ * `NETPRINT_OPERATION_NO_RE` と同じ。実測 `2608241017180000003046` =
+ * 読取日 2026-08-24 / 本社営業所 の 1 運行)。 */
 export const NETPRINT_OPERATION_NO_RE = /^\d{22}$/
 
 /** `POST /api/netprint/run` の body。**全部省略可** (relay と同じ契約)。

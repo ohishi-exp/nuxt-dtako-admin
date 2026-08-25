@@ -973,7 +973,7 @@ onMounted(() => {
             <label class="block text-sm font-medium mb-1">運行NO (任意)</label>
             <UInput
               v-model="netprintOperationNo"
-              placeholder="2608240638160000003821"
+              placeholder="2608241017180000003046"
               class="w-56 font-mono"
               :disabled="netprintRunning"
             />

@@ -167,7 +167,8 @@ export function validateNetprintTargetsPayload(raw: string): NetprintTargetsVali
 /** 対象日 (JST) の受け渡し形式。cron が渡す値も手動実行の `date` も同じ。 */
 export const NETPRINT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-/** 運行No の形式 (theearth の 22 桁数字。実測 `2608240638160000003821`)。
+/** 運行No の形式 (theearth の 22 桁数字。実測 `2608241017180000003046` =
+ * 読取日 2026-08-24 / 本社営業所 (`branch_cd=1`) / 浦田　広行 / 長崎100か3046)。
  *
  * 手動実行で **1 運行だけ**を対象にするための `operation_no` に使う (Refs #913)。
  * 桁数まで見るのは、打ち間違いを「一致 0 件」ではなく**入力の誤り**として
