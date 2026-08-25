@@ -238,7 +238,8 @@ describe('EventDataTable', () => {
       await wrapper.find('div.overflow-auto > label input').setValue(true)
       await nextTick()
       // 落としていた 急加速 の 1 行が増えるだけで、他の行の便番号は 1 つも動かない。
-      expect(legCells(wrapper)).toEqual(['便1 回送', '便1 回送', '便1', '便1', '便1 帰庫'])
+      // 急加速 は DISTANCE_EVENT_NAMES に無い重ね掛け行なので「便1 重ね掛け」。
+      expect(legCells(wrapper)).toEqual(['便1 回送', '便1 重ね掛け', '便1', '便1', '便1 帰庫'])
       expect(wrapper.text()).not.toContain('判定できなかった')
     })
   })

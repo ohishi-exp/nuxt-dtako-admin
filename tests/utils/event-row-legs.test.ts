@@ -154,7 +154,10 @@ function kmOf(src: string[][], assigned: EventRowLeg[], seq: number, kind: Event
   let sum = 0
   assigned.forEach((a, i) => {
     if (a.legSeq !== seq || a.kind !== kind) return
-    if (!DISTANCE_EVENT_NAMES.includes((src[i]![nameIdx] ?? '').trim())) return
+    // **UI が使うのと同じ述語で数える** — `counted` が `DISTANCE_EVENT_NAMES` と
+    // ずれたら、この検算が落ちる。
+    expect(a.counted).toBe(DISTANCE_EVENT_NAMES.includes((src[i]![nameIdx] ?? '').trim()))
+    if (!a.counted) return
     sum += Number(src[i]![distIdx] ?? '') || 0
   })
   return sum
@@ -210,8 +213,8 @@ describe('rowLegLookup', () => {
     // 表示側と同じように「一部だけ抜いた配列」から引く。
     const picked = [src[12]!, src[2]!]
     expect(picked.map(r => lookup.get(r))).toEqual([
-      { legSeq: 2, kind: 'tail' },
-      { legSeq: 1, kind: 'haul' },
+      { legSeq: 2, kind: 'tail', counted: true },
+      { legSeq: 1, kind: 'haul', counted: true },
     ])
   })
 
@@ -223,39 +226,67 @@ describe('rowLegLookup', () => {
 
 describe('legLabel / legTitle / legCellClass', () => {
   const samples: Array<[EventRowLeg, string]> = [
-    [{ legSeq: 2, kind: 'haul' }, '便2'],
-    [{ legSeq: 2, kind: 'approach' }, '便2 回送'],
-    [{ legSeq: 2, kind: 'tail' }, '便2 帰庫'],
-    [{ legSeq: 2, kind: 'other' }, '便2 区分なし'],
+    [{ legSeq: 2, kind: 'haul', counted: true }, '便2'],
+    [{ legSeq: 2, kind: 'approach', counted: true }, '便2 回送'],
+    [{ legSeq: 2, kind: 'tail', counted: true }, '便2 帰庫'],
+    [{ legSeq: 2, kind: 'other', counted: true }, '便2 (降しなし)'],
+    [{ legSeq: 2, kind: 'haul', counted: false }, '便2 重ね掛け'],
     [{ legSeq: null, kind: 'noLeg' }, '便なし'],
     [{ legSeq: null, kind: 'unknown' }, '判定不能'],
   ]
 
   for (const [leg, label] of samples) {
-    it(`${leg.kind} のラベルは ${label}`, () => {
+    it(`${leg.kind}${leg.counted ? '' : ' (重ね掛け)'} のラベルは ${label}`, () => {
       expect(legLabel(leg)).toBe(label)
     })
   }
 
-  it('売上区間と回送は語でも分かれる (色が読めなくても区別できる)', () => {
-    expect(legLabel({ legSeq: 1, kind: 'haul' })).not.toBe(legLabel({ legSeq: 1, kind: 'approach' }))
-    expect(legLabel({ legSeq: 1, kind: 'haul' })).not.toBe(legLabel({ legSeq: 1, kind: 'tail' }))
+  it('売上区間・回送・重ね掛けは語でも分かれる (色が読めなくても区別できる)', () => {
+    const haul: EventRowLeg = { legSeq: 1, kind: 'haul', counted: true }
+    expect(legLabel(haul)).not.toBe(legLabel({ legSeq: 1, kind: 'approach', counted: true }))
+    expect(legLabel(haul)).not.toBe(legLabel({ legSeq: 1, kind: 'tail', counted: true }))
+    expect(legLabel(haul)).not.toBe(legLabel({ ...haul, counted: false }))
   })
 
-  it('title は kind ごとに違う説明になる', () => {
+  it('重ね掛け行のラベルは 便番号で始まる (「薄いから便に入っていない」と読ませない)', () => {
+    expect(legLabel({ legSeq: 3, kind: 'approach', counted: false })).toBe('便3 重ね掛け')
+  })
+
+  it('重ね掛け行に 回送 / 帰庫 を付けない (どの区間にも 1km も入らないので過剰主張になる)', () => {
+    for (const kind of ['haul', 'approach', 'tail', 'other'] as const) {
+      expect(legLabel({ legSeq: 1, kind, counted: false })).toBe('便1 重ね掛け')
+    }
+  })
+
+  it('重ね掛け行の title には「便のどこか」と「距離が入っていない」が両方入る', () => {
+    const title = legTitle({ legSeq: 1, kind: 'approach', counted: false })
+    expect(title).toContain('便1 の回送にある重ね掛け行')
+    expect(title).toContain('この行の区間距離は便の走行に入っていない')
+  })
+
+  it('重ね掛け行は塗りつぶさない — 売上区間の見た目を奪わない', () => {
+    for (const kind of ['haul', 'approach', 'tail', 'other'] as const) {
+      const cls = legCellClass({ legSeq: 1, kind, counted: false })
+      expect(cls).not.toContain('bg-')
+      expect(cls).toContain('border-dashed')
+      expect(cls).toContain('text-blue-600')
+    }
+  })
+
+  it('title は状態ごとに違う説明になる', () => {
     const titles = samples.map(([leg]) => legTitle(leg))
     expect(new Set(titles).size).toBe(samples.length)
   })
 
   it('売上区間は塗りつぶし、回送・区分なしは同じ色の薄い版 (文字色だけ)', () => {
-    expect(legCellClass({ legSeq: 1, kind: 'haul' })).toContain('bg-blue-100')
-    expect(legCellClass({ legSeq: 1, kind: 'approach' })).toBe('text-blue-600 dark:text-blue-400')
-    expect(legCellClass({ legSeq: 1, kind: 'tail' })).toBe('text-blue-600 dark:text-blue-400')
-    expect(legCellClass({ legSeq: 1, kind: 'other' })).toBe('text-blue-600 dark:text-blue-400')
+    expect(legCellClass({ legSeq: 1, kind: 'haul', counted: true })).toContain('bg-blue-100')
+    expect(legCellClass({ legSeq: 1, kind: 'approach', counted: true })).toBe('text-blue-600 dark:text-blue-400')
+    expect(legCellClass({ legSeq: 1, kind: 'tail', counted: true })).toBe('text-blue-600 dark:text-blue-400')
+    expect(legCellClass({ legSeq: 1, kind: 'other', counted: true })).toBe('text-blue-600 dark:text-blue-400')
   })
 
   it('便ごとに色が変わり、既存の 4 色 (緑・黄・紫・青緑) を使わない', () => {
-    const used = Array.from({ length: LEG_COLOR_COUNT }, (_, i) => legCellClass({ legSeq: i + 1, kind: 'haul' }))
+    const used = Array.from({ length: LEG_COLOR_COUNT }, (_, i) => legCellClass({ legSeq: i + 1, kind: 'haul', counted: true }))
     expect(new Set(used).size).toBe(LEG_COLOR_COUNT)
     for (const cls of used) {
       expect(cls).not.toMatch(/green|yellow|purple|teal/)
@@ -263,10 +294,10 @@ describe('legLabel / legTitle / legCellClass', () => {
   })
 
   it('色は循環する (便が多い運行で破綻しない) — 便番号はラベルで読み分ける', () => {
-    expect(legCellClass({ legSeq: LEG_COLOR_COUNT + 1, kind: 'haul' }))
-      .toBe(legCellClass({ legSeq: 1, kind: 'haul' }))
-    expect(legLabel({ legSeq: LEG_COLOR_COUNT + 1, kind: 'haul' }))
-      .not.toBe(legLabel({ legSeq: 1, kind: 'haul' }))
+    expect(legCellClass({ legSeq: LEG_COLOR_COUNT + 1, kind: 'haul', counted: true }))
+      .toBe(legCellClass({ legSeq: 1, kind: 'haul', counted: true }))
+    expect(legLabel({ legSeq: LEG_COLOR_COUNT + 1, kind: 'haul', counted: true }))
+      .not.toBe(legLabel({ legSeq: 1, kind: 'haul', counted: true }))
   })
 
   it('便に入らない行は色を持たない', () => {
@@ -314,7 +345,7 @@ describe('絞り込み 3 段は行オブジェクトの identity と順序を保
     const crew2 = groupByCrewRole(wide, all).find(g => g.crewRole === '2')!
     const shown = filterRowsByCategory(crew2.rows, nameIdx, 'event')
     expect(shown.map(r => lookup.get(r))).toEqual([
-      { legSeq: 2, kind: 'haul' }, { legSeq: 2, kind: 'haul' },
+      { legSeq: 2, kind: 'haul', counted: true }, { legSeq: 2, kind: 'haul', counted: true },
     ])
   })
 })
@@ -359,5 +390,50 @@ describe('イベントタブに出る行の範囲 (buildOperationRoute の走査
     expect(shape(assigned)).toEqual([
       '便1:approach', '便1:haul', '便1:haul', '便1:haul', '便1:tail',
     ])
+  })
+})
+
+describe('counted — 位置は便の中でも距離が便に入るとは限らない', () => {
+  it('重ね掛け行 (DISTANCE_EVENT_NAMES に無い) は counted=false、位置は便の中', () => {
+    const assigned = assignRowsToLegs(headers, rows([
+      ['運行開始'], ['積み'], ['一般道実車', '99'], ['連続運転', '252.9'], ['降し'], ['運行終了'],
+    ]))
+    expect(assigned.map(a => [a.legSeq, a.kind, a.counted])).toEqual([
+      [1, 'approach', true],
+      [1, 'haul', true],
+      [1, 'haul', false], // 位置は便1 の売上区間だが、距離は overlayKm へ
+      [1, 'haul', false],
+      [1, 'haul', true],
+      [1, 'tail', true],
+    ])
+  })
+
+  it('counted の述語は DISTANCE_EVENT_NAMES そのもの (お金と同じ)', () => {
+    for (const name of DISTANCE_EVENT_NAMES) {
+      const assigned = assignRowsToLegs(headers, rows([['積み'], [name], ['降し']]))
+      expect([name, assigned[1]!.counted]).toEqual([name, true])
+    }
+    for (const name of ['一般道空車', '一般道実車', '専用道', '高速道', '一般道速度オーバー', '連続運転', '急加速']) {
+      const assigned = assignRowsToLegs(headers, rows([['積み'], [name], ['降し']]))
+      expect([name, assigned[1]!.counted]).toEqual([name, false])
+    }
+  })
+})
+
+describe('絞った配列から数え直すと便番号がお金とずれる (だから CSV 全行を渡す)', () => {
+  // `EventCrewPanel` の `rowLegs` を必須にした理由。規則としてここに残す。
+  const spec: Array<[string, string?, string?, string?]> = [
+    ['積み'], ['降し'], ['積み'], ['降し'],
+  ]
+
+  it('CSV 全行から数えれば後半の 積み/降し は 便2', () => {
+    const all = rows(spec)
+    const lookup = rowLegLookup(headers, all)
+    expect(all.slice(2).map(r => lookup.get(r)!.legSeq)).toEqual([2, 2])
+  })
+
+  it('同じ 2 行だけを渡して数え直すと 便1 になってしまう', () => {
+    const shownOnly = rows(spec).slice(2)
+    expect(assignRowsToLegs(headers, shownOnly).map(a => a.legSeq)).toEqual([1, 1])
   })
 })

@@ -29,8 +29,10 @@ const props = defineProps<{
    * 絞られた側に積みがある運行で**画面の便番号がお金の便番号とずれる**。
    * 数え直す口をそもそも持たないことで、**「間違った配列から数える」事故を構造的に消す**。
    *
-   * **省略時は全行が `判定不能`** (勝手に別の数え方に落ちない)。 */
-  rowLegs?: Map<string[], EventRowLeg>
+   * **必須にしてある。** optional にすると「渡し忘れ → エラーにならず・見た目も自然で・
+   * お金とだけ食い違う便番号」が出る経路が既定値として残る。利用箇所は
+   * `EventDataTable.vue` の 1 か所だけなので、必須化しても呼び出し側の変更は無い。 */
+  rowLegs: Map<string[], EventRowLeg>
   /** 一番星の伝票から提案された区間 (Refs proposeFromSlips)。値が変わるたびに
    * filteredRows 内で対応する行をチェック状態にする。手動選択とは独立した
    * 「外部からの選択指示」チャネルとして扱う (null は「指示なし」で無視する)。
@@ -75,7 +77,7 @@ const displayColumns = computed(() => getDisplayColumns(props.headers))
  * 「判定できなかった行 N 件」が画面に出る** (下の `legNotice`)。
  */
 function legOf(row: string[]): EventRowLeg {
-  return props.rowLegs?.get(toRaw(row)) ?? UNKNOWN_LEG_ROW
+  return props.rowLegs.get(toRaw(row)) ?? UNKNOWN_LEG_ROW
 }
 
 /** **便が付かなかった行を黙らせない。** 表示している行だけを数える。 */

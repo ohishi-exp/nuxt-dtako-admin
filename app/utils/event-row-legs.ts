@@ -33,19 +33,40 @@
  * 「割り当てられない」が同じ見た目になる。
  *
  * **重ね掛け行も落とさずに位置で分類する。** `extractOperationIdle` が全行を順に舐めるのと
- * 揃えるため (重ね掛け行の距離はあちらが 0 に倒す)。
+ * 揃えるため。ただし**距離は別扱い**なので `counted` で持つ (下記)。
  *
- * **★ 「重ね掛け行はイベントタブに出ない」は正しくない** (2026-08-25 に `classifyEventName`
- * を実際に通して確認)。`filterRowsByCategory` が別タブへ送るのは **速度オーバー / 一般道空車・
- * 実車 / 専用道 / 高速道 / アイドリング だけ**で、**`連続運転` `急加速` `急減速` `急カーブ` は
- * `event` に落ちてイベントタブに並ぶ**。しかも `連続運転` は 252.9km / 288分 を持つので
- * `dropIgnoredRows` でも落ちない (`dropIgnoredRows` の doc 参照)。
+ * ## ★ 「重ね掛け行はこの表に出ない」は事実と違う (2026-08-25、実測で訂正)
+ *
+ * issue #868 はそう書いていたが、**2 段階で誤り**だった:
+ *
+ * 1. **イベントタブにも重ね掛け行は出る。** `filterRowsByCategory` が別タブへ送るのは
+ *    速度オーバー / 一般道空車・実車 / 専用道 / 高速道 / アイドリング だけで、
+ *    **`連続運転` `急加速` `急減速` `急カーブ` は `event` に落ちてイベントタブに並ぶ**
+ *    (`classifyEventName` に実際に通して確認)。しかも `連続運転` は 252.9km / 288分 を
+ *    持つので `dropIgnoredRows` でも落ちない (「数字を持つ行は隠さない」)
+ * 2. **便の列はタブで出し分けていない。** `EventCrewPanel` の `便` セルは `filteredRows`
+ *    のループの中にあるので、**走行タブ・速度超過タブ・アイドリングタブにも出る**。
+ *    走行タブと速度超過タブは**全行が重ね掛け行**
  *
  * ⇒ **`buildOperationRoute` の 1 回目の走査は流用できない。** あちらは
  * `DISTANCE_EVENT_NAMES` の 8 種だけを `timeline` に残すので、`連続運転` の行が
  * 落ちて便が付かない。ここは全行を対象にする (`extractOperationIdle` と同じ範囲)。
+ *
+ * ## `counted` — 位置は便の中でも、距離が便に入るとは限らない
+ *
+ * **重ね掛け行の `区間距離` は `extractOperationIdle` が `overlayKm` に逃がしており、
+ * 便の `haulKm` にも `approachKm` にも 1km も入らない。** 位置だけで塗ると、画面は
+ * **「便1 の売上区間」と最も強く読める塗りつぶし**を、**お金が便1 の売上走行から
+ * 意図的に外した行**に付けることになる。この repo で一番多い
+ * 「出ているものが別の意味に読める」型 (#851 / #854 / #861)。
+ *
+ * ⇒ **判定はタブではなく `DISTANCE_EVENT_NAMES` (お金と同じ述語) で行う。**
+ * `counted === false` の行は**塗りつぶさず破線の枠**にし、ラベルも `便1 重ね掛け` にして
+ * 「便1 の中の行だが、距離は便1 に入っていない」を語で読めるようにする。
+ * **逆方向の誤読 (「薄いから便に入っていない」) はラベル先頭の `便1` で潰す。**
  */
 import { colIndex, classifyTimeCategory } from './event-data-table'
+import { DISTANCE_EVENT_NAMES } from './allowance-idle'
 
 /**
  * 行 1 つの区分。`haul` / `approach` / `tail` / `other` は `LegKmDetail` の同名フィールドと
@@ -57,13 +78,22 @@ export interface EventRowLeg {
   /** 属する便 (1 始まり)。`noLeg` / `unknown` は null。 */
   legSeq: number | null
   kind: EventRowLegKind
+  /**
+   * **この行の `区間距離` が便の距離 (`legKmDetail`) に入っているか。**
+   * `DISTANCE_EVENT_NAMES` の 8 種なら true。重ね掛け行 (一般道空車・実車 / 専用道 /
+   * 高速道 / 速度オーバー / 連続運転 / 急加速 …) は false で、距離は `overlayKm` に
+   * 別建て = **便の走行には 1km も入らない**。
+   *
+   * **`legSeq === null` のときは意味を持たない** (便が無いので便の距離も無い)。
+   */
+  counted: boolean
 }
 
 /** 積みが 1 行も無い運行の行 (どの便にも属さない)。 */
-export const NO_LEG_ROW: Readonly<EventRowLeg> = Object.freeze({ legSeq: null, kind: 'noLeg' })
+export const NO_LEG_ROW: Readonly<EventRowLeg> = Object.freeze({ legSeq: null, kind: 'noLeg', counted: false })
 
 /** 判定に要る列が無い / 対象の行が見つからない。**「便が無い」とは別物**。 */
-export const UNKNOWN_LEG_ROW: Readonly<EventRowLeg> = Object.freeze({ legSeq: null, kind: 'unknown' })
+export const UNKNOWN_LEG_ROW: Readonly<EventRowLeg> = Object.freeze({ legSeq: null, kind: 'unknown', counted: false })
 
 /** 便 1 本ぶんの行位置 (`allowance-idle.ts` の `IdleLeg` / `operation-route-map.ts` の `LegRows` と同じ数え方)。 */
 interface LegRows {
@@ -87,8 +117,12 @@ export function assignRowsToLegs(headers: string[], rows: string[][]): EventRowL
   // --- 1 回目: 便の位置を確定する (積み = 便の頭 / 最初の積みより前の降しは前の運行の
   //     積み残しなので、属する便が無い = 捨てる)。
   const legs: LegRows[] = []
+  /** 行ごとの「距離が便に入るか」。**お金と同じ述語** (`DISTANCE_EVENT_NAMES`) で決める。 */
+  const counted: boolean[] = []
   for (let i = 0; i < rows.length; i++) {
-    const category = classifyTimeCategory(rows[i]![nameIdx] ?? '')
+    const name = (rows[i]![nameIdx] ?? '').trim()
+    counted.push(DISTANCE_EVENT_NAMES.includes(name))
+    const category = classifyTimeCategory(name)
     if (category === 'loading') {
       legs.push({ loadAt: i, lastUnloadAt: null })
       continue
@@ -113,15 +147,15 @@ export function assignRowsToLegs(headers: string[], rows: string[][]): EventRowL
     // **直前の便に降しが無ければ、その走行は直前の便の `other` に乗せたまま**付け替えない
     // (`LegKmDetail.approachKm` が `prev.hasUnload ? prev.tailKm : 0` なのと同じ判定)。
     const approachFrom = prev ? (prev.lastUnloadAt === null ? leg.loadAt : prev.lastUnloadAt + 1) : 0
-    for (let r = approachFrom; r < leg.loadAt; r++) out[r] = { legSeq: seq, kind: 'approach' }
+    for (let r = approachFrom; r < leg.loadAt; r++) out[r] = { legSeq: seq, kind: 'approach', counted: counted[r]! }
     if (leg.lastUnloadAt === null) {
-      for (let r = leg.loadAt; r < end; r++) out[r] = { legSeq: seq, kind: 'other' }
+      for (let r = leg.loadAt; r < end; r++) out[r] = { legSeq: seq, kind: 'other', counted: counted[r]! }
       continue
     }
-    for (let r = leg.loadAt; r <= leg.lastUnloadAt; r++) out[r] = { legSeq: seq, kind: 'haul' }
+    for (let r = leg.loadAt; r <= leg.lastUnloadAt; r++) out[r] = { legSeq: seq, kind: 'haul', counted: counted[r]! }
     // 降しの後 → 次の積みの手前 は次の便の approach として上で塗られるので、
     // ここでは**最後の便の帰庫**だけ塗る (`tailKm` が最後の便にしか乗らないのと同じ)。
-    if (!next) for (let r = leg.lastUnloadAt + 1; r < end; r++) out[r] = { legSeq: seq, kind: 'tail' }
+    if (!next) for (let r = leg.lastUnloadAt + 1; r < end; r++) out[r] = { legSeq: seq, kind: 'tail', counted: counted[r]! }
   }
   return out
 }
@@ -204,38 +238,72 @@ const DEADHEAD_CLASSES: readonly string[] = [
   'text-red-600 dark:text-red-400',
 ]
 
+/**
+ * **重ね掛け行** (`counted === false`) のセル = **同じ色の破線の枠**。塗りつぶし
+ * (= 売上区間) とも文字だけ (= 回送) とも別の見た目にして、「位置は便の中だが
+ * 距離は便に入っていない」を出す。
+ */
+const OVERLAY_CLASSES: readonly string[] = [
+  'border border-dashed border-blue-400 dark:border-blue-500 text-blue-600 dark:text-blue-400',
+  'border border-dashed border-orange-400 dark:border-orange-500 text-orange-600 dark:text-orange-400',
+  'border border-dashed border-pink-400 dark:border-pink-500 text-pink-600 dark:text-pink-400',
+  'border border-dashed border-indigo-400 dark:border-indigo-500 text-indigo-600 dark:text-indigo-400',
+  'border border-dashed border-red-400 dark:border-red-500 text-red-600 dark:text-red-400',
+]
+
 /** 便に入らない行 (`noLeg` / `unknown`)。色を持たせない。 */
 const UNASSIGNED_CLASS = 'text-gray-400 dark:text-gray-500'
 
 export function legCellClass(leg: EventRowLeg): string {
   if (leg.legSeq === null) return UNASSIGNED_CLASS
   const i = (leg.legSeq - 1) % LEG_COLOR_COUNT
+  // **塗りつぶしは「この行の距離が便の売上走行に入っている」ときだけ。**
+  if (!leg.counted) return OVERLAY_CLASSES[i]!
   return (leg.kind === 'haul' ? HAUL_CLASSES : DEADHEAD_CLASSES)[i]!
 }
 
+/** その行が便のどのあたりに居るか (重ね掛け行の `title` 用)。 */
+const REGION_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  haul: '売上区間',
+  approach: '回送',
+  tail: '帰庫',
+  other: '走行',
+})
+
 /**
  * セルの文字。**色だけに頼らない** — 印刷・色覚の条件で色が落ちても
- * 売上区間 (`便2`) と回送 (`便2 回送` / `便2 帰庫`) が読み分けられるようにする。
+ * 売上区間 (`便2`) と回送 (`便2 回送` / `便2 帰庫`) と重ね掛け (`便2 重ね掛け`) が
+ * 読み分けられるようにする。
+ *
+ * **重ね掛け行に `回送` / `帰庫` を付けない。** その区別は「便のどの区間の距離か」を
+ * 意味するが、重ね掛け行はどの区間にも 1km も入らないので、付けると過剰に主張する。
+ * 区間は `legTitle` に書く。
  */
 export function legLabel(leg: EventRowLeg): string {
+  if (leg.kind === 'noLeg') return '便なし'
+  if (leg.kind === 'unknown') return '判定不能'
+  if (!leg.counted) return `便${leg.legSeq} 重ね掛け`
   switch (leg.kind) {
     case 'haul': return `便${leg.legSeq}`
     case 'approach': return `便${leg.legSeq} 回送`
     case 'tail': return `便${leg.legSeq} 帰庫`
-    case 'other': return `便${leg.legSeq} 区分なし`
-    case 'noLeg': return '便なし'
-    default: return '判定不能'
+    // 降しが 1 つも無い便の走行。**理由が読める語**にする (ラベルだけ見る条件を想定した列なので)。
+    default: return `便${leg.legSeq} (降しなし)`
   }
 }
 
 /** セルの `title` (ホバー)。ラベルが短いぶんの説明をここに置く。 */
 export function legTitle(leg: EventRowLeg): string {
+  if (leg.kind === 'noLeg') return 'この運行には積みが 1 行も無いため、属する便がない'
+  if (leg.kind === 'unknown') return 'イベント名の列が無いため判定できない'
+  if (!leg.counted) {
+    return `便${leg.legSeq} の${REGION_LABELS[leg.kind]}にある重ね掛け行。`
+      + 'この行の区間距離は便の走行に入っていない (overlayKm に別建て)'
+  }
   switch (leg.kind) {
     case 'haul': return `便${leg.legSeq} の売上区間 (積み開始 → その便の最後の降し終了)`
     case 'approach': return `便${leg.legSeq} へ向かう回送 (運行開始 / 前の便の降し終了 → 積み開始)`
     case 'tail': return `便${leg.legSeq} の帰庫 (最後の降し終了 → 運行終了)`
-    case 'other': return `便${leg.legSeq} の走行。降しが無い便なのでどの区分にも入らない`
-    case 'noLeg': return 'この運行には積みが 1 行も無いため、属する便がない'
-    default: return 'イベント名の列が無いため判定できない'
+    default: return `便${leg.legSeq} の走行。降しが無い便なのでどの区分にも入らない`
   }
 }
