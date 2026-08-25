@@ -85,11 +85,13 @@ function readLegSales(): OperationLegSalesLookup {
   }
 }
 
-// --- この端末で集計していないときの落とし先 (R2 の版、Refs #865) --------------
+// --- この端末で集計していないときの落とし先 (R2 の版、Refs #865 / #867) -------
 // **必要なデータは既に R2 にある** (`MarginCache.operations[].legs` が #826 で
 // `margin-summary` に入っている)。読む経路が無かっただけなので、**読むだけ**足す。
 // **localStorage を先に見る順序は変えない** (集計直後の値が即反映される挙動を壊さない)。
 // **出どころは画面で言い分ける** — 版は古いことがある (最後に誰かが集計した時点)。
+// **落ちるのは `missing` だけではない** (#867)。この端末に**別の月**の突合結果がある
+// (`not-aggregated`) ときも「この端末に答えが無い」ことに変わりはないので R2 を見る。
 const legSalesR2 = ref<LegSalesR2Fetch>({ state: 'loading' })
 
 /** 計上額パネルが出すもの (中身 / 出どころ / 出せない理由)。判断は pure 側 (テスト済み)。 */
@@ -106,14 +108,20 @@ const legSaleRows = computed(() =>
   (legSalesReady.value?.legs ?? []).map(leg => ({ ...leg, yen: legSaleYen(leg) })))
 
 /**
- * R2 の版を見に行く。**この端末に結果があるときは 1 回も叩かない** (古い版で上書きしない)。
+ * R2 の版を見に行く。**この端末にこの運行の結果があるときは 1 回も叩かない**
+ * (`ready` = 古い版で上書きしない)。
+ *
+ * **`missing` 以外を全部止めない** (#867)。`not-aggregated` (この端末は別の月を集計して
+ * ある) は**この運行の答えを持っていない**ので、R2 に版があれば出せる。止めていたせいで、
+ * 2026-06 を集計した端末で 2026-07 の運行を開くと**R2 に版があるのに**
+ * 「この運行はありません」しか出なかった。
  *
  * 月は `operationRunDate` (粗利タブと同じ月の切り方の材料) から出し、**前後 1 日ぶんの月も
  * 候補にする** — 粗利タブは運行の開始日で月を切るので、読取日とは 1 日ずれうる
  * (月末・月初の運行を 1 か月だけ見ると「版にこの運行はありません」と嘘をつく)。
  */
 async function loadLegSalesFromR2() {
-  if (legSales.value.status !== 'missing') return
+  if (legSales.value.status === 'ready') return
   const date = operationRunDate(null, primary.value?.operation_date ?? null, unkoNo)
   const yms = legSalesYmCandidates(date)
   if (yms.length === 0) {
@@ -128,7 +136,13 @@ async function loadLegSalesFromR2() {
   }
   catch (e) {
     // **黙って「集計されていません」に倒さない。** 読めなかったことを画面で言う。
-    legSalesR2.value = { state: 'failed', message: e instanceof Error ? e.message : String(e) }
+    // **どの月を見に行って失敗したのかまで言う** (#867) — 失敗の文言は本文に月を
+    // 書かないので、`checkedYms` が無いと「見に行かなかった」と区別が付かない。
+    legSalesR2.value = {
+      state: 'failed',
+      message: e instanceof Error ? e.message : String(e),
+      checkedYms: yms,
+    }
   }
 }
 

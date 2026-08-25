@@ -597,6 +597,13 @@ branches = true
 # **別の関数から取らない** — `parseOperationLegSales` は読めた便だけ返す緩い読みなので、
 # 片方に居て片方に居ない明細ができると、そこが二重計上の口になる。**同じ seq が 2 つある
 # 保存は読まない** (どちらがその便のものか決められず、選ぶと片方の売上を落とす)。
+# **#867 で変えたのは文字列 2 本だけ** — `legSalesNote` の 2 つの一言の**文末に `。`**を
+# 付けた。この一言は単独では出ず、`resolveLegSalesPanel` が
+# `${legSalesNote(local)} ${r2Note(fetch)}` と **R2 側の事情と 1 文に繋げて**出すため
+# (付いていないと「…集計すると出ます R2 の版 (…) にもこの運行はありません」と繋がる)。
+# **分岐は 1 つも増減していない** (再計測: if/?:/&&/||/?? を機械挿入する計測器で 50 分岐、
+# 全部が true/false 両方を通る。上の 58 は `?.` 等も数えた別の計測器の値で、
+# **同じものを数えていない** — どちらも 100%)。
 [[files]]
 path = "app/utils/operation-leg-sales.ts"
 branches = true
@@ -618,7 +625,20 @@ branches = true
 #
 # ★ **中核は「出どころを言い分ける」側**の分岐なので、その両側を数えることに意味がある:
 # - **localStorage を先に見る順序は変えない** (集計直後の値が即反映される挙動を壊さない)。
-#   R2 へ落ちるのは `missing` のときだけで、`not-aggregated` は今までどおりの一言
+#   **R2 を見ないのは `ready` のときだけ** — `missing` と `not-aggregated` は
+#   **どちらも「この端末に答えが無い」**ので落ちる (#867 で `not-aggregated` を足した。
+#   `missing` だけにしていたせいで、2026-06 を集計した端末で 2026-07 の運行を開くと
+#   **R2 に版があるのに**「この運行はありません」しか出なかった)
+# - **`not-aggregated` の端末から出した回は、2 つの月を両方名乗る** (#867)。
+#   見出しは `legSalesSourceLabel` の `localYm` (**否定語は入れない** — 金額が出ている行の
+#   横に「ありません」を置くと出ている数字に掛かって読める)、注記は
+#   `legSalesLocalOtherYmNote` を `LEG_SALES_R2_NOTE` の**後ろ**に足して、
+#   **切り替わるのはこの運行の月を集計したときだ**と名指しし直す (前に置くと一般文
+#   「この端末の粗利タブで集計すると切り替わります」が後から読め、別の月を集計し直しても
+#   切り替わらないことが伝わらない)。**出せた回の `note` は `null`** のまま
+# - **`failed` も見に行った月を名乗る** (#867) — 失敗の文言は本文に月を書かないので、
+#   付けないと「見に行かなかった」と区別が付かない (`checkedYmsSuffix` を省けるのは
+#   本文がその月を書いている回だけなので、こちらは **1 つでも必ず書く**)
 # - **`ready` の見出しに必ず出どころを出す** (`legSalesSourceLabel`)。R2 の回は
 #   **いつの版か (`savedAt`)** を添える — 版は最後に誰かが集計した時点のもので、
 #   **黙って差し替えると数字が変わった理由が読めなくなる**
@@ -635,6 +655,14 @@ branches = true
 # ★ **収支パネルの候補ゲート (`lookupUsedSlipIds`) はここに乗せない。** あちらは
 # 「①が既にどこかの便へ当てた明細」の**和集合**が要り、版は `slipIds` を持たないので
 # 落とすと空集合になり**必ず**二重計上の口になる。localStorage のままにしてある (別 issue)。
+# branches: instrumented コピー (`operation-leg-sales.ts` と同じ計測器を TypeScript の AST で
+# 機械挿入) でテストを流し、**44 分岐すべてが true/false 両方を通る**ことを数えた
+# (origin/main de2db18 では 42 — #867 で `localYm` の 2 分岐が増え、`not-aggregated` の
+# 早期 return が三項に替わった)。probe 2 段 (片側だけ通る `if` が `[true]` / 両側が
+# `[true,false]`、`pick(0,7)===7` `orValue(0,7)===0` `andValue(0,7)===false` で
+# **計測器が値を壊していない**こと) と**陰性対照**も取ってある —
+# `not-aggregated` の describe を外すと `localYm === null` が `true のみ` に落ち、
+# 両側は 44 → 43 になる。
 [[files]]
 path = "app/utils/operation-leg-sales-r2.ts"
 branches = true

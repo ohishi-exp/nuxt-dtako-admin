@@ -42,9 +42,25 @@
  *
  * ## ★ localStorage を先に見る順序は変えない
  *
- * 集計直後の値が即反映される今の挙動を壊さないため。R2 へ落ちるのは
- * **localStorage が `missing` のときだけ** — `not-aggregated` (別の月を集計してある)
- * は今までどおりの一言に留める (#865 の指定)。
+ * 集計直後の値が即反映される今の挙動を壊さないため。**R2 を見ないのは `ready` のとき
+ * だけ** — この端末でこの運行を集計してあるので、古い版で上書きしない。
+ *
+ * **`missing` と `not-aggregated` はどちらも R2 へ落ちる** (Refs #867)。#865 は
+ * `missing` だけを指定していたので `not-aggregated` (この端末に**別の月**の突合結果が
+ * ある) が落ちず、**R2 に版があるのに「この運行はありません」しか出なかった。**
+ *
+ * ## ★ 出どころの言い分けが 1 段増える (#867)
+ *
+ * 「**この端末には 2026-06 の結果があり、R2 の 2026-07 の版から出した**」という状態が
+ * 新しく生まれる。**黙って混ぜない:**
+ *
+ * - 数字が出ているときに「ありません」を横に残さない (`note` は `null` のまま)
+ * - **見出しで両方の月を名乗る** (`legSalesSourceLabel` の `localYm`) — 版の月しか
+ *   名乗らないと、この端末のキャッシュが別の月だという事実が消える
+ * - 注記で**逆方向の誤読も潰す** (`legSalesLocalOtherYmNote`) — 「R2 から出した」だけだと
+ *   この端末の集計が別の月である事実が消え、`LEG_SALES_R2_NOTE` の
+ *   「この端末の粗利タブで集計すると切り替わります」も**2026-06 を集計し直しても
+ *   切り替わらない**ので、切り替わる月を名指しし直す
  */
 
 import { shiftYmd } from './profit-compare'
@@ -210,14 +226,23 @@ export function pickBestR2LegSales(results: OperationLegSalesR2[]): OperationLeg
 
 // --- 画面が受け取る状態 -----------------------------------------------------
 
-/** R2 側の取得がどこまで進んでいるか。**`missing` のときだけ画面が見る。** */
+/**
+ * R2 側の取得がどこまで進んでいるか。**`ready` 以外のときに画面が見る**
+ * (`missing` も `not-aggregated` も落ちてくる、Refs #867)。
+ */
 export type LegSalesR2Fetch =
   /** まだ確認中 (運行の読み込み待ちを含む)。 */
   | { state: 'loading' }
   /** 運行の日付が読めず、**どの月の版を見ればよいか決められない**。 */
   | { state: 'no-date' }
-  /** 取得そのものが失敗した (通信・503 等)。**0 円ではない。** */
-  | { state: 'failed', message: string }
+  /**
+   * 取得そのものが失敗した (通信・503 等)。**0 円ではない。**
+   *
+   * **`checkedYms` を持つ** (Refs #867) — 失敗の文言はどこにも月を書かないので、
+   * 付けないと**どの月を見に行って失敗したのか**が読めない (「見に行かなかった」と
+   * 区別が付かない)。`done` と同じく**取りに行った月を全部**入れる。
+   */
+  | { state: 'failed', message: string, checkedYms: string[] }
   /** 候補の月を全部見終わった。 */
   | { state: 'done', result: OperationLegSalesR2, checkedYms: string[] }
 
@@ -273,19 +298,66 @@ function savedAtText(savedAt: string): string {
 
 /**
  * 見出しの一行。**出どころ・突合した月・(R2 なら) いつの版か**を必ず並べる。
+ *
+ * **`localYm` は「この端末のキャッシュは別の突合 (別の月) だ」という事実** (Refs #867)。
+ * `not-aggregated` の端末で R2 の版から出したときに渡す — **版の月しか名乗らないと、
+ * この端末が持っている月が画面から消える**。渡さない (`null`) のは、この端末に
+ * そもそも突合結果が無い (`missing`) ときと local から出したとき。
+ *
+ * **ここには否定語を入れない。** この見出しは**金額が出ている行の横**に並ぶので、
+ * 「ありません」の類を置くと出ている数字の方に掛かって読める (この repo で最も多い
+ * 欠陥の型)。**月を名乗るだけ**にして、事情は下の注記
+ * (`legSalesLocalOtherYmNote`) が出どころを名指しして言う。
  */
-export function legSalesSourceLabel(source: LegSalesSource, ym: string, savedAt: string | null): string {
-  const head = `${LEG_SALES_SOURCE_NAMES[source]} (${ym} の突合`
-  return savedAt === null ? `${head})` : `${head} / ${savedAtText(savedAt)})`
+export function legSalesSourceLabel(
+  source: LegSalesSource,
+  ym: string,
+  savedAt: string | null,
+  localYm: string | null = null,
+): string {
+  const parts = [`${ym} の突合`]
+  if (savedAt !== null) parts.push(savedAtText(savedAt))
+  if (localYm !== null) parts.push(`この端末の集計は ${localYm}`)
+  return `${LEG_SALES_SOURCE_NAMES[source]} (${parts.join(' / ')})`
+}
+
+/**
+ * `not-aggregated` の端末が R2 の版から出したときに、`LEG_SALES_R2_NOTE` の**後ろへ
+ * 足す**一言 (Refs #867)。
+ *
+ * **誤読が 2 方向あるので両方塞ぐ:**
+ *
+ * 1. **「R2 から出した」だけだと、この端末の集計が別の月だという事実が消える。**
+ *    次に粗利タブを開いた人が「もう集計してある」と読む
+ * 2. **`LEG_SALES_R2_NOTE` の「この端末の粗利タブで集計すると切り替わります」は、
+ *    この状態では不正確。** `${localYm}` を集計し直しても切り替わらない —
+ *    切り替わるのは**この運行の月 (`${r2Ym}`)** を集計したときだけ。
+ *    後ろに置いて名指しし直す (前に置くと、一般文の方が後から上書きして読める)
+ *
+ * **否定は「そちら (この端末の別の月の突合) に入っていない」と出どころを名指しした形
+ * だけ**にする。裸の「ありません」を金額の横に置かない。
+ */
+export function legSalesLocalOtherYmNote(localYm: string, r2Ym: string): string {
+  return `この端末の粗利タブが集計してあるのは ${localYm} の突合で、そちらにこの運行が入っていないため、`
+    + `この計上額は R2 の ${r2Ym} の版から出しています。`
+    + `この画面がこの端末の結果に切り替わるのは、この運行の月 (${r2Ym}) をこの端末の粗利タブで集計したときです。`
+}
+
+/** 見に行った月を名乗る (Refs #867 で `checkedYmsSuffix` から切り出した)。 */
+function checkedYmsPhrase(checkedYms: string[]): string {
+  return `(確認した月: ${checkedYms.join(' / ')})`
 }
 
 /**
  * 見に行った月を添える一言。**1 つなら何も言わない** (本文が既にその月を書いている)。
  * 2 つ見たのに 1 つしか書かないと、「もう片方は見ていない」と読まれる。
+ *
+ * **`failed` はこちらを使わない** (Refs #867) — あの本文は月をどこにも書かないので、
+ * 1 つのときに省くと「見に行かなかった」と区別が付かなくなる。
  */
 function checkedYmsSuffix(checkedYms: string[]): string {
   if (checkedYms.length <= 1) return ''
-  return ` (確認した月: ${checkedYms.join(' / ')})`
+  return ` ${checkedYmsPhrase(checkedYms)}`
 }
 
 /** R2 側が出せなかった理由。**どれも「0 円」ではない**ことが分かる書き方にする。 */
@@ -295,7 +367,8 @@ function r2Note(fetch: LegSalesR2Fetch): string {
     return 'この運行の日付が読めないため、R2 のどの月の版を見ればよいか決められませんでした。'
   }
   if (fetch.state === 'failed') {
-    return `R2 に保存された版も読めませんでした (${fetch.message}) — 計上額が 0 円なのではありません。`
+    return `R2 に保存された版 ${checkedYmsPhrase(fetch.checkedYms)} も読めませんでした (${fetch.message})`
+      + ` — 計上額が 0 円なのではありません。`
   }
   const tail = checkedYmsSuffix(fetch.checkedYms)
   const r = fetch.result
@@ -314,15 +387,19 @@ function r2Note(fetch: LegSalesR2Fetch): string {
 }
 
 /**
- * 計上額パネルが出すものを決める (Refs #865)。**pure** — 取得はしない。
+ * 計上額パネルが出すものを決める (Refs #865 / Refs #867)。**pure** — 取得はしない。
  *
  * **localStorage を先に見る順序は変えない** (集計直後の値が即反映される今の挙動を壊さない)。
- * R2 を見るのは **`missing` のときだけ**:
+ * **R2 を見ないのは `ready` のときだけ**:
  *
- * - `ready` — この端末で集計してある。**R2 は見ない** (古い版で上書きしない)
- * - `not-aggregated` — この端末に別の月の結果がある。**今までどおりの一言**
- *   (#865 が指定した範囲は `missing` のときの落とし先だけ)
+ * - `ready` — この端末でこの運行を集計してある。**R2 は見ない** (古い版で上書きしない)
+ * - `not-aggregated` — この端末に**別の月**の結果がある。**R2 へ落ちる** (#867)。
+ *   この端末に答えが無いことに変わりはなく、R2 に版があるなら出せる。
+ *   ただし**出どころは 2 つの月を名乗って言い分ける** (`legSalesLocalOtherYmNote`)
  * - `missing` — R2 へ落ちる。**出せた回も出せなかった回も、出どころ / 理由を必ず言う**
+ *
+ * **どちらの落ち方でも、出せたときに `note` は `null`** — 数字が出ている横に
+ * 「この運行はありません」を残さない (出ているものが別の意味に読める)。
  */
 export function resolveLegSalesPanel(
   local: OperationLegSalesLookup,
@@ -337,21 +414,31 @@ export function resolveLegSalesPanel(
       note: null,
     }
   }
-  const localNote = legSalesNote(local)
-  if (local.status === 'not-aggregated') {
-    return { ready: null, source: null, sourceLabel: '', sourceNote: '', note: localNote }
-  }
+  // **この端末が別の月を集計してある**ときだけ、その月を持ち回る (#867)。
+  // `missing` は端末に突合結果そのものが無いので名乗る月が無い (`null`)。
+  const localYm = local.status === 'not-aggregated' ? local.ym : null
   if (fetch.state === 'done' && fetch.result.status === 'ready') {
     const r = fetch.result
     return {
       ready: legSalesReadyLookup(r.ym, r.legs),
       source: 'r2',
-      sourceLabel: legSalesSourceLabel('r2', r.ym, r.savedAt),
-      sourceNote: LEG_SALES_R2_NOTE,
+      sourceLabel: legSalesSourceLabel('r2', r.ym, r.savedAt, localYm),
+      // **この端末の事情は R2 の注記の後ろへ足す** — 前に置くと
+      // `LEG_SALES_R2_NOTE` の一般文 (「この端末で集計すると切り替わります」) が
+      // 後から読めてしまい、**別の月を集計し直しても切り替わらない**ことが伝わらない。
+      sourceNote: localYm === null ? LEG_SALES_R2_NOTE : LEG_SALES_R2_NOTE + legSalesLocalOtherYmNote(localYm, r.ym),
       note: null,
     }
   }
   // **この端末の事情と R2 の事情を両方言う。** 片方だけだと「もう片方は見ていない」
-  // (あるいは「見たが黙っている」) と読まれる。
-  return { ready: null, source: null, sourceLabel: '', sourceNote: '', note: `${localNote} ${r2Note(fetch)}` }
+  // (あるいは「見たが黙っている」) と読まれる。**`not-aggregated` も同じ形で言う** —
+  // 「この運行の月を粗利タブで集計すると出ます。」で終わらせると、R2 を見たことが
+  // 伝わらない (#867)。`legSalesNote` の文末の `。` はこの連結のためにある。
+  return {
+    ready: null,
+    source: null,
+    sourceLabel: '',
+    sourceNote: '',
+    note: `${legSalesNote(local)} ${r2Note(fetch)}`,
+  }
 }
