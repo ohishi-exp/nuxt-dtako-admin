@@ -1021,3 +1021,87 @@ branches = true
 [[files]]
 path = "server/utils/netprint-targets.ts"
 branches = true
+
+# --- ページ (`app/pages/*.vue`) の component テスト (Refs #903 の 1 段目) ---
+#
+# ★ この 3 本で **「ページ component テストの型」** を作った。2 段目以降
+# (`restraint-report` / `y-time-export` / `net780` / `scraper` / `daily-report-edit` /
+# `restraint-wage`) はこれをなぞる:
+#
+# - **API は `~/utils/api` を `vi.mock` + `importOriginal`** で必要な関数だけ差し替える。
+#   この 3 本は `$fetch` を直接持たないので `vi.stubGlobal('$fetch', …)`
+#   (`tests/components/profit-monthly-page.test.ts` の形) は**効かない**
+# - **Nuxt UI は `tests/helpers/stubs.ts` の `NUXT_UI_PAGE_STUBS` で全部 stub。**
+#   実物は setup で `useAppConfig()` を呼ぶため vitest では `[nuxt] instance
+#   unavailable` で mount できない。**1 つ stub し忘れると、そのコンポーネント名が
+#   出ない形 (`Invalid vnode type … undefined`) で落ちる**
+# - **文字を持つ prop (`label` / `title` / `description`) は stub でも描画する** —
+#   しないと画面に出ている文字が `wrapper.text()` から消え、「出ていないのに通る
+#   テスト」になる
+# - **ボタンはラベル完全一致で引く** (部分一致だと「メンバー招待」が「招待」に、
+#   「コピー」が「コピー済み」に当たる)
+# - **`w.text()` は要素の textContent を連結するだけ**なので、隣り合う区画の文字が
+#   くっついて存在しない語ができる (「アップロード履歴 / CSV分割」+ バッジ「完了」で
+#   **常に「分割完了」が現れる**)。区画の生死は文言ではなく**その区画の要素**で見る
+# - **★ 全部 stub することで測れなくなるものがある** (詳細は `stubs.ts` の doc)。
+#   一番効くのは **色**: `:color="statusColor(…)"` は stub では描かれないので、
+#   **`props('color')` で値を見る**必要がある。見ないと色を出し分ける関数は
+#   「実行されただけ」になり、**何色を返してもテストが通る** (v8 の行カバレッジは
+#   通ってしまう)。そのために stub 側で `color` を props に宣言してある
+#
+# ★★ **数字の指標を取り違えないこと。** この repo には分岐の数え方が 3 通り同居して
+# いる。下の 3 本の注記には**全部**書いてあるので、読むときも直すときも指標名ごと扱う:
+#
+# | 指標 | 数え方 | 数える範囲 |
+# |---|---|---|
+# | **BR() instrumented site** | `if`/三項の条件 + `&&`/`\|\|` の両辺 + `??` の左辺 | **`<script setup>` だけ** |
+# | v8 の branch **site** | `Object.keys(cov.b).length` | script + template (render 関数) |
+# | v8 の branch **arm** | `Object.values(cov.b).flat().length` | script + template |
+#
+# **BR() が v8 より小さいのは漏れではない** — 計測器 (`instrument.mjs`) が
+# `<script … lang="ts">` ブロックしか書き換えないため。`members.vue` の v8 branch site
+# 34 は **script 側 9 + template 側 25** (`</script>` は 103 行目、template 側の site は
+# 108 行目以降) で、BR() が数えた 10 site はすべて script 側。
+#
+# 測定条件: commit dc82ad5 + 本 PR のテスト。BR() は親の `br-tooling`
+# (`instrument.mjs` + `br.ts`) を使い、**使う前に 3 段で検証**した:
+# ①probe — 片側だけ通る `if` が `[true]` / 両側が `[true,false]`
+# ②probe — 計測器が値を壊さない (`pick(0,7)===0` / `orValue(0,7)===7` /
+#   `andValue(0,'x')===0` を instrumented 側で assert)
+# ③基準の再現 — `ProfitPanel.vue` を instrument して既存 69 本を流し、
+#   この toml の既存注記どおり **20 site / 両側 18** を再現
+# さらに**陰性対照**: `members.vue` のテストを 1 本 `it.skip` すると両側が 10 → 9 に
+# 落ち、落ちた site が狙いどおり `!payload.role` だった (計測が効いていることの確認)。
+
+# メンバー管理。**JWT の `role` だけで見た目が変わる**画面なので、テストの軸は
+# 「admin / member / role だけ / トークン無し で出す口が変わること」と
+# 「自分自身のロール変更・削除の口を出さないこと」。
+# branches: **BR() instrumented site 10、10 site とも両側**。
+# **v8 branch site 34 / arm 66、すべて被覆。死に分岐 0 件。**
+[[files]]
+path = "app/pages/members.vue"
+branches = true
+
+# APIトークン管理。**平文トークンは作成直後の 1 回しか出せない**ので、
+# 「再表示できません」の注意書きと一緒に出ること、閉じたら消えること、
+# 「コピー済み」が前の本の話として残らないことを固定している。
+# 状態は **失効済み / 期限切れ / 有効** の 3 つを同じ見た目にしない。
+# branches: **BR() instrumented site 10、10 site とも両側**。
+# **v8 branch site 29 / arm 57、すべて被覆。死に分岐 0 件。**
+[[files]]
+path = "app/pages/api-tokens.vue"
+branches = true
+
+# デジタコ CSV アップロード。要は **「取り込みは成功したが CSV 分割が失敗した」を
+# 取り込みの緑とは別枠で出す**こと (Refs ohishi-exp/rust-ichibanboshi#205 の 40) —
+# 分割に失敗した運行は `has_kudgivt = FALSE` のまま読み取り側 3 クエリから消える。
+# **`loadPending` / `loadUploads` の `catch` は握りつぶして空配列にする**ので、
+# 取得失敗と 0 件が同じ見た目になる。#903 の制約 (テストのために本番コードを
+# 変えない) によりコードは触らず、**現状の挙動としてテストで固定**してある。
+# branches: **BR() instrumented site 9、9 site とも両側**。
+# **v8 branch site 39 / arm 82、すべて被覆。死に分岐 0 件**
+# (`statusColor` / `statusLabel` の switch は default を含む 4 アームとも通す。
+# switch は BR() の対象外・v8 の branch でもあるので、両方の指標で数えている)。
+[[files]]
+path = "app/pages/upload.vue"
+branches = true
