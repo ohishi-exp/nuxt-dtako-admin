@@ -133,28 +133,47 @@ export interface DtakoConfigKvBinding {
 /** `DTAKO_ACCOUNTS` を置く KV のキー名。 */
 export const DTAKO_ACCOUNTS_KV_KEY = "dtako_accounts";
 
+/** `NETPRINT_TARGETS` を置く KV のキー名 (`dtako_accounts` と同じ snake_case)。 */
+export const NETPRINT_TARGETS_KV_KEY = "netprint_targets";
+
 /**
- * `DTAKO_ACCOUNTS` (comp_id → tenant_id / theearth 認証情報) の解決。
- *
- * **KV (`DTAKO_CONFIG_KV` の `dtako_accounts`) が正**で、無ければ従来の binding
+ * relay の設定値を **KV (`DTAKO_CONFIG_KV`) 優先**で解決し、無ければ従来の binding
  * (dashboard の plain 環境変数 / Secrets Store) にフォールバックする。
  *
  * KV へ移した理由 (2026-07-25 実害): dashboard の plain 環境変数は deploy で
- * 消えることがあり (`keep_vars` があっても本番から消えていた)、消えると viewer
- * 認可 (`viewerCompIdsForTenant`) が fail-closed で**全会社 401** になり、
- * 拘束×賃金の全タブが「セッションが無効か期限切れです」で閲覧不能になる。
+ * 消えることがあり (`keep_vars` があっても本番から消えていた)。`DTAKO_ACCOUNTS` が
+ * 消えたときは viewer 認可 (`viewerCompIdsForTenant`) が fail-closed で**全会社 401**
+ * になり、拘束×賃金の全タブが「セッションが無効か期限切れです」で閲覧不能になった。
  * **KV の値が唯一の正で、投入は最初の 1 回だけ** — CI もデプロイも書き換えない
  * (毎回書き直すなら「消える変数」と同じで、値の持ち主がパイプラインになって
  * しまう)。CI は `dtako-scraper-relay-deploy.yml` で**存在を検証して落とす**だけ。
- * 空だった時に黙って全社 401 になるのが今回の事故なので、呼び出し側は
- * loud fail (console.error) すること。
+ * 空のまま黙って動かなくなるのが事故の形なので、呼び出し側は loud fail
+ * (console.error) するか、意図した skip であることを結果に載せること。
  */
-export async function resolveDtakoAccountsRaw(kv: unknown, binding: unknown): Promise<string> {
+export async function resolveKvConfigRaw(
+  kv: unknown,
+  key: string,
+  binding: unknown,
+): Promise<string> {
   if (kv && typeof (kv as DtakoConfigKvBinding).get === "function") {
-    const value = await (kv as DtakoConfigKvBinding).get(DTAKO_ACCOUNTS_KV_KEY);
+    const value = await (kv as DtakoConfigKvBinding).get(key);
     if (value) return value;
   }
   return resolveSecretBinding(binding);
+}
+
+/** `DTAKO_ACCOUNTS` (comp_id → tenant_id / theearth 認証情報) の解決。
+ * KV `dtako_accounts` が正、無ければ binding (`resolveKvConfigRaw` 参照)。 */
+export async function resolveDtakoAccountsRaw(kv: unknown, binding: unknown): Promise<string> {
+  return resolveKvConfigRaw(kv, DTAKO_ACCOUNTS_KV_KEY, binding);
+}
+
+/** `NETPRINT_TARGETS` (日報 netprint の通知先) の解決。KV `netprint_targets` が正、
+ * 無ければ binding (`resolveKvConfigRaw` 参照)。**cron も手動実行もこれを使う** —
+ * 設定の出どころが経路で違う状態を作らないため。どちらも未設定なら空文字を返し、
+ * 呼び出し側は従来どおり skip する (fail-closed、Refs #874)。 */
+export async function resolveNetprintTargetsRaw(kv: unknown, binding: unknown): Promise<string> {
+  return resolveKvConfigRaw(kv, NETPRINT_TARGETS_KV_KEY, binding);
 }
 
 /** scheduled handler から注入される DO 呼び出し。doKey は `idFromName` に渡す
@@ -170,7 +189,8 @@ export interface CronEnvValues {
   scraperMode?: string;
   dtakoAccountsRaw?: string;
   etcAccountsRaw?: string;
-  /** `NETPRINT_TARGETS` (plain 変数)。未設定は netprint cron skip (Refs #874)。 */
+  /** `NETPRINT_TARGETS` (KV `netprint_targets` が正、plain 変数は fallback)。
+   * 未設定は netprint cron skip (Refs #874)。 */
   netprintTargetsRaw?: string;
   /** netprint cron が theearth ログインに使う会社 (`KINTAI_COMP_ID` var)。日報を
    * 持つのは打刻と同じ大石運輸倉庫 1 社なので同じ var を読む。未設定は
