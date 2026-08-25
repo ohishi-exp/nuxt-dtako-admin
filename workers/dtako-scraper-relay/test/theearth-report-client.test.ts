@@ -10,6 +10,7 @@ import {
   getReviseForm,
   getReviseFormPage,
   getWorkForm,
+  harvestDailyOperationReport,
   harvestDailyReport,
   parseExpenseMasters,
   recalculateExpense,
@@ -3879,5 +3880,85 @@ describe("findEnclosingUpdatePanelId", () => {
 
   it("returns null when there is no UpdatePanel at all", () => {
     expect(findEnclosingUpdatePanelId(`<input id="btn">`, "btn")).toBeNull();
+  });
+});
+
+// --- F-NRS1010 [運転日報] fixture --------------------------------------------
+// 行 prefix は `MainContent_T1_lstOperation_` (`T1_` あり) で F-DES1010
+// (`MainContent_lstOperation_`) と紛らわしいが別物 (theearth-venus skill
+// 「運転日報 F-NRS1010 = 作業時間の一括取得元」節)。
+
+function nrsRowHtml(row: number, v: {
+  operationNo?: string;
+  workEndDateTime?: string;
+  omitDetails?: boolean;
+} = {}): string {
+  const id = (field: string) => `MainContent_T1_lstOperation_${field}_${row}`;
+  return `
+    <span id="${id("lblOperationNo")}">${v.operationNo ?? `NRS${row}`}</span>
+    <span id="${id("lblStartDateTime")}">2026/07/01 8:00:00</span>
+    <span id="${id("lblWorkEndDateTime")}">${v.workEndDateTime ?? "07/01 18:00"}</span>
+    ${v.omitDetails ? "" : `
+    <span id="${id("lblDriverState1Min")}">8:10</span>
+    <span id="${id("lblDriverState2Min")}">1:20</span>
+    <span id="${id("lblDriverState3Min")}">0:30</span>
+    <span id="${id("lblDriverState4Min")}">0:00</span>
+    <span id="${id("lblDriverState5Min")}">2:40</span>
+    <span id="${id("lblIntankFuel1")}">120.5</span>
+    <span id="${id("lblSSFuel1")}">30.0</span>`}
+  `;
+}
+
+describe("harvestDailyOperationReport (F-NRS1010)", () => {
+  const range = { from: "2026/07/01 00:00", to: "2026/07/01 23:59" };
+
+  it("parses T1_-prefixed rows including work times and fuel (missing spans → null)", async () => {
+    const jar = createCookieJar();
+    const page = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-NRS" />
+      ${nrsRowHtml(0, { operationNo: "A", workEndDateTime: "07/01 18:00" })}
+      ${nrsRowHtml(1, { operationNo: "B", workEndDateTime: "07/01 12:00", omitDetails: true })}
+      ${nrsRowHtml(2, { operationNo: "C", workEndDateTime: "06/30 23:50" })}
+    </form></body></html>`;
+    const rows = await harvestDailyOperationReport(jar, range, sequenceFetch([html(page)]));
+    expect(rows.map((r) => r.operationNo)).toEqual(["A", "B"]);
+    expect(rows[0]).toMatchObject({
+      startDateTime: "2026/07/01 8:00:00",
+      workEndDateTime: "2026/07/01 18:00",
+      driverState1Min: "8:10",
+      driverState2Min: "1:20",
+      driverState3Min: "0:30",
+      driverState4Min: "0:00",
+      driverState5Min: "2:40",
+      intankFuel1: "120.5",
+      ssFuel1: "30.0",
+    });
+    // span が無い列は null (「0」をでっち上げない)
+    expect(rows[1].driverState1Min).toBeNull();
+    expect(rows[1].driverState5Min).toBeNull();
+    expect(rows[1].intankFuel1).toBeNull();
+    expect(rows[1].ssFuel1).toBeNull();
+  });
+
+  it("keeps the two grids apart: DES parser ignores T1_ rows and vice versa", async () => {
+    const jar = createCookieJar();
+    const mixed = `<html><body><form>
+      <input type="hidden" id="__VIEWSTATE" name="__VIEWSTATE" value="VS-MIX" />
+      ${reportRowHtml(0, { operationNo: "DES", workEndDateTime: "07/01 18:00" })}
+      ${reportRowHtml(1, { operationNo: "DES-OLD", workEndDateTime: "06/30 23:50" })}
+      ${nrsRowHtml(0, { operationNo: "NRS", workEndDateTime: "07/01 17:00" })}
+      ${nrsRowHtml(1, { operationNo: "NRS-OLD", workEndDateTime: "06/30 23:40" })}
+    </form></body></html>`;
+    const nrsRows = await harvestDailyOperationReport(jar, range, sequenceFetch([html(mixed)]));
+    expect(nrsRows.map((r) => r.operationNo)).toEqual(["NRS"]);
+    const desRows = await harvestDailyReport(jar, range, sequenceFetch([html(mixed)]));
+    expect(desRows.map((r) => r.operationNo)).toEqual(["DES"]);
+  });
+
+  it("rejects a malformed range before any fetch (既定引数の分岐もここで通す)", async () => {
+    const jar = createCookieJar();
+    await expect(harvestDailyOperationReport(jar, { from: "bad", to: range.to })).rejects.toThrow(
+      ReportParamError,
+    );
   });
 });
