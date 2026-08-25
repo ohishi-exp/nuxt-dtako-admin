@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { CronConfigError } from '../src/cron'
 import {
+  sendLineworksTextViaAlcInternalProxy,
+  type FetchLike,
+} from '../src/lineworks-notify'
+import {
   buildNetprintErrorNotification,
   buildNetprintNotification,
   buildNoOperationsNotification,
@@ -17,7 +21,13 @@ import {
   type NetprintTarget,
 } from '../src/netprint-cron'
 
-const TARGET: NetprintTarget = { branch_cd: '1', channel_id: 'ch-honsha' }
+// `channel_id` は DB `lineworks_channels` の行 id (Uuid) — LINE WORKS の
+// channelId そのものではない (Refs #874 の 8)。
+const CH_HONSHA = '3f2504e0-4f89-41d3-9a0c-0305e82c3301'
+const CH_OBIHIRO = '9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d'
+const CH_TEST = '00000000-0000-4000-8000-000000000001'
+
+const TARGET: NetprintTarget = { branch_cd: '1', channel_id: CH_HONSHA }
 
 function row(branchCd: string | null, branchName: string | null = null): NetprintReportRow {
   return { branchCd, branchName }
@@ -30,8 +40,8 @@ describe('parseNetprintTargets', () => {
   })
 
   it('JSON 配列をパースする', () => {
-    const targets = parseNetprintTargets('[{"branch_cd":"1","channel_id":"c1"}]')
-    expect(targets).toEqual([{ branch_cd: '1', channel_id: 'c1' }])
+    const targets = parseNetprintTargets(`[{"branch_cd":"1","channel_id":"${CH_HONSHA}"}]`)
+    expect(targets).toEqual([{ branch_cd: '1', channel_id: CH_HONSHA }])
   })
 
   it('JSON 不正 / 非配列は CronConfigError で loud fail する', () => {
@@ -92,16 +102,16 @@ describe('通知文', () => {
 
 describe('planNetprintRun (手動実行の body 解釈)', () => {
   const CONFIGURED = JSON.stringify([
-    { branch_cd: '1', channel_id: 'ch-honsha' },
-    { branch_cd: '2', channel_id: 'ch-obihiro' },
+    { branch_cd: '1', channel_id: CH_HONSHA },
+    { branch_cd: '2', channel_id: CH_OBIHIRO },
   ])
 
   it('全部省略なら前日 (呼び出し側が渡す既定日) + NETPRINT_TARGETS 全件 = cron と同じ', () => {
     expect(planNetprintRun({}, CONFIGURED, '2026-08-24')).toEqual({
       date: '2026-08-24',
       targets: [
-        { branch_cd: '1', channel_id: 'ch-honsha' },
-        { branch_cd: '2', channel_id: 'ch-obihiro' },
+        { branch_cd: '1', channel_id: CH_HONSHA },
+        { branch_cd: '2', channel_id: CH_OBIHIRO },
       ],
     })
   })
@@ -123,32 +133,49 @@ describe('planNetprintRun (手動実行の body 解釈)', () => {
   it('branch_cd + channel_id を揃えて渡すとその 1 件だけ (NETPRINT_TARGETS は使わない)', () => {
     expect(
       planNetprintRun(
-        { branch_cd: ' 1 ', channel_id: ' ch-test ', branch_name: '本社営業所' },
+        { branch_cd: ' 1 ', channel_id: ` ${CH_TEST} `, branch_name: '本社営業所' },
         CONFIGURED,
         '2026-08-24',
       ),
     ).toEqual({
       date: '2026-08-24',
-      targets: [{ branch_cd: '1', channel_id: 'ch-test', branch_name: '本社営業所' }],
+      targets: [{ branch_cd: '1', channel_id: CH_TEST, branch_name: '本社営業所' }],
     })
   })
 
   it('branch_name 省略 / 空文字は undefined (行から引くフォールバックに任せる)', () => {
     const plan = planNetprintRun(
-      { branch_cd: '1', channel_id: 'ch-test', branch_name: '' },
+      { branch_cd: '1', channel_id: CH_TEST, branch_name: '' },
       CONFIGURED,
       '2026-08-24',
     )
     expect(plan).toEqual({
       date: '2026-08-24',
-      targets: [{ branch_cd: '1', channel_id: 'ch-test', branch_name: undefined }],
+      targets: [{ branch_cd: '1', channel_id: CH_TEST, branch_name: undefined }],
     })
+  })
+
+  it('channel_id が Uuid でなければ 400 相当の error (LINE WORKS の channelId 直貼りを弾く)', () => {
+    const expected = {
+      error: 'channel_id が UUID 形式ではありません (lineworks_channels の行 id を指定してください)',
+    }
+    expect(
+      planNetprintRun({ branch_cd: '1', channel_id: 'ch-honsha' }, CONFIGURED, '2026-08-24'),
+    ).toEqual(expected)
+    // 桁の足りない / 区切りの無い Uuid もどきも通さない。
+    expect(
+      planNetprintRun(
+        { branch_cd: '1', channel_id: '3f2504e04f8941d39a0c0305e82c3301' },
+        CONFIGURED,
+        '2026-08-24',
+      ),
+    ).toEqual(expected)
   })
 
   it('片方だけの指定は受け付けない (設定側の宛先と混ざるのを防ぐ)', () => {
     const expected = { error: 'branch_cd と channel_id は両方まとめて指定してください' }
     expect(planNetprintRun({ branch_cd: '1' }, CONFIGURED, '2026-08-24')).toEqual(expected)
-    expect(planNetprintRun({ channel_id: 'ch-test' }, CONFIGURED, '2026-08-24')).toEqual(expected)
+    expect(planNetprintRun({ channel_id: CH_TEST }, CONFIGURED, '2026-08-24')).toEqual(expected)
   })
 
   it('NETPRINT_TARGETS 未設定 + 指定なしは error (黙って何もしないにしない)', () => {
@@ -216,7 +243,7 @@ describe('runNetprintTargets', () => {
     expect(results).toEqual([
       {
         branch_cd: '1',
-        channel_id: 'ch-honsha',
+        channel_id: CH_HONSHA,
         ok: true,
         rows: 1,
         print_id: 'J5JZPEQJ',
@@ -224,7 +251,7 @@ describe('runNetprintTargets', () => {
       },
     ])
     expect(sent).toHaveLength(1)
-    expect(sent[0].channelId).toBe('ch-honsha')
+    expect(sent[0].channelId).toBe(CH_HONSHA)
     expect(sent[0].text).toContain('プリント予約番号: J5JZPEQJ')
     expect(sent[0].text).toContain('本社営業所 2026/08/24分')
   })
@@ -233,7 +260,7 @@ describe('runNetprintTargets', () => {
     const { deps, sent, fetched } = makeDeps()
     const results = await runNetprintTargets(
       deps,
-      [{ branch_cd: '00000001', channel_id: 'c1' }],
+      [{ branch_cd: '00000001', channel_id: CH_HONSHA }],
       '2026-08-24',
     )
     expect(fetched).toEqual([{ dateYmd: '2026-08-24', branchCd: '1' }])
@@ -252,7 +279,7 @@ describe('runNetprintTargets', () => {
     const results = await runNetprintTargets(deps, [TARGET], '2026-08-04')
     expect(results[0]).toMatchObject({ ok: true, rows: 0, print_id: null })
     expect(sent).toEqual([
-      { channelId: 'ch-honsha', text: '営業所コード1 8/4分の運行はありませんでした' },
+      { channelId: CH_HONSHA, text: '営業所コード1 8/4分の運行はありませんでした' },
     ])
   })
 
@@ -262,7 +289,7 @@ describe('runNetprintTargets', () => {
         throw new Error('netprint 受付エラー code=11202')
       },
     })
-    const second: NetprintTarget = { branch_cd: '2', channel_id: 'ch-obihiro' }
+    const second: NetprintTarget = { branch_cd: '2', channel_id: CH_OBIHIRO }
     const results = await runNetprintTargets(deps, [TARGET, second], '2026-08-24')
     expect(results[0].ok).toBe(false)
     expect(results[0].rows).toBe(1)
@@ -286,6 +313,60 @@ describe('runNetprintTargets', () => {
     expect(results[0]).toMatchObject({ ok: false, rows: null, print_id: null })
     expect(results[0].detail).toContain('theearth login failed')
     expect(sent[0].text).toContain('営業所コード1')
+  })
+
+  it('channel_id が Uuid でない target は harvest せず ok: false — 他の target は止めない', async () => {
+    const { deps, sent, fetched } = makeDeps()
+    const broken: NetprintTarget = { branch_cd: '1', channel_id: 'ch-honsha' }
+    const second: NetprintTarget = { branch_cd: '2', channel_id: CH_OBIHIRO }
+    const results = await runNetprintTargets(deps, [broken, second], '2026-08-24')
+    expect(results[0]).toEqual({
+      branch_cd: '1',
+      channel_id: 'ch-honsha',
+      ok: false,
+      rows: null,
+      print_id: null,
+      detail: 'channel_id が UUID 形式ではありません (lineworks_channels の行 id を設定してください)',
+    })
+    // 宛先が無い以上 harvest も PDF 登録もエラー通知もしない (確実に失敗する送信を試さない)。
+    expect(fetched).toEqual([{ dateYmd: '2026-08-24', branchCd: '2' }])
+    expect(sent.map((m) => m.channelId)).toEqual([CH_OBIHIRO])
+    expect(results[1]).toMatchObject({ ok: true, rows: 0 })
+  })
+
+  it('channel_id 欠落 (設定 JSON は素通しなので型どおりとは限らない) も同じく ok: false', async () => {
+    const { deps, fetched } = makeDeps()
+    const results = await runNetprintTargets(
+      deps,
+      [{ branch_cd: '1' } as unknown as NetprintTarget],
+      '2026-08-24',
+    )
+    expect(results[0]).toMatchObject({ ok: false, rows: null, print_id: null })
+    expect(fetched).toEqual([])
+  })
+
+  it('alc からの非 2xx は status と本文の先頭を落とさず detail に載せる (画面が理由を出せる)', async () => {
+    // #874-6 の migration が本番に当たるまでは送信が失敗しうる。そのとき Tail と
+    // `/kintai-relay/netprint-run` の応答から「何が起きたか」が読めることを固定する
+    // (画面 #874-5 は results[].detail を表示する)。実物の通知経路を deps に挿す。
+    const alcFetch: FetchLike = (async () =>
+      new Response('{"error":"relation lineworks_channels does not exist"}', {
+        status: 500,
+      })) as FetchLike
+    const { deps } = makeDeps({
+      sendText: (channelId, text) =>
+        sendLineworksTextViaAlcInternalProxy(
+          { sharedSecret: 'shared-1', channelId, text },
+          alcFetch,
+        ),
+    })
+    const results = await runNetprintTargets(deps, [TARGET], '2026-08-24')
+    expect(results[0]).toMatchObject({ ok: false, rows: 1, print_id: null })
+    expect(results[0].detail).toContain('HTTP 500')
+    expect(results[0].detail).toContain('relation lineworks_channels does not exist')
+    expect(results[0].detail).toContain(CH_HONSHA)
+    // 予約番号の通知が失敗 → エラー通知も同じ壊れた経路なので併記されて飲み込まれる。
+    expect(results[0].detail).toContain('エラー通知も失敗')
   })
 
   it('エラー通知まで失敗したら detail に併記して飲み込む (Error 以外の throw も文字列化)', async () => {

@@ -14,15 +14,29 @@ import { CronConfigError } from "./cron";
 
 /** `NETPRINT_TARGETS` (plain 変数) の 1 エントリ。`branch_cd` は theearth
  * F-DES1010 の行 `lblBranchCD` (非パディング数値) と突き合わせる営業所コード、
- * `channel_id` は LINE WORKS の通知先トークルーム。`branch_name` は任意の
- * 表示名 — 0 行の日 (= 行から営業所名を引けない日) の通知文にも正しい名前を
- * 出すための設定で、未設定なら行の `branchName` → `営業所コード{branch_cd}`
- * の順にフォールバックする。 */
+ * `branch_name` は任意の表示名 — 0 行の日 (= 行から営業所名を引けない日) の
+ * 通知文にも正しい名前を出すための設定で、未設定なら行の `branchName` →
+ * `営業所コード{branch_cd}` の順にフォールバックする。
+ *
+ * **`channel_id` は rust-alc-api の DB テーブル `lineworks_channels` の行 id
+ * (Uuid)** であって、LINE WORKS API の channelId そのものではない (Refs #874 の
+ * 8 の方針転換)。Bot の credential も実チャンネルも DB 一元管理で、rust 側が
+ * この id から tenant ごと解決する。⇒ **通知先を変えるときに触るのは DB (画面)
+ * であって、ここの値は「どの行を指すか」だけ**。 */
 export interface NetprintTarget {
   branch_cd: string;
   channel_id: string;
   branch_name?: string;
 }
+
+/** `channel_id` (= `lineworks_channels` の行 id) の形。Uuid でないものは DB を
+ * 引くまでもなく設定ミスなので、alc へ投げる前に弾く — 「LINE WORKS の
+ * channelId をそのまま貼った」を静かに 404 にせず、設定した人に見える形で
+ * 落とすため。**この検証をするのはここだけ** — auth-worker の allowlist は
+ * path しか見ず (`channel_id` は body にある)、rust 側の 404 は「DB に無い行」と
+ * 「そもそも id の形ではない」を区別しない。 */
+export const NETPRINT_CHANNEL_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** `NETPRINT_TARGETS` (JSON 配列 `[{branch_cd, channel_id}, ...]`) をパースする。
  * 未設定は [] (= cron skip)、JSON 不正は loud fail (`parseDtakoAccounts` と
@@ -119,7 +133,8 @@ export type NetprintRunPlan = { error: string } | { date: string; targets: Netpr
  * - `branch_cd` + `channel_id` を**揃えて**渡すとその 1 件だけを走らせる
  *   (`NETPRINT_TARGETS` を触らずに試験用チャンネルへ流せる)。**片方だけの指定は
  *   受け付けない** — 設定側の target と混ざって「意図しない宛先へ送る」が起きうる
- *   ため、黙って補完しない。
+ *   ため、黙って補完しない。`channel_id` は `lineworks_channels` の行 id (Uuid)
+ *   なので、形が違えば 400 で返す (叩いた人がその場で直せるように)。
  * - どちらも省略すると `NETPRINT_TARGETS` の全 target を使う (= cron と同じ動き)。
  *
  * `NETPRINT_TARGETS` が不正 JSON なら `parseNetprintTargets` がそのまま throw する
@@ -142,6 +157,12 @@ export function planNetprintRun(
   if (branchCd !== "" || channelId !== "") {
     if (branchCd === "" || channelId === "") {
       return { error: "branch_cd と channel_id は両方まとめて指定してください" };
+    }
+    if (!NETPRINT_CHANNEL_ID_RE.test(channelId)) {
+      return {
+        error:
+          "channel_id が UUID 形式ではありません (lineworks_channels の行 id を指定してください)",
+      };
     }
     const branchName =
       typeof body.branch_name === "string" && body.branch_name !== "" ? body.branch_name : undefined;
@@ -181,7 +202,9 @@ export interface NetprintCronDeps<Harvest extends NetprintHarvest = NetprintHarv
   /** netprint へ登録し status poll 完了まで待つ (#874-3 `registerPdf` +
    * `waitForReservation`)。 */
   registerPdf(pdf: Uint8Array, fileName: string): Promise<NetprintRegistration>;
-  /** LINE WORKS のトークルームへテキストを送る (#874-1 `LineworksBotClient`)。 */
+  /** LINE WORKS のトークルームへテキストを送る。`channelId` は
+   * `lineworks_channels` の行 id (Uuid) で、実体は rust-alc-api の
+   * `POST /api/internal/lineworks/send` (#874-8 `sendLineworksTextViaAlcInternalProxy`)。 */
   sendText(channelId: string, text: string): Promise<void>;
 }
 
@@ -216,6 +239,11 @@ export function resolveBranchDisplayName(
  * target の結果 (`ok: false` + 可能なら LINE WORKS へのエラー通知) に閉じ、
  * 次の target へ進む。呼び出し側 (DO) は `ok: false` の結果を console.error
  * する (Tail Worker に残す)。
+ *
+ * `channel_id` が Uuid でない target は **harvest も PDF 生成もせずに** `ok: false`
+ * にする — 通知先が無い以上 netprint に登録しても誰にも番号が届かないし、
+ * エラー通知の送り先も同じく無いため (送ろうとしても確実に失敗する)。
+ * 1 営業所の設定ミスで他の営業所の通知まで止めないのが target 独立の趣旨。
  */
 export async function runNetprintTargets<Harvest extends NetprintHarvest>(
   deps: NetprintCronDeps<Harvest>,
@@ -224,6 +252,20 @@ export async function runNetprintTargets<Harvest extends NetprintHarvest>(
 ): Promise<NetprintTargetResult[]> {
   const results: NetprintTargetResult[] = [];
   for (const target of targets) {
+    // `parseNetprintTargets` は設定 JSON を素通し (`as NetprintTarget[]`) するので、
+    // 型が言うほど string とは限らない。`test` の String 化に任せて弾く。
+    if (!NETPRINT_CHANNEL_ID_RE.test(target.channel_id)) {
+      results.push({
+        branch_cd: target.branch_cd,
+        channel_id: target.channel_id,
+        ok: false,
+        rows: null,
+        print_id: null,
+        detail:
+          "channel_id が UUID 形式ではありません (lineworks_channels の行 id を設定してください)",
+      });
+      continue;
+    }
     let report: Harvest | null = null;
     try {
       // F-DES1010 の行の branchCd は非パディング (`1`) なので、設定側の

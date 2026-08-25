@@ -406,7 +406,10 @@ describe("handleNet780Archive body 素通し (Refs #760 の 26)", () => {
 // 走らせる口で、実機確認はこの route 経由で行う (cron 経路と同じ DO route
 // /cron/netprint を叩くので「cron でだけ通る道」を作らない)。
 describe("handleNetprintRun (POST /kintai-relay/netprint-run)", () => {
-  const TARGETS = JSON.stringify([{ branch_cd: "1", channel_id: "ch-honsha" }]);
+  // `channel_id` は DB `lineworks_channels` の行 id (Uuid、Refs #874 の 8)。
+  const CH_HONSHA = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+  const CH_TEST = "00000000-0000-4000-8000-000000000001";
+  const TARGETS = JSON.stringify([{ branch_cd: "1", channel_id: CH_HONSHA }]);
 
   it("X-Alc-Proxy-Secret 不一致は401 (DO を叩かない)", async () => {
     const { env, doFetch } = fakeEnv({ NETPRINT_TARGETS: TARGETS, KINTAI_COMP_ID: "27324455" });
@@ -469,7 +472,7 @@ describe("handleNetprintRun (POST /kintai-relay/netprint-run)", () => {
     const [url, init] = doFetch.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("https://relay.internal/cron/netprint");
     const sent = JSON.parse(init.body as string);
-    expect(sent).toMatchObject({ comp_id: "27324455", branch_cd: "1", channel_id: "ch-honsha" });
+    expect(sent).toMatchObject({ comp_id: "27324455", branch_cd: "1", channel_id: CH_HONSHA });
     // 既定の対象日は前日 (JST) — 形式だけ固定し、値そのものは実行時刻に依存させない
     expect(sent.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect((await jsonOf(res)) as { date: string }).toMatchObject({ date: sent.date });
@@ -484,7 +487,7 @@ describe("handleNetprintRun (POST /kintai-relay/netprint-run)", () => {
     const res = await handleNetprintRun(
       post("https://relay.internal/kintai-relay/netprint-run", {
         branch_cd: "2",
-        channel_id: "ch-test",
+        channel_id: CH_TEST,
         branch_name: "テスト用",
         date: "2026-08-20",
       }),
@@ -496,7 +499,7 @@ describe("handleNetprintRun (POST /kintai-relay/netprint-run)", () => {
     expect(JSON.parse(init.body as string)).toEqual({
       comp_id: "27324455",
       branch_cd: "2",
-      channel_id: "ch-test",
+      channel_id: CH_TEST,
       branch_name: "テスト用",
       date: "2026-08-20",
     });
@@ -531,7 +534,7 @@ describe("handleNetprintRun (POST /kintai-relay/netprint-run)", () => {
     const { env } = fakeEnv({
       NETPRINT_TARGETS: TARGETS,
       KINTAI_COMP_ID: "27324455",
-      doFetch: vi.fn(async () => new Response("LINEWORKS_BOT が未設定または不正です", { status: 503 })),
+      doFetch: vi.fn(async () => new Response("INTERNAL_SHARED_SECRET 未設定のため LINE WORKS へ通知できません", { status: 503 })),
     });
     const res = await handleNetprintRun(
       post("https://relay.internal/kintai-relay/netprint-run", {}),
