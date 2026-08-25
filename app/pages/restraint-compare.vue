@@ -8,7 +8,14 @@ const results = ref<any[]>([])
 const error = ref('')
 const selectedFile = ref<File | null>(null)
 const filterMode = ref<'all' | 'diff' | 'unknown'>('unknown')
-const recalcStates = ref<Record<string, { loading: boolean; result: string }>>({})
+/**
+ * 1 人ぶんの再計算の状態。**`error` は「この結果が失敗である」ことを持つ** (Refs #917)。
+ *
+ * 文字列だけだと表示側の色分けが `result.includes('一致')` のような**文言判定**になり、
+ * 失敗の理由文にたまたま「一致」の 2 文字が入った回に緑で出る。**失敗かどうかは
+ * 文言から読み取らない。**
+ */
+const recalcStates = ref<Record<string, { loading: boolean; result: string; error?: boolean }>>({})
 const flashDrivers = ref<Set<string>>(new Set())
 
 async function onFileChange(e: Event) {
@@ -51,7 +58,34 @@ const summary = computed(() => {
 })
 
 const batchRecalcRunning = ref(false)
+/** 一括再計算の進捗。**ボタンのラベルにしか出ない**ので、走り終われば消えてよい。 */
 const batchRecalcProgress = ref('')
+/**
+ * 一括再計算が失敗した理由 (Refs #917)。
+ *
+ * **進捗と分けてある**のは、進捗が `batchRecalcRunning` の間しか描かれないため —
+ * 理由を進捗に入れると、走り終わった瞬間にボタンのラベルが通常文言に戻り、
+ * **失敗が画面から消える**。理由はこちらに入れて `UAlert` で出し続ける。
+ */
+const batchRecalcError = ref('')
+
+/**
+ * 再計算ストリームが**例外で終わった**ときに人に見せる 1 文 (Refs #917)。
+ *
+ * **進捗を 1 つでも受け取っていれば、切れたのは接続だけでサーバ側は走り続けている
+ * ことがある**ので、「失敗しました」と断定しない。ここは表の行に出るセルなので
+ * `restraint-report.vue` の長い文面は入らない — 短く、理由は残す。
+ *
+ * ⚠️ `app/pages/restraint-report.vue:133` に同名・同趣旨のローカル関数がある。
+ * **#903 の 2 段目 (あちらを編集中) がマージされたら `app/utils/` へ 1 本に統合する。**
+ * 今そちらを動かすと編集中のファイルと衝突するので、重複を承知でここに置く。
+ */
+function recalcStreamFailure(e: unknown, gotAnyEvent: boolean): string {
+  const reason = e instanceof Error ? e.message : String(e)
+  return gotAnyEvent
+    ? `再計算が途中で切れました (${reason})。完了したかは不明 — 再比較で確認`
+    : `再計算を開始できませんでした (${reason})`
+}
 
 async function recalcDiffsOnly() {
   const driversWithDiffs = results.value.filter((r: any) => r.diffs.length > 0 && r.driver_id)
@@ -67,11 +101,17 @@ async function recalcDiffsOnly() {
   const year = 2026
 
   batchRecalcRunning.value = true
+  batchRecalcError.value = ''
   const driverIds = driversWithDiffs.map((r: any) => r.driver_id)
-  const driverMap = Object.fromEntries(driversWithDiffs.map((r: any) => [r.driver_cd, r.driver_name]))
+
+  /** `error` イベントを受け取ったか。**受け取ったら再比較しない。** */
+  let batchFailed = false
+  /** 進捗を 1 つでも受け取ったか (= 再計算が始まってはいた)。 */
+  let gotAnyEvent = false
 
   try {
     await recalculateDriversBatch(year, month, driverIds, (evt: BatchRecalcEvent) => {
+      gotAnyEvent = true
       if (evt.event === 'progress') {
         const errors = (evt as any).errors || 0
         batchRecalcProgress.value = `${evt.current}/${evt.total}名${errors > 0 ? ` (${errors}エラー)` : ''}`
@@ -79,14 +119,37 @@ async function recalcDiffsOnly() {
         const errors = (evt as any).errors || 0
         batchRecalcProgress.value = `${(evt as any).done || evt.total}名完了${errors > 0 ? ` ${errors}エラー` : ''} 再比較中...`
       } else if (evt.event === 'error') {
-        batchRecalcProgress.value = evt.message || 'エラー'
+        // `/api/recalculate-drivers` は SSE で、alc は **DB エラーでも 200 を返す**
+        // (エラーは本文に入る)。**失敗を知る手段はこの error イベントだけ**なので、
+        // 進捗欄に入れて `finally` で消す、をやめる (Refs #917)。
+        batchFailed = true
+        batchRecalcError.value = evt.message || '一括再計算に失敗しました'
       }
     })
+  } catch (e: unknown) {
+    if (!batchFailed) batchRecalcError.value = recalcStreamFailure(e, gotAnyEvent)
+    batchFailed = true
+  }
+
+  try {
+    // 失敗した回に再比較すると、**再計算されていない古い値**で結果が出る。続行しない。
+    if (batchFailed) return
+
+    // ★ ここから先で落ちたのは**再比較**であって再計算ではない。`recalcDriver` と
+    //   同じ扱いにする — 「再計算に失敗」と読めると、**もう一度 全員ぶん回さないと
+    //   直らない**ように見える (Refs #917)。
+    //   なお `runCompare()` は自分で catch して `error` に入れる (**throw しない**)
+    //   ので、例外ではなく `error` を見て判定する。throw するように変えるなら
+    //   ここも直すこと。
     await runCompare()
-  } catch (e: any) {
-    batchRecalcProgress.value = e.message || 'エラー'
+    if (error.value) {
+      batchRecalcError.value = `一括再計算は終わりましたが再比較に失敗しました (${error.value})`
+      // 同じことを 2 つの UAlert で言わない (理由は上の 1 文に畳んである)。
+      error.value = ''
+    }
   } finally {
     batchRecalcRunning.value = false
+    // 進捗はボタンのラベルなので消してよい。**理由は batchRecalcError に残る。**
     batchRecalcProgress.value = ''
   }
 }
@@ -104,19 +167,41 @@ async function recalcDriver(driverId: string, driverName: string, driverCd: stri
   const key = driverCd
   recalcStates.value[key] = { loading: true, result: '再計算中...' }
 
+  /** `error` イベントを受け取ったか。**受け取ったら再比較も「一致！」も出さない。** */
+  let recalcFailed = false
+  /** 進捗を 1 つでも受け取ったか (= 再計算が始まってはいた)。 */
+  let gotAnyEvent = false
+
   try {
     await recalculateDriverStream(year, month, driverId, (evt: RecalcProgressEvent) => {
+      gotAnyEvent = true
       if (evt.event === 'progress') {
         const step = evt.step === 'download' ? 'DL' : '処理'
         recalcStates.value[key] = { loading: true, result: `${step}中 (${evt.current}/${evt.total})` }
       } else if (evt.event === 'done') {
         recalcStates.value[key] = { loading: true, result: '再比較中...' }
       } else if (evt.event === 'error') {
-        recalcStates.value[key] = { loading: false, result: evt.message || 'エラー' }
+        // `/api/recalculate-driver` は SSE で、alc は **DB エラーでも 200 を返す**。
+        // **失敗を知る手段はこの error イベントだけ** (Refs #917)。
+        recalcFailed = true
+        recalcStates.value[key] = { loading: false, result: evt.message || '再計算に失敗しました', error: true }
       }
     })
+  } catch (e: unknown) {
+    // **error イベントで受け取った理由の方が具体的**なので、既に持っていれば上書きしない。
+    if (!recalcFailed) {
+      recalcStates.value[key] = { loading: false, result: recalcStreamFailure(e, gotAnyEvent), error: true }
+    }
+    return
+  }
 
-    // 再計算完了 → 1件だけ再比較
+  // ★ 失敗した回はここで止める。以前はこの下の「再計算完了 → 再比較」が
+  //   **エラーかどうかを一切見ずに** `一致！` / `完了` で上書きしていたため、
+  //   **理由が数ミリ秒だけ出て消え、失敗が成功に読めていた** (Refs #917)。
+  if (recalcFailed) return
+
+  // 再計算完了 → 1件だけ再比較
+  try {
     if (selectedFile.value) {
       const updated = await compareRestraintCsv(selectedFile.value, driverCd)
       if (updated.length > 0) {
@@ -135,8 +220,11 @@ async function recalcDriver(driverId: string, driverName: string, driverCd: stri
     } else {
       recalcStates.value[key] = { loading: false, result: '完了' }
     }
-  } catch {
-    recalcStates.value[key] = { loading: false, result: 'エラー' }
+  } catch (e: unknown) {
+    // **再計算は終わっている**。ここで落ちたのは再比較なので、そう書く —
+    // 「再計算に失敗」と出すと、もう一度回さないと直らないように読める。
+    const reason = e instanceof Error ? e.message : String(e)
+    recalcStates.value[key] = { loading: false, result: `再計算は終わりましたが再比較に失敗しました (${reason})`, error: true }
   }
 }
 </script>
@@ -170,6 +258,7 @@ async function recalcDriver(driverId: string, driverName: string, driverCd: stri
     </div>
 
     <UAlert v-if="error" :title="error" color="error" icon="i-lucide-circle-x" variant="subtle" />
+    <UAlert v-if="batchRecalcError" :title="batchRecalcError" color="error" icon="i-lucide-circle-x" variant="subtle" />
 
     <div v-if="loading" class="text-center py-8 text-gray-400">読み込み中...</div>
 
@@ -211,7 +300,7 @@ async function recalcDriver(driverId: string, driverName: string, driverCd: stri
           <span
             v-if="recalcStates[r.driver_cd]?.result && !recalcStates[r.driver_cd]?.loading"
             class="text-xs font-bold"
-            :class="recalcStates[r.driver_cd]!.result.includes('一致') ? 'text-green-600' : recalcStates[r.driver_cd]!.result.includes('未知') ? 'text-red-600' : 'text-yellow-600'"
+            :class="recalcStates[r.driver_cd]!.error ? 'text-red-600' : recalcStates[r.driver_cd]!.result.includes('一致') ? 'text-green-600' : recalcStates[r.driver_cd]!.result.includes('未知') ? 'text-red-600' : 'text-yellow-600'"
           >
             {{ recalcStates[r.driver_cd]!.result }}
           </span>

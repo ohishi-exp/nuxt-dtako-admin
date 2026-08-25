@@ -137,7 +137,10 @@ async function splitAll() {
         splitResult.value = evt.message || '失敗'
       }
     })
-    if (!gotDone) splitResult.value = '処理中...'
+    // done も error も来ずにストリームが閉じた = 何が起きたか分からない。
+    // 「処理中...」は**永久に動いているように読める**ので出さない。`scraper.vue` の
+    // 同じ状況 (`splitCsvAllStream` の同じ関数) と同じく loud に出す (Refs #917)。
+    if (!gotDone) splitResult.value = '応答が空でした (alc から done イベントが来ていません)'
   } catch (e: any) {
     splitResult.value = e.message || '失敗'
   } finally {
