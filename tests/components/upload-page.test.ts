@@ -10,8 +10,11 @@
  * あわせて、この画面が同じ見た目にしてはいけないもの:
  *
  * 1. **読み込み中と 0 件** (保留中・履歴の両方)
- * 2. **リランの成功と失敗** (同じ場所に出るので色と文言で撃ち分ける)
- * 3. **分割の「完了」と「N 件失敗したまま」** — 200 が返っても個別 PUT は失敗しうる
+ * 2. **★ 「取得に失敗した」と「本当に 0 件」** (Refs #911) — 以前は `catch` を
+ *    握り潰して空配列にするだけで、どちらも「ありません」と読めた。**逆方向も同じだけ
+ *    大事**で、「読めませんでした」しか出さないと**本当に 0 件の回**まで異常に見える
+ * 3. **リランの成功と失敗** (同じ場所に出るので色と文言で撃ち分ける)
+ * 4. **分割の「完了」と「N 件失敗したまま」** — 200 が返っても個別 PUT は失敗しうる
  *
  * テストの型は `members-page.test.ts` と同じ。
  */
@@ -311,15 +314,50 @@ describe('/upload デジタコ CSV アップロード', () => {
       expect(api.getPendingUploads).toHaveBeenCalledTimes(2)
     })
 
-    // **現状の挙動を固定するテスト。** `loadPending` は catch を握りつぶして空配列に
-    // するので、**取得に失敗したときと本当に 0 件のときが同じ見た目**になる。
-    // 本番コードは #903 の制約 (テストのために本番コードを変えない) で触っていない。
-    it('取得に失敗すると空一覧になる (失敗と 0 件が同じ見た目 — 現状の挙動)', async () => {
-      api.getPendingUploads.mockRejectedValue(new Error('落ちた'))
-      const w = mountPage()
-      await flushPromises()
-      expect(w.text()).toContain('保留中のアップロードはありません')
-      expect(w.text()).not.toContain('落ちた')
+    describe('★ 「取得に失敗した」と「本当に 0 件」を別の文にする (Refs #911)', () => {
+      it('失敗したら理由を出し、「ありません」とは言わない', async () => {
+        api.getPendingUploads.mockRejectedValue(new Error('API エラー (503): R2 が未設定です'))
+        const w = mountPage()
+        await flushPromises()
+        expect(w.text()).toContain('保留中のアップロードを取得できませんでした (API エラー (503): R2 が未設定です)')
+        // **「無い」と言わない** — 読めなかっただけかもしれない
+        expect(w.text()).not.toContain('保留中のアップロードはありません')
+        // **断定もしない。**確かめ方まで出す (#910 と同じ形)
+        expect(w.text()).toContain('0 件なのか読めなかっただけなのかは、この画面では判りません')
+        expect(w.text()).toContain('再読み込みを押して確かめてください')
+      })
+
+      it('★ 逆方向: 本当に 0 件の回は今までどおり「ありません」だけ (異常に見せない)', async () => {
+        api.getPendingUploads.mockResolvedValue([])
+        const w = mountPage()
+        await flushPromises()
+        expect(w.text()).toContain('保留中のアップロードはありません')
+        expect(w.text()).not.toContain('取得できませんでした')
+        expect(w.text()).not.toContain('判りません')
+      })
+
+      it('Error 以外で失敗しても黙らず、[object Object] も出さない', async () => {
+        api.getPendingUploads.mockRejectedValue({ status: 503 })
+        const w = mountPage()
+        await flushPromises()
+        expect(w.text()).toContain('保留中のアップロードを取得できませんでした (理由を読めませんでした)')
+        expect(w.text()).not.toContain('[object Object]')
+        expect(w.text()).not.toContain('保留中のアップロードはありません')
+      })
+
+      it('再読み込みで読めたら失敗表示は消える (前回の失敗が残らない)', async () => {
+        api.getPendingUploads.mockRejectedValueOnce(new Error('落ちた'))
+        const w = mountPage()
+        await flushPromises()
+        expect(w.text()).toContain('落ちた')
+
+        api.getPendingUploads.mockResolvedValue([pending()])
+        await w.findAll('button')[0]!.trigger('click')
+        await flushPromises()
+        expect(w.text()).not.toContain('落ちた')
+        expect(w.text()).not.toContain('取得できませんでした')
+        expect(w.text()).toContain('20260701.zip')
+      })
     })
   })
 
@@ -381,11 +419,35 @@ describe('/upload デジタコ CSV アップロード', () => {
       expect(w.text()).toContain('アップロード履歴なし')
     })
 
-    it('取得に失敗すると空一覧になる (失敗と 0 件が同じ見た目 — 現状の挙動)', async () => {
-      api.getUploads.mockRejectedValue(new Error('落ちた'))
-      const w = mountPage()
-      await flushPromises()
-      expect(w.text()).toContain('アップロード履歴なし')
+    describe('★ 「取得に失敗した」と「本当に 0 件」を別の文にする (Refs #911)', () => {
+      it('失敗したら理由を出し、「履歴なし」とは言わない', async () => {
+        api.getUploads.mockRejectedValue(new Error('API エラー (502): upstream が落ちています'))
+        const w = mountPage()
+        await flushPromises()
+        expect(w.text()).toContain('アップロード履歴を取得できませんでした (API エラー (502): upstream が落ちています)')
+        expect(w.text()).not.toContain('アップロード履歴なし')
+        expect(w.text()).toContain('0 件なのか読めなかっただけなのかは、この画面では判りません')
+      })
+
+      it('★ 逆方向: 本当に 0 件の回は今までどおり「アップロード履歴なし」だけ', async () => {
+        api.getUploads.mockResolvedValue([])
+        const w = mountPage()
+        await flushPromises()
+        expect(w.text()).toContain('アップロード履歴なし')
+        expect(w.text()).not.toContain('取得できませんでした')
+      })
+
+      it('再読み込みで読めたら失敗表示は消える', async () => {
+        api.getUploads.mockRejectedValueOnce(new Error('落ちた'))
+        const w = mountPage()
+        await flushPromises()
+        expect(w.text()).toContain('アップロード履歴を取得できませんでした (落ちた)')
+
+        api.getUploads.mockResolvedValue([uploaded()])
+        await w.findAll('button')[1]!.trigger('click')
+        await flushPromises()
+        expect(w.text()).not.toContain('取得できませんでした')
+      })
     })
 
     it('再読み込みでもう一度取りに行く', async () => {
