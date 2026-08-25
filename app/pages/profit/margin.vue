@@ -1136,7 +1136,11 @@ async function run() {
       legSalesByUnko.value = sales.legSales
     }
     catch (e) {
-      salesError.value = e instanceof Error ? e.message : String(e)
+      // **`e.message` は使わない** (Refs #890)。売上は `/api/ichiban/**` (自前の
+      // server route) 越しなので、proxy が投げる 502/503 の日本語は JSON 本文にしか
+      // 載らない。本番は HTTP/3 で reason phrase 自体が無く、`e.message` は
+      // `[GET] "…": 503` で終わる。
+      salesError.value = describeApiError(e)
     }
 
     // 運行が月を跨いだぶんの注記 (Refs #760 の 16)。**キャッシュにも入れる。**
@@ -1171,7 +1175,8 @@ async function run() {
       costs.value = gathered
     }
     catch (e) {
-      costError.value = e instanceof Error ? e.message : String(e)
+      // 売上と同じ理由で本文から読む (Refs #890)。経費も `/api/ichiban/**` 越し。
+      costError.value = describeApiError(e)
     }
 
     status.value = 'ready'
@@ -1244,7 +1249,12 @@ async function loadKushiroMinWageMaster() {
     kushiroMinWageError.value = res.data === null ? '最低賃金マスタが R2 にありません (拘束時間・賃金タブの単価マスタで登録できます)' : ''
   }
   catch (e) {
-    kushiroMinWageError.value = `最低賃金マスタを読めませんでした — ${e instanceof Error ? e.message : String(e)}`
+    // **`/restraint-api/**` は Nitro ではない** (Refs #890)。`worker/index.ts` が
+    // relay worker (`SCRAPER_RELAY`) へ転送しており、本文は Nitro の
+    // `{error: true, …}` ではなく relay の **`{error: '<日本語>'}`**
+    // (`dtako-scraper-relay-do.ts` の `dvrJsonError`)。`describeApiError` は
+    // `d.error` を最初に見るので、この形なら 1 発で拾える。
+    kushiroMinWageError.value = `最低賃金マスタを読めませんでした — ${describeApiError(e)}`
   }
 }
 
@@ -1349,7 +1359,8 @@ async function loadMarginVersions(ymValue: string) {
     marginVersions.value = []
     marginVersionsNote.value = ''
     marginVersionsUnreadableNote.value = ''
-    marginVersionsError.value = `R2 に残した版の一覧を読めませんでした — ${e instanceof Error ? e.message : String(e)}`
+    // 理由は JSON 本文から読む (Refs #890)。`e.message` だと status しか出ない。
+    marginVersionsError.value = `R2 に残した版の一覧を読めませんでした — ${describeApiError(e)}`
   }
   finally {
     marginVersionsLoading.value = false
@@ -1416,7 +1427,8 @@ async function runMarginDiff() {
   catch (e) {
     // **空の差分に倒さない** — 「読めなかった」と「変わっていない」は別のこと。
     marginDiff.value = null
-    marginDiffError.value = `選んだ版の本文を読めませんでした — ${e instanceof Error ? e.message : String(e)}`
+    // 理由は JSON 本文から読む (Refs #890)。
+    marginDiffError.value = `選んだ版の本文を読めませんでした — ${describeApiError(e)}`
   }
   finally {
     marginDiffLoading.value = false
@@ -1584,7 +1596,8 @@ async function loadRestraint(force = false) {
   catch (e) {
     if (shownYm.value !== target) return
     restraintByCd.value = null
-    restraintError.value = `拘束時間を読めませんでした — ${e instanceof Error ? e.message : String(e)}`
+    // 最低賃金マスタと同じ relay 経由 (`{error: '<日本語>'}`、Refs #890)。
+    restraintError.value = `拘束時間を読めませんでした — ${describeApiError(e)}`
   }
   finally {
     loadingRestraint.value = false
@@ -1637,7 +1650,8 @@ async function loadActualPay(force = false) {
   catch (e) {
     if (shownYm.value !== target) return
     actualPayByCd.value = null
-    actualPayError.value = `実支給 (一番星の経費明細 08 給与) を読めませんでした — ${e instanceof Error ? e.message : String(e)}`
+    // `/api/ichiban/**` 越しなので本文から読む (Refs #890)。
+    actualPayError.value = `実支給 (一番星の経費明細 08 給与) を読めませんでした — ${describeApiError(e)}`
   }
   finally {
     loadingActualPay.value = false

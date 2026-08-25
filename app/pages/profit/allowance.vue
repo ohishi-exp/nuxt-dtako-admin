@@ -43,6 +43,7 @@
  * 表示側で差し替えると経路だけ直って数え方が置き去りになる。
  */
 import { getOperations, getOperationCsv, getDrivers } from '~/utils/api'
+import { describeApiError } from '~/utils/api-error'
 import { fetchAllPages } from '~/utils/paged-fetch'
 import type { Driver, OperationListItem } from '~/types'
 import { extractAllowanceLegs, extractCarryInUnloads, allowanceForLegs, addressToCity, cityToPlace } from '~/utils/allowance-trips'
@@ -272,7 +273,10 @@ async function pushProvisionalOverride(key: string, value: number | null) {
     overrideFailed.value = false
   }
   catch (e) {
-    overrideNote.value = allowanceOverrideSaveNote(null, e instanceof Error ? e.message : String(e))
+    // **`e.message` は使わない** (Refs #890)。`/api/profit/allowance-override` が
+    // `createError` に載せた日本語は JSON 本文にしか残らない (本番は HTTP/3 で
+    // reason phrase が無いため、`e.message` は `[POST] "…": 400` で終わる)。
+    overrideNote.value = allowanceOverrideSaveNote(null, describeApiError(e))
     overrideFailed.value = true
   }
 }
@@ -307,7 +311,8 @@ async function sendProvisionalToR2() {
     }
     catch (e) {
       failed += 1
-      if (firstError === '') firstError = e instanceof Error ? e.message : String(e)
+      // 同じ口 (`postProvisionalOverride`) なので同じく本文から読む (Refs #890)。
+      if (firstError === '') firstError = describeApiError(e)
     }
   }
   sendingOverrides.value = false
@@ -1372,7 +1377,9 @@ async function run(force = false) {
       Object.assign(slips, await runReconcile(allRows(), cached?.slips ?? {}, force))
     }
     catch (e) {
-      salesError.value = e instanceof Error ? e.message : String(e)
+      // 売上は `/api/ichiban/**` (自前の server route) 越し。理由は JSON 本文に
+      // しか残らないので本文から読む (Refs #890)。
+      salesError.value = describeApiError(e)
     }
     writeCache({
       ym: ym.value,

@@ -14,6 +14,7 @@
  * (マッチレベルは保存時に焼き込んだ値を読むだけなので、書き込みが止まっても正しい)。
  */
 import { snapshotUnreadableNote, type SnapshotListItem, type SnapshotListResult } from '~/utils/profit-r2'
+import { describeApiError } from '~/utils/api-error'
 import { shiftYmd } from '~/utils/profit-compare'
 
 /** 保存済み検証スナップショットの車輌・期間で `/profit/compare` (類似運行検索) に
@@ -58,7 +59,8 @@ async function loadSnapshotList() {
     // 一覧そのものを読めなかったときは注記を残さない — こちらは `snapshotListError`
     // が理由を言う。前の検索で出た件数を持ち越すと、今の結果の話に読める。
     snapshotUnreadable.value = ''
-    snapshotListError.value = e instanceof Error ? e.message : String(e)
+    // 理由は JSON 本文から読む (Refs #890)。`e.message` だと status しか出ない。
+    snapshotListError.value = describeApiError(e)
     snapshotListStatus.value = 'error'
   }
 }
@@ -102,7 +104,8 @@ async function confirmDeleteSnapshot() {
     deleteConfirmOpen.value = false
   }
   catch (e) {
-    deleteError.value = e instanceof Error ? e.message : String(e)
+    // 削除の失敗理由も JSON 本文から読む (Refs #890)。
+    deleteError.value = describeApiError(e)
   }
   finally {
     deleting.value = false

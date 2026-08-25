@@ -175,13 +175,28 @@ branches = true
 # **両側とも当たっている行には足さない** — 畳んで隠したものが無く、全行に同じ文字が
 # 並ぶと候補一覧が読みにくくなるだけ。
 # branches: script ブロックを instrumented コピー
-# (`operation-leg-sales.ts` と同じ計測器) に差し替えてテストを流し、**21 分岐のうち
-# 実分岐 19 が true/false 両方**を通ることを数えた (origin/main では 25 分岐。
-# `props.location?.originCity ?? ''` 2 組 = 4 分岐が `slipMatch` 側へ移った)。
+# (`operation-leg-sales.ts` と同じ計測器) に差し替えてテストを流し、**BR site 20 のうち
+# 18 が true/false 両方**を通ることを数えた (#890、`tests/components/ProfitPanel.test.ts`
+# + `operation-detail-route-map.test.ts` の 69 本を流して実測)。
+# **★ 数字の指標を取り違えないこと。**この repo では 3 通りの数え方が同居している:
+#
+# | 指標 | 数え方 | #890 の前 | #890 の後 |
+# |---|---|---|---|
+# | **BR() instrumented site** (この注記が言っているもの) | `if`/三項の条件 + `&&`/`\|\|` の両辺 + `??` の左辺 | **21** (両側 19) | **20** (両側 18) |
+# | v8 の branch **site** | `Object.keys(cov.b).length` | 43 | 42 |
+# | v8 の branch **arm** | `Object.values(cov.b).flat().length` | 83 | 81 |
+#
+# **#890 で `e instanceof Error ? … : …` を 1 つ消した**ので BR site が 1 つ (v8 の arm では
+# 2 つ) **減っている**。**増えていない** — 埋めるべき新しい分岐は無い。
+# (それ以前: origin/main で 25 分岐だった頃から `props.location?.originCity ?? ''` 2 組
+# = 4 分岐が `slipMatch` 側へ移って 21 になった。)
 # **側の一言の `v-if` は template 側**なので BR には出ない (compile 後の render 関数)。
 # 出る行・出ない行の両方を component テストで踏んで v8 の branches で見ている。
-# **残る 2 は `leg.originCity || '?'` の右辺の文字列リテラル** = 常に真で経路が分かれない
+# **残る 2 は `legLabel` の 1 行 (`:297`) にある `||` の右辺の文字列リテラル 2 つ**
+# = `leg.originCity || '?'` と `leg.destCity || '(卸地なし)'`。常に真で経路が分かれない
 # (v8 も分岐に数えないので gate は 100%。埋めようとすると通らないテストを書くことになる)。
+# **★ 同じ `||` の 2 辺ではなく、別々の `||` の右辺が 1 つずつ**である
+# (#890 で数え直したときに位置まで確認した。前の注記は `originCity` 側しか挙げていなかった)。
 [[files]]
 path = "app/components/ProfitPanel.vue"
 branches = true
