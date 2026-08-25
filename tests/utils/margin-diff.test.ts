@@ -681,7 +681,22 @@ describe('marginDiffNeedsMoreVersionsNote', () => {
     expect(note).toContain('版が 1 本しかないので、まだ差分を出せません')
     expect(note).toContain('比べるには 2 本以上要ります')
     // **どうすれば版が増えるのか**まで書く (待てば増えるものではない)。
-    expect(note).toContain('粗利タブで集計して、前の版と数字が変わったとき')
+    expect(note).toContain('粗利タブで集計して、前の版と中身が変わったとき')
+  })
+
+  it('★ 「同じ数字なら増えない」とは言わない — 数字はハッシュ対象の一部でしかない (Refs #891)', () => {
+    const note = marginDiffNeedsMoreVersionsNote(1)
+    // 本番 v0.0.556 で、運行 91 本 / 売上 ¥10,260,265 / 手当 ¥2,499,500 / 粗利 ¥4,467,597 が
+    // 4 項目とも同一の版が 2 本並んだ (形式 1 → 形式 2 の最初の集計)。**この 1 文が嘘だった。**
+    expect(note).not.toContain('同じ数字なら版は増えません')
+    // `marginSummaryHashInput` が数字の他に見ているもの (Refs #886) を、両方とも言う。
+    expect(note).toContain('集計した端末の設定 (燃費の上書き・運行経費の配分) が変わったとき')
+    expect(note).toContain('保存の形式が上がった後の最初の集計では増えます')
+  })
+
+  it('★ 逆方向の誤読も潰す — 「集計すれば必ず増える」と読ませない (#854 の型)', () => {
+    // 中身が同じなら `putVersionedProfit` は `changed: false` で本当に増やさない。
+    expect(marginDiffNeedsMoreVersionsNote(1)).toContain('どれも前の版と同じなら、何度集計しても増えません')
   })
 
   it('版が 0 本でも本数をそのまま言う', () => {
