@@ -9,6 +9,7 @@ import {
   marginSummaryHashInput,
   marginSummaryHistoryLine,
   marginSummarySaveNote,
+  MARGIN_SUMMARY_SAVE_FAILED_NEXT,
   marginVersionLabel,
   MARGIN_VERSION_UNNAMED,
   resolveCodeVersion,
@@ -440,6 +441,27 @@ describe('marginSummarySaveNote — どちらが正かを画面で明示する',
     expect(note).toContain('残せませんでした')
     expect(note).toContain('503')
     expect(note).toContain('この端末のキャッシュだけ')
+  })
+
+  it('★ 失敗の注記は「次にやること」まで出す (Refs #889)', () => {
+    const note = marginSummarySaveNote(null, '400 schemaVersion(=2)/ym/totals が必要です')
+    // 症状だけで終わらない — 開き直せば直る場合があると言う
+    expect(note).toContain('開き直して')
+    // ★ 逆方向の誤読も潰す — 開き直しても直らない回の意味を書いておく
+    expect(note).toContain('開き直しても同じなら R2 側の障害です')
+    expect(note).toContain(MARGIN_SUMMARY_SAVE_FAILED_NEXT)
+  })
+
+  it('文言は定数で固定する (画面の文と定数がずれない)', () => {
+    expect(MARGIN_SUMMARY_SAVE_FAILED_NEXT).toBe(
+      'まず画面を開き直してください — デプロイ後に古いタブが残っていただけならこれで直ります。'
+      + '開き直しても同じなら R2 側の障害です。',
+    )
+  })
+
+  it('成功の注記には「次にやること」を出さない (Refs #831 の文言は触らない)', () => {
+    expect(marginSummarySaveNote(result, null)).not.toContain('開き直して')
+    expect(marginSummarySaveNote({ ...result, changed: false }, null)).not.toContain('開き直して')
   })
 
   it('まだ保存していなければ何も出さない', () => {

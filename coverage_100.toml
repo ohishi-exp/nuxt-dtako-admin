@@ -242,6 +242,18 @@ branches = true
 path = "app/utils/wage-range-view.ts"
 branches = true
 
+# `$fetch` のエラーから人が読める理由を作る 1 関数だけのファイル (Refs #890)。
+# 元は `wage-range-view.ts` にあった `describeApiError` を、賃金以外 (粗利タブ等) から
+# 呼べるように切り出した。本文の拾い方を `??` から「文字列である最初の 1 つ」に直して
+# ある (Nitro の本文は `error` が真偽値で、`??` だとそこで止まる。dev で実測)。
+# **branches も 100%** — 実測 (Stmts/Branch/Funcs/Lines すべて 100) してから登録した。
+# BR() の instrumented コピーで数えた分岐は **13 site 中 12 が両側**。残る 1 つは
+# `|| String(e)` の**右辺** — `||` 連鎖の最終項なので**真偽で経路が分かれず**、
+# v8 も分岐に数えない (埋めようとすると通らないテストを書くことになる)。
+[[files]]
+path = "app/utils/api-error.ts"
+branches = true
+
 # RemoteApp ビューアの接続前処理 (Refs #693)。WebSocket / window.open / 待ち時間を
 # 差し替えられる形にしてあるので、実ブラウザ無しで全分岐を通せる。
 # **branches も 100%** — CI の実測 (Stmts/Branch/Funcs/Lines すべて 100) を見てから登録した。
