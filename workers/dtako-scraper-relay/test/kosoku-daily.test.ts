@@ -129,6 +129,34 @@ describe('parseKosokuDaily', () => {
     expect(parseKosokuDaily({ drivers: [null, 'x'] }).size).toBe(0)
     expect(parseKosokuDaily({ drivers: [{ driver: 1, days: 'x' }] }).size).toBe(0)
   })
+
+  // 上流は `driver` を指定すると `drivers` を持たず、その 1 名を month と並べて
+  // トップレベルへ展開して返す (Refs #602 / #599)。**この repo の呼び出し元は
+  // まだ `driver` を付けていない**ので予防的な固定 — 増えた瞬間に静かに 0 行に
+  // なるのを防ぐ
+  it('driver 指定の形 (drivers が無く 1 名がトップレベル) も読む (Refs #602)', () => {
+    const got = parseKosokuDaily({
+      month: '2026-04',
+      driver: 1104,
+      days: [shift()],
+      duplicate_rows: 0,
+    })
+    expect([...got.keys()]).toEqual(['1104'])
+    expect(got.get('1104')).toHaveLength(1)
+    // 全乗務員形と同じ値になる (読む場所が変わるだけ)
+    expect(got.get('1104')).toEqual(
+      parseKosokuDaily({ drivers: [{ driver: 1104, days: [shift()] }] }).get('1104'),
+    )
+  })
+
+  it('drivers 配列があればそちらが正 (トップレベルは見ない)', () => {
+    const got = parseKosokuDaily({
+      driver: 9999,
+      days: [shift()],
+      drivers: [{ driver: 1104, days: [shift()] }],
+    })
+    expect([...got.keys()]).toEqual(['1104'])
+  })
 })
 
 describe('kosokuPartsByDate', () => {
@@ -443,6 +471,33 @@ describe('parseFerryMinusByDriver', () => {
 
   it('マップが無い乗務員は載らない', () => {
     expect(parseFerryMinusByDriver({ drivers: [{ driver: 1026 }] }).size).toBe(0)
+  })
+})
+
+// 日別マップ 6 本は `parseDateMapByDriver` の薄い包みなので、形状の吸収は
+// 代表 2 本で固定する (Refs #602)
+describe('日別マップも driver 指定の形を読む (Refs #602)', () => {
+  it('drivers が無くトップレベルに展開された 1 名を読む', () => {
+    const drift = parsePaperDriftByDriver({
+      month: '2026-03',
+      driver: 1194,
+      days: [],
+      paper_drift_by_date: { '2026-03-11': 3 },
+      duplicate_rows: 0,
+    })
+    expect(drift.get('1194')?.get('2026-03-11')).toBe(3)
+
+    const ferry = parseFerryMinusByDriver({
+      month: '2026-05',
+      driver: 1026,
+      days: [],
+      ferry_minus_by_date: { '2026-05-01': 76 },
+    })
+    expect(ferry.get('1026')?.get('2026-05-01')).toBe(76)
+  })
+
+  it('マップが無ければ載らない (単一乗務員形でも同じ)', () => {
+    expect(parsePaperDriftByDriver({ month: '2026-03', driver: 1194, days: [] }).size).toBe(0)
   })
 })
 

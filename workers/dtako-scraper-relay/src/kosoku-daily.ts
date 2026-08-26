@@ -147,7 +147,31 @@ function toPart(r: Record<string, unknown>): KosokuCalendarPart {
 }
 
 /**
- * `{drivers: [{driver, days}]}` を乗務員CD 引きに直す。
+ * 応答から**乗務員エントリの配列**を取り出す。**上流の形は `driver` クエリの有無で
+ * 変わる** (Refs #602。`/kintai/diff` 経路では `kintai-diff.ts` の
+ * `onpremKosokuDailyToMap` が同じ罠を吸収済み、Refs #599 / #600):
+ *
+ * - `driver` 省略 = `{month, drivers: [{driver, days, ...}]}` (全乗務員)
+ * - `driver` 指定 = `{month, driver, days, ...}` (**`drivers` が無く**、1 名がトップレベルへ展開)
+ *
+ * 単一乗務員形は**トップレベルをそのまま乗務員エントリ 1 件として読む** — `driver` /
+ * `days` / 日別マップのキーが `drivers[]` の 1 要素と同じ位置にあるので、同じループに
+ * 載る。nginx の `/time-card/pdf-json` を読む `timecard-compare.ts` の `parsePdfJson`
+ * が使っている `else entries = [b]` と同じ形で、新しい流儀は作らない。
+ *
+ * **この repo の呼び出し元 3 箇所 (`loadKosokuShifts` / `loadCompareKosoku` /
+ * kyuyo-mcp の `get_timecard_diff`) はいずれも `driver` を付けない**ので、いまは常に
+ * `drivers` 配列の側を通る。予防的な整合であって現行の応答での結果は変わらない —
+ * `driver=` 付きで呼ぶ経路が増えた瞬間に静かに 0 行になるのを先に塞いでおく。
+ */
+function driverEntriesOf(body: unknown): unknown[] {
+  if (typeof body !== "object" || body === null) return [];
+  const drivers = (body as { drivers?: unknown }).drivers;
+  return Array.isArray(drivers) ? drivers : [body];
+}
+
+/**
+ * 上流の応答を乗務員CD 引きに直す (**両方の形を読む** — [driverEntriesOf])。
  *
  * - **乗務員CD は `String(Number(...))` で正規化**する (打刻側と同じ規則)
  * - **日付が `YYYY-MM-DD` でない勤務は捨てる** — 暦日に置き場が無い
@@ -155,10 +179,7 @@ function toPart(r: Record<string, unknown>): KosokuCalendarPart {
  */
 export function parseKosokuDaily(body: unknown): Map<string, KosokuShift[]> {
   const out = new Map<string, KosokuShift[]>();
-  if (typeof body !== "object" || body === null) return out;
-  const drivers = (body as { drivers?: unknown }).drivers;
-  if (!Array.isArray(drivers)) return out;
-  for (const entry of drivers) {
+  for (const entry of driverEntriesOf(body)) {
     if (typeof entry !== "object" || entry === null) continue;
     const e = entry as { driver?: unknown; days?: unknown };
     const cd = Number(e.driver);
@@ -260,13 +281,11 @@ export function parseGapMidnightByDriver(body: unknown): Map<string, Map<string,
   return parseDateMapByDriver(body, "gap_midnight_by_date");
 }
 
-/** `drivers[].<key>` の `{YYYY-MM-DD: 分}` を乗務員CD 引きに直す共通部。 */
+/** 乗務員エントリ ([driverEntriesOf]) の `<key>` にある `{YYYY-MM-DD: 分}` を
+ *  乗務員CD 引きに直す共通部。**単一乗務員形もそのまま読む** (Refs #602)。 */
 function parseDateMapByDriver(body: unknown, key: string): Map<string, Map<string, number>> {
   const out = new Map<string, Map<string, number>>();
-  if (typeof body !== "object" || body === null) return out;
-  const drivers = (body as { drivers?: unknown }).drivers;
-  if (!Array.isArray(drivers)) return out;
-  for (const entry of drivers) {
+  for (const entry of driverEntriesOf(body)) {
     if (typeof entry !== "object" || entry === null) continue;
     const e = entry as Record<string, unknown>;
     const cd = Number(e.driver);
