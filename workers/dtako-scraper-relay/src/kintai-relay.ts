@@ -870,6 +870,11 @@ export async function checkKyuyoAccess(
 
   let res: Response;
   try {
+    // ★★ **`onprem()` である。`gcp()` に「揃えて」はいけない。**
+    // このすぐ下の `relayWageSnapshotPut` / `relayWageRangeGet` は `gcp()` なので
+    // 揃えたくなるが、**allowlist を持っているのは ohishi-data (= `onprem()`) だけ**で、
+    // GCP 側の `KyuyoAuthState` は未設定。`gcp()` に変えると**全員 503** になり、
+    // 許可されている 1 名まで画面が死ぬ。理由の表は [`KYUYO_ACCESS_PATH`] の docs。
     res = await deps.onprem(KYUYO_ACCESS_PATH, {
       headers: { Authorization: `Bearer ${bearer}` },
     });
