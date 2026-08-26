@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from 'vitest'
 import type { MinWageRowAttrs } from '../../app/utils/restraint-wage-view'
-import { EMPTY_WAGE_REPORT_NOTICE, emptyWageReportCause, fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, groupMinWageRows, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
+import { EMPTY_WAGE_REPORT_NOTICE, emptyWageReportCause, fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, groupMinWageRows, isMonthlyOvertimeOver60h, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, MONTHLY_OVERTIME_THRESHOLD_MINUTES, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
 
 describe('fmtMinutes', () => {
   it('時間+分を "XhYYm" 表記にする', () => {
@@ -514,5 +514,31 @@ describe('fmtYen が `-0` を出さない (Refs #843)', () => {
     expect(fmtYen(50000)).toBe('50,000')
     expect(fmtYen(null)).toBe('-')
     expect(fmtYen(undefined)).toBe('-')
+  })
+})
+
+describe('isMonthlyOvertimeOver60h (月60時間超の時間外労働、Refs #670)', () => {
+  it('時間外+週40超過 だけで 60 時間を超えたら true', () => {
+    expect(isMonthlyOvertimeOver60h({ overtimeMinutes: 3601, nightOvertimeMinutes: 0 })).toBe(true)
+  })
+
+  it('ちょうど 60 時間は false (「超」なので等号は含まない)', () => {
+    expect(isMonthlyOvertimeOver60h({ overtimeMinutes: MONTHLY_OVERTIME_THRESHOLD_MINUTES, nightOvertimeMinutes: 0 })).toBe(false)
+    expect(isMonthlyOvertimeOver60h({ overtimeMinutes: 3000, nightOvertimeMinutes: 600 })).toBe(false)
+  })
+
+  it('60 時間に届かなければ false', () => {
+    expect(isMonthlyOvertimeOver60h({ overtimeMinutes: 1200, nightOvertimeMinutes: 300 })).toBe(false)
+  })
+
+  // ★ この形が壊れていた: 時間外深夜を足さないと 60h 超が見逃される
+  // (2026-01〜07 の本番データで毎月 4〜9 名。例 1523/2026-06 は
+  //  時間外+週40超過 が 60h 未満なのに 時間外深夜 を足すと超える)
+  it('時間外深夜を足して初めて 60 時間を超える行も true', () => {
+    expect(isMonthlyOvertimeOver60h({ overtimeMinutes: 3540, nightOvertimeMinutes: 120 })).toBe(true)
+  })
+
+  it('時間外深夜だけで 60 時間を超えた行も true', () => {
+    expect(isMonthlyOvertimeOver60h({ overtimeMinutes: 0, nightOvertimeMinutes: 4000 })).toBe(true)
   })
 })
