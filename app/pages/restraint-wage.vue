@@ -167,6 +167,7 @@ import { parseKintaiAlcUploadResult } from '~/utils/kintai-alc-upload'
 import type { SnapshotSourceRow } from '~/utils/wage-snapshot-client'
 import { buildSnapshotPayload, contentHash, WAGE_LOGIC_VERSION } from '~/utils/wage-snapshot-client'
 import { describeApiError } from '~/utils/api-error'
+import { kyuyoAccessFromError, kyuyoAccessNotice, KYUYO_CONSEQUENCE_WAGE, type KyuyoAccessState } from '~/utils/kyuyo-access'
 import type { WageRangeResponse } from '~/utils/wage-range-view'
 import {
   defaultRange,
@@ -333,6 +334,28 @@ const kyuyoSyncedKeys = ref<Set<string>>(new Set())
  * 「取り込まれていない」を取り違えないための門 (Refs #554) — 未解決のうちに
  * 「取り込んでください」を出すと、待てば出るデータに対して取り込みを促してしまう。 */
 const kyuyoSyncedLoaded = ref(false)
+
+/**
+ * 給与データ (`/api/kyuyo/*`) を見てよいか、**upstream が返した答え** (Refs #556)。
+ *
+ * ★ 画面はここで認可を決めていない。判定しているのは rust-ichibanboshi の
+ * `kyuyo::introspect::authorize()` だけで (email allowlist、#82)、`server/api/kyuyo/**`
+ * は status も本文もそのまま passthrough する。**画面で隠しても API を直接叩けば
+ * 取れる**ので、ここでやっているのは「upstream の答えを捨てずに人へ説明する」だけ。
+ *
+ * 答えは `loadKyuyoSyncedMonths()` の応答から**ただで**採れる — あの口は既に開いた
+ * 直後に 1 回叩いており、upstream 側は derived SQLite を読むだけで OHKEN も
+ * 同時実行キャップも触らない。**プローブ用の追加リクエストは 1 本も足していない。**
+ *
+ * **`unknown` のまま = 何も言わない。**`loadKyuyoSyncedMonths()` はセッションが
+ * 無いときや `/restraint-api/archive/months` が失敗したときには**そもそも走らない**
+ * ので (呼び出し元は `loadArchiveMonths` の中)、「給与タブを開けば必ず判定が出る」
+ * わけではない。**判らないものを「見られます」とも「見られません」とも書かない。**
+ */
+const kyuyoAccess = ref<KyuyoAccessState>('unknown')
+
+/** 上を人が読む 1 文にしたもの。出さない状態では null (`allowed` / `unknown`)。 */
+const kyuyoAccessMessage = computed(() => kyuyoAccessNotice(kyuyoAccess.value, KYUYO_CONSEQUENCE_WAGE))
 /** 拘束サマリが ichiban に同期済みの月 (YYYY-MM) = 高速表示できる月 (Refs #460)。 */
 const ichibanMonths = ref<string[]>([])
 /** timecard 側が ichiban に同期済みの月 (YYYY-MM、#611 の無人同期、Refs #614)。
@@ -465,9 +488,14 @@ async function loadKyuyoSyncedMonths() {
     const res = await $fetch<{ entries: Array<{ company: string, month: string }> }>('/api/kyuyo/synced-months')
     kyuyoSyncedMonths.value = new Set(res.entries.map(e => e.month))
     kyuyoSyncedKeys.value = new Set(res.entries.map(e => `${e.company}|${e.month}`))
+    // 200 が返った = allowlist に載っている (Refs #556)
+    kyuyoAccess.value = 'allowed'
   }
-  catch {
-    // バッジが出ないだけ — エラー表示はしない
+  catch (e) {
+    // バッジが出ないだけ — **エラー表示はしない**。ただし status は捨てない:
+    // 403 (allowlist 外) と 503 (認可未設定・認可サーバ不達) は意味が違い、
+    // どちらも「給与列がなぜ空欄なのか」の答えになる (Refs #556)。
+    kyuyoAccess.value = kyuyoAccessFromError(e)
   }
   finally {
     // 失敗しても「解決済み」にする — 引けない環境で「読み込み中」を出し続けない
@@ -5503,6 +5531,21 @@ watch([compMap, kyuyoSyncedKeys], () => {
              給与比較タブの両方が使うので、タブを移動せずここで取れるようにする。
              期間は**勤務月**で指定する (画面の月タブと同じ基準)。
              操作用なので印刷対象外 (Refs #671)。 -->
+        <!-- 給与データの閲覧可否 (Refs #556)。**タブは消さない・disabled にしない** —
+             隠すと「権限があるのに使えない」と誤解され、しかも画面で隠しても API を
+             直接叩けば取れるので「制限したつもり」になる。制限の本体は upstream の
+             403 で、ここはその**説明**だけを担う。
+             403 (権限の話) と 503 (設定・障害の話) で**文を分ける** — 混ぜると
+             「権限があるのに自分には権限が無い」と誤読させる。判らないとき
+             (401 / 未確定) は**無言**。操作用ではないが紙にも要らないので印刷対象外。 -->
+        <p
+          v-if="kyuyoAccessMessage"
+          class="text-sm rounded-lg p-3 print:hidden"
+          :class="kyuyoAccess === 'denied'
+            ? 'text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950'
+            : 'text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-900'"
+        >{{ kyuyoAccessMessage }}</p>
+
         <div v-if="session" class="flex flex-wrap items-center gap-2 border border-sky-200 dark:border-sky-900 rounded-lg p-2 print:hidden">
           <span class="text-sm font-medium">給与DB</span>
           <USelect

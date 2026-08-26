@@ -20,6 +20,7 @@
  * データがブラウザに無くなったので不要になった。
  */
 import { defaultPayrollMonth } from '~/utils/ichiban-health'
+import { classifyKyuyoAccess, kyuyoAccessNotice, KYUYO_CONSEQUENCE_FETCH, type KyuyoAccessState } from '~/utils/kyuyo-access'
 import {
   buildFetchPlan,
   expandMonthRange,
@@ -51,6 +52,24 @@ const fetchErrors = ref<string[]>([])
 const synced = ref<SyncedMonthRow[]>([])
 const syncedLoading = ref(false)
 
+/**
+ * 給与データを見てよいか、**upstream が返した答え** (Refs #556)。
+ *
+ * ★ この画面は認可を決めていない。判定は rust-ichibanboshi の
+ * `kyuyo::introspect::authorize()` (email allowlist、#82) だけで、`server/api/kyuyo/**`
+ * は status をそのまま passthrough する。ここは**その答えを人へ説明する**だけ。
+ *
+ * 答えは `loadSynced()` の応答から**ただで**採れる — この画面は開いた直後に
+ * `GET /api/kyuyo/synced-months` を必ず 1 回叩いており (Refs #467)、upstream 側は
+ * derived SQLite を読むだけ。**プローブ用の追加リクエストは足していない。**
+ *
+ * **ページ全体が給与の画面なので、注記は一番上に出す** — 一覧が空なのが
+ * 「まだ引き直していない」なのか「そもそも見せてもらえない」なのかを、
+ * 押す前に読めるようにする。
+ */
+const kyuyoAccess = ref<KyuyoAccessState>('unknown')
+const kyuyoAccessMessage = computed(() => kyuyoAccessNotice(kyuyoAccess.value, KYUYO_CONSEQUENCE_FETCH))
+
 /** この画面で今回引き直した結果 (会社×月ごと)。**一覧に無い情報はここにだけ出す** —
  * DB 名と warnings は `synced-months` が返さないので、その場で分かる形で残す。 */
 interface SyncRunRow {
@@ -70,12 +89,21 @@ async function loadSynced() {
   syncedLoading.value = true
   try {
     const res = await fetch('/api/kyuyo/synced-months')
-    if (!res.ok) return
+    if (!res.ok) {
+      // 一覧は出さない。ただし status は捨てない — 403 (allowlist 外) と
+      // 503 (認可未設定・認可サーバ不達) は意味が違い、どちらも「一覧が空な
+      // 理由」の答えになる (Refs #556)。それ以外は無言のまま
+      kyuyoAccess.value = classifyKyuyoAccess(res.status)
+      return
+    }
     const body = await res.json().catch(() => null) as { entries?: unknown } | null
     synced.value = summarizeSyncedMonths(body?.entries)
+    // 200 が返った = allowlist に載っている (Refs #556)
+    kyuyoAccess.value = 'allowed'
   }
   catch {
-    // 一覧が出ないだけ — エラー表示はしない
+    // 一覧が出ないだけ — エラー表示はしない。到達できていないので
+    // 権限の話とも設定の話とも言えず、`unknown` (無言) のままにする
   }
   finally {
     syncedLoading.value = false
@@ -222,6 +250,18 @@ onMounted(() => {
       (1 社×1 ヶ月あたり 10〜20 秒。給与大臣 PC が古く DB を都度開くためで、異常ではありません)。
       <b>明細はこのブラウザに持ってきません</b> — 画面に出るのは件数だけで、金額・氏名は出しません。
     </p>
+
+    <!-- 給与データの閲覧可否 (Refs #556)。**この画面を隠さない** — 隠しても API を
+         直接叩けば取れるので「制限したつもり」になるし、権限があるのに使えないと
+         誤解される。制限の本体は upstream の 403 で、ここはその説明だけを担う。
+         403 (権限の話) と 503 (設定・障害の話) で文を分け、判らないときは無言。 -->
+    <p
+      v-if="kyuyoAccessMessage"
+      class="text-sm rounded-lg p-3 mb-3"
+      :class="kyuyoAccess === 'denied'
+        ? 'text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950'
+        : 'text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-900'"
+    >{{ kyuyoAccessMessage }}</p>
 
     <p v-if="pageError" class="text-sm text-red-600 dark:text-red-400 mb-3">
       {{ pageError }}

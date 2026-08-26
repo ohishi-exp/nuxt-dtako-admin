@@ -1243,3 +1243,28 @@ branches = true
 [[files]]
 path = "app/utils/download-blob.ts"
 branches = true
+
+# 給与データを見てよいか **upstream が返した答え**を画面の 1 文に翻訳するだけの
+# 純粋ロジック (Refs #556)。認可そのものは持たない — 判断しているのは
+# rust-ichibanboshi の `kyuyo::introspect::authorize()` だけで、この lib は
+# **403 (権限の話) と 503 (設定・障害の話) を撃ち分ける**のが全部。
+# 混ぜると「権限があるのに自分には権限が無いと誤解する」逆方向の誤読が出るので、
+# **文が入れ替わっていないこと** (`denied` に「認可設定」が出ない / `unconfigured` に
+# 「閲覧権限がありません」が出ない) をテストで固定してある。
+#
+# **「何が起きるか」は呼び出し側が渡す** (`KYUYO_CONSEQUENCE_WAGE` /
+# `KYUYO_CONSEQUENCE_FETCH`)。理由は共通でも結果は画面ごとに違い、**金額を 1 つも
+# 出さない `/kyuyo-fetch` に「金額列は空欄になります」と書く**欠陥を実際に踏んだ
+# (2026-08-26 のスタブ実測で発覚。読みでは出なかった) ので、**入れ替わらないこと**も
+# テストで固定してある (`KYUYO_CONSEQUENCE_FETCH` に「金額」が入らない)。
+#
+# branches: **v8 branch site 7 / arm 14、14 arm すべて被覆。死に分岐 0 件。**
+# stmt は 19 / 19。内訳は `(e ?? {})` の 1 site と `if` 6 site
+# (`typeof status === 'number'` / `typeof statusCode === 'number'` /
+#  `status === 403` / `status === 503` / `state === 'denied'` / `state === 'unconfigured'`)。
+# **BR() instrumented site も 7 / 7 が両側** (`tests/utils/kyuyo-access.test.ts` 21 本)。
+# 陰性対照つきで測った — `-t 'classifyKyuyoAccess'` だけに絞ると
+# **BR site が 7 → 2 に落ちる** (残るのは `classifyKyuyoAccess` 内の 2 site だけ)。
+[[files]]
+path = "app/utils/kyuyo-access.ts"
+branches = true
