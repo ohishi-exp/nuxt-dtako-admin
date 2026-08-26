@@ -6,6 +6,7 @@ import {
   kyuyoAccessNotice,
   kyuyoErrorStatus,
   KYUYO_CONSEQUENCE_FETCH,
+  KYUYO_CONSEQUENCE_RANGE,
   KYUYO_CONSEQUENCE_WAGE,
 } from '~/utils/kyuyo-access'
 
@@ -116,9 +117,34 @@ describe('kyuyoAccessNotice', () => {
     expect(fetchNotice).toContain('アーカイブ一覧')
   })
 
+  /**
+   * ★ #949 の一段深い形 — **同じ画面のタブごと**でも結果が違う (Refs #951)。
+   *
+   * 注記の `<p>` は全タブ共通領域にあるので、句を `KYUYO_CONSEQUENCE_WAGE` に
+   * 固定すると**期間集計タブでも「金額列は空欄のままになります」と出る**。
+   * 期間集計は `wage-range` 1 本を口ごと 403 にされるので、起きるのは
+   * 「表そのものが出ない」で別のこと。**「空欄」と書かない**ことを固定する。
+   */
+  it('期間集計タブの consequence は「空欄」ではなく「表示されない」と言う', () => {
+    expect(KYUYO_CONSEQUENCE_RANGE).not.toContain('空欄')
+    expect(KYUYO_CONSEQUENCE_RANGE).not.toContain('金額列')
+    expect(KYUYO_CONSEQUENCE_RANGE).toContain('期間集計')
+    expect(KYUYO_CONSEQUENCE_RANGE).toContain('表示されません')
+    // 3 つの句が互いに入れ替わっていないこと (定数名だけ足して中身を使い回す事故防止)
+    expect(new Set([KYUYO_CONSEQUENCE_WAGE, KYUYO_CONSEQUENCE_RANGE, KYUYO_CONSEQUENCE_FETCH]).size).toBe(3)
+
+    const rangeNotice = kyuyoAccessNotice('denied', KYUYO_CONSEQUENCE_RANGE)!
+    expect(rangeNotice).not.toContain('空欄')
+    expect(rangeNotice).toContain('期間集計')
+    // 503 (設定・障害) 側でも日本語として繋がる — 「復旧するまで…表示されません。」
+    expect(kyuyoAccessNotice('unconfigured', KYUYO_CONSEQUENCE_RANGE))
+      .toContain(`復旧するまで${KYUYO_CONSEQUENCE_RANGE}。`)
+  })
+
   it('句点は関数側で付ける (consequence には付けない)', () => {
     expect(KYUYO_CONSEQUENCE_WAGE.endsWith('。')).toBe(false)
     expect(KYUYO_CONSEQUENCE_FETCH.endsWith('。')).toBe(false)
+    expect(KYUYO_CONSEQUENCE_RANGE.endsWith('。')).toBe(false)
     expect(kyuyoAccessNotice('denied', W)).toContain(`${W}。`)
   })
 

@@ -124,6 +124,7 @@ import {
   buildDeps,
   decideFoldTrigger,
   foldMonth,
+  checkKyuyoAccess,
   FOLD_PAGE_MAX_DRIVERS,
   monthsCoveredByRange,
   relayKintaiDaySummaries,
@@ -3847,7 +3848,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return this.handleWageSnapshotPut(record!, request);
     }
     if (url.pathname === "/restraint-api/wage-range" && request.method === "GET") {
-      return this.handleWageRange(record!, url);
+      return this.handleWageRange(record!, url, request);
     }
     return dvrJsonError(404, "Not Found");
   }
@@ -7582,6 +7583,42 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /**
+   * 給与 allowlist の関門 (Refs #951)。**通れば null、通らなければ返す Response。**
+   *
+   * `wage-snapshot` / `wage-range` が扱う `paid` は**給与大臣の実支給額**で、
+   * `/api/kyuyo/payroll` と同じ値。なのにこの 2 本の認可は
+   * `authorizeRestraintViewer` の **tenant 単位**だけで、`/api/kyuyo/*` に掛かって
+   * いる **email allowlist を通っていなかった**。⇒ allowlist に載っている人が
+   * 保存した瞬間、実支給額が **tenant 全員の読める場所へ移る**。
+   * **「漏れ」ではなく「洗浄」**で、読み側だけ塞ぐと「見えないが汚せる」が残るので
+   * **保存側にも同じ関門を掛ける** (しかも上流へ POST する**前**に)。
+   *
+   * ## ★ 転送するのは**リクエスト自身の Bearer** (`record.token` ではない)
+   *
+   * viewer 経路の `record.token` は `token ?? "viewer"`、theearth セッション経路の
+   * それは **theearth のランダム token**。どちらもブラウザ JWT ではないので、
+   * 上流に渡すと `active:false` で**静かに 401** になる。
+   *
+   * ## ★ dev 短絡 (`RESTRAINT_DEV_VIEWER_COMP`) は**意図的に素通しする**
+   *
+   * 消し忘れではない。あの短絡は `authorizeRestraintViewer` の入口で
+   * **JWT ごと全部バイパス**しており (tenant 判定すら通さない)、**転送できる
+   * ブラウザ JWT がそもそも存在しない**。ここだけ tenant より厳しくしても
+   * security は 1 ミリも上がらず、**dev の実機確認ができなくなるだけ**。
+   * `RESTRAINT_DEV_VIEWER_COMP` は `wrangler.toml` に 1 行も無く
+   * (top-level / staging / preview のいずれにも無い)、`wrangler dev --var` で
+   * しか入らないので、**本番系では発火しない**。
+   */
+  private async kyuyoAccessGate(
+    deps: KintaiRelayDeps,
+    request: Request,
+  ): Promise<Response | null> {
+    if (this.env.RESTRAINT_DEV_VIEWER_COMP) return null;
+    const denial = await checkKyuyoAccess(deps, extractBearerToken(request.headers));
+    return denial ? dvrJsonError(denial.status, denial.message) : null;
+  }
+
+  /**
    * POST /restraint-api/wage-snapshot — 画面が確定させた 1 か月ぶんを GCP へ中継する
    * (Refs ohishi-exp/nuxt-dtako-admin#677)。
    *
@@ -7594,6 +7631,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   ): Promise<Response> {
     const ctx = await this.buildKintaiRelayContext(record.compId, "wage_snapshot");
     if (ctx instanceof Response) return ctx;
+    // **上流へ POST する前に**関門を通す — allowlist 外が Supabase に 1 行も
+    // 書けないようにする (読み側だけ塞ぐと「見えないが汚せる」が残る、#951)
+    const gate = await this.kyuyoAccessGate(ctx.deps, request);
+    if (gate) return gate;
     let body: unknown;
     try {
       body = await request.json();
@@ -7616,9 +7657,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * `wage-report` と違い**この口は計算しない** — 保存済みを SUM して返すだけなので
    * 1 往復で終わる (期間分の `wage-report` は 1 か月 15〜64 秒 × 月数かかる)。
    */
-  private async handleWageRange(record: TheearthSessionRecord, url: URL): Promise<Response> {
+  private async handleWageRange(
+    record: TheearthSessionRecord,
+    url: URL,
+    request: Request,
+  ): Promise<Response> {
     const ctx = await this.buildKintaiRelayContext(record.compId, "wage_range");
     if (ctx instanceof Response) return ctx;
+    // tenant を通した後に email allowlist を AND する (#951)
+    const gate = await this.kyuyoAccessGate(ctx.deps, request);
+    if (gate) return gate;
     try {
       return Response.json(await relayWageRangeGet(ctx.deps, record.compId, url.searchParams));
     } catch (err) {

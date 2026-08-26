@@ -168,7 +168,7 @@ import { parseKintaiAlcUploadResult } from '~/utils/kintai-alc-upload'
 import type { SnapshotSourceRow } from '~/utils/wage-snapshot-client'
 import { buildSnapshotPayload, contentHash, WAGE_LOGIC_VERSION } from '~/utils/wage-snapshot-client'
 import { describeApiError } from '~/utils/api-error'
-import { kyuyoAccessFromError, kyuyoAccessNotice, KYUYO_CONSEQUENCE_WAGE, type KyuyoAccessState } from '~/utils/kyuyo-access'
+import { kyuyoAccessFromError, kyuyoAccessNotice, KYUYO_CONSEQUENCE_RANGE, KYUYO_CONSEQUENCE_WAGE, type KyuyoAccessState } from '~/utils/kyuyo-access'
 import type { WageRangeResponse } from '~/utils/wage-range-view'
 import {
   defaultRange,
@@ -355,8 +355,17 @@ const kyuyoSyncedLoaded = ref(false)
  */
 const kyuyoAccess = ref<KyuyoAccessState>('unknown')
 
-/** 上を人が読む 1 文にしたもの。出さない状態では null (`allowed` / `unknown`)。 */
-const kyuyoAccessMessage = computed(() => kyuyoAccessNotice(kyuyoAccess.value, KYUYO_CONSEQUENCE_WAGE))
+/** 上を人が読む 1 文にしたもの。出さない状態では null (`allowed` / `unknown`)。
+ *
+ * ★ **句 (`consequence`) はタブで切り替える** (Refs #951)。この注記の `<p>` は
+ * 最初の `activeTab === '...'` ブロックより前 = **全タブ共通領域**にあるので、
+ * `KYUYO_CONSEQUENCE_WAGE` に固定すると**期間集計タブでも「金額列は空欄のままに
+ * なります」と出る**。期間集計で実際に起きるのは「表そのものが出ない」で別のこと
+ * (各定数の docs 参照)。**判定 (`kyuyoAccess`) は 1 本のまま** — プローブは増やさない。 */
+const kyuyoAccessMessage = computed(() => kyuyoAccessNotice(
+  kyuyoAccess.value,
+  activeTab.value === 'range' ? KYUYO_CONSEQUENCE_RANGE : KYUYO_CONSEQUENCE_WAGE,
+))
 /** 拘束サマリが ichiban に同期済みの月 (YYYY-MM) = 高速表示できる月 (Refs #460)。 */
 const ichibanMonths = ref<string[]>([])
 /** timecard 側が ichiban に同期済みの月 (YYYY-MM、#611 の無人同期、Refs #614)。

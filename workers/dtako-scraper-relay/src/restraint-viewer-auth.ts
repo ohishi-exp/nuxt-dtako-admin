@@ -32,22 +32,38 @@
  * | --- | --- | --- |
  * | 給与大臣の**実支給額** (支給項目) | `/api/kyuyo/payroll` | **email allowlist** (上流) |
  * | **単価マスタ × 拘束時間 の計算賃金** — 月次集計 CSV の `単価`/`…(円)`/`合計(円)`/`総支給時給(割増込)`、最低賃金チェック、タイムカードの残業額 | `/restraint-api/wage-report`・`/restraint-api/wage-master` (計算は `restraint-wage.ts`) | **tenant** (この関数) |
- * | **確定値スナップショット** (期間集計タブの `paid` / 差) | `/restraint-api/wage-snapshot`・`/restraint-api/wage-range` | **tenant** (この関数) |
+ * | **確定値スナップショット** (期間集計タブの `paid` / 差) | `/restraint-api/wage-snapshot`・`/restraint-api/wage-range` | **tenant (この関数) AND email allowlist** (Refs #951) |
  *
  * email allowlist の実体は**上流にしか無い** — rust-ichibanboshi の
  * `kyuyo::introspect::authorize()` (`#82`) が auth-worker introspect の `email` を
  * オンプレ設定 (`KYUYO_ALLOWED_EMAILS`) と突き合わせる。**この repo は allowlist を
  * 持っていない**し、持たせると二重管理になる (片方だけ更新されて食い違う)。
+ * 3 段目もこの正を**聞きに行く**だけで、写しは持たない
+ * (`kintai-relay.ts` の `checkKyuyoAccess`)。
  *
  * **なぜ 2 段目が tenant のままか**: あれは給与大臣の実データではなく、**この repo が
  * 持つ単価マスタから計算した労務管理値**で、最低賃金チェックはテナント内の総務が回す
- * 業務だから。**★ ただしこの線でよいかは未決** — 誰が金額を見てよいかは実装側で
- * 決められることではない。email に寄せるなら**上流に「見てよいか」を答える口
- * (`GET /api/kyuyo/access` 相当) を足す必要がある**ので、#556 に残件として置いてある。
+ * 業務だから。**★ ただしこの線でよいかは依然として未決** — 誰が金額を見てよいかは
+ * 実装側で決められることではない。**寄せる場合の道具はもう在る** — #951 で足した
+ * `GET /api/kyuyo/access` と `checkKyuyoAccess` を同じように AND するだけ。
+ * ⇒ **残っているのは「寄せるかどうか」の判断だけで、実装の障壁ではない** (#556)。
  *
- * **★ 3 段目 (確定値スナップショット) は上の論拠が当てはまらない。**`paid` は
- * 給与明細由来の**実支給額**で、この repo が計算した値ではない。**tenant のままなのは
- * 現状であって決定ではなく**、#556 で email 側へ寄せる対象 (**未決**)。
+ * **★ 3 段目 (確定値スナップショット) は上の論拠が当てはまらない**ので、
+ * **#951 で email 側へ寄せた (決着済み)。**`paid` は給与明細由来の**実支給額**で、
+ * この repo が計算した値ではない。#951 以前は tenant 単位だけだったため、
+ * **allowlist に載っている 1 名が保存した瞬間に、実支給額が tenant 全員の読める
+ * 場所へ移っていた** —「漏れ」ではなく**「洗浄」**。
+ *
+ * いまは `handleWageRange` / `handleWageSnapshotPut` が、この関数の tenant 判定を
+ * 通した**後**に `checkKyuyoAccess` (上流 `GET /api/kyuyo/access`) を AND する。
+ * **読みだけでなく保存にも掛ける** — 読みだけ塞ぐと「見えないが汚せる」が残る。
+ *
+ * **★ ブラウザ JWT を転送する経路は `deps.onprem()`** (`kintai-relay.ts` に理由の表)。
+ * wage-* 本体が `deps.gcp()` なのに合わせて `gcp()` へ揃えると、GCP 側には
+ * allowlist が無いので**全員 503** になる。
+ *
+ * **2 段目 (単価マスタ × 拘束時間の計算賃金) は tenant のまま**で、これは**据え置き**
+ * (#951 の対象外)。上の「なぜ 2 段目が tenant のままか」の論拠がそのまま生きている。
  *
  * ## ★ role (`VIEWER_ADMIN_ROLE`) と email allowlist は**優先関係ではない**
  *

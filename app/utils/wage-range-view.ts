@@ -5,15 +5,25 @@
  * ohishi-exp/rust-ichibanboshi の `GET /api/kintai/wage-range`、#292) が返す
  * 「乗務員 × 月の確定値」を、画面の形に組み替える:
  *
- * ## ★ この口は `/api/kyuyo/*` **ではない** — email 制限は掛かっていない (Refs #556)
+ * ## ★ この口は `/api/kyuyo/*` ではないが、**email 制限は掛かっている** (Refs #556 / #951)
  *
  * 以前ここには `GET /api/kyuyo/wage-range` と書いてあったが**どちらの経路とも違う**。
  * 上流の登録は `/api/kintai/wage-range` (`src/server.rs`) で、画面が叩くのは relay の
- * `/restraint-api/wage-range`。`/api/kyuyo/*` に掛かっている **email allowlist
- * (introspect gate、rust-ichibanboshi#82) は通らず**、認可は relay の **tenant 単位**
- * (`allowedViewerComps`) — 同じ tenant なら誰でも `paid` (給与支払額) が見える。
- * **「kyuyo だから email 制限済み」と読めてしまうのが嘘の本体**だった。
- * この線でよいかは**未決**で、#556 の残件 (上流に問い合わせ口を足す案) の対象。
+ * `/restraint-api/wage-range`。
+ *
+ * **#951 まではここに email 制限が無かった。** 認可は relay の tenant 単位だけで、
+ * 同じ tenant なら誰でも `paid` (給与支払額) が見えていた — `paid` は
+ * `/api/kyuyo/payroll` 由来の**実支給額**で、あちらは email allowlist で 1 名に
+ * 絞られているのに、**画面が保存した瞬間に tenant 全員の読める場所へ移っていた**
+ * (「漏れ」ではなく「洗浄」)。
+ *
+ * **いまは tenant AND email** — relay が `GET /api/kyuyo/access` (上流の
+ * `kyuyo::introspect::authorize()` そのもの) にブラウザ JWT を転送して可否を聞き、
+ * **通ったときだけ**この口を通す。allowlist の正は上流の `KYUYO_ALLOWED_EMAILS`
+ * 1 か所のままで、この repo は写しを持たない。
+ *
+ * ⇒ **allowlist 外の人には 403 が返り、この表は出ない** (列が空欄になるのではなく
+ * 表ごと出ない)。理由は `rangeError` に `describeApiError` でそのまま出る。
  *
  *   1 行 = 1 乗務員。**月ごとの差を横に並べ**、右端に**期間合計 (計算額 / 給与支払額 /
  *   差合計)** を置く。並び (会社 → 職員区分 → 営業所 → 乗務員CD) と 3 段
