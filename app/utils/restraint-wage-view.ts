@@ -178,6 +178,66 @@ export interface MinWageMaster {
 /** minWageMaster.prefectures / defaultPrefecture に使う固定キー。 */
 export const MIN_WAGE_DEFAULT_KEY = '全社共通'
 
+/**
+ * 簡易カード (最低賃金カードの「全社共通」履歴) の編集結果を、**既存のマスタに重ねて**返す
+ * 内部ヘルパ (Refs #961)。
+ *
+ * カードは `prefectures[MIN_WAGE_DEFAULT_KEY]` の行しか表示していない。したがって
+ * **カードから読み取れないもの — 他県の履歴 (厚労省取り込みの 47 県) と
+ * `branchToPrefecture` (拠点→県) — は 1 件も触らない**。
+ *
+ * 直す前は `{ prefectures: { [MIN_WAGE_DEFAULT_KEY]: entries }, branchToPrefecture: {} }` を
+ * 組み立てて丸ごと差し替えていたため、47 県と拠点対応がカードの「追加」「削除」を
+ * 押した瞬間に落ちていた (`setBranchPrefecture` 側は元から既存を保つ形だった)。
+ *
+ * `defaultPrefecture` — 拠点→県で引けなかった分の近似 (`minWageForBranch` /
+ * `resolveKushiroMinWage` が最後に見る) — の扱いは 3 通りに分けた:
+ * - **既に値があるなら触らない。** カードに出ていない設定なので、カードの操作で
+ *   他県 → `全社共通` に書き換えてはいけない
+ * - **未設定で、行が 1 件以上あるときだけ `MIN_WAGE_DEFAULT_KEY` を入れる。** これが無いと
+ *   カードだけで運用しているテナント (履歴が `全社共通` 1 本) で `minWageForBranch` が
+ *   額を一切引けなくなる — 直す前の挙動をここだけ保つ
+ * - **行が 0 件になり、かつ `defaultPrefecture` が `MIN_WAGE_DEFAULT_KEY` を指しているときだけ外す。**
+ *   空の履歴を指したままにしないため (直す前の `removeMinWageRate` と同じ判断)。
+ *   他県を指しているなら残す
+ */
+function withMinWageDefaultEntries(master: MinWageMaster, entries: MinWageEntry[]): MinWageMaster {
+  const next: MinWageMaster = {
+    ...master,
+    prefectures: { ...master.prefectures, [MIN_WAGE_DEFAULT_KEY]: entries },
+  }
+  if (!entries.length) {
+    if (next.defaultPrefecture === MIN_WAGE_DEFAULT_KEY) delete next.defaultPrefecture
+  }
+  else if (!next.defaultPrefecture) next.defaultPrefecture = MIN_WAGE_DEFAULT_KEY
+  return next
+}
+
+/**
+ * 簡易カードの「追加」— `全社共通` の履歴に 1 行 upsert したマスタを返す (Refs #961)。
+ *
+ * 同じ `effectiveFrom` が既にあれば額を差し替え、無ければ足して発効日順に並べ直す。
+ * 他県の履歴・`branchToPrefecture` は `withMinWageDefaultEntries` が保つ。
+ */
+export function upsertMinWageDefaultRate(master: MinWageMaster, effectiveFrom: string, rate: number): MinWageMaster {
+  const entries = [...(master.prefectures[MIN_WAGE_DEFAULT_KEY] ?? [])]
+  const at = entries.findIndex(e => e.effectiveFrom === effectiveFrom)
+  if (at >= 0) entries[at] = { effectiveFrom, rate }
+  else entries.push({ effectiveFrom, rate })
+  entries.sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom))
+  return withMinWageDefaultEntries(master, entries)
+}
+
+/**
+ * 簡易カードの「削除」— `全社共通` の履歴から発効日 1 件を落としたマスタを返す (Refs #961)。
+ *
+ * 他県の履歴・`branchToPrefecture` は `withMinWageDefaultEntries` が保つ。
+ */
+export function removeMinWageDefaultRate(master: MinWageMaster, effectiveFrom: string): MinWageMaster {
+  const entries = (master.prefectures[MIN_WAGE_DEFAULT_KEY] ?? []).filter(e => e.effectiveFrom !== effectiveFrom)
+  return withMinWageDefaultEntries(master, entries)
+}
+
 export interface ArchiveCsvEntry {
   key: string
   range: string
