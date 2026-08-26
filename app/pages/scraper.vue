@@ -14,6 +14,8 @@ import type { ScrapeResult, ScrapeHistoryItem, PendingUpload, ScrapeStatusEntry 
 import type { ScrapeProgressEvent } from '~/utils/api'
 import {
   ETAGS_MAX_RANGE_DAYS,
+  countMissingCsv,
+  formatMissingCsv,
   formatSplitAllDone,
   formatUnsplitTotal,
   initialSplitStatus,
@@ -493,13 +495,20 @@ async function drainSplitRetries() {
 
 const unsplitLine = ref<{ level: 'info' | 'error', text: string } | null>(null)
 
+// `unsplitLine` とは**別行**で出す (Refs #621 / #936)。同じ `etags` 応答から来るが
+// 数えているものが違う (未 split ではなく「R2 に CSV が無い」) ので、足しても
+// 同じラベルにしてもいけない。詳細は `scrape-split.ts` の `countMissingCsv`。
+const missingCsvLine = ref<{ level: 'info' | 'error', text: string } | null>(null)
+
 async function checkUnsplit(dates: string[]) {
   const range = unsplitCheckRange(dates)
   if (!range) {
     // 期間が alc の上限 (40 日) を超えた。黙って飛ばすと「確認した」と誤読されるので出す。
+    // 問い合わせ 1 本で 2 つとも見ているので、省略も 2 つ同時に起きる (1 行で言う)。
     unsplitLine.value = dates.length
-      ? { level: 'info', text: `未分割の確認は省略しました (対象期間が ${ETAGS_MAX_RANGE_DAYS} 日を超えています)` }
+      ? { level: 'info', text: `未分割 / R2 の CSV 有無の確認は省略しました (対象期間が ${ETAGS_MAX_RANGE_DAYS} 日を超えています)` }
       : null
+    missingCsvLine.value = null
     return
   }
   try {
@@ -507,12 +516,15 @@ async function checkUnsplit(dates: string[]) {
     unsplitLine.value = typeof res.unsplit_total === 'number'
       ? formatUnsplitTotal(range, res.unsplit_total)
       : { level: 'info', text: '未分割の件数を確認できませんでした (alc が unsplit_total を返していません)' }
+    missingCsvLine.value = formatMissingCsv(range, countMissingCsv(res.items))
   }
   catch (e) {
+    // 1 本の GET で両方見ているので、落ちたら両方見ていない。1 行にまとめて言う。
     unsplitLine.value = {
       level: 'error',
-      text: `未分割の確認に失敗しました: ${e instanceof Error ? e.message : '不明なエラー'}`,
+      text: `未分割 / R2 の CSV 有無の確認に失敗しました: ${e instanceof Error ? e.message : '不明なエラー'}`,
     }
+    missingCsvLine.value = null
   }
 }
 
@@ -1347,6 +1359,19 @@ onMounted(() => {
           : 'text-gray-500 dark:text-gray-400'"
       >
         {{ unsplitLine.text }}
+      </div>
+
+      <!-- 答え合わせ その 2 (Refs #621 / #936)。上の未分割とは**別勘定** —
+           `has_kudgivt = TRUE` なのに R2 に CSV が無い運行 (`items[].etag === null`)。
+           独立した行で出す (同じ数字として足さない・同じラベルにしない)。 -->
+      <div
+        v-if="missingCsvLine"
+        class="text-xs"
+        :class="missingCsvLine.level === 'error'
+          ? 'font-bold text-red-600 dark:text-red-400'
+          : 'text-gray-500 dark:text-gray-400'"
+      >
+        {{ missingCsvLine.text }}
       </div>
 
       <div class="space-y-2">

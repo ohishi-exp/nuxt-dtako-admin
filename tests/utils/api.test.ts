@@ -464,7 +464,9 @@ describe('api', () => {
     })
 
     it('getDtakoEventsEtags', async () => {
-      stubOk({ unsplit: [], unsplit_total: 0, warnings: [] })
+      // `items` は #936 で読むようになった (etag === null = R2 に CSV が無い)。
+      // `unsplit_total` とは別勘定なので、応答の形として両方載せておく。
+      stubOk({ items: [{ unko_no: 'u-1', etag: null }], unsplit: [], unsplit_total: 0, warnings: [] })
       await callApi(() => getDtakoEventsEtags('2026-07-01', '2026-07-31'))
       assertMock(() => {
         expect(mockFetch.mock.calls[0][0]).toBe(

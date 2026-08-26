@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   ETAGS_MAX_RANGE_DAYS,
+  countMissingCsv,
+  formatMissingCsv,
   formatSplitAllDone,
   formatUnsplitTotal,
   initialSplitStatus,
@@ -173,5 +175,85 @@ describe('splitLineClass', () => {
     expect(splitLineClass('unknown')).toContain('text-amber-600')
     expect(splitLineClass('failed')).toContain('font-bold')
     expect(splitLineClass('unrecovered')).toContain('text-red-600')
+  })
+})
+
+describe('countMissingCsv', () => {
+  it('counts items whose etag is null (= R2 に CSV が無い)', () => {
+    expect(countMissingCsv([
+      { unko_no: 'a', etag: '"abc"' },
+      { unko_no: 'b', etag: null },
+      { unko_no: 'c', etag: '"def"' },
+      { unko_no: 'd', etag: null },
+    ])).toEqual({ missing: 2, total: 4 })
+  })
+
+  it('未分割 (unsplit_total) とは母集団が違う — items は has_kudgivt = TRUE だけ', () => {
+    // #621 の 2026-03 と同型: 未分割 0 件でも etag無 は 0 にならない。
+    expect(countMissingCsv([{ etag: null }])).toEqual({ missing: 1, total: 1 })
+  })
+
+  it('returns 0/0 for an empty array (母集団ゼロ — 「見ていない」とは区別する)', () => {
+    expect(countMissingCsv([])).toEqual({ missing: 0, total: 0 })
+  })
+
+  it('returns null when items is not an array (見ていない を 0 件に倒さない)', () => {
+    expect(countMissingCsv(undefined)).toBeNull()
+    expect(countMissingCsv(null)).toBeNull()
+    expect(countMissingCsv({ items: [] })).toBeNull()
+  })
+
+  it('counts an item that is not an object as missing (安全側に倒す)', () => {
+    expect(countMissingCsv([null, undefined, { etag: '"abc"' }, {}]))
+      .toEqual({ missing: 3, total: 4 })
+  })
+})
+
+describe('formatMissingCsv', () => {
+  const range = { from: '2026-03-01', to: '2026-03-31' }
+
+  it('shouts when operations have no CSV in R2', () => {
+    const line = formatMissingCsv(range, { missing: 31, total: 1130 })
+    expect(line.level).toBe('error')
+    expect(line.text).toContain('31 件')
+    expect(line.text).toContain('1130 件中')
+    expect(line.text).toContain('2026-03-01〜2026-03-31')
+    expect(line.text).toContain('ログイン中のテナント')
+  })
+
+  it('says 「0 件」 and the population when there is no gap (空欄・「なし」で済ませない)', () => {
+    const line = formatMissingCsv(range, { missing: 0, total: 1130 })
+    expect(line.level).toBe('info')
+    expect(line.text).toContain('無い運行 0 件')
+    expect(line.text).toContain('1130 件を確認')
+    expect(line.text).toContain('ログイン中のテナント')
+  })
+
+  it('does not claim "穴なし" when the population is empty', () => {
+    const line = formatMissingCsv(range, { missing: 0, total: 0 })
+    expect(line.level).toBe('info')
+    expect(line.text).toContain('確認する対象がありません')
+    expect(line.text).not.toContain('無い運行 0 件')
+  })
+
+  it('says 見ていない (not 0 件) when items was missing', () => {
+    const line = formatMissingCsv(range, null)
+    expect(line.level).toBe('info')
+    expect(line.text).toContain('確認できませんでした')
+    expect(line.text).toContain('items')
+    expect(line.text).not.toContain('0 件')
+  })
+
+  it('collapses the period to a single date for a 1 日 range', () => {
+    expect(formatMissingCsv({ from: '2026-03-01', to: '2026-03-01' }, { missing: 0, total: 3 }).text)
+      .toContain('(2026-03-01、')
+  })
+
+  it('未分割の行と同じ文言にしない (別勘定だと読めること)', () => {
+    const missing = formatMissingCsv(range, { missing: 1, total: 10 }).text
+    const unsplit = formatUnsplitTotal(range, 1).text
+    expect(missing).not.toBe(unsplit)
+    expect(missing).not.toContain('未分割')
+    expect(unsplit).not.toContain('R2 に CSV')
   })
 })
