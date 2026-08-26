@@ -14,7 +14,7 @@ import {
   KintaiRelayError,
   MAX_MONTH_COUNT,
   decideFoldTrigger,
-  isFoldTargetComp,
+  judgeFoldScope,
   monthsCoveredByRange,
   foldMonth,
   FOLD_PAGE_MAX_DRIVERS,
@@ -341,20 +341,57 @@ describe("relayKintaiRecalc (ohishi-exp/rust-ichibanboshi#205 の 10)", () => {
   });
 });
 
-describe("isFoldTargetComp (Refs #633-22)", () => {
+describe("judgeFoldScope (Refs #633-22 / #944)", () => {
   it("KINTAI_COMP_ID と一致する会社だけが対象", () => {
-    expect(isFoldTargetComp({ compId: "27324455", kintaiCompId: "27324455" })).toBe(true);
-    expect(isFoldTargetComp({ compId: "75700192", kintaiCompId: "27324455" })).toBe(false);
+    expect(judgeFoldScope({ compId: "27324455", kintaiCompId: "27324455" })).toEqual({
+      inScope: true,
+    });
+    expect(judgeFoldScope({ compId: "75700192", kintaiCompId: "27324455" })).toMatchObject({
+      inScope: false,
+      reason: "out_of_scope",
+    });
   });
 
-  it("**KINTAI_COMP_ID 未設定は「対象なし」** — staging は意図的に置いていないので fail-closed が正しい向き", () => {
-    expect(isFoldTargetComp({ compId: "27324455", kintaiCompId: undefined })).toBe(false);
-    expect(isFoldTargetComp({ compId: "27324455", kintaiCompId: "" })).toBe(false);
-    expect(isFoldTargetComp({ compId: "27324455", kintaiCompId: "   " })).toBe(false);
+  it("**KINTAI_COMP_ID 未設定は「対象外」ではなく not_configured** (Refs #944 — 設定の穴を「意図的に飛ばした」に化けさせない)", () => {
+    for (const kintaiCompId of [undefined, "", "   "]) {
+      expect(judgeFoldScope({ compId: "27324455", kintaiCompId })).toMatchObject({
+        inScope: false,
+        reason: "not_configured",
+      });
+    }
+  });
+
+  it("**対象外 と 未設定 は別の理由になる** — 旧実装は両方 false を返し、呼び出し元が両方を skipped_out_of_scope として記録していた (Refs #944)", () => {
+    const outOfScope = judgeFoldScope({ compId: "75700192", kintaiCompId: "27324455" });
+    const notConfigured = judgeFoldScope({ compId: "27324455", kintaiCompId: undefined });
+    expect(outOfScope.inScope).toBe(false);
+    expect(notConfigured.inScope).toBe(false);
+    if (outOfScope.inScope || notConfigured.inScope) throw new Error("unreachable");
+    // ★ ここが本体。`false` どうしでは区別が付かなかった。**文面だけでなく
+    // `reason` が割れていること**を見る (文面の差で通ってしまうと空撃ちになる)
+    expect(outOfScope.reason).toBe("out_of_scope");
+    expect(notConfigured.reason).toBe("not_configured");
+    expect(outOfScope.reason).not.toBe(notConfigured.reason);
+  });
+
+  it("理由の文面が**どの宣言で決まったか**を名指しする (記録だけ見て (a) 意図的 / (b) 壊れて黙った を切り分けられるように)", () => {
+    const verdict = judgeFoldScope({ compId: "75700192", kintaiCompId: "27324455" });
+    expect(verdict.inScope).toBe(false);
+    if (verdict.inScope) throw new Error("unreachable");
+    expect(verdict.detail).toContain("75700192");
+    expect(verdict.detail).toContain("KINTAI_COMP_ID");
+    expect(verdict.detail).toContain("27324455");
+
+    const missing = judgeFoldScope({ compId: "27324455", kintaiCompId: "" });
+    if (missing.inScope) throw new Error("unreachable");
+    expect(missing.detail).toContain("KINTAI_COMP_ID");
+    expect(missing.detail).toContain("設定の穴");
   });
 
   it("前後の空白は両側とも無視する (var の書き間違いで静かに全社 skip にしない)", () => {
-    expect(isFoldTargetComp({ compId: " 27324455 ", kintaiCompId: " 27324455 " })).toBe(true);
+    expect(judgeFoldScope({ compId: " 27324455 ", kintaiCompId: " 27324455 " })).toEqual({
+      inScope: true,
+    });
   });
 });
 
@@ -363,12 +400,16 @@ describe("decideFoldTrigger (ohishi-exp/rust-ichibanboshi#205 の 10)", () => {
   const inScope = { compId: "27324455", kintaiCompId: "27324455" };
 
   it("アップロードが無ければ回さない", () => {
-    expect(decideFoldTrigger(null, inScope)).toEqual({ run: false, reason: "no_upload" });
+    expect(decideFoldTrigger(null, inScope)).toMatchObject({ run: false, reason: "no_upload" });
   });
 
   it("**split_failed > 0 の間は回さない** — 不完全データで上書きし成功に見えるより、古い値のままの方がマシ", () => {
-    expect(decideFoldTrigger({ splitFailed: 1 }, inScope)).toEqual({ run: false, reason: "split_failed" });
-    expect(decideFoldTrigger({ splitFailed: 42 }, inScope)).toEqual({ run: false, reason: "split_failed" });
+    expect(decideFoldTrigger({ splitFailed: 1 }, inScope)).toMatchObject({ run: false, reason: "split_failed" });
+    const many = decideFoldTrigger({ splitFailed: 42 }, inScope);
+    expect(many).toMatchObject({ run: false, reason: "split_failed" });
+    // 何件落ちたかを理由に書く (記録だけで規模が分かるように)
+    if (many.run) throw new Error("unreachable");
+    expect(many.detail).toContain("42");
   });
 
   it("split_failed が 0 か不明 (null、旧 alc) なら回す", () => {
@@ -378,13 +419,22 @@ describe("decideFoldTrigger (ohishi-exp/rust-ichibanboshi#205 の 10)", () => {
 
   it("**対象外の会社は取り込みが完全に成功していても回さない** (Refs #633-22 — comp 75700192 の 403 の実害)", () => {
     const outOfScope = { compId: "75700192", kintaiCompId: "27324455" };
-    expect(decideFoldTrigger({ splitFailed: 0 }, outOfScope)).toEqual({ run: false, reason: "out_of_scope" });
+    expect(decideFoldTrigger({ splitFailed: 0 }, outOfScope)).toMatchObject({ run: false, reason: "out_of_scope" });
   });
 
   it("**範囲の判定が先** — 対象外なら no_upload / split_failed ではなく out_of_scope を返す (「直せば畳める」と読めてしまうため)", () => {
     const outOfScope = { compId: "75700192", kintaiCompId: "27324455" };
-    expect(decideFoldTrigger(null, outOfScope)).toEqual({ run: false, reason: "out_of_scope" });
-    expect(decideFoldTrigger({ splitFailed: 3 }, outOfScope)).toEqual({ run: false, reason: "out_of_scope" });
+    expect(decideFoldTrigger(null, outOfScope)).toMatchObject({ run: false, reason: "out_of_scope" });
+    expect(decideFoldTrigger({ splitFailed: 3 }, outOfScope)).toMatchObject({ run: false, reason: "out_of_scope" });
+  });
+
+  it("**KINTAI_COMP_ID 未設定なら not_configured** — 取り込みが完全に成功していても、対象外とは別の理由で回さない (Refs #944)", () => {
+    const unset = { compId: "27324455", kintaiCompId: undefined };
+    expect(decideFoldTrigger({ splitFailed: 0 }, unset)).toMatchObject({
+      run: false,
+      reason: "not_configured",
+    });
+    expect(decideFoldTrigger(null, unset)).toMatchObject({ run: false, reason: "not_configured" });
   });
 });
 
