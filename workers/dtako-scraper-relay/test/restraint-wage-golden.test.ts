@@ -69,7 +69,7 @@ describe('restraint-wage golden (共有 fixture)', () => {
 
   it('シナリオの意図が成り立っている (golden の腐り検知)', () => {
     const byCd = Object.fromEntries(rows.map(r => [r.driverCd, r.wage]))
-    // 9901: 正常 — 換算時給も残業代も最低賃金水準以上
+    // 9901: 正常 — 総支給時給も残業代も最低賃金水準以上
     expect(byCd['9901']!.minWageDiff).toBeGreaterThanOrEqual(0)
     expect(byCd['9901']!.overtimePayDiff).toBeGreaterThanOrEqual(0)
     // 9902: 時給 900 円 < 最低賃金 956 円

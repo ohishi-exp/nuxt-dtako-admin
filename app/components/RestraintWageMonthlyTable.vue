@@ -13,6 +13,7 @@
  */
 import { computed } from 'vue'
 import type { TheearthBackfillKey, WageReportRow } from '~/utils/restraint-wage-view'
+import { GROSS_HOURLY_CAVEAT } from '~/utils/restraint-wage-view'
 
 const props = defineProps<{
   rows: WageReportRow[]
@@ -87,8 +88,8 @@ const hasAnyBackfill = computed(() =>
             <th v-for="c in WAGE_COLUMNS" :key="c.key" class="px-1.5 py-1.5 text-right wage-col">{{ c.label }}</th>
           </template>
           <th class="px-1.5 py-1.5 text-right wage-col">時間給<br>合計</th>
-          <th class="px-1.5 py-1.5 text-right wage-col">換算<br>時給</th>
-          <th class="px-1.5 py-1.5 text-right wage-col">最低賃金<br>差</th>
+          <th class="px-1.5 py-1.5 text-right wage-col" :title="GROSS_HOURLY_CAVEAT">総支給<br>時給</th>
+          <th class="px-1.5 py-1.5 text-right wage-col" :title="GROSS_HOURLY_CAVEAT + ' 参考値です。'">総支給時給<br>−最低賃金</th>
         </tr>
       </thead>
       <tbody>

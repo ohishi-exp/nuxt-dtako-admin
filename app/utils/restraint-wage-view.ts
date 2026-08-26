@@ -106,8 +106,14 @@ export interface WageRow {
   minutes: Record<WageCategoryKey, number>
   amounts: Record<WageCategoryKey, number> | null
   totalAmount: number | null
+  /** 支給見込 ÷ 基礎時間 (円/h)。**`totalAmount` は割増 (時間外・深夜・休日) を全部
+   * 含んだ合計**なので、**この値は法的な最低賃金判定ではない**。画面 / CSV では
+   * **「総支給時給」**と表示する (Refs #938。文言は {@link GROSS_HOURLY_CAVEAT})。 */
   hourlyEquivalent: number | null
   minWage: { rate: number | null, prefecture: string | null, mapped: boolean }
+  /** `hourlyEquivalent` − 最低賃金 (どちらか欠けたら null)。分子が割増込みなので
+   * **最低賃金法4条3項の判定ではなく参考値**。画面 / CSV では
+   * **「総支給時給−最低賃金」**と表示する (Refs #938)。 */
   minWageDiff: number | null
   minWageTotalPay: number | null
   minWageStatutoryPay: number | null
@@ -197,6 +203,27 @@ export const WAGE_COLUMNS: Array<{ key: WageCategoryKey, label: string }> = [
   { key: 'weekly40Excess', label: '週40超過' },
 ]
 
+/**
+ * 「総支給時給」「総支給時給−最低賃金」が何であって何でないか (Refs #938)。
+ * CSV の列名・月次集計表の `title`・docs で共有する 1 文。
+ *
+ * **`totalAmount` は割増を全部含んだ合計**なので、この値を最低賃金法4条3項の
+ * 判定に使うと誤りになる。「最低賃金チェック」タブの注記
+ * (`app/pages/restraint-wage.vue` の #937 の ⚠ 文) と矛盾させないこと。
+ */
+export const GROSS_HOURLY_CAVEAT = '割増 (時間外・深夜・休日) を全部含んだ総支給額 ÷ 基礎時間です。最低賃金法4条3項では割増を除いて比較するため、法的な最低賃金判定には使えません。'
+
+/**
+ * 月次集計 CSV の末尾 3 列の列名 (Refs #938)。画面の月次集計表と対になる。
+ * **`換算時給` / `最低賃金差` という旧名は、割増込みの値を法定判定と
+ * 読ませてしまうので使わない。**
+ */
+export const MONTHLY_CSV_WAGE_TAIL_HEADERS = [
+  '総支給時給(割増込)',
+  '最低賃金',
+  '総支給時給−最低賃金(法的判定ではない)',
+] as const
+
 export const HISTORY_RESULT_LABEL: Record<string, string> = {
   'new-version': '変更あり (新版)',
   'unchanged': '変更なし',
@@ -214,7 +241,7 @@ export function fmtMinutes(minutes: number | null | undefined): string {
 /**
  * 円 (null は "-")。
  *
- * **`"-0"` だけ `"0"` に差し替える** (Refs #843 / #928)。最低賃金差 (`minWageDiff`)
+ * **`"-0"` だけ `"0"` に差し替える** (Refs #843 / #928)。「総支給時給−最低賃金」(`minWageDiff`)
  * は負になり、`toLocaleString` の既定 (`maximumFractionDigits: 3`) は `-0` も
  * `-0.0005 < v < 0` の端数つきの負も `"-0"` にするので、`¥-0` / `+-0` と出ていた。
  *
