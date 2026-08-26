@@ -42,7 +42,9 @@ import {
   MIN_WAGE_JOB_GROUP_LABEL,
   minWageCompareRow,
   MONTHLY_CSV_WAGE_TAIL_HEADERS,
+  removeMinWageDefaultRate,
   theearthSyncState,
+  upsertMinWageDefaultRate,
 } from '~/utils/restraint-wage-view'
 import { buildTimecardSummary, buildTimecardTable, countWorkKinds, employedDaysInMonth } from '~/utils/timecard-view'
 import type { KosokuDay } from '~/utils/kosoku-daily'
@@ -4756,27 +4758,16 @@ function addMinWageRate() {
     minWageMessage.value = '最低賃金が不正です'
     return
   }
-  const entries = [...(minWageMaster.value.prefectures[MIN_WAGE_DEFAULT_KEY] ?? [])]
-  const existing = entries.findIndex(e => e.effectiveFrom === newMinWageFrom.value)
-  if (existing >= 0) entries[existing] = { effectiveFrom: newMinWageFrom.value, rate }
-  else entries.push({ effectiveFrom: newMinWageFrom.value, rate })
-  entries.sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom))
-  minWageMaster.value = {
-    prefectures: { [MIN_WAGE_DEFAULT_KEY]: entries },
-    branchToPrefecture: {},
-    defaultPrefecture: MIN_WAGE_DEFAULT_KEY,
-  }
+  // ★ このカードは `全社共通` の履歴しか出していない。マージは純関数に任せ、
+  // 他県 (厚労省取り込みの 47 県) と拠点→県の対応を巻き込まない (Refs #961)。
+  minWageMaster.value = upsertMinWageDefaultRate(minWageMaster.value, newMinWageFrom.value, rate)
   newMinWageRate.value = ''
   minWageMessage.value = ''
 }
 
 function removeMinWageRate(effectiveFrom: string) {
-  const entries = (minWageMaster.value.prefectures[MIN_WAGE_DEFAULT_KEY] ?? []).filter(e => e.effectiveFrom !== effectiveFrom)
-  minWageMaster.value = {
-    prefectures: { [MIN_WAGE_DEFAULT_KEY]: entries },
-    branchToPrefecture: {},
-    defaultPrefecture: entries.length ? MIN_WAGE_DEFAULT_KEY : undefined,
-  }
+  // 「追加」と同じく、消すのは `全社共通` の 1 行だけ (Refs #961)。
+  minWageMaster.value = removeMinWageDefaultRate(minWageMaster.value, effectiveFrom)
   minWageMessage.value = `${effectiveFrom} の最低賃金を削除しました。「保存」で確定します`
 }
 

@@ -996,14 +996,25 @@ branches = true
 
 # /restraint-wage 系の共有型・表示ヘルパ (Refs #244 / gate 登録は #825)。書式 (分 / 円 /
 # R2 版タイムスタンプ / 月)、月の範囲、月タブのバッジ 3 種、最低賃金チェックの並び
-# (`groupMinWageRows`)、計算 ⇄ 給与の突合行、0 行の理由 (Refs #812) を持つ pure util。
+# (`groupMinWageRows`)、計算 ⇄ 給与の突合行、0 行の理由 (Refs #812)、最低賃金カードの
+# マージ (`upsertMinWageDefaultRate` / `removeMinWageDefaultRate`、Refs #961) を持つ pure util。
 #
 # branches: BR/BRV/BRN 計測器を **2 段の probe** で先に検証 — ①片側だけ通した `if` が
 # `[true]`、両側が `[true,false]` を返すこと ②instrumented コピーでも `||` `??` `?:` の
 # **返り値が素の実装と一致**すること (計測器が値を Boolean に化かすバグを踏んでいる) —
 # したうえで、`if` / 三項の条件 / `&&` `||` の両辺 / `??` の左辺 / `?.` を TypeScript の
-# AST で機械的に包んだコピーでテストを流し、**72 分岐中 71 が true/false 両方**を通る
+# AST で機械的に包んだコピーでテストを流し、**78 分岐中 77 が true/false 両方**を通る
 # ことを数えた (v8 も 100%/100%)。
+#
+# ★ **指標は「BR() site」** (v8 の branch/arm ではない)。**測り直した条件** (Refs #961、
+# 2026-08-26): `_shared/br-tooling/instrument.mjs` に `?.` の被参照側を `BRN` で包む処理を
+# 足したコピーで instrument し (素の instrument.mjs だけだと `?.` を数えないので 66 site に
+# なる)、`npx vitest run` を全件流して pid ごとの出力を統合。**陽性対照**として同じ計測器を
+# `origin/main` 54d0384 の本ファイルに当て、**72 site = 下の #825 の実測値と一致**すること
+# を先に確かめてある。instrumented コピーでも 3957 本が全部通る (計測器が値を壊していない)。
+# #961 で足した 6 site (最低賃金カードのマージ 2 関数) は**全部 true/false 両方**を通る。
+# 片側だけなのは下の「分岐ではないので何もしない」の 1 site
+# (`TIMECARD_JOB_GROUPS.indexOf` の差、`groupMinWageRows` の並び替え) だけで、#825 当時と同じ。
 #
 # ★ **v8 が 100% と言っていた状態で、片側しか通っていない分岐が 11 側あった** (#825)。
 # 内訳と処置 (「テストで埋める」より先に「反対側が起こり得るか」を判定した):
