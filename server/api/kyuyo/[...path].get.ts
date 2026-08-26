@@ -3,7 +3,10 @@
  *
  * GET /api/kyuyo/** → <NUXT_ICHIBAN_API_URL>/api/kyuyo/** に
  * ① CF Access Service Token (トンネル通過用、server だけが持つ) と
- * ② ブラウザの `Authorization: Bearer <JWT>` (素通し転送) を付けて転送する。
+ * ② ブラウザの JWT を `Authorization: Bearer <JWT>` として付けて転送する。
+ *
+ * **② の JWT は cookie (`logi_auth_token`) から組む** (Refs #375) — client がヘッダを
+ * 手で載せる必要は無い。優先順と後方互換の扱いは `server/utils/browser-jwt.ts` 参照。
  *
  * 給与データの認可は upstream 側 (rust-ichibanboshi の introspect + email allowlist、
  * ohishi-exp/rust-ichibanboshi#82) が担う — この proxy は JWT を検証しない。
@@ -13,14 +16,15 @@
  * この route から給与以外のエンドポイントへは到達できないようにする。
  */
 import type { H3Event } from 'h3'
-import { defineEventHandler, getRequestURL, getRouterParam, getHeader, createError, setResponseStatus, setHeader } from 'h3'
+import { defineEventHandler, getRequestURL, getRouterParam, createError, setResponseStatus, setHeader } from 'h3'
 import { fetchIchiban, cfEnv, type IchibanUpstreamError } from '../../utils/ichiban-upstream'
+import { resolveBrowserAuthorization } from '../../utils/browser-jwt'
 
 export default defineEventHandler(async (event: H3Event) => {
   const env = cfEnv(event)
   const pathParam = getRouterParam(event, 'path') ?? ''
 
-  const authorization = getHeader(event, 'authorization')
+  const authorization = resolveBrowserAuthorization(event, env)
   const extraHeaders: Record<string, string> = authorization ? { Authorization: authorization } : {}
 
   let upstreamRes: Response

@@ -3,14 +3,14 @@
  * 一番星ヘルスチェック (Refs #369)。
  *
  * rust-ichibanboshi の既存 API (CAPE#01) と給与読み取り API (OHKEN、#82) を
- * 一括疎通確認する。給与系はブラウザの JWT が proxy 経由で upstream に渡り、
- * introspect + allowlist の認可ゲートまで含めて検証される — つまりこのページが
- * 通れば「トンネル・CF Access・introspect・DB 接続」の全区間が生きている。
+ * 一括疎通確認する。給与系はブラウザの認証 cookie が proxy 経由で JWT として
+ * upstream に渡り、introspect + allowlist の認可ゲートまで含めて検証される —
+ * つまりこのページが通れば「トンネル・CF Access・introspect・DB 接続」の全区間が
+ * 生きている (cookie → Bearer の変換は server route の仕事。Refs #375)。
  *
  * 給与明細の内容 (金額・氏名) は画面に出さない — 件数と warnings 数のみ。
  */
 import { buildHealthChecks, classifyResult, defaultPayrollMonth, type CheckLevel, type HealthCheck } from '~/utils/ichiban-health'
-import { currentAccessToken } from '~/utils/api'
 
 interface CheckRow {
   check: HealthCheck
@@ -33,15 +33,15 @@ async function runOne(row: CheckRow): Promise<void> {
   row.state = 'running'
   const started = performance.now()
   try {
-    const token = row.check.needsAuth ? currentAccessToken() : null
-    if (row.check.needsAuth && !token) {
-      row.level = 'ng'
-      row.detail = 'JWT がありません (再ログインしてください)'
-      return
-    }
-    const res = await fetch(row.check.url, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    })
+    // 認可が要る口は cookie (`logi_auth_token`) で通す — ヘッダは組まない
+    // (Refs #375、server route が cookie から Bearer を組んで upstream へ渡す)。
+    //
+    // **「JWT がありません」の事前チェックは撤去した** (Refs #375)。判定材料が
+    // localStorage の token だったのに、実際に認証を運ぶのは cookie になったので、
+    // **「cookie はあるが localStorage が空」で通るはずの口を NG と断定する**
+    // ようになる。**認可の結果は応答に語らせる** — 401 が返るならそれが正直な信号で、
+    // 嘘の断定より読み手を迷わせない。
+    const res = await fetch(row.check.url)
     let body: unknown = null
     try {
       body = await res.json()

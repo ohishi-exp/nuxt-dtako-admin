@@ -204,6 +204,11 @@ const session = computed<{ compId: string, userName: string } | null>(() =>
  * 触れるかどうかの判定は worker 側 (`viewerCompIdsForTenant`) が DTAKO_ACCOUNTS の
  * 逆引きで行うため、ここで会社を絞る必要はない。
  */
+// **この画面は認証の運び方が 2 通りある** (Refs #375)。`/restraint-api/**` は Nitro を
+// 通らず relay worker へ service binding で丸投げされ、relay 側は `Authorization` ヘッダ
+// しか読まない (cookie を読むコードが無い) ので**ここは Bearer を組み続ける**。一方
+// `/api/kyuyo/**` は Nitro の server route が cookie から Bearer を組むので、ページ側は
+// 何も載せない。混ざっているのは書き忘れではない。
 function authHeaders(compId?: string): Record<string, string> {
   const token = currentAccessToken()
   return {
@@ -443,11 +448,9 @@ const showBackfillHint = computed(() =>
  * その場合は従来どおり「給与DBから読み込み」ボタンでの取得だけになる。 */
 async function loadKyuyoSyncedMonths() {
   try {
-    const token = currentAccessToken()
-    if (!token) return
-    const res = await $fetch<{ entries: Array<{ company: string, month: string }> }>('/api/kyuyo/synced-months', {
-      headers: { Authorization: `Bearer ${token}` },
-    })
+    // 認証は cookie (`logi_auth_token`) 任せ — 同一オリジンなので自動で載る
+    // (Refs #375。server route が cookie から Bearer を組んで upstream へ渡す)。
+    const res = await $fetch<{ entries: Array<{ company: string, month: string }> }>('/api/kyuyo/synced-months')
     kyuyoSyncedMonths.value = new Set(res.entries.map(e => e.month))
     kyuyoSyncedKeys.value = new Set(res.entries.map(e => `${e.company}|${e.month}`))
   }
@@ -3044,7 +3047,6 @@ async function loadPayrollFromDb() {
   const totalFetches = workMonths.length * companies.length
   let done = 0
   try {
-    const token = currentAccessToken()
     for (const workMonth of workMonths) {
       const payMonth = nextYm(workMonth)
       for (const { payrollCompany } of companies) {
@@ -3056,8 +3058,8 @@ async function loadPayrollFromDb() {
           payrollDbMessage.value = totalFetches > 1
             ? `${done}/${totalFetches} ${payrollCompany} / ${fmtYm(payMonth)} 支給分 を取得しています… (1 社あたり 10〜20 秒)`
             : `${payrollCompany} を取得しています… (1 社あたり 10〜20 秒)`
+          // 認証は cookie 任せ (Refs #375)。
           const body = await $fetch(`/api/kyuyo/payroll`, {
-            headers: token ? { Authorization: `Bearer ${token}` } : {},
             query: { company: payrollCompany, month: workMonth },
           })
           stored = toStoredPayroll(body, new Date().toISOString())
@@ -3126,12 +3128,11 @@ async function autoLoadArchivedPayroll() {
   autoPayrollLoading.value = true
   const loaded: typeof dbImports.value = []
   try {
-    const token = currentAccessToken()
     for (const { payrollCompany } of companies) {
       let stored = readStoredPayroll(payrollCompany, payMonth)
       if (!stored) {
+        // 認証は cookie 任せ (Refs #375)。
         const body = await $fetch(`/api/kyuyo/payroll`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
           query: { company: payrollCompany, month: workMonth },
         })
         stored = toStoredPayroll(body, new Date().toISOString())
@@ -3173,9 +3174,8 @@ async function importFromPayrollDb() {
   importingPayroll.value = true
   pageError.value = ''
   try {
-    const token = currentAccessToken()
+    // 認証は cookie 任せ (Refs #375)。
     const res = await $fetch<KyuyoEmployeesResponse>('/api/kyuyo/employees', {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
       query: { company: payrollCompany, month: month.value },
     })
     const legacyLabel = compMap.value

@@ -5,9 +5,11 @@
  * 込み。AUTO_CLOSE の全 DB を開いて回るため**〜10 秒かかる**) を JWT pass-through
  * で取得し、D1 `kyuyo_companies` を上書きする。初回シードと会社名の補完用 —
  * 通常のリスト更新は refresh.post (差分、ミリ秒) を使う。
+ * **JWT は cookie (`logi_auth_token`) から組む** (Refs #375、`server/utils/browser-jwt.ts`)。
  */
-import { defineEventHandler, getHeader, createError } from 'h3'
+import { defineEventHandler, createError } from 'h3'
 import { fetchIchiban, cfEnv, type IchibanUpstreamError } from '../../utils/ichiban-upstream'
+import { resolveBrowserAuthorization } from '../../utils/browser-jwt'
 import { getKyuyoDb, listKyuyoCompanies, upsertKyuyoCompany } from '../../utils/kyuyo-master-db'
 
 export default defineEventHandler(async (event) => {
@@ -15,9 +17,9 @@ export default defineEventHandler(async (event) => {
   if (!db) {
     throw createError({ statusCode: 503, statusMessage: 'DTAKO_DB binding が未設定です' })
   }
-  const authorization = getHeader(event, 'authorization')
+  const authorization = resolveBrowserAuthorization(event, cfEnv(event))
   if (!authorization) {
-    throw createError({ statusCode: 401, statusMessage: 'Authorization: Bearer <JWT> が必要です' })
+    throw createError({ statusCode: 401, statusMessage: 'ログインが必要です (認証 cookie が届いていません)' })
   }
 
   let upstreamRes: Response
