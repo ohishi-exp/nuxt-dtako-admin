@@ -893,6 +893,16 @@ export async function checkKyuyoAccess(
       message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE,
     };
   }
+  if (res.status === 404) {
+    // ★ **デプロイ順序**。この口はまだ上流に無い (relay が先に出た)。fail-closed の
+    // ままでよいが、404 を素通しすると画面には「期間集計の口が無い」と読める文が
+    // 出て**原因を取り違える**。設定・順序の話なので 503 に倒す
+    return {
+      status: 503,
+      message:
+        "上流に給与アクセス判定の口 (/api/kyuyo/access) がありません。上流のデプロイが先に必要です",
+    };
+  }
   // 403 / 503 はそのまま passthrough — 画面が理由をそのまま出せる
   return { status: res.status, message: kyuyoAccessMessage(body, res.status) };
 }

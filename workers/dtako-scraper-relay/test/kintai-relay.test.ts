@@ -1049,6 +1049,15 @@ describe("checkKyuyoAccess — 給与 allowlist の関門 (Refs #951)", () => {
     });
   });
 
+  it("★ 404 (上流がまだデプロイされていない) は 503 に倒す — 404 を素通しすると原因を取り違える", async () => {
+    const { deps: d } = deps({ onprem: {} }); // stub 無し = 404
+    const denial = await checkKyuyoAccess(d, "jwt");
+    expect(denial!.status).toBe(503);
+    expect(denial!.message).toContain("上流のデプロイが先に必要です");
+    // **通してはいけない** — 口が無いことを「許可」と読むと穴が開いたまま出る
+    expect(denial).not.toBeNull();
+  });
+
   it("**上流に届かなければ fail-closed** (判定が取れないなら通さない)", async () => {
     const d: KintaiRelayDeps = {
       onprem: () => Promise.reject(new TypeError("fetch failed")),
