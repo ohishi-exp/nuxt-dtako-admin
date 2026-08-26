@@ -56,7 +56,12 @@ export interface ScrapeJobRecord {
    * `skipped_out_of_scope` は**勤怠の対象会社ではない**ため最初から回さなかった
    * 状態 (Refs #633-22、`kintai-relay.ts` の `isFoldTargetComp`)。**失敗ではない** —
    * これを `failed` として記録していた間、comp 75700192 は取り込み成功のたびに
-   * 403 を出し続け、本物の fold 失敗と見分けが付かなかった。 */
+   * 403 を出し続け、本物の fold 失敗と見分けが付かなかった。
+   *
+   * **★ `fold_*` は `state` を一切動かさない** ([`recordFoldProgress`]、Refs #595)。
+   * `fold_state: "failed"` でも `state` は取り込みが決めた値 (`done`/`failed`) のまま。
+   * **`fold_state` を見て取り込みの成否を判断しないこと**、そして逆に
+   * **`state` を見て fold の成否を判断しないこと。** */
   fold_state?:
     | "running"
     | "done"
@@ -125,7 +130,11 @@ function describeUnknownError(err: unknown): string {
  * `error`/`fold_state`/`fold_error`/`phase` 等を patch に含めない限り引き継いで
  * しまう (issue #595 実測)。**新しい試行の入口では前回の残骸を全部捨てて
  * `accepted_at` も引き直す。** running/done/failed はこの試行の記録の上に
- * 重ねるだけなので、今まで通り spread する。 */
+ * 重ねるだけなので、今まで通り spread する。
+ *
+ * **★ このリセットは「新規ディスパッチの入口を通った時」にしか効かない。** 入口を
+ * 通らずに同じ `scrape-job:{date}` を触る経路があると素通りする — 実際、画面 (WS)
+ * 経路の fold がそれだった (Refs #595)。fold 側は [`recordFoldProgress`] を使うこと。 */
 export async function recordScrapeJob(
   storage: QueueStorage,
   jobKey: string,
@@ -146,6 +155,81 @@ export async function recordScrapeJob(
     await touchScrapeJobOrder(storage, jobKey);
   } catch (err) {
     console.error(`recordScrapeJob failed (job=${jobKey}): ${describeUnknownError(err)}`);
+  }
+}
+
+/** fold (取り込み後の畳み直し) の進捗だけを表す patch。**`state` を持たない** —
+ * fold は取り込みの成否を語る立場に無いので、`state` に触れる手段そのものを型から
+ * 外してある (Refs #595)。 */
+export type ScrapeJobFoldPatch = Required<Pick<ScrapeJobRecord, "fold_state">> &
+  Partial<
+    Pick<
+      ScrapeJobRecord,
+      "fold_error" | "fold_months" | "fold_pages" | "fold_drivers_written" | "fold_started_at"
+    >
+  >;
+
+/** [`decideFoldRecord`] の答え。`write: false` は「書かない」— **失敗ではない**。 */
+export type FoldRecordDecision =
+  | { write: false; reason: "no_record" }
+  | { write: true; record: ScrapeJobRecord };
+
+/**
+ * fold の進捗を既存の `scrape-job:{jobKey}` に重ねた結果を決める pure 関数
+ * (Refs #595)。**既存レコードが無ければ書かない。**
+ *
+ * ## なぜ「無ければ作らない」なのか
+ *
+ * `/cron/dtako/progress` は**無人実行 (`/cron/dtako`) の進捗板**で、そこに載る
+ * レコードは `handleCronDtakoScrape` の `state: "pending"` が入口。ところが
+ * **画面 (WS) 経路の `executeScrape` は `recordScrapeJob` を 1 度も呼ばず**、
+ * `foldAfterIngest` 越しにだけ同じ `scrape-job:{読取日}` を触っていた。旧実装は
+ * そこで `{ state: "done", ... }` を書いていたため、
+ *
+ * - **その読取日のレコードが無いと、取り込んでいないのに `done` が生える**
+ *   (アップロードに失敗して `resultStatus: "error"` になった回でも、
+ *   `decideFoldTrigger` が `no_upload` を返して `done` + `skipped_no_upload` を書く)
+ * - **`failed` + `error` のレコードがあると `done` に化け、`error` / `accepted_at` /
+ *   `upload_id` / `split_failed` が前回の失敗のまま残る** (issue #595 の症状1 と同じ形。
+ *   「失敗を見た人が画面から取り直す」という正規の復旧手順で踏む)
+ *
+ * `recordScrapeJob` の `state: "pending"` リセットはこの経路を通らないので効かない。
+ *
+ * ⇒ **fold は「既にある試行の記録に fold の結果を足す」だけにする。** 記録が無い
+ * ということは無人実行の試行が無いということで、fold が代わりに名乗る筋合いはない。
+ */
+export function decideFoldRecord(
+  existing: ScrapeJobRecord | undefined,
+  jobKey: string,
+  patch: ScrapeJobFoldPatch,
+): FoldRecordDecision {
+  if (!existing) return { write: false, reason: "no_record" };
+  return { write: true, record: { ...existing, ...patch, date: jobKey } };
+}
+
+/** [`recordFoldProgress`] の結果。**呼び出し元は `written` 以外を黙って捨てないこと** —
+ * 「書かなかった」と「書けなかった」を混ぜない (`unsplit_total` の null と同じ流儀)。 */
+export type FoldProgressOutcome = "written" | "skipped_no_record" | "error";
+
+/** [`decideFoldRecord`] の答えを storage に反映する。`recordScrapeJob` と同じく
+ * **観測のための書き込みなので例外を投げない** (Refs #205-43 の条件3) が、
+ * `recordScrapeJob` と違って**戻り値で結果を返す** — 「書かなかった」は正常な
+ * 分岐なので、呼び出し元がログに残せるようにする。 */
+export async function recordFoldProgress(
+  storage: QueueStorage,
+  jobKey: string,
+  patch: ScrapeJobFoldPatch,
+): Promise<FoldProgressOutcome> {
+  try {
+    const key = SCRAPE_JOB_KEY_PREFIX + jobKey;
+    const decision = decideFoldRecord(await storage.get<ScrapeJobRecord>(key), jobKey, patch);
+    if (!decision.write) return "skipped_no_record";
+    await storage.put(key, decision.record);
+    await touchScrapeJobOrder(storage, jobKey);
+    return "written";
+  } catch (err) {
+    console.error(`recordFoldProgress failed (job=${jobKey}): ${describeUnknownError(err)}`);
+    return "error";
   }
 }
 

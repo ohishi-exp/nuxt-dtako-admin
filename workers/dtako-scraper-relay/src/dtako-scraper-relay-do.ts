@@ -98,6 +98,7 @@ import {
   migrateLegacyScrapeJobsOnce,
   popNextScrapeQueueItem,
   pushScrapeQueueItem,
+  recordFoldProgress,
   recordScrapeJob,
   recoverOrphan,
   SCRAPE_JOB_KEY_PREFIX,
@@ -105,6 +106,7 @@ import {
   SCRAPE_QUEUE_KEY,
   setRunningPointer,
   type QueuedScrapeItem,
+  type ScrapeJobFoldPatch,
   type ScrapeJobRecord,
 } from "./scrape-queue";
 import {
@@ -1232,12 +1234,36 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
   }
 
+  /** fold の進捗を `scrape-job:{jobKey}` に**重ねる**唯一の口 (Refs #595)。
+   * `state` は触らず、既存レコードが無ければ書かない ([`decideFoldRecord`] の doc
+   * に理由)。**書かなかったことを黙って捨てない** — 画面 (WS) 経路では
+   * `skipped_no_record` が正常な既定値なので `console.log`、storage の失敗
+   * (`error`) だけ `console.error` で鳴らす。 */
+  private async recordFold(jobKey: string, patch: ScrapeJobFoldPatch): Promise<void> {
+    const outcome = await recordFoldProgress(this.ctx.storage, jobKey, patch);
+    if (outcome === "written") return;
+    const line = JSON.stringify({
+      kintai_fold: "progress_not_recorded",
+      job: jobKey,
+      outcome,
+      fold_state: patch.fold_state,
+    });
+    if (outcome === "error") console.error(line);
+    else console.log(line);
+  }
+
   /**
    * 取り込み (アップロード) 成功後に勤怠の畳み直しを蹴る (Refs
    * ohishi-exp/rust-ichibanboshi#205 の 10)。
    *
    * **取り込み本体を絶対に道連れにしない** — 呼び出し元は取り込みの成否記録を
    * 終えた"後"にこれを呼ぶこと。ここでは例外を外へ投げない (全部 catch する)。
+   *
+   * **★ 進捗レコードの `state` には一切触らない** (Refs #595)。fold は取り込みの
+   * 成否を語る立場に無い。旧実装は `{ state: "done", fold_state: … }` を書いており、
+   * **`recordScrapeJob` の `pending` リセットを通らない画面 (WS) 経路**では
+   * ①レコードが無い読取日に架空の `done` を生やし ②`failed` + `error` のレコードを
+   * `done` に化けさせて `error` を道連れに残していた ([`decideFoldRecord`] の doc)。
    *
    * **`split_failed > 0` の間は skip する。** rust-alc-api の
    * `has_kudgivt = TRUE` フィルタにより、split が終わっていない運行は fold の
@@ -1261,17 +1287,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         kintaiCompId: this.env.KINTAI_COMP_ID,
       });
       if (!decision.run) {
-        await recordScrapeJob(this.ctx.storage, jobKey, {
-          state: "done",
-          fold_state: FOLD_SKIP_STATE[decision.reason],
-        });
+        await this.recordFold(jobKey, { fold_state: FOLD_SKIP_STATE[decision.reason] });
         return;
       }
 
       const months = monthsCoveredByRange(range.startDate, range.endDate);
       if (months.length === 0) {
-        await recordScrapeJob(this.ctx.storage, jobKey, {
-          state: "done",
+        await this.recordFold(jobKey, {
           fold_state: "failed",
           fold_error: `不正な日付範囲: ${range.startDate}..${range.endDate}`,
         });
@@ -1308,8 +1330,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     jobKey: string,
     months: string[],
   ): Promise<void> {
-    await recordScrapeJob(this.ctx.storage, jobKey, {
-      state: "done",
+    await this.recordFold(jobKey, {
       fold_state: "running",
       fold_started_at: new Date().toISOString(),
       fold_months: months,
@@ -1322,8 +1343,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         resolveSecretBinding(this.env.ICHIBAN_CF_ACCESS_CLIENT_SECRET),
       ]);
       if (!origin || !cfAccessClientId || !sharedSecret || !cfAccessClientSecret) {
-        await recordScrapeJob(this.ctx.storage, jobKey, {
-          state: "done",
+        await this.recordFold(jobKey, {
           fold_state: "not_configured",
           fold_error:
             "NUXT_ICHIBAN_API_URL / NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID / ICHIBAN_CF_ACCESS_CLIENT_SECRET / INTERNAL_SHARED_SECRET のいずれかが未設定",
@@ -1353,8 +1373,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         );
       }
 
-      await recordScrapeJob(this.ctx.storage, jobKey, {
-        state: "done",
+      await this.recordFold(jobKey, {
         fold_state: anyCapped ? "capped" : "done",
         fold_pages: totalPages,
         fold_drivers_written: totalDriversWritten,
@@ -1364,12 +1383,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       console.error(
         JSON.stringify({ kintai_fold: "failed", comp_id: account.comp_id, months, message }),
       );
-      await recordScrapeJob(this.ctx.storage, jobKey, { state: "done", fold_state: "failed", fold_error: message });
+      await this.recordFold(jobKey, { fold_state: "failed", fold_error: message });
     }
   }
 
   /** GET /cron/dtako/progress — この DO インスタンス (= 1 comp_id) の
-   * `/cron/dtako` 進捗一覧。read-only (Refs #205-43)。 */
+   * `/cron/dtako` 進捗一覧。read-only (Refs #205-43)。
+   *
+   * **★ ここに載るのは無人実行 (`/cron/dtako`) だけ** (Refs #595)。画面 (WS) からの
+   * 手動スクレイプは `recordScrapeJob` を呼ばないので 1 件も増えない — **「画面から
+   * 取り直したのに progress が動かない = 効いていない」と読まれる**ので、応答自身に
+   * そう書く (`handleScrapeHistory` の `note` と同じ流儀)。画面経路の結果は alc 側の
+   * `GET /api/scraper/history` に載る。 */
   private async handleCronDtakoProgress(): Promise<Response> {
     try {
       const order = (await this.ctx.storage.get<string[]>(SCRAPE_JOB_ORDER_KEY)) ?? [];
@@ -1385,6 +1410,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         queue,
         ...counts,
         max_records: MAX_SCRAPE_JOB_RECORDS,
+        // **載っていない = 実行されていない、ではない。** 画面 (WS) 経路は
+        // ここに 1 件も書かない (Refs #595)
+        note:
+          "無人実行 (/cron/dtako) の進捗だけが載ります。" +
+          "画面 (WebSocket) からの手動スクレイプはここに載りません — " +
+          "その結果は alc 側の GET /api/scraper/history で見てください。" +
+          "fold_* は state を動かしません (fold_state: failed でも state は取り込みが決めた値のまま)。",
       });
     } catch (err) {
       console.error(

@@ -7,6 +7,8 @@ import {
   migrateLegacyScrapeJobsOnce,
   popNextScrapeQueueItem,
   pushScrapeQueueItem,
+  decideFoldRecord,
+  recordFoldProgress,
   recordScrapeJob,
   recoverOrphan,
   SCRAPE_JOB_KEY_PREFIX,
@@ -519,5 +521,92 @@ describe("annotateFoldStaleness", () => {
       fold_state: "running",
     };
     expect(annotateFoldStaleness(record, NOW)).toBe(record);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fold の進捗 (Refs #595) — **state を動かさない / 無ければ作らない**
+// ---------------------------------------------------------------------------
+
+describe("decideFoldRecord", () => {
+  it("既存レコードが無ければ書かない (画面 WS 経路が架空の done を生やしていた穴)", () => {
+    expect(decideFoldRecord(undefined, "2026-06-06", { fold_state: "skipped_no_upload" })).toEqual({
+      write: false,
+      reason: "no_record",
+    });
+  });
+
+  it("既存の state を保ったまま fold_* だけ重ねる (failed は failed のまま)", () => {
+    const existing: ScrapeJobRecord = {
+      date: "2026-06-06",
+      state: "failed",
+      accepted_at: "2026-08-01T04:07:27.550Z",
+      error: "CSV ダウンロードの2段階目ボタンが見つかりません",
+      upload_id: "c3164192-77c1-4575-8b8a-0405a8eab8f0",
+      split_failed: 0,
+    };
+    const decision = decideFoldRecord(existing, "2026-06-06", {
+      fold_state: "skipped_no_upload",
+    });
+    expect(decision.write).toBe(true);
+    // 型を絞ってから中身を見る (write: false 側には record が無い)
+    if (!decision.write) throw new Error("unreachable");
+    expect(decision.record.state).toBe("failed");
+    expect(decision.record.error).toBe("CSV ダウンロードの2段階目ボタンが見つかりません");
+    expect(decision.record.accepted_at).toBe("2026-08-01T04:07:27.550Z");
+    expect(decision.record.fold_state).toBe("skipped_no_upload");
+    // 元のレコードを壊さない (新しいオブジェクトを返す)
+    expect(existing.fold_state).toBeUndefined();
+  });
+
+  it("date は jobKey で引き直す (壊れたレコードを持ち回らない)", () => {
+    const existing: ScrapeJobRecord = {
+      date: "ずれた値",
+      state: "done",
+      accepted_at: "2026-08-01T00:00:00.000Z",
+    };
+    const decision = decideFoldRecord(existing, "2026-06-03", { fold_state: "done" });
+    if (!decision.write) throw new Error("unreachable");
+    expect(decision.record.date).toBe("2026-06-03");
+  });
+});
+
+describe("recordFoldProgress", () => {
+  it("既存レコードがあれば fold_* を重ねて written を返し、order も触る", async () => {
+    const storage = new FakeStorage();
+    await recordScrapeJob(storage, "2026-06-03", { state: "done", split_failed: 1 });
+    const outcome = await recordFoldProgress(storage, "2026-06-03", {
+      fold_state: "skipped_split_failed",
+    });
+    expect(outcome).toBe("written");
+    const record = await storage.get<ScrapeJobRecord>(SCRAPE_JOB_KEY_PREFIX + "2026-06-03");
+    expect(record?.state).toBe("done");
+    expect(record?.split_failed).toBe(1);
+    expect(record?.fold_state).toBe("skipped_split_failed");
+    expect(await storage.get<string[]>(SCRAPE_JOB_ORDER_KEY)).toEqual(["2026-06-03"]);
+  });
+
+  it("**レコードが無ければ 1 バイトも書かない** (skipped_no_record)", async () => {
+    const storage = new FakeStorage();
+    const outcome = await recordFoldProgress(storage, "2026-06-06", { fold_state: "done" });
+    expect(outcome).toBe("skipped_no_record");
+    expect(await storage.get(SCRAPE_JOB_KEY_PREFIX + "2026-06-06")).toBeUndefined();
+    // order にも足さない (空レコードの幽霊を作らない)
+    expect(await storage.get<string[]>(SCRAPE_JOB_ORDER_KEY)).toBeUndefined();
+  });
+
+  it("storage が失敗しても投げず error を返す", async () => {
+    const storage = new FakeStorage();
+    await recordScrapeJob(storage, "2026-06-07", { state: "done" });
+    storage.poisonPutOnce(new Error("boom"));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(
+        recordFoldProgress(storage, "2026-06-07", { fold_state: "failed", fold_error: "x" }),
+      ).resolves.toBe("error");
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Error: boom"));
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });
