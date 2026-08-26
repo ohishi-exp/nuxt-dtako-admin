@@ -85,15 +85,42 @@ watch([selectedDriverId, selectedMonth], () => {
   if (selectedDriverId.value && selectedMonth.value) fetchReport()
 })
 
+/**
+ * 分 → `h:mm`。**「実測して 0 分」と「データが無い」を同じ見た目にしない** (Refs #918)。
+ *
+ * - `0` → **`0:00`** (記録を読んだ結果が 0)
+ * - `null` / `undefined` → **`-`** (記録が無い / 取得できなかった。0 分だったかも分からない)
+ *
+ * ## なぜ `-` なのか
+ *
+ * 以前は `val == null || val === 0` で**どちらも空欄**にしていた。空欄は
+ * 「そこに何も無い」とも「読まなかった」とも読めるので、とくに **`break_minutes` は
+ * 「休憩 0 分」(拘束基準の判断材料) と「休憩データ無し」(欠測) が区別できなかった。**
+ *
+ * `-` は `app/utils/restraint-wage-view.ts` の **`fmtMinutes(null)` が既に採っている
+ * 書き方**で、そちらが正本。**新しい流儀を作らずそこに揃える** (書式そのものは
+ * この表の既存の `h:mm` を維持する — `fmtMinutes` は `h00m` 形式で別物)。
+ * repo の「欠測を 0 分に倒さない」「データが無いときだけ項を落とす。実測して 0 の項は
+ * 残す」とも一致する。
+ *
+ * ## 記号の意味は画面にも出す
+ *
+ * **区別できるようにしただけでは、見る人が `-` の意味を知らない。**表の下に凡例を
+ * 1 行置いてある (`<!-- 凡例 -->`)。片方だけ直すと嘘になるので、ここを変えるときは
+ * 凡例も一緒に見ること。
+ *
+ * ## `fmtOrDash` は消した
+ *
+ * `fmt(val) || '-'` という**呼び出し元 0 件**の関数が並んで残っていた
+ * (「空欄では区別が付かない」と気づいた誰かが道具だけ書いて結線しなかった痕跡)。
+ * `fmt` 自身が `-` を返すようになった以上 `|| '-'` は**到達しない枝**で、
+ * 同じ挙動に名前が 2 つある状態にしかならないので削除した。
+ */
 function fmt(val: number | null | undefined): string {
-  if (val == null || val === 0) return ''
+  if (val == null) return '-'
   const h = Math.floor(val / 60)
   const m = val % 60
   return `${h}:${String(m).padStart(2, '0')}`
-}
-
-function fmtOrDash(val: number | null | undefined): string {
-  return fmt(val) || '-'
 }
 
 function isWeekSubtotalAfter(day: RestraintDayRow, index: number, days: RestraintDayRow[]): boolean {
@@ -400,16 +427,16 @@ const monthLabel = computed(() => {
                   </td>
                   <!-- First operation breakdown -->
                   <td class="px-2 py-1.5 text-right border-r border-gray-200 dark:border-gray-700">
-                    {{ day.operations.length ? fmt(day.operations[0]!.drive_minutes) : '' }}
+                    {{ fmt(day.operations[0]?.drive_minutes) }}
                   </td>
                   <td class="px-2 py-1.5 text-right border-r border-gray-200 dark:border-gray-700">
-                    {{ day.operations.length ? fmt(day.operations[0]!.cargo_minutes) : '' }}
+                    {{ fmt(day.operations[0]?.cargo_minutes) }}
                   </td>
                   <td class="px-2 py-1.5 text-right border-r border-gray-200 dark:border-gray-700">
-                    {{ day.operations.length ? fmt(day.operations[0]!.break_minutes) : '' }}
+                    {{ fmt(day.operations[0]?.break_minutes) }}
                   </td>
                   <td class="px-2 py-1.5 text-right border-r border-gray-200 dark:border-gray-700">
-                    {{ day.operations.length ? fmt(day.operations[0]!.restraint_minutes) : '' }}
+                    {{ fmt(day.operations[0]?.restraint_minutes) }}
                   </td>
                   <td class="px-2 py-1.5 text-right border-r border-gray-200 dark:border-gray-700 font-medium" :rowspan="day.operations.length || 1">
                     {{ fmt(day.restraint_total_minutes) }}
@@ -418,10 +445,10 @@ const monthLabel = computed(() => {
                     {{ fmt(day.restraint_cumulative_minutes) }}
                   </td>
                   <td class="px-2 py-1.5 text-right border-r border-gray-200 dark:border-gray-700" :rowspan="day.operations.length || 1">
-                    {{ fmt(Math.round(day.drive_average_minutes)) }}
+                    {{ day.drive_average_minutes == null ? '-' : fmt(Math.round(day.drive_average_minutes)) }}
                   </td>
                   <td class="px-2 py-1.5 text-right border-r border-gray-200 dark:border-gray-700" :rowspan="day.operations.length || 1">
-                    {{ day.rest_period_minutes != null ? fmt(day.rest_period_minutes) : '' }}
+                    {{ fmt(day.rest_period_minutes) }}
                   </td>
                   <td class="px-2 py-1.5 text-xs" :rowspan="day.operations.length || 1">
                     {{ day.remarks }}
@@ -482,6 +509,23 @@ const monthLabel = computed(() => {
           </tbody>
         </table>
       </div>
+
+      <!--
+        凡例 (Refs #918)。**記号を増やしただけでは意味が伝わらない**ので、表のすぐ下に
+        1 行置く。言いたいのは **「読んだ結果が 0」と「そもそも読めていない」は違う**
+        ということ — `fmt()` の doc コメントと対。片方だけ直すと画面が嘘になる。
+        「休」に触れているのは、**日ごとの行で時間欄がまるごと空になるのはそこだけ**で、
+        `-` を 1 日分並べたのと紛らわしいから。小計行 / 月合計行の空欄は `colspan` の
+        埋めで、そもそもその列のセルが無い (`fmt()` を通っていない)。
+      -->
+      <p class="px-1 text-xs text-gray-500 dark:text-gray-400">
+        時間列の見かた:
+        <span class="font-medium text-gray-700 dark:text-gray-300">0:00</span>
+        は<span class="font-medium">実測して 0 分</span> (記録を読んだ結果が 0)、
+        <span class="font-medium text-gray-700 dark:text-gray-300">-</span>
+        は<span class="font-medium">データ無し</span> (記録が無い、または取得できなかった
+        — 0 分だったのかどうかも分かりません)。「休」の行は稼働の無い日です。
+      </p>
 
       <!-- Footer summary -->
       <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-4 text-sm space-y-1">
