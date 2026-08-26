@@ -59,7 +59,7 @@ describe('restraint-wage golden (共有 fixture)', () => {
     return
   }
 
-  it('4 乗務員 (正常 / 時給割れ / 月60h超割れ / 単価未設定) を網羅している', () => {
+  it('4 乗務員 (正常 / 時給割れ / 月60h超 / 単価未設定) を網羅している', () => {
     expect(summaries.map(s => s.driverCd)).toEqual(['9901', '9902', '9903', '9904'])
   })
 
@@ -74,10 +74,15 @@ describe('restraint-wage golden (共有 fixture)', () => {
     expect(byCd['9901']!.overtimePayDiff).toBeGreaterThanOrEqual(0)
     // 9902: 時給 900 円 < 最低賃金 956 円
     expect(byCd['9902']!.minWageDiff).toBeLessThan(0)
-    // 9903: 月60h超 (100h) — 通常残業の単価マスタ計算 (一律1.25) が
-    // 最低賃金ベース (60h超は1.5) を下回る
-    expect(byCd['9903']!.overtimeMinutes).toBeGreaterThan(60 * 60)
-    expect(byCd['9903']!.overtimePayDiff).toBeLessThan(0)
+    // 9903: 月60h超 (100h)。**単価マスタ側にも 60h 超の 1.5 倍が入った** (Refs #670) ので、
+    // 60h まで 1.25 / 超過 40h を 1.5 で計算する。係数一定に戻したらこの等式が落ちる。
+    expect(byCd['9903']!.overtimeMinutes).toBe(100 * 60)
+    expect(byCd['9903']!.nightOvertimeMinutes).toBe(0)
+    expect(byCd['9903']!.actualOvertimePay).toBe(Math.round(60 * 960 * 1.25 + 40 * 960 * 1.5))
+    // 以前はここが「基礎単価 (960) の方が最低賃金 (956) より高いのに残業代が下回る」
+    // という逆転になっていた (単価マスタ側だけ一律 1.25 だったため、diff は −9,060)。
+    // 両側が同じ 60h ルールになったので、差は基礎単価の差 (960 − 956) だけが残る。
+    expect(byCd['9903']!.overtimePayDiff).toBeGreaterThanOrEqual(0)
     // 9904: 単価マスタ未登録 — 金額系は null、時間分類と最低賃金換算は出る
     expect(byCd['9904']!.hourlyRate).toBeNull()
     expect(byCd['9904']!.amounts).toBeNull()
