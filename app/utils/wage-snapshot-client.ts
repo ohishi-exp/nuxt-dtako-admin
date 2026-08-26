@@ -40,7 +40,7 @@ import type { SalaryItemConfig } from './salary-compare'
  *
  * 命名は `wage-<YYYYMMDD><連番>`。
  */
-export const WAGE_LOGIC_VERSION = 'wage-2026080501'
+export const WAGE_LOGIC_VERSION = 'wage-2026082601'
 
 /** 画面が持っている 1 行ぶんの材料 (最低賃金チェックの表 1 行に対応)。 */
 export interface SnapshotSourceRow {

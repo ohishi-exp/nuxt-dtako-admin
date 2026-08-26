@@ -390,9 +390,11 @@ export const MONTHLY_OVERTIME_THRESHOLD_MINUTES = 60 * 60
  * 法定休日の実働は労基法上その日に時間外の概念が無く休日割増に一本化されるので、
  * ここにも算入しない (`classifyMonth` が別区分に落としているのと同じ扱い)。
  *
- * **これは「時間が 60h を超えたか」だけを返す。金額には影響しない** — 単価マスタ
- * 換算の金額 (`amounts` / `totalAmount` / `actualOvertimePay`) は区分ごとの係数一定で、
- * 60h 超の 1.5 倍を反映していない (Refs #670 の本題、`docs/wage-calculation-spec.md` §6)。
+ * **これは「時間が 60h を超えたか」の真偽だけを返す関数で、金額はここでは出さない。**
+ * 単価マスタ換算の金額側 (`computeWageAmounts`) も月60h 超の割増を反映するように
+ * なったが (Refs #670)、**割増が付くのは 60h を超えたぶんだけ**なので、
+ * **橙が点いていても超過が小さい行では金額の増えかたはごくわずか**になる。
+ * 「橙 = その月まるごと 1.5 倍」ではない (`docs/wage-calculation-spec.md` §6)。
  */
 export function isMonthlyOvertimeOver60h(
   wage: Pick<WageRow, 'overtimeMinutes' | 'nightOvertimeMinutes'>,

@@ -738,7 +738,9 @@ export interface WageRow {
    * から先に消費する扱いだが、これは表示上の按分に過ぎず合計額 (+ nightOvertimePay)
    * は按分順序に依存しない。minWage.rate が無ければ null。 */
   minWageOvertimePay: number | null;
-  /** 単価マスタの実単価で計算した通常残業代 (時間外+週40超過の金額)。hourlyRate が無ければ null。 */
+  /** 単価マスタの実単価で計算した通常残業代 (時間外+週40超過の金額)。**月60h を超えた
+   * ぶんは overtimeOver60h 係数** (Refs #670 — 以前は係数一定だった)。hourlyRate が
+   * 無ければ null。 */
   actualOvertimePay: number | null;
   /** actualOvertimePay − minWageOvertimePay (どちらか欠けたら null。負 = 最低賃金ベースの残業代を下回る)。 */
   overtimePayDiff: number | null;
@@ -753,7 +755,8 @@ export interface WageRow {
    * 合算した月60h判定のうち通常残業消費後の残り枠を充てる) と深夜軸 (常時+0.25倍)
    * を独立加算する。minWage.rate が無ければ null。 */
   minWageNightOvertimePay: number | null;
-  /** 単価マスタの実単価で計算した深夜残業代 (時間外深夜の金額)。hourlyRate が無ければ null。 */
+  /** 単価マスタの実単価で計算した深夜残業代 (時間外深夜の金額)。**月60h を超えたぶんは
+   * overtimeOver60h + night = 1.75 倍相当** (Refs #670)。hourlyRate が無ければ null。 */
   actualNightOvertimePay: number | null;
   /** actualNightOvertimePay − minWageNightOvertimePay (どちらか欠けたら null。負 = 最低賃金ベースの深夜残業代を下回る)。 */
   nightOvertimePayDiff: number | null;
@@ -825,15 +828,66 @@ export function splitMinWageOvertimePay(
   return { normalPay, nightPay };
 }
 
+/**
+ * 月60h 判定の対象になる区分と、**60h 枠を消費する順**。
+ *
+ * 時間外 → 週40超過 → 時間外深夜。`splitMinWageOvertimePay` が
+ * 「通常残業 (時間外+週40超過) を先に消費し、残りを深夜に充てる」のと同じ順序に
+ * 揃えている (通常残業の中での 時間外/週40超過 の前後は係数が同じなので合計に
+ * 影響しない)。法定休日・法定外休日は時間外労働ではないので入らない。
+ */
+const OVERTIME_KEYS = ["overtime", "weekly40Excess", "overtimeNight"] as const;
+type OvertimeKey = (typeof OVERTIME_KEYS)[number];
+
+/**
+ * 月60h を**超えた**ぶんに掛ける係数 (60h 以下は `config.rates[key]` のまま)。
+ *
+ * 深夜だけは時間外軸 (`overtimeOver60h` = 1.5) と深夜軸 (`night` = +0.25) の
+ * **独立加算**で 1.75 倍相当になる — 単純な係数の差し替えでは表せない
+ * (`docs/wage-calculation-spec.md` §6、`computeMinWageOvertimePay` の doc comment)。
+ */
+function over60hRate(key: OvertimeKey, rates: WageConfig["rates"]): number {
+  return key === "overtimeNight" ? rates.overtimeOver60h + rates.night : rates.overtimeOver60h;
+}
+
+/**
+ * 法定区分ごとの金額 (円、区分ごとに円未満四捨五入)。
+ *
+ * **月60h 超の時間外割増 (労基法37条1項但書) を含む** (Refs #670)。時間外系 3 区分
+ * (時間外 / 週40超過 / 時間外深夜) は合算して 60h 判定し、超えたぶんだけ
+ * `overtimeOver60h` 側の係数に切り替える。それ以外の区分は従来どおり
+ * 「時間 × 単価 × 係数」の単純積。
+ *
+ * **代替休暇 (労基法37条3項) は運用していないため、60h 超は全額 1.5 倍で計上する**
+ * (オーナー確認 2026-08-26)。運用していないものを分岐で用意すると死に分岐になり、
+ * 「運用しているのかもしれない」と次の人に読ませるので、置かない。
+ *
+ * 60h 以下の月は `over` が 0 になるため、**金額は改修前と 1 円も変わらない**。
+ */
 export function computeWageAmounts(
   minutes: WageCategoryMinutes,
   hourlyRate: number,
   config: WageConfig,
 ): { amounts: WageCategoryAmounts; total: number } {
+  // 60h 枠を上の順で食い合わせ、区分ごとに「60h 以下ぶん / 超過ぶん」へ割る。
+  let remainingQuota = MONTHLY_OVERTIME_THRESHOLD_MINUTES;
+  const split = {} as Record<OvertimeKey, { under: number; over: number }>;
+  for (const key of OVERTIME_KEYS) {
+    const under = Math.min(minutes[key], remainingQuota);
+    remainingQuota -= under;
+    split[key] = { under, over: minutes[key] - under };
+  }
+
   const amounts = {} as WageCategoryAmounts;
   let total = 0;
   for (const key of Object.keys(minutes) as Array<keyof WageCategoryMinutes>) {
-    const amount = Math.round((minutes[key] / 60) * hourlyRate * config.rates[key]);
+    const part = (split as Partial<Record<keyof WageCategoryMinutes, { under: number; over: number }>>)[key];
+    const amount = part
+      ? Math.round(
+          (part.under / 60) * hourlyRate * config.rates[key]
+          + (part.over / 60) * hourlyRate * over60hRate(key as OvertimeKey, config.rates),
+        )
+      : Math.round((minutes[key] / 60) * hourlyRate * config.rates[key]);
     amounts[key] = amount;
     total += amount;
   }

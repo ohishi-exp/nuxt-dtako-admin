@@ -647,6 +647,74 @@ describe('computeWageAmounts', () => {
     expect(amounts.legalHoliday).toBe(0)
     expect(total).toBe(Object.values(amounts).reduce((a, b) => a + b, 0))
   })
+
+  // -- 月60h 超の割増 (労基法37条1項但書、Refs #670) --------------------------
+  // 代替休暇 (37条3項) は運用していないため全額 1.5 倍 (オーナー確認 2026-08-26)。
+
+  it('60h ちょうどまでは改修前と同じ (超過分が 0)', () => {
+    const minutes = { ...emptyCategoryMinutes(), overtime: 3000, weekly40Excess: 600 }
+    const { amounts } = computeWageAmounts(minutes, 1000, DEFAULT_WAGE_CONFIG)
+    expect(amounts.overtime).toBe(Math.round((3000 / 60) * 1000 * 1.25))
+    expect(amounts.weekly40Excess).toBe(Math.round((600 / 60) * 1000 * 1.25))
+  })
+
+  it('時間外だけで 60h を超えたら、超過分だけ 1.5 倍', () => {
+    const minutes = { ...emptyCategoryMinutes(), overtime: 4200 } // 70h
+    const { amounts } = computeWageAmounts(minutes, 1000, DEFAULT_WAGE_CONFIG)
+    expect(amounts.overtime).toBe(Math.round((3600 / 60) * 1000 * 1.25 + (600 / 60) * 1000 * 1.5))
+  })
+
+  it('60h 枠は 時間外 → 週40超過 の順に消費する', () => {
+    const minutes = { ...emptyCategoryMinutes(), overtime: 3000, weekly40Excess: 1200 }
+    const { amounts } = computeWageAmounts(minutes, 1000, DEFAULT_WAGE_CONFIG)
+    // 時間外 3000 は全部 60h 枠の中。週40超過 1200 のうち 600 だけが枠に入る
+    expect(amounts.overtime).toBe(Math.round((3000 / 60) * 1000 * 1.25))
+    expect(amounts.weekly40Excess).toBe(Math.round((600 / 60) * 1000 * 1.25 + (600 / 60) * 1000 * 1.5))
+  })
+
+  // ★ golden fixture (tests/fixtures/restraint-wage/golden/wage-rows.json) は
+  //   60h 超の行を 1 つしか持たず、その行は overtimeNight が 0 なので
+  //   **1.75 倍相当の経路を 1 度も通らない**。ここで単体で押さえる。
+  it('時間外深夜の 60h 超は 1.5 + 0.25 = 1.75 倍相当', () => {
+    const minutes = { ...emptyCategoryMinutes(), overtimeNight: 4200 } // 70h すべて深夜
+    const { amounts } = computeWageAmounts(minutes, 1000, DEFAULT_WAGE_CONFIG)
+    // 60h まで 1.5 (= 1.25 + 0.25)、超過 10h は 1.5 + 0.25 = 1.75
+    expect(amounts.overtimeNight).toBe(Math.round((3600 / 60) * 1000 * 1.5 + (600 / 60) * 1000 * 1.75))
+  })
+
+  it('60h 枠は通常残業を先に消費し、残り枠だけが時間外深夜に回る', () => {
+    const minutes = { ...emptyCategoryMinutes(), overtime: 3000, overtimeNight: 1200 }
+    const { amounts } = computeWageAmounts(minutes, 1000, DEFAULT_WAGE_CONFIG)
+    expect(amounts.overtime).toBe(Math.round((3000 / 60) * 1000 * 1.25))
+    // 深夜 1200 のうち 600 が枠内 (1.5)、残り 600 が超過 (1.75)
+    expect(amounts.overtimeNight).toBe(Math.round((600 / 60) * 1000 * 1.5 + (600 / 60) * 1000 * 1.75))
+  })
+
+  it('法定休日・法定外休日は 60h 判定に入らない (時間外労働ではない)', () => {
+    const minutes = {
+      ...emptyCategoryMinutes(),
+      overtime: 1200,
+      legalHoliday: 6000,
+      nonLegalHoliday: 6000,
+    }
+    const { amounts } = computeWageAmounts(minutes, 1000, DEFAULT_WAGE_CONFIG)
+    // 休日の時間がいくらあっても、時間外 20h は 60h 枠の中なので 1.25 のまま
+    expect(amounts.overtime).toBe(Math.round((1200 / 60) * 1000 * 1.25))
+    expect(amounts.legalHoliday).toBe(Math.round((6000 / 60) * 1000 * 1.35))
+    expect(amounts.nonLegalHoliday).toBe(Math.round((6000 / 60) * 1000 * 1.25))
+  })
+
+  it('合計は 60h 按分の順序に依存しない (通常残業の中での 時間外/週40超過 の入れ替え)', () => {
+    const a = computeWageAmounts(
+      { ...emptyCategoryMinutes(), overtime: 3900, weekly40Excess: 300 },
+      1000, DEFAULT_WAGE_CONFIG,
+    )
+    const b = computeWageAmounts(
+      { ...emptyCategoryMinutes(), overtime: 300, weekly40Excess: 3900 },
+      1000, DEFAULT_WAGE_CONFIG,
+    )
+    expect(a.total).toBe(b.total)
+  })
 })
 
 describe('computeWageRow', () => {
