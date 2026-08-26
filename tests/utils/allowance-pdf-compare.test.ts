@@ -150,6 +150,17 @@ describe('parsePdfAllowanceCsv', () => {
     expect(warnings[0]).toContain('金額が読めません')
   })
 
+  it('小数の金額は捨て、「読めません」とは別の理由を残す (他の 3 経路と同じ整数の物差し)', () => {
+    const { file: f, warnings } = parsePdfAllowanceCsv([
+      HEADER, line(), line({ date: '2026-07-07', allowance_yen: '1234.5' }),
+    ].join('\n'))
+    // 整数の行はそのまま通る (**お金は 1 円も変えない**)。
+    expect(f.trips).toEqual([
+      { driverName: '中村一由', date: '2026-07-01', origin: '釧路', dest: '上士幌', allowanceYen: 9000 },
+    ])
+    expect(warnings).toEqual(['3 行目: 金額が整数ではありません (1234.5)'])
+  })
+
   it('読める便が 1 行も無ければ投げる', () => {
     expect(() => parsePdfAllowanceCsv([HEADER, line({ date: '' })].join('\n'))).toThrow()
   })
