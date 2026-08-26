@@ -65,6 +65,7 @@ import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resol
 import {
   buildScrapeHistoryEntries,
   recordScrapeHistoryLoud,
+  resolveHistoryTenantId,
   type CronScrapeOutcome,
 } from "./scrape-history-record";
 import {
@@ -734,6 +735,23 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       );
     }
     return raw;
+  }
+
+  /**
+   * `dtako_accounts` を配列として返す (未設定 / JSON 不正なら `null`)。
+   *
+   * `resolveAccount` は **1 社を引く**のが仕事なので、**全体が要る**こちらは別口にする
+   * (履歴の書き先 tenant は `KINTAI_COMP_ID` から引くため、スクレイプ対象の
+   * account だけでは足りない — `resolveHistoryTenantId` の docs)。
+   */
+  private async dtakoAccountsParsed(): Promise<unknown> {
+    const raw = await this.dtakoAccountsRaw();
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as unknown;
+    } catch {
+      return null;
+    }
   }
 
   private async introspect(
@@ -3106,18 +3124,37 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       const rpc = this.env.AUTH_WORKER_RPC;
       if (!rpc) {
         console.error(
+          JSON.stringify({ ...base, scrape_history: "no_rpc_binding", detail: ALC_TENANT_RPC_MISSING }),
+        );
+        return;
+      }
+
+      // ★ 書き先の tenant は **スクレイプ対象の comp のものではない** (Refs #931)。
+      // 読み手が `KINTAI_COMP_ID` 1 社の tenant しか見ないので、そこへ揃える
+      // (理由は `resolveHistoryTenantId` の docs)。会社の区別は行の `comp_id` が持つ。
+      // **`account.tenant_id` を使う他の経路 (取り込み本体) は触らない。**
+      const historyTenantId = resolveHistoryTenantId(
+        await this.dtakoAccountsParsed(),
+        this.env.KINTAI_COMP_ID,
+      );
+      if (!historyTenantId) {
+        // **「読めなかった」と「書かなかった」を同じ見た目にしない** — 専用の理由で出す。
+        // staging は `KINTAI_COMP_ID` を意図的に置いていないので、ここに来るのが正しい。
+        console.error(
           JSON.stringify({
             ...base,
-            scrape_history: "no_rpc_binding",
-            tenant_id: account.tenant_id,
-            detail: ALC_TENANT_RPC_MISSING,
+            scrape_history: "no_tenant",
+            detail:
+              "KINTAI_COMP_ID から履歴の書き先 tenant を解決できないため書きません " +
+              "(staging は意図的に未設定。本番で出たら dtako_accounts と KINTAI_COMP_ID を確認)",
           }),
         );
         return;
       }
+
       const report = await recordScrapeHistoryLoud(
         entries,
-        (entry) => postScrapeHistory(entry, account.tenant_id, rpc),
+        (entry) => postScrapeHistory(entry, historyTenantId, rpc),
         (line) => console.error(line),
       );
       console.log(JSON.stringify({ ...base, scrape_history: "saved", ...report }));
