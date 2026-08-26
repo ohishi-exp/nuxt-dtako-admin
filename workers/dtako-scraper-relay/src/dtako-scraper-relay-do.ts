@@ -724,6 +724,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * **空なら loud fail** — 空のまま viewer 認可へ進むと全会社 401 になり、画面には
    * 「セッションが無効か期限切れです」としか出ないため原因が追えない
    * (2026-07-25 に本番で実際に起きた)。 */
+  private async dtakoAccountsRaw(): Promise<string> {
+    const raw = await resolveDtakoAccountsRaw(this.env.DTAKO_CONFIG_KV, this.env.DTAKO_ACCOUNTS);
+    if (!raw) {
+      console.error(
+        JSON.stringify({
+          dtako_accounts: "missing",
+          detail: "KV(dtako_accounts) も binding も空 — viewer 認可は全 comp で拒否されます",
+        }),
+      );
+    }
+    return raw;
+  }
+
   /**
    * `dtako_accounts` を配列として返す (未設定 / JSON 不正なら `null`)。
    *
@@ -739,19 +752,6 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch {
       return null;
     }
-  }
-
-  private async dtakoAccountsRaw(): Promise<string> {
-    const raw = await resolveDtakoAccountsRaw(this.env.DTAKO_CONFIG_KV, this.env.DTAKO_ACCOUNTS);
-    if (!raw) {
-      console.error(
-        JSON.stringify({
-          dtako_accounts: "missing",
-          detail: "KV(dtako_accounts) も binding も空 — viewer 認可は全 comp で拒否されます",
-        }),
-      );
-    }
-    return raw;
   }
 
   private async introspect(
