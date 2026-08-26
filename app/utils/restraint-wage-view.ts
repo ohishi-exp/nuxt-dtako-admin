@@ -194,9 +194,15 @@ export const MIN_WAGE_DEFAULT_KEY = '全社共通'
  * `resolveKushiroMinWage` が最後に見る) — の扱いは 3 通りに分けた:
  * - **既に値があるなら触らない。** カードに出ていない設定なので、カードの操作で
  *   他県 → `全社共通` に書き換えてはいけない
- * - **未設定で、行が 1 件以上あるときだけ `MIN_WAGE_DEFAULT_KEY` を入れる。** これが無いと
- *   カードだけで運用しているテナント (履歴が `全社共通` 1 本) で `minWageForBranch` が
- *   額を一切引けなくなる — 直す前の挙動をここだけ保つ
+ * - **未設定で、行が 1 件以上あり、かつ `全社共通` が唯一の県キーのときだけ
+ *   `MIN_WAGE_DEFAULT_KEY` を入れる。** 唯一の県キーなら**カードはマスタの全体を出している**
+ *   ので、`defaultPrefecture` を入れても「カードから読み取れない設定を巻き込む」ことにならない
+ *   (これが条件の理由)。これが無いと、カードだけで運用しているテナント (履歴が `全社共通`
+ *   1 本) で `minWageForBranch` が額を一切引けなくなる — 直す前の挙動をここだけ保つ。
+ *   **他県が入っているなら入れない** — 本番 (47 県 + 拠点→県 7 件、`全社共通` は無し) で
+ *   カードから 1 行目を足した瞬間に、拠点→県で引けない拠点の額が `null` → カードの額へ
+ *   静かに変わってしまう (`minWageForBranch` の `master.defaultPrefecture ?? null`)。
+ *   `defaultPrefecture` はその 47 県についての設定なので、カードは触らない
  * - **行が 0 件になり、かつ `defaultPrefecture` が `MIN_WAGE_DEFAULT_KEY` を指しているときだけ外す。**
  *   空の履歴を指したままにしないため (直す前の `removeMinWageRate` と同じ判断)。
  *   他県を指しているなら残す
@@ -209,7 +215,9 @@ function withMinWageDefaultEntries(master: MinWageMaster, entries: MinWageEntry[
   if (!entries.length) {
     if (next.defaultPrefecture === MIN_WAGE_DEFAULT_KEY) delete next.defaultPrefecture
   }
-  else if (!next.defaultPrefecture) next.defaultPrefecture = MIN_WAGE_DEFAULT_KEY
+  else if (!next.defaultPrefecture && Object.keys(next.prefectures).length === 1) {
+    next.defaultPrefecture = MIN_WAGE_DEFAULT_KEY
+  }
   return next
 }
 

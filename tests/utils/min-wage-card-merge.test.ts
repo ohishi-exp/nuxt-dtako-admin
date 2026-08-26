@@ -43,6 +43,21 @@ function masterWith47(): MinWageMaster {
 }
 
 /**
+ * **本番 `restraint/{compId}/min-wage/latest.json` と同じ形** (2026-08-26 実測):
+ * 47 県 (すべて県名キー) / `branchToPrefecture` 7 件 / **`全社共通` は無し** /
+ * **`defaultPrefecture` は未設定**。この形で「追加」を押すのが実際にいちばん起きる操作
+ * (カードは「未設定です。上の欄から追加してください。」の空表示になっている)。
+ */
+function prodShapeMaster(): MinWageMaster {
+  const prefectures: MinWageMaster['prefectures'] = {}
+  PREFECTURES_47.forEach((name, i) => { prefectures[name] = [{ effectiveFrom: '2025-10-01', rate: 950 + i }] })
+  return {
+    prefectures,
+    branchToPrefecture: { 本社: '福岡', 帯広: '北海道', 釧路: '北海道', 東京: '東京', 大阪: '大阪', 名古屋: '愛知', 仙台: '宮城' },
+  }
+}
+
+/**
  * 不変条件 — `全社共通` 以外は 1 件も失わない。
  *
  * **キーの件数**と**中身**の両方を見る (件数だけだと入れ替わりを見逃す)。
@@ -179,10 +194,50 @@ describe('最低賃金カードのマージ — defaultPrefecture (Refs #961)', 
     expect(after.defaultPrefecture).toBe('福岡')
   })
 
-  it('未設定のときだけ全社共通を入れる (カードだけで運用しているテナントを保つ)', () => {
+  it('未設定 かつ 全社共通が唯一の県キーなら入れる (カードだけで運用しているテナントを保つ)', () => {
     const before: MinWageMaster = { prefectures: {}, branchToPrefecture: {} }
     const after = upsertMinWageDefaultRate(before, '2025-10-01', 1000)
+    expect(Object.keys(after.prefectures)).toEqual([MIN_WAGE_DEFAULT_KEY])
     expect(after.defaultPrefecture).toBe(MIN_WAGE_DEFAULT_KEY)
+  })
+
+  it('全社共通だけの master に 2 行目を足しても入ったまま', () => {
+    const before: MinWageMaster = {
+      prefectures: { [MIN_WAGE_DEFAULT_KEY]: [{ effectiveFrom: '2024-10-01', rate: 1000 }] },
+      branchToPrefecture: {},
+      defaultPrefecture: MIN_WAGE_DEFAULT_KEY,
+    }
+    expect(upsertMinWageDefaultRate(before, '2025-10-01', 1050).defaultPrefecture).toBe(MIN_WAGE_DEFAULT_KEY)
+  })
+
+  // ★ ここが (C) の本体 — 「未設定なら入れる」だけだと本番でこの 1 本が落ちる。
+  // 47 県が入っている master に defaultPrefecture を書くと、拠点→県で引けない拠点の額が
+  // `null` → カードの額へ静かに変わる (`minWageForBranch` の `defaultPrefecture ?? null`)。
+  it('★ 本番の形 (47 県 + 拠点 7 件・全社共通なし・defaultPrefecture 未設定) に 1 行目を足しても書かれない', () => {
+    const before = prodShapeMaster()
+    expect(before.defaultPrefecture).toBeUndefined()
+    expect(Object.keys(before.prefectures)).toHaveLength(47)
+    expect(MIN_WAGE_DEFAULT_KEY in before.prefectures).toBe(false)
+
+    const after = upsertMinWageDefaultRate(before, '2026-10-01', 1200)
+    expect(after.defaultPrefecture).toBeUndefined()
+    expect('defaultPrefecture' in after).toBe(false)
+    // 足した行そのものは入る / 47 県と拠点 7 件は無傷
+    expect(after.prefectures[MIN_WAGE_DEFAULT_KEY]).toEqual([{ effectiveFrom: '2026-10-01', rate: 1200 }])
+    expect(Object.keys(after.prefectures)).toHaveLength(48)
+    expectKeepsAllButDefaultKey(before, after)
+  })
+
+  it('★ 本番の形では「削除」でも書かれない (削除後も行が残る形で測る)', () => {
+    const before = prodShapeMaster()
+    // 2 行足してから 1 行だけ消す — 消したあとも行が残るので、`entries.length === 0` の枝
+    // ではなくこの分岐を通る (残らない形だと条件を外しても落ちず、陰性対照にならない)
+    const seeded = upsertMinWageDefaultRate(upsertMinWageDefaultRate(before, '2025-10-01', 1100), '2026-10-01', 1200)
+    expect('defaultPrefecture' in seeded).toBe(false)
+    const after = removeMinWageDefaultRate(seeded, '2026-10-01')
+    expect(after.prefectures[MIN_WAGE_DEFAULT_KEY]).toEqual([{ effectiveFrom: '2025-10-01', rate: 1100 }])
+    expect('defaultPrefecture' in after).toBe(false)
+    expectKeepsAllButDefaultKey(before, after)
   })
 
   it('行が 0 件になり、全社共通を指していたときだけ外す', () => {
