@@ -79,6 +79,16 @@ import {
   summarizeTimecardCompareResults,
   toTimecardCompareRows,
 } from '~/utils/timecard-compare-view'
+import type { ArchiveSummaryEntry } from '~/utils/restraint-source-diff'
+import {
+  buildRestraintSourceDiffRows,
+  fmtRestraintSourceDiffMinutes,
+  restraintSourceDiffKindLabel,
+  restraintSourceDiffUnavailableReason,
+  sortRestraintSourceDiffRows,
+  summarizeRestraintSourceDiff,
+  RESTRAINT_SOURCE_DIFF_KIND_NOTE,
+} from '~/utils/restraint-source-diff'
 import type {
   KintaiDiffCacheState,
   KintaiDiffCategoryItemRow,
@@ -2328,7 +2338,10 @@ async function runBatchPrint() {
 
 const archiveEntries = ref<ArchiveCsvEntry[]>([])
 const archiveNoData = ref<string[]>([])
-const archiveSummaryCount = ref(0)
+/** アーカイブ (R2 `restraint/` prefix) の summary latest 一覧。
+ * **人数だけでなく中身も持つ** — デジタコ vs 打刻 の突合 (下記) がここを読む (Refs #606 PR-F)。 */
+const archiveSummaries = ref<ArchiveSummaryEntry[]>([])
+const archiveSummaryCount = computed(() => archiveSummaries.value.length)
 const loadingArchive = ref(false)
 const archiveHistory = ref<Record<string, ArchiveHistoryEntry[]>>({})
 
@@ -2346,19 +2359,20 @@ async function loadArchive() {
       headers: authHeaders(),
       query: { month: ym },
     })
-    const summaries = await $fetch<{ summaries: unknown[], no_data_drivers: string[] }>('/restraint-api/archive/summaries', {
+    const summaries = await $fetch<{ summaries: ArchiveSummaryEntry[], no_data_drivers: string[] }>('/restraint-api/archive/summaries', {
       headers: authHeaders(),
       query: { month: ym },
     })
     if (epoch !== archiveEpoch) return // 古い月の応答は捨てる
     archiveEntries.value = csvList.entries
-    archiveSummaryCount.value = summaries.summaries.length
+    archiveSummaries.value = summaries.summaries
     archiveNoData.value = summaries.no_data_drivers
     archiveHistory.value = {}
   }
   catch (e) {
     if (epoch !== archiveEpoch) return
     archiveEntries.value = []
+    archiveSummaries.value = []
     handleApiError(e)
   }
   finally {
@@ -2379,6 +2393,63 @@ const archiveRanges = computed(() => {
     versions: entries.filter(e => e.kind === 'version').sort((a, b) => b.file.localeCompare(a.file)),
   }))
 })
+
+// ---- デジタコ (theearth) vs 打刻 (live-build) の月計拘束の突合 (Refs #606 PR-F) ----
+//
+// **出どころが違う 2 つの口を突き合わせている。**
+//   デジタコ … このタブが既に読んでいる `/restraint-api/archive/summaries` = **R2**
+//              (`restraint/` prefix の summary latest)
+//   打刻     … `/restraint-api/wage-report` (`restraint_source` 既定 = `current`) の
+//              `source === 'timecard'` 行 = **live-build** (ichiban 経由でその場で組む)
+// 拘束時間の正は 2 系統あるので、**どちらを読んでいるかで答えが変わる。**
+// 画面にも書く (「アーカイブにありません」を鵜呑みにさせない)。
+//
+// wage-report は重いので**ボタンを押した時だけ**取りに行く (E のタイムカード照合タブと
+// 同じ流儀)。`fetchWageReport` はキャッシュ持ちなので、月次集計タブを先に開いていれば
+// 往復は起きない。
+const sourceDiffMonth = ref('')
+const sourceDiffReport = ref<WageReportResponse | null>(null)
+const sourceDiffLoading = ref(false)
+const sourceDiffError = ref('')
+
+/** 突合の結果を捨てる (月が変わったら前の月の突合を出したままにしない)。 */
+function resetSourceDiff() {
+  sourceDiffMonth.value = ''
+  sourceDiffReport.value = null
+  sourceDiffError.value = ''
+}
+watch(month, resetSourceDiff)
+
+async function loadSourceDiff() {
+  if (!session.value || !month.value) return
+  const ym = month.value
+  sourceDiffLoading.value = true
+  sourceDiffError.value = ''
+  try {
+    const res = await fetchWageReport(ym)
+    if (month.value !== ym) return // 待っている間に月が変わったら捨てる
+    sourceDiffReport.value = res
+    sourceDiffMonth.value = ym
+  }
+  catch (e) {
+    if (month.value !== ym) return
+    resetSourceDiff()
+    sourceDiffError.value = restraintErrorMessage(e)
+  }
+  finally {
+    if (month.value === ym) sourceDiffLoading.value = false
+  }
+}
+
+/** 突合を出してよいか (この月ぶんの wage-report を取得済みか)。 */
+const sourceDiffLoaded = computed(() => sourceDiffReport.value !== null && sourceDiffMonth.value === month.value)
+
+const sourceDiffRows = computed(() => sortRestraintSourceDiffRows(
+  buildRestraintSourceDiffRows(archiveSummaries.value, sourceDiffReport.value?.rows ?? []),
+))
+const sourceDiffSummary = computed(() => summarizeRestraintSourceDiff(sourceDiffRows.value))
+/** 0 行の理由。**「差のある乗務員はいません」とだけ出さない** (片側まるごと欠けを一致に見せない)。 */
+const sourceDiffUnavailable = computed(() => restraintSourceDiffUnavailableReason(sourceDiffSummary.value))
 
 interface ResummarizeResult { csv_processed: number, summaries_written: number, summaries_new_version: number, errors: string[] }
 
@@ -5591,6 +5662,129 @@ watch([compMap, kyuyoSyncedKeys], () => {
             <p v-if="archiveNoData.length" class="text-xs text-amber-600 dark:text-amber-400">
               該当データなし (途中入社・休職・未集計 等): 乗務員 {{ archiveNoData.join(', ') }}
             </p>
+          </UCard>
+
+          <!-- デジタコ (このタブのアーカイブ) vs 打刻 (live-build) の月計拘束 (Refs #606 PR-F) -->
+          <UCard class="mt-4">
+            <template #header>
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="font-semibold">デジタコ vs 打刻 — 月計拘束 ({{ fmtYm(month) }})</span>
+                <span class="text-xs text-gray-500">
+                  <b>デジタコ</b> = このタブのアーカイブ (R2 に貯めた拘束時間管理表) /
+                  <b>打刻</b> = 月次集計に出ている live-build の値。<b>出どころが違う 2 つの口</b>を並べています。
+                  賃金に入るのは<b>打刻側</b>で、この表は<b>どちらが正かを決めません</b> —
+                  採否はサーバ側で確定済みです (乗務員CD 単位で打刻を採用)。
+                </span>
+                <div class="flex-1" />
+                <UButton
+                  size="xs"
+                  icon="i-lucide-git-compare"
+                  :label="sourceDiffLoaded ? '取り直して突き合わせる' : '打刻と突き合わせる'"
+                  :loading="sourceDiffLoading"
+                  :disabled="sourceDiffLoading"
+                  @click="loadSourceDiff"
+                />
+              </div>
+            </template>
+
+            <UAlert
+              v-if="sourceDiffError"
+              color="error"
+              variant="soft"
+              class="mb-3"
+              icon="i-lucide-alert-triangle"
+              title="突き合わせられませんでした"
+              :description="sourceDiffError"
+            />
+
+            <p v-if="!sourceDiffLoaded && !sourceDiffLoading && !sourceDiffError" class="text-sm text-gray-500">
+              「打刻と突き合わせる」を押すと、この月の月計拘束をデジタコ側と打刻側で並べます
+              (打刻で測ると拘束は増えるのが設計どおりの向きなので、<b>差そのものは異常ではありません</b>。
+              この表の使いどころは<b>外れ値を上に出すこと</b>です)。
+            </p>
+            <div v-else-if="sourceDiffLoading" class="flex items-center gap-2 text-sm text-gray-500">
+              <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin text-primary" />
+              打刻側 (live-build) を取得しています…
+            </div>
+            <template v-else-if="sourceDiffLoaded">
+              <p class="text-xs text-gray-600 dark:text-gray-400 mb-2">
+                比べられた <b>{{ sourceDiffSummary.comparedCount }}</b> 名
+                (一致 {{ sourceDiffSummary.matchedCount }} / 差あり {{ sourceDiffSummary.differentCount }})
+                / デジタコのみ <b>{{ sourceDiffSummary.theearthOnlyCount }}</b> 名
+                / 打刻のみ <b>{{ sourceDiffSummary.timecardOnlyCount }}</b> 名
+                <template v-if="sourceDiffSummary.bothButNoValueCount">
+                  / 両方に居るが拘束が空 <b>{{ sourceDiffSummary.bothButNoValueCount }}</b> 名
+                </template>
+                <!-- ★ 比べられた行が 0 のときに合計を出さない。0 名の合計は必ず
+                     「デジタコ 0h00m / 打刻 0h00m = 差 ±0」になり、**差が無かったように読める** -->
+                <template v-if="sourceDiffSummary.comparedCount">
+                  <br>
+                  比べられた行だけの合計: デジタコ {{ fmtMinutes(sourceDiffSummary.theearthMinutes) }} /
+                  打刻 {{ fmtMinutes(sourceDiffSummary.timecardMinutes) }} =
+                  差 {{ fmtRestraintSourceDiffMinutes(sourceDiffSummary.diffMinutes) }}
+                  <span class="text-gray-500">(比較不能な行は 1 分も足していません)</span>
+                </template>
+              </p>
+              <UAlert
+                v-if="sourceDiffUnavailable"
+                color="warning"
+                variant="soft"
+                class="mb-3"
+                icon="i-lucide-alert-triangle"
+                title="比べられませんでした (差が無いという意味ではありません)"
+                :description="sourceDiffUnavailable"
+              />
+              <div class="overflow-x-auto">
+                <table class="min-w-full text-sm border-collapse">
+                  <thead class="bg-gray-100 dark:bg-gray-800">
+                    <tr>
+                      <th class="px-2 py-1 text-left">乗務員CD</th>
+                      <th class="px-2 py-1 text-left">氏名</th>
+                      <th class="px-2 py-1 text-left">事業所</th>
+                      <th class="px-2 py-1 text-right" title="R2 に貯めた拘束時間管理表 (デジタコ) の月計拘束">
+                        デジタコ (R2)
+                      </th>
+                      <th class="px-2 py-1 text-right" title="wage-report の live-build (打刻ベース) の月計拘束。賃金はこちらを根拠にする">
+                        打刻 (live-build)
+                      </th>
+                      <th class="px-2 py-1 text-right border-l border-gray-200 dark:border-gray-700" title="打刻 − デジタコ。片側でも欠けていれば「比較不能」">
+                        差
+                      </th>
+                      <th class="px-2 py-1 text-left">区分</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="drow in sourceDiffRows"
+                      :key="drow.driverCd"
+                      class="border-t border-gray-200 dark:border-gray-700"
+                      :class="drow.diffMinutes === null ? 'bg-gray-50 dark:bg-gray-900/40 text-gray-500' : ''"
+                    >
+                      <td class="px-2 py-1 tabular-nums">{{ drow.driverCd }}</td>
+                      <td class="px-2 py-1">{{ drow.driverName }}</td>
+                      <td class="px-2 py-1 text-xs">{{ drow.branchName }}</td>
+                      <td class="px-2 py-1 text-right tabular-nums">{{ fmtMinutes(drow.theearthMinutes) }}</td>
+                      <td class="px-2 py-1 text-right tabular-nums">{{ fmtMinutes(drow.timecardMinutes) }}</td>
+                      <td class="px-2 py-1 text-right tabular-nums border-l border-gray-200 dark:border-gray-700">
+                        {{ fmtRestraintSourceDiffMinutes(drow.diffMinutes) }}
+                      </td>
+                      <td class="px-2 py-1 text-xs" :title="RESTRAINT_SOURCE_DIFF_KIND_NOTE[drow.kind]">
+                        {{ restraintSourceDiffKindLabel(drow) }}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="mt-2 text-xs text-gray-500">
+                並びは<b>差の絶対値が大きい順</b>で、比べられなかった行はその下に乗務員CD 順で置いています。
+                <b>「デジタコのみ」は打刻が欠けているという意味ではありません</b> — 打刻システムは本社にしか無いので、
+                営業所の乗務員に打刻が無いのは正常です (#613)。
+                比べているのは<b>月計拘束だけ</b>です — 運転・荷役・年度累計・拘束上限・当月超過・平均運転9h超 の 6 指標は
+                打刻から構造的に出せず、デジタコ側から埋め戻しているので、突き合わせる相手がいません。
+                日別の突合は入れていません (デジタコ側の日とこちらの始業日は<b>軸が揃っている保証がまだ取れていない</b>ため。
+                揃っていない軸で日別を出すと、片側だけの日が大量に出て嘘の差になります)。
+              </p>
+            </template>
           </UCard>
         </template>
 
