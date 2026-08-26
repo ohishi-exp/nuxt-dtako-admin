@@ -181,9 +181,15 @@ describe('/restraint-wage 最低賃金チェック: 最低賃金との差分が�
     expect(text).not.toContain('この表の判定には使いません')
   })
 
-  it('★ 対照: 表に時給列 (換算時給 / 最低 / 差) が復活していない — 復活したら上の注記が嘘になる', async () => {
+  it('★ 対照: 表に時給列 (総支給時給 / 最低賃金 / 差、および旧名の換算時給) が復活していない — 復活したら上の注記が嘘になる', async () => {
     const w = await mountMinWageTab()
     const headers = w.findAll('table.minwage-table thead th').map(th => th.text().replace(/\s+/g, ' '))
+    // **新名で塞ぐ** (Refs #938)。月次集計タブの同じ列は `換算時給` → `総支給時給` に
+    // 改称したので、**旧名だけ見ていると新名の列を足されて素通りする** — 旧名を製品から
+    // 消した以上、このガードが実際に守れるのは新名の側。
+    // `総支給時給−最低賃金` も `総支給時給` を含むので、この 1 行で差の列も塞がる。
+    expect(headers.some(h => h.includes('総支給時給'))).toBe(false)
+    // 旧名も残す — 復活の仕方が 2 通りある (改称前のコードを戻す / 新しく足す)。
     expect(headers.some(h => h.includes('換算時給'))).toBe(false)
     // 「最低賃金」を名乗る列が無いこと (設定カードの見出しは表の外なので拾わない)
     expect(headers.some(h => h.includes('最低賃金'))).toBe(false)
