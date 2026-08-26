@@ -100,6 +100,17 @@ describe("get_dtako_scrape_status", () => {
     expect(getDtakoScrapeStatusTool.description).toContain("見ていない");
   });
 
+  // **「履歴に無い」は「実行されていない」ではない** (Refs #958)。#946 で無人実行も
+  // ここに載るようになったが書き込みは best-effort で、#946 より前の分は載っていない。
+  it("**説明で「載っていない = 実行されていない」ではないことが読める** (Refs #958)", () => {
+    const d = getDtakoScrapeStatusTool.description;
+    expect(d).toContain("実行されていない」の根拠にしない");
+    expect(d).toContain("best-effort");
+    expect(d).toContain("#946 より前の無人実行はそもそも載っていない");
+    // fold の情報はこちらには 1 件も載らない — 探す先を名指しする
+    expect(d).toContain("fold_* は get_dtako_scrape_progress 側だけが持つ");
+  });
+
   it("limit を省略すると relay の既定に委ねる", async () => {
     const e = env({
       SCRAPER_RELAY: { fetch: vi.fn(async () => new Response(JSON.stringify({ history: [] }))) },

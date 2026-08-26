@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { getDtakoScrapeProgressTool } from "../src/mcp/tools";
+import { FOLD_STATES } from "../../dtako-scraper-relay/src/scrape-queue";
 import type { Env } from "../src/env";
 
 const SECRET = "internal-shared-secret";
@@ -24,6 +25,45 @@ describe("get_dtako_scrape_progress (ohishi-exp/rust-ichibanboshi#205 の 43)", 
     expect(getDtakoScrapeProgressTool.description).toContain("pending/running/done/failed");
     expect(getDtakoScrapeProgressTool.description).toContain("黙って消えない");
     expect(getDtakoScrapeProgressTool.description).toContain("comp_id ごとの instance");
+  });
+
+  // **応答に載るのに説明に無い**フィールドを潰す (Refs #958)。#945 は fold_pages /
+  // fold_drivers_written を「今回の途中経過」と読んで誤診した — 説明にそう書いていな
+  // かったので、読み手には気づく手段が無かった。
+  it("**説明で fold_* の意味と「別の試行の値が残り得る」ことが読める** (Refs #958)", () => {
+    const d = getDtakoScrapeProgressTool.description;
+    // 値そのものと、「失敗ではない」区別が読めること
+    expect(d).toContain("skipped_out_of_scope");
+    expect(d).toContain("not_configured");
+    expect(d).toContain("設定の穴");
+    expect(d).toContain("fold_skip_reason");
+    // 取り込みの成否と fold の成否を混ぜない (両方向)
+    expect(d).toContain("fold_* は state を一切動かさない");
+    // ★ 部分 spread なので、patch に含まれないフィールドは前の試行のまま残る
+    expect(d).toContain("fold_* には別の試行の値が残り得る");
+    expect(d).toContain("前回の試行の終端値");
+    // #944 以降の入口クリアは**過去の記録には及ばない**
+    expect(d).toContain("それ以前に書かれた記録には残ったまま");
+  });
+
+  // **列挙は腐る** — 状態が増えたときに説明だけが古いまま残らないよう、正 (relay の
+  // FOLD_STATES) を回して 1 つでも書き漏れたら落とす。件数を数字で書き写さないのも
+  // 同じ理由 (数字だけの注記は静かに腐る)。
+  it("**fold_state の値を 1 つも書き漏らさない** (Refs #958)", () => {
+    const d = getDtakoScrapeProgressTool.description;
+    const missing = FOLD_STATES.filter((state) => !d.includes(state));
+    expect(missing).toEqual([]);
+    // 「9 値」と書いてあるので、正の件数が動いたらここも落ちる
+    expect(d).toContain(`fold_state の ${FOLD_STATES.length} 値`);
+  });
+
+  // **#942 以前に書かれた記録が今も現存する** (Refs #959)。記録は書き換えない判断な
+  // ので、読み手が「done なのに error」を正しく読めるかは説明文だけが担保する。
+  it("**説明で done + pre_upload + error が混ざることが読める** (Refs #959)", () => {
+    const d = getDtakoScrapeProgressTool.description;
+    expect(d).toContain('state: "done" なのに phase: "pre_upload" と error を抱えた記録が混ざる');
+    expect(d).toContain("#942 以前に書かれた記録");
+    expect(d).toContain("どちらが真かは記録からは決まらない");
   });
 
   it("comp_id は任意", () => {

@@ -1003,7 +1003,15 @@ export const getDtakoScrapeStatusTool = {
     "**date_from / date_to を渡すと unsplit_total (未 split の運行数) を直接数える** — " +
     "これが 0 なら取り込みは完了している。" +
     "**unsplit_total が null なのは「残っていない」ではなく「見ていない」** " +
-    "(date_from / date_to を渡していないか、alc から引けなかった。後者は unsplit_error に出る)。",
+    "(date_from / date_to を渡していないか、alc から引けなかった。後者は unsplit_error に出る)。" +
+    // ── 履歴に「載っていない」の読み方 (Refs #958) ──────────────────────────
+    "★**history に載っていないことを「実行されていない」の根拠にしない。** " +
+    "画面 (WS) 経由の手動スクレイプに加えて、#946 以降は日次 cron / run_dtako_scrape の" +
+    "無人実行もここに載るようになったが、履歴の書き込みは best-effort で " +
+    "(落ちても取り込み本体は成功のまま進む)、#946 より前の無人実行はそもそも載っていない。" +
+    "**無人実行が走ったかどうかは get_dtako_scrape_progress (DO 自身の状態) で見ること。** " +
+    "こちらには fold (取り込み後の畳み直し) の情報も一切載らない — " +
+    "fold_* は get_dtako_scrape_progress 側だけが持つ。",
   inputSchema: getDtakoScrapeStatusArgs,
   execute: async (env: Env, args: z.infer<typeof getDtakoScrapeStatusArgs>) => {
     const relay = env.SCRAPER_RELAY;
@@ -1046,8 +1054,11 @@ export const getDtakoScrapeProgressTool = {
     "**run_dtako_scrape で起動した `/cron/dtako` job が「まだ走っている / 終わった / " +
     "落ちた」かを DO の scrapeQueue から直接見る** (Refs ohishi-exp/rust-ichibanboshi#205 の 43)。" +
     "読むだけ。**get_dtako_scrape_status とは別物** — あちらは alc 側の履歴で、" +
-    "ブラウザ経由 (画面の「スクレイプ履歴」) の実行しか載らず、" +
-    "run_dtako_scrape や日次 cron の実行は 1 件も載らない (#205-43 で確認済み)。" +
+    "画面 (WS) 経由の手動スクレイプはあちらにしか載らない (こちらには 1 件も載らない)。" +
+    "**逆に、無人実行が「あちらに載らない」のは #946 より前の話** — " +
+    "#946 以降は日次 cron / run_dtako_scrape の結果も alc 履歴に書くようになった。" +
+    "ただしその書き込みは best-effort (落ちても取り込み本体は成功のまま進む) なので、" +
+    "**あちらに無いことを「実行されていない」の根拠にしない**。" +
     "こちらは DO 自身が持つ状態なので、無人実行でも見える。" +
     "**DO は comp_id ごとの instance。** comp_id を省略すると dtako_accounts の" +
     "全社ぶんを `comps` 配列で返す (会社ごとに comp_id 付き) — 1 社しか見えていないのに" +
@@ -1057,7 +1068,50 @@ export const getDtakoScrapeProgressTool = {
     "done でも split_failed が null でない数を持つことがある — " +
     "0 より大きければ取り込みは成功したが CSV 分割が落ちた回 " +
     "(get_dtako_scrape_status の split_failed と同じ注意: 必要条件であって十分条件ではない)。" +
-    "**進捗は上限 200 件で古い方から捨てる** (応答の max_records で分かる)。",
+    "**進捗は上限 200 件で古い方から捨てる** (応答の max_records で分かる)。" +
+    // ── fold_* の意味 (Refs #958) ──────────────────────────────────────────
+    "各 job には、取り込みの後に走る勤怠の畳み直し (fold) の記録が fold_* として載る。" +
+    "**fold_* は state を一切動かさない** — fold_state: failed でも state は取り込みが" +
+    "決めた値のままで、逆に state: done を見て fold まで成功したと読んではいけない " +
+    "(fold の内訳は応答の fold_counts を見る。pending/running/done/failed の 4 件数は" +
+    "取り込みのもので、fold の成否を 1 件も含まない)。" +
+    "**fold_state の 9 値**: running (走行中。**これだけが非終端**) / done (畳み切った) / " +
+    "capped (ページ上限で打ち切った。**失敗ではないが完了でもない** — 畳み残しがあり、" +
+    "続きは次回の fold に委ねている。打ち切った回は月ゲートを封じない) / " +
+    "stale (running のまま閾値を超えたので終端に倒した。**fold が失敗したと確認できたわけではない** — " +
+    "DO の再起動 (deploy / evict) 等で終端の記録が書かれず取り残されただけのことがある。" +
+    "倒した理由と経過時間は fold_error に書いてある) / failed (fold 自体が落ちた。理由は fold_error) / " +
+    "skipped_no_upload・skipped_split_failed・skipped_out_of_scope " +
+    "(**意図して回さなかった。失敗ではない**) / " +
+    "not_configured (**設定の穴**。skipped_* と混ぜない — あちらは意図して回さなかった状態で、" +
+    "こちらは設定を直せば回る)。" +
+    "**なぜ回さなかったかは fold_skip_reason が名指しする** (skipped_* / not_configured のとき)。" +
+    "fold_months は畳んだ対象月、fold_started_at は fold_state: running を書いた時刻、" +
+    "fold_pages / fold_drivers_written は **fold の終端 1 か所でしか書かない全月の合計**。" +
+    "fold_running_for_ms / fold_stale は running のレコードにだけ応答で添える算出値で" +
+    "保存値ではない (fold_stale: true は「疑え」であって「失敗した」ではない)。" +
+    "★**fold_* には別の試行の値が残り得る。** 進捗レコードは部分 spread で重ねるので、" +
+    "patch に含まれないフィールドは前回の試行の値のまま残る。" +
+    "fold_pages / fold_drivers_written は fold の終端でしか書かないので、" +
+    "**running の間に見えている数字は今回の途中経過ではなく前回の試行の終端値** " +
+    "(#945 がこれを今回の途中経過と読んで誤診した)。fold_error も同じで、" +
+    "前回 failed → 今回 running にすると古いエラーが残る。" +
+    "**#944 以降は running の入口で前回の残骸を捨てるようになったが、" +
+    "それ以前に書かれた記録には残ったままなので、古い記録を読むときは必ず疑うこと。** " +
+    // ── done + pre_upload + error が混ざる (Refs #959) ─────────────────────
+    "★**state: \"done\" なのに phase: \"pre_upload\" と error を抱えた記録が混ざる。** " +
+    "phase は破壊的操作 (取り込み) の前か後かを表す pre_upload / post_upload で、" +
+    "state: running の間だけ意味を持つ。取り込み経路はアップロードを発火する直前に " +
+    "post_upload へ倒してからでないと done を書かないので、" +
+    "**done + pre_upload の組は取り込み経路では作れない**。" +
+    "これは **#942 以前に書かれた記録**で、当時は画面 (WS) 経路の fold が既存レコードに " +
+    "state: \"done\" を重ねており、前の試行の phase / error を残したまま done に化けた。" +
+    "**#942 は新規発生を止めただけで、既に書かれた記録はそのまま残っている** " +
+    "(2026-08-26 時点で複数の読取日に現存)。" +
+    "⇒ **state と error が矛盾しているので、どちらが真かは記録からは決まらない** — " +
+    "error と phase: pre_upload からは「アップロード前に落ちた」と読めるが、state: done と食い違う。" +
+    "**この形を見たら記録だけで取り込みの成否を判定せず、alc 側 " +
+    "(get_dtako_scrape_status の unsplit_total 等) で確かめること。**",
   inputSchema: getDtakoScrapeProgressArgs,
   execute: async (env: Env, args: z.infer<typeof getDtakoScrapeProgressArgs>) => {
     const relay = env.SCRAPER_RELAY;
