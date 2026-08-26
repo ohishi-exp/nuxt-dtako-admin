@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  archiveFetchedRange,
   buildRestraintSourceDiffRows,
   sortRestraintSourceDiffRows,
   summarizeRestraintSourceDiff,
@@ -274,6 +275,29 @@ describe('区分のラベルと注記', () => {
     const note = RESTRAINT_SOURCE_DIFF_KIND_NOTE['theearth-only']
     expect(note).toContain('正常')
     expect(note).not.toContain('欠け')
+  })
+})
+
+describe('archiveFetchedRange', () => {
+  const at = (ts: string | null): ArchiveSummaryEntry => ({ data: summary(), fetchedAt: ts, lastVerifiedAt: null })
+
+  it('保存時刻の最小と最大を返す', () => {
+    expect(archiveFetchedRange([at('20260810T031500'), at('20260801T031500'), at('20260825T121500')]))
+      .toEqual({ from: '20260801T031500', to: '20260825T121500' })
+  })
+
+  it('1 件だけなら from と to が同じ', () => {
+    expect(archiveFetchedRange([at('20260801T031500')])).toEqual({ from: '20260801T031500', to: '20260801T031500' })
+  })
+
+  it('保存時刻を持たない entry は飛ばす', () => {
+    expect(archiveFetchedRange([at(null), at('20260801T031500'), at(null)]))
+      .toEqual({ from: '20260801T031500', to: '20260801T031500' })
+  })
+
+  it('0 件・全部 null なら null (「いつの値か分からない」を 0 に倒さない)', () => {
+    expect(archiveFetchedRange([])).toBeNull()
+    expect(archiveFetchedRange([at(null), at(null)])).toBeNull()
   })
 })
 

@@ -81,6 +81,7 @@ import {
 } from '~/utils/timecard-compare-view'
 import type { ArchiveSummaryEntry } from '~/utils/restraint-source-diff'
 import {
+  archiveFetchedRange,
   buildRestraintSourceDiffRows,
   fmtRestraintSourceDiffMinutes,
   restraintSourceDiffKindLabel,
@@ -2448,6 +2449,8 @@ const sourceDiffRows = computed(() => sortRestraintSourceDiffRows(
   buildRestraintSourceDiffRows(archiveSummaries.value, sourceDiffReport.value?.rows ?? []),
 ))
 const sourceDiffSummary = computed(() => summarizeRestraintSourceDiff(sourceDiffRows.value))
+/** デジタコ側 (R2) が**いつ保存された値か**。「保存済み vs いま計算した値」を画面で言い切るのに要る。 */
+const sourceDiffArchiveFetched = computed(() => archiveFetchedRange(archiveSummaries.value))
 /** 0 行の理由。**「差のある乗務員はいません」とだけ出さない** (片側まるごと欠けを一致に見せない)。 */
 const sourceDiffUnavailable = computed(() => restraintSourceDiffUnavailableReason(sourceDiffSummary.value))
 
@@ -5670,8 +5673,9 @@ watch([compMap, kyuyoSyncedKeys], () => {
               <div class="flex flex-wrap items-center gap-2">
                 <span class="font-semibold">デジタコ vs 打刻 — 月計拘束 ({{ fmtYm(month) }})</span>
                 <span class="text-xs text-gray-500">
-                  <b>デジタコ</b> = このタブのアーカイブ (R2 に貯めた拘束時間管理表) /
-                  <b>打刻</b> = 月次集計に出ている live-build の値。<b>出どころが違う 2 つの口</b>を並べています。
+                  <b>左 = デジタコ</b>: このタブのアーカイブ (<b>R2 に保存済み</b>の拘束時間管理表)。
+                  <b>右 = 打刻</b>: <b>いま計算した値</b> (live-build)。<b>出どころが違う 2 つの口</b>を並べているので、
+                  片方が欠けているだけで読みが 180 度変わります。
                   賃金に入るのは<b>打刻側</b>で、この表は<b>どちらが正かを決めません</b> —
                   採否はサーバ側で確定済みです (乗務員CD 単位で打刻を採用)。
                 </span>
@@ -5724,6 +5728,20 @@ watch([compMap, kyuyoSyncedKeys], () => {
                   差 {{ fmtRestraintSourceDiffMinutes(sourceDiffSummary.diffMinutes) }}
                   <span class="text-gray-500">(比較不能な行は 1 分も足していません)</span>
                 </template>
+                <template v-if="sourceDiffArchiveFetched">
+                  <br>
+                  デジタコ側は
+                  <b>{{ fmtArchiveTs(sourceDiffArchiveFetched.from) }}<template v-if="sourceDiffArchiveFetched.to !== sourceDiffArchiveFetched.from"> 〜 {{ fmtArchiveTs(sourceDiffArchiveFetched.to) }}</template></b>
+                  に R2 へ保存された値です (打刻側はこのボタンを押した時点の計算結果)。
+                </template>
+                <!-- ★ 保存時刻が無い理由は 2 通りある。**行が 1 件も無い月にこれを出さない** —
+                     「データはあるが時刻だけ読めない」と読めてしまう (実際は行そのものが無く、
+                     それは下の警告が言う)。行があるのに時刻が無い時だけ出す -->
+                <template v-else-if="archiveSummaries.length">
+                  <br>
+                  <span class="text-amber-600 dark:text-amber-400">デジタコ側の保存時刻が読めませんでした</span> —
+                  行はありますが、いつ取り込んだ値かは分かりません (打刻側はこのボタンを押した時点の計算結果)。
+                </template>
               </p>
               <UAlert
                 v-if="sourceDiffUnavailable"
@@ -5741,11 +5759,11 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       <th class="px-2 py-1 text-left">乗務員CD</th>
                       <th class="px-2 py-1 text-left">氏名</th>
                       <th class="px-2 py-1 text-left">事業所</th>
-                      <th class="px-2 py-1 text-right" title="R2 に貯めた拘束時間管理表 (デジタコ) の月計拘束">
-                        デジタコ (R2)
+                      <th class="px-2 py-1 text-right" title="R2 に保存済みの拘束時間管理表 (デジタコ) の月計拘束。取り込んだ時点の値">
+                        デジタコ (R2 の保存済み)
                       </th>
-                      <th class="px-2 py-1 text-right" title="wage-report の live-build (打刻ベース) の月計拘束。賃金はこちらを根拠にする">
-                        打刻 (live-build)
+                      <th class="px-2 py-1 text-right" title="wage-report が打刻からその場で組んだ月計拘束 (live-build)。賃金はこちらを根拠にする">
+                        打刻 (いま計算した値)
                       </th>
                       <th class="px-2 py-1 text-right border-l border-gray-200 dark:border-gray-700" title="打刻 − デジタコ。片側でも欠けていれば「比較不能」">
                         差
@@ -5781,8 +5799,13 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 営業所の乗務員に打刻が無いのは正常です (#613)。
                 比べているのは<b>月計拘束だけ</b>です — 運転・荷役・年度累計・拘束上限・当月超過・平均運転9h超 の 6 指標は
                 打刻から構造的に出せず、デジタコ側から埋め戻しているので、突き合わせる相手がいません。
-                日別の突合は入れていません (デジタコ側の日とこちらの始業日は<b>軸が揃っている保証がまだ取れていない</b>ため。
-                揃っていない軸で日別を出すと、片側だけの日が大量に出て嘘の差になります)。
+                <b>日別の突合は入れていません。</b>「まだ確かめていない」のではなく、<b>確かめた結果 軸が違います</b> —
+                打刻側の日別は<b>暦日に按分し直した後</b>の値 (日跨ぎ勤務は開始日と翌日に分かれて乗る) で、
+                デジタコ側は拘束時間管理表の 1 行を<b>按分せずそのまま</b>入れています。
+                日別で並べると日跨ぎのたびに片側だけの日と過大な差が出るので、突合できるのは<b>月計まで</b>です。
+                <b>月末の日跨ぎ勤務は月計にも効きます</b> — 打刻側は対象月に落ちた分しか数えないので翌月へこぼれ、
+                デジタコ側は行が対象月にあれば丸ごと入ります。壊れているのではなく、
+                <b>各システムが「その月に属する」と数えた分</b>そのものです。
               </p>
             </template>
           </UCard>

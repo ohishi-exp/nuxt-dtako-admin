@@ -30,6 +30,24 @@
  * とおり**打刻で測ると拘束は増える**ので、正の値が設計どおりの向き。
  * **閾値 (許容誤差) は置かない** — 系統差の大きさは月・乗務員で変わり、
  * 勝手な閾値は「正常を異常に見せる」方向にしか効かないため。
+ *
+ * ## ★ 比べるのは月計だけ。日別は軸が違う (2026-08-26 に実コードで確定)
+ *
+ * 「まだ確かめていない」ではなく**確かめた結果ずれている**。日付のずれではなく
+ * **暦日按分の有無**で、日跨ぎ勤務があると必ず食い違う:
+ *
+ * | | 日別 1 行が持つ拘束 |
+ * |---|---|
+ * | **打刻** | **暦日按分後。** `KosokuShift.date` は始業日だが `parts` に暦日の内訳を持ち、`kosokuByCalendarDate` → `applyKosokuTimes` が**暦日ごとに合算し直す**。日跨ぎ勤務は開始日と翌日に分かれて乗る |
+ * | **デジタコ** | **按分なし。** `theearth-restraint-client.ts` が CSV の `N月N日` 行をそのまま `day` にし、その行の拘束を丸ごと入れる |
+ *
+ * ⇒ **日別で並べると、日跨ぎのたびに片側だけの日と過大な差が出る。**
+ * 突合できるのは**月計まで**。
+ *
+ * **月計にもこの寄せ方の差は残る** (`kosokuByCalendarDate` が
+ * `date.startsWith(month)` で**対象月に落ちる分しか足さない**ため、月末の日跨ぎ勤務は
+ * 打刻側で翌月へこぼれる。デジタコ側は行が対象月にあれば丸ごと入る)。
+ * これは壊れているのではなく**各システムが「その月に属する」と数えた分**そのもの。
  */
 
 import type { RestraintDriverSummary, WageReportRow } from './restraint-wage-view'
@@ -40,6 +58,32 @@ export interface ArchiveSummaryEntry {
   data: RestraintDriverSummary
   fetchedAt: string | null
   lastVerifiedAt: string | null
+}
+
+/**
+ * デジタコ側 (R2) が**いつ保存された値なのか**の範囲 (`YYYYMMDDTHHMMSS` の生の形。
+ * 整形は呼び出し側の `fmtArchiveTs`)。`fetchedAt` を持つ entry が 1 件も無ければ null。
+ *
+ * ★ **これを出さないと「左が保存済み・右がいま計算した値」が画面から読めない。**
+ * 拘束の正は 2 系統あり、**どちらを読んでいるかで答えが変わる**ので、
+ * 左側が「いつの時点か」は差そのものと同じくらい重要。
+ */
+export function archiveFetchedRange(
+  entries: readonly ArchiveSummaryEntry[],
+): { from: string, to: string } | null {
+  // ★ `from`/`to` を別々に null 初期化して `from === null || ts < from` と書くと、
+  // **`to === null` 側が構造上あり得ない死に分岐になる** (両方が必ず同時に埋まるため)。
+  // 先に取り出してから畳む (Refs #606 PR-F、BR 計測で検出)。
+  const stamps = entries.map(e => e.fetchedAt).filter((ts): ts is string => ts !== null)
+  const first = stamps[0]
+  if (first === undefined) return null
+  let from = first
+  let to = first
+  for (const ts of stamps) {
+    if (ts < from) from = ts
+    if (ts > to) to = ts
+  }
+  return { from, to }
 }
 
 /**
