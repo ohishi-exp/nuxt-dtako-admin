@@ -22,6 +22,8 @@ import {
   classifyTimeCategory,
   summarizeSelectedRows,
   proposeEventRowRange,
+  proposeCarriedEventRowRange,
+  type CarriedEventRowRange,
   groupLegsByDate,
   rowIndicesInTimeRange,
   rowIndicesInTimeRanges,
@@ -1142,5 +1144,153 @@ describe('ignoredEventCodes / dropIgnoredRows', () => {
   it('イベントCD 列が無ければそのまま返す (推測で落とさない)', () => {
     const rows = [['急加速']]
     expect(dropIgnoredRows(['イベント名'], rows, new Set(['401']))).toBe(rows)
+  })
+})
+
+describe('proposeCarriedEventRowRange (次の運行の先頭の降しで代用、Refs #926)', () => {
+  function row(start: string, end: string, name: string, startCity: string, endCity: string): string[] {
+    return [start, end, '999', name, '30', '5', startCity, endCity]
+  }
+
+  /** 降しが 1 行も無いまま帰庫した運行 (積んだまま翌朝の運行の頭で降ろす形)。 */
+  const rows = [
+    row('2026/07/31 04:15:41', '2026/07/31 08:40:00', '運転', '北海道河東郡音更町', '北海道釧路市西港2'),
+    row('2026/07/31 08:40:00', '2026/07/31 09:20:00', '積み', '北海道釧路市西港2', '北海道釧路市西港2'),
+    row('2026/07/31 09:20:00', '2026/07/31 14:10:00', '運転', '北海道釧路市西港1', '北海道河東郡音更町駒場'),
+    row('2026/07/31 14:10:00', '2026/07/31 20:00:00', '休息', '北海道河東郡音更町駒場', '北海道河東郡音更町駒場'),
+  ]
+
+  const carried = {
+    unkoNo: '26080104120000000011091',
+    crossesMonth: true,
+    cities: ['北海道河東郡音更町駒場'],
+    toTs: parseEventDatetimeToTs('2026/08/01 06:30:00'),
+  }
+
+  it('最終便に降しが無ければ、卸地を次の運行の先頭の降しで代用して区間を返す', () => {
+    const result = proposeCarriedEventRowRange(eventHeaders, rows, '釧路市西港', '音更町駒場', carried)
+    expect(result).toEqual({
+      status: 'ok',
+      range: {
+        fromTs: parseEventDatetimeToTs('2026/07/31 08:40:00'),
+        toTs: parseEventDatetimeToTs('2026/07/31 20:00:00'),
+        legs: [{
+          fromTs: parseEventDatetimeToTs('2026/07/31 08:40:00'),
+          toTs: parseEventDatetimeToTs('2026/07/31 20:00:00'),
+        }],
+        destSource: 'carried',
+        carriedFromUnkoNo: '26080104120000000011091',
+        carriedFromNextMonth: true,
+        carriedDestCity: '北海道河東郡音更町駒場',
+        carriedUnloadTs: parseEventDatetimeToTs('2026/08/01 06:30:00'),
+      },
+    })
+  })
+
+  it('★ toTs は**この運行の最終行**までにクランプされ、次の運行の降しの時刻は入らない', () => {
+    const result = proposeCarriedEventRowRange(eventHeaders, rows, '釧路市西港', '音更町駒場', carried)
+    expect(result.status).toBe('ok')
+    const range = (result as { status: 'ok', range: CarriedEventRowRange }).range
+    // 実際の降しは翌日 (翌月) だが、区間の toTs はこの運行の最終行 (07/31 20:00)。
+    expect(range.toTs).toBe(parseEventDatetimeToTs('2026/07/31 20:00:00'))
+    expect(range.carriedUnloadTs).toBe(parseEventDatetimeToTs('2026/08/01 06:30:00'))
+    expect(range.carriedUnloadTs! > range.toTs).toBe(true)
+    // クランプした区間で行を選べば、この運行の行しか入らない (積み〜帰庫)。
+    expect(rowIndicesInTimeRanges(eventHeaders, rows, range.legs)).toEqual([1, 2, 3])
+  })
+
+  it('終了日時が読めない行が混ざってもクランプは壊れない', () => {
+    const withBadEnd = [...rows, row('2026/07/31 20:00:00', 'invalid', '運転', '北海道河東郡音更町駒場', '北海道河東郡音更町駒場')]
+    const result = proposeCarriedEventRowRange(eventHeaders, withBadEnd, '釧路市西港', '音更町駒場', carried)
+    expect(result.status).toBe('ok')
+    expect((result as { status: 'ok', range: CarriedEventRowRange }).range.toTs)
+      .toBe(parseEventDatetimeToTs('2026/07/31 20:00:00'))
+  })
+
+  it('読める終了日時が 1 つも無くても区間は逆転せず fromTs に潰れる', () => {
+    const noEnds = rows.map(r => [r[0]!, '', ...r.slice(2)])
+    const result = proposeCarriedEventRowRange(eventHeaders, noEnds, '釧路市西港', '音更町駒場', carried)
+    expect(result.status).toBe('ok')
+    const range = (result as { status: 'ok', range: CarriedEventRowRange }).range
+    expect(range.toTs).toBe(range.fromTs)
+  })
+
+  it('最終便に降しがあれば代用しない (has-unload) — 原因が別なので塗り潰さない', () => {
+    const withUnload = [...rows, row('2026/07/31 20:00:00', '2026/07/31 20:40:00', '降し', '北海道河東郡音更町駒場', '北海道河東郡音更町駒場')]
+    expect(proposeCarriedEventRowRange(eventHeaders, withUnload, '釧路市西港', '音更町駒場', carried))
+      .toEqual({ status: 'has-unload' })
+  })
+
+  it('積みが 1 行も無ければ no-loading', () => {
+    const noLoad = rows.filter(r => r[3] !== '積み')
+    expect(proposeCarriedEventRowRange(eventHeaders, noLoad, '釧路市西港', '音更町駒場', carried))
+      .toEqual({ status: 'no-loading' })
+  })
+
+  it('最終便の積地が伝票の積地と一致しなければ no-loading', () => {
+    expect(proposeCarriedEventRowRange(eventHeaders, rows, '存在しない地名', '音更町駒場', carried))
+      .toEqual({ status: 'no-loading' })
+  })
+
+  it('次の運行の先頭に降しが無ければ no-carry-in', () => {
+    expect(proposeCarriedEventRowRange(eventHeaders, rows, '釧路市西港', '音更町駒場', { ...carried, cities: [] }))
+      .toEqual({ status: 'no-carry-in' })
+  })
+
+  it('次の運行の先頭の降しが伝票の卸地と違えば city-mismatch (**代用元の町名を返す**)', () => {
+    expect(proposeCarriedEventRowRange(eventHeaders, rows, '釧路市西港', '標茶町多和', carried))
+      .toEqual({ status: 'city-mismatch', carriedDestCity: '北海道河東郡音更町駒場' })
+  })
+
+  it('伝票の積地・卸地が空なら unreadable', () => {
+    expect(proposeCarriedEventRowRange(eventHeaders, rows, '', '音更町駒場', carried)).toEqual({ status: 'unreadable' })
+    expect(proposeCarriedEventRowRange(eventHeaders, rows, '釧路市西港', '', carried)).toEqual({ status: 'unreadable' })
+  })
+
+  it('必要な列が無いヘッダーなら unreadable', () => {
+    const headersNoCity = ['開始日時', '終了日時', 'イベントCD', 'イベント名', '区間時間', '区間距離']
+    expect(proposeCarriedEventRowRange(headersNoCity, rows, '釧路市西港', '音更町駒場', carried))
+      .toEqual({ status: 'unreadable' })
+  })
+
+  it('最終便の積みの開始日時が読めなければ unreadable', () => {
+    const badStart = rows.map(r => (r[3] === '積み' ? ['invalid', ...r.slice(1)] : r))
+    expect(proposeCarriedEventRowRange(eventHeaders, badStart, '釧路市西港', '音更町駒場', carried))
+      .toEqual({ status: 'unreadable' })
+  })
+
+  it('★ `proposeEventRowRange` は 1 バイトも変えていない — 同じ入力で従来どおり null', () => {
+    expect(proposeEventRowRange(eventHeaders, rows, '釧路市西港', '音更町駒場')).toBeNull()
+  })
+})
+
+describe('proposeCarriedEventRowRange の行が短い CSV (?? のフォールバック)', () => {
+  function row(start: string, end: string, name: string, startCity: string, endCity: string): string[] {
+    return [start, end, '999', name, '30', '5', startCity, endCity]
+  }
+  const carried = {
+    unkoNo: '26080104120000000011091',
+    crossesMonth: true,
+    cities: ['北海道河東郡音更町駒場'],
+    toTs: parseEventDatetimeToTs('2026/08/01 06:30:00'),
+  }
+
+  it('イベント名列すら無い行が混ざっても、スキップして代用できる', () => {
+    const holeMissingName = ['2026/07/31 07:00:00', '2026/07/31 07:30:00', '999']
+    const rows = [
+      holeMissingName,
+      row('2026/07/31 08:40:00', '2026/07/31 09:20:00', '積み', '北海道釧路市西港2', '北海道釧路市西港2'),
+      row('2026/07/31 09:20:00', '2026/07/31 14:10:00', '運転', '北海道釧路市西港1', '北海道河東郡音更町駒場'),
+    ]
+    const result = proposeCarriedEventRowRange(eventHeaders, rows, '釧路市西港', '音更町駒場', carried)
+    expect(result.status).toBe('ok')
+    expect((result as { status: 'ok', range: CarriedEventRowRange }).range.toTs)
+      .toBe(parseEventDatetimeToTs('2026/07/31 14:10:00'))
+  })
+
+  it('最終便の積みの行に開始市町村名列が無ければ no-loading', () => {
+    const shortLoad = ['2026/07/31 08:40:00', '2026/07/31 09:20:00', '999', '積み']
+    expect(proposeCarriedEventRowRange(eventHeaders, [shortLoad], '釧路市西港', '音更町駒場', carried))
+      .toEqual({ status: 'no-loading' })
   })
 })

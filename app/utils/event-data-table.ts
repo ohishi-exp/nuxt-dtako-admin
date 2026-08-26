@@ -549,6 +549,174 @@ export function proposeEventRowRange(
   }
 }
 
+// --- 降しイベントが無い最終便を、**次の運行の先頭の降し**で代用して提案する
+//     (Refs #926 / #822 ②)。①(粗利タブ・運行手当タブ) の `carryOverDest`
+//     (`allowance-trips.ts`) と**同じ現象**を、②(区間提案) 側で扱う。
+
+/**
+ * 行が短い CSV があるので、無い列は空文字として読む。
+ *
+ * **`?? ''` を呼び出しごとに書かない。** 同じフォールバックが散らばると、
+ * 「どこか 1 か所だけ書き忘れている」が起きても読んで気づけない。
+ */
+function cell(row: string[], idx: number): string {
+  return row[idx] ?? ''
+}
+
+/**
+ * 代用の材料 = **次の運行の先頭にある降し**。`allowance-trips.ts` の
+ * `extractCarryInUnloads` が返す `CarryInUnload` に、**どの運行から持ってきたか**を
+ * 足しただけの形。
+ *
+ * **運行NO を必ず持たせている。** 代用したことを画面に出すとき「次の運行から」だけでは
+ * 人が確かめに行けない — 運行NO があれば、その運行を開いて自分の目で降しを見られる。
+ */
+export interface CarriedUnloadSource {
+  /** 代用元の運行NO。**画面に必ず出す。** */
+  unkoNo: string
+  /**
+   * 代用元が**暦月をまたぐ** (= 翌月の運行) か。
+   *
+   * **判定には使わない — 注記に出すためだけに持ち回る。** またいでいても代用の確度は
+   * 落ちない (規則は「同一乗務員+車輌で運行NO順に隣接」で暦月と無関係) が、
+   * **またいだ事実は人に読ませる** (`allowance-report.ts` の `CarryNeighborPick`)。
+   */
+  crossesMonth: boolean
+  /** 最初の積みより前に降ろした市町村 (順に)。空なら代用できない。 */
+  cities: string[]
+  /** その最後の降しの `終了日時` (epoch 秒)。読めなければ null。 */
+  toTs: number | null
+}
+
+/**
+ * 代用で作った提案区間。**`proposeEventRowRange` の戻り値とは別の型**にしてある。
+ *
+ * ## ★ 同じ器に入れない (これが型を分けている理由)
+ *
+ * 実際の降しは**次の運行の中**にあるので、その `終了日時` を `toTs` に入れると
+ * 「実測の区間」と同じ器に**この運行の外を指す値**が入る。`groupLegsByDate` に
+ * 渡せば翌日を指すし、区間として読めば「積み〜降し」に見えるのに、選べる行は
+ * この運行までしか無い。**出ているものが別の意味に読める**形になる。
+ *
+ * なので `toTs` は**この運行の最終行までにクランプ**してある — 選択区間の意味は
+ * 正直に「**積み → 帰庫**」で、実際の降しの時刻は `carriedUnloadTs` に分けて持つ。
+ * 画面はそちらを注記に出す。
+ */
+export interface CarriedEventRowRange {
+  fromTs: number
+  /** **この運行の最終行までにクランプ済み**。次の運行の時刻は入らない。 */
+  toTs: number
+  legs: { fromTs: number, toTs: number }[]
+  /** 卸地の出どころ。①の `DestSource` と同じ語 (`allowance-trips.ts`)。 */
+  destSource: 'carried'
+  /** 代用元の運行NO。 */
+  carriedFromUnkoNo: string
+  /** 代用元が**翌月**の運行か。**注記に出すための事実**で、判定には使っていない。 */
+  carriedFromNextMonth: boolean
+  /** 代用した卸地 (次の運行の先頭の降しの市町村)。 */
+  carriedDestCity: string
+  /** 実際の降しの `終了日時` (**次の運行の中**)。読めなければ null。 */
+  carriedUnloadTs: number | null
+}
+
+/**
+ * 代用できなかった理由。**黙って落とさないための語彙** (Refs #926 の決めごと)。
+ * `null` を返して呼び出し側に理由を推測させると、**探す先が違うものが 1 つに丸まる**
+ * (#822 ① で `proposeStatus` を原因ごとに割ったのと同じ理由)。
+ *
+ * **件数は書かない。** 下の bullet と `CarriedProposeStatus` が正で、コメントに数を
+ * 書くと 1 つ足したときに必ず腐る (実際に「4 つ」と書いて 5 つあった)。
+ *
+ * - `'unreadable'` … 伝票の積地/卸地が空、またはイベントCSV に必要な列が無い
+ * - `'has-unload'` … **最終便に降しがある** = 代用の対象外。原因は別 (卸地が一致しない等)
+ * - `'no-loading'` … 最終便の積みが伝票の積地と一致しない (積みが 1 行も無い場合を含む)
+ * - `'no-carry-in'` … **次の運行の先頭に降しが無い**
+ * - `'city-mismatch'` … 次の運行の先頭の降しが、伝票の卸地と一致しない
+ */
+export type CarriedProposeStatus =
+  | 'ok' | 'unreadable' | 'has-unload' | 'no-loading' | 'no-carry-in' | 'city-mismatch'
+
+export type CarriedProposeResult =
+  | { status: 'ok', range: CarriedEventRowRange }
+  | { status: 'city-mismatch', carriedDestCity: string }
+  | { status: 'unreadable' | 'has-unload' | 'no-loading' | 'no-carry-in' }
+
+/**
+ * **降しイベントが無い最終便**の卸地を、**次の運行の先頭の降し**で代用して区間を提案する。
+ *
+ * `proposeEventRowRange` が null を返した伝票にだけ当てる。**`proposeEventRowRange` は
+ * 1 バイトも変えていない** — 発生条件も解決手段も違うものを 1 つの関数にまとめると、
+ * 帯広市内 (川西 / 富士 / 札内) の罠を踏み直す (#822 の設計相談の警告)。
+ *
+ * ## 当てる条件は ① と同じ (`carryOverDest`)
+ *
+ * **最後の積みの後に降しが 1 行も無い**ときだけ当てる。降しが 1 つでもある便には
+ * 触らない — そちらは別の原因なので、代用で塗り潰すと間違いが黙って混ざる。
+ * 卸地の一致も ① と同じく**先頭の降し 1 つ目** (`cities[0]`) で見る — ① が
+ * `destCity = cities[0]` としているので、ここだけ緩めると①と違う卸地を提案する。
+ */
+export function proposeCarriedEventRowRange(
+  headers: string[],
+  rows: string[][],
+  originCity: string,
+  destCity: string,
+  carried: CarriedUnloadSource,
+): CarriedProposeResult {
+  if (!originCity.trim() || !destCity.trim()) return { status: 'unreadable' }
+
+  const nameIdx = colIndex(headers, 'イベント名')
+  const startIdx = colIndex(headers, '開始日時')
+  const endIdx = colIndex(headers, '終了日時')
+  const startCityIdx = colIndex(headers, '開始市町村名')
+  if (nameIdx < 0 || startIdx < 0 || endIdx < 0 || startCityIdx < 0) return { status: 'unreadable' }
+
+  // 最後の積み = 最終便の頭。①の `carryOverDest` が `items[items.length - 1]` だけを
+  // 埋めるのと同じ便を指す。
+  let lastLoad = -1
+  for (let i = 0; i < rows.length; i++) {
+    if (classifyTimeCategory(cell(rows[i]!, nameIdx)) === 'loading') lastLoad = i
+  }
+  if (lastLoad < 0) return { status: 'no-loading' }
+
+  // その後に降しがあれば、この便は代用の対象ではない (原因が別)。
+  for (let j = lastLoad + 1; j < rows.length; j++) {
+    if (classifyTimeCategory(cell(rows[j]!, nameIdx)) === 'unloading') return { status: 'has-unload' }
+  }
+
+  const loadRow = rows[lastLoad]!
+  if (matchLocationLevel(cell(loadRow, startCityIdx), originCity) === 'none') {
+    return { status: 'no-loading' }
+  }
+  const fromTs = parseEventDatetimeToTs(cell(loadRow, startIdx))
+  if (fromTs === null) return { status: 'unreadable' }
+
+  const carriedDestCity = carried.cities[0]
+  if (carriedDestCity === undefined) return { status: 'no-carry-in' }
+  if (matchLocationLevel(carriedDestCity, destCity) === 'none') return { status: 'city-mismatch', carriedDestCity }
+
+  // **この運行の最終行までにクランプ**する (型の doc 参照)。読める `終了日時` が
+  // 1 つも無くても `fromTs` を下限にするので、区間が逆転することはない。
+  let toTs = fromTs
+  for (const row of rows) {
+    const end = parseEventDatetimeToTs(cell(row, endIdx))
+    if (end !== null && end > toTs) toTs = end
+  }
+
+  return {
+    status: 'ok',
+    range: {
+      fromTs,
+      toTs,
+      legs: [{ fromTs, toTs }],
+      destSource: 'carried',
+      carriedFromUnkoNo: carried.unkoNo,
+      carriedFromNextMonth: carried.crossesMonth,
+      carriedDestCity,
+      carriedUnloadTs: carried.toTs,
+    },
+  }
+}
+
 export interface EventLegDateGroup {
   /** レグの開始日時から `epochToYmd` で求めた日付 (YYYY-MM-DD)。 */
   date: string

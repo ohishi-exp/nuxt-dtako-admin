@@ -10,6 +10,8 @@ import {
   buildMonthlyAllowanceByOperationDate,
   operationRunDate,
   applyCarryOver,
+  pickNextOperationForCarry,
+  carryStartLabel,
   type OperationAllowance,
   type AllowanceReportRow,
 } from '~/utils/allowance-report'
@@ -376,5 +378,59 @@ describe('buildMonthlyAllowance / 推定卸地の件数', () => {
     expect(m).toMatchObject({ trips: 2, totalYen: 18000, carriedTrips: 1 })
     expect(m.drivers[0]).toMatchObject({ carriedTrips: 1 })
     expect(m.drivers[0]!.operations[0]).toMatchObject({ carriedTrips: 1 })
+  })
+})
+
+describe('pickNextOperationForCarry (区間提案が引く「次の運行」、Refs #926)', () => {
+  const cur = '26073104154100000011091'
+  /** 同一車輌・同一乗務員で、同月 (07-31 の後) に始まる次の運行。 */
+  const sameMonth = { unkoNo: '26073118000000000011091' }
+  /** 同一車輌・同一乗務員で、翌月 (08-01) に始まる次の運行。 */
+  const nextMonth = { unkoNo: '26080104120000000011091' }
+
+  it('運行NO が次のものを 1 本選ぶ (最小のもの)', () => {
+    const later = { unkoNo: '26080304120000000011091' }
+    expect(pickNextOperationForCarry(cur, [later, sameMonth]))
+      .toEqual({ status: 'ok', unkoNo: sameMonth.unkoNo, crossesMonth: false })
+  })
+
+  it('前の運行 (運行NO が小さい) は候補にしない', () => {
+    const earlier = { unkoNo: '26073004120000000011091' }
+    expect(pickNextOperationForCarry(cur, [earlier])).toEqual({ status: 'none', unkoNo: null, crossesMonth: false })
+  })
+
+  it('★ 23 桁目だけが違う行 (2マンの相方) を「次の運行」に選ばない', () => {
+    const partner = { unkoNo: '26073104154100000011092' }
+    expect(pickNextOperationForCarry(cur, [partner])).toEqual({ status: 'none', unkoNo: null, crossesMonth: false })
+  })
+
+  it('★ 返すのは一覧が持っていた運行NO そのまま (22 桁に切らない)', () => {
+    const pick = pickNextOperationForCarry(cur, [sameMonth])
+    expect(pick.unkoNo).toBe('26073118000000000011091')
+    expect(pick.unkoNo).toHaveLength(23)
+  })
+
+  it('★ 暦月をまたぐ次の運行でも**選ぶ** — またぐことは crossesMonth で持ち回るだけ', () => {
+    expect(pickNextOperationForCarry(cur, [nextMonth]))
+      .toEqual({ status: 'ok', unkoNo: nextMonth.unkoNo, crossesMonth: true })
+  })
+
+  it('候補が空なら none', () => {
+    expect(pickNextOperationForCarry(cur, [])).toEqual({ status: 'none', unkoNo: null, crossesMonth: false })
+  })
+})
+
+describe('carryStartLabel (代用元の開始日時を注記に出す、Refs #926)', () => {
+  it('運行NO の先頭 12 桁から MM-DD HH:mm を作る', () => {
+    expect(carryStartLabel('26080104120000000011091')).toBe('08-01 04:12')
+  })
+
+  it('22 桁でも読める', () => {
+    expect(carryStartLabel('2608010412000000001109')).toBe('08-01 04:12')
+  })
+
+  it('22 桁でも 23 桁でもなければ null (推測で作らない)', () => {
+    expect(carryStartLabel('2608')).toBeNull()
+    expect(carryStartLabel('26080104120000000011091x')).toBeNull()
   })
 })
