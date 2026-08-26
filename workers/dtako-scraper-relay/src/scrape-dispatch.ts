@@ -193,8 +193,20 @@ export async function fetchScrapeHistory(
  * 履歴を 1 行書く (`POST /api/scraper/history`)。**無人実行を履歴に載せるための口**
  * (Refs #931)。行の組み立ては `scrape-history-record.ts` の責務。
  *
- * 読み (上の GET) と**同じ RPC・同じ tenant** を通る。alc は成功時 `204 No Content` を
- * 返すので**本文は読まない** (`unwrapAlcTenantData` が 2xx を通すだけ)。
+ * ## ★ `tenantId` を正しく選ぶ責任は**呼び出し側**にある
+ *
+ * この関数は渡された `tenantId` へ書くだけで、**それが読み手の見る tenant かを
+ * 検証しない。**以前ここには「読み (上の GET) と**同じ tenant** を通る」と書いて
+ * あったが、**cron 経路では同じ tenant を通っていなかった** — スクレイプ対象の
+ * comp ごとの tenant へ書いており、`KINTAI_COMP_ID` 以外の会社の行は
+ * **どの読み手からも見えなかった** (2026-08-26 の実測。`saved` は出ているのに
+ * 履歴に現れない)。**この doc の嘘が欠陥そのものだった。**
+ *
+ * ⇒ 呼び出し側は **読み手と同じ tenant を渡す責任**を持つ。cron 経路は
+ * `resolveHistoryTenantId` がそれを 1 か所で決める。
+ *
+ * alc は成功時 `204 No Content` を返すので**本文は読まない**
+ * (`unwrapAlcTenantData` が 2xx を通すだけ)。
  */
 export async function postScrapeHistory(
   entry: unknown,

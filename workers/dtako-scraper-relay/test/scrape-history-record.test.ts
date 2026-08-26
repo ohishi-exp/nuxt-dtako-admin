@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 
+import { postScrapeHistory } from "../src/scrape-dispatch";
+import type { AlcTenantDataInput } from "../src/alc-tenant-rpc";
 import {
   MAX_HISTORY_DATES,
   MAX_HISTORY_MESSAGE,
@@ -9,6 +11,7 @@ import {
   markHistoryMessage,
   readScrapeHistorySource,
   recordScrapeHistoryLoud,
+  resolveHistoryTenantId,
   truncateHistoryMessage,
   type ScrapeHistoryEntry,
 } from "../src/scrape-history-record";
@@ -257,5 +260,88 @@ describe("recordScrapeHistoryLoud", () => {
     expect(report).toEqual({ attempted: 0, saved: 0, failed: [] });
     expect(send).not.toHaveBeenCalled();
     expect(log).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * ★ #931 の本体。**書き先の tenant は「スクレイプ対象の comp」ではなく
+ * 「読み手が見る comp (`KINTAI_COMP_ID`)」から引く。**
+ *
+ * 2 社が**別々の tenant**を持つ `dtako_accounts` を使う — 同じ tenant にすると
+ * 直す前のコードでも素通りしてしまい、陰性対照にならない。
+ */
+describe("resolveHistoryTenantId (Refs #931)", () => {
+  const KINTAI_COMP = "27324455";
+  const OTHER_COMP = "75700192";
+  const KINTAI_TENANT = "tenant-of-27324455";
+  const OTHER_TENANT = "tenant-of-75700192";
+  const ACCOUNTS = [
+    { comp_id: KINTAI_COMP, tenant_id: KINTAI_TENANT, user_name: "u", user_pass: "p" },
+    { comp_id: OTHER_COMP, tenant_id: OTHER_TENANT, user_name: "u", user_pass: "p" },
+  ];
+
+  it("★ KINTAI_COMP_ID の tenant を返す — スクレイプ対象の comp の tenant ではない", () => {
+    const got = resolveHistoryTenantId(ACCOUNTS, KINTAI_COMP);
+    expect(got).toBe(KINTAI_TENANT);
+    // 直す前は account.tenant_id (= OTHER_TENANT) が渡っていた
+    expect(got).not.toBe(OTHER_TENANT);
+  });
+
+  it("前後の空白は落とす", () => {
+    expect(resolveHistoryTenantId(ACCOUNTS, `  ${KINTAI_COMP}  `)).toBe(KINTAI_TENANT);
+  });
+
+  it("★ 引けなければ null (呼び出し側が no_tenant で鳴らす) — 両側を通す", () => {
+    expect(resolveHistoryTenantId(ACCOUNTS, undefined)).toBeNull(); // staging (未設定)
+    expect(resolveHistoryTenantId(ACCOUNTS, null)).toBeNull();
+    expect(resolveHistoryTenantId(ACCOUNTS, "")).toBeNull();
+    expect(resolveHistoryTenantId(ACCOUNTS, "   ")).toBeNull();
+    expect(resolveHistoryTenantId(ACCOUNTS, "99999999")).toBeNull(); // accounts に無い
+    expect(resolveHistoryTenantId(null, KINTAI_COMP)).toBeNull(); // KV が壊れている
+  });
+});
+
+describe("★ 陰性対照: 別会社の cron 履歴が読み手と同じ tenant へ送られる (Refs #931)", () => {
+  const KINTAI_COMP = "27324455";
+  const OTHER_COMP = "75700192";
+  const KINTAI_TENANT = "tenant-of-27324455";
+  const OTHER_TENANT = "tenant-of-75700192";
+  const ACCOUNTS = [
+    { comp_id: KINTAI_COMP, tenant_id: KINTAI_TENANT },
+    { comp_id: OTHER_COMP, tenant_id: OTHER_TENANT },
+  ];
+
+  it("RPC に渡る tenantId の実値が KINTAI 側で、行の comp_id は別会社のまま", async () => {
+    // 「別会社 (75700192) を無人スクレイプした」状況をそのまま組む。
+    const { entries } = buildScrapeHistoryEntries({
+      compId: OTHER_COMP,
+      startDate: "2026-08-26",
+      endDate: "2026-08-26",
+      outcome: { kind: "success" },
+    });
+    const tenantId = resolveHistoryTenantId(ACCOUNTS, KINTAI_COMP);
+    expect(tenantId).not.toBeNull();
+
+    const calls: AlcTenantDataInput[] = [];
+    const rpc = {
+      forwardAlcTenantData: async (input: AlcTenantDataInput) => {
+        calls.push(input);
+        return { status: 204, body: "", contentType: null };
+      },
+    };
+    const report = await recordScrapeHistoryLoud(
+      entries,
+      (entry) => postScrapeHistory(entry, tenantId!, rpc),
+      () => {},
+    );
+
+    expect(report).toEqual({ attempted: 1, saved: 1, failed: [] });
+    // ★ ここが陰性対照 — 直す前は OTHER_TENANT が渡っており、
+    //   読み手 (KINTAI_TENANT 固定) からは永久に見えなかった。
+    expect(calls[0]!.tenantId).toBe(KINTAI_TENANT);
+    expect(calls[0]!.tenantId).not.toBe(OTHER_TENANT);
+    // 会社の区別は行の comp_id 列が持つ (情報は失われない)
+    expect(JSON.parse(calls[0]!.body!).comp_id).toBe(OTHER_COMP);
+    expect(JSON.parse(calls[0]!.body!).message).toBe("[無人] 取り込み成功");
   });
 });

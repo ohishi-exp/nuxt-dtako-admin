@@ -45,6 +45,7 @@
  */
 
 import { addDaysIso } from "./net780-archive";
+import { tenantForCompId } from "./kintai-relay";
 
 /** alc の `POST /api/scraper/history` が受ける body (`app/utils/api.ts` の
  * `ScrapeHistoryEntry` と同じ形。rust 側は `ScrapeHistoryEntry` = `dtako_scraper.rs`)。 */
@@ -195,6 +196,42 @@ export function buildScrapeHistoryEntries(input: BuildScrapeHistoryInput): {
     })),
     dropped: range.dropped,
   };
+}
+
+/**
+ * 履歴を**どの tenant に書くか**を決める (Refs #931)。
+ *
+ * ## ★ スクレイプ対象の comp の tenant では**ない**
+ *
+ * 直感に反するので理由を書く。**読み手が 1 tenant しか見ないから**である。
+ *
+ * - 読み (relay / kyuyo-mcp): `index.ts` の `handleScrapeHistory` が
+ *   `env.KINTAI_COMP_ID` **1 社から引いた tenant だけ**を問い合わせる。
+ *   **`comp_id` のクエリ引数がそもそも無い**
+ * - 読み (画面): `getScrapeHistory` は `/api/proxy` 経由で**閲覧者の tenant**を見る
+ * - 書き (画面): `saveScrapeHistory` も `/api/proxy` 経由なので、**どの comp を
+ *   スクレイプしても閲覧者の tenant 1 つ**に書く。会社の区別は**行の `comp_id` 列**が持つ
+ *
+ * ⇒ cron だけが「comp ごとに tenant を分ける」流儀を採ると、**`KINTAI_COMP_ID` 以外の
+ * 会社の行はどの読み手からも見えない**。実際に 2026-08-26 の cron で
+ * `{"scrape_history":"saved","comp_id":"75700192"}` が出ているのに履歴に現れず、
+ * 27324455 のぶんだけ見えていた。
+ *
+ * **だから書き手を読み手に合わせる。**会社の区別は行の `comp_id` が持つので、
+ * 情報は失われない (画面ではブラウザから手で回したときと同じ見え方になる)。
+ *
+ * **スクレイプ本体の tenant 分離 (`account.tenant_id`) は正しいので触らない。**
+ * 変えるのは**履歴 1 行の書き先だけ**。
+ *
+ * `null` を返すのは `KINTAI_COMP_ID` が未設定 / `dtako_accounts` に無いとき。
+ * **staging は意図的に `KINTAI_COMP_ID` を置いていない** (`wrangler.toml`) ので、
+ * staging では常に `null` = 履歴を書かない、が正しい挙動になる。
+ */
+export function resolveHistoryTenantId(
+  accounts: unknown,
+  kintaiCompId: string | undefined | null,
+): string | null {
+  return tenantForCompId(accounts, (kintaiCompId ?? "").trim());
 }
 
 /** 1 行を送る口。**送り先はここでは決めない** (上の docs 参照)。 */
