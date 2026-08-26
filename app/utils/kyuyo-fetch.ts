@@ -2,10 +2,21 @@
  * 給与DB取得 (/kyuyo-fetch) の純粋ロジック (Refs #369)。
  *
  * - 会社 (複数) × 月範囲 (from〜to) の取得プラン展開
- * - 取得済み給与明細の sessionStorage キー規則と、セッション所有者 (JWT sub) が
- *   変わった時の purge 判定 — タブを閉じれば消える + 別ユーザーには引き継がない
+ * - 取得結果 / サーバー同期状態の表示用整形
  *
- * fetch / sessionStorage 操作はページ側の責務 — ここは判定と変換のみ。
+ * fetch はページ側の責務 — ここは判定と変換のみ。
+ *
+ * ## sessionStorage の明細キャッシュは廃止した (Refs #467 PR-A3)
+ *
+ * 氏名と金額を含む明細をブラウザに平文で置かないため (#367 の方針と揃える)。
+ * 鮮度の正は **サーバー側の給与アーカイブ** (`GET /api/kyuyo/synced-months` /
+ * `payroll` 応答の `synced_at`) 1 か所だけになった。
+ *
+ * **同時に 1 件の欠陥が消えた** (Refs #934): 2 画面が同じ `kyuyo-payroll:{会社}:{月}`
+ * キーを**違う意味の「月」**で使っていた — `/kyuyo-fetch` は勤務月、`/restraint-wage` は
+ * 支給月 (`nextYm(勤務月)`) で書いていたため、`/kyuyo-fetch` で勤務月 N を取ると
+ * `/restraint-wage` の勤務月 N-1 に命中し、**1 か月ずれた明細が給与比較・最低賃金
+ * チェックに載った**。キー生成関数ごと消したので構造的に再発しない。
  */
 import type { ParsedSalaryCsv, SalaryCsvRow } from './salary-compare'
 
@@ -47,39 +58,14 @@ export function buildFetchPlan(
   return companies.flatMap(company => months.map(month => ({ company, month })))
 }
 
-// ── sessionStorage キー規則 ──────────────────────────────────
-
-export const PAYROLL_STORAGE_PREFIX = 'kyuyo-payroll:'
-export const SESSION_OWNER_KEY = 'kyuyo-session-owner'
-
-export function payrollStorageKey(company: string, month: string): string {
-  return `${PAYROLL_STORAGE_PREFIX}${company}:${month}`
-}
-
-export function parsePayrollStorageKey(key: string): { company: string, month: string } | null {
-  if (!key.startsWith(PAYROLL_STORAGE_PREFIX)) return null
-  const rest = key.slice(PAYROLL_STORAGE_PREFIX.length)
-  const separator = rest.indexOf(':')
-  if (separator <= 0 || separator === rest.length - 1) return null
-  return { company: rest.slice(0, separator), month: rest.slice(separator + 1) }
-}
+// ── 取得結果の保持形 ─────────────────────────────────────────
 
 /**
- * セッション所有者が変わったか (= 取得済みデータを purge すべきか)。
- * 前の所有者が記録されていて、今のユーザー (sub) と違う時だけ true —
- * 別ユーザーに前の人の給与データを見せない。
+ * 画面が**メモリ上に**持つ 1 件 (会社×月)。rows は payroll 応答そのまま。
+ * **ブラウザには保存しない** — リロードすれば消える (Refs #467 PR-A3)。
  */
-export function shouldPurgeSession(storedOwner: string | null, currentSub: string | null): boolean {
-  return storedOwner != null && storedOwner !== '' && currentSub != null && storedOwner !== currentSub
-}
-
-// ── 取得結果の保存形 ─────────────────────────────────────────
-
-/** sessionStorage に保存する 1 件 (会社×月)。rows は payroll 応答そのまま。 */
 export interface StoredPayroll {
   database: string
-  /** **ブラウザがこの明細を受け取った時刻**。サーバ側の同期時刻ではない。 */
-  fetchedAt: string
   rowCount: number
   warningCount: number
   rows: unknown[]
@@ -90,19 +76,19 @@ export interface StoredPayroll {
    * - `cache` — rust-ichibanboshi の derived store から (給与大臣 PC に触っていない)
    * - `live` — 給与大臣 DB を実際に読んだ
    *
-   * **古い保存や旧版 upstream では `undefined`** (判らない、の意味)。
+   * **旧版 upstream では `undefined`** (判らない、の意味)。
    */
   source?: 'cache' | 'live'
   /**
-   * **サーバ側でこの会社×月を最後に同期した時刻** (RFC3339)。`fetchedAt` と違い
+   * **サーバ側でこの会社×月を最後に同期した時刻** (RFC3339)。ブラウザの受信時刻と違い
    * ブラウザを跨いで意味を持つ — 賃金スナップショットの鮮度判定はこちらを使う
    * (ohishi-exp/nuxt-dtako-admin#677)。取れなければ `null`。
    */
   syncedAt?: string | null
 }
 
-/** payroll 応答 → 保存形。応答形式が想定外なら null。 */
-export function toStoredPayroll(body: unknown, fetchedAt: string): StoredPayroll | null {
+/** payroll 応答 → 画面が持つ形。応答形式が想定外なら null。 */
+export function toStoredPayroll(body: unknown): StoredPayroll | null {
   const rows = (body as { rows?: unknown } | null)?.rows
   const database = (body as { database?: unknown } | null)?.database
   if (!Array.isArray(rows) || typeof database !== 'string') return null
@@ -119,7 +105,6 @@ export function toStoredPayroll(body: unknown, fetchedAt: string): StoredPayroll
   const syncedAt = typeof syncedRaw === 'string' && syncedRaw !== '' ? syncedRaw : null
   return {
     database,
-    fetchedAt,
     rowCount: rows.length,
     warningCount: warnings.length,
     rows,
@@ -129,36 +114,42 @@ export function toStoredPayroll(body: unknown, fetchedAt: string): StoredPayroll
   }
 }
 
-/** 取得済み一覧の表示行 (会社 → 月 の昇順)。 */
-export interface StoredSummary {
+// ── サーバー同期済み一覧 (Refs #467 PR-A3) ───────────────────
+
+/** `GET /api/kyuyo/synced-months` の 1 件 (rust-ichibanboshi `SyncedMonthEntry`)。 */
+export interface SyncedMonthEntry {
   company: string
+  /** **勤務月** ("YYYY-MM")。payroll API の `month` と同じ基準 (支給月ではない)。 */
   month: string
-  database: string
-  fetchedAt: string
-  rowCount: number
-  warningCount: number
-  /** upstream の出どころ (`cache` / `live`)。判らなければ undefined (Refs #467)。 */
-  source?: 'cache' | 'live'
-  /** サーバ側の最終同期時刻。取れなければ null / undefined。 */
-  syncedAt?: string | null
+  synced_at: string
+  row_count: number
 }
 
-export function summarizeStored(
-  entries: { key: string, value: StoredPayroll }[],
-): StoredSummary[] {
-  return entries
-    .flatMap(({ key, value }) => {
-      const parsed = parsePayrollStorageKey(key)
-      if (!parsed) return []
+/** サーバー同期済み一覧の表示行 (会社 → 月 の昇順)。 */
+export interface SyncedMonthRow {
+  company: string
+  month: string
+  rowCount: number
+  syncedAt: string
+}
+
+/**
+ * `synced-months` 応答 → 表示行 (会社 → 月 の昇順)。
+ *
+ * 旧 `summarizeStored` (sessionStorage 由来) の置き換え (Refs #467 PR-A3)。
+ * **形が想定外の行は黙って落とす** — 一覧が出ないより、読める行だけでも出す方が良い。
+ */
+export function summarizeSyncedMonths(entries: unknown): SyncedMonthRow[] {
+  const list = Array.isArray(entries) ? entries : []
+  return list
+    .flatMap((raw) => {
+      const e = raw as Partial<SyncedMonthEntry> | null
+      if (typeof e?.company !== 'string' || typeof e?.month !== 'string') return []
       return [{
-        company: parsed.company,
-        month: parsed.month,
-        database: value.database,
-        fetchedAt: value.fetchedAt,
-        rowCount: value.rowCount,
-        warningCount: value.warningCount,
-        source: value.source,
-        syncedAt: value.syncedAt,
+        company: e.company,
+        month: e.month,
+        rowCount: typeof e.row_count === 'number' ? e.row_count : 0,
+        syncedAt: typeof e.synced_at === 'string' ? e.synced_at : '',
       }]
     })
     .sort((a, b) => a.company.localeCompare(b.company) || a.month.localeCompare(b.month))

@@ -166,6 +166,15 @@ branches = true
 path = "app/utils/ichiban.ts"
 branches = true
 
+# 給与DB取得 (/kyuyo-fetch) の純粋ロジック。
+# branches: **BR site** (instrumented コピーで数えた分岐、v8 の branch slot ではない)
+# が 43 で、うち **39 が true/false 両方**を通る。**残り 4 は構造上 true 側しか無い**
+# ので埋めない: `label || '-'` / `label || '-'` / `row.pay_date || '空'` の
+# **右辺が文字列リテラル**な 3 件と、`localeCompare(...) || localeCompare(...)` の
+# タイブレーク 1 件 ((会社, 月) は upstream の PK なので同値行が来ない)。
+# **v8 は短絡のせいでこの 4 件も 100% と報告する** ので、数え直すときは BR() を使うこと。
+# 対照: origin/main = bc6ea80 で BR site 48 / 両側 44 / 片側 4 (同じ 4 件)。
+# sessionStorage キー規則の撤去 (#467 PR-A3) で 5 site 減った。
 [[files]]
 path = "app/utils/kyuyo-fetch.ts"
 branches = true
