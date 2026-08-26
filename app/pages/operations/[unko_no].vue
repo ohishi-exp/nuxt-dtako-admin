@@ -269,22 +269,25 @@ function onSelectedLocationChange(location: SelectedRowsLocationRange | null) {
 //     EventCrewPanel に渡し、対応する filteredRows のチェックボックスにも反映する
 //     (以前はページ側の ref だけ更新してチェックボックスが連動しない実運用回帰があった)。
 
-/** 提案できなかった状態は**原因ごとに 4 つに分ける** (Refs #822 ①②-1)。同じ文言に
- * 丸めると、押した人が**間違った場所を探しに行く**:
+/** 提案できなかった状態は**原因ごとに 5 つに分ける** (Refs #822 ①②-1)。同じ文言に
+ * 丸めると、押した人が**間違った場所を探しに行く**。**「探す先」で分けている**:
  *
- * - `'error'` … 一番星を呼んで落ちた。**押し直せば変わりうる** (赤)
- * - `'not-found'` … **伝票が 1 件も無い** (この運行にイベント行が 1 行も無い場合も
- *   ここに入る — ②-1 の担当外なので従来のまま)。探す先は一番星 (灰)
+ * - `'error'` … 呼んで落ちた (イベント行が引けなかった場合を含む)。
+ *   **押し直せば変わりうる** (赤)
+ * - `'not-found'` … 一番星を呼んだが**伝票が 1 件も無い**。探す先は一番星 (灰)
+ * - `'no-events'` … **この運行にイベント行が 1 行も無い**。伝票は**見てすらいない**ので
+ *   一番星に行かせてはいけない。探す先は取込元 (デジタコ) (琥珀)
  * - `'no-event-match'` … **伝票はあるのに**、その積地・卸地に対応する積み降しが
  *   イベント行に無い (`proposeEventRowRange` が全件 null)。探す先は**イベント表**で、
  *   一番星を見に行っても伝票はちゃんとある。押し直しても変わらない (琥珀)
  * - `'unavailable'` … **呼ぶための材料 (車輌CD / 運行日) がそもそも無い**。
  *   一番星は呼んですらいない。押し直しても変わらない (琥珀)
  *
- * 押し直しても変わらない 2 つ (`'no-event-match'` / `'unavailable'`) を `'error'` の赤と
- * 同じ見た目にすると「もう一度押せば直るかも」と読ませてしまうので色も分ける。
- * ただし**この 2 つも互いに別物** — 材料が無いのか、材料はあるが対応が取れないのか。 */
-type ProposeStatus = 'idle' | 'loading' | 'done' | 'not-found' | 'error' | 'ambiguous' | 'unavailable' | 'no-event-match'
+ * 押し直しても変わらない 3 つ (`'no-events'` / `'no-event-match'` / `'unavailable'`) を
+ * `'error'` の赤と同じ見た目にすると「もう一度押せば直るかも」と読ませてしまうので
+ * 色も分ける。ただし**この 3 つも互いに別物** — イベントが無いのか、材料が無いのか、
+ * 材料はあるが対応が取れないのか。 */
+type ProposeStatus = 'idle' | 'loading' | 'done' | 'not-found' | 'error' | 'ambiguous' | 'unavailable' | 'no-event-match' | 'no-events'
 const proposeStatus = ref<ProposeStatus>('idle')
 /** `'unavailable'` のとき**何が欠けているか**。車輌CD と運行日は片方だけ欠けることも
  * 両方欠けることもあり、どちらか分からないと直しようがないので文言を出し分ける。 */
@@ -364,7 +367,12 @@ async function proposeFromSlips() {
     await loadCsv('events')
     const csv = csvData.value.events
     if (!csv || csv.rows.length === 0) {
-      proposeStatus.value = 'not-found'
+      // **伝票を見てすらいないのに「伝票が見つかりません」と言っていた** (Refs #822 ②-1)。
+      // ここに来るのは「この運行にイベント行が無い」ときで、探す先は取込元 (デジタコ) —
+      // 一番星ではない。ただし**引けなかっただけ**なら押し直す意味があるので、
+      // それは `'error'` (赤) に倒す (`csvError` は #873 で「引けなかった」と「無い」を
+      // 言い分けるために持っている。琥珀にすると「押しても無駄」と読ませてしまう)。
+      proposeStatus.value = csvError.value.events ? 'error' : 'no-events'
       return
     }
     // reading_date/operation_date (タコグラフ読取日) は一番星の売上年月日と1日前後
@@ -685,6 +693,8 @@ function formatDatetime(val: string | null): string {
             <span v-else-if="proposeStatus === 'error'" class="text-xs text-red-500">提案に失敗しました</span>
             <!-- 「呼んで駄目だった」(赤/灰) と**色も文も分ける** — 押し直しても変わらない。 -->
             <span v-else-if="proposeStatus === 'unavailable'" class="text-xs text-amber-600 dark:text-amber-400">{{ proposeUnavailableReason }}</span>
+            <!-- 伝票は**見てすらいない** — 一番星ではなく取込元 (デジタコ) を見る話。 -->
+            <span v-else-if="proposeStatus === 'no-events'" class="text-xs text-amber-600 dark:text-amber-400">この運行にはイベントの記録が無いため提案できません</span>
             <!-- 「伝票が無い」(灰) と**別の文**にする — 伝票はあるので探す先はイベント表。 -->
             <span v-else-if="proposeStatus === 'no-event-match'" class="text-xs text-amber-600 dark:text-amber-400">伝票{{ proposeNoMatchSlipCount }}件に対応する積み降しが無く提案できません</span>
             <span v-else-if="proposeStatus === 'done' && proposedLegCount > 1" class="text-xs text-amber-600 dark:text-amber-400">

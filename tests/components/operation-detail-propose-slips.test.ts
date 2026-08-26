@@ -27,6 +27,11 @@
  * 後者を踏んだ人は**ちゃんとある伝票を一番星に探しに行く** (探す先はイベント表)。
  * `'no-event-match'` を別に立て、`'not-found'`(灰)・`'unavailable'`(琥珀)・
  * `'error'`(赤) の**どれとも文言が混ざらない**ことをここで固定する。
+ *
+ * **同じ型の穴がもう 1 つ**あった: **イベント行が 1 行も無い**運行も
+ * 「一致する伝票が見つかりませんでした」と言っていた — **伝票は見てすらいない**のに。
+ * こちらは `'no-events'` に分け、探す先が一番星ではなく取込元 (デジタコ) だと読めるようにした。
+ * **引けなかっただけ**なら押し直す意味があるので `'error'`(赤) に倒す (`csvError`)。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -259,6 +264,7 @@ describe('提案ボタン: 伝票が無いのか、伝票はあるが区間が�
   const NOT_FOUND_TEXT = '一致する伝票が見つかりませんでした'
   const UNAVAILABLE_TEXT = 'この運行は車輌CDが無いため提案できません'
   const noMatchText = (n: number) => `伝票${n}件に対応する積み降しが無く提案できません`
+  const NO_EVENTS_TEXT = 'この運行にはイベントの記録が無いため提案できません'
 
   const WITH_KEYS = { operation_date: '2026-07-01', reading_date: '2026-07-01' }
 
@@ -329,11 +335,51 @@ describe('提案ボタン: 伝票が無いのか、伝票はあるが区間が�
     expect(fetchVehicleDailySlipsMock).not.toHaveBeenCalled()
   })
 
+  // ★ 伝票を**見てすらいない**のに「伝票が見つかりません」と言っていた経路。
+  it('イベント行が 1 行も無い運行: 伝票の話にしない (一番星を呼んですらいない)', async () => {
+    getOperationCsvMock.mockResolvedValue({ headers: [], rows: [] })
+    const w = await press()
+
+    expect(w.text()).toContain(NO_EVENTS_TEXT)
+    // ★ 伝票は 1 件も見ていないのだから、一番星へ探しに行かせない。
+    expect(w.text()).not.toContain(NOT_FOUND_TEXT)
+    expect(fetchVehicleDailySlipsMock).not.toHaveBeenCalled()
+    // 他の 3 つとも混ざらない。
+    expect(w.text()).not.toContain('に対応する積み降しが無く')
+    expect(w.text()).not.toContain(UNAVAILABLE_TEXT)
+    expect(w.text()).not.toContain('提案に失敗しました')
+  })
+
+  it('イベント行が「無い」のではなく「引けなかった」場合: 赤に倒す (押し直す意味がある)', async () => {
+    getOperationCsvMock.mockRejectedValue(new Error('boom'))
+    const w = await press()
+
+    // 押し直せば変わりうるので `'error'` (赤)。琥珀にすると「押しても無駄」と読ませる。
+    expect(w.text()).toContain('提案に失敗しました')
+    expect(w.text()).not.toContain(NO_EVENTS_TEXT)
+    expect(w.text()).not.toContain(NOT_FOUND_TEXT)
+  })
+
   it('②-1 と ① は別の文である (同じ文字列に寄せていない)', () => {
     expect(noMatchText(1)).not.toBe(UNAVAILABLE_TEXT)
     expect(noMatchText(1)).not.toBe(NOT_FOUND_TEXT)
+    expect(NO_EVENTS_TEXT).not.toBe(noMatchText(1))
+    expect(NO_EVENTS_TEXT).not.toBe(NOT_FOUND_TEXT)
+    expect(NO_EVENTS_TEXT).not.toBe(UNAVAILABLE_TEXT)
     // セルに収まる長さ (既存の一言は 17〜26 字)。
     expect(noMatchText(1).length).toBeLessThanOrEqual(26)
+    expect(NO_EVENTS_TEXT.length).toBeLessThanOrEqual(26)
+  })
+
+  it('イベント行が無いときの一言も琥珀 (押し直しても変わらない側)', async () => {
+    getOperationCsvMock.mockResolvedValue({ headers: [], rows: [] })
+    const w = await press()
+
+    const span = w.findAll('span.text-xs').find(s => s.text() === NO_EVENTS_TEXT)
+    expect(span).toBeDefined()
+    expect(span!.classes().join(' ')).toContain('text-amber-600')
+    expect(span!.classes()).not.toContain('text-red-500')
+    expect(span!.classes()).not.toContain('text-gray-400')
   })
 
   it('②-1 の一言は琥珀 (押し直しても変わらない) で、赤とも灰とも別の色', async () => {
