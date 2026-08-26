@@ -276,11 +276,11 @@ describe('ProfitPanel', () => {
       expect(wrapper.text()).toContain('便1 07-16 北海道釧路市西港1-98-41 → (卸地なし)')
     })
 
-    it('積地が空でも「?」で出す', async () => {
+    it('積地が空なら「(積地なし)」で出す (`legRouteLabel` に寄せた、Refs #860)', async () => {
       writeAggregated()
       const wrapper = createWrapper({ legs: [leg({ originCity: '', destCity: '上士幌町' })] })
       await flushPromises()
-      expect(wrapper.text()).toContain('便1 07-16 ? → 上士幌町')
+      expect(wrapper.text()).toContain('便1 07-16 (積地なし) → 上士幌町')
     })
 
     it('★ 便が 2 本あれば選べる。既定は先頭で、押した便に切り替わる', async () => {
@@ -719,7 +719,7 @@ describe('ProfitPanel', () => {
         slip({ rowId: 'b', originAreaName: '北海道釧路市', destAreaName: '上士幌町' }),
         slip({ rowId: 'c', originAreaName: '苫小牧市', origin: '苫小牧', destAreaName: '千歳市', dest: '千歳' }),
       ])
-      const wrapper = createWrapper()
+      const wrapper = createWrapper({ legs: [leg({ originCity: '釧路市', destCity: '上士幌町' })] })
       await flushPromises()
       expect(wrapper.text()).toContain('完全一致')
       expect(wrapper.text()).toContain('部分一致')
@@ -736,7 +736,7 @@ describe('ProfitPanel', () => {
       fetchDriverDailySlipsMock.mockResolvedValue([
         slip({ rowId: 'a', originAreaName: '北海道釧路市', destAreaName: '北海道上士幌町' }),
       ])
-      const wrapper = createWrapper({ location: { originCity: '釧路市', destCity: '上士幌町' } })
+      const wrapper = createWrapper({ legs: [leg({ originCity: '釧路市', destCity: '上士幌町' })] })
       await flushPromises()
       expect(wrapper.text()).toContain('部分一致')
       expect(wrapper.text()).not.toContain('完全一致')
@@ -746,7 +746,7 @@ describe('ProfitPanel', () => {
       fetchDriverDailySlipsMock.mockResolvedValue([
         slip({ rowId: 'a', originAreaName: '釧路市', destAreaName: '別海町', dest: '別海町' }),
       ])
-      const wrapper = createWrapper()
+      const wrapper = createWrapper({ legs: [leg({ originCity: '釧路市', destCity: '上士幌町' })] })
       await flushPromises()
       expect(wrapper.text()).toContain('根拠なし')
       expect(wrapper.text()).not.toContain('部分一致')
@@ -765,7 +765,7 @@ describe('ProfitPanel', () => {
         slip({ rowId: 'a', originAreaName: '釧路市', destAreaName: '別海町', dest: '別海町' }),
         slip({ rowId: 'b', originAreaName: '苫小牧市', origin: '苫小牧', destAreaName: '千歳市', dest: '千歳' }),
       ])
-      const wrapper = createWrapper()
+      const wrapper = createWrapper({ legs: [leg({ originCity: '釧路市', destCity: '上士幌町' })] })
       await flushPromises()
       const cells = wrapper.findAll('tbody tr').map(tr => tr.text())
       // 積地だけ当たっている行 = バッジは「根拠なし」だが、畳んだ側を言う
@@ -778,7 +778,7 @@ describe('ProfitPanel', () => {
       fetchDriverDailySlipsMock.mockResolvedValue([
         slip({ rowId: 'a', originAreaName: '東京都', origin: '東京', destAreaName: '上士幌町' }),
       ])
-      const wrapper = createWrapper()
+      const wrapper = createWrapper({ legs: [leg({ originCity: '釧路市', destCity: '上士幌町' })] })
       await flushPromises()
       expect(wrapper.text()).toContain('根拠なし')
       expect(wrapper.text()).toContain('卸地のみ一致')
@@ -788,18 +788,138 @@ describe('ProfitPanel', () => {
       fetchDriverDailySlipsMock.mockResolvedValue([
         slip({ rowId: 'a', originAreaName: '釧路市', destAreaName: '上士幌町' }),
       ])
-      const wrapper = createWrapper()
+      const wrapper = createWrapper({ legs: [leg({ originCity: '釧路市', destCity: '上士幌町' })] })
       await flushPromises()
       expect(wrapper.text()).toContain('完全一致')
       expect(wrapper.text()).not.toContain('積地のみ一致')
       expect(wrapper.text()).not.toContain('卸地のみ一致')
     })
 
-    it('選択区間の積地・卸地が取れていなくても出せる (根拠は付かない)', async () => {
-      fetchDriverDailySlipsMock.mockResolvedValue([slip()])
-      const wrapper = createWrapper({ location: null })
+    it('★ 選択区間の積地・卸地が取れていなくても、便の側で突合できる (Refs #860)', async () => {
+      fetchDriverDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'a', originAreaName: '釧路市', destAreaName: '上士幌町' }),
+      ])
+      const wrapper = createWrapper({ legs: [leg({ originCity: '釧路市', destCity: '上士幌町' })], location: null })
       await flushPromises()
-      expect(wrapper.text()).toContain('根拠なし')
+      // 相手は便なので、選択区間が取れていなくてもバッジは付く (直す前は全件「根拠なし」だった)
+      expect(wrapper.find('tbody').text()).toContain('完全一致')
+      // ただし「選択区間が取れていない」ことは黙らない
+      expect(wrapper.text()).toContain('選択した区間の積地・卸地は取れていません')
+    })
+
+    it('便の積地・卸地も取れていなければ根拠は付かない (「結べない」ではない)', async () => {
+      fetchDriverDailySlipsMock.mockResolvedValue([slip()])
+      const wrapper = createWrapper({ legs: [leg({ originCity: '', destCity: '' })], location: null })
+      await flushPromises()
+      expect(wrapper.find('tbody').text()).toContain('根拠なし')
+      expect(wrapper.findAll('tbody tr')).toHaveLength(1)
+    })
+
+    /**
+     * ## ★★ #860 の本題 — バッジの相手は「選択区間」ではなく「その便」
+     *
+     * 候補は `forceMatchCandidates` が**便ごと**に出しているのに、そこへ貼る根拠だけが
+     * **選択区間 1 つぶんの積地・卸地**を相手にしていた。選択が便をまたぐと
+     * `SelectedRowsLocationRange.destCity` は**最後の便の卸地**になるので、
+     * **手前の便の候補は構造的に「積地だけ当たり」**になっていた。
+     *
+     * 下は**その形をそのまま作った**もの: 便1 (釧路市 → 上士幌町) と便2 (帯広市 → 千歳市) を
+     * 選び、選択区間は `釧路市 → 千歳市` (= 便1 の積地と便2 の卸地)。便1 の候補は
+     * **便1 の卸地には当たっている**のに、直す前は「根拠なし」に落ちていた。
+     */
+    it('★★ 便をまたいで選んでも、根拠はその便の積地・卸地と比べる (Refs #860)', async () => {
+      writeLegSales({ [UNKO]: [{ seq: 1, slipIds: [] }, { seq: 2, slipIds: [] }] })
+      fetchDriverDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'a', originAreaName: '釧路市', destAreaName: '上士幌町' }),
+      ])
+      const wrapper = createWrapper({
+        legs: [leg({ originCity: '釧路市', destCity: '上士幌町' }), leg({ fromTs: LEG2_TS, originCity: '帯広市', destCity: '千歳市' })],
+        location: { originCity: '釧路市', destCity: '千歳市' },
+      })
+      await flushPromises()
+      // 開いているのは便1。相手は便1 の 釧路市 → 上士幌町 なので当たる
+      expect(wrapper.find('tbody').text()).toContain('完全一致')
+      // 直す前はここが「根拠なし」だった (選択区間の卸地 = 便2 の 千歳市 と比べていたため)
+      expect(wrapper.find('tbody').text()).not.toContain('根拠なし')
+    })
+
+    /** **選択区間を動かしてもバッジは動かない** — 相手が便になったことの陰性対照 (Refs #860)。 */
+    it('★ 選択区間の積地・卸地を変えてもバッジは変わらない (Refs #860)', async () => {
+      fetchDriverDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'a', originAreaName: '釧路市', destAreaName: '上士幌町' }),
+      ])
+      const legs = [leg({ originCity: '釧路市', destCity: '上士幌町' })]
+      const same = createWrapper({ legs, location: { originCity: '釧路市', destCity: '上士幌町' } })
+      const other = createWrapper({ legs, location: { originCity: '音更町駒場北町', destCity: '音更町駒場北町' } })
+      await flushPromises()
+      expect(same.find('tbody').text()).toContain('完全一致')
+      expect(other.find('tbody').text()).toContain('完全一致')
+    })
+
+    /** **便の積地・卸地を変えるとバッジは変わる** — 陽性対照 (相手が便であることの証拠)。 */
+    it('★ 便の積地・卸地を変えるとバッジが変わる (Refs #860)', async () => {
+      fetchDriverDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'a', originAreaName: '釧路市', destAreaName: '上士幌町' }),
+      ])
+      const location = { originCity: '釧路市', destCity: '上士幌町' }
+      const hit = createWrapper({ legs: [leg({ originCity: '釧路市', destCity: '上士幌町' })], location })
+      const miss = createWrapper({ legs: [leg({ originCity: '苫小牧市', destCity: '千歳市' })], location })
+      await flushPromises()
+      expect(hit.find('tbody').text()).toContain('完全一致')
+      expect(miss.find('tbody').text()).toContain('根拠なし')
+    })
+
+    /**
+     * **何を相手に突合したのかを画面に出す** (Refs #860)。#860 の本題は「相手が違う」ことより
+     * **画面に相手が出ていない**ことだった — 出さずに相手だけ変えると、昨日「根拠なし」だった
+     * 行が今日「部分一致」になる理由がどこにも無い。
+     */
+    it('★★ 何を相手に突合したのか (この便 / 選択区間) を便ごとに出す (Refs #860)', async () => {
+      writeAggregated()
+      fetchDriverDailySlipsMock.mockResolvedValue([slip()])
+      const wrapper = createWrapper({
+        legs: [leg({ originCity: '釧路市', destCity: '上士幌町' })],
+        location: { originCity: '音更町駒場北町', destCity: '音更町駒場北町' },
+      })
+      await flushPromises()
+      expect(wrapper.text()).toContain('根拠はこの便の積地・卸地 (釧路市 → 上士幌町) と比べた結果です')
+      expect(wrapper.text()).toContain('選択した区間は 音更町駒場北町 → 音更町駒場北町')
+      // ★ 逆方向の誤読 (「完全一致が増えた = もう確認しなくてよい」) も同じ 1 行で潰す
+      expect(wrapper.text()).toContain('地名だけの目安なので、金額・品名・日付は必ず自分で確かめてください')
+    })
+
+    it('★ 表の見出しにも相手を書く (「根拠」だけにしない、Refs #860)', async () => {
+      fetchDriverDailySlipsMock.mockResolvedValue([slip()])
+      const wrapper = createWrapper()
+      await flushPromises()
+      expect(wrapper.find('thead').text()).toContain('根拠 (この便の積地・卸地)')
+    })
+
+    /**
+     * ## ★★ 「卸地が合わない」と「卸地が取れていない」を分ける (Refs #860)
+     *
+     * `matchLocationLevel` は片方が空なら無条件 `none`、`combinedMatchLevel` は片方でも
+     * `none` なら `none`。⇒ **降しイベントが無い便は、積地がどれだけ当たっていても全行
+     * 「根拠なし」**になる。**消えるのはバッジ色の区別だけで、側注 (「積地のみ一致」) は残る**
+     * が、一色になった理由が出ないと**「この便には根拠のある候補が 1 つも無い」と誤読される。**
+     */
+    it('★★ 卸地が取れていない便では、そう言う (バッジが一色になる理由を黙らない、Refs #860)', async () => {
+      fetchDriverDailySlipsMock.mockResolvedValue([
+        slip({ rowId: 'a', originAreaName: '釧路市', destAreaName: '上士幌町' }),
+      ])
+      const wrapper = createWrapper({ legs: [leg({ originCity: '釧路市', destCity: '' })] })
+      await flushPromises()
+      expect(wrapper.text()).toContain('この便は降しイベントが無く卸地が取れていないため、根拠は積地だけで見ています')
+      // バッジは畳まれるが、積地が当たっていることは側注に残る
+      expect(wrapper.find('tbody').text()).toContain('根拠なし')
+      expect(wrapper.find('tbody').text()).toContain('積地のみ一致')
+    })
+
+    it('卸地が取れている便にはその注記を出さない', async () => {
+      fetchDriverDailySlipsMock.mockResolvedValue([slip()])
+      const wrapper = createWrapper({ legs: [leg({ originCity: '釧路市', destCity: '上士幌町' })] })
+      await flushPromises()
+      expect(wrapper.text()).not.toContain('この便は降しイベントが無く卸地が取れていない')
     })
   })
 

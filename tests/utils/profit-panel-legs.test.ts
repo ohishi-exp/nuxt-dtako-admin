@@ -14,6 +14,11 @@ import {
   seedForceMatch,
   slipMatch,
   slipSideNote,
+  LEG_DEST_MISSING_NOTE,
+  badgeTargetNote,
+  legDestKnown,
+  legMatchTarget,
+  legRouteLabel,
   slipRows,
   sumAmount,
 } from '~/utils/profit-panel-legs'
@@ -401,5 +406,91 @@ describe('seedForceMatch — 人が触った瞬間に①の結果を土台とし
     const next = seedForceMatch({}, 'op#t1', ichiban)
     next['op#t1']!.push('b')
     expect(ichiban).toEqual(['a'])
+  })
+})
+
+/**
+ * ## ★ 根拠バッジの相手は「その便」 (Refs #860)
+ *
+ * 候補は `forceMatchCandidates` が**便ごと** (`leg.originCity` / `leg.date`) に出しているのに、
+ * そこへ貼る根拠だけが**選択区間 1 つぶんの積地・卸地**を相手にしていた。
+ * **同じ表の中で、並びは便基準・ラベルは区間基準**という食い違いだった。
+ */
+describe('legMatchTarget / legDestKnown / legRouteLabel — 根拠の相手 (Refs #860)', () => {
+  const panelLeg = { seq: 1, key: 'k', date: '2026-07-16', originCity: '釧路市', destCity: '上士幌町' }
+
+  it('★ 相手はその便の積地・卸地 (`SelectedRowsLocationRange` と同じ形で返す)', () => {
+    expect(legMatchTarget(panelLeg)).toEqual({ originCity: '釧路市', destCity: '上士幌町' })
+  })
+
+  it('★ 便を相手にすると、選択区間がどうであれ同じ結果になる', () => {
+    const s = slip({ originAreaName: '釧路市', destAreaName: '上士幌町' })
+    expect(slipMatch(legMatchTarget(panelLeg), s).badge).toBe('exact')
+    // 選択区間 (車庫→車庫) を相手にすると根拠なしに落ちていた = #860 で直したところ
+    expect(slipMatch({ originCity: '音更町駒場北町', destCity: '音更町駒場北町' }, s).badge).toBe('none')
+  })
+
+  it('★ 卸地が取れているかを言う (空 / 空白だけ は「取れていない」)', () => {
+    expect(legDestKnown({ destCity: '上士幌町' })).toBe(true)
+    expect(legDestKnown({ destCity: '' })).toBe(false)
+    expect(legDestKnown({ destCity: '  ' })).toBe(false)
+  })
+
+  /**
+   * `matchLocationLevel` は片方が空なら無条件 `none`、`combinedMatchLevel` は片方でも
+   * `none` なら `none`。⇒ **卸地が取れていない便は、積地が完全一致でも `none`。**
+   * **消えるのはバッジ色の区別だけで、側注は残る**ことを両方固定する。
+   */
+  it('★★ 卸地が取れていない便は積地が完全一致でも `none`。ただし側注は残る', () => {
+    const s = slip({ originAreaName: '釧路市', destAreaName: '上士幌町' })
+    const match = slipMatch(legMatchTarget({ ...panelLeg, destCity: '' }), s)
+    expect(match.badge).toBe('none')
+    expect(match.originMatch).toBe('exact')
+    expect(slipSideNote(match)).toBe('積地のみ一致')
+  })
+
+  it('区間の書き方は 1 か所 — 取れていない側は伏せず言葉にする', () => {
+    expect(legRouteLabel('釧路市', '上士幌町')).toBe('釧路市 → 上士幌町')
+    expect(legRouteLabel('', '上士幌町')).toBe('(積地なし) → 上士幌町')
+    expect(legRouteLabel('釧路市', '')).toBe('釧路市 → (卸地なし)')
+    expect(legRouteLabel('', '')).toBe('(積地なし) → (卸地なし)')
+  })
+})
+
+/**
+ * ## ★ 何を相手に突合したのかを画面に出す (Refs #860)
+ *
+ * #860 の本題は「相手が違う」ことより**画面に相手が出ていない**こと。相手だけ黙って
+ * 変えると、昨日「根拠なし」だった行が今日「部分一致」になる理由がどこにも出ない。
+ */
+describe('badgeTargetNote / LEG_DEST_MISSING_NOTE — 相手を画面に出す (Refs #860)', () => {
+  const panelLeg = { seq: 1, key: 'k', date: '2026-07-16', originCity: '釧路市', destCity: '上士幌町' }
+
+  it('★ 便と選択区間の両方を出す (どちらも「いま何と比べているか」なので腐らない)', () => {
+    const note = badgeTargetNote({ originCity: '音更町駒場北町', destCity: '音更町駒場北町' }, panelLeg)
+    expect(note).toContain('根拠はこの便の積地・卸地 (釧路市 → 上士幌町) と比べた結果です')
+    expect(note).toContain('選択した区間は 音更町駒場北町 → 音更町駒場北町')
+  })
+
+  it('★ 選択区間が取れていなければ、そう言う (空欄にして黙らない)', () => {
+    const note = badgeTargetNote(null, panelLeg)
+    expect(note).toContain('選択した区間の積地・卸地は取れていません')
+    expect(note).toContain('根拠はこの便の積地・卸地 (釧路市 → 上士幌町) と比べた結果です')
+  })
+
+  /**
+   * **逆方向の誤読を同時に潰す** — 複数便を選んでいると「部分一致」が一気に増えるので、
+   * 「確認済み」と読まれないよう地名だけの目安であることを同じ 1 行で言う。
+   * (`exact` は #858 の実測で候補 1,668 件中 0 件。増えるのは「部分一致」の方。)
+   */
+  it('★ 地名だけの目安であることを同じ 1 行で言う', () => {
+    expect(badgeTargetNote(null, panelLeg)).toContain('金額・品名・日付は必ず自分で確かめてください')
+  })
+
+  it('★ 便の卸地が取れていない便では、バッジが一色になる理由を言う', () => {
+    expect(LEG_DEST_MISSING_NOTE).toContain('降しイベントが無く卸地が取れていない')
+    expect(LEG_DEST_MISSING_NOTE).toContain('積地だけで見ています')
+    // **側注が残ることまで書く** — 「情報が消えた」と読ませない
+    expect(LEG_DEST_MISSING_NOTE).toContain('積地のみ一致')
   })
 })
