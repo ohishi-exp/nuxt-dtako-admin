@@ -204,6 +204,11 @@ const session = computed<{ compId: string, userName: string } | null>(() =>
  * 触れるかどうかの判定は worker 側 (`viewerCompIdsForTenant`) が DTAKO_ACCOUNTS の
  * 逆引きで行うため、ここで会社を絞る必要はない。
  */
+// **この画面は認証の運び方が 2 通りある** (Refs #375)。`/restraint-api/**` は Nitro を
+// 通らず relay worker へ service binding で丸投げされ、relay 側は `Authorization` ヘッダ
+// しか読まない (cookie を読むコードが無い) ので**ここは Bearer を組み続ける**。一方
+// `/api/kyuyo/**` は Nitro の server route が cookie から Bearer を組むので、ページ側は
+// 何も載せない。混ざっているのは書き忘れではない。
 function authHeaders(compId?: string): Record<string, string> {
   const token = currentAccessToken()
   return {

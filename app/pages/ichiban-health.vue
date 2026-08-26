@@ -11,7 +11,6 @@
  * 給与明細の内容 (金額・氏名) は画面に出さない — 件数と warnings 数のみ。
  */
 import { buildHealthChecks, classifyResult, defaultPayrollMonth, type CheckLevel, type HealthCheck } from '~/utils/ichiban-health'
-import { currentAccessToken } from '~/utils/api'
 
 interface CheckRow {
   check: HealthCheck
@@ -36,15 +35,12 @@ async function runOne(row: CheckRow): Promise<void> {
   try {
     // 認可が要る口は cookie (`logi_auth_token`) で通す — ヘッダは組まない
     // (Refs #375、server route が cookie から Bearer を組んで upstream へ渡す)。
-    // **事前チェックは残す**: このページは「ログイン済みの人が押す」画面で、
-    // 手元にセッションが無いまま出る 401 を upstream 由来の NG と読ませないため。
-    // 判定材料は localStorage のセッション (`currentAccessToken`) で、実際に送る
-    // cookie とは別物 — なので文言も「JWT が無い」ではなくセッションの話にする。
-    if (row.check.needsAuth && !currentAccessToken()) {
-      row.level = 'ng'
-      row.detail = 'このブラウザにログインセッションがありません (再ログインしてください)'
-      return
-    }
+    //
+    // **「JWT がありません」の事前チェックは撤去した** (Refs #375)。判定材料が
+    // localStorage の token だったのに、実際に認証を運ぶのは cookie になったので、
+    // **「cookie はあるが localStorage が空」で通るはずの口を NG と断定する**
+    // ようになる。**認可の結果は応答に語らせる** — 401 が返るならそれが正直な信号で、
+    // 嘘の断定より読み手を迷わせない。
     const res = await fetch(row.check.url)
     let body: unknown = null
     try {

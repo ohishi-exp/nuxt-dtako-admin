@@ -21,8 +21,12 @@ export interface HealthCheck {
   url: string
   /** kyuyo 系は認可が要る。**ヘッダはページ側で組まない** — 同一オリジンの
    * cookie (`logi_auth_token`) を server route が `Authorization: Bearer` に
-   * 変換して upstream へ渡す (Refs #375)。ページはこのフラグを「セッション有無の
-   * 事前チェック」と「直列実行の対象か」の判定にだけ使う。 */
+   * 変換して upstream へ渡す (Refs #375)。
+   *
+   * **ページ側の「JWT がありません」事前チェックは #375 で撤去した** —
+   * 判定材料 (localStorage の token) と実際に認証を運ぶもの (cookie) が
+   * 別物になったため。**いまこのフラグの用途は「直列実行の対象か」だけ**
+   * (OHKEN の接続プールが 2 本しかなく、並列で叩くと偽の 503 NG が出る)。 */
   needsAuth: boolean
 }
 
