@@ -1,4 +1,12 @@
 /**
+ * ofetch が理由の代わりに組む `[GET] "/api/foo": 503 ` の形 (`createFetchError` の
+ * `` `${requestStr}: ${statusStr}` ``、`ofetch/dist/shared/*.mjs`)。**method と URL を
+ * 取り出すためだけ**に使う。手投げの `{ statusCode, message: 'Bad Gateway' }` は
+ * この形に当たらないので、そちらは今までどおり `502 Bad Gateway` のまま。
+ */
+const OFETCH_SYNTHETIC_MESSAGE = /^\[([A-Z]+)\] "(.*)": \d{3}(?: |$)/
+
+/**
  * `$fetch` のエラーから**人が読める理由**を作る (Refs #677 / #890)。
  *
  * 既定の `e.message` は `[GET] "/api/kyuyo/wage-range?…": 503` のように
@@ -46,6 +54,23 @@
  * `message` を素通しする** — 日本語は全部落ちる。いまはその経路を通らないが、
  * **`statusMessage` を先に読む実装にすると将来そこで壊れる。**
  *
+ * ## ★ 理由が 1 つも無いとき、status を 2 回書かない (Refs #900)
+ *
+ * 一番星 (`/api/ichiban/**`) はエラー側の型が素の `StatusCode` で、axum が
+ * **本文を 1 バイトも付けない**。本番 (h3) は reason phrase が空なので
+ * `err.statusMessage` も空になり、残るのは ofetch が自分で組んだ `err.message`
+ * (`[GET] "…": 503`) だけ — そこに `${statusCode}` を前置していたので、画面は
+ * **`503 [GET] "…": 503`** で **status が 2 回出るだけ**だった (dev + スタブ upstream に
+ * `ofetch` を当てて実測: `statusMessage: ""` / `data: ""`)。
+ * **この道に落ちた時点で「応答に理由が無い」ことは確定している**ので、そう書いて
+ * method と URL だけ残す。
+ *
+ * **transport で症状が変わる** — dev (node) は reason phrase を埋めるので、同じ空本文でも
+ * `503 Service Unavailable` になる (二重にはならないが、**理由が無いのは同じ**)。
+ *
+ * **ichiban はもうここまで来ない** — `server/api/ichiban/[...path].get.ts` が空本文の
+ * 非 2xx に日本語の理由を作って返すので `d.error` で拾える。ここは他 route の保険。
+ *
  * ## 効く相手・効かない相手
  *
  * 直るのは **`$fetch` で自前の `server/api/*` を呼んでいる箇所**だけ。
@@ -74,6 +99,17 @@ export function describeApiError(e: unknown): string {
     const picked = [d.error, d.message, d.statusMessage].find(v => typeof v === 'string')
     if (typeof picked === 'string') fromData = picked
   }
-  const detail = fromData || err.statusMessage || err.message || String(e)
+  const fallback = fromData || err.statusMessage
+  // ★ **拾える理由が 1 つも無いとき、status を 2 回書かない** (Refs #900)。
+  // ここに落ちるのは「本文にも reason phrase にも文字が無い」場合だけで、
+  // 残っているのは ofetch が自分で組んだ `[GET] "/api/…": 503` — **status は
+  // `${err.statusCode}` として既に前置している**ので、そのまま繋ぐと本番
+  // (h3 = reason phrase が空) の画面が `503 [GET] "…": 503` になる。
+  // **理由が無いことはここで確定している**ので、そう書いて method と URL だけ残す。
+  if (!fallback && err.statusCode) {
+    const synthetic = OFETCH_SYNTHETIC_MESSAGE.exec(err.message ?? '')
+    if (synthetic) return `${err.statusCode} 応答に理由が入っていません (${synthetic[1]} ${synthetic[2]})`
+  }
+  const detail = fallback || err.message || String(e)
   return err.statusCode ? `${err.statusCode} ${detail}` : detail
 }

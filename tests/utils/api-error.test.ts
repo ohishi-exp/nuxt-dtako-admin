@@ -103,3 +103,56 @@ describe('describeApiError — 自前の server/api の日本語 (Refs #890)', (
     expect(note).toContain('が必要です')
   })
 })
+
+/**
+ * ★ **理由がどこにも無いとき、status を 2 回書かない** (Refs #900)。
+ *
+ * 一番星 (`/api/ichiban/**`) はエラー側が素の `StatusCode` で**本文を返さない**。
+ * 本番 (h3 = reason phrase が空) では `statusMessage` も空になるので、拾える文字が
+ * `err.message` (= ofetch が組んだ `[GET] "…": 503`) しか残らず、`${statusCode}` の
+ * 前置とあわせて **`503 [GET] "…": 503`** になっていた。
+ *
+ * 下の値は**実測から写した形** (`ofetch` を reason phrase 空の 503 に当てて
+ * `statusMessage: ""` / `data: ""` / `message: '[GET] "…": 503 '` を確認)。
+ */
+describe('describeApiError — 理由が 1 つも無いとき (Refs #900)', () => {
+  const noReason = {
+    statusCode: 503,
+    statusMessage: '',
+    data: '',
+    message: '[GET] "/api/ichiban/api/sales/vehicle-daily?vehicle=101": 503 ',
+  }
+
+  it('status が 2 回出ない (method と URL だけ残す)', () => {
+    expect(describeApiError(noReason))
+      .toBe('503 応答に理由が入っていません (GET /api/ichiban/api/sales/vehicle-daily?vehicle=101)')
+    // 直す前に出ていた形 — status が 2 回
+    expect(describeApiError(noReason)).not.toContain('": 503')
+  })
+
+  /** dev (node = reason phrase あり) では `statusMessage` が勝つ — 挙動を変えない。 */
+  it('reason phrase があればそれを使う (dev の HTTP/1.1)', () => {
+    expect(describeApiError({ ...noReason, statusMessage: 'Service Unavailable' }))
+      .toBe('503 Service Unavailable')
+  })
+
+  /** ★ 陰性対照。**手投げの message は畳まない** — status を落とすと情報が減る。 */
+  it('ofetch が組んだ形でない message は今までどおり status を前置する', () => {
+    expect(describeApiError({ statusCode: 502, data: null, message: '中継が応答しませんでした' }))
+      .toBe('502 中継が応答しませんでした')
+  })
+
+  /** status が無ければ前置するものが無いので、そもそも二重にならない。 */
+  it('statusCode が無ければ message をそのまま返す', () => {
+    expect(describeApiError({ message: '[GET] "/api/ichiban/health": 503 ' }))
+      .toBe('[GET] "/api/ichiban/health": 503 ')
+  })
+
+  /** 本文に理由があれば、そちらが勝つ (proxy が空本文を補った後の姿。Refs #900) */
+  it('proxy が補った日本語があれば、そちらを出す', () => {
+    expect(describeApiError({
+      ...noReason,
+      data: { error: '一番星 API が応答しませんでした (/api/sales/vehicle-daily) — 停止か DB 接続プール枯渇の可能性 (一番星が理由を返していません)' },
+    })).toBe('503 一番星 API が応答しませんでした (/api/sales/vehicle-daily) — 停止か DB 接続プール枯渇の可能性 (一番星が理由を返していません)')
+  })
+})
