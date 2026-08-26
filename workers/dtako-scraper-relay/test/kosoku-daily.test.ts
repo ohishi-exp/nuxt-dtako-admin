@@ -39,7 +39,7 @@ describe('prevYmOf', () => {
 
 describe('parseKosokuDaily', () => {
   it('乗務員CD 引きに直し、深夜は法定休日ぶんも足す', () => {
-    const got = parseKosokuDaily({ drivers: [{ driver: 1104, days: [shift()] }] })
+    const got = parseKosokuDaily({ drivers: [{ driver: 1104, days: [shift()] }] }).map
     expect([...got.keys()]).toEqual(['1104'])
     expect(got.get('1104')).toEqual([{
       date: '2026-04-06',
@@ -61,12 +61,12 @@ describe('parseKosokuDaily', () => {
   })
 
   it('乗務員CD は String(Number()) で正規化する (打刻側と同じ規則)', () => {
-    const got = parseKosokuDaily({ drivers: [{ driver: '0205', days: [shift()] }] })
+    const got = parseKosokuDaily({ drivers: [{ driver: '0205', days: [shift()] }] }).map
     expect([...got.keys()]).toEqual(['205'])
   })
 
   it('欠けた数値は 0 で埋める (項目が増減しても落ちない)', () => {
-    const got = parseKosokuDaily({ drivers: [{ driver: 1, days: [{ date: '2026-04-01' }] }] })
+    const got = parseKosokuDaily({ drivers: [{ driver: 1, days: [{ date: '2026-04-01' }] }] }).map
     expect(got.get('1')).toEqual([{
       date: '2026-04-01',
       restraintMinutes: 0,
@@ -95,7 +95,7 @@ describe('parseKosokuDaily', () => {
           ],
         })],
       }],
-    })
+    }).map
     expect(got.get('1')![0]!.parts.map(p => [p.date, p.restraintMinutes])).toEqual([
       ['2026-04-06', 400],
       ['2026-04-07', 299],
@@ -109,7 +109,7 @@ describe('parseKosokuDaily', () => {
         { driver: 'x', days: [shift()] },
         { driver: 2, days: [shift({ date: '2026/04/06' }), shift({ date: 7 }), null, 'x', shift()] },
       ],
-    })
+    }).map
     expect([...got.keys()]).toEqual(['2'])
     expect(got.get('2')).toHaveLength(1)
   })
@@ -117,17 +117,17 @@ describe('parseKosokuDaily', () => {
   it('内訳の中の不正な要素も捨てる', () => {
     const got = parseKosokuDaily({
       drivers: [{ driver: 1, days: [shift({ parts: [null, 'x', { date: 'bad' }, { date: '2026-04-06' }] })] }],
-    })
+    }).map
     expect(got.get('1')![0]!.parts.map(p => p.date)).toEqual(['2026-04-06'])
   })
 
   it('応答の形が違えば空 (取り込みを落とさない)', () => {
-    expect(parseKosokuDaily(null).size).toBe(0)
-    expect(parseKosokuDaily('x').size).toBe(0)
-    expect(parseKosokuDaily({}).size).toBe(0)
-    expect(parseKosokuDaily({ drivers: 'x' }).size).toBe(0)
-    expect(parseKosokuDaily({ drivers: [null, 'x'] }).size).toBe(0)
-    expect(parseKosokuDaily({ drivers: [{ driver: 1, days: 'x' }] }).size).toBe(0)
+    expect(parseKosokuDaily(null).map.size).toBe(0)
+    expect(parseKosokuDaily('x').map.size).toBe(0)
+    expect(parseKosokuDaily({}).map.size).toBe(0)
+    expect(parseKosokuDaily({ drivers: 'x' }).map.size).toBe(0)
+    expect(parseKosokuDaily({ drivers: [null, 'x'] }).map.size).toBe(0)
+    expect(parseKosokuDaily({ drivers: [{ driver: 1, days: 'x' }] }).map.size).toBe(0)
   })
 
   // 上流は `driver` を指定すると `drivers` を持たず、その 1 名を month と並べて
@@ -140,12 +140,12 @@ describe('parseKosokuDaily', () => {
       driver: 1104,
       days: [shift()],
       duplicate_rows: 0,
-    })
+    }).map
     expect([...got.keys()]).toEqual(['1104'])
     expect(got.get('1104')).toHaveLength(1)
     // 全乗務員形と同じ値になる (読む場所が変わるだけ)
     expect(got.get('1104')).toEqual(
-      parseKosokuDaily({ drivers: [{ driver: 1104, days: [shift()] }] }).get('1104'),
+      parseKosokuDaily({ drivers: [{ driver: 1104, days: [shift()] }] }).map.get('1104'),
     )
   })
 
@@ -154,8 +154,45 @@ describe('parseKosokuDaily', () => {
       driver: 9999,
       days: [shift()],
       drivers: [{ driver: 1104, days: [shift()] }],
-    })
+    }).map
     expect([...got.keys()]).toEqual(['1104'])
+  })
+
+  // ── unreadable (Refs #960) ──────────────────────────────────────────────
+  // 空 Map をそのまま返すと「上流にその行が無い」と「応答の形を読み間違えた」が
+  // 呼び出し側から区別できない。前者は取り込み直しで直り、後者は直らない。
+
+  it('陰性対照: 正常な全乗務員形は unreadable が false (map の中身も従来どおり)', () => {
+    const res = parseKosokuDaily({ drivers: [{ driver: 1104, days: [shift()] }] })
+    expect(res.unreadable).toBe(false)
+    expect([...res.map.keys()]).toEqual(['1104'])
+    expect(res.map.get('1104')).toHaveLength(1)
+  })
+
+  it('陰性対照: 単一乗務員形も unreadable は false', () => {
+    const res = parseKosokuDaily({ month: '2026-04', driver: 1104, days: [shift()] })
+    expect(res.unreadable).toBe(false)
+    expect([...res.map.keys()]).toEqual(['1104'])
+  })
+
+  it('陰性対照: 乗務員が 0 名の応答は「読めた上で 0 名」なので unreadable は false', () => {
+    expect(parseKosokuDaily({ month: '2026-04', drivers: [] }).unreadable).toBe(false)
+    expect(parseKosokuDaily({ month: '2026-04', driver: 1104, days: [] }).unreadable).toBe(false)
+  })
+
+  it('★ どちらの形でもなければ unreadable を立てる (map は空のまま)', () => {
+    for (const body of [null, undefined, 'x', 42, {}, { month: '2026-04' }, { drivers: 'x' }, [], { days: 'x' }]) {
+      const res = parseKosokuDaily(body)
+      expect({ body, unreadable: res.unreadable, size: res.map.size })
+        .toEqual({ body, unreadable: true, size: 0 })
+    }
+  })
+
+  it('★ 読めた形なら、中身が全部捨てられて空 Map になっても unreadable は立てない', () => {
+    // 「行が無い」と「読めなかった」を混ぜない — 前者は取り込み直しで直る
+    const res = parseKosokuDaily({ drivers: [{ driver: 0, days: [shift()] }] })
+    expect(res.map.size).toBe(0)
+    expect(res.unreadable).toBe(false)
   })
 })
 
@@ -179,7 +216,7 @@ describe('kosokuPartsByDate', () => {
         shift({ date: '2026-05-01' }),
       ],
     }],
-  }).get('1')!
+  }).map.get('1')!
 
   it('対象月の暦日ごとに合計する', () => {
     const got = kosokuPartsByDate(shifts, '2026-04')
@@ -262,7 +299,7 @@ describe('crossMonthMinutesByDate', () => {
         }),
       ],
     }],
-  }).get('1196')!
+  }).map.get('1196')!
 
   it('月境界を跨ぐ勤務の当月分だけを暦日ごとに数える (同じ暦日は合算)', () => {
     const got = crossMonthMinutesByDate(shifts, '2026-03')
@@ -289,7 +326,7 @@ describe('crossMonthMinutesByDate', () => {
           shift({ date: '2026-04-06', run_gap_minutes: 5 }),
         ],
       }],
-    }).get('9')!
+    }).map.get('9')!
     expect(m[0]!.runGapMinutes).toBe(23)
     expect(kosokuPartsByDate(m, '2026-04').get('2026-04-06')!.runGapMinutes).toBe(28)
   })
@@ -297,7 +334,7 @@ describe('crossMonthMinutesByDate', () => {
   it('punch_tail_minutes を運ぶ (rust#172 の日跨ぎ終業の尻尾)', () => {
     const m = parseKosokuDaily({
       drivers: [{ driver: 8, days: [shift({ date: '2026-04-06', punch_tail_minutes: 151 })] }],
-    }).get('8')!
+    }).map.get('8')!
     expect(m[0]!.punchTailMinutes).toBe(151)
     expect(kosokuPartsByDate(m, '2026-04').get('2026-04-06')!.punchTailMinutes).toBe(151)
   })
@@ -305,7 +342,7 @@ describe('crossMonthMinutesByDate', () => {
   it('punch_head_minutes を運ぶ (rust#173 の日跨ぎ始業の頭)', () => {
     const m = parseKosokuDaily({
       drivers: [{ driver: 7, days: [shift({ date: '2026-04-06', punch_head_minutes: 979 })] }],
-    }).get('7')!
+    }).map.get('7')!
     expect(m[0]!.punchHeadMinutes).toBe(979)
     expect(kosokuPartsByDate(m, '2026-04').get('2026-04-06')!.punchHeadMinutes).toBe(979)
   })
@@ -313,7 +350,7 @@ describe('crossMonthMinutesByDate', () => {
   it('run_head_minutes を運ぶ (rust#174 の始業前の運行の頭)', () => {
     const m = parseKosokuDaily({
       drivers: [{ driver: 6, days: [shift({ date: '2026-04-06', run_head_minutes: 8 })] }],
-    }).get('6')!
+    }).map.get('6')!
     expect(m[0]!.runHeadMinutes).toBe(8)
     expect(kosokuPartsByDate(m, '2026-04').get('2026-04-06')!.runHeadMinutes).toBe(8)
   })
@@ -372,16 +409,16 @@ describe('parsePaperDriftByDriver', () => {
         { driver: 1194, days: [], paper_drift_by_date: { '2026-03-11': 3, '2026-03-02': 61 } },
         { driver: 1729, days: [], paper_drift_by_date: { '2026-03-26': -8 } },
       ],
-    })
+    }).map
     expect(got.get('1194')?.get('2026-03-11')).toBe(3)
     expect(got.get('1194')?.get('2026-03-02')).toBe(61)
     expect(got.get('1729')?.get('2026-03-26')).toBe(-8)
   })
 
   it('壊れた形は黙って空 — body が object でない / drivers が配列でない', () => {
-    expect(parsePaperDriftByDriver(null).size).toBe(0)
-    expect(parsePaperDriftByDriver('x').size).toBe(0)
-    expect(parsePaperDriftByDriver({ drivers: 'x' }).size).toBe(0)
+    expect(parsePaperDriftByDriver(null).map.size).toBe(0)
+    expect(parsePaperDriftByDriver('x').map.size).toBe(0)
+    expect(parsePaperDriftByDriver({ drivers: 'x' }).map.size).toBe(0)
   })
 
   it('解釈できない行・値は捨てる', () => {
@@ -397,7 +434,7 @@ describe('parsePaperDriftByDriver', () => {
         },
         { driver: 1051, paper_drift_by_date: { 'not-a-date': 1 } }, // 有効な日が残らない
       ],
-    })
+    }).map
     expect([...got.keys()]).toEqual(['1041'])
     expect(got.get('1041')?.size).toBe(1)
     expect(got.get('1041')?.get('2026-03-06')).toBe(2)
@@ -408,12 +445,12 @@ describe('parsePaperOutsideByDriver', () => {
   it('乗務員CD 引きに直す (Refs #546 / ohishi-exp/rust-ichibanboshi#182)', () => {
     const got = parsePaperOutsideByDriver({
       drivers: [{ driver: 1069, days: [], paper_outside_by_date: { '2026-01-05': 403 } }],
-    })
+    }).map
     expect(got.get('1069')?.get('2026-01-05')).toBe(403)
   })
 
   it('マップが無い乗務員は載らない', () => {
-    expect(parsePaperOutsideByDriver({ drivers: [{ driver: 1069 }] }).size).toBe(0)
+    expect(parsePaperOutsideByDriver({ drivers: [{ driver: 1069 }] }).map.size).toBe(0)
   })
 })
 
@@ -421,12 +458,12 @@ describe('parseOursOutsideByDriver', () => {
   it('乗務員CD 引きに直す (Refs #546 / ohishi-exp/rust-ichibanboshi#182)', () => {
     const got = parseOursOutsideByDriver({
       drivers: [{ driver: 1442, days: [], ours_outside_by_date: { '2026-05-27': 753 } }],
-    })
+    }).map
     expect(got.get('1442')?.get('2026-05-27')).toBe(753)
   })
 
   it('マップが無い乗務員は載らない', () => {
-    expect(parseOursOutsideByDriver({ drivers: [{ driver: 1442 }] }).size).toBe(0)
+    expect(parseOursOutsideByDriver({ drivers: [{ driver: 1442 }] }).map.size).toBe(0)
   })
 })
 
@@ -434,12 +471,12 @@ describe('parseMinusUnkoByDriver', () => {
   it('乗務員CD 引きに直す (Refs #546 / ohishi-exp/rust-ichibanboshi#182)', () => {
     const got = parseMinusUnkoByDriver({
       drivers: [{ driver: 1729, days: [], minus_unko_by_date: { '2026-01-09': 9 } }],
-    })
+    }).map
     expect(got.get('1729')?.get('2026-01-09')).toBe(9)
   })
 
   it('マップが無い乗務員は載らない', () => {
-    expect(parseMinusUnkoByDriver({ drivers: [{ driver: 1729 }] }).size).toBe(0)
+    expect(parseMinusUnkoByDriver({ drivers: [{ driver: 1729 }] }).map.size).toBe(0)
   })
 })
 
@@ -451,13 +488,13 @@ describe('parseGapMidnightByDriver', () => {
         days: [],
         gap_midnight_by_date: { '2026-06-10': -8, '2026-06-11': 8 },
       }],
-    })
+    }).map
     expect(got.get('1536')?.get('2026-06-10')).toBe(-8)
     expect(got.get('1536')?.get('2026-06-11')).toBe(8)
   })
 
   it('マップが無い乗務員は載らない', () => {
-    expect(parseGapMidnightByDriver({ drivers: [{ driver: 1536 }] }).size).toBe(0)
+    expect(parseGapMidnightByDriver({ drivers: [{ driver: 1536 }] }).map.size).toBe(0)
   })
 })
 
@@ -465,12 +502,12 @@ describe('parseFerryMinusByDriver', () => {
   it('乗務員CD 引きに直す (Refs ohishi-exp/rust-ichibanboshi#181)', () => {
     const got = parseFerryMinusByDriver({
       drivers: [{ driver: 1026, days: [], ferry_minus_by_date: { '2026-05-01': 76 } }],
-    })
+    }).map
     expect(got.get('1026')?.get('2026-05-01')).toBe(76)
   })
 
   it('マップが無い乗務員は載らない', () => {
-    expect(parseFerryMinusByDriver({ drivers: [{ driver: 1026 }] }).size).toBe(0)
+    expect(parseFerryMinusByDriver({ drivers: [{ driver: 1026 }] }).map.size).toBe(0)
   })
 })
 
@@ -484,7 +521,7 @@ describe('日別マップも driver 指定の形を読む (Refs #602)', () => {
       days: [],
       paper_drift_by_date: { '2026-03-11': 3 },
       duplicate_rows: 0,
-    })
+    }).map
     expect(drift.get('1194')?.get('2026-03-11')).toBe(3)
 
     const ferry = parseFerryMinusByDriver({
@@ -492,12 +529,45 @@ describe('日別マップも driver 指定の形を読む (Refs #602)', () => {
       driver: 1026,
       days: [],
       ferry_minus_by_date: { '2026-05-01': 76 },
-    })
+    }).map
     expect(ferry.get('1026')?.get('2026-05-01')).toBe(76)
   })
 
   it('マップが無ければ載らない (単一乗務員形でも同じ)', () => {
-    expect(parsePaperDriftByDriver({ month: '2026-03', driver: 1194, days: [] }).size).toBe(0)
+    expect(parsePaperDriftByDriver({ month: '2026-03', driver: 1194, days: [] }).map.size).toBe(0)
+  })
+
+  // ── unreadable (Refs #960) ──────────────────────────────────────────────
+  // cause 別の実額は「その日に値が無い = 0」として読むので、形を読み違えた空 Map を
+  // そのまま渡すと突合の差が全部「未説明」に化ける。0 と読めない理由を運ぶ。
+
+  it('陰性対照: 読めた形なら unreadable は false (値が 1 つも無くても)', () => {
+    const withValues = parsePaperDriftByDriver({
+      drivers: [{ driver: 1194, paper_drift_by_date: { '2026-03-02': -3 } }],
+    })
+    expect(withValues.unreadable).toBe(false)
+    expect(withValues.map.get('1194')?.get('2026-03-02')).toBe(-3)
+    // マップが 1 つも載らなくても「読めた上で 0 件」なので false のまま
+    expect(parsePaperDriftByDriver({ drivers: [{ driver: 1194 }] }).unreadable).toBe(false)
+    expect(parsePaperDriftByDriver({ month: '2026-03', driver: 1194, days: [] }).unreadable).toBe(false)
+  })
+
+  it('★ どちらの形でもなければ 6 本とも unreadable を立てる (map は空のまま)', () => {
+    const parsers = [
+      parsePaperDriftByDriver,
+      parseFerryMinusByDriver,
+      parsePaperOutsideByDriver,
+      parseOursOutsideByDriver,
+      parseMinusUnkoByDriver,
+      parseGapMidnightByDriver,
+    ]
+    for (const parse of parsers) {
+      for (const body of [null, 'x', {}, { drivers: 'x' }]) {
+        const res = parse(body)
+        expect({ name: parse.name, unreadable: res.unreadable, size: res.map.size })
+          .toEqual({ name: parse.name, unreadable: true, size: 0 })
+      }
+    }
   })
 })
 
@@ -509,7 +579,7 @@ describe('時間外深夜の内数を読み取りで排他へ直す (Refs #564)'
   it('上流の時間外から内数の時間外深夜を引く', () => {
     const [got] = parseKosokuDaily({
       drivers: [{ driver: 1, days: [shift({ working_minutes: 946, overtime_minutes: 466, overtime_night_minutes: 120 })] }],
-    }).get('1')!;
+    }).map.get('1')!;
     // 466 は深夜 120 を含む全部なので、引いて 346 / 120 の排他にする
     expect(got!.overtimeMinutes).toBe(346);
     expect(got!.overtimeNightMinutes).toBe(120);
@@ -522,7 +592,7 @@ describe('時間外深夜の内数を読み取りで排他へ直す (Refs #564)'
     // classifyMonth の法定内が max(0, …) に張り付いて最低賃金チェックの差分列に負で出る
     const [got] = parseKosokuDaily({
       drivers: [{ driver: 1, days: [shift({ working_minutes: 1072, overtime_minutes: 1072, overtime_night_minutes: 300 })] }],
-    }).get('1')!;
+    }).map.get('1')!;
     expect(got!.overtimeMinutes).toBe(772);
     expect(holdsExclusive(got!)).toBe(true);
     expect(got!.workingMinutes - got!.overtimeMinutes - got!.overtimeNightMinutes).toBe(0);
@@ -543,7 +613,7 @@ describe('時間外深夜の内数を読み取りで排他へ直す (Refs #564)'
           ],
         })],
       }],
-    }).get('1')!;
+    }).map.get('1')!;
     const byDate = kosokuPartsByDate(shifts, '2026-04');
     expect(byDate.get('2026-04-06')!.overtimeMinutes).toBe(100);
     expect(byDate.get('2026-04-07')!.overtimeMinutes).toBe(500);
@@ -553,7 +623,7 @@ describe('時間外深夜の内数を読み取りで排他へ直す (Refs #564)'
   it('上流が壊れた値 (内数 > 全体) を返しても負にしない', () => {
     const [got] = parseKosokuDaily({
       drivers: [{ driver: 1, days: [shift({ overtime_minutes: 10, overtime_night_minutes: 30 })] }],
-    }).get('1')!;
+    }).map.get('1')!;
     expect(got!.overtimeMinutes).toBe(0);
   });
 });

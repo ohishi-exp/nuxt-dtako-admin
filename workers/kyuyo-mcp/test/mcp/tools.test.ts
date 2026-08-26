@@ -836,6 +836,50 @@ describe("get_timecard_diff", () => {
     ).rejects.toThrow("YYYY-MM");
     expect(fetchSpy).not.toHaveBeenCalled();
   });
+
+  // ── ours_unreadable (Refs #960) ────────────────────────────────────────────
+  // オンプレ `kosoku-daily` は driver 指定の有無で形が変わる。どちらでもない形を
+  // 空 Map で返すと「こちら側 0 分」と見分けが付かず、紙の値がまるごと差に化ける。
+
+  it("陰性対照: 正常な全乗務員形では ours_unreadable が false で note も空", async () => {
+    stubIchiban();
+    const res = (await getTimecardDiffTool.execute(kosokuEnv(), {
+      month: "2026-04",
+      driver: "1021",
+    })) as DiffResult & { ours_unreadable: boolean, note: string };
+    expect(res.ours_unreadable).toBe(false);
+    expect(res.note).toBe("");
+    // 中身も従来どおり (差が出る 2 日だけ残る)
+    expect(res.results[0]!.days.map((d) => d.date)).toEqual(["2026-04-03", "2026-04-06"]);
+  });
+
+  it("陰性対照: 単一乗務員形 (drivers が無く days がトップレベル) も読めた扱い", async () => {
+    stubIchiban({
+      cur: { month: "2026-04", driver: 1021, days: KOSOKU_CURRENT.drivers[0]!.days },
+    });
+    const res = (await getTimecardDiffTool.execute(kosokuEnv(), {
+      month: "2026-04",
+      driver: "1021",
+    })) as DiffResult & { ours_unreadable: boolean, note: string };
+    expect(res.ours_unreadable).toBe(false);
+    expect(res.note).toBe("");
+    expect(res.results[0]!.days.map((d) => d.date)).toEqual(["2026-04-03", "2026-04-06"]);
+  });
+
+  it("★ どちらの形でもなければ ours_unreadable を立て、note で 0 分を信じさせない", async () => {
+    // `drivers` が配列でなく `days` も無い = 上流の応答の形が変わった状態
+    stubIchiban({ cur: { month: "2026-04", results: [] } });
+    const res = (await getTimecardDiffTool.execute(kosokuEnv(), {
+      month: "2026-04",
+      driver: "1021",
+    })) as DiffResult & { ours_unreadable: boolean, note: string };
+    expect(res.ours_unreadable).toBe(true);
+    expect(res.note).toContain("ours_unreadable: true");
+    // 「取れなかった」と混ぜない — 取り込み直しでは直らないと書いてあること
+    expect(res.note).toContain("取り込み直しでは直らない");
+    // こちら側が全部 0 分になっているので、紙の値がまるごと差として出ている
+    expect(res.results[0]!.days.every((d) => d.status === "nginx-only")).toBe(true);
+  });
 });
 
 // ===== get_timecard_diff (mode=summary) ======================================
@@ -1075,6 +1119,29 @@ describe("get_timecard_diff (mode=summary)", () => {
     })) as unknown as { mode: string; results: Array<{ days: unknown[] }> };
     expect(res.mode).toBe("days");
     expect(Array.isArray(res.results[0]?.days)).toBe(true);
+  });
+
+  // summary は「未説明の多い順」に並べるので、こちら側が丸ごと 0 分だと**一覧の
+  // 先頭が総入れ替わる**。日別モードだけに注記を出すと、この画面で嘘になる (#960)
+  it("★ summary モードにも ours_unreadable と note が載る", async () => {
+    stubIchiban({ cur: { month: "2026-04", results: [] } });
+    const res = (await getTimecardDiffTool.execute(summaryModeEnv(), {
+      month: "2026-04",
+      mode: "summary",
+    })) as unknown as { ours_unreadable: boolean, note: string };
+    expect(res.ours_unreadable).toBe(true);
+    expect(res.note).toContain("ours_unreadable: true");
+  });
+
+  it("陰性対照: summary モードの正常系は ours_unreadable が false で note も空", async () => {
+    stubIchiban({ cur: KOSOKU_WITH_OURS_ONLY });
+    const res = (await getTimecardDiffTool.execute(summaryModeEnv(), {
+      month: "2026-04",
+      mode: "summary",
+    })) as unknown as { ours_unreadable: boolean, note: string, results: unknown[] };
+    expect(res.ours_unreadable).toBe(false);
+    expect(res.note).toBe("");
+    expect(res.results).toHaveLength(2);
   });
 });
 

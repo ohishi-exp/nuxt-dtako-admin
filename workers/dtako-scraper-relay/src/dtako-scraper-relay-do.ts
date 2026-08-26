@@ -273,6 +273,7 @@ import {
   parsePaperDriftByDriver,
   parsePaperOutsideByDriver,
   prevYmOf,
+  type KosokuParseResult,
   type KosokuShift,
 } from "./kosoku-daily";
 import {
@@ -4672,7 +4673,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // **前月も取る** — 前月に始業して当月へ跨いだ勤務は、上流が始業日 (= 前月) の
     // 応答にしか入れないため。`kosokuPartsByDate` が当月に落ちる分だけ拾う。
     // 取れなければ null のまま = 従来どおり打刻から組む (取り込みを止めない)。
-    const kosokuShifts = await this.loadKosokuShifts(apiUrl, clientId, clientSecret, [ym, prevYmOf(ym)]);
+    const { shifts: kosokuShifts, unreadable: kosokuUnreadable } = await this.loadKosokuShifts(
+      apiUrl,
+      clientId,
+      clientSecret,
+      [ym, prevYmOf(ym)],
+    );
 
     // 2) 所定労働時間・休日出勤の承認・社員のスコープ・夜勤者を D1 から引く
     const { schedules, approved, scopes, nightShift } = await this.loadKintaiInputs(record.compId, ym);
@@ -4707,6 +4713,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       warnings.push(
         "打刻基準の日別サマリ (kosoku-daily) が取れなかったため、時間は打刻から組んでいます"
         + " — 長距離のように運行単位でしか打刻しない乗務員は残業が過大に出ます。取り込み直してください",
+      );
+    }
+    // ★ 「取れなかった」と**別の文言にする** (Refs #960)。応答自体は 200 で返って
+    // きているので取り込み直しても直らない — 上流の応答の形が変わった (`drivers`
+    // 配列でも `days` 配列でもない) のが原因で、直すのは上流側。同じ文言にすると
+    // 「もう一度取り込む」という効かない処方へ読み手を送ることになる。
+    else if (kosokuUnreadable) {
+      warnings.push(
+        "打刻基準の日別サマリ (kosoku-daily) の応答の形が読めなかったため、時間は打刻から組んでいます"
+        + " — 長距離のように運行単位でしか打刻しない乗務員は残業が過大に出ます。"
+        + "取り込み直しでは直りません (上流の応答の形が変わっています)",
       );
     }
 
@@ -5991,6 +6008,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       ]);
       const {
         shifts,
+        oursUnreadable,
         paperDriftByDriver,
         paperOutsideByDriver,
         oursOutsideByDriver,
@@ -6050,14 +6068,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           driver,
           results: results.length,
           // 上流が落ちても突合自体は返す (片側 null で nginx-only / ours-only に出る)
-          ours: shifts ? "yes" : "no",
+          // 「取れなかった (no)」と「形が読めなかった (unreadable)」は調べる先が違う
+          ours: shifts === null ? "no" : oursUnreadable ? "unreadable" : "yes",
         }),
       );
       return Response.json({
         month: ym,
         driver,
         onlyAnomalies: driver ? false : onlyAnomalies,
-        oursAvailable: shifts !== null,
+        // ★ 空 Map は「こちら側 0 分」ではない (Refs #960)。形が読めなかった応答でも
+        // shifts は null にならないので、`!== null` だけだと画面の
+        // 「こちら側の拘束が取れていません」が出ず、紙の値がまるごと差になったまま
+        // 「差は本物」として読まれる。front は 1 行も変えずにここだけで塞ぐ
+        oursAvailable: shifts !== null && !oursUnreadable,
         results,
       });
     } catch (err) {
@@ -6784,8 +6807,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           ),
     ]);
     // 当月の勤務 = 前月から跨いだ分 + 当月分 (`kosokuPartsByDate` が当月に落ちる分だけ拾う)
-    const kosokuCurrent = mergeKosokuShiftMaps(shiftsPrev, shiftsCurrent);
-    const kosokuPrev = shiftsPrev;
+    const kosokuCurrent = mergeKosokuShiftMaps(shiftsPrev?.shifts ?? null, shiftsCurrent?.shifts ?? null);
+    const kosokuPrev = shiftsPrev?.shifts ?? null;
     // 当月の `/api/kintai/daily` が取れないと賃金の素材が無い。R2 へは落とさず null
     // (呼び出し側で timecard 行が空になる、#606-5) — 握り潰さずここで理由を残す
     if (!dailyCurrent) {
@@ -6839,6 +6862,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         ym,
         drivers: current.summaries.length,
         kosoku: kosokuCurrent ? "yes" : "no",
+        // 「取れなかった」と「形が読めなかった」を log でも分ける (Refs #960) —
+        // 後者は取り込み直しでは直らないので、調べる先が変わる
+        kosoku_unreadable: shiftsCurrent?.unreadable === true,
       }),
     );
     return { current, prev };
@@ -6847,9 +6873,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   /**
    * `kosoku-daily` を当月 + 前月ぶん取って乗務員CD 引きにまとめる (2026-07-28)。
    *
-   * **取れなければ null** — 取り込み自体は止めず、呼び出し側が従来どおり打刻から
-   * 組んだ上で warning を出す。片方だけ取れた場合は取れた方だけを使う (前月が
+   * **取れなければ `shifts: null`** — 取り込み自体は止めず、呼び出し側が従来どおり
+   * 打刻から組んだ上で warning を出す。片方だけ取れた場合は取れた方だけを使う (前月が
    * 落ちても当月の勤務は正しく、月初に跨いだ勤務が欠けるだけで済む)。
+   *
+   * **`unreadable` は「取れなかった」とは別** (Refs #960)。上流の応答が `drivers` 配列
+   * でも `days` 配列でもない形だと `parseKosokuDaily` は空 Map を返すので、`shifts` は
+   * null にならず呼び出し側は「取れた」と読む。結果、時間が全員ぶん静かに打刻由来へ
+   * 落ちる。**取り込み直しでは直らない**ので警告も別文言にする — 判定は
+   * **当月 (`months[0]`) だけ**を見る。前月は元々「取れなくても当月は正しい」扱いで、
+   * 読めなくても失うのは月初に跨いだ勤務だけだから。
    *
    * timer/phase はフェーズ計測用 (Refs #543 PR-1、任意) — 応答サイズを phase に載せる。
    */
@@ -6862,8 +6895,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     phase?: string,
     versionPhase?: string,
     tracker?: CacheStateTracker,
-  ): Promise<Map<string, KosokuShift[]> | null> {
-    const fetchMonth = async (ym: string): Promise<Map<string, KosokuShift[]> | null> => {
+  ): Promise<{ shifts: Map<string, KosokuShift[]> | null; unreadable: boolean }> {
+    const fetchMonth = async (ym: string): Promise<KosokuParseResult<KosokuShift[]> | null> => {
       // 賃金計算 (wage-report) の経路 — 画面の `/kintai/kosoku-daily` 中継と
       // 同じ生応答 memo を共有する (Refs #508)。view=timecard の slim 応答でも
       // parseKosokuDaily は欠けた数値を 0 に落とすので同じ形に畳める
@@ -6872,15 +6905,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     };
     const results = await Promise.all(months.map(fetchMonth));
     // 当月 (先頭) が取れていないと時間が丸ごと出ないので、その時は諦める
-    if (!results[0]) return null;
+    if (!results[0]) return { shifts: null, unreadable: false };
     const merged = new Map<string, KosokuShift[]>();
     for (const result of results) {
       if (!result) continue;
-      for (const [driverCd, shifts] of result) {
+      for (const [driverCd, shifts] of result.map) {
         merged.set(driverCd, [...(merged.get(driverCd) ?? []), ...shifts]);
       }
     }
-    return merged;
+    return { shifts: merged, unreadable: results[0].unreadable };
   }
 
   /**
@@ -6895,6 +6928,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * **紙の再現値との差 (`paper_drift_by_date`) は当月の応答からだけ**読む — 紙も
    * この再現も月単位で閉じている (Refs ohishi-exp/rust-ichibanboshi#179)。
    * 取れなければ shifts は null (呼び出し側が ours 欠けとして突合を続ける)。
+   *
+   * **`oursUnreadable` は「取れなかった」とは別** (Refs #960)。当月の応答が `drivers`
+   * 配列でも `days` 配列でもない形だと、shifts も日別マップ 6 本も**空だが null では
+   * ない**ので、突合は「こちら側 0 分」を全乗務員・全日に置いて紙の値をまるごと差に
+   * し、cause の実額も全部 0 になって差が「未説明」に化ける。判定は**当月だけ**を
+   * 見る — 前月は元々「取れなくてもよい」補助で、日別マップも当月からしか読まない。
    */
   private async loadCompareKosoku(
     apiUrl: string,
@@ -6903,6 +6942,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     ym: string,
   ): Promise<{
     shifts: Map<string, KosokuShift[]> | null;
+    /** 当月の応答がどちらの形にも当てはまらなかった (Refs #960)。 */
+    oursUnreadable: boolean;
     paperDriftByDriver: Map<string, Map<string, number>>;
     paperOutsideByDriver: Map<string, Map<string, number>>;
     oursOutsideByDriver: Map<string, Map<string, number>>;
@@ -6932,31 +6973,33 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     };
     const [curBody, prevBody] = await Promise.all([fetchMonth(ym), fetchMonth(prevYmOf(ym))]);
     const paperDriftByDriver =
-      curBody == null ? new Map<string, Map<string, number>>() : parsePaperDriftByDriver(curBody);
+      curBody == null ? new Map<string, Map<string, number>>() : parsePaperDriftByDriver(curBody).map;
     // 紙だけが数える勤務外の分も当月応答からだけ読む (Refs #546 / rust#182)
     const paperOutsideByDriver =
       curBody == null
         ? new Map<string, Map<string, number>>()
-        : parsePaperOutsideByDriver(curBody);
+        : parsePaperOutsideByDriver(curBody).map;
     const oursOutsideByDriver =
       curBody == null
         ? new Map<string, Map<string, number>>()
-        : parseOursOutsideByDriver(curBody);
+        : parseOursOutsideByDriver(curBody).map;
     // 紙が引く 運行開始 → 始業 も当月応答からだけ読む (cause "minus-unko" の実額)
     const minusUnkoByDriver =
-      curBody == null ? new Map<string, Map<string, number>>() : parseMinusUnkoByDriver(curBody);
+      curBody == null ? new Map<string, Map<string, number>>() : parseMinusUnkoByDriver(curBody).map;
     // 深夜を跨ぐ継ぎ目の暦日配分の差も当月応答からだけ読む (cause "gap-midnight" の実額)
     const gapMidnightByDriver =
       curBody == null
         ? new Map<string, Map<string, number>>()
-        : parseGapMidnightByDriver(curBody);
+        : parseGapMidnightByDriver(curBody).map;
     // フェリー控除の日別マップも当月応答からだけ読む (rust#181 — 勤務に貼れない日がある)
     const ferryMinusByDriver =
-      curBody == null ? new Map<string, Map<string, number>>() : parseFerryMinusByDriver(curBody);
+      curBody == null ? new Map<string, Map<string, number>>() : parseFerryMinusByDriver(curBody).map;
     // 当月が取れていないと時間が丸ごと出ないので、その時は諦める
     if (curBody == null) {
       return {
         shifts: null,
+        // 取れなかっただけ。形が読めなかったわけではないので false (Refs #960)
+        oursUnreadable: false,
         paperDriftByDriver,
         paperOutsideByDriver,
         oursOutsideByDriver,
@@ -6966,14 +7009,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       };
     }
     const merged = new Map<string, KosokuShift[]>();
-    for (const body of [curBody, prevBody]) {
-      if (body == null) continue;
-      for (const [driverCd, shifts] of parseKosokuDaily(body)) {
+    // 当月の「形が読めたか」だけを呼び出し側へ運ぶ (Refs #960)
+    const curParsed = parseKosokuDaily(curBody);
+    for (const parsed of [curParsed, prevBody == null ? null : parseKosokuDaily(prevBody)]) {
+      if (parsed == null) continue;
+      for (const [driverCd, shifts] of parsed.map) {
         merged.set(driverCd, [...(merged.get(driverCd) ?? []), ...shifts]);
       }
     }
     return {
       shifts: merged,
+      oursUnreadable: curParsed.unreadable,
       paperDriftByDriver,
       paperOutsideByDriver,
       oursOutsideByDriver,
