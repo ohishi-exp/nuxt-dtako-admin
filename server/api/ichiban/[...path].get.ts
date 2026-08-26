@@ -19,7 +19,7 @@
  */
 import type { H3Event } from 'h3'
 import { defineEventHandler, getRequestURL, getRouterParam, createError, setResponseStatus, setHeader } from 'h3'
-import { fetchIchiban, cfEnv, type IchibanUpstreamError } from '../../utils/ichiban-upstream'
+import { fetchIchiban, cfEnv, ichibanEmptyErrorReason, type IchibanUpstreamError } from '../../utils/ichiban-upstream'
 
 export default defineEventHandler(async (event: H3Event) => {
   const env = cfEnv(event)
@@ -36,7 +36,20 @@ export default defineEventHandler(async (event: H3Event) => {
   }
 
   setResponseStatus(event, upstreamRes.status)
+  const body = await upstreamRes.text()
+
+  // **本文が空のエラーにだけ、日本語の理由を作って返す** (Refs #900)。
+  // 一番星はエラー側が素の `StatusCode` なので本文を 1 バイトも返さず、そのまま
+  // 素通しすると画面には ofetch が組んだ `[GET] "…": 503` しか出ない
+  // (= 「一番星が落ちた」が画面から消える)。**本文がある応答は今までどおり無改変で
+  // 素通しする** — 意味づけをしないのがこの proxy の契約で、上流が理由を持っている
+  // ならそれが正しい。status も変えない (400/500/503 の意味は上流のもの)。
+  if (upstreamRes.status >= 400 && body.trim() === '') {
+    setHeader(event, 'Content-Type', 'application/json')
+    return JSON.stringify({ error: ichibanEmptyErrorReason(upstreamRes.status, pathParam) })
+  }
+
   const contentType = upstreamRes.headers.get('content-type')
   if (contentType) setHeader(event, 'Content-Type', contentType)
-  return upstreamRes.text()
+  return body
 })

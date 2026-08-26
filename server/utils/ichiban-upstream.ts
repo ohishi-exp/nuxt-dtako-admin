@@ -87,3 +87,34 @@ export async function fetchIchiban(env: Record<string, unknown>, path: string, s
 export function cfEnv(event: { context: unknown }): Record<string, unknown> {
   return (event.context as { cloudflare?: { env?: Record<string, unknown> } }).cloudflare?.env ?? {}
 }
+
+/**
+ * **本文が 1 バイトも無い非 2xx** に、こちら側で日本語の理由を作る (Refs #900)。
+ *
+ * 一番星 (`rust-ichibanboshi`) はエラー側の型が素の `StatusCode` なので、axum が
+ * **本文を付けない** (`d5f4128` の `src/routes/vehicle_daily.rs:43,249` /
+ * `src/routes/costs_daily.rs:221`。`src/routes/kintai.rs:459` だけは
+ * `(StatusCode, String)` なので本文がある)。空のまま素通しすると、画面に出るのは
+ * ofetch が自分で組んだ `[GET] "…": 503` だけになり、**「一番星が落ちた」という
+ * いちばん知りたいことが 1 文字も出ない** (本番 = reason phrase が空、では
+ * `describeApiError` の前置とあわせて status が 2 回出るだけになる)。
+ *
+ * ★ **status を文言に入れない。** 画面側の `describeApiError` が
+ * `${statusCode} ${本文の理由}` で組むので、ここで status を書くと二重になる。
+ *
+ * **理由の中身までは書けない** — 「なぜ落ちたか」は一番星しか知らず、それを画面に
+ * 出すには上流がエラー本文を返すようになるしかない (issue #900 の案 1)。
+ */
+export function ichibanEmptyErrorReason(status: number, path: string): string {
+  const where = `/${path}`
+  const head
+    = status === 503
+      ? `一番星 API が応答しませんでした (${where}) — 停止か DB 接続プール枯渇の可能性`
+      : status >= 500
+        ? `一番星 API が内部エラーで失敗しました (${where})`
+        : `一番星 API がリクエストを拒否しました (${where}) — パラメータ不正の可能性`
+  // ★ **「一番星 API が」を省かない。** `/profit/compare` と `ProfitPanel` は
+  // この 1 文を**そのまま**出す (「売上 (一番星) が引けませんでした —」のような
+  // 前置きが無い) ので、単体で誰が落ちたか読めないと画面で意味を失う。
+  return `${head} (一番星が理由を返していません)`
+}
