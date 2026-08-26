@@ -31,7 +31,7 @@
  * | 金額 | 経路 | 認可 |
  * | --- | --- | --- |
  * | 給与大臣の**実支給額** (支給項目) | `/api/kyuyo/payroll` | **email allowlist** (上流) |
- * | **単価マスタ × 拘束時間 の計算賃金** — 月次集計 CSV の `単価`/`…(円)`/`合計(円)`/`換算時給`、最低賃金チェック、タイムカードの残業額 | `/restraint-api/wage-report`・`/restraint-api/wage-master` (計算は `restraint-wage.ts`) | **tenant** (この関数) |
+ * | **単価マスタ × 拘束時間 の計算賃金** — 月次集計 CSV の `単価`/`…(円)`/`合計(円)`/`総支給時給(割増込)`、最低賃金チェック、タイムカードの残業額 | `/restraint-api/wage-report`・`/restraint-api/wage-master` (計算は `restraint-wage.ts`) | **tenant** (この関数) |
  * | **確定値スナップショット** (期間集計タブの `paid` / 差) | `/restraint-api/wage-snapshot`・`/restraint-api/wage-range` | **tenant** (この関数) |
  *
  * email allowlist の実体は**上流にしか無い** — rust-ichibanboshi の

@@ -98,7 +98,7 @@ export interface WageConfig {
   nonLegalHolidayWeekdays: number[];
   /** 週40h の起算曜日 (0=日曜 — 決定事項)。 */
   weekStartsOn: number;
-  /** 換算時給の分母。 */
+  /** `hourlyEquivalent` (画面 / CSV の「総支給時給」) の分母。 */
   hourlyBasis: "working" | "restraint";
 }
 
@@ -712,10 +712,16 @@ export interface WageRow {
   minutes: WageCategoryMinutes;
   amounts: WageCategoryAmounts | null;
   totalAmount: number | null;
-  /** 換算時給 (円/h、支給見込 ÷ hourlyBasis の時間)。分母 0 や単価なしは null。 */
+  /** 支給見込 ÷ hourlyBasis の時間 (円/h)。分母 0 や単価なしは null。
+   * **`totalAmount` は割増 (時間外・深夜・休日) を全部含んだ合計**なので、
+   * **この値は法的な最低賃金判定ではない** — 最低賃金法4条3項では割増を除いて比較する。
+   * 画面 / CSV では **「総支給時給」** と表示する (Refs #938)。 */
   hourlyEquivalent: number | null;
   minWage: MinWageLookup;
-  /** 換算時給 − 最低賃金 (どちらか欠けたら null。負 = 最低賃金割れ)。 */
+  /** `hourlyEquivalent` − 最低賃金 (どちらか欠けたら null)。
+   * **分子が割増込みなので「最低賃金割れ」の法的判定ではなく参考値** — 法的な判定は
+   * 「基礎単価 ≥ 最低賃金」で見る。画面 / CSV では **「総支給時給−最低賃金」** と
+   * 表示する (Refs #938)。 */
   minWageDiff: number | null;
   /** 最低賃金 × hourlyBasis の時間 (支給見込みの最低賃金換算値)。分母 0 や最低賃金なしは null。 */
   minWageTotalPay: number | null;

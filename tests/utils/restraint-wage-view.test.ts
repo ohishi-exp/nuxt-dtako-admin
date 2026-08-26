@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from 'vitest'
 import type { MinWageRowAttrs } from '../../app/utils/restraint-wage-view'
-import { EMPTY_WAGE_REPORT_NOTICE, emptyWageReportCause, fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, groupMinWageRows, isMonthlyOvertimeOver60h, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, MONTHLY_OVERTIME_THRESHOLD_MINUTES, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
+import { EMPTY_WAGE_REPORT_NOTICE, emptyWageReportCause, fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, GROSS_HOURLY_CAVEAT, groupMinWageRows, isMonthlyOvertimeOver60h, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, MONTHLY_CSV_WAGE_TAIL_HEADERS, MONTHLY_OVERTIME_THRESHOLD_MINUTES, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
 
 describe('fmtMinutes', () => {
   it('時間+分を "XhYYm" 表記にする', () => {
@@ -472,7 +472,8 @@ describe('emptyWageReportCause', () => {
 /**
  * `fmtYen` が **`-0` を出さない** (Refs #843 / #928)。
  *
- * この `fmtYen` は最低賃金差 (`row.wage.minWageDiff`) にも使う。換算時給 − 最低賃金 なので
+ * この `fmtYen` は月次集計表の「総支給時給−最低賃金」列 (`row.wage.minWageDiff`) にも使う。
+ * 総支給時給 − 最低賃金 なので
  * **負になり**、`toLocaleString` の既定 (`maximumFractionDigits: 3`) は `-0` も
  * `-0.0005 < v < 0` の端数つきの負も **`"-0"`** にする。呼び出し側
  * (`RestraintWageMonthlyTable.vue`) は `v >= 0 ? '+' : ''` を前に付けるので、
@@ -540,5 +541,55 @@ describe('isMonthlyOvertimeOver60h (月60時間超の時間外労働、Refs #670
 
   it('時間外深夜だけで 60 時間を超えた行も true', () => {
     expect(isMonthlyOvertimeOver60h({ overtimeMinutes: 0, nightOvertimeMinutes: 4000 })).toBe(true)
+  })
+})
+
+/**
+ * 月次集計 (表 + CSV) の末尾 3 列の**列名** (Refs #938)。
+ *
+ * `hourlyEquivalent` は **`totalAmount` (割増を全部含んだ合計) ÷ 基礎時間**なので、
+ * `換算時給` / `最低賃金差` という旧名だと**最低賃金法4条3項の判定として読めてしまう**。
+ * しかも同じ `report` を出す「最低賃金チェック」タブには
+ * 「この表は最低賃金との差分を出しません」という注記 (#937) が出ているので、
+ * **同じ画面から正面から矛盾した 2 つの出力**が出ていた。値は 1 円も変えず名前だけ直す。
+ *
+ * ここは**合成後の 1 文 / 配列そのもの**で判定する — ヘルパを 1 本ずつ見て
+ * 「書いてある」と判断しない ([[ui-text-judge-composed-string]] の型)。
+ */
+describe('月次集計の列名は割増込みだと分かる名前になっている (Refs #938)', () => {
+  it('CSV の末尾 3 列は 総支給時給 / 最低賃金 / 総支給時給−最低賃金 の 3 要素', () => {
+    // `−` は U+2212 (ハイフンではない)。ここで直接書いて固定する。
+    expect([...MONTHLY_CSV_WAGE_TAIL_HEADERS]).toEqual([
+      '総支給時給(割増込)',
+      '最低賃金',
+      '総支給時給\u2212最低賃金(法的判定ではない)',
+    ])
+  })
+
+  it('★ 旧名 `換算時給` / `最低賃金差` は完全一致で 1 つも残っていない', () => {
+    // **完全一致で見る** — `総支給時給(割増込)` は「換算時給」を含まないので
+    // `includes` では旧名の復活を止められない (新名に旧名が部分一致しない以上、
+    // 止めたいのは「列名がまるごと旧名に戻る」退行そのもの)。
+    for (const old of ['換算時給', '最低賃金差']) {
+      expect(MONTHLY_CSV_WAGE_TAIL_HEADERS.some(h => h === old)).toBe(false)
+    }
+    // 陽性対照: 同じ書き方で、実際に在る列名は拾える (テストが常に true を返していない)
+    expect(MONTHLY_CSV_WAGE_TAIL_HEADERS.some(h => h === '最低賃金')).toBe(true)
+  })
+
+  it('根拠の 1 文は「法的な最低賃金判定には使えません」まで言い切る', () => {
+    // 合成後の 1 文で見る。「割増込み」だけ書いて**結論 (使えない) を書かない**と、
+    // 読み手は「参考にはなるのだろう」と受け取って元の誤読に戻る。
+    expect(GROSS_HOURLY_CAVEAT).toContain('法的な最低賃金判定には使えません')
+    expect(GROSS_HOURLY_CAVEAT).toContain('割増 (時間外・深夜・休日) を全部含んだ総支給額')
+    expect(GROSS_HOURLY_CAVEAT).toContain('最低賃金法4条3項')
+  })
+
+  it('★ 表の見出しに付ける `title` (合成後) も同じ 1 文を含む', () => {
+    // `RestraintWageMonthlyTable.vue` の 2 列目は `GROSS_HOURLY_CAVEAT + ' 参考値です。'`
+    // を出す。**合成後の文字列で**、根拠と「参考値」の両方が出ることを見る。
+    const composed = GROSS_HOURLY_CAVEAT + ' 参考値です。'
+    expect(composed).toContain('法的な最低賃金判定には使えません')
+    expect(composed).toContain('参考値です。')
   })
 })

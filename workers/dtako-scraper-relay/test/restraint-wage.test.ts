@@ -727,7 +727,7 @@ describe('computeWageRow', () => {
     days: [day(1, { workingMinutes: 600, overtimeMinutes: 120 })],
   })
 
-  it('単価あり: 区分金額・合計・換算時給 (実働基準)・最低賃金差', () => {
+  it('単価あり: 区分金額・合計・総支給時給 (実働基準)・最低賃金との差', () => {
     const row = computeWageRow(baseSummary, 2025, 4, wageMaster, MIN_WAGE, DEFAULT_WAGE_CONFIG)
     expect(row.hourlyRate).toBe(1200)
     expect(row.amounts!.statutory).toBe(Math.round((480 / 60) * 1200))
@@ -748,7 +748,7 @@ describe('computeWageRow', () => {
     expect(row.minutes.statutory).toBe(480)
   })
 
-  it('換算時給: 分母 (実働) が無い/0 なら null。restraint 基準にも切替可', () => {
+  it('総支給時給: 分母 (実働) が無い/0 なら null。restraint 基準にも切替可', () => {
     const noWorking = computeWageRow(
       summary({ workingMinutes: null, days: [day(1, { workingMinutes: 600 })] }),
       2025, 4, wageMaster, MIN_WAGE, DEFAULT_WAGE_CONFIG,
@@ -763,7 +763,7 @@ describe('computeWageRow', () => {
     expect(restraintBasis.hourlyEquivalent).toBe(Math.round(restraintBasis.totalAmount! / 50))
   })
 
-  it('実働 0 分 (null でなく 0) は換算時給・最低賃金換算とも null', () => {
+  it('実働 0 分 (null でなく 0) は総支給時給・最低賃金換算とも null', () => {
     const row = computeWageRow(
       summary({ workingMinutes: 0, days: [day(1, { workingMinutes: 600 })] }),
       2025, 4, wageMaster, MIN_WAGE, DEFAULT_WAGE_CONFIG,

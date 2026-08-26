@@ -41,6 +41,7 @@ import {
   MIN_WAGE_DEFAULT_KEY,
   MIN_WAGE_JOB_GROUP_LABEL,
   minWageCompareRow,
+  MONTHLY_CSV_WAGE_TAIL_HEADERS,
   theearthSyncState,
 } from '~/utils/restraint-wage-view'
 import { buildTimecardSummary, buildTimecardTable, countWorkKinds, employedDaysInMonth } from '~/utils/timecard-view'
@@ -2277,7 +2278,9 @@ function downloadMonthlyCsv() {
     '運転', '荷役', '休憩', '拘束合計', '年度累計(前月まで)', '当月超過', '15時間超過日数', '平均運転9h超過回数',
     // 時間区分は画面 (月次集計・最低賃金チェック) と同じ classifyMonth の結果を出す
     '実働', '時間外', '週40超過', '深夜', '時間外深夜', '法定休日', '法定休日深夜', '法定外休日', '法定外休日深夜', '単価',
-    ...WAGE_COLUMNS.map(c => `${c.label}(円)`), '合計(円)', '換算時給', '最低賃金', '最低賃金差',
+    // 末尾 3 列の列名は画面の月次集計表と共有する (Refs #938) — 片方だけ直せる状態にすると
+    // 「同じ値が画面では旧名・CSV では新名」の食い違いが戻る。値を出す式は下の行のまま。
+    ...WAGE_COLUMNS.map(c => `${c.label}(円)`), '合計(円)', ...MONTHLY_CSV_WAGE_TAIL_HEADERS,
   ]
   const lines = [header.join(',')]
   for (const row of report.value.rows) {
