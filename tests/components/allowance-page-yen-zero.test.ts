@@ -79,8 +79,10 @@ describe('運行手当タブの金額に `¥-0` を出さない (Refs #843)', ()
    *
    * この画面は元から丸めていない (`v.toLocaleString()`)。`Math.round` を足して直すと
    * `¥1,234.5` → `¥1,235` と**表示が変わってしまう**。そして**この画面には小数が
-   * 実際に入り得る** — 手当表PDF の CSV (`parsePdfAllowanceCsv`) は `Number(rawYen)` と
-   * `Number.isFinite` しか見ておらず、整数チェックが無いため。
+   * 実際に入り得る** — CSV (`parsePdfAllowanceCsv`) は `Number.isInteger` を強制する
+   * ようになった (Refs #927) が、**保存済み PDF を読む `parsePdfTripFile` は金額を
+   * 検査していない**ため。**このテスト自身がその経路**で、`PDF_TRIPS_KEY` に書いた
+   * 小数をそのまま読ませている。
    *
    * **小数がそのまま出ることを固定する。** これが崩れたら「黙って丸め方を変えた」。
    */
