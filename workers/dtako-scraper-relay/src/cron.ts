@@ -19,6 +19,10 @@
  */
 
 import { parseNetprintTargets, type NetprintTarget } from "./netprint-cron";
+// 「どの会社が勤怠 (打刻) の対象か」の判定。拘束サマリ同期 cron が fold と同じ
+// 宣言 (`KINTAI_COMP_ID`) を参照するために再利用する (Refs #981)。この module は
+// import を 1 本も持たない pure なので、cron.ts の「pure に保つ」制約を壊さない。
+import { judgeFoldScope } from "./kintai-relay";
 
 /** dtako 日次スクレイプの cron 式 (UTC)。VPS cron `0 1 * * *` JST と同時刻。 */
 export const DTAKO_CRON = "0 16 * * *";
@@ -397,9 +401,21 @@ export async function runScheduledCron(
   if (cron === RESTRAINT_SYNC_CRON) {
     // 拘束サマリの写しを更新できる経路は画面の「取り込み」ボタン
     // (`POST /restraint-api/kintai/fetch`) だけで、無人で押し直す経路が無かった
-    // ため写しが化石化していた (実測 2026-08-03、Refs #606-6)。account は dtako
-    // スクレイプと同じ theearth 会社単位 (comp_id) の一覧を使う — 拘束サマリも
-    // 会社ごとの theearth データなので、対象は dtako と同じ母集団でよい。
+    // ため写しが化石化していた (実測 2026-08-03、Refs #606-6)。
+    //
+    // ★ ここが押しているのは **打刻 (timecard) 由来のサマリ**であって theearth の
+    // データではない (DO 側 `handleCronRestraintSync` は synthetic record を組んで
+    // `handleKintaiFetch` を呼ぶだけ)。そして上流 (`/api/kintai/daily` 等) は comp を
+    // 受け取らないので、**どの comp で走らせても同じ応答**が返る。旧実装は
+    // 「拘束サマリも会社ごとの theearth データだから dtako と同じ母集団でよい」と
+    // いう**偽の前提**で DTAKO_ACCOUNTS の全社を回しており、打刻を 1 件も持たない
+    // 会社の R2 `kintai/{compId}/…` にまで中身が完全に同じ写しを書いていた
+    // (Refs #981。読み手は在り、月タブの「タイムカード取り込み済み」バッジ・同期状態
+    // 表示・温め対象・版履歴に出ていた)。**dtako スクレイプとは母集団が違う。**
+    //
+    // ⇒ 対象は fold と同じ `judgeFoldScope` に訊く。「どの会社が勤怠の対象か」は
+    // `wrangler.toml` の `KINTAI_COMP_ID` が既に宣言しているので、**値をコピーせず
+    // 宣言を参照する** (`kintai-relay.ts` の doc、Refs #944)。
     const accounts = parseDtakoAccounts(env.dtakoAccountsRaw);
     if (accounts.length === 0) {
       return [{ kind: "restraint", target: "*", ok: true, detail: "DTAKO_ACCOUNTS 未設定のため skip" }];
@@ -408,8 +424,27 @@ export async function runScheduledCron(
     // 当月だけだと締め後に化石化する (Refs #606-6)。
     const curYm = currentYmJst(now);
     const months = [curYm, prevYm(curYm)];
-    const jobs = accounts.flatMap((account) => months.map((month) => ({ account, month })));
-    return Promise.all(
+    const jobs: Array<{ account: DtakoAccountEntry; month: string }> = [];
+    // 対象外の会社は**黙って落とさず数える** — 理由 (`detail`) をそのまま載せた
+    // CronRunResult を返す。`not_configured` (設定の穴) だけ ok=false にするのは
+    // #944 の要点で、同じ関数の NETPRINT_CRON 分岐が同じ条件を既に loud fail に
+    // している。両方を「正常な skip」に畳むと、本番で KINTAI_COMP_ID を落とした時に
+    // 対象会社まで「意図的に対象外」に見えたまま写しが化石化する。
+    const skipped: CronRunResult[] = [];
+    for (const account of accounts) {
+      const verdict = judgeFoldScope({ compId: account.comp_id, kintaiCompId: env.kintaiCompId });
+      if (verdict.inScope) {
+        for (const month of months) jobs.push({ account, month });
+        continue;
+      }
+      skipped.push({
+        kind: "restraint",
+        target: account.comp_id,
+        ok: verdict.reason === "out_of_scope",
+        detail: verdict.detail,
+      });
+    }
+    const dispatched = await Promise.all(
       jobs.map(async ({ account, month }): Promise<CronRunResult> => {
         try {
           const res = await callDo(`scraper-comp-${account.comp_id}`, "/cron/restraint-sync", {
@@ -432,6 +467,7 @@ export async function runScheduledCron(
         }
       }),
     );
+    return [...skipped, ...dispatched];
   }
 
   if (cron === NETPRINT_CRON) {

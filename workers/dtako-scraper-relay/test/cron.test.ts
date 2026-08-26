@@ -216,54 +216,85 @@ describe('runScheduledCron: restraint', () => {
     expect(results[0].detail).toContain('DTAKO_ACCOUNTS 未設定')
   })
 
-  it('各社の comp_id 単位 DO に前月+当月の /cron/restraint-sync を投げる', async () => {
+  // ★ 陰性対照 (Refs #981)。旧実装は DTAKO_ACCOUNTS の全社を回しており、この
+  // it は callDo が 4 回・両社ぶん呼ばれて落ちる。**結果配列の件数だけ見ると
+  // 素通りする** (対象外も skip 行として数えるため件数は 3 と 4 でしか違わない)
+  // ので、`calls` の中身そのものを固定する。
+  it('KINTAI_COMP_ID と一致しない comp は /cron/restraint-sync へ dispatch しない', async () => {
     const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
     const results = await runScheduledCron(
       RESTRAINT_SYNC_CRON,
-      { dtakoAccountsRaw: DTAKO_ACCOUNTS_JSON },
+      { dtakoAccountsRaw: DTAKO_ACCOUNTS_JSON, kintaiCompId: '27324455' },
       okDoCall(calls),
       now,
     )
-    // 2 社 × (当月 + 前月) = 4 件
-    expect(results).toHaveLength(4)
-    expect(results.every((r) => r.kind === 'restraint' && r.ok)).toBe(true)
-    expect(calls).toEqual(
-      expect.arrayContaining([
-        { doKey: 'scraper-comp-27324455', path: '/cron/restraint-sync', body: { comp_id: '27324455', month: '2026-08' } },
-        { doKey: 'scraper-comp-27324455', path: '/cron/restraint-sync', body: { comp_id: '27324455', month: '2026-07' } },
-        { doKey: 'scraper-comp-99999999', path: '/cron/restraint-sync', body: { comp_id: '99999999', month: '2026-08' } },
-        { doKey: 'scraper-comp-99999999', path: '/cron/restraint-sync', body: { comp_id: '99999999', month: '2026-07' } },
-      ]),
-    )
+    // 打刻を持つ 1 社 × (当月 + 前月) = 2 回だけ。99999999 は 1 回も呼ばれない。
+    expect(calls).toEqual([
+      { doKey: 'scraper-comp-27324455', path: '/cron/restraint-sync', body: { comp_id: '27324455', month: '2026-08' } },
+      { doKey: 'scraper-comp-27324455', path: '/cron/restraint-sync', body: { comp_id: '27324455', month: '2026-07' } },
+    ])
+    expect(calls.map((c) => c.body.comp_id)).not.toContain('99999999')
+    expect(calls.map((c) => c.doKey)).not.toContain('scraper-comp-99999999')
+
+    // 対象外は黙って落とさず数える (out_of_scope = 正常な skip なので ok=true)。
+    expect(results).toHaveLength(3)
+    const skipped = results.filter((r) => !r.target.includes('|'))
+    expect(skipped).toHaveLength(1)
+    expect(skipped[0]).toMatchObject({ kind: 'restraint', target: '99999999', ok: true })
+    expect(skipped[0].detail).toContain('KINTAI_COMP_ID の宣言 (27324455) と一致しません')
+    expect(results.filter((r) => r.target.includes('|')).every((r) => r.ok)).toBe(true)
   })
 
-  it('DO 呼び出しの失敗 (throw) は per-account/月の error result になる', async () => {
-    const failCall: CronDoCall = async (doKey) => {
-      if (doKey.includes('27324455')) throw new Error('do down')
+  // `not_configured` (設定の穴) を `out_of_scope` (正常な skip) と同じ扱いにしない
+  // — 同じにすると本番で KINTAI_COMP_ID が落ちた時に全社が「意図的に対象外」に
+  // 見えたまま写しが化石化する (Refs #944 / #981)。
+  it('KINTAI_COMP_ID 未設定は 1 社も dispatch せず ok=false で数える', async () => {
+    for (const env of [
+      { dtakoAccountsRaw: DTAKO_ACCOUNTS_JSON }, // undefined
+      { dtakoAccountsRaw: DTAKO_ACCOUNTS_JSON, kintaiCompId: ' ' },
+    ]) {
+      const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+      const results = await runScheduledCron(RESTRAINT_SYNC_CRON, env, okDoCall(calls), now)
+      expect(calls).toEqual([])
+      expect(results).toHaveLength(2)
+      expect(results.map((r) => r.target)).toEqual(['27324455', '99999999'])
+      for (const r of results) {
+        expect(r.kind).toBe('restraint')
+        expect(r.ok).toBe(false) // 設定の穴 → index.ts が console.error に落とす
+        expect(r.detail).toContain('KINTAI_COMP_ID が未設定です')
+        expect(r.detail).not.toContain('一致しません') // 2 つの理由を同じ文言に畳まない
+      }
+    }
+  })
+
+  it('DO 呼び出しの失敗 (throw) は per-月の error result になる', async () => {
+    const failCall: CronDoCall = async (_doKey, _path, body) => {
+      if (body.month === '2026-08') throw new Error('do down')
       throw 'string error'
     }
     const results = await runScheduledCron(
       RESTRAINT_SYNC_CRON,
-      { dtakoAccountsRaw: DTAKO_ACCOUNTS_JSON },
+      { dtakoAccountsRaw: DTAKO_ACCOUNTS_JSON, kintaiCompId: '27324455' },
       failCall,
       now,
     )
-    expect(results).toHaveLength(4)
-    for (const r of results) {
-      expect(r.ok).toBe(false)
-      expect(['do down', 'string error']).toContain(r.detail)
-    }
+    const dispatched = results.filter((r) => r.target.includes('|'))
+    expect(dispatched).toHaveLength(2)
+    expect(dispatched.map((r) => r.detail)).toEqual(['do down', 'string error'])
+    expect(dispatched.every((r) => r.ok === false)).toBe(true)
   })
 
   it('DO が non-2xx を返したら ok=false で status を detail に載せる', async () => {
     const call: CronDoCall = async () => ({ ok: false, status: 500, text: 'account not found' })
     const results = await runScheduledCron(
       RESTRAINT_SYNC_CRON,
-      { dtakoAccountsRaw: DTAKO_ACCOUNTS_JSON },
+      { dtakoAccountsRaw: DTAKO_ACCOUNTS_JSON, kintaiCompId: '27324455' },
       call,
       now,
     )
-    expect(results.every((r) => r.ok === false && r.detail.includes('HTTP 500'))).toBe(true)
+    const dispatched = results.filter((r) => r.target.includes('|'))
+    expect(dispatched).toHaveLength(2)
+    expect(dispatched.every((r) => r.ok === false && r.detail.includes('HTTP 500'))).toBe(true)
   })
 })
 

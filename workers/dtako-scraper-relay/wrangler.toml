@@ -89,7 +89,11 @@ service = "nuxt-dtako-admin-scraper-relay-tail"
 # - "0 19 * * *"         = 04:00 JST。拘束サマリの写し (R2 kintai/ prefix) を前月+
 #                          当月ぶん無人で押し直す (Refs #606-6)。dtako 日次の後・ETC の
 #                          前を選んだ (打刻が入った後に畳み直せる)。DTAKO_ACCOUNTS 設定時
-#                          のみ実走。
+#                          のみ実走。**押すのは打刻由来のサマリなので、対象は
+#                          KINTAI_COMP_ID が宣言する 1 社だけ** (dtako 日次と母集団が
+#                          違う。上流が comp を取らず全社に同じ写しを書いていた実害は
+#                          Refs #981)。⇒ staging は KINTAI_COMP_ID を持たないので
+#                          1 社も dispatch せず、設定の穴として ok=false で数える。
 # - "30 21 * * *"        = 06:30 JST。前日分の運転日報を netprint へ登録し予約番号を
 #                          LINE WORKS へ通知する (Refs #874)。dtako 日次で前日分が
 #                          theearth に揃った後・営業所の始業前。NETPRINT_TARGETS
