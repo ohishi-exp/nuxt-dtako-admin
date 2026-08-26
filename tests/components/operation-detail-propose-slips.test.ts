@@ -18,6 +18,15 @@
  * **提案の中身 (どの区間を提案するか) は 1 つも変えていない。**陽性対照の
  * 「両方そろっている運行」が今までどおり `'loading'` に入って提案まで走ることを
  * 同じファイルで測り、退行が無いことを示す。
+ *
+ * ---
+ *
+ * 後半の describe は **#822 ②-1**: `'not-found'` (「一致する伝票が見つかりませんでした」)
+ * に**原因の違う 2 つの状態が相乗り**していた件。伝票が 1 件も無い場合と、
+ * **伝票はあるのに `proposeEventRowRange` が全件 null** の場合が同じ文言だったので、
+ * 後者を踏んだ人は**ちゃんとある伝票を一番星に探しに行く** (探す先はイベント表)。
+ * `'no-event-match'` を別に立て、`'not-found'`(灰)・`'unavailable'`(琥珀)・
+ * `'error'`(赤) の**どれとも文言が混ざらない**ことをここで固定する。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -64,6 +73,18 @@ const EVENTS_CSV: CsvJsonResponse = {
     ev('運行開始', '帯広市', '', '2026/7/1 5:00:00', '2026/7/1 5:00:00'),
     ev('積み', '釧路市', '', '2026/7/1 8:00:00', '2026/7/1 8:30:00'),
     ev('降し', '', '士幌町', '2026/7/1 11:00:00', '2026/7/1 11:30:00'),
+    ev('運行終了', '', '帯広市', '2026/7/1 20:00:00', '2026/7/1 20:00:00'),
+  ],
+}
+
+/** 同じ運行だが**降しイベントが 1 行も無い** (積みっぱなしで終わっている)。
+ * `proposeEventRowRange` は `pairs.length === 0` で null を返すので候補が 0 件になる —
+ * **伝票はあるのに**提案できない、#822 ②-1 の経路 (Refs `event-data-table.ts` の内側ループ)。 */
+const EVENTS_CSV_NO_UNLOAD: CsvJsonResponse = {
+  headers: HEADERS,
+  rows: [
+    ev('運行開始', '帯広市', '', '2026/7/1 5:00:00', '2026/7/1 5:00:00'),
+    ev('積み', '釧路市', '', '2026/7/1 8:00:00', '2026/7/1 8:30:00'),
     ev('運行終了', '', '帯広市', '2026/7/1 20:00:00', '2026/7/1 20:00:00'),
   ],
 }
@@ -226,5 +247,115 @@ describe('提案ボタン: 検索キーが無い運行で黙らない (Refs #822
     expect(w.text()).not.toContain('提案できません')
     expect(w.text()).not.toContain('一致する伝票が見つかりませんでした')
     expect(w.text()).not.toContain('提案に失敗しました')
+  })
+})
+
+/**
+ * #822 ②-1: 「伝票が無い」と「伝票はあるが対応する積み降しがイベント行に無い」を
+ * **同じ文言に丸めない**。原因が違えば**探しに行く場所が違う** (前者は一番星、
+ * 後者はこの運行のイベント表) ので、丸めると読んだ人を間違った場所へ送る。
+ */
+describe('提案ボタン: 伝票が無いのか、伝票はあるが区間が取れないのか (Refs #822 ②-1)', () => {
+  const NOT_FOUND_TEXT = '一致する伝票が見つかりませんでした'
+  const UNAVAILABLE_TEXT = 'この運行は車輌CDが無いため提案できません'
+  const noMatchText = (n: number) => `伝票${n}件に対応する積み降しが無く提案できません`
+
+  const WITH_KEYS = { operation_date: '2026-07-01', reading_date: '2026-07-01' }
+
+  beforeEach(() => {
+    getOperationCsvMock.mockReset().mockResolvedValue(EVENTS_CSV)
+    fetchVehicleDailySlipsMock.mockReset().mockResolvedValue([SLIP])
+    getOperationMock.mockReset().mockResolvedValue([operation({ 車輌CD: '1318' }, WITH_KEYS)])
+    vi.stubGlobal('$fetch', vi.fn().mockRejectedValue({ statusCode: 404 }))
+    localStorage.clear()
+  })
+
+  async function press() {
+    const w = await mountPage()
+    await proposeButton(w)!.trigger('click')
+    await flushPromises()
+    return w
+  }
+
+  // ① 退行なし: 伝票が 1 件も無い経路は**今までどおりの文言**。
+  it('伝票が 0 件: 従来どおり「一致する伝票が見つかりませんでした」', async () => {
+    fetchVehicleDailySlipsMock.mockResolvedValue([])
+    const w = await press()
+
+    expect(w.text()).toContain(NOT_FOUND_TEXT)
+    // 伝票が無いのだから件数を出す新しい文には倒さない。
+    expect(w.text()).not.toContain('に対応する積み降しが無く')
+    expect(w.text()).not.toContain('提案に失敗しました')
+  })
+
+  // ② ★ 本題: 伝票はあるのに降しイベントが無い。
+  it('伝票はあるが降しイベントが無い: 「伝票が見つかりません」ではない別の文が出る', async () => {
+    getOperationCsvMock.mockResolvedValue(EVENTS_CSV_NO_UNLOAD)
+    const w = await press()
+
+    // 伝票は**ちゃんと引けている** (呼んで 1 件返っている)。
+    expect(fetchVehicleDailySlipsMock).toHaveBeenCalledTimes(1)
+    // **件数を数えて画面に言わせる** — 「伝票はある」ことが読める。
+    expect(w.text()).toContain(noMatchText(1))
+    // ★ **一番星を探しに行かせない。**
+    expect(w.text()).not.toContain(NOT_FOUND_TEXT)
+    // 押し直しても変わらないので `'error'` の赤にも相乗りさせない。
+    expect(w.text()).not.toContain('提案に失敗しました')
+    // ① の `'unavailable'` とも混ざらない (材料はそろっている)。
+    expect(w.text()).not.toContain(UNAVAILABLE_TEXT)
+  })
+
+  it('伝票が複数あって全件区間が取れない: 件数がそのまま出る (1 件に丸めない)', async () => {
+    getOperationCsvMock.mockResolvedValue(EVENTS_CSV_NO_UNLOAD)
+    fetchVehicleDailySlipsMock.mockResolvedValue([
+      SLIP,
+      { ...SLIP, originAreaName: '帯広市', destAreaName: '音更町', rowId: 'R2' },
+    ])
+    const w = await press()
+
+    expect(w.text()).toContain(noMatchText(2))
+    expect(w.text()).not.toContain(NOT_FOUND_TEXT)
+  })
+
+  // ③ 3 つが互いに混ざらないこと (① の `'unavailable'` はそのまま)。
+  it('車輌CD が無い運行: ① の unavailable のままで、②-1 の文は出ない', async () => {
+    getOperationMock.mockResolvedValue([operation({ 乗務員CD1: '1412' }, WITH_KEYS)])
+    const w = await press()
+
+    expect(w.text()).toContain(UNAVAILABLE_TEXT)
+    expect(w.text()).not.toContain('に対応する積み降しが無く')
+    expect(w.text()).not.toContain(NOT_FOUND_TEXT)
+    // 材料が無いので一番星は呼んですらいない (②-1 とはここが違う)。
+    expect(fetchVehicleDailySlipsMock).not.toHaveBeenCalled()
+  })
+
+  it('②-1 と ① は別の文である (同じ文字列に寄せていない)', () => {
+    expect(noMatchText(1)).not.toBe(UNAVAILABLE_TEXT)
+    expect(noMatchText(1)).not.toBe(NOT_FOUND_TEXT)
+    // セルに収まる長さ (既存の一言は 17〜26 字)。
+    expect(noMatchText(1).length).toBeLessThanOrEqual(26)
+  })
+
+  it('②-1 の一言は琥珀 (押し直しても変わらない) で、赤とも灰とも別の色', async () => {
+    getOperationCsvMock.mockResolvedValue(EVENTS_CSV_NO_UNLOAD)
+    const w = await press()
+
+    const span = w.findAll('span.text-xs').find(s => s.text().includes('に対応する積み降しが無く'))
+    expect(span).toBeDefined()
+    expect(span!.classes().join(' ')).toContain('text-amber-600')
+    expect(span!.classes()).not.toContain('text-red-500')
+    expect(span!.classes()).not.toContain('text-gray-400')
+  })
+
+  // ★ 陽性対照: 伝票があり降しもある運行は**今までどおり提案が走る** (何も止めていない)。
+  it('伝票があり降しもある: 提案が走り、どの「できません」も出ない', async () => {
+    const w = await press()
+
+    expect(fetchVehicleDailySlipsMock).toHaveBeenCalledWith('1318', '2026-06-30', '2026-07-03')
+    expect(w.text()).not.toContain('提案できません')
+    expect(w.text()).not.toContain('に対応する積み降しが無く')
+    expect(w.text()).not.toContain(NOT_FOUND_TEXT)
+    expect(w.text()).not.toContain('提案に失敗しました')
+    expect(proposeButton(w)!.text()).toBe(PROPOSE_LABEL)
   })
 })
