@@ -15,10 +15,11 @@
  * ## この画面で踏みやすい「別の意味に読める」型
  *
  * 1. **「まだ選んでいない」「読み込み中」「取得に失敗」「0 件」を同じ見た目にしない**
- * 2. **★ 表の空欄は「0 分」と「データ無し」の区別が付かない (Refs #918)** —
- *    `fmt()` は `null` と `0` をどちらも `''` に潰す。**これは現状の挙動として
- *    固定してあるだけで、「区別しなくてよい」と決まったわけではない。**
- *    判断は #918。**このテストを根拠に #918 を閉じないこと**
+ * 2. **★ 「実測して 0 分」と「データ無し」を同じ見た目にしない (#918 で決着)** —
+ *    `fmt()` は `0` → **`0:00`** / `null` `undefined` → **`-`**。以前はどちらも
+ *    空欄で、とくに `break_minutes` は「休憩 0 分」と「休憩データ無し」が
+ *    区別できなかった。**記号の意味は凡例で画面にも出す** — 区別できるように
+ *    しただけでは見る人が `-` を読めないので、**凡例が消えたら欠陥**として扱う
  * 3. **1 日に複数運行がある日を 1 行に潰さない** — 潰すと内訳が消える
  * 4. **PDF の進捗を出したまま消し忘れない** — 「まだ動いている」と読める
  */
@@ -370,49 +371,85 @@ describe('/restraint-report 表の組み立て', () => {
     expect(rows[1]!.findAll('td').map(t => t.text())).toEqual(['1:30', '0:20', '0:10', '2:00'])
   })
 
-  it('運行が 0 件の日でも日付行は消さず、内訳だけ空にする', async () => {
+  it('運行が 0 件の日でも日付行は消さず、内訳は「データ無し」にする (Refs #918)', async () => {
     const w = await show(report({
       days: [day('2026-07-03', { operations: [], start_time: null, end_time: null, rest_period_minutes: null })],
     }))
 
     const tds = w.findAll('tbody tr')[0]!.findAll('td').map(t => t.text())
     expect(tds[0]).toBe('03')
-    expect(tds[1]).toBe('')   // 始業 (null)
-    expect(tds[2]).toBe('')   // 終業 (null)
-    expect(tds[3]).toBe('')   // 運行 0 件なので内訳は空
-    expect(tds[10]).toBe('')  // 休息時間 null
+    expect(tds[1]).toBe('')     // 始業 (null) — 時刻列は文字列なので凡例の対象外
+    expect(tds[2]).toBe('')     // 終業 (null)
+    // ★ 運行 0 件 = **その日の内訳を読めていない**。空欄にすると「4 項目とも 0 分」と
+    // 同じ見た目になるので `-` を出す。
+    expect(tds.slice(3, 7)).toEqual(['-', '-', '-', '-'])
+    expect(tds[10]).toBe('-')   // 休息時間 null
   })
 
-  it('休息時間があれば出す (null と 0 を同じ空欄にするのは現状の挙動 — Refs #918)', async () => {
+  it('休息時間があれば出す', async () => {
     const w = await show(report({ days: [day('2026-07-04', { rest_period_minutes: 660 })] }))
 
     expect(w.findAll('tbody tr')[0]!.findAll('td')[10]!.text()).toBe('11:00')
   })
 
   /**
-   * ★ **これは「現状の挙動」の固定であって、「区別しなくてよい」という主張ではない。**
-   *
-   * `fmt()` は `val == null || val === 0` で **「データが無い」と「実測して 0 分」を
-   * 同じ空欄に潰す**。**それでよいかは #918 で判断中**で、意図的な設計と決まった
-   * わけではない (区別しようとした `fmtOrDash` が結線されないまま死んでいたのが発端)。
-   *
-   * **#918 で区別することになったら、このテストは書き換わるのが正しい** —
-   * `SKILL.md` §7 の「その語を固定していたテストは**今の嘘**を固定している。
-   * 書き換えになるのが正しい」に当たる。**このテストを根拠に #918 の判断を
-   * 閉じないこと。**
+   * ★ **#918 の本体。**以前は `val == null || val === 0` で「データが無い」と
+   * 「実測して 0 分」を**同じ空欄に潰して**いた。潰すのをやめたので、
+   * **0 の側と null の側の両方**を固定する (片方だけだと、また潰す実装に
+   * 戻しても半分は通ってしまう)。
    */
-  it('0 分は 0:00 と書かず空欄になる (現状の挙動 — 「データ無し」との区別は #918 で判断中)', async () => {
+  it('実測して 0 分は 0:00 と書く (空欄にしない — Refs #918)', async () => {
     const w = await show(report({
       days: [day('2026-07-06', {
         operations: [op({ drive_minutes: 0, cargo_minutes: 0, break_minutes: 0, restraint_minutes: 0 })],
         restraint_total_minutes: 0,
         restraint_cumulative_minutes: 0,
         drive_average_minutes: 0,
+        rest_period_minutes: 0,
       })],
     }))
 
     const tds = w.findAll('tbody tr')[0]!.findAll('td').map(t => t.text())
-    expect(tds.slice(3, 10)).toEqual(['', '', '', '', '', '', ''])
+    expect(tds.slice(3, 11)).toEqual(['0:00', '0:00', '0:00', '0:00', '0:00', '0:00', '0:00', '0:00'])
+  })
+
+  /**
+   * `null` 側。**型 (`RestraintDayRow`) は `rest_period_minutes` 以外を `number` と
+   * 言っているが、これは API 応答をそう宣言しているだけ**で、欠測が来ないことを
+   * 保証してはいない。`fmt()` が `null | undefined` を受ける以上、来たときに
+   * 「0 分」と読める見た目にしないことを固定しておく。
+   */
+  it('データが無い分は - にする (0 分と混ぜない — Refs #918)', async () => {
+    const w = await show(report({
+      days: [day('2026-07-09', {
+        operations: [op({
+          drive_minutes: null as unknown as number,
+          cargo_minutes: undefined as unknown as number,
+          break_minutes: null as unknown as number,
+          restraint_minutes: undefined as unknown as number,
+        })],
+        restraint_total_minutes: null as unknown as number,
+        restraint_cumulative_minutes: undefined as unknown as number,
+        drive_average_minutes: null as unknown as number,
+        rest_period_minutes: null,
+      })],
+    }))
+
+    const tds = w.findAll('tbody tr')[0]!.findAll('td').map(t => t.text())
+    expect(tds.slice(3, 11)).toEqual(['-', '-', '-', '-', '-', '-', '-', '-'])
+  })
+
+  /**
+   * **運転平均だけは `fmt()` の手前に `Math.round()` が挟まる。**`Math.round(null)`
+   * は `0` なので、素通しすると**欠測が `0:00` (実測して 0 分) に化ける** —
+   * `fmt()` を直しただけでは塞がらない穴なので独立して固定する。
+   */
+  it('運転平均が欠測でも 0:00 に倒さない (Math.round(null) === 0 の穴 — Refs #918)', async () => {
+    const w = await show(report({
+      days: [day('2026-07-10', { drive_average_minutes: null as unknown as number })],
+    }))
+
+    expect(w.findAll('tbody tr')[0]!.findAll('td')[9]!.text()).toBe('-')
   })
 
   it('運転平均は分に丸めてから整形する', async () => {
@@ -462,6 +499,37 @@ describe('/restraint-report 表の組み立て', () => {
     expect(w.text()).toContain('4月〜前月 累計拘束時間:')
     expect(w.text()).toContain('20:00')   // fiscal_year_cumulative 1200
     expect(w.text()).toContain('27:00')   // fiscal_year_total 1620
+  })
+
+  /**
+   * ★ **凡例 (Refs #918)。`0:00` と `-` を出し分けただけでは、見る人が `-` の意味を
+   * 知らない。**
+   *
+   * **判定は「合成後の 1 文」で行う** — 凡例は `<span>` を挟んで組み立てられるので、
+   * `toContain('データ無し')` のように語を 1 つずつ見ると、**語が全部あるのに文として
+   * 成立していない**組み方 (順序が入れ替わる / `0:00` と `-` の説明が入れ替わる) を
+   * 通してしまう。空白を潰した 1 本の文字列を丸ごと固定する。
+   */
+  function legendText(w: VueWrapper): string {
+    const p = w.findAll('p').find(el => el.text().includes('時間列の見かた'))
+    return (p?.text() ?? '').replace(/\s+/g, ' ').trim()
+  }
+
+  it('表の下に凡例を出し、「読んだ結果 0」と「読めていない」の違いを書く (Refs #918)', async () => {
+    const w = await show(report())
+
+    expect(legendText(w)).toBe(
+      '時間列の見かた: 0:00 は実測して 0 分 (記録を読んだ結果が 0)、'
+      + ' - はデータ無し (記録が無い、または取得できなかった'
+      + ' — 0 分だったのかどうかも分かりません)。「休」の行は稼働の無い日です。',
+    )
+  })
+
+  it('表が無いうちは凡例も出さない (説明する対象が無い)', async () => {
+    const w = mountPage()
+    await flushPromises()
+
+    expect(legendText(w)).toBe('')
   })
 })
 
