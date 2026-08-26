@@ -762,10 +762,140 @@ export async function relayKintaiUnkoGaps(
 // (資格情報は auth-worker 1 箇所に集約) なので、画面 → relay → `/ichibanboshi-proxy`
 // → GCP という経路になる。`relayKintaiDaySummaries` とまったく同じ道。
 
+/**
+ * 「この人は給与データを見てよいか」を上流に聞く口
+ * (rust-ichibanboshi `src/routes/kyuyo.rs` の `access`、Refs #951)。
+ *
+ * ## ★ この口は **`onprem()` で叩く。`gcp()` ではない**
+ *
+ * 同じファイルの `WAGE_SNAPSHOT_PATH` / `WAGE_RANGE_PATH` が `gcp()` なので
+ * **「揃えよう」と `gcp()` に変えたくなるが、変えると全員 503 になる。**
+ * 上流は同じバイナリでも**インスタンスごとに設定が違う**:
+ *
+ * | | Supabase 接続 | `/kyuyo/*` の allowlist |
+ * | --- | --- | --- |
+ * | **ohishi-data** (`onprem()` の宛先) | **無い** | **ある** |
+ * | **GCP Cloud Run** (`gcp()` の宛先) | **ある** | **無い** |
+ *
+ * `kintai.wage_snapshot` は Supabase にあるので wage-* は `gcp()` でしか届かず、
+ * allowlist は ohishi-data にしか無いので判定は `onprem()` でしか取れない。
+ * **経路が分かれているのは意図で、揃えるのが誤り。**
+ * (上流 `routes::wage_snapshot` の module docs に同じ表がある。)
+ */
+const KYUYO_ACCESS_PATH = "/api/kyuyo/access";
+
 /** 保存の口 (rust-ichibanboshi `src/routes/wage_snapshot.rs`)。 */
 const WAGE_SNAPSHOT_PATH = "/api/kintai/wage-snapshot";
 /** 期間集計の口 (同上)。 */
 const WAGE_RANGE_PATH = "/api/kintai/wage-range";
+
+/**
+ * 給与 allowlist に通らなかったときに relay が返すもの。**null = 通った。**
+ *
+ * status は**上流のものをそのまま持つ** (401 だけ写し替える。下の
+ * [`checkKyuyoAccess`] 参照) — 画面側は `describeApiError` で本文をそのまま
+ * 出すので、502 等へ丸めると 403 / 503 の撃ち分けがこの経路だけ効かなくなる。
+ */
+export interface KyuyoAccessDenial {
+  status: number;
+  message: string;
+}
+
+/**
+ * 上流 401 を写す先。
+ *
+ * **401 のまま返してはいけない** — 画面では「ログインし直せ」の意味になり、
+ * 原因と処方が食い違う。ここへ 401 が返るのは
+ *
+ * - relay が Bearer を持たずに叩いた (theearth セッション経路など。あちらの
+ *   Bearer は theearth のランダム token でブラウザ JWT ではない)
+ * - 上流の introspect が `active:false` を返した (app_origin の ACL 違い等)
+ *
+ * のどちらかで、**どちらも利用者の権限の話ではない**。⇒ 403 (権限) ではなく
+ * **503 (設定・経路の話)** に倒す。画面の `classifyKyuyoAccess` でも 503 は
+ * 「権限の問題ではありません」と読まれるので、意味が一致する。
+ */
+export const KYUYO_ACCESS_UNIDENTIFIED_STATUS = 503;
+
+/** 上流 401 を 503 に写したときに出す文 (上流の「token が無効です」は
+ * ログインの話に読めるので、こちらで言い換える)。 */
+export const KYUYO_ACCESS_UNIDENTIFIED_MESSAGE =
+  "給与データの閲覧可否を判定できませんでした (閲覧者を上流に識別させられていません)。権限の問題ではありません";
+
+/** 上流の `{error: "..."}` から文を取り出す。JSON でなければ本文の頭を返す。 */
+function kyuyoAccessMessage(body: string, status: number): string {
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown };
+    if (typeof parsed.error === "string" && parsed.error) return parsed.error;
+  } catch {
+    // JSON でない応答 (CF Access のログイン HTML 等) はそのまま頭だけ見せる
+  }
+  return body.trim() ? body.trim().slice(0, 200) : `上流が status ${status} を返しました`;
+}
+
+/**
+ * 給与 allowlist を上流に問い合わせる (Refs #951)。**通れば null。**
+ *
+ * ## なぜ relay が聞くのか
+ *
+ * `paid` (実支給額) を読み書きする `wage-range` / `wage-snapshot` の認可は
+ * **tenant 単位**で、`/api/kyuyo/payroll` に掛かっている **email allowlist を
+ * 通っていない**。⇒ allowlist に載っている 1 名が保存した瞬間、実支給額が
+ * tenant 全員の読める場所へ移る。tenant 判定を**通した後**にこれを AND する。
+ *
+ * ## ★ 転送するのは**リクエスト自身の Bearer**
+ *
+ * `record.token` を使ってはいけない — viewer 経路では `token ?? "viewer"` が
+ * 入り、theearth セッションを持つ record では **theearth のセッショントークン**
+ * (ランダム hex) が入っていて、どちらもブラウザ JWT ではない。上流で
+ * `active:false` になって**静かに 401** になる。
+ *
+ * ## allowlist はここに持たない
+ *
+ * 正は上流の `KYUYO_ALLOWED_EMAILS` 1 か所。relay 側に写しを持つと二重管理に
+ * なり、片方だけ更新されて食い違う。
+ */
+export async function checkKyuyoAccess(
+  deps: Pick<KintaiRelayDeps, "onprem">,
+  bearer: string | null,
+): Promise<KyuyoAccessDenial | null> {
+  // Bearer が無いなら上流に聞くまでもない (必ず 401 が返る)。往復を省くだけで、
+  // 結論は上流に聞いた場合と同じ 503。
+  if (!bearer) {
+    return {
+      status: KYUYO_ACCESS_UNIDENTIFIED_STATUS,
+      message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE,
+    };
+  }
+
+  let res: Response;
+  try {
+    res = await deps.onprem(KYUYO_ACCESS_PATH, {
+      headers: { Authorization: `Bearer ${bearer}` },
+    });
+  } catch (err) {
+    // **fail-closed。** 判定が取れないなら通さない
+    return {
+      status: 503,
+      // `String(err)` で足りる (`Error` は "TypeError: fetch failed" になる)。
+      // `err instanceof Error ? ... : ...` にすると分岐が 2 本増えるだけで、
+      // 出る文はほぼ同じ
+      message: `給与データの閲覧可否を上流に問い合わせられませんでした: ${String(err)}`,
+    };
+  }
+
+  if (res.ok) return null;
+
+  const body = await res.text();
+  if (res.status === 401) {
+    return {
+      status: KYUYO_ACCESS_UNIDENTIFIED_STATUS,
+      message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE,
+    };
+  }
+  // 403 / 503 はそのまま passthrough — 画面が理由をそのまま出せる
+  return { status: res.status, message: kyuyoAccessMessage(body, res.status) };
+}
 
 /**
  * 画面が確定させた 1 か月ぶんを保存する。

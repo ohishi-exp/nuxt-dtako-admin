@@ -20,6 +20,9 @@ import {
   FOLD_PAGE_MAX_DRIVERS,
   FOLD_CLOSE_MAX_DRIVERS,
   MAX_FOLD_PAGES,
+  checkKyuyoAccess,
+  KYUYO_ACCESS_UNIDENTIFIED_STATUS,
+  KYUYO_ACCESS_UNIDENTIFIED_MESSAGE,
   type KintaiRelayDeps,
 } from "../src/kintai-relay";
 
@@ -932,5 +935,127 @@ describe("賃金スナップショットの中継 (ohishi-exp/nuxt-dtako-admin#6
       gcp: async () => json({ error: "month は YYYY-MM" }, 400),
     } as unknown as KintaiRelayDeps;
     await expect(relayWageRangeGet(deps, "c", new URLSearchParams())).rejects.toThrow();
+  });
+});
+
+describe("checkKyuyoAccess — 給与 allowlist の関門 (Refs #951)", () => {
+  const ACCESS = "/api/kyuyo/access";
+
+  it("**`onprem()` を叩く。`gcp()` ではない** — allowlist は ohishi-data 側にしか無い", async () => {
+    const { deps: d, calls } = deps({ onprem: { [ACCESS]: { allowed: true, email: "k@example.com" } } });
+    expect(await checkKyuyoAccess(d, "jwt")).toBeNull();
+    expect(calls).toEqual([{ side: "onprem", path: ACCESS, body: undefined }]);
+    // gcp を 1 度も触っていない (揃えて `gcp()` にすると全員 503 になる経路)
+    expect(calls.some((c) => c.side === "gcp")).toBe(false);
+  });
+
+  it("**リクエスト自身の Bearer をそのまま転送する** (record.token ではない)", async () => {
+    let seen: HeadersInit | undefined;
+    const { deps: d } = deps({
+      onprem: {
+        [ACCESS]: (init?: RequestInit) => {
+          seen = init?.headers;
+          return json({ allowed: true, email: "k@example.com" });
+        },
+      },
+    });
+    expect(await checkKyuyoAccess(d, "browser-jwt")).toBeNull();
+    expect(seen).toEqual({ Authorization: "Bearer browser-jwt" });
+  });
+
+  it("Bearer が無ければ**上流に聞かずに** 503 (必ず 401 が返るので往復を省く)", async () => {
+    const { deps: d, calls } = deps({ onprem: { [ACCESS]: { allowed: true } } });
+    expect(await checkKyuyoAccess(d, null)).toEqual({
+      status: KYUYO_ACCESS_UNIDENTIFIED_STATUS,
+      message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE,
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("**403 は status も本文もそのまま passthrough** — 画面が理由をそのまま出せる", async () => {
+    const { deps: d } = deps({
+      onprem: {
+        [ACCESS]: () =>
+          json({ error: "このユーザーには給与データへのアクセス権がありません" }, 403),
+      },
+    });
+    expect(await checkKyuyoAccess(d, "jwt")).toEqual({
+      status: 403,
+      message: "このユーザーには給与データへのアクセス権がありません",
+    });
+  });
+
+  it("**503 も丸めない** — 権限の話 (403) と設定・障害の話 (503) を撃ち分けられるように", async () => {
+    const { deps: d } = deps({
+      onprem: { [ACCESS]: () => json({ error: "kyuyo 認可が未設定です" }, 503) },
+    });
+    expect(await checkKyuyoAccess(d, "jwt")).toEqual({
+      status: 503,
+      message: "kyuyo 認可が未設定です",
+    });
+  });
+
+  it("★ **401 は 401 のまま返さない** — 画面で「ログインし直せ」になり処方が食い違う", async () => {
+    const { deps: d } = deps({
+      onprem: { [ACCESS]: () => json({ error: "token が無効です" }, 401) },
+    });
+    const denial = await checkKyuyoAccess(d, "theearth-session-token");
+    expect(denial).toEqual({
+      status: KYUYO_ACCESS_UNIDENTIFIED_STATUS,
+      message: KYUYO_ACCESS_UNIDENTIFIED_MESSAGE,
+    });
+    // 403 (権限の話) にも倒さない — 利用者の権限ではなく経路の問題なので
+    expect(denial!.status).toBe(503);
+    expect(denial!.message).not.toContain("権限がありません");
+  });
+
+  it("JSON でない応答 (CF Access のログイン HTML 等) は本文の頭を見せる", async () => {
+    const { deps: d } = deps({
+      onprem: { [ACCESS]: () => new Response("  <html>Access login</html>  ", { status: 403 }) },
+    });
+    expect(await checkKyuyoAccess(d, "jwt")).toEqual({
+      status: 403,
+      message: "<html>Access login</html>",
+    });
+  });
+
+  it("本文が空でも黙らない (status を文にする)", async () => {
+    const { deps: d } = deps({
+      onprem: { [ACCESS]: () => new Response("   ", { status: 403 }) },
+    });
+    expect(await checkKyuyoAccess(d, "jwt")).toEqual({
+      status: 403,
+      message: "上流が status 403 を返しました",
+    });
+  });
+
+  it("`{error}` が文字列でない JSON も本文の頭に落とす (握り潰さない)", async () => {
+    const { deps: d } = deps({
+      onprem: { [ACCESS]: () => json({ error: true }, 403) },
+    });
+    expect(await checkKyuyoAccess(d, "jwt")).toEqual({
+      status: 403,
+      message: '{"error":true}',
+    });
+  });
+
+  it("`{error: \"\"}` (空文字) でも黙らない", async () => {
+    const { deps: d } = deps({
+      onprem: { [ACCESS]: () => json({ error: "" }, 403) },
+    });
+    expect(await checkKyuyoAccess(d, "jwt")).toEqual({
+      status: 403,
+      message: '{"error":""}',
+    });
+  });
+
+  it("**上流に届かなければ fail-closed** (判定が取れないなら通さない)", async () => {
+    const d: KintaiRelayDeps = {
+      onprem: () => Promise.reject(new TypeError("fetch failed")),
+      gcp: () => Promise.resolve(json({})),
+    };
+    const denial = await checkKyuyoAccess(d, "jwt");
+    expect(denial!.status).toBe(503);
+    expect(denial!.message).toContain("TypeError: fetch failed");
   });
 });
