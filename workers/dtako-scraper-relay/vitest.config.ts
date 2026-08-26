@@ -29,6 +29,7 @@ export default defineConfig({
         'src/theearth-session.ts',
         'src/promise-queue.ts',
         'src/device-proxy.ts',
+        'src/dtako-device-creds.ts',
         'src/scrape-dispatch.ts',
         'src/scrape-history-record.ts',
         'src/scrape-queue.ts',

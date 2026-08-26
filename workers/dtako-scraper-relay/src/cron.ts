@@ -162,6 +162,11 @@ export const DTAKO_ACCOUNTS_KV_KEY = "dtako_accounts";
 /** `NETPRINT_TARGETS` を置く KV のキー名 (`dtako_accounts` と同じ snake_case)。 */
 export const NETPRINT_TARGETS_KV_KEY = "netprint_targets";
 
+/** device-data-proxy 用の device credential を置く KV key (Refs #931 / #933)。
+ * **`DTAKO_ACCOUNTS` とは別 key** — 相乗りさせると再投入が要るため
+ * (`dtako-device-creds.ts` の docs)。 */
+export const DTAKO_DEVICE_CREDS_KV_KEY = "dtako_device_creds";
+
 /**
  * relay の設定値を **KV (`DTAKO_CONFIG_KV`) 優先**で解決し、無ければ従来の binding
  * (dashboard の plain 環境変数 / Secrets Store) にフォールバックする。
@@ -209,6 +214,13 @@ export async function resolveDtakoAccountsRaw(kv: unknown, binding: unknown): Pr
  * 呼び出し側は従来どおり skip する (fail-closed、Refs #874)。 */
 export async function resolveNetprintTargetsRaw(kv: unknown, binding: unknown): Promise<string> {
   return resolveKvConfigRaw(kv, NETPRINT_TARGETS_KV_KEY, binding);
+}
+
+/** device credential (`dtako_device_creds`) の解決。KV が正、無ければ binding。
+ * **どちらも未設定なら空文字** — 履歴の読み書きができないだけで、取り込み本体は
+ * 止めない (`dtako-device-creds.ts` の docs)。 */
+export async function resolveDtakoDeviceCredsRaw(kv: unknown, binding: unknown): Promise<string> {
+  return resolveKvConfigRaw(kv, DTAKO_DEVICE_CREDS_KV_KEY, binding);
 }
 
 /** scheduled handler から注入される DO 呼び出し。doKey は `idFromName` に渡す

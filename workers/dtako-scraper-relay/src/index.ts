@@ -18,6 +18,7 @@ import {
   dispatchNetprintTargets,
   NETPRINT_TARGETS_KV_KEY,
   resolveDtakoAccountsRaw,
+  resolveDtakoDeviceCredsRaw,
   resolveNetprintTargetsRaw,
   resolveSecretBinding,
   runScheduledCron,
@@ -38,6 +39,8 @@ import {
   MAX_SCRAPE_DATES,
   planScrapeDispatch,
 } from "./scrape-dispatch";
+import { requestDeviceJwt } from "./device-proxy";
+import { credentialForTenant, parseDtakoDeviceCreds } from "./dtako-device-creds";
 
 export interface RelayWorkerEnv {
   RELAY: DurableObjectNamespace;
@@ -1170,9 +1173,30 @@ async function handleScrapeHistory(request: Request, env: RelayWorkerEnv): Promi
   const proxy = ((input: unknown, init?: RequestInit) =>
     authWorker.fetch(input as string, init)) as unknown as typeof fetch;
 
+  // ★ 履歴は alc の **tenant (data) 経路** なので `alc-internal-proxy` では 403
+  // (Refs #933)。`device-data-proxy` 越しに device JWT で叩く — tenant は device
+  // record 由来で詐称不能。credential は KV `dtako_device_creds` (人が投入)。
+  let accessToken: string;
+  try {
+    const cred = credentialForTenant(
+      parseDtakoDeviceCreds(await resolveDtakoDeviceCredsRaw(env.DTAKO_CONFIG_KV, null)),
+      tenantId,
+    );
+    if (!cred) {
+      return fail(
+        503,
+        `dtako_device_creds に tenant_id=${tenantId} の device credential がありません ` +
+          "(auth-worker の POST /device/pair で払い出して KV に投入してください)",
+      );
+    }
+    accessToken = (await requestDeviceJwt(cred, proxy)).accessToken;
+  } catch (err) {
+    return fail(502, err instanceof Error ? err.message : String(err));
+  }
+
   let history: unknown;
   try {
-    history = await fetchScrapeHistory({ sharedSecret: proxySecret, tenantId, limit }, proxy);
+    history = await fetchScrapeHistory({ accessToken, limit }, proxy);
   } catch (err) {
     return fail(502, err instanceof Error ? err.message : String(err));
   }
@@ -1188,10 +1212,7 @@ async function handleScrapeHistory(request: Request, env: RelayWorkerEnv): Promi
   let unsplitError: string | null = null;
   if (isValidDate(dateFrom) && isValidDate(dateTo)) {
     try {
-      const got = await fetchUnsplit(
-        { sharedSecret: proxySecret, tenantId, dateFrom, dateTo },
-        proxy,
-      );
+      const got = await fetchUnsplit({ accessToken, dateFrom, dateTo }, proxy);
       unsplitTotal = got.unsplit_total;
       unsplit = got.unsplit;
     } catch (err) {
