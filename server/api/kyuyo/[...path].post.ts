@@ -4,7 +4,9 @@
  *
  * POST /api/kyuyo/** → <NUXT_ICHIBAN_API_URL>/api/kyuyo/** に
  * ① CF Access Service Token (トンネル通過用、server だけが持つ) と
- * ② ブラウザの `Authorization: Bearer <JWT>` (素通し転送) を付けて転送する。
+ * ② ブラウザの JWT を `Authorization: Bearer <JWT>` として付けて転送する。
+ *
+ * **② の JWT は cookie (`logi_auth_token`) から組む** (Refs #375、GET 版と同じ)。
  *
  * GET 版 (`[...path].get.ts`) と対になる。**認可は upstream 側**
  * (rust-ichibanboshi の introspect + email allowlist) が担い、この proxy は JWT を
@@ -29,8 +31,9 @@
  * 数十 KB なので充分だが、青天井にはしない。
  */
 import type { H3Event } from 'h3'
-import { defineEventHandler, getRequestURL, getRouterParam, getHeader, readRawBody, createError, setResponseStatus, setHeader } from 'h3'
+import { defineEventHandler, getRequestURL, getRouterParam, readRawBody, createError, setResponseStatus, setHeader } from 'h3'
 import { fetchIchiban, cfEnv, type IchibanUpstreamError } from '../../utils/ichiban-upstream'
+import { resolveBrowserAuthorization } from '../../utils/browser-jwt'
 
 /** 転送する body の上限 (bytes)。 */
 export const MAX_BODY_BYTES = 1024 * 1024
@@ -45,7 +48,7 @@ export default defineEventHandler(async (event: H3Event) => {
     throw createError({ statusCode: 413, statusMessage: 'body が大きすぎます' })
   }
 
-  const authorization = getHeader(event, 'authorization')
+  const authorization = resolveBrowserAuthorization(event, env)
   const extraHeaders: Record<string, string> = authorization ? { Authorization: authorization } : {}
 
   let upstreamRes: Response

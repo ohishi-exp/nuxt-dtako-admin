@@ -443,11 +443,9 @@ const showBackfillHint = computed(() =>
  * その場合は従来どおり「給与DBから読み込み」ボタンでの取得だけになる。 */
 async function loadKyuyoSyncedMonths() {
   try {
-    const token = currentAccessToken()
-    if (!token) return
-    const res = await $fetch<{ entries: Array<{ company: string, month: string }> }>('/api/kyuyo/synced-months', {
-      headers: { Authorization: `Bearer ${token}` },
-    })
+    // 認証は cookie (`logi_auth_token`) 任せ — 同一オリジンなので自動で載る
+    // (Refs #375。server route が cookie から Bearer を組んで upstream へ渡す)。
+    const res = await $fetch<{ entries: Array<{ company: string, month: string }> }>('/api/kyuyo/synced-months')
     kyuyoSyncedMonths.value = new Set(res.entries.map(e => e.month))
     kyuyoSyncedKeys.value = new Set(res.entries.map(e => `${e.company}|${e.month}`))
   }
@@ -3044,7 +3042,6 @@ async function loadPayrollFromDb() {
   const totalFetches = workMonths.length * companies.length
   let done = 0
   try {
-    const token = currentAccessToken()
     for (const workMonth of workMonths) {
       const payMonth = nextYm(workMonth)
       for (const { payrollCompany } of companies) {
@@ -3056,8 +3053,8 @@ async function loadPayrollFromDb() {
           payrollDbMessage.value = totalFetches > 1
             ? `${done}/${totalFetches} ${payrollCompany} / ${fmtYm(payMonth)} 支給分 を取得しています… (1 社あたり 10〜20 秒)`
             : `${payrollCompany} を取得しています… (1 社あたり 10〜20 秒)`
+          // 認証は cookie 任せ (Refs #375)。
           const body = await $fetch(`/api/kyuyo/payroll`, {
-            headers: token ? { Authorization: `Bearer ${token}` } : {},
             query: { company: payrollCompany, month: workMonth },
           })
           stored = toStoredPayroll(body, new Date().toISOString())
@@ -3126,12 +3123,11 @@ async function autoLoadArchivedPayroll() {
   autoPayrollLoading.value = true
   const loaded: typeof dbImports.value = []
   try {
-    const token = currentAccessToken()
     for (const { payrollCompany } of companies) {
       let stored = readStoredPayroll(payrollCompany, payMonth)
       if (!stored) {
+        // 認証は cookie 任せ (Refs #375)。
         const body = await $fetch(`/api/kyuyo/payroll`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
           query: { company: payrollCompany, month: workMonth },
         })
         stored = toStoredPayroll(body, new Date().toISOString())
@@ -3173,9 +3169,8 @@ async function importFromPayrollDb() {
   importingPayroll.value = true
   pageError.value = ''
   try {
-    const token = currentAccessToken()
+    // 認証は cookie 任せ (Refs #375)。
     const res = await $fetch<KyuyoEmployeesResponse>('/api/kyuyo/employees', {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
       query: { company: payrollCompany, month: month.value },
     })
     const legacyLabel = compMap.value

@@ -19,7 +19,10 @@ export interface HealthCheck {
   target: string
   /** 同一 origin の proxy 経由 URL。 */
   url: string
-  /** kyuyo 系は JWT が必要 (proxy が Authorization を upstream へ素通しする)。 */
+  /** kyuyo 系は認可が要る。**ヘッダはページ側で組まない** — 同一オリジンの
+   * cookie (`logi_auth_token`) を server route が `Authorization: Bearer` に
+   * 変換して upstream へ渡す (Refs #375)。ページはこのフラグを「セッション有無の
+   * 事前チェック」と「直列実行の対象か」の判定にだけ使う。 */
   needsAuth: boolean
 }
 

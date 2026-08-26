@@ -3,9 +3,10 @@
  * 一番星ヘルスチェック (Refs #369)。
  *
  * rust-ichibanboshi の既存 API (CAPE#01) と給与読み取り API (OHKEN、#82) を
- * 一括疎通確認する。給与系はブラウザの JWT が proxy 経由で upstream に渡り、
- * introspect + allowlist の認可ゲートまで含めて検証される — つまりこのページが
- * 通れば「トンネル・CF Access・introspect・DB 接続」の全区間が生きている。
+ * 一括疎通確認する。給与系はブラウザの認証 cookie が proxy 経由で JWT として
+ * upstream に渡り、introspect + allowlist の認可ゲートまで含めて検証される —
+ * つまりこのページが通れば「トンネル・CF Access・introspect・DB 接続」の全区間が
+ * 生きている (cookie → Bearer の変換は server route の仕事。Refs #375)。
  *
  * 給与明細の内容 (金額・氏名) は画面に出さない — 件数と warnings 数のみ。
  */
@@ -33,15 +34,18 @@ async function runOne(row: CheckRow): Promise<void> {
   row.state = 'running'
   const started = performance.now()
   try {
-    const token = row.check.needsAuth ? currentAccessToken() : null
-    if (row.check.needsAuth && !token) {
+    // 認可が要る口は cookie (`logi_auth_token`) で通す — ヘッダは組まない
+    // (Refs #375、server route が cookie から Bearer を組んで upstream へ渡す)。
+    // **事前チェックは残す**: このページは「ログイン済みの人が押す」画面で、
+    // 手元にセッションが無いまま出る 401 を upstream 由来の NG と読ませないため。
+    // 判定材料は localStorage のセッション (`currentAccessToken`) で、実際に送る
+    // cookie とは別物 — なので文言も「JWT が無い」ではなくセッションの話にする。
+    if (row.check.needsAuth && !currentAccessToken()) {
       row.level = 'ng'
-      row.detail = 'JWT がありません (再ログインしてください)'
+      row.detail = 'このブラウザにログインセッションがありません (再ログインしてください)'
       return
     }
-    const res = await fetch(row.check.url, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    })
+    const res = await fetch(row.check.url)
     let body: unknown = null
     try {
       body = await res.json()

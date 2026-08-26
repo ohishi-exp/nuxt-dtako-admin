@@ -48,11 +48,6 @@ const progress = ref('')
 const fetchErrors = ref<string[]>([])
 const stored = ref<StoredSummary[]>([])
 
-function authHeader(): Record<string, string> {
-  const token = currentAccessToken()
-  return token ? { Authorization: `Bearer ${token}` } : {}
-}
-
 /** 別ユーザーのログインを検知したら取得済みデータを全部消す。 */
 function purgeIfOwnerChanged() {
   const token = currentAccessToken()
@@ -118,7 +113,9 @@ async function refreshList(full: boolean) {
   pageError.value = ''
   try {
     const endpoint = full ? '/api/kyuyo-master/refresh-full' : '/api/kyuyo-master/refresh'
-    const res = await fetch(endpoint, { method: 'POST', headers: authHeader() })
+    // 認証は cookie (`logi_auth_token`) 任せ — 同一オリジンなので自動で載る
+    // (Refs #375。server route が cookie から Bearer を組んで upstream へ渡す)。
+    const res = await fetch(endpoint, { method: 'POST' })
     const body = await res.json().catch(() => null) as Record<string, unknown> | null
     if (!res.ok) {
       pageError.value = `リスト更新に失敗 (HTTP ${res.status}): ${String((body as { statusMessage?: unknown } | null)?.statusMessage ?? '')}`
@@ -173,10 +170,8 @@ async function fetchRange() {
     for (const [index, item] of plan.entries()) {
       progress.value = `${index + 1}/${plan.length} — ${item.company} ${item.month} を取得中…`
       try {
-        const res = await fetch(
-          `/api/kyuyo/payroll?company=${item.company}&month=${item.month}`,
-          { headers: authHeader() },
-        )
+        // 認証は cookie 任せ (Refs #375、`refreshList` と同じ)。
+        const res = await fetch(`/api/kyuyo/payroll?company=${item.company}&month=${item.month}`)
         const body = await res.json().catch(() => null)
         if (!res.ok) {
           const message = (body as { error?: string } | null)?.error ?? `HTTP ${res.status}`

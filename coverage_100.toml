@@ -92,6 +92,16 @@ branches = true
 path = "server/utils/ichiban-upstream.ts"
 branches = true
 
+# ブラウザ JWT の解決 (cookie `logi_auth_token` → dev cookie → 受領 `Authorization`)。
+# **client が `Authorization: Bearer` を組むのをやめた** (#375、ippoan/auth-worker#416 の
+# 子) ぶんの受け皿で、`/api/kyuyo/**` と `/api/kyuyo-master/**` の 4 route が使う。
+# branches: instrumented コピー (BR()) で **4 分岐すべてが true/false 両側を通る**ことを
+# 数えた — `if(cookie)` / `if(DEV_LOGIN==='true')` / `if(devCookie)` / ヘッダの `?? null`。
+# 陰性対照も取った (dev cookie のケースを 1 本外すと `if(devCookie)` が `[false]` に落ちる)。
+[[files]]
+path = "server/utils/browser-jwt.ts"
+branches = true
+
 [[files]]
 path = "app/utils/salary-compare.ts"
 branches = true

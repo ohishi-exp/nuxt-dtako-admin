@@ -6,7 +6,13 @@ const call = (event: unknown) => (handler as unknown as (e: unknown) => Promise<
 
 function eventWith(
   env: Record<string, unknown>,
-  opts: { path?: string, url?: string, body?: string, authorization?: string } = {},
+  opts: {
+    path?: string
+    url?: string
+    body?: string
+    authorization?: string
+    cookies?: Record<string, string>
+  } = {},
 ) {
   const path = opts.path ?? 'wage-snapshot'
   const url = opts.url ?? `https://dtako.ippoan.org/api/kyuyo/${path}`
@@ -20,6 +26,7 @@ function eventWith(
     _url: url,
     _body: opts.body ?? '{"month":"2026-01"}',
     _headers: opts.authorization === undefined ? {} : { authorization: opts.authorization },
+    _cookies: opts.cookies ?? {},
   }
 }
 
@@ -35,6 +42,7 @@ vi.mock('h3', async (importOriginal) => {
     getRouterParam: (event: { context: { params?: Record<string, string> } }, name: string) =>
       event.context.params?.[name],
     getHeader: (event: { _headers: Record<string, string> }, name: string) => event._headers[name],
+    getCookie: (event: { _cookies: Record<string, string> }, name: string) => event._cookies[name],
     readRawBody: (event: { _body: string }) => Promise.resolve(event._body),
     setResponseStatus: (event: { __statusCode?: number }, code: number) => { event.__statusCode = code },
     setHeader: (event: { __responseHeaders: Record<string, string> }, name: string, value: string) => {
@@ -81,8 +89,18 @@ describe('kyuyo POST proxy (Refs #467, #677)', () => {
     expect(init.headers['Content-Type']).toBe('application/json')
   })
 
-  /** 認可は upstream (introspect + email allowlist) が担うので、JWT は素通しする。 */
-  it('ブラウザの Authorization を素通し転送する', async () => {
+  /** 認可は upstream (introspect + email allowlist) が担うので、JWT はそのまま渡す。
+   * **client はヘッダを組まない** — cookie から組むのが主経路 (Refs #375)。 */
+  it('cookie (logi_auth_token) を Bearer に組んで転送する', async () => {
+    fetchMock.mockResolvedValue(new Response('{}', { status: 200 }))
+    await call(eventWith(ENV, { cookies: { logi_auth_token: 'jwt-cookie' } }))
+
+    const [, init] = fetchMock.mock.calls[0]!
+    expect(init.headers.Authorization).toBe('Bearer jwt-cookie')
+  })
+
+  /** デプロイ skew 用の後方互換 (古いバンドルのタブが残っている間だけ効く)。 */
+  it('cookie が無ければ受領した Authorization を素通し転送する', async () => {
     fetchMock.mockResolvedValue(new Response('{}', { status: 200 }))
     await call(eventWith(ENV, { authorization: 'Bearer jwt-x' }))
 
@@ -90,7 +108,18 @@ describe('kyuyo POST proxy (Refs #467, #677)', () => {
     expect(init.headers.Authorization).toBe('Bearer jwt-x')
   })
 
-  it('Authorization が無ければ付けない (upstream が 401 を返す)', async () => {
+  it('cookie とヘッダが両方あれば cookie を優先する', async () => {
+    fetchMock.mockResolvedValue(new Response('{}', { status: 200 }))
+    await call(eventWith(ENV, {
+      cookies: { logi_auth_token: 'jwt-cookie' },
+      authorization: 'Bearer jwt-header',
+    }))
+
+    const [, init] = fetchMock.mock.calls[0]!
+    expect(init.headers.Authorization).toBe('Bearer jwt-cookie')
+  })
+
+  it('どちらも無ければ付けない (upstream が 401 を返す)', async () => {
     fetchMock.mockResolvedValue(new Response('{}', { status: 401 }))
     const event = eventWith(ENV)
     await call(event)

@@ -7,9 +7,11 @@
  * (refresh-full.post の仕事)。
  *
  * 認可は upstream の introspect + allowlist が担う — 401/403 はそのまま返る。
+ * **JWT は cookie (`logi_auth_token`) から組む** (Refs #375、`server/utils/browser-jwt.ts`)。
  */
-import { defineEventHandler, getHeader, createError } from 'h3'
+import { defineEventHandler, createError } from 'h3'
 import { fetchIchiban, cfEnv, type IchibanUpstreamError } from '../../utils/ichiban-upstream'
+import { resolveBrowserAuthorization } from '../../utils/browser-jwt'
 import { getKyuyoDb, listKyuyoCompanies, upsertKyuyoCompany } from '../../utils/kyuyo-master-db'
 
 /** `KYDATA{会社4桁}_{年度3桁}C` → { company, year } (年 = 1900 + 年度3桁)。 */
@@ -24,9 +26,9 @@ export default defineEventHandler(async (event) => {
   if (!db) {
     throw createError({ statusCode: 503, statusMessage: 'DTAKO_DB binding が未設定です' })
   }
-  const authorization = getHeader(event, 'authorization')
+  const authorization = resolveBrowserAuthorization(event, cfEnv(event))
   if (!authorization) {
-    throw createError({ statusCode: 401, statusMessage: 'Authorization: Bearer <JWT> が必要です' })
+    throw createError({ statusCode: 401, statusMessage: 'ログインが必要です (認証 cookie が届いていません)' })
   }
 
   let upstreamRes: Response
