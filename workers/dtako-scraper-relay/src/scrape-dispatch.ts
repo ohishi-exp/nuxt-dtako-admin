@@ -44,7 +44,10 @@
  * ```
  */
 
-import { deviceProxyGet, deviceProxyPostJson } from "./device-proxy";
+import {
+  unwrapAlcTenantData,
+  type AlcTenantDataForwarder,
+} from "./alc-tenant-rpc";
 
 /** 1 回で配れる読取日の上限。
  *
@@ -59,7 +62,6 @@ export const MAX_SCRAPE_DATES = 10;
  * 見渡せる程度。 */
 export const DEFAULT_HISTORY_LIMIT = 50;
 
-export type FetchLike = typeof fetch;
 
 /** `YYYY-MM-DD` か。**実在する日付かまでは見る** (02-30 を弾く)。 */
 export function isValidDate(s: unknown): s is string {
@@ -155,33 +157,31 @@ export async function dispatchScrapeDates(
  * 行は CSV 分割が落ちた回で、その読取日の運行は `has_kudgivt = FALSE` のまま
  * 残っている可能性がある。
  *
- * ## ★ `alc-internal-proxy` から移した理由 (Refs #933)
+ * ## ★ 経路の変遷 (Refs #933 → #950)
  *
- * **旧経路は本番で 403 だった。** `/api/scraper/history` は rust 側で
- * `tenant_router()` = `require_tenant_header` の data 経路で、`alc-internal-proxy`
- * は data 経路を**意図的に allowlist から外している** (shared secret だけで
- * `X-Tenant-ID` を詐称できると #434 の再現になるため)。`classifyInternalPath` に
- * この path は無く、**GET / POST とも 403 `{"error":"forbidden"}`** で上流へ
- * forward もされない (method の差ではない)。
+ * `/api/scraper/history` は rust 側で `tenant_router()` = `require_tenant_header` の
+ * data 経路。`alc-internal-proxy` は data 経路を**意図的に allowlist から外している**
+ * (shared secret だけで `X-Tenant-ID` を詐称できると #434 の再現になるため) ので、
+ * **かつては GET / POST とも 403** で上流へ forward もされなかった (#933)。
+ * **テストが注入なので、緑のまま口だけが死んでいた。**
  *
- * **テストが `fetchImpl` 注入なので、緑のまま口だけが死んでいた。**
- * 本番では `GET /kintai-relay/scrape-history` が
- * `502: alc scraper history failed (403): {"error":"forbidden"}` を返していた。
+ * いまは auth-worker の **RPC entrypoint** 越し (#950)。**名前付きメソッドは
+ * service binding からしか呼べない**ので、device credential も pairing も要らない。
+ * `tenantId` は relay が `DTAKO_ACCOUNTS` で既に持っている値。
  */
 export async function fetchScrapeHistory(
-  input: { accessToken: string; limit: number },
-  fetchImpl: FetchLike,
+  input: { tenantId: string; limit: number },
+  rpc: AlcTenantDataForwarder,
 ): Promise<unknown> {
-  const res = await deviceProxyGet(
-    "/api/scraper/history",
-    `?limit=${input.limit}`,
-    input.accessToken,
-    fetchImpl,
+  const text = unwrapAlcTenantData(
+    "alc scraper history",
+    await rpc.forwardAlcTenantData({
+      tenantId: input.tenantId,
+      path: "/api/scraper/history",
+      method: "GET",
+      search: `?limit=${input.limit}`,
+    }),
   );
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`alc scraper history failed (${res.status}): ${text.slice(0, 300)}`);
-  }
   try {
     return JSON.parse(text) as unknown;
   } catch {
@@ -193,19 +193,24 @@ export async function fetchScrapeHistory(
  * 履歴を 1 行書く (`POST /api/scraper/history`)。**無人実行を履歴に載せるための口**
  * (Refs #931)。行の組み立ては `scrape-history-record.ts` の責務。
  *
- * `ROLE_PATH_ALLOWLIST` は **method を見ない**ので、読み (上の GET) と同じ 1 行の
- * allowlist で書きも通る。alc は成功時 `204 No Content` を返すので**本文は読まない**。
+ * 読み (上の GET) と**同じ RPC・同じ tenant** を通る。alc は成功時 `204 No Content` を
+ * 返すので**本文は読まない** (`unwrapAlcTenantData` が 2xx を通すだけ)。
  */
 export async function postScrapeHistory(
   entry: unknown,
-  accessToken: string,
-  fetchImpl: FetchLike,
+  tenantId: string,
+  rpc: AlcTenantDataForwarder,
 ): Promise<void> {
-  const res = await deviceProxyPostJson("/api/scraper/history", entry, accessToken, fetchImpl);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`alc scraper history save failed (${res.status}): ${text.slice(0, 300)}`);
-  }
+  unwrapAlcTenantData(
+    "alc scraper history save",
+    await rpc.forwardAlcTenantData({
+      tenantId,
+      path: "/api/scraper/history",
+      method: "POST",
+      body: JSON.stringify(entry),
+      contentType: "application/json",
+    }),
+  );
 }
 
 /**
@@ -239,15 +244,18 @@ export function countSplitFailed(history: unknown): number {
  * そのまま本文つきで上がる (握り潰さない)。
  */
 export async function fetchUnsplit(
-  input: { accessToken: string; dateFrom: string; dateTo: string },
-  fetchImpl: FetchLike,
+  input: { tenantId: string; dateFrom: string; dateTo: string },
+  rpc: AlcTenantDataForwarder,
 ): Promise<{ unsplit: unknown[]; unsplit_total: number }> {
-  const q = `?date_from=${input.dateFrom}&date_to=${input.dateTo}`;
-  const res = await deviceProxyGet("/api/dtako/events/etags", q, input.accessToken, fetchImpl);
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`alc etags failed (${res.status}): ${text.slice(0, 300)}`);
-  }
+  const text = unwrapAlcTenantData(
+    "alc etags",
+    await rpc.forwardAlcTenantData({
+      tenantId: input.tenantId,
+      path: "/api/dtako/events/etags",
+      method: "GET",
+      search: `?date_from=${input.dateFrom}&date_to=${input.dateTo}`,
+    }),
+  );
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
