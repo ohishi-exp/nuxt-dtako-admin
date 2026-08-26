@@ -28,6 +28,7 @@ export default defineConfig({
         'src/upstream-memo.ts',
         'src/theearth-session.ts',
         'src/promise-queue.ts',
+        'src/device-proxy.ts',
         'src/scrape-dispatch.ts',
         'src/scrape-history-record.ts',
         'src/scrape-queue.ts',
