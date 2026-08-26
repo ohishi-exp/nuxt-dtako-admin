@@ -16,7 +16,11 @@ import {
   SCRAPE_QUEUE_KEY,
   SCRAPE_RUNNING_KEY,
   setRunningPointer,
+  STALE_FOLD_REAP_MS,
   STALE_FOLD_THRESHOLD_MS,
+  countFoldStates,
+  reapStaleFolds,
+  FOLD_STATES,
   touchScrapeJobOrder,
   type QueuedScrapeItem,
   type QueueStorage,
@@ -30,8 +34,10 @@ class FakeStorage implements QueueStorage {
   private map = new Map<string, unknown>();
   private alarmTime: number | null = null;
   private poison: unknown | null = null;
+  private getPoison: unknown | null = null;
 
   async get<T>(key: string): Promise<T | undefined> {
+    if (this.getPoison !== null) throw this.getPoison;
     return this.map.get(key) as T | undefined;
   }
   async put<T>(key: string, value: T): Promise<void> {
@@ -62,6 +68,11 @@ class FakeStorage implements QueueStorage {
   /** 次の 1 回だけ `put` を throw させる。 */
   poisonPutOnce(err: unknown): void {
     this.poison = err;
+  }
+
+  /** 以降ずっと `get` を throw させる (掃除の catch 分岐を検証するため)。 */
+  poisonGet(err: unknown): void {
+    this.getPoison = err;
   }
 
   hasKey(key: string): boolean {
@@ -608,5 +619,245 @@ describe("recordFoldProgress", () => {
     } finally {
       errSpy.mockRestore();
     }
+  });
+});
+
+describe("decideFoldRecord — running は前回の試行の残骸を捨てる (Refs #945)", () => {
+  const finished: ScrapeJobRecord = {
+    date: "2026-08-01",
+    state: "done",
+    accepted_at: "2026-08-01T16:00:56.704Z",
+    upload_id: "065b9a76",
+    split_failed: 0,
+    fold_state: "done",
+    fold_months: ["2026-08"],
+    fold_pages: 2,
+    fold_drivers_written: 0,
+    fold_started_at: "2026-08-01T16:01:00.000Z",
+  };
+
+  it("**畳み直すと前回の fold_pages / fold_drivers_written が消える** — 残すと「2 ページ書いて止まった」と誤読される (本番 comp 27324455 / 2026-08-01 の実測)", () => {
+    const decision = decideFoldRecord(finished, "2026-08-01", {
+      fold_state: "running",
+      fold_started_at: "2026-08-21T18:23:32.752Z",
+      fold_months: ["2026-08"],
+    });
+    expect(decision.write).toBe(true);
+    if (!decision.write) throw new Error("unreachable");
+    expect(decision.record.fold_state).toBe("running");
+    expect(decision.record.fold_pages).toBeUndefined();
+    expect(decision.record.fold_drivers_written).toBeUndefined();
+    // 新しい試行の値だけが載る
+    expect(decision.record.fold_started_at).toBe("2026-08-21T18:23:32.752Z");
+    // 取り込みが決めた値には触れない (fold は state を語る立場に無い)
+    expect(decision.record.state).toBe("done");
+    expect(decision.record.upload_id).toBe("065b9a76");
+    expect(decision.record.split_failed).toBe(0);
+  });
+
+  it("前回の fold_error / fold_skip_reason も残さない (failed → running で古いエラーが残り続けるのを防ぐ)", () => {
+    const decision = decideFoldRecord(
+      { ...finished, fold_state: "failed", fold_error: "status 403: 畳めません", fold_skip_reason: "古い理由" },
+      "2026-08-01",
+      { fold_state: "running", fold_started_at: "2026-08-21T18:23:32.752Z" },
+    );
+    if (!decision.write) throw new Error("unreachable");
+    expect(decision.record.fold_error).toBeUndefined();
+    expect(decision.record.fold_skip_reason).toBeUndefined();
+    expect(decision.record.fold_months).toBeUndefined();
+  });
+
+  it("**running 以外の patch では捨てない** — 終端の書き込みは running が置いた値の上に重ねる", () => {
+    const running: ScrapeJobRecord = {
+      date: "2026-08-01",
+      state: "done",
+      accepted_at: "2026-08-01T16:00:56.704Z",
+      fold_state: "running",
+      fold_months: ["2026-08"],
+      fold_started_at: "2026-08-21T18:23:32.752Z",
+    };
+    const decision = decideFoldRecord(running, "2026-08-01", {
+      fold_state: "done",
+      fold_pages: 4,
+      fold_drivers_written: 21,
+    });
+    if (!decision.write) throw new Error("unreachable");
+    expect(decision.record.fold_months).toEqual(["2026-08"]);
+    expect(decision.record.fold_started_at).toBe("2026-08-21T18:23:32.752Z");
+    expect(decision.record.fold_drivers_written).toBe(21);
+  });
+});
+
+describe("reapStaleFolds (Refs #945)", () => {
+  const NOW = Date.parse("2026-08-26T04:35:00.000Z");
+  const seed = async (storage: FakeStorage, records: ScrapeJobRecord[]): Promise<void> => {
+    for (const record of records) {
+      await storage.put(SCRAPE_JOB_KEY_PREFIX + record.date, record);
+      await touchScrapeJobOrder(storage, record.date);
+    }
+  };
+  const read = (storage: FakeStorage, date: string): Promise<ScrapeJobRecord | undefined> =>
+    storage.get<ScrapeJobRecord>(SCRAPE_JOB_KEY_PREFIX + date);
+
+  it("**閾値を超えた running を終端 (stale) に倒す** — done/failed/skipped_* のどれにも入らず数えられない状態を無くす", async () => {
+    const storage = new FakeStorage();
+    await seed(storage, [
+      {
+        date: "2026-07-03",
+        state: "done",
+        accepted_at: "2026-08-21T05:47:22.741Z",
+        fold_state: "running",
+        fold_started_at: "2026-08-21T05:47:22.741Z",
+        fold_months: ["2026-07"],
+      },
+    ]);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await reapStaleFolds(storage, NOW)).toEqual({ reaped: ["2026-07-03"] });
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("reaped_stale"));
+    } finally {
+      errSpy.mockRestore();
+    }
+    const after = await read(storage, "2026-07-03");
+    expect(after?.fold_state).toBe("stale");
+    // **失敗と断定しない。** 倒した理由と根拠時刻を残す
+    expect(after?.fold_error).toContain("2026-08-21T05:47:22.741Z");
+    expect(after?.fold_error).toContain("失敗したと確認できたわけではありません");
+    // 取り込みが決めた値には触れない
+    expect(after?.state).toBe("done");
+  });
+
+  it("**fold_started_at を持たない旧レコードは accepted_at 代用と明記する** — 代用で出た日数を実測値と読ませない", async () => {
+    const storage = new FakeStorage();
+    await seed(storage, [
+      {
+        date: "2026-06-06",
+        state: "done",
+        accepted_at: "2026-08-01T04:07:27.550Z",
+        fold_state: "running",
+        fold_months: ["2026-06"],
+      },
+    ]);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await reapStaleFolds(storage, NOW);
+    } finally {
+      errSpy.mockRestore();
+    }
+    const after = await read(storage, "2026-06-06");
+    expect(after?.fold_state).toBe("stale");
+    expect(after?.fold_error).toContain("accepted_at");
+    expect(after?.fold_error).toContain("実際の fold 開始時刻は記録に残っていません");
+  });
+
+  it("**まだ生きている running は倒さない** (閾値ちょうども倒さない) — 動いていたものを止まったことにしない", async () => {
+    const storage = new FakeStorage();
+    const startedAt = new Date(NOW - STALE_FOLD_REAP_MS).toISOString();
+    await seed(storage, [
+      { date: "2026-08-26", state: "done", accepted_at: startedAt, fold_state: "running", fold_started_at: startedAt },
+    ]);
+    expect(await reapStaleFolds(storage, NOW)).toEqual({ reaped: [] });
+    expect((await read(storage, "2026-08-26"))?.fold_state).toBe("running");
+  });
+
+  it("**読むだけの閾値 (30分) では倒さない** — 書き換える判定に読み取り用の値を流用していないことの陰性対照", async () => {
+    const storage = new FakeStorage();
+    const startedAt = new Date(NOW - (STALE_FOLD_THRESHOLD_MS + 60_000)).toISOString();
+    await seed(storage, [
+      { date: "2026-08-26", state: "done", accepted_at: startedAt, fold_state: "running", fold_started_at: startedAt },
+    ]);
+    expect(await reapStaleFolds(storage, NOW)).toEqual({ reaped: [] });
+    expect((await read(storage, "2026-08-26"))?.fold_state).toBe("running");
+  });
+
+  it("running 以外 / レコード欠落 / 時刻が壊れた行は素通しする", async () => {
+    const storage = new FakeStorage();
+    await seed(storage, [
+      { date: "2026-08-24", state: "done", accepted_at: "2026-08-24T16:00:25.917Z", fold_state: "done" },
+      { date: "2026-08-23", state: "failed", accepted_at: "2026-08-23T16:00:53.946Z" },
+      { date: "2026-08-22", state: "done", accepted_at: "壊れた日付", fold_state: "running" },
+    ]);
+    // order にだけ載っていてレコードが消えている日付 (200 件上限で捨てられた後)
+    await touchScrapeJobOrder(storage, "2026-01-01");
+    expect(await reapStaleFolds(storage, NOW)).toEqual({ reaped: [] });
+    expect((await read(storage, "2026-08-22"))?.fold_state).toBe("running");
+  });
+
+  it("order が無ければ何もしない", async () => {
+    expect(await reapStaleFolds(new FakeStorage(), NOW)).toEqual({ reaped: [] });
+  });
+
+  it("**掃除は記録の並び順を動かさない** — touchScrapeJobOrder を通すと掃除した件数ぶん別の記録が 200 件上限から落ちる", async () => {
+    const storage = new FakeStorage();
+    await seed(storage, [
+      {
+        date: "2026-07-03",
+        state: "done",
+        accepted_at: "2026-08-21T05:47:22.741Z",
+        fold_state: "running",
+        fold_started_at: "2026-08-21T05:47:22.741Z",
+      },
+      { date: "2026-08-25", state: "done", accepted_at: "2026-08-25T16:00:22.134Z", fold_state: "done" },
+    ]);
+    const before = await storage.get<string[]>(SCRAPE_JOB_ORDER_KEY);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await reapStaleFolds(storage, NOW);
+    } finally {
+      errSpy.mockRestore();
+    }
+    expect(await storage.get<string[]>(SCRAPE_JOB_ORDER_KEY)).toEqual(before);
+  });
+
+  it("storage が失敗しても投げず、黙って 0 件で返さない (loud fail)", async () => {
+    const storage = new FakeStorage();
+    storage.poisonGet(new Error("boom"));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await reapStaleFolds(storage, NOW)).toEqual({ reaped: [] });
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Error: boom"));
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+});
+
+describe("countFoldStates (Refs #945)", () => {
+  const record = (date: string, fold_state?: ScrapeJobRecord["fold_state"]): ScrapeJobRecord => ({
+    date,
+    state: "done",
+    accepted_at: "2026-08-01T00:00:00.000Z",
+    ...(fold_state ? { fold_state } : {}),
+  });
+
+  it("**0 件の状態も 0 と書く** — 出ていない状態を「無かった」と読ませない", () => {
+    const counts = countFoldStates([]);
+    for (const state of FOLD_STATES) expect(counts[state]).toBe(0);
+    expect(counts.none).toBe(0);
+  });
+
+  it("fold_state を持たないレコードは none に入り、合計がレコード数と一致する", () => {
+    const records = [
+      record("2026-08-01"),
+      record("2026-08-02", "done"),
+      record("2026-08-03", "running"),
+      record("2026-08-04", "stale"),
+      record("2026-08-05", "skipped_out_of_scope"),
+      record("2026-08-06", "not_configured"),
+    ];
+    const counts = countFoldStates(records);
+    expect(counts.none).toBe(1);
+    expect(counts.done).toBe(1);
+    expect(counts.running).toBe(1);
+    expect(counts.stale).toBe(1);
+    expect(counts.skipped_out_of_scope).toBe(1);
+    expect(counts.not_configured).toBe(1);
+    expect(Object.values(counts).reduce((a, b) => a + b, 0)).toBe(records.length);
+  });
+
+  it("**FOLD_STATES に載っている状態は全部数えられる** — 状態を足して集計に載せ忘れる穴を塞ぐ", () => {
+    const counts = countFoldStates(FOLD_STATES.map((state, i) => record(`2026-08-${i + 1}`, state)));
+    for (const state of FOLD_STATES) expect(counts[state]).toBe(1);
+    expect(counts.none).toBe(0);
   });
 });

@@ -33,6 +33,25 @@ export type ScrapeJobState = "pending" | "running" | "done" | "failed";
  * `state === "running"` の間だけ意味を持つ。 */
 export type ScrapeJobPhase = "pre_upload" | "post_upload";
 
+/** fold の状態。**`running` 以外はすべて終端** (Refs #945)。
+ *
+ * **配列を正にする** — [`countFoldStates`] がこれを回して「0 件の状態も 0 と書く」
+ * ため、状態を足したら集計にも自動で載る。**union 型を直接書くと、集計に足し忘れた
+ * 状態が黙って 0 件にすらならず消える**ので、単一の宣言から型を導く。 */
+export const FOLD_STATES = [
+  "running",
+  "done",
+  "capped",
+  "stale",
+  "skipped_split_failed",
+  "skipped_no_upload",
+  "skipped_out_of_scope",
+  "not_configured",
+  "failed",
+] as const;
+
+export type FoldState = (typeof FOLD_STATES)[number];
+
 /** `/cron/dtako` 1 ジョブぶんの進捗。DO の `ctx.storage` に `scrape-job:{date}`
  * キーで持つ (`date` は [`QueuedScrapeItem.jobKey`] と同じ値)。 */
 export interface ScrapeJobRecord {
@@ -54,23 +73,32 @@ export interface ScrapeJobRecord {
    * の方がマシ」という判断で意図的に回さなかった状態。
    *
    * `skipped_out_of_scope` は**勤怠の対象会社ではない**ため最初から回さなかった
-   * 状態 (Refs #633-22、`kintai-relay.ts` の `isFoldTargetComp`)。**失敗ではない** —
+   * 状態 (Refs #633-22、`kintai-relay.ts` の [`judgeFoldScope`])。**失敗ではない** —
    * これを `failed` として記録していた間、comp 75700192 は取り込み成功のたびに
-   * 403 を出し続け、本物の fold 失敗と見分けが付かなかった。
+   * 403 を出し続け、本物の fold 失敗と見分けが付かなかった。**なぜ対象外なのかは
+   * `fold_skip_reason` が名指しする** (Refs #944)。
+   *
+   * `not_configured` は**設定の穴**。`KINTAI_COMP_ID` 未設定 (対象会社が 1 社も
+   * 宣言されていない) と、畳み先の origin/secret 未設定の両方がここに入る。
+   * **`skipped_*` と混ぜない** — あちらは意図して回さなかった状態で、こちらは
+   * 「設定を直せば回る」状態 (Refs #944)。
+   *
+   * `stale` は **`running` のまま閾値を超えたので終端に倒した**状態
+   * ([`reapStaleFolds`]、Refs #945)。**`failed` とは別**にしてある — DO の evict 等で
+   * 記録が取り残されただけで、fold が失敗したと断定できたわけではない。倒す理由と
+   * 経過時間は `fold_error` に書く。
    *
    * **★ `fold_*` は `state` を一切動かさない** ([`recordFoldProgress`]、Refs #595)。
    * `fold_state: "failed"` でも `state` は取り込みが決めた値 (`done`/`failed`) のまま。
    * **`fold_state` を見て取り込みの成否を判断しないこと**、そして逆に
    * **`state` を見て fold の成否を判断しないこと。** */
-  fold_state?:
-    | "running"
-    | "done"
-    | "capped"
-    | "skipped_split_failed"
-    | "skipped_no_upload"
-    | "skipped_out_of_scope"
-    | "not_configured"
-    | "failed";
+  fold_state?: FoldState;
+  /** `skipped_*` / `not_configured` の**理由を人が読める形で**持つ (Refs #944)。
+   * `skipped_out_of_scope` は「対象外だから飛ばした」としか読めず、**その直前まで
+   * 同じ読取日が 403 で失敗していた場合に「壊れているのを黙らせた」と区別が付かない**
+   * — どの宣言が対象外を決めたのかをここに書いて名指しさせる
+   * (`kintai-relay.ts` の [`judgeFoldScope`] が文面を作る)。 */
+  fold_skip_reason?: string;
   fold_error?: string;
   fold_months?: string[];
   fold_pages?: number;
@@ -165,7 +193,12 @@ export type ScrapeJobFoldPatch = Required<Pick<ScrapeJobRecord, "fold_state">> &
   Partial<
     Pick<
       ScrapeJobRecord,
-      "fold_error" | "fold_months" | "fold_pages" | "fold_drivers_written" | "fold_started_at"
+      | "fold_error"
+      | "fold_skip_reason"
+      | "fold_months"
+      | "fold_pages"
+      | "fold_drivers_written"
+      | "fold_started_at"
     >
   >;
 
@@ -204,7 +237,47 @@ export function decideFoldRecord(
   patch: ScrapeJobFoldPatch,
 ): FoldRecordDecision {
   if (!existing) return { write: false, reason: "no_record" };
-  return { write: true, record: { ...existing, ...patch, date: jobKey } };
+  const base = patch.fold_state === "running" ? clearPreviousFoldAttempt(existing) : existing;
+  return { write: true, record: { ...base, ...patch, date: jobKey } };
+}
+
+/**
+ * **新しい fold の入口 (`fold_state: "running"`) で、前回の試行の残骸を捨てる**
+ * (Refs #945)。`recordScrapeJob` が `state: "pending"` で spread を止めている
+ * (#596) のと同じ処置を fold 側にも当てる。
+ *
+ * ## なぜ要るか (本番で実測、2026-08-26)
+ *
+ * `fold_pages` / `fold_drivers_written` を書くのは **`runFoldMonths` の終端 1 か所
+ * だけ**で、fold の途中では 1 度も書かない。ところが patch は部分 spread なので、
+ * **同じ読取日を畳み直すと前回の終端値がそのまま残る**:
+ *
+ * ```
+ * comp 27324455 / 読取日 2026-08-01
+ *   fold_pages: 2, fold_drivers_written: 0   ← 2026-08-01 の fold の終端値
+ *   fold_started_at: 2026-08-21T18:23:32Z    ← 20 日後に畳み直した
+ *   fold_state: "running"
+ * ```
+ *
+ * これは **「2 ページ書いたところで止まった」と読めてしまう**が、実際には別の試行の
+ * 数字。ohishi-exp/nuxt-dtako-admin#945 の本文もそう誤読している。`fold_error` も
+ * 同じで、前回 `failed` → 今回 `running` にすると古いエラーが残り続ける。
+ *
+ * ⇒ **入口で「この試行がまだ何も書いていない」状態に戻す。** `running` の patch が
+ * 自分で書く `fold_started_at` / `fold_months` もここで一度落として、patch 側の値
+ * だけが載るようにする (patch に無ければ載らないのが正しい)。
+ */
+function clearPreviousFoldAttempt(record: ScrapeJobRecord): ScrapeJobRecord {
+  const {
+    fold_error: _foldError,
+    fold_skip_reason: _foldSkipReason,
+    fold_months: _foldMonths,
+    fold_pages: _foldPages,
+    fold_drivers_written: _foldDriversWritten,
+    fold_started_at: _foldStartedAt,
+    ...rest
+  } = record;
+  return rest;
 }
 
 /** [`recordFoldProgress`] の結果。**呼び出し元は `written` 以外を黙って捨てないこと** —
@@ -405,11 +478,37 @@ export async function migrateLegacyScrapeJobsOnce(
   return { ran: true, requeued, failedClosed };
 }
 
-/** `fold_state: "running"` の古さの閾値 (ミリ秒)。**★ この数字は未検証**
- * (Refs #633-21)。fold 1 回の実所要時間の実測が無く、「1 読取日の scrape が約
- * 3 分」(kintai-ops skill 実測) の 10 倍かかることは考えにくい、という程度の
- * 根拠しかない。実測で違うと分かったら、この数字ではなく実測値を報告すること。 */
+/** `fold_state: "running"` の古さの閾値 (ミリ秒)。**読み手に「これは残骸かもしれない」
+ * と伝えるためだけの値** — これを超えても保存値は書き換えない ([`annotateFoldStaleness`])。
+ *
+ * ## 実測 (2026-08-26、測定条件つき)
+ *
+ * - 経路: kyuyo-mcp `get_dtako_scrape_progress` (読むだけ)。母集団は下記 3 件のみ
+ * - 条件: comp 27324455 / **取り込みを伴わない fold のみの遡り実行** / `fold_pages: 4`
+ * - fold は DO 内で直列 (`foldQueue`) なので、連続する `fold_started_at` の差を所要時間の
+ *   近似として読んだ (厳密な計測ではなく**上限寄りの近似**)
+ *
+ * ```
+ * 2026-08-21 05:40:40  読取日 07-01 → done (pages 4, drivers 92)
+ * 2026-08-21 05:44:07  読取日 07-02 → done (pages 4, drivers 98)   差 3分27秒
+ * 2026-08-21 05:47:22  読取日 07-03 → running (取り残された)        差 3分15秒
+ * ```
+ *
+ * ⇒ **4 ページ完走で約 3.3 分。** 30 分はその約 9 倍で、読むだけの用途には十分な余裕がある。
+ * **母集団が 3 件しかないので、ページ数や母集団が変われば測り直すこと。**
+ * (Refs #633-21 の「★ この数字は未検証」を、この実測で置き換えた。) */
 export const STALE_FOLD_THRESHOLD_MS = 30 * 60 * 1000;
+
+/** `fold_state: "running"` を**終端に倒す**閾値 (ミリ秒、Refs #945)。
+ *
+ * **[`STALE_FOLD_THRESHOLD_MS`] を流用しない。** あちらは「読み手に疑わせる」ための値で、
+ * こちらは**記録を書き換える**判定。まだ生きている fold を倒すと「動いていたものを
+ * 止まったことにした記録」が残り、`skipped_out_of_scope` が壊れた fold を隠していたのと
+ * 同じ型の欠陥 (Refs #944) を新しく作ってしまう。⇒ **上の実測 (約 3.3 分) の 100 倍以上**を
+ * 取って、実質「その日のうちに終わらなかったものだけ」を倒す。
+ *
+ * **実測で本当に 6 時間かかる fold が見つかったら、この数字ではなく実測値を報告すること。** */
+export const STALE_FOLD_REAP_MS = 6 * 60 * 60 * 1000;
 
 /** 進捗応答用に、`fold_state: "running"` のレコードへ経過時間の算出値を添える。
  * **保存値 (`fold_state` そのもの) は書き換えない** — running が本当に残骸か
@@ -430,4 +529,112 @@ export function annotateFoldStaleness(
   if (Number.isNaN(startedMs)) return record;
   const fold_running_for_ms = Math.max(0, now - startedMs);
   return { ...record, fold_running_for_ms, fold_stale: fold_running_for_ms > STALE_FOLD_THRESHOLD_MS };
+}
+
+/** `fold_state: "running"` が始まってからの経過ミリ秒。`fold_started_at` が無い旧
+ * レコードは `accepted_at` で代用する ([`annotateFoldStaleness`] と同じ規則)。
+ * 時刻が読めなければ `null` — **0 に丸めない** (「経過 0 = 今始まった」と読めてしまう)。 */
+function foldRunningForMs(record: ScrapeJobRecord, now: number): number | null {
+  const startedMs = Date.parse(record.fold_started_at ?? record.accepted_at);
+  if (Number.isNaN(startedMs)) return null;
+  return Math.max(0, now - startedMs);
+}
+
+/** [`reapStaleFolds`] が `fold_error` に書く文面。**「いつから running か」と
+ * 「その時刻をどう測ったか」を必ず両方書く** (Refs #945)。
+ *
+ * `fold_started_at` を持たない旧レコードでは `accepted_at` で代用しており、
+ * **本当の fold 開始時刻は記録に残っていない**。これを書かないと、代用で出た
+ * 「25 日」が実測値として読まれる (#945 本文がまさにそう読んでいる)。 */
+function describeStaleFold(record: ScrapeJobRecord, runningForMs: number): string {
+  const hours = Math.floor(runningForMs / (60 * 60 * 1000));
+  const basis = record.fold_started_at
+    ? `running を書いた時刻: ${record.fold_started_at}`
+    : `★ fold_started_at を持たない旧レコードのため accepted_at (${record.accepted_at}) からの` +
+      "経過で測っています — 実際の fold 開始時刻は記録に残っていません";
+  return (
+    `fold_state: "running" のまま約 ${hours} 時間 (閾値 ` +
+    `${STALE_FOLD_REAP_MS / (60 * 60 * 1000)} 時間) を超えたため終端に倒しました。` +
+    `${basis}。**fold が失敗したと確認できたわけではありません** — ` +
+    "DO の再起動 (deploy / evict) 等で終端の記録が書かれないまま取り残された可能性があります。"
+  );
+}
+
+/** [`reapStaleFolds`] の結果。倒した jobKey を返す — **呼び出し元が黙って捨てないため**。 */
+export interface StaleFoldReapResult {
+  reaped: string[];
+}
+
+/**
+ * **取り残された `fold_state: "running"` を終端 (`stale`) に倒す** (Refs #945)。
+ *
+ * ## なぜ要るか
+ *
+ * `runFoldMonths` は `running` を書いた後、try/catch で終端を書く。**DO が evict /
+ * 再起動されるとその catch は走らない**ので、記録は `running` のまま残る。取り込み
+ * 本体には孤児回収 ([`recoverOrphan`]) が在るのに、**fold には対応物が 1 本も無かった** —
+ * 結果、本番に最長 25 日 (旧レコードの `accepted_at` 代用で測った値) の `running` が
+ * 9 件残り、**`done`/`failed`/`skipped_*` のどれにも入らないので失敗として数えられない**
+ * 状態になっていた (「黙って落とす」の型)。
+ *
+ * ## 倒すのであって、リトライはしない
+ *
+ * fold をやり直すには取り込みの入力が要り、`/cron/dtako` は破壊的経路
+ * (`has_kudgivt` を `DEFAULT FALSE` に戻す)。**勝手に回さない** — 数えられる終端に
+ * するところまでが仕事で、回し直すかどうかは人が決める。
+ *
+ * ## `touchScrapeJobOrder` を通さない
+ *
+ * あれは「最後に触れた順」を更新し、[`MAX_SCRAPE_JOB_RECORDS`] を超えたぶんを古い方から
+ * 捨てる。**掃除で 9 件を触ると 9 件が最新扱いになり、その分だけ別の (もっと新しい)
+ * 記録が板から落ちる** — 記録を読めるようにするための掃除で記録を消しては本末転倒。
+ * ⇒ 順序には触れず `put` だけする。
+ *
+ * **観測のための書き込みなので例外を投げない** ([`recordFoldProgress`] と同じ流儀)。
+ * `now` は必ず引数で受ける (テストのため `Date.now()` をここで直接呼ばない)。
+ */
+export async function reapStaleFolds(
+  storage: QueueStorage,
+  now: number,
+): Promise<StaleFoldReapResult> {
+  const reaped: string[] = [];
+  try {
+    const order = (await storage.get<string[]>(SCRAPE_JOB_ORDER_KEY)) ?? [];
+    for (const jobKey of order) {
+      const key = SCRAPE_JOB_KEY_PREFIX + jobKey;
+      const record = await storage.get<ScrapeJobRecord>(key);
+      if (!record || record.fold_state !== "running") continue;
+      const runningForMs = foldRunningForMs(record, now);
+      if (runningForMs === null || runningForMs <= STALE_FOLD_REAP_MS) continue;
+      await storage.put(key, {
+        ...record,
+        fold_state: "stale",
+        fold_error: describeStaleFold(record, runningForMs),
+      });
+      reaped.push(jobKey);
+    }
+  } catch (err) {
+    // **黙って 0 件にしない。** 掃除できなかったことと、掃除する物が無かったことは別。
+    console.error(`reapStaleFolds failed: ${describeUnknownError(err)}`);
+  }
+  if (reaped.length > 0) {
+    console.error(JSON.stringify({ kintai_fold: "reaped_stale", count: reaped.length, jobs: reaped }));
+  }
+  return { reaped };
+}
+
+/** `fold_state` 別の件数。**全ての状態を 0 件でも必ず載せる** (Refs #945)。
+ *
+ * `fold_state` を持たない (fold を回す前 / 回さなかった) レコードは `none` に数える —
+ * **合計がレコード数と一致することを保証する**。issue #945 の「`fold_state` の集計は
+ * `done`/`failed`/`skipped_*` しか拾わず、永久 `running` はどちらにも入らない」は、
+ * 集計する側が状態を列挙していたことが原因。⇒ [`FOLD_STATES`] を正にして、
+ * **状態が増えたら集計にも自動で載る**ようにする。 */
+export function countFoldStates(
+  records: readonly ScrapeJobRecord[],
+): Record<FoldState | "none", number> {
+  const counts = { none: 0 } as Record<FoldState | "none", number>;
+  for (const state of FOLD_STATES) counts[state] = 0;
+  for (const record of records) counts[record.fold_state ?? "none"] += 1;
+  return counts;
 }

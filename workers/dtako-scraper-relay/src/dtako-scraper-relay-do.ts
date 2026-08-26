@@ -105,6 +105,8 @@ import {
   clearRunningPointer,
   MAX_SCRAPE_JOB_RECORDS,
   migrateLegacyScrapeJobsOnce,
+  reapStaleFolds,
+  countFoldStates,
   popNextScrapeQueueItem,
   pushScrapeQueueItem,
   recordFoldProgress,
@@ -503,9 +505,14 @@ function describeScrapeFailure(err: unknown): { message: string; evidence?: Thee
 }
 
 /** `decideFoldTrigger` が「回さない」と決めた理由 → 進捗レコードの `fold_state`
- * (Refs #633-22)。**全部 `skipped_*`** — どれも失敗ではなく、意図して回さなかった
- * 状態を表す (`scrape-queue.ts` の `ScrapeJobRecord.fold_state` の doc 参照)。
- * 網羅を型で担保するため `Record<...>` で受ける (理由が増えたらここが型エラーになる)。 */
+ * (Refs #633-22)。網羅を型で担保するため `Record<...>` で受ける (理由が増えたら
+ * ここが型エラーになる)。
+ *
+ * **★ `not_configured` だけ `skipped_*` に落とさない** (Refs #944)。`skipped_*` は
+ * 「意図して回さなかった」状態だが、`KINTAI_COMP_ID` 未設定は**設定の穴**で、
+ * 直せば回る。旧実装は両方を `skipped_out_of_scope` にしていたため、**本番でこの var を
+ * 落とすと対象会社まで含めた全社が「対象外だから飛ばした」に見え、勤怠が畳まれなく
+ * なったことが失敗として数えられなかった** (`kintai-relay.ts` の [`judgeFoldScope`] の doc)。 */
 const FOLD_SKIP_STATE: Record<
   Exclude<FoldTriggerDecision, { run: true }>["reason"],
   NonNullable<ScrapeJobRecord["fold_state"]>
@@ -513,6 +520,7 @@ const FOLD_SKIP_STATE: Record<
   no_upload: "skipped_no_upload",
   split_failed: "skipped_split_failed",
   out_of_scope: "skipped_out_of_scope",
+  not_configured: "not_configured",
 };
 
 /** ETC 手動実行 (`/ws/scraper?kind=etc|etc-all`) の「今月/先月」ボタン選択を
@@ -646,7 +654,8 @@ export interface RelayEnv {
    * key 設計と「何を残して何を残さないか」は `scrape-error-artifact.ts` の doc 参照。 */
   DTAKO_SCRAPE_R2_PREFIX?: string;
   /** 勤怠 (fold) の対象会社。`wrangler.toml` の宣言をそのまま fold の可否判定に
-   * 使う (`kintai-relay.ts` の `isFoldTargetComp`)。未設定 = 対象なし (fail-closed)。 */
+   * 使う (`kintai-relay.ts` の `judgeFoldScope`)。未設定は「対象外」ではなく
+   * `not_configured` (設定の穴) として記録する (Refs #944)。 */
   KINTAI_COMP_ID?: string;
   /** 拘束時間管理表 CSV / サマリ JSON の R2 key prefix (`restraint` /
    * `restraint-staging` / `restraint-preview`)。key 設計とバージョン管理
@@ -992,6 +1001,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // (`migrateLegacyScrapeJobsOnce` の docs 参照)。
     await migrateLegacyScrapeJobsOnce(this.ctx.storage, compId);
 
+    // 取り残された `fold_state: "running"` を終端に倒す (Refs #945)。取り込み本体の
+    // 孤児回収 (`recoverOrphan`) と同じ「次を始める前に前回の残骸を片付ける」位置。
+    // **進捗応答 (`handleCronDtakoProgress`) ではやらない** — あれは read-only。
+    await reapStaleFolds(this.ctx.storage, Date.now());
+
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server);
@@ -1058,6 +1072,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // (`scrape-job:*` の pending/running) を新キューへ一度だけ移送する (Refs
     // #205-55 条件10)。
     await migrateLegacyScrapeJobsOnce(this.ctx.storage, compId);
+
+    // 取り残された `fold_state: "running"` を終端に倒す (Refs #945)。取り込み本体の
+    // 孤児回収 (`recoverOrphan`) と同じ「次を始める前に前回の残骸を片付ける」位置。
+    // **進捗応答 (`handleCronDtakoProgress`) ではやらない** — あれは read-only。
+    await reapStaleFolds(this.ctx.storage, Date.now());
 
     // 受理した時点で pending を記録する。**waitUntil の外で await** — ここで
     // 待たないと、202 を返した直後に progress を引いても pending すら見えない
@@ -1306,13 +1325,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     try {
       // **`KINTAI_COMP_ID` の宣言をそのまま判定に使う** (値をコピーしない、
       // Refs #633-22)。対象外の会社で fold を回すと畳み先が 403 を返し、恒久的な
-      // `fold_state: "failed"` になって本物の失敗が埋もれる (`isFoldTargetComp` の doc)。
+      // `fold_state: "failed"` になって本物の失敗が埋もれる (`judgeFoldScope` の doc)。
       const decision = decideFoldTrigger(uploadOutcome, {
         compId: account.comp_id,
         kintaiCompId: this.env.KINTAI_COMP_ID,
       });
       if (!decision.run) {
-        await this.recordFold(jobKey, { fold_state: FOLD_SKIP_STATE[decision.reason] });
+        // **理由を必ず添える** (Refs #944)。`skipped_out_of_scope` は「対象外だから
+        // 飛ばした」としか読めず、直前まで同じ読取日が 403 で落ちていた場合に
+        // 「壊れているのを黙らせた」と区別が付かない。
+        await this.recordFold(jobKey, {
+          fold_state: FOLD_SKIP_STATE[decision.reason],
+          fold_skip_reason: decision.detail,
+        });
         return;
       }
 
@@ -1434,6 +1459,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return Response.json({
         queue,
         ...counts,
+        // **fold も数える** (Refs #945)。`state` の 4 値だけを数えていたので、
+        // 終端に倒れない `fold_state: "running"` が done/failed のどちらにも
+        // 入らず「黙って落ちて」いた。`countFoldStates` は 0 件の状態も 0 と
+        // 書くので、状態が増えても集計から消えない。
+        fold_counts: countFoldStates(queue),
         max_records: MAX_SCRAPE_JOB_RECORDS,
         // **載っていない = 実行されていない、ではない。** 画面 (WS) 経路は
         // ここに 1 件も書かない (Refs #595)
@@ -1441,7 +1471,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           "無人実行 (/cron/dtako) の進捗だけが載ります。" +
           "画面 (WebSocket) からの手動スクレイプはここに載りません — " +
           "その結果は alc 側の GET /api/scraper/history で見てください。" +
-          "fold_* は state を動かしません (fold_state: failed でも state は取り込みが決めた値のまま)。",
+          "fold_* は state を動かしません (fold_state: failed でも state は取り込みが決めた値のまま)。" +
+          "fold の内訳は fold_counts を見てください — pending/running/done/failed の 4 件数は " +
+          "取り込みのもので、fold の成否は 1 件も含みません。" +
+          "fold_state: stale は running のまま取り残されて終端に倒したもの (失敗と断定はしていません)、" +
+          "not_configured は設定の穴、skipped_* は意図して回さなかったもので、" +
+          "なぜ回さなかったかは fold_skip_reason に書いてあります。",
       });
     } catch (err) {
       console.error(

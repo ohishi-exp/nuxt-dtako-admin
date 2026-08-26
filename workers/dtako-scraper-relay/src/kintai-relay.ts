@@ -401,7 +401,12 @@ export async function relayKintaiRecalc(
  */
 export type FoldTriggerDecision =
   | { run: true }
-  | { run: false; reason: "no_upload" | "split_failed" | "out_of_scope" };
+  | { run: false; reason: FoldSkipReason; detail: string };
+
+/** fold を回さなかった理由。**`not_configured` だけが「設定の穴」**で、他の 3 つは
+ * 意図して回さなかった状態 (Refs #944)。`FOLD_SKIP_STATE`
+ * (`dtako-scraper-relay-do.ts`) がこれを `fold_state` へ写す。 */
+export type FoldSkipReason = "no_upload" | "split_failed" | "out_of_scope" | "not_configured";
 
 /** fold の対象会社かどうか。判定の**引数**を `KINTAI_COMP_ID` の宣言 (env) にする。 */
 export interface FoldScope {
@@ -432,17 +437,52 @@ export interface FoldScope {
  * いる (「打刻を持つのは大石運輸倉庫だけ」)。**値をコピーせず宣言を参照する** —
  * 将来 対象が変わったら `KINTAI_COMP_ID` 側が変わり、この判定も自動で追随する。
  *
- * ## 未設定は「対象なし」
+ * ## 未設定は「対象外」ではない (Refs #944)
  *
  * `KINTAI_COMP_ID` は staging に**意図的に置いていない** (書き先は tenant で決まり、
  * staging も本番も同じ KV / 同じ tenant を見るため、置くと staging から本番の
  * `kintai.*` に書ける)。`/kintai-relay/run` が未設定で 503 に倒れるのと同じく、
- * ここも未設定なら**誰も対象にしない** — fail-closed が正しい向き。
+ * ここも未設定なら**誰も対象にしない** — fail-closed の向き自体は正しい。
+ *
+ * **★ ただし「宣言が無い」と「宣言はあるが一致しない」を同じ答えにしてはいけない。**
+ * 旧実装は両方 `false` を返し、呼び出し元が両方を `skipped_out_of_scope`
+ * (=「対象外だから飛ばした」) として記録していた。すると **本番で
+ * `KINTAI_COMP_ID` を落とした時、対象会社 (27324455) まで含めた全社が
+ * 「意図的に対象外」に見えたまま勤怠が畳まれなくなり、失敗としても数えられない。**
+ * top-level `[vars]` は named environment に継承されない (CLAUDE.md) ので、
+ * env を増やす時に普通に踏む穴。**同じ worker の netprint cron は同じ条件を
+ * 「黙って skip せず loud fail」にしている** (`cron.ts` の `NETPRINT_CRON` 分岐) —
+ * fold だけが逆を向いていた。
+ *
+ * ⇒ **`not_configured` (設定の穴) と `out_of_scope` (本当に対象外) を別の答えにし、
+ * どちらも人が読める理由 (`detail`) を持たせる。**
  */
-export function isFoldTargetComp(scope: FoldScope): boolean {
+export type FoldScopeVerdict =
+  | { inScope: true }
+  | { inScope: false; reason: "not_configured" | "out_of_scope"; detail: string };
+
+export function judgeFoldScope(scope: FoldScope): FoldScopeVerdict {
   const target = (scope.kintaiCompId ?? "").trim();
-  if (!target) return false;
-  return scope.compId.trim() === target;
+  if (!target) {
+    return {
+      inScope: false,
+      reason: "not_configured",
+      detail:
+        "KINTAI_COMP_ID が未設定です — fold の対象会社が 1 社も宣言されていません。" +
+        "「この会社は対象外」ではなく設定の穴です (staging は意図的に未設定)。",
+    };
+  }
+  const compId = scope.compId.trim();
+  if (compId !== target) {
+    return {
+      inScope: false,
+      reason: "out_of_scope",
+      detail:
+        `comp_id ${compId} は KINTAI_COMP_ID の宣言 (${target}) と一致しません — ` +
+        "wrangler.toml [vars] が勤怠の対象会社を 1 社に絞っています (打刻を持つのがその 1 社だけのため)。",
+    };
+  }
+  return { inScope: true };
 }
 
 export function decideFoldTrigger(
@@ -452,10 +492,24 @@ export function decideFoldTrigger(
   // **範囲の判定を先に置く。** 対象外の会社では「取り込みが成功したか」も
   // 「split が落ちたか」も fold の可否と無関係で、どちらを理由に記録しても
   // 「直せば畳める」と読めてしまう (実際には何をしても畳めない)。
-  if (!isFoldTargetComp(scope)) return { run: false, reason: "out_of_scope" };
-  if (!uploadOutcome) return { run: false, reason: "no_upload" };
+  const verdict = judgeFoldScope(scope);
+  if (!verdict.inScope) return { run: false, reason: verdict.reason, detail: verdict.detail };
+  if (!uploadOutcome) {
+    return {
+      run: false,
+      reason: "no_upload",
+      detail: "取り込み (アップロード) が成功していないため、fold に渡す入力がありません。",
+    };
+  }
   if (uploadOutcome.splitFailed !== null && uploadOutcome.splitFailed > 0) {
-    return { run: false, reason: "split_failed" };
+    return {
+      run: false,
+      reason: "split_failed",
+      detail:
+        `CSV 分割が ${uploadOutcome.splitFailed} 件失敗しています — ` +
+        "分割前の運行は fold の入力 (GET /api/dtako/events) から見えないため、" +
+        "不完全なデータで上書きしないよう見送りました。",
+    };
   }
   return { run: true };
 }
