@@ -5,9 +5,11 @@
  * - 会社×年度リストは D1 (kyuyo_companies) から即表示。「リスト更新 (差分)」は
  *   rust の高速一覧 (ミリ秒) と D1 の突き合わせ、「フル更新」は会社名+権限
  *   チェック込みの遅い方 (〜10 秒、初回シード用)
- * - 明細は会社 (複数) × 月範囲を選んで明示的に一括取得 (サーバー側の直列制限に
- *   合わせ 1 件ずつ、進捗表示)。結果は sessionStorage — タブを閉じれば消え、
- *   別ユーザーのログインを検知したら purge する
+ * - 明細は会社 (複数) × 月範囲を選んで明示的に一括引き直し (サーバー側の直列制限に
+ *   合わせ 1 件ずつ、進捗表示)。`POST /api/kyuyo/sync` で給与大臣 (OHKEN) を実際に
+ *   読み直してからサーバーの給与アーカイブを読む — `payroll` は read-through
+ *   キャッシュなので、sync 無しでは遡り修正が反映されない (Refs #467)。
+ *   結果は sessionStorage — タブを閉じれば消え、別ユーザーのログインを検知したら purge する
  * - 画面には件数と warnings 数のみ表示 (金額・氏名は出さない)
  */
 import { decodeJwtPayloadFromToken } from '@ippoan/auth-client'
@@ -168,9 +170,23 @@ async function fetchRange() {
   fetching.value = true
   try {
     for (const [index, item] of plan.entries()) {
-      progress.value = `${index + 1}/${plan.length} — ${item.company} ${item.month} を取得中…`
+      progress.value = `${index + 1}/${plan.length} — ${item.company} ${item.month} を給与大臣から引き直し中…`
       try {
-        // 認証は cookie 任せ (Refs #375、`refreshList` と同じ)。
+        // ★ まず sync — payroll は read-through キャッシュなので、これを撃たないと
+        // 給与大臣側の遡り修正が永久に反映されない (Refs #467)。
+        // 認証は cookie 任せ (Refs #375、`refreshList` と同じ) — POST proxy も
+        // cookie から Bearer を組むので、ページ側は何も載せない
+        const syncRes = await fetch(
+          `/api/kyuyo/sync?company=${item.company}&month=${item.month}`,
+          { method: 'POST' },
+        )
+        if (!syncRes.ok) {
+          const syncBody = await syncRes.json().catch(() => null)
+          const message = (syncBody as { error?: string } | null)?.error ?? `HTTP ${syncRes.status}`
+          fetchErrors.value.push(`${item.company} ${item.month}: 引き直しに失敗 (${message})`)
+          continue
+        }
+        // sync は明細を返さない (行数と synced_at だけ) ので読み直す
         const res = await fetch(`/api/kyuyo/payroll?company=${item.company}&month=${item.month}`)
         const body = await res.json().catch(() => null)
         if (!res.ok) {
@@ -216,7 +232,9 @@ onMounted(() => {
       給与DB取得
     </h1>
     <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-      給与大臣 DB から明細を取得してこのタブ内に保持します (タブを閉じると消えます)。
+      給与大臣 (OHKEN) を実際に読み直し、<b>サーバー側の給与アーカイブを上書き</b>します
+      (1 社×1 ヶ月あたり 10〜20 秒。給与大臣 PC が古く DB を都度開くためで、異常ではありません)。
+      取得した明細はこのタブ内にも保持します (タブを閉じると消えます)。
       画面には件数のみ表示し、金額・氏名は出しません。
     </p>
 
@@ -268,8 +286,8 @@ onMounted(() => {
         <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">終了月</label>
         <UInput v-model="monthTo" type="month" :disabled="fetching" />
       </div>
-      <UButton icon="i-lucide-download" :loading="fetching" @click="fetchRange">
-        一括取得
+      <UButton icon="i-lucide-refresh-cw" :loading="fetching" @click="fetchRange">
+        一括で引き直す
       </UButton>
       <span v-if="progress" class="text-xs text-gray-500 dark:text-gray-400 pb-2">{{ progress }}</span>
     </div>
