@@ -12,6 +12,10 @@ export default defineConfig({
       // pure ロジックだけ 100% gate。dtako-scraper-relay-do.ts / index.ts は
       // cloudflare:workers / DurableObject / WebSocket runtime 依存で node vitest
       // からは計測不可 (要 @cloudflare/vitest-pool-workers) のため対象外。
+      //
+      // ★ これは allowlist。src/ に pure ロジックのファイルを足したら、ここにも
+      // 足すこと。足し忘れても CI は緑のまま通る (母数に載らないので「カバレッジが
+      // 動かない」だけに見える。実害 #957 / 気づきにくさの実例 #954)。
       include: [
         'src/auth-decision.ts',
         'src/theearth-client.ts',
@@ -61,6 +65,7 @@ export default defineConfig({
         'src/netprint-client.ts',
         'src/daily-report-preview.ts',
         'src/netprint-cron.ts',
+        'src/kosoku-daily.ts',
       ],
       thresholds: {
         lines: 100,
