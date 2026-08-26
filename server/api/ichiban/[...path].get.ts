@@ -9,8 +9,17 @@
  * (`ICHIBAN_CF_ACCESS_CLIENT_SECRET`、secret_name="CF_ACCESS_CLIENT_SECRET" を
  * 物理共有) から解決する。追加の secrets-inventory 投入作業は不要 (wrangler.toml 参照)。
  *
- * upstream の応答 (status/body) はそのまま passthrough する — 400 等の API 側エラーも
- * 呼び出し元がそのまま受け取れるようにするための thin proxy であり、意味づけはしない。
+ * upstream の応答は **status を変えず、本文があればそのまま passthrough** する —
+ * 400 等の API 側エラーも呼び出し元がそのまま受け取れるようにするための thin proxy
+ * であり、意味づけはしない。
+ *
+ * ★ **例外は 1 つだけ — 本文が空の非 2xx** (Refs #900)。一番星はエラー側の型が素の
+ * `StatusCode` で、axum が**本文を 1 バイトも返さない**。空のまま素通しすると画面に
+ * 出るのは ofetch が自分で組んだ `[GET] "…": 503` だけになり、**「一番星が落ちた」と
+ * いういちばん知りたいことが 1 文字も出ない**。**そのときに限って**
+ * `{"error":"<日本語の理由>"}` をこちらで作って返す — **status は変えない**し、
+ * **本文がある応答は 1 文字も触らない** (上流が理由を持っているならそれが正)。
+ *
  * binding 未設定は 503、fetch 自体の失敗 (tunnel down 等) は 502 で弾く。
  *
  * CF Access トークン付与ロジック本体は `server/utils/ichiban-upstream.ts` に集約

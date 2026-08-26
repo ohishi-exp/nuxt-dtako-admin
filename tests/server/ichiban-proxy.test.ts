@@ -121,7 +121,7 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('upstream の非 2xx はそのまま passthrough する (意味づけしない)', async () => {
+  it('本文がある非 2xx は status も本文もそのまま返す (意味づけしない)', async () => {
     fetchMock.mockResolvedValue(new Response('{"error":"bad request"}', {
       status: 400,
       headers: { 'content-type': 'application/json' },
@@ -238,8 +238,8 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
     expect(parsed.error).toContain('一番星 API が応答しませんでした')
   })
 
-  /** ★ 陰性対照。**上流が理由を持っているならそれが正**で、書き換えない。 */
-  it('本文がある非 2xx は 1 文字も書き換えない (passthrough のまま)', async () => {
+  /** ★ 陰性対照 (Refs #900)。**上流が理由を持っているならそれが正**で、書き換えない。 */
+  it('★ 本文がある 503 は、理由を作らず 1 文字も書き換えない', async () => {
     fetchMock.mockResolvedValue(new Response('{"error":"vehicle は必須です"}', {
       status: 503,
       headers: { 'content-type': 'application/json' },
