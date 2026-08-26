@@ -1,16 +1,20 @@
 <script setup lang="ts">
-import { getOperation, getOperationCsv, deleteOperation } from '~/utils/api'
+import { getOperation, getOperations, getOperationCsv, deleteOperation } from '~/utils/api'
 import type { Operation, CsvJsonResponse, CsvType } from '~/types'
 import { filterValidGpsPoints, filterPointsByRange, buildSpeedColoredSegments, buildNet780SearchLink } from '~/utils/net780'
 import {
   summarizeSelectedRows,
   selectedRowsLocationRange,
   proposeEventRowRange,
+  proposeCarriedEventRowRange,
   rowIndicesInTimeRanges,
+  type CarriedEventRowRange,
+  type CarriedProposeResult,
   type SelectedRowsSummary,
   type SelectedRowsLocationRange,
 } from '~/utils/event-data-table'
-import { extractAllowanceLegs } from '~/utils/allowance-trips'
+import { extractAllowanceLegs, extractCarryInUnloads } from '~/utils/allowance-trips'
+import { pickNextOperationForCarry, carryStartLabel } from '~/utils/allowance-report'
 import { fetchVehicleDailySlips } from '~/utils/ichiban'
 import { shiftYmd } from '~/utils/profit-compare'
 import {
@@ -289,12 +293,15 @@ function onSelectedLocationChange(location: SelectedRowsLocationRange | null) {
  *   一番星を見に行っても伝票はちゃんとある。押し直しても変わらない (琥珀)
  * - `'unavailable'` … **呼ぶための材料 (車輌CD / 運行日) がそもそも無い**。
  *   一番星は呼んですらいない。押し直しても変わらない (琥珀)
+ * - `'carried-choice'` … **卸地を次の運行の先頭の降しで代用した候補がある** (Refs #926)。
+ *   `'ambiguous'` (実データの候補が複数) と**別に持つ** — 代用は 1 件でも自動適用せず、
+ *   人のクリックを 1 回挟む。1 件しか無いのに「複数の配送先候補」と言うのも嘘になる
  *
  * 押し直しても変わらない 3 つ (`'no-events'` / `'no-event-match'` / `'unavailable'`) を
  * `'error'` の赤と同じ見た目にすると「もう一度押せば直るかも」と読ませてしまうので
  * 色も分ける。ただし**この 3 つも互いに別物** — イベントが無いのか、材料が無いのか、
  * 材料はあるが対応が取れないのか。 */
-type ProposeStatus = 'idle' | 'loading' | 'done' | 'not-found' | 'error' | 'ambiguous' | 'unavailable' | 'no-event-match' | 'no-events'
+type ProposeStatus = 'idle' | 'loading' | 'done' | 'not-found' | 'error' | 'ambiguous' | 'unavailable' | 'no-event-match' | 'no-events' | 'carried-choice'
 const proposeStatus = ref<ProposeStatus>('idle')
 /** `'unavailable'` のとき**何が欠けているか**。車輌CD と運行日は片方だけ欠けることも
  * 両方欠けることもあり、どちらか分からないと直しようがないので文言を出し分ける。 */
@@ -314,12 +321,178 @@ interface ProposeCandidate {
   originCity: string
   destCity: string
   range: { fromTs: number, toTs: number, legs: { fromTs: number, toTs: number }[] }
+  /** **卸地を次の運行の先頭の降しで代用した候補**なら中身が入る (Refs #926)。
+   * 実データから出た候補と**同じ見た目で並べない**ための印。 */
+  carried?: CarriedEventRowRange
 }
 /** 複数の別得意先向け配送が同じ運行に混在し、それぞれ独立に区間が見つかった場合の
  * 候補一覧 (実運用回帰: 標茶町向けと上士幌町向けが同一運行にあり、最初にマッチした
  * 伝票の配送先をそのまま採用すると無関係な配送まで union してしまっていた)。
  * 2件以上あれば自動適用せず、ユーザーにどちらを反映するか選ばせる。 */
 const proposeCandidates = ref<ProposeCandidate[]>([])
+
+// --- 降しイベントが無い最終便を「次の運行の先頭の降し」で代用する (Refs #926 / #822 ②)
+//
+//     ①(粗利タブ・運行手当タブ) の `carryOverDest` (`allowance-trips.ts`) と**同じ現象**を
+//     ②(区間提案) 側で扱う。**①には 1 バイトも触っていない** — 発生条件も解決手段も違う
+//     ものを 1 つの関数にまとめると、帯広市内 (川西 / 富士 / 札内) の罠を踏み直す (#822)。
+//
+//     ★ **お金は動かない。** ここが変えるのは「候補の出し方」だけで、`FORCE_MATCH_KEY`
+//     (①への人の上書き) に書くのは `ProfitPanel` と運行手当タブの**人のクリック**だけ。
+
+/** 次の運行を探す窓 (運行日から何日先まで)。
+ *
+ * **「翌日まで」では足りない。** `allowance-trips.ts` の doc にある実測 (2026-07 の
+ * 1109、オンプレ `dtako_events` の 14 運行) では、07-06 開始の運行の代用元が
+ * **07-08 開始**で、開始日で 2 日空いている。 */
+const CARRY_LOOKAHEAD_DAYS = 3
+
+// ★ **暦月では切らない。**「月をまたぐと確度が落ちる」機序は無い — 代用の規則は
+//   「同一乗務員 + 車輌で運行NO順に隣接する次の運行の先頭の降し」で、暦月と無関係。
+//   ①(`applyCarryOver`) が暦月で切れるのは**その月ぶんしか fetch していない実装の
+//   副作用**であって仕様ではない (`allowance-report.ts` の doc がそう書いている)。
+//   実測でも 07-31 開始の運行の卸地が 08-01 の運行の先頭にある (`allowance-trips.ts`
+//   の doc、#926 の代表例)。月末だけ提案が出ない穴を残す方が読めない。
+//   **またいだ事実は `carriedFromNextMonth` で注記に出す。**
+//
+// ★ **代用の候補は自動で反映しない** (下の `'carried-choice'`)。代用が外れていた
+//   ときの害は「人がそのまま確定してしまう」ことなので、**人のクリックを 1 回必ず
+//   挟む**。範囲を狭めずにその害だけを潰せる。
+
+/** 代用の結果。**代用したことと、できなかったことの両方**を画面に出すための材料。
+ *
+ * **代用を試したなら 0 件でも「0 件」と出す。** 空欄は「該当なし」と「そもそも見て
+ * いない」を区別できない — この repo で最も多い欠陥 (出ているものが別の意味に読める)。 */
+interface CarryOutcome {
+  /** 代用を試した伝票 (積地・卸地の組) の件数。 */
+  tried: number
+  /** 代用できた件数。 */
+  carried: number
+  /** 代用できなかった理由と件数 (同じ理由は畳む)。 */
+  skips: { reason: string, count: number }[]
+}
+/** `null` = **代用を試していない** (通常の提案が当たったか、そもそも押していない)。 */
+const proposeCarry = ref<CarryOutcome | null>(null)
+/**
+ * 直近に**適用した提案が代用だった**ときの中身。次に「提案」を押すまで出し続ける。
+ *
+ * ★ **「いま選択中の区間」と突き合わせて出し分けない。** 一度そう書いて外した:
+ * EventCrewPanel が返す選択範囲は**カテゴリで絞った行から derive し直したもの**
+ * (`selectedRowsTimeRange(headers, filteredRows, selectedRows)`) なので、代用の
+ * 区間に含まれる休息が既定カテゴリから外れるだけで `toTs` が縮み、**適用した
+ * 直後に注記が消える**。消えたら「実測だ」と読まれるので、これは倒す向きが逆。
+ *
+ * だから注記は**「この提案は代用だった」という提案についての文**にしてある。
+ * 人がその後チェックを手で足し引きしても、文として嘘にならない。
+ */
+const proposeAppliedCarried = ref<CarriedEventRowRange | null>(null)
+const proposeCarrySkipped = computed(() =>
+  proposeCarry.value ? proposeCarry.value.tried - proposeCarry.value.carried : 0)
+
+/** 代用元の運行を人が特定できる形にする — 「(08-01 04:12 開始)」。
+ * 運行NO だけだと桁を目で追うことになるので、開始日時を添える。 */
+function carriedSourceSuffix(carried: CarriedEventRowRange): string {
+  const started = carryStartLabel(carried.carriedFromUnkoNo)
+  return started === null ? '' : ` (${started} 開始)`
+}
+
+function countSkip(outcome: CarryOutcome, reason: string, n = 1) {
+  const hit = outcome.skips.find(s => s.reason === reason)
+  if (hit) hit.count += n
+  else outcome.skips.push({ reason, count: n })
+}
+
+/** 代用できなかった理由の文言。**探す先が違うので 1 つに丸めない** (#822 ① と同じ流儀)。 */
+function carrySkipReason(result: CarriedProposeResult, nextUnkoNo: string): string {
+  if (result.status === 'has-unload') return 'この便には降しイベントがあるため代用の対象外です'
+  if (result.status === 'no-loading') return '伝票の積地に一致する積みが最終便にありません'
+  if (result.status === 'no-carry-in') return `次の運行 ${nextUnkoNo} の先頭にも降しがありません`
+  if (result.status === 'city-mismatch') return `次の運行の先頭の降し (${result.carriedDestCity}) が伝票の卸地と一致しません`
+  return '伝票の積地・卸地、またはイベントCSV の列が読めません'
+}
+
+/**
+ * 通常の提案が 1 件も当たらなかった伝票に、**次の運行の先頭の降し**を当てて候補を作る。
+ *
+ * **通信は当たらなかったときだけ。** 通常の提案が当たる運行では
+ * `getOperations` も追加の CSV も引かないので、押した瞬間の待ち時間は増えない。
+ */
+async function buildCarriedCandidates(
+  csv: CsvJsonResponse,
+  routes: { originCity: string, destCity: string }[],
+  vehicleCode: string,
+  opDate: string,
+): Promise<ProposeCandidate[]> {
+  const outcome: CarryOutcome = { tried: routes.length, carried: 0, skips: [] }
+  const found = await collectCarriedCandidates(csv, routes, vehicleCode, opDate, outcome)
+  // ★ **中身を全部詰めてから ref に入れる。** 先に `proposeCarry.value = outcome` して
+  // から生オブジェクトを触ると、Vue の proxy を経由しない更新になり `proposeCarrySkipped`
+  // が古い値をキャッシュしたままになる (実際に踏んだ: 1 件代用できているのに
+  // 「代用もできなかった便 1件」と出た)。
+  proposeCarry.value = outcome
+  return found
+}
+
+async function collectCarriedCandidates(
+  csv: CsvJsonResponse,
+  routes: { originCity: string, destCity: string }[],
+  vehicleCode: string,
+  opDate: string,
+  outcome: CarryOutcome,
+): Promise<ProposeCandidate[]> {
+  // ★ 運行一覧 (`OperationListItem`) は `raw_data` を持たず車輌CD/乗務員CD が読めない。
+  //   **引く時点で絞る** — ①の `applyCarryOver` が 乗務員 + 車輌 で束ねるのと同じキー。
+  const driverCode = net780DriverCd.value
+  let candidates: { unkoNo: string }[]
+  try {
+    const list = await getOperations({
+      vehicle_cd: vehicleCode,
+      ...(driverCode ? { driver_cd: driverCode } : {}),
+      date_from: opDate,
+      date_to: shiftYmd(opDate, CARRY_LOOKAHEAD_DAYS),
+    })
+    candidates = list.operations.map(o => ({ unkoNo: o.unko_no }))
+  }
+  catch {
+    // **全体を `'error'` に倒さない** — 通常の提案が当たらなかったことは確定していて、
+    // そちらの理由は別に出ている。ここは「代用が引けなかった」だけを言う。
+    countSkip(outcome, '次の運行の一覧を引けませんでした (押し直すと変わることがあります)', routes.length)
+    return []
+  }
+
+  const pick = pickNextOperationForCarry(unkoNo, candidates)
+  if (pick.status === 'none' || pick.unkoNo === null) {
+    countSkip(outcome, `同じ乗務員・車輌の次の運行が運行日から${CARRY_LOOKAHEAD_DAYS}日以内に見つかりません`, routes.length)
+    return []
+  }
+
+  let nextCsv: CsvJsonResponse
+  try {
+    nextCsv = await getOperationCsv(pick.unkoNo, 'events')
+  }
+  catch {
+    countSkip(outcome, `次の運行 ${pick.unkoNo} のイベントを引けませんでした (押し直すと変わることがあります)`, routes.length)
+    return []
+  }
+
+  const carryIn = extractCarryInUnloads(nextCsv.headers, nextCsv.rows)
+  const found: ProposeCandidate[] = []
+  for (const route of routes) {
+    const result = proposeCarriedEventRowRange(csv.headers, csv.rows, route.originCity, route.destCity, {
+      unkoNo: pick.unkoNo,
+      crossesMonth: pick.crossesMonth,
+      cities: carryIn.cities,
+      toTs: carryIn.toTs,
+    })
+    if (result.status === 'ok') {
+      outcome.carried += 1
+      found.push({ originCity: route.originCity, destCity: route.destCity, range: result.range, carried: result.range })
+      continue
+    }
+    countSkip(outcome, carrySkipReason(result, pick.unkoNo))
+  }
+  return found
+}
 
 function applyProposedRange(
   headers: string[],
@@ -343,6 +516,9 @@ function applyProposeCandidate(headers: string[], rows: string[][], candidate: P
   applyProposedRange(headers, rows, candidate.range)
   activeTab.value = 'events'
   proposedLegCount.value = candidate.range.legs.length
+  // **適用した後も「代用した区間だ」と読めるようにする。** 提案の瞬間だけ出して
+  // 消すと、人が確定ボタンを押す時点では推定だと分からない (Refs #926)。
+  proposeAppliedCarried.value = candidate.carried ?? null
   proposeCandidates.value = []
   proposeStatus.value = 'done'
 }
@@ -370,6 +546,8 @@ async function proposeFromSlips() {
   }
   proposeStatus.value = 'loading'
   proposeCandidates.value = []
+  proposeCarry.value = null
+  proposeAppliedCarried.value = null
   try {
     await loadCsv('events')
     const csv = csvData.value.events
@@ -391,12 +569,16 @@ async function proposeFromSlips() {
     // 除いた上で全件試し、複数の別配送が見つかった場合はユーザーに選ばせる。
     const seenRoutes = new Set<string>()
     const candidates: ProposeCandidate[] = []
+    // 代用 (Refs #926) は**同じ重複除去済みの組**に当てる — 伝票の生の件数で数えると
+    // 「同じ区間を 3 回落とした」を 3 件と数えてしまう。
+    const routes: { originCity: string, destCity: string }[] = []
     for (const slip of slips) {
       const originCity = slip.originAreaName || slip.origin
       const destCity = slip.destAreaName || slip.dest
       const routeKey = `${originCity} ${destCity}`
       if (seenRoutes.has(routeKey)) continue
       seenRoutes.add(routeKey)
+      routes.push({ originCity, destCity })
       const range = proposeEventRowRange(csv.headers, csv.rows, originCity, destCity)
       if (range) candidates.push({ originCity, destCity, range })
     }
@@ -408,6 +590,20 @@ async function proposeFromSlips() {
       // 「伝票が見つかりません」と出すと、ちゃんとある伝票を探しに行かせてしまう。
       if (slips.length === 0) {
         proposeStatus.value = 'not-found'
+        return
+      }
+      // ★ ここから代用 (Refs #926)。**降しイベントが無い最終便**は、その卸地が
+      // **次の運行の先頭**に記録されている (積んだまま帰庫し翌朝降ろす形)。
+      // ①`carryOverDest` と同じ現象・同じ条件で当てる。当たらなかったぶんは
+      // `proposeCarry` に理由ごとに数えて残し、画面に出す。
+      const carriedCandidates = await buildCarriedCandidates(csv, routes, vehicleCode, opDate)
+      if (carriedCandidates.length > 0) {
+        // ★ **1 件でも自動適用しない** (`'ambiguous'` ではなく `'carried-choice'`)。
+        // 代用が外れていたときの害は「人がそのまま確定してしまう」ことなので、
+        // **人のクリックを 1 回必ず挟む**。文言も「複数候補」とは別に持つ —
+        // 1 件しか無いのに「複数の配送先候補が見つかりました」は嘘になる。
+        proposeCandidates.value = carriedCandidates
+        proposeStatus.value = 'carried-choice'
         return
       }
       proposeNoMatchSlipCount.value = slips.length
@@ -707,6 +903,21 @@ function formatDatetime(val: string | null): string {
             <span v-else-if="proposeStatus === 'done' && proposedLegCount > 1" class="text-xs text-amber-600 dark:text-amber-400">
               同一区間のレグが{{ proposedLegCount }}件見つかったため全て選択範囲に含めました
             </span>
+            <!-- ★ 代用の候補は**自動で反映しない** (Refs #926)。1 件でも押させる。
+                 `'ambiguous'` と文言を分ける — 1 件しか無いのに「複数の配送先候補」は嘘。 -->
+            <span v-else-if="proposeStatus === 'carried-choice'" class="text-xs text-sky-700 dark:text-sky-300 flex items-center gap-1.5 flex-wrap">
+              <span class="px-1 rounded bg-sky-100 dark:bg-sky-900/50">降し無し・代用 (推定)</span>
+              <b>自動では反映しません</b>。内容を確かめて押してください:
+              <button
+                v-for="c in proposeCandidates"
+                :key="`carried-${c.originCity}-${c.destCity}`"
+                class="px-1.5 py-0.5 rounded border border-sky-400 text-sky-700 dark:text-sky-300 hover:bg-sky-100 dark:hover:bg-sky-950/40"
+                @click="selectProposeCandidate(c)"
+              >
+                {{ c.originCity }} → {{ c.destCity }}
+                <span v-if="c.carried">(代用元 {{ c.carried.carriedFromUnkoNo }}{{ carriedSourceSuffix(c.carried) }})</span>
+              </button>
+            </span>
             <span v-else-if="proposeStatus === 'ambiguous'" class="text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1.5 flex-wrap">
               複数の配送先候補が見つかりました:
               <button
@@ -716,7 +927,30 @@ function formatDatetime(val: string | null): string {
                 @click="selectProposeCandidate(c)"
               >
                 {{ c.originCity }} → {{ c.destCity }} ({{ c.range.legs.length }}レグ)
+                <!-- ★ 代用の候補と実データの候補が**並ぶ**のがいちばん危ない。
+                     選ばせる時点で文言で区別する (色だけにしない、Refs #926)。 -->
+                <span v-if="c.carried" class="ml-1 px-1 rounded bg-sky-100 text-sky-700 dark:bg-sky-900/50 dark:text-sky-300">降し無し・代用</span>
               </button>
+            </span>
+            <!-- ★ 代用 (次の運行の先頭の降し、Refs #926) の**結果**。
+                 `proposeCarry` が null = 代用を試していない ので何も出さない。
+                 試したなら**代用できた件数も、できなかった件数も、0 件でも出す** —
+                 空欄は「該当なし」と「そもそも見ていない」を区別できない。 -->
+            <span v-if="proposeCarry" class="text-xs text-sky-700 dark:text-sky-300 flex items-center gap-1.5 flex-wrap">
+              <span class="px-1 rounded bg-sky-100 dark:bg-sky-900/50">降し無し・代用 (推定)</span>
+              伝票{{ proposeCarry.tried }}件のうち{{ proposeCarry.carried }}件を「次の運行の先頭の降し」で代用しました /
+              代用もできなかった便 {{ proposeCarrySkipped }}件
+              <span v-for="s in proposeCarry.skips" :key="s.reason" class="text-gray-500 dark:text-gray-400">・{{ s.reason }} {{ s.count }}件</span>
+            </span>
+            <!-- ★ 適用した後も出し続ける。**人が確定ボタンを押す前に「これは推測だ」と
+                 読める**ことが要件 (Refs #926)。色だけでなく文言で言う。 -->
+            <span v-if="proposeAppliedCarried" class="text-xs text-sky-700 dark:text-sky-300 flex items-center gap-1.5 flex-wrap">
+              <span class="px-1 rounded bg-sky-100 dark:bg-sky-900/50">降し無し・代用 (推定)</span>
+              <b>この提案は代用です</b> — この運行に降しイベントが無いため、卸地を次の運行
+              <NuxtLink :to="`/operations/${proposeAppliedCarried.carriedFromUnkoNo}`" class="underline">{{ proposeAppliedCarried.carriedFromUnkoNo }}</NuxtLink>
+              の先頭の降し ({{ proposeAppliedCarried.carriedDestCity }}) で代用しました。<b>実測ではありません</b>。
+              <b v-if="proposeAppliedCarried.carriedFromNextMonth">代用元は<u>翌月</u>の運行です{{ carriedSourceSuffix(proposeAppliedCarried) }}。</b>
+              実際の降しは次の運行の中なので、<b>提案した区間の終わりはこの運行の帰庫まで</b>です
             </span>
             <NuxtLink
               v-if="similarOperationsQuery"

@@ -54,6 +54,82 @@ export function applyCarryOver(ops: OperationAllowance[]): OperationAllowance[] 
   return ops.map(op => ({ ...op, legs: filled.get(op.unkoNo) ?? op.legs }))
 }
 
+/**
+ * **区間提案 (②) が「次の運行」を引くための隣接判定** (Refs #926)。
+ *
+ * `applyCarryOver` は**その月ぶんの運行を全部持っている**前提で隣接を取るが、運行詳細
+ * (`/operations/[unko_no]`) は `getOperation(unkoNo)` で**単一運行しか持たない**。
+ * そこで「一覧から引いてきた候補の中から、①と同じ規則で次の 1 本を選ぶ」ところだけを
+ * 切り出す。**①の `applyCarryOver` / `carryOverDest` には触っていない。**
+ *
+ * ①と同じ規則: **同一車輌 + 同一乗務員**を、**運行NO順 (= 開始日時順)** に並べた隣接。
+ *
+ * ★ **乗務員・車輌の絞り込みは呼び出し側の責任**。運行一覧 (`OperationListItem`) は
+ * `raw_data` を持たず車輌CD/乗務員CD が読めないので、**一覧を引く時点で
+ * `vehicle_cd` / `driver_cd` を指定して絞る**。ここで再度絞れるふりをすると、
+ * 「絞ったつもりで絞れていない」形になる。
+ */
+export interface CarryNeighborPick {
+  /**
+   * - `'ok'` … 次の運行が決まった
+   * - `'none'` … 窓の中に**同じ乗務員・車輌の**次の運行が無い (月末・退職・車輌入替・連休)
+   */
+  status: 'ok' | 'none'
+  unkoNo: string | null
+  /**
+   * 代用元が**暦月をまたぐ**か。
+   *
+   * ★ **止める条件ではない。注記に出すための事実。** 一度これを「またぐなら代用しない」
+   * の条件にしかけたが、**そう作ると #926 が代表例に挙げている便
+   * (`26073104154100000011091`、07-31 開始 → 降しは 08-01 の運行の先頭) が構造的に
+   * 対象外**になる。①が暦月で切れるのは `applyCarryOver` が**その月ぶんしか
+   * fetch していない実装の副作用**であって、代用の規則 (同一乗務員+車輌で運行NO順に
+   * 隣接) は暦月と無関係 — 07-31→08-01 の隣接は 07-06→07-08 の隣接より近い。
+   * **確度は落ちないが、またいだ事実は必ず読ませる。**
+   */
+  crossesMonth: boolean
+}
+
+/** 運行NO の先頭 22 桁 = 運行の identity (23 桁目の対象CD は乗務員の別)。 */
+function opeNo22(unkoNo: string): string {
+  return unkoNo.slice(0, 22)
+}
+
+/**
+ * `currentUnkoNo` の**次の運行**を `candidates` から選ぶ。
+ * `candidates` は**同一車輌 + 同一乗務員に絞ってあること** (上の doc)。
+ *
+ * **先頭 22 桁で比べる。** 23 桁目 (対象CD) だけが違う行は**同じ運行の相方 (2マンの
+ * 助手枠)** なので、23 桁で比べると相方を「次の運行」に選んでしまう。
+ */
+export function pickNextOperationForCarry(
+  currentUnkoNo: string,
+  candidates: { unkoNo: string }[],
+): CarryNeighborPick {
+  const cur22 = opeNo22(currentUnkoNo)
+  // **返すのは一覧が持っていた運行NO そのまま** — 22 桁に切ったものを返すと、
+  // イベントCSV を引くときに存在しない運行NO を叩く。
+  const next = candidates
+    .filter(op => opeNo22(op.unkoNo) > cur22)
+    .sort((a, b) => compareText(opeNo22(a.unkoNo), opeNo22(b.unkoNo)))[0]
+  if (next === undefined) return { status: 'none', unkoNo: null, crossesMonth: false }
+  // 運行NO の先頭 4 桁 = YYMM。暦月をまたぐかはここだけで決まる。
+  return { status: 'ok', unkoNo: next.unkoNo, crossesMonth: next.unkoNo.slice(0, 4) !== cur22.slice(0, 4) }
+}
+
+/**
+ * 運行NO の先頭 12 桁 (`YYMMDDHHmmss`) → 注記用の短い開始日時 (`MM-DD HH:mm`)。
+ * 22 桁でも 23 桁でもなければ `null`。
+ *
+ * `kintai-unko-gaps.ts` の `kintaiUnkoGapsDeriveStartOpe` が似た変換を持っているが、
+ * **独立に書く** — あちらは勤怠 (オンプレの③フォームへ見せる `YYYY/MM/DD H:mm:ss`) の
+ * 口で、ここは手当・粗利の注記。`runDateFromUnkoNo` を別に持っているのと同じ理由。
+ */
+export function carryStartLabel(unkoNo: string): string | null {
+  if (!/^\d{22}$/.test(unkoNo) && !/^\d{23}$/.test(unkoNo)) return null
+  return `${unkoNo.slice(2, 4)}-${unkoNo.slice(4, 6)} ${unkoNo.slice(6, 8)}:${unkoNo.slice(8, 10)}`
+}
+
 /** 表と CSV の 1 行 = 1 便。 */
 export interface AllowanceReportRow {
   unkoNo: string

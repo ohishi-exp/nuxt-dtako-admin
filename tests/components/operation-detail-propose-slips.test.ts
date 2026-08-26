@@ -42,8 +42,9 @@ import type { VehicleDailySlip } from '~/utils/ichiban'
 
 const UNKO_NO = '2607010121120000001318'
 
-const { getOperationMock, getOperationCsvMock, fetchVehicleDailySlipsMock } = vi.hoisted(() => ({
+const { getOperationMock, getOperationsMock, getOperationCsvMock, fetchVehicleDailySlipsMock } = vi.hoisted(() => ({
   getOperationMock: vi.fn(),
+  getOperationsMock: vi.fn(),
   getOperationCsvMock: vi.fn(),
   fetchVehicleDailySlipsMock: vi.fn(),
 }))
@@ -51,6 +52,7 @@ const { getOperationMock, getOperationCsvMock, fetchVehicleDailySlipsMock } = vi
 vi.mock('~/utils/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('~/utils/api')>()),
   getOperation: getOperationMock,
+  getOperations: getOperationsMock,
   getOperationCsv: getOperationCsvMock,
 }))
 
@@ -161,6 +163,7 @@ describe('提案ボタン: 検索キーが無い運行で黙らない (Refs #822
   beforeEach(() => {
     getOperationCsvMock.mockReset().mockResolvedValue(EVENTS_CSV)
     fetchVehicleDailySlipsMock.mockReset().mockResolvedValue([SLIP])
+    getOperationsMock.mockReset().mockResolvedValue({ operations: [], total: 0, page: 1, per_page: 50 })
     // 計上額パネル (R2) と NET780 はこの検証では引けない扱い (404)。
     vi.stubGlobal('$fetch', vi.fn().mockRejectedValue({ statusCode: 404 }))
     localStorage.clear()
@@ -272,6 +275,7 @@ describe('提案ボタン: 伝票が無いのか、伝票はあるが区間が�
     getOperationCsvMock.mockReset().mockResolvedValue(EVENTS_CSV)
     fetchVehicleDailySlipsMock.mockReset().mockResolvedValue([SLIP])
     getOperationMock.mockReset().mockResolvedValue([operation({ 車輌CD: '1318' }, WITH_KEYS)])
+    getOperationsMock.mockReset().mockResolvedValue({ operations: [], total: 0, page: 1, per_page: 50 })
     vi.stubGlobal('$fetch', vi.fn().mockRejectedValue({ statusCode: 404 }))
     localStorage.clear()
   })
@@ -403,5 +407,264 @@ describe('提案ボタン: 伝票が無いのか、伝票はあるが区間が�
     expect(w.text()).not.toContain(NOT_FOUND_TEXT)
     expect(w.text()).not.toContain('提案に失敗しました')
     expect(proposeButton(w)!.text()).toBe(PROPOSE_LABEL)
+  })
+})
+
+/**
+ * **#926: 降しイベントが無い最終便を「次の運行の先頭の降し」で代用する。**
+ *
+ * ①(粗利タブ・運行手当タブ) は `carryOverDest` で同じ代用を入れているのに、
+ * ②(区間提案) には無かったので、**積んだまま帰庫して翌朝降ろす便では
+ * 押しても永久に提案が出ない**。
+ *
+ * ★ ここで固定するのは「提案が出ること」だけではない。**代用したことが画面で
+ * 読めること**が本体で、そちらが無いなら代用は入れない方がまし — 代用した卸地が
+ * 誤っていた場合、**根拠が実測に見えるせいで人が誤った明細を結んでしまう**。
+ *
+ * - **文言のラベルで区別する** (色だけにしない — 色は「良し悪し」に読まれる)
+ * - **代用の候補は 1 件でも自動適用しない** — 人のクリックを 1 回必ず挟む。
+ *   「外れた提案を人がそのまま確定してしまう」害を、範囲を狭めずに直接潰す
+ * - **代用できなかった便を数えて出す。0 件でも「0 件」と出す** (空欄は「該当なし」と
+ *   「そもそも見ていない」を区別できない)
+ * - **暦月では切らない。またいだ事実は注記に出す** — 月をまたぐと確度が落ちる機序は
+ *   無く、切ると #926 の代表例 (07-31 開始 → 降しは 08-01) が構造的に外れる
+ * - **お金は動かない** — 動くのは提案 (候補出し) だけ
+ */
+describe('提案ボタン: 降しが無い最終便を次の運行の先頭の降しで代用する (Refs #926)', () => {
+  const WITH_KEYS = { operation_date: '2026-07-01', reading_date: '2026-07-01' }
+  /** 同じ車輌の**同月**の次の運行 (07-02 04:12 開始)。 */
+  const NEXT_SAME_MONTH = '2607020412000000001318'
+  /** 同じ車輌の**翌月**の次の運行 (08-01 04:12 開始)。 */
+  const NEXT_CROSS_MONTH = '2608010412000000001318'
+
+  /** 次の運行: **先頭 (最初の積みより前) に士幌町の降し**がある = 前の運行の積み残し。 */
+  const NEXT_EVENTS_CSV: CsvJsonResponse = {
+    headers: HEADERS,
+    rows: [
+      ev('運行開始', '帯広市', '', '2026/7/2 5:00:00', '2026/7/2 5:00:00'),
+      ev('降し', '', '士幌町', '2026/7/2 6:00:00', '2026/7/2 6:30:00'),
+      ev('積み', '釧路市', '', '2026/7/2 9:00:00', '2026/7/2 9:30:00'),
+      ev('降し', '', '上士幌町', '2026/7/2 12:00:00', '2026/7/2 12:30:00'),
+    ],
+  }
+  /** 次の運行だが**先頭に降しが無い** (いきなり積みから始まる)。 */
+  const NEXT_EVENTS_NO_HEAD_UNLOAD: CsvJsonResponse = {
+    headers: HEADERS,
+    rows: [
+      ev('運行開始', '帯広市', '', '2026/7/2 5:00:00', '2026/7/2 5:00:00'),
+      ev('積み', '釧路市', '', '2026/7/2 9:00:00', '2026/7/2 9:30:00'),
+    ],
+  }
+  /** 次の運行の先頭の降しが**別の町** (伝票の卸地 士幌町 と一致しない)。 */
+  const NEXT_EVENTS_OTHER_CITY: CsvJsonResponse = {
+    headers: HEADERS,
+    rows: [
+      ev('運行開始', '帯広市', '', '2026/7/2 5:00:00', '2026/7/2 5:00:00'),
+      ev('降し', '', '標茶町', '2026/7/2 6:00:00', '2026/7/2 6:30:00'),
+      ev('積み', '釧路市', '', '2026/7/2 9:00:00', '2026/7/2 9:30:00'),
+    ],
+  }
+
+  const CARRIED_BADGE = '降し無し・代用 (推定)'
+
+  /** この運行 = 降し無し / 次の運行 = 引数の CSV。 */
+  function withNextOperation(nextUnkoNo: string, nextCsv: CsvJsonResponse) {
+    getOperationsMock.mockResolvedValue({ operations: [{ unko_no: nextUnkoNo }], total: 1, page: 1, per_page: 50 })
+    getOperationCsvMock.mockImplementation(async (no: string) =>
+      (no === UNKO_NO ? EVENTS_CSV_NO_UNLOAD : nextCsv))
+  }
+
+  beforeEach(() => {
+    getOperationCsvMock.mockReset().mockResolvedValue(EVENTS_CSV_NO_UNLOAD)
+    fetchVehicleDailySlipsMock.mockReset().mockResolvedValue([SLIP])
+    getOperationMock.mockReset().mockResolvedValue([operation({ 車輌CD: '1318', 対象乗務員CD: '1412' }, WITH_KEYS)])
+    getOperationsMock.mockReset().mockResolvedValue({ operations: [], total: 0, page: 1, per_page: 50 })
+    vi.stubGlobal('$fetch', vi.fn().mockRejectedValue({ statusCode: 404 }))
+    localStorage.clear()
+  })
+
+  async function press() {
+    const w = await mountPage()
+    await proposeButton(w)!.trigger('click')
+    await flushPromises()
+    return w
+  }
+
+  /** 代用の候補チップ (`'carried-choice'` の中の button)。 */
+  function carriedChip(w: VueWrapper) {
+    return w.findAll('button').find(b => b.text().includes('代用元'))
+  }
+
+  it('次の運行の先頭に卸地の降しがあれば候補が出る (今までは永久に出なかった)', async () => {
+    withNextOperation(NEXT_SAME_MONTH, NEXT_EVENTS_CSV)
+    const w = await press()
+
+    // #822 ②-1 の「提案できません」に落ちない = 代用が当たっている。
+    expect(w.text()).not.toContain('に対応する積み降しが無く提案できません')
+    expect(w.text()).toContain(CARRIED_BADGE)
+    expect(carriedChip(w)).toBeDefined()
+  })
+
+  // ★ C: 代用は 1 件でも自動適用しない。
+  it('★ 代用の候補は 1 件でも自動では反映しない — 押して初めて反映される', async () => {
+    withNextOperation(NEXT_SAME_MONTH, NEXT_EVENTS_CSV)
+    const w = await press()
+
+    // 押す前: 「自動では反映しません」と言い、適用後の注記はまだ出ていない。
+    expect(w.text()).toContain('自動では反映しません')
+    expect(w.text()).not.toContain('この提案は代用です')
+    // 「複数の配送先候補」とは言わない (1 件しか無いので嘘になる)。
+    expect(w.text()).not.toContain('複数の配送先候補が見つかりました')
+
+    await carriedChip(w)!.trigger('click')
+    await flushPromises()
+
+    expect(w.text()).toContain('この提案は代用です')
+    expect(w.text()).not.toContain('自動では反映しません')
+  })
+
+  it('★ 押す前の候補チップにも代用元が読める (押す判断の材料を先に出す)', async () => {
+    withNextOperation(NEXT_SAME_MONTH, NEXT_EVENTS_CSV)
+    const w = await press()
+
+    const chip = carriedChip(w)!
+    expect(chip.text()).toContain('釧路市 → 士幌町')
+    expect(chip.text()).toContain(NEXT_SAME_MONTH)
+    expect(chip.text()).toContain('07-02 04:12 開始')
+  })
+
+  it('★ 代用したことが**文言で**読める — 代用元の運行NO と町名まで出す', async () => {
+    withNextOperation(NEXT_SAME_MONTH, NEXT_EVENTS_CSV)
+    const w = await press()
+    await carriedChip(w)!.trigger('click')
+    await flushPromises()
+
+    const text = w.text()
+    expect(text).toContain('この提案は代用です')
+    expect(text).toContain('実測ではありません')
+    expect(text).toContain(NEXT_SAME_MONTH)
+    expect(text).toContain('士幌町')
+    // 区間の終わりが卸地ではなく帰庫であることも言う (別の意味に読ませない)。
+    expect(text).toContain('提案した区間の終わりはこの運行の帰庫まで')
+  })
+
+  it('★ 色だけで区別していない — バッジを白黒にしても「代用」と読める', async () => {
+    withNextOperation(NEXT_SAME_MONTH, NEXT_EVENTS_CSV)
+    const w = await press()
+
+    const badge = w.findAll('span').find(sp => sp.text() === CARRIED_BADGE)
+    expect(badge).toBeDefined()
+    // 文言そのものが「代用」「推定」と言っている (class を剥がしても意味が残る)。
+    expect(CARRIED_BADGE).toContain('代用')
+    expect(CARRIED_BADGE).toContain('推定')
+  })
+
+  it('★ 代用できた件数と、できなかった件数を出す (0 件でも「0件」と出す)', async () => {
+    withNextOperation(NEXT_SAME_MONTH, NEXT_EVENTS_CSV)
+    const w = await press()
+
+    expect(w.text()).toContain('伝票1件のうち1件を「次の運行の先頭の降し」で代用しました')
+    expect(w.text()).toContain('代用もできなかった便 0件')
+  })
+
+  // ★ A: 暦月では切らない。#926 の代表例 (07-31 開始 → 降しは 08-01) がこの形。
+  it('★ 暦月をまたぐ次の運行でも代用する — ただし「翌月」であることを注記に出す', async () => {
+    withNextOperation(NEXT_CROSS_MONTH, NEXT_EVENTS_CSV)
+    const w = await press()
+
+    expect(w.text()).toContain(CARRIED_BADGE)
+    expect(w.text()).not.toContain('に対応する積み降しが無く提案できません')
+
+    await carriedChip(w)!.trigger('click')
+    await flushPromises()
+
+    expect(w.text()).toContain('代用元は翌月の運行です')
+    expect(w.text()).toContain('08-01 04:12 開始')
+  })
+
+  it('同月の代用では「翌月」と言わない (またいでいない事実も正しく出す)', async () => {
+    withNextOperation(NEXT_SAME_MONTH, NEXT_EVENTS_CSV)
+    const w = await press()
+    await carriedChip(w)!.trigger('click')
+    await flushPromises()
+
+    expect(w.text()).toContain('この提案は代用です')
+    expect(w.text()).not.toContain('代用元は翌月の運行です')
+  })
+
+  it('次の運行の先頭に降しが無い: その理由を名指しする', async () => {
+    withNextOperation(NEXT_SAME_MONTH, NEXT_EVENTS_NO_HEAD_UNLOAD)
+    const w = await press()
+
+    expect(w.text()).toContain(`次の運行 ${NEXT_SAME_MONTH} の先頭にも降しがありません 1件`)
+    expect(w.text()).not.toContain('この提案は代用です')
+  })
+
+  it('次の運行の先頭の降しが伝票の卸地と違う: **代用元の町名**が読める', async () => {
+    withNextOperation(NEXT_SAME_MONTH, NEXT_EVENTS_OTHER_CITY)
+    const w = await press()
+
+    // 代用元の町名 (標茶町) を出す。伝票の卸地 (士幌町) は伝票側で分かる。
+    expect(w.text()).toContain('次の運行の先頭の降し (標茶町) が伝票の卸地と一致しません 1件')
+    expect(w.text()).not.toContain('この提案は代用です')
+  })
+
+  it('同じ乗務員・車輌の次の運行が窓の中に無い: その理由を出す', async () => {
+    const w = await press()
+
+    expect(w.text()).toContain('同じ乗務員・車輌の次の運行が運行日から3日以内に見つかりません 1件')
+    expect(w.text()).toContain('代用もできなかった便 1件')
+  })
+
+  it('次の運行の一覧が引けなくても全体を「提案に失敗しました」に倒さない', async () => {
+    getOperationsMock.mockRejectedValue(new Error('boom'))
+    const w = await press()
+
+    expect(w.text()).toContain('次の運行の一覧を引けませんでした')
+    expect(w.text()).not.toContain('提案に失敗しました')
+  })
+
+  it('次の運行は見つかるがイベントを引けない: そこだけを言う', async () => {
+    getOperationsMock.mockResolvedValue({ operations: [{ unko_no: NEXT_SAME_MONTH }], total: 1, page: 1, per_page: 50 })
+    getOperationCsvMock.mockImplementation(async (no: string) => {
+      if (no === UNKO_NO) return EVENTS_CSV_NO_UNLOAD
+      throw new Error('boom')
+    })
+    const w = await press()
+
+    expect(w.text()).toContain(`次の運行 ${NEXT_SAME_MONTH} のイベントを引けませんでした`)
+    expect(w.text()).not.toContain('提案に失敗しました')
+  })
+
+  it('次の運行は 同じ乗務員 + 同じ車輌 で、運行日から 3 日ぶんだけ引く', async () => {
+    withNextOperation(NEXT_SAME_MONTH, NEXT_EVENTS_CSV)
+    await press()
+
+    expect(getOperationsMock).toHaveBeenCalledWith({
+      vehicle_cd: '1318',
+      driver_cd: '1412',
+      date_from: '2026-07-01',
+      date_to: '2026-07-04',
+    })
+  })
+
+  // ★ 陽性対照 1: 降しがある普通の運行では**代用を試さない** = 余計な通信をしない。
+  it('降しがある運行では次の運行を引かない (押した瞬間の待ち時間が増えない)', async () => {
+    getOperationCsvMock.mockResolvedValue(EVENTS_CSV)
+    const w = await press()
+
+    expect(getOperationsMock).not.toHaveBeenCalled()
+    expect(w.text()).not.toContain(CARRIED_BADGE)
+    expect(w.text()).not.toContain('代用もできなかった便')
+  })
+
+  // ★ 陽性対照 2: **押していないうちは何も出さない。**「代用 0 件」と「そもそも
+  //    見ていない」を同じ見た目にしない (0 件を出すのは代用を試したときだけ)。
+  it('押す前は代用の区画そのものが無い', async () => {
+    withNextOperation(NEXT_SAME_MONTH, NEXT_EVENTS_CSV)
+    const w = await mountPage()
+
+    expect(w.text()).not.toContain(CARRIED_BADGE)
+    expect(w.text()).not.toContain('代用もできなかった便')
   })
 })
