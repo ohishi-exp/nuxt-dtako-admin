@@ -797,8 +797,11 @@ export async function handleNet780Archive(request: Request, env: RelayWorkerEnv)
  * 転送する — 認証・comp_id フォールバックは `/kintai-relay/operation-zip` と同じ
  * (`X-Alc-Proxy-Secret` の constant-time 検証)。
  *
- * **押した写しは表示に使われない** (#606-5 決定)。突合・履歴用のスナップショットを
- * 最新に保つのが目的で、同期が失敗しても画面は壊れない。
+ * **押した写しは「表の数字」には出ない** (#606-5 決定) — wage-report の timecard 側は
+ * live-build 一本化済みで、`summary/{driverCd}/latest.json` を読む経路は 1 本も無い。
+ * **だが「表示に使われない」ではない**: この同期が作る月ディレクトリは月タブの
+ * 「タイムカード取り込み済み」バッジ・同期状態表示・「温める」対象月・版一覧に出る
+ * (Refs #981。DO 側 `handleCronRestraintSync` の docstring に読み手の一覧がある)。
  */
 async function handleRestraintSync(request: Request, env: RelayWorkerEnv): Promise<Response> {
   const fail = (status: number, error: string) =>

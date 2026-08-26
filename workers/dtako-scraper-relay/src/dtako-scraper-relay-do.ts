@@ -4874,11 +4874,24 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 認証は index.ts の `/kintai-relay/restraint-sync` 側 (`X-Alc-Proxy-Secret`) が
    * 持つ — この worker 自身からしか到達できない前提は `/cron/dtako` と同じ。
    *
-   * **★ ここで押した写しは表示に使われない** (2026-08-03 決定、#606-5)。
+   * **★ ここで押した写しは「表の数字」には出ない** (2026-08-03 決定、#606-5)。
    * `loadWageReportSource` の timecard 側は live-build (`buildKintaiSummariesLive`)
-   * の成否だけで決まる。この同期の目的は突合・履歴用のスナップショットを最新に
-   * 保つことで、**同期が失敗しても画面は壊れない** (`handleKintaiFetch` の
-   * docstring 参照)。
+   * の成否だけで決まり、`summary/{driverCd}/latest.json` を読む経路は 1 本も無い
+   * (`handleKintaiFetch` の docstring 参照)。
+   *
+   * **★★ ただし「表示に使われない」ではない。** 旧版のこの docstring は
+   * 「表示に使われない / 同期が失敗しても画面は壊れない」と書いていたが、**広く
+   * 読めすぎる誤りだった** (Refs #981 — この一文が起票時の影響評価を「限定的」に
+   * 誤らせた)。実際にはこの同期が作る R2 `kintai/{compId}/{ym}/` の**月ディレクトリ
+   * そのもの**に読み手が居る:
+   *
+   * - `handleArchiveMonths` が `kintai_months` として返し、`restraint-wage.vue` の
+   *   **月タブの「タイムカード取り込み済み」バッジ** (`monthHasKintai`) /
+   *   **同期状態表示の入力** (`theearthSyncState`) / **「温める」ボタンの対象月**
+   *   (`warmTargetMonths`) になる
+   * - `handleKintaiArchive` が `raw/` の**版一覧**と `history.jsonl` を返す
+   *
+   * ⇒ 表の金額・時間は動かないが、**月タブの見え方は動く。**
    */
   private async handleCronRestraintSync(request: Request): Promise<Response> {
     let body: { comp_id?: unknown; month?: unknown };
