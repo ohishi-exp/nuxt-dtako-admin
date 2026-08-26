@@ -2642,10 +2642,16 @@ const salaryParseError = ref('')
  * 給与DB (`/api/kyuyo/payroll`) から読み込んだ明細 (Refs #369 PR-B2)。
  *
  * 貼り付け CSV と**併存**させる — 取得元をユーザーが選べる状態を保つ (#369 決定 4)。
- * 保存先は `/kyuyo-fetch` と同じ sessionStorage (`kyuyo-payroll:{会社}:{月}`) を
- * 共有するので、キャッシュが二重にならない。
+ *
+ * **メモリだけに持つ** — 金額と氏名をブラウザに残さないため、sessionStorage の
+ * 明細キャッシュは廃止した (Refs #467 PR-A3)。リロードすると消えるが、サーバー側で
+ * 同期済みの月は `autoLoadArchivedPayroll` が押さずに読み直す。
+ *
+ * `syncedAt` は **サーバー側でこの (会社, 勤務月) を最後に同期した時刻**。
+ * `payrollSyncedAtForMonth()` (= 賃金スナップショットの鮮度メタ、#677) がここを読むので、
+ * **明細と同じ寿命で持つ必要がある** — 別の場所に置くと片方だけ残って意味がずれる。
  */
-const dbImports = ref<Array<{ company: string, month: string, parsed: ParsedSalaryCsv }>>([])
+const dbImports = ref<Array<{ company: string, month: string, parsed: ParsedSalaryCsv, syncedAt: string | null }>>([])
 const loadingPayrollDb = ref(false)
 const payrollDbMessage = ref('')
 
@@ -3093,22 +3099,9 @@ async function matchFromIchiban() {
  * **唯一の引き直し手段**なので、キャッシュの有無に関わらず必ず `sync` から始める。
  * `sync` は明細を返さない (行数と `synced_at` だけ) ので、完了後に `payroll` を読み直す。
  *
- * 取得済みデータは `/kyuyo-fetch` と**同じ sessionStorage キー**を共有する —
- * 一度取れば両方の画面で使い回せ、キャッシュが二重にならない。
+ * 取得結果は `dbImports` (メモリ) にだけ置く — 明細の sessionStorage キャッシュは
+ * 廃止した (Refs #467 PR-A3)。
  */
-/** sessionStorage の (会社, 支給月) を読む。壊れていたら null (取り直させる)。 */
-function readStoredPayroll(payrollCompany: string, payMonth: string): StoredPayroll | null {
-  if (!import.meta.client) return null
-  const cached = sessionStorage.getItem(payrollStorageKey(payrollCompany, payMonth))
-  if (!cached) return null
-  try {
-    return JSON.parse(cached) as StoredPayroll
-  }
-  catch {
-    return null
-  }
-}
-
 /** 取得済み明細を dbImports へ反映する。同じ (会社, 支給月) だけ差し替え、
  * それ以外の既取得分は残す — 月を切り替えながら押しても前の月が消えない
  * (突合は月で絞るので混ざらない)。 */
@@ -3147,14 +3140,13 @@ async function loadPayrollFromDb() {
         const body = await $fetch(`/api/kyuyo/payroll`, {
           query: { company: payrollCompany, month: workMonth },
         })
-        const stored = toStoredPayroll(body, new Date().toISOString())
+        const stored = toStoredPayroll(body)
         if (!stored) {
           payrollDbMessage.value = `${payrollCompany} / ${fmtYm(payMonth)} の応答形式が想定外でした`
           continue
         }
-        if (import.meta.client) sessionStorage.setItem(payrollStorageKey(payrollCompany, payMonth), JSON.stringify(stored))
         const parsed = payrollToParsedSalary(stored.rows as KyuyoPayrollRow[], payrollCompany)
-        loaded.push({ company: payrollCompany, month: payMonth, parsed })
+        loaded.push({ company: payrollCompany, month: payMonth, parsed, syncedAt: stored.syncedAt ?? null })
       }
     }
     applyDbImports(loaded)
@@ -3180,10 +3172,11 @@ async function loadPayrollFromDb() {
  * 選択中の月に**給与アーカイブがある会社だけ**、ボタンを押さずに読み込む
  * (2026-07-28 要望「給与アーカイブあるのであれば、取り込みせずとも表示して」)。
  *
- * 対象は `kyuyo_sync_state` に (会社, 勤務月) がある組か、既に sessionStorage に
- * ある組だけ — この 2 つは upstream が SQLite / ブラウザキャッシュだけで返せるので
- * **給与大臣 (OHKEN) を開かない** = 待ち時間もロックも発生しない。アーカイブが
+ * 対象は `kyuyo_sync_state` に (会社, 勤務月) がある組だけ — upstream が SQLite だけで
+ * 返せるので **給与大臣 (OHKEN) を開かない** = 待ち時間もロックも発生しない。アーカイブが
  * 無い会社は従来どおり「給与大臣から引き直す」ボタン (1 社 10〜20 秒) の担当のまま。
+ *
+ * **`sync` は絶対に撃たない** (Refs #467 PR-A4) — 月を開いただけで給与大臣を叩かせない。
  */
 /** 自動読み込みの走行中フラグ。**ref にしてある** — 給与比較タブの「読み込み中」表示が
  * これを見るため (Refs #554)。素の let にすると表示が更新されない。 */
@@ -3207,28 +3200,24 @@ async function autoLoadArchivedPayroll() {
     .filter(({ payrollCompany }) =>
       // 既に画面に載っている組は読み直さない (押した直後の再取得を避ける)
       !dbImports.value.some(i => i.company === payrollCompany && i.month === payMonth)
-      && (kyuyoSyncedKeys.value.has(`${payrollCompany}|${workMonth}`)
-        || readStoredPayroll(payrollCompany, payMonth) !== null),
+      && kyuyoSyncedKeys.value.has(`${payrollCompany}|${workMonth}`),
     )
   if (!companies.length) return
   autoPayrollLoading.value = true
   const loaded: typeof dbImports.value = []
   try {
     for (const { payrollCompany } of companies) {
-      let stored = readStoredPayroll(payrollCompany, payMonth)
-      if (!stored) {
-        // 認証は cookie 任せ (Refs #375)。
-        const body = await $fetch(`/api/kyuyo/payroll`, {
-          query: { company: payrollCompany, month: workMonth },
-        })
-        stored = toStoredPayroll(body, new Date().toISOString())
-        if (!stored) continue // 形式が想定外 = ボタンで取り直す。自動読みは黙って諦める
-        if (import.meta.client) sessionStorage.setItem(payrollStorageKey(payrollCompany, payMonth), JSON.stringify(stored))
-      }
+      // 認証は cookie 任せ (Refs #375)。
+      const body = await $fetch(`/api/kyuyo/payroll`, {
+        query: { company: payrollCompany, month: workMonth },
+      })
+      const stored = toStoredPayroll(body)
+      if (!stored) continue // 形式が想定外 = ボタンで取り直す。自動読みは黙って諦める
       loaded.push({
         company: payrollCompany,
         month: payMonth,
         parsed: payrollToParsedSalary(stored.rows as KyuyoPayrollRow[], payrollCompany),
+        syncedAt: stored.syncedAt ?? null,
       })
     }
     if (!loaded.length) return
@@ -3886,6 +3875,11 @@ const minWageTableSettled = computed(() =>
  * その月を集計から外す (0 円で足して支払い不足に見せない、#677 の合算規則)。
  * 最も古いものを採るのは、どれか 1 社が古ければその月ぜんたいを「要再計算」に
  * したいため。
+ *
+ * **読み先は sessionStorage から `dbImports` (メモリ) に移した** (Refs #467 PR-A3)。
+ * **判定規則は 1 文字も変えていない** — 「その (会社, 支給月) の明細が手元に無い」か
+ * 「有るが `syncedAt` を持たない」なら `null` (= 給与未取込)、という同じ 2 条件。
+ * ここを緩めると #677 の合算規則が変わり、**別の金額がずれる**。
  */
 function payrollSyncedAtForMonth(): string | null {
   const compId = session.value?.compId
@@ -3894,7 +3888,8 @@ function payrollSyncedAtForMonth(): string | null {
   const payMonth = nextYm(month.value)
   let oldest: string | null = null
   for (const { payrollCompany } of companies) {
-    const synced = readStoredPayroll(payrollCompany, payMonth)?.syncedAt
+    const synced = dbImports.value
+      .find(i => i.company === payrollCompany && i.month === payMonth)?.syncedAt
     if (!synced) return null
     if (oldest === null || synced < oldest) oldest = synced
   }
@@ -6791,7 +6786,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                    氏名と金額はサーバー側 (一番星の給与アーカイブ) に保存されており、
                    これを信じて個人情報の扱いを判断されると事故になる。 -->
               引き直した明細は<b>サーバー側の給与アーカイブに保存されます</b> (次からは給与大臣に触らずここから表示されます)。
-              取得結果はタブを閉じるまで保持され、<code>/kyuyo-fetch</code> と共有されます。
+              <b>このブラウザには残しません</b> — リロードすると消えますが、アーカイブがある月は自動で読み直します。
               下の貼り付けと<b>併用できます</b> — 両方あれば合算して突合します。
             </p>
           </UCard>

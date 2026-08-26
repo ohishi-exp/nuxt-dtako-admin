@@ -2,19 +2,13 @@
 import { describe, expect, it } from 'vitest'
 import {
   MAX_RANGE_MONTHS,
-  PAYROLL_STORAGE_PREFIX,
-  SESSION_OWNER_KEY,
   buildFetchPlan,
   expandMonthRange,
-  parsePayrollStorageKey,
-  payrollStorageKey,
   payrollToParsedSalary,
-  shouldPurgeSession,
   fmtPayrollSync,
-  summarizeStored,
+  summarizeSyncedMonths,
   type KyuyoPayrollRow,
   toStoredPayroll,
-  type StoredPayroll,
 } from '~/utils/kyuyo-fetch'
 
 describe('expandMonthRange', () => {
@@ -64,32 +58,6 @@ describe('buildFetchPlan', () => {
   })
 })
 
-describe('storage キー規則', () => {
-  it('生成とパースが往復する', () => {
-    const key = payrollStorageKey('0100', '2026-06')
-    expect(key).toBe(`${PAYROLL_STORAGE_PREFIX}0100:2026-06`)
-    expect(parsePayrollStorageKey(key)).toEqual({ company: '0100', month: '2026-06' })
-  })
-  it('無関係のキーは null', () => {
-    expect(parsePayrollStorageKey('other')).toBeNull()
-    expect(parsePayrollStorageKey(SESSION_OWNER_KEY)).toBeNull()
-    expect(parsePayrollStorageKey(`${PAYROLL_STORAGE_PREFIX}0100`)).toBeNull() // 月なし
-    expect(parsePayrollStorageKey(`${PAYROLL_STORAGE_PREFIX}:2026-06`)).toBeNull() // 会社なし
-    expect(parsePayrollStorageKey(`${PAYROLL_STORAGE_PREFIX}0100:`)).toBeNull() // 月が空
-  })
-})
-
-describe('shouldPurgeSession', () => {
-  it('所有者が変わった時だけ purge', () => {
-    expect(shouldPurgeSession('user-a', 'user-b')).toBe(true)
-    expect(shouldPurgeSession('user-a', 'user-a')).toBe(false)
-    // 記録なし / 未ログインでは purge しない
-    expect(shouldPurgeSession(null, 'user-a')).toBe(false)
-    expect(shouldPurgeSession('', 'user-a')).toBe(false)
-    expect(shouldPurgeSession('user-a', null)).toBe(false)
-  })
-})
-
 describe('toStoredPayroll', () => {
   it('payroll 応答を保存形に変換 (件数・warnings 数を持つ)', () => {
     const body = {
@@ -97,9 +65,8 @@ describe('toStoredPayroll', () => {
       rows: [{ employee_code: '1771' }, { employee_code: '0941' }],
       warnings: ['SHUKEI1 に集計行がありません'],
     }
-    expect(toStoredPayroll(body, '2026-07-23T01:00:00Z')).toEqual({
+    expect(toStoredPayroll(body)).toEqual({
       database: 'KYDATA0100_126C',
-      fetchedAt: '2026-07-23T01:00:00Z',
       rowCount: 2,
       warningCount: 1,
       rows: body.rows,
@@ -109,11 +76,11 @@ describe('toStoredPayroll', () => {
     })
   })
   it('warnings が無くても壊れない / 想定外形式は null', () => {
-    const stored = toStoredPayroll({ database: 'X', rows: [] }, 't')
+    const stored = toStoredPayroll({ database: 'X', rows: [] })
     expect(stored?.warningCount).toBe(0)
-    expect(toStoredPayroll(null, 't')).toBeNull()
-    expect(toStoredPayroll({ rows: [] }, 't')).toBeNull() // database なし
-    expect(toStoredPayroll({ database: 'X' }, 't')).toBeNull() // rows なし
+    expect(toStoredPayroll(null)).toBeNull()
+    expect(toStoredPayroll({ rows: [] })).toBeNull() // database なし
+    expect(toStoredPayroll({ database: 'X' })).toBeNull() // rows なし
   })
 
   // ── source / synced_at (Refs #467) ───────────────────────────────
@@ -126,26 +93,26 @@ describe('toStoredPayroll', () => {
       rows: [],
       source: 'cache',
       synced_at: '2026-02-03T09:12:00Z',
-    }, 't')
+    })
     expect(stored?.source).toBe('cache')
     expect(stored?.syncedAt).toBe('2026-02-03T09:12:00Z')
   })
 
   /** **形が想定外でも取り込み自体は失敗させない** — 明細が読めることの方が大事。 */
   it('未知の source は undefined に落とすが、明細は取り込む', () => {
-    const stored = toStoredPayroll({ database: 'X', rows: [{ a: 1 }], source: 'ohken' }, 't')
+    const stored = toStoredPayroll({ database: 'X', rows: [{ a: 1 }], source: 'ohken' })
     expect(stored?.source).toBeUndefined()
     expect(stored?.rowCount).toBe(1)
   })
 
   it('source が live でも拾う', () => {
-    expect(toStoredPayroll({ database: 'X', rows: [], source: 'live' }, 't')?.source).toBe('live')
+    expect(toStoredPayroll({ database: 'X', rows: [], source: 'live' })?.source).toBe('live')
   })
 
   it('synced_at が無い / 空文字なら null', () => {
-    expect(toStoredPayroll({ database: 'X', rows: [] }, 't')?.syncedAt).toBeNull()
-    expect(toStoredPayroll({ database: 'X', rows: [], synced_at: '' }, 't')?.syncedAt).toBeNull()
-    expect(toStoredPayroll({ database: 'X', rows: [], synced_at: 42 }, 't')?.syncedAt).toBeNull()
+    expect(toStoredPayroll({ database: 'X', rows: [] })?.syncedAt).toBeNull()
+    expect(toStoredPayroll({ database: 'X', rows: [], synced_at: '' })?.syncedAt).toBeNull()
+    expect(toStoredPayroll({ database: 'X', rows: [], synced_at: 42 })?.syncedAt).toBeNull()
   })
 })
 
@@ -181,29 +148,45 @@ describe('fmtPayrollSync', () => {
   })
 })
 
-describe('summarizeStored', () => {
-  const value = (rowCount: number): StoredPayroll => ({
-    database: 'KYDATA0100_126C',
-    fetchedAt: 't',
-    rowCount,
-    warningCount: 0,
-    rows: [],
-    warnings: [],
+describe('summarizeSyncedMonths', () => {
+  const entry = (company: string, month: string, rowCount: number) => ({
+    company, month, synced_at: '2026-08-01T00:00:00Z', row_count: rowCount,
   })
-  it('会社 → 月の昇順に整列し、無関係キーは除外', () => {
-    const entries = [
-      { key: payrollStorageKey('0200', '2026-05'), value: value(91) },
-      { key: payrollStorageKey('0100', '2026-06'), value: value(53) },
-      { key: payrollStorageKey('0100', '2026-05'), value: value(52) },
-      { key: 'unrelated', value: value(0) },
-    ]
-    const summaries = summarizeStored(entries)
-    expect(summaries.map(s => `${s.company}:${s.month}`)).toEqual([
+  it('会社 → 月の昇順に整列する', () => {
+    const rows = summarizeSyncedMonths([
+      entry('0200', '2026-05', 91),
+      entry('0100', '2026-06', 53),
+      entry('0100', '2026-05', 52),
+    ])
+    expect(rows.map(r => `${r.company}:${r.month}`)).toEqual([
       '0100:2026-05',
       '0100:2026-06',
       '0200:2026-05',
     ])
-    expect(summaries[1]?.rowCount).toBe(53)
+    expect(rows[1]?.rowCount).toBe(53)
+    expect(rows[1]?.syncedAt).toBe('2026-08-01T00:00:00Z')
+  })
+
+  /** **形が想定外の行は落とすが、一覧そのものは出す** — 読める行だけでも出す方が良い。 */
+  it('company / month が文字列でない行は落とす', () => {
+    const rows = summarizeSyncedMonths([
+      entry('0100', '2026-05', 1),
+      { company: 100, month: '2026-05' },
+      { company: '0100' },
+      null,
+    ])
+    expect(rows.map(r => r.company)).toEqual(['0100'])
+  })
+
+  it('row_count / synced_at が欠けても行は残す (0 と 空文字)', () => {
+    const rows = summarizeSyncedMonths([{ company: '0100', month: '2026-05' }])
+    expect(rows[0]).toEqual({ company: '0100', month: '2026-05', rowCount: 0, syncedAt: '' })
+  })
+
+  it('配列でなければ空 (一覧を読めなかった時)', () => {
+    expect(summarizeSyncedMonths(null)).toEqual([])
+    expect(summarizeSyncedMonths(undefined)).toEqual([])
+    expect(summarizeSyncedMonths({ entries: [] })).toEqual([])
   })
 })
 
