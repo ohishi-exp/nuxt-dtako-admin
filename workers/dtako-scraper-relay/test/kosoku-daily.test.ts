@@ -11,6 +11,7 @@ import {
   parsePaperDriftByDriver,
   parsePaperOutsideByDriver,
   prevYmOf,
+  kosokuShiftsState,
 } from '../src/kosoku-daily'
 
 /** 上流 (`/api/kintai/kosoku-daily`) の 1 勤務。実応答のキー名そのまま。 */
@@ -625,5 +626,28 @@ describe('時間外深夜の内数を読み取りで排他へ直す (Refs #564)'
       drivers: [{ driver: 1, days: [shift({ overtime_minutes: 10, overtime_night_minutes: 30 })] }],
     }).map.get('1')!;
     expect(got!.overtimeMinutes).toBe(0);
+  });
+});
+
+describe('kosokuShiftsState — wage-report の応答に載る「当月の拘束を組めたか」 (Refs #980)', () => {
+  const shifts = () => new Map([['1', []]]);
+
+  it('取りに行っていない (null) は「取れなかった」ではない — source=gcp の経路', () => {
+    // ★ ここを false 側に倒すと、時間が GCP `day_summaries` に丸ごと差し替わった
+    // 表に「取れなかったので打刻由来です」という嘘が出る
+    expect(kosokuShiftsState(null)).toBeNull();
+  });
+
+  it('取れなかった (shifts が null) は "no"', () => {
+    expect(kosokuShiftsState({ shifts: null, unreadable: false })).toBe('no');
+  });
+
+  it('形が読めなかったら "unreadable" — 「取れなかった」と同じ見た目にしない', () => {
+    // 空 Map なので shifts は非 null。真偽 2 値に畳むと "yes" 側へ落ちる
+    expect(kosokuShiftsState({ shifts: new Map(), unreadable: true })).toBe('unreadable');
+  });
+
+  it('取れたら "yes"', () => {
+    expect(kosokuShiftsState({ shifts: shifts(), unreadable: false })).toBe('yes');
   });
 });

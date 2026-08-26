@@ -1019,6 +1019,18 @@ branches = true
 # 片側だけなのは下の「分岐ではないので何もしない」の 1 site
 # (`TIMECARD_JOB_GROUPS.indexOf` の差、`groupMinWageRows` の並び替え) だけで、#825 当時と同じ。
 #
+# ★ **#980 で 6 site 増えて 86 site (85 が両側)。** 測り直した条件 (2026-08-26、base
+# `00f02a9`): 上と同じ手 — `_shared/br-tooling/instrument.mjs` に `?.` の被参照側を
+# `BRN` で包む処理を足したコピーで instrument し、`npx vitest run` を全件流して pid
+# ごとの出力を統合。**陽性対照**として同じコピーを base の本ファイルに当て、
+# **80 site = 上の #961 の実測値と一致**することを先に確かめてある。instrumented
+# コピーでも 3972 本が全部通る (計測器が値を壊していない)。#980 で足した 6 site
+# (`timecardKosokuNotice`: `!report` / `!== 'no' && !== 'unreadable'` の 3 site /
+# `affected > 0` / `state === 'no'`) は**全部 true/false 両方**を通り、片側だけなのは
+# 下の 1 site のまま変わらない。
+# **素の instrument.mjs (`?.` を数えない) だと base 68 → 74 site** — 上の「66 site」は
+# #961 時点の値で、その後の追加で動いている (**この数は指標と測定日で読むこと**)。
+#
 # ★ **v8 が 100% と言っていた状態で、片側しか通っていない分岐が 11 側あった** (#825)。
 # 内訳と処置 (「テストで埋める」より先に「反対側が起こり得るか」を判定した):
 # - **死に分岐 → コードを直した**: `branchRank.get(an) ?? Infinity` の右 (a/b の 2 側)。

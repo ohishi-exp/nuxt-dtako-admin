@@ -156,6 +156,65 @@ export interface WageReportResponse {
   /** 拘束時間の出どころ。`current` = 従来どおり theearth 拘束表 + オンプレ打刻
    * (`kosoku-daily`)、`gcp` = GCP `kintai.day_summaries`。古い応答には無い。 */
   restraint_source?: RestraintSourceKey
+  /** 当月の拘束を オンプレ `kosoku-daily` から組めたか (Refs #980)。
+   * `null` / 未定義は**「判定していない」** — `restraint_source: 'gcp'` (取りに
+   * 行っていない)・タイムカード側の live-build ごと失敗した・この項目を返さない
+   * 古い relay の 3 通り。**「取れた」と読まないこと。** */
+  timecard_kosoku?: TimecardKosokuState | null
+}
+
+/**
+ * `timecard_kosoku` の値 (Refs #980)。**「取れなかった」と「読めなかった」を
+ * 同じ見た目にしない** — 前者は上流の一過性の不調なので読み直せば入るが、後者は
+ * 応答の形が変わっているので読み直しても直らない (Refs #960)。
+ */
+export type TimecardKosokuState = 'yes' | 'no' | 'unreadable'
+
+/** 拘束の元データが欠けたことを画面に出す注記 (UAlert の title / description)。 */
+export interface TimecardKosokuNotice { title: string, description: string }
+
+/**
+ * 拘束の元データ (`kosoku-daily`) が欠けたまま組まれた表であることの注記を作る
+ * (Refs #980)。**出す条件は `'no'` / `'unreadable'` だけ** — `null` (判定して
+ * いない) で出すと、GCP ソースや live-build 失敗の画面に「取れなかったので打刻
+ * 由来です」という**別の嘘**を置くことになる (それぞれ別の表示が既にある)。
+ *
+ * 文面が満たすもの (この画面は**金額が出る**ので、突合タブの文言は流用しない):
+ *
+ * 1. **何が取れなかったか** — `kosoku-daily` (拘束の元データ) であること
+ * 2. **この表の時間がどう組まれたか** — 打刻だけ / 影響を受けるのは
+ *    **タイムカード由来の行だけ**で、デジタコ由来の行は動かないこと
+ * 3. **数字をどう読むか** — 時間が長く出るので、そこから計算する残業・金額も
+ *    過大側になること
+ * 4. **効く処方だけを書く** — 「取り込み直し」は上流の不調を直さないので書かない。
+ *    `'no'` は読み直しで入る / `'unreadable'` は読み直しでは直らない
+ */
+export function timecardKosokuNotice(
+  report: WageReportResponse | null | undefined,
+): TimecardKosokuNotice | null {
+  if (!report) return null
+  const state = report.timecard_kosoku
+  if (state !== 'no' && state !== 'unreadable') return null
+  // 影響を受けるのは打刻から組んだ行だけ。**数えて画面に言わせる** —
+  // 「何行が該当するのか」が読めないと、表のどこを疑えばいいか分からない
+  const affected = report.rows.filter(r => r.source === 'timecard').length
+  const scope = affected > 0
+    ? `タイムカード由来の ${affected} 行は、拘束・実働を打刻 (始業・終業) だけから組んでいます。`
+      + '運行単位でしか打刻しない乗務員は休息で区切れないぶん時間が長く出るので、'
+      + 'そこから計算する残業・金額も過大側になります。デジタコ由来の行は影響を受けません。'
+    : 'この表にタイムカード由来の行はないので、いま出ている数字 (デジタコ由来) は影響を受けていません。'
+  return state === 'no'
+    ? {
+        title: '拘束の元データ (kosoku-daily) が取れていません',
+        description: `この月の拘束をオンプレの kosoku-daily から取得できませんでした。${scope}`
+          + '上流の一過性の不調なので、少し待ってから画面を読み直すと入ります。',
+      }
+    : {
+        title: '拘束の元データ (kosoku-daily) の形が読めません',
+        description: 'オンプレの kosoku-daily は応答しましたが、こちらが知っている形ではなく '
+          + `1 件も読み取れませんでした。${scope}`
+          + '読み直しても直りません — 上流の応答の形を確認してください。',
+      }
 }
 
 /** 最低賃金チェックで選べる拘束時間ソース (既定は `current` = 従来の挙動)。 */

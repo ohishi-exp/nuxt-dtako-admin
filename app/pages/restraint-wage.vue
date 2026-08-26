@@ -788,6 +788,19 @@ const minWageReport = computed(() =>
 /** 月次集計 / 最低賃金チェックの共有カードが表示している応答。 */
 const displayReport = computed(() =>
   activeTab.value === 'minwage' ? minWageReport.value : report.value)
+
+/**
+ * 拘束の元データ (オンプレ `kosoku-daily`) が欠けたまま組まれた表であることの注記
+ * (Refs #980)。**上流が落ちた時、この画面は打刻だけで組んだ表を黙って 200 で
+ * 出していた** — 本番で 97 名ぶん発生し、6 分違いで開いた 2 人が違う根拠の数字を
+ * どちらも「正常」と読んだ。
+ *
+ * **表示中の応答から作る。** 最低賃金チェックが GCP ソースの時は
+ * `timecard_kosoku` が null (取りに行っていない) なので、ここでは出ない —
+ * 時間が GCP `day_summaries` に差し替わっていて `kosoku-daily` は関係ないため。
+ * 月次集計 / 給与比較 / タイムカードの 3 タブでは `displayReport === report`。
+ */
+const kosokuNotice = computed(() => timecardKosokuNotice(displayReport.value))
 const displayLoading = computed(() =>
   activeTab.value === 'minwage' && minWageRestraintSource.value === 'gcp'
     ? loadingGcpReport.value
@@ -5981,6 +5994,20 @@ watch([compMap, kyuyoSyncedKeys], () => {
             </p>
 
             <p v-for="w in displayReport?.warnings ?? []" :key="w" class="text-xs text-amber-600 dark:text-amber-400 mb-1">⚠ {{ w }}</p>
+
+            <!-- 拘束の元データが欠けたまま組まれた表であることを出す (Refs #980)。
+                 **`print:hidden` を付けない** — この表は紙で回るので、根拠が欠けた
+                 ことを知らないまま配られる方が危ない -->
+            <UAlert
+              v-if="kosokuNotice"
+              color="warning"
+              variant="soft"
+              class="mb-3"
+              icon="i-lucide-alert-triangle"
+              :title="kosokuNotice.title"
+              :description="kosokuNotice.description"
+            />
+
             <p v-if="missingRateRows.length" class="text-xs text-amber-600 dark:text-amber-400 mb-1">
               ⚠ 単価未設定: {{ missingRateRows.map(r => `${r.summary.driverCd} ${r.summary.driverName}`).join(', ') }} (単価マスタタブで登録してください)
             </p>
@@ -6949,6 +6976,19 @@ watch([compMap, kyuyoSyncedKeys], () => {
             </template>
 
             <p v-for="w in report?.warnings ?? []" :key="w" class="text-xs text-amber-600 dark:text-amber-400 mb-1">⚠ {{ w }}</p>
+
+            <!-- システム集計側の時間 (残業) が打刻だけから組まれていると、ここの
+                 差分は「給与明細が違う」ではなく「こちらの時間が長い」になる
+                 (Refs #980) -->
+            <UAlert
+              v-if="kosokuNotice"
+              color="warning"
+              variant="soft"
+              class="mb-3"
+              icon="i-lucide-alert-triangle"
+              :title="kosokuNotice.title"
+              :description="kosokuNotice.description"
+            />
 
             <div v-if="salaryStatus === 'loading-payroll'" class="flex items-center gap-2 text-sm text-gray-500">
               <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin text-primary" />
@@ -8046,6 +8086,19 @@ watch([compMap, kyuyoSyncedKeys], () => {
             </template>
 
             <p v-for="w in report?.warnings ?? []" :key="w" class="text-xs text-amber-600 dark:text-amber-400 mb-1">⚠ {{ w }}</p>
+
+            <!-- この表に出ている拘束・実働そのものが打刻だけから組まれた値になる
+                 (Refs #980)。下の「打刻が保存されていません」とは**別物** —
+                 あちらは打刻区間を持たない古いサマリ、こちらは上流の拘束が欠けた状態 -->
+            <UAlert
+              v-if="kosokuNotice"
+              color="warning"
+              variant="soft"
+              class="mb-3"
+              icon="i-lucide-alert-triangle"
+              :title="kosokuNotice.title"
+              :description="kosokuNotice.description"
+            />
 
             <UAlert
               v-if="timecardNeedsRefetch"

@@ -464,3 +464,33 @@ export function mergeKosokuShiftMaps(
   }
   return out;
 }
+
+/**
+ * wage-report の応答に載せる「**当月の**拘束を `kosoku-daily` から組めたか」
+ * (Refs #980)。
+ *
+ * 語彙は `timecard_compare` の log (`ours: "no" | "unreadable" | "yes"`) に揃える —
+ * **「取れなかった」と「読めなかった」は調べる先も処方も違う** (Refs #960)。
+ * 前者は上流の一過性の不調なので読み直せば入るが、後者は応答の形が変わっているので
+ * 読み直しても直らない。
+ *
+ * **`null` は「判定していない」** で、「取れた」でも「取れなかった」でもない:
+ * `source=gcp` は `kosoku-daily` をそもそも取りに行かない (`skipKosoku`) ので、
+ * ここで `"no"` を返すと「取れなかったから打刻由来です」という嘘になる (時間は
+ * GCP `day_summaries` で丸ごと差し替わっていて `kosoku-daily` は関係ない)。
+ *
+ * **判定は当月だけ** — 前月 (`kosoku-prev`) が落ちるのは元々許容で、失うのは
+ * 月初に跨いだ勤務だけ。畳んで 1 つの値にすると、前月が落ちただけで当月の表まで
+ * 疑わせる (`loadKosokuShifts` / `loadCompareKosoku` と同じ方針)。
+ */
+export type KosokuShiftsState = "yes" | "no" | "unreadable";
+
+/** 当月ぶんの `loadKosokuShifts` の戻り値を {@link KosokuShiftsState} に畳む。
+ * 引数が null (= 取りに行っていない) なら null。 */
+export function kosokuShiftsState(
+  loaded: { shifts: Map<string, KosokuShift[]> | null; unreadable: boolean } | null,
+): KosokuShiftsState | null {
+  if (loaded === null) return null;
+  if (loaded.shifts === null) return "no";
+  return loaded.unreadable ? "unreadable" : "yes";
+}
