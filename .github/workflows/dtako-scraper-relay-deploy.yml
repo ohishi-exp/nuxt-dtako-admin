@@ -89,6 +89,39 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
+      # ---- netprint_targets の存在検証 (Refs #906, #874) ----
+      # 日報 netprint の通知先。**未設定だと cron は毎朝静かに skip する** —
+      # fail-closed で安全側だが、キーが消えたことに誰も気づけない。#874 では
+      # 「投入されていないので毎朝何もせず終わっていた」状態が続いていた。設定は
+      # `/scraper` の「日報netprint」タブから編集できる (#897) ぶん、**消す操作も
+      # 画面からできる**。
+      # DTAKO_ACCOUNTS と同じく **CI は値を投入しない** — KV を唯一の正とし、
+      # ここでは「在るか」だけを見て無ければ deploy を落とす。
+      # 中身の妥当性 (宛先 Uuid が実在するか等) は relay の
+      # validateNetprintTargetsPayload が保存時に見ているのでここでは見ない
+      # (deploy 時に DB を引きに行くのは重すぎる)。ただし**空文字は「無い」と同じ** —
+      # resolveKvConfigRaw が falsy を binding fallback 扱いにするので cron は skip する。
+      # キー名は src/cron.ts の NETPRINT_TARGETS_KV_KEY が唯一の正。**ここに
+      # リテラルを 2 つ目として書かない** — ずれても deploy が通ってしまうため。
+      - name: Verify netprint_targets (KV)
+        if: github.event_name != 'pull_request'
+        run: |
+          set -o pipefail
+          KEY=$(node -e 'const s=require("fs").readFileSync("src/cron.ts","utf8"); const m=s.match(/NETPRINT_TARGETS_KV_KEY\s*=\s*"([^"]+)"/); if(!m){ console.error("src/cron.ts に NETPRINT_TARGETS_KV_KEY が見つかりません (改名されたらこの検証も追随させること)"); process.exit(1) } process.stdout.write(m[1])')
+          if ! npx wrangler kv key get "$KEY" --binding DTAKO_CONFIG_KV --remote > /tmp/netprint_targets.json 2>/tmp/netprint_kv_err.txt; then
+            echo "::error::KV(dtako-relay-config) に $KEY がありません。日報 netprint の cron が毎朝静かに skip します。/scraper の「日報netprint」タブから通知先を保存してください"
+            cat /tmp/netprint_kv_err.txt
+            exit 1
+          fi
+          if ! [ -s /tmp/netprint_targets.json ]; then
+            echo "::error::KV(dtako-relay-config) の $KEY が空です。値が無いのと同じで日報 netprint の cron は毎朝 skip します"
+            exit 1
+          fi
+          echo "netprint_targets ok ($KEY)"
+          rm -f /tmp/netprint_targets.json /tmp/netprint_kv_err.txt
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
       # ---- D1 migration (Refs #367) ----
       # `migrations/` は app 本体と relay の共有ディレクトリだが、D1 binding
       # (DTAKO_DB) を実際に読み書きするのはこの worker なので適用もここで行う。
