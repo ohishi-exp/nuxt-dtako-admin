@@ -99,9 +99,19 @@ export const DEPOT_LABELS: Record<DepotKey, string> = {
 /** 欠測を表す記号。**0 と区別が付く形にする** (要件)。 */
 export const DASH = '−'
 
-/** 円。`null` は `DASH`。 */
+/**
+ * 円。`null` は `DASH`。
+ *
+ * **`+ 0` は `-0` を潰すためだけ** (Refs #843 / #928)。粗利・営業利益は負になり、
+ * `Math.round` は `-0.5 ≤ v < 0` で `-0` を返す。`(-0).toLocaleString()` は `"-0"`
+ * なので、素で書くと `¥-0` と出て「0 円」か「符号が化けた」か読めない。
+ * **丸め方も符号も変えない** — `-0.6` は `¥-1` のまま。
+ *
+ * 下の `fmtSignedYen` には要らない。あちらは `Math.abs` を通すので、`-0` も
+ * 端数つきの負も符号ごと落ちる (`-0 >= 0` は `true` なので `+¥0`)。
+ */
 export function fmtYen(v: number | null): string {
-  return v === null ? DASH : `¥${Math.round(v).toLocaleString('ja-JP')}`
+  return v === null ? DASH : `¥${(Math.round(v) + 0).toLocaleString('ja-JP')}`
 }
 
 /** 符号付きの円 (最低賃金との差)。`null` は `DASH`。 */

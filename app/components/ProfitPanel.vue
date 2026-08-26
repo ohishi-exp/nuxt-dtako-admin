@@ -265,8 +265,13 @@ function isBound(leg: ProfitPanelLeg, rowId: string): boolean {
   return effectiveOf(leg).ids.includes(rowId)
 }
 
+/**
+ * 円。**`+ 0` は `Math.round` が返す `-0` を畳むためだけ** (Refs #843 / #928)。
+ * 売上は一番星の `amount` の和なので負にもなり、`(-0).toLocaleString()` は `"-0"`。
+ * **丸め方は 1 ミリも変えない。**
+ */
 function formatYen(v: number | null): string {
-  return v === null ? '-' : Math.round(v).toLocaleString('ja-JP')
+  return v === null ? '-' : (Math.round(v) + 0).toLocaleString('ja-JP')
 }
 
 /** 品名N/数量/単価をまとめて1列に表示するための整形。同一日でも複数明細で単価が

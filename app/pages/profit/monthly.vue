@@ -117,8 +117,12 @@ function matchLevelLabel(item: SnapshotListItem): string {
   return `完全${exact} / 部分${partial} / 根拠なし${none}`
 }
 
+/**
+ * 円。`+ 0` は `Math.round` が返す `-0` を `0` に畳むためだけのもの
+ * (`(-0).toLocaleString()` は `"-0"`。Refs #843 / #928)。**丸め方は変えない。**
+ */
 function formatYen(v: number): string {
-  return Math.round(v).toLocaleString('ja-JP')
+  return (Math.round(v) + 0).toLocaleString('ja-JP')
 }
 </script>
 
