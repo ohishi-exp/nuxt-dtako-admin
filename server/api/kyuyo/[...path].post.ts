@@ -15,8 +15,14 @@
  * ## なぜ必要だったか
  *
  * `fetchIchiban` は長らく `method: 'GET'` 固定で、書き込み系の口 (`POST /kyuyo/sync`)
- * は rust 側に在るのに**画面から叩けなかった** (#467 の調査)。賃金スナップショットの
- * 保存 (`POST /api/kyuyo/wage-snapshot`、ohishi-exp/rust-ichibanboshi#292) も同じ口が要る。
+ * は rust 側に在るのに**画面から叩けなかった** (#467 の調査)。
+ *
+ * **★ 賃金スナップショットの保存はこの route を通らない (Refs #556)。**以前ここには
+ * 「保存 (`POST /api/kyuyo/wage-snapshot`) も同じ口が要る」と書いてあったが、上流の
+ * 登録は `POST /api/kintai/wage-snapshot` (`src/server.rs`) で、画面が叩くのは relay の
+ * `/restraint-api/wage-snapshot`。**この route の email allowlist は掛からず**、
+ * 認可は relay の tenant 単位。`app/utils/wage-snapshot-client.ts` の同名の節も参照。
+ * いまこの route を実際に通るのは `POST /api/kyuyo/sync` だけ。
  *
  * ## upstream パスは `api/kyuyo/` 配下に固定する
  *

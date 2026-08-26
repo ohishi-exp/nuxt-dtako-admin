@@ -3,8 +3,16 @@
  *
  * 最低賃金チェックの右端 3 ブロック (計算 / 給与 / 差 × 基本給 / 残業代 / 合計) が
  * 確定した時点で、その**画面表示の写し**を
- * `POST /api/kyuyo/wage-snapshot` (ohishi-exp/rust-ichibanboshi#292) へ送る。
+ * `POST /restraint-api/wage-snapshot` (relay 経由、上流の実体は
+ * ohishi-exp/rust-ichibanboshi の `POST /api/kintai/wage-snapshot`、#292) へ送る。
  * 期間集計タブはこの保存を合算するだけで済む (単月あたり 15〜64 秒の再計算が要らない)。
+ *
+ * ## ★ この口は `/api/kyuyo/*` **ではない** — email 制限は掛かっていない (Refs #556)
+ *
+ * 以前ここには `POST /api/kyuyo/wage-snapshot` と書いてあったが**どちらの経路とも違う**。
+ * 認可は relay の **tenant 単位** (`allowedViewerComps`) で、`/api/kyuyo/*` の
+ * **email allowlist は通らない**。`wage-range-view.ts` の同名の節も参照
+ * (未決として #556 に残してある)。
  *
  * ここには**組み立てだけ**を置く。送信と「いつ送るか」の判断は画面 (`restraint-wage.vue`)。
  *
