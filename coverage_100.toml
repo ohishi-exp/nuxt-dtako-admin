@@ -121,6 +121,21 @@ branches = true
 path = "app/utils/timecard-compare-view.ts"
 branches = true
 
+# デジタコ (theearth、R2 アーカイブ) と 打刻 (live-build) の月計拘束の突合 (Refs #606 PR-F)。
+# **分岐は 35 BR site** (`_shared/br-tooling` の instrument で数えた実測。v8 の
+# site/arm ではない — v8 は短絡した側を数えないので、両者の数は一致しない)。
+# **35/35 が両側とも通っている** (`tests/utils/restraint-source-diff.test.ts` の 31 件)。
+# 陰性対照: `-t fmtRestraintSourceDiffMinutes` だけに絞ると到達 site が 35 → 3 に落ちる
+# (計測器が効いていること自体の確認)。**書かなかった分岐は無い。**
+#
+# ★ 途中で **死に分岐を 1 つ潰した** (テストで埋めずコードを直した)。`archiveFetchedRange`
+# を `from`/`to` の 2 変数で null 初期化すると `to === null` 側が**構造上あり得ない**
+# (両方が必ず同時に埋まる)。v8 は branches 100% と報告し続けたが BR 計測で
+# `[False]` だけの site として出た (42 site 中 1)。先に `filter` してから畳む形に直して 35 site。
+[[files]]
+path = "app/utils/restraint-source-diff.ts"
+branches = true
+
 [[files]]
 path = "app/utils/kosoku-daily.ts"
 branches = true
