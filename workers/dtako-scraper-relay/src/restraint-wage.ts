@@ -314,6 +314,123 @@ export function normalizeWageConfig(raw: unknown): WageConfig {
 }
 
 // ---------------------------------------------------------------------------
+// 運行手当マスタ (R2 `allowance-rate`、Refs #805)
+// ---------------------------------------------------------------------------
+
+/** R2 のマスタ種別 (`restraint/{compId}/{name}/{latest.json, v-{ts}.json}`)。 */
+export type WageMasterName =
+  | "wage-master"
+  | "min-wage"
+  | "wage-config"
+  | "salary-item-config"
+  | "allowance-rate";
+
+/**
+ * 監査証跡を優先するマスタか (Refs #805)。**給与の基準額**なので、他 4 マスタと
+ * 違って ① 旧版 (`v-{ts}.json`) を prune せず永久に残し ② 誰がいつ変えたかを
+ * `history.jsonl` に残す。
+ *
+ * 他 4 マスタは保存のたびに `pruneRestraintVersions` が走り、後継版の出現から
+ * `RESTRAINT_VERSION_RETENTION_MS` (7 日) で旧版が消える。それだと「2026-07 の
+ * 給与はこの版で出した」を後から言えない。**新しい流儀ではない** —
+ * `app/utils/profit-r2.ts` が同じ設計で「7日pruneは採用しない … 監査証跡としての
+ * 価値を優先」と明記している。
+ *
+ * **既存 4 マスタの挙動は変えない** (変えるかどうかは別の判断。#805 のスコープ外)。
+ */
+export function isAuditedWageMaster(name: WageMasterName): boolean {
+  return name === "allowance-rate";
+}
+
+/** 運行手当マスタ 1 行。`app/utils/allowance-rate-master.ts` の `RateRow` と同じ形
+ * (フロントの `RATE_MASTER` をそのまま R2 へ移す)。**キーを増減しない** — #805 の
+ * seed 投入で `RATE_MASTER` と順序込み deepEqual を取るため。 */
+export interface AllowanceRateRow {
+  /** 荷主グループ。 */
+  shipper: string;
+  /** 得意先。 */
+  customer: string;
+  /** 積地の業者。 */
+  loader: string;
+  /** 積地。 */
+  origin: string;
+  /** 卸地。**この語彙がマスタの正**で、手当表PDF やデジタコの地名は別名で寄せる。 */
+  dest: string;
+  /** 銘柄。空の行もある (卸地だけで運賃が決まる契約)。 */
+  brand: string;
+  /** 運賃 (円/t)。**売上には使わない — 単価の検算専用**
+   * (`app/utils/allowance-ichiban.ts` の doc)。中継の内訳など単価が無い便が実在
+   * するので `null` を取りうる。**欠測を 0 に倒さない。** */
+  farePerT: number | null;
+  /** 運行手当 (円/便)。**金額に効くのはこれだけ。** */
+  allowanceYen: number;
+  /** 備考。 */
+  note: string;
+}
+
+export interface AllowanceRateMaster {
+  rows: AllowanceRateRow[];
+}
+
+/** 各行で string を要求する項目。`note` を含めて 7 つ — `RateRow` 側が
+ * `note: string` (optional ではない) なので、省略を許すと seed の deepEqual が
+ * 通らなくなる。 */
+const ALLOWANCE_RATE_TEXT_FIELDS = [
+  "shipper",
+  "customer",
+  "loader",
+  "origin",
+  "dest",
+  "brand",
+  "note",
+] as const;
+
+/** allowance-rate JSON を検証・正規化する。**行の順序は保つ** (#805 の後続 PR が
+ * 順序込みで `RATE_MASTER` と突き合わせる)。壊れていれば投げる — 呼び出し側で
+ * GET は 502 / PUT は 400 にマップされる (既存マスタと同じ作法)。 */
+export function normalizeAllowanceRateMaster(raw: unknown): AllowanceRateMaster {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new WageMasterError("allowance-rate は {rows: [...]} の JSON オブジェクトが必要です");
+  }
+  const rows = (raw as { rows?: unknown }).rows;
+  if (!Array.isArray(rows)) {
+    throw new WageMasterError("allowance-rate.rows が配列ではありません");
+  }
+  return {
+    rows: rows.map((rowRaw: unknown, i: number): AllowanceRateRow => {
+      if (!rowRaw || typeof rowRaw !== "object" || Array.isArray(rowRaw)) {
+        throw new WageMasterError(`allowance-rate.rows[${i}] がオブジェクトではありません`);
+      }
+      const r = rowRaw as Record<string, unknown>;
+      for (const field of ALLOWANCE_RATE_TEXT_FIELDS) {
+        if (typeof r[field] !== "string") {
+          throw new WageMasterError(`allowance-rate.rows[${i}].${field} は文字列が必要です`);
+        }
+      }
+      if (!isFiniteNumber(r.allowanceYen) || r.allowanceYen < 0) {
+        throw new WageMasterError(`allowance-rate.rows[${i}].allowanceYen は 0 以上の数値が必要です`);
+      }
+      // farePerT は「無い」を null で表す。0 に倒すと単価の検算が黙って
+      // mismatch になるので、null 以外は有限数を要求して落とす。
+      if (r.farePerT !== null && !isFiniteNumber(r.farePerT)) {
+        throw new WageMasterError(`allowance-rate.rows[${i}].farePerT は数値または null が必要です`);
+      }
+      return {
+        shipper: r.shipper as string,
+        customer: r.customer as string,
+        loader: r.loader as string,
+        origin: r.origin as string,
+        dest: r.dest as string,
+        brand: r.brand as string,
+        farePerT: r.farePerT as number | null,
+        allowanceYen: r.allowanceYen,
+        note: r.note as string,
+      };
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // lookup
 // ---------------------------------------------------------------------------
 

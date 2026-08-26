@@ -390,6 +390,23 @@ describe('restraintHistoryLine / appendHistoryJsonl', () => {
     })
   })
 
+  it('by (誰が変えたか、Refs #805) は渡した時だけキーが出る', () => {
+    expect(
+      JSON.parse(restraintHistoryLine('20260716T183000', 'new-version', 'abc', 100, 'viewer@example.com')),
+    ).toEqual({
+      ts: '20260716T183000',
+      result: 'new-version',
+      sha256: 'abc',
+      bytes: 100,
+      by: 'viewer@example.com',
+    })
+    // 無人取得のアーカイブ経路 (既定 null) は出力バイト列が変わらない
+    expect(restraintHistoryLine('20260716T183000', 'new-version', 'abc', 100, null)).toBe(
+      restraintHistoryLine('20260716T183000', 'new-version', 'abc', 100),
+    )
+    expect(JSON.parse(restraintHistoryLine('20260716T183000', 'new-version', 'abc', 100))).not.toHaveProperty('by')
+  })
+
   it('JSONL に追記し、空行を除去して末尾改行を付ける', () => {
     const first = appendHistoryJsonl(null, '{"a":1}')
     expect(first).toBe('{"a":1}\n')

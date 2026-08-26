@@ -202,6 +202,8 @@ import {
 import {
   applyMinWageToWageMaster,
   computeWageRow,
+  isAuditedWageMaster,
+  normalizeAllowanceRateMaster,
   normalizeMinWageMaster,
   normalizeSalaryItemConfig,
   normalizeWageConfig,
@@ -211,6 +213,7 @@ import {
   type MinWageMaster,
   type WageConfig,
   type WageMaster,
+  type WageMasterName,
 } from "./restraint-wage";
 import {
   MHLW_NATIONAL_LIST_URL,
@@ -3725,6 +3728,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/salary-item-config") {
       return this.handleWageMasterRoute(record!, request, "salary-item-config", (raw) => normalizeSalaryItemConfig(raw));
     }
+    // 運行手当マスタ (Refs #805)。他 4 マスタと同じ経路だが、給与の基準額なので
+    // 旧版を prune せず、誰がいつ変えたかを history.jsonl に残す
+    // (isAuditedWageMaster、handleWageMasterRoute 内で分岐)。
+    if (url.pathname === "/restraint-api/allowance-rate") {
+      return this.handleWageMasterRoute(record!, request, "allowance-rate", (raw) => normalizeAllowanceRateMaster(raw));
+    }
     if (url.pathname === "/restraint-api/wage-master/csv" && request.method === "POST") {
       return this.handleWageMasterCsvImport(record!, request);
     }
@@ -3859,10 +3868,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   // -------------------------------------------------------------------------
 
   /** マスタ類の R2 配置 (comp 単位、月に依らない)。 */
-  private wageMasterR2Paths(compId: string, name: "wage-master" | "min-wage" | "wage-config" | "salary-item-config") {
+  private wageMasterR2Paths(compId: string, name: WageMasterName) {
     const prefix = this.env.RESTRAINT_R2_PREFIX || "restraint";
     const dir = `${prefix}/${compId}/${name}`;
-    return { dir, latest: `${dir}/latest.json`, version: (ts: string) => `${dir}/v-${ts}.json` };
+    return {
+      dir,
+      latest: `${dir}/latest.json`,
+      version: (ts: string) => `${dir}/v-${ts}.json`,
+      // 保存履歴 (誰がいつ変えたか)。isAuditedWageMaster が true のマスタだけ書く。
+      history: `${dir}/history.jsonl`,
+    };
   }
 
   /** R2 list を cursor で全件回す (versions が増えると 1 回の list に収まらないため)。 */
@@ -3895,7 +3910,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   private async handleWageMasterRoute(
     record: TheearthSessionRecord,
     request: Request,
-    name: "wage-master" | "min-wage" | "wage-config" | "salary-item-config",
+    name: WageMasterName,
     normalize: (raw: unknown) => unknown,
   ): Promise<Response> {
     const bucket = this.env.DTAKO_R2;
@@ -3954,15 +3969,25 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         }
       }
       const ts = restraintVersionTimestamp(new Date());
-      const result = await this.putVersionedR2(
-        bucket,
-        paths.latest,
-        paths.version(ts),
-        JSON.stringify(normalized),
-        "application/json",
-        ts,
-      );
-      if (result.changed) await this.pruneRestraintVersions(bucket, paths.dir);
+      const body = JSON.stringify(normalized);
+      const result = await this.putVersionedR2(bucket, paths.latest, paths.version(ts), body, "application/json", ts);
+      const audited = isAuditedWageMaster(name);
+      // 監査対象マスタは旧版を消さない (Refs #805)。既存 4 マスタは従来どおり
+      // 7 日で prune する — 挙動を変える判断はここではしない。
+      if (result.changed && !audited) await this.pruneRestraintVersions(bucket, paths.dir);
+      if (audited) {
+        await this.appendRestraintHistory(
+          bucket,
+          paths.history,
+          restraintHistoryLine(
+            ts,
+            result.changed ? "new-version" : "unchanged",
+            result.sha256,
+            new TextEncoder().encode(body).byteLength,
+            record.viewerEmail ?? null,
+          ),
+        );
+      }
       return Response.json({ saved: true, changed: result.changed, data: normalized, version: result.sha256 });
     }
     return dvrJsonError(405, "Method Not Allowed");

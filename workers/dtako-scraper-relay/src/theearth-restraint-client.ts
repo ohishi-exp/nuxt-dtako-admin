@@ -600,18 +600,25 @@ export const RESTRAINT_HISTORY_MAX_LINES = 1000;
  *   未集計などで正当にありうる — 未取得とは区別して残す) */
 export type RestraintHistoryResult = "new-version" | "unchanged" | "no-data";
 
-/** 確認履歴の 1 行 (JSONL)。no-data は sha256/bytes を持たない。 */
+/** 確認履歴の 1 行 (JSONL)。no-data は sha256/bytes を持たない。
+ *
+ * `by` は「誰が変えたか」(Refs #805 — 監査対象マスタの保存履歴)。無人取得の
+ * アーカイブ経路には人が居ないので既定は null = キーごと出さない (既存 3 経路の
+ * 出力バイト列は不変)。**閲覧者の email を入れる — `record.token` は経路によって
+ * 中身が違うので身元には使わない。** */
 export function restraintHistoryLine(
   ts: string,
   result: RestraintHistoryResult,
   sha256: string | null,
   bytes: number | null,
+  by: string | null = null,
 ): string {
   return JSON.stringify({
     ts,
     result,
     ...(sha256 !== null ? { sha256 } : {}),
     ...(bytes !== null ? { bytes } : {}),
+    ...(by !== null ? { by } : {}),
   });
 }
 
