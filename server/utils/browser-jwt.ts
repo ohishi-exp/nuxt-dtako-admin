@@ -14,6 +14,17 @@
  * `Domain=.ippoan.org` の共有 cookie は必ず届く。新しい worker がデプロイされてから
  * 古いバンドルを掴んだままのタブが消えるまでの間だけ、この段が効く。
  *
+ * **★ この fallback を外せる条件** (残置を「消し忘れ」と見分けられるように明記する):
+ * **`Authorization` を組んで送ってくる呼び出し元は「#375 デプロイ前のブラウザ」しか無い。**
+ * `/api/kyuyo/**` と `/api/kyuyo-master/**` を叩くのは本 repo の 3 ページ
+ * (`kyuyo-fetch` / `ichiban-health` / `restraint-wage`) だけで、cron・relay・MCP など
+ * 機械からの呼び出しは 1 件も無い (2026-08-26 に repo 全体を grep して確認)。
+ * ⇒ **#375 が本番にデプロイされ、旧バンドルを掴んだタブが残っていないと言える時点で外せる。**
+ * 自然な撤去時期は **ippoan/auth-worker#420 (cookie の HttpOnly ON) と同時か、その直後**
+ * (あちらでは client がそもそも `document.cookie` を読めなくなる)。
+ * 外すときは `getHeader(event, 'authorization')` の 1 行と、それを固定している
+ * 「cookie が無ければ受領した Authorization を素通し転送する」系のテストを一緒に消すこと。
+ *
  * dev cookie (`logi_auth_token_dev`) は `DEV_LOGIN === 'true'` の時だけ見る
  * (`server/api/proxy/[...path].ts` に渡している `devLoginEnabled` と同じ条件。
  * ippoan/auth-worker#423/#425)。
