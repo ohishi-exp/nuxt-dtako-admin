@@ -3917,11 +3917,20 @@ function fmtRatePerHour(v: number | null): string {
   return v == null ? '-' : Math.round(v).toLocaleString('ja-JP')
 }
 
-/** 差額表示 (0 は "±0"、正負は符号つき)。 */
+/**
+ * 差額表示 (0 は "±0"、正負は符号つき)。
+ *
+ * **`-0` そのものは `v === 0` が拾う** (`-0 === 0` は `true`) が、`toLocaleString` の
+ * 既定 (`maximumFractionDigits: 3`) が `"-0"` にしてしまう `-0.0005 < v < 0` の
+ * 端数つきの負は素通りする。差は `paid − calc` で、`wage-range-view.ts` の parse が
+ * `Number.isFinite` しか見ていない (整数を強制していない) ので端数が入り得る。
+ * **`"-0"` を返した回だけ `"0"` に差し替える** (Refs #843 / #928)。
+ * **`Math.round` は足さない** — 元から丸めていないので丸め方が変わる。
+ */
 function fmtDiff(v: number | null): string {
   if (v == null) return '-'
   if (v === 0) return '±0'
-  return (v > 0 ? '+' : '') + v.toLocaleString('ja-JP')
+  return (v > 0 ? '+' : '') + v.toLocaleString('ja-JP').replace(/^-0$/, '0')
 }
 
 /** 基本給計/残業計の内訳ツールチップ ("項目名: 金額円 / 項目名: 金額円")。 */

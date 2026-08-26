@@ -218,8 +218,13 @@ function downloadJson() {
 
 // --- 表示整形 ---
 
+/**
+ * 円。**`Math.round` は `-0.5 ≤ v < 0` で `-0` を返し、`(-0).toLocaleString()` は
+ * `"-0"`** なので、素で書くと金額 0 の行に `-0 円` と出る (Refs #843 / #928)。
+ * `+ 0` は `-0` を `0` に畳むだけで、**丸め方は 1 ミリも変えない**。
+ */
 function formatYen(v: number | null): string {
-  return v === null ? '-' : `${Math.round(v).toLocaleString('ja-JP')} 円`
+  return v === null ? '-' : `${(Math.round(v) + 0).toLocaleString('ja-JP')} 円`
 }
 
 function formatKm(v: number | null): string {

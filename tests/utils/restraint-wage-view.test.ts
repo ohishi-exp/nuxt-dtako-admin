@@ -468,3 +468,51 @@ describe('emptyWageReportCause', () => {
     expect(text).not.toContain('アーカイブに在る')
   })
 })
+
+/**
+ * `fmtYen` が **`-0` を出さない** (Refs #843 / #928)。
+ *
+ * この `fmtYen` は最低賃金差 (`row.wage.minWageDiff`) にも使う。換算時給 − 最低賃金 なので
+ * **負になり**、`toLocaleString` の既定 (`maximumFractionDigits: 3`) は `-0` も
+ * `-0.0005 < v < 0` の端数つきの負も **`"-0"`** にする。呼び出し側
+ * (`RestraintWageMonthlyTable.vue`) は `v >= 0 ? '+' : ''` を前に付けるので、
+ * `-0` のときは **`+-0`** と出ていた。
+ *
+ * **`Math.round` は足していない** — 元から丸めていないので、足すと丸め方ごと変わる。
+ * 下の陽性対照はそれを固定するためのもので、**`Math.round` を足すと落ちる。**
+ */
+describe('fmtYen が `-0` を出さない (Refs #843)', () => {
+  it.each([
+    ['-0 そのもの', -0],
+    ['-0.0004 (端数つきの負。toLocaleString が "-0" にする窓)', -0.0004],
+    ['-0.0004999 (窓の端)', -0.0004999],
+    ['-4.66e-10', -4.66e-10],
+    ['0 (退行なし)', 0],
+  ])('%s → "0"', (_name, v) => {
+    expect(fmtYen(v)).toBe('0')
+  })
+
+  // ★ 陽性対照。**1 件 1 本に割ってある** — `Math.round` を足す直しが入ったときに
+  // 「何が壊れたか」が本数で見えるようにするため (`^-0$` は全体一致なので当たらない)。
+  it.each([
+    [-0.4, '-0.4'],
+    [-0.6, '-0.6'],
+    [-1234.5, '-1,234.5'],
+    [1234.5, '1,234.5'],
+    [0.4, '0.4'],
+    [-0.5, '-0.5'],
+  ])('★ 陽性対照: %p は小数のまま %p (`Math.round` を足したら落ちる)', (v, want) => {
+    expect(fmtYen(v)).toBe(want)
+  })
+
+  it('陽性対照: 本当に負の額は負のまま (符号ごと消していない)', () => {
+    expect(fmtYen(-1)).toBe('-1')
+    expect(fmtYen(-50000)).toBe('-50,000')
+  })
+
+  it('正の額・null・undefined は 1 文字も変わらない', () => {
+    expect(fmtYen(50000)).toBe('50,000')
+    expect(fmtYen(null)).toBe('-')
+    expect(fmtYen(undefined)).toBe('-')
+  })
+})

@@ -211,9 +211,19 @@ export function fmtMinutes(minutes: number | null | undefined): string {
   return `${h}h${String(m).padStart(2, '0')}m`
 }
 
-/** 円 (null は "-")。 */
+/**
+ * 円 (null は "-")。
+ *
+ * **`"-0"` だけ `"0"` に差し替える** (Refs #843 / #928)。最低賃金差 (`minWageDiff`)
+ * は負になり、`toLocaleString` の既定 (`maximumFractionDigits: 3`) は `-0` も
+ * `-0.0005 < v < 0` の端数つきの負も `"-0"` にするので、`¥-0` / `+-0` と出ていた。
+ *
+ * **`Math.round` は足さない** — ここは元から丸めていないので、足すと丸め方ごと
+ * 変わる (`¥-1,234.5` → `¥-1,234`。負は絶対値が小さくなる向きに転ぶ)。
+ * `^-0$` は全体一致なので `-0.4` (`"-0.4"`) には当たらない。
+ */
 export function fmtYen(v: number | null | undefined): string {
-  return v == null ? '-' : v.toLocaleString('ja-JP')
+  return v == null ? '-' : v.toLocaleString('ja-JP').replace(/^-0$/, '0')
 }
 
 /** "20260716T183000" (R2 版タイムスタンプ) → "2026-07-16 18:30"。 */
