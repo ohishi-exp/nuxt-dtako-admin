@@ -61,8 +61,15 @@ import {
   scrapeEtcCsv,
   type ScrapeMonthTarget,
 } from "./etc-meisai-client";
-import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveDtakoAccountsRaw, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
-import { scrapeJobKey } from "./scrape-dispatch";
+import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveDtakoAccountsRaw, resolveDtakoDeviceCredsRaw, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
+import {
+  buildScrapeHistoryEntries,
+  recordScrapeHistoryLoud,
+  type CronScrapeOutcome,
+} from "./scrape-history-record";
+import { requestDeviceJwt } from "./device-proxy";
+import { credentialForTenant, parseDtakoDeviceCreds } from "./dtako-device-creds";
+import { postScrapeHistory, scrapeJobKey } from "./scrape-dispatch";
 import { buildOperationZipPayload } from "./operation-zip";
 import { recalculateBeforeFetch } from "./theearth-recalculate";
 import { decideRelogin, isEntryReusable, type LoginSessionEntry } from "./theearth-login-session";
@@ -1098,6 +1105,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         const message = "INTERNAL_SHARED_SECRET 未設定のためアップロード不能 (zip は破棄)";
         console.error(JSON.stringify({ ...logBase, status: "error", message }));
         await recordScrapeJob(this.ctx.storage, jobKey, { state: "failed", error: message });
+        await this.recordCronScrapeHistory(account, range, { kind: "error", message });
         return;
       }
       // ★ 破壊的操作 (has_kudgivt を FALSE に戻すアップロード) の fetch を発火する
@@ -1142,6 +1150,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         upload_id: outcome.uploadId,
         split_failed: outcome.splitFailed,
       });
+      // **無人実行を alc の履歴に載せる** (Refs #931)。ここまでで取り込みの成否は
+      // 既に記録済みなので、履歴が書けなくても上の記録は変わらない。
+      await this.recordCronScrapeHistory(
+        account,
+        range,
+        outcome.splitFailed !== null && outcome.splitFailed > 0
+          ? { kind: "split_failed", splitFailed: outcome.splitFailed }
+          : { kind: "success" },
+      );
       // 取り込み本体はここで完了済み (state: "done" 記録済み)。この先で fold が
       // 何をしようと、上の記録は変わらない (条件3: fold 失敗が取り込みを道連れ
       // にしない)。cron 経路は元々 ctx.waitUntil の中なので、ここで await して
@@ -1186,6 +1203,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         }),
       );
       await recordScrapeJob(this.ctx.storage, jobKey, { state: "failed", error: message });
+      // **失敗こそ履歴に残す** — 載せないと「落ちた日が履歴から消える」= #931 の穴
+      // そのものが残る。
+      await this.recordCronScrapeHistory(account, range, { kind: "error", message });
     } finally {
       const { phases, totalMs } = timer.report();
       console.log(JSON.stringify({ ...logBase, scrape_phase_timing: phases, total_ms: totalMs }));
@@ -2998,6 +3018,86 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * cron 経路 (`resolveDtakoAccounts`) と viewer 認可は既に KV を見ていたので、
    * この関数だけが 2026-07-25 の KV 移行から取り残されていた。
    */
+  /**
+   * 無人スクレイプ (日次 cron / `run_dtako_scrape`) の結果を **alc の履歴に載せる**
+   * (Refs #931)。行の組み立ては `scrape-history-record.ts`、送信は
+   * `device-data-proxy` 越し (`device-proxy.ts` / `scrape-dispatch.ts`)。
+   *
+   * ## ★ 絶対に throw しない
+   *
+   * これは**診断のための書き込み**で、取り込み本体の成否とは関係が無い。ここで
+   * throw すると `runCronDtakoScrape` の catch に落ち、**取り込みは成功している
+   * のに `state: "failed"` で上書きされる** (#205-43 条件3 と同じ事故)。
+   * `saveScrapeErrorArtifact` / `recordScrapeJob` と同じ流儀。
+   *
+   * **ただし黙らない。** 書けなかった理由は全て `console.error` に出す
+   * (Tail Worker 経由で Workers Logs に載る)。
+   */
+  private async recordCronScrapeHistory(
+    account: DtakoAccountRaw,
+    range: { startDate: string; endDate: string },
+    outcome: CronScrapeOutcome,
+  ): Promise<void> {
+    const base = { scrape_history: "", comp_id: account.comp_id };
+    try {
+      const { entries, dropped } = buildScrapeHistoryEntries({
+        compId: account.comp_id,
+        startDate: range.startDate,
+        endDate: range.endDate,
+        outcome,
+      });
+      if (dropped > 0) {
+        console.error(JSON.stringify({ ...base, scrape_history: "dates_truncated", dropped }));
+      }
+      if (entries.length === 0) {
+        console.error(
+          JSON.stringify({
+            ...base,
+            scrape_history: "no_entries",
+            range: `${range.startDate}..${range.endDate}`,
+            detail: "読取日が YYYY-MM-DD として読めないため履歴を書きません",
+          }),
+        );
+        return;
+      }
+      // 履歴は alc の tenant (data) 経路。`alc-internal-proxy` では 403 なので
+      // device JWT で `device-data-proxy` を通す (Refs #933)。
+      const cred = credentialForTenant(
+        parseDtakoDeviceCreds(await resolveDtakoDeviceCredsRaw(this.env.DTAKO_CONFIG_KV, null)),
+        account.tenant_id,
+      );
+      if (!cred) {
+        console.error(
+          JSON.stringify({
+            ...base,
+            scrape_history: "no_credential",
+            tenant_id: account.tenant_id,
+            detail:
+              "KV dtako_device_creds に この tenant の device credential がありません " +
+              "(auth-worker の POST /device/pair で払い出して投入してください)",
+          }),
+        );
+        return;
+      }
+      const proxy = this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER) as unknown as typeof fetch;
+      const { accessToken } = await requestDeviceJwt(cred, proxy);
+      const report = await recordScrapeHistoryLoud(
+        entries,
+        (entry) => postScrapeHistory(entry, accessToken, proxy),
+        (line) => console.error(line),
+      );
+      console.log(JSON.stringify({ ...base, scrape_history: "saved", ...report }));
+    } catch (err) {
+      console.error(
+        JSON.stringify({
+          ...base,
+          scrape_history: "unexpected_error",
+          error: describeUnknownError(err),
+        }),
+      );
+    }
+  }
+
   private async resolveAccount(compId: string): Promise<DtakoAccountRaw | null> {
     const raw = await this.dtakoAccountsRaw();
     if (!raw) return null;

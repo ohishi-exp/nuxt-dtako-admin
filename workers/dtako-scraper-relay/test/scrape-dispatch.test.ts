@@ -4,6 +4,7 @@ import {
   dateRangeOf,
   dispatchScrapeDates,
   fetchScrapeHistory,
+  postScrapeHistory,
   fetchUnsplit,
   isValidDate,
   MAX_SCRAPE_DATES,
@@ -107,7 +108,7 @@ describe("dispatchScrapeDates", () => {
 });
 
 describe("fetchScrapeHistory", () => {
-  it("alc-internal-proxy に consumer proof と tenant を付けて引く", async () => {
+  it("★ device-data-proxy に Bearer で引く (alc-internal-proxy では 403 だった、Refs #933)", async () => {
     const calls: { url: string; init?: RequestInit }[] = [];
     const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
       calls.push({ url, init });
@@ -116,29 +117,66 @@ describe("fetchScrapeHistory", () => {
       });
     }) as unknown as typeof fetch;
 
-    const out = await fetchScrapeHistory(
-      { sharedSecret: "s3cret", tenantId: "11111111-2222-3333-4444-555555555555", limit: 20 },
-      fetchImpl,
-    );
+    const out = await fetchScrapeHistory({ accessToken: "jwt-abc", limit: 20 }, fetchImpl);
     expect(out).toEqual([{ target_date: "2026-06-03", status: "success" }]);
     expect(calls[0]!.url).toBe(
-      "https://auth-worker.internal/alc-internal-proxy/api/scraper/history?limit=20",
+      "https://auth-worker.internal/device-data-proxy/api/scraper/history?limit=20",
     );
     const headers = calls[0]!.init?.headers as Record<string, string>;
-    expect(headers["X-Alc-Proxy-Secret"]).toBe("s3cret");
-    expect(headers["X-Tenant-ID"]).toBe("11111111-2222-3333-4444-555555555555");
+    expect(headers.Authorization).toBe("Bearer jwt-abc");
+    // tenant は auth-worker が device record から注入する。送ると詐称できると誤読させる。
+    expect(headers["X-Tenant-ID"]).toBeUndefined();
+    expect(headers["X-Alc-Proxy-Secret"]).toBeUndefined();
+  });
+
+  it("★ もう alc-internal-proxy は叩かない (403 の経路へ戻らないことを固定する)", async () => {
+    const calls: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      calls.push(url);
+      return new Response("[]", { status: 200 });
+    }) as unknown as typeof fetch;
+    await fetchScrapeHistory({ accessToken: "jwt", limit: 1 }, fetchImpl);
+    expect(calls[0]).not.toContain("/alc-internal-proxy/");
   });
 
   it("非 2xx / 非 JSON は握り潰さず原因を throw する", async () => {
     const bad = (async () => new Response("nope", { status: 502 })) as unknown as typeof fetch;
-    await expect(
-      fetchScrapeHistory({ sharedSecret: "s", tenantId: "t", limit: 1 }, bad),
-    ).rejects.toThrow("alc scraper history failed (502)");
+    await expect(fetchScrapeHistory({ accessToken: "jwt", limit: 1 }, bad)).rejects.toThrow(
+      "alc scraper history failed (502)",
+    );
 
     const html = (async () => new Response("<html>", { status: 200 })) as unknown as typeof fetch;
-    await expect(
-      fetchScrapeHistory({ sharedSecret: "s", tenantId: "t", limit: 1 }, html),
-    ).rejects.toThrow("parse failed");
+    await expect(fetchScrapeHistory({ accessToken: "jwt", limit: 1 }, html)).rejects.toThrow(
+      "parse failed",
+    );
+  });
+});
+
+describe("postScrapeHistory", () => {
+  it("★ 無人実行の 1 行を書く — 同じ path なので読みと同じ allowlist で通る (Refs #931)", async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return new Response(null, { status: 204 });
+    }) as unknown as typeof fetch;
+
+    const entry = { target_date: "2026-08-25", comp_id: "75700192", status: "success" };
+    await postScrapeHistory(entry, "jwt-abc", fetchImpl);
+
+    expect(calls[0]!.url).toBe(
+      "https://auth-worker.internal/device-data-proxy/api/scraper/history",
+    );
+    expect(calls[0]!.init?.method).toBe("POST");
+    const headers = calls[0]!.init?.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer jwt-abc");
+    expect(JSON.parse(calls[0]!.init?.body as string)).toEqual(entry);
+  });
+
+  it("非 2xx は status と本文抜粋つきで throw する (呼び手が loud に鳴らせるように)", async () => {
+    const bad = (async () => new Response('{"error":"forbidden"}', { status: 403 })) as unknown as typeof fetch;
+    await expect(postScrapeHistory({}, "jwt", bad)).rejects.toThrow(
+      /alc scraper history save failed \(403\).*forbidden/,
+    );
   });
 });
 
@@ -179,24 +217,26 @@ describe("fetchUnsplit", () => {
     }) as unknown as typeof fetch;
 
     const got = await fetchUnsplit(
-      { sharedSecret: "s3cret", tenantId: "t-1", dateFrom: "2026-06-03", dateTo: "2026-07-01" },
+      { accessToken: "jwt-abc", dateFrom: "2026-06-03", dateTo: "2026-07-01" },
       fetchImpl,
     );
     expect(got.unsplit_total).toBe(3);
     expect(got.unsplit).toHaveLength(1);
     expect(got).not.toHaveProperty("items");
     expect(calls[0]!.url).toBe(
-      "https://auth-worker.internal/alc-internal-proxy/api/dtako/events/etags?date_from=2026-06-03&date_to=2026-07-01",
+      "https://auth-worker.internal/device-data-proxy/api/dtako/events/etags?date_from=2026-06-03&date_to=2026-07-01",
     );
     const headers = calls[0]!.init?.headers as Record<string, string>;
-    expect(headers["X-Alc-Proxy-Secret"]).toBe("s3cret");
-    expect(headers["X-Tenant-ID"]).toBe("t-1");
+    // Refs #933: 旧経路 (alc-internal-proxy) は tenant 経路なので 403 だった。
+    expect(headers.Authorization).toBe("Bearer jwt-abc");
+    expect(headers["X-Alc-Proxy-Secret"]).toBeUndefined();
+    expect(headers["X-Tenant-ID"]).toBeUndefined();
   });
 
   it("欠けたフィールドは 0 / 空に倒すが、**上流の失敗は握り潰さない**", async () => {
     const empty = (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch;
     const got = await fetchUnsplit(
-      { sharedSecret: "s", tenantId: "t", dateFrom: "2026-06-03", dateTo: "2026-06-04" },
+      { accessToken: "jwt", dateFrom: "2026-06-03", dateTo: "2026-06-04" },
       empty,
     );
     expect(got).toEqual({ unsplit: [], unsplit_total: 0 });
@@ -204,7 +244,7 @@ describe("fetchUnsplit", () => {
     const nulled = (async () => new Response("null", { status: 200 })) as unknown as typeof fetch;
     expect(
       await fetchUnsplit(
-        { sharedSecret: "s", tenantId: "t", dateFrom: "2026-06-03", dateTo: "2026-06-04" },
+        { accessToken: "jwt", dateFrom: "2026-06-03", dateTo: "2026-06-04" },
         nulled,
       ),
     ).toEqual({ unsplit: [], unsplit_total: 0 });
@@ -214,7 +254,7 @@ describe("fetchUnsplit", () => {
       new Response("range too wide", { status: 400 })) as unknown as typeof fetch;
     await expect(
       fetchUnsplit(
-        { sharedSecret: "s", tenantId: "t", dateFrom: "2026-01-01", dateTo: "2026-12-31" },
+        { accessToken: "jwt", dateFrom: "2026-01-01", dateTo: "2026-12-31" },
         bad,
       ),
     ).rejects.toThrow("alc etags failed (400): range too wide");
@@ -222,7 +262,7 @@ describe("fetchUnsplit", () => {
     const html = (async () => new Response("<html>", { status: 200 })) as unknown as typeof fetch;
     await expect(
       fetchUnsplit(
-        { sharedSecret: "s", tenantId: "t", dateFrom: "2026-06-03", dateTo: "2026-06-04" },
+        { accessToken: "jwt", dateFrom: "2026-06-03", dateTo: "2026-06-04" },
         html,
       ),
     ).rejects.toThrow("alc etags parse failed");
