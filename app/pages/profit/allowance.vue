@@ -572,9 +572,12 @@ function fetchOperationsFor(range: { from: string, to: string }, driverCd?: stri
  * `Math.round` があった**ので `+ 0` は `-0` を畳むだけで済む。ここは元々丸めていないので、
  * `Math.round` を足すと**丸め方そのものが変わる** (`¥1,234.5` → `¥1,235`、
  * `¥-1,234.5` → `¥-1,234`)。そして**この画面には小数が実際に入り得る** —
- * 手当表PDF の CSV (`parsePdfAllowanceCsv`) は `Number(rawYen)` と `Number.isFinite` しか
- * 見ておらず、**整数チェックが無い唯一の入口**だから (手当マスタ・暫定・上書きは
- * どれも整数を強制している)。**表示の丸め方を黙って変えない。**
+ * 手当表PDF の CSV (`parsePdfAllowanceCsv`) は **`Number.isInteger` を強制するように
+ * なった** (Refs #927) が、**保存済み PDF を読む `parsePdfTripFile`
+ * (localStorage `dtako:allowance:pdf:v1`) は金額を検査していない**ので、
+ * **#927 より前に取り込んだ小数は読み直しでそのまま入ってくる**。入口が 1 つ締まっても
+ * 「もう小数は来ない」とは言えない — 保存済みのぶんは後から検査し直せないので、
+ * **表示の丸め方を黙って変えない。**
  *
  * ⇒ **`toLocaleString` が `"-0"` を返した回だけ `"0"` に差し替える。**
  * `+ 0` では届かない `-0.0005 < v < 0` の端数つきの負も、`toLocaleString` の既定

@@ -118,6 +118,13 @@ export function parsePdfAllowanceCsv(text: string): { file: PdfTripFile, warning
       warnings.push(`${i + 1} 行目: 金額が読めません (${rawYen || '空'})`)
       continue
     }
+    // **手当は円なので整数だけ受ける。** `parseProvisional` / `isProvisionalOverrideValue`
+    // と同じ物差し — **この経路だけが人の転記物**なので、小数点が紛れ込む余地は
+    // 他より大きい。捨てた行が黙って減らないよう、「読めません」とは別の文言で残す。
+    if (!Number.isInteger(yen)) {
+      warnings.push(`${i + 1} 行目: 金額が整数ではありません (${rawYen})`)
+      continue
+    }
     trips.push({
       driverName: driverKey(at(cols, 'driver_name')),
       date,
