@@ -515,9 +515,29 @@ export async function splitCsv(uploadId: string): Promise<any> {
   return request<any>(`/api/split-csv/${uploadId}`, { method: 'POST' })
 }
 
-/** `GET /api/dtako/events/etags` の応答のうち、未 split の把握に使う部分だけ
- * (ippoan/rust-alc-api#587)。`items` (月ゲートの指紋) はここでは使わない。 */
+/** `GET /api/dtako/events/etags` の `items[]` の 1 件 (alc の `DtakoEventsEtagItem`)。
+ *
+ * **`etag` が `null` = DB に運行はあるが R2 の LIST に現れない** = R2 に CSV が無い
+ * (alc `crates/alc-dtako/src/dtako_events.rs` の手順 4)。`has_kudgivt = FALSE` の
+ * 未 split (`unsplit` / `unsplit_total`) とは**別勘定** — `items` は
+ * `has_kudgivt = TRUE` の運行だけを載せる。
+ *
+ * 上流の fold (`rust-ichibanboshi` `InputCoverage::measure`) が warnings に出す
+ * `etag無=N` は、この `etag === null` を数えているだけ (Refs #621 / #936)。
+ * `driver_cds` はここでは使わないので宣言しない。 */
+export interface DtakoEventsEtagItem {
+  unko_no?: string
+  etag?: string | null
+}
+
+/** `GET /api/dtako/events/etags` の応答のうち、取り込み後の答え合わせに使う部分
+ * (ippoan/rust-alc-api#587)。**別勘定を 2 つ載せている**ので混ぜないこと:
+ * `unsplit_total` = 未 split (`has_kudgivt = FALSE`) / `items[].etag === null` =
+ * R2 に CSV が無い (Refs #936)。 */
 export interface DtakoEventsEtagsResponse {
+  /** `has_kudgivt = TRUE` の運行の R2 指紋。**alc は必ず全件返す** (切らない) ので、
+   * 欠けていたら「0 件」ではなく「見ていない」(古い alc / 応答の形が違う)。 */
+  items?: DtakoEventsEtagItem[]
   unsplit?: { unko_no: string, driver_cd: string, reading_date: string }[]
   /** `has_kudgivt = FALSE` の運行の**実数** (`unsplit` は 500 件で切られるが、こちらは切られない)。 */
   unsplit_total?: number
@@ -525,7 +545,13 @@ export interface DtakoEventsEtagsResponse {
 }
 
 /**
- * 指定期間に **CSV 分割されていない運行 (`has_kudgivt = FALSE`)** が何件あるかを引く。
+ * 指定期間の **取り込みの答え合わせ 2 種**を引く。
+ *
+ * 1. **CSV 分割されていない運行 (`has_kudgivt = FALSE`)** が何件あるか (`unsplit_total`)
+ * 2. **R2 に CSV が無い運行** が何件あるか (`items[].etag === null`、Refs #621 / #936)
+ *
+ * **2 つは別勘定** — 片方が 0 でももう片方は 0 にならない (実測: 2026-03 は etag無 31 件で
+ * 未分割 0 件)。同じ数字として足さないこと。
  *
  * `split_failed` は「分割が失敗した件数」であって「分割済みか」ではない — alc 側の
  * `update_has_kudgivt` が当たらなかった unko_no は warn されるだけで成功扱いになる
