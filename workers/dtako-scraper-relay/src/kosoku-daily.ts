@@ -101,6 +101,40 @@ export interface KosokuShift extends KosokuCalendarPart {
   parts: Array<{ date: string } & KosokuCalendarPart>;
 }
 
+/**
+ * `parse*` の結果。**読めたかどうかを Map の中身から切り離して持つ** (Refs #602 / #960)。
+ *
+ * 空 Map をそのまま返すと「上流にその行が無い」と「応答の形を読み間違えた」が呼び出し
+ * 側から区別できない。**前者は取り込み直しで直り、後者は直らない** — 原因も処方も違う
+ * ものを 1 つの返り値に畳まない。
+ *
+ * **`kintai-diff.ts` の `OnpremParseResult` と同じ形** (`{ map, unreadable }`。#600 で
+ * 同じ罠のために作られたもの)。**新しい流儀は作らない**ためフィールド名も意味も
+ * そのまま揃えてある。
+ *
+ * ## なぜ `OnpremParseResult` を import せず、同じ形を置いているのか (Refs #960)
+ *
+ * **重複に見えるが意図的。generic 化して共有しに行かないこと。** 理由は 3 つ:
+ *
+ * 1. **値の型が違う。** あちらは `map: Map<string, KintaiDiffValueEntry>` で**非
+ *    generic**。こちらは `KosokuShift[]` と `Map<string, number>` の 2 種を持つので、
+ *    そのままでは当てはまらない。
+ * 2. **共有するには所有権の外に手が入る。** `OnpremParseResult<V = …>` へ generic 化
+ *    すると `kintai-diff.ts` の宣言と doc (「`onpremKosokuDailyToMap` の結果」) を
+ *    書き換えることになる。**型の都合で他人のファイルを触る**のは割に合わない。
+ * 3. **同じ形を別に置く前例が既にある。** `kyuyo-mcp/src/mcp/tools.ts` は
+ *    `OnpremParseResult` を verbatim 複製している (別デプロイ単位のため)。
+ *    「この repo で現に何が行われているか」で測ると、複製の方が既存の流儀。
+ *
+ * ⇒ 揃えるべきは**形と意味**であって、宣言の実体ではない。片方を変えるときは
+ *    もう片方も同じ意味に保つこと。
+ */
+export interface KosokuParseResult<V> {
+  map: Map<string, V>;
+  /** `drivers` 配列 (全乗務員形) にも `days` 配列 (driver 指定形) にも当てはまらなかった。 */
+  unreadable: boolean;
+}
+
 /** `YYYY-MM` の前月。1 月は前年 12 月へ回る。 */
 export function prevYmOf(ym: string): string {
   const [y, m] = ym.split("-").map(Number) as [number, number];
@@ -159,15 +193,23 @@ function toPart(r: Record<string, unknown>): KosokuCalendarPart {
  * 載る。nginx の `/time-card/pdf-json` を読む `timecard-compare.ts` の `parsePdfJson`
  * が使っている `else entries = [b]` と同じ形で、新しい流儀は作らない。
  *
+ * **どちらの形にも当てはまらなければ `unreadable: true`** (Refs #960)。`drivers` が
+ * 配列でなく `days` も配列でない応答は「乗務員が 0 名」ではなく「読めなかった」で、
+ * 空 Map を黙って返すと呼び出し側が「取れた」と読む。判別は
+ * `kintai-diff.ts` の `onpremKosokuDailyToMap` と同じ順序 (`drivers` → `days`) に
+ * 揃えてある — 同じ上流の同じ応答を 2 通りの規則で読み分けない。
+ *
  * **この repo の呼び出し元 3 箇所 (`loadKosokuShifts` / `loadCompareKosoku` /
  * kyuyo-mcp の `get_timecard_diff`) はいずれも `driver` を付けない**ので、いまは常に
  * `drivers` 配列の側を通る。予防的な整合であって現行の応答での結果は変わらない —
  * `driver=` 付きで呼ぶ経路が増えた瞬間に静かに 0 行になるのを先に塞いでおく。
  */
-function driverEntriesOf(body: unknown): unknown[] {
-  if (typeof body !== "object" || body === null) return [];
-  const drivers = (body as { drivers?: unknown }).drivers;
-  return Array.isArray(drivers) ? drivers : [body];
+function driverEntriesOf(body: unknown): { entries: unknown[]; unreadable: boolean } {
+  if (typeof body !== "object" || body === null) return { entries: [], unreadable: true };
+  const b = body as { drivers?: unknown; days?: unknown };
+  if (Array.isArray(b.drivers)) return { entries: b.drivers, unreadable: false };
+  if (Array.isArray(b.days)) return { entries: [body], unreadable: false };
+  return { entries: [], unreadable: true };
 }
 
 /**
@@ -176,10 +218,13 @@ function driverEntriesOf(body: unknown): unknown[] {
  * - **乗務員CD は `String(Number(...))` で正規化**する (打刻側と同じ規則)
  * - **日付が `YYYY-MM-DD` でない勤務は捨てる** — 暦日に置き場が無い
  * - 乗務員CD 0 は捨てる (実測で返ってくる。社員マスタに居ない番号)
+ * - **どちらの形でもなければ `unreadable: true`** — 空 Map と一緒に返すので、
+ *   呼び出し側は「0 名だった」と読まずに済む (Refs #960)
  */
-export function parseKosokuDaily(body: unknown): Map<string, KosokuShift[]> {
+export function parseKosokuDaily(body: unknown): KosokuParseResult<KosokuShift[]> {
   const out = new Map<string, KosokuShift[]>();
-  for (const entry of driverEntriesOf(body)) {
+  const { entries, unreadable } = driverEntriesOf(body);
+  for (const entry of entries) {
     if (typeof entry !== "object" || entry === null) continue;
     const e = entry as { driver?: unknown; days?: unknown };
     const cd = Number(e.driver);
@@ -203,7 +248,7 @@ export function parseKosokuDaily(body: unknown): Map<string, KosokuShift[]> {
     }
     out.set(String(cd), shifts);
   }
-  return out;
+  return { map: out, unreadable };
 }
 
 /**
@@ -215,7 +260,7 @@ export function parseKosokuDaily(body: unknown): Map<string, KosokuShift[]> {
  * `ferry+rounding` の実額に使う。上流は差の無い日・値の無い日を省くので、無い日は
  * 0 と読む。**当月の応答からだけ**読めばよい (紙もこちらの再現も月単位で閉じている)。
  */
-export function parsePaperDriftByDriver(body: unknown): Map<string, Map<string, number>> {
+export function parsePaperDriftByDriver(body: unknown): KosokuParseResult<Map<string, number>> {
   return parseDateMapByDriver(body, "paper_drift_by_date");
 }
 
@@ -228,7 +273,7 @@ export function parsePaperDriftByDriver(body: unknown): Map<string, Map<string, 
  * 落ちる (実測 1026 一瀬 2026-05-01: 出庫 04-30 の運行のフェリー 76 分)。突合は
  * このマップを優先し、無ければ従来の貼り付け値へ倒す (旧上流との互換)。
  */
-export function parseFerryMinusByDriver(body: unknown): Map<string, Map<string, number>> {
+export function parseFerryMinusByDriver(body: unknown): KosokuParseResult<Map<string, number>> {
   return parseDateMapByDriver(body, "ferry_minus_by_date");
 }
 
@@ -241,7 +286,7 @@ export function parseFerryMinusByDriver(body: unknown): Map<string, Map<string, 
  * その分だけ紙が大きくなる。**紙が大きくなる向き** (run-head と同じ) の実額で、
  * 突合が cause `paper-outside` に使う。
  */
-export function parsePaperOutsideByDriver(body: unknown): Map<string, Map<string, number>> {
+export function parsePaperOutsideByDriver(body: unknown): KosokuParseResult<Map<string, number>> {
   return parseDateMapByDriver(body, "paper_outside_by_date");
 }
 
@@ -253,7 +298,7 @@ export function parsePaperOutsideByDriver(body: unknown): Map<string, Map<string
  * こちらの拘束 — アイドリングだけの休息明け勤務 (車中泊) など。**紙が小さくなる
  * 向き** (run-gap と同じ) の実額で、突合が cause `ours-outside` に使う。
  */
-export function parseOursOutsideByDriver(body: unknown): Map<string, Map<string, number>> {
+export function parseOursOutsideByDriver(body: unknown): KosokuParseResult<Map<string, number>> {
   return parseDateMapByDriver(body, "ours_outside_by_date");
 }
 
@@ -265,7 +310,7 @@ export function parseOursOutsideByDriver(body: unknown): Map<string, Map<string,
  * のでこちらより小さくなる。**紙が小さくなる向き** (lunch と同じ) の実額で、
  * 突合が cause `minus-unko` と汎用部分和の項に使う。
  */
-export function parseMinusUnkoByDriver(body: unknown): Map<string, Map<string, number>> {
+export function parseMinusUnkoByDriver(body: unknown): KosokuParseResult<Map<string, number>> {
   return parseDateMapByDriver(body, "minus_unko_by_date");
 }
 
@@ -277,15 +322,20 @@ export function parseMinusUnkoByDriver(body: unknown): Map<string, Map<string, n
  * 割る。**同じ時間の置き場所が違うだけ**なので、運行開始日が正 (紙が多い)・前日が
  * 負 (紙が少ない) で釣り合う。突合が cause `gap-midnight` に使う。
  */
-export function parseGapMidnightByDriver(body: unknown): Map<string, Map<string, number>> {
+export function parseGapMidnightByDriver(body: unknown): KosokuParseResult<Map<string, number>> {
   return parseDateMapByDriver(body, "gap_midnight_by_date");
 }
 
 /** 乗務員エントリ ([driverEntriesOf]) の `<key>` にある `{YYYY-MM-DD: 分}` を
- *  乗務員CD 引きに直す共通部。**単一乗務員形もそのまま読む** (Refs #602)。 */
-function parseDateMapByDriver(body: unknown, key: string): Map<string, Map<string, number>> {
+ *  乗務員CD 引きに直す共通部。**単一乗務員形もそのまま読む** (Refs #602)。
+ *
+ *  **どちらの形でもなければ `unreadable: true`** (Refs #960) — 突合の cause 別実額は
+ *  「その日に値が無い = 0」として読むので、形を読み違えた空 Map をそのまま渡すと
+ *  **差が全部「未説明」に化ける**。0 と読めない理由を呼び出し側へ運ぶ。 */
+function parseDateMapByDriver(body: unknown, key: string): KosokuParseResult<Map<string, number>> {
   const out = new Map<string, Map<string, number>>();
-  for (const entry of driverEntriesOf(body)) {
+  const { entries, unreadable } = driverEntriesOf(body);
+  for (const entry of entries) {
     if (typeof entry !== "object" || entry === null) continue;
     const e = entry as Record<string, unknown>;
     const cd = Number(e.driver);
@@ -300,7 +350,7 @@ function parseDateMapByDriver(body: unknown, key: string): Map<string, Map<strin
     }
     if (byDate.size > 0) out.set(String(cd), byDate);
   }
-  return out;
+  return { map: out, unreadable };
 }
 
 /**

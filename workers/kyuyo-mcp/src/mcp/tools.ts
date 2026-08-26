@@ -694,7 +694,14 @@ export const getTimecardDiffTool = {
     "`totals` (原因別日数・未説明日数) を添えたうえで**未説明の多い順に既定 20 名**だけ返す (limit で変更可)。" +
     "totals と ours_only_by_branch は絞り込む前の全乗務員で数えるので limit を変えても動かない。" +
     "こちら側の氏名・営業所と `ours_only_by_branch` (ours-only 日数の営業所別内訳) を添える。" +
-    "そこで見当を付けてから driver 指定で日別に掘る。",
+    "そこで見当を付けてから driver 指定で日別に掘る。" +
+    "**こちら側 (オンプレ kosoku-daily) の応答は driver 指定の有無で形が変わる** " +
+    "(省略時 `{drivers:[...]}` / 指定時 `{driver, days:[...]}` で `drivers` が無い) — 両方読む。" +
+    "`ours_unreadable` が true ならどちらの形にも当てはまらず読めなかったということで、" +
+    "こちら側の 0 分は「本当に 0 分」ではない。**紙 (nginx) 側とは別の口**なのでそちらは無事だが、" +
+    "差分も cause 別の実額 (unknown を含む) も当てにならないので、この結果で紙を疑わないこと。" +
+    "get_kintai_diff の `onprem_unreadable` と同じ条件を、この tool の `ours` 語彙に揃えたもの " +
+    "(ここは紙もオンプレなので `onprem_` ではどちら側か分からない)。",
   inputSchema: getTimecardDiffArgs,
   execute: async (env: Env, args) => {
     if (!parseYm(args.month)) throw new Error("month は YYYY-MM で指定してください");
@@ -725,8 +732,11 @@ export const getTimecardDiffTool = {
     // `mergeKosokuShiftMaps` を使わないのは、あちらが「取得失敗 = null」を扱う
     // 都合で null を返しうる型になっており、ここでは起きない分岐が残るため
     const shifts = new Map<string, KosokuShift[]>();
-    for (const body of [curBody, prevBody]) {
-      for (const [driverCd, driverShifts] of parseKosokuDaily(body)) {
+    // **当月の応答の形が読めたか**だけを応答へ載せる (Refs #960)。読めていないと
+    // shifts も日別マップ 6 本も空だが、空は「こちら側 0 分」と見分けが付かない
+    const curParsed = parseKosokuDaily(curBody);
+    for (const parsed of [curParsed, parseKosokuDaily(prevBody)]) {
+      for (const [driverCd, driverShifts] of parsed.map) {
         shifts.set(driverCd, [...(shifts.get(driverCd) ?? []), ...driverShifts]);
       }
     }
@@ -740,17 +750,28 @@ export const getTimecardDiffTool = {
     }
     // 紙の再現値との差 (cause "rounding" の実額) — 当月の応答からだけ読む
     // (Refs ohishi-exp/rust-ichibanboshi#179)
-    const paperDriftByDriver = parsePaperDriftByDriver(curBody);
+    const paperDriftByDriver = parsePaperDriftByDriver(curBody).map;
     // 紙だけが数える勤務外の分 (cause "paper-outside" の実額、Refs #546 / rust#182)
-    const paperOutsideByDriver = parsePaperOutsideByDriver(curBody);
+    const paperOutsideByDriver = parsePaperOutsideByDriver(curBody).map;
     // こちらだけが数える時間 (cause "ours-outside" の実額、鏡像)
-    const oursOutsideByDriver = parseOursOutsideByDriver(curBody);
+    const oursOutsideByDriver = parseOursOutsideByDriver(curBody).map;
     // 紙が引く 運行開始 → 始業 (cause "minus-unko" の実額、Refs #546 / rust#182)
-    const minusUnkoByDriver = parseMinusUnkoByDriver(curBody);
+    const minusUnkoByDriver = parseMinusUnkoByDriver(curBody).map;
     // 深夜を跨ぐ継ぎ目の暦日配分の差 (cause "gap-midnight" の実額、Refs #546)
-    const gapMidnightByDriver = parseGapMidnightByDriver(curBody);
+    const gapMidnightByDriver = parseGapMidnightByDriver(curBody).map;
     // フェリー控除の日別マップ (rust#181) — 勤務に貼れない日があるのでマップ優先
-    const ferryMinusByDriver = parseFerryMinusByDriver(curBody);
+    const ferryMinusByDriver = parseFerryMinusByDriver(curBody).map;
+    // ★ 読めなかったときだけ本文が入る (Refs #960)。get_kintai_diff の `note` と同じ
+    // 扱い — tool 説明を読み直さなくても、応答そのものから「0 分は 0 分ではない」と
+    // 分かるようにする。**「取れなかった」ではなく「形が読めなかった」**なので、
+    // 取り込み直しでは直らない (直すのは上流の応答の形)
+    const oursUnreadableNote = curParsed.unreadable
+      ? "**ours_unreadable: true — こちら側 (オンプレ kosoku-daily) の応答の形が読めなかった** " +
+        "(drivers 配列も driver 指定形の days 配列も無かった)。こちら側は全乗務員・全日が " +
+        "0 分になり、紙 (nginx) の値がまるごと差として出る。差分も cause 別の実額 " +
+        "(unknown を含む) も当てにならないので、この結果で紙を疑わないこと。" +
+        "取り込み直しでは直らない — 上流の応答の形が変わっている。"
+      : "";
     // nginx はエラーも HTTP 200 + `{error}` で返す (nginx#784)。素通しすると
     // 「差なし」に見えるので必ず表に出す
     const upstreamError = pdfJsonError(pdfBody);
@@ -815,6 +836,8 @@ export const getTimecardDiffTool = {
         onlyAnomalies,
         mode: "summary" as const,
         drivers: rows.length,
+        ours_unreadable: curParsed.unreadable,
+        note: oursUnreadableNote,
         totals,
         ours_only_by_branch: branches,
         /** 未説明の多い順。`limit` で切った残りの件数。 */
@@ -835,6 +858,8 @@ export const getTimecardDiffTool = {
       onlyAnomalies,
       mode: "days" as const,
       drivers: trimmed.length,
+      ours_unreadable: curParsed.unreadable,
+      note: oursUnreadableNote,
       results: trimmed,
     };
   },
