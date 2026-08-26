@@ -276,15 +276,32 @@ function onSelectedLocationChange(location: SelectedRowsLocationRange | null) {
 //     EventCrewPanel に渡し、対応する filteredRows のチェックボックスにも反映する
 //     (以前はページ側の ref だけ更新してチェックボックスが連動しない実運用回帰があった)。
 
-/** `'unavailable'` は **`'error'` とは別物** (Refs #822 ①): `'error'`/`'not-found'` は
- * 「一番星を呼んだ結果」なので押し直せば変わりうるが、`'unavailable'` は**呼ぶための
- * 材料 (車輌CD / 運行日) がそもそも無い**状態で、何度押しても永久に変わらない。
- * 同じ見た目にすると「もう一度押せば直るかも」と読ませてしまう。 */
-type ProposeStatus = 'idle' | 'loading' | 'done' | 'not-found' | 'error' | 'ambiguous' | 'unavailable'
+/** 提案できなかった状態は**原因ごとに 5 つに分ける** (Refs #822 ①②-1)。同じ文言に
+ * 丸めると、押した人が**間違った場所を探しに行く**。**「探す先」で分けている**:
+ *
+ * - `'error'` … 呼んで落ちた (イベント行が引けなかった場合を含む)。
+ *   **押し直せば変わりうる** (赤)
+ * - `'not-found'` … 一番星を呼んだが**伝票が 1 件も無い**。探す先は一番星 (灰)
+ * - `'no-events'` … **この運行にイベント行が 1 行も無い**。伝票は**見てすらいない**ので
+ *   一番星に行かせてはいけない。探す先は取込元 (デジタコ) (琥珀)
+ * - `'no-event-match'` … **伝票はあるのに**、その積地・卸地に対応する積み降しが
+ *   イベント行に無い (`proposeEventRowRange` が全件 null)。探す先は**イベント表**で、
+ *   一番星を見に行っても伝票はちゃんとある。押し直しても変わらない (琥珀)
+ * - `'unavailable'` … **呼ぶための材料 (車輌CD / 運行日) がそもそも無い**。
+ *   一番星は呼んですらいない。押し直しても変わらない (琥珀)
+ *
+ * 押し直しても変わらない 3 つ (`'no-events'` / `'no-event-match'` / `'unavailable'`) を
+ * `'error'` の赤と同じ見た目にすると「もう一度押せば直るかも」と読ませてしまうので
+ * 色も分ける。ただし**この 3 つも互いに別物** — イベントが無いのか、材料が無いのか、
+ * 材料はあるが対応が取れないのか。 */
+type ProposeStatus = 'idle' | 'loading' | 'done' | 'not-found' | 'error' | 'ambiguous' | 'unavailable' | 'no-event-match' | 'no-events'
 const proposeStatus = ref<ProposeStatus>('idle')
 /** `'unavailable'` のとき**何が欠けているか**。車輌CD と運行日は片方だけ欠けることも
  * 両方欠けることもあり、どちらか分からないと直しようがないので文言を出し分ける。 */
 const proposeUnavailableReason = ref('')
+/** `'no-event-match'` のとき**伝票が何件あったか**。「伝票が無い」(`'not-found'`) と
+ * 読み違えられないよう、**件数を数えて画面に言わせる** (0 件ならこの状態にならない)。 */
+const proposeNoMatchSlipCount = ref(0)
 /** 直近の提案で union した積み/降しペアの件数 (Refs #356: 同日往復2回等で2以上に
  * なる場合、レグを1本しか提案できていないと誤解されないよう画面に通知する)。 */
 const proposedLegCount = ref(0)
@@ -357,7 +374,12 @@ async function proposeFromSlips() {
     await loadCsv('events')
     const csv = csvData.value.events
     if (!csv || csv.rows.length === 0) {
-      proposeStatus.value = 'not-found'
+      // **伝票を見てすらいないのに「伝票が見つかりません」と言っていた** (Refs #822 ②-1)。
+      // ここに来るのは「この運行にイベント行が無い」ときで、探す先は取込元 (デジタコ) —
+      // 一番星ではない。ただし**引けなかっただけ**なら押し直す意味があるので、
+      // それは `'error'` (赤) に倒す (`csvError` は #873 で「引けなかった」と「無い」を
+      // 言い分けるために持っている。琥珀にすると「押しても無駄」と読ませてしまう)。
+      proposeStatus.value = csvError.value.events ? 'error' : 'no-events'
       return
     }
     // reading_date/operation_date (タコグラフ読取日) は一番星の売上年月日と1日前後
@@ -379,7 +401,17 @@ async function proposeFromSlips() {
       if (range) candidates.push({ originCity, destCity, range })
     }
     if (candidates.length === 0) {
-      proposeStatus.value = 'not-found'
+      // **原因が 2 つあるのに 1 つの文言に丸めない** (Refs #822 ②-1)。伝票が 1 件も
+      // 無いのか、伝票はあるが `proposeEventRowRange` が全件 null (積地に一致する
+      // 積みが無い / その積みの後に卸地の降しが無い) なのかで、**押した人が探しに
+      // 行く場所が違う** — 前者は一番星、後者はこの運行のイベント表。後者で
+      // 「伝票が見つかりません」と出すと、ちゃんとある伝票を探しに行かせてしまう。
+      if (slips.length === 0) {
+        proposeStatus.value = 'not-found'
+        return
+      }
+      proposeNoMatchSlipCount.value = slips.length
+      proposeStatus.value = 'no-event-match'
       return
     }
     if (candidates.length === 1) {
@@ -668,6 +700,10 @@ function formatDatetime(val: string | null): string {
             <span v-else-if="proposeStatus === 'error'" class="text-xs text-red-500">提案に失敗しました</span>
             <!-- 「呼んで駄目だった」(赤/灰) と**色も文も分ける** — 押し直しても変わらない。 -->
             <span v-else-if="proposeStatus === 'unavailable'" class="text-xs text-amber-600 dark:text-amber-400">{{ proposeUnavailableReason }}</span>
+            <!-- 伝票は**見てすらいない** — 一番星ではなく取込元 (デジタコ) を見る話。 -->
+            <span v-else-if="proposeStatus === 'no-events'" class="text-xs text-amber-600 dark:text-amber-400">この運行にはイベントの記録が無いため提案できません</span>
+            <!-- 「伝票が無い」(灰) と**別の文**にする — 伝票はあるので探す先はイベント表。 -->
+            <span v-else-if="proposeStatus === 'no-event-match'" class="text-xs text-amber-600 dark:text-amber-400">伝票{{ proposeNoMatchSlipCount }}件に対応する積み降しが無く提案できません</span>
             <span v-else-if="proposeStatus === 'done' && proposedLegCount > 1" class="text-xs text-amber-600 dark:text-amber-400">
               同一区間のレグが{{ proposedLegCount }}件見つかったため全て選択範囲に含めました
             </span>
