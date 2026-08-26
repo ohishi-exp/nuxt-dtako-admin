@@ -109,10 +109,25 @@ export interface KosokuShift extends KosokuCalendarPart {
  * ものを 1 つの返り値に畳まない。
  *
  * **`kintai-diff.ts` の `OnpremParseResult` と同じ形** (`{ map, unreadable }`。#600 で
- * 同じ罠のために作られたもので、kyuyo-mcp も別デプロイ単位に同じ形を持っている)。
- * 違いは値の型だけ — あちらは `KintaiDiffValueEntry` 固定、こちらは `KosokuShift[]` と
- * `Map<string, number>` の 2 種を持つので generic にした。**新しい流儀は作らない**
- * ためフィールド名も意味もそのまま揃える。
+ * 同じ罠のために作られたもの)。**新しい流儀は作らない**ためフィールド名も意味も
+ * そのまま揃えてある。
+ *
+ * ## なぜ `OnpremParseResult` を import せず、同じ形を置いているのか (Refs #960)
+ *
+ * **重複に見えるが意図的。generic 化して共有しに行かないこと。** 理由は 3 つ:
+ *
+ * 1. **値の型が違う。** あちらは `map: Map<string, KintaiDiffValueEntry>` で**非
+ *    generic**。こちらは `KosokuShift[]` と `Map<string, number>` の 2 種を持つので、
+ *    そのままでは当てはまらない。
+ * 2. **共有するには所有権の外に手が入る。** `OnpremParseResult<V = …>` へ generic 化
+ *    すると `kintai-diff.ts` の宣言と doc (「`onpremKosokuDailyToMap` の結果」) を
+ *    書き換えることになる。**型の都合で他人のファイルを触る**のは割に合わない。
+ * 3. **同じ形を別に置く前例が既にある。** `kyuyo-mcp/src/mcp/tools.ts` は
+ *    `OnpremParseResult` を verbatim 複製している (別デプロイ単位のため)。
+ *    「この repo で現に何が行われているか」で測ると、複製の方が既存の流儀。
+ *
+ * ⇒ 揃えるべきは**形と意味**であって、宣言の実体ではない。片方を変えるときは
+ *    もう片方も同じ意味に保つこと。
  */
 export interface KosokuParseResult<V> {
   map: Map<string, V>;
