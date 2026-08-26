@@ -11,6 +11,11 @@ import {
   planScrapeDispatch,
   scrapeJobKey,
 } from "../src/scrape-dispatch";
+import type {
+  AlcTenantDataForwarder,
+  AlcTenantDataInput,
+  AlcTenantDataResult,
+} from "../src/alc-tenant-rpc";
 
 describe("planScrapeDispatch", () => {
   it("昇順・重複無しに畳む", () => {
@@ -107,75 +112,91 @@ describe("dispatchScrapeDates", () => {
   });
 });
 
+/** `AUTH_WORKER_RPC` の面を差し替えるスタブ。**呼ばれた input をそのまま覚える** —
+ * RPC は URL を組まないので、検証対象は「どんな input を渡したか」になる。 */
+function rpcStub(reply: (input: AlcTenantDataInput) => AlcTenantDataResult) {
+  const calls: AlcTenantDataInput[] = [];
+  return {
+    calls,
+    rpc: {
+      forwardAlcTenantData: async (input: AlcTenantDataInput) => {
+        calls.push(input);
+        return reply(input);
+      },
+    } satisfies AlcTenantDataForwarder,
+  };
+}
+
+const json = (body: string, status = 200): AlcTenantDataResult => ({
+  status,
+  body,
+  contentType: "application/json",
+});
+
 describe("fetchScrapeHistory", () => {
-  it("★ device-data-proxy に Bearer で引く (alc-internal-proxy では 403 だった、Refs #933)", async () => {
-    const calls: { url: string; init?: RequestInit }[] = [];
-    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
-      calls.push({ url, init });
-      return new Response(JSON.stringify([{ target_date: "2026-06-03", status: "success" }]), {
-        status: 200,
-      });
-    }) as unknown as typeof fetch;
+  it("★ RPC entrypoint 越しに引く (credential も URL も組まない、Refs #950)", async () => {
+    const { calls, rpc } = rpcStub(() =>
+      json(JSON.stringify([{ target_date: "2026-06-03", status: "success" }])),
+    );
 
-    const out = await fetchScrapeHistory({ accessToken: "jwt-abc", limit: 20 }, fetchImpl);
+    const out = await fetchScrapeHistory({ tenantId: "t-1", limit: 20 }, rpc);
+
     expect(out).toEqual([{ target_date: "2026-06-03", status: "success" }]);
-    expect(calls[0]!.url).toBe(
-      "https://auth-worker.internal/device-data-proxy/api/scraper/history?limit=20",
-    );
-    const headers = calls[0]!.init?.headers as Record<string, string>;
-    expect(headers.Authorization).toBe("Bearer jwt-abc");
-    // tenant は auth-worker が device record から注入する。送ると詐称できると誤読させる。
-    expect(headers["X-Tenant-ID"]).toBeUndefined();
-    expect(headers["X-Alc-Proxy-Secret"]).toBeUndefined();
+    expect(calls[0]).toEqual({
+      tenantId: "t-1",
+      path: "/api/scraper/history",
+      method: "GET",
+      search: "?limit=20",
+    });
   });
 
-  it("★ もう alc-internal-proxy は叩かない (403 の経路へ戻らないことを固定する)", async () => {
-    const calls: string[] = [];
-    const fetchImpl = (async (url: string) => {
-      calls.push(url);
-      return new Response("[]", { status: 200 });
-    }) as unknown as typeof fetch;
-    await fetchScrapeHistory({ accessToken: "jwt", limit: 1 }, fetchImpl);
-    expect(calls[0]).not.toContain("/alc-internal-proxy/");
+  it("★ tenant は呼び手が渡す (RPC は binding 内なので詐称の相手が居ない)", async () => {
+    const { calls, rpc } = rpcStub(() => json("[]"));
+    await fetchScrapeHistory({ tenantId: "t-9", limit: 1 }, rpc);
+    expect(calls[0]!.tenantId).toBe("t-9");
   });
 
-  it("非 2xx / 非 JSON は握り潰さず原因を throw する", async () => {
-    const bad = (async () => new Response("nope", { status: 502 })) as unknown as typeof fetch;
-    await expect(fetchScrapeHistory({ accessToken: "jwt", limit: 1 }, bad)).rejects.toThrow(
-      "alc scraper history failed (502)",
+  it("★ 非 2xx は黙って 0 件にせず、status と本文抜粋つきで throw する", async () => {
+    const { rpc } = rpcStub(() => json("nope", 502));
+    await expect(fetchScrapeHistory({ tenantId: "t-1", limit: 1 }, rpc)).rejects.toThrow(
+      /alc scraper history failed \(502\).*nope/,
     );
+  });
 
-    const html = (async () => new Response("<html>", { status: 200 })) as unknown as typeof fetch;
-    await expect(fetchScrapeHistory({ accessToken: "jwt", limit: 1 }, html)).rejects.toThrow(
+  it("JSON でない 2xx も握り潰さず throw する", async () => {
+    const { rpc } = rpcStub(() => json("<html>"));
+    await expect(fetchScrapeHistory({ tenantId: "t-1", limit: 1 }, rpc)).rejects.toThrow(
       "parse failed",
     );
   });
 });
 
 describe("postScrapeHistory", () => {
-  it("★ 無人実行の 1 行を書く — 同じ path なので読みと同じ allowlist で通る (Refs #931)", async () => {
-    const calls: { url: string; init?: RequestInit }[] = [];
-    const fetchImpl = (async (url: string, init?: RequestInit) => {
-      calls.push({ url, init });
-      return new Response(null, { status: 204 });
-    }) as unknown as typeof fetch;
-
+  it("★ 無人実行の 1 行を書く — 読みと同じ RPC・同じ tenant (Refs #931)", async () => {
+    const { calls, rpc } = rpcStub(() => ({ status: 204, body: "", contentType: null }));
     const entry = { target_date: "2026-08-25", comp_id: "75700192", status: "success" };
-    await postScrapeHistory(entry, "jwt-abc", fetchImpl);
 
-    expect(calls[0]!.url).toBe(
-      "https://auth-worker.internal/device-data-proxy/api/scraper/history",
-    );
-    expect(calls[0]!.init?.method).toBe("POST");
-    const headers = calls[0]!.init?.headers as Record<string, string>;
-    expect(headers.Authorization).toBe("Bearer jwt-abc");
-    expect(JSON.parse(calls[0]!.init?.body as string)).toEqual(entry);
+    await postScrapeHistory(entry, "t-1", rpc);
+
+    expect(calls[0]!.path).toBe("/api/scraper/history");
+    expect(calls[0]!.method).toBe("POST");
+    expect(calls[0]!.tenantId).toBe("t-1");
+    expect(calls[0]!.contentType).toBe("application/json");
+    expect(JSON.parse(calls[0]!.body!)).toEqual(entry);
   });
 
-  it("非 2xx は status と本文抜粋つきで throw する (呼び手が loud に鳴らせるように)", async () => {
-    const bad = (async () => new Response('{"error":"forbidden"}', { status: 403 })) as unknown as typeof fetch;
-    await expect(postScrapeHistory({}, "jwt", bad)).rejects.toThrow(
-      /alc scraper history save failed \(403\).*forbidden/,
+  it("204 (本文なし) を成功として扱う", async () => {
+    const { rpc } = rpcStub(() => ({ status: 204, body: "", contentType: null }));
+    await expect(postScrapeHistory({}, "t-1", rpc)).resolves.toBeUndefined();
+  });
+
+  it("★ 非 2xx は status と本文抜粋つきで throw する (呼び手が loud に鳴らせるように)", async () => {
+    // ★ RPC の allowlist 拒否は `path_not_forwardable` (auth-worker#484)。
+    //   `forbidden` (alc-internal-proxy / 上流の tenant 拒否) と**本文で区別できる**
+    //   ようになっているので、サンプルも実際に返る方に合わせる。
+    const { rpc } = rpcStub(() => json('{"error":"path_not_forwardable"}', 403));
+    await expect(postScrapeHistory({}, "t-1", rpc)).rejects.toThrow(
+      /alc scraper history save failed \(403\).*path_not_forwardable/,
     );
   });
 });
@@ -201,10 +222,8 @@ describe("countSplitFailed", () => {
 
 describe("fetchUnsplit", () => {
   it("**unsplit / unsplit_total だけを取り出す** (items は 1,100 件超あるので捨てる)", async () => {
-    const calls: { url: string; init?: RequestInit }[] = [];
-    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
-      calls.push({ url, init });
-      return new Response(
+    const { calls, rpc } = rpcStub(() =>
+      json(
         JSON.stringify({
           period: {},
           items: Array.from({ length: 1130 }, (_, i) => ({ unko_no: String(i) })),
@@ -212,59 +231,45 @@ describe("fetchUnsplit", () => {
           unsplit_total: 3,
           warnings: [],
         }),
-        { status: 200 },
-      );
-    }) as unknown as typeof fetch;
+      ),
+    );
 
     const got = await fetchUnsplit(
-      { accessToken: "jwt-abc", dateFrom: "2026-06-03", dateTo: "2026-07-01" },
-      fetchImpl,
+      { tenantId: "t-1", dateFrom: "2026-06-03", dateTo: "2026-07-01" },
+      rpc,
     );
+
     expect(got.unsplit_total).toBe(3);
     expect(got.unsplit).toHaveLength(1);
     expect(got).not.toHaveProperty("items");
-    expect(calls[0]!.url).toBe(
-      "https://auth-worker.internal/device-data-proxy/api/dtako/events/etags?date_from=2026-06-03&date_to=2026-07-01",
-    );
-    const headers = calls[0]!.init?.headers as Record<string, string>;
-    // Refs #933: 旧経路 (alc-internal-proxy) は tenant 経路なので 403 だった。
-    expect(headers.Authorization).toBe("Bearer jwt-abc");
-    expect(headers["X-Alc-Proxy-Secret"]).toBeUndefined();
-    expect(headers["X-Tenant-ID"]).toBeUndefined();
+    expect(calls[0]).toEqual({
+      tenantId: "t-1",
+      path: "/api/dtako/events/etags",
+      method: "GET",
+      search: "?date_from=2026-06-03&date_to=2026-07-01",
+    });
   });
 
   it("欠けたフィールドは 0 / 空に倒すが、**上流の失敗は握り潰さない**", async () => {
-    const empty = (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch;
-    const got = await fetchUnsplit(
-      { accessToken: "jwt", dateFrom: "2026-06-03", dateTo: "2026-06-04" },
-      empty,
-    );
-    expect(got).toEqual({ unsplit: [], unsplit_total: 0 });
-
-    const nulled = (async () => new Response("null", { status: 200 })) as unknown as typeof fetch;
+    const empty = rpcStub(() => json("{}"));
     expect(
-      await fetchUnsplit(
-        { accessToken: "jwt", dateFrom: "2026-06-03", dateTo: "2026-06-04" },
-        nulled,
-      ),
+      await fetchUnsplit({ tenantId: "t-1", dateFrom: "2026-06-03", dateTo: "2026-06-04" }, empty.rpc),
+    ).toEqual({ unsplit: [], unsplit_total: 0 });
+
+    const nulled = rpcStub(() => json("null"));
+    expect(
+      await fetchUnsplit({ tenantId: "t-1", dateFrom: "2026-06-03", dateTo: "2026-06-04" }, nulled.rpc),
     ).toEqual({ unsplit: [], unsplit_total: 0 });
 
     // 期間の上限 (alc 側 40 日) 超過はここに落ちる
-    const bad = (async () =>
-      new Response("range too wide", { status: 400 })) as unknown as typeof fetch;
+    const bad = rpcStub(() => json("range too wide", 400));
     await expect(
-      fetchUnsplit(
-        { accessToken: "jwt", dateFrom: "2026-01-01", dateTo: "2026-12-31" },
-        bad,
-      ),
+      fetchUnsplit({ tenantId: "t-1", dateFrom: "2026-01-01", dateTo: "2026-12-31" }, bad.rpc),
     ).rejects.toThrow("alc etags failed (400): range too wide");
 
-    const html = (async () => new Response("<html>", { status: 200 })) as unknown as typeof fetch;
+    const html = rpcStub(() => json("<html>"));
     await expect(
-      fetchUnsplit(
-        { accessToken: "jwt", dateFrom: "2026-06-03", dateTo: "2026-06-04" },
-        html,
-      ),
+      fetchUnsplit({ tenantId: "t-1", dateFrom: "2026-06-03", dateTo: "2026-06-04" }, html.rpc),
     ).rejects.toThrow("alc etags parse failed");
   });
 });

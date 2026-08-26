@@ -18,7 +18,6 @@ import {
   dispatchNetprintTargets,
   NETPRINT_TARGETS_KV_KEY,
   resolveDtakoAccountsRaw,
-  resolveDtakoDeviceCredsRaw,
   resolveNetprintTargetsRaw,
   resolveSecretBinding,
   runScheduledCron,
@@ -39,8 +38,10 @@ import {
   MAX_SCRAPE_DATES,
   planScrapeDispatch,
 } from "./scrape-dispatch";
-import { requestDeviceJwt } from "./device-proxy";
-import { credentialForTenant, parseDtakoDeviceCreds } from "./dtako-device-creds";
+import {
+  requireAlcTenantForwarder,
+  type AlcTenantDataForwarder,
+} from "./alc-tenant-rpc";
 
 export interface RelayWorkerEnv {
   RELAY: DurableObjectNamespace;
@@ -53,6 +54,10 @@ export interface RelayWorkerEnv {
   ETC_ACCOUNTS?: unknown;
   /** auth-worker への service binding。`/ichibanboshi-proxy/*` (OIDC mint) に使う。 */
   AUTH_WORKER?: { fetch(input: string, init?: RequestInit): Promise<Response> };
+  /** auth-worker の RPC entrypoint (`InternalEntrypoint`)。**名前付きメソッドは
+   * service binding からしか呼べない**ので、履歴の読み書きに credential が要らない
+   * (Refs #950 / ippoan/auth-worker#483)。 */
+  AUTH_WORKER_RPC?: AlcTenantDataForwarder;
   /** consumer worker proof (`X-Alc-Proxy-Secret`)。未設定なら打刻の中継は 503。 */
   INTERNAL_SHARED_SECRET?: unknown;
   /** オンプレ rust-ichibanboshi (CF Tunnel) の origin と CF Access Service Token。 */
@@ -1148,10 +1153,9 @@ async function handleScrapeHistory(request: Request, env: RelayWorkerEnv): Promi
       headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
     });
 
-  const authWorker = env.AUTH_WORKER;
   const compId = (env.KINTAI_COMP_ID ?? "").trim();
   const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-  if (!authWorker || !compId || !proxySecret) return fail(503, "kintai-relay not configured");
+  if (!compId || !proxySecret) return fail(503, "kintai-relay not configured");
   const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
   if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
 
@@ -1170,33 +1174,20 @@ async function handleScrapeHistory(request: Request, env: RelayWorkerEnv): Promi
   const parsed = raw === null ? DEFAULT_HISTORY_LIMIT : Number.parseInt(raw, 10);
   const limit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 200) : DEFAULT_HISTORY_LIMIT;
 
-  const proxy = ((input: unknown, init?: RequestInit) =>
-    authWorker.fetch(input as string, init)) as unknown as typeof fetch;
-
-  // ★ 履歴は alc の **tenant (data) 経路** なので `alc-internal-proxy` では 403
-  // (Refs #933)。`device-data-proxy` 越しに device JWT で叩く — tenant は device
-  // record 由来で詐称不能。credential は KV `dtako_device_creds` (人が投入)。
-  let accessToken: string;
+  // ★ 履歴は alc の **tenant (data) 経路**。`alc-internal-proxy` は data 経路を
+  // 意図的に弾くので通らない (#933)。auth-worker の **RPC entrypoint** 越しに叩く
+  // (#950) — 名前付きメソッドは service binding からしか呼べないので credential が
+  // 要らない。**binding が無ければ黙らずその旨を返す。**
+  let rpc: AlcTenantDataForwarder;
   try {
-    const cred = credentialForTenant(
-      parseDtakoDeviceCreds(await resolveDtakoDeviceCredsRaw(env.DTAKO_CONFIG_KV, null)),
-      tenantId,
-    );
-    if (!cred) {
-      return fail(
-        503,
-        `dtako_device_creds に tenant_id=${tenantId} の device credential がありません ` +
-          "(auth-worker の POST /device/pair で払い出して KV に投入してください)",
-      );
-    }
-    accessToken = (await requestDeviceJwt(cred, proxy)).accessToken;
+    rpc = requireAlcTenantForwarder(env.AUTH_WORKER_RPC);
   } catch (err) {
-    return fail(502, err instanceof Error ? err.message : String(err));
+    return fail(503, err instanceof Error ? err.message : String(err));
   }
 
   let history: unknown;
   try {
-    history = await fetchScrapeHistory({ accessToken, limit }, proxy);
+    history = await fetchScrapeHistory({ tenantId, limit }, rpc);
   } catch (err) {
     return fail(502, err instanceof Error ? err.message : String(err));
   }
@@ -1212,7 +1203,7 @@ async function handleScrapeHistory(request: Request, env: RelayWorkerEnv): Promi
   let unsplitError: string | null = null;
   if (isValidDate(dateFrom) && isValidDate(dateTo)) {
     try {
-      const got = await fetchUnsplit({ accessToken, dateFrom, dateTo }, proxy);
+      const got = await fetchUnsplit({ tenantId, dateFrom, dateTo }, rpc);
       unsplitTotal = got.unsplit_total;
       unsplit = got.unsplit;
     } catch (err) {

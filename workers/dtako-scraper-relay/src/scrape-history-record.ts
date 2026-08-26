@@ -16,16 +16,18 @@
  *
  * ## ★ 送り先はここでは決めない
  *
+ * このモジュールは **行を組み立てるところまで**を持ち、実際の送信は
+ * [`SendScrapeHistory`] として**呼び出し側から注入**する。
+ *
  * **`/alc-internal-proxy/api/scraper/history` は通らない** — auth-worker の
  * `classifyInternalPath` の allowlist に path が無く、GET / POST とも 403
  * (`{"error":"forbidden"}`、上流へ forward されない)。alc 側で
  * `/scraper/history` は `tenant_router()` = `require_tenant_header` の data 経路で、
  * これは #434 の詐称を塞ぐため**意図的に allowlist から外されている**。
  *
- * よって「どこへ送るか」は**この repo の外の設計判断**であり、ここでは決めない。
- * このモジュールは **行を組み立てるところまで**を持ち、実際の送信は
- * [`SendScrapeHistory`] として**呼び出し側から注入**する。送り先が
- * device-data-proxy になっても自前 D1 になっても、ここは変わらない。
+ * その後 device credential (`/device-data-proxy`) を経て、**いまは auth-worker の
+ * RPC entrypoint 越し** (`alc-tenant-rpc.ts`、Refs #950)。**3 度 経路が変わったが
+ * このモジュールは一度も変えていない** — 注入にしてある理由がこれ。
  *
  * ## 出自を `message` に書く理由 (`status` ではなく)
  *

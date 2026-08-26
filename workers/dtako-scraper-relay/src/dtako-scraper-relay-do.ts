@@ -61,14 +61,16 @@ import {
   scrapeEtcCsv,
   type ScrapeMonthTarget,
 } from "./etc-meisai-client";
-import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveDtakoAccountsRaw, resolveDtakoDeviceCredsRaw, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
+import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveDtakoAccountsRaw, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
 import {
   buildScrapeHistoryEntries,
   recordScrapeHistoryLoud,
   type CronScrapeOutcome,
 } from "./scrape-history-record";
-import { requestDeviceJwt } from "./device-proxy";
-import { credentialForTenant, parseDtakoDeviceCreds } from "./dtako-device-creds";
+import {
+  ALC_TENANT_RPC_MISSING,
+  type AlcTenantDataForwarder,
+} from "./alc-tenant-rpc";
 import { postScrapeHistory, scrapeJobKey } from "./scrape-dispatch";
 import { buildOperationZipPayload } from "./operation-zip";
 import { recalculateBeforeFetch } from "./theearth-recalculate";
@@ -560,6 +562,9 @@ export interface RelayEnv {
    * `/alc-internal-proxy/api/internal/lineworks/send` (#874-8 の通知) を
    * これ経由で叩く。 */
   AUTH_WORKER: Fetcher;
+  /** auth-worker の RPC entrypoint (`InternalEntrypoint`)。履歴の読み書きはこちら
+   * (Refs #950 / ippoan/auth-worker#483)。**binding が無ければ黙らず鳴らす。** */
+  AUTH_WORKER_RPC?: AlcTenantDataForwarder;
   /**
    * Workers VPC binding (beta) — kagoya_tunnel (Tunnel ID
    * e690242e-06cb-43a6-b2f5-67dfec95ca46) 経由で dtako-scraper (VPS
@@ -3008,20 +3013,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /**
-   * scrape 経路の comp_id → theearth 認証情報の解決。
-   *
-   * **参照先は `dtakoAccountsRaw()` に統一する** (= KV `dtako-relay-config` の
-   * `dtako_accounts` が正、無ければ binding に fallback)。以前はここだけ
-   * `env.DTAKO_ACCOUNTS` binding を直読みしていたため、規範どおり KV に投入して
-   * あっても WS 経由の手動リランからは見えず、`comp_id=... が DTAKO_ACCOUNTS に
-   * 見つかりません` になっていた (2026-07-30、comp_id 27324455 / 75700192)。
-   * cron 経路 (`resolveDtakoAccounts`) と viewer 認可は既に KV を見ていたので、
-   * この関数だけが 2026-07-25 の KV 移行から取り残されていた。
-   */
-  /**
    * 無人スクレイプ (日次 cron / `run_dtako_scrape`) の結果を **alc の履歴に載せる**
-   * (Refs #931)。行の組み立ては `scrape-history-record.ts`、送信は
-   * `device-data-proxy` 越し (`device-proxy.ts` / `scrape-dispatch.ts`)。
+   * (Refs #931)。行の組み立ては `scrape-history-record.ts`、送信は auth-worker の
+   * **RPC entrypoint** 越し (`alc-tenant-rpc.ts` / `scrape-dispatch.ts`、Refs #950)。
    *
    * ## ★ 絶対に throw しない
    *
@@ -3061,29 +3055,29 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         return;
       }
       // 履歴は alc の tenant (data) 経路。`alc-internal-proxy` では 403 なので
-      // device JWT で `device-data-proxy` を通す (Refs #933)。
-      const cred = credentialForTenant(
-        parseDtakoDeviceCreds(await resolveDtakoDeviceCredsRaw(this.env.DTAKO_CONFIG_KV, null)),
-        account.tenant_id,
-      );
-      if (!cred) {
+      // auth-worker の RPC entrypoint を通す (Refs #933 / #950)。**名前付きメソッドは
+      // service binding からしか呼べない**ので credential は要らない。
+      //
+      // **★ binding 未設定は専用のキーで名指しする** (撤去した `no_credential` の
+      // 置き換え)。`unexpected_error` に混ぜない — **宣言漏れは「想定外」ではなく
+      // 診断可能な設定ミス**で、`wrangler.toml` の 3 か所 (top-level /
+      // env.staging / env.preview) は top-level 非継承なので**まさにここで事故る**。
+      // 「設定したのに効いていない」を「設定していない」と同じ静かさで扱わない。
+      const rpc = this.env.AUTH_WORKER_RPC;
+      if (!rpc) {
         console.error(
           JSON.stringify({
             ...base,
-            scrape_history: "no_credential",
+            scrape_history: "no_rpc_binding",
             tenant_id: account.tenant_id,
-            detail:
-              "KV dtako_device_creds に この tenant の device credential がありません " +
-              "(auth-worker の POST /device/pair で払い出して投入してください)",
+            detail: ALC_TENANT_RPC_MISSING,
           }),
         );
         return;
       }
-      const proxy = this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER) as unknown as typeof fetch;
-      const { accessToken } = await requestDeviceJwt(cred, proxy);
       const report = await recordScrapeHistoryLoud(
         entries,
-        (entry) => postScrapeHistory(entry, accessToken, proxy),
+        (entry) => postScrapeHistory(entry, account.tenant_id, rpc),
         (line) => console.error(line),
       );
       console.log(JSON.stringify({ ...base, scrape_history: "saved", ...report }));
@@ -3098,6 +3092,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     }
   }
 
+  /**
+   * scrape 経路の comp_id → theearth 認証情報の解決。
+   *
+   * **参照先は `dtakoAccountsRaw()` に統一する** (= KV `dtako-relay-config` の
+   * `dtako_accounts` が正、無ければ binding に fallback)。以前はここだけ
+   * `env.DTAKO_ACCOUNTS` binding を直読みしていたため、規範どおり KV に投入して
+   * あっても WS 経由の手動リランからは見えず、`comp_id=... が DTAKO_ACCOUNTS に
+   * 見つかりません` になっていた (2026-07-30、comp_id 27324455 / 75700192)。
+   * cron 経路 (`resolveDtakoAccounts`) と viewer 認可は既に KV を見ていたので、
+   * この関数だけが 2026-07-25 の KV 移行から取り残されていた。
+   */
   private async resolveAccount(compId: string): Promise<DtakoAccountRaw | null> {
     const raw = await this.dtakoAccountsRaw();
     if (!raw) return null;
