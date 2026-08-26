@@ -36,6 +36,7 @@ import {
   emptyWageReportCause,
   fastBadgeState,
   groupMinWageRows,
+  isMonthlyOvertimeOver60h,
   isTimecardSynced,
   MIN_WAGE_DEFAULT_KEY,
   MIN_WAGE_JOB_GROUP_LABEL,
@@ -5773,13 +5774,13 @@ watch([compMap, kyuyoSyncedKeys], () => {
                          残業代・深夜残業代と同じ「割増」ブロックに入れる (ユーザー指示 2026-08-04)。
                          基本給 (法定内) は 1.0 倍の本体賃金でここだけが割増ではない -->
                     <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="残業ではない通常勤務中の深夜加算分 (労基法37条4項、0.25倍の上乗せのみ)。基礎の 1.0 倍は左の基本給(法定内)に入っているので、法定内深夜の支払は 基本給 + この列 = 1.25 倍になる。@ は計算単価 (加算分 0.25 倍のみ)">深夜(通常)<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
-                    <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom" title="対象時間 = 時間外 + 週40超過 (2段表示)。@ は残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)。月60時間超過は時間が橙色">残業代<br><span class="font-normal text-xs">(時間外 / 週40超過 / @単価 / 金額)</span></th>
-                    <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom" title="対象時間 = 時間外深夜。@ は深夜残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)">深夜残業代<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
+                    <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom" title="対象時間 = 時間外 + 週40超過 (2段表示)。@ は残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)。橙色 = 月60時間超の時間外労働 (労基法37条1項但書) — 判定は 時間外 + 週40超過 + 時間外深夜 の合算なので、この列の時間だけでは 60 時間に届かない行にも点く。金額には反映していない (@ も金額も 60 時間の前後で係数一定)">残業代<br><span class="font-normal text-xs">(時間外 / 週40超過 / @単価 / 金額)</span></th>
+                    <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom" title="対象時間 = 時間外深夜。@ は深夜残業単価 (基礎時給 + 割増加算分の実額按分、基礎込み)。この時間も月60時間の判定に入る — 橙色の条件は左の残業代列と同じ (時間外 + 週40超過 + 時間外深夜 の合算が 60 時間超)。金額には反映していない">深夜残業代<br><span class="font-normal text-xs">(対象時間 / @単価 / 金額)</span></th>
                     <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="法定休日 (既定 日曜) の実働すべて (1.35倍、深夜分は1.6倍)。@ は通常+深夜合算の実額按分">法定休日<br><span class="font-normal text-xs">(通常 / 深夜 / @単価 / 金額)</span></th>
                     <!-- 祝日・会社指定休に出勤した日だけ入る区分。有る月だけ列を出す (Refs #566) -->
                     <th v-if="hasNonLegalHolidayWork" class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom" title="法定外休日 (祝日・会社指定休に出勤した日) の実働すべて。土曜は平日扱いなのでここには入らない (2026-07-18 決定)。@ は通常+深夜合算の実額按分">法定外休日<br><span class="font-normal text-xs">(通常 / 深夜 / @単価 / 金額)</span></th>
                     <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom" title="実働 − (法定内 + 時間外 + 週40超過 + 時間外深夜 + 法定休日 + 法定外休日)。9 区分すべてを引いているので、0 以外 = 日別データの不整合 — 検算用">差分<br><span class="font-normal text-xs">(実働 − 表合計)</span></th>
-                    <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom border-l-2 border-gray-300 dark:border-gray-600" title="単価マスタ × 拘束時間データの換算理論値。上段=基本給(法定内) / 中段=残業代合計 (基本給以外のすべて — 残業・週40超過・時間外深夜・深夜(通常)・法定休日・法定外休日) / 下段=合計 (上2段の和 = 全区分合計)">計算<br><span class="font-normal text-xs">(基本給 / 残業代 / 合計)</span></th>
+                    <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom border-l-2 border-gray-300 dark:border-gray-600" title="単価マスタ × 拘束時間データの換算理論値。上段=基本給(法定内) / 中段=残業代合計 (基本給以外のすべて — 残業・週40超過・時間外深夜・深夜(通常)・法定休日・法定外休日) / 下段=合計 (上2段の和 = 全区分合計)。★ この列は月60時間超の時間外割増 (労基法37条1項但書、1.5倍) を含まない — 区分ごとの係数一定で計算しており、60 時間を超えた乗務員では理論値が過小に出る (右の「差」も同じだけ甘く出る)">計算<br><span class="font-normal text-xs">(基本給 / 残業代 / 合計)</span></th>
                     <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="給与比較タブで取り込んだ給与明細の実績 (勤務月+1 の支給月ラベルで突合)。上段=基本給扱い項目の合計 / 中段=割増扱い項目 (残業・深夜・休日出勤) の合計 / 下段=その 2 つの合計">給与<br><span class="font-normal text-xs">(基本給 / 残業代 / 合計)</span></th>
                     <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="給与 − 計算。マイナス (赤) = 支払いが換算理論値を下回っている。どちらか欠けている行は「-」">差<br><span class="font-normal text-xs">(基本給 / 残業代 / 合計)</span></th>
                   </tr>
@@ -5837,13 +5838,21 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       <div class="font-medium">{{ fmtYen(row.wage.amounts?.night ?? null) }}</div>
                     </td>
                     <td class="px-2 py-1.5 text-right">
-                      <div class="text-xs" :class="row.wage.overtimeMinutes > 60 * 60 ? 'text-amber-600 font-medium' : 'text-gray-500'">{{ fmtMinutes(row.wage.minutes.overtime) }}</div>
-                      <div class="text-xs" :class="row.wage.overtimeMinutes > 60 * 60 ? 'text-amber-600' : 'text-gray-500'">{{ fmtMinutes(row.wage.minutes.weekly40Excess) }}</div>
+                      <!-- 橙 = 月60時間超の時間外労働。判定は `isMonthlyOvertimeOver60h`
+                           (時間外 + 週40超過 + **時間外深夜** の合算) — ここで
+                           `row.wage.overtimeMinutes` (時間外+週40超過) だけを見ていた頃は
+                           時間外深夜が丸ごと落ち、60h 超なのに橙が点かない行が
+                           毎月 4〜9 名いた (2026-01〜07 の本番データで実測、Refs #670) -->
+                      <div class="text-xs" :class="isMonthlyOvertimeOver60h(row.wage) ? 'text-amber-600 font-medium' : 'text-gray-500'">{{ fmtMinutes(row.wage.minutes.overtime) }}</div>
+                      <div class="text-xs" :class="isMonthlyOvertimeOver60h(row.wage) ? 'text-amber-600' : 'text-gray-500'">{{ fmtMinutes(row.wage.minutes.weekly40Excess) }}</div>
                       <div class="text-xs text-gray-400">{{ fmtAtRate(row.wage.actualOvertimePay, row.wage.overtimeMinutes) }}</div>
                       <div class="font-medium">{{ fmtYen(row.wage.actualOvertimePay) }}</div>
                     </td>
                     <td class="px-2 py-1.5 text-right">
-                      <div class="text-xs text-gray-500">{{ fmtMinutes(row.wage.nightOvertimeMinutes) }}</div>
+                      <!-- 時間外深夜も月60時間の判定に入るので、橙の条件は残業代列と同じ。
+                           ここだけ灰色のままにすると「60h 超の原因はこの列なのに、
+                           この列は 60h に関係ない」と読める (Refs #670) -->
+                      <div class="text-xs" :class="isMonthlyOvertimeOver60h(row.wage) ? 'text-amber-600' : 'text-gray-500'">{{ fmtMinutes(row.wage.nightOvertimeMinutes) }}</div>
                       <div class="text-xs text-gray-400">{{ fmtAtRate(row.wage.actualNightOvertimePay, row.wage.nightOvertimeMinutes) }}</div>
                       <div class="font-medium">{{ fmtYen(row.wage.actualNightOvertimePay) }}</div>
                     </td>
@@ -5952,9 +5961,13 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 基本給(法定内) の対象時間 = 実働 − 時間外 − 時間外深夜 − 週40超過 − 法定休日実働 (時間外・週40超過の基礎1.0は残業代の1.25側にのみ含まれる — 2026-07-18 案B 決定で週40超過の二重計上を解消)。
                 深夜(通常) の対象時間は基本給の対象時間にも含まれており (基礎1.0は基本給側)、深夜列は 0.25 加算分だけを別枠計上する。
                 合計は「実働全体 × 基礎単価 + 割増分 (時間外0.25 / 週40超過0.25 / 時間外深夜0.5 / 深夜0.25 / 法定休日の超過分)」と恒等で、基礎の2重計上はありません。<br>
-                残業は「残業 (時間外+週40超過)」と「深夜残業 (時間外深夜)」の2列に分けて表示。月60時間の時間外割増判定はこの2つを合算した時間で行うが、
-                60時間の枠は残業列から先に消費する扱いとして按分している (表示上の割り振りであり、順序を変えても2列合計の理論値は変わらない)。<br>
-                残業代・深夜残業代の @ 単価は「基礎時給 + 割増加算分」を合成した実額按分平均 (換算理論値 ÷ 時間) — 基本給・深夜(通常) の @ と違い基礎部分も含む金額であることに注意 (深夜残業の @ は基礎1.0倍を含むため、60時間超過が絡まない月は基礎単価×1.5 に一致する)。
+                残業は「残業 (時間外+週40超過)」と「深夜残業 (時間外深夜)」の2列に分けて表示。月60時間の時間外割増判定 (労基法37条1項但書) は<b>この2列を合算した時間</b>で行い、
+                超えた行は<b>両方の列の時間を橙色</b>にする — 片方の列の時間だけでは60時間に届かない行にも点くのはこのため。<br>
+                <b>橙色は時間の警告だけで、金額には入っていません。</b>この2列の金額 (と右の「計算」列・「差」列) は区分ごとの係数一定 (残業 1.25 / 深夜残業 1.5) で計算しており、
+                <b>60時間超の1.5倍は反映していません</b> — 60時間を超えた乗務員では理論値が過小に出ます (= 支払い不足を見逃す向き、Refs #670)。
+                「60時間の枠を残業列から先に消費する」按分を掛けているのは<b>最低賃金換算の理論値だけ</b> (給与比較タブの残業(最賃)列) で、この2列には掛かりません。<br>
+                残業代・深夜残業代の @ 単価は「基礎時給 + 割増加算分」を合成した単価 (金額 ÷ 対象時間) — 基本給・深夜(通常) の @ と違い基礎部分も含む金額であることに注意。
+                係数一定なので、<b>深夜残業の @ は月60時間を超えた月でも常に 基礎単価×1.5 ちょうど</b>になります (60時間の有無で @ は動きません)。
               </p>
             </div>
           </UCard>

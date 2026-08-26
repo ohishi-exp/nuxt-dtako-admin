@@ -372,6 +372,34 @@ export function isTimecardSynced(ym: string, timecardSyncedMonths: readonly stri
   return timecardSyncedMonths.includes(ym)
 }
 
+// ---- 月60時間超の時間外労働 (労基法37条1項但書) ----
+
+/** 月の時間外割増の法定上限 (分)。worker `restraint-wage.ts` の
+ * `MONTHLY_OVERTIME_THRESHOLD_MINUTES` と同値。 */
+export const MONTHLY_OVERTIME_THRESHOLD_MINUTES = 60 * 60
+
+/**
+ * その乗務員のその月が **月60時間超の時間外労働** (労基法37条1項但書) に当たるか。
+ *
+ * **判定の対象は 時間外 + 週40超過 + 時間外深夜 の合算** — worker の
+ * `splitMinWageOvertimePay` が 60h 枠を割り振るときと**同じ 3 区分**に揃える。
+ * `wage.overtimeMinutes` (= 時間外 + 週40超過) だけで見ると **時間外深夜が丸ごと
+ * 落ちる**ため、60h を超えているのに警告色が点かない乗務員が出る
+ * (2026-01〜07 の本番データで毎月 4〜9 名、Refs #670)。
+ *
+ * 法定休日の実働は労基法上その日に時間外の概念が無く休日割増に一本化されるので、
+ * ここにも算入しない (`classifyMonth` が別区分に落としているのと同じ扱い)。
+ *
+ * **これは「時間が 60h を超えたか」だけを返す。金額には影響しない** — 単価マスタ
+ * 換算の金額 (`amounts` / `totalAmount` / `actualOvertimePay`) は区分ごとの係数一定で、
+ * 60h 超の 1.5 倍を反映していない (Refs #670 の本題、`docs/wage-calculation-spec.md` §6)。
+ */
+export function isMonthlyOvertimeOver60h(
+  wage: Pick<WageRow, 'overtimeMinutes' | 'nightOvertimeMinutes'>,
+): boolean {
+  return wage.overtimeMinutes + wage.nightOvertimeMinutes > MONTHLY_OVERTIME_THRESHOLD_MINUTES
+}
+
 // ---- 最低賃金チェックの並び (ユーザー決定 2026-07-30) ----
 
 /** 職員区分の見出し。`other` は「推測で他の区分に混ぜない」ので中身を明示する。 */
