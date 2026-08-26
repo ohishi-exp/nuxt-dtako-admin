@@ -123,7 +123,17 @@ const totals = computed(() => {
   }
 })
 
-const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
+/**
+ * 金額。**`¥-0` だけを潰す** (Refs #843)。収支の列 (`marginYen`) は**負になり得る**
+ * (下の表が `marginYen < 0` で赤く塗っているのがその証拠) ので、0 のときに `¥-0` と
+ * 出ていた。
+ *
+ * **`Math.round` を足して直さない理由**は `profit/allowance.vue` の `yen` に同じ —
+ * 元から丸めていないここに `Math.round` を足すと**丸め方ごと変わる**。
+ * `toLocaleString` が `"-0"` を返した回だけ `"0"` に差し替えるので、
+ * **`¥-0` 以外の出力は 1 文字も変わらない** (`-0.6` は `¥-0.6` のまま = 符号を消さない)。
+ */
+const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString().replace(/^-0$/, '0')}`)
 const tons = (v: number) => `${Math.round(v * 100) / 100}t`
 
 function legSales(e: AllowanceModalEntry): number | null {

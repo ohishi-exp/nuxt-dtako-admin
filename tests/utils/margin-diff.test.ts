@@ -652,6 +652,36 @@ describe('注記', () => {
       .toContain('→ 0 便')
   })
 
+  /**
+   * **注記に `¥-0` を出さない** (Refs #843 / #840)。対象外の便の売上・手当は
+   * 一番星の額をそのまま足したもので**負にもなる**が、`Math.round` は `-0.5 ≤ v < 0` で
+   * `-0` を返し、`(-0).toLocaleString()` が **`"-0"`** を返す。注記に `¥-0` と書かれると
+   * 「0 円」なのか「符号が化けた」のか読めない。
+   *
+   * **陽性対照 (`-0.6` → `¥-1`) つき** — `Math.abs` で符号ごと消す直しを弾くため。
+   */
+  it('注記に `¥-0` を出さない (負の額は負のまま)', () => {
+    const noteOf = (salesYen: number) =>
+      marginDiffUncoveredNote(null, { trips: 1, salesYen, allowanceYen: 0 })
+
+    expect(noteOf(-0.4)).toContain('売上 ¥0')
+    expect(noteOf(-0.5)).toContain('売上 ¥0')
+    expect(noteOf(-0.0004)).toContain('売上 ¥0')
+    expect(noteOf(-0)).toContain('売上 ¥0')
+    expect(noteOf(0)).toContain('売上 ¥0')
+    // 陽性対照: 符号を消していない
+    expect(noteOf(-0.6)).toContain('売上 ¥-1')
+    expect(noteOf(-413000)).toContain('売上 ¥-413,000')
+    // 正の額は動かない
+    expect(noteOf(1649681)).toContain('売上 ¥1,649,681')
+
+    // 手当の側も同じ (`yenText` は 1 本)
+    expect(marginDiffUncoveredNote(null, { trips: 1, salesYen: 0, allowanceYen: -0.4 }))
+      .toContain('手当 ¥0')
+    expect(marginDiffUncoveredNote(null, { trips: 1, salesYen: 0, allowanceYen: -0.6 }))
+      .toContain('手当 ¥-1')
+  })
+
   it('月を跨いだ便は動いたときだけ 1 行', () => {
     expect(marginDiffCrossMonthNote(null, null)).toBe('')
     const c = { nextMonthLegs: 2, nextMonthAllowanceYen: 24000, prevMonthOpsLegsInMonth: 1, prevMonthOpsAllowanceYen: 12000 }

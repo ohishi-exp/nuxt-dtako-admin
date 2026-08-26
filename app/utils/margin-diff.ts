@@ -363,9 +363,15 @@ export interface MarginDiffChangedOperation {
 
 // --- 画面に出す注記 ---
 
-/** 金額の文字列。**画面の `yen()` と同じ丸め方** (`Math.round` + 3 桁区切り)。 */
+/**
+ * 金額の文字列。**画面の `yen()` と同じ丸め方** (`Math.round` + 3 桁区切り)。
+ * **`+ 0` で `-0` を `+0` に畳む** (Refs #843) — 対象外の便の売上・手当は一番星の額を
+ * そのまま足したものなので**負になり得る**が、`Math.round` は `-0.5 ≤ v < 0` で `-0` を
+ * 返し、`(-0).toLocaleString()` が **`"-0"`** を出す。注記に `¥-0` と書かれると
+ * 「0 円」なのか「符号が化けた」のか読めない。`-0.6` は `¥-1` のまま。
+ */
 function yenText(v: number): string {
-  return `¥${Math.round(v).toLocaleString()}`
+  return `¥${(Math.round(v) + 0).toLocaleString()}`
 }
 
 function uncoveredText(t: UncoveredTotals | null): string {

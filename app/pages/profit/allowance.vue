@@ -561,7 +561,28 @@ function fetchOperationsFor(range: { from: string, to: string }, driverCd?: stri
   })
 }
 
-const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString()}`)
+/**
+ * 金額。**`¥-0` だけを潰す** (Refs #843)。収支 (`margin()` = 売上 − 手当) と PDF との差
+ * (`screenYen - pdfYen`) を出すので**負になり得る**列で、0 のときに `¥-0` と出ていた。
+ * 「0 円」なのか「符号が化けた」のか読めないのが害。
+ *
+ * ## なぜ `Math.round` を足して直さないのか (Refs #843 の判断)
+ *
+ * 見本の `margin.vue` の `yen` は `(Math.round(v) + 0)` だが、**あちらは元から
+ * `Math.round` があった**ので `+ 0` は `-0` を畳むだけで済む。ここは元々丸めていないので、
+ * `Math.round` を足すと**丸め方そのものが変わる** (`¥1,234.5` → `¥1,235`、
+ * `¥-1,234.5` → `¥-1,234`)。そして**この画面には小数が実際に入り得る** —
+ * 手当表PDF の CSV (`parsePdfAllowanceCsv`) は `Number(rawYen)` と `Number.isFinite` しか
+ * 見ておらず、**整数チェックが無い唯一の入口**だから (手当マスタ・暫定・上書きは
+ * どれも整数を強制している)。**表示の丸め方を黙って変えない。**
+ *
+ * ⇒ **`toLocaleString` が `"-0"` を返した回だけ `"0"` に差し替える。**
+ * `+ 0` では届かない `-0.0005 < v < 0` の端数つきの負も、`toLocaleString` の既定
+ * (`maximumFractionDigits: 3`) がここで `"-0"` にするので**同じ 1 か所で捕まる**。
+ * **`¥-0` 以外の出力は 1 文字も変わらない** — `-0.4` は `¥-0.4`、`-0.6` は `¥-0.6` のまま
+ * (符号も小数も消さない)。正規表現は `^-0$` で全体一致なので `-0.4` には当たらない。
+ */
+const yen = (v: number | null) => (v === null ? '-' : `¥${v.toLocaleString().replace(/^-0$/, '0')}`)
 const tons = (v: number) => `${Math.round(v * 100) / 100}t`
 
 // --- 一番星の明細と、強制突合 (降しが無い便に明細を手で結ぶ) ---

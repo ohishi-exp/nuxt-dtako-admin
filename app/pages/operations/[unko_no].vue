@@ -168,7 +168,14 @@ async function loadLegSalesFromR2() {
   }
 }
 
-const yen = (v: number) => `¥${Math.round(v).toLocaleString()}`
+/**
+ * 金額。**`-0` を `+0` に畳んでから出す** (Refs #843)。`Math.round` は `-0.5 ≤ v < 0` で
+ * **`-0`** を返し、**`(-0).toLocaleString()` は `"-0"`** なので、そのままだと売上が
+ * ちょうど 0 の便に **`¥-0`** と出る。`-0 + 0` は IEEE 754 で `+0`。
+ * **変わるのはその窓の回だけ** — `-0.6` は `Math.round` が `-1` を返すので `¥-1` のまま
+ * (本当に負の額は負のまま出る)。仕掛けの詳細は `profit/margin.vue` の `yen` に同じ。
+ */
+const yen = (v: number) => `¥${(Math.round(v) + 0).toLocaleString()}`
 
 // Fetch operation detail
 onMounted(async () => {
