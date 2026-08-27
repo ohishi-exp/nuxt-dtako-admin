@@ -103,10 +103,10 @@ Google が 2 回出たなら ⑧ が壊れており、そのときは「アプ�
 
 | 段 | 本数 | 認可の実体 |
 | --- | --- | --- |
-| A. `requireAuth` (auth-worker ログイン必須) | 6 → 10 → 16 → **24** | Nitro で 401 |
+| A. `requireAuth` (auth-worker ログイン必須) | 6 → 10 → 16 → 24 → **25** | Nitro で 401 |
 | B. 上流に browser JWT を渡し**上流が弾く** | 7 → **5** | rust-ichibanboshi / auth-worker `/alc-proxy` |
 | C. machine shared secret | 1 | `X-Internal-Shared-Secret` constant-time |
-| **D. 認可が 1 つも無い** | 18 → 14 → 8 → **2** | **Access だけが前段** |
+| **D. 認可が 1 つも無い** | 18 → 14 → 8 → 2 → **1** | **Access だけが前段** |
 | E. 本番では 404 | 1 | `DEV_LOGIN !== 'true'` |
 
 > **2026-08-27 追記 (#988 の 1 本目、`origin/main` = 94b72f2 基点)。**
@@ -232,16 +232,55 @@ Google が 2 回出たなら ⑧ が壊れており、そのときは「アプ�
 >   **`y-time-export.post` 側にはこの利得はありません** — あちらは上流を待ってから
 >   R2 に触るので、元から未ログインでは R2 に到達しません。
 
+> ### 2026-08-27 追記 (#988 の 4 本目、thin proxy 3 本 = **最後の 1 本**)
+>
+> **`origin/main` = `df9ecd4` 基点。**`/api/ichiban/**` を D → A に移し、
+> `/api/kyuyo/**` の GET/POST を **B 段のまま fail closed に**しました。
+>
+> | 時点 | A | B | C | D | E | 計 |
+> | --- | --- | --- | --- | --- | --- | --- |
+> | #1012 (読み口 8 本) の後 = `origin/main` `df9ecd4` | 24 | 5 | 1 | 2 | 1 | 33 |
+> | **この PR (proxy 3 本) の後** | **25** | 5 | 1 | **1** | 1 | 33 |
+>
+> - 段を移るのは **`/api/ichiban/**` の 1 本だけ** (D → A)。
+>   上の #1012 の表が `(予定)` として書いた行と**同じ値で着地**しました。
+> - **`/api/kyuyo/**` の GET/POST は B 段のままで、段の数字は動きません。**
+>   足したのは `requireAuth` ではなく「`resolveBrowserAuthorization` が `null` なら
+>   401」の 3 行で、**認可の正本は上流 (introspect + email allowlist) のまま**です。
+>   ⇒ **A 段に移したと読まないでください。**
+> - **D に残る `tariff/fare` の 1 本は触っていません** (注 1 の理由のまま)。
+>
+> **★ route ごとに機構を変えたのは意図です** (「揃える」と壊れます):
+>
+> | route | 入れたもの | なぜ |
+> | --- | --- | --- |
+> | `GET /api/ichiban/**` | **`requireAuth`** (A 段) | **上流へ渡す身元をそもそも持たない** (`Authorization` を見も付けもしない) ので「無ければ止める」対象が無い。⇒ Nitro が独立に認証するしかない |
+> | `GET` / `POST /api/kyuyo/**` | **身元が無ければ 401** (B 段のまま) | 上流へ渡す身元を持っており、認可の正本も上流。`requireAuth` を足すと **introspect の往復が 1 回増え、認可の正本が 2 か所になる** |
+>
+> - **`/api/ichiban/**` に browser JWT の転送を足していません。**上流は email
+>   allowlist を持つので、**いままで 200 だった呼び出しが 403 になりうる** =
+>   画面の挙動が変わります。別の判断として残します。
+> - **呼び出し元調査**: 語を変えた `git grep` 16 種 + `scripts/xref.sh`。
+>   `app/**` 以外に現存する呼び出しは **0 件**。relay の `/api/kyuyo/access` と
+>   kyuyo-mcp の `fetchIchibanJson` は**どちらも上流 rust を直接**叩き、この Nitro
+>   route を通りません。`useFetch`/`useAsyncData` は repo 全体で **0 件**、
+>   `.vue` の top-level await も **0 件**なので **SSR 経路も無い**ことまで確認済み。
+> - **★ テストの `fetch` は mock なので、テストからは「上流が何を返したか」は導けません。**
+>   テストが固定するのは「この proxy が投げるかどうか」だけです。上流の挙動は
+>   上流を実読して別に確かめました (上の「いちばん重かったのは」の節)。
+>   最初この区別を誤り、**テストのコメントに「上流に書きに行けた」と書いていました** —
+>   誤りとして理由ごと当該テストに残してあります。
+
 ### D の 18 本 (Access を外すと**そのまま公開される**)
 
 **✍ の 4 本は #988 の 1 本目 (#995) で塞ぎました** (`requireAuth` = A 段に移動)。
 **🔒 の 6 本は #988 の 2 本目**、**🔧 の 6 本は #988 の 3 本目 (#1010)** で塞ぎました
-(いずれも A 段に移動)。**残るのは 2 本** — `/api/ichiban/**` (兄弟タスクの持ち物) と
-`tariff/fare` (注 1) だけです。
+(いずれも A 段に移動)。**◆ の 1 本は #988 の 4 本目**で塞ぎました (A 段に移動)。
+**残るのは 1 本** — `tariff/fare` (注 1) だけです。
 
 | route | 中身 | 書き込み |
 | --- | --- | --- |
-| **`GET /api/ichiban/**`** | **CF Access Service Token を付けて `rust-ichiban.mtamaramu.com` へ丸ごと転送する thin proxy。呼び出し元の身元を一切見ない** | — |
+| **`GET /api/ichiban/**`** | **CF Access Service Token を付けて上流へ丸ごと転送する thin proxy。呼び出し元の身元を一切見なかった** | ◆ **→ #988 の 4 本目で塞いだ** |
 | `GET /api/profit/snapshots` / `snapshot` / `margin-snapshots` / `margin-snapshot` / `operation-leg-sales` | `PROFIT_R2` の粗利・検証スナップショット (売上・原価・粗利の実額) | 🔧 **→ #988 の 3 本目 (#1010) で塞いだ** |
 | `POST /api/profit/margin-summary` | 同 R2 に**版を書く** | ✍✍ **→ #988 で塞いだ** |
 | `DELETE /api/profit/snapshot` | 同 R2 の `latest.json` を**消す** | ✍✍ **→ #988 で塞いだ** |
@@ -268,8 +307,29 @@ Google が 2 回出たなら ⑧ が壊れており、そのときは「アプ�
 > 確定してから別途**にします。
 > (同 §1 の 🔒 6 本は全部ブラウザからだけで、`git grep` で確定済み。)
 
-**いちばん重いのは `/api/ichiban/**` です。**これは classic な confused deputy で、Access を外すと**インターネットの誰でも、この worker を踏み台にして CF Access の裏の一番星 API を叩けます**。`X-Alc-Proxy-Secret` も browser JWT も見ておらず、付けるのは Service Token だけです。
-唯一の緩和は「上流の rust-ichibanboshi 自身が `Authorization` を見て弾く口があるかどうか」ですが、**それは上流の実装依存で、この repo からは保証できません** (兄弟タスク #951「実支給額が tenant 全員に開いている経路を塞ぐ」が隣接しています)。
+**いちばん重かったのは `/api/ichiban/**` でした。**classic な confused deputy で、Access を外すと**この worker を踏み台にして CF Access の裏の一番星 API に届きます**。`X-Alc-Proxy-Secret` も browser JWT も見ておらず、付けるのは Service Token だけでした。
+**⇒ #988 の 4 本目で `requireAuth` を入れ、A 段に移りました** (2026-08-27)。
+
+**★ 「唯一の緩和は上流が弾くかどうか」は、その 4 本目で実測して決着しました** — ここには
+長く「**上流の実装依存で、この repo からは保証できない**」と書いてありましたが、
+**実際には緩和は掛かっていませんでした** (下表の「未確定」からも外しました)。
+`ohishi-exp/rust-ichibanboshi` の `origin/main` = `a17067aad911e3fcd9fb08a532974299c57ae969`
+を `git show` で実読した結果:
+
+- `src/routes/` 全体で `kyuyo::introspect::authorize()` を呼ぶファイルは
+  **`src/routes/kyuyo.rs` の 1 本だけ**。売上・経費・社員・schema の各 handler は 0 件
+- `src/server.rs` に**全体へ掛かる auth 系 layer / middleware は無い**
+  (`.layer()` は `cors` / `TraceLayer` / `DefaultBodyLimit` / `Extension(...)` のみ)
+
+**逆に `/api/kyuyo/*` の側には緩和が掛かっていました** — `authorize()` は
+`Authorization: Bearer` が取れなければ **401** を返す fail-closed
+(`src/kyuyo/introspect.rs:174-182`)、mount されている **7 route が 7 本ともそこを通る**
+(`src/server.rs:461-472` ↔ `src/routes/kyuyo.rs` の 7 箇所)。
+⇒ **`/api/kyuyo/**` を「無防備だった」と書いてはいけません。**あちらの proxy に
+#988 の 4 本目で入れたのは `requireAuth` ではなく「**上流に渡す身元が取れないなら
+401 で止める**」(fail closed) で、**認可の正本は上流のまま = B 段のまま**です。
+塞いだ理由は「防御がまるごと上流の実装依存で、この repo から保証できない」ことです。
+(**監督役も別セッションで独立に同じ SHA を読み、同じ結論を得ています。**)
 
 **書き込み 4 本 (`margin-summary` / `snapshot.delete` / `vehicle-settings/extract` / `y-time-template.put`) は、無認証のまま公開すると「粗利の版を第三者が消せる／捏造できる」**という形になります。金額そのものではありませんが、**金額の証跡**です。
 
@@ -483,7 +543,7 @@ tracking はそれを認識しています:
 | `Cf-Access-Jwt-Assertion` が Worker origin に届くか | 反射する口が無く、作るのは実装 | 一時 probe route を 1 本 (別 PR) |
 | Access アプリの `policies` の中身 (`require`/`exclude`/`path` スコープ)、`allowed_idps` の中身、service token の有無 | **このセッションに Cloudflare の read tool が生えていません** (`ToolSearch` で access / zero trust / protect_hostname を引いて 0 件)。login ページから逆算できたのは「IdP が auth-worker OIDC 1 本」までで、**`everyone`/`allow` は親の実測を引用** | ユーザー / Cloudflare read tool を持つセッション |
 | `ACCESS_OIDC_CLIENTS` の中身 (登録済み client の一覧) | Secrets Store の値。読めない (読むべきでもない) | ユーザー |
-| 上流 rust-ichibanboshi が `Authorization` 無しの `/api/**` を弾くか (= `/api/ichiban/**` の緩和が効くか) | 別 repo・別ホスト、Access の裏 | 兄弟 #951 / 上流を読めるセッション |
+| ~~上流 rust-ichibanboshi が `Authorization` 無しの `/api/**` を弾くか~~ | **決着 (2026-08-27、#988 の 4 本目)。**上流 clone を `git fetch` して `git show origin/main:<path>` で実読 (`a17067a`)。**`/api/kyuyo/*` の 7 route だけが fail-closed、それ以外に認可は無い**。詳細は上の「いちばん重かったのは」の節 | — (測定済み) |
 | `/scraper-zip/{requestId}` の `requestId` の推測困難性 | 生成箇所は読めたが、エントロピーの実測はしていない | — (次に触るとき) |
 
 ---
