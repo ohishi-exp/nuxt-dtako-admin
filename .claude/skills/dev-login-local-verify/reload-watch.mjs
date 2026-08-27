@@ -1,5 +1,18 @@
 #!/usr/bin/env node
 /**
+ * ★ 正本 (canonical) は**この repo** — ohishi-exp/nuxt-dtako-admin の
+ *   .claude/skills/dev-login-local-verify/reload-watch.mjs です (Refs #979)。
+ *
+ *   理由: これは wrangler dev の hot reload 反映を検知する**この repo 専用の道具**で、
+ *   判定条件 (.output/server/chunks/_/nitro.mjs の buildId / /login が配信する HTML /
+ *   :8787) がすべてこの repo のビルド構成に固有だから。
+ *
+ *   ippoan/claude-skills にも同名・同内容 (md5 一致) のファイルが在るが、**そちらは写し**。
+ *   直すときはこちらを直すこと。写しだけ直してもこの repo には届きません。
+ *   なお publish 方向は repo → ~/.claude/skills/ の一方向で、この repo 側が
+ *   claude-skills を symlink で指すことはありません (.claude/skills/install.sh 冒頭を参照)。
+ */
+/**
  * wrangler dev の hot reload 反映検知 (dev-login-local-verify skill 付属)。
  *
  * 原理: `nuxt build` が `.output/server/chunks/_/nitro.mjs` に埋める buildId
