@@ -11,6 +11,14 @@ import { ref } from 'vue'
 import VehicleSettingsDisplay from '~/components/VehicleSettingsDisplay.vue'
 import type { VehicleSettings } from '~/utils/vehicle-settings-cfg'
 import { currentAccessToken } from '~/utils/api'
+import { describeResponseFailure } from '~/utils/api-error'
+
+/** この画面の「やり直し方」。**句点を付けない** (`describeResponseFailure` が文に組む)。
+ *
+ * 失敗しても `file` は残る (`submit` は `result` と `error` しか消さない) ので、
+ * **選び直さずボタンを押すだけで再送できる**。**ボタンの表記そのまま**
+ * (`<span v-else>設定を抽出</span>`) を書く — 画面に無い語で案内すると探させる。 */
+const RETRY_EXTRACT = 'もう一度「設定を抽出」を押してください'
 
 interface ExtractResult extends VehicleSettings {
   saved: { json_key: string; cfg_key: string } | null
@@ -64,8 +72,12 @@ async function submit() {
       body: form,
     })
     if (!res.ok) {
-      const text = await res.text().catch(() => '')
-      throw new Error(`抽出失敗 (${res.status}): ${text || res.statusText}`)
+      // **サーバの本文をそのまま貼らない** (Refs #996)。Nitro のエラー本文は
+      // `{"error":true,"statusCode":401,"statusMessage":"Unauthorized",…}` で、
+      // そのまま出すと**人が読むべき 1 つの事実 (ログインが切れた) が JSON に埋もれ、
+      // 次に何をすればいいかが 1 文字も無い**。`describeResponseFailure` が
+      // 理由 + 次の一手の 1 文にする。**やり直し方はこの画面のもの**を渡す。
+      throw new Error(`抽出失敗: ${await describeResponseFailure(res, RETRY_EXTRACT)}`)
     }
     result.value = (await res.json()) as ExtractResult
   } catch (e: unknown) {

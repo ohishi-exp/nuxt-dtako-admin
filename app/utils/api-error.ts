@@ -113,3 +113,106 @@ export function describeApiError(e: unknown): string {
   const detail = fallback || err.message || String(e)
   return err.statusCode ? `${err.statusCode} ${detail}` : detail
 }
+
+/**
+ * 非 2xx の `Response` から**人が読める 1 文**を作る (Refs #996)。
+ *
+ * `describeApiError` との違いは**入口と出口の両方**:
+ *
+ * | | 入口 | 出口 |
+ * | --- | --- | --- |
+ * | `describeApiError` | `$fetch` (ofetch) が投げた `FetchError` | `${status} ${理由}` |
+ * | `describeResponseFailure` | 生 `fetch` の `Response` (本文は未読) | `${status} ${理由} — ${次の一手}` |
+ *
+ * ## ★ 直した欠陥 — 本文をそのまま画面に貼っていた (Refs #996)
+ *
+ * `/vehicle-settings` は `抽出失敗 (401): ${await res.text()}` の形で、
+ * Nitro のエラー本文 (`{"error":true,"statusCode":401,"statusMessage":"Unauthorized",…}`)
+ * を**そのまま画面に出していた**。人が読み取るべきなのは「ログインが切れた」という
+ * ただ 1 つの事実なのに、**次に何をすればいいか (再ログイン) が 1 文字も無かった**。
+ *
+ * ## ★ 401 は `describeApiError` に通すだけでは直らない
+ *
+ * `requireAuth` (`@ippoan/auth-client/server`) が投げるのは
+ * `createError({ statusCode: 401, statusMessage: 'Unauthorized' })` **固定**
+ * (`src/server/auth.mjs`)。**日本語の理由は最初から存在しない**ので、本文を正しく
+ * 読んでも画面に出るのは `401 Unauthorized` だけ。**理由を拾う話ではなく、
+ * 次の一手を足す話**なので、`status` ごとの一文をこちら側で持つ。
+ *
+ * ## ★ 401 / 403 / 5xx を混ぜない (`kyuyo-access.ts` と同じ理由)
+ *
+ * | status | 意味 | 次の一手 |
+ * | --- | --- | --- |
+ * | **401** | ログインの話。**introspect 不達もここに来る** (下記) | 再ログイン |
+ * | **403** | **その人の権限の話。**再ログインしても変わらない | 管理者に依頼 |
+ * | **5xx** | **設定・障害の話。権限とは無関係** | 復旧を待つ |
+ * | その他 4xx | 送った内容の話 | 内容を直す |
+ *
+ * **`introspectToken` は auth-worker に届かなくても `{ active: false }` に倒す**
+ * (`src/server/introspectCore.mjs` の `catch`) ので、**認証サーバの障害も 401 になる**。
+ * ブラウザ側からこの 2 つは区別できない。だから 401 の文は「再ログイン」を先に置きつつ、
+ * **「再ログインしても直らないときは認証サーバに繋がっていない」**まで書く
+ * (書かないと「再ログインしたのに直らない = 自分に権限が無い」と誤読される)。
+ *
+ * ## ★ 「理由が無い」と「理由を読めなかった」を同じ見た目にしない
+ *
+ * 本文が空 / JSON でない / JSON だが文字列の理由を持たない、の 3 つは別々の文にする
+ * (`res.statusText` に落とさない — **本番は reason phrase が空**なので区切り文字の
+ * 後ろが空になる)。**理由の拾い順は `describeApiError` が正**で、ここは持たない。
+ *
+ * ## 同じ形の先行実装との関係
+ *
+ * `app/pages/y-time-export.vue` の `describeApiFailure(res)` が本文を読む部分の
+ * 先行実装 (Refs #890)。**あちらは「次の一手」を持たない**ので出力が違い、
+ * この PR では寄せていない (#996-1 の担当範囲外 + 同ファイルを別タスクが編集中)。
+ *
+ * @param res  非 2xx の `Response` (**本文はまだ読んでいないこと**)
+ * @param retry 画面ごとの「やり直し方」。**句点を付けずに**渡す (ここで文に組む)。
+ *              理由は共通でも、やり直し方は画面ごとに違う (`kyuyo-access.ts` と同じ)。
+ */
+export async function describeResponseFailure(res: Response, retry: string): Promise<string> {
+  return `${await responseReason(res)} — ${nextStepForStatus(res.status, retry)}`
+}
+
+/** 本文から理由を作る。`describeApiError` に渡す前に「文字列の理由があるか」だけ見る。 */
+async function responseReason(res: Response): Promise<string> {
+  const text = await res.text().catch(() => '')
+  if (text === '') return `${res.status} (応答本文が空でした)`
+  let data: unknown
+  try {
+    data = JSON.parse(text)
+  }
+  catch {
+    return `${res.status} (応答が JSON ではありません: ${text.slice(0, 120)})`
+  }
+  return hasStringReason(data)
+    ? describeApiError({ statusCode: res.status, data })
+    : `${res.status} (本文に理由の文字列がありません: ${text.slice(0, 120)})`
+}
+
+/** `describeApiError` が理由として拾える文字列を本文が持っているか。 */
+function hasStringReason(data: unknown): boolean {
+  if (typeof data === 'string') return data !== ''
+  if (typeof data !== 'object' || data === null) return false
+  const d = data as Record<string, unknown>
+  return [d.error, d.message, d.statusMessage].some(v => typeof v === 'string')
+}
+
+/** status ごとの「次に何をすればいいか」。上の表が正。 */
+function nextStepForStatus(status: number, retry: string): string {
+  if (status === 401) {
+    return `ログインが切れています。再ログインしてから${retry}`
+      + ' (再ログインしても直らないときは認証サーバに繋がっていません。権限の問題ではありません)'
+  }
+  if (status === 403) {
+    return 'この操作の権限がありません (ログインし直しても変わりません)。'
+      + '管理者に許可の追加を依頼してください'
+  }
+  if (status === 413) {
+    return `送ったファイルがサーバの上限を超えています。小さいファイルにしてから${retry}`
+  }
+  if (status >= 500) {
+    return `サーバ側の設定か障害です (権限の問題ではありません)。復旧してから${retry}`
+  }
+  return `送った内容をサーバが受け付けませんでした。上の理由のとおりに直してから${retry}`
+}

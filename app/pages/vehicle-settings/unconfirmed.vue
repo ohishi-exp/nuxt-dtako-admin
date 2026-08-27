@@ -7,6 +7,11 @@
  */
 
 import { computed, ref, onMounted } from 'vue'
+import { describeResponseFailure } from '~/utils/api-error'
+
+/** この画面の「やり直し方」。**句点を付けない** (`describeResponseFailure` が文に組む)。
+ * **ボタンの表記そのまま** (`再取得`) を書く — 画面に無い語で案内すると探させる。 */
+const RETRY_LOAD = '「再取得」を押してください'
 
 interface UnconfirmedVehicle {
   vehicle_cd: string
@@ -33,8 +38,17 @@ async function load() {
   try {
     const res = await fetch('/api/vehicle-settings/unconfirmed')
     if (!res.ok) {
-      const text = await res.text().catch(() => '')
-      throw new Error(`HTTP ${res.status}: ${text || res.statusText}`)
+      // **サーバの本文をそのまま貼らない** (Refs #996)。`/vehicle-settings` の抽出と
+      // 同じ形だった — `HTTP 503: {"error":true,…}` のように JSON を画面に出し、
+      // **次に何をすればいいかが 1 文字も無い**。この口は 503 (R2 binding 無し /
+      // `INTERNAL_SHARED_SECRET` 未設定) と、upstream の status をそのまま中継する
+      // 4xx/5xx を投げる。
+      //
+      // ★ **401 の出どころは 2 つある** — 上流 (auth-worker `/alc-proxy` が
+      // fail-closed) と、自前の `requireAuth` (Refs #988 の続き)。`statusMessage` が
+      // 別物になるが、**人がすべきこと (再ログイン) は同じ**なので同じ文が出る。
+      // 両方を `tests/components/vehicle-settings-error-text.test.ts` で固定してある。
+      throw new Error(`未確認車輛の取得に失敗しました: ${await describeResponseFailure(res, RETRY_LOAD)}`)
     }
     items.value = (await res.json()) as UnconfirmedVehicle[]
   } catch (e) {
