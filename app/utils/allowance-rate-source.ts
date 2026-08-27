@@ -136,18 +136,46 @@ export function allowanceRateRows(state: AllowanceRateState): RateRow[] | null {
 }
 
 /**
- * 画面に出す 1 文。**合成後の文字列をテストで固定してある** — ヘルパを 1 本ずつ
- * 見て「書いてある」と判断すると、実際に出る文が別物になることがあるため。
+ * 画面に出す 1 文の本体。
+ *
+ * `amountsLabel` は**その画面で出なくなるもの**。理由は共通でも**結果は画面ごとに違う**
+ * ので、1 本の文を 2 枚目に貼ると嘘になる (memory `shared-notice-lies-on-second-screen`)。
+ * 運行手当タブは「手当・収支」、粗利タブは「手当・粗利」。
  */
-export function allowanceRateNotice(state: AllowanceRateState): string {
+function noticeBody(state: AllowanceRateState, amountsLabel: string): string {
   if (state.status === 'seed') {
     return `R2 未設定のため同梱の初期値で表示しています (同梱 ${state.rows.length} 行)。`
       + 'R2 に登録すると deploy なしで金額を変えられます。'
   }
   if (state.status === 'error') {
     return `運行手当マスタを読めませんでした — ${state.reason}。`
-      + '同梱の初期値には倒さないため、手当・収支は表示しません。'
+      + `同梱の初期値には倒さないため、${amountsLabel}は表示しません。`
   }
   return `R2 の運行手当マスタで計算しています (${state.rows.length} 行 / 版 ${state.version ?? '不明'}`
     + ` / 更新 ${state.updatedAt ?? '不明'})。`
+}
+
+/**
+ * 運行手当タブ (`/profit/allowance`) に出す 1 文。
+ * **合成後の文字列をテストで固定してある** — ヘルパを 1 本ずつ見て「書いてある」と
+ * 判断すると、実際に出る文が別物になることがあるため。
+ */
+export function allowanceRateNotice(state: AllowanceRateState): string {
+  return noticeBody(state, '手当・収支')
+}
+
+/**
+ * 粗利タブ (`/profit/margin`) に出す 1 文。**運行手当タブと 2 か所違う。**
+ *
+ * 1. 出なくなるのは「手当・粗利」(この画面に「収支」の合計は無い)
+ * 2. **キャッシュから出している回は「この版で計算したとは限らない」を足す** —
+ *    運行手当タブのキャッシュは金額を残さず読み込み時に引き直すが、
+ *    **粗利タブのキャッシュは計算済みの金額そのもの**を持っているため
+ *
+ * `error` では金額を 1 つも出さない (キャッシュも復元しない) ので 2 は足さない。
+ */
+export function allowanceRateNoticeForMargin(state: AllowanceRateState, restoredFromCache: boolean): string {
+  const base = noticeBody(state, '手当・粗利')
+  if (state.status === 'error' || !restoredFromCache) return base
+  return `${base}表示中の金額は前回の集計 (キャッシュ) のもので、この版で計算したとは限りません。集計 を押すと引き直します。`
 }

@@ -37,6 +37,7 @@ import {
 } from '~/utils/allowance-ichiban'
 import { buildIchibanLegs, resolveSlipDest } from '~/utils/allowance-ichiban-legs'
 import { forcedLeg, resolveForceMatches } from '~/utils/allowance-force-match'
+import { buildUncoveredLegs } from '~/utils/margin'
 
 /** 手当 ¥1,234 / 運賃 ¥4,321 — **同梱の初期値 (9000 / 2750) とは違う値**。 */
 const TAMPERED_YEN = 1234
@@ -265,5 +266,34 @@ describe('master を省略した呼び出しは同梱の初期値のまま (粗�
     expect(buildIchibanLegs('中村 一由', slips, new Set(), new Set(), '2026-07', PROVISIONAL, MASTER))
       .not.toEqual(buildIchibanLegs('中村 一由', slips, new Set(), new Set(), '2026-07', PROVISIONAL))
     expect(checkLeftoverFares(slips, MASTER)).not.toEqual(checkLeftoverFares(slips))
+  })
+})
+
+/**
+ * **粗利タブの経路にもマスタが届く** (Refs #805 PR-2)。
+ *
+ * 粗利の「手当」は運行手当タブと同じマスタから出ている
+ * (`app/pages/profit/margin.vue` の `allowanceForLegs` / `applyCarryOver` /
+ * `resolveForceMatches` と、`margin.ts` の `buildUncoveredLegs`)。ここは
+ * `margin.ts` 側の 1 本 — 残り 3 本は上の describe が同じ関数を測っている。
+ */
+describe('粗利タブの「対象外の便」にもマスタが届く', () => {
+  const driver = {
+    driverName: '中村 一由',
+    rows: [] as AllowanceReportRow[],
+    slips: [slip()],
+  }
+
+  it('buildUncoveredLegs — 差し替えたマスタの手当が出る', () => {
+    const legs = buildUncoveredLegs([driver], [], '2026-07', PROVISIONAL, MASTER)
+    expect(legs).toHaveLength(1)
+    expect(legs[0]).toMatchObject({ allowanceYen: TAMPERED_YEN, status: 'ok' })
+  })
+
+  it('省略すると同梱の初期値のまま (陽性対照つき)', () => {
+    const omitted = buildUncoveredLegs([driver], [], '2026-07', PROVISIONAL)
+    expect(omitted).toEqual(buildUncoveredLegs([driver], [], '2026-07', PROVISIONAL, RATE_MASTER))
+    expect(omitted[0]).toMatchObject({ allowanceYen: 9000, status: 'ok' })
+    expect(omitted).not.toEqual(buildUncoveredLegs([driver], [], '2026-07', PROVISIONAL, MASTER))
   })
 })

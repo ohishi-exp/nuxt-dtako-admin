@@ -16,6 +16,7 @@ import { describe, it, expect } from 'vitest'
 import {
   ALLOWANCE_RATE_ENDPOINT,
   allowanceRateNotice,
+  allowanceRateNoticeForMargin,
   allowanceRateReadError,
   allowanceRateRows,
   resolveAllowanceRateMaster,
@@ -183,6 +184,13 @@ describe('allowanceRateNotice — 画面に出る 1 文 (合成後で固定)', (
     )
   })
 
+  it('★ error の「出なくなるもの」は画面ごとに違う (収支 / 粗利)', () => {
+    const state = allowanceRateReadError('502')
+    expect(allowanceRateNotice(state)).toContain('手当・収支は表示しません')
+    expect(allowanceRateNoticeForMargin(state, false)).toContain('手当・粗利は表示しません')
+    expect(allowanceRateNoticeForMargin(state, false)).not.toBe(allowanceRateNotice(state))
+  })
+
   it('r2: どの版で計算したかを出す', () => {
     const state = resolveAllowanceRateMaster(getResponse([row()]))
     expect(allowanceRateNotice(state)).toBe(
@@ -204,6 +212,37 @@ describe('allowanceRateNotice — 画面に出る 1 文 (合成後で固定)', (
       allowanceRateNotice(allowanceRateReadError('x')),
     ])
     expect(seen.size).toBe(3)
+  })
+})
+
+describe('allowanceRateNoticeForMargin — 粗利タブは「結果」が違う', () => {
+  const seed: AllowanceRateState = { status: 'seed', rows: RATE_MASTER }
+
+  it('seed / r2 は運行手当タブと同じ文 (出なくなるものが無いので差が出ない)', () => {
+    expect(allowanceRateNoticeForMargin(seed, false)).toBe(allowanceRateNotice(seed))
+  })
+
+  it('キャッシュから出している回は「この版で計算したとは限らない」を足す', () => {
+    expect(allowanceRateNoticeForMargin(seed, true)).toBe(
+      'R2 未設定のため同梱の初期値で表示しています (同梱 62 行)。R2 に登録すると deploy なしで金額を変えられます。'
+      + '表示中の金額は前回の集計 (キャッシュ) のもので、この版で計算したとは限りません。集計 を押すと引き直します。',
+    )
+  })
+
+  it('r2 でも足す (粗利のキャッシュは計算済みの金額そのものだから)', () => {
+    const r2 = resolveAllowanceRateMaster(getResponse([row()]))
+    expect(allowanceRateNoticeForMargin(r2, true)).toContain('この版で計算したとは限りません')
+    expect(allowanceRateNoticeForMargin(r2, false)).not.toContain('この版で計算したとは限りません')
+  })
+
+  it('error ではキャッシュの但し書きを足さない (金額を 1 つも出さないため)', () => {
+    const err = allowanceRateReadError('x')
+    expect(allowanceRateNoticeForMargin(err, true)).toBe(allowanceRateNoticeForMargin(err, false))
+    expect(allowanceRateNoticeForMargin(err, true)).not.toContain('この版で計算したとは限りません')
+  })
+
+  it('★ 運行手当タブの文をそのまま粗利タブに出すと嘘になる (2 枚目で違う文が要る)', () => {
+    expect(allowanceRateNoticeForMargin(seed, true)).not.toBe(allowanceRateNotice(seed))
   })
 })
 

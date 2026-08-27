@@ -40,6 +40,7 @@
  */
 
 import { buildIchibanLegs, summarizeIchibanLegs, type IchibanLeg } from './allowance-ichiban-legs'
+import type { RateRow } from './allowance-rate-master'
 import { transportSlips } from './allowance-relay'
 import { addressToCity, cityToPlace } from './allowance-trips'
 import type { AllowanceReportRow, CrossMonthLegs } from './allowance-report'
@@ -1951,6 +1952,9 @@ export function buildUncoveredLegs(
   matched: Pick<LegReconcile, 'slips'>[],
   ym: string,
   provisional: ProvisionalMap,
+  /** 運行手当マスタ (R2 から解決したもの、Refs #805 PR-2)。**既定値は持たせない** —
+   * 省略すると下層 (`lookupAllowance`) の既定 = 同梱の初期値になる。 */
+  master?: RateRow[],
 ): IchibanLeg[] {
   // **デジタコ便に当たった明細だけを除く。** 日単位で避けると、一部だけ取れている日の
   // 起こし損ねた便が永久に埋まらない。
@@ -1963,7 +1967,9 @@ export function buildUncoveredLegs(
     const coveredOrigins = new Set(d.rows.map(r => `${r.date}|${cityToPlace(addressToCity(r.originCity))}`))
     // **請求のみ (`請求K=1`) からは便を起こさない。** 走っていない請求行なので、
     // 便にすると存在しない仕事の売上と手当を「対象外」として数えてしまう。
-    legs.push(...buildIchibanLegs(d.driverName, transportSlips(d.slips), used, coveredOrigins, ym, provisional))
+    legs.push(...buildIchibanLegs(
+      d.driverName, transportSlips(d.slips), used, coveredOrigins, ym, provisional, master,
+    ))
   }
   return legs
 }
