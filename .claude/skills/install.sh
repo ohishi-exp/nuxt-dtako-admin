@@ -3,6 +3,11 @@
 # ~/.claude/skills/<name> に symlink して、この repo を開いていない他 session /
 # 他 repo からも `/<skill-name>` で使えるようにする。
 #
+# ★ 向き (誤読注意, Refs #979): publish は **repo → home の一方向**。この repo 側が外部
+#   clone (ippoan/claude-skills 等) の実体を指す symlink を置くことはありません —
+#   .claude/skills/** は git 管理下なので、sibling clone への symlink を commit すると
+#   その path が無い環境 (CI / CCoW の fresh clone) で壊れるためです。
+#
 # 使い方:
 #   bash .claude/skills/install.sh            # symlink を作る/更新する
 #   bash .claude/skills/install.sh --copy     # symlink ではなく実体コピー (repo を消しても残る)
@@ -21,7 +26,7 @@ for arg in "$@"; do
     --copy) MODE="copy" ;;
     --dry-run) MODE="dry" ;;
     -h|--help)
-      sed -n '2,17p' "$0"
+      sed -n '2,20p' "$0"
       exit 0
       ;;
     *)
