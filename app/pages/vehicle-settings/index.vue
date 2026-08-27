@@ -10,6 +10,7 @@
 import { ref } from 'vue'
 import VehicleSettingsDisplay from '~/components/VehicleSettingsDisplay.vue'
 import type { VehicleSettings } from '~/utils/vehicle-settings-cfg'
+import { currentAccessToken } from '~/utils/api'
 
 interface ExtractResult extends VehicleSettings {
   saved: { json_key: string; cfg_key: string } | null
@@ -52,8 +53,14 @@ async function submit() {
   try {
     const form = new FormData()
     form.append('file', file.value)
+    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+    // 経路でも通るよう `Authorization: Bearer` も明示する — 抽出の口が
+    // `requireAuth` を通すようになった (Refs #988)。`postNet780Archive` と同じ扱い。
+    // **content-type は付けない** (multipart の boundary はブラウザが決める)。
+    const token = currentAccessToken()
     const res = await fetch('/api/vehicle-settings/extract', {
       method: 'POST',
+      headers: token ? { authorization: `Bearer ${token}` } : {},
       body: form,
     })
     if (!res.ok) {

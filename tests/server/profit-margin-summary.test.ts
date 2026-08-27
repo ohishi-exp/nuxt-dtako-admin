@@ -1,4 +1,7 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { beforeEach, describe, it, expect, vi, afterEach } from 'vitest'
+
+const { requireAuthMock } = vi.hoisted(() => ({ requireAuthMock: vi.fn() }))
+vi.mock('@ippoan/auth-client/server', () => ({ requireAuth: requireAuthMock }))
 
 import postHandler from '../../server/api/profit/margin-summary.post'
 import type { R2BucketLite, R2ObjectLite } from '../../server/utils/profit-r2-io'
@@ -79,8 +82,12 @@ function validInput(overrides: Record<string, unknown> = {}) {
   }
 }
 
+/** 認証が通る前提の env。`requireAuth` に渡す secret を必ず載せる (Refs #988)。 */
+const okEnv = (bucket: R2BucketLite, extra: Record<string, unknown> = {}) =>
+  ({ INTERNAL_SHARED_SECRET: 'secret', PROFIT_R2: bucket, ...extra })
+
 const eventWith = (bucket: R2BucketLite, body: unknown) =>
-  ({ context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _body: body })
+  ({ context: { cloudflare: { env: okEnv(bucket) } }, _body: body })
 
 const latestKey = 'profit/2026-07/margin-summary/latest.json'
 const historyKey = 'profit/2026-07/margin-summary/history.jsonl'
@@ -91,9 +98,66 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-describe('POST /api/profit/margin-summary', () => {
-  it('PROFIT_R2 未設定なら 503', async () => {
+beforeEach(() => {
+  requireAuthMock.mockReset()
+  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+})
+
+/**
+ * ★ **Access に依存しない認可** (Refs #988)。この口は
+ * `docs/plan-922-single-signin.md` §1 の D 段 (認可が 1 つも無い) に居た。
+ * **陰性対照**: `requireAuth` を外すとこの describe の 401 が落ちる。
+ * **陽性対照**: 認証が通れば従来どおり版が増える (下の既存テスト群がそのまま担う)。
+ */
+describe('POST /api/profit/margin-summary — 認可 (Refs #988)', () => {
+  it('★ 未ログインは 401 で、R2 には 1 バイトも書かない', async () => {
+    requireAuthMock.mockRejectedValue(Object.assign(new Error('Unauthorized'), { statusCode: 401 }))
+    const bucket = new FakeR2Bucket()
+    await expect(callPost(eventWith(bucket, validInput()))).rejects.toMatchObject({ statusCode: 401 })
+    expect(bucket.store.size).toBe(0)
+  })
+
+  it('INTERNAL_SHARED_SECRET 未設定なら 503 (auth を通す前に落ちる)', async () => {
+    const event = { context: { cloudflare: { env: { PROFIT_R2: new FakeR2Bucket() } } }, _body: validInput() }
+    await expect(callPost(event)).rejects.toMatchObject({ statusCode: 503, statusMessage: expect.stringContaining('INTERNAL_SHARED_SECRET') })
+    expect(requireAuthMock).not.toHaveBeenCalled()
+  })
+
+  it('cloudflare env そのものが無くても 503 (落ちない)', async () => {
     await expect(callPost({ context: {}, _body: validInput() })).rejects.toMatchObject({ statusCode: 503 })
+  })
+
+  it('Secrets Store binding (.get()) からも secret を取れる', async () => {
+    const env = { INTERNAL_SHARED_SECRET: { get: async () => 'from-store' }, PROFIT_R2: new FakeR2Bucket() }
+    await callPost({ context: { cloudflare: { env } }, _body: validInput() })
+    expect(requireAuthMock.mock.calls[0]![1]).toMatchObject({ sharedSecret: 'from-store' })
+  })
+
+  it('.get() が値を返さない binding / 文字列でも .get() でもない binding は 503', async () => {
+    const nullish = { INTERNAL_SHARED_SECRET: { get: async () => undefined }, PROFIT_R2: new FakeR2Bucket() }
+    await expect(callPost({ context: { cloudflare: { env: nullish } }, _body: validInput() })).rejects.toMatchObject({ statusCode: 503 })
+    const wrongType = { INTERNAL_SHARED_SECRET: 123, PROFIT_R2: new FakeR2Bucket() }
+    await expect(callPost({ context: { cloudflare: { env: wrongType } }, _body: validInput() })).rejects.toMatchObject({ statusCode: 503 })
+  })
+
+  it('auth-worker の URL は env が有れば env、無ければ既定', async () => {
+    await callPost({ context: { cloudflare: { env: okEnv(new FakeR2Bucket(), { NUXT_PUBLIC_AUTH_WORKER_URL: 'https://auth.example.test' }) } }, _body: validInput() })
+    expect(requireAuthMock.mock.calls[0]![1]).toMatchObject({ authWorkerUrl: 'https://auth.example.test' })
+
+    requireAuthMock.mockClear()
+    await callPost({ context: { cloudflare: { env: okEnv(new FakeR2Bucket(), { NUXT_PUBLIC_AUTH_WORKER_URL: '' }) } }, _body: validInput() })
+    expect(requireAuthMock.mock.calls[0]![1]).toMatchObject({ authWorkerUrl: 'https://auth.ippoan.org' })
+
+    requireAuthMock.mockClear()
+    await callPost({ context: { cloudflare: { env: okEnv(new FakeR2Bucket(), { NUXT_PUBLIC_AUTH_WORKER_URL: 7 }) } }, _body: validInput() })
+    expect(requireAuthMock.mock.calls[0]![1]).toMatchObject({ authWorkerUrl: 'https://auth.ippoan.org' })
+  })
+})
+
+describe('POST /api/profit/margin-summary', () => {
+  it('PROFIT_R2 未設定なら 503 (ログイン後)', async () => {
+    const event = { context: { cloudflare: { env: { INTERNAL_SHARED_SECRET: 'secret' } } }, _body: validInput() }
+    await expect(callPost(event)).rejects.toMatchObject({ statusCode: 503, statusMessage: expect.stringContaining('PROFIT_R2') })
   })
 
   it('形が違う body は 400', async () => {

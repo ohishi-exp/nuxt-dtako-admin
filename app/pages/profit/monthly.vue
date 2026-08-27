@@ -15,6 +15,7 @@
  */
 import { snapshotUnreadableNote, type SnapshotListItem, type SnapshotListResult } from '~/utils/profit-r2'
 import { describeApiError } from '~/utils/api-error'
+import { currentAccessToken } from '~/utils/api'
 import { shiftYmd } from '~/utils/profit-compare'
 
 /** 保存済み検証スナップショットの車輌・期間で `/profit/compare` (類似運行検索) に
@@ -96,8 +97,13 @@ async function confirmDeleteSnapshot() {
   deleting.value = true
   deleteError.value = null
   try {
+    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+    // 経路でも通るよう `Authorization: Bearer` も明示する — 削除の口が
+    // `requireAuth` を通すようになった (Refs #988)。`postNet780Archive` と同じ扱い。
+    const token = currentAccessToken()
     await $fetch('/api/profit/snapshot', {
       method: 'DELETE',
+      headers: token ? { authorization: `Bearer ${token}` } : {},
       query: { ym: item.ym, vehicle: item.vehicleCode, unkoNo: item.unkoNo, segmentId: item.segmentId },
     })
     snapshotItems.value = snapshotItems.value.filter(i => i !== item)

@@ -1317,8 +1317,13 @@ async function saveMarginSummaryToR2() {
     runCostShareMode: runCostShareMode.value,
   })
   try {
+    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+    // 経路でも通るよう `Authorization: Bearer` も明示する — server route が
+    // `requireAuth` を通すようになった (Refs #988)。`postNet780Archive` と同じ扱い。
+    const token = currentAccessToken()
     const res = await $fetch<MarginSummarySaveResult>('/api/profit/margin-summary', {
       method: 'POST',
+      headers: token ? { authorization: `Bearer ${token}` } : {},
       body: input,
     })
     marginR2Note.value = marginSummarySaveNote(res, null)

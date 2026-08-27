@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useAuth } from '@ippoan/auth-client'
-import { getDrivers, getYTimePreview } from '~/utils/api'
+import { getDrivers, getYTimePreview, currentAccessToken } from '~/utils/api'
 import { describeApiError } from '~/utils/api-error'
 import type { Driver, YTimeExportResponse } from '~/types'
 
@@ -245,12 +245,18 @@ async function uploadTemplate() {
   uploadStatus.value = ''
   try {
     const buf = await templateFile.value.arrayBuffer()
+    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+    // 経路でも通るよう `Authorization: Bearer` も明示する — 上書きの口が
+    // `requireAuth` を通すようになった (Refs #988)。`postNet780Archive` と同じ扱い。
+    const token = currentAccessToken()
+    const headers: Record<string, string> = {
+      'content-type':
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    }
+    if (token) headers.authorization = `Bearer ${token}`
     const res = await fetch(`/api/y-time-template?key=${encodeURIComponent(templateKey.value)}`, {
       method: 'PUT',
-      headers: {
-        'content-type':
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      },
+      headers,
       body: buf,
     })
     // 本文が空だと `res.statusText` に落ち、本番 (HTTP/3) は `502: ` と

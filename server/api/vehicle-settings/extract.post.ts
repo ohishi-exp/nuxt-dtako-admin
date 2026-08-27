@@ -9,10 +9,25 @@
  * - R2 binding が無い環境 (vitest / dev で binding 未設定 等) や vehicle_cd / dump_dir が
  *   path から取れなかった場合は `saved_warning` を返して成功扱い (UX 互換)。
  * - parse 本体は `app/utils/vehicle-settings-cfg.ts` (pure)
+ *
+ * ## `requireAuth` を付ける (Refs #988)
+ *
+ * ここは **Cloudflare Access だけが前段**で、Nitro 側に認可が 1 つも無かった
+ * (`docs/plan-922-single-signin.md` §1 の D 段)。Access は edge の設定であって
+ * **この repo が意図して置いた防御ではない**ので、A 段の `requireAuth`
+ * (`allowance-override.post.ts` と同じ 2 行) をここにも入れる。**zip を読む前に**
+ * 通すので、未ログインの相手に 5MB のアップロードを解かせない。
+ * 呼ぶのは車輛設定タブ (`/vehicle-settings`) の**ブラウザだけ**で、relay / cron /
+ * service binding からの呼び出しは無い (`git grep` で確認)。
+ *
+ *   401 — 未ログイン (`requireAuth`)
+ *   503 — INTERNAL_SHARED_SECRET binding 未設定
+ *         (**R2/D1 は従来どおり未設定でも成功扱い** — `saved_warning` で返す)
  */
 
 import type { H3Event } from 'h3'
 import { defineEventHandler, readMultipartFormData, createError } from 'h3'
+import { requireAuth } from '@ippoan/auth-client/server'
 import {
   extractVehicleSettingsAndCfgBytes,
   type VehicleSettings,
@@ -38,6 +53,25 @@ interface D1PreparedStatementLite {
 }
 interface D1DatabaseLite {
   prepare(sql: string): D1PreparedStatementLite
+}
+
+/** Secrets Store binding (`.get()`) / 文字列 のいずれでも値を取り出す
+ * (`allowance-override.post.ts` と同実装)。 */
+async function resolveSecret(binding: unknown): Promise<string | null> {
+  if (typeof binding === 'string') return binding
+  if (binding && typeof (binding as { get?: unknown }).get === 'function') {
+    return (await (binding as { get(): Promise<string> }).get()) ?? null
+  }
+  return null
+}
+
+interface AuthEnv {
+  INTERNAL_SHARED_SECRET?: unknown
+  NUXT_PUBLIC_AUTH_WORKER_URL?: string
+}
+
+function authEnv(event: H3Event): AuthEnv {
+  return (event.context.cloudflare as { env?: AuthEnv } | undefined)?.env ?? {}
 }
 
 function getR2Binding(event: H3Event): R2BucketLite | null {
@@ -89,6 +123,18 @@ export interface ExtractResponse extends VehicleSettings {
 }
 
 export default defineEventHandler(async (event): Promise<ExtractResponse> => {
+  const env = authEnv(event)
+  const sharedSecret = await resolveSecret(env.INTERNAL_SHARED_SECRET)
+  if (!sharedSecret) {
+    throw createError({ statusCode: 503, statusMessage: 'INTERNAL_SHARED_SECRET binding が未設定です' })
+  }
+  const authWorkerUrl
+    = typeof env.NUXT_PUBLIC_AUTH_WORKER_URL === 'string' && env.NUXT_PUBLIC_AUTH_WORKER_URL
+      ? env.NUXT_PUBLIC_AUTH_WORKER_URL
+      : 'https://auth.ippoan.org'
+  // **body を読む前に認証する。** 未ログインの相手に zip を展開させない。
+  await requireAuth(event, { authWorkerUrl, sharedSecret })
+
   const parts = await readMultipartFormData(event)
   if (!parts || parts.length === 0) {
     throw createError({

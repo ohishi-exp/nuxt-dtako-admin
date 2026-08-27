@@ -14,6 +14,9 @@ import { mount, flushPromises } from '@vue/test-utils'
 vi.mock('~/utils/api', () => ({
   getDrivers: vi.fn(async () => [{ id: 'd1', driver_cd: '0001', driver_name: '山田' }]),
   getYTimePreview: vi.fn(async () => ({ warnings: [] })),
+  // テンプレの上書きは `requireAuth` を通るようになった (Refs #988)。画面は
+  // cookie に加えて `Authorization: Bearer` も明示するので、その token 取得も mock する。
+  currentAccessToken: vi.fn(() => 'dummy-token'),
 }))
 vi.mock('@ippoan/auth-client', () => ({
   useAuth: () => ({ token: { value: 'dummy-token' } }),
