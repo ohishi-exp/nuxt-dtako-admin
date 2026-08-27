@@ -151,6 +151,22 @@ powershell -ExecutionPolicy Bypass -File <skill>/kill-dev-zombies.ps1          #
 powershell -ExecutionPolicy Bypass -File <skill>/kill-dev-zombies.ps1 -DryRun  # 何が引っかかるか見る
 ```
 
+**`kill-dev-zombies.ps1` は Windows 専用** (Linux 版は作っていない — 同期対象を
+増やさないため)。Linux では `setup-dev-env.sh` がエラー時に案内するとおり、
+**自分のものだけ**を手で止める:
+
+```bash
+ss -ltnp "sport = :8787"   # port を塞いでいる PID
+ls -l /proc/<PID>/cwd      # どの worktree のものか分かる
+kill <PID>
+```
+
+**`pkill -x workerd` のような一括 kill はしないこと。** Windows は 1 セッション前提だが、
+この Linux 作業機は複数セッションが同時に dev を回しているので、**兄弟セッションの
+実測ごと壊す** (2026-08-27 実測: 他タスクの workerd が 30 個生存、それでも port 8787 は
+空いていた)。`setup-dev-env.sh` の Linux 側のゾンビ検出も、この理由で
+**cwd がその worktree の workerd だけ**をゾンビとみなす。
+
 **ポートだけ見ても足りない。** 2026-07-25 実測で、dev ポート 5 つ全部 `free` なのに
 `node`/`workerd` が 5 個生きていた — listener を落としても親 wrangler と workerd が
 残り、次の起動でポートを奪い返す (これが「Ready と出るのに古いバンドルが応答する」
@@ -194,10 +210,26 @@ bash .claude/skills/dev-login-local-verify/setup-dev-env.sh            # wrangle
 bash .claude/skills/dev-login-local-verify/setup-dev-env.sh --hybrid   # + nuxt dev (HMR)
 ```
 
+`setup-dev-env.sh` は **Windows (Git Bash) と Linux の両方で動く** (#1001)。差が出るのは
+3 箇所だけ (node_modules の複製 / port の先住チェック / ゾンビ workerd の検出) で、
+スクリプト内で `uname` により分岐する。**Linux 版を別ファイルに分けていない**のは、
+共有部分 (worktree・build・wrangler 起動、約 140 行) が二重管理になるのを避けるため。
+
+**ヘッドレスの Linux セッションでは `--remote` が最後で止まる** (2026-08-27 実測)。
+`[6/6] wrangler dev 起動` まで進み **port 8787 は listen するのに `Ready on` が出ない** —
+wrangler が route の zone (`dtako.ippoan.org`) に Access を検出して
+`cloudflared access login dtako.ippoan.org` を spawn し、**対話ログイン待ちでブロックする**
+ため (`~/.config/.wrangler/logs/*.log` の末尾が `Access switch not cached for:
+dtako.ippoan.org` で止まるのが目印)。**これは OS ではなく Access の壁**なので、
+ブラウザで Access を通せないセッションは上の「代替 (① が駄目なとき)」の
+`remote = true` 経路を使う。
+
+
 - node_modules は「実体を持つ worktree」から junction (0秒)。donor が無ければ
   `gh auth token` で GH Packages 認証して npm install に落ちる (gh token に
   `read:packages` scope が必要 — 無ければ `gh auth refresh -s read:packages` を
   一度実行しておく。2026-07-25 に NODE_AUTH_TOKEN 失効の恒久対策として確立)。
+  **Linux では junction の代わりに `cp -al` でハードリンク複製する** (`ln -s` は使わない)。
 - UI をいじる検証は `--hybrid` を推奨 (下の「hybrid dev」節参照)。
 - **nuxt build (~90秒) は `.output` が無い初回だけ自動実行**される。hybrid では
   UI は nuxt dev 側が配信するので、wrangler 用の .output は古くても構わない
@@ -210,11 +242,19 @@ bash .claude/skills/dev-login-local-verify/setup-dev-env.sh --hybrid   # + nuxt 
    ```powershell
    Get-NetTCPConnection -LocalPort 8787 -State Listen -ErrorAction SilentlyContinue
    ```
+   Linux なら (`netstat` の `LISTENING` ではなく `ss` の `LISTEN`):
+   ```bash
+   ss -ltnp "sport = :8787"
+   ```
    前セッションの wrangler dev (workerd + node ツリー) が残っていると、**新しい
    wrangler dev は「Ready on :8787」と表示するのに実際のリクエストは旧バンドルを
    アップロード済みの古いインスタンスが処理する** (コード修正が反映されない、
    ように見える)。残骸がいたら `Stop-Process` で workerd と親 node を止めてから
    起動する。検証セッションの終わりにも wrangler dev を止めておくこと。
+   Linux では `Stop-Process` の代わりに、**`ls -l /proc/<PID>/cwd` でどの worktree の
+   ものか確かめてから** `kill <PID>`。**`pkill -x workerd` のような一括 kill は
+   しないこと** — この作業機は複数セッションが同時に dev を回しており、
+   兄弟セッションの実測ごと壊す (2026-08-27 実測: 無関係な workerd が 30 個生存)。
 1. **origin/main ベースの worktree で作業する** (CLAUDE.md の規範通り。メイン
    worktree ではソース編集しない)。`git worktree add .claude/worktrees/<name>
    origin/main` 等。
@@ -222,6 +262,12 @@ bash .claude/skills/dev-login-local-verify/setup-dev-env.sh --hybrid   # + nuxt 
    リンクすると npm install の待ち時間を避けられる (Windows なら
    `New-Item -ItemType Junction`)。ソースが違っても node_modules の中身は
    基本同じなので使い回して問題ない。
+
+   **Linux は `cp -al <donor>/node_modules ./node_modules`** (ハードリンク複製)。
+   **`ln -s` は使わない** — 下の 1 つ目の罠 (vite の `/@fs` 解決) をそのまま踏む。
+   `cp -al` なら中身が「本物のディレクトリ」になるのでその罠を回避でき、
+   メタデータのみの複製なので junction と同じくほぼ 0 秒。`setup-dev-env.sh` は
+   Linux ではこちらを使う (#1001)。
 
    **★ 2 つ罠がある。どちらも「コードが壊れている」ように見える。**
 
@@ -240,6 +286,7 @@ bash .claude/skills/dev-login-local-verify/setup-dev-env.sh --hybrid   # + nuxt 
    注意: シェルの cwd が `.output/` 配下にあるとビルドが
    `EBUSY: resource busy or locked, rmdir .output/server/chunks` で落ちる
    (Windows はディレクトリを開いているプロセスがいると削除できない)。
+   **Linux ではこの EBUSY は起きない** (開かれているディレクトリも rmdir できる)。
 4. **wrangler dev を起動する** — `[build]` (custom build = `npm run build`) を
    除いた派生 config を使うと **起動が 168秒 → 23秒** になる (wrangler は
    positional で entry を渡しても `[build]` を必ず実行するため、config から
