@@ -11,11 +11,37 @@
  *
  * レスポンス: [{ vehicle_cd, vehicle_name }, ...]
  * vehicle_cd でソートされて返る。
+ *
+ * ## `requireAuth` を付ける (Refs #988)
+ *
+ * **ここは D 段 (認可ゼロ) ではなく B 段だった** — `alcProxyFetch` が browser JWT を
+ * cookie / `Authorization: Bearer` から拾って転送し、上流の auth-worker `/alc-proxy`
+ * が **token 不在を fail-closed で 401 にする** (`ippoan/auth-worker@dd220b2`
+ * `src/handlers/alc-proxy.ts` の `if (!token) return jsonError(401, "Unauthorized")`)。
+ * `X-Alc-Proxy-Secret` は consumer proof であって身元ではないので、secret だけでは
+ * 通らない。**`/api/ichiban/**` (Service Token を無条件に付け、呼び出し元の身元を
+ * 一切見ない) とは型が違う** — 誤読しやすいのでここに書いておく。
+ *
+ * それでも A 段に上げる理由が 2 つある:
+ *
+ * 1. **B 段の防御は上流の実装依存**で、この repo からは保証できない
+ *    (`docs/plan-922-single-signin.md` §1 が `/api/ichiban/**` の項で書いている性質と
+ *    同じ)。Nitro 側で確定させれば、上流が変わっても規約が残る。
+ * 2. **上流 401 を待つ前に R2 list が走ってしまう** — 下の `Promise.all` は
+ *    `listConfirmedVehicleCds` を並行で回すので、**未ログインの相手でも R2 の
+ *    listing (最大 50 往復) だけは実行される**。`requireAuth` を先に置けば止まる。
+ *
+ * 呼ぶのは `/vehicle-settings/unconfirmed` の**ブラウザだけ**で、relay / cron /
+ * service binding からの呼び出しは無い (`git grep` で確認)。
+ *
+ *   401 — 未ログイン (`requireAuth`)
+ *   503 — INTERNAL_SHARED_SECRET / DTAKO_R2 binding 未設定
  */
 
-import type { H3Event } from 'h3'
 import { defineEventHandler, createError } from 'h3'
+import { requireAuth } from '@ippoan/auth-client/server'
 import { alcProxyFetch } from '../../utils/alc-proxy'
+import { cfEnv, resolveSecret } from '../../utils/cf-env'
 
 const R2_PREFIX = 'vehicle-settings/'
 
@@ -36,9 +62,10 @@ interface R2BucketLite {
   list(options?: R2ListOptions): Promise<R2ListResult>
 }
 
-function getR2Binding(event: H3Event): R2BucketLite | null {
-  const ctx = event.context as { cloudflare?: { env?: { DTAKO_R2?: R2BucketLite } } }
-  return ctx.cloudflare?.env?.DTAKO_R2 ?? null
+interface CloudflareEnv {
+  DTAKO_R2?: R2BucketLite
+  INTERNAL_SHARED_SECRET?: unknown
+  NUXT_PUBLIC_AUTH_WORKER_URL?: string
 }
 
 // `vehicle-settings/4437/...` → '4437'
@@ -83,7 +110,20 @@ export interface UnconfirmedVehicle {
 }
 
 export default defineEventHandler(async (event): Promise<UnconfirmedVehicle[]> => {
-  const r2 = getR2Binding(event)
+  const env = cfEnv<CloudflareEnv>(event)
+  const sharedSecret = await resolveSecret(env.INTERNAL_SHARED_SECRET)
+  if (!sharedSecret) {
+    throw createError({ statusCode: 503, statusMessage: 'INTERNAL_SHARED_SECRET binding が未設定です' })
+  }
+  const authWorkerUrl
+    = typeof env.NUXT_PUBLIC_AUTH_WORKER_URL === 'string' && env.NUXT_PUBLIC_AUTH_WORKER_URL
+      ? env.NUXT_PUBLIC_AUTH_WORKER_URL
+      : 'https://auth.ippoan.org'
+  // **R2 list と上流フェッチを始める前に認証する。** 上流も未ログインを 401 に
+  // するが、それを待つ間に下の `Promise.all` が R2 listing を回してしまう。
+  await requireAuth(event, { authWorkerUrl, sharedSecret })
+
+  const r2 = env.DTAKO_R2
   if (!r2) {
     throw createError({
       statusCode: 503,

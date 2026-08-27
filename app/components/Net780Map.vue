@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { Loader } from '@googlemaps/js-api-loader'
+import { currentAccessToken } from '~/utils/api'
 import type { Net780GpsPoint } from '~/utils/net780'
 
 const props = defineProps<{
@@ -25,7 +26,13 @@ onMounted(async () => {
     // GOOGLEMAP_KEY_SECRET は Cloudflare Secrets Store binding (文字列ではない) なので
     // public runtimeConfig には載せず、server route 経由で解決した文字列を取得する
     // (vid-check ページと同じ endpoint を共用する)。
-    const { key } = await $fetch('/api/vid-check/map-key')
+    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+    // 経路でも通るよう `Authorization: Bearer` も明示する — 鍵を返す口が
+    // `requireAuth` を通すようになった (Refs #988)。
+    const mapKeyToken = currentAccessToken()
+    const { key } = await $fetch('/api/vid-check/map-key', {
+      headers: mapKeyToken ? { authorization: `Bearer ${mapKeyToken}` } : {},
+    })
     if (!key) {
       loadError.value = 'Google Maps API key が未設定です (GOOGLEMAP_KEY_SECRET)'
       return

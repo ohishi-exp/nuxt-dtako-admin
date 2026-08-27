@@ -10,7 +10,9 @@
  *   (`readRawBody` が 1 度も呼ばれない。`requireAuth` を外すとこの it が落ちる)
  * - **陽性対照**: 認証が通れば**従来どおり R2 に put され、`{ok, key, size}` が返る**
  *
- * **読み口 (`y-time-template.get.ts`) はこの PR では触っていない** — 読み取り系は別 PR。
+ * **読み口 (`y-time-template.get.ts`) にも #988 の 2 本目で同じ 2 行が入り、
+ * `tests/server/y-time-template-get-route.test.ts` が同じ形で固定している** —
+ * #995 当時の「この PR では触っていない・読み取り系は別 PR」はもう本当ではない。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 

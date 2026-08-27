@@ -19,7 +19,9 @@
  * 呼ぶのは Y時間 タブの**ブラウザだけ**で、relay / cron / service binding からの
  * 呼び出しは無い (`git grep` で確認)。
  *
- * **読み口 (`y-time-template.get.ts`) はこの PR では触らない** — 読み取り系は別 PR。
+ * **読み口 (`y-time-template.get.ts`) にも #988 の 2 本目で同じ 2 行が入った** —
+ * #995 当時は「この PR では触らない・読み取り系は別 PR」と書いてあったが、それはもう
+ * 本当ではない。**書き口だけが認証を要求する状態は解消済み**。
  *
  *   401 — 未ログイン (`requireAuth`)
  *   503 — INTERNAL_SHARED_SECRET / DTAKO_R2 binding 未設定

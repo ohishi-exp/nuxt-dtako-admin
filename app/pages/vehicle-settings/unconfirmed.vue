@@ -7,6 +7,7 @@
  */
 
 import { computed, ref, onMounted } from 'vue'
+import { currentAccessToken } from '~/utils/api'
 import { describeResponseFailure } from '~/utils/api-error'
 
 /** この画面の「やり直し方」。**句点を付けない** (`describeResponseFailure` が文に組む)。
@@ -36,7 +37,13 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const res = await fetch('/api/vehicle-settings/unconfirmed')
+    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+    // 経路でも通るよう `Authorization: Bearer` も明示する — この読み口が
+    // `requireAuth` を通すようになった (Refs #988)。`postNet780Archive` と同じ扱い。
+    const token = currentAccessToken()
+    const res = await fetch('/api/vehicle-settings/unconfirmed', {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    })
     if (!res.ok) {
       // **サーバの本文をそのまま貼らない** (Refs #996)。`/vehicle-settings` の抽出と
       // 同じ形だった — `HTTP 503: {"error":true,…}` のように JSON を画面に出し、

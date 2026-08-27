@@ -20,6 +20,7 @@
  * データがブラウザに無くなったので不要になった。
  */
 import { defaultPayrollMonth } from '~/utils/ichiban-health'
+import { currentAccessToken } from '~/utils/api'
 import { classifyKyuyoAccess, kyuyoAccessNotice, KYUYO_CONSEQUENCE_FETCH, type KyuyoAccessState } from '~/utils/kyuyo-access'
 import {
   buildFetchPlan,
@@ -113,7 +114,13 @@ async function loadSynced() {
 async function loadCompanies() {
   pageError.value = ''
   try {
-    const res = await fetch('/api/kyuyo-master/companies')
+    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+    // 経路でも通るよう `Authorization: Bearer` も明示する — この読み口が
+    // `requireAuth` を通すようになった (Refs #988)。`postNet780Archive` と同じ扱い。
+    const token = currentAccessToken()
+    const res = await fetch('/api/kyuyo-master/companies', {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    })
     if (!res.ok) {
       pageError.value = `会社リストを読めません (HTTP ${res.status})`
       return

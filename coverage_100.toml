@@ -48,6 +48,20 @@ branches = true
 path = "app/utils/poi.ts"
 branches = true
 
+# **#988 の 2 本目で `requireAuth` を入れた** (`GET /api/poi/:region`)。
+# **この行は元から在る** — 登録は `f9c2029` (#503) が済ませていた。#988 では
+# **注記を足しただけで `[[files]]` は増やしていない** (一度 重複行を足してしまい、
+# rebase 時に `grep '^path = ' | sort | uniq -d` で気づいて消した)。
+# 中身は OSM 由来の公開 POI なので秘密は漏れない — 塞いだのは、region ごとに
+# 数 MB を R2 から出す口が無認証だと**帯域と R2 の class-B 課金を誰にでも回せる**ため。
+# **`Cache-Control: public, max-age=3600` は残してある** (返す中身は利用者によらず
+# 同じで、キャッシュされて困る個人情報が無い。`private` にすると月次バッチ由来の
+# 静的データを毎回 R2 から出すことになる)。
+# **statements 19 / 19、branch site 7 / arm 14、14 arm すべて被覆**
+# (基準 = `origin/main` 00b0881 + この PR)。
+# **既存の `tests/server/poi.test.ts` の「R2 binding 未設定は 503」は、
+# secret 未設定でも 503 になるので `statusCode` だけでは別の理由で緑になる** —
+# 文言 (`DTAKO_R2`) で分けるよう直した。
 [[files]]
 path = "server/api/poi/[region].get.ts"
 branches = true
@@ -1379,8 +1393,123 @@ branches = true
 #      **★ ただし `.get()` の 1 本だけを skip しても緑のまま**だった —
 #      `.get()` の arm は「値を返さない binding は 503」の側でも通るため。
 #      **「1 本 skip して緑」を「gate が無意味」と読まないこと。**
-# **読み口 (`y-time-template.get.ts`) は #988 では触っておらず、登録簿にも入れていない** —
-# 読み取り系は別 PR。
+# **読み口 (`y-time-template.get.ts`) も #988 の 2 本目で `requireAuth` を通すようになり、
+# 登録簿にも入れた** (このファイルの末尾)。#995 当時の「触っておらず、登録簿にも入れていない」は
+# もう本当ではない。
 [[files]]
 path = "server/api/y-time-template.put.ts"
+branches = true
+
+# ── #988 の 2 本目 — **読み口 7 本を登録簿に足す** ────────────────────────────
+#
+# `docs/plan-922-single-signin.md` §1 の D 段 (Nitro 側の認可が 1 つも無く、
+# **Cloudflare Access だけが前段**) と B 段 (上流に browser JWT を渡し上流が弾く) に
+# 居た読み口に、A 段の `requireAuth` を `y-time-template.put.ts` と同じ形で入れた。
+# **規約をコードにした口はカバレッジで固定する価値がある**ので、100% に到達したものを
+# ここに登録する。
+#
+# **初登録は 6 本。**`poi/[region].get.ts` は **`f9c2029` (#503) が既に登録済み**
+# だったので `[[files]]` は足さず、上流の注記だけ既存行に付けた
+# (`grep '^path = ' coverage_100.toml | sort | uniq -d` が空になることを確認済み)。
+# **どれも差分ではなく絶対値で書く。基準 = `origin/main`
+# `00b0881aa83c413d7ef3ab811cdebab7571ed81e` + この PR の変更。**
+# **指標名: v8 の statements / branch site / branch arm** (`coverage-final.json` の
+# `s` と `branchMap` を実際に読んで数えた)。**数字だけ残すと次に読む人が別の指標と
+# 取り違える**ので指標名を必ず添える — 分岐数はこのファイルを触るたびに動く。
+#
+# 7 本すべてに**同じ auth 前置き**が入っているが、**route ファイルに乗る branch site は
+# 共通で 3 だけ**: `!sharedSecret` の if 1 / `NUXT_PUBLIC_AUTH_WORKER_URL` の 2
+# (三項と `&&`)。
+# **★ `cfEnv` の `?? {}` と `resolveSecret` の 4 site は `server/utils/cf-env.ts` 側に
+# 計上され、route ファイルには乗らない** (`cee9db4` / #1000 で 15 か所を共通化した効果)。
+# #995 が `y-time-template.put.ts` に「auth 前置きで 8 site 増えた」と書けたのは
+# **共通化の前でヘルパを各 route に inline していたから**で、今は同じ数え方が通らない。
+# `cf-env.ts` 自体は statements 6/6・arm 10/10 で 100% だが、#988 のスコープ外
+# (#999 / #1000 の持ち物) なので**この PR では登録しない**。
+#
+# **★ 陰性対照を 2 段で測った。結論は「この gate は認可を測っていない」**
+# (memory `coverage-green-does-not-check-values`。基準 = a05bd08 + この PR):
+#   ① `vid-check/map-key.get.ts` の**「★ 未ログインは 401」系 2 本を `it.skip` にしても
+#      gate は緑のまま** (`All 114 files at 100%`)。`requireAuth` の呼び出し行自体は
+#      他の it が通すので、**401 になるかどうかは 1 行も lines/branches に現れない**。
+#      **「gate が緑だから認可が効いている」とは絶対に読まないこと。**
+#      認可が効いていることを測っているのは**テストの側だけ** — 直す前のコード
+#      (`origin/main` a05bd08 の route 8 本) に当てると **93 本中 47 本が落ちる**
+#      (うち「★ 未ログイン…401」は 10 本)。これが唯一の陰性対照。
+#   ② 一方で**値を見る it を skip すると gate は落ちる** — 同ファイルの
+#      「binding が無ければ process.env フォールバック…」と「`.get()` が undefined…」を
+#      `it.skip` にすると **`FAIL: server/api/vid-check/map-key.get.ts —
+#      branches 94.44% (expected 100%)`** で exit 1。gate 自体は生きている。
+#
+# **`server/api/vehicle-settings/unconfirmed.get.ts` は登録しない** —
+# statements 45/46・arm 27/28 で 100% に届かない。届かないのは
+# `extractVehicleCdFromKey` の `if (!key.startsWith(R2_PREFIX)) return null` で、
+# **呼び出し元が `r2.list({ prefix: R2_PREFIX })` の結果しか渡さないので
+# 「いまの呼び方では通らない」**。R2 の list 契約に対する防御的ガードなので
+# **テストで埋めず、コードも消さない** (skill `nuxt-dtako-admin-map` §PR の基準 (2)
+# 「死に分岐はテストで埋めない」の 3 段判定)。認可のテスト自体は
+# `tests/server/vehicle-settings-unconfirmed-route.test.ts` にある。
+
+# 車輌設定 dump の**一覧** (`GET /api/vehicle-settings/history`)。
+# ここに並ぶ key は実体 (`object.get.ts`) の入口そのもの =
+# **一覧が開いていれば実体も開いている**。
+# **statements 52 / 52、branch site 21 / arm 42、42 arm すべて被覆。**
+# auth 前置き 8 site 以外の 13 site は R2 listing と集計 (cursor ループ、
+# `parseVehicleSettingsR2Key` の null、`ext !== 'json'`、`customMetadata?.` の
+# `??`、`toIso` の三項、sort の三項、`latest` 更新の if)。
+[[files]]
+path = "server/api/vehicle-settings/history.get.ts"
+branches = true
+
+# 同 **実体** (`GET /api/vehicle-settings/object`)。
+# **key prefix の強制は認可ではない** (別用途のオブジェクトを引かせないための制限で、
+# 呼び出し元が誰かは見ていない) — テスト側で「prefix が正しくても未ログインは 401」を
+# 別の it として固定してある。
+# **statements 23 / 23、branch site 11 / arm 22、22 arm すべて被覆。**
+[[files]]
+path = "server/api/vehicle-settings/object.get.ts"
+branches = true
+
+# `DTAKO_DB` の給与会社マスタ**一覧** (`GET /api/kyuyo-master/companies`)。
+# 更新の口 (`refresh.post` / `refresh-full.post`) は browser JWT を上流に渡して
+# 上流が弾く形なのに、**読み口だけが素通し**だった。
+# **statements 12 / 12、branch site 5 / arm 10、10 arm すべて被覆。**
+# 内訳は auth 前置き 3 + `!db` の if 1 + catch の `e instanceof Error` 三項 1。
+# **7 本の中でいちばん小さい** — この route 自体の分岐が 2 本しか無いため。
+[[files]]
+path = "server/api/kyuyo-master/companies.get.ts"
+branches = true
+
+# Y時間 テンプレ xlsx の**存在確認** (`GET /api/y-time-template`)。
+# **書き口 (`y-time-template.put.ts`) は #988 の 1 本目で塞いだのに、ここは残っていた。**
+# `size` / `etag` / `uploaded` はテンプレ差し替えを外から観測できる情報。
+# **statements 18 / 18、branch site 9 / arm 18、18 arm すべて被覆。**
+# **「未配置は 404 ではなく 200 + `{exists:false}`」という契約は変えていない** —
+# テストで陽性対照として固定した。
+[[files]]
+path = "server/api/y-time-template.get.ts"
+branches = true
+
+# Y時間 xlsx 生成 (`POST /api/y-time-export`)。
+# **ここは D 段ではなく B 段だった** — `alcProxyFetch` が browser JWT を転送し、
+# 上流 auth-worker `/alc-proxy` が token 不在を fail-closed で 401 にする
+# (`ippoan/auth-worker@dd220b2` `src/handlers/alc-proxy.ts`)。それでも A 段に
+# 上げたのは **B 段の防御が上流の実装依存**でこの repo からは保証できないため。
+# **statements 32 / 32、branch site 12 / arm 27、27 arm すべて被覆。**
+# `writeYTimeRows` (ExcelJS) は mock している — ここで測っているのは
+# **route の分岐**であって xlsx 生成ではない (それは `tests/utils/y-time-xlsx.test.ts`)。
+[[files]]
+path = "server/api/y-time-export.post.ts"
+branches = true
+
+# **Google Maps API key を平文で返す口** (`GET /api/vid-check/map-key`)。
+# D 段の中で唯一「秘密そのものを返す」。**「referrer 制限があるから無認証でよい」は
+# 成り立たない** — `Referer` は呼び出し元が自由に名乗れるヘッダで、ブラウザの外からは
+# 任意の値を付けられる。referrer 制限は課金の保険であって認証ではない。
+# **statements 16 / 16、branch site 9 / arm 18、18 arm すべて被覆。**
+# **`process.env.NUXT_PUBLIC_GOOGLEMAP_KEY` フォールバックは残してある**ので、
+# 「未ログインなら env 側の鍵も返さない」を**別の it として**固定した
+# (401 を通り越して素の鍵が出る経路を塞いだ証拠)。
+[[files]]
+path = "server/api/vid-check/map-key.get.ts"
 branches = true

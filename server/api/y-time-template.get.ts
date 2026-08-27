@@ -6,11 +6,27 @@
  *   200 { exists: false, key } — 存在しない (404 でなく 200 + flag で返すのは
  *     fetch で簡単に分岐できるようにするため)
  *   400 — key がない / 形式不正
- *   503 — R2 binding 未設定
+ *
+ * ## `requireAuth` を付ける (Refs #988)
+ *
+ * ここは **Cloudflare Access だけが前段**で、Nitro 側に認可が 1 つも無かった
+ * (`docs/plan-922-single-signin.md` §1 の D 段)。Access は edge の設定であって
+ * **この repo が意図して置いた防御ではない**ので、A 段の `requireAuth` を入れる。
+ *
+ * **書き口 (`y-time-template.put.ts`) は #988 の 1 本目で塞いだのに、読み口である
+ * ここは残っていた。**「存在するか」しか返さないが、`size` / `etag` / `uploaded` は
+ * **テンプレの差し替えを外から観測できる情報**で、`templates/` 配下の key を
+ * 総当たりすれば配置も判る。
+ * 呼ぶのは Y時間 タブ (`/y-time-export`) の**ブラウザだけ**で、relay / cron /
+ * service binding からの呼び出しは無い (`git grep` で確認)。
+ *
+ *   401 — 未ログイン (`requireAuth`)
+ *   503 — INTERNAL_SHARED_SECRET / DTAKO_R2 binding 未設定
  */
 
-import type { H3Event } from 'h3'
 import { defineEventHandler, getQuery, createError } from 'h3'
+import { requireAuth } from '@ippoan/auth-client/server'
+import { cfEnv, resolveSecret } from '../utils/cf-env'
 
 interface R2HeadResult {
   size: number
@@ -21,12 +37,25 @@ interface R2BucketLite {
   head(key: string): Promise<R2HeadResult | null>
 }
 
-function getR2Binding(event: H3Event): R2BucketLite | null {
-  const ctx = event.context as { cloudflare?: { env?: { DTAKO_R2?: R2BucketLite } } }
-  return ctx.cloudflare?.env?.DTAKO_R2 ?? null
+interface CloudflareEnv {
+  DTAKO_R2?: R2BucketLite
+  INTERNAL_SHARED_SECRET?: unknown
+  NUXT_PUBLIC_AUTH_WORKER_URL?: string
 }
 
 export default defineEventHandler(async (event) => {
+  const env = cfEnv<CloudflareEnv>(event)
+  const sharedSecret = await resolveSecret(env.INTERNAL_SHARED_SECRET)
+  if (!sharedSecret) {
+    throw createError({ statusCode: 503, statusMessage: 'INTERNAL_SHARED_SECRET binding が未設定です' })
+  }
+  const authWorkerUrl
+    = typeof env.NUXT_PUBLIC_AUTH_WORKER_URL === 'string' && env.NUXT_PUBLIC_AUTH_WORKER_URL
+      ? env.NUXT_PUBLIC_AUTH_WORKER_URL
+      : 'https://auth.ippoan.org'
+  // **query を読む前に認証する** (書き口 `y-time-template.put.ts` と同じ順序)。
+  await requireAuth(event, { authWorkerUrl, sharedSecret })
+
   const { key } = getQuery(event)
   if (typeof key !== 'string' || !key) {
     throw createError({ statusCode: 400, statusMessage: 'key (string) is required' })
@@ -38,7 +67,7 @@ export default defineEventHandler(async (event) => {
     })
   }
 
-  const r2 = getR2Binding(event)
+  const r2 = env.DTAKO_R2
   if (!r2) {
     throw createError({
       statusCode: 503,

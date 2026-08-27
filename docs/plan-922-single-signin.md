@@ -103,10 +103,10 @@ Google が 2 回出たなら ⑧ が壊れており、そのときは「アプ�
 
 | 段 | 本数 | 認可の実体 |
 | --- | --- | --- |
-| A. `requireAuth` (auth-worker ログイン必須) | 6 → **10** | Nitro で 401 |
-| B. 上流に browser JWT を渡し**上流が弾く** | 7 | rust-ichibanboshi / auth-worker `/alc-proxy` |
+| A. `requireAuth` (auth-worker ログイン必須) | 6 → 10 → **18** | Nitro で 401 |
+| B. 上流に browser JWT を渡し**上流が弾く** | 7 → **5** | rust-ichibanboshi / auth-worker `/alc-proxy` |
 | C. machine shared secret | 1 | `X-Internal-Shared-Secret` constant-time |
-| **D. 認可が 1 つも無い** | 18 → **14** | **Access だけが前段** |
+| **D. 認可が 1 つも無い** | 18 → 14 → **8** | **Access だけが前段** |
 | E. 本番では 404 | 1 | `DEV_LOGIN !== 'true'` |
 
 > **2026-08-27 追記 (#988 の 1 本目、`origin/main` = 94b72f2 基点)。**
@@ -115,9 +115,70 @@ Google が 2 回出たなら ⑧ が壊れており、そのときは「アプ�
 > `y-time-template.put`)。**読み取り 14 本は手つかず**で、別 PR に残っています。
 > 数字は着手時に `origin/main` で数え直したもの (33 本の総数は当時から変わっていません)。
 
+> ### 2026-08-27 追記 (#988 の 2 本目、読み口 8 本)
+>
+> **数え直しの条件を先に書きます** — この repo は「引き継ぎ文の数字が腐って次の人を
+> 外す」事故を繰り返しているため (memory `main-clone-worktree-is-stale-for-counting`
+> `measurement-needs-its-conditions`)。
+>
+> - **基点 SHA**: `origin/main` = `a05bd08d7b17452ef7c086557c43b07d3a3030e4`
+> - **数え方**: `find server/api -name '*.ts'` (32 本) + `server/routes/__dev/callback.get.ts`
+>   (1 本) = **33 本を全数**、1 本ずつ実読して A〜E に振り分けた。**表の行数ではなく
+>   ファイル数**で数えている (D の表は 1 行に 5 本まとめている行がある)。
+> - **数えた人**: #988 の 2 本目の子タスク (`fix/988-3-misc-read-authz`)。
+>
+> **この 8 本に `requireAuth` を入れました**:
+>
+> | route | 直前の段 | 中身 |
+> | --- | --- | --- |
+> | `GET /api/vehicle-settings/history` | D | 車輌設定 dump の一覧 |
+> | `GET /api/vehicle-settings/object` | D | 同 実体 |
+> | `GET /api/kyuyo-master/companies` | D | `DTAKO_DB` の給与会社マスタ一覧 |
+> | `GET /api/y-time-template` | D | R2 テンプレ xlsx の存在確認 |
+> | `GET /api/vid-check/map-key` | D | **Google Maps API key を平文で返す** |
+> | `GET /api/poi/:region` | D | R2 の POI geojson |
+> | **`GET /api/vehicle-settings/unconfirmed`** | **B** | 未確認車輛抽出 (`alcProxyFetch`) |
+> | **`POST /api/y-time-export`** | **B** | Y時間 xlsx 生成 (`alcProxyFetch`) |
+>
+> ⇒ **D は 14 − 6 = 8、B は 7 − 2 = 5、A は 10 + 8 = 18。** 10+5+1+8+1 = **33** で総数と合う。
+>
+> #### ★ 「D は 14 本ではなく 16 本だった」は成り立ちませんでした
+>
+> この 2 本目のタスクは「`unconfirmed` と `y-time-export` が D の表から**漏れていた**ので
+> 読み取りは 14 本ではなく 16 本」という前提で起票されました。**実測では違いました。**
+> 間違えた読みも理由ごと残します (消すと同じ失敗が繰り返せるため):
+>
+> 1. **2 本は漏れていません。段 B に入っていました。** B の 7 本を実際に列挙すると
+>    `proxy/[...path]` / `kyuyo/[...path].get` / `kyuyo/[...path].post` /
+>    `kyuyo-master/refresh.post` / `kyuyo-master/refresh-full.post` /
+>    `vehicle-settings/unconfirmed.get` / `y-time-export.post` の 7 本です。
+>    C は `tariff/dtako-operations.get` 1 本、E は `__dev/callback` 1 本。
+>    10 + 7 + 1 + 14 + 1 = 33 で、**この doc の数字は元から自己矛盾していません**。
+>    D の表が 18 行に見えるのは 1 行に複数ファイルを畳んでいるからで、**表の行数を
+>    ファイル数として数えると外します**。
+> 2. **「上流の資格情報を無認証の呼び出し元に貸している」も成り立ちません。**
+>    `server/utils/alc-proxy.ts` は browser JWT を cookie / `Authorization: Bearer` から
+>    拾って転送し、上流の auth-worker `/alc-proxy` は `ippoan/auth-worker@dd220b2`
+>    `src/handlers/alc-proxy.ts` で **token 不在を fail-closed で 401** にします。
+>    `X-Alc-Proxy-Secret` は consumer proof であって身元ではないので、secret だけでは
+>    通りません。**`/api/ichiban/**` (Service Token を無条件に付け、呼び出し元の身元を
+>    一切見ない) とは型が違います。**
+>
+> **それでも 2 本を A 段に上げた理由**は 2 つ:
+>
+> - **B 段の防御は上流の実装依存**で、この repo からは保証できない — これは下の
+>   `/api/ichiban/**` の項がまさに書いている性質と同じです。Nitro 側で確定させれば、
+>   上流が変わっても規約がこの repo に残ります。
+> - **`unconfirmed` は上流 401 を待つ前に R2 list が走っていました** —
+>   handler の `Promise.all` が listing を並行で回すので、**未ログインの相手でも
+>   R2 の listing (最大 50 往復) だけは実行される**。`requireAuth` を先に置くと止まります。
+>   (`tests/server/vehicle-settings-unconfirmed-route.test.ts` で実測して固定しました。)
+
 ### D の 18 本 (Access を外すと**そのまま公開される**)
 
-**✍ の 4 本は #988 の 1 本目で塞ぎました** (`requireAuth` = A 段に移動)。残るのは読み取り 14 本。
+**✍ の 4 本は #988 の 1 本目で塞ぎました** (`requireAuth` = A 段に移動)。
+**🔒 の 6 本は #988 の 2 本目で塞ぎました** (同じく A 段に移動)。**残るのは 8 本**
+(`/api/ichiban/**` 1 + 粗利の読み 5 + `net780/by-operation` 1 + `tariff/fare` 1)。
 
 | route | 中身 | 書き込み |
 | --- | --- | --- |
@@ -127,13 +188,26 @@ Google が 2 回出たなら ⑧ が壊れており、そのときは「アプ�
 | `DELETE /api/profit/snapshot` | 同 R2 の `latest.json` を**消す** | ✍✍ **→ #988 で塞いだ** |
 | `GET /api/net780/by-operation` | `DTAKO_DB` + `DTAKO_R2` の NET780 生データ ZIP | — |
 | `POST /api/vehicle-settings/extract` | `DTAKO_R2` + `DTAKO_DB` に**書く** | ✍✍ **→ #988 で塞いだ** |
-| `GET /api/vehicle-settings/history` / `object` | 車輌設定 dump の一覧・実体 | — |
-| `GET /api/kyuyo-master/companies` | `DTAKO_DB` の給与会社マスタ一覧 | — |
-| `GET /api/y-time-template` | R2 テンプレ xlsx | — |
+| `GET /api/vehicle-settings/history` / `object` | 車輌設定 dump の一覧・実体 | 🔒 **→ #988 の 2 本目で塞いだ** |
+| `GET /api/kyuyo-master/companies` | `DTAKO_DB` の給与会社マスタ一覧 | 🔒 **→ #988 の 2 本目で塞いだ** |
+| `GET /api/y-time-template` | R2 テンプレ xlsx | 🔒 **→ #988 の 2 本目で塞いだ** |
 | `PUT /api/y-time-template` | R2 テンプレ xlsx を**上書き** | ✍✍ **→ #988 で塞いだ** |
-| `GET /api/vid-check/map-key` | **Google Maps API key を平文で返す** (referrer 制限あり) | — |
-| `GET /api/poi/:region` | R2 の POI geojson | — |
-| `GET /api/tariff/fare` | 告示209号の公開運賃表 (実害なし) | — |
+| `GET /api/vid-check/map-key` | **Google Maps API key を平文で返す** (referrer 制限あり) | 🔒 **→ #988 の 2 本目で塞いだ** |
+| `GET /api/poi/:region` | R2 の POI geojson | 🔒 **→ #988 の 2 本目で塞いだ** |
+| `GET /api/tariff/fare` | 告示209号の公開運賃表 (実害なし) | — (注 1) |
+
+> **注 1 — `GET /api/tariff/fare` に #988 では `requireAuth` を足していません。**
+> 中身は**告示209号の公開データ**で秘密は無く、かつ **この repo 内に呼び出し元が
+> 1 つもありません** (`git grep` の結果は自分自身の JSDoc と
+> `tests/server/tariff-fare.test.ts` だけ)。一方
+> `docs/plan-198-rest-poi-430-tariff.md:155-161` は **Phase 8c (未着手)** として
+> 「nuxt-ichibanboshi が … `/api/tariff/fare` (Phase 4/5) を呼んで標準的運賃と比較する」
+> と書いており、**この repo から見えない呼び出し元がこれから生えうる**
+> (しかも service binding = **browser JWT を持たない**経路)。`requireAuth` を足すと
+> その caller を**黙って壊す**ので、**呼び出し元と、その経路が A 段でよいのか
+> (`tariff/dtako-operations.get` と同じ C 段 = machine shared secret ではないのか) を
+> 確定してから別途**にします。
+> (同 §1 の 🔒 6 本は全部ブラウザからだけで、`git grep` で確定済み。)
 
 **いちばん重いのは `/api/ichiban/**` です。**これは classic な confused deputy で、Access を外すと**インターネットの誰でも、この worker を踏み台にして CF Access の裏の一番星 API を叩けます**。`X-Alc-Proxy-Secret` も browser JWT も見ておらず、付けるのは Service Token だけです。
 唯一の緩和は「上流の rust-ichibanboshi 自身が `Authorization` を見て弾く口があるかどうか」ですが、**それは上流の実装依存で、この repo からは保証できません** (兄弟タスク #951「実支給額が tenant 全員に開いている経路を塞ぐ」が隣接しています)。

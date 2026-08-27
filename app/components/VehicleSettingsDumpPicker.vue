@@ -17,6 +17,7 @@
 
 import { computed, ref, watch } from 'vue'
 import type { VehicleSettings } from '~/utils/vehicle-settings-cfg'
+import { currentAccessToken } from '~/utils/api'
 
 interface HistoryItem {
   key: string
@@ -69,7 +70,13 @@ async function loadHistory() {
   itemsLoading.value = true
   itemsError.value = ''
   try {
-    const res = await fetch(`/api/vehicle-settings/history?vehicle_cd=${encodeURIComponent(cd)}`)
+    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+    // 経路でも通るよう `Authorization: Bearer` も明示する — この読み口が
+    // `requireAuth` を通すようになった (Refs #988)。`postNet780Archive` と同じ扱い。
+    const token = currentAccessToken()
+    const res = await fetch(`/api/vehicle-settings/history?vehicle_cd=${encodeURIComponent(cd)}`, {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    })
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
     items.value = (await res.json()) as HistoryItem[]
     // dump が 1 件しかなければ自動選択 (UX: 余分なクリックを省く)
@@ -89,7 +96,11 @@ async function selectDump(item: HistoryItem) {
   loadingDetail.value = true
   emit('selected', null)
   try {
-    const res = await fetch(`/api/vehicle-settings/object?key=${encodeURIComponent(item.key)}`)
+    // Refs #988 — 読み口が `requireAuth` を通すので Bearer も明示する。
+    const token = currentAccessToken()
+    const res = await fetch(`/api/vehicle-settings/object?key=${encodeURIComponent(item.key)}`, {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    })
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
     const settings = (await res.json()) as VehicleSettings
     emit('selected', { key: item.key, settings })
