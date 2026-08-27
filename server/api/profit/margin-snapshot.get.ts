@@ -34,15 +34,32 @@
  * 版の名前は `profitVersionTimestamp` が作る `YYYYMMDDTHHMMSS` しか無い。
  *
  * **粗利の数字を 1 円も作らない・変えない。** 保存済みの JSON をそのまま返すだけ。
+ *
+ * ## `requireAuth` を付ける (Refs #988)
+ *
+ * ここは **Cloudflare Access だけが前段**で、Nitro 側に認可が 1 つも無かった
+ * (`docs/plan-922-single-signin.md` §1 の D 段)。Access は edge の設定であって
+ * **この repo が意図して置いた防御ではない** — 外した瞬間、版 1 本の本文
+ * (`MarginCache` 丸ごと = 運行ごとの売上・原価・粗利) がそのまま公開される。
+ * **上の「キーを受けない」設計は prefix 逸脱を塞ぐだけで、認証の代わりにはならない。**
+ * 書く側 (`margin-summary.post.ts`) は #995 で塞いだので、読む側にも同じ A 段の
+ * `requireAuth` (同じ 2 行) を掛ける。呼ぶのは粗利タブ (`/profit/margin`) の
+ * **ブラウザだけ**で、relay / cron / service binding からの呼び出しは無い
+ * (`git grep` で確認)。
+ *
+ *   401 — 未ログイン (`requireAuth`)
+ *   503 — INTERNAL_SHARED_SECRET / PROFIT_R2 binding 未設定
  */
-import type { H3Event } from 'h3'
 import { defineEventHandler, getQuery, createError } from 'h3'
+import { requireAuth } from '@ippoan/auth-client/server'
 import { marginR2Paths, type MarginSummarySnapshot } from '~/utils/margin-r2'
+import { cfEnv, resolveSecret } from '../../utils/cf-env'
 import type { R2BucketLite } from '../../utils/profit-r2-io'
 
-function getR2Binding(event: H3Event): R2BucketLite | null {
-  const ctx = event.context as { cloudflare?: { env?: { PROFIT_R2?: R2BucketLite } } }
-  return ctx.cloudflare?.env?.PROFIT_R2 ?? null
+interface CloudflareEnv {
+  PROFIT_R2?: R2BucketLite
+  INTERNAL_SHARED_SECRET?: unknown
+  NUXT_PUBLIC_AUTH_WORKER_URL?: string
 }
 
 /**
@@ -56,7 +73,19 @@ function getR2Binding(event: H3Event): R2BucketLite | null {
 const VERSION_LABEL_RE = /^v-\d{8}T\d{6}$/
 
 export default defineEventHandler(async (event): Promise<MarginSummarySnapshot> => {
-  const r2 = getR2Binding(event)
+  const env = cfEnv<CloudflareEnv>(event)
+  const sharedSecret = await resolveSecret(env.INTERNAL_SHARED_SECRET)
+  if (!sharedSecret) {
+    throw createError({ statusCode: 503, statusMessage: 'INTERNAL_SHARED_SECRET binding が未設定です' })
+  }
+  const authWorkerUrl
+    = typeof env.NUXT_PUBLIC_AUTH_WORKER_URL === 'string' && env.NUXT_PUBLIC_AUTH_WORKER_URL
+      ? env.NUXT_PUBLIC_AUTH_WORKER_URL
+      : 'https://auth.ippoan.org'
+  // **R2 を読む前に認証する。** 返すのは版 1 本の本文 (運行ごとの売上・原価・粗利)。
+  await requireAuth(event, { authWorkerUrl, sharedSecret })
+
+  const r2 = env.PROFIT_R2
   if (!r2) {
     throw createError({ statusCode: 503, statusMessage: 'PROFIT_R2 binding が未設定です' })
   }

@@ -1351,7 +1351,12 @@ async function saveMarginSummaryToR2() {
 async function loadMarginVersions(ymValue: string) {
   marginVersionsLoading.value = true
   try {
+    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+    // 経路でも通るよう `Authorization: Bearer` も明示する — この読み口が
+    // `requireAuth` を通すようになった (Refs #988)。`snapshot.delete.ts` と同じ扱い。
+    const token = currentAccessToken()
     const res = await $fetch<MarginVersionListResult>('/api/profit/margin-snapshots', {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
       query: { ym: ymValue },
     })
     marginVersions.value = res.items
@@ -1416,11 +1421,18 @@ async function runMarginDiff() {
   marginDiffLoading.value = true
   marginDiffError.value = ''
   try {
+    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+    // 経路でも通るよう `Authorization: Bearer` も明示する — この読み口が
+    // `requireAuth` を通すようになった (Refs #988)。`snapshot.delete.ts` と同じ扱い。
+    const token = currentAccessToken()
+    const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {}
     const [before, after] = await Promise.all([
       $fetch<MarginDiffSnapshot>('/api/profit/margin-snapshot', {
+        headers,
         query: { ym: shownYm.value, version: marginDiffBeforeLabel.value },
       }),
       $fetch<MarginDiffSnapshot>('/api/profit/margin-snapshot', {
+        headers,
         query: { ym: shownYm.value, version: marginDiffAfterLabel.value },
       }),
     ])

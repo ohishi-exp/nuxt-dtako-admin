@@ -1,10 +1,18 @@
-import { describe, it, expect, vi } from 'vitest'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
 
 import getHandler from '../../server/api/profit/snapshot.get'
 import { profitR2Paths, profitVersionTimestamp } from '../../app/utils/profit-r2'
 import { putVersionedProfit, type R2BucketLite, type R2ObjectLite } from '../../server/utils/profit-r2-io'
 
 const callGet = (event: unknown) => (getHandler as unknown as (e: unknown) => Promise<unknown>)(event)
+
+const { requireAuthMock } = vi.hoisted(() => ({ requireAuthMock: vi.fn() }))
+vi.mock('@ippoan/auth-client/server', () => ({ requireAuth: requireAuthMock }))
+
+beforeEach(() => {
+  requireAuthMock.mockReset()
+  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+})
 
 vi.mock('h3', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>()
@@ -87,36 +95,119 @@ async function seedSnapshot(bucket: FakeR2Bucket) {
   )
 }
 
+/**
+ * **既定でログイン済みの event。** `requireAuth` (Refs #988) が読む
+ * `INTERNAL_SHARED_SECRET` を env に足しておく — 認可そのものは
+ * 「認可 (Refs #988)」の describe で測る。`env` に同名を渡せば上書きできる。
+ */
+function eventWith(env: Record<string, unknown>, query: Record<string, string> = {}) {
+  return { context: { cloudflare: { env: { INTERNAL_SHARED_SECRET: 'secret', ...env } } }, _query: query }
+}
+
+const FULL_QUERY = { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' }
+
 describe('GET /api/profit/snapshot', () => {
-  it('PROFIT_R2 未設定なら 503', async () => {
-    const event = { context: {}, _query: { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
-    await expect(callGet(event)).rejects.toMatchObject({ statusCode: 503 })
+  it('PROFIT_R2 未設定なら 503 (ログイン後)', async () => {
+    await expect(callGet(eventWith({}, FULL_QUERY))).rejects.toMatchObject({
+      statusCode: 503,
+      statusMessage: expect.stringContaining('PROFIT_R2'),
+    })
   })
 
   it('クエリパラメータが欠けていれば 400', async () => {
     const bucket = new FakeR2Bucket()
-    const event = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _query: { ym: '2026-06' } }
-    await expect(callGet(event)).rejects.toMatchObject({ statusCode: 400 })
+    await expect(callGet(eventWith({ PROFIT_R2: bucket }, { ym: '2026-06' })))
+      .rejects.toMatchObject({ statusCode: 400 })
   })
 
   it('ym が欠けていれば 400', async () => {
     const bucket = new FakeR2Bucket()
-    const event = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _query: { vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
-    await expect(callGet(event)).rejects.toMatchObject({ statusCode: 400 })
+    await expect(callGet(eventWith({ PROFIT_R2: bucket }, { vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' })))
+      .rejects.toMatchObject({ statusCode: 400 })
   })
 
   it('未保存なら 404', async () => {
     const bucket = new FakeR2Bucket()
-    const event = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _query: { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
-    await expect(callGet(event)).rejects.toMatchObject({ statusCode: 404 })
+    await expect(callGet(eventWith({ PROFIT_R2: bucket }, FULL_QUERY))).rejects.toMatchObject({ statusCode: 404 })
   })
 
   it('保存済みなら latest の内容を返す', async () => {
     const bucket = new FakeR2Bucket()
     await seedSnapshot(bucket)
 
-    const getEvent = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _query: { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
-    const result = await callGet(getEvent) as { confirmedAmount: number }
+    const result = await callGet(eventWith({ PROFIT_R2: bucket }, FULL_QUERY)) as { confirmedAmount: number }
     expect(result.confirmedAmount).toBe(65000)
+  })
+})
+
+
+/**
+ * **認可** (Refs #988)。この読み口は **Cloudflare Access だけが前段**で、Nitro 側に
+ * 認可が 1 つも無かった (`docs/plan-922-single-signin.md` §1 の D 段)。書き込み側は
+ * #995 で塞いだので、同じ A 段の `requireAuth` を読む側にも掛ける。
+ *
+ * - **陰性対照**: 未ログインは 401 で、**R2 を 1 回も叩かない**
+ *   (`requireAuth` を外すとこの it が落ちる)
+ * - **陽性対照**: 認証が通れば**従来どおりの応答が返る** (塞いだだけで使えなくしていない)
+ */
+/**
+ * **`requireAuth` に渡った引数だけを見る呼び出し。** この event の R2 は空なので
+ * 本文が無く 404 になるが、見たいのは auth に渡った値なので握り潰す
+ * (**404 になること自体は上の describe が固定している**)。
+ */
+const callForAuthArgs = (event: unknown) => callGet(event).catch(() => null)
+
+describe('GET /api/profit/snapshot — 認可 (Refs #988)', () => {
+  it('★ 未ログインは 401 で、R2 を 1 回も叩かない', async () => {
+    requireAuthMock.mockRejectedValue(Object.assign(new Error('Unauthorized'), { statusCode: 401 }))
+    const bucket = new FakeR2Bucket()
+    await seedSnapshot(bucket)
+    const getSpy = vi.spyOn(bucket, 'get')
+    await expect(callGet(eventWith({ PROFIT_R2: bucket }, FULL_QUERY))).rejects.toMatchObject({ statusCode: 401 })
+    expect(getSpy).not.toHaveBeenCalled()
+  })
+
+  it('INTERNAL_SHARED_SECRET 未設定なら 503 (auth を通す前に落ちる)', async () => {
+    await expect(callGet({ context: { cloudflare: { env: { PROFIT_R2: new FakeR2Bucket() } } }, _query: FULL_QUERY }))
+      .rejects.toMatchObject({ statusCode: 503, statusMessage: expect.stringContaining('INTERNAL_SHARED_SECRET') })
+    expect(requireAuthMock).not.toHaveBeenCalled()
+  })
+
+  it('cloudflare env そのものが無くても 503 (落ちない)', async () => {
+    await expect(callGet({ context: {}, _query: FULL_QUERY })).rejects.toMatchObject({ statusCode: 503 })
+    expect(requireAuthMock).not.toHaveBeenCalled()
+  })
+
+  it('Secrets Store binding (.get()) からも secret を取れる', async () => {
+    await callForAuthArgs(eventWith({ INTERNAL_SHARED_SECRET: { get: async () => 'from-store' }, PROFIT_R2: new FakeR2Bucket() }, FULL_QUERY))
+    expect(requireAuthMock.mock.calls[0]![1]).toMatchObject({ sharedSecret: 'from-store' })
+  })
+
+  it('.get() が値を返さない binding / 文字列でも .get() でもない binding は 503', async () => {
+    await expect(callGet(eventWith({ INTERNAL_SHARED_SECRET: { get: async () => undefined }, PROFIT_R2: new FakeR2Bucket() }, FULL_QUERY)))
+      .rejects.toMatchObject({ statusCode: 503 })
+    await expect(callGet(eventWith({ INTERNAL_SHARED_SECRET: 123, PROFIT_R2: new FakeR2Bucket() }, FULL_QUERY)))
+      .rejects.toMatchObject({ statusCode: 503 })
+  })
+
+  it('auth-worker の URL は env が有れば env、無ければ既定', async () => {
+    await callForAuthArgs(eventWith({ PROFIT_R2: new FakeR2Bucket(), NUXT_PUBLIC_AUTH_WORKER_URL: 'https://auth.example.test' }, FULL_QUERY))
+    expect(requireAuthMock.mock.calls[0]![1]).toMatchObject({ authWorkerUrl: 'https://auth.example.test' })
+
+    requireAuthMock.mockClear()
+    await callForAuthArgs(eventWith({ PROFIT_R2: new FakeR2Bucket(), NUXT_PUBLIC_AUTH_WORKER_URL: '' }, FULL_QUERY))
+    expect(requireAuthMock.mock.calls[0]![1]).toMatchObject({ authWorkerUrl: 'https://auth.ippoan.org' })
+
+    requireAuthMock.mockClear()
+    await callForAuthArgs(eventWith({ PROFIT_R2: new FakeR2Bucket(), NUXT_PUBLIC_AUTH_WORKER_URL: 7 }, FULL_QUERY))
+    expect(requireAuthMock.mock.calls[0]![1]).toMatchObject({ authWorkerUrl: 'https://auth.ippoan.org' })
+  })
+
+  it('★ 陽性対照: 認証が通れば従来どおり latest の本文が返る', async () => {
+    const bucket = new FakeR2Bucket()
+    await seedSnapshot(bucket)
+    const result = await callGet(eventWith({ PROFIT_R2: bucket }, FULL_QUERY)) as { confirmedAmount: number }
+    expect(result.confirmedAmount).toBe(65000)
+    expect(requireAuthMock).toHaveBeenCalledTimes(1)
   })
 })

@@ -23,9 +23,23 @@
  * - **形で弾いたもの**は数えない。そもそもスナップショットではないので「欠けている」ではない
  * - **形は合っているのに本文を読めなかったもの**は `unreadable` として数え、**画面に出す**
  *   (`/profit/monthly`)。黙って飛ばすと「この条件では保存が無い」と同じ見た目になる
+ *
+ * ## `requireAuth` を付ける (Refs #988)
+ *
+ * ここは **Cloudflare Access だけが前段**で、Nitro 側に認可が 1 つも無かった
+ * (`docs/plan-922-single-signin.md` §1 の D 段)。Access は edge の設定であって
+ * **この repo が意図して置いた防御ではない** — 外した瞬間、保存済み検証の一覧
+ * (車輌・運行NO・確定金額・効率) がそのまま公開される。書き込み側 (#995) と同じ
+ * A 段の `requireAuth` (`margin-summary.post.ts` と同じ 2 行) をここにも入れる。
+ * 呼ぶのは `/profit/monthly` と `/profit/compare` の**ブラウザだけ**で、
+ * relay / cron / service binding からの呼び出しは無い (`git grep` で確認)。
+ *
+ *   401 — 未ログイン (`requireAuth`)
+ *   503 — INTERNAL_SHARED_SECRET / PROFIT_R2 binding 未設定
  */
-import type { H3Event } from 'h3'
 import { defineEventHandler, getQuery, createError } from 'h3'
+import { requireAuth } from '@ippoan/auth-client/server'
+import { cfEnv, resolveSecret } from '../../utils/cf-env'
 import { listAllProfit, type R2BucketLite } from '../../utils/profit-r2-io'
 import {
   isProfitSnapshotKey,
@@ -37,15 +51,28 @@ import {
   type SnapshotListResult,
 } from '~/utils/profit-r2'
 
-function getR2Binding(event: H3Event): R2BucketLite | null {
-  const ctx = event.context as { cloudflare?: { env?: { PROFIT_R2?: R2BucketLite } } }
-  return ctx.cloudflare?.env?.PROFIT_R2 ?? null
+interface CloudflareEnv {
+  PROFIT_R2?: R2BucketLite
+  INTERNAL_SHARED_SECRET?: unknown
+  NUXT_PUBLIC_AUTH_WORKER_URL?: string
 }
 
 const DEFAULT_LIMIT = 200
 
 export default defineEventHandler(async (event): Promise<SnapshotListResult> => {
-  const r2 = getR2Binding(event)
+  const env = cfEnv<CloudflareEnv>(event)
+  const sharedSecret = await resolveSecret(env.INTERNAL_SHARED_SECRET)
+  if (!sharedSecret) {
+    throw createError({ statusCode: 503, statusMessage: 'INTERNAL_SHARED_SECRET binding が未設定です' })
+  }
+  const authWorkerUrl
+    = typeof env.NUXT_PUBLIC_AUTH_WORKER_URL === 'string' && env.NUXT_PUBLIC_AUTH_WORKER_URL
+      ? env.NUXT_PUBLIC_AUTH_WORKER_URL
+      : 'https://auth.ippoan.org'
+  // **R2 を列挙する前に認証する。** 一覧に出るのは確定金額と効率そのもの。
+  await requireAuth(event, { authWorkerUrl, sharedSecret })
+
+  const r2 = env.PROFIT_R2
   if (!r2) {
     throw createError({ statusCode: 503, statusMessage: 'PROFIT_R2 binding が未設定です' })
   }

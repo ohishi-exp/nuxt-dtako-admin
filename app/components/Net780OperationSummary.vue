@@ -17,6 +17,7 @@ import {
 } from '~/utils/net780'
 import type { Net780GpsPoint } from '~/utils/net780'
 import { net780ZipAvailability, net780ZipFileName } from '~/utils/operation-detail-view'
+import { currentAccessToken } from '~/utils/api'
 
 const props = defineProps<{
   operationNo: string
@@ -74,7 +75,12 @@ async function downloadZip() {
   zipDownloading.value = true
   zipError.value = null
   try {
+    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+    // 経路でも通るよう `Authorization: Bearer` も明示する — この口が `requireAuth` を
+    // 通すようになった (Refs #988)。`snapshot.delete.ts` と同じ扱い。
+    const token = currentAccessToken()
     const blob = await $fetch<Blob>('/api/net780/by-operation', {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
       query: { operationNo: props.operationNo },
       responseType: 'blob',
     })
