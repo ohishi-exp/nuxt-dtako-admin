@@ -180,6 +180,15 @@ import {
 } from '~/utils/margin'
 import { describeApiError } from '~/utils/api-error'
 import {
+  ALLOWANCE_RATE_ENDPOINT,
+  allowanceRateNoticeForMargin,
+  allowanceRateReadError,
+  allowanceRateRows,
+  resolveAllowanceRateMaster,
+  type AllowanceRateState,
+} from '~/utils/allowance-rate-source'
+import type { RateRow } from '~/utils/allowance-rate-master'
+import {
   buildMarginSummaryInput,
   marginSummarySaveNote,
   type MarginSummarySaveResult,
@@ -224,6 +233,67 @@ const shownYm = ref('')
 
 type Status = 'idle' | 'loading' | 'ready' | 'error'
 const status = ref<Status>('idle')
+
+// --- 運行手当マスタの出どころ (R2 → 無ければ同梱の初期値。Refs #805 PR-2) -----
+// **粗利の「手当」はこのマスタから出ている** (`allowanceForLegs` / `buildUncoveredLegs`)
+// ので、運行手当タブと**同じ判定を、この画面にも出す**。バッジを片方にだけ置くと、
+// 粗利タブが初期値の金額を注記なしで出し続ける (memory `shared-notice-lies-on-second-screen`)。
+// 判定そのものは `allowance-rate-source.ts` (pure) が持ち、ここは通信とゲートだけ。
+
+/** まだ 1 度も読んでいなければ `null`。読んだ後は 3 状態のどれか。 */
+const rateState = ref<AllowanceRateState | null>(null)
+
+/**
+ * 引き当てに渡す配列。**`undefined` は「まだ決まっていない / 読めなかった」間だけ**で、
+ * そのとき集計もキャッシュ復元も止めてある (`run` / `onMounted` の頭)。
+ * **ここを「読めなかったときの逃げ道」に使わないこと** — 渡さないと下層の既定
+ * (`RATE_MASTER` = 同梱の初期値) で黙って計算される。
+ */
+const rateRows = computed<RateRow[] | undefined>(() =>
+  (rateState.value === null ? null : allowanceRateRows(rateState.value)) ?? undefined)
+
+/** 画面に出す 1 文。**キャッシュから出している回は「この版で計算したとは限らない」を足す。** */
+const rateNotice = computed(() => (rateState.value === null
+  ? ''
+  : allowanceRateNoticeForMargin(rateState.value, restoredFromCache.value)))
+
+/**
+ * 運行手当マスタを R2 から読む (`GET /restraint-api/allowance-rate`、PR-1 の口)。
+ * 会社ID と JWT の借り方は下の `loadKushiroMinWageMaster` と同じ。
+ * **借りられなければ初期値へ倒さず理由を出す。**
+ */
+async function loadRateMaster(): Promise<AllowanceRateState> {
+  const compId = readViewerCompId(localStorage)
+  const token = currentAccessToken()
+  if (!compId || !token) {
+    return allowanceRateReadError('会社IDまたはログイン情報が分かりません。拘束時間・賃金タブを一度開いてください')
+  }
+  try {
+    const res = await $fetch<unknown>(ALLOWANCE_RATE_ENDPOINT, {
+      headers: {
+        'X-Theearth-Comp-Id': compId,
+        'X-Theearth-User-B64': b64urlUtf8('viewer'),
+        'Authorization': `Bearer ${token}`,
+      },
+    })
+    return resolveAllowanceRateMaster(res)
+  }
+  catch (e) {
+    // `/restraint-api/**` は Nitro ではなく relay worker へ転送される (Refs #890)。
+    return allowanceRateReadError(describeApiError(e))
+  }
+}
+
+/**
+ * マスタが決まるまで待つ。**決まらなければ `false`** で、呼び出し側は集計しない。
+ * `error` の回は次に呼ばれたらもう一度試す (mount 時に JWT が揃っていないことがある)。
+ */
+async function ensureRateMaster(): Promise<boolean> {
+  if (rateState.value === null || rateState.value.status === 'error') {
+    rateState.value = await loadRateMaster()
+  }
+  return rateState.value.status !== 'error'
+}
 const errorMessage = ref<string | null>(null)
 const salesError = ref<string | null>(null)
 const costError = ref<string | null>(null)
@@ -470,13 +540,20 @@ onMounted(async () => {
   fuelRates.value = parseFuelRates(localStorage.getItem(FUEL_RATE_KEY))
   runCostShareMode.value = parseRunCostShareMode(localStorage.getItem(RUN_COST_SHARE_MODE_KEY))
   routeMapLayers.value = parseRouteMapLayers(localStorage.getItem(ROUTE_MAP_LAYERS_KEY))
+  // **手当マスタは乗務員マスタより先に読む。** どの版で計算しているかの注記は alc の
+  // 応答に依存しないので、`getDrivers()` の後ろに置くと乗務員マスタが遅い間ずっと
+  // 注記が出ない (運行手当タブで実際にそうなった)。
+  const masterOk = await ensureRateMaster()
   try {
     drivers.value = await getDrivers()
   }
   catch {
     // 乗務員マスタが引けなくても CD だけで動く (表示が CD のままになるだけ)
   }
-  restoreFromCache()
+  // **マスタが決まらないうちはキャッシュも戻さない。** 粗利のキャッシュは
+  // **計算済みの金額**を持っているので、出どころを言えないまま出すと
+  // 「初期値に倒した」のと同じことになる。
+  if (masterOk) restoreFromCache()
   // 釧路区画の最低賃金。**粗利の集計とは独立**なので await しない (失敗しても粗利は出る)。
   loadKushiroMinWageMaster()
 })
@@ -728,7 +805,7 @@ async function resolveOperation(op: OperationListItem): Promise<ResolvedOperatio
     return {
       allowance: {
         ...base,
-        legs: allowanceForLegs(extractAllowanceLegs(csv.headers, csv.rows)),
+        legs: allowanceForLegs(extractAllowanceLegs(csv.headers, csv.rows), rateRows.value),
         // **積んだまま帰庫した便の卸地は、次の運行の先頭の降しにある。**
         // ここで CSV から取らないと `applyCarryOver` が空の `carryIn` しか見られず、
         // 引き継ぎが 1 便も当たらない (2026-07 / 帯広5台で 10 運行・手当 ¥89,000・
@@ -1017,7 +1094,9 @@ function reconcileSales(
         slips: slips.byKey[key] ?? [],
       }))
     : []
-  const legs = buildUncoveredLegs(uncoveredInputs, [...byLeg.values()], shownYm.value, provisional)
+  const legs = buildUncoveredLegs(
+    uncoveredInputs, [...byLeg.values()], shownYm.value, provisional, rateRows.value,
+  )
   return {
     salesByLeg,
     customersByLeg,
@@ -1053,6 +1132,15 @@ async function run() {
   uncoveredByDriver.value = null
   legSalesByUnko.value = null
   crossMonth.value = null
+  progress.value = '運行手当マスタを確認中...'
+  // **マスタの出どころが決まらないと集計しない。** 手当が決まらなければ粗利
+  // (売上 − 手当 − 経費) も決まらないので、同梱の初期値へ黙って倒さず何も出さない。
+  // 理由は上の注記に出る。
+  if (!await ensureRateMaster()) {
+    status.value = 'idle'
+    progress.value = ''
+    return
+  }
   progress.value = '運行を検索中...'
   try {
     localStorage.setItem(LAST_SEARCH_KEY, serializeLastSearch({ ym: ym.value, vehicle: vehicle.value }))
@@ -1082,7 +1170,7 @@ async function run() {
     // 便ごとの積地・卸地 GPS (Refs #760 の 35)。**同じ CSV から取っていて追加の fetch は無い。**
     legPointsByUnko.value = new Map(resolved.map(r => [r.allowance.unkoNo, r.legPoints]))
     // 積んだまま帰庫した便の卸地は次の運行の先頭にある。全運行を引き終えてから当てる。
-    const ops = applyCarryOver(resolved.map(r => r.allowance))
+    const ops = applyCarryOver(resolved.map(r => r.allowance), rateRows.value)
     shownYm.value = ym.value
 
     // **手当は運行手当タブと同じ基準にする** — 暫定を足し、除外した便は落とす。
@@ -1122,6 +1210,7 @@ async function run() {
             parseForceMatch(localStorage.getItem(FORCE_MATCH_KEY)),
             slipByRowId(slips.byKey),
             provisional,
+            rateRows.value,
           )
         : new Map<string, ForcedLeg>()
       // **集計の前に便へ重ねる** — 卸地・手当・便数・経路キーが 1 か所から追従する。
@@ -2180,6 +2269,24 @@ function downloadCustomerRouteCsv() {
       <b>直課経費・固定費按分は運行の走行km (売上走行 + 回送) の比で便に配ります</b>
       (便の無い運行は配れないので「便の無い運行」として別に出します)。
       取引先別の粗利 + 便の無い運行の粗利 = 粗利タブの粗利 になるのを頭の 1 行で検算しています。
+    </p>
+
+    <!--
+      **手当マスタの出どころ** (Refs #805)。粗利の「手当」はこのマスタから出ているので、
+      運行手当タブと**両方**に出す — 片方だけだと粗利タブが初期値の金額を注記なしで
+      出し続ける。**印刷にも残す** (margin-print-hide を付けない) — 紙で回った金額が
+      どの版のものかは、紙の側にこそ要る。
+    -->
+    <p
+      v-if="rateState"
+      class="text-xs mb-4 px-3 py-2 rounded border"
+      :class="{
+        'text-gray-500 border-gray-200 dark:border-gray-700': rateState.status === 'r2',
+        'text-amber-700 dark:text-amber-400 border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950': rateState.status === 'seed',
+        'text-red-700 dark:text-red-400 border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950 font-semibold': rateState.status === 'error',
+      }"
+    >
+      {{ rateNotice }}
     </p>
 
     <div class="margin-print-controls flex flex-wrap gap-3 items-end mb-4">

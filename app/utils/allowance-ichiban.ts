@@ -351,11 +351,16 @@ export function tradableSlips(slips: VehicleDailySlip[]): VehicleDailySlip[] {
  * デジタコの `開始/終了市町村名` (実体は住所) と銘柄から、マスタの運賃 (円/t) を引く。
  * `lookupAllowanceByCity` と同じ寄せ方 (`CITY_TO_DEST` → 市町村名) を運賃側に当てたもの。
  */
-export function lookupFareByCity(originCity: string, destCity: string, brand: string): number | null {
+export function lookupFareByCity(
+  originCity: string,
+  destCity: string,
+  brand: string,
+  master?: RateRow[],
+): number | null {
   const origin = addressToCity(originCity)
   const dest = addressToCity(destCity)
   const mapped = CITY_TO_DEST[`${origin}|${dest}`]
-  return lookupFare(cityToPlace(origin), mapped ?? cityToPlace(dest), brand)
+  return lookupFare(cityToPlace(origin), mapped ?? cityToPlace(dest), brand, master)
 }
 
 /**
@@ -380,9 +385,14 @@ export function brandFares(brand: string, master: RateRow[] = RATE_MASTER): numb
 }
 
 /** その明細に当てはまりうるマスタの運賃 (経路から引いたもの + 銘柄から引いたもの)。 */
-export function fareCandidates(originCity: string, destCity: string, brand: string): number[] {
-  const fares = new Set(brandFares(brand))
-  const route = lookupFareByCity(originCity, destCity, brand)
+export function fareCandidates(
+  originCity: string,
+  destCity: string,
+  brand: string,
+  master?: RateRow[],
+): number[] {
+  const fares = new Set(brandFares(brand, master))
+  const route = lookupFareByCity(originCity, destCity, brand, master)
   if (route !== null) fares.add(route)
   return [...fares].sort((a, b) => a - b)
 }
@@ -419,13 +429,17 @@ export interface FareCheck {
 }
 
 /** 突合できた明細の単価をマスタの運賃と突き合わせる。 */
-export function checkFares(rows: AllowanceReportRow[], byLeg: Map<string, LegReconcile>): FareCheck[] {
+export function checkFares(
+  rows: AllowanceReportRow[],
+  byLeg: Map<string, LegReconcile>,
+  master?: RateRow[],
+): FareCheck[] {
   const out: FareCheck[] = []
   for (const row of rows) {
     const hit = byLeg.get(legKey(row))
     if (!hit) continue
     for (const slip of hit.slips) {
-      const masterFares = fareCandidates(row.originCity, row.destCity, slip.itemName)
+      const masterFares = fareCandidates(row.originCity, row.destCity, slip.itemName, master)
       out.push({
         legKey: hit.key,
         unkoNo: row.unkoNo,
@@ -448,9 +462,9 @@ export function checkFares(rows: AllowanceReportRow[], byLeg: Map<string, LegRec
  * 料金改定は「便に当たらなかった明細」の側にも出る (2026-07 の `ミライコーン` が
  * まさにこれで、便に当たらないまま単価が 3,900 / マスタ 3,500 になっていた)。
  */
-export function checkLeftoverFares(slips: VehicleDailySlip[]): FareCheck[] {
+export function checkLeftoverFares(slips: VehicleDailySlip[], master?: RateRow[]): FareCheck[] {
   return slips.map((slip) => {
-    const masterFares = brandFares(slip.itemName)
+    const masterFares = brandFares(slip.itemName, master)
     return {
       legKey: '',
       unkoNo: '',

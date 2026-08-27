@@ -47,6 +47,7 @@
  * 呼び出し側が「未確定」として人に見せる (この画面の他の便と同じ扱い)。
  */
 import { lookupAllowance, placeKey, normalizePlace, type AllowanceLookup } from './allowance-rate'
+import type { RateRow } from './allowance-rate-master'
 import { areaTown } from './allowance-ichiban'
 import { provisionalFor, type ProvisionalMap } from './allowance-provisional'
 import type { VehicleDailySlip } from './ichiban'
@@ -105,9 +106,12 @@ function destCandidates(slip: VehicleDailySlip): string[] {
  * **最終卸し地から遡って試し、先に `ok` になった候補を採る。** どれも引けなければ
  * 最終卸し地の見え方をそのまま返して `unknown` にする (推測で金額を作らない)。
  */
-function resolve(group: VehicleDailySlip[]): { origin: string, dest: string, lookup: AllowanceLookup } {
+function resolve(
+  group: VehicleDailySlip[],
+  master?: RateRow[],
+): { origin: string, dest: string, lookup: AllowanceLookup } {
   const origin = placeKey(group[0]!.origin)
-  const { dest, lookup } = resolveSlipDest(origin, group)
+  const { dest, lookup } = resolveSlipDest(origin, group, master)
   return { origin, dest, lookup }
 }
 
@@ -120,11 +124,12 @@ function resolve(group: VehicleDailySlip[]): { origin: string, dest: string, loo
 export function resolveSlipDest(
   origin: string,
   group: VehicleDailySlip[],
+  master?: RateRow[],
 ): { dest: string, lookup: AllowanceLookup } {
   const candidates = [...group].reverse().flatMap(destCandidates)
   let fallback: { dest: string, lookup: AllowanceLookup } | null = null
   for (const dest of candidates) {
-    const lookup = lookupAllowance(origin, dest)
+    const lookup = lookupAllowance(origin, dest, master)
     if (lookup.status === 'ok') return { dest, lookup }
     // **どれも引けなかったときは最後の候補を採る。** 候補は
     // 「着地N (施設名) → 地域名 (市町村)」の順に積むので、最後は市町村名になる。
@@ -166,9 +171,10 @@ function toLeg(
   date: string,
   group: VehicleDailySlip[],
   provisional: ProvisionalMap,
+  master?: RateRow[],
 ): IchibanLeg {
   const first = group[0]!
-  const { origin, dest, lookup } = resolve(group)
+  const { origin, dest, lookup } = resolve(group, master)
   const masterDest = lookup.status === 'ok' ? lookup.dest : ''
   // マスタで決まらない経路は**暫定手当**を当てる。デジタコ由来の便と同じ経路キー
   // (`積地|卸地`) で引くので、画面で 1 度入れれば両方に効く。
@@ -220,6 +226,7 @@ export function buildIchibanLegs(
   coveredOrigins: Set<string>,
   ym: string,
   provisional: ProvisionalMap,
+  master?: RateRow[],
 ): IchibanLeg[] {
   const byKey = new Map<string, VehicleDailySlip[]>()
   for (const slip of slips) {
@@ -240,7 +247,7 @@ export function buildIchibanLegs(
   const legs: IchibanLeg[] = []
   for (const [key, group] of byKey) {
     const date = key.slice(0, 10)
-    for (const part of splitByLoad(group)) legs.push(toLeg(driverName, date, part, provisional))
+    for (const part of splitByLoad(group)) legs.push(toLeg(driverName, date, part, provisional, master))
   }
   return legs.sort((a, b) => (legSortKey(a) > legSortKey(b) ? 1 : -1))
 }

@@ -24,6 +24,7 @@
  */
 import { colIndex, classifyTimeCategory, parseEventDatetimeToTs } from './event-data-table'
 import { lookupAllowance, type AllowanceLookup } from './allowance-rate'
+import type { RateRow } from './allowance-rate-master'
 
 export interface AllowanceLeg {
   /** 積みイベントの行 index。 */
@@ -135,12 +136,21 @@ export const CITY_TO_DEST: Record<string, string> = {
  *
  * `CITY_TO_DEST` に無ければ市町村名から `市/町/村` を落としてマスタを引く
  * (`本別町` → `本別` のように、マスタの卸地がそのまま町名の契約がある)。
+ *
+ * `master` は **R2 から解決したマスタ** (Refs #805 PR-2)。省略すると
+ * `lookupAllowance` の既定 (`RATE_MASTER` = 同梱の初期値) に落ちる。
+ * **既定を持たせない** — ここで `= RATE_MASTER` と書くと「渡し忘れ」と
+ * 「初期値で計算してよい」が区別できなくなる。
  */
-export function lookupAllowanceByCity(originCity: string, destCity: string): AllowanceLookup {
+export function lookupAllowanceByCity(
+  originCity: string,
+  destCity: string,
+  master?: RateRow[],
+): AllowanceLookup {
   const origin = addressToCity(originCity)
   const dest = addressToCity(destCity)
   const mapped = CITY_TO_DEST[`${origin}|${dest}`]
-  return lookupAllowance(cityToPlace(origin), mapped ?? cityToPlace(dest))
+  return lookupAllowance(cityToPlace(origin), mapped ?? cityToPlace(dest), master)
 }
 
 /**
@@ -159,11 +169,11 @@ export interface LegAllowance {
   destSource: DestSource
 }
 
-/** 各便に手当を引き当てる。 */
-export function allowanceForLegs(legs: AllowanceLeg[]): LegAllowance[] {
+/** 各便に手当を引き当てる。`master` は R2 から解決したマスタ (Refs #805 PR-2)。 */
+export function allowanceForLegs(legs: AllowanceLeg[], master?: RateRow[]): LegAllowance[] {
   return legs.map(leg => ({
     leg,
-    lookup: lookupAllowanceByCity(leg.originCity, leg.destCity),
+    lookup: lookupAllowanceByCity(leg.originCity, leg.destCity, master),
     destSource: 'event' as const,
   }))
 }
@@ -222,7 +232,11 @@ export function extractCarryInUnloads(headers: string[], rows: string[][]): Carr
  * 降しが 1 つでもある便 (卸地の市町村名だけが空の便) には触らない — そちらは
  * 別の原因なので、引き継ぎで塗り潰すと間違いが黙って混ざる。
  */
-export function carryOverDest(items: LegAllowance[], carryIn: CarryInUnload): LegAllowance[] {
+export function carryOverDest(
+  items: LegAllowance[],
+  carryIn: CarryInUnload,
+  master?: RateRow[],
+): LegAllowance[] {
   const last = items[items.length - 1]
   if (!last || last.leg.unloadRowIndexes.length > 0 || carryIn.cities.length === 0) return items
   const leg: AllowanceLeg = {
@@ -233,7 +247,7 @@ export function carryOverDest(items: LegAllowance[], carryIn: CarryInUnload): Le
   }
   return [
     ...items.slice(0, -1),
-    { leg, lookup: lookupAllowanceByCity(leg.originCity, leg.destCity), destSource: 'carried' },
+    { leg, lookup: lookupAllowanceByCity(leg.originCity, leg.destCity, master), destSource: 'carried' },
   ]
 }
 

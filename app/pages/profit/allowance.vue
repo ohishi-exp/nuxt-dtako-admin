@@ -42,8 +42,19 @@
  * デジタコに無い便を足すのに対し、こちらは**既にある便の欠けを埋める**ので、
  * 表示側で差し替えると経路だけ直って数え方が置き去りになる。
  */
-import { getOperations, getOperationCsv, getDrivers } from '~/utils/api'
+import { getOperations, getOperationCsv, getDrivers, currentAccessToken } from '~/utils/api'
 import { describeApiError } from '~/utils/api-error'
+import {
+  ALLOWANCE_RATE_ENDPOINT,
+  allowanceRateNotice,
+  allowanceRateReadError,
+  allowanceRateRows,
+  resolveAllowanceRateMaster,
+  type AllowanceRateState,
+} from '~/utils/allowance-rate-source'
+import type { RateRow } from '~/utils/allowance-rate-master'
+import { readViewerCompId } from '~/utils/kushiro-branch-view'
+import { b64urlUtf8 } from '~/composables/useTheearthSession'
 import { fetchAllPages } from '~/utils/paged-fetch'
 import type { Driver, OperationListItem } from '~/types'
 import { extractAllowanceLegs, extractCarryInUnloads, allowanceForLegs, addressToCity, cityToPlace } from '~/utils/allowance-trips'
@@ -476,6 +487,72 @@ const vehicle = ref('')
 type Status = 'idle' | 'loading' | 'ready' | 'error'
 const status = ref<Status>('idle')
 const errorMessage = ref<string | null>(null)
+
+// --- 運行手当マスタの出どころ (R2 → 無ければ同梱の初期値。Refs #805 PR-2) -----
+// 判定は `allowance-rate-source.ts` (pure)。ここは通信と、**決まらなければ
+// 集計しない**というゲートだけを持つ。
+
+/** まだ 1 度も読んでいなければ `null`。読んだ後は 3 状態のどれか。 */
+const rateState = ref<AllowanceRateState | null>(null)
+
+/**
+ * 引き当てに渡す配列。
+ *
+ * **`undefined` になるのは「まだ決まっていない / 読めなかった」間だけ**で、
+ * そのとき `operations` は空・`status` は `ready` ではないので引き当ては
+ * 1 件も走らない (`run` / `restoreFromCache` の頭で止めてある)。
+ * `undefined` を渡すと下層の既定 (`RATE_MASTER`) に落ちるので、**ここを
+ * 「読めなかったときの逃げ道」に使わないこと。**
+ */
+const rateRows = computed<RateRow[] | undefined>(() =>
+  (rateState.value === null ? null : allowanceRateRows(rateState.value)) ?? undefined)
+
+/** 画面に出す 1 文。まだ読んでいなければ出さない。 */
+const rateNotice = computed(() => (rateState.value === null ? '' : allowanceRateNotice(rateState.value)))
+
+/**
+ * 運行手当マスタを R2 から読む (`GET /restraint-api/allowance-rate`、PR-1 の口)。
+ *
+ * **会社ID と JWT は拘束時間・賃金タブが localStorage に残したものを借りる** —
+ * この画面は theearth ログインを持たないので、新しいログイン導線は作らない
+ * (粗利タブ `margin.vue` の最低賃金マスタと同じ借用)。借りられなければ
+ * **初期値には倒さず**理由を出す。
+ */
+async function loadRateMaster(): Promise<AllowanceRateState> {
+  const compId = readViewerCompId(localStorage)
+  const token = currentAccessToken()
+  if (!compId || !token) {
+    return allowanceRateReadError('会社IDまたはログイン情報が分かりません。拘束時間・賃金タブを一度開いてください')
+  }
+  try {
+    const res = await $fetch<unknown>(ALLOWANCE_RATE_ENDPOINT, {
+      headers: {
+        'X-Theearth-Comp-Id': compId,
+        'X-Theearth-User-B64': b64urlUtf8('viewer'),
+        'Authorization': `Bearer ${token}`,
+      },
+    })
+    return resolveAllowanceRateMaster(res)
+  }
+  catch (e) {
+    // `/restraint-api/**` は Nitro ではなく relay worker へ転送される。本文は
+    // relay の `{error: '<日本語>'}` なので `describeApiError` が拾う (Refs #890)。
+    return allowanceRateReadError(describeApiError(e))
+  }
+}
+
+/**
+ * マスタが決まるまで待つ。**決まらなければ `false` を返し、呼び出し側は集計しない。**
+ *
+ * 読めた回はそのまま使い回すが、**`error` の回は次に呼ばれたらもう一度試す** —
+ * mount の時点では JWT がまだ入っていないことがあるため。
+ */
+async function ensureRateMaster(): Promise<boolean> {
+  if (rateState.value === null || rateState.value.status === 'error') {
+    rateState.value = await loadRateMaster()
+  }
+  return rateState.value.status !== 'error'
+}
 const progress = ref('')
 const operations = ref<OperationAllowance[]>([])
 /** 集計を実行したときの月。表と入力欄がずれないように保持する。 */
@@ -507,6 +584,10 @@ onMounted(async () => {
   pdfOverpaid.value = parseOverpaid(localStorage.getItem(OVERPAID_KEY))
   forceMatch.value = parseForceMatch(localStorage.getItem(FORCE_MATCH_KEY))
   pdfFile.value = parsePdfTripFile(localStorage.getItem(PDF_TRIPS_KEY))
+  // **手当マスタは乗務員マスタより先に読む。** どの版で計算しているかの注記は
+  // alc の応答に依存しないので、`getDrivers()` の後ろに置くと**乗務員マスタが
+  // 遅い/落ちている間ずっと注記が出ない** (dev で実際にそうなった)。
+  const masterOk = await ensureRateMaster()
   // **乗務員マスタはキャッシュ復元より先に読む。** 一番星を乗務員で引いた月の
   // キャッシュは `driver:<CD>` を鍵にしているので、氏名→CD が引けないと
   // 復元した表の売上がまるごと空になる。
@@ -517,7 +598,10 @@ onMounted(async () => {
     // 乗務員マスタが引けなくても CD だけで動く (表示が CD のままになるだけ)
   }
   cachedMonth.value = readCache()
-  if (cachedMonth.value) restoreFromCache(cachedMonth.value)
+  // **手当マスタが決まる前に復元しない。** キャッシュは便の材料だけを持ち手当は
+  // 読み込み時に引き直す作りなので、決まる前に戻すと「どの版で出した金額か
+  // 分からない表」が出る。読めなかったときは戻さず、理由だけを画面に出す。
+  if (masterOk && cachedMonth.value) restoreFromCache(cachedMonth.value)
 })
 
 function toggle(cd: string) {
@@ -617,6 +701,7 @@ const forcedLegs = computed(() => resolveForceMatches(
   forceMatch.value,
   slipByRowId.value,
   provisional.value,
+  rateRows.value,
 ))
 
 /** 除外を当てる**前**の集計。モーダル (外した便を戻す場所) と、当たらなくなった
@@ -949,7 +1034,9 @@ const ichibanLegs = computed<IchibanLeg[]>(() => {
     // **デジタコ便がある `日付|積地`。** その積地に残った明細は複数卸しの片割れ。
     const coveredOrigins = new Set(d.operations.flatMap(op => op.rows
       .map(r => `${r.date}|${cityToPlace(addressToCity(r.originCity))}`)))
-    out.push(...buildIchibanLegs(d.driverName, slips, used, coveredOrigins, shownYm.value, provisional.value))
+    out.push(...buildIchibanLegs(
+      d.driverName, slips, used, coveredOrigins, shownYm.value, provisional.value, rateRows.value,
+    ))
   }
   return out
 })
@@ -1210,8 +1297,8 @@ const leftoverSlips = computed(() => (reconciled.value?.leftovers ?? [])
 const leftoverYen = computed(() => leftoverSlips.value.reduce((sum, l) => sum + l.slip.amount, 0))
 
 const fareChecks = computed(() => [
-  ...checkFares(allRows(), byLeg.value),
-  ...(reconciled.value?.leftovers ?? []).flatMap(l => checkLeftoverFares(l.slips)),
+  ...checkFares(allRows(), byLeg.value, rateRows.value),
+  ...(reconciled.value?.leftovers ?? []).flatMap(l => checkLeftoverFares(l.slips, rateRows.value)),
 ])
 /** マスタの運賃と単価が食い違う明細。**料金改定の検知に使う。** */
 const fareMismatches = computed(() => fareChecks.value.filter(f => f.status === 'mismatch'))
@@ -1292,7 +1379,7 @@ async function resolveOperation(op: {
     const csv = await getOperationCsv(op.unko_no, 'events')
     return {
       ...base,
-      legs: allowanceForLegs(extractAllowanceLegs(csv.headers, csv.rows)),
+      legs: allowanceForLegs(extractAllowanceLegs(csv.headers, csv.rows), rateRows.value),
       carryIn: extractCarryInUnloads(csv.headers, csv.rows),
     }
   }
@@ -1325,7 +1412,7 @@ function fromCached(op: CachedOperation): OperationAllowance {
     operationDate: op.operationDate,
     driverName: op.driverName,
     vehicleName: op.vehicleName,
-    legs: allowanceForLegs(op.legs),
+    legs: allowanceForLegs(op.legs, rateRows.value),
     carryIn: op.carryIn,
     error: op.error,
   }
@@ -1343,7 +1430,7 @@ function fromCached(op: CachedOperation): OperationAllowance {
  * 「キャッシュから出している」ことを画面に出し、`集計` で取り直せるようにしておく。
  */
 function restoreFromCache(month: MonthCache) {
-  operations.value = applyCarryOver(month.operations.map(fromCached))
+  operations.value = applyCarryOver(month.operations.map(fromCached), rateRows.value)
   shownYm.value = month.ym
   autoOpen()
   status.value = 'ready'
@@ -1362,6 +1449,15 @@ async function run(force = false) {
   cacheNote.value = null
   operations.value = []
   reconciled.value = null
+  progress.value = '運行手当マスタを確認中...'
+  // **マスタの出どころが決まらないと集計しない。** 同梱の初期値へ黙って倒すと、
+  // フロントの値と本番 R2 の値が食い違ったまま誰も気付かない (最低賃金マスタで
+  // 実際に踏んだ形)。理由は上の注記に出るので `errorMessage` には積まない。
+  if (!await ensureRateMaster()) {
+    status.value = 'idle'
+    progress.value = ''
+    return
+  }
   progress.value = '運行を検索中...'
   try {
     const range = monthReadingRange(ym.value)
@@ -1391,7 +1487,7 @@ async function run(force = false) {
     }
     const all = [...reused, ...resolved]
     // 積んだまま帰庫した便の卸地は次の運行の先頭にある。全運行を引き終えてから当てる。
-    operations.value = applyCarryOver(all)
+    operations.value = applyCarryOver(all, rateRows.value)
     shownYm.value = ym.value
     autoOpen()
     status.value = 'ready'
@@ -1480,6 +1576,24 @@ function downloadCsv() {
       <b>別の車番で走った日</b>の売上も入ります (車番で引くと丸ごと落ちます)。
       <b>デジタコに運行が 1 件も無い日</b>は、一番星の明細から便を起こして
       合計に足します (内訳は「デジタコ N ・ 一番星 M」で併記)。
+    </p>
+
+    <!--
+      **マスタの出どころを必ず出す** (Refs #805)。3 状態を別々の見た目にする —
+      「初期値で計算している」を黙って隠すと、フロントの値と本番 R2 の値が
+      食い違ったまま誰も気付かない (最低賃金マスタで実際に踏んだ形)。
+      **粗利タブ (`/profit/margin`) は別案件が触っているのでこの PR では出ない。**
+    -->
+    <p
+      v-if="rateState"
+      class="text-xs mb-4 px-3 py-2 rounded border"
+      :class="{
+        'text-gray-500 border-gray-200 dark:border-gray-700': rateState.status === 'r2',
+        'text-amber-700 dark:text-amber-400 border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950': rateState.status === 'seed',
+        'text-red-700 dark:text-red-400 border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950 font-semibold': rateState.status === 'error',
+      }"
+    >
+      {{ rateNotice }}
     </p>
 
     <div class="flex flex-wrap gap-3 items-end mb-4">

@@ -7,6 +7,7 @@
  */
 import { epochToYmd } from './ichiban'
 import { carryOverDest, type CarryInUnload, type DestSource, type LegAllowance } from './allowance-trips'
+import type { RateRow } from './allowance-rate-master'
 
 /** 1 運行ぶんの引き当て結果。 */
 export interface OperationAllowance {
@@ -35,7 +36,7 @@ export interface OperationAllowance {
  * `carryOverDest` を当てる。**引いた範囲の最後の運行は埋まらない** — 次の運行を
  * 持っていないため。その便は翌月ぶんなので、対象月の合計には効かない。
  */
-export function applyCarryOver(ops: OperationAllowance[]): OperationAllowance[] {
+export function applyCarryOver(ops: OperationAllowance[], master?: RateRow[]): OperationAllowance[] {
   const byTruck = new Map<string, OperationAllowance[]>()
   for (const op of ops) {
     const key = `${op.driverName ?? ''}|${op.vehicleName ?? ''}`
@@ -48,7 +49,7 @@ export function applyCarryOver(ops: OperationAllowance[]): OperationAllowance[] 
     const sorted = [...list].sort((a, b) => compareText(a.unkoNo, b.unkoNo))
     for (let i = 0; i < sorted.length - 1; i++) {
       const op = sorted[i]!
-      filled.set(op.unkoNo, carryOverDest(op.legs, sorted[i + 1]!.carryIn))
+      filled.set(op.unkoNo, carryOverDest(op.legs, sorted[i + 1]!.carryIn, master))
     }
   }
   return ops.map(op => ({ ...op, legs: filled.get(op.unkoNo) ?? op.legs }))
