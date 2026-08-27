@@ -550,25 +550,49 @@ onMounted(async () => {
   catch {
     // 乗務員マスタが引けなくても CD だけで動く (表示が CD のままになるだけ)
   }
-  // **マスタが決まらないうちはキャッシュも戻さない。** 粗利のキャッシュは
-  // **計算済みの金額**を持っているので、出どころを言えないまま出すと
-  // 「初期値に倒した」のと同じことになる。
-  if (masterOk) restoreFromCache()
+  // **キャッシュを読むことと、キャッシュの金額を出すことは別** (Refs #1017)。
+  // 金額はマスタが決まるまで出さない (下) が、**R2 の版の一覧は手当マスタと
+  // 無関係で金額も持たない** — マスタが読めないことを理由に一緒に伏せると、
+  // 「いつ変わったかを追える記録」まで画面から消える。
+  const cache = readMarginCache()
+  if (cache && cache.ym === ym.value) {
+    // **マスタが決まらないうちはキャッシュの金額を戻さない。** 粗利のキャッシュは
+    // **計算済みの金額**を持っているので、出どころを言えないまま出すと
+    // 「初期値に倒した」のと同じことになる。
+    if (masterOk) restoreFromCache(cache)
+    // **キャッシュから出しただけの回にも版の一覧は読む** (Refs #833)。端末のキャッシュは
+    // 写しで、いつ変わったかを追える記録は R2 の版の方 — ここで読まないと、
+    // 集計し直すまで**追える記録が画面に出ない**。
+    // **マスタが `error` の回もここは読む** (Refs #1017) — 金額を伏せている回こそ、
+    // R2 に何が残っているかは見えていてよい (一覧に金額の判断は 1 つも要らない)。
+    void loadMarginVersions(cache.ym)
+  }
   // 釧路区画の最低賃金。**粗利の集計とは独立**なので await しない (失敗しても粗利は出る)。
   loadKushiroMinWageMaster()
 })
 
-/** **前回の集計をそのまま出す (通信しない)。** 月・車輌が違うキャッシュは使わない。 */
-function restoreFromCache() {
-  let cache: MarginCache | null
+/**
+ * **前回の集計を読むだけ** (画面には何も出さない)。壊れていれば理由を注記に出して `null`。
+ *
+ * **金額を出す判断からは切り離してある** (Refs #1017) — マスタが `error` の回でも
+ * 「どの月のキャッシュがあるか」は知る必要があり、そこから R2 の版の一覧を読む。
+ * 月が使えるかの判定 (`cache.ym === ym.value`) は呼び出し側。
+ */
+function readMarginCache(): MarginCache | null {
   try {
-    cache = parseMarginCache(localStorage.getItem(MARGIN_CACHE_KEY))
+    return parseMarginCache(localStorage.getItem(MARGIN_CACHE_KEY))
   }
   catch (e) {
     cacheNote.value = `キャッシュを読めませんでした — ${e instanceof Error ? e.message : String(e)}`
-    return
+    return null
   }
-  if (!cache || cache.ym !== ym.value) return
+}
+
+/**
+ * **前回の集計をそのまま出す (通信しない)。** 読むのは `readMarginCache()` で、
+ * ここは**金額を画面に出す側**だけ — 呼ぶ前にマスタが決まっていること。
+ */
+function restoreFromCache(cache: MarginCache) {
   inputs.value = cache.operations
   costs.value = cache.costs
   legPointsByUnko.value = restoredLegPoints(cache.ym)
@@ -579,10 +603,6 @@ function restoreFromCache() {
   savedAt.value = cache.savedAt
   restoredFromCache.value = true
   status.value = 'ready'
-  // **キャッシュから出しただけの回にも版の一覧は読む** (Refs #833)。端末のキャッシュは
-  // 写しで、いつ変わったかを追える記録は R2 の版の方 — ここで読まないと、
-  // 集計し直すまで**追える記録が画面に出ない**。
-  void loadMarginVersions(cache.ym)
 }
 
 /**
