@@ -166,21 +166,37 @@ done
 if [ "$IS_LINUX" = 1 ]; then
   # Linux の作業機は**複数セッションが同時に dev を回す**ので、素の `pgrep -x workerd` で
   # 落とすと兄弟セッションの dev を「ゾンビ」と誤判定して常に exit 1 になる
-  # (2026-08-27 実測: 他タスクの workerd が 30 個生存、しかし port 8787 は空き)。
-  # 元の意図は「前回の**自分の** wrangler dev の残骸」なので、この worktree 由来のものだけ見る
-  # (workerd の cwd = wrangler dev を起動した worktree)。
+  # (2026-08-27 実測: 無関係な workerd が **30 個**生存、しかし port 8787 は空き)。
+  # 元の意図は「前回の**自分の** wrangler dev の残骸」なので、この worktree 由来のものだけ見る。
+  # workerd の cwd が起動元の worktree を指すことは実測で確認した (30 個中 25 個が各 worktree の
+  # パス。残りは worktree ごと消えた archive 済みセッションの孤児で cwd が `... (deleted)` になる)。
+  # **文字列比較ではなく `-ef` (device+inode 一致)** で見るのは、その `(deleted)` 表記と
+  # `readlink -f` の正規化に引きずられないため。消えた worktree は $WT と一致しようがない。
   ZOMBIE=""
+  UNKNOWN=0
   for zpid in $(pgrep -x workerd 2>/dev/null || true); do
-    if [ "$(readlink -f "/proc/$zpid/cwd" 2>/dev/null)" = "$(readlink -f "$WT")" ]; then
+    if [ "/proc/$zpid/cwd" -ef "$WT" ]; then
       ZOMBIE="$ZOMBIE $zpid"
+    elif ! readlink "/proc/$zpid/cwd" > /dev/null 2>&1; then
+      UNKNOWN=$((UNKNOWN + 1))
     fi
   done
   if [ -n "$ZOMBIE" ]; then
     echo "   !! この worktree の workerd が残っている (前回の wrangler dev の子プロセス):$ZOMBIE"
-    echo "   !! 掃除 (**他セッションの workerd は巻き込まないこと** — 相手の実測ごと壊す):"
+    echo "   !! 掃除 — **ここに出た PID 以外は絶対に kill しないこと**。この機では無関係な"
+    echo '   !!        workerd が常時 30 個ほど動いており、`pkill -x workerd` のような一括 kill は'
+    echo "   !!        兄弟セッションの実測ごと壊す:"
     echo "   !!         ps -o pid,lstart,args -p $(echo $ZOMBIE | tr ' ' ',')"
     echo "   !!         kill$ZOMBIE"
     exit 1
+  fi
+  # **持ち主を判定できなかった分は warn に倒して先へ進める。** ゾンビ検出は二次的な
+  # ヒューリスティックで、**本当の衝突は上の port 先住チェックが捕まえる**。確信が持てないのに
+  # 起動を阻むと、「起動できない」を直したスクリプトが別の理由で起動を阻むことになる。
+  if [ "$UNKNOWN" -gt 0 ]; then
+    echo "   (warn) 持ち主を判定できない workerd が ${UNKNOWN} 個ある (/proc/<pid>/cwd が読めない)。"
+    echo "   (warn) この worktree のものではない前提で続行する。旧バンドルが応答する疑いが出たら"
+    echo "   (warn) ps -o pid,lstart,args -C workerd で手で確認すること。"
   fi
 elif tasklist //FI "IMAGENAME eq workerd.exe" 2>/dev/null | grep -qi workerd; then
   echo "   !! workerd.exe が残っている (前セッションの wrangler dev の子プロセス)。"
