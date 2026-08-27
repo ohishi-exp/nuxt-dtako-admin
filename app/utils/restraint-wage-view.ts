@@ -217,7 +217,7 @@ export function timecardKosokuNotice(
       }
 }
 
-/** 最低賃金チェックで選べる拘束時間ソース (既定は `current` = 従来の挙動)。 */
+/** 最低賃金チェックで選べる拘束時間ソース (**既定は `gcp`**。`current` が従来の挙動)。 */
 export type RestraintSourceKey = 'current' | 'gcp'
 
 /** `prefecture` は最低賃金の一括設定で入った場合の根拠県 (手入力には付かない、Refs #409)。 */
