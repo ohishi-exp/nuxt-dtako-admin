@@ -7,6 +7,40 @@
  * `./theearth-client` を再利用し二重管理しない。現在地 (VehicleStateTableForBranchEx、
  * 推測実装) は viewer では使わないため移植していない。
  */
+
+/**
+ * ★ theearth クライアントの正本はこの repo (ohishi-exp/nuxt-dtako-admin) — Refs #978
+ *
+ * 上記のとおり移植元は **ohishi-exp/nuxt_dtako_logs の
+ * `server/utils/theearth-venus-client.ts`** で、あちらには今も写しが残っている。
+ * ただし **theearth の実機仕様に追従して更新され続けているのはこの repo だけ**
+ * (あちらは 2026-07-03 の移植元 commit 以降そのファイルが未変更、2026-08-27 時点)。
+ * **theearth の仕様変更で直す本体はこちら**、が #978 の決定。
+ *
+ * ■ 最終同期時点 (次に見る人が「いつからズレているか」を測り直さずに読めるように):
+ *     写し側は **ohishi-exp/nuxt_dtako_logs#33 / 2026-07-03** の内容のまま止まっている
+ *     (あちらの main = `f666e1a` / 2026-07-30 だが、それ以降 theearth 関連の変更は無い)。
+ *     こちら側の実装の最終変更 (docs commit を除く) はこのファイルが **#175 / 2026-07-08
+ *     (`39ccd50`)**、`./theearth-client` が **#644 / 2026-08-04 (`7c97b4f`)**。
+ *     ⇒ **2026-07-03 以降ズレ続けている。** 最後に両者を突合したのは **2026-08-27**
+ *     (当 repo の origin/main = `94b72f2`)。
+ *
+ * ■ nuxt_dtako_logs 側と本体が一字一句同じ (2026-08-27 実測。このファイルが持つ分):
+ *     VENUS_BRIDGE_PATH / pickStringField / VDF_MAGIC
+ *   → ここを直したら向こうの同名も直す (逆も同じ)。ログイン/cookie jar 側の
+ *     一致リストは `./theearth-client` の冒頭コメントにある。
+ *
+ * ■ 同名だが中身は既に分岐済み (揃える対象ではない。この repo 側が新しい):
+ *     callVenusBridgeMethod (session 切れ判定 + 500 の扱い) / toItemArray /
+ *     pickNumberField / getVehicleStates / DvrNotification + getDvrNotifications
+ *     (緯度経度の DDMM→度 変換と receiveState はこちらにしか無い) /
+ *     assertVdfMagic (こちらは stream 先頭 Uint8Array を受ける) /
+ *     DVR_{VEHICLE_CD,VEHICLE_NAME,SERIAL_NO,FILE_NAME,FILE_PATH,EVENT_TYPE,DATETIME,
+ *     DRIVER_NAME}_CANDIDATES (実フィールドは PascalCase と実機確定済みなので
+ *     こちらは PascalCase を先頭に置く。向こうは snake_case 先頭の推測のまま)
+ *
+ * 実機確定知見の正本は `theearth-venus` skill (`.claude/skills/theearth-venus/SKILL.md`)。
+ */
 import {
   BASE_URL,
   extractHiddenFields,
