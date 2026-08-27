@@ -26,7 +26,9 @@ for arg in "$@"; do
     --copy) MODE="copy" ;;
     --dry-run) MODE="dry" ;;
     -h|--help)
-      sed -n '2,20p' "$0"
+      # doc の範囲を行番号で持たない — 冒頭コメントが終わる (# 以外の行が来る) まで出す。
+      # 行番号だと doc を 1 行足すたびに更新が要り、忘れると末尾が黙って切れる (Refs #979)。
+      awk 'NR>1{ if (!/^#/) exit; print }' "$0"
       exit 0
       ;;
     *)
