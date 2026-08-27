@@ -299,6 +299,16 @@ branches = true
 path = "server/api/profit/snapshots.get.ts"
 branches = true
 
+# **Access に依存しない認可を入れた** (Refs #988)。この口は
+# `docs/plan-922-single-signin.md` §1 の D 段 (Nitro 側の認可が 1 つも無く、
+# Cloudflare Access だけが前段) に居た。A 段の `requireAuth` を
+# `allowance-override.post.ts` と同じ形で足したので、
+# **`resolveSecret` の 3 分岐 (文字列 / `.get()` / どちらでもない) と
+# `NUXT_PUBLIC_AUTH_WORKER_URL` の 3 分岐 (値あり / 空文字 / 非文字列) が増えた**
+# (v8 の branches が **18 → 32**。母数は AST が決めるので、どのテストを流したかには
+# 依らない — 基準は `origin/main` = 94b72f2 のこのファイル)。**指標名を書いておく** —
+# 分岐数は触るたびに動くので、数字だけ残すと次に読む人が別の指標と取り違える。
+# **陰性対照**: `requireAuth` の行を消すと「未ログインは 401」が落ちる (実測済み)。
 [[files]]
 path = "server/api/profit/snapshot.delete.ts"
 branches = true
@@ -922,6 +932,11 @@ branches = true
 path = "app/utils/code-version.ts"
 branches = true
 
+# **Access に依存しない認可を入れた** (Refs #988)。`snapshot.delete.ts` と同じ理由・
+# 同じ形 (`docs/plan-922-single-signin.md` §1 の D 段)。**`resolveSecret` の 3 分岐と
+# `NUXT_PUBLIC_AUTH_WORKER_URL` の 3 分岐が増えた** (v8 の branches が **34 → 48**。
+# 基準は `origin/main` = 94b72f2 のこのファイル)。
+# **陰性対照**: `requireAuth` の行を消すと「未ログインは 401」が落ちる (実測済み)。
 [[files]]
 path = "server/api/profit/margin-summary.post.ts"
 branches = true
@@ -1089,11 +1104,12 @@ branches = true
 path = "app/utils/allowance-overrides-r2.ts"
 branches = true
 
-# 上の口 (`POST /api/profit/allowance-override`)。**新設する route にだけ `requireAuth`**
-# を付ける — 権限範囲が「その端末の人だけ」→「R2 に触れる人全員」に広がるので、
-# **誰が触ったか** (`by` = email) を履歴の 1 行に残す。**既存の
-# `margin-summary.post.ts` には足していない** (スコープ外。`snapshot.post.ts` は
-# 突合一本化 PR-2 (#848) で撤去した)。
+# 上の口 (`POST /api/profit/allowance-override`)。`requireAuth` を付ける —
+# 権限範囲が「その端末の人だけ」→「R2 に触れる人全員」に広がるので、
+# **誰が触ったか** (`by` = email) を履歴の 1 行に残す。
+# **`margin-summary.post.ts` / `snapshot.delete.ts` にも #988 で同じ 2 行が入った**
+# (#845 当時は「スコープ外なので足していない」と書いてあったが、それはもう本当ではない。
+# `snapshot.post.ts` は突合一本化 PR-2 (#848) で撤去した)。
 # `codeVersion` は刻まない — 値は**人が入力した数そのもの**でコードが作っていないため
 # (`margin-summary` が刻むのは「同じ入力でもロジックが変われば数字が動く」から)。
 [[files]]
@@ -1293,4 +1309,37 @@ branches = true
 # **BR site が 7 → 2 に落ちる** (残るのは `classifyKyuyoAccess` 内の 2 site だけ)。
 [[files]]
 path = "app/utils/kyuyo-access.ts"
+branches = true
+
+# Y時間 テンプレ xlsx を R2 に**上書きする**口 (`PUT /api/y-time-template`)。
+# **#988 で `requireAuth` を入れたのを機に登録簿へ足した** — `docs/plan-922-single-signin.md`
+# §1 が D 段の実例として名指ししていたファイルで (JSDoc に「要 JWT」と書いてあるのに
+# **その JWT を検証するコードが無かった**)、**規約をコードにした口はカバレッジで固定する
+# 価値がある**。ここに置いた xlsx が Y時間 の出力の中身そのものになる。
+#
+# **初登録なので差分ではなく絶対値で書く** (基準 = `origin/main` 94b72f2 + #988 の変更)。
+# **指標名: v8 の statements 27 / 27、branch site 14 / arm 28、28 arm すべて被覆。**
+# 14 site の内訳は `coverage-final.json` の `branchMap` を実際に読んで数えた:
+#   `cfEnv` の `?? {}` 1 / `resolveSecret` の 4 (`typeof === 'string'` の if、
+#   `binding && typeof(...).get === 'function'` の if と binary-expr、`?? null`) /
+#   `!sharedSecret` 1 / `NUXT_PUBLIC_AUTH_WORKER_URL` の 2 (三項と `&&`) /
+#   `key` の 3 (`typeof !== 'string' || !key` の if と binary-expr、
+#   `!key.startsWith('templates/')`) / `!r2` 1 / `!body` 1 /
+#   `content-type` header の `?? 既定` 1。
+# **数字だけ残すと次に読む人が別の指標と取り違える**ので指標名を必ず添える
+# (分岐数はこのファイルを触るたびに動く)。
+#
+# **陰性対照を 2 段で測った** (memory `coverage-green-does-not-check-values` —
+# gate が緑なだけでは「測れている」証明にならないため):
+#   ① `requireAuth` の行を消すと `tests/server/y-time-template-put-route.test.ts` の
+#      「★ 未ログインは 401 で、body を 1 バイトも読まない」が落ちる
+#   ② その 401 と「body が空なら従来どおり 400」を `it.skip` にすると、**この登録行が
+#      `FAIL: … lines 96.3% (expected 100%)` で落ちる** (gate exit 1)。
+#      **★ ただし `.get()` の 1 本だけを skip しても緑のまま**だった —
+#      `.get()` の arm は「値を返さない binding は 503」の側でも通るため。
+#      **「1 本 skip して緑」を「gate が無意味」と読まないこと。**
+# **読み口 (`y-time-template.get.ts`) は #988 では触っておらず、登録簿にも入れていない** —
+# 読み取り系は別 PR。
+[[files]]
+path = "server/api/y-time-template.put.ts"
 branches = true

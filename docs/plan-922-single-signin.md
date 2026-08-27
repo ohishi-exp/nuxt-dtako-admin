@@ -103,26 +103,34 @@ Google が 2 回出たなら ⑧ が壊れており、そのときは「アプ�
 
 | 段 | 本数 | 認可の実体 |
 | --- | --- | --- |
-| A. `requireAuth` (auth-worker ログイン必須) | 6 | Nitro で 401 |
+| A. `requireAuth` (auth-worker ログイン必須) | 6 → **10** | Nitro で 401 |
 | B. 上流に browser JWT を渡し**上流が弾く** | 7 | rust-ichibanboshi / auth-worker `/alc-proxy` |
 | C. machine shared secret | 1 | `X-Internal-Shared-Secret` constant-time |
-| **D. 認可が 1 つも無い** | **18** | **Access だけが前段** |
+| **D. 認可が 1 つも無い** | 18 → **14** | **Access だけが前段** |
 | E. 本番では 404 | 1 | `DEV_LOGIN !== 'true'` |
 
+> **2026-08-27 追記 (#988 の 1 本目、`origin/main` = 94b72f2 基点)。**
+> **D のうち書き込み 4 本に A 段の `requireAuth` を入れました** — 下表の ✍ 行 4 つ
+> (`margin-summary` / `snapshot.delete` / `vehicle-settings/extract` /
+> `y-time-template.put`)。**読み取り 14 本は手つかず**で、別 PR に残っています。
+> 数字は着手時に `origin/main` で数え直したもの (33 本の総数は当時から変わっていません)。
+
 ### D の 18 本 (Access を外すと**そのまま公開される**)
+
+**✍ の 4 本は #988 の 1 本目で塞ぎました** (`requireAuth` = A 段に移動)。残るのは読み取り 14 本。
 
 | route | 中身 | 書き込み |
 | --- | --- | --- |
 | **`GET /api/ichiban/**`** | **CF Access Service Token を付けて `rust-ichiban.mtamaramu.com` へ丸ごと転送する thin proxy。呼び出し元の身元を一切見ない** | — |
 | `GET /api/profit/snapshots` / `snapshot` / `margin-snapshots` / `margin-snapshot` / `operation-leg-sales` | `PROFIT_R2` の粗利・検証スナップショット (売上・原価・粗利の実額) | — |
-| `POST /api/profit/margin-summary` | 同 R2 に**版を書く** | ✍ |
-| `DELETE /api/profit/snapshot` | 同 R2 の `latest.json` を**消す** | ✍ |
+| `POST /api/profit/margin-summary` | 同 R2 に**版を書く** | ✍✍ **→ #988 で塞いだ** |
+| `DELETE /api/profit/snapshot` | 同 R2 の `latest.json` を**消す** | ✍✍ **→ #988 で塞いだ** |
 | `GET /api/net780/by-operation` | `DTAKO_DB` + `DTAKO_R2` の NET780 生データ ZIP | — |
-| `POST /api/vehicle-settings/extract` | `DTAKO_R2` + `DTAKO_DB` に**書く** | ✍ |
+| `POST /api/vehicle-settings/extract` | `DTAKO_R2` + `DTAKO_DB` に**書く** | ✍✍ **→ #988 で塞いだ** |
 | `GET /api/vehicle-settings/history` / `object` | 車輌設定 dump の一覧・実体 | — |
 | `GET /api/kyuyo-master/companies` | `DTAKO_DB` の給与会社マスタ一覧 | — |
 | `GET /api/y-time-template` | R2 テンプレ xlsx | — |
-| `PUT /api/y-time-template` | R2 テンプレ xlsx を**上書き** | ✍ |
+| `PUT /api/y-time-template` | R2 テンプレ xlsx を**上書き** | ✍✍ **→ #988 で塞いだ** |
 | `GET /api/vid-check/map-key` | **Google Maps API key を平文で返す** (referrer 制限あり) | — |
 | `GET /api/poi/:region` | R2 の POI geojson | — |
 | `GET /api/tariff/fare` | 告示209号の公開運賃表 (実害なし) | — |
@@ -131,6 +139,10 @@ Google が 2 回出たなら ⑧ が壊れており、そのときは「アプ�
 唯一の緩和は「上流の rust-ichibanboshi 自身が `Authorization` を見て弾く口があるかどうか」ですが、**それは上流の実装依存で、この repo からは保証できません** (兄弟タスク #951「実支給額が tenant 全員に開いている経路を塞ぐ」が隣接しています)。
 
 **書き込み 4 本 (`margin-summary` / `snapshot.delete` / `vehicle-settings/extract` / `y-time-template.put`) は、無認証のまま公開すると「粗利の版を第三者が消せる／捏造できる」**という形になります。金額そのものではありませんが、**金額の証跡**です。
+
+**⇒ この 4 本は #988 の 1 本目で `requireAuth` を入れ、A 段に移りました** (2026-08-27)。
+**読み取り 14 本は未着手**です — 書き込みと読み取りを 1 つの PR に混ぜると、壊れたときの
+切り分けができなくなるので分けました。
 
 ### ★ C 段 (machine shared secret) も「限られた caller だけ」ではない
 
@@ -308,7 +320,8 @@ tracking はそれを認識しています:
 2. **⑧ が成立していたら、残件は摩擦だけ**なので、着手順は
    **(a) `prompt=select_account` の扱いを決める** (§4、**ユーザー判断**) →
    **(b) `/login` に「有効な `logi_auth_token` があれば provider chooser を出さずに素通しする」短絡を足す** (④ の 1 枚が消える。`/oidc/authorize` に既にある `identityFromSession` を再利用するだけで、**auth-worker 内の 1 handler で閉じます**)。
-3. **並行して、Access に依存しない認可を D の 18 本 + `/dvr-api/login` に入れる** — これは**単一サインインとは独立に、それ自体が必要**です。いまは「Access が偶然守っている」だけで、設計として意図された防御ではありません (`y-time-template.put` の JSDoc は「管理者専用画面 (要 JWT) で叩く想定」と書いていますが、**その JWT を検証するコードはありません**)。**A 段の `requireAuth` が 6 本で既に確立している型なので、同じ 2 行を足すだけです。**
+3. **並行して、Access に依存しない認可を D の 18 本 + `/dvr-api/login` に入れる** — これは**単一サインインとは独立に、それ自体が必要**です。いまは「Access が偶然守っている」だけで、設計として意図された防御ではありません (`y-time-template.put` の JSDoc は「管理者専用画面 (要 JWT) で叩く想定」と書いていたのに、**その JWT を検証するコードがありませんでした**)。**A 段の `requireAuth` が既に確立している型なので、同じ 2 行を足すだけです。**
+   **→ 書き込み 4 本は #988 の 1 本目で完了 (2026-08-27)。読み取り 14 本と `/dvr-api/login` は未着手。**
 4. **3 が終わってから、Access に service token を足して agent/CI の目視を解決する** (§5)。
 
 ### 案 1 を採る場合の必要条件 (両論として残す)
@@ -316,6 +329,7 @@ tracking はそれを認識しています:
 **「採らない」は推奨であって決定ではありません。**採る場合、実行前に**全部**満たす必要があります:
 
 - D の 18 本すべてに認可が入っている (**特に `/api/ichiban/**` の confused deputy**)
+  — **書き込み 4 本は #988 の 1 本目で完了。残りは読み取り 14 本。**
 - `POST /dvr-api/login` が塞がれている (theearth のパスワード試行台にしない)
 - `/scraper-zip/{requestId}` の `requestId` のエントロピーが測られている
 - **`dtako-staging` / `dtako-preview` も同時に判断されている** — 3 ホストは別 Access アプリだが

@@ -1,4 +1,7 @@
-import { describe, it, expect, vi } from 'vitest'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
+
+const { requireAuthMock } = vi.hoisted(() => ({ requireAuthMock: vi.fn() }))
+vi.mock('@ippoan/auth-client/server', () => ({ requireAuth: requireAuthMock }))
 
 import deleteHandler from '../../server/api/profit/snapshot.delete'
 import { profitR2Paths, profitVersionTimestamp } from '../../app/utils/profit-r2'
@@ -88,21 +91,90 @@ async function seedSnapshot(bucket: FakeR2Bucket) {
   }))
 }
 
+/** 認証が通る前提の env。`requireAuth` に渡す secret を必ず載せる (Refs #988)。 */
+const okEnv = (bucket: R2BucketLite, extra: Record<string, unknown> = {}) =>
+  ({ INTERNAL_SHARED_SECRET: 'secret', PROFIT_R2: bucket, ...extra })
+
+const fullQuery = { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' }
+
+beforeEach(() => {
+  requireAuthMock.mockReset()
+  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+})
+
+/**
+ * ★ **Access に依存しない認可** (Refs #988)。この口は
+ * `docs/plan-922-single-signin.md` §1 の D 段 (認可が 1 つも無い) に居た。
+ * **陰性対照**: `requireAuth` を外すとこの describe の 401 が落ちる。
+ * **陽性対照**: 認証が通れば従来どおり消せる (下の既存テスト群がそのまま担う)。
+ */
+describe('DELETE /api/profit/snapshot — 認可 (Refs #988)', () => {
+  it('★ 未ログインは 401 で、R2 には 1 バイトも触らない', async () => {
+    requireAuthMock.mockRejectedValue(Object.assign(new Error('Unauthorized'), { statusCode: 401 }))
+    const bucket = new FakeR2Bucket()
+    await seedSnapshot(bucket)
+    const before = new Map(bucket.store)
+    const event = { context: { cloudflare: { env: okEnv(bucket) } }, _query: fullQuery }
+    await expect(callDelete(event)).rejects.toMatchObject({ statusCode: 401 })
+    // latest.json も history.jsonl も動いていない。
+    expect([...bucket.store.keys()].sort()).toEqual([...before.keys()].sort())
+    expect(bucket.store.get('profit/2026-06/8504/unko-1/0-3600/history.jsonl')?.body)
+      .toBe(before.get('profit/2026-06/8504/unko-1/0-3600/history.jsonl')?.body)
+  })
+
+  it('INTERNAL_SHARED_SECRET 未設定なら 503 (auth を通す前に落ちる)', async () => {
+    const event = { context: { cloudflare: { env: { PROFIT_R2: new FakeR2Bucket() } } }, _query: fullQuery }
+    await expect(callDelete(event)).rejects.toMatchObject({ statusCode: 503, statusMessage: expect.stringContaining('INTERNAL_SHARED_SECRET') })
+    expect(requireAuthMock).not.toHaveBeenCalled()
+  })
+
+  it('cloudflare env そのものが無くても 503 (落ちない)', async () => {
+    await expect(callDelete({ context: {}, _query: fullQuery })).rejects.toMatchObject({ statusCode: 503 })
+  })
+
+  it('Secrets Store binding (.get()) からも secret を取れる', async () => {
+    const bucket = new FakeR2Bucket()
+    const env = { INTERNAL_SHARED_SECRET: { get: async () => 'from-store' }, PROFIT_R2: bucket }
+    await callDelete({ context: { cloudflare: { env } }, _query: fullQuery })
+    expect(requireAuthMock.mock.calls[0]![1]).toMatchObject({ sharedSecret: 'from-store' })
+  })
+
+  it('.get() が値を返さない binding / 文字列でも .get() でもない binding は 503', async () => {
+    const nullish = { INTERNAL_SHARED_SECRET: { get: async () => undefined }, PROFIT_R2: new FakeR2Bucket() }
+    await expect(callDelete({ context: { cloudflare: { env: nullish } }, _query: fullQuery })).rejects.toMatchObject({ statusCode: 503 })
+    const wrongType = { INTERNAL_SHARED_SECRET: 123, PROFIT_R2: new FakeR2Bucket() }
+    await expect(callDelete({ context: { cloudflare: { env: wrongType } }, _query: fullQuery })).rejects.toMatchObject({ statusCode: 503 })
+  })
+
+  it('auth-worker の URL は env が有れば env、無ければ既定', async () => {
+    await callDelete({ context: { cloudflare: { env: okEnv(new FakeR2Bucket(), { NUXT_PUBLIC_AUTH_WORKER_URL: 'https://auth.example.test' }) } }, _query: fullQuery })
+    expect(requireAuthMock.mock.calls[0]![1]).toMatchObject({ authWorkerUrl: 'https://auth.example.test' })
+
+    requireAuthMock.mockClear()
+    await callDelete({ context: { cloudflare: { env: okEnv(new FakeR2Bucket(), { NUXT_PUBLIC_AUTH_WORKER_URL: '' }) } }, _query: fullQuery })
+    expect(requireAuthMock.mock.calls[0]![1]).toMatchObject({ authWorkerUrl: 'https://auth.ippoan.org' })
+
+    requireAuthMock.mockClear()
+    await callDelete({ context: { cloudflare: { env: okEnv(new FakeR2Bucket(), { NUXT_PUBLIC_AUTH_WORKER_URL: 7 }) } }, _query: fullQuery })
+    expect(requireAuthMock.mock.calls[0]![1]).toMatchObject({ authWorkerUrl: 'https://auth.ippoan.org' })
+  })
+})
+
 describe('DELETE /api/profit/snapshot', () => {
-  it('PROFIT_R2 未設定なら 503', async () => {
-    const event = { context: {}, _query: { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
-    await expect(callDelete(event)).rejects.toMatchObject({ statusCode: 503 })
+  it('PROFIT_R2 未設定なら 503 (ログイン後)', async () => {
+    const event = { context: { cloudflare: { env: { INTERNAL_SHARED_SECRET: 'secret' } } }, _query: fullQuery }
+    await expect(callDelete(event)).rejects.toMatchObject({ statusCode: 503, statusMessage: expect.stringContaining('PROFIT_R2') })
   })
 
   it('クエリパラメータが欠けていれば 400', async () => {
     const bucket = new FakeR2Bucket()
-    const event = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _query: { ym: '2026-06' } }
+    const event = { context: { cloudflare: { env: okEnv(bucket) } }, _query: { ym: '2026-06' } }
     await expect(callDelete(event)).rejects.toMatchObject({ statusCode: 400 })
   })
 
   it('ym が欠けていれば 400', async () => {
     const bucket = new FakeR2Bucket()
-    const event = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _query: { vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
+    const event = { context: { cloudflare: { env: okEnv(bucket) } }, _query: { vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
     await expect(callDelete(event)).rejects.toMatchObject({ statusCode: 400 })
   })
 
@@ -111,7 +183,7 @@ describe('DELETE /api/profit/snapshot', () => {
     await seedSnapshot(bucket)
     expect(await bucket.get('profit/2026-06/8504/unko-1/0-3600/latest.json')).not.toBeNull()
 
-    const deleteEvent = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _query: { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
+    const deleteEvent = { context: { cloudflare: { env: okEnv(bucket) } }, _query: { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
     const result = await callDelete(deleteEvent) as { deleted: boolean }
 
     expect(result.deleted).toBe(true)
@@ -124,7 +196,7 @@ describe('DELETE /api/profit/snapshot', () => {
     const versionKeys = [...bucket.store.keys()].filter(k => k.includes('/v-'))
     expect(versionKeys.length).toBeGreaterThan(0)
 
-    const deleteEvent = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _query: { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
+    const deleteEvent = { context: { cloudflare: { env: okEnv(bucket) } }, _query: { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
     await callDelete(deleteEvent)
 
     for (const key of versionKeys) {
@@ -136,7 +208,7 @@ describe('DELETE /api/profit/snapshot', () => {
     const bucket = new FakeR2Bucket()
     await seedSnapshot(bucket)
 
-    const deleteEvent = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _query: { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
+    const deleteEvent = { context: { cloudflare: { env: okEnv(bucket) } }, _query: { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
     await callDelete(deleteEvent)
 
     const history = await bucket.get('profit/2026-06/8504/unko-1/0-3600/history.jsonl')
@@ -146,7 +218,7 @@ describe('DELETE /api/profit/snapshot', () => {
 
   it('未保存のキーを削除してもエラーにせず冪等に成功扱いにする', async () => {
     const bucket = new FakeR2Bucket()
-    const deleteEvent = { context: { cloudflare: { env: { PROFIT_R2: bucket } } }, _query: { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
+    const deleteEvent = { context: { cloudflare: { env: okEnv(bucket) } }, _query: { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId: '0-3600' } }
     const result = await callDelete(deleteEvent) as { deleted: boolean }
     expect(result.deleted).toBe(true)
   })
