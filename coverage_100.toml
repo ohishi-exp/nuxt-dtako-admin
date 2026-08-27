@@ -1310,3 +1310,36 @@ branches = true
 [[files]]
 path = "app/utils/kyuyo-access.ts"
 branches = true
+
+# Y時間 テンプレ xlsx を R2 に**上書きする**口 (`PUT /api/y-time-template`)。
+# **#988 で `requireAuth` を入れたのを機に登録簿へ足した** — `docs/plan-922-single-signin.md`
+# §1 が D 段の実例として名指ししていたファイルで (JSDoc に「要 JWT」と書いてあるのに
+# **その JWT を検証するコードが無かった**)、**規約をコードにした口はカバレッジで固定する
+# 価値がある**。ここに置いた xlsx が Y時間 の出力の中身そのものになる。
+#
+# **初登録なので差分ではなく絶対値で書く** (基準 = `origin/main` 94b72f2 + #988 の変更)。
+# **指標名: v8 の statements 27 / 27、branch site 14 / arm 28、28 arm すべて被覆。**
+# 14 site の内訳は `coverage-final.json` の `branchMap` を実際に読んで数えた:
+#   `cfEnv` の `?? {}` 1 / `resolveSecret` の 4 (`typeof === 'string'` の if、
+#   `binding && typeof(...).get === 'function'` の if と binary-expr、`?? null`) /
+#   `!sharedSecret` 1 / `NUXT_PUBLIC_AUTH_WORKER_URL` の 2 (三項と `&&`) /
+#   `key` の 3 (`typeof !== 'string' || !key` の if と binary-expr、
+#   `!key.startsWith('templates/')`) / `!r2` 1 / `!body` 1 /
+#   `content-type` header の `?? 既定` 1。
+# **数字だけ残すと次に読む人が別の指標と取り違える**ので指標名を必ず添える
+# (分岐数はこのファイルを触るたびに動く)。
+#
+# **陰性対照を 2 段で測った** (memory `coverage-green-does-not-check-values` —
+# gate が緑なだけでは「測れている」証明にならないため):
+#   ① `requireAuth` の行を消すと `tests/server/y-time-template-put-route.test.ts` の
+#      「★ 未ログインは 401 で、body を 1 バイトも読まない」が落ちる
+#   ② その 401 と「body が空なら従来どおり 400」を `it.skip` にすると、**この登録行が
+#      `FAIL: … lines 96.3% (expected 100%)` で落ちる** (gate exit 1)。
+#      **★ ただし `.get()` の 1 本だけを skip しても緑のまま**だった —
+#      `.get()` の arm は「値を返さない binding は 503」の側でも通るため。
+#      **「1 本 skip して緑」を「gate が無意味」と読まないこと。**
+# **読み口 (`y-time-template.get.ts`) は #988 では触っておらず、登録簿にも入れていない** —
+# 読み取り系は別 PR。
+[[files]]
+path = "server/api/y-time-template.put.ts"
+branches = true
