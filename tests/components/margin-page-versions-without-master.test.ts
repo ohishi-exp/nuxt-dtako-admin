@@ -15,6 +15,12 @@
  * — この直しでそこを緩めていないことまで測る。4 本目は**この PR で変えていない**
  * 「月が違うキャッシュは使わない」を留める (`cache.ym !== ym.value` は #1016 以前からの挙動)。
  *
+ * **キャッシュを読む位置が `if (masterOk)` の外へ出た副作用**も 2 本で固定する (末尾)。
+ * `キャッシュを読めませんでした` の注記がマスタ error の回にも出るようになるが、
+ * **金額を出していない理由はマスタ側の注記が言う**べきで、この 1 文が
+ * 「だから金額を出していない」と読めてはいけない (memory `shared-notice-lies-on-second-screen`)。
+ * **合成後の 1 文をまるごと固定**してそこを留める。
+ *
  * 画面のローカル関数なので、`margin.vue` を**実際に mount して文字を読む**以外に測る手が無い
  * (memory `mount-huge-page-via-storage-and-usestate` と同じ形)。
  */
@@ -164,6 +170,37 @@ describe('/profit/margin の「R2 に残っている版」と手当マスタ (Re
     expect(w.text()).toContain('前回の集計')
     expect(w.text()).toContain(CACHED_DRIVER)
     expect(snapshotQueryYms).toEqual([CACHE_YM])
+  })
+
+  /**
+   * `localStorage.getItem` が投げる回 (SecurityError・quota 等)。**壊れた JSON では通らない** —
+   * `parseMarginCache` は `JSON.parse` を自分で catch して `null` を返すので、
+   * この経路に入るのは**読み出しそのものが失敗したとき**だけ (下の 1 本で対にして留める)。
+   */
+  it('キャッシュを読めなかった回は、その 1 文だけを出す (金額を出していない理由はマスタ側が言う)', async () => {
+    const real = localStorage.getItem.bind(localStorage)
+    const spy = vi.spyOn(localStorage, 'getItem').mockImplementation((key: string) => {
+      if (key === MARGIN_CACHE_KEY) throw new Error('localStorage が読めません')
+      return real(key)
+    })
+    const w = mountPage()
+    await flushPromises()
+    spy.mockRestore()
+    // **合成後の 1 文をまるごと固定する。** 金額にも手当マスタにも触れていないこと。
+    const note = w.findAll('p').map(p => p.text()).find(t => t.startsWith('キャッシュを読めませんでした'))
+    expect(note).toBe('キャッシュを読めませんでした — localStorage が読めません')
+    // 金額を出していない理由は**マスタ側の注記が言う** (2 本並ぶが、人が次にやることが違う)。
+    expect(w.text()).toContain('手当・粗利は表示しません')
+    // キャッシュが無いのだから月も分からない — 版の一覧は読まない。
+    expect(snapshotQueryYms).toEqual([])
+  })
+
+  it('壊れた JSON では「読めませんでした」を出さない (`parseMarginCache` が null に倒す)', async () => {
+    localStorage.setItem(MARGIN_CACHE_KEY, '{壊れた JSON')
+    const w = mountPage()
+    await flushPromises()
+    expect(w.text()).not.toContain('キャッシュを読めませんでした')
+    expect(snapshotQueryYms).toEqual([])
   })
 
   it('月が違うキャッシュでは版の一覧を読まない (#1016 以前からの挙動、この PR で変えない)', async () => {
