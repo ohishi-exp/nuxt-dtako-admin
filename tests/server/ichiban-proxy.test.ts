@@ -1,15 +1,24 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
+const { requireAuthMock } = vi.hoisted(() => ({ requireAuthMock: vi.fn() }))
+vi.mock('@ippoan/auth-client/server', () => ({ requireAuth: requireAuthMock }))
+
 import handler from '../../server/api/ichiban/[...path].get'
 
 const call = (event: unknown) => (handler as unknown as (e: unknown) => Promise<unknown>)(event)
 
-function eventWith(env: Record<string, unknown>, opts: { path?: string, url?: string } = {}) {
+/**
+ * `requireAuth` (Refs #988) が通る前提の event。**`INTERNAL_SHARED_SECRET` を既定で
+ * 載せる** — CF Access binding の 503 を見るテストが、認証側の 503 で先に落ちて
+ * 「別の理由の 503」を緑にしてしまわないようにする。認証側だけを見たいテストは
+ * `opts.env` で env を丸ごと差し替える。
+ */
+function eventWith(env: Record<string, unknown>, opts: { path?: string, url?: string, env?: Record<string, unknown> } = {}) {
   const path = opts.path ?? 'sales/vehicle-daily'
   const url = opts.url ?? `https://dtako.ippoan.org/api/ichiban/${path}?vehicle=101&from=2026-06-01`
   return {
     context: {
-      cloudflare: { env },
+      cloudflare: { env: opts.env ?? { INTERNAL_SHARED_SECRET: 'secret', ...env } },
       params: { path },
     },
     __responseHeaders: {} as Record<string, string>,
@@ -43,6 +52,8 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
   beforeEach(() => {
     fetchMock.mockReset()
     vi.stubGlobal('fetch', fetchMock)
+    requireAuthMock.mockReset()
+    requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
   })
 
   afterEach(() => {
@@ -151,9 +162,16 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
     })
   })
 
-  it('cloudflare.env が無くても binding 未設定として 503 で弾く', async () => {
+  /** env がまるごと無い形。**いまは認証側 (`INTERNAL_SHARED_SECRET`) の 503 が先に出る** —
+   * #988 で認証を上流 fetch より手前に置いたため。どちらにせよ「binding 未設定は 503、
+   * upstream は叩かない」は変わらない。 */
+  it('cloudflare.env が無くても binding 未設定として 503 で弾き fetch しない', async () => {
     const event = { context: { params: { path: 'x' } }, _url: 'https://dtako.ippoan.org/api/ichiban/x' }
-    await expect(call(event)).rejects.toMatchObject({ statusCode: 503 })
+    await expect(call(event)).rejects.toMatchObject({
+      statusCode: 503,
+      statusMessage: expect.stringContaining('INTERNAL_SHARED_SECRET'),
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('Secrets Store binding.get() が空値解決 (undefined) の場合も未設定として 503', async () => {
@@ -261,5 +279,122 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
 
     expect(body).toBe('')
     expect(event.__statusCode).toBe(200)
+  })
+})
+
+/**
+ * ★ **`requireAuth` を入れた 1 点** (Refs #988)。
+ *
+ * この route は「呼び出し元の身元を一切見ずに、CF Access Service Token を付けて
+ * 上流へ丸ごと転送する」classic な confused deputy だった — 前段は Cloudflare Access
+ * だけで、それは edge の設定であって**この repo が意図して置いた防御ではない**。
+ *
+ * **陰性対照 (2026-08-27 実測)**: `requireAuth` の 3 行を外すと、この describe の
+ * 4 本 (401 / 503 / secret 解決 / authWorkerUrl) が落ちる。とくに 1 本目は
+ * 直す前のコードでは **200 が返り upstream が 1 回叩かれる**。
+ *
+ * ★ **`fetch` は mock なので、このテスト単体は「上流が答えたか」を測っていない。**
+ * ただしこの route については**上流側にも認可の段が無い**ことを別途実読で確認済み
+ * (`ohishi-exp/rust-ichibanboshi` `origin/main` = `a17067a`。`authorize()` を呼ぶのは
+ * `src/routes/kyuyo.rs` だけで、全体に掛かる auth layer も無い) — なので
+ * 「前段は実質 Cloudflare Access だけだった」は成り立つ。**根拠はテストではなく
+ * そちらの実読**であることを混ぜないこと。
+ *
+ * 姉妹の `/api/kyuyo/**` が `requireAuth` ではなく「渡す身元が無ければ 401」なのは
+ * 機構の違い (route の JSDoc 参照) — あちらは認可の正本が上流にあり (しかも上流は
+ * fail-closed)、こちらは上流へ渡す身元をそもそも持たない。
+ */
+describe('ichiban proxy の認可 (Refs #988)', () => {
+  const fetchMock = vi.fn()
+  const ENV = {
+    INTERNAL_SHARED_SECRET: 'secret',
+    NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'client-id-x',
+    ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'client-secret-x',
+  }
+  const eventFor = (env: Record<string, unknown>) => ({
+    context: { cloudflare: { env }, params: { path: 'sales/vehicle-daily' } },
+    __responseHeaders: {} as Record<string, string>,
+    __statusCode: undefined as number | undefined,
+    _url: 'https://dtako.ippoan.org/api/ichiban/sales/vehicle-daily?vehicle=101',
+  })
+
+  beforeEach(() => {
+    fetchMock.mockReset()
+    vi.stubGlobal('fetch', fetchMock)
+    requireAuthMock.mockReset()
+    requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  /** ★★ **この PR の本体**。直す前は 200 が返り、upstream が 1 回叩かれていた。 */
+  it('★ 未ログインは 401 で、upstream を 1 回も叩かない (Service Token を貸さない)', async () => {
+    requireAuthMock.mockRejectedValue(Object.assign(new Error('Unauthorized'), { statusCode: 401 }))
+    fetchMock.mockResolvedValue(new Response('{"ok":true}', { status: 200 }))
+
+    await expect(call(eventFor(ENV))).rejects.toMatchObject({ statusCode: 401 })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('ログイン済みなら従来どおり転送する (陽性対照)', async () => {
+    fetchMock.mockResolvedValue(new Response('{"ok":true}', {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }))
+    const event = eventFor(ENV)
+
+    expect(await call(event)).toBe('{"ok":true}')
+    expect(event.__statusCode).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(requireAuthMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('INTERNAL_SHARED_SECRET 未設定なら 503 (requireAuth を呼ぶ前に落ちる)', async () => {
+    const { INTERNAL_SHARED_SECRET: _drop, ...rest } = ENV
+    await expect(call(eventFor(rest))).rejects.toMatchObject({
+      statusCode: 503,
+      statusMessage: expect.stringContaining('INTERNAL_SHARED_SECRET'),
+    })
+    expect(requireAuthMock).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('INTERNAL_SHARED_SECRET は Secrets Store binding (.get()) でも解決する', async () => {
+    fetchMock.mockResolvedValue(new Response('{}', { status: 200 }))
+    await call(eventFor({ ...ENV, INTERNAL_SHARED_SECRET: { get: async () => 'from-store' } }))
+
+    expect(requireAuthMock.mock.calls[0]![1]).toMatchObject({ sharedSecret: 'from-store' })
+  })
+
+  it('authWorkerUrl は NUXT_PUBLIC_AUTH_WORKER_URL、空/非文字列なら auth.ippoan.org', async () => {
+    // 3 回叩くので **毎回新しい Response** を返す (使い回すと body が二度読めない)。
+    fetchMock.mockImplementation(() => Promise.resolve(new Response('{}', { status: 200 })))
+
+    await call(eventFor({ ...ENV, NUXT_PUBLIC_AUTH_WORKER_URL: 'https://auth.example.test' }))
+    expect(requireAuthMock.mock.calls[0]![1]).toMatchObject({ authWorkerUrl: 'https://auth.example.test' })
+
+    requireAuthMock.mockClear()
+    await call(eventFor({ ...ENV, NUXT_PUBLIC_AUTH_WORKER_URL: '' }))
+    expect(requireAuthMock.mock.calls[0]![1]).toMatchObject({ authWorkerUrl: 'https://auth.ippoan.org' })
+
+    requireAuthMock.mockClear()
+    await call(eventFor({ ...ENV, NUXT_PUBLIC_AUTH_WORKER_URL: 7 }))
+    expect(requireAuthMock.mock.calls[0]![1]).toMatchObject({ authWorkerUrl: 'https://auth.ippoan.org' })
+  })
+
+  /** ★ **passthrough の契約 (Refs #900) に触れていない**ことを固定する。
+   * 401 は「本文が空の非 2xx に日本語の理由を作る」分岐より**手前**で投げるので、
+   * upstream 由来の 401 は今までどおり素通しされる (両者は別物)。 */
+  it('upstream 由来の 401 は今までどおり passthrough する (requireAuth の 401 とは別物)', async () => {
+    fetchMock.mockResolvedValue(new Response('{"error":"upstream unauthorized"}', {
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+    }))
+    const event = eventFor(ENV)
+
+    expect(await call(event)).toBe('{"error":"upstream unauthorized"}')
+    expect(event.__statusCode).toBe(401)
   })
 })

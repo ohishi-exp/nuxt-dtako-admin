@@ -47,8 +47,20 @@ export const DEV_AUTH_COOKIE_NAME = 'logi_auth_token_dev'
 
 /**
  * upstream に渡す `Authorization` ヘッダ値 (`Bearer <JWT>`) を組み立てる。
- * どこからも token を取れなければ `null` — 呼び出し側が 401 にするか、ヘッダを
- * 付けずに転送して upstream に判断させるかを決める。
+ * どこからも token を取れなければ `null`。
+ *
+ * ★ **#988 以降、`null` を受けた呼び出し元は 4 route とも 401 で止める** (fail closed)。
+ * 以前ここには「呼び出し側が 401 にするか、**ヘッダを付けずに転送して upstream に
+ * 判断させるか**を決める」と書いてあったが、**後者を選ぶ呼び出し元はもう 1 つも無い** —
+ * `/api/kyuyo/**` の GET/POST が最後だった。
+ *
+ * ★ **後者が危険だったから消したのではない** (上流 `rust-ichibanboshi` の
+ * `kyuyo::introspect::authorize()` は Bearer 無しを 401 で弾く fail-closed。
+ * 2026-08-27 に `origin/main` = `a17067a` を実読)。消したのは、**その防御が
+ * まるごと上流の実装に依存していて、この repo からは保証できない**から。
+ * `null` と分かっているなら、こちら側で止められる。
+ * **この関数自体の役割は変わっていない** — 決めるのは「どの文字列を渡すか」だけで、
+ * 失効・allowlist 外の判定は今までどおりしない (下記「ここでは JWT を検証しない」)。
  */
 export function resolveBrowserAuthorization(
   event: H3Event,

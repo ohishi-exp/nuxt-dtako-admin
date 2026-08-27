@@ -123,6 +123,41 @@ branches = true
 path = "server/utils/browser-jwt.ts"
 branches = true
 
+# 給与 proxy の 2 route。**#988 で「渡す身元が無ければ 401 (fail closed)」を足した**
+# ぶんをここで固定する — 認可の正本は上流のまま (introspect + email allowlist) で、
+# この 2 本が持つ認可は `resolveBrowserAuthorization` が `null` かどうかだけ。
+# **その 1 分岐が gate から外れていると、次の refactor で黙って消えても誰も気づかない。**
+# `/api/ichiban/**` (requireAuth) は #330 から登録済み。
+#
+# branches の根拠 — **指標は「v8 の per-arm カウント」** (`coverage/coverage-final.json`
+# の `b` 配列を 1 arm ずつ数えたもの。`check_coverage_100.mjs` が読む `% Branch` とは
+# 別の見方で、こちらは**短絡で片側しか通っていない arm を 0 として区別できる**):
+#   GET : branch site 3 / **arm 6 中 6** (2026-08-27 実測)
+#   POST: branch site 5 / **arm 10 中 10** (同上)
+#   内訳は両方とも `pathParam ?? ''` / `if (!authorization)` / `if (contentType)` で、
+#   POST はこれに `body.length > MAX_BODY_BYTES` と
+#   `typeof raw === 'string' ? raw : ''` が加わる。
+#   **陰性対照 (2026-08-27 実測、緑が測れている証拠)**: `if (!authorization)` の
+#   **true 側を通るテストは各 route 2 本ずつ**あり、**1 本だけ `it.skip` にしても
+#   gate は緑のまま通ってしまう** (もう 1 本が同じ arm を踏むため)。
+#   **2 本とも落とすと初めて赤になる**:
+#     POST — 「★ 3 経路とも取れなければ 401」+「身元が無ければ body が上限超過でも
+#            413 ではなく 401」の 2 本 ⇒ `lines 95%` で exit 1
+#     GET  — 「★ 3 経路とも取れなければ 401」+「DEV_LOGIN が無ければ dev cookie は
+#            身元にならず 401」の 2 本 ⇒ `lines 93.33%` で exit 1
+#   ★ **「1 本外せば赤になる」と書かない。**実測すると緑のまま通った —
+#   gate が緑であることは「その 1 本が効いている」の証拠にならない。
+#   **本番コードは 1 行も足していない** — 100% にするために足したのは
+#   「upstream 失敗 502 / path 欠落 / Content-Type 無し / body が文字列でない」の
+#   既存の枝を通すテスト 6 本だけ。
+[[files]]
+path = "server/api/kyuyo/[...path].get.ts"
+branches = true
+
+[[files]]
+path = "server/api/kyuyo/[...path].post.ts"
+branches = true
+
 [[files]]
 path = "app/utils/salary-compare.ts"
 branches = true
