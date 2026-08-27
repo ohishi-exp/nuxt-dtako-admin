@@ -21,6 +21,7 @@ import VehicleSettingsDumpPicker from '~/components/VehicleSettingsDumpPicker.vu
 import VehicleSettingsDiffTable from '~/components/VehicleSettingsDiffTable.vue'
 import { diffVehicleSettings, type FullDiff } from '~/utils/vehicle-settings-diff'
 import type { VehicleSettings } from '~/utils/vehicle-settings-cfg'
+import { currentAccessToken } from '~/utils/api'
 
 const route = useRoute()
 
@@ -51,7 +52,13 @@ function firstString(v: unknown): string {
 
 async function loadSummary() {
   try {
-    const res = await fetch('/api/vehicle-settings/history')
+    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+    // 経路でも通るよう `Authorization: Bearer` も明示する — この読み口が
+    // `requireAuth` を通すようになった (Refs #988)。`postNet780Archive` と同じ扱い。
+    const token = currentAccessToken()
+    const res = await fetch('/api/vehicle-settings/history', {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    })
     if (!res.ok) return
     summary.value = (await res.json()) as VehicleSummary[]
   } catch {

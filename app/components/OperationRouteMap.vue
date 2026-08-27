@@ -20,6 +20,7 @@
  * Google Maps 描画コンポーネントは他と同様 unit test 対象外)。
  */
 import { Loader } from '@googlemaps/js-api-loader'
+import { currentAccessToken } from '~/utils/api'
 import { filterRouteByLayers, type OperationRoute, type RouteMarker, type RouteSegment, type RouteMapLayers } from '~/utils/operation-route-map'
 
 const props = defineProps<{
@@ -123,7 +124,13 @@ async function createMap(): Promise<google.maps.Map | null> {
   try {
     // GOOGLEMAP_KEY_SECRET は Cloudflare Secrets Store binding なので server route
     // 経由で解決した文字列を取得する (vid-check / net780 と同じ endpoint を共用)。
-    const { key } = await $fetch('/api/vid-check/map-key')
+    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+    // 経路でも通るよう `Authorization: Bearer` も明示する — 鍵を返す口が
+    // `requireAuth` を通すようになった (Refs #988)。
+    const mapKeyToken = currentAccessToken()
+    const { key } = await $fetch('/api/vid-check/map-key', {
+      headers: mapKeyToken ? { authorization: `Bearer ${mapKeyToken}` } : {},
+    })
     if (!key) {
       loadError.value = 'Google Maps API key が未設定です (GOOGLEMAP_KEY_SECRET)'
       return null

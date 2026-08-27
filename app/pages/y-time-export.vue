@@ -203,7 +203,13 @@ async function checkTemplate() {
   }
   templateStatus.value = { state: 'checking' }
   try {
-    const res = await fetch(`/api/y-time-template?key=${encodeURIComponent(key)}`)
+    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+    // 経路でも通るよう `Authorization: Bearer` も明示する — 読み口も
+    // `requireAuth` を通すようになった (Refs #988)。上書きの口 (PUT) と同じ扱い。
+    const token = currentAccessToken()
+    const res = await fetch(`/api/y-time-template?key=${encodeURIComponent(key)}`, {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    })
     if (!res.ok) {
       templateStatus.value = {
         state: 'error',

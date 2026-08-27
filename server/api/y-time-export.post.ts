@@ -9,18 +9,48 @@
  * 5. xlsx binary を octet-stream で return
  *
  * R2 binding がない (ローカル `nuxt dev` 等) 環境では明示的に 503 を返す。
+ *
+ * ## `requireAuth` を付ける (Refs #988)
+ *
+ * **ここは D 段 (認可ゼロ) ではなく B 段だった** — `alcProxyFetch` が browser JWT を
+ * cookie / `Authorization: Bearer` から拾って転送し、上流の auth-worker `/alc-proxy`
+ * が **token 不在を fail-closed で 401 にする** (`ippoan/auth-worker@dd220b2`
+ * `src/handlers/alc-proxy.ts` の `if (!token) return jsonError(401, "Unauthorized")`)。
+ * `X-Alc-Proxy-Secret` は consumer proof であって身元ではないので、secret だけでは
+ * 通らない。**`/api/ichiban/**` (Service Token を無条件に付け、呼び出し元の身元を
+ * 一切見ない) とは型が違う** — 誤読しやすいのでここに書いておく。
+ *
+ * **⇒ ここは無防備ではなく、`requireAuth` を入れる前も xlsx は無認証の呼び出し元には
+ * 返っていない** (上流 401 がそのまま `createError({statusCode: apiRes.status})` で
+ * 返り、R2 のテンプレ取得にも到達しない)。「開いていたので塞いだ」とは書かないこと。
+ *
+ * それでも A 段に上げる: **B 段の防御は上流の実装依存**で、この repo からは
+ * 保証できない (`docs/plan-922-single-signin.md` §1 が `/api/ichiban/**` の項で
+ * 書いている性質と同じ)。Nitro 側で確定させれば、上流が変わっても規約が残る。
+ * ここが返す xlsx は**乗務員 1 人の日別 拘束/運転/休憩 の実データ**なので、
+ * 「Access を通れる誰か」ではなく「ログインしている人」に限る。
+ * 呼ぶのは Y時間 タブ (`/y-time-export`) の**ブラウザだけ**で、relay / cron /
+ * service binding からの呼び出しは無い (`git grep` で確認)。
+ *
+ * **書き口 (`y-time-template.put.ts`) と読み口 (`y-time-template.get.ts`) が
+ * 認証を要求するのに、テンプレを使って出力する側だけ素通し**、という食い違いも
+ * ここで解消する。
+ *
+ *   401 — 未ログイン (`requireAuth`)
+ *   503 — INTERNAL_SHARED_SECRET / DTAKO_R2 binding 未設定
  */
 
-import type { H3Event } from 'h3'
 import {
   defineEventHandler,
   readBody,
   createError,
   setResponseHeader,
 } from 'h3'
+import { requireAuth } from '@ippoan/auth-client/server'
 import type { YTimeExportResponse } from '~/types'
 import { writeYTimeRows, buildFilename } from '~/utils/y-time-xlsx'
 import { alcProxyFetch } from '../utils/alc-proxy'
+import { cfEnv, resolveSecret } from '../utils/cf-env'
 
 interface RequestBody {
   driver_cd: string
@@ -37,15 +67,24 @@ interface R2BucketMinimal {
 }
 interface CloudflareEnv {
   DTAKO_R2?: R2BucketMinimal
-}
-
-function getR2Binding(event: H3Event): R2BucketMinimal | null {
-  // nitro-cloudflare-pages / cloudflare-module で `event.context.cloudflare.env` に bindings が入る
-  const ctx = event.context as { cloudflare?: { env?: CloudflareEnv } }
-  return ctx.cloudflare?.env?.DTAKO_R2 ?? null
+  INTERNAL_SHARED_SECRET?: unknown
+  NUXT_PUBLIC_AUTH_WORKER_URL?: string
 }
 
 export default defineEventHandler(async (event) => {
+  // nitro-cloudflare-pages / cloudflare-module で `event.context.cloudflare.env` に bindings が入る
+  const env = cfEnv<CloudflareEnv>(event)
+  const sharedSecret = await resolveSecret(env.INTERNAL_SHARED_SECRET)
+  if (!sharedSecret) {
+    throw createError({ statusCode: 503, statusMessage: 'INTERNAL_SHARED_SECRET binding が未設定です' })
+  }
+  const authWorkerUrl
+    = typeof env.NUXT_PUBLIC_AUTH_WORKER_URL === 'string' && env.NUXT_PUBLIC_AUTH_WORKER_URL
+      ? env.NUXT_PUBLIC_AUTH_WORKER_URL
+      : 'https://auth.ippoan.org'
+  // **body を読む前・上流を叩く前に認証する。**
+  await requireAuth(event, { authWorkerUrl, sharedSecret })
+
   const body = await readBody<RequestBody>(event)
   if (!body || !body.driver_cd || !body.from || !body.to || !body.template_key) {
     throw createError({
@@ -77,7 +116,7 @@ export default defineEventHandler(async (event) => {
   const data = (await apiRes.json()) as YTimeExportResponse
 
   // 2. R2 binding でテンプレ取得
-  const r2 = getR2Binding(event)
+  const r2 = env.DTAKO_R2
   if (!r2) {
     throw createError({
       statusCode: 503,

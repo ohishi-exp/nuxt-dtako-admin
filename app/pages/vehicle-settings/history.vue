@@ -14,6 +14,7 @@ import { computed, ref, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import VehicleSettingsDisplay from '~/components/VehicleSettingsDisplay.vue'
 import type { VehicleSettings } from '~/utils/vehicle-settings-cfg'
+import { currentAccessToken } from '~/utils/api'
 
 interface VehicleSummary {
   vehicle_cd: string
@@ -57,7 +58,13 @@ async function loadSummary() {
   summaryLoading.value = true
   summaryError.value = ''
   try {
-    const res = await fetch('/api/vehicle-settings/history')
+    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+    // 経路でも通るよう `Authorization: Bearer` も明示する — この読み口が
+    // `requireAuth` を通すようになった (Refs #988)。`postNet780Archive` と同じ扱い。
+    const token = currentAccessToken()
+    const res = await fetch('/api/vehicle-settings/history', {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    })
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
     summary.value = (await res.json()) as VehicleSummary[]
   } catch (e) {
@@ -76,7 +83,11 @@ async function loadHistory(cd: string) {
   itemsLoading.value = true
   itemsError.value = ''
   try {
-    const res = await fetch(`/api/vehicle-settings/history?vehicle_cd=${encodeURIComponent(cd)}`)
+    // Refs #988 — 読み口が `requireAuth` を通すので Bearer も明示する。
+    const token = currentAccessToken()
+    const res = await fetch(`/api/vehicle-settings/history?vehicle_cd=${encodeURIComponent(cd)}`, {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    })
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
     items.value = (await res.json()) as HistoryItem[]
   } catch (e) {
@@ -92,7 +103,11 @@ async function loadDetail(key: string) {
   detailLoading.value = true
   detailError.value = ''
   try {
-    const res = await fetch(`/api/vehicle-settings/object?key=${encodeURIComponent(key)}`)
+    // Refs #988 — 読み口が `requireAuth` を通すので Bearer も明示する。
+    const token = currentAccessToken()
+    const res = await fetch(`/api/vehicle-settings/object?key=${encodeURIComponent(key)}`, {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    })
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
     detail.value = (await res.json()) as VehicleSettings
   } catch (e) {
