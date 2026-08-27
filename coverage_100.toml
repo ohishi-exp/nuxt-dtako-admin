@@ -419,6 +419,26 @@ branches = true
 [[files]]
 path = "app/utils/allowance-rate-master.ts"
 
+# 運行手当マスタの出どころ (R2 → 無ければ同梱の初期値) を決める pure util (Refs #805 PR-2)。
+# **3 状態 (`r2` / `seed` / `error`) を union で分けてある** — `error` に `rows` を
+# 持たせていないので、呼び出し側が `?? RATE_MASTER` と書けない。
+# 基準 = `origin/main` c918714 + この PR。実測で **Stmts 46/46・Lines 46/46・
+# Funcs 6/6・branch site 23 / arm 50 (50 arm すべて被覆)**。arm の内訳は
+# `resolveAllowanceRateMaster` 10 site / 21 arm、`parseRateRow` 7 / 17、
+# `allowanceRateNotice` 4 / 8、`textOrNull` 1 / 2、`allowanceRateRows` 1 / 2。
+# **`seed` の既定引数 (`= RATE_MASTER`) も両側を通してある**。
+#
+# **カバレッジ 100% は値を検査していない。** 2026-08-27 に `it.skip` で両方向を実測した:
+# - 値の砦 (`describe('R2 経由で解決したマスタ = 同梱の初期値 …')` の 5 本 = golden 24 経路の
+#   突合・手当合計 ¥2,618,000・陽性対照 2 本) を `describe.skip` にしても
+#   **gate は緑のまま** (`All 117 files at 100%`)。金額が全部ずれても gate は気づかない
+# - 一方 `describe('allowanceRateNotice …')` の 5 本を skip すると **gate は落ちる**
+#   (lines 95.65%)。文言の分岐はそこでしか通らないため
+# ⇒ **金額の砦は gate ではなくこの 5 本**。消すときは代わりを先に置くこと。
+[[files]]
+path = "app/utils/allowance-rate-source.ts"
+branches = true
+
 [[files]]
 path = "app/utils/allowance-trips.ts"
 branches = true

@@ -21,6 +21,7 @@
  */
 import { excludedKey, type ExcludableRow } from './allowance-excluded'
 import { resolveSlipDest } from './allowance-ichiban-legs'
+import type { RateRow } from './allowance-rate-master'
 import { dayDiff, DATE_SLACK } from './allowance-ichiban'
 import { placeKey, type AllowanceLookup } from './allowance-rate'
 import { addressToCity, cityToPlace, type LegAllowance } from './allowance-trips'
@@ -122,9 +123,10 @@ export function forcedLeg(
   row: Pick<AllowanceReportRow, 'originCity'>,
   slips: VehicleDailySlip[],
   provisional: ProvisionalMap,
+  master?: RateRow[],
 ): ForcedLeg {
   const origin = legOrigin(row)
-  const { dest, lookup } = resolveSlipDest(origin, slips)
+  const { dest, lookup } = resolveSlipDest(origin, slips, master)
   const masterDest = lookup.status === 'ok' ? lookup.dest : ''
   const provisionalYen = lookup.status === 'ok'
     ? null
@@ -147,6 +149,7 @@ export function resolveForceMatches(
   map: ForceMatchMap,
   slipsByRowId: Map<string, VehicleDailySlip>,
   provisional: ProvisionalMap,
+  master?: RateRow[],
 ): Map<string, ForcedLeg> {
   const out = new Map<string, ForcedLeg>()
   for (const row of rows) {
@@ -155,7 +158,7 @@ export function resolveForceMatches(
     if (ids === undefined) continue
     const slips = ids.map(id => slipsByRowId.get(id)).filter((s): s is VehicleDailySlip => s !== undefined)
     if (slips.length === 0) continue
-    out.set(key, forcedLeg(row, slips, provisional))
+    out.set(key, forcedLeg(row, slips, provisional, master))
   }
   return out
 }
