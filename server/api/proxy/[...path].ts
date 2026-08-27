@@ -14,22 +14,9 @@
  * (=/api/proxy) に連結するので catch-all path は api/... になる。'/' + 'api/...' で
  * /api/... に一致し二重 /api を防ぐ。
  */
-import type { H3Event } from 'h3'
 import { defineEventHandler, createError } from 'h3'
 import { createAuthWorkerProxyHandler } from '@ippoan/auth-client/server'
-
-function cfEnv(event: H3Event): Record<string, unknown> {
-  return (event.context.cloudflare as { env?: Record<string, unknown> } | undefined)?.env ?? {}
-}
-
-/** Secrets Store binding (`.get()`) / 文字列 のいずれでも値を取り出す。 */
-async function resolveSecret(binding: unknown): Promise<string | null> {
-  if (typeof binding === 'string') return binding
-  if (binding && typeof (binding as { get?: unknown }).get === 'function') {
-    return (await (binding as { get(): Promise<string> }).get()) ?? null
-  }
-  return null
-}
+import { cfEnv, resolveSecret } from '../../utils/cf-env'
 
 export default defineEventHandler(async (event) => {
   const env = cfEnv(event)

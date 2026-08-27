@@ -23,22 +23,10 @@
  */
 import type { H3Event } from 'h3'
 import { getCookie, getHeader, getRequestURL, createError } from 'h3'
+import { cfEnv, resolveSecret } from './cf-env'
 
 const DEFAULT_COOKIE_NAME = 'logi_auth_token'
 const ROUTE_PREFIX = '/alc-proxy'
-
-function cfEnv(event: H3Event): Record<string, unknown> {
-  return (event.context.cloudflare as { env?: Record<string, unknown> } | undefined)?.env ?? {}
-}
-
-/** Secrets Store binding (`.get()`) / 文字列 のいずれでも値を取り出す。 */
-async function resolveSecret(binding: unknown): Promise<string | null> {
-  if (typeof binding === 'string') return binding
-  if (binding && typeof (binding as { get?: unknown }).get === 'function') {
-    return (await (binding as { get(): Promise<string> }).get()) ?? null
-  }
-  return null
-}
 
 function bearerToken(authHeader: string | undefined): string | undefined {
   if (!authHeader) return undefined
