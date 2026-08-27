@@ -268,6 +268,7 @@ import {
 import {
   crossMonthMinutesByDate,
   kosokuPartsByDate,
+  kosokuShiftsState,
   mergeKosokuShiftMaps,
   parseKosokuDaily,
   parseFerryMinusByDriver,
@@ -279,6 +280,7 @@ import {
   prevYmOf,
   type KosokuParseResult,
   type KosokuShift,
+  type KosokuShiftsState,
 } from "./kosoku-daily";
 import {
   gcpPartsFor,
@@ -6808,6 +6810,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   ): Promise<{
     current: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
     prev: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
+    /** 当月の拘束を `kosoku-daily` から組めたか (Refs #980)。`null` は
+     * 「取りに行っていない」= `skipKosoku` (`source=gcp`)。呼び出し側が応答に
+     * 載せるので、**握り潰さずここから上げる** — 無いと「打刻だけで組んだ表」を
+     * 画面が正常として出す (本番で 97 名ぶん発生、#980)。 */
+    kosokuCurrent: KosokuShiftsState | null;
   } | null> {
     const apiUrl = (this.env.NUXT_ICHIBAN_API_URL || "").replace(/\/+$/, "");
     const clientId = this.env.NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID || "";
@@ -6883,6 +6890,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     ]);
     // 当月の勤務 = 前月から跨いだ分 + 当月分 (`kosokuPartsByDate` が当月に落ちる分だけ拾う)
     const kosokuCurrent = mergeKosokuShiftMaps(shiftsPrev?.shifts ?? null, shiftsCurrent?.shifts ?? null);
+    // ★ 応答に載せる判定は **当月だけ**を見る (Refs #980)。上の merge は「片方が
+    // null ならもう一方をそのまま返す」ので、**当月が落ちて前月だけ取れた時も
+    // 非 null になる** — `kosokuCurrent` の真偽で判定すると「当月が取れた」と
+    // 読めてしまう (既存の log の `kosoku` が今そうなっている)
+    const kosokuState = kosokuShiftsState(shiftsCurrent);
     const kosokuPrev = shiftsPrev?.shifts ?? null;
     // 当月の `/api/kintai/daily` が取れないと賃金の素材が無い。R2 へは落とさず null
     // (呼び出し側で timecard 行が空になる、#606-5) — 握り潰さずここで理由を残す
@@ -6940,9 +6952,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         // 「取れなかった」と「形が読めなかった」を log でも分ける (Refs #960) —
         // 後者は取り込み直しでは直らないので、調べる先が変わる
         kosoku_unreadable: shiftsCurrent?.unreadable === true,
+        // ★ 既存の `kosoku` は**前月だけ取れた時も "yes"** になる (上の merge)。
+        // 本番ログの追跡を切らないよう既存の値は変えず、当月だけを見た判定を足す
+        // (これが応答に載る値、Refs #980)
+        kosoku_current: kosokuState,
       }),
     );
-    return { current, prev };
+    return { current, prev, kosokuCurrent: kosokuState };
   }
 
   /**
@@ -7531,6 +7547,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
      * 空 (`{ summaries: [], noDataDrivers: [] }`)。呼び出し側 (`handleWageReport`)
      * は warnings 等で応答から観測できるようにすること (#606-5、握り潰し禁止)。 */
     kintaiLive: boolean;
+    /** 当月の拘束を `kosoku-daily` から組めたか (Refs #980)。**`kintaiLive: false`
+     * の時は `null`** — timecard 行が 1 行も無いので「打刻だけで組まれた表」自体が
+     * 存在せず、`"no"` を返すと上の live 失敗の warning と別のことを言い出す。 */
+    kintaiKosoku: KosokuShiftsState | null;
   }> {
     // タイムカード側は **R2 も ichiban の写しも読まず、live-build の成否だけで決める**
     // (2026-07-28「R2 やめろ」決定 → 2026-08-03 に写しフォールバックも撤去、#606-5)。
@@ -7551,6 +7571,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       kintaiCurrent: typeof emptyKintaiMonth;
       kintaiPrev: typeof emptyKintaiMonth;
       kintaiLive: boolean;
+      kintaiKosoku: KosokuShiftsState | null;
     }> | null = null;
     const resolveLive = () => {
       livePartsPromise ??= livePromise.then((live) => {
@@ -7563,6 +7584,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           kintaiCurrent: live ? live.current : emptyKintaiMonth,
           kintaiPrev: live ? live.prev : emptyKintaiMonth,
           kintaiLive: live !== null,
+          kintaiKosoku: live ? live.kosokuCurrent : null,
         };
       });
       return livePartsPromise;
@@ -7857,7 +7879,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // タイムカード由来 (本社事務員等、デジタコに乗らない人) のサマリは
     // `loadWageReportSource` が live-build の成否だけで組む (#606-5、Refs #424 PR-D)
     // マスタ 3 種と当月・前月 summary は互いに独立なので一括並列で読む (月切替の体感に直結)
-    const [wageMaster, minWageMaster, config, { current, prev, kintaiCurrent, kintaiPrev, kintaiLive }, gcpOverlay] =
+    const [
+      wageMaster,
+      minWageMaster,
+      config,
+      { current, prev, kintaiCurrent, kintaiPrev, kintaiLive, kintaiKosoku },
+      gcpOverlay,
+    ] =
       await Promise.all([
         timer.measure("master-wage", () =>
           loadMaster<WageMaster>("wage-master", normalizeWageMaster, { drivers: {} }),
@@ -7985,6 +8013,20 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         ...(gcpOverlay ? { restraint_source: restraintSource } : {}),
         rows,
         no_data_drivers: noDataDrivers,
+        /** 当月の拘束を `kosoku-daily` から組めたか (Refs #980)。
+         * `"yes"` = 組めた / `"no"` = 上流から取れなかった / `"unreadable"` =
+         * 応答は返ったが形が読めなかった / `null` = **判定していない**
+         * (`source=gcp` は取りに行かない、live-build ごと失敗した)。
+         *
+         * ★ **`null` を「取れた」と読ませないこと。** 画面は `"no"` /
+         * `"unreadable"` の時だけ注記を出し、`null` の 2 経路には別の表示がある
+         * (GCP はソース切替の注記、live 失敗は下の warnings)。
+         *
+         * ★ 常に載せる (`restraint_source` のように gcp 経路だけ足す形にしない)。
+         * **キーごと消すと「古い relay」と「取れた」が同じ見た目**になり、
+         * この issue と同じ「黙って落とす」を作り直す。既定経路の本文が 1 度だけ
+         * 変わる = 全閲覧者の弱 ETag が 1 回無効になるのは承知の上 (Refs #543 PR-5)。 */
+        timecard_kosoku: kintaiKosoku,
         warnings,
         config,
       },

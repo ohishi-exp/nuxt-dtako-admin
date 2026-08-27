@@ -7,8 +7,8 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import type { MinWageRowAttrs } from '../../app/utils/restraint-wage-view'
-import { EMPTY_WAGE_REPORT_NOTICE, emptyWageReportCause, fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, GROSS_HOURLY_CAVEAT, groupMinWageRows, isMonthlyOvertimeOver60h, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, MONTHLY_CSV_WAGE_TAIL_HEADERS, MONTHLY_OVERTIME_THRESHOLD_MINUTES, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
+import type { MinWageRowAttrs, TimecardKosokuState, WageReportResponse } from '../../app/utils/restraint-wage-view'
+import { EMPTY_WAGE_REPORT_NOTICE, timecardKosokuNotice, emptyWageReportCause, fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, GROSS_HOURLY_CAVEAT, groupMinWageRows, isMonthlyOvertimeOver60h, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, MONTHLY_CSV_WAGE_TAIL_HEADERS, MONTHLY_OVERTIME_THRESHOLD_MINUTES, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
 
 describe('fmtMinutes', () => {
   it('時間+分を "XhYYm" 表記にする', () => {
@@ -591,5 +591,85 @@ describe('月次集計の列名は割増込みだと分かる名前になって�
     const composed = GROSS_HOURLY_CAVEAT + ' 参考値です。'
     expect(composed).toContain('法的な最低賃金判定には使えません')
     expect(composed).toContain('参考値です。')
+  })
+})
+
+/**
+ * 拘束の元データ (`kosoku-daily`) が欠けたまま組まれた表であることの注記 (Refs #980)。
+ *
+ * **合成後の 1 文で見る** — ヘルパ 1 本や title だけを見て「書いてある」と決めない
+ * (memory `ui-text-judge-composed-string`)。この画面は**金額が出る**ので、突合タブの
+ * 「差分は当てになりません」は流用できない (あちらは差の画面で、金額欄が信用できるか
+ * については 1 文字も言っていない)。
+ */
+describe('timecardKosokuNotice', () => {
+  const report = (
+    state: TimecardKosokuState | null | undefined,
+    sources: Array<'timecard' | 'theearth'>,
+  ) => ({
+    month: '2026-07',
+    rows: sources.map(source => ({ source })),
+    no_data_drivers: [],
+    warnings: [],
+    ...(state === undefined ? {} : { timecard_kosoku: state }),
+  } as unknown as WageReportResponse)
+
+  it('応答がまだ無ければ出さない', () => {
+    expect(timecardKosokuNotice(null)).toBeNull()
+    expect(timecardKosokuNotice(undefined)).toBeNull()
+  })
+
+  it('取れていれば出さない', () => {
+    expect(timecardKosokuNotice(report('yes', ['timecard']))).toBeNull()
+  })
+
+  it('★ 判定していない (null / 項目ごと無い古い応答) でも出さない — 「取れなかった」ではない', () => {
+    // `source=gcp` (取りに行っていない) / live-build ごと失敗 / 古い relay の 3 通り。
+    // ここで出すと、時間が GCP 由来に差し替わった表に別の嘘を置くことになる
+    expect(timecardKosokuNotice(report(null, ['timecard']))).toBeNull()
+    expect(timecardKosokuNotice(report(undefined, ['timecard']))).toBeNull()
+  })
+
+  it('★ 取れなかった時は (a) 何が取れなかったか (b) 時間がどう組まれたか (c) 数字をどう読むか が 1 文で読める', () => {
+    const notice = timecardKosokuNotice(report('no', ['timecard', 'theearth', 'timecard']))!
+    expect(notice.title).toBe('拘束の元データ (kosoku-daily) が取れていません')
+    // (a) 何が取れなかったか
+    expect(notice.description).toContain('この月の拘束をオンプレの kosoku-daily から取得できませんでした')
+    // (b) この表の時間がどう組まれたか — **影響する行を数えて言う**
+    expect(notice.description).toContain('タイムカード由来の 2 行は、拘束・実働を打刻 (始業・終業) だけから組んでいます')
+    expect(notice.description).toContain('デジタコ由来の行は影響を受けません')
+    // (c) 数字をどう読むか
+    expect(notice.description).toContain('そこから計算する残業・金額も過大側になります')
+    // 効く処方だけを書く
+    expect(notice.description).toContain('少し待ってから画面を読み直すと入ります')
+  })
+
+  it('★ 効かない処方 (取り込み直し) へ読み手を送らない / 突合タブの文言を流用しない', () => {
+    const d = timecardKosokuNotice(report('no', ['timecard']))!.description
+    expect(d).not.toContain('取り込み')
+    expect(d).not.toContain('再取り込み')
+    // 突合タブ (`oursAvailable`) の文言。金額の出るこの画面では意味を成さない
+    expect(d).not.toContain('差分は当てになりません')
+    expect(d).not.toContain('nginx')
+    // 陽性対照: 同じ書き方で、実際に在る語は拾える (常に true を返していない)
+    expect(d).toContain('打刻')
+  })
+
+  it('★ 「取れなかった」と「読めなかった」を同じ見た目にしない — 処方が逆', () => {
+    const no = timecardKosokuNotice(report('no', ['timecard']))!
+    const unreadable = timecardKosokuNotice(report('unreadable', ['timecard']))!
+    expect(unreadable.title).not.toBe(no.title)
+    expect(unreadable.title).toBe('拘束の元データ (kosoku-daily) の形が読めません')
+    expect(unreadable.description).toContain('こちらが知っている形ではなく 1 件も読み取れませんでした')
+    expect(unreadable.description).toContain('読み直しても直りません')
+    // 「待てば入る」と読ませない (待っても直らない)
+    expect(unreadable.description).not.toContain('少し待ってから画面を読み直すと入ります')
+  })
+
+  it('タイムカード由来の行が 1 つも無ければ「影響を受けていない」と言い切る', () => {
+    const d = timecardKosokuNotice(report('no', ['theearth']))!.description
+    expect(d).toContain('この表にタイムカード由来の行はないので、いま出ている数字 (デジタコ由来) は影響を受けていません')
+    // 0 行なのに「N 行が打刻だけから組まれた」と言わない
+    expect(d).not.toContain('だけから組んでいます')
   })
 })
