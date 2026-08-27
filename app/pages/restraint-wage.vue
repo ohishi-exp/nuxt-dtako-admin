@@ -5968,11 +5968,17 @@ watch([compMap, kyuyoSyncedKeys], () => {
               </div>
             </template>
 
-            <!-- 拘束時間ソースの切り替え (最低賃金チェックのみ、既定は「現行」)。
-                 既定 = theearth の拘束時間管理表 (デジタコ = 運行ベース) + オンプレ
-                 kosoku-daily (打刻ベース) の合流で、**GCP は混ざっていない**。
-                 「GCP」を選ぶと拘束時間だけを kintai.day_summaries に差し替えて
-                 計算し直す (「オンプレ vs Supabase」タブが突き合わせている側)。 -->
+            <!-- 拘束時間ソースの切り替え (最低賃金チェックのみ)。
+                 **既定は「GCP」** (`minWageRestraintSource` の初期値が `'gcp'`)。
+                 つまり画面を開いた直後に出ている拘束時間は、GCP
+                 `kintai.day_summaries` に差し替えて計算し直したもの
+                 (「オンプレ vs Supabase」タブが突き合わせている側)。
+                 「現行」を選ぶと theearth の拘束時間管理表 (デジタコ = 運行ベース)
+                 と オンプレ kosoku-daily (打刻ベース) の合流に戻る
+                 (こちらには **GCP は混ざっていない**)。
+                 **GCP は行が欠けることがある** ので、完全な拘束を見たいときは
+                 「現行」に切り替えること — 既定が GCP になったからといって
+                 「現行」が要らなくなったわけではない。 -->
             <div v-if="activeTab === 'minwage'" class="flex flex-wrap items-center gap-3 mb-3 print:hidden">
               <span class="text-sm font-medium">拘束時間ソース:</span>
               <UButton
