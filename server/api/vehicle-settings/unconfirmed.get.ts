@@ -22,6 +22,10 @@
  * 通らない。**`/api/ichiban/**` (Service Token を無条件に付け、呼び出し元の身元を
  * 一切見ない) とは型が違う** — 誤読しやすいのでここに書いておく。
  *
+ * **⇒ ここは無防備ではなく、`requireAuth` を入れる前も車輛マスタは無認証の
+ * 呼び出し元には返っていない** (上流 401 がそのまま `createError({statusCode:
+ * apiRes.status})` で返る)。「開いていたので塞いだ」とは書かないこと。
+ *
  * それでも A 段に上げる理由が 2 つある:
  *
  * 1. **B 段の防御は上流の実装依存**で、この repo からは保証できない
@@ -29,7 +33,13 @@
  *    同じ)。Nitro 側で確定させれば、上流が変わっても規約が残る。
  * 2. **上流 401 を待つ前に R2 list が走ってしまう** — 下の `Promise.all` は
  *    `listConfirmedVehicleCds` を並行で回すので、**未ログインの相手でも R2 の
- *    listing (最大 50 往復) だけは実行される**。`requireAuth` を先に置けば止まる。
+ *    listing だけは実行される**。`requireAuth` を先に置けば止まる。
+ *    **実測** (`origin/main` a05bd08 の実装に、上流が 401 を返す mock を当てた
+ *    使い捨て probe。空バケツ = objects 0 件): **`r2.list` の呼び出し 1 回**。
+ *    陽性対照として上流 200 でも 1 回。**「未ログインなら 0 回」ではなかった。**
+ *    本番のデータ量では 1000 件ごとに cursor が 1 往復増える (ループ上限 50)。
+ *    今の実装では未ログイン時 **0 回**で、
+ *    `tests/server/vehicle-settings-unconfirmed-route.test.ts` が固定している。
  *
  * 呼ぶのは `/vehicle-settings/unconfirmed` の**ブラウザだけ**で、relay / cron /
  * service binding からの呼び出しは無い (`git grep` で確認)。

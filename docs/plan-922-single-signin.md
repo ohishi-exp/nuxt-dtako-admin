@@ -103,10 +103,10 @@ Google が 2 回出たなら ⑧ が壊れており、そのときは「アプ�
 
 | 段 | 本数 | 認可の実体 |
 | --- | --- | --- |
-| A. `requireAuth` (auth-worker ログイン必須) | 6 → 10 → **18** | Nitro で 401 |
+| A. `requireAuth` (auth-worker ログイン必須) | 6 → 10 → 16 → **24** | Nitro で 401 |
 | B. 上流に browser JWT を渡し**上流が弾く** | 7 → **5** | rust-ichibanboshi / auth-worker `/alc-proxy` |
 | C. machine shared secret | 1 | `X-Internal-Shared-Secret` constant-time |
-| **D. 認可が 1 つも無い** | 18 → 14 → **8** | **Access だけが前段** |
+| **D. 認可が 1 つも無い** | 18 → 14 → 8 → **2** | **Access だけが前段** |
 | E. 本番では 404 | 1 | `DEV_LOGIN !== 'true'` |
 
 > **2026-08-27 追記 (#988 の 1 本目、`origin/main` = 94b72f2 基点)。**
@@ -115,16 +115,28 @@ Google が 2 回出たなら ⑧ が壊れており、そのときは「アプ�
 > `y-time-template.put`)。**読み取り 14 本は手つかず**で、別 PR に残っています。
 > 数字は着手時に `origin/main` で数え直したもの (33 本の総数は当時から変わっていません)。
 
+> **2026-08-27 追記 (#988 の 3 本目 = PR #1010、`origin/main` = 00b0881)。**
+> **D のうち粗利・NET780 の読み口 6 本に `requireAuth` が入りました** — 下表の 🔧 行 6 つ
+> (`profit/snapshots` / `snapshot` / `margin-snapshots` / `margin-snapshot` /
+> `operation-leg-sales` / `net780/by-operation`)。#1010 はこの doc を触っていないので、
+> **この行は #988 の 2 本目 (下記) の rebase 時に足しました** — base が動いたのに
+> 数字を直さないと、次の人が古い内訳を読むことになるため。
+
 > ### 2026-08-27 追記 (#988 の 2 本目、読み口 8 本)
 >
 > **数え直しの条件を先に書きます** — この repo は「引き継ぎ文の数字が腐って次の人を
 > 外す」事故を繰り返しているため (memory `main-clone-worktree-is-stale-for-counting`
 > `measurement-needs-its-conditions`)。
 >
-> - **基点 SHA**: `origin/main` = `a05bd08d7b17452ef7c086557c43b07d3a3030e4`
+> - **基点 SHA**: 着手時は `origin/main` = `a05bd08d7b17452ef7c086557c43b07d3a3030e4`。
+>   **その後 #1007・#1010 が入って base が 2 回動いたので、
+>   `origin/main` = `00b0881aa83c413d7ef3ab811cdebab7571ed81e` で数え直した。**
+>   下の本数はすべて **00b0881 基準**。
 > - **数え方**: `find server/api -name '*.ts'` (32 本) + `server/routes/__dev/callback.get.ts`
 >   (1 本) = **33 本を全数**、1 本ずつ実読して A〜E に振り分けた。**表の行数ではなく
 >   ファイル数**で数えている (D の表は 1 行に 5 本まとめている行がある)。
+>   A 段の照合は `git show 00b0881:<path> | grep requireAuth` を 33 本に回して
+>   **16 本**を得た (= 6 + #995 の 4 + #1010 の 6)。
 > - **数えた人**: #988 の 2 本目の子タスク (`fix/988-3-misc-read-authz`)。
 >
 > **この 8 本に `requireAuth` を入れました**:
@@ -140,13 +152,45 @@ Google が 2 回出たなら ⑧ が壊れており、そのときは「アプ�
 > | **`GET /api/vehicle-settings/unconfirmed`** | **B** | 未確認車輛抽出 (`alcProxyFetch`) |
 > | **`POST /api/y-time-export`** | **B** | Y時間 xlsx 生成 (`alcProxyFetch`) |
 >
-> ⇒ **D は 14 − 6 = 8、B は 7 − 2 = 5、A は 10 + 8 = 18。** 10+5+1+8+1 = **33** で総数と合う。
+> #### 段の遷移 (★ この表は 2026-08-27 の 1 日で 3 回動いています)
+>
+> **数字だけを写さないこと。「いつの時点の数か」が無いと必ず腐ります。**
+> 合計は各時点とも 33 で、`server/api/**` 32 + `server/routes/__dev/callback` 1。
+>
+> | 時点 | A | B | C | D | E | 計 |
+> | --- | --- | --- | --- | --- | --- | --- |
+> | #988 着手前 (`origin/main` 09d7a33 / 94b72f2) | 6 | 7 | 1 | 18 | 1 | 33 |
+> | #995 (書き込み 4 本) の後 | 10 | 7 | 1 | 14 | 1 | 33 |
+> | **#1010 (粗利 5 + net780 1) の後 = `origin/main` `00b0881`** | **16** | 7 | 1 | **8** | 1 | 33 |
+> | **この PR (読み口 8 本) の後** | **24** | **5** | 1 | **2** | 1 | 33 |
+> | (予定) 兄弟 #p760-c988-4 (`/api/ichiban/**`) の後 | 25 | 5 | 1 | **1** | 1 | 33 |
+>
+> - この PR の 8 本は **D から 6 本** (`history` / `object` / `kyuyo-master/companies` /
+>   `y-time-template.get` / `vid-check/map-key` / `poi/:region`) +
+>   **B から 2 本** (`unconfirmed` / `y-time-export.post`)。
+>   だから **D 8→2 / B 7→5 / A 16→24** です。
+> - **この PR の直後に D に残るのは 2 本** — `GET /api/ichiban/**` (兄弟
+>   #p760-c988-4 の持ち物) と `GET /api/tariff/fare`。
+> - **★ 最後まで D に残る 1 本は `server/api/tariff/fare.get.ts` です。**
+>   D が 0 にならないのは塞ぎ忘れではなく、**呼び出し元を確定できていないから**
+>   (理由は下の注 1)。**この行を消さないでください** — 「なぜ 0 でないのか」が
+>   読み手に分からなくなります。
+> - **A 段の照合方法**: `git show 00b0881:<path> | grep requireAuth` を 33 本に回して
+>   16 本を得た (= 着手前 6 + #995 の 4 + #1010 の 6)。#1010 の 6 本は
+>   `origin/main` に入っているのに doc は更新されていなかったので、
+>   **この PR の rebase 時に表へ反映しました**。
 >
 > #### ★ 「D は 14 本ではなく 16 本だった」は成り立ちませんでした
 >
 > この 2 本目のタスクは「`unconfirmed` と `y-time-export` が D の表から**漏れていた**ので
 > 読み取りは 14 本ではなく 16 本」という前提で起票されました。**実測では違いました。**
 > 間違えた読みも理由ごと残します (消すと同じ失敗が繰り返せるため):
+>
+> > **誤読の型 (監督役の自己申告)**: 起票時の下調べが **route ファイルだけを grep して
+> > `requireAuth` / `Authorization` / shared secret の有無で分類した**ため、
+> > **認可が `alcProxyFetch` (`server/utils/alc-proxy.ts`) の側に居ることを見落とした**。
+> > ヒットした行が「誰のものか」まで辿っていない — この repo で繰り返し出ている型です。
+> > 同じ誤りは issue #988 のコメントにも書かれており、**訂正は監督役が #988 側に出します**。
 >
 > 1. **2 本は漏れていません。段 B に入っていました。** B の 7 本を実際に列挙すると
 >    `proxy/[...path]` / `kyuyo/[...path].get` / `kyuyo/[...path].post` /
@@ -164,29 +208,44 @@ Google が 2 回出たなら ⑧ が壊れており、そのときは「アプ�
 >    通りません。**`/api/ichiban/**` (Service Token を無条件に付け、呼び出し元の身元を
 >    一切見ない) とは型が違います。**
 >
+> **⇒ この 2 本は無防備ではありませんでした。**`requireAuth` を入れる前も、
+> 無認証の呼び出し元にはデータが返っていません (上流 401 がそのまま
+> `createError({ statusCode: apiRes.status })` で返る)。**「開いていたので塞いだ」と
+> 書くと、それもまた嘘になります。**
+>
 > **それでも 2 本を A 段に上げた理由**は 2 つ:
 >
 > - **B 段の防御は上流の実装依存**で、この repo からは保証できない — これは下の
 >   `/api/ichiban/**` の項がまさに書いている性質と同じです。Nitro 側で確定させれば、
 >   上流が変わっても規約がこの repo に残ります。
+>   (**上流の実測条件**: `ippoan/auth-worker` の `origin/main` = `HEAD` =
+>   `dd220b2a26519173972d566a5fed525a5e7a8dbf` (2026-08-27) の
+>   `src/handlers/alc-proxy.ts:143-144`。**監督役と子タスクが別々に読んで一致**。)
 > - **`unconfirmed` は上流 401 を待つ前に R2 list が走っていました** —
->   handler の `Promise.all` が listing を並行で回すので、**未ログインの相手でも
->   R2 の listing (最大 50 往復) だけは実行される**。`requireAuth` を先に置くと止まります。
->   (`tests/server/vehicle-settings-unconfirmed-route.test.ts` で実測して固定しました。)
+>   handler の `Promise.all` が listing を並行で回すため。
+>   **実測条件**: `origin/main` a05bd08 の `unconfirmed.get.ts` に、
+>   `alcProxyFetch` が **401 を返す** mock を当てた使い捨て probe。**空バケツ
+>   (objects 0 件) で `r2.list` の呼び出しは 1 回**、陽性対照 (上流 200) でも 1 回。
+>   **「未ログインなら 0 回」ではありませんでした。**本番のデータ量では 1000 件ごとに
+>   cursor が 1 往復増えます (ループ上限 50)。`requireAuth` を先に置いた今の実装では
+>   **0 回**で、`tests/server/vehicle-settings-unconfirmed-route.test.ts` が固定しています。
+>   **`y-time-export.post` 側にはこの利得はありません** — あちらは上流を待ってから
+>   R2 に触るので、元から未ログインでは R2 に到達しません。
 
 ### D の 18 本 (Access を外すと**そのまま公開される**)
 
-**✍ の 4 本は #988 の 1 本目で塞ぎました** (`requireAuth` = A 段に移動)。
-**🔒 の 6 本は #988 の 2 本目で塞ぎました** (同じく A 段に移動)。**残るのは 8 本**
-(`/api/ichiban/**` 1 + 粗利の読み 5 + `net780/by-operation` 1 + `tariff/fare` 1)。
+**✍ の 4 本は #988 の 1 本目 (#995) で塞ぎました** (`requireAuth` = A 段に移動)。
+**🔒 の 6 本は #988 の 2 本目**、**🔧 の 6 本は #988 の 3 本目 (#1010)** で塞ぎました
+(いずれも A 段に移動)。**残るのは 2 本** — `/api/ichiban/**` (兄弟タスクの持ち物) と
+`tariff/fare` (注 1) だけです。
 
 | route | 中身 | 書き込み |
 | --- | --- | --- |
 | **`GET /api/ichiban/**`** | **CF Access Service Token を付けて `rust-ichiban.mtamaramu.com` へ丸ごと転送する thin proxy。呼び出し元の身元を一切見ない** | — |
-| `GET /api/profit/snapshots` / `snapshot` / `margin-snapshots` / `margin-snapshot` / `operation-leg-sales` | `PROFIT_R2` の粗利・検証スナップショット (売上・原価・粗利の実額) | — |
+| `GET /api/profit/snapshots` / `snapshot` / `margin-snapshots` / `margin-snapshot` / `operation-leg-sales` | `PROFIT_R2` の粗利・検証スナップショット (売上・原価・粗利の実額) | 🔧 **→ #988 の 3 本目 (#1010) で塞いだ** |
 | `POST /api/profit/margin-summary` | 同 R2 に**版を書く** | ✍✍ **→ #988 で塞いだ** |
 | `DELETE /api/profit/snapshot` | 同 R2 の `latest.json` を**消す** | ✍✍ **→ #988 で塞いだ** |
-| `GET /api/net780/by-operation` | `DTAKO_DB` + `DTAKO_R2` の NET780 生データ ZIP | — |
+| `GET /api/net780/by-operation` | `DTAKO_DB` + `DTAKO_R2` の NET780 生データ ZIP | 🔧 **→ #988 の 3 本目 (#1010) で塞いだ** |
 | `POST /api/vehicle-settings/extract` | `DTAKO_R2` + `DTAKO_DB` に**書く** | ✍✍ **→ #988 で塞いだ** |
 | `GET /api/vehicle-settings/history` / `object` | 車輌設定 dump の一覧・実体 | 🔒 **→ #988 の 2 本目で塞いだ** |
 | `GET /api/kyuyo-master/companies` | `DTAKO_DB` の給与会社マスタ一覧 | 🔒 **→ #988 の 2 本目で塞いだ** |

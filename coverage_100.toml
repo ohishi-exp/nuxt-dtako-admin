@@ -1493,8 +1493,10 @@ branches = true
 # Y時間 xlsx 生成 (`POST /api/y-time-export`)。
 # **ここは D 段ではなく B 段だった** — `alcProxyFetch` が browser JWT を転送し、
 # 上流 auth-worker `/alc-proxy` が token 不在を fail-closed で 401 にする
-# (`ippoan/auth-worker@dd220b2` `src/handlers/alc-proxy.ts`)。それでも A 段に
-# 上げたのは **B 段の防御が上流の実装依存**でこの repo からは保証できないため。
+# (`ippoan/auth-worker` の `origin/main` = `dd220b2` `src/handlers/alc-proxy.ts:143-144`)。
+# **⇒ 無防備ではなかった** — 入れる前も無認証の呼び出し元には xlsx が返っていない。
+# 「開いていたので塞いだ」と読まないこと。A 段に上げたのは
+# **B 段の防御が上流の実装依存**でこの repo からは保証できないため。
 # **statements 32 / 32、branch site 12 / arm 27、27 arm すべて被覆。**
 # `writeYTimeRows` (ExcelJS) は mock している — ここで測っているのは
 # **route の分岐**であって xlsx 生成ではない (それは `tests/utils/y-time-xlsx.test.ts`)。
