@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dev-login ローカル検証環境を 1 コマンドで立ち上げる (Windows Git Bash 前提)。
+# dev-login ローカル検証環境を 1 コマンドで立ち上げる (Windows Git Bash / Linux 両対応)。
 #
 # nuxt-dtako-admin の repo ルート (メイン worktree) から実行:
 #   bash .claude/skills/dev-login-local-verify/setup-dev-env.sh [name] [options]
@@ -25,10 +25,16 @@
 #                  (chunk のハッシュが変わらないのが唯一の手掛かり。2026-08-24 に実害)。
 #
 # やること: git fetch → worktree add/更新 (origin/main detached) → node_modules を
-# donor から junction (0秒) or npm install (gh auth token) → wrangler.prebuilt.toml 生成
+# donor から junction / cp -al (0秒) or npm install (gh auth token) → wrangler.prebuilt.toml 生成
 # → port 先住チェック → nuxt build → wrangler dev 起動 (Ready 待ち) → (--hybrid で
 # nuxt dev も起動)。最後に issue_dev_login_url に渡す port を表示する。
 set -euo pipefail
+
+# Windows (Git Bash) と Linux で道具が違うのは 3 箇所だけ (node_modules の複製 / port の
+# 先住チェック / ゾンビ workerd の検出)。共有部分 (worktree・build・wrangler 起動、約 140 行) を
+# 二重管理にすると「片方だけ直して片方が腐る」ので、**別スクリプトに分けずその場で分岐する** (#1001)。
+IS_LINUX=0
+if [ "$(uname -s)" = Linux ]; then IS_LINUX=1; fi
 
 NAME="wrangler-dev-test"
 HYBRID=0
@@ -100,7 +106,16 @@ if [ ! -e "$WT/node_modules" ]; then
     echo "   donor 候補 $c は package.json が origin/main と違うので使わない"
   done
   rm -f "$MAIN_PKG"
-  if [ -n "$DONOR" ]; then
+  if [ -n "$DONOR" ] && [ "$IS_LINUX" = 1 ]; then
+    # Linux には junction が無い。**`ln -s` は使わない** — symlink で node_modules を張ると
+    # vite の `/@fs` allowlist に弾かれて**テストが全滅する** (SKILL.md の既知の罠。
+    # 2026-08-27 に別 repo で実測: 156 テストファイル全滅)。`cp -al` のハードリンク複製なら
+    # 中身は「本物のディレクトリ」になるので回避でき、メタデータのみの複製なので
+    # junction と同じくほぼ 0 秒で済む。
+    cp -al "$DONOR/node_modules" "$WT/node_modules" \
+      || { echo "!! node_modules のハードリンク複製に失敗した ($DONOR/node_modules)"; exit 1; }
+    echo "   cp -al -> $DONOR/node_modules (package.json は origin/main と一致)"
+  elif [ -n "$DONOR" ]; then
     # `cmd //c mklink /J` は使わない — MSYS の引数変換で `/J` が潰れ
     # 「無効なスイッチです」で失敗する (2026-07-25 実害)。PowerShell の
     # New-Item -ItemType Junction は引数変換の影響を受けない。
@@ -126,7 +141,20 @@ echo "== [4/6] port 先住 + ゾンビチェック"
 CHECK_PORTS="$WPORT"
 [ "$HYBRID" = 1 ] && CHECK_PORTS="$WPORT $NPORT"
 for p in $CHECK_PORTS; do
-  if netstat -ano 2>/dev/null | grep "LISTENING" | grep -q ":${p}[^0-9]"; then
+  if [ "$IS_LINUX" = 1 ]; then
+    # `ss` は netstat と出力が違う: 状態は `LISTEN` (`LISTENING` ではない)、Local Address は
+    # `0.0.0.0:8787` / `[::]:8787` / `127.0.0.1:8787` のどれでも出る。プロセス名は要らないので
+    # 「その port を listen しているか」だけを、最後の `:port` の完全一致で見る
+    # (`:${p}[^0-9]` のような部分一致は :3000 が :30000 に釣られる)。
+    if ss -ltn 2>/dev/null | awk -v want=":${p}" '$1 == "LISTEN" { a = $4; sub(/.*:/, ":", a); if (a == want) found = 1 } END { exit found ? 0 : 1 }'; then
+      echo "   !! port ${p} に先住プロセスあり。旧 workerd が旧バンドルで応答する罠 (SKILL.md 手順0)。"
+      echo "   !! 掃除 (**自分が起動したものか確かめてから**止める。兄弟セッションの dev を巻き込まない):"
+      echo "   !!         ss -ltnp \"sport = :${p}\"     # 塞いでいる PID が出る"
+      echo "   !!         ls -l /proc/<PID>/cwd        # どの worktree のものか分かる"
+      echo "   !!         kill <PID>"
+      exit 1
+    fi
+  elif netstat -ano 2>/dev/null | grep "LISTENING" | grep -q ":${p}[^0-9]"; then
     echo "   !! port ${p} に先住プロセスあり。旧 workerd が旧バンドルで応答する罠 (SKILL.md 手順0)。"
     echo "   !! 掃除: powershell -ExecutionPolicy Bypass -File $(dirname "$0")/kill-dev-zombies.ps1"
     exit 1
@@ -135,7 +163,26 @@ done
 # **port が空いていてもゾンビは残る** — listener を落とした親 wrangler や workerd が
 # 生き続け、次の起動で port を奪い返す (2026-07-25 実測: 5 ports 全部 free なのに
 # node/workerd が 5 個生存)。名前で分かる workerd だけ先に見る。
-if tasklist //FI "IMAGENAME eq workerd.exe" 2>/dev/null | grep -qi workerd; then
+if [ "$IS_LINUX" = 1 ]; then
+  # Linux の作業機は**複数セッションが同時に dev を回す**ので、素の `pgrep -x workerd` で
+  # 落とすと兄弟セッションの dev を「ゾンビ」と誤判定して常に exit 1 になる
+  # (2026-08-27 実測: 他タスクの workerd が 30 個生存、しかし port 8787 は空き)。
+  # 元の意図は「前回の**自分の** wrangler dev の残骸」なので、この worktree 由来のものだけ見る
+  # (workerd の cwd = wrangler dev を起動した worktree)。
+  ZOMBIE=""
+  for zpid in $(pgrep -x workerd 2>/dev/null || true); do
+    if [ "$(readlink -f "/proc/$zpid/cwd" 2>/dev/null)" = "$(readlink -f "$WT")" ]; then
+      ZOMBIE="$ZOMBIE $zpid"
+    fi
+  done
+  if [ -n "$ZOMBIE" ]; then
+    echo "   !! この worktree の workerd が残っている (前回の wrangler dev の子プロセス):$ZOMBIE"
+    echo "   !! 掃除 (**他セッションの workerd は巻き込まないこと** — 相手の実測ごと壊す):"
+    echo "   !!         ps -o pid,lstart,args -p $(echo $ZOMBIE | tr ' ' ',')"
+    echo "   !!         kill$ZOMBIE"
+    exit 1
+  fi
+elif tasklist //FI "IMAGENAME eq workerd.exe" 2>/dev/null | grep -qi workerd; then
   echo "   !! workerd.exe が残っている (前セッションの wrangler dev の子プロセス)。"
   echo "   !! 掃除: powershell -ExecutionPolicy Bypass -File $(dirname "$0")/kill-dev-zombies.ps1"
   exit 1
