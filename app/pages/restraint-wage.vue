@@ -3987,6 +3987,14 @@ async function saveWageSnapshot() {
     compId,
     month: month.value,
     restraintSource: minWageRestraintSource.value,
+    // ★ **行を作ったのと同じ応答から取る** (Refs #986)。`snapshotSourceRows()` が
+    //    読んでいるのは `minWageReport` なので、ここも `minWageReport`。`displayReport`
+    //    は保存が走る条件 (`minWageTableSettled` は `activeTab === 'minwage'` を含む) の
+    //    下では同じ値になるが、**その一致は別の条件に依存している**ので使わない —
+    //    ずれた瞬間に「その数字の土台」を指さない記録になり、この issue と同じ穴が増える。
+    //    `?? null` は `undefined` (この項目を返さない古い relay) を `null` に寄せるため。
+    //    **`null` は「見ていない」** で、「揃っていた」ではない。
+    timecardKosoku: minWageReport.value?.timecard_kosoku ?? null,
     rows: snapshotSourceRows(),
     salaryItemConfig: salaryItemConfig.value,
     payrollSyncedAt: payrollSyncedAtForMonth(),
