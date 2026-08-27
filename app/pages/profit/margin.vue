@@ -1159,6 +1159,21 @@ async function run() {
   if (!await ensureRateMaster()) {
     status.value = 'idle'
     progress.value = ''
+    // **既に出ていた版の一覧まで消さない** (Refs #1017)。上で一覧を空にしてから
+    // ここへ来るので、読み直さないと `onMounted` で出した版が画面から消え、
+    // **ページを開き直すまで戻らない**。金額を伏せている回こそ「いつ変わったかを
+    // 追える記録」は要る、という `onMounted` 側と同じ判断。
+    //
+    // **鍵は `shownYm` ではなく `ym.value`** — 版の一覧は**いま画面で見ている月**に
+    // 付く。集計していないので `shownYm` は空 (マスタが error のままのセッション) か
+    // 前回集計した月で、利用者が入力欄で選び直した月とは限らない。
+    // **上で空にするのは正しいので残す** — 月を変えて押した回に前の月の版が
+    // 残っていると、入力欄と一覧が違う月を指す。
+    //
+    // **月が空 / 形が違う回は呼ばない。** `<input type="month">` は空にできて、
+    // 読み口 (`margin-snapshots.get.ts`) は `400 ym (YYYY-MM) が必要です` を返すので、
+    // 月を消しただけの回に「一覧を読めませんでした」という別の失敗が画面に出る。
+    if (/^\d{4}-\d{2}$/.test(ym.value)) void loadMarginVersions(ym.value)
     return
   }
   progress.value = '運行を検索中...'

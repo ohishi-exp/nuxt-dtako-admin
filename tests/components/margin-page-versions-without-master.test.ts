@@ -21,6 +21,12 @@
  * 「だから金額を出していない」と読めてはいけない (memory `shared-notice-lies-on-second-screen`)。
  * **合成後の 1 文をまるごと固定**してそこを留める。
  *
+ * **「集計」を押した回**も同じ話 (Refs #1017 の 2 本目)。`run()` は版の一覧を**空にしてから**
+ * `ensureRateMaster()` の早期 return に入るので、マスタが error のまま押すと
+ * **`onMounted` で出した版が消えて、ページを開き直すまで戻らない**。空にするのは正しい
+ * (月を変えて押した回に前の月の版が残ると入力欄と一覧が食い違う) ので、
+ * **早期 return の中で `ym.value` の版を読み直す**。末尾 3 本で留める。
+ *
  * 画面のローカル関数なので、`margin.vue` を**実際に mount して文字を読む**以外に測る手が無い
  * (memory `mount-huge-page-via-storage-and-usestate` と同じ形)。
  */
@@ -201,6 +207,59 @@ describe('/profit/margin の「R2 に残っている版」と手当マスタ (Re
     await flushPromises()
     expect(w.text()).not.toContain('キャッシュを読めませんでした')
     expect(snapshotQueryYms).toEqual([])
+  })
+
+  /** 「集計」ボタン。`status === 'loading'` のときだけ文言が変わるので、両方で拾う。 */
+  function runButton(w: ReturnType<typeof mountPage>) {
+    return w.findAll('button').find(b => b.text() === '集計' || b.text() === '集計中...')!
+  }
+
+  it('★ マスタが error のまま「集計」を押しても、版の一覧が消えない', async () => {
+    const w = mountPage()
+    await flushPromises()
+    expect(w.text()).toContain(VERSION_LABEL)
+
+    await runButton(w).trigger('click')
+    await flushPromises()
+
+    // 空にした後に読み直しているので、`ym.value` (= 画面の月) でもう 1 回引く。
+    expect(snapshotQueryYms).toEqual([CACHE_YM, CACHE_YM])
+    expect(w.text()).toContain('R2 に残っている版')
+    expect(w.text()).toContain(VERSION_LABEL)
+    // 金額はやはり出さない (#1016 の判断)。
+    expect(w.text()).toContain('手当・粗利は表示しません')
+    expect(w.text()).not.toContain(CACHED_DRIVER)
+  })
+
+  it('月を空にして「集計」を押した回は読み口を叩かない (400 の注記を出さない)', async () => {
+    const w = mountPage()
+    await flushPromises()
+    await w.find('input[type="month"]').setValue('')
+
+    await runButton(w).trigger('click')
+    await flushPromises()
+
+    // mount 時の 1 回だけ。空の `ym` で引くと読み口が 400 を返す。
+    expect(snapshotQueryYms).toEqual([CACHE_YM])
+    expect(w.text()).not.toContain('R2 に残した版の一覧を読めませんでした')
+  })
+
+  it('マスタが正常なら「集計」の版の読み直しは今までどおり集計の最後だけ', async () => {
+    rateResponse = { exists: false }
+    const w = mountPage()
+    await flushPromises()
+    expect(snapshotQueryYms).toEqual([CACHE_YM])
+
+    await runButton(w).trigger('click')
+    await flushPromises()
+
+    // **早期 return を通らないので、ここでは 1 回も増えない。** 版を読み直すのは
+    // 集計しきった最後 (`loadMarginVersions(shownYm.value)`) だけで、この回は
+    // 運行の検索が失敗して (テストでは `initApi` を通っていないので `API 未初期化`)
+    // そこまで届かない。**足した読み直しが成功経路に漏れていない**ことの陽性対照。
+    expect(snapshotQueryYms).toEqual([CACHE_YM])
+    // 一覧は `run()` の頭で空にしたまま (この PR で変えていない挙動)。
+    expect(w.text()).not.toContain(VERSION_LABEL)
   })
 
   it('月が違うキャッシュでは版の一覧を読まない (#1016 以前からの挙動、この PR で変えない)', async () => {
