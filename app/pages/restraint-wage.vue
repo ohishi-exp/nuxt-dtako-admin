@@ -759,15 +759,18 @@ async function fetchWageReport(ym: string): Promise<WageReportResponse> {
 
 // ---- 最低賃金チェックの拘束時間ソース切り替え (ユーザー決定 2026-08-04) ----
 //
-// 既定 (`current`) は**この画面が従来ずっと出していたもの**: theearth の拘束時間
-// 管理表 CSV (デジタコ = 運行ベース) と オンプレ `kosoku-daily` (打刻 + 休息、
-// MariaDB 直読み) の合流。**GCP は 1 行も混ざっていない。**
-// `gcp` を選んだ時だけ relay が `?source=gcp` で拘束時間を GCP `day_summaries`
-// (「オンプレ vs Supabase」タブが突き合わせている側) に差し替えて計算し直す。
+// **既定は `gcp`** (すぐ下の初期値)。`gcp` の時は relay が `?source=gcp` で
+// 拘束時間を GCP `day_summaries` (「オンプレ vs Supabase」タブが突き合わせている側)
+// に差し替えて計算し直す。**つまり画面を開いた既定の状態には GCP が混ざっている。**
+// `current` を選ぶと差し替えの無い側に戻る: theearth の拘束時間管理表 CSV
+// (デジタコ = 運行ベース) と オンプレ `kosoku-daily` (打刻 + 休息、MariaDB 直読み)
+// の合流で、**こちらには GCP は 1 行も混ざっていない。**
+// **GCP は行が欠けることがある**ので、完全な拘束を見たいときは `current` に切り替える。
 //
 // **別 ref に分けて持つ** — `report` は月次集計・給与比較・タイムカード表も見ており、
-// 最低賃金チェックのトグルでそれらの数字が動いてはいけない。既定のままなら
-// 追加のフェッチも起きない。
+// 最低賃金チェックのトグルでそれらの数字が動いてはいけない。**既定が `gcp` なので、
+// 最低賃金チェックのタブを開くと GCP を取りに行く** — 発火条件は下の
+// `watch([activeTab, minWageRestraintSource, month])` に付けたコメントが正。
 const minWageRestraintSource = ref<RestraintSourceKey>('gcp')
 const RESTRAINT_SOURCE_OPTIONS = [
   { label: '現行 (デジタコ拘束表 + オンプレ打刻)', value: 'current' },
@@ -5968,11 +5971,17 @@ watch([compMap, kyuyoSyncedKeys], () => {
               </div>
             </template>
 
-            <!-- 拘束時間ソースの切り替え (最低賃金チェックのみ、既定は「現行」)。
-                 既定 = theearth の拘束時間管理表 (デジタコ = 運行ベース) + オンプレ
-                 kosoku-daily (打刻ベース) の合流で、**GCP は混ざっていない**。
-                 「GCP」を選ぶと拘束時間だけを kintai.day_summaries に差し替えて
-                 計算し直す (「オンプレ vs Supabase」タブが突き合わせている側)。 -->
+            <!-- 拘束時間ソースの切り替え (最低賃金チェックのみ)。
+                 **既定は「GCP」** (`minWageRestraintSource` の初期値が `'gcp'`)。
+                 つまり画面を開いた直後に出ている拘束時間は、GCP
+                 `kintai.day_summaries` に差し替えて計算し直したもの
+                 (「オンプレ vs Supabase」タブが突き合わせている側)。
+                 「現行」を選ぶと theearth の拘束時間管理表 (デジタコ = 運行ベース)
+                 と オンプレ kosoku-daily (打刻ベース) の合流に戻る
+                 (こちらには **GCP は混ざっていない**)。
+                 **GCP は行が欠けることがある** ので、完全な拘束を見たいときは
+                 「現行」に切り替えること — 既定が GCP になったからといって
+                 「現行」が要らなくなったわけではない。 -->
             <div v-if="activeTab === 'minwage'" class="flex flex-wrap items-center gap-3 mb-3 print:hidden">
               <span class="text-sm font-medium">拘束時間ソース:</span>
               <UButton
