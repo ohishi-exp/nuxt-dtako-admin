@@ -537,6 +537,20 @@ const RATE_MASTER_NO_AUTH = '会社IDまたはログイン情報が分かりま�
  *
  * **読み (GET) と書き (PUT) で同じものを使う** — 片方だけ別の作り方にすると
  * 「読めるのに保存だけ 401」になる。
+ *
+ * ## `restraint-wage.vue:228` の `authHeaders()` から借りた型と、意図的に違う 2 点
+ *
+ * 送るヘッダ 3 本 (`X-Theearth-Comp-Id` / `X-Theearth-User-B64` / `Authorization`)
+ * は同じ。違うのは:
+ *
+ * 1. **token が無いとき、あちらは `Authorization` を省いて送る**
+ *    (`...(token ? {…} : {})`)。**こちらは送らない (`null` を返す)** — あちらは
+ *    theearth セッションを持つので comp だけでも身元が立つが、この画面は
+ *    それを持たないので、**token が無ければ relay に届く身元が 1 つも無い**。
+ *    投げても 401 が返るだけなので、理由を画面に出す方が読める
+ * 2. **会社ID の探し先** — あちらは `session.value?.compId ?? viewerComp.value`、
+ *    こちらは `readViewerCompId(localStorage)` (拘束時間タブの残りを借りる)。
+ *    PR-2 が決めた借用で、**新しいキーは増やさない**
  */
 function rateMasterHeaders(): Record<string, string> | null {
   const compId = readViewerCompId(localStorage)
@@ -619,9 +633,19 @@ const rateConflictDiff = ref<AllowanceRateRowDiff | null>(null)
  * 保存の後、**表に出ている金額が保存前のマスタで計算したもの**になっているか。
  *
  * 出さないと、注記だけ新しい版を指したまま古い金額が並ぶ — 「この版で計算した金額」に
- * 読めてしまう (`allowanceRateNoticeForMargin` が粗利タブのキャッシュに足しているのと
- * 同じ理由)。**自動で引き直さない**のは、保存の途中で集計を走らせると失敗したときの
- * 状態が読めなくなるため。
+ * 読めてしまう。**粗利タブの但し書き (`allowanceRateNoticeForMargin`) と形は同じだが
+ * 理由が違う**ので文も分けてある (`ALLOWANCE_RATE_STALE_AMOUNTS_NOTICE` の注記が正)。
+ *
+ * ## **自動で引き直さない** — 押した人に押させる
+ *
+ * 1. **引き直しは通信を伴う** (イベントCSV と一番星の明細)。保存 1 回で運行の本数だけ
+ *    取りにいくのは、押した人が頼んでいない仕事
+ * 2. **保存の経路から `run()` を呼ぶと、失敗したときの状態が読めなくなる** —
+ *    保存は通ったが集計が落ちた回に、`status` が `error` で `rateSaveMessage` が
+ *    成功、という**互いに矛盾する 2 つの表示**が同時に出る。どちらが起きたのかを
+ *    人が読み解けない
+ *
+ * ⇒ **「古い」とだけ言って、引き直しは `集計` ボタン 1 か所に残す。**
  */
 const rateAmountsStale = ref(false)
 /** 集計中に出す注記の文字列 (テストで固定してある 1 文)。 */
