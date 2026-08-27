@@ -541,6 +541,31 @@ branches = true
 path = "server/utils/net780-archive.ts"
 branches = true
 
+# `GET /api/net780/by-operation` — D1 検索カタログを運行NO で引き、アーカイブ済みなら
+# R2 の NET780 生データ ZIP を**そのまま**返す口。**#988 で `requireAuth` を入れたのを機に
+# 登録した** (それまでテストが 1 本も無かった)。この口は
+# `docs/plan-922-single-signin.md` §1 の D 段 (Nitro 側の認可が 1 つも無く、Cloudflare
+# Access だけが前段) に居て、**運行NO を 22 桁総当たりすれば誰でも生データを落とせる**形
+# だった。JSDoc の「theearth セッションは不要」は**上流の話**で、こちら側の認可が要らない
+# 理由ではない。
+# 固定しているのは ①認可 (`requireAuth` の前に secret を解く 503 / 未ログインの 401 で
+# **D1 も R2 も叩かない** / 形の検査より認証が先で 401 が 400 に化けない)
+# ②既存の 404 三態 (カタログ未登録 / `operation_count !== 1` / R2 オブジェクト欠落) を
+# **同じ見た目にしない**こと ③応答が `Buffer` で、`{}` (2 バイト) に JSON 化されないこと
+# (2026-07-19 の実害と同じ形)。
+# 実測: v8 の **statements 23/23、branch site 13 / arm 26/26、functions 1/1**
+# (指標名を書いておく — 分岐数は触るたびに動くので、数字だけ残すと次に読む人が別の指標と
+# 取り違える)。
+# **陰性対照**: 「★ 陽性対照: 認証が通れば ZIP のバイトがそのまま返る」と
+# 「httpMetadata が無ければ content-type は application/zip に倒す」の 2 本を `it.skip` に
+# すると、この登録行が **`branches 96.15% (expected 100%)`** で落ちる (gate exit 1)。実測済み。
+# **落ちるのは branches だけで lines は 100% のまま** — `content-type` を組む行そのものは
+# 通り、`?? 'application/zip'` の**既定側の腕だけ**が落ちる (26 → 25)。
+# **lines だけを見ていると気づけない**ので、この行は `branches = true` で登録する。
+[[files]]
+path = "server/api/net780/by-operation.get.ts"
+branches = true
+
 # 釧路営業所 (暫定) 試算の土台 (Refs #760 の 32)。営業所マスタは作らず、起終点の座標を
 # 差し替えて回送距離を試算するための pure util — 座標定数 (`KUSHIRO_CITY_HALL` /
 # `OBIHIRO_DEPOT`) と営業所をキーで選ぶ `DEPOTS` + `isValidLatLng` + 直線距離

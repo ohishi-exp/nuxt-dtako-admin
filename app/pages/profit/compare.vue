@@ -10,7 +10,7 @@
  */
 import { searchVehicleDailySlips } from '~/utils/ichiban'
 import { describeApiError } from '~/utils/api-error'
-import { getOperations, getOperationCsv } from '~/utils/api'
+import { getOperations, getOperationCsv, currentAccessToken } from '~/utils/api'
 import { summarizeSelectedRows, type SelectedRowsSummary } from '~/utils/event-data-table'
 import {
   groupSlipsByVehicleDate,
@@ -62,8 +62,13 @@ function hasAnyFilter(): boolean {
  * 無し扱いになり、CSV全行集計にフォールバックする)。 */
 async function loadSnapshotIndex(groups: SlipGroup[]): Promise<Map<string, SnapshotListItem>> {
   const pairs = uniqueVehicleYmPairs(groups)
+  // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+  // 経路でも通るよう `Authorization: Bearer` も明示する — この読み口が
+  // `requireAuth` を通すようになった (Refs #988)。`snapshot.delete.ts` と同じ扱い。
+  const token = currentAccessToken()
+  const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {}
   const results = await Promise.allSettled(
-    pairs.map(p => $fetch<{ items: SnapshotListItem[] }>('/api/profit/snapshots', { query: p })),
+    pairs.map(p => $fetch<{ items: SnapshotListItem[] }>('/api/profit/snapshots', { query: p, headers })),
   )
   const index = new Map<string, SnapshotListItem>()
   for (const res of results) {
@@ -80,7 +85,12 @@ async function loadSnapshotIndex(groups: SlipGroup[]): Promise<Map<string, Snaps
 
 async function fetchFullSnapshot(item: SnapshotListItem): Promise<ProfitSnapshot | null> {
   try {
+    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+    // 経路でも通るよう `Authorization: Bearer` も明示する — この読み口が
+    // `requireAuth` を通すようになった (Refs #988)。`snapshot.delete.ts` と同じ扱い。
+    const token = currentAccessToken()
     return await $fetch<ProfitSnapshot>('/api/profit/snapshot', {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
       query: { ym: item.ym, vehicle: item.vehicleCode, unkoNo: item.unkoNo, segmentId: item.segmentId },
     })
   }

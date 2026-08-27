@@ -51,7 +51,14 @@ async function loadSnapshotList() {
     const query: Record<string, string> = {}
     if (snapshotFilterVehicle.value) query.vehicle = snapshotFilterVehicle.value
     if (snapshotFilterYm.value) query.ym = snapshotFilterYm.value
-    const res = await $fetch<SnapshotListResult>('/api/profit/snapshots', { query })
+    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+    // 経路でも通るよう `Authorization: Bearer` も明示する — この読み口が
+    // `requireAuth` を通すようになった (Refs #988)。`snapshot.delete.ts` と同じ扱い。
+    const token = currentAccessToken()
+    const res = await $fetch<SnapshotListResult>('/api/profit/snapshots', {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+      query,
+    })
     snapshotItems.value = res.items
     snapshotUnreadable.value = snapshotUnreadableNote(res.unreadable)
     snapshotListStatus.value = 'ready'

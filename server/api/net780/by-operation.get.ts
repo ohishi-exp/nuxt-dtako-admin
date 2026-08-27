@@ -15,14 +15,31 @@
  * GET /api/net780/by-operation?operationNo=2607141234560000001726
  *   200 — ZIP バイナリ (extractSingleOperationZip + parseNet780Zip はフロント側)
  *   400 — operationNo 形式不正
+ *   401 — 未ログイン (`requireAuth`、Refs #988)
  *   404 — カタログ未登録・R2 オブジェクト欠落・または operation_count !== 1
  *         (複数運行まとめて archive された zip は個別運行を安全に取り出せない
  *         — DO 側の handleNet780R2View と同じガード、Refs #299 実害修正)
- *   503 — DTAKO_DB / DTAKO_R2 binding 未設定
+ *   503 — INTERNAL_SHARED_SECRET / DTAKO_DB / DTAKO_R2 binding 未設定
+ *
+ * ## `requireAuth` を付ける (Refs #988)
+ *
+ * ここは **Cloudflare Access だけが前段**で、Nitro 側に認可が 1 つも無かった
+ * (`docs/plan-922-single-signin.md` §1 の D 段)。Access は edge の設定であって
+ * **この repo が意図して置いた防御ではない** — 外した瞬間、運行NO を 22 桁総当たり
+ * するだけで**運行の生データ ZIP** (速度・位置の秒単位の原本) が誰でも落とせる。
+ * **「theearth セッションは不要」は上流の話で、こちら側の認可が要らない理由ではない。**
+ * 書き込み側 (#995) と同じ A 段の `requireAuth` (`margin-summary.post.ts` と同じ 2 行)
+ * をここにも入れる。呼ぶのは運行詳細の NET780 タブ
+ * (`Net780OperationSummary.vue` / `useNet780OperationData.ts`) の**ブラウザだけ**で、
+ * relay / cron / service binding からの呼び出しは無い (`git grep` で確認)。
+ *
+ * **`/net780-api/*` (DO 側) には足していない** — あちらは `worker/index.ts` が Nitro を
+ * 迂回させる prefix なので、この handler を通らない。
  */
 
-import type { H3Event } from 'h3'
 import { defineEventHandler, getQuery, createError, setResponseHeader } from 'h3'
+import { requireAuth } from '@ippoan/auth-client/server'
+import { cfEnv, resolveSecret } from '../../utils/cf-env'
 
 interface D1PreparedStatementLite {
   bind(...values: unknown[]): D1PreparedStatementLite
@@ -39,23 +56,34 @@ interface R2BucketLite {
   get(key: string): Promise<R2ObjectLite | null>
 }
 
-function getBindings(event: H3Event): { db: D1DatabaseLite | null; r2: R2BucketLite | null } {
-  const ctx = event.context as {
-    cloudflare?: { env?: { DTAKO_DB?: D1DatabaseLite; DTAKO_R2?: R2BucketLite } }
-  }
-  return {
-    db: ctx.cloudflare?.env?.DTAKO_DB ?? null,
-    r2: ctx.cloudflare?.env?.DTAKO_R2 ?? null,
-  }
+interface CloudflareEnv {
+  DTAKO_DB?: D1DatabaseLite
+  DTAKO_R2?: R2BucketLite
+  INTERNAL_SHARED_SECRET?: unknown
+  NUXT_PUBLIC_AUTH_WORKER_URL?: string
 }
 
 export default defineEventHandler(async (event) => {
+  const env = cfEnv<CloudflareEnv>(event)
+  const sharedSecret = await resolveSecret(env.INTERNAL_SHARED_SECRET)
+  if (!sharedSecret) {
+    throw createError({ statusCode: 503, statusMessage: 'INTERNAL_SHARED_SECRET binding が未設定です' })
+  }
+  const authWorkerUrl
+    = typeof env.NUXT_PUBLIC_AUTH_WORKER_URL === 'string' && env.NUXT_PUBLIC_AUTH_WORKER_URL
+      ? env.NUXT_PUBLIC_AUTH_WORKER_URL
+      : 'https://auth.ippoan.org'
+  // **運行NO を 1 つも受け取る前に認証する。** 22 桁の総当たりで生データを
+  // 引ける口だったので、形の検査より先に置く。
+  await requireAuth(event, { authWorkerUrl, sharedSecret })
+
   const { operationNo } = getQuery(event)
   if (typeof operationNo !== 'string' || !/^\d{22}$/.test(operationNo)) {
     throw createError({ statusCode: 400, statusMessage: 'operationNo は22桁の数値で指定してください' })
   }
 
-  const { db, r2 } = getBindings(event)
+  const db = env.DTAKO_DB ?? null
+  const r2 = env.DTAKO_R2 ?? null
   if (!db || !r2) {
     throw createError({
       statusCode: 503,

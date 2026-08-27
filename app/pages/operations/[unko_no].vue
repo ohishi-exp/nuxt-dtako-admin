@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { getOperation, getOperations, getOperationCsv, deleteOperation } from '~/utils/api'
+import { getOperation, getOperations, getOperationCsv, deleteOperation, currentAccessToken } from '~/utils/api'
 import type { Operation, CsvJsonResponse, CsvType } from '~/types'
 import { filterValidGpsPoints, filterPointsByRange, buildSpeedColoredSegments, buildNet780SearchLink } from '~/utils/net780'
 import {
@@ -155,8 +155,13 @@ async function loadLegSalesFromR2() {
     return
   }
   try {
+    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+    // 経路でも通るよう `Authorization: Bearer` も明示する — この読み口が
+    // `requireAuth` を通すようになった (Refs #988)。`snapshot.delete.ts` と同じ扱い。
+    const token = currentAccessToken()
+    const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {}
     const results = await Promise.all(yms.map(ym =>
-      $fetch<OperationLegSalesR2>('/api/profit/operation-leg-sales', { query: { ym, unkoNo } })))
+      $fetch<OperationLegSalesR2>('/api/profit/operation-leg-sales', { query: { ym, unkoNo }, headers })))
     // 候補が空になることはない (`yms.length > 0` を上で見ている) ので `pickBest` は必ず値を返す。
     legSalesR2.value = { state: 'done', result: pickBestR2LegSales(results)!, checkedYms: yms }
   }
