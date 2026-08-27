@@ -16,6 +16,45 @@
  * これを含めれば `SCRAPER_MODE=http` (Chromium 不要) で正常動作する。
  */
 
+/**
+ * ★ theearth クライアントの正本はこの repo (ohishi-exp/nuxt-dtako-admin) — Refs #978
+ *
+ * 写しが 1 本ある: **ohishi-exp/nuxt_dtako_logs の `server/utils/theearth-venus-client.ts`**
+ * (あちらは login + VenusBridge が 1 ファイルにまとまっており、このファイルと
+ * `./theearth-venus-client` の両方に対応する)。
+ *
+ * 由来はむしろ nuxt_dtako_logs → この repo への移植 (`./theearth-venus-client` の冒頭参照、
+ * どちらも 2026-07-03) だが、**以後 theearth の実機仕様に追従して更新され続けているのは
+ * この repo だけ**。nuxt_dtako_logs 側は移植元の 1 commit (ohishi-exp/nuxt_dtako_logs#33、
+ * 2026-07-03) 以降そのファイルが一度も変更されていない (2026-08-27 時点)。
+ * よって **theearth の仕様変更で直す本体はこちら**とする。
+ *
+ * ■ 最終同期時点 (次に見る人が「いつからズレているか」を測り直さずに読めるように):
+ *     写し側は **ohishi-exp/nuxt_dtako_logs#33 / 2026-07-03** の内容のまま止まっている
+ *     (あちらの main = `f666e1a` / 2026-07-30 だが、それ以降 theearth 関連の変更は無い)。
+ *     こちら側の実装の最終変更 (docs commit を除く) はこのファイルが **#644 / 2026-08-04
+ *     (`7c97b4f`)**、`./theearth-venus-client` が **#175 / 2026-07-08 (`39ccd50`)**。
+ *     ⇒ **2026-07-03 以降ズレ続けている。** 最後に両者を突合したのは **2026-08-27**
+ *     (当 repo の origin/main = `94b72f2`)。
+ *
+ * ■ nuxt_dtako_logs 側と本体が一字一句同じ (2026-08-27 実測。コメント・空白・`export`
+ *   修飾子を除いた比較。このファイルが持つ分):
+ *     BASE_URL / LOGIN_PATH / TheearthClientError / FetchLike / CookieJar /
+ *     createCookieJar / extractSetCookieHeaders / ingestSetCookie / cookieHeader /
+ *     LoginParams / FormFieldRef / decodeHtmlEntities / findFormFieldById /
+ *     extractHiddenFields / looksLoggedIn
+ *   → **ここを theearth 都合で直したら、nuxt_dtako_logs 側の同名も直す (逆も同じ)。**
+ *
+ * ■ 同名だが中身は既に分岐済み (揃える対象ではない。いずれもこの repo 側が新しい):
+ *     findTagById (こちらは `<select>` も拾う) / HIDDEN_FIELD_NAMES / postForm /
+ *     fetchWithJar (timeout + User-Agent) / login (ライセンス数超過の自動 kick)
+ *   ※ nuxt_dtako_logs 側の HIDDEN_FIELD_NAMES には `__VIEWSTATEENCRYPTED` が無い。
+ *     `theearth-venus` skill の「罠1」に該当し、あちらのログインは現状 500 で
+ *     失敗している可能性が高い (未実測)。
+ *
+ * 実機確定知見の正本は `theearth-venus` skill (`.claude/skills/theearth-venus/SKILL.md`)。
+ */
+
 import { measurePhase, type PhaseTimer } from "./phase-timing";
 
 export const BASE_URL = "https://theearth-np.com";
