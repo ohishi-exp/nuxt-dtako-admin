@@ -336,6 +336,22 @@ branches = true
 # BR() の instrumented コピーで数えた分岐は **13 site 中 12 が両側**。残る 1 つは
 # `|| String(e)` の**右辺** — `||` 連鎖の最終項なので**真偽で経路が分かれず**、
 # v8 も分岐に数えない (埋めようとすると通らないテストを書くことになる)。
+#
+# **#996 で `describeResponseFailure` (生 `fetch` の `Response` → 理由 + 次の一手) を
+# 足したので分岐が動いた。**指標名を必ず添える (数字だけ残すと別の指標と取り違える):
+#
+# | 指標 (v8) | 基準 = `origin/main` a05bd08 | #996 後 |
+# | --- | --- | --- |
+# | statements | 18 / 18 | **43 / 43** |
+# | branch site | 12 | **21** |
+# | branch arm | 25 / 25 | **43 / 43** |
+#
+# 増えた 9 site の内訳は `responseReason` の 3 (`text === ''` / `hasStringReason` の
+# 三項 / `catch`)、`hasStringReason` の 3 (`typeof === 'string'` / `typeof !== 'object'
+# || data === null` の if と binary-expr)、`nextStepForStatus` の 4 つの `if`
+# — 死に分岐 0 件 (401 / 403 / 413 / 5xx / その他 4xx を**両側から**固定してある)。
+# **BR() の instrumented コピーは #996 では測っていない** (計測器がこの worktree に
+# 無い)。上の 3 指標は v8 の `coverage-final.json` を直接数えた値。
 [[files]]
 path = "app/utils/api-error.ts"
 branches = true
