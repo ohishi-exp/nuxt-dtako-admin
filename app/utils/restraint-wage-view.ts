@@ -143,7 +143,7 @@ export interface WageReportRow {
    * 単価の掛け方を決めるのに使う。 */
   pay_kubun?: number | null
   /** `restraint_source: 'gcp'` の応答で、GCP `day_summaries` にこの乗務員 × この月の
-   * 行が無かった (= 欠測)。既定 (`current`) の応答では常に false / 未定義。
+   * 行が無かった (= 欠測)。`current` の応答では常に false / 未定義。
    * **0 分ではない** ので、金額・最低賃金割れの判定は出さずに「-」で表示する。 */
   restraint_missing?: boolean
 }
