@@ -17,10 +17,10 @@
  * (relay へ渡す形にできないため)。
  */
 
-import type { H3Event } from 'h3'
 import { defineEventHandler, readBody, createError } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
 import { describeNetprintTargetsFailure } from '../../utils/netprint-targets'
+import { cfEnv, resolveSecret } from '../../utils/cf-env'
 
 interface FetcherLike {
   fetch(input: string, init?: RequestInit): Promise<Response>
@@ -31,25 +31,11 @@ interface CloudflareEnv {
   NUXT_PUBLIC_AUTH_WORKER_URL?: string
 }
 
-function cfEnv(event: H3Event): CloudflareEnv {
-  return (event.context.cloudflare as { env?: CloudflareEnv } | undefined)?.env ?? {}
-}
-
-/** Secrets Store binding (`.get()`) / 文字列 のいずれでも値を取り出す
- * (`run.post.ts` と同実装)。 */
-async function resolveSecret(binding: unknown): Promise<string | null> {
-  if (typeof binding === 'string') return binding
-  if (binding && typeof (binding as { get?: unknown }).get === 'function') {
-    return (await (binding as { get(): Promise<string> }).get()) ?? null
-  }
-  return null
-}
-
 /** body が読めなかったことを表す番兵 (`undefined` は「空 body」と区別が付かない)。 */
 const UNREADABLE = Symbol('unreadable-body')
 
 export default defineEventHandler(async (event) => {
-  const env = cfEnv(event)
+  const env = cfEnv<CloudflareEnv>(event)
   const sharedSecret = await resolveSecret(env.INTERNAL_SHARED_SECRET)
   if (!sharedSecret) {
     throw createError({ statusCode: 503, statusMessage: 'INTERNAL_SHARED_SECRET binding が未設定です' })

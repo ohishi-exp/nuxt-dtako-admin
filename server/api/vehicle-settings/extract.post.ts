@@ -33,6 +33,7 @@ import {
   type VehicleSettings,
 } from '~/utils/vehicle-settings-cfg'
 import { vehicleSettingsR2Paths } from '~/utils/vehicle-settings-r2'
+import { resolveSecret } from '../../utils/cf-env'
 
 const MAX_BYTES = 5 * 1024 * 1024 // 5MB — NET780 dump zip は 50KB 程度なので余裕の上限
 
@@ -53,16 +54,6 @@ interface D1PreparedStatementLite {
 }
 interface D1DatabaseLite {
   prepare(sql: string): D1PreparedStatementLite
-}
-
-/** Secrets Store binding (`.get()`) / 文字列 のいずれでも値を取り出す
- * (`allowance-override.post.ts` と同実装)。 */
-async function resolveSecret(binding: unknown): Promise<string | null> {
-  if (typeof binding === 'string') return binding
-  if (binding && typeof (binding as { get?: unknown }).get === 'function') {
-    return (await (binding as { get(): Promise<string> }).get()) ?? null
-  }
-  return null
 }
 
 interface AuthEnv {
