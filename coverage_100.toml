@@ -447,6 +447,38 @@ path = "app/utils/allowance-rate-master.ts"
 path = "app/utils/allowance-rate-source.ts"
 branches = true
 
+# 運行手当マスタを**画面から書き換える**ための pure ロジック (Refs #805 PR-3)。
+# 読む側 (`allowance-rate-source.ts`) の 3 状態を受けて、**編集させてよいのは
+# `r2` (edit) と `seed` (register) の 2 つだけ**に絞る。`error` は `locked` で、
+# **`locked` に `rows` を持たせていない**ので呼び出し側が初期値へ倒しようがない。
+#
+# ★ **`seed` でも `baseVersion` (空文字) を送る。** relay は「文字列が来たら
+# 突き合わせる / 現在が無ければ素通し」なので、空文字は「まだ無いはず」の主張になる。
+# 省くと無条件保存で、同じ `seed` を見た 2 人の**後勝ちで先の登録が黙って消える**。
+#
+# ★ **409 の結果型に「手元をこう置き換えろ」という材料が無い**
+# (`AllowanceRateSaveResult` の `conflict` は `conflict` / `diff` だけ)。
+# 上書きは呼び出し側が書こうとしても書けない。
+#
+# ★ **0 行は保存させない。** relay の `normalizeAllowanceRateMaster` は `rows: []` を
+# 通すが、通すと次に読んだとき `resolveAllowanceRateMaster` が `error` (「0 行です」) に
+# するので、**全部消す操作が「マスタを読めない状態」を自分で作る**ことになる。
+#
+# 基準 = `origin/main` d91888c + この PR。実測で **Stmts 69/69・Funcs 14/14・
+# v8 branch site 32 / arm 68 (68 arm すべて被覆)**。
+# **`BR()` の instrumented コピーでも数え直した** — `||` / `&&` / `??` の項を 1 site ずつに
+# 割ると **site 37 / arm 74、片側しか通らない分岐 0 件**。v8 は短絡で死に分岐を
+# 見逃すので、この 2 通りが一致することまで見ている (memory `coverage-branch-instrumentation`)。
+#
+# **カバレッジ 100% は値を検査していない。** 実装を壊す 6 通りで落ちる本数を実測した
+# (全 63 本中):
+# 409 を saved 扱い → **4 落ちる** / `seed` の `baseVersion` を省く → **1** /
+# `error` でも編集させる → **2** / 0 行を止めない → **1** /
+# 運賃の空欄を 0 に倒す → **7** / `changed` の出し分けをやめる → **5**。
+[[files]]
+path = "app/utils/allowance-rate-editor.ts"
+branches = true
+
 [[files]]
 path = "app/utils/allowance-trips.ts"
 branches = true

@@ -52,6 +52,20 @@ import {
   resolveAllowanceRateMaster,
   type AllowanceRateState,
 } from '~/utils/allowance-rate-source'
+import {
+  ALLOWANCE_RATE_STALE_AMOUNTS_NOTICE,
+  allowanceRateDiffLabel,
+  allowanceRateEditability,
+  allowanceRateSaveLabel,
+  emptyAllowanceRateDraftRow,
+  parseAllowanceRateDraft,
+  resolveAllowanceRateSave,
+  toAllowanceRateDraft,
+  type AllowanceRateConflict,
+  type AllowanceRateDraftRow,
+  type AllowanceRatePutOutcome,
+  type AllowanceRateRowDiff,
+} from '~/utils/allowance-rate-editor'
 import type { RateRow } from '~/utils/allowance-rate-master'
 import { readViewerCompId } from '~/utils/kushiro-branch-view'
 import { b64urlUtf8 } from '~/composables/useTheearthSession'
@@ -510,28 +524,41 @@ const rateRows = computed<RateRow[] | undefined>(() =>
 /** 画面に出す 1 文。まだ読んでいなければ出さない。 */
 const rateNotice = computed(() => (rateState.value === null ? '' : allowanceRateNotice(rateState.value)))
 
+/** 会社ID か JWT を借りられなかったときに画面へ出す 1 文。**読み (GET) と
+ * 書き (PUT) で同じ**にする — 読めた人が書けない (またはその逆) と読める文にしない。 */
+const RATE_MASTER_NO_AUTH = '会社IDまたはログイン情報が分かりません。拘束時間・賃金タブを一度開いてください'
+
 /**
- * 運行手当マスタを R2 から読む (`GET /restraint-api/allowance-rate`、PR-1 の口)。
+ * relay へ送る認証ヘッダ。借りられなければ `null`。
  *
  * **会社ID と JWT は拘束時間・賃金タブが localStorage に残したものを借りる** —
  * この画面は theearth ログインを持たないので、新しいログイン導線は作らない
- * (粗利タブ `margin.vue` の最低賃金マスタと同じ借用)。借りられなければ
- * **初期値には倒さず**理由を出す。
+ * (粗利タブ `margin.vue` の最低賃金マスタと同じ借用)。
+ *
+ * **読み (GET) と書き (PUT) で同じものを使う** — 片方だけ別の作り方にすると
+ * 「読めるのに保存だけ 401」になる。
  */
-async function loadRateMaster(): Promise<AllowanceRateState> {
+function rateMasterHeaders(): Record<string, string> | null {
   const compId = readViewerCompId(localStorage)
   const token = currentAccessToken()
-  if (!compId || !token) {
-    return allowanceRateReadError('会社IDまたはログイン情報が分かりません。拘束時間・賃金タブを一度開いてください')
+  if (!compId || !token) return null
+  return {
+    'X-Theearth-Comp-Id': compId,
+    'X-Theearth-User-B64': b64urlUtf8('viewer'),
+    'Authorization': `Bearer ${token}`,
   }
+}
+
+/**
+ * 運行手当マスタを R2 から読む (`GET /restraint-api/allowance-rate`、PR-1 の口)。
+ *
+ * 認証情報を借りられなければ **初期値には倒さず**理由を出す。
+ */
+async function loadRateMaster(): Promise<AllowanceRateState> {
+  const headers = rateMasterHeaders()
+  if (headers === null) return allowanceRateReadError(RATE_MASTER_NO_AUTH)
   try {
-    const res = await $fetch<unknown>(ALLOWANCE_RATE_ENDPOINT, {
-      headers: {
-        'X-Theearth-Comp-Id': compId,
-        'X-Theearth-User-B64': b64urlUtf8('viewer'),
-        'Authorization': `Bearer ${token}`,
-      },
-    })
+    const res = await $fetch<unknown>(ALLOWANCE_RATE_ENDPOINT, { headers })
     return resolveAllowanceRateMaster(res)
   }
   catch (e) {
@@ -552,6 +579,161 @@ async function ensureRateMaster(): Promise<boolean> {
     rateState.value = await loadRateMaster()
   }
   return rateState.value.status !== 'error'
+}
+
+// --- 運行手当マスタを画面から書き換える (Refs #805 PR-3) ---------------------
+// 判定は `allowance-rate-editor.ts` (pure)。ここは通信と入力欄の状態だけ。
+//
+// **編集をこの画面に置いた理由**: すぐ下で人は既に手当の金額を入れている
+// (暫定手当 = マスタの穴の回避策)。マスタ編集が別画面にあると「穴を暫定で埋める」と
+// 「マスタを直す」が散り、暫定のまま放置される。
+//
+// **`error` では編集させない。** 読めていない版を上書きすると、他の人が保存した
+// 内容がまるごと消える。「読めなかった」を「まだ何も無い」と同じ扱いにしない。
+
+/** 編集の可否・`baseVersion`・ロック理由。まだ 1 度も読んでいなければ `null`。 */
+const rateEdit = computed(() => (rateState.value === null ? null : allowanceRateEditability(rateState.value)))
+
+/** 編集欄を開いているか。**既定は閉じ** — 62 行の表を常時出すと集計の邪魔になる。 */
+const rateEditorOpen = ref(false)
+/** 入力中の行。**開いたときの値で作り直す。** */
+const rateDraft = ref<AllowanceRateDraftRow[]>([])
+/**
+ * 開いたときに握った `baseVersion` と mode。**保存はこれを送る。**
+ *
+ * 保存の瞬間の `rateEdit` を読むと、その間に読み直しが挟まったとき「自分が見て
+ * 編集した版」ではなくなる — 楽観排他の突き合わせ相手が自分の知らない版になって
+ * **他人の保存を黙って上書きする**。
+ */
+const rateDraftBase = ref<{ mode: 'edit' | 'register', baseVersion: string } | null>(null)
+const savingRate = ref(false)
+/** 保存できた回の 1 文 (`changed` の出し分けを含む)。 */
+const rateSaveMessage = ref('')
+/** 保存できなかった回の 1 文 (入力の不備 / 通信の失敗)。**409 は別扱い** (下)。 */
+const rateSaveError = ref('')
+/** 409。**手元の編集は消さず**、サーバの現在値を並べて見せる。 */
+const rateConflict = ref<AllowanceRateConflict | null>(null)
+/** 409 のとき、手元とサーバで何行食い違っているか。 */
+const rateConflictDiff = ref<AllowanceRateRowDiff | null>(null)
+/**
+ * 保存の後、**表に出ている金額が保存前のマスタで計算したもの**になっているか。
+ *
+ * 出さないと、注記だけ新しい版を指したまま古い金額が並ぶ — 「この版で計算した金額」に
+ * 読めてしまう (`allowanceRateNoticeForMargin` が粗利タブのキャッシュに足しているのと
+ * 同じ理由)。**自動で引き直さない**のは、保存の途中で集計を走らせると失敗したときの
+ * 状態が読めなくなるため。
+ */
+const rateAmountsStale = ref(false)
+/** 集計中に出す注記の文字列 (テストで固定してある 1 文)。 */
+const rateStaleNotice = ALLOWANCE_RATE_STALE_AMOUNTS_NOTICE
+
+function resetRateDraftFromState() {
+  const next = rateEdit.value
+  if (next === null || next.mode === 'locked') return
+  rateDraft.value = toAllowanceRateDraft(next.rows)
+  rateDraftBase.value = { mode: next.mode, baseVersion: next.baseVersion }
+}
+
+function openRateEditor() {
+  const edit = rateEdit.value
+  if (edit === null || edit.mode === 'locked') return
+  resetRateDraftFromState()
+  rateSaveMessage.value = ''
+  rateSaveError.value = ''
+  rateConflict.value = null
+  rateConflictDiff.value = null
+  rateEditorOpen.value = true
+}
+
+function addRateRow() {
+  rateDraft.value = [...rateDraft.value, emptyAllowanceRateDraftRow()]
+  rateSaveError.value = ''
+}
+
+function removeRateRow(index: number) {
+  rateDraft.value = rateDraft.value.filter((_, i) => i !== index)
+  rateSaveError.value = ''
+}
+
+/**
+ * `PUT /restraint-api/allowance-rate`。
+ *
+ * **`baseVersion` を必ず送る。** `seed` (R2 未設定) の回は**空文字**を送る —
+ * relay は「文字列が来たら突き合わせる / 現在が無ければ素通し」なので、空文字は
+ * 「まだ無いはず」の主張になる。省くと無条件保存になり、同じ `seed` を見た 2 人が
+ * 両方登録したときに**後勝ちで先の登録が黙って消える**。
+ */
+async function saveRateMaster() {
+  const base = rateDraftBase.value
+  if (base === null) return
+  rateSaveMessage.value = ''
+  rateConflict.value = null
+  rateConflictDiff.value = null
+  const parsed = parseAllowanceRateDraft(rateDraft.value)
+  if (!parsed.ok) {
+    rateSaveError.value = parsed.errors.join(' / ')
+    return
+  }
+  const headers = rateMasterHeaders()
+  if (headers === null) {
+    rateSaveError.value = RATE_MASTER_NO_AUTH
+    return
+  }
+  rateSaveError.value = ''
+  // **読み直しが終わるまで押させない。** 先にボタンを戻すと、読み直しの最中に
+  // もう一度押されて「保存した直後なのに 409」が出る。
+  savingRate.value = true
+  try {
+    let outcome: AllowanceRatePutOutcome
+    try {
+      const res = await $fetch<{ changed: boolean }>(ALLOWANCE_RATE_ENDPOINT, {
+        method: 'PUT',
+        headers,
+        body: { baseVersion: base.baseVersion, rows: parsed.rows },
+      })
+      outcome = { ok: true, changed: res.changed }
+    }
+    catch (e) {
+      // `/restraint-api/**` は relay worker が答える。理由は JSON 本文にしか
+      // 残らないので `describeApiError` に読ませる (Refs #890)。
+      outcome = {
+        ok: false,
+        status: (e as { statusCode?: number }).statusCode,
+        body: (e as { data?: unknown }).data,
+        reason: describeApiError(e),
+      }
+    }
+    // **判定は pure 側 (`resolveAllowanceRateSave`)。** 409 の結果には入力欄を
+    // 差し替える材料が入っていないので、**ここで上書きしようとしても書けない。**
+    const result = resolveAllowanceRateSave(base.mode, parsed.rows, outcome)
+    if (result.kind === 'conflict') {
+      rateConflict.value = result.conflict
+      rateConflictDiff.value = result.diff
+      return
+    }
+    if (result.kind === 'failed') {
+      rateSaveError.value = result.message
+      return
+    }
+    rateSaveMessage.value = result.message
+    // **保存したら読み直す。** 注記の版・行数・更新時刻が新しい版を指すようにする。
+    rateState.value = await loadRateMaster()
+    resetRateDraftFromState()
+    // 表に出ている金額は保存前のマスタで引いたもの。集計していなければ黙る。
+    rateAmountsStale.value = operations.value.length > 0
+  }
+  finally {
+    savingRate.value = false
+  }
+}
+
+/** 409 の後、**サーバの現在値で編集をやり直す** (手元の編集は捨てる)。 */
+async function adoptServerRateRows() {
+  rateState.value = await loadRateMaster()
+  resetRateDraftFromState()
+  rateConflict.value = null
+  rateConflictDiff.value = null
+  rateSaveMessage.value = ''
 }
 const progress = ref('')
 const operations = ref<OperationAllowance[]>([])
@@ -1443,6 +1625,8 @@ function restoreFromCache(month: MonthCache) {
 async function run(force = false) {
   saveLastSearch()
   restoredFromCache.value = false
+  // 引き直すので「保存前のマスタで計算した金額」ではなくなる。
+  rateAmountsStale.value = false
   status.value = 'loading'
   errorMessage.value = null
   salesError.value = null
@@ -1582,7 +1766,9 @@ function downloadCsv() {
       **マスタの出どころを必ず出す** (Refs #805)。3 状態を別々の見た目にする —
       「初期値で計算している」を黙って隠すと、フロントの値と本番 R2 の値が
       食い違ったまま誰も気付かない (最低賃金マスタで実際に踏んだ形)。
-      **粗利タブ (`/profit/margin`) は別案件が触っているのでこの PR では出ない。**
+      **粗利タブ (`/profit/margin`) にも同じ注記が出ている** —
+      `allowanceRateNoticeForMargin` (文は 2 か所違う。理由は共通でも結果は画面ごとに違う)。
+      PR-2 の分割中に書いた「粗利タブには出ない」は、#1016 が両方に入れた時点で嘘になっていた。
     -->
     <p
       v-if="rateState"
@@ -1595,6 +1781,179 @@ function downloadCsv() {
     >
       {{ rateNotice }}
     </p>
+
+    <!--
+      **手当マスタの編集** (Refs #805 PR-3)。**暫定手当のすぐ上に置く** —
+      暫定はマスタの穴の回避策なので、直す場所が別画面にあると穴が埋まらない。
+      **3 状態のうち編集させるのは 2 つだけ**で、`error` は理由を出して閉じる。
+    -->
+    <div v-if="rateEdit" class="mb-4">
+      <p
+        v-if="rateEdit.mode === 'locked'"
+        class="text-xs px-3 py-2 rounded border text-red-700 dark:text-red-400 border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950"
+      >
+        {{ rateEdit.reason }}
+      </p>
+      <template v-else>
+        <button
+          v-if="!rateEditorOpen"
+          class="text-sm px-3 py-1.5 rounded border border-gray-300 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800"
+          @click="openRateEditor"
+        >
+          運行手当マスタを編集 ({{ rateEdit.rows.length }} 行)
+        </button>
+
+        <div v-else class="border border-gray-300 dark:border-gray-700 rounded p-3">
+          <div class="flex flex-wrap items-center gap-2 mb-2">
+            <b class="text-sm">運行手当マスタ</b>
+            <span class="text-xs text-gray-500">{{ rateDraft.length }} 行</span>
+            <span v-if="rateEdit.mode === 'register'" class="text-xs text-amber-700 dark:text-amber-400">
+              R2 にはまだ何もありません。同梱の初期値を種にして<b>新規に登録</b>します。
+            </span>
+            <span class="flex-1" />
+            <button
+              class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800"
+              @click="addRateRow"
+            >
+              行を追加
+            </button>
+            <button
+              class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800"
+              title="編集を捨てて、いま読んでいる版に戻します"
+              @click="openRateEditor"
+            >
+              編集を取り消す
+            </button>
+            <button
+              class="text-sm px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white"
+              :disabled="savingRate"
+              @click="saveRateMaster"
+            >
+              {{ savingRate ? '保存中...' : allowanceRateSaveLabel(rateEdit.mode) }}
+            </button>
+            <button
+              class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800"
+              @click="rateEditorOpen = false"
+            >
+              閉じる
+            </button>
+          </div>
+
+          <p v-if="rateSaveMessage" class="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950 rounded-lg p-2 mb-2">
+            {{ rateSaveMessage }}
+          </p>
+          <p v-if="rateSaveError" class="text-sm text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950 rounded-lg p-2 mb-2">
+            {{ rateSaveError }}
+          </p>
+
+          <!--
+            **409 (楽観排他)。** 手元の入力欄は 1 文字も書き換えない — 上書きさせない
+            のが目的なので、サーバの現在値は**別の表**として並べる。
+          -->
+          <div
+            v-if="rateConflict"
+            class="text-sm rounded-lg p-2 mb-2 border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-300"
+          >
+            <p>{{ rateConflict.message }}</p>
+            <p v-if="rateConflictDiff" class="text-xs mt-1">
+              {{ allowanceRateDiffLabel(rateConflictDiff) }}
+            </p>
+            <button
+              class="text-xs mt-2 px-2 py-1 rounded border border-amber-400 dark:border-amber-700 hover:bg-amber-100 dark:hover:bg-amber-900"
+              title="サーバの現在値を読み直して編集し直します。いまの入力は捨てられます"
+              @click="adoptServerRateRows"
+            >
+              サーバの現在値で編集し直す (手元の編集は捨てる)
+            </button>
+            <div v-if="rateConflict.rows" class="mt-2 max-h-48 overflow-auto border border-amber-300 dark:border-amber-800 rounded bg-white dark:bg-gray-900">
+              <table class="text-xs w-full">
+                <thead class="sticky top-0 bg-gray-100 dark:bg-gray-800">
+                  <tr>
+                    <th class="px-1 py-0.5 text-left">積地</th>
+                    <th class="px-1 py-0.5 text-left">卸地</th>
+                    <th class="px-1 py-0.5 text-left">銘柄</th>
+                    <th class="px-1 py-0.5 text-right">運賃(円/t)</th>
+                    <th class="px-1 py-0.5 text-right">手当(円/便)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(row, i) in rateConflict.rows" :key="`srv-${i}`" class="border-t border-gray-200 dark:border-gray-700">
+                    <td class="px-1 py-0.5">{{ row.origin }}</td>
+                    <td class="px-1 py-0.5">{{ row.dest }}</td>
+                    <td class="px-1 py-0.5">{{ row.brand }}</td>
+                    <td class="px-1 py-0.5 text-right">{{ row.farePerT === null ? '—' : row.farePerT }}</td>
+                    <td class="px-1 py-0.5 text-right">{{ row.allowanceYen }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="max-h-96 overflow-auto border border-gray-200 dark:border-gray-700 rounded">
+            <table class="text-xs w-full">
+              <thead class="sticky top-0 bg-gray-100 dark:bg-gray-800">
+                <tr>
+                  <th class="px-1 py-1 text-left">荷主</th>
+                  <th class="px-1 py-1 text-left">得意先</th>
+                  <th class="px-1 py-1 text-left">積地業者</th>
+                  <th class="px-1 py-1 text-left">積地</th>
+                  <th class="px-1 py-1 text-left">卸地</th>
+                  <th class="px-1 py-1 text-left">銘柄</th>
+                  <th class="px-1 py-1 text-left">運賃(円/t)</th>
+                  <th class="px-1 py-1 text-left">手当(円/便)</th>
+                  <th class="px-1 py-1 text-left">備考</th>
+                  <th class="px-1 py-1" />
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, i) in rateDraft" :key="`rate-${i}`" class="border-t border-gray-200 dark:border-gray-700">
+                  <td class="px-0.5 py-0.5"><input v-model="row.shipper" class="w-24 border rounded px-1 py-0.5 dark:bg-gray-900"></td>
+                  <td class="px-0.5 py-0.5"><input v-model="row.customer" class="w-24 border rounded px-1 py-0.5 dark:bg-gray-900"></td>
+                  <td class="px-0.5 py-0.5"><input v-model="row.loader" class="w-24 border rounded px-1 py-0.5 dark:bg-gray-900"></td>
+                  <td class="px-0.5 py-0.5"><input v-model="row.origin" class="w-16 border rounded px-1 py-0.5 dark:bg-gray-900"></td>
+                  <td class="px-0.5 py-0.5"><input v-model="row.dest" class="w-16 border rounded px-1 py-0.5 dark:bg-gray-900"></td>
+                  <td class="px-0.5 py-0.5"><input v-model="row.brand" class="w-28 border rounded px-1 py-0.5 dark:bg-gray-900"></td>
+                  <td class="px-0.5 py-0.5">
+                    <input
+                      v-model="row.farePerT"
+                      inputmode="decimal"
+                      placeholder="空欄=単価なし"
+                      title="空欄のままにすると「単価が無い便」として保存します (0 にはしません)"
+                      class="w-24 border rounded px-1 py-0.5 text-right dark:bg-gray-900"
+                    >
+                  </td>
+                  <td class="px-0.5 py-0.5">
+                    <input v-model="row.allowanceYen" inputmode="numeric" class="w-20 border rounded px-1 py-0.5 text-right dark:bg-gray-900">
+                  </td>
+                  <td class="px-0.5 py-0.5"><input v-model="row.note" class="w-28 border rounded px-1 py-0.5 dark:bg-gray-900"></td>
+                  <td class="px-0.5 py-0.5">
+                    <button class="text-red-600 hover:text-red-800 hover:underline" @click="removeRateRow(i)">
+                      削除
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="text-xs text-gray-500 mt-2">
+            <b>運賃 (円/t) の空欄は「単価が無い便」</b>として保存します (0 円にはしません)。
+            <b>手当 (円/便) は空にできません。</b>
+            保存すると <b>新しい版</b> が R2 に増えます (この画面のマスタは古い版を消しません)。
+          </p>
+        </div>
+      </template>
+
+      <!--
+        **保存した瞬間、表に出ている金額は「保存前のマスタ」のもの**になる。
+        注記だけ新しい版を指すと「この版で計算した金額」に読めるので必ず出す。
+      -->
+      <p
+        v-if="rateAmountsStale"
+        class="text-xs mt-2 px-3 py-2 rounded border text-amber-700 dark:text-amber-400 border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950"
+      >
+        {{ rateStaleNotice }}
+      </p>
+    </div>
 
     <div class="flex flex-wrap gap-3 items-end mb-4">
       <label class="text-xs text-gray-500">月
