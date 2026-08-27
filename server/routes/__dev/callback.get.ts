@@ -5,12 +5,8 @@
  * 叩かれる。`DEV_LOGIN` env var (env.dev のみ、[[env.dev.vars]] 参照) が
  * "true" の時だけルートとして機能し、それ以外 (本番/staging/preview) は 404。
  */
-import type { H3Event } from 'h3'
 import { createDevLoginCallbackHandler } from '@ippoan/auth-client/server'
-
-function cfEnv(event: H3Event): Record<string, unknown> {
-  return (event.context.cloudflare as { env?: Record<string, unknown> } | undefined)?.env ?? {}
-}
+import { cfEnv } from '../../utils/cf-env'
 
 export default defineEventHandler((event) => {
   const env = cfEnv(event)

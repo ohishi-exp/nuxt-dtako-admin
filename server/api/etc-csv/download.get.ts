@@ -18,9 +18,9 @@
  * 対応) なので、user_id と session の tenant を突き合わせる追加チェックは行わない。
  */
 
-import type { H3Event } from 'h3'
 import { defineEventHandler, getQuery, createError, setResponseHeader } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { cfEnv, resolveSecret } from '../../utils/cf-env'
 
 interface R2ObjectMinimal {
   arrayBuffer(): Promise<ArrayBuffer>
@@ -34,19 +34,6 @@ interface CloudflareEnv {
   NUXT_PUBLIC_AUTH_WORKER_URL?: string
 }
 
-function cfEnv(event: H3Event): CloudflareEnv {
-  return (event.context.cloudflare as { env?: CloudflareEnv } | undefined)?.env ?? {}
-}
-
-/** Secrets Store binding (`.get()`) / 文字列 のいずれでも値を取り出す。 */
-async function resolveSecret(binding: unknown): Promise<string | null> {
-  if (typeof binding === 'string') return binding
-  if (binding && typeof (binding as { get?: unknown }).get === 'function') {
-    return (await (binding as { get(): Promise<string> }).get()) ?? null
-  }
-  return null
-}
-
 /** `{etc|etc-staging|etc-preview}/{user_id}/{YYYY-MM-DD}/{HHmmss}.csv` のみ許可
  * (`etcCsvKey()` の生成形式と一致、セグメント文字種を絞って header injection も防ぐ)。
  * `wrangler.toml` の `ETC_R2_PREFIX` は本番 `etc` / staging `etc-staging` に
@@ -55,7 +42,7 @@ async function resolveSecret(binding: unknown): Promise<string | null> {
 const ETC_CSV_KEY_PATTERN = /^etc(?:-staging|-preview)?\/[A-Za-z0-9_-]+\/\d{4}-\d{2}-\d{2}\/\d{6}\.csv$/
 
 export default defineEventHandler(async (event) => {
-  const env = cfEnv(event)
+  const env = cfEnv<CloudflareEnv>(event)
   const sharedSecret = await resolveSecret(env.INTERNAL_SHARED_SECRET)
   if (!sharedSecret) {
     throw createError({ statusCode: 503, statusMessage: 'INTERNAL_SHARED_SECRET binding が未設定です' })

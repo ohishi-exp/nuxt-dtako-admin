@@ -25,7 +25,6 @@
  *   503 — INTERNAL_SHARED_SECRET / DTAKO_R2 binding 未設定
  */
 
-import type { H3Event } from 'h3'
 import {
   defineEventHandler,
   getQuery,
@@ -34,6 +33,7 @@ import {
   createError,
 } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { cfEnv, resolveSecret } from '../utils/cf-env'
 
 interface R2Object {
   arrayBuffer(): Promise<ArrayBuffer>
@@ -52,22 +52,8 @@ interface CloudflareEnv {
   NUXT_PUBLIC_AUTH_WORKER_URL?: string
 }
 
-function cfEnv(event: H3Event): CloudflareEnv {
-  return (event.context.cloudflare as { env?: CloudflareEnv } | undefined)?.env ?? {}
-}
-
-/** Secrets Store binding (`.get()`) / 文字列 のいずれでも値を取り出す
- * (`allowance-override.post.ts` と同実装)。 */
-async function resolveSecret(binding: unknown): Promise<string | null> {
-  if (typeof binding === 'string') return binding
-  if (binding && typeof (binding as { get?: unknown }).get === 'function') {
-    return (await (binding as { get(): Promise<string> }).get()) ?? null
-  }
-  return null
-}
-
 export default defineEventHandler(async (event) => {
-  const env = cfEnv(event)
+  const env = cfEnv<CloudflareEnv>(event)
   const sharedSecret = await resolveSecret(env.INTERNAL_SHARED_SECRET)
   if (!sharedSecret) {
     throw createError({ statusCode: 503, statusMessage: 'INTERNAL_SHARED_SECRET binding が未設定です' })

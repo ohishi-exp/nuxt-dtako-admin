@@ -17,21 +17,9 @@
  * 経由、Refs ippoan/auth-worker#362 / ippoan/rust-alc-api#562)。
  */
 
-import type { H3Event } from 'h3'
 import { defineEventHandler, getQuery, createError } from 'h3'
 import { alcInternalProxyFetch } from '../../utils/alc-internal-proxy'
-
-function cfEnv(event: H3Event): Record<string, unknown> {
-  return (event.context.cloudflare as { env?: Record<string, unknown> } | undefined)?.env ?? {}
-}
-
-async function resolveSecret(binding: unknown): Promise<string | null> {
-  if (typeof binding === 'string') return binding
-  if (binding && typeof (binding as { get?: unknown }).get === 'function') {
-    return (await (binding as { get(): Promise<string> }).get()) ?? null
-  }
-  return null
-}
+import { cfEnv, resolveSecret } from '../../utils/cf-env'
 
 /** timing-safe な文字列比較 (auth-worker alc-internal-proxy.ts と同実装)。 */
 function constantTimeEquals(a: string, b: string): boolean {
