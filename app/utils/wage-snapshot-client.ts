@@ -41,7 +41,7 @@
  * 別物と判定され、全月が無意味に stale になる。
  */
 
-import type { MinWageRowAttrs, WageMaster } from './restraint-wage-view'
+import type { MinWageRowAttrs, TimecardKosokuState, WageMaster } from './restraint-wage-view'
 import type { SalaryItemConfig } from './salary-compare'
 
 /**
@@ -99,6 +99,21 @@ export interface SnapshotPayload {
   comp_id: string
   month: string
   restraint_source: string
+  /**
+   * 当月の拘束を オンプレ `kosoku-daily` から組めたか (Refs #986)。
+   *
+   * **この数字の土台が揃っていたか**の記録なので、`masters` (マスタの内容ハッシュ) では
+   * なくトップレベルの `restraint_source` の隣に置く — 層が違う。
+   *
+   * **`null` は「見ていない」** — `restraint_source: 'gcp'` では `kosoku-daily` を
+   * 取りに行かないので `null` が正しい値。**「揃っていた」と混ぜないこと。**
+   * 上流 (`ohishi-exp/rust-ichibanboshi#311`) は `Option<String>` で受けるので、
+   * **キーごと消さずに `null` を送る**。未知の値は上流が 400 で弾く。
+   *
+   * 語彙 (`yes` / `no` / `unreadable`) は画面の注記が使っているものと同じ。
+   * `no` と `unreadable` を畳まないのは**処方が逆だから** (`TimecardKosokuState` 参照)。
+   */
+  timecard_kosoku: TimecardKosokuState | null
   wage_logic_version: string
   masters: {
     salary_item_sha: string
@@ -157,6 +172,9 @@ export function buildSnapshotPayload(input: {
   compId: string
   month: string
   restraintSource: string
+  /** 拘束の元データ (`kosoku-daily`) を組めたか。**`rows` を読んだのと同じ応答から
+   * 取ること** — 別の応答から取ると、記録がその数字の土台を指さなくなる。 */
+  timecardKosoku: TimecardKosokuState | null
   rows: SnapshotSourceRow[]
   salaryItemConfig: SalaryItemConfig
   payrollSyncedAt: string | null
@@ -194,6 +212,7 @@ export function buildSnapshotPayload(input: {
       comp_id: input.compId,
       month: input.month,
       restraint_source: input.restraintSource,
+      timecard_kosoku: input.timecardKosoku,
       wage_logic_version: WAGE_LOGIC_VERSION,
       masters: {
         salary_item_sha: contentHash(input.salaryItemConfig),

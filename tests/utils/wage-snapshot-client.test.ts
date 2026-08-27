@@ -9,7 +9,7 @@ import {
   WAGE_LOGIC_VERSION,
   type SnapshotSourceRow,
 } from '~/utils/wage-snapshot-client'
-import type { WageMaster } from '~/utils/restraint-wage-view'
+import type { TimecardKosokuState, WageMaster } from '~/utils/restraint-wage-view'
 import type { SalaryItemConfig } from '~/utils/salary-compare'
 
 const ITEM_CONFIG: SalaryItemConfig = { items: { 基本給: 'base', 残業手当: 'overtime' } } as SalaryItemConfig
@@ -32,11 +32,16 @@ function sourceRow(over: Partial<SnapshotSourceRow> = {}): SnapshotSourceRow {
   }
 }
 
-function build(rows: SnapshotSourceRow[], payrollSyncedAt: string | null = '2026-02-03T09:12:00Z') {
+function build(
+  rows: SnapshotSourceRow[],
+  payrollSyncedAt: string | null = '2026-02-03T09:12:00Z',
+  timecardKosoku: TimecardKosokuState | null = null,
+) {
   return buildSnapshotPayload({
     compId: 'comp-a',
     month: '2026-01',
     restraintSource: 'gcp',
+    timecardKosoku,
     rows,
     salaryItemConfig: ITEM_CONFIG,
     payrollSyncedAt,
@@ -193,6 +198,7 @@ describe('buildSnapshotPayload', () => {
       compId: 'comp-a',
       month: '2026-01',
       restraintSource: 'gcp',
+      timecardKosoku: null,
       rows: [sourceRow()],
       salaryItemConfig: { items: { 基本給: 'overtime' } } as SalaryItemConfig,
       payrollSyncedAt: null,
@@ -203,6 +209,45 @@ describe('buildSnapshotPayload', () => {
   it('行が 0 件でも payload は作る (その月に対象者が居ない、を保存できる)', () => {
     const { payload } = build([])
     expect(payload.rows).toEqual([])
+  })
+
+  /**
+   * 拘束の元データ (`kosoku-daily`) の取得可否を、**そのまま**トップレベルに写す
+   * (Refs #986)。畳んだり既定値に倒したりすると、後から「なぜこの月だけ数字が
+   * 違うのか」を説明できない — それがこの項目を足した理由そのもの。
+   */
+  it.each<TimecardKosokuState>(['yes', 'no', 'unreadable'])('timecard_kosoku %s をそのまま載せる', (state) => {
+    const { payload } = build([sourceRow()], null, state)
+    expect(payload.timecard_kosoku).toBe(state)
+  })
+
+  /**
+   * **`null` はキーごと消さずに `null` で送る。** 上流は `Option<String>` で受けるので
+   * `null` が `None` (= 見ていない) になる。キーを落とすと、上流の既定値と
+   * 「明示的に見ていない」が同じ見た目になり、`stableStringify` が `undefined` を
+   * 捨てるぶん**ハッシュにも現れなくなる**。
+   */
+  it('timecard_kosoku が null のときキーごと消さない', () => {
+    const { payload } = build([sourceRow()], null, null)
+    expect(payload.timecard_kosoku).toBeNull()
+    expect('timecard_kosoku' in payload).toBe(true)
+    expect(stableStringify(payload)).toContain('"timecard_kosoku":null')
+  })
+
+  /**
+   * ★ **土台の取得可否だけを訂正した保存が黙って捨てられないこと。**
+   * 画面は `contentHash` が前回と同じなら 1 バイトも送らない
+   * (`restraint-wage.vue` の `saveWageSnapshot`)。上流も `skipped_unchanged` の
+   * 判定に `timecard_kosoku` を入れてあるので、front 側も同じ性質を持たせる。
+   */
+  it('timecard_kosoku だけが違う payload は contentHash が変わる', () => {
+    const a = build([sourceRow()], null, null).payload
+    const b = build([sourceRow()], null, 'no').payload
+    const c = build([sourceRow()], null, 'unreadable').payload
+    expect(contentHash(a)).not.toBe(contentHash(b))
+    expect(contentHash(b)).not.toBe(contentHash(c))
+    // 陽性対照 — 他が同じなら同じハッシュになる (差はこの 1 項目だけだと示す)
+    expect(contentHash(b)).toBe(contentHash(build([sourceRow()], null, 'no').payload))
   })
 })
 
