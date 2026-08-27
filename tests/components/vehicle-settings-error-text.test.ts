@@ -198,6 +198,68 @@ describe('/vehicle-settings/unconfirmed の取得失敗の 1 文 (Refs #996)', (
     expect(t).not.toContain('"error":true')
   })
 
+  /**
+   * ★ **この口の 401 は出どころが 2 つある** (#p760-c988-3 の実測 + 実読で確認)。
+   *
+   * | 出どころ | 経路 | `statusMessage` |
+   * | --- | --- | --- |
+   * | **上流** | `alcProxyFetch` → auth-worker `/alc-proxy` が fail-closed で 401 | `backend /api/dtako/vehicles エラー: {"error":"Unauthorized"}` |
+   * | **自前** | `unconfirmed.get.ts` の `requireAuth` (#p760-c988-3 が追加予定) | `Unauthorized` |
+   *
+   * 上流の本文は auth-worker の `jsonError(401, "Unauthorized")` = `{"error":"Unauthorized"}`
+   * (`ohishi-exp/auth-worker` の `src/handlers/alc-proxy.ts:81-86` / `:139,145,155,158`。
+   * clone は `dd220b2` 時点)。`unconfirmed.get.ts` はそれを
+   * `backend /api/dtako/vehicles エラー: ${text}` に包んで投げ直す。
+   *
+   * **理由の文字列は別物になるが、次の一手は同じでなければならない** — 人がすべきこと
+   * (再ログイン) は出どころに依らないのに、片方だけ案内が出ないと
+   * 「同じ 401 なのに画面が違う」になる。**ここで両方を固定する。**
+   *
+   * ★ なお**上流由来の側は、理由の中に `{"error":"Unauthorized"}` が残る**。これを
+   * 貼っているのは**画面ではなく server route** (`unconfirmed.get.ts` の
+   * `text || vehiclesRes.statusText`) なので、**この PR の担当範囲では消せない**
+   * (`server/api/vehicle-settings/**` は兄弟タスクの持ち物)。**次の一手が出ること**は
+   * 下で固定してあるので、残った JSON 片は別 PR の課題として報告済み。
+   */
+  it('401 は出どころが 2 つあっても同じ「次の一手」を出す', async () => {
+    // ① 上流 (auth-worker /alc-proxy) 由来 — route が包み直した形
+    const upstream = errorText(await loadWith(401, JSON.stringify({
+      error: true,
+      statusCode: 401,
+      statusMessage: 'backend /api/dtako/vehicles エラー: {"error":"Unauthorized"}',
+      message: 'backend /api/dtako/vehicles エラー: {"error":"Unauthorized"}',
+    })))
+    expect(upstream).toBe(
+      '未確認車輛の取得に失敗しました: '
+      + '401 backend /api/dtako/vehicles エラー: {"error":"Unauthorized"} — '
+      + 'ログインが切れています。再ログインしてから「再取得」を押してください'
+      + ' (再ログインしても直らないときは認証サーバに繋がっていません。権限の問題ではありません)',
+    )
+
+    // ② 自前の `requireAuth` 由来 (#p760-c988-3 のマージ後に出る形)
+    const own = errorText(await loadWith(401, UNAUTHORIZED_BODY))
+
+    // **理由は別物・次の一手は同一。**` — ` の後ろを取り出して突き合わせる。
+    expect(upstream.split(' — ')[0]).not.toBe(own.split(' — ')[0])
+    expect(upstream.split(' — ')[1]).toBe(own.split(' — ')[1])
+    expect(upstream.split(' — ')[1]).toContain('再ログイン')
+  })
+
+  /** `alcProxyFetch` 自身が投げる 503 (`INTERNAL_SHARED_SECRET binding が未設定です`)。
+   * R2 binding 無しの 503 とは**別の 503** だが、人がすべきことは同じ。 */
+  it('503 (INTERNAL_SHARED_SECRET 未設定) — R2 の 503 と同じ「次の一手」', async () => {
+    expect(errorText(await loadWith(503, JSON.stringify({
+      error: true,
+      statusCode: 503,
+      statusMessage: 'INTERNAL_SHARED_SECRET binding が未設定です',
+      message: 'INTERNAL_SHARED_SECRET binding が未設定です',
+    })))).toBe(
+      '未確認車輛の取得に失敗しました: 503 INTERNAL_SHARED_SECRET binding が未設定です — '
+      + 'サーバ側の設定か障害です (権限の問題ではありません)。'
+      + '復旧してから「再取得」を押してください',
+    )
+  })
+
   /** backend の理由を中継する 502 (`backend /api/dtako/vehicles エラー: …`)。 */
   it('502 (upstream の理由つき) — 理由を残したまま次の一手を足す', async () => {
     const w = await loadWith(502, JSON.stringify({
