@@ -496,11 +496,52 @@ path = "app/utils/allowance-rate-master.ts"
 # 運行手当マスタの出どころ (R2 → 無ければ同梱の初期値) を決める pure util (Refs #805 PR-2)。
 # **3 状態 (`r2` / `seed` / `error`) を union で分けてある** — `error` に `rows` を
 # 持たせていないので、呼び出し側が `?? RATE_MASTER` と書けない。
-# 基準 = `origin/main` c918714 + この PR。実測で **Stmts 51/51・Lines 51/51・
-# Funcs 8/8・branch site 25 / arm 54 (54 arm すべて被覆)**。arm の内訳は
-# `resolveAllowanceRateMaster` 10 site / 21 arm、`parseRateRow` 7 / 17、
-# `noticeBody` 4 / 8、`allowanceRateNoticeForMargin` 2 / 4、
-# `textOrNull` 1 / 2、`allowanceRateRows` 1 / 2。
+# ## 分岐の実測 — **指標名・対象・測定日・base SHA を必ず添える** (Refs #1030 #1009)
+#
+# 前の注記は「基準 = `origin/main` c918714 + この PR。branch site 25 / arm 54」とだけ
+# 書いていた。**指標が v8 だけで、BR() を 1 度も当てていなかった** — v8 の branches 100% は
+# **短絡で片側を見逃す**ので、それだけでは「両側を通した」と言えない。
+# 下は **base `31594a487f23` と #1017 ③ (`marginCacheRateStatus` ほかを足した回) を
+# 2026-08-28 に測り直した**値:
+#
+# | 指標 | 対象 | base 31594a487f23 | **#1017 ③ (2026-08-28 実測)** |
+# | --- | --- | --- | --- |
+# | v8 Stmts | ファイル全体 | 51 / 51 | **85 / 85** |
+# | v8 Funcs | ファイル全体 | 8 / 8 | **12 / 12** |
+# | v8 branch site / arm | ファイル全体 | 25 / 54 (54 被覆) | **42 / 88 (88 被覆)** |
+# | AST 分岐 (`if`+三項+`&&`+`\|\|`+`??`+`?.`) | ファイル全体 | 29 | **46** |
+# | **BR() branch site** | **ファイル全体** | **40 — 両側 39 / 片側のみ 1 / 未到達 0** | **59 — 両側 58 / 片側のみ 1 / 未到達 0** |
+# | BR() branch site | `parseRateRow` | 16 — 両側 16 | 16 — 両側 16 |
+# | BR() branch site | `resolveAllowanceRateMaster` | 15 — 両側 14 / **片側 1** | 15 — 両側 14 / **片側 1** |
+# | BR() branch site | `rateVerdict` | — | **6 — 両側 6** |
+# | BR() branch site | `marginCacheSentence` | — | **6 — 両側 6** |
+# | BR() branch site | `cachedRateVersionOf` | — | **4 — 両側 4** |
+# | BR() branch site | `marginCacheRateStatus` | — | **3 — 両側 3** |
+# | BR() branch site | `noticeBody` | 4 — 両側 4 | 4 — 両側 4 |
+# | BR() branch site | `allowanceRateNoticeForMargin` | 3 — 両側 3 | 3 — 両側 3 |
+#
+# **BR() と v8 は足せない・引けない別の指標** — BR() は `&&` / `||` を**左右の項に割り**、
+# `?.` を数えない。**どちらの指標かを書かずに数字だけ残さないこと。**
+# base の値は **`31594a4` の実装 + `31594a4` のテストに揃えて**測った (実装だけ戻すと嘘になる)。
+# v8 の base 値 (Stmts 51/51・Funcs 8/8・site 25 / arm 54) が**前の注記と一致**したのが較正。
+#
+# **両側でない 1 site は `resolveAllowanceRateMaster` の
+# `if (data === null || typeof data !== 'object' || Array.isArray(data))` の
+# 中間項 `typeof data !== 'object'`** (`[false]` 側だけ)。`data` が `null` でない非オブジェクト
+# (文字列・数値) を relay が `data` に入れて返す応答を、いまのテストが 1 本も作っていない。
+# **v8 はこの site を 100% と報告し続ける** (短絡で畳むため)。**#1017 ③ が足した site では
+# なく base にも在る**もので、この関数は **#1022 の所有**なので触っていない。
+#
+# **`parseRateRow` の 16 site が両側なのは #1044 のおかげ** (陰性対照で実測):
+# `tests/utils/allowance-rate-row-shared.test.ts` を外すと **両側 58 → 57** に落ち、
+# `parseRateRow` の `typeof raw !== 'object'` が `[false]` だけになる。
+# **#1017 ③ の base (`6e5eddd`) で測ったときは片側 2 件**だったのが、#1044 で 1 件に減った。
+#
+# **計測器と probe** (2026-08-28 に当日ぶんを確認): `_shared/br-tooling/{br.ts,instrument.mjs}`
+# (**clone と同じ階層 = repo の外**)。① 片側だけ通る `if` が `[true]` / 両側通る `if` が
+# `[false,true]`、② `pick(0,7) === 0` / `orValue(0,7) === 7` / `nullish(0,7) === 0` /
+# `ternary(0) === 'F'` — **計測器が値を壊していない**。**未到達 0 が陽性対照**でもある。
+#
 # **`seed` の既定引数 (`= RATE_MASTER`) も両側を通してある**。
 #
 # **カバレッジ 100% は値を検査していない。** 2026-08-27 に `describe.skip` で両方向を実測した:
@@ -515,8 +556,19 @@ path = "app/utils/allowance-rate-master.ts"
 # `allowanceRateNoticeForMargin` (粗利タブ) — 理由は共通でも**結果が違う**ので、
 # 1 本にまとめないこと。違いは 2 つ: (1) 出なくなるのが「手当・収支」か「手当・粗利」か、
 # (2) **粗利タブのキャッシュは計算済みの金額そのもの**を持っているので、キャッシュから
-# 出している回は「この版で計算したとは限らない」を足す (運行手当タブのキャッシュは
+# 出している回は**刻んだ版といまの版を突き合わせた 1 文**を足す (運行手当タブのキャッシュは
 # 金額を残さず読み込み時に引き直すので足さない)。
+#
+# **★ (2) は #1017 ③ で「この版で計算したとは限りません」の 1 文から 6 通りに割れた。**
+# 画面の状態は **3 つ (一致 / 不一致 / 不明)** で、**「不明」の内訳が 4 通り**:
+# (a) 版も出どころも刻まれていない (このPR より前のキャッシュ) /
+# (b) 出どころは刻んであり、それが `seed` だった /
+# (c) 出どころは `r2` だが応答に版が無かった /
+# (d) 刻んだ版はあるが、いま読んでいるマスタに版が無い。
+# **(b) を (a) と同じ文にしないこと** — 「記録していない」と「記録してあって、それが
+# seed だった」が同じ見た目になる。`rateSource` を刻んでいるのはこのためだけで、
+# **6 通りとも別の文**であることを `tests/utils/allowance-rate-source.test.ts` の
+# `★ 6 通りの文はどれも同じにならない` が `Set.size === 6` で固定している。
 [[files]]
 path = "app/utils/allowance-rate-source.ts"
 branches = true
@@ -681,17 +733,25 @@ branches = true
 # この癖は `toLocaleString` にしか無い — `${-0}` は `"0"` なので `km()` / `pct()` / `pct1()` は無傷 (実測)。
 #
 # **★ 上の数字に測定日も base SHA も書いていなかったので測り直した (Refs #1030)。**
-# **実測は注記のまま正しい。** 下は **`origin/main` 6e5eddd65429 を 2026-08-28 に測り直した**値:
+# **実測は注記のまま正しい。** 下は **`origin/main` 6e5eddd65429 を 2026-08-28 に測り直した**値と、
+# **#1017 ③ (`MarginCache` に `rateSource` / `rateVersion` / `rateUpdatedAt` を足した回) で
+# 動いたぶんを同じ日に測り直した**値。**動いたのは `parseMarginCache` だけ**:
 #
-# | 指標 | 対象 | 値 (6e5eddd65429 / 2026-08-28 実測) |
-# | --- | --- | --- |
-# | AST 分岐 (`if`+三項+`&&`+`||`+`??`+`?.`) | ファイル全体 | 120 (`if` 44 + 三項 25 + `&&` 7 + `||` 15 + `??` 27 + `?.` 2) |
-# | **BR() branch site** | **ファイル全体** | **140 — 両側 140 / 片側のみ 0 / 未到達 0** |
-# | BR() branch site | `parseMarginCache` | 16 — 両側 16 |
-# | BR() branch site | `spreadCosts` | 11 — 両側 11 |
-# | BR() branch site | `parseFuelRates` | 10 — 両側 10 |
+# | 指標 | 対象 | base 31594a487f23 (= 6e5eddd65429 と同値) | **#1017 ③ (2026-08-28 実測)** |
+# | --- | --- | --- | --- |
+# | AST 分岐 (`if`+三項+`&&`+`\|\|`+`??`+`?.`) | ファイル全体 | 120 (`if` 44 + 三項 25 + `&&` 7 + `\|\|` 15 + `??` 27 + `?.` 2) | **124** (`if` 44 + 三項 **28** + `&&` 7 + `\|\|` **16** + `??` 27 + `?.` 2) |
+# | **BR() branch site** | **ファイル全体** | **140 — 両側 140 / 片側のみ 0 / 未到達 0** | **145 — 両側 145 / 片側のみ 0 / 未到達 0** |
+# | BR() branch site | `parseMarginCache` | 16 — 両側 16 | **21 — 両側 21** |
+# | BR() branch site | `spreadCosts` | 11 — 両側 11 | 11 — 両側 11 |
+# | BR() branch site | `parseFuelRates` | 10 — 両側 10 | 10 — 両側 10 |
+# | v8 branch site / arm | ファイル全体 | 120 / 238 (238 被覆) | **124 / 246 (246 被覆)** |
 #
-# **この 2 つは足せない・引けない別の指標** — BR() は `&&` / `||` を**左右の項に割り**、
+# **base の 140 は自分でも測り直して一致を見た** (`31594a4` の実装 + `31594a4` のテストに
+# 揃えて全件実行。**実装だけ base に戻して測ると嘘になる**)。AST 側の counter も
+# **`if` 44 / 三項 25 / `&&` 7 / `||` 15 / `??` 27 / `?.` 2 の内訳ごと再現**してから
+# 当てている (較正 = 陽性対照)。
+#
+# **AST 分岐 と BR() は足せない・引けない別の指標** — BR() は `&&` / `||` を**左右の項に割り**、
 # `?.` を数えない。**どちらの指標かを書かずに数字だけ残さないこと** (それが #1030 の本体)。
 #
 # **注記より後にファイルが動いているが (`d91888c` = #1016)、分岐は 1 つも動いていない。**
@@ -708,6 +768,12 @@ branches = true
 # — **計測器が値を壊していない**。**#1030 で測り直した 8 ファイルはすべてこの probe の下**。
 # 各ファイルの **未到達 0 が陽性対照**でもある — instrumented コピーが読み込まれて
 # いなければ全 site が未到達に出る (実際、環境を壊した回はそう出た)。
+#
+# **#1017 ③ が動かした 5 site は全部 `parseMarginCache` の中**で、
+# `rateSource: cache.rateSource === 'r2' || cache.rateSource === 'seed' ? … : null` (3 site) と
+# `rateVersion` / `rateUpdatedAt` の `typeof … === 'string' ? … : null` (各 1 site)。
+# **5 site とも両側**を通してある (欄が無い / `null` / 知らない値 / 正しい値 の 4 通りを
+# `tests/utils/margin.test.ts` の `parseMarginCache` の describe が当てている)。
 #
 # **測定は `6e5eddd65429` で行い、その後 `2b773159` まで rebase した。**#1030 で測った
 # 9 ファイル (`margin.ts` / `operation-route-map.ts` / `kushiro-branch-view.ts` /
