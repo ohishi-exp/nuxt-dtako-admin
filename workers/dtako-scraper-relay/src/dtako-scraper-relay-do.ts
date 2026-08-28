@@ -8854,7 +8854,26 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   private async handleNet780R2View(compId: string, url: URL): Promise<Response> {
     const operationNo = url.searchParams.get("operationNo") ?? "";
     if (!/^\d{22}$/.test(operationNo)) {
-      return dvrJsonError(400, "operationNo は22桁の数値で指定してください");
+      // ★ **利用者の入力ミスとして書かない** (Refs #1041/#1011)。運行NO を手で入れる画面は
+      // 無く、ここへ来る `operationNo` は画面が運行詳細 (`/operations/{unko_no}`) の
+      // route param をそのまま渡している — 「22桁の数値で指定してください」と
+      // 言われても**利用者には直しようが無い**。書くのは「この形の運行NO では
+      // NET780 を引けない」まで。
+      //
+      // ★ **前半分の `server/api/net780/by-operation.get.ts` の 400 と揃える** (Refs #1038)。
+      // あちらの JSDoc がこの `handleNet780R2View` を名指しで「同じガード」と書いているのに
+      // 片割れだけ直った状態になっていた。
+      //
+      // ★ **ASCII に寄せる必要は無い** — `dvrJsonError` は本文 JSON (`{error: …}`) を返すので、
+      // 非 ASCII が落ちる #886 の reason phrase の穴は踏まない (同じ #1038 でも
+      // `statusMessage` を ASCII にしたのは h3 の `createError` を使う側だけの事情)。
+      //
+      // ★ **桁の検査は緩めない。**本番 `/api/operations` 全件 **8,037 件が 22 桁 / 23 桁 0 件**
+      // (2026-08-28 実測、読むだけ)。変えるのは文言だけ。
+      return dvrJsonError(
+        400,
+        "NET780 のアーカイブは 22 桁の運行NO でしか引けません (受け取った operationNo はその形ではありません)。運行NO は画面が渡しているので、利用者の入力の誤りではありません。",
+      );
     }
     const bucket = this.env.DTAKO_R2;
     if (!bucket) return dvrJsonError(503, "R2 (DTAKO_R2) が未設定です");
