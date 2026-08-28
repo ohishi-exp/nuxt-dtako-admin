@@ -15,6 +15,53 @@ import { useRoute } from 'vue-router'
 import VehicleSettingsDisplay from '~/components/VehicleSettingsDisplay.vue'
 import type { VehicleSettings } from '~/utils/vehicle-settings-cfg'
 import { currentAccessToken } from '~/utils/api'
+import { describeResponseFailure } from '~/utils/api-error'
+
+/**
+ * この画面の「やり直し方」。**句点を付けない** (`describeResponseFailure` が文に組む)。
+ *
+ * ★ **3 つとも別物にしてある** (Refs #1005)。3 つのうち 2 つは同じ route
+ * (`/api/vehicle-settings/history`) を叩くが、**画面の「次の一手」は違う** —
+ * 上の集計はボタンが無く、下の履歴はボタンがある。**まとめない。**
+ */
+
+/** 下部「登録済み車輛一覧」の集計。**この画面に再取得ボタンは 1 つも無い**
+ * (`loadSummary` は `onMounted` からしか呼ばれない) ので、**無いボタンの名前で
+ * 案内しない** — ページの再読み込みで案内する。 */
+const RETRY_SUMMARY = 'ページを再読み込みしてください'
+
+/** 履歴の取得。**ボタンの表記そのまま** (`<span v-else>履歴を取得</span>`)。
+ * `vehicle_cd` は自由入力なので **400 (`vehicle_cd は英数 / _ / - のみ`) が実際に来る**
+ * — 「上の理由のとおりに直してから」の続きが、そのまま入力を直して押し直す動線になる。 */
+const RETRY_HISTORY = 'もう一度「履歴を取得」を押してください'
+
+/** dump 実体の取得。**行クリックで開くのでボタンは無い。**
+ * この口だけ **404 (`object not found: <key>`) が来る** — 一覧を出した後に R2 から
+ * 消えた形なので、**行を押し直す前に一覧を取り直す**のが正しい動線。
+ * 404 だけは `describeResponseFailure` に通さない (下の `describeMissingDump` を見ること)。 */
+const RETRY_DETAIL = '「履歴を取得」で一覧を取り直し、行をクリックし直してください'
+
+/**
+ * ★ **暫定** — 404 をここで撃ち分ける (Refs #1005 #1021)。**恒久策は
+ * `app/utils/api-error.ts` の `nextStepForStatus` に 404 の枝を足すこと (#1021)。**
+ * いま足さないのは `api-error.ts` が別タスクの持ち物で、`coverage_100.toml` に
+ * 登録された分岐数を兄弟タスクが測っている最中のため。**#1021 の着手は #1009 の
+ * マージ後** (分岐数の注記が新しい実測値に置き換わってから) で、**そのとき
+ * この関数と呼び出し側の `res.status === 404` は消える。**
+ *
+ * **`describeResponseFailure` に 404 を通すと嘘になる。** 404 は「その他 4xx」に落ちて
+ * 前置きが「**送った内容をサーバが受け付けませんでした。上の理由のとおりに直してから**」に
+ * なるが、**行をクリックしただけの人は何も送っていない**し、直せるものも無い。
+ * 消えた dump を指しているという事実と、正しい動線 (一覧の取り直し) だけを出す。
+ *
+ * **本文は読まない。** `object.get.ts` の 404 は `object not found: <key>` の 1 種類しか
+ * 無く、key を指す `dump dir` は一覧の行に出ているので、画面に足す情報が無い。
+ * **本文から理由を組む処理は `api-error.ts` の持ち物**なので、ここに写さない。
+ */
+function describeMissingDump(): string {
+  return 'dump JSON の取得に失敗しました: 404 この dump は R2 にもう存在しません — '
+    + `一覧を出した後に消えた可能性があります。${RETRY_DETAIL}`
+}
 
 interface VehicleSummary {
   vehicle_cd: string
@@ -65,7 +112,15 @@ async function loadSummary() {
     const res = await fetch('/api/vehicle-settings/history', {
       headers: token ? { authorization: `Bearer ${token}` } : {},
     })
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+    if (!res.ok) {
+      // **reason phrase に落とさない** (Refs #1005 / #996 / #890)。`res.statusText` は
+      // **本番 (workerd) では空**なので、画面に出ていたのは `HTTP 503: ` だけだった
+      // (dev の node は埋めるので**再現しない**)。理由は本文
+      // (`{ error: true, statusCode, statusMessage, message }`) に無傷で残っている。
+      // この口が投げるのは 401 (`requireAuth`) と 503 (`INTERNAL_SHARED_SECRET` /
+      // `DTAKO_R2` binding 未設定) — **引数無しの集計なので 400 は来ない**。
+      throw new Error(`登録済み車輛一覧の取得に失敗しました: ${await describeResponseFailure(res, RETRY_SUMMARY)}`)
+    }
     summary.value = (await res.json()) as VehicleSummary[]
   } catch (e) {
     summaryError.value = e instanceof Error ? e.message : String(e)
@@ -88,7 +143,12 @@ async function loadHistory(cd: string) {
     const res = await fetch(`/api/vehicle-settings/history?vehicle_cd=${encodeURIComponent(cd)}`, {
       headers: token ? { authorization: `Bearer ${token}` } : {},
     })
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+    if (!res.ok) {
+      // Refs #1005 — 上と同じ理由で本文を読む。**status の顔ぶれは上と違う**:
+      // `vehicle_cd` を付ける側は 400 (`vehicle_cd は英数 / _ / - のみ`) を投げる
+      // (`history.get.ts` の正規表現)。入力欄が自由入力なので**実際に来る**。
+      throw new Error(`履歴の取得に失敗しました: ${await describeResponseFailure(res, RETRY_HISTORY)}`)
+    }
     items.value = (await res.json()) as HistoryItem[]
   } catch (e) {
     itemsError.value = e instanceof Error ? e.message : String(e)
@@ -108,7 +168,13 @@ async function loadDetail(key: string) {
     const res = await fetch(`/api/vehicle-settings/object?key=${encodeURIComponent(key)}`, {
       headers: token ? { authorization: `Bearer ${token}` } : {},
     })
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+    if (res.status === 404) throw new Error(describeMissingDump())
+    if (!res.ok) {
+      // Refs #1005 — 叩く先が別 route (`object.get.ts`) なので **404 が増える**
+      // (`object not found: <key>`)。404 だけは上で撃ち分けてある。
+      // key は一覧から来るので 400 (key 形式) は事実上来ない。
+      throw new Error(`dump JSON の取得に失敗しました: ${await describeResponseFailure(res, RETRY_DETAIL)}`)
+    }
     detail.value = (await res.json()) as VehicleSettings
   } catch (e) {
     detailError.value = e instanceof Error ? e.message : String(e)

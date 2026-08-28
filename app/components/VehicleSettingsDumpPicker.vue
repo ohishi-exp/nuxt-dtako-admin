@@ -18,6 +18,51 @@
 import { computed, ref, watch } from 'vue'
 import type { VehicleSettings } from '~/utils/vehicle-settings-cfg'
 import { currentAccessToken } from '~/utils/api'
+import { describeResponseFailure } from '~/utils/api-error'
+
+/**
+ * この picker の「やり直し方」。**句点を付けない** (`describeResponseFailure` が文に組む)。
+ *
+ * ★ **ボタンの表記は `history.vue` と違う** (Refs #1005)。同じ 2 本の route を叩き、
+ * `/vehicle-settings/history` と見た目もほぼ同じだが、**こちらのボタンは「履歴取得」**
+ * (`<span v-else>履歴取得</span>` — 「を」が無い)。**画面に無い語で案内すると探させる**
+ * ので、文字列を共有せずこちらの表記で書く。
+ */
+
+/** 履歴一覧の取得。`vehicle_cd` は自由入力 (datalist はあくまでサジェスト) なので
+ * **400 (`vehicle_cd は英数 / _ / - のみ`) が実際に来る**。 */
+const RETRY_HISTORY = 'もう一度「履歴取得」を押してください'
+
+/** dump 実体の取得。**行クリック (または 1 件のときの自動選択) で走るのでボタンは無い。**
+ * この口だけ **404 (`object not found: <key>`) が来る** — 一覧を出した後に R2 から
+ * 消えた形なので、**行を押し直す前に一覧を取り直す**のが正しい動線。
+ * 404 だけは `describeResponseFailure` に通さない (下の `describeMissingDump` を見ること)。 */
+const RETRY_DETAIL = '「履歴取得」で一覧を取り直し、行をクリックし直してください'
+
+/**
+ * ★ **暫定** — 404 をここで撃ち分ける (Refs #1005 #1021)。**恒久策は
+ * `app/utils/api-error.ts` の `nextStepForStatus` に 404 の枝を足すこと (#1021)。**
+ * いま足さないのは `api-error.ts` が別タスクの持ち物で、`coverage_100.toml` に
+ * 登録された分岐数を兄弟タスクが測っている最中のため。**#1021 の着手は #1009 の
+ * マージ後** (分岐数の注記が新しい実測値に置き換わってから) で、**そのとき
+ * この関数と呼び出し側の `res.status === 404` は消える。**
+ *
+ * **`/vehicle-settings/history` の同名関数と中身が重複しているが、そのままにしてある** —
+ * 共通化の置き場は `api-error.ts` で、今回そこを触れないため。恒久策を入れるときに
+ * **両方まとめて消える**のが正しい畳み方。
+ *
+ * **`describeResponseFailure` に 404 を通すと嘘になる。** 404 は「その他 4xx」に落ちて
+ * 前置きが「**送った内容をサーバが受け付けませんでした。上の理由のとおりに直してから**」に
+ * なるが、**行をクリックしただけの人は何も送っていない**し、直せるものも無い。
+ *
+ * **本文は読まない。** `object.get.ts` の 404 は `object not found: <key>` の 1 種類しか
+ * 無く、key を指す `dump dir` は選択中バナーに出ている。**本文から理由を組む処理は
+ * `api-error.ts` の持ち物**なので、ここに写さない。
+ */
+function describeMissingDump(): string {
+  return 'dump JSON の取得に失敗しました: 404 この dump は R2 にもう存在しません — '
+    + `一覧を出した後に消えた可能性があります。${RETRY_DETAIL}`
+}
 
 interface HistoryItem {
   key: string
@@ -77,7 +122,14 @@ async function loadHistory() {
     const res = await fetch(`/api/vehicle-settings/history?vehicle_cd=${encodeURIComponent(cd)}`, {
       headers: token ? { authorization: `Bearer ${token}` } : {},
     })
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+    if (!res.ok) {
+      // **reason phrase に落とさない** (Refs #1005 / #996 / #890)。`res.statusText` は
+      // **本番 (workerd) では空**なので、画面に出ていたのは `HTTP 401: ` だけだった
+      // (dev の node は埋めるので**再現しない**)。理由は本文
+      // (`{ error: true, statusCode, statusMessage, message }`) に無傷で残っている。
+      // この口は 401 (`requireAuth`) / 400 (`vehicle_cd` の形) / 503 (binding 未設定)。
+      throw new Error(`履歴の取得に失敗しました: ${await describeResponseFailure(res, RETRY_HISTORY)}`)
+    }
     items.value = (await res.json()) as HistoryItem[]
     // dump が 1 件しかなければ自動選択 (UX: 余分なクリックを省く)
     if (items.value.length === 1) {
@@ -101,7 +153,13 @@ async function selectDump(item: HistoryItem) {
     const res = await fetch(`/api/vehicle-settings/object?key=${encodeURIComponent(item.key)}`, {
       headers: token ? { authorization: `Bearer ${token}` } : {},
     })
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+    if (res.status === 404) throw new Error(describeMissingDump())
+    if (!res.ok) {
+      // Refs #1005 — 叩く先が別 route (`object.get.ts`) なので **404 が増える**
+      // (`object not found: <key>`)。404 だけは上で撃ち分けてある。
+      // **やり直し方も上とは別**で、押し直すべきは行ではなく一覧の取り直し。
+      throw new Error(`dump JSON の取得に失敗しました: ${await describeResponseFailure(res, RETRY_DETAIL)}`)
+    }
     const settings = (await res.json()) as VehicleSettings
     emit('selected', { key: item.key, settings })
   } catch (e) {
