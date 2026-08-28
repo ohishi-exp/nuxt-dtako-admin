@@ -15,6 +15,7 @@ import type {
   YTimeExportResponse,
 } from '~/types'
 import { createAuthFetch } from '@ippoan/auth-client'
+import { describeFetchThrow } from '~/utils/api-error'
 import type { Net780ArchiveResult } from '~/utils/net780-archive'
 import { normalizeNetprintRunOutcome, type NetprintRunInput, type NetprintRunOutcome } from '~/utils/netprint-run'
 import type { NetprintTargetPayloadItem } from '~/utils/netprint-targets'
@@ -82,9 +83,50 @@ function toParams(filter: object): string {
   return qs ? `?${qs}` : ''
 }
 
+/**
+ * `fetch` が throw した (= `Response` が 1 つも得られなかった) ときだけ、
+ * #1006 の 1 文に差し替えて投げ直す。**当たらなければ元の値をそのまま投げる**ので、
+ * 既存の文言は 1 文字も変わらない。
+ *
+ * Access が切れると upstream は **cross-origin へ 302** を返し、`fetch` は追随先を
+ * 返せず `TypeError` を投げる (2026-08-28 に本番で実測、Refs #1006)。直すまでは
+ * 画面に出るのが **`Failed to fetch` の 1 語**で、ネットワーク断と見分けが付かない。
+ */
+function rethrowFetchThrow(e: unknown): never {
+  const described = describeFetchThrow(e)
+  throw described ? new Error(described) : e
+}
+
+/**
+ * `fetch` の薄い包み。**`try` が囲むのは `fetch` の 1 行だけ** — 素の
+ * プログラミングエラー (`undefined.foo` 等) も `TypeError` なので、
+ * 他の処理を巻き込むとバグを「サーバに接続できませんでした」と誤って報告する。
+ */
+async function fetchOrDescribe(input: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, init)
+  }
+  catch (e) {
+    rethrowFetchThrow(e)
+  }
+}
+
+/**
+ * JSON 経路の入口。**この repo のほぼ全画面がここを通る** (下の 31 本の API 関数)。
+ *
+ * `authFetch` (= `@ippoan/auth-client` の `createAuthFetch`) は素の `fetch` を
+ * **try/catch 無しで**呼ぶので、Access 切れの `TypeError` はそのまま呼び出し側の
+ * `catch (e) { e instanceof Error ? e.message : … }` に届き、画面は
+ * `Failed to fetch` だけを出していた (Refs #1006)。**ここ 1 か所で全画面に効く。**
+ */
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (!authFetch) throw new Error('API 未初期化: initApi() を呼んでください')
-  return authFetch<T>(path, options)
+  try {
+    return await authFetch<T>(path, options)
+  }
+  catch (e) {
+    rethrowFetchThrow(e)
+  }
 }
 
 // --- Drivers ---
@@ -198,7 +240,7 @@ export async function downloadRestraintReportPdfSingle(year: number, month: numb
   const token = getAccessToken?.()
   const headers: Record<string, string> = {}
   const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
-  const res = await fetch(`${apiBase}/api/restraint-report/pdf?year=${year}&month=${month}&driver_id=${driverId}`, { headers })
+  const res = await fetchOrDescribe(`${apiBase}/api/restraint-report/pdf?year=${year}&month=${month}&driver_id=${driverId}`, { headers })
   if (!res.ok) throw new Error(`PDF生成に失敗: ${res.status}`)
   const blob = await res.blob()
   const url = URL.createObjectURL(blob)
@@ -230,7 +272,7 @@ export async function downloadRestraintReportPdfStream(
     const token = getAccessToken?.()
     const headers: Record<string, string> = {}
     const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
-    return fetch(url, { headers })
+    return fetchOrDescribe(url, { headers })
   }
 
   let res = await doFetch()
@@ -322,7 +364,7 @@ export async function recalculateStream(
     const token = getAccessToken?.()
     const headers: Record<string, string> = {}
     const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
-    return fetch(url, { method: 'POST', headers })
+    return fetchOrDescribe(url, { method: 'POST', headers })
   }
 
   let res = await doFetch()
@@ -372,7 +414,7 @@ export async function compareRestraintCsv(file: File, driverCd?: string): Promis
   const headers: Record<string, string> = {}
   const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
   const params = driverCd ? `?driver_cd=${encodeURIComponent(driverCd)}` : ''
-  const res = await fetch(`${apiBase}/api/restraint-report/compare-csv${params}`, {
+  const res = await fetchOrDescribe(`${apiBase}/api/restraint-report/compare-csv${params}`, {
     method: 'POST',
     headers,
     body: formData,
@@ -393,7 +435,7 @@ export async function recalculateDriverStream(
     const token = getAccessToken?.()
     const headers: Record<string, string> = {}
     const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
-    return fetch(url, { method: 'POST', headers })
+    return fetchOrDescribe(url, { method: 'POST', headers })
   }
 
   let res = await doFetch()
@@ -458,7 +500,7 @@ export async function recalculateDriversBatch(
     const token = getAccessToken?.()
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
-    return fetch(url, {
+    return fetchOrDescribe(url, {
       method: 'POST',
       headers,
       body: JSON.stringify({ year, month, driver_ids: driverIds }),
@@ -577,7 +619,7 @@ export async function splitCsvAllStream(
   const token = getAccessToken?.()
   const headers: Record<string, string> = {}
   const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
-  const res = await fetch(url, { method: 'POST', headers })
+  const res = await fetchOrDescribe(url, { method: 'POST', headers })
   if (!res.ok) throw new Error(`分割に失敗: ${res.status}`)
   const reader = res.body?.getReader()
   if (!reader) throw new Error('No response body')
@@ -736,7 +778,7 @@ export async function postNet780Archive(operationNos: string[]): Promise<Net780A
   const token = currentAccessToken()
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   if (token) headers['authorization'] = `Bearer ${token}`
-  const res = await fetch('/api/net780/archive', { method: 'POST', headers, body: JSON.stringify({ operationNos }) })
+  const res = await fetchOrDescribe('/api/net780/archive', { method: 'POST', headers, body: JSON.stringify({ operationNos }) })
   const body = await res.json().catch(() => null) as { statusMessage?: string, message?: string } | null
   if (!res.ok) {
     throw new Error(body?.statusMessage ?? body?.message ?? `HTTP ${res.status}`)
@@ -760,7 +802,7 @@ export async function postNetprintRun(input: NetprintRunInput): Promise<Netprint
   const token = currentAccessToken()
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   if (token) headers['authorization'] = `Bearer ${token}`
-  const res = await fetch('/api/netprint/run', { method: 'POST', headers, body: JSON.stringify(input) })
+  const res = await fetchOrDescribe('/api/netprint/run', { method: 'POST', headers, body: JSON.stringify(input) })
   const body = await res.json().catch(() => null) as unknown
   return normalizeNetprintRunOutcome(res.status, res.ok, body)
 }
@@ -792,7 +834,7 @@ async function readNetprintTargetsResponse(res: Response, label: string): Promis
  * Refs #874 の 12)。応答は KV `netprint_targets` の生 JSON 配列 (未設定は `[]`)。
  */
 export async function getNetprintTargets(): Promise<unknown> {
-  const res = await fetch('/api/netprint/targets', { headers: netprintRouteHeaders() })
+  const res = await fetchOrDescribe('/api/netprint/targets', { headers: netprintRouteHeaders() })
   return readNetprintTargetsResponse(res, '通知先の設定')
 }
 
@@ -801,7 +843,7 @@ export async function getNetprintTargets(): Promise<unknown> {
  * 中身の検証は relay (cron と同じ部品) が行い、落ちた理由が `Error.message` に載る。
  */
 export async function putNetprintTargets(targets: NetprintTargetPayloadItem[]): Promise<unknown> {
-  const res = await fetch('/api/netprint/targets', {
+  const res = await fetchOrDescribe('/api/netprint/targets', {
     method: 'PUT',
     headers: netprintRouteHeaders(),
     body: JSON.stringify(targets),

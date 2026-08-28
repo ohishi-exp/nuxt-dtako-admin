@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 
-import { describeApiError, describeResponseFailure } from '~/utils/api-error'
+import { describeApiError, describeFetchThrow, describeResponseFailure } from '~/utils/api-error'
 import { marginSummarySaveNote } from '~/utils/margin-r2'
 
 describe('describeApiError', () => {
@@ -370,5 +370,60 @@ describe('describeResponseFailure (Refs #996)', () => {
   it('本文が読めなくても落ちない', async () => {
     const broken = { status: 500, text: async () => { throw new Error('stream error') } } as unknown as Response
     expect(await describeResponseFailure(broken, RETRY)).toContain('500 (応答本文が空でした) — ')
+  })
+})
+
+describe('describeFetchThrow — fetch 自体が throw したとき (Refs #1006)', () => {
+  /**
+   * 本番実測 (2026-08-28): Access が切れると **cross-origin へ 302** が返り、
+   * `fetch` は追随先を返せず `TypeError` を投げる。`res` を見るコードには
+   * 1 行も到達しないので、直す場所は `catch` 側しかない。
+   */
+  it('TypeError なら「どちらか」と書き、やることを 1 つだけ出す', () => {
+    const s = describeFetchThrow(new TypeError('Failed to fetch'))
+    expect(s).toBe(
+      'サーバに接続できませんでした。'
+      + 'ログインが切れているか、ネットワークが繋がっていないかのどちらかです'
+      + ' (ブラウザからは区別できません)。'
+      + 'ページを再読み込みしてください'
+      + ' — ログインが切れていた場合はログイン画面が出ます。'
+      + 'ネットワークが原因のときは同じ表示のままです。',
+    )
+  })
+
+  /** ★ 断定しないことが本体 (陰性対照)。どちらか一方に倒したら落ちる。 */
+  it('認証切れともネットワーク断とも断定しない (陰性対照)', () => {
+    const s = describeFetchThrow(new TypeError('Failed to fetch')) ?? ''
+    // 「切れました」「切れています」と言い切る形が入っていないこと
+    expect(s).not.toContain('ログインが切れました')
+    expect(s).not.toContain('ログインが切れています')
+    expect(s).not.toContain('ネットワークが切れています')
+    expect(s).not.toContain('再ログインしてください')
+    // 両方を挙げていること + 区別できないと明示していること
+    expect(s).toContain('ログインが切れているか')
+    expect(s).toContain('ネットワークが繋がっていないか')
+    expect(s).toContain('どちらか')
+    expect(s).toContain('区別できません')
+    // やることは 1 つだけ (再読み込み)
+    expect(s).toContain('ページを再読み込みしてください')
+  })
+
+  /**
+   * ★ `e.message` の文字列一致で判定していないこと。文言はブラウザごとに違う
+   * (Chrome `Failed to fetch` / Firefox `NetworkError when attempting to fetch resource.`)。
+   */
+  it('message の文言が違っても同じ文になる (Chrome / Firefox / 空)', () => {
+    const chrome = describeFetchThrow(new TypeError('Failed to fetch'))
+    expect(describeFetchThrow(new TypeError('NetworkError when attempting to fetch resource.')))
+      .toBe(chrome)
+    expect(describeFetchThrow(new TypeError(''))).toBe(chrome)
+  })
+
+  /** TypeError 以外は当てない — 呼び出し側の既存の文言をそのまま残す。 */
+  it('TypeError でなければ null (既存の振る舞いを変えない)', () => {
+    expect(describeFetchThrow(new Error('API エラー (503): upstream down'))).toBeNull()
+    expect(describeFetchThrow({ statusCode: 401 })).toBeNull()
+    expect(describeFetchThrow(null)).toBeNull()
+    expect(describeFetchThrow('Failed to fetch')).toBeNull()
   })
 })

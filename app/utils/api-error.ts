@@ -240,3 +240,60 @@ function nextStepForStatus(status: number, retry: string): string {
   }
   return `送った内容をサーバが受け付けませんでした。上の理由のとおりに直してから${retry}`
 }
+
+/**
+ * **`fetch` 自体が throw したとき**の 1 文 (Refs #1006)。`Response` が 1 つも
+ * 得られなかった場合だけを相手にする。当たらなければ `null` を返すので、
+ * 呼び出し側の既存の文言はそのまま残る。
+ *
+ * ## ★ issue #1006 の予想は**半分外れている** (2026-08-28 に本番で実測)
+ *
+ * `credentials:'omit'` で「未認証相当」を作って測った結果:
+ *
+ * | issue の予想 | 実測 |
+ * | --- | --- |
+ * | Access が 302 を返す | **✅ そのとおり** (`redirect:'manual'` で `type:"opaqueredirect"` / `status:0`) |
+ * | ログインページの **HTML が 200 で返る** | **❌ 返らない** |
+ * | ⇒ `res.ok` が真になる | **❌ ならない** |
+ * | ⇒ `res.json()` が `Unexpected token '<'` で落ちる | **❌ そこまで到達しない** |
+ *
+ * **リダイレクト先が cross-origin** なので、`fetch` は追随先の応答を返せず
+ * **CORS で弾いて `TypeError` を投げる** (既定の `redirect:'follow'` で
+ * `TypeError: Failed to fetch`)。API でもページでも同じだった。
+ *
+ * ⇒ **`res.redirected` / `content-type` を見る枝は要らない** — そこまで到達しない。
+ * **要るのは `catch` 側**。`if (!res.ok)` も `describeResponseFailure` も
+ * `describeApiError` も、`res` を見るコードには **1 行も到達しない**。
+ *
+ * ## ★ 断定しない — 認証切れとネットワーク断は**ブラウザから区別できない**
+ *
+ * どちらも同じ `TypeError` になる。だから
+ * **「ログインが切れました」とも「ネットワークが切れています」とも書かない**。
+ * **両方を挙げて、やることを 1 つ (ページの再読み込み) だけ出す。**
+ * 直していない状態で画面に出るのは **`Failed to fetch` の 1 語**で、利用者は
+ * 「サーバが落ちている」と読む — この repo で最も多い欠陥の型
+ * (「出ているものが別の意味に読める」) にそのまま当たる。
+ *
+ * ## ★ 判定は `e.message` の文字列一致にしない
+ *
+ * 文言はブラウザごとに違う (Chrome `Failed to fetch` /
+ * Firefox `NetworkError when attempting to fetch resource.` / Safari は別)。
+ * **`TypeError` かどうか**で見る。`fetch` はネットワークエラーを
+ * `TypeError` で reject すると仕様で決まっている。
+ *
+ * ## ★ `try` は `fetch` の 1 行だけを囲むこと
+ *
+ * 素の プログラミングエラー (`undefined.foo` 等) も `TypeError` なので、
+ * **`try` に他の処理を巻き込むと「接続できませんでした」と誤って書く**。
+ * だから当てる場所は**`fetch` を呼ぶ関数の中**であって、画面側の広い
+ * `try { …数十行… } catch` **ではない**。
+ */
+export function describeFetchThrow(e: unknown): string | null {
+  if (!(e instanceof TypeError)) return null
+  return 'サーバに接続できませんでした。'
+    + 'ログインが切れているか、ネットワークが繋がっていないかのどちらかです'
+    + ' (ブラウザからは区別できません)。'
+    + 'ページを再読み込みしてください'
+    + ' — ログインが切れていた場合はログイン画面が出ます。'
+    + 'ネットワークが原因のときは同じ表示のままです。'
+}
