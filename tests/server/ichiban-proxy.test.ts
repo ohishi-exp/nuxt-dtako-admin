@@ -155,13 +155,19 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
     await expect(call(event)).rejects.toMatchObject({ statusCode: 502 })
   })
 
-  it('fetch が Error でない値で reject しても 502 (String() でメッセージ化)', async () => {
+  /**
+   * ★ **上流の理由は `message` (JSON 本文) の側で運ぶ** (Refs #1032/#886)。
+   * `statusMessage` は 502/503 共通の ASCII 固定句 — 日本語を載せると本番 (workerd) の
+   * reason phrase で断片だけが残る (`403 proxy` と同じ形)。
+   */
+  it('fetch が Error でない値で reject しても 502 (理由は message、statusMessage は ASCII 固定句)', async () => {
     fetchMock.mockRejectedValue('connection refused')
     const event = eventWith({ NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a', ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' })
 
     await expect(call(event)).rejects.toMatchObject({
       statusCode: 502,
-      statusMessage: expect.stringContaining('connection refused'),
+      statusMessage: 'ichiban upstream request failed',
+      message: expect.stringContaining('connection refused'),
     })
   })
 
@@ -172,7 +178,9 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
     const event = { context: { params: { path: 'x' } }, _url: 'https://dtako.ippoan.org/api/ichiban/x' }
     await expect(call(event)).rejects.toMatchObject({
       statusCode: 503,
-      statusMessage: expect.stringContaining('INTERNAL_SHARED_SECRET'),
+      // ASCII 固定句 / 日本語は本文の側 (Refs #1032)
+      statusMessage: 'INTERNAL_SHARED_SECRET binding is not configured',
+      message: 'INTERNAL_SHARED_SECRET binding が未設定です',
     })
     expect(fetchMock).not.toHaveBeenCalled()
   })
@@ -359,7 +367,8 @@ describe('ichiban proxy の認可 (Refs #988)', () => {
     const { INTERNAL_SHARED_SECRET: _drop, ...rest } = ENV
     await expect(call(eventFor(rest))).rejects.toMatchObject({
       statusCode: 503,
-      statusMessage: expect.stringContaining('INTERNAL_SHARED_SECRET'),
+      statusMessage: 'INTERNAL_SHARED_SECRET binding is not configured',
+      message: 'INTERNAL_SHARED_SECRET binding が未設定です',
     })
     expect(requireAuthMock).not.toHaveBeenCalled()
     expect(fetchMock).not.toHaveBeenCalled()
@@ -525,16 +534,51 @@ describe('ichiban proxy の upstream path allowlist (Refs #1015)', () => {
   })
 
   /**
-   * ★ **理由は本文 (`message`) の側にも入れる。**本番 (workerd) の reason phrase は
-   * 日本語を運べず空になるので、画面 (`describeApiError` が `d.message` を読む) に
-   * 届くのは JSON 本文だけ。**upstream に何が在るかは書かない。**
+   * ★ **理由は本文 (`message`) の側に日本語で入れる。**本番 (workerd) の reason phrase は
+   * 日本語を運べないので、画面 (`describeApiError` が `d.message` を読む) に届くのは
+   * JSON 本文だけ。**upstream に何が在るかは書かない。**
+   *
+   * ★ **`statusMessage` は ASCII に留める** (Refs #1032/#886)。日本語を載せると
+   * reason phrase が空ではなく **`HTTP/1.1 403 proxy`** になり、**正しい reason phrase に
+   * 見える断片**が残る (2026-08-28、local `wrangler dev` = 本物の workerd で実測)。
    */
-  it('403 の理由は statusMessage と message の両方に入り、upstream を示唆しない', async () => {
+  it('403 の理由は message に日本語で入り、statusMessage は ASCII (upstream を示唆しない)', async () => {
     await expect(call(eventForPath('api/schema/columns'))).rejects.toMatchObject({
       statusCode: 403,
-      statusMessage: 'この proxy が中継するパスではありません',
+      statusMessage: 'path is not relayed by this proxy',
       message: 'この proxy が中継するパスではありません',
     })
+  })
+
+  /**
+   * ★ **陰性対照**: 3 か所の `statusMessage` に**非 ASCII が 1 文字も無い**ことを直接測る。
+   * 上の 3 本は「この文字列であること」を見ているので、**将来別の日本語に差し替えられても
+   * その it が落ちるだけ**で「ASCII であること」自体は誰も守らない。ここが守る。
+   * (この it は、どれか 1 つでも日本語に戻すと落ちる。)
+   */
+  it('★ 陰性対照: 403 / 503 / 502 の statusMessage は 3 本とも非 ASCII を含まない', async () => {
+    const collected: string[] = []
+
+    // 403 — allowlist 外
+    await call(eventForPath('api/schema/columns')).catch((e: { statusMessage?: string }) => {
+      collected.push(e.statusMessage ?? '')
+    })
+    // 503 — INTERNAL_SHARED_SECRET 未設定
+    const { INTERNAL_SHARED_SECRET: _drop, ...rest } = ENV
+    const noSecret = { ...eventForPath('api/employees'), context: { cloudflare: { env: rest }, params: { path: 'api/employees' } } }
+    await call(noSecret).catch((e: { statusMessage?: string }) => {
+      collected.push(e.statusMessage ?? '')
+    })
+    // 502 — fetchIchiban が throw する経路
+    fetchMock.mockRejectedValue(new Error('接続できません'))
+    await call(eventForPath('api/employees')).catch((e: { statusMessage?: string }) => {
+      collected.push(e.statusMessage ?? '')
+    })
+
+    expect(collected).toHaveLength(3)
+    for (const sm of collected) {
+      expect(sm, `非 ASCII が混じっている: ${sm}`).toMatch(/^[\x20-\x7e]+$/)
+    }
   })
 
   /** query string は照合対象外 — 判定するのは path 部分だけ (`?` 以降は素通し)。 */

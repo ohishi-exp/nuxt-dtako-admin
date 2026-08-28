@@ -101,7 +101,13 @@ export default defineEventHandler(async (event: H3Event) => {
 
   const sharedSecret = await resolveSecret(env.INTERNAL_SHARED_SECRET)
   if (!sharedSecret) {
-    throw createError({ statusCode: 503, statusMessage: 'INTERNAL_SHARED_SECRET binding が未設定です' })
+    // ★ **`statusMessage` は ASCII、理由は `message` (= JSON 本文) に日本語で置く**
+    // (Refs #1032/#886)。下の 403 の注記に測定条件つきで書いた穴と同じ理由。
+    throw createError({
+      statusCode: 503,
+      statusMessage: 'INTERNAL_SHARED_SECRET binding is not configured',
+      message: 'INTERNAL_SHARED_SECRET binding が未設定です',
+    })
   }
   const authWorkerUrl
     = typeof env.NUXT_PUBLIC_AUTH_WORKER_URL === 'string' && env.NUXT_PUBLIC_AUTH_WORKER_URL
@@ -114,24 +120,36 @@ export default defineEventHandler(async (event: H3Event) => {
   // **認証のあとに path の認可** (Refs #1015)。順序を入れ替えないこと — 未ログインを
   // 403 で返すと「ログインしたら通る」ことが読めなくなる。
   //
-  // ★ **理由は `message` (= JSON 本文) の側にも明示する。**画面に届くのは本文だけで
-  // (`describeApiError` が `d.message` を読む)、reason phrase は当てにならない。
-  // **実測 (2026-08-28、local `wrangler dev` = 本物の workerd)**: この日本語を
-  // `statusMessage` に載せると reason phrase は空ではなく
-  // **`HTTP/1.1 403 proxy`** になった (非 ASCII が落ちて断片だけ残る) —
-  // 単語に見えるぶん空より紛らわしい。本文の側は 6 行とも無傷で届いている:
+  // ★ **理由は `message` (= JSON 本文) に日本語で置き、`statusMessage` は ASCII に留める**
+  // (Refs #1032/#886)。画面に届くのは本文だけで (`describeApiError` が `d.message` を
+  // 読む)、reason phrase は当てにならない。
+  //
+  // **なぜ `statusMessage` に日本語を残さないか — 実測 (2026-08-28、local `wrangler dev`
+  // = 本物の workerd)**: 日本語を `statusMessage` に載せると reason phrase は空ではなく
+  // **`HTTP/1.1 403 proxy`** になった (非 ASCII が落ちて `proxy` の断片だけ残る) —
+  // **正しい reason phrase に見えるぶん、空より紛らわしい**。本文の側は当時から無傷で
+  // 届いていたので実害は無いが、壊れて見えないぶん質が悪い。⇒ ASCII に寄せて断片を消す。
+  // いまの本文はこうなる:
   //   {"error":true,"url":"…","statusCode":403,
-  //    "statusMessage":"この proxy が中継するパスではありません",
+  //    "statusMessage":"path is not relayed by this proxy",
   //    "message":"この proxy が中継するパスではありません"}
-  // h3 の `createError` は `message` 未指定なら `statusMessage` を写すが、
-  // **写しに依存せず両方書く。**
+  // h3 の `createError` は `message` 未指定なら `statusMessage` を写すので、
+  // **写させずに両方明示する** (写しに任せると本文まで ASCII になる)。
+  //
+  // ★ **この直しを front の他の経路へ広げないこと。**`app/utils/api.ts:784,826` /
+  // `app/utils/netprint-run.ts:139` / `app/pages/kyuyo-fetch.vue:150,214` は
+  // **`statusMessage` を `message` より先に読む** ので、同じ直しを netprint / kyuyo /
+  // net780-archive の server route に当てると**画面の日本語が ASCII に化ける**。
+  // `/api/ichiban/**` を読む front は全数が `message` 先 (`describeApiError` ないし
+  // `theearthSessionErrorMessage` = `[error, message, statusMessage]`) か、
+  // 本文を読まないかのどちらかであることを実測して確かめてある (Refs #1032)。
   //
   // ★ **upstream に何が在るかを示唆しない。**書くのは「この proxy が中継する path では
   // ない」までで、要求された path も echo しない。
   if (!isAllowedIchibanProxyPath(pathParam)) {
     throw createError({
       statusCode: 403,
-      statusMessage: 'この proxy が中継するパスではありません',
+      statusMessage: 'path is not relayed by this proxy',
       message: 'この proxy が中継するパスではありません',
     })
   }
@@ -143,7 +161,18 @@ export default defineEventHandler(async (event: H3Event) => {
   // fetchIchiban は IchibanUpstreamError (503/502) のみを throw する契約 (同ファイルの JSDoc 参照)。
   catch (e: unknown) {
     const err = e as IchibanUpstreamError
-    throw createError({ statusCode: err.statusCode, statusMessage: err.message })
+    // ★ **`err.message` を `statusMessage` に載せない** (Refs #1032/#886)。
+    // 中身は `server/utils/ichiban-upstream.ts` の日本語 2 本
+    // (`:118` の binding 未設定 = 503 / `:139` の接続失敗 = 502) で、**日本語のまま
+    // reason phrase に流すと本番 (workerd) で断片だけが残る**。`statusMessage` は
+    // **502/503 のどちらにも当てはまる ASCII の固定句**にし、上流の日本語は
+    // `message` (= JSON 本文) にそのまま載せる。**`ichiban-upstream.ts` 側の文言は
+    // 触らない** — 本文に載るので無傷でよい。
+    throw createError({
+      statusCode: err.statusCode,
+      statusMessage: 'ichiban upstream request failed',
+      message: err.message,
+    })
   }
 
   setResponseStatus(event, upstreamRes.status)
