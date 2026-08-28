@@ -122,6 +122,10 @@ export function pickNextOperationForCarry(
  * 運行NO の先頭 12 桁 (`YYMMDDHHmmss`) → 注記用の短い開始日時 (`MM-DD HH:mm`)。
  * 22 桁でも 23 桁でもなければ `null`。
  *
+ * **23 桁は 2026-08-28 時点の本番に 0 件** (本番 `/api/operations` を日付フィルタ無しで
+ * 読んだ全 8,037 件が 22 桁、23 桁 0)。**将来の桁への防御として受けている** — 測定条件と
+ * 「22 桁だけ受ける口と矛盾しない理由」は `runDateFromUnkoNo` の doc に書いてある。
+ *
  * `kintai-unko-gaps.ts` の `kintaiUnkoGapsDeriveStartOpe` が似た変換を持っているが、
  * **独立に書く** — あちらは勤怠 (オンプレの③フォームへ見せる `YYYY/MM/DD H:mm:ss`) の
  * 口で、ここは手当・粗利の注記。`runDateFromUnkoNo` を別に持っているのと同じ理由。
@@ -204,6 +208,24 @@ export function operationRunDate(startTs: number | null, operationDate: string |
 
 /**
  * 運行NO の先頭 6 桁 (`YYMMDD`) → `YYYY-MM-DD`。22 桁でも 23 桁でもなければ `null`。
+ *
+ * ## 23 桁を受けているのは「将来の桁への防御」で、実データではない (Refs #1011)
+ *
+ * **実測 (2026-08-28)**: 本番 `/api/operations` (rust-alc-api の運行一覧) を**日付
+ * フィルタ無し**で読んだ**全 8,037 件**が **22 桁 8,037 / 23 桁 0**。先頭 6 桁の範囲は
+ * `180101`〜`260827` = **2018-01-01 〜 2026-08-27 を覆う**。
+ * ⇒ **23 桁の運行NO は本番に 1 件も無い。** それでも受けるのは、この関数が
+ * **運行NO から日付を導くだけで存在検証をしない**からで、桁を決め打つと
+ * `server/api/profit/operation-leg-sales.get.ts` の JSDoc が言うとおり「将来の桁で
+ * 『ありません』と嘘をつく」。**根拠の無い断定ではなく、0 件と分かった上での防御。**
+ *
+ * `server/api/net780/by-operation.get.ts` が 22 桁だけを受けているのと**矛盾しない** —
+ * あちらは D1 `dtako_uploads` を引く**実データの検証**で、桁を広げても通る件数は 1 件も
+ * 増えず、存在しないキーで引いて「アーカイブされていません」と返す逆方向の嘘が増える
+ * だけ。こちらは**導出だけの防御**。役割が違う。
+ *
+ * **勤怠 (`app/pages/restraint-wage.vue` / `app/utils/kintai-*.ts`) の 22桁/23桁 は別の軸**
+ * (オンプレ 23 桁 / GCP 22 桁 の取り込み) で、上の母集団ではない。混ぜて読まないこと。
  *
  * `kintai-candidate-diff.ts` の `kintaiCandidateDiffDateFromUnkoNo` が同じ変換を
  * 持っているが、**独立に書く** — あちらは勤怠 (オンプレ/GCP の突合) の口で、ここは
