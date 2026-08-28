@@ -184,8 +184,12 @@ import {
   allowanceRateNoticeForMargin,
   allowanceRateReadError,
   allowanceRateRows,
+  cachedRateVersionOf,
+  marginCacheRateStatus,
   resolveAllowanceRateMaster,
   type AllowanceRateState,
+  type CachedRateVersion,
+  type MarginCacheRateMatch,
 } from '~/utils/allowance-rate-source'
 import type { RateRow } from '~/utils/allowance-rate-master'
 import {
@@ -252,10 +256,34 @@ const rateState = ref<AllowanceRateState | null>(null)
 const rateRows = computed<RateRow[] | undefined>(() =>
   (rateState.value === null ? null : allowanceRateRows(rateState.value)) ?? undefined)
 
-/** 画面に出す 1 文。**キャッシュから出している回は「この版で計算したとは限らない」を足す。** */
+/**
+ * **キャッシュを作ったときの手当マスタの版** (`MarginCache.rateVersion` / `rateUpdatedAt`、
+ * Refs #1017 ③)。復元していない回は空 (突き合わせる相手が無い)。
+ * **「刻まれていない」を「いまの版」で埋めないこと** — 埋めると全部「一致」になる。
+ */
+const restoredRate = ref<CachedRateVersion>({})
+
+/**
+ * 刻んだ版といまの版の突き合わせ。**復元していない回は `null`。**
+ * 文 (`rateNotice`) と色 (`rateVersionUnsure`) の**両方がこれを見る** — 判定を 2 つ持つと
+ * 片方だけ直したときに黙ってずれる。
+ */
+const cacheRateMatch = computed<MarginCacheRateMatch | null>(() => (
+  rateState.value === null || !restoredFromCache.value
+    ? null
+    : marginCacheRateStatus(rateState.value, restoredRate.value)))
+
+/**
+ * **言い切れない回** (`mismatch` / `unknown`)。注記の色を上げるためだけで、金額には効かない。
+ * 「一致」を出すようになると、**印の無い画面が「壊れている」と読まれる**逆方向の誤読が
+ * 起きるので、**色でも 3 状態を分ける** (一致 = 既定色 / 言い切れない = amber)。
+ */
+const rateVersionUnsure = computed(() => cacheRateMatch.value !== null && cacheRateMatch.value !== 'match')
+
+/** 画面に出す 1 文。**キャッシュから出している回は、刻んだ版といまの版の突き合わせを足す。** */
 const rateNotice = computed(() => (rateState.value === null
   ? ''
-  : allowanceRateNoticeForMargin(rateState.value, restoredFromCache.value)))
+  : allowanceRateNoticeForMargin(rateState.value, restoredFromCache.value, restoredRate.value)))
 
 /**
  * 運行手当マスタを R2 から読む (`GET /restraint-api/allowance-rate`、PR-1 の口)。
@@ -599,6 +627,9 @@ function restoreFromCache(cache: MarginCache) {
   uncoveredByDriver.value = restoredUncoveredByDriver(cache.ym)
   uncovered.value = cache.uncovered
   crossMonth.value = cache.crossMonth
+  // **刻んであるものをそのまま持つ** (Refs #1017 ③)。欄が無ければ `parseMarginCache` が
+  // null にしてあるので、ここで「いまの版」に埋め直さない。
+  restoredRate.value = { source: cache.rateSource, version: cache.rateVersion, updatedAt: cache.rateUpdatedAt }
   shownYm.value = cache.ym
   savedAt.value = cache.savedAt
   restoredFromCache.value = true
@@ -642,9 +673,11 @@ function restoredUncoveredByDriver(ym: string): Record<string, number> | null {
 /**
  * いま画面に出ている集計を `MarginCache` の形にする。**localStorage の写しと R2 の版で
  * 同じ中身を使う**ための 1 か所 (Refs #826) — 2 か所で組むと、片方だけ項目を足したときに
- * 黙って中身の違う 2 つが残る。`MarginCache` の形は変えない。
+ * 黙って中身の違う 2 つが残る。**この関数が `MarginCache` を組む唯一の場所**なので、
+ * 欄を足すときもここだけを直す (Refs #1017 ③ で `rateVersion` / `rateUpdatedAt` を足した)。
  */
 function currentMarginCache(savedAtIso: string): MarginCache {
+  const rate = cachedRateVersionOf(rateState.value)
   return {
     ym: shownYm.value,
     savedAt: savedAtIso,
@@ -652,6 +685,11 @@ function currentMarginCache(savedAtIso: string): MarginCache {
     costs: costs.value,
     uncovered: uncovered.value,
     crossMonth: crossMonth.value,
+    // **どの手当マスタの版で計算したか** (Refs #1017 ③)。`r2` 以外は版が無いので null。
+    // R2 の版 (`buildMarginSummaryInput`) にも同じ中身が入る — 保存の口は 1 か所。
+    rateSource: rate.source,
+    rateVersion: rate.version,
+    rateUpdatedAt: rate.updatedAt,
   }
 }
 
@@ -1132,6 +1170,8 @@ function reconcileSales(
 async function run() {
   status.value = 'loading'
   restoredFromCache.value = false
+  // **前回の版の名札を残したまま集計しない。** 集計後は `writeCache()` が刻み直す。
+  restoredRate.value = {}
   errorMessage.value = null
   salesError.value = null
   costError.value = null
@@ -1875,7 +1915,8 @@ watch([() => inputs.value.length, shownYm], ([count]) => {
 /**
  * 運行行の「地図」モーダル (Refs #760 の 18)。イベントCSV を **その場で 1 回引く**
  * (`resolveOperation` の集計とは別の呼び出し。運行 1 本の 1 呼び出しなので cache には
- * 入れない — `MARGIN_CACHE_KEY` の形を変えない)。描く形への変換は
+ * 入れない — **明細は `MarginCache` に入れない**。量が桁違いで、R2 の版の容量が
+ * 運行本数×月で膨らむ)。描く形への変換は
  * `buildOperationRoute` (pure)、描画は `OperationRouteMap.vue` (dumb)。
  */
 const routeModal = ref<{
@@ -2010,7 +2051,7 @@ async function openRouteMap(m: OperationMargin) {
  * `legRefs` を運行ごとにまとめ、運行 1 本につきイベントCSV を 1 回引いて
  * (`CSV_CONCURRENCY` で並列)、`pickLegsFromRoute` でその運行の**該当する便だけ**を
  * 残してから `mergeRoutes` で 1 枚に重ねる。**運行行の地図と同じモーダル**
- * (`routeModal`) に出す。cache には入れない (`MARGIN_CACHE_KEY` の形を変えない)。
+ * (`routeModal`) に出す。cache には入れない (**明細は `MarginCache` に入れない** — 量が桁違い)。
  *
  * 引けなかった運行はそのぶんを抜いて描き、何本落としたかを `error` に出す
  * (**黙って少ない本数を重ねない** — 形を比べるのが目的なので、欠けを見せる)。
@@ -2316,8 +2357,8 @@ function downloadCustomerRouteCsv() {
       v-if="rateState"
       class="text-xs mb-4 px-3 py-2 rounded border"
       :class="{
-        'text-gray-500 border-gray-200 dark:border-gray-700': rateState.status === 'r2',
-        'text-amber-700 dark:text-amber-400 border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950': rateState.status === 'seed',
+        'text-gray-500 border-gray-200 dark:border-gray-700': rateState.status === 'r2' && !rateVersionUnsure,
+        'text-amber-700 dark:text-amber-400 border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950': rateState.status === 'seed' || (rateState.status === 'r2' && rateVersionUnsure),
         'text-red-700 dark:text-red-400 border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950 font-semibold': rateState.status === 'error',
       }"
     >

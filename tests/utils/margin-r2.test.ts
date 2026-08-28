@@ -288,6 +288,35 @@ describe('marginSummaryHashInput — 差分検知', () => {
     expect(marginSummaryHashInput(timeShare)).not.toBe(marginSummaryHashInput(base))
   })
 
+  /**
+   * ★★ **#1017 ③ の予測を先に固定する。** `cache` は丸ごとハッシュ対象なので、
+   * `MarginCache` に列を足すと自動的に入る = **列を足した回の最初の保存は、取り込み
+   * データが 1 円も変わっていなくても版が 1 本増える。2 回目からは増えない。**
+   *
+   * 「増える」だけ測って終わらせないこと — **2 回目が増えないことまで測って初めて
+   * 「一度きり」と言える。**
+   */
+  it('★★ 手当マスタの版が違えば違う版になる (1 回目は増える)', () => {
+    const withVersion = input({ totals: productionTotals(), cache: cache({ rateSource: 'r2', rateVersion: 'a1b2c3d4e5f6', rateUpdatedAt: '2026-08-27T00:00:00.000Z' }) })
+    // **`totals` は 1 円も動かない**のに版は分かれる (指紋 2 欄と同じ理屈)。
+    expect(withVersion.totals).toEqual(base.totals)
+    expect(marginSummaryHashInput(withVersion)).not.toBe(marginSummaryHashInput(base))
+  })
+
+  it('★★ 同じ版で 2 回目を保存してもハッシュは動かない (増えるのは一度きり)', () => {
+    const rate = { rateSource: 'r2' as const, rateVersion: 'a1b2c3d4e5f6', rateUpdatedAt: '2026-08-27T00:00:00.000Z' }
+    const first = input({ totals: productionTotals(), cache: cache(rate) })
+    // 2 回目は保存時刻だけが違う (`savedAt` はハッシュから抜いてある)。
+    const second = input({ totals: productionTotals(), cache: cache({ ...rate, savedAt: '2026-08-28T09:00:00.000Z' }) })
+    expect(marginSummaryHashInput(second)).toBe(marginSummaryHashInput(first))
+  })
+
+  it('★ 保存時の出どころが違えば違う版 (r2 と seed を同じ版にまとめない)', () => {
+    const fromR2 = input({ totals: productionTotals(), cache: cache({ rateSource: 'r2', rateVersion: null, rateUpdatedAt: null }) })
+    const fromSeed = input({ totals: productionTotals(), cache: cache({ rateSource: 'seed', rateVersion: null, rateUpdatedAt: null }) })
+    expect(marginSummaryHashInput(fromR2)).not.toBe(marginSummaryHashInput(fromSeed))
+  })
+
   it('★ 上書きの入れた順が違うだけなら同じ (中身が同じなのに版を増やさない)', () => {
     // ★ **車輌C が 1000 未満だと並びが入れた順になる。** `vehicleCodeFromUnkoNo` は
     // `padStart(4, '0')` を通すので `'0123'` になり、これは整数として正規な文字列ではない

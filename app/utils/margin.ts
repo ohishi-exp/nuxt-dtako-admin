@@ -2034,8 +2034,22 @@ export function summarizeUncoveredLegs(legs: IchibanLeg[]): UncoveredTotals | nu
  * `v9` で便に**拘束秒** (`haulSec`/`deadheadSec`) を足した (Refs #760 の 22)。
  * `v8` を読ませないのは、**秒の無い便を読むと拘束時間比が全運行フォールバックになり**、
  * 走行km比と同じ数字が「拘束時間比」の名前で出てしまうため (キャッシュ経路だけ
- * 切り替えが効かない画面に戻る)。**キャッシュを読む側にバージョン判定は無い** —
- * 形が変わったらこのキーを上げる、が唯一の作法。
+ * 切り替えが効かない画面に戻る)。
+ *
+ * ## 上げるのは「読み方が変わるとき」だけ。**足すだけなら上げない** (Refs #1017 ③)
+ *
+ * `parseMarginCache` は `Partial<MarginCache>` から**要る欄だけ**読む。だから
+ * **欄を足すだけなら古いキャッシュもそのまま読める** — 足した欄は「記録されていない」
+ * として null になるだけで、既にある欄の読み方は 1 つも変わらない。
+ * **`rateVersion` / `rateUpdatedAt` を足したときに上げていないのはこの理由。**
+ *
+ * **上げるとどうなるかを先に見る**: キーを上げると**全端末のキャッシュが消える**。
+ * 利用者から見れば「開いたら金額が消えた」で、`v9` までのように**既にある欄の意味が
+ * 変わる**回でなければ、得られるものより失うものの方が大きい。
+ *
+ * ⇒ **既にある欄の読み方が変わる (意味・単位・数え方が変わる) ときは上げる。欄を足す
+ * だけなら上げない。** 足した欄は「無い」を **null で受け、`0` や「一致」に倒さないこと** —
+ * 倒すと「記録していない」と「記録して一致した」が同じ見た目になる。
  */
 export const MARGIN_CACHE_KEY = 'dtako:margin:cache:v9'
 
@@ -2064,6 +2078,42 @@ export interface MarginCache {
    * 運行手当タブとの差を読めない画面に戻る。**古いキャッシュには無い**ので null 可。
    */
   crossMonth: CrossMonthLegs | null
+  /**
+   * この集計に使った**運行手当マスタの版** (`AllowanceRateState` の `version` = sha256) と
+   * その保存時刻 (Refs #1017 ③)。**刻まれていなければ null。**
+   *
+   * これが無かった間、粗利タブの注記は「**この版で計算したとは限りません**」としか
+   * 言えなかった。注記が出す「版 X」は**いま読んでいる版**で、**このキャッシュを作った
+   * 版ではない**ため、利用者は 2 つの版を見比べられなかった。
+   *
+   * **`null` を「一致」に倒さない。** 「記録していない」と「記録して一致した」を同じ
+   * 見た目にすると、**このPR より前に保存されたキャッシュが「この版で計算した」と
+   * 名乗る**ことになる。
+   *
+   * ## **`rateVersion` だけでは「版が無い」の理由を言い分けられない**
+   *
+   * `AllowanceRateState` は **`r2` のときしか `version` を持たない**ので、版が刻まれて
+   * いない回が **3 通り**ある。**同じ 1 文に束ねるとどれかで必ず嘘になる**:
+   *
+   * | | 保存時 | `rateSource` | `rateVersion` |
+   * |---|---|---|---|
+   * | (a) | **このPR より前**に保存 | 欄ごと無い → null | 欄ごと無い → null |
+   * | (b) | `seed` (**同梱の初期値**) | `'seed'` | null (seed に版は無い) |
+   * | (c) | `r2` だが応答に版が無い | `'r2'` | null (`textOrNull` が null にする) |
+   *
+   * ⇒ **`rateSource` も刻む。** (b) を (a) と同じ文にすると「**記録していない**」と
+   * 「**記録してあって、それが seed だった**」が同じ見た目になる — この repo で最も
+   * 多い欠陥の型そのもので、このPR が直そうとしているのがまさにそれ。
+   *
+   * **金額は 1 円も動かさない。** 手当を引き直さないのは材料が足りないからではなく
+   * (`MarginLegInput` の `originCity` / `destCity` は残っている)、畳んだ入力に
+   * `viaCities` / `masterDest` / `status` (ambiguous/unknown) / 暫定額かどうかが
+   * 残っていないため — 部分的に引き直すと **`集計` を押したときとは違う金額**を
+   * 自信ありげに出すことになり、いまより悪くなる。**検知して注記を強めるだけ。**
+   */
+  rateSource?: 'r2' | 'seed' | null
+  rateVersion?: string | null
+  rateUpdatedAt?: string | null
 }
 
 /**
@@ -2092,6 +2142,13 @@ export function parseMarginCache(raw: string | null | undefined): MarginCache | 
     // **null と「入っていない」を同じに倒す。** 対象外が 0 便の月は `null` で保存する。
     uncovered: typeof cache.uncovered === 'object' && cache.uncovered !== null ? cache.uncovered : null,
     crossMonth: typeof cache.crossMonth === 'object' && cache.crossMonth !== null ? cache.crossMonth : null,
+    // **文字列でなければ null** (Refs #1017 ③)。欄そのものが無い古いキャッシュ
+    // (このPR より前に保存されたもの) はここで null になり、画面が
+    // 「保存時の版が記録されていません」と断る。**「一致」には倒さない。**
+    // **知っている 2 語以外は null。`'r2'` には倒さない。**
+    rateSource: cache.rateSource === 'r2' || cache.rateSource === 'seed' ? cache.rateSource : null,
+    rateVersion: typeof cache.rateVersion === 'string' ? cache.rateVersion : null,
+    rateUpdatedAt: typeof cache.rateUpdatedAt === 'string' ? cache.rateUpdatedAt : null,
   }
 }
 
