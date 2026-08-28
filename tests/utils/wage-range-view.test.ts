@@ -7,9 +7,11 @@ import {
   monthBadgeLabel,
   monthCellState,
   monthDiff,
+  monthKosokuMark,
   monthsNeedingRefresh,
   parseWageRange,
   rangeCoverageNote,
+  rangeKosokuNote,
   rangeDiff,
   sumWageRangeRows,
   wageRangeCsv,
@@ -92,6 +94,7 @@ function month(over: Partial<WageRangeMonth> = {}): WageRangeMonth {
     stale: false,
     staleReason: [],
     excluded: null,
+    timecardKosoku: null,
     ...over,
   }
 }
@@ -110,6 +113,27 @@ describe('parseWageRange', () => {
     expect(parsed.rows[0]!.byMonth['2026-01']!.calcTotal).toBe(280_000)
     // 月セルの内訳モーダルが出す実働 (月ごと)。古い応答には無いので null もある
     expect(parsed.rows[0]!.byMonth['2026-01']!.workingMinutes).toBe(11_820)
+  })
+
+  /**
+   * `timecard_kosoku` (Refs #998 / #986)。**知っている 3 値だけ**受け、無い月は
+   * `null` にする。上流は `None` を**キーごと省略**するので、`null` には
+   * 「上流が判定していない」と「記録していなかった頃の保存」が畳まれて届く。
+   */
+  it('timecard_kosoku を読む (知らない値とキー無しは null)', () => {
+    const parsed = parseWageRange({
+      months: [
+        { ym: '2026-01', timecard_kosoku: 'yes' },
+        { ym: '2026-02', timecard_kosoku: 'no' },
+        { ym: '2026-03', timecard_kosoku: 'unreadable' },
+        { ym: '2026-04' }, // キーごと省略 (上流の skip_serializing_if)
+        { ym: '2026-05', timecard_kosoku: null },
+        { ym: '2026-06', timecard_kosoku: 'maybe' }, // 上流が値を増やしても印にしない
+        { ym: '2026-07', timecard_kosoku: 1 },
+      ],
+    })
+    expect(parsed.months.map(m => m.timecardKosoku))
+      .toEqual(['yes', 'no', 'unreadable', null, null, null, null])
   })
 
   /** 壊れた応答で画面を落とさない (期間集計が出ないだけにする)。 */
@@ -283,6 +307,109 @@ describe('monthBadgeLabel', () => {
     expect(monthBadgeLabel(month({ excluded: 'payroll_missing' }))).toBe('給与未取込')
     expect(monthBadgeLabel(month({ excluded: 'other' }))).toBe('集計外')
     expect(monthBadgeLabel(month({ stale: true }))).toBe('要再計算')
+  })
+})
+
+/**
+ * 拘束の元データ (`kosoku-daily`) を組めたかの印 (Refs #998)。
+ *
+ * **画面に出る文字列をそのまま固定する** — ここを緩めると「印は出ているが
+ * 何の印か読めない」に戻る。`'no'` と `'unreadable'` は**記号も語も別**である
+ * ことまで見る (処方が逆なので、畳むとこの issue が塞ぐ穴と同じ形になる)。
+ */
+describe('monthKosokuMark', () => {
+  it('取得済 — 記号 + 語で出す (色を消しても読める)', () => {
+    const mark = monthKosokuMark(month({ timecardKosoku: 'yes' }))
+    expect(mark).toEqual({
+      text: '✓ 拘束元 取得済',
+      tone: 'ok',
+      title: 'この月の拘束は オンプレの kosoku-daily から組めています',
+    })
+  })
+
+  it('取れず — 単月側 (#989) と同じ語彙。処方は「待って取り直す」', () => {
+    const mark = monthKosokuMark(month({ timecardKosoku: 'no' }))
+    expect(mark!.text).toBe('⚠ 拘束元 取れず')
+    expect(mark!.tone).toBe('warn')
+    expect(mark!.title).toBe(
+      '拘束の元データ (kosoku-daily) が取れていません — '
+      + 'この月の拘束をオンプレの kosoku-daily から取得できませんでした。'
+      + '上流の一過性の不調なので、少し待ってからこの月を取り直すと入ります。')
+  })
+
+  it('読めず — 「取れず」と記号も語も別。処方も逆 (読み直しでは直らない)', () => {
+    const mark = monthKosokuMark(month({ timecardKosoku: 'unreadable' }))
+    expect(mark!.text).toBe('✕ 拘束元 読めず')
+    expect(mark!.tone).toBe('error')
+    expect(mark!.title).toBe(
+      '拘束の元データ (kosoku-daily) の形が読めません — '
+      + 'オンプレの kosoku-daily は応答しましたが、こちらが知っている形ではなく '
+      + '1 件も読み取れませんでした。読み直しても直りません — '
+      + '上流の応答の形を確認してください。')
+    // ★ 畳んでいないことを陰性対照で示す (記号・語・色のどれも共有しない)
+    const no = monthKosokuMark(month({ timecardKosoku: 'no' }))!
+    expect(mark!.text).not.toBe(no.text)
+    expect(mark!.tone).not.toBe(no.tone)
+    expect(mark!.title).not.toBe(no.title)
+  })
+
+  /**
+   * 上流は `None` を**キーごと省略**して返すので、front には
+   * 「上流が判定していない」と「この項目を記録していなかった頃の保存」が
+   * どちらも `null` で届く。**区別できないことを画面に書かない** = 印を出さない。
+   */
+  it('判定が無い月は印なし (「取れた」とも「取れなかった」とも書かない)', () => {
+    expect(monthKosokuMark(month())).toBeNull()
+  })
+})
+
+/**
+ * 印の無い月があることの注記 (Refs #998)。**1 本で 2 つの状況を説明しない** —
+ * 「そもそも判定していない (gcp)」と「判定が応答に無い」は結果が違う。
+ */
+describe('rangeKosokuNote', () => {
+  const data = (months: WageRangeMonth[], restraintSource: string) => ({
+    from: '2026-01', to: '2026-03', restraintSource, months, rows: [],
+  })
+
+  it('印の無い月が 1 つも無ければ出さない (出しっぱなしなら誰も読まなくなる)', () => {
+    expect(rangeKosokuNote(data([
+      month({ ym: '2026-01', timecardKosoku: 'yes' }),
+      month({ ym: '2026-02', timecardKosoku: 'no' }),
+      month({ ym: '2026-03', timecardKosoku: 'unreadable' }),
+    ], 'current'))).toBe('')
+  })
+
+  it('応答が無ければ出さない', () => {
+    expect(rangeKosokuNote(null)).toBe('')
+    expect(rangeKosokuNote(undefined)).toBe('')
+  })
+
+  it('★ gcp の範囲は「判定していない」— 「取れなかった」と読ませない', () => {
+    expect(rangeKosokuNote(data([month({ ym: '2026-01' }), month({ ym: '2026-02' })], 'gcp')))
+      .toBe('この期間は拘束時間ソースが GCP (day_summaries) なので、'
+        + '拘束の元データ (オンプレ kosoku-daily) を組めたかどうかを判定していません (2 ヶ月)。'
+        + '印が無いのは「取れなかった」ではなく「判定していない」という意味です。')
+  })
+
+  it('★ gcp 以外は「印が無い = 揃っていた、ではない」— 印のある月は数に入れない', () => {
+    expect(rangeKosokuNote(data([
+      month({ ym: '2026-01', timecardKosoku: 'yes' }),
+      month({ ym: '2026-02' }),
+      month({ ym: '2026-03', timecardKosoku: 'no' }),
+    ], 'current')))
+      .toBe('1 ヶ月には拘束の元データ (kosoku-daily) の判定が付いていません。'
+        + '印が無いことは「揃っていた」という意味ではありません — '
+        + 'この応答に判定が入っていないだけなので、その月の拘束が何から組まれたかはこの画面では分かりません。')
+  })
+
+  /** ★ 2 つの状況を同じ文で説明していないこと (過去に 1 本化して片方で嘘になった)。 */
+  it('★ gcp と gcp 以外で別の文になる', () => {
+    const months = [month({ ym: '2026-01' })]
+    expect(rangeKosokuNote(data(months, 'gcp')))
+      .not.toBe(rangeKosokuNote(data(months, 'current')))
+    expect(rangeKosokuNote(data(months, 'gcp'))).not.toContain('揃っていた')
+    expect(rangeKosokuNote(data(months, 'current'))).not.toContain('判定していません')
   })
 })
 

@@ -40,7 +40,7 @@
  * 「0 円だった」ではない。0 と見分けが付く表示にしないと、支払い不足の見落としになる。
  */
 
-import type { MinWageRowAttrs } from './restraint-wage-view'
+import type { MinWageRowAttrs, TimecardKosokuState } from './restraint-wage-view'
 
 /** 月ごとの状態 (カバレッジバー)。 */
 export interface WageRangeMonth {
@@ -53,6 +53,15 @@ export interface WageRangeMonth {
   staleReason: string[]
   /** 集計から外した理由 (`"payroll_missing"` 等)。入っていれば合計に寄与しない。 */
   excluded: string | null
+  /**
+   * その月の拘束を オンプレ `kosoku-daily` から組めたか (Refs #998 / #986 / #980)。
+   *
+   * **`null` は「判定が無い」であって「取れた」ではない。** 上流は `None` を
+   * **キーごと省略**して返すので (`skip_serializing_if`)、front に届いた時点で
+   * 「上流が判定していない」と「この項目を記録していなかった頃の保存」は
+   * **既に見分けが付かない**。⇒ 画面はこの 2 つを区別して書かない。
+   */
+  timecardKosoku: TimecardKosokuState | null
 }
 
 /** 乗務員 × 月の金額。 */
@@ -116,6 +125,17 @@ function strOrNull(v: unknown): string | null {
   return typeof v === 'string' && v !== '' ? v : null
 }
 
+/**
+ * `timecard_kosoku` を**知っている 3 値だけ**受ける。
+ *
+ * `strOrNull` に通さないのは、あれが `undefined` と `null` と `''` を同じ
+ * `null` に畳むうえ、知らない文字列 (上流が値を増やした時) もそのまま通すため。
+ * 知らない値を印にすると、意味の分からない記号がバッジに出る。
+ */
+function kosokuState(v: unknown): TimecardKosokuState | null {
+  return v === 'yes' || v === 'no' || v === 'unreadable' ? v : null
+}
+
 /** `wage-range` の応答を画面の形にする。壊れていても**落ちない** (空で返す)。 */
 export function parseWageRange(body: unknown): WageRangeResponse {
   const b = (body ?? {}) as Record<string, unknown>
@@ -137,6 +157,7 @@ export function parseWageRange(body: unknown): WageRangeResponse {
           ? r.stale_reason.filter((x): x is string => typeof x === 'string')
           : [],
         excluded: strOrNull(r.excluded),
+        timecardKosoku: kosokuState(r.timecard_kosoku),
       }
     }),
     rows: rowsRaw.map((row) => {
@@ -301,6 +322,99 @@ export function monthBadgeLabel(m: WageRangeMonth): string {
   if (m.excluded) return '集計外'
   if (m.stale) return '要再計算'
   return '保存済'
+}
+
+/** 月バッジに足す「拘束の元データ」の印 (Refs #998)。 */
+export interface MonthKosokuMark {
+  /** バッジに**そのまま出す 1 語** (記号 + 短文)。hover しなくても読める。 */
+  text: string
+  /** hover で読める詳しい 1 文 (状態 + 原因 + 効く処方)。 */
+  title: string
+  /** 色の当て方だけ (`text` に記号と語が入っているので、色は補助)。 */
+  tone: 'ok' | 'warn' | 'error'
+}
+
+/**
+ * その月の拘束を オンプレ `kosoku-daily` から組めたかの印 (Refs #998)。
+ *
+ * ## なぜ期間集計タブに要るか
+ *
+ * #986 の目的は「**土台が違う 2 つを『同じ条件で計算した 2 つ』として比べてしまう**」
+ * を止めること。**一番「後から比べる」場所がこのタブ**なのに、単月 (#989) にしか
+ * 印が無かった。月を横に並べた表で、ある月だけ打刻から組んだ拘束が混ざっていても
+ * 見分けが付かない。
+ *
+ * ## 見た目の決め方
+ *
+ * - **hover に逃がさない。** `title` だけに書くと #989 が潰した「hover しないと
+ *   読めない」に戻る。`text` は色を消しても読める (記号 + 語)。
+ * - **`'no'` と `'unreadable'` は畳まない。** 処方が逆で、前者は読み直しで入るが
+ *   後者は上流の応答の形が変わっているので読み直しても直らない (Refs #960)。
+ *   **色だけでなく記号も語も分ける。**
+ * - **`null` は印を出さない。** 「判定していない」と「記録していなかった」を
+ *   front では見分けられないので、断定する文を画面に置かない
+ *   (説明は [rangeKosokuNote] が範囲単位で 1 行だけ出す)。
+ *
+ * 語彙は単月側の `timecardKosokuNotice()` に揃える (`'no'` → 取れていない /
+ * `'unreadable'` → 読めない)。**同じ状態が 2 画面で違う言葉になると読み手が迷う。**
+ */
+export function monthKosokuMark(m: WageRangeMonth): MonthKosokuMark | null {
+  switch (m.timecardKosoku) {
+    case 'yes':
+      return {
+        text: '✓ 拘束元 取得済',
+        tone: 'ok',
+        title: 'この月の拘束は オンプレの kosoku-daily から組めています',
+      }
+    case 'no':
+      return {
+        text: '⚠ 拘束元 取れず',
+        tone: 'warn',
+        title: '拘束の元データ (kosoku-daily) が取れていません — '
+          + 'この月の拘束をオンプレの kosoku-daily から取得できませんでした。'
+          + '上流の一過性の不調なので、少し待ってからこの月を取り直すと入ります。',
+      }
+    case 'unreadable':
+      return {
+        text: '✕ 拘束元 読めず',
+        tone: 'error',
+        title: '拘束の元データ (kosoku-daily) の形が読めません — '
+          + 'オンプレの kosoku-daily は応答しましたが、こちらが知っている形ではなく '
+          + '1 件も読み取れませんでした。読み直しても直りません — '
+          + '上流の応答の形を確認してください。',
+      }
+    default:
+      return null
+  }
+}
+
+/**
+ * 印の無い月があることを、バーの下に 1 行で出す (Refs #998)。
+ *
+ * **印が無い月を「土台が完全に揃っていた」と読ませないため**だけの注記なので、
+ * 印の無い月が 1 つも無ければ空文字 (出さない)。
+ *
+ * **文は 2 通りに分ける。** 理由は共通でも結果が違うため、1 本で使い回すと
+ * 片方で嘘になる:
+ *
+ * - 範囲全体が `gcp` — 拘束時間を GCP `day_summaries` に差し替えて計算しており、
+ *   `kosoku-daily` は**そもそも取りに行っていない**。「取れなかった」と読ませない。
+ * - `gcp` 以外 — 判定が応答に入っていないだけで、**揃っていた証拠ではない**。
+ *
+ * `restraintSource` は**表示中の応答が実際に使った側**を見る (画面の選択 ref では
+ * ない) — 選び直してまだ取り直していない時に、出ている数字と違う説明をしないため。
+ */
+export function rangeKosokuNote(data: WageRangeResponse | null | undefined): string {
+  const months = data?.months ?? []
+  const unknown = months.filter(m => m.timecardKosoku == null).length
+  if (!unknown) return ''
+  if (data?.restraintSource === 'gcp') {
+    return `この期間は拘束時間ソースが GCP (day_summaries) なので、拘束の元データ (オンプレ kosoku-daily) を組めたかどうかを判定していません (${unknown} ヶ月)。`
+      + '印が無いのは「取れなかった」ではなく「判定していない」という意味です。'
+  }
+  return `${unknown} ヶ月には拘束の元データ (kosoku-daily) の判定が付いていません。`
+    + '印が無いことは「揃っていた」という意味ではありません — '
+    + 'この応答に判定が入っていないだけなので、その月の拘束が何から組まれたかはこの画面では分かりません。'
 }
 
 /** 「取得し直すべき月」= 未保存 または 要再計算 (PR-F の対象)。 */

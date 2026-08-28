@@ -171,7 +171,7 @@ import type { SnapshotSourceRow } from '~/utils/wage-snapshot-client'
 import { buildSnapshotPayload, contentHash, WAGE_LOGIC_VERSION } from '~/utils/wage-snapshot-client'
 import { describeApiError } from '~/utils/api-error'
 import { kyuyoAccessFromError, kyuyoAccessNotice, KYUYO_CONSEQUENCE_RANGE, KYUYO_CONSEQUENCE_WAGE, type KyuyoAccessState } from '~/utils/kyuyo-access'
-import type { WageRangeResponse } from '~/utils/wage-range-view'
+import type { MonthKosokuMark, WageRangeResponse } from '~/utils/wage-range-view'
 import {
   defaultRange,
   emptyRowsNote,
@@ -179,9 +179,11 @@ import {
   monthBadgeLabel,
   monthCellState,
   monthDiff,
+  monthKosokuMark,
   monthsNeedingRefresh,
   parseWageRange,
   rangeCoverageNote,
+  rangeKosokuNote,
   rangeDiff,
   sumWageRangeRows,
   wageRangeCsv,
@@ -4590,6 +4592,26 @@ const rangeRefreshTargets = computed(() => monthsNeedingRefresh(rangeData.value?
  */
 const rangeStaleCount = computed(() => (rangeData.value?.months ?? []).filter(m => m.stale === true).length)
 
+/**
+ * 月バッジ 1 個ぶんの材料 (Refs #998)。**印を出すかどうかも文言も util が決める** —
+ * `app/pages/**` はカバレッジ 100% gate の外なので、ここに判定を書くと検証できない。
+ */
+const rangeMonthBadges = computed(() => (rangeData.value?.months ?? []).map(
+  m => ({ month: m, kosoku: monthKosokuMark(m) })))
+
+/** 印の色 (`text` に記号と語が入っているので、**色は補助**)。 */
+const KOSOKU_TONE_CLASS: Record<MonthKosokuMark['tone'], string> = {
+  ok: 'text-green-700 dark:text-green-400',
+  warn: 'text-amber-600 dark:text-amber-400',
+  error: 'text-red-600 dark:text-red-400',
+}
+
+/**
+ * 印の無い月があることの注記 (Refs #998)。**印が無い = 揃っていた、ではない** —
+ * 出す条件も 2 通りの文の出し分けも util 側 (`rangeKosokuNote`) が持つ。
+ */
+const rangeKosokuNoteText = computed(() => rangeKosokuNote(rangeData.value))
+
 /** 月カバレッジ行の注記 / 行 0 件時の説明 (矛盾した文言を出さないため中身は util に寄せる)。 */
 const rangeCoverageNoteText = computed(() => rangeCoverageNote(rangeData.value?.months ?? []))
 const rangeEmptyNoteText = computed(() => (
@@ -6542,7 +6564,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
             <!-- 月カバレッジ。押すとその月の最低賃金チェックへ飛ぶ (数字の根拠は単月で見る) -->
             <div v-if="rangeData" class="flex flex-wrap gap-1 mb-3">
               <button
-                v-for="m in rangeData.months"
+                v-for="{ month: m, kosoku } in rangeMonthBadges"
                 :key="m.ym"
                 type="button"
                 class="text-xs px-2 py-0.5 border rounded"
@@ -6555,6 +6577,9 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 @click="jumpToMinWageMonth(m.ym)"
               >
                 {{ fmtYm(m.ym) }} {{ monthBadgeLabel(m) }}
+                <!-- 拘束の元データ (kosoku-daily) の印 (Refs #998)。**hover に逃がさない** —
+                     記号 + 語をバッジに出し、詳しい 1 文は title で足す -->
+                <span v-if="kosoku" class="ml-1" :class="KOSOKU_TONE_CLASS[kosoku.tone]" :title="kosoku.title">{{ kosoku.text }}</span>
               </button>
               <!-- 未保存 / 要再計算の月をまとめて取得 (Refs #677 PR-F)。押すと対象月の
                    最低賃金チェックを順に開き、単月表の自動保存に任せる -->
@@ -6574,6 +6599,13 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 {{ rangeCoverageNoteText }}
               </span>
             </div>
+
+            <!-- 印の付いていない月を「土台が完全に揃っていた」と読ませないための 1 行
+                 (Refs #998)。**バーの直下** — 印そのものと同じく hover 不要で読める
+                 場所に置く。文言は範囲の拘束時間ソースで変わる (util が出し分ける) -->
+            <p v-if="rangeKosokuNoteText" class="text-xs text-gray-500 dark:text-gray-400 mb-2">
+              {{ rangeKosokuNoteText }}
+            </p>
 
             <!-- 賃金計算ロジックの版が上がった直後、保存済みの月はまとめて「要再計算」に
                  落ちる (Refs #670 で月60時間超の割増を入れた版が該当)。**保存済みの値は
