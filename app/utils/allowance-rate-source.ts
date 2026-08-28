@@ -199,6 +199,9 @@ export function allowanceRateNotice(state: AllowanceRateState): string {
 // **どの手当マスタの版で計算したか**を持っていなかった。そのため注記は永久に
 // 「この版で計算したとは限りません」としか言えず、注記が出す「版 X」は
 // **いま読んでいる版**だったので、利用者は 2 つの版を見比べられなかった。
+//
+// **画面の状態は 3 つ (一致 / 不一致 / 不明)。ただし「不明」の内訳は 4 通りあり、
+// 1 文に束ねるとどれかで必ず嘘になる** — 内訳は `CacheRateVerdict` の (a)〜(d)。
 
 /**
  * キャッシュに刻んである版 (`MarginCache.rateVersion` / `rateUpdatedAt` **そのまま**)。
@@ -208,6 +211,12 @@ export function allowanceRateNotice(state: AllowanceRateState): string {
  * この口の型は変わらない)。
  */
 export interface CachedRateVersion {
+  /**
+   * **保存時の `AllowanceRateState.status`。** `version` だけでは「版が無い」の理由を
+   * 言い分けられないので刻む — 詳細は `MarginCache.rateSource` の表 (`margin.ts`)。
+   * **欄が無い / 知らない値は null** で、それが「このPR より前に保存された」の印。
+   */
+  source?: 'r2' | 'seed' | null
   version?: string | null
   updatedAt?: string | null
 }
@@ -231,7 +240,13 @@ export type MarginCacheRateMatch = 'match' | 'mismatch' | 'unknown'
  * `run()` は `seed` でも保存するので実在する)。
  */
 type CacheRateVerdict =
+  /** (a) 版も出どころも刻まれていない = **このPR より前に保存された**キャッシュ。 */
   | { kind: 'unrecorded' }
+  /** (b) 出どころは刻んである。**それが `seed` (同梱の初期値) だった** — 版は元から無い。 */
+  | { kind: 'saved-seed' }
+  /** (c) 出どころは `r2`。**応答に版が付いていなかった** (`textOrNull` が null にした)。 */
+  | { kind: 'saved-r2-no-version' }
+  /** (d) 刻んだ版はある。**いま読んでいるマスタの側に版が無い**ので突き合わせられない。 */
   | { kind: 'no-current', saved: string }
   | { kind: 'match', saved: string }
   | { kind: 'mismatch', saved: string }
@@ -239,11 +254,16 @@ type CacheRateVerdict =
 /** **判定は 1 か所だけ**にする — 文と色で別々に数えると、片方だけ直したときに黙ってずれる。 */
 function rateVerdict(state: AllowanceRateState, cached: CachedRateVersion): CacheRateVerdict {
   const saved = cached.version
-  if (typeof saved !== 'string') return { kind: 'unrecorded' }
-  // **`r2` 以外は版そのものが無い。** `seed` の「同梱の初期値」に版は付かない。
-  const current = state.status === 'r2' ? state.version : null
-  if (current === null) return { kind: 'no-current', saved }
-  return { kind: saved === current ? 'match' : 'mismatch', saved }
+  if (typeof saved === 'string') {
+    // **`r2` 以外は版そのものが無い。** `seed` の「同梱の初期値」に版は付かない。
+    const current = state.status === 'r2' ? state.version : null
+    if (current === null) return { kind: 'no-current', saved }
+    return { kind: saved === current ? 'match' : 'mismatch', saved }
+  }
+  // 版が無い。**なぜ無いのかを `rateSource` が言い分ける** — (b) を (a) に倒さない。
+  if (cached.source === 'seed') return { kind: 'saved-seed' }
+  if (cached.source === 'r2') return { kind: 'saved-r2-no-version' }
+  return { kind: 'unrecorded' }
 }
 
 /**
@@ -262,13 +282,15 @@ export function marginCacheRateStatus(state: AllowanceRateState, cached: CachedR
  * 「とりあえず今の版」で埋めると、初期値で計算した金額に R2 の版の名札が付く。
  */
 export function cachedRateVersionOf(state: AllowanceRateState | null): CachedRateVersion {
-  return state !== null && state.status === 'r2'
-    ? { version: state.version, updatedAt: state.updatedAt }
-    : { version: null, updatedAt: null }
+  if (state === null || state.status === 'error') return { source: null, version: null, updatedAt: null }
+  // **`seed` は「出どころは分かっているが版が無い」。** null に潰すと (a) と混ざる。
+  if (state.status === 'seed') return { source: 'seed', version: null, updatedAt: null }
+  return { source: 'r2', version: state.version, updatedAt: state.updatedAt }
 }
 
 /**
- * キャッシュから出している回に足す 1 文。**4 通りとも別の文**にする。
+ * キャッシュから出している回に足す 1 文。**6 通りとも別の文**にする
+ * (画面の状態は 3 つ = 一致 / 不一致 / 不明。**「不明」の内訳が 4 通り**)。
  *
  * `match` にだけ「集計 を押すと引き直します」を付けないのは、**引き直す理由が版の側には
  * 無い**ため (取り込み直しがあれば古い、という話は別の注記が出している)。
@@ -276,15 +298,27 @@ export function cachedRateVersionOf(state: AllowanceRateState | null): CachedRat
 function marginCacheSentence(state: AllowanceRateState, cached: CachedRateVersion): string {
   const head = '表示中の金額は前回の集計 (キャッシュ) のもの'
   const again = '集計 を押すと引き直します。'
+  const undecidable = '同じ版かどうかは判定できません。'
   const verdict = rateVerdict(state, cached)
+  // (a) 出どころも版も無い = このPR より前のキャッシュ。**ここに (b)(c) を混ぜない。**
   if (verdict.kind === 'unrecorded') {
     return `${head}で、保存時の版が記録されていません。この版で計算したとは限りません。${again}`
   }
+  // (b) 記録してある。**それが「同梱の初期値」だった** — 「記録していない」ではない。
+  if (verdict.kind === 'saved-seed') {
+    return `${head}で、保存時は R2 未設定のため同梱の初期値で計算しています。`
+      + `同梱の初期値に版は無いので、${undecidable}${again}`
+  }
+  // (c) R2 のマスタではあるが、応答に版が付いていなかった。
+  if (verdict.kind === 'saved-r2-no-version') {
+    return `${head}で、保存時は R2 のマスタで計算していますが、版が付いていません。${undecidable}${again}`
+  }
   // **`noticeBody` と同じ並び**にする (「版 X / 更新 Y」)。並びが違うと見比べられない。
   const label = `版 ${verdict.saved} / 更新 ${cached.updatedAt ?? '不明'}`
+  // (d) 刻んだ版はある。いま読んでいるマスタの側に版が無い。
   if (verdict.kind === 'no-current') {
     return `${head}で、保存時は ${label} で計算しています。`
-      + `いま読んでいるマスタに版が無いため、同じ版かどうかは判定できません。${again}`
+      + `いま読んでいるマスタに版が無いため、${undecidable}${again}`
   }
   if (verdict.kind === 'match') {
     return `${head}で、いま読んでいるこの版 (${label}) で計算したものです。`

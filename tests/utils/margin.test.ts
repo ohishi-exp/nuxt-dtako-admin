@@ -911,6 +911,7 @@ describe('parseMarginCache', () => {
     // 月またぎの注記 (Refs #760 の 16)。`uncovered` と同じくキャッシュに持つ
     crossMonth: null,
     // どの手当マスタの版で計算したか (Refs #1017 ③)。刻まれていなければ null
+    rateSource: null,
     rateVersion: null,
     rateUpdatedAt: null,
   }
@@ -972,11 +973,24 @@ describe('parseMarginCache', () => {
   // ★ **キーを `v9` のまま欄を足した**ので、**古い形のキャッシュが読めること**が
   // この PR の前提そのもの。上げると全端末のキャッシュが消える (= 開いたら金額が消える)。
 
-  it('手当マスタの版も読み戻せる', () => {
-    const withRate = { ...cache, rateVersion: 'a1b2c3d4e5f6', rateUpdatedAt: '2026-08-27T00:00:00.000Z' }
+  it('手当マスタの出どころと版も読み戻せる', () => {
+    const withRate = { ...cache, rateSource: 'r2' as const, rateVersion: 'a1b2c3d4e5f6', rateUpdatedAt: '2026-08-27T00:00:00.000Z' }
     const parsed = parseMarginCache(serializeMarginCache(withRate))!
+    expect(parsed.rateSource).toBe('r2')
     expect(parsed.rateVersion).toBe('a1b2c3d4e5f6')
     expect(parsed.rateUpdatedAt).toBe('2026-08-27T00:00:00.000Z')
+  })
+
+  it('★ seed で保存した回は出どころだけ残る (版が無いのは「記録していない」ではない)', () => {
+    const parsed = parseMarginCache('{"ym":"2026-07","operations":[],"costs":[],"rateSource":"seed","rateVersion":null}')!
+    expect(parsed.rateSource).toBe('seed')
+    expect(parsed.rateVersion).toBeNull()
+  })
+
+  it('★ 知らない出どころは null に倒す (`r2` には倒さない)', () => {
+    expect(parseMarginCache('{"ym":"2026-07","operations":[],"costs":[],"rateSource":"R2"}')!.rateSource).toBeNull()
+    expect(parseMarginCache('{"ym":"2026-07","operations":[],"costs":[],"rateSource":1}')!.rateSource).toBeNull()
+    expect(parseMarginCache('{"ym":"2026-07","operations":[],"costs":[]}')!.rateSource).toBeNull()
   })
 
   it('★ 版の欄が無い / null なら null (このPR より前のキャッシュを「一致」と読ませない)', () => {
@@ -1010,6 +1024,7 @@ describe('parseMarginCache', () => {
     expect(parsed.uncovered).toEqual({ trips: 36, salesYen: 1649681, allowanceYen: 413000 })
     expect(parsed.crossMonth).toEqual({ nextMonthLegs: 2, nextMonthAllowanceYen: 18000, prevMonthOpsLegsInMonth: 1, prevMonthOpsAllowanceYen: 9000 })
     // **足した欄だけが「記録されていない」になる**
+    expect(parsed.rateSource).toBeNull()
     expect(parsed.rateVersion).toBeNull()
     expect(parsed.rateUpdatedAt).toBeNull()
   })
@@ -1326,7 +1341,7 @@ describe('走行km の内訳 (kmBreakdown)', () => {
     // 翌月便ぶんの燃料だけを抱えた古い集計のまま残る。
     // v9 は便に拘束秒 (`haulSec`/`deadheadSec`) を足した版 (#760 の 22) — v8 を読むと
     // 拘束時間比が全運行フォールバックになり、走行km比と同じ数字が別の名前で出る。
-    // ★ **#1017 ③ で `rateVersion` / `rateUpdatedAt` を足したが上げていない** — 上のどれも
+    // ★ **#1017 ③ で `rateSource` / `rateVersion` / `rateUpdatedAt` を足したが上げていない** — 上のどれも
     // 「**既にある欄の読み方が変わった**」回で、足すだけの回は古いキャッシュがそのまま
     // 読める (`parseMarginCache` が欄の欠けを null にする)。上げると**全端末のキャッシュが
     // 消える**ので、得られるものより失うものの方が大きい。

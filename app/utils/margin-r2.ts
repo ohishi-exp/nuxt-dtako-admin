@@ -209,6 +209,15 @@ function fuelRateFingerprint(map: FuelRateMap): Array<[string, number | null, nu
  * 変えて集計し直すと、**`totals` は 1 円も動かないのに版が 1 本増える**。それが正しい —
  * 便の内訳は実際に変わっており、その内訳は版の外 (画面) にしか無いので、
  * **指紋が違えば別の版として残す**以外に後から見分ける術が無い。
+ *
+ * ★ **`cache` は丸ごと対象なので、`MarginCache` に列を足すと自動的にハッシュへ入る**
+ * (Refs #1017 ③ で `rateSource` / `rateVersion` / `rateUpdatedAt` を足した)。**列を足した
+ * 回の最初の保存は、取り込みデータが 1 円も変わっていなくても版が 1 本増える** —
+ * 2 回目からは増えない (`changed: false` = 「前回の版から変わっていないので版は増やして
+ * いません」)。これは上の指紋と同じ理屈で**正しい**: 同じ運行データを**違う手当マスタ**で
+ * 計算した 2 回が同じ版にまとまると、後から見分ける術が無い。
+ * **`MARGIN_SUMMARY_SCHEMA_VERSION` は上げない** — 既にある列の読み方は変わっておらず、
+ * 上げると `marginDiffSchemaMismatchNote` で既存の版との比較が全部「比較不能」になる。
  */
 export function marginSummaryHashInput(input: MarginSummaryInput): string {
   return JSON.stringify({

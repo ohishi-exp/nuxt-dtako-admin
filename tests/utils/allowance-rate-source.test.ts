@@ -249,8 +249,12 @@ describe('allowanceRateNoticeForMargin — 刻んだ版といまの版を突き�
   const seed: AllowanceRateState = { status: 'seed', rows: RATE_MASTER }
   const R2_BASE = 'R2 の運行手当マスタで計算しています (1 行 / 版 a1b2c3d4e5f6 / 更新 2026-08-27T00:00:00.000Z)。'
   const SEED_BASE = 'R2 未設定のため同梱の初期値で表示しています (同梱 62 行)。R2 に登録すると deploy なしで金額を変えられます。'
-  const SAME = { version: 'a1b2c3d4e5f6', updatedAt: '2026-08-27T00:00:00.000Z' }
-  const OTHER = { version: '0f0f0f0f0f0f', updatedAt: '2026-08-01T00:00:00.000Z' }
+  const SAME = { source: 'r2' as const, version: 'a1b2c3d4e5f6', updatedAt: '2026-08-27T00:00:00.000Z' }
+  const OTHER = { source: 'r2' as const, version: '0f0f0f0f0f0f', updatedAt: '2026-08-01T00:00:00.000Z' }
+  /** (b) 保存時が `seed` だった = **記録してあって、それが同梱の初期値**。 */
+  const SAVED_SEED = { source: 'seed' as const, version: null, updatedAt: null }
+  /** (c) 保存時は `r2` だが応答に版が付いていなかった。 */
+  const SAVED_R2_NO_VERSION = { source: 'r2' as const, version: null, updatedAt: null }
   const r2 = () => resolveAllowanceRateMaster(getResponse([row()]))
 
   it('一致: 「この版で計算した」と言い切る', () => {
@@ -282,9 +286,37 @@ describe('allowanceRateNoticeForMargin — 刻んだ版といまの版を突き�
     expect(allowanceRateNoticeForMargin(r2(), true, {})).not.toContain('で計算したものです')
   })
 
-  it('不明: version が null で刻まれていても同じ (null を「一致」に倒さない)', () => {
-    expect(allowanceRateNoticeForMargin(r2(), true, { version: null, updatedAt: null }))
+  it('不明: 出どころも版も無ければ (a) と同じ (null を「一致」に倒さない)', () => {
+    expect(allowanceRateNoticeForMargin(r2(), true, { source: null, version: null, updatedAt: null }))
       .toBe(allowanceRateNoticeForMargin(r2(), true, {}))
+  })
+
+  /**
+   * ★ **(b) を (a) と同じ文にしない。** (b) は「記録されていない」のではなく
+   * 「**記録されていて、それが seed だった**」。同じ文にすると「読まなかった」と
+   * 「読めなかった」が同じ見た目になる。
+   */
+  it('不明 (b): 保存時が seed — 「記録されていません」とは言わない', () => {
+    expect(allowanceRateNoticeForMargin(r2(), true, SAVED_SEED)).toBe(
+      R2_BASE
+      + '表示中の金額は前回の集計 (キャッシュ) のもので、'
+      + '保存時は R2 未設定のため同梱の初期値で計算しています。'
+      + '同梱の初期値に版は無いので、同じ版かどうかは判定できません。集計 を押すと引き直します。',
+    )
+    expect(allowanceRateNoticeForMargin(r2(), true, SAVED_SEED)).not.toContain('記録されていません')
+    expect(allowanceRateNoticeForMargin(r2(), true, SAVED_SEED))
+      .not.toBe(allowanceRateNoticeForMargin(r2(), true, {}))
+  })
+
+  it('不明 (c): 保存時は R2 だが版が付いていなかった — (a)(b) のどちらとも別の文', () => {
+    expect(allowanceRateNoticeForMargin(r2(), true, SAVED_R2_NO_VERSION)).toBe(
+      R2_BASE
+      + '表示中の金額は前回の集計 (キャッシュ) のもので、'
+      + '保存時は R2 のマスタで計算していますが、版が付いていません。'
+      + '同じ版かどうかは判定できません。集計 を押すと引き直します。',
+    )
+    expect(allowanceRateNoticeForMargin(r2(), true, SAVED_R2_NO_VERSION)).not.toContain('記録されていません')
+    expect(allowanceRateNoticeForMargin(r2(), true, SAVED_R2_NO_VERSION)).not.toContain('同梱の初期値で計算しています')
   })
 
   /**
@@ -314,14 +346,16 @@ describe('allowanceRateNoticeForMargin — 刻んだ版といまの版を突き�
       .toContain('別の版 (版 0f0f0f0f0f0f / 更新 不明) で計算した金額です')
   })
 
-  it('★ 4 通りの文はどれも同じにならない (画面で区別できること)', () => {
+  it('★ 6 通りの文はどれも同じにならない (一致 / 不一致 / 不明の内訳 4 通り)', () => {
     const seen = new Set([
-      allowanceRateNoticeForMargin(r2(), true, {}),
-      allowanceRateNoticeForMargin(seed, true, OTHER),
-      allowanceRateNoticeForMargin(r2(), true, SAME),
-      allowanceRateNoticeForMargin(r2(), true, OTHER),
+      allowanceRateNoticeForMargin(r2(), true, {}),                   // (a) 記録が無い
+      allowanceRateNoticeForMargin(r2(), true, SAVED_SEED),           // (b) 保存時 seed
+      allowanceRateNoticeForMargin(r2(), true, SAVED_R2_NO_VERSION),  // (c) 保存時 r2・版無し
+      allowanceRateNoticeForMargin(seed, true, OTHER),                // (d) いまのマスタに版が無い
+      allowanceRateNoticeForMargin(r2(), true, SAME),                 // 一致
+      allowanceRateNoticeForMargin(r2(), true, OTHER),                // 不一致
     ])
-    expect(seen.size).toBe(4)
+    expect(seen.size).toBe(6)
   })
 
   it('キャッシュから出していない回は 1 文も足さない', () => {
@@ -335,16 +369,18 @@ describe('marginCacheRateStatus — 3 状態。unknown を match に倒さない
   const r2 = () => resolveAllowanceRateMaster(getResponse([row()]))
 
   it('刻んだ版 == いまの版 なら match', () => {
-    expect(marginCacheRateStatus(r2(), { version: 'a1b2c3d4e5f6', updatedAt: 'x' })).toBe('match')
+    expect(marginCacheRateStatus(r2(), { source: 'r2', version: 'a1b2c3d4e5f6', updatedAt: 'x' })).toBe('match')
   })
 
   it('刻んだ版 != いまの版 なら mismatch (更新時刻は判定に使わない)', () => {
     expect(marginCacheRateStatus(r2(), { version: '0f0f0f0f0f0f', updatedAt: '2026-08-27T00:00:00.000Z' })).toBe('mismatch')
   })
 
-  it('★ 刻んだ版が無ければ unknown — match に倒さない', () => {
+  it('★ 刻んだ版が無ければ unknown — match に倒さない (a)(b)(c) とも', () => {
     expect(marginCacheRateStatus(r2(), {})).toBe('unknown')
     expect(marginCacheRateStatus(r2(), { version: null })).toBe('unknown')
+    expect(marginCacheRateStatus(r2(), { source: 'seed', version: null })).toBe('unknown')
+    expect(marginCacheRateStatus(r2(), { source: 'r2', version: null })).toBe('unknown')
   })
 
   it('いま読んでいるマスタに版が無ければ unknown (seed / 応答に version が無い)', () => {
@@ -359,20 +395,50 @@ describe('marginCacheRateStatus — 3 状態。unknown を match に倒さない
 })
 
 describe('cachedRateVersionOf — 刻む側。r2 以外に版の名札を付けない', () => {
-  it('r2 の版と更新時刻をそのまま刻む', () => {
+  it('r2 の出どころ・版・更新時刻をそのまま刻む', () => {
     expect(cachedRateVersionOf(resolveAllowanceRateMaster(getResponse([row()]))))
-      .toEqual({ version: 'a1b2c3d4e5f6', updatedAt: '2026-08-27T00:00:00.000Z' })
+      .toEqual({ source: 'r2', version: 'a1b2c3d4e5f6', updatedAt: '2026-08-27T00:00:00.000Z' })
   })
 
-  it('★ seed / error / まだ読んでいない は null (初期値の金額に R2 の版の名札を付けない)', () => {
-    expect(cachedRateVersionOf({ status: 'seed', rows: RATE_MASTER })).toEqual({ version: null, updatedAt: null })
-    expect(cachedRateVersionOf(allowanceRateReadError('x'))).toEqual({ version: null, updatedAt: null })
-    expect(cachedRateVersionOf(null)).toEqual({ version: null, updatedAt: null })
+  it('r2 で応答に版が無ければ (c) の形 — 出どころだけ残る', () => {
+    expect(cachedRateVersionOf(resolveAllowanceRateMaster(getResponse([row()], { version: null, updated_at: null }))))
+      .toEqual({ source: 'r2', version: null, updatedAt: null })
+  })
+
+  it('★ seed は「出どころ seed・版なし」 (初期値の金額に R2 の版の名札を付けない)', () => {
+    expect(cachedRateVersionOf({ status: 'seed', rows: RATE_MASTER }))
+      .toEqual({ source: 'seed', version: null, updatedAt: null })
+  })
+
+  it('★ error / まだ読んでいない は出どころも null (= 記録していない)', () => {
+    expect(cachedRateVersionOf(allowanceRateReadError('x'))).toEqual({ source: null, version: null, updatedAt: null })
+    expect(cachedRateVersionOf(null)).toEqual({ source: null, version: null, updatedAt: null })
   })
 
   it('刻んだものを読み戻すと match になる (保存側と読む側が繋がっている)', () => {
     const state = resolveAllowanceRateMaster(getResponse([row()]))
     expect(marginCacheRateStatus(state, cachedRateVersionOf(state))).toBe('match')
+  })
+
+  /**
+   * ★ **保存側と「合成後の 1 文」を繋ぐ担保。** `cachedRateVersionOf` が seed の出どころを
+   * 落とすと、**画面の文が (b) から (a)「記録されていません」に戻る** — 単体の
+   * `toEqual` だけだとその実害が見えないので、文まで通して固定する。
+   */
+  it('★ seed で保存 → 後で R2 が入った回は、画面が (b) の文を出す', () => {
+    const savedUnder: AllowanceRateState = { status: 'seed', rows: RATE_MASTER }
+    const nowR2 = resolveAllowanceRateMaster(getResponse([row()]))
+    const notice = allowanceRateNoticeForMargin(nowR2, true, cachedRateVersionOf(savedUnder))
+    expect(notice).toContain('保存時は R2 未設定のため同梱の初期値で計算しています')
+    expect(notice).not.toContain('保存時の版が記録されていません')
+  })
+
+  it('★ r2 だが版が無い状態で保存した回は、画面が (c) の文を出す', () => {
+    const savedUnder = resolveAllowanceRateMaster(getResponse([row()], { version: null, updated_at: null }))
+    const nowR2 = resolveAllowanceRateMaster(getResponse([row()]))
+    const notice = allowanceRateNoticeForMargin(nowR2, true, cachedRateVersionOf(savedUnder))
+    expect(notice).toContain('保存時は R2 のマスタで計算していますが、版が付いていません')
+    expect(notice).not.toContain('保存時の版が記録されていません')
   })
 })
 

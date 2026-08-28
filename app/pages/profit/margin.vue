@@ -629,7 +629,7 @@ function restoreFromCache(cache: MarginCache) {
   crossMonth.value = cache.crossMonth
   // **刻んであるものをそのまま持つ** (Refs #1017 ③)。欄が無ければ `parseMarginCache` が
   // null にしてあるので、ここで「いまの版」に埋め直さない。
-  restoredRate.value = { version: cache.rateVersion, updatedAt: cache.rateUpdatedAt }
+  restoredRate.value = { source: cache.rateSource, version: cache.rateVersion, updatedAt: cache.rateUpdatedAt }
   shownYm.value = cache.ym
   savedAt.value = cache.savedAt
   restoredFromCache.value = true
@@ -687,6 +687,7 @@ function currentMarginCache(savedAtIso: string): MarginCache {
     crossMonth: crossMonth.value,
     // **どの手当マスタの版で計算したか** (Refs #1017 ③)。`r2` 以外は版が無いので null。
     // R2 の版 (`buildMarginSummaryInput`) にも同じ中身が入る — 保存の口は 1 か所。
+    rateSource: rate.source,
     rateVersion: rate.version,
     rateUpdatedAt: rate.updatedAt,
   }

@@ -2088,7 +2088,22 @@ export interface MarginCache {
    *
    * **`null` を「一致」に倒さない。** 「記録していない」と「記録して一致した」を同じ
    * 見た目にすると、**このPR より前に保存されたキャッシュが「この版で計算した」と
-   * 名乗る**ことになる。`status` が `r2` でない回 (`seed`) も版そのものが無いので null。
+   * 名乗る**ことになる。
+   *
+   * ## **`rateVersion` だけでは「版が無い」の理由を言い分けられない**
+   *
+   * `AllowanceRateState` は **`r2` のときしか `version` を持たない**ので、版が刻まれて
+   * いない回が **3 通り**ある。**同じ 1 文に束ねるとどれかで必ず嘘になる**:
+   *
+   * | | 保存時 | `rateSource` | `rateVersion` |
+   * |---|---|---|---|
+   * | (a) | **このPR より前**に保存 | 欄ごと無い → null | 欄ごと無い → null |
+   * | (b) | `seed` (**同梱の初期値**) | `'seed'` | null (seed に版は無い) |
+   * | (c) | `r2` だが応答に版が無い | `'r2'` | null (`textOrNull` が null にする) |
+   *
+   * ⇒ **`rateSource` も刻む。** (b) を (a) と同じ文にすると「**記録していない**」と
+   * 「**記録してあって、それが seed だった**」が同じ見た目になる — この repo で最も
+   * 多い欠陥の型そのもので、このPR が直そうとしているのがまさにそれ。
    *
    * **金額は 1 円も動かさない。** 手当を引き直さないのは材料が足りないからではなく
    * (`MarginLegInput` の `originCity` / `destCity` は残っている)、畳んだ入力に
@@ -2096,6 +2111,7 @@ export interface MarginCache {
    * 残っていないため — 部分的に引き直すと **`集計` を押したときとは違う金額**を
    * 自信ありげに出すことになり、いまより悪くなる。**検知して注記を強めるだけ。**
    */
+  rateSource?: 'r2' | 'seed' | null
   rateVersion?: string | null
   rateUpdatedAt?: string | null
 }
@@ -2129,6 +2145,8 @@ export function parseMarginCache(raw: string | null | undefined): MarginCache | 
     // **文字列でなければ null** (Refs #1017 ③)。欄そのものが無い古いキャッシュ
     // (このPR より前に保存されたもの) はここで null になり、画面が
     // 「保存時の版が記録されていません」と断る。**「一致」には倒さない。**
+    // **知っている 2 語以外は null。`'r2'` には倒さない。**
+    rateSource: cache.rateSource === 'r2' || cache.rateSource === 'seed' ? cache.rateSource : null,
     rateVersion: typeof cache.rateVersion === 'string' ? cache.rateVersion : null,
     rateUpdatedAt: typeof cache.rateUpdatedAt === 'string' ? cache.rateUpdatedAt : null,
   }
