@@ -165,7 +165,8 @@ describe('describeApiError — 理由が 1 つも無いとき (Refs #900)', () =
  *
  *  1. **本文の JSON がそのまま出ない**こと (陰性対照: `"error":true` を含まない)
  *  2. **status ごとに次の一手が変わる**こと — 401 (ログイン) / 403 (権限) /
- *     5xx (設定・障害) / その他 4xx (送った内容) を**両側から**固定する。
+ *     404 (対象が無い) / 413 (大きさ) / 5xx (設定・障害) / その他 4xx (送った内容) を
+ *     **両側から**固定する。
  *     混ぜると「権限があるのに自分には権限が無い」の逆方向の誤読が出る
  *     (`kyuyo-access.ts` と同じ判断)
  *  3. **「理由が無い」と「理由を読めなかった」を同じ見た目にしない**こと
@@ -243,6 +244,50 @@ describe('describeResponseFailure (Refs #996)', () => {
       + 'サーバ側の設定か障害です (権限の問題ではありません)。'
       + '復旧してからもう一度「設定を抽出」を押してください',
     )
+  })
+
+  /**
+   * ★ **404 は「その他 4xx」に落とさない** (Refs #1005 #1021)。
+   *
+   * `/vehicle-settings/history` と `<VehicleSettingsDumpPicker>` は、一覧の行を
+   * **クリックしただけ**で `object.get.ts` の 404 を受け取る。「送った内容を直せ」に
+   * 落ちると**何も送っていない人に直せないものを直させる**ので、
+   * 「対象がもう無い」と書いて画面ごとの `retry` に繋ぐ。
+   *
+   * **これは #1005 の暫定 (呼び出し側の `if (res.status === 404)`) を畳んだ恒久策**で、
+   * 理由の半分は**本文から読む** (暫定は本文を読まず自分で書いていた)。
+   */
+  it('404 は「指した対象がもう無い」話にする', async () => {
+    const s = await describeResponseFailure(
+      res(404, JSON.stringify({
+        error: true,
+        statusCode: 404,
+        message: 'object not found: vehicle-settings/4437/20260514_093253-0-0-4437.json',
+      })),
+      RETRY,
+    )
+    expect(s).toBe(
+      '404 object not found: vehicle-settings/4437/20260514_093253-0-0-4437.json — '
+      + '指していた対象がサーバにもう存在しません。'
+      + '画面の情報が古くなっているので、もう一度「設定を抽出」を押してください',
+    )
+  })
+
+  /** **陰性対照** — 「その他 4xx」の文言を 404 に流用していたら、ここで落ちる。
+   * 401 / 403 / 413 / 5xx の文言の混入も同時に見る。 */
+  it('404 に「その他 4xx」「再ログイン」「権限」の文言を混ぜない (陰性対照)', async () => {
+    const s = await describeResponseFailure(
+      res(404, JSON.stringify({ error: true, statusCode: 404, message: 'object not found: x' })),
+      RETRY,
+    )
+    expect(s).not.toContain('送った内容')
+    expect(s).not.toContain('直してから')
+    expect(s).not.toContain('再ログイン')
+    expect(s).not.toContain('権限')
+    expect(s).not.toContain('ファイル')
+    // 陽性対照 — 「もう無い」と、画面ごとのやり直し方は残っていること。
+    expect(s).toContain('もう存在しません')
+    expect(s).toContain(RETRY)
   })
 
   it('413 はファイルの大きさの話にする', async () => {

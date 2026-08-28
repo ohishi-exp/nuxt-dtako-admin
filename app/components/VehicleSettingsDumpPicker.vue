@@ -36,33 +36,10 @@ const RETRY_HISTORY = 'もう一度「履歴取得」を押してください'
 /** dump 実体の取得。**行クリック (または 1 件のときの自動選択) で走るのでボタンは無い。**
  * この口だけ **404 (`object not found: <key>`) が来る** — 一覧を出した後に R2 から
  * 消えた形なので、**行を押し直す前に一覧を取り直す**のが正しい動線。
- * 404 だけは `describeResponseFailure` に通さない (下の `describeMissingDump` を見ること)。 */
+ * **404 の前置きは `nextStepForStatus` が持つ** (Refs #1021) ので、ここは
+ * 「やり直し方」だけを渡す。#1005 の暫定 (`describeMissingDump` + `res.status === 404`)
+ * は `history.vue` の写しごと消してある — **呼び出し側へ戻さないこと**。 */
 const RETRY_DETAIL = '「履歴取得」で一覧を取り直し、行をクリックし直してください'
-
-/**
- * ★ **暫定** — 404 をここで撃ち分ける (Refs #1005 #1021)。**恒久策は
- * `app/utils/api-error.ts` の `nextStepForStatus` に 404 の枝を足すこと (#1021)。**
- * いま足さないのは `api-error.ts` が別タスクの持ち物で、`coverage_100.toml` に
- * 登録された分岐数を兄弟タスクが測っている最中のため。**#1021 の着手は #1009 の
- * マージ後** (分岐数の注記が新しい実測値に置き換わってから) で、**そのとき
- * この関数と呼び出し側の `res.status === 404` は消える。**
- *
- * **`/vehicle-settings/history` の同名関数と中身が重複しているが、そのままにしてある** —
- * 共通化の置き場は `api-error.ts` で、今回そこを触れないため。恒久策を入れるときに
- * **両方まとめて消える**のが正しい畳み方。
- *
- * **`describeResponseFailure` に 404 を通すと嘘になる。** 404 は「その他 4xx」に落ちて
- * 前置きが「**送った内容をサーバが受け付けませんでした。上の理由のとおりに直してから**」に
- * なるが、**行をクリックしただけの人は何も送っていない**し、直せるものも無い。
- *
- * **本文は読まない。** `object.get.ts` の 404 は `object not found: <key>` の 1 種類しか
- * 無く、key を指す `dump dir` は選択中バナーに出ている。**本文から理由を組む処理は
- * `api-error.ts` の持ち物**なので、ここに写さない。
- */
-function describeMissingDump(): string {
-  return 'dump JSON の取得に失敗しました: 404 この dump は R2 にもう存在しません — '
-    + `一覧を出した後に消えた可能性があります。${RETRY_DETAIL}`
-}
 
 interface HistoryItem {
   key: string
@@ -153,11 +130,11 @@ async function selectDump(item: HistoryItem) {
     const res = await fetch(`/api/vehicle-settings/object?key=${encodeURIComponent(item.key)}`, {
       headers: token ? { authorization: `Bearer ${token}` } : {},
     })
-    if (res.status === 404) throw new Error(describeMissingDump())
     if (!res.ok) {
-      // Refs #1005 — 叩く先が別 route (`object.get.ts`) なので **404 が増える**
-      // (`object not found: <key>`)。404 だけは上で撃ち分けてある。
-      // **やり直し方も上とは別**で、押し直すべきは行ではなく一覧の取り直し。
+      // Refs #1005 #1021 — 叩く先が別 route (`object.get.ts`) なので **404 が増える**
+      // (`object not found: <key>`)。**404 の前置きは `nextStepForStatus` が持つ**
+      // ので、ここで撃ち分けない。**やり直し方は上の口とは別**で、
+      // 押し直すべきは行ではなく一覧の取り直し。
       throw new Error(`dump JSON の取得に失敗しました: ${await describeResponseFailure(res, RETRY_DETAIL)}`)
     }
     const settings = (await res.json()) as VehicleSettings

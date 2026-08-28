@@ -32,10 +32,9 @@
  * **A は同じファイルの B と同じ route なのに文が違う** — 再取得ボタンが無いから。
  * 一括置換にしていないことの根拠が、このファイルの `toBe` に載っている。
  *
- * ## ★ 404 だけ `describeResponseFailure` を通していない (C / E)
+ * ## ★ 404 は `nextStepForStatus` の枝を通る (C / E) — Refs #1005 #1021
  *
- * `nextStepForStatus` に 404 の枝が無いので、通すと「その他 4xx」に落ちて
- * **こう出るはずだった**:
+ * 404 が「その他 4xx」に落ちると**こう出る**:
  *
  * ```
  * dump JSON の取得に失敗しました: 404 object not found: vehicle-settings/… —
@@ -43,14 +42,18 @@
  * 「履歴を取得」で一覧を取り直し、行をクリックし直してください
  * ```
  *
- * **採らなかった。行をクリックしただけの人は何も送っておらず、直せるものも無い** ので
- * 前置きが**事実に反する**。動線 (一覧の取り直し) が正しく出ることは、前置きが嘘で
- * よい理由にならない。**呼び出し側で 404 を撃ち分け**、消えた dump を指しているという
- * 事実だけを書く。`describeApiError` / `describeResponseFailure` は**無変更**。
+ * **これは事実に反する。行をクリックしただけの人は何も送っておらず、直せるものも無い。**
+ * 動線 (一覧の取り直し) が正しく出ることは、前置きが嘘でよい理由にならない。
  *
- * **これは暫定 (#1021)** — 恒久策は `nextStepForStatus` に 404 を足して、2 か所の
- * `describeMissingDump` をまとめて消すこと。下の `it` が**誤った前置きが出ていないこと**を
- * 陰性対照で押さえている。
+ * #1005 では**呼び出し側で 404 を撃ち分ける暫定** (`describeMissingDump`) を 2 ファイルに
+ * 置いていた。#1021 で `nextStepForStatus` に 404 の枝が入り、**暫定は 2 か所とも消えた**。
+ * 変わったのは**理由の半分**だけ — 暫定は本文を読まず `この dump は R2 にもう存在しません`
+ * と自分で書いていたが、いまは `describeResponseFailure` が本文の
+ * `object not found: <key>` を拾う。**次の一手の側は同じ趣旨**。
+ *
+ * 下の `it` は**誤った前置き (「送った内容」) が出ていないこと**を陰性対照で押さえている。
+ * **この 2 行 (`not.toContain('送った内容')`) が本体**なので、文言を足すときは
+ * ここを書き換えて通すのではなく、**文言の方を直すこと**。
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -288,12 +291,19 @@ describe('C. /vehicle-settings/history の dump 詳細 (行クリック) — Ref
   const KEY = 'vehicle-settings/4437/20260514_093253-0-0-4437.json'
 
   /** ★ **この口だけ 404 が来る** (`object.get.ts`)。一覧を出した後に R2 から
-   * 消えた形なので、**押し直すべきは行ではなく一覧**。 */
+   * 消えた形なので、**押し直すべきは行ではなく一覧**。
+   *
+   * **#1021 で理由の半分が変わった** — #1005 の暫定 (`describeMissingDump`) は
+   * 本文を読まず `この dump は R2 にもう存在しません` と自分で書いていたが、
+   * 恒久策は `describeResponseFailure` を通るので **`object.get.ts` の本文
+   * (`object not found: <key>`) が理由になる**。次の一手の側は
+   * `nextStepForStatus` の 404 の枝が持つ。 */
   it('404 (一覧の後に R2 から消えた) — 消えた事実と一覧の取り直しを書く', async () => {
     const t = errorTextStartingWith(await clickRowWith(404, nitroBody(404, `object not found: ${KEY}`)), P)
     expect(t).toBe(
-      P + '404 この dump は R2 にもう存在しません — '
-      + '一覧を出した後に消えた可能性があります。'
+      P + `404 object not found: ${KEY} — `
+      + '指していた対象がサーバにもう存在しません。'
+      + '画面の情報が古くなっているので、'
       + '「履歴を取得」で一覧を取り直し、行をクリックし直してください',
     )
   })
@@ -390,16 +400,19 @@ describe('D / E. <VehicleSettingsDumpPicker> (ボタン = 「履歴取得」) �
   it('E. 404 — 消えた事実と一覧の取り直しを書く', async () => {
     const t = errorTextStartingWith(await clickRowWith(404, nitroBody(404, `object not found: ${KEY}`)), PD)
     expect(t).toBe(
-      PD + '404 この dump は R2 にもう存在しません — '
-      + '一覧を出した後に消えた可能性があります。'
+      PD + `404 object not found: ${KEY} — `
+      + '指していた対象がサーバにもう存在しません。'
+      + '画面の情報が古くなっているので、'
       + '「履歴取得」で一覧を取り直し、行をクリックし直してください',
     )
     // 陰性対照 — `describeResponseFailure` に通していたら出ていた前置き。
     expect(t).not.toContain('送った内容')
   })
 
-  /** ★ **C と E は「同じ暫定処理の写し」なので、文も一致していなければならない** —
-   * 違うのはボタンの表記だけ。片方だけ直したら落ちる。 */
+  /** ★ **C と E は同じ 1 本 (`nextStepForStatus` の 404 の枝) を通るので、文も
+   * 一致していなければならない** — 違うのはボタンの表記だけ。
+   * #1005 では「暫定処理の写しが 2 つある」ことを固定していたが、#1021 で
+   * **写しは消え、共通の枝になった**。片方の画面だけ直したら落ちるのは同じ。 */
   it('C と E の 404 は、ボタンの表記だけが違う', async () => {
     const e = errorTextStartingWith(await clickRowWith(404, nitroBody(404, `object not found: ${KEY}`)), PD)
 
