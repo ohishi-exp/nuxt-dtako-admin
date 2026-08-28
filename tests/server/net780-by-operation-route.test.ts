@@ -157,6 +157,8 @@ describe('GET /api/net780/by-operation — 既存の分岐 (塞いだだけで�
   it.each([
     ['22 桁でない', 'abc'],
     ['21 桁', '260714123456000000172'],
+    // **23 桁も 400 のまま** — 2026-08-28 の実測で本番 `/api/operations` 全 8,037 件は
+    // 22 桁 8,037 / 23 桁 0 なので、受けても通る件数は 1 件も増えない (Refs #1011)。
     ['23 桁', '26071412345600000017266'],
     ['数値でない文字を含む', '26071412345600000017a6'],
   ])('operationNo が %s なら 400', async (_label, operationNo) => {
@@ -229,5 +231,54 @@ describe('GET /api/net780/by-operation — 既存の分岐 (塞いだだけで�
     const event = eventWith({ DTAKO_DB: db, DTAKO_R2: new FakeR2({ bytes: ZIP_BYTES, contentType: 'application/octet-stream' }) })
     await call(event)
     expect(event._headers['content-type']).toBe('application/octet-stream')
+  })
+})
+
+/**
+ * 400 の**合成後の 1 文**を固定する (Refs #1011)。
+ *
+ * 直す前は `statusMessage: 'operationNo は22桁の数値で指定してください'` の 1 本だけで、
+ * **利用者の入力ミスに読めた** — が、運行NO を手で入れる画面は無く、ここへ来る
+ * `operationNo` は運行詳細の route param を呼び出し側がそのまま渡している。
+ * 「22桁で指定してください」と言われても**利用者には直しようが無い**。
+ *
+ * ★ **`statusMessage` が ASCII だけであること**も測る。本番 (h3/workerd) の reason phrase は
+ * 非 ASCII を落とすので、日本語を載せると `400 operationNo 22` のような**単語に見える断片**が
+ * 残る (`/api/ichiban/**` が `403 proxy` になった実例、Refs #886)。この it は
+ * `statusMessage` に日本語を 1 文字でも戻すと落ちる。
+ */
+describe('GET /api/net780/by-operation — 400 の文言 (Refs #1011)', () => {
+  const EXPECTED_STATUS_MESSAGE = 'operationNo is not a 22-digit NET780 archive key'
+  const EXPECTED_MESSAGE
+    = 'NET780 のアーカイブは 22 桁の運行NO でしか引けません (受け取った operationNo はその形ではありません)。'
+      + '運行NO は画面が渡しているので、利用者の入力の誤りではありません。'
+
+  it.each([
+    ['22 桁でない', 'abc'],
+    ['23 桁', '26071412345600000017266'],
+    ['そもそも渡されていない', undefined],
+  ])('%s でも、返る 1 文は同じ (理由は本文の側)', async (_label, operationNo) => {
+    await expect(call(eventWith(okEnv(), operationNo === undefined ? {} : { operationNo })))
+      .rejects.toMatchObject({
+        statusCode: 400,
+        statusMessage: EXPECTED_STATUS_MESSAGE,
+        message: EXPECTED_MESSAGE,
+      })
+  })
+
+  it('★ statusMessage は ASCII だけ (本番の reason phrase で断片にならない)', async () => {
+    const err = await call(eventWith(okEnv(), { operationNo: 'abc' })).catch((e: unknown) => e)
+    const statusMessage = (err as { statusMessage: string }).statusMessage
+    // 印字可能 ASCII のみ。日本語を 1 文字でも混ぜると落ちる。
+    expect(statusMessage).toMatch(/^[\x20-\x7e]+$/)
+  })
+
+  it('★ 利用者の操作ミスに読める言い回しを本文に残さない', async () => {
+    const err = await call(eventWith(okEnv(), { operationNo: 'abc' })).catch((e: unknown) => e)
+    const message = (err as { message: string }).message
+    // 陽性対照: 「利用者の誤りではない」と**書いてある**こと (語を消しただけでは通らない)。
+    expect(message).toContain('利用者の入力の誤りではありません')
+    // 直す前の 1 文 (入力ミス扱い) には戻っていない。
+    expect(message).not.toContain('指定してください')
   })
 })
