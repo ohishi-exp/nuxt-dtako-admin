@@ -193,18 +193,121 @@ export function allowanceRateNotice(state: AllowanceRateState): string {
   return noticeBody(state, '手当・収支')
 }
 
+// --- キャッシュに刻んだ版と、いま読んでいる版の突き合わせ (Refs #1017 ③) ----------
+//
+// 粗利タブの localStorage キャッシュ (`MarginCache`) は**計算済みの金額**を持つのに、
+// **どの手当マスタの版で計算したか**を持っていなかった。そのため注記は永久に
+// 「この版で計算したとは限りません」としか言えず、注記が出す「版 X」は
+// **いま読んでいる版**だったので、利用者は 2 つの版を見比べられなかった。
+
+/**
+ * キャッシュに刻んである版 (`MarginCache.rateVersion` / `rateUpdatedAt` **そのまま**)。
+ *
+ * **欄が無い / null は「記録されていない」**で、`MarginCache` 側が optional なので
+ * ここも optional で受ける (**分解せず透過させる** — `MarginCache` に列が増えても
+ * この口の型は変わらない)。
+ */
+export interface CachedRateVersion {
+  version?: string | null
+  updatedAt?: string | null
+}
+
+/**
+ * 突き合わせの結果。**3 つ。`unknown` を `match` に倒さないこと** —
+ * 「読まなかった」と「読めなかった」を同じ見た目にするのがこの repo で最も多い欠陥の型。
+ */
+export type MarginCacheRateMatch = 'match' | 'mismatch' | 'unknown'
+
+/**
+ * 突き合わせの内訳。**`unknown` は 2 通りある**ので、ここでは畳まない。
+ *
+ * - `unrecorded` — **キャッシュに版が刻まれていない** (このPR より前に保存された /
+ *   保存した回が `seed` だった)
+ * - `no-current` — **刻んだ版はあるが、いま読んでいるマスタに版が無い** (`seed` に
+ *   落ちた / 応答に `version` が無い)
+ *
+ * この 2 つを 1 文に束ねると、**版を刻んであるのに「記録されていません」と言う**回が
+ * 出る (集計時は R2 に `latest.json` があり、その後 R2 から消えると `seed` になる。
+ * `run()` は `seed` でも保存するので実在する)。
+ */
+type CacheRateVerdict =
+  | { kind: 'unrecorded' }
+  | { kind: 'no-current', saved: string }
+  | { kind: 'match', saved: string }
+  | { kind: 'mismatch', saved: string }
+
+/** **判定は 1 か所だけ**にする — 文と色で別々に数えると、片方だけ直したときに黙ってずれる。 */
+function rateVerdict(state: AllowanceRateState, cached: CachedRateVersion): CacheRateVerdict {
+  const saved = cached.version
+  if (typeof saved !== 'string') return { kind: 'unrecorded' }
+  // **`r2` 以外は版そのものが無い。** `seed` の「同梱の初期値」に版は付かない。
+  const current = state.status === 'r2' ? state.version : null
+  if (current === null) return { kind: 'no-current', saved }
+  return { kind: saved === current ? 'match' : 'mismatch', saved }
+}
+
+/**
+ * キャッシュの金額が**いま読んでいる版で計算されたものか**。画面の色分けもこれで決める。
+ * **`unknown` を `match` に倒さない** — 倒すと、版を刻む前に保存されたキャッシュが
+ * 「この版で計算した」と名乗る。
+ */
+export function marginCacheRateStatus(state: AllowanceRateState, cached: CachedRateVersion): MarginCacheRateMatch {
+  const { kind } = rateVerdict(state, cached)
+  return kind === 'match' || kind === 'mismatch' ? kind : 'unknown'
+}
+
+/**
+ * いま読んでいるマスタの版を、**キャッシュに刻む形**にする (保存側)。
+ * **`r2` 以外と「まだ読んでいない」(`null`) は版が無いので `null`** — ここを
+ * 「とりあえず今の版」で埋めると、初期値で計算した金額に R2 の版の名札が付く。
+ */
+export function cachedRateVersionOf(state: AllowanceRateState | null): CachedRateVersion {
+  return state !== null && state.status === 'r2'
+    ? { version: state.version, updatedAt: state.updatedAt }
+    : { version: null, updatedAt: null }
+}
+
+/**
+ * キャッシュから出している回に足す 1 文。**4 通りとも別の文**にする。
+ *
+ * `match` にだけ「集計 を押すと引き直します」を付けないのは、**引き直す理由が版の側には
+ * 無い**ため (取り込み直しがあれば古い、という話は別の注記が出している)。
+ */
+function marginCacheSentence(state: AllowanceRateState, cached: CachedRateVersion): string {
+  const head = '表示中の金額は前回の集計 (キャッシュ) のもの'
+  const again = '集計 を押すと引き直します。'
+  const verdict = rateVerdict(state, cached)
+  if (verdict.kind === 'unrecorded') {
+    return `${head}で、保存時の版が記録されていません。この版で計算したとは限りません。${again}`
+  }
+  // **`noticeBody` と同じ並び**にする (「版 X / 更新 Y」)。並びが違うと見比べられない。
+  const label = `版 ${verdict.saved} / 更新 ${cached.updatedAt ?? '不明'}`
+  if (verdict.kind === 'no-current') {
+    return `${head}で、保存時は ${label} で計算しています。`
+      + `いま読んでいるマスタに版が無いため、同じ版かどうかは判定できません。${again}`
+  }
+  if (verdict.kind === 'match') {
+    return `${head}で、いま読んでいるこの版 (${label}) で計算したものです。`
+  }
+  return `${head}で、別の版 (${label}) で計算した金額です。${again}`
+}
+
 /**
  * 粗利タブ (`/profit/margin`) に出す 1 文。**運行手当タブと 2 か所違う。**
  *
  * 1. 出なくなるのは「手当・粗利」(この画面に「収支」の合計は無い)
- * 2. **キャッシュから出している回は「この版で計算したとは限らない」を足す** —
+ * 2. **キャッシュから出している回は、刻んだ版といまの版を突き合わせた 1 文を足す** —
  *    運行手当タブのキャッシュは金額を残さず読み込み時に引き直すが、
  *    **粗利タブのキャッシュは計算済みの金額そのもの**を持っているため
  *
  * `error` では金額を 1 つも出さない (キャッシュも復元しない) ので 2 は足さない。
  */
-export function allowanceRateNoticeForMargin(state: AllowanceRateState, restoredFromCache: boolean): string {
+export function allowanceRateNoticeForMargin(
+  state: AllowanceRateState,
+  restoredFromCache: boolean,
+  cachedRate: CachedRateVersion,
+): string {
   const base = noticeBody(state, '手当・粗利')
   if (state.status === 'error' || !restoredFromCache) return base
-  return `${base}表示中の金額は前回の集計 (キャッシュ) のもので、この版で計算したとは限りません。集計 を押すと引き直します。`
+  return base + marginCacheSentence(state, cachedRate)
 }
