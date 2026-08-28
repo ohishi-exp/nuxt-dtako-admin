@@ -4,6 +4,7 @@ const { requireAuthMock } = vi.hoisted(() => ({ requireAuthMock: vi.fn() }))
 vi.mock('@ippoan/auth-client/server', () => ({ requireAuth: requireAuthMock }))
 
 import handler from '../../server/api/ichiban/[...path].get'
+import { ICHIBAN_PROXY_ALLOWED_PATHS, isAllowedIchibanProxyPath } from '../../server/utils/ichiban-upstream'
 
 const call = (event: unknown) => (handler as unknown as (e: unknown) => Promise<unknown>)(event)
 
@@ -14,7 +15,9 @@ const call = (event: unknown) => (handler as unknown as (e: unknown) => Promise<
  * `opts.env` で env を丸ごと差し替える。
  */
 function eventWith(env: Record<string, unknown>, opts: { path?: string, url?: string, env?: Record<string, unknown> } = {}) {
-  const path = opts.path ?? 'sales/vehicle-daily'
+  // ★ 既定は **front が実際に叩いている path** (`app/utils/ichiban.ts:182`)。
+  // #1015 で allowlist を入れたので、ここに架空の path を置くと全部 403 になる。
+  const path = opts.path ?? 'api/sales/vehicle-daily'
   const url = opts.url ?? `https://dtako.ippoan.org/api/ichiban/${path}?vehicle=101&from=2026-06-01`
   return {
     context: {
@@ -74,7 +77,7 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [url, init] = fetchMock.mock.calls[0]! as [URL, RequestInit]
-    expect(url.toString()).toBe('https://rust-ichiban.mtamaramu.com/sales/vehicle-daily?vehicle=101&from=2026-06-01')
+    expect(url.toString()).toBe('https://rust-ichiban.mtamaramu.com/api/sales/vehicle-daily?vehicle=101&from=2026-06-01')
     expect(init.method).toBe('GET')
     expect((init.headers as Record<string, string>)['CF-Access-Client-Id']).toBe('client-id-x')
     expect((init.headers as Record<string, string>)['CF-Access-Client-Secret']).toBe('client-secret-x')
@@ -183,7 +186,10 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('path パラメータが無ければ base の root に転送する', async () => {
+  /** ★ **#1015 で挙動を変えた 1 点。**以前はここが「base の root に転送する」を
+   * 固定していた (`url.pathname === '/'`) — path 無しは allowlist の 6 件に無いので、
+   * いまは転送せず 403 で止める。**空文字を通す口を残さない。** */
+  it('path パラメータが無ければ 403 で止め、root へは転送しない (Refs #1015)', async () => {
     fetchMock.mockResolvedValue(new Response('ok', { status: 200 }))
     const event = eventWith(
       { NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'a', ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'b' },
@@ -191,10 +197,8 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
     )
     event.context.params = {} as unknown as { path: string }
 
-    await call(event)
-
-    const [url] = fetchMock.mock.calls[0]! as [URL]
-    expect(url.pathname).toBe('/')
+    await expect(call(event)).rejects.toMatchObject({ statusCode: 403 })
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('upstream 応答に content-type が無ければ Content-Type ヘッダを設定しない', async () => {
@@ -228,7 +232,7 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
     const parsed = JSON.parse(body) as { error: string }
     expect(parsed.error).toContain('一番星 API が応答しませんでした')
     // どの口が落ちたか分かるように upstream のパスを載せる
-    expect(parsed.error).toContain('/sales/vehicle-daily')
+    expect(parsed.error).toContain('/api/sales/vehicle-daily')
     // 理由が無いのは画面のバグではなく上流の仕様、と言い切る
     expect(parsed.error).toContain('一番星が理由を返していません')
     // ★ status は文言に入れない (画面側が前置するため)
@@ -312,10 +316,10 @@ describe('ichiban proxy の認可 (Refs #988)', () => {
     ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'client-secret-x',
   }
   const eventFor = (env: Record<string, unknown>) => ({
-    context: { cloudflare: { env }, params: { path: 'sales/vehicle-daily' } },
+    context: { cloudflare: { env }, params: { path: 'api/sales/vehicle-daily' } },
     __responseHeaders: {} as Record<string, string>,
     __statusCode: undefined as number | undefined,
-    _url: 'https://dtako.ippoan.org/api/ichiban/sales/vehicle-daily?vehicle=101',
+    _url: 'https://dtako.ippoan.org/api/ichiban/api/sales/vehicle-daily?vehicle=101',
   })
 
   beforeEach(() => {
@@ -396,5 +400,168 @@ describe('ichiban proxy の認可 (Refs #988)', () => {
 
     expect(await call(event)).toBe('{"error":"upstream unauthorized"}')
     expect(event.__statusCode).toBe(401)
+  })
+})
+
+/**
+ * ★ **upstream path を allowlist で固定する** (Refs #1015)。
+ *
+ * #988 で入ったのは **認証**だけで、**どの path を中継してよいか**は 1 か所も見て
+ * いなかった。この route は呼び出し元が持っていない CF Access Service Token を
+ * こちらで付け足すので、中継先を画面が実際に使う口に固定する。
+ *
+ * **測るのは両側**:
+ * - **陽性対照** — allowlist の 6 件が**全部** upstream に届く。ここを測らずに塞ぐと
+ *   front を黙って壊す。
+ * - **陰性対照** — 「在りそうで無い path」が 403 で、**upstream を 1 回も叩かない**。
+ *
+ * ★ **`fetch` は mock なので、これは「上流が答えたか」ではなく「この route が上流を
+ * 叩いたか」を測っている。** 塞げているかの根拠はそこまで。
+ */
+describe('ichiban proxy の upstream path allowlist (Refs #1015)', () => {
+  const fetchMock = vi.fn()
+  const ENV = {
+    INTERNAL_SHARED_SECRET: 'secret',
+    NUXT_ICHIBAN_CF_ACCESS_CLIENT_ID: 'client-id-x',
+    ICHIBAN_CF_ACCESS_CLIENT_SECRET: 'client-secret-x',
+  }
+  const eventForPath = (path: string, search = '') => ({
+    context: { cloudflare: { env: ENV }, params: { path } },
+    __responseHeaders: {} as Record<string, string>,
+    __statusCode: undefined as number | undefined,
+    _url: `https://dtako.ippoan.org/api/ichiban/${path}${search}`,
+  })
+
+  beforeEach(() => {
+    fetchMock.mockReset()
+    vi.stubGlobal('fetch', fetchMock)
+    requireAuthMock.mockReset()
+    requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  /**
+   * front が実際に叩いている path。2026-08-28 に `a028078` で
+   * `git grep -n "/api/ichiban" -- 'app/**'` (25 行) を実読し、**コメント/JSDoc を
+   * 除いた実リテラル 8 site / 6 distinct** を数えたもの。**全部 string literal** で、
+   * 動的に組んでいる箇所は無い (陽性対照: 同じ探索で `/api/kyuyo/` 側の template
+   * literal 組み立て `app/pages/kyuyo-fetch.vue:209` は拾える)。
+   */
+  const FRONT_CALL_SITES: ReadonlyArray<[string, string]> = [
+    ['health', 'app/utils/ichiban-health.ts:43'],
+    ['api/sales/departments', 'app/utils/ichiban-health.ts:50'],
+    ['api/employees', 'app/utils/ichiban-health.ts:57'],
+    ['api/vehicles', 'app/utils/ichiban-health.ts:64'],
+    ['api/sales/vehicle-daily', 'app/utils/ichiban.ts:182'],
+    ['api/costs/vehicle-daily', 'app/utils/margin.ts:153'],
+    ['api/costs/vehicle-daily', 'app/utils/profit-actual-wage.ts:99'],
+    ['api/employees', 'app/pages/restraint-wage.vue:3122'],
+  ]
+
+  it('★ 陽性対照: front の 8 site / 6 distinct path が全部 upstream に届く', () => {
+    expect(FRONT_CALL_SITES).toHaveLength(8)
+    expect(new Set(FRONT_CALL_SITES.map(([path]) => path)).size).toBe(6)
+    for (const [path, site] of FRONT_CALL_SITES) {
+      expect(isAllowedIchibanProxyPath(path), `${site} の ${path} が allowlist から漏れている`).toBe(true)
+    }
+  })
+
+  it('★ 陽性対照: allowlist の 6 件を実際に handler へ通すと 6 件とも upstream を叩く', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(new Response('{"data":[]}', {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })))
+
+    for (const path of ICHIBAN_PROXY_ALLOWED_PATHS) {
+      const event = eventForPath(path, '?vehicle=101')
+      expect(await call(event)).toBe('{"data":[]}')
+      expect(event.__statusCode).toBe(200)
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(ICHIBAN_PROXY_ALLOWED_PATHS.length)
+    expect(fetchMock.mock.calls.map(([url]) => (url as URL).pathname)).toEqual(
+      ICHIBAN_PROXY_ALLOWED_PATHS.map(p => `/${p}`),
+    )
+  })
+
+  it('allowlist は front が叩く 6 件ちょうど (増減したら front と突き合わせ直す)', () => {
+    expect([...ICHIBAN_PROXY_ALLOWED_PATHS].sort()).toEqual([
+      'api/costs/vehicle-daily',
+      'api/employees',
+      'api/sales/departments',
+      'api/sales/vehicle-daily',
+      'api/vehicles',
+      'health',
+    ])
+  })
+
+  /**
+   * ★ **陰性対照。**「在りそうで無い path」を並べる。**upstream に在るかどうかは
+   * ここでは測っていない** — 測っているのは「この proxy が中継しないこと」だけ。
+   */
+  it('★ 陰性対照: allowlist 外は 403 で、upstream を 1 回も叩かない', async () => {
+    fetchMock.mockResolvedValue(new Response('{"ok":true}', { status: 200 }))
+
+    const outside = [
+      '',
+      'api',
+      'api/',
+      'api/sales',
+      'api/employees/1',
+      'api/employees/',
+      '/api/employees',
+      'API/EMPLOYEES',
+      'api/kyuyo/companies',
+    ]
+
+    for (const path of outside) {
+      await expect(call(eventForPath(path)), `${path} が通ってしまった`)
+        .rejects.toMatchObject({ statusCode: 403 })
+    }
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  /**
+   * ★ **理由は本文 (`message`) の側にも入れる。**本番 (workerd) の reason phrase は
+   * 日本語を運べず空になるので、画面 (`describeApiError` が `d.message` を読む) に
+   * 届くのは JSON 本文だけ。**upstream に何が在るかは書かない。**
+   */
+  it('403 の理由は statusMessage と message の両方に入り、upstream を示唆しない', async () => {
+    await expect(call(eventForPath('api/schema/columns'))).rejects.toMatchObject({
+      statusCode: 403,
+      statusMessage: 'この proxy が中継するパスではありません',
+      message: 'この proxy が中継するパスではありません',
+    })
+  })
+
+  /** query string は照合対象外 — 判定するのは path 部分だけ (`?` 以降は素通し)。 */
+  it('query string は判定に影響せず、そのまま upstream へ渡る', async () => {
+    fetchMock.mockResolvedValue(new Response('{}', { status: 200 }))
+
+    await call(eventForPath('api/costs/vehicle-daily', '?vehicle=101&from=2026-06-01&limit=5000'))
+
+    const [url] = fetchMock.mock.calls[0]! as [URL]
+    expect(url.pathname).toBe('/api/costs/vehicle-daily')
+    expect(url.search).toBe('?vehicle=101&from=2026-06-01&limit=5000')
+  })
+
+  /** 認証 (401) の方が手前。順序を入れ替えると「ログインすれば通る」が読めなくなる。 */
+  it('未ログインで allowlist 外なら 401 が先 (403 ではない)', async () => {
+    requireAuthMock.mockRejectedValue(Object.assign(new Error('Unauthorized'), { statusCode: 401 }))
+
+    await expect(call(eventForPath('api/schema/columns'))).rejects.toMatchObject({ statusCode: 401 })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  /** 純関数そのもの (`fetchIchiban` 側では照合しない — kyuyo と共有部品のため)。 */
+  it('isAllowedIchibanProxyPath は完全一致のみ true', () => {
+    expect(ICHIBAN_PROXY_ALLOWED_PATHS.every(p => isAllowedIchibanProxyPath(p))).toBe(true)
+    expect(isAllowedIchibanProxyPath('health')).toBe(true)
+    expect(isAllowedIchibanProxyPath('health/')).toBe(false)
+    expect(isAllowedIchibanProxyPath('healthz')).toBe(false)
+    expect(isAllowedIchibanProxyPath('')).toBe(false)
   })
 })

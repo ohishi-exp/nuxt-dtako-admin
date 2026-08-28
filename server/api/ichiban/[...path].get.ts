@@ -56,6 +56,26 @@
  * `git grep` + `scripts/xref.sh` で確認。`app/**` 以外のヒットは全て JSDoc か、
  * 上流 rust を直接叩く relay / kyuyo-mcp のもので、この Nitro route は通らない)。
  *
+ * ## upstream path を allowlist で固定する (Refs #1015)
+ *
+ * #988 で入ったのは **認証**であって **認可**ではない。`requireAuth` が見ているのは
+ * 「**誰が**呼んでいるか」までで、**この route が中継してよい path** は 1 か所も
+ * 見ていなかった (`getRouterParam(event, 'path')` を素通しで `fetchIchiban` へ渡していた)。
+ * この route は**呼び出し元が持っていない資格情報 (CF Access Service Token) を
+ * こちらで付け足す**ので、中継先は画面が実際に使う口に固定する。
+ *
+ * 許す path は `ICHIBAN_PROXY_ALLOWED_PATHS` (`server/utils/ichiban-upstream.ts`) の
+ * **完全一致 6 件**。前方一致にしない理由・front を数えた手順・「なぜ `fetchIchiban`
+ * 側で照合しないか」は全部そちらの JSDoc に書いてある。**照合するのは path 部分だけで、
+ * query string は今までどおり素通し。**
+ *
+ * ★ **範囲はこのファイル = GET だけ。**`.get.ts` なので書き込み系は元から通らない。
+ *
+ * 403 — allowlist 外 (この proxy が中継する path ではない)。**404 にしない** —
+ * 「そんな path は無い」と読めてしまい、実際には「この proxy が許していないだけ」
+ * という事実と食い違う。姉妹の proxy クラス (auth-worker 側の shared-secret allowlist)
+ * が allowlist 外を 403 で返しているのと**同じ読み方に揃える**。
+ *
  * 401 — 未ログイン (`requireAuth`)。**空本文の非 2xx に理由を作る下の分岐より手前で
  * 投げる**ので、passthrough の契約 (Refs #900) には触れていない。
  * binding 未設定は 503 (`INTERNAL_SHARED_SECRET` / CF Access の 2 つ)、
@@ -67,8 +87,12 @@
  */
 import type { H3Event } from 'h3'
 import { defineEventHandler, getRequestURL, getRouterParam, createError, setResponseStatus, setHeader } from 'h3'
-import { fetchIchiban, cfEnv, ichibanEmptyErrorReason, type IchibanUpstreamError } from '../../utils/ichiban-upstream'
+import { fetchIchiban, cfEnv, ichibanEmptyErrorReason, isAllowedIchibanProxyPath, type IchibanUpstreamError } from '../../utils/ichiban-upstream'
 import { requireAuth } from '@ippoan/auth-client/server'
+// ★ **`resolveSecret` だけ `cf-env.ts` から取っているのは意図的** (Refs #999/#1015)。
+// `ichiban-upstream.ts` にも同名があるが、あちらは `.get()` の reject を
+// `catch { return null }` で握り潰す (= binding 故障が「未設定」と同じ 503 に化ける)。
+// こちらは例外を伝播させる版で、理由は `cf-env.ts` の JSDoc。**片方に寄せない。**
 import { resolveSecret } from '../../utils/cf-env'
 
 export default defineEventHandler(async (event: H3Event) => {
@@ -86,6 +110,31 @@ export default defineEventHandler(async (event: H3Event) => {
   // **上流を叩く前に認証する。** ここを通れる範囲が「Access を通れる人」から
   // 「auth-worker にログインしている人」に狭まる。
   await requireAuth(event, { authWorkerUrl, sharedSecret })
+
+  // **認証のあとに path の認可** (Refs #1015)。順序を入れ替えないこと — 未ログインを
+  // 403 で返すと「ログインしたら通る」ことが読めなくなる。
+  //
+  // ★ **理由は `message` (= JSON 本文) の側にも明示する。**画面に届くのは本文だけで
+  // (`describeApiError` が `d.message` を読む)、reason phrase は当てにならない。
+  // **実測 (2026-08-28、local `wrangler dev` = 本物の workerd)**: この日本語を
+  // `statusMessage` に載せると reason phrase は空ではなく
+  // **`HTTP/1.1 403 proxy`** になった (非 ASCII が落ちて断片だけ残る) —
+  // 単語に見えるぶん空より紛らわしい。本文の側は 6 行とも無傷で届いている:
+  //   {"error":true,"url":"…","statusCode":403,
+  //    "statusMessage":"この proxy が中継するパスではありません",
+  //    "message":"この proxy が中継するパスではありません"}
+  // h3 の `createError` は `message` 未指定なら `statusMessage` を写すが、
+  // **写しに依存せず両方書く。**
+  //
+  // ★ **upstream に何が在るかを示唆しない。**書くのは「この proxy が中継する path では
+  // ない」までで、要求された path も echo しない。
+  if (!isAllowedIchibanProxyPath(pathParam)) {
+    throw createError({
+      statusCode: 403,
+      statusMessage: 'この proxy が中継するパスではありません',
+      message: 'この proxy が中継するパスではありません',
+    })
+  }
 
   let upstreamRes: Response
   try {
