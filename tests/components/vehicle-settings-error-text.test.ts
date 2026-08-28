@@ -203,13 +203,13 @@ describe('/vehicle-settings/unconfirmed の取得失敗の 1 文 (Refs #996)', (
    *
    * | 出どころ | 経路 | `statusMessage` |
    * | --- | --- | --- |
-   * | **上流** | `alcProxyFetch` → auth-worker `/alc-proxy` が fail-closed で 401 | `backend /api/dtako/vehicles エラー: {"error":"Unauthorized"}` |
+   * | **上流** | `alcProxyFetch` → auth-worker `/alc-proxy` が fail-closed で 401 | `backend /api/vehicles エラー: {"error":"Unauthorized"}` |
    * | **自前** | `unconfirmed.get.ts` の `requireAuth` (#p760-c988-3 が追加予定) | `Unauthorized` |
    *
    * 上流の本文は auth-worker の `jsonError(401, "Unauthorized")` = `{"error":"Unauthorized"}`
    * (`ohishi-exp/auth-worker` の `src/handlers/alc-proxy.ts:81-86` / `:139,145,155,158`。
    * clone は `dd220b2` 時点)。`unconfirmed.get.ts` はそれを
-   * `backend /api/dtako/vehicles エラー: ${text}` に包んで投げ直す。
+   * `backend /api/vehicles エラー: ${text}` に包んで投げ直す。
    *
    * **理由の文字列は別物になるが、次の一手は同じでなければならない** — 人がすべきこと
    * (再ログイン) は出どころに依らないのに、片方だけ案内が出ないと
@@ -226,12 +226,12 @@ describe('/vehicle-settings/unconfirmed の取得失敗の 1 文 (Refs #996)', (
     const upstream = errorText(await loadWith(401, JSON.stringify({
       error: true,
       statusCode: 401,
-      statusMessage: 'backend /api/dtako/vehicles エラー: {"error":"Unauthorized"}',
-      message: 'backend /api/dtako/vehicles エラー: {"error":"Unauthorized"}',
+      statusMessage: 'backend /api/vehicles エラー: {"error":"Unauthorized"}',
+      message: 'backend /api/vehicles エラー: {"error":"Unauthorized"}',
     })))
     expect(upstream).toBe(
       '未確認車輛の取得に失敗しました: '
-      + '401 backend /api/dtako/vehicles エラー: {"error":"Unauthorized"} — '
+      + '401 backend /api/vehicles エラー: {"error":"Unauthorized"} — '
       + 'ログインが切れています。再ログインしてから「再取得」を押してください'
       + ' (再ログインしても直らないときは認証サーバに繋がっていません。権限の問題ではありません)',
     )
@@ -260,16 +260,16 @@ describe('/vehicle-settings/unconfirmed の取得失敗の 1 文 (Refs #996)', (
     )
   })
 
-  /** backend の理由を中継する 502 (`backend /api/dtako/vehicles エラー: …`)。 */
+  /** backend の理由を中継する 502 (`backend /api/vehicles エラー: …`)。 */
   it('502 (upstream の理由つき) — 理由を残したまま次の一手を足す', async () => {
     const w = await loadWith(502, JSON.stringify({
       error: true,
       statusCode: 502,
-      statusMessage: 'backend /api/dtako/vehicles エラー: upstream timeout',
-      message: 'backend /api/dtako/vehicles エラー: upstream timeout',
+      statusMessage: 'backend /api/vehicles エラー: upstream timeout',
+      message: 'backend /api/vehicles エラー: upstream timeout',
     }))
     expect(errorText(w)).toBe(
-      '未確認車輛の取得に失敗しました: 502 backend /api/dtako/vehicles エラー: upstream timeout — '
+      '未確認車輛の取得に失敗しました: 502 backend /api/vehicles エラー: upstream timeout — '
       + 'サーバ側の設定か障害です (権限の問題ではありません)。'
       + '復旧してから「再取得」を押してください',
     )

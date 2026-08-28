@@ -97,7 +97,7 @@ onMounted(() => {
     </div>
 
     <p class="text-sm text-gray-600 dark:text-gray-400">
-      車輛マスタ (backend <code>/api/dtako/vehicles</code>) のうち、R2 に dump が
+      車輛マスタ (backend <code>/api/vehicles</code>) のうち、R2 に dump が
       一件もアップロードされていない車輛を一覧します。
       <button
         type="button"

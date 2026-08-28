@@ -31,7 +31,7 @@ dtako (デジタコ運行データ) 管理画面。Nuxt 4 + Nitro `cloudflare_mo
 | **server/api (粗利/検証スナップショット)** | `server/api/profit/{snapshot.get,snapshot.post,snapshot.delete,snapshots.get,monthly.get,margin-summary.post}.ts` `server/utils/profit-r2-io.ts` | `PROFIT_R2` への検証スナップショット read/write/list と車輌×月サマリ、**粗利の集計そのものの版管理保存** (Refs #826)。R2 binding が要るので Worker 側 (pure は `app/utils/{profit-r2,margin-r2}.ts`) |
 | **server/api (kyuyo-master)** | `server/api/kyuyo-master/{companies.get,refresh.post,refresh-full.post}.ts` `server/utils/kyuyo-master-db.ts` | D1 `kyuyo_companies` (migration 0005、会社×年度リスト・金額なし) の読み/差分更新 (rust `/api/kyuyo/databases` 高速一覧)/フル更新 (会社名+権限、遅い)。消費者は `/kyuyo-fetch` ページ (#369 PR-B1)。取得済み明細は sessionStorage (タブ限り、別ユーザー検知で purge、pure ロジックは `app/utils/kyuyo-fetch.ts`) |
 | **server/api (Y時間)** | `server/api/y-time-export.post.ts` `y-time-template.{get,put}.ts` | backend GET→R2 テンプレ→ExcelJS xlsx 生成 (R2 が要るので Worker 側)。backend GET は `alcProxyFetch` で /alc-proxy 経由 |
-| **server/api (車両設定)** | `server/api/vehicle-settings/{extract.post,history.get,object.get,unconfirmed.get}.ts` | 車両設定 抽出・履歴・取得。unconfirmed は backend `/api/dtako/vehicles` を `alcProxyFetch` (/alc-proxy 経由) で叩く |
+| **server/api (車両設定)** | `server/api/vehicle-settings/{extract.post,history.get,object.get,unconfirmed.get}.ts` | 車両設定 抽出・履歴・取得。unconfirmed は backend `/api/vehicles` を `alcProxyFetch` (/alc-proxy 経由) で叩く (**`/api/dtako/vehicles` ではない** — 下の gotcha 参照。Refs #1033) |
 | **utils** | `app/utils/{api,event-data-table,y-time-xlsx,vehicle-settings-*,net780}.ts` | API ラッパ / 表整形 / JSZip writer / 車両設定 cfg・diff・labels / net780-wasm ラッパー |
 | **utils (粗利・突合)** | `app/utils/{allowance-*,margin*,profit-*,ichiban,operation-leg-sales}.ts` | 便の切り出し・手当・突合・粗利・賃金構成の pure ロジック (下記に主要 3 本) |
 | **middleware** | `app/middleware/auth.global.ts` | 全 page の JWT gate |
@@ -60,6 +60,7 @@ vitest は `resolve.alias` で `tests/mocks/net780-wasm.ts` に差し替える (
 - **Y時間 は sync HTTP で配信 (async job 化しない)**。一時期 backend `POST /jobs` + WS 完了通知 (notify-realtime-bus) で async 化を試みたが、**Cloud Run の CPU throttling で `tokio::spawn` の background compute が完走せず** frontend WS が 120s timeout → revert。5-15s compute は CF edge timeout (100s) 内に収まる。
 - Y時間 xlsx は JSZip single-pass row-batch writer (`y-time-xlsx.ts`, PR #30 で 150x 高速化)。
 - 開発は必ず `origin/main` ベース worktree。メイン wt では build しない (hook がソース編集を禁止)。
+- **上流 (rust-alc-api) の車輛マスタは `GET /api/vehicles`。`/api/dtako/vehicles` は存在しない** (Refs #1033)。**`dtako/` は nest ではなく各モジュールが route 文字列に直書き**していて (`nest("/api/dtako` は 0 件)、`alc-dtako` crate の 37 route のうち接頭辞つきは `/dtako/events`・`/dtako/events/etags`・`/dtako/tickets*`・`/dtako/y-time-export` の 4 系統だけ。`vehicles`・`operations`・`drivers`・`work-times` 等は接頭辞なしで `/api` 直下。**`/api/dtako/**` が居ないわけではないので「dtako を消す」を一般則にしないこと。**`unconfirmed.get.ts` が最初から後者を指していて **本番が 404 だった**。**この repo のテストは `alcProxyFetch` を mock するので「path が上流に在る」ことは検査していない** — 上流の path を変える/消す変更は緑のまま通る。
 
 ## CCoW / CI から見た立ち位置
 

@@ -35,7 +35,7 @@ function bearerToken(authHeader: string | undefined): string | undefined {
 }
 
 export interface AlcProxyFetchOptions {
-  /** rust-alc-api 側の path。先頭 `/` 込みで渡す (例 `/api/dtako/vehicles`) */
+  /** rust-alc-api 側の path。先頭 `/` 込みで渡す (例 `/api/vehicles`) */
   path: string
   /** HTTP method (default 'GET') */
   method?: string
