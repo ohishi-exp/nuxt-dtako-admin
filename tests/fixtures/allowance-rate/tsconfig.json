@@ -1,0 +1,24 @@
+// **この 1 本が無いと relay 側の CI が落ちる** (Refs #1017 ④)。
+//
+// `row-validation.ts` は `workers/dtako-scraper-relay/test/` からも読まれる。
+// vite (oxc) は .ts を transform する前にそのファイルの tsconfig を探し、
+// repo 直下の `tsconfig.json` は `./.nuxt/tsconfig.json` を extends している。
+// **relay の CI job は `workers/dtako-scraper-relay` で `npm ci` するだけで
+// `nuxt prepare` を回さない**ので `.nuxt/` が無く、
+// `[TSCONFIG_ERROR] Failed to load tsconfig ... Tsconfig not found` で
+// **テストファイルごと落ちる** (実測: この shim を消すと再現する)。
+//
+// ここに自己完結の tsconfig を 1 本置いて root の nuxt 依存を遮断する。
+// **fixture 用**で、この repo の型検査の設定ではない (対象はこのディレクトリの
+// `*.ts` だけ)。
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022"],
+    "strict": true,
+    "noEmit": true
+  },
+  "include": ["*.ts"]
+}

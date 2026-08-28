@@ -5,6 +5,7 @@ import {
   summaryListPrefix,
   wageMasterR2Paths,
   restraintR2Paths,
+  type WageMasterName,
 } from "../../src/r2/keys";
 
 describe("companiesListPrefix / monthsListPrefix / summaryListPrefix", () => {
@@ -23,8 +24,24 @@ describe("wageMasterR2Paths", () => {
     expect(paths.version("20260701T000000Z")).toBe("restraint/0100/wage-master/v-20260701T000000Z.json");
   });
 
+  // ★ **列挙をベタ書きしない。** `Record<WageMasterName, true>` にしておくと、
+  // 正本 (relay の `restraint-wage.ts`) が種別を足したときに **tsc が
+  // 「プロパティが足りない」で落ちる** (CI の `npx tsc --noEmit`)。ベタ書きの
+  // 配列だと足された種別を素通りしたまま "every variant" と名乗り続ける
+  // (実際 `"allowance-rate"` が 4 値のまま取り残されていた、Refs #1022)。
+  const EVERY_WAGE_MASTER_NAME: Record<WageMasterName, true> = {
+    "wage-master": true,
+    "min-wage": true,
+    "wage-config": true,
+    "salary-item-config": true,
+    "allowance-rate": true,
+  };
+
   it("works for every WageMasterName variant", () => {
-    for (const name of ["wage-master", "min-wage", "wage-config", "salary-item-config"] as const) {
+    const names = Object.keys(EVERY_WAGE_MASTER_NAME) as WageMasterName[];
+    // 「回っていない」を数で固定する (0 件でも for ループは緑になるため)。
+    expect(names).toHaveLength(5);
+    for (const name of names) {
       expect(wageMasterR2Paths("restraint", "0100", name).latest).toBe(`restraint/0100/${name}/latest.json`);
     }
   });
