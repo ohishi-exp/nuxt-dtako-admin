@@ -2,14 +2,26 @@
  * R2 key builder。既存 `workers/dtako-scraper-relay` の規約をそのまま踏襲する
  * (新規実装しない)。
  *
- * `restraintR2Paths` は `theearth-restraint-client.ts` の純粋関数をそのまま
- * import する。一方 `wageMasterR2Paths` は `dtako-scraper-relay-do.ts` の
- * private instance method (`this.env` に依存) で import できないため、
- * ここに同じロジックをローカル複製する (3 行、Refs 調査で判明した drift)。
+ * ## 型は import する。複製するのは関数だけ (Refs #1022)
+ *
+ * - **型 `WageMasterName` は relay の `restraint-wage.ts` が正本で、ここは
+ *   import して再輸出するだけ。** この worker は `mcp/tools.ts` で既に同じ
+ *   ファイルから import しているので、型を複製する理由が無い。**複製していた頃は
+ *   実際に drift していた** — #805 PR-1 が relay に足した `"allowance-rate"` が、
+ *   この複製だけ 4 値のまま取り残された。import にすると drift は
+ *   「検出される」のではなく**起きえなくなる**。
+ * - **関数 `wageMasterR2Paths` だけは複製する。** 正本が
+ *   `dtako-scraper-relay-do.ts` の private instance method (`this.env` に依存)
+ *   で import できないため (3 行)。
+ * - `restraintR2Paths` は `theearth-restraint-client.ts` の純粋関数をそのまま
+ *   import する。
  */
+import type { WageMasterName } from "../../../dtako-scraper-relay/src/restraint-wage";
+
 export { restraintR2Paths } from "../../../dtako-scraper-relay/src/theearth-restraint-client";
 
-export type WageMasterName = "wage-master" | "min-wage" | "wage-config" | "salary-item-config";
+/** R2 のマスタ種別 (`restraint/{compId}/{name}/…`)。**正本は relay 側**。 */
+export type { WageMasterName };
 
 /** `dtako-scraper-relay-do.ts::wageMasterR2Paths` と同一ロジック (prefix を引数化)。 */
 export function wageMasterR2Paths(

@@ -79,9 +79,10 @@ export const KUSHIRO_ORIGIN = "釧路";
  * `test/kushiro-doto-rebuild.test.ts` の `KUSHIRO_LOADERS` vs `golden.kushiroLoaders`
  * が落ちる、の **2 段**になる。「マスタが動けば両側とも落ちる」ではない。
  *
- * なお `src/r2/keys.ts` の `WageMasterName` には relay 側にある `"allowance-rate"`
- * が入っていない (drift)。この定数の話とは別件で、**検出する仕組みが無いこと**
- * ごと Refs #1022。
+ * なお `src/r2/keys.ts` の `WageMasterName` は、かつて relay 側の 5 値から
+ * `"allowance-rate"` が落ちた**複製**だった (drift)。#1022 で複製をやめ、relay の
+ * `restraint-wage.ts` から import するようにしたので、**もう drift しえない**
+ * (この定数の話とは別件)。
  */
 export const KUSHIRO_LOADERS: readonly string[] = ["中部飼料", "釧路飼料", "道東飼料", "中部飼料(株)"];
 
