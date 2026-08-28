@@ -50,10 +50,9 @@
 
 import { defineEventHandler, createError } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { VEHICLE_SETTINGS_R2_PREFIX, parseVehicleSettingsR2Key } from '~/utils/vehicle-settings-r2'
 import { alcProxyFetch } from '../../utils/alc-proxy'
 import { cfEnv, resolveSecret } from '../../utils/cf-env'
-
-const R2_PREFIX = 'vehicle-settings/'
 
 interface R2Object {
   key: string
@@ -78,28 +77,23 @@ interface CloudflareEnv {
   NUXT_PUBLIC_AUTH_WORKER_URL?: string
 }
 
-// `vehicle-settings/4437/...` → '4437'
-function extractVehicleCdFromKey(key: string): string | null {
-  if (!key.startsWith(R2_PREFIX)) return null
-  const rest = key.slice(R2_PREFIX.length)
-  const slash = rest.indexOf('/')
-  if (slash <= 0) return null
-  return rest.slice(0, slash)
-}
-
 async function listConfirmedVehicleCds(r2: R2BucketLite): Promise<Set<string>> {
   const cds = new Set<string>()
   let cursor: string | undefined = undefined
   // R2 list は 1 回 1000 件上限。全件拾うため cursor でストリーム。
   for (let i = 0; i < 50; i += 1) {
     const res: R2ListResult = await r2.list({
-      prefix: R2_PREFIX,
+      prefix: VEHICLE_SETTINGS_R2_PREFIX,
       cursor,
       limit: 1000,
     })
     for (const o of res.objects) {
-      const cd = extractVehicleCdFromKey(o.key)
-      if (cd) cds.add(cd)
+      // `history.get.ts` と同じ共有パーサ。拡張子まで見るので
+      // `vehicle-settings/<cd>/<dump_dir>` のような拡張子無しの key は null に
+      // なるが、書き手 (`extract.post.ts` の `vehicleSettingsR2Paths`) は
+      // `.json` / `.cfg` しか作らない。
+      const parsed = parseVehicleSettingsR2Key(o.key)
+      if (parsed) cds.add(parsed.vehicle_cd)
     }
     if (!res.truncated || !res.cursor) break
     cursor = res.cursor
