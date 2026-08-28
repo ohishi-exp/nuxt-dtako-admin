@@ -1719,7 +1719,12 @@ branches = true
 # (`server/api/vehicle-settings/object.get.ts` / `history.get.ts` /
 # `unconfirmed.get.ts`) が乗っている。ここの key 組み立てが崩れれば
 # **3 本まとめて壊れる**のに、このファイル自身の 100% は誰も守っていなかった。
-# (同じく `vehicleSettingsR2Paths` を使う `extract.post.ts` は gate 未登録。別件)
+# **[宣言] 数えた対象 = このファイルを import している `server/` のファイル → 4 本**
+# (`object.get.ts` / `history.get.ts` / `unconfirmed.get.ts` / `extract.post.ts`)。
+# **うち gate 登録済みは 3 本。** なお `server/api/vehicle-settings/extract.post.ts` も
+# 同じ共有ファイルの `vehicleSettingsR2Paths` に依存しているが、**その route 自身が
+# gate 未登録**なのでここには含めていない (別件)。
+# (issue #1029 は依存を「2 本」と書いているが、実測は上記のとおり 4 本 / 登録済み 3 本)
 # **2026-08-28 実測 (base `6e5eddd`)、`coverage/coverage-final.json` 直読み:
 # statements 17 / 17、branch site 3 / arm 6 / 6、functions 4 / 4。**
 # 0 の arm は無く、最少の arm でも実行回数 1。
