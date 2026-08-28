@@ -1712,3 +1712,21 @@ branches = true
 [[files]]
 path = "server/api/vid-check/map-key.get.ts"
 branches = true
+
+# `vehicle-settings/**` の R2 key 設計 (pure)。**依存されている側だけが gate の外だった。**
+# `VEHICLE_SETTINGS_R2_PREFIX` / `parseVehicleSettingsR2Key` /
+# `vehicleSettingsR2Paths` の上に **既に登録済みの server route 3 本**
+# (`server/api/vehicle-settings/object.get.ts` / `history.get.ts` /
+# `unconfirmed.get.ts`) が乗っている。ここの key 組み立てが崩れれば
+# **3 本まとめて壊れる**のに、このファイル自身の 100% は誰も守っていなかった。
+# (同じく `vehicleSettingsR2Paths` を使う `extract.post.ts` は gate 未登録。別件)
+# **2026-08-28 実測 (base `6e5eddd`)、`coverage/coverage-final.json` 直読み:
+# statements 17 / 17、branch site 3 / arm 6 / 6、functions 4 / 4。**
+# 0 の arm は無く、最少の arm でも実行回数 1。
+# **BR() での再測は省いた** — このファイルには**短絡演算子 (`??` / `||` / `&&`) が
+# 1 つも無い** (`grep -c -E '\?\?|\|\||&&'` = 0。陽性対照 `app/utils/api-error.ts` = 14)。
+# v8 が branches を過大報告するのは短絡で片側が評価されない形なので、
+# その形が存在しない以上ここでは起きない。分岐は 3 つの早期 return `if` だけ。
+[[files]]
+path = "app/utils/vehicle-settings-r2.ts"
+branches = true
