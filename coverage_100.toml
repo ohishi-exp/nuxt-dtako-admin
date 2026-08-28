@@ -383,6 +383,9 @@ branches = true
 # ある (Nitro の本文は `error` が真偽値で、`??` だとそこで止まる。dev で実測)。
 # #996 で `describeResponseFailure` (生 `fetch` の `Response` → 理由 + 次の一手) と
 # その下請け `responseReason` / `hasStringReason` / `nextStepForStatus` が同居した。
+# #1021 で `nextStepForStatus` に **404 の枝**が入り、`vehicle-settings` の 2 ファイル
+# (`history.vue` / `VehicleSettingsDumpPicker.vue`) に置いていた #1005 の暫定
+# (`describeMissingDump` + 呼び出し側の `if (res.status === 404)`) が**両方消えた**。
 #
 # ## 分岐の実測 — **指標名と対象を必ず添える** (Refs #1009)
 #
@@ -390,21 +393,29 @@ branches = true
 # `describeApiError` 1 関数だけ**の BR() 値で、その後 #963 が 5 site
 # (`!fallback && err.statusCode` の 3 / `err.message ?? ''` / `if (synthetic)`)、
 # #996 が 3 関数 10 site を足した後の**ファイル全体を指していなかった** (13+5=18)。
-# 下は **`origin/main` a028078 のファイル全体**を 2026-08-28 に測り直した値。
+# 下は **`origin/main` 29bb7f5 + この PR (#1021)** のファイル全体を 2026-08-28 に
+# 測り直した値。**#1021 で `nextStepForStatus` に 404 の枝が 1 つ増えている**
+# (前回 = #1009 が `origin/main` a028078 で測った値を括弧に併記)。
 #
-# | 指標 | 対象 | 値 (a028078 / 2026-08-28 実測) |
-# | --- | --- | --- |
-# | v8 statements | ファイル全体 | 43 / 43 |
-# | v8 branch site | ファイル全体 | 21 |
-# | v8 branch arm | ファイル全体 | 43 / 43 (**死に分岐 0**) |
-# | v8 funcs | ファイル全体 | 8 / 8 |
-# | **BR() branch site** | **ファイル全体** | **28 — 両側 27 / 片側のみ 1 / 未到達 0** |
-# | BR() branch site | `describeApiError` | 18 — 両側 17 |
-# | BR() branch site | `responseReason` | 2 — 両側 2 |
-# | BR() branch site | `hasStringReason` | 4 — 両側 4 |
-# | BR() branch site | `nextStepForStatus` | 4 — 両側 4 |
+# | 指標 | 対象 | 値 (29bb7f5 + #1021 / 2026-08-28 実測) | 前 (a028078) |
+# | --- | --- | --- | --- |
+# | v8 statements | ファイル全体 | 45 / 45 | 43 / 43 |
+# | v8 branch site | ファイル全体 | 22 | 21 |
+# | v8 branch arm | ファイル全体 | 45 / 45 (**死に分岐 0**) | 43 / 43 |
+# | v8 funcs | ファイル全体 | 8 / 8 | 8 / 8 |
+# | **BR() branch site** | **ファイル全体** | **29 — 両側 28 / 片側のみ 1 / 未到達 0** | 28 — 両側 27 |
+# | BR() branch site | `describeApiError` | 18 — 両側 17 | 18 — 両側 17 |
+# | BR() branch site | `responseReason` | 2 — 両側 2 | 2 — 両側 2 |
+# | BR() branch site | `hasStringReason` | 4 — 両側 4 | 4 — 両側 4 |
+# | BR() branch site | `nextStepForStatus` | **5 — 両側 5** | 4 — 両側 4 |
 #
-# BR() が v8 より多い (28 > 21) のは、`&&` / `||` を**左右の項に分けて**数えるため
+# **計測器の probe を 2 段で先に通してある** (#1021):
+# ① 片側だけ通る `if` が `[true]` / 両側通る `if` が `[false,true]` になる、
+# ② `pick(0,7) === 0` / `orValue(0,7) === 7` / `nullish(0,7) === 0` / `ternary(0) === 'F'`
+# — **計測器が値を壊していない**。②を通さないと `BRV` / `BRN` の差 (`0` や `''` の扱い)
+# に気づけない。
+#
+# BR() が v8 より多い (29 > 22) のは、`&&` / `||` を**左右の項に分けて**数えるため
 # (v8 は 1 site に畳む)。**v8 の branches 100% は短絡で片側を見逃す**ので、
 # 「v8 が緑だから両側」とは読まないこと。
 #
@@ -417,13 +428,28 @@ branches = true
 # **BR() の instrumented コピーは #996 では当てていない。**計測器は repo の外
 # (clone と同じ階層の `_shared/br-tooling/{br.ts,instrument.mjs}`) に**在る**が、
 # #996 の作業では使わず v8 の `coverage-final.json` だけを数えた — **道具が無くて
-# 測れなかったのではない**。#1009 で当て直したのが上の表。
+# 測れなかったのではない**。#1009 で当て直し、#1021 で 404 の枝を足して測り直したのが
+# 上の表。**`_shared/` は clone と同じ階層 (repo の外)** — `.claude/worktrees/_shared/`
+# ではない。
 #
 # **計測が効いていることの陰性対照** (#1009 で実測): 413 を撃つテスト 2 本
 # (`tests/utils/api-error.test.ts` と `tests/components/vehicle-settings-error-text.test.ts`)
 # を**両方** `it.skip` にすると 両側 **27 → 26** (`nextStepForStatus` 4/4 → 3/4、
 # `status === 413` が `[false]` だけになる)。**片方だけ外しても 27 のまま動かない** —
 # どちらか 1 本を「唯一の担保」と思わないこと。
+#
+# **404 も同じ形だった** (#1021 で実測)。`status === 404` の `[true]` 側を通す担保は
+# **2 ファイル 6 本**:
+#
+# - `tests/utils/api-error.test.ts` — 2 本 (`404 は「指した対象がもう無い」話にする` /
+#   `404 に「その他 4xx」「再ログイン」「権限」の文言を混ぜない (陰性対照)`)
+# - `tests/components/vehicle-settings-history-error-text.test.ts` — 4 本
+#   (C の 2 本 / `E. 404 …` / `C と E の 404 は、ボタンの表記だけが違う`)
+#
+# **unit 側の 2 本だけを `it.skip` にしても 両側 28 のまま動かない** (component 側が
+# 同じ枝を通すため)。**6 本すべて**を `it.skip` にして初めて 両側 **28 → 27**
+# (`nextStepForStatus` 5/5 → 4/5、`status === 404` が `[false]` だけになる)。
+# **1 ファイルだけ外して「動かない = 計測器が壊れている」と読まないこと。**
 [[files]]
 path = "app/utils/api-error.ts"
 branches = true
