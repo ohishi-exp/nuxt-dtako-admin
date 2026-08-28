@@ -1662,4 +1662,49 @@ describe('api', () => {
       expect(headers).not.toHaveProperty('X-Tenant-ID')
     })
   })
+
+  /**
+   * ★ `fetch` 自体が throw する経路 (Refs #1006)。Access が切れると upstream は
+   * **cross-origin へ 302** を返し、`fetch` は追随先を返せず `TypeError` を投げる
+   * (2026-08-28 に本番で実測)。**`res` を見るコードには 1 行も到達しない**ので、
+   * 直すまで画面に出るのは `Failed to fetch` の 1 語だけだった。
+   */
+  describe.runIf(!isLive)('fetch が throw したとき (Refs #1006)', () => {
+    /** JSON 経路の入口。**ほぼ全画面がここを通る。** */
+    it('request() 経由 — Failed to fetch のままにしない', async () => {
+      mockFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      await expect(getDrivers()).rejects.toThrow(/サーバに接続できませんでした/)
+
+      mockFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      const e = await getDrivers().catch((x: unknown) => x) as Error
+      expect(e.message).not.toBe('Failed to fetch')
+      expect(e.message).toContain('ログインが切れているか')
+      expect(e.message).toContain('ネットワークが繋がっていないか')
+      expect(e.message).toContain('ページを再読み込みしてください')
+      // ★ 断定していないこと (陰性対照)
+      expect(e.message).not.toContain('ログインが切れました')
+      expect(e.message).not.toContain('再ログインしてください')
+    })
+
+    /** 生 fetch を使う 11 本の側 (`fetchOrDescribe`)。 */
+    it('生 fetch 経由 (getNetprintTargets) — 同じ 1 文になる', async () => {
+      mockFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      const e = await getNetprintTargets().catch((x: unknown) => x) as Error
+      expect(e.message).toContain('サーバに接続できませんでした')
+      expect(e.message).toContain('どちらか')
+      expect(e.message).toContain('区別できません')
+    })
+
+    /**
+     * ★ `TypeError` 以外は**素通し** — 既存の文言を 1 文字も変えない。
+     * `authFetch` の `API エラー (503): …` はそのまま出る。
+     */
+    it('TypeError でなければ素通し (既存の振る舞いを変えない)', async () => {
+      mockFetch.mockResolvedValueOnce(errResponse(503, 'upstream down'))
+      await expect(getDrivers()).rejects.toThrow('API エラー (503): upstream down')
+
+      mockFetch.mockRejectedValueOnce(new Error('boom'))
+      await expect(getNetprintTargets()).rejects.toThrow('boom')
+    })
+  })
 })

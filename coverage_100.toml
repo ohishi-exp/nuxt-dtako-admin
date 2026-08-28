@@ -386,6 +386,15 @@ branches = true
 # #1021 で `nextStepForStatus` に **404 の枝**が入り、`vehicle-settings` の 2 ファイル
 # (`history.vue` / `VehicleSettingsDumpPicker.vue`) に置いていた #1005 の暫定
 # (`describeMissingDump` + 呼び出し側の `if (res.status === 404)`) が**両方消えた**。
+# #1006 で `describeFetchThrow` が同居した — **`fetch` 自体が throw したとき**
+# (= `Response` が 1 つも得られなかったとき) の 1 文。他の 4 関数と入口が違う:
+# あちらは `Response` / `FetchError` を受け取るが、こちらは **`res` がそもそも無い**。
+#
+# **issue #1006 の予想は半分外れていた** (2026-08-28 に本番で実測)。Access が 302 を
+# 返すのは合っていたが、**ログインページの HTML が 200 で返ることは無い** —
+# リダイレクト先が cross-origin なので `fetch` は追随先を返せず **CORS で弾いて
+# `TypeError` を投げる**。⇒ `res.redirected` / `content-type` を見る枝は**要らない**
+# (そこまで到達しない)。**要るのは `catch` 側**だった。
 #
 # ## 分岐の実測 — **指標名と対象を必ず添える** (Refs #1009)
 #
@@ -393,21 +402,22 @@ branches = true
 # `describeApiError` 1 関数だけ**の BR() 値で、その後 #963 が 5 site
 # (`!fallback && err.statusCode` の 3 / `err.message ?? ''` / `if (synthetic)`)、
 # #996 が 3 関数 10 site を足した後の**ファイル全体を指していなかった** (13+5=18)。
-# 下は **`origin/main` 29bb7f5 + この PR (#1021)** のファイル全体を 2026-08-28 に
-# 測り直した値。**#1021 で `nextStepForStatus` に 404 の枝が 1 つ増えている**
-# (前回 = #1009 が `origin/main` a028078 で測った値を括弧に併記)。
+# 下は **`origin/main` 3575c7604a (v0.0.640) + この PR (#1006)** のファイル全体を
+# 2026-08-28 に測り直した値。**#1006 で `describeFetchThrow` が 1 site 増えている**
+# (前回 = #1021 が `origin/main` 29bb7f5 で測った値を括弧に併記)。
 #
-# | 指標 | 対象 | 値 (29bb7f5 + #1021 / 2026-08-28 実測) | 前 (a028078) |
+# | 指標 | 対象 | 値 (3575c7604a + #1006 / 2026-08-28 実測) | 前 (29bb7f5) |
 # | --- | --- | --- | --- |
-# | v8 statements | ファイル全体 | 45 / 45 | 43 / 43 |
-# | v8 branch site | ファイル全体 | 22 | 21 |
-# | v8 branch arm | ファイル全体 | 45 / 45 (**死に分岐 0**) | 43 / 43 |
-# | v8 funcs | ファイル全体 | 8 / 8 | 8 / 8 |
-# | **BR() branch site** | **ファイル全体** | **29 — 両側 28 / 片側のみ 1 / 未到達 0** | 28 — 両側 27 |
+# | v8 statements | ファイル全体 | 48 / 48 | 45 / 45 |
+# | v8 branch site | ファイル全体 | 23 | 22 |
+# | v8 branch arm | ファイル全体 | 47 / 47 (**死に分岐 0**) | 45 / 45 |
+# | v8 funcs | ファイル全体 | 9 / 9 | 8 / 8 |
+# | **BR() branch site** | **ファイル全体** | **30 — 両側 29 / 片側のみ 1 / 未到達 0** | 29 — 両側 28 |
 # | BR() branch site | `describeApiError` | 18 — 両側 17 | 18 — 両側 17 |
 # | BR() branch site | `responseReason` | 2 — 両側 2 | 2 — 両側 2 |
 # | BR() branch site | `hasStringReason` | 4 — 両側 4 | 4 — 両側 4 |
-# | BR() branch site | `nextStepForStatus` | **5 — 両側 5** | 4 — 両側 4 |
+# | BR() branch site | `nextStepForStatus` | 5 — 両側 5 | 5 — 両側 5 |
+# | BR() branch site | `describeFetchThrow` | **1 — 両側 1** | — (この PR で追加) |
 #
 # **計測器の probe を 2 段で先に通してある** (#1021):
 # ① 片側だけ通る `if` が `[true]` / 両側通る `if` が `[false,true]` になる、
@@ -415,7 +425,7 @@ branches = true
 # — **計測器が値を壊していない**。②を通さないと `BRV` / `BRN` の差 (`0` や `''` の扱い)
 # に気づけない。
 #
-# BR() が v8 より多い (29 > 22) のは、`&&` / `||` を**左右の項に分けて**数えるため
+# BR() が v8 より多い (30 > 23) のは、`&&` / `||` を**左右の項に分けて**数えるため
 # (v8 は 1 site に畳む)。**v8 の branches 100% は短絡で片側を見逃す**ので、
 # 「v8 が緑だから両側」とは読まないこと。
 #
@@ -450,6 +460,21 @@ branches = true
 # 同じ枝を通すため)。**6 本すべて**を `it.skip` にして初めて 両側 **28 → 27**
 # (`nextStepForStatus` 5/5 → 4/5、`status === 404` が `[false]` だけになる)。
 # **1 ファイルだけ外して「動かない = 計測器が壊れている」と読まないこと。**
+#
+# **`describeFetchThrow` も同じ形だった** (#1006 で実測)。`e instanceof TypeError` の
+# **`[false]` 側 (= TypeError だったとき)** を通す担保は **2 ファイル 5 本**:
+#
+# - `tests/utils/api-error.test.ts` — 3 本 (`TypeError なら「どちらか」と書き、…` /
+#   `認証切れともネットワーク断とも断定しない (陰性対照)` /
+#   `message の文言が違っても同じ文になる (Chrome / Firefox / 空)`)
+# - `tests/utils/api.test.ts` — 2 本 (`request() 経由 — Failed to fetch のままにしない` /
+#   `生 fetch 経由 (getNetprintTargets) — 同じ 1 文になる`)
+#
+# **unit 側の 3 本だけを `it.skip` にしても 両側 29 のまま動かない** (`api.test.ts` が
+# `request()` / `fetchOrDescribe` 経由で同じ枝を通すため)。**5 本すべて**を `it.skip`
+# にして初めて 両側 **29 → 28** (`describeFetchThrow` 1/1 → 0/1、
+# `!(e instanceof TypeError)` が `[true]` だけになる)。**これで 3 回連続で同じ形**
+# — **担保が何本あるか数えてから外すこと。**
 [[files]]
 path = "app/utils/api-error.ts"
 branches = true
