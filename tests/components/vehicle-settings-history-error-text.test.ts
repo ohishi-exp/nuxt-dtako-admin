@@ -31,6 +31,26 @@
  * **B と D は同じ route を同じ status で叩くのに文が違う** — ボタンの表記が違うから。
  * **A は同じファイルの B と同じ route なのに文が違う** — 再取得ボタンが無いから。
  * 一括置換にしていないことの根拠が、このファイルの `toBe` に載っている。
+ *
+ * ## ★ 404 だけ `describeResponseFailure` を通していない (C / E)
+ *
+ * `nextStepForStatus` に 404 の枝が無いので、通すと「その他 4xx」に落ちて
+ * **こう出るはずだった**:
+ *
+ * ```
+ * dump JSON の取得に失敗しました: 404 object not found: vehicle-settings/… —
+ * 送った内容をサーバが受け付けませんでした。上の理由のとおりに直してから
+ * 「履歴を取得」で一覧を取り直し、行をクリックし直してください
+ * ```
+ *
+ * **採らなかった。行をクリックしただけの人は何も送っておらず、直せるものも無い** ので
+ * 前置きが**事実に反する**。動線 (一覧の取り直し) が正しく出ることは、前置きが嘘で
+ * よい理由にならない。**呼び出し側で 404 を撃ち分け**、消えた dump を指しているという
+ * 事実だけを書く。`describeApiError` / `describeResponseFailure` は**無変更**。
+ *
+ * **これは暫定** — 恒久策は `nextStepForStatus` に 404 を足して、2 か所の
+ * `describeMissingDump` をまとめて消すこと。下の `it` が**誤った前置きが出ていないこと**を
+ * 陰性対照で押さえている。
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -268,17 +288,35 @@ describe('C. /vehicle-settings/history の dump 詳細 (行クリック) — Ref
   const KEY = 'vehicle-settings/4437/20260514_093253-0-0-4437.json'
 
   /** ★ **この口だけ 404 が来る** (`object.get.ts`)。一覧を出した後に R2 から
-   * 消えた形なので、**押し直すべきは行ではなく一覧**。`nextStepForStatus` は 404 を
-   * 「その他 4xx」として扱うので、**正しい手順はやり直し方の側で出しきる**。 */
-  it('404 (一覧の後に R2 から消えた) — 一覧の取り直しを案内する', async () => {
+   * 消えた形なので、**押し直すべきは行ではなく一覧**。 */
+  it('404 (一覧の後に R2 から消えた) — 消えた事実と一覧の取り直しを書く', async () => {
     const t = errorTextStartingWith(await clickRowWith(404, nitroBody(404, `object not found: ${KEY}`)), P)
     expect(t).toBe(
-      P + `404 object not found: ${KEY} — `
+      P + '404 この dump は R2 にもう存在しません — '
+      + '一覧を出した後に消えた可能性があります。'
+      + '「履歴を取得」で一覧を取り直し、行をクリックし直してください',
+    )
+  })
+
+  /** ★ **陰性対照** — `describeResponseFailure` に 404 を通していたら出ていた前置き。
+   * **行をクリックしただけの人は何も送っていない**ので、これが出たら嘘。 */
+  it('404 — 「送った内容を直せ」を 1 文字も出さない (陰性対照)', async () => {
+    const t = errorTextStartingWith(await clickRowWith(404, nitroBody(404, `object not found: ${KEY}`)), P)
+    expect(t).not.toContain('送った内容')
+    expect(t).not.toContain('直してから')
+    expect(t).not.toContain('再ログイン')
+    // 正しい動線は残っていること (陽性対照)。
+    expect(t).toContain('一覧を取り直し')
+  })
+
+  /** 404 を撃ち分けても**他の 4xx は今までどおり**「その他 4xx」の文に落ちる。 */
+  it('400 (404 以外の 4xx) — 「送った内容」の文はこちらに残る', async () => {
+    const t = errorTextStartingWith(await clickRowWith(400, nitroBody(400, 'key must end with .json')), P)
+    expect(t).toBe(
+      P + '400 key must end with .json — '
       + '送った内容をサーバが受け付けませんでした。'
       + '上の理由のとおりに直してから「履歴を取得」で一覧を取り直し、行をクリックし直してください',
     )
-    // **行をもう一度押せ、では直らない。**一覧の取り直しが入っていること。
-    expect(t).toContain('一覧を取り直し')
   })
 
   it('401 — 再ログインを案内する', async () => {
@@ -349,12 +387,39 @@ describe('D / E. <VehicleSettingsDumpPicker> (ボタン = 「履歴取得」) �
     )
   })
 
-  it('E. 404 — 一覧の取り直しを案内する', async () => {
-    expect(errorTextStartingWith(await clickRowWith(404, nitroBody(404, `object not found: ${KEY}`)), PD)).toBe(
-      PD + `404 object not found: ${KEY} — `
-      + '送った内容をサーバが受け付けませんでした。'
-      + '上の理由のとおりに直してから「履歴取得」で一覧を取り直し、行をクリックし直してください',
+  it('E. 404 — 消えた事実と一覧の取り直しを書く', async () => {
+    const t = errorTextStartingWith(await clickRowWith(404, nitroBody(404, `object not found: ${KEY}`)), PD)
+    expect(t).toBe(
+      PD + '404 この dump は R2 にもう存在しません — '
+      + '一覧を出した後に消えた可能性があります。'
+      + '「履歴取得」で一覧を取り直し、行をクリックし直してください',
     )
+    // 陰性対照 — `describeResponseFailure` に通していたら出ていた前置き。
+    expect(t).not.toContain('送った内容')
+  })
+
+  /** ★ **C と E は「同じ暫定処理の写し」なので、文も一致していなければならない** —
+   * 違うのはボタンの表記だけ。片方だけ直したら落ちる。 */
+  it('C と E の 404 は、ボタンの表記だけが違う', async () => {
+    const e = errorTextStartingWith(await clickRowWith(404, nitroBody(404, `object not found: ${KEY}`)), PD)
+
+    respondList()
+    const page = mount(HistoryPage, {
+      global: { stubs: { NuxtLink: true, VehicleSettingsDisplay: true } },
+    })
+    await flushPromises()
+    await page.find('#vehicle-cd').setValue('4437')
+    await page.find('form').trigger('submit')
+    await flushPromises()
+    respond(404, nitroBody(404, `object not found: ${KEY}`))
+    await page.findAll('tbody tr')[0]!.trigger('click')
+    await flushPromises()
+    const c = errorTextStartingWith(page, PD)
+
+    expect(c.replace('「履歴を取得」', '')).toBe(e.replace('「履歴取得」', ''))
+    expect(c).toContain('「履歴を取得」')
+    expect(e).toContain('「履歴取得」')
+    expect(e).not.toContain('「履歴を取得」')
   })
 
   it('E. 503 — 設定・障害だと書く', async () => {

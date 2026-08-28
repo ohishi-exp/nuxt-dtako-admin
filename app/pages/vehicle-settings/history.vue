@@ -38,9 +38,28 @@ const RETRY_HISTORY = 'もう一度「履歴を取得」を押してください
 /** dump 実体の取得。**行クリックで開くのでボタンは無い。**
  * この口だけ **404 (`object not found: <key>`) が来る** — 一覧を出した後に R2 から
  * 消えた形なので、**行を押し直す前に一覧を取り直す**のが正しい動線。
- * `describeResponseFailure` は 404 を「その他 4xx」として扱う (`nextStepForStatus` に
- * 404 の枝は無い) ので、**やり直し方の側で正しい手順を出しきる**。 */
+ * 404 だけは `describeResponseFailure` に通さない (下の `describeMissingDump` を見ること)。 */
 const RETRY_DETAIL = '「履歴を取得」で一覧を取り直し、行をクリックし直してください'
+
+/**
+ * ★ **暫定** — 404 をここで撃ち分ける (Refs #1005)。**恒久策は
+ * `app/utils/api-error.ts` の `nextStepForStatus` に 404 の枝を足すこと。**
+ * いま足さないのは `api-error.ts` が別タスクの持ち物で、`coverage_100.toml` に
+ * 登録された分岐数を兄弟タスクが測っている最中のため。
+ *
+ * **`describeResponseFailure` に 404 を通すと嘘になる。** 404 は「その他 4xx」に落ちて
+ * 前置きが「**送った内容をサーバが受け付けませんでした。上の理由のとおりに直してから**」に
+ * なるが、**行をクリックしただけの人は何も送っていない**し、直せるものも無い。
+ * 消えた dump を指しているという事実と、正しい動線 (一覧の取り直し) だけを出す。
+ *
+ * **本文は読まない。** `object.get.ts` の 404 は `object not found: <key>` の 1 種類しか
+ * 無く、key を指す `dump dir` は一覧の行に出ているので、画面に足す情報が無い。
+ * **本文から理由を組む処理は `api-error.ts` の持ち物**なので、ここに写さない。
+ */
+function describeMissingDump(): string {
+  return 'dump JSON の取得に失敗しました: 404 この dump は R2 にもう存在しません — '
+    + `一覧を出した後に消えた可能性があります。${RETRY_DETAIL}`
+}
 
 interface VehicleSummary {
   vehicle_cd: string
@@ -147,10 +166,11 @@ async function loadDetail(key: string) {
     const res = await fetch(`/api/vehicle-settings/object?key=${encodeURIComponent(key)}`, {
       headers: token ? { authorization: `Bearer ${token}` } : {},
     })
+    if (res.status === 404) throw new Error(describeMissingDump())
     if (!res.ok) {
       // Refs #1005 — 叩く先が別 route (`object.get.ts`) なので **404 が増える**
-      // (`object not found: <key>`)。key は一覧から来るので 400 (key 形式) は事実上
-      // 来ないが、**一覧を出した後に R2 から消えると 404 になる**。
+      // (`object not found: <key>`)。404 だけは上で撃ち分けてある。
+      // key は一覧から来るので 400 (key 形式) は事実上来ない。
       throw new Error(`dump JSON の取得に失敗しました: ${await describeResponseFailure(res, RETRY_DETAIL)}`)
     }
     detail.value = (await res.json()) as VehicleSettings
