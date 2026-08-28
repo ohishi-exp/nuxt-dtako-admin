@@ -33,6 +33,63 @@ export class IchibanUpstreamError extends Error {
   }
 }
 
+/**
+ * **`/api/ichiban/**` proxy が中継してよい upstream path (完全一致、Refs #1015)。**
+ *
+ * あの route は呼び出し元 (ブラウザ) が持っていない CF Access Service Token を
+ * **こちらで付け足して**上流へ渡す。#988 で入れた `requireAuth` が見ているのは
+ * 「**誰が**呼んでいるか」までで、「**どの path を中継してよいか**」は 1 か所も
+ * 見ていなかった (= 認証は在るが認可が無い)。ここで中継先を固定する。
+ *
+ * ★ **前方一致 (`api/` 配下なら何でも) にはしない** — それでは「path を固定する」の
+ * 実効性がほとんど残らない。姉妹の `/api/kyuyo/**` は `` `api/kyuyo/${pathParam}` `` の
+ * **前置き固定**だが、あちらは**認可の正本が上流にある委任設計**
+ * (`kyuyo::introspect::authorize()` + email allowlist) で「外れ」の概念自体が無い。
+ * **同じ型にしない。**
+ *
+ * ★ **中身は front が実際に叩いている path の集合。front が正で、この一覧が front に
+ * 合わせる** (逆ではない)。2026-08-28 に `a028078` で
+ * `git grep -n "/api/ichiban" -- 'app/**'` = 25 行を実読し、**コメント/JSDoc を除いた
+ * 実リテラル 8 site / 6 distinct** を数えた:
+ *
+ * | path | 呼び出し元 (site) |
+ * |---|---|
+ * | `health` | `app/utils/ichiban-health.ts` |
+ * | `api/sales/departments` | `app/utils/ichiban-health.ts` |
+ * | `api/employees` | `app/utils/ichiban-health.ts` / `app/pages/restraint-wage.vue` |
+ * | `api/vehicles` | `app/utils/ichiban-health.ts` |
+ * | `api/sales/vehicle-daily` | `app/utils/ichiban.ts` |
+ * | `api/costs/vehicle-daily` | `app/utils/margin.ts` / `app/utils/profit-actual-wage.ts` |
+ *
+ * **front は path を動的に組んでいない** (全部 string literal)。陽性対照として、同じ
+ * 探索が `/api/kyuyo/` 側では template literal 組み立て
+ * (`app/pages/kyuyo-fetch.vue:209`) を拾うことを確認してある — 「0 件」は探索の失敗
+ * ではない。**front に呼び出しを足すときは、この一覧にも足す** (足し忘れると 403)。
+ *
+ * ★ **`fetchIchiban` の側では照合しない。** あちらは `/api/kyuyo/**` と
+ * `/api/kyuyo-master/**` の 4 route も使う共有部品で、そちらは上流委任設計。
+ * ここに混ぜると kyuyo 側が全部落ちる。**照合するのは ichiban proxy の route だけ。**
+ *
+ * ★ **query string は照合しない** — 判定するのは path 部分だけで、`?` 以降は
+ * 今までどおり素通しする。
+ */
+export const ICHIBAN_PROXY_ALLOWED_PATHS: readonly string[] = [
+  'health',
+  'api/employees',
+  'api/vehicles',
+  'api/sales/departments',
+  'api/sales/vehicle-daily',
+  'api/costs/vehicle-daily',
+]
+
+/**
+ * `/api/ichiban/**` の path 部分が中継対象か (**完全一致**)。
+ * 正規化はしない — 末尾スラッシュ等の揺れは素直に「対象外」に倒す (fail closed)。
+ */
+export function isAllowedIchibanProxyPath(path: string): boolean {
+  return ICHIBAN_PROXY_ALLOWED_PATHS.includes(path)
+}
+
 /** 書き込み系で使う method/body。省略時は従来どおり GET (body 無し)。 */
 export interface IchibanUpstreamInit {
   method?: 'GET' | 'POST'

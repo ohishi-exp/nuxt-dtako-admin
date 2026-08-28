@@ -27,7 +27,7 @@ dtako (デジタコ運行データ) 管理画面。Nuxt 4 + Nitro `cloudflare_mo
 | **pages (DVR)** | `app/pages/dvr-viewer.vue` `dvr-map.vue` | DVR 動画・位置情報ビューア (Refs #90)。**管理者専用** — auth-worker ログインを**必須**とし (`auth.global.ts` の publicPaths は `/login` `/auth/callback` だけ)、**その上で** theearth credential pass-through で DVR データを取る二段構え。default レイアウト (サイドバー) に載る。**「外部利用者向け・publicPaths・`layout: false`」は #90 以前の姿で、いまは違う** (下記の節が正)。`/dvr-api/*` は worker/index.ts → SCRAPER_RELAY service binding → `workers/dtako-scraper-relay` の DO (`theearth-session.ts` / `theearth-venus-client.ts`) |
 | **components** | `app/components/Event*.vue` `VehicleSettings*.vue` `CsvDataTable.vue` `DriverSearchSelect.vue` `ProfitPanel.vue` `AllowanceOperationModal.vue` | イベント表 / 車両設定 表示・diff / CSV テーブル / 運行詳細の収支パネル (検証スナップショット、下記) / 運行手当タブの運行モーダル |
 | **server/api (proxy)** | `server/api/proxy/[...path].ts` `server/utils/alc-proxy.ts` | `/api/proxy/*` → auth-worker `/alc-proxy/*` (introspect / ACL / OIDC mint / identity 注入を集約) → rust-alc-api `/api/*` (createAuthWorkerProxyHandler、#434 step 3 方式 B)。consumer は AUTH_WORKER service binding に X-Alc-Proxy-Secret + browser JWT を thin-forward するだけ。`alc-proxy.ts` の `alcProxyFetch` は R2 が要る route が同じ `/alc-proxy` 経由で backend を叩き Response を受け取るヘルパ (lockdown 後も OIDC 不要で通る。旧 `identity.ts` の直叩き+resolveIdentityHeaders を置換、#434 caller #2) |
-| **server/api (ichiban/kyuyo proxy)** | `server/api/ichiban/[...path].get.ts` `server/api/kyuyo/[...path].get.ts` `server/utils/ichiban-upstream.ts` | rust-ichibanboshi への thin proxy (CF Access Service Token 付与、#330/#369)。kyuyo 側は upstream パスを `api/kyuyo/` 配下に固定し、ブラウザの `Authorization: Bearer <JWT>` を素通し転送 — 給与の認可は upstream の introspect + email allowlist (rust-ichibanboshi#82) が担う。**#988 で認可が入った (機構は route で違う)**: ichiban は `requireAuth` (上流へ渡す身元をそもそも持たないため)、kyuyo GET/POST は `resolveBrowserAuthorization` が `null` なら 401 (fail closed。認可の正本は上流のまま) |
+| **server/api (ichiban/kyuyo proxy)** | `server/api/ichiban/[...path].get.ts` `server/api/kyuyo/[...path].get.ts` `server/utils/ichiban-upstream.ts` | rust-ichibanboshi への thin proxy (CF Access Service Token 付与、#330/#369)。kyuyo 側は upstream パスを `api/kyuyo/` 配下に固定し、ブラウザの `Authorization: Bearer <JWT>` を素通し転送 — 給与の認可は upstream の introspect + email allowlist (rust-ichibanboshi#82) が担う。**#988 で認可が入った (機構は route で違う)**: ichiban は `requireAuth` (上流へ渡す身元をそもそも持たないため)、kyuyo GET/POST は `resolveBrowserAuthorization` が `null` なら 401 (fail closed。認可の正本は上流のまま)。**#1015 で ichiban は upstream path も固定** — `ICHIBAN_PROXY_ALLOWED_PATHS` の**完全一致 6 件**だけを中継し、外れは 403 (kyuyo の `api/kyuyo/` 前置き固定とは別物。あちらは上流委任なので「外れ」の概念が無い)。**front に `/api/ichiban/**` の呼び出しを足すときは allowlist にも足す** |
 | **server/api (粗利/検証スナップショット)** | `server/api/profit/{snapshot.get,snapshot.post,snapshot.delete,snapshots.get,monthly.get,margin-summary.post}.ts` `server/utils/profit-r2-io.ts` | `PROFIT_R2` への検証スナップショット read/write/list と車輌×月サマリ、**粗利の集計そのものの版管理保存** (Refs #826)。R2 binding が要るので Worker 側 (pure は `app/utils/{profit-r2,margin-r2}.ts`) |
 | **server/api (kyuyo-master)** | `server/api/kyuyo-master/{companies.get,refresh.post,refresh-full.post}.ts` `server/utils/kyuyo-master-db.ts` | D1 `kyuyo_companies` (migration 0005、会社×年度リスト・金額なし) の読み/差分更新 (rust `/api/kyuyo/databases` 高速一覧)/フル更新 (会社名+権限、遅い)。消費者は `/kyuyo-fetch` ページ (#369 PR-B1)。取得済み明細は sessionStorage (タブ限り、別ユーザー検知で purge、pure ロジックは `app/utils/kyuyo-fetch.ts`) |
 | **server/api (Y時間)** | `server/api/y-time-export.post.ts` `y-time-template.{get,put}.ts` | backend GET→R2 テンプレ→ExcelJS xlsx 生成 (R2 が要るので Worker 側)。backend GET は `alcProxyFetch` で /alc-proxy 経由 |
@@ -855,7 +855,12 @@ N:1 が現実に存在する (本番で 5 件、うち社員C 1619 鵜瀬裕一�
 
 - **fetch パスは `/api/ichiban/api/employees`** — proxy の base に `/api` が
   含まれないので**二重に書く**。`/api/ichiban/health` だけは rust 側が root
-  ルートなので例外。列一覧は `/api/ichiban/api/schema/columns?table=社員ﾏｽﾀ`
+  ルートなので例外
+- **列一覧を `/api/ichiban/api/schema/columns?table=…` で見る手順は、もう通らない**
+  (#1015)。この proxy が中継する path は `ICHIBAN_PROXY_ALLOWED_PATHS`
+  (`server/utils/ichiban-upstream.ts`) の**完全一致 6 件**に固定してあり、外れは 403。
+  列の顔ぶれは **`GET /api/ichiban/api/employees` の応答そのもの**を見るか、上流
+  (`ohishi-exp/rust-ichibanboshi`) の該当ハンドラを読む
 - **氏名が一意な行だけ**自動で埋める。同名複数・一番星に無しは画面に一覧表示して
   手入力に回す。**既に社員CD が入っている行は上書きしない**
 - **番号帯で一番星の行を落としてはいけない** — 9000 番台は拠点 (`9101` 佐賀(営)、
