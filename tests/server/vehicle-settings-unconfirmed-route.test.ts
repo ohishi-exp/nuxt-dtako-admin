@@ -152,7 +152,7 @@ describe('GET /api/vehicle-settings/unconfirmed — 陽性対照 (塞いだだ�
       { vehicle_cd: '0900', vehicle_name: '' },
       { vehicle_cd: '1201', vehicle_name: '中型B' },
     ])
-    expect(alcProxyFetchMock).toHaveBeenCalledWith(expect.anything(), { path: '/api/dtako/vehicles' })
+    expect(alcProxyFetchMock).toHaveBeenCalledWith(expect.anything(), { path: '/api/vehicles' })
   })
 
   it('R2 の cursor を辿って全件を「dump 済み」に数える', async () => {

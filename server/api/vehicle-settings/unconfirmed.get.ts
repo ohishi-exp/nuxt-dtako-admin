@@ -3,7 +3,7 @@
  *
  * GET /api/vehicle-settings/unconfirmed
  *
- * 1. backend (rust-alc-api) `/api/dtako/vehicles` を auth-worker `/alc-proxy`
+ * 1. backend (rust-alc-api) `/api/vehicles` を auth-worker `/alc-proxy`
  *    経由でフェッチ → 全車輛マスタ [{ id, tenant_id, vehicle_cd, vehicle_name }, ...]
  * 2. R2 (`DTAKO_R2`) の `vehicle-settings/` prefix を listing して
  *    dump が存在する vehicle_cd 集合を作る
@@ -11,6 +11,23 @@
  *
  * レスポンス: [{ vehicle_cd, vehicle_name }, ...]
  * vehicle_cd でソートされて返る。
+ *
+ * ## path は `/api/dtako/vehicles` ではない (Refs #1033)
+ *
+ * **本番でこの画面は 404 だった** — `/api/dtako/vehicles` は上流に一度も存在しない。
+ * `rust-alc-api` (`5df8b03`) の実体は `crates/alc-dtako/src/dtako_vehicles.rs` の
+ * `route("/vehicles", get(list_vehicles))` が `src/routes/mod.rs` の tenant router に
+ * merge され、`src/main.rs` が `.nest("/api", api_router)` するので **`GET /api/vehicles`**。
+ * **`/api/dtako/**` という形自体は上流に在る** (`/dtako/events`, `/dtako/events/etags`,
+ * `/dtako/tickets*`, `/dtako/y-time-export`)。ただし `dtako/` は router の nest では
+ * なく **各モジュールが route 文字列に直書き**しており (`nest("/api/dtako` は 0 件)、
+ * `alc-dtako` crate の 37 route のうち接頭辞を持つのは上記 4 系統だけ。
+ * `dtako_vehicles` は持たない側なので **`dtako` を足し直さないこと。**
+ *
+ * **⚠ テスト (`tests/server/vehicle-settings-unconfirmed-route.test.ts`) は
+ * `alcProxyFetch` を mock しているので、「この path で呼んだ」ことしか守っていない。
+ * 「この path が上流に在る」は誰も見ていない** — 上流が route を消す/改名しても、
+ * この repo のテストは緑のまま通り、本番だけが 404 になる。
  *
  * ## `requireAuth` を付ける (Refs #988)
  *
@@ -138,7 +155,7 @@ export default defineEventHandler(async (event): Promise<UnconfirmedVehicle[]> =
   // backend フェッチと R2 list を並行。#434 step 3 (方式 B): rust-alc-api を直叩き
   // せず auth-worker `/alc-proxy` に委譲する (OIDC mint は auth-worker、lockdown 対応)。
   const [vehiclesRes, confirmedCds] = await Promise.all([
-    alcProxyFetch(event, { path: '/api/dtako/vehicles' }),
+    alcProxyFetch(event, { path: '/api/vehicles' }),
     listConfirmedVehicleCds(r2),
   ])
 
@@ -146,7 +163,7 @@ export default defineEventHandler(async (event): Promise<UnconfirmedVehicle[]> =
     const text = await vehiclesRes.text().catch(() => '')
     throw createError({
       statusCode: vehiclesRes.status,
-      statusMessage: `backend /api/dtako/vehicles エラー: ${text || vehiclesRes.statusText}`,
+      statusMessage: `backend /api/vehicles エラー: ${text || vehiclesRes.statusText}`,
     })
   }
   const allVehicles = (await vehiclesRes.json()) as DtakoVehicle[]

@@ -54,11 +54,11 @@ describe('alcProxyFetch (#434 step 3 方式 B, service binding 委譲)', () => {
       INTERNAL_SHARED_SECRET: 'sek',
       AUTH_WORKER: { fetch: b.fetch },
     })
-    const res = await alcProxyFetch(event as never, { path: '/api/dtako/vehicles' })
+    const res = await alcProxyFetch(event as never, { path: '/api/vehicles' })
     expect(res.status).toBe(200)
     const { url, options } = b.calls()
     // service binding は host を無視するが path が /alc-proxy/... である必要がある
-    expect(url).toBe('https://alc-proxy.internal/alc-proxy/api/dtako/vehicles')
+    expect(url).toBe('https://alc-proxy.internal/alc-proxy/api/vehicles')
     expect(options.method).toBe('GET')
     const h = options.headers as Record<string, string>
     expect(h['X-Alc-Proxy-Secret']).toBe('sek')
@@ -87,7 +87,7 @@ describe('alcProxyFetch (#434 step 3 方式 B, service binding 委譲)', () => {
     h3State.headers = { authorization: 'Bearer jwt-from-header' }
     const b = bindingFetch()
     const event = eventWith({ INTERNAL_SHARED_SECRET: 'sek', AUTH_WORKER: { fetch: b.fetch } })
-    await alcProxyFetch(event as never, { path: '/api/dtako/vehicles' })
+    await alcProxyFetch(event as never, { path: '/api/vehicles' })
     const h = b.calls().options.headers as Record<string, string>
     expect(h['Authorization']).toBe('Bearer jwt-from-header')
   })
@@ -95,7 +95,7 @@ describe('alcProxyFetch (#434 step 3 方式 B, service binding 委譲)', () => {
   it('token が無ければ Authorization ヘッダーを付けない (auth-worker が 401 を返す)', async () => {
     const b = bindingFetch()
     const event = eventWith({ INTERNAL_SHARED_SECRET: 'sek', AUTH_WORKER: { fetch: b.fetch } })
-    await alcProxyFetch(event as never, { path: '/api/dtako/vehicles' })
+    await alcProxyFetch(event as never, { path: '/api/vehicles' })
     const h = b.calls().options.headers as Record<string, string>
     expect(h['Authorization']).toBeUndefined()
   })
@@ -108,9 +108,9 @@ describe('alcProxyFetch (#434 step 3 方式 B, service binding 委譲)', () => {
       INTERNAL_SHARED_SECRET: 'sek',
       NUXT_PUBLIC_AUTH_WORKER_URL: 'https://auth-staging.ippoan.org',
     })
-    await alcProxyFetch(event as never, { path: '/api/dtako/vehicles' })
+    await alcProxyFetch(event as never, { path: '/api/vehicles' })
     const [url] = globalFetch.mock.calls[0]! as [string, RequestInit]
-    expect(url).toBe('https://auth-staging.ippoan.org/alc-proxy/api/dtako/vehicles')
+    expect(url).toBe('https://auth-staging.ippoan.org/alc-proxy/api/vehicles')
   })
 
   it('INTERNAL_SHARED_SECRET が Secrets Store binding (.get()) でも解決する', async () => {
@@ -120,14 +120,14 @@ describe('alcProxyFetch (#434 step 3 方式 B, service binding 委譲)', () => {
       INTERNAL_SHARED_SECRET: { get: async () => 'from-store' },
       AUTH_WORKER: { fetch: b.fetch },
     })
-    await alcProxyFetch(event as never, { path: '/api/dtako/vehicles' })
+    await alcProxyFetch(event as never, { path: '/api/vehicles' })
     const h = b.calls().options.headers as Record<string, string>
     expect(h['X-Alc-Proxy-Secret']).toBe('from-store')
   })
 
   it('INTERNAL_SHARED_SECRET 未設定なら 503 を throw する', async () => {
     const event = eventWith({ AUTH_WORKER: { fetch: vi.fn() } })
-    await expect(alcProxyFetch(event as never, { path: '/api/dtako/vehicles' })).rejects.toMatchObject(
+    await expect(alcProxyFetch(event as never, { path: '/api/vehicles' })).rejects.toMatchObject(
       { statusCode: 503 },
     )
   })
