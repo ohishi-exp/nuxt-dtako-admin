@@ -15,6 +15,32 @@ import { useRoute } from 'vue-router'
 import VehicleSettingsDisplay from '~/components/VehicleSettingsDisplay.vue'
 import type { VehicleSettings } from '~/utils/vehicle-settings-cfg'
 import { currentAccessToken } from '~/utils/api'
+import { describeResponseFailure } from '~/utils/api-error'
+
+/**
+ * この画面の「やり直し方」。**句点を付けない** (`describeResponseFailure` が文に組む)。
+ *
+ * ★ **3 つとも別物にしてある** (Refs #1005)。3 つのうち 2 つは同じ route
+ * (`/api/vehicle-settings/history`) を叩くが、**画面の「次の一手」は違う** —
+ * 上の集計はボタンが無く、下の履歴はボタンがある。**まとめない。**
+ */
+
+/** 下部「登録済み車輛一覧」の集計。**この画面に再取得ボタンは 1 つも無い**
+ * (`loadSummary` は `onMounted` からしか呼ばれない) ので、**無いボタンの名前で
+ * 案内しない** — ページの再読み込みで案内する。 */
+const RETRY_SUMMARY = 'ページを再読み込みしてください'
+
+/** 履歴の取得。**ボタンの表記そのまま** (`<span v-else>履歴を取得</span>`)。
+ * `vehicle_cd` は自由入力なので **400 (`vehicle_cd は英数 / _ / - のみ`) が実際に来る**
+ * — 「上の理由のとおりに直してから」の続きが、そのまま入力を直して押し直す動線になる。 */
+const RETRY_HISTORY = 'もう一度「履歴を取得」を押してください'
+
+/** dump 実体の取得。**行クリックで開くのでボタンは無い。**
+ * この口だけ **404 (`object not found: <key>`) が来る** — 一覧を出した後に R2 から
+ * 消えた形なので、**行を押し直す前に一覧を取り直す**のが正しい動線。
+ * `describeResponseFailure` は 404 を「その他 4xx」として扱う (`nextStepForStatus` に
+ * 404 の枝は無い) ので、**やり直し方の側で正しい手順を出しきる**。 */
+const RETRY_DETAIL = '「履歴を取得」で一覧を取り直し、行をクリックし直してください'
 
 interface VehicleSummary {
   vehicle_cd: string
@@ -65,7 +91,15 @@ async function loadSummary() {
     const res = await fetch('/api/vehicle-settings/history', {
       headers: token ? { authorization: `Bearer ${token}` } : {},
     })
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+    if (!res.ok) {
+      // **reason phrase に落とさない** (Refs #1005 / #996 / #890)。`res.statusText` は
+      // **本番 (workerd) では空**なので、画面に出ていたのは `HTTP 503: ` だけだった
+      // (dev の node は埋めるので**再現しない**)。理由は本文
+      // (`{ error: true, statusCode, statusMessage, message }`) に無傷で残っている。
+      // この口が投げるのは 401 (`requireAuth`) と 503 (`INTERNAL_SHARED_SECRET` /
+      // `DTAKO_R2` binding 未設定) — **引数無しの集計なので 400 は来ない**。
+      throw new Error(`登録済み車輛一覧の取得に失敗しました: ${await describeResponseFailure(res, RETRY_SUMMARY)}`)
+    }
     summary.value = (await res.json()) as VehicleSummary[]
   } catch (e) {
     summaryError.value = e instanceof Error ? e.message : String(e)
@@ -88,7 +122,12 @@ async function loadHistory(cd: string) {
     const res = await fetch(`/api/vehicle-settings/history?vehicle_cd=${encodeURIComponent(cd)}`, {
       headers: token ? { authorization: `Bearer ${token}` } : {},
     })
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+    if (!res.ok) {
+      // Refs #1005 — 上と同じ理由で本文を読む。**status の顔ぶれは上と違う**:
+      // `vehicle_cd` を付ける側は 400 (`vehicle_cd は英数 / _ / - のみ`) を投げる
+      // (`history.get.ts` の正規表現)。入力欄が自由入力なので**実際に来る**。
+      throw new Error(`履歴の取得に失敗しました: ${await describeResponseFailure(res, RETRY_HISTORY)}`)
+    }
     items.value = (await res.json()) as HistoryItem[]
   } catch (e) {
     itemsError.value = e instanceof Error ? e.message : String(e)
@@ -108,7 +147,12 @@ async function loadDetail(key: string) {
     const res = await fetch(`/api/vehicle-settings/object?key=${encodeURIComponent(key)}`, {
       headers: token ? { authorization: `Bearer ${token}` } : {},
     })
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+    if (!res.ok) {
+      // Refs #1005 — 叩く先が別 route (`object.get.ts`) なので **404 が増える**
+      // (`object not found: <key>`)。key は一覧から来るので 400 (key 形式) は事実上
+      // 来ないが、**一覧を出した後に R2 から消えると 404 になる**。
+      throw new Error(`dump JSON の取得に失敗しました: ${await describeResponseFailure(res, RETRY_DETAIL)}`)
+    }
     detail.value = (await res.json()) as VehicleSettings
   } catch (e) {
     detailError.value = e instanceof Error ? e.message : String(e)

@@ -18,6 +18,25 @@
 import { computed, ref, watch } from 'vue'
 import type { VehicleSettings } from '~/utils/vehicle-settings-cfg'
 import { currentAccessToken } from '~/utils/api'
+import { describeResponseFailure } from '~/utils/api-error'
+
+/**
+ * この picker の「やり直し方」。**句点を付けない** (`describeResponseFailure` が文に組む)。
+ *
+ * ★ **ボタンの表記は `history.vue` と違う** (Refs #1005)。同じ 2 本の route を叩き、
+ * `/vehicle-settings/history` と見た目もほぼ同じだが、**こちらのボタンは「履歴取得」**
+ * (`<span v-else>履歴取得</span>` — 「を」が無い)。**画面に無い語で案内すると探させる**
+ * ので、文字列を共有せずこちらの表記で書く。
+ */
+
+/** 履歴一覧の取得。`vehicle_cd` は自由入力 (datalist はあくまでサジェスト) なので
+ * **400 (`vehicle_cd は英数 / _ / - のみ`) が実際に来る**。 */
+const RETRY_HISTORY = 'もう一度「履歴取得」を押してください'
+
+/** dump 実体の取得。**行クリック (または 1 件のときの自動選択) で走るのでボタンは無い。**
+ * この口だけ **404 (`object not found: <key>`) が来る** — 一覧を出した後に R2 から
+ * 消えた形なので、**行を押し直す前に一覧を取り直す**のが正しい動線。 */
+const RETRY_DETAIL = '「履歴取得」で一覧を取り直し、行をクリックし直してください'
 
 interface HistoryItem {
   key: string
@@ -77,7 +96,14 @@ async function loadHistory() {
     const res = await fetch(`/api/vehicle-settings/history?vehicle_cd=${encodeURIComponent(cd)}`, {
       headers: token ? { authorization: `Bearer ${token}` } : {},
     })
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+    if (!res.ok) {
+      // **reason phrase に落とさない** (Refs #1005 / #996 / #890)。`res.statusText` は
+      // **本番 (workerd) では空**なので、画面に出ていたのは `HTTP 401: ` だけだった
+      // (dev の node は埋めるので**再現しない**)。理由は本文
+      // (`{ error: true, statusCode, statusMessage, message }`) に無傷で残っている。
+      // この口は 401 (`requireAuth`) / 400 (`vehicle_cd` の形) / 503 (binding 未設定)。
+      throw new Error(`履歴の取得に失敗しました: ${await describeResponseFailure(res, RETRY_HISTORY)}`)
+    }
     items.value = (await res.json()) as HistoryItem[]
     // dump が 1 件しかなければ自動選択 (UX: 余分なクリックを省く)
     if (items.value.length === 1) {
@@ -101,7 +127,12 @@ async function selectDump(item: HistoryItem) {
     const res = await fetch(`/api/vehicle-settings/object?key=${encodeURIComponent(item.key)}`, {
       headers: token ? { authorization: `Bearer ${token}` } : {},
     })
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+    if (!res.ok) {
+      // Refs #1005 — 叩く先が別 route (`object.get.ts`) なので **404 が増える**
+      // (`object not found: <key>`)。**やり直し方も上とは別**で、押し直すべきは
+      // 行ではなく一覧の取り直し。
+      throw new Error(`dump JSON の取得に失敗しました: ${await describeResponseFailure(res, RETRY_DETAIL)}`)
+    }
     const settings = (await res.json()) as VehicleSettings
     emit('selected', { key: item.key, settings })
   } catch (e) {
