@@ -32,11 +32,36 @@
  * docker-compose.test.yml up` (`ghcr.io/ippoan/rust-alc-api:dev`
  * `sha256:8a09890…`、image created 2026-08-25T09:07:41Z) を起こして curl した実測:
  *
- *     GET  /api/health              -> 200
- *     GET  /api/vehicles            -> 401   (在る)
- *     GET  /api/dtako/y-time-export -> 401   (在る。GET でも 405 ではなく 401)
- *     GET  /api/dtako/vehicles      -> 404   (#1033 で壊れていた値)
- *     GET  /api/__nonexistent…__    -> 404
+ *     GET  /api/health                -> 200
+ *     GET  /api/vehicles              -> 401   (在る)
+ *     GET  /api/dtako/y-time-export   -> 401   (在る。GET でも 405 ではなく 401)
+ *     GET  /api/internal/operations   -> 401   (在る。ただし下記の env が要る)
+ *     GET  /api/dtako/vehicles        -> 404   (#1033 で壊れていた値)
+ *     GET  /api/__nonexistent…__      -> 404
+ *
+ * ## `/api/internal/operations` には compose の env が要る
+ *
+ * 上流の `internal_shared_secret_router` は env `INTERNAL_SHARED_SECRET` が空だと
+ * **empty Router** になり、この route が丸ごと生えない
+ * (`rust-alc-api@5df8b03` `src/routes/mod.rs:258` / `src/main.rs:525`。route 定義
+ * 自体は `crates/alc-dtako/src/dtako_operations.rs:35`)。
+ * `docker-compose.test.yml` はこれを設定していなかったので **404 だった** —
+ * 「上流から消えた」ではない。同 PR で compose に dummy 値を 1 行足して解消済みで、
+ * **足す前 404 → 足した後 401** を実測している。
+ *
+ * 切り分けに使った陽性対照: 無条件 mount の別 router
+ * (`/api/internal/auth/sso-config` / `/api/internal/notify/line/webhook` /
+ * `/api/internal/pending`) は env 無しでも **401** を返す。つまり
+ * 「`/api/internal` 名前空間ごと無い」のではなく **secret gate の route だけ**が
+ * 無かった。**接頭辞で判定せず、上流のどの router に merge されているかを読むこと。**
+ *
+ * ## ★ ログは `console.*` ではなく `process.stdout.write` で出す
+ *
+ * **実測**: vitest の既定 reporter (= `npm test` = CI と同条件) は
+ * **`console.info` / `console.log` を 1 行も出さない**。`--reporter=verbose` で
+ * しか見えないので、`console` で書くと ④ の「CI ログで実際に走ったか読める」が
+ * 成立しない。`process.stdout.write` / `process.stderr.write` は既定 reporter でも
+ * **skip した test からでも**出る (使い捨て probe で 6 出口を比較して確認)。
  *
  * ## ★ 既存の `callApi` ヘルパを使ってはいけない
  *
@@ -86,34 +111,22 @@ const UPSTREAM_PATHS: UpstreamPathEntry[] = [
   {
     path: '/api/internal/operations',
     caller: 'server/api/tariff/dtako-operations.get.ts',
-    liveProbe: false,
-    // 上流を実読して確定した理由 (憶測ではない)。`rust-alc-api@5df8b03`:
-    //   - `src/routes/mod.rs:258` — `dtako_operations::internal_router()` は
-    //     `internal_shared_secret_router(internal_secret)` の中にあり、
-    //     `Some(secret) if !secret.is_empty()` のときだけ merge される。
-    //     未設定なら `_ =>` 分岐で **empty Router**。
-    //   - `src/main.rs:525` — その値は env `INTERNAL_SHARED_SECRET` から読む。
-    //   - `docker-compose.test.yml` の `api` service はこれを設定していない。
-    // ⇒ この構成では route ごと生えないので 404 になり、「上流から消えた」と
-    //    区別できない。**path 自体は上流に実在する**
-    //    (`crates/alc-dtako/src/dtako_operations.rs:35`
-    //     `route("/internal/operations", get(list_operations))`)。
-    // 陽性対照: 無条件 mount の別 router (`/api/internal/auth/sso-config` /
-    //    `/api/internal/notify/line/webhook` / `/api/internal/pending`) は 401 を
-    //    返すので、「`/api/internal` 名前空間ごと無い」のではなく **secret gate の
-    //    3 route だけ**が無い。
-    // 測れるようにするには `docker-compose.test.yml` の `api` service に
-    // `INTERNAL_SHARED_SECRET` を 1 行足すだけだが、compose は #1035 の担当範囲外
-    // (CI の形を変えるのは親とオーナーの判断)。許可が出たら `liveProbe: true` に
-    // して `reason` を消せば済む。
-    reason:
-      'docker-compose.test.yml が INTERNAL_SHARED_SECRET を設定しておらず、'
-      + '上流 (rust-alc-api@5df8b03 src/routes/mod.rs:258 / src/main.rs:525) が '
-      + 'internal_shared_secret_router を empty Router にするため、この構成では '
-      + 'route ごと mount されず 404 になる (path 自体は上流に実在: '
-      + 'crates/alc-dtako/src/dtako_operations.rs:35)。Refs #1035',
+    // `docker-compose.test.yml` に `INTERNAL_SHARED_SECRET` を足すまでは 404 で、
+    // 「上流から消えた」と区別できなかった (経緯は冒頭の docstring)。
+    // env を足して 401 になったので live で測れる。
+    liveProbe: true,
   },
 ]
+
+/**
+ * live 実測から外れている path の件数。**現在 0 件**。
+ *
+ * ここを固定しておくと、次に誰かが `liveProbe: false` を黙って足したときに落ちる。
+ * 外すのが正当なら**この数と `reason` を一緒に**直すことになるので、除外が
+ * 「気づかれないまま増える」ことがなくなる (この repo が何度も踏んでいる
+ * 「緑だが検証ゼロ」の穴を、件数側からも塞ぐ)。
+ */
+const EXPECTED_EXCLUDED_FROM_LIVE = 0
 
 // ---------------------------------------------------------------------------
 // ② server/ を走査して実装側の path: リテラルを抜く
@@ -198,6 +211,17 @@ function scanAnyPathLiterals(): FoundPath[] {
 
 const sorted = (xs: string[]) => [...xs].sort()
 
+/**
+ * CI ログに 1 行出す。
+ *
+ * **`console.info` を使わないこと** — vitest の既定 reporter (= `npm test` =
+ * CI と同条件) は console 出力を 1 行も表示しない (`--reporter=verbose` 専用)。
+ * `process.stdout.write` なら既定 reporter でも、skip する test からでも出る。
+ */
+function logLine(msg: string): void {
+  process.stdout.write(`[upstream-path-liveness] ${msg}\n`)
+}
+
 // ---------------------------------------------------------------------------
 
 describe('上流 path の実在検証 (Refs #1035 #1033)', () => {
@@ -250,6 +274,17 @@ describe('上流 path の実在検証 (Refs #1035 #1033)', () => {
       // 全部が liveProbe: false になると ③ が丸ごと空回りする。
       expect(UPSTREAM_PATHS.filter(e => e.liveProbe).length).toBeGreaterThan(0)
     })
+
+    it('④ 穴塞ぎ: live 実測から外れている path の件数が想定どおり (陰性対照)', () => {
+      const excluded = UPSTREAM_PATHS.filter(e => !e.liveProbe)
+      expect(
+        excluded.length,
+        `live 実測から外れている path が ${EXPECTED_EXCLUDED_FROM_LIVE} 件のはずが `
+        + `${excluded.length} 件 (${excluded.map(e => e.path).join(', ')})。`
+        + '除外を足す/減らすなら EXPECTED_EXCLUDED_FROM_LIVE も一緒に直すこと。'
+        + '黙って除外が増えると「緑だが上流を測っていない」に戻る。',
+      ).toBe(EXPECTED_EXCLUDED_FROM_LIVE)
+    })
   })
 
   // -------------------------------------------------------------------------
@@ -264,8 +299,8 @@ describe('上流 path の実在検証 (Refs #1035 #1033)', () => {
     /** live でなければ理由を CI ログに出してから skip する。 */
     function skipUnlessLive(ctx: { skip: () => void }, what: string): boolean {
       if (isLive) return true
-      console.info(
-        `[upstream-path-liveness] SKIP ${what} — API_BASE_URL 未設定のため live で測っていない。`
+      logLine(
+        `SKIP ${what} — API_BASE_URL 未設定のため live で測っていない。`
         + 'CI (has_integration: true) では docker-compose.test.yml の '
         + 'ghcr.io/ippoan/rust-alc-api が localhost:18080 に居るので実行される。',
       )
@@ -281,9 +316,7 @@ describe('上流 path の実在検証 (Refs #1035 #1033)', () => {
     for (const entry of UPSTREAM_PATHS) {
       if (!entry.liveProbe) {
         it(`${entry.path} — 測っていない (理由あり)`, (ctx) => {
-          console.info(
-            `[upstream-path-liveness] SKIP ${entry.path} — ${entry.reason}`,
-          )
+          logLine(`SKIP ${entry.path} — ${entry.reason}`)
           ctx.skip()
         })
         continue
@@ -292,7 +325,7 @@ describe('上流 path の実在検証 (Refs #1035 #1033)', () => {
       it(`${entry.path} は上流に在る`, async (ctx) => {
         if (!skipUnlessLive(ctx, entry.path)) return
         const status = await statusOf(entry.path)
-        console.info(`[upstream-path-liveness] LIVE GET ${API_BASE}${entry.path} -> ${status}`)
+        logLine(`LIVE GET ${API_BASE}${entry.path} -> ${status}`)
         expect(
           status,
           `GET ${entry.path} が 404。上流 ippoan/rust-alc-api から path が消えた/`
@@ -310,7 +343,7 @@ describe('上流 path の実在検証 (Refs #1035 #1033)', () => {
       // (例: 認証層が routing より先に走って全部 401 を返す構成に変わった、等)。
       const bogus = '/api/__upstream-path-liveness-negative-control__'
       const status = await statusOf(bogus)
-      console.info(`[upstream-path-liveness] LIVE GET ${API_BASE}${bogus} -> ${status} (陰性対照)`)
+      logLine(`LIVE GET ${API_BASE}${bogus} -> ${status} (陰性対照)`)
       expect(
         status,
         '実在しない path が 404 を返さない。上流の routing/認証の順序が変わって、'
