@@ -73,6 +73,11 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:test@test-db:5432/postgres?options=-c search_path=alc_api
       JWT_SECRET: test-jwt-secret-for-integration
+      # 上流の `internal_shared_secret_router` は env が空だと empty Router になり、
+      # `/api/internal/operations` 等の secret gate 付き route が丸ごと生えない (= 404)。
+      # 設定しないと `server/api/tariff/dtako-operations.get.ts` が叩く上流 path を
+      # live で検証できない (`tests/server/upstream-path-liveness.test.ts`、Refs #1035)。
+      INTERNAL_SHARED_SECRET: dummy-internal-shared-secret-for-integration
       GOOGLE_CLIENT_ID: dummy-google-client-id
       GOOGLE_CLIENT_SECRET: dummy-google-client-secret
       OAUTH_STATE_SECRET: dummy-oauth-state-secret
