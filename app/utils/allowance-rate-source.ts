@@ -238,6 +238,10 @@ export type MarginCacheRateMatch = 'match' | 'mismatch' | 'unknown'
  * この 2 つを 1 文に束ねると、**版を刻んであるのに「記録されていません」と言う**回が
  * 出る (集計時は R2 に `latest.json` があり、その後 R2 から消えると `seed` になる。
  * `run()` は `seed` でも保存するので実在する)。
+ *
+ * **この repo の既存の作法**: `KintaiCandidateDiffResult` (`kintai-candidate-diff.ts`) が
+ * 同じ形 —「一致」「不一致」と、**種類の違う「判定できない」を別 kind に分ける**
+ * union。**共通化はしない** (中身が全部ドメイン固有で、括り出せるのは kind の名前だけ)。
  */
 type CacheRateVerdict =
   /** (a) 版も出どころも刻まれていない = **このPR より前に保存された**キャッシュ。 */
