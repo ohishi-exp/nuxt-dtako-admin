@@ -22,14 +22,43 @@
  * **0 行も `error` にする。** 空のマスタは全便を `unknown` にするので、画面には
  * 「手当 ¥0」として出てしまう。「読めなかった」と「1 円も出ない」は別の話。
  *
- * ## 行の検証を relay と 2 か所に持っている理由
+ * ## 行の検証は **3 か所**にある。「両方直す」ではもう足りない
  *
  * relay 側の `normalizeAllowanceRateMaster` (`workers/dtako-scraper-relay/src/
  * restraint-wage.ts`) と規則は同じだが、**`app/` から `workers/` は import
- * できない** (別ビルド・別 tsconfig) ので写しになっている。規則を変えるときは
- * 両方直す。ここで落ちるのは relay を通っていない応答 (経路の取り違え・
- * 中間のプロキシが別物を返した) だけのはずで、**落ちたら黙って初期値に倒さず
- * `error` にする**のがこのファイルの仕事。
+ * できない** (別ビルド・別 tsconfig) ので写しになっている。**#805 PR-3 で
+ * 書き込み側 (3 つ目) が増えた:**
+ *
+ * | 場所 | 関数 | 列の持ち方 |
+ * |---|---|---|
+ * | relay | `normalizeAllowanceRateMaster` | `ALLOWANCE_RATE_TEXT_FIELDS` の列挙 |
+ * | front (読み) | `parseRateRow` (下) | `TEXT_FIELDS` (下) の列挙 |
+ * | front (書き) | `parseAllowanceRateDraft` (`allowance-rate-editor.ts`) | 列挙を持たず `AllowanceRateDraftRow` の型が列 |
+ *
+ * **列は将来足される前提** (設計 U3 — 他の営業所ぶんが出たら袋を分けるのではなく
+ * 行に列を足す)。だから「規則を変えるときは両方直す」では足りない。**3 か所直す。**
+ *
+ * ## tsc がどこを守り、どこを守らないか (`RateRow` に 1 列足して実測、Refs #1017 ④)
+ *
+ * - **relay が列を足しただけでは front は 1 件も型エラーにならない。** `RateRow`
+ *   (app) と `AllowanceRateRow` (relay) は別宣言で、front は relay の型を 1 つも
+ *   import していない — **型は build 境界を越えない**。この段階では
+ *   **front 3 系統とも新しい列を黙って落とす**
+ * - **`RateRow` に列を足すと** tsc が止めるのは **2 か所だけ** —
+ *   `parseRateRow` の return リテラルと `parseAllowanceRateDraft` の
+ *   `rows.push({...})`。`toAllowanceRateDraft` は `RateRow` を**読む**向きなので
+ *   余分なプロパティで型エラーにならず、**落ちない**
+ * - **`TEXT_FIELDS` と `ALLOWANCE_RATE_TEXT_FIELDS` の 2 つの列挙は、最後まで誰にも
+ *   強制されない。** 型に列を足して構築側へ cast を 1 行書けば typecheck は通り、
+ *   **その列だけ実行時の型検証を素通りする** — 列が落ちるより静かな壊れ方
+ *
+ * ⇒ **tsc が守るのは「行の組み立て」で、「検証の列挙」ではない。**
+ * 「列挙を持つ側が危なくて型の側は安全」ではないので、**列を足すときは tsc に
+ * 教わる前に上の表の 3 か所を先に見る。**
+ *
+ * ここで落ちるのは relay を通っていない応答 (経路の取り違え・中間のプロキシが
+ * 別物を返した) だけのはずで、**落ちたら黙って初期値に倒さず `error` にする**
+ * のがこのファイルの仕事。
  */
 import { RATE_MASTER, type RateRow } from './allowance-rate-master'
 
