@@ -9,10 +9,11 @@
  * 1. `routePlace` を `./route-place` (双子) から取る
  * 2. 入力型を `margin.ts` / `allowance-idle.ts` の部分型として書けないので、
  *    **同じ形の interface をこのファイルで宣言**する
- * 3. `KUSHIRO_LOADERS` は app 側が `RATE_MASTER` (画面側の生成物) から導出している。
- *    worker からマスタを読めないので**結果を literal で持ち**、共有 golden
+ * 3. `KUSHIRO_LOADERS` は app 側が `RATE_MASTER` から導出しているが、こちらは
+ *    **結果を literal で持つ**。共有 golden
  *    (`tests/fixtures/kushiro-loading/golden/doto-2026-07.json` の `kushiroLoaders`)
- *    で両側を突き合わせる — マスタが動けば両側とも落ちる
+ *    で両側を突き合わせる。**理由は「読めない」ではない** — 定数の宣言のところに
+ *    書いてある
  *
  * **経路ごとに符号が反転する。** 標茶・別海 (道東) で降ろす運行は釧路の方が近く、
  * 上士幌・帯広川西・士幌 (十勝) で降ろす運行は帰庫が遠くなる。合計だけ見ると反転が
@@ -45,8 +46,42 @@ export const KUSHIRO_ORIGIN = "釧路";
 /**
  * 釧路積みの業者 (`RATE_MASTER` の `origin === '釧路'` の `loader`、初出順)。
  *
- * **判定には使わない** (判定は `isKushiroOrigin`)。app 側はマスタから導出しているが、
- * worker はマスタを読めないので literal。**共有 golden で app 側の導出結果と突き合わせる。**
+ * **判定には使わない** (判定は `isKushiroOrigin`)。**src からの参照は 0 件** —
+ * この定数を読むのは両側の test だけで、実データの積地の住所がこの業者たちの
+ * 倉庫であることを言うための資料として置いてある。
+ *
+ * ## 「worker はマスタを読めないので literal」ではない (Refs #805 PR-4)
+ *
+ * **読める。** この worker は `DTAKO_R2` (`dtako-uploads`) を binding していて、
+ * `SCRAPER_RELAY` の service binding も持つ。実際 `mcp/tools.ts` の
+ * `get_wage_report` は `wageMasterR2Paths(...).latest` で R2 のマスタを読んでいる。
+ * 運行手当マスタも `{prefix}/{compId}/allowance-rate/latest.json` に居る。
+ *
+ * **読めるが、あえて読んでいない。** 理由は 3 つ:
+ *
+ * 1. **src の消費者が 0 なので、R2 に切り替えても判定も金額も 1 件/1 円も動かない**
+ * 2. R2 を読むと「空」「壊れている」の分岐が増える。`get_wage_report` の前例は
+ *    `fallback` に**黙って倒す**形で、これは #805 が防ごうとしている形そのもの。
+ *    **得が無いのに新しい失敗経路だけ足すことになる**
+ * 3. これは module 直下の同期 `const`。R2 は非同期なので切り替えると Promise 化し、
+ *    **app 側と同じ形でなくなる** = 双子の「ロジックを 1 行も変えない」が崩れる
+ *
+ * ## app 側の「マスタから導出」も、いまや R2 由来ではない
+ *
+ * #805 PR-2 以降 `app/utils/allowance-rate-master.ts` は **seed (同梱の初期値)** で、
+ * マスタの正は R2。app 側もその seed から導出しているので、**両側とも「同じ seed
+ * 由来の compile-time 定数」**で、残る差は書き方だけ。
+ *
+ * ## 突き合わせは効くが、**同時には落ちない**
+ *
+ * golden は commit 済みのファイルなので、`RATE_MASTER` が動いたときは
+ * ① app 側の golden 突合が落ちる → ② golden を再生成する → ③ **そこで初めて**
+ * `test/kushiro-doto-rebuild.test.ts` の `KUSHIRO_LOADERS` vs `golden.kushiroLoaders`
+ * が落ちる、の **2 段**になる。「マスタが動けば両側とも落ちる」ではない。
+ *
+ * なお `src/r2/keys.ts` の `WageMasterName` には relay 側にある `"allowance-rate"`
+ * が入っていない (drift)。この定数の話とは別件で、**検出する仕組みが無いこと**
+ * ごと Refs #1022。
  */
 export const KUSHIRO_LOADERS: readonly string[] = ["中部飼料", "釧路飼料", "道東飼料", "中部飼料(株)"];
 
