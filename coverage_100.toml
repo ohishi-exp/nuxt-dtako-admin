@@ -377,30 +377,53 @@ branches = true
 path = "app/utils/wage-range-view.ts"
 branches = true
 
-# `$fetch` のエラーから人が読める理由を作る 1 関数だけのファイル (Refs #890)。
+# `$fetch` / 生 `fetch` のエラーから人が読める 1 文を作るファイル (Refs #890 / #900 / #996)。
 # 元は `wage-range-view.ts` にあった `describeApiError` を、賃金以外 (粗利タブ等) から
 # 呼べるように切り出した。本文の拾い方を `??` から「文字列である最初の 1 つ」に直して
 # ある (Nitro の本文は `error` が真偽値で、`??` だとそこで止まる。dev で実測)。
-# **branches も 100%** — 実測 (Stmts/Branch/Funcs/Lines すべて 100) してから登録した。
-# BR() の instrumented コピーで数えた分岐は **13 site 中 12 が両側**。残る 1 つは
-# `|| String(e)` の**右辺** — `||` 連鎖の最終項なので**真偽で経路が分かれず**、
-# v8 も分岐に数えない (埋めようとすると通らないテストを書くことになる)。
+# #996 で `describeResponseFailure` (生 `fetch` の `Response` → 理由 + 次の一手) と
+# その下請け `responseReason` / `hasStringReason` / `nextStepForStatus` が同居した。
 #
-# **#996 で `describeResponseFailure` (生 `fetch` の `Response` → 理由 + 次の一手) を
-# 足したので分岐が動いた。**指標名を必ず添える (数字だけ残すと別の指標と取り違える):
+# ## 分岐の実測 — **指標名と対象を必ず添える** (Refs #1009)
 #
-# | 指標 (v8) | 基準 = `origin/main` a05bd08 | #996 後 |
+# 数字だけ残すと腐る。前の注記の「13 site 中 12」は **#898 時点の
+# `describeApiError` 1 関数だけ**の BR() 値で、その後 #963 が 5 site
+# (`!fallback && err.statusCode` の 3 / `err.message ?? ''` / `if (synthetic)`)、
+# #996 が 3 関数 10 site を足した後の**ファイル全体を指していなかった** (13+5=18)。
+# 下は **`origin/main` a028078 のファイル全体**を 2026-08-28 に測り直した値。
+#
+# | 指標 | 対象 | 値 (a028078 / 2026-08-28 実測) |
 # | --- | --- | --- |
-# | statements | 18 / 18 | **43 / 43** |
-# | branch site | 12 | **21** |
-# | branch arm | 25 / 25 | **43 / 43** |
+# | v8 statements | ファイル全体 | 43 / 43 |
+# | v8 branch site | ファイル全体 | 21 |
+# | v8 branch arm | ファイル全体 | 43 / 43 (**死に分岐 0**) |
+# | v8 funcs | ファイル全体 | 8 / 8 |
+# | **BR() branch site** | **ファイル全体** | **28 — 両側 27 / 片側のみ 1 / 未到達 0** |
+# | BR() branch site | `describeApiError` | 18 — 両側 17 |
+# | BR() branch site | `responseReason` | 2 — 両側 2 |
+# | BR() branch site | `hasStringReason` | 4 — 両側 4 |
+# | BR() branch site | `nextStepForStatus` | 4 — 両側 4 |
 #
-# 増えた 9 site の内訳は `responseReason` の 3 (`text === ''` / `hasStringReason` の
-# 三項 / `catch`)、`hasStringReason` の 3 (`typeof === 'string'` / `typeof !== 'object'
-# || data === null` の if と binary-expr)、`nextStepForStatus` の 4 つの `if`
-# — 死に分岐 0 件 (401 / 403 / 413 / 5xx / その他 4xx を**両側から**固定してある)。
-# **BR() の instrumented コピーは #996 では測っていない** (計測器がこの worktree に
-# 無い)。上の 3 指標は v8 の `coverage-final.json` を直接数えた値。
+# BR() が v8 より多い (28 > 21) のは、`&&` / `||` を**左右の項に分けて**数えるため
+# (v8 は 1 site に畳む)。**v8 の branches 100% は短絡で片側を見逃す**ので、
+# 「v8 が緑だから両側」とは読まないこと。
+#
+# 両側でない 1 site は `detail = fallback || err.message || String(e)` の
+# **`String(e)` (最終項)**。`||` 連鎖の最終項は**真偽で経路が分かれない** (式の値は
+# 真偽によらず `String(e)`) ので、死に分岐ではなく**計測の粒度**の問題。
+# **構造上あり得ないわけでもない** — `describeApiError('')` を直接当てると
+# `[false]` 側が出る (実測)。埋めても画面の挙動は 1 文字も変わらないので埋めていない。
+#
+# **BR() の instrumented コピーは #996 では当てていない。**計測器は repo の外
+# (clone と同じ階層の `_shared/br-tooling/{br.ts,instrument.mjs}`) に**在る**が、
+# #996 の作業では使わず v8 の `coverage-final.json` だけを数えた — **道具が無くて
+# 測れなかったのではない**。#1009 で当て直したのが上の表。
+#
+# **計測が効いていることの陰性対照** (#1009 で実測): 413 を撃つテスト 2 本
+# (`tests/utils/api-error.test.ts` と `tests/components/vehicle-settings-error-text.test.ts`)
+# を**両方** `it.skip` にすると 両側 **27 → 26** (`nextStepForStatus` 4/4 → 3/4、
+# `status === 413` が `[false]` だけになる)。**片方だけ外しても 27 のまま動かない** —
+# どちらか 1 本を「唯一の担保」と思わないこと。
 [[files]]
 path = "app/utils/api-error.ts"
 branches = true
