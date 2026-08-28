@@ -33,7 +33,7 @@ import {
   type VehicleSettings,
 } from '~/utils/vehicle-settings-cfg'
 import { vehicleSettingsR2Paths } from '~/utils/vehicle-settings-r2'
-import { resolveSecret } from '../../utils/cf-env'
+import { cfEnv, resolveSecret } from '../../utils/cf-env'
 
 const MAX_BYTES = 5 * 1024 * 1024 // 5MB — NET780 dump zip は 50KB 程度なので余裕の上限
 
@@ -56,23 +56,20 @@ interface D1DatabaseLite {
   prepare(sql: string): D1PreparedStatementLite
 }
 
-interface AuthEnv {
+// binding も auth 用の値も 1 本の `cfEnv` から取る (#1000 の集約に揃えた。
+// 前例: `server/api/profit/snapshots.get.ts`)。ローカルに置いていた
+// `authEnv` / `getR2Binding` / `getD1Binding` は 3 本とも
+// `event.context.cloudflare?.env?.X` を読んで無ければ falsy を返すだけで、
+// `cfEnv<CloudflareEnv>(event).X` と同じことをしていた。**唯一の差は
+// `?? null` と `undefined` だが、消費側は 3 か所とも `if (!x)` の falsy 判定**
+// なので挙動は変わらない。
+// `resolveSecret` は **`cf-env.ts` 版のまま**にすること —
+// `ichiban-upstream.ts` 版は `.get()` の reject を握り潰す (同ファイルの JSDoc)。
+interface CloudflareEnv {
+  DTAKO_R2?: R2BucketLite
+  DTAKO_DB?: D1DatabaseLite
   INTERNAL_SHARED_SECRET?: unknown
   NUXT_PUBLIC_AUTH_WORKER_URL?: string
-}
-
-function authEnv(event: H3Event): AuthEnv {
-  return (event.context.cloudflare as { env?: AuthEnv } | undefined)?.env ?? {}
-}
-
-function getR2Binding(event: H3Event): R2BucketLite | null {
-  const ctx = event.context as { cloudflare?: { env?: { DTAKO_R2?: R2BucketLite } } }
-  return ctx.cloudflare?.env?.DTAKO_R2 ?? null
-}
-
-function getD1Binding(event: H3Event): D1DatabaseLite | null {
-  const ctx = event.context as { cloudflare?: { env?: { DTAKO_DB?: D1DatabaseLite } } }
-  return ctx.cloudflare?.env?.DTAKO_DB ?? null
 }
 
 /** D1 検索カタログ (`dtako_uploads`、Refs #299) へ vehicle-settings の1行を
@@ -86,7 +83,7 @@ async function upsertVehicleSettingsCatalog(
   jsonKey: string,
   uploadedAt: string,
 ): Promise<void> {
-  const db = getD1Binding(event)
+  const db = cfEnv<CloudflareEnv>(event).DTAKO_DB
   if (!db) return
   try {
     await db
@@ -114,7 +111,7 @@ export interface ExtractResponse extends VehicleSettings {
 }
 
 export default defineEventHandler(async (event): Promise<ExtractResponse> => {
-  const env = authEnv(event)
+  const env = cfEnv<CloudflareEnv>(event)
   const sharedSecret = await resolveSecret(env.INTERNAL_SHARED_SECRET)
   if (!sharedSecret) {
     throw createError({ statusCode: 503, statusMessage: 'INTERNAL_SHARED_SECRET binding が未設定です' })
@@ -167,7 +164,7 @@ export default defineEventHandler(async (event): Promise<ExtractResponse> => {
     saved_warning =
       'vehicle_cd / dump_dir が取れなかったため R2 保存をスキップしました'
   } else {
-    const r2 = getR2Binding(event)
+    const r2 = env.DTAKO_R2
     if (!r2) {
       saved_warning = 'R2 binding (DTAKO_R2) が無いため保存をスキップしました'
     } else {

@@ -1519,8 +1519,12 @@ branches = true
 # 計上され、route ファイルには乗らない** (`cee9db4` / #1000 で 15 か所を共通化した効果)。
 # #995 が `y-time-template.put.ts` に「auth 前置きで 8 site 増えた」と書けたのは
 # **共通化の前でヘルパを各 route に inline していたから**で、今は同じ数え方が通らない。
-# `cf-env.ts` 自体は statements 6/6・arm 10/10 で 100% だが、#988 のスコープ外
-# (#999 / #1000 の持ち物) なので**この PR では登録しない**。
+# **★ 登録した (#1013)。** `cf-env.ts` 自体は statements 6/6・branch site 5・
+# arm 10/10 で 100%。#988 の当時は「#999 / #1000 の持ち物だから」と見送ったが、
+# **認可の共通部分が gate の外に居る**状態だったので下の `[[files]]` で足した。
+# **数を書くときは分けて書くこと: route 側 3 site / `cf-env.ts` 側 5 site。**
+# (5 = `cfEnv` の `?? {}` 1 + `resolveSecret` の `typeof === 'string'` /
+#  `binding &&` / `typeof .get === 'function'` / `?? null` の 4)
 #
 # **★ 陰性対照を 2 段で測った。結論は「この gate は認可を測っていない」**
 # (memory `coverage-green-does-not-check-values`。基準 = a05bd08 + この PR):
@@ -1536,14 +1540,38 @@ branches = true
 #      `it.skip` にすると **`FAIL: server/api/vid-check/map-key.get.ts —
 #      branches 94.44% (expected 100%)`** で exit 1。gate 自体は生きている。
 #
-# **`server/api/vehicle-settings/unconfirmed.get.ts` は登録しない** —
-# statements 45/46・arm 27/28 で 100% に届かない。届かないのは
-# `extractVehicleCdFromKey` の `if (!key.startsWith(R2_PREFIX)) return null` で、
-# **呼び出し元が `r2.list({ prefix: R2_PREFIX })` の結果しか渡さないので
-# 「いまの呼び方では通らない」**。R2 の list 契約に対する防御的ガードなので
-# **テストで埋めず、コードも消さない** (skill `nuxt-dtako-admin-map` §PR の基準 (2)
-# 「死に分岐はテストで埋めない」の 3 段判定)。認可のテスト自体は
-# `tests/server/vehicle-settings-unconfirmed-route.test.ts` にある。
+# **`server/api/vehicle-settings/unconfirmed.get.ts` も登録した (#1013)。**
+# #988 の時点では **statements 45/46・branch site 14・arm 27/28** で届かず、
+# 届かなかったのは手書きの `extractVehicleCdFromKey` の
+# `if (!key.startsWith(R2_PREFIX)) return null`。**呼び出し元が
+# `r2.list({ prefix: R2_PREFIX })` の結果しか渡さないので「いまの呼び方では
+# 通らない」死に分岐**で、テストで埋めるのは筋が悪かった。
+# **#1013 で手書きを消し、`history.get.ts` が既に使っている共有側
+# (`app/utils/vehicle-settings-r2.ts` の `VEHICLE_SETTINGS_R2_PREFIX` /
+# `parseVehicleSettingsR2Key`) に寄せた**ので、この分岐は route から消えた
+# (共有側の同じガードは `tests/utils/vehicle-settings-r2.test.ts` が両側を通している)。
+# **結果 statements 38/38・branch site 12・arm 24/24 で 100%。**
+# 基準 = `origin/main` `a028078d3ecc2856eef875836ea057cfa684a79d` + この PR。
+# 認可のテスト自体は `tests/server/vehicle-settings-unconfirmed-route.test.ts` にある。
+
+# `cfEnv` / `resolveSecret` の共通ヘルパ本体。
+# **#988 で入れた認可の前置きの分岐は実質ここに乗っている** — route 側 3 site に対し
+# こちらが 5 site。共通化 (`cee9db4` / #1000) の結果、**登録しないと認可の共通部分だけが
+# gate の外**になる。**statements 6 / 6、branch site 5 / arm 10、10 arm すべて被覆。**
+# なお `resolveSecret` の `.get()` reject を**例外として伝播させる**のがこちら版の
+# 契約で、`server/utils/ichiban-upstream.ts` 版 (握り潰す) とは別物
+# (理由は `server/utils/cf-env.ts` の JSDoc)。
+[[files]]
+path = "server/utils/cf-env.ts"
+branches = true
+
+# 設定未確認車輛の抽出 (`GET /api/vehicle-settings/unconfirmed`)。
+# **上流 (`/alc-proxy`) が未ログインを 401 にする B 段だったが、それを待つ間に
+# R2 listing が走ってしまう**ので A 段に上げた口 (詳細はファイル冒頭の JSDoc)。
+# **statements 38 / 38、branch site 12 / arm 24、24 arm すべて被覆。**
+[[files]]
+path = "server/api/vehicle-settings/unconfirmed.get.ts"
+branches = true
 
 # 車輌設定 dump の**一覧** (`GET /api/vehicle-settings/history`)。
 # ここに並ぶ key は実体 (`object.get.ts`) の入口そのもの =
