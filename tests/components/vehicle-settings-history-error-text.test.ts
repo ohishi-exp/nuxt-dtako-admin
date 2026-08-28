@@ -48,7 +48,7 @@
  * よい理由にならない。**呼び出し側で 404 を撃ち分け**、消えた dump を指しているという
  * 事実だけを書く。`describeApiError` / `describeResponseFailure` は**無変更**。
  *
- * **これは暫定** — 恒久策は `nextStepForStatus` に 404 を足して、2 か所の
+ * **これは暫定 (#1021)** — 恒久策は `nextStepForStatus` に 404 を足して、2 か所の
  * `describeMissingDump` をまとめて消すこと。下の `it` が**誤った前置きが出ていないこと**を
  * 陰性対照で押さえている。
  */
