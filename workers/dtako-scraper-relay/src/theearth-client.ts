@@ -562,6 +562,21 @@ async function resolveForcedLogin(res: Response, failureMessage: string): Promis
 
 /** 想定外ページの診断用に title + タグ除去済み本文の先頭を 1 行にする
  * (credential は含まれない。エラーメッセージ / log 用)。 */
+/**
+ * [`describePage`] が **title と本文抜粋の間**に置く区切り。
+ *
+ * **抜粋 (`本文先頭:` 以降) は上流ページの生テキスト**で、theearth 側のエラー
+ * ページには中間ファイルの UNC パスのような内部情報が乗ることがある。
+ * `TheearthClientError` の message はこの `describePage` を埋め込む箇所が複数
+ * あるため (ログイン POST の非 2xx / 強制ログインの非 2xx)、**message を人へ
+ * 転送する経路 (#967 の LINE WORKS 通知) は、ここで切って抜粋を落とす。**
+ * 定数にしてあるのは、切る側 (`scrape-alert.ts`) が文字列を書き写して
+ * 「片方だけ直った時に黙って素通しになる」を作らないため。
+ *
+ * ログと R2 の原本は従来どおり抜粋を持つ — 落とすのは人へ送る 1 通だけ。
+ */
+export const PAGE_EXCERPT_MARKER = " 本文先頭: ";
+
 function describePage(html: string): string {
   const title = html.match(/<title>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, " ").trim() || "(no title)";
   const text = html
@@ -569,7 +584,7 @@ function describePage(html: string): string {
     .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  return `title="${title}" 本文先頭: ${text.slice(0, 160)}`;
+  return `title="${title}"${PAGE_EXCERPT_MARKER}${text.slice(0, 160)}`;
 }
 
 /** ログイン中に既存セッションを強制ログアウトさせた (kick した) かどうか。
