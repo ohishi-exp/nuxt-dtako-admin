@@ -22,8 +22,9 @@ export interface TheearthSessionRecord {
   createdAt: number;
   expiresAt: number;
   /** viewer 経路 (auth-worker JWT) で認可した時の role。
-   * **★ 認可には使わない (Refs #1049)** — 全社許可は `viewerEmail` の allowlist
-   * だけで決めるようになったので、いまは記録用の値。theearth ログイン由来の
+   * **★ 認可には使わない (Refs #1049)** — 全社許可は `viewerOrgWide`
+   * (= auth-worker の `USER_ACL` 由来の introspect 応答 `org_wide`) だけで
+   * 決めるので、いまは記録用の値。theearth ログイン由来の
    * セッションでは undefined。DO storage に保存されるのは theearth セッションだけで、
    * viewer は毎リクエスト組み立てるため永続化されない。 */
   viewerRole?: string;
