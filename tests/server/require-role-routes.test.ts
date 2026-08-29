@@ -119,6 +119,15 @@ describe('role 認可の配線 (Refs #1004)', () => {
     expect(got?.statusCode).not.toBe(403)
   })
 
+  // ★ #1048 で足した 2 値目。**一覧に足しただけで 25 route 全部に効く**ことを route
+  //   側で測る (helper 単体は `require-role.test.ts`)。上の viewer の 403 と対で読むこと
+  //   — payroll だけだと「全部通す形に退化した」場合も緑になる。
+  it.each(WIRED)('%s — 陽性対照: payroll も 403 で止まらない (#1048)', async (_label, handler) => {
+    requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'payroll' })
+    const got = await call(handler).then(() => null, (e: { statusCode?: number }) => e)
+    expect(got?.statusCode).not.toBe(403)
+  })
+
   it('認可は認証の後 — requireAuth が 401 で投げたら 403 にはしない', async () => {
     requireAuthMock.mockRejectedValue(Object.assign(new Error('Unauthorized'), { statusCode: 401 }))
     await expect(call(vidCheckMapKey)).rejects.toMatchObject({ statusCode: 401 })

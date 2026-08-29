@@ -1744,10 +1744,11 @@ branches = true
 path = "server/utils/netprint-targets.ts"
 branches = true
 
-# server route の **role 認可** (Refs #1004)。`requireAuth` (= 認証) の後に AND で
+# server route の **role 認可** (Refs #1004 / #1048)。`requireAuth` (= 認証) の後に AND で
 # 1 本足すだけの層で、**許可 role の一覧 (`ALLOWED_ROLES`) は 1 か所**。
-# **`role === 'admin'` をベタ書きしない** — 給与用の 3 値目が増えるとき、この配列の
-# 1 行だけで全 route に効かせるため (判定は一覧を引く `roleIsIn` に寄せてある)。
+# **`role === 'admin'` をベタ書きしない** — 給与用の `payroll` を足したときも、この配列の
+# 1 行だけで全 route に効いた (判定は一覧を引く `roleIsIn` に寄せてある)。**一覧が増えても
+# 分岐は増えない** (下の内訳は `payroll` の追加前後で 1 つも動いていない)。
 # 分岐は `roleIsIn` の 2 つ (typeof / includes) と `assertAllowedRole` の 1 つで、
 # **非許可 role / 空文字 / undefined / 文字列でない値**の 4 通りが偽側を踏む。
 [[files]]

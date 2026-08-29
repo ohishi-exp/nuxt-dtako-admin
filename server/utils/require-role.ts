@@ -4,15 +4,20 @@
  *
  * ## ★ `role === 'admin'` をベタ書きしない理由
  *
- * いま `role` は上流 `rust-alc-api` の DB で `CHECK (role IN ('admin','viewer'))` の
- * **2 値**しかない。だが「**給与用の role (salary viewer のような)**」が要るのでは、と
- * いう指摘がオーナーから出ており、**3 値目が増える見込み**がある (3 値目そのものは
- * 上流の migration が要るので別 issue)。
+ * 「**給与用の role**」が要るとオーナーが決め、値は **`payroll`** に確定した (Refs #1048)。
+ * ⇒ {@link ALLOWED_ROLES} の中身は **`admin` と `payroll` の 2 つ**。
  *
- * `role === 'admin'` を 24 ファイルに散らすと、そのとき **24 ファイルを触り直す**。
- * ⇒ 一覧を {@link ALLOWED_ROLES} 1 か所に持ち、判定は
- * 「**その一覧に含まれるか**」({@link roleIsIn}) だけにする。**3 値目の追加は
- * `ALLOWED_ROLES` の 1 行**で済み、route も {@link assertAllowedRole} も無変更。
+ * `role === 'admin'` を 24 ファイルに散らしていたら、ここで **24 ファイルを触り直して
+ * いた**。⇒ 一覧を {@link ALLOWED_ROLES} 1 か所に持ち、判定は
+ * 「**その一覧に含まれるか**」({@link roleIsIn}) だけにしてある。**`payroll` の追加は
+ * 実際に `ALLOWED_ROLES` の 1 行だけ**で済み、route も {@link assertAllowedRole} も
+ * 無変更だった (4 値目が要るときも同じ)。
+ *
+ * **★ この repo 側だけでは `payroll` を持つ利用者は生まれない。** role に使える値を
+ * 決めているのは上流 `rust-alc-api` の `migrations/003_create_users.sql` の
+ * `CHECK (role IN (…))` で、そこへ `payroll` を足す migration は**上流の別 PR**。
+ * ⇒ **上流が広がるまで、この 2 値目は誰にも当たらない** — ここを先に出しても、
+ * 通る人・落ちる人は 1 人も変わらない (安全に先行できるのが狙い)。
  *
  * ## ★ これは「admin を通行証にする」変更ではない (誤読されやすいので明記)
  *
@@ -32,6 +37,10 @@
  * であって、**admin を追加条件として要求すること (fail-closed)** ではない。
  * ここで入れるのは後者 — **既存の担保に AND で 1 本足すだけ**で、どの担保も緩めない。
  * **#1049 が会社の軸から role を外したのも同じ向き** (role で特別扱いしない)。
+ *
+ * **★ `payroll` も同じ** (Refs #1048)。この role が決めるのは「給与画面に**入れるか**」
+ * だけで、「給与の実額を**見てよいか**」の正本は上流 rust-ichibanboshi の email
+ * allowlist のまま。**role が allowlist を上書きすることは無い — AND で効く。**
  *
  * ## ★ 判定は fail-closed
  *
@@ -87,17 +96,40 @@
 import { createError } from 'h3'
 
 /**
- * server route を触ってよい role の**一覧**。**3 値目が増えたら、この配列に 1 行足すだけ**
+ * server route を触ってよい role の**一覧**。**値が増えたら、この配列に 1 行足すだけ**
  * で全 route に効く (判定は {@link roleIsIn} が一覧を引くだけなので、他は無変更)。
  *
- * **いまの中身は `admin` 1 つだけ。**増やすのは別 issue (上流の
- * `migrations/003_create_users.sql` の `CHECK` を広げる migration が先に要る)。
+ * **いまの中身は `admin` と `payroll` の 2 つ** (`payroll` は Refs #1048 で追加。
+ * 綴りはオーナーが決めたもので `kyuyo` / `wage` ではない)。
+ *
+ * **★ `payroll` を発行できるかは上流次第。** role に使える値は上流 `rust-alc-api` の
+ * `migrations/003_create_users.sql` の `CHECK (role IN (…))` が決めており、そこへ
+ * `payroll` を足す migration は**上流の別 PR**。**この一覧に先に足してあるだけ**なので、
+ * 上流が広がるまで通る人・落ちる人は 1 人も変わらない。
+ *
+ * ## ★ この配列を触る人へ: 403 の文言の見直しの引き金 (Refs #1048)
+ *
+ * {@link assertAllowedRole} が返す 403 は **`administrator role is required` /
+ * 「この操作には管理者権限が必要です」のまま据え置いてある**。
+ *
+ * **上流の `CHECK` が広がっただけでは、まだ嘘ではない。** 誰も `payroll` を持っていない
+ * 間、拒否されるのは今日と同じ「`admin` でない人」で、その人への次の一手 (管理者に依頼)
+ * も真のまま。**先回りして文言を変えると、存在しない選択肢を案内することになる。**
+ *
+ * **★ 引き金は「`payroll` role を持つ利用者が 1 人でも実在したら」。** そのとき初めて
+ * この文言は嘘になる (`payroll` でも入れる人が居るのに「管理者権限が必要」と言うため)。
+ * ⇒ **その時点で `statusMessage` / `message` の 2 行と、それを固定している
+ * `tests/server/require-role.test.ts` の期待値を一緒に見直すこと。**
+ *
+ * **同じ申し送りは #1048 の issue 側にも置く** — `grep` も `scripts/xref.sh` も issue には
+ * 届かず、逆に役割を配る作業をする人は issue から入ってくる。**片方だけだともう片方が腐る。**
  */
-export const ALLOWED_ROLES = ['admin'] as const satisfies readonly string[]
+export const ALLOWED_ROLES = ['admin', 'payroll'] as const satisfies readonly string[]
 
 /**
  * `role` が一覧に含まれるか。**一覧を引数に取る純関数**なので、
- * 「一覧に 2 つ目を足したらどうなるか」を**実装を変えずにテストで示せる**。
+ * 「一覧に値を足したらどうなるか」を**実装を変えずにテストで示せる**
+ * (`payroll` を足す前に、この形で先に測ってあった)。
  *
  * 文字列以外 (`undefined` / claim 欠落) は `typeof` で落ち、空文字は一覧に無いので
  * 落ちる — どちらも fail-closed。
@@ -117,6 +149,10 @@ export interface RoleBearingAuth {
  *
  * **`requireAuth` の後に呼ぶこと** — 未ログインを 403 で返すと「ログインしたら通る」が
  * 読めなくなる (`server/api/ichiban/[...path].get.ts` の順序の注記と同じ理由)。
+ *
+ * **★ 下の 403 の文言 2 行は `payroll` を足した後も「管理者」のまま据え置いてある。
+ * 見直しの引き金 (「`payroll` を持つ利用者が 1 人でも実在したら」) は
+ * {@link ALLOWED_ROLES} の注記が正本** (Refs #1048。説明を 2 か所に増やさない)。
  */
 export function assertAllowedRole(auth: RoleBearingAuth): void {
   if (roleIsIn(ALLOWED_ROLES, auth.role)) return
