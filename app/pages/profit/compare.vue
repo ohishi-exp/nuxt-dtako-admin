@@ -9,7 +9,7 @@
  * dtako 側は他ページと同じく rust-alc-api を直 fetch する (`app/utils/api.ts`)。
  */
 import { searchVehicleDailySlips } from '~/utils/ichiban'
-import { describeApiError } from '~/utils/api-error'
+import { describeCaughtError } from '~/utils/api-error'
 import { getOperations, getOperationCsv, currentAccessToken } from '~/utils/api'
 import { summarizeSelectedRows, type SelectedRowsSummary } from '~/utils/event-data-table'
 import {
@@ -159,7 +159,9 @@ async function search() {
   catch (e) {
     // 検索は `/api/ichiban/**` と `/api/profit/snapshots` の両方を叩く。どちらも
     // 自前の server route で、理由は JSON 本文にしか残らない (Refs #890)。
-    errorMessage.value = describeApiError(e)
+    // **「次に何をすればいいか」まで出す** (Refs #1008) — 押し直す先はこの画面の
+    // 「検索」ボタン 1 つ。
+    errorMessage.value = describeCaughtError(e, '「検索」を押してください')
     status.value = 'error'
   }
 }

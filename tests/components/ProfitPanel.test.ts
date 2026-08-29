@@ -222,6 +222,59 @@ describe('ProfitPanel', () => {
       expect(wrapper.text()).toContain('connection refused')
     })
 
+    /**
+     * ★ **このパネルに再試行ボタンは 1 つも無い** (`load` は
+     * `watch([driverCd, range])` からしか走らない)。だから `retry` に
+     * `「…」を押してください` の形を使っていない — **無いボタンを案内すると、
+     * 失敗した人が押すものを探して見つからない** (Refs #1008)。
+     *
+     * `/operations/[unko_no]` のイベント表で行を選び直すと `selectedEventRange`
+     * が変わり、この `watch` が発火して `load` が走る = **これが実際の再試行動線**。
+     */
+    describe('★ 「次に何をすればいいか」を出す (Refs #1008)', () => {
+      it('status ごとに撃ち分け、実在しないボタンは案内しない', async () => {
+        fetchDriverDailySlipsMock.mockRejectedValue({
+          statusCode: 403, data: { error: 'この会社の閲覧は許可されていません' },
+        })
+        const wrapper = createWrapper()
+        await flushPromises()
+        expect(wrapper.text()).toContain(
+          '403 この会社の閲覧は許可されていません'
+          + ' — この操作の権限がありません (ログインし直しても変わりません)。管理者に許可の追加を依頼してください')
+      })
+
+      it('401 は再ログイン + **この画面の**やり直し方 (ボタン名を出さない)', async () => {
+        fetchDriverDailySlipsMock.mockRejectedValue({
+          statusCode: 401, data: { error: 'Unauthorized' },
+        })
+        const wrapper = createWrapper()
+        await flushPromises()
+        // ★ **合成後の 1 文で見る。** `retry` に括弧つきの補足を足すと、401 の
+        //   文型が持つ括弧と**2 つ連続**する (初稿で実際にそうなっていた)。
+        expect(wrapper.text()).toContain(
+          '401 Unauthorized — ログインが切れています。再ログインしてからイベントの行を選び直してください'
+          + ' (再ログインしても直らないときは認証サーバに繋がっていません。権限の問題ではありません)')
+        // 陰性対照: 括弧が 2 つ続かない
+        expect(wrapper.text()).not.toContain(') (')
+      })
+
+      it('★ 陰性対照: 「…を押してください」と書かない (存在しないボタンを案内しない)', async () => {
+        fetchDriverDailySlipsMock.mockRejectedValue({ statusCode: 503, data: { error: 'x' } })
+        const wrapper = createWrapper()
+        await flushPromises()
+        expect(wrapper.text()).toContain('復旧してからイベントの行を選び直してください')
+        expect(wrapper.text()).not.toContain('を押してください')
+      })
+
+      it('status が読めないときは今までどおり理由だけ (次の一手を付けない)', async () => {
+        fetchDriverDailySlipsMock.mockRejectedValue(new Error('network error'))
+        const wrapper = createWrapper()
+        await flushPromises()
+        expect(wrapper.text()).toContain('network error')
+        expect(wrapper.text()).not.toContain('選び直してください')
+      })
+    })
+
     it('乗務員CD / 区間が変われば引き直す', async () => {
       writeAggregated()
       const wrapper = createWrapper()

@@ -76,7 +76,12 @@ describe('/daily-hours 乗務員一覧の取得', () => {
       api.getDrivers.mockRejectedValue(new Error('API エラー (503): DB に繋がりません'))
       const w = await mountPage()
 
-      expect(alertTitles(w)).toEqual(['乗務員一覧を取得できませんでした (API エラー (503): DB に繋がりません)'])
+      // ★ **理由のうしろに「次に何をすればいいか」が付く** (Refs #1008)。
+      //   status は `createAuthFetch` が組んだ `(503): ` から読む
+      //   (この経路の例外は ofetch の `FetchError` ではなく素の `Error`)。
+      //   この画面に一覧を取り直すボタンは無いので、案内はページの再読み込み。
+      expect(alertTitles(w)).toEqual(['乗務員一覧を取得できませんでした (API エラー (503): DB に繋がりません'
+        + ' — サーバ側の設定か障害です (権限の問題ではありません)。復旧してからページを再読み込みしてください)'])
       expect(w.text()).toContain('0 人なのか読めなかっただけなのかは、この画面では判りません')
       expect(w.text()).toContain('ページを再読み込みして確かめてください')
     })

@@ -7,6 +7,36 @@
 const OFETCH_SYNTHETIC_MESSAGE = /^\[([A-Z]+)\] "(.*)": \d{3}(?: |$)/
 
 /**
+ * `@ippoan/auth-client` の `createAuthFetch` が組む
+ * `` `${errorLabel} (${res.status}): ${body || res.statusText}` `` から **status だけ**を
+ * 取り出す (`createAuthFetch.ts:56`)。上の `OFETCH_SYNTHETIC_MESSAGE` と同じ流儀 —
+ * **上流が固定フォーマットで組んだ文字列を、正規表現で読み戻す**。
+ *
+ * ## ★ なぜ文字列を読むのか (**本当の直しは上流**)
+ *
+ * `createAuthFetch` は非 2xx を **素の `Error`** に組んで投げる。ofetch の `FetchError`
+ * ではないので **`statusCode` も `data` も持たず**、status は**メッセージ文字列の中に
+ * しか無い**。**本来の直しは上流 (`@ippoan/auth-client` が `statusCode` を載せる)**
+ * だが、別 repo + 版上げ + 全 consumer への波及になるので #1008 の範囲外
+ * — 上流が載せるようになったら `describeCaughtError` は `statusCode` の側を先に見るので、
+ * **この正規表現は自然に使われなくなる** (消すのはそのとき)。
+ *
+ * ## ★ `errorLabel` を決め打ちしない
+ *
+ * ラベルは `createAuthFetch` の option で、この repo は `'API エラー'` を渡している
+ * (`app/utils/api.ts:58`) が、**上流の既定は `'API error'`** で consumer ごとに違う。
+ * だから見るのは**ラベルではなく `` ` (3 桁): ` `` の形**だけ。ラベル位置は
+ * `[^(\n]+` (括弧を含まない 1 行) にしてあるので、**括弧を含むラベルに変わったら
+ * 当たらなくなる** — そのとき起きるのは「次の一手が付かない」だけで、
+ * **理由の 1 文はそのまま出る** (`describeCaughtError` の 3 番目の枝 = 現状維持)。
+ *
+ * **接頭辞で当てて、外れたら空撃ちになるガードにはしていない** — この repo は
+ * 同じ日に「文言変更でメッセージ接頭辞のガードが空撃ちになる」事故を出している。
+ * **外れたときに何が起きるかは `tests/utils/api-error.test.ts` で固定してある。**
+ */
+const AUTH_FETCH_ERROR_MESSAGE = /^[^(\n]+ \((\d{3})\): /
+
+/**
  * `$fetch` のエラーから**人が読める理由**を作る (Refs #677 / #890)。
  *
  * 既定の `e.message` は `[GET] "/api/kyuyo/wage-range?…": 503` のように
@@ -366,4 +396,62 @@ export function describeFetchThrow(e: unknown): string | null {
     + 'ページを再読み込みしてください'
     + ' — ログインが切れていた場合はログイン画面に移ります。'
     + '移らないときはネットワークの側を確認してください。'
+}
+
+/**
+ * **catch した例外**から「理由 — 次に何をすればいいか」の 1 文を作る (Refs #1008)。
+ * `describeResponseFailure` の**兄弟**で、違うのは**入口だけ**:
+ *
+ * | | 入口 | 出口 |
+ * | --- | --- | --- |
+ * | `describeResponseFailure` | 生 `fetch` の `Response` (本文は未読) | `${status} ${理由} — ${次の一手}` |
+ * | `describeCaughtError` | **catch した例外** | 同じ形 |
+ *
+ * ## 3 つの枝
+ *
+ * 1. **transport failure** (`fetch` 自体が throw した) — `describeFetchThrow` の 1 文を
+ *    使い、**繋がった後にやることとして `retry` を足す**。あの 1 文は
+ *    「まずページを再読み込みして切り分けろ」までしか言わないので、
+ *    **その画面のデータが戻ってくる操作**は別に要る。
+ * 2. **status が分かる** — `${describeApiError(e)} — ${nextStepForStatus(status, retry)}`。
+ * 3. **status が分からない** — `describeApiError(e)` を**そのまま返す**。
+ *    **劣化ではなく現状維持** — 次の一手は status ごとに違う (401 は再ログイン、
+ *    403 は管理者へ、5xx は復旧待ち) ので、**status が読めていないのに 1 つを選ぶと
+ *    嘘になる**。空文字にも例外にも倒さない。
+ *
+ * @param retry 画面ごとの「やり直し方」。**その画面に実在するボタンの表記そのまま**を
+ *              `「…」` で引用し、**句点を付けずに**渡す (`describeResponseFailure` と
+ *              同じ規約。`tests/components/next-step-retry-labels.test.ts` が
+ *              「その `.vue` の template に実在するか」を機械で見ている)。
+ *              **押せるボタンが無い画面**は `'ページを再読み込みしてください'` のように
+ *              **ボタンを名指ししない文**を渡す (`「…」` が無いものは検査の対象外)。
+ */
+export function describeCaughtError(e: unknown, retry: string): string {
+  const transport = describeFetchThrow(e)
+  // ★ 「繋がったあとで」— `describeFetchThrow` の文は末尾が
+  //   「移らないときはネットワークの側を確認してください。」で終わっている。
+  //   再読み込みは**切り分け**であって、この画面の取り直しではない。
+  if (transport !== null) return `${transport}繋がったあとで${retry}`
+  const status = caughtErrorStatus(e)
+  if (status === null) return describeApiError(e)
+  return `${describeApiError(e)} — ${nextStepForStatus(status, retry)}`
+}
+
+/**
+ * catch した例外の HTTP status。読めなければ `null`。**2 系統ある** (#1008 で実測):
+ *
+ * | 投げ元 | status | 読み方 |
+ * | --- | --- | --- |
+ * | `$fetch` (ofetch) の `FetchError` | **`e.statusCode` を持つ** | そのまま |
+ * | `app/utils/api.ts` の `request()` (= `createAuthFetch`) | **持たない** | `AUTH_FETCH_ERROR_MESSAGE` |
+ *
+ * `statusCode` を**先に**見る — 上流が `statusCode` を載せるようになったら、
+ * 文字列を読む側は自動的に使われなくなる (`AUTH_FETCH_ERROR_MESSAGE` の注記)。
+ */
+function caughtErrorStatus(e: unknown): number | null {
+  const err = (e ?? {}) as { statusCode?: unknown, message?: unknown }
+  if (typeof err.statusCode === 'number') return err.statusCode
+  if (typeof err.message !== 'string') return null
+  const m = AUTH_FETCH_ERROR_MESSAGE.exec(err.message)
+  return m === null ? null : Number(m[1])
 }

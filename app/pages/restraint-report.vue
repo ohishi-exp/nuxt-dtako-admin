@@ -2,6 +2,7 @@
 import { getDrivers, getRestraintReport, downloadRestraintReportPdfStream, downloadRestraintReportPdfSingle, recalculateStream, recalculateDriverStream } from '~/utils/api'
 import type { PdfProgressEvent, RecalcProgressEvent } from '~/utils/api'
 import type { Driver, RestraintReportResponse, RestraintDayRow } from '~/types'
+import { describeCaughtError } from '~/utils/api-error'
 
 const drivers = ref<Driver[]>([])
 // 乗務員一覧が**取得できなかった**理由 (Refs #920)。**空配列だけでは「0 人」と
@@ -32,39 +33,32 @@ async function fetchReport() {
   }
 }
 
+/** 乗務員一覧を取り直す口が `onMounted` にしかない画面の「やり直し方」 (Refs #1008)。 */
+const RETRY_RELOAD = 'ページを再読み込みしてください'
+
 /**
- * 一覧の取得失敗を 1 行にする (Refs #920。**正本は #911 / PR #915 の `upload.vue`**)。
+ * 一覧の取得失敗を 1 行にする (Refs #920 / #1008)。
  *
- * ## ★ `describeApiError` を当てていない — **当て忘れではない** (Refs #890 / #904)
+ * ## `describeCaughtError` に通す — 足しているのは**「次に何をすればいいか」**
  *
  * `getDrivers` は `app/utils/api.ts` の `request()` → `@ippoan/auth-client` の
  * `createAuthFetch` 経由で、そこは非 2xx を
  * `new Error(`API エラー (${status}): ${body || statusText}`)` に組んで投げる。
  * **ofetch の `FetchError` ではない**ので `statusCode` も `data` も持たず、
- * `describeApiError` は `err.message` をそのまま返すだけになる ⇒ **当てても
- * 1 文字も変わらない** (#910 が (B) 経路 28 箇所で実測済み)。機械的に当てると
- * 「理由が良くなった」と誤読させるだけなので当てない。
- * **理由を 1 行に畳むのは #904 (`api.ts` 側) の担当。**
+ * **理由の文字列は `describeApiError` を当てても 1 文字も変わらない**
+ * (#910 が (B) 経路 28 箇所で実測済み。この事実は #1008 でも変わっていない)。
+ * **変わるのは末尾**で、`describeCaughtError` が `` `(3 桁): ` `` の形から status を
+ * 読んで「再ログイン」「管理者に依頼」「復旧を待つ」を撃ち分ける。
+ * **理由を 1 行に畳むのは今も #904 (`api.ts` 側) の担当。**
  *
- * ## いま実際に出る 1 文 (2026-08-25 実測)
+ * ## `retry` にボタンを渡していない理由
  *
- * **「status しか出ない」ではない** — `createAuthFetch` は本文を読むので
- * **status + 応答本文まるごと**が出る。測定条件は
- * **nuxt dev (:3001) が配信する本物の画面 + CDP の `Fetch.fulfillRequest` で
- * `/api/proxy/api/drivers` だけを 503 `{"error":"DB に繋がりません"}` に差し替え**:
- *
- * ```
- * 乗務員一覧を取得できませんでした (API エラー (503): {"error":"DB に繋がりません"})
- * ```
- *
- * ## ★ ここでは塞げない穴 (#904 に申し送り、未測定)
- *
- * 本番は HTTP/3 で reason phrase が空 (`res.statusText === ''`) なので、**本文が空の
- * 非 2xx では `e.message` が `API エラー (503): ` (コロンの後ろが空)** になる。
- * `api.ts` / `createAuthFetch` に触らずには塞げない。
+ * この一覧を取り直す口は **`onMounted` にしかなく、押せるボタンが画面に無い**。
+ * **無いボタンを案内しない** (`tests/components/next-step-retry-labels.test.ts` の
+ * 規約) ので、ボタンを名指ししない `RETRY_RELOAD` を渡す。
  */
 function describeListFailure(e: unknown): string {
-  return e instanceof Error ? e.message : '理由を読めませんでした'
+  return e instanceof Error ? describeCaughtError(e, RETRY_RELOAD) : '理由を読めませんでした'
 }
 
 onMounted(async () => {

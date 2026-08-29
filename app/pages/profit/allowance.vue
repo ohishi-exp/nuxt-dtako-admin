@@ -43,7 +43,8 @@
  * 表示側で差し替えると経路だけ直って数え方が置き去りになる。
  */
 import { getOperations, getOperationCsv, getDrivers, currentAccessToken } from '~/utils/api'
-import { describeApiError } from '~/utils/api-error'
+import { describeApiError, describeCaughtError } from '~/utils/api-error'
+
 import {
   ALLOWANCE_RATE_ENDPOINT,
   allowanceRateNotice,
@@ -196,6 +197,13 @@ import {
   type LegReconcile,
 } from '~/utils/allowance-ichiban'
 
+/**
+ * **この画面の「やり直し方」** (Refs #1008)。`describeCaughtError` の `retry` は
+ * **その画面に実在するボタンの表記そのまま**を渡す規約
+ * (`tests/components/next-step-retry-labels.test.ts` が template と突き合わせる)。
+ */
+const RETRY_AGGREGATE = '「集計」を押してください'
+
 /** イベントCSV を同時に引く本数。alc を叩きすぎないための上限。 */
 const CSV_CONCURRENCY = 4
 /** 対象乗務員 (乗務員CD) の保存先。ブラウザごとに残る。
@@ -301,6 +309,15 @@ async function pushProvisionalOverride(key: string, value: number | null) {
     // **`e.message` は使わない** (Refs #890)。`/api/profit/allowance-override` が
     // `createError` に載せた日本語は JSON 本文にしか残らない (本番は HTTP/3 で
     // reason phrase が無いため、`e.message` は `[POST] "…": 400` で終わる)。
+    // ★ **ここは `describeCaughtError` に通さない** (Refs #1008 PR-2)。
+    //   `allowanceOverrideSaveNote` が**自前の「次の一手」を末尾に持っている**ので、
+    //   status ごとの一手を足すと**指示が 2 つ並ぶ**。実測した合成後の 1 文:
+    //
+    //   `暫定手当を R2 (共有) に送れませんでした (400 … — …「この端末の暫定手当を R2 へ送る」を押してください)`
+    //   `— この端末の記録は残っているので… あとでもう一度送ってください。`
+    //   ⇒ **同じ指示が 2 回。**
+    //
+    //   「理由は共通・やり直し方は画面ごと (= 1 つ)」を崩さないため、理由だけを渡す。
     overrideNote.value = allowanceOverrideSaveNote(null, describeApiError(e))
     overrideFailed.value = true
   }
@@ -337,6 +354,9 @@ async function sendProvisionalToR2() {
     catch (e) {
       failed += 1
       // 同じ口 (`postProvisionalOverride`) なので同じく本文から読む (Refs #890)。
+      // ★ 上の `pushProvisionalOverride` と同じ理由で `describeCaughtError` に通さない
+      //   (Refs #1008 PR-2)。`allowanceOverrideMigrationNote` の末尾が
+      //   「もう一度押せば、送れなかったぶんだけ送り直せます。」で**やり直し方を既に持つ**。
       if (firstError === '') firstError = describeApiError(e)
     }
   }
@@ -577,8 +597,10 @@ async function loadRateMaster(): Promise<AllowanceRateState> {
   }
   catch (e) {
     // `/restraint-api/**` は Nitro ではなく relay worker へ転送される。本文は
-    // relay の `{error: '<日本語>'}` なので `describeApiError` が拾う (Refs #890)。
-    return allowanceRateReadError(describeApiError(e))
+    // relay の `{error: '<日本語>'}` なので `describeCaughtError` が中で呼ぶ
+    // `describeApiError` が拾う (Refs #890)。**「次に何をすればいいか」まで出す**
+    // (Refs #1008) — マスタは `ensureRateMaster` が集計のたびに読み直す。
+    return allowanceRateReadError(describeCaughtError(e, RETRY_AGGREGATE))
   }
 }
 
@@ -719,12 +741,17 @@ async function saveRateMaster() {
     }
     catch (e) {
       // `/restraint-api/**` は relay worker が答える。理由は JSON 本文にしか
-      // 残らないので `describeApiError` に読ませる (Refs #890)。
+      // 残らないので `describeCaughtError` (中で `describeApiError` を呼ぶ) に
+      // 読ませる (Refs #890 / #1008)。
       outcome = {
         ok: false,
         status: (e as { statusCode?: number }).statusCode,
         body: (e as { data?: unknown }).data,
-        reason: describeApiError(e),
+        // ★ **やり直し先は保存ボタンそのもの**だが、ラベルは登録/保存で入れ替わる
+        //   (`allowanceRateSaveLabel`)。**template と同じ関数から組む**ので、
+        //   ラベルを変えても案内文だけが古くなることが構造的に起きない
+        //   (`restraint-compare.vue` の `batchRecalcLabel` と同じ形、Refs #1008)。
+        reason: describeCaughtError(e, `「${allowanceRateSaveLabel(base.mode)}」を押してください`),
       }
     }
     // **判定は pure 側 (`resolveAllowanceRateSave`)。** 409 の結果には入力欄を
@@ -1707,7 +1734,7 @@ async function run(force = false) {
     catch (e) {
       // 売上は `/api/ichiban/**` (自前の server route) 越し。理由は JSON 本文に
       // しか残らないので本文から読む (Refs #890)。
-      salesError.value = describeApiError(e)
+      salesError.value = describeCaughtError(e, RETRY_AGGREGATE)
     }
     writeCache({
       ym: ym.value,
