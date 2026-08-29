@@ -1562,6 +1562,10 @@ describe("ALL_TOOLS", () => {
     "get_wage_report",
     "list_companies",
     "list_months",
+    // スクレイプ失敗の原本 (R2 `{prefix}-errors/`) を読むだけ (Refs #1052)。
+    // relay 側の口は R2 の list / get しか呼ばず、put / delete を 1 行も持たない
+    "list_scrape_errors",
+    "get_scrape_error",
   ];
   /** 書きうる tool。**scope を要求する** (Refs ohishi-exp/rust-ichibanboshi#205 の 04b / 10)。 */
   const WRITE = {

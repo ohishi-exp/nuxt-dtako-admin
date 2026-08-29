@@ -140,6 +140,14 @@ import {
 } from "./kintai-relay";
 import { buildScrapeErrorArtifact } from "./scrape-error-artifact";
 import {
+  buildScrapeErrorListing,
+  buildScrapeErrorObjectPayload,
+  parseScrapeErrorListRequest,
+  parseScrapeErrorObjectRequest,
+  SCRAPE_ERROR_MAX_OBJECT_BYTES,
+  scrapeErrorListPrefix,
+} from "./scrape-error-reader";
+import {
   allowedViewerComps,
   compIdsInSameTenant,
   devViewerCompIds,
@@ -854,6 +862,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/cron/dtako/operation-zip" && request.method === "POST") {
       return this.handleCronDtakoOperationZip(request);
     }
+    // スクレイプ失敗の原本 (`{DTAKO_SCRAPE_R2_PREFIX}-errors/`) を**読むだけ**の 2 口
+    // (Refs #1052)。`/cron/dtako/operation-zip` の隣に同じ流儀で置く — 認証は
+    // index.ts の `/kintai-relay/scrape-error{s,-object}` 側 (X-Alc-Proxy-Secret) が
+    // 持ち、comp_id 単位の DO へ routing される。**`scrapeQueue` には乗せない** —
+    // theearth へ 1 度も繋がず R2 を読むだけなので、同一 comp_id の直列化 (theearth
+    // セッションロック避け) が要らない。**put / delete はしない。**
+    if (url.pathname === "/cron/dtako/scrape-errors" && request.method === "POST") {
+      return this.handleCronDtakoScrapeErrors(request);
+    }
+    if (url.pathname === "/cron/dtako/scrape-error-object" && request.method === "POST") {
+      return this.handleCronDtakoScrapeErrorObject(request);
+    }
     // ① zip 取得 (自前ログイン) → ② オンプレ autoload push を 1 回で完結させる
     // (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67)。**書き込み (取り込み) を
     // 伴う**ので `/cron/dtako/operation-zip` と違い破壊的操作 — `scrapeQueue` で
@@ -1262,6 +1282,106 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /**
+   * スクレイプ失敗の原本の R2 prefix (`wrangler.toml` の `DTAKO_SCRAPE_R2_PREFIX`)。
+   *
+   * **書く側 (`saveScrapeErrorArtifact`) と読む側 (`handleCronDtakoScrapeErrors` /
+   * `handleCronDtakoScrapeErrorObject`) で同じ 1 か所から取る** — 既定値を書き写すと、
+   * 片方だけ直した時に「書いている場所と違う場所を読んで 0 件」が作れてしまい、しかも
+   * その 0 件は「原本が無い」と全く同じ見た目になる (Refs #1052)。
+   */
+  private resolveScrapeErrorPrefix(): string {
+    return this.env.DTAKO_SCRAPE_R2_PREFIX || "dtako-scrape";
+  }
+
+  /**
+   * POST /cron/dtako/scrape-errors — body `{comp_id, job_key?, limit?}`。
+   * `{prefix}-errors/{comp_id}/[{job_key}/]` を list して**キー / サイズ / 保存時刻**を
+   * 新しい順に返す (Refs #1052)。
+   *
+   * **読むだけ。** `put` / `delete` はこの経路に 1 行も無い。`/cron/dtako/operation-zip`
+   * と違い theearth へは繋がないので、`enqueueScrape` (theearth セッションの直列化) にも
+   * 乗せない。
+   *
+   * 件数は既定 50 件で切る (`SCRAPE_ERROR_LIST_DEFAULT_LIMIT`) が、**`total` /
+   * `truncated` / `counts_by_job_key` は切る前の全件から出す** — 「どの読取日が繰り返し
+   * 落ちているか」が調査の入口なので、一覧が切れていても分布だけは正しく読めるように
+   * する。整形は `scrape-error-reader.ts` の pure 関数 (100% gate) が持ち、ここは
+   * bucket を list して渡すだけ。
+   */
+  private async handleCronDtakoScrapeErrors(request: Request): Promise<Response> {
+    let body: { comp_id?: unknown; job_key?: unknown; limit?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return Response.json({ error: "JSON body が必要です" }, { status: 400 });
+    }
+    const parsed = parseScrapeErrorListRequest(body);
+    if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return Response.json({ error: "DTAKO_R2 binding が未設定です" }, { status: 503 });
+    const prefix = this.resolveScrapeErrorPrefix();
+    const listPrefix = scrapeErrorListPrefix(prefix, parsed.compId, parsed.jobKey);
+    const objects = await this.listAllR2(bucket, listPrefix);
+    return Response.json({
+      prefix: listPrefix,
+      ...buildScrapeErrorListing(objects, prefix, parsed.limit),
+    });
+  }
+
+  /**
+   * POST /cron/dtako/scrape-error-object — body `{key, full?}`。原本 1 件を返す
+   * (Refs #1052)。
+   *
+   * **既定では本文を先頭 4096 文字で切り、`<title>` だけ別に返す** — 原本は theearth の
+   * HTML で、セッション ID 等が埋まっている可能性があるため (親指示 2026-08-29)。全文は
+   * `full: true` を明示した時だけ。切ったことは `body_truncated` / `body_chars` に出る。
+   *
+   * **key は `{prefix}-errors/` 配下しか受け付けない** (`parseScrapeErrorObjectRequest`)
+   * — `DTAKO_R2` は ETC 明細 CSV / 拘束サマリ / 賃金マスタ / NET780 と同じ bucket なので、
+   * ここを開けると bucket 全体の read 口になる。**読むだけ。**
+   */
+  private async handleCronDtakoScrapeErrorObject(request: Request): Promise<Response> {
+    let body: { key?: unknown; full?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return Response.json({ error: "JSON body が必要です" }, { status: 400 });
+    }
+    const prefix = this.resolveScrapeErrorPrefix();
+    const parsed = parseScrapeErrorObjectRequest(body, prefix);
+    if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
+    const bucket = this.env.DTAKO_R2;
+    if (!bucket) return Response.json({ error: "DTAKO_R2 binding が未設定です" }, { status: 503 });
+    const obj = await bucket.get(parsed.key);
+    if (!obj) return Response.json({ error: `key が見つかりません: ${parsed.key}` }, { status: 404 });
+    // 原本の実測は 7〜11KB。上限を大きく超えるものは「原本ではない何か」なので、
+    // 黙って途中まで返さずサイズを名指しして断る (壊れた本文を返さない、
+    // `operation-zip.ts` の `omitted` と同じ流儀)。
+    if (obj.size > SCRAPE_ERROR_MAX_OBJECT_BYTES) {
+      return Response.json(
+        {
+          error: `原本が上限 ${SCRAPE_ERROR_MAX_OBJECT_BYTES} bytes を超えています (${obj.size} bytes)`,
+          key: parsed.key,
+          bytes: obj.size,
+          limit_bytes: SCRAPE_ERROR_MAX_OBJECT_BYTES,
+        },
+        { status: 413 },
+      );
+    }
+    const bytes = new Uint8Array(await obj.arrayBuffer());
+    return Response.json(
+      buildScrapeErrorObjectPayload({
+        key: parsed.key,
+        prefix,
+        bytes,
+        contentType: obj.httpMetadata?.contentType ?? null,
+        full: parsed.full,
+        uploaded: obj.uploaded ?? null,
+      }),
+    );
+  }
+
+  /**
    * スクレイプ失敗の原本を R2 へ保存する (Refs #633-22)。保存した key を返す
    * (保存しなかった / できなかった時は `null`)。
    *
@@ -1278,7 +1398,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const bucket = this.env.DTAKO_R2;
     if (!bucket) return null;
     const artifact = buildScrapeErrorArtifact(err, {
-      prefix: this.env.DTAKO_SCRAPE_R2_PREFIX || "dtako-scrape",
+      prefix: this.resolveScrapeErrorPrefix(),
       compId,
       jobKey,
       nowMs: Date.now(),

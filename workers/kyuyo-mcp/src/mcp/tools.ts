@@ -30,6 +30,11 @@ import {
 import { OPE_NO_RE, START_OPE_RE } from "../../../dtako-scraper-relay/src/theearth-report-client";
 import { CRON_BATCH_MAX_ITEMS } from "../../../dtako-scraper-relay/src/cron-batch";
 import {
+  SCRAPE_ERROR_LIST_DEFAULT_LIMIT,
+  SCRAPE_ERROR_LIST_MAX_LIMIT,
+} from "../../../dtako-scraper-relay/src/scrape-error-reader";
+import { EVIDENCE_BODY_PREFIX_MAX } from "../../../dtako-scraper-relay/src/theearth-client";
+import {
   crossMonthMinutesByDate,
   kosokuPartsByDate,
   parseKosokuDaily,
@@ -1292,6 +1297,145 @@ export const getOperationZipTool = {
       throw new Error(`relay: parse failed: ${responseBody.slice(0, 200)}`);
     }
   },
+};
+
+// ── list_scrape_errors / get_scrape_error ────────────────────────────────────
+
+/**
+ * relay の read-only 診断口を叩く共通部分 (Refs #1052)。
+ *
+ * `get_operation_zip` と**同じ流儀** (SCRAPER_RELAY service binding +
+ * `X-Alc-Proxy-Secret`、非 2xx は本文つきで throw、応答は JSON をそのまま返す)。
+ * 既存 tool 側をこのヘルパへ寄せる書き換えは**しない** — 認可段に触らないため
+ * (#1052 の禁止事項)。ここで括るのは今回足す 2 tool だけ。
+ */
+async function callRelayReadOnly(env: Env, path: string, body: unknown): Promise<unknown> {
+  const relay = env.SCRAPER_RELAY;
+  if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
+  const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+  const res = await relay.fetch(`https://relay.internal${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
+    body: JSON.stringify(body),
+  });
+  const responseBody = await res.text();
+  if (!res.ok) throw new Error(`relay: status ${res.status}: ${responseBody.slice(0, 200)}`);
+  try {
+    return JSON.parse(responseBody) as unknown;
+  } catch {
+    throw new Error(`relay: parse failed: ${responseBody.slice(0, 200)}`);
+  }
+}
+
+/** `scrapeJobKey` (読取日) の形。単日か期間 (`YYYY-MM-DD..YYYY-MM-DD`)。 */
+const SCRAPE_JOB_KEY_RE = /^\d{4}-\d{2}-\d{2}(?:\.\.\d{4}-\d{2}-\d{2})?$/;
+
+const listScrapeErrorsArgs = z
+  .object({
+    comp_id: z.string().optional().describe("会社。省略すると relay の既定 (KINTAI_COMP_ID)"),
+    job_key: z
+      .string()
+      .regex(SCRAPE_JOB_KEY_RE)
+      .optional()
+      .describe(
+        "読取日で絞る。`YYYY-MM-DD` か期間 `YYYY-MM-DD..YYYY-MM-DD` " +
+          "(スクレイプの job キーと同じ形)。省略するとその会社の全読取日。",
+      ),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(SCRAPE_ERROR_LIST_MAX_LIMIT)
+      .optional()
+      .describe(
+        `返す件数の上限 (新しい順)。既定 ${SCRAPE_ERROR_LIST_DEFAULT_LIMIT}、最大 ` +
+          `${SCRAPE_ERROR_LIST_MAX_LIMIT}。切っても total / truncated / counts_by_job_key は` +
+          "全件から出るので、件数と分布は上限に関係なく読める。",
+      ),
+  })
+  .strict();
+
+/**
+ * スクレイプ失敗の原本 (`{DTAKO_SCRAPE_R2_PREFIX}-errors/`) の一覧 (Refs #1052)。
+ *
+ * **read-only。** relay の `POST /kintai-relay/scrape-errors` を叩くだけで、保存側
+ * (`scrape-error-artifact.ts`) には触らない。`get_operation_zip` と同じ位置づけ。
+ */
+export const listScrapeErrorsTool = {
+  name: "list_scrape_errors",
+  description:
+    "dtako スクレイプが「ZIP でない応答 / 想定と違うページ」で落ちた時に R2 へ残した" +
+    "**原本の一覧**を返す (Refs #1052)。**読むだけ — put / delete はしない。**" +
+    "スクレイプの失敗理由 (`取得したデータが ZIP ではありません (10546 bytes)` 等) は" +
+    "バイト数しか教えてくれないので、**そのページが何だったかを確定するにはこの一覧から" +
+    "原本を選んで `get_scrape_error` で開く。**" +
+    "各行は key / size / comp_id / job_key (読取日) / saved_at / ext (bin=生バイト、" +
+    "json=ページ違いの証拠) を持つ。**新しい順**で、既定 " +
+    `${SCRAPE_ERROR_LIST_DEFAULT_LIMIT} 件で切る。` +
+    "`total` / `truncated` / `counts_by_job_key` (読取日ごとの件数) は**切る前の全件**から" +
+    "出るので、「どの読取日が繰り返し落ちているか」は上限に関係なく読める。" +
+    "**空 ZIP は保存されない** (未来日プローブのノイズ避け、#633-22) ので、失敗の件数と" +
+    "原本の件数は一致しない。",
+  inputSchema: listScrapeErrorsArgs,
+  execute: async (env: Env, args: z.infer<typeof listScrapeErrorsArgs>) =>
+    callRelayReadOnly(env, "/kintai-relay/scrape-errors", {
+      comp_id: args.comp_id,
+      job_key: args.job_key,
+      limit: args.limit,
+    }),
+};
+
+const getScrapeErrorArgs = z
+  .object({
+    key: z
+      .string()
+      .min(1)
+      .describe(
+        "`list_scrape_errors` が返した key をそのまま渡す。**`{prefix}-errors/` 配下だけ** — " +
+          "同じ bucket に居る ETC 明細 CSV / 拘束サマリ / 賃金マスタ等の key は relay が 400 で拒否する。",
+      ),
+    full: z
+      .boolean()
+      .optional()
+      .describe(
+        `**既定 false — 本文は先頭 ${EVIDENCE_BODY_PREFIX_MAX} 文字までしか返らない。** ` +
+          "原本は theearth の HTML で、セッション ID 等が埋まっている可能性があるため。" +
+          "true にすると全文が返る。**まず false で <title> と body_prefix を読み、" +
+          "それで足りなければ true にすること。**",
+      ),
+    comp_id: z.string().optional().describe("会社。省略すると relay の既定 (KINTAI_COMP_ID)"),
+  })
+  .strict();
+
+/**
+ * スクレイプ失敗の原本 1 件を返す (Refs #1052)。
+ *
+ * **read-only。** 既定では本文を切り、`<title>` だけ別に返す (親指示 2026-08-29)。
+ */
+export const getScrapeErrorTool = {
+  name: "get_scrape_error",
+  description:
+    "スクレイプ失敗の原本を 1 件読む (Refs #1052)。key は `list_scrape_errors` の戻り値から取る。" +
+    "**読むだけ — put / delete はしない。**" +
+    `**既定では本文を先頭 ${EVIDENCE_BODY_PREFIX_MAX} 文字で切る** — 原本は theearth の HTML で、` +
+    "セッション ID 等が埋まっている可能性があるため。切った事は `body_truncated` / " +
+    "`body_chars` に出る (黙って切らない)。全文が要るなら `full: true` を明示する。" +
+    "**`title` は本文全体から探した `<title>`** なので、4KB より後ろに在っても拾える — " +
+    "「theearth が何のページを返したか」はまずここを見る。" +
+    "`.json` の原本 (ページ違いの証拠) では `json_meta` に kind / message / evidence が" +
+    "構造化されて載る (**生ページは json_meta には入らない** — 生本文は body_prefix 側の" +
+    "切り詰めと full の規則に従う)。" +
+    "`charset` / `charset_fallback` は本文をどの文字コードで読んだか (theearth は Shift_JIS の" +
+    "ことがある。`charset_fallback: true` は宣言された文字コードが使えず utf-8 で読んだ = " +
+    "日本語が化けている可能性がある、という意味)。",
+  inputSchema: getScrapeErrorArgs,
+  execute: async (env: Env, args: z.infer<typeof getScrapeErrorArgs>) =>
+    callRelayReadOnly(env, "/kintai-relay/scrape-error-object", {
+      key: args.key,
+      full: args.full,
+      comp_id: args.comp_id,
+    }),
 };
 
 // ── run_dtako_reimport ───────────────────────────────────────────────────────
@@ -3043,6 +3187,8 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getKintaiDaySummariesTool as unknown as ToolEntry<z.ZodTypeAny>,
   getKintaiDiffTool as unknown as ToolEntry<z.ZodTypeAny>,
   getOperationZipTool as unknown as ToolEntry<z.ZodTypeAny>,
+  listScrapeErrorsTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getScrapeErrorTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDtakoReimportTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDtakoAlcUploadTool as unknown as ToolEntry<z.ZodTypeAny>,
   getIchibanCostsTool as unknown as ToolEntry<z.ZodTypeAny>,

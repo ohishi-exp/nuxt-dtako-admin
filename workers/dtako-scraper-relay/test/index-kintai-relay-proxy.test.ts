@@ -14,6 +14,8 @@ import {
   handleDtakoAlcUpload,
   handleNet780Archive,
   handleNetprintRun,
+  handleScrapeErrors,
+  handleScrapeErrorObject,
   type RelayWorkerEnv,
 } from "../src/index";
 
@@ -687,5 +689,119 @@ describe("handleNetprintRun (POST /kintai-relay/netprint-run)", () => {
     const body = (await jsonOf(res)) as { ok: boolean; results: Array<{ ok: boolean; detail: string }> };
     expect(body.ok).toBe(false);
     expect(body.results[0].detail).toContain("HTTP 503");
+  });
+});
+
+// ── スクレイプ失敗の原本を読む 2 口 (Refs #1052) ─────────────────────────────
+// **読むだけ。** 認証・comp_id フォールバック・DO routing・body 素通しは
+// handleOperationZip と同じ流儀に揃えてある (新しい認可の作法を作っていない)。
+describe("handleScrapeErrors / handleScrapeErrorObject (read-only、Refs #1052)", () => {
+  const ERR_KEY = "dtako-scrape-errors/75700192/2026-08-01/1754000000000.bin";
+
+  it("X-Alc-Proxy-Secret が不一致だと401 (DO を叩かない) — 一覧も取得も", async () => {
+    for (const handler of [handleScrapeErrors, handleScrapeErrorObject]) {
+      const { env, doFetch } = fakeEnv();
+      const res = await handler(
+        post("https://relay.internal/kintai-relay/scrape-errors", { comp_id: "75700192" }, {
+          "X-Alc-Proxy-Secret": "wrong",
+        }),
+        env,
+      );
+      expect(res.status).toBe(401);
+      expect(doFetch).not.toHaveBeenCalled();
+    }
+  });
+
+  it("INTERNAL_SHARED_SECRET が未設定なら503 (DO を叩かない)", async () => {
+    const { env, doFetch } = fakeEnv({ INTERNAL_SHARED_SECRET: undefined });
+    const res = await handleScrapeErrors(
+      post("https://relay.internal/kintai-relay/scrape-errors", { comp_id: "75700192" }),
+      env,
+    );
+    expect(res.status).toBe(503);
+    expect(doFetch).not.toHaveBeenCalled();
+  });
+
+  it("body が JSON でなければ400 (DO を叩かない)", async () => {
+    const { env, doFetch } = fakeEnv();
+    const req = new Request("https://relay.internal/kintai-relay/scrape-errors", {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": SECRET },
+      body: "not json",
+    });
+    const res = await handleScrapeErrors(req, env);
+    expect(res.status).toBe(400);
+    expect(await jsonOf(res)).toEqual({ error: "body must be JSON" });
+    expect(doFetch).not.toHaveBeenCalled();
+  });
+
+  it("comp_id は body 優先、無ければ KINTAI_COMP_ID にフォールバックする", async () => {
+    const { env, doFetch, relay } = fakeEnv({ KINTAI_COMP_ID: "9999" });
+    await handleScrapeErrors(
+      post("https://relay.internal/kintai-relay/scrape-errors", { job_key: "2026-08-01" }),
+      env,
+    );
+    expect(relay.idFromName).toHaveBeenCalledWith("scraper-comp-9999");
+    const body = JSON.parse((doFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(body).toEqual({ job_key: "2026-08-01", comp_id: "9999" });
+  });
+
+  it("comp_id が body にも KINTAI_COMP_ID にも無ければ503 (DO を叩かない)", async () => {
+    const { env, doFetch } = fakeEnv();
+    const res = await handleScrapeErrorObject(
+      post("https://relay.internal/kintai-relay/scrape-error-object", { key: ERR_KEY }),
+      env,
+    );
+    expect(res.status).toBe(503);
+    expect(doFetch).not.toHaveBeenCalled();
+  });
+
+  it("一覧は /cron/dtako/scrape-errors へ、body を組み直さず転送する", async () => {
+    const { env, doFetch } = fakeEnv();
+    await handleScrapeErrors(
+      post("https://relay.internal/kintai-relay/scrape-errors", {
+        comp_id: "75700192",
+        job_key: "2026-08-01",
+        limit: 5,
+      }),
+      env,
+    );
+    expect(doFetch.mock.calls[0][0]).toBe("https://relay.internal/cron/dtako/scrape-errors");
+    expect(JSON.parse((doFetch.mock.calls[0][1] as RequestInit).body as string)).toEqual({
+      comp_id: "75700192",
+      job_key: "2026-08-01",
+      limit: 5,
+    });
+  });
+
+  it("取得は /cron/dtako/scrape-error-object へ、key と full を落とさず転送する", async () => {
+    const { env, doFetch } = fakeEnv();
+    await handleScrapeErrorObject(
+      post("https://relay.internal/kintai-relay/scrape-error-object", {
+        comp_id: "75700192",
+        key: ERR_KEY,
+        full: true,
+      }),
+      env,
+    );
+    expect(doFetch.mock.calls[0][0]).toBe("https://relay.internal/cron/dtako/scrape-error-object");
+    expect(JSON.parse((doFetch.mock.calls[0][1] as RequestInit).body as string)).toEqual({
+      comp_id: "75700192",
+      key: ERR_KEY,
+      full: true,
+    });
+  });
+
+  it("DO の応答 (status/body) をそのまま透過する", async () => {
+    const payload = { error: "key は dtako-scrape-errors/ 配下だけです" };
+    const { env } = fakeEnv({
+      doFetch: vi.fn(async () => new Response(JSON.stringify(payload), { status: 400 })),
+    });
+    const res = await handleScrapeErrorObject(
+      post("https://relay.internal/kintai-relay/scrape-error-object", { comp_id: "1", key: "etc/x" }),
+      env,
+    );
+    expect(res.status).toBe(400);
+    expect(await jsonOf(res)).toEqual(payload);
   });
 });
