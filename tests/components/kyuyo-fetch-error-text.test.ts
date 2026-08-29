@@ -139,6 +139,28 @@ describe('/kyuyo-fetch の「リスト更新」失敗の 1 文 (Refs #1050)', ()
     expect(pageErrorText(await refreshWith(500, { error: true, statusCode: 500 })))
       .toBe('リスト更新に失敗 (HTTP 500):')
   })
+
+  /**
+   * ★ **この 2 route は role gate の下に居ない** ので、403 の ASCII では差が出ない。
+   * **差が出るのは「握られなかった例外」**: Nitro (`internal/error/prod.mjs`) は
+   * `statusMessage` を `"Server Error"` に潰し、本当の理由を `message` にだけ残す。
+   * 旧式 (`statusMessage` 先) は `… (HTTP 500): Server Error` と出していて、
+   * **理由が出ていないのに「サーバのエラー」と読めた**。
+   *
+   * 本文は nuxt dev の実機で採った本物 (`/api/netprint/targets` を binding 無しで叩くと
+   * Secrets Store が投げてこの形になる)。
+   */
+  it('握られなかった例外は Server Error ではなく本当の理由を出す', async () => {
+    const t = pageErrorText(await refreshWith(500, {
+      error: true,
+      url: 'http://127.0.0.1:3211/api/kyuyo-master/refresh',
+      statusCode: 500,
+      statusMessage: 'Server Error',
+      message: 'Secret "INTERNAL_SHARED_SECRET" not found',
+    }))
+    expect(t).toBe('リスト更新に失敗 (HTTP 500): Secret "INTERNAL_SHARED_SECRET" not found')
+    expect(t).not.toContain('Server Error')
+  })
 })
 
 describe('/kyuyo-fetch の「一括で引き直す」失敗の 1 文 (Refs #1050)', () => {

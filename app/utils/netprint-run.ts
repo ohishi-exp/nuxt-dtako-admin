@@ -132,9 +132,10 @@ function readDate(value: unknown): string | null {
  *
  * ## ★ 理由の拾い順は `pickBodyReason` に任せる — `statusMessage` を先に読まないこと
  *
- * server route は ASCII を `statusMessage`・日本語を `message` に置く
- * (`statusMessage` に日本語を入れると本番 workerd で reason phrase が壊れる。
- * #1032 / #886)。`statusMessage` を先に読むと**この画面だけ英文になる** (#1050)。
+ * この route 自身の `createError` は `statusMessage` だけを渡すので h3 が `message` へ
+ * 同じ文を写す (= どちらを読んでも同じ)。**差が出るのは role gate の 403** で、
+ * あちらは ASCII を `statusMessage`・日本語を `message` に置く — `statusMessage` を
+ * 先に読むと**この画面だけ英文に戻る** (#1050)。理由の全体は `pickBodyReason` の doc。
  */
 export function normalizeNetprintRunOutcome(status: number, ok: boolean, body: unknown): NetprintRunOutcome {
   const rec = asRecord(body)

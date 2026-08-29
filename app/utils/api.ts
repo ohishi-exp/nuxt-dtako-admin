@@ -772,9 +772,10 @@ export function buildEtcCsvDownloadUrl(key: string): string {
  * `request()` (rust-alc-api 向けの `createAuthFetch`) は base URL が backend なので使わない。
  *
  * 非 2xx は本文から理由を拾って (`pickBodyReason`、relay の理由には `relay:` 前置が
- * 付く) `Error.message` にして投げる。**`statusMessage` を先に読まないこと** (#1050) —
- * server route は ASCII を `statusMessage`・日本語を `message` に置くので、先に読むと
- * 画面が英文になる。拾えなければ `HTTP ${status}`。
+ * 付く) `Error.message` にして投げる。拾えなければ `HTTP ${status}`。
+ * **`statusMessage` を先に読まないこと** (#1050) — role gate の 403 は ASCII を
+ * `statusMessage`・日本語を `message` に置くので、先に読むと画面が英文になる
+ * (理由の全体は `pickBodyReason` の doc が正)。
  */
 export async function postNet780Archive(operationNos: string[]): Promise<Net780ArchiveResult> {
   const token = currentAccessToken()

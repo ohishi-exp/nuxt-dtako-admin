@@ -123,10 +123,23 @@ export function describeApiError(e: unknown): string {
  *
  * ## ★ 順序は `[error, message, statusMessage]`。`statusMessage` を先に読まないこと
  *
- * server route は `createError({ statusMessage: <ASCII>, message: <日本語> })` の形で
- * 投げる (**`statusMessage` に日本語を入れると本番 workerd で reason phrase が壊れ、
- * 画面の注記に穴が出る** — #1032 / #886 で 2 度踏んでいる)。**日本語は `message` にしか
- * 無い**ので、`statusMessage` を先に読むと画面に ASCII だけが出る (#1050)。
+ * **理由は 2 つあり、server route の書き方によってどちらが効くかが変わる** (#1050)。
+ * **どちらの向きでも `message` 先が正しい**ので、route ごとに読み分けない:
+ *
+ * | server 側の書き方 | `statusMessage` | `message` | `statusMessage` 先だと |
+ * | --- | --- | --- | --- |
+ * | **role gate** (`server/utils/require-role.ts`) と ichiban proxy — **両方を明示** | ASCII | 日本語 | **画面が ASCII になる** |
+ * | **`statusMessage` だけ渡す** (netprint / kyuyo-master / net780-archive の自前エラー) | 日本語 | **h3 が同じ日本語を写す** | 同じ値なので**変わらない** |
+ *
+ * 2 行目は h3 1.15.6 で実測 (`createError({ statusMessage: '… が未設定です' })` →
+ * `e.message` に同じ文字列)。**ただし `H3Error.toJSON()` を通る経路では
+ * `statusMessage` だけが sanitize され、非 ASCII が落ちる**
+ * (`"SCRAPER_RELAY service binding "` になるのを実測) — `message` は素通しなので、
+ * **その経路に変わったときに壊れないのも `message` 先の側**。
+ *
+ * **`statusMessage` に日本語を入れないこと自体は今も禁止** (本番 workerd で reason
+ * phrase が壊れる。#1032 / #886)。この順序はその禁止の代わりではなく、独立した保険。
+ *
  * `error` を先頭に置くのは upstream proxy が passthrough する `{ error: '…' }` (文字列)
  * を先に見るため — **この順序の根拠は `describeApiError` の doc が正**。
  *

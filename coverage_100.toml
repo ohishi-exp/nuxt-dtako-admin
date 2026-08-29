@@ -402,23 +402,28 @@ branches = true
 # `describeApiError` 1 関数だけ**の BR() 値で、その後 #963 が 5 site
 # (`!fallback && err.statusCode` の 3 / `err.message ?? ''` / `if (synthetic)`)、
 # #996 が 3 関数 10 site を足した後の**ファイル全体を指していなかった** (13+5=18)。
-# 下は **`origin/main` c3fac8ee5d68 + この PR (#1050)** のファイル全体を 2026-08-29 に
+# 下は **`origin/main` abf4aabd068e + この PR (#1050)** のファイル全体を 2026-08-29 に
 # 測り直した値。**#1050 で `pickBodyReason` が 6 site 増え、`hasStringReason` は
 # そこへ委譲して 4 site → 0 site になった** (差引 +2)。
-# (前回 = #1006 が `origin/main` 3575c7604a で測った値を括弧に併記。
-# その前の #1021 は `origin/main` 29bb7f5 で BR() 30 — 両側 29。)
 #
-# | 指標 | 対象 | 値 (c3fac8ee5d68 + #1050 / 2026-08-29 実測) | 前 (3575c7604a + #1006) |
+# **★ base 側も同じ worktree の `abf4aabd068e` で測り直してある** — #1058 (#1053) の
+# マージで `origin/main` が動いたため rebase した。あの PR は `coverage_100.toml` と
+# `tests/server/etc-csv-download.test.ts` の 2 つだけで `app/**` を 1 行も触っていないので、
+# **base 側の数字は rebase の前後で完全に同じ**だった (30 — 両側 29 / 片側 1 を再測して確認)。
+# (それ以前 = #1006 が `origin/main` 3575c7604a で測った値も 30 — 両側 29。
+# その前の #1021 は `origin/main` 29bb7f5 で 29 — 両側 28。)
+#
+# | 指標 | 対象 | base (abf4aabd068e) | **+ #1050 (2026-08-29 実測)** |
 # | --- | --- | --- | --- |
-# | v8 statements | ファイル全体 | 50 / 50 | 48 / 48 |
-# | v8 branch site | ファイル全体 | 25 | 23 |
-# | v8 branch arm | ファイル全体 | 51 / 51 (**死に分岐 0**) | 47 / 47 |
-# | v8 funcs | ファイル全体 | 10 / 10 | 9 / 9 |
-# | **BR() branch site** | **ファイル全体** | **32 — 両側 31 / 片側のみ 1 / 未到達 0** | 30 — 両側 29 |
+# | v8 statements | ファイル全体 | 48 / 48 | **50 / 50** |
+# | v8 branch site | ファイル全体 | 23 | **25** |
+# | v8 branch arm | ファイル全体 | 47 / 47 | **51 / 51 (死に分岐 0)** |
+# | v8 funcs | ファイル全体 | 9 / 9 | **10 / 10** |
+# | **BR() branch site** | **ファイル全体** | 30 — 両側 29 / 片側 1 | **32 — 両側 31 / 片側のみ 1 / 未到達 0** |
 # | BR() branch site | `describeApiError` | 18 — 両側 17 | 18 — 両側 17 |
-# | BR() branch site | **`pickBodyReason`** | **6 — 両側 6** | — (この PR で追加) |
+# | BR() branch site | **`pickBodyReason`** | — (存在しない) | **6 — 両側 6** |
 # | BR() branch site | `responseReason` | 2 — 両側 2 | 2 — 両側 2 |
-# | BR() branch site | `hasStringReason` | **0 (`pickBodyReason` へ委譲)** | 4 — 両側 4 |
+# | BR() branch site | `hasStringReason` | 4 — 両側 4 | **0 (`pickBodyReason` へ委譲)** |
 # | BR() branch site | `nextStepForStatus` | 5 — 両側 5 | 5 — 両側 5 |
 # | BR() branch site | `describeFetchThrow` | 1 — 両側 1 | 1 — 両側 1 |
 #

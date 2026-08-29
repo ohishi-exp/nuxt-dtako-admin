@@ -138,13 +138,24 @@ export default defineEventHandler(async (event: H3Event) => {
   // h3 の `createError` は `message` 未指定なら `statusMessage` を写すので、
   // **写させずに両方明示する** (写しに任せると本文まで ASCII になる)。
   //
-  // ★ **この直しを front の他の経路へ広げないこと。**`app/utils/api.ts:784,826` /
-  // `app/utils/netprint-run.ts:139` / `app/pages/kyuyo-fetch.vue:150,214` は
-  // **`statusMessage` を `message` より先に読む** ので、同じ直しを netprint / kyuyo /
-  // net780-archive の server route に当てると**画面の日本語が ASCII に化ける**。
-  // `/api/ichiban/**` を読む front は全数が `message` 先 (`describeApiError` ないし
-  // `theearthSessionErrorMessage` = `[error, message, statusMessage]`) か、
-  // 本文を読まないかのどちらかであることを実測して確かめてある (Refs #1032)。
+  // ★ **この形 (ASCII を `statusMessage` / 日本語を `message`) を使うのは、この proxy と
+  // role gate (`server/utils/require-role.ts`) の 2 つ**。他の route (netprint /
+  // kyuyo-master / net780-archive の自前エラー) は `statusMessage` だけを渡していて、
+  // h3 が `message` へ同じ文を写している — **そちらも本当は ASCII へ寄せるべき**だが、
+  // 本 PR (#1050) の範囲外なので触っていない。
+  // **禁止されているのは `statusMessage` に日本語を入れること**で、その理由は
+  // **本番 (workerd) で reason phrase が壊れ、画面の注記に穴が出る**から (上の実測)。
+  // **この禁止は今も有効** — 新しい route を足すときも ASCII を `statusMessage` に置く。
+  //
+  // **★ 「front が `statusMessage` を先に読むから」という理由は #1050 で消えました。**
+  // かつては `app/utils/api.ts:784,826` / `app/utils/netprint-run.ts:139` /
+  // `app/pages/kyuyo-fetch.vue:150,214` の **4 経路 5 か所だけが `statusMessage` を先に
+  // 読んでいて**、この形を当てると**その画面だけ ASCII が出て**いた。#1050 で 5 か所とも
+  // `pickBodyReason` (`app/utils/api-error.ts` = `[error, message, statusMessage]`) に
+  // 揃えたので、**いまは front 全数が `message` を `statusMessage` より先に読む**
+  // (`describeApiError` / `pickBodyReason` / `theearthSessionErrorMessage` /
+  // `app/pages/y-time-export.vue` の `describeApiFailure` / `app/utils/ichiban-health.ts`)。
+  // ⇒ **この形を他の server route に広げても、画面は日本語のまま**になる。
   //
   // ★ **upstream に何が在るかを示唆しない。**書くのは「この proxy が中継する path では
   // ない」までで、要求された path も echo しない。
