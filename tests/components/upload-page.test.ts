@@ -22,6 +22,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import type { PendingUpload, UploadResponse } from '~/types'
 import { NUXT_UI_PAGE_STUBS } from '../helpers/stubs'
+import { nextStepCases, expectExactlyOneNextStep } from '../helpers/next-step'
 
 const { api } = vi.hoisted(() => ({
   api: {
@@ -325,13 +326,33 @@ describe('/upload デジタコ CSV アップロード', () => {
           + ' — サーバ側の設定か障害です (権限の問題ではありません)。復旧してから「保留中のアップロードを再取得」を押してください)')
         // **「無い」と言わない** — 読めなかっただけかもしれない
         expect(w.text()).not.toContain('保留中のアップロードはありません')
-        // **断定もしない。**確かめ方まで出す (#910 と同じ形)
+        // **断定もしない。「判らない」ことそのものを言う。**
+        // ★ **「確かめ方まで出す」ではもう無い** — #1008 PR-2 で下の段から
+        //   「再読み込みを押して確かめてください」を落とした (下の注記)。
+        //   **やり直し方は上の 1 文が実在ボタン名で言う**ので、この段は事実だけ。
         expect(w.text()).toContain('0 件なのか読めなかっただけなのかは、この画面では判りません')
         // ★ **「再読み込みを押して」は落とした** (Refs #1008)。やり直し方は上の 1 文が
         //   実在するボタン名 (`aria-label`) で言うので、ここに残すと同じ指示が 2 回出るうえ、
         //   **この画面に「再読み込み」という表記のボタンは無い** (陰性対照)。
         expect(w.text()).not.toContain('再読み込みを押して')
       })
+
+
+      // ★★ **4 経路** で「次の一手はちょうど 1 つ、食い違わない」(Refs #1008 PR-3)。
+      //    条件の本体は `tests/helpers/next-step.ts`。**この画面は `UAlert` ではなく
+      //    `<p>` 2 段**なので、2 つの `<p>` のテキストをそのまま渡す。
+      //    **`retry` は再読み込みではなく実在ボタン名** (アイコンボタンの `aria-label`)。
+      it.each(nextStepCases('「保留中のアップロードを再取得」を押してください').map(c => [c.label, c] as const))(
+        '保留中のアップロード — %s',
+        async (_label, c) => {{
+          api.getPendingUploads.mockRejectedValue(c.error)
+          const w = mountPage()
+          await flushPromises()
+          const ps = w.findAll('.py-8.text-center.text-sm.space-y-1 p')
+          expect(ps, '失敗の段が 2 本の <p> で出ていない').toHaveLength(2)
+          expectExactlyOneNextStep(ps[0]!.text(), ps[1]!.text(), c.next)
+        }},
+      )
 
       it('★ 逆方向: 本当に 0 件の回は今までどおり「ありません」だけ (異常に見せない)', async () => {
         api.getPendingUploads.mockResolvedValue([])
@@ -346,7 +367,7 @@ describe('/upload デジタコ CSV アップロード', () => {
         api.getPendingUploads.mockRejectedValue({ status: 503 })
         const w = mountPage()
         await flushPromises()
-        expect(w.text()).toContain('保留中のアップロードを取得できませんでした (理由を読めませんでした)')
+        expect(w.text()).toContain('保留中のアップロードを取得できませんでした (理由を読めませんでした — 「保留中のアップロードを再取得」を押してください)')
         expect(w.text()).not.toContain('[object Object]')
         expect(w.text()).not.toContain('保留中のアップロードはありません')
       })
@@ -436,6 +457,23 @@ describe('/upload デジタコ CSV アップロード', () => {
         expect(w.text()).toContain('0 件なのか読めなかっただけなのかは、この画面では判りません')
       })
 
+
+      // ★★ **4 経路** で「次の一手はちょうど 1 つ、食い違わない」(Refs #1008 PR-3)。
+      //    条件の本体は `tests/helpers/next-step.ts`。**この画面は `UAlert` ではなく
+      //    `<p>` 2 段**なので、2 つの `<p>` のテキストをそのまま渡す。
+      //    **`retry` は再読み込みではなく実在ボタン名** (アイコンボタンの `aria-label`)。
+      it.each(nextStepCases('「アップロード履歴を再取得」を押してください').map(c => [c.label, c] as const))(
+        'アップロード履歴 — %s',
+        async (_label, c) => {{
+          api.getUploads.mockRejectedValue(c.error)
+          const w = mountPage()
+          await flushPromises()
+          const ps = w.findAll('.py-4.text-center.text-sm.space-y-1 p')
+          expect(ps, '失敗の段が 2 本の <p> で出ていない').toHaveLength(2)
+          expectExactlyOneNextStep(ps[0]!.text(), ps[1]!.text(), c.next)
+        }},
+      )
+
       it('★ 逆方向: 本当に 0 件の回は今までどおり「アップロード履歴なし」だけ', async () => {
         api.getUploads.mockResolvedValue([])
         const w = mountPage()
@@ -448,7 +486,7 @@ describe('/upload デジタコ CSV アップロード', () => {
         api.getUploads.mockRejectedValueOnce(new Error('落ちた'))
         const w = mountPage()
         await flushPromises()
-        expect(w.text()).toContain('アップロード履歴を取得できませんでした (落ちた)')
+        expect(w.text()).toContain('アップロード履歴を取得できませんでした (落ちた — 「アップロード履歴を再取得」を押してください)')
 
         api.getUploads.mockResolvedValue([uploaded()])
         await w.findAll('button')[1]!.trigger('click')

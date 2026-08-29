@@ -624,3 +624,69 @@ describe('describeCaughtError (Refs #1008)', () => {
       .toContain('サーバ側の設定か障害です')
   })
 })
+
+/**
+ * ★★ 画面 3 本 (`daily-hours` / `operations` / `restraint-report`) が**依存している契約**
+ * (Refs #1008 PR-3)。**`api-error.ts` を触る人はここを読むこと。**
+ *
+ * ## 何を約束しているか
+ *
+ * > **`describeCaughtError` が「次の一手」を付けなかった回は、戻り値が
+ * > `describeApiError(e)` と 1 文字も違わない。**
+ *
+ * 画面側の `describeListFailure` は**この同一性で「次の一手が付かなかった回」を判定**し、
+ * その回だけ `RETRY_RELOAD` を補っている:
+ *
+ * ```ts
+ * return detail === describeApiError(e) ? `${detail} — ${RETRY_RELOAD}` : detail
+ * ```
+ *
+ * ## ★ 崩れたときに何が起きるか — **画面は緑のまま壊れる**とは限らないが、原因はここに出ない
+ *
+ * `describeCaughtError` の 3 番目の枝が「素の `describeApiError` を返す」のをやめると、
+ * 上の判定は**常に false** になり、**status を読めない失敗で画面から次の一手が消える**
+ * (= #1008 が潰そうとしている状態に戻る)。画面側のテストは「次の一手が在る」ことを
+ * 期待しているので落ちるが、**落ちるのは 3 画面ぶんのページテスト**で、
+ * **原因が `api-error.ts` にあることは分からない**。
+ * ⇒ **前提そのものをここで固定する。** ここが落ちれば、触った人がその場で気づける。
+ *
+ * ## ★ 文言では判定していない (ここが要点)
+ *
+ * 画面側は `'てください'` のような**語で判定していない**。語で見ると
+ * `nextStepForStatus` の文言を変えた日に**空撃ちになり、永久に緑のまま通る**
+ * (消えた語は二度と現れないので、否定ガードが死んだことに誰も気づけない)。
+ * **戻り値そのものの比較**にしてあるのはそのため。
+ */
+describe('★ 契約: 次の一手を付けなかった回は describeApiError と同一 (Refs #1008 PR-3)', () => {
+  const RETRY = 'ページを再読み込みしてください'
+
+  /** status を読めない例外 = `describeCaughtError` の 3 番目の枝に落ちるもの。 */
+  const UNREADABLE: [string, unknown][] = [
+    ['素の Error (createAuthFetch の形をしていない)', new Error('Unexpected token \'<\' … is not valid JSON')],
+    ['ラベルに括弧が入って正規表現から外れた', new Error('API (v2) エラー (503): {"error":"落ちています"}')],
+    ['3 桁でない数字', new Error('API エラー (12): x')],
+    ['message が文字列でない', { message: 500 }],
+    ['null', null],
+    ['undefined', undefined],
+  ]
+
+  it.each(UNREADABLE)('%s — describeCaughtError === describeApiError', (_label, e) => {
+    expect(describeCaughtError(e, RETRY)).toBe(describeApiError(e))
+    // ★ 同時に「次の一手が付いていない」ことも見る — 同一性だけだと、
+    //   `describeApiError` の側が次の一手を持つようになった場合に見逃す。
+    expect(describeCaughtError(e, RETRY)).not.toContain(RETRY)
+  })
+
+  it('★ 陽性対照: status を読める回は describeApiError と一致しない (判定が常に true にならない)', () => {
+    for (const e of [
+      new Error('API エラー (503): DB に繋がりません'),
+      new Error('API エラー (403): 権限がありません'),
+      new TypeError('Failed to fetch'),
+    ]) {
+      expect(describeCaughtError(e, RETRY)).not.toBe(describeApiError(e))
+      expect(describeCaughtError(e, RETRY).startsWith(describeApiError(e))
+        || describeCaughtError(e, RETRY).includes(RETRY)
+        || describeCaughtError(e, RETRY).includes('依頼してください')).toBe(true)
+    }
+  })
+})

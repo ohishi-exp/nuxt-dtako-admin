@@ -2,7 +2,7 @@
 import { uploadZip, getPendingUploads, rerunUpload, getUploads, splitCsv } from '~/utils/api'
 import { parseSplitCsvResponse } from '~/utils/scrape-split'
 import type { UploadResponse, PendingUpload } from '~/types'
-import { describeCaughtError } from '~/utils/api-error'
+import { describeApiError, describeCaughtError } from '~/utils/api-error'
 
 const isDragging = ref(false)
 const isUploading = ref(false)
@@ -101,6 +101,24 @@ async function handleUpload(file: File) {
  * `tests/components/next-step-retry-labels.test.ts` が
  * 「その `.vue` の template に実在するか」を機械で見ている。
  *
+ * ## ★ 次の一手は**どの経路でもちょうど 1 つ**。0 にも 2 つにもしない (#1008 PR-3)
+ *
+ * | 入ってくる例外 | `describeCaughtError` | ここで足すもの |
+ * | --- | --- | --- |
+ * | `API エラー (503): …` | 「復旧してから」+ `retry` | なし |
+ * | `API エラー (403): …` | 「管理者に許可の追加を依頼してください」 | なし |
+ * | status を読めない `Error` | **次の一手なし** (3 番目の枝) | `retry` |
+ * | `Error` ですらない | — | `retry` |
+ *
+ * **PR-2 で下の段から「再読み込みを押して確かめてください」を落としたとき、
+ * status を読めない 2 経路では下の段が唯一の次の一手だった** — 落とした結果 0 になり、
+ * **#1008 の PR が #1008 の欠陥を新しく作っていた** (PR-3 で実測して判明)。
+ * 落としたこと自体は正しい (同じ指示が 2 回出るうえ、この画面に「再読み込み」という
+ * 表記のボタンは無い) ので、**穴はここで塞ぐ**。
+ * 3 画面 (`daily-hours` / `operations` / `restraint-report`) と同じ形だが、
+ * **あちらは `RETRY_RELOAD` 固定・こちらは `retry` が呼び出しごとに違う**
+ * (実在ボタンを名指ししているため) 点だけが違う。
+ *
  * ## ★ ここでは塞げない穴 (#904 に申し送り、未測定)
  *
  * 本番は HTTP/3 で reason phrase が空 (`res.statusText === ''`) なので、
@@ -110,7 +128,15 @@ async function handleUpload(file: File) {
  * **ただし「次の一手」はこの穴の中でも出る** — status は `(503): ` の側から読める。
  */
 function describeListFailure(e: unknown, retry: string): string {
-  return e instanceof Error ? describeCaughtError(e, retry) : '理由を読めませんでした'
+  if (!(e instanceof Error)) return `理由を読めませんでした — ${retry}`
+  const detail = describeCaughtError(e, retry)
+  // ★ **`describeCaughtError` は status が読めなかった回に次の一手を付けない** —
+  //   status ごとに違うので「1 つ選ぶと嘘になる」から (`api-error.ts` の 3 番目の枝)。
+  //   下の段から固定文を落とした (#1008 PR-2) 以上、**ここが最後の砦**なので、
+  //   付かなかった回だけ `retry` を補う。
+  //   **判定は「3 番目の枝が返す値そのもの」との一致**で行う — 文言を grep すると
+  //   `nextStepForStatus` を書き換えた日に空撃ちになる。
+  return detail === describeApiError(e) ? `${detail} — ${retry}` : detail
 }
 
 async function loadPending() {
@@ -302,7 +328,10 @@ onMounted(() => {
 
       <!-- ★ 「読めなかった」と「0 件」を別の文にする (Refs #911)。理由だけ出すと
            **本当に 0 件の回**まで異常に見えるので、0 件の文はそのまま残し、
-           失敗の回は**判らないと言って確かめ方まで出す** (#910 と同じ形)。 -->
+           失敗の回は**「判らない」ことそのものを言う**。
+           ★ **「確かめ方まで出す」ではもう無い** (#1008 PR-2 で下の段から
+           「再読み込みを押して確かめてください」を落としたため。理由は下の注記)。
+           やり直し方は**上の段が実在ボタン名で言う**。 -->
       <div v-else-if="pendingError" class="py-8 text-center text-sm space-y-1">
         <p class="text-red-600 dark:text-red-400 break-words">
           保留中のアップロードを取得できませんでした ({{ pendingError }})

@@ -1842,16 +1842,35 @@ branches = true
 # **その 2 つの `aria-label` はこの PR で足したもの** — アイコンだけのボタンに
 # 表記が無く、案内文が名指しできるものが画面に無かった
 # (`tests/components/next-step-retry-labels.test.ts` が突き合わせる)。
-# **branches の数字は動いていない** (下の 45 site / 94 arm を #1008 PR-2 後に
-# 再測して同値。`aria-label` は静的属性で分岐を作らず、`describeListFailure` は
-# 引数が 1 つ増えただけで三項はそのまま)。
-# branches: **BR() instrumented site 10、10 site とも両側** (#911 の前は 9 / 9)。
-# **v8 branch site 45 / arm 94、すべて被覆。死に分岐 0 件** (#911 の前は 39 site / 82 arm)。
-# 内訳も実測済み: **script 10 site / 24 arm + template 35 site / 70 arm**
-# (#911 の前は script 9/22 + template 30/60) ⇒ 増えた分は
-# **script +1 site (`describeListFailure` の三項) と template +5 site
-# (`v-else-if` 2 本を足したことによる v-if 連鎖の組み替え)**
-# (`statusColor` / `statusLabel` の switch は default を含む 4 アームとも通す。
+# **#1008 PR-3 で `describeListFailure` に「次の一手」の保証を足した** — PR-2 が
+# 2 段目から「再読み込みを押して確かめてください」を落とした結果、**status を読めない
+# 2 経路 (素の `Error` / `Error` ですらない) で次の一手が 0 になっていた**ため。
+# `detail === describeApiError(e)` で「`describeCaughtError` が次の一手を付けなかった回」
+# を判定して `retry` を補う (前提は `tests/utils/api-error.test.ts` の「★ 契約」で固定)。
+#
+# **★ branches の数字は PR-3 で動いた。** PR-2 時点の注記は
+# 「**branches の数字は動いていない** … 三項はそのまま」と書いていたが、
+# **PR-3 で三項 1 個 → `if` 1 個 + 三項 1 個**になったので**もう真ではない**。
+# 実測し直した (base `b4a1ca7` / この PR、`npm run test:coverage` の
+# `coverage-final.json` を数えた。**base 側はテストも `b4a1ca7` に戻してから測っている** —
+# 落ちると vitest は coverage を書かず前回の値を読んでしまうため):
+#
+# | | BR() site (両側) | v8 site / arm | script | template |
+# | --- | --- | --- | --- | --- |
+# | base `b4a1ca7` (= #1008 PR-2 まで) | 10 (10) | 45 / 94 | 10 / 24 | 35 / 70 |
+# | **+ #1008 PR-3** | **11 (11)** | **46 / 96** | **11 / 26** | 35 / 70 |
+# | 差 | **+1** | **+1 / +2** | **+1 / +2** | **0** |
+#
+# 増えた 1 site は **`if (!(e instanceof Error))`**。template は 1 つも動いていない —
+# **PR-3 は `upload.vue` の template を 1 文字も変えていない** (2 段目から注記を
+# 落としたのは PR-2 の仕事で、PR-3 が触ったのは `<script>` の 1 関数だけ)。
+# **★ 他の画面では PR-3 も template を変えている** (`daily-hours` / `operations` /
+# `restraint-report` の注記から次の一手を落とし、前 2 者には `UAlert` を 1 本ずつ
+# 足した) — **この節の「変えていない」は `upload.vue` 限定の話**。
+# branches: **BR() instrumented site 11、11 site とも両側**。片側だけの site は 0。
+# **v8 branch site 46 / arm 96、すべて被覆。死に分岐 0 件。**
+# (#911 の前は BR 9/9・v8 39 site / 82 arm・script 9/22 + template 30/60。
+# `statusColor` / `statusLabel` の switch は default を含む 4 アームとも通す。
 # switch は BR() の対象外・v8 の branch でもあるので、両方の指標で数えている)。
 [[files]]
 path = "app/pages/upload.vue"

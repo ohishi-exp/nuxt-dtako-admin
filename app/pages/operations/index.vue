@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { getOperations, getDrivers, getVehicles, splitCsvAllStream } from '~/utils/api'
 import type { OperationListItem, Driver, Vehicle } from '~/types'
-import { describeCaughtError } from '~/utils/api-error'
+import { describeApiError, describeCaughtError } from '~/utils/api-error'
 
 const router = useRouter()
 
@@ -23,6 +23,11 @@ const vehicles = ref<Vehicle[]>([])
 // 別々に持つ** — 片方だけ落ちたときに、落ちていない側まで疑わせないため。
 const driversError = ref<string | null>(null)
 const vehiclesError = ref<string | null>(null)
+// 表そのものが**取得できなかった**理由 (Refs #1008)。上の 2 本と同じ理由で
+// **別に持つ** — 落ちたときの表は `operations.length === 0` の枝に入って
+// **「データがありません」**と出るので、**空配列だけでは「本当に 0 件」と
+// 区別が付かない**。絞り込みの選択肢とは落ちる口が違うので 1 本にまとめない。
+const fetchError = ref<string | null>(null)
 const loading = ref(false)
 const splitLoading = ref(false)
 const splitResult = ref('')
@@ -43,6 +48,9 @@ const columns = [
 
 async function fetchData() {
   loading.value = true
+  // **取り直しごとに消す** — 絞り込みやページ送りで走り直して成功した回に、
+  // 前回の失敗が残っていると「いま落ちている」と読める。
+  fetchError.value = null
   try {
     const res = await getOperations({
       date_from: dateFrom.value || undefined,
@@ -56,6 +64,10 @@ async function fetchData() {
     total.value = res.total
   } catch (e) {
     console.error('Failed to fetch operations:', e)
+    // ★ **console だけだと画面には何も出ない** (Refs #1008)。`loading` が終わって
+    //   表が「データがありません」になるだけなので、**「取得に失敗した」と
+    //   「本当に 0 件」が人には区別できない**。理由と次の一手を状態に持つ。
+    fetchError.value = describeListFailure(e)
   } finally {
     loading.value = false
   }
@@ -78,12 +90,41 @@ const RETRY_RELOAD = 'ページを再読み込みしてください'
  *
  * ## `retry` にボタンを渡していない理由
  *
- * この一覧を取り直す口は **`onMounted` にしかなく、押せるボタンが画面に無い**。
+ * **失敗した回に押せるボタンが、この画面には 1 つも出ていない。** 乗務員・車両の口は
+ * `onMounted` の 1 回だけ。運行一覧 (`fetchData`) は絞り込みの `watch` / ページ送り /
+ * `splitAll` の `done` でも走るが、**絞り込みはボタンではなく**、残る 2 つは
+ * **一覧が取れた回にしか描かれない** — ページ送りは `totalPages > 1`、
+ * 「IVT一括分割」は `unsplitCount > 0` (= `operations` が空でない) が条件で、
+ * **失敗した回はどちらも `operations` が空なので出ていない**。
  * **無いボタンを案内しない** (`tests/components/next-step-retry-labels.test.ts` の
  * 規約) ので、ボタンを名指ししない `RETRY_RELOAD` を渡す。
+ *
+ * ## ★ 次の一手は**どの経路でもちょうど 1 つ**。0 にも 2 つにもしない (#1008 PR-3)
+ *
+ * | 入ってくる例外 | `describeCaughtError` | ここで足すもの |
+ * | --- | --- | --- |
+ * | `API エラー (503): …` | 「復旧してから」+ `RETRY_RELOAD` | なし |
+ * | `API エラー (403): …` | 「管理者に許可の追加を依頼してください」 | なし |
+ * | status を読めない `Error` | **次の一手なし** (3 番目の枝) | `RETRY_RELOAD` |
+ * | `Error` ですらない | — | `RETRY_RELOAD` |
+ *
+ * **0 にしない**のは #1008 そのものだから。**2 つにしない**のは、`UAlert` の
+ * `description` 側にも固定の指示を置いていた初稿が、403 で
+ * 「ログインし直しても変わりません」と「ページを再読み込みして確かめてください」を
+ * **並べて食い違わせていた**から (dev で実測。PR-2 が `margin` / `allowance` で
+ * 見つけたのと同型で、**合成後を描画するまで出ない**)。
+ * ⇒ **次の一手を持つのは `title` の側だけ。`description` は事実だけを書く。**
  */
 function describeListFailure(e: unknown): string {
-  return e instanceof Error ? describeCaughtError(e, RETRY_RELOAD) : '理由を読めませんでした'
+  if (!(e instanceof Error)) return `理由を読めませんでした — ${RETRY_RELOAD}`
+  const detail = describeCaughtError(e, RETRY_RELOAD)
+  // ★ **`describeCaughtError` は status が読めなかった回に次の一手を付けない** —
+  //   status ごとに違うので「1 つ選ぶと嘘になる」から (`api-error.ts` の 3 番目の枝)。
+  //   注記側の固定文を落とした (#1008 PR-3) 以上、**ここが最後の砦**なので、
+  //   付かなかった回だけ status に依らない `RETRY_RELOAD` を補う。
+  //   **判定は「3 番目の枝が返す値そのもの」との一致**で行う — 文言を grep すると
+  //   `nextStepForStatus` を書き換えた日に空撃ちになる。
+  return detail === describeApiError(e) ? `${detail} — ${RETRY_RELOAD}` : detail
 }
 
 async function loadDrivers() {
@@ -224,12 +265,16 @@ async function splitAll() {
     <!-- ★ 「読めなかった」と「0 人 / 0 台」を別の文にする (Refs #920)。失敗した回に
          だけ出す (理由だけ出すと**本当に 0 件の回**まで異常に見える)。
          **乗務員と車両で別の文**にしてある — 1 本にまとめると、落ちていない側の
-         選択肢まで信用できないと読める。取りに行くのは `onMounted` の 1 回だけなので、
-         やり直す手段はページの再読み込みしかない。 -->
+         選択肢まで信用できないと読める。
+         ★ **やり直し方はここに書かない** (#1008 PR-3)。次の一手は `title` の側
+         (`describeListFailure`) が **status ごとに撃ち分ける**ので、注記にも固定文を
+         置くと 403 で「ログインし直しても変わりません」と食い違う (dev で実測)。
+         **どの経路でも次の一手はちょうど 1 つ**であることは `describeListFailure` が
+         保証している。 -->
     <UAlert
       v-if="driversError"
       :title="`乗務員一覧を取得できませんでした (${driversError})`"
-      description="0 人なのか読めなかっただけなのかは、この画面では判りません — ページを再読み込みして確かめてください"
+      description="0 人なのか読めなかっただけなのかは、この画面では判りません"
       color="error"
       icon="i-lucide-circle-x"
       variant="subtle"
@@ -237,7 +282,28 @@ async function splitAll() {
     <UAlert
       v-if="vehiclesError"
       :title="`車両一覧を取得できませんでした (${vehiclesError})`"
-      description="0 台なのか読めなかっただけなのかは、この画面では判りません — ページを再読み込みして確かめてください"
+      description="0 台なのか読めなかっただけなのかは、この画面では判りません"
+      color="error"
+      icon="i-lucide-circle-x"
+      variant="subtle"
+    />
+
+    <!-- ★ 表の取得失敗を出す (Refs #1008)。直す前は `console.error` だけで、画面には
+         **表の「データがありません」しか出ていなかった** — 「取れなかった」と
+         「本当に 0 件」が区別できない。**失敗した回にだけ出す**のは上 2 本と同じ理由。
+
+         ★★ `description` は**事実だけ**を書き、**次の一手を持たない**。
+         次の一手は `title` の側 (`describeCaughtError` → `nextStepForStatus`) が
+         **status ごとに撃ち分けている**ので、ここにも書くと**食い違う**。
+         dev で 403 を撃って実測: title は「ログインし直しても変わりません。管理者に
+         許可の追加を依頼してください」なのに、初稿の description は「ページを
+         再読み込みして確かめてください」と、**title が効かないと言った手を勧めていた**
+         (PR-2 が `margin` / `allowance` で見つけた「指示が 2 つ並んで食い違う」と同型。
+         **ヘルパ 1 本を読んでいる限り出ず、合成後を描画して初めて出た**)。 -->
+    <UAlert
+      v-if="fetchError"
+      :title="`運行一覧を取得できませんでした (${fetchError})`"
+      description="下の表の「データがありません」は 0 件を意味しません"
       color="error"
       icon="i-lucide-circle-x"
       variant="subtle"
