@@ -115,6 +115,55 @@ export function describeApiError(e: unknown): string {
 }
 
 /**
+ * **parse 済みのエラー本文**から理由の 1 文を拾う (Refs #1050)。無ければ `null`。
+ *
+ * `describeApiError` が `err.data` に対してやっている選び方**だけ**を切り出したもの。
+ * 入口が違う: あちらは ofetch の `FetchError`、こちらは `await res.json()` の**素の値**。
+ * `${status}` の前置きも「次の一手」も付けない — それは呼び出し側が決める。
+ *
+ * ## ★ 順序は `[error, message, statusMessage]`。`statusMessage` を先に読まないこと
+ *
+ * **理由は 2 つあり、server route の書き方によってどちらが効くかが変わる** (#1050)。
+ * **どちらの向きでも `message` 先が正しい**ので、route ごとに読み分けない:
+ *
+ * | server 側の書き方 | `statusMessage` | `message` | `statusMessage` 先だと |
+ * | --- | --- | --- | --- |
+ * | **role gate** (`server/utils/require-role.ts`) と ichiban proxy — **両方を明示** | ASCII | 日本語 | **画面が ASCII になる** |
+ * | **`statusMessage` だけ渡す** (netprint / kyuyo-master / net780-archive の自前エラー) | 日本語 | **h3 が同じ日本語を写す** | 同じ値なので**変わらない** |
+ *
+ * 2 行目は h3 1.15.6 で実測 (`createError({ statusMessage: '… が未設定です' })` →
+ * `e.message` に同じ文字列)。**ただし `H3Error.toJSON()` を通る経路では
+ * `statusMessage` だけが sanitize され、非 ASCII が落ちる**
+ * (`"SCRAPER_RELAY service binding "` になるのを実測) — `message` は素通しなので、
+ * **その経路に変わったときに壊れないのも `message` 先の側**。
+ *
+ * **`statusMessage` に日本語を入れないこと自体は今も禁止** (本番 workerd で reason
+ * phrase が壊れる。#1032 / #886)。この順序はその禁止の代わりではなく、独立した保険。
+ *
+ * `error` を先頭に置くのは upstream proxy が passthrough する `{ error: '…' }` (文字列)
+ * を先に見るため — **この順序の根拠は `describeApiError` の doc が正**。
+ *
+ * ## ★ `??` で繋がない
+ *
+ * Nitro の既定の本文は `{ error: true, url, statusCode, statusMessage, message, data }` で
+ * **`error` が真偽値**。`d.error ?? d.message` は `true` で止まる。**文字列である最初の
+ * 1 つ**を選ぶ (`describeApiError` と同じ)。
+ *
+ * ## 拾えなかったときに何を出すかは呼び出し側の話
+ *
+ * `null` を返すだけで `HTTP ${status}` のような代替は作らない。**「理由が無い」と
+ * 「理由を読めなかった」を同じ見た目にしない**ためで、画面ごとに書き分けたい
+ * (`describeResponseFailure` の注記と同じ理由)。
+ */
+export function pickBodyReason(body: unknown): string | null {
+  if (typeof body === 'string') return body === '' ? null : body
+  if (typeof body !== 'object' || body === null) return null
+  const d = body as Record<string, unknown>
+  const picked = [d.error, d.message, d.statusMessage].find(v => typeof v === 'string')
+  return typeof picked === 'string' ? picked : null
+}
+
+/**
  * 非 2xx の `Response` から**人が読める 1 文**を作る (Refs #996)。
  *
  * `describeApiError` との違いは**入口と出口の両方**:
@@ -211,10 +260,7 @@ async function responseReason(res: Response): Promise<string> {
 
 /** `describeApiError` が理由として拾える文字列を本文が持っているか。 */
 function hasStringReason(data: unknown): boolean {
-  if (typeof data === 'string') return data !== ''
-  if (typeof data !== 'object' || data === null) return false
-  const d = data as Record<string, unknown>
-  return [d.error, d.message, d.statusMessage].some(v => typeof v === 'string')
+  return pickBodyReason(data) !== null
 }
 
 /** status ごとの「次に何をすればいいか」。上の表が正。 */

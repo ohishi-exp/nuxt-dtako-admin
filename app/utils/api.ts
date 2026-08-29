@@ -15,7 +15,7 @@ import type {
   YTimeExportResponse,
 } from '~/types'
 import { createAuthFetch } from '@ippoan/auth-client'
-import { describeFetchThrow } from '~/utils/api-error'
+import { describeFetchThrow, pickBodyReason } from '~/utils/api-error'
 import type { Net780ArchiveResult } from '~/utils/net780-archive'
 import { normalizeNetprintRunOutcome, type NetprintRunInput, type NetprintRunOutcome } from '~/utils/netprint-run'
 import type { NetprintTargetPayloadItem } from '~/utils/netprint-targets'
@@ -771,17 +771,20 @@ export function buildEtcCsvDownloadUrl(key: string): string {
  * (`requireAuth` は cookie 優先 + Bearer 併用)。
  * `request()` (rust-alc-api 向けの `createAuthFetch`) は base URL が backend なので使わない。
  *
- * 非 2xx は server route の `statusMessage` (relay の理由に `relay:` 前置) を
- * `Error.message` にして投げる。
+ * 非 2xx は本文から理由を拾って (`pickBodyReason`、relay の理由には `relay:` 前置が
+ * 付く) `Error.message` にして投げる。拾えなければ `HTTP ${status}`。
+ * **`statusMessage` を先に読まないこと** (#1050) — role gate の 403 は ASCII を
+ * `statusMessage`・日本語を `message` に置くので、先に読むと画面が英文になる
+ * (理由の全体は `pickBodyReason` の doc が正)。
  */
 export async function postNet780Archive(operationNos: string[]): Promise<Net780ArchiveResult> {
   const token = currentAccessToken()
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   if (token) headers['authorization'] = `Bearer ${token}`
   const res = await fetchOrDescribe('/api/net780/archive', { method: 'POST', headers, body: JSON.stringify({ operationNos }) })
-  const body = await res.json().catch(() => null) as { statusMessage?: string, message?: string } | null
+  const body = await res.json().catch(() => null) as unknown
   if (!res.ok) {
-    throw new Error(body?.statusMessage ?? body?.message ?? `HTTP ${res.status}`)
+    throw new Error(pickBodyReason(body) ?? `HTTP ${res.status}`)
   }
   if (body === null) throw new Error('NET780 取得の応答が JSON ではありません')
   return body as unknown as Net780ArchiveResult
@@ -817,13 +820,14 @@ function netprintRouteHeaders(): Record<string, string> {
   return headers
 }
 
-/** `/api/netprint/targets` の応答を読む。非 2xx は server route の `statusMessage`
- * (relay の理由に `relay:` 前置) を `Error.message` にして投げる — 通知先の設定は
- * 「保存できたのか分からない」が一番困るので、成否を曖昧にしない。 */
+/** `/api/netprint/targets` の応答を読む。非 2xx は本文から理由を拾って
+ * (`pickBodyReason`、relay の理由には `relay:` 前置が付く) `Error.message` にして
+ * 投げる — 通知先の設定は「保存できたのか分からない」が一番困るので、成否を曖昧に
+ * しない。**`statusMessage` を先に読まないこと** (#1050、`postNet780Archive` と同じ)。 */
 async function readNetprintTargetsResponse(res: Response, label: string): Promise<unknown> {
-  const body = await res.json().catch(() => null) as { statusMessage?: string, message?: string } | null
+  const body = await res.json().catch(() => null) as unknown
   if (!res.ok) {
-    throw new Error(body?.statusMessage ?? body?.message ?? `HTTP ${res.status}`)
+    throw new Error(pickBodyReason(body) ?? `HTTP ${res.status}`)
   }
   if (body === null) throw new Error(`${label}の応答が JSON ではありません`)
   return body

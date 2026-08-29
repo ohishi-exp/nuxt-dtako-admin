@@ -69,12 +69,42 @@ describe('normalizeNetprintRunOutcome', () => {
     expect(normalizeNetprintRunOutcome(200, true, 'not json')).toMatchObject({ results: [], date: null })
   })
 
-  it('非 2xx は statusMessage → message → HTTP n の順でエラー文にする', () => {
-    expect(normalizeNetprintRunOutcome(400, false, { statusMessage: 'date は YYYY-MM-DD', message: 'x' }).error)
+  /** 拾い順は `pickBodyReason` = `[error, message, statusMessage]` (Refs #1050)。
+   * **`statusMessage` を先に読まない** — 直す前はここが `statusMessage` 先で、
+   * server route の ASCII が画面に出ていた。 */
+  it('非 2xx は error → message → statusMessage → HTTP n の順でエラー文にする', () => {
+    expect(normalizeNetprintRunOutcome(400, false, { error: 'date は YYYY-MM-DD', message: 'x' }).error)
       .toBe('date は YYYY-MM-DD')
     expect(normalizeNetprintRunOutcome(401, false, { message: 'Unauthorized' }).error).toBe('Unauthorized')
     expect(normalizeNetprintRunOutcome(401, false, {}).error).toBe('HTTP 401')
     expect(normalizeNetprintRunOutcome(502, false, null).error).toBe('HTTP 502')
+  })
+
+  /**
+   * ★ **server route が ASCII を `statusMessage`・日本語を `message` に置く形**
+   * (`server/api/netprint/run.post.ts` の `requireRole` の 403)。**日本語が出る** —
+   * 直す前はこの画面だけ ASCII が出ていた (#1050)。
+   * **server 側で `statusMessage` を日本語にする直しは採れない** — 本番 (workerd) では
+   * reason phrase が壊れ、画面の注記に穴が出る (#1032 / #886)。
+   */
+  it('403 は日本語の message を出し、ASCII の statusMessage を出さない (Refs #1050)', () => {
+    const out = normalizeNetprintRunOutcome(403, false, {
+      error: true,
+      statusCode: 403,
+      statusMessage: 'requires one of roles: netprint, admin',
+      message: 'この操作には netprint または admin の権限が必要です',
+    })
+    expect(out.error).toBe('この操作には netprint または admin の権限が必要です')
+    expect(out.error).not.toContain('requires one of roles')
+  })
+
+  /** ★ **陽性対照** — `statusMessage` しか無ければ、これまでどおりそれを出す。
+   * 「日本語を出す」直しで**英文しか無いときに理由がゼロになる**と直す前より悪い。 */
+  it('statusMessage しか無い応答は今までどおり statusMessage を出す (陽性対照)', () => {
+    expect(normalizeNetprintRunOutcome(401, false, { statusMessage: 'Unauthorized' }).error)
+      .toBe('Unauthorized')
+    expect(normalizeNetprintRunOutcome(400, false, { statusMessage: 'date は YYYY-MM-DD 形式で指定してください' }).error)
+      .toBe('date は YYYY-MM-DD 形式で指定してください')
   })
 
   // ★ 一部の営業所だけ失敗した 502 でも、営業所ごとの結果は data に載っている。

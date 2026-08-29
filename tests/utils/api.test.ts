@@ -1373,8 +1373,11 @@ describe('api', () => {
       expect(mockFetch.mock.calls[0][1].headers['authorization']).toBeUndefined()
     })
 
-    it('非 2xx は statusMessage → message → HTTP n の順でメッセージにして投げる', async () => {
-      mockFetch.mockResolvedValueOnce({ ok: false, status: 404, json: async () => ({ statusMessage: 'relay: 不明なエンドポイントです', message: 'x' }) })
+    /** 拾い順は `pickBodyReason` = `[error, message, statusMessage]` (Refs #1050)。
+     * **`statusMessage` を先に読まない** — 直す前はここが `statusMessage` 先で、
+     * server route の ASCII が画面に出ていた。 */
+    it('非 2xx は error → message → statusMessage → HTTP n の順でメッセージにして投げる', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 404, json: async () => ({ error: 'relay: 不明なエンドポイントです', message: 'x' }) })
       await expect(postNet780Archive([UNKO_22])).rejects.toThrow('relay: 不明なエンドポイントです')
       mockFetch.mockResolvedValueOnce({ ok: false, status: 400, json: async () => ({ message: 'operationNos が空です' }) })
       await expect(postNet780Archive([])).rejects.toThrow('operationNos が空です')
@@ -1383,6 +1386,30 @@ describe('api', () => {
       // 本文が JSON でなくても HTTP n で落とす
       mockFetch.mockResolvedValueOnce({ ok: false, status: 502, json: async () => { throw new Error('not json') } })
       await expect(postNet780Archive([UNKO_22])).rejects.toThrow('HTTP 502')
+    })
+
+    /**
+     * ★ **server route が ASCII を `statusMessage`・日本語を `message` に置く形**
+     * (`server/api/net780/archive.post.ts` が `requireRole` の 403 を返すときの実物)。
+     * **日本語が出る** — 直す前はここで ASCII だけが画面に出ていた (#1050)。
+     */
+    it('403 は日本語の message を出し、ASCII の statusMessage を出さない', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 403, json: async () => ({
+        error: true,
+        statusCode: 403,
+        statusMessage: 'requires one of roles: net780, admin',
+        message: 'この操作には net780 または admin の権限が必要です',
+      }) })
+      const e = await postNet780Archive([UNKO_22]).catch((x: unknown) => x) as Error
+      expect(e.message).toBe('この操作には net780 または admin の権限が必要です')
+      expect(e.message).not.toContain('requires one of roles')
+    })
+
+    /** ★ **陽性対照** — `statusMessage` しか無ければ、これまでどおりそれを出す。
+     * 「日本語を出す」直しで**英文しか無いときに理由がゼロになる**と悪化する。 */
+    it('statusMessage しか無い応答は今までどおり statusMessage を出す (陽性対照)', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 401, json: async () => ({ statusMessage: 'Unauthorized' }) })
+      await expect(postNet780Archive([UNKO_22])).rejects.toThrow('Unauthorized')
     })
 
     it('2xx なのに JSON でなければ投げる (null を返さない)', async () => {
@@ -1484,7 +1511,8 @@ describe('api', () => {
       expect(mockFetch.mock.calls[0][1].headers['authorization']).toBeUndefined()
     })
 
-    it('非 2xx は statusMessage → message → HTTP n の順でメッセージにして投げる', async () => {
+    /** 拾い順は `pickBodyReason` = `[error, message, statusMessage]` (Refs #1050)。 */
+    it('非 2xx は error → message → statusMessage → HTTP n の順でメッセージにして投げる', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 400, json: async () => ({ statusMessage: 'relay: 1 件目 (営業所 1): channel_id が UUID 形式ではありません' }) })
       await expect(putNetprintTargets(TARGETS)).rejects.toThrow('1 件目 (営業所 1)')
       mockFetch.mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({ message: 'DTAKO_CONFIG_KV binding が未設定です' }) })
@@ -1493,6 +1521,29 @@ describe('api', () => {
       await expect(getNetprintTargets()).rejects.toThrow('HTTP 401')
       mockFetch.mockResolvedValueOnce({ ok: false, status: 502, json: async () => { throw new Error('not json') } })
       await expect(putNetprintTargets([])).rejects.toThrow('HTTP 502')
+    })
+
+    /** ★ GET / PUT のどちらも日本語を出す (#1050)。**ASCII の `statusMessage` は出ない。** */
+    it('403 は GET / PUT とも日本語の message を出す', async () => {
+      const body = {
+        error: true,
+        statusCode: 403,
+        statusMessage: 'requires one of roles: netprint, admin',
+        message: 'この操作には netprint または admin の権限が必要です',
+      }
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 403, json: async () => body })
+      const onGet = await getNetprintTargets().catch((x: unknown) => x) as Error
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 403, json: async () => body })
+      const onPut = await putNetprintTargets(TARGETS).catch((x: unknown) => x) as Error
+      expect(onGet.message).toBe('この操作には netprint または admin の権限が必要です')
+      expect(onPut.message).toBe(onGet.message)
+      expect(onGet.message).not.toContain('requires one of roles')
+    })
+
+    /** ★ **陽性対照** — `statusMessage` しか無ければ、これまでどおりそれを出す。 */
+    it('statusMessage しか無い応答は今までどおり statusMessage を出す (陽性対照)', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 401, json: async () => ({ statusMessage: 'Unauthorized' }) })
+      await expect(getNetprintTargets()).rejects.toThrow('Unauthorized')
     })
 
     it('2xx なのに JSON でなければ投げる (読めたことにしない)', async () => {

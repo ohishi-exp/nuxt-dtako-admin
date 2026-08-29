@@ -45,17 +45,35 @@
  * に実測つきの注記がある)。h3 の `createError` は `message` 未指定なら `statusMessage`
  * を写すので、**写させずに両方明示する**。
  *
- * **★ ただし画面に何が出るかは route ごとに違う** (注記を 1 本にすると 2 枚目で嘘になる):
+ * **★ 画面に出るのは `message` (日本語) — front 全数がそう読む** (#1050 以降)。
+ * 拾い順は `app/utils/api-error.ts` の `describeApiError` が正本で
+ * (`[error, message, statusMessage]` の**文字列である最初の 1 つ**)、そこから切り出した
+ * `pickBodyReason` を生 `fetch` 経路が使う。
  *
- * | front の読み方 | 対象 | 画面に出る文字列 |
+ * **かつては route ごとに違った (#1050 で解消)。**`statusMessage` を先に読む front が
+ * **4 経路 5 か所**あり、そこだけ **ASCII** が出ていた。**「この gate の下に居るか」
+ * まで込みで書く** — 居ないなら、いま英文が出ることは無い:
+ *
+ * | front | 対象の server route | この gate の下 |
  * |---|---|---|
- * | `message` 先 (`describeApiError` = `[error, message, statusMessage]`) | 大半の A 段 route | **日本語** (`message`) |
- * | **`statusMessage` 先** | `/api/net780/archive` (`app/utils/api.ts:784`) / `/api/netprint/targets` GET・PUT (`app/utils/api.ts:826`) / `/api/netprint/run` (`app/utils/netprint-run.ts:139`) | **ASCII** (`statusMessage`) |
+ * | `app/utils/api.ts:784` `postNet780Archive` | `/api/net780/archive` | **はい** |
+ * | `app/utils/api.ts:826` `readNetprintTargetsResponse` | `/api/netprint/targets` GET・PUT | **はい** (2 本とも) |
+ * | `app/utils/netprint-run.ts:139` `normalizeNetprintRunOutcome` | `/api/netprint/run` | **はい** |
+ * | `app/pages/kyuyo-fetch.vue:150` `refreshList` | `/api/kyuyo-master/refresh`・`refresh-full` | **いいえ** |
+ * | `app/pages/kyuyo-fetch.vue:214` `fetchRange` | `/api/kyuyo/sync` | **いいえ** |
  *
- * ⇒ **その 4 本では英文が出る。**「日本語が出る」と一律に書かないこと。
- * 英文のままでも理由は読めるので実害は無いと判断した (front を message 先へ直すのは
- * 別の変更 — `server/api/ichiban/[...path].get.ts` の「**この直しを front の他の経路へ
- * 広げないこと**」に従い、ここでは front を触らない)。
+ * ⇒ **実際に ASCII が出ていたのは上の 4 か所** (`assertAllowedRole` を呼ぶ 25 route の
+ * うち、この 4 つを読む front だけが `statusMessage` 先だった)。下の 2 つは
+ * `statusMessage` だけが渡る route なので h3 の写しで同じ文になり、**見た目は
+ * 変わらなかった** (直ったのは Nitro 既定の本文で `(true)` / 空文字が出ていた方)。
+ *
+ * **5 か所とも `pickBodyReason` に揃えた**ので、いまはどの route でも日本語が出る。
+ * dev + **role gate と同じ形のスタブ 403** で 5 か所とも実機確認し、往復 1 回で
+ * base の ASCII も再現した (下の 2 つは「この gate に載ったら何が出るか」の測定)。
+ *
+ * ⇒ **それでも `statusMessage` に日本語を入れてはいけない。** 禁止の理由は front の
+ * 読み順ではなく**本番 (workerd) の reason phrase が壊れること** (上の段落) で、
+ * そちらは #1050 では 1 ミリも変わっていない。
  */
 import { createError } from 'h3'
 

@@ -21,6 +21,7 @@
  */
 import { defaultPayrollMonth } from '~/utils/ichiban-health'
 import { currentAccessToken } from '~/utils/api'
+import { pickBodyReason } from '~/utils/api-error'
 import { classifyKyuyoAccess, kyuyoAccessNotice, KYUYO_CONSEQUENCE_FETCH, type KyuyoAccessState } from '~/utils/kyuyo-access'
 import {
   buildFetchPlan,
@@ -147,7 +148,20 @@ async function refreshList(full: boolean) {
     const res = await fetch(endpoint, { method: 'POST' })
     const body = await res.json().catch(() => null) as Record<string, unknown> | null
     if (!res.ok) {
-      pageError.value = `リスト更新に失敗 (HTTP ${res.status}): ${String((body as { statusMessage?: unknown } | null)?.statusMessage ?? '')}`
+      // 理由の拾い順は `pickBodyReason` (= `describeApiError`) に任せる (#1050)。
+      //
+      // ★ **この 2 route (`kyuyo-master/refresh`・`refresh-full`) は今日 role gate の
+      // 下に居ない。**明示的な `createError` は `statusMessage` だけを渡し、h3 が
+      // `message` へ同じ文を写すので、**そこは読み順を変えても見た目が変わらない。**
+      //
+      // ★ **変わるのは「握られなかった例外」の側。**Nitro (`internal/error/prod.mjs`) は
+      // そのとき `statusMessage` を **`"Server Error"` に潰し、本当の理由は `message`
+      // にだけ残す** — 旧式 (`statusMessage` 先) は画面に
+      // `リスト更新に失敗 (HTTP 500): Server Error` と出していた。**理由が出ていないのに
+      // 「サーバのエラー」と読める**ので、この repo で一番多い欠陥の型に当たる。
+      // (nuxt dev の実機で採った本物の本文: `statusMessage: "Server Error"` /
+      // `message: "Secret \"INTERNAL_SHARED_SECRET\" not found"`)
+      pageError.value = `リスト更新に失敗 (HTTP ${res.status}): ${pickBodyReason(body) ?? ''}`
       return
     }
     if (full) {
@@ -211,8 +225,11 @@ async function fetchRange() {
         )
         const body = await res.json().catch(() => null) as Record<string, unknown> | null
         if (!res.ok) {
-          const message = (body as { statusMessage?: string, error?: string } | null)?.statusMessage
-            ?? (body as { error?: string } | null)?.error ?? `HTTP ${res.status}`
+          // `refreshList` と同じ拾い方 (#1050)。**`statusMessage` を先に読まない。**
+          // ★ **旧式 `statusMessage ?? error ?? 'HTTP n'` は画面に `(true)` と出していた** —
+          // Nitro 既定の本文は `error` が**真偽値**なので `??` がそこで止まる (実測)。
+          // `pickBodyReason` は「文字列である最初の 1 つ」を選ぶので真偽値を飛ばす。
+          const message = pickBodyReason(body) ?? `HTTP ${res.status}`
           fetchErrors.value.push(`${item.company} ${item.month}: 引き直しに失敗 (${message})`)
           continue
         }
