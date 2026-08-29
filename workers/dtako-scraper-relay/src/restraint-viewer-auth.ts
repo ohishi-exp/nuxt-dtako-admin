@@ -34,14 +34,18 @@
  * | **単価マスタ × 拘束時間 の計算賃金** — 月次集計 CSV の `単価`/`…(円)`/`合計(円)`/`総支給時給(割増込)`、最低賃金チェック、タイムカードの残業額 | `/restraint-api/wage-report`・`/restraint-api/wage-master` (計算は `restraint-wage.ts`) | **tenant** (この関数) |
  * | **確定値スナップショット** (期間集計タブの `paid` / 差) | `/restraint-api/wage-snapshot`・`/restraint-api/wage-range` | **tenant (この関数) AND 給与 allowlist** (Refs #951) |
  *
- * **給与 allowlist** の実体は**上流にしか無い** — rust-ichibanboshi の
- * `kyuyo::introspect::authorize()` (`#82`) が auth-worker introspect の `email` を
- * オンプレ設定 (`KYUYO_ALLOWED_EMAILS`) と突き合わせる。**この repo は給与 allowlist
- * を持っていない**し、持たせると二重管理になる (片方だけ更新されて食い違う)。
- * 3 段目もこの正を**聞きに行く**だけで、写しは持たない
- * (`kintai-relay.ts` の `checkKyuyoAccess`)。**#1049 で足した
- * `ALL_COMPS_VIEWER_EMAILS` は写しではなく別物** — 下の「email allowlist は 2 つある」
- * を参照。
+ * **給与 allowlist は上流にしか無い。全社閲覧 allowlist はこの relay にある** —
+ * この 2 つは**別物**で、置き場も効き先も違う (下の「email allowlist は 2 つある」)。
+ *
+ * **給与 allowlist** の実体は rust-ichibanboshi の `kyuyo::introspect::authorize()`
+ * (`#82`) で、auth-worker introspect の `email` をオンプレ設定
+ * (`KYUYO_ALLOWED_EMAILS`) と突き合わせる。**この repo は給与 allowlist の写しを
+ * 持っていない**し、持たせると二重管理になる (片方だけ更新されて食い違う)。
+ * 3 段目もこの正を**聞きに行く**だけ (`kintai-relay.ts` の `checkKyuyoAccess`)。
+ *
+ * **全社閲覧 allowlist** (`ALL_COMPS_VIEWER_EMAILS`、Refs #1049) は**この relay が
+ * 自分で持つ**。給与 allowlist の写しではないので、二重管理にはならない — 決める
+ * ことが違う (実支給額の可否ではなく、**どの会社**を見てよいか)。
  *
  * **なぜ 2 段目が tenant のままか**: あれは給与大臣の実データではなく、**この repo が
  * 持つ単価マスタから計算した労務管理値**で、最低賃金チェックはテナント内の総務が回す
@@ -154,8 +158,8 @@ export function devViewerCompIds(raw: string): Set<string> {
   );
 }
 
-/** 全社 (DTAKO_ACCOUNTS に載っている会社すべて) を見てよいアカウントの
- * allowlist を持つ環境変数名。中身は **JSON の文字列配列**
+/** **全社閲覧 allowlist** (= DTAKO_ACCOUNTS に載っている会社すべてを見てよい
+ * アカウント) を持つ環境変数名。中身は **JSON の文字列配列**
  * (`["viewer@example.com", ...]`)。
  *
  * **`ETC_ACCOUNTS` / `SCRAPE_ALERT_TARGET` と同じ作法** — Cloudflare dashboard の
