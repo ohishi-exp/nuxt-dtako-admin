@@ -17,12 +17,21 @@
  * ## ★ これは「admin を通行証にする」変更ではない (誤読されやすいので明記)
  *
  * `workers/dtako-scraper-relay/src/restraint-viewer-auth.ts` の module docs に
- * 「role と email allowlist は**優先関係ではなく直交した別の軸で、AND で効く**」
- * 「**admin に allowlist を無視させる (fail-open) 案は却下**」とある。
+ * 「「金額の軸」と「会社の軸」は**直交していて AND で効く**」
+ * 「どちらかがもう一方を上書きすることは無い」
+ * 「**admin に給与 allowlist を無視させる (fail-open) 案は却下**」とある。
+ *
+ * **★ 引用元の「軸」の呼び方は #1049 で変わった** (言葉が違って見えても中身は同じ)。
+ * あちらは元々「role と email allowlist」の 2 軸と書いていたが、**#1049 で会社の軸から
+ * role が外れた**ため、いまは **「給与 allowlist」(上流 rust-ichibanboshi) と
+ * 「tenant + 全社閲覧 allowlist」(`ALL_COMPS_VIEWER_EMAILS`、relay)** の 2 軸。
+ * **直交していて AND で効く**という中身は変わっていない
+ * (email allowlist が 2 つになったので、あちらでは呼び分けている)。
  *
  * 却下されているのは **admin を通行証にして allowlist を上書きすること (fail-open)**
  * であって、**admin を追加条件として要求すること (fail-closed)** ではない。
  * ここで入れるのは後者 — **既存の担保に AND で 1 本足すだけ**で、どの担保も緩めない。
+ * **#1049 が会社の軸から role を外したのも同じ向き** (role で特別扱いしない)。
  *
  * ## ★ 判定は fail-closed
  *
