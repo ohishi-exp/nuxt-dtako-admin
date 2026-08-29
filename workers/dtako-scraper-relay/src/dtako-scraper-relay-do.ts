@@ -1175,7 +1175,19 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 叩かないので、ここへ動かしても上流への往復は 1 回も増えない。
     // **`if (!sharedSecret)` の早期 return は動かさない** — 「zip を取ってから
     // 破棄する」という現行の順序と文言をそのまま残す。
-    const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
+    //
+    // **★ `.catch()` を外さないこと。** Secrets Store binding の `.get()` は
+    // reject しうる。try の中に居た頃はその reject を下の catch が拾って
+    // `state: "failed"` + 履歴に落としていたが、**try の外へ出した今は
+    // `runCronDtakoScrape` ごと抜けて `alarm()` まで飛ぶ** — job が `running` の
+    // まま失敗記録も残らない (#967 で通知を足す前より悪くなる)。空文字に倒せば
+    // 下の早期 return が従来どおり loud fail する。**理由は捨てずに message へ
+    // 添える** (「未設定」と「取得に失敗」を運用者が区別できるように)。
+    let secretDetail = "";
+    const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET).catch((err) => {
+      secretDetail = ` — 取得に失敗: ${describeUnknownError(err)}`;
+      return "";
+    });
     try {
       const zip = await scrapeViaHttp(
         {
@@ -1192,7 +1204,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       );
 
       if (!sharedSecret) {
-        const message = "INTERNAL_SHARED_SECRET 未設定のためアップロード不能 (zip は破棄)";
+        const message = `INTERNAL_SHARED_SECRET 未設定のためアップロード不能 (zip は破棄)${secretDetail}`;
         console.error(JSON.stringify({ ...logBase, status: "error", message }));
         await recordScrapeJob(this.ctx.storage, jobKey, { state: "failed", error: message });
         await this.recordCronScrapeHistory(account, range, { kind: "error", message });

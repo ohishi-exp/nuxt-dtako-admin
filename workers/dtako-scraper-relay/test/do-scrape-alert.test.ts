@@ -49,11 +49,23 @@ function isLineworksSend(url: string): boolean {
   return url.includes(LINEWORKS_SEND_PATH);
 }
 
-function makeDO(opts: { scrapeAlertTarget?: string; sharedSecret?: string; sendOk?: boolean } = {}) {
+function makeDO(
+  opts: {
+    scrapeAlertTarget?: string;
+    sharedSecret?: string;
+    sendOk?: boolean;
+    /** Secrets Store binding が reject する形 (`.get()` が落ちる)。 */
+    secretRejects?: boolean;
+  } = {},
+) {
   const sent: SentRequest[] = [];
   const env = {
     DTAKO_CONFIG_KV: { get: async () => null },
-    INTERNAL_SHARED_SECRET: "sharedSecret" in opts ? opts.sharedSecret : "shared-secret",
+    INTERNAL_SHARED_SECRET: opts.secretRejects
+      ? { get: async () => { throw new Error("secrets store unavailable"); } }
+      : "sharedSecret" in opts
+        ? opts.sharedSecret
+        : "shared-secret",
     SCRAPE_ALERT_TARGET:
       "scrapeAlertTarget" in opts ? opts.scrapeAlertTarget : `{"channel_id":"${CHANNEL_ID}"}`,
     AUTH_WORKER: {
@@ -227,6 +239,27 @@ describe("runCronDtakoScrape の失敗を人へ届ける (Refs #967)", () => {
     expect(stored.get(SCRAPE_JOB_KEY_PREFIX + "job-5")).toMatchObject({ state: "failed" });
     expect(errs.find("scrape_alert_send_failed")).toMatchObject({
       reason: expect.stringContaining("LINE WORKS 送信失敗"),
+    });
+  });
+
+  it("★ Secrets Store の .get() が落ちても runCronDtakoScrape ごと抜けない", async () => {
+    // #967 で `resolveSecret` を try の外へ持ち上げた副作用の対照。持ち上げただけ
+    // (`.catch()` 無し) だと reject が `alarm()` まで飛び、job は `running` のまま
+    // 失敗記録も残らない — **通知を足す前より悪くなる**。
+    const { sent, stored, run } = makeDO({ secretRejects: true });
+    scrapeViaHttp.mockRejectedValue(new Error("失敗"));
+    const errs = captureConsoleError();
+
+    // ここで reject すると「抜けている」= 回帰。
+    await expect(run(ACCOUNT, RANGE, "job-7")).resolves.toBeUndefined();
+    errs.restore();
+
+    // 従来どおり失敗として記録される。
+    expect(stored.get(SCRAPE_JOB_KEY_PREFIX + "job-7")).toMatchObject({ state: "failed" });
+    // 秘密が取れないので通知は送れない。送っていないことは名指しで残す。
+    expect(sent).toHaveLength(0);
+    expect(errs.find("scrape_alert_not_sent")).toMatchObject({
+      reason: expect.stringContaining("INTERNAL_SHARED_SECRET"),
     });
   });
 
