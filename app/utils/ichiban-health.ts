@@ -99,15 +99,15 @@ export interface CheckOutcome {
 
 /**
  * HTTP status + 応答 JSON からチェック結果を判定する。
- * - 非 2xx → ng (応答の `error` メッセージがあれば添える)
+ * - 非 2xx → ng (本文から理由を拾えれば添える。拾い方は `errorReason` 参照)
  * - kyuyo 系の warnings (権限抜け等) や 0 件は warn — 疎通はしているが要確認
  */
 export function classifyResult(id: string, httpStatus: number, body: unknown): CheckOutcome {
   if (httpStatus < 200 || httpStatus >= 300) {
-    const message = (body as { error?: unknown } | null)?.error
+    const reason = errorReason(body)
     return {
       level: 'ng',
-      detail: `HTTP ${httpStatus}${typeof message === 'string' && message ? `: ${message}` : ''}`,
+      detail: `HTTP ${httpStatus}${reason ? `: ${reason}` : ''}`,
     }
   }
 
@@ -139,6 +139,51 @@ export function classifyResult(id: string, httpStatus: number, body: unknown): C
   if (!Array.isArray(data)) return { level: 'ng', detail: '応答形式が想定外 (data がありません)' }
   if (data.length === 0) return { level: 'warn', detail: '0 件 (マスタが空?)' }
   return { level: 'ok', detail: `${data.length} 件` }
+}
+
+/**
+ * 非 2xx の本文から**人が読める理由**を 1 つ拾う (Refs #1008)。
+ *
+ * ## ★ 直した欠陥 — 「一番星が落ちている」は説明できるのに「一番星に繋がらない」は黙っていた
+ *
+ * 以前はここが **`body.error` しか見ていなかった**。上流 (一番星) が空の本文で
+ * エラーを返した場合は `server/api/ichiban/[...path].get.ts` が
+ * `{ error: '<日本語の理由>' }` を作る (Refs #900) ので理由が出るが、
+ * **proxy 自身が失敗したとき** (上流に到達できない 502 / `INTERNAL_SHARED_SECRET`
+ * 未設定の 503 / allowlist 外の 403) は h3 の `createError` → Nitro のエラー本文で
+ *
+ * ```
+ * {"error":true,"statusCode":502,"statusMessage":"…","message":"<日本語の理由>"}
+ * ```
+ *
+ * のように **`error` が真偽値**になる。`typeof … === 'string'` を満たさないので
+ * 理由が丸ごと落ち、**画面には `HTTP 502` だけ**が出ていた
+ * (理由は `message` に届いているのに読まれていなかった)。
+ * **ヘルスチェック画面の存在意義がいちばん問われる場面で画面が黙る**、という穴。
+ *
+ * ## ★ 拾うのは「文字列である最初の 1 つ」— `??` では拾えない
+ *
+ * `d.error ?? d.message` と繋ぐと **`true` で止まる**。`describeApiError`
+ * (`app/utils/api-error.ts`) が同じ理由で `find(typeof … === 'string')` にしてある。
+ *
+ * ## ★ `error` を先頭に置く順序は変えないこと
+ *
+ * 上流の理由 (`ichibanEmptyErrorReason` が作る `{ error: '<日本語>' }`) が
+ * **`error` に乗っている**。順序を入れ替えると、**いま出ている上流の理由が
+ * proxy 側の文言に置き換わる** (`tests/utils/ichiban-health.test.ts` の
+ * 「上流の理由が `message` に負けない」がこれを固定している)。
+ *
+ * ## ★ 寄せたのは「拾う順序」だけ — `describeApiError` を呼ばない
+ *
+ * あちらは入口が `$fetch` (ofetch) の `FetchError` で、出口が `${status} ${理由}`。
+ * こちらは入口が生 `fetch` の `res.json()` 済みの本文で、出口は
+ * `CheckOutcome.detail` (`HTTP ${status}: ${理由}` の 1 行)。**形が違うので
+ * 呼び出しでは寄せられない** (issue #1008 の「一括置換にしないこと」)。
+ */
+function errorReason(body: unknown): string {
+  const d = (body ?? {}) as Record<string, unknown>
+  const picked = [d.error, d.message, d.statusMessage].find(v => typeof v === 'string')
+  return typeof picked === 'string' ? picked : ''
 }
 
 function warningCount(body: unknown): number {
