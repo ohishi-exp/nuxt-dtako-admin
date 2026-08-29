@@ -24,7 +24,7 @@ import type { VueWrapper } from '@vue/test-utils'
 import { mockNuxtImport } from '@nuxt/test-utils/runtime'
 import type { Driver, Vehicle } from '~/types'
 import { NUXT_UI_PAGE_STUBS } from '../helpers/stubs'
-import { NEXT_STEP_CASES, expectExactlyOneNextStep } from '../helpers/next-step'
+import { RETRY, nextStepCases, expectExactlyOneNextStep } from '../helpers/next-step'
 
 const { api } = vi.hoisted(() => ({
   api: {
@@ -132,7 +132,7 @@ describe('/operations 運行一覧の取得失敗 (Refs #1008)', () => {
     // ★★ **4 経路 × この画面の `UAlert`** で「次の一手はちょうど 1 つ、食い違わない」
     //    (Refs #1008 PR-3)。条件の本体は `tests/helpers/next-step.ts`。
     //    **403 だけを見ると `0` になる壊れ方 (③④) を取り逃す。**
-    it.each(NEXT_STEP_CASES.map(c => [c.label, c] as const))(
+    it.each(nextStepCases(RETRY).map(c => [c.label, c] as const))(
       '運行一覧の表 — %s',
       async (_label, c) => {{
         api.getOperations.mockRejectedValue(c.error)
