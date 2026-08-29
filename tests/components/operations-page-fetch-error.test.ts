@@ -73,6 +73,11 @@ function alertTitles(w: VueWrapper) {
   return w.findAllComponents({ name: 'UAlert' }).map(a => a.props('title'))
 }
 
+/** 足した `UAlert` の `description` (**次の一手を持たない**ことを測るため)。 */
+function alertDescriptions(w: VueWrapper) {
+  return w.findAllComponents({ name: 'UAlert' }).map(a => a.props('description'))
+}
+
 beforeEach(() => {
   for (const fn of Object.values(api)) fn.mockReset()
   api.getOperations.mockResolvedValue({ operations: [], total: 0, page: 1, per_page: 50 })
@@ -96,6 +101,8 @@ describe('/operations 運行一覧の取得失敗 (Refs #1008)', () => {
       expect(alertTitles(w)).toEqual(['運行一覧を取得できませんでした (API エラー (503): DB に繋がりません'
         + ' — サーバ側の設定か障害です (権限の問題ではありません)。復旧してからページを再読み込みしてください)'])
       expect(w.text()).toContain('下の表の「データがありません」は 0 件を意味しません')
+      // ★ 503 は次の一手が「復旧してから再読み込み」なので title 側にだけ在る。
+      expect(alertDescriptions(w)).toEqual(['下の表の「データがありません」は 0 件を意味しません'])
     })
 
     it('★ 逆方向: 取得できて 0 件だった回は警告を出さない (異常に見せない)', async () => {
@@ -118,6 +125,25 @@ describe('/operations 運行一覧の取得失敗 (Refs #1008)', () => {
       expect(ng).not.toBe(ok)
       expect(ng).toContain('取得できませんでした')
       expect(ok).not.toContain('取得できませんでした')
+    })
+
+    it('★★ 403 で「次の一手」が 2 つ並んで食い違わない (dev で実測した欠陥の再現)', async () => {
+      // 初稿の `description` は末尾が「— ページを再読み込みして確かめてください」だった。
+      // 403 の `title` は **「ログインし直しても変わりません」「管理者に許可の追加を
+      // 依頼してください」** なので、**title が効かないと言った手を description が
+      // 勧める**形になっていた (nuxt dev + CDP で 403 を撃って実測)。
+      // ⇒ **次の一手は status を知っている `title` の側だけが持つ。**
+      api.getOperations.mockRejectedValue(new Error('API エラー (403): 権限がありません'))
+      const w = await mountPage()
+
+      const alert = w.findAllComponents({ name: 'UAlert' })[0]!
+      expect(alert.props('title')).toContain('管理者に許可の追加を依頼してください')
+      expect(alert.props('title')).toContain('ログインし直しても変わりません')
+      // ★ 同じ箱の中に「再読み込み」を勧める文が無い (title も description も)
+      expect(alert.props('description')).not.toContain('再読み込み')
+      expect(`${alert.props('title')} ${alert.props('description')}`).not.toContain('再読み込み')
+      // 区別のための事実そのものは残っている
+      expect(alert.props('description')).toBe('下の表の「データがありません」は 0 件を意味しません')
     })
 
     it('Error 以外で失敗しても黙らず、[object Object] も出さない', async () => {
