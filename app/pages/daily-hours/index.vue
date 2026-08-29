@@ -20,6 +20,11 @@ const drivers = ref<Driver[]>([])
 // 乗務員一覧が**取得できなかった**理由 (Refs #920)。**空配列だけでは「0 人」と
 // 区別が付かない**ので、「読めなかった」ことを状態として持つ。
 const driversError = ref<string | null>(null)
+// 表そのものが**取得できなかった**理由 (Refs #1008)。`driversError` と同じ理由で
+// **別に持つ** — 落ちたときの表は `items.length === 0` の枝に入って
+// **「データがありません」**と出るので、**空配列だけでは「本当に 0 件」と
+// 区別が付かない**。乗務員一覧とは落ちる口が違うので 1 本にまとめない。
+const fetchError = ref<string | null>(null)
 const workTimeItems = ref<WorkTimeItem[]>([])
 const wtTotal = ref(0)
 const loading = ref(false)
@@ -44,6 +49,9 @@ function buildFilter() {
 
 async function fetchData() {
   loading.value = true
+  // **取り直しごとに消す** — 絞り込みやページ送りで走り直して成功した回に、
+  // 前回の失敗が残っていると「いま落ちている」と読める。
+  fetchError.value = null
   try {
     const filter = buildFilter()
     const [hoursRes, wtRes] = await Promise.all([
@@ -56,6 +64,10 @@ async function fetchData() {
     wtTotal.value = wtRes.total
   } catch (e) {
     console.error('Failed to fetch daily hours:', e)
+    // ★ **console だけだと画面には何も出ない** (Refs #1008)。`loading` が終わって
+    //   表が「データがありません」になるだけなので、**「取得に失敗した」と
+    //   「本当に 0 件」が人には区別できない**。理由と次の一手を状態に持つ。
+    fetchError.value = describeListFailure(e)
   } finally {
     loading.value = false
   }
@@ -78,7 +90,10 @@ const RETRY_RELOAD = 'ページを再読み込みしてください'
  *
  * ## `retry` にボタンを渡していない理由
  *
- * この一覧を取り直す口は **`onMounted` にしかなく、押せるボタンが画面に無い**。
+ * **この画面に、取り直しを起こせるボタンが 1 つも無い。** 乗務員一覧の口は
+ * `onMounted` の 1 回だけ。一覧 (`fetchData`) は絞り込みの `watch` とページ送りでも
+ * 走るが、**絞り込みはボタンではなく**、ページ送りは `totalPages > 1` のときしか
+ * 描かれない — **失敗した回は `total` が 0 のままなので出ていない**。
  * **無いボタンを案内しない** (`tests/components/next-step-retry-labels.test.ts` の
  * 規約) ので、ボタンを名指ししない `RETRY_RELOAD` を渡す。
  */
@@ -153,6 +168,18 @@ function onTabChange() {
       v-if="driversError"
       :title="`乗務員一覧を取得できませんでした (${driversError})`"
       description="0 人なのか読めなかっただけなのかは、この画面では判りません — ページを再読み込みして確かめてください"
+      color="error"
+      icon="i-lucide-circle-x"
+      variant="subtle"
+    />
+
+    <!-- ★ 表の取得失敗を出す (Refs #1008)。直す前は `console.error` だけで、画面には
+         **表の「データがありません」しか出ていなかった** — 「取れなかった」と
+         「本当に 0 件」が区別できない。**失敗した回にだけ出す**のは上と同じ理由。 -->
+    <UAlert
+      v-if="fetchError"
+      :title="`日別労働時間を取得できませんでした (${fetchError})`"
+      description="下の表の「データがありません」は 0 件を意味しません — ページを再読み込みして確かめてください"
       color="error"
       icon="i-lucide-circle-x"
       variant="subtle"

@@ -23,6 +23,11 @@ const vehicles = ref<Vehicle[]>([])
 // 別々に持つ** — 片方だけ落ちたときに、落ちていない側まで疑わせないため。
 const driversError = ref<string | null>(null)
 const vehiclesError = ref<string | null>(null)
+// 表そのものが**取得できなかった**理由 (Refs #1008)。上の 2 本と同じ理由で
+// **別に持つ** — 落ちたときの表は `operations.length === 0` の枝に入って
+// **「データがありません」**と出るので、**空配列だけでは「本当に 0 件」と
+// 区別が付かない**。絞り込みの選択肢とは落ちる口が違うので 1 本にまとめない。
+const fetchError = ref<string | null>(null)
 const loading = ref(false)
 const splitLoading = ref(false)
 const splitResult = ref('')
@@ -43,6 +48,9 @@ const columns = [
 
 async function fetchData() {
   loading.value = true
+  // **取り直しごとに消す** — 絞り込みやページ送りで走り直して成功した回に、
+  // 前回の失敗が残っていると「いま落ちている」と読める。
+  fetchError.value = null
   try {
     const res = await getOperations({
       date_from: dateFrom.value || undefined,
@@ -56,6 +64,10 @@ async function fetchData() {
     total.value = res.total
   } catch (e) {
     console.error('Failed to fetch operations:', e)
+    // ★ **console だけだと画面には何も出ない** (Refs #1008)。`loading` が終わって
+    //   表が「データがありません」になるだけなので、**「取得に失敗した」と
+    //   「本当に 0 件」が人には区別できない**。理由と次の一手を状態に持つ。
+    fetchError.value = describeListFailure(e)
   } finally {
     loading.value = false
   }
@@ -78,7 +90,12 @@ const RETRY_RELOAD = 'ページを再読み込みしてください'
  *
  * ## `retry` にボタンを渡していない理由
  *
- * この一覧を取り直す口は **`onMounted` にしかなく、押せるボタンが画面に無い**。
+ * **失敗した回に押せるボタンが、この画面には 1 つも出ていない。** 乗務員・車両の口は
+ * `onMounted` の 1 回だけ。運行一覧 (`fetchData`) は絞り込みの `watch` / ページ送り /
+ * `splitAll` の `done` でも走るが、**絞り込みはボタンではなく**、残る 2 つは
+ * **一覧が取れた回にしか描かれない** — ページ送りは `totalPages > 1`、
+ * 「IVT一括分割」は `unsplitCount > 0` (= `operations` が空でない) が条件で、
+ * **失敗した回はどちらも `operations` が空なので出ていない**。
  * **無いボタンを案内しない** (`tests/components/next-step-retry-labels.test.ts` の
  * 規約) ので、ボタンを名指ししない `RETRY_RELOAD` を渡す。
  */
@@ -238,6 +255,18 @@ async function splitAll() {
       v-if="vehiclesError"
       :title="`車両一覧を取得できませんでした (${vehiclesError})`"
       description="0 台なのか読めなかっただけなのかは、この画面では判りません — ページを再読み込みして確かめてください"
+      color="error"
+      icon="i-lucide-circle-x"
+      variant="subtle"
+    />
+
+    <!-- ★ 表の取得失敗を出す (Refs #1008)。直す前は `console.error` だけで、画面には
+         **表の「データがありません」しか出ていなかった** — 「取れなかった」と
+         「本当に 0 件」が区別できない。**失敗した回にだけ出す**のは上 2 本と同じ理由。 -->
+    <UAlert
+      v-if="fetchError"
+      :title="`運行一覧を取得できませんでした (${fetchError})`"
+      description="下の表の「データがありません」は 0 件を意味しません — ページを再読み込みして確かめてください"
       color="error"
       icon="i-lucide-circle-x"
       variant="subtle"
