@@ -684,6 +684,18 @@ export interface RelayEnv {
    * **未設定は fail-closed** (通知を送らず、送らなかったことを `console.error`
    * に出す)。検証は `scrape-alert.ts` の `resolveScrapeAlertTarget`。 */
   SCRAPE_ALERT_TARGET?: string;
+  /** **全社 (DTAKO_ACCOUNTS に載っている会社すべて) を見てよいアカウント**の
+   * email allowlist。**JSON の文字列配列** (`["viewer@example.com", ...]`、
+   * Refs #1049)。
+   *
+   * **`ETC_ACCOUNTS` / `SCRAPE_ALERT_TARGET` と同じ作法** — Cloudflare dashboard
+   * の plain 変数 + `keep_vars = true` で、値は commit しない (`wrangler.toml`
+   * にはキー名だけコメントで書く)。
+   *
+   * **未設定・空配列・JSON 不正・配列でない はすべて fail-closed** = 全社許可を
+   * 1 件も出さない (= 全員が自 tenant のみ)。判定は `restraint-viewer-auth.ts` の
+   * `isAllCompsViewer` で、**role は見ない**。 */
+  ALL_COMPS_VIEWER_EMAILS?: string;
   /** 勤怠 (fold) の対象会社。`wrangler.toml` の宣言をそのまま fold の可否判定に
    * 使う (`kintai-relay.ts` の `judgeFoldScope`)。未設定は「対象外」ではなく
    * `not_configured` (設定の穴) として記録する (Refs #944)。 */
@@ -3939,9 +3951,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch {
       return null; // DTAKO_ACCOUNTS 不正は fail-closed (viewer 経路のみ閉じる)
     }
-    // admin は DTAKO_ACCOUNTS に載っている全会社を見られる (グループ管理者、
-    // Refs #367)。それ以外は従来どおり自 tenant の会社のみ。
-    return allowedViewerComps(accounts, result.tenant_id, result.role).has(routing.compId)
+    // 全社を見られるのは ALL_COMPS_VIEWER_EMAILS に載っている email だけ
+    // (Refs #1049)。それ以外は自 tenant の会社のみ。**role は見ない** —
+    // 「dtako の admin は 1 人だけ」という前提が崩れたため (restraint-viewer-auth.ts
+    // の VIEWER_ADMIN_ROLE の doc)。未設定・壊れた設定は fail-closed。
+    return allowedViewerComps(
+      accounts,
+      result.tenant_id,
+      result.email,
+      this.env.ALL_COMPS_VIEWER_EMAILS,
+    ).has(routing.compId)
       ? viewerRecord(result.role, result.email)
       : null;
   }
@@ -4667,14 +4686,20 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   /** GET /restraint-api/comp-map — dtako 会社ID ↔ 給与大臣の会社コード対応
    * (migration 0008)。**同じ tenant の会社だけ**返す — 会社名・会社IDを別テナントに
    * 見せない (Refs #367)。DTAKO_ACCOUNTS 未設定・自 comp が未登録なら空配列
-   * (fail-closed)。 */
+   * (fail-closed)。全社ぶんを返すのは `ALL_COMPS_VIEWER_EMAILS` に載っている
+   * email だけ (Refs #1049 — role は見ない)。 */
   private async handleCompMap(record: TheearthSessionRecord): Promise<Response> {
     const db = this.env.DTAKO_DB;
     if (!db) return dvrJsonError(503, "会社対応表 (DTAKO_DB) が未設定です");
     let allowed = new Set<string>([record.compId]);
     try {
       const accounts = parseDtakoAccounts((await this.dtakoAccountsRaw()) || undefined);
-      const sameTenant = compIdsInSameTenant(accounts, record.compId, record.viewerRole);
+      const sameTenant = compIdsInSameTenant(
+        accounts,
+        record.compId,
+        record.viewerEmail,
+        this.env.ALL_COMPS_VIEWER_EMAILS,
+      );
       if (sameTenant.size > 0) allowed = sameTenant;
     } catch {
       // DTAKO_ACCOUNTS 不正時は自 comp のみ (fail-closed)

@@ -124,39 +124,121 @@ export function devViewerCompIds(raw: string): Set<string> {
   );
 }
 
-/** 全会社を見られる role。auth-worker の introspect が JWT の `role` claim を
- * そのまま返す (`{active, tenant_id, role, email, sub, exp}`)。
+/** auth-worker の introspect が JWT の `role` claim をそのまま返す
+ * (`{active, tenant_id, role, email, sub, exp}`) ときの管理者ロール値。
  *
- * dtako の admin はグループ全体の管理者 1 人だけで、別テナント側に admin を
- * 増やす予定は無い (2026-07-25 ユーザー確認) ため、role だけで全社許可にする。
- * これが変わる時は「全社を許可する tenant_id の allowlist」に切り替えること。 */
+ * **★ 全社許可の判定には使わない (Refs #1049)。** 誰が全社を見てよいかは
+ * `ALL_COMPS_VIEWER_EMAILS` の email allowlist **だけ**で決める
+ * (`isAllCompsViewer`)。
+ *
+ * **なぜ role をやめたか**: 「dtako の admin はグループ全体の管理者 1 人だけ」
+ * (2026-07-25) という前提が崩れ、管理者ロールのアカウントが複数になったため —
+ * 旧 doc 自身が指定していた「全社を許可する allowlist に切り替えること」という
+ * 条件に入った。**role との AND にもしない** — 2 条件にすると role が変わった
+ * ときに黙って権限が消える。「誰が全社を見てよいか」は 1 か所で決める。
+ *
+ * 定数を消さずに残しているのは、上の
+ * 「role と email allowlist は**優先関係ではない**」節がこの名前で参照している
+ * ため (あちらは**上流 rust-ichibanboshi の給与 allowlist** の話で、ここの
+ * `ALL_COMPS_VIEWER_EMAILS` とは別物)。 */
 export const VIEWER_ADMIN_ROLE = "admin";
 
+/** 全社 (DTAKO_ACCOUNTS に載っている会社すべて) を見てよいアカウントの
+ * allowlist を持つ環境変数名。中身は **JSON の文字列配列**
+ * (`["viewer@example.com", ...]`)。
+ *
+ * **`ETC_ACCOUNTS` / `SCRAPE_ALERT_TARGET` と同じ作法** — Cloudflare dashboard の
+ * plain 変数 + `keep_vars = true` で、**値は commit しない**
+ * (`wrangler.toml` にはキー名とコメントだけ書く。`[vars]` に書くと deploy が
+ * その値で dashboard を上書きしてしまう)。 */
+export const ALL_COMPS_VIEWER_EMAILS_VAR = "ALL_COMPS_VIEWER_EMAILS";
+
+/** DTAKO_ACCOUNTS に載っている comp_id すべて (空 comp_id は除外)。
+ * 載っていない comp は含めない — ヘッダ偽装で未登録の会社を触らせない。 */
+function allRegisteredCompIds(accounts: DtakoAccountEntry[]): Set<string> {
+  const out = new Set<string>();
+  for (const a of accounts) {
+    if (a.comp_id) out.add(a.comp_id);
+  }
+  return out;
+}
+
+/** 突き合わせ用のメールアドレス正規化 (前後空白を落として小文字化)。
+ * **allowlist 側と viewer 側の両方**をこれに通す — 片側だけだと大文字小文字の
+ * 違いで一致しなくなる。 */
+export function normalizeViewerEmail(email: string | undefined): string {
+  if (!email) return "";
+  return email.trim().toLowerCase();
+}
+
+/** `ALL_COMPS_VIEWER_EMAILS` の生値 → 正規化済み email の集合。
+ *
+ * **未設定 / JSON としてパースできない / 配列でない はすべて空集合**
+ * (fail-closed = 全社許可を 1 件も出さない)。配列の中の文字列でない要素と、
+ * 正規化した結果が空になる要素も落とす。**壊れた設定で全社が開かないこと**が
+ * この関数の目的。 */
+export function allCompsViewerEmails(raw: string | undefined): Set<string> {
+  const out = new Set<string>();
+  if (!raw) return out;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    return out;
+  }
+  if (!Array.isArray(parsed)) return out;
+  for (const v of parsed) {
+    if (typeof v !== "string") continue;
+    const norm = normalizeViewerEmail(v);
+    if (norm) out.add(norm);
+  }
+  return out;
+}
+
+/** この viewer が全社を見てよいか。**role は見ない** (`VIEWER_ADMIN_ROLE` の
+ * doc 参照)。email 不在・allowlist 空 (未設定 / 壊れた設定を含む)・allowlist に
+ * 未収載 はすべて false (fail-closed)。 */
+export function isAllCompsViewer(
+  viewerEmail: string | undefined,
+  allCompsViewerEmailsRaw: string | undefined,
+): boolean {
+  const norm = normalizeViewerEmail(viewerEmail);
+  if (!norm) return false;
+  return allCompsViewerEmails(allCompsViewerEmailsRaw).has(norm);
+}
+
 /** viewer 経路で触れる comp_id 集合。
- * admin は **DTAKO_ACCOUNTS に載っている会社すべて** (載っていない comp は不可 —
- * ヘッダ偽装で未登録の会社を触らせない)、それ以外は自 tenant の会社のみ。 */
+ * `ALL_COMPS_VIEWER_EMAILS` に載っている email は **DTAKO_ACCOUNTS に載っている
+ * 会社すべて** (載っていない comp は不可 — ヘッダ偽装で未登録の会社を触らせない)、
+ * それ以外は自 tenant の会社のみ (Refs #1049)。 */
 export function allowedViewerComps(
   accounts: DtakoAccountEntry[],
   tenantId: string,
-  role: string | undefined,
+  viewerEmail: string | undefined,
+  allCompsViewerEmailsRaw: string | undefined,
 ): Set<string> {
-  if (role === VIEWER_ADMIN_ROLE) {
-    return new Set(accounts.map((a) => a.comp_id).filter((c): c is string => !!c));
+  if (isAllCompsViewer(viewerEmail, allCompsViewerEmailsRaw)) {
+    return allRegisteredCompIds(accounts);
   }
   return viewerCompIdsForTenant(accounts, tenantId);
 }
 
 /** `compId` と同じ tenant に属する comp_id 集合 (自分自身を含む)。
  * 社員マスタの会社横断表示・会社対応表 (comp-map) を「同じテナントの会社だけ」に
- * 絞るために使う (Refs #367)。DTAKO_ACCOUNTS に無い comp は空集合 (fail-closed)。 */
+ * 絞るために使う (Refs #367)。DTAKO_ACCOUNTS に無い comp は空集合 (fail-closed)。
+ * `ALL_COMPS_VIEWER_EMAILS` に載っている email だけが全社ぶんを見られる
+ * (Refs #1049 — ここも `allowedViewerComps` と同じ全社許可を持っているので、
+ * 片方だけ絞ると素通りする)。 */
 export function compIdsInSameTenant(
   accounts: DtakoAccountEntry[],
   compId: string,
-  role?: string,
+  viewerEmail?: string,
+  allCompsViewerEmailsRaw?: string,
 ): Set<string> {
-  if (role === VIEWER_ADMIN_ROLE) {
-    return new Set(accounts.map((a) => a.comp_id).filter((c): c is string => !!c));
+  if (isAllCompsViewer(viewerEmail, allCompsViewerEmailsRaw)) {
+    return allRegisteredCompIds(accounts);
   }
-  const tenantId = accounts.find((a) => a.comp_id === compId)?.tenant_id ?? "";
+  const found = accounts.find((a) => a.comp_id === compId);
+  const tenantId = found ? found.tenant_id : "";
   return viewerCompIdsForTenant(accounts, tenantId);
 }

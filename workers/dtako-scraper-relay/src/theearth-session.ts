@@ -21,14 +21,16 @@ export interface TheearthSessionRecord {
   cookies: Array<[string, string]>;
   createdAt: number;
   expiresAt: number;
-  /** viewer 経路 (auth-worker JWT) で認可した時の role。`admin` はグループ全社を
-   * 見られる (Refs #367)。theearth ログイン由来のセッションでは undefined。
-   * DO storage に保存されるのは theearth セッションだけで、viewer は毎リクエスト
-   * 組み立てるため永続化されない。 */
+  /** viewer 経路 (auth-worker JWT) で認可した時の role。
+   * **★ 認可には使わない (Refs #1049)** — 全社許可は `viewerEmail` の allowlist
+   * だけで決めるようになったので、いまは記録用の値。theearth ログイン由来の
+   * セッションでは undefined。DO storage に保存されるのは theearth セッションだけで、
+   * viewer は毎リクエスト組み立てるため永続化されない。 */
   viewerRole?: string;
   /** viewer 経路で認可した時の JWT の email claim (Refs #554)。kintai 上流
-   * キャッシュを人単位の DO に分ける鍵に使う (`kintai-cache-{sha256(email)}`)。
-   * **認可には使わない** — 会社スコープは従来どおり tenant 逆引き。
+   * キャッシュを人単位の DO に分ける鍵に使い (`kintai-cache-{sha256(email)}`)、
+   * **`ALL_COMPS_VIEWER_EMAILS` の allowlist との突き合わせにも使う** (Refs #1049 —
+   * 全社を見てよいかの判定。会社スコープの既定は従来どおり tenant 逆引き)。
    * theearth ログイン由来のセッションでは undefined (= キャッシュを使わない)。 */
   viewerEmail?: string;
 }

@@ -14,12 +14,16 @@ export interface IntrospectResult {
    * の comp スコープ判定 (DTAKO_ACCOUNTS 逆引き) に使う。WS ハンドシェイク判定
    * (decideRelayAuth) は従来どおり active しか見ない。 */
   tenant_id?: string
-  /** active:true の時に introspect が返す JWT の role claim。restraint viewer 経路
-   * で「admin は全会社」を判定するのに使う (Refs #367)。WS ハンドシェイク判定
+  /** active:true の時に introspect が返す JWT の role claim。
+   * **★ 認可には使わない (Refs #1049)** — 以前は restraint viewer 経路で
+   * 「admin は全会社」を判定していたが、全社許可は `ALL_COMPS_VIEWER_EMAILS` の
+   * email allowlist だけで決めるようになった。WS ハンドシェイク判定
    * (decideRelayAuth) は従来どおり active しか見ない。 */
   role?: string
   /** active:true の時に introspect が返す JWT の email claim (Refs #554)。
-   * kintai 上流キャッシュを**人単位の DO** に分けるための鍵に使う。
+   * kintai 上流キャッシュを**人単位の DO** に分けるための鍵に使い、
+   * **`ALL_COMPS_VIEWER_EMAILS` の allowlist との突き合わせにも使う**
+   * (Refs #1049 — 全社を見てよいかの判定)。
    * theearth のユーザー名は共有アカウントになりうるので鍵にしない。
    * WS ハンドシェイク判定 (decideRelayAuth) は従来どおり active しか見ない。 */
   email?: string
