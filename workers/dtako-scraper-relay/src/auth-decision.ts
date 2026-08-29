@@ -16,17 +16,30 @@ export interface IntrospectResult {
   tenant_id?: string
   /** active:true の時に introspect が返す JWT の role claim。
    * **★ 認可には使わない (Refs #1049)** — 以前は restraint viewer 経路で
-   * 「admin は全会社」を判定していたが、全社許可は `ALL_COMPS_VIEWER_EMAILS` の
-   * email allowlist だけで決めるようになった。WS ハンドシェイク判定
+   * 「admin は全会社」を判定していたが、全社許可は下の `org_wide`
+   * (= auth-worker の `USER_ACL`) だけで決めるようになった。WS ハンドシェイク判定
    * (decideRelayAuth) は従来どおり active しか見ない。 */
   role?: string
   /** active:true の時に introspect が返す JWT の email claim (Refs #554)。
-   * kintai 上流キャッシュを**人単位の DO** に分けるための鍵に使い、
-   * **`ALL_COMPS_VIEWER_EMAILS` の allowlist との突き合わせにも使う**
-   * (Refs #1049 — 全社を見てよいかの判定)。
+   * kintai 上流キャッシュを**人単位の DO** に分けるための鍵に使う。
    * theearth のユーザー名は共有アカウントになりうるので鍵にしない。
+   * **認可には使わない** — テナントを越えてよいかは `org_wide` が答える。
    * WS ハンドシェイク判定 (decideRelayAuth) は従来どおり active しか見ない。 */
   email?: string
+  /** active:true の時だけ返る「**テナント境界を越えて org 全体を見てよい人か**」
+   * (Refs #1049 / ippoan/auth-worker#497)。正本は auth-worker の `USER_ACL`
+   * (`checkOrgAccess` が `TENANT_ACL` と OR 合成する側) で、**この repo は写しを
+   * 持たない**。restraint viewer 経路の全社許可はこれだけで決まる。
+   *
+   * - **`true` は「管理者」でも「開発者」でもない。role とは無関係**
+   * - **`DEVELOPER_EMAILS` とは別物** (あちらは UI の出し分け専用で認可ではない)
+   * - **`active: false` の応答には含まれない** (情報リーク回避の既存方針)
+   * - **★ `undefined` は `false` として扱うこと** — 古い auth-worker はこのキーを
+   *   返さない (additive な変更)。倒し方は `restraint-viewer-auth.ts` の
+   *   `isAllCompsViewer` (真の boolean の `true` だけを通す)
+   *
+   * WS ハンドシェイク判定 (decideRelayAuth) は従来どおり active しか見ない。 */
+  org_wide?: boolean
 }
 
 /** ハンドシェイク判定結果。`status === 101` の時だけ accept する。 */

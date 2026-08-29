@@ -730,17 +730,38 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   判定は `allowedViewerComps` (DTAKO_ACCOUNTS 逆引き) が正で、フロントの
   リストは表示順とラベルだけ。dtako の 2 社は別 tenant (27324455 と 75700192) で、
   グループ管理者が両方を 1 画面で見る要件がある (2026-07-25)。
-  **★ 全社を見られるのは `ALL_COMPS_VIEWER_EMAILS` (全社閲覧 allowlist) に載って
-  いる email だけ (Refs #1049)。`role: admin` は見ない** — 以前は role だけで
-  全社許可にしていたが、「dtako の admin は 1 人だけ」という前提が崩れた
-  (管理者ロールのアカウントが複数になった) ため、当時の doc 自身が指定していた
-  「allowlist へ切り替える」条件に入った。**role との AND にもしない**
-  (role が変わった時に黙って権限が消えるため)。**未設定・空配列・JSON 不正は
-  すべて fail-closed** = 全員が自 tenant のみ。値は Cloudflare dashboard の
-  plain 変数 + `keep_vars = true` で、`wrangler.toml` には書かない。
-  allowlist に載っていても DTAKO_ACCOUNTS に無い会社は不可 (ヘッダ偽装対策)。
-  **全社許可は `allowedViewerComps` と `compIdsInSameTenant` (comp-map) の
-  2 か所にある** — 片方だけ絞ると素通りする
+  **★ 全社を見られるのは introspect の `org_wide` が `true` の viewer だけ
+  (Refs #1049)。`role: admin` は見ない** — 以前は role だけで全社許可にしていたが、
+  「dtako の admin は 1 人だけ」という前提が崩れた (管理者ロールのアカウントが
+  複数になった) ため。**role との AND にもしない** (role が変わった時に黙って
+  権限が消えるため)。`org_wide` が true でも DTAKO_ACCOUNTS に無い会社は不可
+  (ヘッダ偽装対策)。**全社許可は `allowedViewerComps` と `compIdsInSameTenant`
+  (comp-map) の 2 か所にある** — 片方だけ絞ると素通りする。
+  **★ 受け取り側の fail-closed はこの repo の責任** — 古い auth-worker は
+  `org_wide` を返さない (additive)。`isAllCompsViewer` は**真の boolean の `true`
+  だけ**を通す (`undefined` / `null` / `1` / **文字列 `"false"`** はすべて false。
+  `Boolean(x)` で受けると `"false"` が true になる)
+
+### ★★ テナント越えの正本は auth-worker。**この repo に allowlist を作らない**
+
+**実測 (2026-08-29): dtako の 3 repo に `USER_ACL` / `DEVELOPER_EMAILS` /
+`bypass_emails` の言及が 0 件。** 知識が `ippoan/auth-worker` にしか無いので、
+**dtako 側だけを見ていると構造的に見えない。だから #1004 と #1049 で 2 回、
+「この repo に allowlist を新設する」案が再発明された** (#1049 は実装まで進んで
+差し戻し)。**「新しく allowlist を足す」案が出たら、まずここを読むこと。**
+
+| 口 (auth-worker) | 使うか | 中身 |
+| --- | --- | --- |
+| **`USER_ACL[org]`** | **★ これだけが正本** | `checkOrgAccess` が `TENANT_ACL` と **OR** 合成する側。**tenant が一致しなくてもその人だから通す** = 「テナント境界を越えてよい」そのもの。`/auth/introspect` が `org_wide` (boolean) として返す (ippoan/auth-worker#497) |
+| `DEVELOPER_EMAILS` | **使わない** | `admin-html.ts` / `device-setup.ts` に直書き (2 ファイルで重複)。**UI の出し分け専用で認可ではない**と実装に明記がある。**取り違え注意** |
+| `APP_TENANT_ACL.bypass_emails` | 使わない | per-app の開発者バックドア。**secret が空だと誰も通らず、本番で全員締め出し**になりうる |
+
+**★ 「ACL 判定を通過したか」から導出しないこと。** 通過は **tenant 一致でも真**に
+なるので測りたいものと違ううえ、`checkAppTenant` は **malformed JSON で fail-open**、
+`classifyOrigin` は部分一致で**未分類なら無条件 pass**。⇒ 設定ミスのときに
+「全社を見てよい」が真に倒れる。判定は **`USER_ACL` に literal に載っているか**だけ
+(auth-worker の `isOrgWideUser` がそれ。`matchesOrgAllowlist` は tenant を先に見て
+早期 return するので、**両方に載っている人**の email 一致が観測されず流用できない)
 - **給与DBからの取り込み** (Refs #367): 社員マスタタブの「給与DBから取り込み」は
   rust-ichibanboshi の identity-only API (`GET /api/kyuyo/employees`、
   ohishi-exp/rust-ichibanboshi#92) を叩き、社員番号・氏名・所属・給与体系だけを

@@ -24,7 +24,7 @@
  * **★ 引用元の「軸」の呼び方は #1049 で変わった** (言葉が違って見えても中身は同じ)。
  * あちらは元々「role と email allowlist」の 2 軸と書いていたが、**#1049 で会社の軸から
  * role が外れた**ため、いまは **「給与 allowlist」(上流 rust-ichibanboshi) と
- * 「tenant + 全社閲覧 allowlist」(`ALL_COMPS_VIEWER_EMAILS`、relay)** の 2 軸。
+ * 「tenant + 全社閲覧 allowlist」(auth-worker の `USER_ACL`)** の 2 軸。
  * **直交していて AND で効く**という中身は変わっていない
  * (email allowlist が 2 つになったので、あちらでは呼び分けている)。
  *

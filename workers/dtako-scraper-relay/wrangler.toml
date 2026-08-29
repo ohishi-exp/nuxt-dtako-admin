@@ -194,23 +194,10 @@ UPSTREAM_CACHE = "on"
 #                         なので送っていない」を console.error に出す
 #                         (status: "scrape_alert_not_sent"、Tail Worker で読む)。
 
-# 全社 (DTAKO_ACCOUNTS に載っている会社すべて) の拘束時間・賃金画面を見てよい
-# アカウントの allowlist (ALL_COMPS_VIEWER_EMAILS、Refs #1049)。
-# **ここには値を書かない — dashboard の plain 変数 + keep_vars = true**
-# (ETC_ACCOUNTS / SCRAPE_ALERT_TARGET と同じ作法。[vars] に書くと deploy が
-# その値で dashboard を上書きしてしまう)。
-#
-#   ALL_COMPS_VIEWER_EMAILS ... JSON の文字列配列 ["viewer@example.com", ...]。
-#                         auth-worker introspect が返す JWT の email claim と
-#                         突き合わせる (前後空白を落として小文字化してから比較)。
-#                         **role は見ない** — 「dtako の admin は 1 人だけ」と
-#                         いう前提が崩れたため role 判定をやめた
-#                         (restraint-viewer-auth.ts の module docs
-#                         「会社の軸が role を見るのをやめた理由」)。
-#                         **未設定・空配列・JSON 不正・配列でない はすべて
-#                         fail-closed** = 全社許可を 1 件も出さない
-#                         (= 全員が自 tenant の会社のみ)。壊れた設定で全社が
-#                         開くことは無い。
+# 「全社 (DTAKO_ACCOUNTS の全会社) を見てよい人」の設定は**ここには無い**
+# (Refs #1049)。正本は **auth-worker の `USER_ACL`** で、relay は
+# `/auth/introspect` の応答 `org_wide` を聞きに行くだけ — 写しを持たない
+# (二重管理の回避)。**この relay に allowlist を新設しないこと。**
 
 [env.staging]
 name = "nuxt-dtako-admin-scraper-relay-staging"

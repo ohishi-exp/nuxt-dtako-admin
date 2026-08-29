@@ -28,11 +28,19 @@ export interface TheearthSessionRecord {
    * viewer は毎リクエスト組み立てるため永続化されない。 */
   viewerRole?: string;
   /** viewer 経路で認可した時の JWT の email claim (Refs #554)。kintai 上流
-   * キャッシュを人単位の DO に分ける鍵に使い (`kintai-cache-{sha256(email)}`)、
-   * **`ALL_COMPS_VIEWER_EMAILS` の allowlist との突き合わせにも使う** (Refs #1049 —
-   * 全社を見てよいかの判定。会社スコープの既定は従来どおり tenant 逆引き)。
+   * キャッシュを人単位の DO に分ける鍵に使う (`kintai-cache-{sha256(email)}`)。
+   * **認可には使わない** — テナントを越えてよいかは `viewerOrgWide` が答える。
    * theearth ログイン由来のセッションでは undefined (= キャッシュを使わない)。 */
   viewerEmail?: string;
+  /** viewer 経路で認可した時の introspect 応答の `org_wide`
+   * (Refs #1049 / ippoan/auth-worker#497)。**テナント境界を越えて org 全体を
+   * 見てよい人か**で、正本は auth-worker の `USER_ACL`。`comp-map` の全社表示
+   * (`compIdsInSameTenant`) がこれを読む。
+   *
+   * theearth ログイン由来のセッションでは undefined。**DO storage に残っている
+   * #1049 以前の record にも入っていない** — どちらも `undefined` → false に
+   * 倒れる (`isAllCompsViewer` が真の boolean の `true` だけを通す)。 */
+  viewerOrgWide?: boolean;
 }
 
 export interface TheearthRouting {

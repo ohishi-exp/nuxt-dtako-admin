@@ -34,8 +34,9 @@
  * | **単価マスタ × 拘束時間 の計算賃金** — 月次集計 CSV の `単価`/`…(円)`/`合計(円)`/`総支給時給(割増込)`、最低賃金チェック、タイムカードの残業額 | `/restraint-api/wage-report`・`/restraint-api/wage-master` (計算は `restraint-wage.ts`) | **tenant** (この関数) |
  * | **確定値スナップショット** (期間集計タブの `paid` / 差) | `/restraint-api/wage-snapshot`・`/restraint-api/wage-range` | **tenant (この関数) AND 給与 allowlist** (Refs #951) |
  *
- * **給与 allowlist は上流にしか無い。全社閲覧 allowlist はこの relay にある** —
- * この 2 つは**別物**で、置き場も効き先も違う (下の「email allowlist は 2 つある」)。
+ * **どちらの allowlist も、この repo には無い** — 給与 allowlist は上流
+ * rust-ichibanboshi、全社閲覧 allowlist は auth-worker。**別物**で効き先も違う
+ * (下の「email allowlist は 2 つある」)。
  *
  * **給与 allowlist** の実体は rust-ichibanboshi の `kyuyo::introspect::authorize()`
  * (`#82`) で、auth-worker introspect の `email` をオンプレ設定
@@ -43,9 +44,9 @@
  * 持っていない**し、持たせると二重管理になる (片方だけ更新されて食い違う)。
  * 3 段目もこの正を**聞きに行く**だけ (`kintai-relay.ts` の `checkKyuyoAccess`)。
  *
- * **全社閲覧 allowlist** (`ALL_COMPS_VIEWER_EMAILS`、Refs #1049) は**この relay が
- * 自分で持つ**。給与 allowlist の写しではないので、二重管理にはならない — 決める
- * ことが違う (実支給額の可否ではなく、**どの会社**を見てよいか)。
+ * **全社閲覧 allowlist** の実体は **auth-worker の `USER_ACL`** (Refs #1049)。
+ * この relay は写しを持たず、**`/auth/introspect` の応答 `org_wide` (boolean) を
+ * 聞きに行くだけ**。給与 allowlist と同じ「正本は 1 つ、写しは持たない」形。
  *
  * **なぜ 2 段目が tenant のままか**: あれは給与大臣の実データではなく、**この repo が
  * 持つ単価マスタから計算した労務管理値**で、最低賃金チェックはテナント内の総務が回す
@@ -79,7 +80,7 @@
  * | 呼び名 | 実体 | 決めること |
  * | --- | --- | --- |
  * | **給与 allowlist** | **上流** rust-ichibanboshi の `KYUYO_ALLOWED_EMAILS` (`kyuyo::introspect::authorize()`) | 給与大臣の**実支給額**を見てよいか |
- * | **全社閲覧 allowlist** | **この relay** の `ALL_COMPS_VIEWER_EMAILS` (`isAllCompsViewer`) | **どの会社**を見てよいか |
+ * | **全社閲覧 allowlist** | **auth-worker** の `USER_ACL` → introspect の `org_wide` (`isAllCompsViewer`) | **どの会社**を見てよいか |
  *
  * **無冠で「email allowlist」と書かないこと** — どちらの話か読み手が決められない。
  *
@@ -108,11 +109,23 @@
  * アカウントが複数になった) ため、旧 doc 自身が指定していた「全社を許可する
  * allowlist に切り替えること」という条件に入った。
  *
- * ⇒ いまは **`ALL_COMPS_VIEWER_EMAILS` (全社閲覧 allowlist) だけ**で決める。
+ * ⇒ いまは **introspect の `org_wide` (= auth-worker の `USER_ACL`) だけ**で決める。
  * **role との AND にもしない** — 2 条件にすると role が変わったときに**黙って権限が
  * 消える**という分かりにくい失敗が増える。「誰が全社を見てよいか」は 1 か所で決める。
  * ⇒ **`role` は全社許可の判定に一度も現れない** (`allowedViewerComps` /
  * `compIdsInSameTenant` のどちらも引数に取らない)。
+ *
+ * ## ★ なぜ relay 側に allowlist を置かないか (Refs #1049、2 度目の再発明)
+ *
+ * **「テナントを越えてよい人」の正本は auth-worker の `USER_ACL` に既にある。**
+ * relay に写しを作ると**二重管理**になり、片方だけ更新されて食い違う。
+ * この案件では **#1004 と #1049 の 2 回**「この repo に allowlist を新設する」案が
+ * 出た — **dtako の 3 repo に `USER_ACL` の言及が 0 件**で、知識が auth-worker に
+ * しか無いため**構造的に見えない**のが機序 (`nuxt-dtako-admin-map` skill に明記した)。
+ *
+ * **★ `org_wide` を受け取る側の fail-closed はこちらの責任**。古い auth-worker は
+ * このキーを返さない (additive な変更) ので、**`undefined` は false**。型崩れ
+ * (`"false"` / `1` / `null`) も false に倒す — `isAllCompsViewer` の doc 参照。
  */
 import type { DtakoAccountEntry } from "./cron";
 
@@ -158,16 +171,6 @@ export function devViewerCompIds(raw: string): Set<string> {
   );
 }
 
-/** **全社閲覧 allowlist** (= DTAKO_ACCOUNTS に載っている会社すべてを見てよい
- * アカウント) を持つ環境変数名。中身は **JSON の文字列配列**
- * (`["viewer@example.com", ...]`)。
- *
- * **`ETC_ACCOUNTS` / `SCRAPE_ALERT_TARGET` と同じ作法** — Cloudflare dashboard の
- * plain 変数 + `keep_vars = true` で、**値は commit しない**
- * (`wrangler.toml` にはキー名とコメントだけ書く。`[vars]` に書くと deploy が
- * その値で dashboard を上書きしてしまう)。 */
-export const ALL_COMPS_VIEWER_EMAILS_VAR = "ALL_COMPS_VIEWER_EMAILS";
-
 /** DTAKO_ACCOUNTS に載っている comp_id すべて (空 comp_id は除外)。
  * 載っていない comp は含めない — ヘッダ偽装で未登録の会社を触らせない。 */
 function allRegisteredCompIds(accounts: DtakoAccountEntry[]): Set<string> {
@@ -178,62 +181,38 @@ function allRegisteredCompIds(accounts: DtakoAccountEntry[]): Set<string> {
   return out;
 }
 
-/** 突き合わせ用のメールアドレス正規化 (前後空白を落として小文字化)。
- * **allowlist 側と viewer 側の両方**をこれに通す — 片側だけだと大文字小文字の
- * 違いで一致しなくなる。 */
-export function normalizeViewerEmail(email: string | undefined): string {
-  if (!email) return "";
-  return email.trim().toLowerCase();
-}
-
-/** `ALL_COMPS_VIEWER_EMAILS` の生値 → 正規化済み email の集合。
- *
- * **未設定 / JSON としてパースできない / 配列でない はすべて空集合**
- * (fail-closed = 全社許可を 1 件も出さない)。配列の中の文字列でない要素と、
- * 正規化した結果が空になる要素も落とす。**壊れた設定で全社が開かないこと**が
- * この関数の目的。 */
-export function allCompsViewerEmails(raw: string | undefined): Set<string> {
-  const out = new Set<string>();
-  if (!raw) return out;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw) as unknown;
-  } catch {
-    return out;
-  }
-  if (!Array.isArray(parsed)) return out;
-  for (const v of parsed) {
-    if (typeof v !== "string") continue;
-    const norm = normalizeViewerEmail(v);
-    if (norm) out.add(norm);
-  }
-  return out;
-}
-
 /** この viewer が全社を見てよいか (**全社閲覧 allowlist**)。
- * **role は見ない** — 理由は module docs の「会社の軸が role を見るのをやめた理由」。
- * email 不在・allowlist 空 (未設定 / 壊れた設定を含む)・allowlist に未収載 は
- * すべて false (fail-closed)。 */
-export function isAllCompsViewer(
-  viewerEmail: string | undefined,
-  allCompsViewerEmailsRaw: string | undefined,
-): boolean {
-  const norm = normalizeViewerEmail(viewerEmail);
-  if (!norm) return false;
-  return allCompsViewerEmails(allCompsViewerEmailsRaw).has(norm);
+ *
+ * 判定の正本は **auth-worker の `USER_ACL`** で、この relay は
+ * `/auth/introspect` の応答 `org_wide` を渡されるだけ (写しを持たない、
+ * Refs #1049)。**role は見ない** — 理由は module docs の
+ * 「会社の軸が role を見るのをやめた理由」。
+ *
+ * **★ 引数を `unknown` で受けて `=== true` だけを通すのは意図的**。値は
+ * **上流 worker の JSON 応答**から来るので、型注釈は実行時の保証にならない:
+ *
+ * - **`undefined`** — 古い auth-worker はこのキーを返さない (additive な変更)。
+ *   **応答欠落・キー欠落も同じ**
+ * - **`null` / 数値 / オブジェクト** — 型崩れ
+ * - **文字列 `"false"`** — ★ `Boolean("false")` は `true`。truthy 判定では
+ *   通ってしまうので `=== true` で弾く
+ *
+ * ⇒ **真の boolean の `true` だけが全社許可**。それ以外は全部 false
+ * (fail-closed = 自 tenant の会社のみ)。 */
+export function isAllCompsViewer(orgWide: unknown): boolean {
+  return orgWide === true;
 }
 
 /** viewer 経路で触れる comp_id 集合。
- * `ALL_COMPS_VIEWER_EMAILS` に載っている email は **DTAKO_ACCOUNTS に載っている
+ * introspect の `org_wide` が `true` の viewer は **DTAKO_ACCOUNTS に載っている
  * 会社すべて** (載っていない comp は不可 — ヘッダ偽装で未登録の会社を触らせない)、
  * それ以外は自 tenant の会社のみ (Refs #1049)。 */
 export function allowedViewerComps(
   accounts: DtakoAccountEntry[],
   tenantId: string,
-  viewerEmail: string | undefined,
-  allCompsViewerEmailsRaw: string | undefined,
+  orgWide: unknown,
 ): Set<string> {
-  if (isAllCompsViewer(viewerEmail, allCompsViewerEmailsRaw)) {
+  if (isAllCompsViewer(orgWide)) {
     return allRegisteredCompIds(accounts);
   }
   return viewerCompIdsForTenant(accounts, tenantId);
@@ -242,16 +221,16 @@ export function allowedViewerComps(
 /** `compId` と同じ tenant に属する comp_id 集合 (自分自身を含む)。
  * 社員マスタの会社横断表示・会社対応表 (comp-map) を「同じテナントの会社だけ」に
  * 絞るために使う (Refs #367)。DTAKO_ACCOUNTS に無い comp は空集合 (fail-closed)。
- * `ALL_COMPS_VIEWER_EMAILS` に載っている email だけが全社ぶんを見られる
+ * introspect の `org_wide` が `true` の viewer だけが全社ぶんを見られる
  * (Refs #1049 — ここも `allowedViewerComps` と同じ全社許可を持っているので、
- * 片方だけ絞ると素通りする)。 */
+ * 片方だけ絞ると素通りする)。**DO の record 経由**なので、古いセッション record に
+ * `viewerOrgWide` が入っていない場合も `undefined` → false に倒れる。 */
 export function compIdsInSameTenant(
   accounts: DtakoAccountEntry[],
   compId: string,
-  viewerEmail?: string,
-  allCompsViewerEmailsRaw?: string,
+  orgWide?: unknown,
 ): Set<string> {
-  if (isAllCompsViewer(viewerEmail, allCompsViewerEmailsRaw)) {
+  if (isAllCompsViewer(orgWide)) {
     return allRegisteredCompIds(accounts);
   }
   const found = accounts.find((a) => a.comp_id === compId);
