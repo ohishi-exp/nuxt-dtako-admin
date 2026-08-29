@@ -59,6 +59,7 @@ export default defineConfig({
         'src/dtako-day-operations-list.ts',
         'src/theearth-login-session.ts',
         'src/scrape-error-artifact.ts',
+        'src/scrape-error-reader.ts',
         'src/cron-batch.ts',
         'src/net780-archive.ts',
         'src/lineworks-notify.ts',

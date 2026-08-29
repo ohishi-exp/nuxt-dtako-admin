@@ -149,6 +149,19 @@ export default {
       return handleOperationZip(request, env);
     }
 
+    if (url.pathname === "/kintai-relay/scrape-errors" && request.method === "POST") {
+      // スクレイプ失敗の原本 (`{DTAKO_SCRAPE_R2_PREFIX}-errors/`) の一覧 (Refs #1052)。
+      // **読むだけ** — `/kintai-relay/operation-zip` と同じ read-only 診断の型
+      // (認証・comp_id フォールバック・body 素通しまで同じ)。put / delete は無い
+      return handleScrapeErrors(request, env);
+    }
+
+    if (url.pathname === "/kintai-relay/scrape-error-object" && request.method === "POST") {
+      // 同上の 1 件取得 (Refs #1052)。一覧と口を分けるのは、`key` の有無で挙動が
+      // 変わる 1 本の口にすると「一覧のつもりで全文を取る」が作れるため。**読むだけ**
+      return handleScrapeErrorObject(request, env);
+    }
+
     if (url.pathname === "/kintai-relay/dtako-reimport" && request.method === "POST") {
       // ① zip 取得 (自前ログイン) → ② オンプレ autoload push を 1 tool で完結させる
       // (Refs ohishi-exp/rust-ichibanboshi#280, #205 の 67)。**同期。** 取り込みまで
@@ -614,6 +627,82 @@ export async function handleOperationZip(request: Request, env: RelayWorkerEnv):
     status: res.status,
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
   });
+}
+
+/**
+ * スクレイプ失敗の原本を**読むだけ**の 2 口 (Refs #1052) の共通部分。
+ *
+ * 認証 (`X-Alc-Proxy-Secret` の constant-time 検証)・`comp_id` フォールバック
+ * (`KINTAI_COMP_ID`)・DO routing (`idFromName`)・body 素通しは
+ * [`handleOperationZip`] と**同じ流儀**で、新しい認可の作法は作らない。
+ *
+ * 既存の 3 経路 (`operation-zip` / `dtako-reimport` / `dtako-alc-upload`) をこの
+ * ヘルパへ寄せる書き換えは**しない** — 認可段に手を入れないため (#1052 の禁止事項)。
+ * ここで括るのは今回足す 2 口だけ。
+ */
+async function forwardReadOnlyToRelayDo(
+  request: Request,
+  env: RelayWorkerEnv,
+  doPath: string,
+): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  let body: Record<string, unknown>;
+  try {
+    body = (await request.json()) as Record<string, unknown>;
+  } catch {
+    return fail(400, "body must be JSON");
+  }
+  const compId =
+    (typeof body.comp_id === "string" && body.comp_id.trim()) || (env.KINTAI_COMP_ID ?? "").trim();
+  if (!compId) return fail(503, "comp_id が解決できません");
+
+  const id = env.RELAY.idFromName(`scraper-comp-${compId}`);
+  const res = await env.RELAY.get(id).fetch(`https://relay.internal${doPath}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    // body を素通しし、comp_id だけ解決値で上書きする (フィールド単位の組み直しは
+    // しない — 拾い出しで DO 側の新フィールドが黙って消える穴を 2 回踏んでいる、
+    // Refs #633-24)。
+    body: JSON.stringify({ ...body, comp_id: compId }),
+  });
+  return new Response(res.body, {
+    status: res.status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * `POST /kintai-relay/scrape-errors` — スクレイプ失敗の原本
+ * (`{DTAKO_SCRAPE_R2_PREFIX}-errors/{comp_id}/{読取日}/{時刻}.{bin|json}`) の一覧
+ * (Refs #1052)。body `{comp_id?, job_key?, limit?}`。
+ *
+ * **読むだけ** — R2 を `list` するだけで、この経路に `put` / `delete` は 1 行も無い。
+ * 保存側 (`scrape-error-artifact.ts` / `saveScrapeErrorArtifact`) には触っていない。
+ */
+export function handleScrapeErrors(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  return forwardReadOnlyToRelayDo(request, env, "/cron/dtako/scrape-errors");
+}
+
+/**
+ * `POST /kintai-relay/scrape-error-object` — 原本 1 件を返す (Refs #1052)。
+ * body `{key, full?, comp_id?}`。
+ *
+ * **既定は先頭 4096 文字 + `<title>` だけ。** 原本は theearth の HTML で、セッション
+ * ID 等が埋まっている可能性があるため (親指示 2026-08-29)。全文は `full: true` を
+ * 明示した時だけ返る。**読むだけ。**
+ */
+export function handleScrapeErrorObject(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  return forwardReadOnlyToRelayDo(request, env, "/cron/dtako/scrape-error-object");
 }
 
 /**
