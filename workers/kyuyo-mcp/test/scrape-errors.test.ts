@@ -60,6 +60,39 @@ describe("list_scrape_errors / get_scrape_error (Refs #1052)", () => {
     expect(argDesc).toContain("まず false");
   });
 
+  /**
+   * ★ `comp_id` を省略すると本番の既定 (`KINTAI_COMP_ID`) を読む。実測では
+   * **省略 9 件 / 明示 14 件**で、**どちらも「原本がちゃんとある」ようにしか見えなかった**
+   * (#1052)。「一致するとは限らない」だけだと読み手は「違ったら分かるだろう」と思うので、
+   * **気づけない**ことまで書いてあるかを固定する。`full` と同じく **tool 説明と引数説明の
+   * 両方**に要る (モデルが読んで埋めるのは引数側)。
+   */
+  it("**comp_id 省略の罠が list 側の tool 説明と引数説明の両方にある**", () => {
+    const argDesc = String(listScrapeErrorsTool.inputSchema.shape.comp_id.description ?? "");
+    for (const text of [listScrapeErrorsTool.description, argDesc]) {
+      expect(text).toContain("KINTAI_COMP_ID");
+      expect(text).toContain("取り違えても気づけない");
+      expect(text).toContain("明示");
+      expect(text).toContain("prefix");
+    }
+  });
+
+  /**
+   * ★ **get 側には同じ警告を貼らない。** こちらの `comp_id` は DO instance を選ぶだけで、
+   * 何を読むかは `key` が決める (`handleCronDtakoScrapeErrorObject` は bucket も prefix も
+   * env から取り `bucket.get(key)` しかしない)。**危険が無いところに危険だと書くと、
+   * 注記の側が嘘になる** — この repo で一番多い欠陥の型なので、逆向きも固定する。
+   */
+  it("**get 側は「comp_id で結果は変わらない」と書いてあり、list 側の警告を貼っていない**", () => {
+    const argDesc = String(getScrapeErrorTool.inputSchema.shape.comp_id.description ?? "");
+    for (const text of [getScrapeErrorTool.description, argDesc]) {
+      expect(text).toContain("`key` が決める");
+      expect(text).toContain("list_scrape_errors");
+      // ★ 逆向きの固定: list 側の強い警告が get 側に紛れ込んでいない
+      expect(text).not.toContain("取り違えても気づけない");
+    }
+  });
+
   it("job_key は読取日の形式のみ通す", () => {
     expect(listScrapeErrorsTool.inputSchema.safeParse({ job_key: "2026-08-01" }).success).toBe(true);
     expect(

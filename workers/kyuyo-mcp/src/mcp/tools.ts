@@ -1331,9 +1331,38 @@ async function callRelayReadOnly(env: Env, path: string, body: unknown): Promise
 /** `scrapeJobKey` (読取日) の形。単日か期間 (`YYYY-MM-DD..YYYY-MM-DD`)。 */
 const SCRAPE_JOB_KEY_RE = /^\d{4}-\d{2}-\d{2}(?:\.\.\d{4}-\d{2}-\d{2})?$/;
 
+/**
+ * `list_scrape_errors` の `comp_id` の説明。
+ *
+ * **★ 省略が本物の罠なので、強い言い方で書く (親判断 2026-08-29)。** 本番の
+ * `KINTAI_COMP_ID` は 1 社だけを指すので、**調べたい会社と違っても「別の会社の件数」が
+ * それらしい答えとして返る** — 実測では省略時 9 件 / 明示時 14 件と、どちらも
+ * 「原本がちゃんとある」ようにしか見えなかった (#1052)。**「一致するとは限らない」だけだと
+ * 読み手は「違ったら分かるだろう」と思ってしまう**ので、**気づけない**ことまで書く。
+ */
+const COMP_ID_LIST_DESCRIPTION =
+  "会社。省略すると relay の既定 (`KINTAI_COMP_ID`。本番では 1 社だけ) を読む。" +
+  "**調べたい会社と一致するとは限らず、しかも別の会社の件数が「それらしい答え」として" +
+  "返るので、取り違えても気づけない。原則として明示すること。** " +
+  "応答の `prefix` にどの会社を読んだかが出る。";
+
+/**
+ * `get_scrape_error` の `comp_id` の説明。
+ *
+ * **★ list 側と同じ警告を貼らない。** こちらの `comp_id` は **DO instance を選ぶだけ**で、
+ * 何を読むかは `key` が決める (`handleCronDtakoScrapeErrorObject` は bucket も prefix も
+ * env から取り、`bucket.get(key)` しかしない)。**取り違えの危険が無いところに危険だと
+ * 書くと、注記の側が嘘になる。**
+ */
+const COMP_ID_GET_DESCRIPTION =
+  "会社。省略すると relay の既定 (`KINTAI_COMP_ID`)。" +
+  "**この tool では何を読むかは `key` が決めるので、`comp_id` を変えても結果は変わらない** " +
+  "(DO instance の routing にしか使わない)。会社の取り違えを心配するのは " +
+  "`list_scrape_errors` の側。";
+
 const listScrapeErrorsArgs = z
   .object({
-    comp_id: z.string().optional().describe("会社。省略すると relay の既定 (KINTAI_COMP_ID)"),
+    comp_id: z.string().optional().describe(COMP_ID_LIST_DESCRIPTION),
     job_key: z
       .string()
       .regex(SCRAPE_JOB_KEY_RE)
@@ -1376,7 +1405,11 @@ export const listScrapeErrorsTool = {
     "`total` / `truncated` / `counts_by_job_key` (読取日ごとの件数) は**切る前の全件**から" +
     "出るので、「どの読取日が繰り返し落ちているか」は上限に関係なく読める。" +
     "**空 ZIP は保存されない** (未来日プローブのノイズ避け、#633-22) ので、失敗の件数と" +
-    "原本の件数は一致しない。",
+    "原本の件数は一致しない。" +
+    "**★ `comp_id` は原則として明示すること。** 省略すると relay の既定 (`KINTAI_COMP_ID`、" +
+    "本番では 1 社だけ) を読み、**調べたい会社と違っても別の会社の件数が「それらしい答え」" +
+    "として返るので、取り違えても気づけない** (実測: 省略 9 件 / 明示 14 件、どちらも" +
+    "「原本がある」ようにしか見えない)。応答の `prefix` に実際に読んだ会社が出る。",
   inputSchema: listScrapeErrorsArgs,
   execute: async (env: Env, args: z.infer<typeof listScrapeErrorsArgs>) =>
     callRelayReadOnly(env, "/kintai-relay/scrape-errors", {
@@ -1406,7 +1439,7 @@ const getScrapeErrorArgs = z
           "**全文を取ったら、その本文を issue / PR / commit に貼らないこと** " +
           "(この repo は public)。",
       ),
-    comp_id: z.string().optional().describe("会社。省略すると relay の既定 (KINTAI_COMP_ID)"),
+    comp_id: z.string().optional().describe(COMP_ID_GET_DESCRIPTION),
   })
   .strict();
 
@@ -1435,7 +1468,9 @@ export const getScrapeErrorTool = {
     "切り詰めと full の規則に従う)。" +
     "`charset` / `charset_fallback` は本文をどの文字コードで読んだか (theearth は Shift_JIS の" +
     "ことがある。`charset_fallback: true` は宣言された文字コードが使えず utf-8 で読んだ = " +
-    "日本語が化けている可能性がある、という意味)。",
+    "日本語が化けている可能性がある、という意味)。" +
+    "**`comp_id` はこの tool では結果を変えない** — 何を読むかは `key` が決める " +
+    "(会社の取り違えを心配するのは `list_scrape_errors` の側)。",
   inputSchema: getScrapeErrorArgs,
   execute: async (env: Env, args: z.infer<typeof getScrapeErrorArgs>) =>
     callRelayReadOnly(env, "/kintai-relay/scrape-error-object", {
