@@ -639,6 +639,22 @@ export async function handleOperationZip(request: Request, env: RelayWorkerEnv):
  * 既存の 3 経路 (`operation-zip` / `dtako-reimport` / `dtako-alc-upload`) をこの
  * ヘルパへ寄せる書き換えは**しない** — 認可段に手を入れないため (#1052 の禁止事項)。
  * ここで括るのは今回足す 2 口だけ。
+ *
+ * ## ★ 読むだけなのに POST なのはなぜか (GET に「揃えない」理由)
+ *
+ * この worker の read-only な口は `/kintai-relay/{scrape-progress,scrape-history,
+ * day-summaries}` が **GET** なので、**次に読む人は必ず「こちらも GET に揃えよう」と
+ * 考える。揃えないでください。**
+ *
+ * **この 2 口は R2 の key を引数に取るから**です。GET にすると key が URL のクエリ
+ * 文字列に載り、**URL は各所のログに残る** — 「原本を安全に読むための診断口」を
+ * 作ったつもりで、**key の一覧をログに撒く**ことになります。原本の key は
+ * `{prefix}-errors/{comp_id}/{読取日}/{時刻}` で、それ自体が「どの会社がいつ落ちたか」
+ * の一覧です。上の GET 3 本は引数が comp_id と月だけなので事情が違います
+ * (親判断 2026-08-29、Refs #1052)。
+ *
+ * 隣人の `/kintai-relay/operation-zip` (read-only 診断) が POST なのと形が揃うのは
+ * 結果であって、理由はこちらです。
  */
 async function forwardReadOnlyToRelayDo(
   request: Request,
