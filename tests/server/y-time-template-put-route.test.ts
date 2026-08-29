@@ -59,7 +59,7 @@ function eventWith(
 
 beforeEach(() => {
   requireAuthMock.mockReset()
-  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
   readRawBodyMock.mockReset()
   readRawBodyMock.mockResolvedValue(Buffer.from('PKfake-xlsx'))
 })

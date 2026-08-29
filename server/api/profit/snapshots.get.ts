@@ -39,6 +39,7 @@
  */
 import { defineEventHandler, getQuery, createError } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { assertAllowedRole } from '../../utils/require-role'
 import { cfEnv, resolveSecret } from '../../utils/cf-env'
 import { listAllProfit, type R2BucketLite } from '../../utils/profit-r2-io'
 import {
@@ -70,7 +71,8 @@ export default defineEventHandler(async (event): Promise<SnapshotListResult> => 
       ? env.NUXT_PUBLIC_AUTH_WORKER_URL
       : 'https://auth.ippoan.org'
   // **R2 を列挙する前に認証する。** 一覧に出るのは確定金額と効率そのもの。
-  await requireAuth(event, { authWorkerUrl, sharedSecret })
+  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
+  assertAllowedRole(auth)
 
   const r2 = env.PROFIT_R2
   if (!r2) {

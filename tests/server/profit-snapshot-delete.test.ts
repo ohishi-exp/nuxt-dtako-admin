@@ -99,7 +99,7 @@ const fullQuery = { ym: '2026-06', vehicle: '8504', unkoNo: 'unko-1', segmentId:
 
 beforeEach(() => {
   requireAuthMock.mockReset()
-  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
 })
 
 /**

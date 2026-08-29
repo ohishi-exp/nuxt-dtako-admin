@@ -94,7 +94,7 @@ function okEnv(extra: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   requireAuthMock.mockReset()
-  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
 })
 
 describe('GET /api/net780/by-operation — 認可 (Refs #988)', () => {

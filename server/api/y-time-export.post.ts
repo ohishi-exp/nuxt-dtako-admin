@@ -47,6 +47,7 @@ import {
   setResponseHeader,
 } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { assertAllowedRole } from '../utils/require-role'
 import type { YTimeExportResponse } from '~/types'
 import { writeYTimeRows, buildFilename } from '~/utils/y-time-xlsx'
 import { alcProxyFetch } from '../utils/alc-proxy'
@@ -83,7 +84,8 @@ export default defineEventHandler(async (event) => {
       ? env.NUXT_PUBLIC_AUTH_WORKER_URL
       : 'https://auth.ippoan.org'
   // **body を読む前・上流を叩く前に認証する。**
-  await requireAuth(event, { authWorkerUrl, sharedSecret })
+  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
+  assertAllowedRole(auth)
 
   const body = await readBody<RequestBody>(event)
   if (!body || !body.driver_cd || !body.from || !body.to || !body.template_key) {

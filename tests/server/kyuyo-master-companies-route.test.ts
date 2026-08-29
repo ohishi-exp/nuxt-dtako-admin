@@ -46,7 +46,7 @@ const eventWith = (env: Record<string, unknown>) => ({ context: { cloudflare: { 
 
 beforeEach(() => {
   requireAuthMock.mockReset()
-  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
 })
 
 describe('GET /api/kyuyo-master/companies — 認可 (Refs #988)', () => {

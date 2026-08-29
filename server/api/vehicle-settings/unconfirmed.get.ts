@@ -67,6 +67,7 @@
 
 import { defineEventHandler, createError } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { assertAllowedRole } from '../../utils/require-role'
 import { VEHICLE_SETTINGS_R2_PREFIX, parseVehicleSettingsR2Key } from '~/utils/vehicle-settings-r2'
 import { alcProxyFetch } from '../../utils/alc-proxy'
 import { cfEnv, resolveSecret } from '../../utils/cf-env'
@@ -142,7 +143,8 @@ export default defineEventHandler(async (event): Promise<UnconfirmedVehicle[]> =
       : 'https://auth.ippoan.org'
   // **R2 list と上流フェッチを始める前に認証する。** 上流も未ログインを 401 に
   // するが、それを待つ間に下の `Promise.all` が R2 listing を回してしまう。
-  await requireAuth(event, { authWorkerUrl, sharedSecret })
+  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
+  assertAllowedRole(auth)
 
   const r2 = env.DTAKO_R2
   if (!r2) {

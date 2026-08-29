@@ -29,6 +29,7 @@
 
 import { defineEventHandler, getQuery, createError } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { assertAllowedRole } from '../../utils/require-role'
 import { VEHICLE_SETTINGS_R2_PREFIX, parseVehicleSettingsR2Key } from '~/utils/vehicle-settings-r2'
 import { cfEnv, resolveSecret } from '../../utils/cf-env'
 
@@ -109,7 +110,8 @@ export default defineEventHandler(
         : 'https://auth.ippoan.org'
     // **一覧を出す前に認証する。** ここに並ぶ key は実体 (`object.get.ts`) の
     // 入口そのものなので、一覧を開けることは実体を開けることと同じ。
-    await requireAuth(event, { authWorkerUrl, sharedSecret })
+    const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
+    assertAllowedRole(auth)
 
     const r2 = env.DTAKO_R2
     if (!r2) {

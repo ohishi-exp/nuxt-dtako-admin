@@ -11,7 +11,7 @@ vi.mock('@ippoan/auth-client/server', () => ({ requireAuth: requireAuthMock }))
 
 beforeEach(() => {
   requireAuthMock.mockReset()
-  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
 })
 
 vi.mock('h3', async (importOriginal) => {

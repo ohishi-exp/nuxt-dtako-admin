@@ -56,7 +56,7 @@ function eventWith(env: Record<string, unknown>, query: Record<string, unknown> 
 
 beforeEach(() => {
   requireAuthMock.mockReset()
-  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
   setResponseHeaderMock.mockReset()
 })
 

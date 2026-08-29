@@ -23,6 +23,7 @@
  */
 import { defineEventHandler, createError } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { assertAllowedRole } from '../../utils/require-role'
 import { getKyuyoDb, listKyuyoCompanies } from '../../utils/kyuyo-master-db'
 import { cfEnv, resolveSecret } from '../../utils/cf-env'
 
@@ -42,7 +43,8 @@ export default defineEventHandler(async (event) => {
       ? env.NUXT_PUBLIC_AUTH_WORKER_URL
       : 'https://auth.ippoan.org'
   // **D1 を読む前に認証する。** 更新の口と同じ相手だけに読ませる。
-  await requireAuth(event, { authWorkerUrl, sharedSecret })
+  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
+  assertAllowedRole(auth)
 
   const db = getKyuyoDb(event)
   if (!db) {

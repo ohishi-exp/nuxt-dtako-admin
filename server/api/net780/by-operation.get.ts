@@ -68,6 +68,7 @@
 
 import { defineEventHandler, getQuery, createError, setResponseHeader } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { assertAllowedRole } from '../../utils/require-role'
 import { cfEnv, resolveSecret } from '../../utils/cf-env'
 
 interface D1PreparedStatementLite {
@@ -104,7 +105,8 @@ export default defineEventHandler(async (event) => {
       : 'https://auth.ippoan.org'
   // **運行NO を 1 つも受け取る前に認証する。** 22 桁の総当たりで生データを
   // 引ける口だったので、形の検査より先に置く。
-  await requireAuth(event, { authWorkerUrl, sharedSecret })
+  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
+  assertAllowedRole(auth)
 
   const { operationNo } = getQuery(event)
   if (typeof operationNo !== 'string' || !/^\d{22}$/.test(operationNo)) {
