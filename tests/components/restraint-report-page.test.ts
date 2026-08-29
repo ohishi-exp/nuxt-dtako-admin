@@ -192,7 +192,6 @@ describe('/restraint-report ドライバー一覧の取得', () => {
         + ' — サーバ側の設定か障害です (権限の問題ではありません)。復旧してからページを再読み込みしてください)')
       // **断定しない。**確かめ方まで出す (#911 / #915 と同じ形)
       expect(w.text()).toContain('0 人なのか読めなかっただけなのかは、この画面では判りません')
-      expect(w.text()).toContain('ページを再読み込みして確かめてください')
       // 画面は今までどおり開く (選択肢が空になるだけ)
       expect(w.find('.driver-count').text()).toBe('0')
       expect(w.text()).toContain('ドライバーと月を選択してください')
@@ -214,8 +213,30 @@ describe('/restraint-report ドライバー一覧の取得', () => {
       const w = mountPage()
       await flushPromises()
 
-      expect(w.text()).toContain('乗務員一覧を取得できませんでした (理由を読めませんでした)')
+      expect(w.text()).toContain('乗務員一覧を取得できませんでした (理由を読めませんでした — ページを再読み込みしてください)')
       expect(w.text()).not.toContain('[object Object]')
+    })
+
+    it('★★ 403 で「次の一手」が 2 つ並んで食い違わない / 読めない回でも 0 にならない (#1008 PR-3)', async () => {
+      // **注記から次の一手を落とした** (#1008 PR-3)。落とす前は 403 で
+      // title「ログインし直しても変わりません。管理者に許可の追加を依頼してください」と
+      // description「— ページを再読み込みして確かめてください」が**食い違っていた**。
+      // **落とすだけだと 0 になる経路がある**ので、`describeListFailure` が補っている。
+      api.getDrivers.mockRejectedValue(new Error('API エラー (403): 権限がありません'))
+      const w = mountPage()
+      await flushPromises()
+
+      const a = w.findAllComponents({ name: 'UAlert' })[0]!
+      expect(a.props('title')).toContain('管理者に許可の追加を依頼してください')
+      expect(`${a.props('title')} ${a.props('description')}`).not.toContain('再読み込み')
+      expect(a.props('description')).toBe('0 人なのか読めなかっただけなのかは、この画面では判りません')
+
+      // ★ status が読めない回は **title の側に** 次の一手が入る (0 にしない)
+      api.getDrivers.mockRejectedValue(new Error('status を読めない理由'))
+      const wU = mountPage()
+      await flushPromises()
+      expect(wU.findAllComponents({ name: 'UAlert' })[0]!.props('title'))
+        .toContain('ページを再読み込みしてください')
     })
 
     it('乗務員一覧が読めなくても、月報の取得エラーとは別の文として出る', async () => {
@@ -229,7 +250,7 @@ describe('/restraint-report ドライバー一覧の取得', () => {
 
       const alerts = w.findAllComponents({ name: 'UAlert' })
       const titles = alerts.map(a => a.props('title'))
-      expect(titles).toContain('乗務員一覧を取得できませんでした (一覧が落ちた)')
+      expect(titles).toContain('乗務員一覧を取得できませんでした (一覧が落ちた — ページを再読み込みしてください)')
       expect(titles).toContain('月報が落ちた')
     })
   })

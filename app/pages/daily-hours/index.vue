@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { getDailyHours, getDrivers, getWorkTimes } from '~/utils/api'
 import type { DailyWorkHours, Driver, WorkTimeItem } from '~/types'
-import { describeCaughtError } from '~/utils/api-error'
+import { describeApiError, describeCaughtError } from '~/utils/api-error'
 
 // Tab
 const activeTab = ref('segments')
@@ -96,9 +96,33 @@ const RETRY_RELOAD = 'ページを再読み込みしてください'
  * 描かれない — **失敗した回は `total` が 0 のままなので出ていない**。
  * **無いボタンを案内しない** (`tests/components/next-step-retry-labels.test.ts` の
  * 規約) ので、ボタンを名指ししない `RETRY_RELOAD` を渡す。
+ *
+ * ## ★ 次の一手は**どの経路でもちょうど 1 つ**。0 にも 2 つにもしない (#1008 PR-3)
+ *
+ * | 入ってくる例外 | `describeCaughtError` | ここで足すもの |
+ * | --- | --- | --- |
+ * | `API エラー (503): …` | 「復旧してから」+ `RETRY_RELOAD` | なし |
+ * | `API エラー (403): …` | 「管理者に許可の追加を依頼してください」 | なし |
+ * | status を読めない `Error` | **次の一手なし** (3 番目の枝) | `RETRY_RELOAD` |
+ * | `Error` ですらない | — | `RETRY_RELOAD` |
+ *
+ * **0 にしない**のは #1008 そのものだから。**2 つにしない**のは、`UAlert` の
+ * `description` 側にも固定の指示を置いていた初稿が、403 で
+ * 「ログインし直しても変わりません」と「ページを再読み込みして確かめてください」を
+ * **並べて食い違わせていた**から (dev で実測。PR-2 が `margin` / `allowance` で
+ * 見つけたのと同型で、**合成後を描画するまで出ない**)。
+ * ⇒ **次の一手を持つのは `title` の側だけ。`description` は事実だけを書く。**
  */
 function describeListFailure(e: unknown): string {
-  return e instanceof Error ? describeCaughtError(e, RETRY_RELOAD) : '理由を読めませんでした'
+  if (!(e instanceof Error)) return `理由を読めませんでした — ${RETRY_RELOAD}`
+  const detail = describeCaughtError(e, RETRY_RELOAD)
+  // ★ **`describeCaughtError` は status が読めなかった回に次の一手を付けない** —
+  //   status ごとに違うので「1 つ選ぶと嘘になる」から (`api-error.ts` の 3 番目の枝)。
+  //   注記側の固定文を落とした (#1008 PR-3) 以上、**ここが最後の砦**なので、
+  //   付かなかった回だけ status に依らない `RETRY_RELOAD` を補う。
+  //   **判定は「3 番目の枝が返す値そのもの」との一致**で行う — 文言を grep すると
+  //   `nextStepForStatus` を書き換えた日に空撃ちになる。
+  return detail === describeApiError(e) ? `${detail} — ${RETRY_RELOAD}` : detail
 }
 
 onMounted(async () => {
@@ -162,12 +186,16 @@ function onTabChange() {
     <h2 class="text-xl font-bold">日別労働時間</h2>
 
     <!-- ★ 「読めなかった」と「0 人」を別の文にする (Refs #920)。失敗した回にだけ出す
-         (理由だけ出すと**本当に 0 人の回**まで異常に見える)。取りに行くのは
-         `onMounted` の 1 回だけなので、やり直す手段はページの再読み込みしかない。 -->
+         (理由だけ出すと**本当に 0 人の回**まで異常に見える)。
+         ★ **やり直し方はここに書かない** (#1008 PR-3)。次の一手は `title` の側
+         (`describeListFailure`) が **status ごとに撃ち分ける**ので、注記にも固定文を
+         置くと 403 で「ログインし直しても変わりません」と食い違う (dev で実測)。
+         **どの経路でも次の一手はちょうど 1 つ**であることは `describeListFailure` が
+         保証している。 -->
     <UAlert
       v-if="driversError"
       :title="`乗務員一覧を取得できませんでした (${driversError})`"
-      description="0 人なのか読めなかっただけなのかは、この画面では判りません — ページを再読み込みして確かめてください"
+      description="0 人なのか読めなかっただけなのかは、この画面では判りません"
       color="error"
       icon="i-lucide-circle-x"
       variant="subtle"

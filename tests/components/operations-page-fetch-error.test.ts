@@ -150,7 +150,7 @@ describe('/operations 運行一覧の取得失敗 (Refs #1008)', () => {
       api.getOperations.mockRejectedValue({ status: 503 })
       const w = await mountPage()
 
-      expect(alertTitles(w)).toContain('運行一覧を取得できませんでした (理由を読めませんでした)')
+      expect(alertTitles(w)).toContain('運行一覧を取得できませんでした (理由を読めませんでした — ページを再読み込みしてください)')
       expect(w.text()).not.toContain('[object Object]')
     })
 
@@ -173,9 +173,9 @@ describe('/operations 運行一覧の取得失敗 (Refs #1008)', () => {
       const w = await mountPage()
 
       expect(alertTitles(w)).toEqual([
-        '乗務員一覧を取得できませんでした (乗務員が落ちた)',
-        '車両一覧を取得できませんでした (車両が落ちた)',
-        '運行一覧を取得できませんでした (表が落ちた)',
+        '乗務員一覧を取得できませんでした (乗務員が落ちた — ページを再読み込みしてください)',
+        '車両一覧を取得できませんでした (車両が落ちた — ページを再読み込みしてください)',
+        '運行一覧を取得できませんでした (表が落ちた — ページを再読み込みしてください)',
       ])
     })
   })

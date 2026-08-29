@@ -158,7 +158,7 @@ describe('/daily-hours 表の取得失敗 (Refs #1008)', () => {
       api.getDailyHours.mockRejectedValue({ status: 503 })
       const w = await mountPage()
 
-      expect(alertTitles(w)).toContain('日別労働時間を取得できませんでした (理由を読めませんでした)')
+      expect(alertTitles(w)).toContain('日別労働時間を取得できませんでした (理由を読めませんでした — ページを再読み込みしてください)')
       expect(w.text()).not.toContain('[object Object]')
     })
 
@@ -180,8 +180,8 @@ describe('/daily-hours 表の取得失敗 (Refs #1008)', () => {
       const w = await mountPage()
 
       expect(alertTitles(w)).toEqual([
-        '乗務員一覧を取得できませんでした (乗務員が落ちた)',
-        '日別労働時間を取得できませんでした (表が落ちた)',
+        '乗務員一覧を取得できませんでした (乗務員が落ちた — ページを再読み込みしてください)',
+        '日別労働時間を取得できませんでした (表が落ちた — ページを再読み込みしてください)',
       ])
     })
   })

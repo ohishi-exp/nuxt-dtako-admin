@@ -106,7 +106,6 @@ describe('/operations 絞り込み選択肢の取得', () => {
       expect(alertTitles(w)).toContain('乗務員一覧を取得できませんでした (API エラー (503): DB に繋がりません'
         + ' — サーバ側の設定か障害です (権限の問題ではありません)。復旧してからページを再読み込みしてください)')
       expect(w.text()).toContain('0 人なのか読めなかっただけなのかは、この画面では判りません')
-      expect(w.text()).toContain('ページを再読み込みして確かめてください')
     })
 
     it('車両一覧が失敗したら理由を出す', async () => {
@@ -135,7 +134,7 @@ describe('/operations 絞り込み選択肢の取得', () => {
       const w = await mountPage()
 
       const titles = alertTitles(w)
-      expect(titles).toEqual(['乗務員一覧を取得できませんでした (乗務員が落ちた)'])
+      expect(titles).toEqual(['乗務員一覧を取得できませんでした (乗務員が落ちた — ページを再読み込みしてください)'])
       // **落ちていない側は今までどおり読めている** (直列化して巻き込んでいない)
       expect(await openVehicleDropdown(w)).toHaveLength(1)
     })
@@ -146,8 +145,8 @@ describe('/operations 絞り込み選択肢の取得', () => {
       const w = await mountPage()
 
       expect(alertTitles(w)).toEqual([
-        '乗務員一覧を取得できませんでした (乗務員が落ちた)',
-        '車両一覧を取得できませんでした (車両が落ちた)',
+        '乗務員一覧を取得できませんでした (乗務員が落ちた — ページを再読み込みしてください)',
+        '車両一覧を取得できませんでした (車両が落ちた — ページを再読み込みしてください)',
       ])
     })
 
@@ -155,8 +154,40 @@ describe('/operations 絞り込み選択肢の取得', () => {
       api.getVehicles.mockRejectedValue({ status: 503 })
       const w = await mountPage()
 
-      expect(alertTitles(w)).toContain('車両一覧を取得できませんでした (理由を読めませんでした)')
+      expect(alertTitles(w)).toContain('車両一覧を取得できませんでした (理由を読めませんでした — ページを再読み込みしてください)')
       expect(w.text()).not.toContain('[object Object]')
+    })
+
+    it('★★ 403 で「次の一手」が 2 つ並んで食い違わない / 読めない回でも 0 にならない (#1008 PR-3)', async () => {
+      // **注記から次の一手を落とした** (#1008 PR-3)。落とす前は 403 で
+      // title「ログインし直しても変わりません。管理者に許可の追加を依頼してください」と
+      // description「— ページを再読み込みして確かめてください」が**食い違っていた**
+      // (nuxt dev + CDP で実測)。⇒ 次の一手は status を知っている `title` の側だけが持つ。
+      //
+      // **落とすだけだと 0 になる経路がある** — `describeCaughtError` は status を
+      // 読めない回に次の一手を付けないので、`describeListFailure` が補っている。
+      // ここでは **403 (食い違わない) と 読めない回 (0 にならない) の両方**を見る。
+      api.getDrivers.mockRejectedValue(new Error('API エラー (403): 権限がありません'))
+      const w403 = await mountPage()
+      const a403 = w403.findAllComponents({ name: 'UAlert' })[0]!
+      expect(a403.props('title')).toContain('管理者に許可の追加を依頼してください')
+      expect(`${a403.props('title')} ${a403.props('description')}`).not.toContain('再読み込み')
+      expect(a403.props('description')).toBe('0 人なのか読めなかっただけなのかは、この画面では判りません')
+      // ★ 車両側も**別に**撃つ (文は「0 台」で違うが、次の一手を持たないのは同じ)。
+      //   [[shared-notice-lies-on-second-screen]] — 理由は共通でも結果は区画ごとに違う。
+      api.getDrivers.mockResolvedValue([driver('D1', '山田 太郎')])
+      api.getVehicles.mockRejectedValue(new Error('API エラー (403): 権限がありません'))
+      const v403 = (await mountPage()).findAllComponents({ name: 'UAlert' })[0]!
+      expect(v403.props('title')).toContain('車両一覧を取得できませんでした')
+      expect(v403.props('title')).toContain('管理者に許可の追加を依頼してください')
+      expect(`${v403.props('title')} ${v403.props('description')}`).not.toContain('再読み込み')
+      expect(v403.props('description')).toBe('0 台なのか読めなかっただけなのかは、この画面では判りません')
+
+      api.getVehicles.mockRejectedValue(new Error('status を読めない理由'))
+      const wU = await mountPage()
+      const aUnknown = wU.findAllComponents({ name: 'UAlert' }).at(-1)!
+      // ★ status が読めない回は **title の側に** 次の一手が入る (0 にしない)
+      expect(aUnknown.props('title')).toContain('ページを再読み込みしてください')
     })
 
     it('選択肢が読めなくても運行一覧の取得は今までどおり走る', async () => {

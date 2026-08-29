@@ -83,7 +83,6 @@ describe('/daily-hours 乗務員一覧の取得', () => {
       expect(alertTitles(w)).toEqual(['乗務員一覧を取得できませんでした (API エラー (503): DB に繋がりません'
         + ' — サーバ側の設定か障害です (権限の問題ではありません)。復旧してからページを再読み込みしてください)'])
       expect(w.text()).toContain('0 人なのか読めなかっただけなのかは、この画面では判りません')
-      expect(w.text()).toContain('ページを再読み込みして確かめてください')
     })
 
     it('★ 逆方向: 取得できて 0 人だった回は警告を出さない (異常に見せない)', async () => {
@@ -100,8 +99,31 @@ describe('/daily-hours 乗務員一覧の取得', () => {
       api.getDrivers.mockRejectedValue({ status: 503 })
       const w = await mountPage()
 
-      expect(alertTitles(w)).toContain('乗務員一覧を取得できませんでした (理由を読めませんでした)')
+      expect(alertTitles(w)).toContain('乗務員一覧を取得できませんでした (理由を読めませんでした — ページを再読み込みしてください)')
       expect(w.text()).not.toContain('[object Object]')
+    })
+
+    it('★★ 403 で「次の一手」が 2 つ並んで食い違わない / 読めない回でも 0 にならない (#1008 PR-3)', async () => {
+      // **注記から次の一手を落とした** (#1008 PR-3)。落とす前は 403 で
+      // title「ログインし直しても変わりません。管理者に許可の追加を依頼してください」と
+      // description「— ページを再読み込みして確かめてください」が**食い違っていた**
+      // (nuxt dev + CDP で実測)。⇒ 次の一手は status を知っている `title` の側だけが持つ。
+      //
+      // **落とすだけだと 0 になる経路がある** — `describeCaughtError` は status を
+      // 読めない回に次の一手を付けないので、`describeListFailure` が補っている。
+      // ここでは **403 (食い違わない) と 読めない回 (0 にならない) の両方**を見る。
+      api.getDrivers.mockRejectedValue(new Error('API エラー (403): 権限がありません'))
+      const w403 = await mountPage()
+      const a403 = w403.findAllComponents({ name: 'UAlert' })[0]!
+      expect(a403.props('title')).toContain('管理者に許可の追加を依頼してください')
+      expect(`${a403.props('title')} ${a403.props('description')}`).not.toContain('再読み込み')
+      expect(a403.props('description')).toBe('0 人なのか読めなかっただけなのかは、この画面では判りません')
+
+      api.getDrivers.mockRejectedValue(new Error('status を読めない理由'))
+      const wU = await mountPage()
+      const aUnknown = wU.findAllComponents({ name: 'UAlert' })[0]!
+      // ★ status が読めない回は **title の側に** 次の一手が入る (0 にしない)
+      expect(aUnknown.props('title')).toContain('ページを再読み込みしてください')
     })
 
     it('乗務員一覧が読めなくても表のデータ取得は今までどおり走る', async () => {
