@@ -8,7 +8,6 @@ import {
   isAllCompsViewer,
   isR2OnlyRestraintPath,
   normalizeViewerEmail,
-  VIEWER_ADMIN_ROLE,
   viewerCompIdsForTenant,
 } from '../src/restraint-viewer-auth'
 import type { DtakoAccountEntry } from '../src/cron'
@@ -174,10 +173,12 @@ describe('isAllCompsViewer (role を見ないこと)', () => {
     expect(isAllCompsViewer(OTHER_EMAIL, ALLOWLIST)).toBe(false)
   })
 
-  it('★ role の値は判定に一切効かない (admin でも allowlist 外なら false)', () => {
+  it('★ role の値は判定に一切効かない (旧 VIEWER_ADMIN_ROLE = "admin")', () => {
+    // #1049 で全社許可から role を外し、VIEWER_ADMIN_ROLE 定数も消した。
+    // **定数ではなくリテラルで書く** — 消えた定数を参照したままだと、この否定ガードは
+    // 「二度と現れない語」を測ることになって永久に緑になる。
     // 引数に role を取らないので「admin だから通る」経路が構造的に無い。
-    // VIEWER_ADMIN_ROLE を email として渡しても、当然ながら通らない。
-    expect(isAllCompsViewer(VIEWER_ADMIN_ROLE, ALLOWLIST)).toBe(false)
+    expect(isAllCompsViewer('admin', ALLOWLIST)).toBe(false)
   })
 })
 

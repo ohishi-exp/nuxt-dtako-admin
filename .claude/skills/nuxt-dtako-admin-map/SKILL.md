@@ -728,12 +728,19 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   会社リストは `app/utils/dtako-comps.ts` = scraper.vue と共有)。保存は会社ごとに
   PUT を分ける — worker はセッションの会社IDでしか書かないため。触れる会社の
   判定は `allowedViewerComps` (DTAKO_ACCOUNTS 逆引き) が正で、フロントの
-  リストは表示順とラベルだけ。**`role: admin` (introspect が JWT の claim を返す) は
-  DTAKO_ACCOUNTS の全会社を見られる** — dtako の 2 社は別 tenant
-  (27324455 と 75700192) で、グループ管理者が両方を 1 画面で見る要件があるため
-  (2026-07-25)。admin でも DTAKO_ACCOUNTS に無い会社は不可 (ヘッダ偽装対策)。
-  別テナント側に admin を増やす時は「全社を許可する tenant_id の allowlist」へ
-  切り替えること
+  リストは表示順とラベルだけ。dtako の 2 社は別 tenant (27324455 と 75700192) で、
+  グループ管理者が両方を 1 画面で見る要件がある (2026-07-25)。
+  **★ 全社を見られるのは `ALL_COMPS_VIEWER_EMAILS` (全社閲覧 allowlist) に載って
+  いる email だけ (Refs #1049)。`role: admin` は見ない** — 以前は role だけで
+  全社許可にしていたが、「dtako の admin は 1 人だけ」という前提が崩れた
+  (管理者ロールのアカウントが複数になった) ため、当時の doc 自身が指定していた
+  「allowlist へ切り替える」条件に入った。**role との AND にもしない**
+  (role が変わった時に黙って権限が消えるため)。**未設定・空配列・JSON 不正は
+  すべて fail-closed** = 全員が自 tenant のみ。値は Cloudflare dashboard の
+  plain 変数 + `keep_vars = true` で、`wrangler.toml` には書かない。
+  allowlist に載っていても DTAKO_ACCOUNTS に無い会社は不可 (ヘッダ偽装対策)。
+  **全社許可は `allowedViewerComps` と `compIdsInSameTenant` (comp-map) の
+  2 か所にある** — 片方だけ絞ると素通りする
 - **給与DBからの取り込み** (Refs #367): 社員マスタタブの「給与DBから取り込み」は
   rust-ichibanboshi の identity-only API (`GET /api/kyuyo/employees`、
   ohishi-exp/rust-ichibanboshi#92) を叩き、社員番号・氏名・所属・給与体系だけを

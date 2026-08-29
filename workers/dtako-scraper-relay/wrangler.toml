@@ -205,7 +205,8 @@ UPSTREAM_CACHE = "on"
 #                         突き合わせる (前後空白を落として小文字化してから比較)。
 #                         **role は見ない** — 「dtako の admin は 1 人だけ」と
 #                         いう前提が崩れたため role 判定をやめた
-#                         (restraint-viewer-auth.ts の VIEWER_ADMIN_ROLE の doc)。
+#                         (restraint-viewer-auth.ts の module docs
+#                         「会社の軸が role を見るのをやめた理由」)。
 #                         **未設定・空配列・JSON 不正・配列でない はすべて
 #                         fail-closed** = 全社許可を 1 件も出さない
 #                         (= 全員が自 tenant の会社のみ)。壊れた設定で全社が
