@@ -22,17 +22,25 @@ vi.mock('h3', async (importOriginal) => {
     defineEventHandler: (fn: unknown) => fn,
     readBody: async () => ({}),
     getQuery: () => ({}),
-    getRouterParam: () => 'x',
+    // ichiban は path allowlist も 403 を返すので、**許可された path** を返す。
+    // こうしないと admin の陽性対照が『path が対象外の 403』と区別できない。
+    getRouterParam: () => 'api/employees',
   }
 })
 
 import etcCsvDownload from '../../server/api/etc-csv/download.get'
+import ichibanProxy from '../../server/api/ichiban/[...path].get'
 import kyuyoMasterCompanies from '../../server/api/kyuyo-master/companies.get'
+import net780Archive from '../../server/api/net780/archive.post'
 import net780ByOperation from '../../server/api/net780/by-operation.get'
 import netprintRun from '../../server/api/netprint/run.post'
 import netprintTargetsGet from '../../server/api/netprint/targets.get'
 import netprintTargetsPut from '../../server/api/netprint/targets.put'
 import poiRegion from '../../server/api/poi/[region].get'
+import profitAllowanceOverride from '../../server/api/profit/allowance-override.post'
+import profitMarginSnapshot from '../../server/api/profit/margin-snapshot.get'
+import profitMarginSnapshots from '../../server/api/profit/margin-snapshots.get'
+import profitMarginSummary from '../../server/api/profit/margin-summary.post'
 import profitOperationLegSales from '../../server/api/profit/operation-leg-sales.get'
 import profitSnapshotDelete from '../../server/api/profit/snapshot.delete'
 import profitSnapshot from '../../server/api/profit/snapshot.get'
@@ -46,15 +54,21 @@ import yTimeExport from '../../server/api/y-time-export.post'
 import yTimeTemplateGet from '../../server/api/y-time-template.get'
 import yTimeTemplatePut from '../../server/api/y-time-template.put'
 
-/** この PR で role 認可を配線した route。**追加したらここにも足す。** */
+/** この PR で role 認可を配線した A 段 route **全 25 本**。**追加したらここにも足す。** */
 const WIRED: [string, unknown][] = [
   ['GET /api/etc-csv/download', etcCsvDownload],
+  ['GET /api/ichiban/[...path]', ichibanProxy],
   ['GET /api/kyuyo-master/companies', kyuyoMasterCompanies],
+  ['POST /api/net780/archive', net780Archive],
   ['GET /api/net780/by-operation', net780ByOperation],
   ['POST /api/netprint/run', netprintRun],
   ['GET /api/netprint/targets', netprintTargetsGet],
   ['PUT /api/netprint/targets', netprintTargetsPut],
   ['GET /api/poi/[region]', poiRegion],
+  ['POST /api/profit/allowance-override', profitAllowanceOverride],
+  ['GET /api/profit/margin-snapshot', profitMarginSnapshot],
+  ['GET /api/profit/margin-snapshots', profitMarginSnapshots],
+  ['POST /api/profit/margin-summary', profitMarginSummary],
   ['GET /api/profit/operation-leg-sales', profitOperationLegSales],
   ['GET /api/profit/snapshot', profitSnapshot],
   ['DELETE /api/profit/snapshot', profitSnapshotDelete],

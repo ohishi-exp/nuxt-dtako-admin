@@ -107,7 +107,7 @@ const historyLines = (bucket: FakeR2Bucket) =>
 
 beforeEach(() => {
   requireAuthMock.mockReset()
-  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
 })
 
 describe('POST /api/profit/allowance-override — binding と認証', () => {
@@ -224,10 +224,10 @@ describe('POST /api/profit/allowance-override — 1 件を畳み込む', () => {
     const bucket = new FakeR2Bucket()
     // 1 台目 (別の人) が入れた 2 件。
     await call(eventWith(okEnv(bucket), validBody({ key: 'a|b', value: 1000 })))
-    requireAuthMock.mockResolvedValue({ active: true, email: 'you@example.com' })
+    requireAuthMock.mockResolvedValue({ active: true, email: 'you@example.com', role: 'admin' })
     await call(eventWith(okEnv(bucket), validBody({ key: 'c|d', value: 2000 })))
     // 2 台目 (自分) が 3 件目を入れる。
-    requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+    requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
     const res = await call(eventWith(okEnv(bucket)))
 
     const latest = latestOf(bucket)
@@ -295,7 +295,7 @@ describe('POST /api/profit/allowance-override — 1 件を畳み込む', () => {
   })
 
   it('email が取れなくても書ける。by は空文字に倒さない', async () => {
-    requireAuthMock.mockResolvedValue({ active: true })
+    requireAuthMock.mockResolvedValue({ active: true, role: 'admin' })
     const bucket = new FakeR2Bucket()
     const res = await call(eventWith(okEnv(bucket)))
     expect(res.by).toBe(UNKNOWN_OVERRIDE_BY)

@@ -56,7 +56,7 @@ describe('ichiban proxy handler (thin passthrough, Refs #330)', () => {
     fetchMock.mockReset()
     vi.stubGlobal('fetch', fetchMock)
     requireAuthMock.mockReset()
-    requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+    requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
   })
 
   afterEach(() => {
@@ -334,7 +334,7 @@ describe('ichiban proxy の認可 (Refs #988)', () => {
     fetchMock.mockReset()
     vi.stubGlobal('fetch', fetchMock)
     requireAuthMock.mockReset()
-    requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+    requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
   })
 
   afterEach(() => {
@@ -445,7 +445,7 @@ describe('ichiban proxy の upstream path allowlist (Refs #1015)', () => {
     fetchMock.mockReset()
     vi.stubGlobal('fetch', fetchMock)
     requireAuthMock.mockReset()
-    requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+    requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
   })
 
   afterEach(() => {

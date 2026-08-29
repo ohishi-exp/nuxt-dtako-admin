@@ -89,6 +89,7 @@ import type { H3Event } from 'h3'
 import { defineEventHandler, getRequestURL, getRouterParam, createError, setResponseStatus, setHeader } from 'h3'
 import { fetchIchiban, cfEnv, ichibanEmptyErrorReason, isAllowedIchibanProxyPath, type IchibanUpstreamError } from '../../utils/ichiban-upstream'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { assertAllowedRole } from '../../utils/require-role'
 // ★ **`resolveSecret` だけ `cf-env.ts` から取っているのは意図的** (Refs #999/#1015)。
 // `ichiban-upstream.ts` にも同名があるが、あちらは `.get()` の reject を
 // `catch { return null }` で握り潰す (= binding 故障が「未設定」と同じ 503 に化ける)。
@@ -115,7 +116,8 @@ export default defineEventHandler(async (event: H3Event) => {
       : 'https://auth.ippoan.org'
   // **上流を叩く前に認証する。** ここを通れる範囲が「Access を通れる人」から
   // 「auth-worker にログインしている人」に狭まる。
-  await requireAuth(event, { authWorkerUrl, sharedSecret })
+  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
+  assertAllowedRole(auth)
 
   // **認証のあとに path の認可** (Refs #1015)。順序を入れ替えないこと — 未ログインを
   // 403 で返すと「ログインしたら通る」ことが読めなくなる。

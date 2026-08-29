@@ -39,6 +39,7 @@
  */
 import { defineEventHandler, readBody, createError } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { assertAllowedRole } from '../../utils/require-role'
 import {
   isRunCostShareMode,
   marginR2Paths,
@@ -99,7 +100,8 @@ export default defineEventHandler(async (event) => {
       : 'https://auth.ippoan.org'
   // **R2 を触る前に認証する。** 版を増やせる範囲が「Access を通れる人」から
   // 「auth-worker にログインしている人」に狭まる。
-  await requireAuth(event, { authWorkerUrl, sharedSecret })
+  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
+  assertAllowedRole(auth)
 
   const r2 = env.PROFIT_R2
   if (!r2) {
