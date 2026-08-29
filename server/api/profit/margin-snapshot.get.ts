@@ -52,6 +52,7 @@
  */
 import { defineEventHandler, getQuery, createError } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { assertAllowedRole } from '../../utils/require-role'
 import { marginR2Paths, type MarginSummarySnapshot } from '~/utils/margin-r2'
 import { cfEnv, resolveSecret } from '../../utils/cf-env'
 import type { R2BucketLite } from '../../utils/profit-r2-io'
@@ -83,7 +84,8 @@ export default defineEventHandler(async (event): Promise<MarginSummarySnapshot> 
       ? env.NUXT_PUBLIC_AUTH_WORKER_URL
       : 'https://auth.ippoan.org'
   // **R2 を読む前に認証する。** 返すのは版 1 本の本文 (運行ごとの売上・原価・粗利)。
-  await requireAuth(event, { authWorkerUrl, sharedSecret })
+  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
+  assertAllowedRole(auth)
 
   const r2 = env.PROFIT_R2
   if (!r2) {

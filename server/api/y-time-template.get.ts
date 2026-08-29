@@ -26,6 +26,7 @@
 
 import { defineEventHandler, getQuery, createError } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { assertAllowedRole } from '../utils/require-role'
 import { cfEnv, resolveSecret } from '../utils/cf-env'
 
 interface R2HeadResult {
@@ -54,7 +55,8 @@ export default defineEventHandler(async (event) => {
       ? env.NUXT_PUBLIC_AUTH_WORKER_URL
       : 'https://auth.ippoan.org'
   // **query を読む前に認証する** (書き口 `y-time-template.put.ts` と同じ順序)。
-  await requireAuth(event, { authWorkerUrl, sharedSecret })
+  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
+  assertAllowedRole(auth)
 
   const { key } = getQuery(event)
   if (typeof key !== 'string' || !key) {

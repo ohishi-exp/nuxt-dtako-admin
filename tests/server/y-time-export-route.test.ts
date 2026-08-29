@@ -58,7 +58,7 @@ const eventWith = (env: Record<string, unknown>) => ({ context: { cloudflare: { 
 
 beforeEach(() => {
   requireAuthMock.mockReset()
-  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
   readBodyMock.mockReset()
   readBodyMock.mockResolvedValue({ ...BODY })
   alcProxyFetchMock.mockReset()

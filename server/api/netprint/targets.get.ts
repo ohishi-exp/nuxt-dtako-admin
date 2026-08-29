@@ -17,6 +17,7 @@
 
 import { defineEventHandler, createError } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { assertAllowedRole } from '../../utils/require-role'
 import { describeNetprintTargetsFailure } from '../../utils/netprint-targets'
 import { cfEnv, resolveSecret } from '../../utils/cf-env'
 
@@ -39,7 +40,8 @@ export default defineEventHandler(async (event) => {
     = typeof env.NUXT_PUBLIC_AUTH_WORKER_URL === 'string' && env.NUXT_PUBLIC_AUTH_WORKER_URL
       ? env.NUXT_PUBLIC_AUTH_WORKER_URL
       : 'https://auth.ippoan.org'
-  await requireAuth(event, { authWorkerUrl, sharedSecret })
+  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
+  assertAllowedRole(auth)
 
   const relay = env.SCRAPER_RELAY
   if (!relay) {

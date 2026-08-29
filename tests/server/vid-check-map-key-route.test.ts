@@ -36,7 +36,7 @@ const ORIGINAL_FALLBACK = process.env.NUXT_PUBLIC_GOOGLEMAP_KEY
 
 beforeEach(() => {
   requireAuthMock.mockReset()
-  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
   delete process.env.NUXT_PUBLIC_GOOGLEMAP_KEY
 })
 

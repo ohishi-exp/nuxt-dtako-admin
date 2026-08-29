@@ -28,6 +28,7 @@
 import type { H3Event } from 'h3'
 import { defineEventHandler, readMultipartFormData, createError } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { assertAllowedRole } from '../../utils/require-role'
 import {
   extractVehicleSettingsAndCfgBytes,
   type VehicleSettings,
@@ -121,7 +122,8 @@ export default defineEventHandler(async (event): Promise<ExtractResponse> => {
       ? env.NUXT_PUBLIC_AUTH_WORKER_URL
       : 'https://auth.ippoan.org'
   // **body を読む前に認証する。** 未ログインの相手に zip を展開させない。
-  await requireAuth(event, { authWorkerUrl, sharedSecret })
+  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
+  assertAllowedRole(auth)
 
   const parts = await readMultipartFormData(event)
   if (!parts || parts.length === 0) {

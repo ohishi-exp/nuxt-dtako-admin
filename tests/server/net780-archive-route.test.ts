@@ -86,7 +86,7 @@ function envWithRelay(fetchMock: ReturnType<typeof vi.fn>, extra: Record<string,
 describe('POST /api/net780/archive', () => {
   beforeEach(() => {
     requireAuthMock.mockReset()
-    requireAuthMock.mockResolvedValue({ sub: 'user-1' })
+    requireAuthMock.mockResolvedValue({ sub: 'user-1', role: 'admin' })
   })
 
   it('INTERNAL_SHARED_SECRET 未設定は 503 (relay も requireAuth も呼ばない)', async () => {

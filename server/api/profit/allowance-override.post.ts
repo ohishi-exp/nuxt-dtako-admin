@@ -40,6 +40,7 @@
  */
 import { defineEventHandler, readBody, createError } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { assertAllowedRole } from '../../utils/require-role'
 import {
   allowanceOverrideHashInput,
   allowanceOverrideHistoryLine,
@@ -74,6 +75,7 @@ export default defineEventHandler(async (event) => {
       : 'https://auth.ippoan.org'
   // **書く前に誰かを確定させる。** 履歴の `by` はここでしか取れない。
   const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
+  assertAllowedRole(auth)
 
   const r2 = env.PROFIT_R2
   if (!r2) {

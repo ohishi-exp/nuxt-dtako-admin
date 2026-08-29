@@ -62,6 +62,7 @@
  */
 import { defineEventHandler, getQuery, createError } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { assertAllowedRole } from '../../utils/require-role'
 import { marginR2Paths } from '~/utils/margin-r2'
 import { pickOperationLegSalesFromSnapshot, type OperationLegSalesR2 } from '~/utils/operation-leg-sales-r2'
 import { cfEnv, resolveSecret } from '../../utils/cf-env'
@@ -84,7 +85,8 @@ export default defineEventHandler(async (event): Promise<OperationLegSalesR2> =>
       ? env.NUXT_PUBLIC_AUTH_WORKER_URL
       : 'https://auth.ippoan.org'
   // **R2 を読む前に認証する。** 返すのは取引先名と計上額そのもの。
-  await requireAuth(event, { authWorkerUrl, sharedSecret })
+  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
+  assertAllowedRole(auth)
 
   const r2 = env.PROFIT_R2
   if (!r2) {

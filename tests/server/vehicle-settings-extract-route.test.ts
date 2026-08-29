@@ -50,7 +50,7 @@ const eventWith = (env: Record<string, unknown>) => ({ context: { cloudflare: { 
 
 beforeEach(() => {
   requireAuthMock.mockReset()
-  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
   readMultipartFormDataMock.mockReset()
   readMultipartFormDataMock.mockResolvedValue([{ name: 'file', filename: 'dump.zip', data: ZIP }])
 })

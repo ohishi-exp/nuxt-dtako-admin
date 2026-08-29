@@ -31,6 +31,7 @@
 
 import { defineEventHandler, getQuery, createError, setResponseHeader } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { assertAllowedRole } from '../../utils/require-role'
 import { VEHICLE_SETTINGS_R2_PREFIX } from '~/utils/vehicle-settings-r2'
 import { cfEnv, resolveSecret } from '../../utils/cf-env'
 
@@ -65,7 +66,8 @@ export default defineEventHandler(async (event) => {
       ? env.NUXT_PUBLIC_AUTH_WORKER_URL
       : 'https://auth.ippoan.org'
   // **query を読む前に認証する。** key の形を検査するより先に身元を見る。
-  await requireAuth(event, { authWorkerUrl, sharedSecret })
+  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
+  assertAllowedRole(auth)
 
   const { key } = getQuery(event)
   if (typeof key !== 'string' || !key) {

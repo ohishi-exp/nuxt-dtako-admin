@@ -20,6 +20,7 @@
  */
 import { defineEventHandler, getQuery, createError } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { assertAllowedRole } from '../../utils/require-role'
 import { profitR2Paths } from '~/utils/profit-r2'
 import { appendProfitHistory, type R2BucketLite } from '../../utils/profit-r2-io'
 import { cfEnv, resolveSecret } from '../../utils/cf-env'
@@ -42,7 +43,8 @@ export default defineEventHandler(async (event) => {
       : 'https://auth.ippoan.org'
   // **消す前に認証する。** 消えるのは人が確認した作業の記録なので、
   // 「Access を通れる誰か」ではなく「ログインしている人」に限る。
-  await requireAuth(event, { authWorkerUrl, sharedSecret })
+  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
+  assertAllowedRole(auth)
 
   const r2 = env.PROFIT_R2
   if (!r2) {

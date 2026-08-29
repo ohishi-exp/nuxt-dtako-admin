@@ -44,7 +44,7 @@ function r2With(objects: Record<string, string>) {
 
 beforeEach(() => {
   requireAuthMock.mockReset()
-  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com' })
+  requireAuthMock.mockResolvedValue({ active: true, email: 'me@example.com', role: 'admin' })
 })
 
 describe('GET /api/poi/:region — 認可 (Refs #988)', () => {

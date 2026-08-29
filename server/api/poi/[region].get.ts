@@ -35,6 +35,7 @@
 
 import { defineEventHandler, getRouterParam, createError, setHeader } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { assertAllowedRole } from '../../utils/require-role'
 import { cfEnv, resolveSecret } from '../../utils/cf-env'
 
 interface R2ObjectBodyLite {
@@ -61,7 +62,8 @@ export default defineEventHandler(async (event) => {
       ? env.NUXT_PUBLIC_AUTH_WORKER_URL
       : 'https://auth.ippoan.org'
   // **region を読む前に認証する。**
-  await requireAuth(event, { authWorkerUrl, sharedSecret })
+  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
+  assertAllowedRole(auth)
 
   const region = getRouterParam(event, 'region')
   // R2 key に埋め込むので形式を厳しく検証する (path traversal / key injection 防止)

@@ -67,7 +67,7 @@ function envWithRelay(fetchMock: ReturnType<typeof vi.fn>, extra: Record<string,
 
 beforeEach(() => {
   requireAuthMock.mockReset()
-  requireAuthMock.mockResolvedValue({ sub: 'user-1' })
+  requireAuthMock.mockResolvedValue({ sub: 'user-1', role: 'admin' })
 })
 
 describe('GET /api/netprint/targets', () => {

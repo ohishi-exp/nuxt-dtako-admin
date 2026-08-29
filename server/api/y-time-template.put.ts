@@ -35,6 +35,7 @@ import {
   createError,
 } from 'h3'
 import { requireAuth } from '@ippoan/auth-client/server'
+import { assertAllowedRole } from '../utils/require-role'
 import { cfEnv, resolveSecret } from '../utils/cf-env'
 
 interface R2Object {
@@ -65,7 +66,8 @@ export default defineEventHandler(async (event) => {
       ? env.NUXT_PUBLIC_AUTH_WORKER_URL
       : 'https://auth.ippoan.org'
   // **テンプレを上書きする前に認証する。** ここに置いた xlsx が Y時間 の出力の中身になる。
-  await requireAuth(event, { authWorkerUrl, sharedSecret })
+  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
+  assertAllowedRole(auth)
 
   const { key } = getQuery(event)
   if (typeof key !== 'string' || !key) {
