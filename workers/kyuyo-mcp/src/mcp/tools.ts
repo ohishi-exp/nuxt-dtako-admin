@@ -1400,9 +1400,11 @@ const getScrapeErrorArgs = z
       .optional()
       .describe(
         `**既定 false — 本文は先頭 ${EVIDENCE_BODY_PREFIX_MAX} 文字までしか返らない。** ` +
-          "原本は theearth の HTML で、セッション ID 等が埋まっている可能性があるため。" +
-          "true にすると全文が返る。**まず false で <title> と body_prefix を読み、" +
-          "それで足りなければ true にすること。**",
+          "原本は theearth の HTML で、セッション ID やサーバ内のパスが埋まっていることが" +
+          "実際にある (#1052 で実測)。true にすると全文が返る。" +
+          "**まず false で <title> と body_prefix を読み、それで足りなければ true にすること。** " +
+          "**全文を取ったら、その本文を issue / PR / commit に貼らないこと** " +
+          "(この repo は public)。",
       ),
     comp_id: z.string().optional().describe("会社。省略すると relay の既定 (KINTAI_COMP_ID)"),
   })
@@ -1420,8 +1422,13 @@ export const getScrapeErrorTool = {
     "**読むだけ — put / delete はしない。**" +
     `**既定では本文を先頭 ${EVIDENCE_BODY_PREFIX_MAX} 文字で切る** — 原本は theearth の HTML で、` +
     "セッション ID 等が埋まっている可能性があるため。切った事は `body_truncated` / " +
-    "`body_chars` に出る (黙って切らない)。全文が要るなら `full: true` を明示する。" +
-    "**`title` は本文全体から探した `<title>`** なので、4KB より後ろに在っても拾える — " +
+    "`body_chars` に出る (黙って切らない)。" +
+    "**`full: true` (全文) は必要なときだけ使い、返ってきた本文を issue / PR / commit に貼らないこと** — " +
+    "原本には theearth のセッション ID やサーバ内のパスが埋まっていることが実際にある " +
+    "(#1052 で実測)。**まず既定 (false) で `title` と `body_prefix` を読み、それで足りない時だけ。** " +
+    "この repo は public なので、貼った時点で戻せない。" +
+    "**`title` は本文全体から探した `<title>`** なので、" +
+    `先頭 ${EVIDENCE_BODY_PREFIX_MAX} 文字より後ろに在っても拾える — ` +
     "「theearth が何のページを返したか」はまずここを見る。" +
     "`.json` の原本 (ページ違いの証拠) では `json_meta` に kind / message / evidence が" +
     "構造化されて載る (**生ページは json_meta には入らない** — 生本文は body_prefix 側の" +

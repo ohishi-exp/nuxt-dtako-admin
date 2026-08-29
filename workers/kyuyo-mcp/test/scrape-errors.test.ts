@@ -44,6 +44,22 @@ describe("list_scrape_errors / get_scrape_error (Refs #1052)", () => {
     expect(getScrapeErrorTool.description).toContain("title");
   });
 
+  /**
+   * ★ 全文を取ったときの注意 (親指示 2026-08-29)。**tool 説明と引数説明の両方**に要る —
+   * モデルが実際に読んで `full` を埋めるのは引数側の `.describe()` なので、説明文だけに
+   * 書くと素通りする。この repo は public で、貼った時点で戻せない。
+   */
+  it("**全文フラグの注意が tool 説明と引数説明の両方にある**", () => {
+    const argDesc = JSON.stringify(getScrapeErrorTool.inputSchema.shape.full.description ?? "");
+    for (const text of [getScrapeErrorTool.description, argDesc]) {
+      expect(text).toContain("issue / PR / commit に貼らない");
+      expect(text).toContain("public");
+    }
+    // 「必要なときだけ = まず既定で読む」も両方に書いてある
+    expect(getScrapeErrorTool.description).toContain("必要なときだけ");
+    expect(argDesc).toContain("まず false");
+  });
+
   it("job_key は読取日の形式のみ通す", () => {
     expect(listScrapeErrorsTool.inputSchema.safeParse({ job_key: "2026-08-01" }).success).toBe(true);
     expect(
