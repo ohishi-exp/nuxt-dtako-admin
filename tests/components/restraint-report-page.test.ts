@@ -30,6 +30,7 @@ import type {
 } from '~/types'
 import type { PdfProgressEvent } from '~/utils/api'
 import { NUXT_UI_PAGE_STUBS } from '../helpers/stubs'
+import { NEXT_STEP_CASES, expectExactlyOneNextStep } from '../helpers/next-step'
 
 const { api } = vi.hoisted(() => ({
   api: {
@@ -216,6 +217,21 @@ describe('/restraint-report ドライバー一覧の取得', () => {
       expect(w.text()).toContain('乗務員一覧を取得できませんでした (理由を読めませんでした — ページを再読み込みしてください)')
       expect(w.text()).not.toContain('[object Object]')
     })
+
+
+    // ★★ **4 経路 × この画面の `UAlert`** で「次の一手はちょうど 1 つ、食い違わない」
+    //    (Refs #1008 PR-3)。条件の本体は `tests/helpers/next-step.ts`。
+    //    **403 だけを見ると `0` になる壊れ方 (③④) を取り逃す。**
+    it.each(NEXT_STEP_CASES.map(c => [c.label, c] as const))(
+      '乗務員一覧 — %s',
+      async (_label, c) => {{
+        api.getDrivers.mockRejectedValue(c.error)
+        const w = mountPage()
+        await flushPromises()
+        const a = w.findAllComponents({ name: 'UAlert' })[0]!
+        expectExactlyOneNextStep(a.props('title'), a.props('description'), c.next)
+      }},
+    )
 
     it('★★ 403 で「次の一手」が 2 つ並んで食い違わない / 読めない回でも 0 にならない (#1008 PR-3)', async () => {
       // **注記から次の一手を落とした** (#1008 PR-3)。落とす前は 403 で
