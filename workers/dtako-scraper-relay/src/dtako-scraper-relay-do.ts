@@ -385,6 +385,10 @@ import {
 } from "./net780-archive";
 import { sendLineworksTextViaAlcInternalProxy } from "./lineworks-notify";
 import {
+  buildScrapeFailureNotification,
+  resolveScrapeAlertTarget,
+} from "./scrape-alert";
+import {
   fetchBranchDailyReport,
   fetchDailyReportPdf,
   type BranchDailyReport,
@@ -669,6 +673,17 @@ export interface RelayEnv {
    * prefix (`dtako-scrape` / `-staging` / `-preview`、Refs #633-22)。
    * key 設計と「何を残して何を残さないか」は `scrape-error-artifact.ts` の doc 参照。 */
   DTAKO_SCRAPE_R2_PREFIX?: string;
+  /** dtako スクレイプ失敗を人へ知らせる LINE WORKS の宛先 (JSON 1 件
+   * `{"channel_id":"<uuid>"}` または `{"recipient_id":"<uuid>"}`、Refs #967)。
+   *
+   * **`ETC_ACCOUNTS` と同じ作法** — Cloudflare dashboard の plain 変数 +
+   * `keep_vars = true` で、値は commit しない (`wrangler.toml` にはキー名だけ
+   * コメントで書く)。**`NETPRINT_TARGETS` は流用しない** — あちらは営業所 ×
+   * 運転日報の宛先で、混ぜると「日報が届く人」へ別種の通知が飛ぶ。
+   *
+   * **未設定は fail-closed** (通知を送らず、送らなかったことを `console.error`
+   * に出す)。検証は `scrape-alert.ts` の `resolveScrapeAlertTarget`。 */
+  SCRAPE_ALERT_TARGET?: string;
   /** 勤怠 (fold) の対象会社。`wrangler.toml` の宣言をそのまま fold の可否判定に
    * 使う (`kintai-relay.ts` の `judgeFoldScope`)。未設定は「対象外」ではなく
    * `not_configured` (設定の穴) として記録する (Refs #944)。 */
@@ -1154,6 +1169,25 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // どちらでも finally で 1 行出す — **失敗時のログだけで「どの段が何ms掛かったか
     // (= timeout に当たったか当たっていないか)」の両方向が読める**ようにする。
     const timer = new PhaseTimer();
+    // ★ **try の外**で解決する (Refs #967)。失敗時の LINE WORKS 通知
+    // (`notifyScrapeFailure`) は同じ shared secret を使うが、catch からは try
+    // ブロック内の const が見えない。解決は binding を読むだけで theearth を
+    // 叩かないので、ここへ動かしても上流への往復は 1 回も増えない。
+    // **`if (!sharedSecret)` の早期 return は動かさない** — 「zip を取ってから
+    // 破棄する」という現行の順序と文言をそのまま残す。
+    //
+    // **★ `.catch()` を外さないこと。** Secrets Store binding の `.get()` は
+    // reject しうる。try の中に居た頃はその reject を下の catch が拾って
+    // `state: "failed"` + 履歴に落としていたが、**try の外へ出した今は
+    // `runCronDtakoScrape` ごと抜けて `alarm()` まで飛ぶ** — job が `running` の
+    // まま失敗記録も残らない (#967 で通知を足す前より悪くなる)。空文字に倒せば
+    // 下の早期 return が従来どおり loud fail する。**理由は捨てずに message へ
+    // 添える** (「未設定」と「取得に失敗」を運用者が区別できるように)。
+    let secretDetail = "";
+    const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET).catch((err) => {
+      secretDetail = ` — 取得に失敗: ${describeUnknownError(err)}`;
+      return "";
+    });
     try {
       const zip = await scrapeViaHttp(
         {
@@ -1169,9 +1203,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         timer,
       );
 
-      const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
       if (!sharedSecret) {
-        const message = "INTERNAL_SHARED_SECRET 未設定のためアップロード不能 (zip は破棄)";
+        const message = `INTERNAL_SHARED_SECRET 未設定のためアップロード不能 (zip は破棄)${secretDetail}`;
         console.error(JSON.stringify({ ...logBase, status: "error", message }));
         await recordScrapeJob(this.ctx.storage, jobKey, { state: "failed", error: message });
         await this.recordCronScrapeHistory(account, range, { kind: "error", message });
@@ -1275,9 +1308,88 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       // **失敗こそ履歴に残す** — 載せないと「落ちた日が履歴から消える」= #931 の穴
       // そのものが残る。
       await this.recordCronScrapeHistory(account, range, { kind: "error", message });
+      // **人へ届ける** (Refs #967)。上の 3 つ (console / DO storage / alc 履歴) は
+      // どれも人が見に行かないと分からない。**durable な記録を全部書き終えてから**
+      // 送る — 通知が落ちても失敗が記録から消えないように。
+      await this.notifyScrapeFailure(
+        logBase,
+        account,
+        range,
+        message,
+        artifactKey !== null,
+        sharedSecret,
+      );
     } finally {
       const { phases, totalMs } = timer.report();
       console.log(JSON.stringify({ ...logBase, scrape_phase_timing: phases, total_ms: totalMs }));
+    }
+  }
+
+  /**
+   * スクレイプ失敗を LINE WORKS へ 1 通送る (Refs #967)。**グルーだけ** — 宛先の
+   * 検証も文面の組み立ても `scrape-alert.ts` (100% gate) が持つ。
+   *
+   * **リトライではない。** 失敗した取り込みをやり直さないし、送信に失敗しても
+   * 送り直さない (ユーザー判断 2026-08-29 — 本番のスクレイプが上流 theearth を
+   * 叩く回数を 1 回も増やさない)。送り先は `AUTH_WORKER` service binding =
+   * rust-alc-api なので、この 1 通で theearth への往復は増えない。
+   *
+   * **単位は「`runCronDtakoScrape` 1 回の失敗 = 1 通」** で、重複抑制も連続失敗の
+   * 閾値も持たない (netprint cron と同じ流儀)。
+   *
+   * **best-effort** (netprint cron の catch と同じ) — 取り込みの成否は既に記録
+   * 済みで、通知が落ちてもそれを覆さない。ただし**黙って落ちない**: 送らなかった /
+   * 送れなかった理由は必ず `console.error` に 1 行出す。「通知が来ない」は
+   * 「失敗していない」と見分けが付かないため。
+   */
+  private async notifyScrapeFailure(
+    logBase: Record<string, unknown>,
+    account: DtakoAccountRaw,
+    range: { startDate: string; endDate: string },
+    message: string,
+    artifactSaved: boolean,
+    sharedSecret: string,
+  ): Promise<void> {
+    const target = resolveScrapeAlertTarget(this.env.SCRAPE_ALERT_TARGET);
+    if (!target.ok) {
+      console.error(
+        JSON.stringify({ ...logBase, status: "scrape_alert_not_sent", reason: target.error }),
+      );
+      return;
+    }
+    if (!sharedSecret) {
+      console.error(
+        JSON.stringify({
+          ...logBase,
+          status: "scrape_alert_not_sent",
+          reason: "INTERNAL_SHARED_SECRET 未設定のためスクレイプ失敗の通知を送っていません",
+        }),
+      );
+      return;
+    }
+    try {
+      await sendLineworksTextViaAlcInternalProxy(
+        {
+          sharedSecret,
+          destination: target.destination,
+          text: buildScrapeFailureNotification({
+            compId: account.comp_id,
+            startDate: range.startDate,
+            endDate: range.endDate,
+            message,
+            artifactSaved,
+          }),
+        },
+        this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER),
+      );
+    } catch (notifyErr) {
+      console.error(
+        JSON.stringify({
+          ...logBase,
+          status: "scrape_alert_send_failed",
+          reason: describeUnknownError(notifyErr),
+        }),
+      );
     }
   }
 

@@ -17,7 +17,12 @@
  */
 
 import { CronConfigError } from "./cron";
-import type { LineworksDestination } from "./lineworks-notify";
+import {
+  LINEWORKS_DESTINATION_ID_RE,
+  resolveLineworksDestination,
+  type LineworksDestination,
+  type LineworksDestinationResolution,
+} from "./lineworks-notify";
 
 /** `NETPRINT_TARGETS` (plain 変数) の 1 エントリ。`branch_cd` は theearth
  * F-DES1010 の行 `lblBranchCD` (非パディング数値) と突き合わせる営業所コード、
@@ -45,54 +50,23 @@ export interface NetprintTarget {
   branch_name?: string;
 }
 
-/** 宛先 id (`channel_id` / `recipient_id` のどちらも DB の行 id) の形。Uuid で
- * ないものは DB を引くまでもなく設定ミスなので、alc へ投げる前に弾く —
- * 「LINE WORKS の channelId をそのまま貼った」を静かに 404 にせず、設定した人に
- * 見える形で落とすため。**この検証をするのはここだけ** — auth-worker の allowlist
- * は path しか見ず (宛先は body にある)、rust 側の 404 は「DB に無い行」と
- * 「そもそも id の形ではない」を区別しない。 */
-export const NETPRINT_DESTINATION_ID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** 宛先 id (Uuid) の形。**規則の本体は [`LINEWORKS_DESTINATION_ID_RE`]**
+ * (`lineworks-notify.ts`) にあり、ここはその別名 — 通知を出す cron が増えるたびに
+ * 同じ正規表現を書き写さないための集約 (Refs #967 で `SCRAPE_ALERT_TARGET` が
+ * 同じ規則を使うようになった)。 */
+export const NETPRINT_DESTINATION_ID_RE = LINEWORKS_DESTINATION_ID_RE;
 
-export type NetprintDestinationResolution =
-  | { ok: true; destination: LineworksDestination }
-  | { ok: false; error: string };
+export type NetprintDestinationResolution = LineworksDestinationResolution;
 
 /**
  * target の `channel_id` / `recipient_id` から送信先を 1 つ決める。
  *
- * **どちらか一方だけ**が要る (rust の `POST /api/internal/lineworks/send` が
- * 両方 / 両方無しを 400 にするのと同じ規則、#874-9)。ここで弾くのは往復を
- * 減らすためではなく、**設定した人がその場で直せる日本語**を返すため —
- * rust の 400 は relay の `detail` を経て画面に出るころには HTTP status に
- * 潰れている。
- *
+ * **規則も文言も [`resolveLineworksDestination`] が持つ** (排他 + Uuid、#874-9)。
  * `parseNetprintTargets` は設定 JSON を素通し (`as NetprintTarget[]`) するので、
- * 型が言うほど string とは限らない。`typeof` で見て非文字列は「無い」に倒す。
+ * 型が言うほど string とは限らない — 非文字列を「無い」に倒すのも向こう側の役目。
  */
 export function resolveNetprintDestination(target: NetprintTarget): NetprintDestinationResolution {
-  const channelId = typeof target.channel_id === "string" ? target.channel_id.trim() : "";
-  const recipientId = typeof target.recipient_id === "string" ? target.recipient_id.trim() : "";
-  if (channelId !== "" && recipientId !== "") {
-    return { ok: false, error: "channel_id と recipient_id はどちらか一方だけ指定してください" };
-  }
-  if (channelId === "" && recipientId === "") {
-    return { ok: false, error: "channel_id と recipient_id のどちらか一方を指定してください" };
-  }
-  const destination: LineworksDestination =
-    channelId !== "" ? { kind: "channel", id: channelId } : { kind: "recipient", id: recipientId };
-  if (!NETPRINT_DESTINATION_ID_RE.test(destination.id)) {
-    return { ok: false, error: describeBadDestinationId(destination.kind) };
-  }
-  return { ok: true, destination };
-}
-
-/** Uuid でない宛先 id の理由。**どの表を引く id なのか**まで書く (設定した人が
- * 画面のどこから値を持ってくればよいか分かるように)。 */
-function describeBadDestinationId(kind: LineworksDestination["kind"]): string {
-  return kind === "channel"
-    ? "channel_id が UUID 形式ではありません (lineworks_channels の行 id を指定してください)"
-    : "recipient_id が UUID 形式ではありません (notify_recipients の行 id を指定してください)";
+  return resolveLineworksDestination(target);
 }
 
 /** `NETPRINT_TARGETS` (JSON 配列 `[{branch_cd, channel_id | recipient_id}, ...]`)

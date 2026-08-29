@@ -67,6 +67,7 @@ export default defineConfig({
         'src/daily-report-preview.ts',
         'src/netprint-cron.ts',
         'src/kosoku-daily.ts',
+        'src/scrape-alert.ts',
       ],
       thresholds: {
         lines: 100,

@@ -178,6 +178,22 @@ KINTAI_COMP_ID = "27324455"
 # フォールバックするので、切り戻しはこの 1 行を off に戻すだけ。
 UPSTREAM_CACHE = "on"
 
+# dtako 日次スクレイプが失敗したことを人へ知らせる LINE WORKS の宛先
+# (SCRAPE_ALERT_TARGET、Refs #967)。**ここには値を書かない — dashboard の plain
+# 変数 + keep_vars = true** (ETC_ACCOUNTS と同じ作法。[vars] に書くと deploy が
+# その値で上書きしてしまう)。
+#
+#   SCRAPE_ALERT_TARGET = {"channel_id":"<uuid>"} か {"recipient_id":"<uuid>"} の
+#                         どちらか一方だけを持つ JSON 1 件。id は rust-alc-api の
+#                         DB lineworks_channels (トークルーム) / notify_recipients
+#                         (個人) の行 id で、LINE WORKS の channelId ではない。
+#                         **NETPRINT_TARGETS は流用しない** — あちらは営業所 ×
+#                         運転日報の宛先で、混ぜると日報の受け取り手に別種の通知が
+#                         飛ぶ (#874 の誤配と同じ型)。
+#                         **未設定は fail-closed** — 通知を送らず、「宛先が未設定
+#                         なので送っていない」を console.error に出す
+#                         (status: "scrape_alert_not_sent"、Tail Worker で読む)。
+
 [env.staging]
 name = "nuxt-dtako-admin-scraper-relay-staging"
 # staging も同様に公開ルートを閉じ、app (service binding) 経由のみにする。
