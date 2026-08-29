@@ -1966,3 +1966,26 @@ branches = true
 [[files]]
 path = "app/utils/vehicle-settings-r2.ts"
 branches = true
+
+# ETC 明細 CSV のダウンロード (`GET /api/etc-csv/download`、Refs #1053)。
+# **A 段 route のうち、これだけが専用テスト 0 本だった。** #1051 以前は coverage の
+# 出力に 1 行も現れておらず (どのテストからも読まれていなかった)、#1051 の配線テスト
+# (`tests/server/require-role-routes.test.ts`) が読むようになって **41.66% (branches
+# 37.5%)** として現れたが、**gate 未登録なので落ちなかった**。ここで登録して閉じる。
+# **2026-08-29 実測 (base `c3fac8e`)、`coverage/coverage-final.json` 直読み:
+# statements 24 / 24、branch site 8 / arm 16 / 16、functions 1 / 1。**
+# **BR() でも再測した (短絡演算子が 2 つ — `&&` 1 / `||` 1 — あるため v8 だけでは足りない):
+# 10 site / 20 arm、20 arm すべて両側。** 内訳は auth 前置き 4 site
+# (`!sharedSecret` / `typeof … === 'string'` / 値の truthy / 三項) +
+# `typeof key !== 'string'` / `!key` / `||` の 3 site + `!PATTERN.test(key)` +
+# `!r2` + `!obj`。
+# **実装は 1 文字も変えていない** (この issue は「テストを足す」作業)。
+# **`CLAUDE.md` の「CSV でない応答は loud fail して R2 `{prefix}-errors/` に原本保存」は
+# この route の規範ではない** — あれはスクレイプ (書き込み) 側のもので、実体は relay の
+# `performEtcScrape()`。こちらは読み出し側で上流の応答を受け取る場面が無く、**保存済み
+# バイト列の中身は検査しない**。ただし**失敗原本がこの口から出ることは無い** —
+# `etc-errors/…` は key の許可形式に合わず 400 で落ちる。この 2 つを別々の it で固定した
+# (前者は「現状の固定であって正しさの主張ではない」と test 側に明記してある)。
+[[files]]
+path = "server/api/etc-csv/download.get.ts"
+branches = true
