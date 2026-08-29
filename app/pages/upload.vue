@@ -2,6 +2,7 @@
 import { uploadZip, getPendingUploads, rerunUpload, getUploads, splitCsv } from '~/utils/api'
 import { parseSplitCsvResponse } from '~/utils/scrape-split'
 import type { UploadResponse, PendingUpload } from '~/types'
+import { describeCaughtError } from '~/utils/api-error'
 
 const isDragging = ref(false)
 const isUploading = ref(false)
@@ -67,31 +68,38 @@ async function handleUpload(file: File) {
 }
 
 /**
- * 一覧の取得失敗を 1 行にする (Refs #911)。
+ * 一覧の取得失敗を 1 行にする (Refs #911 / #1008)。
  *
- * ## ★ `describeApiError` を当てていない — **当て忘れではない** (Refs #890 / #904)
+ * ## `describeCaughtError` に通す — 足しているのは**「次に何をすればいいか」**
  *
  * `getPendingUploads` / `getUploads` は `app/utils/api.ts` の `request()` →
  * `@ippoan/auth-client` の `createAuthFetch` 経由で、そこは非 2xx を
  * `new Error(`API エラー (${status}): ${body || statusText}`)` に組んで投げる
  * (`createAuthFetch.ts:56`)。**ofetch の `FetchError` ではない**ので `statusCode` も
- * `data` も持たず、`describeApiError` は `err.message` をそのまま返すだけになる
- * ⇒ **当てても 1 文字も変わらない** (#910 が (B) 経路 28 箇所で実測済み)。
- * 機械的に当てると「理由が良くなった」と誤読させるだけなので当てない。
+ * `data` も持たず、**理由の文字列は `describeApiError` を当てても 1 文字も変わらない**
+ * (#910 が (B) 経路 28 箇所で実測済み。この事実は #1008 でも変わっていない)。
  *
- * ## いま実際に出る文字列 (dev の実機で実測、2026-08-25)
+ * **変わるのは末尾**で、`describeCaughtError` が
+ * `` `API エラー (503): …` `` の `` `(3 桁): ` `` から status を読み、
+ * 401 は再ログイン / 403 は管理者へ / 5xx は復旧待ち、と撃ち分ける。
+ * **理由そのものを 1 行に畳むのは今も #904 (`api.ts` 側) の担当**で、ここで JSON を
+ * 読み直すと二重実装になるのでやっていない。
  *
- * **「status しか出ない」ではない** — `createAuthFetch` は本文を読むので
- * **status + 応答本文まるごと**が出る。合成後の 1 文はこうなる:
+ * ## いま実際に出る文字列 (合成後の 1 文)
  *
  * ```
- * 保留中のアップロードを取得できませんでした (API エラー (503): { "error": true,
- *   "url": "…/api/proxy/api/internal/pending", "statusCode": 503,
- *   "statusMessage": "INTERNAL_SHARED_SECRET binding が未設定です", … })
+ * 保留中のアップロードを取得できませんでした (API エラー (503): { "error": true, … }
+ *   — サーバ側の設定か障害です (権限の問題ではありません)。
+ *     復旧してから「保留中のアップロードを再取得」を押してください)
  * ```
  *
- * **理由を 1 行に畳むのは #904 (`api.ts` 側) の担当**で、ここで JSON を読み直すと
- * 二重実装になるのでやっていない。#904 が入れば `e.message` の中身がそのまま良くなる。
+ * ## ★ `retry` は**画面に実在するボタンの表記そのまま**
+ *
+ * この 2 つの再取得ボタンは **`icon` だけでラベルの文字を持っていなかった**ので、
+ * **`aria-label` を足してそれを引用している** (#1008)。案内文のためだけに
+ * ラベルを創作したのではなく、**画面 (と読み上げ) の側に足したものを引用**している。
+ * `tests/components/next-step-retry-labels.test.ts` が
+ * 「その `.vue` の template に実在するか」を機械で見ている。
  *
  * ## ★ ここでは塞げない穴 (#904 に申し送り、未測定)
  *
@@ -99,9 +107,10 @@ async function handleUpload(file: File) {
  * **本文が空の非 2xx では `e.message` が `API エラー (503): ` (コロンの後ろが空)** に
  * なる。`api.ts` / `createAuthFetch` に触らずには塞げない。dev は HTTP/1.1 なので
  * この形は踏めず、**実測できていない**。
+ * **ただし「次の一手」はこの穴の中でも出る** — status は `(503): ` の側から読める。
  */
-function describeListFailure(e: unknown): string {
-  return e instanceof Error ? e.message : '理由を読めませんでした'
+function describeListFailure(e: unknown, retry: string): string {
+  return e instanceof Error ? describeCaughtError(e, retry) : '理由を読めませんでした'
 }
 
 async function loadPending() {
@@ -114,7 +123,7 @@ async function loadPending() {
     // **ただし空にした理由を必ず持つ** — 空配列だけだと画面が「保留中は無い」と
     // 読まれ、API が落ちて読めなかっただけの回と区別が付かない (Refs #911)。
     pendingUploads.value = []
-    pendingError.value = describeListFailure(e)
+    pendingError.value = describeListFailure(e, '「保留中のアップロードを再取得」を押してください')
   } finally {
     pendingLoading.value = false
   }
@@ -174,7 +183,7 @@ async function loadUploads() {
   } catch (e) {
     // loadPending と同じ理由 (Refs #911)。
     uploads.value = []
-    uploadsError.value = describeListFailure(e)
+    uploadsError.value = describeListFailure(e, '「アップロード履歴を再取得」を押してください')
   } finally {
     uploadsLoading.value = false
   }
@@ -271,8 +280,14 @@ onMounted(() => {
     <UCard>
       <div class="flex items-center justify-between mb-3">
         <h3 class="text-lg font-bold">保留中のアップロード</h3>
+        <!-- ★ `aria-label` はこのボタンの**唯一の表記** (アイコンだけで文字が無い)。
+             読み上げのためだけでなく、取得に失敗したときの案内文
+             (`describeListFailure` の `retry`) がこの文字列を引用している。
+             **変えるときは `loadPending` の catch の文字列も一緒に**
+             (`tests/components/next-step-retry-labels.test.ts` が突き合わせる)。 -->
         <UButton
           icon="i-lucide-refresh-cw"
+          aria-label="保留中のアップロードを再取得"
           variant="ghost"
           size="xs"
           :loading="pendingLoading"
@@ -293,7 +308,13 @@ onMounted(() => {
           保留中のアップロードを取得できませんでした ({{ pendingError }})
         </p>
         <p class="text-gray-400">
-          0 件なのか読めなかっただけなのかは、この画面では判りません — 再読み込みを押して確かめてください
+          <!-- ★ 「再読み込みを押して確かめてください」を落とした (Refs #1008)。
+               やり直し方は**上の 1 文が実在するボタン名で言う**ようになったので、
+               ここに残すと**同じ指示が 2 回**出るうえ、**この画面に「再読み込み」という
+               表記のボタンは無い** (アイコンだけのボタンで、名前は `aria-label` の
+               「保留中のアップロードを再取得」/「アップロード履歴を再取得」)。
+               この段が言うべきは「0 件と読めなかったの区別が付かない」ことだけ。 -->
+          0 件なのか読めなかっただけなのかは、この画面では判りません
         </p>
       </div>
 
@@ -356,8 +377,11 @@ onMounted(() => {
     <UCard>
       <div class="flex items-center justify-between mb-3">
         <h3 class="text-lg font-bold">アップロード履歴 / CSV分割</h3>
+        <!-- 上と同じ (Refs #1008)。`aria-label` がこのボタンの唯一の表記で、
+             `loadUploads` の catch の案内文がこの文字列を引用している。 -->
         <UButton
           icon="i-lucide-refresh-cw"
+          aria-label="アップロード履歴を再取得"
           variant="ghost"
           size="xs"
           :loading="uploadsLoading"
@@ -375,7 +399,13 @@ onMounted(() => {
           アップロード履歴を取得できませんでした ({{ uploadsError }})
         </p>
         <p class="text-gray-400">
-          0 件なのか読めなかっただけなのかは、この画面では判りません — 再読み込みを押して確かめてください
+          <!-- ★ 「再読み込みを押して確かめてください」を落とした (Refs #1008)。
+               やり直し方は**上の 1 文が実在するボタン名で言う**ようになったので、
+               ここに残すと**同じ指示が 2 回**出るうえ、**この画面に「再読み込み」という
+               表記のボタンは無い** (アイコンだけのボタンで、名前は `aria-label` の
+               「保留中のアップロードを再取得」/「アップロード履歴を再取得」)。
+               この段が言うべきは「0 件と読めなかったの区別が付かない」ことだけ。 -->
+          0 件なのか読めなかっただけなのかは、この画面では判りません
         </p>
       </div>
 

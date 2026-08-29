@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 
-import { describeApiError, describeFetchThrow, describeResponseFailure, pickBodyReason } from '~/utils/api-error'
+import { describeApiError, describeCaughtError, describeFetchThrow, describeResponseFailure, pickBodyReason } from '~/utils/api-error'
 import { marginSummarySaveNote } from '~/utils/margin-r2'
 
 describe('describeApiError', () => {
@@ -516,5 +516,111 @@ describe('pickBodyReason (Refs #1050)', () => {
     for (const data of bodies) {
       expect(describeApiError({ statusCode: 400, data })).toBe(`400 ${pickBodyReason(data)}`)
     }
+  })
+})
+
+/**
+ * `describeCaughtError` — **catch した例外**に「次に何をすればいいか」を足す (Refs #1008)。
+ *
+ * 3 つの枝を**それぞれ 1 本以上**で固定する。とくに 3 番目 (**status が読めない**) は
+ * 「**次の一手を付けない = 現状維持**」が仕様なので、**付かないこと**を陰性対照で書く
+ * — ここが空文字や例外に倒れると、画面から理由ごと消える。
+ */
+describe('describeCaughtError (Refs #1008)', () => {
+  const RETRY = '「集計」を押してください'
+
+  // --- 枝 1: transport failure (fetch 自体が throw した) ---------------------
+
+  it('枝1 — TypeError は describeFetchThrow の 1 文に retry を足す', () => {
+    const out = describeCaughtError(new TypeError('Failed to fetch'), RETRY)
+    // 元の 1 文は 1 文字も削らない (切り分けの手順がそこにしか無い)。
+    expect(out.startsWith(describeFetchThrow(new TypeError('x'))!)).toBe(true)
+    expect(out.endsWith('繋がったあとで「集計」を押してください')).toBe(true)
+  })
+
+  it('枝1 — status の話は混ぜない (陰性対照)', () => {
+    // `Response` が 1 つも得られていないので status は存在しない。
+    // 「ログインが切れています」と断定する 401 の文型を混ぜないこと。
+    // **`' — '` では見ない** — `describeFetchThrow` の 1 文が自前で使っている
+    // (`ページを再読み込みしてください — ログインが切れていた場合は…`)。
+    // 見るのは `nextStepForStatus` が出す文型そのもの。
+    const out = describeCaughtError(new TypeError('Failed to fetch'), RETRY)
+    expect(out).not.toContain('ログインが切れています。')
+    expect(out).not.toContain('この操作の権限がありません')
+    expect(out).not.toContain('送った内容をサーバが受け付けませんでした')
+    expect(out).not.toContain('サーバ側の設定か障害です')
+  })
+
+  // --- 枝 2: status が分かる -------------------------------------------------
+
+  it('枝2 — ofetch の FetchError は statusCode から読む', () => {
+    expect(describeCaughtError({
+      statusCode: 503,
+      data: { error: '[kintai_push] が無効です' },
+      message: '[GET] "/api/kyuyo/wage-range": 503',
+    }, RETRY)).toBe(
+      '503 [kintai_push] が無効です — '
+      + 'サーバ側の設定か障害です (権限の問題ではありません)。復旧してから「集計」を押してください')
+  })
+
+  it('枝2 — createAuthFetch の素の Error は message の `(3桁): ` から読む', () => {
+    // `app/utils/api.ts` の `request()` 経路。`statusCode` も `data` も持たない。
+    expect(describeCaughtError(
+      new Error('API エラー (401): {"error":"Unauthorized"}'), RETRY)).toBe(
+      'API エラー (401): {"error":"Unauthorized"} — '
+      + 'ログインが切れています。再ログインしてから「集計」を押してください'
+      + ' (再ログインしても直らないときは認証サーバに繋がっていません。権限の問題ではありません)')
+  })
+
+  it('枝2 — errorLabel を決め打ちしない (上流の既定 `API error` でも読む)', () => {
+    // `errorLabel` は `createAuthFetch` の option。`'API エラー'` は
+    // この repo が渡している値でしかない (`app/utils/api.ts`)。
+    for (const label of ['API エラー', 'API error', 'alc']) {
+      expect(describeCaughtError(new Error(`${label} (403): {}`), RETRY))
+        .toContain('この操作の権限がありません')
+    }
+  })
+
+  it('枝2 — statusCode を message より先に見る', () => {
+    // 上流が `statusCode` を載せるようになったら、そちらが勝つ。
+    expect(describeCaughtError(
+      { statusCode: 404, message: 'API エラー (500): x' }, RETRY))
+      .toContain('指していた対象がサーバにもう存在しません')
+  })
+
+  // --- 枝 3: status が読めない = 現状維持 ------------------------------------
+
+  it('枝3 — status が読めないときは describeApiError そのまま (次の一手を付けない)', () => {
+    const e = new Error('タイムアウトしました')
+    expect(describeCaughtError(e, RETRY)).toBe(describeApiError(e))
+  })
+
+  it('枝3 — 陰性対照: 外れても空文字にも例外にもしない / 「次の一手」だけが付かない', () => {
+    // ★ 上流が `errorLabel` に括弧を入れたときの形。`AUTH_FETCH_ERROR_MESSAGE` は
+    //   当たらなくなるが、**理由の 1 文はそのまま残る**のがこの実装の要点。
+    const e = new Error('API (v2) エラー (503): {"error":"落ちています"}')
+    const out = describeCaughtError(e, RETRY)
+    expect(out).toBe('API (v2) エラー (503): {"error":"落ちています"}')
+    expect(out).not.toBe('')
+    expect(out).not.toContain('「集計」を押してください')
+    expect(out).not.toContain(' — ')
+  })
+
+  it('枝3 — message が文字列でない / 例外が null でも落ちない', () => {
+    expect(describeCaughtError({ message: 500 }, RETRY)).toBe(describeApiError({ message: 500 }))
+    expect(describeCaughtError(null, RETRY)).toBe(describeApiError(null))
+    expect(describeCaughtError(undefined, RETRY)).toBe(describeApiError(undefined))
+  })
+
+  it('枝3 — 3 桁でない数字は status として読まない', () => {
+    // `(12): ` / `(1234): ` に当てて 12 や 123 を status にしない。
+    expect(describeCaughtError(new Error('API エラー (12): x'), RETRY)).toBe('API エラー (12): x')
+    expect(describeCaughtError(new Error('API エラー (1234): x'), RETRY)).toBe('API エラー (1234): x')
+  })
+
+  it('本文の中に `(404): ` が現れても先頭の status を使う (行頭固定)', () => {
+    expect(describeCaughtError(
+      new Error('API エラー (500): upstream said "API エラー (404): no"'), RETRY))
+      .toContain('サーバ側の設定か障害です')
   })
 })

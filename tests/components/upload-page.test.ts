@@ -319,12 +319,18 @@ describe('/upload デジタコ CSV アップロード', () => {
         api.getPendingUploads.mockRejectedValue(new Error('API エラー (503): R2 が未設定です'))
         const w = mountPage()
         await flushPromises()
-        expect(w.text()).toContain('保留中のアップロードを取得できませんでした (API エラー (503): R2 が未設定です)')
+        // ★ 理由のうしろに「次に何をすればいいか」が付き、**この画面に実在する
+        //   ボタン** (アイコンだけのボタンに足した `aria-label`) を名指しする (Refs #1008)。
+        expect(w.text()).toContain('保留中のアップロードを取得できませんでした (API エラー (503): R2 が未設定です'
+          + ' — サーバ側の設定か障害です (権限の問題ではありません)。復旧してから「保留中のアップロードを再取得」を押してください)')
         // **「無い」と言わない** — 読めなかっただけかもしれない
         expect(w.text()).not.toContain('保留中のアップロードはありません')
         // **断定もしない。**確かめ方まで出す (#910 と同じ形)
         expect(w.text()).toContain('0 件なのか読めなかっただけなのかは、この画面では判りません')
-        expect(w.text()).toContain('再読み込みを押して確かめてください')
+        // ★ **「再読み込みを押して」は落とした** (Refs #1008)。やり直し方は上の 1 文が
+        //   実在するボタン名 (`aria-label`) で言うので、ここに残すと同じ指示が 2 回出るうえ、
+        //   **この画面に「再読み込み」という表記のボタンは無い** (陰性対照)。
+        expect(w.text()).not.toContain('再読み込みを押して')
       })
 
       it('★ 逆方向: 本当に 0 件の回は今までどおり「ありません」だけ (異常に見せない)', async () => {
@@ -424,7 +430,8 @@ describe('/upload デジタコ CSV アップロード', () => {
         api.getUploads.mockRejectedValue(new Error('API エラー (502): upstream が落ちています'))
         const w = mountPage()
         await flushPromises()
-        expect(w.text()).toContain('アップロード履歴を取得できませんでした (API エラー (502): upstream が落ちています)')
+        expect(w.text()).toContain('アップロード履歴を取得できませんでした (API エラー (502): upstream が落ちています'
+          + ' — サーバ側の設定か障害です (権限の問題ではありません)。復旧してから「アップロード履歴を再取得」を押してください)')
         expect(w.text()).not.toContain('アップロード履歴なし')
         expect(w.text()).toContain('0 件なのか読めなかっただけなのかは、この画面では判りません')
       })

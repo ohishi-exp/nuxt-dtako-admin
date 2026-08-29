@@ -102,7 +102,9 @@ describe('/operations 絞り込み選択肢の取得', () => {
       api.getDrivers.mockRejectedValue(new Error('API エラー (503): DB に繋がりません'))
       const w = await mountPage()
 
-      expect(alertTitles(w)).toContain('乗務員一覧を取得できませんでした (API エラー (503): DB に繋がりません)')
+      // ★ 理由のうしろに「次に何をすればいいか」が付く (Refs #1008)。
+      expect(alertTitles(w)).toContain('乗務員一覧を取得できませんでした (API エラー (503): DB に繋がりません'
+        + ' — サーバ側の設定か障害です (権限の問題ではありません)。復旧してからページを再読み込みしてください)')
       expect(w.text()).toContain('0 人なのか読めなかっただけなのかは、この画面では判りません')
       expect(w.text()).toContain('ページを再読み込みして確かめてください')
     })
@@ -111,7 +113,8 @@ describe('/operations 絞り込み選択肢の取得', () => {
       api.getVehicles.mockRejectedValue(new Error('API エラー (502): upstream が落ちています'))
       const w = await mountPage()
 
-      expect(alertTitles(w)).toContain('車両一覧を取得できませんでした (API エラー (502): upstream が落ちています)')
+      expect(alertTitles(w)).toContain('車両一覧を取得できませんでした (API エラー (502): upstream が落ちています'
+        + ' — サーバ側の設定か障害です (権限の問題ではありません)。復旧してからページを再読み込みしてください)')
       expect(w.text()).toContain('0 台なのか読めなかっただけなのかは、この画面では判りません')
     })
 

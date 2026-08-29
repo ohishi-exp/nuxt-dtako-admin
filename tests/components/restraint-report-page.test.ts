@@ -187,7 +187,9 @@ describe('/restraint-report ドライバー一覧の取得', () => {
       const w = mountPage()
       await flushPromises()
 
-      expect(w.text()).toContain('乗務員一覧を取得できませんでした (API エラー (503): DB に繋がりません)')
+      // ★ 理由のうしろに「次に何をすればいいか」が付く (Refs #1008)。
+      expect(w.text()).toContain('乗務員一覧を取得できませんでした (API エラー (503): DB に繋がりません'
+        + ' — サーバ側の設定か障害です (権限の問題ではありません)。復旧してからページを再読み込みしてください)')
       // **断定しない。**確かめ方まで出す (#911 / #915 と同じ形)
       expect(w.text()).toContain('0 人なのか読めなかっただけなのかは、この画面では判りません')
       expect(w.text()).toContain('ページを再読み込みして確かめてください')

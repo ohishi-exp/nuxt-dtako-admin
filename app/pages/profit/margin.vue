@@ -178,7 +178,8 @@ import {
   type UncoveredDriverInput,
   type UncoveredTotals,
 } from '~/utils/margin'
-import { describeApiError } from '~/utils/api-error'
+import { describeApiError, describeCaughtError } from '~/utils/api-error'
+
 import {
   ALLOWANCE_RATE_ENDPOINT,
   allowanceRateNoticeForMargin,
@@ -217,6 +218,22 @@ import {
 import { buildKushiroBranchView, readViewerCompId } from '~/utils/kushiro-branch-view'
 import { b64urlUtf8 } from '~/composables/useTheearthSession'
 import type { MinWageMaster } from '~/utils/restraint-wage-view'
+
+/**
+ * **この画面の「やり直し方」** (Refs #1008)。`describeCaughtError` の `retry` は
+ * **その画面に実在するボタンの表記そのまま**を渡す規約
+ * (`tests/components/next-step-retry-labels.test.ts` が template と突き合わせる)。
+ *
+ * 集計の素材 (手当マスタ / 売上 / 経費 / 最低賃金マスタ / R2 の版) はすべて
+ * `run()` が読み直すので、やり直し方は「集計」1 つに畳める。
+ */
+const RETRY_AGGREGATE = '「集計」を押してください'
+
+/**
+ * 賃金構成タブの素材 (拘束時間・実支給) だけは**専用の取り直しボタン**を持つ
+ * (`reloadWageMixSources`)。「集計」では取り直らないので分けている (Refs #1008)。
+ */
+const RETRY_RELOAD_WAGE_MIX = '「拘束時間・実支給を再読込」を押してください'
 
 /** イベントCSV を同時に引く本数。alc を叩きすぎないための上限 (運行手当タブと同じ)。 */
 const CSV_CONCURRENCY = 4
@@ -308,7 +325,9 @@ async function loadRateMaster(): Promise<AllowanceRateState> {
   }
   catch (e) {
     // `/restraint-api/**` は Nitro ではなく relay worker へ転送される (Refs #890)。
-    return allowanceRateReadError(describeApiError(e))
+    // **「次に何をすればいいか」まで出す** (Refs #1008)。マスタは `ensureRateMaster`
+    // が集計のたびに読み直すので、やり直し方は「集計」を押すこと。
+    return allowanceRateReadError(describeCaughtError(e, RETRY_AGGREGATE))
   }
 }
 
@@ -1304,7 +1323,7 @@ async function run() {
       // server route) 越しなので、proxy が投げる 502/503 の日本語は JSON 本文にしか
       // 載らない。本番は HTTP/3 で reason phrase 自体が無く、`e.message` は
       // `[GET] "…": 503` で終わる。
-      salesError.value = describeApiError(e)
+      salesError.value = describeCaughtError(e, RETRY_AGGREGATE)
     }
 
     // 運行が月を跨いだぶんの注記 (Refs #760 の 16)。**キャッシュにも入れる。**
@@ -1340,7 +1359,7 @@ async function run() {
     }
     catch (e) {
       // 売上と同じ理由で本文から読む (Refs #890)。経費も `/api/ichiban/**` 越し。
-      costError.value = describeApiError(e)
+      costError.value = describeCaughtError(e, RETRY_AGGREGATE)
     }
 
     status.value = 'ready'
@@ -1416,9 +1435,9 @@ async function loadKushiroMinWageMaster() {
     // **`/restraint-api/**` は Nitro ではない** (Refs #890)。`worker/index.ts` が
     // relay worker (`SCRAPER_RELAY`) へ転送しており、本文は Nitro の
     // `{error: true, …}` ではなく relay の **`{error: '<日本語>'}`**
-    // (`dtako-scraper-relay-do.ts` の `dvrJsonError`)。`describeApiError` は
-    // `d.error` を最初に見るので、この形なら 1 発で拾える。
-    kushiroMinWageError.value = `最低賃金マスタを読めませんでした — ${describeApiError(e)}`
+    // (`dtako-scraper-relay-do.ts` の `dvrJsonError`)。`describeCaughtError` が中で
+    // 呼ぶ `describeApiError` は `d.error` を最初に見るので、この形なら 1 発で拾える。
+    kushiroMinWageError.value = `最低賃金マスタを読めませんでした — ${describeCaughtError(e, RETRY_AGGREGATE)}`
   }
 }
 
@@ -1497,6 +1516,15 @@ async function saveMarginSummaryToR2() {
     // **`e.message` は使わない** (Refs #890)。ofetch は HTTP の reason phrase から
     // message を組むので、`createError` に書いた日本語がそこで丸ごと落ちる
     // (「cache (ym 一致)」が「cache (ym )」になる)。理由は JSON 本文に残っている。
+    // ★ **ここは `describeCaughtError` に通さない** (Refs #1008 PR-2)。
+    //   `marginSummarySaveNote` が**自前の「次の一手」を末尾に持っている**ので、
+    //   status ごとの一手を足すと**指示が 2 つ並ぶ**。実測した合成後の 1 文:
+    //
+    //   `… (401 Unauthorized — ログインが切れています。再ログインしてから「集計」を押してください (…))`
+    //   `— 記録はこの端末のキャッシュだけです。… まず画面を開き直してください — …`
+    //   ⇒ **「集計を押せ」と「画面を開き直せ」が食い違う。**
+    //
+    //   「理由は共通・やり直し方は画面ごと (= 1 つ)」を崩さないため、理由だけを渡す。
     marginR2Note.value = marginSummarySaveNote(null, describeApiError(e))
     marginR2Failed.value = true
   }
@@ -1534,7 +1562,7 @@ async function loadMarginVersions(ymValue: string) {
     marginVersionsNote.value = ''
     marginVersionsUnreadableNote.value = ''
     // 理由は JSON 本文から読む (Refs #890)。`e.message` だと status しか出ない。
-    marginVersionsError.value = `R2 に残した版の一覧を読めませんでした — ${describeApiError(e)}`
+    marginVersionsError.value = `R2 に残した版の一覧を読めませんでした — ${describeCaughtError(e, RETRY_AGGREGATE)}`
   }
   finally {
     marginVersionsLoading.value = false
@@ -1609,7 +1637,7 @@ async function runMarginDiff() {
     // **空の差分に倒さない** — 「読めなかった」と「変わっていない」は別のこと。
     marginDiff.value = null
     // 理由は JSON 本文から読む (Refs #890)。
-    marginDiffError.value = `選んだ版の本文を読めませんでした — ${describeApiError(e)}`
+    marginDiffError.value = `選んだ版の本文を読めませんでした — ${describeCaughtError(e, '「差分を出す」を押してください')}`
   }
   finally {
     marginDiffLoading.value = false
@@ -1778,7 +1806,7 @@ async function loadRestraint(force = false) {
     if (shownYm.value !== target) return
     restraintByCd.value = null
     // 最低賃金マスタと同じ relay 経由 (`{error: '<日本語>'}`、Refs #890)。
-    restraintError.value = `拘束時間を読めませんでした — ${describeApiError(e)}`
+    restraintError.value = `拘束時間を読めませんでした — ${describeCaughtError(e, RETRY_RELOAD_WAGE_MIX)}`
   }
   finally {
     loadingRestraint.value = false
@@ -1832,7 +1860,7 @@ async function loadActualPay(force = false) {
     if (shownYm.value !== target) return
     actualPayByCd.value = null
     // `/api/ichiban/**` 越しなので本文から読む (Refs #890)。
-    actualPayError.value = `実支給 (一番星の経費明細 08 給与) を読めませんでした — ${describeApiError(e)}`
+    actualPayError.value = `実支給 (一番星の経費明細 08 給与) を読めませんでした — ${describeCaughtError(e, RETRY_RELOAD_WAGE_MIX)}`
   }
   finally {
     loadingActualPay.value = false

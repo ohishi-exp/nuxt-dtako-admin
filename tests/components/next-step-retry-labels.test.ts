@@ -104,10 +104,36 @@ describe('describeResponseFailure の retry は実在するボタンを指す', 
   // ★ 陽性対照。改名や書式変更で抽出が 0 件になると、下の `it.each` が
   //   **1 本も走らないまま緑になる**。件数の下限をここで固定する。
   it('★ 陽性対照: retry が名指ししているボタンを抽出できている', () => {
-    // #1008 で 12 本 (4 画面) + #996 で 6 本 (3 画面 + 1 component)。
-    // 13 本目 (`restraint-compare` の一括) は computed 共有なのでリテラルが無い (上の注記)。
-    expect(cases.length).toBeGreaterThanOrEqual(18)
-    expect(new Set(cases.map(c => c.rel)).size).toBeGreaterThanOrEqual(8)
+    // **★ 数えたもの**: `app/**` の `.vue` の `<script>` 側にある
+    // 「`「…」` を含み `してください` で終わるシングルクォート文字列」から取った
+    // `「…」` の**引用 1 つ = 1 件**。ファイル数はそれが 1 件以上あるファイルの数。
+    //
+    // | | 本 | ファイル |
+    // | --- | --- | --- |
+    // | base `b78116493dc9` (= #996 + #1008 PR-1) | 18 | **9** |
+    // | **+ #1008 PR-2** | **27** | **14** |
+    // | 差 | +9 | +5 (`margin` 3 / `upload` 2 / `monthly` 2 / `allowance` 1 / `compare` 1) |
+    //
+    // **★ 旧版の注記は「8 ファイル」と書いていたが、それは下限値であって実測ではない。**
+    // 同じ行の内訳 (`#996 で 3 画面 + 1 component` / `PR-1 で 4 画面` = 8) も
+    // **PR-1 側が 1 ファイル数え落としていた** — 実測は 9
+    // (#996 の 4 = `vehicle-settings/{index,history,unconfirmed}` +
+    // `VehicleSettingsDumpPicker` / PR-1 の 5 = `restraint-compare` / `operations` /
+    // `restraint-report` / `scraper` / `y-time-export`)。
+    // **下限をそのまま「いま何本あるか」として引用しない。**
+    //
+    // **リテラルが無い `retry` はここに出ない** — 数え漏れではなく設計:
+    // - `restraint-compare` の一括ボタンと `allowance` の保存ボタンは
+    //   **ラベルが可変**なので `computed` / 共有関数から組む (上の注記)
+    // - `daily-hours` / `operations` の乗務員・車両一覧、`restraint-report` の
+    //   乗務員一覧、`ProfitPanel` は **押せるボタンが画面に無い**ので
+    //   `「…」` を使わない文を渡している (ボタンを名指ししていない = 対象外)
+    // - `margin` の R2 保存注記と `allowance` の暫定手当注記は、**注記そのものが
+    //   やり直し方を持っている**ので `retry` を渡していない (指示が 2 つ並ぶため)
+    //
+    // **下限は上げるだけ。下げない。**
+    expect(cases.length).toBeGreaterThanOrEqual(27)
+    expect(new Set(cases.map(c => c.rel)).size).toBeGreaterThanOrEqual(14)
   })
 
   it.each(cases.map(c => [c.rel, c.label, c] as const))(

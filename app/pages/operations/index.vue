@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { getOperations, getDrivers, getVehicles, splitCsvAllStream } from '~/utils/api'
 import type { OperationListItem, Driver, Vehicle } from '~/types'
+import { describeCaughtError } from '~/utils/api-error'
 
 const router = useRouter()
 
@@ -60,14 +61,29 @@ async function fetchData() {
   }
 }
 
+/** 一覧を取り直す口が `onMounted` にしかない画面の「やり直し方」 (Refs #1008)。 */
+const RETRY_RELOAD = 'ページを再読み込みしてください'
+
 /**
- * 一覧の取得失敗を 1 行にする (Refs #920)。
- * **`describeApiError` を当てていないのは当て忘れではない** — 理由は
- * `app/pages/restraint-report.vue` の同名関数の doc コメント (この経路の例外は
- * ofetch の `FetchError` ではないので当てても 1 文字も変わらない。直すのは #904)。
+ * 一覧の取得失敗を 1 行にする (Refs #920 / #1008)。
+ *
+ * ## `describeCaughtError` に通す — 足しているのは**「次に何をすればいいか」**
+ *
+ * この経路 (`app/utils/api.ts` の `request()` → `@ippoan/auth-client` の
+ * `createAuthFetch`) の例外は **ofetch の `FetchError` ではなく素の `Error`** なので、
+ * **理由の文字列は `describeApiError` を当てても 1 文字も変わらない**
+ * (`app/pages/restraint-report.vue` の同名関数の doc が正)。**変わるのは末尾**で、
+ * `describeCaughtError` が `` `(3 桁): ` `` の形から status を読んで
+ * 「再ログイン」「管理者に依頼」「復旧を待つ」を撃ち分ける。
+ *
+ * ## `retry` にボタンを渡していない理由
+ *
+ * この一覧を取り直す口は **`onMounted` にしかなく、押せるボタンが画面に無い**。
+ * **無いボタンを案内しない** (`tests/components/next-step-retry-labels.test.ts` の
+ * 規約) ので、ボタンを名指ししない `RETRY_RELOAD` を渡す。
  */
 function describeListFailure(e: unknown): string {
-  return e instanceof Error ? e.message : '理由を読めませんでした'
+  return e instanceof Error ? describeCaughtError(e, RETRY_RELOAD) : '理由を読めませんでした'
 }
 
 async function loadDrivers() {

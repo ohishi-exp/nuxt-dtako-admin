@@ -14,7 +14,7 @@
  * (マッチレベルは保存時に焼き込んだ値を読むだけなので、書き込みが止まっても正しい)。
  */
 import { snapshotUnreadableNote, type SnapshotListItem, type SnapshotListResult } from '~/utils/profit-r2'
-import { describeApiError } from '~/utils/api-error'
+import { describeCaughtError } from '~/utils/api-error'
 import { currentAccessToken } from '~/utils/api'
 import { shiftYmd } from '~/utils/profit-compare'
 
@@ -68,7 +68,8 @@ async function loadSnapshotList() {
     // が理由を言う。前の検索で出た件数を持ち越すと、今の結果の話に読める。
     snapshotUnreadable.value = ''
     // 理由は JSON 本文から読む (Refs #890)。`e.message` だと status しか出ない。
-    snapshotListError.value = describeApiError(e)
+    // **「次に何をすればいいか」まで出す** (Refs #1008)。
+    snapshotListError.value = describeCaughtError(e, '「検索」を押してください')
     snapshotListStatus.value = 'error'
   }
 }
@@ -117,8 +118,9 @@ async function confirmDeleteSnapshot() {
     deleteConfirmOpen.value = false
   }
   catch (e) {
-    // 削除の失敗理由も JSON 本文から読む (Refs #890)。
-    deleteError.value = describeApiError(e)
+    // 削除の失敗理由も JSON 本文から読む (Refs #890)。**やり直し方は「検索」ではなく
+    // 「削除」** — 出ているのは確認モーダルで、押し直す先はその中のボタン (Refs #1008)。
+    deleteError.value = describeCaughtError(e, '「削除」を押してください')
   }
   finally {
     deleting.value = false

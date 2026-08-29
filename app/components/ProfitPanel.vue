@@ -46,7 +46,7 @@ import {
 import type { SelectedRowsSummary, SelectedRowsLocationRange } from '~/utils/event-data-table'
 import type { AllowanceLeg } from '~/utils/allowance-trips'
 import { DATE_SLACK, tradableSlips } from '~/utils/allowance-ichiban'
-import { describeApiError } from '~/utils/api-error'
+import { describeCaughtError } from '~/utils/api-error'
 import { transportSlips } from '~/utils/allowance-relay'
 import { shiftYmd } from '~/utils/profit-compare'
 import {
@@ -105,6 +105,32 @@ const props = defineProps<{
 defineEmits<{ close: [] }>()
 
 type FetchStatus = 'loading' | 'ready' | 'error' | 'no-driver'
+
+/**
+ * **この画面の「やり直し方」** (Refs #1008)。
+ *
+ * ★ **`「…」を押してください` の形にしていない** — このパネルに再試行ボタンは
+ * 存在せず (`load` は `watch([driverCd, range])` からしか走らない)、
+ * **無いボタンを案内すると、失敗した人が探して見つからない**。
+ * 代わりに**本当にもう一度取りに行く操作**を書く: 親 (`/operations/[unko_no]` の
+ * イベントタブ) で選択行を変えると `selectedEventRange` が変わり、この `watch` が
+ * 発火して `load` が走る。
+ *
+ * ## ★ 括弧つきの補足を足さないこと (**合成後の 1 文**で決めている)
+ *
+ * 初稿は `'… (選び直すと自動で取り直します)'` だった。**単体では読めるが、
+ * `nextStepForStatus(401, retry)` と合成すると括弧が 2 つ連続する** (実測):
+ *
+ * ```
+ * 401 … 再ログインしてからイベントの行を選び直してください (選び直すと自動で取り直します)
+ *      (再ログインしても直らないときは認証サーバに繋がっていません。権限の問題ではありません)
+ * ```
+ *
+ * **描画させて読むまで気づけない** — ヘルパ 1 本を見て「読める」で済ませないこと。
+ * `「…してください」` の命令形だけで「もう一度取りに行く」ことは伝わるので補足は消した。
+ * **仕組みの説明はこの doc の役目**であって画面の役目ではない。
+ */
+const RETRY_RESELECT = 'イベントの行を選び直してください'
 
 const status = ref<FetchStatus>('loading')
 const errorMessage = ref<string | null>(null)
@@ -232,7 +258,12 @@ async function load() {
     // `fetchDriverDailySlips` → `utils/ichiban.ts` の
     // `$fetch('/api/ichiban/api/sales/vehicle-daily')` で、理由は JSON 本文にしか
     // 残らない。**`localStorage` の `:245` は触らない** (HTTP ではない)。
-    errorMessage.value = describeApiError(e)
+    // ★ **この画面には「再試行」ボタンが 1 つも無い** (`load` は props の
+    //   乗務員CD / 区間を見る `watch` からしか走らない)。**無いボタンを案内しない**
+    //   ので、`retry` は `「…」を押してください` の形にせず、**実際にもう一度
+    //   取りに行く操作**を書く (Refs #1008)。イベント表の選択を変えると
+    //   `selectedEventRange` が変わり、この `watch` が発火する。
+    errorMessage.value = describeCaughtError(e, RETRY_RESELECT)
     status.value = 'error'
   }
 }
