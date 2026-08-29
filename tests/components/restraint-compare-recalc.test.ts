@@ -217,6 +217,26 @@ describe('一括再計算 (recalcDiffsOnly)', () => {
     expect(compareRestraintCsv).toHaveBeenCalledTimes(1)
   })
 
+  // ★ `retry` に渡す表記が、**画面に実際に描かれているラベルと 1 文字も違わない**ことを
+  //    見る (Refs #1008)。このボタンだけラベルが件数入りで可変なので、式を 2 か所に書くと
+  //    片方だけ変わって「存在しないボタン」を案内する。`batchRecalcLabel` (computed) を
+  //    template と `retry` で共有しているので、ここが両者を突き合わせる場所になる。
+  it('★ retry は画面に出ている一括ボタンのラベルそのもの (件数入り)', async () => {
+    compareRestraintCsv.mockResolvedValue(withUnknownDiff())
+    recalculateDriversBatch.mockResolvedValue(undefined)
+
+    const w = mountPage()
+    await selectCsv(w)
+    await clickLabel(w, BATCH_LABEL)
+    await flushPromises()
+
+    const retry = recalculateDriversBatch.mock.calls[0]![4] as string
+    expect(retry).toBe(`「${batchButtonLabel(w)}」を押してください`)
+    // 陰性対照: 伏せ字や固定文言に戻っていないこと (件数が実際に入っている)。
+    expect(retry).toBe('「未知差分1名 再計算」を押してください')
+    expect(retry).not.toContain('…')
+  })
+
   it('★ 陽性対照: 成功した回は再比較まで進み、進捗は空に戻る', async () => {
     // 再比較後も差分が残る側にしておく (一致させるとボタンごと消えてラベルが読めない)。
     compareRestraintCsv.mockResolvedValue(withUnknownDiff())

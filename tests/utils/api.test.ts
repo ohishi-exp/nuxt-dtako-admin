@@ -65,6 +65,24 @@ import {
   restoreNativeApis,
 } from '../helpers/api-test-env'
 
+/**
+ * 成功経路 (`res.ok === true`) のテストでは `retry` は **1 度も読まれない**
+ * (`if (!res.ok)` に入らないため)。実在ボタンの表記を選ぶ意味が無いので、
+ * **どの画面のものでもないと分かる目印**を渡す (Refs #1008)。
+ * 失敗経路のテストは実際に画面が渡している表記をそのまま使うこと。
+ */
+const RETRY_UNUSED = '(この経路では使われません)'
+
+/**
+ * 非 2xx の `Response` の stub。**`text()` を持たせるのが要点** (Refs #1008)。
+ * `describeResponseFailure` は本文を読んでから理由を組むので、`{ ok: false, status }`
+ * だけの stub では本文が読めず「理由が無い」側に落ちる。**実物の server route は
+ * Nitro のエラー本文を返す**ので、そちらに合わせて JSON を持たせる。
+ */
+function failRes(status: number, body: Record<string, unknown>) {
+  return { ok: false, status, statusText: '', text: async () => JSON.stringify(body) } as any
+}
+
 // ---------------------------------------------------------------------------
 // Mock-only helpers (SSE / download)
 // ---------------------------------------------------------------------------
@@ -614,7 +632,7 @@ describe('api', () => {
     it('sends FormData with file', async () => {
       stubOk([{ driver_cd: 'D001', diff: 10 }])
       const file = new File(['csv-content'], 'report.csv', { type: 'text/csv' })
-      await callApi(() => compareRestraintCsv(file))
+      await callApi(() => compareRestraintCsv(file, '「再比較」を押してください'))
       assertMock(() => {
         const [url, opts] = mockFetch.mock.calls[0]
         expect(url).toBe(`${API_BASE}/api/restraint-report/compare-csv`)
@@ -626,7 +644,7 @@ describe('api', () => {
     it('includes driverCd query param when provided', async () => {
       stubOk([])
       const file = new File(['csv-content'], 'report.csv')
-      await callApi(() => compareRestraintCsv(file, 'D001'))
+      await callApi(() => compareRestraintCsv(file, '「再比較」を押してください', 'D001'))
       assertMock(() => {
         const url = mockFetch.mock.calls[0][0] as string
         expect(url).toBe(`${API_BASE}/api/restraint-report/compare-csv?driver_cd=D001`)
@@ -636,7 +654,7 @@ describe('api', () => {
     it('encodes special characters in driverCd', async () => {
       stubOk([])
       const file = new File(['csv-content'], 'report.csv')
-      await callApi(() => compareRestraintCsv(file, 'D/001'))
+      await callApi(() => compareRestraintCsv(file, '「再比較」を押してください', 'D/001'))
       assertMock(() => {
         const url = mockFetch.mock.calls[0][0] as string
         expect(url).toContain('driver_cd=D%2F001')
@@ -646,18 +664,23 @@ describe('api', () => {
     it('omits driverCd param when not provided', async () => {
       stubOk([])
       const file = new File(['csv-content'], 'report.csv')
-      await callApi(() => compareRestraintCsv(file))
+      await callApi(() => compareRestraintCsv(file, '「再比較」を押してください'))
       assertMock(() => {
         const url = mockFetch.mock.calls[0][0] as string
         expect(url).not.toContain('driver_cd')
       })
     })
 
-    it('throws on non-ok response', async () => {
+    // ★ 直す前は `比較に失敗: 400` で終わり、**次に何をすればいいかが 1 文字も無かった**
+    //    (Refs #1008)。`describeResponseFailure` を通して「理由 — 次の一手」に揃える。
+    it('throws on non-ok response — 理由と「次の一手」を両方出す', async () => {
       if (isLive) return
-      stubResponse({ ok: false, status: 400, statusText: 'Bad Request' })
+      stubResponse(failRes(400, { message: 'CSV の列が足りません' }))
       const file = new File(['csv'], 'r.csv')
-      await expect(compareRestraintCsv(file)).rejects.toThrow('比較に失敗: 400')
+      await expect(compareRestraintCsv(file, '「再比較」を押してください')).rejects.toThrow(
+        '400 CSV の列が足りません — 送った内容をサーバが受け付けませんでした。'
+        + '上の理由のとおりに直してから「再比較」を押してください',
+      )
     })
   })
 
@@ -681,7 +704,7 @@ describe('api', () => {
       mockFetch.mockResolvedValue(mockStreamResponse(createSSEStream(events)))
 
       const received: unknown[] = []
-      await recalculateStream(2026, 3, evt => received.push(evt))
+      await recalculateStream(2026, 3, evt => received.push(evt), RETRY_UNUSED)
 
       expect(received).toEqual(events)
       const [url, opts] = mockFetch.mock.calls[0]
@@ -690,14 +713,17 @@ describe('api', () => {
       expect(opts.headers['X-Tenant-ID']).toBe('tid-1')
     })
 
-    it('recalculateStream throws on non-ok response', async () => {
-      mockFetch.mockResolvedValue({ ok: false, status: 500, statusText: 'Error' })
-      await expect(recalculateStream(2026, 3, () => {})).rejects.toThrow('再計算に失敗: 500')
+    it('recalculateStream throws on non-ok response — 5xx は「復旧してから」に繋ぐ', async () => {
+      mockFetch.mockResolvedValue(failRes(500, { message: 'alc に繋がりません' }))
+      await expect(recalculateStream(2026, 3, () => {}, '「全員再計算」を押してください')).rejects.toThrow(
+        '500 alc に繋がりません — サーバ側の設定か障害です (権限の問題ではありません)。'
+        + '復旧してから「全員再計算」を押してください',
+      )
     })
 
     it('recalculateStream throws when body is null', async () => {
       mockFetch.mockResolvedValue({ ok: true, status: 200, body: null })
-      await expect(recalculateStream(2026, 3, () => {})).rejects.toThrow('No response body')
+      await expect(recalculateStream(2026, 3, () => {}, RETRY_UNUSED)).rejects.toThrow('No response body')
     })
 
     it('recalculateDriverStream parses SSE events', async () => {
@@ -708,21 +734,24 @@ describe('api', () => {
       mockFetch.mockResolvedValue(mockStreamResponse(createSSEStream(events)))
 
       const received: unknown[] = []
-      await recalculateDriverStream(2026, 3, 'D001', evt => received.push(evt))
+      await recalculateDriverStream(2026, 3, 'D001', evt => received.push(evt), RETRY_UNUSED)
 
       expect(received).toEqual(events)
       const url = mockFetch.mock.calls[0][0] as string
       expect(url).toContain('driver_id=D001')
     })
 
-    it('recalculateDriverStream throws on non-ok response', async () => {
-      mockFetch.mockResolvedValue({ ok: false, status: 403, statusText: 'Forbidden' })
-      await expect(recalculateDriverStream(2026, 3, 'D001', () => {})).rejects.toThrow('再計算に失敗: 403')
+    it('recalculateDriverStream throws on non-ok response — 403 は「再ログイン」と書かない', async () => {
+      mockFetch.mockResolvedValue(failRes(403, { message: 'この会社のデータは見られません' }))
+      await expect(recalculateDriverStream(2026, 3, 'D001', () => {}, '行の「再計算」を押してください')).rejects.toThrow(
+        '403 この会社のデータは見られません — この操作の権限がありません (ログインし直しても変わりません)。'
+        + '管理者に許可の追加を依頼してください',
+      )
     })
 
     it('recalculateDriverStream throws when body is null', async () => {
       mockFetch.mockResolvedValue({ ok: true, status: 200, body: null })
-      await expect(recalculateDriverStream(2026, 3, 'D001', () => {})).rejects.toThrow('No response body')
+      await expect(recalculateDriverStream(2026, 3, 'D001', () => {}, RETRY_UNUSED)).rejects.toThrow('No response body')
     })
 
     it('recalculateDriversBatch sends JSON body and parses SSE', async () => {
@@ -734,7 +763,7 @@ describe('api', () => {
       mockFetch.mockResolvedValue(mockStreamResponse(createSSEStream(events)))
 
       const received: unknown[] = []
-      await recalculateDriversBatch(2026, 3, ['D001', 'D002'], evt => received.push(evt))
+      await recalculateDriversBatch(2026, 3, ['D001', 'D002'], evt => received.push(evt), RETRY_UNUSED)
 
       expect(received).toEqual(events)
       const [url, opts] = mockFetch.mock.calls[0]
@@ -745,13 +774,16 @@ describe('api', () => {
     })
 
     it('recalculateDriversBatch throws on non-ok response', async () => {
-      mockFetch.mockResolvedValue({ ok: false, status: 500, statusText: 'Error' })
-      await expect(recalculateDriversBatch(2026, 3, [], () => {})).rejects.toThrow('一括再計算に失敗: 500')
+      mockFetch.mockResolvedValue(failRes(500, { message: '再計算ワーカーが落ちています' }))
+      await expect(recalculateDriversBatch(2026, 3, [], () => {}, '「未知差分2名 再計算」を押してください')).rejects.toThrow(
+        '500 再計算ワーカーが落ちています — サーバ側の設定か障害です (権限の問題ではありません)。'
+        + '復旧してから「未知差分2名 再計算」を押してください',
+      )
     })
 
     it('recalculateDriversBatch throws when body is null', async () => {
       mockFetch.mockResolvedValue({ ok: true, status: 200, body: null })
-      await expect(recalculateDriversBatch(2026, 3, ['D1'], () => {})).rejects.toThrow('No response body')
+      await expect(recalculateDriversBatch(2026, 3, ['D1'], () => {}, RETRY_UNUSED)).rejects.toThrow('No response body')
     })
 
     // dtako-scraper-relay (front Worker + DO) への WebSocket 中継。SSE ではないため
@@ -765,7 +797,7 @@ describe('api', () => {
       mockFetch.mockResolvedValue(mockStreamResponse(createSSEStream(events)))
 
       const received: unknown[] = []
-      await splitCsvAllStream(evt => received.push(evt))
+      await splitCsvAllStream(evt => received.push(evt), RETRY_UNUSED)
 
       expect(received).toEqual(events)
       const [url, opts] = mockFetch.mock.calls[0]
@@ -774,13 +806,16 @@ describe('api', () => {
     })
 
     it('splitCsvAllStream throws on non-ok response', async () => {
-      mockFetch.mockResolvedValue({ ok: false, status: 500, statusText: 'Error' })
-      await expect(splitCsvAllStream(() => {})).rejects.toThrow('分割に失敗: 500')
+      mockFetch.mockResolvedValue(failRes(500, { message: 'alc が 503 を返しました' }))
+      await expect(splitCsvAllStream(() => {}, '「IVT一括分割」を押してください')).rejects.toThrow(
+        '500 alc が 503 を返しました — サーバ側の設定か障害です (権限の問題ではありません)。'
+        + '復旧してから「IVT一括分割」を押してください',
+      )
     })
 
     it('splitCsvAllStream throws when body is null', async () => {
       mockFetch.mockResolvedValue({ ok: true, status: 200, body: null })
-      await expect(splitCsvAllStream(() => {})).rejects.toThrow('No response body')
+      await expect(splitCsvAllStream(() => {}, RETRY_UNUSED)).rejects.toThrow('No response body')
     })
 
     it('downloadRestraintReportPdfStream parses SSE and triggers download on done', async () => {
@@ -794,7 +829,7 @@ describe('api', () => {
       mockFetch.mockResolvedValue(mockStreamResponse(createSSEStream(events)))
 
       const received: unknown[] = []
-      await downloadRestraintReportPdfStream(2026, 3, evt => received.push(evt))
+      await downloadRestraintReportPdfStream(2026, 3, evt => received.push(evt), RETRY_UNUSED)
 
       expect(received).toHaveLength(2)
       expect(received[0]).toEqual(events[0])
@@ -810,13 +845,16 @@ describe('api', () => {
     })
 
     it('downloadRestraintReportPdfStream throws on non-ok response', async () => {
-      mockFetch.mockResolvedValue({ ok: false, status: 500, statusText: 'Error' })
-      await expect(downloadRestraintReportPdfStream(2026, 3, () => {})).rejects.toThrow('PDF生成に失敗しました: 500')
+      mockFetch.mockResolvedValue(failRes(500, { message: 'PDF エンジンが応答しません' }))
+      await expect(downloadRestraintReportPdfStream(2026, 3, () => {}, '「全員PDF」を押してください')).rejects.toThrow(
+        '500 PDF エンジンが応答しません — サーバ側の設定か障害です (権限の問題ではありません)。'
+        + '復旧してから「全員PDF」を押してください',
+      )
     })
 
     it('downloadRestraintReportPdfStream throws when body is null', async () => {
       mockFetch.mockResolvedValue({ ok: true, status: 200, body: null })
-      await expect(downloadRestraintReportPdfStream(2026, 3, () => {})).rejects.toThrow('No response body')
+      await expect(downloadRestraintReportPdfStream(2026, 3, () => {}, RETRY_UNUSED)).rejects.toThrow('No response body')
     })
 
     // --- SSE edge cases ---
@@ -833,7 +871,7 @@ describe('api', () => {
       mockFetch.mockResolvedValue(mockStreamResponse(stream))
 
       const received: unknown[] = []
-      await recalculateStream(2026, 3, evt => received.push(evt))
+      await recalculateStream(2026, 3, evt => received.push(evt), RETRY_UNUSED)
       expect(received).toEqual([{ event: 'done' }])
     })
 
@@ -849,7 +887,7 @@ describe('api', () => {
       mockFetch.mockResolvedValue(mockStreamResponse(stream))
 
       const received: unknown[] = []
-      await recalculateStream(2026, 3, evt => received.push(evt))
+      await recalculateStream(2026, 3, evt => received.push(evt), RETRY_UNUSED)
       expect(received).toEqual([{ event: 'done' }])
     })
 
@@ -864,15 +902,15 @@ describe('api', () => {
       mockFetch.mockResolvedValue(mockStreamResponse(stream))
 
       const received: unknown[] = []
-      await recalculateStream(2026, 3, evt => received.push(evt))
+      await recalculateStream(2026, 3, evt => received.push(evt), RETRY_UNUSED)
       expect(received).toEqual([{ event: 'done' }])
     })
 
     it.each([
-      ['recalculateDriverStream', (cb: (e: unknown) => void) => recalculateDriverStream(2026, 3, 'D001', cb)],
-      ['recalculateDriversBatch', (cb: (e: unknown) => void) => recalculateDriversBatch(2026, 3, ['D1'], cb)],
-      ['downloadRestraintReportPdfStream', (cb: (e: unknown) => void) => downloadRestraintReportPdfStream(2026, 3, cb)],
-      ['splitCsvAllStream', (cb: (e: unknown) => void) => splitCsvAllStream(cb)],
+      ['recalculateDriverStream', (cb: (e: unknown) => void) => recalculateDriverStream(2026, 3, 'D001', cb, RETRY_UNUSED)],
+      ['recalculateDriversBatch', (cb: (e: unknown) => void) => recalculateDriversBatch(2026, 3, ['D1'], cb, RETRY_UNUSED)],
+      ['downloadRestraintReportPdfStream', (cb: (e: unknown) => void) => downloadRestraintReportPdfStream(2026, 3, cb, RETRY_UNUSED)],
+      ['splitCsvAllStream', (cb: (e: unknown) => void) => splitCsvAllStream(cb, RETRY_UNUSED)],
     ] as [string, (cb: (e: unknown) => void) => Promise<void>][])('%s ignores invalid JSON in data lines', async (_name, fn) => {
       const encoder = new TextEncoder()
       const doneEvent = _name === 'recalculateDriversBatch' ? 'batch_done' : (_name === 'downloadRestraintReportPdfStream' ? 'progress' : 'done')
@@ -891,10 +929,10 @@ describe('api', () => {
     })
 
     it.each([
-      ['recalculateDriverStream', (cb: (e: unknown) => void) => recalculateDriverStream(2026, 3, 'D001', cb)],
-      ['recalculateDriversBatch', (cb: (e: unknown) => void) => recalculateDriversBatch(2026, 3, ['D1'], cb)],
-      ['downloadRestraintReportPdfStream', (cb: (e: unknown) => void) => downloadRestraintReportPdfStream(2026, 3, cb)],
-      ['splitCsvAllStream', (cb: (e: unknown) => void) => splitCsvAllStream(cb)],
+      ['recalculateDriverStream', (cb: (e: unknown) => void) => recalculateDriverStream(2026, 3, 'D001', cb, RETRY_UNUSED)],
+      ['recalculateDriversBatch', (cb: (e: unknown) => void) => recalculateDriversBatch(2026, 3, ['D1'], cb, RETRY_UNUSED)],
+      ['downloadRestraintReportPdfStream', (cb: (e: unknown) => void) => downloadRestraintReportPdfStream(2026, 3, cb, RETRY_UNUSED)],
+      ['splitCsvAllStream', (cb: (e: unknown) => void) => splitCsvAllStream(cb, RETRY_UNUSED)],
     ] as [string, (cb: (e: unknown) => void) => Promise<void>][])('%s handles empty data lines', async (_name, fn) => {
       const encoder = new TextEncoder()
       const doneEvent = _name === 'recalculateDriversBatch' ? 'batch_done' : (_name === 'downloadRestraintReportPdfStream' ? 'progress' : 'done')
@@ -913,10 +951,10 @@ describe('api', () => {
     })
 
     it.each([
-      ['recalculateDriverStream', (cb: (e: unknown) => void) => recalculateDriverStream(2026, 3, 'D001', cb)],
-      ['recalculateDriversBatch', (cb: (e: unknown) => void) => recalculateDriversBatch(2026, 3, ['D1'], cb)],
-      ['downloadRestraintReportPdfStream', (cb: (e: unknown) => void) => downloadRestraintReportPdfStream(2026, 3, cb)],
-      ['splitCsvAllStream', (cb: (e: unknown) => void) => splitCsvAllStream(cb)],
+      ['recalculateDriverStream', (cb: (e: unknown) => void) => recalculateDriverStream(2026, 3, 'D001', cb, RETRY_UNUSED)],
+      ['recalculateDriversBatch', (cb: (e: unknown) => void) => recalculateDriversBatch(2026, 3, ['D1'], cb, RETRY_UNUSED)],
+      ['downloadRestraintReportPdfStream', (cb: (e: unknown) => void) => downloadRestraintReportPdfStream(2026, 3, cb, RETRY_UNUSED)],
+      ['splitCsvAllStream', (cb: (e: unknown) => void) => splitCsvAllStream(cb, RETRY_UNUSED)],
     ] as [string, (cb: (e: unknown) => void) => Promise<void>][])('%s handles non-data lines', async (_name, fn) => {
       const encoder = new TextEncoder()
       const doneEvent = _name === 'recalculateDriversBatch' ? 'batch_done' : (_name === 'downloadRestraintReportPdfStream' ? 'progress' : 'done')
@@ -951,7 +989,7 @@ describe('api', () => {
       mockFetch.mockResolvedValue(mockStreamResponse(stream))
 
       const received: unknown[] = []
-      await recalculateStream(2026, 3, evt => received.push(evt))
+      await recalculateStream(2026, 3, evt => received.push(evt), RETRY_UNUSED)
       expect(received).toEqual([{ event: 'progress', current: 1 }])
     })
   })
@@ -1068,7 +1106,7 @@ describe('api', () => {
         .mockResolvedValueOnce(mockStreamResponse(createSSEStream(events)))
 
       const received: unknown[] = []
-      await recalculateStream(2026, 3, evt => received.push(evt))
+      await recalculateStream(2026, 3, evt => received.push(evt), RETRY_UNUSED)
 
       expect(refresher).toHaveBeenCalledTimes(1)
       expect(mockFetch).toHaveBeenCalledTimes(2)
@@ -1084,7 +1122,7 @@ describe('api', () => {
         .mockResolvedValueOnce(mockStreamResponse(createSSEStream([{ event: 'done' }])))
 
       const received: unknown[] = []
-      await recalculateDriverStream(2026, 3, 'D001', evt => received.push(evt))
+      await recalculateDriverStream(2026, 3, 'D001', evt => received.push(evt), RETRY_UNUSED)
 
       expect(refresher).toHaveBeenCalledTimes(1)
       expect(mockFetch).toHaveBeenCalledTimes(2)
@@ -1099,7 +1137,7 @@ describe('api', () => {
         .mockResolvedValueOnce(mockStreamResponse(createSSEStream([{ event: 'batch_done' }])))
 
       const received: unknown[] = []
-      await recalculateDriversBatch(2026, 3, ['D1'], evt => received.push(evt))
+      await recalculateDriversBatch(2026, 3, ['D1'], evt => received.push(evt), RETRY_UNUSED)
 
       expect(refresher).toHaveBeenCalledTimes(1)
       expect(mockFetch).toHaveBeenCalledTimes(2)
@@ -1113,7 +1151,7 @@ describe('api', () => {
         .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })
         .mockResolvedValueOnce(mockStreamResponse(createSSEStream([{ event: 'progress', current: 1, total: 1 }])))
 
-      await downloadRestraintReportPdfStream(2026, 3, () => {})
+      await downloadRestraintReportPdfStream(2026, 3, () => {}, RETRY_UNUSED)
 
       expect(refresher).toHaveBeenCalledTimes(1)
       expect(mockFetch).toHaveBeenCalledTimes(2)
@@ -1188,9 +1226,11 @@ describe('api', () => {
     it('401 without tokenRefresher does not retry', async () => {
       initApi('http://test', () => 'token', undefined, () => 'tid')
 
-      mockFetch.mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })
+      mockFetch.mockResolvedValueOnce(failRes(401, { statusMessage: 'Unauthorized' }))
 
-      await expect(recalculateStream(2026, 3, () => {})).rejects.toThrow('再計算に失敗: 401')
+      await expect(recalculateStream(2026, 3, () => {}, '「全員再計算」を押してください')).rejects.toThrow(
+        '401 Unauthorized — ログインが切れています。再ログインしてから「全員再計算」を押してください',
+      )
       expect(mockFetch).toHaveBeenCalledTimes(1)
     })
 
@@ -1199,33 +1239,42 @@ describe('api', () => {
       initApi('http://test', () => 'token', refresher, () => 'tid')
 
       mockFetch
-        .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })
-        .mockResolvedValueOnce({ ok: false, status: 403, statusText: 'Forbidden' })
+        .mockResolvedValueOnce(failRes(401, { statusMessage: 'Unauthorized' }))
+        .mockResolvedValueOnce(failRes(403, { message: '権限がありません' }))
 
-      await expect(recalculateStream(2026, 3, () => {})).rejects.toThrow('再計算に失敗: 403')
+      // ★ リトライ後の 403 は「再ログイン」ではなく「管理者に依頼」へ倒す (混ぜない)。
+      await expect(recalculateStream(2026, 3, () => {}, '「全員再計算」を押してください')).rejects.toThrow(
+        '403 権限がありません — この操作の権限がありません (ログインし直しても変わりません)。'
+        + '管理者に許可の追加を依頼してください',
+      )
     })
 
     it('401 retry handles refresher failure gracefully', async () => {
       const refresher = vi.fn().mockRejectedValue(new Error('refresh failed'))
       initApi('http://test', () => 'token', refresher, () => 'tid')
 
-      mockFetch.mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })
+      mockFetch.mockResolvedValueOnce(failRes(401, { statusMessage: 'Unauthorized' }))
 
-      await expect(recalculateStream(2026, 3, () => {})).rejects.toThrow('再計算に失敗: 401')
+      await expect(recalculateStream(2026, 3, () => {}, '「全員再計算」を押してください')).rejects.toThrow(
+        '401 Unauthorized — ログインが切れています。再ログインしてから「全員再計算」を押してください',
+      )
     })
 
+    // ★ リフレッシュに失敗した 401 でも、**画面ごとのやり直し方**まで出す (Refs #1008)。
+    //    `retry` は呼び出し元の `.vue` が渡す実在ボタンの表記で、ここでも同じ文字列を使う。
     it.each([
-      ['recalculateDriverStream', () => recalculateDriverStream(2026, 3, 'D001', () => {}), '再計算に失敗: 401'],
-      ['recalculateDriversBatch', () => recalculateDriversBatch(2026, 3, ['D1'], () => {}), '一括再計算に失敗: 401'],
-      ['downloadRestraintReportPdfStream', () => downloadRestraintReportPdfStream(2026, 3, () => {}), 'PDF生成に失敗しました: 401'],
-    ] as [string, () => Promise<void>, string][])('%s handles refresher failure gracefully', async (_name, fn, errorMsg) => {
+      ['recalculateDriverStream', (r: string) => recalculateDriverStream(2026, 3, 'D001', () => {}, r), '行の「再計算」を押してください'],
+      ['recalculateDriversBatch', (r: string) => recalculateDriversBatch(2026, 3, ['D1'], () => {}, r), '「未知差分2名 再計算」を押してください'],
+      ['downloadRestraintReportPdfStream', (r: string) => downloadRestraintReportPdfStream(2026, 3, () => {}, r), '「全員PDF」を押してください'],
+    ] as [string, (r: string) => Promise<void>, string][])('%s handles refresher failure gracefully', async (_name, fn, retry) => {
       const refresher = vi.fn().mockRejectedValue(new Error('refresh failed'))
       initApi('http://test', () => 'token', refresher, () => 'tid')
 
-      const resp: any = { ok: false, status: 401, statusText: 'Unauthorized' }
-      mockFetch.mockResolvedValueOnce(resp)
+      mockFetch.mockResolvedValueOnce(failRes(401, { statusMessage: 'Unauthorized' }))
 
-      await expect(fn()).rejects.toThrow(errorMsg)
+      await expect(fn(retry)).rejects.toThrow(
+        `401 Unauthorized — ログインが切れています。再ログインしてから${retry}`,
+      )
     })
 
     it('triggerScrapeStream handles refresher failure gracefully', async () => {
@@ -1258,8 +1307,8 @@ describe('api', () => {
 
       mockFetch.mockResolvedValue({ ok: false, status: 401, statusText: 'Unauthorized' })
 
-      const p1 = recalculateStream(2026, 3, () => {}).catch(() => {})
-      const p2 = recalculateStream(2026, 4, () => {}).catch(() => {})
+      const p1 = recalculateStream(2026, 3, () => {}, RETRY_UNUSED).catch(() => {})
+      const p2 = recalculateStream(2026, 4, () => {}, RETRY_UNUSED).catch(() => {})
 
       await new Promise(r => setTimeout(r, 0))
       expect(refresher).toHaveBeenCalledTimes(1)
@@ -1269,9 +1318,9 @@ describe('api', () => {
     })
 
     it.each([
-      ['recalculateDriverStream', (m: number) => recalculateDriverStream(2026, 3, `D00${m}`, () => {})],
-      ['recalculateDriversBatch', (m: number) => recalculateDriversBatch(2026, 3, [`D${m}`], () => {})],
-      ['downloadRestraintReportPdfStream', (m: number) => downloadRestraintReportPdfStream(2026, m, () => {})],
+      ['recalculateDriverStream', (m: number) => recalculateDriverStream(2026, 3, `D00${m}`, () => {}, RETRY_UNUSED)],
+      ['recalculateDriversBatch', (m: number) => recalculateDriversBatch(2026, 3, [`D${m}`], () => {}, RETRY_UNUSED)],
+      ['downloadRestraintReportPdfStream', (m: number) => downloadRestraintReportPdfStream(2026, m, () => {}, RETRY_UNUSED)],
     ] as [string, (m: number) => Promise<void>][])('concurrent 401 retries share refresh for %s', async (_name, fn) => {
       let resolveRefresh: () => void
       const refresher = vi.fn().mockImplementation(() => new Promise<void>((r) => { resolveRefresh = r }))
@@ -1594,7 +1643,7 @@ describe('api', () => {
       const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue(mockBlobUrl)
       const revokeObjectURLSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
 
-      await downloadRestraintReportPdfSingle(2026, 3, 'D001', 'Driver A')
+      await downloadRestraintReportPdfSingle(2026, 3, 'D001', 'Driver A', RETRY_UNUSED)
 
       const url = mockFetch.mock.calls[0][0] as string
       expect(url).toBe('http://test/api/restraint-report/pdf?year=2026&month=3&driver_id=D001')
@@ -1615,7 +1664,7 @@ describe('api', () => {
       })
       setupDownloadMocks()
 
-      await downloadRestraintReportPdfSingle(2026, 1, 'D001', 'Test')
+      await downloadRestraintReportPdfSingle(2026, 1, 'D001', 'Test', RETRY_UNUSED)
 
       const headers = mockFetch.mock.calls[0][1].headers
       expect(headers['X-Tenant-ID']).toBe('tid-1')
@@ -1629,14 +1678,17 @@ describe('api', () => {
       })
       const { mockAnchor } = setupDownloadMocks()
 
-      await downloadRestraintReportPdfSingle(2026, 1, 'D001', 'DriverX')
+      await downloadRestraintReportPdfSingle(2026, 1, 'D001', 'DriverX', '「PDF」を押してください')
 
       expect(mockAnchor.download).toBe('拘束時間管理表_DriverX_2026年01月.pdf')
     })
 
     it('throws on non-ok response', async () => {
-      mockFetch.mockResolvedValue({ ok: false, status: 500 })
-      await expect(downloadRestraintReportPdfSingle(2026, 3, 'D001', 'Test')).rejects.toThrow('PDF生成に失敗: 500')
+      mockFetch.mockResolvedValue(failRes(500, { message: 'PDF エンジンが応答しません' }))
+      await expect(downloadRestraintReportPdfSingle(2026, 3, 'D001', 'Test', '「PDF」を押してください')).rejects.toThrow(
+        '500 PDF エンジンが応答しません — サーバ側の設定か障害です (権限の問題ではありません)。'
+        + '復旧してから「PDF」を押してください',
+      )
     })
 
     it('works without tenantIdGetter', async () => {
@@ -1649,7 +1701,7 @@ describe('api', () => {
       })
       setupDownloadMocks()
 
-      await downloadRestraintReportPdfSingle(2026, 3, 'D001', 'Test')
+      await downloadRestraintReportPdfSingle(2026, 3, 'D001', 'Test', RETRY_UNUSED)
 
       const headers = mockFetch.mock.calls[0][1].headers
       expect(headers).not.toHaveProperty('X-Tenant-ID')
@@ -1664,11 +1716,11 @@ describe('api', () => {
     })
 
     it.each([
-      ['recalculateStream', (cb: (e: unknown) => void) => recalculateStream(2026, 3, cb), 'done'],
-      ['recalculateDriverStream', (cb: (e: unknown) => void) => recalculateDriverStream(2026, 3, 'D001', cb), 'done'],
-      ['recalculateDriversBatch', (cb: (e: unknown) => void) => recalculateDriversBatch(2026, 3, ['D1'], cb), 'batch_done'],
-      ['splitCsvAllStream', (cb: (e: unknown) => void) => splitCsvAllStream(cb), 'done'],
-      ['downloadRestraintReportPdfStream', (cb: (e: unknown) => void) => downloadRestraintReportPdfStream(2026, 3, cb), 'progress'],
+      ['recalculateStream', (cb: (e: unknown) => void) => recalculateStream(2026, 3, cb, RETRY_UNUSED), 'done'],
+      ['recalculateDriverStream', (cb: (e: unknown) => void) => recalculateDriverStream(2026, 3, 'D001', cb, RETRY_UNUSED), 'done'],
+      ['recalculateDriversBatch', (cb: (e: unknown) => void) => recalculateDriversBatch(2026, 3, ['D1'], cb, RETRY_UNUSED), 'batch_done'],
+      ['splitCsvAllStream', (cb: (e: unknown) => void) => splitCsvAllStream(cb, RETRY_UNUSED), 'done'],
+      ['downloadRestraintReportPdfStream', (cb: (e: unknown) => void) => downloadRestraintReportPdfStream(2026, 3, cb, RETRY_UNUSED), 'progress'],
     ] as [string, (cb: (e: unknown) => void) => Promise<void>, string][])('%s works without tokenGetter', async (_name, fn, doneEvent) => {
       const events = [{ event: doneEvent, current: 1, total: 1 }]
       mockFetch.mockResolvedValue(mockStreamResponse(createSSEStream(events)))
@@ -1680,7 +1732,7 @@ describe('api', () => {
 
     it('recalculateStream omits X-Tenant-ID header', async () => {
       mockFetch.mockResolvedValue(mockStreamResponse(createSSEStream([{ event: 'done' }])))
-      await recalculateStream(2026, 3, () => {})
+      await recalculateStream(2026, 3, () => {}, RETRY_UNUSED)
       const headers = mockFetch.mock.calls[0][1].headers
       expect(headers).not.toHaveProperty('X-Tenant-ID')
     })
@@ -1694,7 +1746,7 @@ describe('api', () => {
       })
 
       const file = new File(['csv'], 'r.csv')
-      const result = await compareRestraintCsv(file)
+      const result = await compareRestraintCsv(file, '「再比較」を押してください')
       expect(result).toEqual([])
       const headers = mockFetch.mock.calls[0][1].headers
       expect(headers).not.toHaveProperty('X-Tenant-ID')
@@ -1708,7 +1760,7 @@ describe('api', () => {
       })
       setupDownloadMocks()
 
-      await downloadRestraintReportPdfSingle(2026, 3, 'D001', 'Test')
+      await downloadRestraintReportPdfSingle(2026, 3, 'D001', 'Test', RETRY_UNUSED)
       const headers = mockFetch.mock.calls[0][1].headers
       expect(headers).not.toHaveProperty('X-Tenant-ID')
     })

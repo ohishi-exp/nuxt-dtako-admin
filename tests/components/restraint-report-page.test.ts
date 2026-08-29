@@ -554,7 +554,7 @@ describe('/restraint-report 単一 PDF', () => {
     await button(w, 'PDF').trigger('click')
     await flushPromises()
 
-    expect(api.downloadRestraintReportPdfSingle).toHaveBeenCalledWith(2026, 7, 'd1', '山田 太郎')
+    expect(api.downloadRestraintReportPdfSingle).toHaveBeenCalledWith(2026, 7, 'd1', '山田 太郎', '「PDF」を押してください')
   })
 
   it('★ 表が出ていなくても、一覧の氏名で作らせる (氏名だけ空にしない)', async () => {
@@ -566,7 +566,7 @@ describe('/restraint-report 単一 PDF', () => {
     await button(w, 'PDF').trigger('click')
     await flushPromises()
 
-    expect(api.downloadRestraintReportPdfSingle).toHaveBeenCalledWith(2026, 7, 'd1', '山田 太郎')
+    expect(api.downloadRestraintReportPdfSingle).toHaveBeenCalledWith(2026, 7, 'd1', '山田 太郎', '「PDF」を押してください')
   })
 
   it('一覧にも居ないドライバーなら氏名は空で渡す (存在しない名前を作らない)', async () => {
@@ -578,7 +578,7 @@ describe('/restraint-report 単一 PDF', () => {
     await button(w, 'PDF').trigger('click')
     await flushPromises()
 
-    expect(api.downloadRestraintReportPdfSingle).toHaveBeenCalledWith(2026, 7, 'zzz', '')
+    expect(api.downloadRestraintReportPdfSingle).toHaveBeenCalledWith(2026, 7, 'zzz', '', '「PDF」を押してください')
   })
 
   it('失敗したら理由を出す', async () => {
