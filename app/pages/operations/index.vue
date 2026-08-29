@@ -174,7 +174,7 @@ async function splitAll() {
         gotDone = true
         splitResult.value = evt.message || '失敗'
       }
-    })
+    }, '「IVT一括分割」を押してください')
     // done も error も来ずにストリームが閉じた = 何が起きたか分からない。
     // 「処理中...」は**永久に動いているように読める**ので出さない。`scraper.vue` の
     // 同じ状況 (`splitCsvAllStream` の同じ関数) と同じく loud に出す (Refs #917)。

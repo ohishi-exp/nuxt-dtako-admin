@@ -550,7 +550,7 @@ async function handleSplitAll() {
       else if (evt.event === 'error') {
         splitAllLog.value.push({ text: `エラー: ${evt.message ?? '不明'}`, level: 'error' })
       }
-    })
+    }, '「未分割をまとめて分割」を押してください')
     if (splitAllLog.value.length === 0) {
       // done も error も来ずにストリームが閉じた = 何が起きたか分からない。
       // 「黙って成功」にすると未分割が残ったまま完了に見えるので loud に出す。

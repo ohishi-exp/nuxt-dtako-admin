@@ -32,7 +32,7 @@ async function runCompare() {
   error.value = ''
   results.value = []
   try {
-    results.value = await compareRestraintCsv(selectedFile.value)
+    results.value = await compareRestraintCsv(selectedFile.value, '「再比較」を押してください')
   } catch (e: any) {
     error.value = e.message || '比較に失敗しました'
   } finally {
@@ -125,7 +125,7 @@ async function recalcDiffsOnly() {
         batchFailed = true
         batchRecalcError.value = evt.message || '一括再計算に失敗しました'
       }
-    })
+    }, '「未知差分…名 再計算」を押してください')
   } catch (e: unknown) {
     if (!batchFailed) batchRecalcError.value = recalcStreamFailure(e, gotAnyEvent)
     batchFailed = true
@@ -186,7 +186,7 @@ async function recalcDriver(driverId: string, driverName: string, driverCd: stri
         recalcFailed = true
         recalcStates.value[key] = { loading: false, result: evt.message || '再計算に失敗しました', error: true }
       }
-    })
+    }, '行の「再計算」を押してください')
   } catch (e: unknown) {
     // **error イベントで受け取った理由の方が具体的**なので、既に持っていれば上書きしない。
     if (!recalcFailed) {
@@ -203,7 +203,7 @@ async function recalcDriver(driverId: string, driverName: string, driverCd: stri
   // 再計算完了 → 1件だけ再比較
   try {
     if (selectedFile.value) {
-      const updated = await compareRestraintCsv(selectedFile.value, driverCd)
+      const updated = await compareRestraintCsv(selectedFile.value, '「再比較」を押してください', driverCd)
       if (updated.length > 0) {
         const idx = results.value.findIndex((r: any) => r.driver_cd === driverCd)
         if (idx >= 0) {

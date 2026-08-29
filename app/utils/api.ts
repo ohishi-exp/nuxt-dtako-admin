@@ -15,7 +15,7 @@ import type {
   YTimeExportResponse,
 } from '~/types'
 import { createAuthFetch } from '@ippoan/auth-client'
-import { describeFetchThrow, pickBodyReason } from '~/utils/api-error'
+import { describeFetchThrow, describeResponseFailure, pickBodyReason } from '~/utils/api-error'
 import type { Net780ArchiveResult } from '~/utils/net780-archive'
 import { normalizeNetprintRunOutcome, type NetprintRunInput, type NetprintRunOutcome } from '~/utils/netprint-run'
 import type { NetprintTargetPayloadItem } from '~/utils/netprint-targets'
@@ -236,12 +236,12 @@ export async function getRestraintReport(filter: RestraintReportFilter): Promise
 
 // --- Restraint Report PDF ---
 
-export async function downloadRestraintReportPdfSingle(year: number, month: number, driverId: string, driverName: string): Promise<void> {
+export async function downloadRestraintReportPdfSingle(year: number, month: number, driverId: string, driverName: string, retry: string): Promise<void> {
   const token = getAccessToken?.()
   const headers: Record<string, string> = {}
   const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
   const res = await fetchOrDescribe(`${apiBase}/api/restraint-report/pdf?year=${year}&month=${month}&driver_id=${driverId}`, { headers })
-  if (!res.ok) throw new Error(`PDF生成に失敗: ${res.status}`)
+  if (!res.ok) throw new Error(await describeResponseFailure(res, retry))
   const blob = await res.blob()
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -265,6 +265,7 @@ export async function downloadRestraintReportPdfStream(
   year: number,
   month: number,
   onProgress: (evt: PdfProgressEvent) => void,
+  retry: string,
 ): Promise<void> {
   const url = `${apiBase}/api/restraint-report/pdf-stream?year=${year}&month=${month}`
 
@@ -290,7 +291,7 @@ export async function downloadRestraintReportPdfStream(
     }
   }
 
-  if (!res.ok) throw new Error(`PDF生成に失敗しました: ${res.status}`)
+  if (!res.ok) throw new Error(await describeResponseFailure(res, retry))
 
   const reader = res.body?.getReader()
   if (!reader) throw new Error('No response body')
@@ -357,6 +358,7 @@ export async function recalculateStream(
   year: number,
   month: number,
   onProgress: (evt: RecalcProgressEvent) => void,
+  retry: string,
 ): Promise<void> {
   const url = `${apiBase}/api/recalculate?year=${year}&month=${month}`
 
@@ -379,7 +381,7 @@ export async function recalculateStream(
     } catch { /* ignore */ }
   }
 
-  if (!res.ok) throw new Error(`再計算に失敗: ${res.status}`)
+  if (!res.ok) throw new Error(await describeResponseFailure(res, retry))
 
   const reader = res.body?.getReader()
   if (!reader) throw new Error('No response body')
@@ -407,7 +409,7 @@ export async function recalculateStream(
   }
 }
 
-export async function compareRestraintCsv(file: File, driverCd?: string): Promise<any[]> {
+export async function compareRestraintCsv(file: File, retry: string, driverCd?: string): Promise<any[]> {
   const formData = new FormData()
   formData.append('file', file)
   const token = getAccessToken?.()
@@ -419,7 +421,7 @@ export async function compareRestraintCsv(file: File, driverCd?: string): Promis
     headers,
     body: formData,
   })
-  if (!res.ok) throw new Error(`比較に失敗: ${res.status}`)
+  if (!res.ok) throw new Error(await describeResponseFailure(res, retry))
   return res.json()
 }
 
@@ -428,6 +430,7 @@ export async function recalculateDriverStream(
   month: number,
   driverId: string,
   onProgress: (evt: RecalcProgressEvent) => void,
+  retry: string,
 ): Promise<void> {
   const url = `${apiBase}/api/recalculate-driver?year=${year}&month=${month}&driver_id=${driverId}`
 
@@ -450,7 +453,7 @@ export async function recalculateDriverStream(
     } catch { /* ignore */ }
   }
 
-  if (!res.ok) throw new Error(`再計算に失敗: ${res.status}`)
+  if (!res.ok) throw new Error(await describeResponseFailure(res, retry))
 
   const reader = res.body?.getReader()
   if (!reader) throw new Error('No response body')
@@ -493,6 +496,7 @@ export async function recalculateDriversBatch(
   month: number,
   driverIds: string[],
   onProgress: (evt: BatchRecalcEvent) => void,
+  retry: string,
 ): Promise<void> {
   const url = `${apiBase}/api/recalculate-drivers`
 
@@ -519,7 +523,7 @@ export async function recalculateDriversBatch(
     } catch { /* ignore */ }
   }
 
-  if (!res.ok) throw new Error(`一括再計算に失敗: ${res.status}`)
+  if (!res.ok) throw new Error(await describeResponseFailure(res, retry))
 
   const reader = res.body?.getReader()
   if (!reader) throw new Error('No response body')
@@ -614,13 +618,14 @@ export async function getDtakoEventsEtags(
 
 export async function splitCsvAllStream(
   onProgress: (evt: any) => void,
+  retry: string,
 ): Promise<void> {
   const url = `${apiBase}/api/split-csv-all`
   const token = getAccessToken?.()
   const headers: Record<string, string> = {}
   const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
   const res = await fetchOrDescribe(url, { method: 'POST', headers })
-  if (!res.ok) throw new Error(`分割に失敗: ${res.status}`)
+  if (!res.ok) throw new Error(await describeResponseFailure(res, retry))
   const reader = res.body?.getReader()
   if (!reader) throw new Error('No response body')
   const decoder = new TextDecoder()

@@ -228,11 +228,14 @@ export function pickBodyReason(body: unknown): string | null {
  * (`res.statusText` に落とさない — **本番は reason phrase が空**なので区切り文字の
  * 後ろが空になる)。**理由の拾い順は `describeApiError` が正**で、ここは持たない。
  *
- * ## 同じ形の先行実装との関係
+ * ## 同じ形の先行実装は畳んである (Refs #1008)
  *
- * `app/pages/y-time-export.vue` の `describeApiFailure(res)` が本文を読む部分の
- * 先行実装 (Refs #890)。**あちらは「次の一手」を持たない**ので出力が違い、
- * この PR では寄せていない (#996-1 の担当範囲外 + 同ファイルを別タスクが編集中)。
+ * `app/pages/y-time-export.vue` に `describeApiFailure(res)` という**本文を読む部分が
+ * 同型の先行実装** (Refs #890) と、その中の `hasStringReason` の写しがあった。
+ * #996 の時点では「あちらは『次の一手』を持たないので出力が違う」ことを理由に据え置いて
+ * いたが、**出力が違うのは寄せられない理由ではなく、寄せたときに `retry` を渡す先が
+ * 3 か所あるというだけ**だった。#1008 で 3 か所とも実在するボタン表記を渡して撤去済み。
+ * **同じ拾い順の実装を 2 つ持たない** (CLAUDE.md の重複防止)。
  *
  * @param res  非 2xx の `Response` (**本文はまだ読んでいないこと**)
  * @param retry 画面ごとの「やり直し方」。**句点を付けずに**渡す (ここで文に組む)。
@@ -263,8 +266,15 @@ function hasStringReason(data: unknown): boolean {
   return pickBodyReason(data) !== null
 }
 
-/** status ごとの「次に何をすればいいか」。上の表が正。 */
-function nextStepForStatus(status: number, retry: string): string {
+/**
+ * status ごとの「次に何をすればいいか」。上の表が正。
+ *
+ * `describeResponseFailure` (= `Response` を持っている経路) 以外からも使う (Refs #1008)。
+ * `Response` を持たない経路 — `api.ts` の `request()` は `@ippoan/auth-client` が
+ * **素の `Error`** に組んで投げるので `Response` が残らない — は
+ * `describeApiError` で理由を作ってから、この関数で「次の一手」だけを足す。
+ */
+export function nextStepForStatus(status: number, retry: string): string {
   if (status === 401) {
     return `ログインが切れています。再ログインしてから${retry}`
       + ' (再ログインしても直らないときは認証サーバに繋がっていません。権限の問題ではありません)'

@@ -161,7 +161,7 @@ async function downloadPdf() {
       } else if (evt.event === 'error') {
         pdfError.value = evt.message || 'PDF出力に失敗しました'
       }
-    })
+    }, '「全員PDF」を押してください')
   } catch (e: unknown) {
     pdfError.value = e instanceof Error ? e.message : 'PDF出力に失敗しました'
   } finally {
@@ -177,7 +177,7 @@ async function downloadSinglePdf() {
   singlePdfLoading.value = true
   try {
     const [y = 0, m = 0] = selectedMonth.value.split('-').map(Number)
-    await downloadRestraintReportPdfSingle(y, m, selectedDriverId.value, driverName.value)
+    await downloadRestraintReportPdfSingle(y, m, selectedDriverId.value, driverName.value, '「PDF」を押してください')
   } catch (e: unknown) {
     pdfError.value = e instanceof Error ? e.message : 'PDF出力に失敗しました'
   } finally {
@@ -236,7 +236,7 @@ async function runRecalculate() {
         recalcResult.value = evt.message || '再計算に失敗しました'
         recalcError.value = evt.message || '再計算に失敗しました'
       }
-    })
+    }, '「全員再計算」を押してください')
     if (!gotDone) {
       recalcResult.value = 'バックグラウンドで処理中...完了までお待ちください'
     }
@@ -282,7 +282,7 @@ async function runDriverRecalculate() {
         recalcResult.value = evt.message || '再計算に失敗しました'
         recalcError.value = evt.message || '再計算に失敗しました'
       }
-    })
+    }, '「再計算」を押してください')
     if (gotDone && !recalcError.value) {
       await fetchReport()
     }

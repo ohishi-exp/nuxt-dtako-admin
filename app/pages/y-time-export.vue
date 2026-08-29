@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useAuth } from '@ippoan/auth-client'
 import { getDrivers, getYTimePreview, currentAccessToken } from '~/utils/api'
-import { describeApiError } from '~/utils/api-error'
+import { describeResponseFailure } from '~/utils/api-error'
 import type { Driver, YTimeExportResponse } from '~/types'
 
 const drivers = ref<Driver[]>([])
@@ -144,55 +144,16 @@ function onTemplateFileChange(e: Event) {
   templateFile.value = input.files && input.files[0] ? input.files[0] : null
 }
 
-/** `describeApiError` が理由として拾える文字列が本文にあるか。無いまま渡すと
- * `String(e)` に倒れて `[object Object]` が画面に出るので、先に判定して生本文を出す。 */
-function hasStringReason(data: unknown): boolean {
-  if (typeof data === 'string') return data !== ''
-  if (typeof data !== 'object' || data === null) return false
-  const d = data as Record<string, unknown>
-  return [d.error, d.message, d.statusMessage].some(v => typeof v === 'string')
-}
-
-/**
- * 非 2xx の `Response` から**人が読める理由**を作る (Refs #890)。
- *
- * **この画面の 3 つの口 (`R2 確認` / `テンプレ保存` / `xlsx ダウンロード`) で共用する。**
- * 直す前はそれぞれ
- *
- * ```
- * `${res.status} ${res.statusText}`                    ← 本文を一度も読んでいない
- * `${res.status}: ${text || res.statusText}`           ← 本文が空だと statusText に落ちる
- * `xlsx 生成失敗 (${res.status}): ${text || res.statusText}`   ← 同上
- * ```
- *
- * で、**本番は HTTP/3 で reason phrase が存在しない** (`statusText === ''`) ため
- * `✗ 確認エラー: 503 ` / `502: ` / `xlsx 生成失敗 (502): ` のように
- * **区切り文字の後ろが空**になっていた。理由が化けていたのではない —
- * これらは自前の server route なので、理由は本文
- * (`{ error: true, statusCode, statusMessage, message }`) の側に無傷で残っている。
- *
- * **「理由が無い」と「理由を読めなかった」を同じ見た目にしない。**本文が空 / JSON でない /
- * 文字列の理由を持たない、の 3 つは別々の文にし、生本文の先頭も添える。空文字で埋めると
- * 「サーバは何も言っていない」と誤読される。**区切り文字だけが残る形は作らない。**
- *
- * `$fetch` ではなく生 `fetch` なので、`describeApiError` に渡す `e` は ofetch の
- * `FetchError` と同じ形 (`{ statusCode, data }`) に自分で組む。**理由の拾い順は
- * `app/utils/api-error.ts` が正** — ここでは順序を持たない。
- */
-async function describeApiFailure(res: Response): Promise<string> {
-  const text = await res.text().catch(() => '')
-  if (text === '') return `${res.status} (応答本文が空でした)`
-  let data: unknown
-  try {
-    data = JSON.parse(text)
-  }
-  catch {
-    return `${res.status} (応答が JSON ではありません: ${text.slice(0, 120)})`
-  }
-  return hasStringReason(data)
-    ? describeApiError({ statusCode: res.status, data })
-    : `${res.status} (本文に理由の文字列がありません: ${text.slice(0, 120)})`
-}
+// 非 2xx の `Response` から人が読める 1 文を作る `describeApiFailure` は、この画面の
+// ローカル関数だった (Refs #890)。**`app/utils/api-error.ts` の `describeResponseFailure`
+// と本文の読み方が同型**で、`hasStringReason` の写しまで持っていたので #1008 で撤去した。
+//
+// **出力は変わる** — `describeResponseFailure` は理由の後ろに「次に何をすればいいか」を
+// 足す。理由は共通・やり直し方は画面ごとなので、`retry` にはこの画面に実在するボタンの
+// 表記 (`R2 確認` / `R2 に保存` / `ダウンロード`) を**原文ママ**で渡す。
+//
+// **`計算プレビュー` はここを通らない** — `getYTimePreview()` は `api.ts` の `request()`
+// 経由 (`@ippoan/auth-client` が素の `Error` に組んで投げる) で `Response` が残らない。
 
 /** R2 上のテンプレ存在確認 */
 async function checkTemplate() {
@@ -213,7 +174,7 @@ async function checkTemplate() {
     if (!res.ok) {
       templateStatus.value = {
         state: 'error',
-        message: await describeApiFailure(res),
+        message: await describeResponseFailure(res, '「R2 確認」を押してください'),
       }
       return
     }
@@ -267,7 +228,7 @@ async function uploadTemplate() {
     })
     // 本文が空だと `res.statusText` に落ち、本番 (HTTP/3) は `502: ` と
     // **コロンの後ろが空**になっていた (Refs #890)。`R2 確認` と同じ形に揃える。
-    if (!res.ok) throw new Error(await describeApiFailure(res))
+    if (!res.ok) throw new Error(await describeResponseFailure(res, '「R2 に保存」を押してください'))
     const json = await res.json() as { key: string; size: number }
     uploadStatus.value = `✓ R2 に保存: ${json.key} (${(json.size / 1024).toFixed(1)} KB)`
   } catch (e: unknown) {
@@ -357,7 +318,7 @@ async function downloadXlsx() {
 
     // 同上。`xlsx 生成失敗 (502): ` と括弧の後ろが空になるのを止める (Refs #890)。
     // **どの操作が落ちたか**は残したいので、ラベルは前置きのまま保つ。
-    if (!res.ok) throw new Error(`xlsx 生成失敗: ${await describeApiFailure(res)}`)
+    if (!res.ok) throw new Error(`xlsx 生成失敗: ${await describeResponseFailure(res, '「ダウンロード」を押してください')}`)
 
     const warnings = res.headers.get('x-y-time-warnings')
     if (warnings) {
