@@ -21,16 +21,26 @@ export interface TheearthSessionRecord {
   cookies: Array<[string, string]>;
   createdAt: number;
   expiresAt: number;
-  /** viewer 経路 (auth-worker JWT) で認可した時の role。`admin` はグループ全社を
-   * 見られる (Refs #367)。theearth ログイン由来のセッションでは undefined。
-   * DO storage に保存されるのは theearth セッションだけで、viewer は毎リクエスト
-   * 組み立てるため永続化されない。 */
+  /** viewer 経路 (auth-worker JWT) で認可した時の role。
+   * **★ 認可には使わない (Refs #1049)** — 全社許可は `viewerEmail` の allowlist
+   * だけで決めるようになったので、いまは記録用の値。theearth ログイン由来の
+   * セッションでは undefined。DO storage に保存されるのは theearth セッションだけで、
+   * viewer は毎リクエスト組み立てるため永続化されない。 */
   viewerRole?: string;
   /** viewer 経路で認可した時の JWT の email claim (Refs #554)。kintai 上流
    * キャッシュを人単位の DO に分ける鍵に使う (`kintai-cache-{sha256(email)}`)。
-   * **認可には使わない** — 会社スコープは従来どおり tenant 逆引き。
+   * **認可には使わない** — テナントを越えてよいかは `viewerOrgWide` が答える。
    * theearth ログイン由来のセッションでは undefined (= キャッシュを使わない)。 */
   viewerEmail?: string;
+  /** viewer 経路で認可した時の introspect 応答の `org_wide`
+   * (Refs #1049 / ippoan/auth-worker#497)。**テナント境界を越えて org 全体を
+   * 見てよい人か**で、正本は auth-worker の `USER_ACL`。`comp-map` の全社表示
+   * (`compIdsInSameTenant`) がこれを読む。
+   *
+   * theearth ログイン由来のセッションでは undefined。**DO storage に残っている
+   * #1049 以前の record にも入っていない** — どちらも `undefined` → false に
+   * 倒れる (`isAllCompsViewer` が真の boolean の `true` だけを通す)。 */
+  viewerOrgWide?: boolean;
 }
 
 export interface TheearthRouting {

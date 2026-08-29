@@ -3,6 +3,7 @@ import {
   allowedViewerComps,
   compIdsInSameTenant,
   devViewerCompIds,
+  isAllCompsViewer,
   isR2OnlyRestraintPath,
   viewerCompIdsForTenant,
 } from '../src/restraint-viewer-auth'
@@ -92,38 +93,93 @@ describe('compIdsInSameTenant', () => {
   })
 })
 
-describe('allowedViewerComps (admin は全社)', () => {
+/**
+ * 全社許可 (Refs #1049)。
+ *
+ * **★ ここは「権限を狭めた」ことを測る陰性対照**: 以前は `role === 'admin'` だけで
+ * 全社が開いていた。いまは **auth-worker の `USER_ACL` 由来の `org_wide`** だけで、
+ * **role は一切見ない**。この relay は allowlist の写しを持たない。
+ *
+ * **★ 受け取り側の fail-closed はこの repo の責任** — 値は上流 worker の JSON
+ * 応答から来るので、型注釈は実行時の保証にならない。古い auth-worker は
+ * キーごと返さない (additive な変更)。
+ */
+
+/** `org_wide` として届きうる「true ではないもの」。**全部 false に倒れること。**
+ * `"false"` は `Boolean("false") === true` なので truthy 判定では通ってしまう。 */
+const NOT_TRUE: unknown[] = [undefined, null, false, 'false', 'true', 0, 1, '', {}, []]
+
+describe('isAllCompsViewer (真の boolean の true だけを通す)', () => {
+  it('true (真の boolean) だけが全社許可', () => {
+    expect(isAllCompsViewer(true)).toBe(true)
+  })
+
+  it('★ 陰性対照: undefined / null / "false" / "true" / 0 / 1 / {} / [] は全部 false', () => {
+    for (const v of NOT_TRUE) {
+      expect(isAllCompsViewer(v), JSON.stringify(v) ?? 'undefined').toBe(false)
+    }
+  })
+
+  it('★ 陰性対照: 引数を渡さない (キーごと欠落 / 古い auth-worker) も false', () => {
+    expect(isAllCompsViewer(undefined)).toBe(false)
+  })
+
+  it('★ Boolean() で受けていたら通ってしまう値が、実際に落ちている', () => {
+    // 計測器の対照: この 2 つは truthy なので、`Boolean(x)` 実装なら true になる。
+    expect(Boolean('false')).toBe(true)
+    expect(Boolean(1)).toBe(true)
+    expect(isAllCompsViewer('false')).toBe(false)
+    expect(isAllCompsViewer(1)).toBe(false)
+  })
+})
+
+describe('allowedViewerComps (全社は org_wide だけ、Refs #1049)', () => {
   const accounts: DtakoAccountEntry[] = [
     { comp_id: '100', user_name: 'a', user_pass: 'x', tenant_id: 't-1' },
     { comp_id: '200', user_name: 'b', user_pass: 'x', tenant_id: 't-2' },
     { comp_id: '', user_name: 'c', user_pass: 'x', tenant_id: 't-2' },
   ]
 
-  it('admin は DTAKO_ACCOUNTS の全会社 (空 comp_id は除外)', () => {
-    expect([...allowedViewerComps(accounts, 't-1', 'admin')].sort()).toEqual(['100', '200'])
+  it('org_wide なら DTAKO_ACCOUNTS の全会社 (空 comp_id は除外)', () => {
+    expect([...allowedViewerComps(accounts, 't-1', true)].sort()).toEqual(['100', '200'])
   })
 
-  it('admin でも DTAKO_ACCOUNTS に無い会社は許可しない (ヘッダ偽装対策)', () => {
-    expect(allowedViewerComps(accounts, 't-1', 'admin').has('999')).toBe(false)
+  it('org_wide でも DTAKO_ACCOUNTS に無い会社は許可しない (ヘッダ偽装対策)', () => {
+    expect(allowedViewerComps(accounts, 't-1', true).has('999')).toBe(false)
   })
 
-  it('admin 以外は自 tenant の会社のみ', () => {
-    expect([...allowedViewerComps(accounts, 't-1', 'member')]).toEqual(['100'])
-    expect([...allowedViewerComps(accounts, 't-1', undefined)]).toEqual(['100'])
+  it('★ 陰性対照: org_wide が true でない値のときは、他社が 1 件も通らない', () => {
+    for (const v of NOT_TRUE) {
+      const got = allowedViewerComps(accounts, 't-1', v)
+      expect([...got], JSON.stringify(v) ?? 'undefined').toEqual(['100'])
+      expect(got.has('200'), JSON.stringify(v) ?? 'undefined').toBe(false)
+    }
+  })
+
+  it('org_wide でも tenant が未知なら自 tenant 側は空 (fail-closed は従来どおり)', () => {
+    expect(allowedViewerComps(accounts, 't-9', undefined).size).toBe(0)
   })
 })
 
-describe('compIdsInSameTenant (role つき)', () => {
+describe('compIdsInSameTenant (2 か所目の全社許可、Refs #1049)', () => {
   const accounts: DtakoAccountEntry[] = [
     { comp_id: '100', user_name: 'a', user_pass: 'x', tenant_id: 't-1' },
     { comp_id: '200', user_name: 'b', user_pass: 'x', tenant_id: 't-2' },
   ]
 
-  it('admin は会社対応表も全社ぶん見られる', () => {
-    expect([...compIdsInSameTenant(accounts, '100', 'admin')].sort()).toEqual(['100', '200'])
+  it('org_wide なら会社対応表も全社ぶん見られる', () => {
+    expect([...compIdsInSameTenant(accounts, '100', true)].sort()).toEqual(['100', '200'])
   })
 
-  it('admin 以外は自 tenant のみ (従来どおり)', () => {
-    expect([...compIdsInSameTenant(accounts, '100', 'member')]).toEqual(['100'])
+  it('★ 陰性対照: org_wide が true でない値のときは自 tenant のみ', () => {
+    for (const v of NOT_TRUE) {
+      expect([...compIdsInSameTenant(accounts, '100', v)], JSON.stringify(v) ?? 'undefined').toEqual([
+        '100',
+      ])
+    }
+  })
+
+  it('★ 陰性対照: 引数を省いた呼び方 (#1049 以前の古い record) も自 tenant のみ', () => {
+    expect([...compIdsInSameTenant(accounts, '100')]).toEqual(['100'])
   })
 })

@@ -30,16 +30,23 @@
  *
  * | 金額 | 経路 | 認可 |
  * | --- | --- | --- |
- * | 給与大臣の**実支給額** (支給項目) | `/api/kyuyo/payroll` | **email allowlist** (上流) |
+ * | 給与大臣の**実支給額** (支給項目) | `/api/kyuyo/payroll` | **給与 allowlist** (上流) |
  * | **単価マスタ × 拘束時間 の計算賃金** — 月次集計 CSV の `単価`/`…(円)`/`合計(円)`/`総支給時給(割増込)`、最低賃金チェック、タイムカードの残業額 | `/restraint-api/wage-report`・`/restraint-api/wage-master` (計算は `restraint-wage.ts`) | **tenant** (この関数) |
- * | **確定値スナップショット** (期間集計タブの `paid` / 差) | `/restraint-api/wage-snapshot`・`/restraint-api/wage-range` | **tenant (この関数) AND email allowlist** (Refs #951) |
+ * | **確定値スナップショット** (期間集計タブの `paid` / 差) | `/restraint-api/wage-snapshot`・`/restraint-api/wage-range` | **tenant (この関数) AND 給与 allowlist** (Refs #951) |
  *
- * email allowlist の実体は**上流にしか無い** — rust-ichibanboshi の
- * `kyuyo::introspect::authorize()` (`#82`) が auth-worker introspect の `email` を
- * オンプレ設定 (`KYUYO_ALLOWED_EMAILS`) と突き合わせる。**この repo は allowlist を
+ * **どちらの allowlist も、この repo には無い** — 給与 allowlist は上流
+ * rust-ichibanboshi、全社閲覧 allowlist は auth-worker。**別物**で効き先も違う
+ * (下の「email allowlist は 2 つある」)。
+ *
+ * **給与 allowlist** の実体は rust-ichibanboshi の `kyuyo::introspect::authorize()`
+ * (`#82`) で、auth-worker introspect の `email` をオンプレ設定
+ * (`KYUYO_ALLOWED_EMAILS`) と突き合わせる。**この repo は給与 allowlist の写しを
  * 持っていない**し、持たせると二重管理になる (片方だけ更新されて食い違う)。
- * 3 段目もこの正を**聞きに行く**だけで、写しは持たない
- * (`kintai-relay.ts` の `checkKyuyoAccess`)。
+ * 3 段目もこの正を**聞きに行く**だけ (`kintai-relay.ts` の `checkKyuyoAccess`)。
+ *
+ * **全社閲覧 allowlist** の実体は **auth-worker の `USER_ACL`** (Refs #1049)。
+ * この relay は写しを持たず、**`/auth/introspect` の応答 `org_wide` (boolean) を
+ * 聞きに行くだけ**。給与 allowlist と同じ「正本は 1 つ、写しは持たない」形。
  *
  * **なぜ 2 段目が tenant のままか**: あれは給与大臣の実データではなく、**この repo が
  * 持つ単価マスタから計算した労務管理値**で、最低賃金チェックはテナント内の総務が回す
@@ -49,10 +56,10 @@
  * ⇒ **残っているのは「寄せるかどうか」の判断だけで、実装の障壁ではない** (#556)。
  *
  * **★ 3 段目 (確定値スナップショット) は上の論拠が当てはまらない**ので、
- * **#951 で email 側へ寄せた (決着済み)。**`paid` は給与明細由来の**実支給額**で、
+ * **#951 で給与 allowlist 側へ寄せた (決着済み)。**`paid` は給与明細由来の**実支給額**で、
  * この repo が計算した値ではない。#951 以前は tenant 単位だけだったため、
- * **allowlist に載っている 1 名が保存した瞬間に、実支給額が tenant 全員の読める
- * 場所へ移っていた** —「漏れ」ではなく**「洗浄」**。
+ * **給与 allowlist に載っている 1 名が保存した瞬間に、実支給額が tenant 全員の
+ * 読める場所へ移っていた** —「漏れ」ではなく**「洗浄」**。
  *
  * いまは `handleWageRange` / `handleWageSnapshotPut` が、この関数の tenant 判定を
  * 通した**後**に `checkKyuyoAccess` (上流 `GET /api/kyuyo/access`) を AND する。
@@ -60,25 +67,65 @@
  *
  * **★ ブラウザ JWT を転送する経路は `deps.onprem()`** (`kintai-relay.ts` に理由の表)。
  * wage-* 本体が `deps.gcp()` なのに合わせて `gcp()` へ揃えると、GCP 側には
- * allowlist が無いので**全員 503** になる。
+ * 給与 allowlist が無いので**全員 503** になる。
  *
  * **2 段目 (単価マスタ × 拘束時間の計算賃金) は tenant のまま**で、これは**据え置き**
  * (#951 の対象外)。上の「なぜ 2 段目が tenant のままか」の論拠がそのまま生きている。
  *
- * ## ★ role (`VIEWER_ADMIN_ROLE`) と email allowlist は**優先関係ではない**
+ * ## ★ email allowlist は **2 つある** — 混同しない (Refs #1049)
+ *
+ * #1049 より前は「email allowlist」といえば上流の給与 allowlist 1 つだけだった。
+ * いまは 2 つあり、**名前も置き場も効き先も違う**:
+ *
+ * | 呼び名 | 実体 | 決めること |
+ * | --- | --- | --- |
+ * | **給与 allowlist** | **上流** rust-ichibanboshi の `KYUYO_ALLOWED_EMAILS` (`kyuyo::introspect::authorize()`) | 給与大臣の**実支給額**を見てよいか |
+ * | **全社閲覧 allowlist** | **auth-worker** の `USER_ACL` → introspect の `org_wide` (`isAllCompsViewer`) | **どの会社**を見てよいか |
+ *
+ * **無冠で「email allowlist」と書かないこと** — どちらの話か読み手が決められない。
+ *
+ * ## ★ 「金額の軸」と「会社の軸」は**直交していて AND で効く**
+ *
+ * - **給与 allowlist** = 給与大臣の実支給額を**見てよいか**
+ * - **tenant + 全社閲覧 allowlist** (この関数) = **どの会社**を見てよいか
+ *
+ * どちらかがもう一方を上書きすることは無い。
  *
  * 上流の `authorize()` は **`role` を一切見ない** (`src/kyuyo/introspect.rs` 実読、
- * 2026-08-26)。したがって **`role === 'admin'` でも allowlist に居なければ 403** で、
- * これは決めごとではなく**既に本番がそうなっている**。
+ * 2026-08-26)。したがって **`role === 'admin'` でも給与 allowlist に居なければ 403**
+ * で、これは決めごとではなく**既に本番がそうなっている**。
  *
- * 2 つは**直交した別の軸**で、AND で効く:
+ * **admin に給与 allowlist を無視させる (fail-open) 案は却下**されている
+ * (2026-08-26) — 上流の変更が要るうえ、「管理者だから全部見える」は給与を email
+ * 単位に絞った方針そのものを崩す。**#1049 で会社の軸からも role を外したので、
+ * この方針の論拠は 1 つ増えた** — いまは**どちらの軸も「role で特別扱いしない」で
+ * 揃っている**。
  *
- * - **email allowlist** = 給与大臣の実支給額を**見てよいか**
- * - **role / tenant** (この関数) = **どの会社**を見てよいか
+ * ## ★ 会社の軸が role を見るのをやめた理由 (Refs #1049)
  *
- * どちらかがもう一方を上書きすることは無い。**admin に allowlist を無視させる
- * (fail-open) 案は却下**されている (2026-08-26) — 上流の変更が要るうえ、
- * 「管理者だから全部見える」は給与を email 単位に絞った方針そのものを崩す。
+ * 以前は「role が `admin` なら DTAKO_ACCOUNTS の全会社」だった。根拠は
+ * **「dtako の admin はグループ全体の管理者 1 人だけで、別テナント側に admin を
+ * 増やす予定は無い」** (2026-07-25 ユーザー確認)。**その前提が崩れた** (管理者ロールの
+ * アカウントが複数になった) ため、旧 doc 自身が指定していた「全社を許可する
+ * allowlist に切り替えること」という条件に入った。
+ *
+ * ⇒ いまは **introspect の `org_wide` (= auth-worker の `USER_ACL`) だけ**で決める。
+ * **role との AND にもしない** — 2 条件にすると role が変わったときに**黙って権限が
+ * 消える**という分かりにくい失敗が増える。「誰が全社を見てよいか」は 1 か所で決める。
+ * ⇒ **`role` は全社許可の判定に一度も現れない** (`allowedViewerComps` /
+ * `compIdsInSameTenant` のどちらも引数に取らない)。
+ *
+ * ## ★ なぜ relay 側に allowlist を置かないか (Refs #1049、2 度目の再発明)
+ *
+ * **「テナントを越えてよい人」の正本は auth-worker の `USER_ACL` に既にある。**
+ * relay に写しを作ると**二重管理**になり、片方だけ更新されて食い違う。
+ * この案件では **#1004 と #1049 の 2 回**「この repo に allowlist を新設する」案が
+ * 出た — **dtako の 3 repo に `USER_ACL` の言及が 0 件**で、知識が auth-worker に
+ * しか無いため**構造的に見えない**のが機序 (`nuxt-dtako-admin-map` skill に明記した)。
+ *
+ * **★ `org_wide` を受け取る側の fail-closed はこちらの責任**。古い auth-worker は
+ * このキーを返さない (additive な変更) ので、**`undefined` は false**。型崩れ
+ * (`"false"` / `1` / `null`) も false に倒す — `isAllCompsViewer` の doc 参照。
  */
 import type { DtakoAccountEntry } from "./cron";
 
@@ -124,39 +171,69 @@ export function devViewerCompIds(raw: string): Set<string> {
   );
 }
 
-/** 全会社を見られる role。auth-worker の introspect が JWT の `role` claim を
- * そのまま返す (`{active, tenant_id, role, email, sub, exp}`)。
+/** DTAKO_ACCOUNTS に載っている comp_id すべて (空 comp_id は除外)。
+ * 載っていない comp は含めない — ヘッダ偽装で未登録の会社を触らせない。 */
+function allRegisteredCompIds(accounts: DtakoAccountEntry[]): Set<string> {
+  const out = new Set<string>();
+  for (const a of accounts) {
+    if (a.comp_id) out.add(a.comp_id);
+  }
+  return out;
+}
+
+/** この viewer が全社を見てよいか (**全社閲覧 allowlist**)。
  *
- * dtako の admin はグループ全体の管理者 1 人だけで、別テナント側に admin を
- * 増やす予定は無い (2026-07-25 ユーザー確認) ため、role だけで全社許可にする。
- * これが変わる時は「全社を許可する tenant_id の allowlist」に切り替えること。 */
-export const VIEWER_ADMIN_ROLE = "admin";
+ * 判定の正本は **auth-worker の `USER_ACL`** で、この relay は
+ * `/auth/introspect` の応答 `org_wide` を渡されるだけ (写しを持たない、
+ * Refs #1049)。**role は見ない** — 理由は module docs の
+ * 「会社の軸が role を見るのをやめた理由」。
+ *
+ * **★ 引数を `unknown` で受けて `=== true` だけを通すのは意図的**。値は
+ * **上流 worker の JSON 応答**から来るので、型注釈は実行時の保証にならない:
+ *
+ * - **`undefined`** — 古い auth-worker はこのキーを返さない (additive な変更)。
+ *   **応答欠落・キー欠落も同じ**
+ * - **`null` / 数値 / オブジェクト** — 型崩れ
+ * - **文字列 `"false"`** — ★ `Boolean("false")` は `true`。truthy 判定では
+ *   通ってしまうので `=== true` で弾く
+ *
+ * ⇒ **真の boolean の `true` だけが全社許可**。それ以外は全部 false
+ * (fail-closed = 自 tenant の会社のみ)。 */
+export function isAllCompsViewer(orgWide: unknown): boolean {
+  return orgWide === true;
+}
 
 /** viewer 経路で触れる comp_id 集合。
- * admin は **DTAKO_ACCOUNTS に載っている会社すべて** (載っていない comp は不可 —
- * ヘッダ偽装で未登録の会社を触らせない)、それ以外は自 tenant の会社のみ。 */
+ * introspect の `org_wide` が `true` の viewer は **DTAKO_ACCOUNTS に載っている
+ * 会社すべて** (載っていない comp は不可 — ヘッダ偽装で未登録の会社を触らせない)、
+ * それ以外は自 tenant の会社のみ (Refs #1049)。 */
 export function allowedViewerComps(
   accounts: DtakoAccountEntry[],
   tenantId: string,
-  role: string | undefined,
+  orgWide: unknown,
 ): Set<string> {
-  if (role === VIEWER_ADMIN_ROLE) {
-    return new Set(accounts.map((a) => a.comp_id).filter((c): c is string => !!c));
+  if (isAllCompsViewer(orgWide)) {
+    return allRegisteredCompIds(accounts);
   }
   return viewerCompIdsForTenant(accounts, tenantId);
 }
 
 /** `compId` と同じ tenant に属する comp_id 集合 (自分自身を含む)。
  * 社員マスタの会社横断表示・会社対応表 (comp-map) を「同じテナントの会社だけ」に
- * 絞るために使う (Refs #367)。DTAKO_ACCOUNTS に無い comp は空集合 (fail-closed)。 */
+ * 絞るために使う (Refs #367)。DTAKO_ACCOUNTS に無い comp は空集合 (fail-closed)。
+ * introspect の `org_wide` が `true` の viewer だけが全社ぶんを見られる
+ * (Refs #1049 — ここも `allowedViewerComps` と同じ全社許可を持っているので、
+ * 片方だけ絞ると素通りする)。**DO の record 経由**なので、古いセッション record に
+ * `viewerOrgWide` が入っていない場合も `undefined` → false に倒れる。 */
 export function compIdsInSameTenant(
   accounts: DtakoAccountEntry[],
   compId: string,
-  role?: string,
+  orgWide?: unknown,
 ): Set<string> {
-  if (role === VIEWER_ADMIN_ROLE) {
-    return new Set(accounts.map((a) => a.comp_id).filter((c): c is string => !!c));
+  if (isAllCompsViewer(orgWide)) {
+    return allRegisteredCompIds(accounts);
   }
-  const tenantId = accounts.find((a) => a.comp_id === compId)?.tenant_id ?? "";
+  const found = accounts.find((a) => a.comp_id === compId);
+  const tenantId = found ? found.tenant_id : "";
   return viewerCompIdsForTenant(accounts, tenantId);
 }

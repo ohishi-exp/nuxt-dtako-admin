@@ -806,6 +806,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         role: typeof data.role === "string" ? data.role : undefined,
         // kintai 上流キャッシュの DO 鍵 (Refs #554)。認可には使わない
         email: typeof data.email === "string" ? data.email : undefined,
+        // テナントを越えてよい人か (Refs #1049)。**真の boolean 以外は undefined**
+        // — 古い auth-worker はキーごと返さず、型崩れ ("false" / 1 / null) も
+        // ここで落とす。受け側 (isAllCompsViewer) でも二重に倒している。
+        org_wide: typeof data.org_wide === "boolean" ? data.org_wide : undefined,
       };
     } catch {
       return { active: false };
@@ -3912,9 +3916,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     routing: TheearthRouting,
     url: URL,
   ): Promise<TheearthSessionRecord | null> {
-    const viewerRecord = (role?: string, email?: string): TheearthSessionRecord => ({
+    const viewerRecord = (
+      role?: string,
+      email?: string,
+      orgWide?: boolean,
+    ): TheearthSessionRecord => ({
       viewerRole: role,
       viewerEmail: email,
+      viewerOrgWide: orgWide,
       token: token ?? "viewer",
       compId: routing.compId,
       userName: routing.userName,
@@ -3926,6 +3935,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // nuxt dev は stagingTenantId バイパスで auth セッションを持たないため、
     // JWT 無しでも許可する (token 必須チェックより先に判定)。
     if (this.env.RESTRAINT_DEV_VIEWER_COMP) {
+      // 全社許可は与えない (第 3 引数を省く) — dev で触れる会社は
+      // RESTRAINT_DEV_VIEWER_COMP が明示した comp だけ、が短絡の意図。
       return devViewerCompIds(this.env.RESTRAINT_DEV_VIEWER_COMP).has(routing.compId)
         ? viewerRecord(undefined, this.env.RESTRAINT_DEV_VIEWER_EMAIL)
         : null;
@@ -3939,10 +3950,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch {
       return null; // DTAKO_ACCOUNTS 不正は fail-closed (viewer 経路のみ閉じる)
     }
-    // admin は DTAKO_ACCOUNTS に載っている全会社を見られる (グループ管理者、
-    // Refs #367)。それ以外は従来どおり自 tenant の会社のみ。
-    return allowedViewerComps(accounts, result.tenant_id, result.role).has(routing.compId)
-      ? viewerRecord(result.role, result.email)
+    // 全社を見られるのは introspect の org_wide が true の viewer だけ
+    // (= auth-worker の USER_ACL、Refs #1049)。それ以外は自 tenant の会社のみ。
+    // **role は見ない** — 理由は restraint-viewer-auth.ts の module docs
+    // 「会社の軸が role を見るのをやめた理由」。org_wide 欠落・型崩れは
+    // fail-closed (isAllCompsViewer が真の boolean の true だけを通す)。
+    return allowedViewerComps(accounts, result.tenant_id, result.org_wide).has(routing.compId)
+      ? viewerRecord(result.role, result.email, result.org_wide)
       : null;
   }
 
@@ -4667,14 +4681,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   /** GET /restraint-api/comp-map — dtako 会社ID ↔ 給与大臣の会社コード対応
    * (migration 0008)。**同じ tenant の会社だけ**返す — 会社名・会社IDを別テナントに
    * 見せない (Refs #367)。DTAKO_ACCOUNTS 未設定・自 comp が未登録なら空配列
-   * (fail-closed)。 */
+   * (fail-closed)。全社ぶんを返すのは introspect の `org_wide` が true の viewer
+   * だけ (= auth-worker の `USER_ACL`、Refs #1049 — role は見ない)。 */
   private async handleCompMap(record: TheearthSessionRecord): Promise<Response> {
     const db = this.env.DTAKO_DB;
     if (!db) return dvrJsonError(503, "会社対応表 (DTAKO_DB) が未設定です");
     let allowed = new Set<string>([record.compId]);
     try {
       const accounts = parseDtakoAccounts((await this.dtakoAccountsRaw()) || undefined);
-      const sameTenant = compIdsInSameTenant(accounts, record.compId, record.viewerRole);
+      const sameTenant = compIdsInSameTenant(accounts, record.compId, record.viewerOrgWide);
       if (sameTenant.size > 0) allowed = sameTenant;
     } catch {
       // DTAKO_ACCOUNTS 不正時は自 comp のみ (fail-closed)

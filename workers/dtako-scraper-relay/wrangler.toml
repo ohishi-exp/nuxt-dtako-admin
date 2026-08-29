@@ -194,6 +194,11 @@ UPSTREAM_CACHE = "on"
 #                         なので送っていない」を console.error に出す
 #                         (status: "scrape_alert_not_sent"、Tail Worker で読む)。
 
+# 「全社 (DTAKO_ACCOUNTS の全会社) を見てよい人」の設定は**ここには無い**
+# (Refs #1049)。正本は **auth-worker の `USER_ACL`** で、relay は
+# `/auth/introspect` の応答 `org_wide` を聞きに行くだけ — 写しを持たない
+# (二重管理の回避)。**この relay に allowlist を新設しないこと。**
+
 [env.staging]
 name = "nuxt-dtako-admin-scraper-relay-staging"
 # staging も同様に公開ルートを閉じ、app (service binding) 経由のみにする。
