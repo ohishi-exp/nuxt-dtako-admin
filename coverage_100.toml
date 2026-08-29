@@ -402,22 +402,56 @@ branches = true
 # `describeApiError` 1 関数だけ**の BR() 値で、その後 #963 が 5 site
 # (`!fallback && err.statusCode` の 3 / `err.message ?? ''` / `if (synthetic)`)、
 # #996 が 3 関数 10 site を足した後の**ファイル全体を指していなかった** (13+5=18)。
-# 下は **`origin/main` 3575c7604a (v0.0.640) + この PR (#1006)** のファイル全体を
-# 2026-08-28 に測り直した値。**#1006 で `describeFetchThrow` が 1 site 増えている**
-# (前回 = #1021 が `origin/main` 29bb7f5 で測った値を括弧に併記)。
+# 下は **`origin/main` c3fac8ee5d68 + この PR (#1050)** のファイル全体を 2026-08-29 に
+# 測り直した値。**#1050 で `pickBodyReason` が 6 site 増え、`hasStringReason` は
+# そこへ委譲して 4 site → 0 site になった** (差引 +2)。
+# (前回 = #1006 が `origin/main` 3575c7604a で測った値を括弧に併記。
+# その前の #1021 は `origin/main` 29bb7f5 で BR() 30 — 両側 29。)
 #
-# | 指標 | 対象 | 値 (3575c7604a + #1006 / 2026-08-28 実測) | 前 (29bb7f5) |
+# | 指標 | 対象 | 値 (c3fac8ee5d68 + #1050 / 2026-08-29 実測) | 前 (3575c7604a + #1006) |
 # | --- | --- | --- | --- |
-# | v8 statements | ファイル全体 | 48 / 48 | 45 / 45 |
-# | v8 branch site | ファイル全体 | 23 | 22 |
-# | v8 branch arm | ファイル全体 | 47 / 47 (**死に分岐 0**) | 45 / 45 |
-# | v8 funcs | ファイル全体 | 9 / 9 | 8 / 8 |
-# | **BR() branch site** | **ファイル全体** | **30 — 両側 29 / 片側のみ 1 / 未到達 0** | 29 — 両側 28 |
+# | v8 statements | ファイル全体 | 50 / 50 | 48 / 48 |
+# | v8 branch site | ファイル全体 | 25 | 23 |
+# | v8 branch arm | ファイル全体 | 51 / 51 (**死に分岐 0**) | 47 / 47 |
+# | v8 funcs | ファイル全体 | 10 / 10 | 9 / 9 |
+# | **BR() branch site** | **ファイル全体** | **32 — 両側 31 / 片側のみ 1 / 未到達 0** | 30 — 両側 29 |
 # | BR() branch site | `describeApiError` | 18 — 両側 17 | 18 — 両側 17 |
+# | BR() branch site | **`pickBodyReason`** | **6 — 両側 6** | — (この PR で追加) |
 # | BR() branch site | `responseReason` | 2 — 両側 2 | 2 — 両側 2 |
-# | BR() branch site | `hasStringReason` | 4 — 両側 4 | 4 — 両側 4 |
+# | BR() branch site | `hasStringReason` | **0 (`pickBodyReason` へ委譲)** | 4 — 両側 4 |
 # | BR() branch site | `nextStepForStatus` | 5 — 両側 5 | 5 — 両側 5 |
-# | BR() branch site | `describeFetchThrow` | **1 — 両側 1** | — (この PR で追加) |
+# | BR() branch site | `describeFetchThrow` | 1 — 両側 1 | 1 — 両側 1 |
+#
+# ## `pickBodyReason` を足した理由と、`hasStringReason` を委譲にした理由 (Refs #1050)
+#
+# front の 4 経路 (`api.ts` の `postNet780Archive` / `readNetprintTargetsResponse`、
+# `netprint-run.ts` の `normalizeNetprintRunOutcome`、`kyuyo-fetch.vue` の
+# `refreshList` / `fetchRange`) が **`statusMessage` を先に読んでいて**、server route が
+# ASCII を `statusMessage`・日本語を `message` に置く形だと**画面に ASCII だけが
+# 出ていた**。**server 側では直せない** (`statusMessage` に日本語を入れると本番
+# workerd で reason phrase が壊れる。#1032 / #886)。
+#
+# **順序の正本は `describeApiError`。** 切り出した `pickBodyReason` が 2 つ目の正本に
+# ならないよう、`tests/utils/api-error.test.ts` の
+# `describeApiError と同じ順序で拾う (二重管理の見張り)` が同じ本文を両方に当てて
+# 一致を固定している。`hasStringReason` は
+# `[d.error, d.message, d.statusMessage].some(…)` の**3 つ目の写し**だったので
+# `pickBodyReason(data) !== null` へ委譲した (戻り値は全入力で同値)。
+#
+# **`pickBodyReason` の 6 site の担保は 1 本ではない** (#1050 で実測)。
+# `describe('pickBodyReason')` を**丸ごと `describe.skip` にしても 32 / 両側 31 のまま
+# 動かない** — 4 経路のテストと `describeResponseFailure` 経由 (`hasStringReason`) が
+# 同じ枝を通すため。`146:7` (`typeof body === 'string'`) と `146:40` (`body === ''`) の
+# **真の側**を通す担保は **2 本**:
+#
+# - `tests/utils/api-error.test.ts` — `pickBodyReason … 本文が文字列ならそれ自体が理由`
+# - `tests/utils/api-error.test.ts` — `本文が JSON の文字列 / 数値 / null でも撃ち分ける`
+#   (`describeResponseFailure` に JSON の空文字列 `""` を食わせる枝が
+#   `hasStringReason('')` → `pickBodyReason('')` を通す)
+#
+# **両方**を skip して初めて **32 → 31 site / 両側 31 → 28 / 片側 1 → 3**
+# (`146:40` は到達しなくなって site ごと消える)。**1 本外して「動かない = 計測器が
+# 壊れている」と読まないこと。**
 #
 # **計測器の probe を 2 段で先に通してある** (#1021):
 # ① 片側だけ通る `if` が `[true]` / 両側通る `if` が `[false,true]` になる、
@@ -425,7 +459,7 @@ branches = true
 # — **計測器が値を壊していない**。②を通さないと `BRV` / `BRN` の差 (`0` や `''` の扱い)
 # に気づけない。
 #
-# BR() が v8 より多い (30 > 23) のは、`&&` / `||` を**左右の項に分けて**数えるため
+# BR() が v8 より多い (32 > 25) のは、`&&` / `||` を**左右の項に分けて**数えるため
 # (v8 は 1 site に畳む)。**v8 の branches 100% は短絡で片側を見逃す**ので、
 # 「v8 が緑だから両側」とは読まないこと。
 #

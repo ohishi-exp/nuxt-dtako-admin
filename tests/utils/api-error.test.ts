@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 
-import { describeApiError, describeFetchThrow, describeResponseFailure } from '~/utils/api-error'
+import { describeApiError, describeFetchThrow, describeResponseFailure, pickBodyReason } from '~/utils/api-error'
 import { marginSummarySaveNote } from '~/utils/margin-r2'
 
 describe('describeApiError', () => {
@@ -429,5 +429,92 @@ describe('describeFetchThrow — fetch 自体が throw したとき (Refs #1006)
     expect(describeFetchThrow({ statusCode: 401 })).toBeNull()
     expect(describeFetchThrow(null)).toBeNull()
     expect(describeFetchThrow('Failed to fetch')).toBeNull()
+  })
+})
+
+/**
+ * `pickBodyReason` — **parse 済みの本文から理由の 1 文を拾う** (Refs #1050)。
+ *
+ * `describeApiError` が `err.data` に対してやっている選び方だけを切り出したもの。
+ * ここで固定するのは **順序が `[error, message, statusMessage]` であること**と、
+ * **`statusMessage` しか無い応答が今までどおり出ること** (陽性対照) の 2 つ。
+ *
+ * 直す前の front 4 経路は `statusMessage` を先に読んでいたので、server route が
+ * ASCII を `statusMessage`・日本語を `message` に置く形 (**`statusMessage` に日本語を
+ * 入れると本番 workerd で reason phrase が壊れるので、server 側では直せない**。
+ * #1032 / #886) だと**画面に ASCII だけが出ていた**。
+ */
+describe('pickBodyReason (Refs #1050)', () => {
+  /** `requireRole` 系の 403 の実物の形 — ASCII が `statusMessage`、日本語が `message`。 */
+  const FORBIDDEN_BODY = {
+    error: true,
+    url: '/api/kyuyo-master/refresh',
+    statusCode: 403,
+    statusMessage: 'requires one of roles: kyuyo, admin',
+    message: 'この操作には kyuyo または admin の権限が必要です',
+  }
+
+  it('日本語の message を ASCII の statusMessage より先に拾う', () => {
+    expect(pickBodyReason(FORBIDDEN_BODY)).toBe('この操作には kyuyo または admin の権限が必要です')
+  })
+
+  /** **陰性対照** — 直す前の順序 (`statusMessage` 先) で出ていた ASCII が 1 文字も出ない。 */
+  it('ASCII の statusMessage は出ない (陰性対照)', () => {
+    expect(pickBodyReason(FORBIDDEN_BODY)).not.toContain('requires one of roles')
+  })
+
+  /**
+   * ★★ **陽性対照** — `statusMessage` しか無い応答は**これまでどおり `statusMessage`**。
+   * 「日本語を出す」直しで**英文しか無いときに理由がゼロになる**と、直す前より悪い。
+   * `requireAuth` (`@ippoan/auth-client`) の 401 は `statusMessage: 'Unauthorized'` 固定で
+   * **日本語の理由が最初から存在しない**ので、この道は実際に通る。
+   */
+  it('statusMessage しか無ければ statusMessage を出す (陽性対照)', () => {
+    expect(pickBodyReason({ statusCode: 401, statusMessage: 'Unauthorized' })).toBe('Unauthorized')
+    expect(pickBodyReason({ error: true, statusCode: 503, statusMessage: 'R2 binding (DTAKO_R2) not available' }))
+      .toBe('R2 binding (DTAKO_R2) not available')
+  })
+
+  /** upstream proxy が passthrough する `{ error: '…' }` (文字列) は先頭で拾う。 */
+  it('error が文字列なら message より先に拾う', () => {
+    expect(pickBodyReason({ error: 'upstream が落ちています', message: 'Service Unavailable' }))
+      .toBe('upstream が落ちています')
+  })
+
+  /** Nitro の既定の本文は `error` が**真偽値**。`??` だとここで止まって日本語に届かない。 */
+  it('error が真偽値なら飛ばす (`??` では拾えない形)', () => {
+    expect(pickBodyReason({ error: true, message: '日本語の理由' })).toBe('日本語の理由')
+    expect(pickBodyReason({ error: false, statusMessage: 'Bad Request' })).toBe('Bad Request')
+  })
+
+  it('本文が文字列ならそれ自体が理由 (空文字は理由ではない)', () => {
+    expect(pickBodyReason('upstream down')).toBe('upstream down')
+    expect(pickBodyReason('')).toBeNull()
+  })
+
+  /** 拾えなかったときの代替 (`HTTP ${status}` 等) は**呼び出し側**が決める。 */
+  it('理由が無ければ null (代替文を作らない)', () => {
+    expect(pickBodyReason({})).toBeNull()
+    expect(pickBodyReason({ error: true, statusCode: 500 })).toBeNull()
+    expect(pickBodyReason(null)).toBeNull()
+    expect(pickBodyReason(undefined)).toBeNull()
+    expect(pickBodyReason(502)).toBeNull()
+  })
+
+  /**
+   * ★ **順序の正本は `describeApiError`。** 片方だけ直すと #1050 と同じ形の欠陥に戻るので、
+   * 同じ本文を両方に当てて**理由の文字列が一致する**ことを固定する
+   * (`describeApiError` は `${statusCode} ` を前置するので、そこだけ剥がして比べる)。
+   */
+  it('describeApiError と同じ順序で拾う (二重管理の見張り)', () => {
+    const bodies: Record<string, unknown>[] = [
+      FORBIDDEN_BODY,
+      { error: 'upstream が落ちています', message: 'Service Unavailable', statusMessage: 'Service Unavailable' },
+      { error: true, message: '日本語の理由', statusMessage: 'ASCII reason' },
+      { statusMessage: 'Unauthorized' },
+    ]
+    for (const data of bodies) {
+      expect(describeApiError({ statusCode: 400, data })).toBe(`400 ${pickBodyReason(data)}`)
+    }
   })
 })

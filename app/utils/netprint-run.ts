@@ -31,6 +31,7 @@
  * `予約番号 A / B / C` の形でも載せているので、**JSON と本文テキストの両方から拾って
  * 重複を潰す**。片方だけにすると、日によって番号が画面から消える。
  */
+import { pickBodyReason } from '~/utils/api-error'
 
 /** `date` に受け付ける形式 (relay の `NETPRINT_DATE_RE` と同じ)。 */
 export const NETPRINT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -128,17 +129,19 @@ function readDate(value: unknown): string | null {
  * - 非 2xx: server route が `createError` で返す `{statusMessage, message, data}` を読む。
  *   **`data` には relay の応答 (target ごとの `results`) がそのまま載っている** ので、
  *   一部の営業所だけ失敗した 502 でも各営業所の理由が画面に出る
+ *
+ * ## ★ 理由の拾い順は `pickBodyReason` に任せる — `statusMessage` を先に読まないこと
+ *
+ * server route は ASCII を `statusMessage`・日本語を `message` に置く
+ * (`statusMessage` に日本語を入れると本番 workerd で reason phrase が壊れる。
+ * #1032 / #886)。`statusMessage` を先に読むと**この画面だけ英文になる** (#1050)。
  */
 export function normalizeNetprintRunOutcome(status: number, ok: boolean, body: unknown): NetprintRunOutcome {
   const rec = asRecord(body)
   if (ok) {
     return { ok: rec?.ok === true, status, date: readDate(body), results: readResults(body), error: null }
   }
-  const statusMessage = rec?.statusMessage
-  const message = rec?.message
-  const error = typeof statusMessage === 'string'
-    ? statusMessage
-    : typeof message === 'string' ? message : `HTTP ${status}`
+  const error = pickBodyReason(rec) ?? `HTTP ${status}`
   return { ok: false, status, date: readDate(rec?.data), results: readResults(rec?.data), error }
 }
 

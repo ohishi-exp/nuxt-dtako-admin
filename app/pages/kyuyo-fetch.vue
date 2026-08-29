@@ -21,6 +21,7 @@
  */
 import { defaultPayrollMonth } from '~/utils/ichiban-health'
 import { currentAccessToken } from '~/utils/api'
+import { pickBodyReason } from '~/utils/api-error'
 import { classifyKyuyoAccess, kyuyoAccessNotice, KYUYO_CONSEQUENCE_FETCH, type KyuyoAccessState } from '~/utils/kyuyo-access'
 import {
   buildFetchPlan,
@@ -147,7 +148,10 @@ async function refreshList(full: boolean) {
     const res = await fetch(endpoint, { method: 'POST' })
     const body = await res.json().catch(() => null) as Record<string, unknown> | null
     if (!res.ok) {
-      pageError.value = `リスト更新に失敗 (HTTP ${res.status}): ${String((body as { statusMessage?: unknown } | null)?.statusMessage ?? '')}`
+      // 理由の拾い順は `pickBodyReason` (= `describeApiError`) に任せる。
+      // **`statusMessage` を先に読まない** (#1050) — server route は ASCII を
+      // `statusMessage`・日本語を `message` に置くので、先に読むと英文が出る。
+      pageError.value = `リスト更新に失敗 (HTTP ${res.status}): ${pickBodyReason(body) ?? ''}`
       return
     }
     if (full) {
@@ -211,8 +215,10 @@ async function fetchRange() {
         )
         const body = await res.json().catch(() => null) as Record<string, unknown> | null
         if (!res.ok) {
-          const message = (body as { statusMessage?: string, error?: string } | null)?.statusMessage
-            ?? (body as { error?: string } | null)?.error ?? `HTTP ${res.status}`
+          // `refreshList` と同じ拾い方 (#1050)。**`statusMessage` を先に読まない** —
+          // Nitro の本文は `error` が真偽値なので `??` では日本語の `message` に
+          // 届かない (`pickBodyReason` は「文字列である最初の 1 つ」を選ぶ)。
+          const message = pickBodyReason(body) ?? `HTTP ${res.status}`
           fetchErrors.value.push(`${item.company} ${item.month}: 引き直しに失敗 (${message})`)
           continue
         }
