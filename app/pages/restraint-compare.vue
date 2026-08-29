@@ -57,6 +57,15 @@ const summary = computed(() => {
   return { total, withDiffs, withUnknownDiffs, knownBugOnly, noSystem }
 })
 
+/**
+ * 一括再計算ボタンのラベル。**template と `retry` の両方がこれを使う** (Refs #1008)。
+ *
+ * `describeResponseFailure` の `retry` には**その画面に実在するボタンの表記そのまま**を
+ * 渡す規約なので、件数入りの式を 2 か所に書くと、**ラベルだけ変えた人が案内文に気づけず**
+ * 画面が「存在しないボタン」を案内する。式を 1 本にして構造的に起きなくする。
+ */
+const batchRecalcLabel = computed(() => `未知差分${summary.value.withUnknownDiffs}名 再計算`)
+
 const batchRecalcRunning = ref(false)
 /** 一括再計算の進捗。**ボタンのラベルにしか出ない**ので、走り終われば消えてよい。 */
 const batchRecalcProgress = ref('')
@@ -125,7 +134,7 @@ async function recalcDiffsOnly() {
         batchFailed = true
         batchRecalcError.value = evt.message || '一括再計算に失敗しました'
       }
-    }, '「未知差分…名 再計算」を押してください')
+    }, `「${batchRecalcLabel.value}」を押してください`)
   } catch (e: unknown) {
     if (!batchFailed) batchRecalcError.value = recalcStreamFailure(e, gotAnyEvent)
     batchFailed = true
@@ -246,7 +255,7 @@ async function recalcDriver(driverId: string, driverName: string, driverCd: stri
       </div>
       <UButton
         v-if="summary.withUnknownDiffs > 0"
-        :label="batchRecalcRunning ? batchRecalcProgress : `未知差分${summary.withUnknownDiffs}名 再計算`"
+        :label="batchRecalcRunning ? batchRecalcProgress : batchRecalcLabel"
         icon="i-lucide-refresh-cw"
         size="sm"
         color="warning"

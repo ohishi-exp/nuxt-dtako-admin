@@ -775,9 +775,9 @@ describe('api', () => {
 
     it('recalculateDriversBatch throws on non-ok response', async () => {
       mockFetch.mockResolvedValue(failRes(500, { message: '再計算ワーカーが落ちています' }))
-      await expect(recalculateDriversBatch(2026, 3, [], () => {}, '「未知差分…名 再計算」を押してください')).rejects.toThrow(
+      await expect(recalculateDriversBatch(2026, 3, [], () => {}, '「未知差分2名 再計算」を押してください')).rejects.toThrow(
         '500 再計算ワーカーが落ちています — サーバ側の設定か障害です (権限の問題ではありません)。'
-        + '復旧してから「未知差分…名 再計算」を押してください',
+        + '復旧してから「未知差分2名 再計算」を押してください',
       )
     })
 
@@ -1264,7 +1264,7 @@ describe('api', () => {
     //    `retry` は呼び出し元の `.vue` が渡す実在ボタンの表記で、ここでも同じ文字列を使う。
     it.each([
       ['recalculateDriverStream', (r: string) => recalculateDriverStream(2026, 3, 'D001', () => {}, r), '行の「再計算」を押してください'],
-      ['recalculateDriversBatch', (r: string) => recalculateDriversBatch(2026, 3, ['D1'], () => {}, r), '「未知差分…名 再計算」を押してください'],
+      ['recalculateDriversBatch', (r: string) => recalculateDriversBatch(2026, 3, ['D1'], () => {}, r), '「未知差分2名 再計算」を押してください'],
       ['downloadRestraintReportPdfStream', (r: string) => downloadRestraintReportPdfStream(2026, 3, () => {}, r), '「全員PDF」を押してください'],
     ] as [string, (r: string) => Promise<void>, string][])('%s handles refresher failure gracefully', async (_name, fn, retry) => {
       const refresher = vi.fn().mockRejectedValue(new Error('refresh failed'))

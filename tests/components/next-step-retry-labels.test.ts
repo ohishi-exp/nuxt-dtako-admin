@@ -25,9 +25,18 @@
  *
  * - `「…」` を含まない `retry` は**ボタンを名指ししていない**ので対象外
  *   (`'ページを再読み込みしてください'` / `'zip ファイルを選択してください'`)。
- * - ラベルが `` :label="`IVT一括分割 (${n}件未分割)`" `` のように**件数だけ可変**な
- *   ときは、`retry` 側で可変部を `…` に置いて `「未知差分…名 再計算」` と書く。
- *   ここでは `…` で分割して**各断片が順に現れる**ことを見る。
+ * - ラベルが `` :label="`IVT一括分割 (${n}件未分割)`" `` のように**件数だけ可変**なとき、
+ *   括弧の中が補足でしかないものは**固定部だけを引用**する (`「IVT一括分割」`)。
+ *   `…` を含む引用は `…` で分割して**各断片が順に現れる**ことを見る。
+ *
+ * ## ★ 可変部が意味を持つラベルは、ここではなく `computed` の共有で守る
+ *
+ * `restraint-compare` の一括ボタン (`未知差分${N}名 再計算`) は**件数まで含めて 1 つの表記**
+ * なので、伏せ字にすると案内が実物とずれる。式を `batchRecalcLabel` (computed) に切り出して
+ * **template と `retry` が同じものを読む**形にしてあり、ずれが**構造的に起こらない**。
+ * その `retry` はリテラルではないのでここには現れない — **突き合わせは
+ * `tests/components/restraint-compare-recalc.test.ts` の
+ * 「retry は画面に出ている一括ボタンのラベルそのもの」**が、描画結果に対して行う。
  *
  * ## ★ 見ているのは template の**ソース**であって描画結果ではない
  *
@@ -95,8 +104,9 @@ describe('describeResponseFailure の retry は実在するボタンを指す', 
   // ★ 陽性対照。改名や書式変更で抽出が 0 件になると、下の `it.each` が
   //   **1 本も走らないまま緑になる**。件数の下限をここで固定する。
   it('★ 陽性対照: retry が名指ししているボタンを抽出できている', () => {
-    // #1008 で 13 本 (4 画面) + #996 で 6 本 (3 画面 + 1 component)。
-    expect(cases.length).toBeGreaterThanOrEqual(19)
+    // #1008 で 12 本 (4 画面) + #996 で 6 本 (3 画面 + 1 component)。
+    // 13 本目 (`restraint-compare` の一括) は computed 共有なのでリテラルが無い (上の注記)。
+    expect(cases.length).toBeGreaterThanOrEqual(18)
     expect(new Set(cases.map(c => c.rel)).size).toBeGreaterThanOrEqual(8)
   })
 
