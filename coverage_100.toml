@@ -61,8 +61,6 @@ branches = true
 # **`Cache-Control: public, max-age=3600` は残してある** (返す中身は利用者によらず
 # 同じで、キャッシュされて困る個人情報が無い。`private` にすると月次バッチ由来の
 # 静的データを毎回 R2 から出すことになる)。
-# **statements 19 / 19、branch site 7 / arm 14、14 arm すべて被覆**
-# (基準 = `origin/main` 00b0881 + この PR)。
 # **既存の `tests/server/poi.test.ts` の「R2 binding 未設定は 503」は、
 # secret 未設定でも 503 になるので `statusCode` だけでは別の理由で緑になる** —
 # 文言 (`DTAKO_R2`) で分けるよう直した。
@@ -122,25 +120,6 @@ branches = true
 # この 2 本が持つ認可は `resolveBrowserAuthorization` が `null` かどうかだけ。
 # **その 1 分岐が gate から外れていると、次の refactor で黙って消えても誰も気づかない。**
 # `/api/ichiban/**` (requireAuth) は #330 から登録済み。
-#
-# branches の根拠 — **指標は「v8 の per-arm カウント」** (`coverage/coverage-final.json`
-# の `b` 配列を 1 arm ずつ数えたもの。`check_coverage_100.mjs` が読む `% Branch` とは
-# 別の見方で、こちらは**短絡で片側しか通っていない arm を 0 として区別できる**):
-#   GET : branch site 3 / **arm 6 中 6** (2026-08-27 実測)
-#   POST: branch site 5 / **arm 10 中 10** (同上)
-#   内訳は両方とも `pathParam ?? ''` / `if (!authorization)` / `if (contentType)` で、
-#   POST はこれに `body.length > MAX_BODY_BYTES` と
-#   `typeof raw === 'string' ? raw : ''` が加わる。
-#   **陰性対照 (2026-08-27 実測、緑が測れている証拠)**: `if (!authorization)` の
-#   **true 側を通るテストは各 route 2 本ずつ**あり、**1 本だけ `it.skip` にしても
-#   gate は緑のまま通ってしまう** (もう 1 本が同じ arm を踏むため)。
-#   **2 本とも落とすと初めて赤になる**:
-#     POST — 「★ 3 経路とも取れなければ 401」+「身元が無ければ body が上限超過でも
-#            413 ではなく 401」の 2 本 ⇒ `lines 95%` で exit 1
-#     GET  — 「★ 3 経路とも取れなければ 401」+「DEV_LOGIN が無ければ dev cookie は
-#            身元にならず 401」の 2 本 ⇒ `lines 93.33%` で exit 1
-#   ★ **「1 本外せば赤になる」と書かない。**実測すると緑のまま通った —
-#   gate が緑であることは「その 1 本が効いている」の証拠にならない。
 #   **本番コードは 1 行も足していない** — 100% にするために足したのは
 #   「upstream 失敗 502 / path 欠落 / Content-Type 無し / body が文字列でない」の
 #   既存の枝を通すテスト 6 本だけ。
@@ -299,12 +278,7 @@ branches = true
 # **Access に依存しない認可を入れた** (Refs #988)。この口は
 # `docs/plan-922-single-signin.md` §1 の D 段 (Nitro 側の認可が 1 つも無く、
 # Cloudflare Access だけが前段) に居た。A 段の `requireAuth` を
-# `allowance-override.post.ts` と同じ形で足したので、
-# **`resolveSecret` の 3 分岐 (文字列 / `.get()` / どちらでもない) と
-# `NUXT_PUBLIC_AUTH_WORKER_URL` の 3 分岐 (値あり / 空文字 / 非文字列) が増えた**
-# (v8 の branches が **18 → 32**。母数は AST が決めるので、どのテストを流したかには
-# 依らない — 基準は `origin/main` = 94b72f2 のこのファイル)。**指標名を書いておく** —
-# 分岐数は触るたびに動くので、数字だけ残すと次に読む人が別の指標と取り違える。
+# `allowance-override.post.ts` と同じ形で足した。
 # **陰性対照**: `requireAuth` の行を消すと「未ログインは 401」が落ちる (実測済み)。
 [[files]]
 path = "server/api/profit/snapshot.delete.ts"
@@ -316,7 +290,6 @@ branches = true
 
 # 賃金確定値の月次スナップショット (Refs #677)。どちらも DB も時計も要らない純関数で、
 # 保存 payload の組み立てと期間集計の合算・差の導出・CSV を持つ。
-# **branches も 100%** — 実測 (Stmts/Branch/Funcs/Lines すべて 100) してから登録した。
 [[files]]
 path = "app/utils/wage-snapshot-client.ts"
 branches = true
@@ -395,7 +368,6 @@ branches = true
 
 # RemoteApp ビューアの接続前処理 (Refs #693)。WebSocket / window.open / 待ち時間を
 # 差し替えられる形にしてあるので、実ブラウザ無しで全分岐を通せる。
-# **branches も 100%** — CI の実測 (Stmts/Branch/Funcs/Lines すべて 100) を見てから登録した。
 [[files]]
 path = "app/utils/rdp-access.ts"
 branches = true
@@ -414,9 +386,9 @@ path = "app/utils/allowance-rate-master.ts"
 # **カバレッジ 100% は値を検査していない。** 2026-08-27 に `describe.skip` で両方向を実測した:
 # - 値の砦 (`describe('R2 経由で解決したマスタ = 同梱の初期値 …')` の 5 本 = golden 24 経路の
 #   突合・手当合計 ¥2,618,000・陽性対照 2 本) を skip しても
-#   **gate は緑のまま** (`All 117 files at 100%`)。金額が全部ずれても gate は気づかない
+#   **gate は緑のまま**。金額が全部ずれても gate は気づかない
 # - 一方 `describe('allowanceRateNotice — 画面に出る 1 文 …')` の 5 本を skip すると
-#   **gate は落ちる** (branches 96.3%)。文言の分岐はそこでしか通らないため
+#   **gate は落ちる**。文言の分岐はそこでしか通らないため
 # ⇒ **金額の砦は gate ではなくこの 5 本**。消すときは代わりを先に置くこと。
 #
 # **注記は 2 つある。** `allowanceRateNotice` (運行手当タブ) と
@@ -456,9 +428,6 @@ branches = true
 # ★ **0 行は保存させない。** relay の `normalizeAllowanceRateMaster` は `rows: []` を
 # 通すが、通すと次に読んだとき `resolveAllowanceRateMaster` が `error` (「0 行です」) に
 # するので、**全部消す操作が「マスタを読めない状態」を自分で作る**ことになる。
-#
-# 基準 = `origin/main` d91888c + この PR。実測で **Stmts 69/69・Funcs 14/14・
-# v8 branch site 32 / arm 68 (68 arm すべて被覆)**。
 #
 # **カバレッジ 100% は値を検査していない。** 実装を壊す 6 通りで落ちる本数を実測した
 # (全 63 本中):
@@ -618,15 +587,9 @@ branches = true
 # ②既存の 404 三態 (カタログ未登録 / `operation_count !== 1` / R2 オブジェクト欠落) を
 # **同じ見た目にしない**こと ③応答が `Buffer` で、`{}` (2 バイト) に JSON 化されないこと
 # (2026-07-19 の実害と同じ形)。
-# 実測: v8 の **statements 23/23、branch site 13 / arm 26/26、functions 1/1**
-# (指標名を書いておく — 分岐数は触るたびに動くので、数字だけ残すと次に読む人が別の指標と
-# 取り違える)。
-# **陰性対照**: 「★ 陽性対照: 認証が通れば ZIP のバイトがそのまま返る」と
-# 「httpMetadata が無ければ content-type は application/zip に倒す」の 2 本を `it.skip` に
-# すると、この登録行が **`branches 96.15% (expected 100%)`** で落ちる (gate exit 1)。実測済み。
-# **落ちるのは branches だけで lines は 100% のまま** — `content-type` を組む行そのものは
-# 通り、`?? 'application/zip'` の**既定側の腕だけ**が落ちる (26 → 25)。
-# **lines だけを見ていると気づけない**ので、この行は `branches = true` で登録する。
+# **`branches = true` で登録する理由**: 分岐だけが落ちる形の欠陥がある —
+# `?? 'application/zip'` の**既定側の腕**が通らなくなっても lines は 100% のままで、
+# **lines だけを見ていると気づけない**。
 [[files]]
 path = "server/api/net780/by-operation.get.ts"
 branches = true
@@ -938,9 +901,7 @@ path = "app/utils/code-version.ts"
 branches = true
 
 # **Access に依存しない認可を入れた** (Refs #988)。`snapshot.delete.ts` と同じ理由・
-# 同じ形 (`docs/plan-922-single-signin.md` §1 の D 段)。**`resolveSecret` の 3 分岐と
-# `NUXT_PUBLIC_AUTH_WORKER_URL` の 3 分岐が増えた** (v8 の branches が **34 → 48**。
-# 基準は `origin/main` = 94b72f2 のこのファイル)。
+# 同じ形 (`docs/plan-922-single-signin.md` §1 の D 段)。
 # **陰性対照**: `requireAuth` の行を消すと「未ログインは 401」が落ちる (実測済み)。
 [[files]]
 path = "server/api/profit/margin-summary.post.ts"
@@ -1007,18 +968,18 @@ branches = true
 # (`groupMinWageRows`)、計算 ⇄ 給与の突合行、0 行の理由 (Refs #812)、最低賃金カードの
 # マージ (`upsertMinWageDefaultRate` / `removeMinWageDefaultRate`、Refs #961) を持つ pure util。
 #
-# ★ **v8 が 100% と言っていた状態で、片側しか通っていない分岐が 11 側あった** (#825)。
+# ★ **v8 が 100% と言っていた状態で、片側しか通っていない分岐があった** (#825)。
 # 内訳と処置 (「テストで埋める」より先に「反対側が起こり得るか」を判定した):
 # - **死に分岐 → コードを直した**: `branchRank.get(an) ?? Infinity` の右 (a/b の 2 側)。
 #   `branchRank` は**同じ `rows` を同じ式で舐めて**作り、`sort` の対象はその部分集合なので
 #   キーは必ず在る。`?? Infinity` は構造上通らないので落とした (`!` で読む)。
 #   **並び順は 1 つも動いていない** — 追加した golden を含む 61 本が
 #   `origin/main` の実装でもそのまま通ることで固定してある
-# - **起こり得る → テストを足した** (7 側): `attrsOf` が null の行が同じ区画に 2 行以上
+# - **起こり得る → テストを足した**: `attrsOf` が null の行が同じ区画に 2 行以上
 #   ある形 (`aa?.branchName` / `aa?.branchCode` の null 側 4 つ)、所属コードを持たない
 #   営業所が 2 つある形 (順位が同値 → 営業所名で決まる第 2 キー)、会社が引けない区画が
 #   2 つある形 (`a.company ?? ''` の右 2 つ)
-# - **分岐ではないので何もしない** (2 側): `||` 連鎖の**最終項**の真偽 (下流が無いので
+# - **分岐ではないので何もしない**: `||` 連鎖の**最終項**の真偽 (下流が無いので
 #   どちらでも経路が変わらない)。乗務員CD 側は「同一CD が 2 行」の形でテストを足したが、
 #   区画側 (`TIMECARD_JOB_GROUPS.indexOf` の差が 0) は**構造上あり得ない** —
 #   区画は `company|jobGroup` で一意なので、両方同値なら同じ区画になる
@@ -1147,10 +1108,7 @@ branches = true
 # **ページ 2 本は gate に登録していない**。この lib はページのテストを書く過程で
 # 初めて実行され、専用の unit test (`tests/utils/download-blob.test.ts`) だけで
 # 100% に届くことを実測したので、**lib として**登録する
-# (ページテストに依存しない — `tests/utils/download-blob.test.ts` 単独で 9/9 stmt・4/4 arm)。
-#
-# branches: **v8 branch site 2 / arm 4、すべて被覆。死に分岐 0 件。**
-# 内訳は `content-disposition` の `?? ''` (2 arm) と `m ? m[1]! : fallback` (2 arm)。
+# (ページテストに依存しない — `tests/utils/download-blob.test.ts` 単独で 100% に届く)。
 [[files]]
 path = "app/utils/download-blob.ts"
 branches = true
@@ -1168,11 +1126,6 @@ branches = true
 # 出さない `/kyuyo-fetch` に「金額列は空欄になります」と書く**欠陥を実際に踏んだ
 # (2026-08-26 のスタブ実測で発覚。読みでは出なかった) ので、**入れ替わらないこと**も
 # テストで固定してある (`KYUYO_CONSEQUENCE_FETCH` に「金額」が入らない)。
-#
-# branches: **v8 branch site 7 / arm 14、14 arm すべて被覆。死に分岐 0 件。**
-# stmt は 19 / 19。内訳は `(e ?? {})` の 1 site と `if` 6 site
-# (`typeof status === 'number'` / `typeof statusCode === 'number'` /
-#  `status === 403` / `status === 503` / `state === 'denied'` / `state === 'unconfigured'`)。
 [[files]]
 path = "app/utils/kyuyo-access.ts"
 branches = true
@@ -1183,27 +1136,9 @@ branches = true
 # **その JWT を検証するコードが無かった**)、**規約をコードにした口はカバレッジで固定する
 # 価値がある**。ここに置いた xlsx が Y時間 の出力の中身そのものになる。
 #
-# **初登録なので差分ではなく絶対値で書く** (基準 = `origin/main` 94b72f2 + #988 の変更)。
-# **指標名: v8 の statements 27 / 27、branch site 14 / arm 28、28 arm すべて被覆。**
-# 14 site の内訳は `coverage-final.json` の `branchMap` を実際に読んで数えた:
-#   `cfEnv` の `?? {}` 1 / `resolveSecret` の 4 (`typeof === 'string'` の if、
-#   `binding && typeof(...).get === 'function'` の if と binary-expr、`?? null`) /
-#   `!sharedSecret` 1 / `NUXT_PUBLIC_AUTH_WORKER_URL` の 2 (三項と `&&`) /
-#   `key` の 3 (`typeof !== 'string' || !key` の if と binary-expr、
-#   `!key.startsWith('templates/')`) / `!r2` 1 / `!body` 1 /
-#   `content-type` header の `?? 既定` 1。
-# **数字だけ残すと次に読む人が別の指標と取り違える**ので指標名を必ず添える
-# (分岐数はこのファイルを触るたびに動く)。
-#
-# **陰性対照を 2 段で測った** (memory `coverage-green-does-not-check-values` —
-# gate が緑なだけでは「測れている」証明にならないため):
-#   ① `requireAuth` の行を消すと `tests/server/y-time-template-put-route.test.ts` の
-#      「★ 未ログインは 401 で、body を 1 バイトも読まない」が落ちる
-#   ② その 401 と「body が空なら従来どおり 400」を `it.skip` にすると、**この登録行が
-#      `FAIL: … lines 96.3% (expected 100%)` で落ちる** (gate exit 1)。
-#      **★ ただし `.get()` の 1 本だけを skip しても緑のまま**だった —
-#      `.get()` の arm は「値を返さない binding は 503」の側でも通るため。
-#      **「1 本 skip して緑」を「gate が無意味」と読まないこと。**
+# **陰性対照** (gate が緑なだけでは「測れている」証明にならない):
+#   `requireAuth` の行を消すと `tests/server/y-time-template-put-route.test.ts` の
+#   「★ 未ログインは 401 で、body を 1 バイトも読まない」が落ちる。
 # **読み口 (`y-time-template.get.ts`) も #988 の 2 本目で `requireAuth` を通すようになり、
 # 登録簿にも入れた** (このファイルの末尾)。#995 当時の「触っておらず、登録簿にも入れていない」は
 # もう本当ではない。
@@ -1222,42 +1157,22 @@ branches = true
 # **初登録は 6 本。**`poi/[region].get.ts` は **`f9c2029` (#503) が既に登録済み**
 # だったので `[[files]]` は足さず、上流の注記だけ既存行に付けた
 # (`grep '^path = ' coverage_100.toml | sort | uniq -d` が空になることを確認済み)。
-# **どれも差分ではなく絶対値で書く。基準 = `origin/main`
-# `00b0881aa83c413d7ef3ab811cdebab7571ed81e` + この PR の変更。**
-# **指標名: v8 の statements / branch site / branch arm** (`coverage-final.json` の
-# `s` と `branchMap` を実際に読んで数えた)。**数字だけ残すと次に読む人が別の指標と
-# 取り違える**ので指標名を必ず添える — 分岐数はこのファイルを触るたびに動く。
 #
-# 7 本すべてに**同じ auth 前置き**が入っているが、**route ファイルに乗る branch site は
-# 共通で 3 だけ**: `!sharedSecret` の if 1 / `NUXT_PUBLIC_AUTH_WORKER_URL` の 2
-# (三項と `&&`)。
-# **★ `cfEnv` の `?? {}` と `resolveSecret` の 4 site は `server/utils/cf-env.ts` 側に
-# 計上され、route ファイルには乗らない** (`cee9db4` / #1000 で 15 か所を共通化した効果)。
-# #995 が `y-time-template.put.ts` に「auth 前置きで 8 site 増えた」と書けたのは
-# **共通化の前でヘルパを各 route に inline していたから**で、今は同じ数え方が通らない。
-# **★ 登録した (#1013)。** `cf-env.ts` 自体は statements 6/6・branch site 5・
-# arm 10/10 で 100%。#988 の当時は「#999 / #1000 の持ち物だから」と見送ったが、
+# **★ `cf-env.ts` も登録した (#1013)。** #988 の当時は「#999 / #1000 の持ち物だから」と見送ったが、
 # **認可の共通部分が gate の外に居る**状態だったので下の `[[files]]` で足した。
-# **数を書くときは分けて書くこと: route 側 3 site / `cf-env.ts` 側 5 site。**
-# (5 = `cfEnv` の `?? {}` 1 + `resolveSecret` の `typeof === 'string'` /
-#  `binding &&` / `typeof .get === 'function'` / `?? null` の 4)
 #
-# **★ 陰性対照を 2 段で測った。結論は「この gate は認可を測っていない」**
-# (memory `coverage-green-does-not-check-values`。基準 = a05bd08 + この PR):
-#   ① `vid-check/map-key.get.ts` の**「★ 未ログインは 401」系 2 本を `it.skip` にしても
-#      gate は緑のまま** (`All 114 files at 100%`)。`requireAuth` の呼び出し行自体は
-#      他の it が通すので、**401 になるかどうかは 1 行も lines/branches に現れない**。
-#      **「gate が緑だから認可が効いている」とは絶対に読まないこと。**
-#      認可が効いていることを測っているのは**テストの側だけ** — 直す前のコード
-#      (`origin/main` a05bd08 の route 8 本) に当てると **93 本中 47 本が落ちる**
-#      (うち「★ 未ログイン…401」は 10 本)。これが唯一の陰性対照。
-#   ② 一方で**値を見る it を skip すると gate は落ちる** — 同ファイルの
-#      「binding が無ければ process.env フォールバック…」と「`.get()` が undefined…」を
-#      `it.skip` にすると **`FAIL: server/api/vid-check/map-key.get.ts —
-#      branches 94.44% (expected 100%)`** で exit 1。gate 自体は生きている。
+# **★ 陰性対照。結論は「この gate は認可を測っていない」**
+# (memory `coverage-green-does-not-check-values`):
+#   `vid-check/map-key.get.ts` の**「★ 未ログインは 401」系 2 本を `it.skip` にしても
+#   gate は緑のまま**。`requireAuth` の呼び出し行自体は他の it が通すので、
+#   **401 になるかどうかは 1 行も lines/branches に現れない**。
+#   **「gate が緑だから認可が効いている」とは絶対に読まないこと。**
+#   認可が効いていることを測っているのは**テストの側だけ** — 直す前のコード
+#   (`origin/main` a05bd08 の route 8 本) に当てると **93 本中 47 本が落ちる**
+#   (うち「★ 未ログイン…401」は 10 本)。これが唯一の陰性対照。
 #
 # **`server/api/vehicle-settings/unconfirmed.get.ts` も登録した (#1013)。**
-# #988 の時点では **statements 45/46・branch site 14・arm 27/28** で届かず、
+# #988 の時点では 100% に届かず、
 # 届かなかったのは手書きの `extractVehicleCdFromKey` の
 # `if (!key.startsWith(R2_PREFIX)) return null`。**呼び出し元が
 # `r2.list({ prefix: R2_PREFIX })` の結果しか渡さないので「いまの呼び方では
@@ -1266,14 +1181,11 @@ branches = true
 # (`app/utils/vehicle-settings-r2.ts` の `VEHICLE_SETTINGS_R2_PREFIX` /
 # `parseVehicleSettingsR2Key`) に寄せた**ので、この分岐は route から消えた
 # (共有側の同じガードは `tests/utils/vehicle-settings-r2.test.ts` が両側を通している)。
-# **結果 statements 38/38・branch site 12・arm 24/24 で 100%。**
-# 基準 = `origin/main` `a028078d3ecc2856eef875836ea057cfa684a79d` + この PR。
 # 認可のテスト自体は `tests/server/vehicle-settings-unconfirmed-route.test.ts` にある。
 
 # `cfEnv` / `resolveSecret` の共通ヘルパ本体。
-# **#988 で入れた認可の前置きの分岐は実質ここに乗っている** — route 側 3 site に対し
-# こちらが 5 site。共通化 (`cee9db4` / #1000) の結果、**登録しないと認可の共通部分だけが
-# gate の外**になる。**statements 6 / 6、branch site 5 / arm 10、10 arm すべて被覆。**
+# **#988 で入れた認可の前置きの分岐は実質ここに乗っている**。共通化 (`cee9db4` / #1000) の
+# 結果、**登録しないと認可の共通部分だけが gate の外**になる。
 # なお `resolveSecret` の `.get()` reject を**例外として伝播させる**のがこちら版の
 # 契約で、`server/utils/ichiban-upstream.ts` 版 (握り潰す) とは別物
 # (理由は `server/utils/cf-env.ts` の JSDoc)。
@@ -1284,7 +1196,6 @@ branches = true
 # 設定未確認車輛の抽出 (`GET /api/vehicle-settings/unconfirmed`)。
 # **上流 (`/alc-proxy`) が未ログインを 401 にする B 段だったが、それを待つ間に
 # R2 listing が走ってしまう**ので A 段に上げた口 (詳細はファイル冒頭の JSDoc)。
-# **statements 38 / 38、branch site 12 / arm 24、24 arm すべて被覆。**
 [[files]]
 path = "server/api/vehicle-settings/unconfirmed.get.ts"
 branches = true
@@ -1292,10 +1203,6 @@ branches = true
 # 車輌設定 dump の**一覧** (`GET /api/vehicle-settings/history`)。
 # ここに並ぶ key は実体 (`object.get.ts`) の入口そのもの =
 # **一覧が開いていれば実体も開いている**。
-# **statements 52 / 52、branch site 21 / arm 42、42 arm すべて被覆。**
-# auth 前置き 8 site 以外の 13 site は R2 listing と集計 (cursor ループ、
-# `parseVehicleSettingsR2Key` の null、`ext !== 'json'`、`customMetadata?.` の
-# `??`、`toIso` の三項、sort の三項、`latest` 更新の if)。
 [[files]]
 path = "server/api/vehicle-settings/history.get.ts"
 branches = true
@@ -1304,7 +1211,6 @@ branches = true
 # **key prefix の強制は認可ではない** (別用途のオブジェクトを引かせないための制限で、
 # 呼び出し元が誰かは見ていない) — テスト側で「prefix が正しくても未ログインは 401」を
 # 別の it として固定してある。
-# **statements 23 / 23、branch site 11 / arm 22、22 arm すべて被覆。**
 [[files]]
 path = "server/api/vehicle-settings/object.get.ts"
 branches = true
@@ -1312,9 +1218,6 @@ branches = true
 # `DTAKO_DB` の給与会社マスタ**一覧** (`GET /api/kyuyo-master/companies`)。
 # 更新の口 (`refresh.post` / `refresh-full.post`) は browser JWT を上流に渡して
 # 上流が弾く形なのに、**読み口だけが素通し**だった。
-# **statements 12 / 12、branch site 5 / arm 10、10 arm すべて被覆。**
-# 内訳は auth 前置き 3 + `!db` の if 1 + catch の `e instanceof Error` 三項 1。
-# **7 本の中でいちばん小さい** — この route 自体の分岐が 2 本しか無いため。
 [[files]]
 path = "server/api/kyuyo-master/companies.get.ts"
 branches = true
@@ -1322,7 +1225,6 @@ branches = true
 # Y時間 テンプレ xlsx の**存在確認** (`GET /api/y-time-template`)。
 # **書き口 (`y-time-template.put.ts`) は #988 の 1 本目で塞いだのに、ここは残っていた。**
 # `size` / `etag` / `uploaded` はテンプレ差し替えを外から観測できる情報。
-# **statements 18 / 18、branch site 9 / arm 18、18 arm すべて被覆。**
 # **「未配置は 404 ではなく 200 + `{exists:false}`」という契約は変えていない** —
 # テストで陽性対照として固定した。
 [[files]]
@@ -1336,7 +1238,6 @@ branches = true
 # **⇒ 無防備ではなかった** — 入れる前も無認証の呼び出し元には xlsx が返っていない。
 # 「開いていたので塞いだ」と読まないこと。A 段に上げたのは
 # **B 段の防御が上流の実装依存**でこの repo からは保証できないため。
-# **statements 32 / 32、branch site 12 / arm 27、27 arm すべて被覆。**
 # `writeYTimeRows` (ExcelJS) は mock している — ここで測っているのは
 # **route の分岐**であって xlsx 生成ではない (それは `tests/utils/y-time-xlsx.test.ts`)。
 [[files]]
@@ -1347,7 +1248,6 @@ branches = true
 # D 段の中で唯一「秘密そのものを返す」。**「referrer 制限があるから無認証でよい」は
 # 成り立たない** — `Referer` は呼び出し元が自由に名乗れるヘッダで、ブラウザの外からは
 # 任意の値を付けられる。referrer 制限は課金の保険であって認証ではない。
-# **statements 16 / 16、branch site 9 / arm 18、18 arm すべて被覆。**
 # **`process.env.NUXT_PUBLIC_GOOGLEMAP_KEY` フォールバックは残してある**ので、
 # 「未ログインなら env 側の鍵も返さない」を**別の it として**固定した
 # (401 を通り越して素の鍵が出る経路を塞いだ証拠)。
@@ -1367,9 +1267,6 @@ branches = true
 # 同じ共有ファイルの `vehicleSettingsR2Paths` に依存しているが、**その route 自身が
 # gate 未登録**なのでここには含めていない (別件)。
 # (issue #1029 は依存を「2 本」と書いているが、実測は上記のとおり 4 本 / 登録済み 3 本)
-# **2026-08-28 実測 (base `6e5eddd`)、`coverage/coverage-final.json` 直読み:
-# statements 17 / 17、branch site 3 / arm 6 / 6、functions 4 / 4。**
-# 0 の arm は無く、最少の arm でも実行回数 1。
 [[files]]
 path = "app/utils/vehicle-settings-r2.ts"
 branches = true
@@ -1377,10 +1274,8 @@ branches = true
 # ETC 明細 CSV のダウンロード (`GET /api/etc-csv/download`、Refs #1053)。
 # **A 段 route のうち、これだけが専用テスト 0 本だった。** #1051 以前は coverage の
 # 出力に 1 行も現れておらず (どのテストからも読まれていなかった)、#1051 の配線テスト
-# (`tests/server/require-role-routes.test.ts`) が読むようになって **41.66% (branches
-# 37.5%)** として現れたが、**gate 未登録なので落ちなかった**。ここで登録して閉じる。
-# **2026-08-29 実測 (base `c3fac8e`)、`coverage/coverage-final.json` 直読み:
-# statements 24 / 24、branch site 8 / arm 16 / 16、functions 1 / 1。**
+# (`tests/server/require-role-routes.test.ts`) が読むようになったが、**gate 未登録なので
+# 落ちなかった**。ここで登録して閉じる。
 # **実装は 1 文字も変えていない** (この issue は「テストを足す」作業)。
 # **`CLAUDE.md` の「CSV でない応答は loud fail して R2 `{prefix}-errors/` に原本保存」は
 # この route の規範ではない** — あれはスクレイプ (書き込み) 側のもので、実体は relay の
