@@ -27,7 +27,9 @@ import { describeResponseFailure } from '~/utils/api-error'
 
 /** 下部「登録済み車輛一覧」の集計。**この画面に再取得ボタンは 1 つも無い**
  * (`loadSummary` は `onMounted` からしか呼ばれない) ので、**無いボタンの名前で
- * 案内しない** — ページの再読み込みで案内する。 */
+ * 案内しない** — ページの再読み込みで案内する。
+ * 来るのは 401 (`requireAuth`) と 503 (`INTERNAL_SHARED_SECRET` / `DTAKO_R2` binding
+ * 未設定) — **引数無しの集計なので 400 は来ない**。 */
 const RETRY_SUMMARY = 'ページを再読み込みしてください'
 
 /** 履歴の取得。**ボタンの表記そのまま** (`<span v-else>履歴を取得</span>`)。
@@ -40,7 +42,8 @@ const RETRY_HISTORY = 'もう一度「履歴を取得」を押してください
  * 消えた形なので、**行を押し直す前に一覧を取り直す**のが正しい動線。
  * **404 の前置きは `nextStepForStatus` が持つ** (Refs #1021) ので、ここは
  * 「やり直し方」だけを渡す。#1005 の暫定 (`describeMissingDump` + `res.status === 404`)
- * は恒久策と引き換えに消してある — **呼び出し側へ戻さないこと**。 */
+ * は恒久策と引き換えに消してある — **呼び出し側へ戻さないこと**。
+ * key は一覧から来るので 400 (key の形) は事実上来ない。 */
 const RETRY_DETAIL = '「履歴を取得」で一覧を取り直し、行をクリックし直してください'
 
 interface VehicleSummary {
@@ -81,27 +84,33 @@ const filteredSummary = computed(() => {
   return summary.value.filter((s) => s.vehicle_cd.toLowerCase().includes(q))
 })
 
+/**
+ * この画面の 3 つの読み口に共通の GET (Refs #1068)。**画面に出る 1 文をここで組む** —
+ * 形は 3 か所とも `${prefix}: ${describeResponseFailure(res, retry)}` で同じで、
+ * 違うのは `prefix` と**やり直し方** (`RETRY_*`) だけ。**実際に来る status の顔ぶれは
+ * 口ごとに違う**ので、それは上の `RETRY_*` の注記が持つ。
+ *
+ * - 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+ *   経路でも通るよう `Authorization: Bearer` も明示する — 読み口が `requireAuth` を
+ *   通すようになった (Refs #988)。`postNet780Archive` と同じ扱い。
+ * - **reason phrase に落とさない** (Refs #1005 / #996 / #890)。`res.statusText` は
+ *   **本番 (workerd) では空**なので、画面に出ていたのは `HTTP 503: ` だけだった
+ *   (dev の node は埋めるので**再現しない**)。理由は本文
+ *   (`{ error: true, statusCode, statusMessage, message }`) に無傷で残っている。
+ */
+async function getJson<T>(url: string, prefix: string, retry: string): Promise<T> {
+  const token = currentAccessToken()
+  const res = await fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {} })
+  if (!res.ok) throw new Error(`${prefix}: ${await describeResponseFailure(res, retry)}`)
+  return (await res.json()) as T
+}
+
 async function loadSummary() {
   summaryLoading.value = true
   summaryError.value = ''
   try {
-    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
-    // 経路でも通るよう `Authorization: Bearer` も明示する — この読み口が
-    // `requireAuth` を通すようになった (Refs #988)。`postNet780Archive` と同じ扱い。
-    const token = currentAccessToken()
-    const res = await fetch('/api/vehicle-settings/history', {
-      headers: token ? { authorization: `Bearer ${token}` } : {},
-    })
-    if (!res.ok) {
-      // **reason phrase に落とさない** (Refs #1005 / #996 / #890)。`res.statusText` は
-      // **本番 (workerd) では空**なので、画面に出ていたのは `HTTP 503: ` だけだった
-      // (dev の node は埋めるので**再現しない**)。理由は本文
-      // (`{ error: true, statusCode, statusMessage, message }`) に無傷で残っている。
-      // この口が投げるのは 401 (`requireAuth`) と 503 (`INTERNAL_SHARED_SECRET` /
-      // `DTAKO_R2` binding 未設定) — **引数無しの集計なので 400 は来ない**。
-      throw new Error(`登録済み車輛一覧の取得に失敗しました: ${await describeResponseFailure(res, RETRY_SUMMARY)}`)
-    }
-    summary.value = (await res.json()) as VehicleSummary[]
+    summary.value = await getJson<VehicleSummary[]>(
+      '/api/vehicle-settings/history', '登録済み車輛一覧の取得に失敗しました', RETRY_SUMMARY)
   } catch (e) {
     summaryError.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -118,18 +127,8 @@ async function loadHistory(cd: string) {
   itemsLoading.value = true
   itemsError.value = ''
   try {
-    // Refs #988 — 読み口が `requireAuth` を通すので Bearer も明示する。
-    const token = currentAccessToken()
-    const res = await fetch(`/api/vehicle-settings/history?vehicle_cd=${encodeURIComponent(cd)}`, {
-      headers: token ? { authorization: `Bearer ${token}` } : {},
-    })
-    if (!res.ok) {
-      // Refs #1005 — 上と同じ理由で本文を読む。**status の顔ぶれは上と違う**:
-      // `vehicle_cd` を付ける側は 400 (`vehicle_cd は英数 / _ / - のみ`) を投げる
-      // (`history.get.ts` の正規表現)。入力欄が自由入力なので**実際に来る**。
-      throw new Error(`履歴の取得に失敗しました: ${await describeResponseFailure(res, RETRY_HISTORY)}`)
-    }
-    items.value = (await res.json()) as HistoryItem[]
+    items.value = await getJson<HistoryItem[]>(
+      `/api/vehicle-settings/history?vehicle_cd=${encodeURIComponent(cd)}`, '履歴の取得に失敗しました', RETRY_HISTORY)
   } catch (e) {
     itemsError.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -143,18 +142,8 @@ async function loadDetail(key: string) {
   detailLoading.value = true
   detailError.value = ''
   try {
-    // Refs #988 — 読み口が `requireAuth` を通すので Bearer も明示する。
-    const token = currentAccessToken()
-    const res = await fetch(`/api/vehicle-settings/object?key=${encodeURIComponent(key)}`, {
-      headers: token ? { authorization: `Bearer ${token}` } : {},
-    })
-    if (!res.ok) {
-      // Refs #1005 #1021 — 叩く先が別 route (`object.get.ts`) なので **404 が増える**
-      // (`object not found: <key>`)。**404 の前置きは `nextStepForStatus` が持つ**
-      // ので、ここで撃ち分けない。key は一覧から来るので 400 (key 形式) は事実上来ない。
-      throw new Error(`dump JSON の取得に失敗しました: ${await describeResponseFailure(res, RETRY_DETAIL)}`)
-    }
-    detail.value = (await res.json()) as VehicleSettings
+    detail.value = await getJson<VehicleSettings>(
+      `/api/vehicle-settings/object?key=${encodeURIComponent(key)}`, 'dump JSON の取得に失敗しました', RETRY_DETAIL)
   } catch (e) {
     detailError.value = e instanceof Error ? e.message : String(e)
   } finally {
