@@ -1,5 +1,9 @@
 # Lines 100% + Branches 100% 達成ファイル登録簿
 # CI でリグレッションを検出する
+# 方針 (2026-08-31、Refs #1069):
+# - UI ページ (.vue) は新規登録しない。gate は pure ロジック (app/utils / server / relay) だけ。
+# - 分岐数などの手書き注記 (BR() 等) をこのファイルに書かない — 手書きの数値主張は必ず腐る。
+#   分岐の検証が要るときは計測し、結果は PR 本文に測定条件つきで書く。
 
 [[files]]
 path = "app/utils/api.ts"
@@ -109,16 +113,6 @@ branches = true
 # ブラウザ JWT の解決 (cookie `logi_auth_token` → dev cookie → 受領 `Authorization`)。
 # **client が `Authorization: Bearer` を組むのをやめた** (#375、ippoan/auth-worker#416 の
 # 子) ぶんの受け皿で、`/api/kyuyo/**` と `/api/kyuyo-master/**` の 4 route が使う。
-#
-# branches の根拠 — **指標は「BR() site」(v8 の branch/arm ではない)**:
-#   **BR() site = 4、両側 (true/false) を通ったのが 4/4** (2026-08-26 実測)。
-#   内訳は `if (cookie)` / `if (env.DEV_LOGIN === 'true')` / `if (devCookie)` /
-#   `getHeader(...) ?? null` の nullish 判定の 4 つ。
-#   陰性対照つき: dev cookie のケースを 1 本外すと `if (devCookie)` が `[false]` だけに
-#   落ちる。probe (`pick(0,7)===7` / `orValue(0,7)===7`) で計測器が値を壊していないことも
-#   先に確認した。
-#   **v8 側 (`check_coverage_100.mjs` が見る % Branch) は別指標**で、こちらは短絡のせいで
-#   片側しか通っていなくても 100% と報告しうる — だから BR() で数え直してある。
 [[files]]
 path = "server/utils/browser-jwt.ts"
 branches = true
@@ -171,16 +165,9 @@ path = "app/utils/timecard-compare-view.ts"
 branches = true
 
 # デジタコ (theearth、R2 アーカイブ) と 打刻 (live-build) の月計拘束の突合 (Refs #606 PR-F)。
-# **分岐は 35 BR site** (`_shared/br-tooling` の instrument で数えた実測。v8 の
-# site/arm ではない — v8 は短絡した側を数えないので、両者の数は一致しない)。
-# **35/35 が両側とも通っている** (`tests/utils/restraint-source-diff.test.ts` の 31 件)。
-# 陰性対照: `-t fmtRestraintSourceDiffMinutes` だけに絞ると到達 site が 35 → 3 に落ちる
-# (計測器が効いていること自体の確認)。**書かなかった分岐は無い。**
-#
 # ★ 途中で **死に分岐を 1 つ潰した** (テストで埋めずコードを直した)。`archiveFetchedRange`
 # を `from`/`to` の 2 変数で null 初期化すると `to === null` 側が**構造上あり得ない**
-# (両方が必ず同時に埋まる)。v8 は branches 100% と報告し続けたが BR 計測で
-# `[False]` だけの site として出た (42 site 中 1)。先に `filter` してから畳む形に直して 35 site。
+# (両方が必ず同時に埋まる)。先に `filter` してから畳む形に直した。
 [[files]]
 path = "app/utils/restraint-source-diff.ts"
 branches = true
@@ -209,21 +196,11 @@ branches = true
 # ②とは別物 (`event-data-table.ts` の `proposeEventRowRange` が使用中)。
 # 「どの明細をどの便に当てるか」は①(`allowance-ichiban.ts` / `reconcileVehicles`) が
 # 唯一の突合であり、**このファイルは 1 件も当てない**。
-# branches: instrumented コピーで**17 分岐すべてが true/false 両方を通る**ことを数えた
-# (origin/main では 20。撤去した②のぶんが減った)。
 [[files]]
 path = "app/utils/ichiban.ts"
 branches = true
 
 # 給与DB取得 (/kyuyo-fetch) の純粋ロジック。
-# branches: **BR site** (instrumented コピーで数えた分岐、v8 の branch slot ではない)
-# が 43 で、うち **39 が true/false 両方**を通る。**残り 4 は構造上 true 側しか無い**
-# ので埋めない: `label || '-'` / `label || '-'` / `row.pay_date || '空'` の
-# **右辺が文字列リテラル**な 3 件と、`localeCompare(...) || localeCompare(...)` の
-# タイブレーク 1 件 ((会社, 月) は upstream の PK なので同値行が来ない)。
-# **v8 は短絡のせいでこの 4 件も 100% と報告する** ので、数え直すときは BR() を使うこと。
-# 対照: origin/main = bc6ea80 で BR site 48 / 両側 44 / 片側 4 (同じ 4 件)。
-# sessionStorage キー規則の撤去 (#467 PR-A3) で 5 site 減った。
 [[files]]
 path = "app/utils/kyuyo-fetch.ts"
 branches = true
@@ -277,42 +254,10 @@ branches = true
 # **便あたり 1 行**出す (`destCity` は便の性質なので行ごとに繰り返さない)。
 # **両側とも当たっている行には足さない** — 畳んで隠したものが無く、全行に同じ文字が
 # 並ぶと候補一覧が読みにくくなるだけ。
-# branches: script ブロックを instrumented コピー
-# (`operation-leg-sales.ts` と同じ計測器) に差し替えてテストを流し、**BR site 16 すべてが
-# true/false 両方**を通ることを数えた (#860、`tests/components/ProfitPanel.test.ts`
-# + `operation-detail-route-map.test.ts` の **77 本**を流して実測。#890 の時点では
-# 20 site / 両側 18 で、片側だけの 2 つは `legLabel` の `||` の右辺の文字列リテラルだった)。
-# **#860 で `legLabel` が `legRouteLabel` (pure 側) を呼ぶ形になり、その 2 つを含む
-# `||` 4 site が丸ごと `profit-panel-legs.ts` へ移った** — この画面に**片側だけの分岐は
-# 1 つも残っていない**。埋めるべき分岐が増えたのではなく、場所が動いただけ。
-# **★ 数字の指標を取り違えないこと。**この repo では 4 通りの数え方が同居している:
-#
-# | 指標 | 数え方 | #890 の後 | **#860 の後 (いま)** |
-# |---|---|---|---|
-# | **BR() instrumented site** (この注記が言っているもの) | `if`/三項の条件 + `&&`/`\|\|` の両辺 + `??` の左辺 | **20** (両側 18) | **16** (両側 **16**) |
-# | v8 の branch **site** | `Object.keys(cov.b).length` | 42 | **42** |
-# | v8 の branch **arm** | `Object.values(cov.b).flat().length` | 81 | **81** |
-# | AST の**構文上の分岐** (`margin.ts` の節が使う) | `if` + 三項 + `&&`/`\|\|`/`??` の**左辺** + **`?.`** | — | — |
-#
-# **★ 4 つ目は `?.` を数え、`&&`/`\|\|` を 1 site と数える**ので BR site とは別物
-# (`margin.ts` の節が「120 分岐 / BR site 140」と**両方を名乗って**書き分けているのが手本)。
-# この画面では `?.` を数えていないので上の表には値を入れていない。
-#
-# **★ BR が 4 減っても v8 が動かないのは、v8 が template の render 関数まで数えるから。**
-# script から `||` 4 site (8 arm) が消えた一方で、template に
-# `v-if="!legDestKnown(leg)"` 等が増えている。**2 つの指標は足し引きが噛み合わない** ので、
-# **数字を引用するときは必ずどちらの指標か名乗ること** (この表がある理由)。
-# **v8 site 42 / arm 81 は `origin/main` (09f6d55) と `#860` の両方で実測して同じ値**。
-# (履歴: #890 で `e instanceof Error ? … : …` を 1 つ消して BR 21→20。
-# それ以前は `props.location?.originCity ?? ''` 2 組 = 4 分岐が `slipMatch` 側へ移って 25→21。)
-# **template の `v-if` は BR には出ない** (compile 後の render 関数)。出る行・出ない行の
-# 両方を component テストで踏んで v8 の branches で見ている。
 # **#1008 PR-2**: 取得失敗の 1 文を `describeCaughtError` に通した。
 # **`retry` に `「…」を押してください` の形を使っていない唯一の画面** —
 # このパネルに再試行ボタンは無く (`load` は `watch([driverCd, range])` からしか
 # 走らない)、**無いボタンを案内すると探して見つからない**ため。
-# **v8 branch site 42 / arm 81 は動いていない** (#1008 PR-2 後に再測して同値。
-# template は 1 行も触っていない)。
 [[files]]
 path = "app/components/ProfitPanel.vue"
 branches = true
@@ -328,9 +273,6 @@ branches = true
 # `GET /api/profit/monthly` ごと廃止 (分子だけ凍結し分母が増え続ける誤診を生む形だった)。
 # **`combinedMatchLevel` は #858 で収支パネルの根拠バッジからも呼ばれるようになった** —
 # 保存済み一覧と収支パネルで**同じ言葉が同じ意味**になるための 1 か所。
-# branches: instrumented コピーで**14 分岐すべてが true/false 両方を通る**ことを数えた
-# (#858 時点で 20 → 16、#859 で 16 → 14)。消した `summarizeMonthly` は分岐を持たず
-# (畳み方は `combinedMatchLevel` 側)、減った 2 は `monthRange` の年またぎの三項 2 つ。
 # **`monthRange` も #859 で消した** — 唯一の呼び出し元だった `monthly.get.ts` と一緒に死に、
 # `restraint-wage-view.ts` に**同名で引数の違う関数**があって auto-import で取り違える罠
 # だったため (`buildProfitSnapshot` を #858 で消したのと同じ扱い)。
@@ -401,38 +343,6 @@ branches = true
 # リダイレクト先が cross-origin なので `fetch` は追随先を返せず **CORS で弾いて
 # `TypeError` を投げる**。⇒ `res.redirected` / `content-type` を見る枝は**要らない**
 # (そこまで到達しない)。**要るのは `catch` 側**だった。
-#
-# ## 分岐の実測 — **指標名と対象を必ず添える** (Refs #1009)
-#
-# 数字だけ残すと腐る。前の注記の「13 site 中 12」は **#898 時点の
-# `describeApiError` 1 関数だけ**の BR() 値で、その後 #963 が 5 site
-# (`!fallback && err.statusCode` の 3 / `err.message ?? ''` / `if (synthetic)`)、
-# #996 が 3 関数 10 site を足した後の**ファイル全体を指していなかった** (13+5=18)。
-# 下は **`origin/main` abf4aabd068e + この PR (#1050)** のファイル全体を 2026-08-29 に
-# 測り直した値。**#1050 で `pickBodyReason` が 6 site 増え、`hasStringReason` は
-# そこへ委譲して 4 site → 0 site になった** (差引 +2)。
-#
-# **★ base 側も同じ worktree の `abf4aabd068e` で測り直してある** — #1058 (#1053) の
-# マージで `origin/main` が動いたため rebase した。あの PR は `coverage_100.toml` と
-# `tests/server/etc-csv-download.test.ts` の 2 つだけで `app/**` を 1 行も触っていないので、
-# **base 側の数字は rebase の前後で完全に同じ**だった (30 — 両側 29 / 片側 1 を再測して確認)。
-# (それ以前 = #1006 が `origin/main` 3575c7604a で測った値も 30 — 両側 29。
-# その前の #1021 は `origin/main` 29bb7f5 で 29 — 両側 28。)
-#
-# | 指標 | 対象 | base (abf4aabd068e) | **+ #1050 (2026-08-29 実測)** |
-# | --- | --- | --- | --- |
-# | v8 statements | ファイル全体 | 48 / 48 | **50 / 50** |
-# | v8 branch site | ファイル全体 | 23 | **25** |
-# | v8 branch arm | ファイル全体 | 47 / 47 | **51 / 51 (死に分岐 0)** |
-# | v8 funcs | ファイル全体 | 9 / 9 | **10 / 10** |
-# | **BR() branch site** | **ファイル全体** | 30 — 両側 29 / 片側 1 | **32 — 両側 31 / 片側のみ 1 / 未到達 0** |
-# | BR() branch site | `describeApiError` | 18 — 両側 17 | 18 — 両側 17 |
-# | BR() branch site | **`pickBodyReason`** | — (存在しない) | **6 — 両側 6** |
-# | BR() branch site | `responseReason` | 2 — 両側 2 | 2 — 両側 2 |
-# | BR() branch site | `hasStringReason` | 4 — 両側 4 | **0 (`pickBodyReason` へ委譲)** |
-# | BR() branch site | `nextStepForStatus` | 5 — 両側 5 | 5 — 両側 5 |
-# | BR() branch site | `describeFetchThrow` | 1 — 両側 1 | 1 — 両側 1 |
-#
 # ## `pickBodyReason` を足した理由と、`hasStringReason` を委譲にした理由 (Refs #1050)
 #
 # front の 4 経路 (`api.ts` の `postNet780Archive` / `readNetprintTargetsResponse`、
@@ -448,78 +358,6 @@ branches = true
 # 一致を固定している。`hasStringReason` は
 # `[d.error, d.message, d.statusMessage].some(…)` の**3 つ目の写し**だったので
 # `pickBodyReason(data) !== null` へ委譲した (戻り値は全入力で同値)。
-#
-# **`pickBodyReason` の 6 site の担保は 1 本ではない** (#1050 で実測)。
-# `describe('pickBodyReason')` を**丸ごと `describe.skip` にしても 32 / 両側 31 のまま
-# 動かない** — 4 経路のテストと `describeResponseFailure` 経由 (`hasStringReason`) が
-# 同じ枝を通すため。`146:7` (`typeof body === 'string'`) と `146:40` (`body === ''`) の
-# **真の側**を通す担保は **2 本**:
-#
-# - `tests/utils/api-error.test.ts` — `pickBodyReason … 本文が文字列ならそれ自体が理由`
-# - `tests/utils/api-error.test.ts` — `本文が JSON の文字列 / 数値 / null でも撃ち分ける`
-#   (`describeResponseFailure` に JSON の空文字列 `""` を食わせる枝が
-#   `hasStringReason('')` → `pickBodyReason('')` を通す)
-#
-# **両方**を skip して初めて **32 → 31 site / 両側 31 → 28 / 片側 1 → 3**
-# (`146:40` は到達しなくなって site ごと消える)。**1 本外して「動かない = 計測器が
-# 壊れている」と読まないこと。**
-#
-# **計測器の probe を 2 段で先に通してある** (#1021):
-# ① 片側だけ通る `if` が `[true]` / 両側通る `if` が `[false,true]` になる、
-# ② `pick(0,7) === 0` / `orValue(0,7) === 7` / `nullish(0,7) === 0` / `ternary(0) === 'F'`
-# — **計測器が値を壊していない**。②を通さないと `BRV` / `BRN` の差 (`0` や `''` の扱い)
-# に気づけない。
-#
-# BR() が v8 より多い (32 > 25) のは、`&&` / `||` を**左右の項に分けて**数えるため
-# (v8 は 1 site に畳む)。**v8 の branches 100% は短絡で片側を見逃す**ので、
-# 「v8 が緑だから両側」とは読まないこと。
-#
-# 両側でない 1 site は `detail = fallback || err.message || String(e)` の
-# **`String(e)` (最終項)**。`||` 連鎖の最終項は**真偽で経路が分かれない** (式の値は
-# 真偽によらず `String(e)`) ので、死に分岐ではなく**計測の粒度**の問題。
-# **構造上あり得ないわけでもない** — `describeApiError('')` を直接当てると
-# `[false]` 側が出る (実測)。埋めても画面の挙動は 1 文字も変わらないので埋めていない。
-#
-# **BR() の instrumented コピーは #996 では当てていない。**計測器は repo の外
-# (clone と同じ階層の `_shared/br-tooling/{br.ts,instrument.mjs}`) に**在る**が、
-# #996 の作業では使わず v8 の `coverage-final.json` だけを数えた — **道具が無くて
-# 測れなかったのではない**。#1009 で当て直し、#1021 で 404 の枝を足して測り直したのが
-# 上の表。**`_shared/` は clone と同じ階層 (repo の外)** — `.claude/worktrees/_shared/`
-# ではない。
-#
-# **計測が効いていることの陰性対照** (#1009 で実測): 413 を撃つテスト 2 本
-# (`tests/utils/api-error.test.ts` と `tests/components/vehicle-settings-error-text.test.ts`)
-# を**両方** `it.skip` にすると 両側 **27 → 26** (`nextStepForStatus` 4/4 → 3/4、
-# `status === 413` が `[false]` だけになる)。**片方だけ外しても 27 のまま動かない** —
-# どちらか 1 本を「唯一の担保」と思わないこと。
-#
-# **404 も同じ形だった** (#1021 で実測)。`status === 404` の `[true]` 側を通す担保は
-# **2 ファイル 6 本**:
-#
-# - `tests/utils/api-error.test.ts` — 2 本 (`404 は「指した対象がもう無い」話にする` /
-#   `404 に「その他 4xx」「再ログイン」「権限」の文言を混ぜない (陰性対照)`)
-# - `tests/components/vehicle-settings-history-error-text.test.ts` — 4 本
-#   (C の 2 本 / `E. 404 …` / `C と E の 404 は、ボタンの表記だけが違う`)
-#
-# **unit 側の 2 本だけを `it.skip` にしても 両側 28 のまま動かない** (component 側が
-# 同じ枝を通すため)。**6 本すべて**を `it.skip` にして初めて 両側 **28 → 27**
-# (`nextStepForStatus` 5/5 → 4/5、`status === 404` が `[false]` だけになる)。
-# **1 ファイルだけ外して「動かない = 計測器が壊れている」と読まないこと。**
-#
-# **`describeFetchThrow` も同じ形だった** (#1006 で実測)。`e instanceof TypeError` の
-# **`[false]` 側 (= TypeError だったとき)** を通す担保は **2 ファイル 5 本**:
-#
-# - `tests/utils/api-error.test.ts` — 3 本 (`TypeError なら「どちらか」と書き、…` /
-#   `認証切れともネットワーク断とも断定しない (陰性対照)` /
-#   `message の文言が違っても同じ文になる (Chrome / Firefox / 空)`)
-# - `tests/utils/api.test.ts` — 2 本 (`request() 経由 — Failed to fetch のままにしない` /
-#   `生 fetch 経由 (getNetprintTargets) — 同じ 1 文になる`)
-#
-# **unit 側の 3 本だけを `it.skip` にしても 両側 29 のまま動かない** (`api.test.ts` が
-# `request()` / `fetchOrDescribe` 経由で同じ枝を通すため)。**5 本すべて**を `it.skip`
-# にして初めて 両側 **29 → 28** (`describeFetchThrow` 1/1 → 0/1、
-# `!(e instanceof TypeError)` が `[true]` だけになる)。**これで 3 回連続で同じ形**
-# — **担保が何本あるか数えてから外すこと。**
 # ## #1008 PR-2 — `describeCaughtError` を足した (2026-08-29 実測)
 #
 # **catch した例外**に「次の一手」を足す関数。`describeResponseFailure` の兄弟で、
@@ -540,58 +378,6 @@ branches = true
 # (`marginSummarySaveNote` は「まず画面を開き直してください」、
 # `allowanceOverrideSaveNote` は「あとでもう一度送ってください」)。
 # **合成後の 1 文を描画して読んで**から外した — ヘルパ 1 本を見て決めていない。
-#
-# **基準は `origin/main` b78116493dc9 + この PR。** 計測器 (`_shared/br-tooling`) は
-# 使う前に 2 段で検証した: ①片側だけ通る `if` が `[true]` / 両側通る `if` が
-# `[true,false]`、②値を壊さない (`pick(0,7)===0` / `orValue(0,7)===7` /
-# `andValue(0,'x')===0` / `ternary(0)==='F'`)。さらに**基準の再現** —
-# `origin/main` を別 worktree に出して同じ計測器を当て、**この toml の既存注記どおり
-# 32 site / 両側 31 / 片側 1 を再現**してから測っている。
-#
-# | 指標 | 対象 | base (b78116493dc9) | **+ #1008 PR-2** |
-# | --- | --- | --- | --- |
-# | v8 statements | ファイル全体 | 50 / 50 | **65 / 65** |
-# | v8 branch site | ファイル全体 | 25 | **31** |
-# | v8 branch arm | ファイル全体 | 51 / 51 | **63 / 63 (死に分岐 0)** |
-# | **BR() branch site** | **ファイル全体** | 32 — 両側 31 / 片側 1 | **38 — 両側 37 / 片側のみ 1 / 未到達 0** |
-# | BR() branch site | **`describeCaughtError`** | — (存在しない) | **2 — 両側 2** |
-# | BR() branch site | **`caughtErrorStatus`** | — (存在しない) | **4 — 両側 4** |
-#
-# **片側のみの 1 site は base と同じもの** (`detail = fallback || err.message ||
-# String(e)` の最終項 `String(e)`。`||` 連鎖の最終項は真偽で経路が分かれない)。
-# **増えた 6 site は 6 site とも両側**。
-#
-# ## 陰性対照 — 3 つの枝を**それぞれ**外して測った
-#
-# `tests/utils/api-error.test.ts` **1 ファイルだけ**で 両側 37 に届く
-# (= 全体を流したときと同値) ので、この対照はそのファイルに閉じている:
-#
-# | 外したもの | BR() | 落ちた site |
-# | --- | --- | --- |
-# | (基準) | 38 — 両側 **37** | — |
-# | 枝1 (transport) の 2 本 | 両側 **36** | `if (transport !== null)` が `[false]` だけに |
-# | 枝2 (status 判明) の 5 本 | 両側 **34** | `if (status === null)` が `[true]` だけ / `typeof err.statusCode === 'number'` が `[false]` だけ / `m === null ? …` が `[true]` だけ |
-# | 枝3 (status 不明) の 4 本 | 両側 **33** | `if (status === null)` が `[false]` だけ / `(e ?? {})` が `[true]` だけ / `typeof err.message !== 'string'` が `[false]` だけ / `m === null ? …` が `[false]` だけ |
-#
-# **★ repo 全体で流すと担保の本数が枝ごとに違う** (「1 本外して動かない = 計測器が
-# 壊れている」と読まないための実測):
-#
-# **★ 下の 2 行は「据え置き 3 か所」を外した後 (= この PR の最終形) で測り直してある。**
-# `.vue` を触ると repo 全体の担保の数は変わりうるので、`.vue` を変えたら測り直すこと。
-#
-# - **枝1 は上の 2 本が唯一の担保** — 全テストを流したまま 2 本を `it.skip` にすると
-#   **repo 全体でも 両側 37 → 36** に落ち、`if (transport !== null)` が `[false]` だけになる
-#   (`TypeError` を `describeCaughtError` に食わせているのはこの 2 本だけ)
-# - **枝3 (`if (status === null)` の `[true]` 側) は担保が多い** — 上の 4 本を
-#   `it.skip` にしても**全体では両側のまま動かない**。`operations` /
-#   `daily-hours` / `upload` / `restraint-report` の画面テストが
-#   `new Error('落ちた')` のような**この形に当たらないメッセージ**で同じ枝を通すため。
-#   一方 **`(e ?? {})` の nullish 側は 1 本だけが担保**で、こちらは全体でも落ちる
-#   (`describeCaughtError(null / undefined, …)` を渡しているのがその 1 本)。
-#   **実測: 4 本を `it.skip` にすると repo 全体で 両側 37 → 36。落ちるのは
-#   `452:16` (`e ?? {}`) だけで、`if (status === null)` は両側のまま。**
-#   ⇒ **「1 本外して両側 37 のままだった = 計測器が壊れている」と読まないこと。**
-#
 # ## `retry` の文字列そのものは別のテストが見張る
 #
 # `tests/components/next-step-retry-labels.test.ts` が
@@ -624,53 +410,6 @@ path = "app/utils/allowance-rate-master.ts"
 # 運行手当マスタの出どころ (R2 → 無ければ同梱の初期値) を決める pure util (Refs #805 PR-2)。
 # **3 状態 (`r2` / `seed` / `error`) を union で分けてある** — `error` に `rows` を
 # 持たせていないので、呼び出し側が `?? RATE_MASTER` と書けない。
-# ## 分岐の実測 — **指標名・対象・測定日・base SHA を必ず添える** (Refs #1030 #1009)
-#
-# 前の注記は「基準 = `origin/main` c918714 + この PR。branch site 25 / arm 54」とだけ
-# 書いていた。**指標が v8 だけで、BR() を 1 度も当てていなかった** — v8 の branches 100% は
-# **短絡で片側を見逃す**ので、それだけでは「両側を通した」と言えない。
-# 下は **base `31594a487f23` と #1017 ③ (`marginCacheRateStatus` ほかを足した回) を
-# 2026-08-28 に測り直した**値:
-#
-# | 指標 | 対象 | base 31594a487f23 | **#1017 ③ (2026-08-28 実測)** |
-# | --- | --- | --- | --- |
-# | v8 Stmts | ファイル全体 | 51 / 51 | **85 / 85** |
-# | v8 Funcs | ファイル全体 | 8 / 8 | **12 / 12** |
-# | v8 branch site / arm | ファイル全体 | 25 / 54 (54 被覆) | **42 / 88 (88 被覆)** |
-# | AST 分岐 (`if`+三項+`&&`+`\|\|`+`??`+`?.`) | ファイル全体 | 29 | **46** |
-# | **BR() branch site** | **ファイル全体** | **40 — 両側 39 / 片側のみ 1 / 未到達 0** | **59 — 両側 58 / 片側のみ 1 / 未到達 0** |
-# | BR() branch site | `parseRateRow` | 16 — 両側 16 | 16 — 両側 16 |
-# | BR() branch site | `resolveAllowanceRateMaster` | 15 — 両側 14 / **片側 1** | 15 — 両側 14 / **片側 1** |
-# | BR() branch site | `rateVerdict` | — | **6 — 両側 6** |
-# | BR() branch site | `marginCacheSentence` | — | **6 — 両側 6** |
-# | BR() branch site | `cachedRateVersionOf` | — | **4 — 両側 4** |
-# | BR() branch site | `marginCacheRateStatus` | — | **3 — 両側 3** |
-# | BR() branch site | `noticeBody` | 4 — 両側 4 | 4 — 両側 4 |
-# | BR() branch site | `allowanceRateNoticeForMargin` | 3 — 両側 3 | 3 — 両側 3 |
-#
-# **BR() と v8 は足せない・引けない別の指標** — BR() は `&&` / `||` を**左右の項に割り**、
-# `?.` を数えない。**どちらの指標かを書かずに数字だけ残さないこと。**
-# base の値は **`31594a4` の実装 + `31594a4` のテストに揃えて**測った (実装だけ戻すと嘘になる)。
-# v8 の base 値 (Stmts 51/51・Funcs 8/8・site 25 / arm 54) が**前の注記と一致**したのが較正。
-#
-# **両側でない 1 site は `resolveAllowanceRateMaster` の
-# `if (data === null || typeof data !== 'object' || Array.isArray(data))` の
-# 中間項 `typeof data !== 'object'`** (`[false]` 側だけ)。`data` が `null` でない非オブジェクト
-# (文字列・数値) を relay が `data` に入れて返す応答を、いまのテストが 1 本も作っていない。
-# **v8 はこの site を 100% と報告し続ける** (短絡で畳むため)。**#1017 ③ が足した site では
-# なく base にも在る**もので、この関数は **#1022 の所有**なので触っていない。
-#
-# **`parseRateRow` の 16 site が両側なのは #1044 のおかげ** (陰性対照で実測):
-# `tests/utils/allowance-rate-row-shared.test.ts` を外すと **両側 58 → 57** に落ち、
-# `parseRateRow` の `typeof raw !== 'object'` が `[false]` だけになる。
-# **#1017 ③ の base (`6e5eddd`) で測ったときは片側 2 件**だったのが、#1044 で 1 件に減った。
-#
-# **計測器と probe** (2026-08-28 に当日ぶんを確認): `_shared/br-tooling/{br.ts,instrument.mjs}`
-# (**clone と同じ階層 = repo の外**)。① 片側だけ通る `if` が `[true]` / 両側通る `if` が
-# `[false,true]`、② `pick(0,7) === 0` / `orValue(0,7) === 7` / `nullish(0,7) === 0` /
-# `ternary(0) === 'F'` — **計測器が値を壊していない**。**未到達 0 が陽性対照**でもある。
-#
-# **`seed` の既定引数 (`= RATE_MASTER`) も両側を通してある**。
 #
 # **カバレッジ 100% は値を検査していない。** 2026-08-27 に `describe.skip` で両方向を実測した:
 # - 値の砦 (`describe('R2 経由で解決したマスタ = 同梱の初期値 …')` の 5 本 = golden 24 経路の
@@ -720,9 +459,6 @@ branches = true
 #
 # 基準 = `origin/main` d91888c + この PR。実測で **Stmts 69/69・Funcs 14/14・
 # v8 branch site 32 / arm 68 (68 arm すべて被覆)**。
-# **`BR()` の instrumented コピーでも数え直した** — `||` / `&&` / `??` の項を 1 site ずつに
-# 割ると **site 37 / arm 74、片側しか通らない分岐 0 件**。v8 は短絡で死に分岐を
-# 見逃すので、この 2 通りが一致することまで見ている (memory `coverage-branch-instrumentation`)。
 #
 # **カバレッジ 100% は値を検査していない。** 実装を壊す 6 通りで落ちる本数を実測した
 # (全 63 本中):
@@ -786,10 +522,6 @@ path = "app/utils/allowance-force-match.ts"
 branches = true
 
 # デジタコのイベントCSV から 1 運行の非売上時間・走行距離・**便ごとの内訳**を出す pure util。
-# branches: TypeScript の AST で `if` / 三項 / `&&` `||` `??` / `?.` を `BR`/`NC` で包んだ
-# instrumented コピーを流して、**46 分岐すべて両側 OK** (#760 の 22 で 便ごとの拘束秒
-# `haulSec`/`approachSec`/`tailSec` を足して 40 → 46)。計測器は、通らない暗黙 else・
-# 評価されない `??` の右側・片側だけの三項を仕込んだ probe で先に検出できることを確かめてある。
 [[files]]
 path = "app/utils/allowance-idle.ts"
 branches = true
@@ -799,24 +531,9 @@ path = "app/utils/paged-fetch.ts"
 branches = true
 
 # 粗利 = 売上 − 手当 − 経費 (Refs #760)。燃費・単価の導出、経費の直課と距離比按分、
-# 粗利率・合計・CSV・**粗利の対象外の便**を持つ pure 関数。**branches も 100%**。
-# `if` の暗黙 else・三項の両側・`?.` の短絡・`??`/`||`/`&&` の右側を 1 つずつ
-# `IF`/`TER`/`OPT`/`RHS` で包んだ instrumented コピーを流して確かめている
-# (#757 で `branches 96.15%` を落とした反省。計測器そのものも、通らない暗黙 else と
-# 評価されない `??` の右側を仕込んだ probe で検出できることを先に確かめてある)。
-#
-# **#760 の 22 で AST で数え直した** (手で token を洗うのをやめ、TypeScript の
-# AST を歩いて `if` / 三項 / `&&` `||` `??` の左辺 / `?.` を機械的に列挙した):
-# `if` 44 + 三項 25 + `&&` 7 + `||` 16 + `??` 27 + `?.` 2 = **121 分岐**。
-# (以前は「条件 33 個 × 両側 + 論理演算子の右側 27 個 = 93 分岐」と書いてあった。
-# 数え方が違うだけで対象は同じ — AST はネストした三項や arrow の中の `if` も
-# 取りこぼさないので、こちらの方が多く出る。)
-#
-# **★ その「121 すべて両側 OK」は誤りだった** (Refs #842)。#760 の 22 は AST で
-# **site を数え直した**だけで、**片側しか通っていない site を数えていなかった** —
-# v8 は短絡のせいでこの 3 つを 100% と報告し続けていた。BR() の instrumented コピー
-# (BR site = `if` 44 + 三項 25 + `&&` 7×2 + `||` 16×2 + `??` 27 = **142**) を全テストに
-# 流すと、**右辺が false 側しか通らない `||` が 3 つ**あった:
+# 粗利率・合計・CSV・**粗利の対象外の便**を持つ pure 関数。
+# **★ #842 で `||` の右辺を 3 つ見直した** — v8 が branches 100% と報告し続けていた裏で、
+# 右辺が false 側しか通らないものが 3 つあった:
 #
 # - `positiveOrNull` の `|| !Number.isFinite(value)` → **通る。テストの側が間違っていた。**
 #   `JSON.parse('1e999')` は `Infinity` を返すのに、テストは `JSON.stringify` で往復させて
@@ -832,9 +549,6 @@ branches = true
 #   `fuelYen` は出るのに `marginYen` は null になる。`buildOperationMargins` から起こした
 #   テストを 1 本足して両側を通した。
 #
-# **いまの実測**: `if` 44 + 三項 25 + `&&` 7 + `||` 15 + `??` 27 + `?.` 2 = **120 分岐**、
-# BR site は **140 site すべて両側 OK** (陰性対照: 上の 2 本のテストを外すと 138 に落ちる)。
-#
 # **積み上げ棒の「赤字」判定は、画面に出る円の精度で決める** (Refs #840)。`shareBarOf` の
 # `costSum` は**費用 4 区分をその場で足し直したもの**、比べる相手の売上から出る粗利は
 # **運行 1 本ずつ足し込んだもの** — **同じ量を別の足し順で出した 2 つ**なので double では
@@ -849,76 +563,12 @@ branches = true
 # そのままでよい。**逆に true → false に転ぶ行はある** (超過が ¥1 未満の行) ので、
 # その回の `scale` は `salesYen ÷ costSum` → 厳密な `1` に変わる。**幅の差は全区分の合計でも
 # `100 ÷ costSum` %pt 未満** (売上 ¥100,000 の行で 0.001%pt 未満 = 幅 1000px で 0.005px 未満。実測)。
-# branches: `costExceedsSalesAtYen` は**分岐を 1 つも増やさない** (AST の数え上げでも
-# **当時の 142 site から変わらず**。#842 で `buildLegMargins` の死んだ `||` を外して
-# **140 site** になったが、これは別の話)。`overflow` の三項 2 本は**両側とも実測**。
-# v8 も 100%/100%/100%/100%。
 #
 # **同じ欠陥の 2 つ目の出口は `margin.vue` の `yen()` だった** (Refs #840)。`marginYen` は
 # `grossMarginYen ?? (salesYen − costSum)` で粗利ちょうど 0 の行では `-4.66e-10` のような
 # **尾つきの負**になり、`Math.round` が **`-0`** を返し **`(-0).toLocaleString()` は `"-0"`** なので
 # 画面に **`¥-0`** と出ていた。`yen()` 側で `+ 0` して `+0` に寄せた (**`margin.ts` は無関係**)。
 # この癖は `toLocaleString` にしか無い — `${-0}` は `"0"` なので `km()` / `pct()` / `pct1()` は無傷 (実測)。
-#
-# **★ 上の数字に測定日も base SHA も書いていなかったので測り直した (Refs #1030)。**
-# **実測は注記のまま正しい。** 下は **`origin/main` 6e5eddd65429 を 2026-08-28 に測り直した**値と、
-# **#1017 ③ (`MarginCache` に `rateSource` / `rateVersion` / `rateUpdatedAt` を足した回) で
-# 動いたぶんを同じ日に測り直した**値。**動いたのは `parseMarginCache` だけ**:
-#
-# | 指標 | 対象 | base 31594a487f23 (= 6e5eddd65429 と同値) | **#1017 ③ (2026-08-28 実測)** |
-# | --- | --- | --- | --- |
-# | AST 分岐 (`if`+三項+`&&`+`\|\|`+`??`+`?.`) | ファイル全体 | 120 (`if` 44 + 三項 25 + `&&` 7 + `\|\|` 15 + `??` 27 + `?.` 2) | **124** (`if` 44 + 三項 **28** + `&&` 7 + `\|\|` **16** + `??` 27 + `?.` 2) |
-# | **BR() branch site** | **ファイル全体** | **140 — 両側 140 / 片側のみ 0 / 未到達 0** | **145 — 両側 145 / 片側のみ 0 / 未到達 0** |
-# | BR() branch site | `parseMarginCache` | 16 — 両側 16 | **21 — 両側 21** |
-# | BR() branch site | `spreadCosts` | 11 — 両側 11 | 11 — 両側 11 |
-# | BR() branch site | `parseFuelRates` | 10 — 両側 10 | 10 — 両側 10 |
-# | v8 branch site / arm | ファイル全体 | 120 / 238 (238 被覆) | **124 / 246 (246 被覆)** |
-#
-# **base の 140 は自分でも測り直して一致を見た** (`31594a4` の実装 + `31594a4` のテストに
-# 揃えて全件実行。**実装だけ base に戻して測ると嘘になる**)。AST 側の counter も
-# **`if` 44 / 三項 25 / `&&` 7 / `||` 15 / `??` 27 / `?.` 2 の内訳ごと再現**してから
-# 当てている (較正 = 陽性対照)。
-#
-# **AST 分岐 と BR() は足せない・引けない別の指標** — BR() は `&&` / `||` を**左右の項に割り**、
-# `?.` を数えない。**どちらの指標かを書かずに数字だけ残さないこと** (それが #1030 の本体)。
-#
-# **注記より後にファイルが動いているが (`d91888c` = #1016)、分岐は 1 つも動いていない。**
-# 足したのは `master?: RateRow[]` (**既定値なし**) の透過と型 import と改行だけで、
-# **既定値を持たない optional param は分岐を増やさない** — `d91888c` の前後どちらでも
-# BR 140 / AST 120 (実測)。**「ファイルが動いた」は「分岐が動いた」ではない。**
-#
-# **書かなかった分岐は無い** (片側のみ 0 / 未到達 0)。
-#
-# **計測器と probe** (2026-08-28 に当日ぶんを再確認): `_shared/br-tooling/{br.ts,instrument.mjs}`
-# (**clone と同じ階層 = repo の外**。`.claude/worktrees/_shared/` ではない)。
-# ① 片側だけ通る `if` が `[true]` / 両側通る `if` が `[false,true]`、
-# ② `pick(0,7) === 0` / `orValue(0,7) === 7` / `nullish(0,7) === 0` / `ternary(0) === 'F'`
-# — **計測器が値を壊していない**。**#1030 で測り直した 8 ファイルはすべてこの probe の下**。
-# 各ファイルの **未到達 0 が陽性対照**でもある — instrumented コピーが読み込まれて
-# いなければ全 site が未到達に出る (実際、環境を壊した回はそう出た)。
-#
-# **#1017 ③ が動かした 5 site は全部 `parseMarginCache` の中**で、
-# `rateSource: cache.rateSource === 'r2' || cache.rateSource === 'seed' ? … : null` (3 site) と
-# `rateVersion` / `rateUpdatedAt` の `typeof … === 'string' ? … : null` (各 1 site)。
-# **5 site とも両側**を通してある (欄が無い / `null` / 知らない値 / 正しい値 の 4 通りを
-# `tests/utils/margin.test.ts` の `parseMarginCache` の describe が当てている)。
-#
-# **測定は `6e5eddd65429` で行い、その後 `2b773159` まで rebase した。**#1030 で測った
-# 9 ファイル (`margin.ts` / `operation-route-map.ts` / `kushiro-branch-view.ts` /
-# `kushiro-doto-rebuild.ts` / `kushiro-loading-legs.ts` / `operation-leg-sales.ts` /
-# `profit-wage-formula.ts` (+`profit-wage-mix.ts`) / `margin-driver-share.ts` /
-# `margin-r2.ts`) は **`6e5eddd65429..2b773159` で 1 行も動いていない** (実測) ので、
-# **上の値は `2b773159` でもそのまま有効**。
-# (`workers/kyuyo-mcp/src/kushiro-loading-legs.ts` はこの間に動いているが、
-# **`app/utils/kushiro-loading-legs.ts` とは別ファイル**。同名なので取り違えないこと。)
-#
-# **陰性対照** (2026-08-28 実測): `positiveOrNull` の `|| !Number.isFinite(value)` の **`[true]`
-# 側を通す担保は `tests/utils/margin.test.ts` の 2 本** (`数でない / NaN / 0 以下 は
-# どれも入っていない扱い` / `Infinity は「消す」扱い (入力欄に 1e999 と打てる)`)。
-# **1 本目だけ `it.skip` にすると 両側 140 → 139 に動くが、落ちるのは `parseFuelRates` の
-# 別 site で、`positiveOrNull` は 5/5 のまま**。**2 本とも外して初めて 138** になり、
-# `319:36` (`!Number.isFinite`) が `[false]` だけになる。
-# **数字が動いたことを「担保はこの 1 本」の証拠と読まないこと** — 担保の本数を先に数える。
 [[files]]
 path = "app/utils/margin.ts"
 branches = true
@@ -931,30 +581,6 @@ branches = true
 # 重ね掛け行も混ぜて軌跡を密にする buildOverlayTrack も持つ (Refs #760 の 24)。
 # 地図のレイヤ切替 (軌跡 / 直線 / マーカー) の parseRouteMapLayers / filterRouteByLayers
 # も持つ (Refs #760 の 25)。
-# branches: BR() で包んだ instrumented コピーで
-# 61 条件 (`if` / 三項 / `&&` `||` `??` の各項。#760 の 19 で 37 → 41、#760 の 21 で
-# NET780 軌跡の時間窓 windows / splitTrackByWindows を足して 53、#760 の 24 で
-# buildOverlayTrack のぶん 61) すべて両側 OK。#760 の 25 は TS compiler API で
-# if / 三項 / && || の左 / ?? を機械的に包み直して 64 条件すべて両側 OK
-# (**★ この 64 は指標が再現できない。下の 2026-08-28 実測 = BR 76 を見ること — Refs #1030**)。
-# **★ 上の「64 条件」は指標も測定条件も書いておらず、いま再現できない (Refs #1030)。**
-# `origin/main` 6e5eddd65429 を 2026-08-28 に **BR() で測り直した**値:
-#
-# | 指標 | 対象 | 値 (6e5eddd65429 / 2026-08-28 実測) |
-# | --- | --- | --- |
-# | AST 分岐 (`if`+三項+`&&`+`||`+`??`+`?.`) | ファイル全体 | 57 (`if` 24 + 三項 13 + `&&` 11 + `||` 8 + `??` 1 + `?.` 0) |
-# | **BR() branch site** | **ファイル全体** | **76 — 両側 76 / 片側のみ 0 / 未到達 0** |
-#
-# **64 と引き算しないこと。** 上の 64 は「`&&` `||` の**左だけ**包む」計測器の値で、
-# BR() は**左右の項を別々に**数える。母数の定義が違うので差に因果を付けられない
-# (`operation-leg-sales.ts` の注記が #867 で踏んだのと同じ型)。
-# **書かなかった分岐は無い** (片側のみ 0 / 未到達 0)。
-#
-# **陰性対照** (2026-08-28 実測): 担保は **3 ファイル** (`tests/utils/operation-route-map.test.ts` /
-# `tests/components/operation-detail-route-map.test.ts` / `tests/utils/margin-rebuild-input.test.ts`)。
-# 1 本目だけ外すと 両側 **76 → 57** (片側 15 / 未到達 4)、**3 本とも外すと 両側 0 /
-# 未到達 71**。**`vitest --exclude` では外れない** (171 files のまま = 空振り) ので、
-# **test ファイルを退避して file 数が減ったことを見てから数字を読むこと。**
 [[files]]
 path = "app/utils/operation-route-map.ts"
 branches = true
@@ -963,8 +589,6 @@ branches = true
 # (Refs #760 の 23)。relay の `deriveOpeNoFromUnkoNo` と同じ導出に、画面から任意の
 # 値が来る前提の範囲検証 (月日時分秒) を足したもの。いまは NET780 一括取得
 # (`server/utils/net780-archive.ts`) が使う。
-# branches: BR() で包んだ instrumented コピーで **9 分岐 (`if` 7 + `&&` の左右)
-# すべて両側 OK** を実測してから登録した。
 [[files]]
 path = "server/utils/operation-zip.ts"
 branches = true
@@ -972,7 +596,6 @@ branches = true
 # NET780 一括取得 (Refs #760 の 27) の pure な部品。relay の応答の型と、画面が
 # `NET780_ARCHIVE_BATCH_SIZE` 件ずつ直列に呼ぶための分割 (`chunk`)・残りの計算 (`remainingNet780ArchiveTargets`)・
 # 結果の集計 (`summarizeNet780ArchiveResults` / `formatNet780ArchiveSummary`)。
-# branches: BR() で包んだ instrumented コピーで全分岐両側 OK を実測してから登録した。
 [[files]]
 path = "app/utils/net780-archive.ts"
 branches = true
@@ -1013,8 +636,6 @@ branches = true
 # `OBIHIRO_DEPOT`) と営業所をキーで選ぶ `DEPOTS` + `isValidLatLng` + 直線距離
 # `haversineKm` (欠測・範囲外は 0 ではなく null)。座標型は新設せず `operation-route-map.ts` の `LatLng` (= `getGpsForCell` の
 # 戻り値) を type-only import している。
-# branches: BR() で包んだ instrumented コピーで **9 分岐 (`if` 5 + `||` の左右 4)
-# すべて両側 OK** を実測してから登録した (V8 の未実行レンジも 0)。
 [[files]]
 path = "app/utils/depot-distance.ts"
 branches = true
@@ -1023,19 +644,6 @@ branches = true
 # (pure / mixed / none)、営業所を差し替えた回送の**両側とも推定**での試算、経路・
 # 乗務員別の集計、回送の実測平均速度。入力型は新設せず `margin.ts` の
 # `OperationMargin`/`LegMargin` と `allowance-idle.ts` の `OperationIdle` の部分型で受ける。
-# branches: BR() で包んだ instrumented コピーで **23 分岐 (`if` 12 + `||` の各項 7 +
-# 三項 1 + `??` 相当 2 + 既定引数 1) すべて両側 OK** を実測してから登録した
-# (**★ 内訳の「既定引数 1」は誤り。総数 23 は正しい — 下を見ること。Refs #1030**)
-# (V8 の未実行レンジも 0)。
-# **★ 測定日も base SHA も書いていなかったので測り直した (Refs #1030)。総数 23 は正しい。**
-#
-# | 指標 | 対象 | 値 (6e5eddd65429 / 2026-08-28 実測) |
-# | --- | --- | --- |
-# | **BR() branch site** | **ファイル全体** | **23 — 両側 23 / 片側のみ 0 / 未到達 0** |
-#
-# **ただし上の内訳の「既定引数 1」は誤り** — **BR() は既定引数を包まない**。正しくは
-# `if` 12 + 三項 1 + **`||` の各項 8** (`||` 4 本 × 左右) + `??` 2 = 23。総数が合っていた
-# ぶん見逃されていた。**書かなかった分岐は無い** (片側のみ 0 / 未到達 0)。
 [[files]]
 path = "app/utils/kushiro-loading-legs.ts"
 branches = true
@@ -1049,26 +657,7 @@ branches = true
 # 「1 日に何便まわすか」は**変数** (オーナー指示 2026-08-23) なので、感度分析
 # (`sensitivityGrid`) と損益分岐 (`breakEvenLegsPerDay`) は**便/日 を引数で受けるだけの
 # 純粋関数**にしてある — 既定値はこのファイルに埋めず、決めるのは呼び出し側 (tool / 画面)。
-# branches: BR() で包んだ instrumented コピーで **54 分岐 (`if` 17 + `||`/`&&` の各項 24 +
-# 三項 7 + `??` 相当 5 + 既定引数 1) すべて両側 OK** を実測してから登録した
-# (**★ この 54 も内訳の「既定引数 1」も誤り。下の 2026-08-28 実測 = BR 65 を見ること — Refs #1030**)
-# (probe を 1 本刺して branches が 98.55% に落ちることを先に確認済み。V8 の未実行レンジも 0。
-# `sensitivityRow` の `drivers > 0` は到達しない分岐だったので、ガードごと外した)。
 # Refs #760 の 38 で `substitutedUnloadLegs` (卸地を運行終了で代用した便の数) を足した。
-# 数えるのは**推定に入った便だけ**なので、`addRebuildLeg` の新しい `if` は
-# 「代用あり」「代用あり かつ 座標欠け」「代用なし」の 3 本で両側を通してある。
-# **★ 上の「54 分岐」は実測と食い違う (Refs #1030)。** この注記の日付 (`2026-08-23`) は
-# **オーナー指示の日であって測定日ではなく**、base SHA も無い。`origin/main` 6e5eddd65429 を
-# 2026-08-28 に BR() で測り直した値:
-#
-# | 指標 | 対象 | 値 (6e5eddd65429 / 2026-08-28 実測) |
-# | --- | --- | --- |
-# | AST 分岐 (`if`+三項+`&&`+`||`+`??`+`?.`) | ファイル全体 | 51 (`if` 19 + 三項 12 + `&&` 3 + `||` 11 + `??` 6 + `?.` 0) |
-# | **BR() branch site** | **ファイル全体** | **65 — 両側 65 / 片側のみ 0 / 未到達 0** |
-#
-# **内訳の「既定引数 1」は誤り** — **BR() は既定引数を包まない** (`kushiro-loading-legs.ts`
-# と同じ誤り。1 か所直したら語を広げて grep すること)。
-# **書かなかった分岐は無い** (片側のみ 0 / 未到達 0)。
 [[files]]
 path = "app/utils/kushiro-doto-rebuild.ts"
 branches = true
@@ -1077,12 +666,7 @@ branches = true
 # 畳む mapper と、`MarginOperationInput[]` + 座標 → `RebuildOperationInput[]` の組み立て、
 # 保存 (別キー) だけの pure util。**共有 fixture (道東 23 運行) に 1 バイトも違わず戻る**
 # ことをテストが固定している。
-# branches: BR() で包んだ instrumented コピーで**全分岐の両側**を実測してから登録。
 # Refs #760 の 38 で「降しの記録が無い最終便の卸地を運行終了で代用する」を足した。
-# 新しい分岐 (`legCount <= 0` / `operationEnd === null` / `最終便に卸地がある` /
-# `最終便の枠そのものが無い` / marker が `end` か) は**片側ずつ専用テストを置いてある**。
-# 到達しない分岐を 1 本刺すと v8 が branches 97.82% / 該当行 UNCOVERED を出すことを
-# probe で確認済み (2026-08-24)。
 [[files]]
 path = "app/utils/margin-rebuild-input.ts"
 branches = true
@@ -1093,41 +677,12 @@ branches = true
 # (2) 最低賃金マスタの**キーの流儀が 2 つある**問題 (本番 R2 は県名キー / フロントの
 # 単価マスタタブは `全社共通`) を吸収して額を引くこと、(3) 最低賃金をちょうど満たす 便/日
 # を解析的に解くこと の 3 つだけ。欠測は 0 に倒さず `null` のまま返す。
-# branches: probe (`if` の暗黙 else / `??` の右 / 三項の false / `&&` の右) を先に刺して
-# 計測器が 4/8 を UNCOVERED と出すことを確認したうえで、BR() で包んだ instrumented コピーで
-# **30 条件すべてが true/false 両方を通る**ことを実測してから登録した
-# (**★ この 30 は誤り。下の 2026-08-28 実測 = BR 44 を見ること — Refs #1030**)。
-# v8 が 100% と言った状態でも `entryAt` の「より新しいか」の false 側と
-# `master?.branchToPrefecture?.` の undefined 側が**片側しか通っていなかった** —
-# v8 は `||` の右「項が評価されたか」しか数えず、その**結果**は数えない。
-# **★ 上の「30 条件」は実測と食い違う (Refs #1030)。** `origin/main` 6e5eddd65429 を 2026-08-28 に
-# BR() で測り直すと **44**。しかも**注記を書いた時点 (`0680fe5`) のファイルでも既に 44** で、
-# **後からファイルが動いて増えたのではなく、書いた時点で 30 が間違っていた**
-# (30 に合う数え方を再現できない。母数の定義は不明)。
-#
-# | 指標 | 対象 | 値 (6e5eddd65429 / 2026-08-28 実測) |
-# | --- | --- | --- |
-# | AST 分岐 (`if`+三項+`&&`+`||`+`??`+`?.`) | ファイル全体 | 44 (`if` 16 + 三項 9 + `&&` 2 + `||` 5 + `??` 5 + `?.` 7) |
-# | **BR() branch site** | **ファイル全体** | **44 — 両側 44 / 片側のみ 0 / 未到達 0** |
-# | BR() branch site | `minWageLegsPerDay` | 8 — 両側 8 |
-# | BR() branch site | `entryAt` | 5 — 両側 5 |
-# | BR() branch site | `readViewerCompId` | 5 — 両側 5 |
-#
-# **2 つの指標が同じ 44 になるのは偶然** — BR() は `&&`/`||` を割って **+7**、`?.` を
-# 数えず **−7**。**一致していても同じものを数えてはいない。足さない・引かない。**
-# **書かなかった分岐は無い** (片側のみ 0 / 未到達 0)。
-#
-# **陰性対照** (2026-08-28 実測): 担保は **2 ファイル** (`tests/utils/kushiro-branch-view.test.ts` /
-# `tests/components/KushiroBranchPanel.test.ts`)。1 本目だけ外すと 両側 **44 → 28**
-# (片側 14 / 未到達 2)、**2 本とも外すと 両側 2 / 未到達 24**。
 [[files]]
 path = "app/utils/kushiro-branch-view.ts"
 branches = true
 
 # 上の素材を並べるだけの表示専用コンポーネント (Refs #760 の 36)。計算はしない。
 # 「実在しない試算」バッジは**条件分岐なしで固定表示** (オーナー要件)。
-# branches: テンプレートの `v-if` は三項にコンパイルされ、上の probe で v8 が三項の
-# 通らない側を検出できることを確認済み。両側を通すテストを置いてある。
 [[files]]
 path = "app/components/KushiroBranchPanel.vue"
 branches = true
@@ -1137,22 +692,8 @@ branches = true
 # 表がそのまま使っている `DriverMargin.totals` を棒の形に並べ替え、合計は
 # `summarizeMargins` (中核) にもう一度畳ませるだけ。棒の 5 区分は表の 5 列そのもので、
 # 直課経費 + 固定費按分だけ取引先版と同じ「運行経費の配分」1 区分に束ねる。
-# branches: probe (`if` の暗黙 else / `??` の右 / 三項の false / `&&` の右) を刺して
-# **v8 は `if` の暗黙 else を UNCOVERED に出さない** ことを実測 (20 分岐中 5 件しか
-# 落ちず、`if` の行だけ Uncovered に出なかった) してから、BR() で包んだ instrumented
-# コピーで **5 条件すべてが true/false 両方を通る**ことを数えて登録した。
 # **赤字の判定は `margin.ts` の `costExceedsSalesAtYen` に預けてある** (Refs #840) —
 # **取引先版と同じ 1 つの関数**を通すので、片方だけ直して挙動が割れることが無い。
-# 分岐は 5 のまま (判定に分岐は無い)。`overflow` の三項 2 本は両側とも実測。
-# **★ 測定日も base SHA も書いていなかったので測り直した (Refs #1030)。5 は正しい。**
-#
-# | 指標 | 対象 | 値 (6e5eddd65429 / 2026-08-28 実測) |
-# | --- | --- | --- |
-# | **BR() branch site** | **ファイル全体** | **5 — 両側 5 / 片側のみ 0 / 未到達 0** |
-#
-# 内訳は `if` 2 + 三項 3。**`&&` / `||` / `??` / `?.` が 1 つも無いので、このファイルに
-# 限り BR() branch site と AST 分岐が必ず一致する** (他のファイルでは一致しない)。
-# **書かなかった分岐は無い** (片側のみ 0 / 未到達 0)。
 [[files]]
 path = "app/utils/margin-driver-share.ts"
 branches = true
@@ -1163,11 +704,6 @@ branches = true
 # 1 円も効かない** (`margin.ts` は 1 行も触っていない)。
 # **欠測を 0 に倒さない**分岐 (拘束が引けない乗務員 / 対象外便が取れていない月 /
 # 金額の決まらなかった便) が中核なので、その両側を数えることに意味がある。
-# branches: BR() 計測器を probe (片側しか通らない `if` を仕込んだ .ts) で先に検証して
-# から、`??` `||` `&&` `?:` と全 `if` を BR() で包んだ instrumented コピーで **52 分岐
-# すべてが true/false 両方を通る**ことを数えた。**v8 が branches 100% を出した状態でも
-# 片側しか通っていない分岐が 2 件あった** (`Number.isFinite(month)` の false 側と
-# `Number.isFinite(yen)` の false 側 — どちらも `||` / `&&` の短絡で評価されていなかった)。
 [[files]]
 path = "app/utils/profit-allowance-base.ts"
 branches = true
@@ -1183,12 +719,6 @@ branches = true
 # **粗利の数字には 1 円も効かない** (`margin.ts` は 1 行も触っていない)。
 # **0 に倒さない**分岐 (行が無い乗務員は鍵を作らない / 乗務員CD が空の行は落とす /
 # 上限で切れたら期間を割って引き直し、割れなければ投げる) が中核。
-# branches: BR() 計測器を probe (片側しか通らない `if` と、評価されない `??` の右を
-# 仕込んだ .ts) で**両方向に**検証 — 片側だけ通した probe が `[true]` を、両側通した
-# probe が `[true,false]` を返すことを実測してから、`if` / 三項 / `&&` `||` の両辺 /
-# `??` の左辺 を BR() で包んだ instrumented コピー (TypeScript の AST で機械的に挿入)
-# でテストを流し、**`profit-actual-wage.ts` の 9 分岐 + `profit-wage-mix.ts` の 24 分岐
-# = 33 分岐すべてが true/false 両方を通る**ことを数えた (v8 も 100%/100%)。
 [[files]]
 path = "app/utils/profit-actual-wage.ts"
 branches = true
@@ -1200,22 +730,6 @@ branches = true
 # (掛け直すと表とホバーで金額が食い違う)。
 # **欠測 (拘束が引けず金額 null) の行は式を出さない**分岐と、**法定休日の項は
 # 有るときだけ並べる**分岐が中核なので、その両側を数えることに意味がある。
-# branches: BR() 計測器を probe (片側だけ通る `if` / 両側通る `if` / 右を評価しない
-# `??` を仕込んだ .ts) で**両方向に**検証 — 片側の probe が `[true]`、両側の probe が
-# `[true,false]`、`??` の左が `[true]` を返すことを実測してから、instrumented コピー
-# (TypeScript の AST で機械挿入) でテストを流し、**`profit-wage-formula.ts` の 5 分岐
-# + `profit-wage-mix.ts` の 24 分岐 = 29 分岐すべてが true/false 両方を通る**ことを
-# 数えた (v8 も 100%/100%)。
-# **★ 測定日も base SHA も書いていなかったので測り直した (Refs #1030)。5 + 24 = 29 は正しい。**
-#
-# | 指標 | 対象 | 値 (6e5eddd65429 / 2026-08-28 実測) |
-# | --- | --- | --- |
-# | **BR() branch site** | **`profit-wage-formula.ts` 全体** | **5 — 両側 5 / 片側のみ 0 / 未到達 0** |
-# | BR() branch site | `profit-wage-mix.ts` 全体 | 24 — 両側 24 / 片側のみ 0 / 未到達 0 |
-#
-# `profit-wage-formula.ts` の内訳は `if` 3 + 三項 2 (`&&` / `||` / `??` / `?.` は 0)。
-# **上の「29 分岐」は 2 ファイルの和なので、このブロック単体の指標として読まないこと。**
-# **書かなかった分岐は無い** (両ファイルとも 片側のみ 0 / 未到達 0)。
 [[files]]
 path = "app/utils/profit-wage-formula.ts"
 branches = true
@@ -1226,11 +740,6 @@ branches = true
 # 触っていない。`legRefs` は行の数字に効かない「便の居場所」で、地図も同じものを読む)。
 # **運行日が引けない運行を 0 や空文字に潰さず `null` で末尾へ寄せる**分岐が中核なので、
 # その両側を数えることに意味がある (空文字にするとどの日付より小さく、月初に並ぶ)。
-# branches: BR() 計測器を probe (片側だけ通る `if` / 両側通る `if` / 右を評価しない
-# `??` を仕込んだ .ts) で**両方向に**検証 — 片側の probe が `[true]`、両側の probe が
-# `[true,false]`、`??` の左が `[true]` を返すことを実測してから、instrumented コピー
-# (TypeScript の AST で機械挿入) でテストを流し、**9 分岐すべてが true/false 両方を
-# 通る**ことを数えた (v8 も 100%/100%)。
 [[files]]
 path = "app/utils/margin-route-operations.ts"
 branches = true
@@ -1256,12 +765,6 @@ branches = true
 # 読めなければ全部やめる**。読めなかった便が当てていた明細が「まだ空いている」ように
 # 見えると、人がそれを結んで**同じ売上が 2 つの便に乗る**ため。**空の `Set` に倒さない**
 # (`missing` / `not-aggregated` を返して呼び出し側に候補欄ごと出させない) 分岐が中核。
-# branches: BR() 計測器を probe (片側だけ通る `if` / 両側通る `if` / 右を評価しない
-# `??` を仕込んだ .ts) で**両方向に**検証 — 片側の probe が `[true]`、両側の probe が
-# `[true,false]`、`??` の左が `[true]` を返すことと、**計測器が値を壊していないこと**
-# (`pick(0,7) === 0` / `orValue(0,7) === 7`) を実測してから、instrumented コピー
-# (TypeScript の AST で機械挿入) でテストを流し、**58 分岐すべてが true/false 両方を
-# 通る**ことを数えた (v8 も 100%/100%、テスト 46 本)。
 # **#854 で `slipIdsBySeq` (便ごとの `slipIds`) を同じ返り値に足した。** 収支パネルは
 # 「候補から外す相手」(和集合) と「この便に①が当てたもの」(per-leg) の**両方**が要る。
 # **別の関数から取らない** — `parseOperationLegSales` は読めた便だけ返す緩い読みなので、
@@ -1271,29 +774,6 @@ branches = true
 # 付けた。この一言は単独では出ず、`resolveLegSalesPanel` が
 # `${legSalesNote(local)} ${r2Note(fetch)}` と **R2 側の事情と 1 文に繋げて**出すため
 # (付いていないと「…集計すると出ます R2 の版 (…) にもこの運行はありません」と繋がる)。
-# **分岐は 1 つも増減していない。** #867 で再計測したときの値は
-# **`if` / `?:` / `&&` / `||` / `??` を TypeScript の AST で機械挿入する計測器で 50 分岐、
-# 全部が true/false 両方を通る**。**上の 58 とは数え方が違う** (差の内訳は未確認) ので、
-# **2 つの数字を直接引き算しない** — どちらも「自分が数えた分岐が全部両側を通った」を
-# 言っているだけで、母数の定義が違う。
-# ★ **#867 で一度「差は `?.` 等を数えたぶんだ」と書いたが、これは測らずに書いた推測で、
-# しかも成り立たない** — このファイルの `?.` は **1 個**しかなく、差 8 を説明できない。
-# **数字の差に因果を付けるなら、同じ定義で数え直してからにする** (#858 で 3 者が 3 通りの
-# 数字を出したとき壊れたのは、数字ではなく**因果の推論**の方だった)。
-# **次の人が同じ推測をやり直さないよう、外れの向きも書いておく**: この toml の `margin.ts`
-# の注記 (#760 の 22) は **AST 計測器が `?.` も数え、数え直すと増える**と書いている。
-# `?.` を数えない #867 の計測器は**むしろ少なく出る**はずで、**差 8 は向きも大きさも
-# 合わない。⇒ `?.` は原因ではない** (本当の内訳は未確認のまま。#867 には要らない)。
-# **★ 測定日も base SHA も書いていなかったので測り直した (Refs #1030)。58 は正しい。**
-#
-# | 指標 | 対象 | 値 (6e5eddd65429 / 2026-08-28 実測) |
-# | --- | --- | --- |
-# | **BR() branch site** | **ファイル全体** | **58 — 両側 58 / 片側のみ 0 / 未到達 0** |
-# | AST 分岐 (`if`+三項+`&&`+`||`+`??`+`?.`) | ファイル全体 | 51 (`if` 40 + 三項 1 + `&&` 1 + `||` 7 + `??` 1 + `?.` 1) |
-#
-# **上の「#867 の 50」との差の内訳は今回も未確認** — 定義の違う 3 つ目の数字を足さない
-# ため、**BR() の 58 を正とし、指標名と測定条件を添えて残す**。**58 − 50 に意味を持たせない。**
-# **書かなかった分岐は無い** (片側のみ 0 / 未到達 0)。
 [[files]]
 path = "app/utils/operation-leg-sales.ts"
 branches = true
@@ -1354,22 +834,6 @@ branches = true
 # ★ **収支パネルの候補ゲート (`lookupUsedSlipIds`) はここに乗せない。** あちらは
 # 「①が既にどこかの便へ当てた明細」の**和集合**が要り、版は `slipIds` を持たないので
 # 落とすと空集合になり**必ず**二重計上の口になる。localStorage のままにしてある (別 issue)。
-# branches: instrumented コピー (`if` / `?:` / `&&` / `||` / `??` を TypeScript の AST で
-# 機械挿入する計測器) でテストを流し、**44 分岐すべてが true/false 両方を通る**ことを数えた。
-# **origin/main de2db18 を同じ計測器で測ると 42** で、差 2 の内訳も突き合わせてある
-# (分岐の式を機械比較した結果): **増えたのは `localYm !== null` と `localYm === null` の 2 つ
-# だけ**。`legSalesSourceLabel` の `savedAt === null`(三項) → `savedAt !== null`(if) と、
-# `local.status === 'not-aggregated'` の早期 return → 三項は**書き方が変わっただけで数は同じ**
-# (だから差には寄与していない)。**別々の計測器の数字は引き算しない**が、これは
-# 両方を同じ計測器で測っているので比較が成立する。
-# probe 2 段 (片側だけ通る `if` が `[true]` / 両側が `[true,false]`、
-# `pick(0,7)===7` `pick(3,7)===3` `orValue(0,7)===0` `orValue(null,7)===7`
-# `andValue(0,7)===false` `andValue(1,7)===7` で**計測器が値を壊していない**こと。
-# ★ `pick` / `orValue` の中身は上の `operation-leg-sales.ts` の注記と**入れ替わっている**
-# — あちらの `orValue` は `||`、こちらの `orValue` は `??`。**同じ名前で別の式**なので、
-# probe の値を比べるときは定義から見ること) と**陰性対照**も取ってある —
-# `not-aggregated` の describe を外すと `localYm === null` が `true のみ` に落ち、
-# 両側は 44 → 43 になる。
 [[files]]
 path = "app/utils/operation-leg-sales-r2.ts"
 branches = true
@@ -1441,17 +905,6 @@ branches = true
 # 分けてある (あちらはキー 1 本を受けて `(不明)`、こちらは 2 引数で `(積地なし)` /
 # `(卸地なし)` = 「分からない」ではなく「そのイベントが無い」)。同名だと Nuxt の
 # auto-import が片方を黙って捨てる (`Duplicated imports` の WARN) ので実害もある。
-# branches: 上と同じ instrumented コピーで**BR site 23 のうち 21 が true/false 両方**を
-# 通ることを数えた (#860、`tests/utils/profit-panel-legs.test.ts` +
-# `tests/components/ProfitPanel.test.ts` の **129 本**を流して実測)。
-# **片側だけの 2 つは `legRouteLabel` の `||` の右辺の文字列リテラル**
-# (`'(積地なし)'` / `'(卸地なし)'`) で、常に真なので経路が分かれない。
-# **これは `ProfitPanel.vue` の `legLabel` から移ってきたもの** — repo 全体で見れば
-# 死に分岐は増えていない (v8 も数えないので gate は 100%)。
-# **★ 前の注記の「20 分岐」は再現できなかった。** origin/main (09f6d55) で測り直すと
-# **BR site 18 (両側 18) / v8 site 17 / v8 arm 34** で、20 はどの指標とも一致しない
-# (#860 の後は BR 23 / v8 site 20 / v8 arm 40)。**指標を名乗らずに数字だけ書いたのが
-# 原因**なので、以後この注記は**必ず「BR site」か「v8 site/arm」かを書く。**
 [[files]]
 path = "app/utils/profit-panel-legs.ts"
 branches = true
@@ -1470,27 +923,6 @@ branches = true
 # `fuelRateFingerprint` (ハッシュのキー順を外す) は**分岐を 1 つも持たない**
 # (`Object.keys().sort().map()` だけ)。**受け取り側で既定に倒さない**のが要点 —
 # 倒すと嘘の指紋が版に残り、理由の分からない版が理由を偽った版になる。
-# branches: BR() 計測器を probe (片側だけ通る `if` / 両側通る `if` / 右を評価しない `??`)
-# で**両方向に**検証し、さらに**計測器が値を壊していないこと** (`||` / `??` / 三項の
-# 返り値が素の実装と一致) を確かめてから、instrumented コピー (TypeScript の AST で
-# 機械挿入) でテストを流して**全分岐が true/false 両方を通る**ことを数えた。
-# **★ 分岐の実数を 1 つも書いていなかったので測って足した (Refs #1030)。**
-#
-# | 指標 | 対象 | 値 (6e5eddd65429 / 2026-08-28 実測) |
-# | --- | --- | --- |
-# | **BR() branch site** | **ファイル全体** | **7 — 両側 7 / 片側のみ 0 / 未到達 0** |
-# | BR() branch site | `marginSummarySaveNote` | 4 — 両側 4 |
-# | BR() branch site | `isRunCostShareMode` | 2 — 両側 2 |
-# | BR() branch site | `marginVersionLabel` | 1 — 両側 1 |
-#
-# AST 分岐は 6 (`if` 3 + 三項 2 + `&&` 1)。**BR() が 1 多いのは `&&` を左右に割るため。**
-# 上の「**分岐は 2 つ増えた**」(#886) はこの 7 の内訳の話で、`isRunCostShareMode` の 2 site
-# がそれ。**書かなかった分岐は無い** (片側のみ 0 / 未到達 0)。
-#
-# **陰性対照** (2026-08-28 実測): 担保は **4 ファイル** (`tests/utils/margin-r2.test.ts` /
-# `tests/utils/margin-diff.test.ts` / `tests/server/profit-margin-summary.test.ts` /
-# `tests/server/profit-margin-snapshot.test.ts`)。1 本目だけ外すと 両側 **7 → 2**
-# (片側 2 / 未到達 3)、**4 本とも外すと 両側 0 / 未到達 5**。
 [[files]]
 path = "app/utils/margin-r2.ts"
 branches = true
@@ -1530,10 +962,6 @@ branches = true
 # 描くと「なぜこの行だけ金額が無いのか」が読む人に分からない (#831 で直した「穴が別の意味に
 # 読める」型と同じ)。注記も本数も**別勘定** (`omitted` / `unreadable`)。文言は定数
 # (`MARGIN_VERSION_TOTALS_STATE_LABELS` / `..._TITLES`) にして**変異テストで固定**した。
-# branches: BR/BRN 計測器を **2 段の probe** で先に検証 — ①片側だけ通した `if` が `[true]`、
-# 両側が `[true,false]` を返すこと ②instrumented コピーでも `||` `??` `?:` の**返り値が
-# 素の実装と一致**すること — したうえで、AST で機械的に包んだコピーでテストを流し、
-# **8 分岐すべてが true/false 両方**を通ることを数えた (v8 も 100%/100%、テスト 29 本)。
 [[files]]
 path = "app/utils/margin-versions.ts"
 branches = true
@@ -1559,11 +987,6 @@ branches = true
 # server route は**版 1 本の本文を返すだけ** — 差分のロジックは持たせない (画面が 2 本取って
 # `margin-diff.ts` を呼ぶ)。**画面が持つ R2 のキーをそのまま鍵にしない** (ym と版の名前を
 # 受けて `marginR2Paths` で組み直す = そのまま境界になる)。
-# branches: 計測器の **2 段 probe** を先に回した — ①片側だけ通した `if` が `[true]`、両側が
-# `[true,false]` ②instrumented コピーでも `||` `??` `?:` の**返り値が素の実装と一致**
-# (`pick(0,7)===7` / `nn(null)==='fb'` / `andv('','b')===''`) — そのうえで AST で機械的に
-# 包んだコピーでテストを流し、**24 分岐すべてが true/false 両方**を通ることを数えた
-# (v8 も 100%/100%、テスト 41 本)。
 # **動いたかどうかは「画面に出る精度」で決める** (Refs #838)。保存された `totals.marginYen` は
 # 按分の割り算のぶん `4467597.000000001` と尾を持つ (**それ自体は正常**)。厳密比較のままだと
 # **合計の足し順が変わるだけのリファクタ**で「粗利が **¥0** 動いた」と出るので、
@@ -1571,9 +994,6 @@ branches = true
 # **「丸めてから引く」であって「差を丸める」ではない** — 後者だと `100.4` (¥100) → `100.6`
 # (¥101) が「動いていない」になり、**画面の 2 数は 1 円違うのに差は 0** と食い違う (実測)。
 # **金額・距離・本数を 1 つの丸め方でまとめない** (距離を `Math.round` にすると 0.4km が消える)。
-# branches: 上と同じ 2 段 probe を回し直し、**margin-diff.ts の 19 分岐すべてが両側**
-# (新しい `atDisplayPrecision` の `yen` / `km` 判定を含む。count は両方 false で通る)。
-# v8 も 100%/100%、テスト 44 本。
 [[files]]
 path = "app/utils/margin-diff.ts"
 branches = true
@@ -1586,38 +1006,6 @@ branches = true
 # R2 版タイムスタンプ / 月)、月の範囲、月タブのバッジ 3 種、最低賃金チェックの並び
 # (`groupMinWageRows`)、計算 ⇄ 給与の突合行、0 行の理由 (Refs #812)、最低賃金カードの
 # マージ (`upsertMinWageDefaultRate` / `removeMinWageDefaultRate`、Refs #961) を持つ pure util。
-#
-# branches: BR/BRV/BRN 計測器を **2 段の probe** で先に検証 — ①片側だけ通した `if` が
-# `[true]`、両側が `[true,false]` を返すこと ②instrumented コピーでも `||` `??` `?:` の
-# **返り値が素の実装と一致**すること (計測器が値を Boolean に化かすバグを踏んでいる) —
-# したうえで、`if` / 三項の条件 / `&&` `||` の両辺 / `??` の左辺 / `?.` を TypeScript の
-# AST で機械的に包んだコピーでテストを流し、**80 分岐中 79 が true/false 両方**を通る
-# ことを数えた (v8 も 100%/100%)。
-#
-# ★ **指標は「BR() site」** (v8 の branch/arm ではない)。**測り直した条件** (Refs #961、
-# 2026-08-26): `_shared/br-tooling/instrument.mjs` に `?.` の被参照側を `BRN` で包む処理を
-# 足したコピーで instrument し (素の instrument.mjs だけだと `?.` を数えないので 66 site に
-# なる)、`npx vitest run` を全件流して pid ごとの出力を統合。**陽性対照**として同じ計測器を
-# `origin/main` 54d0384 の本ファイルに当て、**72 site = 下の #825 の実測値と一致**すること
-# を先に確かめてある。instrumented コピーでも 3957 本が全部通る (計測器が値を壊していない)。
-# #961 で足した 8 site (最低賃金カードのマージ 2 関数) は**全部 true/false 両方**を通る。
-# うち 2 site は `defaultPrefecture` を入れる条件の `&&` 両辺 (「未設定」×「`全社共通` が
-# 唯一の県キー」)。**両辺とも陰性対照つき** — 右辺を外すと本番の形 (47 県) のテストが
-# 2 本落ちることを実測してある。
-# 片側だけなのは下の「分岐ではないので何もしない」の 1 site
-# (`TIMECARD_JOB_GROUPS.indexOf` の差、`groupMinWageRows` の並び替え) だけで、#825 当時と同じ。
-#
-# ★ **#980 で 6 site 増えて 86 site (85 が両側)。** 測り直した条件 (2026-08-26、base
-# `00f02a9`): 上と同じ手 — `_shared/br-tooling/instrument.mjs` に `?.` の被参照側を
-# `BRN` で包む処理を足したコピーで instrument し、`npx vitest run` を全件流して pid
-# ごとの出力を統合。**陽性対照**として同じコピーを base の本ファイルに当て、
-# **80 site = 上の #961 の実測値と一致**することを先に確かめてある。instrumented
-# コピーでも 3972 本が全部通る (計測器が値を壊していない)。#980 で足した 6 site
-# (`timecardKosokuNotice`: `!report` / `!== 'no' && !== 'unreadable'` の 3 site /
-# `affected > 0` / `state === 'no'`) は**全部 true/false 両方**を通り、片側だけなのは
-# 下の 1 site のまま変わらない。
-# **素の instrument.mjs (`?.` を数えない) だと base 68 → 74 site** — 上の「66 site」は
-# #961 時点の値で、その後の追加で動いている (**この数は指標と測定日で読むこと**)。
 #
 # ★ **v8 が 100% と言っていた状態で、片側しか通っていない分岐が 11 側あった** (#825)。
 # 内訳と処置 (「テストで埋める」より先に「反対側が起こり得るか」を判定した):
@@ -1668,11 +1056,6 @@ branches = true
 # だったのと同じ型の穴)。注記にも `鍵 = ¥値` をそのまま出し、**消した回は空白ではなく
 # 「(消しました)」**と書く (欠落と区別が付かなくなるため)。並べる件数の上限
 # (`ALLOWANCE_OVERRIDE_NOTE_MAX_ITEMS`) を超えたぶんは**黙って切らず件数で言う**。
-#
-# branches: BR/BRV/BRN 計測器を **2 段の probe** で先に検証 — ①片側だけ通した `if` が
-# `[true]`、両側が `[true,false]` ②instrumented コピーでも `||` `??` `?:` の**返り値が
-# 素の実装と一致**すること — したうえで AST で機械的に包んだコピーでテストを流し、
-# **69 分岐すべてが true/false 両方**を通ることを数えた (v8 も 100%/100%、テスト 76 本)。
 [[files]]
 path = "app/utils/allowance-overrides-r2.ts"
 branches = true
@@ -1706,9 +1089,6 @@ branches = true
 # **GPS 列が無い CSV の `emptyRoute()` を「便 0 本」と出すと「便が無い運行」に読める**)
 # なので、**5 状態を 1 つも同じ文言にしない**ことと**数えられないときは本数を名乗らない**
 # ことをテストで固定している。
-# branches: BR() で包んだ instrumented コピーで **7 条件 (`operationTrackNote` の
-# `&&` 左右 2 + 三項 1 + `if` 1、`operationRouteMapTitle` の `??` 1 + `&&` 左右 2)
-# すべて両側 OK** を実測してから登録した (probe 2 段 + 陰性対照つき)。
 # `net780ZipAvailability` / `net780ZipFileName` は条件 0 (Record 引き + テンプレート
 # 文字列) — 状態ごとに `if` を並べると `idle` が死に分岐になるので、**分岐を作らない
 # 構造にした** (死に分岐をテストで埋めない、の 3 段判定 → 構造上なのでコードの側を直した)。
@@ -1755,127 +1135,6 @@ branches = true
 path = "server/utils/require-role.ts"
 branches = true
 
-# --- ページ (`app/pages/*.vue`) の component テスト (Refs #903 の 1 段目) ---
-#
-# ★ この 3 本で **「ページ component テストの型」** を作った。2 段目以降
-# (`restraint-report` / `y-time-export` / `net780` / `scraper` / `daily-report-edit` /
-# `restraint-wage`) はこれをなぞる:
-#
-# - **API は `~/utils/api` を `vi.mock` + `importOriginal`** で必要な関数だけ差し替える。
-#   この 3 本は `$fetch` を直接持たないので `vi.stubGlobal('$fetch', …)`
-#   (`tests/components/profit-monthly-page.test.ts` の形) は**効かない**
-# - **Nuxt UI は `tests/helpers/stubs.ts` の `NUXT_UI_PAGE_STUBS` で全部 stub。**
-#   実物は setup で `useAppConfig()` を呼ぶため vitest では `[nuxt] instance
-#   unavailable` で mount できない。**1 つ stub し忘れると、そのコンポーネント名が
-#   出ない形 (`Invalid vnode type … undefined`) で落ちる**
-# - **文字を持つ prop (`label` / `title` / `description`) は stub でも描画する** —
-#   しないと画面に出ている文字が `wrapper.text()` から消え、「出ていないのに通る
-#   テスト」になる
-# - **ボタンはラベル完全一致で引く** (部分一致だと「メンバー招待」が「招待」に、
-#   「コピー」が「コピー済み」に当たる)
-# - **`w.text()` は要素の textContent を連結するだけ**なので、隣り合う区画の文字が
-#   くっついて存在しない語ができる (「アップロード履歴 / CSV分割」+ バッジ「完了」で
-#   **常に「分割完了」が現れる**)。区画の生死は文言ではなく**その区画の要素**で見る
-# - **★ 全部 stub することで測れなくなるものがある** (詳細は `stubs.ts` の doc)。
-#   一番効くのは **色**: `:color="statusColor(…)"` は stub では描かれないので、
-#   **`props('color')` で値を見る**必要がある。見ないと色を出し分ける関数は
-#   「実行されただけ」になり、**何色を返してもテストが通る** (v8 の行カバレッジは
-#   通ってしまう)。そのために stub 側で `color` を props に宣言してある
-#
-# ★★ **数字の指標を取り違えないこと。** この repo には分岐の数え方が 3 通り同居して
-# いる。下の 3 本の注記には**全部**書いてあるので、読むときも直すときも指標名ごと扱う:
-#
-# | 指標 | 数え方 | 数える範囲 |
-# |---|---|---|
-# | **BR() instrumented site** | `if`/三項の条件 + `&&`/`\|\|` の両辺 + `??` の左辺 | **`<script setup>` だけ** |
-# | v8 の branch **site** | `Object.keys(cov.b).length` | script + template (render 関数) |
-# | v8 の branch **arm** | `Object.values(cov.b).flat().length` | script + template |
-#
-# **BR() が v8 より小さいのは漏れではない** — 計測器 (`instrument.mjs`) が
-# `<script … lang="ts">` ブロックしか書き換えないため。`members.vue` の v8 branch site
-# 34 は **script 側 9 + template 側 25** (`</script>` は 103 行目、template 側の site は
-# 108 行目以降) で、BR() が数えた 10 site はすべて script 側。
-#
-# 測定条件: commit dc82ad5 + 本 PR のテスト。BR() は親の `br-tooling`
-# (`instrument.mjs` + `br.ts`) を使い、**使う前に 3 段で検証**した:
-# ①probe — 片側だけ通る `if` が `[true]` / 両側が `[true,false]`
-# ②probe — 計測器が値を壊さない (`pick(0,7)===0` / `orValue(0,7)===7` /
-#   `andValue(0,'x')===0` を instrumented 側で assert)
-# ③基準の再現 — `ProfitPanel.vue` を instrument して既存 69 本を流し、
-#   この toml の既存注記どおり **20 site / 両側 18** を再現
-# さらに**陰性対照**: `members.vue` のテストを 1 本 `it.skip` すると両側が 10 → 9 に
-# 落ち、落ちた site が狙いどおり `!payload.role` だった (計測が効いていることの確認)。
-
-# メンバー管理。**JWT の `role` だけで見た目が変わる**画面なので、テストの軸は
-# 「admin / member / role だけ / トークン無し で出す口が変わること」と
-# 「自分自身のロール変更・削除の口を出さないこと」。
-# branches: **BR() instrumented site 10、10 site とも両側**。
-# **v8 branch site 34 / arm 66、すべて被覆。死に分岐 0 件。**
-[[files]]
-path = "app/pages/members.vue"
-branches = true
-
-# APIトークン管理。**平文トークンは作成直後の 1 回しか出せない**ので、
-# 「再表示できません」の注意書きと一緒に出ること、閉じたら消えること、
-# 「コピー済み」が前の本の話として残らないことを固定している。
-# 状態は **失効済み / 期限切れ / 有効** の 3 つを同じ見た目にしない。
-# branches: **BR() instrumented site 10、10 site とも両側**。
-# **v8 branch site 29 / arm 57、すべて被覆。死に分岐 0 件。**
-[[files]]
-path = "app/pages/api-tokens.vue"
-branches = true
-
-# デジタコ CSV アップロード。要は **「取り込みは成功したが CSV 分割が失敗した」を
-# 取り込みの緑とは別枠で出す**こと (Refs ohishi-exp/rust-ichibanboshi#205 の 40) —
-# 分割に失敗した運行は `has_kudgivt = FALSE` のまま読み取り側 3 クエリから消える。
-# **`loadPending` / `loadUploads` の取得失敗は `pendingError` / `uploadsError` に
-# 残して画面に出す** (Refs #911)。以前は `catch` を握り潰して空配列にするだけで、
-# **取得失敗と本当の 0 件が同じ見た目**だった (#912 はその挙動をテストで固定していた —
-# #911 でテストごと書き換えてある)。**逆方向も固定してある**: 本当に 0 件の回は
-# 今までどおり「ありません」だけを出し、失敗の文言を混ぜない。
-# **#1008 PR-2 で `describeCaughtError` を当てた** (それ以前は「当てていない」と
-# ここに書いてあった)。**理由の文字列はいまも 1 文字も変わらない** —
-# この経路 (`createAuthFetch`) の例外は ofetch の `FetchError` ではないため
-# (理由を 1 行に畳むのは今も #904 側)。**変わったのは末尾**で、
-# `API エラー (503): …` の `(3 桁): ` から status を読んで
-# 「復旧してから「保留中のアップロードを再取得」を押してください」まで出す。
-# **その 2 つの `aria-label` はこの PR で足したもの** — アイコンだけのボタンに
-# 表記が無く、案内文が名指しできるものが画面に無かった
-# (`tests/components/next-step-retry-labels.test.ts` が突き合わせる)。
-# **#1008 PR-3 で `describeListFailure` に「次の一手」の保証を足した** — PR-2 が
-# 2 段目から「再読み込みを押して確かめてください」を落とした結果、**status を読めない
-# 2 経路 (素の `Error` / `Error` ですらない) で次の一手が 0 になっていた**ため。
-# `detail === describeApiError(e)` で「`describeCaughtError` が次の一手を付けなかった回」
-# を判定して `retry` を補う (前提は `tests/utils/api-error.test.ts` の「★ 契約」で固定)。
-#
-# **★ branches の数字は PR-3 で動いた。** PR-2 時点の注記は
-# 「**branches の数字は動いていない** … 三項はそのまま」と書いていたが、
-# **PR-3 で三項 1 個 → `if` 1 個 + 三項 1 個**になったので**もう真ではない**。
-# 実測し直した (base `b4a1ca7` / この PR、`npm run test:coverage` の
-# `coverage-final.json` を数えた。**base 側はテストも `b4a1ca7` に戻してから測っている** —
-# 落ちると vitest は coverage を書かず前回の値を読んでしまうため):
-#
-# | | BR() site (両側) | v8 site / arm | script | template |
-# | --- | --- | --- | --- | --- |
-# | base `b4a1ca7` (= #1008 PR-2 まで) | 10 (10) | 45 / 94 | 10 / 24 | 35 / 70 |
-# | **+ #1008 PR-3** | **11 (11)** | **46 / 96** | **11 / 26** | 35 / 70 |
-# | 差 | **+1** | **+1 / +2** | **+1 / +2** | **0** |
-#
-# 増えた 1 site は **`if (!(e instanceof Error))`**。template は 1 つも動いていない —
-# **PR-3 は `upload.vue` の template を 1 文字も変えていない** (2 段目から注記を
-# 落としたのは PR-2 の仕事で、PR-3 が触ったのは `<script>` の 1 関数だけ)。
-# **★ 他の画面では PR-3 も template を変えている** (`daily-hours` / `operations` /
-# `restraint-report` の注記から次の一手を落とし、前 2 者には `UAlert` を 1 本ずつ
-# 足した) — **この節の「変えていない」は `upload.vue` 限定の話**。
-# branches: **BR() instrumented site 11、11 site とも両側**。片側だけの site は 0。
-# **v8 branch site 46 / arm 96、すべて被覆。死に分岐 0 件。**
-# (#911 の前は BR 9/9・v8 39 site / 82 arm・script 9/22 + template 30/60。
-# `statusColor` / `statusLabel` の switch は default を含む 4 アームとも通す。
-# switch は BR() の対象外・v8 の branch でもあるので、両方の指標で数えている)。
-[[files]]
-path = "app/pages/upload.vue"
-branches = true
-
 # ダウンロード共通処理 (`downloadBlobResponse`、Refs #169 / gate 登録は #903 の 2 段目)。
 # **ファイル名の出どころが 2 つある**のがこの lib の全部 —
 # `content-disposition: … filename="…"` があればそれ、無ければ呼び出し側の fallback。
@@ -1892,8 +1151,6 @@ branches = true
 #
 # branches: **v8 branch site 2 / arm 4、すべて被覆。死に分岐 0 件。**
 # 内訳は `content-disposition` の `?? ''` (2 arm) と `m ? m[1]! : fallback` (2 arm)。
-# BR() instrumented site は測っていない (`.ts` なので計測器は使えるが、
-# v8 が 2 site しか持たない小さな lib なので指標を増やしていない — **未測定**)。
 [[files]]
 path = "app/utils/download-blob.ts"
 branches = true
@@ -1916,9 +1173,6 @@ branches = true
 # stmt は 19 / 19。内訳は `(e ?? {})` の 1 site と `if` 6 site
 # (`typeof status === 'number'` / `typeof statusCode === 'number'` /
 #  `status === 403` / `status === 503` / `state === 'denied'` / `state === 'unconfigured'`)。
-# **BR() instrumented site も 7 / 7 が両側** (`tests/utils/kyuyo-access.test.ts` 21 本)。
-# 陰性対照つきで測った — `-t 'classifyKyuyoAccess'` だけに絞ると
-# **BR site が 7 → 2 に落ちる** (残るのは `classifyKyuyoAccess` 内の 2 site だけ)。
 [[files]]
 path = "app/utils/kyuyo-access.ts"
 branches = true
@@ -2116,10 +1370,6 @@ branches = true
 # **2026-08-28 実測 (base `6e5eddd`)、`coverage/coverage-final.json` 直読み:
 # statements 17 / 17、branch site 3 / arm 6 / 6、functions 4 / 4。**
 # 0 の arm は無く、最少の arm でも実行回数 1。
-# **BR() での再測は省いた** — このファイルには**短絡演算子 (`??` / `||` / `&&`) が
-# 1 つも無い** (`grep -c -E '\?\?|\|\||&&'` = 0。陽性対照 `app/utils/api-error.ts` = 14)。
-# v8 が branches を過大報告するのは短絡で片側が評価されない形なので、
-# その形が存在しない以上ここでは起きない。分岐は 3 つの早期 return `if` だけ。
 [[files]]
 path = "app/utils/vehicle-settings-r2.ts"
 branches = true
@@ -2131,11 +1381,6 @@ branches = true
 # 37.5%)** として現れたが、**gate 未登録なので落ちなかった**。ここで登録して閉じる。
 # **2026-08-29 実測 (base `c3fac8e`)、`coverage/coverage-final.json` 直読み:
 # statements 24 / 24、branch site 8 / arm 16 / 16、functions 1 / 1。**
-# **BR() でも再測した (短絡演算子が 2 つ — `&&` 1 / `||` 1 — あるため v8 だけでは足りない):
-# 10 site / 20 arm、20 arm すべて両側。** 内訳は auth 前置き 4 site
-# (`!sharedSecret` / `typeof … === 'string'` / 値の truthy / 三項) +
-# `typeof key !== 'string'` / `!key` / `||` の 3 site + `!PATTERN.test(key)` +
-# `!r2` + `!obj`。
 # **実装は 1 文字も変えていない** (この issue は「テストを足す」作業)。
 # **`CLAUDE.md` の「CSV でない応答は loud fail して R2 `{prefix}-errors/` に原本保存」は
 # この route の規範ではない** — あれはスクレイプ (書き込み) 側のもので、実体は relay の
