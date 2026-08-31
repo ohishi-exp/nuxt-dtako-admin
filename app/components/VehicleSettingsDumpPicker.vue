@@ -30,7 +30,8 @@ import { describeResponseFailure } from '~/utils/api-error'
  */
 
 /** 履歴一覧の取得。`vehicle_cd` は自由入力 (datalist はあくまでサジェスト) なので
- * **400 (`vehicle_cd は英数 / _ / - のみ`) が実際に来る**。 */
+ * **400 (`vehicle_cd は英数 / _ / - のみ`) が実際に来る**。
+ * 来るのは 401 (`requireAuth`) / 400 (`vehicle_cd` の形) / 503 (binding 未設定)。 */
 const RETRY_HISTORY = 'もう一度「履歴取得」を押してください'
 
 /** dump 実体の取得。**行クリック (または 1 件のときの自動選択) で走るのでボタンは無い。**
@@ -82,6 +83,29 @@ const datalistId = computed(
   () => `vehicle-cd-options-${props.label.replace(/[^a-zA-Z0-9]/g, '-')}`,
 )
 
+/**
+ * この picker の 2 つの読み口に共通の GET (Refs #1068)。**画面に出る 1 文をここで組む** —
+ * 形は 2 か所とも `${prefix}: ${describeResponseFailure(res, retry)}` で同じで、
+ * 違うのは `prefix` と**やり直し方** (`RETRY_*`) だけ。**実際に来る status の顔ぶれは
+ * 口ごとに違う**ので、それは上の `RETRY_*` の注記が持つ。
+ * `history.vue` に同名の helper があるが、**渡す `RETRY_*` がこちらはボタン表記
+ * 「履歴取得」なので共有しない** (上の注記のとおり)。
+ *
+ * - 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
+ *   経路でも通るよう `Authorization: Bearer` も明示する — 読み口が `requireAuth` を
+ *   通すようになった (Refs #988)。`postNet780Archive` と同じ扱い。
+ * - **reason phrase に落とさない** (Refs #1005 / #996 / #890)。`res.statusText` は
+ *   **本番 (workerd) では空**なので、画面に出ていたのは `HTTP 401: ` だけだった
+ *   (dev の node は埋めるので**再現しない**)。理由は本文
+ *   (`{ error: true, statusCode, statusMessage, message }`) に無傷で残っている。
+ */
+async function getJson<T>(url: string, prefix: string, retry: string): Promise<T> {
+  const token = currentAccessToken()
+  const res = await fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {} })
+  if (!res.ok) throw new Error(`${prefix}: ${await describeResponseFailure(res, retry)}`)
+  return (await res.json()) as T
+}
+
 async function loadHistory() {
   const cd = vehicleCd.value.trim()
   items.value = []
@@ -92,22 +116,8 @@ async function loadHistory() {
   itemsLoading.value = true
   itemsError.value = ''
   try {
-    // 同一オリジンなので cookie (`logi_auth_token`) は自動で載るが、cookie の無い
-    // 経路でも通るよう `Authorization: Bearer` も明示する — この読み口が
-    // `requireAuth` を通すようになった (Refs #988)。`postNet780Archive` と同じ扱い。
-    const token = currentAccessToken()
-    const res = await fetch(`/api/vehicle-settings/history?vehicle_cd=${encodeURIComponent(cd)}`, {
-      headers: token ? { authorization: `Bearer ${token}` } : {},
-    })
-    if (!res.ok) {
-      // **reason phrase に落とさない** (Refs #1005 / #996 / #890)。`res.statusText` は
-      // **本番 (workerd) では空**なので、画面に出ていたのは `HTTP 401: ` だけだった
-      // (dev の node は埋めるので**再現しない**)。理由は本文
-      // (`{ error: true, statusCode, statusMessage, message }`) に無傷で残っている。
-      // この口は 401 (`requireAuth`) / 400 (`vehicle_cd` の形) / 503 (binding 未設定)。
-      throw new Error(`履歴の取得に失敗しました: ${await describeResponseFailure(res, RETRY_HISTORY)}`)
-    }
-    items.value = (await res.json()) as HistoryItem[]
+    items.value = await getJson<HistoryItem[]>(
+      `/api/vehicle-settings/history?vehicle_cd=${encodeURIComponent(cd)}`, '履歴の取得に失敗しました', RETRY_HISTORY)
     // dump が 1 件しかなければ自動選択 (UX: 余分なクリックを省く)
     if (items.value.length === 1) {
       await selectDump(items.value[0]!)
@@ -125,19 +135,8 @@ async function selectDump(item: HistoryItem) {
   loadingDetail.value = true
   emit('selected', null)
   try {
-    // Refs #988 — 読み口が `requireAuth` を通すので Bearer も明示する。
-    const token = currentAccessToken()
-    const res = await fetch(`/api/vehicle-settings/object?key=${encodeURIComponent(item.key)}`, {
-      headers: token ? { authorization: `Bearer ${token}` } : {},
-    })
-    if (!res.ok) {
-      // Refs #1005 #1021 — 叩く先が別 route (`object.get.ts`) なので **404 が増える**
-      // (`object not found: <key>`)。**404 の前置きは `nextStepForStatus` が持つ**
-      // ので、ここで撃ち分けない。**やり直し方は上の口とは別**で、
-      // 押し直すべきは行ではなく一覧の取り直し。
-      throw new Error(`dump JSON の取得に失敗しました: ${await describeResponseFailure(res, RETRY_DETAIL)}`)
-    }
-    const settings = (await res.json()) as VehicleSettings
+    const settings = await getJson<VehicleSettings>(
+      `/api/vehicle-settings/object?key=${encodeURIComponent(item.key)}`, 'dump JSON の取得に失敗しました', RETRY_DETAIL)
     emit('selected', { key: item.key, settings })
   } catch (e) {
     detailError.value = e instanceof Error ? e.message : String(e)

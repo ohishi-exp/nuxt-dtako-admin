@@ -112,6 +112,15 @@ async function fetchOrDescribe(input: string, init?: RequestInit): Promise<Respo
 }
 
 /**
+ * blob / SSE 経路の `!res.ok` 判定。**export しない** — 公開 API を増やさずに
+ * このファイル内の 7 重複だけを畳む (Refs #1068)。投げる `Error` の文言は
+ * `describeResponseFailure` が組む 1 文そのままで、**呼び出し側の `retry` 引数も不変**。
+ */
+async function ensureOk(res: Response, retry: string): Promise<void> {
+  if (!res.ok) throw new Error(await describeResponseFailure(res, retry))
+}
+
+/**
  * JSON 経路の入口。**この repo のほぼ全画面がここを通る** (下の 31 本の API 関数)。
  *
  * `authFetch` (= `@ippoan/auth-client` の `createAuthFetch`) は素の `fetch` を
@@ -241,7 +250,7 @@ export async function downloadRestraintReportPdfSingle(year: number, month: numb
   const headers: Record<string, string> = {}
   const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
   const res = await fetchOrDescribe(`${apiBase}/api/restraint-report/pdf?year=${year}&month=${month}&driver_id=${driverId}`, { headers })
-  if (!res.ok) throw new Error(await describeResponseFailure(res, retry))
+  await ensureOk(res, retry)
   const blob = await res.blob()
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -291,7 +300,7 @@ export async function downloadRestraintReportPdfStream(
     }
   }
 
-  if (!res.ok) throw new Error(await describeResponseFailure(res, retry))
+  await ensureOk(res, retry)
 
   const reader = res.body?.getReader()
   if (!reader) throw new Error('No response body')
@@ -381,7 +390,7 @@ export async function recalculateStream(
     } catch { /* ignore */ }
   }
 
-  if (!res.ok) throw new Error(await describeResponseFailure(res, retry))
+  await ensureOk(res, retry)
 
   const reader = res.body?.getReader()
   if (!reader) throw new Error('No response body')
@@ -421,7 +430,7 @@ export async function compareRestraintCsv(file: File, retry: string, driverCd?: 
     headers,
     body: formData,
   })
-  if (!res.ok) throw new Error(await describeResponseFailure(res, retry))
+  await ensureOk(res, retry)
   return res.json()
 }
 
@@ -453,7 +462,7 @@ export async function recalculateDriverStream(
     } catch { /* ignore */ }
   }
 
-  if (!res.ok) throw new Error(await describeResponseFailure(res, retry))
+  await ensureOk(res, retry)
 
   const reader = res.body?.getReader()
   if (!reader) throw new Error('No response body')
@@ -523,7 +532,7 @@ export async function recalculateDriversBatch(
     } catch { /* ignore */ }
   }
 
-  if (!res.ok) throw new Error(await describeResponseFailure(res, retry))
+  await ensureOk(res, retry)
 
   const reader = res.body?.getReader()
   if (!reader) throw new Error('No response body')
@@ -625,7 +634,7 @@ export async function splitCsvAllStream(
   const headers: Record<string, string> = {}
   const tid = getTenantId?.(); if (tid) headers['X-Tenant-ID'] = tid
   const res = await fetchOrDescribe(url, { method: 'POST', headers })
-  if (!res.ok) throw new Error(await describeResponseFailure(res, retry))
+  await ensureOk(res, retry)
   const reader = res.body?.getReader()
   if (!reader) throw new Error('No response body')
   const decoder = new TextDecoder()
