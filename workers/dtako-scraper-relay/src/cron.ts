@@ -32,6 +32,11 @@ export const ETC_CRON = "0 21,22,23,0 * * *";
  * dtako 日次 (JST 1:00) の後で ETC (JST 6,7,8,9 時) の前、既存 2 本と重ならない
  * 時間帯 (Refs #606-6)。 */
 export const RESTRAINT_SYNC_CRON = "0 19 * * *";
+/** theearth 乗務員マスタ (F-MMS0320) → alc employees の定時同期 cron 式 (UTC)。
+ * JST 7/12/15/17/19 時 — 免許証の交付日+期限が alc に無いとタブレット
+ * (CoreS3 / alc-app) が乗務員を引けないため、当日の登録変更を営業時間内に
+ * 何度か拾い直す (Refs ippoan/alc-app-s3#125)。DTAKO_ACCOUNTS 設定時のみ実走。 */
+export const DRIVER_MASTER_SYNC_CRON = "0 22,3,6,8,10 * * *";
 /** 運転日報 netprint 登録 + LINE WORKS 通知の cron 式 (UTC)。JST 6:30 —
  * dtako 日次 (JST 1:00) で前日分が theearth に揃った後、営業所の始業前
  * (Refs #874)。 */
@@ -239,7 +244,7 @@ export interface CronEnvValues {
 }
 
 export interface CronRunResult {
-  kind: "dtako" | "etc" | "restraint" | "netprint" | "none";
+  kind: "dtako" | "etc" | "restraint" | "netprint" | "driver-master" | "none";
   target: string;
   ok: boolean;
   detail: string;
@@ -468,6 +473,39 @@ export async function runScheduledCron(
       }),
     );
     return [...skipped, ...dispatched];
+  }
+
+  if (cron === DRIVER_MASTER_SYNC_CRON) {
+    // 乗務員マスタは **会社ごとの theearth データ**なので、母集団は dtako 日次と同じ
+    // DTAKO_ACCOUNTS 全社でよい (打刻由来で 1 社に絞る RESTRAINT_SYNC_CRON とは違う。
+    // 混同して全社に同じ写しを書いた実害は Refs #981)。書き先の tenant は各 account の
+    // `tenant_id` を DO 側が引く — **cron は tenant を運ばない。**
+    const accounts = parseDtakoAccounts(env.dtakoAccountsRaw);
+    if (accounts.length === 0) {
+      return [{ kind: "driver-master", target: "*", ok: true, detail: "DTAKO_ACCOUNTS 未設定のため skip" }];
+    }
+    return Promise.all(
+      accounts.map(async (account): Promise<CronRunResult> => {
+        try {
+          const res = await callDo(`scraper-comp-${account.comp_id}`, "/cron/driver-master", {
+            comp_id: account.comp_id,
+          });
+          return {
+            kind: "driver-master",
+            target: account.comp_id,
+            ok: res.ok,
+            detail: `HTTP ${res.status}: ${res.text.slice(0, 200)}`,
+          };
+        } catch (err) {
+          return {
+            kind: "driver-master",
+            target: account.comp_id,
+            ok: false,
+            detail: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }),
+    );
   }
 
   if (cron === NETPRINT_CRON) {

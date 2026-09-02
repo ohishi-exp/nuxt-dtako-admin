@@ -70,8 +70,11 @@ import {
 } from "./scrape-history-record";
 import {
   ALC_TENANT_RPC_MISSING,
+  requireAlcTenantForwarder,
+  unwrapAlcTenantData,
   type AlcTenantDataForwarder,
 } from "./alc-tenant-rpc";
+import { fetchDriverMaster, parseDriverMasterUpsertResult, toUpsertItems } from "./theearth-driver-master-client";
 import { postScrapeHistory, scrapeJobKey } from "./scrape-dispatch";
 import { buildOperationZipPayload } from "./operation-zip";
 import { recalculateBeforeFetch } from "./theearth-recalculate";
@@ -926,6 +929,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 自身からしか到達できない) は /cron/dtako/* と同じなのでこの並びに置く。
     if (url.pathname === "/cron/restraint-sync" && request.method === "POST") {
       return this.handleCronRestraintSync(request);
+    }
+
+    // theearth 乗務員マスタ (F-MMS0320) を読んで alc の employees へ流す
+    // (Refs ippoan/alc-app-s3#125)。theearth へ自前ログインするので `scrapeQueue`
+    // で同一 comp_id の他ジョブと直列化する (並行アクセスはセッションロックで
+    // hang/500 する)。認証は index.ts の /kintai-relay/driver-master-run 側
+    // (X-Alc-Proxy-Secret) と cron dispatch (この worker 自身) が持つ。
+    if (url.pathname === "/cron/driver-master" && request.method === "POST") {
+      return this.handleCronDriverMaster(request);
     }
 
     // 前日分の運転日報を netprint へ登録し予約番号を LINE WORKS へ通知する
@@ -5166,6 +5178,105 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       `https://relay.internal/restraint-api/kintai/fetch?month=${encodeURIComponent(month)}`,
     );
     return this.handleKintaiFetch(record, url);
+  }
+
+  /**
+   * POST /cron/driver-master — body {comp_id}。theearth の乗務員マスタ
+   * (F-MMS0320) を全ページ読み、在籍者を alc の
+   * `PUT /api/employees/bulk-by-code` へ流す (Refs ippoan/alc-app-s3#125)。
+   *
+   * ## なぜ 202 + alarm ではなく同期応答なのか
+   *
+   * `handleCronDtako` (読取日スクレイプ) は 1 社で数分かかるため 202 で受理して
+   * DO の alarm で走らせるが、こちらは**一覧を数ページ読んで 1 回 PUT するだけ**で
+   * 軽く、失敗しても次の cron (1 日 5 回) で回復する。`handleCronRestraintSync` と
+   * 同じく同期で返し、呼び出し元 (cron dispatch / 手動 route) がその場で結果を読める形にする。
+   *
+   * ## ★ tenant は DTAKO_ACCOUNTS 由来のものしか使わない
+   *
+   * 書き先の `tenant_id` は `resolveAccount(comp_id)` が返す account のものだけ。
+   * **request body の tenant_id は読まない** — 読むと comp_id を知っている呼び出し元が
+   * 任意テナントへ書けてしまい、#434 の再現になる。
+   *
+   * ## 送る列 (意図的に絞る)
+   *
+   * 乗務員CD / 氏名 / nfc_id / 免許の交付日・有効期限だけ。免許証番号・住所・電話・
+   * メールは `theearth-driver-master-client.ts` の時点で読んでいない。
+   */
+  private async handleCronDriverMaster(request: Request): Promise<Response> {
+    let body: { comp_id?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return dvrJsonError(400, "body must be JSON");
+    }
+    const compId = typeof body.comp_id === "string" ? body.comp_id.trim() : "";
+    if (!compId) {
+      return dvrJsonError(400, "comp_id は必須です");
+    }
+    const account = await this.resolveAccount(compId);
+    if (!account) {
+      return Response.json({ error: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
+    }
+    // 同一 comp_id への theearth 並行アクセスはセッションロックで hang/500 する。
+    return this.enqueueScrape(() => this.runDriverMasterSync(account));
+  }
+
+  /** 乗務員マスタ同期の本体 (`scrapeQueue` の直列化の中でだけ呼ばれる)。 */
+  private async runDriverMasterSync(account: DtakoAccountRaw): Promise<Response> {
+    const jobState = this.makeTheearthLoginJobState();
+    const base = { driver_master_sync: "", comp_id: account.comp_id };
+    try {
+      const rpc = requireAlcTenantForwarder(this.env.AUTH_WORKER_RPC);
+      const rows = await this.withTheearthLoginSession(account, jobState, (jar) => fetchDriverMaster(jar));
+      const items = toUpsertItems(rows);
+      const text = unwrapAlcTenantData(
+        "alc employees bulk-by-code",
+        await rpc.forwardAlcTenantData({
+          tenantId: account.tenant_id,
+          path: "/api/employees/bulk-by-code",
+          method: "PUT",
+          body: JSON.stringify({ items }),
+          contentType: "application/json",
+        }),
+      );
+      const result = parseDriverMasterUpsertResult(text);
+      const log = {
+        ...base,
+        driver_master_sync: "done",
+        rows: rows.length,
+        items: items.length,
+        created: result.created,
+        updated: result.updated,
+        skipped: result.skipped,
+        unreadable: result.unreadable,
+        theearth_logins: jobState.logins.length,
+        theearth_kicked: jobState.logins.some((l) => l.kicked),
+      };
+      // ★ skipped が空でない / 応答が読めなかった、のどちらかなら warn。上流が
+      // 受け取らなかった乗務員が居ることを「0 件だった」と同じ静かさで流さない。
+      if (result.skipped.length > 0 || result.unreadable !== null) {
+        console.warn(JSON.stringify({ ...log, driver_master_sync: "done_with_warnings" }));
+      } else {
+        console.log(JSON.stringify(log));
+      }
+      return Response.json({
+        ok: true,
+        comp_id: account.comp_id,
+        rows: rows.length,
+        items: items.length,
+        created: result.created,
+        updated: result.updated,
+        skipped: result.skipped,
+        unreadable: result.unreadable,
+        theearth_logins: jobState.logins.length,
+        theearth_kicked: jobState.logins.some((l) => l.kicked),
+      });
+    } catch (err) {
+      const message = describeUnknownError(err);
+      console.error(JSON.stringify({ ...base, driver_master_sync: "failed", error: message }));
+      return Response.json({ ok: false, comp_id: account.comp_id, error: message }, { status: 502 });
+    }
   }
 
   /**

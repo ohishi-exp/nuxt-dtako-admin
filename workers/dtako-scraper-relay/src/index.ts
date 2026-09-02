@@ -192,6 +192,14 @@ export default {
       return handleRestraintSync(request, env);
     }
 
+    if (url.pathname === "/kintai-relay/driver-master-run" && request.method === "POST") {
+      // theearth 乗務員マスタ → alc employees の同期を、cron (JST 7/12/15/17/19 時)
+      // を待たずに 1 回走らせる (Refs ippoan/alc-app-s3#125)。cron 経路と同じ DO
+      // route (/cron/driver-master) へ転送する — 実機確認が「cron でだけ通る道」に
+      // ならないようにするため (netprint-run と同じ流儀)
+      return handleDriverMasterRun(request, env);
+    }
+
     if (url.pathname === "/kintai-relay/netprint-targets" && request.method === "GET") {
       // 日報 netprint の通知先設定 (KV `netprint_targets`) を読む (Refs #874 の 12)。
       // 画面 (`/scraper` の「日報netprint」タブ) が編集するための口
@@ -937,6 +945,55 @@ async function handleRestraintSync(request: Request, env: RelayWorkerEnv): Promi
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ comp_id: compId, month }),
+  });
+  // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
+  return new Response(res.body, {
+    status: res.status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * `POST /kintai-relay/driver-master-run` — theearth の乗務員マスタ (F-MMS0320) を
+ * 読んで alc の employees へ流す同期を、cron を待たずに 1 回走らせる
+ * (Refs ippoan/alc-app-s3#125)。
+ *
+ * body は `{comp_id?}`。省略時は `KINTAI_COMP_ID` (`/kintai-relay/restraint-sync`
+ * と同じフォールバック)。認証は `X-Alc-Proxy-Secret` の constant-time 検証。
+ *
+ * **`tenant_id` は body で受け付けない。** 書き先は comp_id から DTAKO_ACCOUNTS 経由で
+ * DO 側が引く — body で運べるようにすると、comp_id を知っている呼び出し元が任意
+ * テナントへ書けてしまう (#434 の再現)。
+ */
+async function handleDriverMasterRun(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  let body: { comp_id?: unknown };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return fail(400, "body must be JSON");
+  }
+  const compId =
+    (typeof body.comp_id === "string" && body.comp_id.trim()) || (env.KINTAI_COMP_ID ?? "").trim();
+  if (!compId) return fail(503, "comp_id が解決できません");
+
+  const id = env.RELAY.idFromName(`scraper-comp-${compId}`);
+  const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/driver-master", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    // ★ comp_id だけを渡す (body を素通ししない) — tenant_id 等の余計なフィールドを
+    // DO へ運ばないため。
+    body: JSON.stringify({ comp_id: compId }),
   });
   // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
   return new Response(res.body, {
