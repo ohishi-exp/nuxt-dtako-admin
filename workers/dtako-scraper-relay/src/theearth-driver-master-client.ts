@@ -260,6 +260,25 @@ export function parseDriverMasterPage(html: string): DriverMasterPage {
  * 見出しに並べ替え記号などが付いているだけで 0 行になり、その差は
  * 実物のラベルを見ないと分からない。
  */
+/**
+ * 見出しラベルが HTML の**どこに・どんなタグの中に**在るかを 1 件だけ示す
+ * (0 行の切り分け用)。
+ *
+ * ★ 出すのは**囲んでいる開始タグ**だけ (`<th class="...">` 等のマークアップ)。
+ * 列名は個人データではなく、開始タグに乗るのは id / class / name なので、
+ * 乗務員の値は 1 文字も出ない。ラベルが HTML に無ければ `無` を返す —
+ * **「セルから読めない」と「そもそも書かれていない」は原因が別**で、前者は
+ * セルの読み方、後者は列構成の話になる。
+ */
+function locateLabel(html: string, label: string): string {
+  const index = html.indexOf(label);
+  if (index < 0) return `${label}=無`;
+  const open = html.lastIndexOf("<", index);
+  const close = open < 0 ? -1 : html.indexOf(">", open);
+  const tag = open >= 0 && close > open ? html.slice(open, close + 1) : "(タグ不明)";
+  return `${label}=${tag.slice(0, 80)}`;
+}
+
 export function describeDriverMasterStructure(html: string): string {
   const title = html.match(/<title>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, " ").trim() || "(no title)";
   const all = splitRows(html);
@@ -279,6 +298,8 @@ export function describeDriverMasterStructure(html: string): string {
   // 一番困る順**に並べる。見出しの実物が読めれば照合の直し方が決まる。
   return (
     `見出し=${columns ? "検出" : "未検出"} 見出し候補=[${candidates.join("] [")}] ` +
+    `ラベル位置=[${[COLUMN_LABELS.driverCd, COLUMN_LABELS.name].map((l) => locateLabel(html, l)).join(" / ")}] ` +
+    `1行目のセル数=${all.find((row) => row.raw.includes(DATA_CELL_MARKER))?.cells.length ?? 0} ` +
     `引けない列=[${missing.join(",")}] データ行=${dataRows} tr=${all.length} ` +
     `title="${title}" bytes=${html.length} ` +
     `行数select=${hasFormField(html, ROW_COUNT_SELECT)} 行数ボタン=${hasFormField(html, ROW_COUNT_BUTTON)}`
