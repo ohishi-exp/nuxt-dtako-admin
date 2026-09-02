@@ -74,7 +74,14 @@ import {
   unwrapAlcTenantData,
   type AlcTenantDataForwarder,
 } from "./alc-tenant-rpc";
-import { fetchDriverMaster, parseDriverMasterUpsertResult, toUpsertItems } from "./theearth-driver-master-client";
+import {
+  chunkUpsertItems,
+  fetchDriverMaster,
+  mergeUpsertResults,
+  parseDriverMasterUpsertResult,
+  toUpsertItems,
+} from "./theearth-driver-master-client";
+import type { DriverMasterUpsertResult } from "./theearth-driver-master-client";
 import { postScrapeHistory, scrapeJobKey } from "./scrape-dispatch";
 import { buildOperationZipPayload } from "./operation-zip";
 import { recalculateBeforeFetch } from "./theearth-recalculate";
@@ -5226,26 +5233,60 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   private async runDriverMasterSync(account: DtakoAccountRaw): Promise<Response> {
     const jobState = this.makeTheearthLoginJobState();
     const base = { driver_master_sync: "", comp_id: account.comp_id };
+    // ★ 失敗応答にも件数を載せるため try の外で数える。2026-09-02 の 400
+    // (`items が不正です`) は「0 件だったのか 500 件超だったのか」が応答から
+    // 分からず、切り分けにもう 1 往復かかった。
+    let rowCount: number | null = null;
+    let itemCount: number | null = null;
+    let chunkCount: number | null = null;
     try {
       const rpc = requireAlcTenantForwarder(this.env.AUTH_WORKER_RPC);
       const rows = await this.withTheearthLoginSession(account, jobState, (jar) => fetchDriverMaster(jar));
+      rowCount = rows.length;
       const items = toUpsertItems(rows);
-      const text = unwrapAlcTenantData(
-        "alc employees bulk-by-code",
-        await rpc.forwardAlcTenantData({
-          tenantId: account.tenant_id,
-          path: "/api/employees/bulk-by-code",
-          method: "PUT",
-          body: JSON.stringify({ items }),
-          contentType: "application/json",
-        }),
-      );
-      const result = parseDriverMasterUpsertResult(text);
+      itemCount = items.length;
+      const chunks = chunkUpsertItems(items);
+      chunkCount = chunks.length;
+      // 送るものが無いまま PUT すると上流が 400 (`items が不正です`) を返し、
+      // 件数超過と同じ本文になる。**ここで名指しして止める** — 一覧は読めたのに
+      // 在籍者が 0 件というのは、退職判定かページ解析が壊れた側の疑い。
+      if (chunks.length === 0) {
+        throw new Error(
+          `theearth の乗務員マスタに送れる在籍者が 1 件もありません ` +
+            `(rows=${rows.length} items=0) — 一覧の解析か退職者判定を疑ってください`,
+        );
+      }
+      const results: DriverMasterUpsertResult[] = [];
+      for (const [index, chunk] of chunks.entries()) {
+        // 上流は 1 リクエスト MAX_BULK_UPSERT_ITEMS 件まで。**逐次で送る** —
+        // 同じ tenant の employees を並列 upsert すると一意制約で競合しうる。
+        // 途中で失敗した場合、前のチャンクは書き込み済みのまま残るが、
+        // upsert なので次回の同期がそのまま上書きして収束する。
+        // 分割が要らなかった回は**文言を変えない** — 「(1/1)」が付くだけで、
+        // 既存の診断 (ログ grep / 呼び出し元の突合) が空振りする。
+        const label =
+          chunks.length === 1
+            ? "alc employees bulk-by-code"
+            : `alc employees bulk-by-code (${index + 1}/${chunks.length}, ${chunk.length} 件)`;
+        const text = unwrapAlcTenantData(
+          label,
+          await rpc.forwardAlcTenantData({
+            tenantId: account.tenant_id,
+            path: "/api/employees/bulk-by-code",
+            method: "PUT",
+            body: JSON.stringify({ items: chunk }),
+            contentType: "application/json",
+          }),
+        );
+        results.push(parseDriverMasterUpsertResult(text));
+      }
+      const result = mergeUpsertResults(results);
       const log = {
         ...base,
         driver_master_sync: "done",
         rows: rows.length,
         items: items.length,
+        chunks: chunks.length,
         created: result.created,
         updated: result.updated,
         skipped: result.skipped,
@@ -5265,6 +5306,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         comp_id: account.comp_id,
         rows: rows.length,
         items: items.length,
+        chunks: chunks.length,
         created: result.created,
         updated: result.updated,
         skipped: result.skipped,
@@ -5274,8 +5316,29 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       });
     } catch (err) {
       const message = describeUnknownError(err);
-      console.error(JSON.stringify({ ...base, driver_master_sync: "failed", error: message }));
-      return Response.json({ ok: false, comp_id: account.comp_id, error: message }, { status: 502 });
+      console.error(
+        JSON.stringify({
+          ...base,
+          driver_master_sync: "failed",
+          rows: rowCount,
+          items: itemCount,
+          chunks: chunkCount,
+          error: message,
+        }),
+      );
+      return Response.json(
+        {
+          ok: false,
+          comp_id: account.comp_id,
+          // ★ どこまで進んだかを応答に残す。null なら theearth の一覧を読む前に
+          // 落ちたということで、上流 (alc) は 1 度も叩いていない。
+          rows: rowCount,
+          items: itemCount,
+          chunks: chunkCount,
+          error: message,
+        },
+        { status: 502 },
+      );
     }
   }
 
