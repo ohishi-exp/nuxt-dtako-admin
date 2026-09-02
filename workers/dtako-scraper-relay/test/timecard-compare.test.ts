@@ -12,7 +12,8 @@ import {
   type NginxDriverMonth,
 } from "../src/timecard-compare";
 // 実応答 (yhonda-ohishi/nginx#784) を 3 名 × 数日に間引いたもの。
-// ssh ohishi-data → `curl http://127.0.0.1:120/time-card/pdf-json?month=2026-04&recalc=0`
+// オンプレ側で nginx の pdf-json を叩いて取得 (手順は `kintai-ops` skill §4)。
+// 引数は month=2026-04 / recalc=0。
 import REAL_PDF_JSON from "./fixtures/pdf-json-2026-04.json";
 // 同日フェリー控除の実応答 (nginx#787 後、1726 / 2026-03)。3/14 は控除で合計が負に
 // なり、3/21 は控除があっても合計は正のまま — 後者を見落とさないための実データ。
