@@ -205,6 +205,36 @@ export function parseDriverMasterPage(html: string): DriverMasterPage {
 }
 
 /**
+ * 一覧 HTML の**構造だけ**を 1 行に要約する (0 行だった理由の切り分け用)。
+ *
+ * ★ **個人データを 1 文字も載せない。** 引用するのは「データセル
+ * (`lstMain_LabelValue`) を持たない行」= 見出しやページャのラベルだけで、
+ * 乗務員の行は構造 (件数) しか出さない。列名は個人データではないので、
+ * **実機の見出しをそのまま出す** — `resolveColumnIndexes` は完全一致で引くため、
+ * 見出しに並べ替え記号などが付いているだけで 0 行になり、その差は
+ * 実物のラベルを見ないと分からない。
+ */
+export function describeDriverMasterStructure(html: string): string {
+  const title = html.match(/<title>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, " ").trim() || "(no title)";
+  const all = splitRows(html);
+  const dataRows = all.filter((row) => row.raw.includes(DATA_CELL_MARKER)).length;
+  const columns = resolveColumnIndexes(all);
+  const labels =
+    all
+      .find((row) => !row.raw.includes(DATA_CELL_MARKER) && row.cells.some((cell) => cell !== ""))
+      ?.cells.filter((cell) => cell !== "")
+      .slice(0, 12)
+      .map((cell) => cell.slice(0, 20)) ?? [];
+  const missing = Object.values(COLUMN_LABELS).filter((label) => !columns?.has(label));
+  return (
+    `title="${title}" bytes=${html.length} tr=${all.length} データ行=${dataRows} ` +
+    `見出し=${columns ? "検出" : "未検出"} 引けない列=[${missing.join(",")}] ` +
+    `見出し候補=[${labels.join(" | ")}] ` +
+    `行数select=${hasFormField(html, ROW_COUNT_SELECT)} 行数ボタン=${hasFormField(html, ROW_COUNT_BUTTON)}`
+  );
+}
+
+/**
  * 次ページへ進むリンクを選ぶ。
  *
  * 1. テキストが `currentPage + 1` の数字リンク
@@ -353,9 +383,13 @@ export async function fetchDriverMaster(
     [ROW_COUNT_SELECT],
   );
 
+  let page = parseDriverMasterPage(html);
+
   // 一覧が出た後だけ行数を上げられる。ボタンが無い / 既に 30 なら触らない
+  const baseHtml = html;
+  let rowCountApplied = false;
   if (hasFormField(html, ROW_COUNT_BUTTON) && serializeFormFields(html)[ROW_COUNT_SELECT] !== DRIVER_MASTER_ROW_COUNT) {
-    html = await postDriverMasterForm(
+    const wideHtml = await postDriverMasterForm(
       jar,
       url,
       html,
@@ -368,11 +402,38 @@ export async function fetchDriverMaster(
       fetchImpl,
       timeoutMs,
     );
+    const widePage = parseDriverMasterPage(wideHtml);
+    // ★ 行数を上げるのは往復を減らすための最適化でしかない。**減ったら採らない** —
+    // 最適化のために件数を失うのが一番まずい (静かに欠けるのを避ける、と同じ理由)。
+    if (widePage.rows.length >= page.rows.length) {
+      html = wideHtml;
+      page = widePage;
+      rowCountApplied = true;
+    } else {
+      console.warn(
+        JSON.stringify({
+          driver_master_row_count: "rolled_back",
+          base_rows: page.rows.length,
+          wide_rows: widePage.rows.length,
+          wide_structure: describeDriverMasterStructure(wideHtml),
+        }),
+      );
+    }
+  }
+
+  // ★ 1 行も読めなかったら**静かに 0 件で返さない。** 上流 (alc) に空を送ると
+  // 「件数超過」と同じ 400 になり、原因が遠くなる (2026-09-02 に実害)。
+  // 個人データを出さない構造要約を添えて、見出しの不一致とページの取り違えを
+  // 応答だけで切り分けられるようにする。
+  if (page.rows.length === 0) {
+    const detail = rowCountApplied
+      ? `表示直後: ${describeDriverMasterStructure(baseHtml)} / 行数変更後: ${describeDriverMasterStructure(html)}`
+      : describeDriverMasterStructure(html);
+    throw new TheearthClientError(`乗務員マスタ一覧から 1 行も読めませんでした (${detail})`);
   }
 
   const rows: DriverMasterRow[] = [];
   const seen = new Set<string>();
-  let page = parseDriverMasterPage(html);
   for (let pageCount = 1; ; pageCount++) {
     let added = 0;
     for (const row of page.rows) {
