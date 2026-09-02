@@ -218,6 +218,54 @@ function resolveColumnIndexes(rows: Array<{ cells: string[] }>): Map<string, num
 }
 
 /**
+ * 列定義 (`PageLoad` の第 2 引数) から **列名 → `lstMain_LabelValue` の番号**を作る。
+ *
+ * 実機 (2026-09-02) の 1 列ぶんはコロン区切りで、
+ *
+ * ```
+ * DriverCD:1:1:int:MT00320Driver:DriverCD:DriverName::8::1:right::乗務員CD:75
+ * ExpirationDate:23:0:datetime:::::10::1:left::有効期限:95
+ * ```
+ *
+ * のように **2 番目が列番号、末尾から 2 番目が日本語の列名**。列番号は
+ * データセルの `<span id="lstMain_LabelValue{番号}_{行}">` の番号と一致する
+ * (乗務員CD=1 / 乗務員名=2 / 退職年月日=12 / 乗務員分類4=13 / 交付年月日=22 /
+ * 有効期限=23 を実機で確認)。
+ *
+ * ★ **位置 (何番目のセルか) では引かない。** 列の増減で静かにずれる。番号は
+ * 列そのものに付いた id なので、列が増えても既存の列は動かない。
+ */
+function parseSpecColumns(html: string): Map<string, number> | null {
+  const m = html.match(/PageLoad\(\s*'[^']*'\s*,\s*'([^']*)'/);
+  if (!m || !m[1]) return null;
+  const map = new Map<string, number>();
+  for (const column of m[1].split(",")) {
+    const parts = column.split(":");
+    if (parts.length < 3) continue;
+    const index = Number(parts[1]);
+    // `parts.length >= 3` を確かめた後なので必ず在る。`?? ""` を書くと到達しない
+    // 分岐が増えて 100% gate が落ちるだけなので `String()` で受ける。
+    const label = normalizeLabel(String(parts[parts.length - 2]));
+    if (!Number.isInteger(index) || index <= 0 || label === "") continue;
+    if (!map.has(label)) map.set(label, index);
+  }
+  return map.size === 0 ? null : map;
+}
+
+/** データ行の raw HTML から **`lstMain_LabelValue{番号}` → セルの文字列** を作る。 */
+function rowValuesById(raw: string): Map<number, string> {
+  const values = new Map<number, string>();
+  const re = new RegExp(`<span\\b[^>]*\\bid="[^"]*${DATA_CELL_MARKER}(\\d+)_\\d+"[^>]*>([\\s\\S]*?)</span>`, "gi");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw)) !== null) {
+    const index = Number(m[1]);
+    // group 2 は必ず参加する (上と同じ理由で `?? ""` は書かない)。
+    if (!values.has(index)) values.set(index, cellText(String(m[2])));
+  }
+  return values;
+}
+
+/**
  * 乗務員マスタ一覧 (1 ページぶんの HTML) を行 + ページャ状態に畳む。
  *
  * - 列は **header 行の列名**で引く (固定 idx では引かない)。header が読めなければ 0 行。
@@ -228,15 +276,38 @@ function resolveColumnIndexes(rows: Array<{ cells: string[] }>): Map<string, num
 export function parseDriverMasterPage(html: string): DriverMasterPage {
   const currentPage = extractCurrentPageNumber(html) ?? 1;
   const allRows = splitRows(html);
-  const columns = resolveColumnIndexes(allRows);
+  const dataRows = allRows.filter((row) => row.raw.includes(DATA_CELL_MARKER));
   const rows: DriverMasterRow[] = [];
+
+  // ① 列定義があればそれで引く (実機はこちら。見出しの日本語は HTML に無い)
+  const spec = parseSpecColumns(html);
+  if (spec) {
+    for (const row of dataRows) {
+      const values = rowValuesById(row.raw);
+      const at = (label: string): string => {
+        const index = spec.get(normalizeLabel(label));
+        return index === undefined ? "" : (values.get(index) ?? "");
+      };
+      rows.push({
+        driverCd: at(COLUMN_LABELS.driverCd),
+        name: at(COLUMN_LABELS.name),
+        retiredOn: at(COLUMN_LABELS.retiredOn),
+        classification4: at(COLUMN_LABELS.classification4),
+        licenseIssuedOn: at(COLUMN_LABELS.licenseIssuedOn),
+        licenseExpiresOn: at(COLUMN_LABELS.licenseExpiresOn),
+      });
+    }
+    return { rows, currentPage, nextTarget: pickNextPagerLink(extractPagerLinks(html), currentPage) };
+  }
+
+  // ② 列定義が無いページは見出し行の列名で引く (従来の経路)
+  const columns = resolveColumnIndexes(allRows);
   if (columns) {
     const at = (cells: string[], label: string): string => {
       const index = columns.get(normalizeLabel(label));
       return index === undefined ? "" : (cells[index] ?? "");
     };
-    for (const row of allRows) {
-      if (!row.raw.includes(DATA_CELL_MARKER)) continue;
+    for (const row of dataRows) {
       rows.push({
         driverCd: at(row.cells, COLUMN_LABELS.driverCd),
         name: at(row.cells, COLUMN_LABELS.name),
@@ -303,6 +374,7 @@ export function describeDriverMasterStructure(html: string): string {
   const all = splitRows(html);
   const dataRows = all.filter((row) => row.raw.includes(DATA_CELL_MARKER)).length;
   const columns = resolveColumnIndexes(all);
+  const spec = parseSpecColumns(html);
   // ★ 最初に見つかった行ではなく、**非空セルが多い行から 3 本**出す。実機では
   // 先頭に「事業所」1 セルだけのフォーム行が居て、それだけを出して詰まった。
   const candidates = all
@@ -316,6 +388,7 @@ export function describeDriverMasterStructure(html: string): string {
   // ★ 呼び出し元 (`driver-master-run.ts`) が本文を切り詰めるので、**切られたら
   // 一番困る順**に並べる。見出しの実物が読めれば照合の直し方が決まる。
   return (
+    `列定義から引けた列=${spec ? Object.values(COLUMN_LABELS).filter((l) => spec.has(normalizeLabel(l))).length : "定義無"}/6 ` +
     `見出し=${columns ? "検出" : "未検出"} 見出し候補=[${candidates.join("] [")}] ` +
     `ラベル位置=[${[COLUMN_LABELS.driverCd, COLUMN_LABELS.name].map((l) => locateLabel(html, l)).join(" / ")}] ` +
     `1行目のセル数=${all.find((row) => row.raw.includes(DATA_CELL_MARKER))?.cells.length ?? 0} ` +
