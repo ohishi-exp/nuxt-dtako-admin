@@ -94,9 +94,12 @@ read-only agent `simplify-reviewer` へ渡し、根本 vs 症状・削れる複�
 - 認可 helper: `requireAuth` / `resolveBrowserAuthorization` (fail closed)。ichiban proxy の
   allowlist は `ICHIBAN_PROXY_ALLOWED_PATHS` (完全一致)。alc 経路は `alcProxyFetch` (上流が 401 を返す)
 - coverage gate の登録簿: `coverage_100.toml` (**UI ページ .vue は登録しない**、下の (2))
-- public repo で書いてはいけない語: 社内ホスト名 (`kintai-ops` skill §4 の内部アドレス)、token 値
-- 同型スイープの系譜: エラー表示は #890 → #996/#1005/#1006 → #1008/#1050 → #1067 で集約済み。
-  「理由と次の一手」を画面へ足す計画は、まず `app/utils/api-error.ts` を触らずに済むかを問う
+- public repo で書いてはいけない語: 社内ホスト名と token 値。**語そのものは repo に書かず、
+  親が prompt で渡す** (実体は machine-global の `kintai-ops` skill §4)。reviewer は計画テキストを
+  その語で grep する。base に既に在る出現は reviewer が数えて返すので、「漏れ」か「許容」かは親が決める
+- 同型スイープの系譜: エラー表示は #890 → #996/#1005/#1006 → #1008/#1050 → #1067。
+  **`app/utils/api-error.ts` を通らないエラー表示を画面へ足す step が 1 つでもあったら**、
+  発生源 (api-error.ts / 呼び出し側の同型関数) を先に問う — 1 画面ずつ足すと次の世代になる
 
 ### (1) PR を作る前に満たっていること (子に渡す検証)
 
