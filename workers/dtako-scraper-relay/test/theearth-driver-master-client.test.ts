@@ -778,7 +778,8 @@ describe('describeDriverMasterStructure', () => {
     // 呼び出し元 (driver-master-run.ts) が本文を切るので、並び順が診断の可否を決める。
     // 2026-09-02 は `引けない列=[乗務員CD,乗` で切れ、見出しラベルが落ちた。
     const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }] }))
-    expect(out.startsWith('見出し=')).toBe(true)
+    // 先頭は「どの経路で列を引けたか」— これが読めれば直し方が決まる。
+    expect(out.startsWith('列定義から引けた列=')).toBe(true)
     expect(out.indexOf('見出し候補=')).toBeLessThan(out.indexOf('title='))
   })
 
@@ -1031,5 +1032,146 @@ describe('extractGridSpec', () => {
     const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }] }))
     expect(out).toContain('列定義=無')
     expect(out.indexOf('列定義=')).toBeGreaterThan(out.indexOf('見出し候補='))
+  })
+})
+
+describe('列定義で引く経路 (実機 F-MMS0320)', () => {
+  /** 実機の `PageLoad` 第 2 引数 (2026-09-02 に本番から採取した形。値は列の定義のみ)。 */
+  const SPEC = [
+    'DriverCD:1:1:int:MT00320Driver:DriverCD:DriverName::8::1:right::乗務員CD:75',
+    'BranchCD:5:0:int:MT00020Branch:BranchCD:BranchName::8::1:left::所属事業所CD:150',
+    'DriverName:2:1:nvarchar:::::40::2:left::乗務員名:155',
+    'RetireDate:12:0:datetime:::::10::1:left::退職年月日:95',
+    'DriverCategory4:13:0:int:MT00120UserEnumeration:::DRVRCLASS4:8::1:left::乗務員分類4:120',
+    'DriverLicenseNumber:21:0:nvarchar:::::16::1:left::免許証番号:95',
+    'IssuanceDate:22:0:datetime:::::10::1:left::交付年月日:95',
+    'ExpirationDate:23:0:datetime:::::10::1:left::有効期限:95',
+  ].join(',')
+
+  /** 実機のデータ行は 77 セルで、値は `lstMain_LabelValue{列番号}_{行}` の span に入る。
+   * 見出し行の文字は無い (JS が列定義から描くため)。 */
+  function specPage(
+    rows: Array<{ cd: string; name: string; retired?: string; category4?: string; issued?: string; expires?: string }>,
+  ): string {
+    const body = rows
+      .map((r, i) => {
+        const cell = (col: number, value: string) =>
+          `<td><span id="lstMain_LabelValue${col}_${i}">${value}</span></td>`
+        return (
+          '<tr>' +
+          '<td><a href="#">編集</a></td>' +
+          cell(1, r.cd) +
+          cell(2, r.name) +
+          cell(12, r.retired ?? '') +
+          cell(13, r.category4 ?? '001:正社員') +
+          cell(21, '第一種大型') +
+          cell(22, r.issued ?? '') +
+          cell(23, r.expires ?? '') +
+          '</tr>'
+        )
+      })
+      .join('')
+    return `<html><body><form>
+      <input type="hidden" name="__VIEWSTATE" value="VS1" />
+      <script>//<![CDATA[
+      PageLoad('MMS0320', '${SPEC}')
+      //]]></script>
+      <table id="lstMain_itemPlaceholderContainer">
+        <tr><th>Item1</th><th>Item2</th><th>KeyNO</th><th>DeleteFlag</th></tr>
+        ${body}
+      </table>
+    </form></body></html>`
+  }
+
+  it('★ 見出しの日本語が 1 つも無くても、列定義の番号で値を引ける', () => {
+    const page = parseDriverMasterPage(
+      specPage([{ cd: '1009', name: '大石 一郎', issued: '2021/04/01', expires: '2026/05/20' }]),
+    )
+    expect(page.rows).toHaveLength(1)
+    expect(page.rows[0]).toEqual({
+      driverCd: '1009',
+      name: '大石 一郎',
+      retiredOn: '',
+      classification4: '001:正社員',
+      licenseIssuedOn: '2021/04/01',
+      licenseExpiresOn: '2026/05/20',
+    })
+  })
+
+  it('★ 列定義の番号で引くので、セルの並び順が変わっても当たる', () => {
+    // 位置で引いていたら、この並べ替えで別の列を読む。
+    const shuffled = specPage([{ cd: '1009', name: '大石 一郎', expires: '2026/05/20' }]).replace(
+      '<td><span id="lstMain_LabelValue1_0">1009</span></td><td><span id="lstMain_LabelValue2_0">大石 一郎</span></td>',
+      '<td><span id="lstMain_LabelValue2_0">大石 一郎</span></td><td><span id="lstMain_LabelValue1_0">1009</span></td>',
+    )
+    const page = parseDriverMasterPage(shuffled)
+    expect(page.rows[0]!.driverCd).toBe('1009')
+    expect(page.rows[0]!.name).toBe('大石 一郎')
+  })
+
+  it('退職者は列定義経由でも判定できる (退職年月日 / 分類4)', () => {
+    const byDate = parseDriverMasterPage(specPage([{ cd: '1', name: 'a', retired: '2025/03/31' }]))
+    expect(isRetiredDriver(byDate.rows[0]!)).toBe(true)
+    const byClass = parseDriverMasterPage(specPage([{ cd: '2', name: 'b', category4: '999:退職' }]))
+    expect(isRetiredDriver(byClass.rows[0]!)).toBe(true)
+  })
+
+  it('列定義に無い列は空文字 (捏造しない)', () => {
+    const page = parseDriverMasterPage(
+      specPage([{ cd: '1009', name: '大石 一郎' }]).replace('IssuanceDate:22:0:datetime:::::10::1:left::交付年月日:95,', ''),
+    )
+    expect(page.rows[0]!.licenseIssuedOn).toBe('')
+    expect(page.rows[0]!.driverCd).toBe('1009')
+  })
+
+  it('壊れた列定義の要素は飛ばす (列番号が数字でない / ラベルが空)', () => {
+    const broken = specPage([{ cd: '1009', name: '大石 一郎' }]).replace(
+      'BranchCD:5:0:int',
+      'BranchCD:xx:0:int',
+    )
+    expect(parseDriverMasterPage(broken).rows[0]!.driverCd).toBe('1009')
+    const shortEntry = specPage([{ cd: '1009', name: '大石 一郎' }]).replace('DriverCD:1:', 'zz,DriverCD:1:')
+    expect(parseDriverMasterPage(shortEntry).rows[0]!.driverCd).toBe('1009')
+  })
+
+  it('PageLoad はあるが列が 1 つも読めなければ見出し経路に落ちる', () => {
+    const page = listPage({ rows: [{ cd: '1009', name: '大石 一郎' }] }).replace(
+      '<form>',
+      `<form><script>//<![CDATA[\nPageLoad('MMS0320', '::')\n//]]></script>`,
+    )
+    expect(parseDriverMasterPage(page).rows[0]!.driverCd).toBe('1009')
+  })
+
+  it('★ 列定義に在る列でも、その行に span が無ければ空文字 (捏造しない)', () => {
+    const page = parseDriverMasterPage(
+      specPage([{ cd: '1009', name: '大石 一郎', issued: '2021/04/01' }]).replace(
+        '<td><span id="lstMain_LabelValue22_0">2021/04/01</span></td>',
+        '<td>&nbsp;</td>',
+      ),
+    )
+    expect(page.rows[0]!.licenseIssuedOn).toBe('')
+    expect(page.rows[0]!.driverCd).toBe('1009')
+  })
+
+  it('同じ列番号の span が 1 行に 2 つあれば先勝ち (隠し要素で値を上書きしない)', () => {
+    const dup = specPage([{ cd: '1009', name: '大石 一郎' }]).replace(
+      '<td><span id="lstMain_LabelValue1_0">1009</span></td>',
+      '<td><span id="lstMain_LabelValue1_0">1009</span><span id="lstMain_LabelValue1_0">9999</span></td>',
+    )
+    expect(parseDriverMasterPage(dup).rows[0]!.driverCd).toBe('1009')
+  })
+
+  it('同じ列名が 2 回出てきたら先勝ち (後から上書きしない)', () => {
+    const dup = specPage([{ cd: '1009', name: '大石 一郎' }]).replace(
+      'BranchCD:5:0:int:MT00020Branch:BranchCD:BranchName::8::1:left::所属事業所CD:150',
+      'Dup:99:0:int:::::8::1:left::乗務員CD:75',
+    )
+    // 99 ではなく先に定義された 1 を使う
+    expect(parseDriverMasterPage(dup).rows[0]!.driverCd).toBe('1009')
+  })
+
+  it('構造要約に「列定義から引けた列」が出る', () => {
+    expect(describeDriverMasterStructure(specPage([{ cd: '1', name: 'a' }]))).toContain('列定義から引けた列=6/6')
+    expect(describeDriverMasterStructure(listPage({ rows: [] }))).toContain('列定義から引けた列=定義無/6')
   })
 })
