@@ -76,6 +76,7 @@ import {
 } from "./alc-tenant-rpc";
 import {
   chunkUpsertItems,
+  countRetired,
   fetchDriverMaster,
   mergeUpsertResults,
   parseDriverMasterUpsertResult,
@@ -5239,10 +5240,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     let rowCount: number | null = null;
     let itemCount: number | null = null;
     let chunkCount: number | null = null;
+    // 退職者も送る (ユーザー指示 2026-09-02)。**何名が退職者だったかは応答に残す** —
+    // 送る/送らないを変えても「静かに減らさない」方針は変えない。
+    let retiredCount: number | null = null;
     try {
       const rpc = requireAlcTenantForwarder(this.env.AUTH_WORKER_RPC);
       const rows = await this.withTheearthLoginSession(account, jobState, (jar) => fetchDriverMaster(jar));
       rowCount = rows.length;
+      retiredCount = countRetired(rows);
       const items = toUpsertItems(rows);
       itemCount = items.length;
       const chunks = chunkUpsertItems(items);
@@ -5286,6 +5291,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         driver_master_sync: "done",
         rows: rows.length,
         items: items.length,
+        retired: retiredCount,
         chunks: chunks.length,
         created: result.created,
         updated: result.updated,
@@ -5306,6 +5312,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         comp_id: account.comp_id,
         rows: rows.length,
         items: items.length,
+        retired: retiredCount,
         chunks: chunks.length,
         created: result.created,
         updated: result.updated,
@@ -5322,6 +5329,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           driver_master_sync: "failed",
           rows: rowCount,
           items: itemCount,
+          retired: retiredCount,
           chunks: chunkCount,
           error: message,
         }),
@@ -5334,6 +5342,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           // 落ちたということで、上流 (alc) は 1 度も叩いていない。
           rows: rowCount,
           items: itemCount,
+          retired: retiredCount,
           chunks: chunkCount,
           error: message,
         },

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   chunkUpsertItems,
+  countRetired,
   describeDriverMasterStructure,
   extractGridSpec,
   DRIVER_MASTER_ROW_COUNT,
@@ -400,14 +401,27 @@ describe('toUpsertItems', () => {
     })
   })
 
-  it('退職者と乗務員CD が空の行は送らない', () => {
+  it('★ 退職者も送る (2026-09-02 に除外をやめた)。落とすのは乗務員CD が空の行だけ', () => {
+    // 在籍者だけに絞ると alc の 507 名に対して 132 名しか当たらず、過去の点呼や
+    // 免許の履歴を引けない乗務員が残る。
     const items = toUpsertItems([
       row({ driverCd: '1001', retiredOn: '2025/03/31' }),
       row({ driverCd: '1002', classification4: '999:退職' }),
       row({ driverCd: '  ' }),
       row({ driverCd: '1004' }),
     ])
-    expect(items.map((i) => i.code)).toEqual(['1004'])
+    expect(items.map((i) => i.code)).toEqual(['1001', '1002', '1004'])
+  })
+
+  it('退職者の数は数えて返せる (送る件数は減らさないが内訳は残す)', () => {
+    expect(
+      countRetired([
+        row({ driverCd: '1001', retiredOn: '2025/03/31' }),
+        row({ driverCd: '1002', classification4: '999:退職' }),
+        row({ driverCd: '1004' }),
+      ]),
+    ).toBe(2)
+    expect(countRetired([])).toBe(0)
   })
 
   it('同じ乗務員CD が複数出たら後勝ち', () => {

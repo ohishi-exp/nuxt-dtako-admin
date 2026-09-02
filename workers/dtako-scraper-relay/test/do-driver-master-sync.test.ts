@@ -200,11 +200,23 @@ describe('DtakoScraperRelayDO#runDriverMasterSync', () => {
     expect(await res.json()).toMatchObject({ ok: true, rows: 501, items: 501, chunks: 2, created: 3, updated: 498 })
   })
 
-  it('★ 一覧は読めたが全員退職で在籍者 0 件なら、上流を 1 度も叩かず rows と items を名指しして 502', async () => {
+  it('★ 退職者も送る。何名が退職者だったかは応答に載せる (2026-09-02 に除外をやめた)', async () => {
+    stubTheearth([{ ...DRIVERS[0]!, retired: '2025/03/31' }])
+    const { calls, run } = makeDO({ status: 200, body: '{"created":0,"updated":1,"skipped":[]}' })
+
+    const res = await run(ACCOUNT)
+
+    // 退職者でも 1 件送る (在籍者だけに絞ると alc 側で当たらない乗務員が残る)
+    expect(res.status).toBe(200)
+    expect(calls).toHaveLength(1)
+    expect(await res.json()).toMatchObject({ ok: true, rows: 1, items: 1, retired: 1, updated: 1 })
+  })
+
+  it('★ 乗務員CD が 1 件も無ければ上流を叩かず rows と items を名指しして 502', async () => {
     // 空のまま PUT すると上流は 500 件超と**同じ本文** (`items が不正です`) の 400 を
     // 返すので、原因が切り分けられなくなる。手前で止めて名指しする。
     // (一覧そのものが 0 行の場合は、その手前 `fetchDriverMaster` が構造を添えて落ちる)
-    stubTheearth([{ ...DRIVERS[0]!, retired: '2025/03/31' }])
+    stubTheearth([{ ...DRIVERS[0]!, cd: '  ' }])
     const { calls, run } = makeDO({ status: 200, body: '{"created":0,"updated":0,"skipped":[]}' })
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
 

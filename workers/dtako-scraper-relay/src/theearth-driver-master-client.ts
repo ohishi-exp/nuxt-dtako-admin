@@ -426,15 +426,26 @@ export function toIsoDate(value: string): string | null {
   return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
 }
 
-/** 退職者か (退職年月日が入っている、または 乗務員分類4 が `999:` で始まる)。 */
+/** 退職者か (退職年月日が入っている、または 乗務員分類4 が `999:` で始まる)。
+ *
+ * ★ **送るかどうかの判定には使わない** (2026-09-02 にユーザー指示で除外をやめた)。
+ * 何名が退職者だったかを数えて応答に載せるためだけに残している。 */
 export function isRetiredDriver(row: DriverMasterRow): boolean {
   return row.retiredOn.trim() !== "" || row.classification4.trim().startsWith(RETIRED_CLASSIFICATION_PREFIX);
+}
+
+/** 一覧のうち退職者が何名か (送る件数は減らさない。内訳を応答に出すため)。 */
+export function countRetired(rows: DriverMasterRow[]): number {
+  return rows.filter(isRetiredDriver).length;
 }
 
 /**
  * 一覧の行を `PUT /api/employees/bulk-by-code` の items に畳む。
  *
- * - **退職者は送らない** (`isRetiredDriver`)。
+ * - **退職者も送る** (ユーザー指示 2026-09-02)。theearth の在籍者だけに絞ると
+ *   alc 側の 507 名に対して 132 名しか当たらず、過去の点呼や免許の履歴を
+ *   引けない乗務員が残る。**弾く代わりに何名が退職者だったかを数えて返す**
+ *   (`countRetired`) — 静かに減らさない、という方針は変えない。
  * - 乗務員CD が空の行は送らない (`code` が主キーなので空では upsert できない)。
  * - 免許日付は `YYYY-MM-DD` に直す。**片方だけでも入れる** (期限だけ判っている乗務員が居る)。
  * - `nfc_id` は 交付 8 桁 + 期限 8 桁。**両方揃わなければ null** (タブレットが引けないだけで、
@@ -445,7 +456,7 @@ export function toUpsertItems(rows: DriverMasterRow[]): EmployeeUpsertItem[] {
   const byCode = new Map<string, EmployeeUpsertItem>();
   for (const row of rows) {
     const code = row.driverCd.trim();
-    if (!code || isRetiredDriver(row)) continue;
+    if (!code) continue;
     const issue = toIsoDate(row.licenseIssuedOn);
     const expiry = toIsoDate(row.licenseExpiresOn);
     byCode.set(code, {
