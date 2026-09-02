@@ -138,9 +138,36 @@ export interface DriverMasterPage {
   nextTarget: PagerLink | null;
 }
 
-/** セルの内側からタグを剥がし、entity を戻して trim する (textContent 相当)。 */
+/**
+ * セルの中の**コントロールが持つラベル**を拾う (`textContent` では取れないもの)。
+ *
+ * 実機 (2026-09-02、本番): 見出し行のセルは `<input type="submit" value="乗務員CD">`
+ * のような並べ替えボタンで、タグを剥がすと**空文字になる**。実際
+ * `見出し候補=[事業所]` (= 素のテキストを持つ行はフォーム側の 1 行だけ) で、
+ * 30 行のデータがあるのに見出しだけ引けなかった。
+ *
+ * 拾うのは押せる `input` の `value` と `img` の `alt` だけ。**hidden や text の
+ * `value` は拾わない** — `__VIEWSTATE` のような中身や、入力済みの値を
+ * 見出しと取り違えるため。
+ */
+function controlLabel(html: string): string {
+  for (const tag of html.match(/<input\b[^>]*>/gi) ?? []) {
+    if (!/\btype\s*=\s*["']?(?:submit|button|image)["']?/i.test(tag)) continue;
+    const value = tag.match(/\bvalue\s*=\s*"([^"]*)"/i)?.[1] ?? tag.match(/\bvalue\s*=\s*'([^']*)'/i)?.[1];
+    if (value && value.trim() !== "") return value;
+  }
+  for (const tag of html.match(/<img\b[^>]*>/gi) ?? []) {
+    const alt = tag.match(/\balt\s*=\s*"([^"]*)"/i)?.[1] ?? tag.match(/\balt\s*=\s*'([^']*)'/i)?.[1];
+    if (alt && alt.trim() !== "") return alt;
+  }
+  return "";
+}
+
+/** セルの内側からタグを剥がし、entity を戻して trim する (textContent 相当)。
+ * **素のテキストが空のときだけ**コントロールのラベルへ落ちる (`controlLabel`)。 */
 function cellText(html: string): string {
-  return decodeHtmlEntities(html.replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ")).trim();
+  const text = decodeHtmlEntities(html.replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ")).trim();
+  return text !== "" ? text : decodeHtmlEntities(controlLabel(html)).trim();
 }
 
 /** `<tr>…</tr>` を順に取り出し、それぞれの生 HTML とセル文字列の組にして返す。 */
@@ -238,17 +265,20 @@ export function describeDriverMasterStructure(html: string): string {
   const all = splitRows(html);
   const dataRows = all.filter((row) => row.raw.includes(DATA_CELL_MARKER)).length;
   const columns = resolveColumnIndexes(all);
-  const labels =
-    all
-      .find((row) => !row.raw.includes(DATA_CELL_MARKER) && row.cells.some((cell) => cell !== ""))
-      ?.cells.filter((cell) => cell !== "")
-      .slice(0, 12)
-      .map((cell) => cell.slice(0, 20)) ?? [];
+  // ★ 最初に見つかった行ではなく、**非空セルが多い行から 3 本**出す。実機では
+  // 先頭に「事業所」1 セルだけのフォーム行が居て、それだけを出して詰まった。
+  const candidates = all
+    .filter((row) => !row.raw.includes(DATA_CELL_MARKER))
+    .map((row) => row.cells.filter((cell) => cell !== ""))
+    .filter((cells) => cells.length > 0)
+    .sort((a, b) => b.length - a.length)
+    .slice(0, 3)
+    .map((cells) => cells.slice(0, 12).map((cell) => cell.slice(0, 20)).join(" | "));
   const missing = Object.values(COLUMN_LABELS).filter((label) => !columns?.has(normalizeLabel(label)));
   // ★ 呼び出し元 (`driver-master-run.ts`) が本文を切り詰めるので、**切られたら
   // 一番困る順**に並べる。見出しの実物が読めれば照合の直し方が決まる。
   return (
-    `見出し=${columns ? "検出" : "未検出"} 見出し候補=[${labels.join(" | ")}] ` +
+    `見出し=${columns ? "検出" : "未検出"} 見出し候補=[${candidates.join("] [")}] ` +
     `引けない列=[${missing.join(",")}] データ行=${dataRows} tr=${all.length} ` +
     `title="${title}" bytes=${html.length} ` +
     `行数select=${hasFormField(html, ROW_COUNT_SELECT)} 行数ボタン=${hasFormField(html, ROW_COUNT_BUTTON)}`
