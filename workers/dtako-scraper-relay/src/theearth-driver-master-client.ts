@@ -350,21 +350,50 @@ export async function fetchDriverMaster(
   return rows;
 }
 
-/** `PUT /api/employees/bulk-by-code` の応答 (rust-alc-api、Refs ippoan/alc-app-s3#125)。 */
+/**
+ * upsert できなかった 1 件。上流 rust-alc-api の `EmployeeUpsertSkipped`
+ * (`crates/alc-core/src/models.rs`、Refs ippoan/rust-alc-api#603) と同じ形。
+ *
+ * **`code` と `reason` を対で持つのが要点。** 文字列に潰すと「どの乗務員が
+ * なぜ弾かれたか」が消えて、`skipped` を warn に出す意味が無くなる。
+ * `reason` の実値は `nfc_id_conflict` (他の乗務員が同じ nfc_id を持っている) と
+ * `unique_violation` (INSERT 時の一意制約違反) の 2 種 (#603 の repo 実装で確認)。
+ */
+export interface DriverMasterUpsertSkipped {
+  code: string;
+  reason: string;
+}
+
+/** `PUT /api/employees/bulk-by-code` の応答 (rust-alc-api の
+ * `EmployeeUpsertSummary`、Refs ippoan/alc-app-s3#125 / ippoan/rust-alc-api#603)。 */
 export interface DriverMasterUpsertResult {
   /** 新規に作られた件数。読めなければ null。 */
   created: number | null;
   /** 更新された件数。読めなければ null。 */
   updated: number | null;
-  /** 上流が受け取らなかった乗務員CD。**空でなければ呼び出し側が warn する。** */
-  skipped: string[];
-  /** 応答を数値として読めなかった理由 (読めたら null)。
+  /** 上流が受け取らなかった乗務員。**空でなければ呼び出し側が warn する。** */
+  skipped: DriverMasterUpsertSkipped[];
+  /** 応答を期待した形として読めなかった理由 (読めたら null)。
    * **2xx で返ってきた以上、書き込み自体は通っている**ので job ごと失敗にはしない。
    * ただし「0 件だった」と同じ静かさにもしない — 呼び出し側が warn で名指しする。 */
   unreadable: string | null;
 }
 
-/** 上流の応答本文を `DriverMasterUpsertResult` に畳む (pure)。 */
+/** `skipped` の 1 要素が `{code, reason}` の対になっているか。 */
+function asUpsertSkipped(value: unknown): DriverMasterUpsertSkipped | null {
+  if (typeof value !== "object" || value === null) return null;
+  const entry = value as { code?: unknown; reason?: unknown };
+  if (typeof entry.code !== "string" || typeof entry.reason !== "string") return null;
+  return { code: entry.code, reason: entry.reason };
+}
+
+/**
+ * 上流の応答本文を `DriverMasterUpsertResult` に畳む (pure)。
+ *
+ * **`skipped` の要素が `{code, reason}` でなければ `unreadable` に落とす。**
+ * `String(v)` で潰すと `[object Object]` になり、名指しのつもりの warn が
+ * 「何か弾かれた」しか言わなくなる (静かに流さない設計が無効化される)。
+ */
 export function parseDriverMasterUpsertResult(text: string): DriverMasterUpsertResult {
   const unreadable = (why: string): DriverMasterUpsertResult => ({
     created: null,
@@ -383,10 +412,14 @@ export function parseDriverMasterUpsertResult(text: string): DriverMasterUpsertR
   }
   const body = parsed as { created?: unknown; updated?: unknown; skipped?: unknown };
   const count = (value: unknown): number | null => (typeof value === "number" ? value : null);
-  return {
-    created: count(body.created),
-    updated: count(body.updated),
-    skipped: Array.isArray(body.skipped) ? body.skipped.map((v) => String(v)) : [],
-    unreadable: null,
-  };
+  const rawSkipped = Array.isArray(body.skipped) ? body.skipped : [];
+  const skipped: DriverMasterUpsertSkipped[] = [];
+  for (const entry of rawSkipped) {
+    const parsedEntry = asUpsertSkipped(entry);
+    if (!parsedEntry) {
+      return unreadable("応答の skipped が {code, reason} の配列ではありません");
+    }
+    skipped.push(parsedEntry);
+  }
+  return { created: count(body.created), updated: count(body.updated), skipped, unreadable: null };
 }

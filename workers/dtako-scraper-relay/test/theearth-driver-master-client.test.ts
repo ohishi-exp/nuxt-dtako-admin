@@ -419,13 +419,45 @@ describe('toUpsertItems', () => {
 // ---------------------------------------------------------------------------
 
 describe('parseDriverMasterUpsertResult', () => {
-  it('created / updated / skipped を読む', () => {
-    expect(parseDriverMasterUpsertResult('{"created":2,"updated":8,"skipped":["1009"]}')).toEqual({
+  // 上流 (ippoan/rust-alc-api#603 の `EmployeeUpsertSummary`) の実形状。
+  // skipped は **オブジェクト配列** で、reason の実値は nfc_id_conflict / unique_violation。
+  it('created / updated / skipped を読む (skipped は {code, reason} の配列)', () => {
+    expect(
+      parseDriverMasterUpsertResult(
+        '{"created":2,"updated":8,"skipped":[{"code":"1009","reason":"nfc_id_conflict"},{"code":"1078","reason":"unique_violation"}]}',
+      ),
+    ).toEqual({
       created: 2,
       updated: 8,
-      skipped: ['1009'],
+      skipped: [
+        { code: '1009', reason: 'nfc_id_conflict' },
+        { code: '1078', reason: 'unique_violation' },
+      ],
       unreadable: null,
     })
+  })
+
+  // ★ 陰性対照。`skipped.map((v) => String(v))` に戻すとここが通ってしまい、
+  // warn ログが "[object Object]" だけになって「誰がなぜ弾かれたか」が消える。
+  it('skipped が {code, reason} の配列でなければ unreadable に落とす', () => {
+    for (const body of [
+      '{"skipped":["1009"]}',
+      '{"skipped":[{"code":"1009"}]}',
+      '{"skipped":[{"reason":"nfc_id_conflict"}]}',
+      '{"skipped":[null]}',
+    ]) {
+      const result = parseDriverMasterUpsertResult(body)
+      expect(result.unreadable).toContain('skipped が {code, reason} の配列ではありません')
+      expect(result.skipped).toEqual([])
+    }
+  })
+
+  it('warn ログに載る形 (JSON) に code と reason が両方残る', () => {
+    const result = parseDriverMasterUpsertResult('{"skipped":[{"code":"1009","reason":"nfc_id_conflict"}]}')
+    const logged = JSON.stringify({ skipped: result.skipped })
+    expect(logged).toContain('1009')
+    expect(logged).toContain('nfc_id_conflict')
+    expect(logged).not.toContain('[object Object]')
   })
 
   it('欠けたフィールドは null / 空配列にする', () => {
