@@ -974,14 +974,21 @@ async function handleRestraintSync(request: Request, env: RelayWorkerEnv): Promi
  *
  * alc-app (点呼アプリ) は theearth の comp_id を知らず alc の tenant_id しか持たない
  * ので、**tenant_id → comp_id[] の逆引き**をここで引き受ける
- * (`viewerCompIdsForTenant` = `DTAKO_ACCOUNTS` の逆引き。写しをこの repo に
- * 新設しない)。
+ * (`viewerCompIdsForTenant`)。**tenant_id → comp_id の写しは `DTAKO_ACCOUNTS`
+ * (relay の KV) が正**で、この repo に別の写しや allowlist を新設しない — 二重管理に
+ * なって片方だけ更新される (`restraint-viewer-auth.ts` の module doc、#1004 / #1049)。
  *
  * **DO へ渡すのは comp_id だけで、tenant_id は 1 バイトも運ばない。** 書き先の
  * tenant は DO 側が `resolveAccount(comp_id)` から引く (`handleCronDriverMaster` の
  * doc 参照) ので、**呼び出し元が任意テナントへ書ける形にはならない** (#434 の
  * 不変条件はそのまま)。ここで tenant_id が効くのは「どの comp を回すか」だけで、
  * 選べる範囲は `DTAKO_ACCOUNTS` に載っている組み合わせに限られる。
+ *
+ * **★ tenant_id は認可ではない。認可を担うのは `X-Alc-Proxy-Secret` だけ** —
+ * この secret を constant-time で検証して通った呼び出し元を信頼する、という
+ * サーバ間の関門であって、body の tenant_id は「誰か」を主張しない。
+ * ⇒ **tenant_id の値で権限を判定しないこと。** 判定に使い出した瞬間、body に
+ * 書くだけで名乗れる認可になる。
  *
  * ## ★ 該当 0 件は 404 で名指しする
  *
