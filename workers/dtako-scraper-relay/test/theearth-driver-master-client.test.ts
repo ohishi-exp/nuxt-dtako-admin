@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   chunkUpsertItems,
   describeDriverMasterStructure,
+  extractGridSpec,
   DRIVER_MASTER_ROW_COUNT,
   fetchDriverMaster,
   isRetiredDriver,
@@ -998,5 +999,37 @@ describe('ラベル位置の要約', () => {
 
   it('タグの外に在るラベルでも落ちない', () => {
     expect(describeDriverMasterStructure('乗務員CD')).toContain('乗務員CD=(タグ不明)')
+  })
+})
+
+describe('extractGridSpec', () => {
+  const page = (script: string) => `<html><body><script>//<![CDATA[\n${script}\n//]]></script></body></html>`
+
+  it('PageLoad の列定義を 1 行に畳んで返す', () => {
+    const spec = extractGridSpec(page("PageLoad('MMS0320', 'DriverCD:1:1:int:MT00320Driver:DriverCD:DriverName')"))
+    expect(spec).toBe("PageLoad('MMS0320', 'DriverCD:1:1:int:MT00320Driver:DriverCD:DriverName')")
+  })
+
+  it('改行やタブは空白 1 つに畳む', () => {
+    expect(extractGridSpec(page("PageLoad('MMS0320',\n\t'DriverCD:1')"))).toBe("PageLoad('MMS0320', 'DriverCD:1')")
+  })
+
+  it('閉じ括弧が無くても落ちない', () => {
+    expect(extractGridSpec("PageLoad('MMS0320', 'DriverCD")).toBe("PageLoad('MMS0320', 'DriverCD")
+  })
+
+  it('長すぎる定義は切る', () => {
+    const spec = extractGridSpec(page(`PageLoad('${'x'.repeat(50)}'`), 20)
+    expect(spec).toHaveLength(20)
+  })
+
+  it('PageLoad が無ければ null', () => {
+    expect(extractGridSpec('<html></html>')).toBeNull()
+  })
+
+  it('構造要約の末尾に列定義が載る (切られたら最初に落ちる位置)', () => {
+    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }] }))
+    expect(out).toContain('列定義=無')
+    expect(out.indexOf('列定義=')).toBeGreaterThan(out.indexOf('見出し候補='))
   })
 })
