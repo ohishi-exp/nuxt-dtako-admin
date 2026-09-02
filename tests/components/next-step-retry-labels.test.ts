@@ -120,7 +120,8 @@ describe('describeResponseFailure の retry は実在するボタンを指す', 
     // `daily-hours` / `operations` の**表の取得失敗**で、`retry` は両画面に既にある
     // `RETRY_RELOAD` (`'ページを再読み込みしてください'`) — **`「…」` が無いので
     // この抽出の対象外**。理由は下の 2 つ目の項目と同じ (失敗した回に押せるボタンが
-    // 画面に出ていない) で、`.vue` 側の `describeListFailure` の doc に実測が書いてある。
+    // 画面に出ていない) で、`daily-hours`/`operations` の `RETRY_RELOAD` 定数の doc
+    // (呼び出し元。`describeListFailure` 自体は Refs #1074 で `api-error.ts` へ移設済み) に実測が書いてある。
     // **数え直しは `999` に上げて落とし、`expected X to be greater than or equal to 999`
     // の X を読む** — 下限をそのまま「いま何本あるか」として引用しない (下記)。
     //

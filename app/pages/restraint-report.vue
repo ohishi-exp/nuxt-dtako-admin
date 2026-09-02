@@ -2,7 +2,7 @@
 import { getDrivers, getRestraintReport, downloadRestraintReportPdfStream, downloadRestraintReportPdfSingle, recalculateStream, recalculateDriverStream } from '~/utils/api'
 import type { PdfProgressEvent, RecalcProgressEvent } from '~/utils/api'
 import type { Driver, RestraintReportResponse, RestraintDayRow } from '~/types'
-import { describeApiError, describeCaughtError } from '~/utils/api-error'
+import { describeListFailure } from '~/utils/api-error'
 
 const drivers = ref<Driver[]>([])
 // 乗務員一覧が**取得できなかった**理由 (Refs #920)。**空配列だけでは「0 人」と
@@ -36,59 +36,6 @@ async function fetchReport() {
 /** 乗務員一覧を取り直す口が `onMounted` にしかない画面の「やり直し方」 (Refs #1008)。 */
 const RETRY_RELOAD = 'ページを再読み込みしてください'
 
-/**
- * 一覧の取得失敗を 1 行にする (Refs #920 / #1008)。
- *
- * ## `describeCaughtError` に通す — 足しているのは**「次に何をすればいいか」**
- *
- * `getDrivers` は `app/utils/api.ts` の `request()` → `@ippoan/auth-client` の
- * `createAuthFetch` 経由で、そこは非 2xx を
- * `new Error(`API エラー (${status}): ${body || statusText}`)` に組んで投げる。
- * **ofetch の `FetchError` ではない**ので `statusCode` も `data` も持たず、
- * **理由の文字列は `describeApiError` を当てても 1 文字も変わらない**
- * (#910 が (B) 経路 28 箇所で実測済み。この事実は #1008 でも変わっていない)。
- * **変わるのは末尾**で、`describeCaughtError` が `` `(3 桁): ` `` の形から status を
- * 読んで「再ログイン」「管理者に依頼」「復旧を待つ」を撃ち分ける。
- * **理由を 1 行に畳むのは今も #904 (`api.ts` 側) の担当。**
- *
- * ## `retry` にボタンを渡していない理由
- *
- * **乗務員一覧を取り直す口は `onMounted` にしかない。** この画面には
- * 「表示」「PDF」「全員PDF」「再計算」「全員再計算」のボタンが在るが、
- * **どれも乗務員一覧を取り直さない** — 名指ししても押した人は直らない。
- * (**「押せるボタンが画面に無い」と書いていたが、それは literal に偽だった** —
- * 無いのは**この一覧を取り直すボタン**であって、ボタン一般ではない。#1008 PR-3)
- * **無いボタンを案内しない** (`tests/components/next-step-retry-labels.test.ts` の
- * 規約) ので、ボタンを名指ししない `RETRY_RELOAD` を渡す。
- *
- * ## ★ 次の一手は**どの経路でもちょうど 1 つ**。0 にも 2 つにもしない (#1008 PR-3)
- *
- * | 入ってくる例外 | `describeCaughtError` | ここで足すもの |
- * | --- | --- | --- |
- * | `API エラー (503): …` | 「復旧してから」+ `RETRY_RELOAD` | なし |
- * | `API エラー (403): …` | 「管理者に許可の追加を依頼してください」 | なし |
- * | status を読めない `Error` | **次の一手なし** (3 番目の枝) | `RETRY_RELOAD` |
- * | `Error` ですらない | — | `RETRY_RELOAD` |
- *
- * **0 にしない**のは #1008 そのものだから。**2 つにしない**のは、`UAlert` の
- * `description` 側にも固定の指示を置いていた初稿が、403 で
- * 「ログインし直しても変わりません」と「ページを再読み込みして確かめてください」を
- * **並べて食い違わせていた**から (dev で実測。PR-2 が `margin` / `allowance` で
- * 見つけたのと同型で、**合成後を描画するまで出ない**)。
- * ⇒ **次の一手を持つのは `title` の側だけ。`description` は事実だけを書く。**
- */
-function describeListFailure(e: unknown): string {
-  if (!(e instanceof Error)) return `理由を読めませんでした — ${RETRY_RELOAD}`
-  const detail = describeCaughtError(e, RETRY_RELOAD)
-  // ★ **`describeCaughtError` は status が読めなかった回に次の一手を付けない** —
-  //   status ごとに違うので「1 つ選ぶと嘘になる」から (`api-error.ts` の 3 番目の枝)。
-  //   注記側の固定文を落とした (#1008 PR-3) 以上、**ここが最後の砦**なので、
-  //   付かなかった回だけ status に依らない `RETRY_RELOAD` を補う。
-  //   **判定は「3 番目の枝が返す値そのもの」との一致**で行う — 文言を grep すると
-  //   `nextStepForStatus` を書き換えた日に空撃ちになる。
-  return detail === describeApiError(e) ? `${detail} — ${RETRY_RELOAD}` : detail
-}
-
 onMounted(async () => {
   try {
     drivers.value = await getDrivers()
@@ -99,7 +46,7 @@ onMounted(async () => {
     // 区別が付かない (Refs #920)。以前は `.catch(() => {})` で例外オブジェクトを
     // **束縛すらしていなかった**ので、理由は 100% 失われていた。
     drivers.value = []
-    driversError.value = describeListFailure(e)
+    driversError.value = describeListFailure(e, RETRY_RELOAD)
   }
 })
 

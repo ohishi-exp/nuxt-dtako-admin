@@ -193,7 +193,7 @@ describe('/operations 絞り込み選択肢の取得', () => {
       // (nuxt dev + CDP で実測)。⇒ 次の一手は status を知っている `title` の側だけが持つ。
       //
       // **落とすだけだと 0 になる経路がある** — `describeCaughtError` は status を
-      // 読めない回に次の一手を付けないので、`describeListFailure` が補っている。
+      // 読めない回に次の一手を付けないので、`describeListFailure` (api-error.ts、Refs #1074) が補っている。
       // ここでは **403 (食い違わない) と 読めない回 (0 にならない) の両方**を見る。
       api.getDrivers.mockRejectedValue(new Error('API エラー (403): 権限がありません'))
       const w403 = await mountPage()

@@ -21,7 +21,8 @@
 import { expect } from 'vitest'
 
 /**
- * `describeListFailure` に入りうる例外の**全経路**と、そのとき `title` に入るべき次の一手。
+ * `describeListFailure` (`app/utils/api-error.ts` の export、Refs #1074) に入りうる
+ * 例外の**全経路**と、そのとき `title` に入るべき次の一手。
  *
  * ## ★ `retry` を引数で受ける — **画面ごとに違うから**
  *

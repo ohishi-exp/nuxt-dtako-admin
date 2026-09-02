@@ -2,7 +2,7 @@
 import { uploadZip, getPendingUploads, rerunUpload, getUploads, splitCsv } from '~/utils/api'
 import { parseSplitCsvResponse } from '~/utils/scrape-split'
 import type { UploadResponse, PendingUpload } from '~/types'
-import { describeApiError, describeCaughtError } from '~/utils/api-error'
+import { describeListFailure } from '~/utils/api-error'
 
 const isDragging = ref(false)
 const isUploading = ref(false)
@@ -65,78 +65,6 @@ async function handleUpload(file: File) {
   } finally {
     isUploading.value = false
   }
-}
-
-/**
- * 一覧の取得失敗を 1 行にする (Refs #911 / #1008)。
- *
- * ## `describeCaughtError` に通す — 足しているのは**「次に何をすればいいか」**
- *
- * `getPendingUploads` / `getUploads` は `app/utils/api.ts` の `request()` →
- * `@ippoan/auth-client` の `createAuthFetch` 経由で、そこは非 2xx を
- * `new Error(`API エラー (${status}): ${body || statusText}`)` に組んで投げる
- * (`createAuthFetch.ts:56`)。**ofetch の `FetchError` ではない**ので `statusCode` も
- * `data` も持たず、**理由の文字列は `describeApiError` を当てても 1 文字も変わらない**
- * (#910 が (B) 経路 28 箇所で実測済み。この事実は #1008 でも変わっていない)。
- *
- * **変わるのは末尾**で、`describeCaughtError` が
- * `` `API エラー (503): …` `` の `` `(3 桁): ` `` から status を読み、
- * 401 は再ログイン / 403 は管理者へ / 5xx は復旧待ち、と撃ち分ける。
- * **理由そのものを 1 行に畳むのは今も #904 (`api.ts` 側) の担当**で、ここで JSON を
- * 読み直すと二重実装になるのでやっていない。
- *
- * ## いま実際に出る文字列 (合成後の 1 文)
- *
- * ```
- * 保留中のアップロードを取得できませんでした (API エラー (503): { "error": true, … }
- *   — サーバ側の設定か障害です (権限の問題ではありません)。
- *     復旧してから「保留中のアップロードを再取得」を押してください)
- * ```
- *
- * ## ★ `retry` は**画面に実在するボタンの表記そのまま**
- *
- * この 2 つの再取得ボタンは **`icon` だけでラベルの文字を持っていなかった**ので、
- * **`aria-label` を足してそれを引用している** (#1008)。案内文のためだけに
- * ラベルを創作したのではなく、**画面 (と読み上げ) の側に足したものを引用**している。
- * `tests/components/next-step-retry-labels.test.ts` が
- * 「その `.vue` の template に実在するか」を機械で見ている。
- *
- * ## ★ 次の一手は**どの経路でもちょうど 1 つ**。0 にも 2 つにもしない (#1008 PR-3)
- *
- * | 入ってくる例外 | `describeCaughtError` | ここで足すもの |
- * | --- | --- | --- |
- * | `API エラー (503): …` | 「復旧してから」+ `retry` | なし |
- * | `API エラー (403): …` | 「管理者に許可の追加を依頼してください」 | なし |
- * | status を読めない `Error` | **次の一手なし** (3 番目の枝) | `retry` |
- * | `Error` ですらない | — | `retry` |
- *
- * **PR-2 で下の段から「再読み込みを押して確かめてください」を落としたとき、
- * status を読めない 2 経路では下の段が唯一の次の一手だった** — 落とした結果 0 になり、
- * **#1008 の PR が #1008 の欠陥を新しく作っていた** (PR-3 で実測して判明)。
- * 落としたこと自体は正しい (同じ指示が 2 回出るうえ、この画面に「再読み込み」という
- * 表記のボタンは無い) ので、**穴はここで塞ぐ**。
- * 3 画面 (`daily-hours` / `operations` / `restraint-report`) と同じ形だが、
- * **あちらは `RETRY_RELOAD` 固定・こちらは `retry` が呼び出しごとに違う**
- * (実在ボタンを名指ししているため) 点だけが違う。
- *
- * ## ★ ここでは塞げない穴 (#904 に申し送り、未測定)
- *
- * 本番は HTTP/3 で reason phrase が空 (`res.statusText === ''`) なので、
- * **本文が空の非 2xx では `e.message` が `API エラー (503): ` (コロンの後ろが空)** に
- * なる。`api.ts` / `createAuthFetch` に触らずには塞げない。dev は HTTP/1.1 なので
- * この形は踏めず、**実測できていない**。
- * **ただし「次の一手」はこの穴の中でも出る** — status は `(503): ` の側から読める。
- */
-function describeListFailure(e: unknown, retry: string): string {
-  if (!(e instanceof Error)) return `理由を読めませんでした — ${retry}`
-  const detail = describeCaughtError(e, retry)
-  // ★ **`describeCaughtError` は status が読めなかった回に次の一手を付けない** —
-  //   status ごとに違うので「1 つ選ぶと嘘になる」から (`api-error.ts` の 3 番目の枝)。
-  //   下の段から固定文を落とした (#1008 PR-2) 以上、**ここが最後の砦**なので、
-  //   付かなかった回だけ `retry` を補う。
-  //   **判定は「3 番目の枝が返す値そのもの」との一致**で行う — 文言を grep すると
-  //   `nextStepForStatus` を書き換えた日に空撃ちになる。
-  return detail === describeApiError(e) ? `${detail} — ${retry}` : detail
 }
 
 async function loadPending() {
