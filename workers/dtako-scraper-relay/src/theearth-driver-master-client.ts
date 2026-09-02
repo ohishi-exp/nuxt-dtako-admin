@@ -279,6 +279,25 @@ function locateLabel(html: string, label: string): string {
   return `${label}=${tag.slice(0, 80)}`;
 }
 
+/**
+ * 一覧の**列定義**を取り出す (`PageLoad('MMS0320', '…')` の第 2 引数)。
+ *
+ * 実機 (2026-09-02): 見出しの日本語は HTML に**素のテキストとして存在しない**。
+ * `<![CDATA[ PageLoad('MMS0320', 'DriverCD:1:1:int:MT00320Driver:DriverCD:…')]]>`
+ * という**列定義の文字列**を JS が読んで見出しを描いている。ブラウザレス fetch
+ * では JS が走らないので、列の並びを知る手がかりはこの文字列だけになる。
+ *
+ * ★ 返すのは**列の定義 (項目名・型・テーブル名)** であって乗務員の値ではない。
+ * 念のため長さで切る。
+ */
+export function extractGridSpec(html: string, maxChars = 1500): string | null {
+  const start = html.indexOf("PageLoad(");
+  if (start < 0) return null;
+  const end = html.indexOf(")", start);
+  const spec = (end < 0 ? html.slice(start) : html.slice(start, end + 1)).replace(/\s+/g, " ");
+  return spec.slice(0, maxChars);
+}
+
 export function describeDriverMasterStructure(html: string): string {
   const title = html.match(/<title>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, " ").trim() || "(no title)";
   const all = splitRows(html);
@@ -302,7 +321,9 @@ export function describeDriverMasterStructure(html: string): string {
     `1行目のセル数=${all.find((row) => row.raw.includes(DATA_CELL_MARKER))?.cells.length ?? 0} ` +
     `引けない列=[${missing.join(",")}] データ行=${dataRows} tr=${all.length} ` +
     `title="${title}" bytes=${html.length} ` +
-    `行数select=${hasFormField(html, ROW_COUNT_SELECT)} 行数ボタン=${hasFormField(html, ROW_COUNT_BUTTON)}`
+    `行数select=${hasFormField(html, ROW_COUNT_SELECT)} 行数ボタン=${hasFormField(html, ROW_COUNT_BUTTON)} ` +
+    // ★ 一番後ろに置く。切り詰められたときに最初に落ちてよい (長いので)。
+    `列定義=${extractGridSpec(html) ?? "無"}`
   );
 }
 

@@ -50,7 +50,7 @@ export type DriverMasterDoCall = (compId: string) => Promise<{ status: number; t
 /** 失敗本文をエラー文字列に載せるときの上限。DO が返すのは小さな JSON なので、
  * これは「想定外に長い本文で応答が膨らむのを止める」ための上限であって、
  * 短く保つためのものではない (2026-09-02 に 200 で診断が切れた)。 */
-export const ERROR_TEXT_MAX_CHARS = 1000;
+export const ERROR_TEXT_MAX_CHARS = 4000;
 
 /** 1 社ぶんの実行結果。`created` / `updated` / `skipped` は DO の応答
  * (`runDriverMasterSync` が返す `{created, updated, skipped}`) 由来で、
