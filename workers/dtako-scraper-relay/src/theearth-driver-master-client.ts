@@ -430,6 +430,57 @@ export interface DriverMasterUpsertResult {
   unreadable: string | null;
 }
 
+/**
+ * 1 リクエストに詰められる items の上限。**上流 rust-alc-api の
+ * `MAX_BULK_UPSERT_ITEMS` (`crates/alc-misc/src/employees.rs`) と同じ値**で、
+ * 超えると本文 `items が不正です` の 400 になる (2026-09-02 の本番実行で踏んだ)。
+ *
+ * ★ 上流と同じ数を 2 repo に書いているので、片方だけ変えないこと。上流を増やす
+ * ぶんには**こちらが小さいまま**でも正しく動く (分割数が増えるだけ) が、逆は
+ * 400 になる。迷ったらこちらを増やさない。
+ */
+export const MAX_BULK_UPSERT_ITEMS = 500;
+
+/**
+ * items を上限以下のチャンクに割る (pure)。空配列は**空の配列を返す** —
+ * 「0 件を 1 回 PUT する」は上流が 400 にする形なので、呼び出し側が
+ * 「送るものが無い」を自分で判定できるようにする。
+ */
+export function chunkUpsertItems(
+  items: EmployeeUpsertItem[],
+  size: number = MAX_BULK_UPSERT_ITEMS,
+): EmployeeUpsertItem[][] {
+  const chunks: EmployeeUpsertItem[][] = [];
+  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
+  return chunks;
+}
+
+/**
+ * チャンクごとの結果を 1 つに畳む (pure)。
+ *
+ * - `created` / `updated` は**読めたチャンクだけ**を足す。1 つも読めなければ null
+ *   (「0 件だった」と「読めなかった」を同じ 0 にしない)
+ * - `skipped` は連結する。どのチャンクで弾かれたかは呼び出し側の関心事ではない
+ *   (`code` で名指しできれば足りる)
+ * - `unreadable` は**読めなかったチャンクを番号付きで並べる**。1 つでも読めなければ
+ *   非 null になるので、合計を「全件ぶん」と読ませない
+ */
+export function mergeUpsertResults(results: DriverMasterUpsertResult[]): DriverMasterUpsertResult {
+  const sum = (pick: (r: DriverMasterUpsertResult) => number | null): number | null => {
+    const values = results.map(pick).filter((v): v is number => typeof v === "number");
+    return values.length === 0 ? null : values.reduce((a, b) => a + b, 0);
+  };
+  const unreadable = results
+    .map((r, i) => (r.unreadable === null ? null : `[${i + 1}/${results.length}] ${r.unreadable}`))
+    .filter((v): v is string => v !== null);
+  return {
+    created: sum((r) => r.created),
+    updated: sum((r) => r.updated),
+    skipped: results.flatMap((r) => r.skipped),
+    unreadable: unreadable.length === 0 ? null : unreadable.join(" / "),
+  };
+}
+
 /** `skipped` の 1 要素が `{code, reason}` の対になっているか。 */
 function asUpsertSkipped(value: unknown): DriverMasterUpsertSkipped | null {
   if (typeof value !== "object" || value === null) return null;

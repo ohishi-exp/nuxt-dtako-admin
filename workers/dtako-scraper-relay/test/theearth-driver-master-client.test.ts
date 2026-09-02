@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
+  chunkUpsertItems,
   DRIVER_MASTER_ROW_COUNT,
   fetchDriverMaster,
   isRetiredDriver,
+  MAX_BULK_UPSERT_ITEMS,
   MAX_DRIVER_MASTER_PAGES,
+  mergeUpsertResults,
   parseDriverMasterPage,
   parseDriverMasterUpsertResult,
   pickNextPagerLink,
@@ -669,5 +672,85 @@ describe('fetchDriverMaster', () => {
         ]),
       ),
     ).rejects.toThrow(VenusSessionExpiredError)
+  })
+})
+
+describe('chunkUpsertItems', () => {
+  const items = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      code: String(1000 + i),
+      name: `d${i}`,
+      nfc_id: null,
+      license_issue_date: null,
+      license_expiry_date: null,
+    }))
+
+  it('空なら空の配列 (「0 件を 1 回 PUT」を作らない)', () => {
+    // ★ ここが [[]] を返すと、上流が 400 (`items が不正です`) を返す呼び出しを
+    // わざわざ 1 回起こすことになる。呼び出し側が「送るものが無い」を判定できる形に保つ。
+    expect(chunkUpsertItems([])).toEqual([])
+  })
+
+  it('上限ちょうどまでは 1 チャンク', () => {
+    const chunks = chunkUpsertItems(items(MAX_BULK_UPSERT_ITEMS))
+    expect(chunks).toHaveLength(1)
+    expect(chunks[0]).toHaveLength(MAX_BULK_UPSERT_ITEMS)
+  })
+
+  it('上限を 1 件超えたら 2 チャンクに割れ、全件が 1 度ずつ入る', () => {
+    const all = items(MAX_BULK_UPSERT_ITEMS + 1)
+    const chunks = chunkUpsertItems(all)
+    expect(chunks.map((c) => c.length)).toEqual([MAX_BULK_UPSERT_ITEMS, 1])
+    expect(chunks.flat()).toEqual(all)
+  })
+
+  it('size を渡せば刻み幅を変えられる (端数も落とさない)', () => {
+    expect(chunkUpsertItems(items(5), 2).map((c) => c.length)).toEqual([2, 2, 1])
+  })
+})
+
+describe('mergeUpsertResults', () => {
+  const ok = (created: number, updated: number, skipped: Array<{ code: string; reason: string }> = []) => ({
+    created,
+    updated,
+    skipped,
+    unreadable: null,
+  })
+
+  it('読めたチャンクを足し合わせ、skipped を連結する', () => {
+    const merged = mergeUpsertResults([
+      ok(2, 498, [{ code: '1009', reason: 'nfc_id_conflict' }]),
+      ok(1, 6, [{ code: '1010', reason: 'unique_violation' }]),
+    ])
+    expect(merged).toEqual({
+      created: 3,
+      updated: 504,
+      skipped: [
+        { code: '1009', reason: 'nfc_id_conflict' },
+        { code: '1010', reason: 'unique_violation' },
+      ],
+      unreadable: null,
+    })
+  })
+
+  it('読めなかったチャンクは番号付きで並び、合計は読めたぶんだけ', () => {
+    const merged = mergeUpsertResults([
+      ok(1, 2),
+      { created: null, updated: null, skipped: [], unreadable: '応答が JSON として読めません: <html>' },
+    ])
+    // ★ 合計 3 を「全件ぶん」と読ませないために unreadable が非 null で残る
+    expect(merged.created).toBe(1)
+    expect(merged.updated).toBe(2)
+    expect(merged.unreadable).toBe('[2/2] 応答が JSON として読めません: <html>')
+  })
+
+  it('1 つも読めなければ created / updated は null (0 件と区別する)', () => {
+    const merged = mergeUpsertResults([
+      { created: null, updated: null, skipped: [], unreadable: 'a' },
+      { created: null, updated: null, skipped: [], unreadable: 'b' },
+    ])
+    expect(merged.created).toBeNull()
+    expect(merged.updated).toBeNull()
+    expect(merged.unreadable).toBe('[1/2] a / [2/2] b')
   })
 })

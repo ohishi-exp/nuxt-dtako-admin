@@ -90,8 +90,8 @@ function html(body: string): Response {
 }
 
 /** login GET → login POST → 一覧 GET → 表示 POST の 4 往復を順に返す。 */
-function stubTheearth(): void {
-  const responses = [html(LOGIN_PAGE), html(MENU_PAGE), html(listPage([])), html(listPage(DRIVERS))]
+function stubTheearth(rows: Array<{ cd: string; name: string; issued: string; expires: string }> = DRIVERS): void {
+  const responses = [html(LOGIN_PAGE), html(MENU_PAGE), html(listPage([])), html(listPage(rows))]
   let i = 0
   vi.stubGlobal('fetch', async () => {
     const res = responses[i]
@@ -101,8 +101,9 @@ function stubTheearth(): void {
   })
 }
 
-function makeDO(upstream: { status: number; body: string }) {
+function makeDO(upstream: { status: number; body: string } | Array<{ status: number; body: string }>) {
   const calls: AlcTenantDataInput[] = []
+  const queue = Array.isArray(upstream) ? [...upstream] : null
   const env = {
     DTAKO_CONFIG_KV: {
       get: async (key: string) => (key === 'dtako_accounts' ? JSON.stringify(ACCOUNTS) : null),
@@ -110,7 +111,9 @@ function makeDO(upstream: { status: number; body: string }) {
     AUTH_WORKER_RPC: {
       forwardAlcTenantData: async (input: AlcTenantDataInput) => {
         calls.push(input)
-        return { status: upstream.status, body: upstream.body, contentType: 'application/json' }
+        const res = queue ? queue.shift() : (upstream as { status: number; body: string })
+        if (!res) throw new Error(`unexpected extra upstream call (#${calls.length})`)
+        return { status: res.status, body: res.body, contentType: 'application/json' }
       },
     },
   }
@@ -162,6 +165,67 @@ describe('DtakoScraperRelayDO#runDriverMasterSync', () => {
     expect(calls[0]!.body).not.toContain('tenant')
 
     expect(await res.json()).toMatchObject({ ok: true, rows: 1, items: 1, created: 1, updated: 0, skipped: [] })
+  })
+
+  it('★ 500 件を超えたら分割して逐次 PUT する (上流の MAX_BULK_UPSERT_ITEMS = 400 の原因)', async () => {
+    // 2026-09-02 の本番実行で `alc employees bulk-by-code failed (400): items が不正です`。
+    // 上流は 1 リクエスト 500 件までで、501 件目から丸ごと拒否される。
+    const many = Array.from({ length: 501 }, (_, i) => ({
+      cd: String(1000 + i),
+      name: `乗務員${i}`,
+      issued: '2021/04/01',
+      expires: '2026/05/20',
+    }))
+    stubTheearth(many)
+    const { calls, run } = makeDO([
+      { status: 200, body: '{"created":2,"updated":498,"skipped":[]}' },
+      { status: 200, body: '{"created":1,"updated":0,"skipped":[]}' },
+    ])
+
+    const res = await run(ACCOUNT)
+
+    expect(res.status).toBe(200)
+    // ★ 1 回で投げると 400 になる。2 回に割れていることを件数で見る
+    expect(calls).toHaveLength(2)
+    const sizes = calls.map((c) => (JSON.parse(c.body!) as { items: unknown[] }).items.length)
+    expect(sizes).toEqual([500, 1])
+    // 全件が 1 度ずつ送られている (重複も欠けも無い)
+    const sentCodes = calls.flatMap((c) => (JSON.parse(c.body!) as { items: Array<{ code: string }> }).items.map((i) => i.code))
+    expect(new Set(sentCodes).size).toBe(501)
+    // 応答の created / updated はチャンクの合計
+    expect(await res.json()).toMatchObject({ ok: true, rows: 501, items: 501, chunks: 2, created: 3, updated: 498 })
+  })
+
+  it('★ 在籍者が 0 件なら上流を 1 度も叩かず、rows と items を名指しして 502', async () => {
+    // 空のまま PUT すると上流は 500 件超と**同じ本文** (`items が不正です`) の 400 を
+    // 返すので、原因が切り分けられなくなる。手前で止めて名指しする。
+    stubTheearth([])
+    const { calls, run } = makeDO({ status: 200, body: '{"created":0,"updated":0,"skipped":[]}' })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const res = await run(ACCOUNT)
+    spy.mockRestore()
+
+    expect(res.status).toBe(502)
+    expect(calls).toHaveLength(0)
+    const body = (await res.json()) as { ok: boolean; rows: number; items: number; error: string }
+    expect(body.ok).toBe(false)
+    expect(body.rows).toBe(0)
+    expect(body.items).toBe(0)
+    expect(body.error).toContain('送れる在籍者が 1 件もありません')
+  })
+
+  it('★ 失敗応答にも rows / items が載る (どこまで進んだかが応答だけで分かる)', async () => {
+    stubTheearth()
+    const { run } = makeDO({ status: 500, body: 'db down' })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const res = await run(ACCOUNT)
+    spy.mockRestore()
+
+    // 2026-09-02 の 400 は本文が `items が不正です` だけで、0 件なのか 500 件超なのかが
+    // 分からず切り分けに 1 往復かかった。件数を応答に残す。
+    expect(await res.json()).toMatchObject({ ok: false, rows: 1, items: 1, chunks: 1 })
   })
 
   it('★ skipped は code と reason の対で warn に出る ([object Object] に潰さない)', async () => {
