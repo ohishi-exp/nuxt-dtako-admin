@@ -1954,6 +1954,62 @@ export const runKintaiRestraintSyncTool = {
   },
 };
 
+// ── run_driver_master_sync ───────────────────────────────────────────────────
+
+const runDriverMasterSyncArgs = z
+  .object({
+    comp_id: z
+      .string()
+      .regex(/^\d{8}$/)
+      .describe(
+        "会社 (8桁の数字)。**省略値は無い** — kyuyo-mcp は DTAKO_ACCOUNTS の binding を " +
+          "持たないので全社ループができない。get_dtako_scrape_progress の comps[].comp_id で調べる",
+      ),
+  })
+  .strict();
+
+/**
+ * theearth の乗務員マスタ (F-MMS0320) を取得して alc の employees へ一括 upsert する、
+ * cron (JST 7/12/15/17/19 時) を待たない手動トリガー (Refs ippoan/alc-app-s3#125)。
+ *
+ * relay の `POST /kintai-relay/driver-master-run` (Refs 同 issue、`index.ts` の
+ * `handleDriverMasterRun`) を X-Alc-Proxy-Secret で叩くだけ — 運ぶロジックはここに無い
+ * (`run_kintai_restraint_sync` と同じ流儀)。**`comp_id` は必須** — relay 側は省略時
+ * `KINTAI_COMP_ID` にフォールバックするが、kyuyo-mcp からの呼び出しは対象会社を
+ * 呼び出し側が明示する前提とする (全社ループを作らない)。
+ */
+export const runDriverMasterSyncTool = {
+  name: "run_driver_master_sync",
+  description:
+    "theearth の乗務員マスタ (F-MMS0320) を取得して alc の employees へ一括 upsert する " +
+    "(Refs ippoan/alc-app-s3#125)。cron (JST 7/12/15/17/19 時) を待たずに 1 回走らせる手動口。" +
+    "**同一 comp_id の並行実行は不可** (relay 側で直列化)。応答の skipped[].reason は " +
+    "nfc_id_conflict (nfc_id が既に別の乗務員に付いている) / unique_violation " +
+    "(一意制約違反) のいずれか。**comp_id は必須、省略値は無い**。",
+  inputSchema: runDriverMasterSyncArgs,
+  // **write tool。** alc の employees へ書き込みうるので read tool と同じ扱いにしない
+  requiresScope: "mcp.write",
+  execute: async (env: Env, args: z.infer<typeof runDriverMasterSyncArgs>) => {
+    const relay = env.SCRAPER_RELAY;
+    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
+    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+
+    const res = await relay.fetch("https://relay.internal/kintai-relay/driver-master-run", {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
+      body: JSON.stringify({ comp_id: args.comp_id }),
+    });
+    const body = await res.text();
+    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
+    try {
+      return JSON.parse(body) as unknown;
+    } catch {
+      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
+    }
+  },
+};
+
 // ── get_kintai_day_summaries ─────────────────────────────────────────────────
 
 const getKintaiDaySummariesArgs = z.object({
@@ -3223,6 +3279,7 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   runKintaiRelayTool as unknown as ToolEntry<z.ZodTypeAny>,
   runKintaiRecalcTool as unknown as ToolEntry<z.ZodTypeAny>,
   runKintaiRestraintSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
+  runDriverMasterSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDtakoScrapeTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDtakoScrapeStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDtakoScrapeProgressTool as unknown as ToolEntry<z.ZodTypeAny>,
