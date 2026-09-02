@@ -34,6 +34,7 @@
 
 import {
   decodeHtmlEntities,
+  describePage,
   fetchWithJar,
   hasLoginForm,
   postForm,
@@ -60,6 +61,20 @@ export const MAX_DRIVER_MASTER_PAGES = 50;
 
 /** 1 ページに出す行数。既定 20 のまま回しても全件は取れるが、往復を減らす。 */
 export const DRIVER_MASTER_ROW_COUNT = "30";
+
+/** 行数 select の name。**初回 GET のページには存在しない** (一覧が空の間は
+ * ページャごと描かれない) ので、初回の「表示」postback に載せてはいけない
+ * (下記 `ROW_COUNT_BUTTON` の doc 参照)。 */
+const ROW_COUNT_SELECT = "ctl00$ddlRowCount";
+
+/** 行数を適用する「表示」ボタン (ページャ横の方。上の `ctl00$btnChange` とは別物)。
+ * 実機 (2026-09-02、本番の初回実行が HTTP 500): 初回の `btnChange` postback に
+ * `ctl00$ddlRowCount=30` を同送すると、その時点のページに無い項目なので ASP.NET の
+ * EventValidation が「無効なポストバックまたはコールバック引数です」(500) を返す。
+ * 一覧が出た後のページには select とこのボタンが在り、`ddlRowCount=30` +
+ * `btnRowCount=表示` の 2 回目の postback で 30 行/ページになる (同日ブラウザで
+ * 200 / 30 行を確認)。 */
+const ROW_COUNT_BUTTON = "ctl00$btnRowCount";
 
 /** 退職を表す乗務員分類4 の接頭辞。 */
 const RETIRED_CLASSIFICATION_PREFIX = "999:";
@@ -248,7 +263,14 @@ export function toUpsertItems(rows: DriverMasterRow[]): EmployeeUpsertItem[] {
   return [...byCode.values()];
 }
 
-/** 一覧ページを POST し、セッション切れ / 非 200 を loud fail する。 */
+/** `name="<field>"` の input/select がページに在るか (postback に載せてよいかの判定)。 */
+function hasFormField(html: string, field: string): boolean {
+  return html.includes(`name="${field}"`) || html.includes(`name='${field}'`);
+}
+
+/** 一覧ページを POST し、セッション切れ / 非 200 を loud fail する。
+ * `omit` に挙げた項目は full form から落として送る (初回ページに無い項目を
+ * 送ると EventValidation で 500 になるため)。 */
 async function postDriverMasterForm(
   jar: CookieJar,
   url: string,
@@ -256,13 +278,21 @@ async function postDriverMasterForm(
   extra: Record<string, string>,
   fetchImpl: FetchLike,
   timeoutMs: number,
+  omit: string[] = [],
 ): Promise<string> {
   // ★ full form 直列化。hidden だけの部分 POST だと `ddlRowCount` が既定へ落ち、
   // その値が**アカウント設定として残留する** (btnUpdate で実証済みの罠)。
-  const body = new URLSearchParams({ ...serializeFormFields(html), ...extra });
+  const fields = serializeFormFields(html);
+  for (const key of omit) delete fields[key];
+  const body = new URLSearchParams({ ...fields, ...extra });
   const res = await postForm(jar, url, body, fetchImpl, timeoutMs, "driver_master_post");
   if (!res.ok) {
-    throw new TheearthClientError(`乗務員マスタ一覧の表示が HTTP ${res.status} を返しました`);
+    // 本文の title / 先頭を添える — status だけでは EventValidation の 500 と
+    // セッション由来の 500 を切り分けられない (2026-09-02 の初回実行で実害)
+    const errHtml = await res.text();
+    throw new TheearthClientError(
+      `乗務員マスタ一覧の表示が HTTP ${res.status} を返しました (${describePage(errHtml)})`,
+    );
   }
   const nextHtml = await res.text();
   assertNotLoggedOut(nextHtml, "乗務員マスタ一覧の表示");
@@ -283,8 +313,11 @@ function assertNotLoggedOut(html: string, what: string): void {
  * 1. GET — **この時点の一覧は空**。
  * 2. 「表示」ボタン (`ctl00$btnChange`) の postback で全事業所ぶんが出る。
  *    事業所 select (`ctl00$ddlSort`) は "0" (全事業所) のまま触らない。
- *    同じ POST に `ctl00$ddlRowCount` を載せて 1 ページの行数を上げる。
- * 3. `nextTarget` がある間ページ送りし、行を乗務員CD で重複排除しながら積む。
+ *    **行数 (`ctl00$ddlRowCount`) はここに載せない** — 初回ページに無い項目を送ると
+ *    EventValidation の 500 になる (`ROW_COUNT_BUTTON` の doc)。
+ * 3. 一覧が出たページに `ctl00$btnRowCount` があれば、`ddlRowCount=30` + そのボタンで
+ *    もう 1 回 postback して 1 ページの行数を上げる (無ければ既定の行数で回る)。
+ * 4. `nextTarget` がある間ページ送りし、行を乗務員CD で重複排除しながら積む。
  *
  * **打ち切りは 3 通りとも「静かに減らさない」形にしてある**:
  * - 次ページが無い → 正常終了
@@ -312,12 +345,30 @@ export async function fetchDriverMaster(
     {
       __EVENTTARGET: "",
       __EVENTARGUMENT: "",
-      "ctl00$ddlRowCount": DRIVER_MASTER_ROW_COUNT,
       "ctl00$btnChange": "表示",
     },
     fetchImpl,
     timeoutMs,
+    // 初回ページに無い項目は送らない (在っても既定値のまま送る意味が無い)
+    [ROW_COUNT_SELECT],
   );
+
+  // 一覧が出た後だけ行数を上げられる。ボタンが無い / 既に 30 なら触らない
+  if (hasFormField(html, ROW_COUNT_BUTTON) && serializeFormFields(html)[ROW_COUNT_SELECT] !== DRIVER_MASTER_ROW_COUNT) {
+    html = await postDriverMasterForm(
+      jar,
+      url,
+      html,
+      {
+        __EVENTTARGET: "",
+        __EVENTARGUMENT: "",
+        [ROW_COUNT_SELECT]: DRIVER_MASTER_ROW_COUNT,
+        [ROW_COUNT_BUTTON]: "表示",
+      },
+      fetchImpl,
+      timeoutMs,
+    );
+  }
 
   const rows: DriverMasterRow[] = [];
   const seen = new Set<string>();

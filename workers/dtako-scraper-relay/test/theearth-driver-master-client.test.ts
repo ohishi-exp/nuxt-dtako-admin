@@ -101,18 +101,26 @@ function listPage(options: {
   headerRow?: string
   extraRows?: string
   rowCountSelected?: string
+  /** 実機の初回 GET は一覧が空で、行数 select もページャ横の表示ボタンも描かれない */
+  withoutRowCount?: boolean
+  /** 一覧が出た後のページにだけ在る、行数を適用する表示ボタン (`ctl00$btnRowCount`) */
+  withRowCountButton?: boolean
 }): string {
   const rows = options.rows ?? []
   const selected = options.rowCountSelected ?? '20'
+  const rowCountControls = options.withoutRowCount
+    ? ''
+    : `<select name="ctl00$ddlRowCount">
+    <option value="20"${selected === '20' ? ' selected="selected"' : ''}>20</option>
+    <option value="30"${selected === '30' ? ' selected="selected"' : ''}>30</option>
+  </select>
+  ${options.withRowCountButton ? '<input type="submit" name="ctl00$btnRowCount" value="表示" />' : ''}`
   return `<html><body><form>
   <input type="hidden" name="__VIEWSTATE" value="VS1" />
   <input type="hidden" name="__EVENTTARGET" value="" />
   <input type="hidden" name="__EVENTARGUMENT" value="" />
   <select name="ctl00$ddlSort"><option value="0" selected="selected">全事業所</option><option value="1">本社</option></select>
-  <select name="ctl00$ddlRowCount">
-    <option value="20"${selected === '20' ? ' selected="selected"' : ''}>20</option>
-    <option value="30"${selected === '30' ? ' selected="selected"' : ''}>30</option>
-  </select>
+  ${rowCountControls}
   <input type="submit" name="ctl00$btnChange" value="表示" />
   ${pager(options.currentPage === undefined ? 1 : options.currentPage, options.pageLinks ?? [])}
   <table id="lstMain_itemPlaceholderContainer">
@@ -504,9 +512,58 @@ describe('fetchDriverMaster', () => {
     // 設定として既定へ落ちる罠を踏まないため
     expect(body.get('__VIEWSTATE')).toBe('VS1')
     expect(body.get('ctl00$ddlSort')).toBe('0')
-    expect(body.get('ctl00$ddlRowCount')).toBe(DRIVER_MASTER_ROW_COUNT)
+    // ★ 初回の表示 postback に行数は載せない — 実機の初回ページに無い項目を送ると
+    // EventValidation が 500 を返す (2026-09-02 本番初回実行で実害)。fixture の
+    // 初回ページに select が在っても落とす
+    expect(body.has('ctl00$ddlRowCount')).toBe(false)
     expect(body.get('ctl00$btnChange')).toBe('表示')
     expect(body.get('__EVENTTARGET')).toBe('')
+    // 2 ページ目の応答に btnRowCount が無いので行数の postback は起きない (fetch 2 回)
+    expect(captured.body).toHaveLength(1)
+  })
+
+  it('一覧が出た後に btnRowCount があれば ddlRowCount=30 で 2 回目の postback をして行数を上げる', async () => {
+    const captured = { body: [] as string[] }
+    const rows = await fetchDriverMaster(
+      createCookieJar(),
+      sequenceFetch(
+        [
+          // 実機どおり: 初回 GET は行数 select 無し
+          html(listPage({ withoutRowCount: true })),
+          // 表示後: 20 行設定で select + btnRowCount が現れる
+          html(listPage({ rows: [{ cd: '1009', name: 'A' }], withRowCountButton: true })),
+          // 行数適用後: 30 行設定
+          html(listPage({ rows: [{ cd: '1009', name: 'A' }, { cd: '1018', name: 'B' }], rowCountSelected: '30', withRowCountButton: true })),
+        ],
+        captured,
+      ),
+    )
+    expect(rows.map((r) => r.driverCd)).toEqual(['1009', '1018'])
+    expect(captured.body).toHaveLength(2)
+    const first = new URLSearchParams(captured.body[0])
+    expect(first.has('ctl00$ddlRowCount')).toBe(false)
+    expect(first.get('ctl00$btnChange')).toBe('表示')
+    const second = new URLSearchParams(captured.body[1])
+    expect(second.get('ctl00$ddlRowCount')).toBe(DRIVER_MASTER_ROW_COUNT)
+    expect(second.get('ctl00$btnRowCount')).toBe('表示')
+    expect(second.has('ctl00$btnChange')).toBe(false)
+    // full form (viewstate は表示後のページのもの) を引き継ぐ
+    expect(second.get('__VIEWSTATE')).toBe('VS1')
+  })
+
+  it('既に 30 行設定なら行数の postback はしない', async () => {
+    const captured = { body: [] as string[] }
+    await fetchDriverMaster(
+      createCookieJar(),
+      sequenceFetch(
+        [
+          html(listPage({ withoutRowCount: true })),
+          html(listPage({ rows: [{ cd: '1009', name: 'A' }], rowCountSelected: '30', withRowCountButton: true })),
+        ],
+        captured,
+      ),
+    )
+    expect(captured.body).toHaveLength(1)
   })
 
   it('数字リンクで次ページへ進み、全ページの行を集める', async () => {
@@ -574,13 +631,16 @@ describe('fetchDriverMaster', () => {
     ).rejects.toThrow(TheearthClientError)
   })
 
-  it('表示 POST が 200 以外なら loud fail する', async () => {
+  it('表示 POST が 200 以外なら本文の title を添えて loud fail する', async () => {
     await expect(
       fetchDriverMaster(
         createCookieJar(),
-        sequenceFetch([html(listPage({})), new Response('boom', { status: 500 })]),
+        sequenceFetch([
+          html(listPage({})),
+          new Response('<html><head><title>無効なポストバックまたはコールバック引数です。</title></head><body>boom</body></html>', { status: 500 }),
+        ]),
       ),
-    ).rejects.toThrow(/乗務員マスタ一覧の表示が HTTP 500/)
+    ).rejects.toThrow(/乗務員マスタ一覧の表示が HTTP 500 を返しました \(title="無効なポストバックまたはコールバック引数です。"/)
   })
 
   it('GET でログイン画面が返ればセッション切れとして loud fail する', async () => {

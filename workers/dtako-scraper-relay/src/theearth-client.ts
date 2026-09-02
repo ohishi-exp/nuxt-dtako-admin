@@ -577,7 +577,7 @@ async function resolveForcedLogin(res: Response, failureMessage: string): Promis
  */
 export const PAGE_EXCERPT_MARKER = " 本文先頭: ";
 
-function describePage(html: string): string {
+export function describePage(html: string): string {
   const title = html.match(/<title>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, " ").trim() || "(no title)";
   const text = html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
