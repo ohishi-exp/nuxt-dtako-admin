@@ -20,6 +20,7 @@
  * secret をブラウザに出さないため、Nitro 側で `requireAuth` (auth-worker ログイン必須。
  * cookie `logi_auth_token` 優先 + `Authorization: Bearer` 併用) を通してから service
  * binding で relay を呼ぶ。`comp_id` は relay が `KINTAI_COMP_ID` で補完するので送らない。
+ * 定型は `server/utils/scraper-relay.ts` に集約。
  *
  * 1 件ごとに theearth を検索してダウンロードするので **1 回 (最大 20 件) で数分かかりうる**。
  * 画面は `NET780_ARCHIVE_BATCH_SIZE` 件ずつ直列に呼び (進捗が動く間隔を短くするため
@@ -27,32 +28,17 @@
  */
 
 import { defineEventHandler, readBody, createError } from 'h3'
-import { requireAuth } from '@ippoan/auth-client/server'
-import { assertAllowedRole } from '../../utils/require-role'
 import { parseNet780ArchiveBody } from '../../utils/net780-archive'
-import { cfEnv, resolveSecret } from '../../utils/cf-env'
+import { authorizeScraperRelay, sendToScraperRelay } from '../../utils/scraper-relay'
 
-interface FetcherLike {
-  fetch(input: string, init?: RequestInit): Promise<Response>
-}
-interface CloudflareEnv {
-  SCRAPER_RELAY?: FetcherLike
-  INTERNAL_SHARED_SECRET?: unknown
-  NUXT_PUBLIC_AUTH_WORKER_URL?: string
+/** relay の非 2xx を 1 行にする。`{error}` が無ければ HTTP 番号だけの定型文。 */
+function describeNet780ArchiveFailure(data: unknown, status: number): string {
+  const error = (data as { error?: unknown } | null)?.error
+  return typeof error === 'string' && error !== '' ? error : `NET780 の取得に失敗しました (HTTP ${status})`
 }
 
 export default defineEventHandler(async (event) => {
-  const env = cfEnv<CloudflareEnv>(event)
-  const sharedSecret = await resolveSecret(env.INTERNAL_SHARED_SECRET)
-  if (!sharedSecret) {
-    throw createError({ statusCode: 503, statusMessage: 'INTERNAL_SHARED_SECRET binding が未設定です' })
-  }
-  const authWorkerUrl
-    = typeof env.NUXT_PUBLIC_AUTH_WORKER_URL === 'string' && env.NUXT_PUBLIC_AUTH_WORKER_URL
-      ? env.NUXT_PUBLIC_AUTH_WORKER_URL
-      : 'https://auth.ippoan.org'
-  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
-  assertAllowedRole(auth)
+  const auth = await authorizeScraperRelay(event)
 
   // body が JSON でない (readBody が投げる) のも 400 に寄せる。
   const body = await readBody(event).catch(() => null)
@@ -61,26 +47,7 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 400, statusMessage: parsed.error })
   }
 
-  const relay = env.SCRAPER_RELAY
-  if (!relay) {
-    throw createError({ statusCode: 503, statusMessage: 'SCRAPER_RELAY service binding が未設定です' })
-  }
-
-  const res = await relay.fetch('https://relay.internal/kintai-relay/net780-archive', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'X-Alc-Proxy-Secret': sharedSecret },
-    body: JSON.stringify({ items: parsed.items }),
+  return sendToScraperRelay(event, auth, '/kintai-relay/net780-archive', { items: parsed.items }, {
+    describeFailure: describeNet780ArchiveFailure,
   })
-  const data = await res.json().catch(() => null) as { error?: string } | null
-  if (!res.ok) {
-    throw createError({
-      statusCode: res.status,
-      statusMessage: `relay: ${data?.error ?? `NET780 の取得に失敗しました (HTTP ${res.status})`}`,
-    })
-  }
-  // 2xx なのに JSON が読めない応答は relay 側の異常 (黙って null を返さない)。
-  if (data === null) {
-    throw createError({ statusCode: 502, statusMessage: 'relay の応答が JSON ではありません' })
-  }
-  return data
 })

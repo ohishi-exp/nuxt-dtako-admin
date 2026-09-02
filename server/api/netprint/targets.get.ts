@@ -9,60 +9,20 @@
  *   4xx/5xx — relay の応答をそのまま (status + `relay:` 前置のメッセージ)
  *   503 — SCRAPER_RELAY / INTERNAL_SHARED_SECRET binding 未設定
  *
- * 構造は `run.post.ts` と同じ (secret 未設定 503 → `requireAuth` → SCRAPER_RELAY
- * 未設定 503 → `relay.fetch` → 非 2xx は `relay:` 前置で throw)。**relay は 3 env とも
- * service binding 専用で外から叩けない**ので、この route が唯一の到達経路。
+ * 定型は `server/utils/scraper-relay.ts` に集約 (secret 未設定 503 → `requireAuth` →
+ * SCRAPER_RELAY 未設定 503 → `relay.fetch` → 非 2xx は `relay:` 前置で throw)。**relay は
+ * 3 env とも service binding 専用で外から叩けない**ので、この route が唯一の到達経路。
  * `X-Alc-Proxy-Secret` は worker 側で解決し、ブラウザには出さない。
  */
 
-import { defineEventHandler, createError } from 'h3'
-import { requireAuth } from '@ippoan/auth-client/server'
-import { assertAllowedRole } from '../../utils/require-role'
+import { defineEventHandler } from 'h3'
 import { describeNetprintTargetsFailure } from '../../utils/netprint-targets'
-import { cfEnv, resolveSecret } from '../../utils/cf-env'
-
-interface FetcherLike {
-  fetch(input: string, init?: RequestInit): Promise<Response>
-}
-interface CloudflareEnv {
-  SCRAPER_RELAY?: FetcherLike
-  INTERNAL_SHARED_SECRET?: unknown
-  NUXT_PUBLIC_AUTH_WORKER_URL?: string
-}
+import { authorizeScraperRelay, sendToScraperRelay } from '../../utils/scraper-relay'
 
 export default defineEventHandler(async (event) => {
-  const env = cfEnv<CloudflareEnv>(event)
-  const sharedSecret = await resolveSecret(env.INTERNAL_SHARED_SECRET)
-  if (!sharedSecret) {
-    throw createError({ statusCode: 503, statusMessage: 'INTERNAL_SHARED_SECRET binding が未設定です' })
-  }
-  const authWorkerUrl
-    = typeof env.NUXT_PUBLIC_AUTH_WORKER_URL === 'string' && env.NUXT_PUBLIC_AUTH_WORKER_URL
-      ? env.NUXT_PUBLIC_AUTH_WORKER_URL
-      : 'https://auth.ippoan.org'
-  const auth = await requireAuth(event, { authWorkerUrl, sharedSecret })
-  assertAllowedRole(auth)
-
-  const relay = env.SCRAPER_RELAY
-  if (!relay) {
-    throw createError({ statusCode: 503, statusMessage: 'SCRAPER_RELAY service binding が未設定です' })
-  }
-
-  const res = await relay.fetch('https://relay.internal/kintai-relay/netprint-targets', {
+  const auth = await authorizeScraperRelay(event)
+  return sendToScraperRelay(event, auth, '/kintai-relay/netprint-targets', undefined, {
     method: 'GET',
-    headers: { 'X-Alc-Proxy-Secret': sharedSecret },
+    describeFailure: describeNetprintTargetsFailure,
   })
-  const data = await res.json().catch(() => null) as unknown
-  if (!res.ok) {
-    throw createError({
-      statusCode: res.status,
-      statusMessage: `relay: ${describeNetprintTargetsFailure(data, res.status)}`,
-      data,
-    })
-  }
-  // 2xx なのに JSON が読めない応答は relay 側の異常 (黙って null を返さない)。
-  if (data === null) {
-    throw createError({ statusCode: 502, statusMessage: 'relay の応答が JSON ではありません' })
-  }
-  return data
 })
