@@ -43,6 +43,7 @@ import {
   buildEtcCsvDownloadUrl,
   postNet780Archive,
   postNetprintRun,
+  postDriverMasterRun,
   getNetprintTargets,
   putNetprintTargets,
   getNotifyRecipients,
@@ -1523,6 +1524,66 @@ describe('api', () => {
       const result = await postNetprintRun({})
       expect(result.error).toBe('HTTP 401')
       expect(result.results).toEqual([])
+    })
+  })
+
+  // 乗務員マスタ同期の手動実行 (Refs ippoan/alc-app-s3#125)。**失敗でも投げない** —
+  // `postNetprintRun` と同じ向き (途中まで進んだ件数を data から拾えるようにするため)。
+  describe.runIf(!isLive)('postDriverMasterRun', () => {
+    const relayResult = {
+      ok: true,
+      comp_id: '27324455',
+      created: 1,
+      updated: 40,
+      skipped: [],
+    }
+
+    it('POST /api/driver-master/run に comp_id を JSON で送り、Bearer を明示して結果を返す', async () => {
+      initApi(API_BASE, () => 'tok-1', undefined, () => 'test-tenant')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => relayResult })
+      const result = await postDriverMasterRun('27324455')
+      expect(result).toEqual({
+        ok: true,
+        status: 200,
+        rows: [{ compId: '27324455', ok: true, created: 1, updated: 40, skipped: [], error: null }],
+        error: null,
+      })
+      const [url, opts] = mockFetch.mock.calls[0]
+      expect(url).toBe('/api/driver-master/run')
+      expect(opts.method).toBe('POST')
+      expect(opts.headers['content-type']).toBe('application/json')
+      expect(opts.headers['authorization']).toBe('Bearer tok-1')
+      expect(JSON.parse(opts.body)).toEqual({ comp_id: '27324455' })
+    })
+
+    it('token が無ければ Authorization を付けない (cookie だけで通す経路)', async () => {
+      initApi(API_BASE, () => null, undefined, () => 'test-tenant')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => relayResult })
+      await postDriverMasterRun('27324455')
+      expect(mockFetch.mock.calls[0][1].headers['authorization']).toBeUndefined()
+    })
+
+    it('非 2xx は投げずに error と (data にあれば) 会社ごとの結果を返す', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        json: async () => ({
+          statusMessage: 'relay: theearth ログインに失敗しました',
+          data: { ok: false, comp_id: '27324455', error: 'theearth ログインに失敗しました' },
+        }),
+      })
+      const result = await postDriverMasterRun('27324455')
+      expect(result.ok).toBe(false)
+      expect(result.status).toBe(502)
+      expect(result.error).toBe('relay: theearth ログインに失敗しました')
+      expect(result.rows).toEqual([{ compId: '27324455', ok: false, created: 0, updated: 0, skipped: [], error: 'theearth ログインに失敗しました' }])
+    })
+
+    it('本文が JSON でなくても HTTP n を error にして返す', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 401, json: async () => { throw new Error('not json') } })
+      const result = await postDriverMasterRun('27324455')
+      expect(result.error).toBe('HTTP 401')
+      expect(result.rows).toEqual([])
     })
   })
 

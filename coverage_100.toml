@@ -1194,6 +1194,14 @@ branches = true
 path = "server/utils/cf-env.ts"
 branches = true
 
+# dtako-scraper-relay を呼ぶ server route 4 本 (netprint/run, netprint/targets の
+# GET/PUT, net780/archive) の定型 (secret 解決 → requireAuth → assertAllowedRole →
+# body 検証は呼び出し側 → SCRAPER_RELAY 未設定 503 → relay.fetch → pass-through) を
+# 集約したヘルパ (Refs ippoan/alc-app-s3#125 の c125-5)。
+[[files]]
+path = "server/utils/scraper-relay.ts"
+branches = true
+
 # 設定未確認車輛の抽出 (`GET /api/vehicle-settings/unconfirmed`)。
 # **上流 (`/alc-proxy`) が未ログインを 401 にする B 段だったが、それを待つ間に
 # R2 listing が走ってしまう**ので A 段に上げた口 (詳細はファイル冒頭の JSDoc)。

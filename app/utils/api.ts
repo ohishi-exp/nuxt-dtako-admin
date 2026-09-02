@@ -19,6 +19,7 @@ import { describeFetchThrow, describeResponseFailure, pickBodyReason } from '~/u
 import type { Net780ArchiveResult } from '~/utils/net780-archive'
 import { normalizeNetprintRunOutcome, type NetprintRunInput, type NetprintRunOutcome } from '~/utils/netprint-run'
 import type { NetprintTargetPayloadItem } from '~/utils/netprint-targets'
+import { buildDriverMasterRunOutcome, type DriverMasterRunOutcome } from '~/utils/driver-master-run'
 
 let apiBase = ''
 let getAccessToken: (() => string | null) | null = null
@@ -822,6 +823,24 @@ export async function postNetprintRun(input: NetprintRunInput): Promise<Netprint
   const res = await fetchOrDescribe('/api/netprint/run', { method: 'POST', headers, body: JSON.stringify(input) })
   const body = await res.json().catch(() => null) as unknown
   return normalizeNetprintRunOutcome(res.status, res.ok, body)
+}
+
+/**
+ * theearth の乗務員マスタ → alc employees の同期を 1 回走らせる front worker の
+ * server route (`server/api/driver-master/run.post.ts`、Refs ippoan/alc-app-s3#125)。
+ * cron (JST 7/12/15/17/19 時) と同じ道を通る。
+ *
+ * **成功も失敗も投げずに `DriverMasterRunOutcome` で返す** (`postNetprintRun` と同じ向き) —
+ * relay 側で失敗しても `data` に途中まで進んだ件数が載ることがあるため。fetch 自体の
+ * 失敗 (ネットワーク断) だけは投げる。cookie / Bearer の扱いは `postNet780Archive` と同じ。
+ */
+export async function postDriverMasterRun(compId: string): Promise<DriverMasterRunOutcome> {
+  const token = currentAccessToken()
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  if (token) headers['authorization'] = `Bearer ${token}`
+  const res = await fetchOrDescribe('/api/driver-master/run', { method: 'POST', headers, body: JSON.stringify({ comp_id: compId }) })
+  const body = await res.json().catch(() => null) as unknown
+  return buildDriverMasterRunOutcome(res.status, res.ok, body, compId)
 }
 
 /** front worker の server route (`/api/netprint/*`) 向けヘッダ。同一オリジンなので

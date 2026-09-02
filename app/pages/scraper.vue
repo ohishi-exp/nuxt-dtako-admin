@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl, saveScrapeHistory, buildScraperZipUrl, buildEtcCsvDownloadUrl, splitCsv, splitCsvAllStream, getDtakoEventsEtags, postNetprintRun, getNetprintTargets, putNetprintTargets, getNotifyRecipients, getLineworksChannels } from '~/utils/api'
+import { getCalendar, triggerScrapeStream, getScrapeHistory, getPendingUploads, rerunUpload, getUploadDownloadUrl, saveScrapeHistory, buildScraperZipUrl, buildEtcCsvDownloadUrl, splitCsv, splitCsvAllStream, getDtakoEventsEtags, postNetprintRun, getNetprintTargets, putNetprintTargets, getNotifyRecipients, getLineworksChannels, postDriverMasterRun } from '~/utils/api'
 import { yesterdayJstYmd, viewNetprintRunResult, type NetprintRunOutcome, type NetprintTargetView } from '~/utils/netprint-run'
+import type { DriverMasterRunOutcome } from '~/utils/driver-master-run'
 import {
   emptyNetprintTargetRow,
   netprintDestinationOptions,
@@ -59,6 +60,37 @@ const compIdLabels: Record<string, string> = Object.fromEntries(
 )
 
 const selectedCompId = useState('scraper-compId', () => '')
+
+// --- 乗務員マスタ同期 (dtako タブ、Refs ippoan/alc-app-s3#125) ---
+// theearth の乗務員マスタ (免許の交付日・有効期限等) を alc の employees へ流す
+// 手動実行。会社は上の「企業」選択 (selectedCompId) をそのまま使う — 専用の
+// セレクトを別途持たない。「全企業」(空文字) は relay 側で 1 社に決まらないため、
+// ボタンは具体的な会社が選ばれているときだけ押せる。
+const driverMasterRunning = ref(false)
+/** 実行中の経過秒 (theearth ログイン→マスタ読み取り→alc へ PUT で数十秒かかる)。 */
+const driverMasterElapsed = ref(0)
+/** fetch 自体が失敗した (ネットワーク断など)。route/relay の失敗は outcome 側に入る。 */
+const driverMasterFetchError = ref('')
+const driverMasterOutcome = ref<DriverMasterRunOutcome | null>(null)
+
+async function handleDriverMasterRun() {
+  if (driverMasterRunning.value || !selectedCompId.value) return
+  driverMasterRunning.value = true
+  driverMasterElapsed.value = 0
+  driverMasterFetchError.value = ''
+  driverMasterOutcome.value = null
+  const timer = setInterval(() => { driverMasterElapsed.value += 1 }, 1000)
+  try {
+    driverMasterOutcome.value = await postDriverMasterRun(selectedCompId.value)
+  }
+  catch (e) {
+    driverMasterFetchError.value = e instanceof Error ? e.message : '実行に失敗しました'
+  }
+  finally {
+    clearInterval(timer)
+    driverMasterRunning.value = false
+  }
+}
 
 // --- ETC 明細スクレイプ (管理タブ、Refs #134) ---
 // ETC_ACCOUNTS 登録済みの全アカウントを一括実行する (`kind: 'etc-all'`)。
@@ -1199,6 +1231,75 @@ onMounted(() => {
           <select v-model="selectedCompId" class="border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-900 dark:border-gray-700">
             <option v-for="opt in compIdOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
           </select>
+        </div>
+      </div>
+    </UCard>
+
+    <!-- 乗務員マスタ同期 (Refs ippoan/alc-app-s3#125) -->
+    <UCard class="mb-4">
+      <h2 class="font-bold mb-1">
+        乗務員マスタ同期 (theearth → alc)
+      </h2>
+      <p class="text-xs text-gray-500 mb-3">
+        免許証の交付日・有効期限を alc の乗務員に反映します。1 回数十秒。cron は 7/12/15/17/19 時です。
+        会社は上の「企業」選択に従います。
+      </p>
+      <div class="flex flex-wrap gap-2 items-center mb-2">
+        <UButton
+          label="乗務員マスタを同期"
+          icon="i-lucide-id-card"
+          :loading="driverMasterRunning"
+          :disabled="driverMasterRunning || !selectedCompId"
+          @click="handleDriverMasterRun"
+        />
+        <span v-if="!selectedCompId" class="text-xs text-gray-500">
+          上の「企業」で会社を選択してください (全企業では実行できません)
+        </span>
+      </div>
+
+      <div v-if="driverMasterRunning" class="text-sm text-gray-500 flex items-center gap-2">
+        <UIcon name="i-lucide-loader-circle" class="animate-spin size-4" />
+        実行中... ({{ driverMasterElapsed }} 秒経過 / theearth 取得 → alc へ反映)
+      </div>
+
+      <div v-if="driverMasterFetchError" class="text-sm text-red-500">
+        [エラー] {{ driverMasterFetchError }}
+      </div>
+
+      <div v-if="driverMasterOutcome" class="space-y-2 text-sm">
+        <div :class="driverMasterOutcome.ok ? 'text-green-600 dark:text-green-400' : 'text-red-500'">
+          {{ driverMasterOutcome.ok ? '成功' : '失敗' }} (HTTP {{ driverMasterOutcome.status }})
+        </div>
+        <div v-if="driverMasterOutcome.error" class="text-red-500 break-all">
+          {{ driverMasterOutcome.error }}
+        </div>
+        <div v-for="(row, i) in driverMasterOutcome.rows" :key="i" class="text-xs">
+          <div :class="row.ok ? 'text-green-600 dark:text-green-400' : 'text-red-500'">
+            [{{ row.ok ? '成功' : '失敗' }}] {{ compIdLabels[row.compId] || row.compId }} — 追加 {{ row.created }} 件 / 更新 {{ row.updated }} 件
+          </div>
+          <div v-if="row.error" class="text-red-500">
+            {{ row.error }}
+          </div>
+          <table v-if="row.skipped.length" class="mt-1 border-collapse">
+            <thead>
+              <tr class="text-gray-500">
+                <th class="text-left pr-3">
+                  code
+                </th>
+                <th class="text-left">
+                  reason
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(s, j) in row.skipped" :key="j">
+                <td class="pr-3 font-mono">
+                  {{ s.code }}
+                </td>
+                <td>{{ s.reason }}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
     </UCard>
