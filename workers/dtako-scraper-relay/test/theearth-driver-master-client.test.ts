@@ -884,3 +884,90 @@ describe('見出しの表記ゆれ (2026-09-02 の 見出し=未検出)', () => 
     expect(page.rows[0]!.driverCd).toBe('１００９')
   })
 })
+
+describe('見出しが並べ替えボタンのとき (2026-09-02 の実機)', () => {
+  /** 実機の見出しはセルの中が `<input type="submit" value="乗務員CD">` で、
+   * タグを剥がすと空文字になる (素のテキストを持つ行はフォーム側の 1 行だけだった)。 */
+  const buttonHeader =
+    '<tr>' +
+    '<th>&nbsp;</th>' +
+    '<th><input type="submit" name="ctl00$lstMain$s1" value="乗務員CD" /></th>' +
+    '<th><input type="submit" name="ctl00$lstMain$s2" value="乗務員名" /></th>' +
+    '<th><input type="submit" value="免許証番号" /></th>' +
+    '<th><input type="submit" value="退職年月日" /></th>' +
+    '<th><input type="submit" value="乗務員分類4" /></th>' +
+    '<th><input type="submit" value="交付年月日" /></th>' +
+    '<th><input type="submit" value="有効期限" /></th>' +
+    '</tr>'
+
+  it('★ 並べ替えボタンの value を見出しとして引ける', () => {
+    const page = parseDriverMasterPage(
+      listPage({
+        rows: [{ cd: '1009', name: '大石 一郎', issuedOn: '2021/04/01', expiresOn: '2026/05/20' }],
+        headerRow: buttonHeader,
+      }),
+    )
+    expect(page.rows).toHaveLength(1)
+    expect(page.rows[0]!.driverCd).toBe('1009')
+    expect(page.rows[0]!.name).toBe('大石 一郎')
+    expect(page.rows[0]!.licenseIssuedOn).toBe('2021/04/01')
+    expect(page.rows[0]!.licenseExpiresOn).toBe('2026/05/20')
+  })
+
+  it('img の alt でも引ける', () => {
+    const header = buttonHeader.replace(
+      '<input type="submit" name="ctl00$lstMain$s1" value="乗務員CD" />',
+      '<img src="h.gif" alt="乗務員CD" />',
+    )
+    const page = parseDriverMasterPage(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], headerRow: header }))
+    expect(page.rows[0]!.driverCd).toBe('1009')
+  })
+
+  it("シングルクォートの value / alt も拾い、空の value や alt は飛ばす", () => {
+    // 実機は二重引用符だが、ASP.NET の出力は設定で変わる。空の value を「見出し」に
+    // しないことも同時に固定する (空を返すと見出し行が成立してしまう)。
+    const header = buttonHeader
+      .replace(
+        '<input type="submit" name="ctl00$lstMain$s1" value="乗務員CD" />',
+        `<input type='submit' value='' /><input type='submit' value='乗務員CD' />`,
+      )
+      .replace(
+        '<input type="submit" name="ctl00$lstMain$s2" value="乗務員名" />',
+        `<img src="a.gif" alt="" /><img src="b.gif" alt='乗務員名' />`,
+      )
+    const page = parseDriverMasterPage(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], headerRow: header }))
+    expect(page.rows).toHaveLength(1)
+    expect(page.rows[0]!.driverCd).toBe('1009')
+    expect(page.rows[0]!.name).toBe('大石 一郎')
+  })
+
+  it('★ hidden / text の value は拾わない (__VIEWSTATE や入力済みの値を見出しにしない)', () => {
+    const header = buttonHeader.replace(
+      '<input type="submit" name="ctl00$lstMain$s1" value="乗務員CD" />',
+      '<input type="hidden" name="__VIEWSTATE" value="VS-JUNK" /><input type="text" value="入力中" />',
+    )
+    // 乗務員CD が引けないので見出し行として成立しない = 0 行 (junk を列名にしない)
+    const page = parseDriverMasterPage(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], headerRow: header }))
+    expect(page.rows).toHaveLength(0)
+    expect(describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], headerRow: header })))
+      .not.toContain('VS-JUNK')
+  })
+
+  it('素のテキストがあるセルはそのまま優先する (ボタンの value に落ちない)', () => {
+    const header = buttonHeader.replace(
+      '<th><input type="submit" name="ctl00$lstMain$s1" value="乗務員CD" /></th>',
+      '<th>乗務員CD<input type="submit" value="並べ替え" /></th>',
+    )
+    const page = parseDriverMasterPage(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], headerRow: header }))
+    expect(page.rows[0]!.driverCd).toBe('1009')
+  })
+
+  it('★ 見出し候補は非空セルが多い行から 3 本出す (フォーム行 1 つで埋めない)', () => {
+    // 実機は先頭に「事業所」1 セルだけの行が居て、それだけが出て詰まった。
+    const page = listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], headerRow: buttonHeader })
+    const withFormRow = page.replace('<table id="lstMain_itemPlaceholderContainer">', '<table><tr><td>事業所</td></tr></table><table id="lstMain_itemPlaceholderContainer">')
+    const out = describeDriverMasterStructure(withFormRow)
+    expect(out).toContain('乗務員CD')
+    expect(out).toContain('乗務員名')
+  })
+})
