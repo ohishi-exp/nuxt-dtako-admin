@@ -17,6 +17,7 @@ import {
   asWritableConfigKv,
   dispatchNetprintTargets,
   NETPRINT_TARGETS_KV_KEY,
+  parseDtakoAccounts,
   resolveDtakoAccountsRaw,
   resolveNetprintTargetsRaw,
   resolveSecretBinding,
@@ -42,6 +43,11 @@ import {
   requireAlcTenantForwarder,
   type AlcTenantDataForwarder,
 } from "./alc-tenant-rpc";
+import { viewerCompIdsForTenant } from "./restraint-viewer-auth";
+import {
+  driverMasterOverallStatus,
+  runDriverMasterForComps,
+} from "./driver-master-run";
 
 export interface RelayWorkerEnv {
   RELAY: DurableObjectNamespace;
@@ -958,14 +964,45 @@ async function handleRestraintSync(request: Request, env: RelayWorkerEnv): Promi
  * 読んで alc の employees へ流す同期を、cron を待たずに 1 回走らせる
  * (Refs ippoan/alc-app-s3#125)。
  *
- * body は `{comp_id?}`。省略時は `KINTAI_COMP_ID` (`/kintai-relay/restraint-sync`
- * と同じフォールバック)。認証は `X-Alc-Proxy-Secret` の constant-time 検証。
+ * body は `{comp_id}` **または** `{tenant_id}` の**どちらか一方**。両方指定・
+ * 両方省略はどちらも 400 (`KINTAI_COMP_ID` へのフォールバックは廃止した —
+ * 「何も指定しなかったら大石運輸倉庫が同期される」は #367 と同じ静かな事故になる)。
+ * 認証は従来どおり `X-Alc-Proxy-Secret` の constant-time 検証。**CORS は付けない**
+ * — ブラウザから直に叩く口ではなく、secret を持つサーバ間経路だけが呼ぶ。
  *
- * **`tenant_id` は body で受け付けない。** 書き先は comp_id から DTAKO_ACCOUNTS 経由で
- * DO 側が引く — body で運べるようにすると、comp_id を知っている呼び出し元が任意
- * テナントへ書けてしまう (#434 の再現)。
+ * ## ★ tenant_id は「選択子」であって「書き先」ではない
+ *
+ * alc-app (点呼アプリ) は theearth の comp_id を知らず alc の tenant_id しか持たない
+ * ので、**tenant_id → comp_id[] の逆引き**をここで引き受ける
+ * (`viewerCompIdsForTenant`)。**tenant_id → comp_id の写しは `DTAKO_ACCOUNTS`
+ * (relay の KV) が正**で、この repo に別の写しや allowlist を新設しない — 二重管理に
+ * なって片方だけ更新される (`restraint-viewer-auth.ts` の module doc、#1004 / #1049)。
+ *
+ * **DO へ渡すのは comp_id だけで、tenant_id は 1 バイトも運ばない。** 書き先の
+ * tenant は DO 側が `resolveAccount(comp_id)` から引く (`handleCronDriverMaster` の
+ * doc 参照) ので、**呼び出し元が任意テナントへ書ける形にはならない** (#434 の
+ * 不変条件はそのまま)。ここで tenant_id が効くのは「どの comp を回すか」だけで、
+ * 選べる範囲は `DTAKO_ACCOUNTS` に載っている組み合わせに限られる。
+ *
+ * **★ tenant_id は認可ではない。認可を担うのは `X-Alc-Proxy-Secret` だけ** —
+ * この secret を constant-time で検証して通った呼び出し元を信頼する、という
+ * サーバ間の関門であって、body の tenant_id は「誰か」を主張しない。
+ * ⇒ **tenant_id の値で権限を判定しないこと。** 判定に使い出した瞬間、body に
+ * 書くだけで名乗れる認可になる。
+ *
+ * ## ★ 該当 0 件は 404 で名指しする
+ *
+ * `tenant_id` に対応する theearth アカウントが 1 つも無いとき、空の `results` を
+ * 200 で返すと呼び出し元には「同期したが 0 社だった」と見える。設定の穴なので
+ * fail-closed で 404 + tenant_id を名指しした本文を返す。
+ *
+ * ## 応答 (comp_id 単独指定でも同じ形)
+ *
+ * `{ results: [{comp_id, status, created, updated, skipped, error?}] }`。
+ * **DO の応答を素通ししていた旧実装から変えた** — 複数社を回すと素通しできないため。
+ * 1 社でも通れば 200、**全社失敗のときだけ 502** (`driverMasterOverallStatus`)。
  */
-async function handleDriverMasterRun(request: Request, env: RelayWorkerEnv): Promise<Response> {
+export async function handleDriverMasterRun(request: Request, env: RelayWorkerEnv): Promise<Response> {
   const fail = (status: number, error: string) =>
     new Response(JSON.stringify({ error }), {
       status,
@@ -977,27 +1014,53 @@ async function handleDriverMasterRun(request: Request, env: RelayWorkerEnv): Pro
   const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
   if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
 
-  let body: { comp_id?: unknown };
+  let body: { comp_id?: unknown; tenant_id?: unknown };
   try {
     body = (await request.json()) as typeof body;
   } catch {
     return fail(400, "body must be JSON");
   }
-  const compId =
-    (typeof body.comp_id === "string" && body.comp_id.trim()) || (env.KINTAI_COMP_ID ?? "").trim();
-  if (!compId) return fail(503, "comp_id が解決できません");
+  const compId = typeof body.comp_id === "string" ? body.comp_id.trim() : "";
+  const tenantId = typeof body.tenant_id === "string" ? body.tenant_id.trim() : "";
+  if (compId && tenantId) {
+    return fail(400, "comp_id と tenant_id は同時に指定できません");
+  }
+  if (!compId && !tenantId) {
+    return fail(400, "comp_id か tenant_id のどちらか一方が必要です");
+  }
 
-  const id = env.RELAY.idFromName(`scraper-comp-${compId}`);
-  const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/driver-master", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    // ★ comp_id だけを渡す (body を素通ししない) — tenant_id 等の余計なフィールドを
-    // DO へ運ばないため。
-    body: JSON.stringify({ comp_id: compId }),
+  let compIds: string[];
+  if (tenantId) {
+    const accountsRaw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
+    let matched: Set<string>;
+    try {
+      matched = viewerCompIdsForTenant(parseDtakoAccounts(accountsRaw), tenantId);
+    } catch (err) {
+      // 設定が壊れているのを「該当なし」(404) と同じ顔にしない (Refs #944 の分類)。
+      return fail(503, err instanceof Error ? err.message : String(err));
+    }
+    compIds = [...matched];
+    if (compIds.length === 0) {
+      return fail(404, `tenant_id=${tenantId} に対応する theearth アカウントがありません`);
+    }
+  } else {
+    compIds = [compId];
+  }
+
+  const results = await runDriverMasterForComps(compIds, async (target) => {
+    const id = env.RELAY.idFromName(`scraper-comp-${target}`);
+    const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/driver-master", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // ★ comp_id だけを渡す (body を素通ししない) — tenant_id 等の余計なフィールドを
+      // DO へ運ばないため。
+      body: JSON.stringify({ comp_id: target }),
+    });
+    return { status: res.status, text: await res.text() };
   });
-  // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
-  return new Response(res.body, {
-    status: res.status,
+
+  return new Response(JSON.stringify({ results }), {
+    status: driverMasterOverallStatus(results),
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
   });
 }

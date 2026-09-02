@@ -69,6 +69,7 @@ export default defineConfig({
         'src/netprint-cron.ts',
         'src/kosoku-daily.ts',
         'src/scrape-alert.ts',
+        'src/driver-master-run.ts',
       ],
       thresholds: {
         lines: 100,

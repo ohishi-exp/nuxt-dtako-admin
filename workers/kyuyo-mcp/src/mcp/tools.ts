@@ -1974,9 +1974,13 @@ const runDriverMasterSyncArgs = z
  *
  * relay の `POST /kintai-relay/driver-master-run` (Refs 同 issue、`index.ts` の
  * `handleDriverMasterRun`) を X-Alc-Proxy-Secret で叩くだけ — 運ぶロジックはここに無い
- * (`run_kintai_restraint_sync` と同じ流儀)。**`comp_id` は必須** — relay 側は省略時
- * `KINTAI_COMP_ID` にフォールバックするが、kyuyo-mcp からの呼び出しは対象会社を
- * 呼び出し側が明示する前提とする (全社ループを作らない)。
+ * (`run_kintai_restraint_sync` と同じ流儀)。**`comp_id` は必須** — relay 側も
+ * `comp_id` か `tenant_id` の**どちらか一方を必須**にしており、**省略すると 400**
+ * (他の `/kintai-relay/*` と違い `KINTAI_COMP_ID` へのフォールバックは無い)。
+ *
+ * relay の `tenant_id` 指定 (1 テナントの全 comp を逐次同期) は **kyuyo-mcp からは
+ * 出さない** — この worker は `DTAKO_ACCOUNTS` の binding を持たず逆引きできないので、
+ * 対象会社は呼び出し側が明示する前提のまま (全社ループを作らない)。
  */
 export const runDriverMasterSyncTool = {
   name: "run_driver_master_sync",
