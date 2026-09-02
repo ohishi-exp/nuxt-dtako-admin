@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   driverMasterOverallStatus,
+  ERROR_TEXT_MAX_CHARS,
   runDriverMasterForComps,
   type DriverMasterCompResult,
 } from "../src/driver-master-run";
@@ -20,6 +21,32 @@ function okBody(over: Record<string, unknown> = {}) {
     ...over,
   });
 }
+
+describe("失敗本文の切り詰め", () => {
+  it("★ 一覧の構造要約が切れない長さまで載せる (2026-09-02 は 200 文字で見出しが落ちた)", async () => {
+    // 実機の要約は「見出し=… 見出し候補=[…] 引けない列=[…] データ行=… tr=… title=… bytes=…」で、
+    // 200 文字だと `引けない列=[乗務員CD,乗` で切れて**原因を名指しする部分が落ちた**。
+    const detail =
+      "見出し=未検出 見出し候補=[編集 | 乗務員ＣＤ | 乗務員名 | 免許証番号 | 退職年月日 | 乗務員分類４ | 交付年月日 | 有効期限] " +
+      "引けない列=[乗務員CD,乗務員名,退職年月日,乗務員分類4,交付年月日,有効期限] データ行=30 tr=68 " +
+      'title="乗務員マスターメンテナンス" bytes=727933 行数select=true 行数ボタン=true';
+    const body = JSON.stringify({ ok: false, comp_id: "1", rows: null, error: `TheearthClientError: 乗務員マスタ一覧から 1 行も読めませんでした (${detail})` });
+
+    const results = await runDriverMasterForComps(["1"], async () => ({ status: 502, text: body }));
+
+    expect(results[0]!.error).toContain("見出し候補=[");
+    expect(results[0]!.error).toContain("有効期限]");
+    expect(ERROR_TEXT_MAX_CHARS).toBeGreaterThan(200);
+  });
+
+  it("上限を超える本文は切る (暴走した本文で応答を膨らませない)", async () => {
+    const body = JSON.stringify({ ok: false, error: "x".repeat(ERROR_TEXT_MAX_CHARS * 2) });
+
+    const results = await runDriverMasterForComps(["1"], async () => ({ status: 502, text: body }));
+
+    expect(results[0]!.error!.length).toBe(`HTTP 502: `.length + ERROR_TEXT_MAX_CHARS);
+  });
+});
 
 describe("runDriverMasterForComps", () => {
   it("comp_id を 1 社ずつ順番に呼ぶ (並列にしない)", async () => {

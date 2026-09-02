@@ -47,6 +47,11 @@ import {
  * そのまま渡すと呼び出し側で 1 度しか読めない。 */
 export type DriverMasterDoCall = (compId: string) => Promise<{ status: number; text: string }>;
 
+/** 失敗本文をエラー文字列に載せるときの上限。DO が返すのは小さな JSON なので、
+ * これは「想定外に長い本文で応答が膨らむのを止める」ための上限であって、
+ * 短く保つためのものではない (2026-09-02 に 200 で診断が切れた)。 */
+export const ERROR_TEXT_MAX_CHARS = 1000;
+
 /** 1 社ぶんの実行結果。`created` / `updated` / `skipped` は DO の応答
  * (`runDriverMasterSync` が返す `{created, updated, skipped}`) 由来で、
  * 読めなければ null / 空配列。 */
@@ -74,7 +79,11 @@ function driverMasterErrorText(
 ): string | null {
   if (status < 200 || status >= 300) {
     // cron 分岐の `detail` と同じ形。DO が返した本文 (`{error: ...}`) がそのまま入る。
-    return `HTTP ${status}: ${text.slice(0, 200)}`;
+    // ★ 200 文字だと診断が切れる。実際 2026-09-02 に一覧の構造要約が
+    // `引けない列=[乗務員CD,乗` で切れ、**原因を名指しするはずの見出しラベルが
+    // 落ちた**。本文は DO が組んだ小さな JSON (ページ本文ではない) なので、
+    // 切り詰めは「暴走を止める上限」であって「短く保つため」ではない。
+    return `HTTP ${status}: ${text.slice(0, ERROR_TEXT_MAX_CHARS)}`;
   }
   return unreadable;
 }

@@ -158,12 +158,31 @@ function splitRows(html: string): Array<{ raw: string; cells: string[] }> {
   return rows;
 }
 
-/** header 行 (乗務員CD と 乗務員名 の両方を持つ最初の行) から 列名 → 列位置 を作る。 */
+/**
+ * 見出しラベルの表記ゆれを畳む (比較の前に**両側**を通す)。
+ *
+ * 実機 (2026-09-02、本番) は一覧を 30 行描いているのに見出しが引けなかった
+ * (`見出し=未検出`)。完全一致で引いていたため、**全角英数字** (`乗務員ＣＤ`)、
+ * **並べ替え記号** (`乗務員CD▲`)、`&nbsp;` 由来の空白のどれか 1 つでも混ざると
+ * 落ちる。NFKC で全角→半角に畳み、空白と並べ替え記号を落として比べる。
+ *
+ * ★ 緩めるのは**見出しの照合だけ**。データ (乗務員CD や日付) の値には掛けない —
+ * 値を勝手に正規化すると alc 側のキーが静かに変わる。
+ */
+function normalizeLabel(label: string): string {
+  return label.normalize("NFKC").replace(/[\s\u00a0\u3000▲▼△▽↑↓⇑⇓]/g, "");
+}
+
+/** header 行 (乗務員CD と 乗務員名 の両方を持つ最初の行) から 列名 → 列位置 を作る。
+ * **キーは `normalizeLabel` 済み** (引く側も同じ関数を通すこと)。 */
 function resolveColumnIndexes(rows: Array<{ cells: string[] }>): Map<string, number> | null {
+  const wantedCd = normalizeLabel(COLUMN_LABELS.driverCd);
+  const wantedName = normalizeLabel(COLUMN_LABELS.name);
   for (const row of rows) {
-    if (!row.cells.includes(COLUMN_LABELS.driverCd) || !row.cells.includes(COLUMN_LABELS.name)) continue;
+    const normalized = row.cells.map(normalizeLabel);
+    if (!normalized.includes(wantedCd) || !normalized.includes(wantedName)) continue;
     const map = new Map<string, number>();
-    row.cells.forEach((label, index) => {
+    normalized.forEach((label, index) => {
       if (label && !map.has(label)) map.set(label, index);
     });
     return map;
@@ -186,7 +205,7 @@ export function parseDriverMasterPage(html: string): DriverMasterPage {
   const rows: DriverMasterRow[] = [];
   if (columns) {
     const at = (cells: string[], label: string): string => {
-      const index = columns.get(label);
+      const index = columns.get(normalizeLabel(label));
       return index === undefined ? "" : (cells[index] ?? "");
     };
     for (const row of allRows) {
@@ -225,11 +244,13 @@ export function describeDriverMasterStructure(html: string): string {
       ?.cells.filter((cell) => cell !== "")
       .slice(0, 12)
       .map((cell) => cell.slice(0, 20)) ?? [];
-  const missing = Object.values(COLUMN_LABELS).filter((label) => !columns?.has(label));
+  const missing = Object.values(COLUMN_LABELS).filter((label) => !columns?.has(normalizeLabel(label)));
+  // ★ 呼び出し元 (`driver-master-run.ts`) が本文を切り詰めるので、**切られたら
+  // 一番困る順**に並べる。見出しの実物が読めれば照合の直し方が決まる。
   return (
-    `title="${title}" bytes=${html.length} tr=${all.length} データ行=${dataRows} ` +
-    `見出し=${columns ? "検出" : "未検出"} 引けない列=[${missing.join(",")}] ` +
-    `見出し候補=[${labels.join(" | ")}] ` +
+    `見出し=${columns ? "検出" : "未検出"} 見出し候補=[${labels.join(" | ")}] ` +
+    `引けない列=[${missing.join(",")}] データ行=${dataRows} tr=${all.length} ` +
+    `title="${title}" bytes=${html.length} ` +
     `行数select=${hasFormField(html, ROW_COUNT_SELECT)} 行数ボタン=${hasFormField(html, ROW_COUNT_BUTTON)}`
   );
 }

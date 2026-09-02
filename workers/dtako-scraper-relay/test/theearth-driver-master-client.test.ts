@@ -764,15 +764,21 @@ describe('describeDriverMasterStructure', () => {
     expect(out).toContain('データ行=1')
   })
 
-  it('見出しに記号が付いて完全一致しないと「未検出」になり、実物のラベルが出る', () => {
-    // ★ これが 2026-09-02 に本番で 0 行になった疑いの筆頭。列名は個人データでは
-    // ないので、実物をそのまま出して差を見えるようにする。
-    const sorted = HEADER_ROW.replace('<th>乗務員CD</th>', '<th>乗務員CD▲</th>')
-    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], headerRow: sorted }))
+  it('見出しが 1 つも当たらなければ「未検出」で、実物のラベルが出る', () => {
+    // 列名は個人データではないので、実物をそのまま出して差を見えるようにする。
+    const renamed = HEADER_ROW.replace('<th>乗務員CD</th>', '<th>社員番号</th>')
+    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], headerRow: renamed }))
     expect(out).toContain('見出し=未検出')
-    expect(out).toContain('乗務員CD▲')
-    // 引けない列に全部が並ぶ (どの列が落ちたかが分かる)
+    expect(out).toContain('社員番号')
     expect(out).toContain('乗務員名')
+  })
+
+  it('★ 切り詰められても原因が読めるよう、見出しの検出可否と実物のラベルが先頭に来る', () => {
+    // 呼び出し元 (driver-master-run.ts) が本文を切るので、並び順が診断の可否を決める。
+    // 2026-09-02 は `引けない列=[乗務員CD,乗` で切れ、見出しラベルが落ちた。
+    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }] }))
+    expect(out.startsWith('見出し=')).toBe(true)
+    expect(out.indexOf('見出し候補=')).toBeLessThan(out.indexOf('title='))
   })
 
   it('★ 乗務員の行の中身は 1 文字も出さない (見出し行だけを引用する)', () => {
@@ -837,5 +843,44 @@ describe('fetchDriverMaster — 行数変更と 0 行の扱い', () => {
         ]),
       ),
     ).rejects.toThrow(/表示直後: .* \/ 行数変更後: /)
+  })
+})
+
+describe('見出しの表記ゆれ (2026-09-02 の 見出し=未検出)', () => {
+  const row = [{ cd: '1009', name: '大石 一郎' }]
+
+  it('★ 全角の見出し (乗務員ＣＤ) でも引ける', () => {
+    const header = HEADER_ROW.replace('<th>乗務員CD</th>', '<th>乗務員ＣＤ</th>')
+    const page = parseDriverMasterPage(listPage({ rows: row, headerRow: header }))
+    expect(page.rows).toHaveLength(1)
+    expect(page.rows[0]!.driverCd).toBe('1009')
+  })
+
+  it('★ 並べ替え記号や &nbsp; が付いた見出しでも引ける', () => {
+    const header = HEADER_ROW.replace('<th>乗務員CD</th>', '<th>乗務員CD&nbsp;▲</th>').replace(
+      '<th>有効期限</th>',
+      '<th> 有効期限 </th>',
+    )
+    const page = parseDriverMasterPage(
+      listPage({ rows: [{ cd: '1009', name: '大石 一郎', expiresOn: '2026/05/20' }], headerRow: header }),
+    )
+    expect(page.rows).toHaveLength(1)
+    expect(page.rows[0]!.driverCd).toBe('1009')
+    expect(page.rows[0]!.licenseExpiresOn).toBe('2026/05/20')
+  })
+
+  it('全角の分類列 (乗務員分類４) も引けて、退職判定が効く', () => {
+    const header = HEADER_ROW.replace('<th>乗務員分類4</th>', '<th>乗務員分類４</th>')
+    const page = parseDriverMasterPage(
+      listPage({ rows: [{ cd: '1009', name: '大石 一郎', classification4: '999:退職' }], headerRow: header }),
+    )
+    expect(page.rows).toHaveLength(1)
+    expect(isRetiredDriver(page.rows[0]!)).toBe(true)
+  })
+
+  it('★ 見出しの正規化は値には掛からない (乗務員CD の全角はそのまま渡す)', () => {
+    // 値を正規化すると alc 側のキーが静かに変わる。緩めるのは照合だけ。
+    const page = parseDriverMasterPage(listPage({ rows: [{ cd: '１００９', name: '大石 一郎' }] }))
+    expect(page.rows[0]!.driverCd).toBe('１００９')
   })
 })
