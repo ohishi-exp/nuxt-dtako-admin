@@ -477,6 +477,16 @@ function pushScrapeResult(task: DayTask, evt: ScrapeProgressEvent) {
   )
 }
 
+/** result イベント無しで例外が飛んだとき (接続断・catch) に task へ error 結果を積む。
+ * (3 箇所のスクレイプ経路 — 実行 / リラン / 全エラーリラン — で共用) */
+function pushErrorResult(task: DayTask, compId: string | undefined, e: unknown) {
+  task.results.push({
+    comp_id: compId || '',
+    status: 'error',
+    message: e instanceof Error ? e.message : 'エラー',
+  })
+}
+
 /** 実行中の自動リトライを全部待つ (取りこぼしたまま画面を「完了」にしないため)。 */
 async function drainSplitRetries() {
   if (pendingSplitRetries.length === 0) return
@@ -615,11 +625,7 @@ async function handleScrape() {
           )
         }
         catch (e) {
-          task.results.push({
-            comp_id: compId,
-            status: 'error',
-            message: e instanceof Error ? e.message : 'エラー',
-          })
+          pushErrorResult(task, compId, e)
         }
       }),
     )
@@ -679,11 +685,7 @@ async function handleRerun(task: DayTask) {
         )
       }
       catch (e) {
-        task.results.push({
-          comp_id: compId || '',
-          status: 'error',
-          message: e instanceof Error ? e.message : 'エラー',
-        })
+        pushErrorResult(task, compId, e)
       }
     }),
   )
@@ -741,11 +743,7 @@ async function handleRerunAllErrors() {
           )
         }
         catch (e) {
-          task.results.push({
-            comp_id: compId || '',
-            status: 'error',
-            message: e instanceof Error ? e.message : 'エラー',
-          })
+          pushErrorResult(task, compId, e)
         }
       }),
     )
