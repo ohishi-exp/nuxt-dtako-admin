@@ -941,7 +941,7 @@ describe("賃金スナップショットの中継 (ohishi-exp/nuxt-dtako-admin#6
 describe("checkKyuyoAccess — 給与 allowlist の関門 (Refs #951)", () => {
   const ACCESS = "/api/kyuyo/access";
 
-  it("**`onprem()` を叩く。`gcp()` ではない** — allowlist は ohishi-data 側にしか無い", async () => {
+  it("**`onprem()` を叩く。`gcp()` ではない** — allowlist はオンプレ側にしか無い", async () => {
     const { deps: d, calls } = deps({ onprem: { [ACCESS]: { allowed: true, email: "k@example.com" } } });
     expect(await checkKyuyoAccess(d, "jwt")).toBeNull();
     expect(calls).toEqual([{ side: "onprem", path: ACCESS, body: undefined }]);

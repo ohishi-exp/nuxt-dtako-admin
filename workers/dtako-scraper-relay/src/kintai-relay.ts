@@ -758,7 +758,7 @@ export async function relayKintaiUnkoGaps(
 // 賃金確定値の月次スナップショット (Refs ohishi-exp/nuxt-dtako-admin#677)
 // ---------------------------------------------------------------------------
 // 読み書きする `kintai.wage_snapshot` は Supabase にあり、そこへ繋がるのは GCP の
-// インスタンスだけ。**Supabase の接続情報を ohishi-data (local) には置かない**方針
+// インスタンスだけ。**Supabase の接続情報をオンプレ側 (`onprem()` の宛先) には置かない**方針
 // (資格情報は auth-worker 1 箇所に集約) なので、画面 → relay → `/ichibanboshi-proxy`
 // → GCP という経路になる。`relayKintaiDaySummaries` とまったく同じ道。
 
@@ -774,11 +774,11 @@ export async function relayKintaiUnkoGaps(
  *
  * | | Supabase 接続 | `/kyuyo/*` の allowlist |
  * | --- | --- | --- |
- * | **ohishi-data** (`onprem()` の宛先) | **無い** | **ある** |
+ * | **オンプレ側** (`onprem()` の宛先) | **無い** | **ある** |
  * | **GCP Cloud Run** (`gcp()` の宛先) | **ある** | **無い** |
  *
  * `kintai.wage_snapshot` は Supabase にあるので wage-* は `gcp()` でしか届かず、
- * allowlist は ohishi-data にしか無いので判定は `onprem()` でしか取れない。
+ * allowlist はオンプレ側 (`onprem()` の宛先) にしか無いので判定は `onprem()` でしか取れない。
  * **経路が分かれているのは意図で、揃えるのが誤り。**
  * (上流 `routes::wage_snapshot` の module docs に同じ表がある。)
  */
@@ -872,7 +872,7 @@ export async function checkKyuyoAccess(
   try {
     // ★★ **`onprem()` である。`gcp()` に「揃えて」はいけない。**
     // このすぐ下の `relayWageSnapshotPut` / `relayWageRangeGet` は `gcp()` なので
-    // 揃えたくなるが、**allowlist を持っているのは ohishi-data (= `onprem()`) だけ**で、
+    // 揃えたくなるが、**allowlist を持っているのはオンプレ側 (= `onprem()`) だけ**で、
     // GCP 側の `KyuyoAuthState` は未設定。`gcp()` に変えると**全員 503** になり、
     // 許可されている 1 名まで画面が死ぬ。理由の表は [`KYUYO_ACCESS_PATH`] の docs。
     res = await deps.onprem(KYUYO_ACCESS_PATH, {
