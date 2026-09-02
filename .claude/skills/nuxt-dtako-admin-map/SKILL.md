@@ -84,6 +84,23 @@ vitest は `resolve.alias` で `tests/mocks/net780-wasm.ts` に差し替える (
 引き継ぎ文に置いている限り交代のたびに抜け落ちる、とオーナーから指摘があったため
 (2026-08-25)。**子タスクにもここを読ませること。**
 
+### (0) 計画を実装へ移す前に `simplify-reviewer` に通す (2026-09-02、Refs #1067)
+
+`simplify-review` skill の運用。plan mode を抜ける前・子を起票する前に、計画原文を
+read-only agent `simplify-reviewer` へ渡し、根本 vs 症状・削れる複製の実測・既存実装・
+純減の収支・担保の 5 点を grep で数えさせる (hook が ExitPlanMode / spawn_task を
+未通過のあいだ deny する)。**この repo で渡す固有の材料** (毎回書かずに済むようここに置く):
+
+- 認可 helper: `requireAuth` / `resolveBrowserAuthorization` (fail closed)。ichiban proxy の
+  allowlist は `ICHIBAN_PROXY_ALLOWED_PATHS` (完全一致)。alc 経路は `alcProxyFetch` (上流が 401 を返す)
+- coverage gate の登録簿: `coverage_100.toml` (**UI ページ .vue は登録しない**、下の (2))
+- public repo で書いてはいけない語: 社内ホスト名と token 値。**語そのものは repo に書かず、
+  親が prompt で渡す** (実体は machine-global の `kintai-ops` skill §4)。reviewer は計画テキストを
+  その語で grep する。base に既に在る出現は reviewer が数えて返すので、「漏れ」か「許容」かは親が決める
+- 同型スイープの系譜: エラー表示は #890 → #996/#1005/#1006 → #1008/#1050 → #1067。
+  **`app/utils/api-error.ts` を通らないエラー表示を画面へ足す step が 1 つでもあったら**、
+  発生源 (api-error.ts / 呼び出し側の同型関数) を先に問う — 1 画面ずつ足すと次の世代になる
+
 ### (1) PR を作る前に満たっていること (子に渡す検証)
 
 ```bash
