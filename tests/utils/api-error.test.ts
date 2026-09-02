@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 
-import { describeApiError, describeCaughtError, describeFetchThrow, describeResponseFailure, pickBodyReason } from '~/utils/api-error'
+import { describeApiError, describeCaughtError, describeFetchThrow, describeListFailure, describeResponseFailure, pickBodyReason } from '~/utils/api-error'
 import { marginSummarySaveNote } from '~/utils/margin-r2'
 
 describe('describeApiError', () => {
@@ -634,11 +634,11 @@ describe('describeCaughtError (Refs #1008)', () => {
  * > **`describeCaughtError` が「次の一手」を付けなかった回は、戻り値が
  * > `describeApiError(e)` と 1 文字も違わない。**
  *
- * 画面側の `describeListFailure` は**この同一性で「次の一手が付かなかった回」を判定**し、
- * その回だけ `RETRY_RELOAD` を補っている:
+ * `describeListFailure` (同じ `api-error.ts` の export、Refs #1074 で 4 画面から移設) は
+ * **この同一性で「次の一手が付かなかった回」を判定**し、その回だけ `retry` を補っている:
  *
  * ```ts
- * return detail === describeApiError(e) ? `${detail} — ${RETRY_RELOAD}` : detail
+ * return detail === describeApiError(e) ? `${detail} — ${retry}` : detail
  * ```
  *
  * ## ★ 崩れたときに何が起きるか — **画面は緑のまま壊れる**とは限らないが、原因はここに出ない
@@ -688,5 +688,32 @@ describe('★ 契約: 次の一手を付けなかった回は describeApiError �
         || describeCaughtError(e, RETRY).includes(RETRY)
         || describeCaughtError(e, RETRY).includes('依頼してください')).toBe(true)
     }
+  })
+})
+
+describe('describeListFailure — 4 画面 (daily-hours/operations/restraint-report/upload) 共有 (Refs #1074)', () => {
+  const RETRY = 'ページを再読み込みしてください'
+
+  it('TypeError (fetch 失敗) 経路 — describeCaughtError の transport 1 文をそのまま返す', () => {
+    const e = new TypeError('Failed to fetch')
+    expect(describeListFailure(e, RETRY)).toBe(describeCaughtError(e, RETRY))
+    expect(describeListFailure(e, RETRY)).toBe(`${describeFetchThrow(e)}繋がったあとで${RETRY}`)
+  })
+
+  it('statusCode 付き経路 — describeCaughtError の 1 文をそのまま返す (retry を重ねて足さない)', () => {
+    const e = Object.assign(new Error('[GET] "/api/kyuyo/wage-range": 503'), {
+      statusCode: 503,
+      data: { error: '[kintai_push] が無効です' },
+    })
+    expect(describeListFailure(e, RETRY)).toBe(describeCaughtError(e, RETRY))
+    expect(describeListFailure(e, RETRY)).toBe(
+      '503 [kintai_push] が無効です — '
+      + `サーバ側の設定か障害です (権限の問題ではありません)。復旧してから${RETRY}`)
+  })
+
+  it('detail が describeApiError と同一 (次の一手なし) のときだけ retry を補う', () => {
+    const e = new Error('Unexpected token \'<\' … is not valid JSON')
+    expect(describeCaughtError(e, RETRY)).toBe(describeApiError(e))
+    expect(describeListFailure(e, RETRY)).toBe(`${describeApiError(e)} — ${RETRY}`)
   })
 })

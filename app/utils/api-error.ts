@@ -455,3 +455,19 @@ function caughtErrorStatus(e: unknown): number | null {
   const m = AUTH_FETCH_ERROR_MESSAGE.exec(err.message)
   return m === null ? null : Number(m[1])
 }
+
+/**
+ * 一覧取得の catch を 1 行にする。`daily-hours` / `operations` / `restraint-report` /
+ * `upload` の 4 画面が文字単位で同一の定義を別々に持っていたのをここへ寄せた (Refs #1074)。
+ *
+ * status ごとの次の一手は `describeCaughtError` が撃ち分ける。**この関数が足すのは
+ * 「次の一手が付かなかった回」の穴埋めだけ** — 戻り値が `describeApiError(e)` と
+ * 1 文字も違わない (= status を読めなかった) ときだけ `retry` を補う。
+ *
+ * @param retry 画面ごとの「やり直し方」。規約は `describeCaughtError` の `@param retry` と同じ。
+ */
+export function describeListFailure(e: unknown, retry: string): string {
+  if (!(e instanceof Error)) return `理由を読めませんでした — ${retry}`
+  const detail = describeCaughtError(e, retry)
+  return detail === describeApiError(e) ? `${detail} — ${retry}` : detail
+}

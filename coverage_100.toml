@@ -344,7 +344,8 @@ branches = true
 # | `describeCaughtError(` の**記述箇所** | — | **19** |
 #
 # **記述 19 < 呼び出し 21** なのは、`upload` / `operations` / `daily-hours` /
-# `restraint-report` が **`describeListFailure` ヘルパ 1 本**を経由するため。
+# `restraint-report` が **`describeListFailure` ヘルパ 1 本**を経由するため
+# (Refs #1074 で `app/utils/api-error.ts` の export 1 本に統合済み)。
 #
 # **据え置いた 3 か所** (`margin` の R2 保存注記 1 / `allowance` の暫定手当注記 2) は、
 # **注記そのものが末尾に「次の一手」を持っている**ので足すと**指示が 2 つ並ぶ**

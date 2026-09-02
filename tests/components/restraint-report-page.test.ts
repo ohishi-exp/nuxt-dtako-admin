@@ -241,7 +241,7 @@ describe('/restraint-report ドライバー一覧の取得', () => {
       // **注記から次の一手を落とした** (#1008 PR-3)。落とす前は 403 で
       // title「ログインし直しても変わりません。管理者に許可の追加を依頼してください」と
       // description「— ページを再読み込みして確かめてください」が**食い違っていた**。
-      // **落とすだけだと 0 になる経路がある**ので、`describeListFailure` が補っている。
+      // **落とすだけだと 0 になる経路がある**ので、`describeListFailure` (api-error.ts、Refs #1074) が補っている。
       api.getDrivers.mockRejectedValue(new Error('API エラー (403): 権限がありません'))
       const w = mountPage()
       await flushPromises()
