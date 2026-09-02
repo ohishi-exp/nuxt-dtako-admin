@@ -1738,7 +1738,7 @@ function parseDailyOperationReportRows(html: string): DailyOperationReportRow[] 
   }));
 }
 
-interface PagerLink {
+export interface PagerLink {
   target: string;
   argument: string;
   text: string;
@@ -1750,7 +1750,7 @@ interface PagerLink {
  * href は postback 応答ページで `&#39;` 等に entity encode されることがあるため、
  * decode してから __doPostBack を照合する (plain GET の応答だけ相手にしていた頃の
  * 生クォート前提だと postback 応答起点の harvest が 1 ページで打ち切られる)。 */
-function extractPagerLinks(html: string): PagerLink[] {
+export function extractPagerLinks(html: string): PagerLink[] {
   const links: PagerLink[] = [];
   const re = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
   let m: RegExpExecArray | null;
@@ -1765,7 +1765,7 @@ function extractPagerLinks(html: string): PagerLink[] {
   return links;
 }
 
-function extractCurrentPageNumber(html: string): number | null {
+export function extractCurrentPageNumber(html: string): number | null {
   const m = html.match(/class="[^"]*\bgCurrentPage\b[^"]*"[^>]*>\s*(\d+)\s*</i);
   return m ? Number(m[1]) : null;
 }
@@ -1837,7 +1837,7 @@ async function postPagerSubmitButton(
   return nextHtml;
 }
 
-async function postPagerLink(
+export async function postPagerLink(
   jar: CookieJar,
   url: string,
   html: string,

@@ -80,7 +80,8 @@ service = "nuxt-dtako-admin-scraper-relay-tail"
 
 # VPS / GCE cron の Worker 移行 (Refs ohishi-exp/dtako-scraper#22 /
 # ohishi-exp/browser-render-rust#14)。cron 式は src/cron.ts の
-# DTAKO_CRON / ETC_CRON / RESTRAINT_SYNC_CRON 定数と一致させること (ズレると
+# DTAKO_CRON / ETC_CRON / RESTRAINT_SYNC_CRON / NETPRINT_CRON /
+# DRIVER_MASTER_SYNC_CRON 定数と一致させること (ズレると
 # scheduled handler が「未知の cron 式」を log して何もしない)。
 # - "0 16 * * *"        = 01:00 JST。dtako 日次 (VPS cron dtako-scraper-daily と同時刻)。
 #                          SCRAPER_MODE=http + DTAKO_ACCOUNTS 設定時のみ実走。
@@ -103,12 +104,25 @@ service = "nuxt-dtako-admin-scraper-relay-tail"
 #                          一方だけ指定する (Refs #874 の 10)) 設定時のみ実走。
 #                          **KV DTAKO_CONFIG_KV の netprint_targets が正**で、
 #                          dashboard plain var は fallback (Refs #874 の 11)。
+# - "0 22,3,6,8,10 * * *" = JST 7,12,15,17,19 時。theearth の乗務員マスタ (F-MMS0320)
+#                          を読み、在籍乗務員の免許「交付日 8 桁 + 有効期限 8 桁」= 16 桁を
+#                          alc の employees.nfc_id へ流す (Refs ippoan/alc-app-s3#125)。
+#                          この 16 桁が無いと CoreS3 / alc-app のタブレットが乗務員を
+#                          引けないので、当日の登録変更を営業時間内に何度か拾い直す。
+#                          DTAKO_ACCOUNTS の各社について実走し、書き先 tenant は
+#                          各 account の tenant_id (cron は tenant を運ばない)。
+#                          ★ **staging には足さない** — theearth は同一アカウントの
+#                          同時ログインを許さず、staging と本番が同じ DTAKO_ACCOUNTS で
+#                          自前ログインすると互いに (そして人の) セッションを蹴り合う。
+#                          staging での検証は手動 route
+#                          (POST /kintai-relay/driver-master-run) を必要な時だけ叩く。
 [triggers]
 crons = [
   "0 16 * * *",
   "0 21,22,23,0 * * *",
   "0 19 * * *",
   "30 21 * * *",
+  "0 22,3,6,8,10 * * *",
 ]
 
 # ETC 明細 CSV の保存先 (app 本体の DTAKO_R2 と同じ dtako-uploads bucket)。

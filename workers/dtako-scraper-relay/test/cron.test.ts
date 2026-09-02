@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   CronConfigError,
+  DRIVER_MASTER_SYNC_CRON,
   DTAKO_CRON,
   ETC_CRON,
   NETPRINT_CRON,
@@ -295,6 +296,65 @@ describe('runScheduledCron: restraint', () => {
     const dispatched = results.filter((r) => r.target.includes('|'))
     expect(dispatched).toHaveLength(2)
     expect(dispatched.every((r) => r.ok === false && r.detail.includes('HTTP 500'))).toBe(true)
+  })
+})
+
+describe('runScheduledCron: driver-master', () => {
+  const now = new Date('2026-09-01T22:00:00Z') // 2026-09-02 07:00 JST
+
+  it('DTAKO_ACCOUNTS 未設定は skip する', async () => {
+    const results = await runScheduledCron(DRIVER_MASTER_SYNC_CRON, {}, okDoCall([]), now)
+    expect(results).toHaveLength(1)
+    expect(results[0].kind).toBe('driver-master')
+    expect(results[0].ok).toBe(true)
+    expect(results[0].detail).toContain('DTAKO_ACCOUNTS 未設定')
+  })
+
+  // 乗務員マスタは**会社ごとの theearth データ**なので母集団は全社。打刻由来で
+  // 1 社に絞る RESTRAINT_SYNC_CRON と取り違えないための陽性対照 (Refs #981)。
+  it('DTAKO_ACCOUNTS の各社について /cron/driver-master を叩く', async () => {
+    const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+    const results = await runScheduledCron(
+      DRIVER_MASTER_SYNC_CRON,
+      { dtakoAccountsRaw: DTAKO_ACCOUNTS_JSON, kintaiCompId: '27324455' },
+      okDoCall(calls),
+      now,
+    )
+    expect(calls).toEqual([
+      { doKey: 'scraper-comp-27324455', path: '/cron/driver-master', body: { comp_id: '27324455' } },
+      { doKey: 'scraper-comp-99999999', path: '/cron/driver-master', body: { comp_id: '99999999' } },
+    ])
+    // ★ tenant_id は cron が運ばない (DO が DTAKO_ACCOUNTS から引く)。body に
+    // 混ぜると comp_id を知っている呼び出し元が任意テナントへ書けてしまう。
+    expect(JSON.stringify(calls)).not.toContain('tenant')
+    expect(results).toHaveLength(2)
+    expect(results.every((r) => r.kind === 'driver-master' && r.ok)).toBe(true)
+  })
+
+  it('DO 呼び出しの失敗は per-account の error result になる', async () => {
+    const failCall: CronDoCall = async (doKey) => {
+      if (doKey === 'scraper-comp-27324455') throw new Error('do down')
+      throw 'string error'
+    }
+    const results = await runScheduledCron(
+      DRIVER_MASTER_SYNC_CRON,
+      { dtakoAccountsRaw: DTAKO_ACCOUNTS_JSON },
+      failCall,
+      now,
+    )
+    expect(results.map((r) => r.detail)).toEqual(['do down', 'string error'])
+    expect(results.every((r) => r.ok === false)).toBe(true)
+  })
+
+  it('DO が non-2xx を返したら ok=false で status を detail に載せる', async () => {
+    const call: CronDoCall = async () => ({ ok: false, status: 502, text: 'theearth down' })
+    const results = await runScheduledCron(
+      DRIVER_MASTER_SYNC_CRON,
+      { dtakoAccountsRaw: DTAKO_ACCOUNTS_JSON },
+      call,
+      now,
+    )
+    expect(results.every((r) => r.ok === false && r.detail.includes('HTTP 502'))).toBe(true)
   })
 })
 
