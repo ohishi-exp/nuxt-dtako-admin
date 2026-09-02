@@ -971,3 +971,32 @@ describe('見出しが並べ替えボタンのとき (2026-09-02 の実機)', ()
     expect(out).toContain('乗務員名')
   })
 })
+
+describe('ラベル位置の要約', () => {
+  it('見出しが在れば囲んでいる開始タグを出す (乗務員の値は出さない)', () => {
+    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }] }))
+    expect(out).toContain('ラベル位置=[')
+    expect(out).toContain('乗務員CD=<th')
+    expect(out).not.toContain('大石 一郎')
+  })
+
+  it('★ ラベルが HTML に無ければ「無」と言う (読めないのか書かれていないのかを分ける)', () => {
+    const header = HEADER_ROW.replace('<th>乗務員CD</th>', '<th>社員番号</th>')
+    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], headerRow: header }))
+    expect(out).toContain('乗務員CD=無')
+    expect(out).toContain('乗務員名=<th')
+  })
+
+  it('データ 1 行目のセル数を出す (入れ子で行が切れていれば実列数と合わない)', () => {
+    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }] }))
+    expect(out).toContain('1行目のセル数=8')
+  })
+
+  it('データ行が無ければセル数は 0', () => {
+    expect(describeDriverMasterStructure(listPage({ rows: [] }))).toContain('1行目のセル数=0')
+  })
+
+  it('タグの外に在るラベルでも落ちない', () => {
+    expect(describeDriverMasterStructure('乗務員CD')).toContain('乗務員CD=(タグ不明)')
+  })
+})
