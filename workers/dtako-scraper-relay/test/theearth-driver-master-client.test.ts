@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   chunkUpsertItems,
+  describeDriverMasterStructure,
   DRIVER_MASTER_ROW_COUNT,
   fetchDriverMaster,
   isRetiredDriver,
@@ -752,5 +753,89 @@ describe('mergeUpsertResults', () => {
     expect(merged.created).toBeNull()
     expect(merged.updated).toBeNull()
     expect(merged.unreadable).toBe('[1/2] a / [2/2] b')
+  })
+})
+
+describe('describeDriverMasterStructure', () => {
+  it('見出しが読めた一覧は「検出」で、引けない列が無いことまで出る', () => {
+    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }] }))
+    expect(out).toContain('見出し=検出')
+    expect(out).toContain('引けない列=[]')
+    expect(out).toContain('データ行=1')
+  })
+
+  it('見出しに記号が付いて完全一致しないと「未検出」になり、実物のラベルが出る', () => {
+    // ★ これが 2026-09-02 に本番で 0 行になった疑いの筆頭。列名は個人データでは
+    // ないので、実物をそのまま出して差を見えるようにする。
+    const sorted = HEADER_ROW.replace('<th>乗務員CD</th>', '<th>乗務員CD▲</th>')
+    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }], headerRow: sorted }))
+    expect(out).toContain('見出し=未検出')
+    expect(out).toContain('乗務員CD▲')
+    // 引けない列に全部が並ぶ (どの列が落ちたかが分かる)
+    expect(out).toContain('乗務員名')
+  })
+
+  it('★ 乗務員の行の中身は 1 文字も出さない (見出し行だけを引用する)', () => {
+    const out = describeDriverMasterStructure(listPage({ rows: [{ cd: '1009', name: '大石 一郎' }] }))
+    expect(out).not.toContain('大石 一郎')
+    expect(out).not.toContain('1009')
+  })
+
+  it('title が無いページでも落ちない', () => {
+    expect(describeDriverMasterStructure('<html><body></body></html>')).toContain('title="(no title)"')
+    expect(describeDriverMasterStructure('<html><body></body></html>')).toContain('見出し候補=[]')
+  })
+})
+
+describe('fetchDriverMaster — 行数変更と 0 行の扱い', () => {
+  it('★ 行数を上げた側が減ったら採らず、表示直後のページで続ける', async () => {
+    // 行数変更は往復を減らすための最適化でしかない。最適化のために件数を失わない。
+    const warns: string[] = []
+    const spy = vi.spyOn(console, 'warn').mockImplementation((line: unknown) => {
+      warns.push(String(line))
+    })
+    const rows = await fetchDriverMaster(
+      createCookieJar(),
+      sequenceFetch([
+        html(listPage({ withoutRowCount: true })),
+        html(
+          listPage({
+            rows: [
+              { cd: '1009', name: '大石 一郎' },
+              { cd: '1010', name: '大石 二郎' },
+            ],
+            withRowCountButton: true,
+          }),
+        ),
+        // 行数変更の応答が一覧を落とした (0 行) — 採ってはいけない
+        html(listPage({ rows: [], withRowCountButton: true, rowCountSelected: '30' })),
+      ]),
+    )
+    spy.mockRestore()
+
+    expect(rows.map((r) => r.driverCd)).toEqual(['1009', '1010'])
+    expect(warns.join('\n')).toContain('rolled_back')
+  })
+
+  it('★ 1 行も読めなければ構造要約を添えて loud fail (静かに 0 件を返さない)', async () => {
+    await expect(
+      fetchDriverMaster(
+        createCookieJar(),
+        sequenceFetch([html(listPage({ withoutRowCount: true })), html(listPage({ rows: [] }))]),
+      ),
+    ).rejects.toThrow(/乗務員マスタ一覧から 1 行も読めませんでした/)
+  })
+
+  it('行数変更まで進んで 0 行なら、表示直後と変更後の両方の構造を出す', async () => {
+    await expect(
+      fetchDriverMaster(
+        createCookieJar(),
+        sequenceFetch([
+          html(listPage({ withoutRowCount: true })),
+          html(listPage({ rows: [], withRowCountButton: true })),
+          html(listPage({ rows: [], withRowCountButton: true, rowCountSelected: '30' })),
+        ]),
+      ),
+    ).rejects.toThrow(/表示直後: .* \/ 行数変更後: /)
   })
 })

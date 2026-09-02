@@ -61,14 +61,16 @@ const HEADER_ROW =
   '<tr><th>&nbsp;</th><th>乗務員CD</th><th>乗務員名</th>' +
   '<th>退職年月日</th><th>乗務員分類4</th><th>交付年月日</th><th>有効期限</th></tr>'
 
-function listPage(rows: Array<{ cd: string; name: string; issued: string; expires: string }>): string {
+function listPage(
+  rows: Array<{ cd: string; name: string; issued: string; expires: string; retired?: string }>,
+): string {
   const body = rows
     .map(
       (r, i) =>
         `<tr><td>&nbsp;</td>` +
         `<td><span id="lstMain_LabelValue1_${i}">${r.cd}</span></td>` +
         `<td><span id="lstMain_LabelValue2_${i}">${r.name}</span></td>` +
-        `<td><span id="lstMain_LabelValue12_${i}"></span></td>` +
+        `<td><span id="lstMain_LabelValue12_${i}">${r.retired ?? ''}</span></td>` +
         `<td><span id="lstMain_LabelValue13_${i}">001:正社員</span></td>` +
         `<td><span id="lstMain_LabelValue22_${i}">${r.issued}</span></td>` +
         `<td><span id="lstMain_LabelValue23_${i}">${r.expires}</span></td></tr>`,
@@ -90,7 +92,9 @@ function html(body: string): Response {
 }
 
 /** login GET → login POST → 一覧 GET → 表示 POST の 4 往復を順に返す。 */
-function stubTheearth(rows: Array<{ cd: string; name: string; issued: string; expires: string }> = DRIVERS): void {
+function stubTheearth(
+  rows: Array<{ cd: string; name: string; issued: string; expires: string; retired?: string }> = DRIVERS,
+): void {
   const responses = [html(LOGIN_PAGE), html(MENU_PAGE), html(listPage([])), html(listPage(rows))]
   let i = 0
   vi.stubGlobal('fetch', async () => {
@@ -196,10 +200,11 @@ describe('DtakoScraperRelayDO#runDriverMasterSync', () => {
     expect(await res.json()).toMatchObject({ ok: true, rows: 501, items: 501, chunks: 2, created: 3, updated: 498 })
   })
 
-  it('★ 在籍者が 0 件なら上流を 1 度も叩かず、rows と items を名指しして 502', async () => {
+  it('★ 一覧は読めたが全員退職で在籍者 0 件なら、上流を 1 度も叩かず rows と items を名指しして 502', async () => {
     // 空のまま PUT すると上流は 500 件超と**同じ本文** (`items が不正です`) の 400 を
     // 返すので、原因が切り分けられなくなる。手前で止めて名指しする。
-    stubTheearth([])
+    // (一覧そのものが 0 行の場合は、その手前 `fetchDriverMaster` が構造を添えて落ちる)
+    stubTheearth([{ ...DRIVERS[0]!, retired: '2025/03/31' }])
     const { calls, run } = makeDO({ status: 200, body: '{"created":0,"updated":0,"skipped":[]}' })
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
@@ -210,9 +215,28 @@ describe('DtakoScraperRelayDO#runDriverMasterSync', () => {
     expect(calls).toHaveLength(0)
     const body = (await res.json()) as { ok: boolean; rows: number; items: number; error: string }
     expect(body.ok).toBe(false)
-    expect(body.rows).toBe(0)
+    expect(body.rows).toBe(1)
     expect(body.items).toBe(0)
     expect(body.error).toContain('送れる在籍者が 1 件もありません')
+  })
+
+  it('★ 一覧が 1 行も読めなければ、上流を叩かず構造要約を添えて 502 (2026-09-02 の rows=0)', async () => {
+    stubTheearth([])
+    const { calls, run } = makeDO({ status: 200, body: '{"created":0,"updated":0,"skipped":[]}' })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const res = await run(ACCOUNT)
+    spy.mockRestore()
+
+    expect(res.status).toBe(502)
+    expect(calls).toHaveLength(0)
+    const body = (await res.json()) as { ok: boolean; rows: null; error: string }
+    // theearth の一覧を読む前に落ちたので件数は null (alc は 1 度も叩いていない)
+    expect(body.rows).toBeNull()
+    expect(body.error).toContain('乗務員マスタ一覧から 1 行も読めませんでした')
+    // ★ 見出しの実物が載る (完全一致で引いているので、記号 1 つの差で 0 行になる)
+    expect(body.error).toContain('見出し候補=[')
+    expect(body.error).toContain('乗務員CD')
   })
 
   it('★ 失敗応答にも rows / items が載る (どこまで進んだかが応答だけで分かる)', async () => {
