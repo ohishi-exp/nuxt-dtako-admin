@@ -41,6 +41,11 @@ export const DRIVER_MASTER_SYNC_CRON = "0 22,3,6,8,10 * * *";
  * dtako 日次 (JST 1:00) で前日分が theearth に揃った後、営業所の始業前
  * (Refs #874)。 */
 export const NETPRINT_CRON = "30 21 * * *";
+/** DVR (ドラレコ映像) 通知の取り込み cron 式 (UTC)。**10 分おき** — 旧 pipeline
+ * (VPS が 10 分おきに theearth を scrape していた) と同じ間隔にそろえる
+ * (Refs #1094)。映像は事故直後に見たいものなので、日次まで落とすと用を成さない。
+ * `DVR_TARGETS` (KV `dvr_targets` が正) 設定時のみ実走。 */
+export const DVR_CRON = "*/10 * * * *";
 
 export interface DtakoAccountEntry {
   comp_id: string;
@@ -171,6 +176,9 @@ export const DTAKO_ACCOUNTS_KV_KEY = "dtako_accounts";
 /** `NETPRINT_TARGETS` を置く KV のキー名 (`dtako_accounts` と同じ snake_case)。 */
 export const NETPRINT_TARGETS_KV_KEY = "netprint_targets";
 
+/** `DVR_TARGETS` を置く KV のキー名 (`netprint_targets` と同じ snake_case)。 */
+export const DVR_TARGETS_KV_KEY = "dvr_targets";
+
 
 /**
  * relay の設定値を **KV (`DTAKO_CONFIG_KV`) 優先**で解決し、無ければ従来の binding
@@ -221,6 +229,48 @@ export async function resolveNetprintTargetsRaw(kv: unknown, binding: unknown): 
   return resolveKvConfigRaw(kv, NETPRINT_TARGETS_KV_KEY, binding);
 }
 
+/** `DVR_TARGETS` (DVR 取り込みの対象会社) の解決。KV `dvr_targets` が正、無ければ
+ * binding (`resolveKvConfigRaw` 参照)。どちらも未設定なら空文字を返し、呼び出し側は
+ * skip する — **`DTAKO_ACCOUNTS` 全件に倒さない** (Refs #1094 の設計注意 7)。
+ * DVR を持つのは現時点で 1 社だけで、持たない会社まで 10 分おきに theearth へ
+ * ログインしにいくと、同一アカウントの同時ログイン制約 (Refs #233) で
+ * 既存の dtako scrape cron と蹴り合う。 */
+export async function resolveDvrTargetsRaw(kv: unknown, binding: unknown): Promise<string> {
+  return resolveKvConfigRaw(kv, DVR_TARGETS_KV_KEY, binding);
+}
+
+/** DVR 取り込みの対象 1 件。**`tenant_id` は持たない** — 書き先 tenant は DO が
+ * `DTAKO_ACCOUNTS` の `comp_id` から引く (呼び出し元に名乗らせると、comp_id を
+ * 知っている者が任意テナントへ書ける。Refs ippoan/rust-alc-api#434)。 */
+export interface DvrTarget {
+  comp_id: string;
+}
+
+/** `DVR_TARGETS` (JSON 配列 `[{comp_id}, ...]`) をパースする。未設定は [] (= cron
+ * skip)、JSON 不正は loud fail (`parseNetprintTargets` と同じ流儀)。
+ * `comp_id` が空の要素は**黙って捨てず**設定ミスとして落とす。 */
+export function parseDvrTargets(raw: string | undefined): DvrTarget[] {
+  if (!raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new CronConfigError("DVR_TARGETS が JSON としてパースできません");
+  }
+  if (!Array.isArray(parsed)) {
+    throw new CronConfigError("DVR_TARGETS は JSON 配列である必要があります");
+  }
+  return parsed.map((entry, index) => {
+    const candidate = entry as { comp_id?: unknown } | null;
+    const compId =
+      candidate && typeof candidate.comp_id === "string" ? candidate.comp_id.trim() : "";
+    if (compId === "") {
+      throw new CronConfigError(`DVR_TARGETS の ${index + 1} 件目に comp_id がありません`);
+    }
+    return { comp_id: compId };
+  });
+}
+
 /** scheduled handler から注入される DO 呼び出し。doKey は `idFromName` に渡す
  * キー、path は DO 内部 route (`/cron/dtako` 等)、body は JSON。 */
 export type CronDoCall = (
@@ -241,10 +291,13 @@ export interface CronEnvValues {
    * 持つのは打刻と同じ大石運輸倉庫 1 社なので同じ var を読む。未設定は
    * fail-closed (Refs #874)。 */
   kintaiCompId?: string;
+  /** `DVR_TARGETS` (KV `dvr_targets` が正、plain 変数は fallback)。未設定は DVR
+   * cron skip — **DTAKO_ACCOUNTS 全件に倒さない** (Refs #1094)。 */
+  dvrTargetsRaw?: string;
 }
 
 export interface CronRunResult {
-  kind: "dtako" | "etc" | "restraint" | "netprint" | "driver-master" | "none";
+  kind: "dtako" | "etc" | "restraint" | "netprint" | "driver-master" | "dvr" | "none";
   target: string;
   ok: boolean;
   detail: string;
@@ -525,6 +578,45 @@ export async function runScheduledCron(
     }
     // cron から 1 運行に絞る経路は作らない (Refs #913) — 空文字 = 全運行。
     return dispatchNetprintTargets(compId, targets, yesterdayJst(now), "", callDo);
+  }
+
+  if (cron === DVR_CRON) {
+    // ★ 対象は `DVR_TARGETS` が名指しした会社だけ。**DTAKO_ACCOUNTS 全件を回さない**
+    // (Refs #1094 の設計注意 7)。DVR (ドラレコ) を運用しているのは現時点で 1 社で、
+    // 持たない会社まで 10 分おきに theearth へログインしにいくと、同一アカウントの
+    // 同時ログイン制約 (Refs #233) で既存の dtako scrape cron と蹴り合う。
+    //
+    // 未設定は skip (fail-closed)。「設定が無い = 全社」に倒さないのは
+    // NETPRINT_CRON と同じ流儀 (Refs #874)。
+    const targets = parseDvrTargets(env.dvrTargetsRaw);
+    if (targets.length === 0) {
+      return [{ kind: "dvr", target: "*", ok: true, detail: "DVR_TARGETS 未設定のため skip" }];
+    }
+    return Promise.all(
+      targets.map(async (target): Promise<CronRunResult> => {
+        try {
+          // 既存の dtako scrape cron と**同じ DO instance** に載せる。別 DO を立てると
+          // 同じ service account で 2 セッションになり、theearth が片方を kick する
+          // (Refs #233 / #1094 の決定 3)。DO 内の `scrapeQueue` が直列化も担う。
+          const res = await callDo(`scraper-comp-${target.comp_id}`, "/cron/dvr", {
+            comp_id: target.comp_id,
+          });
+          return {
+            kind: "dvr",
+            target: target.comp_id,
+            ok: res.ok,
+            detail: `HTTP ${res.status}: ${res.text.slice(0, 200)}`,
+          };
+        } catch (err) {
+          return {
+            kind: "dvr",
+            target: target.comp_id,
+            ok: false,
+            detail: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }),
+    );
   }
 
   return [{ kind: "none", target: cron, ok: false, detail: "未知の cron 式です (wrangler.toml の triggers と cron.ts の定数がズレています)" }];

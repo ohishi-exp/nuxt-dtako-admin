@@ -24,7 +24,7 @@
 /** service binding fetch 用の絶対 URL base。host は binding が無視するが path が
  * `/alc-internal-proxy/...` で始まる必要がある (auth-worker 側が prefix を slice
  * して rust-alc-api に forward するため)。email-receiver の dtako.ts と同じ規約。 */
-const INTERNAL_PROXY_BASE = "https://auth-worker.internal";
+export const INTERNAL_PROXY_BASE = "https://auth-worker.internal";
 
 export class AlcInternalUploadError extends Error {
   constructor(message: string) {
@@ -63,29 +63,74 @@ function buildMultipartBody(
   return combined.buffer;
 }
 
+/** `alc-internal-proxy` の **shared-secret class** へ送る 1 リクエスト。
+ * `path` は `/alc-internal-proxy/...` で始めること (auth-worker 側の規約)。 */
+export interface AlcInternalProxyRequest {
+  path: string;
+  /** `INTERNAL_SHARED_SECRET` (consumer worker proof)。 */
+  sharedSecret: string;
+  /** **caller が名乗る tenant。** shared-secret class では必須 — 省略できる形にしない。 */
+  tenantId: string;
+  contentType: string;
+  /** バイト列でも `ReadableStream` でもよい (DVR の `.vdf` は DO で読み切らずに渡す。
+   * ただし **forward 先の auth-worker が 1 度 `arrayBuffer()` でバッファする**ので、
+   * end-to-end のストリーミングにはならない — `dvr-ingest.ts` の
+   * `DvrFileIngestInput.body` 参照)。 */
+  body: BodyInit;
+}
+
+/**
+ * `AUTH_WORKER` service binding 経由で shared-secret class の口へ POST し、応答本文を
+ * 返す。**非 2xx は本文付き loud fail** — 「送ったつもり」を作らない。
+ *
+ * ## ★ なぜ `lineworks-notify.ts` をここへ畳まないか (再検討しないで済むよう残す)
+ *
+ * あちらは `internal-jwt` class で、**`X-Tenant-ID` を付けない** (付けても
+ * auth-worker が forward しない。tenant は rust が行 id から解決する)。
+ * `tenantId` を optional にしてあちらもここへ寄せると、**shared-secret class の
+ * 呼び出しで tenant を付け忘れても型が通る**形になる。caller が名乗る tenant は
+ * この class の封じ込めの要 (Refs ippoan/rust-alc-api#434) なので、事故で落とせる
+ * 形にしない。共通なのは fetch と非 2xx の 4 行で、畳むより危ない。
+ */
+export async function sendViaAlcInternalProxy(
+  req: AlcInternalProxyRequest,
+  fetchImpl: FetchLike,
+): Promise<string> {
+  const res = await fetchImpl(`${INTERNAL_PROXY_BASE}${req.path}`, {
+    method: "POST",
+    headers: {
+      "X-Alc-Proxy-Secret": req.sharedSecret,
+      "X-Tenant-ID": req.tenantId,
+      "Content-Type": req.contentType,
+    },
+    body: req.body,
+  });
+
+  const text = await res.text();
+  if (!res.ok) {
+    throw new AlcInternalUploadError(
+      `alc-internal-proxy ${req.path} failed (${res.status}): ${text.slice(0, 300)}`,
+    );
+  }
+  return text;
+}
+
 /** `AUTH_WORKER` service binding 経由で `/alc-internal-proxy/api/upload` に zip を送る。 */
 export async function uploadDtakoZipViaAlcInternalProxy(
   input: AlcInternalUploadInput,
   fetchImpl: FetchLike,
 ): Promise<string> {
   const boundary = `----dtakoScraperRelay${crypto.randomUUID().replace(/-/g, "")}`;
-  const body = buildMultipartBody(boundary, input.filename, input.zipBytes);
-
-  const res = await fetchImpl(`${INTERNAL_PROXY_BASE}/alc-internal-proxy/api/upload`, {
-    method: "POST",
-    headers: {
-      "X-Alc-Proxy-Secret": input.sharedSecret,
-      "X-Tenant-ID": input.tenantId,
-      "Content-Type": `multipart/form-data; boundary=${boundary}`,
+  return sendViaAlcInternalProxy(
+    {
+      path: "/alc-internal-proxy/api/upload",
+      sharedSecret: input.sharedSecret,
+      tenantId: input.tenantId,
+      contentType: `multipart/form-data; boundary=${boundary}`,
+      body: buildMultipartBody(boundary, input.filename, input.zipBytes),
     },
-    body,
-  });
-
-  const text = await res.text();
-  if (!res.ok) {
-    throw new AlcInternalUploadError(`alc-internal-proxy upload failed (${res.status}): ${text.slice(0, 300)}`);
-  }
-  return text;
+    fetchImpl,
+  );
 }
 
 /**

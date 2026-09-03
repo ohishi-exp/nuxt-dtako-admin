@@ -18,7 +18,9 @@ import {
   dispatchNetprintTargets,
   NETPRINT_TARGETS_KV_KEY,
   parseDtakoAccounts,
+  parseDvrTargets,
   resolveDtakoAccountsRaw,
+  resolveDvrTargetsRaw,
   resolveNetprintTargetsRaw,
   resolveSecretBinding,
   runScheduledCron,
@@ -81,6 +83,11 @@ export interface RelayWorkerEnv {
    * と同じ理由、Refs #367)。宛先はトークルーム (`channel_id`) か個人
    * (`recipient_id`) のどちらか一方 (#874-10)。KV も変数も未設定なら cron skip。 */
   NETPRINT_TARGETS?: unknown;
+  /** DVR (ドラレコ映像) 取り込み cron の対象会社 (JSON 配列 `[{comp_id}, ...]`、
+   * Refs #1094)。**KV (`DTAKO_CONFIG_KV`) の `dvr_targets` が正で、この plain 変数は
+   * fallback** (`netprint_targets` と同じ理由)。KV も変数も未設定なら cron skip —
+   * **`DTAKO_ACCOUNTS` 全件に倒さない**。 */
+  DVR_TARGETS?: unknown;
 }
 
 export default {
@@ -212,6 +219,12 @@ export default {
       return handleDriverMasterStatus(request, env);
     }
 
+    if (url.pathname === "/kintai-relay/dvr-status" && request.method === "POST") {
+      // DVR 取り込み cron (10 分おき) の**直近 1 回の結末**を comp ごとに読む
+      // (Refs #1094)。無音故障 (last_success_at が進まない) に気づくための口
+      return handleDvrStatus(request, env);
+    }
+
     if (url.pathname === "/kintai-relay/netprint-targets" && request.method === "GET") {
       // 日報 netprint の通知先設定 (KV `netprint_targets`) を読む (Refs #874 の 12)。
       // 画面 (`/scraper` の「日報netprint」タブ) が編集するための口
@@ -308,6 +321,9 @@ export default {
               env.NETPRINT_TARGETS,
             ),
             kintaiCompId: env.KINTAI_COMP_ID,
+            // DVR 取り込みの対象会社 (KV `dvr_targets` が正)。**未設定なら skip** —
+            // DTAKO_ACCOUNTS 全件に倒さない (Refs #1094 の設計注意 7)。
+            dvrTargetsRaw: await resolveDvrTargetsRaw(env.DTAKO_CONFIG_KV, env.DVR_TARGETS),
           },
           async (doKey, path, body) => {
             const id = env.RELAY.idFromName(doKey);
@@ -1084,7 +1100,47 @@ export async function handleDriverMasterRun(request: Request, env: RelayWorkerEn
  * body は `{comp_id?}`。省略すると `DTAKO_ACCOUNTS` の全社ぶんを返す。
  * **書き込みはしない** — 読むだけなので同期を起動しない。
  */
-export async function handleDriverMasterStatus(request: Request, env: RelayWorkerEnv): Promise<Response> {
+export function handleDriverMasterStatus(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  return handleDoLastRunStatus(request, env, "/cron/driver-master/last", async () => {
+    const accountsRaw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
+    return parseDtakoAccounts(accountsRaw).map((a) => a.comp_id);
+  });
+}
+
+/**
+ * `POST /kintai-relay/dvr-status` — DVR 取り込み cron の**直近 1 回の結末**を
+ * comp ごとに返す (Refs #1094 の設計注意 8)。
+ *
+ * cron は 10 分おきで、失敗しても静かに次の回へ流れる。`last_success_at` が
+ * 進んでいないことに気づける口をここに置く (**通知はまだ出さない** — 後続 PR)。
+ *
+ * body は `{comp_id?}`。省略時の既定は **`DVR_TARGETS` が名指しした会社だけ**
+ * (`DTAKO_ACCOUNTS` 全社ではない) — DVR を運用していない会社の DO を読んでも
+ * 常に `last: null` が返るだけで、「止まっている」と見分けが付かなくなる。
+ */
+export function handleDvrStatus(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  return handleDoLastRunStatus(request, env, "/cron/dvr/last", async () => {
+    const targetsRaw = await resolveDvrTargetsRaw(env.DTAKO_CONFIG_KV, env.DVR_TARGETS);
+    return parseDvrTargets(targetsRaw).map((t) => t.comp_id);
+  });
+}
+
+/**
+ * `scraper-comp-{compId}` DO が 1 件だけ持つ「直近 1 回の結末」を読む 2 route
+ * (`driver-master-status` / `dvr-status`) の共通部。**読むだけ** — 同期を起動しない。
+ *
+ * cron の実行履歴は Cloudflare 側からしか見えず、「あの回は成功したのか」を後から
+ * 確かめる術が無い。DO が持つ 1 行をここから読む。`doPath` が読む先を、
+ * `resolveDefaultCompIds` が「comp_id 省略時の母集団」を決める — **母集団は
+ * cron ごとに違う**ので注入する (乗務員マスタは DTAKO_ACCOUNTS 全社、DVR は
+ * DVR_TARGETS だけ)。
+ */
+async function handleDoLastRunStatus(
+  request: Request,
+  env: RelayWorkerEnv,
+  doPath: string,
+  resolveDefaultCompIds: () => Promise<string[]>,
+): Promise<Response> {
   const fail = (status: number, error: string) =>
     new Response(JSON.stringify({ error }), {
       status,
@@ -1108,9 +1164,8 @@ export async function handleDriverMasterStatus(request: Request, env: RelayWorke
   if (compId) {
     compIds = [compId];
   } else {
-    const accountsRaw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
     try {
-      compIds = parseDtakoAccounts(accountsRaw).map((a) => a.comp_id);
+      compIds = await resolveDefaultCompIds();
     } catch (err) {
       // 設定が壊れているのを「1 社も無い」と同じ顔にしない (Refs #944 の分類)。
       return fail(503, err instanceof Error ? err.message : String(err));
@@ -1123,7 +1178,7 @@ export async function handleDriverMasterStatus(request: Request, env: RelayWorke
   for (const target of compIds) {
     try {
       const id = env.RELAY.idFromName(`scraper-comp-${target}`);
-      const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/driver-master/last");
+      const res = await env.RELAY.get(id).fetch(`https://relay.internal${doPath}`);
       const text = await res.text();
       if (!res.ok) {
         results.push({ comp_id: target, last: null, error: `HTTP ${res.status}: ${text.slice(0, 200)}` });
