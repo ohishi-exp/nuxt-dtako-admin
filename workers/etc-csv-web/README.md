@@ -76,9 +76,14 @@ CI が deploy しても、以下が未了だと **fail-closed で全部 404 / CO
    `ETC_CSV_ALLOWED_USER_IDS` に載せる `user_id` は、relay の `ETC_ACCOUNTS` が
    使っているものと同じ (= R2 の `etc/{user_id}/` のディレクトリ名)。
 
-2. **DNS レコード** — `etc-csv.ippoan.org` の custom domain。
-   `[[routes]] custom_domain = true` なので初回 deploy で Cloudflare が
-   自動作成するが、zone に既存レコードがあると衝突する。dashboard で確認する。
+2. **入口の custom domain を dashboard で 1 回 attach する。**
+   **ホスト名は public repo に書かない**ので `wrangler.toml` にも無い (Refs #1103) —
+   この worker は受け側の認証を持たないため、宛先を公開しないこと自体が担保の一部。
+   Workers & Pages → この worker → Settings → Domains & Routes → Custom domain。
+   zone に既存の DNS レコードがあると衝突するので、そこも合わせて確認する。
+   **一度 attach すれば CI の再 deploy では外れない** — config に `[[routes]]` が
+   無いとき wrangler は routes / custom domains のどちらの API も呼ばない
+   (根拠は `wrangler.toml` の注記)。付けるホスト名の条件は次項。
 
 3. **Cloudflare Access の配下に入っていないことを確認する。**
    ホスト名は `*-dev` / `*-staging` / `*-preview` / `preview-*` のいずれにも

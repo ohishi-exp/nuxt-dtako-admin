@@ -1497,7 +1497,10 @@ dtako (csvdata.zip) と ETC (明細 CSV) の定期取得を VPS / GCE の cron �
 ### ETC 明細 CSV の配信 (`workers/etc-csv-web/`、Refs #1103)
 
 上の cron が R2 に貯めた ETC 明細 CSV を**読み取り専用で配る別 worker**
-(`nuxt-dtako-admin-etc-csv-web`、custom domain `etc-csv.ippoan.org`、single-env)。
+(`nuxt-dtako-admin-etc-csv-web`、single-env)。**入口の custom domain は
+`wrangler.toml` に書かない** — この repo は public で、この worker には受け側の認証が
+無いため、宛先を公開しないこと自体が担保の一部 (attach は dashboard で 1 回。
+CI の再 deploy では外れない。根拠は同 `wrangler.toml` の注記、Refs #1103)。
 消費者は**オンプレの社内 Web アプリの取り込み画面** (別 repo、private) で、
 停止した外部 VPS 上の gRPC サービスの置き換え。取り込みの POST 自体は認証 + CSRF 必須で
 ブラウザからしか行えないため、**「CSV をどこから取ってくるか」だけを差し替えている**。

@@ -27,13 +27,26 @@ workers_dev = false
 enabled = true
 head_sampling_rate = 1
 
-# ★ ホスト名は `*-dev` / `*-staging` / `*-preview` / `preview-*` のいずれにも
-#   一致させないこと。一致すると Cloudflare Access のワイルドカードアプリに
-#   巻き込まれ、ブラウザからの cross-origin fetch が preflight 403 で落ちる。
-#   (kyuyo-mcp.ippoan.org と同じ流儀の custom domain)
-[[routes]]
-pattern = "etc-csv.ippoan.org"
-custom_domain = true
+# ★ 入口の custom domain (ホスト名) は **この config に書かない** (Refs #1103)。
+#   この repo は public で、この worker には受け側の認証が無いため、**宛先を公開しない
+#   こと自体が担保の一部**である (置き換え対象の旧 gRPC は既定ホストが private repo に
+#   しか無く、この軸では旧構成のほうが厳格だった)。**attach は dashboard で人が 1 回だけ**
+#   行う。手順は README.md。
+#
+#   CI が繰り返し deploy しても attach 済みの custom domain が外れない根拠
+#   (wrangler 4.128.0 の実装を読んで確認):
+#     - `publishRoutes` は `PUT /routes` で「既存 route を消す」
+#       (実装中のコメント: "Note: PUT will delete previous routes on this script.")
+#     - ただし呼び出しは `if (routesOnly.length > 0)` の中にあり、custom domain 側も
+#       `if (customDomainsOnly.length > 0)` でガードされている
+#   ⇒ config に `[[routes]]` が 1 つも無ければどちらの API も呼ばれず、既に attach
+#     されている custom domain は触られない。
+#   同 repo の先行例: `workers/dtako-scraper-relay` と `-tail` も `workers_dev = false`
+#   かつ top-level `[[routes]]` 無しで CI deploy が通っている。
+#
+# ★ attach するホスト名は `*-dev` / `*-staging` / `*-preview` / `preview-*` のいずれにも
+#   一致させないこと。一致すると Cloudflare Access のワイルドカードアプリに巻き込まれ、
+#   ブラウザからの cross-origin fetch が preflight 403 で落ちる。
 
 # 読み取り専用で bind する。この worker に書き込みの口は無い。
 [[r2_buckets]]
