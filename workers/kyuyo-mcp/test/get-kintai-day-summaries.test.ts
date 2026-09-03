@@ -75,9 +75,26 @@ describe("get_kintai_day_summaries (ohishi-exp/rust-ichibanboshi#205 の 23)", (
     expect(url.searchParams.get("driver")).toBe("1130");
     const init = call[1] as RequestInit;
     expect((init.headers as Record<string, string>)["X-Alc-Proxy-Secret"]).toBe(SECRET);
-    // **GET (method 未指定) で body も無い** — この経路は 1 行も書けない
-    expect(init.method).toBeUndefined();
+    // **GET で body も無い** — この経路は 1 行も書けない。
+    // #1102 で callRelay に寄せるまでは method 未指定 (fetch 既定の GET) だった。
+    // 送出は同じだが、**「書けない」の担保は method が空欄なことではなく GET であること**
+    // なので、明示された値でそのまま検査する。
+    expect(init.method).toBe("GET");
     expect(init.body).toBeUndefined();
+  });
+
+  it("★ GET なので body も content-type も付けない (workers は GET+body を throw する)", async () => {
+    // callRelay は POST 側にだけ body / content-type を付ける。**畳む前からそうだった**が、
+    // 畳んだことで「helper を 1 行直すと 3 tool が同時に壊れる」形になった。
+    // workers は GET に body があると `Request with a GET or HEAD method cannot have a body`
+    // で throw するので、**スタブしか居ないテストが緑のまま本番だけ落ちる。**
+    // ⇒ スタブが受け取った RequestInit をここで検査して、その戻しを落とす。
+    const e = env();
+    await getKintaiDaySummariesTool.execute(e, { month: "2026-06" });
+    const init = relayFetch(e).mock.calls[0]![1] as RequestInit;
+    expect(init.method).toBe("GET");
+    expect(init.body).toBeUndefined();
+    expect((init.headers as Record<string, string>)["content-type"]).toBeUndefined();
   });
 
   it("driver を省いたら query に出さない (`driver=` は受け側が 400 にする)", async () => {

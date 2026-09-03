@@ -59,6 +59,11 @@ describe("run_dtako_scrape (ohishi-exp/rust-ichibanboshi#205 の 42)", () => {
     expect(call[0]).toBe("https://relay.internal/kintai-relay/scrape");
     const init = call[1] as RequestInit;
     expect((init.headers as Record<string, string>)["X-Alc-Proxy-Secret"]).toBe(SECRET);
+    // ★ 陽性対照 — POST 側は body も content-type も**在る**。
+    // 上の GET 側 (body/content-type 無し) だけを検査すると、helper を
+    // 「どの経路にも body を付けない」に変えても両方通ってしまう。
+    expect(init.method).toBe("POST");
+    expect((init.headers as Record<string, string>)["content-type"]).toBe("application/json");
     expect(JSON.parse(init.body as string)).toEqual({
       dates: ["2026-06-03"],
       comp_id: "0100",
@@ -109,6 +114,20 @@ describe("get_dtako_scrape_status", () => {
     expect(d).toContain("#946 より前の無人実行はそもそも載っていない");
     // fold の情報はこちらには 1 件も載らない — 探す先を名指しする
     expect(d).toContain("fold_* は get_dtako_scrape_progress 側だけが持つ");
+  });
+
+  it("★ GET なので body も content-type も付けない (workers は GET+body を throw する)", async () => {
+    // callRelay は POST 側にだけ body / content-type を付ける。**畳む前からそうだった**が、
+    // 畳んだことで「helper を 1 行直すと 3 tool が同時に壊れる」形になった。
+    // workers は GET に body があると `Request with a GET or HEAD method cannot have a body`
+    // で throw するので、**スタブしか居ないテストが緑のまま本番だけ落ちる。**
+    // ⇒ スタブが受け取った RequestInit をここで検査して、その戻しを落とす。
+    const e = env();
+    await getDtakoScrapeStatusTool.execute(e, {});
+    const init = relayOf(e).fetch.mock.calls[0]![1] as RequestInit;
+    expect(init.method).toBe("GET");
+    expect(init.body).toBeUndefined();
+    expect((init.headers as Record<string, string>)["content-type"]).toBeUndefined();
   });
 
   it("limit を省略すると relay の既定に委ねる", async () => {
