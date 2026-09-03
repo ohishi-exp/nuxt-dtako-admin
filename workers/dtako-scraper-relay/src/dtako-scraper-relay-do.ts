@@ -199,6 +199,7 @@ import {
   getDvrNotifications,
   getVehicleLogTrack,
   getVehicleStates,
+  getVehicleStatesRaw,
   openDvrFileStream,
   requestDvrDownloadPath,
   requestDvrFileTransfer,
@@ -221,6 +222,13 @@ import {
   selectRecentDvrNotifications,
   toDvrIngestItems,
 } from "./dvr-ingest";
+// 車輌動態 (dtako_logs) cron が rust-alc-api へ渡すぶんの pure ロジック (Refs #1098)。
+// DVR と同じ 10 分 cron に相乗りする (`VEHICLE_STATE_CRON` の doc 参照)。
+import {
+  ingestVehicleStates,
+  VEHICLE_STATE_ALL_BRANCHES,
+  type DtakoLogsBulkOutcome,
+} from "./vehicle-state-ingest";
 // theearth ログインセッション (dvr-api / daily-report-api 共通、Refs #233):
 // routing 解決・レコード検証・token 生成 / Bearer token 抽出は theearth-session.ts
 // が唯一の実装元 (かつての dvr-session.ts / report-session.ts ラッパーは統合済み)。
@@ -502,6 +510,34 @@ export interface DriverMasterLastRun {
   error: string | null;
 }
 
+/** 直近 1 回の車輌動態 (`dtako_logs`) 取り込み cron の結末を置く DO storage のキー
+ * (Refs #1098)。`dvr_last_run` と同じ流儀で**1 件だけ**持つ。 */
+const VEHICLE_STATE_LAST_RUN_KEY = "vehicle_state_last_run";
+
+/**
+ * 直近 1 回の車輌動態取り込み cron の結末 (`GET /cron/vehicle-state/last` が返す形)。
+ *
+ * ★ **「画面が止まっている」を機械で答えられるようにするための入れ物。**
+ * #1098 の発端は、取得元 (VPS) を止めたことに誰も気づけず、画面の最終更新時刻から
+ * 逆算するしかなかったこと。`last_success_at` を DO 側に残しておけば、
+ * 「取得が止まっている」のか「取得はできているが表示が古い」のかが 1 回の GET で割れる。
+ */
+export interface VehicleStateCronLastRun {
+  comp_id: string;
+  started_at: string;
+  finished_at: string;
+  ok: boolean;
+  /** 最後に**成功で終わった**時刻。失敗した回は前回の値を持ち回る。 */
+  last_success_at: string | null;
+  /** theearth から取れた車輌の件数 (null = そこまで到達していない)。 */
+  vehicles: number | null;
+  /** rust が upsert した件数 (`records_added`)。 */
+  records_added: number | null;
+  /** rust が受け取った件数 (`total_records`)。 */
+  total_records: number | null;
+  error: string | null;
+}
+
 /** 直近 1 回の DVR 取り込み cron の結末を置く DO storage のキー。
  * `driver_master_last_run` と同じ流儀で**1 件だけ**持つ (Refs #1094 の設計注意 8)。 */
 const DVR_LAST_RUN_KEY = "dvr_last_run";
@@ -679,6 +715,23 @@ export interface RelayEnv {
    * (CF Secrets Store binding、`X-Alc-Proxy-Secret` として consumer worker
    * proof に使う)。 */
   INTERNAL_SHARED_SECRET?: unknown;
+  /**
+   * 車輌動態 (`dtako_logs`) 取り込みの device credential (Refs #1098)。
+   * auth-worker の `POST /device/token` で短命 JWT に交換し、
+   * `/device-data-proxy/api/dtako-logs/bulk` に Bearer で提示する。
+   * 書き先 tenant は **device record 由来**で、relay からは詐称できない。
+   *
+   * ★ **置き場は Secrets Store binding** (`INTERNAL_SHARED_SECRET` と同じ)。
+   * **dashboard の plain 環境変数に置かないこと** — deploy で消える実害があり
+   * (2026-07-25、`DTAKO_ACCOUNTS` が本番から消えて viewer 認可が全社 401)、
+   * 消えた日に車輌動態だけが静かに止まる = いま直そうとしている故障と同じ形になる。
+   *
+   * **未設定なら fail-closed で skip** (503)。値はコードにも wrangler.toml にも
+   * 置かない。
+   */
+  DTAKO_LOGS_DEVICE_ID?: unknown;
+  /** 同 secret (Secrets Store binding)。詳細は `DTAKO_LOGS_DEVICE_ID` の doc。 */
+  DTAKO_LOGS_DEVICE_SECRET?: unknown;
   /** auth-worker origin (wrangler vars と共有)。introspect の絶対 URL 組み立てにのみ使う
    * (service binding は host を無視するため、値そのものは到達性に影響しない)。 */
   NUXT_PUBLIC_AUTH_WORKER_URL?: string;
@@ -1054,6 +1107,20 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 直近 1 回の DVR 取り込みの結末を読む (無音故障の検知、Refs #1094 の設計注意 8)。
     if (url.pathname === "/cron/dvr/last" && request.method === "GET") {
       const last = await this.ctx.storage.get<DvrCronLastRun>(DVR_LAST_RUN_KEY);
+      return Response.json({ last: last ?? null });
+    }
+
+    // 車輌動態 (`dtako_logs`) を 10 分おきに取り込む (Refs #1098)。DVR と同じ tick・
+    // 同じ DO に載る (`VEHICLE_STATE_CRON` の doc)。到達条件は /cron/dvr と同じ。
+    if (url.pathname === "/cron/vehicle-state" && request.method === "POST") {
+      return this.handleCronVehicleState(request);
+    }
+
+    // 直近 1 回の車輌動態取り込みの結末を読む。cron の実行履歴は Cloudflare 側から
+    // しか見えないので、「画面が止まっているのは取得が止まっているのか」を後から
+    // 答えられるようにする (今回の #1098 は、まさにそれが分からず時間を使った)。
+    if (url.pathname === "/cron/vehicle-state/last" && request.method === "GET") {
+      const last = await this.ctx.storage.get<VehicleStateCronLastRun>(VEHICLE_STATE_LAST_RUN_KEY);
       return Response.json({ last: last ?? null });
     }
 
@@ -5542,6 +5609,154 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * **request body の tenant_id は読まない** — 読むと comp_id を知っている呼び出し元が
    * 任意テナントへ書けてしまう (Refs ippoan/rust-alc-api#434)。
    */
+  /**
+   * POST /cron/vehicle-state — body `{comp_id}`。10 分おきの車輌動態取り込み (Refs #1098)。
+   *
+   * 旧 pipeline (外部 VPS 上のヘッドレス Chrome) を relay へ寄せた移行先。
+   * **設定が 1 つでも欠けたら fail-closed で止める** — 部分的に動いて「毎回成功して
+   * いるのに画面が更新されない」状態を作らない。
+   */
+  private async handleCronVehicleState(request: Request): Promise<Response> {
+    let body: { comp_id?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return dvrJsonError(400, "body must be JSON");
+    }
+    const compId = typeof body.comp_id === "string" ? body.comp_id.trim() : "";
+    if (!compId) {
+      return dvrJsonError(400, "comp_id は必須です");
+    }
+    const account = await this.resolveAccount(compId);
+    if (!account) {
+      return Response.json({ error: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
+    }
+    // ★ device credential は**投入されるまで動かない** (fail-closed)。片方だけ設定された
+    // 状態も同じく止める — 「ID はあるのに secret が無い」で 401 を 10 分おきに撃ち続ける
+    // より、設定漏れとして 1 行出す方が直せる。
+    const [deviceId, deviceSecret] = await Promise.all([
+      resolveSecret(this.env.DTAKO_LOGS_DEVICE_ID),
+      resolveSecret(this.env.DTAKO_LOGS_DEVICE_SECRET),
+    ]);
+    if (!deviceId || !deviceSecret) {
+      return Response.json(
+        {
+          error:
+            "DTAKO_LOGS_DEVICE_ID / DTAKO_LOGS_DEVICE_SECRET 未設定のため車輌動態を alc へ投入できません",
+        },
+        { status: 503 },
+      );
+    }
+    // 同一 comp_id への theearth 並行アクセスはセッションロックで hang/500 する。
+    // 既存の dtako scrape / DVR / 乗務員マスタ同期と同じキューに載せて直列化する。
+    return this.enqueueScrape(() =>
+      this.runVehicleStateCron(account, { deviceId, deviceSecret }),
+    );
+  }
+
+  /**
+   * 直近 1 回の車輌動態 cron の結末を DO storage に 1 件だけ残す。
+   *
+   * ★ **書けなくても取り込みの結果は変えない** (`putDvrLastRun` と同じ)。
+   */
+  private async putVehicleStateLastRun(record: VehicleStateCronLastRun): Promise<void> {
+    try {
+      await this.ctx.storage.put(VEHICLE_STATE_LAST_RUN_KEY, record);
+    } catch (err) {
+      console.warn(
+        JSON.stringify({
+          vehicle_state_last_run: "put_failed",
+          comp_id: record.comp_id,
+          error: describeUnknownError(err),
+        }),
+      );
+    }
+  }
+
+  /** 車輌動態取り込みの本体 (`scrapeQueue` の直列化の中でだけ呼ばれる)。 */
+  private async runVehicleStateCron(
+    account: DtakoAccountRaw,
+    cred: { deviceId: string; deviceSecret: string },
+  ): Promise<Response> {
+    const startedAt = new Date().toISOString();
+    const jobState = this.makeTheearthLoginJobState();
+    const authFetch = this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER);
+    const base = { vehicle_state_cron: "", comp_id: account.comp_id };
+
+    const previous = await this.ctx.storage.get<VehicleStateCronLastRun>(
+      VEHICLE_STATE_LAST_RUN_KEY,
+    );
+    const lastSuccessAt = previous?.last_success_at ?? null;
+
+    // ★ 失敗応答にも「どこまで進んだか」を載せるため try の外で数える
+    // (`runDvrCron` と同じ理由)。null は「そこまで到達していない」。
+    let vehicles: number | null = null;
+    let outcome: DtakoLogsBulkOutcome | null = null;
+
+    try {
+      // **射影版 (`getVehicleStates`) を使わない。** 送るのは生レコードで、理由は
+      // `vehicle-state-ingest.ts` の doc (57 フィールドの受け手 + DDMM の INTEGER 列)。
+      const rows = await this.withTheearthLoginSession(account, jobState, (jar) =>
+        getVehicleStatesRaw(jar, VEHICLE_STATE_ALL_BRANCHES),
+      );
+      vehicles = rows.length;
+      outcome = await ingestVehicleStates({ cred, rows }, authFetch);
+
+      const finishedAt = new Date().toISOString();
+      console.log(
+        JSON.stringify({
+          ...base,
+          vehicle_state_cron: "done",
+          vehicles,
+          records_added: outcome.recordsAdded,
+          total_records: outcome.totalRecords,
+          theearth_logins: jobState.logins.length,
+          theearth_kicked: jobState.logins.some((l) => l.kicked),
+        }),
+      );
+      await this.putVehicleStateLastRun({
+        comp_id: account.comp_id,
+        started_at: startedAt,
+        finished_at: finishedAt,
+        ok: true,
+        last_success_at: finishedAt,
+        vehicles,
+        records_added: outcome.recordsAdded,
+        total_records: outcome.totalRecords,
+        error: null,
+      });
+      return Response.json({
+        ok: true,
+        comp_id: account.comp_id,
+        vehicles,
+        records_added: outcome.recordsAdded,
+        total_records: outcome.totalRecords,
+        theearth_logins: jobState.logins.length,
+        theearth_kicked: jobState.logins.some((l) => l.kicked),
+      });
+    } catch (err) {
+      const message = describeUnknownError(err);
+      console.error(
+        JSON.stringify({ ...base, vehicle_state_cron: "failed", vehicles, error: message }),
+      );
+      await this.putVehicleStateLastRun({
+        comp_id: account.comp_id,
+        started_at: startedAt,
+        finished_at: new Date().toISOString(),
+        ok: false,
+        last_success_at: lastSuccessAt,
+        vehicles,
+        records_added: null,
+        total_records: null,
+        error: message,
+      });
+      return Response.json(
+        { ok: false, comp_id: account.comp_id, vehicles, error: message },
+        { status: 502 },
+      );
+    }
+  }
+
   private async handleCronDvr(request: Request): Promise<Response> {
     let body: { comp_id?: unknown };
     try {

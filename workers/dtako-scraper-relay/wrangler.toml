@@ -132,6 +132,18 @@ service = "nuxt-dtako-admin-scraper-relay-tail"
 #                          本番とセッションを奪い合い、**本番の DVR 取り込みと dtako 日次の
 #                          両方が落ちる**。staging での検証は `wrangler dev --local` と
 #                          POST /kintai-relay/dvr-status (結末を読むだけ) で行う。
+#                          ★★ **この 1 本には車輌動態 (dtako_logs) の取り込みも相乗り
+#                          している** (Refs #1098)。cron を 1 本増やさないのは、同じ会社の
+#                          同じ DO (scraper-comp-{comp_id}) を同じ 10 分間隔で叩くため —
+#                          トリガーを分けると theearth へのログインが 2 倍になる。
+#                          同じ tick に載せれば DO の scrapeQueue が直列化し、ログイン
+#                          セッションも使い回される。対象は VEHICLE_STATE_TARGETS
+#                          ([{comp_id}]、**KV DTAKO_CONFIG_KV の vehicle_state_targets が
+#                          正**) で、**DVR_TARGETS とは独立に評価する** — 片方の設定漏れが
+#                          もう片方を止めない。送信には device credential
+#                          (DTAKO_LOGS_DEVICE_ID / DTAKO_LOGS_DEVICE_SECRET) が要り、
+#                          **未設定なら fail-closed で skip**。上の「staging には足さない」は
+#                          車輌動態にもそのまま当てはまる (= staging では 1 度も走らない)。
 [triggers]
 crons = [
   "0 16 * * *",

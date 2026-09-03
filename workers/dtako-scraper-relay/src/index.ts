@@ -23,6 +23,7 @@ import {
   resolveDvrTargetsRaw,
   resolveNetprintTargetsRaw,
   resolveSecretBinding,
+  resolveVehicleStateTargetsRaw,
   runScheduledCron,
   yesterdayJst,
 } from "./cron";
@@ -88,6 +89,11 @@ export interface RelayWorkerEnv {
    * fallback** (`netprint_targets` と同じ理由)。KV も変数も未設定なら cron skip —
    * **`DTAKO_ACCOUNTS` 全件に倒さない**。 */
   DVR_TARGETS?: unknown;
+  /** 車輌動態 (`dtako_logs`) 取り込み cron の対象会社 (JSON 配列 `[{comp_id}, ...]`、
+   * Refs #1098)。**KV (`DTAKO_CONFIG_KV`) の `vehicle_state_targets` が正で、この
+   * plain 変数は fallback** (`dvr_targets` と同じ理由)。KV も変数も未設定なら
+   * cron skip — **`DTAKO_ACCOUNTS` 全件に倒さない**。 */
+  VEHICLE_STATE_TARGETS?: unknown;
 }
 
 export default {
@@ -324,6 +330,12 @@ export default {
             // DVR 取り込みの対象会社 (KV `dvr_targets` が正)。**未設定なら skip** —
             // DTAKO_ACCOUNTS 全件に倒さない (Refs #1094 の設計注意 7)。
             dvrTargetsRaw: await resolveDvrTargetsRaw(env.DTAKO_CONFIG_KV, env.DVR_TARGETS),
+            // 車輌動態 (dtako_logs) 取り込みの対象会社 (KV `vehicle_state_targets` が正)。
+            // **DVR とは独立に評価する** — 片方の設定漏れがもう片方を止めない (Refs #1098)。
+            vehicleStateTargetsRaw: await resolveVehicleStateTargetsRaw(
+              env.DTAKO_CONFIG_KV,
+              env.VEHICLE_STATE_TARGETS,
+            ),
           },
           async (doKey, path, body) => {
             const id = env.RELAY.idFromName(doKey);
