@@ -15,6 +15,7 @@ import {
   parseDvrFileResponse,
   parseDvrNotificationsResponse,
   parseTheearthDatetimeJst,
+  toDvrDatetimeRfc3339,
   planDvrFileWork,
   postDvrNotifications,
   putDvrFile,
@@ -72,6 +73,39 @@ describe('parseTheearthDatetimeJst', () => {
   })
 })
 
+describe('toDvrDatetimeRfc3339', () => {
+  it('★ 本番で 422 を出した生表記を RFC3339 (UTC) に直す', () => {
+    // 本番の DVR cron が送っていた実データ由来の値。JST→UTC で **日付が前日に戻る**。
+    // これを生のまま送ると rust の Option<DateTime<Utc>> が deserialize に失敗し、
+    // items[0].dvr_datetime で body 全体が 422 になっていた (Refs #1094)。
+    expect(toDvrDatetimeRfc3339('2026/09/03 08:49:12')).toBe('2026-09-02T23:49:12Z')
+  })
+
+  it('converts both observed theearth shapes', () => {
+    expect(toDvrDatetimeRfc3339('2026/07/03 18:32:26')).toBe('2026-07-03T09:32:26Z')
+    expect(toDvrDatetimeRfc3339('2026-07-01T23:00:59')).toBe('2026-07-01T14:00:59Z')
+  })
+
+  it('pads a missing seconds field to :00', () => {
+    expect(toDvrDatetimeRfc3339('2026/07/03 18:32')).toBe('2026-07-03T09:32:00Z')
+  })
+
+  it('★ 空文字・欠落・読めない値はすべて null (空文字を送らない)', () => {
+    // 空文字も RFC3339 として不正なので、生の文字列と同じく body 全体を 422 にする。
+    expect(toDvrDatetimeRfc3339('')).toBeNull()
+    expect(toDvrDatetimeRfc3339(null)).toBeNull()
+    expect(toDvrDatetimeRfc3339('2026年7月3日')).toBeNull()
+  })
+
+  it('★ 桁溢れで西暦 5 桁になる値も null — 拡張表記を送って全件を落とさない', () => {
+    // parseTheearthDatetimeJst は月日の繰り上げを Date.UTC に任せるので、
+    // ここは epoch ms としては読めてしまう (= null ではない)。
+    expect(parseTheearthDatetimeJst('9999/99/99 23:59:59')).not.toBeNull()
+    // が、toISOString() は `+010008-…` を返す。それは RFC3339 ではないので捨てる。
+    expect(toDvrDatetimeRfc3339('9999/99/99 23:59:59')).toBeNull()
+  })
+})
+
 describe('selectRecentDvrNotifications', () => {
   const now = new Date('2026-07-03T10:00:00Z') // = 2026/07/03 19:00 JST
 
@@ -113,14 +147,14 @@ describe('toDvrIngestItems', () => {
           vehicle_name: '大型1号',
           driver_name: '運転 太郎',
           event_type: '急ブレーキ',
-          dvr_datetime: '2026/07/03 18:32:26',
+          dvr_datetime: '2026-07-03T09:32:26Z',
           source_url: 'notify/F1.vdf',
         },
       ],
     })
   })
 
-  it('★ source_url だけ null に倒す — 欠落と空文字を 1 通りにする', () => {
+  it('★ source_url は欠落と空文字を null の 1 通りに畳む', () => {
     // theearth は `FilePath: ""` を実際に返す (venus client の実データ)。空文字と null が
     // 混ざると「値が無かった」と「欄ごと無かった」を後から区別できない。
     expect(toDvrIngestItems([notification({ filePath: null })]).items[0]!.source_url).toBeNull()
@@ -130,7 +164,7 @@ describe('toDvrIngestItems', () => {
     expect(bare.vehicle_cd).toBe('')
   })
 
-  it('falls back to empty strings for the optional columns', () => {
+  it('falls back to empty strings for the display columns, null for the two nullable ones', () => {
     const bare = notification({
       vehicleCd: null,
       vehicleName: null,
@@ -146,7 +180,8 @@ describe('toDvrIngestItems', () => {
       vehicle_name: '',
       driver_name: '',
       event_type: '',
-      dvr_datetime: '',
+      // ★ 空文字ではなく null (source_url と同じ扱いの 2 欄目)
+      dvr_datetime: null,
       source_url: null,
     })
   })

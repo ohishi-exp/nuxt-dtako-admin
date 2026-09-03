@@ -254,7 +254,8 @@ describe("DtakoScraperRelayDO#runDvrCron", () => {
         vehicle_name: "大型1号",
         driver_name: "運転 太郎",
         event_type: "急ブレーキ",
-        dvr_datetime: "2026/07/03 18:32:26",
+        // ★ 生の theearth 表記ではなく RFC3339 (UTC)。生だと rust が 422 を返す。
+        dvr_datetime: "2026-07-03T09:32:26Z",
         source_url: "notify/F1.vdf",
       },
     ]);
