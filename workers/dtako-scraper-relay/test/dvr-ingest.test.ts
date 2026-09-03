@@ -371,8 +371,33 @@ describe('postDvrNotifications', () => {
     const fetchImpl: FetchLike = (async () =>
       new Response('tenant mismatch', { status: 403 })) as FetchLike
     await expect(
-      postDvrNotifications({ sharedSecret: 's', tenantId: 't', items: [] }, fetchImpl),
+      // ★ 空ではなく実物を送る — 空バッチは POST 自体を打たないので、
+      // `items: []` のままだと **この陰性対照が rejects を測れなくなる**。
+      postDvrNotifications(
+        { sharedSecret: 's', tenantId: 't', items: toDvrIngestItems([notification()]).items },
+        fetchImpl,
+      ),
     ).rejects.toThrow(AlcInternalUploadError)
+  })
+
+  it('★ 空バッチは POST を打たない — rust は items: [] を 400 で弾く', async () => {
+    // rust 側の doc は「items が空なら 400 (relay の bug を無言の 200 で隠さない)」。
+    // sendViaAlcInternalProxy は非 2xx で throw するので、素で投げると
+    // 「48h 窓に 1 件も無かった」だけで cron run 全体が失敗する。
+    let calls = 0
+    const fetchImpl: FetchLike = (async () => {
+      calls += 1
+      return new Response('{"inserted":0,"skipped":0,"pending":[]}', { status: 200 })
+    }) as FetchLike
+
+    const result = await postDvrNotifications(
+      { sharedSecret: 's', tenantId: 't', items: [] },
+      fetchImpl,
+    )
+
+    expect(calls).toBe(0)
+    // ★ 観測性を落とさない — 0 件で埋める。`null` (「そこまで到達していない」) と混ぜない。
+    expect(result).toEqual({ inserted: 0, skipped: 0, pending: [] })
   })
 })
 

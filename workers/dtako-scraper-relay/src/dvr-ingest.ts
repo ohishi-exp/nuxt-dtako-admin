@@ -388,6 +388,18 @@ export async function postDvrNotifications(
   input: DvrNotificationsIngestInput,
   fetchImpl: FetchLike,
 ): Promise<DvrNotificationsIngestResult> {
+  // ★ **空バッチは打たない。** rust 側は `items: []` を 400 で弾く
+  // (「`items` が空なら 400 (relay の bug を無言の 200 で隠さない)」= **空を送るな**という
+  // relay 向けの契約) 一方、`sendViaAlcInternalProxy` は非 2xx で throw する。
+  // ⇒ 素で投げると「48h 窓に 1 件も無かった」だけで **cron run 全体が失敗**し、
+  // `last_success_at` が進まないまま `DVR_STALE_ALERT_HOURS` 後に無音故障まで鳴る。
+  // 稼働の少ない comp・連休・`unusable` で全件落ちたときに普通に起きる条件。
+  //
+  // 打たなかったことは **0 件**として応答に載せる — `null` (「そこまで到達していない」)
+  // とは混ぜない (`DvrNotificationsIngestResult` の doc 参照)。件数が消えないので
+  // 観測性は落ちない。
+  if (input.items.length === 0) return { inserted: 0, skipped: 0, pending: [] };
+
   const text = await sendViaAlcInternalProxy(
     {
       path: DVR_NOTIFICATIONS_INGEST_PATH,
