@@ -246,6 +246,8 @@ async function loadGcpDayParts(
   const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
   if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
 
+  // ★ callRelay へは寄せない — 月ごとに Promise.all で回し、失敗の名指しに月が要る
+  // (`GCP day-summaries (${month}): …`)。定型の `relay: …` にすると、どの月が落ちたか消える。
   const fetched = await Promise.all(
     months.map(async (month) => {
       const q = new URLSearchParams({ month });
@@ -873,6 +875,65 @@ export const getTimecardDiffTool = {
 /** server.ts が McpServer に登録する全 tool。inputSchema が異なるため
  *  `ToolEntry<z.ZodTypeAny>` に揃えて束ねる (cf-access-mcp と同じパターン)。 */
 
+// ── relay を叩く共通部分 (callRelay) ──────────────────────────────────────────
+
+/** `callRelay` の任意引数。**既定値は持たせない** (末端の `??` が `undefined` を受ける)。 */
+type CallRelayOptions = {
+  /** 省略すると POST (`body` を JSON で送る)。`"GET"` を渡すと本文を送らない。 */
+  method?: "GET";
+  /** 失敗本文を切る長さ。省略すると 200。 */
+  maxChars?: number;
+};
+
+/**
+ * relay (SCRAPER_RELAY service binding) を叩く共通部分 (Refs #1052 / #1102)。
+ *
+ * binding 確認 → secret 解決 → fetch → 非 2xx は本文つきで throw → JSON.parse か throw、
+ * までを 1 本に畳む。この 11〜13 行が 14 箇所に複製されていたのを #1102 で寄せた。
+ *
+ * **認可判断には一切触らない。** どの scope を要求するかは tool オブジェクト側の
+ * `requiresScope` が持っているので、fetch 本体をここへ通しても write / read の区別は
+ * 1 ミリも動かない — **だから write tool も寄せてある。**
+ *
+ * #1052 には「既存 tool 側をこのヘルパへ寄せる書き換えは**しない**」と書いてあったが、
+ * あれは「2 tool を足す PR で範囲外の tool の認可段に手を出さない」という**その PR の
+ * scope の線引き**であって、恒久的な安全不変条件ではなかった。#1102 で取り消した。
+ * 併せて、read-only を強制する要素が 1 つも無い (ただ叩くだけ) 名前の嘘を消すため
+ * `callRelayReadOnly` から改名した。
+ */
+async function callRelay(
+  env: Env,
+  path: string,
+  body?: unknown,
+  opts?: CallRelayOptions,
+): Promise<unknown> {
+  const relay = env.SCRAPER_RELAY;
+  if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
+  const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+  // ★ **既定は 200 のまま**。2000 (RELAY_ERROR_MAX_CHARS) が要るのは
+  // run_driver_master_sync / run_vehicle_state_sync の 2 site だけで、**全体を広げない** —
+  // 広げると残り 15 site の挙動が黙って変わる。
+  const maxChars = opts?.maxChars ?? 200;
+  const res = await relay.fetch(
+    `https://relay.internal${path}`,
+    opts?.method === "GET"
+      ? { method: "GET", headers: { "X-Alc-Proxy-Secret": secret } }
+      : {
+          method: "POST",
+          headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
+          body: JSON.stringify(body),
+        },
+  );
+  const responseBody = await res.text();
+  if (!res.ok) throw new Error(`relay: status ${res.status}: ${responseBody.slice(0, maxChars)}`);
+  try {
+    return JSON.parse(responseBody) as unknown;
+  } catch {
+    throw new Error(`relay: parse failed: ${responseBody.slice(0, maxChars)}`);
+  }
+}
+
 // ── run_kintai_relay ──────────────────────────────────────────────────────────
 
 const runKintaiRelayArgs = z.object({
@@ -919,27 +980,11 @@ export const runKintaiRelayTool = {
     if (args.month !== undefined && !parseYm(args.month)) {
       throw new Error("month は YYYY-MM で指定してください");
     }
-    const relay = env.SCRAPER_RELAY;
-    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
-    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
-
-    const res = await relay.fetch("https://relay.internal/kintai-relay/run", {
-      method: "POST",
-      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
-      body: JSON.stringify({
-        month: args.month,
-        month_count: args.month_count,
-        apply: args.apply === true,
-      }),
+    return await callRelay(env, "/kintai-relay/run", {
+      month: args.month,
+      month_count: args.month_count,
+      apply: args.apply === true,
     });
-    const body = await res.text();
-    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
-    try {
-      return JSON.parse(body) as unknown;
-    } catch {
-      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
-    }
   },
 };
 
@@ -982,22 +1027,7 @@ export const runDtakoScrapeTool = {
   // **write tool。** 本番の R2 / DB を書き換えうるので read tool と同じ扱いにしない
   requiresScope: "mcp.write",
   execute: async (env: Env, args: z.infer<typeof runDtakoScrapeArgs>) => {
-    const relay = env.SCRAPER_RELAY;
-    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
-    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
-    const res = await relay.fetch("https://relay.internal/kintai-relay/scrape", {
-      method: "POST",
-      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
-      body: JSON.stringify({ dates: args.dates, comp_id: args.comp_id }),
-    });
-    const body = await res.text();
-    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
-    try {
-      return JSON.parse(body) as unknown;
-    } catch {
-      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
-    }
+    return await callRelay(env, "/kintai-relay/scrape", { dates: args.dates, comp_id: args.comp_id });
   },
 };
 
@@ -1044,26 +1074,12 @@ export const getDtakoScrapeStatusTool = {
     "fold_* は get_dtako_scrape_progress 側だけが持つ。",
   inputSchema: getDtakoScrapeStatusArgs,
   execute: async (env: Env, args: z.infer<typeof getDtakoScrapeStatusArgs>) => {
-    const relay = env.SCRAPER_RELAY;
-    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
-    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
     const p = new URLSearchParams();
     if (args.limit !== undefined) p.set("limit", String(args.limit));
     if (args.date_from !== undefined) p.set("date_from", args.date_from);
     if (args.date_to !== undefined) p.set("date_to", args.date_to);
     const q = p.size === 0 ? "" : `?${p.toString()}`;
-    const res = await relay.fetch(`https://relay.internal/kintai-relay/scrape-history${q}`, {
-      method: "GET",
-      headers: { "X-Alc-Proxy-Secret": secret },
-    });
-    const body = await res.text();
-    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
-    try {
-      return JSON.parse(body) as unknown;
-    } catch {
-      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
-    }
+    return await callRelay(env, `/kintai-relay/scrape-history${q}`, undefined, { method: "GET" });
   },
 };
 
@@ -1144,22 +1160,8 @@ export const getDtakoScrapeProgressTool = {
     "(get_dtako_scrape_status の unsplit_total 等) で確かめること。**",
   inputSchema: getDtakoScrapeProgressArgs,
   execute: async (env: Env, args: z.infer<typeof getDtakoScrapeProgressArgs>) => {
-    const relay = env.SCRAPER_RELAY;
-    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
-    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
     const q = args.comp_id ? `?comp_id=${encodeURIComponent(args.comp_id)}` : "";
-    const res = await relay.fetch(`https://relay.internal/kintai-relay/scrape-progress${q}`, {
-      method: "GET",
-      headers: { "X-Alc-Proxy-Secret": secret },
-    });
-    const body = await res.text();
-    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
-    try {
-      return JSON.parse(body) as unknown;
-    } catch {
-      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
-    }
+    return await callRelay(env, `/kintai-relay/scrape-progress${q}`, undefined, { method: "GET" });
   },
 };
 
@@ -1270,10 +1272,6 @@ export const getOperationZipTool = {
     "remaining/theearth_logins が載る。",
   inputSchema: getOperationZipArgs,
   execute: async (env: Env, args: z.infer<typeof getOperationZipArgs>) => {
-    const relay = env.SCRAPER_RELAY;
-    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
-    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
     const body = args.items
       ? {
           comp_id: args.comp_id,
@@ -1284,49 +1282,11 @@ export const getOperationZipTool = {
           })),
         }
       : { ope_no: args.ope_no_22, start_ope: args.start_ope, recalculate: args.recalculate, comp_id: args.comp_id };
-    const res = await relay.fetch("https://relay.internal/kintai-relay/operation-zip", {
-      method: "POST",
-      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
-      body: JSON.stringify(body),
-    });
-    const responseBody = await res.text();
-    if (!res.ok) throw new Error(`relay: status ${res.status}: ${responseBody.slice(0, 200)}`);
-    try {
-      return JSON.parse(responseBody) as unknown;
-    } catch {
-      throw new Error(`relay: parse failed: ${responseBody.slice(0, 200)}`);
-    }
+    return await callRelay(env, "/kintai-relay/operation-zip", body);
   },
 };
 
 // ── list_scrape_errors / get_scrape_error ────────────────────────────────────
-
-/**
- * relay の read-only 診断口を叩く共通部分 (Refs #1052)。
- *
- * `get_operation_zip` と**同じ流儀** (SCRAPER_RELAY service binding +
- * `X-Alc-Proxy-Secret`、非 2xx は本文つきで throw、応答は JSON をそのまま返す)。
- * 既存 tool 側をこのヘルパへ寄せる書き換えは**しない** — 認可段に触らないため
- * (#1052 の禁止事項)。ここで括るのは今回足す 2 tool だけ。
- */
-async function callRelayReadOnly(env: Env, path: string, body: unknown): Promise<unknown> {
-  const relay = env.SCRAPER_RELAY;
-  if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
-  const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-  if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
-  const res = await relay.fetch(`https://relay.internal${path}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
-    body: JSON.stringify(body),
-  });
-  const responseBody = await res.text();
-  if (!res.ok) throw new Error(`relay: status ${res.status}: ${responseBody.slice(0, 200)}`);
-  try {
-    return JSON.parse(responseBody) as unknown;
-  } catch {
-    throw new Error(`relay: parse failed: ${responseBody.slice(0, 200)}`);
-  }
-}
 
 /** `scrapeJobKey` (読取日) の形。単日か期間 (`YYYY-MM-DD..YYYY-MM-DD`)。 */
 const SCRAPE_JOB_KEY_RE = /^\d{4}-\d{2}-\d{2}(?:\.\.\d{4}-\d{2}-\d{2})?$/;
@@ -1412,7 +1372,7 @@ export const listScrapeErrorsTool = {
     "「原本がある」ようにしか見えない)。応答の `prefix` に実際に読んだ会社が出る。",
   inputSchema: listScrapeErrorsArgs,
   execute: async (env: Env, args: z.infer<typeof listScrapeErrorsArgs>) =>
-    callRelayReadOnly(env, "/kintai-relay/scrape-errors", {
+    callRelay(env, "/kintai-relay/scrape-errors", {
       comp_id: args.comp_id,
       job_key: args.job_key,
       limit: args.limit,
@@ -1473,7 +1433,7 @@ export const getScrapeErrorTool = {
     "(会社の取り違えを心配するのは `list_scrape_errors` の側)。",
   inputSchema: getScrapeErrorArgs,
   execute: async (env: Env, args: z.infer<typeof getScrapeErrorArgs>) =>
-    callRelayReadOnly(env, "/kintai-relay/scrape-error-object", {
+    callRelay(env, "/kintai-relay/scrape-error-object", {
       key: args.key,
       full: args.full,
       comp_id: args.comp_id,
@@ -1659,10 +1619,6 @@ export const runDtakoReimportTool = {
   // 入れない — 取り込みという破壊的操作を伴うため (受け入れ条件7)
   requiresScope: "mcp.write",
   execute: async (env: Env, args: z.infer<typeof runDtakoReimportArgs>) => {
-    const relay = env.SCRAPER_RELAY;
-    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
-    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
     const body = args.items
       ? {
           comp_id: args.comp_id,
@@ -1680,18 +1636,7 @@ export const runDtakoReimportTool = {
           reset_timecard: args.reset_timecard === true,
           comp_id: args.comp_id,
         };
-    const res = await relay.fetch("https://relay.internal/kintai-relay/dtako-reimport", {
-      method: "POST",
-      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
-      body: JSON.stringify(body),
-    });
-    const responseBody = await res.text();
-    if (!res.ok) throw new Error(`relay: status ${res.status}: ${responseBody.slice(0, 200)}`);
-    try {
-      return JSON.parse(responseBody) as unknown;
-    } catch {
-      throw new Error(`relay: parse failed: ${responseBody.slice(0, 200)}`);
-    }
+    return await callRelay(env, "/kintai-relay/dtako-reimport", body);
   },
 };
 
@@ -1785,28 +1730,13 @@ export const runDtakoAlcUploadTool = {
   // 入れない — alc への書き込み (upsert) を伴うため
   requiresScope: "mcp.write",
   execute: async (env: Env, args: z.infer<typeof runDtakoAlcUploadArgs>) => {
-    const relay = env.SCRAPER_RELAY;
-    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
-    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
     const body = args.items
       ? {
           comp_id: args.comp_id,
           items: args.items.map((item) => ({ ope_no: item.ope_no_22, start_ope: item.start_ope })),
         }
       : { ope_no: args.ope_no_22, start_ope: args.start_ope, comp_id: args.comp_id };
-    const res = await relay.fetch("https://relay.internal/kintai-relay/dtako-alc-upload", {
-      method: "POST",
-      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
-      body: JSON.stringify(body),
-    });
-    const responseBody = await res.text();
-    if (!res.ok) throw new Error(`relay: status ${res.status}: ${responseBody.slice(0, 200)}`);
-    try {
-      return JSON.parse(responseBody) as unknown;
-    } catch {
-      throw new Error(`relay: parse failed: ${responseBody.slice(0, 200)}`);
-    }
+    return await callRelay(env, "/kintai-relay/dtako-alc-upload", body);
   },
 };
 
@@ -1873,29 +1803,13 @@ export const runKintaiRecalcTool = {
     if (args.month !== undefined && !parseYm(args.month)) {
       throw new Error("month は YYYY-MM で指定してください");
     }
-    const relay = env.SCRAPER_RELAY;
-    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
-    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
-
-    const res = await relay.fetch("https://relay.internal/kintai-relay/recalc", {
-      method: "POST",
-      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
-      body: JSON.stringify({
-        month: args.month,
-        after_driver_cd: args.after_driver_cd,
-        max_drivers: args.max_drivers,
-        stale_only: args.stale_only,
-        apply: args.apply === true,
-      }),
+    return await callRelay(env, "/kintai-relay/recalc", {
+      month: args.month,
+      after_driver_cd: args.after_driver_cd,
+      max_drivers: args.max_drivers,
+      stale_only: args.stale_only,
+      apply: args.apply === true,
     });
-    const body = await res.text();
-    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
-    try {
-      return JSON.parse(body) as unknown;
-    } catch {
-      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
-    }
   },
 };
 
@@ -1934,23 +1848,11 @@ export const runKintaiRestraintSyncTool = {
   // **write tool。** 拘束サマリの R2 アーカイブを書き換えうるので read tool と同じ扱いにしない
   requiresScope: "mcp.write",
   execute: async (env: Env, args: z.infer<typeof runKintaiRestraintSyncArgs>) => {
-    const relay = env.SCRAPER_RELAY;
-    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
-    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
-
-    const res = await relay.fetch("https://relay.internal/kintai-relay/restraint-sync", {
-      method: "POST",
-      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
-      body: JSON.stringify({ month: args.month, comp_id: args.comp_id }),
-    });
-    const body = await res.text();
-    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
-    try {
-      return JSON.parse(body) as unknown;
-    } catch {
-      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
-    }
+    return await callRelay(
+      env,
+      "/kintai-relay/restraint-sync",
+      { month: args.month, comp_id: args.comp_id },
+    );
   },
 };
 
@@ -1999,27 +1901,17 @@ export const runDriverMasterSyncTool = {
   // **write tool。** alc の employees へ書き込みうるので read tool と同じ扱いにしない
   requiresScope: "mcp.write",
   execute: async (env: Env, args: z.infer<typeof runDriverMasterSyncArgs>) => {
-    const relay = env.SCRAPER_RELAY;
-    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
-    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
-
-    const res = await relay.fetch("https://relay.internal/kintai-relay/driver-master-run", {
-      method: "POST",
-      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
-      body: JSON.stringify({ comp_id: args.comp_id }),
-    });
-    const body = await res.text();
-    // ★ 失敗本文は 200 文字だと**理由が切れる**。relay は comp ごとの結果を
-    // `{results:[{...,error}]}` で返し、その error に一覧の構造要約まで載る
+    // ★ 失敗本文は 200 文字 (callRelay の既定) だと**理由が切れる**。relay は comp ごとの
+    // 結果を `{results:[{...,error}]}` で返し、その error に一覧の構造要約まで載る
     // (2026-09-03 に comp 75700192 の失敗理由が読めず切り分けに詰まった)。
     // 返るのは小さな JSON なので、上限は「暴走を止める」ためのもの。
-    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, RELAY_ERROR_MAX_CHARS)}`);
-    try {
-      return JSON.parse(body) as unknown;
-    } catch {
-      throw new Error(`relay: parse failed: ${body.slice(0, RELAY_ERROR_MAX_CHARS)}`);
-    }
+    // **既定へ黙って戻すと同じ実害が再発して誰も気づかない** ので maxChars を明示する。
+    return await callRelay(
+      env,
+      "/kintai-relay/driver-master-run",
+      { comp_id: args.comp_id },
+      { maxChars: RELAY_ERROR_MAX_CHARS },
+    );
   },
 };
 
@@ -2059,23 +1951,11 @@ export const getDriverMasterStatusTool = {
     "省略すると DTAKO_ACCOUNTS の全社ぶんを返す。",
   inputSchema: getDriverMasterStatusArgs,
   execute: async (env: Env, args: z.infer<typeof getDriverMasterStatusArgs>) => {
-    const relay = env.SCRAPER_RELAY;
-    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
-    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
-
-    const res = await relay.fetch("https://relay.internal/kintai-relay/driver-master-status", {
-      method: "POST",
-      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
-      body: JSON.stringify(args.comp_id ? { comp_id: args.comp_id } : {}),
-    });
-    const body = await res.text();
-    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
-    try {
-      return JSON.parse(body) as unknown;
-    } catch {
-      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
-    }
+    return await callRelay(
+      env,
+      "/kintai-relay/driver-master-status",
+      args.comp_id ? { comp_id: args.comp_id } : {},
+    );
   },
 };
 
@@ -2127,24 +2007,14 @@ export const runVehicleStateSyncTool = {
   // **write tool。** alc の dtako_logs へ書き込むので read tool と同じ扱いにしない
   requiresScope: "mcp.write",
   execute: async (env: Env, args: z.infer<typeof runVehicleStateSyncArgs>) => {
-    const relay = env.SCRAPER_RELAY;
-    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
-    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
-
-    const res = await relay.fetch("https://relay.internal/kintai-relay/vehicle-state-run", {
-      method: "POST",
-      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
-      body: JSON.stringify(args.comp_id ? { comp_id: args.comp_id } : {}),
-    });
-    const body = await res.text();
-    // 失敗本文は 200 文字だと理由が切れる (`run_driver_master_sync` と同じ判断)。
-    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, RELAY_ERROR_MAX_CHARS)}`);
-    try {
-      return JSON.parse(body) as unknown;
-    } catch {
-      throw new Error(`relay: parse failed: ${body.slice(0, RELAY_ERROR_MAX_CHARS)}`);
-    }
+    // 失敗本文は 200 文字 (callRelay の既定) だと理由が切れる
+    // (`run_driver_master_sync` と同じ判断。既定へ黙って戻さないこと)。
+    return await callRelay(
+      env,
+      "/kintai-relay/vehicle-state-run",
+      args.comp_id ? { comp_id: args.comp_id } : {},
+      { maxChars: RELAY_ERROR_MAX_CHARS },
+    );
   },
 };
 
@@ -2190,23 +2060,11 @@ export const getVehicleStateStatusTool = {
     "comp_id を省略すると VEHICLE_STATE_TARGETS が名指しした会社ぶんを返す。",
   inputSchema: getVehicleStateStatusArgs,
   execute: async (env: Env, args: z.infer<typeof getVehicleStateStatusArgs>) => {
-    const relay = env.SCRAPER_RELAY;
-    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
-    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
-
-    const res = await relay.fetch("https://relay.internal/kintai-relay/vehicle-state-status", {
-      method: "POST",
-      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
-      body: JSON.stringify(args.comp_id ? { comp_id: args.comp_id } : {}),
-    });
-    const body = await res.text();
-    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
-    try {
-      return JSON.parse(body) as unknown;
-    } catch {
-      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
-    }
+    return await callRelay(
+      env,
+      "/kintai-relay/vehicle-state-status",
+      args.comp_id ? { comp_id: args.comp_id } : {},
+    );
   },
 };
 
@@ -2256,23 +2114,10 @@ export const getKintaiDaySummariesTool = {
   inputSchema: getKintaiDaySummariesArgs,
   execute: async (env: Env, args: z.infer<typeof getKintaiDaySummariesArgs>) => {
     if (!parseYm(args.month)) throw new Error("month は YYYY-MM で指定してください");
-    const relay = env.SCRAPER_RELAY;
-    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
-    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
 
     const q = new URLSearchParams({ month: args.month });
     if (args.driver) q.set("driver", args.driver);
-    const res = await relay.fetch(`https://relay.internal/kintai-relay/day-summaries?${q}`, {
-      headers: { "X-Alc-Proxy-Secret": secret },
-    });
-    const body = await res.text();
-    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
-    try {
-      return JSON.parse(body) as unknown;
-    } catch {
-      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
-    }
+    return await callRelay(env, `/kintai-relay/day-summaries?${q}`, undefined, { method: "GET" });
   },
 };
 
@@ -2455,6 +2300,8 @@ export const getKintaiDiffTool = {
       `/api/kintai/kosoku-daily?month=${encodeURIComponent(args.month)}` +
       (args.driver ? `&driver=${encodeURIComponent(args.driver)}` : "");
 
+    // ★ callRelay へは寄せない — オンプレ側と Promise.all で並べるため、
+    // JSON ではなく**生の `Response`** が要る (callRelay は JSON.parse 済みを返す)。
     const [gcpRes, onpremBody] = await Promise.all([
       relay.fetch(`https://relay.internal/kintai-relay/day-summaries?${gcpQuery}`, {
         headers: { "X-Alc-Proxy-Secret": secret },

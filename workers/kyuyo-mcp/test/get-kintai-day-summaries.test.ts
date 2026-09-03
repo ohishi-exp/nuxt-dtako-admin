@@ -75,8 +75,11 @@ describe("get_kintai_day_summaries (ohishi-exp/rust-ichibanboshi#205 の 23)", (
     expect(url.searchParams.get("driver")).toBe("1130");
     const init = call[1] as RequestInit;
     expect((init.headers as Record<string, string>)["X-Alc-Proxy-Secret"]).toBe(SECRET);
-    // **GET (method 未指定) で body も無い** — この経路は 1 行も書けない
-    expect(init.method).toBeUndefined();
+    // **GET で body も無い** — この経路は 1 行も書けない。
+    // #1102 で callRelay に寄せるまでは method 未指定 (fetch 既定の GET) だった。
+    // 送出は同じだが、**「書けない」の担保は method が空欄なことではなく GET であること**
+    // なので、明示された値でそのまま検査する。
+    expect(init.method).toBe("GET");
     expect(init.body).toBeUndefined();
   });
 
