@@ -206,6 +206,12 @@ export default {
       return handleDriverMasterRun(request, env);
     }
 
+    if (url.pathname === "/kintai-relay/driver-master-status" && request.method === "POST") {
+      // 乗務員マスタ同期の**直近 1 回の結末**を comp ごとに読む (Refs
+      // ippoan/alc-app-s3#125)。cron が成功したかを後から確かめる唯一の口
+      return handleDriverMasterStatus(request, env);
+    }
+
     if (url.pathname === "/kintai-relay/netprint-targets" && request.method === "GET") {
       // 日報 netprint の通知先設定 (KV `netprint_targets`) を読む (Refs #874 の 12)。
       // 画面 (`/scraper` の「日報netprint」タブ) が編集するための口
@@ -1061,6 +1067,81 @@ export async function handleDriverMasterRun(request: Request, env: RelayWorkerEn
 
   return new Response(JSON.stringify({ results }), {
     status: driverMasterOverallStatus(results),
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * `POST /kintai-relay/driver-master-status` — 乗務員マスタ同期の**直近 1 回の結末**を
+ * comp ごとに返す (Refs ippoan/alc-app-s3#125)。
+ *
+ * ## なぜ要るか
+ *
+ * cron (JST 7/12/15/17/19) が走ったか・成功したかは、これまで **Cloudflare の
+ * Workers Logs にしか無かった**。運用者以外は読めないし、後から遡って
+ * 「あの回は成功したのか」に答えられない。DO が 1 件だけ持つ結末をここから読む。
+ *
+ * body は `{comp_id?}`。省略すると `DTAKO_ACCOUNTS` の全社ぶんを返す。
+ * **書き込みはしない** — 読むだけなので同期を起動しない。
+ */
+export async function handleDriverMasterStatus(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  let body: { comp_id?: unknown };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return fail(400, "body must be JSON");
+  }
+  const compId = typeof body.comp_id === "string" ? body.comp_id.trim() : "";
+
+  let compIds: string[];
+  if (compId) {
+    compIds = [compId];
+  } else {
+    const accountsRaw = await resolveDtakoAccountsRaw(env.DTAKO_CONFIG_KV, env.DTAKO_ACCOUNTS);
+    try {
+      compIds = parseDtakoAccounts(accountsRaw).map((a) => a.comp_id);
+    } catch (err) {
+      // 設定が壊れているのを「1 社も無い」と同じ顔にしない (Refs #944 の分類)。
+      return fail(503, err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  // **1 社ずつ順に読む** — 読むだけなので theearth は叩かないが、DO を跨いで
+  // 並べても得が無い (件数が 2 社)。
+  const results: Array<{ comp_id: string; last: unknown; error?: string }> = [];
+  for (const target of compIds) {
+    try {
+      const id = env.RELAY.idFromName(`scraper-comp-${target}`);
+      const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/driver-master/last");
+      const text = await res.text();
+      if (!res.ok) {
+        results.push({ comp_id: target, last: null, error: `HTTP ${res.status}: ${text.slice(0, 200)}` });
+        continue;
+      }
+      const parsed = JSON.parse(text) as { last?: unknown };
+      results.push({ comp_id: target, last: parsed.last ?? null });
+    } catch (err) {
+      results.push({
+        comp_id: target,
+        last: null,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return new Response(JSON.stringify({ results }), {
+    status: 200,
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
   });
 }

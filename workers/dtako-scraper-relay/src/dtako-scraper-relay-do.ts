@@ -459,6 +459,35 @@ interface EtcScrapeOutcome {
 /** theearth ログインセッションレコードを置く DO storage キー。/dvr-api/* と
  * /daily-report-api/* で共有する (Refs #233)。この DO instance は theearth
  * アカウント単位 (`theearth-{comp}:{userB64}`) なので 1 キーで足りる。 */
+/** 直近 1 回の乗務員マスタ同期の結末を置く DO storage のキー。**1 件だけ**持つ
+ * (履歴が欲しくなったら別の入れ物。ここは「最後にどうなったか」に答えるための 1 行)。 */
+const DRIVER_MASTER_LAST_RUN_KEY = "driver_master_last_run";
+
+/**
+ * 直近 1 回の乗務員マスタ同期の結末 (`GET /cron/driver-master/last` が返す形、
+ * Refs ippoan/alc-app-s3#125)。
+ *
+ * ★ **cron が成功したかを後から確かめる術が無かった。** 結果は console にしか
+ * 出ておらず、Workers Logs は運用者しか読めない。DO に 1 件だけ残して読めるようにする。
+ */
+export interface DriverMasterLastRun {
+  comp_id: string;
+  /** 呼び出し元。**cron が走ったかどうかを答えられるようにするための欄。** */
+  trigger: "cron" | "manual";
+  started_at: string;
+  finished_at: string;
+  ok: boolean;
+  rows: number | null;
+  items: number | null;
+  retired: number | null;
+  chunks: number | null;
+  created: number | null;
+  updated: number | null;
+  /** 上流が受け取らなかった件数 (0 なら全員入った)。失敗時は null。 */
+  skipped: number | null;
+  error: string | null;
+}
+
 const THEEARTH_SESSION_KEY = "theearth:session";
 
 /** F-DES1011 (運行データ修正) の取得時ページ HTML を置く DO storage キー。
@@ -946,6 +975,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // (X-Alc-Proxy-Secret) と cron dispatch (この worker 自身) が持つ。
     if (url.pathname === "/cron/driver-master" && request.method === "POST") {
       return this.handleCronDriverMaster(request);
+    }
+
+    // 直近 1 回の乗務員マスタ同期の結末を読む (Refs ippoan/alc-app-s3#125)。
+    // cron の実行履歴は Cloudflare 側からしか見えず、「あの回は成功したのか」を
+    // 後から確かめる術が無かった。
+    if (url.pathname === "/cron/driver-master/last" && request.method === "GET") {
+      const last = await this.ctx.storage.get<DriverMasterLastRun>(DRIVER_MASTER_LAST_RUN_KEY);
+      return Response.json({ last: last ?? null });
     }
 
     // 前日分の運転日報を netprint へ登録し予約番号を LINE WORKS へ通知する
@@ -5212,13 +5249,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * メールは `theearth-driver-master-client.ts` の時点で読んでいない。
    */
   private async handleCronDriverMaster(request: Request): Promise<Response> {
-    let body: { comp_id?: unknown };
+    let body: { comp_id?: unknown; trigger?: unknown };
     try {
       body = (await request.json()) as typeof body;
     } catch {
       return dvrJsonError(400, "body must be JSON");
     }
     const compId = typeof body.comp_id === "string" ? body.comp_id.trim() : "";
+    // 呼び出し元の札。**既定は manual** — cron 側だけが明示的に "cron" を送る
+    // (既定を cron にすると、札を送り忘れた手動実行が cron の実績に化ける)。
+    const trigger: "cron" | "manual" = body.trigger === "cron" ? "cron" : "manual";
     if (!compId) {
       return dvrJsonError(400, "comp_id は必須です");
     }
@@ -5227,11 +5267,35 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return Response.json({ error: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
     }
     // 同一 comp_id への theearth 並行アクセスはセッションロックで hang/500 する。
-    return this.enqueueScrape(() => this.runDriverMasterSync(account));
+    return this.enqueueScrape(() => this.runDriverMasterSync(account, trigger));
+  }
+
+  /**
+   * 直近 1 回の結末を DO storage に 1 件だけ残す。
+   *
+   * ★ **書けなくても同期の結果は変えない。** 記録は後から確かめるためのもので、
+   * 記録の失敗で取り込みの成否をひっくり返さない (ただし黙らせない)。
+   */
+  private async putDriverMasterLastRun(record: DriverMasterLastRun): Promise<void> {
+    try {
+      await this.ctx.storage.put(DRIVER_MASTER_LAST_RUN_KEY, record);
+    } catch (err) {
+      console.warn(
+        JSON.stringify({
+          driver_master_last_run: "put_failed",
+          comp_id: record.comp_id,
+          error: describeUnknownError(err),
+        }),
+      );
+    }
   }
 
   /** 乗務員マスタ同期の本体 (`scrapeQueue` の直列化の中でだけ呼ばれる)。 */
-  private async runDriverMasterSync(account: DtakoAccountRaw): Promise<Response> {
+  private async runDriverMasterSync(
+    account: DtakoAccountRaw,
+    trigger: "cron" | "manual" = "manual",
+  ): Promise<Response> {
+    const startedAt = new Date().toISOString();
     const jobState = this.makeTheearthLoginJobState();
     const base = { driver_master_sync: "", comp_id: account.comp_id };
     // ★ 失敗応答にも件数を載せるため try の外で数える。2026-09-02 の 400
@@ -5307,6 +5371,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       } else {
         console.log(JSON.stringify(log));
       }
+      await this.putDriverMasterLastRun({
+        comp_id: account.comp_id,
+        trigger,
+        started_at: startedAt,
+        finished_at: new Date().toISOString(),
+        ok: true,
+        rows: rows.length,
+        items: items.length,
+        retired: retiredCount,
+        chunks: chunks.length,
+        created: result.created,
+        updated: result.updated,
+        skipped: result.skipped.length,
+        error: null,
+      });
       return Response.json({
         ok: true,
         comp_id: account.comp_id,
@@ -5334,6 +5413,21 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           error: message,
         }),
       );
+      await this.putDriverMasterLastRun({
+        comp_id: account.comp_id,
+        trigger,
+        started_at: startedAt,
+        finished_at: new Date().toISOString(),
+        ok: false,
+        rows: rowCount,
+        items: itemCount,
+        retired: retiredCount,
+        chunks: chunkCount,
+        created: null,
+        updated: null,
+        skipped: null,
+        error: message,
+      });
       return Response.json(
         {
           ok: false,

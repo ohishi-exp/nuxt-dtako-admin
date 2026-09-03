@@ -320,9 +320,19 @@ describe('runScheduledCron: driver-master', () => {
       okDoCall(calls),
       now,
     )
+    // ★ trigger: 'cron' を送る — DO が結末に札を付けて残すので、後から
+    // 「cron が走ったか」を答えられる (Cloudflare の cron 実行履歴は外から読めない)
     expect(calls).toEqual([
-      { doKey: 'scraper-comp-27324455', path: '/cron/driver-master', body: { comp_id: '27324455' } },
-      { doKey: 'scraper-comp-99999999', path: '/cron/driver-master', body: { comp_id: '99999999' } },
+      {
+        doKey: 'scraper-comp-27324455',
+        path: '/cron/driver-master',
+        body: { comp_id: '27324455', trigger: 'cron' },
+      },
+      {
+        doKey: 'scraper-comp-99999999',
+        path: '/cron/driver-master',
+        body: { comp_id: '99999999', trigger: 'cron' },
+      },
     ])
     // ★ tenant_id は cron が運ばない (DO が DTAKO_ACCOUNTS から引く)。body に
     // 混ぜると comp_id を知っている呼び出し元が任意テナントへ書けてしまう。
