@@ -17,7 +17,9 @@ const relayOf = (e: Env) => e.SCRAPER_RELAY as unknown as { fetch: ReturnType<ty
 
 describe("get_driver_master_status (Refs ippoan/alc-app-s3#125)", () => {
   it("★ read tool — scope を要求しない (同期を起動しないため)", () => {
-    expect(getDriverMasterStatusTool.requiresScope).toBeUndefined();
+    // `requiresScope` を**持たない**ことを見る (型に無いので in で確かめる)。
+    // write tool と取り違えると、読むだけの口が mcp.write を要求し始める。
+    expect("requiresScope" in getDriverMasterStatusTool).toBe(false);
   });
 
   it("comp_id は任意 (省略で全社)。8桁の数字以外は弾き、未知の引数も弾く", () => {
