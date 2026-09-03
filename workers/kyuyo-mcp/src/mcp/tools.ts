@@ -2079,6 +2079,137 @@ export const getDriverMasterStatusTool = {
   },
 };
 
+// ── run_vehicle_state_sync ───────────────────────────────────────────────────
+
+const runVehicleStateSyncArgs = z
+  .object({
+    comp_id: z
+      .string()
+      .regex(/^\d{8}$/)
+      .optional()
+      .describe(
+        "会社 (8桁の数字)。**省略すると relay の VEHICLE_STATE_TARGETS が名指しした会社**を " +
+          "走らせる (未設定なら 404)。kyuyo-mcp は DTAKO_ACCOUNTS の binding を持たないので、" +
+          "設定外の会社を走らせたいときだけ明示する",
+      ),
+  })
+  .strict();
+
+/**
+ * 車輌動態 (`dtako_logs`) の取得を、cron (10 分おき) を待たずに 1 回走らせる
+ * (Refs ohishi-exp/nuxt-dtako-admin#1098)。
+ *
+ * relay の `POST /kintai-relay/vehicle-state-run` を X-Alc-Proxy-Secret で叩くだけ —
+ * 運ぶロジックはここに無い (`run_driver_master_sync` と同じ流儀)。
+ *
+ * ## ★ 1 呼び出しで theearth にログインする
+ *
+ * relay の DO が theearth へ**自前ログイン**して `VehicleStateTableForBranchEx` を叩く。
+ * theearth は同一アカウントの同時ログインを許さない (Refs 同 repo #233) ので、
+ * **連打すると DVR 取り込み (10 分おき) や dtako 日次のセッションを蹴る。**
+ * DO の `scrapeQueue` が直列化するので壊れはしないが、待たされるうえ相手を蹴る。
+ * **説明文は実装 (`handleVehicleStateRun` → `/cron/vehicle-state` →
+ * `runVehicleStateCron` の `withTheearthLoginSession`) を読んで書いている。**
+ */
+export const runVehicleStateSyncTool = {
+  name: "run_vehicle_state_sync",
+  description:
+    "車輌動態 (theearth の車輌現在地 → alc の dtako_logs) の取得を、cron (10 分おき) を " +
+    "待たずに 1 回走らせる (Refs ohishi-exp/nuxt-dtako-admin#1098)。" +
+    "**1 呼び出しで theearth へ実際にログインする。** theearth は同一アカウントの同時 " +
+    "ログインを許さないので、**連打すると DVR 取り込みや dtako 日次のセッションを蹴る** " +
+    "(relay 側で直列化されるため壊れはしないが待たされる)。**まず get_vehicle_state_status " +
+    "で直近の結末を読み、本当に走らせる必要があるか確かめること。** comp_id を省略すると " +
+    "relay の VEHICLE_STATE_TARGETS が名指しした会社を走らせ、**未設定なら 404**。" +
+    "応答は `{results:[{kind,target,ok,detail}]}` で cron のログと同じ形、" +
+    "detail は `HTTP {status}: {DO の応答}`。**全社失敗のときだけ 502**。",
+  inputSchema: runVehicleStateSyncArgs,
+  // **write tool。** alc の dtako_logs へ書き込むので read tool と同じ扱いにしない
+  requiresScope: "mcp.write",
+  execute: async (env: Env, args: z.infer<typeof runVehicleStateSyncArgs>) => {
+    const relay = env.SCRAPER_RELAY;
+    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
+    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+
+    const res = await relay.fetch("https://relay.internal/kintai-relay/vehicle-state-run", {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
+      body: JSON.stringify(args.comp_id ? { comp_id: args.comp_id } : {}),
+    });
+    const body = await res.text();
+    // 失敗本文は 200 文字だと理由が切れる (`run_driver_master_sync` と同じ判断)。
+    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, RELAY_ERROR_MAX_CHARS)}`);
+    try {
+      return JSON.parse(body) as unknown;
+    } catch {
+      throw new Error(`relay: parse failed: ${body.slice(0, RELAY_ERROR_MAX_CHARS)}`);
+    }
+  },
+};
+
+// ── get_vehicle_state_status ─────────────────────────────────────────────────
+
+const getVehicleStateStatusArgs = z
+  .object({
+    comp_id: z
+      .string()
+      .regex(/^\d{8}$/)
+      .optional()
+      .describe(
+        "会社 (8桁の数字)。**省略すると relay の VEHICLE_STATE_TARGETS が名指しした会社ぶん**" +
+          "を返す (DTAKO_ACCOUNTS 全社ではない)",
+      ),
+  })
+  .strict();
+
+/**
+ * 車輌動態取り込みの**直近 1 回の結末**を読む (Refs ohishi-exp/nuxt-dtako-admin#1098)。
+ *
+ * **この tool が要る理由は、無いことで実害が出たから。** 取得が止まったのに誰も
+ * 気づけず、画面 (`dtako-logs`) の最終更新時刻から逆算するしかなかった。
+ * 「取得が止まっている」のか「取得はできているが表示が古い」のかが、この 1 回の
+ * 呼び出しで割れる。
+ *
+ * **読むだけ — 取得は起動しない** (走らせるのは `run_vehicle_state_sync`)。
+ * theearth にもログインしないので**連打してよい**。
+ */
+export const getVehicleStateStatusTool = {
+  name: "get_vehicle_state_status",
+  description:
+    "車輌動態 (theearth → alc の dtako_logs) 取り込みの**直近 1 回の結末**を comp ごとに " +
+    "読む (Refs ohishi-exp/nuxt-dtako-admin#1098)。**読むだけ — 取得は起動せず theearth に " +
+    "ログインもしない** (走らせるのは run_vehicle_state_sync)。**cron (10 分おき) が " +
+    "走ったか・成功したかを後から確かめる口** — Cloudflare の cron 実行履歴は外から " +
+    "読めないため、relay の DO が 1 件だけ持つ結末をここから読む。各 comp の `last` は " +
+    "`{comp_id, started_at, finished_at, ok, last_success_at, vehicles, records_added, " +
+    "total_records, error}`。**`vehicles` が取得できた台数、`records_added` が alc に " +
+    "入った件数** で、両方が同じなら正常。**`ok:false` の回は `last_success_at` を " +
+    "進めない**ので、「最後に成功したのはいつか」で無音故障を判定できる。" +
+    "**`last` が null は「この DO に記録が無い」** (1 度も走っていない / DO が作り直された)。" +
+    "comp_id を省略すると VEHICLE_STATE_TARGETS が名指しした会社ぶんを返す。",
+  inputSchema: getVehicleStateStatusArgs,
+  execute: async (env: Env, args: z.infer<typeof getVehicleStateStatusArgs>) => {
+    const relay = env.SCRAPER_RELAY;
+    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
+    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+
+    const res = await relay.fetch("https://relay.internal/kintai-relay/vehicle-state-status", {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
+      body: JSON.stringify(args.comp_id ? { comp_id: args.comp_id } : {}),
+    });
+    const body = await res.text();
+    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
+    try {
+      return JSON.parse(body) as unknown;
+    } catch {
+      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
+    }
+  },
+};
+
 // ── get_kintai_day_summaries ─────────────────────────────────────────────────
 
 const getKintaiDaySummariesArgs = z.object({
@@ -3350,6 +3481,8 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   runKintaiRestraintSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDriverMasterSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDriverMasterStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
+  runVehicleStateSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getVehicleStateStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDtakoScrapeTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDtakoScrapeStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDtakoScrapeProgressTool as unknown as ToolEntry<z.ZodTypeAny>,

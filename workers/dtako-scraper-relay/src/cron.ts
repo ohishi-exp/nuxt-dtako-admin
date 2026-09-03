@@ -370,8 +370,16 @@ export interface CronEnvValues {
  * 出すのは、どの設定を投入すれば動き出すかがログだけで分かるようにするため。
  *
  * 1 会社の失敗は他の会社を止めない (`catch` して `ok: false` で数える)。
+ *
+ * ★ **cron からも手動実行 (`POST /kintai-relay/vehicle-state-run`) からも呼ぶ**
+ * ので export している (Refs #1098)。**手動で叩く道と cron の道を同じ関数にする**のが
+ * 目的 — 別実装にすると「実機確認では通るのに cron では通らない」(逆も) が作れてしまう
+ * (`handleDriverMasterRun` / netprint-run と同じ流儀)。
+ *
+ * **`detail` は `HTTP {status}: {本文の先頭 200 文字}`。** DO の応答が 200 文字を
+ * 超えると末尾が切れる (現状の車輌動態の応答は約 120 文字)。
  */
-async function dispatchCompIdTargets(
+export async function dispatchCompIdTargets(
   kind: CronRunResult["kind"],
   targets: CompIdTarget[],
   path: string,
