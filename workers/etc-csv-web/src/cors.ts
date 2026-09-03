@@ -4,7 +4,10 @@
  * ★★ **CORS は認可ではない。** ここで決めているのは「どの画面 (オリジン) が
  * ブラウザから読めるか」であって「誰が読めるか」ではない。`Origin` ヘッダを
  * 送らない client (curl 等) はそもそもこの判定を通らず素通りで読める。
- * この worker の唯一の実効的な絞りは `user_id` の allowlist (`allowlist.ts`) である。
+ * 配信 3 口の唯一の実効的な絞りは `user_id` の allowlist (`allowlist.ts`) である。
+ *
+ * ★ `POST /run` (Refs #1111) には `user_id` が無いので、その絞りも掛からない。
+ * **到達性を既存 3 口と同じにするのはオーナー判断** (理由は `run.ts` の doc)。
  *
  * 許可オリジンは **KV `AUTH_CONFIG` の `etc-csv:allowed-origin` が正**で、
  * 無ければ dashboard の plain 変数 `ETC_CSV_ALLOWED_ORIGIN` にフォールバックする
@@ -19,6 +22,11 @@
  *
  * `Vary: Origin` は常に付ける — オリジンごとに応答ヘッダが変わるので、
  * CDN / ブラウザキャッシュに混ぜさせない。
+ *
+ * ★ `POST` が Allow-Methods に居るのは `/run` のため (Refs #1111)。`Content-Type` を
+ * Allow-Headers に出しているのも同じ理由で、**取り込み画面が JSON で POST しても
+ * preflight で落ちない**ようにするもの (`/run` 自身は body を読まないが、送り方を
+ * 呼ぶ側に強制しない)。**どちらも絞りではなく、絞りを緩める側の宣言**である。
  */
 export function corsHeaders(
   requestOrigin: string | null,
@@ -28,7 +36,8 @@ export function corsHeaders(
   const allowed = (allowedOrigin ?? '').trim()
   if (allowed !== '' && requestOrigin === allowed) {
     headers['Access-Control-Allow-Origin'] = allowed
-    headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+    headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    headers['Access-Control-Allow-Headers'] = 'Content-Type'
     headers['Access-Control-Max-Age'] = '600'
   }
   return headers

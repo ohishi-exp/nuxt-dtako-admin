@@ -1,10 +1,13 @@
 /**
- * 3 つの口 (`/list` / `/list?date=` / `/download`) の判断そのもの。
+ * 配信 3 口 (`/list` / `/list?date=` / `/download`) の判断そのもの。
  *
  * `Request` / `Response` を触らず、偽のバケットで node からそのままテストできる形に
  * してある (`src/index.ts` は「HTTP ↔ ここ」の変換だけを持つ薄い層)。
  *
- * ★ 全ての口が **読み取り専用**。書き込みの口はこの worker に存在しない。
+ * ★ **このファイルの 3 口はすべて読み取り専用**で、R2 へ書く経路はここにも
+ * worker 全体にも無い。ただし **worker には実行の口が 1 つある** —
+ * `POST /run` (`run.ts`、Refs #1111) は relay 経由で etc-meisai.jp のスクレイプを
+ * 起こす。**「この worker は読むだけ」とはもう言えない。**
  */
 
 import { isAllowedUserId } from './allowlist'

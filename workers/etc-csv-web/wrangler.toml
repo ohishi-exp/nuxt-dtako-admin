@@ -1,7 +1,9 @@
-# etc-csv-web — R2 の ETC 明細 CSV を読み取り専用で配る worker (Refs #1103)。
+# etc-csv-web — R2 の ETC 明細 CSV を配る worker (Refs #1103) と、その取得を
+# 今すぐ 1 回起こす `POST /run` (Refs #1111)。
 #
-# ★ この worker には受け側の認証が無い (無認証の公開配信)。理由と根拠は
-#   src/index.ts の冒頭 doc コメントを読むこと。
+# ★ この worker には受け側の認証が無い (無認証の公開配信・公開実行口)。理由と根拠は
+#   src/index.ts / src/run.ts の冒頭 doc コメントを読むこと。**`/run` に追加の
+#   認証・IP 制限・レート制限を入れないのはオーナー判断** (Refs #1111)。
 #
 # ★ この repo は public。`ETC_CSV_ALLOWED_ORIGIN` / `ETC_CSV_ALLOWED_USER_IDS` は
 #   **dashboard の plain Environment Variable** で投入する (`ETC_ACCOUNTS` と同じ流儀)。
@@ -83,10 +85,27 @@ head_sampling_rate = 1
 binding = "AUTH_CONFIG"
 id = "f13ecae4b69043819c09f606abb84797"
 
-# 読み取り専用で bind する。この worker に書き込みの口は無い。
+# 配信 3 口が読む R2。**この worker から R2 へ書く口は無い** (`/run` も書かない —
+# 起こすのは relay 側のスクレイプで、R2 へ書くのは relay の DO)。
 [[r2_buckets]]
 binding = "DTAKO_R2"
 bucket_name = "dtako-uploads"
+
+# dtako-scraper-relay への service binding (Refs #1111)。`POST /run` が relay の
+# `POST /kintai-relay/etc-run` を叩く。**relay は `workers_dev = false` で公開ルートを
+# 持たないので、これが唯一の経路**。走らせる中身は relay 側の 1 実装 (cron と同じ
+# `dispatchEtcAccounts`) のままで、こちらは画面から押せる入口を出すだけ
+# (`workers/kyuyo-mcp` の SCRAPER_RELAY と同じ形)。
+[[services]]
+binding = "SCRAPER_RELAY"
+service = "nuxt-dtako-admin-scraper-relay"
+
+# relay が要求する consumer proof (`X-Alc-Proxy-Secret`)。**既存 entry を binding する
+# だけ** — 新規投入は不要 (`workers/kyuyo-mcp/wrangler.toml` と同じ store / secret)。
+[[secrets_store_secrets]]
+binding = "INTERNAL_SHARED_SECRET"
+store_id = "bd7bc91a3e5f4111add4acf6cb4b8733"
+secret_name = "INTERNAL_SHARED_SECRET"
 
 [vars]
 # relay の cron が書いている prefix と一致させる

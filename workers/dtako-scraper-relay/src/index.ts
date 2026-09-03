@@ -18,7 +18,9 @@ import {
   dispatchNetprintTargets,
   NETPRINT_TARGETS_KV_KEY,
   dispatchCompIdTargets,
+  dispatchEtcAccounts,
   parseDtakoAccounts,
+  parseEtcAccounts,
   parseDvrTargets,
   parseVehicleStateTargets,
   type CompIdTarget,
@@ -267,6 +269,15 @@ export default {
       // 1 回走らせる (Refs #874)。cron 経路と同じ DO route (/cron/netprint) へ
       // 転送する — 実機確認が「cron でだけ通る道」にならないようにするため
       return handleNetprintRun(request, env);
+    }
+
+    if (url.pathname === "/kintai-relay/etc-run" && request.method === "POST") {
+      // ETC 明細 CSV の取得を、cron (JST 6,7,8,9 時) を待たずに 1 回走らせる
+      // (Refs #1111)。cron 経路と**同じ関数 (`dispatchEtcAccounts`) で同じ DO route
+      // (`/cron/etc`) へ**転送する — 実機確認が「cron でだけ通る道」にならないように
+      // するため (vehicle-state-run / driver-master-run / netprint-run と同じ流儀)。
+      // 呼ぶのは `workers/etc-csv-web` の `POST /run` から service binding 越し
+      return handleEtcRun(request, env);
     }
 
     if (url.pathname === "/ws/scraper") {
@@ -1239,6 +1250,97 @@ export async function handleVehicleStateRun(
   );
 
   // 1 社でも通れば 200、**全社失敗のときだけ 502** (`handleDriverMasterRun` と同じ)。
+  return new Response(JSON.stringify({ results }), {
+    status: results.some((r) => r.ok) ? 200 : 502,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * `POST /kintai-relay/etc-run` — ETC 明細 CSV の取得を、cron (JST 6,7,8,9 時) を
+ * 待たずに 1 回走らせる手動口 (Refs #1111)。
+ *
+ * ## ★ cron と同じ関数で同じ DO route へ転送する
+ *
+ * `runScheduledCron` が使う `dispatchEtcAccounts` を**そのまま**呼ぶ。検証専用の
+ * 別経路を作ると「手で叩くと通るのに cron では通らない」(逆も) を作れてしまう
+ * (`handleVehicleStateRun` / `handleDriverMasterRun` / netprint-run と同じ理由)。
+ * DO 側の入口も cron と同じ `/cron/etc` で、その先は `handleCronEtc` →
+ * `enqueueScrape(runCronEtcScrape)` → `performEtcScrape` — **管理タブの手動実行
+ * (`/ws/scraper?kind=etc-all`) が通るのと同じ本体**である。応答も cron の
+ * `CronRunResult[]` と同じ形なので、**Workers Logs に出る cron の行と直接見比べられる**。
+ *
+ * ## ★ パラメータを持たない
+ *
+ * ETC cron は引数を取らない (`ETC_ACCOUNTS` 全件を回すだけ) ので、この口も
+ * **body を読まない**。`comp_id` / `user_id` で 1 件に絞る口を足すと、cron に無い
+ * 経路がここにだけ生えて上の「同じ道」が崩れる。1 アカウントだけ走らせたい用途には
+ * 既存の `/ws/scraper?kind=etc&user_id=…` (管理タブ) がある。
+ *
+ * ## ★ 追加の認証・IP 制限・レート制限・クールダウンは置かない (オーナー判断 Refs #1111)
+ *
+ * 関門は他の `*-run` と同じ `X-Alc-Proxy-Secret` の constant-time 検証 1 つだけ。
+ * **CORS ヘッダは付けない** — ブラウザから直に叩く口ではない (呼ぶのは
+ * `workers/etc-csv-web` の `POST /run` から service binding 越し)。
+ *
+ * 連打の歯止めを置いていないのは、置く理由が実測されていないため:
+ *   - etc-meisai.jp にアカウントロックは無い (オーナー確認済み)
+ *   - DO はアカウント単位で直列化する (`etc-{user_id}` DO の `scrapeQueue`) ので、
+ *     連打しても並列ログインにはならず順番に流れる。**これは既存の性質**であって
+ *     この口のために足したものではない
+ *
+ * ## 応答
+ *
+ * 1 アカウントでも通れば 200、**全滅のときだけ 502** (`handleVehicleStateRun` と同じ)。
+ *
+ * ## ★ 0 件のときだけ cron と意図的に違える
+ *
+ * `ETC_ACCOUNTS` が 0 件のとき、**cron 経路は `ok: true` の skip** を返す
+ * (`dispatchEtcAccounts` の中。無人実行では「対象が無いのは正常」)。**手動実行は
+ * 404 で名指しして落とす** — 手で押した人に「200 だが何も起きていない」を返さない。
+ * 「押したのに動かない」は手動実行の答えとして成立しないため
+ * (`handleVehicleStateRun` の doc にある同じ分類。**共有するのは fan-out までで、
+ * 0 件をどう返すかは呼び出し側が決める**)。
+ *
+ * `test/index-etc-run.test.ts` が「同じ関数を使いながら 0 件の返り値だけが違う」を
+ * cron 側 (skip) と手動側 (404) の 1 本ずつで固定している。
+ */
+export async function handleEtcRun(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  let accounts;
+  try {
+    accounts = parseEtcAccounts(await resolveSecretBinding(env.ETC_ACCOUNTS));
+  } catch (err) {
+    // 設定が壊れているのを「対象 0 件」(404) と同じ顔にしない (`handleVehicleStateRun`
+    // と同じ分類)。未設定は 404、壊れているのは 503。
+    return fail(503, err instanceof Error ? err.message : String(err));
+  }
+  // ★ ここが cron と意図的に違う唯一の点 (上の doc)。cron は 0 件を `ok: true` の
+  // skip で流すが、手で押した人に 200 を返すと「押したのに何も起きない」になる。
+  if (accounts.length === 0) {
+    return fail(404, "ETC_ACCOUNTS が未設定です");
+  }
+
+  const results = await dispatchEtcAccounts(accounts, async (doKey, path, doBody) => {
+    const id = env.RELAY.idFromName(doKey);
+    const res = await env.RELAY.get(id).fetch(`https://relay.internal${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(doBody),
+    });
+    return { ok: res.ok, status: res.status, text: await res.text() };
+  });
+
   return new Response(JSON.stringify({ results }), {
     status: results.some((r) => r.ok) ? 200 : 502,
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },

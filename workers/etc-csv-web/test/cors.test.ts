@@ -8,7 +8,8 @@ describe('corsHeaders', () => {
     expect(corsHeaders(ALLOWED, ALLOWED)).toEqual({
       Vary: 'Origin',
       'Access-Control-Allow-Origin': ALLOWED,
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
       'Access-Control-Max-Age': '600',
     })
   })

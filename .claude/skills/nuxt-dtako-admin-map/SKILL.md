@@ -48,7 +48,7 @@ app 本体 (Nuxt) とは別に deploy される Worker が 4 つある。**こ�
 | `workers/dtako-scraper-relay/` | theearth / etc-meisai のブラウザレススクレイプ、DO による直列化、cron、拘束・勤怠・DVR・車輌動態の中継 | 下記「スクレイパ」「Cron」「DVR 動画ビューア」「拘束時間管理表 CSV 取得」「拘束×賃金」 |
 | `workers/dtako-scraper-relay-tail/` | Tail Worker。producer の `ctx.waitUntil()` 内ログを転写する | 下記 Cron の gotcha |
 | `workers/kyuyo-mcp/` | 給与比較 (拘束時間×賃金) データと dtako の取り込み操作を read-only / 操作系の MCP tool として公開する | **この skill には無い** — deploy の引き金・theearth への自前ログイン・tool 説明の罠は `kintai-ops` skill を見ること |
-| `workers/etc-csv-web/` | R2 の ETC 明細 CSV を読み取り専用で配る (**受け側の認証が無い公開配信**) | 下記「ETC 明細 CSV の配信」 |
+| `workers/etc-csv-web/` | R2 の ETC 明細 CSV を配る + 取得を今すぐ起こす `POST /run` (**受け側の認証が無い公開配信・公開実行口**) | 下記「ETC 明細 CSV の配信」 |
 
 ## NET780 ビューア (`/net780`、Refs dtako-scraper#18)
 
@@ -1494,10 +1494,13 @@ dtako (csvdata.zip) と ETC (明細 CSV) の定期取得を VPS / GCE の cron �
   R2 の `{prefix}-errors/` に原本を残す (「黙って200」対策)。明細 0 件は
   `EtcMeisaiNoUsageError` で正常 skip 扱い。
 
-### ETC 明細 CSV の配信 (`workers/etc-csv-web/`、Refs #1103)
+### ETC 明細 CSV の配信と手動取得 (`workers/etc-csv-web/`、Refs #1103 / #1111)
 
-上の cron が R2 に貯めた ETC 明細 CSV を**読み取り専用で配る別 worker**
-(`nuxt-dtako-admin-etc-csv-web`、single-env)。**入口の custom domain は
+上の cron が R2 に貯めた ETC 明細 CSV を**配る別 worker**
+(`nuxt-dtako-admin-etc-csv-web`、single-env)。**#1111 で「今すぐ取得」の実行口
+(`POST /run`) が付いたので、もう読み取り専用ではない。**
+
+**入口の custom domain は
 `wrangler.toml` に書かない** — この repo は public で、この worker には受け側の認証が
 無いため、宛先を公開しないこと自体が担保の一部 (attach は dashboard で 1 回。
 CI の再 deploy では外れない。根拠は同 `wrangler.toml` の注記、Refs #1103)。
@@ -1505,9 +1508,25 @@ CI の再 deploy では外れない。根拠は同 `wrangler.toml` の注記、R
 停止した外部 VPS 上の gRPC サービスの置き換え。取り込みの POST 自体は認証 + CSRF 必須で
 ブラウザからしか行えないため、**「CSV をどこから取ってくるか」だけを差し替えている**。
 
-- 口は **GET 3 本 + OPTIONS だけ**。`/list?user_id=` (日付一覧、`delimitedPrefixes`)、
-  `/list?user_id=&date=` (その日の `[{key,size,uploaded}]`)、`/download?key=` (本体)。
-  **GET / OPTIONS 以外はすべて 405 で、書き込みの口は存在しない。**
+- 口は **GET 3 本 + `POST /run` + OPTIONS**。`/list?user_id=` (日付一覧、
+  `delimitedPrefixes`)、`/list?user_id=&date=` (その日の `[{key,size,uploaded}]`)、
+  `/download?key=` (本体)。**それ以外の method はすべて 405。**
+- **★ `POST /run` は「読むだけ」ではない (Refs #1111)。** 押すと service binding で
+  relay の `POST /kintai-relay/etc-run` を叩き、**cron と同じ関数
+  (`dispatchEtcAccounts`) で同じ DO route (`/cron/etc`) へ**入って etc-meisai.jp への
+  ログインとスクレイプが起きる。**この worker から R2 へ書く口は無い**(書くのは
+  relay の DO)が、「書き込みの口は存在しない」という以前の説明はもう当たらない。
+  - **到達性は既存の GET 3 口と同じ** (無認証公開、CORS はオリジン完全一致)。
+    **追加の認証・IP 制限・レート制限・クールダウンを入れないのはオーナー判断**
+    (Refs #1111)。etc-meisai.jp にアカウントロックは無く、relay の DO は
+    `etc-{user_id}` 単位の `scrapeQueue` で直列化するので連打しても並列ログインには
+    ならない — **どちらも既存の性質**であって `/run` のために足した担保ではない。
+  - **旧構成との「より厳格」比較はこの口には効かない** — 旧サービスには実行の口が
+    そもそも無く、これは**新設された実行口**である。
+  - `src/run.ts` が `workers/dtako-scraper-relay/src/cron.ts` の
+    `resolveSecretBinding` を直接 import している (worker 間 import の前例は
+    `workers/kyuyo-mcp`)。**そのぶん CI の path filter に
+    `workers/dtako-scraper-relay/src/**` が入っている。**
 - `DTAKO_R2` (`dtako-uploads`) を read-only で bind し、上と同じ
   `{ETC_R2_PREFIX}/{user_id}/{YYYY-MM-DD}/{HHMMSS}.csv` だけを読む。
   **汎用の R2 lister ではない** — 任意の prefix を外から渡す口が無く、`ETC_R2_PREFIX`
@@ -1544,8 +1563,9 @@ CI の再 deploy では外れない。根拠は同 `wrangler.toml` の注記、R
 | `workers/dtako-scraper-relay/src/index.ts` | `scheduled()` handler (cron → DO fetch 配線) |
 | `workers/dtako-scraper-relay/src/dtako-scraper-relay-do.ts` | `/cron/dtako` `/cron/etc` ハンドラ + ETC CSV の R2 保存 |
 | `workers/dtako-scraper-relay-tail/src/index.ts` | Tail Worker。producer の `ctx.waitUntil()` 内ログを転写 (下記 gotcha 参照) |
-| `workers/etc-csv-web/src/index.ts` | 薄い fetch handler (HTTP ↔ 判断の変換だけ)。GET/OPTIONS 以外は 405 |
-| `workers/etc-csv-web/src/{handlers,keys,allowlist,cors,r2}.ts` | 口の判断 / 鍵検証 / user_id allowlist / CORS 判定 / R2 list-get。専用 `vitest.config.ts` で `src/**` を 100% gate |
+| `workers/etc-csv-web/src/index.ts` | 薄い fetch handler (HTTP ↔ 判断の変換だけ)。GET 3 口 + `POST /run`、それ以外の method は 405 |
+| `workers/etc-csv-web/src/{handlers,keys,allowlist,cors,r2,run}.ts` | 口の判断 / 鍵検証 / user_id allowlist / CORS 判定 / R2 list-get / `POST /run` の relay 呼び出し。専用 `vitest.config.ts` で `src/**` を 100% gate |
+| `workers/dtako-scraper-relay/src/cron.ts` の `dispatchEtcAccounts` | ETC の fan-out。**cron (`ETC_CRON`) と手動実行 (`POST /kintai-relay/etc-run`) が同じ 1 本を呼ぶ** (Refs #1111) |
 
 ### ETC の CCoW 内検証 (cookie 委譲、Refs ippoan/cdp-relay#69)
 

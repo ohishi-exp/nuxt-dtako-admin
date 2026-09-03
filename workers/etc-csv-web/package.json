@@ -2,7 +2,7 @@
   "name": "nuxt-dtako-admin-etc-csv-web",
   "private": true,
   "type": "module",
-  "description": "R2 に溜まった ETC 明細 CSV を読み取り専用で配る Worker (Refs #1103)。",
+  "description": "R2 に溜まった ETC 明細 CSV を配り、その取得を今すぐ起こす Worker (Refs #1103 / #1111)。",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run --coverage"

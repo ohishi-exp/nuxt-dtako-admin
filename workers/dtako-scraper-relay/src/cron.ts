@@ -416,6 +416,58 @@ export async function dispatchCompIdTargets(
   );
 }
 
+/**
+ * ETC_ACCOUNTS の各アカウントについて `etc-{user_id}` DO の `/cron/etc` を叩く
+ * (Refs #1111 で `dispatchCron` の ETC_CRON 分岐から切り出した。挙動は不変)。
+ *
+ * ★ **cron からも手動実行 (`POST /kintai-relay/etc-run`) からも呼ぶ**ので export
+ * している。**手で叩く道と cron の道を同じ関数にする**のが目的 — 別実装にすると
+ * 「手で叩くと通るのに cron では通らない」(逆も) を作れてしまう
+ * (`dispatchCompIdTargets` / `dispatchNetprintTargets` と同じ流儀)。
+ *
+ * **credential (`user_pass`) は DO へ運ばない。** 渡すのは `user_id` だけで、
+ * DO 自身が `ETC_ACCOUNTS` から解決する (`handleCronEtc` の doc)。
+ * `test/cron.test.ts` が `JSON.stringify(calls)` にパスワードが出ないことで固定している。
+ *
+ * アカウント 0 件は **`ok: true` の skip** — 未設定を「失敗」にすると、投入前の
+ * 環境で cron が毎回赤くなる。1 アカウントの失敗は他を止めない (`catch` して
+ * `ok: false` で数える)。DO 側は user_id ごとに別インスタンスなので、アカウント間は
+ * 並列でも同一アカウントへの並列ログインにはならない (DO 内の `scrapeQueue` が直列化)。
+ *
+ * **`detail` は `HTTP {status}: {本文の先頭 200 文字}`** (他の dispatch と同じ)。
+ */
+export async function dispatchEtcAccounts(
+  accounts: EtcAccountEntry[],
+  callDo: CronDoCall,
+): Promise<CronRunResult[]> {
+  if (accounts.length === 0) {
+    return [{ kind: "etc", target: "*", ok: true, detail: "ETC_ACCOUNTS 未設定のため skip" }];
+  }
+  return Promise.all(
+    accounts.map(async (account): Promise<CronRunResult> => {
+      try {
+        const res = await callDo(`etc-${account.user_id}`, "/cron/etc", {
+          user_id: account.user_id,
+        });
+        return {
+          kind: "etc",
+          target: account.user_id,
+          ok: res.ok,
+          detail: `HTTP ${res.status}: ${res.text.slice(0, 200)}`,
+        };
+      } catch (err) {
+        return {
+          kind: "etc",
+          target: account.user_id,
+          ok: false,
+          detail: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }),
+  );
+}
+
+
 export interface CronRunResult {
   kind: "dtako" | "etc" | "restraint" | "netprint" | "driver-master" | "dvr" | "vehicle-state" | "none";
   target: string;
@@ -548,32 +600,7 @@ export async function runScheduledCron(
   }
 
   if (cron === ETC_CRON) {
-    const accounts = parseEtcAccounts(env.etcAccountsRaw);
-    if (accounts.length === 0) {
-      return [{ kind: "etc", target: "*", ok: true, detail: "ETC_ACCOUNTS 未設定のため skip" }];
-    }
-    return Promise.all(
-      accounts.map(async (account): Promise<CronRunResult> => {
-        try {
-          const res = await callDo(`etc-${account.user_id}`, "/cron/etc", {
-            user_id: account.user_id,
-          });
-          return {
-            kind: "etc",
-            target: account.user_id,
-            ok: res.ok,
-            detail: `HTTP ${res.status}: ${res.text.slice(0, 200)}`,
-          };
-        } catch (err) {
-          return {
-            kind: "etc",
-            target: account.user_id,
-            ok: false,
-            detail: err instanceof Error ? err.message : String(err),
-          };
-        }
-      }),
-    );
+    return dispatchEtcAccounts(parseEtcAccounts(env.etcAccountsRaw), callDo);
   }
 
   if (cron === RESTRAINT_SYNC_CRON) {

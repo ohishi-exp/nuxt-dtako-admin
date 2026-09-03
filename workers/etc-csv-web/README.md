@@ -1,6 +1,7 @@
 # etc-csv-web
 
-R2 (`dtako-uploads`) に溜まった **ETC 明細 CSV を読み取り専用で配る** Worker (Refs #1103)。
+R2 (`dtako-uploads`) に溜まった **ETC 明細 CSV を配る** Worker (Refs #1103) と、
+その取得を **今すぐ 1 回起こす `POST /run`** (Refs #1111)。
 
 `workers/dtako-scraper-relay/` の cron が毎日 JST 6/7/8/9 時に etc-meisai から取得し、
 `etc/{user_id}/{YYYY-MM-DD}/{HHMMSS}.csv` へ保存している CSV を、
@@ -10,7 +11,8 @@ R2 (`dtako-uploads`) に溜まった **ETC 明細 CSV を読み取り専用で�
 
 ## ★ セキュリティ上の性質 — 先に読むこと
 
-**この worker は無認証の公開 ETC 明細配信である。CORS は認可ではない。**
+**この worker は無認証の公開 ETC 明細配信であり、`POST /run` は無認証の公開実行口である。
+CORS は認可ではない。**
 `Origin` ヘッダを送らない client (curl 等) は素通りで読める。守っているのは
 「どの画面が読めるか」であって「誰が読めるか」ではない。
 
@@ -21,9 +23,14 @@ R2 (`dtako-uploads`) に溜まった **ETC 明細 CSV を読み取り専用で�
 それより厳格である。
 
 **ただしこの比較は口ごとにしか言えない。** 新しい口を足すときは、その口について
-改めて旧構成と比較すること。
+改めて旧構成と比較すること。**`POST /run` (Refs #1111) にはこの比較が効かない** —
+旧サービスには実行の口がそもそも無かったので、これは「旧より厳格」ではなく
+**新設された実行口**である。到達性を既存 3 口と同じ (無認証公開・CORS はオリジン
+完全一致) にし、**追加の認証・IP 制限・レート制限・クールダウンを入れないのは
+オーナー判断** (歯止めを置く理由が実測されていないため。詳細は `src/run.ts` の doc)。
 
-実効的な絞りは 2 つだけ:
+配信 3 口の実効的な絞りは 2 つだけ (`/run` は `user_id` を取らないので、下の 1 段目は
+掛からない):
 
 | 仕掛け | 何を防ぐか | 未設定のとき |
 |---|---|---|
@@ -35,16 +42,30 @@ R2 (`dtako-uploads`) に溜まった **ETC 明細 CSV を読み取り専用で�
 
 どちらも fail-closed。前方一致・後方一致・ワイルドカード・正規表現は使っていない。
 
-## 口 (すべて GET。書き込みの口は無い)
+## 口 (読むのが 3 つ、起こすのが 1 つ)
 
 ```
-GET /list?user_id=<id>                  → { user_id, dates: ["YYYY-MM-DD", ...] }
-GET /list?user_id=<id>&date=YYYY-MM-DD  → { user_id, date, objects: [{key, size, uploaded}] }
-GET /download?key=<r2 key>              → CSV 本体 (text/csv; charset=shift_jis)
-OPTIONS                                 → 204 (preflight)
+GET  /list?user_id=<id>                  → { user_id, dates: ["YYYY-MM-DD", ...] }
+GET  /list?user_id=<id>&date=YYYY-MM-DD  → { user_id, date, objects: [{key, size, uploaded}] }
+GET  /download?key=<r2 key>              → CSV 本体 (text/csv; charset=shift_jis)
+POST /run                                → { results: [{kind:"etc", target, ok, detail}, ...] }
+OPTIONS                                  → 204 (preflight)
 ```
 
-- GET / OPTIONS 以外はすべて **405**。
+- GET 3 口は GET 以外なら **405**、`/run` は POST 以外なら **405**。
+- **`POST /run` は「読むだけ」ではない (Refs #1111)。** service binding で relay の
+  `POST /kintai-relay/etc-run` を叩き、その先は **cron (JST 6/7/8/9 時) と同じ関数
+  (`dispatchEtcAccounts`) で同じ DO route (`/cron/etc`)** — つまり etc-meisai.jp への
+  ログインとスクレイプが起きる。**この worker から R2 へ書く口は無い** (書くのは
+  relay の DO)。
+  - **パラメータを取らない** (ETC cron が取らないため)。body を送っても読まない。
+  - 応答は relay のものをそのまま透過する。**1 アカウントでも通れば 200、全滅で 502、
+    `ETC_ACCOUNTS` が 0 件なら 404。** 0 件を 200 の skip で流すのは cron 経路だけで、
+    手動実行は「押したのに動かない」を成功として返さない (relay の `handleEtcRun` の doc)。
+  - 連打の歯止めは無い。etc-meisai.jp にアカウントロックは無く (オーナー確認済み)、
+    relay の DO は `etc-{user_id}` 単位の `scrapeQueue` で直列化するので連打しても
+    並列ログインにはならない — **どちらも既存の性質**であって `/run` のために足した
+    ものではない。
 - 鍵は `{ETC_R2_PREFIX}/{user_id}/{YYYY-MM-DD}/{HHMMSS}.csv` の形だけを受け付ける。
   **汎用の R2 lister ではない** — 任意の prefix を外から渡す口は無く、
   `ETC_R2_PREFIX` も `etc` / `etc-staging` / `etc-preview` 以外なら 503 で止まる。
@@ -129,6 +150,11 @@ CI が deploy しても、以下が未了だと **fail-closed で全部 404 / CO
 ## 参照
 
 - 鍵を生成している側: `workers/dtako-scraper-relay/src/cron.ts` の `etcCsvKey()`
+- `POST /run` の行き先: 同 `cron.ts` の `dispatchEtcAccounts()` (cron と手動実行が
+  共有する 1 本) と `workers/dtako-scraper-relay/src/index.ts` の `handleEtcRun()`
+- `src/run.ts` は同 `cron.ts` の `resolveSecretBinding` を直接 import している
+  (worker 間 import の前例は `workers/kyuyo-mcp/src/mcp/tools.ts`)。そのぶん CI の
+  path filter に `workers/dtako-scraper-relay/src/**` が入っている
 - 同じ CSV を返す admin 画面側の route (**認証あり**):
   `server/api/etc-csv/download.get.ts`
   — `ETC_CSV_KEY_PATTERN` はそちらの写しで、`test/key-pattern-parity.test.ts` が
