@@ -1,10 +1,10 @@
 /**
  * `user_id` の allowlist (pure ロジック)。
  *
- * 値は **dashboard の plain Environment Variable `ETC_CSV_ALLOWED_USER_IDS`**
- * (カンマ区切り) から来る — `ETC_ACCOUNTS` と同じ流儀で、リポジトリにも
- * wrangler.toml にも値は書かない (この repo は public)。
- * wrangler.toml の `keep_vars = true` が deploy での消滅を防いでいる。
+ * 値 (カンマ区切り) の出どころは **KV `AUTH_CONFIG` の
+ * `etc-csv:allowed-user-ids` が正**で、無ければ dashboard の plain 変数
+ * `ETC_CSV_ALLOWED_USER_IDS` にフォールバックする (解決は `config.ts`)。
+ * リポジトリにも wrangler.toml にも値は書かない (この repo は public)。
  *
  * ★ `user_id` を自由入力にしないための仕掛け。自由入力だと総当たりで他アカウントの
  * 明細の存在と鍵が引け、`/download` で本文まで取れてしまう。
