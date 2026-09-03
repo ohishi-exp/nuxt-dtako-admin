@@ -5,6 +5,10 @@ import {
   DTAKO_CRON,
   DVR_CRON,
   DVR_TARGETS_KV_KEY,
+  parseVehicleStateTargets,
+  resolveVehicleStateTargetsRaw,
+  VEHICLE_STATE_CRON,
+  VEHICLE_STATE_TARGETS_KV_KEY,
   ETC_CRON,
   NETPRINT_CRON,
   RESTRAINT_SYNC_CRON,
@@ -660,6 +664,17 @@ describe('resolveDvrTargetsRaw', () => {
   })
 })
 
+/** DVR と車輌動態は**同じ 1 本の cron に相乗り**しているので (Refs #1098)、
+ * DVR だけを設定した回の結果には車輌動態側の skip が必ず 1 件付く。
+ * **これが「片方の設定漏れがもう片方を止めない」ことの対照**でもある — 早期 return に
+ * 戻すと DVR 側の結果ごと消えてここで落ちる。 */
+const VEHICLE_STATE_SKIP = {
+  kind: 'vehicle-state',
+  target: '*',
+  ok: true,
+  detail: 'VEHICLE_STATE_TARGETS 未設定のため skip',
+}
+
 describe('runScheduledCron — DVR_CRON', () => {
   const now = new Date('2026-07-03T10:00:00Z')
 
@@ -675,6 +690,7 @@ describe('runScheduledCron — DVR_CRON', () => {
     expect(calls).toEqual([])
     expect(results).toEqual([
       { kind: 'dvr', target: '*', ok: true, detail: 'DVR_TARGETS 未設定のため skip' },
+      VEHICLE_STATE_SKIP,
     ])
   })
 
@@ -691,6 +707,7 @@ describe('runScheduledCron — DVR_CRON', () => {
     ])
     expect(results).toEqual([
       { kind: 'dvr', target: '27324455', ok: true, detail: 'HTTP 202: {"accepted":true}' },
+      VEHICLE_STATE_SKIP,
     ])
   })
 
@@ -703,6 +720,7 @@ describe('runScheduledCron — DVR_CRON', () => {
     )
     expect(results).toEqual([
       { kind: 'dvr', target: '27324455', ok: false, detail: 'HTTP 502: {"error":"theearth 500"}' },
+      VEHICLE_STATE_SKIP,
     ])
   })
 
@@ -719,6 +737,7 @@ describe('runScheduledCron — DVR_CRON', () => {
     expect(results).toEqual([
       { kind: 'dvr', target: 'aaa', ok: false, detail: 'binding down' },
       { kind: 'dvr', target: 'bbb', ok: true, detail: 'HTTP 202: ok' },
+      VEHICLE_STATE_SKIP,
     ])
   })
 
@@ -731,6 +750,160 @@ describe('runScheduledCron — DVR_CRON', () => {
       },
       now,
     )
-    expect(results).toEqual([{ kind: 'dvr', target: 'aaa', ok: false, detail: 'not an Error' }])
+    expect(results).toEqual([
+      { kind: 'dvr', target: 'aaa', ok: false, detail: 'not an Error' },
+      VEHICLE_STATE_SKIP,
+    ])
+  })
+})
+
+/**
+ * 車輌動態 (`dtako_logs`) 取り込みの dispatch (Refs #1098)。
+ *
+ * DVR と**同じ 1 本の cron (10 分おき) に相乗り**している。ここで測るのは
+ * 「相乗りしても 2 つが独立に評価される」ことで、**それが壊れると画面が止まったまま
+ * 「skip」とだけログに出る** — いま直そうとしている故障と同じ形になる。
+ */
+describe('runScheduledCron — 車輌動態 (DVR と同じ cron に相乗り)', () => {
+  const now = new Date('2026-09-03T10:00:00Z')
+
+  it('★ VEHICLE_STATE_CRON は DVR_CRON と同じ 1 本 (別トリガーを増やさない)', () => {
+    // 同じ値であること自体が設計 (theearth へのログインを 2 倍にしないため)。
+    // 片方だけ変えたらここで落ちる — そのときは runScheduledCron の branch を割ること。
+    expect(VEHICLE_STATE_CRON).toBe(DVR_CRON)
+  })
+
+  it('★ VEHICLE_STATE_TARGETS 未設定は skip — DTAKO_ACCOUNTS 全件に倒さない', async () => {
+    const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+    const results = await runScheduledCron(
+      VEHICLE_STATE_CRON,
+      // DTAKO_ACCOUNTS が 2 社ぶん設定されていても 1 件も dispatch しない
+      { dtakoAccountsRaw: DTAKO_ACCOUNTS_JSON },
+      okDoCall(calls),
+      now,
+    )
+    expect(calls).toEqual([])
+    expect(results).toContainEqual(VEHICLE_STATE_SKIP)
+  })
+
+  it('名指しされた会社の scraper-comp DO の /cron/vehicle-state だけを叩く', async () => {
+    const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+    const results = await runScheduledCron(
+      VEHICLE_STATE_CRON,
+      { dtakoAccountsRaw: DTAKO_ACCOUNTS_JSON, vehicleStateTargetsRaw: '[{"comp_id":"27324455"}]' },
+      okDoCall(calls),
+      now,
+    )
+    // DVR は未設定なので DO 呼び出しは車輌動態の 1 本だけ。
+    expect(calls).toEqual([
+      {
+        doKey: 'scraper-comp-27324455',
+        path: '/cron/vehicle-state',
+        body: { comp_id: '27324455' },
+      },
+    ])
+    expect(results).toContainEqual({
+      kind: 'vehicle-state',
+      target: '27324455',
+      ok: true,
+      detail: 'HTTP 202: {"accepted":true}',
+    })
+  })
+
+  it('★★ DVR_TARGETS が未設定でも車輌動態は走る (片方の設定漏れが人質にならない)', async () => {
+    const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+    const results = await runScheduledCron(
+      VEHICLE_STATE_CRON,
+      { vehicleStateTargetsRaw: '[{"comp_id":"27324455"}]' },
+      okDoCall(calls),
+      now,
+    )
+    expect(calls.map((c) => c.path)).toEqual(['/cron/vehicle-state'])
+    expect(results).toEqual([
+      { kind: 'dvr', target: '*', ok: true, detail: 'DVR_TARGETS 未設定のため skip' },
+      {
+        kind: 'vehicle-state',
+        target: '27324455',
+        ok: true,
+        detail: 'HTTP 202: {"accepted":true}',
+      },
+    ])
+  })
+
+  it('★★ 逆向きも同じ — 車輌動態が未設定でも DVR は走る', async () => {
+    const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+    await runScheduledCron(
+      DVR_CRON,
+      { dvrTargetsRaw: '[{"comp_id":"27324455"}]' },
+      okDoCall(calls),
+      now,
+    )
+    expect(calls.map((c) => c.path)).toEqual(['/cron/dvr'])
+  })
+
+  it('両方設定されていれば 2 本とも同じ tick で dispatch される', async () => {
+    const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+    const results = await runScheduledCron(
+      DVR_CRON,
+      {
+        dvrTargetsRaw: '[{"comp_id":"27324455"}]',
+        vehicleStateTargetsRaw: '[{"comp_id":"27324455"}]',
+      },
+      okDoCall(calls),
+      now,
+    )
+    expect(calls.map((c) => c.path).sort()).toEqual(['/cron/dvr', '/cron/vehicle-state'])
+    expect(results.map((r) => r.kind).sort()).toEqual(['dvr', 'vehicle-state'])
+  })
+
+  it('DO が非 2xx / 例外でも 1 社に閉じる', async () => {
+    const results = await runScheduledCron(
+      VEHICLE_STATE_CRON,
+      { vehicleStateTargetsRaw: '[{"comp_id":"aaa"},{"comp_id":"bbb"}]' },
+      async (doKey) => {
+        if (doKey === 'scraper-comp-aaa') throw new Error('binding down')
+        return { ok: false, status: 502, text: 'theearth 500' }
+      },
+      now,
+    )
+    expect(results.filter((r) => r.kind === 'vehicle-state')).toEqual([
+      { kind: 'vehicle-state', target: 'aaa', ok: false, detail: 'binding down' },
+      { kind: 'vehicle-state', target: 'bbb', ok: false, detail: 'HTTP 502: theearth 500' },
+    ])
+  })
+})
+
+describe('parseVehicleStateTargets / resolveVehicleStateTargetsRaw', () => {
+  it('未設定は [] (= cron skip)、JSON 不正・非配列・comp_id 欠けは loud fail', () => {
+    expect(parseVehicleStateTargets(undefined)).toEqual([])
+    expect(parseVehicleStateTargets('')).toEqual([])
+    expect(parseVehicleStateTargets('[{"comp_id":"27324455"}]')).toEqual([
+      { comp_id: '27324455' },
+    ])
+    // ★ 設定名がそのまま文言に出ること — どの設定を投入すれば動き出すかが
+    // ログだけで分かる必要がある (DVR_TARGETS と共通の helper に畳んである)。
+    expect(() => parseVehicleStateTargets('{')).toThrow(
+      /VEHICLE_STATE_TARGETS が JSON としてパースできません/,
+    )
+    expect(() => parseVehicleStateTargets('{"comp_id":"a"}')).toThrow(
+      /VEHICLE_STATE_TARGETS は JSON 配列である必要があります/,
+    )
+    expect(() => parseVehicleStateTargets('[{"comp_id":"a"},{}]')).toThrow(
+      /VEHICLE_STATE_TARGETS の 2 件目に comp_id がありません/,
+    )
+  })
+
+  it('KV の vehicle_state_targets が正、無ければ plain 変数へ落ちる', async () => {
+    const kv = {
+      get: async (key: string) =>
+        key === VEHICLE_STATE_TARGETS_KV_KEY ? '[{"comp_id":"kv"}]' : null,
+    }
+    expect(await resolveVehicleStateTargetsRaw(kv, '[{"comp_id":"plain"}]')).toBe(
+      '[{"comp_id":"kv"}]',
+    )
+    expect(
+      await resolveVehicleStateTargetsRaw({ get: async () => null }, '[{"comp_id":"plain"}]'),
+    ).toBe('[{"comp_id":"plain"}]')
+    expect(await resolveVehicleStateTargetsRaw(undefined, undefined)).toBe('')
   })
 })

@@ -664,13 +664,22 @@ function assertVehicleStateArray(d: unknown, methodName: string): Array<Record<s
   return keepObjects(d);
 }
 
-/** 事業所単位の車輌現在地一覧 (`VehicleStateTableForBranchEx`)。branchCd は
- * getDvrMasters の branches[].code ("00000001" 形式)。 */
-export async function getVehicleStates(
+/**
+ * 事業所単位の車輌現在地一覧を **`VehicleSetStateData` の生オブジェクトのまま**返す
+ * (`VehicleStateTableForBranchEx`)。branchCd は getDvrMasters の branches[].code
+ * ("00000001" 形式)、`"00000000"` で全事業所。
+ *
+ * ★ 画面用には下の `getVehicleStates()` (射影版) を使うこと。**生のままが要るのは
+ * `dtako_logs` への取り込みだけ** (Refs #1098) — 受け手 `DtakologInput` は 57
+ * フィールドあり、緯度経度も **DDMM の生値 (INTEGER 列)** で受ける。射影版は 12
+ * フィールドに削ったうえ緯度経度を十進度へ変換済みなので、そのまま送ると列が落ち、
+ * 緯度が整数に丸まる。詳細は `vehicle-state-ingest.ts` の doc。
+ */
+export async function getVehicleStatesRaw(
   jar: CookieJar,
   branchCd: string,
   fetchImpl: FetchLike = fetch,
-): Promise<VehicleStatePoint[]> {
+): Promise<Array<Record<string, unknown>>> {
   if (!/^\d+$/.test(branchCd)) {
     throw new DvrSearchParamError(`事業所コードは数値で指定してください: "${branchCd}"`);
   }
@@ -681,7 +690,17 @@ export async function getVehicleStates(
     { strBranchCD: branchCd, strScrapCarDisp: "0" },
     fetchImpl,
   );
-  return assertVehicleStateArray(d, "VehicleStateTableForBranchEx").map(mapVehicleStateRow);
+  return assertVehicleStateArray(d, "VehicleStateTableForBranchEx");
+}
+
+/** 事業所単位の車輌現在地一覧 (`VehicleStateTableForBranchEx`)。branchCd は
+ * getDvrMasters の branches[].code ("00000001" 形式)。 */
+export async function getVehicleStates(
+  jar: CookieJar,
+  branchCd: string,
+  fetchImpl: FetchLike = fetch,
+): Promise<VehicleStatePoint[]> {
+  return (await getVehicleStatesRaw(jar, branchCd, fetchImpl)).map(mapVehicleStateRow);
 }
 
 const VEHICLE_LOG_DAY_RE = /^\d{4}\/\d{2}\/\d{2}$/;

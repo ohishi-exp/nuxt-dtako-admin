@@ -44,8 +44,31 @@ export const NETPRINT_CRON = "30 21 * * *";
 /** DVR (ドラレコ映像) 通知の取り込み cron 式 (UTC)。**10 分おき** — 旧 pipeline
  * (VPS が 10 分おきに theearth を scrape していた) と同じ間隔にそろえる
  * (Refs #1094)。映像は事故直後に見たいものなので、日次まで落とすと用を成さない。
- * `DVR_TARGETS` (KV `dvr_targets` が正) 設定時のみ実走。 */
+ * `DVR_TARGETS` (KV `dvr_targets` が正) 設定時のみ実走。
+ *
+ * ★ **車輌動態 (`dtako_logs`) の取り込みもこの 1 本に相乗りしている** (Refs #1098)。
+ * `VEHICLE_STATE_CRON` の doc に理由。 */
 export const DVR_CRON = "*/10 * * * *";
+
+/**
+ * 車輌動態 (`dtako_logs`) 取り込みの cron 式 (UTC)。**`DVR_CRON` と同じ 1 本**。
+ *
+ * 間隔 10 分は旧 pipeline の実測 —
+ * `ohishi-exp/browser-render-rust` の `scripts/vehicle-fetch.sh` が
+ * `# Called by cron every 10 minutes` で、`VehicleStateTableForBranchEx` を叩いて
+ * 199 台を送っていた (2026-09-03 に read-only clone で確認)。
+ *
+ * ★ **別の cron 式 (5 分ずらす等) にしない。** 同じ 10 分間隔で同じ会社の同じ DO
+ * (`scraper-comp-{compId}`) を叩くので、トリガーを分けると theearth への
+ * **ログインが 2 倍**になる。theearth は同一アカウントの同時ログインを許さないので
+ * (Refs #233)、ログイン回数が増えるほど他の cron / 人の操作を蹴る確率が上がる。
+ * 同じ tick に載せれば DO の `scrapeQueue` が直列化し、セッションも使い回される。
+ *
+ * この 2 定数が**同じ値であること自体が設計**なので、`cron.test.ts` に等値の
+ * 対照がある。片方だけ変えるとそこで落ちる — そのときは
+ * `runScheduledCron` の branch を 2 つに割る必要がある。
+ */
+export const VEHICLE_STATE_CRON = DVR_CRON;
 
 export interface DtakoAccountEntry {
   comp_id: string;
@@ -179,6 +202,9 @@ export const NETPRINT_TARGETS_KV_KEY = "netprint_targets";
 /** `DVR_TARGETS` を置く KV のキー名 (`netprint_targets` と同じ snake_case)。 */
 export const DVR_TARGETS_KV_KEY = "dvr_targets";
 
+/** `VEHICLE_STATE_TARGETS` を置く KV のキー名 (`dvr_targets` と同じ snake_case)。 */
+export const VEHICLE_STATE_TARGETS_KV_KEY = "vehicle_state_targets";
+
 
 /**
  * relay の設定値を **KV (`DTAKO_CONFIG_KV`) 優先**で解決し、無ければ従来の binding
@@ -239,36 +265,70 @@ export async function resolveDvrTargetsRaw(kv: unknown, binding: unknown): Promi
   return resolveKvConfigRaw(kv, DVR_TARGETS_KV_KEY, binding);
 }
 
+/** `VEHICLE_STATE_TARGETS` (車輌動態取り込みの対象会社) の解決。KV
+ * `vehicle_state_targets` が正、無ければ binding (`resolveKvConfigRaw` 参照)。
+ * どちらも未設定なら空文字を返し、呼び出し側は skip する — **`DTAKO_ACCOUNTS`
+ * 全件に倒さない** (`resolveDvrTargetsRaw` と同じ理由、Refs #1098)。 */
+export async function resolveVehicleStateTargetsRaw(
+  kv: unknown,
+  binding: unknown,
+): Promise<string> {
+  return resolveKvConfigRaw(kv, VEHICLE_STATE_TARGETS_KV_KEY, binding);
+}
+
 /** DVR 取り込みの対象 1 件。**`tenant_id` は持たない** — 書き先 tenant は DO が
  * `DTAKO_ACCOUNTS` の `comp_id` から引く (呼び出し元に名乗らせると、comp_id を
  * 知っている者が任意テナントへ書ける。Refs ippoan/rust-alc-api#434)。 */
-export interface DvrTarget {
+export interface CompIdTarget {
   comp_id: string;
 }
 
-/** `DVR_TARGETS` (JSON 配列 `[{comp_id}, ...]`) をパースする。未設定は [] (= cron
- * skip)、JSON 不正は loud fail (`parseNetprintTargets` と同じ流儀)。
- * `comp_id` が空の要素は**黙って捨てず**設定ミスとして落とす。 */
-export function parseDvrTargets(raw: string | undefined): DvrTarget[] {
+export type DvrTarget = CompIdTarget;
+
+/** 車輌動態 (`dtako_logs`) 取り込みの対象 1 件。`DvrTarget` と同じく **`tenant_id` は
+ * 持たない** — 書き先 tenant は DO が `DTAKO_ACCOUNTS` の `comp_id` から引く
+ * (Refs #1098)。 */
+export type VehicleStateTarget = CompIdTarget;
+
+/**
+ * `[{comp_id}, ...]` 形の対象リスト設定をパースする。未設定は [] (= cron skip)、
+ * JSON 不正は loud fail (`parseNetprintTargets` と同じ流儀)。`comp_id` が空の要素は
+ * **黙って捨てず**設定ミスとして落とす。
+ *
+ * `settingName` はエラー文言にだけ使う (`DVR_TARGETS` / `VEHICLE_STATE_TARGETS`)。
+ * **どの設定を直せばいいか**が読み手に分からないと、10 分おきの cron が黙って
+ * skip し続ける状態から抜け出せないため、共通化しても名前は残す。
+ */
+function parseCompIdTargets(raw: string | undefined, settingName: string): CompIdTarget[] {
   if (!raw) return [];
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new CronConfigError("DVR_TARGETS が JSON としてパースできません");
+    throw new CronConfigError(`${settingName} が JSON としてパースできません`);
   }
   if (!Array.isArray(parsed)) {
-    throw new CronConfigError("DVR_TARGETS は JSON 配列である必要があります");
+    throw new CronConfigError(`${settingName} は JSON 配列である必要があります`);
   }
   return parsed.map((entry, index) => {
     const candidate = entry as { comp_id?: unknown } | null;
     const compId =
       candidate && typeof candidate.comp_id === "string" ? candidate.comp_id.trim() : "";
     if (compId === "") {
-      throw new CronConfigError(`DVR_TARGETS の ${index + 1} 件目に comp_id がありません`);
+      throw new CronConfigError(`${settingName} の ${index + 1} 件目に comp_id がありません`);
     }
     return { comp_id: compId };
   });
+}
+
+/** `DVR_TARGETS` (JSON 配列 `[{comp_id}, ...]`) をパースする。 */
+export function parseDvrTargets(raw: string | undefined): DvrTarget[] {
+  return parseCompIdTargets(raw, "DVR_TARGETS");
+}
+
+/** `VEHICLE_STATE_TARGETS` (JSON 配列 `[{comp_id}, ...]`) をパースする。 */
+export function parseVehicleStateTargets(raw: string | undefined): VehicleStateTarget[] {
+  return parseCompIdTargets(raw, "VEHICLE_STATE_TARGETS");
 }
 
 /** scheduled handler から注入される DO 呼び出し。doKey は `idFromName` に渡す
@@ -294,10 +354,62 @@ export interface CronEnvValues {
   /** `DVR_TARGETS` (KV `dvr_targets` が正、plain 変数は fallback)。未設定は DVR
    * cron skip — **DTAKO_ACCOUNTS 全件に倒さない** (Refs #1094)。 */
   dvrTargetsRaw?: string;
+  /** `VEHICLE_STATE_TARGETS` (KV `vehicle_state_targets` が正、plain 変数は fallback)。
+   * 未設定は車輌動態 cron skip。**`DVR_TARGETS` とは独立に評価する** — 片方の設定漏れが
+   * もう片方を止めない (Refs #1098)。 */
+  vehicleStateTargetsRaw?: string;
+}
+
+/**
+ * `[{comp_id}, ...]` 形の対象リストを comp_id 単位 DO の `path` へ 1 件ずつ dispatch する
+ * (Refs #1098)。DVR と車輌動態が同じ 10 分 cron に相乗りしているので、**2 つが同じ
+ * 形で並ぶ**ぶんをここに畳む。
+ *
+ * 対象 0 件は **`ok: true` の skip** — 未設定は `DTAKO_ACCOUNTS` 全件に倒さず
+ * fail-closed で止める (Refs #874 / #1094 の設計注意 7)。`settingName` を detail に
+ * 出すのは、どの設定を投入すれば動き出すかがログだけで分かるようにするため。
+ *
+ * 1 会社の失敗は他の会社を止めない (`catch` して `ok: false` で数える)。
+ */
+async function dispatchCompIdTargets(
+  kind: CronRunResult["kind"],
+  targets: CompIdTarget[],
+  path: string,
+  settingName: string,
+  callDo: CronDoCall,
+): Promise<CronRunResult[]> {
+  if (targets.length === 0) {
+    return [{ kind, target: "*", ok: true, detail: `${settingName} 未設定のため skip` }];
+  }
+  return Promise.all(
+    targets.map(async (target): Promise<CronRunResult> => {
+      try {
+        // 既存の dtako scrape cron と**同じ DO instance** に載せる。別 DO を立てると
+        // 同じ service account で 2 セッションになり、theearth が片方を kick する
+        // (Refs #233 / #1094 の決定 3)。DO 内の `scrapeQueue` が直列化も担う。
+        const res = await callDo(`scraper-comp-${target.comp_id}`, path, {
+          comp_id: target.comp_id,
+        });
+        return {
+          kind,
+          target: target.comp_id,
+          ok: res.ok,
+          detail: `HTTP ${res.status}: ${res.text.slice(0, 200)}`,
+        };
+      } catch (err) {
+        return {
+          kind,
+          target: target.comp_id,
+          ok: false,
+          detail: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }),
+  );
 }
 
 export interface CronRunResult {
-  kind: "dtako" | "etc" | "restraint" | "netprint" | "driver-master" | "dvr" | "none";
+  kind: "dtako" | "etc" | "restraint" | "netprint" | "driver-master" | "dvr" | "vehicle-state" | "none";
   target: string;
   ok: boolean;
   detail: string;
@@ -588,35 +700,18 @@ export async function runScheduledCron(
     //
     // 未設定は skip (fail-closed)。「設定が無い = 全社」に倒さないのは
     // NETPRINT_CRON と同じ流儀 (Refs #874)。
-    const targets = parseDvrTargets(env.dvrTargetsRaw);
-    if (targets.length === 0) {
-      return [{ kind: "dvr", target: "*", ok: true, detail: "DVR_TARGETS 未設定のため skip" }];
-    }
-    return Promise.all(
-      targets.map(async (target): Promise<CronRunResult> => {
-        try {
-          // 既存の dtako scrape cron と**同じ DO instance** に載せる。別 DO を立てると
-          // 同じ service account で 2 セッションになり、theearth が片方を kick する
-          // (Refs #233 / #1094 の決定 3)。DO 内の `scrapeQueue` が直列化も担う。
-          const res = await callDo(`scraper-comp-${target.comp_id}`, "/cron/dvr", {
-            comp_id: target.comp_id,
-          });
-          return {
-            kind: "dvr",
-            target: target.comp_id,
-            ok: res.ok,
-            detail: `HTTP ${res.status}: ${res.text.slice(0, 200)}`,
-          };
-        } catch (err) {
-          return {
-            kind: "dvr",
-            target: target.comp_id,
-            ok: false,
-            detail: err instanceof Error ? err.message : String(err),
-          };
-        }
-      }),
-    );
+    // ★ **2 つの取り込みが同じ 1 本の cron に載っている** (Refs #1098) — DVR と
+    // 車輌動態 (`dtako_logs`)。理由は `VEHICLE_STATE_CRON` の doc (同じ会社の同じ DO を
+    // 同じ間隔で叩くので、トリガーを分けると theearth ログインが 2 倍になる)。
+    //
+    // ★★ **設定は独立に評価して結果を連結する。**「片方が未設定なら早期 return」に
+    // すると、`DVR_TARGETS` の設定漏れが車輌動態を人質に取る (逆も同じ) — 画面が
+    // 止まったまま「skip」とだけログに出る、いま直そうとしている故障と同じ形になる。
+    const [dvr, vehicleState] = await Promise.all([
+      dispatchCompIdTargets("dvr", parseDvrTargets(env.dvrTargetsRaw), "/cron/dvr", "DVR_TARGETS", callDo),
+      dispatchCompIdTargets("vehicle-state", parseVehicleStateTargets(env.vehicleStateTargetsRaw), "/cron/vehicle-state", "VEHICLE_STATE_TARGETS", callDo),
+    ]);
+    return [...dvr, ...vehicleState];
   }
 
   return [{ kind: "none", target: cron, ok: false, detail: "未知の cron 式です (wrangler.toml の triggers と cron.ts の定数がズレています)" }];

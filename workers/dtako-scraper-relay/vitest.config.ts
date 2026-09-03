@@ -71,6 +71,7 @@ export default defineConfig({
         'src/scrape-alert.ts',
         'src/driver-master-run.ts',
         'src/dvr-ingest.ts',
+        'src/vehicle-state-ingest.ts',
       ],
       thresholds: {
         lines: 100,
