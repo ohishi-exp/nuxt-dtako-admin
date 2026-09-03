@@ -6,9 +6,10 @@
  * 送らない client (curl 等) はそもそもこの判定を通らず素通りで読める。
  * この worker の唯一の実効的な絞りは `user_id` の allowlist (`allowlist.ts`) である。
  *
- * 許可オリジンは **dashboard の plain Environment Variable `ETC_CSV_ALLOWED_ORIGIN`**
- * から読む — この repo は public なので、内部ホスト名を wrangler.toml にもコードにも
- * 書かない。**未設定なら CORS ヘッダを一切付けない (fail-closed)。**
+ * 許可オリジンは **KV `AUTH_CONFIG` の `etc-csv:allowed-origin` が正**で、
+ * 無ければ dashboard の plain 変数 `ETC_CSV_ALLOWED_ORIGIN` にフォールバックする
+ * (解決は `config.ts`)。この repo は public なので、ホスト名を wrangler.toml にも
+ * コードにも書かない。**どちらにも無ければ CORS ヘッダを一切付けない (fail-closed)。**
  */
 
 /**

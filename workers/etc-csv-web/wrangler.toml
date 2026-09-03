@@ -11,9 +11,10 @@ account_id = "24b45709d060d957340180e995f0d373"
 main = "src/index.ts"
 compatibility_date = "2025-05-01"
 
-# 上の 2 変数は wrangler.toml に無いため、これが無いと deploy のたびに消える
-# (Wrangler の既定挙動: config に無い binding は deploy 時に削除される)。
-# 消えると allowlist が空になり fail-closed で全部 404 = 恒常的に壊れる。
+# allowlist 2 つの plain 変数 (KV 未投入のあいだの fallback) は wrangler.toml に
+# 無いため、これが無いと deploy のたびに消える (Wrangler の既定挙動: config に無い
+# binding は deploy 時に削除される)。**ただし `keep_vars` があっても消えた実害が
+# relay 側であった**ので、正は上の KV に置いてある (`[[kv_namespaces]]` の注記)。
 #
 # ★ `keep_vars` は top-level only (named environment 配下には書けない)。
 #   したがってこの worker に named environment (staging 等) を作ってはいけない
@@ -61,6 +62,24 @@ head_sampling_rate = 1
 # ★ attach するホスト名は `*-dev` / `*-staging` / `*-preview` / `preview-*` のいずれにも
 #   一致させないこと。一致すると Cloudflare Access のワイルドカードアプリに巻き込まれ、
 #   ブラウザからの cross-origin fetch が preflight 403 で落ちる。
+
+# allowlist 2 つ (`etc-csv:allowed-user-ids` / `etc-csv:allowed-origin`) の**正**。
+# dashboard の plain 変数は `keep_vars` があっても deploy で消えた実害があり
+# (relay 側 2026-07-25。消えると viewer 認可が全社 401 になった)、この worker では
+# 消えると fail-closed で全部 404 = 取り込み画面が黙って止まる。
+# **投入は最初の 1 回だけ。CI も deploy も書き換えない。** 手順は README.md。
+#
+# 流儀は auth-worker の `src/lib/config.ts` (KV-backed allowlist + 60s cache) に揃えて
+# あり、namespace もそれと同じものを read-only で借りている。
+#
+# ★★ この namespace には **OAuth の refresh token / DCR / device 系が同居**している。
+#   この worker が読むキーは `src/config.ts` の**コンパイル時定数 2 つだけ**
+#   (`etc-csv:allowed-origin` / `etc-csv:allowed-user-ids`) で、リクエスト由来の
+#   文字列が `.get()` に到達する経路は無い (型でも塞ぎ、テストでも固定してある)。
+#   **既存キーを読む・書く・列挙するコードを足さないこと。**
+[[kv_namespaces]]
+binding = "AUTH_CONFIG"
+id = "f13ecae4b69043819c09f606abb84797"
 
 # 読み取り専用で bind する。この worker に書き込みの口は無い。
 [[r2_buckets]]

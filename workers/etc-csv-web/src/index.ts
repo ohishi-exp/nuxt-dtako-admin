@@ -22,10 +22,13 @@
  *   OPTIONS                                 → preflight 応答
  * GET / OPTIONS 以外はすべて 405。
  *
- * 判断そのものは `handlers.ts` / `keys.ts` / `allowlist.ts` / `cors.ts` / `r2.ts` に
- * 分離してあり (100% gate 対象)、ここは HTTP との変換だけを持つ。
+ * 判断そのものは `handlers.ts` / `keys.ts` / `allowlist.ts` / `cors.ts` / `r2.ts` /
+ * `config.ts` に
+ * 分離してあり (100% gate 対象)、ここは HTTP との変換と、allowlist 2 つの解決
+ * (`config.ts`、KV 正・plain 変数 fallback) の呼び出しだけを持つ。
  */
 
+import { resolveAllowedOrigin, resolveAllowedUserIds, type EtcCsvConfigKvBinding } from './config'
 import { corsHeaders } from './cors'
 import { downloadResult, listResult, type EtcCsvConfig } from './handlers'
 import type { R2BucketLite } from './r2'
@@ -34,7 +37,14 @@ export interface Env {
   DTAKO_R2?: R2BucketLite
   /** wrangler.toml `[vars]`。 */
   ETC_R2_PREFIX?: string
-  /** dashboard の plain 変数 (この repo は public なので値は書かない)。 */
+  /**
+   * allowlist 2 つの**正** (KV 優先、無ければ下の plain 変数)。auth-worker と同じ
+   * namespace を read-only で借りている。**読むキーは `config.ts` の定数 2 つだけ** —
+   * 同じ namespace に OAuth の refresh token / DCR / device 系が同居しているため、
+   * リクエスト由来の文字列が `.get()` に到達する経路を作らないこと。
+   */
+  AUTH_CONFIG?: EtcCsvConfigKvBinding
+  /** dashboard の plain 変数 (KV 未投入のあいだの fallback。値は repo に書かない)。 */
   ETC_CSV_ALLOWED_ORIGIN?: string
   ETC_CSV_ALLOWED_USER_IDS?: string
 }
@@ -48,7 +58,10 @@ function json(result: { status: number; body: unknown }, cors: Record<string, st
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const cors = corsHeaders(request.headers.get('Origin'), env.ETC_CSV_ALLOWED_ORIGIN)
+    // allowlist 2 つは KV が正、無ければ plain 変数 (`config.ts`)。CORS ヘッダは
+    // どの応答にも載るので、method 分岐より前に解決する。
+    const allowedOrigin = await resolveAllowedOrigin(env.AUTH_CONFIG, env.ETC_CSV_ALLOWED_ORIGIN)
+    const cors = corsHeaders(request.headers.get('Origin'), allowedOrigin)
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors })
     if (request.method !== 'GET') {
@@ -58,7 +71,7 @@ export default {
     const url = new URL(request.url)
     const config: EtcCsvConfig = {
       r2Prefix: env.ETC_R2_PREFIX,
-      allowedUserIds: env.ETC_CSV_ALLOWED_USER_IDS,
+      allowedUserIds: await resolveAllowedUserIds(env.AUTH_CONFIG, env.ETC_CSV_ALLOWED_USER_IDS),
     }
 
     if (url.pathname === '/list') {
