@@ -207,6 +207,20 @@ import {
   VenusSessionExpiredError,
   type DvrSearchParams,
 } from "./theearth-venus-client";
+// DVR cron (10 分おき) が rust-alc-api へ渡すぶんの pure ロジック (Refs #1094)。
+// theearth 側は上の theearth-venus-client、rust への送信は alc-internal-upload の
+// `sendViaAlcInternalProxy` に閉じている — ここは配線だけ。
+import {
+  DVR_MAX_FILES_PER_RUN,
+  DVR_NOTIFICATION_WINDOW_HOURS,
+  DVR_STALE_ALERT_HOURS,
+  judgeDvrStaleness,
+  planDvrFileWork,
+  postDvrNotifications,
+  putDvrFile,
+  selectRecentDvrNotifications,
+  toDvrIngestItems,
+} from "./dvr-ingest";
 // theearth ログインセッション (dvr-api / daily-report-api 共通、Refs #233):
 // routing 解決・レコード検証・token 生成 / Bearer token 抽出は theearth-session.ts
 // が唯一の実装元 (かつての dvr-session.ts / report-session.ts ラッパーは統合済み)。
@@ -485,6 +499,50 @@ export interface DriverMasterLastRun {
   updated: number | null;
   /** 上流が受け取らなかった件数 (0 なら全員入った)。失敗時は null。 */
   skipped: number | null;
+  error: string | null;
+}
+
+/** 直近 1 回の DVR 取り込み cron の結末を置く DO storage のキー。
+ * `driver_master_last_run` と同じ流儀で**1 件だけ**持つ (Refs #1094 の設計注意 8)。 */
+const DVR_LAST_RUN_KEY = "dvr_last_run";
+
+/**
+ * 直近 1 回の DVR 取り込み cron の結末 (`GET /cron/dvr/last` が返す形、Refs #1094)。
+ *
+ * ★ **無音故障を検知するための入れ物。** cron が 10 分おきに空振りし続けても、
+ * 結果が console にしか出ていないと「動いているように見えて 1 件も保存していない」
+ * 状態に誰も気づけない。`last_success_at` を持ち回って、閾値
+ * (`DVR_STALE_ALERT_HOURS`) を超えたら `console.error` に落とす。
+ * **この PR では通知を出さない** — LINE WORKS 通知は後続の子タスク。
+ */
+export interface DvrCronLastRun {
+  comp_id: string;
+  started_at: string;
+  finished_at: string;
+  ok: boolean;
+  /** 最後に**成功で終わった**時刻。失敗した回は前回の値を持ち回る (null = 一度も
+   * 成功していない)。無音故障の判定はこの欄だけを見る。 */
+  last_success_at: string | null;
+  /** この回の開始時点で「最後の成功から何時間経っていたか」。 */
+  hours_since_last_success: number | null;
+  /** theearth の通知一覧の件数。 */
+  notifications: number | null;
+  /** うち直近 DVR_NOTIFICATION_WINDOW_HOURS 時間に入ったもの。 */
+  in_window: number | null;
+  /** 日時が読めず窓の判定ができなかった件数 (捨てずに送っている)。 */
+  undated: number | null;
+  /** serial_no / file_name が欠けていて送れなかった件数。 */
+  unusable: number | null;
+  inserted: number | null;
+  skipped: number | null;
+  /** rust がまだ `.vdf` を持っていない件数 (この回の上限前)。 */
+  pending: number | null;
+  /** 車両へ転送要求を出した件数。 */
+  requested: number | null;
+  /** `.vdf` を rust へ渡せた件数。 */
+  stored: number | null;
+  /** 1 件ずつのダウンロード/転送で失敗した件数。 */
+  failed: number | null;
   error: string | null;
 }
 
@@ -982,6 +1040,20 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 後から確かめる術が無かった。
     if (url.pathname === "/cron/driver-master/last" && request.method === "GET") {
       const last = await this.ctx.storage.get<DriverMasterLastRun>(DRIVER_MASTER_LAST_RUN_KEY);
+      return Response.json({ last: last ?? null });
+    }
+
+    // DVR (ドラレコ映像) 通知を 10 分おきに取り込む (Refs #1094)。**既存の
+    // scraper-comp DO に相乗りする** — 別 DO を立てると同じ service account で
+    // 2 セッションになり theearth が片方を kick する (Refs #233)。到達条件は
+    // /cron/dtako と同じ (この worker 自身から)。
+    if (url.pathname === "/cron/dvr" && request.method === "POST") {
+      return this.handleCronDvr(request);
+    }
+
+    // 直近 1 回の DVR 取り込みの結末を読む (無音故障の検知、Refs #1094 の設計注意 8)。
+    if (url.pathname === "/cron/dvr/last" && request.method === "GET") {
+      const last = await this.ctx.storage.get<DvrCronLastRun>(DVR_LAST_RUN_KEY);
       return Response.json({ last: last ?? null });
     }
 
@@ -5438,6 +5510,304 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
           items: itemCount,
           retired: retiredCount,
           chunks: chunkCount,
+          error: message,
+        },
+        { status: 502 },
+      );
+    }
+  }
+
+  /**
+   * POST /cron/dvr — body {comp_id}。theearth の DVR (ドラレコ映像) 通知を
+   * rust-alc-api へ取り込む (Refs #1094)。**10 分おき**の無人実行。
+   *
+   * ## なぜ既存の scraper-comp DO に相乗りするのか
+   *
+   * theearth は同一アカウントの同時ログインを許さない (ライセンス数超過で既存
+   * セッションを kick する、`theearth-session.ts` の doc comment / Refs #233)。
+   * DVR cron は `DTAKO_ACCOUNTS` の service account で入るので、別 DO を立てると
+   * **既存の dtako scrape cron と同じアカウントで 2 セッションになり互いに蹴り合う**。
+   * `/dvr-api/*` (ブラウザ経路) の DO は**人間の利用者ごと**の別インスタンスで、
+   * credential も毎リクエスト body 由来 — 無人 cron からは使わない。
+   *
+   * ## 同期応答
+   *
+   * `handleCronDriverMaster` と同じ理由で 202 + alarm にしない — 通知一覧を 1 回
+   * 読んで最大 `DVR_MAX_FILES_PER_RUN` 件を流すだけで、失敗しても 10 分後の cron が
+   * 続きを引く (未取得ぶんは rust 側が `pending` として持っている)。
+   *
+   * ## ★ tenant は DTAKO_ACCOUNTS 由来のものしか使わない
+   *
+   * `resolveAccount(comp_id)` が返す `tenant_id` だけを `X-Tenant-ID` に載せる。
+   * **request body の tenant_id は読まない** — 読むと comp_id を知っている呼び出し元が
+   * 任意テナントへ書けてしまう (Refs ippoan/rust-alc-api#434)。
+   */
+  private async handleCronDvr(request: Request): Promise<Response> {
+    let body: { comp_id?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return dvrJsonError(400, "body must be JSON");
+    }
+    const compId = typeof body.comp_id === "string" ? body.comp_id.trim() : "";
+    if (!compId) {
+      return dvrJsonError(400, "comp_id は必須です");
+    }
+    const account = await this.resolveAccount(compId);
+    if (!account) {
+      return Response.json({ error: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
+    }
+    const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
+    if (!sharedSecret) {
+      return Response.json(
+        { error: "INTERNAL_SHARED_SECRET 未設定のため DVR を alc へ投入できません" },
+        { status: 503 },
+      );
+    }
+    // 同一 comp_id への theearth 並行アクセスはセッションロックで hang/500 する。
+    // 既存の dtako scrape / 乗務員マスタ同期と同じキューに載せて直列化する。
+    return this.enqueueScrape(() => this.runDvrCron(account, sharedSecret));
+  }
+
+  /**
+   * 直近 1 回の DVR cron の結末を DO storage に 1 件だけ残す。
+   *
+   * ★ **書けなくても取り込みの結果は変えない** (`putDriverMasterLastRun` と同じ)。
+   * 記録は後から確かめるためのもので、記録の失敗で取り込みの成否をひっくり返さない
+   * (ただし黙らせない)。
+   */
+  private async putDvrLastRun(record: DvrCronLastRun): Promise<void> {
+    try {
+      await this.ctx.storage.put(DVR_LAST_RUN_KEY, record);
+    } catch (err) {
+      console.warn(
+        JSON.stringify({
+          dvr_last_run: "put_failed",
+          comp_id: record.comp_id,
+          error: describeUnknownError(err),
+        }),
+      );
+    }
+  }
+
+  /** DVR 取り込みの本体 (`scrapeQueue` の直列化の中でだけ呼ばれる)。 */
+  private async runDvrCron(account: DtakoAccountRaw, sharedSecret: string): Promise<Response> {
+    const startedAt = new Date().toISOString();
+    const jobState = this.makeTheearthLoginJobState();
+    const authFetch = this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER);
+    const base = { dvr_cron: "", comp_id: account.comp_id };
+
+    const previous = await this.ctx.storage.get<DvrCronLastRun>(DVR_LAST_RUN_KEY);
+    const lastSuccessAt = previous?.last_success_at ?? null;
+    const staleness = judgeDvrStaleness(lastSuccessAt, new Date(), DVR_STALE_ALERT_HOURS);
+    if (staleness.stale) {
+      // ★ 無音故障。**通知は出さない** (後続 PR) — Tail Worker / Workers Logs から
+      // 読める形にするところまでがこの PR の範囲 (Refs #1094 の設計注意 8)。
+      console.error(
+        JSON.stringify({
+          ...base,
+          dvr_cron: "stale",
+          hours_since_last_success: staleness.hoursSinceLastSuccess,
+          threshold_hours: DVR_STALE_ALERT_HOURS,
+        }),
+      );
+    }
+
+    // ★ 失敗応答にも「どこまで進んだか」を載せるため try の外で数える
+    // (`runDriverMasterSync` と同じ理由)。null は「そこまで到達していない」。
+    let notificationCount: number | null = null;
+    let inWindow: number | null = null;
+    let undated: number | null = null;
+    let unusable: number | null = null;
+    let inserted: number | null = null;
+    let skippedCount: number | null = null;
+    let pendingCount: number | null = null;
+    let requested: number | null = null;
+
+    try {
+      const notifications = await this.withTheearthLoginSession(account, jobState, (jar) =>
+        getDvrNotifications(jar),
+      );
+      notificationCount = notifications.length;
+      const windowed = selectRecentDvrNotifications(
+        notifications,
+        new Date(),
+        DVR_NOTIFICATION_WINDOW_HOURS,
+      );
+      inWindow = windowed.recent.length;
+      undated = windowed.undated;
+      const built = toDvrIngestItems(windowed.recent);
+      unusable = built.unusable;
+
+      const ingest = await postDvrNotifications(
+        { sharedSecret, tenantId: account.tenant_id, items: built.items },
+        authFetch,
+      );
+      inserted = ingest.inserted;
+      skippedCount = ingest.skipped;
+      pendingCount = ingest.pending.length;
+
+      const plan = planDvrFileWork(ingest.pending, windowed.recent, DVR_MAX_FILES_PER_RUN);
+
+      // まだ車両にしか無いものは**まとめて 1 回**転送要求する
+      // (`Request_DvrFileTransfer_MultiTarget`)。1 件ずつ N 回叩かない。
+      // 要求は非同期で、次回以降の cron で receiveState が ready に変わる。
+      requested = plan.toRequest.length;
+      if (plan.toRequest.length > 0) {
+        await this.withTheearthLoginSession(account, jobState, (jar) =>
+          requestDvrFileTransferMulti(
+            jar,
+            plan.toRequest.map((row) => row.serial_no),
+            plan.toRequest.map((row) => row.file_name),
+          ),
+        );
+      }
+
+      const stored: Array<{ id: string; file_status: string | null; size: number | null; r2_key: string | null }> = [];
+      const failed: Array<{ id: string; error: string }> = [];
+      // ★ **逐次で回す** (`Promise.all` にしない)。forward 先の auth-worker が
+      // `alc-internal-proxy` で body を `arrayBuffer()` に読み切るので、並列にすると
+      // **同時に持つバッファが件数ぶん**になる (1 件最大 32MB × Worker のメモリ 128MB)。
+      // theearth 側も同一アカウントの並行アクセスでセッションが競合する。
+      for (const row of plan.ready) {
+        // 1 件の失敗で残りを止めない — 落ちた行は rust 側に `pending` のまま残るので
+        // 次回の cron が引き直す (`runDriverMasterForComps` と同じ流儀)。
+        try {
+          const result = await this.withTheearthLoginSession(account, jobState, async (jar) => {
+            const target = await requestDvrDownloadPath(jar, row.serial_no, row.file_name);
+            // **DO では `arrayBuffer()` に読み切らない**ので、relay 側はファイル全体を
+            // 持たない (auth-worker は forward 前に 1 度バッファする — end-to-end の
+            // ストリーミングではない。`DvrFileIngestInput.body` の doc 参照)。
+            // `openDvrFileStream` が `.vdf` の magic を検証しているので、ログイン切れの
+            // HTML を映像として保存することはない。
+            const stream = await openDvrFileStream(jar, dvrDataUrl(target.path));
+            return putDvrFile(
+              { sharedSecret, tenantId: account.tenant_id, id: row.id, body: stream },
+              authFetch,
+            );
+          });
+          stored.push({
+            id: row.id,
+            file_status: result.fileStatus,
+            size: result.size,
+            r2_key: result.r2Key,
+          });
+        } catch (err) {
+          failed.push({ id: row.id, error: describeUnknownError(err) });
+        }
+      }
+
+      // ファイルが 1 件でも落ちていれば ok=false — `last_success_at` を進めないことで
+      // 「通知だけ入り続けて映像が 1 本も保存されない」状態が閾値で表に出る。
+      const ok = failed.length === 0;
+      const finishedAt = new Date().toISOString();
+      const log = {
+        ...base,
+        dvr_cron: ok ? "done" : "done_with_failures",
+        notifications: notificationCount,
+        in_window: inWindow,
+        undated,
+        unusable,
+        inserted,
+        skipped: skippedCount,
+        pending: pendingCount,
+        requested,
+        stored: stored.length,
+        waiting: plan.waiting.length,
+        failed,
+        theearth_logins: jobState.logins.length,
+        theearth_kicked: jobState.logins.some((l) => l.kicked),
+      };
+      if (ok && unusable === 0) console.log(JSON.stringify(log));
+      else console.warn(JSON.stringify(log));
+
+      await this.putDvrLastRun({
+        comp_id: account.comp_id,
+        started_at: startedAt,
+        finished_at: finishedAt,
+        ok,
+        last_success_at: ok ? finishedAt : lastSuccessAt,
+        hours_since_last_success: staleness.hoursSinceLastSuccess,
+        notifications: notificationCount,
+        in_window: inWindow,
+        undated,
+        unusable,
+        inserted,
+        skipped: skippedCount,
+        pending: pendingCount,
+        requested,
+        stored: stored.length,
+        failed: failed.length,
+        error: null,
+      });
+
+      return Response.json({
+        ok,
+        comp_id: account.comp_id,
+        notifications: notificationCount,
+        in_window: inWindow,
+        undated,
+        unusable,
+        inserted,
+        skipped: skippedCount,
+        pending: pendingCount,
+        requested,
+        stored,
+        waiting: plan.waiting.length,
+        failed,
+        theearth_logins: jobState.logins.length,
+        theearth_kicked: jobState.logins.some((l) => l.kicked),
+      });
+    } catch (err) {
+      const message = describeUnknownError(err);
+      console.error(
+        JSON.stringify({
+          ...base,
+          dvr_cron: "failed",
+          notifications: notificationCount,
+          in_window: inWindow,
+          undated,
+          unusable,
+          inserted,
+          skipped: skippedCount,
+          pending: pendingCount,
+          requested,
+          error: message,
+        }),
+      );
+      await this.putDvrLastRun({
+        comp_id: account.comp_id,
+        started_at: startedAt,
+        finished_at: new Date().toISOString(),
+        ok: false,
+        last_success_at: lastSuccessAt,
+        hours_since_last_success: staleness.hoursSinceLastSuccess,
+        notifications: notificationCount,
+        in_window: inWindow,
+        undated,
+        unusable,
+        inserted,
+        skipped: skippedCount,
+        pending: pendingCount,
+        requested,
+        stored: null,
+        failed: null,
+        error: message,
+      });
+      return Response.json(
+        {
+          ok: false,
+          comp_id: account.comp_id,
+          // ★ どこまで進んだかを応答に残す。null なら theearth の通知一覧を読む前に
+          // 落ちたということで、rust (alc) は 1 度も叩いていない。
+          notifications: notificationCount,
+          in_window: inWindow,
+          undated,
+          unusable,
+          inserted,
+          skipped: skippedCount,
+          pending: pendingCount,
+          requested,
           error: message,
         },
         { status: 502 },

@@ -70,6 +70,7 @@ export default defineConfig({
         'src/kosoku-daily.ts',
         'src/scrape-alert.ts',
         'src/driver-master-run.ts',
+        'src/dvr-ingest.ts',
       ],
       thresholds: {
         lines: 100,

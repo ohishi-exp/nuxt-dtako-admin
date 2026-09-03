@@ -81,8 +81,10 @@ service = "nuxt-dtako-admin-scraper-relay-tail"
 # VPS / GCE cron の Worker 移行 (Refs ohishi-exp/dtako-scraper#22 /
 # ohishi-exp/browser-render-rust#14)。cron 式は src/cron.ts の
 # DTAKO_CRON / ETC_CRON / RESTRAINT_SYNC_CRON / NETPRINT_CRON /
-# DRIVER_MASTER_SYNC_CRON 定数と一致させること (ズレると
+# DRIVER_MASTER_SYNC_CRON / DVR_CRON 定数と一致させること (ズレると
 # scheduled handler が「未知の cron 式」を log して何もしない)。
+# ★ **この一致を機械検証する gate はまだ無い** (別 issue #1095)。定数を足したら
+#   本番 [triggers] と (足すなら) [env.staging.triggers] を手で揃えること。
 # - "0 16 * * *"        = 01:00 JST。dtako 日次 (VPS cron dtako-scraper-daily と同時刻)。
 #                          SCRAPER_MODE=http + DTAKO_ACCOUNTS 設定時のみ実走。
 # - "0 21,22,23,0 * * *" = JST 6,7,8,9 時。ETC 明細 (GCE cron etc-scrape-batch-env と
@@ -116,6 +118,20 @@ service = "nuxt-dtako-admin-scraper-relay-tail"
 #                          自前ログインすると互いに (そして人の) セッションを蹴り合う。
 #                          staging での検証は手動 route
 #                          (POST /kintai-relay/driver-master-run) を必要な時だけ叩く。
+# - "*/10 * * * *"       = 10 分おき。theearth の DVR (ドラレコ映像) 通知を
+#                          rust-alc-api へ取り込む (Refs #1094)。旧 pipeline (VPS が
+#                          10 分おきに scrape → Cloud Run へ push) と同じ間隔。
+#                          DVR_TARGETS ([{comp_id}]) 設定時のみ実走 — **DTAKO_ACCOUNTS
+#                          全件に倒さない** (DVR を運用しているのは 1 社だけで、持たない
+#                          会社まで 10 分おきに theearth へ入ると既存 cron と蹴り合う)。
+#                          **KV DTAKO_CONFIG_KV の dvr_targets が正**で、dashboard の
+#                          plain var は fallback (netprint_targets と同じ流儀)。
+#                          ★ **staging には足さない** — DVR cron は DTAKO_ACCOUNTS の
+#                          service account で theearth に**自前ログイン**する。staging にも
+#                          置くと同一アカウントの同時ログイン制約 (Refs #233) で 10 分おきに
+#                          本番とセッションを奪い合い、**本番の DVR 取り込みと dtako 日次の
+#                          両方が落ちる**。staging での検証は `wrangler dev --local` と
+#                          POST /kintai-relay/dvr-status (結末を読むだけ) で行う。
 [triggers]
 crons = [
   "0 16 * * *",
@@ -123,6 +139,7 @@ crons = [
   "0 19 * * *",
   "30 21 * * *",
   "0 22,3,6,8,10 * * *",
+  "*/10 * * * *",
 ]
 
 # ETC 明細 CSV の保存先 (app 本体の DTAKO_R2 と同じ dtako-uploads bucket)。
@@ -266,6 +283,23 @@ enabled = true
 [[env.staging.tail_consumers]]
 service = "nuxt-dtako-admin-scraper-relay-tail-staging"
 
+# ★ 本番 [triggers] の 6 本のうち 2 本を**意図的に外している** —
+# "0 22,3,6,8,10 * * *" (乗務員マスタ同期、Refs ippoan/alc-app-s3#125) と
+# "*/10 * * * *" (DVR 取り込み、Refs #1094)。理由の本体は top-level [triggers] の
+# 各 cron の項に書いてある (この 2 本だけ「staging には足さない」と明記されている)。
+#
+# ★ **「staging は theearth に自前ログインしない」ではない** (2026-09-03 実測)。
+# ここに残っている "0 16 * * *" (dtako 日次) は staging でも実走する —
+# [env.staging.vars] に SCRAPER_MODE = "http" があり、DTAKO_CONFIG_KV は**本番と同じ
+# namespace** (id 56a36cc6…) なので dtako_accounts も読めるため。
+# **分かれ目はログインの有無ではなく頻度。** 1 日 1 回なら衝突窓が狭く staging で
+# 試験する価値が上回るが、10 分おきは本番と恒常的にセッションを奪い合う
+# (theearth は同一アカウントの同時ログインを許さない、Refs #233)。
+#
+# 残る 3 本が theearth へ自前ログインしない理由 (コードで確認):
+# "0 21,22,23,0 * * *" (ETC) は別サイト (etc-meisai)。"0 19 * * *" (拘束サマリ) と
+# "30 21 * * *" (netprint) は、staging が KINTAI_COMP_ID を持たないので
+# **DO を呼ぶ前に** cron.ts 側で止まる (judgeFoldScope / KINTAI_COMP_ID 未設定の分岐)。
 [env.staging.triggers]
 crons = [
   "0 16 * * *",

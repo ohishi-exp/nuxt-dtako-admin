@@ -3,6 +3,8 @@ import {
   CronConfigError,
   DRIVER_MASTER_SYNC_CRON,
   DTAKO_CRON,
+  DVR_CRON,
+  DVR_TARGETS_KV_KEY,
   ETC_CRON,
   NETPRINT_CRON,
   RESTRAINT_SYNC_CRON,
@@ -10,9 +12,11 @@ import {
   dispatchNetprintTargets,
   etcCsvKey,
   parseDtakoAccounts,
+  parseDvrTargets,
   parseEtcAccounts,
   prevYm,
   resolveDtakoAccountsRaw,
+  resolveDvrTargetsRaw,
   asWritableConfigKv,
   resolveNetprintTargetsRaw,
   resolveSecretBinding,
@@ -617,5 +621,116 @@ describe('asWritableConfigKv', () => {
     // 「保存したのに変わらない」が一番たちが悪い (宛先が古いまま日報が飛ぶ)。
     expect(asWritableConfigKv({ get: async () => null })).toBeNull()
     expect(asWritableConfigKv({ put: async () => {} })).toBeNull()
+  })
+})
+
+describe('parseDvrTargets', () => {
+  it('未設定 (undefined / 空文字) は空配列 = cron skip', () => {
+    expect(parseDvrTargets(undefined)).toEqual([])
+    expect(parseDvrTargets('')).toEqual([])
+  })
+
+  it('comp_id だけを取り出す (前後の空白は落とす)', () => {
+    expect(parseDvrTargets('[{"comp_id":" 27324455 "}]')).toEqual([{ comp_id: '27324455' }])
+  })
+
+  it('JSON 不正 / 非配列は loud fail', () => {
+    expect(() => parseDvrTargets('{')).toThrow(CronConfigError)
+    expect(() => parseDvrTargets('{"comp_id":"x"}')).toThrow(/JSON 配列である必要があります/)
+  })
+
+  it('★ comp_id を持たない要素は黙って捨てず設定ミスとして落とす', () => {
+    expect(() => parseDvrTargets('[{"comp_id":"27324455"},{}]')).toThrow(
+      /2 件目に comp_id がありません/,
+    )
+    expect(() => parseDvrTargets('[{"comp_id":"  "}]')).toThrow(/1 件目に comp_id がありません/)
+    expect(() => parseDvrTargets('[null]')).toThrow(/1 件目に comp_id がありません/)
+    expect(() => parseDvrTargets('[{"comp_id":7}]')).toThrow(/1 件目に comp_id がありません/)
+  })
+})
+
+describe('resolveDvrTargetsRaw', () => {
+  it('KV の dvr_targets が正、無ければ plain 変数へ落ちる', async () => {
+    const kv = { get: async (key: string) => (key === DVR_TARGETS_KV_KEY ? '[{"comp_id":"kv"}]' : null) }
+    expect(await resolveDvrTargetsRaw(kv, '[{"comp_id":"plain"}]')).toBe('[{"comp_id":"kv"}]')
+    expect(await resolveDvrTargetsRaw({ get: async () => null }, '[{"comp_id":"plain"}]')).toBe(
+      '[{"comp_id":"plain"}]',
+    )
+    expect(await resolveDvrTargetsRaw(undefined, undefined)).toBe('')
+  })
+})
+
+describe('runScheduledCron — DVR_CRON', () => {
+  const now = new Date('2026-07-03T10:00:00Z')
+
+  it('★ DVR_TARGETS 未設定は skip — DTAKO_ACCOUNTS 全件に倒さない', async () => {
+    const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+    const results = await runScheduledCron(
+      DVR_CRON,
+      // DTAKO_ACCOUNTS が 2 社ぶん設定されていても 1 件も dispatch しない
+      { dtakoAccountsRaw: DTAKO_ACCOUNTS_JSON },
+      okDoCall(calls),
+      now,
+    )
+    expect(calls).toEqual([])
+    expect(results).toEqual([
+      { kind: 'dvr', target: '*', ok: true, detail: 'DVR_TARGETS 未設定のため skip' },
+    ])
+  })
+
+  it('★ 名指しされた会社の scraper-comp DO の /cron/dvr だけを叩く (相乗り)', async () => {
+    const calls: Array<{ doKey: string; path: string; body: Record<string, string> }> = []
+    const results = await runScheduledCron(
+      DVR_CRON,
+      { dtakoAccountsRaw: DTAKO_ACCOUNTS_JSON, dvrTargetsRaw: '[{"comp_id":"27324455"}]' },
+      okDoCall(calls),
+      now,
+    )
+    expect(calls).toEqual([
+      { doKey: 'scraper-comp-27324455', path: '/cron/dvr', body: { comp_id: '27324455' } },
+    ])
+    expect(results).toEqual([
+      { kind: 'dvr', target: '27324455', ok: true, detail: 'HTTP 202: {"accepted":true}' },
+    ])
+  })
+
+  it('DO が非 2xx を返したら ok=false で本文を載せる', async () => {
+    const results = await runScheduledCron(
+      DVR_CRON,
+      { dvrTargetsRaw: '[{"comp_id":"27324455"}]' },
+      async () => ({ ok: false, status: 502, text: '{"error":"theearth 500"}' }),
+      now,
+    )
+    expect(results).toEqual([
+      { kind: 'dvr', target: '27324455', ok: false, detail: 'HTTP 502: {"error":"theearth 500"}' },
+    ])
+  })
+
+  it('DO 呼び出しが例外でも 1 社に閉じる (他社は回る)', async () => {
+    const results = await runScheduledCron(
+      DVR_CRON,
+      { dvrTargetsRaw: '[{"comp_id":"aaa"},{"comp_id":"bbb"}]' },
+      async (doKey) => {
+        if (doKey === 'scraper-comp-aaa') throw new Error('binding down')
+        return { ok: true, status: 202, text: 'ok' }
+      },
+      now,
+    )
+    expect(results).toEqual([
+      { kind: 'dvr', target: 'aaa', ok: false, detail: 'binding down' },
+      { kind: 'dvr', target: 'bbb', ok: true, detail: 'HTTP 202: ok' },
+    ])
+  })
+
+  it('Error でない throw も文字列化して残す', async () => {
+    const results = await runScheduledCron(
+      DVR_CRON,
+      { dvrTargetsRaw: '[{"comp_id":"aaa"}]' },
+      async () => {
+        throw 'not an Error'
+      },
+      now,
+    )
+    expect(results).toEqual([{ kind: 'dvr', target: 'aaa', ok: false, detail: 'not an Error' }])
   })
 })
