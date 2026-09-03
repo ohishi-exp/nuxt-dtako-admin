@@ -1,10 +1,9 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import {
   ALLOWED_ORIGIN_KV_KEY,
   ALLOWED_USER_IDS_KV_KEY,
-  _clearConfigCacheForTest,
   resolveAllowedOrigin,
   resolveAllowedUserIds,
 } from '../src/config'
@@ -20,22 +19,14 @@ function kvOf(entries: Record<string, string>) {
   }
 }
 
-// cache は module スコープなので、テスト間で値が漏れないよう毎回消す。
-beforeEach(() => {
-  _clearConfigCacheForTest()
-  vi.useRealTimers()
-})
-
 describe('resolveAllowedOrigin / resolveAllowedUserIds', () => {
   it('KV に値があれば KV が勝つ (plain は使わない)', async () => {
     expect(await resolveAllowedOrigin(kvOf({ [ALLOWED_ORIGIN_KV_KEY]: 'kv' }), 'plain')).toBe('kv')
-    _clearConfigCacheForTest()
     expect(await resolveAllowedUserIds(kvOf({ [ALLOWED_USER_IDS_KV_KEY]: 'kv' }), 'plain')).toBe('kv')
   })
 
   it('KV に無ければ plain へ落ちる', async () => {
     expect(await resolveAllowedOrigin(kvOf({}), 'plain')).toBe('plain')
-    _clearConfigCacheForTest()
     expect(await resolveAllowedUserIds(kvOf({}), 'plain')).toBe('plain')
   })
 
@@ -45,14 +36,12 @@ describe('resolveAllowedOrigin / resolveAllowedUserIds', () => {
 
   it('binding が無くても plain で動く', async () => {
     expect(await resolveAllowedOrigin(undefined, 'plain')).toBe('plain')
-    _clearConfigCacheForTest()
     expect(await resolveAllowedUserIds({ notKv: true }, 'plain')).toBe('plain')
   })
 
   // 陰性対照: どちらにも無ければ undefined = 呼び出し側が fail-closed する材料。
   it('KV にも plain にも無ければ undefined', async () => {
     expect(await resolveAllowedOrigin(kvOf({}), undefined)).toBeUndefined()
-    _clearConfigCacheForTest()
     expect(await resolveAllowedUserIds(undefined, undefined)).toBeUndefined()
   })
 
@@ -68,30 +57,28 @@ describe('resolveAllowedOrigin / resolveAllowedUserIds', () => {
   })
 })
 
-describe('in-memory cache (auth-worker の CACHE_TTL_MS = 60s と同じ)', () => {
-  it('2 回目は KV を叩かない', async () => {
+describe('cache を置かない (kv key put が即効くことが要件)', () => {
+  // `auth-worker` の `origins:wt` と同じ分類。cache を入れると、取り下げた値が
+  // 最大 60 秒配られ続け、「投入したのに 404」の切り分けが KV の伝播と cache の
+  // 二重になる (config.ts の doc 参照)。
+  it('同じ値を 2 回解決したら KV を 2 回読む', async () => {
     const kv = kvOf({ [ALLOWED_ORIGIN_KV_KEY]: 'kv' })
     expect(await resolveAllowedOrigin(kv, undefined)).toBe('kv')
     expect(await resolveAllowedOrigin(kv, undefined)).toBe('kv')
-    expect(kv.calls).toHaveLength(1)
+    expect(kv.calls).toEqual([ALLOWED_ORIGIN_KV_KEY, ALLOWED_ORIGIN_KV_KEY])
   })
 
-  it('60 秒を過ぎたら読み直す (値の取り下げが反映される)', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-09-03T00:00:00Z'))
-    const first = kvOf({ [ALLOWED_ORIGIN_KV_KEY]: 'old' })
-    expect(await resolveAllowedOrigin(first, undefined)).toBe('old')
-
-    vi.setSystemTime(new Date('2026-09-03T00:00:59Z')) // まだ TTL 内
-    expect(await resolveAllowedOrigin(kvOf({}), undefined)).toBe('old')
-
-    vi.setSystemTime(new Date('2026-09-03T00:01:01Z')) // TTL 超過
-    const after = kvOf({})
-    expect(await resolveAllowedOrigin(after, undefined)).toBeUndefined()
-    expect(after.calls).toEqual([ALLOWED_ORIGIN_KV_KEY])
+  it('KV の値が変わったら次の解決で即反映される (投入が効く)', async () => {
+    expect(await resolveAllowedOrigin(kvOf({}), undefined)).toBeUndefined()
+    expect(await resolveAllowedOrigin(kvOf({ [ALLOWED_ORIGIN_KV_KEY]: 'new' }), undefined)).toBe('new')
   })
 
-  it('2 つのキーは別々にキャッシュされる', async () => {
+  it('KV から値が消えたら次の解決で即消える (取り下げが効く)', async () => {
+    expect(await resolveAllowedOrigin(kvOf({ [ALLOWED_ORIGIN_KV_KEY]: 'old' }), undefined)).toBe('old')
+    expect(await resolveAllowedOrigin(kvOf({}), undefined)).toBeUndefined()
+  })
+
+  it('2 つのキーはそれぞれ 1 回ずつ読まれる', async () => {
     const kv = kvOf({ [ALLOWED_ORIGIN_KV_KEY]: 'o', [ALLOWED_USER_IDS_KV_KEY]: 'u' })
     expect(await resolveAllowedOrigin(kv, undefined)).toBe('o')
     expect(await resolveAllowedUserIds(kv, undefined)).toBe('u')

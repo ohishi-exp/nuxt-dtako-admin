@@ -1,12 +1,6 @@
-import { beforeEach, describe, expect, it } from 'vitest'
-import { _clearConfigCacheForTest } from '../src/config'
+import { describe, expect, it } from 'vitest'
 import worker, { type Env } from '../src/index'
 import { fakeBucket, obj } from './fake-bucket'
-
-// config の cache は module スコープ。テスト間で allowlist が漏れないよう毎回消す。
-beforeEach(() => {
-  _clearConfigCacheForTest()
-})
 
 const ORIGIN = 'https://example.invalid'
 const KEY = 'etc/alice/2026-09-01/060005.csv'

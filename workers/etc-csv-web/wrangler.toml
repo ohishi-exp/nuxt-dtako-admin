@@ -69,8 +69,10 @@ head_sampling_rate = 1
 # 消えると fail-closed で全部 404 = 取り込み画面が黙って止まる。
 # **投入は最初の 1 回だけ。CI も deploy も書き換えない。** 手順は README.md。
 #
-# 流儀は auth-worker の `src/lib/config.ts` (KV-backed allowlist + 60s cache) に揃えて
-# あり、namespace もそれと同じものを read-only で借りている。
+# 流儀は auth-worker の `src/lib/config.ts` (KV-backed allowlist) に揃えてあり、
+# namespace もそれと同じものを read-only で借りている。**cache は置かない** —
+# `kv key put` / `delete` が即効くことが要件なので、あちらの `readKeyNoCache` 側の
+# 分類に当たる (理由は `src/config.ts` の doc)。
 #
 # ★★ この namespace には **OAuth の refresh token / DCR / device 系が同居**している。
 #   この worker が読むキーは `src/config.ts` の**コンパイル時定数 2 つだけ**

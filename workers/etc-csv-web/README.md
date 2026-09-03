@@ -99,9 +99,10 @@ CI が deploy しても、以下が未了だと **fail-closed で全部 404 / CO
    npx wrangler kv key get --remote --namespace-id <namespace-id> 'etc-csv:allowed-origin'
    ```
 
-   **反映は最大 60 秒遅れる** (worker 側に 60 秒の in-memory cache がある。
-   auth-worker の `CACHE_TTL_MS` と同じ流儀)。**取り下げ (allowlist から外す) も
-   同じだけ遅れる**ので、即座に止めたいときは worker を再 deploy して isolate ごと捨てる。
+   **worker 側に cache は無い。毎回 KV を読む**ので、投入も取り下げも
+   **`kv key put` / `kv key delete` がそのまま効く** (残るのは KV 自体の伝播だけ)。
+   auth-worker が `origins:wt` を `readKeyNoCache` で読んでいるのと同じ分類 —
+   受け側の認証が無いこの worker では、取り下げが遅れるのは受け入れられないため。
 
    **これは「手動 `wrangler deploy` 禁止」には当たらない** — deploy ではなく設定値の
    投入で、`DTAKO_ACCOUNTS` / `ETC_ACCOUNTS` と同じく**値の持ち主を人にしておく**ため

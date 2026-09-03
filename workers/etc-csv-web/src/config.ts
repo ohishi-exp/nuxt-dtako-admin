@@ -2,8 +2,8 @@
  * allowlist 2 つ (`user_id` / 許可オリジン) の解決。**KV が正、無ければ plain 変数**。
  *
  * 流儀は `auth-worker/src/lib/config.ts` (`KV-backed allowlist with in-memory cache`)
- * から借りている — キー名の `<scope>:<name>` 形式・60 秒の in-memory cache・
- * 「allowlist は秘密の値ではない」という置き場所の根拠。**コードは共通化しない**
+ * から借りている — キー名の `<scope>:<name>` 形式と、「allowlist は秘密の値ではない」
+ * という置き場所の根拠。**コードは共通化しない**
  * (別 repo。`keys.ts` の正規表現と同じ判断で、新しいパッケージ境界を作るコストのほうが
  * 大きい)。あちらの doc から:
  *
@@ -37,17 +37,8 @@ export const ALLOWED_USER_IDS_KV_KEY = 'etc-csv:allowed-user-ids'
 /** この worker が `AUTH_CONFIG` から読んでよいキーの全体。**増やさないこと。** */
 type EtcCsvConfigKey = typeof ALLOWED_ORIGIN_KV_KEY | typeof ALLOWED_USER_IDS_KV_KEY
 
-/** `auth-worker/src/lib/config.ts` の `CACHE_TTL_MS` と同じ 60 秒。 */
-const CACHE_TTL_MS = 60_000
-
-interface CacheEntry {
-  value: string
-  expiresAt: number
-}
-const cache = new Map<string, CacheEntry>()
-
 /**
- * KV から 1 キー読む。60 秒 in-memory cache。
+ * KV から 1 キー読む。**毎回読む — in-memory cache は置かない。**
  *
  * ★ **KV の読み取りが例外で失敗したら握らずそのまま投げる。** ここは
  * `auth-worker` の `readKey` (失敗を `""` に畳む) と**意図的に違える**:
@@ -57,22 +48,22 @@ const cache = new Map<string, CacheEntry>()
  * `user_id` / オリジンに配り続ける**。読めなければ配らない (5xx) 方を選ぶ。
  * (この方針は relay の `cron.ts` `resolveKvConfigRaw` と同じ。)
  *
- * ★ cache の代償: **投入も取り下げも最大 60 秒遅れる。** allowlist は日常的に
- * 動かす値ではないのでこれを受け入れる (`auth-worker` が `origins:wt` だけ
- * `readKeyNoCache` にしているのは、あちらが秒単位で書き換わるため)。
- * **取り下げを即時にしたいときは worker を再 deploy すれば isolate ごと消える。**
+ * ★ **なぜ cache しないか。** `auth-worker` は 60 秒の in-memory cache を持つが、
+ * `origins:wt` だけ `readKeyNoCache` で読んでいる — 「`wrangler kv key put` が
+ * **即効く**こと」が要件の allowlist だからである。**この worker の 2 キーは
+ * まさにそちらの分類**なので、流儀に揃えた結果として cache を置かない:
+ *   - この worker には受け側の認証が無い。**取り下げた `user_id` / オリジンが
+ *     最大 60 秒配られ続ける**のは、ここでは受け入れられない代償
+ *   - **「投入したのに 404」の切り分けが、KV の伝播と cache の二重になる。**
+ *     これが一番高くつく壊れ方
+ * 読み回数は問題にならない — 消費者はオンプレ画面のブラウザ 1 つで、人が押したときだけ
+ * `/list` 2 本 + `/download` 数本、**1 日に数回**。
  */
 async function readKey(kv: unknown, key: EtcCsvConfigKey): Promise<string> {
-  const now = Date.now()
-  const cached = cache.get(key)
-  if (cached && cached.expiresAt > now) return cached.value
-
-  let value = ''
   if (kv && typeof (kv as EtcCsvConfigKvBinding).get === 'function') {
-    value = (await (kv as EtcCsvConfigKvBinding).get(key)) ?? ''
+    return (await (kv as EtcCsvConfigKvBinding).get(key)) ?? ''
   }
-  cache.set(key, { value, expiresAt: now + CACHE_TTL_MS })
-  return value
+  return ''
 }
 
 /** 許可オリジン。KV `etc-csv:allowed-origin` が正、無ければ plain 変数。
@@ -91,9 +82,4 @@ export async function resolveAllowedUserIds(
   plain: string | undefined,
 ): Promise<string | undefined> {
   return (await readKey(kv, ALLOWED_USER_IDS_KV_KEY)) || plain
-}
-
-/** テスト専用の cache クリア (`auth-worker` の `_clearAllowedOriginsCache` と同じ位置づけ)。 */
-export function _clearConfigCacheForTest(): void {
-  cache.clear()
 }
