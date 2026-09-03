@@ -1,0 +1,18 @@
+{
+  "name": "nuxt-dtako-admin-etc-csv-web",
+  "private": true,
+  "type": "module",
+  "description": "R2 に溜まった ETC 明細 CSV を読み取り専用で配る Worker (Refs #1103)。",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260721.1",
+    "@types/node": "^22.10.0",
+    "@vitest/coverage-v8": "^4.1.9",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.2",
+    "wrangler": "^4.67.0"
+  }
+}

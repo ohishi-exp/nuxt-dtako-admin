@@ -10,9 +10,19 @@
  * も同時に防ぐ)。管理タブ (`/scraper` ETC タブ) の実行結果ログから `key` を受け
  * 取ってこの endpoint に誘導する。
  *
- * `requireAuth` で auth-worker ログイン必須にする — R2 read はここでしか gate
- * されないため (`/api/proxy` 等と違い backend への forward が無く、認証を backend
- * に委譲できない)。この admin 画面は「ログイン済み管理者は任意の comp_id/ETC
+ * `requireAuth` で auth-worker ログイン必須にする (`/api/proxy` 等と違い backend への
+ * forward が無く、認証を backend に委譲できないので、この route 自身が gate になる)。
+ *
+ * ★ ただし **この route は同じ R2 オブジェクトへの唯一の gate ではない** (Refs #1103)。
+ * `workers/etc-csv-web/` が同じ `etc/{user_id}/{date}/{time}.csv` を **無認証で**
+ * 配っている (停止した外部 VPS の gRPC サービスの置き換え。旧サービスが
+ * `allow_origin(Any)` + 受け側の認証 0 件の公開ホストだったことを踏まえたオーナー判断)。
+ * あちらが絞っているのは CORS の許可オリジンと user_id allowlist =
+ * 「どの画面が読めるか」であって「誰が読めるか」ではない。
+ * ⇒ ここの `requireAuth` は **admin 画面の入口**を塞ぐものであって、R2 に置いた
+ * ETC 明細そのものの秘匿性の根拠にはならない。
+ *
+ * この admin 画面は「ログイン済み管理者は任意の comp_id/ETC
  * アカウントを操作できる」設計 (dtako 側の comp_id トリガーと同じモデル、Refs
  * #134 の DTAKO_ACCOUNTS/ETC_ACCOUNTS がテナント非依存の共有リストであることに
  * 対応) なので、user_id と session の tenant を突き合わせる追加チェックは行わない。

@@ -1,0 +1,46 @@
+# etc-csv-web — R2 の ETC 明細 CSV を読み取り専用で配る worker (Refs #1103)。
+#
+# ★ この worker には受け側の認証が無い (無認証の公開配信)。理由と根拠は
+#   src/index.ts の冒頭 doc コメントを読むこと。
+#
+# ★ この repo は public。`ETC_CSV_ALLOWED_ORIGIN` / `ETC_CSV_ALLOWED_USER_IDS` は
+#   **dashboard の plain Environment Variable** で投入する (`ETC_ACCOUNTS` と同じ流儀)。
+#   ここにも コードにも値を書かない。手順は README.md。
+name = "nuxt-dtako-admin-etc-csv-web"
+account_id = "24b45709d060d957340180e995f0d373"
+main = "src/index.ts"
+compatibility_date = "2025-05-01"
+
+# 上の 2 変数は wrangler.toml に無いため、これが無いと deploy のたびに消える
+# (Wrangler の既定挙動: config に無い binding は deploy 時に削除される)。
+# 消えると allowlist が空になり fail-closed で全部 404 = 恒常的に壊れる。
+#
+# ★ `keep_vars` は top-level only (named environment 配下には書けない)。
+#   したがってこの worker に named environment (staging 等) を作ってはいけない
+#   (`workers/dtako-scraper-relay/wrangler.toml` の同じ注記を参照)。
+keep_vars = true
+
+# `*.workers.dev` の公開ルートを無効化する。入口は下の custom domain だけ。
+workers_dev = false
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+# ★ ホスト名は `*-dev` / `*-staging` / `*-preview` / `preview-*` のいずれにも
+#   一致させないこと。一致すると Cloudflare Access のワイルドカードアプリに
+#   巻き込まれ、ブラウザからの cross-origin fetch が preflight 403 で落ちる。
+#   (kyuyo-mcp.ippoan.org と同じ流儀の custom domain)
+[[routes]]
+pattern = "etc-csv.ippoan.org"
+custom_domain = true
+
+# 読み取り専用で bind する。この worker に書き込みの口は無い。
+[[r2_buckets]]
+binding = "DTAKO_R2"
+bucket_name = "dtako-uploads"
+
+[vars]
+# relay の cron が書いている prefix と一致させる
+# (`workers/dtako-scraper-relay/wrangler.toml` の同名 var。本番は "etc")。
+ETC_R2_PREFIX = "etc"

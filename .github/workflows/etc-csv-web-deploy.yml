@@ -1,0 +1,67 @@
+name: etc-csv-web worker
+
+# R2 の ETC 明細 CSV を読み取り専用で配る worker (Refs #1103)。
+# kyuyo-mcp と同じ single-env (staging = prod) 構成なので、
+# dtako-scraper-relay-tail のような staging/prod 分岐は無く `wrangler deploy` 一本。
+#
+# ★ named environment は作らない。`keep_vars` が top-level only で、named env だと
+#   dashboard の plain 変数 (ETC_CSV_ALLOWED_ORIGIN / ETC_CSV_ALLOWED_USER_IDS) が
+#   deploy のたびに消え、fail-closed で恒常的に壊れるため
+#   (workers/etc-csv-web/wrangler.toml の注記を参照)。
+#
+# pull_request: typecheck + test (coverage 100% gate) のみ、deploy は skip。
+# push(main/tag) / workflow_dispatch: 上記 gate に加えて deploy を実行。
+#
+# path filter に `server/api/etc-csv/download.get.ts` を入れてあるのは、この worker の
+# `ETC_CSV_KEY_PATTERN` がその route の写しで、test/key-pattern-parity.test.ts が
+# 両者の literal 一致を検査しているため。**本家だけを変えたときに落ちてほしい**ので、
+# worker 側が無変更でもこの gate を回す。
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'workers/etc-csv-web/**'
+      - 'server/api/etc-csv/download.get.ts'
+      - '.github/workflows/etc-csv-web-deploy.yml'
+  pull_request:
+    paths:
+      - 'workers/etc-csv-web/**'
+      - 'server/api/etc-csv/download.get.ts'
+      - '.github/workflows/etc-csv-web-deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers/etc-csv-web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # 依存は public npm の devDependencies だけ (GitHub Packages も git 依存も無い)
+      # ので `npm ci` が素で通る。
+      - name: Install deps
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Test (coverage 100% gate)
+        run: npx vitest run --coverage
+
+      # single-env (staging = prod)。手動 wrangler deploy は禁止、この CI 経由のみ。
+      - name: Deploy
+        if: github.event_name != 'pull_request'
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

@@ -1481,6 +1481,44 @@ dtako (csvdata.zip) と ETC (明細 CSV) の定期取得を VPS / GCE の cron �
   R2 の `{prefix}-errors/` に原本を残す (「黙って200」対策)。明細 0 件は
   `EtcMeisaiNoUsageError` で正常 skip 扱い。
 
+### ETC 明細 CSV の配信 (`workers/etc-csv-web/`、Refs #1103)
+
+上の cron が R2 に貯めた ETC 明細 CSV を**読み取り専用で配る別 worker**
+(`nuxt-dtako-admin-etc-csv-web`、custom domain `etc-csv.ippoan.org`、single-env)。
+消費者は**オンプレの社内 Web アプリの取り込み画面** (別 repo、private) で、
+停止した外部 VPS 上の gRPC サービスの置き換え。取り込みの POST 自体は認証 + CSRF 必須で
+ブラウザからしか行えないため、**「CSV をどこから取ってくるか」だけを差し替えている**。
+
+- 口は **GET 3 本 + OPTIONS だけ**。`/list?user_id=` (日付一覧、`delimitedPrefixes`)、
+  `/list?user_id=&date=` (その日の `[{key,size,uploaded}]`)、`/download?key=` (本体)。
+  **GET / OPTIONS 以外はすべて 405 で、書き込みの口は存在しない。**
+- `DTAKO_R2` (`dtako-uploads`) を read-only で bind し、上と同じ
+  `{ETC_R2_PREFIX}/{user_id}/{YYYY-MM-DD}/{HHMMSS}.csv` だけを読む。
+  **汎用の R2 lister ではない** — 任意の prefix を外から渡す口が無く、`ETC_R2_PREFIX`
+  自体も `etc` / `etc-staging` / `etc-preview` 以外なら 503 で止まる。
+  CSV は **Shift_JIS のまま**返す (`text/csv; charset=shift_jis`)。
+- **★ この worker には受け側の認証が無い (無認証の公開 ETC 明細配信)。**
+  置き換え対象の旧サービスが `allow_origin(Any)` + 受け側の認証 0 件の公開ホスト
+  だったことを踏まえたオーナー判断 (2026-09-03)。**CORS は認可ではない** — `Origin` を
+  送らない client (curl 等) は素通りで読める。守っているのは「どの画面が読めるか」
+  であって「誰が読めるか」ではない。**この比較は口ごとにしか言えないので、
+  新しい口を足すときはその口について旧構成と比べ直すこと。**
+- 実効的な絞りは 2 つだけで、**どちらも完全一致・未設定なら fail-closed**
+  (`ETC_CSV_ALLOWED_USER_IDS` 未設定 → 全部 404 / `ETC_CSV_ALLOWED_ORIGIN` 未設定 →
+  CORS ヘッダを付けない)。前方一致・後方一致・ワイルドカードは使っていない。
+  **値は dashboard の plain Environment Variable で投入する** (`ETC_ACCOUNTS` と
+  同じ流儀。**この repo は public なので値も内部ホスト名も書かない**)。
+- **★ named environment を作らないこと。** `keep_vars` は top-level only なので、
+  named env にすると上の 2 変数が deploy のたびに消え、fail-closed で恒常的に壊れる。
+- **★ Access 配下に置かないこと。** ホスト名を `*-dev` / `*-staging` / `*-preview` /
+  `preview-*` のいずれかに一致させると Access のワイルドカードアプリに巻き込まれ、
+  ブラウザからの cross-origin fetch が preflight 403 で落ちる。Access のアプリを
+  新設するのも同じ理由で不可。
+- 鍵の正規表現は `server/api/etc-csv/download.get.ts` の `ETC_CSV_KEY_PATTERN` の**写し**
+  (`server/` と `workers/` の間に実コードの import 前例が 0 件のため共通化していない)。
+  `test/key-pattern-parity.test.ts` が literal 一致を検査するので、**変えるときは
+  必ず両方を同時に変える**。deploy は `.github/workflows/etc-csv-web-deploy.yml` の CI のみ。
+
 ### 関連ファイル (cron)
 
 | ファイル | 役割 |
@@ -1490,6 +1528,8 @@ dtako (csvdata.zip) と ETC (明細 CSV) の定期取得を VPS / GCE の cron �
 | `workers/dtako-scraper-relay/src/index.ts` | `scheduled()` handler (cron → DO fetch 配線) |
 | `workers/dtako-scraper-relay/src/dtako-scraper-relay-do.ts` | `/cron/dtako` `/cron/etc` ハンドラ + ETC CSV の R2 保存 |
 | `workers/dtako-scraper-relay-tail/src/index.ts` | Tail Worker。producer の `ctx.waitUntil()` 内ログを転写 (下記 gotcha 参照) |
+| `workers/etc-csv-web/src/index.ts` | 薄い fetch handler (HTTP ↔ 判断の変換だけ)。GET/OPTIONS 以外は 405 |
+| `workers/etc-csv-web/src/{handlers,keys,allowlist,cors,r2}.ts` | 口の判断 / 鍵検証 / user_id allowlist / CORS 判定 / R2 list-get。専用 `vitest.config.ts` で `src/**` を 100% gate |
 
 ### ETC の CCoW 内検証 (cookie 委譲、Refs ippoan/cdp-relay#69)
 
