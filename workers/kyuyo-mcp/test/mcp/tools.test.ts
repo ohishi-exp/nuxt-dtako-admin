@@ -1558,6 +1558,10 @@ describe("ALL_TOOLS", () => {
     // 乗務員マスタ同期の直近 1 回の結末を DO から読むだけ (Refs ippoan/alc-app-s3#125)。
     // **同期は起動しない** — 走らせるのは run_driver_master_sync 側
     "get_driver_master_status",
+    // 車輌動態取り込みの直近 1 回の結末を DO から読むだけ (Refs #1098)。
+    // **取得は起動せず theearth にログインもしない** — 走らせるのは
+    // run_vehicle_state_sync 側
+    "get_vehicle_state_status",
     "get_operation_zip",
     "get_rest_diff",
     "get_restraint_summary",
@@ -1585,6 +1589,10 @@ describe("ALL_TOOLS", () => {
     run_dtako_reimport: "mcp.write",
     // alc (R2 CSV) を書き換えうるアップロード。オンプレは触らない (Refs #633-9)
     run_dtako_alc_upload: "mcp.write",
+    // theearth の車輌現在地 → alc の dtako_logs へ upsert (Refs #1098)。
+    // **1 呼び出しで theearth にログインする**ので、同時ログイン制約 (#233) の観点でも
+    // read tool と同じ扱いにしない
+    run_vehicle_state_sync: "mcp.write",
   } as const;
 
   it("read-only tool と write tool を取り違えない", () => {

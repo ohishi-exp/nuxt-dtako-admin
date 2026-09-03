@@ -17,8 +17,11 @@ import {
   asWritableConfigKv,
   dispatchNetprintTargets,
   NETPRINT_TARGETS_KV_KEY,
+  dispatchCompIdTargets,
   parseDtakoAccounts,
   parseDvrTargets,
+  parseVehicleStateTargets,
+  type CompIdTarget,
   resolveDtakoAccountsRaw,
   resolveDvrTargetsRaw,
   resolveNetprintTargetsRaw,
@@ -229,6 +232,22 @@ export default {
       // DVR 取り込み cron (10 分おき) の**直近 1 回の結末**を comp ごとに読む
       // (Refs #1094)。無音故障 (last_success_at が進まない) に気づくための口
       return handleDvrStatus(request, env);
+    }
+
+    if (url.pathname === "/kintai-relay/vehicle-state-run" && request.method === "POST") {
+      // 車輌動態 (dtako_logs) の取得を、cron (10 分おき) を待たずに 1 回走らせる
+      // (Refs #1098)。cron 経路と**同じ DO route (/cron/vehicle-state) へ同じ関数で**
+      // 転送する — 実機確認が「cron でだけ通る道」にならないようにするため
+      // (driver-master-run / netprint-run と同じ流儀)
+      return handleVehicleStateRun(request, env);
+    }
+
+    if (url.pathname === "/kintai-relay/vehicle-state-status" && request.method === "POST") {
+      // 車輌動態 (dtako_logs) 取り込み cron (10 分おき) の**直近 1 回の結末**を comp ごと
+      // に読む (Refs #1098)。dvr-status と同じく無音故障 (last_success_at が進まない)
+      // に気づくための口 — **この cron はまさにその故障で起票された**ので、対になる
+      // 読み口を欠かさない
+      return handleVehicleStateStatus(request, env);
     }
 
     if (url.pathname === "/kintai-relay/netprint-targets" && request.method === "GET") {
@@ -1138,14 +1157,133 @@ export function handleDvrStatus(request: Request, env: RelayWorkerEnv): Promise<
 }
 
 /**
- * `scraper-comp-{compId}` DO が 1 件だけ持つ「直近 1 回の結末」を読む 2 route
- * (`driver-master-status` / `dvr-status`) の共通部。**読むだけ** — 同期を起動しない。
+ * `POST /kintai-relay/vehicle-state-run` — 車輌動態 (`dtako_logs`) の取得を、cron
+ * (10 分おき) を待たずに 1 回走らせる手動口 (Refs #1098)。
+ *
+ * ## ★ cron と同じ関数で同じ DO route へ転送する
+ *
+ * `runScheduledCron` が使う `dispatchCompIdTargets` を**そのまま**呼ぶ。検証専用の
+ * 別経路を作ると「手で叩くと通るのに cron では通らない」(逆も) を作れてしまう
+ * (`handleDriverMasterRun` の doc と同じ理由)。応答も cron の
+ * `CronRunResult[]` と同じ形なので、**Workers Logs に出る cron の行と直接見比べられる**。
+ *
+ * ## ★ theearth へ実際にログインする — 連打しない
+ *
+ * この口は DO の `/cron/vehicle-state` を叩き、その先で theearth へ**自前ログイン**する。
+ * theearth は同一アカウントの同時ログインを許さない (Refs #233) ので、**連打すると
+ * DVR 取り込みや dtako 日次のセッションを蹴る**。DO の `scrapeQueue` が直列化するので
+ * 壊れはしないが、待たされるうえ相手を蹴る。
+ *
+ * body は `{comp_id?}`。省略時の既定は **`VEHICLE_STATE_TARGETS` が名指しした会社だけ**。
+ * **0 件なら 404 で名指しして落とす** — 手で押した人に「200 だが何も起きていない」を
+ * 返さない (cron 経路が `ok: true` の skip を返すのとはここだけ意図的に違う。
+ * 無人実行は「対象が無いのは正常」だが、手動実行は「押したのに動かない」が答えとして
+ * 成立しないため)。
+ */
+export async function handleVehicleStateRun(
+  request: Request,
+  env: RelayWorkerEnv,
+): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  let body: { comp_id?: unknown };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return fail(400, "body must be JSON");
+  }
+  const compId = typeof body.comp_id === "string" ? body.comp_id.trim() : "";
+
+  let targets: CompIdTarget[];
+  if (compId) {
+    targets = [{ comp_id: compId }];
+  } else {
+    const targetsRaw = await resolveVehicleStateTargetsRaw(
+      env.DTAKO_CONFIG_KV,
+      env.VEHICLE_STATE_TARGETS,
+    );
+    try {
+      targets = parseVehicleStateTargets(targetsRaw);
+    } catch (err) {
+      // 設定が壊れているのを「該当なし」(404) と同じ顔にしない (Refs #944 の分類)。
+      return fail(503, err instanceof Error ? err.message : String(err));
+    }
+    if (targets.length === 0) {
+      return fail(404, "VEHICLE_STATE_TARGETS が未設定です (comp_id を明示すれば 1 社だけ走ります)");
+    }
+  }
+
+  const results = await dispatchCompIdTargets(
+    "vehicle-state",
+    targets,
+    "/cron/vehicle-state",
+    "VEHICLE_STATE_TARGETS",
+    async (doKey, path, doBody) => {
+      const id = env.RELAY.idFromName(doKey);
+      const res = await env.RELAY.get(id).fetch(`https://relay.internal${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(doBody),
+      });
+      return { ok: res.ok, status: res.status, text: await res.text() };
+    },
+  );
+
+  // 1 社でも通れば 200、**全社失敗のときだけ 502** (`handleDriverMasterRun` と同じ)。
+  return new Response(JSON.stringify({ results }), {
+    status: results.some((r) => r.ok) ? 200 : 502,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * `POST /kintai-relay/vehicle-state-status` — 車輌動態 (`dtako_logs`) 取り込み cron の
+ * **直近 1 回の結末**を comp ごとに返す (Refs #1098)。
+ *
+ * ## なぜ要るか
+ *
+ * **この cron は「取得が止まったのに誰も気づけなかった」ことで起票された。**
+ * 画面 (`dtako-logs`) の最終更新時刻から逆算するしかなく、「取得が止まっている」のか
+ * 「取得はできているが表示が古い」のかが割れなかった。DO が 1 件だけ持つ結末を
+ * ここから読めば **1 回の POST で割れる**。
+ *
+ * body は `{comp_id?}`。省略時の既定は **`VEHICLE_STATE_TARGETS` が名指しした会社だけ**
+ * (`DTAKO_ACCOUNTS` 全社ではない) — 対象外の会社の DO を読んでも常に `last: null` が
+ * 返るだけで、**「止まっている」と「そもそも対象外」が見分けられなくなる**
+ * (`handleDvrStatus` と同じ理由)。
+ */
+export function handleVehicleStateStatus(
+  request: Request,
+  env: RelayWorkerEnv,
+): Promise<Response> {
+  return handleDoLastRunStatus(request, env, "/cron/vehicle-state/last", async () => {
+    const targetsRaw = await resolveVehicleStateTargetsRaw(
+      env.DTAKO_CONFIG_KV,
+      env.VEHICLE_STATE_TARGETS,
+    );
+    return parseVehicleStateTargets(targetsRaw).map((t) => t.comp_id);
+  });
+}
+
+/**
+ * `scraper-comp-{compId}` DO が 1 件だけ持つ「直近 1 回の結末」を読む 3 route
+ * (`driver-master-status` / `dvr-status` / `vehicle-state-status`) の共通部。
+ * **読むだけ** — 同期を起動しない。
  *
  * cron の実行履歴は Cloudflare 側からしか見えず、「あの回は成功したのか」を後から
  * 確かめる術が無い。DO が持つ 1 行をここから読む。`doPath` が読む先を、
  * `resolveDefaultCompIds` が「comp_id 省略時の母集団」を決める — **母集団は
  * cron ごとに違う**ので注入する (乗務員マスタは DTAKO_ACCOUNTS 全社、DVR は
- * DVR_TARGETS だけ)。
+ * DVR_TARGETS だけ、車輌動態は VEHICLE_STATE_TARGETS だけ)。
  */
 async function handleDoLastRunStatus(
   request: Request,
