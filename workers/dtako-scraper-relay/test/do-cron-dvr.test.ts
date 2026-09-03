@@ -254,7 +254,8 @@ describe("DtakoScraperRelayDO#runDvrCron", () => {
         vehicle_name: "大型1号",
         driver_name: "運転 太郎",
         event_type: "急ブレーキ",
-        dvr_datetime: "2026/07/03 18:32:26",
+        // ★ 生の theearth 表記ではなく RFC3339 (UTC)。生だと rust が 422 を返す。
+        dvr_datetime: "2026-07-03T09:32:26Z",
         source_url: "notify/F1.vdf",
       },
     ]);
@@ -426,6 +427,35 @@ describe("DtakoScraperRelayDO#runDvrCron", () => {
     expect(stale).toHaveLength(1);
     expect(stale[0]!.comp_id).toBe(COMP_ID);
     expect(Number(stale[0]!.hours_since_last_success)).toBeGreaterThan(3);
+  });
+
+  it("★ 窓に 1 件も無いときは alc を 1 度も叩かず、それでも成功として記録する", async () => {
+    // rust は `items: []` を 400 で弾き、relay は非 2xx で throw する。素で POST すると
+    // 「48h 窓に 1 件も無かった」だけで cron run 全体が失敗し、`last_success_at` が
+    // 進まないまま無音故障まで鳴っていた。稼働の少ない comp では普通に起きる。
+    stubTheearth([]);
+    // ★ 応答を 1 本も積まない = alc を叩いた瞬間 "unexpected extra alc call" で落ちる。
+    const { alcCalls, run, stored } = makeDO([]);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const res = await run(ACCOUNT, "shared-1");
+
+    expect(res.status).toBe(200);
+    expect(alcCalls).toEqual([]);
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      comp_id: COMP_ID,
+      notifications: 0,
+      in_window: 0,
+      // ★ 件数は 0 で埋まる (null = 「そこまで到達していない」ではない)
+      inserted: 0,
+      skipped: 0,
+      pending: 0,
+    });
+    // ★ ここが本体 — 成功として記録され、無音故障の時計が進む。
+    const last = stored.get("dvr_last_run") as DvrCronLastRun;
+    expect(last.ok).toBe(true);
+    expect(last.last_success_at).not.toBeNull();
   });
 
   it("theearth が落ちたら 502 + どこまで進んだかを応答に残す (alc は 1 度も叩かない)", async () => {

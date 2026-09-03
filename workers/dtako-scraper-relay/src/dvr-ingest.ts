@@ -92,6 +92,30 @@ export function parseTheearthDatetimeJst(raw: string | null): number | null {
   return utcish - 9 * 3_600_000;
 }
 
+/**
+ * theearth の日時を rust の `Option<DateTime<Utc>>` が読める **RFC3339 (UTC)** に直す。
+ * 読めない値・空文字・欠損はすべて `null`。
+ *
+ * **空文字を送らないのが要点** — rust 側は `Option<DateTime<Utc>>` なので、`""` も
+ * theearth の生表記 (`2026/07/03 18:32:26`) も同じく deserialize に失敗し、
+ * **その 1 件だけでなく body 全体が 422** になる (本番で実際に出た。Refs #1094)。
+ *
+ * JST の扱いは `parseTheearthDatetimeJst` を**再利用する**ので、日時の解釈が
+ * この module 内で 2 通りに割れない (theearth のサーバーローカル = JST。
+ * `theearth-venus-client.ts` の `開始日時` の doc 参照)。
+ *
+ * 最後に RFC3339 の形へ当て直しているのは、`parseTheearthDatetimeJst` が
+ * 月日の桁溢れ (`2026/99/99`) を繰り上げに任せているため — 繰り上がって西暦 5 桁に
+ * なると `toISOString()` が拡張表記 (`+010008-…`) を返し、これは RFC3339 ではない。
+ * **そこで 1 件を捨てる方が、body 全体を 422 にするより安い。**
+ */
+export function toDvrDatetimeRfc3339(raw: string | null): string | null {
+  const at = parseTheearthDatetimeJst(raw);
+  if (at === null) return null;
+  const m = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.\d{3}Z$/.exec(new Date(at).toISOString());
+  return m === null ? null : `${m[1]}Z`;
+}
+
 export interface DvrWindowSelection {
   /** 窓に入った通知 (**日時が読めなかったものも含む**)。 */
   recent: DvrNotification[];
@@ -134,14 +158,24 @@ export interface DvrIngestItem {
   vehicle_name: string;
   driver_name: string;
   event_type: string;
-  dvr_datetime: string;
+  /**
+   * 録画日時を **RFC3339 (UTC)** に直したもの。rust 側は `Option<DateTime<Utc>>` で
+   * 受けるので、theearth の生表記 (`2026/07/03 18:32:26` / `2026-07-01T23:00:59`、
+   * **どちらもタイムゾーン表記なし**) をそのまま送ると body 全体が 422 になる。
+   *
+   * ★ **`source_url` と並んで `null` を送る 2 欄のうちの 1 つ。** 読めない値も空文字も
+   * 欠損もすべて `null` に畳む (`toDvrDatetimeRfc3339` 参照) — 空文字は RFC3339 として
+   * 不正なので、倒した先が生の文字列と同じ 422 になる。
+   */
+  dvr_datetime: string | null;
   /**
    * 由来 — theearth 通知行の `FilePath`。**fetch できる URL ではない**
    * (`/dvrData/` の実パスは `Request_DvrFileDownload` がその都度作る一時パスで、
    * 通知行から決定論的には組み立てられない。`theearth-venus-client.ts` 参照)。
    * rust 側は nullable・URL 検証なし・重複判定に使わない (provenance だけの欄)。
    *
-   * ★ **この欄だけ `null` を送る。** 他の文字列列と違って空文字に倒さない —
+   * ★ **`dvr_datetime` と並んで `null` を送る 2 欄のうちの 1 つ。** 他の文字列列と
+   * 違って空文字に倒さない —
    * 空文字と null が混ざると「theearth が値を持っていなかった」と「欄ごと無かった」を
    * 後から区別できなくなる。**空文字も null に畳む** (theearth は `FilePath: ""` を
    * 実際に返す) ので、**`null` = 由来なし の 1 通りだけ**になる。
@@ -156,10 +190,11 @@ export interface DvrIngestItemBuild {
   unusable: number;
 }
 
-/** 通知行を ingest の `items[]` に直す。欠けている文字列列は空文字に倒す
+/** 通知行を ingest の `items[]` に直す。欠けている**表示用の**文字列列は空文字に倒す
  * (rust 側が `NOT NULL` を期待している列に `null` を送らない)。
- * **例外は `source_url` だけ** — あちらは nullable なので空文字ごと `null` に畳む
- * (`DvrIngestItem.source_url` の doc 参照)。 */
+ * **例外は nullable な 2 欄 `source_url` と `dvr_datetime`** — 前者は空文字ごと
+ * `null` に畳み、後者は RFC3339 (UTC) に直して読めなければ `null` にする
+ * (それぞれの欄の doc 参照)。 */
 export function toDvrIngestItems(notifications: DvrNotification[]): DvrIngestItemBuild {
   const items: DvrIngestItem[] = [];
   let unusable = 0;
@@ -177,8 +212,9 @@ export function toDvrIngestItems(notifications: DvrNotification[]): DvrIngestIte
       vehicle_name: n.vehicleName ?? "",
       driver_name: n.driverName ?? "",
       event_type: n.eventType ?? "",
-      dvr_datetime: n.dvrDatetime ?? "",
-      // ★ 空文字も null に畳む (この列だけ nullable)。
+      // ★ 生の theearth 表記も空文字も rust の `DateTime<Utc>` では 422。
+      dvr_datetime: toDvrDatetimeRfc3339(n.dvrDatetime),
+      // ★ 空文字も null に畳む (dvr_datetime と並ぶ nullable な 2 列目)。
       source_url: n.filePath === "" ? null : n.filePath,
     });
   }
@@ -352,6 +388,18 @@ export async function postDvrNotifications(
   input: DvrNotificationsIngestInput,
   fetchImpl: FetchLike,
 ): Promise<DvrNotificationsIngestResult> {
+  // ★ **空バッチは打たない。** rust 側は `items: []` を 400 で弾く
+  // (「`items` が空なら 400 (relay の bug を無言の 200 で隠さない)」= **空を送るな**という
+  // relay 向けの契約) 一方、`sendViaAlcInternalProxy` は非 2xx で throw する。
+  // ⇒ 素で投げると「48h 窓に 1 件も無かった」だけで **cron run 全体が失敗**し、
+  // `last_success_at` が進まないまま `DVR_STALE_ALERT_HOURS` 後に無音故障まで鳴る。
+  // 稼働の少ない comp・連休・`unusable` で全件落ちたときに普通に起きる条件。
+  //
+  // 打たなかったことは **0 件**として応答に載せる — `null` (「そこまで到達していない」)
+  // とは混ぜない (`DvrNotificationsIngestResult` の doc 参照)。件数が消えないので
+  // 観測性は落ちない。
+  if (input.items.length === 0) return { inserted: 0, skipped: 0, pending: [] };
+
   const text = await sendViaAlcInternalProxy(
     {
       path: DVR_NOTIFICATIONS_INGEST_PATH,
