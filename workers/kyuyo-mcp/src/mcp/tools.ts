@@ -2014,6 +2014,62 @@ export const runDriverMasterSyncTool = {
   },
 };
 
+// ── get_driver_master_status ─────────────────────────────────────────────────
+
+const getDriverMasterStatusArgs = z
+  .object({
+    comp_id: z
+      .string()
+      .regex(/^\d{8}$/)
+      .optional()
+      .describe("会社 (8桁の数字)。**省略すると DTAKO_ACCOUNTS の全社ぶん**を返す"),
+  })
+  .strict();
+
+/**
+ * 乗務員マスタ同期の**直近 1 回の結末**を読む (Refs ippoan/alc-app-s3#125)。
+ *
+ * **cron (JST 7/12/15/17/19 時) が走ったか・成功したかを後から確かめる唯一の口。**
+ * Cloudflare の cron 実行履歴は外から読めず、結果は Workers Logs にしか残っていな
+ * かった。relay の DO が comp ごとに 1 件だけ持つ結末をそのまま返す。
+ *
+ * **読むだけ — 同期は起動しない** (走らせるのは `run_driver_master_sync`)。
+ */
+export const getDriverMasterStatusTool = {
+  name: "get_driver_master_status",
+  description:
+    "乗務員マスタ同期 (theearth → alc) の**直近 1 回の結末**を comp ごとに読む " +
+    "(Refs ippoan/alc-app-s3#125)。**読むだけ — 同期は起動しない** (走らせるのは " +
+    "run_driver_master_sync)。**cron (JST 7/12/15/17/19 時) が走ったか・成功したかを " +
+    "後から確かめる口** — Cloudflare の cron 実行履歴は外から読めないため、relay の DO が " +
+    "1 件だけ持つ結末をここから読む。各 comp の `last` は `{trigger, started_at, " +
+    "finished_at, ok, rows, items, retired, chunks, created, updated, skipped, error}`。" +
+    "**`trigger` が `cron` なら無人実行、`manual` なら画面か run_driver_master_sync**。" +
+    "**`last` が null は「1 度も走っていない」ではなく「この DO に記録が無い」** — " +
+    "記録を残すようになる前の実行と、DO が作り直された後は null になる。comp_id を " +
+    "省略すると DTAKO_ACCOUNTS の全社ぶんを返す。",
+  inputSchema: getDriverMasterStatusArgs,
+  execute: async (env: Env, args: z.infer<typeof getDriverMasterStatusArgs>) => {
+    const relay = env.SCRAPER_RELAY;
+    if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です");
+    const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+    if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+
+    const res = await relay.fetch("https://relay.internal/kintai-relay/driver-master-status", {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Alc-Proxy-Secret": secret },
+      body: JSON.stringify(args.comp_id ? { comp_id: args.comp_id } : {}),
+    });
+    const body = await res.text();
+    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
+    try {
+      return JSON.parse(body) as unknown;
+    } catch {
+      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
+    }
+  },
+};
+
 // ── get_kintai_day_summaries ─────────────────────────────────────────────────
 
 const getKintaiDaySummariesArgs = z.object({
@@ -3284,6 +3340,7 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   runKintaiRecalcTool as unknown as ToolEntry<z.ZodTypeAny>,
   runKintaiRestraintSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDriverMasterSyncTool as unknown as ToolEntry<z.ZodTypeAny>,
+  getDriverMasterStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDtakoScrapeTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDtakoScrapeStatusTool as unknown as ToolEntry<z.ZodTypeAny>,
   getDtakoScrapeProgressTool as unknown as ToolEntry<z.ZodTypeAny>,

@@ -121,17 +121,27 @@ function makeDO(upstream: { status: number; body: string } | Array<{ status: num
       },
     },
   }
+  const stored = new Map<string, unknown>()
   const ctx = {
     setWebSocketAutoResponse: () => {},
-    storage: { get: async () => undefined, put: async () => {}, delete: async () => {} },
+    storage: {
+      get: async (key: string) => stored.get(key),
+      put: async (key: string, value: unknown) => {
+        stored.set(key, value)
+      },
+      delete: async () => {},
+    },
   }
   const relay = new DtakoScraperRelayDO(ctx as never, env as never)
   const run = (
     relay as unknown as {
-      runDriverMasterSync(account: { comp_id: string; tenant_id: string; user_name: string; user_pass: string }): Promise<Response>
+      runDriverMasterSync(
+        account: { comp_id: string; tenant_id: string; user_name: string; user_pass: string },
+        trigger?: 'cron' | 'manual',
+      ): Promise<Response>
     }
   ).runDriverMasterSync.bind(relay)
-  return { calls, run }
+  return { calls, run, stored }
 }
 
 const ACCOUNT = ACCOUNTS[0]!
@@ -352,5 +362,53 @@ describe('DtakoScraperRelayDO#runDriverMasterSync', () => {
     expect((await res.json() as { error: string }).error).toContain('AUTH_WORKER_RPC binding がありません')
     // binding が無いと分かっている時に人のセッションを蹴りにいかない
     expect(fetchCalls).toBe(0)
+  })
+})
+
+describe('直近 1 回の結末 (get_driver_master_status が読む記録)', () => {
+  it('★ 成功した回を DO storage に残す (cron が成功したかを後から答えられるように)', async () => {
+    stubTheearth()
+    const { run, stored } = makeDO({ status: 200, body: '{"created":1,"updated":0,"skipped":[]}' })
+
+    await run(ACCOUNT, 'cron')
+
+    const last = stored.get('driver_master_last_run') as Record<string, unknown>
+    expect(last).toMatchObject({
+      comp_id: COMP_ID,
+      trigger: 'cron',
+      ok: true,
+      rows: 1,
+      items: 1,
+      retired: 0,
+      chunks: 1,
+      created: 1,
+      updated: 0,
+      skipped: 0,
+      error: null,
+    })
+    expect(typeof last.started_at).toBe('string')
+    expect(typeof last.finished_at).toBe('string')
+  })
+
+  it('★ 失敗した回も残す (成功だけ残すと「走ったのに記録が無い」が作れる)', async () => {
+    stubTheearth()
+    const { run, stored } = makeDO({ status: 500, body: 'db down' })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await run(ACCOUNT, 'cron')
+    spy.mockRestore()
+
+    const last = stored.get('driver_master_last_run') as Record<string, unknown>
+    expect(last).toMatchObject({ trigger: 'cron', ok: false, rows: 1, items: 1 })
+    expect(String(last.error)).toContain('failed (500)')
+  })
+
+  it('trigger を渡さなければ manual 扱い (札の無い実行を cron の実績にしない)', async () => {
+    stubTheearth()
+    const { run, stored } = makeDO({ status: 200, body: '{"created":0,"updated":1,"skipped":[]}' })
+
+    await run(ACCOUNT)
+
+    expect((stored.get('driver_master_last_run') as Record<string, unknown>).trigger).toBe('manual')
   })
 })

@@ -489,6 +489,9 @@ export async function runScheduledCron(
         try {
           const res = await callDo(`scraper-comp-${account.comp_id}`, "/cron/driver-master", {
             comp_id: account.comp_id,
+            // ★ 無人実行の札。DO が結末に付けて残すので、**後から「cron が走ったか」
+            // を答えられる** (Cloudflare の cron 実行履歴は外から読めない)。
+            trigger: "cron",
           });
           return {
             kind: "driver-master",

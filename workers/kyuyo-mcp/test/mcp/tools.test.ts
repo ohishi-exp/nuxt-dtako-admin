@@ -1555,6 +1555,9 @@ describe("ALL_TOOLS", () => {
     "get_dtako_scrape_status",
     // `/cron/dtako` (無人実行) の進捗を DO から直接見るだけ (Refs #205-43)
     "get_dtako_scrape_progress",
+    // 乗務員マスタ同期の直近 1 回の結末を DO から読むだけ (Refs ippoan/alc-app-s3#125)。
+    // **同期は起動しない** — 走らせるのは run_driver_master_sync 側
+    "get_driver_master_status",
     "get_operation_zip",
     "get_rest_diff",
     "get_restraint_summary",
