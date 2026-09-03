@@ -37,6 +37,19 @@ dtako (デジタコ運行データ) 管理画面。Nuxt 4 + Nitro `cloudflare_mo
 | **middleware** | `app/middleware/auth.global.ts` | 全 page の JWT gate |
 | **assets** | `app/assets/css/main.css` | Tailwind/Nuxt UI entry。印刷はダークモードでもライト配色に固定 (dark variant を `@media not print` に限定 + Nuxt UI `--ui-*` 変数の print 上書き。後者は @nuxt/ui 更新時に追従が必要)。`<main>` の bg-gray-50 も印刷では白固定 |
 
+## worker 一覧
+
+app 本体 (Nuxt) とは別に deploy される Worker が 4 つある。**ここは「何が居るか」と
+「どこを読むか」だけ**を持ち、中身は各機能の節 (または別 skill) が正本
+— 同じ事実を 2 か所に書くと、片方だけ直したときにもう片方が黙って腐るため。
+
+| ディレクトリ | 役割 | 詳細の在処 |
+|---|---|---|
+| `workers/dtako-scraper-relay/` | theearth / etc-meisai のブラウザレススクレイプ、DO による直列化、cron、拘束・勤怠・DVR・車輌動態の中継 | 下記「スクレイパ」「Cron」「DVR 動画ビューア」「拘束時間管理表 CSV 取得」「拘束×賃金」 |
+| `workers/dtako-scraper-relay-tail/` | Tail Worker。producer の `ctx.waitUntil()` 内ログを転写する | 下記 Cron の gotcha |
+| `workers/kyuyo-mcp/` | 給与比較 (拘束時間×賃金) データと dtako の取り込み操作を read-only / 操作系の MCP tool として公開する | **この skill には無い** — deploy の引き金・theearth への自前ログイン・tool 説明の罠は `kintai-ops` skill を見ること |
+| `workers/etc-csv-web/` | R2 の ETC 明細 CSV を読み取り専用で配る (**受け側の認証が無い公開配信**) | 下記「ETC 明細 CSV の配信」 |
+
 ## NET780 ビューア (`/net780`、Refs dtako-scraper#18)
 
 NET780 生データ ZIP をサーバー送信せずブラウザ内で直接パースする機能。パースロジックの
