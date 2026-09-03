@@ -64,7 +64,9 @@ const MAX_ERROR_CHARS = 200
  *
  * relay の応答 (`{results: CronRunResult[]}`) は**そのまま透過**する。ここで畳むと
  * 「どのアカウントが失敗したか」が画面から見えなくなる。status も relay のものを
- * そのまま返す (1 件でも通れば 200 / 全滅で 502)。
+ * そのまま返す — 1 件でも通れば 200 / 全滅で 502 / **`ETC_ACCOUNTS` が 0 件なら 404**
+ * (relay 側の手動口は cron と違って 0 件を skip にしない。押した人に「200 だが何も
+ * 起きていない」を返さないため。理由は relay の `handleEtcRun` の doc)。
  */
 export async function runResult(
   relay: RelayServiceBinding | undefined,

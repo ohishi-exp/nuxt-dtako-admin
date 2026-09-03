@@ -1292,8 +1292,18 @@ export async function handleVehicleStateRun(
  * ## 応答
  *
  * 1 アカウントでも通れば 200、**全滅のときだけ 502** (`handleVehicleStateRun` と同じ)。
- * `ETC_ACCOUNTS` 未設定は `dispatchEtcAccounts` が返す `ok: true` の skip 行 1 件が
- * そのまま 200 で返る — cron の答えを手動口で書き換えない。
+ *
+ * ## ★ 0 件のときだけ cron と意図的に違える
+ *
+ * `ETC_ACCOUNTS` が 0 件のとき、**cron 経路は `ok: true` の skip** を返す
+ * (`dispatchEtcAccounts` の中。無人実行では「対象が無いのは正常」)。**手動実行は
+ * 404 で名指しして落とす** — 手で押した人に「200 だが何も起きていない」を返さない。
+ * 「押したのに動かない」は手動実行の答えとして成立しないため
+ * (`handleVehicleStateRun` の doc にある同じ分類。**共有するのは fan-out までで、
+ * 0 件をどう返すかは呼び出し側が決める**)。
+ *
+ * `test/index-etc-run.test.ts` が「同じ関数を使いながら 0 件の返り値だけが違う」を
+ * cron 側 (skip) と手動側 (404) の 1 本ずつで固定している。
  */
 export async function handleEtcRun(request: Request, env: RelayWorkerEnv): Promise<Response> {
   const fail = (status: number, error: string) =>
@@ -1311,9 +1321,14 @@ export async function handleEtcRun(request: Request, env: RelayWorkerEnv): Promi
   try {
     accounts = parseEtcAccounts(await resolveSecretBinding(env.ETC_ACCOUNTS));
   } catch (err) {
-    // 設定が壊れているのを「対象 0 件」(skip) と同じ顔にしない (`handleVehicleStateRun`
-    // と同じ分類)。未設定は skip、壊れているのは 503。
+    // 設定が壊れているのを「対象 0 件」(404) と同じ顔にしない (`handleVehicleStateRun`
+    // と同じ分類)。未設定は 404、壊れているのは 503。
     return fail(503, err instanceof Error ? err.message : String(err));
+  }
+  // ★ ここが cron と意図的に違う唯一の点 (上の doc)。cron は 0 件を `ok: true` の
+  // skip で流すが、手で押した人に 200 を返すと「押したのに何も起きない」になる。
+  if (accounts.length === 0) {
+    return fail(404, "ETC_ACCOUNTS が未設定です");
   }
 
   const results = await dispatchEtcAccounts(accounts, async (doKey, path, doBody) => {

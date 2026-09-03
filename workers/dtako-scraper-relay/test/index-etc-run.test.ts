@@ -143,14 +143,36 @@ describe("handleEtcRun — cron と同じ道", () => {
 });
 
 describe("handleEtcRun — 設定と失敗", () => {
-  it("ETC_ACCOUNTS 未設定は 200 の skip (cron の答えを書き換えない)", async () => {
-    const { env, doFetch } = fakeEnv({ ETC_ACCOUNTS: undefined });
-    const res = await handleEtcRun(post(), env);
-    expect(res.status).toBe(200);
-    expect((await jsonOf(res)).results).toEqual([
+  /**
+   * ★ **0 件のときだけ cron と意図的に違える** (`handleVehicleStateRun` と同じ分類)。
+   * 下の cron 側 1 本と対で読むこと — **同じ `dispatchEtcAccounts` を使いながら
+   * 返り値だけが違う**ことを、両側 1 本ずつで固定している。
+   */
+  it.each([[undefined], [""], ["[]"]])(
+    "ETC_ACCOUNTS が %o なら手動実行は 404 (200 で「何も起きていない」を返さない)",
+    async (raw) => {
+      const { env, doFetch } = fakeEnv({ ETC_ACCOUNTS: raw });
+      const res = await handleEtcRun(post(), env);
+      expect(res.status).toBe(404);
+      expect(await jsonOf(res)).toEqual({ error: "ETC_ACCOUNTS が未設定です" });
+      expect(doFetch).not.toHaveBeenCalled();
+    },
+  );
+
+  // 対になる cron 側。**手動を 404 にしても、無人実行の「対象が無いのは正常」は
+  // 変えていない** — ここが赤くなると cron が毎回失敗扱いになる。
+  it("同じ 0 件でも cron 経路は従来どおり ok: true の skip", async () => {
+    const results = await runScheduledCron(
+      ETC_CRON,
+      { etcAccountsRaw: undefined },
+      async () => {
+        throw new Error("cron は 0 件で DO を叩かない");
+      },
+      new Date("2026-09-03T21:00:00Z"),
+    );
+    expect(results).toEqual([
       { kind: "etc", target: "*", ok: true, detail: "ETC_ACCOUNTS 未設定のため skip" },
     ]);
-    expect(doFetch).not.toHaveBeenCalled();
   });
 
   it("ETC_ACCOUNTS が壊れていたら 503 (skip と同じ顔にしない)", async () => {

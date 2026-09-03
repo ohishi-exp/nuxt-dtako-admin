@@ -53,6 +53,15 @@ describe('runResult — relay の口を叩く', () => {
     expect(await runResult(relay, SECRET)).toEqual({ status: 502, body })
   })
 
+  // relay の手動口は `ETC_ACCOUNTS` 0 件を 404 で落とす (cron の skip とは意図的に
+  // 違う)。**その 404 が画面まで届くこと**を固定する — ここで 200 に畳むと
+  // 「押したのに何も起きない」が成功として見えてしまう。
+  it('relay の 404 (ETC_ACCOUNTS 0 件) をそのまま画面へ返す', async () => {
+    const body = { error: 'ETC_ACCOUNTS が未設定です' }
+    const relay = fakeRelay(() => new Response(JSON.stringify(body), { status: 404 }))
+    expect(await runResult(relay, SECRET)).toEqual({ status: 404, body })
+  })
+
   it('relay が JSON を返さなければ 502 (握って 200 にしない)', async () => {
     const relay = fakeRelay(() => new Response('Internal Server Error', { status: 500 }))
     const res = await runResult(relay, SECRET)
