@@ -33,14 +33,28 @@ head_sampling_rate = 1
 #   しか無く、この軸では旧構成のほうが厳格だった)。**attach は dashboard で人が 1 回だけ**
 #   行う。手順は README.md。
 #
-#   CI が繰り返し deploy しても attach 済みの custom domain が外れない根拠
-#   (wrangler 4.128.0 の実装を読んで確認):
-#     - `publishRoutes` は `PUT /routes` で「既存 route を消す」
-#       (実装中のコメント: "Note: PUT will delete previous routes on this script.")
-#     - ただし呼び出しは `if (routesOnly.length > 0)` の中にあり、custom domain 側も
-#       `if (customDomainsOnly.length > 0)` でガードされている
-#   ⇒ config に `[[routes]]` が 1 つも無ければどちらの API も呼ばれず、既に attach
-#     されている custom domain は触られない。
+#   ★ custom domain は **既に attach 済み**なので、要件は「作る」ではなく
+#   **「以後の CI deploy が detach しない」**である。その根拠
+#   (`package-lock.json` が pin している wrangler 4.128.0 の実装を読んで確認):
+#     - route:  `publishRoutes` は `PUT /routes`。実装中のコメントに
+#               "Note: PUT will delete previous routes on this script."
+#     - domain: `publishCustomDomains` は `PUT /domains/records` (+ TTY のときは
+#               `/domains/changeset?replace_state=true`)。**どちらも置換の意味論**
+#     - **ただし呼び出しは `if (routesOnly.length > 0)` /
+#       `if (customDomainsOnly.length > 0)` の中にある**
+#     - deploy 経路に custom domain を DELETE する口は無い (bundle 内の DELETE は
+#       Cloudchamber registry / email routing / R2 bucket の custom domain で、
+#       いずれも worker の deploy とは別系統)
+#   ⇒ config に `[[routes]]` が 1 つも無ければ、置換 API がそもそも呼ばれない。
+#
+#   ★ 上は実装読解だが、**本番で実測もしてある** (2026-09-03)。`[[routes]]` を消した
+#   この config での deploy (`6c1ee8b`、CI の `etc-csv-web worker` が success) の**あと**に
+#   custom domain を叩いた結果:
+#     OPTIONS /list                    → 204   (worker 自身の応答)
+#     POST    /list                    → 405
+#     GET     /list?user_id=<許可外>   → 404   {"error":"not found"} (fail-closed)
+#     陰性対照 (存在しないホスト)      → 000   (DNS 失敗。上が本物の応答である担保)
+#   **detach されていない。** 読解と観測の両方で裏が取れている。
 #   同 repo の先行例: `workers/dtako-scraper-relay` と `-tail` も `workers_dev = false`
 #   かつ top-level `[[routes]]` 無しで CI deploy が通っている。
 #
