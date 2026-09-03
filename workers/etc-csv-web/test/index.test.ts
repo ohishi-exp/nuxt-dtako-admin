@@ -36,13 +36,19 @@ describe('fetch handler', () => {
     const res = await worker.fetch(get('/list', ORIGIN, 'OPTIONS'), env())
     expect(res.status).toBe(204)
     expect(res.headers.get('access-control-allow-origin')).toBe(ORIGIN)
-    expect(res.headers.get('access-control-allow-methods')).toBe('GET, OPTIONS')
+    expect(res.headers.get('access-control-allow-methods')).toBe('GET, POST, OPTIONS')
+    expect(res.headers.get('access-control-allow-headers')).toBe('Content-Type')
     expect(res.headers.get('vary')).toBe('Origin')
   })
 
-  // 陰性対照: 書き込みの口は無い。GET / OPTIONS 以外は全部 405。
-  it.each(['POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'])('%s は 405', async (method) => {
+  // 陰性対照: 配信 3 口は GET だけ。`/run` 以外に GET でない口は無い (Refs #1111)。
+  it.each(['POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'])('%s /download は 405', async (method) => {
     const res = await worker.fetch(get('/download?key=' + KEY, ORIGIN, method), env())
+    expect(res.status).toBe(405)
+  })
+
+  it.each(['POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'])('%s /list は 405', async (method) => {
+    const res = await worker.fetch(get('/list?user_id=alice', ORIGIN, method), env())
     expect(res.status).toBe(405)
   })
 
@@ -241,12 +247,30 @@ describe('KV のキーはコンパイル時定数 2 つだけ (リクエスト�
     ['path traversal 風', '/list?user_id=../../origins:prod'],
     ['未知の path', '/origins:prod'],
     ['空クエリ', '/list'],
+    // Refs #1111: 新設した実行口も同じ不変条件の下にある
+    ['/run (POST 以外なので 405)', '/run'],
+    ['/run にクエリを足す', '/run?user_id=refresh%3Ax&key=dcr%3Aclient'],
   ])('%s でも KV に渡るキーは定数 2 つのまま', async (_label, path) => {
     const { spy, e } = spyEnv()
     await worker.fetch(get(path, 'https://attacker.invalid'), e)
     // 定数以外が 1 つでも混ざったら落ちる
     expect(spy.calls.filter((k) => !KEYS.includes(k))).toEqual([])
     expect(new Set(spy.calls).size).toBeLessThanOrEqual(KEYS.length)
+  })
+
+  // Refs #1111: `/run` は relay を叩く実行口だが、KV の読み方は 1 ミリも変わらない。
+  it('POST /run でも KV に渡るキーは定数 2 つのまま', async () => {
+    const { spy, e } = spyEnv()
+    const req = new Request('https://etc-csv.invalid/run?user_id=refresh%3Ax', {
+      method: 'POST',
+      headers: { Origin: 'https://attacker.invalid' },
+    })
+    await worker.fetch(req, {
+      ...e,
+      SCRAPER_RELAY: { async fetch() { return new Response('{}', { status: 200 }) } },
+      INTERNAL_SHARED_SECRET: 'x',
+    })
+    expect(spy.calls.filter((k) => !KEYS.includes(k))).toEqual([])
   })
 
   it('Origin ヘッダを KV のキーに使っていない', async () => {
@@ -261,5 +285,111 @@ describe('KV のキーはコンパイル時定数 2 つだけ (リクエスト�
       await worker.fetch(get('/list?user_id=refresh%3Ax', 'https://x.invalid', method), e)
       expect(spy.calls.filter((k) => !KEYS.includes(k))).toEqual([])
     }
+  })
+})
+
+/**
+ * `POST /run` — ETC 取得を今すぐ 1 回起こす口 (Refs #1111)。
+ *
+ * ここで見るのは「HTTP ↔ `run.ts` の変換」と、**既存 3 口の性質を 1 つも変えて
+ * いないこと**。relay とのやり取りそのものは `test/run.test.ts` が見る。
+ */
+describe('POST /run', () => {
+  type RelayCall = { url: string; init?: RequestInit }
+
+  function relayEnv(
+    respond: () => Response = () => new Response(JSON.stringify({ results: [] }), { status: 200 }),
+  ) {
+    const calls: RelayCall[] = []
+    const e = env({
+      SCRAPER_RELAY: {
+        async fetch(url: string, init?: RequestInit) {
+          calls.push({ url, init })
+          return respond()
+        },
+      },
+      INTERNAL_SHARED_SECRET: 'internal-shared-secret',
+    })
+    return { e, calls }
+  }
+
+  function run(method = 'POST', origin: string | null = ORIGIN): Request {
+    return new Request('https://etc-csv.invalid/run', {
+      method,
+      headers: origin === null ? {} : { Origin: origin },
+    })
+  }
+
+  it('relay の POST /kintai-relay/etc-run を叩き、応答をそのまま返す', async () => {
+    const body = { results: [{ kind: 'etc', target: 'etc1', ok: true, detail: 'HTTP 202: {}' }] }
+    const { e, calls } = relayEnv(() => new Response(JSON.stringify(body), { status: 200 }))
+    const res = await worker.fetch(run(), e)
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual(body)
+    expect(calls).toHaveLength(1)
+    expect(new URL(calls[0].url).pathname).toBe('/kintai-relay/etc-run')
+    expect(calls[0].init?.headers).toEqual({ 'X-Alc-Proxy-Secret': 'internal-shared-secret' })
+  })
+
+  it('許可オリジンには CORS ヘッダが付く (画面から fetch できる)', async () => {
+    const { e } = relayEnv()
+    const res = await worker.fetch(run(), e)
+    expect(res.headers.get('access-control-allow-origin')).toBe(ORIGIN)
+  })
+
+  // 陰性対照: 既存 3 口と同じ絞り。許可外オリジンには CORS ヘッダを付けない。
+  it('許可外オリジンには CORS ヘッダを付けない', async () => {
+    const { e } = relayEnv()
+    const res = await worker.fetch(run('POST', 'https://evil-example.invalid'), e)
+    expect(res.headers.get('access-control-allow-origin')).toBeNull()
+  })
+
+  // 陰性対照: `/run` は POST だけ。GET で起こせる口にしない (リンクや prefetch で
+  // 発火する)。
+  it.each(['GET', 'PUT', 'PATCH', 'DELETE', 'HEAD'])('%s /run は 405', async (method) => {
+    const { e, calls } = relayEnv()
+    const res = await worker.fetch(run(method), e)
+    expect(res.status).toBe(405)
+    expect(await res.json()).toEqual({ error: 'method not allowed' })
+    expect(calls).toEqual([])
+  })
+
+  it('OPTIONS /run は既存どおり 204 (relay を叩かない)', async () => {
+    const { e, calls } = relayEnv()
+    const res = await worker.fetch(run('OPTIONS'), e)
+    expect(res.status).toBe(204)
+    expect(calls).toEqual([])
+  })
+
+  it('service binding が無ければ 503', async () => {
+    const res = await worker.fetch(run(), env({ INTERNAL_SHARED_SECRET: 'x' }))
+    expect(res.status).toBe(503)
+  })
+
+  it('INTERNAL_SHARED_SECRET が無ければ 503 (relay を叩かない)', async () => {
+    const { calls } = relayEnv()
+    const e = env({
+      SCRAPER_RELAY: {
+        async fetch(url: string, init?: RequestInit) {
+          calls.push({ url, init })
+          return new Response('{}', { status: 200 })
+        },
+      },
+    })
+    expect((await worker.fetch(run(), e)).status).toBe(503)
+    expect(calls).toEqual([])
+  })
+
+  // ★ 既存の口の性質を 1 つも変えていないことを口から見る。
+  it('R2 を 1 度も触らない (配信 3 口の bucket に手を出さない)', async () => {
+    const { e } = relayEnv()
+    await worker.fetch(run(), e)
+    expect((e.DTAKO_R2 as unknown as { calls: unknown[] }).calls).toEqual([])
+  })
+
+  it('user_id allowlist を経由しない (allowlist 未設定でも 200)', async () => {
+    const { e } = relayEnv()
+    const res = await worker.fetch(run(), { ...e, ETC_CSV_ALLOWED_USER_IDS: undefined })
+    expect(res.status).toBe(200)
   })
 })
