@@ -83,6 +83,20 @@ describe("get_kintai_day_summaries (ohishi-exp/rust-ichibanboshi#205 の 23)", (
     expect(init.body).toBeUndefined();
   });
 
+  it("★ GET なので body も content-type も付けない (workers は GET+body を throw する)", async () => {
+    // callRelay は POST 側にだけ body / content-type を付ける。**畳む前からそうだった**が、
+    // 畳んだことで「helper を 1 行直すと 3 tool が同時に壊れる」形になった。
+    // workers は GET に body があると `Request with a GET or HEAD method cannot have a body`
+    // で throw するので、**スタブしか居ないテストが緑のまま本番だけ落ちる。**
+    // ⇒ スタブが受け取った RequestInit をここで検査して、その戻しを落とす。
+    const e = env();
+    await getKintaiDaySummariesTool.execute(e, { month: "2026-06" });
+    const init = relayFetch(e).mock.calls[0]![1] as RequestInit;
+    expect(init.method).toBe("GET");
+    expect(init.body).toBeUndefined();
+    expect((init.headers as Record<string, string>)["content-type"]).toBeUndefined();
+  });
+
   it("driver を省いたら query に出さない (`driver=` は受け側が 400 にする)", async () => {
     const e = env();
     await getKintaiDaySummariesTool.execute(e, { month: "2026-06" });

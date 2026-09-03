@@ -82,6 +82,20 @@ describe("get_dtako_scrape_progress (ohishi-exp/rust-ichibanboshi#205 の 43)", 
     ).rejects.toThrow(/INTERNAL_SHARED_SECRET/);
   });
 
+  it("★ GET なので body も content-type も付けない (workers は GET+body を throw する)", async () => {
+    // callRelay は POST 側にだけ body / content-type を付ける。**畳む前からそうだった**が、
+    // 畳んだことで「helper を 1 行直すと 3 tool が同時に壊れる」形になった。
+    // workers は GET に body があると `Request with a GET or HEAD method cannot have a body`
+    // で throw するので、**スタブしか居ないテストが緑のまま本番だけ落ちる。**
+    // ⇒ スタブが受け取った RequestInit をここで検査して、その戻しを落とす。
+    const e = env();
+    await getDtakoScrapeProgressTool.execute(e, {});
+    const init = relayOf(e).fetch.mock.calls[0]![1] as RequestInit;
+    expect(init.method).toBe("GET");
+    expect(init.body).toBeUndefined();
+    expect((init.headers as Record<string, string>)["content-type"]).toBeUndefined();
+  });
+
   it("comp_id を省略すると query 無しで relay の /kintai-relay/scrape-progress を叩く", async () => {
     const e = env();
     await getDtakoScrapeProgressTool.execute(e, {});
