@@ -9,25 +9,35 @@
  *
  * - theearth 側は `theearth-venus-client.ts` の `getVehicleStatesRaw()` が唯一の実装元。
  *   ここは VenusBridge を自分では叩かない (**theearth クライアントの 4 本目を作らない**)。
- * - 送信は `AUTH_WORKER` service binding 越しの `fetch`。`alc-internal-upload.ts` の
- *   `sendViaAlcInternalProxy` は使えない — あちらは `alc-internal-proxy` の
- *   **shared-secret class** で、その allowlist (auth-worker の `classifyInternalPath`) に
- *   `/api/dtako-logs/bulk` は載っていない。§「なぜ device-data-proxy か」参照。
+ * - 送信は **auth-worker の RPC** (`InternalEntrypoint.forwardAlcTenantData`)。型と
+ *   応答の畳み方は `alc-tenant-rpc.ts` が唯一の実装元で、**新しい送信の型を作らない**。
  *
- * ## なぜ device-data-proxy か (再検討しないで済むよう理由を残す)
+ * ## なぜ RPC 経路か (再検討しないで済むよう理由を残す)
  *
  * rust-alc-api の `/api/dtako-logs/bulk` は `src/routes/mod.rs` で
  * `tenant_protected` (`require_tenant_header`) に nest されている **data 経路**で、
  * `internal_shared_secret_router` には入っていない (2026-09-03 に origin/main を実読)。
- * relay が既に持つ 2 経路はどちらも届かない:
+ * よって `alc-internal-proxy` の shared-secret class では通らない — あちらの
+ * `classifyInternalPath` に `/api/dtako-logs/bulk` の行が無いため。
+ * (**「data 経路だから禁止」ではない** — 同じ class に `/api/upload` = これも
+ * `require_tenant_header` が現に載っている。見るのは allowlist の行。)
  *
- * - `alc-internal-proxy` の shared-secret class — auth-worker 側の path allowlist に無い
- * - auth-worker RPC (`InternalEntrypoint.forwardAlcTenantData`) — `FORWARDABLE_PATHS` に無い
+ * 通る口は 2 つあり、**RPC を採った**:
  *
- * **auth-worker を変えずに通るのは `/device-data-proxy/api/dtako-logs/bulk` だけ**
- * (`ROLE_PATH_ALLOWLIST[device-dtako-ingest]` に既に載っている。旧 pipeline が
- * 使っていたのと同じ口)。書き先 tenant は **device record 由来**で、
- * 呼び出し側から `X-Tenant-ID` で詐称できない (Refs ippoan/rust-alc-api#434)。
+ * - `/device-data-proxy/api/dtako-logs/bulk` — 旧 pipeline (VPS) が使っていた口。
+ *   auth-worker 無変更で通るが、**device credential の発行・投入・失効管理が要る**
+ * - **`InternalEntrypoint.forwardAlcTenantData`** — service binding からしか呼べない
+ *   名前付き RPC で **HTTP の面に出ない**。`FORWARDABLE_PATHS` に 1 行足すだけで通り、
+ *   **credential は要らない** (Refs ippoan/auth-worker の同 issue)
+ *
+ * ★ この repo は **#950 で device credential 経路を捨てて RPC に寄せた** —
+ * 「直接呼べる相手に bearer を提示していた」形をやめるため (`alc-tenant-rpc.ts` の doc)。
+ * ここで device-data-proxy に戻すと、その判断を 1 か所だけ巻き戻すことになる。
+ *
+ * 書き先 tenant は **呼び手が渡す値**。この cron は `VEHICLE_STATE_TARGETS` が名指しした
+ * `comp_id` を `DTAKO_ACCOUNTS` で引いた `tenant_id` しか渡さず、**theearth の応答も
+ * request body も tenant を決める材料にしない** (`/api/employees/bulk-by-code` を
+ * allowlist に足したときと同じ根拠)。
  *
  * ## 生レコードをそのまま送る (射影しない)
  *
@@ -46,7 +56,10 @@
  * `records_added=199` が返っていた**実績のある形をそのまま踏襲する**のが、
  * 57 フィールドを手で組み直すより安全。
  */
-import { INTERNAL_PROXY_BASE, type FetchLike } from "./alc-internal-upload";
+import {
+  unwrapAlcTenantData,
+  type AlcTenantDataForwarder,
+} from "./alc-tenant-rpc";
 
 /**
  * `VehicleStateTableForBranchEx` の事業所コード。**`"00000000"` は「全事業所」**で、
@@ -56,11 +69,9 @@ import { INTERNAL_PROXY_BASE, type FetchLike } from "./alc-internal-upload";
  */
 export const VEHICLE_STATE_ALL_BRANCHES = "00000000";
 
-/** device credential を短命 JWT に交換する auth-worker の口。 */
-export const DEVICE_TOKEN_PATH = "/device/token";
-
-/** 車輌動態の投入先。auth-worker の `ROLE_PATH_ALLOWLIST` に載っている 2 本のうち 1 本。 */
-export const DTAKO_LOGS_BULK_PATH = "/device-data-proxy/api/dtako-logs/bulk";
+/** 車輌動態の投入先 (rust-alc-api 側の path)。auth-worker の `FORWARDABLE_PATHS` に
+ * この文字列が**完全一致で**載っていること。前方一致では通らない。 */
+export const DTAKO_LOGS_BULK_PATH = "/api/dtako-logs/bulk";
 
 /**
  * `DataDateTime` が空 / 非文字列のときに rust 側が入れる既定値。
@@ -151,46 +162,6 @@ export function toDtakoLogsBulkRecords(
   });
 }
 
-/** device pairing で発行済みの credential。**値はコードにも設定ファイルにも置かない。** */
-export interface DtakoLogsDeviceCredential {
-  deviceId: string;
-  deviceSecret: string;
-}
-
-/**
- * `device_id` + `device_secret` を短命の device JWT に交換する。
- *
- * **失敗は本文付き loud fail** — 「送ったつもり」を作らない (`sendViaAlcInternalProxy`
- * と同じ流儀)。`device_secret` は例外メッセージにも log にも出さない。
- */
-export async function mintDtakoLogsDeviceToken(
-  cred: DtakoLogsDeviceCredential,
-  fetchImpl: FetchLike,
-): Promise<string> {
-  const res = await fetchImpl(`${INTERNAL_PROXY_BASE}${DEVICE_TOKEN_PATH}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ device_id: cred.deviceId, device_secret: cred.deviceSecret }),
-  });
-  const text = await res.text();
-  if (!res.ok) {
-    throw new VehicleStateIngestError(
-      `${DEVICE_TOKEN_PATH} failed (${res.status}): ${text.slice(0, 300)}`,
-    );
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new VehicleStateIngestError(`${DEVICE_TOKEN_PATH} の応答が JSON ではありません`);
-  }
-  const token = (parsed as { access_token?: unknown } | null)?.access_token;
-  if (typeof token !== "string" || token === "") {
-    throw new VehicleStateIngestError(`${DEVICE_TOKEN_PATH} の応答に access_token がありません`);
-  }
-  return token;
-}
-
 /** `POST /api/dtako-logs/bulk` の応答 (`BulkUpsertResponse`) のうち使う分。 */
 export interface DtakoLogsBulkOutcome {
   success: boolean;
@@ -220,17 +191,25 @@ export function parseDtakoLogsBulkResponse(body: string): DtakoLogsBulkOutcome {
 }
 
 /**
- * device JWT を mint して `POST /device-data-proxy/api/dtako-logs/bulk` する。
+ * auth-worker の RPC 越しに `POST /api/dtako-logs/bulk` する。
+ *
+ * `tenantId` は **呼び手 (DO) が `DTAKO_ACCOUNTS` から引いた値**。theearth の応答から
+ * 作らない — 上流はこの header だけを identity にする data 経路なので、取得元の
+ * データに tenant を決めさせると、theearth 側の変更で書き先が動く。
  *
  * **空配列を送らない** — theearth が 0 台を返したら「送るものが無い」のではなく
  * **取得に失敗している** (実測は 199 台/回で、0 になる正常系が無い)。rust 側は
- * 空 body に 200 + `records_added: 0` を返してしまうので、ここで落とさないと
- * 「毎回成功しているのに画面が更新されない」無音故障になる (#1094 で空バッチを
- * 送って踏んだのと同型)。
+ * 空 body に `200` + `records_added: 0` + `"No records provided"` を返してしまうので、
+ * ここで落とさないと「毎回成功しているのに画面が更新されない」無音故障になる
+ * (#1094 で空バッチを送って踏んだのと同型)。
+ *
+ * 非 2xx は `unwrapAlcTenantData` が status と本文抜粋つきで throw する。
+ * **`403 path_not_forwardable` が返るなら auth-worker の allowlist 未反映** —
+ * 本文で「呼び手の path 誤り」と「上流の tenant 拒否」が割れる。
  */
 export async function ingestVehicleStates(
-  input: { cred: DtakoLogsDeviceCredential; rows: ReadonlyArray<Record<string, unknown>> },
-  fetchImpl: FetchLike,
+  input: { tenantId: string; rows: ReadonlyArray<Record<string, unknown>> },
+  rpc: AlcTenantDataForwarder,
 ): Promise<DtakoLogsBulkOutcome> {
   const records = toDtakoLogsBulkRecords(input.rows);
   if (records.length === 0) {
@@ -238,22 +217,20 @@ export async function ingestVehicleStates(
       "車輌が 1 台も取れませんでした (空バッチは送りません)",
     );
   }
-  const token = await mintDtakoLogsDeviceToken(input.cred, fetchImpl);
-  const res = await fetchImpl(`${INTERNAL_PROXY_BASE}${DTAKO_LOGS_BULK_PATH}`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify(records),
-  });
-  const text = await res.text();
-  if (!res.ok) {
-    throw new VehicleStateIngestError(
-      `${DTAKO_LOGS_BULK_PATH} failed (${res.status}): ${text.slice(0, 300)}`,
-    );
-  }
-  const outcome = parseDtakoLogsBulkResponse(text);
+  const body = unwrapAlcTenantData(
+    "alc dtako-logs bulk upsert",
+    await rpc.forwardAlcTenantData({
+      tenantId: input.tenantId,
+      path: DTAKO_LOGS_BULK_PATH,
+      method: "POST",
+      body: JSON.stringify(records),
+      contentType: "application/json",
+    }),
+  );
+  const outcome = parseDtakoLogsBulkResponse(body);
   if (!outcome.success) {
     throw new VehicleStateIngestError(
-      `${DTAKO_LOGS_BULK_PATH} が success=true を返しませんでした: ${text.slice(0, 300)}`,
+      `${DTAKO_LOGS_BULK_PATH} が success=true を返しませんでした: ${body.slice(0, 300)}`,
     );
   }
   return outcome;

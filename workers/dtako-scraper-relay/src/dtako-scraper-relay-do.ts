@@ -715,23 +715,6 @@ export interface RelayEnv {
    * (CF Secrets Store binding、`X-Alc-Proxy-Secret` として consumer worker
    * proof に使う)。 */
   INTERNAL_SHARED_SECRET?: unknown;
-  /**
-   * 車輌動態 (`dtako_logs`) 取り込みの device credential (Refs #1098)。
-   * auth-worker の `POST /device/token` で短命 JWT に交換し、
-   * `/device-data-proxy/api/dtako-logs/bulk` に Bearer で提示する。
-   * 書き先 tenant は **device record 由来**で、relay からは詐称できない。
-   *
-   * ★ **置き場は Secrets Store binding** (`INTERNAL_SHARED_SECRET` と同じ)。
-   * **dashboard の plain 環境変数に置かないこと** — deploy で消える実害があり
-   * (2026-07-25、`DTAKO_ACCOUNTS` が本番から消えて viewer 認可が全社 401)、
-   * 消えた日に車輌動態だけが静かに止まる = いま直そうとしている故障と同じ形になる。
-   *
-   * **未設定なら fail-closed で skip** (503)。値はコードにも wrangler.toml にも
-   * 置かない。
-   */
-  DTAKO_LOGS_DEVICE_ID?: unknown;
-  /** 同 secret (Secrets Store binding)。詳細は `DTAKO_LOGS_DEVICE_ID` の doc。 */
-  DTAKO_LOGS_DEVICE_SECRET?: unknown;
   /** auth-worker origin (wrangler vars と共有)。introspect の絶対 URL 組み立てにのみ使う
    * (service binding は host を無視するため、値そのものは到達性に影響しない)。 */
   NUXT_PUBLIC_AUTH_WORKER_URL?: string;
@@ -5631,27 +5614,18 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!account) {
       return Response.json({ error: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
     }
-    // ★ device credential は**投入されるまで動かない** (fail-closed)。片方だけ設定された
-    // 状態も同じく止める — 「ID はあるのに secret が無い」で 401 を 10 分おきに撃ち続ける
-    // より、設定漏れとして 1 行出す方が直せる。
-    const [deviceId, deviceSecret] = await Promise.all([
-      resolveSecret(this.env.DTAKO_LOGS_DEVICE_ID),
-      resolveSecret(this.env.DTAKO_LOGS_DEVICE_SECRET),
-    ]);
-    if (!deviceId || !deviceSecret) {
-      return Response.json(
-        {
-          error:
-            "DTAKO_LOGS_DEVICE_ID / DTAKO_LOGS_DEVICE_SECRET 未設定のため車輌動態を alc へ投入できません",
-        },
-        { status: 503 },
-      );
+    // ★ **binding が張られていないなら黙って 0 件にしない** — named environment で
+    // `entrypoint = "InternalEntrypoint"` を宣言し忘れると、10 分おきに取得だけして
+    // 捨てる状態になる (Refs #1094 の「named env の binding は別 service を指す」)。
+    let rpc: AlcTenantDataForwarder;
+    try {
+      rpc = requireAlcTenantForwarder(this.env.AUTH_WORKER_RPC);
+    } catch (err) {
+      return Response.json({ error: describeUnknownError(err) }, { status: 503 });
     }
     // 同一 comp_id への theearth 並行アクセスはセッションロックで hang/500 する。
     // 既存の dtako scrape / DVR / 乗務員マスタ同期と同じキューに載せて直列化する。
-    return this.enqueueScrape(() =>
-      this.runVehicleStateCron(account, { deviceId, deviceSecret }),
-    );
+    return this.enqueueScrape(() => this.runVehicleStateCron(account, rpc));
   }
 
   /**
@@ -5676,11 +5650,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   /** 車輌動態取り込みの本体 (`scrapeQueue` の直列化の中でだけ呼ばれる)。 */
   private async runVehicleStateCron(
     account: DtakoAccountRaw,
-    cred: { deviceId: string; deviceSecret: string },
+    rpc: AlcTenantDataForwarder,
   ): Promise<Response> {
     const startedAt = new Date().toISOString();
     const jobState = this.makeTheearthLoginJobState();
-    const authFetch = this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER);
     const base = { vehicle_state_cron: "", comp_id: account.comp_id };
 
     const previous = await this.ctx.storage.get<VehicleStateCronLastRun>(
@@ -5700,7 +5673,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         getVehicleStatesRaw(jar, VEHICLE_STATE_ALL_BRANCHES),
       );
       vehicles = rows.length;
-      outcome = await ingestVehicleStates({ cred, rows }, authFetch);
+      // ★ tenant は **`DTAKO_ACCOUNTS` の値**。theearth の応答からも呼び出し元の body
+      // からも作らない (comp_id を知っている者が任意テナントへ書ける形にしない、
+      // Refs ippoan/rust-alc-api#434)。
+      outcome = await ingestVehicleStates({ tenantId: account.tenant_id, rows }, rpc);
 
       const finishedAt = new Date().toISOString();
       console.log(

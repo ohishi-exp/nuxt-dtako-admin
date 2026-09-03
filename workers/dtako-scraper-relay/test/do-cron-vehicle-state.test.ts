@@ -14,6 +14,7 @@ vi.mock('cloudflare:workers', () => ({
   },
 }))
 
+import type { AlcTenantDataInput, AlcTenantDataResult } from '../src/alc-tenant-rpc'
 import { DtakoScraperRelayDO, type VehicleStateCronLastRun } from '../src/dtako-scraper-relay-do'
 
 /**
@@ -23,11 +24,14 @@ import { DtakoScraperRelayDO, type VehicleStateCronLastRun } from '../src/dtako-
  * pure 側 (`vehicle-state-ingest.test.ts`) が測るのは日時変換・生レコードの不変性・
  * 応答パースまで。ここで測るのは DO にしか無い 3 つ:
  *
- * 1. **device credential 未設定なら 1 度も theearth に触らず 503** (fail-closed)。
- *    片方だけ設定された状態も同じく止まること
- * 2. **`getVehicleStatesRaw` (生) を叩くこと** — 射影版 (`getVehicleStates`) を使うと
- *    列が落ち緯度が丸まるが、**200 が返ったまま**起きるので送信側からは見えない
- * 3. `last_success_at` の持ち回り (失敗した回は前回の値を残す = 無音故障が表に出る)
+ * 1. **`AUTH_WORKER_RPC` binding が無ければ 1 度も theearth に触らず 503** (fail-closed)。
+ *    named environment で `entrypoint = "InternalEntrypoint"` を宣言し忘れると、
+ *    黙って取得だけして捨てる状態になる
+ * 2. **書き先 tenant が `DTAKO_ACCOUNTS` 由来**であること (呼び出し元の body 由来にすると
+ *    comp_id を知っている者が任意テナントへ書ける、Refs ippoan/rust-alc-api#434)
+ * 3. **`getVehicleStatesRaw` (生) を叩くこと** — 射影版 (`getVehicleStates`) を使うと
+ *    列が落ち緯度が丸まるが、**2xx が返ったまま**起きるので送信側からは見えない
+ * 4. `last_success_at` の持ち回り (失敗した回は前回の値を残す = 無音故障が表に出る)
  *
  * ★ `dtako-scraper-relay-do.ts` は 100% gate の**対象外**なので、
  * **カバレッジが緑であることはこの 3 点の根拠にならない。**
@@ -41,12 +45,12 @@ import { DtakoScraperRelayDO, type VehicleStateCronLastRun } from '../src/dtako-
 
 const COMP_ID = '27324455'
 const TENANT_ID = 'tenant-of-27324455' // 架空の値 (実物ではない)
+const OTHER_TENANT = 'tenant-of-99999999' // 陰性対照用の別テナント (架空)
 const ACCOUNT = { comp_id: COMP_ID, tenant_id: TENANT_ID, user_name: 'u', user_pass: 'p' }
-const ACCOUNTS = [ACCOUNT]
-
-// ★ **架空の値** (実物ではない)。device credential の実物はこの repo (public) の
-// コードにもテストにも置かない。
-const CRED = { deviceId: 'dummy-device-id', deviceSecret: 'dummy-device-secret' }
+const ACCOUNTS = [
+  ACCOUNT,
+  { comp_id: '99999999', tenant_id: OTHER_TENANT, user_name: 'u2', user_pass: 'p2' },
+]
 
 /** theearth のログインページ (login() の GET が読む hidden field を持つ)。 */
 const LOGIN_PAGE = `<html><body><form>
@@ -105,40 +109,30 @@ function stubTheearth(rows: unknown[]): { venusCalls: Array<{ method: string; bo
   return { venusCalls }
 }
 
-interface AuthCall {
-  url: string
-  headers: Record<string, string>
-  body: unknown
-}
-
 function makeDO(
-  authResponses: Response[],
-  opts: { deviceId?: string; deviceSecret?: string; seedLastRun?: VehicleStateCronLastRun } = {},
+  rpcResults: AlcTenantDataResult[],
+  opts: { withRpc?: boolean; seedLastRun?: VehicleStateCronLastRun } = {},
 ): {
-  authCalls: AuthCall[]
+  rpcCalls: AlcTenantDataInput[]
   relay: DtakoScraperRelayDO
   stored: Map<string, unknown>
 } {
-  const authCalls: AuthCall[] = []
-  const queue = [...authResponses]
+  const rpcCalls: AlcTenantDataInput[] = []
+  const queue = [...rpcResults]
+  const forwarder = {
+    forwardAlcTenantData: async (input: AlcTenantDataInput): Promise<AlcTenantDataResult> => {
+      rpcCalls.push(input)
+      const res = queue.shift()
+      if (!res) throw new Error(`unexpected extra RPC call (#${rpcCalls.length})`)
+      return res
+    },
+  }
   const env = {
     DTAKO_CONFIG_KV: {
       get: async (key: string) => (key === 'dtako_accounts' ? JSON.stringify(ACCOUNTS) : null),
     },
-    DTAKO_LOGS_DEVICE_ID: opts.deviceId,
-    DTAKO_LOGS_DEVICE_SECRET: opts.deviceSecret,
-    AUTH_WORKER: {
-      fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
-        authCalls.push({
-          url: String(input),
-          headers: (init?.headers ?? {}) as Record<string, string>,
-          body: init?.body,
-        })
-        const res = queue.shift()
-        if (!res) throw new Error(`unexpected extra auth-worker call (#${authCalls.length})`)
-        return res
-      },
-    },
+    // opts.withRpc === false で「binding を張り忘れた named environment」を再現する。
+    AUTH_WORKER_RPC: opts.withRpc === false ? undefined : forwarder,
   }
   const stored = new Map<string, unknown>()
   if (opts.seedLastRun) stored.set('vehicle_state_last_run', opts.seedLastRun)
@@ -153,7 +147,7 @@ function makeDO(
     },
   }
   const relay = new DtakoScraperRelayDO(ctx as never, env as never)
-  return { authCalls, relay, stored }
+  return { rpcCalls, relay, stored }
 }
 
 function cronRequest(body: unknown): Request {
@@ -172,49 +166,41 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status })
 }
 
-const TOKEN_OK = () => json({ access_token: 'jwt-1' })
-const BULK_OK = () => json({ success: true, records_added: 1, total_records: 1, message: '' })
+const BULK_OK = (): AlcTenantDataResult => ({
+  status: 200,
+  body: JSON.stringify({ success: true, records_added: 1, total_records: 1, message: '' }),
+  contentType: 'application/json',
+})
 
 afterEach(() => {
   vi.unstubAllGlobals()
 })
 
 describe('/cron/vehicle-state — fail-closed', () => {
-  it('★★ device credential 未設定なら 503 で、theearth にも auth-worker にも触らない', async () => {
+  it('★★ AUTH_WORKER_RPC binding が無ければ 503 で、theearth に 1 度も触らない', async () => {
     const { venusCalls } = stubTheearth([VEHICLE_ROW])
-    const { authCalls, relay } = makeDO([])
+    const { rpcCalls, relay } = makeDO([], { withRpc: false })
 
     const res = await handle(relay, cronRequest({ comp_id: COMP_ID }))
 
     expect(res.status).toBe(503)
-    expect((await res.json() as { error: string }).error).toMatch(
-      /DTAKO_LOGS_DEVICE_ID \/ DTAKO_LOGS_DEVICE_SECRET 未設定/,
-    )
-    // ★ 「設定が無い = 全部やらない」。ログインだけして捨てる、にしない。
+    expect(((await res.json()) as { error: string }).error).toMatch(/AUTH_WORKER_RPC binding/)
+    // ★ 「送り先が無い = 取りにも行かない」。ログインだけして捨てる、にしない。
     expect(venusCalls).toEqual([])
-    expect(authCalls).toEqual([])
+    expect(rpcCalls).toEqual([])
   })
 
-  it('★ 片方だけ設定された状態も止める (401 を 10 分おきに撃たない)', async () => {
+  it('comp_id が DTAKO_ACCOUNTS に無ければ 500 (RPC を 1 度も呼ばない)', async () => {
     stubTheearth([VEHICLE_ROW])
-    const onlyId = makeDO([], { deviceId: CRED.deviceId })
-    expect((await handle(onlyId.relay, cronRequest({ comp_id: COMP_ID }))).status).toBe(503)
-
-    const onlySecret = makeDO([], { deviceSecret: CRED.deviceSecret })
-    expect((await handle(onlySecret.relay, cronRequest({ comp_id: COMP_ID }))).status).toBe(503)
-  })
-
-  it('comp_id が DTAKO_ACCOUNTS に無ければ 500 (credential を読む前に落ちる)', async () => {
-    stubTheearth([VEHICLE_ROW])
-    const { authCalls, relay } = makeDO([], CRED)
-    const res = await handle(relay, cronRequest({ comp_id: '99999999' }))
+    const { rpcCalls, relay } = makeDO([])
+    const res = await handle(relay, cronRequest({ comp_id: '00000001' }))
     expect(res.status).toBe(500)
-    expect(authCalls).toEqual([])
+    expect(rpcCalls).toEqual([])
   })
 
   it('body が JSON でない / comp_id が無いのは 400', async () => {
     stubTheearth([VEHICLE_ROW])
-    const { relay } = makeDO([], CRED)
+    const { relay } = makeDO([])
     expect((await handle(relay, cronRequest('{'))).status).toBe(400)
     expect((await handle(relay, cronRequest({}))).status).toBe(400)
   })
@@ -223,7 +209,7 @@ describe('/cron/vehicle-state — fail-closed', () => {
 describe('/cron/vehicle-state — 取得と投入', () => {
   it('★ 生レコードを全事業所ぶん取り、DataDateTime だけ直して bulk へ送る', async () => {
     const { venusCalls } = stubTheearth([VEHICLE_ROW])
-    const { authCalls, relay, stored } = makeDO([TOKEN_OK(), BULK_OK()], CRED)
+    const { rpcCalls, relay, stored } = makeDO([BULK_OK()])
 
     const res = await handle(relay, cronRequest({ comp_id: COMP_ID }))
     expect(res.status).toBe(200)
@@ -239,25 +225,19 @@ describe('/cron/vehicle-state — 取得と投入', () => {
     expect(venusCalls.map((c) => c.method)).toEqual(['VehicleStateTableForBranchEx'])
     expect(venusCalls[0].body).toContain('00000000')
 
-    // auth-worker 側: mint → bulk の 2 本。
-    expect(authCalls.map((c) => new URL(c.url).pathname)).toEqual([
-      '/device/token',
-      '/device-data-proxy/api/dtako-logs/bulk',
-    ])
-    expect(authCalls[1].headers.Authorization).toBe('Bearer jwt-1')
+    // auth-worker 側: RPC 1 回。**device token の mint は無い** (credential 経路を使わない)。
+    expect(rpcCalls).toHaveLength(1)
+    expect(rpcCalls[0].path).toBe('/api/dtako-logs/bulk')
+    expect(rpcCalls[0].method).toBe('POST')
 
     // ★★ 送った body が theearth の生レコードであること。射影版 (getVehicleStates) を
     // 使うと GPSLatitude が 34.73… になり、AddressDispP / AllState / State2 が消える。
-    const sent = JSON.parse(String(authCalls[1].body)) as Array<Record<string, unknown>>
+    const sent = JSON.parse(String(rpcCalls[0].body)) as Array<Record<string, unknown>>
     expect(sent[0].GPSLatitude).toBe(34733210)
     expect(sent[0].AddressDispP).toBe('静岡県浜松市中央区')
     expect(sent[0].AllState).toBe('走行中')
     expect(sent[0].State2).toBe('積車')
     expect(sent[0].DataDateTime).toBe('2026-09-03T07:20:00+09:00')
-
-    // ★ `X-Tenant-ID` は付けない — device-data-proxy が device record から注入するので、
-    // relay が名乗ると詐称の口になる (Refs ippoan/rust-alc-api#434)。
-    expect(Object.keys(authCalls[1].headers)).not.toContain('X-Tenant-ID')
 
     expect(stored.get('vehicle_state_last_run')).toMatchObject({
       comp_id: COMP_ID,
@@ -267,10 +247,18 @@ describe('/cron/vehicle-state — 取得と投入', () => {
     })
   })
 
+  it('★★ 書き先 tenant は DTAKO_ACCOUNTS 由来 (呼び出し元は tenant を名乗れない)', async () => {
+    stubTheearth([VEHICLE_ROW])
+    const { rpcCalls, relay } = makeDO([BULK_OK()])
+    // body には comp_id しか無い。tenant は DO が DTAKO_ACCOUNTS から引く。
+    await handle(relay, cronRequest({ comp_id: COMP_ID, tenant_id: OTHER_TENANT }))
+    expect(rpcCalls[0].tenantId).toBe(TENANT_ID)
+    expect(rpcCalls[0].tenantId).not.toBe(OTHER_TENANT)
+  })
+
   it('★ theearth が 0 台なら失敗 — 空バッチを送らず last_success_at も進めない', async () => {
     stubTheearth([])
-    const { authCalls, relay, stored } = makeDO([], {
-      ...CRED,
+    const { rpcCalls, relay, stored } = makeDO([], {
       seedLastRun: {
         comp_id: COMP_ID,
         started_at: '2026-09-03T00:00:00.000Z',
@@ -287,8 +275,8 @@ describe('/cron/vehicle-state — 取得と投入', () => {
     const res = await handle(relay, cronRequest({ comp_id: COMP_ID }))
     expect(res.status).toBe(502)
     expect(await res.json()).toMatchObject({ ok: false, vehicles: 0 })
-    // device token の mint すらしない。
-    expect(authCalls).toEqual([])
+    // RPC を 1 度も呼ばない。
+    expect(rpcCalls).toEqual([])
 
     const last = stored.get('vehicle_state_last_run') as VehicleStateCronLastRun
     expect(last.ok).toBe(false)
@@ -297,16 +285,20 @@ describe('/cron/vehicle-state — 取得と投入', () => {
     expect(last.error).toMatch(/車輌が 1 台も取れませんでした/)
   })
 
-  it('bulk が非 2xx なら 502 で本文を残す', async () => {
+  it('★ allowlist 未反映 (403 path_not_forwardable) は 502 で本文を残す', async () => {
+    // auth-worker より先に relay がマージされると必ずこれになる。**本文で気づける**
+    // ことが要点 (上流の tenant 拒否 `forbidden` と混ざらない)。
     stubTheearth([VEHICLE_ROW])
-    const { relay, stored } = makeDO([TOKEN_OK(), json({ error: 'forbidden' }, 403)], CRED)
+    const { relay, stored } = makeDO([
+      { status: 403, body: JSON.stringify({ error: 'path_not_forwardable' }), contentType: 'application/json' },
+    ])
 
     const res = await handle(relay, cronRequest({ comp_id: COMP_ID }))
     expect(res.status).toBe(502)
     const last = stored.get('vehicle_state_last_run') as VehicleStateCronLastRun
     expect(last.ok).toBe(false)
     expect(last.last_success_at).toBeNull()
-    expect(last.error).toMatch(/403/)
+    expect(last.error).toMatch(/path_not_forwardable/)
     expect(last.vehicles).toBe(1)
   })
 })
@@ -314,17 +306,17 @@ describe('/cron/vehicle-state — 取得と投入', () => {
 describe('GET /cron/vehicle-state/last', () => {
   it('直近 1 回の結末を返す (未実行なら null)', async () => {
     stubTheearth([VEHICLE_ROW])
-    const empty = makeDO([], CRED)
+    const empty = makeDO([])
     const first = await handle(
       empty.relay,
       new Request('https://relay.internal/cron/vehicle-state/last'),
     )
     expect(await first.json()).toEqual({ last: null })
 
-    const { relay } = makeDO([TOKEN_OK(), BULK_OK()], CRED)
+    const { relay } = makeDO([BULK_OK()])
     await handle(relay, cronRequest({ comp_id: COMP_ID }))
     const res = await handle(relay, new Request('https://relay.internal/cron/vehicle-state/last'))
-    expect((await res.json() as { last: VehicleStateCronLastRun }).last).toMatchObject({
+    expect(((await res.json()) as { last: VehicleStateCronLastRun }).last).toMatchObject({
       comp_id: COMP_ID,
       ok: true,
       vehicles: 1,

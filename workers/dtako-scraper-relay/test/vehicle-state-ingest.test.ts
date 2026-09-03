@@ -1,16 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
+import type { AlcTenantDataInput, AlcTenantDataResult } from '../src/alc-tenant-rpc'
 import {
   DTAKO_LOGS_BULK_PATH,
   DTAKO_LOGS_DATETIME_FALLBACK,
-  DEVICE_TOKEN_PATH,
   ingestVehicleStates,
-  mintDtakoLogsDeviceToken,
   parseDtakoLogsBulkResponse,
   toDtakoLogsBulkRecords,
   toDtakoLogsDataDateTime,
   VEHICLE_STATE_ALL_BRANCHES,
-  VehicleStateIngestError,
 } from '../src/vehicle-state-ingest'
 
 /**
@@ -184,93 +182,57 @@ describe('parseDtakoLogsBulkResponse', () => {
   })
 })
 
-// ★ **架空の値** (実物ではない)。device credential の実物はこの repo (public) の
-// コードにもテストにも置かない — 正は auth-worker の device record 側。
-const CRED = { deviceId: 'dummy-device-id', deviceSecret: 'dummy-device-secret' }
+const TENANT_ID = 'tenant-of-27324455' // 架空の値 (実物ではない)
 
-interface Call {
-  url: string
-  init: RequestInit | undefined
-}
-
-/** `AUTH_WORKER` service binding の fetch を差し替える。 */
-function stubAuthWorker(responses: Response[]): {
-  calls: Call[]
-  fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+/** `AUTH_WORKER_RPC` binding (`InternalEntrypoint`) を差し替える。 */
+function stubRpc(results: AlcTenantDataResult[]): {
+  calls: AlcTenantDataInput[]
+  rpc: { forwardAlcTenantData(input: AlcTenantDataInput): Promise<AlcTenantDataResult> }
 } {
-  const calls: Call[] = []
-  const queue = [...responses]
+  const calls: AlcTenantDataInput[] = []
+  const queue = [...results]
   return {
     calls,
-    fetchImpl: async (input, init) => {
-      calls.push({ url: String(input), init })
-      const res = queue.shift()
-      if (!res) throw new Error(`unexpected extra call (#${calls.length})`)
-      return res
+    rpc: {
+      forwardAlcTenantData: async (input) => {
+        calls.push(input)
+        const res = queue.shift()
+        if (!res) throw new Error(`unexpected extra RPC call (#${calls.length})`)
+        return res
+      },
     },
   }
 }
 
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status })
+function rpcResult(body: unknown, status = 200): AlcTenantDataResult {
+  return { status, body: JSON.stringify(body), contentType: 'application/json' }
 }
 
-describe('mintDtakoLogsDeviceToken', () => {
-  it('device_id / device_secret を POST し access_token を返す', async () => {
-    const { calls, fetchImpl } = stubAuthWorker([json({ access_token: 'jwt-1' })])
-    expect(await mintDtakoLogsDeviceToken(CRED, fetchImpl)).toBe('jwt-1')
-    expect(calls[0].url.endsWith(DEVICE_TOKEN_PATH)).toBe(true)
-    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
-      device_id: 'dummy-device-id',
-      device_secret: 'dummy-device-secret',
-    })
-  })
-
-  it('★ 非 2xx は本文付き loud fail (「送ったつもり」を作らない)', async () => {
-    const { fetchImpl } = stubAuthWorker([json({ error: 'Unauthorized' }, 401)])
-    await expect(mintDtakoLogsDeviceToken(CRED, fetchImpl)).rejects.toThrow(
-      /\/device\/token failed \(401\): .*Unauthorized/,
-    )
-  })
-
-  it('★ device_secret を例外メッセージに載せない', async () => {
-    const { fetchImpl } = stubAuthWorker([json({ error: 'Unauthorized' }, 401)])
-    const err = await mintDtakoLogsDeviceToken(CRED, fetchImpl).catch((e: unknown) => e)
-    expect(String(err)).not.toContain('dummy-device-secret')
-    expect(err).toBeInstanceOf(VehicleStateIngestError)
-  })
-
-  it('JSON でない / access_token が無い応答も loud fail', async () => {
-    const a = stubAuthWorker([new Response('<html>', { status: 200 })])
-    await expect(mintDtakoLogsDeviceToken(CRED, a.fetchImpl)).rejects.toThrow(/JSON ではありません/)
-    const b = stubAuthWorker([json({})])
-    await expect(mintDtakoLogsDeviceToken(CRED, b.fetchImpl)).rejects.toThrow(/access_token がありません/)
-    const c = stubAuthWorker([json({ access_token: '' })])
-    await expect(mintDtakoLogsDeviceToken(CRED, c.fetchImpl)).rejects.toThrow(/access_token がありません/)
-    const d = stubAuthWorker([new Response('null', { status: 200 })])
-    await expect(mintDtakoLogsDeviceToken(CRED, d.fetchImpl)).rejects.toThrow(/access_token がありません/)
-  })
-})
-
 describe('ingestVehicleStates', () => {
-  const OK = json({ success: true, records_added: 1, total_records: 1, message: '' })
+  const OK = () => rpcResult({ success: true, records_added: 1, total_records: 1, message: '' })
 
-  it('mint → device-data-proxy の順に叩き、Bearer と生レコードを載せる', async () => {
-    const { calls, fetchImpl } = stubAuthWorker([json({ access_token: 'jwt-1' }), OK])
-    const outcome = await ingestVehicleStates({ cred: CRED, rows: [vehicleRow()] }, fetchImpl)
+  it('RPC 1 回で bulk へ送る。tenant は呼び手が渡した値、body は生レコードの配列', () => {
+    // 同期的に組み立てを確かめたいので下の非同期版で見る (ここは意図の見出し)。
+    expect(DTAKO_LOGS_BULK_PATH).toBe('/api/dtako-logs/bulk')
+  })
+
+  it('forwardAlcTenantData に path / method / tenant / body を渡す', async () => {
+    const { calls, rpc } = stubRpc([OK()])
+    const outcome = await ingestVehicleStates(
+      { tenantId: TENANT_ID, rows: [vehicleRow()] },
+      rpc,
+    )
 
     expect(outcome).toEqual({ success: true, recordsAdded: 1, totalRecords: 1 })
-    expect(calls.map((c) => new URL(c.url).pathname)).toEqual([
-      DEVICE_TOKEN_PATH,
-      DTAKO_LOGS_BULK_PATH,
-    ])
-
-    const headers = calls[1].init?.headers as Record<string, string>
-    expect(headers.Authorization).toBe('Bearer jwt-1')
-    expect(headers['Content-Type']).toBe('application/json')
+    expect(calls).toHaveLength(1)
+    expect(calls[0].path).toBe('/api/dtako-logs/bulk')
+    expect(calls[0].method).toBe('POST')
+    expect(calls[0].contentType).toBe('application/json')
+    // ★ tenant は呼び手が渡した値そのもの。theearth の応答からは作らない。
+    expect(calls[0].tenantId).toBe(TENANT_ID)
 
     // ★ body は生レコードの配列そのもの (ラッパオブジェクトで包まない)。
-    const sent = JSON.parse(String(calls[1].init?.body)) as Array<Record<string, unknown>>
+    const sent = JSON.parse(String(calls[0].body)) as Array<Record<string, unknown>>
     expect(sent).toHaveLength(1)
     expect(sent[0].GPSLatitude).toBe(34733210)
     expect(sent[0].AddressDispP).toBe('静岡県浜松市中央区')
@@ -278,35 +240,39 @@ describe('ingestVehicleStates', () => {
   })
 
   it('★★ 空バッチを送らない — theearth が 0 台なら取得の失敗として落とす', async () => {
-    // rust は空 body に 200 + records_added:0 を返してしまうので、ここで落とさないと
-    // 「毎回成功しているのに画面が更新されない」無音故障になる (#1094 で踏んだ形)。
-    const { calls, fetchImpl } = stubAuthWorker([])
-    await expect(ingestVehicleStates({ cred: CRED, rows: [] }, fetchImpl)).rejects.toThrow(
-      /車輌が 1 台も取れませんでした/,
-    )
-    // device token の mint すらしない (allowlist 外の path を叩く前に止めるのと同じ作法)。
+    // rust は空 body に 200 + records_added:0 ("No records provided") を返すので、
+    // ここで落とさないと「毎回成功しているのに画面が更新されない」無音故障になる
+    // (#1094 で踏んだ形)。
+    const { calls, rpc } = stubRpc([])
+    await expect(
+      ingestVehicleStates({ tenantId: TENANT_ID, rows: [] }, rpc),
+    ).rejects.toThrow(/車輌が 1 台も取れませんでした/)
+    // RPC を 1 度も呼ばない。
     expect(calls).toEqual([])
   })
 
-  it('★ 非 2xx は本文付き loud fail', async () => {
-    const { fetchImpl } = stubAuthWorker([
-      json({ access_token: 'jwt-1' }),
-      json({ error: 'forbidden' }, 403),
-    ])
+  it('★ 非 2xx は status と本文抜粋つきで loud fail', async () => {
+    const { rpc } = stubRpc([rpcResult({ error: 'forbidden' }, 403)])
     await expect(
-      ingestVehicleStates({ cred: CRED, rows: [vehicleRow()] }, fetchImpl),
-    ).rejects.toThrow(/dtako-logs\/bulk failed \(403\): .*forbidden/)
+      ingestVehicleStates({ tenantId: TENANT_ID, rows: [vehicleRow()] }, rpc),
+    ).rejects.toThrow(/alc dtako-logs bulk upsert failed \(403\): .*forbidden/)
   })
 
-  it('★ 200 でも success:true でなければ失敗として扱う', async () => {
+  it('★ allowlist 未反映の 403 は本文で区別できる (auth-worker が先にマージされる前提)', async () => {
+    // `path_not_forwardable` は auth-worker の allowlist が出す固有語。上流の
+    // tenant 拒否 (`forbidden`) と混ざらないので、**どちらを直すか**が本文で割れる。
+    const { rpc } = stubRpc([rpcResult({ error: 'path_not_forwardable' }, 403)])
+    await expect(
+      ingestVehicleStates({ tenantId: TENANT_ID, rows: [vehicleRow()] }, rpc),
+    ).rejects.toThrow(/path_not_forwardable/)
+  })
+
+  it('★ 2xx でも success:true でなければ失敗として扱う', async () => {
     // 「200 が返った = 入った」ではない。success を見ないと、上流が形を変えた日に
     // 静かに 0 件になる。
-    const { fetchImpl } = stubAuthWorker([
-      json({ access_token: 'jwt-1' }),
-      json({ success: false, message: 'nope' }),
-    ])
+    const { rpc } = stubRpc([rpcResult({ success: false, message: 'nope' })])
     await expect(
-      ingestVehicleStates({ cred: CRED, rows: [vehicleRow()] }, fetchImpl),
+      ingestVehicleStates({ tenantId: TENANT_ID, rows: [vehicleRow()] }, rpc),
     ).rejects.toThrow(/success=true を返しませんでした/)
   })
 })
@@ -318,8 +284,9 @@ describe('定数', () => {
     expect(VEHICLE_STATE_ALL_BRANCHES).toBe('00000000')
   })
 
-  it('投入先は auth-worker の allowlist に載っている 1 本', () => {
-    expect(DTAKO_LOGS_BULK_PATH).toBe('/device-data-proxy/api/dtako-logs/bulk')
-    expect(DEVICE_TOKEN_PATH).toBe('/device/token')
+  it('★ 投入先は auth-worker の FORWARDABLE_PATHS に完全一致で載る文字列', () => {
+    // 前方一致では通らない (auth-worker 側に陰性対照あり)。ここがずれると
+    // 403 path_not_forwardable になる。
+    expect(DTAKO_LOGS_BULK_PATH).toBe('/api/dtako-logs/bulk')
   })
 })

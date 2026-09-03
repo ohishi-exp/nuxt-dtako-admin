@@ -140,9 +140,10 @@ service = "nuxt-dtako-admin-scraper-relay-tail"
 #                          セッションも使い回される。対象は VEHICLE_STATE_TARGETS
 #                          ([{comp_id}]、**KV DTAKO_CONFIG_KV の vehicle_state_targets が
 #                          正**) で、**DVR_TARGETS とは独立に評価する** — 片方の設定漏れが
-#                          もう片方を止めない。送信には device credential
-#                          (DTAKO_LOGS_DEVICE_ID / DTAKO_LOGS_DEVICE_SECRET) が要り、
-#                          **未設定なら fail-closed で skip**。上の「staging には足さない」は
+#                          もう片方を止めない。送信は auth-worker の RPC
+#                          (InternalEntrypoint.forwardAlcTenantData) 経由なので
+#                          **device credential は要らない** — AUTH_WORKER_RPC binding が
+#                          無ければ fail-closed で 503。上の「staging には足さない」は
 #                          車輌動態にもそのまま当てはまる (= staging では 1 度も走らない)。
 [triggers]
 crons = [
