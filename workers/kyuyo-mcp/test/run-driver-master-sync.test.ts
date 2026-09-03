@@ -79,6 +79,20 @@ describe("run_driver_master_sync (Refs ippoan/alc-app-s3#125)", () => {
     expect(JSON.parse(init.body as string)).toEqual({ comp_id: COMP_ID });
   });
 
+  it("★ 失敗本文は 200 文字で切らない (comp ごとの理由が読める長さまで載せる)", async () => {
+    // 2026-09-03: comp 75700192 の失敗理由が 200 文字で切れ、切り分けに詰まった。
+    // relay は `{results:[{...,error}]}` を返し、その error に一覧の構造要約まで載る。
+    const detail = JSON.stringify({
+      results: [{ comp_id: "75700192", status: 502, error: `HTTP 502: ${"の".repeat(600)}` }],
+    });
+    const e = env({
+      SCRAPER_RELAY: { fetch: vi.fn(async () => new Response(detail, { status: 502 })) },
+    });
+    await expect(runDriverMasterSyncTool.execute(e, baseArgs)).rejects.toThrow(
+      new RegExp(`${"の".repeat(300)}`),
+    );
+  });
+
   it("relay の失敗と非 JSON は握り潰さない (status と本文抜粋を名指しする)", async () => {
     const bad = env({
       SCRAPER_RELAY: { fetch: vi.fn(async () => new Response("nope", { status: 401 })) },

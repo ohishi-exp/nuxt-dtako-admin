@@ -1956,6 +1956,11 @@ export const runKintaiRestraintSyncTool = {
 
 // ── run_driver_master_sync ───────────────────────────────────────────────────
 
+/** 乗務員マスタ同期の失敗本文をエラーに載せるときの上限。relay が返すのは
+ * comp ごとの結果を畳んだ小さな JSON なので、これは「暴走した本文で応答を
+ * 膨らませない」ための上限であって、短く保つためのものではない。 */
+const RELAY_ERROR_MAX_CHARS = 2000;
+
 const runDriverMasterSyncArgs = z
   .object({
     comp_id: z
@@ -2005,11 +2010,15 @@ export const runDriverMasterSyncTool = {
       body: JSON.stringify({ comp_id: args.comp_id }),
     });
     const body = await res.text();
-    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, 200)}`);
+    // ★ 失敗本文は 200 文字だと**理由が切れる**。relay は comp ごとの結果を
+    // `{results:[{...,error}]}` で返し、その error に一覧の構造要約まで載る
+    // (2026-09-03 に comp 75700192 の失敗理由が読めず切り分けに詰まった)。
+    // 返るのは小さな JSON なので、上限は「暴走を止める」ためのもの。
+    if (!res.ok) throw new Error(`relay: status ${res.status}: ${body.slice(0, RELAY_ERROR_MAX_CHARS)}`);
     try {
       return JSON.parse(body) as unknown;
     } catch {
-      throw new Error(`relay: parse failed: ${body.slice(0, 200)}`);
+      throw new Error(`relay: parse failed: ${body.slice(0, RELAY_ERROR_MAX_CHARS)}`);
     }
   },
 };
