@@ -109,5 +109,10 @@ export default defineNuxtConfig({
     '@ippoan/auth-client/module',
   ],
 
+  // auth-client の SSR 認証状態 (opt-in、Refs ippoan/auth-worker#560)。
+  // server が cookie から認証の判定 (expiresAt / orgId / username) を決めて useState に載せる。
+  // payload に生 JWT は載らない。戻すときはこの 1 行を消す。
+  ippoanAuthClient: { authState: true },
+
   css: ['~/assets/css/main.css'],
 })
