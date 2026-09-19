@@ -64,6 +64,7 @@ import {
 import { CronConfigError, etcCsvKey, parseDtakoAccounts, parseEtcAccounts, resolveDtakoAccountsRaw, resolveSecretBinding, type DtakoAccountEntry, type EtcAccountEntry } from "./cron";
 import {
   buildScrapeHistoryEntries,
+  expandScrapeDateRange,
   recordScrapeHistoryLoud,
   resolveHistoryTenantId,
   type CronScrapeOutcome,
@@ -96,6 +97,7 @@ import {
 } from "./dtako-reimport";
 import {
   DtakoAlcUploadError,
+  assertZipReadyForAlcUpload,
   runDtakoAlcUpload as runDtakoAlcUploadPure,
   type DtakoAlcUploadDeps,
 } from "./dtako-alc-upload";
@@ -1042,6 +1044,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 認証は index.ts の /kintai-relay/dtako-alc-upload 側 (X-Alc-Proxy-Secret) が持つ。
     if (url.pathname === "/cron/dtako/alc-upload" && request.method === "POST") {
       return this.handleCronDtakoAlcUpload(request);
+    }
+    // 乗務員 1 名 × 期間を 1 つの zip で取り込み直す。読取日ベースの /cron/dtako と
+    // 同じ 2 段階 postback を使うが、theearth 側の「乗務員」絞込を効かせるので
+    // has_kudgivt が FALSE に戻るのは**その乗務員の運行だけ**。書き込みなので
+    // scrapeQueue で直列化する。
+    // 認証は index.ts の /kintai-relay/dtako-alc-upload-driver 側 (X-Alc-Proxy-Secret) が持つ。
+    if (url.pathname === "/cron/dtako/alc-upload-driver" && request.method === "POST") {
+      return this.handleCronDtakoAlcUploadDriver(request);
     }
     // NET780 生データを無人で 検索→ダウンロード→R2/D1 アーカイブする (Refs #760 の 26)。
     // 書き込みは R2 + D1 のアーカイブだけ (theearth 側は読むだけ)。同一 comp_id への
@@ -2778,6 +2788,162 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       throw err;
     }
     return this.enqueueScrape(() => this.runDtakoAlcUploadBatch(account, parsed.items, sharedSecret));
+  }
+
+  /**
+   * POST /cron/dtako/alc-upload-driver — body `{comp_id, driver_cd, from, to}`。
+   * **乗務員 1 名 × 期間**を 1 回の zip 取得で alc へ取り込み直す。
+   *
+   * ## 既存 2 経路との住み分け
+   *
+   * | 口 | 単位 | `has_kudgivt` が FALSE に戻る範囲 |
+   * |---|---|---|
+   * | `/cron/dtako` (日次 cron / `run_dtako_scrape`) | **読取日** | その日の**全乗務員** |
+   * | `/cron/dtako/alc-upload` | **運行 1 件** | その運行だけ |
+   * | ここ | **乗務員 × 期間** | **その乗務員の運行だけ** |
+   *
+   * **読取日 ≠ 運行日** (長距離は運行終了の数日後に読取日が付く) なので、
+   * 「ある乗務員のこの期間を直したい」を読取日で表すには人が逆引きするしかなく、
+   * しかも巻き込みが全乗務員に広がっていた。theearth の CSV 出力画面
+   * (F-NOS3010) は **日付範囲 × 乗務員CD range** を持っているので、
+   * `downloadCsvZip` に乗務員を渡すだけでこれが解ける
+   * (`theearth-client.ts` の `CsvDateRange.driverCd`)。
+   *
+   * - **運行を列挙しない。** 1 期間 = 1 zip = 1 回の `/api/upload`。alc の
+   *   `process_zip` は zip 内 KUDGURI.csv の行数ぶん `insert_operation` する
+   * - **期間は `expandScrapeDateRange` の上限 (31 日) まで。** 超えたら 400 で
+   *   拒否する (黙って narrow しない)。月単位で呼び直すのは呼び出し側
+   * - **読取日ではなく「日付範囲」として渡す。** 画面の既定と同じく `rdoDate1`
+   *   (読取日指定) で送っているので、`from`/`to` は**読取日**
+   * - **スクレイプ履歴 (`recordCronScrapeHistory`) は書かない。** あれは
+   *   「この読取日を全乗務員ぶん取り直した」を表す記録で、1 名だけ取り直した
+   *   ことを同じ形で残すと、後から見た人が「その日は取り直し済み」と誤読する
+   */
+  private async handleCronDtakoAlcUploadDriver(request: Request): Promise<Response> {
+    let body: { comp_id?: unknown; driver_cd?: unknown; from?: unknown; to?: unknown };
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return Response.json({ error: "JSON body が必要です" }, { status: 400 });
+    }
+    const driverCd = typeof body.driver_cd === "string" ? body.driver_cd.trim() : "";
+    // theearth の乗務員CD 欄は maxLength=8。
+    if (!/^\d{1,8}$/.test(driverCd)) {
+      return Response.json({ error: "driver_cd は乗務員CD (数字 8 桁まで) で指定してください" }, { status: 400 });
+    }
+    const from = typeof body.from === "string" ? body.from : "";
+    const to = typeof body.to === "string" ? body.to : "";
+    const range = expandScrapeDateRange(from, to);
+    if (!range) {
+      return Response.json(
+        { error: `from / to は YYYY-MM-DD で from <= to を指定してください: "${from}" / "${to}"` },
+        { status: 400 },
+      );
+    }
+    if (range.dropped > 0) {
+      return Response.json(
+        {
+          error:
+            `期間は最大 ${range.dates.length} 日です (${range.dates.length + range.dropped} 日を受け取りました) — ` +
+            "分割して呼び直してください",
+        },
+        { status: 400 },
+      );
+    }
+    const compId =
+      (typeof body.comp_id === "string" && body.comp_id.trim()) || (this.env.KINTAI_COMP_ID ?? "").trim();
+    if (!compId) return Response.json({ error: "comp_id が解決できません" }, { status: 503 });
+
+    const account = await this.resolveAccount(compId);
+    if (!account) {
+      return Response.json({ error: `comp_id=${compId} が DTAKO_ACCOUNTS に見つかりません` }, { status: 500 });
+    }
+    const sharedSecret = await resolveSecret(this.env.INTERNAL_SHARED_SECRET);
+    if (!sharedSecret) {
+      return Response.json(
+        { error: "INTERNAL_SHARED_SECRET 未設定のため alc へ投入できません" },
+        { status: 503 },
+      );
+    }
+    return this.enqueueScrape(() =>
+      this.runDtakoDriverRangeUploadJob(account, { driverCd, startDate: from, endDate: to }, sharedSecret),
+    );
+  }
+
+  /**
+   * 乗務員 1 名 × 期間の zip を取って alc へ投入する (`handleCronDtakoAlcUploadDriver`
+   * の実処理)。`runCronDtakoScrape` と同じ `scrapeViaHttp` + alc-internal-proxy の
+   * 組み合わせだが、**スクレイプ履歴と畳み直し (fold) は回さない** (前者は上の
+   * doc の理由、後者は取り込み後に呼び出し側が月単位で回す方が実際の運用に合う)。
+   */
+  private async runDtakoDriverRangeUploadJob(
+    account: DtakoAccountRaw,
+    input: { driverCd: string; startDate: string; endDate: string },
+    sharedSecret: string,
+  ): Promise<Response> {
+    const logBase = {
+      dtako_alc_upload_driver: "run",
+      comp_id: account.comp_id,
+      driver_cd: input.driverCd,
+      range: `${input.startDate}..${input.endDate}`,
+    };
+    const timer = new PhaseTimer();
+    try {
+      const zip = await scrapeViaHttp(
+        {
+          compId: account.comp_id,
+          userName: account.user_name,
+          userPass: account.user_pass,
+          startDate: input.startDate,
+          endDate: input.endDate,
+          driverCd: input.driverCd,
+        },
+        (step) => console.log(JSON.stringify({ ...logBase, step })),
+        undefined,
+        {},
+        timer,
+      );
+      // 空 ZIP (その期間にその乗務員の運行が無い) は投入しない — alc に空を
+      // 投げても has_kudgivt を落とすだけで得が無い。**0 件は正常な答え**なので
+      // 200 で返し、失敗 (下の catch) と区別できる形にする。
+      assertZipReadyForAlcUpload(zip);
+      const uploadBody = await uploadDtakoZipViaAlcInternalProxy(
+        {
+          sharedSecret,
+          tenantId: account.tenant_id,
+          filename: "csvdata.zip",
+          zipBytes: zip,
+        },
+        this.env.AUTH_WORKER.fetch.bind(this.env.AUTH_WORKER),
+      );
+      const outcome = parseAlcUploadResponse(uploadBody);
+      console.log(JSON.stringify({ ...logBase, status: "ok", bytes: zip.byteLength, ...timer.report() }));
+      return Response.json({
+        ok: true,
+        comp_id: account.comp_id,
+        driver_cd: input.driverCd,
+        from: input.startDate,
+        to: input.endDate,
+        bytes: zip.byteLength,
+        upload_id: outcome.uploadId,
+        operations_count: outcome.operationsCount,
+        split_failed: outcome.splitFailed,
+        split_confirmed: false,
+        notes: {
+          has_kudgivt:
+            "この取り込みで対象乗務員の運行の has_kudgivt は DEFAULT FALSE に戻ります。" +
+            "split (CSV分割) が成功するまで、その運行は読み取り側 (events/etags/Y時間) から一時的に消えます。",
+          split:
+            "split は非同期に走るため、この応答の split_failed は取り込み直後の" +
+            "スナップショットでしかなく確定ではありません。",
+          fold: "畳み直し (fold) はここでは回しません — 取り込み後に run_kintai_recalc を月単位で回してください。",
+        },
+      });
+    } catch (err) {
+      const message = describeUnknownError(err);
+      console.error(JSON.stringify({ ...logBase, status: "error", message, ...timer.report() }));
+      return Response.json({ error: message }, { status: 502 });
+    }
   }
 
   private async runDtakoAlcUploadJob(

@@ -159,6 +159,12 @@ function csvPageHtml(opts: { omit?: string; tableDate?: string } = {}): string {
     MainContent_ucEndDate_txtDay:
       '<input type="text" id="MainContent_ucEndDate_txtDay" name="ctl00$MainContent$ucEndDate$txtDay" value="" />',
     btnCsvSvr: '<input type="submit" id="btnCsvSvr" name="ctl00$MainContent$btnCsvSvr" value="ダウンロード" />',
+    // 乗務員CD の range (実ページ F-NOS3010 の「乗務員」行、2026-09-19 実機確認)。
+    // 既定では絞り込まないので、この 4 つが無くても従来の呼び出しは通る。
+    txtDriver_0: '<input type="text" id="txtDriver_0" name="ctl00$MainContent$txtDriver_0" value="" />',
+    txtDriver_1: '<input type="text" id="txtDriver_1" name="ctl00$MainContent$txtDriver_1" value="" />',
+    ddlDriver_0: '<select id="ddlDriver_0" name="ctl00$MainContent$ddlDriver_0"><option value="0000000000" selected="selected"></option></select>',
+    ddlDriver_1: '<select id="ddlDriver_1" name="ctl00$MainContent$ddlDriver_1"><option value="9999999999" selected="selected"></option></select>',
   }
   if (opts.omit) delete fields[opts.omit]
   return `<html><body><table><tr><td>${tableDate}</td></tr></table>${Object.values(fields).join('\n')}</body></html>`
@@ -758,6 +764,77 @@ describe('downloadCsvZip', () => {
     expect(stage2.get('ctl00$MainContent$ucStartDate$txtDay')).toBe('01')
     expect(stage2.get('ctl00$MainContent$ucEndDate$txtDay')).toBe('02')
     expect(stage2.get('ctl00$MainContent$btnCsvSvrOutput')).toBe('ダウンロード')
+  })
+
+  it('乗務員CD を渡すと stage1/stage2 の両方に CD 欄と select の両方が載る', async () => {
+    // 実機確認 (2026-09-19、読取日 2025-09-29〜10-05): 1 名指定で 7,707 bytes /
+    // KUDGURI 3 行・乗務員CD は 1 名だけ。同じ期間を絞込なしで取ると 755,974 bytes /
+    // 245 行・車輌 111 台だった。**stage2 で落とすと絞り込まれない zip が返る**ので、
+    // 日付範囲と同じく両段に載せることを固定する。
+    const bodies: string[] = []
+    let call = 0
+    const fetchImpl = (async (_url, init) => {
+      call += 1
+      if (call === 1) return html(csvPageHtml())
+      bodies.push(String(init?.body ?? ''))
+      if (call === 2) return html(STAGE1_CONFIRM_HTML)
+      return zipResponse()
+    }) as FetchLike
+    await downloadCsvZip(createCookieJar(), { ...range, driverCd: '1234' }, fetchImpl)
+    for (const body of bodies) {
+      const p = new URLSearchParams(body)
+      expect(p.get('ctl00$MainContent$txtDriver_0')).toBe('1234')
+      expect(p.get('ctl00$MainContent$txtDriver_1')).toBe('1234')
+      // select 側は 10 桁ゼロ埋め (実ページの option 値の形)
+      expect(p.get('ctl00$MainContent$ddlDriver_0')).toBe('0000001234')
+      expect(p.get('ctl00$MainContent$ddlDriver_1')).toBe('0000001234')
+    }
+  })
+
+  it('乗務員CD を渡さなければ乗務員欄を 1 つも送らない (全乗務員のまま)', async () => {
+    const bodies: string[] = []
+    let call = 0
+    const fetchImpl = (async (_url, init) => {
+      call += 1
+      if (call === 1) return html(csvPageHtml())
+      bodies.push(String(init?.body ?? ''))
+      if (call === 2) return html(STAGE1_CONFIRM_HTML)
+      return zipResponse()
+    }) as FetchLike
+    await downloadCsvZip(createCookieJar(), range, fetchImpl)
+    for (const body of bodies) {
+      expect(new URLSearchParams(body).has('ctl00$MainContent$txtDriver_0')).toBe(false)
+    }
+  })
+
+  it('空文字の乗務員CD は「指定なし」として扱う', async () => {
+    const bodies: string[] = []
+    let call = 0
+    const fetchImpl = (async (_url, init) => {
+      call += 1
+      if (call === 1) return html(csvPageHtml())
+      bodies.push(String(init?.body ?? ''))
+      if (call === 2) return html(STAGE1_CONFIRM_HTML)
+      return zipResponse()
+    }) as FetchLike
+    await downloadCsvZip(createCookieJar(), { ...range, driverCd: '' }, fetchImpl)
+    expect(new URLSearchParams(bodies[0]!).has('ctl00$MainContent$txtDriver_0')).toBe(false)
+  })
+
+  it('乗務員CD が数字でなければ loud fail する', async () => {
+    const fetchImpl = sequenceFetch([html(csvPageHtml())])
+    await expect(
+      downloadCsvZip(createCookieJar(), { ...range, driverCd: '15 90' }, fetchImpl),
+    ).rejects.toThrow('乗務員CD が不正です')
+  })
+
+  it('乗務員で絞るのにページに乗務員欄が無ければ loud fail する (ページ仕様変更)', async () => {
+    const fetchImpl = sequenceFetch([html(csvPageHtml({ omit: 'ddlDriver_1' }))])
+    const err = (await downloadCsvZip(createCookieJar(), { ...range, driverCd: '1234' }, fetchImpl).catch(
+      (e: unknown) => e,
+    )) as TheearthPageMismatchError
+    expect(err).toBeInstanceOf(TheearthPageMismatchError)
+    expect(err.message).toContain('ddlDriver_1')
   })
 
   it('downloads directly when stage 1 already returns the ZIP', async () => {

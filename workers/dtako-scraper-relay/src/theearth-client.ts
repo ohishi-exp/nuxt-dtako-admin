@@ -782,6 +782,20 @@ export function splitJapaneseDate(iso: string, isWareki: boolean): JapaneseDateP
 export interface CsvDateRange {
   startDate: string; // "YYYY-MM-DD"
   endDate: string; // "YYYY-MM-DD"
+  /**
+   * 乗務員CD (1 名だけに絞る)。省略すると**全乗務員** (従来どおり)。
+   *
+   * 画面 (F-NOS3010) の「乗務員」は CD の range (from 〜 to) なので、1 名は
+   * **from = to = 同じ CD** で表す。CD 欄 (`txtDriver_0/1`) と隣の select
+   * (`ddlDriver_0/1`、値は 10 桁ゼロ埋め) の**両方**を送る — 実ブラウザは
+   * CD を打つと select 側も連動するので、片方だけ送ると「入力はしたが
+   * 絞り込まれていない」応答になりうる。
+   *
+   * **実測 (2026-09-19、読取日 2025-09-29〜10-05)**: 1 名指定で 7,707 bytes /
+   * KUDGURI は 1 運行ぶん・車輌 1 台だけ。同じ期間を絞込なしで取ると桁違いに
+   * 大きくなる (下の [`CSV_DRIVER_FORM_IDS`] の doc も参照)。
+   */
+  driverCd?: string;
 }
 
 const CSV_FORM_IDS = [
@@ -800,6 +814,16 @@ const CSV_FORM_IDS = [
   // 送ることになる (2026-07-03 実機検証で確認)。
   "btnCsvSvr",
 ] as const;
+
+/** 乗務員で絞るときだけ追加で要る form 要素 (2026-09-19 実ページで確認)。
+ *
+ * **[`CSV_FORM_IDS`] には入れない** — 絞り込まない呼び出し (日次 cron の読取日
+ * スクレイプ) まで、この要素の有無で失敗させないため。絞る指定が来たときだけ
+ * 探し、無ければその場で loud fail する。
+ *
+ * `txtDriver_*` は CD (maxLength 8)、`ddlDriver_*` は同じ乗務員を指す
+ * **10 桁ゼロ埋め**の option 値。既定は `0000000000` 〜 `9999999999` (= 全員)。 */
+const CSV_DRIVER_FORM_IDS = ["txtDriver_0", "txtDriver_1", "ddlDriver_0", "ddlDriver_1"] as const;
 
 /** ZIP のマジックバイト (`PK\x03\x04`) で始まるか。 */
 function zipMagicOk(buf: ArrayBuffer): boolean {
@@ -958,6 +982,28 @@ export async function downloadCsvZip(
     [fields.get("MainContent_ucEndDate_txtDay")!.name]: end.d,
   };
 
+  // 乗務員で 1 名に絞る (指定がなければ従来どおり全乗務員)。**日付範囲と同じく
+  // stage1 / stage2 の両方に載せる** — stage2 で落とすと絞り込まれない zip が
+  // 返る (日付を落とすと空 ZIP になるのと同じ形の罠)。
+  if (range.driverCd != null && range.driverCd !== "") {
+    const driverCd = range.driverCd.trim();
+    if (!/^\d{1,8}$/.test(driverCd)) {
+      throw new TheearthClientError(`乗務員CD が不正です: "${range.driverCd}"`);
+    }
+    const padded = driverCd.padStart(10, "0");
+    for (const id of CSV_DRIVER_FORM_IDS) {
+      const field = findFormFieldById(html, id);
+      if (!field) {
+        throw new TheearthPageMismatchError(
+          `CSV フォームの乗務員絞込要素 (id=${id}) が見つかりません`,
+          buildEvidence(getRes, html, Date.now() - getT0),
+          html,
+        );
+      }
+      dateRange[field.name] = id.startsWith("ddl") ? padded : driverCd;
+    }
+  }
+
   const stage1Body = new URLSearchParams({
     ...hidden,
     ...dateRange,
@@ -1022,6 +1068,9 @@ export interface ScrapeHttpParams {
   userPass: string;
   startDate: string;
   endDate: string;
+  /** 乗務員CD。指定すると**その 1 名の運行だけ**の zip になる (省略で全乗務員、
+   * 日次 cron の読取日スクレイプはこちら)。[`CsvDateRange.driverCd`] 参照。 */
+  driverCd?: string;
 }
 
 export type ProgressCallback = (step: "login" | "download" | "done", message?: string) => void;
@@ -1056,7 +1105,7 @@ export async function scrapeViaHttp(
   onProgress("download");
   const zip = await downloadCsvZip(
     jar,
-    { startDate: params.startDate, endDate: params.endDate },
+    { startDate: params.startDate, endDate: params.endDate, driverCd: params.driverCd },
     fetchImpl,
     timeouts,
     timer,

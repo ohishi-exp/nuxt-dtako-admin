@@ -200,6 +200,13 @@ export default {
       return handleDtakoAlcUpload(request, env);
     }
 
+    if (url.pathname === "/kintai-relay/dtako-alc-upload-driver" && request.method === "POST") {
+      // 乗務員 1 名 × 期間を 1 つの zip で alc へ取り込み直す。**同期。**
+      // `/kintai-relay/dtako-alc-upload` (運行 1 件) の期間版で、theearth 側の
+      // 乗務員絞込を使うので他の乗務員の運行を巻き込まない
+      return handleDtakoAlcUploadDriver(request, env);
+    }
+
     if (url.pathname === "/kintai-relay/net780-archive" && request.method === "POST") {
       // 運行NO の一覧ぶんの NET780 生データを自前ログインで 検索→ダウンロード→
       // R2/D1 アーカイブする (Refs #760 の 26)。**同期。** 書き込みは自前の
@@ -902,6 +909,62 @@ export async function handleDtakoAlcUpload(request: Request, env: RelayWorkerEnv
     body: JSON.stringify({ ...body, comp_id: compId }),
   });
   // DO の応答 (成功も失敗も) をそのまま素通しする — ここで reshape しない。
+  return new Response(res.body, {
+    status: res.status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * `POST /kintai-relay/dtako-alc-upload-driver` — body `{driver_cd, from, to, comp_id?}`。
+ * **乗務員 1 名 × 期間**ぶんの csvdata.zip を自前ログインで取得し、alc の
+ * `POST /api/upload` へ 1 回で投入する。
+ *
+ * `/kintai-relay/dtako-alc-upload` (運行 1 件) の期間版。**運行を列挙しない** —
+ * theearth の CSV 出力画面が持つ「日付範囲 × 乗務員CD」の絞込をそのまま使う
+ * (`theearth-client.ts` の `CsvDateRange.driverCd`)。読取日ベースの
+ * `run_dtako_scrape` と違い、`has_kudgivt` が FALSE に戻るのは**その乗務員の
+ * 運行だけ**なので、他の乗務員が読み取り側から消えない。
+ *
+ * **body は素通しする** (`handleOperationZip` の doc comment 参照)。
+ * `driver_cd` / `from` / `to` の検証と期間上限 (31 日) は DO 側
+ * `/cron/dtako/alc-upload-driver` に委ねる。
+ *
+ * **同期で返す。** 認証・tenant フォールバックは `/kintai-relay/dtako-alc-upload`
+ * と同一 (`INTERNAL_SHARED_SECRET` 未設定は 503、`X-Alc-Proxy-Secret` の
+ * constant-time 検証に失敗したら 401、`comp_id` 省略時は `KINTAI_COMP_ID`)。
+ */
+export async function handleDtakoAlcUploadDriver(
+  request: Request,
+  env: RelayWorkerEnv,
+): Promise<Response> {
+  const fail = (status: number, error: string) =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  const proxySecret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!proxySecret) return fail(503, "kintai-relay not configured");
+  const caller = request.headers.get("X-Alc-Proxy-Secret") ?? "";
+  if (!constantTimeEquals(caller, proxySecret)) return fail(401, "Unauthorized");
+
+  let body: Record<string, unknown>;
+  try {
+    body = (await request.json()) as Record<string, unknown>;
+  } catch {
+    return fail(400, "body must be JSON");
+  }
+  const compId =
+    (typeof body.comp_id === "string" && body.comp_id.trim()) || (env.KINTAI_COMP_ID ?? "").trim();
+  if (!compId) return fail(503, "comp_id が解決できません");
+
+  const id = env.RELAY.idFromName(`scraper-comp-${compId}`);
+  const res = await env.RELAY.get(id).fetch("https://relay.internal/cron/dtako/alc-upload-driver", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...body, comp_id: compId }),
+  });
   return new Response(res.body, {
     status: res.status,
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
