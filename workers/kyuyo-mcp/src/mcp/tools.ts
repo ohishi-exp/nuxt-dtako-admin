@@ -1740,6 +1740,63 @@ export const runDtakoAlcUploadTool = {
   },
 };
 
+// ── run_dtako_alc_upload_driver ──────────────────────────────────────────────
+
+const runDtakoAlcUploadDriverArgs = z
+  .object({
+    driver_cd: z
+      .string()
+      .regex(/^\d{1,8}$/)
+      .describe("乗務員CD (数字、theearth の欄が 8 桁まで)。**この 1 名の運行だけ**が対象"),
+    from: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .describe("開始日 (YYYY-MM-DD)。**読取日**で解釈される (運行日ではない)"),
+    to: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .describe("終了日 (YYYY-MM-DD、両端含む)。**期間は最大 31 日**、超過は relay が 400 で拒否する"),
+    comp_id: z.string().optional().describe("会社。省略すると relay の既定 (KINTAI_COMP_ID)"),
+  })
+  .strict();
+
+/**
+ * 乗務員 1 名 × 期間を 1 回の zip 取得で alc へ取り込み直す
+ * (relay の `POST /kintai-relay/dtako-alc-upload-driver`)。
+ *
+ * **`run_dtako_scrape` (読取日ベース) との違いは巻き込む範囲。** あちらは
+ * その読取日の**全乗務員**の `has_kudgivt` を一旦 FALSE に落とすが、こちらは
+ * theearth 側の乗務員絞込を効かせるので**その乗務員の運行だけ**に閉じる。
+ * **`run_dtako_alc_upload` (運行 1 件) との違いは、運行を列挙しなくてよいこと。**
+ */
+export const runDtakoAlcUploadDriverTool = {
+  name: "run_dtako_alc_upload_driver",
+  description:
+    "**乗務員 1 名 × 期間**の csvdata.zip を theearth から 1 回で取得し、alc へ上げ直す " +
+    "(relay の POST /kintai-relay/dtako-alc-upload-driver)。" +
+    "**運行を列挙しなくてよい** — theearth の CSV 出力画面が持つ「日付範囲 × 乗務員CD」の" +
+    "絞込をそのまま使う。**run_dtako_scrape (読取日ベース) との違いは巻き込む範囲**: " +
+    "あちらはその日の全乗務員の has_kudgivt を FALSE に戻すが、こちらは**その乗務員の" +
+    "運行だけ**なので、他の乗務員が読み取り側 (events/etags/Y時間) から消えない。" +
+    "**from/to は読取日**で解釈される (運行日ではない — 長距離は運行終了の数日後に読取日が付く)。" +
+    "**期間は最大 31 日**、超えたら relay が 400 で拒否する (切り詰めない) ので月単位で呼ぶこと。" +
+    "**書き込み tool。** 応答の split_confirmed は常に false (split は非同期)。" +
+    "**畳み直し (fold) はしない** — 取り込み後に run_kintai_recalc を月単位で回すこと。" +
+    "対象期間にその乗務員の運行が 1 件も無いと空 ZIP になり、投入せずに 502 で返る " +
+    "(「取り込めなかった」ではなく「その期間に運行が無い」)。",
+  inputSchema: runDtakoAlcUploadDriverArgs,
+  // **write tool。** alc への書き込みを伴うので read-only 一覧には入れない
+  requiresScope: "mcp.write",
+  execute: async (env: Env, args: z.infer<typeof runDtakoAlcUploadDriverArgs>) => {
+    return await callRelay(env, "/kintai-relay/dtako-alc-upload-driver", {
+      driver_cd: args.driver_cd,
+      from: args.from,
+      to: args.to,
+      comp_id: args.comp_id,
+    });
+  },
+};
+
 // ── run_kintai_recalc ────────────────────────────────────────────────────────
 
 const runKintaiRecalcArgs = z.object({
@@ -3340,6 +3397,7 @@ export const ALL_TOOLS: ToolEntry<z.ZodTypeAny>[] = [
   getScrapeErrorTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDtakoReimportTool as unknown as ToolEntry<z.ZodTypeAny>,
   runDtakoAlcUploadTool as unknown as ToolEntry<z.ZodTypeAny>,
+  runDtakoAlcUploadDriverTool as unknown as ToolEntry<z.ZodTypeAny>,
   getIchibanCostsTool as unknown as ToolEntry<z.ZodTypeAny>,
   getIchibanSalesTool as unknown as ToolEntry<z.ZodTypeAny>,
   getKushiroBranchEstimateTool as unknown as ToolEntry<z.ZodTypeAny>,

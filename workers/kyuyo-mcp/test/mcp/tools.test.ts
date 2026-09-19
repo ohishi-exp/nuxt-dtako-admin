@@ -1589,6 +1589,9 @@ describe("ALL_TOOLS", () => {
     run_dtako_reimport: "mcp.write",
     // alc (R2 CSV) を書き換えうるアップロード。オンプレは触らない (Refs #633-9)
     run_dtako_alc_upload: "mcp.write",
+    // 同上を「乗務員 × 期間」で回す版。巻き込むのはその乗務員の運行だけだが、
+    // alc への書き込み (has_kudgivt のリセットを含む) は同じ
+    run_dtako_alc_upload_driver: "mcp.write",
     // theearth の車輌現在地 → alc の dtako_logs へ upsert (Refs #1098)。
     // **1 呼び出しで theearth にログインする**ので、同時ログイン制約 (#233) の観点でも
     // read tool と同じ扱いにしない
