@@ -19,4 +19,5 @@ dtako (デジタコ運行データ) 管理画面。Nuxt 4 + Cloudflare Workers (
 - **ETC 検索は `sokoKbn=0` を明示必須** (無いと明細欠落)。**`riyouMonth{N}` は `now` (JST) 当月のみ明示選択し直す** (ページ既定を信用しない)。
 - **cron 式は `wrangler.toml [triggers]` と `src/cron.ts` 定数を必ず一致**させる。
 - **named environment 追加時は `[observability]`/`[triggers]`/`keep_vars`/`[[tail_consumers]]` を個別再宣言**必須 (top-level 非継承)。診断ログは Tail Worker 側を見る。
+- **Y時間 の過去期間は本番ページでは出せない** — alc の dtako は **2024-04〜2025-12 が 0 件**、乗務員は `employees.driver_cd` (theearth 同期が入れるのは `code`) で引く。材料はオンプレ `dtako_events`、テンプレの日付範囲は `要素!F3`/`I3` 駆動。**再現時の分数は「秒を捨ててから引く」** (map skill 参照)。
 - etc-meisai は Shift_JIS。CSV でない応答は loud fail で R2 `{prefix}-errors/` に原本保存。

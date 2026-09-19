@@ -342,6 +342,52 @@ fail することが本番で発覚 → revert。
 5-15s の compute は Cloudflare proxy edge timeout (100s) 内に余裕で収まるので、async 化
 せず sync HTTP で配信している。
 
+### 過去期間を出すときに当たる 3 つの壁 (2026-09-19 実測)
+
+1. **乗務員を引くのは `alc_api.employees.driver_cd`**。theearth の乗務員マスタ同期
+   (`PUT /api/employees/bulk-by-code`) が入れるのは **`code` 列**で、`driver_cd` を
+   付けるのは dtako の取り込み側。⇒ **`code` だけ在る乗務員は `/y-time-export` が
+   404 (`driver_cd not found`)**。画面のプルダウン (`GET /api/drivers`) も
+   `employees INNER JOIN dtako_operations` なので、**運行が 1 件も無い乗務員は
+   そもそも選択肢に出ない**。「マスタに居るのに 404」はこの食い違い。
+2. **alc の `dtako_operations` は全期間を持っていない**。`GET /api/operations/calendar`
+   を月ごとに舐めた実測では、**2023-03〜2024-03 (月 15〜20 件) と 2026-01 以降
+   (月 900〜1100 件) だけ**で、**2024-04〜2025-12 は 0 件**。この穴の期間は
+   本番ページでは計算できない (404 でも 500 でもなく、`rows: []` が返る)。
+3. **テンプレの日付は固定ではなく `要素` シート駆動**。Y時間 の A 列は
+   `A7 = 要素!F3` (開始)、以降 `A{n} = IF(A{n-1}+1 = 要素!$I$3+1, "", A{n-1}+1)` で
+   終了日まで伸びる。`templates/kyoto-soft/base.xlsx` の既定は
+   **2023-03-01〜2024-04-10 の 407 日**で、**その外の日付の行は `writeYTimeRows` が
+   `missingDates` に積むだけで書かれない** (応答の `x-y-time-missing-dates`)。
+   行は 2106 まで = 約 2100 日ぶん用意されているので期間は広げられるが、
+   **`月所` シートは 1 年度スコープ** (`B6` 起点 + `EDATE(B6,12)-1`) なので、
+   年度より広げると Y時間 だけが伸びて月別集計は追従しない。
+
+### 穴の期間は オンプレ `dtako_events` から同じ数字が出せる (陽性対照つき)
+
+オンプレ MariaDB の `dtako_events` (MCP `get_kosoku_events`) は **alc に無い期間も
+持っている**。`状態` を KUDGIVT の event_cd に読み替えれば、上流の
+`split_by_rest` → `split_at_24h` → `build_y_time_rows` をそのまま再現できる。
+
+| オンプレの `状態` | KUDGIVT | 役割 |
+|---|---|---|
+| `休息` | 302 | segment の区切り |
+| `休憩` | 301 | I-O 列 (休憩 7 分割) の材料 |
+| `運行開始` / `運行終了` | — | `dtako_operations.departure_at` / `return_at` の代わり |
+
+- **★ `duration_minutes` は「秒を捨ててから引いた分数」** (`end` と `start` を分に
+  切り捨ててから引く)。秒つきの差を切り捨てると 1 分ずつ短くなり、休憩の多い日で
+  3〜5 分ずれる。**この 1 点だけで、本番 `/api/dtako/y-time-export` の応答と
+  46 行中 46 行不一致 → 0 行不一致に変わった** (乗務員 2 名 × 各 1 か月、F=1 の
+  深夜跨ぎ行と 前日/翌日 バケットを含む)。数字を作るときは**先に本番と一致する
+  月で当てて**から、材料の無い期間へ回すこと。
+- **月クエリは月末 +1 日ぶんしか広げない。** 月をまたぐ運行は前後の月の応答を
+  union しないとイベントが欠ける (片方の月だけ見ると最終日の行が短くなる)。
+- **運行NO はオンプレ 23 桁 / alc 22 桁** (末尾 1 桁 = 対象CD)。alc の
+  `list_operations` は `DISTINCT ON (22 桁)` で 2マンの 2 行を 1 本に畳むので、
+  **23 桁のまま扱うと、出庫が対象CD=1 側・帰庫が =2 側にある運行が
+  「departure/return 不足」で skip され、その日が丸ごと落ちる**。
+
 ### 関連ファイル
 
 | ファイル | 役割 |
