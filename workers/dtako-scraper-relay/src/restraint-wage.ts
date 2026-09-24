@@ -1137,15 +1137,25 @@ export type UnaccountedMinutesKind = "clamp" | "other";
 
 export interface UnaccountedMinutesCheck {
   /** 実働 − (法定内+時間外+週40超過+時間外深夜+法定休日(通常+深夜)+法定外休日(通常+深夜))。
-   * `app/pages/restraint-wage.vue` の `unaccountedMinutes` と同じ式 (深夜 `night` は
-   * 他区分の内訳であって追加の時間ではないため引かない)。0 が不変条件。 */
+   * 式は下の `unaccountedMinutes` (引くのは 8 項。深夜 `night` は他区分の内訳であって
+   * 追加の時間ではないため引かない)。0 が不変条件。画面 (最低賃金チェックの差分列 /
+   * 検証タブ) はこの値を表示するだけで、式を持たない (Refs #1123)。 */
   diffMinutes: number;
   /** `diffMinutes === 0` のときは意味を持たない (参考値)。 */
   kind: UnaccountedMinutesKind;
 }
 
-/** 実働 − 表区分合計 (vue の `unaccountedMinutes` と同じ式)。実働が欠測なら null
- * (判定不能。0 に倒さない)。 */
+/** 実働 − 表区分合計。実働が欠測なら null (判定不能。0 に倒さない)。
+ *
+ * 引くのは 8 項 (法定内・時間外・週40超過・時間外深夜・法定休日・法定休日深夜・
+ * 法定外休日・法定外休日深夜)。深夜 `night` は他区分の内訳なので引かない。
+ * - **週40超過は法定内から控除済み** (案B、Refs #282) なので加算対象
+ * - **法定外休日 (通常+深夜) も引く** — 落としていた頃は、表に出ていないのに差分が
+ *   出ていた (Refs #566)
+ * - 0 以外は日別データの不整合か、ここに無い区分へ分類された時間がある印 (検算用)
+ *
+ * (この式は以前 `app/pages/restraint-wage.vue` にもあったが、#1123 で画面側を消し
+ * relay の判定を表示するだけにした。) */
 function unaccountedMinutes(workingMinutes: number | null, minutes: WageCategoryMinutes): number | null {
   if (workingMinutes === null) return null;
   return (
