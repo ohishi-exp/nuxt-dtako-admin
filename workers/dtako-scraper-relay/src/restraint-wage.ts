@@ -27,6 +27,7 @@
 import { TheearthClientError } from "./theearth-client";
 import type { RestraintDriverSummary, RestraintSummaryDay } from "./theearth-restraint-client";
 import { compareText, isBranchUnder, resolveBranchPrefecture } from "./branch-prefecture";
+import { MINUTES_PER_DAY } from "./timecard-compare";
 
 // ---------------------------------------------------------------------------
 // マスタの型と検証
@@ -1114,6 +1115,112 @@ export function computeWageRow(
       actualNightOvertimePay !== null && minWageNightOvertimePay !== null
         ? actualNightOvertimePay - minWageNightOvertimePay
         : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 不変条件チェック (異常値検知の下地。Refs #1121-6)
+//
+// 「異常値」の閾値を新しく決めるものはここに置かない (地域別最低賃金額との比較・
+// 割増率の法定判定・前月比/他乗務員比の統計的外れ値 — どれも閾値の設定が要る)。
+// ここで見るのは**既に決まっている不変条件**が崩れていないかだけ。
+// ---------------------------------------------------------------------------
+
+/** 実働 − 表区分合計 (`unaccountedMinutes`, 条件1) が 0 でない原因の分類。
+ * - "clamp": `classifyMonth` が「実働 < 時間外」の日を法定時間内 0 にクランプする
+ *   設計 (負にしない。test: `実働 < 時間外の異常データでも法定時間内を負にしない`) の
+ *   ために生じる差分。クランプ自体は意図した挙動だが、**実働 < 時間外というデータ自体が
+ *   怖い状態**なので隠さず出す (除外しない、ユーザー判断)。
+ * - "other": クランプに拠らない差分。日別データの不整合、または `classifyMonth` が
+ *   拾っていない区分に時間が入っている印。 */
+export type UnaccountedMinutesKind = "clamp" | "other";
+
+export interface UnaccountedMinutesCheck {
+  /** 実働 − (法定内+時間外+週40超過+時間外深夜+法定休日(通常+深夜)+法定外休日(通常+深夜))。
+   * `app/pages/restraint-wage.vue` の `unaccountedMinutes` と同じ式 (深夜 `night` は
+   * 他区分の内訳であって追加の時間ではないため引かない)。0 が不変条件。 */
+  diffMinutes: number;
+  /** `diffMinutes === 0` のときは意味を持たない (参考値)。 */
+  kind: UnaccountedMinutesKind;
+}
+
+/** 実働 − 表区分合計 (vue の `unaccountedMinutes` と同じ式)。実働が欠測なら null
+ * (判定不能。0 に倒さない)。 */
+function unaccountedMinutes(workingMinutes: number | null, minutes: WageCategoryMinutes): number | null {
+  if (workingMinutes === null) return null;
+  return (
+    workingMinutes
+    - (minutes.statutory + minutes.overtime + minutes.weekly40Excess + minutes.overtimeNight
+      + minutes.legalHoliday + minutes.legalHolidayNight + minutes.nonLegalHoliday + minutes.nonLegalHolidayNight)
+  );
+}
+
+/** 当月の日別データに「実働 < 時間外(+時間外深夜)」の行があるか。`classifyMonth` の
+ * 法定時間内クランプ (`Math.max(0, c.working - c.overtime - c.overtimeNight)`、通常勤務
+ * 分岐) が発火する条件と同じ。休日区分の分岐は別のクランプ (`night` 系) を持つが、
+ * ここで判定するのはユーザーが指定した「実働 < 時間外」の型のみ。
+ * **`working <= 0` の日は対象外** — `classifyMonth` の区分ループ先頭
+ * (`if (c.fromPrevMonth || c.working <= 0) continue;`) がその日を丸ごと skip する
+ * ため、クランプは 1 度も発火しない (実働欠測 (null→0) で時間外だけ残っている日を
+ * 「クランプ由来」と誤ラベルしないための除外)。 */
+function hasOvertimeClampedDay(days: RestraintSummaryDay[]): boolean {
+  return days.some((d) => {
+    if (d.isRestDay) return false;
+    const working = d.workingMinutes ?? 0;
+    if (working <= 0) return false;
+    const overtimeAndNight = (d.overtimeMinutes ?? 0) + (d.overtimeNightMinutes ?? 0);
+    return working < overtimeAndNight;
+  });
+}
+
+/** 乗務員 1 名 × 1 ヶ月ぶんの不変条件チェック結果。 */
+export interface WageInvariantCheck {
+  /** どの基準で測ったか (`config.hourlyBasis` と同じ)。実測値は測定条件とセットで
+   * 読む必要があるため必ず載せる。 */
+  hourlyBasis: WageConfig["hourlyBasis"];
+  /** 条件1 (実働 − 表区分合計)。実働が欠測で判定不能なら null。 */
+  unaccounted: UnaccountedMinutesCheck | null;
+  /** 条件2 (実働 ≤ 拘束)。true が不変条件。どちらか欠測で判定不能なら null。 */
+  workingWithinRestraint: boolean | null;
+  /** 条件3 (日別拘束の最大 ≤ 1440分 = 1暦日)。true が不変条件。欠測で判定不能なら null。 */
+  restraintWithinDay: boolean | null;
+}
+
+/**
+ * 乗務員 1 名 × 1 ヶ月の不変条件チェック (Refs #1121-6)。`computeWageRow` と同じ層
+ * (`minutes` は `classifyMonth` の出力、`summary` は拘束時間サマリ) で、既に決まって
+ * いる 3 つの不変条件が崩れていないかだけを判定する pure 関数。
+ *
+ * - 条件1: 実働 − 表区分合計 (`unaccountedMinutes`)。0 が不変条件。0 でなければ
+ *   `kind` で「クランプ由来」と「それ以外」を分ける (除外はしない)
+ * - 条件2: 実働 ≤ 拘束 (どちらも月間合計、単位は揃っている)
+ * - 条件3: 日別の最大拘束 (`summary.maxDailyRestraintMinutes`) ≤ 1440分 (1暦日)。
+ *   **`summary.restraintMinutes` は月間合計** (`theearth-restraint-client.ts` の doc
+ *   comment 参照) なので使わない — 使うと実運用の月間拘束 (10,000〜18,000分規模) が
+ *   恒常的に 1440 を超え、全乗務員が毎月「違反」になる (恒常 false positive)
+ *
+ * どの条件も、入力の欠測 (null) は判定不能として null を返し、0 やクリアに倒さない。
+ */
+export function checkWageInvariants(
+  summary: RestraintDriverSummary,
+  minutes: WageCategoryMinutes,
+  config: WageConfig,
+): WageInvariantCheck {
+  const diffMinutes = unaccountedMinutes(summary.workingMinutes, minutes);
+  const { workingMinutes, restraintMinutes, maxDailyRestraintMinutes } = summary;
+  return {
+    hourlyBasis: config.hourlyBasis,
+    unaccounted:
+      diffMinutes === null
+        ? null
+        : {
+            diffMinutes,
+            kind: diffMinutes !== 0 && hasOvertimeClampedDay(summary.days) ? "clamp" : "other",
+          },
+    workingWithinRestraint:
+      workingMinutes === null || restraintMinutes === null ? null : workingMinutes <= restraintMinutes,
+    restraintWithinDay:
+      maxDailyRestraintMinutes === null ? null : maxDailyRestraintMinutes <= MINUTES_PER_DAY,
   };
 }
 

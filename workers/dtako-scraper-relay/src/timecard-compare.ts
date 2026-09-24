@@ -285,8 +285,10 @@ export interface CompareResult {
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-/** 暦日として取りうる上限 (分)。これを超える値は上流の計算事故。 */
-const MINUTES_PER_DAY = 1440;
+/** 暦日として取りうる上限 (分)。これを超える値は上流の計算事故。
+ * `restraint-wage.ts` の拘束不変条件判定 (拘束 > 1440分) でも同じ定数を使う
+ * (再定義しない。1440 の意味が repo 内で 1 か所に集約される)。 */
+export const MINUTES_PER_DAY = 1440;
 
 function finiteNumber(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;

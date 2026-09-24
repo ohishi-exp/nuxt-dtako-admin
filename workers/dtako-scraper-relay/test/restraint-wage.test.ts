@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyMinWageToWageMaster,
+  checkWageInvariants,
   classifyMonth,
   computeMinWageOvertimePay,
   computeWageAmounts,
@@ -938,5 +939,126 @@ describe('splitCsvCells / normalizeDateCell', () => {
     expect(normalizeDateCell(' 2025/1/4 ')).toBe('2025-01-04')
     expect(normalizeDateCell('2025年1月1日')).toBeNull()
     expect(normalizeDateCell('')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// checkWageInvariants (不変条件チェック、Refs #1121-6)
+// ---------------------------------------------------------------------------
+
+describe('checkWageInvariants', () => {
+  it('正常系: 3条件すべて充足 (diff=0 / 実働<=拘束 / 日別最大拘束<=1440)', () => {
+    const minutes = { ...emptyCategoryMinutes(), statutory: 480 }
+    const s = summary({
+      workingMinutes: 480,
+      restraintMinutes: 540,
+      maxDailyRestraintMinutes: 540,
+      days: [day(1, { workingMinutes: 480 })],
+    })
+    const result = checkWageInvariants(s, minutes, DEFAULT_WAGE_CONFIG)
+    expect(result.hourlyBasis).toBe('working')
+    expect(result.unaccounted).toEqual({ diffMinutes: 0, kind: 'other' })
+    expect(result.workingWithinRestraint).toBe(true)
+    expect(result.restraintWithinDay).toBe(true)
+  })
+
+  it('条件1 陰性対照 (other): クランプ由来ではない差分は diffMinutes!=0 / kind=other で捕まる', () => {
+    // 合計400 なのに実働480 → クランプに拠らない差分 (「実働<時間外」の日は無い)
+    const minutes = { ...emptyCategoryMinutes(), statutory: 400 }
+    const s = summary({ workingMinutes: 480, days: [day(1, { workingMinutes: 480, overtimeMinutes: 0 })] })
+    const result = checkWageInvariants(s, minutes, DEFAULT_WAGE_CONFIG)
+    expect(result.unaccounted).toEqual({ diffMinutes: 80, kind: 'other' })
+  })
+
+  it('条件1 陰性対照 (clamp): 「実働<時間外」の日 (test:563 と同じクランプ) は diffMinutes!=0 / kind=clamp で捕まる', () => {
+    const days = [day(1, { workingMinutes: 60, overtimeMinutes: 120 })]
+    // classifyMonth の実クランプ挙動 (法定時間内を負にしない) をそのまま使う
+    const minutes = classifyMonth(days, 2025, 4, DEFAULT_WAGE_CONFIG)
+    expect(minutes.statutory).toBe(0) // クランプが発火していることの前提確認
+    const s = summary({ workingMinutes: 60, days })
+    const result = checkWageInvariants(s, minutes, DEFAULT_WAGE_CONFIG)
+    expect(result.unaccounted).toEqual({ diffMinutes: -60, kind: 'clamp' })
+  })
+
+  it('条件1 判定不能: 実働 null は 0 に倒さず null (早期returnガードに食われないよう、条件2/3は非null入力の別テストで検証する)', () => {
+    const s = summary({ workingMinutes: null, restraintMinutes: 500 })
+    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG)
+    expect(result.unaccounted).toBeNull()
+  })
+
+  it('休日 (isRestDay) の日はクランプ判定から除外する (working=0扱いなので overtimeMinutes が残っていても対象外)', () => {
+    const days = [day(1, { isRestDay: true, workingMinutes: 0, overtimeMinutes: 500 })]
+    const s = summary({ workingMinutes: 10, days })
+    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG)
+    expect(result.unaccounted).toEqual({ diffMinutes: 10, kind: 'other' })
+  })
+
+  it('日別行の実働/時間外/時間外深夜が null でも 0 扱いで判定する (?? 0 フォールバック)', () => {
+    const days = [
+      day(1, { workingMinutes: null, overtimeMinutes: null, overtimeNightMinutes: null }),
+      // working>0 (working<=0 の早期returnを通らない) で時間外/時間外深夜が null の日も
+      // 混ぜる — overtimeAndNight 側の ?? 0 フォールバック分岐を踏むため
+      day(2, { workingMinutes: 500, overtimeMinutes: null, overtimeNightMinutes: null }),
+    ]
+    const s = summary({ workingMinutes: 10, days })
+    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG)
+    // 全部 null → 0 扱い → 0 < 0 は false / 500 < 0 も false → クランプなし
+    expect(result.unaccounted).toEqual({ diffMinutes: 10, kind: 'other' })
+  })
+
+  it('working<=0 の日はクランプ判定から除外する (classifyMonth の区分ループが working<=0 の日を丸ごと skip するのに合わせる。実働欠測 (null→0) で時間外だけ残る日を誤って clamp と判定しない)', () => {
+    const minutes = { ...emptyCategoryMinutes(), statutory: 50 }
+    // working は null (→0 扱い)。classifyMonth はこの日を「working<=0」で skip するので
+    // クランプ (Math.max(0, ...)) は 1 度も発火しない — にもかかわらず working<overtime
+    // (0<120) は成立してしまうので、working<=0 のガードが無いと誤って clamp と判定する。
+    const days = [day(1, { workingMinutes: null, overtimeMinutes: 120 })]
+    const s = summary({ workingMinutes: 100, days })
+    const result = checkWageInvariants(s, minutes, DEFAULT_WAGE_CONFIG)
+    expect(result.unaccounted).toEqual({ diffMinutes: 50, kind: 'other' })
+  })
+
+  it('条件2 陰性対照: 実働 > 拘束 は false で捕まる (workingMinutes/restraintMinutes とも非null)', () => {
+    const minutes = { ...emptyCategoryMinutes(), statutory: 500 }
+    const s = summary({ workingMinutes: 500, restraintMinutes: 400, days: [day(1, { workingMinutes: 500 })] })
+    const result = checkWageInvariants(s, minutes, DEFAULT_WAGE_CONFIG)
+    expect(result.workingWithinRestraint).toBe(false)
+  })
+
+  it('条件2 判定不能: 拘束 null は false ではなく null (実働は非null)', () => {
+    const s = summary({ workingMinutes: 480, restraintMinutes: null })
+    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG)
+    expect(result.workingWithinRestraint).toBeNull()
+  })
+
+  it('条件3 陽性対照: 現実的な1か月 (月間拘束18,000分=20日×15h) でも日別最大拘束が1440分以下なら充足する ' +
+    '(summary.restraintMinutes は月間合計なので、条件3にそのまま使うと恒常的に false になる — この対照はその回帰を防ぐ)', () => {
+    const s = summary({ workingMinutes: 480, restraintMinutes: 18000, maxDailyRestraintMinutes: 900 })
+    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG)
+    expect(result.restraintWithinDay).toBe(true)
+  })
+
+  it('条件3 陰性対照: 日別最大拘束 > 1440分 は false で捕まる (月間合計が現実的な値でも判定は日別最大で行う)', () => {
+    const s = summary({ workingMinutes: 480, restraintMinutes: 18000, maxDailyRestraintMinutes: 1441 })
+    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG)
+    expect(result.restraintWithinDay).toBe(false)
+  })
+
+  it('条件3 境界値: 日別最大拘束 = 1440分ちょうどは充足', () => {
+    const s = summary({ workingMinutes: 480, maxDailyRestraintMinutes: 1440 })
+    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG)
+    expect(result.restraintWithinDay).toBe(true)
+  })
+
+  it('条件3 判定不能: 日別最大拘束 null は false ではなく null (月間合計が非null でも判定不能)', () => {
+    const s = summary({ workingMinutes: 480, restraintMinutes: 18000, maxDailyRestraintMinutes: null })
+    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG)
+    expect(result.restraintWithinDay).toBeNull()
+  })
+
+  it('hourlyBasis を config からそのまま載せる (restraint 基準)', () => {
+    const config = normalizeWageConfig({ hourlyBasis: 'restraint' })
+    const s = summary({ workingMinutes: 480, restraintMinutes: 540 })
+    const result = checkWageInvariants(s, emptyCategoryMinutes(), config)
+    expect(result.hourlyBasis).toBe('restraint')
   })
 })
