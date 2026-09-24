@@ -8,6 +8,7 @@ export { DtakoScraperRelayDO } from "./dtako-scraper-relay-do";
 import { resolveTheearthRouting } from "./theearth-session";
 import {
   buildDeps,
+  relayKintaiCalendarDays,
   relayKintaiDaySummaries,
   relayKintaiRecalc,
   relayKintaiWindow,
@@ -164,6 +165,12 @@ export default {
       // 畳んだ結果を読む (Refs ohishi-exp/rust-ichibanboshi#205 の 23)。
       // **GET だけ。** 受け側に書き込みの口が無いので、こちらにも作らない
       return handleKintaiDaySummaries(request, env);
+    }
+
+    if (url.pathname === "/kintai-relay/calendar-days" && request.method === "GET") {
+      // 暦日ビュー (day_parts を乗務員 × 暦日で足したもの、Refs #1123)。day-summaries と
+      // 同じ関門・同じ読むだけの口 (GET だけ)
+      return handleKintaiCalendarDays(request, env);
     }
 
     if (url.pathname === "/kintai-relay/operation-zip" && request.method === "POST") {
@@ -585,6 +592,39 @@ async function handleKintaiDaySummaries(
   request: Request,
   env: RelayWorkerEnv,
 ): Promise<Response> {
+  return handleKintaiGcpRead(request, env, "kintai_day_summaries", (deps, url) =>
+    relayKintaiDaySummaries(deps, {
+      month: url.searchParams.get("month") || undefined,
+      driver: url.searchParams.get("driver") || undefined,
+    }),
+  );
+}
+
+/**
+ * `GET /kintai-relay/calendar-days?month=YYYY-MM` — 暦日ビュー (`kintai.day_parts` を
+ * 上流が乗務員 × 暦日で足したもの) を読む (Refs #1123)。最低賃金の検証 (条件3) の材料。
+ * 関門・応答の扱いは day-summaries と同じ (`handleKintaiGcpRead`)。
+ */
+async function handleKintaiCalendarDays(
+  request: Request,
+  env: RelayWorkerEnv,
+): Promise<Response> {
+  return handleKintaiGcpRead(request, env, "kintai_calendar_days", (deps, url) =>
+    relayKintaiCalendarDays(deps, { month: url.searchParams.get("month") || undefined }),
+  );
+}
+
+/**
+ * GCP (`/ichibanboshi-proxy` 経由) を**読むだけ**の口の共通の関門と応答。
+ * day-summaries / calendar-days が共有する — 関門を写すと片方だけ直す事故になるため。
+ * 上流の失敗は 502 (古い値に倒さない)。
+ */
+async function handleKintaiGcpRead(
+  request: Request,
+  env: RelayWorkerEnv,
+  logKey: string,
+  read: (deps: ReturnType<typeof buildDeps>, url: URL) => Promise<unknown>,
+): Promise<Response> {
   const fail = (status: number, error: string) =>
     new Response(JSON.stringify({ error }), {
       status,
@@ -615,7 +655,7 @@ async function handleKintaiDaySummaries(
   }
   const tenantId = tenantForCompId(accounts, compId);
   if (!tenantId) {
-    console.error(JSON.stringify({ kintai_day_summaries: "tenant not resolved", comp_id: compId }));
+    console.error(JSON.stringify({ [logKey]: "tenant not resolved", comp_id: compId }));
     return fail(503, "tenant not resolved from dtako_accounts");
   }
 
@@ -629,17 +669,14 @@ async function handleKintaiDaySummaries(
     tenantId,
   });
   try {
-    const summaries = await relayKintaiDaySummaries(deps, {
-      month: url.searchParams.get("month") || undefined,
-      driver: url.searchParams.get("driver") || undefined,
-    });
-    console.log(JSON.stringify({ kintai_day_summaries: "ok" }));
-    return new Response(JSON.stringify(summaries), {
+    const body = await read(deps, url);
+    console.log(JSON.stringify({ [logKey]: "ok" }));
+    return new Response(JSON.stringify(body), {
       headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
     });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
-    console.error(JSON.stringify({ kintai_day_summaries: "failed", message }));
+    console.error(JSON.stringify({ [logKey]: "failed", message }));
     return fail(502, message);
   }
 }

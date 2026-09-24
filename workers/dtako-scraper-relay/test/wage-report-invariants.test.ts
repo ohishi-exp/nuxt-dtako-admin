@@ -69,7 +69,20 @@ function gcpDaySummariesBody(ym: string, withData: boolean) {
   };
 }
 
-function makeDO() {
+/** GCP の暦日ビュー (`/api/kintai/day-parts`、上流が乗務員 × 暦日で SUM 済み)。
+ * **最大の日 (07 日) を day_summaries の始業日 (06 日) とずらす** — 条件3 の日と分数が
+ * 始業日集計ではなく暦日ビューから来ていることを見分けるため。 */
+function calendarDaysBody(ym: string) {
+  return {
+    month: ym,
+    items: [
+      { driver_cd: Number(DRIVER), date: `${ym}-06`, restraint_minutes: 500 },
+      { driver_cd: Number(DRIVER), date: `${ym}-07`, restraint_minutes: 900 },
+    ],
+  };
+}
+
+function makeDO(opts: { calendarDays?: () => Response } = {}) {
   const env = {
     DTAKO_R2: new FakeR2(),
     RESTRAINT_DEV_VIEWER_COMP: COMP_ID,
@@ -84,6 +97,9 @@ function makeDO() {
     AUTH_WORKER: {
       fetch: async (input: RequestInfo | URL) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes("/api/kintai/day-parts")) {
+          return opts.calendarDays?.() ?? Response.json(calendarDaysBody(YM));
+        }
         if (url.includes("/api/kintai/day-summaries")) {
           const isPrev = url.includes(`month=${PREV_YM}`);
           return Response.json(gcpDaySummariesBody(isPrev ? PREV_YM : YM, !isPrev));
@@ -194,14 +210,13 @@ afterEach(() => {
 });
 
 describe("GET /restraint-api/wage-report の rows[].invariants (Refs #1121-7)", () => {
-  it("既定経路 (source=current) — 応答の invariants は同じ入力で checkWageInvariants を直接呼んだ結果と一致する", async () => {
+  it("既定経路 (source=current) — invariants を付けない (検証は GCP のときだけ、Refs #1123)", async () => {
     const body = await wageReport(`month=${YM}`);
     const row = body.rows.find((r) => r.summary.driverCd === DRIVER);
     expect(row).toBeDefined();
-    // ★ 既定経路では truncate が起きない (gcpOverlay が無い) ので、応答の summary
-    // (days を保ったまま) がそのまま checkWageInvariants への入力と一致する
-    const expected = checkWageInvariants(row!.summary, row!.wage.minutes, body.config);
-    expect(row!.invariants).toEqual(expected);
+    // 行はある (陽性対照) が、キーごと無い — 「判定不能」の null とも区別する
+    expect(row!.summary.days.length).toBeGreaterThan(0);
+    expect("invariants" in row!).toBe(false);
   });
 
   it("source=gcp — invariants の判定は応答本文の summary.days が空でも truncate 前の summary を見ている (A-3)", async () => {
@@ -227,13 +242,13 @@ describe("GET /restraint-api/wage-report の rows[].invariants (Refs #1121-7)", 
       "clamp",
     );
 
-    // 条件3 の日 (Refs #1123) も日別行から引くので、truncate 後の summary からは
-    // 分数しか出ない。応答が日 (GCP の 06 日、700 分) まで返していれば、ハンドラが
-    // truncate 前の summary を渡している証拠になる
-    expect(fromTruncated.maxDailyRestraint).toEqual({ day: null, minutes: 700 });
+    // 条件3 (Refs #1123) は暦日ビューの最大 (07 日 900 分) — day_summaries の始業日
+    // (06 日 700 分) ではない。日は overlay が選んだものがハンドラから渡っている
+    // (summary から呼び直すと日を渡さないので分数しか出ない)
+    expect(fromTruncated.maxDailyRestraint).toEqual({ day: null, minutes: 900 });
     expect(
       (row!.invariants as { maxDailyRestraint?: unknown } | undefined)?.maxDailyRestraint,
-    ).toEqual({ day: 6, minutes: 700 });
+    ).toEqual({ day: 7, minutes: 900 });
 
     // 残り 2 条件 (days に依存しない) は truncate の影響を受けないので、そのまま一致する
     expect((row!.invariants as { workingWithinRestraint?: boolean } | undefined)?.workingWithinRestraint).toBe(
@@ -242,5 +257,30 @@ describe("GET /restraint-api/wage-report の rows[].invariants (Refs #1121-7)", 
     expect((row!.invariants as { restraintWithinDay?: boolean } | undefined)?.restraintWithinDay).toBe(
       fromTruncated.restraintWithinDay,
     );
+  });
+});
+
+describe("GET /restraint-api/wage-report?source=gcp の暦日ビュー取得 (Refs #1123)", () => {
+  it("暦日ビュー (day-parts) が落ちたら古い値や始業日集計に倒さず 502", async () => {
+    stubUpstream();
+    const res = await makeDO({ calendarDays: () => new Response("boom", { status: 500 }) }).fetch(
+      req(`month=${YM}&source=gcp`),
+    );
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { error: string }).error).toMatch(/GCP calendar-days \(2026-07\)/);
+  });
+
+  it("暦日ビューにその乗務員の行が無ければ条件3 は判定不能 (null) — day_summaries の 700 分に倒さない", async () => {
+    stubUpstream();
+    const res = await makeDO({ calendarDays: () => Response.json({ month: YM, items: [] }) }).fetch(
+      req(`month=${YM}&source=gcp`),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as WageReportBody;
+    const inv = body.rows.find((r) => r.summary.driverCd === DRIVER)?.invariants as
+      | { restraintWithinDay: boolean | null; maxDailyRestraint: unknown }
+      | undefined;
+    expect(inv?.restraintWithinDay).toBeNull();
+    expect(inv?.maxDailyRestraint).toBeNull();
   });
 });

@@ -78,19 +78,31 @@ function gcpBody(month: string, driverCd = "1442") {
   };
 }
 
+/** 受け側 (`/kintai-relay/calendar-days`) の応答形 — day_parts を乗務員 × 暦日で SUM 済み
+ * (Refs #1123)。既定は 1440 以下 (条件3 は充足)。 */
+function calendarBody(month: string, items = [{ driver_cd: 1442, date: `${month}-01`, restraint_minutes: 720 }]) {
+  return { month, items };
+}
+
 const R2_ENTRIES: Record<string, MockR2Entry> = {
   "restraint/0100/2026-06/summary/1442/latest.json": { value: JSON.stringify(summary()) },
   "restraint/0100/2026-05/summary/1442/latest.json": { value: JSON.stringify(summary()) },
 };
 
-function env(over: Partial<Record<string, unknown>> = {}, entries = R2_ENTRIES): Env {
+function env(
+  over: Partial<Record<string, unknown>> = {},
+  entries = R2_ENTRIES,
+  calendar: (month: string) => unknown = (month) => calendarBody(month),
+): Env {
   return {
     DTAKO_R2: createMockR2(entries),
     RESTRAINT_R2_PREFIX: "restraint",
     AUTH_WORKER_ORIGIN: "https://auth-staging.ippoan.org",
     SCRAPER_RELAY: {
       fetch: vi.fn(async (url: string, _init?: unknown) => {
-        const month = new URL(url).searchParams.get("month")!;
+        const u = new URL(url);
+        const month = u.searchParams.get("month")!;
+        if (u.pathname === "/kintai-relay/calendar-days") return new Response(JSON.stringify(calendar(month)));
         return new Response(JSON.stringify(gcpBody(month)));
       }),
     },
@@ -134,11 +146,15 @@ describe("get_wage_report の source 引数 (Refs #675)", () => {
     expect(res.rows[0]!.summary.days).toHaveLength(2);
   });
 
-  it("**当月と前月の両方**を取りに行く — 片方だけだと跨ぎ週で 2 ソースが混ざる", async () => {
+  it("**当月と前月の両方**を取りに行く — 片方だけだと跨ぎ週で 2 ソースが混ざる。暦日ビューは当月だけ", async () => {
     const e = env();
     await run(e, { company: "0100", month: "2026-06" });
-    const months = relayFetch(e).mock.calls.map((c) => new URL(c[0] as string).searchParams.get("month"));
-    expect(months.sort()).toEqual(["2026-05", "2026-06"]);
+    const calls = relayFetch(e).mock.calls.map((c) => new URL(c[0] as string));
+    const monthsOf = (path: string) =>
+      calls.filter((u) => u.pathname === path).map((u) => u.searchParams.get("month")).sort();
+    expect(monthsOf("/kintai-relay/day-summaries")).toEqual(["2026-05", "2026-06"]);
+    expect(monthsOf("/kintai-relay/calendar-days")).toEqual(["2026-06"]);
+    expect(calls).toHaveLength(3);
   });
 
   it("GCP の分数で計算し直す (R2 の日別値では計算しない)", async () => {
@@ -268,6 +284,31 @@ describe("get_wage_report の driver 引数 (Refs #1121-6、不変条件チェ�
     expect(inv.unaccounted).not.toBeNull();
     expect(inv.workingWithinRestraint).toBe(true);
     expect(inv.restraintWithinDay).toBe(true);
+  });
+
+  it("条件3 は暦日ビューの最大とその日で判定する (別勤務 2 本が同じ暦日 = 1792 分、Refs #1123)", async () => {
+    const e = env({}, R2_ENTRIES, (month) =>
+      calendarBody(month, [
+        { driver_cd: 1442, date: `${month}-01`, restraint_minutes: 720 },
+        { driver_cd: 1442, date: `${month}-24`, restraint_minutes: 1792 },
+      ]),
+    );
+    const inv = (await run(e, { company: "0100", month: "2026-06", driver: "1442" })).rows[0]!.invariants!;
+    expect(inv.restraintWithinDay).toBe(false);
+    expect(inv.maxDailyRestraint).toEqual({ day: 24, minutes: 1792 });
+  });
+
+  it("暦日ビューにその乗務員が居なければ条件3 は判定不能 (day_summaries の 720 分に倒さない)", async () => {
+    const e = env({}, R2_ENTRIES, (month) => calendarBody(month, []));
+    const inv = (await run(e, { company: "0100", month: "2026-06", driver: "1442" })).rows[0]!.invariants!;
+    expect(inv.restraintWithinDay).toBeNull();
+    expect(inv.maxDailyRestraint).toBeNull();
+  });
+
+  it("source: 'current' では driver を指定しても invariants を付けない (検証は GCP のときだけ、Refs #1123)", async () => {
+    const res = await run(env(), { company: "0100", month: "2026-06", source: "current", driver: "1442" });
+    expect(res.rows[0]!.summary.driverCd).toBe("1442");
+    expect(res.rows[0]).not.toHaveProperty("invariants");
   });
 
   it("該当する乗務員が居ない月は、どの行にも invariants が付かない", async () => {

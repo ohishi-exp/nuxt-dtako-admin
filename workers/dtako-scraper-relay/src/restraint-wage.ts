@@ -1201,10 +1201,11 @@ export interface WageInvariantCheck {
   workingWithinRestraint: boolean | null;
   /** 条件3 (日別拘束の最大 ≤ 1440分 = 1暦日)。true が不変条件。欠測で判定不能なら null。 */
   restraintWithinDay: boolean | null;
-  /** 条件3 を判定した日別最大拘束 (`minutes`) と、それを出した日 (`day`、1-31)。
+  /** 条件3 を判定した日別最大拘束 (`minutes`) と、それを出した暦日 (`day`、1-31)。
    * 画面が「どの日が何時間で超えたか」を出すための材料で、判定そのものは
-   * `restraintWithinDay` が正本。`summary.days` に同じ分数の日が無ければ `day: null`
-   * (同じ分数の日が複数なら最初の日)。条件3 が判定不能 (最大拘束が欠測) なら null。 */
+   * `restraintWithinDay` が正本。`day` は呼び出し元が渡した `maxDailyRestraintDay`
+   * (overlay が暦日ビューから選んだ日) で、渡されなければ null。
+   * 条件3 が判定不能 (最大拘束が欠測) なら null。 */
   maxDailyRestraint: { day: number | null; minutes: number } | null;
 }
 
@@ -1217,6 +1218,11 @@ export interface WageInvariantCheck {
  *   `kind` で「クランプ由来」と「それ以外」を分ける (除外はしない)
  * - 条件2: 実働 ≤ 拘束 (どちらも月間合計、単位は揃っている)
  * - 条件3: 日別の最大拘束 (`summary.maxDailyRestraintMinutes`) ≤ 1440分 (1暦日)。
+ *   最大拘束は **GCP の `day_parts` (勤務を 0 時で切って暦日に配った行) を乗務員 ×
+ *   暦日で足した値の最大** (`overlayGcpDayTimes` が暦日ビューから入れる、Refs #1123)。
+ *   超えたら同じ時間帯に勤務が 2 本 = 二重。日 (`maxDailyRestraintDay`、`YYYY-MM-DD`)
+ *   は overlay が選んだものをそのまま使い、`summary.days` から逆引きしない
+ *   (日別行は始業日キーなので暦日とずれる)。
  *   **`summary.restraintMinutes` は月間合計** (`theearth-restraint-client.ts` の doc
  *   comment 参照) なので使わない — 使うと実運用の月間拘束 (10,000〜18,000分規模) が
  *   恒常的に 1440 を超え、全乗務員が毎月「違反」になる (恒常 false positive)
@@ -1226,9 +1232,10 @@ export interface WageInvariantCheck {
  * ## 呼び分け (Refs #1121-7)。**この doc comment が正本** — 揃えないこと
  *
  * 呼び出し元は `dtako-scraper-relay-do.ts` の `handleWageReport` (画面が叩く HTTP
- * route) と `kyuyo-mcp/src/mcp/tools.ts` (MCP `get_wage_report`) の 2 つで、
- * **条件が違う**: route 側は**全行**に常時付ける (画面の検証タブが全乗務員ぶんの
- * 差分列を一度に出すため、呼び出し側で絞り込む余地が無い)。MCP 側は **`driver`
+ * route) と `kyuyo-mcp/src/mcp/tools.ts` (MCP `get_wage_report`) の 2 つ。**どちらも
+ * 拘束時間ソースが GCP のときだけ**呼ぶ (現行ソースでは invariants を付けない —
+ * ユーザー決定、Refs #1123)。そのうえで**条件が違う**: route 側は**全行**に付ける
+ * (画面の検証タブが全乗務員ぶんの差分列を一度に出すため、呼び出し側で絞り込む余地が無い)。MCP 側は **`driver`
  * 指定時に一致した行だけ**に付ける (全乗務員ぶんを毎回計算すると 112 名で応答が
  * 1.1MB 超に膨らむ、Refs #675 と同型の理由)。**「揃える」改修をすると必ずどちらかを
  * 壊す** — MCP を全行にすると応答が肥大化し、route を driver 限定にすると画面の
@@ -1238,6 +1245,7 @@ export function checkWageInvariants(
   summary: RestraintDriverSummary,
   minutes: WageCategoryMinutes,
   config: WageConfig,
+  maxDailyRestraintDay?: string | null,
 ): WageInvariantCheck {
   const diffMinutes = unaccountedMinutes(summary.workingMinutes, minutes);
   const { workingMinutes, restraintMinutes, maxDailyRestraintMinutes } = summary;
@@ -1258,7 +1266,7 @@ export function checkWageInvariants(
       maxDailyRestraintMinutes === null
         ? null
         : {
-            day: summary.days.find((d) => d.restraintMinutes === maxDailyRestraintMinutes)?.day ?? null,
+            day: maxDailyRestraintDay ? Number(maxDailyRestraintDay.slice(8, 10)) : null,
             minutes: maxDailyRestraintMinutes,
           },
   };

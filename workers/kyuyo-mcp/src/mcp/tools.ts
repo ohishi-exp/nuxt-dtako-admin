@@ -25,6 +25,7 @@ import { resolveSecretBinding } from "../../../dtako-scraper-relay/src/cron";
 import {
   gcpPartsFor,
   overlayGcpDayTimes,
+  parseGcpCalendarDays,
   parseGcpDaySummaries,
   type GcpDayPart,
 } from "../../../dtako-scraper-relay/src/gcp-day-summaries";
@@ -235,13 +236,46 @@ const getWageReportArgs = z
         "乗務員CD。**`get_restraint_summary` の `driver` (行を絞り込むフィルタ) とは挙動が違う** " +
           "— こちらは行を絞り込まない (rows は常に会社の全乗務員ぶんのまま)。指定すると、" +
           "driverCd が一致する行にだけ `invariants` (既に決まっている不変条件のチェック結果: " +
-          "実働と表区分合計の差分 / 実働≤拘束 / 日別拘束≤1440分(最大の日で判定)。閾値を新しく決める異常検知 " +
+          "実働と表区分合計の差分 / 実働≤拘束 / 日別拘束≤1440分(GCP day_parts の暦日合計の最大の日で判定)。" +
+          "閾値を新しく決める異常検知 " +
           "(最低賃金額との比較・割増率の法定判定・前月比/他乗務員比較) はここに含まない) を追加する。" +
+          "invariants は source=gcp のときだけ付く (current では driver を指定しても付かない)。" +
           "省略時は invariants を一切計算せず、どの行にも付かない (全乗務員ぶん (100名超) " +
           "計算すると応答が重くなるため)。該当する乗務員が居ない月は、どの行にも付かない",
       ),
   })
   .strict();
+
+/**
+ * relay の GCP 読み取りの口 (`/kintai-relay/{day-summaries,calendar-days}`) を
+ * 1 か月ぶん読んで JSON にする。失敗は `GCP <口> (<月>): …` で名指しする。
+ *
+ * ★ callRelay へは寄せない — 月ごと・口ごとに Promise.all で回し、失敗の名指しに
+ * 月と口が要る。定型の `relay: …` にすると、どの月が落ちたか消える。
+ */
+async function fetchGcpMonth(
+  env: Env,
+  kind: "day-summaries" | "calendar-days",
+  month: string,
+): Promise<unknown> {
+  const relay = env.SCRAPER_RELAY;
+  if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です (source=gcp には relay が要ります)");
+  const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
+  if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
+  const q = new URLSearchParams({ month });
+  const res = await relay.fetch(`https://relay.internal/kintai-relay/${kind}?${q}`, {
+    headers: { "X-Alc-Proxy-Secret": secret },
+  });
+  const body = await res.text();
+  if (!res.ok) {
+    throw new Error(`GCP ${kind} (${month}): status ${res.status}: ${body.slice(0, 200)}`);
+  }
+  try {
+    return JSON.parse(body) as unknown;
+  } catch {
+    throw new Error(`GCP ${kind} (${month}): parse failed: ${body.slice(0, 200)}`);
+  }
+}
 
 /**
  * GCP `kintai.day_summaries` を月ぶん読む (`get_kintai_day_summaries` と同じ口)。
@@ -254,33 +288,22 @@ async function loadGcpDayParts(
   env: Env,
   months: readonly string[],
 ): Promise<Map<string, Map<string, Map<string, GcpDayPart>>>> {
-  const relay = env.SCRAPER_RELAY;
-  if (!relay) throw new Error("SCRAPER_RELAY binding が未設定です (source=gcp には relay が要ります)");
-  const secret = await resolveSecretBinding(env.INTERNAL_SHARED_SECRET);
-  if (!secret) throw new Error("INTERNAL_SHARED_SECRET が未設定です");
-
-  // ★ callRelay へは寄せない — 月ごとに Promise.all で回し、失敗の名指しに月が要る
-  // (`GCP day-summaries (${month}): …`)。定型の `relay: …` にすると、どの月が落ちたか消える。
   const fetched = await Promise.all(
-    months.map(async (month) => {
-      const q = new URLSearchParams({ month });
-      const res = await relay.fetch(`https://relay.internal/kintai-relay/day-summaries?${q}`, {
-        headers: { "X-Alc-Proxy-Secret": secret },
-      });
-      const body = await res.text();
-      if (!res.ok) {
-        throw new Error(`GCP day-summaries (${month}): status ${res.status}: ${body.slice(0, 200)}`);
-      }
-      let raw: unknown;
-      try {
-        raw = JSON.parse(body);
-      } catch {
-        throw new Error(`GCP day-summaries (${month}): parse failed: ${body.slice(0, 200)}`);
-      }
-      return { month, map: parseGcpDaySummaries(raw) };
-    }),
+    months.map(async (month) => ({
+      month,
+      map: parseGcpDaySummaries(await fetchGcpMonth(env, "day-summaries", month)),
+    })),
   );
   return new Map(fetched.map((f) => [f.month, f.map]));
+}
+
+/**
+ * GCP の暦日ビュー (`kintai.day_parts` を上流が乗務員 × 暦日で SUM したもの) を
+ * 1 か月ぶん読む (Refs #1123)。検証の条件3 (日別最大拘束) の材料。relay 側
+ * `loadGcpDayTimes` が当月ぶんだけ同時に読むのと同じ。
+ */
+async function loadGcpCalendarDays(env: Env, month: string): Promise<Map<string, Map<string, number>>> {
+  return parseGcpCalendarDays(await fetchGcpMonth(env, "calendar-days", month));
 }
 
 export const getWageReportTool = {
@@ -292,7 +315,8 @@ export const getWageReportTool = {
     "拘束時間の出どころは `source` で選べ、**省略時は画面と同じ gcp**。" +
     "source=gcp では日別行 (summary.days) を落とす (計算は days を使い切った後なので数字は変わらない)。" +
     "`driver` (乗務員CD) を指定すると、該当行にだけ不変条件チェック `invariants` を追加する " +
-    "(実働と表区分合計の差分 / 実働≤拘束 / 日別拘束≤1440分(最大の日で判定)。閾値を新しく決める異常検知は含まない)。",
+    "(実働と表区分合計の差分 / 実働≤拘束 / 日別拘束≤1440分(GCP day_parts の暦日合計の最大の日で判定)。" +
+    "閾値を新しく決める異常検知は含まない)。invariants は source=gcp のときだけ付く。",
   inputSchema: getWageReportArgs,
   execute: async (env: Env, args) => {
     const source = args.source ?? DEFAULT_RESTRAINT_SOURCE;
@@ -318,23 +342,32 @@ export const getWageReportTool = {
     const prevMonth = month === 1 ? 12 : month - 1;
     const prevYm = `${prevYear}-${String(prevMonth).padStart(2, "0")}`;
 
-    const [wageMaster, minWageMaster, config, current, prev, gcpByMonth] = await Promise.all([
+    const [wageMaster, minWageMaster, config, current, prev, gcp] = await Promise.all([
       loadMaster<WageMaster>("wage-master", normalizeWageMaster, { drivers: {} }),
       loadMaster<MinWageMaster>("min-wage", normalizeMinWageMaster, { prefectures: {}, branchToPrefecture: {} }),
       loadMaster<WageConfig>("wage-config", normalizeWageConfig, normalizeWageConfig(null)),
       loadMonthSummaries(env, args.company, args.month),
       loadMonthSummaries(env, args.company, prevYm),
       // 素材読みとは独立 (月しか要らない) なので待たずに並列で走らせる
-      source === "gcp" ? loadGcpDayParts(env, [args.month, prevYm]) : Promise.resolve(null),
+      source === "gcp"
+        ? Promise.all([loadGcpDayParts(env, [args.month, prevYm]), loadGcpCalendarDays(env, args.month)])
+        : Promise.resolve(null),
     ]);
+    const gcpByMonth = gcp?.[0] ?? null;
 
     // 拘束時間を GCP 由来に差し替える。**当月と前月の両方**を差し替えること —
     // 片方だけだと月初の跨ぎ週 (週40h) で 2 つのソースの実働が混ざる
     // (relay 側 handleWageReport と同じ手順、Refs #675)。
+    // 暦日ビュー (条件3 の材料) は当月ぶんだけ渡す — 前月は日別行しか使わない
     const overlay = (entry: RestraintDriverSummary, forYm: string) =>
       gcpByMonth
-        ? overlayGcpDayTimes(entry, gcpPartsFor(gcpByMonth.get(forYm)!, entry.driverCd), forYm)
-        : { summary: entry, missing: false };
+        ? overlayGcpDayTimes(
+            entry,
+            gcpPartsFor(gcpByMonth.get(forYm)!, entry.driverCd),
+            forYm,
+            forYm === args.month ? gcpPartsFor(gcp![1], entry.driverCd) : null,
+          )
+        : { summary: entry, missing: false, maxDailyRestraintDay: null };
 
     const prevDaysByDriver = new Map<string, RestraintSummaryDay[]>(
       prev.summaries.map((s) => [s.data.driverCd, overlay(s.data, prevYm).summary.days]),
@@ -348,7 +381,7 @@ export const getWageReportTool = {
     }
 
     const rows = current.summaries.map((s) => {
-      const { summary, missing } = overlay(s.data, args.month);
+      const { summary, missing, maxDailyRestraintDay } = overlay(s.data, args.month);
       const wage = computeWageRow(
         summary,
         year,
@@ -376,13 +409,13 @@ export const getWageReportTool = {
         // mode switch。summary は truncate 前のもの (source=gcp でも days を保ったまま)
         // を渡すので、クランプ判定 (日別行を見る) は source に関わらず効く。
         // ★ relay の HTTP route (画面が叩く方、dtako-scraper-relay-do.ts の
-        // handleWageReport) は同じ関数を**全行**に常時付ける。ここを driver 限定の
+        // handleWageReport) は同じ関数を (source=gcp の) **全行**に付ける。ここを driver 限定の
         // ままにするのは意図的 (Refs #1121-7) — 画面は全乗務員ぶんの差分列を
         // 一度に出すが、この MCP tool を全行にすると 112 名で応答が 1.1MB 超に
         // 膨らむ。呼び分けの理由は restraint-wage.ts の checkWageInvariants の
-        // doc comment が正本。
-        ...(args.driver !== undefined && s.data.driverCd === args.driver
-          ? { invariants: checkWageInvariants(summary, wage.minutes, config) }
+        // doc comment が正本。**source=gcp のときだけ** (現行ソースでは検証しない、Refs #1123)。
+        ...(gcpByMonth && args.driver !== undefined && s.data.driverCd === args.driver
+          ? { invariants: checkWageInvariants(summary, wage.minutes, config, maxDailyRestraintDay) }
           : {}),
       };
     });

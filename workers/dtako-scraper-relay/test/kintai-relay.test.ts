@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   relayKintaiWindow,
   relayKintaiRecalc,
+  relayKintaiCalendarDays,
   relayKintaiDaySummaries,
   relayWageRangeGet,
   relayWageSnapshotPut,
@@ -642,6 +643,50 @@ describe("relayKintaiDaySummaries (ohishi-exp/rust-ichibanboshi#205 の 23)", ()
     });
     await expect(relayKintaiDaySummaries({ gcp }, { month: "2026-06" })).rejects.toThrow(
       /parse failed/,
+    );
+  });
+});
+
+const CALENDAR_DAYS = "/api/kintai/day-parts";
+
+describe("relayKintaiCalendarDays (暦日ビュー、Refs #1123)", () => {
+  const SAMPLE = {
+    month: "2026-06",
+    items: [{ driver_cd: 1026, date: "2026-06-24", restraint_minutes: 1792 }],
+  };
+
+  it("壊れた month は 1 回も叩かずに落ちる", async () => {
+    const { gcp, calls } = gcpStub({});
+    await expect(relayKintaiCalendarDays({ gcp }, { month: "2026-6" })).rejects.toBeInstanceOf(KintaiRelayError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("month 省略時は JST の当月 (`now` で固定できる)", async () => {
+    const { gcp, calls } = gcpStub({ [CALENDAR_DAYS]: SAMPLE });
+    await relayKintaiCalendarDays({ gcp }, { now: NOW });
+    expect(calls[0]!.path).toBe(`${CALENDAR_DAYS}?month=2026-06`);
+  });
+
+  it("month も now も無ければ実時刻の当月", async () => {
+    const { gcp, calls } = gcpStub({ [CALENDAR_DAYS]: SAMPLE });
+    await relayKintaiCalendarDays({ gcp }, {});
+    expect(new URL(`https://x${calls[0]!.path}`).searchParams.get("month")).toBe(jstMonth(Date.now()));
+  });
+
+  it("GET で読むだけ。応答はそのまま返す (合算・整形しない)", async () => {
+    const { gcp, calls } = gcpStub({ [CALENDAR_DAYS]: SAMPLE });
+    const r = await relayKintaiCalendarDays({ gcp }, { month: "2026-06" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.method).toBeUndefined();
+    expect(calls[0]!.body).toBeUndefined();
+    expect(calls[0]!.path).toBe(`${CALENDAR_DAYS}?month=2026-06`);
+    expect(r).toEqual(SAMPLE);
+  });
+
+  it("上流が落ちたら口の名前と本文の先頭付きで落とす", async () => {
+    const { gcp } = gcpStub({ [CALENDAR_DAYS]: () => new Response("boom", { status: 404 }) });
+    await expect(relayKintaiCalendarDays({ gcp }, { month: "2026-06" })).rejects.toThrow(
+      /gcp kintai calendar-days: status 404: boom/,
     );
   });
 });

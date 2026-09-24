@@ -6229,7 +6229,9 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       <div class="font-medium">{{ fmtYen(sumNullable(row.wage.amounts?.nonLegalHoliday ?? null, row.wage.amounts?.nonLegalHolidayNight ?? null)) }}</div>
                     </td>
                     <td class="px-2 py-1.5 text-right">
-                      <span :class="row.invariants?.unaccounted?.diffMinutes === 0 ? 'text-xs text-gray-400' : 'text-red-600 font-bold'">
+                      <!-- invariants は拘束時間ソースが GCP のときだけ付く (Refs #1123)。付いていない「-」を
+                           赤くしない (判定不能 = unaccounted が null の「-」は従来どおり赤) -->
+                      <span :class="!row.invariants || row.invariants.unaccounted?.diffMinutes === 0 ? 'text-xs text-gray-400' : 'text-red-600 font-bold'">
                         {{ fmtSignedMinutes(row.invariants?.unaccounted?.diffMinutes ?? null) }}
                       </span>
                     </td>
@@ -9240,13 +9242,19 @@ watch([compMap, kyuyoSyncedKeys], () => {
               <div class="flex flex-wrap items-center gap-2">
                 <span class="font-semibold">検証 ({{ fmtYm(month) }})</span>
                 <span class="text-xs text-gray-500">
-                  測定条件: 時給換算の分母 = {{ verifyHourlyBasis ? HOURLY_BASIS_LABEL[verifyHourlyBasis] : '不明' }} /
+                  測定条件:<template v-if="minWageRestraintSource === 'gcp'"> 時給換算の分母 = {{ verifyHourlyBasis ? HOURLY_BASIS_LABEL[verifyHourlyBasis] : '不明' }} /</template>
                   拘束時間ソース = {{ RESTRAINT_SOURCE_OPTIONS.find(o => o.value === minWageRestraintSource)?.label }}
                   (切り替えは「最低賃金チェック」タブ)
                 </span>
               </div>
             </template>
 
+            <!-- 現行ソースでは検証しない (relay も invariants を付けない、Refs #1123)。
+                 セルごとに「判定不能」を並べると「読めなかった」と「やっていない」が同じ見た目になる -->
+            <p v-if="minWageRestraintSource !== 'gcp'" class="text-sm text-gray-500">
+              検証は拘束時間ソースが GCP のときだけ行います
+            </p>
+            <template v-else>
             <p v-if="gcpReportError" class="text-xs text-red-600 dark:text-red-400 mb-1">
               ⚠ GCP の拘束時間を取得できませんでした: {{ gcpReportError }}
               (現行ソースの数字にはフォールバックしていません — 表は空のままです)
@@ -9335,6 +9343,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
               金額の差 (給与 − 計算) は給与明細を読み込んだ月だけ出ます (未読込は「-」)。
               MCP <code>get_wage_report</code> には金額の突合はありません (給与明細がサーバーに無いため)。
             </p>
+            </template>
           </UCard>
         </template>
       </div>

@@ -27,6 +27,11 @@
  * 月合計もずれる。**「GCP の日別値がオンプレとずれている」を全部データの差と
  * 読まないこと** — この構造差が先に効く。
  *
+ * 例外は**日別の最大拘束 (`maxDailyRestraintMinutes`、検証タブの条件3) だけ**で、
+ * これは GCP が別に保存している暦日ビュー (`kintai.day_parts` を乗務員 × 暦日で
+ * 足したもの、`parseGcpCalendarDays`) から取る (Refs #1123)。始業日キーで足すと、
+ * 同じ日に始まった別勤務 2 本 (例 844 + 948 分) が 1 日に積まれて 24h を超えて見える。
+ *
  * ## `overtime_night_minutes` は `overtime_minutes` の内数なので引く
  *
  * `kosoku-daily.ts` の `toPart` と**同じ理由・同じ式**。日別行 (`RestraintSummaryDay`)
@@ -107,11 +112,43 @@ export function parseGcpDaySummaries(body: unknown): Map<string, Map<string, Gcp
   return out;
 }
 
-/** サマリ側の乗務員CD で GCP 側を引く (両側とも `String(Number(...))` に揃える)。 */
-export function gcpPartsFor(
-  byDriver: ReadonlyMap<string, Map<string, GcpDayPart>>,
-  driverCd: string,
-): ReadonlyMap<string, GcpDayPart> | null {
+/**
+ * GCP の暦日ビュー (`kintai.day_parts` を**上流が乗務員 × 暦日で SUM した**もの、
+ * `relayKintaiCalendarDays`) を **乗務員CD → 暦日 → 拘束 (分)** に直す。
+ *
+ * `{month, items: [{driver_cd, date: "YYYY-MM-DD", restraint_minutes}]}` を読む。
+ * 乗務員CD の正規化・捨てる行は `parseGcpDaySummaries` と同じ規則 (`driver_cd` は
+ * number でも string でも受ける)。**ここで按分・打ち切りはしない** — 暦日への配分は
+ * 上流の day_parts が済ませている。同じ乗務員 × 暦日が 2 行来たら足すのは、
+ * `"01026"` と `1026` のように正規化で初めて同じ乗務員になる行を 1 暦日にまとめる
+ * ためで、上流の SUM と同じ意味。
+ */
+export function parseGcpCalendarDays(body: unknown): Map<string, Map<string, number>> {
+  const out = new Map<string, Map<string, number>>();
+  if (typeof body !== "object" || body === null) return out;
+  const items = (body as { items?: unknown }).items;
+  if (!Array.isArray(items)) return out;
+  for (const raw of items) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const r = raw as Record<string, unknown>;
+    if (typeof r.date !== "string" || !DATE_RE.test(r.date)) continue;
+    if (typeof r.driver_cd !== "number" && typeof r.driver_cd !== "string") continue;
+    const cd = Number(r.driver_cd);
+    if (!Number.isFinite(cd) || cd === 0) continue;
+    const driverCd = String(cd);
+    let byDate = out.get(driverCd);
+    if (!byDate) {
+      byDate = new Map<string, number>();
+      out.set(driverCd, byDate);
+    }
+    byDate.set(r.date, (byDate.get(r.date) ?? 0) + num(r.restraint_minutes));
+  }
+  return out;
+}
+
+/** サマリ側の乗務員CD で GCP 側を引く (両側とも `String(Number(...))` に揃える)。
+ * `parseGcpDaySummaries` と `parseGcpCalendarDays` のどちらの出力にも使う。 */
+export function gcpPartsFor<T>(byDriver: ReadonlyMap<string, T>, driverCd: string): T | null {
   const cd = Number(driverCd);
   if (!Number.isFinite(cd)) return null;
   return byDriver.get(String(cd)) ?? null;
@@ -144,6 +181,25 @@ export interface GcpOverlayResult {
   summary: RestraintDriverSummary;
   /** GCP 側にこの乗務員 × この月の行が 1 つも無かった (= 欠測)。 */
   missing: boolean;
+  /** `summary.maxDailyRestraintMinutes` を出した暦日 (`YYYY-MM-DD`)。同じ最大が複数日
+   * あれば最も早い日。暦日ビューにこの乗務員 × この月の行が無ければ null
+   * (= 条件3 判定不能。そのとき `maxDailyRestraintMinutes` も null)。 */
+  maxDailyRestraintDay: string | null;
+}
+
+/** 暦日ビューのうち `ym` の暦日だけを見て、拘束の最大とその日 (同値なら最も早い日) を選ぶ。 */
+function maxCalendarDay(
+  calendarDays: ReadonlyMap<string, number> | null | undefined,
+  ym: string,
+): { minutes: number; date: string } | null {
+  let best: { minutes: number; date: string } | null = null;
+  for (const [date, minutes] of calendarDays ?? []) {
+    if (date.slice(0, 7) !== ym) continue;
+    if (!best || minutes > best.minutes || (minutes === best.minutes && date < best.date)) {
+      best = { minutes, date };
+    }
+  }
+  return best;
 }
 
 /**
@@ -161,6 +217,11 @@ export interface GcpOverlayResult {
  * 出勤日数 (`workDays`/`restDays`) は差し替えない — GCP には休暇区分が無く、
  * 打刻由来の `restDays` (賃金計算に入らなかった日数) とは意味が違うため。
  *
+ * **`maxDailyRestraintMinutes` だけは `calendarDays` (その乗務員の暦日ビュー) の
+ * `ym` の暦日の最大**にし、その日を `maxDailyRestraintDay` で返す。暦日ビューが
+ * 渡されない / この月の行が無いときは両方 null (条件3 判定不能) — 始業日集計に
+ * 倒さない。前月の overlay のように日別行 (`days`) しか使わない呼び出しは省略してよい。
+ *
  * ## ★ 不変条件: 日別行の合計 = 月合計
  *
  * `summary.days` に同じ暦日 (`day`) の行が複数入っていても (打刻/theearth 側の
@@ -177,13 +238,14 @@ export function overlayGcpDayTimes(
   summary: RestraintDriverSummary,
   parts: ReadonlyMap<string, GcpDayPart> | null,
   ym: string,
+  calendarDays?: ReadonlyMap<string, number> | null,
 ): GcpOverlayResult {
   const inMonth = new Map<number, GcpDayPart>();
   for (const [date, p] of parts ?? []) {
     if (date.slice(0, 7) !== ym) continue;
     inMonth.set(Number(date.slice(8, 10)), p);
   }
-  if (inMonth.size === 0) return { summary: blankTimes(summary), missing: true };
+  if (inMonth.size === 0) return { summary: blankTimes(summary), missing: true, maxDailyRestraintDay: null };
 
   // 同じ暦日が複数行あっても GCP 値は 1 回しか割り当てない (先勝ち)。
   const assigned = new Set<number>();
@@ -221,8 +283,10 @@ export function overlayGcpDayTimes(
   const monthParts = [...inMonth.values()];
   const sum = (pick: (p: GcpDayPart) => number): number =>
     monthParts.reduce((acc, p) => acc + pick(p), 0);
+  // `over15hDays` はまだ始業日集計 (勤務 1 本単位を始業日に寄せた値) のまま
   const dailyRestraints = monthParts.map((p) => p.restraintMinutes);
   const restraintMinutes = sum((p) => p.restraintMinutes);
+  const maxDay = maxCalendarDay(calendarDays, ym);
   return {
     summary: {
       ...summary,
@@ -232,7 +296,7 @@ export function overlayGcpDayTimes(
       overtimeMinutes: sum((p) => p.overtimeMinutes),
       nightMinutes: sum((p) => p.nightMinutes),
       overtimeNightMinutes: sum((p) => p.overtimeNightMinutes),
-      maxDailyRestraintMinutes: Math.max(...dailyRestraints),
+      maxDailyRestraintMinutes: maxDay?.minutes ?? null,
       over15hDays: dailyRestraints.filter((v) => v > 15 * 60).length,
       excessRestraintMinutes:
         summary.restraintLimitMinutes !== null
@@ -241,5 +305,6 @@ export function overlayGcpDayTimes(
       days,
     },
     missing: false,
+    maxDailyRestraintDay: maxDay?.date ?? null,
   };
 }
