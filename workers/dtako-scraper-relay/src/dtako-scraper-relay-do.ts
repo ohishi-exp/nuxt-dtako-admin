@@ -9253,8 +9253,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         // MCP は `driver` 一致時だけ足す ("mode switch") のに対し、ここは**全行**に
         // 常時付ける — 画面 (検証タブ) が全乗務員ぶんの差分列を一度に出すため、
         // 呼び出し側で絞り込む余地が無い。判定は truncate 前の `summary`
-        // (`source=gcp` でも `days` を保ったまま) を渡す — クランプ判定 (日別行を
-        // 見る) は応答の `summary.days` が `[]` になる場合でも効かせる必要があるため。
+        // (`source=gcp` でも `days` を保ったまま) を渡す — クランプ判定と条件3 の日
+        // (どちらも日別行を見る) は応答の `summary.days` が `[]` になる場合でも
+        // 効かせる必要があるため。
         invariants: checkWageInvariants(summary, wage.minutes, config),
       };
     });

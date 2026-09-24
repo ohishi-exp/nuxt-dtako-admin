@@ -35,6 +35,7 @@ import {
   EMPTY_WAGE_REPORT_NOTICE,
   emptyWageReportCause,
   fastBadgeState,
+  fmtMaxDailyRestraint,
   groupMinWageRows,
   invariantRowStatus,
   isMonthlyOvertimeOver60h,
@@ -9277,8 +9278,8 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       <th class="px-2 py-1 text-left">乗務員CD</th>
                       <th class="px-2 py-1 text-left">氏名</th>
                       <th class="px-2 py-1 text-right" title="実働 − 表区分合計 (深夜(通常) 以外の 8 項)。0 が不変条件">条件1 実働 − 表合計</th>
-                      <th class="px-2 py-1 text-left">条件2 実働 ≤ 拘束</th>
-                      <th class="px-2 py-1 text-left">条件3 日別最大拘束 ≤ 24h</th>
+                      <th class="px-2 py-1 text-left">条件2 実働 &gt; 拘束</th>
+                      <th class="px-2 py-1 text-left">条件3 日別最大拘束 &gt; 24h</th>
                       <th class="px-2 py-1 text-right" title="給与 − 計算 (最低賃金チェックの差と同じ値)">基本給の差</th>
                       <th class="px-2 py-1 text-right" title="給与 − 計算 (最低賃金チェックの差と同じ値)">残業代合計の差</th>
                     </tr>
@@ -9300,13 +9301,16 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       </td>
                       <td class="px-2 py-1">
                         <span v-if="row.invariants?.workingWithinRestraint == null" class="text-amber-600">判定不能</span>
-                        <span v-else-if="row.invariants.workingWithinRestraint" class="text-gray-400">OK</span>
-                        <span v-else class="text-red-600 font-bold">違反</span>
+                        <span v-else-if="row.invariants.workingWithinRestraint" class="text-gray-400">なし</span>
+                        <span v-else class="text-red-600 font-bold">あり</span>
                       </td>
                       <td class="px-2 py-1">
                         <span v-if="row.invariants?.restraintWithinDay == null" class="text-amber-600">判定不能</span>
-                        <span v-else-if="row.invariants.restraintWithinDay" class="text-gray-400">OK</span>
-                        <span v-else class="text-red-600 font-bold">違反</span>
+                        <span v-else-if="row.invariants.restraintWithinDay" class="text-gray-400">なし</span>
+                        <span v-else class="text-red-600 font-bold">
+                          あり
+                          <span class="text-xs font-normal">{{ fmtMaxDailyRestraint(row.invariants.maxDailyRestraint, month) }}</span>
+                        </span>
                       </td>
                       <td class="px-2 py-1 text-right tabular-nums" :class="(minWageCompare(row.summary.driverCd).diffBase ?? 0) < 0 ? 'text-red-600 font-medium' : ''">
                         {{ fmtDiff(minWageCompare(row.summary.driverCd).diffBase) }}
@@ -9326,6 +9330,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
             <p class="text-xs text-gray-500 mt-3">
               判定は relay が行い、この画面は表示だけです。「判定不能」は元データが欠けていて判定できなかった行で、OK ではありません
               (relay が古く判定結果を返さない場合も判定不能になります)。
+              条件2・3 は「異常があるか」を表示しています (なし = 正常)。<br>
               条件1 の「クランプ由来」は「実働 &lt; 時間外」の日を法定内 0 に丸めたことによる差で、データそのものが怪しい印です。<br>
               金額の差 (給与 − 計算) は給与明細を読み込んだ月だけ出ます (未読込は「-」)。
               MCP <code>get_wage_report</code> には金額の突合はありません (給与明細がサーバーに無いため)。

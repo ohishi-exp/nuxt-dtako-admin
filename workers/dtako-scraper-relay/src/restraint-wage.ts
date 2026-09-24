@@ -1201,6 +1201,11 @@ export interface WageInvariantCheck {
   workingWithinRestraint: boolean | null;
   /** 条件3 (日別拘束の最大 ≤ 1440分 = 1暦日)。true が不変条件。欠測で判定不能なら null。 */
   restraintWithinDay: boolean | null;
+  /** 条件3 を判定した日別最大拘束 (`minutes`) と、それを出した日 (`day`、1-31)。
+   * 画面が「どの日が何時間で超えたか」を出すための材料で、判定そのものは
+   * `restraintWithinDay` が正本。`summary.days` に同じ分数の日が無ければ `day: null`
+   * (同じ分数の日が複数なら最初の日)。条件3 が判定不能 (最大拘束が欠測) なら null。 */
+  maxDailyRestraint: { day: number | null; minutes: number } | null;
 }
 
 /**
@@ -1249,6 +1254,13 @@ export function checkWageInvariants(
       workingMinutes === null || restraintMinutes === null ? null : workingMinutes <= restraintMinutes,
     restraintWithinDay:
       maxDailyRestraintMinutes === null ? null : maxDailyRestraintMinutes <= MINUTES_PER_DAY,
+    maxDailyRestraint:
+      maxDailyRestraintMinutes === null
+        ? null
+        : {
+            day: summary.days.find((d) => d.restraintMinutes === maxDailyRestraintMinutes)?.day ?? null,
+            minutes: maxDailyRestraintMinutes,
+          },
   };
 }
 

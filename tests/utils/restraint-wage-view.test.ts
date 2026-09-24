@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from 'vitest'
 import type { MinWageRowAttrs, TimecardKosokuState, WageInvariantCheck, WageReportResponse } from '../../app/utils/restraint-wage-view'
-import { EMPTY_WAGE_REPORT_NOTICE, timecardKosokuNotice, emptyWageReportCause, fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, GROSS_HOURLY_CAVEAT, groupMinWageRows, isMonthlyOvertimeOver60h, invariantRowStatus, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, MONTHLY_CSV_WAGE_TAIL_HEADERS, MONTHLY_OVERTIME_THRESHOLD_MINUTES, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
+import { EMPTY_WAGE_REPORT_NOTICE, timecardKosokuNotice, emptyWageReportCause, fastBadgeState, fmtMaxDailyRestraint, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, GROSS_HOURLY_CAVEAT, groupMinWageRows, isMonthlyOvertimeOver60h, invariantRowStatus, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, MONTHLY_CSV_WAGE_TAIL_HEADERS, MONTHLY_OVERTIME_THRESHOLD_MINUTES, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
 
 describe('fmtMinutes', () => {
   it('時間+分を "XhYYm" 表記にする', () => {
@@ -680,6 +680,7 @@ describe('invariantRowStatus (検証タブの 1 行、判定は relay)', () => {
     unaccounted: { diffMinutes: 0, kind: 'other' },
     workingWithinRestraint: true,
     restraintWithinDay: true,
+    maxDailyRestraint: { day: 12, minutes: 700 },
   }
 
   it('invariants が無い (古い relay) は unknown — ok に倒さない', () => {
@@ -715,5 +716,24 @@ describe('invariantRowStatus (検証タブの 1 行、判定は relay)', () => {
     expect(invariantRowStatus({ ...ok, unaccounted: null, restraintWithinDay: false })).toBe('ng')
     expect(invariantRowStatus({ ...ok, unaccounted: { diffMinutes: 10, kind: 'clamp' }, workingWithinRestraint: null })).toBe('ng')
     expect(invariantRowStatus({ ...ok, workingWithinRestraint: false, restraintWithinDay: null })).toBe('ng')
+  })
+})
+
+describe('fmtMaxDailyRestraint (検証タブの条件3「あり」に付ける (M/D Xh))', () => {
+  it('day が引ければ M/D 付きで出す。M は行ではなく month (報告月) から取る', () => {
+    expect(fmtMaxDailyRestraint({ day: 25, minutes: 2097 }, '2026-06')).toBe('(6/25 34h57m)')
+  })
+
+  it('前月扱いの行が混じる month でも、報告月の M をそのまま使う', () => {
+    expect(fmtMaxDailyRestraint({ day: 1, minutes: 120 }, '2026-01')).toBe('(1/1 2h00m)')
+  })
+
+  it('day が null なら M/D を付けず時間だけ', () => {
+    expect(fmtMaxDailyRestraint({ day: null, minutes: 1792 }, '2026-06')).toBe('(29h52m)')
+  })
+
+  it('maxDailyRestraint が無ければ (null / undefined) 空文字', () => {
+    expect(fmtMaxDailyRestraint(null, '2026-06')).toBe('')
+    expect(fmtMaxDailyRestraint(undefined, '2026-06')).toBe('')
   })
 })
