@@ -245,6 +245,7 @@ import {
 } from "./theearth-session";
 import {
   applyMinWageToWageMaster,
+  checkWageInvariants,
   computeWageRow,
   isAuditedWageMaster,
   normalizeAllowanceRateMaster,
@@ -9218,6 +9219,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     const endRows = timer.begin("rows");
     const rows = merged.map(({ entry, source }) => {
       const { summary, missing } = overlay(entry.data, ym);
+      const wage = computeWageRow(
+        summary,
+        year,
+        month,
+        wageMaster,
+        minWageMaster,
+        config,
+        prevDaysByDriver.get(entry.data.driverCd) ?? [],
+        employeeBranches.get(entry.data.driverCd) ?? null,
+      );
       return {
         // ★ `source=gcp` では日別行 (`days`) を本文に載せない (2026-08-04 実測)。
         // 最低賃金チェックは `days` を読まない (日別表はタイムカードタブが
@@ -9236,16 +9247,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
          * **既定経路では列ごと出さない** — 既定の応答本文を 1 バイトも変えないため
          * (変えると全閲覧者の弱 ETag が 1 回無効になる)。 */
         ...(gcpOverlay ? { restraint_missing: missing } : {}),
-        wage: computeWageRow(
-          summary,
-          year,
-          month,
-          wageMaster,
-          minWageMaster,
-          config,
-          prevDaysByDriver.get(entry.data.driverCd) ?? [],
-          employeeBranches.get(entry.data.driverCd) ?? null,
-        ),
+        wage,
+        // ★ 画面が叩くのはこの route (MCP `get_wage_report` とは別経路、Refs #1121-6/7)。
+        // MCP は `driver` 一致時だけ足す ("mode switch") のに対し、ここは**全行**に
+        // 常時付ける — 画面 (検証タブ) が全乗務員ぶんの差分列を一度に出すため、
+        // 呼び出し側で絞り込む余地が無い。判定は truncate 前の `summary`
+        // (`source=gcp` でも `days` を保ったまま) を渡す — クランプ判定 (日別行を
+        // 見る) は応答の `summary.days` が `[]` になる場合でも効かせる必要があるため。
+        invariants: checkWageInvariants(summary, wage.minutes, config),
       };
     });
     endRows();
