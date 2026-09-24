@@ -1029,6 +1029,13 @@ export function computeWageRow(
   prevMonthDays: RestraintSummaryDay[] = [],
   /** 社員マスタ由来の所属 (月末時点)。最低賃金の県はこちらを優先する (Refs #409)。 */
   employeeBranch: string | null = null,
+  /** GCP 側にこの乗務員 × この月の日別サマリが無かった (= 欠測、`overlay()` の
+   * `missing`)。true のとき、時間 (`minutes`) から計算する金額を全部 null にする —
+   * 「拘束データが無い ＝ 金額 0 円」は実際には払っていない額を表示することになる
+   * ため (Refs #1123)。**`minutes` 自体は 0 のまま残す** (front が直読みしている)。
+   * **単価 (`minWageOvertimeRate` / `minWageNightOvertimeRate`) は残す** — 拘束データに
+   * 依存しないフォールバック (`minWage.rate × 係数`) を持つため。 */
+  missing = false,
 ): WageRow {
   const hourlyRate = rateForMonth(wageMaster.drivers[summary.driverCd]?.rates ?? [], year, month);
   const minutes = classifyMonth(summary.days, year, month, config, prevMonthDays);
@@ -1040,7 +1047,7 @@ export function computeWageRow(
   let amounts: WageCategoryAmounts | null = null;
   let totalAmount: number | null = null;
   let hourlyEquivalent: number | null = null;
-  if (hourlyRate !== null) {
+  if (hourlyRate !== null && !missing) {
     const computed = computeWageAmounts(minutes, hourlyRate, config);
     amounts = computed.amounts;
     totalAmount = computed.total;
@@ -1053,16 +1060,16 @@ export function computeWageRow(
       ? Math.round(minWage.rate * (basisMinutes / 60))
       : null;
   const minWageStatutoryPay =
-    minWage.rate !== null ? Math.round(minWage.rate * (minutes.statutory / 60)) : null;
+    minWage.rate !== null && !missing ? Math.round(minWage.rate * (minutes.statutory / 60)) : null;
   const minWageNightPay =
-    minWage.rate !== null
+    minWage.rate !== null && !missing
       ? Math.round(minWage.rate * (minutes.night / 60) * config.rates.night)
       : null;
   const overtimeMinutes = minutes.overtime + minutes.weekly40Excess;
   const nightOvertimeMinutes = minutes.overtimeNight;
   let minWageOvertimePay: number | null = null;
   let minWageNightOvertimePay: number | null = null;
-  if (minWage.rate !== null) {
+  if (minWage.rate !== null && !missing) {
     const split = splitMinWageOvertimePay(overtimeMinutes, nightOvertimeMinutes, minWage.rate, config);
     minWageOvertimePay = split.normalPay;
     minWageNightOvertimePay = split.nightPay;

@@ -791,6 +791,35 @@ describe('computeWageRow', () => {
     // 単価マスタ側の金額は最低賃金と独立に出る
     expect(row.actualOvertimePay).not.toBeNull()
   })
+
+  it('missing=true: 時間から計算する金額は全部 null、minutes は 0 のまま、単価はフォールバックで残る (Refs #1123)', () => {
+    const row = computeWageRow(baseSummary, 2025, 4, wageMaster, MIN_WAGE, DEFAULT_WAGE_CONFIG, [], null, true)
+    expect(row.amounts).toBeNull()
+    expect(row.totalAmount).toBeNull()
+    expect(row.hourlyEquivalent).toBeNull()
+    expect(row.minWageDiff).toBeNull()
+    expect(row.minWageStatutoryPay).toBeNull()
+    expect(row.minWageNightPay).toBeNull()
+    expect(row.minWageOvertimePay).toBeNull()
+    expect(row.minWageNightOvertimePay).toBeNull()
+    expect(row.actualOvertimePay).toBeNull()
+    expect(row.actualNightOvertimePay).toBeNull()
+    expect(row.overtimePayDiff).toBeNull()
+    expect(row.nightOvertimePayDiff).toBeNull()
+    // minutes 自体は 0 のまま (front が直読みしているため null 化しない)
+    expect(row.minutes.statutory).toBe(480)
+    expect(row.minutes.overtime).toBe(120)
+    // 単価 (拘束データに依存しないフォールバック) は残る
+    expect(row.minWageOvertimeRate).toBe(Math.round(956 * DEFAULT_WAGE_CONFIG.rates.overtime))
+    expect(row.minWageNightOvertimeRate).toBe(Math.round(956 * DEFAULT_WAGE_CONFIG.rates.overtimeNight))
+  })
+
+  it('missing (既定 false) を渡さなければ従来どおりの値になる', () => {
+    const row = computeWageRow(baseSummary, 2025, 4, wageMaster, MIN_WAGE, DEFAULT_WAGE_CONFIG)
+    expect(row.amounts).not.toBeNull()
+    expect(row.totalAmount).not.toBeNull()
+    expect(row.minWageStatutoryPay).not.toBeNull()
+  })
 })
 
 // ---------------------------------------------------------------------------

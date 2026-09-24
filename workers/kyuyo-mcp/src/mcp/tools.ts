@@ -357,6 +357,8 @@ export const getWageReportTool = {
         minWageMaster,
         config,
         prevDaysByDriver.get(s.data.driverCd) ?? [],
+        null,
+        missing,
       );
       return {
         // source=gcp では日別行を本文に載せない (relay 側と同じ、Refs #675)。
@@ -366,7 +368,7 @@ export const getWageReportTool = {
         fetched_at: s.fetched_at,
         last_verified_at: s.last_verified_at,
         // GCP 側にこの乗務員 × この月の行が無かった (= 欠測)。**0 分ではない**ので
-        // 呼び出し側は金額・最低賃金割れの判定を出さないこと。
+        // missing を computeWageRow に渡せば、関数側が金額を出さない (null にする)。
         ...(gcpByMonth ? { restraint_missing: missing } : {}),
         wage,
         // driver は行を絞り込むフィルタではない (get_restraint_summary の driver とは
