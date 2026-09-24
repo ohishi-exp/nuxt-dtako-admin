@@ -16,7 +16,7 @@ import type {
   RestraintDriverSummary,
   RestraintSummaryDay,
 } from "../../dtako-scraper-relay/src/theearth-restraint-client";
-import type { WageCategoryMinutes, WageInvariantCheck } from "../../dtako-scraper-relay/src/restraint-wage";
+import type { WageCategoryMinutes, WageInvariantCheck, WageRow } from "../../dtako-scraper-relay/src/restraint-wage";
 
 const SECRET = "internal-shared-secret";
 
@@ -107,7 +107,7 @@ type WageReportResult = {
   rows: Array<{
     summary: RestraintDriverSummary;
     restraint_missing?: boolean;
-    wage: { minutes: WageCategoryMinutes };
+    wage: { minutes: WageCategoryMinutes } & Pick<WageRow, "amounts" | "totalAmount">;
     invariants?: WageInvariantCheck;
   }>;
 };
@@ -170,6 +170,34 @@ describe("get_wage_report の source 引数 (Refs #675)", () => {
     });
     const res = await run(e, { company: "0100", month: "2026-06" });
     expect(res.rows[0]!.restraint_missing).toBe(true);
+  });
+
+  it("欠測行は単価マスタがあっても金額を 0 円ではなく null にする (Refs #1123)", async () => {
+    const withWageMaster: Record<string, MockR2Entry> = {
+      ...R2_ENTRIES,
+      "restraint/0100/wage-master/latest.json": {
+        value: JSON.stringify({
+          drivers: { 1442: { rates: [{ effectiveFrom: "2024-04-01", hourlyRate: 1200 }] } },
+        }),
+      },
+    };
+    const e = env(
+      {
+        SCRAPER_RELAY: {
+          // 別人 (9999) の行しか返さない = 1442 は欠測
+          fetch: vi.fn(async (url: string) => {
+            const month = new URL(url).searchParams.get("month")!;
+            return new Response(JSON.stringify(gcpBody(month, "9999")));
+          }),
+        },
+      },
+      withWageMaster,
+    );
+    const res = await run(e, { company: "0100", month: "2026-06" });
+    expect(res.rows[0]!.restraint_missing).toBe(true);
+    // 単価マスタは引けている (欠測でなければ 0 円ではなく金額が出るはず)
+    expect(res.rows[0]!.wage.amounts).toBeNull();
+    expect(res.rows[0]!.wage.totalAmount).toBeNull();
   });
 
   it("relay binding / secret が無ければ fail-closed", async () => {

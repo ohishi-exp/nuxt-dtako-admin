@@ -9228,6 +9228,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         config,
         prevDaysByDriver.get(entry.data.driverCd) ?? [],
         employeeBranches.get(entry.data.driverCd) ?? null,
+        missing,
       );
       return {
         // ★ `source=gcp` では日別行 (`days`) を本文に載せない (2026-08-04 実測)。
