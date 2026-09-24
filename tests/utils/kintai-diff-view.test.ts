@@ -46,7 +46,7 @@ function diffBody(over: Record<string, unknown> = {}) {
     observations: {
       stale_drivers: 0,
       fold_would_write_drivers: 0,
-      warnings: ['dtako 入力欠け: 乗務員12名の末尾が16日超'],
+      warnings: ['dtako 末尾ギャップ: 乗務員12名の末尾が16日超'],
       unko_diff_gcp_only_in_month: 417,
       unko_diff_gcp_only_driver_split: {
         never_onprem_drivers: 41,
@@ -161,7 +161,7 @@ describe('parseKintaiDiffObservations', () => {
     expect(o).toEqual({
       staleDrivers: 0,
       foldWouldWriteDrivers: 0,
-      warnings: ['dtako 入力欠け: 乗務員12名の末尾が16日超'],
+      warnings: ['dtako 末尾ギャップ: 乗務員12名の末尾が16日超'],
       unkoDiffGcpOnlyInMonth: 417,
       unkoDiffGcpOnlyDriverSplit: {
         neverOnpremDrivers: 41,

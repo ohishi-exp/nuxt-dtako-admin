@@ -350,7 +350,7 @@ export interface KintaiDiffObservations {
   /** dry-run で畳み直したら値が変わる乗務員数 (= 「recalc の dry で何行変わるか」)。
    * 読めなければ `null`。 */
   fold_would_write_drivers: number | null;
-  /** fold の warnings (例: "dtako 入力欠け: 乗務員12名の末尾が16日超")。無ければ空配列。 */
+  /** fold の warnings (例: "dtako 末尾ギャップ: 乗務員12名の末尾が16日超")。無ければ空配列。 */
   warnings: string[];
   /** 対象月に GCP にしか無い運行の件数。読めなければ `null`。 */
   unko_diff_gcp_only_in_month: number | null;
