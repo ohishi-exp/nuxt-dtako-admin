@@ -16,7 +16,7 @@
    #610 の機構は**役目を果たし終えている**。
 3. **単純な stale ではない。** `run_kintai_recalc` の dry 実測 (2026-06) で
    `stale.drivers: 0` / `drivers_written: 0` — 畳み直しても 0 行しか変わらない。
-4. **代わりに観測値が出た。** `warnings: "dtako 入力欠け: 乗務員12名の末尾が16日超"` /
+4. **代わりに観測値が出た。** `warnings: "dtako 末尾ギャップ: 乗務員12名の末尾が16日超"` /
    `unko_diff_gcp_only_in_month: 417` (GCP にしか無い運行) / `unko_diff_total: 0`。
 5. **押しても直る保証がある対象は実データで 0 件。** `get_rest_diff` の `mismatch_total` が
    **3 ヶ月連続 0**。表に出る 239〜243 件は全部 `dtako_missing` で、rust 側のコード自身が

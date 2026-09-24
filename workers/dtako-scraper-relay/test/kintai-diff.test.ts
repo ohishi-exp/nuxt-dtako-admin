@@ -433,7 +433,7 @@ describe("pickRecalcObservations (Refs #615-4)", () => {
     const obs = pickRecalcObservations({
       stale: { drivers: 3 },
       fold: { drivers_written: 5 },
-      warnings: ["dtako 入力欠け: 乗務員12名の末尾が16日超"],
+      warnings: ["dtako 末尾ギャップ: 乗務員12名の末尾が16日超"],
       unko_diff_gcp_only_in_month: 417,
       unko_diff_gcp_only_driver_split: {
         never_onprem_drivers: 41,
@@ -448,7 +448,7 @@ describe("pickRecalcObservations (Refs #615-4)", () => {
     expect(obs).toEqual({
       stale_drivers: 3,
       fold_would_write_drivers: 5,
-      warnings: ["dtako 入力欠け: 乗務員12名の末尾が16日超"],
+      warnings: ["dtako 末尾ギャップ: 乗務員12名の末尾が16日超"],
       unko_diff_gcp_only_in_month: 417,
       unko_diff_gcp_only_driver_split: {
         never_onprem_drivers: 41,
@@ -626,7 +626,7 @@ describe("突合結果のキャッシュ (Refs #620-3)", () => {
   const OBSERVATIONS = {
     stale_drivers: 3,
     fold_would_write_drivers: 5,
-    warnings: ["dtako 入力欠け: 乗務員12名の末尾が16日超"],
+    warnings: ["dtako 末尾ギャップ: 乗務員12名の末尾が16日超"],
     unko_diff_gcp_only_in_month: 417,
     unko_diff_gcp_only_driver_split: {
       never_onprem_drivers: 41,
