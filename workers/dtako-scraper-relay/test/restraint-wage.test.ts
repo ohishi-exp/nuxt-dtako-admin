@@ -1084,40 +1084,37 @@ describe('checkWageInvariants', () => {
     expect(result.restraintWithinDay).toBeNull()
   })
 
-  it('条件3 の日: 日別最大拘束を出した日 (summary.days で分数が一致する日) を maxDailyRestraint に載せる', () => {
-    // 長距離運行で勤務が割れず 1 本が 2,097 分になった日 (issue #1123 の型) を 25 日に置く
+  it('条件3 の日: 引数で受けた暦日 (overlay が暦日ビューから選んだ日) をそのまま載せ、summary.days から逆引きしない', () => {
+    // 別勤務 2 本が同じ暦日 (上流 SUM 済み 1792) の日を 24 日として受ける。
+    // summary.days (始業日キー) には 25 日に同じ 1792 分の行があるが、そちらを拾わない
     const days = [
-      day(24, { restraintMinutes: 600 }),
-      day(25, { restraintMinutes: 2097 }),
-      day(26, { restraintMinutes: 700 }),
+      day(24, { restraintMinutes: 844 }),
+      day(25, { restraintMinutes: 1792 }),
     ]
-    const s = summary({ workingMinutes: 480, maxDailyRestraintMinutes: 2097, days })
-    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG)
+    const s = summary({ workingMinutes: 480, maxDailyRestraintMinutes: 1792, days })
+    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG, '2026-06-24')
     expect(result.restraintWithinDay).toBe(false)
-    expect(result.maxDailyRestraint).toEqual({ day: 25, minutes: 2097 })
+    expect(result.maxDailyRestraint).toEqual({ day: 24, minutes: 1792 })
   })
 
-  it('条件3 の日: 同じ分数の日が複数あれば最初の日を載せる (days の並び順で先に現れる日)', () => {
-    const days = [
-      day(3, { restraintMinutes: 500 }),
-      day(9, { restraintMinutes: 1500 }),
-      day(17, { restraintMinutes: 1500 }),
-    ]
-    const s = summary({ workingMinutes: 480, maxDailyRestraintMinutes: 1500, days })
-    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG)
-    expect(result.maxDailyRestraint).toEqual({ day: 9, minutes: 1500 })
+  it('条件3 の日: 1440 ちょうどは充足のまま日も載せる (判定式は <= 1440 で不変)', () => {
+    const s = summary({ workingMinutes: 480, maxDailyRestraintMinutes: 1440, days: [] })
+    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG, '2026-06-09')
+    expect(result.restraintWithinDay).toBe(true)
+    expect(result.maxDailyRestraint).toEqual({ day: 9, minutes: 1440 })
   })
 
-  it('条件3 の日: summary.days に同じ分数の日が無ければ day は null (分数だけ載せ、日を捏造しない)', () => {
-    // source=gcp の応答本文のように days が落とされた summary / 合計行だけの summary の形
-    const s = summary({ workingMinutes: 480, maxDailyRestraintMinutes: 1792, days: [day(24, { restraintMinutes: 844 })] })
-    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG)
-    expect(result.maxDailyRestraint).toEqual({ day: null, minutes: 1792 })
+  it('条件3 の日: 日を渡されなければ day は null (分数だけ載せ、summary.days から日を捏造しない)', () => {
+    const s = summary({ workingMinutes: 480, maxDailyRestraintMinutes: 1792, days: [day(24, { restraintMinutes: 1792 })] })
+    for (const d of [undefined, null]) {
+      const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG, d)
+      expect(result.maxDailyRestraint).toEqual({ day: null, minutes: 1792 })
+    }
   })
 
   it('条件3 の日: 日別最大拘束が欠測 (判定不能) なら maxDailyRestraint も null (0 分に倒さない)', () => {
     const s = summary({ workingMinutes: 480, maxDailyRestraintMinutes: null, days: [day(1, { restraintMinutes: null })] })
-    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG)
+    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG, '2026-06-01')
     expect(result.restraintWithinDay).toBeNull()
     expect(result.maxDailyRestraint).toBeNull()
   })

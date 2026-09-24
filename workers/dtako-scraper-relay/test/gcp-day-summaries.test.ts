@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   gcpPartsFor,
   overlayGcpDayTimes,
+  parseGcpCalendarDays,
   parseGcpDaySummaries,
   type GcpDayPart,
 } from "../src/gcp-day-summaries";
@@ -208,10 +209,12 @@ describe("overlayGcpDayTimes", () => {
       overtimeMinutes: 300,
       nightMinutes: 40,
       overtimeNightMinutes: 20,
-      maxDailyRestraintMinutes: 960,
+      // 日別最大は暦日ビューからしか取らない。渡さなければ判定不能 (始業日集計の 960 に倒さない)
+      maxDailyRestraintMinutes: null,
       over15hDays: 1,
       excessRestraintMinutes: null,
     });
+    expect(res.maxDailyRestraintDay).toBeNull();
   });
 
   it("拘束上限が引けている月は超過分も数え直す", () => {
@@ -270,6 +273,126 @@ describe("overlayGcpDayTimes", () => {
         over15hDays: 0,
         days: [],
       });
+      expect(res.maxDailyRestraintDay).toBeNull();
     }
+  });
+});
+
+describe("parseGcpCalendarDays", () => {
+  it("items を 乗務員CD → 暦日 → 拘束 (分) に直す (driver_cd は number でも string でも受ける)", () => {
+    const out = parseGcpCalendarDays({
+      month: "2026-06",
+      items: [
+        { driver_cd: 1026, date: "2026-06-24", restraint_minutes: 1792 },
+        { driver_cd: "01248", date: "2026-06-25", restraint_minutes: 1300 },
+        { driver_cd: 1248, date: "2026-06-26", restraint_minutes: 400 },
+      ],
+    });
+    expect([...out.entries()].map(([cd, m]) => [cd, [...m.entries()]])).toEqual([
+      ["1026", [["2026-06-24", 1792]]],
+      ["1248", [["2026-06-25", 1300], ["2026-06-26", 400]]],
+    ]);
+  });
+
+  it("正規化で同じ乗務員 × 暦日になった行は足す (\"01026\" と 1026)", () => {
+    const out = parseGcpCalendarDays({
+      items: [
+        { driver_cd: "01026", date: "2026-06-24", restraint_minutes: 844 },
+        { driver_cd: 1026, date: "2026-06-24", restraint_minutes: 948 },
+      ],
+    });
+    expect(out.get("1026")?.get("2026-06-24")).toBe(1792);
+  });
+
+  it("読めない行は捨て、形の違う応答は空にする", () => {
+    for (const body of [null, "x", {}, { items: "x" }, { items: {} }]) {
+      expect(parseGcpCalendarDays(body).size).toBe(0);
+    }
+    const out = parseGcpCalendarDays({
+      items: [
+        null,
+        "nope",
+        { driver_cd: 1026, date: "20260624", restraint_minutes: 1 },
+        { driver_cd: 1026, restraint_minutes: 1 },
+        { driver_cd: "abc", date: "2026-06-24", restraint_minutes: 1 },
+        { driver_cd: 0, date: "2026-06-24", restraint_minutes: 1 },
+        { driver_cd: true, date: "2026-06-24", restraint_minutes: 1 },
+        { driver_cd: null, date: "2026-06-24", restraint_minutes: 1 },
+      ],
+    });
+    expect(out.size).toBe(0);
+  });
+
+  it("restraint_minutes が数値でなければ 0 分 (day_summaries と同じ num 規則)", () => {
+    const out = parseGcpCalendarDays({ items: [{ driver_cd: 1026, date: "2026-06-24", restraint_minutes: "x" }] });
+    expect(out.get("1026")?.get("2026-06-24")).toBe(0);
+  });
+});
+
+describe("overlayGcpDayTimes の日別最大拘束 (暦日ビュー、Refs #1123)", () => {
+  // 始業日キーの day_summaries: 06-24 に別勤務 2 本 (844 + 948) が始業している
+  const parts = new Map<string, GcpDayPart>([
+    ["2026-06-24", { restraintMinutes: 844 + 948, workingMinutes: 1500, breakMinutes: 292, overtimeMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0 }],
+    ["2026-06-25", { restraintMinutes: 600, workingMinutes: 500, breakMinutes: 100, overtimeMinutes: 0, nightMinutes: 0, overtimeNightMinutes: 0 }],
+  ]);
+
+  it("別勤務 2 本が同じ暦日 (上流が SUM 済みの 1792) → 最大 1792・その日", () => {
+    const calendar = new Map([
+      ["2026-06-23", 300],
+      ["2026-06-24", 1792],
+      ["2026-06-25", 600],
+    ]);
+    const res = overlayGcpDayTimes(summary(), parts, "2026-06", calendar);
+    expect(res.summary.maxDailyRestraintMinutes).toBe(1792);
+    expect(res.maxDailyRestraintDay).toBe("2026-06-24");
+  });
+
+  it("0 時またぎ 1 本 (暦日 2 行、どちらも ≤ 1440) → 最大は大きい方。始業日集計の値 (1792) にならない", () => {
+    // 始業日集計なら 06-24 に 1792 が乗るが、暦日で切ると 1100 + 692
+    const calendar = new Map([
+      ["2026-06-24", 1100],
+      ["2026-06-25", 692 + 600],
+    ]);
+    const res = overlayGcpDayTimes(summary(), parts, "2026-06", calendar);
+    expect(res.summary.maxDailyRestraintMinutes).toBe(1292);
+    expect(res.maxDailyRestraintDay).toBe("2026-06-25");
+  });
+
+  it("同じ最大が複数日あれば最も早い日 (並び順に依らない)", () => {
+    const calendar = new Map([
+      ["2026-06-25", 900],
+      ["2026-06-10", 900],
+      ["2026-06-24", 800],
+    ]);
+    const res = overlayGcpDayTimes(summary(), parts, "2026-06", calendar);
+    expect(res.summary.maxDailyRestraintMinutes).toBe(900);
+    expect(res.maxDailyRestraintDay).toBe("2026-06-10");
+  });
+
+  it("対象月の外の暦日は見ない (前月末・翌月頭)", () => {
+    const calendar = new Map([
+      ["2026-05-31", 2000],
+      ["2026-06-24", 700],
+      ["2026-07-01", 2000],
+    ]);
+    const res = overlayGcpDayTimes(summary(), parts, "2026-06", calendar);
+    expect(res.summary.maxDailyRestraintMinutes).toBe(700);
+    expect(res.maxDailyRestraintDay).toBe("2026-06-24");
+  });
+
+  it("その乗務員の暦日ビューが 0 件 (null / 空 / 月外だけ) → 両方 null (条件3 判定不能)", () => {
+    for (const calendar of [null, undefined, new Map<string, number>(), new Map([["2026-05-31", 900]])]) {
+      const res = overlayGcpDayTimes(summary(), parts, "2026-06", calendar);
+      expect(res.missing).toBe(false);
+      expect(res.summary.maxDailyRestraintMinutes).toBeNull();
+      expect(res.maxDailyRestraintDay).toBeNull();
+      // 月合計は day_summaries のまま (暦日ビューは最大の日にしか使わない)
+      expect(res.summary.restraintMinutes).toBe(844 + 948 + 600);
+    }
+  });
+
+  it("over15hDays は触らない (始業日集計のまま)", () => {
+    const res = overlayGcpDayTimes(summary(), parts, "2026-06", new Map([["2026-06-24", 700]]));
+    expect(res.summary.over15hDays).toBe(1);
   });
 });

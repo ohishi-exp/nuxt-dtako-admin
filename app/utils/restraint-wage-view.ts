@@ -147,7 +147,8 @@ export interface WageReportRow {
    * 行が無かった (= 欠測)。`current` の応答では常に false / 未定義。
    * **0 分ではない** ので、金額・最低賃金割れの判定は出さずに「-」で表示する。 */
   restraint_missing?: boolean
-  /** 不変条件チェック (Refs #1121-6、判定は relay が正本)。古い relay の応答には無いので optional。 */
+  /** 不変条件チェック (Refs #1121-6、判定は relay が正本)。**拘束時間ソースが GCP の応答にだけ
+   * 付く** (現行ソースでは検証しない、Refs #1123)。古い relay の応答にも無いので optional。 */
   invariants?: WageInvariantCheck
 }
 
@@ -173,8 +174,9 @@ export interface WageInvariantCheck {
   workingWithinRestraint: boolean | null
   /** 条件3 (日別拘束の最大 ≤ 1440分)。true が不変条件。 */
   restraintWithinDay: boolean | null
-  /** 条件3 を判定した日別最大拘束と、それを出した日 (`day`、1-31。`summary.days` に
-   * 同じ分数の日が無ければ null)。relay `restraint-wage.ts` の同名フィールドの写し。 */
+  /** 条件3 を判定した日別最大拘束と、それを出した暦日 (`day`、1-31)。最大拘束は GCP の
+   * day_parts を乗務員 × 暦日で足した値の最大で、日も relay がその暦日ビューから選ぶ
+   * (日が渡されなければ null)。relay `restraint-wage.ts` の同名フィールドの写し。 */
   maxDailyRestraint: { day: number | null, minutes: number } | null
 }
 
@@ -182,7 +184,8 @@ export interface WageInvariantCheck {
  * 検証タブの 1 行を ok / ng / unknown に畳む (判定そのものは relay)。
  * **ng を unknown より優先する** — 1 条件でも崩れていれば、他が判定不能でも違反。
  * `unaccounted.kind` (clamp/other) は付記であって ok/ng には使わない。
- * `invariants` が無い (古い relay) は unknown — ok に倒さない。
+ * `invariants` が無い (古い relay) は unknown — ok に倒さない。拘束時間ソースが現行の応答にも
+ * 無いが、そのとき検証タブは表ごと出さない (Refs #1123)。
  */
 export function invariantRowStatus(inv: WageInvariantCheck | undefined): Tone {
   if (!inv) return 'unknown'
@@ -432,7 +435,7 @@ export function fmtYen(v: number | null | undefined): string {
  * `maxDailyRestraint` が無ければ (判定不能 or `restraintWithinDay !== false`) 空文字。
  * **M は行の月ではなく報告の月 (`month`、`YYYY-MM`) から取る** — `day` は暦日のみで
  * 月を持たないため、月境界の勤務 (前月扱いの日) を報告月の月で表示すると 1 日ずれる
- * おそれがあるが、`summary.days` は当月分のみを持つ前提 (relay 側) なのでこれで正しい。
+ * おそれがあるが、relay は暦日ビューのうち報告月の暦日だけから日を選ぶのでこれで正しい。
  * 時間は `fmtMinutes` の書式に合わせる (`fmtMinutes` は分から時分に変換するだけの
  * pure 関数なので、丸めや符号の扱いを 2 か所に増やさないためここでも使い回す)。
  */

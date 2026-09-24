@@ -141,6 +141,7 @@ import {
   checkKyuyoAccess,
   FOLD_PAGE_MAX_DRIVERS,
   monthsCoveredByRange,
+  relayKintaiCalendarDays,
   relayKintaiDaySummaries,
   relayWageRangeGet,
   relayWageSnapshotPut,
@@ -329,6 +330,7 @@ import {
 import {
   gcpPartsFor,
   overlayGcpDayTimes,
+  parseGcpCalendarDays,
   parseGcpDaySummaries,
   type GcpDayPart,
 } from "./gcp-day-summaries";
@@ -8941,40 +8943,57 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 「GCP を選んだのにオンプレの数字が出る」= 切り替えが効いていないのに効いたように
    * 見える状態になり、突合の道具として成立しない (#606-5 の「化石を黙って出さない」と
    * 同じ考え方)。
+   *
+   * 当月 (`months[0]`) だけは暦日ビュー (`relayKintaiCalendarDays`、検証タブの条件3 の
+   * 材料、Refs #1123) も同時に読む。こちらが落ちても同じく 502 にする。
    */
   private async loadGcpDayTimes(
     compId: string,
-    months: readonly string[],
-  ): Promise<Map<string, Map<string, Map<string, GcpDayPart>>> | Response> {
+    months: readonly [string, ...string[]],
+  ): Promise<
+    | { byMonth: Map<string, Map<string, Map<string, GcpDayPart>>>; calendarDays: Map<string, Map<string, number>> }
+    | Response
+  > {
     const ctx = await this.buildKintaiRelayContext(compId, "wage_report_gcp");
     if (ctx instanceof Response) return ctx;
+    type Loaded<T> = { label: string; month: string } & ({ value: T } | { error: string });
+    const tryLoad = async <T>(label: string, month: string, load: () => Promise<T>): Promise<Loaded<T>> => {
+      try {
+        return { label, month, value: await load() };
+      } catch (err) {
+        const message = describeUnknownError(err);
+        console.error(JSON.stringify({ wage_report_gcp: "error", comp_id: compId, month, source: label, error: message }));
+        return { label, month, error: message };
+      }
+    };
     // ★ 月ごとに直列で取らない (2026-08-04 本番で「終わらない」実測)。この口は重く
     // (同じ口を1か月ぶん叩く /kintai/diff が約50秒)、2 か月を直列にすると倍積む。
-    const fetched = await Promise.all(
-      months.map(async (month) => {
-        try {
-          // daily / kosoku の生応答と同じ 60 秒 memo に載せる (Refs #508 と同型)。
-          // 実測でここが GCP モード最大のフェーズ (1.8 秒) — 月を往復するだけで
-          // 毎回取り直していた
-          const map = await this.memoKintaiUpstream(`gcp-day:${month}`, async () =>
+    // daily / kosoku の生応答と同じ 60 秒 memo に載せる (Refs #508 と同型)。
+    // 実測でここが GCP モード最大のフェーズ (1.8 秒) — 月を往復するだけで
+    // 毎回取り直していた
+    const [calendar, ...fetched] = await Promise.all([
+      tryLoad("calendar-days", months[0], () =>
+        this.memoKintaiUpstream(`gcp-calendar-days:${months[0]}`, async () =>
+          parseGcpCalendarDays(await relayKintaiCalendarDays(ctx.deps, { month: months[0] })),
+        ),
+      ),
+      ...months.map((month) =>
+        tryLoad("day-summaries", month, () =>
+          this.memoKintaiUpstream(`gcp-day:${month}`, async () =>
             parseGcpDaySummaries(await relayKintaiDaySummaries(ctx.deps, { month })),
-          );
-          return { month, map };
-        } catch (err) {
-          const message = describeUnknownError(err);
-          console.error(JSON.stringify({ wage_report_gcp: "error", comp_id: compId, month, error: message }));
-          return { month, error: message };
-        }
-      }),
-    );
-    const out = new Map<string, Map<string, Map<string, GcpDayPart>>>();
+          ),
+        ),
+      ),
+    ]);
+    const failed = (f: { label: string; month: string; error: string }) =>
+      dvrJsonError(502, `GCP ${f.label} (${f.month}) の取得に失敗しました: ${f.error}`);
+    const byMonth = new Map<string, Map<string, Map<string, GcpDayPart>>>();
     for (const f of fetched) {
-      if (f.error !== undefined) {
-        return dvrJsonError(502, `GCP day-summaries (${f.month}) の取得に失敗しました: ${f.error}`);
-      }
-      out.set(f.month, f.map!);
+      if ("error" in f) return failed(f);
+      byMonth.set(f.month, f.value);
     }
-    return out;
+    if ("error" in calendar) return failed(calendar);
+    return { byMonth, calendarDays: calendar.value };
   }
 
   /**
@@ -9201,10 +9220,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
     // 合流後のサマリの時間を GCP 由来に差し替える。当月と前月の両方を差し替える —
     // 片方だけだと月初の跨ぎ週で 2 つのソースの実働が混ざる
+    // 暦日ビュー (条件3 の材料) は当月ぶんだけ渡す — 前月は日別行しか使わない
     const overlay = (entry: RestraintDriverSummary, forYm: string) =>
       gcpOverlay
-        ? overlayGcpDayTimes(entry, gcpPartsFor(gcpOverlay.get(forYm)!, entry.driverCd), forYm)
-        : { summary: entry, missing: false };
+        ? overlayGcpDayTimes(
+            entry,
+            gcpPartsFor(gcpOverlay.byMonth.get(forYm)!, entry.driverCd),
+            forYm,
+            forYm === ym ? gcpPartsFor(gcpOverlay.calendarDays, entry.driverCd) : null,
+          )
+        : { summary: entry, missing: false, maxDailyRestraintDay: null };
 
     const prevDaysByDriver = new Map<string, RestraintSummaryDay[]>(
       prevMerged.map((m) => [m.entry.data.driverCd, overlay(m.entry.data, prevYm).summary.days]),
@@ -9218,7 +9243,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
     const endRows = timer.begin("rows");
     const rows = merged.map(({ entry, source }) => {
-      const { summary, missing } = overlay(entry.data, ym);
+      const { summary, missing, maxDailyRestraintDay } = overlay(entry.data, ym);
       const wage = computeWageRow(
         summary,
         year,
@@ -9250,13 +9275,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         ...(gcpOverlay ? { restraint_missing: missing } : {}),
         wage,
         // ★ 画面が叩くのはこの route (MCP `get_wage_report` とは別経路、Refs #1121-6/7)。
+        // **`source=gcp` のときだけ**付ける (現行ソースでは検証しない — ユーザー決定、
+        // Refs #1123。キーごと付けないので既定経路の本文は変わらない)。
         // MCP は `driver` 一致時だけ足す ("mode switch") のに対し、ここは**全行**に
-        // 常時付ける — 画面 (検証タブ) が全乗務員ぶんの差分列を一度に出すため、
+        // 付ける — 画面 (検証タブ) が全乗務員ぶんの差分列を一度に出すため、
         // 呼び出し側で絞り込む余地が無い。判定は truncate 前の `summary`
-        // (`source=gcp` でも `days` を保ったまま) を渡す — クランプ判定と条件3 の日
-        // (どちらも日別行を見る) は応答の `summary.days` が `[]` になる場合でも
-        // 効かせる必要があるため。
-        invariants: checkWageInvariants(summary, wage.minutes, config),
+        // (`days` を保ったまま) を渡す — クランプ判定は日別行を見るので、応答の
+        // `summary.days` が `[]` になっても効かせる必要がある。条件3 の日は overlay が
+        // 暦日ビューから選んだもの (`maxDailyRestraintDay`) を渡す。
+        ...(gcpOverlay
+          ? { invariants: checkWageInvariants(summary, wage.minutes, config, maxDailyRestraintDay) }
+          : {}),
       };
     });
     endRows();
