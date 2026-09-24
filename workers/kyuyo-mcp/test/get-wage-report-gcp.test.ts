@@ -16,7 +16,7 @@ import type {
   RestraintDriverSummary,
   RestraintSummaryDay,
 } from "../../dtako-scraper-relay/src/theearth-restraint-client";
-import type { WageCategoryMinutes } from "../../dtako-scraper-relay/src/restraint-wage";
+import type { WageCategoryMinutes, WageInvariantCheck } from "../../dtako-scraper-relay/src/restraint-wage";
 
 const SECRET = "internal-shared-secret";
 
@@ -108,10 +108,11 @@ type WageReportResult = {
     summary: RestraintDriverSummary;
     restraint_missing?: boolean;
     wage: { minutes: WageCategoryMinutes };
+    invariants?: WageInvariantCheck;
   }>;
 };
 
-const run = (e: Env, args: { company: string; month: string; source?: "current" | "gcp" }) =>
+const run = (e: Env, args: { company: string; month: string; source?: "current" | "gcp"; driver?: string }) =>
   getWageReportTool.execute(e, args) as Promise<WageReportResult>;
 
 describe("get_wage_report の source 引数 (Refs #675)", () => {
@@ -204,5 +205,45 @@ describe("get_wage_report の source 引数 (Refs #675)", () => {
     expect(res.restraint_source).toBe("gcp");
     const init = relayFetch(e).mock.calls[0]![1] as { headers: Record<string, string> };
     expect(init.headers["X-Alc-Proxy-Secret"]).toBe(SECRET);
+  });
+});
+
+describe("get_wage_report の driver 引数 (Refs #1121-6、不変条件チェック)", () => {
+  it("driver を省略すると invariants を一切計算しない (どの行にも付かない)", async () => {
+    const res = await run(env(), { company: "0100", month: "2026-06" });
+    expect(res.rows[0]).not.toHaveProperty("invariants");
+  });
+
+  it("driver を指定すると、rows は絞り込まずに該当行にだけ invariants を追加する " +
+    "(get_restraint_summary の driver = filter とは挙動が違う)", async () => {
+    const twoDrivers: Record<string, MockR2Entry> = {
+      ...R2_ENTRIES,
+      "restraint/0100/2026-06/summary/9999/latest.json": {
+        value: JSON.stringify(summary({ driverCd: "9999", driverName: "試験　次郎" })),
+      },
+    };
+    const e = env({}, twoDrivers);
+    const res = await run(e, { company: "0100", month: "2026-06", driver: "1442" });
+    // rows は絞り込まれない — 2 名とも残る
+    expect(res.rows).toHaveLength(2);
+    const row1442 = res.rows.find((r) => r.summary.driverCd === "1442")!;
+    const row9999 = res.rows.find((r) => r.summary.driverCd === "9999")!;
+    expect(row1442.invariants).toBeDefined();
+    expect(row9999.invariants).toBeUndefined();
+  });
+
+  it("driver 一致行の invariants は checkWageInvariants と同じ形 (hourlyBasis / unaccounted / workingWithinRestraint / restraintWithinDay)", async () => {
+    const res = await run(env(), { company: "0100", month: "2026-06", driver: "1442" });
+    const inv = res.rows[0]!.invariants!;
+    expect(inv.hourlyBasis).toBe("working");
+    // GCP overlay 後: workingMinutes=600, restraintMinutes=720 (gcpBody)
+    expect(inv.unaccounted).not.toBeNull();
+    expect(inv.workingWithinRestraint).toBe(true);
+    expect(inv.restraintWithinDay).toBe(true);
+  });
+
+  it("該当する乗務員が居ない月は、どの行にも invariants が付かない", async () => {
+    const res = await run(env(), { company: "0100", month: "2026-06", driver: "no-such-driver" });
+    expect(res.rows[0]).not.toHaveProperty("invariants");
   });
 });

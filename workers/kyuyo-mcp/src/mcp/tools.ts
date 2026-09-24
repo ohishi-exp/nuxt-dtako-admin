@@ -7,6 +7,7 @@
  */
 import { z } from "zod";
 import {
+  checkWageInvariants,
   computeWageRow,
   minWageForBranch,
   normalizeMinWageMaster,
@@ -227,6 +228,18 @@ const getWageReportArgs = z
           "current = theearth 拘束時間管理表 (運行ベース) + オンプレ kosoku-daily (打刻ベース) " +
           "の合流で GCP は 1 行も混ざらない",
       ),
+    driver: z
+      .string()
+      .optional()
+      .describe(
+        "乗務員CD。**`get_restraint_summary` の `driver` (行を絞り込むフィルタ) とは挙動が違う** " +
+          "— こちらは行を絞り込まない (rows は常に会社の全乗務員ぶんのまま)。指定すると、" +
+          "driverCd が一致する行にだけ `invariants` (既に決まっている不変条件のチェック結果: " +
+          "実働と表区分合計の差分 / 実働≤拘束 / 日別拘束≤1440分(最大の日で判定)。閾値を新しく決める異常検知 " +
+          "(最低賃金額との比較・割増率の法定判定・前月比/他乗務員比較) はここに含まない) を追加する。" +
+          "省略時は invariants を一切計算せず、どの行にも付かない (全乗務員ぶん (100名超) " +
+          "計算すると応答が重くなるため)。該当する乗務員が居ない月は、どの行にも付かない",
+      ),
   })
   .strict();
 
@@ -277,7 +290,9 @@ export const getWageReportTool = {
     "(拘束時間×賃金マスタから computeWageRow で再計算。給与明細実績との突合は含まない — " +
     "サーバー側に給与明細アーカイブが存在しないため)。" +
     "拘束時間の出どころは `source` で選べ、**省略時は画面と同じ gcp**。" +
-    "source=gcp では日別行 (summary.days) を落とす (計算は days を使い切った後なので数字は変わらない)。",
+    "source=gcp では日別行 (summary.days) を落とす (計算は days を使い切った後なので数字は変わらない)。" +
+    "`driver` (乗務員CD) を指定すると、該当行にだけ不変条件チェック `invariants` を追加する " +
+    "(実働と表区分合計の差分 / 実働≤拘束 / 日別拘束≤1440分(最大の日で判定)。閾値を新しく決める異常検知は含まない)。",
   inputSchema: getWageReportArgs,
   execute: async (env: Env, args) => {
     const source = args.source ?? DEFAULT_RESTRAINT_SOURCE;
@@ -334,6 +349,15 @@ export const getWageReportTool = {
 
     const rows = current.summaries.map((s) => {
       const { summary, missing } = overlay(s.data, args.month);
+      const wage = computeWageRow(
+        summary,
+        year,
+        month,
+        wageMaster,
+        minWageMaster,
+        config,
+        prevDaysByDriver.get(s.data.driverCd) ?? [],
+      );
       return {
         // source=gcp では日別行を本文に載せない (relay 側と同じ、Refs #675)。
         // 112 名ぶんの日別が応答の大半 (実測 1.1MB 超) を占めるのに、賃金計算は
@@ -344,15 +368,14 @@ export const getWageReportTool = {
         // GCP 側にこの乗務員 × この月の行が無かった (= 欠測)。**0 分ではない**ので
         // 呼び出し側は金額・最低賃金割れの判定を出さないこと。
         ...(gcpByMonth ? { restraint_missing: missing } : {}),
-        wage: computeWageRow(
-          summary,
-          year,
-          month,
-          wageMaster,
-          minWageMaster,
-          config,
-          prevDaysByDriver.get(s.data.driverCd) ?? [],
-        ),
+        wage,
+        // driver は行を絞り込むフィルタではない (get_restraint_summary の driver とは
+        // 挙動が違う、rows は常に全乗務員ぶんのまま) — 一致した行にだけ invariants を足す
+        // mode switch。summary は truncate 前のもの (source=gcp でも days を保ったまま)
+        // を渡すので、クランプ判定 (日別行を見る) は source に関わらず効く。
+        ...(args.driver !== undefined && s.data.driverCd === args.driver
+          ? { invariants: checkWageInvariants(summary, wage.minutes, config) }
+          : {}),
       };
     });
 
