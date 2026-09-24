@@ -227,6 +227,14 @@ describe("GET /restraint-api/wage-report の rows[].invariants (Refs #1121-7)", 
       "clamp",
     );
 
+    // 条件3 の日 (Refs #1123) も日別行から引くので、truncate 後の summary からは
+    // 分数しか出ない。応答が日 (GCP の 06 日、700 分) まで返していれば、ハンドラが
+    // truncate 前の summary を渡している証拠になる
+    expect(fromTruncated.maxDailyRestraint).toEqual({ day: null, minutes: 700 });
+    expect(
+      (row!.invariants as { maxDailyRestraint?: unknown } | undefined)?.maxDailyRestraint,
+    ).toEqual({ day: 6, minutes: 700 });
+
     // 残り 2 条件 (days に依存しない) は truncate の影響を受けないので、そのまま一致する
     expect((row!.invariants as { workingWithinRestraint?: boolean } | undefined)?.workingWithinRestraint).toBe(
       fromTruncated.workingWithinRestraint,

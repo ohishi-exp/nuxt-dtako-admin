@@ -173,6 +173,9 @@ export interface WageInvariantCheck {
   workingWithinRestraint: boolean | null
   /** 条件3 (日別拘束の最大 ≤ 1440分)。true が不変条件。 */
   restraintWithinDay: boolean | null
+  /** 条件3 を判定した日別最大拘束と、それを出した日 (`day`、1-31。`summary.days` に
+   * 同じ分数の日が無ければ null)。relay `restraint-wage.ts` の同名フィールドの写し。 */
+  maxDailyRestraint: { day: number | null, minutes: number } | null
 }
 
 /**
@@ -422,6 +425,26 @@ export function fmtMinutes(minutes: number | null | undefined): string {
  */
 export function fmtYen(v: number | null | undefined): string {
   return v == null ? '-' : v.toLocaleString('ja-JP').replace(/^-0$/, '0')
+}
+
+/**
+ * 検証タブの条件3 「あり」に付ける `(M/D Xh)` (日が引けなければ `(Xh)`)。
+ * `maxDailyRestraint` が無ければ (判定不能 or `restraintWithinDay !== false`) 空文字。
+ * **M は行の月ではなく報告の月 (`month`、`YYYY-MM`) から取る** — `day` は暦日のみで
+ * 月を持たないため、月境界の勤務 (前月扱いの日) を報告月の月で表示すると 1 日ずれる
+ * おそれがあるが、`summary.days` は当月分のみを持つ前提 (relay 側) なのでこれで正しい。
+ * 時間は `fmtMinutes` の書式に合わせる (`fmtMinutes` は分から時分に変換するだけの
+ * pure 関数なので、丸めや符号の扱いを 2 か所に増やさないためここでも使い回す)。
+ */
+export function fmtMaxDailyRestraint(
+  maxDailyRestraint: { day: number | null, minutes: number } | null | undefined,
+  month: string,
+): string {
+  if (!maxDailyRestraint) return ''
+  const time = fmtMinutes(maxDailyRestraint.minutes)
+  if (maxDailyRestraint.day == null) return `(${time})`
+  const m = Number(month.slice(5, 7))
+  return `(${m}/${maxDailyRestraint.day} ${time})`
 }
 
 /** "20260716T183000" (R2 版タイムスタンプ) → "2026-07-16 18:30"。 */
