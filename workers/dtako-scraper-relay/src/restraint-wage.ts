@@ -1200,6 +1200,17 @@ export interface WageInvariantCheck {
  *   恒常的に 1440 を超え、全乗務員が毎月「違反」になる (恒常 false positive)
  *
  * どの条件も、入力の欠測 (null) は判定不能として null を返し、0 やクリアに倒さない。
+ *
+ * ## 呼び分け (Refs #1121-7)。**この doc comment が正本** — 揃えないこと
+ *
+ * 呼び出し元は `dtako-scraper-relay-do.ts` の `handleWageReport` (画面が叩く HTTP
+ * route) と `kyuyo-mcp/src/mcp/tools.ts` (MCP `get_wage_report`) の 2 つで、
+ * **条件が違う**: route 側は**全行**に常時付ける (画面の検証タブが全乗務員ぶんの
+ * 差分列を一度に出すため、呼び出し側で絞り込む余地が無い)。MCP 側は **`driver`
+ * 指定時に一致した行だけ**に付ける (全乗務員ぶんを毎回計算すると 112 名で応答が
+ * 1.1MB 超に膨らむ、Refs #675 と同型の理由)。**「揃える」改修をすると必ずどちらかを
+ * 壊す** — MCP を全行にすると応答が肥大化し、route を driver 限定にすると画面の
+ * 差分列が出なくなる。
  */
 export function checkWageInvariants(
   summary: RestraintDriverSummary,

@@ -373,6 +373,12 @@ export const getWageReportTool = {
         // 挙動が違う、rows は常に全乗務員ぶんのまま) — 一致した行にだけ invariants を足す
         // mode switch。summary は truncate 前のもの (source=gcp でも days を保ったまま)
         // を渡すので、クランプ判定 (日別行を見る) は source に関わらず効く。
+        // ★ relay の HTTP route (画面が叩く方、dtako-scraper-relay-do.ts の
+        // handleWageReport) は同じ関数を**全行**に常時付ける。ここを driver 限定の
+        // ままにするのは意図的 (Refs #1121-7) — 画面は全乗務員ぶんの差分列を
+        // 一度に出すが、この MCP tool を全行にすると 112 名で応答が 1.1MB 超に
+        // 膨らむ。呼び分けの理由は restraint-wage.ts の checkWageInvariants の
+        // doc comment が正本。
         ...(args.driver !== undefined && s.data.driverCd === args.driver
           ? { invariants: checkWageInvariants(summary, wage.minutes, config) }
           : {}),
