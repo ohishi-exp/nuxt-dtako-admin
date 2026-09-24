@@ -36,6 +36,7 @@ import {
   emptyWageReportCause,
   fastBadgeState,
   groupMinWageRows,
+  invariantRowStatus,
   isMonthlyOvertimeOver60h,
   isTimecardSynced,
   MIN_WAGE_DEFAULT_KEY,
@@ -46,6 +47,7 @@ import {
   theearthSyncState,
   upsertMinWageDefaultRate,
 } from '~/utils/restraint-wage-view'
+import type { Tone } from '~/utils/kushiro-branch-view'
 import { buildTimecardSummary, buildTimecardTable, countWorkKinds, employedDaysInMonth } from '~/utils/timecard-view'
 import type { KosokuDay } from '~/utils/kosoku-daily'
 import {
@@ -257,6 +259,8 @@ const TABS = [
   { key: 'archive', label: 'アーカイブ' },
   { key: 'monthly', label: '月次集計・印刷' },
   { key: 'minwage', label: '最低賃金チェック' },
+  // 最低賃金チェックと同じ応答 (`minWageReport`) の不変条件を並べる (Refs #1123)
+  { key: 'verify', label: '検証' },
   // 保存済みスナップショットの期間集計 (Refs #677)。数字の出どころが最低賃金チェックと
   // 同じなので隣に置く
   { key: 'range', label: '期間集計' },
@@ -272,7 +276,7 @@ const TABS = [
 
 /** 対象月が効くタブ。ここに無いタブでは年月バーを出さない (Refs #409)。
  * 単価マスタは選択月時点の単価を出すので対象に含む。 */
-const MONTH_AWARE_TABS: string[] = ['archive', 'monthly', 'minwage', 'salary', 'master', 'schedule', 'timecard', 'compare', 'gcpdiff']
+const MONTH_AWARE_TABS: string[] = ['archive', 'monthly', 'minwage', 'verify', 'salary', 'master', 'schedule', 'timecard', 'compare', 'gcpdiff']
 
 type TabKey = typeof TABS[number]['key']
 const activeTab = ref<TabKey>('monthly')
@@ -790,9 +794,14 @@ const gcpReportError = ref('')
 const minWageReport = computed(() =>
   minWageRestraintSource.value === 'gcp' ? gcpReport.value : report.value)
 
+/** `minWageReport` を読むタブ (最低賃金チェック / 検証)。データの取得・選択はこれで
+ * 判定する — 検証タブを直接開いても GCP 応答と給与項目設定が読まれるように。
+ * 保存・操作列など最低賃金チェック専用の UI は `'minwage'` のまま。 */
+const readsMinWageReport = computed(() => activeTab.value === 'minwage' || activeTab.value === 'verify')
+
 /** 月次集計 / 最低賃金チェックの共有カードが表示している応答。 */
 const displayReport = computed(() =>
-  activeTab.value === 'minwage' ? minWageReport.value : report.value)
+  readsMinWageReport.value ? minWageReport.value : report.value)
 
 /**
  * 拘束の元データ (オンプレ `kosoku-daily`) が欠けたまま組まれた表であることの注記
@@ -807,13 +816,13 @@ const displayReport = computed(() =>
  */
 const kosokuNotice = computed(() => timecardKosokuNotice(displayReport.value))
 const displayLoading = computed(() =>
-  activeTab.value === 'minwage' && minWageRestraintSource.value === 'gcp'
+  readsMinWageReport.value && minWageRestraintSource.value === 'gcp'
     ? loadingGcpReport.value
     : loadingReport.value)
 
 /** ヘッダーの「再計算」— いま表示しているソースを取り直す。 */
 function reloadDisplayReport() {
-  if (activeTab.value === 'minwage' && minWageRestraintSource.value === 'gcp') {
+  if (readsMinWageReport.value && minWageRestraintSource.value === 'gcp') {
     loadGcpWageReport()
     return
   }
@@ -2247,19 +2256,6 @@ function fmtOvertimeMinWageHours(overtimePay: number | null, minWageRate: number
  * 経過時間の "XhYYm" 表記) を、時間(小数) を分に換算して再利用する。 */
 function fmtCsvOvertimeHours(hours: number | null): string {
   return hours == null ? '' : fmtMinutes(Math.round(hours * 60))
-}
-
-/** 実働 − 表に出ている区分時間の合計 (法定内 + 時間外 + 週40超過 + 時間外深夜 +
- * 法定休日(通常+深夜) + 法定外休日(通常+深夜))。週40超過は法定内から控除済み
- * (案B Refs #282) のため加算対象。**9 区分すべてを引く** (法定外休日を落としていて
- * 「表に出ていないのに差分が出る」状態だった、Refs #566)。0 以外 = 日別データ不整合か、
- * ここに無い区分へ分類された時間がある印 — 検算用 (Refs #282)。 */
-function unaccountedMinutes(row: WageReportRow): number | null {
-  const working = row.summary.workingMinutes
-  if (working == null) return null
-  const m = row.wage.minutes
-  return working - (m.statutory + m.overtime + m.weekly40Excess + m.overtimeNight
-    + m.legalHoliday + m.legalHolidayNight + m.nonLegalHoliday + m.nonLegalHolidayNight)
 }
 
 /**
@@ -3878,6 +3874,25 @@ function minWageCompare(driverCd: string): MinWageCompareRow {
     ?? minWageCompareRow({ base: null, overtime: null, total: null }, null)
 }
 
+// ── 検証タブ (Refs #1123)。判定は relay (`row.invariants`)、畳むのは invariantRowStatus。
+//    ここは数えて絞るだけ — 判定不能を黙って落とさず件数に出す
+const verifyOnlyIssues = ref(true)
+const verifyRows = computed(() =>
+  (minWageReport.value?.rows ?? []).map(row => ({ row, status: invariantRowStatus(row.invariants) })))
+const verifyCounts = computed(() => {
+  const c: Record<Tone, number> = { ng: 0, unknown: 0, ok: 0 }
+  for (const r of verifyRows.value) c[r.status]++
+  return c
+})
+const verifyVisibleRows = computed(() =>
+  verifyOnlyIssues.value ? verifyRows.value.filter(r => r.status !== 'ok') : verifyRows.value)
+/** 測定条件の表示。行ごとに同じ config で判定しているので先頭の 1 行から読む。 */
+const verifyHourlyBasis = computed(() =>
+  verifyRows.value.find(r => r.row.invariants)?.row.invariants?.hourlyBasis ?? null)
+const HOURLY_BASIS_LABEL: Record<'working' | 'restraint', string> = { working: '実働', restraint: '拘束' }
+const INVARIANT_STATUS_LABEL: Record<Tone, string> = { ng: '違反', unknown: '判定不能', ok: 'OK' }
+const INVARIANT_STATUS_COLOR: Record<Tone, 'error' | 'warning' | 'success'> = { ng: 'error', unknown: 'warning', ok: 'success' }
+
 /** 乗務員CD → 並べ替え・表示に使う所属 (社員マスタで引けない人は null)。 */
 function minWageAttrsFor(driverCd: string): MinWageRowAttrs | null {
   return employeeOrderAttrsByDriver.value.get(normalizeDriverCdKey(driverCd)) ?? null
@@ -5289,8 +5304,8 @@ watch([activeTab, month, session, monthSettled], () => {
   // 表示に使わない重い応答 (wage-source + 打刻 + kosoku-daily 2か月) を裏で
   // もう 1 本走らせていて、体感速度が倍悪かった。月次集計へ切り替えた時に
   // この watcher がもう一度走るので、その時に読めばよい
-  const showingGcp = activeTab.value === 'minwage' && minWageRestraintSource.value === 'gcp'
-  if (activeTab.value === 'monthly' || activeTab.value === 'minwage') {
+  const showingGcp = readsMinWageReport.value && minWageRestraintSource.value === 'gcp'
+  if (activeTab.value === 'monthly' || readsMinWageReport.value) {
     if (!showingGcp && (!report.value || report.value.month !== month.value)) loadWageReport()
     if (showingGcp && (!gcpReport.value || gcpReport.value.month !== month.value)) {
       loadGcpWageReport()
@@ -5299,7 +5314,7 @@ watch([activeTab, month, session, monthSettled], () => {
     // **カードを開いた時だけ読む** (2026-08-04) — 閉じている間は誰も使わない
     if (activeTab.value === 'minwage' && minWageCardOpen.value) loadMinWageCard()
     // 支払い実績 (給与) 列の分類・突合に使う (Refs #282)
-    if (activeTab.value === 'minwage' && !salaryConfigLoaded.value) loadSalaryItemConfig()
+    if (readsMinWageReport.value && !salaryConfigLoaded.value) loadSalaryItemConfig()
     // minwage は突合 (支払い実績列)、monthly は CSV の 所属(マスタ)/給与体系 列で使う
     if (!employeeMasterLoaded.value) loadEmployeeMaster()
   }
@@ -6123,7 +6138,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                     <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="法定休日 (既定 日曜) の実働すべて (1.35倍、深夜分は1.6倍)。@ は通常+深夜合算の実額按分">法定休日<br><span class="font-normal text-xs">(通常 / 深夜 / @単価 / 金額)</span></th>
                     <!-- 祝日・会社指定休に出勤した日だけ入る区分。有る月だけ列を出す (Refs #566) -->
                     <th v-if="hasNonLegalHolidayWork" class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom" title="法定外休日 (祝日・会社指定休に出勤した日) の実働すべて。土曜は平日扱いなのでここには入らない (2026-07-18 決定)。@ は通常+深夜合算の実額按分">法定外休日<br><span class="font-normal text-xs">(通常 / 深夜 / @単価 / 金額)</span></th>
-                    <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom" title="実働 − (法定内 + 時間外 + 週40超過 + 時間外深夜 + 法定休日 + 法定外休日)。9 区分すべてを引いているので、0 以外 = 日別データの不整合 — 検算用">差分<br><span class="font-normal text-xs">(実働 − 表合計)</span></th>
+                    <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom" title="実働 − (法定内 + 時間外 + 週40超過 + 時間外深夜 + 法定休日(通常+深夜) + 法定外休日(通常+深夜))。深夜(通常) 以外の 8 項すべてを引いているので、0 以外 = 日別データの不整合 — 検算用">差分<br><span class="font-normal text-xs">(実働 − 表合計)</span></th>
                     <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom border-l-2 border-gray-300 dark:border-gray-600" title="単価マスタ × 拘束時間データの換算理論値。上段=基本給(法定内) / 中段=残業代合計 (基本給以外のすべて — 残業・週40超過・時間外深夜・深夜(通常)・法定休日・法定外休日) / 下段=合計 (上2段の和 = 全区分合計)。★ この列は月60時間超の時間外割増 (労基法37条1項但書) を含む — 60 時間を超えたぶんだけ 残業 1.5 倍 / 深夜残業 1.75 倍 に切り替わる (Refs #670)。60 時間を超えていない乗務員の金額は従来と同じ">計算<br><span class="font-normal text-xs">(基本給 / 残業代 / 合計)</span></th>
                     <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="給与比較タブで取り込んだ給与明細の実績 (勤務月+1 の支給月ラベルで突合)。上段=基本給扱い項目の合計 / 中段=割増扱い項目 (残業・深夜・休日出勤) の合計 / 下段=その 2 つの合計">給与<br><span class="font-normal text-xs">(基本給 / 残業代 / 合計)</span></th>
                     <th class="sticky top-0 z-10 bg-white dark:bg-gray-900 print:static px-2 py-2 text-right align-bottom border-l border-gray-200 dark:border-gray-700" title="給与 − 計算。マイナス (赤) = 支払いが換算理論値を下回っている。どちらか欠けている行は「-」">差<br><span class="font-normal text-xs">(基本給 / 残業代 / 合計)</span></th>
@@ -6213,8 +6228,8 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       <div class="font-medium">{{ fmtYen(sumNullable(row.wage.amounts?.nonLegalHoliday ?? null, row.wage.amounts?.nonLegalHolidayNight ?? null)) }}</div>
                     </td>
                     <td class="px-2 py-1.5 text-right">
-                      <span :class="unaccountedMinutes(row) === 0 ? 'text-xs text-gray-400' : 'text-red-600 font-bold'">
-                        {{ fmtSignedMinutes(unaccountedMinutes(row)) }}
+                      <span :class="row.invariants?.unaccounted?.diffMinutes === 0 ? 'text-xs text-gray-400' : 'text-red-600 font-bold'">
+                        {{ fmtSignedMinutes(row.invariants?.unaccounted?.diffMinutes ?? null) }}
                       </span>
                     </td>
                     <!-- 右端の突合ブロック: 1 列 = 計算 / 給与 / 差、中を
@@ -6308,7 +6323,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                 <b>実働 = 基本給(法定内)の対象時間 + 時間外 + 週40超過 + 時間外深夜 + 法定休日(通常+深夜) + 法定外休日(通常+深夜)</b>。
                 法定外休日は<b>祝日・会社指定休に出勤した日</b>だけ入る区分で、有る月だけ列が出る (土曜は平日扱い — 2026-07-18 決定)。
                 深夜(通常) だけは上記の<b>内数</b> (0.25 加算のための別枠計上) なので、実働の足し算には含めない。
-                差分列はこの検算 (実働 − 表合計) で、<b>9 区分すべてを引いている</b>ので 0 以外 (赤) は日別データの不整合を指す。<br>
+                差分列はこの検算 (実働 − 表合計) で、<b>深夜(通常) 以外の 8 項すべてを引いている</b>ので 0 以外 (赤) は日別データの不整合を指す。値は relay が判定したもの (「検証」タブと同じ)。<br>
                 土曜は平日扱い (法定外休日は使わない — 2026-07-18 決定)。法定休日は日曜のみ。<br>
                 各金額の上の @ は計算単価 (円/h、金額 ÷ 対象時間の実額按分)。基本給の @ は基礎単価そのもの、深夜(通常) の @ は加算分 0.25 倍のみの単価。単価未設定の乗務員は計算されません。<br>
                 基本給(法定内) の対象時間 = 実働 − 時間外 − 時間外深夜 − 週40超過 − 法定休日実働 (時間外・週40超過の基礎1.0は残業代の1.25側にのみ含まれる — 2026-07-18 案B 決定で週40超過の二重計上を解消)。
@@ -9215,6 +9230,106 @@ watch([compMap, kyuyoSyncedKeys], () => {
             <div v-if="mysqlRefreshApplyResult" class="mt-2 text-sm text-gray-600 dark:text-gray-400">
               {{ mysqlRefreshApplyResult }}
             </div>
+          </UCard>
+        </template>
+        <!-- 検証 (Refs #1123): 最低賃金チェックと同じ応答の不変条件を並べる。判定は relay -->
+        <template v-else-if="activeTab === 'verify'">
+          <UCard>
+            <template #header>
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="font-semibold">検証 ({{ fmtYm(month) }})</span>
+                <span class="text-xs text-gray-500">
+                  測定条件: 時給換算の分母 = {{ verifyHourlyBasis ? HOURLY_BASIS_LABEL[verifyHourlyBasis] : '不明' }} /
+                  拘束時間ソース = {{ RESTRAINT_SOURCE_OPTIONS.find(o => o.value === minWageRestraintSource)?.label }}
+                  (切り替えは「最低賃金チェック」タブ)
+                </span>
+              </div>
+            </template>
+
+            <p v-if="gcpReportError" class="text-xs text-red-600 dark:text-red-400 mb-1">
+              ⚠ GCP の拘束時間を取得できませんでした: {{ gcpReportError }}
+              (現行ソースの数字にはフォールバックしていません — 表は空のままです)
+            </p>
+            <div v-if="!minWageReport && displayLoading" class="flex items-center gap-2 text-sm text-gray-500">
+              <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin text-primary" />
+              集計を読み込んでいます… ({{ fmtYm(month) }})
+            </div>
+            <p v-else-if="!minWageReport?.rows.length && !displayLoading && !gcpReportError" class="text-sm text-gray-500">
+              {{ emptyReportNotice }}
+            </p>
+
+            <template v-if="minWageReport?.rows.length">
+              <div class="mb-3 flex flex-wrap items-center gap-3 text-sm">
+                <span>違反 <b class="text-red-600">{{ verifyCounts.ng }}</b></span>
+                <span>判定不能 <b class="text-amber-600">{{ verifyCounts.unknown }}</b></span>
+                <span>OK <b>{{ verifyCounts.ok }}</b></span>
+                <label class="flex items-center gap-1 text-xs">
+                  <input v-model="verifyOnlyIssues" type="checkbox">
+                  違反・判定不能のみ表示
+                </label>
+              </div>
+
+              <div class="overflow-x-auto" :class="staleReport ? STALE_CLASS : ''">
+                <table class="min-w-full text-sm border-collapse">
+                  <thead class="bg-gray-100 dark:bg-gray-800">
+                    <tr>
+                      <th class="px-2 py-1 text-left">判定</th>
+                      <th class="px-2 py-1 text-left">乗務員CD</th>
+                      <th class="px-2 py-1 text-left">氏名</th>
+                      <th class="px-2 py-1 text-right" title="実働 − 表区分合計 (深夜(通常) 以外の 8 項)。0 が不変条件">条件1 実働 − 表合計</th>
+                      <th class="px-2 py-1 text-left">条件2 実働 ≤ 拘束</th>
+                      <th class="px-2 py-1 text-left">条件3 日別最大拘束 ≤ 24h</th>
+                      <th class="px-2 py-1 text-right" title="給与 − 計算 (最低賃金チェックの差と同じ値)">基本給の差</th>
+                      <th class="px-2 py-1 text-right" title="給与 − 計算 (最低賃金チェックの差と同じ値)">残業代合計の差</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="{ row, status } in verifyVisibleRows" :key="row.summary.driverCd" class="border-t border-gray-200 dark:border-gray-700">
+                      <td class="px-2 py-1">
+                        <UBadge :color="INVARIANT_STATUS_COLOR[status]" variant="subtle" size="sm">{{ INVARIANT_STATUS_LABEL[status] }}</UBadge>
+                      </td>
+                      <td class="px-2 py-1 tabular-nums">{{ row.summary.driverCd }}</td>
+                      <td class="px-2 py-1">{{ row.summary.driverName }}</td>
+                      <td class="px-2 py-1 text-right tabular-nums">
+                        <span v-if="!row.invariants?.unaccounted" class="text-amber-600">判定不能</span>
+                        <span v-else-if="row.invariants.unaccounted.diffMinutes === 0" class="text-gray-400">{{ fmtSignedMinutes(0) }}</span>
+                        <span v-else class="text-red-600 font-bold">
+                          {{ fmtSignedMinutes(row.invariants.unaccounted.diffMinutes) }}
+                          <span class="text-xs font-normal">({{ row.invariants.unaccounted.kind === 'clamp' ? 'クランプ由来' : 'それ以外' }})</span>
+                        </span>
+                      </td>
+                      <td class="px-2 py-1">
+                        <span v-if="row.invariants?.workingWithinRestraint == null" class="text-amber-600">判定不能</span>
+                        <span v-else-if="row.invariants.workingWithinRestraint" class="text-gray-400">OK</span>
+                        <span v-else class="text-red-600 font-bold">違反</span>
+                      </td>
+                      <td class="px-2 py-1">
+                        <span v-if="row.invariants?.restraintWithinDay == null" class="text-amber-600">判定不能</span>
+                        <span v-else-if="row.invariants.restraintWithinDay" class="text-gray-400">OK</span>
+                        <span v-else class="text-red-600 font-bold">違反</span>
+                      </td>
+                      <td class="px-2 py-1 text-right tabular-nums" :class="(minWageCompare(row.summary.driverCd).diffBase ?? 0) < 0 ? 'text-red-600 font-medium' : ''">
+                        {{ fmtDiff(minWageCompare(row.summary.driverCd).diffBase) }}
+                      </td>
+                      <td class="px-2 py-1 text-right tabular-nums" :class="(minWageCompare(row.summary.driverCd).diffOvertime ?? 0) < 0 ? 'text-red-600 font-medium' : ''">
+                        {{ fmtDiff(minWageCompare(row.summary.driverCd).diffOvertime) }}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p v-if="!verifyVisibleRows.length" class="mt-2 text-sm text-gray-500">
+                違反・判定不能の乗務員はいません (OK {{ verifyCounts.ok }} 名)。
+              </p>
+            </template>
+
+            <p class="text-xs text-gray-500 mt-3">
+              判定は relay が行い、この画面は表示だけです。「判定不能」は元データが欠けていて判定できなかった行で、OK ではありません
+              (relay が古く判定結果を返さない場合も判定不能になります)。
+              条件1 の「クランプ由来」は「実働 &lt; 時間外」の日を法定内 0 に丸めたことによる差で、データそのものが怪しい印です。<br>
+              金額の差 (給与 − 計算) は給与明細を読み込んだ月だけ出ます (未読込は「-」)。
+              MCP <code>get_wage_report</code> には金額の突合はありません (給与明細がサーバーに無いため)。
+            </p>
           </UCard>
         </template>
       </div>

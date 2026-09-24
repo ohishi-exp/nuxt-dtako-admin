@@ -7,8 +7,8 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import type { MinWageRowAttrs, TimecardKosokuState, WageReportResponse } from '../../app/utils/restraint-wage-view'
-import { EMPTY_WAGE_REPORT_NOTICE, timecardKosokuNotice, emptyWageReportCause, fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, GROSS_HOURLY_CAVEAT, groupMinWageRows, isMonthlyOvertimeOver60h, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, MONTHLY_CSV_WAGE_TAIL_HEADERS, MONTHLY_OVERTIME_THRESHOLD_MINUTES, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
+import type { MinWageRowAttrs, TimecardKosokuState, WageInvariantCheck, WageReportResponse } from '../../app/utils/restraint-wage-view'
+import { EMPTY_WAGE_REPORT_NOTICE, timecardKosokuNotice, emptyWageReportCause, fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, GROSS_HOURLY_CAVEAT, groupMinWageRows, isMonthlyOvertimeOver60h, invariantRowStatus, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, MONTHLY_CSV_WAGE_TAIL_HEADERS, MONTHLY_OVERTIME_THRESHOLD_MINUTES, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
 
 describe('fmtMinutes', () => {
   it('時間+分を "XhYYm" 表記にする', () => {
@@ -671,5 +671,49 @@ describe('timecardKosokuNotice', () => {
     expect(d).toContain('この表にタイムカード由来の行はないので、いま出ている数字 (デジタコ由来) は影響を受けていません')
     // 0 行なのに「N 行が打刻だけから組まれた」と言わない
     expect(d).not.toContain('だけから組んでいます')
+  })
+})
+
+describe('invariantRowStatus (検証タブの 1 行、判定は relay)', () => {
+  const ok: WageInvariantCheck = {
+    hourlyBasis: 'working',
+    unaccounted: { diffMinutes: 0, kind: 'other' },
+    workingWithinRestraint: true,
+    restraintWithinDay: true,
+  }
+
+  it('invariants が無い (古い relay) は unknown — ok に倒さない', () => {
+    expect(invariantRowStatus(undefined)).toBe('unknown')
+  })
+
+  it('3 条件とも満たせば ok', () => {
+    expect(invariantRowStatus(ok)).toBe('ok')
+  })
+
+  it('条件 1: 差が 0 以外なら ng (正負どちらも)', () => {
+    expect(invariantRowStatus({ ...ok, unaccounted: { diffMinutes: 30, kind: 'other' } })).toBe('ng')
+    expect(invariantRowStatus({ ...ok, unaccounted: { diffMinutes: -1, kind: 'other' } })).toBe('ng')
+  })
+
+  it('kind は判定に使わない — clamp でも差があれば ng、差が 0 なら clamp でも ok', () => {
+    expect(invariantRowStatus({ ...ok, unaccounted: { diffMinutes: 45, kind: 'clamp' } })).toBe('ng')
+    expect(invariantRowStatus({ ...ok, unaccounted: { diffMinutes: 0, kind: 'clamp' } })).toBe('ok')
+  })
+
+  it('条件 2 / 条件 3 が false なら ng', () => {
+    expect(invariantRowStatus({ ...ok, workingWithinRestraint: false })).toBe('ng')
+    expect(invariantRowStatus({ ...ok, restraintWithinDay: false })).toBe('ng')
+  })
+
+  it('null を 1 つでも含み違反が無ければ unknown (各条件ごと)', () => {
+    expect(invariantRowStatus({ ...ok, unaccounted: null })).toBe('unknown')
+    expect(invariantRowStatus({ ...ok, workingWithinRestraint: null })).toBe('unknown')
+    expect(invariantRowStatus({ ...ok, restraintWithinDay: null })).toBe('unknown')
+  })
+
+  it('ng と null が混在したら ng を優先する', () => {
+    expect(invariantRowStatus({ ...ok, unaccounted: null, restraintWithinDay: false })).toBe('ng')
+    expect(invariantRowStatus({ ...ok, unaccounted: { diffMinutes: 10, kind: 'clamp' }, workingWithinRestraint: null })).toBe('ng')
+    expect(invariantRowStatus({ ...ok, workingWithinRestraint: false, restraintWithinDay: null })).toBe('ng')
   })
 })

@@ -9,6 +9,7 @@
 // 判定を二重に持つと表記ゆれの追加で片方だけ直す事故が起きる。
 import type { TimecardJobGroup } from './kosoku-daily'
 import { TIMECARD_JOB_GROUPS, timecardJobGroup } from './kosoku-daily'
+import type { Tone } from './kushiro-branch-view'
 
 /** 打刻区間 ("YYYY-MM-DD HH:MM:SS")。タイムカード由来の日にだけ入る (Refs #424 PR-E)。
  * `end` は退社押し忘れ (未終業) だと null (nginx#780)。 */
@@ -146,6 +147,49 @@ export interface WageReportRow {
    * 行が無かった (= 欠測)。`current` の応答では常に false / 未定義。
    * **0 分ではない** ので、金額・最低賃金割れの判定は出さずに「-」で表示する。 */
   restraint_missing?: boolean
+  /** 不変条件チェック (Refs #1121-6、判定は relay が正本)。古い relay の応答には無いので optional。 */
+  invariants?: WageInvariantCheck
+}
+
+/** relay `restraint-wage.ts` の `UnaccountedMinutesKind` の写し。"clamp" = 「実働 < 時間外」の日の
+ * 法定内 0 クランプ由来、"other" = それ以外。 */
+export type UnaccountedMinutesKind = 'clamp' | 'other'
+
+/** relay `restraint-wage.ts` の `UnaccountedMinutesCheck` の写し。 */
+export interface UnaccountedMinutesCheck {
+  /** 実働 − 表区分合計。0 が不変条件。 */
+  diffMinutes: number
+  /** `diffMinutes === 0` のときは意味を持たない (参考値)。 */
+  kind: UnaccountedMinutesKind
+}
+
+/** relay `restraint-wage.ts` の `WageInvariantCheck` の写し。null は判定不能 (欠測)。 */
+export interface WageInvariantCheck {
+  /** 測定条件 (relay の `WageConfig["hourlyBasis"]`)。 */
+  hourlyBasis: 'working' | 'restraint'
+  /** 条件1 (実働 − 表区分合計)。 */
+  unaccounted: UnaccountedMinutesCheck | null
+  /** 条件2 (実働 ≤ 拘束)。true が不変条件。 */
+  workingWithinRestraint: boolean | null
+  /** 条件3 (日別拘束の最大 ≤ 1440分)。true が不変条件。 */
+  restraintWithinDay: boolean | null
+}
+
+/**
+ * 検証タブの 1 行を ok / ng / unknown に畳む (判定そのものは relay)。
+ * **ng を unknown より優先する** — 1 条件でも崩れていれば、他が判定不能でも違反。
+ * `unaccounted.kind` (clamp/other) は付記であって ok/ng には使わない。
+ * `invariants` が無い (古い relay) は unknown — ok に倒さない。
+ */
+export function invariantRowStatus(inv: WageInvariantCheck | undefined): Tone {
+  if (!inv) return 'unknown'
+  if (
+    (inv.unaccounted !== null && inv.unaccounted.diffMinutes !== 0)
+    || inv.workingWithinRestraint === false
+    || inv.restraintWithinDay === false
+  ) return 'ng'
+  if (inv.unaccounted === null || inv.workingWithinRestraint === null || inv.restraintWithinDay === null) return 'unknown'
+  return 'ok'
 }
 
 export interface WageReportResponse {
