@@ -976,19 +976,19 @@ describe('splitCsvCells / normalizeDateCell', () => {
 // ---------------------------------------------------------------------------
 
 describe('checkWageInvariants', () => {
-  it('正常系: 3条件すべて充足 (diff=0 / 実働<=拘束 / 日別最大拘束<=1440)', () => {
+  it('正常系: 3条件すべて充足 (diff=0 / 実働<=拘束 / 勤務の重なり 0 組)', () => {
     const minutes = { ...emptyCategoryMinutes(), statutory: 480 }
     const s = summary({
       workingMinutes: 480,
       restraintMinutes: 540,
-      maxDailyRestraintMinutes: 540,
       days: [day(1, { workingMinutes: 480 })],
     })
-    const result = checkWageInvariants(s, minutes, DEFAULT_WAGE_CONFIG)
+    const result = checkWageInvariants(s, minutes, DEFAULT_WAGE_CONFIG, [])
     expect(result.hourlyBasis).toBe('working')
     expect(result.unaccounted).toEqual({ diffMinutes: 0, kind: 'other' })
     expect(result.workingWithinRestraint).toBe(true)
-    expect(result.restraintWithinDay).toBe(true)
+    expect(result.noShiftOverlap).toBe(true)
+    expect(result.shiftOverlap).toBeNull()
   })
 
   it('条件1 陰性対照 (other): クランプ由来ではない差分は diffMinutes!=0 / kind=other で捕まる', () => {
@@ -1059,64 +1059,44 @@ describe('checkWageInvariants', () => {
     expect(result.workingWithinRestraint).toBeNull()
   })
 
-  it('条件3 陽性対照: 現実的な1か月 (月間拘束18,000分=20日×15h) でも日別最大拘束が1440分以下なら充足する ' +
-    '(summary.restraintMinutes は月間合計なので、条件3にそのまま使うと恒常的に false になる — この対照はその回帰を防ぐ)', () => {
-    const s = summary({ workingMinutes: 480, restraintMinutes: 18000, maxDailyRestraintMinutes: 900 })
-    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG)
-    expect(result.restraintWithinDay).toBe(true)
-  })
+  // 条件3 は GCP kintai.shifts の勤務どうしの重なりの組 (上流が選んだもの) を受けて判定する (Refs #1123)
+  const pair = (aStart: string, aEnd: string, bStart: string, bEnd: string) => ({ aStart, aEnd, bStart, bEnd })
 
-  it('条件3 陰性対照: 日別最大拘束 > 1440分 は false で捕まる (月間合計が現実的な値でも判定は日別最大で行う)', () => {
-    const s = summary({ workingMinutes: 480, restraintMinutes: 18000, maxDailyRestraintMinutes: 1441 })
-    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG)
-    expect(result.restraintWithinDay).toBe(false)
-  })
-
-  it('条件3 境界値: 日別最大拘束 = 1440分ちょうどは充足', () => {
-    const s = summary({ workingMinutes: 480, maxDailyRestraintMinutes: 1440 })
-    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG)
-    expect(result.restraintWithinDay).toBe(true)
-  })
-
-  it('条件3 判定不能: 日別最大拘束 null は false ではなく null (月間合計が非null でも判定不能)', () => {
-    const s = summary({ workingMinutes: 480, restraintMinutes: 18000, maxDailyRestraintMinutes: null })
-    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG)
-    expect(result.restraintWithinDay).toBeNull()
-  })
-
-  it('条件3 の日: 引数で受けた暦日 (overlay が暦日ビューから選んだ日) をそのまま載せ、summary.days から逆引きしない', () => {
-    // 別勤務 2 本が同じ暦日 (上流 SUM 済み 1792) の日を 24 日として受ける。
-    // summary.days (始業日キー) には 25 日に同じ 1792 分の行があるが、そちらを拾わない
-    const days = [
-      day(24, { restraintMinutes: 844 }),
-      day(25, { restraintMinutes: 1792 }),
+  it('条件3 陰性対照: 重なりの組があれば noShiftOverlap=false、最初の組の b の開始〜先に終わる方の終了と組数を載せる', () => {
+    // 合計 20h (24h を超えない) のかぶり: 8:00〜18:00 と 10:00〜20:00
+    const overlaps = [
+      pair('2026-06-24 08:00:00', '2026-06-24 18:00:00', '2026-06-24 10:00:00', '2026-06-24 20:00:00'),
+      pair('2026-06-26 07:00:00', '2026-06-26 19:00:00', '2026-06-26 09:00:00', '2026-06-26 12:00:00'),
     ]
-    const s = summary({ workingMinutes: 480, maxDailyRestraintMinutes: 1792, days })
-    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG, '2026-06-24')
-    expect(result.restraintWithinDay).toBe(false)
-    expect(result.maxDailyRestraint).toEqual({ day: 24, minutes: 1792 })
+    const s = summary({ workingMinutes: 480, restraintMinutes: 18000 })
+    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG, overlaps)
+    expect(result.noShiftOverlap).toBe(false)
+    // 前の勤務 (a) の方が先に終わる → end = a_end
+    expect(result.shiftOverlap).toEqual({ start: '2026-06-24 10:00', end: '2026-06-24 18:00', count: 2 })
   })
 
-  it('条件3 の日: 1440 ちょうどは充足のまま日も載せる (判定式は <= 1440 で不変)', () => {
-    const s = summary({ workingMinutes: 480, maxDailyRestraintMinutes: 1440, days: [] })
-    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG, '2026-06-09')
-    expect(result.restraintWithinDay).toBe(true)
-    expect(result.maxDailyRestraint).toEqual({ day: 9, minutes: 1440 })
+  it('条件3: 後の勤務 (b) が先に終わる (a に内包される) → end = b_end', () => {
+    const overlaps = [pair('2026-06-24 22:00:00', '2026-06-25 09:00:00', '2026-06-24 23:30:00', '2026-06-25 02:00:00')]
+    const s = summary({ workingMinutes: 480 })
+    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG, overlaps)
+    expect(result.noShiftOverlap).toBe(false)
+    expect(result.shiftOverlap).toEqual({ start: '2026-06-24 23:30', end: '2026-06-25 02:00', count: 1 })
   })
 
-  it('条件3 の日: 日を渡されなければ day は null (分数だけ載せ、summary.days から日を捏造しない)', () => {
-    const s = summary({ workingMinutes: 480, maxDailyRestraintMinutes: 1792, days: [day(24, { restraintMinutes: 1792 })] })
-    for (const d of [undefined, null]) {
-      const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG, d)
-      expect(result.maxDailyRestraint).toEqual({ day: null, minutes: 1792 })
+  it('条件3 陽性対照: 組が 0 件なら充足 (月間拘束が 18,000 分でも、日の合計ではなく重なりで判定する)', () => {
+    const s = summary({ workingMinutes: 480, restraintMinutes: 18000, maxDailyRestraintMinutes: 2000 })
+    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG, [])
+    expect(result.noShiftOverlap).toBe(true)
+    expect(result.shiftOverlap).toBeNull()
+  })
+
+  it('条件3 判定不能: 組が null / 省略 (GCP 欠測) なら noShiftOverlap・shiftOverlap とも null (充足に倒さない)', () => {
+    const s = summary({ workingMinutes: 480, restraintMinutes: 18000, maxDailyRestraintMinutes: 900 })
+    for (const overlaps of [null, undefined]) {
+      const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG, overlaps)
+      expect(result.noShiftOverlap).toBeNull()
+      expect(result.shiftOverlap).toBeNull()
     }
-  })
-
-  it('条件3 の日: 日別最大拘束が欠測 (判定不能) なら maxDailyRestraint も null (0 分に倒さない)', () => {
-    const s = summary({ workingMinutes: 480, maxDailyRestraintMinutes: null, days: [day(1, { restraintMinutes: null })] })
-    const result = checkWageInvariants(s, emptyCategoryMinutes(), DEFAULT_WAGE_CONFIG, '2026-06-01')
-    expect(result.restraintWithinDay).toBeNull()
-    expect(result.maxDailyRestraint).toBeNull()
   })
 
   it('hourlyBasis を config からそのまま載せる (restraint 基準)', () => {

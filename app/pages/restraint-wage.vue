@@ -35,7 +35,7 @@ import {
   EMPTY_WAGE_REPORT_NOTICE,
   emptyWageReportCause,
   fastBadgeState,
-  fmtMaxDailyRestraint,
+  fmtShiftOverlap,
   groupMinWageRows,
   invariantRowStatus,
   isMonthlyOvertimeOver60h,
@@ -9287,7 +9287,7 @@ watch([compMap, kyuyoSyncedKeys], () => {
                       <th class="px-2 py-1 text-left">氏名</th>
                       <th class="px-2 py-1 text-right" title="実働 − 表区分合計 (深夜(通常) 以外の 8 項)。0 が不変条件">条件1 実働 − 表合計</th>
                       <th class="px-2 py-1 text-left">条件2 実働 &gt; 拘束</th>
-                      <th class="px-2 py-1 text-left">条件3 日別最大拘束 &gt; 24h</th>
+                      <th class="px-2 py-1 text-left" title="同じ乗務員の勤務 (GCP kintai.shifts) どうしの時間帯の重なり。「なし」が不変条件">条件3 勤務の時間帯の重なり</th>
                       <th class="px-2 py-1 text-right" title="給与 − 計算 (最低賃金チェックの差と同じ値)">基本給の差</th>
                       <th class="px-2 py-1 text-right" title="給与 − 計算 (最低賃金チェックの差と同じ値)">残業代合計の差</th>
                     </tr>
@@ -9313,11 +9313,11 @@ watch([compMap, kyuyoSyncedKeys], () => {
                         <span v-else class="text-red-600 font-bold">あり</span>
                       </td>
                       <td class="px-2 py-1">
-                        <span v-if="row.invariants?.restraintWithinDay == null" class="text-amber-600">判定不能</span>
-                        <span v-else-if="row.invariants.restraintWithinDay" class="text-gray-400">なし</span>
+                        <span v-if="row.invariants?.noShiftOverlap == null" class="text-amber-600">判定不能</span>
+                        <span v-else-if="row.invariants.noShiftOverlap" class="text-gray-400">なし</span>
                         <span v-else class="text-red-600 font-bold">
                           あり
-                          <span class="text-xs font-normal">{{ fmtMaxDailyRestraint(row.invariants.maxDailyRestraint, month) }}</span>
+                          <span class="text-xs font-normal">{{ fmtShiftOverlap(row.invariants.shiftOverlap) }}</span>
                         </span>
                       </td>
                       <td class="px-2 py-1 text-right tabular-nums" :class="(minWageCompare(row.summary.driverCd).diffBase ?? 0) < 0 ? 'text-red-600 font-medium' : ''">

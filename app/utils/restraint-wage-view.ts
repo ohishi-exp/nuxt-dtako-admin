@@ -172,12 +172,12 @@ export interface WageInvariantCheck {
   unaccounted: UnaccountedMinutesCheck | null
   /** 条件2 (実働 ≤ 拘束)。true が不変条件。 */
   workingWithinRestraint: boolean | null
-  /** 条件3 (日別拘束の最大 ≤ 1440分)。true が不変条件。 */
-  restraintWithinDay: boolean | null
-  /** 条件3 を判定した日別最大拘束と、それを出した暦日 (`day`、1-31)。最大拘束は GCP の
-   * day_parts を乗務員 × 暦日で足した値の最大で、日も relay がその暦日ビューから選ぶ
-   * (日が渡されなければ null)。relay `restraint-wage.ts` の同名フィールドの写し。 */
-  maxDailyRestraint: { day: number | null, minutes: number } | null
+  /** 条件3 (同じ乗務員の勤務の時間帯が重なっていない)。true が不変条件。 */
+  noShiftOverlap: boolean | null
+  /** 条件3 の最初の重なり (`start` = 後の勤務の開始、`end` = 先に終わる方の終了、どちらも
+   * JST `YYYY-MM-DD HH:MM`) と組の数。重なりが無い・判定不能なら null。relay
+   * `restraint-wage.ts` の同名フィールドの写し。 */
+  shiftOverlap: { start: string, end: string, count: number } | null
 }
 
 /**
@@ -192,9 +192,9 @@ export function invariantRowStatus(inv: WageInvariantCheck | undefined): Tone {
   if (
     (inv.unaccounted !== null && inv.unaccounted.diffMinutes !== 0)
     || inv.workingWithinRestraint === false
-    || inv.restraintWithinDay === false
+    || inv.noShiftOverlap === false
   ) return 'ng'
-  if (inv.unaccounted === null || inv.workingWithinRestraint === null || inv.restraintWithinDay === null) return 'unknown'
+  if (inv.unaccounted === null || inv.workingWithinRestraint === null || inv.noShiftOverlap === null) return 'unknown'
   return 'ok'
 }
 
@@ -431,23 +431,20 @@ export function fmtYen(v: number | null | undefined): string {
 }
 
 /**
- * 検証タブの条件3 「あり」に付ける `(M/D Xh)` (日が引けなければ `(Xh)`)。
- * `maxDailyRestraint` が無ければ (判定不能 or `restraintWithinDay !== false`) 空文字。
- * **M は行の月ではなく報告の月 (`month`、`YYYY-MM`) から取る** — `day` は暦日のみで
- * 月を持たないため、月境界の勤務 (前月扱いの日) を報告月の月で表示すると 1 日ずれる
- * おそれがあるが、relay は暦日ビューのうち報告月の暦日だけから日を選ぶのでこれで正しい。
- * 時間は `fmtMinutes` の書式に合わせる (`fmtMinutes` は分から時分に変換するだけの
- * pure 関数なので、丸めや符号の扱いを 2 か所に増やさないためここでも使い回す)。
+ * 検証タブの条件3 「あり」に付ける `(M/D HH:MM〜HH:MM)` (最初の重なりの時間帯)。
+ * 終わりが別の日なら `(M/D HH:MM〜M/D HH:MM)`、組が 2 つ以上なら末尾に `ほか N 件`。
+ * `shiftOverlap` が無ければ (判定不能 or 重なり無し) 空文字。日付は `start`/`end` 自身の
+ * `YYYY-MM-DD` から取る (月をまたぐ重なりも正しく出る)。
  */
-export function fmtMaxDailyRestraint(
-  maxDailyRestraint: { day: number | null, minutes: number } | null | undefined,
-  month: string,
+export function fmtShiftOverlap(
+  shiftOverlap: { start: string, end: string, count: number } | null | undefined,
 ): string {
-  if (!maxDailyRestraint) return ''
-  const time = fmtMinutes(maxDailyRestraint.minutes)
-  if (maxDailyRestraint.day == null) return `(${time})`
-  const m = Number(month.slice(5, 7))
-  return `(${m}/${maxDailyRestraint.day} ${time})`
+  if (!shiftOverlap) return ''
+  const { start, end, count } = shiftOverlap
+  const md = (t: string) => `${Number(t.slice(5, 7))}/${Number(t.slice(8, 10))}`
+  const endText = end.slice(0, 10) === start.slice(0, 10) ? end.slice(11, 16) : `${md(end)} ${end.slice(11, 16)}`
+  const more = count >= 2 ? ` ほか ${count - 1} 件` : ''
+  return `(${md(start)} ${start.slice(11, 16)}〜${endText}${more})`
 }
 
 /** "20260716T183000" (R2 版タイムスタンプ) → "2026-07-16 18:30"。 */

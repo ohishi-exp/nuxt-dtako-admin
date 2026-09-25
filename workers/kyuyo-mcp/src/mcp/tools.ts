@@ -25,9 +25,10 @@ import { resolveSecretBinding } from "../../../dtako-scraper-relay/src/cron";
 import {
   gcpPartsFor,
   overlayGcpDayTimes,
-  parseGcpCalendarDays,
   parseGcpDaySummaries,
+  parseGcpShiftOverlaps,
   type GcpDayPart,
+  type GcpShiftOverlap,
 } from "../../../dtako-scraper-relay/src/gcp-day-summaries";
 import { OPE_NO_RE, START_OPE_RE } from "../../../dtako-scraper-relay/src/theearth-report-client";
 import { CRON_BATCH_MAX_ITEMS } from "../../../dtako-scraper-relay/src/cron-batch";
@@ -236,7 +237,7 @@ const getWageReportArgs = z
         "乗務員CD。**`get_restraint_summary` の `driver` (行を絞り込むフィルタ) とは挙動が違う** " +
           "— こちらは行を絞り込まない (rows は常に会社の全乗務員ぶんのまま)。指定すると、" +
           "driverCd が一致する行にだけ `invariants` (既に決まっている不変条件のチェック結果: " +
-          "実働と表区分合計の差分 / 実働≤拘束 / 日別拘束≤1440分(GCP day_parts の暦日合計の最大の日で判定)。" +
+          "実働と表区分合計の差分 / 実働≤拘束 / 勤務の時間帯の重なりが無い (GCP kintai.shifts の保存値の比較)。" +
           "閾値を新しく決める異常検知 " +
           "(最低賃金額との比較・割増率の法定判定・前月比/他乗務員比較) はここに含まない) を追加する。" +
           "invariants は source=gcp のときだけ付く (current では driver を指定しても付かない)。" +
@@ -247,7 +248,7 @@ const getWageReportArgs = z
   .strict();
 
 /**
- * relay の GCP 読み取りの口 (`/kintai-relay/{day-summaries,calendar-days}`) を
+ * relay の GCP 読み取りの口 (`/kintai-relay/{day-summaries,shift-overlaps}`) を
  * 1 か月ぶん読んで JSON にする。失敗は `GCP <口> (<月>): …` で名指しする。
  *
  * ★ callRelay へは寄せない — 月ごと・口ごとに Promise.all で回し、失敗の名指しに
@@ -255,7 +256,7 @@ const getWageReportArgs = z
  */
 async function fetchGcpMonth(
   env: Env,
-  kind: "day-summaries" | "calendar-days",
+  kind: "day-summaries" | "shift-overlaps",
   month: string,
 ): Promise<unknown> {
   const relay = env.SCRAPER_RELAY;
@@ -298,12 +299,12 @@ async function loadGcpDayParts(
 }
 
 /**
- * GCP の暦日ビュー (`kintai.day_parts` を上流が乗務員 × 暦日で SUM したもの) を
- * 1 か月ぶん読む (Refs #1123)。検証の条件3 (日別最大拘束) の材料。relay 側
- * `loadGcpDayTimes` が当月ぶんだけ同時に読むのと同じ。
+ * GCP の勤務の時間帯の重なり (`kintai.shifts` を上流が自己結合したもの) を 1 か月ぶん
+ * 読む (Refs #1123)。検証の条件3 の材料。relay 側 `loadGcpDayTimes` が当月ぶんだけ
+ * 同時に読むのと同じ。
  */
-async function loadGcpCalendarDays(env: Env, month: string): Promise<Map<string, Map<string, number>>> {
-  return parseGcpCalendarDays(await fetchGcpMonth(env, "calendar-days", month));
+async function loadGcpShiftOverlaps(env: Env, month: string): Promise<Map<string, GcpShiftOverlap[]>> {
+  return parseGcpShiftOverlaps(await fetchGcpMonth(env, "shift-overlaps", month));
 }
 
 export const getWageReportTool = {
@@ -315,7 +316,8 @@ export const getWageReportTool = {
     "拘束時間の出どころは `source` で選べ、**省略時は画面と同じ gcp**。" +
     "source=gcp では日別行 (summary.days) を落とす (計算は days を使い切った後なので数字は変わらない)。" +
     "`driver` (乗務員CD) を指定すると、該当行にだけ不変条件チェック `invariants` を追加する " +
-    "(実働と表区分合計の差分 / 実働≤拘束 / 日別拘束≤1440分(GCP day_parts の暦日合計の最大の日で判定)。" +
+    "(実働と表区分合計の差分 / 実働≤拘束 / 勤務の時間帯の重なりが無い (GCP kintai.shifts の保存値の比較、" +
+    "重なりがあれば最初の組の時間帯と組数を shiftOverlap に載せる)。" +
     "閾値を新しく決める異常検知は含まない)。invariants は source=gcp のときだけ付く。",
   inputSchema: getWageReportArgs,
   execute: async (env: Env, args) => {
@@ -350,7 +352,7 @@ export const getWageReportTool = {
       loadMonthSummaries(env, args.company, prevYm),
       // 素材読みとは独立 (月しか要らない) なので待たずに並列で走らせる
       source === "gcp"
-        ? Promise.all([loadGcpDayParts(env, [args.month, prevYm]), loadGcpCalendarDays(env, args.month)])
+        ? Promise.all([loadGcpDayParts(env, [args.month, prevYm]), loadGcpShiftOverlaps(env, args.month)])
         : Promise.resolve(null),
     ]);
     const gcpByMonth = gcp?.[0] ?? null;
@@ -358,16 +360,10 @@ export const getWageReportTool = {
     // 拘束時間を GCP 由来に差し替える。**当月と前月の両方**を差し替えること —
     // 片方だけだと月初の跨ぎ週 (週40h) で 2 つのソースの実働が混ざる
     // (relay 側 handleWageReport と同じ手順、Refs #675)。
-    // 暦日ビュー (条件3 の材料) は当月ぶんだけ渡す — 前月は日別行しか使わない
     const overlay = (entry: RestraintDriverSummary, forYm: string) =>
       gcpByMonth
-        ? overlayGcpDayTimes(
-            entry,
-            gcpPartsFor(gcpByMonth.get(forYm)!, entry.driverCd),
-            forYm,
-            forYm === args.month ? gcpPartsFor(gcp![1], entry.driverCd) : null,
-          )
-        : { summary: entry, missing: false, maxDailyRestraintDay: null };
+        ? overlayGcpDayTimes(entry, gcpPartsFor(gcpByMonth.get(forYm)!, entry.driverCd), forYm)
+        : { summary: entry, missing: false };
 
     const prevDaysByDriver = new Map<string, RestraintSummaryDay[]>(
       prev.summaries.map((s) => [s.data.driverCd, overlay(s.data, prevYm).summary.days]),
@@ -381,7 +377,7 @@ export const getWageReportTool = {
     }
 
     const rows = current.summaries.map((s) => {
-      const { summary, missing, maxDailyRestraintDay } = overlay(s.data, args.month);
+      const { summary, missing } = overlay(s.data, args.month);
       const wage = computeWageRow(
         summary,
         year,
@@ -414,8 +410,16 @@ export const getWageReportTool = {
         // 一度に出すが、この MCP tool を全行にすると 112 名で応答が 1.1MB 超に
         // 膨らむ。呼び分けの理由は restraint-wage.ts の checkWageInvariants の
         // doc comment が正本。**source=gcp のときだけ** (現行ソースでは検証しない、Refs #1123)。
+        // 条件3 の材料はその乗務員の勤務の重なりの組 (GCP 欠測は null = 判定不能、組が無ければ [])。
         ...(gcpByMonth && args.driver !== undefined && s.data.driverCd === args.driver
-          ? { invariants: checkWageInvariants(summary, wage.minutes, config, maxDailyRestraintDay) }
+          ? {
+              invariants: checkWageInvariants(
+                summary,
+                wage.minutes,
+                config,
+                missing ? null : (gcpPartsFor(gcp![1], s.data.driverCd) ?? []),
+              ),
+            }
           : {}),
       };
     });
