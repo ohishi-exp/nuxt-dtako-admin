@@ -1309,3 +1309,10 @@ branches = true
 [[files]]
 path = "app/utils/litigation-output.ts"
 branches = true
+
+# 訴訟準備の「エラー」タブ (Refs #1133 c1133-5) の pure ロジック — 乗務員 × 月へ畳む・
+# 検知 4 列の判定 (異常あり / 異常なし / 判定できない / 未実行)・エラー一覧 CSV・
+# 取り込みの応答の分類。.vue 側は登録しない。
+[[files]]
+path = "app/utils/litigation-errors.ts"
+branches = true

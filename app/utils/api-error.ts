@@ -447,8 +447,11 @@ export function describeCaughtError(e: unknown, retry: string): string {
  *
  * `statusCode` を**先に**見る — 上流が `statusCode` を載せるようになったら、
  * 文字列を読む側は自動的に使われなくなる (`AUTH_FETCH_ERROR_MESSAGE` の注記)。
+ *
+ * 訴訟準備のエラータブ (`litigation.vue`) も `getYTimePreview` の 404 (乗務員CD が
+ * alc に未登録) を見分けるのに使う — status の読み方を画面側に複製しないため export する。
  */
-function caughtErrorStatus(e: unknown): number | null {
+export function caughtErrorStatus(e: unknown): number | null {
   const err = (e ?? {}) as { statusCode?: unknown, message?: unknown }
   if (typeof err.statusCode === 'number') return err.statusCode
   if (typeof err.message !== 'string') return null

@@ -24,7 +24,11 @@ export interface TheearthSessionRecord {
   /** viewer 経路 (auth-worker JWT) で認可した時の role。
    * **★ 認可には使わない (Refs #1049)** — 全社許可は `viewerOrgWide`
    * (= auth-worker の `USER_ACL` 由来の introspect 応答 `org_wide`) だけで
-   * 決めるので、いまは記録用の値。theearth ログイン由来の
+   * 決めるので、いまは記録用の値。
+   * **例外: `/restraint-api/litigation/alc-upload-driver` だけは書き込み (運行を消して
+   * 入れ直す) なので role を見る (#1133)** — admin / payroll のときだけ通す
+   * (`canRunLitigationUpload`)。その口は保存済みセッションを使わず毎回 introspect する
+   * (下のとおり theearth ログイン由来の record では undefined のため)。theearth ログイン由来の
    * セッションでは undefined。DO storage に保存されるのは theearth セッションだけで、
    * viewer は毎リクエスト組み立てるため永続化されない。 */
   viewerRole?: string;
