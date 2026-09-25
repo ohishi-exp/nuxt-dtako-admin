@@ -17,6 +17,8 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
+import { ref, type Ref } from 'vue'
+import { mockNuxtImport } from '@nuxt/test-utils/runtime'
 import { NUXT_UI_PAGE_STUBS } from '../helpers/stubs'
 
 const { api, saved } = vi.hoisted(() => ({
@@ -36,8 +38,17 @@ vi.mock('~/utils/api', async importOriginal => ({
   getYTimePreview: api.getYTimePreview,
 }))
 
+/** `useState` は Nuxt app instance が要る (`[nuxt] instance unavailable`)。この画面は
+ * `useRestraintSession` (会社IDの引き継ぎ、restraint-wage-diff-zero.test.ts と同型) 経由で
+ * 使うだけなので、キーごとの `ref` に置き換える。 */
+const nuxtState = new Map<string, Ref<unknown>>()
+mockNuxtImport('useState', () => (key: string, init?: () => unknown) => {
+  if (!nuxtState.has(key)) nuxtState.set(key, ref(init ? init() : null))
+  return nuxtState.get(key)!
+})
+
 import JSZip from 'jszip'
-import Page from '~/pages/litigation.vue'
+const Page = (await import('~/pages/litigation.vue')).default
 
 const CASE = {
   caseId: 'c1',
