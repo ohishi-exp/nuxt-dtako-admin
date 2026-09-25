@@ -27,7 +27,7 @@
 import { TheearthClientError } from "./theearth-client";
 import type { RestraintDriverSummary, RestraintSummaryDay } from "./theearth-restraint-client";
 import { compareText, isBranchUnder, resolveBranchPrefecture } from "./branch-prefecture";
-import { MINUTES_PER_DAY } from "./timecard-compare";
+import type { GcpShiftOverlap } from "./gcp-day-summaries";
 
 // ---------------------------------------------------------------------------
 // マスタの型と検証
@@ -1199,14 +1199,13 @@ export interface WageInvariantCheck {
   unaccounted: UnaccountedMinutesCheck | null;
   /** 条件2 (実働 ≤ 拘束)。true が不変条件。どちらか欠測で判定不能なら null。 */
   workingWithinRestraint: boolean | null;
-  /** 条件3 (日別拘束の最大 ≤ 1440分 = 1暦日)。true が不変条件。欠測で判定不能なら null。 */
-  restraintWithinDay: boolean | null;
-  /** 条件3 を判定した日別最大拘束 (`minutes`) と、それを出した暦日 (`day`、1-31)。
-   * 画面が「どの日が何時間で超えたか」を出すための材料で、判定そのものは
-   * `restraintWithinDay` が正本。`day` は呼び出し元が渡した `maxDailyRestraintDay`
-   * (overlay が暦日ビューから選んだ日) で、渡されなければ null。
-   * 条件3 が判定不能 (最大拘束が欠測) なら null。 */
-  maxDailyRestraint: { day: number | null; minutes: number } | null;
+  /** 条件3 (同じ乗務員の勤務の時間帯が重なっていない)。true が不変条件。GCP 欠測で
+   * 判定不能なら null。 */
+  noShiftOverlap: boolean | null;
+  /** 条件3 の最初の重なり (`start` = 後の勤務の開始、`end` = 2 本のうち先に終わる方の
+   * 終了、どちらも JST `YYYY-MM-DD HH:MM`) と組の数 (`count`)。画面が「いつ重なったか」を
+   * 出すための材料で、判定そのものは `noShiftOverlap` が正本。重なりが無い・判定不能なら null。 */
+  shiftOverlap: { start: string; end: string; count: number } | null;
 }
 
 /**
@@ -1217,15 +1216,10 @@ export interface WageInvariantCheck {
  * - 条件1: 実働 − 表区分合計 (`unaccountedMinutes`)。0 が不変条件。0 でなければ
  *   `kind` で「クランプ由来」と「それ以外」を分ける (除外はしない)
  * - 条件2: 実働 ≤ 拘束 (どちらも月間合計、単位は揃っている)
- * - 条件3: 日別の最大拘束 (`summary.maxDailyRestraintMinutes`) ≤ 1440分 (1暦日)。
- *   最大拘束は **GCP の `day_parts` (勤務を 0 時で切って暦日に配った行) を乗務員 ×
- *   暦日で足した値の最大** (`overlayGcpDayTimes` が暦日ビューから入れる、Refs #1123)。
- *   超えたら同じ時間帯に勤務が 2 本 = 二重。日 (`maxDailyRestraintDay`、`YYYY-MM-DD`)
- *   は overlay が選んだものをそのまま使い、`summary.days` から逆引きしない
- *   (日別行は始業日キーなので暦日とずれる)。
- *   **`summary.restraintMinutes` は月間合計** (`theearth-restraint-client.ts` の doc
- *   comment 参照) なので使わない — 使うと実運用の月間拘束 (10,000〜18,000分規模) が
- *   恒常的に 1440 を超え、全乗務員が毎月「違反」になる (恒常 false positive)
+ * - 条件3: GCP `kintai.shifts` の勤務どうしの時間帯の重なりが無い (保存値の比較だけ。
+ *   組を選ぶのは上流 `/api/kintai/shift-overlaps`、読むのは `parseGcpShiftOverlaps`、
+ *   Refs #1123)。`overlaps` はその乗務員の組 (後の勤務の開始順)、省略・null は判定不能
+ *   (GCP 欠測)。合計が 24h を超えないかぶり (8:00〜18:00 と 10:00〜20:00) も拾う
  *
  * どの条件も、入力の欠測 (null) は判定不能として null を返し、0 やクリアに倒さない。
  *
@@ -1245,10 +1239,11 @@ export function checkWageInvariants(
   summary: RestraintDriverSummary,
   minutes: WageCategoryMinutes,
   config: WageConfig,
-  maxDailyRestraintDay?: string | null,
+  overlaps?: readonly GcpShiftOverlap[] | null,
 ): WageInvariantCheck {
   const diffMinutes = unaccountedMinutes(summary.workingMinutes, minutes);
-  const { workingMinutes, restraintMinutes, maxDailyRestraintMinutes } = summary;
+  const { workingMinutes, restraintMinutes } = summary;
+  const first = overlaps?.[0];
   return {
     hourlyBasis: config.hourlyBasis,
     unaccounted:
@@ -1260,15 +1255,14 @@ export function checkWageInvariants(
           },
     workingWithinRestraint:
       workingMinutes === null || restraintMinutes === null ? null : workingMinutes <= restraintMinutes,
-    restraintWithinDay:
-      maxDailyRestraintMinutes === null ? null : maxDailyRestraintMinutes <= MINUTES_PER_DAY,
-    maxDailyRestraint:
-      maxDailyRestraintMinutes === null
-        ? null
-        : {
-            day: maxDailyRestraintDay ? Number(maxDailyRestraintDay.slice(8, 10)) : null,
-            minutes: maxDailyRestraintMinutes,
-          },
+    noShiftOverlap: overlaps == null ? null : overlaps.length === 0,
+    shiftOverlap: first
+      ? {
+          start: first.bStart.slice(0, 16),
+          end: (first.aEnd < first.bEnd ? first.aEnd : first.bEnd).slice(0, 16),
+          count: overlaps!.length,
+        }
+      : null,
   };
 }
 

@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from 'vitest'
 import type { MinWageRowAttrs, TimecardKosokuState, WageInvariantCheck, WageReportResponse } from '../../app/utils/restraint-wage-view'
-import { EMPTY_WAGE_REPORT_NOTICE, timecardKosokuNotice, emptyWageReportCause, fastBadgeState, fmtMaxDailyRestraint, fmtMinutes, fmtYen, fmtArchiveTs, fmtYm, GROSS_HOURLY_CAVEAT, groupMinWageRows, isMonthlyOvertimeOver60h, invariantRowStatus, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, MONTHLY_CSV_WAGE_TAIL_HEADERS, MONTHLY_OVERTIME_THRESHOLD_MINUTES, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
+import { EMPTY_WAGE_REPORT_NOTICE, timecardKosokuNotice, emptyWageReportCause, fastBadgeState, fmtMinutes, fmtYen, fmtArchiveTs, fmtShiftOverlap, fmtYm, GROSS_HOURLY_CAVEAT, groupMinWageRows, isMonthlyOvertimeOver60h, invariantRowStatus, isTimecardSynced, MIN_WAGE_JOB_GROUP_LABEL, minWageCompareRow, monthRange, MONTH_RANGE_MAX, MONTHLY_CSV_WAGE_TAIL_HEADERS, MONTHLY_OVERTIME_THRESHOLD_MINUTES, nextYm, prevYm, theearthSyncState } from '../../app/utils/restraint-wage-view'
 
 describe('fmtMinutes', () => {
   it('時間+分を "XhYYm" 表記にする', () => {
@@ -679,8 +679,8 @@ describe('invariantRowStatus (検証タブの 1 行、判定は relay)', () => {
     hourlyBasis: 'working',
     unaccounted: { diffMinutes: 0, kind: 'other' },
     workingWithinRestraint: true,
-    restraintWithinDay: true,
-    maxDailyRestraint: { day: 12, minutes: 700 },
+    noShiftOverlap: true,
+    shiftOverlap: null,
   }
 
   it('invariants が無い (古い relay) は unknown — ok に倒さない', () => {
@@ -703,37 +703,39 @@ describe('invariantRowStatus (検証タブの 1 行、判定は relay)', () => {
 
   it('条件 2 / 条件 3 が false なら ng', () => {
     expect(invariantRowStatus({ ...ok, workingWithinRestraint: false })).toBe('ng')
-    expect(invariantRowStatus({ ...ok, restraintWithinDay: false })).toBe('ng')
+    expect(invariantRowStatus({ ...ok, noShiftOverlap: false })).toBe('ng')
   })
 
   it('null を 1 つでも含み違反が無ければ unknown (各条件ごと)', () => {
     expect(invariantRowStatus({ ...ok, unaccounted: null })).toBe('unknown')
     expect(invariantRowStatus({ ...ok, workingWithinRestraint: null })).toBe('unknown')
-    expect(invariantRowStatus({ ...ok, restraintWithinDay: null })).toBe('unknown')
+    expect(invariantRowStatus({ ...ok, noShiftOverlap: null })).toBe('unknown')
   })
 
   it('ng と null が混在したら ng を優先する', () => {
-    expect(invariantRowStatus({ ...ok, unaccounted: null, restraintWithinDay: false })).toBe('ng')
+    expect(invariantRowStatus({ ...ok, unaccounted: null, noShiftOverlap: false })).toBe('ng')
     expect(invariantRowStatus({ ...ok, unaccounted: { diffMinutes: 10, kind: 'clamp' }, workingWithinRestraint: null })).toBe('ng')
-    expect(invariantRowStatus({ ...ok, workingWithinRestraint: false, restraintWithinDay: null })).toBe('ng')
+    expect(invariantRowStatus({ ...ok, workingWithinRestraint: false, noShiftOverlap: null })).toBe('ng')
   })
 })
 
-describe('fmtMaxDailyRestraint (検証タブの条件3「あり」に付ける (M/D Xh))', () => {
-  it('day が引ければ M/D 付きで出す。M は行ではなく month (報告月) から取る', () => {
-    expect(fmtMaxDailyRestraint({ day: 25, minutes: 2097 }, '2026-06')).toBe('(6/25 34h57m)')
+describe('fmtShiftOverlap (検証タブの条件3「あり」に付ける最初の重なりの時間帯)', () => {
+  it('同じ日に収まる重なりは M/D HH:MM〜HH:MM', () => {
+    expect(fmtShiftOverlap({ start: '2026-06-24 10:00', end: '2026-06-24 18:00', count: 1 })).toBe('(6/24 10:00〜18:00)')
   })
 
-  it('前月扱いの行が混じる month でも、報告月の M をそのまま使う', () => {
-    expect(fmtMaxDailyRestraint({ day: 1, minutes: 120 }, '2026-01')).toBe('(1/1 2h00m)')
+  it('組が 2 つ以上なら「ほか N 件」(N = 組数 − 1)', () => {
+    expect(fmtShiftOverlap({ start: '2026-06-24 10:00', end: '2026-06-24 18:00', count: 2 })).toBe('(6/24 10:00〜18:00 ほか 1 件)')
+    expect(fmtShiftOverlap({ start: '2026-06-24 10:00', end: '2026-06-24 18:00', count: 4 })).toBe('(6/24 10:00〜18:00 ほか 3 件)')
   })
 
-  it('day が null なら M/D を付けず時間だけ', () => {
-    expect(fmtMaxDailyRestraint({ day: null, minutes: 1792 }, '2026-06')).toBe('(29h52m)')
+  it('日をまたぐ重なりは終わりにも M/D を付ける (月をまたいでも end 自身の日付を出す)', () => {
+    expect(fmtShiftOverlap({ start: '2026-06-24 22:00', end: '2026-06-25 02:00', count: 1 })).toBe('(6/24 22:00〜6/25 02:00)')
+    expect(fmtShiftOverlap({ start: '2026-06-30 23:00', end: '2026-07-01 01:30', count: 1 })).toBe('(6/30 23:00〜7/1 01:30)')
   })
 
-  it('maxDailyRestraint が無ければ (null / undefined) 空文字', () => {
-    expect(fmtMaxDailyRestraint(null, '2026-06')).toBe('')
-    expect(fmtMaxDailyRestraint(undefined, '2026-06')).toBe('')
+  it('shiftOverlap が無ければ (null / undefined) 空文字', () => {
+    expect(fmtShiftOverlap(null)).toBe('')
+    expect(fmtShiftOverlap(undefined)).toBe('')
   })
 })

@@ -69,20 +69,24 @@ function gcpDaySummariesBody(ym: string, withData: boolean) {
   };
 }
 
-/** GCP の暦日ビュー (`/api/kintai/day-parts`、上流が乗務員 × 暦日で SUM 済み)。
- * **最大の日 (07 日) を day_summaries の始業日 (06 日) とずらす** — 条件3 の日と分数が
- * 始業日集計ではなく暦日ビューから来ていることを見分けるため。 */
-function calendarDaysBody(ym: string) {
+/** GCP の勤務の重なり (`/api/kintai/shift-overlaps`、上流が `kintai.shifts` を自己結合済み)。
+ * 合計が 24h を超えないかぶり (05:00〜17:00 と 07:00〜19:00) を 1 組。 */
+function shiftOverlapsBody(ym: string) {
   return {
     month: ym,
     items: [
-      { driver_cd: Number(DRIVER), date: `${ym}-06`, restraint_minutes: 500 },
-      { driver_cd: Number(DRIVER), date: `${ym}-07`, restraint_minutes: 900 },
+      {
+        driver_cd: Number(DRIVER),
+        a_start: `${ym}-06 05:00:00`,
+        a_end: `${ym}-06 17:00:00`,
+        b_start: `${ym}-06 07:00:00`,
+        b_end: `${ym}-06 19:00:00`,
+      },
     ],
   };
 }
 
-function makeDO(opts: { calendarDays?: () => Response } = {}) {
+function makeDO(opts: { shiftOverlaps?: () => Response; daySummariesEmpty?: boolean } = {}) {
   const env = {
     DTAKO_R2: new FakeR2(),
     RESTRAINT_DEV_VIEWER_COMP: COMP_ID,
@@ -97,12 +101,12 @@ function makeDO(opts: { calendarDays?: () => Response } = {}) {
     AUTH_WORKER: {
       fetch: async (input: RequestInfo | URL) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-        if (url.includes("/api/kintai/day-parts")) {
-          return opts.calendarDays?.() ?? Response.json(calendarDaysBody(YM));
+        if (url.includes("/api/kintai/shift-overlaps")) {
+          return opts.shiftOverlaps?.() ?? Response.json(shiftOverlapsBody(YM));
         }
         if (url.includes("/api/kintai/day-summaries")) {
           const isPrev = url.includes(`month=${PREV_YM}`);
-          return Response.json(gcpDaySummariesBody(isPrev ? PREV_YM : YM, !isPrev));
+          return Response.json(gcpDaySummariesBody(isPrev ? PREV_YM : YM, !isPrev && !opts.daySummariesEmpty));
         }
         return new Response("unexpected", { status: 500 });
       },
@@ -242,45 +246,51 @@ describe("GET /restraint-api/wage-report の rows[].invariants (Refs #1121-7)", 
       "clamp",
     );
 
-    // 条件3 (Refs #1123) は暦日ビューの最大 (07 日 900 分) — day_summaries の始業日
-    // (06 日 700 分) ではない。日は overlay が選んだものがハンドラから渡っている
-    // (summary から呼び直すと日を渡さないので分数しか出ない)
-    expect(fromTruncated.maxDailyRestraint).toEqual({ day: null, minutes: 900 });
-    expect(
-      (row!.invariants as { maxDailyRestraint?: unknown } | undefined)?.maxDailyRestraint,
-    ).toEqual({ day: 7, minutes: 900 });
+    // 条件3 (Refs #1123) は勤務の重なりの組から判定する。組はハンドラが渡している
+    // (summary から呼び直すと組を渡さないので判定不能になる)
+    expect(fromTruncated.noShiftOverlap).toBeNull();
+    const inv = row!.invariants as { noShiftOverlap?: boolean | null; shiftOverlap?: unknown } | undefined;
+    expect(inv?.noShiftOverlap).toBe(false);
+    expect(inv?.shiftOverlap).toEqual({ start: `${YM}-06 07:00`, end: `${YM}-06 17:00`, count: 1 });
 
-    // 残り 2 条件 (days に依存しない) は truncate の影響を受けないので、そのまま一致する
+    // 条件2 (days に依存しない) は truncate の影響を受けないので、そのまま一致する
     expect((row!.invariants as { workingWithinRestraint?: boolean } | undefined)?.workingWithinRestraint).toBe(
       fromTruncated.workingWithinRestraint,
-    );
-    expect((row!.invariants as { restraintWithinDay?: boolean } | undefined)?.restraintWithinDay).toBe(
-      fromTruncated.restraintWithinDay,
     );
   });
 });
 
-describe("GET /restraint-api/wage-report?source=gcp の暦日ビュー取得 (Refs #1123)", () => {
-  it("暦日ビュー (day-parts) が落ちたら古い値や始業日集計に倒さず 502", async () => {
+describe("GET /restraint-api/wage-report?source=gcp の勤務の重なりの取得 (Refs #1123)", () => {
+  const invOf = async (res: Response) => {
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as WageReportBody;
+    return body.rows.find((r) => r.summary.driverCd === DRIVER)?.invariants as
+      | { noShiftOverlap: boolean | null; shiftOverlap: unknown }
+      | undefined;
+  };
+
+  it("重なり (shift-overlaps) が落ちたら古い値に倒さず 502", async () => {
     stubUpstream();
-    const res = await makeDO({ calendarDays: () => new Response("boom", { status: 500 }) }).fetch(
+    const res = await makeDO({ shiftOverlaps: () => new Response("boom", { status: 500 }) }).fetch(
       req(`month=${YM}&source=gcp`),
     );
     expect(res.status).toBe(502);
-    expect(((await res.json()) as { error: string }).error).toMatch(/GCP calendar-days \(2026-07\)/);
+    expect(((await res.json()) as { error: string }).error).toMatch(/GCP shift-overlaps \(2026-07\)/);
   });
 
-  it("暦日ビューにその乗務員の行が無ければ条件3 は判定不能 (null) — day_summaries の 700 分に倒さない", async () => {
+  it("その乗務員の組が 0 件なら条件3 は充足 (true・null)", async () => {
     stubUpstream();
-    const res = await makeDO({ calendarDays: () => Response.json({ month: YM, items: [] }) }).fetch(
-      req(`month=${YM}&source=gcp`),
+    const inv = await invOf(
+      await makeDO({ shiftOverlaps: () => Response.json({ month: YM, items: [] }) }).fetch(req(`month=${YM}&source=gcp`)),
     );
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as WageReportBody;
-    const inv = body.rows.find((r) => r.summary.driverCd === DRIVER)?.invariants as
-      | { restraintWithinDay: boolean | null; maxDailyRestraint: unknown }
-      | undefined;
-    expect(inv?.restraintWithinDay).toBeNull();
-    expect(inv?.maxDailyRestraint).toBeNull();
+    expect(inv?.noShiftOverlap).toBe(true);
+    expect(inv?.shiftOverlap).toBeNull();
+  });
+
+  it("GCP 欠測 (day_summaries にその乗務員の当月行が無い) なら、組があっても条件3 は判定不能 (null・null)", async () => {
+    stubUpstream();
+    const inv = await invOf(await makeDO({ daySummariesEmpty: true }).fetch(req(`month=${YM}&source=gcp`)));
+    expect(inv?.noShiftOverlap).toBeNull();
+    expect(inv?.shiftOverlap).toBeNull();
   });
 });

@@ -141,8 +141,8 @@ import {
   checkKyuyoAccess,
   FOLD_PAGE_MAX_DRIVERS,
   monthsCoveredByRange,
-  relayKintaiCalendarDays,
   relayKintaiDaySummaries,
+  relayKintaiShiftOverlaps,
   relayWageRangeGet,
   relayWageSnapshotPut,
   relayKintaiRecalc,
@@ -330,9 +330,10 @@ import {
 import {
   gcpPartsFor,
   overlayGcpDayTimes,
-  parseGcpCalendarDays,
   parseGcpDaySummaries,
+  parseGcpShiftOverlaps,
   type GcpDayPart,
+  type GcpShiftOverlap,
 } from "./gcp-day-summaries";
 import {
   compareTimecardMonth,
@@ -8944,14 +8945,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * 見える状態になり、突合の道具として成立しない (#606-5 の「化石を黙って出さない」と
    * 同じ考え方)。
    *
-   * 当月 (`months[0]`) だけは暦日ビュー (`relayKintaiCalendarDays`、検証タブの条件3 の
-   * 材料、Refs #1123) も同時に読む。こちらが落ちても同じく 502 にする。
+   * 当月 (`months[0]`) だけは勤務の時間帯の重なり (`relayKintaiShiftOverlaps`、検証タブの
+   * 条件3 の材料、Refs #1123) も同時に読む。こちらが落ちても同じく 502 にする。
    */
   private async loadGcpDayTimes(
     compId: string,
     months: readonly [string, ...string[]],
   ): Promise<
-    | { byMonth: Map<string, Map<string, Map<string, GcpDayPart>>>; calendarDays: Map<string, Map<string, number>> }
+    | { byMonth: Map<string, Map<string, Map<string, GcpDayPart>>>; shiftOverlaps: Map<string, GcpShiftOverlap[]> }
     | Response
   > {
     const ctx = await this.buildKintaiRelayContext(compId, "wage_report_gcp");
@@ -8971,10 +8972,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // daily / kosoku の生応答と同じ 60 秒 memo に載せる (Refs #508 と同型)。
     // 実測でここが GCP モード最大のフェーズ (1.8 秒) — 月を往復するだけで
     // 毎回取り直していた
-    const [calendar, ...fetched] = await Promise.all([
-      tryLoad("calendar-days", months[0], () =>
-        this.memoKintaiUpstream(`gcp-calendar-days:${months[0]}`, async () =>
-          parseGcpCalendarDays(await relayKintaiCalendarDays(ctx.deps, { month: months[0] })),
+    const [overlaps, ...fetched] = await Promise.all([
+      tryLoad("shift-overlaps", months[0], () =>
+        this.memoKintaiUpstream(`gcp-shift-overlaps:${months[0]}`, async () =>
+          parseGcpShiftOverlaps(await relayKintaiShiftOverlaps(ctx.deps, { month: months[0] })),
         ),
       ),
       ...months.map((month) =>
@@ -8992,8 +8993,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       if ("error" in f) return failed(f);
       byMonth.set(f.month, f.value);
     }
-    if ("error" in calendar) return failed(calendar);
-    return { byMonth, calendarDays: calendar.value };
+    if ("error" in overlaps) return failed(overlaps);
+    return { byMonth, shiftOverlaps: overlaps.value };
   }
 
   /**
@@ -9220,16 +9221,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
     // 合流後のサマリの時間を GCP 由来に差し替える。当月と前月の両方を差し替える —
     // 片方だけだと月初の跨ぎ週で 2 つのソースの実働が混ざる
-    // 暦日ビュー (条件3 の材料) は当月ぶんだけ渡す — 前月は日別行しか使わない
     const overlay = (entry: RestraintDriverSummary, forYm: string) =>
       gcpOverlay
-        ? overlayGcpDayTimes(
-            entry,
-            gcpPartsFor(gcpOverlay.byMonth.get(forYm)!, entry.driverCd),
-            forYm,
-            forYm === ym ? gcpPartsFor(gcpOverlay.calendarDays, entry.driverCd) : null,
-          )
-        : { summary: entry, missing: false, maxDailyRestraintDay: null };
+        ? overlayGcpDayTimes(entry, gcpPartsFor(gcpOverlay.byMonth.get(forYm)!, entry.driverCd), forYm)
+        : { summary: entry, missing: false };
 
     const prevDaysByDriver = new Map<string, RestraintSummaryDay[]>(
       prevMerged.map((m) => [m.entry.data.driverCd, overlay(m.entry.data, prevYm).summary.days]),
@@ -9243,7 +9238,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
 
     const endRows = timer.begin("rows");
     const rows = merged.map(({ entry, source }) => {
-      const { summary, missing, maxDailyRestraintDay } = overlay(entry.data, ym);
+      const { summary, missing } = overlay(entry.data, ym);
       const wage = computeWageRow(
         summary,
         year,
@@ -9281,10 +9276,17 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         // 付ける — 画面 (検証タブ) が全乗務員ぶんの差分列を一度に出すため、
         // 呼び出し側で絞り込む余地が無い。判定は truncate 前の `summary`
         // (`days` を保ったまま) を渡す — クランプ判定は日別行を見るので、応答の
-        // `summary.days` が `[]` になっても効かせる必要がある。条件3 の日は overlay が
-        // 暦日ビューから選んだもの (`maxDailyRestraintDay`) を渡す。
+        // `summary.days` が `[]` になっても効かせる必要がある。条件3 の材料はその乗務員の
+        // 勤務の重なりの組 (GCP 欠測の乗務員は null = 判定不能、組が無ければ [])。
         ...(gcpOverlay
-          ? { invariants: checkWageInvariants(summary, wage.minutes, config, maxDailyRestraintDay) }
+          ? {
+              invariants: checkWageInvariants(
+                summary,
+                wage.minutes,
+                config,
+                missing ? null : (gcpPartsFor(gcpOverlay.shiftOverlaps, entry.data.driverCd) ?? []),
+              ),
+            }
           : {}),
       };
     });

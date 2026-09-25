@@ -62,7 +62,8 @@ const WINDOW_PATH = "/api/kintai/timecard/window";
 const RECALC_PATH = "/api/kintai/recalc";
 /** 畳んだ結果の読み出し口 (rust-ichibanboshi `src/routes/kintai_day_summaries.rs`)。 */
 const DAY_SUMMARIES_PATH = "/api/kintai/day-summaries";
-const CALENDAR_DAYS_PATH = "/api/kintai/day-parts";
+/** 同じ乗務員の勤務の時間帯の重なり (rust-ichibanboshi `src/routes/shift_overlaps.rs`)。 */
+const SHIFT_OVERLAPS_PATH = "/api/kintai/shift-overlaps";
 /**
  * 月ごとの stale (畳み直しが要るか) だけを返す軽い口 (rust-ichibanboshi
  * `src/routes/stale_months.rs`、Refs #620)。`unko_diff` (alc の etags 掃引、約50秒) を
@@ -685,14 +686,13 @@ export async function relayKintaiDaySummaries(
 }
 
 /**
- * 暦日ビュー (`kintai.day_parts` を**上流が乗務員 × 暦日で SUM した**もの) を読む
- * (Refs #1123)。応答は `{month, items: [{driver_cd, date, restraint_minutes}]}`。
+ * 同じ乗務員の勤務の時間帯が重なっている組 (GCP `kintai.shifts` の自己結合) を読む
+ * (Refs #1123)。応答は `{month, items: [{driver_cd, a_start, a_end, b_start, b_end}]}`。
  *
- * **読むだけ** で、`relayKintaiDaySummaries` と同じく応答をそのまま返す (整形・合算は
- * しない。読むのは `parseGcpCalendarDays`)。名前に `DayParts` を使わないのは、
- * kyuyo-mcp の `loadGcpDayParts` / `GcpDayPart` (中身は day_summaries) と取り違えないため。
+ * **読むだけ** で、`relayKintaiDaySummaries` と同じく応答をそのまま返す (整形はしない。
+ * 読むのは `parseGcpShiftOverlaps`)。
  */
-export async function relayKintaiCalendarDays(
+export async function relayKintaiShiftOverlaps(
   deps: Pick<KintaiRelayDeps, "gcp">,
   input: Pick<KintaiDaySummariesInput, "month" | "now">,
 ): Promise<unknown> {
@@ -701,8 +701,8 @@ export async function relayKintaiCalendarDays(
     throw new KintaiRelayError(`month は YYYY-MM で指定してください: ${month}`);
   }
   return readJson<unknown>(
-    await deps.gcp(`${CALENDAR_DAYS_PATH}?${new URLSearchParams({ month })}`),
-    "gcp kintai calendar-days",
+    await deps.gcp(`${SHIFT_OVERLAPS_PATH}?${new URLSearchParams({ month })}`),
+    "gcp kintai shift-overlaps",
   );
 }
 

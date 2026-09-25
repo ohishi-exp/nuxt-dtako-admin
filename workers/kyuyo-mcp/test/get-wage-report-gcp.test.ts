@@ -78,9 +78,11 @@ function gcpBody(month: string, driverCd = "1442") {
   };
 }
 
-/** 受け側 (`/kintai-relay/calendar-days`) の応答形 — day_parts を乗務員 × 暦日で SUM 済み
- * (Refs #1123)。既定は 1440 以下 (条件3 は充足)。 */
-function calendarBody(month: string, items = [{ driver_cd: 1442, date: `${month}-01`, restraint_minutes: 720 }]) {
+type OverlapItem = { driver_cd: number | string; a_start: string; a_end: string; b_start: string; b_end: string };
+
+/** 受け側 (`/kintai-relay/shift-overlaps`) の応答形 — kintai.shifts の自己結合で重なった組
+ * (Refs #1123)。既定は 0 組 (条件3 は充足)。 */
+function overlapsBody(month: string, items: OverlapItem[] = []) {
   return { month, items };
 }
 
@@ -92,7 +94,7 @@ const R2_ENTRIES: Record<string, MockR2Entry> = {
 function env(
   over: Partial<Record<string, unknown>> = {},
   entries = R2_ENTRIES,
-  calendar: (month: string) => unknown = (month) => calendarBody(month),
+  overlaps: (month: string) => unknown = (month) => overlapsBody(month),
 ): Env {
   return {
     DTAKO_R2: createMockR2(entries),
@@ -102,7 +104,7 @@ function env(
       fetch: vi.fn(async (url: string, _init?: unknown) => {
         const u = new URL(url);
         const month = u.searchParams.get("month")!;
-        if (u.pathname === "/kintai-relay/calendar-days") return new Response(JSON.stringify(calendar(month)));
+        if (u.pathname === "/kintai-relay/shift-overlaps") return new Response(JSON.stringify(overlaps(month)));
         return new Response(JSON.stringify(gcpBody(month)));
       }),
     },
@@ -146,14 +148,14 @@ describe("get_wage_report の source 引数 (Refs #675)", () => {
     expect(res.rows[0]!.summary.days).toHaveLength(2);
   });
 
-  it("**当月と前月の両方**を取りに行く — 片方だけだと跨ぎ週で 2 ソースが混ざる。暦日ビューは当月だけ", async () => {
+  it("**当月と前月の両方**を取りに行く — 片方だけだと跨ぎ週で 2 ソースが混ざる。勤務の重なりは当月だけ", async () => {
     const e = env();
     await run(e, { company: "0100", month: "2026-06" });
     const calls = relayFetch(e).mock.calls.map((c) => new URL(c[0] as string));
     const monthsOf = (path: string) =>
       calls.filter((u) => u.pathname === path).map((u) => u.searchParams.get("month")).sort();
     expect(monthsOf("/kintai-relay/day-summaries")).toEqual(["2026-05", "2026-06"]);
-    expect(monthsOf("/kintai-relay/calendar-days")).toEqual(["2026-06"]);
+    expect(monthsOf("/kintai-relay/shift-overlaps")).toEqual(["2026-06"]);
     expect(calls).toHaveLength(3);
   });
 
@@ -276,33 +278,59 @@ describe("get_wage_report の driver 引数 (Refs #1121-6、不変条件チェ�
     expect(row9999.invariants).toBeUndefined();
   });
 
-  it("driver 一致行の invariants は checkWageInvariants と同じ形 (hourlyBasis / unaccounted / workingWithinRestraint / restraintWithinDay)", async () => {
+  it("driver 一致行の invariants は checkWageInvariants と同じ形 (hourlyBasis / unaccounted / workingWithinRestraint / noShiftOverlap)", async () => {
     const res = await run(env(), { company: "0100", month: "2026-06", driver: "1442" });
     const inv = res.rows[0]!.invariants!;
     expect(inv.hourlyBasis).toBe("working");
     // GCP overlay 後: workingMinutes=600, restraintMinutes=720 (gcpBody)
     expect(inv.unaccounted).not.toBeNull();
     expect(inv.workingWithinRestraint).toBe(true);
-    expect(inv.restraintWithinDay).toBe(true);
+    expect(inv.noShiftOverlap).toBe(true);
+    expect(inv.shiftOverlap).toBeNull();
   });
 
-  it("条件3 は暦日ビューの最大とその日で判定する (別勤務 2 本が同じ暦日 = 1792 分、Refs #1123)", async () => {
+  it("条件3 は勤務の時間帯の重なりで判定する (合計 20h のかぶり 8:00〜18:00 と 10:00〜20:00、Refs #1123)", async () => {
     const e = env({}, R2_ENTRIES, (month) =>
-      calendarBody(month, [
-        { driver_cd: 1442, date: `${month}-01`, restraint_minutes: 720 },
-        { driver_cd: 1442, date: `${month}-24`, restraint_minutes: 1792 },
+      overlapsBody(month, [
+        {
+          driver_cd: "01442",
+          a_start: `${month}-24 08:00:00`,
+          a_end: `${month}-24 18:00:00`,
+          b_start: `${month}-24 10:00:00`,
+          b_end: `${month}-24 20:00:00`,
+        },
+        { driver_cd: 9999, a_start: `${month}-02 08:00:00`, a_end: `${month}-02 18:00:00`, b_start: `${month}-02 10:00:00`, b_end: `${month}-02 20:00:00` },
       ]),
     );
     const inv = (await run(e, { company: "0100", month: "2026-06", driver: "1442" })).rows[0]!.invariants!;
-    expect(inv.restraintWithinDay).toBe(false);
-    expect(inv.maxDailyRestraint).toEqual({ day: 24, minutes: 1792 });
+    expect(inv.noShiftOverlap).toBe(false);
+    expect(inv.shiftOverlap).toEqual({ start: "2026-06-24 10:00", end: "2026-06-24 18:00", count: 1 });
   });
 
-  it("暦日ビューにその乗務員が居なければ条件3 は判定不能 (day_summaries の 720 分に倒さない)", async () => {
-    const e = env({}, R2_ENTRIES, (month) => calendarBody(month, []));
-    const inv = (await run(e, { company: "0100", month: "2026-06", driver: "1442" })).rows[0]!.invariants!;
-    expect(inv.restraintWithinDay).toBeNull();
-    expect(inv.maxDailyRestraint).toBeNull();
+  it("GCP 欠測の乗務員は組があっても条件3 は判定不能 (null・null。重なり 0 = 充足に倒さない)", async () => {
+    const e = env({
+      SCRAPER_RELAY: {
+        // day_summaries は別人 (9999) の行しか返さない = 1442 は欠測。重なりは 1442 に 1 組ある
+        fetch: vi.fn(async (url: string) => {
+          const u = new URL(url);
+          const month = u.searchParams.get("month")!;
+          if (u.pathname === "/kintai-relay/shift-overlaps") {
+            return new Response(
+              JSON.stringify(
+                overlapsBody(month, [
+                  { driver_cd: 1442, a_start: `${month}-24 08:00:00`, a_end: `${month}-24 18:00:00`, b_start: `${month}-24 10:00:00`, b_end: `${month}-24 20:00:00` },
+                ]),
+              ),
+            );
+          }
+          return new Response(JSON.stringify(gcpBody(month, "9999")));
+        }),
+      },
+    });
+    const res = await run(e, { company: "0100", month: "2026-06", driver: "1442" });
+    expect(res.rows[0]!.restraint_missing).toBe(true);
+    expect(res.rows[0]!.invariants!.noShiftOverlap).toBeNull();
+    expect(res.rows[0]!.invariants!.shiftOverlap).toBeNull();
   });
 
   it("source: 'current' では driver を指定しても invariants を付けない (検証は GCP のときだけ、Refs #1123)", async () => {

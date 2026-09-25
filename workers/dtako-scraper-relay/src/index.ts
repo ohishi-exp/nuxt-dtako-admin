@@ -8,9 +8,9 @@ export { DtakoScraperRelayDO } from "./dtako-scraper-relay-do";
 import { resolveTheearthRouting } from "./theearth-session";
 import {
   buildDeps,
-  relayKintaiCalendarDays,
   relayKintaiDaySummaries,
   relayKintaiRecalc,
+  relayKintaiShiftOverlaps,
   relayKintaiWindow,
   tenantForCompId,
 } from "./kintai-relay";
@@ -167,10 +167,10 @@ export default {
       return handleKintaiDaySummaries(request, env);
     }
 
-    if (url.pathname === "/kintai-relay/calendar-days" && request.method === "GET") {
-      // 暦日ビュー (day_parts を乗務員 × 暦日で足したもの、Refs #1123)。day-summaries と
-      // 同じ関門・同じ読むだけの口 (GET だけ)
-      return handleKintaiCalendarDays(request, env);
+    if (url.pathname === "/kintai-relay/shift-overlaps" && request.method === "GET") {
+      // 同じ乗務員の勤務の時間帯の重なり (kintai.shifts の自己結合、Refs #1123)。
+      // day-summaries と同じ関門・同じ読むだけの口 (GET だけ)
+      return handleKintaiShiftOverlaps(request, env);
     }
 
     if (url.pathname === "/kintai-relay/operation-zip" && request.method === "POST") {
@@ -601,22 +601,22 @@ async function handleKintaiDaySummaries(
 }
 
 /**
- * `GET /kintai-relay/calendar-days?month=YYYY-MM` — 暦日ビュー (`kintai.day_parts` を
- * 上流が乗務員 × 暦日で足したもの) を読む (Refs #1123)。最低賃金の検証 (条件3) の材料。
+ * `GET /kintai-relay/shift-overlaps?month=YYYY-MM` — 同じ乗務員の勤務の時間帯が重なっている
+ * 組 (GCP `kintai.shifts` の自己結合) を読む (Refs #1123)。最低賃金の検証 (条件3) の材料。
  * 関門・応答の扱いは day-summaries と同じ (`handleKintaiGcpRead`)。
  */
-async function handleKintaiCalendarDays(
+async function handleKintaiShiftOverlaps(
   request: Request,
   env: RelayWorkerEnv,
 ): Promise<Response> {
-  return handleKintaiGcpRead(request, env, "kintai_calendar_days", (deps, url) =>
-    relayKintaiCalendarDays(deps, { month: url.searchParams.get("month") || undefined }),
+  return handleKintaiGcpRead(request, env, "kintai_shift_overlaps", (deps, url) =>
+    relayKintaiShiftOverlaps(deps, { month: url.searchParams.get("month") || undefined }),
   );
 }
 
 /**
  * GCP (`/ichibanboshi-proxy` 経由) を**読むだけ**の口の共通の関門と応答。
- * day-summaries / calendar-days が共有する — 関門を写すと片方だけ直す事故になるため。
+ * day-summaries / shift-overlaps が共有する — 関門を写すと片方だけ直す事故になるため。
  * 上流の失敗は 502 (古い値に倒さない)。
  */
 async function handleKintaiGcpRead(
