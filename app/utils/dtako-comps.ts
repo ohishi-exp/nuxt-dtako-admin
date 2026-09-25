@@ -87,6 +87,32 @@ export function knownDtakoCompId(...candidates: Array<string | null | undefined>
   return candidates.find(c => DTAKO_COMPS.some(d => d.compId === c)) ?? ''
 }
 
+/** `GET /restraint-api/viewer-comps` の応答から会社ID の配列を取り出す。形が違えば null。 */
+export function parseViewerComps(raw: unknown): string[] | null {
+  const comps = (raw as { comps?: unknown } | null)?.comps
+  if (!Array.isArray(comps) || !comps.every(c => typeof c === 'string')) return null
+  return comps
+}
+
+/**
+ * 閲覧する会社を決める。`allowed` はログイン中のアカウントが見られる会社 (relay の
+ * `viewer-comps`)。候補 (保存値等) のうち `allowed` にある最初の値、無ければ見られる会社が
+ * 1 社だけならその会社 (選ばせない)、それ以外は空文字 (選択欄を出す)。
+ * `allowed` が null (一覧の口が無い旧 relay) なら従来どおり `knownDtakoCompId`。
+ */
+export function pickViewerComp(allowed: readonly string[] | null, ...candidates: Array<string | null | undefined>): string {
+  if (allowed === null) return knownDtakoCompId(...candidates)
+  const saved = candidates.find(c => c != null && allowed.includes(c))
+  if (saved) return saved
+  return allowed.length === 1 ? allowed[0]! : ''
+}
+
+/** 会社の選択肢。`allowed` が null なら `DTAKO_COMP_OPTIONS` (固定の全社)。 */
+export function viewerCompOptions(allowed: readonly string[] | null): Array<{ label: string, value: string }> {
+  if (allowed === null) return DTAKO_COMP_OPTIONS
+  return allowed.map(id => ({ label: dtakoCompDisplay(id), value: id }))
+}
+
 /**
  * 給与大臣の会社コードの表示用ラベル (`0100 (有限会社 大石運輸)`、Refs #405)。
  *

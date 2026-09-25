@@ -82,10 +82,10 @@ interface CompMapBody {
   comps: Array<{ compId: string }>;
 }
 
-function makeDO(opts: { orgWide?: unknown; role?: string } = {}) {
+function makeDO(opts: { orgWide?: unknown; role?: string; active?: boolean; devComp?: string } = {}) {
   /** introspect の応答。**role は既定で admin** — 「admin でも通らない」を測るため。 */
   const introspect: Record<string, unknown> = {
-    active: true,
+    active: opts.active ?? true,
     tenant_id: OWN_TENANT,
     role: "role" in opts ? opts.role : "admin",
     email: VIEWER_EMAIL,
@@ -104,6 +104,7 @@ function makeDO(opts: { orgWide?: unknown; role?: string } = {}) {
         all: async () => ({ results: COMP_MAP_ROWS }),
       }),
     },
+    ...(opts.devComp ? { RESTRAINT_DEV_VIEWER_COMP: opts.devComp } : {}),
   };
   const ctx = {
     setWebSocketAutoResponse: () => {},
@@ -126,7 +127,18 @@ function makeDO(opts: { orgWide?: unknown; role?: string } = {}) {
         },
       }) as never,
     );
-  return { compMap };
+  /** `/restraint-api/viewer-comps` を叩く。**routing ヘッダは付けない** (会社を選ぶ前の口)。 */
+  const viewerComps = (bearer: string | null = "Bearer dummy-jwt") =>
+    relay.fetch(
+      new Request("https://relay.example/restraint-api/viewer-comps", {
+        headers: bearer ? { Authorization: bearer } : {},
+      }) as never,
+    );
+  return { compMap, viewerComps };
+}
+
+async function compsOf(res: Response): Promise<string[]> {
+  return ((await res.json()) as { comps: string[] }).comps;
 }
 
 /** ループの失敗メッセージ用。`undefined` は JSON.stringify が undefined を返す。 */
@@ -177,5 +189,49 @@ describe("viewer 経路の全社許可は introspect の org_wide だけ (Refs #
   it("org_wide に関わらず自 tenant の会社は従来どおり通る", async () => {
     const { compMap } = makeDO({ orgWide: MISSING });
     expect((await compMap(OWN_COMP)).status).toBe(200);
+  });
+});
+
+/**
+ * `GET /restraint-api/viewer-comps` — 会社を選ぶ前に「見られる会社」を返す口。
+ * ★ 測るのは **一覧に出る会社 = 認可が通る会社** (同じ `resolveViewerAccess` を通る) と、
+ * 認可と同じ fail-closed (Bearer 無し・introspect 不成立は 401)。
+ */
+describe("GET /restraint-api/viewer-comps", () => {
+  it("★ org_wide が無ければ自 tenant の会社だけ。routing ヘッダ無しで届く", async () => {
+    const { viewerComps } = makeDO({ orgWide: MISSING });
+    const res = await viewerComps();
+    expect(res.status).toBe(200);
+    expect(await compsOf(res)).toEqual([OWN_COMP]);
+  });
+
+  it("★ 陰性対照: org_wide が true でない 8 形すべてで、他社は一覧に出ない", async () => {
+    for (const v of NOT_TRUE) {
+      const { viewerComps } = makeDO({ orgWide: v });
+      expect(await compsOf(await viewerComps()), label(v)).toEqual([OWN_COMP]);
+    }
+  });
+
+  it("org_wide: true なら DTAKO_ACCOUNTS の全社 (昇順)", async () => {
+    const { viewerComps } = makeDO({ orgWide: true, role: "member" });
+    expect(await compsOf(await viewerComps())).toEqual([OWN_COMP, OTHER_COMP].sort());
+  });
+
+  it("★ 一覧に出る会社は認可も通り、出ない会社は 401 (同じ判定を通っている対照)", async () => {
+    const { viewerComps, compMap } = makeDO({ orgWide: MISSING });
+    const listed = await compsOf(await viewerComps());
+    for (const comp of listed) expect((await compMap(comp)).status, comp).toBe(200);
+    expect(listed).not.toContain(OTHER_COMP);
+    expect((await compMap(OTHER_COMP)).status).toBe(401);
+  });
+
+  it("★ Bearer 無し・introspect 不成立は 401 (認可と同じ fail-closed)", async () => {
+    expect((await makeDO().viewerComps(null)).status).toBe(401);
+    expect((await makeDO({ active: false }).viewerComps()).status).toBe(401);
+  });
+
+  it("dev の短絡 (RESTRAINT_DEV_VIEWER_COMP) は列挙した会社だけを返す (JWT 無しでも)", async () => {
+    const { viewerComps } = makeDO({ devComp: `${OTHER_COMP}, ${OWN_COMP}` });
+    expect(await compsOf(await viewerComps(null))).toEqual([OWN_COMP, OTHER_COMP].sort());
   });
 });

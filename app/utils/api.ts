@@ -15,7 +15,8 @@ import type {
   YTimeExportResponse,
 } from '~/types'
 import { createAuthFetch } from '@ippoan/auth-client'
-import { describeFetchThrow, describeResponseFailure, pickBodyReason } from '~/utils/api-error'
+import { caughtErrorStatus, describeFetchThrow, describeResponseFailure, pickBodyReason } from '~/utils/api-error'
+import { parseViewerComps } from '~/utils/dtako-comps'
 import type { Net780ArchiveResult } from '~/utils/net780-archive'
 import { normalizeNetprintRunOutcome, type NetprintRunInput, type NetprintRunOutcome } from '~/utils/netprint-run'
 import type { NetprintTargetPayloadItem } from '~/utils/netprint-targets'
@@ -72,6 +73,26 @@ export function initScraperRelay(url: string) {
  * refresh は無い — 呼び出し側は 401 をエラー表示で扱う。 */
 export function currentAccessToken(): string | null {
   return getAccessToken?.() ?? null
+}
+
+/**
+ * ログイン中のアカウントが見られる会社 (`GET /restraint-api/viewer-comps`)。
+ * 口が無い旧 relay (routing ヘッダ無しで 400、または 404) のときだけ null を返し、
+ * 呼び出し側は固定の全社 (`DTAKO_COMPS`) に戻る。それ以外の失敗 (401 等) は投げる —
+ * 全社に戻すと「選んだら 401」がまた起きるため、エラーとして画面に出す。
+ */
+export async function getViewerComps(): Promise<string[] | null> {
+  const token = currentAccessToken()
+  try {
+    return parseViewerComps(await $fetch('/restraint-api/viewer-comps', {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    }))
+  }
+  catch (e) {
+    const status = caughtErrorStatus(e)
+    if (status === 400 || status === 404) return null
+    throw e
+  }
 }
 
 /** フィルタを URLSearchParams に変換 */

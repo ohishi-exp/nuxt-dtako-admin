@@ -52,7 +52,7 @@ import {
   requireAlcTenantForwarder,
   type AlcTenantDataForwarder,
 } from "./alc-tenant-rpc";
-import { viewerCompIdsForTenant } from "./restraint-viewer-auth";
+import { VIEWER_COMPS_PATH, viewerCompIdsForTenant } from "./restraint-viewer-auth";
 import {
   driverMasterOverallStatus,
   runDriverMasterForComps,
@@ -105,6 +105,12 @@ export interface RelayWorkerEnv {
 export default {
   async fetch(request: Request, env: RelayWorkerEnv): Promise<Response> {
     const url = new URL(request.url);
+
+    // 会社を選ぶ前の口なので theearth routing ヘッダが無い。状態を持たない読み取りなので
+    // 固定キーの DO で受ける (認可の判定は DO の resolveViewerAccess が行う)。
+    if (url.pathname === VIEWER_COMPS_PATH) {
+      return env.RELAY.get(env.RELAY.idFromName("viewer-comps")).fetch(request);
+    }
 
     if (
       url.pathname.startsWith("/dvr-api/")
