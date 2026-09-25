@@ -3,11 +3,35 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { DTAKO_COMPS, dtakoCompDisplay, dtakoCompLabel, parseCompMap, payrollCompanyLabel, payrollCompanyLabelOf } from '../../app/utils/dtako-comps'
+import { DTAKO_COMP_OPTIONS, DTAKO_COMPS, dtakoCompDisplay, dtakoCompLabel, knownDtakoCompId, parseCompMap, payrollCompanyLabel, payrollCompanyLabelOf } from '../../app/utils/dtako-comps'
 
 describe('DTAKO_COMPS', () => {
   it('会社IDは重複しない (社員マスタの会社横断表示がキー衝突しない前提)', () => {
     expect(new Set(DTAKO_COMPS.map(c => c.compId)).size).toBe(DTAKO_COMPS.length)
+  })
+})
+
+describe('DTAKO_COMP_OPTIONS', () => {
+  it('会社ごとに「会社ID (会社名)」の選択肢。空文字の value は無い (USelect が拒むため)', () => {
+    expect(DTAKO_COMP_OPTIONS).toEqual([
+      { label: '27324455 (大石運輸倉庫)', value: '27324455' },
+      { label: '75700192 (北海大運)', value: '75700192' },
+    ])
+  })
+})
+
+describe('knownDtakoCompId', () => {
+  it('DTAKO_COMPS に載っている最初の候補を返す (前の候補が優先)', () => {
+    expect(knownDtakoCompId('75700192', '27324455')).toBe('75700192')
+  })
+
+  it('載っていない値・空・null は読み飛ばす', () => {
+    expect(knownDtakoCompId('1590', null, '', undefined, '27324455')).toBe('27324455')
+  })
+
+  it('陰性対照: どれも載っていなければ空文字 (呼び出し側は選択欄を出す)', () => {
+    expect(knownDtakoCompId('1590', '1000', null)).toBe('')
+    expect(knownDtakoCompId()).toBe('')
   })
 })
 

@@ -192,7 +192,7 @@ describe('会社ID の探し方', () => {
     ])
     expect(readViewerCompId(storage({ 'theearth-session': '{"compId":"27324455"}' }))).toBe('27324455')
     expect(readViewerCompId(storage({ 'restraint-viewer-comp': ' 27324455 ' }))).toBe('27324455')
-    expect(readViewerCompId(storage({ 'theearth-last-account': '{"compId":"999"}' }))).toBe('999')
+    expect(readViewerCompId(storage({ 'theearth-last-account': '{"compId":"75700192"}' }))).toBe('75700192')
   })
 
   it('空・壊れた JSON・compId 無しは次の候補へ落ちる', () => {
@@ -202,11 +202,19 @@ describe('会社ID の探し方', () => {
     }))).toBe('27324455')
     expect(readViewerCompId(storage({
       'theearth-session': '{壊れ',
-      'theearth-last-account': '{"compId":"999"}',
-    }))).toBe('999')
+      'theearth-last-account': '{"compId":"75700192"}',
+    }))).toBe('75700192')
     expect(readViewerCompId(storage({ 'theearth-session': '{"compId":123}' }))).toBe('')
     expect(readViewerCompId(storage({}))).toBe('')
     expect(readViewerCompId(null)).toBe('')
+  })
+
+  it('DTAKO_COMPS に無い会社ID (手入力時代の打ち間違い) は読み飛ばして次の候補へ', () => {
+    expect(readViewerCompId(storage({
+      'restraint-viewer-comp': '1590',
+      'theearth-last-account': '{"compId":"75700192"}',
+    }))).toBe('75700192')
+    expect(readViewerCompId(storage({ 'restraint-viewer-comp': '1590' }))).toBe('')
   })
 })
 
