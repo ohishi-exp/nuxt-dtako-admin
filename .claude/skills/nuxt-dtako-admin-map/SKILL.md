@@ -703,6 +703,12 @@ base/overtime/minwage-only/premium-base-only/excluded、旧 base/overtime 保存
   `GET wage-report?month=` (前月 tail 込みの計算行)、社員マスタ (下記) は
   `GET/PUT /restraint-api/employee-master`、勤務設定 (下記) は
   `GET/PUT /restraint-api/{work-schedule|holiday-work}`
+- **訴訟準備の取り込み `POST /restraint-api/litigation/alc-upload-driver`** (#1133 c1133-5):
+  `/restraint-api/*` で**唯一 role を見る口** (運行を消して入れ直す書き込みのため)。
+  保存済み theearth セッションを使わず毎回 introspect し、`viewerRole` が admin / payroll の
+  ときだけ `scraper-comp-{record.compId}` の `/cron/dtako/alc-upload-driver` へ転送する
+  (body の comp_id は捨てる)。dev の短絡 (`RESTRAINT_DEV_VIEWER_COMP`) は role を持たないので
+  ローカルでは 403 しか出ない — 成功経路は `test/do-litigation-alc-upload.test.ts` が担保
 
 ### 勤務設定 (D1、所定労働時間 + 休日出勤の承認、Refs #424 PR-C)
 
