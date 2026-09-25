@@ -9,6 +9,8 @@
  *    401「セッションが無効か期限切れ」を返し続け、再ログインしても消えなかった (本番で発生)
  * 3. ★ 候補が無ければ選択欄を出す (陰性対照 — 常に自動化されるわけではない)
  * 4. ★ 選んで「開始」を押すとその場で一覧を読む。「変更」で選択欄に戻れ、エラー帯も消える
+ * 5. ★ 選択肢と引き継ぎは「このアカウントが見られる会社」(relay の viewer-comps) に絞る。
+ *    見られる会社が 1 社なら選ばせずに決める。口が無い旧 relay (400) なら DTAKO_COMPS に戻る
  *
  * 型は `litigation-errors-tab.test.ts` をなぞる (`mockNuxtImport('useState', ...)` で
  * `useRestraintSession` の `lastAccount` を素通しする)。
@@ -40,6 +42,8 @@ mockNuxtImport('useState', () => (key: string, init?: () => unknown) => {
 const Page = (await import('~/pages/litigation.vue')).default
 
 let fetchMock: ReturnType<typeof vi.fn>
+/** `GET /restraint-api/viewer-comps` の応答 (既定は全社 = org_wide のアカウント)。 */
+let viewerCompsResponse: () => Promise<unknown>
 
 async function settle() {
   for (let i = 0; i < 5; i++) {
@@ -71,8 +75,10 @@ beforeEach(() => {
   localStorage.clear()
   nuxtState.clear()
   api.getDrivers.mockResolvedValue([])
+  viewerCompsResponse = async () => ({ comps: ['27324455', '75700192'] })
   fetchMock = vi.fn(async (url: string) => {
     if (url === '/restraint-api/litigation-cases') return { cases: [] }
+    if (url === '/restraint-api/viewer-comps') return viewerCompsResponse()
     throw new Error(`unexpected $fetch ${url}`)
   })
   vi.stubGlobal('$fetch', fetchMock)
@@ -150,8 +156,15 @@ describe('/litigation 会社の選択と変更', () => {
 
   it('★ 「変更」で選択欄に戻り、エラー帯も消える。選び直すと新しい会社で読み直す', async () => {
     localStorage.setItem('litigation-viewer-comp', '75700192')
-    fetchMock.mockImplementationOnce(async () => {
-      throw Object.assign(new Error('401'), { statusCode: 401, data: { error: 'セッションが無効か期限切れです。再ログインしてください' } })
+    // 一覧 (litigation-cases) の 1 回目だけ 401 にする
+    const base = fetchMock.getMockImplementation()!
+    let failed = false
+    fetchMock.mockImplementation(async (url: string, opts: unknown) => {
+      if (url === '/restraint-api/litigation-cases' && !failed) {
+        failed = true
+        throw Object.assign(new Error('401'), { statusCode: 401, data: { error: 'セッションが無効か期限切れです。再ログインしてください' } })
+      }
+      return base(url, opts)
     })
     const w = mountPage()
     await settle()
@@ -167,5 +180,59 @@ describe('/litigation 会社の選択と変更', () => {
     await settle()
     expect(loadedComps()).toEqual(['75700192', '27324455'])
     expect(w.text()).toContain('会社: 27324455 (大石運輸倉庫)')
+  })
+})
+
+describe('/litigation 見られる会社 (viewer-comps) による絞り込み', () => {
+  it('★ 見られる会社が 1 社なら、保存値が無くても選ばせずにその会社に決めて読む', async () => {
+    viewerCompsResponse = async () => ({ comps: ['75700192'] })
+    const w = mountPage()
+    await settle()
+    expect(hasViewerForm(w)).toBe(false)
+    expect(w.text()).toContain('会社: 75700192 (北海大運)')
+    expect(loadedComps()).toEqual(['75700192'])
+  })
+
+  it('★ 陰性対照: 見られない会社の保存値 (DTAKO_COMPS には載っている) は使わない', async () => {
+    viewerCompsResponse = async () => ({ comps: ['27324455'] })
+    localStorage.setItem('litigation-viewer-comp', '75700192')
+    const w = mountPage()
+    await settle()
+    expect(w.text()).toContain('会社: 27324455 (大石運輸倉庫)')
+    expect(loadedComps()).toEqual(['27324455'])
+  })
+
+  it('★ 見られる会社が 2 社で保存値が無ければ、選択欄にその 2 社だけを出す', async () => {
+    const w = mountPage()
+    await settle()
+    expect(hasViewerForm(w)).toBe(true)
+    expect(w.find('select').findAll('option').map(o => o.attributes('value'))).toEqual(['27324455', '75700192'])
+  })
+
+  it('見られる会社が 0 社なら、その旨を出す', async () => {
+    viewerCompsResponse = async () => ({ comps: [] })
+    const w = mountPage()
+    await settle()
+    expect(hasViewerForm(w)).toBe(true)
+    expect(w.text()).toContain('閲覧できる会社がありません')
+    expect(loadedComps()).toEqual([])
+  })
+
+  it('口が無い旧 relay (400) なら DTAKO_COMPS に戻り、保存値を従来どおり引き継ぐ', async () => {
+    viewerCompsResponse = async () => { throw Object.assign(new Error('400'), { statusCode: 400 }) }
+    localStorage.setItem('litigation-viewer-comp', '75700192')
+    const w = mountPage()
+    await settle()
+    expect(w.text()).toContain('会社: 75700192 (北海大運)')
+  })
+
+  it('★ 一覧が 401 なら会社を決めず、エラーを出す (決めた会社でまた 401 にしない)', async () => {
+    viewerCompsResponse = async () => { throw Object.assign(new Error('401'), { statusCode: 401 }) }
+    localStorage.setItem('litigation-viewer-comp', '27324455')
+    const w = mountPage()
+    await settle()
+    expect(hasViewerForm(w)).toBe(true)
+    expect(loadedComps()).toEqual([])
+    expect(w.text()).toContain('401')
   })
 })

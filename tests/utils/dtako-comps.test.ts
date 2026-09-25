@@ -3,7 +3,52 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { DTAKO_COMP_OPTIONS, DTAKO_COMPS, dtakoCompDisplay, dtakoCompLabel, knownDtakoCompId, parseCompMap, payrollCompanyLabel, payrollCompanyLabelOf } from '../../app/utils/dtako-comps'
+import { DTAKO_COMP_OPTIONS, DTAKO_COMPS, dtakoCompDisplay, dtakoCompLabel, knownDtakoCompId, parseCompMap, parseViewerComps, payrollCompanyLabel, payrollCompanyLabelOf, pickViewerComp, viewerCompOptions } from '../../app/utils/dtako-comps'
+
+describe('parseViewerComps', () => {
+  it('comps が文字列の配列ならそのまま返す', () => {
+    expect(parseViewerComps({ comps: ['27324455', '75700192'] })).toEqual(['27324455', '75700192'])
+    expect(parseViewerComps({ comps: [] })).toEqual([])
+  })
+
+  it('形が違えば null (配列でない・文字列以外が混ざる・null)', () => {
+    expect(parseViewerComps({ comps: 'x' })).toBeNull()
+    expect(parseViewerComps({ comps: ['27324455', 1] })).toBeNull()
+    expect(parseViewerComps(null)).toBeNull()
+  })
+})
+
+describe('pickViewerComp', () => {
+  it('★ 見られる会社が 1 社なら、保存値が無くてもその会社に決める (選ばせない)', () => {
+    expect(pickViewerComp(['75700192'])).toBe('75700192')
+    expect(pickViewerComp(['75700192'], null, '')).toBe('75700192')
+  })
+
+  it('★ 保存値が見られる会社に入っていればそれ (前の候補が優先)', () => {
+    expect(pickViewerComp(['27324455', '75700192'], '75700192', '27324455')).toBe('75700192')
+  })
+
+  it('★ 陰性対照: 見られない会社の保存値は使わない (1 社ならその会社、2 社以上なら空)', () => {
+    expect(pickViewerComp(['27324455'], '75700192')).toBe('27324455')
+    expect(pickViewerComp(['27324455', '75700192'], '1590')).toBe('')
+    expect(pickViewerComp([], '27324455')).toBe('')
+  })
+
+  it('一覧が取れない (null) ときは従来どおり DTAKO_COMPS に載る保存値', () => {
+    expect(pickViewerComp(null, '1590', '75700192')).toBe('75700192')
+    expect(pickViewerComp(null)).toBe('')
+  })
+})
+
+describe('viewerCompOptions', () => {
+  it('見られる会社だけを「会社ID (会社名)」で並べる', () => {
+    expect(viewerCompOptions(['75700192'])).toEqual([{ label: '75700192 (北海大運)', value: '75700192' }])
+  })
+
+  it('一覧が取れない (null) ときは DTAKO_COMP_OPTIONS', () => {
+    expect(viewerCompOptions(null)).toBe(DTAKO_COMP_OPTIONS)
+  })
+})
 
 describe('DTAKO_COMPS', () => {
   it('会社IDは重複しない (社員マスタの会社横断表示がキー衝突しない前提)', () => {

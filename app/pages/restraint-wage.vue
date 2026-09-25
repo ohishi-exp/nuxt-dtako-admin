@@ -175,7 +175,8 @@ import { buildSnapshotPayload, contentHash, WAGE_LOGIC_VERSION } from '~/utils/w
 import { describeApiError } from '~/utils/api-error'
 import { kyuyoAccessFromError, kyuyoAccessNotice, KYUYO_CONSEQUENCE_RANGE, KYUYO_CONSEQUENCE_WAGE, type KyuyoAccessState } from '~/utils/kyuyo-access'
 import type { MonthKosokuMark, WageRangeResponse } from '~/utils/wage-range-view'
-import { DTAKO_COMP_OPTIONS, knownDtakoCompId } from '~/utils/dtako-comps'
+import { pickViewerComp, viewerCompOptions } from '~/utils/dtako-comps'
+import { getViewerComps } from '~/utils/api'
 import {
   defaultRange,
   emptyRowsNote,
@@ -207,6 +208,8 @@ const {
 const VIEWER_COMP_STORAGE_KEY = 'restraint-viewer-comp'
 const viewerComp = ref('')
 const viewerCompInput = ref('')
+/** ログイン中のアカウントが見られる会社 (relay の viewer-comps)。null は一覧の口が無い旧 relay。 */
+const viewerComps = ref<string[] | null>(null)
 
 const session = computed<{ compId: string, userName: string } | null>(() =>
   theearthSession.value
@@ -640,7 +643,7 @@ async function loadArchiveMonths() {
 const TAB_STORE_KEY = 'restraint-wage:tab'
 const MONTH_STORE_KEY = 'restraint-wage:month'
 
-onMounted(() => {
+onMounted(async () => {
   const savedTab = sessionStorage.getItem(TAB_STORE_KEY)
   if (savedTab && TABS.some(t => t.key === savedTab)) {
     activeTab.value = savedTab as TabKey
@@ -653,10 +656,19 @@ onMounted(() => {
   }
   restoreSalaryImports()
   restoreSession()
-  // theearth 未ログインなら閲覧モードを準備: 前回の閲覧 comp → theearth ログイン
-  // 履歴の comp の順で prefill。どちらも無ければ (DTAKO_COMPS に無い値も) 会社選択パネルが出る。
+  // theearth 未ログインなら閲覧モードを準備: このアカウントが見られる会社 (viewer-comps) のうち
+  // 前回の閲覧 comp → theearth ログイン履歴の comp の順で prefill。見られる会社が 1 社ならそれに決める。
+  // 決まらなければ会社選択パネルが出る。決めた値は保存する — 粗利・手当 (readViewerCompId) もこれを借りる。
+  // ★ 下の loadArchiveMonths より先に決める (await の後に置く)。
   if (!theearthSession.value) {
-    viewerComp.value = knownDtakoCompId(localStorage.getItem(VIEWER_COMP_STORAGE_KEY), lastAccount().compId)
+    try {
+      viewerComps.value = await getViewerComps()
+      viewerComp.value = pickViewerComp(viewerComps.value, localStorage.getItem(VIEWER_COMP_STORAGE_KEY), lastAccount().compId)
+      if (viewerComp.value) localStorage.setItem(VIEWER_COMP_STORAGE_KEY, viewerComp.value)
+    }
+    catch (e) {
+      pageError.value = describeApiError(e)
+    }
     viewerCompInput.value = viewerComp.value
   }
   // watch(session) 側も同 flush で呼ぶが、in-flight ガードで 1 本に潰れる (Refs #451)。
@@ -5670,9 +5682,12 @@ watch([compMap, kyuyoSyncedKeys], () => {
             <span class="font-medium">閲覧する会社を選択</span>
           </template>
           <div class="flex items-center gap-2">
-            <USelect v-model="viewerCompInput" :items="DTAKO_COMP_OPTIONS" placeholder="会社を選択" class="w-64" />
+            <USelect v-model="viewerCompInput" :items="viewerCompOptions(viewerComps)" placeholder="会社を選択" class="w-64" />
             <UButton label="閲覧開始" :disabled="!viewerCompInput" @click="startViewer" />
           </div>
+          <p v-if="viewerComps?.length === 0" class="text-xs text-red-600 mt-2">
+            このアカウントで閲覧できる会社がありません (管理者に権限を確認してください)
+          </p>
           <p class="text-xs text-gray-500 mt-2">
             このページは取得済みアーカイブ・単価マスタ・給与比較の閲覧/設定のみで、theearth ログインは不要です
             (アーカイブの新規取得は /restraint-fetch で行います)。

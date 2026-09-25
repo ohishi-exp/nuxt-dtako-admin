@@ -79,6 +79,7 @@ function stubDollarFetch() {
   vi.stubGlobal('$fetch', vi.fn(async (url: string, opts: { method?: string, query?: Record<string, string> } = {}) => {
     const q = opts.query ?? {}
     calls.push({ via: '$fetch', method: opts.method ?? 'GET', url: `${url}?${new URLSearchParams(q).toString()}` })
+    if (url === '/restraint-api/viewer-comps') return { comps: ['27324455'] }
     if (url === '/restraint-api/litigation-cases') return { cases: [CASE] }
     if (url === '/restraint-api/kintai/unko-gaps') {
       if (q.month === '2025-01') return { gcp_etags_available: false, driver_cds_available: true, drivers: [] }

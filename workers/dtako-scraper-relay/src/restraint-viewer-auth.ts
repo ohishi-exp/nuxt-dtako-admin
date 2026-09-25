@@ -159,6 +159,10 @@ export function viewerCompIdsForTenant(
   return out;
 }
 
+/** 会社を選ぶ前に「見られる会社」を聞く口。会社が決まっていないので theearth routing
+ * ヘッダを要求せず、worker は固定キーの DO へ渡す (DO は `allowedViewerComps` の結果を返す)。 */
+export const VIEWER_COMPS_PATH = "/restraint-api/viewer-comps";
+
 /** ローカル開発専用の短絡 (`RESTRAINT_DEV_VIEWER_COMP`) が許可する comp_id 集合。
  * カンマ区切りで複数指定できる — 社員マスタの会社横断表示 (Refs #367) を
  * ローカルで検証するため。空要素・前後空白は落とす。 */

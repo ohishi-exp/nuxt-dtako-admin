@@ -20,7 +20,7 @@
  */
 import JSZip from 'jszip'
 import type { Driver } from '~/types'
-import { getDrivers, getYTimePreview, getDtakoOperationChanges, currentAccessToken } from '~/utils/api'
+import { getDrivers, getYTimePreview, getDtakoOperationChanges, currentAccessToken, getViewerComps } from '~/utils/api'
 import { caughtErrorStatus, describeCaughtError, describeResponseFailure } from '~/utils/api-error'
 import { downloadBlob } from '~/utils/download-blob'
 import {
@@ -75,7 +75,7 @@ import {
 } from '~/utils/litigation-changes'
 import { monthRange, type WageReportResponse } from '~/utils/restraint-wage-view'
 import { b64urlUtf8 } from '~/composables/useTheearthSession'
-import { DTAKO_COMP_OPTIONS, dtakoCompDisplay, knownDtakoCompId } from '~/utils/dtako-comps'
+import { dtakoCompDisplay, pickViewerComp, viewerCompOptions } from '~/utils/dtako-comps'
 import {
   addDriverCd,
   buildLitigationCaseSavePayload,
@@ -95,12 +95,14 @@ import {
 // 同じブラウザで restraint-wage.vue / restraint-fetch.vue 等 (theearth 系ページ) を
 // 既に使っていれば、その会社IDを引き継いで毎回の手入力を省く (RESTRAINT_VIEWER_COMP_STORAGE_KEY /
 // lastAccount の 2 段フォールバック)。**このページ自体は theearth にログインしない**ので
-// 引き継ぐのは値だけで、theearth セッションは使わない。引き継ぐのは DTAKO_COMPS に載っている値だけ
-// (knownDtakoCompId)。
+// 引き継ぐのは値だけで、theearth セッションは使わない。引き継ぐのはこのアカウントが見られる会社だけで、
+// 見られる会社が 1 社ならそれに決めて選ばせない (pickViewerComp)。
 const VIEWER_COMP_STORAGE_KEY = 'litigation-viewer-comp'
 const RESTRAINT_VIEWER_COMP_STORAGE_KEY = 'restraint-viewer-comp'
 const viewerComp = ref('')
 const viewerCompInput = ref('')
+/** ログイン中のアカウントが見られる会社 (relay の viewer-comps)。null は一覧の口が無い旧 relay。 */
+const viewerComps = ref<string[] | null>(null)
 const { lastAccount } = useRestraintSession()
 
 function startViewer() {
@@ -162,11 +164,19 @@ const drivers = ref<Driver[]>([])
 const selectedDriverId = ref('')
 
 onMounted(async () => {
-  viewerComp.value = knownDtakoCompId(
-    localStorage.getItem(VIEWER_COMP_STORAGE_KEY),
-    localStorage.getItem(RESTRAINT_VIEWER_COMP_STORAGE_KEY),
-    lastAccount().compId,
-  )
+  try {
+    viewerComps.value = await getViewerComps()
+    viewerComp.value = pickViewerComp(
+      viewerComps.value,
+      localStorage.getItem(VIEWER_COMP_STORAGE_KEY),
+      localStorage.getItem(RESTRAINT_VIEWER_COMP_STORAGE_KEY),
+      lastAccount().compId,
+    )
+  }
+  catch (e) {
+    // 見られる会社が分からないまま決めない (決めた会社で 401 になりうる)
+    pageError.value = describeCaughtError(e, '画面を再読み込みしてください')
+  }
   viewerCompInput.value = viewerComp.value
   // 他画面から引き継いだ値は次回のためにこのページ自身のキーにも書いておく
   if (viewerComp.value) localStorage.setItem(VIEWER_COMP_STORAGE_KEY, viewerComp.value)
@@ -830,9 +840,12 @@ function fmtDateTime(iso: string): string {
         <span class="font-medium">閲覧する会社を選択</span>
       </template>
       <div class="flex items-center gap-2">
-        <USelect v-model="viewerCompInput" :items="DTAKO_COMP_OPTIONS" placeholder="会社を選択" class="w-64" />
+        <USelect v-model="viewerCompInput" :items="viewerCompOptions(viewerComps)" placeholder="会社を選択" class="w-64" />
         <UButton label="開始" :disabled="!viewerCompInput" @click="startViewer" />
       </div>
+      <p v-if="viewerComps?.length === 0" class="text-xs text-red-600 mt-2">
+        このアカウントで閲覧できる会社がありません (管理者に権限を確認してください)
+      </p>
     </UCard>
 
     <template v-else>

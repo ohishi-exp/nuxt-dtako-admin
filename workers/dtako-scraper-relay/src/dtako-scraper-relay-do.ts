@@ -170,6 +170,7 @@ import {
   compIdsInSameTenant,
   devViewerCompIds,
   isR2OnlyRestraintPath,
+  VIEWER_COMPS_PATH,
 } from "./restraint-viewer-auth";
 import {
   buildKintaiDiff,
@@ -4290,6 +4291,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   // -------------------------------------------------------------------------
 
   private async handleRestraintApi(request: Request, url: URL): Promise<Response> {
+    // 会社が決まる前に呼ぶ口なので routing ヘッダを要求しない
+    if (url.pathname === VIEWER_COMPS_PATH && request.method === "GET") {
+      return this.handleViewerComps(request, url);
+    }
     const routing = resolveTheearthRouting(request.headers);
     if (!routing) {
       return dvrJsonError(400, "X-Theearth-Comp-Id / X-Theearth-User-B64 ヘッダが不正です");
@@ -4382,30 +4387,41 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     routing: TheearthRouting,
     url: URL,
   ): Promise<TheearthSessionRecord | null> {
-    const viewerRecord = (
-      role?: string,
-      email?: string,
-      orgWide?: boolean,
-    ): TheearthSessionRecord => ({
-      viewerRole: role,
-      viewerEmail: email,
-      viewerOrgWide: orgWide,
+    const access = await this.resolveViewerAccess(token, url);
+    if (!access?.comps.has(routing.compId)) return null;
+    return {
+      viewerRole: access.role,
+      viewerEmail: access.email,
+      viewerOrgWide: access.orgWide,
       token: token ?? "viewer",
       compId: routing.compId,
       userName: routing.userName,
       cookies: [],
       createdAt: Date.now(),
       expiresAt: Date.now(),
-    });
+    };
+  }
+
+  /**
+   * viewer 経路でこの呼び手が触れる会社の集合 (と閲覧用レコードに載せる身元)。
+   * **認可 (`authorizeRestraintViewer`) と一覧 (`GET /restraint-api/viewer-comps`) が
+   * 同じここを通る** — 一覧に出る会社 = 通る会社、を構造で揃えるため。
+   * DTAKO_ACCOUNTS 未設定/不正・introspect 不成立は null (fail-closed)。
+   */
+  private async resolveViewerAccess(
+    token: string | null,
+    url: URL,
+  ): Promise<{ comps: Set<string>; role?: string; email?: string; orgWide?: boolean } | null> {
     // ローカル開発専用の短絡 (Env.RESTRAINT_DEV_VIEWER_COMP のコメント参照)。
     // nuxt dev は stagingTenantId バイパスで auth セッションを持たないため、
     // JWT 無しでも許可する (token 必須チェックより先に判定)。
     if (this.env.RESTRAINT_DEV_VIEWER_COMP) {
-      // 全社許可は与えない (第 3 引数を省く) — dev で触れる会社は
+      // 全社許可は与えない (orgWide を載せない) — dev で触れる会社は
       // RESTRAINT_DEV_VIEWER_COMP が明示した comp だけ、が短絡の意図。
-      return devViewerCompIds(this.env.RESTRAINT_DEV_VIEWER_COMP).has(routing.compId)
-        ? viewerRecord(undefined, this.env.RESTRAINT_DEV_VIEWER_EMAIL)
-        : null;
+      return {
+        comps: devViewerCompIds(this.env.RESTRAINT_DEV_VIEWER_COMP),
+        email: this.env.RESTRAINT_DEV_VIEWER_EMAIL,
+      };
     }
     if (!token) return null;
     const result = await this.introspect(token, `https://${url.host}`);
@@ -4421,9 +4437,20 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // **role は見ない** — 理由は restraint-viewer-auth.ts の module docs
     // 「会社の軸が role を見るのをやめた理由」。org_wide 欠落・型崩れは
     // fail-closed (isAllCompsViewer が真の boolean の true だけを通す)。
-    return allowedViewerComps(accounts, result.tenant_id, result.org_wide).has(routing.compId)
-      ? viewerRecord(result.role, result.email, result.org_wide)
-      : null;
+    return {
+      comps: allowedViewerComps(accounts, result.tenant_id, result.org_wide),
+      role: result.role,
+      email: result.email,
+      orgWide: result.org_wide,
+    };
+  }
+
+  /** `GET /restraint-api/viewer-comps` — 会社を選ぶ前に「見られる会社」を返す。
+   * 返すのは comp_id だけ (DTAKO_ACCOUNTS の資格情報は出さない)。 */
+  private async handleViewerComps(request: Request, url: URL): Promise<Response> {
+    const access = await this.resolveViewerAccess(extractBearerToken(request.headers), url);
+    if (!access) return dvrJsonError(401, "セッションが無効か期限切れです。再ログインしてください");
+    return Response.json({ comps: [...access.comps].sort() }, { headers: { "Cache-Control": "no-store" } });
   }
 
   private async dispatchRestraintApi(request: Request, url: URL, routing: TheearthRouting): Promise<Response> {
