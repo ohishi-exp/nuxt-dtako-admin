@@ -91,15 +91,29 @@ import {
 
 // 閲覧する会社ID (restraint-wage.vue の viewer 経路 (Refs #272) に倣う)。
 // このページの relay route は theearth に触らないので theearth ログインは不要。
+// 同じブラウザで restraint-wage.vue / restraint-fetch.vue 等 (theearth 系ページ) を
+// 既に使っていれば、その会社IDを引き継いで毎回の手入力を省く (RESTRAINT_VIEWER_COMP_STORAGE_KEY /
+// lastAccount の 2 段フォールバック)。**このページ自体は theearth にログインしない**ので
+// 引き継ぐのは値だけで、theearth セッションは使わない。
 const VIEWER_COMP_STORAGE_KEY = 'litigation-viewer-comp'
+const RESTRAINT_VIEWER_COMP_STORAGE_KEY = 'restraint-viewer-comp'
 const viewerComp = ref('')
 const viewerCompInput = ref('')
+const { lastAccount } = useRestraintSession()
 
 function startViewer() {
   const comp = viewerCompInput.value.trim()
   if (!comp) return
   viewerComp.value = comp
   if (import.meta.client) localStorage.setItem(VIEWER_COMP_STORAGE_KEY, comp)
+}
+
+/** 会社IDの選択に戻る (Refs 誤選択時の変更手段)。今の値は入力欄に残し、直しやすくする。 */
+function changeViewer() {
+  viewerComp.value = ''
+  cases.value = []
+  casesLoaded.value = false
+  openCaseId.value = null
 }
 
 /** restraint-wage.vue の authHeaders と同じ組み立て。 */
@@ -143,8 +157,12 @@ const drivers = ref<Driver[]>([])
 const selectedDriverId = ref('')
 
 onMounted(async () => {
-  viewerComp.value = localStorage.getItem(VIEWER_COMP_STORAGE_KEY) || ''
+  viewerComp.value = localStorage.getItem(VIEWER_COMP_STORAGE_KEY)
+    || localStorage.getItem(RESTRAINT_VIEWER_COMP_STORAGE_KEY)
+    || lastAccount().compId
   viewerCompInput.value = viewerComp.value
+  // 他画面から引き継いだ値は次回のためにこのページ自身のキーにも書いておく
+  if (viewerComp.value) localStorage.setItem(VIEWER_COMP_STORAGE_KEY, viewerComp.value)
   if (viewerComp.value) loadCases()
   try {
     drivers.value = await getDrivers()
@@ -803,7 +821,10 @@ function fmtDateTime(iso: string): string {
 
     <template v-else>
       <div class="flex items-center justify-between mb-4 print:hidden">
-        <span class="text-sm text-gray-500">会社ID: {{ viewerComp }}</span>
+        <span class="text-sm text-gray-500">
+          会社ID: {{ viewerComp }}
+          <UButton icon="i-lucide-pencil" label="変更" variant="link" size="xs" class="ml-1" @click="changeViewer" />
+        </span>
         <UButton icon="i-lucide-plus" label="新規作成" size="sm" @click="startNewCase" />
       </div>
 
