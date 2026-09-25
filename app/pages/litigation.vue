@@ -5,7 +5,14 @@
  * 「何月から何月まで・どの乗務員の勤務を記録するか」を選び、案件として保存して
  * 開き直せる土台。案件を「開く」と詳細にタブが出る。「出力」タブ (#c1133-2) は
  * 案件の乗務員 × 期間ぶんの Y時間 Excel を作って 1 つの ZIP にまとめる。
- * エラー検知・変更記録のタブは後続 PR (#c1133-5 / -6) が足す。
+ * 「エラー」タブ (#c1133-5) は乗務員 × 月ごとに 4 つの検知 (alc の運行 0 件 /
+ * Y時間の欠け / 取り込み漏れ候補 / 最低賃金の不変条件) を並べ、alc に運行が無い月は
+ * theearth から取り込み直すボタンを出す。「印刷」は案件の概要・出力の結果・エラーの表を
+ * 1 つの紙面にする。変更記録のタブは後続 PR (#c1133-6) が足す。
+ *
+ * ★ エラータブは wage-report を**読むだけ**。最低賃金チェックの自動保存
+ * (`POST /restraint-api/wage-snapshot`) は呼ばない (restraint-wage.vue のタブや
+ * computed も流用しない)。
  *
  * 認証は restraint-wage.vue の viewer 経路 (Refs #272) と同型: このページの
  * relay route は theearth に触らない (D1 のみ) ので、theearth ログインは不要。
@@ -13,8 +20,8 @@
  */
 import JSZip from 'jszip'
 import type { Driver } from '~/types'
-import { getDrivers, currentAccessToken } from '~/utils/api'
-import { describeCaughtError, describeResponseFailure } from '~/utils/api-error'
+import { getDrivers, getYTimePreview, currentAccessToken } from '~/utils/api'
+import { caughtErrorStatus, describeCaughtError, describeResponseFailure } from '~/utils/api-error'
 import { downloadBlob } from '~/utils/download-blob'
 import {
   buildLitigationOutputChunks,
@@ -27,11 +34,36 @@ import {
   type LitigationOutputResult,
   type LitigationOutputStatus,
 } from '~/utils/litigation-output'
+import {
+  buildLitigationErrorRows,
+  classifyLitigationImport,
+  countLitigationErrorCells,
+  foldYTimeDaysByMonth,
+  litigationAlcOpsFailure,
+  litigationChunkMonths,
+  litigationChunkWarnings,
+  litigationDriverMonthKey,
+  litigationErrorsCsv,
+  litigationImportRanges,
+  litigationMonthBounds,
+  LITIGATION_CHECK_KEYS,
+  LITIGATION_CHECK_LABELS,
+  LITIGATION_CHECK_STATE_LABELS,
+  LITIGATION_ERRORS_CSV_FILENAME,
+  type LitigationAlcOpsEntry,
+  type LitigationCheckState,
+  type LitigationErrorRow,
+  type LitigationFetched,
+  type LitigationImportOutcome,
+} from '~/utils/litigation-errors'
+import { parseKintaiUnkoGaps, type KintaiUnkoGaps } from '~/utils/kintai-unko-gaps'
+import { monthRange, type WageReportResponse } from '~/utils/restraint-wage-view'
 import { b64urlUtf8 } from '~/composables/useTheearthSession'
 import {
   addDriverCd,
   buildLitigationCaseSavePayload,
   emptyLitigationCaseForm,
+  LITIGATION_CASE_MAX_MONTHS,
   litigationCaseMonthCount,
   litigationCaseToForm,
   removeDriverCd,
@@ -220,6 +252,7 @@ async function deleteCase(entry: LitigationCaseRecord) {
 // restraint-wage.vue の自前 TABS / activeTab と同じ流儀 (UTabs は使わない)。
 const TABS = [
   { key: 'output', label: '出力' },
+  { key: 'errors', label: 'エラー' },
 ] as const
 type TabKey = typeof TABS[number]['key']
 const activeTab = ref<TabKey>('output')
@@ -321,16 +354,20 @@ async function buildOutputZip() {
       if (bytes) files.push({ filename: chunk.filename, bytes })
     }
     outputCurrent.value = -1
-    if (files.length === 0) {
-      outputZipError.value = 'ZIP に入れる Excel が 1 冊もできませんでした (下の表の理由を見てください)'
-      return
-    }
     const zip = new JSZip()
     for (const f of files) zip.file(f.filename, f.bytes)
+    // エラー一覧 (エラータブの今の表) も入れる。Y時間の欠けはいま作った結果で埋まり、
+    // エラータブで検知を実行していない列は「未実行」のまま出る (0 件とは書かない)
+    zip.file(LITIGATION_ERRORS_CSV_FILENAME, errorsCsvText())
     const blob = await zip.generateAsync({ type: 'blob' })
     const zipName = litigationZipFilename(target.name, new Date())
     downloadBlob(blob, zipName)
-    outputZipMessage.value = `${zipName} を保存しました (${files.length} / ${chunks.length} 冊)`
+    if (files.length === 0) {
+      // Excel が無くてもエラー一覧は成果物なので保存はする。ただし成功の見た目にしない
+      outputZipError.value = `Excel が 1 冊もできませんでした (下の表の理由を見てください)。${zipName} には ${LITIGATION_ERRORS_CSV_FILENAME} だけを入れて保存しました`
+      return
+    }
+    outputZipMessage.value = `${zipName} を保存しました (Excel ${files.length} / ${chunks.length} 冊 + ${LITIGATION_ERRORS_CSV_FILENAME})`
   }
   catch (e) {
     outputZipError.value = `ZIP を組めませんでした: ${describeCaughtError(e, OUTPUT_RETRY)}`
@@ -340,6 +377,229 @@ async function buildOutputZip() {
     outputCurrent.value = -1
     outputFinished.value = true
   }
+}
+
+// --- エラータブ: 乗務員 × 月ごとに 4 つの検知を並べる (litigation-errors.ts の doc 参照) ---
+const caseMonths = computed<string[]>(() =>
+  openCase.value ? monthRange(openCase.value.fromMonth, openCase.value.toMonth, LITIGATION_CASE_MAX_MONTHS) : [])
+
+/** キー `乗務員CD|YYYY-MM` */
+const errAlcOps = ref(new Map<string, LitigationAlcOpsEntry>())
+/** キー `乗務員CD|YYYY-MM` */
+const errUnkoGaps = ref(new Map<string, LitigationFetched<KintaiUnkoGaps>>())
+/** キー `YYYY-MM` (会社全体を 1 回で読む) */
+const errWageReports = ref(new Map<string, LitigationFetched<WageReportResponse>>())
+const errorsRunning = ref(false)
+const errorsFinished = ref(false)
+const errorsProgress = ref<{ done: number, total: number, label: string } | null>(null)
+const errorsOnlyAttention = ref(false)
+/** 別の案件を開いたら、走行中の検知の書き込みを捨てる世代 */
+let errorsEpoch = 0
+
+watch(() => [openCase.value?.caseId, openCase.value?.updatedAt], () => {
+  errorsEpoch++
+  errAlcOps.value = new Map()
+  errUnkoGaps.value = new Map()
+  errWageReports.value = new Map()
+  errorsRunning.value = false
+  errorsFinished.value = false
+  errorsProgress.value = null
+  importResults.value = new Map()
+})
+
+const errorRows = computed<LitigationErrorRow[]>(() => buildLitigationErrorRows({
+  driverCds: openCase.value?.driverCds ?? [],
+  months: caseMonths.value,
+  chunks: outputChunks.value,
+  results: outputResults.value,
+  alcOps: errAlcOps.value,
+  unkoGaps: errUnkoGaps.value,
+  wageReports: errWageReports.value,
+}))
+const errorCounts = computed(() => countLitigationErrorCells(errorRows.value))
+const chunkWarnings = computed(() => litigationChunkWarnings(outputChunks.value, outputResults.value))
+const shownErrorRows = computed(() => errorsOnlyAttention.value
+  ? errorRows.value.filter(r => LITIGATION_CHECK_KEYS.some(k => r.cells[k].state === 'ng' || r.cells[k].state === 'unknown'))
+  : errorRows.value)
+
+const ERRORS_RETRY = '「検知を実行」を押してやり直してください'
+
+/** 区切り 1 つぶんの Y時間 (JSON) を読み、月ごとの勤務日数に畳む。失敗は各月へ配る。 */
+async function loadAlcOps(epoch: number, driverCd: string, from: string, to: string, months: string[]) {
+  let entries: [string, LitigationAlcOpsEntry][]
+  try {
+    const res = await getYTimePreview(driverCd, from, to)
+    const days = foldYTimeDaysByMonth(res.rows, months)
+    entries = months.map(m => [m, { ok: true, days: days[m]! }])
+  }
+  catch (e) {
+    const entry = litigationAlcOpsFailure(caughtErrorStatus(e), describeCaughtError(e, ERRORS_RETRY))
+    entries = months.map(m => [m, entry])
+  }
+  if (epoch !== errorsEpoch) return
+  for (const [m, entry] of entries) errAlcOps.value.set(litigationDriverMonthKey(driverCd, m), entry)
+}
+
+async function loadUnkoGaps(epoch: number, driverCd: string, month: string) {
+  let entry: LitigationFetched<KintaiUnkoGaps>
+  try {
+    const res = await $fetch<unknown>('/restraint-api/kintai/unko-gaps', {
+      headers: authHeaders(),
+      query: { month, driver_cd: driverCd },
+    })
+    entry = { ok: true, value: parseKintaiUnkoGaps(res) }
+  }
+  catch (e) {
+    entry = { ok: false, reason: describeCaughtError(e, ERRORS_RETRY) }
+  }
+  if (epoch !== errorsEpoch) return
+  errUnkoGaps.value.set(litigationDriverMonthKey(driverCd, month), entry)
+}
+
+/** 最低賃金の不変条件は GCP の拘束で計算した wage-report にだけ付く (Refs #1123)。
+ * **読むだけ** — wage-snapshot (最低賃金チェックの自動保存) は呼ばない。 */
+async function loadWageReport(epoch: number, month: string) {
+  let entry: LitigationFetched<WageReportResponse>
+  try {
+    const res = await $fetch<WageReportResponse>('/restraint-api/wage-report', {
+      headers: authHeaders(),
+      query: { month, source: 'gcp' },
+    })
+    entry = { ok: true, value: res }
+  }
+  catch (e) {
+    entry = { ok: false, reason: describeCaughtError(e, ERRORS_RETRY) }
+  }
+  if (epoch !== errorsEpoch) return
+  errWageReports.value.set(month, entry)
+}
+
+/** 4 つの検知を**直列に**回す (wage-report は 1 か月 15〜64 秒かかり、同じ DO を奪い合わせない)。
+ * 軽いものから先に回し、最後に wage-report を月ごとに読む。 */
+async function runErrorChecks() {
+  const target = openCase.value
+  if (!target || errorsRunning.value) return
+  const epoch = ++errorsEpoch
+  const months = caseMonths.value
+  const steps: { label: string, run: () => Promise<void> }[] = [
+    ...outputChunks.value.map(c => ({
+      label: `alc の運行 ${c.driverCd} ${c.label}`,
+      run: () => loadAlcOps(epoch, c.driverCd, c.from, c.to, litigationChunkMonths(c)),
+    })),
+    ...target.driverCds.flatMap(cd => months.map(m => ({
+      label: `取り込み漏れ候補 ${cd} ${m}`,
+      run: () => loadUnkoGaps(epoch, cd, m),
+    }))),
+    ...months.map(m => ({
+      label: `最低賃金の不変条件 ${m} (1 か月 15〜64 秒)`,
+      run: () => loadWageReport(epoch, m),
+    })),
+  ]
+  errAlcOps.value = new Map()
+  errUnkoGaps.value = new Map()
+  errWageReports.value = new Map()
+  errorsRunning.value = true
+  errorsFinished.value = false
+  errorsProgress.value = { done: 0, total: steps.length, label: '' }
+  try {
+    for (const [i, step] of steps.entries()) {
+      if (epoch !== errorsEpoch) return
+      errorsProgress.value = { done: i, total: steps.length, label: step.label }
+      await step.run()
+    }
+    if (epoch === errorsEpoch) errorsProgress.value = { done: steps.length, total: steps.length, label: '' }
+  }
+  finally {
+    if (epoch === errorsEpoch) {
+      errorsRunning.value = false
+      errorsFinished.value = true
+    }
+  }
+}
+
+// --- 取り込みボタン (alc に運行が 0 件の月): theearth から乗務員 × 期間で取り込み直す ---
+/** 走行中の行 (キー `乗務員CD|YYYY-MM`)。**同時に 1 行だけ** (theearth のセッションロック) */
+const importingKey = ref<string | null>(null)
+/** 行ごとの取り込み結果 (期間 1 本 = 1 件) */
+const importResults = ref(new Map<string, { from: string, to: string, outcome: LitigationImportOutcome }[]>())
+const IMPORT_RETRY = '「theearth から取り込む」を押してやり直してください'
+
+async function postImport(driverCd: string, range: { from: string, to: string }): Promise<LitigationImportOutcome> {
+  try {
+    const res = await fetch('/restraint-api/litigation/alc-upload-driver', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ driver_cd: driverCd, from: range.from, to: range.to }),
+    })
+    const body = await res.clone().json().catch(() => null)
+    const reason = res.ok ? '' : await describeResponseFailure(res, IMPORT_RETRY)
+    return classifyLitigationImport(res.status, body, reason)
+  }
+  catch (e) {
+    return classifyLitigationImport(null, null, describeCaughtError(e, IMPORT_RETRY))
+  }
+}
+
+/**
+ * 運行月とその翌月 (読取日) を **1 か月ずつ直列に** 取り込む (relay の期間上限 31 日、
+ * theearth のセッションロック)。1 本でも取り込めたら、その行の alc の運行と取り込み漏れ候補を
+ * 読み直す。**取り込み直後は CSV 分割が終わるまで運行が見えないことがある**ので、0 件のまま
+ * でも取り込みが失敗したとは限らない (画面の注記で伝える)。
+ */
+async function importMonth(row: LitigationErrorRow) {
+  if (importingKey.value) return
+  const key = litigationDriverMonthKey(row.driverCd, row.month)
+  const epoch = errorsEpoch
+  importingKey.value = key
+  const done: { from: string, to: string, outcome: LitigationImportOutcome }[] = []
+  importResults.value.set(key, [])
+  try {
+    for (const range of litigationImportRanges(row.month)) {
+      const outcome = await postImport(row.driverCd, range)
+      done.push({ ...range, outcome })
+      importResults.value.set(key, [...done])
+      // 権限が無いなら翌月も同じ答えなので呼ばない
+      if (outcome.kind === 'forbidden') break
+    }
+    if (done.some(d => d.outcome.kind === 'ok')) {
+      const { from, to } = litigationMonthBounds(row.month)
+      await loadAlcOps(epoch, row.driverCd, from, to, [row.month])
+      await loadUnkoGaps(epoch, row.driverCd, row.month)
+    }
+  }
+  finally {
+    importingKey.value = null
+  }
+}
+
+/** エラー一覧 CSV (ZIP に入れる)。氏名は乗務員一覧に居る人だけ、居なければ空欄 */
+function errorsCsvText(): string {
+  return litigationErrorsCsv(
+    errorRows.value,
+    cd => drivers.value.find(d => d.driver_cd === cd)?.driver_name ?? '',
+    chunkWarnings.value,
+  )
+}
+
+const CHECK_STATE_CLASS: Record<LitigationCheckState, string> = {
+  ng: 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300',
+  ok: 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300',
+  unknown: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',
+  pending: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400',
+}
+const IMPORT_KIND_CLASS: Record<LitigationImportOutcome['kind'], string> = {
+  ok: 'text-green-700 dark:text-green-400',
+  empty: 'text-gray-600 dark:text-gray-400',
+  forbidden: 'text-red-700 dark:text-red-400',
+  error: 'text-red-700 dark:text-red-400',
+}
+
+// --- 印刷: 案件の概要 + 出力の結果 + エラーの表を 1 つの紙面に ---
+const printedAt = ref('')
+function printCase() {
+  printedAt.value = fmtDateTime(new Date().toISOString())
+  // printedAt の描画を待ってから開く
+  nextTick(() => window.print())
 }
 
 /** 状態の短い名前。**0 件・未登録・失敗を同じ見た目にしない** (map skill「PR の基準」(7)) */
@@ -365,7 +625,7 @@ function fmtDateTime(iso: string): string {
 
 <template>
   <div>
-    <div class="flex items-center justify-between mb-6">
+    <div class="flex items-center justify-between mb-6 print:hidden">
       <h2 class="text-xl font-bold">訴訟準備</h2>
       <UButton
         v-if="viewerComp"
@@ -378,10 +638,10 @@ function fmtDateTime(iso: string): string {
       />
     </div>
 
-    <UAlert v-if="pageError" color="error" :title="pageError" class="mb-4" />
+    <UAlert v-if="pageError" color="error" :title="pageError" class="mb-4 print:hidden" />
 
     <!-- 閲覧する会社ID の指定 (Refs #272 と同型: theearth ログイン不要) -->
-    <UCard v-if="!viewerComp" class="max-w-md mb-4">
+    <UCard v-if="!viewerComp" class="max-w-md mb-4 print:hidden">
       <template #header>
         <span class="font-medium">閲覧する会社IDを指定</span>
       </template>
@@ -392,13 +652,13 @@ function fmtDateTime(iso: string): string {
     </UCard>
 
     <template v-else>
-      <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center justify-between mb-4 print:hidden">
         <span class="text-sm text-gray-500">会社ID: {{ viewerComp }}</span>
         <UButton icon="i-lucide-plus" label="新規作成" size="sm" @click="startNewCase" />
       </div>
 
       <!-- 新規作成/編集フォーム -->
-      <div v-if="showForm" class="mb-4 p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg space-y-4">
+      <div v-if="showForm" class="mb-4 p-4 print:hidden bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg space-y-4">
         <h3 class="text-sm font-medium">{{ editingCaseId ? '案件を編集' : '新規案件' }}</h3>
 
         <div>
@@ -465,7 +725,7 @@ function fmtDateTime(iso: string): string {
       </div>
 
       <!-- 案件一覧 -->
-      <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
+      <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden print:hidden">
         <table class="w-full text-sm">
           <thead>
             <tr class="border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50">
@@ -517,7 +777,7 @@ function fmtDateTime(iso: string): string {
       </div>
 
       <!-- 開いた案件の詳細 (タブ) -->
-      <div v-if="openCase" class="mt-6 space-y-4">
+      <div v-if="openCase" class="mt-6 space-y-4 print:hidden">
         <div class="flex items-center justify-between">
           <h3 class="text-lg font-bold">
             {{ openCase.name }}
@@ -525,7 +785,10 @@ function fmtDateTime(iso: string): string {
               {{ openCase.fromMonth }} 〜 {{ openCase.toMonth }} / {{ openCase.driverCds.length }}名
             </span>
           </h3>
-          <UButton icon="i-lucide-x" label="閉じる" variant="ghost" size="sm" @click="closeCaseDetail" />
+          <div class="flex items-center gap-1">
+            <UButton icon="i-lucide-printer" label="印刷" variant="soft" size="sm" data-testid="litigation-print" @click="printCase" />
+            <UButton icon="i-lucide-x" label="閉じる" variant="ghost" size="sm" @click="closeCaseDetail" />
+          </div>
         </div>
 
         <div class="flex flex-wrap items-center gap-3">
@@ -545,6 +808,7 @@ function fmtDateTime(iso: string): string {
             案件の乗務員 × 期間ぶんの Y時間 Excel (京都ソフト案件のテンプレ) を作り、1 つの ZIP で保存します。
             1 冊 = 乗務員 1 名 × 最大 12 か月 (開始月から 12 か月ごとに区切ります)。
             1 冊あたり 5〜15 秒かかります。運行 0 件・alc に未登録・失敗の冊は ZIP に入れず、下の表に残します。
+            ZIP には {{ LITIGATION_ERRORS_CSV_FILENAME }} (エラータブの表) も入れます — エラータブで検知を実行していない列は「未実行」と出ます。
           </p>
 
           <div class="flex items-center gap-3 flex-wrap">
@@ -613,7 +877,187 @@ function fmtDateTime(iso: string): string {
             </table>
           </div>
         </div>
+
+        <!-- エラー: 乗務員 × 月ごとに 4 つの検知 (litigation-errors.ts) -->
+        <div v-if="activeTab === 'errors'" data-testid="litigation-errors" class="space-y-3">
+          <p class="text-sm text-gray-600 dark:text-gray-400">
+            乗務員 × 月ごとに、alc の運行が 0 件か・Y時間に書けなかった日があるか・取り込み漏れの候補があるか・
+            最低賃金の不変条件 (条件1〜3、拘束は GCP) が崩れていないかを並べます。
+            「判定できない」は調べたが材料が取れなかった月で、異常なしではありません。
+            Y時間の欠けは出力タブで「ZIP を作る」と埋まります。最低賃金の不変条件は 1 か月 15〜64 秒かかります (読むだけで保存はしません)。
+          </p>
+
+          <div class="flex items-center gap-3 flex-wrap">
+            <UButton
+              icon="i-lucide-search-check"
+              label="検知を実行"
+              :loading="errorsRunning"
+              :disabled="errorsRunning || importingKey !== null || errorRows.length === 0"
+              data-testid="litigation-errors-run"
+              @click="runErrorChecks"
+            />
+            <span v-if="errorsProgress" class="text-sm text-gray-600 dark:text-gray-400" data-testid="litigation-errors-progress">
+              {{ errorsProgress.done }} / {{ errorsProgress.total }}
+              <template v-if="errorsRunning && errorsProgress.label">— {{ errorsProgress.label }}</template>
+              <template v-else-if="errorsFinished">完了</template>
+            </span>
+            <label class="text-sm text-gray-600 dark:text-gray-400 flex items-center gap-1">
+              <input v-model="errorsOnlyAttention" type="checkbox">
+              異常あり・判定できないがある行だけ
+            </label>
+          </div>
+
+          <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600 dark:text-gray-400" data-testid="litigation-errors-summary">
+            <span v-for="k in LITIGATION_CHECK_KEYS" :key="k">
+              {{ LITIGATION_CHECK_LABELS[k] }}: 異常あり {{ errorCounts[k].ng }} / 異常なし {{ errorCounts[k].ok }} / 判定できない {{ errorCounts[k].unknown }} / 未実行 {{ errorCounts[k].pending }}
+            </span>
+          </div>
+
+          <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-x-auto">
+            <table class="w-full text-sm" data-testid="litigation-errors-table">
+              <thead>
+                <tr class="border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50">
+                  <th class="text-left px-3 py-2 font-medium">乗務員</th>
+                  <th class="text-left px-3 py-2 font-medium">月</th>
+                  <th v-for="k in LITIGATION_CHECK_KEYS" :key="k" class="text-left px-3 py-2 font-medium">{{ LITIGATION_CHECK_LABELS[k] }}</th>
+                  <th class="text-left px-3 py-2 font-medium">取り込み</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="shownErrorRows.length === 0">
+                  <td :colspan="LITIGATION_CHECK_KEYS.length + 3" class="px-3 py-6 text-center text-gray-500">
+                    {{ errorRows.length === 0 ? '行がありません (期間か乗務員が空です)' : '異常あり・判定できないがある行はありません' }}
+                  </td>
+                </tr>
+                <tr
+                  v-for="row in shownErrorRows"
+                  :key="`${row.driverCd}|${row.month}`"
+                  class="border-b border-gray-100 dark:border-gray-800 align-top"
+                  :data-row="`${row.driverCd}|${row.month}`"
+                >
+                  <td class="px-3 py-2 whitespace-nowrap">{{ driverLabel(row.driverCd) }} ({{ row.driverCd }})</td>
+                  <td class="px-3 py-2 whitespace-nowrap">{{ row.month }}</td>
+                  <td v-for="k in LITIGATION_CHECK_KEYS" :key="k" class="px-3 py-2 min-w-40" :data-check="k">
+                    <span class="text-xs rounded px-2 py-0.5 whitespace-nowrap" :class="CHECK_STATE_CLASS[row.cells[k].state]">
+                      {{ LITIGATION_CHECK_STATE_LABELS[row.cells[k].state] }}
+                    </span>
+                    <div class="text-xs text-gray-600 dark:text-gray-400 mt-1 break-all">{{ row.cells[k].message }}</div>
+                  </td>
+                  <td class="px-3 py-2 min-w-48">
+                    <UButton
+                      v-if="row.canImport"
+                      icon="i-lucide-download"
+                      label="theearth から取り込む"
+                      size="xs"
+                      variant="soft"
+                      :loading="importingKey === `${row.driverCd}|${row.month}`"
+                      :disabled="importingKey !== null || errorsRunning"
+                      data-testid="litigation-import"
+                      @click="importMonth(row)"
+                    />
+                    <div
+                      v-for="r in importResults.get(`${row.driverCd}|${row.month}`) ?? []"
+                      :key="r.from"
+                      class="text-xs mt-1"
+                      :class="IMPORT_KIND_CLASS[r.outcome.kind]"
+                      data-testid="litigation-import-result"
+                    >
+                      読取日 {{ r.from }}〜{{ r.to }}: {{ r.outcome.message }}
+                    </div>
+                    <div
+                      v-if="importResults.get(`${row.driverCd}|${row.month}`)?.some(r => r.outcome.kind === 'ok')"
+                      class="text-xs text-gray-500 mt-1"
+                    >
+                      取り込み直後は CSV 分割が終わるまで運行が見えないことがあります。0 件のままなら数分後に「検知を実行」で読み直してください。
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div v-if="chunkWarnings.length > 0" class="text-xs text-amber-700 dark:text-amber-400 space-y-1">
+            <div class="font-medium">Y時間の警告 (冊単位。月に割り振れないので表とは別に出します)</div>
+            <div v-for="w in chunkWarnings" :key="`${w.driverCd}|${w.label}`">
+              {{ driverLabel(w.driverCd) }} ({{ w.driverCd }}) {{ w.label }}: {{ w.warnings.join(' / ') }}<template v-if="w.warningsCount > w.warnings.length"> ほか (全 {{ w.warningsCount }} 件)</template>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 印刷用の紙面 (画面には出さない)。案件の概要 + 出力の結果 + エラーの表 -->
+      <div v-if="openCase" class="hidden print:block litigation-print" data-testid="litigation-print-sheet">
+        <h1 class="text-base font-bold">訴訟準備: {{ openCase.name }}</h1>
+        <div class="litigation-print-meta">
+          期間 {{ openCase.fromMonth }}〜{{ openCase.toMonth }} ({{ caseMonths.length }}か月) / 会社ID {{ viewerComp }} / 乗務員 {{ openCase.driverCds.length }}名:
+          <template v-for="(cd, i) in openCase.driverCds" :key="cd">{{ i > 0 ? '、' : '' }}{{ driverLabel(cd) }} ({{ cd }})</template>
+          <template v-if="printedAt"> / 印刷 {{ printedAt }}</template>
+        </div>
+        <div v-if="openCase.memo" class="litigation-print-meta">メモ: {{ openCase.memo }}</div>
+
+        <h2 class="font-bold mt-2">出力 (Y時間 Excel)</h2>
+        <table class="litigation-print-table">
+          <thead>
+            <tr><th>乗務員</th><th>期間</th><th>ファイル名</th><th>状態</th><th>結果</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="(chunk, i) in outputChunks" :key="chunk.filename">
+              <td>{{ driverLabel(chunk.driverCd) }} ({{ chunk.driverCd }})</td>
+              <td>{{ chunk.label }}</td>
+              <td>{{ chunk.filename }}</td>
+              <td>{{ outputResults[i] ? OUTPUT_STATUS_LABEL[outputResults[i]!.status] : '未実行' }}</td>
+              <td>
+                <template v-if="outputResults[i]">
+                  {{ outputResults[i]!.message }}<template v-if="outputResults[i]!.missingCount > 0"> / 書けなかった日 {{ outputResults[i]!.missingCount }} 日</template><template v-if="outputResults[i]!.warningsCount > 0"> / 警告 {{ outputResults[i]!.warningsCount }} 件</template>
+                </template>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2 class="font-bold mt-2">エラー</h2>
+        <div class="litigation-print-meta">
+          <template v-for="(k, i) in LITIGATION_CHECK_KEYS" :key="k">{{ i > 0 ? ' / ' : '' }}{{ LITIGATION_CHECK_LABELS[k] }}: 異常あり {{ errorCounts[k].ng }}・異常なし {{ errorCounts[k].ok }}・判定できない {{ errorCounts[k].unknown }}・未実行 {{ errorCounts[k].pending }}</template>
+        </div>
+        <table class="litigation-print-table">
+          <thead>
+            <tr>
+              <th>乗務員</th><th>月</th>
+              <th v-for="k in LITIGATION_CHECK_KEYS" :key="k">{{ LITIGATION_CHECK_LABELS[k] }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in errorRows" :key="`${row.driverCd}|${row.month}`">
+              <td>{{ driverLabel(row.driverCd) }} ({{ row.driverCd }})</td>
+              <td>{{ row.month }}</td>
+              <td v-for="k in LITIGATION_CHECK_KEYS" :key="k">
+                <b>{{ LITIGATION_CHECK_STATE_LABELS[row.cells[k].state] }}</b> {{ row.cells[k].message }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="chunkWarnings.length > 0" class="litigation-print-meta">
+          Y時間の警告 (冊単位):
+          <template v-for="w in chunkWarnings" :key="`${w.driverCd}|${w.label}`">{{ driverLabel(w.driverCd) }} ({{ w.driverCd }}) {{ w.label }}: {{ w.warnings.join(' / ') }}<template v-if="w.warningsCount > w.warnings.length"> ほか (全 {{ w.warningsCount }} 件)</template>。</template>
+        </div>
       </div>
     </template>
   </div>
 </template>
+
+<style>
+/* 印刷は余白優先 — 頭揃えより詰める (1 枚に入る行を増やす)。サイドバーと画面の操作部は消す */
+@media print {
+  aside { display: none !important; }
+  main { padding: 0 !important; overflow: visible !important; }
+  @page { size: A4 landscape; margin: 6mm; }
+  .litigation-print { font-size: 8.5px; line-height: 1.25; color: #000; }
+  .litigation-print h1 { font-size: 12px; margin: 0 0 2px; }
+  .litigation-print h2 { font-size: 10px; margin: 4px 0 1px; }
+  .litigation-print-meta { margin: 1px 0; }
+  .litigation-print-table { width: 100%; border-collapse: collapse; }
+  .litigation-print-table th, .litigation-print-table td { border: 1px solid #999; padding: 1px 3px; text-align: left; vertical-align: top; }
+  .litigation-print-table th { background: #eee; }
+  .litigation-print-table tr { break-inside: avoid; }
+}
+</style>

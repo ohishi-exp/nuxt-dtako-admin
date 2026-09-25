@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   allowedViewerComps,
+  canRunLitigationUpload,
   compIdsInSameTenant,
   devViewerCompIds,
   isAllCompsViewer,
@@ -181,5 +182,18 @@ describe('compIdsInSameTenant (2 か所目の全社許可、Refs #1049)', () => 
 
   it('★ 陰性対照: 引数を省いた呼び方 (#1049 以前の古い record) も自 tenant のみ', () => {
     expect([...compIdsInSameTenant(accounts, '100')]).toEqual(['100'])
+  })
+})
+
+describe('canRunLitigationUpload (訴訟準備の取り込み、Refs #1133 c1133-5)', () => {
+  it('admin / payroll だけが通る (front の ALLOWED_ROLES と同じ線)', () => {
+    expect(canRunLitigationUpload('admin')).toBe(true)
+    expect(canRunLitigationUpload('payroll')).toBe(true)
+  })
+
+  it('★ それ以外・undefined (保存済み theearth セッション由来 / dev の短絡)・型崩れは通さない', () => {
+    for (const role of ['viewer', 'member', '', 'Admin', undefined, null, 1, ['admin']]) {
+      expect(canRunLitigationUpload(role), String(JSON.stringify(role))).toBe(false)
+    }
   })
 })

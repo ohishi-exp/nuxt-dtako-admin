@@ -181,6 +181,22 @@ function allRegisteredCompIds(accounts: DtakoAccountEntry[]): Set<string> {
   return out;
 }
 
+/** 訴訟準備の取り込み (`POST /restraint-api/litigation/alc-upload-driver`、Refs #1133
+ * c1133-5) を実行してよい role。**front の書き込み口 (`server/utils/require-role.ts` の
+ * `ALLOWED_ROLES`) と同じ線** — 片方だけ広げると、同じ人が画面の書き込みは弾かれるのに
+ * 運行の入れ直しはできる、が生まれる。
+ *
+ * ★ この module の「role は見ない」の**例外**。あちらは「**どの会社**を見てよいか」の
+ * 軸の話で、ここは「**運行を消して入れ直す書き込み**をしてよいか」。会社の軸は
+ * 変わらず `allowedViewerComps` (tenant + `org_wide`) が決め、この判定はその**後に AND** する。 */
+export const LITIGATION_UPLOAD_ROLES: readonly string[] = ["admin", "payroll"];
+
+/** `role` が {@link LITIGATION_UPLOAD_ROLES} に入っているか。**文字列以外 (`undefined` =
+ * 保存済み theearth セッション由来の record・dev の短絡) は false** (fail-closed)。 */
+export function canRunLitigationUpload(role: unknown): boolean {
+  return typeof role === "string" && LITIGATION_UPLOAD_ROLES.includes(role);
+}
+
 /** この viewer が全社を見てよいか (**全社閲覧 allowlist**)。
  *
  * 判定の正本は **auth-worker の `USER_ACL`** で、この relay は

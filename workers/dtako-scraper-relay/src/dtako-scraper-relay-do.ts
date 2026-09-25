@@ -163,6 +163,7 @@ import {
 } from "./scrape-error-reader";
 import {
   allowedViewerComps,
+  canRunLitigationUpload,
   compIdsInSameTenant,
   devViewerCompIds,
   isR2OnlyRestraintPath,
@@ -1066,6 +1067,9 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // has_kudgivt が FALSE に戻るのは**その乗務員の運行だけ**。書き込みなので
     // scrapeQueue で直列化する。
     // 認証は index.ts の /kintai-relay/dtako-alc-upload-driver 側 (X-Alc-Proxy-Secret) が持つ。
+    // 呼び元は index.ts の /kintai-relay/dtako-alc-upload-driver と、viewer 認可済みの
+    // /restraint-api/litigation/alc-upload-driver (`handleLitigationAlcUploadDriver`、
+    // role が admin / payroll のときだけ転送する) の 2 つ。
     if (url.pathname === "/cron/dtako/alc-upload-driver" && request.method === "POST") {
       return this.handleCronDtakoAlcUploadDriver(request);
     }
@@ -4266,6 +4270,57 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /**
+   * `POST /restraint-api/litigation/alc-upload-driver` — body `{driver_cd, from, to}`
+   * (Refs #1133 c1133-5)。訴訟準備のエラータブで「alc に運行が 0 件の月」を theearth から
+   * 取り込み直すボタンの口。実処理は既存の `/cron/dtako/alc-upload-driver`
+   * (`handleCronDtakoAlcUploadDriver`、乗務員 1 名 × 期間) をそのまま呼ぶ。
+   *
+   * - **認可は毎回 introspect** (`authorizeRestraintViewer`)。保存済みの theearth セッション
+   *   があっても使わない (呼び出し側の分岐のコメント参照)。
+   * - **role が admin / payroll のときだけ転送する** (`canRunLitigationUpload`)。運行を消して
+   *   入れ直す書き込みなので、front の書き込み口 (`server/utils/require-role.ts`) と同じ線に
+   *   揃える。それ以外・undefined (dev の短絡 `RESTRAINT_DEV_VIEWER_COMP` も) は 403。
+   * - **comp は認可済みの `record.compId` だけ**。body の `comp_id` は受け取らない
+   *   (`driver_cd` / `from` / `to` だけを拾い直して渡す)。
+   * - 検証 (乗務員CD の形・期間 31 日上限) は転送先に任せ、応答はそのまま返す。
+   *   転送先は `scrapeQueue` で直列化するので、ここではキューに載せない。
+   */
+  private async handleLitigationAlcUploadDriver(
+    request: Request,
+    url: URL,
+    routing: TheearthRouting,
+  ): Promise<Response> {
+    const viewer = await this.authorizeRestraintViewer(extractBearerToken(request.headers), routing, url);
+    if (!viewer) {
+      return dvrJsonError(401, "セッションが無効か期限切れです。再ログインしてください");
+    }
+    if (!canRunLitigationUpload(viewer.viewerRole)) {
+      return dvrJsonError(403, "取り込みは admin / payroll のみ実行できます");
+    }
+    let body: { driver_cd?: unknown; from?: unknown; to?: unknown } | null;
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    const stub = this.env.RELAY.get(this.env.RELAY.idFromName(`scraper-comp-${viewer.compId}`));
+    const res = await stub.fetch("https://relay.internal/cron/dtako/alc-upload-driver", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        driver_cd: body?.driver_cd,
+        from: body?.from,
+        to: body?.to,
+        comp_id: viewer.compId,
+      }),
+    });
+    return new Response(res.body, {
+      status: res.status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+  }
+
+  /**
    * R2-only ルートの viewer 認可 (Refs #272): auth-worker introspect で JWT を検証し、
    * DTAKO_ACCOUNTS (comp_id→tenant_id) の逆引きで routing の compId がその tenant の
    * ものだと確認できた時だけ、閲覧用の合成レコードを返す。合成レコードは cookies を
@@ -4324,6 +4379,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   private async dispatchRestraintApi(request: Request, url: URL, routing: TheearthRouting): Promise<Response> {
     if (url.pathname === "/restraint-api/login" && request.method === "POST") {
       return this.handleTheearthLogin(request, routing);
+    }
+    // 訴訟準備の取り込み (Refs #1133 c1133-5)。**下の保存済み theearth セッションを使わない**
+    // ので、その読み出しより前で分ける — 保存済みセッション由来の record は viewerRole が
+    // undefined で、role を見るこの口では admin でも黙って 403 になるため。
+    if (url.pathname === "/restraint-api/litigation/alc-upload-driver" && request.method === "POST") {
+      return this.handleLitigationAlcUploadDriver(request, url, routing);
     }
 
     const stored = await this.ctx.storage.get<TheearthSessionRecord>(THEEARTH_SESSION_KEY);
