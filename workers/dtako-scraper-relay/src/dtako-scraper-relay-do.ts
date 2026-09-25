@@ -301,6 +301,18 @@ import {
   resolveWorkScheduleAt,
 } from "./work-schedule";
 import {
+  buildLitigationCaseDeleteStatement,
+  buildLitigationCaseGetStatement,
+  buildLitigationCaseListResponse,
+  buildLitigationCaseListStatement,
+  buildLitigationCaseUpsertStatement,
+  extractCaseId,
+  LitigationCaseError,
+  normalizeLitigationCaseInput,
+  parseLitigationCaseRow,
+  type LitigationCaseD1Row,
+} from "./litigation-case";
+import {
   isClericalJob,
   kintaiR2Paths,
   mergeSummarySources,
@@ -4401,6 +4413,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/night-shift" && request.method === "PUT") {
       return this.handleNightShiftPut(request, record!);
     }
+    // ---- 訴訟用の準備ページの案件 (D1、Refs #1133 c1133-1) ----
+    if (url.pathname === "/restraint-api/litigation-cases" && request.method === "GET") {
+      return this.handleLitigationCasesGet(record!);
+    }
+    if (url.pathname === "/restraint-api/litigation-cases" && request.method === "PUT") {
+      return this.handleLitigationCasesPut(request, record!);
+    }
+    if (url.pathname === "/restraint-api/litigation-cases" && request.method === "DELETE") {
+      return this.handleLitigationCasesDelete(record!, url);
+    }
     // ---- 勤怠 (タイムカード) の取得とアーカイブ (Refs #424 PR-A) ----
     if (url.pathname === "/restraint-api/kintai/fetch" && request.method === "POST") {
       return this.handleKintaiFetch(record!, url);
@@ -5237,6 +5259,76 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       return dvrJsonError(502, "夜勤者マスタの保存に失敗しました");
     }
     return Response.json({ saved: true, changed: statements.length });
+  }
+
+  /** GET /restraint-api/litigation-cases — 案件一覧 (更新日時の新しい順、Refs #1133)。 */
+  private async handleLitigationCasesGet(record: TheearthSessionRecord): Promise<Response> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return dvrJsonError(503, "案件 (DTAKO_DB) が未設定です");
+    try {
+      const stmt = buildLitigationCaseListStatement(record.compId);
+      const result = await db.prepare(stmt.sql).bind(...stmt.params).all<LitigationCaseD1Row>();
+      return Response.json({ cases: buildLitigationCaseListResponse(result.results ?? []) });
+    } catch (err) {
+      console.error(JSON.stringify({ litigation_cases_get: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "案件一覧の取得に失敗しました");
+    }
+  }
+
+  /**
+   * PUT /restraint-api/litigation-cases — 案件の新規作成/更新 (Refs #1133)。
+   * body に `caseId` があれば更新、無ければ新規作成 (crypto.randomUUID())。
+   * 書き込み先の comp・created_by はセッション record から取る (body の値は見ない)。
+   */
+  private async handleLitigationCasesPut(request: Request, record: TheearthSessionRecord): Promise<Response> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return dvrJsonError(503, "案件 (DTAKO_DB) が未設定です");
+    let raw: unknown;
+    try {
+      raw = await request.json();
+    } catch {
+      return dvrJsonError(400, "JSON body が必要です");
+    }
+    let input: ReturnType<typeof normalizeLitigationCaseInput>;
+    try {
+      input = normalizeLitigationCaseInput(raw);
+    } catch (err) {
+      if (err instanceof LitigationCaseError) return dvrJsonError(400, err.message);
+      throw err;
+    }
+    const caseId = extractCaseId(raw) ?? crypto.randomUUID();
+    const nowIso = new Date().toISOString();
+    const stmt = buildLitigationCaseUpsertStatement(input, caseId, record.compId, record.viewerEmail ?? null, nowIso);
+    try {
+      await db.prepare(stmt.sql).bind(...stmt.params).run();
+      // upsert 直後に読み直す — 更新時は created_by/created_at が upsert 文で
+      // 上書きされない (excluded の SET に含めていない) ので、その場で組んだ
+      // 値を返すと更新のたびに createdAt が現在時刻に化けて嘘になる。
+      const getStmt = buildLitigationCaseGetStatement(record.compId, caseId);
+      const got = await db.prepare(getStmt.sql).bind(...getStmt.params).first<LitigationCaseD1Row>();
+      if (!got) return dvrJsonError(502, "案件の保存直後の読み込みに失敗しました");
+      return Response.json({ saved: true, case: parseLitigationCaseRow(got) });
+    } catch (err) {
+      console.error(JSON.stringify({ litigation_cases_put: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "案件の保存に失敗しました");
+    }
+  }
+
+  /** DELETE /restraint-api/litigation-cases?case_id= — 案件の削除 (Refs #1133)。
+   * 存在しない case_id を渡しても冪等に 200 を返す (0 行削除でもエラーにしない)。 */
+  private async handleLitigationCasesDelete(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const db = this.env.DTAKO_DB;
+    if (!db) return dvrJsonError(503, "案件 (DTAKO_DB) が未設定です");
+    const caseId = url.searchParams.get("case_id");
+    if (!caseId) return dvrJsonError(400, "case_id が必要です");
+    try {
+      const stmt = buildLitigationCaseDeleteStatement(record.compId, caseId);
+      await db.prepare(stmt.sql).bind(...stmt.params).run();
+    } catch (err) {
+      console.error(JSON.stringify({ litigation_cases_delete: "error", error: describeUnknownError(err) }));
+      return dvrJsonError(502, "案件の削除に失敗しました");
+    }
+    return Response.json({ deleted: true });
   }
 
   /**
