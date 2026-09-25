@@ -116,6 +116,8 @@ describe('writeYTimeRows — period 無し (既存の /y-time-export の呼び�
     const res = await writeYTimeRows(tpl, PERIOD_ROWS, { clearPeriod: PERIOD })
     expect(await sheetXml(res.bytes, 2)).toBe(YOSO_XML)
     expect(await sheetXml(res.bytes, 3)).toBe(GESSHO_XML)
+    // 月所!B6 はテンプレの値 (45017 = 2023-04-01) のまま
+    expect(await sheetXml(res.bytes, 3)).toContain('<c r="B6" s="444"><v>45017</v></c>')
     expect(aCells(await sheetXml(res.bytes, 1))).toEqual(aCells(await sheetXml(tpl, 1)))
   })
 
