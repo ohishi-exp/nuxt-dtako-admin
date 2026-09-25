@@ -72,6 +72,7 @@ export default defineConfig({
         'src/driver-master-run.ts',
         'src/dvr-ingest.ts',
         'src/vehicle-state-ingest.ts',
+        'src/litigation-case.ts',
       ],
       thresholds: {
         lines: 100,

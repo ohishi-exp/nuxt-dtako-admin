@@ -31,6 +31,8 @@ const navigation = [
   { label: '一番星ヘルスチェック', icon: 'i-lucide-heart-pulse', to: '/ichiban-health' },
   { label: '給与DB取得', icon: 'i-lucide-database', to: '/kyuyo-fetch' },
   { label: 'リモートアプリ', icon: 'i-lucide-monitor', to: '/remote-app' },
+  // 訴訟用の準備ページ (Refs #1133)。role で出し分けない (ユーザー指示)。
+  { label: '訴訟準備', icon: 'i-lucide-scale', to: '/litigation' },
 ]
 </script>
 

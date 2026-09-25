@@ -1295,3 +1295,10 @@ branches = true
 [[files]]
 path = "server/api/etc-csv/download.get.ts"
 branches = true
+
+# 訴訟用の準備ページ (`/litigation`、Refs #1133 c1133-1) の画面ロジック
+# (チップの追加・重複除去・入力の検証)。.vue 側 (UI ページ) は登録しない
+# (方針改定 2026-08-31、ヘッダ参照)。
+[[files]]
+path = "app/utils/litigation-case-form.ts"
+branches = true
