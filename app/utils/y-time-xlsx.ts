@@ -33,6 +33,13 @@ import JSZip from 'jszip'
 import type { YTimeRow } from '~/types'
 
 const SHEET_NAME = 'Y時間'
+/** 期間の起点 (`F3` 開始 / `I3` 終了) を持つシート */
+const PERIOD_SHEET_NAME = '要素'
+/** 1 年度のカレンダー。`B6` が年度の開始日 (値の直書き) */
+const MONTHLY_SHEET_NAME = '月所'
+/** Y時間 の A 列で日付が始まる行 (`A7 = 要素!F3`) */
+const FIRST_DATE_ROW = 7
+const YMD_RE = /^\d{4}-\d{2}-\d{2}$/
 
 const COL_NOTE = 'C' // 備考
 // テンプレ数式 (AB7=IF(F7=1,0,G7), AC7=IF(F7=1,H7,...)) より:
@@ -70,6 +77,26 @@ export interface WriteOptions {
    * - `from > to` (逆順) や該当 row なしの場合は no-op
    */
   clearPeriod?: { from: string; to: string }
+  /**
+   * テンプレの対象期間を振り直す (Refs #1133 c1133-2、訴訟準備の 1 冊 = 最大 12 か月)。
+   *
+   * **指定が無ければ何もしない** (既存の `/y-time-export` はテンプレ自前の期間を使う)。
+   * 指定があれば書き込みの前に次の 3 つを書き換える (`from` / `to` は `yyyy-mm-dd`):
+   *
+   * - `要素!F3` (開始) / `要素!I3` (終了) — Y時間 / X時間 / 金額 各シートの式の起点
+   * - **`Y時間` の A 列にキャッシュされた `<v>`** — 行の位置合わせ (`buildDateRowIndex`)
+   *   は式ではなくキャッシュ値を読むので、F3/I3 だけ変えても期間外の日は
+   *   `missingDates` に落ちたままになる。A7 = 開始日、以降 1 日ずつ、終了日の翌行からは
+   *   空 (テンプレの式 `IF(A{n-1}+1 = 要素!$I$3+1, "", A{n-1}+1)` と同じ結果)。
+   *   **式 (`<f>`) は残す**
+   * - `月所!B6` — 月所は 1 年度のカレンダー (`E6 = EDATE(B6,12)-1`) で、**B6 は
+   *   `要素!F3` を参照しない値の直書き** (他シートからの参照も 0 件、実物で確認)。
+   *   区切りの開始日を入れて、区切り (≤ 12 か月) と同じ年度を出させる
+   *
+   * 他のセルのキャッシュ値は古いまま残るが、`fullCalcOnLoad` で Excel が開いた時に
+   * 全式を再計算する。
+   */
+  period?: { from: string; to: string }
 }
 
 export interface WriteResult {
@@ -105,6 +132,17 @@ export async function writeYTimeRows(
     throw new Error(`sheet xml not found at ${sheetPath}`)
   }
   let xml = await sheetEntry.async('string')
+
+  if (opts.period) {
+    const fromSerial = ymdToExcelSerial(opts.period.from)
+    const toSerial = ymdToExcelSerial(opts.period.to)
+    if (fromSerial > toSerial) {
+      throw new Error(`period.from (${opts.period.from}) is after period.to (${opts.period.to})`)
+    }
+    xml = rewriteDateColumn(xml, fromSerial, toSerial)
+    await setCellsInSheet(zip, PERIOD_SHEET_NAME, 3, { F: fromSerial, I: toSerial })
+    await setCellsInSheet(zip, MONTHLY_SHEET_NAME, 6, { B: fromSerial })
+  }
 
   const idx = buildDateRowIndex(xml, opts.maxScanRows)
   const missingDates: string[] = []
@@ -211,6 +249,60 @@ async function resolveSheetPath(
   if (!relMatch || !relMatch[1]) return null
   const target = relMatch[1].replace(/^\//, '')
   return target.startsWith('xl/') ? target : `xl/${target}`
+}
+
+/** `yyyy-mm-dd` → Excel serial (1899-12-30 起点)。形式違いは throw */
+function ymdToExcelSerial(ymd: string): number {
+  if (!YMD_RE.test(ymd)) throw new Error(`period date must be yyyy-mm-dd: ${ymd}`)
+  const [y, m, d] = ymd.split('-').map(Number) as [number, number, number]
+  const ms = Date.UTC(y, m - 1, d)
+  if (formatYmd(new Date(ms)) !== ymd) throw new Error(`period date is not a real date: ${ymd}`)
+  return (ms - Date.UTC(1899, 11, 30)) / 86400000
+}
+
+/**
+ * Y時間 の A 列 (式つきセル) のキャッシュ値を `[fromSerial, toSerial]` で振り直す。
+ *
+ * - `A{FIRST_DATE_ROW}` = fromSerial、以降 1 行ごとに +1
+ * - toSerial を超えた行は空文字 (`t="str"` + `<v/>`、テンプレが期間外の行に持つ形と同じ)
+ * - `<f>` は残す。式を持たない A セル (見出し行など) は触らない
+ */
+function rewriteDateColumn(xml: string, fromSerial: number, toSerial: number): string {
+  return xml.replace(
+    /<c r="A(\d+)"([^>/]*)>(<f>[^<]*<\/f>)(?:<v\/>|<v>[^<]*<\/v>)<\/c>/g,
+    (full, rowStr: string, attrs: string, formula: string) => {
+      const rowNum = parseInt(rowStr, 10)
+      if (rowNum < FIRST_DATE_ROW) return full
+      const serial = fromSerial + (rowNum - FIRST_DATE_ROW)
+      const baseAttrs = attrs.replace(/\s+t="[^"]*"/, '')
+      return serial <= toSerial
+        ? `<c r="A${rowStr}"${baseAttrs}>${formula}<v>${serial}</v></c>`
+        : `<c r="A${rowStr}"${baseAttrs} t="str">${formula}<v/></c>`
+    },
+  )
+}
+
+/**
+ * 名前で引いたシートの 1 行に数値を書く (`applyRowChanges` を流用、style は保持)。
+ * シートが無いテンプレは throw — 期間を振り直したつもりで黙って古い期間を出さない。
+ */
+async function setCellsInSheet(
+  zip: JSZip,
+  sheetName: string,
+  rowNum: number,
+  values: Record<string, number>,
+): Promise<void> {
+  const path = await resolveSheetPath(zip, sheetName)
+  const entry = path ? zip.file(path) : null
+  if (!path || !entry) throw new Error(`sheet "${sheetName}" not found in template`)
+  const rc: RowChange = { clearCols: new Set(), writeCells: new Map() }
+  for (const [col, value] of Object.entries(values)) {
+    rc.writeCells.set(col, { kind: 'number', value })
+  }
+  const xml = await entry.async('string')
+  const patched = applyRowChanges(xml, new Map([[rowNum, rc]]))
+  if (patched === xml) throw new Error(`row ${rowNum} not found in sheet "${sheetName}"`)
+  zip.file(path, patched)
 }
 
 /**

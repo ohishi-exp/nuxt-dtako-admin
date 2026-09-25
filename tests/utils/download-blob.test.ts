@@ -13,7 +13,7 @@
  * 消費者は `y-time-export.vue` と `daily-report-edit.vue` (計 6 か所)。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { downloadBlobResponse } from '~/utils/download-blob'
+import { downloadBlob, downloadBlobResponse } from '~/utils/download-blob'
 
 /** 実際に `<a download>` に載った名前と、開放された Object URL を記録する。 */
 let downloaded: string[]
@@ -67,6 +67,14 @@ describe('downloadBlobResponse', () => {
     await downloadBlobResponse(res(), 'x.bin')
 
     expect(created).toHaveLength(1)
+    expect(revoked).toEqual(created)
+  })
+})
+
+describe('downloadBlob', () => {
+  it('渡した Blob を渡した名前で保存し、Object URL を開放する', () => {
+    downloadBlob(new Blob([new Uint8Array([1])]), '訴訟準備_案件_2026-09-25.zip')
+    expect(downloaded).toEqual(['訴訟準備_案件_2026-09-25.zip'])
     expect(revoked).toEqual(created)
   })
 })

@@ -1302,3 +1302,10 @@ branches = true
 [[files]]
 path = "app/utils/litigation-case-form.ts"
 branches = true
+
+# 訴訟準備の「出力」タブ (Refs #1133 c1133-2) の pure ロジック — 案件を
+# 「乗務員 1 名 × 最大 12 か月」に区切る・ファイル名/ZIP 名・応答から結果の 4 分類
+# (ok / empty = 運行 0 件 / not_found = alc に未登録 / error)。.vue 側は登録しない。
+[[files]]
+path = "app/utils/litigation-output.ts"
+branches = true

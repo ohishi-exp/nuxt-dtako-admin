@@ -205,4 +205,67 @@ describe('POST /api/y-time-export — 陽性対照 (塞いだだけで使えな�
       clearPeriod: { from: '2026-07-01', to: '2026-07-31' },
     })
   })
+
+  it('上流のエラーにだけ data.upstream = alc が付く (テンプレ不在の 404 には付かない)', async () => {
+    alcProxyFetchMock.mockResolvedValue({
+      ok: false, status: 404, statusText: 'Not Found', text: async () => 'driver_cd not found: 9999',
+    })
+    await expect(call(eventWith(okEnv({ DTAKO_R2: templateR2() })))).rejects.toMatchObject({
+      statusCode: 404, data: { upstream: 'alc' },
+    })
+
+    alcProxyFetchMock.mockResolvedValue({
+      ok: true, status: 200, statusText: 'OK', json: async () => ({ rows: [], warnings: [] }),
+    })
+    const err = await call(eventWith(okEnv({ DTAKO_R2: r2With({}) }))).catch((e: unknown) => e)
+    expect(err).toMatchObject({ statusCode: 404 })
+    expect((err as { data?: unknown }).data).toBeUndefined()
+  })
+})
+
+describe('POST /api/y-time-export — period_rewrite と件数ヘッダ (Refs #1133 c1133-2)', () => {
+  it('★ period_rewrite: true のときだけ from/to を period として writeYTimeRows に渡す', async () => {
+    readBodyMock.mockResolvedValue({ ...BODY, period_rewrite: true })
+    await call(eventWith(okEnv({ DTAKO_R2: templateR2() })))
+    expect(writeYTimeRowsMock.mock.calls[0]![2]).toEqual({
+      clearPeriod: { from: '2026-07-01', to: '2026-07-31' },
+      period: { from: '2026-07-01', to: '2026-07-31' },
+    })
+  })
+
+  it('period_rewrite が true 以外 (false / 文字列) なら period は渡らない', async () => {
+    for (const v of [false, 'true', 1]) {
+      writeYTimeRowsMock.mockClear()
+      readBodyMock.mockResolvedValue({ ...BODY, period_rewrite: v })
+      await call(eventWith(okEnv({ DTAKO_R2: templateR2() })))
+      expect(writeYTimeRowsMock.mock.calls[0]![2]).toEqual({
+        clearPeriod: { from: '2026-07-01', to: '2026-07-31' },
+      })
+    }
+  })
+
+  it('★ 行数・欠けた日の総数・警告の総数を切り詰めずに別ヘッダで返す', async () => {
+    const missing = Array.from({ length: 31 }, (_, i) => `2026-07-${String(i + 1).padStart(2, '0')}`)
+    writeYTimeRowsMock.mockResolvedValue({ bytes: XLSX_BYTES, missingDates: missing })
+    alcProxyFetchMock.mockResolvedValue({
+      ok: true, status: 200, statusText: 'OK',
+      json: async () => ({ rows: [{}, {}, {}], warnings: ['a', 'b', 'c', 'd', 'e', 'f'] }),
+    })
+    await call(eventWith(okEnv({ DTAKO_R2: templateR2() })))
+    const headers = Object.fromEntries(setResponseHeaderMock.mock.calls.map(c => [c[1], c[2]]))
+    expect(headers['x-y-time-rows']).toBe('3')
+    expect(headers['x-y-time-missing-count']).toBe('31')
+    expect(headers['x-y-time-warnings-count']).toBe('6')
+    // 既存ヘッダは今までどおり先頭 30 件 / 5 件で切る
+    expect(String(headers['x-y-time-missing-dates']).split(',')).toHaveLength(30)
+    expect(decodeURIComponent(String(headers['x-y-time-warnings'])).split(' / ')).toHaveLength(5)
+  })
+
+  it('rows 0 でも件数ヘッダは 0 で載る (「運行 0 件」を画面が言い分ける材料)', async () => {
+    await call(eventWith(okEnv({ DTAKO_R2: templateR2() })))
+    const headers = Object.fromEntries(setResponseHeaderMock.mock.calls.map(c => [c[1], c[2]]))
+    expect(headers['x-y-time-rows']).toBe('0')
+    expect(headers['x-y-time-missing-count']).toBe('0')
+    expect(headers['x-y-time-warnings-count']).toBe('0')
+  })
 })
