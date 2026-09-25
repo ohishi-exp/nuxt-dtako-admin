@@ -46,6 +46,8 @@ function makeDO() {
   const env = {
     DTAKO_R2: new FakeR2(),
     RESTRAINT_DEV_VIEWER_COMP: COMP_ID,
+    // 勤怠の対象会社 (本番 [vars] と同じ)。無いと打刻の live-build / source=gcp が止まる (Refs #1133 c1133-8)
+    KINTAI_COMP_ID: COMP_ID,
     RESTRAINT_DEV_VIEWER_EMAIL: "viewer@example.com",
     // live-build が「配線未設定」で諦めないように 3 点を埋める
     NUXT_ICHIBAN_API_URL: "https://ichiban.invalid",
