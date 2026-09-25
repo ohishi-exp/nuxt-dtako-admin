@@ -38,6 +38,25 @@
  *
  *   401 — 未ログイン (`requireAuth`)
  *   503 — INTERNAL_SHARED_SECRET / DTAKO_R2 binding 未設定
+ *
+ * ## `period_rewrite` (訴訟準備の出力タブ、Refs #1133 c1133-2)
+ *
+ * `true` のときだけ、テンプレの対象期間 (`要素!F3`/`I3`・Y時間 A 列・`月所!B6`) を
+ * body の `from`/`to` に振り直す (`writeYTimeRows` の `period`)。無指定の呼び出し
+ * (`/y-time-export` ページ) は今までどおりテンプレ自前の期間を使う。
+ *
+ * ## 件数ヘッダ (`x-y-time-rows` / `-missing-count` / `-warnings-count`)
+ *
+ * `x-y-time-missing-dates` は先頭 30 件、`x-y-time-warnings` は先頭 5 件で切るので、
+ * **切った後の件数だけ見ると「全部で何件か」が読めない**。本当の件数を別に載せる。
+ * `x-y-time-rows` は上流が返した行数で、**0 = その期間に運行が 0 件**
+ * (404 = 乗務員CD が alc に無い、とは別物) を画面が言い分けるのに使う。
+ *
+ * ## 上流の 404 だけ `data.upstream = 'alc'` を付ける
+ *
+ * 404 は 2 か所から出る: 上流 (`driver_cd not found`、alc の NotFound はこれだけ) と、
+ * R2 にテンプレが無いとき。**画面が「乗務員CD が alc に未登録」と言ってよいのは前者だけ**
+ * なので、上流由来のエラーに印を付けて区別させる (本文の文言で当てない)。
  */
 
 import {
@@ -58,6 +77,8 @@ interface RequestBody {
   from: string
   to: string
   template_key: string
+  /** true のときだけテンプレの期間を from/to に振り直す (Refs #1133 c1133-2) */
+  period_rewrite?: boolean
 }
 
 interface R2ObjectMinimal {
@@ -113,6 +134,7 @@ export default defineEventHandler(async (event) => {
     throw createError({
       statusCode: apiRes.status,
       statusMessage: `backend error: ${text || apiRes.statusText}`,
+      data: { upstream: 'alc' },
     })
   }
   const data = (await apiRes.json()) as YTimeExportResponse
@@ -138,7 +160,12 @@ export default defineEventHandler(async (event) => {
   // 3. xlsx 生成 — 期間内の旧データを書き込み前にクリアして、テンプレ汚染を除去する
   const result = await writeYTimeRows(tplBytes, data.rows, {
     clearPeriod: { from: body.from, to: body.to },
+    ...(body.period_rewrite === true ? { period: { from: body.from, to: body.to } } : {}),
   })
+
+  setResponseHeader(event, 'x-y-time-rows', String(data.rows.length))
+  setResponseHeader(event, 'x-y-time-missing-count', String(result.missingDates.length))
+  setResponseHeader(event, 'x-y-time-warnings-count', String(data.warnings.length))
 
   if (result.missingDates.length > 0) {
     // dev でデバッグしやすいよう warning header にも入れる (本文 binary なので)
