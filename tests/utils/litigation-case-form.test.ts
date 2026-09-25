@@ -22,7 +22,7 @@ function baseForm(overrides: Partial<LitigationCaseFormInput> = {}): LitigationC
     name: '未払残業代請求事件',
     fromMonth: '2024-04',
     toMonth: '2024-06',
-    driverCds: ['1194', '1523'],
+    driverCds: ['1194'],
     memo: '',
     ...overrides,
   }
@@ -78,9 +78,9 @@ describe('isValidDriverCd / normalizeLitigationDriverCd', () => {
 })
 
 describe('addDriverCd', () => {
-  it('新しい乗務員CDを末尾へ追加する', () => {
-    const { driverCds, error } = addDriverCd(['1194'], '1523')
-    expect(driverCds).toEqual(['1194', '1523'])
+  it('空の配列へ乗務員CDを入れる (1 案件 = 1 名。画面は選び直しのたびに空配列から入れる)', () => {
+    const { driverCds, error } = addDriverCd([], '1523')
+    expect(driverCds).toEqual(['1523'])
     expect(error).toBeNull()
   })
 
@@ -189,7 +189,7 @@ describe('validateLitigationCaseForm', () => {
 
   it('乗務員が0名ならエラー', () => {
     const errors = validateLitigationCaseForm(baseForm({ driverCds: [] }))
-    expect(errors).toContainEqual({ field: 'driverCds', message: '乗務員を1名以上追加してください' })
+    expect(errors).toContainEqual({ field: 'driverCds', message: '乗務員を選んでください' })
   })
 
   it(`乗務員が${LITIGATION_CASE_MAX_DRIVERS}名を超えるとエラー`, () => {
@@ -212,7 +212,7 @@ describe('buildLitigationCaseSavePayload', () => {
       name: '未払残業代請求事件',
       fromMonth: '2024-04',
       toMonth: '2024-06',
-      driverCds: ['1194', '1523'],
+      driverCds: ['1194'],
       memo: '',
     })
   })

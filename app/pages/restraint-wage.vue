@@ -175,6 +175,7 @@ import { buildSnapshotPayload, contentHash, WAGE_LOGIC_VERSION } from '~/utils/w
 import { describeApiError } from '~/utils/api-error'
 import { kyuyoAccessFromError, kyuyoAccessNotice, KYUYO_CONSEQUENCE_RANGE, KYUYO_CONSEQUENCE_WAGE, type KyuyoAccessState } from '~/utils/kyuyo-access'
 import type { MonthKosokuMark, WageRangeResponse } from '~/utils/wage-range-view'
+import { DTAKO_COMP_OPTIONS, knownDtakoCompId } from '~/utils/dtako-comps'
 import {
   defaultRange,
   emptyRowsNote,
@@ -653,9 +654,9 @@ onMounted(() => {
   restoreSalaryImports()
   restoreSession()
   // theearth 未ログインなら閲覧モードを準備: 前回の閲覧 comp → theearth ログイン
-  // 履歴の comp の順で prefill。どちらも無ければ会社ID入力パネルが出る。
+  // 履歴の comp の順で prefill。どちらも無ければ (DTAKO_COMPS に無い値も) 会社選択パネルが出る。
   if (!theearthSession.value) {
-    viewerComp.value = localStorage.getItem(VIEWER_COMP_STORAGE_KEY) || lastAccount().compId
+    viewerComp.value = knownDtakoCompId(localStorage.getItem(VIEWER_COMP_STORAGE_KEY), lastAccount().compId)
     viewerCompInput.value = viewerComp.value
   }
   // watch(session) 側も同 flush で呼ぶが、in-flight ガードで 1 本に潰れる (Refs #451)。
@@ -5666,11 +5667,11 @@ watch([compMap, kyuyoSyncedKeys], () => {
              閲覧・設定のみで theearth ログイン不要。 -->
         <UCard v-if="!session" class="max-w-md">
           <template #header>
-            <span class="font-medium">閲覧する会社IDを指定</span>
+            <span class="font-medium">閲覧する会社を選択</span>
           </template>
           <div class="flex items-center gap-2">
-            <UInput v-model="viewerCompInput" placeholder="会社ID (例: 1000)" class="w-40" @keyup.enter="startViewer" />
-            <UButton label="閲覧開始" :disabled="!viewerCompInput.trim()" @click="startViewer" />
+            <USelect v-model="viewerCompInput" :items="DTAKO_COMP_OPTIONS" placeholder="会社を選択" class="w-64" />
+            <UButton label="閲覧開始" :disabled="!viewerCompInput" @click="startViewer" />
           </div>
           <p class="text-xs text-gray-500 mt-2">
             このページは取得済みアーカイブ・単価マスタ・給与比較の閲覧/設定のみで、theearth ログインは不要です

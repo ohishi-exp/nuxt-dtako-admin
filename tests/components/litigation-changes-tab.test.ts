@@ -118,7 +118,7 @@ beforeEach(() => {
   calls = []
   saved.length = 0
   localStorage.clear()
-  localStorage.setItem('litigation-viewer-comp', '1000')
+  localStorage.setItem('litigation-viewer-comp', '27324455')
   api.getDrivers.mockResolvedValue([{ id: 'd1', driver_cd: '1078', driver_name: '甲野太郎' }])
   api.getYTimePreview.mockResolvedValue({ driver: { cd: '1078', name: '甲野太郎' }, period: {}, rows: [], warnings: [] })
   kintaiHandler = () => ({

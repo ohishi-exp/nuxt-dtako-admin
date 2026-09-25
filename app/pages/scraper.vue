@@ -49,7 +49,7 @@ function recordScrapeResult(targetDate: string, evt: ScrapeProgressEvent) {
 // 会社一覧は `app/utils/dtako-comps.ts` に集約 (拘束×賃金の社員マスタと共有、Refs #367)
 const compIdOptions = [
   { label: '全企業', value: '' },
-  ...DTAKO_COMPS.map(c => ({ label: dtakoCompDisplay(c.compId), value: c.compId })),
+  ...DTAKO_COMP_OPTIONS,
 ]
 
 /** compIdOptions から「全企業」プレースホルダ (value: '') を除いた実 comp_id 一覧。 */

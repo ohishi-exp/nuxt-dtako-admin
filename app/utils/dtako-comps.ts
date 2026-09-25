@@ -78,6 +78,16 @@ export function dtakoCompLabel(compId: string): string {
 }
 
 /**
+ * 候補 (localStorage の保存値等) のうち `DTAKO_COMPS` に載っている最初の会社ID。無ければ空文字。
+ * 閲覧モードの会社IDは以前は手入力だったので、実在しない値 (乗務員CD の打ち間違い等) が
+ * 保存されていることがある。それを自動で引き継ぐと relay が 401「セッションが無効か期限切れ」を
+ * 返し続け、再ログインしても消えない (権限なしと区別されないため)。
+ */
+export function knownDtakoCompId(...candidates: Array<string | null | undefined>): string {
+  return candidates.find(c => DTAKO_COMPS.some(d => d.compId === c)) ?? ''
+}
+
+/**
  * 給与大臣の会社コードの表示用ラベル (`0100 (有限会社 大石運輸)`、Refs #405)。
  *
  * 社員マスタの `company` はコードを保持するので、そのまま出すと読めない。
@@ -118,3 +128,6 @@ export function dtakoCompDisplay(compId: string): string {
   const found = DTAKO_COMPS.find(c => c.compId === compId)
   return found ? `${found.compId} (${found.label})` : compId
 }
+
+/** 会社を選ぶ `USelect` の選択肢 (空文字の value は入れない — USelect が拒むため)。 */
+export const DTAKO_COMP_OPTIONS = DTAKO_COMPS.map(c => ({ label: dtakoCompDisplay(c.compId), value: c.compId }))

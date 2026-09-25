@@ -16,7 +16,7 @@
  *
  * 認証は restraint-wage.vue の viewer 経路 (Refs #272) と同型: このページの
  * relay route は theearth に触らない (D1 のみ) ので、theearth ログインは不要。
- * 会社IDを指定して auth-worker JWT (viewer 経路) で閲覧する。
+ * 会社を選んで (DTAKO_COMPS) auth-worker JWT (viewer 経路) で閲覧する。1 案件 = 乗務員 1 名 (個別案件)。
  */
 import JSZip from 'jszip'
 import type { Driver } from '~/types'
@@ -75,6 +75,7 @@ import {
 } from '~/utils/litigation-changes'
 import { monthRange, type WageReportResponse } from '~/utils/restraint-wage-view'
 import { b64urlUtf8 } from '~/composables/useTheearthSession'
+import { DTAKO_COMP_OPTIONS, dtakoCompDisplay, knownDtakoCompId } from '~/utils/dtako-comps'
 import {
   addDriverCd,
   buildLitigationCaseSavePayload,
@@ -94,7 +95,8 @@ import {
 // 同じブラウザで restraint-wage.vue / restraint-fetch.vue 等 (theearth 系ページ) を
 // 既に使っていれば、その会社IDを引き継いで毎回の手入力を省く (RESTRAINT_VIEWER_COMP_STORAGE_KEY /
 // lastAccount の 2 段フォールバック)。**このページ自体は theearth にログインしない**ので
-// 引き継ぐのは値だけで、theearth セッションは使わない。
+// 引き継ぐのは値だけで、theearth セッションは使わない。引き継ぐのは DTAKO_COMPS に載っている値だけ
+// (knownDtakoCompId)。
 const VIEWER_COMP_STORAGE_KEY = 'litigation-viewer-comp'
 const RESTRAINT_VIEWER_COMP_STORAGE_KEY = 'restraint-viewer-comp'
 const viewerComp = ref('')
@@ -102,15 +104,18 @@ const viewerCompInput = ref('')
 const { lastAccount } = useRestraintSession()
 
 function startViewer() {
-  const comp = viewerCompInput.value.trim()
+  const comp = viewerCompInput.value
   if (!comp) return
   viewerComp.value = comp
   if (import.meta.client) localStorage.setItem(VIEWER_COMP_STORAGE_KEY, comp)
+  pageError.value = ''
+  loadCases()
 }
 
-/** 会社IDの選択に戻る (Refs 誤選択時の変更手段)。今の値は入力欄に残し、直しやすくする。 */
+/** 会社の選択に戻る (Refs 誤選択時の変更手段)。今の値は選択欄に残し、直しやすくする。 */
 function changeViewer() {
   viewerComp.value = ''
+  pageError.value = ''
   cases.value = []
   casesLoaded.value = false
   openCaseId.value = null
@@ -157,9 +162,11 @@ const drivers = ref<Driver[]>([])
 const selectedDriverId = ref('')
 
 onMounted(async () => {
-  viewerComp.value = localStorage.getItem(VIEWER_COMP_STORAGE_KEY)
-    || localStorage.getItem(RESTRAINT_VIEWER_COMP_STORAGE_KEY)
-    || lastAccount().compId
+  viewerComp.value = knownDtakoCompId(
+    localStorage.getItem(VIEWER_COMP_STORAGE_KEY),
+    localStorage.getItem(RESTRAINT_VIEWER_COMP_STORAGE_KEY),
+    lastAccount().compId,
+  )
   viewerCompInput.value = viewerComp.value
   // 他画面から引き継いだ値は次回のためにこのページ自身のキーにも書いておく
   if (viewerComp.value) localStorage.setItem(VIEWER_COMP_STORAGE_KEY, viewerComp.value)
@@ -209,23 +216,27 @@ function cancelForm() {
   showForm.value = false
 }
 
-/** 一覧に居る乗務員を選んで追加する。 */
+// 1 案件 = 乗務員 1 名 (訴訟は個別案件)。選び直すと置き換わる — 既存に積まず空配列へ足す。
+
+/** 一覧に居る乗務員を選ぶ。 */
 function addSelectedDriver() {
   if (!selectedDriverId.value) return
   const driver = drivers.value.find(d => d.id === selectedDriverId.value)
   if (!driver) return
-  const { driverCds, error } = addDriverCd(form.value.driverCds, driver.driver_cd)
+  const { driverCds, error } = addDriverCd([], driver.driver_cd)
   form.value.driverCds = driverCds
   driverAddError.value = error ?? ''
   selectedDriverId.value = ''
 }
 
-/** 一覧に居ない乗務員CDを手入力で追加する。 */
+/** 一覧に居ない乗務員CDを手入力で選ぶ。 */
 function addTypedDriver() {
-  const { driverCds, error } = addDriverCd(form.value.driverCds, driverCdInput.value)
-  form.value.driverCds = driverCds
+  const { driverCds, error } = addDriverCd([], driverCdInput.value)
   driverAddError.value = error ?? ''
-  if (!error) driverCdInput.value = ''
+  // 不正・空の入力で今の選択を消さない
+  if (driverCds.length === 0) return
+  form.value.driverCds = driverCds
+  driverCdInput.value = ''
 }
 
 function removeDriver(cd: string) {
@@ -235,6 +246,11 @@ function removeDriver(cd: string) {
 /** 乗務員CDに対応する氏名 (一覧に居れば)。手入力分は CD のまま表示する。 */
 function driverLabel(cd: string): string {
   return drivers.value.find(d => d.driver_cd === cd)?.driver_name ?? cd
+}
+
+/** 案件の乗務員の表示 (`氏名 (CD)`)。1 名制の前に作った複数名の案件は全員を `、` で並べる。 */
+function driversText(cds: readonly string[]): string {
+  return cds.map(cd => `${driverLabel(cd)} (${cd})`).join('、')
 }
 
 async function saveCase() {
@@ -811,18 +827,18 @@ function fmtDateTime(iso: string): string {
     <!-- 閲覧する会社ID の指定 (Refs #272 と同型: theearth ログイン不要) -->
     <UCard v-if="!viewerComp" class="max-w-md mb-4 print:hidden">
       <template #header>
-        <span class="font-medium">閲覧する会社IDを指定</span>
+        <span class="font-medium">閲覧する会社を選択</span>
       </template>
       <div class="flex items-center gap-2">
-        <UInput v-model="viewerCompInput" placeholder="会社ID (例: 1000)" class="w-40" @keyup.enter="startViewer" />
-        <UButton label="開始" :disabled="!viewerCompInput.trim()" @click="startViewer" />
+        <USelect v-model="viewerCompInput" :items="DTAKO_COMP_OPTIONS" placeholder="会社を選択" class="w-64" />
+        <UButton label="開始" :disabled="!viewerCompInput" @click="startViewer" />
       </div>
     </UCard>
 
     <template v-else>
       <div class="flex items-center justify-between mb-4 print:hidden">
         <span class="text-sm text-gray-500">
-          会社ID: {{ viewerComp }}
+          会社: {{ dtakoCompDisplay(viewerComp) }}
           <UButton icon="i-lucide-pencil" label="変更" variant="link" size="xs" class="ml-1" @click="changeViewer" />
         </span>
         <UButton icon="i-lucide-plus" label="新規作成" size="sm" @click="startNewCase" />
@@ -856,13 +872,13 @@ function fmtDateTime(iso: string): string {
         </div>
 
         <div>
-          <label class="block text-xs text-gray-500 mb-1">乗務員</label>
+          <label class="block text-xs text-gray-500 mb-1">乗務員 (1名)</label>
           <div class="flex items-center gap-2 flex-wrap">
             <DriverSearchSelect v-model="selectedDriverId" :drivers="drivers" placeholder="一覧から選ぶ" />
-            <UButton size="xs" label="追加" :disabled="!selectedDriverId" @click="addSelectedDriver" />
+            <UButton size="xs" label="選択" :disabled="!selectedDriverId" @click="addSelectedDriver" />
             <span class="text-xs text-gray-400">または</span>
             <UInput v-model="driverCdInput" size="sm" placeholder="乗務員CDを直接入力" class="w-40" @keyup.enter="addTypedDriver" />
-            <UButton size="xs" label="追加" variant="soft" :disabled="!driverCdInput.trim()" @click="addTypedDriver" />
+            <UButton size="xs" label="選択" variant="soft" :disabled="!driverCdInput.trim()" @click="addTypedDriver" />
           </div>
           <p v-if="driverAddError" class="text-xs text-red-600 mt-1">{{ driverAddError }}</p>
           <p v-if="fieldError('driverCds')" class="text-xs text-red-600 mt-1">{{ fieldError('driverCds') }}</p>
@@ -902,7 +918,7 @@ function fmtDateTime(iso: string): string {
             <tr class="border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50">
               <th class="text-left px-4 py-3 font-medium">名前</th>
               <th class="text-left px-4 py-3 font-medium">期間</th>
-              <th class="text-left px-4 py-3 font-medium">乗務員数</th>
+              <th class="text-left px-4 py-3 font-medium">乗務員</th>
               <th class="text-left px-4 py-3 font-medium">更新日時</th>
               <th class="text-left px-4 py-3 font-medium" />
             </tr>
@@ -928,7 +944,7 @@ function fmtDateTime(iso: string): string {
             >
               <td class="px-4 py-3 font-medium">{{ entry.name }}</td>
               <td class="px-4 py-3 text-gray-500">{{ entry.fromMonth }} 〜 {{ entry.toMonth }}</td>
-              <td class="px-4 py-3 text-gray-500">{{ entry.driverCds.length }}名</td>
+              <td class="px-4 py-3 text-gray-500">{{ driversText(entry.driverCds) }}</td>
               <td class="px-4 py-3 text-gray-500">{{ fmtDateTime(entry.updatedAt) }}</td>
               <td class="px-4 py-3 text-right whitespace-nowrap">
                 <UButton
@@ -953,7 +969,7 @@ function fmtDateTime(iso: string): string {
           <h3 class="text-lg font-bold">
             {{ openCase.name }}
             <span class="text-sm font-normal text-gray-500 ml-2">
-              {{ openCase.fromMonth }} 〜 {{ openCase.toMonth }} / {{ openCase.driverCds.length }}名
+              {{ openCase.fromMonth }} 〜 {{ openCase.toMonth }} / {{ driversText(openCase.driverCds) }}
             </span>
           </h3>
           <div class="flex items-center gap-1">
@@ -1231,8 +1247,7 @@ function fmtDateTime(iso: string): string {
       <div v-if="openCase" class="hidden print:block litigation-print" data-testid="litigation-print-sheet">
         <h1 class="text-base font-bold">訴訟準備: {{ openCase.name }}</h1>
         <div class="litigation-print-meta">
-          期間 {{ openCase.fromMonth }}〜{{ openCase.toMonth }} ({{ caseMonths.length }}か月) / 会社ID {{ viewerComp }} / 乗務員 {{ openCase.driverCds.length }}名:
-          <template v-for="(cd, i) in openCase.driverCds" :key="cd">{{ i > 0 ? '、' : '' }}{{ driverLabel(cd) }} ({{ cd }})</template>
+          期間 {{ openCase.fromMonth }}〜{{ openCase.toMonth }} ({{ caseMonths.length }}か月) / 会社 {{ dtakoCompDisplay(viewerComp) }} / 乗務員: {{ driversText(openCase.driverCds) }}
           <template v-if="printedAt"> / 印刷 {{ printedAt }}</template>
         </div>
         <div v-if="openCase.memo" class="litigation-print-meta">メモ: {{ openCase.memo }}</div>

@@ -144,7 +144,7 @@ beforeEach(() => {
   calls = []
   saved.length = 0
   localStorage.clear()
-  localStorage.setItem('litigation-viewer-comp', '1000')
+  localStorage.setItem('litigation-viewer-comp', '27324455')
   api.getDrivers.mockResolvedValue([{ id: 'd1', driver_cd: '1078', driver_name: '甲野太郎' }])
   // 1 月だけ勤務がある → 2 月は alc に運行 0 件
   api.getYTimePreview.mockResolvedValue({

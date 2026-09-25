@@ -14,8 +14,10 @@ import { monthRange } from './restraint-wage-view'
 export const LITIGATION_CASE_NAME_MAX_LENGTH = 100
 /** 期間の上限 (月数、両端含む。relay と同一)。 */
 export const LITIGATION_CASE_MAX_MONTHS = 60
-/** 乗務員の上限件数 (relay と同一)。 */
-export const LITIGATION_CASE_MAX_DRIVERS = 50
+/** 乗務員の上限件数。訴訟は個別案件なので 1 案件 = 1 名 (ユーザー決定 2026-09-25)。
+ * **relay は 50 のまま** — 1 名制の前に保存した複数名の案件も読めるように、形 (配列) と
+ * relay の検証は変えていない。複数名の案件は画面で編集して保存するときだけここで弾かれる。 */
+export const LITIGATION_CASE_MAX_DRIVERS = 1
 
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 const DRIVER_CD_RE = /^\d{1,8}$/
@@ -136,7 +138,7 @@ export function validateLitigationCaseForm(input: LitigationCaseFormInput): Liti
   }
 
   if (input.driverCds.length === 0) {
-    errors.push({ field: 'driverCds', message: '乗務員を1名以上追加してください' })
+    errors.push({ field: 'driverCds', message: '乗務員を選んでください' })
   }
   else if (input.driverCds.length > LITIGATION_CASE_MAX_DRIVERS) {
     errors.push({ field: 'driverCds', message: `乗務員は${LITIGATION_CASE_MAX_DRIVERS}名までです` })

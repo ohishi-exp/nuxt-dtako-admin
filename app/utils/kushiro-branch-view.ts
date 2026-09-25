@@ -66,6 +66,7 @@ import {
 import { DEPOT_KEYS, isKushiroLoadingLeg } from './kushiro-loading-legs'
 import type { DepotKey } from './depot-distance'
 import { MIN_WAGE_DEFAULT_KEY, type MinWageEntry, type MinWageMaster } from './restraint-wage-view'
+import { knownDtakoCompId } from './dtako-comps'
 
 // ---------------------------------------------------------------------------
 // 前提 (感度分析)
@@ -242,13 +243,14 @@ function compIdOf(raw: string): string {
   }
 }
 
-/** 会社ID を探す。見つからなければ空文字 (**呼び出し側は取得を諦める**)。 */
+/** 会社ID を探す。見つからなければ空文字 (**呼び出し側は取得を諦める**)。
+ * `DTAKO_COMPS` に無い値 (手入力時代の打ち間違い等) は読み飛ばして次の候補へ (`knownDtakoCompId`)。 */
 export function readViewerCompId(storage: Pick<Storage, 'getItem'> | null): string {
   if (storage === null) return ''
   for (const key of VIEWER_COMP_STORAGE_KEYS) {
     const raw = storage.getItem(key)
     if (raw === null || raw === '') continue
-    const compId = compIdOf(raw)
+    const compId = knownDtakoCompId(compIdOf(raw))
     if (compId !== '') return compId
   }
   return ''
