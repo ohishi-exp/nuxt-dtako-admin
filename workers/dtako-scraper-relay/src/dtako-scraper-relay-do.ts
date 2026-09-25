@@ -138,6 +138,7 @@ import {
   buildDeps,
   decideFoldTrigger,
   foldMonth,
+  judgeFoldScope,
   checkKyuyoAccess,
   FOLD_PAGE_MAX_DRIVERS,
   monthsCoveredByRange,
@@ -639,6 +640,53 @@ interface WorkEditPageRecord {
 function dvrJsonError(status: number, message: string): Response {
   return Response.json({ error: message }, { status });
 }
+
+/**
+ * **1 社ぶんの勤怠しか持たない口** (Refs #1133 c1133-8)。`dispatchRestraintApi` が
+ * record 確定直後に `judgeFoldScope` へ訊き、`KINTAI_COMP_ID` の会社でなければ
+ * (未設定・空・不一致とも) 403 にする。method は問わない。
+ *
+ * 入口の viewer 認可 (`authorizeRestraintViewer`) は「閲覧者がその会社を見てよいか」
+ * しか見ない。ところが下の口の取得先は**会社を受け取らない**ので、別の会社の
+ * 正規の閲覧者に `KINTAI_COMP_ID` の会社の記録 (運行NO・分数・打刻) が自社として出る:
+ *
+ * - GCP の読み書き — ichibanboshi の読み口は tenant を起動時設定 (`KINTAI_COMP_ID`
+ *   に対応する 1 社) に固定し `X-Tenant-ID` を読まない
+ * - オンプレの読み書き — 取得先 (`NUXT_ICHIBAN_*`) が 1 か所で会社を渡さず、
+ *   オンプレ自体も `KINTAI_COMP_ID` の会社の乗務員しか持たない
+ * - 上の口の写し (R2、`record.compId` 鍵) — 中身は上の 2 つから来ている
+ *
+ * **入れないもの**: `/kintai/alc-upload` (`record.compId` の theearth アカウントで
+ * 絞れる)・wage-snapshot / wage-range (ichibanboshi 側が comp_id で絞る)・
+ * wage-report (既定ソースの theearth 側は会社ごとに絞れているので止めず、
+ * `handleWageReport` が打刻の live-build と `source=gcp` だけを止める)・マスタ系。
+ */
+const KINTAI_SINGLE_COMP_PATHS = new Set([
+  // GCP (tenant 固定)
+  "/restraint-api/kintai/diff",
+  "/restraint-api/kintai/stale-months",
+  "/restraint-api/kintai/unko-gaps",
+  "/restraint-api/kintai/change-log",
+  "/restraint-api/kintai/refresh/timecard",
+  "/restraint-api/kintai/refresh/fold",
+  // オンプレ
+  "/restraint-api/kintai/fetch",
+  "/restraint-api/kintai/pdf-json",
+  "/restraint-api/timecard-compare",
+  "/restraint-api/kintai/kosoku-daily",
+  "/restraint-api/kintai/warm",
+  "/restraint-api/kintai/refresh/mysql",
+  "/restraint-api/kintai/day-events-lookup",
+  "/restraint-api/kintai/day-operations",
+  // 上の口の写し (R2)
+  "/restraint-api/kintai/archive",
+  "/restraint-api/kintai/diff-cache",
+]);
+
+/** `KINTAI_SINGLE_COMP_PATHS` と wage-report の打刻系を止めた時の文言。
+ * `judgeFoldScope` の `detail` (KINTAI_COMP_ID の値・fold 向けの文言入り) は閲覧者へ返さない。 */
+const KINTAI_SINGLE_COMP_FORBIDDEN =
+  "この会社では使えません (勤怠の記録は KINTAI_COMP_ID の1社分だけを持っています)";
 
 /**
  * 中継ハンドラの失敗を HTTP ステータスへ writeback するための型 (Refs #492 PR-A)。
@@ -4403,6 +4451,12 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!record) {
       return dvrJsonError(401, "セッションが無効か期限切れです。再ログインしてください");
     }
+    if (
+      KINTAI_SINGLE_COMP_PATHS.has(url.pathname) &&
+      !judgeFoldScope({ compId: record.compId, kintaiCompId: this.env.KINTAI_COMP_ID }).inScope
+    ) {
+      return dvrJsonError(403, KINTAI_SINGLE_COMP_FORBIDDEN);
+    }
 
     if (url.pathname === "/restraint-api/logout" && request.method === "POST") {
       await this.ctx.storage.delete(THEEARTH_SESSION_KEY);
@@ -4529,7 +4583,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // 打刻の変更記録 (訴訟準備「変更記録」タブ、Refs #1133 c1133-6)。ichibanboshi の
     // 読み口が単一tenant固定 (X-Tenant-IDを読まない) なので、buildKintaiRelayContext の
     // tenant判定だけでは足りず、record.compId をKINTAI_COMP_IDと直接突き合わせる
-    // (handleKintaiChangeLog 内、下記)。
+    // (上の KINTAI_SINGLE_COMP_PATHS の判定)。
     if (url.pathname === "/restraint-api/kintai/change-log" && request.method === "GET") {
       return this.handleKintaiChangeLog(record!, url);
     }
@@ -6991,26 +7045,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
    * GET /restraint-api/kintai/change-log?driver=&from=&to= — 打刻の変更記録
    * (「取り込んだ時点の値を基準に、あとで変わった記録」、Refs #1133 c1133-6)。
    *
-   * ★★ ここだけ `buildKintaiRelayContext` の tenant 判定 (comp_id→tenant_id の
-   * 逆引き) では足りない。**ichibanboshi のこの読み口は tenant を設定
-   * (`KINTAI_COMP_ID` に対応する 1 社) に固定していて `X-Tenant-ID` を読まない**
-   * (`read_tenant_of`)。tenant 判定だけを通すと、KINTAI_COMP_ID と違う会社の
-   * viewer にも固定 tenant の記録がそのまま見えてしまう。**`record.compId` を
-   * `KINTAI_COMP_ID` へ直接突き合わせる** (未設定・空も 403、fail-closed)。
-   * `KINTAI_COMP_ID` 未設定を「対象外」と丸めないのは fold の判定
-   * ([`judgeFoldScope`]) と同じ理由だが、ここは書き込みではなく閲覧なので
-   * 403 (と理由) を返すだけでよい。
+   * ★★ `buildKintaiRelayContext` の tenant 判定 (comp_id→tenant_id の逆引き) では
+   * 足りない。**ichibanboshi のこの読み口は tenant を設定 (`KINTAI_COMP_ID` に対応する
+   * 1 社) に固定していて `X-Tenant-ID` を読まない** (`read_tenant_of`)。
+   * `record.compId` と `KINTAI_COMP_ID` の突き合わせは **dispatch の集合
+   * (`KINTAI_SINGLE_COMP_PATHS`) で判定**済み — ここに来るのは対象の会社だけ。
    */
   private async handleKintaiChangeLog(record: TheearthSessionRecord, url: URL): Promise<Response> {
-    const kintaiCompId = (this.env.KINTAI_COMP_ID ?? "").trim();
-    if (!kintaiCompId || record.compId !== kintaiCompId) {
-      return dvrJsonError(
-        403,
-        "この会社の打刻の変更記録は読めません " +
-          "(ichibanboshi の読み口は KINTAI_COMP_ID に対応する1社に固定されています)",
-      );
-    }
-
     const driver = url.searchParams.get("driver") || "";
     const from = url.searchParams.get("from") || "";
     const to = url.searchParams.get("to") || "";
@@ -9004,6 +9045,10 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     tracker?: CacheStateTracker,
     /** `source=gcp` 用。`buildKintaiSummariesLive` の同名引数へそのまま渡す。 */
     skipKosoku = false,
+    /** `KINTAI_COMP_ID` の会社でない (Refs #1133 c1133-8)。打刻はオンプレの 1 社ぶん
+     * しか無いので live-build を呼ばず「空の月」にする — 失敗ではないので
+     * `kintaiLive: true` (未設定の warning は呼び出し側が出す)。 */
+    skipTimecard = false,
   ): Promise<{
     current: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
     prev: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>>;
@@ -9025,13 +9070,15 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     // (`wage-source`) は互いに独立なのに直列で待っており、`source` が
     // kintai-live 1,762ms + wage-source 1,083ms = 2,855ms とほぼ完全な足し算に
     // なっていた。下の `resolveLive()` を await する場所まで走らせ続ける。
-    const livePromise = measurePhase(timer, "kintai-live", () =>
-      this.buildKintaiSummariesLive(compId, ym, prevYm, cache, timer, tracker, skipKosoku),
-    );
     const emptyKintaiMonth: Awaited<ReturnType<DtakoScraperRelayDO["loadMonthSummaries"]>> = {
       summaries: [],
       noDataDrivers: [],
     };
+    const livePromise = skipTimecard
+      ? Promise.resolve({ current: emptyKintaiMonth, prev: emptyKintaiMonth, kosokuCurrent: null })
+      : measurePhase(timer, "kintai-live", () =>
+          this.buildKintaiSummariesLive(compId, ym, prevYm, cache, timer, tracker, skipKosoku),
+        );
     /** timecard 側の結果 (**1 度だけ**評価する — 失敗ログを二重に出さない)。 */
     let livePartsPromise: Promise<{
       kintaiCurrent: typeof emptyKintaiMonth;
@@ -9334,6 +9381,14 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (!parsed) return dvrJsonError(400, "month は YYYY-MM で指定してください");
     const { year, month, ym } = parsed;
     const restraintSource = url.searchParams.get("source") === "gcp" ? "gcp" : "current";
+    // 打刻 (オンプレ) と GCP の day_summaries は KINTAI_COMP_ID の 1 社ぶんしか無い
+    // (KINTAI_SINGLE_COMP_PATHS の docs)。wage-report 自体は theearth 側が会社ごとに
+    // 絞れているので止めず、`source=gcp` は 403 (他社の分数で計算した値を出さない)、
+    // 既定ソースは打刻の live-build だけを止める
+    const kintaiScope = judgeFoldScope({ compId: record.compId, kintaiCompId: this.env.KINTAI_COMP_ID });
+    if (restraintSource === "gcp" && !kintaiScope.inScope) {
+      return dvrJsonError(403, KINTAI_SINGLE_COMP_FORBIDDEN);
+    }
     // フェーズ計測 (Refs #543 PR-1)。挙動は変えない — ログ 1 行と Server-Timing だけ
     const timer = new PhaseTimer();
     // キャッシュの hit/miss/live を phase log の cacheState に載せる (Refs #543 PR-2)
@@ -9392,6 +9447,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
             timer,
             tracker,
             restraintSource === "gcp",
+            !kintaiScope.inScope,
           ),
         ),
         // ★ GCP は素材読みと**同時**に走らせる (2026-08-04)。合流を待ってから足すと
@@ -9413,6 +9469,11 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         "タイムカード側の live-build に失敗したため、この月はタイムカード由来の行を表示していません"
           + " (古い写しにはフォールバックしません。取り込み先の疎通を確認してください)",
       );
+    }
+    // 未設定は「対象外」に丸めない (judgeFoldScope の docs、#944) — 本番で
+    // KINTAI_COMP_ID が落ちた時に対象会社の打刻の行が黙って消えるのを防ぐ
+    if (!kintaiScope.inScope && kintaiScope.reason === "not_configured") {
+      warnings.push("KINTAI_COMP_ID が未設定のため打刻の行を組んでいません");
     }
     // 前月 days (週40h の月初跨ぎ週用) も同じ優先順で合流する — 当月と別の source を
     // 混ぜると跨ぎ週の実働が二重に積まれる
