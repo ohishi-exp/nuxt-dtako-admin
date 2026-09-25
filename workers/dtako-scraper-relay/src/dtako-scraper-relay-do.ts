@@ -141,6 +141,8 @@ import {
   checkKyuyoAccess,
   FOLD_PAGE_MAX_DRIVERS,
   monthsCoveredByRange,
+  kintaiChangeLogInputError,
+  relayKintaiChangeLog,
   relayKintaiDaySummaries,
   relayKintaiShiftOverlaps,
   relayWageRangeGet,
@@ -4524,6 +4526,13 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     if (url.pathname === "/restraint-api/kintai/unko-gaps" && request.method === "GET") {
       return this.handleKintaiUnkoGaps(record!, url);
     }
+    // 打刻の変更記録 (訴訟準備「変更記録」タブ、Refs #1133 c1133-6)。ichibanboshi の
+    // 読み口が単一tenant固定 (X-Tenant-IDを読まない) なので、buildKintaiRelayContext の
+    // tenant判定だけでは足りず、record.compId をKINTAI_COMP_IDと直接突き合わせる
+    // (handleKintaiChangeLog 内、下記)。
+    if (url.pathname === "/restraint-api/kintai/change-log" && request.method === "GET") {
+      return this.handleKintaiChangeLog(record!, url);
+    }
     if (url.pathname === "/restraint-api/kintai/refresh/timecard" && request.method === "POST") {
       return this.handleKintaiRefreshTimecard(record!, url);
     }
@@ -6975,6 +6984,55 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
     } catch (err) {
       console.error(JSON.stringify({ kintai_unko_gaps: "error", month, error: describeUnknownError(err) }));
       return dvrJsonError(502, err instanceof Error ? err.message : "取り込み漏れ候補の取得に失敗しました");
+    }
+  }
+
+  /**
+   * GET /restraint-api/kintai/change-log?driver=&from=&to= — 打刻の変更記録
+   * (「取り込んだ時点の値を基準に、あとで変わった記録」、Refs #1133 c1133-6)。
+   *
+   * ★★ ここだけ `buildKintaiRelayContext` の tenant 判定 (comp_id→tenant_id の
+   * 逆引き) では足りない。**ichibanboshi のこの読み口は tenant を設定
+   * (`KINTAI_COMP_ID` に対応する 1 社) に固定していて `X-Tenant-ID` を読まない**
+   * (`read_tenant_of`)。tenant 判定だけを通すと、KINTAI_COMP_ID と違う会社の
+   * viewer にも固定 tenant の記録がそのまま見えてしまう。**`record.compId` を
+   * `KINTAI_COMP_ID` へ直接突き合わせる** (未設定・空も 403、fail-closed)。
+   * `KINTAI_COMP_ID` 未設定を「対象外」と丸めないのは fold の判定
+   * ([`judgeFoldScope`]) と同じ理由だが、ここは書き込みではなく閲覧なので
+   * 403 (と理由) を返すだけでよい。
+   */
+  private async handleKintaiChangeLog(record: TheearthSessionRecord, url: URL): Promise<Response> {
+    const kintaiCompId = (this.env.KINTAI_COMP_ID ?? "").trim();
+    if (!kintaiCompId || record.compId !== kintaiCompId) {
+      return dvrJsonError(
+        403,
+        "この会社の打刻の変更記録は読めません " +
+          "(ichibanboshi の読み口は KINTAI_COMP_ID に対応する1社に固定されています)",
+      );
+    }
+
+    const driver = url.searchParams.get("driver") || "";
+    const from = url.searchParams.get("from") || "";
+    const to = url.searchParams.get("to") || "";
+    // ★ 400 日上限の判定も含めて kintaiChangeLogInputError に一本化する
+    // (relayKintaiChangeLog 内部の検証と二重実装にしない、上記 docs 参照)。
+    // ここで先に 400 を返しておけば、下の catch は「上流の失敗だけ」になり
+    // instanceof での 400/502 の撃ち分けが要らなくなる。
+    const inputError = kintaiChangeLogInputError({ driver, from, to });
+    if (inputError) return dvrJsonError(400, inputError);
+
+    const ctx = await this.buildKintaiRelayContext(record.compId, "kintai_change_log");
+    if (ctx instanceof Response) return ctx;
+
+    try {
+      const log = await relayKintaiChangeLog(ctx.deps, { driver, from, to });
+      console.log(JSON.stringify({ kintai_change_log: "ok", driver, from, to }));
+      return Response.json(log);
+    } catch (err) {
+      console.error(
+        JSON.stringify({ kintai_change_log: "error", driver, from, to, error: describeUnknownError(err) }),
+      );
+      return dvrJsonError(502, err instanceof Error ? err.message : "打刻の変更記録の取得に失敗しました");
     }
   }
 

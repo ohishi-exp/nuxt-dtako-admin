@@ -78,6 +78,12 @@ const STALE_MONTHS_PATH = "/api/kintai/stale-months";
  * 叩いてはいけない。呼び出しタイミングの制御は呼び出し元 (画面) の責務。
  */
 const UNKO_GAPS_PATH = "/api/kintai/unko-gaps";
+/**
+ * 打刻の変更記録を読む口 (rust-ichibanboshi、Refs ohishi-exp/rust-ichibanboshi#320)。
+ * `logic_version` を動かさない場所 (`kintai`/`kosoku` で始まらないファイル) に
+ * 置かれている想定 — 呼ぶだけのこの中継はどこに置かれても影響を受けない。
+ */
+const CHANGE_LOG_PATH = "/api/kintai/change-log";
 
 /** 窓の既定の月数 — **当月 + 前月**。始業 / 終業 の後追い修正を拾う幅。 */
 export const DEFAULT_MONTH_COUNT = 2;
@@ -775,6 +781,77 @@ export async function relayKintaiUnkoGaps(
   const q = new URLSearchParams({ month: input.month });
   if (input.driverCd) q.set("driver_cd", input.driverCd);
   return readJson<unknown>(await deps.gcp(`${UNKO_GAPS_PATH}?${q}`), "gcp kintai unko-gaps");
+}
+
+const CHANGE_LOG_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const CHANGE_LOG_DRIVER_RE = /^\d+$/;
+
+/** 1 回の呼び出しで許す `from`〜`to` (両端含む) の日数 (受け側の上限)。 */
+export const CHANGE_LOG_MAX_DAYS = 400;
+
+export interface KintaiChangeLogInput {
+  /** 乗務員CD (数字の文字列)。 */
+  driver: string;
+  /** `YYYY-MM-DD` */
+  from: string;
+  /** `YYYY-MM-DD` */
+  to: string;
+}
+
+/** `from`..`to` (両端含む) の日数。壊れた日付 (規則に合う桁でも実在しない暦日等) は `null`。 */
+function inclusiveDaySpan(from: string, to: string): number | null {
+  const a = new Date(`${from}T00:00:00Z`);
+  const b = new Date(`${to}T00:00:00Z`);
+  if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return null;
+  return Math.round((b.getTime() - a.getTime()) / 86_400_000) + 1;
+}
+
+/**
+ * `KintaiChangeLogInput` の形式検証。**問題が無ければ `null`。**
+ *
+ * ★ [`relayKintaiChangeLog`] 内部の検証と DO ハンドラの事前検証の両方から呼ぶ、
+ * 唯一の判定元 (二重実装にしない)。呼び出し側 (DO) がここで先に 400 を返せば、
+ * 以降 `relayKintaiChangeLog` が投げる [`KintaiRelayError`] は**上流の失敗
+ * (readJson の非 2xx / parse 失敗) だけ**になり、「400 にすべき入力エラー」と
+ * 「502 にすべき上流エラー」を `instanceof KintaiRelayError` だけでは区別できない
+ * 事故を避けられる (この関数の呼び出し元は入力検証を通過済みとして扱ってよい)。
+ */
+export function kintaiChangeLogInputError(input: KintaiChangeLogInput): string | null {
+  if (!CHANGE_LOG_DRIVER_RE.test(input.driver)) {
+    return `driver は数字で指定してください: ${input.driver}`;
+  }
+  if (!CHANGE_LOG_DATE_RE.test(input.from) || !CHANGE_LOG_DATE_RE.test(input.to)) {
+    return `from/to は YYYY-MM-DD で指定してください: ${input.from}..${input.to}`;
+  }
+  if (input.from > input.to) {
+    return `from は to 以前にしてください: ${input.from} > ${input.to}`;
+  }
+  const span = inclusiveDaySpan(input.from, input.to);
+  if (span === null || span > CHANGE_LOG_MAX_DAYS) {
+    return `from〜to は ${CHANGE_LOG_MAX_DAYS} 日以内にしてください: ${input.from}..${input.to}`;
+  }
+  return null;
+}
+
+/**
+ * 打刻の変更記録 (「取り込んだ時点の値を基準に、あとで変わった記録」) を読む
+ * (Refs #1133 c1133-6)。中身は [`relayKintaiUnkoGaps`] と同じ型 — 読むだけ、
+ * 受け側に `POST` は無い。
+ *
+ * 応答は**そのまま返す**。`recording_since` が `null` (=まだ1件も記録されていない)
+ * かどうかの読み分けは呼び出し側 (画面) の責務 — ここで丸めない。
+ *
+ * `driver`/`from`/`to` の形式検証は [`kintaiChangeLogInputError`] に持つ (呼び出し側の
+ * DO ハンドラでも事前検証するが、この関数を直接使う呼び出し元のための防御)。
+ */
+export async function relayKintaiChangeLog(
+  deps: Pick<KintaiRelayDeps, "gcp">,
+  input: KintaiChangeLogInput,
+): Promise<unknown> {
+  const inputError = kintaiChangeLogInputError(input);
+  if (inputError) throw new KintaiRelayError(inputError);
+  const q = new URLSearchParams({ driver: input.driver, from: input.from, to: input.to });
+  return readJson<unknown>(await deps.gcp(`${CHANGE_LOG_PATH}?${q}`), "gcp kintai change-log");
 }
 
 // ---------------------------------------------------------------------------

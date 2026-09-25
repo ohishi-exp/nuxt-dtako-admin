@@ -8,6 +8,8 @@ import {
   relayWageSnapshotPut,
   relayKintaiStaleMonths,
   relayKintaiUnkoGaps,
+  relayKintaiChangeLog,
+  CHANGE_LOG_MAX_DAYS,
   windowMonths,
   jstMonth,
   tenantForCompId,
@@ -844,6 +846,108 @@ describe("relayKintaiUnkoGaps (Refs #623-2)", () => {
     await expect(relayKintaiUnkoGaps({ gcp }, { month: "2026-06" })).rejects.toThrow(
       /parse failed/,
     );
+  });
+});
+
+const CHANGE_LOG = "/api/kintai/change-log";
+
+describe("relayKintaiChangeLog (Refs #1133 c1133-6)", () => {
+  /** 受け側の確定済みの形 (issue 本文の応答例)。 */
+  const SAMPLE = {
+    driver: "1078",
+    from: "2026-06-01",
+    to: "2026-06-30",
+    recording_since: "2026-09-25",
+    changes: [
+      {
+        driver_cd: 1078,
+        date: "2026-06-05",
+        recorded_at: "2026-06-06T01:00:00Z",
+        before: [{ occurred_at: "2026-06-05T08:00:00Z", state: "始業", source: "timecard", unko_no: null }],
+        after: [{ occurred_at: "2026-06-05T07:30:00Z", state: "始業", source: "timecard", unko_no: null }],
+      },
+    ],
+  };
+
+  it("**GET で読むだけ。** driver/from/to を query に乗せ、応答はそのまま返す (丸めない)", async () => {
+    const { gcp, calls } = gcpStub({ [CHANGE_LOG]: SAMPLE });
+    const r = await relayKintaiChangeLog({ gcp }, { driver: "1078", from: "2026-06-01", to: "2026-06-30" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.method).toBeUndefined();
+    expect(calls[0]!.body).toBeUndefined();
+    const url = new URL(`https://x${calls[0]!.path}`);
+    expect(url.pathname).toBe(CHANGE_LOG);
+    expect(url.searchParams.get("driver")).toBe("1078");
+    expect(url.searchParams.get("from")).toBe("2026-06-01");
+    expect(url.searchParams.get("to")).toBe("2026-06-30");
+    expect(r).toEqual(SAMPLE);
+  });
+
+  it("driver が数字でなければ 1 回も叩かずに落ちる", async () => {
+    const { gcp, calls } = gcpStub({});
+    await expect(
+      relayKintaiChangeLog({ gcp }, { driver: "D1", from: "2026-06-01", to: "2026-06-30" }),
+    ).rejects.toBeInstanceOf(KintaiRelayError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("from/to が YYYY-MM-DD でなければ 1 回も叩かずに落ちる", async () => {
+    const { gcp, calls } = gcpStub({});
+    await expect(
+      relayKintaiChangeLog({ gcp }, { driver: "1078", from: "2026-6-1", to: "2026-06-30" }),
+    ).rejects.toBeInstanceOf(KintaiRelayError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("from が to より後ろなら 1 回も叩かずに落ちる", async () => {
+    const { gcp, calls } = gcpStub({});
+    await expect(
+      relayKintaiChangeLog({ gcp }, { driver: "1078", from: "2026-06-30", to: "2026-06-01" }),
+    ).rejects.toBeInstanceOf(KintaiRelayError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it(`from〜to が ${CHANGE_LOG_MAX_DAYS} 日を超えたら 1 回も叩かずに落ちる`, async () => {
+    const { gcp, calls } = gcpStub({});
+    // 2025-01-01 〜 2026-02-05 は 401 日 (400 日を 1 日超える)
+    await expect(
+      relayKintaiChangeLog({ gcp }, { driver: "1078", from: "2025-01-01", to: "2026-02-05" }),
+    ).rejects.toThrow(new RegExp(`${CHANGE_LOG_MAX_DAYS} 日以内`));
+    expect(calls).toHaveLength(0);
+  });
+
+  it(`from〜to が ちょうど ${CHANGE_LOG_MAX_DAYS} 日 (両端含む) なら通る`, async () => {
+    // 2025-01-01 〜 2026-02-04 は 400 日 (両端含む)
+    const { gcp, calls } = gcpStub({ [CHANGE_LOG]: SAMPLE });
+    await relayKintaiChangeLog({ gcp }, { driver: "1078", from: "2025-01-01", to: "2026-02-04" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("規則には合うが実在しない暦日 (壊れた日付) は 1 回も叩かずに落ちる — from/to どちらが壊れていても", async () => {
+    const { gcp, calls } = gcpStub({});
+    await expect(
+      relayKintaiChangeLog({ gcp }, { driver: "1078", from: "2026-13-40", to: "2026-06-30" }),
+    ).rejects.toBeInstanceOf(KintaiRelayError);
+    await expect(
+      relayKintaiChangeLog({ gcp }, { driver: "1078", from: "2026-01-01", to: "2026-01-32" }),
+    ).rejects.toBeInstanceOf(KintaiRelayError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("どちら側が落ちたかを本文の先頭付きで返す", async () => {
+    const { gcp } = gcpStub({ [CHANGE_LOG]: () => new Response("boom", { status: 502 }) });
+    await expect(
+      relayKintaiChangeLog({ gcp }, { driver: "1078", from: "2026-06-01", to: "2026-06-30" }),
+    ).rejects.toThrow(/gcp kintai change-log: status 502: boom/);
+  });
+
+  it("JSON でない応答は parse failed で落とす", async () => {
+    const { gcp } = gcpStub({
+      [CHANGE_LOG]: () => new Response("<html>", { status: 200 }),
+    });
+    await expect(
+      relayKintaiChangeLog({ gcp }, { driver: "1078", from: "2026-06-01", to: "2026-06-30" }),
+    ).rejects.toThrow(/parse failed/);
   });
 });
 
