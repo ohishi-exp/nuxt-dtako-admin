@@ -20,7 +20,7 @@
  */
 import JSZip from 'jszip'
 import type { Driver } from '~/types'
-import { getDrivers, getYTimePreview, currentAccessToken } from '~/utils/api'
+import { getDrivers, getYTimePreview, getDtakoOperationChanges, currentAccessToken } from '~/utils/api'
 import { caughtErrorStatus, describeCaughtError, describeResponseFailure } from '~/utils/api-error'
 import { downloadBlob } from '~/utils/download-blob'
 import {
@@ -57,6 +57,22 @@ import {
   type LitigationImportOutcome,
 } from '~/utils/litigation-errors'
 import { parseKintaiUnkoGaps, type KintaiUnkoGaps } from '~/utils/kintai-unko-gaps'
+import {
+  alcRecordingSinceNotice,
+  buildAlcChangeRows,
+  buildKintaiChangeRows,
+  KINTAI_CHANGE_LOG_FORBIDDEN_NOTICE,
+  kintaiRecordingSinceNotice,
+  LITIGATION_CHANGE_LOG_MAX_DAYS,
+  litigationCaseDateBounds,
+  LITIGATION_CHANGES_CSV_FILENAME,
+  litigationChangesCsv,
+  mergeLitigationChangeRows,
+  parseAlcOperationChanges,
+  parseKintaiChangeLog,
+  splitDateRangeByMaxDays,
+  type LitigationChangeRow,
+} from '~/utils/litigation-changes'
 import { monthRange, type WageReportResponse } from '~/utils/restraint-wage-view'
 import { b64urlUtf8 } from '~/composables/useTheearthSession'
 import {
@@ -253,6 +269,7 @@ async function deleteCase(entry: LitigationCaseRecord) {
 const TABS = [
   { key: 'output', label: '出力' },
   { key: 'errors', label: 'エラー' },
+  { key: 'changes', label: '変更記録' },
 ] as const
 type TabKey = typeof TABS[number]['key']
 const activeTab = ref<TabKey>('output')
@@ -359,15 +376,18 @@ async function buildOutputZip() {
     // エラー一覧 (エラータブの今の表) も入れる。Y時間の欠けはいま作った結果で埋まり、
     // エラータブで検知を実行していない列は「未実行」のまま出る (0 件とは書かない)
     zip.file(LITIGATION_ERRORS_CSV_FILENAME, errorsCsvText())
+    // 変更記録 (変更記録タブで「検知を実行」していなければ、その旨を備考に書いた空表になる)
+    zip.file(LITIGATION_CHANGES_CSV_FILENAME, changesCsvText())
     const blob = await zip.generateAsync({ type: 'blob' })
     const zipName = litigationZipFilename(target.name, new Date())
     downloadBlob(blob, zipName)
+    const csvNames = `${LITIGATION_ERRORS_CSV_FILENAME} / ${LITIGATION_CHANGES_CSV_FILENAME}`
     if (files.length === 0) {
-      // Excel が無くてもエラー一覧は成果物なので保存はする。ただし成功の見た目にしない
-      outputZipError.value = `Excel が 1 冊もできませんでした (下の表の理由を見てください)。${zipName} には ${LITIGATION_ERRORS_CSV_FILENAME} だけを入れて保存しました`
+      // Excel が無くても CSV 2 本は成果物なので保存はする。ただし成功の見た目にしない
+      outputZipError.value = `Excel が 1 冊もできませんでした (下の表の理由を見てください)。${zipName} には ${csvNames} だけを入れて保存しました`
       return
     }
-    outputZipMessage.value = `${zipName} を保存しました (Excel ${files.length} / ${chunks.length} 冊 + ${LITIGATION_ERRORS_CSV_FILENAME})`
+    outputZipMessage.value = `${zipName} を保存しました (Excel ${files.length} / ${chunks.length} 冊 + ${csvNames})`
   }
   catch (e) {
     outputZipError.value = `ZIP を組めませんでした: ${describeCaughtError(e, OUTPUT_RETRY)}`
@@ -579,6 +599,136 @@ function errorsCsvText(): string {
     cd => drivers.value.find(d => d.driver_cd === cd)?.driver_name ?? '',
     chunkWarnings.value,
   )
+}
+
+// --- 変更記録タブ: 打刻 (relay) + 運行 (alc-proxy) を 1 つの表にまとめる ---
+// litigation-changes.ts の doc 参照。「取り込んだ時点の値を基準に、あとで変わった記録」を
+// 案件の乗務員ごとに読む (期間は案件の開始月初〜終了月末)。
+const changesRows = ref<LitigationChangeRow[]>([])
+const changesRunning = ref(false)
+const changesFinished = ref(false)
+const changesKintaiForbidden = ref(false)
+const changesKintaiRecordingSince = ref<string | null>(null)
+/** 403 以外で 1 回でも読めた (= recordingSince が意味を持つ) か */
+const changesKintaiRecordingSinceKnown = ref(false)
+const changesKintaiErrors = ref<string[]>([])
+const changesAlcRecordingSince = ref<string | null>(null)
+const changesAlcRecordingSinceKnown = ref(false)
+const changesAlcErrors = ref<string[]>([])
+
+// 別の案件を開いた・案件を編集して期間/乗務員が変わったら、前の結果は捨てる
+watch(() => [openCase.value?.caseId, openCase.value?.updatedAt], () => {
+  if (changesRunning.value) return
+  changesRows.value = []
+  changesRunning.value = false
+  changesFinished.value = false
+  changesKintaiForbidden.value = false
+  changesKintaiRecordingSince.value = null
+  changesKintaiRecordingSinceKnown.value = false
+  changesKintaiErrors.value = []
+  changesAlcRecordingSince.value = null
+  changesAlcRecordingSinceKnown.value = false
+  changesAlcErrors.value = []
+})
+
+const CHANGES_RETRY = '「検知を実行」を押してやり直してください'
+
+/** 打刻の記録開始日/403/読めなかった旨の文言。「変更なし」「記録が無い」
+ * 「読めなかった」を混同しない (map skill「PR の基準」(7))。 */
+const kintaiChangesNotice = computed(() => {
+  if (changesKintaiForbidden.value) return KINTAI_CHANGE_LOG_FORBIDDEN_NOTICE
+  if (!changesKintaiRecordingSinceKnown.value && changesKintaiErrors.value.length > 0) {
+    return `打刻の変更記録を読めませんでした: ${changesKintaiErrors.value[0]}`
+  }
+  return kintaiRecordingSinceNotice(changesKintaiRecordingSince.value)
+})
+const alcChangesNotice = computed(() => {
+  if (!changesAlcRecordingSinceKnown.value && changesAlcErrors.value.length > 0) {
+    return `運行の変更記録を読めませんでした: ${changesAlcErrors.value[0]}`
+  }
+  return alcRecordingSinceNotice(changesAlcRecordingSince.value)
+})
+/** CSV (画面と ZIP 共通) に添える備考。検知を実行していなければ表が空である理由を書く。 */
+const changesNotices = computed<string[]>(() => {
+  if (!changesFinished.value) return ['変更記録タブで「検知を実行」を押していないため、この表は空です。']
+  const out = [kintaiChangesNotice.value]
+  if (!changesKintaiForbidden.value && changesKintaiErrors.value.length > 0) {
+    out.push(`打刻の変更記録の一部が読めませんでした (${changesKintaiErrors.value.length} 件): ${changesKintaiErrors.value.join(' / ')}`)
+  }
+  out.push(alcChangesNotice.value)
+  if (changesAlcErrors.value.length > 0) {
+    out.push(`運行の変更記録の一部が読めませんでした (${changesAlcErrors.value.length} 件): ${changesAlcErrors.value.join(' / ')}`)
+  }
+  return out
+})
+
+/** 案件の乗務員ごとに打刻・運行の変更記録を読み、1 つの表にまとめる。
+ * 打刻は relay の 400 日上限があるので `splitDateRangeByMaxDays` で分けて読む。
+ * 1 名ずつ・打刻→運行の順に直列で叩く (theearth には触らないが、同時多発で
+ * 上流に負荷をかけないため他の検知と同じ流儀に揃える)。 */
+async function runChangesFetch() {
+  const target = openCase.value
+  if (!target || changesRunning.value) return
+  changesRunning.value = true
+  changesFinished.value = false
+  changesRows.value = []
+  changesKintaiForbidden.value = false
+  changesKintaiRecordingSince.value = null
+  changesKintaiRecordingSinceKnown.value = false
+  changesKintaiErrors.value = []
+  changesAlcRecordingSince.value = null
+  changesAlcRecordingSinceKnown.value = false
+  changesAlcErrors.value = []
+  const { from, to } = litigationCaseDateBounds(target.fromMonth, target.toMonth)
+  const kintaiRanges = splitDateRangeByMaxDays(from, to, LITIGATION_CHANGE_LOG_MAX_DAYS)
+  const kintaiEntries: ReturnType<typeof parseKintaiChangeLog>['changes'] = []
+  const alcEntries: ReturnType<typeof parseAlcOperationChanges>['changes'] = []
+  try {
+    for (const driverCd of target.driverCds) {
+      if (!changesKintaiForbidden.value) {
+        for (const range of kintaiRanges) {
+          try {
+            const res = await $fetch<unknown>('/restraint-api/kintai/change-log', {
+              headers: authHeaders(),
+              query: { driver: driverCd, from: range.from, to: range.to },
+            })
+            const parsed = parseKintaiChangeLog(res)
+            kintaiEntries.push(...parsed.changes)
+            changesKintaiRecordingSince.value = parsed.recordingSince
+            changesKintaiRecordingSinceKnown.value = true
+          }
+          catch (e) {
+            if (caughtErrorStatus(e) === 403) {
+              // 会社ごとの判定 (KINTAI_COMP_ID) — 一度弾かれたら以降は叩かない
+              changesKintaiForbidden.value = true
+              break
+            }
+            changesKintaiErrors.value.push(`${driverCd} ${range.from}〜${range.to}: ${describeCaughtError(e, CHANGES_RETRY)}`)
+          }
+        }
+      }
+      try {
+        const res = await getDtakoOperationChanges(driverCd, from, to)
+        const parsed = parseAlcOperationChanges(res)
+        alcEntries.push(...parsed.changes)
+        changesAlcRecordingSince.value = parsed.recordingSince
+        changesAlcRecordingSinceKnown.value = true
+      }
+      catch (e) {
+        changesAlcErrors.value.push(`${driverCd}: ${describeCaughtError(e, CHANGES_RETRY)}`)
+      }
+    }
+    changesRows.value = mergeLitigationChangeRows(buildKintaiChangeRows(kintaiEntries), buildAlcChangeRows(alcEntries))
+  }
+  finally {
+    changesRunning.value = false
+    changesFinished.value = true
+  }
+}
+
+/** 変更記録 CSV (ZIP に入れる)。 */
+function changesCsvText(): string {
+  return litigationChangesCsv(changesRows.value, changesNotices.value)
 }
 
 const CHECK_STATE_CLASS: Record<LitigationCheckState, string> = {
@@ -808,7 +958,7 @@ function fmtDateTime(iso: string): string {
             案件の乗務員 × 期間ぶんの Y時間 Excel (京都ソフト案件のテンプレ) を作り、1 つの ZIP で保存します。
             1 冊 = 乗務員 1 名 × 最大 12 か月 (開始月から 12 か月ごとに区切ります)。
             1 冊あたり 5〜15 秒かかります。運行 0 件・alc に未登録・失敗の冊は ZIP に入れず、下の表に残します。
-            ZIP には {{ LITIGATION_ERRORS_CSV_FILENAME }} (エラータブの表) も入れます — エラータブで検知を実行していない列は「未実行」と出ます。
+            ZIP には {{ LITIGATION_ERRORS_CSV_FILENAME }} (エラータブの表) と {{ LITIGATION_CHANGES_CSV_FILENAME }} (変更記録タブの表) も入れます — どちらもタブで検知を実行していない場合は、その旨を書いた空の表になります。
           </p>
 
           <div class="flex items-center gap-3 flex-wrap">
@@ -983,6 +1133,77 @@ function fmtDateTime(iso: string): string {
             </div>
           </div>
         </div>
+
+        <!-- 変更記録: 打刻 (relay) + 運行 (alc-proxy) — 取り込んだ時点の値を基準に、あとで変わった記録 -->
+        <div v-if="activeTab === 'changes'" data-testid="litigation-changes" class="space-y-3">
+          <p class="text-sm text-gray-600 dark:text-gray-400">
+            案件の乗務員ごとに、取り込んだ時点の値を基準にあとで変わった記録 (打刻の変更・運行データの上げ直し/手動削除) を
+            記録時刻の新しい順に並べます。記録は仕組みを作った日 (2026-09-25) からで、それより前の変更は記録されていません。
+          </p>
+
+          <div class="flex items-center gap-3 flex-wrap">
+            <UButton
+              icon="i-lucide-history"
+              label="検知を実行"
+              :loading="changesRunning"
+              :disabled="changesRunning || errorsRunning || importingKey !== null || !openCase || openCase.driverCds.length === 0"
+              data-testid="litigation-changes-run"
+              @click="runChangesFetch"
+            />
+            <span v-if="changesFinished" class="text-sm text-gray-600 dark:text-gray-400" data-testid="litigation-changes-count">
+              {{ changesRows.length }} 件
+            </span>
+          </div>
+
+          <UAlert
+            :color="changesKintaiForbidden ? 'error' : 'neutral'"
+            :title="kintaiChangesNotice"
+            data-testid="litigation-changes-kintai-notice"
+          />
+          <UAlert
+            v-if="!changesKintaiForbidden && changesKintaiErrors.length > 0"
+            color="warning"
+            :title="`打刻の変更記録の一部が読めませんでした (${changesKintaiErrors.length} 件): ${changesKintaiErrors.join(' / ')}`"
+          />
+          <UAlert color="neutral" :title="alcChangesNotice" data-testid="litigation-changes-alc-notice" />
+          <UAlert
+            v-if="changesAlcErrors.length > 0"
+            color="warning"
+            :title="`運行の変更記録の一部が読めませんでした (${changesAlcErrors.length} 件): ${changesAlcErrors.join(' / ')}`"
+          />
+
+          <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-x-auto">
+            <table class="w-full text-sm" data-testid="litigation-changes-table">
+              <thead>
+                <tr class="border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50">
+                  <th class="text-left px-3 py-2 font-medium">記録日時</th>
+                  <th class="text-left px-3 py-2 font-medium">種別</th>
+                  <th class="text-left px-3 py-2 font-medium">対象</th>
+                  <th class="text-left px-3 py-2 font-medium">内容</th>
+                  <th class="text-left px-3 py-2 font-medium">理由</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="changesRows.length === 0">
+                  <td colspan="5" class="px-3 py-6 text-center text-gray-500">
+                    {{ changesFinished ? '変更記録はありません' : '「検知を実行」を押してください' }}
+                  </td>
+                </tr>
+                <tr
+                  v-for="(row, i) in changesRows"
+                  :key="`${row.kind}|${row.recordedAtSort}|${i}`"
+                  class="border-b border-gray-100 dark:border-gray-800 align-top"
+                >
+                  <td class="px-3 py-2 whitespace-nowrap">{{ row.recordedAt }}</td>
+                  <td class="px-3 py-2 whitespace-nowrap">{{ row.kind }}</td>
+                  <td class="px-3 py-2 whitespace-nowrap font-mono text-xs">{{ row.target }}</td>
+                  <td class="px-3 py-2">{{ row.summary }}</td>
+                  <td class="px-3 py-2 whitespace-nowrap">{{ row.reason }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
 
       <!-- 印刷用の紙面 (画面には出さない)。案件の概要 + 出力の結果 + エラーの表 -->
@@ -1040,6 +1261,26 @@ function fmtDateTime(iso: string): string {
           Y時間の警告 (冊単位):
           <template v-for="w in chunkWarnings" :key="`${w.driverCd}|${w.label}`">{{ driverLabel(w.driverCd) }} ({{ w.driverCd }}) {{ w.label }}: {{ w.warnings.join(' / ') }}<template v-if="w.warningsCount > w.warnings.length"> ほか (全 {{ w.warningsCount }} 件)</template>。</template>
         </div>
+
+        <h2 class="font-bold mt-2">変更記録</h2>
+        <div class="litigation-print-meta">
+          <template v-if="changesFinished">{{ kintaiChangesNotice }} / {{ alcChangesNotice }}</template>
+          <template v-else>変更記録タブで「検知を実行」を押していません。</template>
+        </div>
+        <table class="litigation-print-table">
+          <thead>
+            <tr><th>記録日時</th><th>種別</th><th>対象</th><th>内容</th><th>理由</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="(row, i) in changesRows" :key="`${row.kind}|${row.recordedAtSort}|${i}`">
+              <td>{{ row.recordedAt }}</td>
+              <td>{{ row.kind }}</td>
+              <td>{{ row.target }}</td>
+              <td>{{ row.summary }}</td>
+              <td>{{ row.reason }}</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </template>
   </div>

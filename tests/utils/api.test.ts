@@ -17,6 +17,7 @@ import {
   getDailyHours,
   getWorkTimes,
   getYTimePreview,
+  getDtakoOperationChanges,
   getRestraintReport,
   getMembers,
   inviteMember,
@@ -406,6 +407,7 @@ describe('api', () => {
       ['getWorkTimes()', () => getWorkTimes(), '/api/work-times'],
       ['getWorkTimes({date_from})', () => getWorkTimes({ date_from: '2026-01-01' }), '/api/work-times?date_from=2026-01-01'],
       ['getYTimePreview', () => getYTimePreview('D1', '2024-04-01', '2024-04-30'), '/api/dtako/y-time-export?driver_cd=D1&from=2024-04-01&to=2024-04-30'],
+      ['getDtakoOperationChanges', () => getDtakoOperationChanges('D1', '2024-04-01', '2024-04-30'), '/api/dtako/operation-changes?driver_cd=D1&from=2024-04-01&to=2024-04-30'],
     ] as [string, () => Promise<unknown>, string][])('%s → GET %s', async (_name, fn, expectedPath) => {
       stubOk({})
       await callApi(fn)

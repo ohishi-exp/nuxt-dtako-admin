@@ -162,6 +162,24 @@ export async function getYTimePreview(
   return request<YTimeExportResponse>(`/api/dtako/y-time-export?${params.toString()}`)
 }
 
+// --- 運行の変更記録 (訴訟準備「変更記録」タブ、Refs #1133 c1133-6) ---
+
+/**
+ * 運行の変更記録 (上げ直し / 手動削除) を取得する。backend (rust-alc-api、
+ * ippoan/rust-alc-api#679) の `/api/dtako/operation-changes` を既存の alc-proxy 経由で
+ * 直接叩く — 新しい server route は作らない (認可は他の alc 系 API と同じ
+ * `/api/proxy` 経由の introspect/ACL)。パースは `app/utils/litigation-changes.ts` の
+ * `parseAlcOperationChanges` (ここは応答をそのまま返すだけ)。
+ */
+export async function getDtakoOperationChanges(
+  driverCd: string,
+  from: string,
+  to: string,
+): Promise<unknown> {
+  const params = new URLSearchParams({ driver_cd: driverCd, from, to })
+  return request<unknown>(`/api/dtako/operation-changes?${params.toString()}`)
+}
+
 // --- Vehicles ---
 
 export async function getVehicles(): Promise<Vehicle[]> {

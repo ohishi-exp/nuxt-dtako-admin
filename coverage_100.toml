@@ -1316,3 +1316,10 @@ branches = true
 [[files]]
 path = "app/utils/litigation-errors.ts"
 branches = true
+
+# 訴訟準備の「変更記録」タブ (Refs #1133 c1133-6) の pure ロジック — 打刻/運行の変更
+# 記録の防御的パース・要約 (変わった state / 分数フィールドだけを出す)・1 つの表への
+# 統合・記録開始日の文言・CSV。.vue 側は登録しない。
+[[files]]
+path = "app/utils/litigation-changes.ts"
+branches = true
