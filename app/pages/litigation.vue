@@ -157,11 +157,14 @@ async function loadCases() {
   }
 }
 
-// --- 乗務員一覧 (DriverSearchSelect 用。y-time-export.vue と同じ取り方) ---
+// --- 乗務員一覧 (y-time-export.vue と同じ取り方) ---
 // alc に運行が1件でもある乗務員しか出ない (nuxt-dtako-admin-map skill の
 // Y時間 節「3つの壁」) ので、一覧に居ない乗務員CDも手入力で追加できるようにする。
 const drivers = ref<Driver[]>([])
-const selectedDriverId = ref('')
+/** 乗務員の選択肢 (restraint-wage.vue の USelectMenu と同じ「CD 氏名」表記・CD 順で、CD でも氏名でも検索できる)。 */
+const driverOptions = computed(() => drivers.value
+  .map(d => ({ label: `${d.driver_cd} ${d.driver_name}`, value: d.driver_cd }))
+  .sort((a, b) => a.value.localeCompare(b.value, undefined, { numeric: true })))
 
 onMounted(async () => {
   try {
@@ -208,7 +211,6 @@ function startNewCase() {
   formErrors.value = []
   driverCdInput.value = ''
   driverAddError.value = ''
-  selectedDriverId.value = ''
   showForm.value = true
 }
 
@@ -218,7 +220,6 @@ function startEditCase(entry: LitigationCaseRecord) {
   formErrors.value = []
   driverCdInput.value = ''
   driverAddError.value = ''
-  selectedDriverId.value = ''
   showForm.value = true
 }
 
@@ -228,15 +229,11 @@ function cancelForm() {
 
 // 1 案件 = 乗務員 1 名 (訴訟は個別案件)。選び直すと置き換わる — 既存に積まず空配列へ足す。
 
-/** 一覧に居る乗務員を選ぶ。 */
-function addSelectedDriver() {
-  if (!selectedDriverId.value) return
-  const driver = drivers.value.find(d => d.id === selectedDriverId.value)
-  if (!driver) return
-  const { driverCds, error } = addDriverCd([], driver.driver_cd)
-  form.value.driverCds = driverCds
+/** 一覧 (USelectMenu) で乗務員を選ぶ。選んだ時点で決まる。 */
+function selectListedDriver(cd: unknown) {
+  const { driverCds, error } = addDriverCd([], typeof cd === 'string' ? cd : '')
   driverAddError.value = error ?? ''
-  selectedDriverId.value = ''
+  if (driverCds.length > 0) form.value.driverCds = driverCds
 }
 
 /** 一覧に居ない乗務員CDを手入力で選ぶ。 */
@@ -887,8 +884,15 @@ function fmtDateTime(iso: string): string {
         <div>
           <label class="block text-xs text-gray-500 mb-1">乗務員 (1名)</label>
           <div class="flex items-center gap-2 flex-wrap">
-            <DriverSearchSelect v-model="selectedDriverId" :drivers="drivers" placeholder="一覧から選ぶ" />
-            <UButton size="xs" label="選択" :disabled="!selectedDriverId" @click="addSelectedDriver" />
+            <USelectMenu
+              :model-value="form.driverCds[0] ?? ''"
+              :items="driverOptions"
+              value-key="value"
+              :search-input="{ placeholder: '乗務員CD・氏名で検索' }"
+              class="w-64"
+              placeholder="一覧から選ぶ"
+              @update:model-value="selectListedDriver"
+            />
             <span class="text-xs text-gray-400">または</span>
             <UInput v-model="driverCdInput" size="sm" placeholder="乗務員CDを直接入力" class="w-40" @keyup.enter="addTypedDriver" />
             <UButton size="xs" label="選択" variant="soft" :disabled="!driverCdInput.trim()" @click="addTypedDriver" />
