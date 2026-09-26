@@ -27,6 +27,8 @@ const PREV_YM = "2026-06";
 // ★ この repo は public。実在しうる乗務員CDを避け、明らかなプレースホルダを使う
 // (kintai-ops skill の指示)。
 const DRIVER = "9999";
+/** 打刻も拘束時間管理表も無く、GCP の day_summaries にだけ居る乗務員 (営業所の乗務員の形)。 */
+const GCP_ONLY_DRIVER = "9998";
 
 /** この経路が使う口だけの R2 (どのキーも未投入 = theearth 側は 0 行)。 */
 class FakeR2 {
@@ -52,10 +54,23 @@ class FakeR2 {
  * `hasOvertimeClampedDay` を発火させる — `classifyMonth` の法定時間内クランプが
  * 起きる条件そのもの (`checkWageInvariants` の doc comment 参照)。この 1 日だけ
  * 見えるかどうかが A-3 (truncate 前の summary を渡しているか) の分水嶺になる。 */
-function gcpDaySummariesBody(ym: string, withData: boolean) {
+function gcpDaySummariesBody(ym: string, withData: boolean, gcpOnlyDriver = false) {
   if (!withData) return { summaries: {} };
   return {
     summaries: {
+      ...(gcpOnlyDriver
+        ? {
+            [`${GCP_ONLY_DRIVER}|${ym}-08|06:00`]: {
+              restraint_minutes: 600,
+              working_minutes: 480,
+              break_minutes: 120,
+              overtime_minutes: 0,
+              overtime_night_minutes: 0,
+              night_minutes: 0,
+              legal_holiday_night_minutes: 0,
+            },
+          }
+        : {}),
       [`${DRIVER}|${ym}-06|05:00`]: {
         restraint_minutes: 700,
         working_minutes: 150,
@@ -86,7 +101,7 @@ function shiftOverlapsBody(ym: string) {
   };
 }
 
-function makeDO(opts: { shiftOverlaps?: () => Response; daySummariesEmpty?: boolean } = {}) {
+function makeDO(opts: { shiftOverlaps?: () => Response; daySummariesEmpty?: boolean; gcpOnlyDriver?: boolean } = {}) {
   const env = {
     DTAKO_R2: new FakeR2(),
     RESTRAINT_DEV_VIEWER_COMP: COMP_ID,
@@ -108,7 +123,9 @@ function makeDO(opts: { shiftOverlaps?: () => Response; daySummariesEmpty?: bool
         }
         if (url.includes("/api/kintai/day-summaries")) {
           const isPrev = url.includes(`month=${PREV_YM}`);
-          return Response.json(gcpDaySummariesBody(isPrev ? PREV_YM : YM, !isPrev && !opts.daySummariesEmpty));
+          return Response.json(
+            gcpDaySummariesBody(isPrev ? PREV_YM : YM, !isPrev && !opts.daySummariesEmpty, opts.gcpOnlyDriver),
+          );
         }
         return new Response("unexpected", { status: 500 });
       },
@@ -294,5 +311,38 @@ describe("GET /restraint-api/wage-report?source=gcp の勤務の重なりの取�
     const inv = await invOf(await makeDO({ daySummariesEmpty: true }).fetch(req(`month=${YM}&source=gcp`)));
     expect(inv?.noShiftOverlap).toBeNull();
     expect(inv?.shiftOverlap).toBeNull();
+  });
+});
+
+describe("GET /restraint-api/wage-report?source=gcp — 元行が無く GCP にだけ居る乗務員", () => {
+  const rowsOf = async (query: string) => {
+    stubUpstream();
+    const res = await makeDO({ gcpOnlyDriver: true }).fetch(req(query));
+    expect(res.status).toBe(200);
+    return (
+      (await res.json()) as {
+        rows: Array<{ summary: RestraintDriverSummary; source?: string; restraint_missing?: boolean; invariants?: unknown }>;
+      }
+    ).rows;
+  };
+
+  it("★ source=gcp では GCP の勤務だけで行になり、source は gcp、不変条件が付く", async () => {
+    const rows = await rowsOf(`month=${YM}&source=gcp`);
+    const row = rows.find((r) => r.summary.driverCd === GCP_ONLY_DRIVER);
+    expect(row).toBeDefined();
+    expect(row!.source).toBe("gcp");
+    expect(row!.restraint_missing).toBe(false);
+    expect(row!.summary.restraintMinutes).toBe(600);
+    expect(row!.summary.workingMinutes).toBe(480);
+    expect(row!.invariants).toBeDefined();
+    // 元行がある乗務員は従来どおり (timecard 由来) で、並びは乗務員CD 順
+    expect(rows.map((r) => r.summary.driverCd)).toEqual([GCP_ONLY_DRIVER, DRIVER]);
+    expect(rows.find((r) => r.summary.driverCd === DRIVER)!.source).toBe("timecard");
+  });
+
+  it("陰性対照: 既定経路 (source=current) では GCP にだけ居る乗務員は行にならない", async () => {
+    const rows = await rowsOf(`month=${YM}`);
+    expect(rows.some((r) => r.summary.driverCd === GCP_ONLY_DRIVER)).toBe(false);
+    expect(rows.some((r) => r.summary.driverCd === DRIVER)).toBe(true);
   });
 });

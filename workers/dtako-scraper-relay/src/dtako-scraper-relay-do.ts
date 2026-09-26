@@ -346,6 +346,7 @@ import {
 } from "./kosoku-daily";
 import {
   gcpPartsFor,
+  gcpOnlyBaseSummaries,
   overlayGcpDayTimes,
   parseGcpDaySummaries,
   parseGcpShiftOverlaps,
@@ -9525,18 +9526,35 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         ? overlayGcpDayTimes(entry, gcpPartsFor(gcpOverlay.byMonth.get(forYm)!, entry.driverCd), forYm)
         : { summary: entry, missing: false };
 
-    const prevDaysByDriver = new Map<string, RestraintSummaryDay[]>(
-      prevMerged.map((m) => [m.entry.data.driverCd, overlay(m.entry.data, prevYm).summary.days]),
-    );
     // 最低賃金の県は theearth の事業所名ではなく社員マスタの所属 (月末時点) で引く
     // (Refs #409 Phase 3)。D1 が無い / 読めない場合は空のまま = 従来どおり
     // theearth 事業所名 + defaultPrefecture のフォールバックで動く
-    const { branches: employeeBranches, payKubun } = await timer.measure("branches", () =>
+    const { branches: employeeBranches, payKubun, names: employeeNames } = await timer.measure("branches", () =>
       this.branchByDriverCd(record.compId, ym),
     );
 
+    // source=gcp だけ: 元行 (拘束時間管理表 / 打刻) が無くても GCP に当月の勤務がある
+    // 乗務員を行にする (打刻をしない営業所の乗務員で拘束時間管理表も無い月、
+    // gcpOnlyBaseSummaries の docs)。既定経路は何も足さない
+    const gcpOnly = gcpOverlay
+      ? gcpOnlyBaseSummaries(
+          gcpOverlay.byMonth.get(ym)!,
+          ym,
+          merged.map((m) => m.entry.data.driverCd),
+          employeeNames,
+        ).map((data) => ({ entry: { data, fetchedAt: null, lastVerifiedAt: null }, source: "gcp" as const }))
+      : [];
+    const entries = [...merged, ...gcpOnly].sort(
+      (a, b) => Number(a.entry.data.driverCd) - Number(b.entry.data.driverCd),
+    );
+
+    // 前月に元行がある乗務員はそちらを採る (後勝ちなので GCP-only を先に置く)
+    const prevDaysByDriver = new Map<string, RestraintSummaryDay[]>(
+      [...gcpOnly, ...prevMerged].map((m) => [m.entry.data.driverCd, overlay(m.entry.data, prevYm).summary.days]),
+    );
+
     const endRows = timer.begin("rows");
-    const rows = merged.map(({ entry, source }) => {
+    const rows = entries.map(({ entry, source }) => {
       const { summary, missing } = overlay(entry.data, ym);
       const wage = computeWageRow(
         summary,
@@ -9556,7 +9574,8 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
         // 占めて約 1.1MB になっていた。計算 (`computeWageRow`) は days を使い切った
         // 後なので、落としても数字は 1 円も変わらない
         summary: gcpOverlay ? { ...summary, days: [] } : summary,
-        /** 'theearth' (デジタコ) | 'timecard' (タイムカード)。画面のバッジ用 (PR-E)。 */
+        /** 'theearth' (デジタコ) | 'timecard' (タイムカード) | 'gcp' (元行が無く GCP の勤務だけで
+         * 組んだ行、source=gcp のときだけ)。画面のバッジ用 (PR-E)。 */
         source,
         /** 給与区分 (1=月給 / 2=日給 / 3=時給 / 4=その他)。社員マスタに無ければ null。
          * 給与比較が「基本給(計算)」の単価の掛け方を決めるのに使う (Refs #429)。 */

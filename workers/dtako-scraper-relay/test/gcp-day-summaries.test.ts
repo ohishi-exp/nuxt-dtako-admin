@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  gcpOnlyBaseSummaries,
   gcpPartsFor,
   overlayGcpDayTimes,
   parseGcpDaySummaries,
@@ -353,5 +354,45 @@ describe("parseGcpShiftOverlaps (勤務の時間帯の重なり、Refs #1123)", 
     });
     expect([...out.keys()]).toEqual(["1248"]);
     expect(out.get("1248")).toHaveLength(1);
+  });
+});
+
+describe("gcpOnlyBaseSummaries (元行が無く GCP にだけ勤務がある乗務員の空の元行)", () => {
+  // ★ この repo は public。乗務員CD はプレースホルダ
+  const parts = parseGcpDaySummaries({
+    summaries: {
+      "9999|2026-07-06|05:00": gcpValue(),
+      "9999|2026-07-07|05:00": gcpValue(),
+      "9998|2026-07-06|05:00": gcpValue(),
+      // 前月の勤務だけの乗務員 (当月は 0 日)
+      "9997|2026-06-30|05:00": gcpValue(),
+    },
+  });
+
+  it("★ 合流後のサマリに居ない乗務員だけを返す (居る乗務員は返さない = 陰性対照)", () => {
+    const out = gcpOnlyBaseSummaries(parts, "2026-07", ["9998"], new Map());
+    expect(out.map((s) => s.driverCd)).toEqual(["9999"]);
+  });
+
+  it("当月に勤務が無い乗務員は返さない", () => {
+    expect(gcpOnlyBaseSummaries(parts, "2026-07", [], new Map()).map((s) => s.driverCd)).toEqual(["9998", "9999"]);
+  });
+
+  it("乗務員CD は数値で揃えて比べる (前ゼロ付きの既存行とも一致)", () => {
+    expect(gcpOnlyBaseSummaries(parts, "2026-07", ["09999", "9998"], new Map())).toEqual([]);
+  });
+
+  it("氏名は社員マスタ、無ければ空。workDays は当月の勤務日数で、時間は空 (overlay で入れる)", () => {
+    const [s9998, s9999] = gcpOnlyBaseSummaries(parts, "2026-07", [], new Map([["9999", "テスト 太郎"]]));
+    expect(s9999).toMatchObject({ driverCd: "9999", driverName: "テスト 太郎", workDays: 2, restDays: 0, restraintMinutes: null, days: [] });
+    expect(s9998).toMatchObject({ driverCd: "9998", driverName: "", workDays: 1 });
+  });
+
+  it("★ overlayGcpDayTimes を掛けると GCP の時間で埋まる (欠測にならない)", () => {
+    const [base] = gcpOnlyBaseSummaries(parts, "2026-07", ["9998"], new Map());
+    const { summary, missing } = overlayGcpDayTimes(base!, gcpPartsFor(parts, "9999"), "2026-07");
+    expect(missing).toBe(false);
+    expect(summary.restraintMinutes).toBe(1440);
+    expect(summary.days.map((d) => d.day)).toEqual([6, 7]);
   });
 });
