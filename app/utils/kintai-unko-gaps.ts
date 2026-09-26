@@ -27,6 +27,10 @@ export interface KintaiUnkoGapsDriverEntry {
 export interface KintaiUnkoGaps {
   month: string | null
   driverCd: string | null
+  /** 乗務員CD 指定時の、その乗務員の対象月のオンプレ側 (勤怠から運んだ `kintai_events` の
+   * 運行NO 付きの行) の運行件数。指定なし・旧 rust (キーが無い) は `null`。
+   * `0` は「照らし合わせる相手が無い」— 指定時は also_in_month の絞り込みが外れるため。 */
+  onpremOperationsInMonth: number | null
   gcpEtagsAvailable: boolean | null
   driverCdsAvailable: boolean | null
   /** 受け口が返す運行NOの桁数。**GCP側 (22桁) を前提にする** — 23桁を捏造しないための拠り所。 */
@@ -88,6 +92,7 @@ export function parseKintaiUnkoGaps(raw: unknown): KintaiUnkoGaps {
   return {
     month: typeof r.month === 'string' ? r.month : null,
     driverCd: toDriverCdString(r.driver_cd),
+    onpremOperationsInMonth: toNumberOrNull(r.onprem_operations_in_month),
     gcpEtagsAvailable: toBoolOrNull(r.gcp_etags_available),
     driverCdsAvailable: toBoolOrNull(r.driver_cds_available),
     unkoNoDigits: toNumberOrNull(r.unko_no_digits),

@@ -8,7 +8,7 @@
  * | --- | --- | --- |
  * | `alcOps` alc の運行 | Y時間の勤務日 (JSON) を月に畳んだ日数 | `getYTimePreview` (区切り 1 つにつき 1 回) と出力タブの `empty` |
  * | `yTime` Y時間の欠け | 出力タブの結果 (`missingDates` / `not_found` / 失敗) | `POST /api/y-time-export` (出力タブが呼ぶ) |
- * | `unkoGaps` 取り込み漏れ候補 | 受け側の分類をそのまま | `GET /restraint-api/kintai/unko-gaps?month=&driver_cd=` |
+ * | `unkoGaps` alc にあって勤怠に無い運行 | 受け側の分類をそのまま (勤怠側が 0 件なら照合先なし) | `GET /restraint-api/kintai/unko-gaps?month=&driver_cd=` |
  * | `invariants` 最低賃金の不変条件 (条件1〜3) | relay が付ける `invariants` | `GET /restraint-api/wage-report?source=gcp&month=` |
  *
  * ## 判定は 4 つ — **取れなかったことを 0 件と同じ見た目にしない** (map skill「PR の基準」(7))
@@ -19,6 +19,7 @@
  * | `ok` | 異常なし (調べて、無かった) |
  * | `unknown` | 判定できない — 取りに行ったが取れなかった / 取れたが判断材料が欠けていた。`message` に理由 |
  * | `pending` | 未実行 — まだ取りに行っていない |
+ * | `noBaseline` | 照合先なし — 突き合わせる相手 (勤怠から運んだこの乗務員の運行) がその月 0 件。異常ではない |
  *
  * `unknown` と `pending` を分けるのは、「調べたが分からなかった」と「まだ調べていない」で
  * 次の一手が違うため (前者は理由を読む、後者はボタンを押す)。
@@ -35,7 +36,7 @@ import { daysInMonth } from './timecard-view'
 import { csvCell } from './wage-range-view'
 
 export type LitigationCheckKey = 'alcOps' | 'yTime' | 'unkoGaps' | 'invariants'
-export type LitigationCheckState = 'ng' | 'ok' | 'unknown' | 'pending'
+export type LitigationCheckState = 'ng' | 'ok' | 'unknown' | 'pending' | 'noBaseline'
 
 /** 列の並び (表・CSV・印刷で共通) */
 export const LITIGATION_CHECK_KEYS: readonly LitigationCheckKey[] = ['alcOps', 'yTime', 'unkoGaps', 'invariants']
@@ -43,7 +44,7 @@ export const LITIGATION_CHECK_KEYS: readonly LitigationCheckKey[] = ['alcOps', '
 export const LITIGATION_CHECK_LABELS: Record<LitigationCheckKey, string> = {
   alcOps: 'alc の運行',
   yTime: 'Y時間の欠け',
-  unkoGaps: '取り込み漏れ候補',
+  unkoGaps: 'alc にあって勤怠に無い運行',
   invariants: '最低賃金の不変条件',
 }
 
@@ -52,6 +53,7 @@ export const LITIGATION_CHECK_STATE_LABELS: Record<LitigationCheckState, string>
   ok: '異常なし',
   unknown: '判定できない',
   pending: '未実行',
+  noBaseline: '照合先なし',
 }
 
 export interface LitigationCheckCell {
@@ -164,7 +166,7 @@ export function yTimeCell(month: string, result: LitigationOutputResult | null):
     : { state: 'ok', message: '書けなかった日なし' }
 }
 
-/** 取り込み漏れ候補の運行NOを何件まで文に並べるか */
+/** 「alc にあって勤怠に無い運行」の運行NOを何件まで文に並べるか */
 const UNKO_NO_PREVIEW = 3
 
 export function unkoGapsCell(driverCd: string, entry: LitigationFetched<KintaiUnkoGaps> | undefined): LitigationCheckCell {
@@ -178,20 +180,25 @@ export function unkoGapsCell(driverCd: string, entry: LitigationFetched<KintaiUn
   if (readability === 'driver_cds_unavailable') {
     return { state: 'unknown', message: 'alc が乗務員CD を返していない — 0 件とは言えない' }
   }
+  // 乗務員CD 指定で呼ぶと受け側の「勤怠側にも運行がある月だけ」の絞り込みが外れるので、
+  // 勤怠側が 0 件の月は alc の運行が全部「勤怠に無い」に数えられる。異常とは言わずに分ける
+  if (g.onpremOperationsInMonth === 0) {
+    return { state: 'noBaseline', message: 'この月は勤怠から運んだこの乗務員の運行が 0 件で、alc の運行と突き合わせる相手が無い' }
+  }
   const mine = g.drivers.find(d => d.driverCd === driverCd)
   if (mine && mine.unkoNos.length > 0) {
     const shown = mine.unkoNos.slice(0, UNKO_NO_PREVIEW).join(', ')
     const more = mine.unkoNos.length > UNKO_NO_PREVIEW ? ' ほか' : ''
     const count = mine.truncated ? `${mine.unkoNos.length} 件以上` : `${mine.unkoNos.length} 件`
-    return { state: 'ng', message: `候補 ${count}: ${shown}${more}` }
+    return { state: 'ng', message: `勤怠に無い運行 ${count}: ${shown}${more}` }
   }
   if (g.driversTruncated) {
     return { state: 'unknown', message: '乗務員の一覧が途中で切れていて、この乗務員が入っていない' }
   }
   const unknownDriver = g.unknownDriverUnkoNos.length > 0
-    ? ` (乗務員が分からない候補 ${g.unknownDriverUnkoNos.length} 件はこの判定に入らない)`
+    ? ` (乗務員が分からない運行 ${g.unknownDriverUnkoNos.length} 件はこの判定に入らない)`
     : ''
-  return { state: 'ok', message: `候補なし${unknownDriver}` }
+  return { state: 'ok', message: `勤怠に無い運行なし${unknownDriver}` }
 }
 
 /** 崩れている条件を 1 文に並べる (`ng` のときだけ呼ぶ)。 */
@@ -276,7 +283,7 @@ export function buildLitigationErrorRows(input: LitigationErrorInput): Litigatio
 export function countLitigationErrorCells(
   rows: readonly LitigationErrorRow[],
 ): Record<LitigationCheckKey, Record<LitigationCheckState, number>> {
-  const zero = (): Record<LitigationCheckState, number> => ({ ng: 0, ok: 0, unknown: 0, pending: 0 })
+  const zero = (): Record<LitigationCheckState, number> => ({ ng: 0, ok: 0, unknown: 0, pending: 0, noBaseline: 0 })
   const out = { alcOps: zero(), yTime: zero(), unkoGaps: zero(), invariants: zero() }
   for (const r of rows) {
     for (const k of LITIGATION_CHECK_KEYS) out[k][r.cells[k].state]++
@@ -284,7 +291,7 @@ export function countLitigationErrorCells(
   return out
 }
 
-/** 1 つでも異常あり / 判定できないがある行か (印刷で絞るときに使う) */
+/** 1 つでも異常あり / 判定できないがある行か (表の「異常あり・判定できないがある行だけ」で絞る。照合先なしは入れない) */
 export function litigationRowNeedsAttention(row: LitigationErrorRow): boolean {
   return LITIGATION_CHECK_KEYS.some(k => row.cells[k].state === 'ng' || row.cells[k].state === 'unknown')
 }

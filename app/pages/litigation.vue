@@ -6,7 +6,7 @@
  * 開き直せる土台。案件を「開く」と詳細にタブが出る。「出力」タブ (#c1133-2) は
  * 案件の乗務員 × 期間ぶんの Y時間 Excel を作って 1 つの ZIP にまとめる。
  * 「エラー」タブ (#c1133-5) は乗務員 × 月ごとに 4 つの検知 (alc の運行 0 件 /
- * Y時間の欠け / 取り込み漏れ候補 / 最低賃金の不変条件) を並べ、alc に運行が無い月は
+ * Y時間の欠け / alc にあって勤怠に無い運行 / 最低賃金の不変条件) を並べ、alc に運行が無い月は
  * theearth から取り込み直すボタンを出す。「印刷」は案件の概要・出力の結果・エラーの表を
  * 1 つの紙面にする。変更記録のタブは後続 PR (#c1133-6) が足す。
  *
@@ -46,6 +46,7 @@ import {
   litigationErrorsCsv,
   litigationImportRanges,
   litigationMonthBounds,
+  litigationRowNeedsAttention,
   LITIGATION_CHECK_KEYS,
   LITIGATION_CHECK_LABELS,
   LITIGATION_CHECK_STATE_LABELS,
@@ -480,7 +481,7 @@ const errorRows = computed<LitigationErrorRow[]>(() => buildLitigationErrorRows(
 const errorCounts = computed(() => countLitigationErrorCells(errorRows.value))
 const chunkWarnings = computed(() => litigationChunkWarnings(outputChunks.value, outputResults.value))
 const shownErrorRows = computed(() => errorsOnlyAttention.value
-  ? errorRows.value.filter(r => LITIGATION_CHECK_KEYS.some(k => r.cells[k].state === 'ng' || r.cells[k].state === 'unknown'))
+  ? errorRows.value.filter(litigationRowNeedsAttention)
   : errorRows.value)
 
 const ERRORS_RETRY = '「検知を実行」を押してやり直してください'
@@ -548,7 +549,7 @@ async function runErrorChecks() {
       run: () => loadAlcOps(epoch, c.driverCd, c.from, c.to, litigationChunkMonths(c)),
     })),
     ...target.driverCds.flatMap(cd => months.map(m => ({
-      label: `取り込み漏れ候補 ${cd} ${m}`,
+      label: `勤怠に無い運行 ${cd} ${m}`,
       run: () => loadUnkoGaps(epoch, cd, m),
     }))),
     ...months.map(m => ({
@@ -603,7 +604,7 @@ async function postImport(driverCd: string, range: { from: string, to: string })
 
 /**
  * 運行月とその翌月 (読取日) を **1 か月ずつ直列に** 取り込む (relay の期間上限 31 日、
- * theearth のセッションロック)。1 本でも取り込めたら、その行の alc の運行と取り込み漏れ候補を
+ * theearth のセッションロック)。1 本でも取り込めたら、その行の alc の運行と「勤怠に無い運行」を
  * 読み直す。**取り込み直後は CSV 分割が終わるまで運行が見えないことがある**ので、0 件のまま
  * でも取り込みが失敗したとは限らない (画面の注記で伝える)。
  */
@@ -777,6 +778,7 @@ const CHECK_STATE_CLASS: Record<LitigationCheckState, string> = {
   ok: 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300',
   unknown: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',
   pending: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400',
+  noBaseline: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300',
 }
 const IMPORT_KIND_CLASS: Record<LitigationImportOutcome['kind'], string> = {
   ok: 'text-green-700 dark:text-green-400',
@@ -1085,9 +1087,10 @@ function fmtDateTime(iso: string): string {
         <!-- エラー: 乗務員 × 月ごとに 4 つの検知 (litigation-errors.ts) -->
         <div v-if="activeTab === 'errors'" data-testid="litigation-errors" class="space-y-3">
           <p class="text-sm text-gray-600 dark:text-gray-400">
-            乗務員 × 月ごとに、alc の運行が 0 件か・Y時間に書けなかった日があるか・取り込み漏れの候補があるか・
+            乗務員 × 月ごとに、alc の運行が 0 件か・Y時間に書けなかった日があるか・alc にあるのに勤怠 (オンプレから運んだ運行) に無い運行があるか・
             最低賃金の不変条件 (条件1〜3、拘束は GCP) が崩れていないかを並べます。
             「判定できない」は調べたが材料が取れなかった月で、異常なしではありません。
+            「照合先なし」はその月の勤怠にこの乗務員の運行が 1 件も無く、alc の運行と突き合わせる相手が無い月です (異常とは数えません)。
             Y時間の欠けは出力タブで「ZIP を作る」と埋まります。最低賃金の不変条件は 1 か月 15〜64 秒かかります (読むだけで保存はしません)。
           </p>
 
@@ -1113,7 +1116,7 @@ function fmtDateTime(iso: string): string {
 
           <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600 dark:text-gray-400" data-testid="litigation-errors-summary">
             <span v-for="k in LITIGATION_CHECK_KEYS" :key="k">
-              {{ LITIGATION_CHECK_LABELS[k] }}: 異常あり {{ errorCounts[k].ng }} / 異常なし {{ errorCounts[k].ok }} / 判定できない {{ errorCounts[k].unknown }} / 未実行 {{ errorCounts[k].pending }}
+              {{ LITIGATION_CHECK_LABELS[k] }}: 異常あり {{ errorCounts[k].ng }} / 異常なし {{ errorCounts[k].ok }} / 判定できない {{ errorCounts[k].unknown }} / 未実行 {{ errorCounts[k].pending }}<template v-if="errorCounts[k].noBaseline > 0"> / 照合先なし {{ errorCounts[k].noBaseline }}</template>
             </span>
           </div>
 
@@ -1291,7 +1294,7 @@ function fmtDateTime(iso: string): string {
 
         <h2 class="font-bold mt-2">エラー</h2>
         <div class="litigation-print-meta">
-          <template v-for="(k, i) in LITIGATION_CHECK_KEYS" :key="k">{{ i > 0 ? ' / ' : '' }}{{ LITIGATION_CHECK_LABELS[k] }}: 異常あり {{ errorCounts[k].ng }}・異常なし {{ errorCounts[k].ok }}・判定できない {{ errorCounts[k].unknown }}・未実行 {{ errorCounts[k].pending }}</template>
+          <template v-for="(k, i) in LITIGATION_CHECK_KEYS" :key="k">{{ i > 0 ? ' / ' : '' }}{{ LITIGATION_CHECK_LABELS[k] }}: 異常あり {{ errorCounts[k].ng }}・異常なし {{ errorCounts[k].ok }}・判定できない {{ errorCounts[k].unknown }}・未実行 {{ errorCounts[k].pending }}<template v-if="errorCounts[k].noBaseline > 0">・照合先なし {{ errorCounts[k].noBaseline }}</template></template>
         </div>
         <table class="litigation-print-table">
           <thead>

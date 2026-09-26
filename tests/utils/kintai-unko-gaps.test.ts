@@ -40,6 +40,7 @@ describe('parseKintaiUnkoGaps', () => {
     expect(r).toEqual({
       month: '2026-06',
       driverCd: null,
+      onpremOperationsInMonth: null,
       gcpEtagsAvailable: true,
       driverCdsAvailable: true,
       unkoNoDigits: 22,
@@ -54,6 +55,13 @@ describe('parseKintaiUnkoGaps', () => {
     })
   })
 
+  it('onprem_operations_in_month (乗務員CD 指定時のオンプレ側の件数) を読む。0 は 0 のまま、無い・壊れた値は null', () => {
+    expect(parseKintaiUnkoGaps(body({ driver_cd: 1590, onprem_operations_in_month: 0 })).onpremOperationsInMonth).toBe(0)
+    expect(parseKintaiUnkoGaps(body({ driver_cd: 1445, onprem_operations_in_month: 5 })).onpremOperationsInMonth).toBe(5)
+    expect(parseKintaiUnkoGaps(body({ onprem_operations_in_month: null })).onpremOperationsInMonth).toBeNull()
+    expect(parseKintaiUnkoGaps(body({ onprem_operations_in_month: '0' })).onpremOperationsInMonth).toBeNull()
+  })
+
   it('driver_cd (絞り込み指定・トップレベル) が文字列でも数値でも読む', () => {
     expect(parseKintaiUnkoGaps(body({ driver_cd: '1445' })).driverCd).toBe('1445')
     // 実際の受け口は Option<i64> = 数値 or null で返す (drivers[].driver_cd とは別物)
@@ -64,6 +72,7 @@ describe('parseKintaiUnkoGaps', () => {
     expect(parseKintaiUnkoGaps(null)).toEqual({
       month: null,
       driverCd: null,
+      onpremOperationsInMonth: null,
       gcpEtagsAvailable: null,
       driverCdsAvailable: null,
       unkoNoDigits: null,
