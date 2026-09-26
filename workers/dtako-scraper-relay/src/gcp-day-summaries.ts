@@ -186,6 +186,62 @@ function blankTimes(summary: RestraintDriverSummary): RestraintDriverSummary {
   };
 }
 
+/**
+ * GCP にその月の勤務があるのに、合流後のサマリ (theearth の拘束時間管理表 / 打刻) に
+ * 行が無い乗務員の**時間が空の元行**。`overlayGcpDayTimes` を掛けて時間を入れる前提
+ * (時間の組み立てはここではしない)。
+ *
+ * 打刻をしない営業所の乗務員で拘束時間管理表も取り込まれていない月は、元行が無いために
+ * `source=gcp` でも行が作られず、最低賃金の不変条件が判定できなかった。GCP は打刻が
+ * 無くても休息から勤務を組めるので、GCP にある乗務員はそれだけで行にする。
+ *
+ * - 乗務員CD は `String(Number(...))` で揃えて比べる (`gcpPartsFor` と同じ規則)
+ * - 氏名は社員マスタ (`names`)、無ければ空。所属・運転などデジタコ側の項目は無い
+ * - `workDays` は GCP で勤務があった当月の暦日の数、`restDays` は 0。`overlayGcpDayTimes` が
+ *   出勤日数を差し替えないのは元行の値 (休暇区分込み) を残すためで、元行が無いここには他の
+ *   出どころが無い。**有休などの休暇は含まない** (GCP に休暇区分が無い)。使うのは画面の
+ *   給与突き合わせの日給者の基本給 (日額 × 出勤日数) だけで、最低賃金の判定・不変条件
+ *   (`computeWageRow` / `checkWageInvariants`) は読まない。0 に倒すと日給者の基本給が 0 円に見える
+ * - 所属 (`branchName`) は空。最低賃金の県は社員マスタの所属から引かれ、無ければ既定の県になる
+ */
+export function gcpOnlyBaseSummaries(
+  parts: ReadonlyMap<string, ReadonlyMap<string, GcpDayPart>>,
+  ym: string,
+  existingDriverCds: Iterable<string>,
+  names: ReadonlyMap<string, string>,
+): RestraintDriverSummary[] {
+  const existing = new Set([...existingDriverCds].map((cd) => String(Number(cd))));
+  const out: RestraintDriverSummary[] = [];
+  for (const [driverCd, byDate] of parts) {
+    if (existing.has(driverCd)) continue;
+    const workDays = [...byDate.keys()].filter((date) => date.slice(0, 7) === ym).length;
+    if (workDays === 0) continue;
+    out.push({
+      driverCd,
+      driverName: names.get(driverCd) ?? "",
+      branchName: "",
+      workDays,
+      restDays: 0,
+      restraintMinutes: null,
+      drivingMinutes: null,
+      loadingMinutes: null,
+      breakMinutes: null,
+      workingMinutes: null,
+      overtimeMinutes: null,
+      nightMinutes: null,
+      overtimeNightMinutes: null,
+      maxDailyRestraintMinutes: null,
+      fiscalCumulativeMinutes: null,
+      restraintLimitMinutes: null,
+      excessRestraintMinutes: null,
+      over15hDays: 0,
+      avgDriving9hOverCount: 0,
+      days: [],
+    });
+  }
+  return out.sort((a, b) => Number(a.driverCd) - Number(b.driverCd));
+}
+
 export interface GcpOverlayResult {
   summary: RestraintDriverSummary;
   /** GCP 側にこの乗務員 × この月の行が 1 つも無かった (= 欠測)。 */
