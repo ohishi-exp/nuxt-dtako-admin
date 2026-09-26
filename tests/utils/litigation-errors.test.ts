@@ -163,7 +163,7 @@ describe('yTimeCell (Y時間の欠け)', () => {
   })
 })
 
-describe('unkoGapsCell (取り込み漏れ候補)', () => {
+describe('unkoGapsCell (alc にあって勤怠に無い運行)', () => {
   it('未実行 / 取れなかった', () => {
     expect(unkoGapsCell('1078', undefined).state).toBe('pending')
     expect(unkoGapsCell('1078', { ok: false, reason: '502 …' })).toEqual({ state: 'unknown', message: '502 …' })
@@ -175,18 +175,36 @@ describe('unkoGapsCell (取り込み漏れ候補)', () => {
     expect(unkoGapsCell('1078', gaps({ driver_cds_available: false })).state).toBe('unknown')
   })
 
-  it('その乗務員に候補があれば異常あり (3 件まで並べる、切り詰めは「以上」)', () => {
+  it('その乗務員に勤怠に無い運行があれば異常あり (3 件まで並べる、切り詰めは「以上」)', () => {
     const g = gaps({ drivers: [{ driver_cd: '1078', unko_nos: ['a', 'b', 'c', 'd'], truncated: true }] })
-    expect(unkoGapsCell('1078', g)).toEqual({ state: 'ng', message: '候補 4 件以上: a, b, c ほか' })
+    expect(unkoGapsCell('1078', g)).toEqual({ state: 'ng', message: '勤怠に無い運行 4 件以上: a, b, c ほか' })
     const g2 = gaps({ drivers: [{ driver_cd: 1078, unko_nos: ['a'] }] })
-    expect(unkoGapsCell('1078', g2)).toEqual({ state: 'ng', message: '候補 1 件: a' })
+    expect(unkoGapsCell('1078', g2)).toEqual({ state: 'ng', message: '勤怠に無い運行 1 件: a' })
   })
 
-  it('他の乗務員の候補だけなら異常なし。乗務員不明の候補は判定に入らないと添える', () => {
+  it('他の乗務員の分だけなら異常なし。乗務員不明の運行は判定に入らないと添える', () => {
     const g = gaps({ drivers: [{ driver_cd: '9999', unko_nos: ['x'] }, { driver_cd: '1078', unko_nos: [] }] })
-    expect(unkoGapsCell('1078', g)).toEqual({ state: 'ok', message: '候補なし' })
+    expect(unkoGapsCell('1078', g)).toEqual({ state: 'ok', message: '勤怠に無い運行なし' })
     const g2 = gaps({ unknown_driver_unko_nos: ['y', 'z'] })
-    expect(unkoGapsCell('1078', g2)).toEqual({ state: 'ok', message: '候補なし (乗務員が分からない候補 2 件はこの判定に入らない)' })
+    expect(unkoGapsCell('1078', g2)).toEqual({ state: 'ok', message: '勤怠に無い運行なし (乗務員が分からない運行 2 件はこの判定に入らない)' })
+  })
+
+  it('★ 勤怠側にこの乗務員の運行が 0 件の月は、alc の運行が全部並んでも異常ありにせず照合先なし', () => {
+    const g = gaps({ driver_cd: 1590, onprem_operations_in_month: 0, drivers: [{ driver_cd: '1590', unko_nos: ['a', 'b'] }] })
+    expect(unkoGapsCell('1590', g)).toEqual({
+      state: 'noBaseline',
+      message: 'この月は勤怠から運んだこの乗務員の運行が 0 件で、alc の運行と突き合わせる相手が無い',
+    })
+  })
+
+  it('陰性対照: 勤怠側に 1 件以上あれば従来どおり異常あり / 件数が無い (旧 rust) も従来どおり', () => {
+    const drivers = [{ driver_cd: '1078', unko_nos: ['a'] }]
+    expect(unkoGapsCell('1078', gaps({ onprem_operations_in_month: 3, drivers })).state).toBe('ng')
+    expect(unkoGapsCell('1078', gaps({ drivers })).state).toBe('ng')
+  })
+
+  it('★ 照合先なしでも、GCP 側の運行一覧が引けていなければ判定できないが優先', () => {
+    expect(unkoGapsCell('1590', gaps({ onprem_operations_in_month: 0, gcp_etags_available: false })).state).toBe('unknown')
   })
 
   it('乗務員の一覧が切れていてこの乗務員が居なければ判定できない', () => {
@@ -265,10 +283,17 @@ describe('buildLitigationErrorRows / 件数 / CSV', () => {
     const rows = buildLitigationErrorRows(input())
     expect(rows.map(r => `${r.driverCd}|${r.month}`)).toEqual(['1078|2025-01', '1078|2025-02', '2000|2025-01', '2000|2025-02'])
     const counts = countLitigationErrorCells(rows)
-    expect(counts.alcOps).toEqual({ ng: 0, ok: 0, unknown: 0, pending: 4 })
+    expect(counts.alcOps).toEqual({ ng: 0, ok: 0, unknown: 0, pending: 4, noBaseline: 0 })
     expect(counts.invariants.pending).toBe(4)
     expect(rows.some(litigationRowNeedsAttention)).toBe(false)
     expect(rows.every(r => !r.canImport)).toBe(true)
+  })
+
+  it('★ 照合先なしは異常と数えない (印刷の「異常あり・判定できない行だけ」に入らない)', () => {
+    const [row] = buildLitigationErrorRows(input())
+    const cells = { ...row!.cells, unkoGaps: { state: 'noBaseline' as const, message: '' } }
+    expect(litigationRowNeedsAttention({ ...row!, cells })).toBe(false)
+    expect(litigationRowNeedsAttention({ ...row!, cells: { ...cells, yTime: { state: 'ng' as const, message: '' } } })).toBe(true)
   })
 
   it('乗務員 × 月の素材を正しい行に配り、alc 0 件の行だけ取り込みボタンを出す', () => {
@@ -319,7 +344,7 @@ describe('buildLitigationErrorRows / 件数 / CSV', () => {
     const csv = litigationErrorsCsv(rows, cd => (cd === '1078' ? '山田 太郎' : cd), [])
     expect(csv.startsWith('﻿')).toBe(true)
     const lines = csv.slice(1).trimEnd().split('\n')
-    expect(lines[0]).toBe('乗務員CD,氏名,月,alc の運行 判定,alc の運行 内容,Y時間の欠け 判定,Y時間の欠け 内容,取り込み漏れ候補 判定,取り込み漏れ候補 内容,最低賃金の不変条件 判定,最低賃金の不変条件 内容')
+    expect(lines[0]).toBe('乗務員CD,氏名,月,alc の運行 判定,alc の運行 内容,Y時間の欠け 判定,Y時間の欠け 内容,alc にあって勤怠に無い運行 判定,alc にあって勤怠に無い運行 内容,最低賃金の不変条件 判定,最低賃金の不変条件 内容')
     expect(lines[1]).toContain('1078,山田 太郎,2025-01,未実行,')
     expect(lines[1]).toContain(',判定できない,"失敗, ""理由""",')
     expect(lines).toHaveLength(2)

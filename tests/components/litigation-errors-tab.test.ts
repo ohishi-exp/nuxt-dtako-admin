@@ -71,6 +71,8 @@ const OK_INV = {
 }
 
 interface Call { via: '$fetch' | 'fetch', method: string, url: string, body?: unknown }
+/** unko-gaps の 2 月の応答に載せる勤怠側の件数 (undefined ならキーを載せない = 旧 rust)。 */
+let febOnpremOps: number | undefined
 let calls: Call[] = []
 const realFetch = globalThis.fetch
 
@@ -83,7 +85,12 @@ function stubDollarFetch() {
     if (url === '/restraint-api/litigation-cases') return { cases: [CASE] }
     if (url === '/restraint-api/kintai/unko-gaps') {
       if (q.month === '2025-01') return { gcp_etags_available: false, driver_cds_available: true, drivers: [] }
-      return { gcp_etags_available: true, driver_cds_available: true, drivers: [{ driver_cd: '1078', unko_nos: ['2502100000000000001234'] }] }
+      return {
+        gcp_etags_available: true,
+        driver_cds_available: true,
+        ...(febOnpremOps === undefined ? {} : { onprem_operations_in_month: febOnpremOps }),
+        drivers: [{ driver_cd: '1078', unko_nos: ['2502100000000000001234'] }],
+      }
     }
     if (url === '/restraint-api/wage-report') {
       if (q.month === '2025-02') throw Object.assign(new Error('boom'), { statusCode: 504 })
@@ -143,6 +150,7 @@ function cell(w: VueWrapper, row: string, check: string) {
 
 beforeEach(() => {
   calls = []
+  febOnpremOps = undefined
   saved.length = 0
   localStorage.clear()
   localStorage.setItem('litigation-viewer-comp', '27324455')
@@ -189,7 +197,7 @@ describe('エラータブ: 3 状態の出し分け', () => {
     expect(cell(w, '1078|2025-01', 'alcOps')).toContain('異常なし')
     expect(cell(w, '1078|2025-01', 'alcOps')).toContain('勤務日 2 日')
     expect(cell(w, '1078|2025-02', 'alcOps')).toContain('異常あり')
-    // 取り込み漏れ候補: 1 月は GCP 側が引けていない → 判定できない (0 件と言わない)
+    // alc にあって勤怠に無い運行: 1 月は GCP 側が引けていない → 判定できない (0 件と言わない)
     expect(cell(w, '1078|2025-01', 'unkoGaps')).toContain('判定できない')
     expect(cell(w, '1078|2025-01', 'unkoGaps')).toContain('0 件とは言えない')
     expect(cell(w, '1078|2025-02', 'unkoGaps')).toContain('異常あり')
@@ -201,6 +209,25 @@ describe('エラータブ: 3 状態の出し分け', () => {
     // 取り込みボタンは alc 0 件の月だけ
     expect(w.find('tr[data-row="1078|2025-02"] [data-testid="litigation-import"]').exists()).toBe(true)
     expect(w.find('tr[data-row="1078|2025-01"] [data-testid="litigation-import"]').exists()).toBe(false)
+    w.unmount()
+  })
+})
+
+describe('エラータブ: 照合先なし', () => {
+  it('★ 勤怠側にこの乗務員の運行が 0 件の月は「異常あり」でなく照合先なしと出し、件数の行にも出す', async () => {
+    febOnpremOps = 0
+    const w = await openErrorsTabAndRun()
+    expect(cell(w, '1078|2025-02', 'unkoGaps')).toContain('照合先なし')
+    expect(cell(w, '1078|2025-02', 'unkoGaps')).not.toContain('異常あり')
+    expect(w.text()).toContain('照合先なし 1')
+    w.unmount()
+  })
+
+  it('陰性対照: 勤怠側に 1 件以上あれば従来どおり異常あり、件数の行に照合先なしは出ない', async () => {
+    febOnpremOps = 2
+    const w = await openErrorsTabAndRun()
+    expect(cell(w, '1078|2025-02', 'unkoGaps')).toContain('異常あり')
+    expect(w.text()).not.toContain('照合先なし 1')
     w.unmount()
   })
 })
