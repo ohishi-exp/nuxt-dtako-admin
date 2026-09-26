@@ -236,3 +236,36 @@ describe('/litigation 見られる会社 (viewer-comps) による絞り込み', 
     expect(w.text()).toContain('401')
   })
 })
+
+describe('/litigation 案件フォームの乗務員 (検索付きの一覧)', () => {
+  /** USelectMenu の stub (検索は Nuxt UI 側の機能なので、ここで測るのは選択肢と選んだ後の配線)。 */
+  const USelectMenuStub = {
+    props: ['modelValue', 'items'],
+    emits: ['update:modelValue'],
+    template: `<select data-testid="driver-menu" :value="modelValue" @change="$emit('update:modelValue', $event.target.value)"><option v-for="i in items" :key="i.value" :value="i.value">{{ i.label }}</option></select>`,
+  }
+
+  it('★ 選択肢は「CD 氏名」を CD 順に並べ、選んだ時点で 1 名に決まる (選び直すと置き換わる)', async () => {
+    api.getDrivers.mockResolvedValue([
+      { id: 'a', driver_cd: '1078', driver_name: '金原　敏雄' },
+      { id: 'b', driver_cd: '201', driver_name: '山田　太郎' },
+    ])
+    localStorage.setItem('litigation-viewer-comp', '27324455')
+    const w = mount(Page, { global: { stubs: { ...NUXT_UI_PAGE_STUBS, UInput: { props: ['modelValue'], template: '<input />' }, USelectMenu: USelectMenuStub } } })
+    await settle()
+    await w.findAll('button').find(b => b.text().trim() === '新規作成')!.trigger('click')
+    await settle()
+
+    const menu = w.find('[data-testid=driver-menu]')
+    expect(menu.findAll('option').map(o => o.text())).toEqual(['201 山田　太郎', '1078 金原　敏雄'])
+
+    await menu.setValue('1078')
+    await settle()
+    const chips = () => w.findAll('span.rounded-full').map(s => s.text().trim())
+    expect(chips()).toEqual(['金原　敏雄 (1078)'])
+
+    await menu.setValue('201')
+    await settle()
+    expect(chips()).toEqual(['山田　太郎 (201)'])
+  })
+})
