@@ -7,7 +7,7 @@
  * | 列 | 素材 | 口 |
  * | --- | --- | --- |
  * | `alcOps` alc の運行 | Y時間の勤務日 (JSON) を月に畳んだ日数 | `getYTimePreview` (区切り 1 つにつき 1 回) と出力タブの `empty` |
- * | `yTime` Y時間の欠け | 出力タブの結果 (`missingDates` / `not_found` / 失敗) | `POST /api/y-time-export` (出力タブが呼ぶ) |
+ * | `yTime` Y時間の欠け | 同じプレビューの警告 (Y時間に入らなかった運行) + ZIP を作った冊はテンプレに書けなかった日 | `getYTimePreview` (alcOps と同じ応答) / `POST /api/y-time-export` (出力タブ) |
  * | `unkoGaps` alc にあって勤怠に無い運行 | 受け側の分類をそのまま (勤怠側が 0 件なら照合先なし) | `GET /restraint-api/kintai/unko-gaps?month=&driver_cd=` |
  * | `invariants` 最低賃金の不変条件 (条件1〜3) | relay が付ける `invariants` | `GET /restraint-api/wage-report?source=gcp&month=` |
  *
@@ -73,9 +73,16 @@ export interface LitigationErrorRow {
 /** 1 回の取得の結果。失敗は画面に出す 1 文で持つ */
 export type LitigationFetched<T> = { ok: true, value: T } | { ok: false, reason: string }
 
-/** 乗務員 × 月の「alc の運行」の素材 */
+/** Y時間 に入らなかった運行 (プレビューの警告から拾う)。`reason` は画面に出す短い理由。 */
+export interface LitigationYTimeDropped {
+  unkoNo: string
+  reason: string
+}
+
+/** 乗務員 × 月の「alc の運行」の素材。`ok` のときは同じプレビューから拾った
+ * 「Y時間に入らなかった運行」(`dropped`) も持つ — Y時間の欠けを ZIP なしで判定するため。 */
 export type LitigationAlcOpsEntry =
-  | { ok: true, days: number }
+  | { ok: true, days: number, dropped: LitigationYTimeDropped[] }
   | { ok: false, notFound: boolean, reason: string }
 
 /** Map のキー `乗務員CD|YYYY-MM` */
@@ -107,6 +114,29 @@ export function foldYTimeDaysByMonth(rows: readonly { date: string }[], months: 
   for (const r of rows) {
     const m = r.date.slice(0, 7)
     if (m in out) out[m] = out[m]! + 1
+  }
+  return out
+}
+
+/** 上流 (rust-alc-api の Y時間 export) が「運行を Y時間に入れなかった」ときの警告。
+ * `{運行NO}: departure_at/return_at が不足、skip` と `{運行NO}: KUDGIVT 取得失敗 (…)`。
+ * `{日付}: 複数 segment 結合 …` は 1 行にまとめただけで欠けではないので拾わない。 */
+const Y_TIME_DROPPED_RE = /^(\d{22,23}): (departure_at\/return_at が不足|KUDGIVT 取得失敗)/
+
+/**
+ * プレビューの警告から「Y時間に入らなかった運行」を拾い、**運行NO の先頭 4 桁 (YYMM)** で
+ * 月に振り分ける (区切りの月だけ。区切りの外の運行は捨てる)。
+ */
+export function foldYTimeDroppedByMonth(warnings: readonly string[], months: readonly string[]): Record<string, LitigationYTimeDropped[]> {
+  const out: Record<string, LitigationYTimeDropped[]> = {}
+  for (const m of months) out[m] = []
+  for (const w of warnings) {
+    const hit = Y_TIME_DROPPED_RE.exec(w)
+    if (!hit) continue
+    const unkoNo = hit[1]!
+    const month = `20${unkoNo.slice(0, 2)}-${unkoNo.slice(2, 4)}`
+    if (!(month in out)) continue
+    out[month]!.push({ unkoNo, reason: hit[2]!.startsWith('departure') ? '出庫/帰庫が無い' : '運行の中身 (KUDGIVT) が取れない' })
   }
   return out
 }
@@ -145,8 +175,7 @@ export function alcOpsCell(entry: LitigationAlcOpsEntry | undefined, chunkResult
  * `missingDates` はサーバが先頭 30 件に切り詰めるので、**総数が一覧より多く、
  * この月の日が一覧に 1 つも無いときは「無い」と言わず判定できないにする**。
  */
-export function yTimeCell(month: string, result: LitigationOutputResult | null): LitigationCheckCell {
-  if (!result) return { state: 'pending', message: '未実行 — 出力タブで「ZIP を作る」と判定します' }
+function yTimeCellFromOutput(month: string, result: LitigationOutputResult): LitigationCheckCell {
   if (result.status === 'error') return { state: 'unknown', message: result.message }
   if (result.status === 'not_found') {
     return { state: 'ng', message: '乗務員CD が alc に未登録で Y時間を作れない' }
@@ -164,6 +193,38 @@ export function yTimeCell(month: string, result: LitigationOutputResult | null):
   return result.status === 'empty'
     ? { state: 'ok', message: '書けなかった日なし (この冊は運行 0 件 — 「alc の運行」の列を見てください)' }
     : { state: 'ok', message: '書けなかった日なし' }
+}
+
+/** 「検知を実行」のプレビュー (`alcOps` と同じ応答) から、Y時間に入らなかった運行があるかを出す。 */
+function yTimeCellFromPreview(entry: LitigationAlcOpsEntry): LitigationCheckCell {
+  if (!entry.ok) {
+    return entry.notFound
+      ? { state: 'ng', message: '乗務員CD が alc に未登録で Y時間を作れない' }
+      : { state: 'unknown', message: entry.reason }
+  }
+  if (entry.dropped.length > 0) {
+    const shown = entry.dropped.slice(0, UNKO_NO_PREVIEW).map(d => `${d.unkoNo} (${d.reason})`).join(', ')
+    const more = entry.dropped.length > UNKO_NO_PREVIEW ? ' ほか' : ''
+    return { state: 'ng', message: `Y時間に入らなかった運行 ${entry.dropped.length} 件: ${shown}${more}` }
+  }
+  return entry.days === 0
+    ? { state: 'ok', message: '欠けなし (この月は運行 0 件 — 「alc の運行」の列を見てください)' }
+    : { state: 'ok', message: '欠けなし' }
+}
+
+/**
+ * Y時間の欠け。**ZIP を作らなくても「検知を実行」で判定できる** — 同じプレビューから
+ * 「Y時間に入らなかった運行」(出庫/帰庫不足・KUDGIVT 取得失敗) を拾う。ZIP を作った月は
+ * 「テンプレに行が無く書けなかった日」も加える (これだけは Excel を作らないと分からない。
+ * ただし訴訟準備は冊ごとに期間を振り直し、1 冊は最大 12 か月 = テンプレの行数より十分少ない)。
+ * どちらかが異常・判定できないならそれを出す (ZIP 側を先に見る)。
+ */
+export function yTimeCell(month: string, result: LitigationOutputResult | null, alc?: LitigationAlcOpsEntry): LitigationCheckCell {
+  const fromOutput = result ? yTimeCellFromOutput(month, result) : null
+  const fromPreview = alc ? yTimeCellFromPreview(alc) : null
+  if (fromOutput && fromOutput.state !== 'ok') return fromOutput
+  if (fromPreview && fromPreview.state !== 'ok') return fromPreview
+  return fromOutput ?? fromPreview ?? { state: 'pending', message: '未実行 — 「検知を実行」で調べます' }
 }
 
 /** 「alc にあって勤怠に無い運行」の運行NOを何件まで文に並べるか */
@@ -269,7 +330,7 @@ export function buildLitigationErrorRows(input: LitigationErrorInput): Litigatio
       const chunkResult = chunkResultFor(input, driverCd, month)
       const cells: Record<LitigationCheckKey, LitigationCheckCell> = {
         alcOps: alcOpsCell(input.alcOps.get(key), chunkResult),
-        yTime: yTimeCell(month, chunkResult),
+        yTime: yTimeCell(month, chunkResult, input.alcOps.get(key)),
         unkoGaps: unkoGapsCell(driverCd, input.unkoGaps.get(key)),
         invariants: invariantsCell(driverCd, input.wageReports.get(month)),
       }

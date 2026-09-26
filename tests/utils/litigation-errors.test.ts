@@ -12,6 +12,7 @@ import {
   classifyLitigationImport,
   countLitigationErrorCells,
   foldYTimeDaysByMonth,
+  foldYTimeDroppedByMonth,
   invariantsCell,
   litigationAlcOpsFailure,
   litigationChunkMonths,
@@ -102,8 +103,8 @@ describe('月の小道具', () => {
 
 describe('alcOpsCell (alc の運行)', () => {
   it('★ 0 日は異常あり、1 日以上は異常なし', () => {
-    expect(alcOpsCell({ ok: true, days: 0 }, null)).toEqual({ state: 'ng', message: 'alc に運行が 0 件 (Y時間の勤務日 0 日)' })
-    expect(alcOpsCell({ ok: true, days: 12 }, null)).toEqual({ state: 'ok', message: '勤務日 12 日' })
+    expect(alcOpsCell({ ok: true, days: 0, dropped: [] }, null)).toEqual({ state: 'ng', message: 'alc に運行が 0 件 (Y時間の勤務日 0 日)' })
+    expect(alcOpsCell({ ok: true, days: 12, dropped: [] }, null)).toEqual({ state: 'ok', message: '勤務日 12 日' })
   })
 
   it('★ 取れなかったときは 0 件と言わず判定できない (理由つき)', () => {
@@ -127,13 +128,62 @@ describe('alcOpsCell (alc の運行)', () => {
   })
 
   it('月単位の結果は出力タブの結果より優先する', () => {
-    expect(alcOpsCell({ ok: true, days: 3 }, result({ status: 'empty', rows: 0 })).state).toBe('ok')
+    expect(alcOpsCell({ ok: true, days: 3, dropped: [] }, result({ status: 'empty', rows: 0 })).state).toBe('ok')
+  })
+})
+
+describe('foldYTimeDroppedByMonth (プレビューの警告から Y時間に入らなかった運行を拾う)', () => {
+  it('出庫/帰庫不足と KUDGIVT 取得失敗だけを、運行NO の年月で月に振り分ける', () => {
+    const out = foldYTimeDroppedByMonth([
+      '2501050000000000001234: departure_at/return_at が不足、skip',
+      '25020600000000000012341: KUDGIVT 取得失敗 (Upload failed: R2 download status 404)',
+      // 1 行にまとめただけ — 欠けではないので拾わない (陰性対照)
+      '2025-01-07: 複数 segment 結合 (1 行に集約: 最早始業 / 最遅終業 / 休憩合計)',
+      // 区切りの外の月は捨てる
+      '2412310000000000001234: departure_at/return_at が不足、skip',
+    ], ['2025-01', '2025-02'])
+    expect(out).toEqual({
+      '2025-01': [{ unkoNo: '2501050000000000001234', reason: '出庫/帰庫が無い' }],
+      '2025-02': [{ unkoNo: '25020600000000000012341', reason: '運行の中身 (KUDGIVT) が取れない' }],
+    })
   })
 })
 
 describe('yTimeCell (Y時間の欠け)', () => {
-  it('出力タブ未実行は未実行', () => {
-    expect(yTimeCell('2025-01', null)).toEqual({ state: 'pending', message: '未実行 — 出力タブで「ZIP を作る」と判定します' })
+  it('検知も ZIP も未実行なら未実行', () => {
+    expect(yTimeCell('2025-01', null)).toEqual({ state: 'pending', message: '未実行 — 「検知を実行」で調べます' })
+  })
+
+  it('★ ZIP を作らなくても、検知のプレビューから判定する (Y時間に入らなかった運行が無ければ異常なし)', () => {
+    expect(yTimeCell('2025-01', null, { ok: true, days: 20, dropped: [] })).toEqual({ state: 'ok', message: '欠けなし' })
+  })
+
+  it('★ プレビューで Y時間に入らなかった運行があれば異常あり (3 件まで並べる)', () => {
+    const dropped = [
+      { unkoNo: '2501050000000000001234', reason: '出庫/帰庫が無い' },
+      { unkoNo: '2501060000000000001234', reason: '運行の中身 (KUDGIVT) が取れない' },
+      { unkoNo: '2501070000000000001234', reason: '出庫/帰庫が無い' },
+      { unkoNo: '2501080000000000001234', reason: '出庫/帰庫が無い' },
+    ]
+    expect(yTimeCell('2025-01', null, { ok: true, days: 20, dropped })).toEqual({
+      state: 'ng',
+      message: 'Y時間に入らなかった運行 4 件: 2501050000000000001234 (出庫/帰庫が無い), 2501060000000000001234 (運行の中身 (KUDGIVT) が取れない), 2501070000000000001234 (出庫/帰庫が無い) ほか',
+    })
+  })
+
+  it('プレビューが 404 (乗務員CD が alc に未登録) なら異常あり、他の失敗は判定できない', () => {
+    expect(yTimeCell('2025-01', null, { ok: false, notFound: true, reason: '404' }).state).toBe('ng')
+    expect(yTimeCell('2025-01', null, { ok: false, notFound: false, reason: '502 …' })).toEqual({ state: 'unknown', message: '502 …' })
+  })
+
+  it('★ ZIP 側の異常 (テンプレに書けなかった日) はプレビューが異常なしでも出す / 両方異常なしなら ZIP 側の文言', () => {
+    const clean = { ok: true as const, days: 20, dropped: [] }
+    expect(yTimeCell('2025-02', result({ missingDates: ['2025-02-03'], missingCount: 1 }), clean).state).toBe('ng')
+    expect(yTimeCell('2025-01', result({}), clean)).toEqual({ state: 'ok', message: '書けなかった日なし' })
+  })
+
+  it('運行 0 件の月は、欠けなしだが alc の運行の列を見るよう添える', () => {
+    expect(yTimeCell('2025-01', null, { ok: true, days: 0, dropped: [] }).message).toContain('「alc の運行」の列を見てください')
   })
 
   it('失敗は判定できない (出力タブの理由をそのまま)', () => {
@@ -298,8 +348,8 @@ describe('buildLitigationErrorRows / 件数 / CSV', () => {
 
   it('乗務員 × 月の素材を正しい行に配り、alc 0 件の行だけ取り込みボタンを出す', () => {
     const alcOps = new Map<string, LitigationAlcOpsEntry>([
-      ['1078|2025-01', { ok: true, days: 0 }],
-      ['1078|2025-02', { ok: true, days: 20 }],
+      ['1078|2025-01', { ok: true, days: 0, dropped: [] }],
+      ['1078|2025-02', { ok: true, days: 20, dropped: [] }],
     ])
     const rows = buildLitigationErrorRows(input({
       results: [result({ missingDates: ['2025-02-03'], missingCount: 1 }), null],

@@ -204,11 +204,29 @@ describe('エラータブ: 3 状態の出し分け', () => {
     // 最低賃金の不変条件: 2 月は wage-report が 504 → 判定できない
     expect(cell(w, '1078|2025-01', 'invariants')).toContain('異常なし')
     expect(cell(w, '1078|2025-02', 'invariants')).toContain('判定できない')
-    // Y時間の欠け: 出力タブを回していないので未実行
-    expect(cell(w, '1078|2025-01', 'yTime')).toContain('未実行')
+    // Y時間の欠け: 出力タブ (ZIP) を回していなくても、検知のプレビューで判定する
+    expect(cell(w, '1078|2025-01', 'yTime')).toContain('異常なし')
+    expect(cell(w, '1078|2025-01', 'yTime')).not.toContain('未実行')
     // 取り込みボタンは alc 0 件の月だけ
     expect(w.find('tr[data-row="1078|2025-02"] [data-testid="litigation-import"]').exists()).toBe(true)
     expect(w.find('tr[data-row="1078|2025-01"] [data-testid="litigation-import"]').exists()).toBe(false)
+    w.unmount()
+  })
+})
+
+describe('エラータブ: Y時間の欠けを ZIP なしで判定する', () => {
+  it('★ プレビューの警告で Y時間に入らなかった運行がある月は、ZIP を作らなくても異常あり (他の月は異常なし)', async () => {
+    api.getYTimePreview.mockResolvedValue({
+      driver: { cd: '1078', name: '甲野太郎' },
+      period: { from: '2025-01-01', to: '2025-02-28' },
+      rows: [{ date: '2025-01-10' }, { date: '2025-01-11' }],
+      warnings: ['2502030000000000001234: departure_at/return_at が不足、skip', '2025-01-10: 複数 segment 結合 (1 行に集約)'],
+    })
+    const w = await openErrorsTabAndRun()
+    expect(cell(w, '1078|2025-02', 'yTime')).toContain('異常あり')
+    expect(cell(w, '1078|2025-02', 'yTime')).toContain('2502030000000000001234 (出庫/帰庫が無い)')
+    // 「複数 segment 結合」は欠けではない (陰性対照)
+    expect(cell(w, '1078|2025-01', 'yTime')).toContain('異常なし')
     w.unmount()
   })
 })
