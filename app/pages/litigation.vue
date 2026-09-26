@@ -39,6 +39,7 @@ import {
   classifyLitigationImport,
   countLitigationErrorCells,
   foldYTimeDaysByMonth,
+  foldYTimeDroppedByMonth,
   litigationAlcOpsFailure,
   litigationChunkMonths,
   litigationChunkWarnings,
@@ -492,7 +493,8 @@ async function loadAlcOps(epoch: number, driverCd: string, from: string, to: str
   try {
     const res = await getYTimePreview(driverCd, from, to)
     const days = foldYTimeDaysByMonth(res.rows, months)
-    entries = months.map(m => [m, { ok: true, days: days[m]! }])
+    const dropped = foldYTimeDroppedByMonth(res.warnings, months)
+    entries = months.map(m => [m, { ok: true, days: days[m]!, dropped: dropped[m]! }])
   }
   catch (e) {
     const entry = litigationAlcOpsFailure(caughtErrorStatus(e), describeCaughtError(e, ERRORS_RETRY))
@@ -1091,7 +1093,7 @@ function fmtDateTime(iso: string): string {
             最低賃金の不変条件 (条件1〜3、拘束は GCP) が崩れていないかを並べます。
             「判定できない」は調べたが材料が取れなかった月で、異常なしではありません。
             「照合先なし」はその月の勤怠にこの乗務員の運行が 1 件も無く、alc の運行と突き合わせる相手が無い月です (異常とは数えません)。
-            Y時間の欠けは出力タブで「ZIP を作る」と埋まります。最低賃金の不変条件は 1 か月 15〜64 秒かかります (読むだけで保存はしません)。
+            Y時間の欠けは「検知を実行」の Y時間 プレビューから判定します (出庫/帰庫が無い・運行の中身が取れないなどで Y時間 に入らなかった運行)。出力タブで ZIP を作った後は、テンプレに書けなかった日も加えます。最低賃金の不変条件は 1 か月 15〜64 秒かかります (読むだけで保存はしません)。
           </p>
 
           <div class="flex items-center gap-3 flex-wrap">
