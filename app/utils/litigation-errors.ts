@@ -244,7 +244,7 @@ export function unkoGapsCell(driverCd: string, entry: LitigationFetched<KintaiUn
   // 乗務員CD 指定で呼ぶと受け側の「勤怠側にも運行がある月だけ」の絞り込みが外れるので、
   // 勤怠側が 0 件の月は alc の運行が全部「勤怠に無い」に数えられる。異常とは言わずに分ける
   if (g.onpremOperationsInMonth === 0) {
-    return { state: 'noBaseline', message: 'この月のこの乗務員の勤怠 (運行NO 付き) が GCP にまだ無く、alc の運行と突き合わせられない — 「勤怠を GCP へ運ぶ」で入れられます' }
+    return { state: 'noBaseline', message: 'この月のこの乗務員の勤怠 (運行NO 付き) が GCP に無く、alc の運行と突き合わせられない — まだ運んでいない (2026-01 より前) なら「勤怠を GCP へ運ぶ」で入る。運んでも残るならオンプレの勤務時間登録にこの乗務員の運行が無い' }
   }
   const mine = g.drivers.find(d => d.driverCd === driverCd)
   if (mine && mine.unkoNos.length > 0) {

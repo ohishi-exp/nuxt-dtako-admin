@@ -250,7 +250,7 @@ describe('unkoGapsCell (alc にあって勤怠に無い運行)', () => {
     const g = gaps({ driver_cd: 1590, onprem_operations_in_month: 0, drivers: [{ driver_cd: '1590', unko_nos: ['a', 'b'] }] })
     expect(unkoGapsCell('1590', g)).toEqual({
       state: 'noBaseline',
-      message: 'この月のこの乗務員の勤怠 (運行NO 付き) が GCP にまだ無く、alc の運行と突き合わせられない — 「勤怠を GCP へ運ぶ」で入れられます',
+      message: 'この月のこの乗務員の勤怠 (運行NO 付き) が GCP に無く、alc の運行と突き合わせられない — まだ運んでいない (2026-01 より前) なら「勤怠を GCP へ運ぶ」で入る。運んでも残るならオンプレの勤務時間登録にこの乗務員の運行が無い',
     })
   })
 
