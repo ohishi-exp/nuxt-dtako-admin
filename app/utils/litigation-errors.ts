@@ -19,7 +19,7 @@
  * | `ok` | 異常なし (調べて、無かった) |
  * | `unknown` | 判定できない — 取りに行ったが取れなかった / 取れたが判断材料が欠けていた。`message` に理由 |
  * | `pending` | 未実行 — まだ取りに行っていない |
- * | `noBaseline` | 照合先なし — 突き合わせる相手 (勤怠から運んだこの乗務員の運行) がその月 0 件。異常ではない |
+ * | `noBaseline` | 照合先なし — 突き合わせる相手 (GCP へ運んだ勤怠のうち運行NO 付きの、この乗務員の行) がその月 0 件。異常ではない。**2026-01 より前は誰も運んでいない** ので、「勤怠を GCP へ運ぶ」で入れれば照合できる |
  *
  * `unknown` と `pending` を分けるのは、「調べたが分からなかった」と「まだ調べていない」で
  * 次の一手が違うため (前者は理由を読む、後者はボタンを押す)。
@@ -244,7 +244,7 @@ export function unkoGapsCell(driverCd: string, entry: LitigationFetched<KintaiUn
   // 乗務員CD 指定で呼ぶと受け側の「勤怠側にも運行がある月だけ」の絞り込みが外れるので、
   // 勤怠側が 0 件の月は alc の運行が全部「勤怠に無い」に数えられる。異常とは言わずに分ける
   if (g.onpremOperationsInMonth === 0) {
-    return { state: 'noBaseline', message: 'この月は勤怠から運んだこの乗務員の運行が 0 件で、alc の運行と突き合わせる相手が無い' }
+    return { state: 'noBaseline', message: 'この月のこの乗務員の勤怠 (運行NO 付き) が GCP にまだ無く、alc の運行と突き合わせられない — 「勤怠を GCP へ運ぶ」で入れられます' }
   }
   const mine = g.drivers.find(d => d.driverCd === driverCd)
   if (mine && mine.unkoNos.length > 0) {
@@ -458,4 +458,49 @@ export function classifyLitigationImport(httpStatus: number | null, body: unknow
   }
   if (httpStatus === 403) return { kind: 'forbidden', message: '取り込みは admin / payroll のみ' }
   return { kind: 'error', message: reason }
+}
+
+// ---- 勤怠を GCP へ運ぶ (照合先なしの月) ----
+
+/**
+ * 照合先なし (`unkoGaps` が `noBaseline`) の月。重複を除いて古い順。
+ * 運ぶ口 (`POST /restraint-api/kintai/refresh/timecard`) は**会社全体を月単位で**運ぶので、
+ * 乗務員ごとではなく月ごとに 1 回呼べば足りる。
+ */
+export function litigationNoBaselineMonths(rows: readonly LitigationErrorRow[]): string[] {
+  const months = new Set(rows.filter(r => r.cells.unkoGaps.state === 'noBaseline').map(r => r.month))
+  return [...months].sort()
+}
+
+/** `refresh/timecard` の応答 1 月ぶん (`kintai-diff-view.ts` の `parseKintaiWindowReport` で読んだもの) の要点 */
+export interface LitigationTimecardPushReport {
+  events: number
+  daysWritten: number
+  misplaced: number
+  unknownStates: readonly string[]
+}
+
+export interface LitigationTimecardPushOutcome {
+  kind: 'ok' | 'error'
+  message: string
+}
+
+/**
+ * 1 月ぶんの運び結果を 1 文にする。`reason` は通信・HTTP 失敗のとき呼び出し側が組んだ 1 文
+ * (`report` は null)。書き込みは受け側の日単位署名が守るので、`daysWritten: 0` は
+ * 「既に運んである」であって「動かなかった」ではない。`misplaced` / `unknownStates` は
+ * 運び方が壊れている印なので失敗として出す (MCP `run_kintai_relay` の説明と同じ読み方)。
+ */
+export function classifyLitigationTimecardPush(
+  report: LitigationTimecardPushReport | null,
+  reason: string,
+): LitigationTimecardPushOutcome {
+  if (!report) return { kind: 'error', message: reason }
+  if (report.misplaced > 0) return { kind: 'error', message: `運び方が崩れた行 ${report.misplaced} 件 (misplaced)` }
+  if (report.unknownStates.length > 0) {
+    return { kind: 'error', message: `受け側に無い打刻の種類: ${report.unknownStates.join(', ')}` }
+  }
+  if (report.events === 0) return { kind: 'ok', message: 'オンプレにこの月の打刻が無い (運ぶものなし)' }
+  if (report.daysWritten === 0) return { kind: 'ok', message: `変わった日なし (既に運んである。打刻 ${report.events} 件)` }
+  return { kind: 'ok', message: `${report.daysWritten} 日ぶん運んだ (会社全体、打刻 ${report.events} 件)` }
 }

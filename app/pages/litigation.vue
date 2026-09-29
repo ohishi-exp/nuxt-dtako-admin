@@ -37,6 +37,7 @@ import {
 import {
   buildLitigationErrorRows,
   classifyLitigationImport,
+  classifyLitigationTimecardPush,
   countLitigationErrorCells,
   foldYTimeDaysByMonth,
   foldYTimeDroppedByMonth,
@@ -47,6 +48,7 @@ import {
   litigationErrorsCsv,
   litigationImportRanges,
   litigationMonthBounds,
+  litigationNoBaselineMonths,
   litigationRowNeedsAttention,
   LITIGATION_CHECK_KEYS,
   LITIGATION_CHECK_LABELS,
@@ -57,7 +59,9 @@ import {
   type LitigationErrorRow,
   type LitigationFetched,
   type LitigationImportOutcome,
+  type LitigationTimecardPushOutcome,
 } from '~/utils/litigation-errors'
+import { parseKintaiWindowReport } from '~/utils/kintai-diff-view'
 import { parseKintaiUnkoGaps, type KintaiUnkoGaps } from '~/utils/kintai-unko-gaps'
 import {
   alcRecordingSinceNotice,
@@ -468,6 +472,7 @@ watch(() => [openCase.value?.caseId, openCase.value?.updatedAt], () => {
   errorsFinished.value = false
   errorsProgress.value = null
   importResults.value = new Map()
+  timecardPushResults.value = []
 })
 
 const errorRows = computed<LitigationErrorRow[]>(() => buildLitigationErrorRows({
@@ -633,6 +638,53 @@ async function importMonth(row: LitigationErrorRow) {
   }
   finally {
     importingKey.value = null
+  }
+}
+
+// --- 勤怠を GCP へ運ぶ (照合先なしの月): オンプレの打刻を月ごとに GCP へ運ぶ ---
+// restraint-wage の「① 打刻の運び直し」と同じ口 (`refresh/timecard`)。**会社全体を月単位で**運ぶ。
+// 1 回に 1 か月 (12 か月まとめると受け側が 413 を返す実測、2026-09-29)。書き込みは受け側の
+// 日単位署名が守るので、押し直しても変わった日しか書かない。GCP の畳み直し (day_summaries) は
+// しない — 照合 (unko-gaps) は運んだ行を直接読むので、畳み直さなくても照合先になる。
+const noBaselineMonths = computed(() => litigationNoBaselineMonths(errorRows.value))
+const timecardPushing = ref(false)
+const timecardPushResults = ref<{ month: string, outcome: LitigationTimecardPushOutcome }[]>([])
+const TIMECARD_PUSH_RETRY = '「勤怠を GCP へ運ぶ」を押してやり直してください'
+
+async function pushTimecardMonth(month: string): Promise<LitigationTimecardPushOutcome> {
+  try {
+    const res = await $fetch<unknown>('/restraint-api/kintai/refresh/timecard', {
+      method: 'POST',
+      headers: authHeaders(),
+      query: { month, month_count: 1, apply: true },
+    })
+    return classifyLitigationTimecardPush(parseKintaiWindowReport(res), '応答を読めませんでした')
+  }
+  catch (e) {
+    return classifyLitigationTimecardPush(null, describeCaughtError(e, TIMECARD_PUSH_RETRY))
+  }
+}
+
+/** 照合先なしの月を 1 か月ずつ直列に運び、運べた月の「勤怠に無い運行」を読み直す。 */
+async function pushNoBaselineMonths() {
+  const target = openCase.value
+  if (!target || timecardPushing.value) return
+  const epoch = errorsEpoch
+  const months = noBaselineMonths.value
+  timecardPushing.value = true
+  timecardPushResults.value = []
+  try {
+    for (const month of months) {
+      const outcome = await pushTimecardMonth(month)
+      if (epoch !== errorsEpoch) return
+      timecardPushResults.value = [...timecardPushResults.value, { month, outcome }]
+      if (outcome.kind === 'ok') {
+        for (const cd of target.driverCds) await loadUnkoGaps(epoch, cd, month)
+      }
+    }
+  }
+  finally {
+    timecardPushing.value = false
   }
 }
 
@@ -1092,7 +1144,8 @@ function fmtDateTime(iso: string): string {
             乗務員 × 月ごとに、alc の運行が 0 件か・Y時間に書けなかった日があるか・alc にあるのに勤怠 (オンプレから運んだ運行) に無い運行があるか・
             最低賃金の不変条件 (条件1〜3、拘束は GCP) が崩れていないかを並べます。
             「判定できない」は調べたが材料が取れなかった月で、異常なしではありません。
-            「照合先なし」はその月の勤怠にこの乗務員の運行が 1 件も無く、alc の運行と突き合わせる相手が無い月です (異常とは数えません)。
+            「照合先なし」はその月のこの乗務員の勤怠 (運行NO 付き) が GCP にまだ無く、alc の運行と突き合わせられない月です (異常とは数えません)。
+            2026-01 より前の勤怠は GCP へ運んでいないので、その期間は全員が照合先なしになります。「勤怠を GCP へ運ぶ」で照合先なしの月をオンプレから運べます (会社全体を月単位で運びます)。
             Y時間の欠けは「検知を実行」の Y時間 プレビューから判定します (出庫/帰庫が無い・運行の中身が取れないなどで Y時間 に入らなかった運行)。出力タブで ZIP を作った後は、テンプレに書けなかった日も加えます。最低賃金の不変条件は 1 か月 15〜64 秒かかります (読むだけで保存はしません)。
           </p>
 
@@ -1101,9 +1154,19 @@ function fmtDateTime(iso: string): string {
               icon="i-lucide-search-check"
               label="検知を実行"
               :loading="errorsRunning"
-              :disabled="errorsRunning || importingKey !== null || errorRows.length === 0"
+              :disabled="errorsRunning || importingKey !== null || timecardPushing || errorRows.length === 0"
               data-testid="litigation-errors-run"
               @click="runErrorChecks"
+            />
+            <UButton
+              v-if="noBaselineMonths.length > 0 || timecardPushResults.length > 0"
+              icon="i-lucide-database-zap"
+              :label="`勤怠を GCP へ運ぶ (照合先なし ${noBaselineMonths.length} か月)`"
+              variant="soft"
+              :loading="timecardPushing"
+              :disabled="timecardPushing || errorsRunning || importingKey !== null || noBaselineMonths.length === 0"
+              data-testid="litigation-timecard-push"
+              @click="pushNoBaselineMonths"
             />
             <span v-if="errorsProgress" class="text-sm text-gray-600 dark:text-gray-400" data-testid="litigation-errors-progress">
               {{ errorsProgress.done }} / {{ errorsProgress.total }}
@@ -1114,6 +1177,16 @@ function fmtDateTime(iso: string): string {
               <input v-model="errorsOnlyAttention" type="checkbox">
               異常あり・判定できないがある行だけ
             </label>
+          </div>
+
+          <div v-if="timecardPushResults.length > 0" class="text-xs space-y-0.5" data-testid="litigation-timecard-push-results">
+            <div
+              v-for="r in timecardPushResults"
+              :key="r.month"
+              :class="r.outcome.kind === 'ok' ? 'text-gray-600 dark:text-gray-400' : 'text-red-600 dark:text-red-400'"
+            >
+              {{ r.month }}: {{ r.outcome.message }}
+            </div>
           </div>
 
           <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600 dark:text-gray-400" data-testid="litigation-errors-summary">
@@ -1160,7 +1233,7 @@ function fmtDateTime(iso: string): string {
                       size="xs"
                       variant="soft"
                       :loading="importingKey === `${row.driverCd}|${row.month}`"
-                      :disabled="importingKey !== null || errorsRunning"
+                      :disabled="importingKey !== null || errorsRunning || timecardPushing"
                       data-testid="litigation-import"
                       @click="importMonth(row)"
                     />

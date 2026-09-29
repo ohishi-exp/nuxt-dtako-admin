@@ -10,6 +10,7 @@ import {
   alcOpsCell,
   buildLitigationErrorRows,
   classifyLitigationImport,
+  classifyLitigationTimecardPush,
   countLitigationErrorCells,
   foldYTimeDaysByMonth,
   foldYTimeDroppedByMonth,
@@ -21,6 +22,7 @@ import {
   litigationErrorsCsv,
   litigationImportRanges,
   litigationMonthBounds,
+  litigationNoBaselineMonths,
   litigationRowNeedsAttention,
   unkoGapsCell,
   yTimeCell,
@@ -171,6 +173,11 @@ describe('yTimeCell (Y時間の欠け)', () => {
     })
   })
 
+  it('3 件以下なら「ほか」を付けない', () => {
+    const dropped = [{ unkoNo: '2501050000000000001234', reason: '出庫/帰庫が無い' }]
+    expect(yTimeCell('2025-01', null, { ok: true, days: 20, dropped }).message).toBe('Y時間に入らなかった運行 1 件: 2501050000000000001234 (出庫/帰庫が無い)')
+  })
+
   it('プレビューが 404 (乗務員CD が alc に未登録) なら異常あり、他の失敗は判定できない', () => {
     expect(yTimeCell('2025-01', null, { ok: false, notFound: true, reason: '404' }).state).toBe('ng')
     expect(yTimeCell('2025-01', null, { ok: false, notFound: false, reason: '502 …' })).toEqual({ state: 'unknown', message: '502 …' })
@@ -243,7 +250,7 @@ describe('unkoGapsCell (alc にあって勤怠に無い運行)', () => {
     const g = gaps({ driver_cd: 1590, onprem_operations_in_month: 0, drivers: [{ driver_cd: '1590', unko_nos: ['a', 'b'] }] })
     expect(unkoGapsCell('1590', g)).toEqual({
       state: 'noBaseline',
-      message: 'この月は勤怠から運んだこの乗務員の運行が 0 件で、alc の運行と突き合わせる相手が無い',
+      message: 'この月のこの乗務員の勤怠 (運行NO 付き) が GCP にまだ無く、alc の運行と突き合わせられない — 「勤怠を GCP へ運ぶ」で入れられます',
     })
   })
 
@@ -442,5 +449,38 @@ describe('取り込みボタン', () => {
     expect(classifyLitigationImport(403, { error: 'forbidden' }, '')).toEqual({ kind: 'forbidden', message: '取り込みは admin / payroll のみ' })
     expect(classifyLitigationImport(null, null, '接続できませんでした')).toEqual({ kind: 'error', message: '接続できませんでした' })
     expect(classifyLitigationImport(400, {}, '400 …').kind).toBe('error')
+  })
+})
+
+describe('勤怠を GCP へ運ぶ (照合先なしの月)', () => {
+  function rowOf(month: string, state: 'noBaseline' | 'ng' | 'pending') {
+    const cell = { state, message: '' }
+    return {
+      driverCd: '1590',
+      month,
+      cells: { alcOps: cell, yTime: cell, unkoGaps: cell, invariants: cell },
+      canImport: false,
+    }
+  }
+
+  it('照合先なしの月だけを、乗務員をまたいで重複なく古い順に出す', () => {
+    const rows = [rowOf('2024-02', 'noBaseline'), rowOf('2023-12', 'noBaseline'), rowOf('2024-01', 'ng'), { ...rowOf('2024-02', 'noBaseline'), driverCd: '2000' }]
+    expect(litigationNoBaselineMonths(rows)).toEqual(['2023-12', '2024-02'])
+    expect(litigationNoBaselineMonths([rowOf('2024-01', 'pending')])).toEqual([])
+  })
+
+  const rep = (over: Partial<{ events: number, daysWritten: number, misplaced: number, unknownStates: string[] }> = {}) =>
+    ({ events: 3972, daysWritten: 1735, misplaced: 0, unknownStates: [], ...over })
+
+  it('運んだ日数・既に運んである・打刻が無いを言い分ける', () => {
+    expect(classifyLitigationTimecardPush(rep(), '')).toEqual({ kind: 'ok', message: '1735 日ぶん運んだ (会社全体、打刻 3972 件)' })
+    expect(classifyLitigationTimecardPush(rep({ daysWritten: 0 }), '')).toEqual({ kind: 'ok', message: '変わった日なし (既に運んである。打刻 3972 件)' })
+    expect(classifyLitigationTimecardPush(rep({ events: 0, daysWritten: 0 }), '')).toEqual({ kind: 'ok', message: 'オンプレにこの月の打刻が無い (運ぶものなし)' })
+  })
+
+  it('★ misplaced / 受け側に無い種類は運び方が壊れている印なので失敗、通信失敗は理由をそのまま', () => {
+    expect(classifyLitigationTimecardPush(rep({ misplaced: 2 }), '')).toEqual({ kind: 'error', message: '運び方が崩れた行 2 件 (misplaced)' })
+    expect(classifyLitigationTimecardPush(rep({ unknownStates: ['x', 'y'] }), '')).toEqual({ kind: 'error', message: '受け側に無い打刻の種類: x, y' })
+    expect(classifyLitigationTimecardPush(null, '502 …')).toEqual({ kind: 'error', message: '502 …' })
   })
 })
