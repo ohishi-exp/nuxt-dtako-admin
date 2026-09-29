@@ -70,6 +70,44 @@ function punch(driver: number, at: string, state: string) {
 }
 
 describe("relayKintaiWindow (ohishi-exp/rust-ichibanboshi#205 の 04b)", () => {
+  it("★ driverCds で絞ると、その乗務員の行だけを名乗って送る (他の乗務員の日は受け側で触られない)", async () => {
+    const { deps: d, calls } = deps({
+      onprem: {
+        [EVENTS]: {
+          drivers: [1078, 1590],
+          events: [
+            punch(1078, "2023-06-01 08:00:00", "始業"),
+            { datetime: "2023-06-01 09:00:00", driver_id: 1078, source: "dtako", state: "運行開始", unko_no: "23060109000000000012341" },
+            { datetime: "2023-06-01 18:00:00", driver_id: 1078, source: "dtako", state: "運行終了", unko_no: "23060109000000000012341" },
+            punch(1590, "2023-06-01 08:00:00", "始業"),
+            null,
+          ],
+        },
+      },
+      gcp: { [WINDOW]: { drivers_written: 1, days_written: 1, dry_run: false } },
+    });
+    const r = await relayKintaiWindow(d, { month: "2023-06", monthCount: 1, apply: true, driverCds: [1078] });
+    const sent = JSON.parse(calls.find(c => c.side === "gcp")!.body!);
+    expect(sent.drivers).toEqual([1078]);
+    expect(sent.events.map((e: { driver_id: number }) => e.driver_id)).toEqual([1078, 1078, 1078]);
+    expect(r.drivers).toBe(1);
+    expect(r.events).toBe(3);
+    // 運行NO の種類数 (同じ運行の開始/終了は 1 つ)
+    expect(r.operations).toBe(1);
+  });
+
+  it("★ 指定した乗務員に打刻が無ければ名乗らない (名乗ると受け側が窓の中の日を消しにいく)。運行NO が無ければ operations 0", async () => {
+    const { deps: d, calls } = deps({
+      onprem: { [EVENTS]: { drivers: [1078, 1590], events: [punch(1078, "2023-06-01 08:00:00", "始業"), punch(1590, "2023-06-01 08:00:00", "始業")] } },
+      gcp: { [WINDOW]: { dry_run: false } },
+    });
+    const none = await relayKintaiWindow(d, { month: "2023-06", monthCount: 1, apply: true, driverCds: [9999] });
+    expect(JSON.parse(calls.find(c => c.side === "gcp")!.body!).drivers).toEqual([]);
+    expect([none.drivers, none.events, none.operations]).toEqual([0, 0, 0]);
+    const noOps = await relayKintaiWindow(d, { month: "2023-06", monthCount: 1, apply: true, driverCds: [1590] });
+    expect([noOps.events, noOps.operations]).toEqual([1, 0]);
+  });
+
   it("**窓の既定は当月 + 前月** — 始業/終業 の後追い修正を拾う幅", () => {
     expect(windowMonths("2026-06", 2)).toEqual(["2026-05", "2026-06"]);
     // 年をまたいでも畳める

@@ -7178,7 +7178,7 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
   }
 
   /**
-   * POST /restraint-api/kintai/refresh/timecard?month=&month_count=&apply= —
+   * POST /restraint-api/kintai/refresh/timecard?month=&month_count=&apply=&driver_cd= —
    * 打刻をオンプレ→GCPへ**窓ぶん**運び直す (Refs #615-4)。
    *
    * 中身は `kintai-relay.ts` の `relayKintaiWindow` そのまま — 窓の既定 (当月+前月)
@@ -7199,9 +7199,16 @@ export class DtakoScraperRelayDO extends DurableObject<RelayEnv> {
       if (!Number.isInteger(monthCount)) return dvrJsonError(400, "month_count は整数で指定してください");
     }
     const apply = url.searchParams.get("apply") === "true";
+    // 訴訟準備は 1 乗務員ぶんだけ運ぶ (全乗務員を運ぶと 1 か月数秒〜十数秒かかり、
+    // 他の乗務員の畳み直しまで走る)。受け側は名乗った乗務員にしか触らない
+    const driverCdRaw = url.searchParams.get("driver_cd");
+    if (driverCdRaw !== null && !/^\d{1,10}$/.test(driverCdRaw)) {
+      return dvrJsonError(400, "driver_cd は数字で指定してください");
+    }
+    const driverCds = driverCdRaw === null ? undefined : [Number(driverCdRaw)];
 
     try {
-      const report = await relayKintaiWindow(ctx.deps, { month, monthCount, apply });
+      const report = await relayKintaiWindow(ctx.deps, { month, monthCount, apply, driverCds });
       console.log(
         JSON.stringify({
           kintai_refresh_timecard: "ok",

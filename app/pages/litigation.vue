@@ -48,7 +48,7 @@ import {
   litigationErrorsCsv,
   litigationImportRanges,
   litigationMonthBounds,
-  litigationNoBaselineMonths,
+  litigationNoBaselineTargets,
   litigationCheckedAtKey,
   litigationNeedsFetch,
   litigationRowCheckedAt,
@@ -736,22 +736,26 @@ async function importMonth(row: LitigationErrorRow) {
   }
 }
 
-// --- 勤怠を GCP へ運ぶ (照合先なしの月): オンプレの打刻を月ごとに GCP へ運ぶ ---
-// restraint-wage の「① 打刻の運び直し」と同じ口 (`refresh/timecard`)。**会社全体を月単位で**運ぶ。
-// 1 回に 1 か月 (12 か月まとめると受け側が 413 を返す実測、2026-09-29)。書き込みは受け側の
-// 日単位署名が守るので、押し直しても変わった日しか書かない。GCP の畳み直し (day_summaries) は
-// しない — 照合 (unko-gaps) は運んだ行を直接読むので、畳み直さなくても照合先になる。
-const noBaselineMonths = computed(() => litigationNoBaselineMonths(errorRows.value))
+// --- 勤怠を GCP へ運ぶ (照合先なしの月): オンプレの打刻を乗務員 × 月ごとに GCP へ運ぶ ---
+// restraint-wage の「① 打刻の運び直し」と同じ口 (`refresh/timecard`) に `driver_cd` を付けて、
+// **案件の乗務員ぶんだけ**運ぶ (受け側は名乗った乗務員にしか触らない)。1 回に 1 か月
+// (12 か月まとめると受け側が 413、2026-09-29 実測)。押し直しても変わった日しか書かない。
+// 受け側は運んだ乗務員を畳み直す (day_summaries が変わりうる — 最低賃金の不変条件は取り直しが要る)。
 const timecardPushing = ref(false)
-const timecardPushResults = ref<{ month: string, outcome: LitigationTimecardPushOutcome }[]>([])
+const timecardPushResults = ref<{ driverCd: string, month: string, outcome: LitigationTimecardPushOutcome }[]>([])
+/** 運んでも照合先にならないと分かった乗務員 × 月 (運行NO 付きの打刻が無い) は、押し直しても同じなので外す */
+const noBaselineTargets = computed(() => {
+  const hopeless = new Set(timecardPushResults.value.filter(r => r.outcome.kind === 'noOperations').map(r => `${r.driverCd}|${r.month}`))
+  return litigationNoBaselineTargets(errorRows.value).filter(t => !hopeless.has(`${t.driverCd}|${t.month}`))
+})
 const TIMECARD_PUSH_RETRY = '「勤怠を GCP へ運ぶ」を押してやり直してください'
 
-async function pushTimecardMonth(month: string): Promise<LitigationTimecardPushOutcome> {
+async function pushTimecard(driverCd: string, month: string): Promise<LitigationTimecardPushOutcome> {
   try {
     const res = await $fetch<unknown>('/restraint-api/kintai/refresh/timecard', {
       method: 'POST',
       headers: authHeaders(),
-      query: { month, month_count: 1, apply: true },
+      query: { month, month_count: 1, driver_cd: driverCd, apply: true },
     })
     return classifyLitigationTimecardPush(parseKintaiWindowReport(res), '応答を読めませんでした')
   }
@@ -760,22 +764,19 @@ async function pushTimecardMonth(month: string): Promise<LitigationTimecardPushO
   }
 }
 
-/** 照合先なしの月を 1 か月ずつ直列に運び、運べた月の「勤怠に無い運行」を読み直す。 */
+/** 照合先なしの乗務員 × 月を 1 つずつ直列に運び、運べたものは「勤怠に無い運行」を読み直す。 */
 async function pushNoBaselineMonths() {
-  const target = openCase.value
-  if (!target || timecardPushing.value) return
+  if (!openCase.value || timecardPushing.value) return
   const epoch = errorsEpoch
-  const months = noBaselineMonths.value
+  const targets = noBaselineTargets.value
   timecardPushing.value = true
   timecardPushResults.value = []
   try {
-    for (const month of months) {
-      const outcome = await pushTimecardMonth(month)
+    for (const { driverCd, month } of targets) {
+      const outcome = await pushTimecard(driverCd, month)
       if (epoch !== errorsEpoch) return
-      timecardPushResults.value = [...timecardPushResults.value, { month, outcome }]
-      if (outcome.kind === 'ok') {
-        for (const cd of target.driverCds) await loadUnkoGaps(epoch, cd, month)
-      }
+      timecardPushResults.value = [...timecardPushResults.value, { driverCd, month, outcome }]
+      if (outcome.kind === 'ok') await loadUnkoGaps(epoch, driverCd, month)
     }
   }
   finally {
@@ -1240,7 +1241,7 @@ function fmtDateTime(iso: string): string {
             最低賃金の不変条件 (条件1〜3、拘束は GCP) が崩れていないかを並べます。
             「判定できない」は調べたが材料が取れなかった月で、異常なしではありません。
             「照合先なし」はその月のこの乗務員の勤怠 (運行NO 付き) が GCP にまだ無く、alc の運行と突き合わせられない月です (異常とは数えません)。
-            2026-01 より前の勤怠は GCP へ運んでいないので、その期間は全員が照合先なしになります。「勤怠を GCP へ運ぶ」で照合先なしの月をオンプレから運べます (会社全体を月単位で運びます)。運んでも照合先なしのまま残る乗務員は、オンプレの勤務時間登録 (運行NO の付いた勤怠) にその運行が無い乗務員です。
+            2026-01 より前の勤怠は GCP へ運んでいないので、その期間は全員が照合先なしになります。「勤怠を GCP へ運ぶ」で照合先なしの月を、案件の乗務員ぶんだけオンプレから運べます。運んでも照合先なしのまま残る乗務員は、運行NO 付きの打刻 (勤務時間登録) が無い乗務員です (営業所所属など打刻しない乗務員)。
             Y時間の欠けは「検知を実行」の Y時間 プレビューから判定します (出庫/帰庫が無い・運行の中身が取れないなどで Y時間 に入らなかった運行)。出力タブで ZIP を作った後は、テンプレに書けなかった日も加えます。最低賃金の不変条件は 1 か月 15〜64 秒かかります (読むだけで、最低賃金チェックの保存はしません)。
             検知の結果は案件ごとに保存し、開き直すと前回の結果を出します (月の下の時刻がその行の材料を取った時刻)。「続きから」は、まだ取っていない・取れなかった分だけを回します。
           </p>
@@ -1265,12 +1266,12 @@ function fmtDateTime(iso: string): string {
             />
             <span v-if="errorsStoreLoading" class="text-sm text-gray-500" data-testid="litigation-errors-store-loading">保存済みの結果を読み込み中…</span>
             <UButton
-              v-if="noBaselineMonths.length > 0 || timecardPushResults.length > 0"
+              v-if="noBaselineTargets.length > 0 || timecardPushResults.length > 0"
               icon="i-lucide-database-zap"
-              :label="`勤怠を GCP へ運ぶ (照合先なし ${noBaselineMonths.length} か月)`"
+              :label="`勤怠を GCP へ運ぶ (照合先なし ${noBaselineTargets.length} 件)`"
               variant="soft"
               :loading="timecardPushing"
-              :disabled="timecardPushing || errorsRunning || importingKey !== null || noBaselineMonths.length === 0"
+              :disabled="timecardPushing || errorsRunning || importingKey !== null || noBaselineTargets.length === 0"
               data-testid="litigation-timecard-push"
               @click="pushNoBaselineMonths"
             />
@@ -1290,10 +1291,10 @@ function fmtDateTime(iso: string): string {
           <div v-if="timecardPushResults.length > 0" class="text-xs space-y-0.5" data-testid="litigation-timecard-push-results">
             <div
               v-for="r in timecardPushResults"
-              :key="r.month"
-              :class="r.outcome.kind === 'ok' ? 'text-gray-600 dark:text-gray-400' : 'text-red-600 dark:text-red-400'"
+              :key="`${r.driverCd}|${r.month}`"
+              :class="r.outcome.kind === 'ok' ? 'text-gray-600 dark:text-gray-400' : r.outcome.kind === 'noOperations' ? 'text-amber-700 dark:text-amber-400' : 'text-red-600 dark:text-red-400'"
             >
-              {{ r.month }}: {{ r.outcome.message }}
+              {{ r.month }} {{ driverLabel(r.driverCd) }} ({{ r.driverCd }}): {{ r.outcome.message }}
             </div>
           </div>
 

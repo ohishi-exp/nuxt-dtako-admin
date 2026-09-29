@@ -244,7 +244,7 @@ export function unkoGapsCell(driverCd: string, entry: LitigationFetched<KintaiUn
   // 乗務員CD 指定で呼ぶと受け側の「勤怠側にも運行がある月だけ」の絞り込みが外れるので、
   // 勤怠側が 0 件の月は alc の運行が全部「勤怠に無い」に数えられる。異常とは言わずに分ける
   if (g.onpremOperationsInMonth === 0) {
-    return { state: 'noBaseline', message: 'この月のこの乗務員の勤怠 (運行NO 付き) が GCP に無く、alc の運行と突き合わせられない — まだ運んでいない (2026-01 より前) なら「勤怠を GCP へ運ぶ」で入る。運んでも残るならオンプレの勤務時間登録にこの乗務員の運行が無い' }
+    return { state: 'noBaseline', message: 'この月のこの乗務員の運行NO 付きの勤怠が GCP に無く、alc の運行と突き合わせられない — 「勤怠を GCP へ運ぶ」で運べる (2026-01 より前は未運搬)。運んでも残るなら、この乗務員は運行NO 付きの打刻が無い (営業所所属など)' }
   }
   const mine = g.drivers.find(d => d.driverCd === driverCd)
   if (mine && mine.unkoNos.length > 0) {
@@ -463,33 +463,43 @@ export function classifyLitigationImport(httpStatus: number | null, body: unknow
 // ---- 勤怠を GCP へ運ぶ (照合先なしの月) ----
 
 /**
- * 照合先なし (`unkoGaps` が `noBaseline`) の月。重複を除いて古い順。
- * 運ぶ口 (`POST /restraint-api/kintai/refresh/timecard`) は**会社全体を月単位で**運ぶので、
- * 乗務員ごとではなく月ごとに 1 回呼べば足りる。
+ * 照合先なし (`unkoGaps` が `noBaseline`) の乗務員 × 月。月の古い順、同じ月は乗務員の順。
+ * 運ぶ口 (`POST /restraint-api/kintai/refresh/timecard?driver_cd=`) は**その乗務員ぶんだけ**
+ * 運ぶので、乗務員 × 月ごとに 1 回呼ぶ (全乗務員を運ぶと 1 か月数秒〜十数秒かかり、
+ * 他の乗務員の畳み直しまで走る)。
  */
-export function litigationNoBaselineMonths(rows: readonly LitigationErrorRow[]): string[] {
-  const months = new Set(rows.filter(r => r.cells.unkoGaps.state === 'noBaseline').map(r => r.month))
-  return [...months].sort()
+export function litigationNoBaselineTargets(rows: readonly LitigationErrorRow[]): { driverCd: string, month: string }[] {
+  return rows
+    .filter(r => r.cells.unkoGaps.state === 'noBaseline')
+    .map(r => ({ driverCd: r.driverCd, month: r.month }))
+    .sort((a, b) => (a.month === b.month ? a.driverCd.localeCompare(b.driverCd, undefined, { numeric: true }) : a.month < b.month ? -1 : 1))
 }
 
-/** `refresh/timecard` の応答 1 月ぶん (`kintai-diff-view.ts` の `parseKintaiWindowReport` で読んだもの) の要点 */
+/** `refresh/timecard` の応答 1 回ぶん (`kintai-diff-view.ts` の `parseKintaiWindowReport` で読んだもの) の要点 */
 export interface LitigationTimecardPushReport {
   events: number
+  /** 運行NO の種類数。古い relay は null */
+  operations: number | null
   daysWritten: number
   misplaced: number
   unknownStates: readonly string[]
 }
 
 export interface LitigationTimecardPushOutcome {
-  kind: 'ok' | 'error'
+  /** `noOperations` = 打刻はあるが運行NO 付きの行が無い (運んでも照合先にならない) */
+  kind: 'ok' | 'noOperations' | 'error'
   message: string
 }
 
 /**
- * 1 月ぶんの運び結果を 1 文にする。`reason` は通信・HTTP 失敗のとき呼び出し側が組んだ 1 文
- * (`report` は null)。書き込みは受け側の日単位署名が守るので、`daysWritten: 0` は
- * 「既に運んである」であって「動かなかった」ではない。`misplaced` / `unknownStates` は
- * 運び方が壊れている印なので失敗として出す (MCP `run_kintai_relay` の説明と同じ読み方)。
+ * 1 乗務員 × 1 月ぶんの運び結果を 1 文にする。`reason` は通信・HTTP 失敗のとき呼び出し側が
+ * 組んだ 1 文 (`report` は null)。書き込みは受け側の日単位署名が守るので、`daysWritten: 0` は
+ * 「既に運んである」であって「動かなかった」ではない。`misplaced` / `unknownStates` は運び方が
+ * 壊れている印なので失敗として出す (MCP `run_kintai_relay` の説明と同じ読み方)。
+ *
+ * **照合先になるのは運行NO 付きの行 (勤務時間登録) だけ**なので、打刻 (始業/終業) しか無い
+ * 乗務員は運んでも照合先なしのまま — 営業所所属など打刻しない乗務員がこうなる (1590 の
+ * 2023〜2025 で実測、2026-09-29)。これを「運んだ」と同じ見た目にしない。
  */
 export function classifyLitigationTimecardPush(
   report: LitigationTimecardPushReport | null,
@@ -500,9 +510,18 @@ export function classifyLitigationTimecardPush(
   if (report.unknownStates.length > 0) {
     return { kind: 'error', message: `受け側に無い打刻の種類: ${report.unknownStates.join(', ')}` }
   }
-  if (report.events === 0) return { kind: 'ok', message: 'オンプレにこの月の打刻が無い (運ぶものなし)' }
-  if (report.daysWritten === 0) return { kind: 'ok', message: `変わった日なし (既に運んである。打刻 ${report.events} 件)` }
-  return { kind: 'ok', message: `${report.daysWritten} 日ぶん運んだ (会社全体、打刻 ${report.events} 件)` }
+  if (report.events === 0) {
+    return { kind: 'noOperations', message: 'オンプレにこの乗務員のこの月の打刻が無い — この月は照合できない' }
+  }
+  if (report.operations === 0) {
+    return {
+      kind: 'noOperations',
+      message: `打刻 ${report.events} 件はあるが運行NO 付き (勤務時間登録) が無い — 営業所所属など打刻しない乗務員はこうなり、この月は照合できない`,
+    }
+  }
+  const ops = report.operations === null ? '' : `運行 ${report.operations} 件、`
+  if (report.daysWritten === 0) return { kind: 'ok', message: `変わった日なし (既に運んである。${ops}打刻 ${report.events} 件)` }
+  return { kind: 'ok', message: `${report.daysWritten} 日ぶん運んだ (${ops}打刻 ${report.events} 件)` }
 }
 
 // ---- 検知結果の保存 (`GET/PUT /restraint-api/litigation-checks`) ----
