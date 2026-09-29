@@ -128,6 +128,12 @@ export interface KintaiWindowReport {
   drivers: number;
   /** 運んだ生行数。 */
   events: number;
+  /**
+   * 運んだ行の運行NO の種類数 (空・無しは数えない)。**照合先 (unko-gaps の
+   * `onprem_operations_in_month`) の元になるのはこの行だけ** — 打刻 (始業/終業) は
+   * 運行NO を持たないので、`events > 0` でもこれが 0 なら照合先は増えない。
+   */
+  operations: number;
   /** 書き換えた乗務員数。**大半は 0 のはず** (打刻はほとんど戻らない)。 */
   driversWritten: number;
   daysWritten: number;
@@ -148,6 +154,16 @@ export interface KintaiWindowInput {
   monthCount?: number;
   /** **`false` なら受け側に 1 行も書かせない** (既定)。件数だけ返る。 */
   apply?: boolean;
+  /**
+   * 運ぶ乗務員CD を絞る (訴訟準備の「勤怠を GCP へ運ぶ」、Refs #1133)。省略時は全乗務員。
+   *
+   * 受け側は**名乗った乗務員 (`drivers`) の日しか書かないし消さない**
+   * (rust-ichibanboshi `TimecardWindow::drivers` の doc) ので、絞っても他の乗務員には
+   * 触らない。名乗るのは「オンプレが見つけた乗務員 ∩ 指定」— 打刻が 0 行の乗務員を
+   * 名乗ると、受け側に残っている窓の中の日を「元が消えた」と読んで消しにいくため、
+   * 全乗務員のときと同じく見つかった乗務員だけにする。
+   */
+  driverCds?: readonly number[];
   /** 当月の判定に使う時刻 (ms)。**テスト用** — 省略時は `Date.now()`。 */
   now?: number;
 }
@@ -226,8 +242,16 @@ export async function relayKintaiWindow(
     elapsed_ms?: unknown;
   }>(await deps.onprem(`${EVENTS_PATH}?${q}`), "onprem events");
   const eventsMs = Date.now() - at1;
-  const drivers = Array.isArray(got.drivers) ? got.drivers : [];
-  const events = Array.isArray(got.events) ? got.events : [];
+  const only = input.driverCds ? new Set(input.driverCds) : null;
+  const drivers = (Array.isArray(got.drivers) ? got.drivers : []).filter(d => !only || only.has(d));
+  const events = (Array.isArray(got.events) ? got.events : []).filter(
+    e => !only || only.has((e as { driver_id?: unknown } | null)?.driver_id as number),
+  );
+  const operations = new Set(
+    events
+      .map(e => (e as { unko_no?: unknown } | null)?.unko_no)
+      .filter((u): u is string => typeof u === "string" && u !== ""),
+  ).size;
 
   // ── 2. GCP: まるごと渡す ──────────────────────────────────────────────────
   // **突き合わせは向こう。** ここで署名を計算しない (2 実装にしない)
@@ -254,6 +278,7 @@ export async function relayKintaiWindow(
     months,
     drivers: drivers.length,
     events: events.length,
+    operations,
     driversWritten: applied.drivers_written ?? 0,
     daysWritten: applied.days_written ?? 0,
     daysDeleted: applied.days_deleted ?? 0,

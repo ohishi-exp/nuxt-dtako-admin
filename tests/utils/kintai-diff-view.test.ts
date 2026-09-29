@@ -325,6 +325,7 @@ describe('parseKintaiWindowReport (打刻の運び直し)', () => {
       dryRun: true,
     })
     expect(r).toMatchObject({ months: ['2026-05', '2026-06'], driversWritten: 0, dryRun: true })
+    expect(parseKintaiWindowReport({ operations: 3 })?.operations).toBe(3)
   })
 
   it('null/非object は null', () => {
@@ -332,11 +333,12 @@ describe('parseKintaiWindowReport (打刻の運び直し)', () => {
     expect(parseKintaiWindowReport('x')).toBeNull()
   })
 
-  it('欠けたフィールドは 0/[]/false に倒す', () => {
+  it('欠けたフィールドは 0/[]/false に倒す (運行の件数だけは古い relay を 0 と読まず null)', () => {
     expect(parseKintaiWindowReport({})).toEqual({
       months: [],
       drivers: 0,
       events: 0,
+      operations: null,
       driversWritten: 0,
       daysWritten: 0,
       daysDeleted: 0,

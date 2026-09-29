@@ -22,7 +22,7 @@ import {
   litigationErrorsCsv,
   litigationImportRanges,
   litigationMonthBounds,
-  litigationNoBaselineMonths,
+  litigationNoBaselineTargets,
   litigationNeedsFetch,
   litigationRowCheckedAt,
   litigationRowNeedsAttention,
@@ -254,7 +254,7 @@ describe('unkoGapsCell (alc にあって勤怠に無い運行)', () => {
     const g = gaps({ driver_cd: 1590, onprem_operations_in_month: 0, drivers: [{ driver_cd: '1590', unko_nos: ['a', 'b'] }] })
     expect(unkoGapsCell('1590', g)).toEqual({
       state: 'noBaseline',
-      message: 'この月のこの乗務員の勤怠 (運行NO 付き) が GCP に無く、alc の運行と突き合わせられない — まだ運んでいない (2026-01 より前) なら「勤怠を GCP へ運ぶ」で入る。運んでも残るならオンプレの勤務時間登録にこの乗務員の運行が無い',
+      message: 'この月のこの乗務員の運行NO 付きの勤怠が GCP に無く、alc の運行と突き合わせられない — 「勤怠を GCP へ運ぶ」で運べる (2026-01 より前は未運搬)。運んでも残るなら、この乗務員は運行NO 付きの打刻が無い (営業所所属など)',
     })
   })
 
@@ -468,19 +468,27 @@ describe('勤怠を GCP へ運ぶ (照合先なしの月)', () => {
     }
   }
 
-  it('照合先なしの月だけを、乗務員をまたいで重複なく古い順に出す', () => {
-    const rows = [rowOf('2024-02', 'noBaseline'), rowOf('2023-12', 'noBaseline'), rowOf('2024-01', 'ng'), { ...rowOf('2024-02', 'noBaseline'), driverCd: '2000' }]
-    expect(litigationNoBaselineMonths(rows)).toEqual(['2023-12', '2024-02'])
-    expect(litigationNoBaselineMonths([rowOf('2024-01', 'pending')])).toEqual([])
+  it('照合先なしの乗務員 × 月だけを、月の古い順 (同じ月は乗務員の順) に出す', () => {
+    const rows = [rowOf('2024-02', 'noBaseline'), { ...rowOf('2023-12', 'noBaseline'), driverCd: '10' }, rowOf('2023-12', 'noBaseline'), rowOf('2024-01', 'ng'), { ...rowOf('2024-02', 'noBaseline'), driverCd: '2000' }]
+    expect(litigationNoBaselineTargets(rows).map(t => `${t.driverCd}|${t.month}`)).toEqual(['10|2023-12', '1590|2023-12', '1590|2024-02', '2000|2024-02'])
+    expect(litigationNoBaselineTargets([rowOf('2024-01', 'pending')])).toEqual([])
   })
 
-  const rep = (over: Partial<{ events: number, daysWritten: number, misplaced: number, unknownStates: string[] }> = {}) =>
-    ({ events: 3972, daysWritten: 1735, misplaced: 0, unknownStates: [], ...over })
+  const rep = (over: Partial<{ events: number, operations: number | null, daysWritten: number, misplaced: number, unknownStates: string[] }> = {}) =>
+    ({ events: 40, operations: 5, daysWritten: 22, misplaced: 0, unknownStates: [], ...over })
 
-  it('運んだ日数・既に運んである・打刻が無いを言い分ける', () => {
-    expect(classifyLitigationTimecardPush(rep(), '')).toEqual({ kind: 'ok', message: '1735 日ぶん運んだ (会社全体、打刻 3972 件)' })
-    expect(classifyLitigationTimecardPush(rep({ daysWritten: 0 }), '')).toEqual({ kind: 'ok', message: '変わった日なし (既に運んである。打刻 3972 件)' })
-    expect(classifyLitigationTimecardPush(rep({ events: 0, daysWritten: 0 }), '')).toEqual({ kind: 'ok', message: 'オンプレにこの月の打刻が無い (運ぶものなし)' })
+  it('運んだ日数・既に運んである を運行の件数つきで言う (古い relay は運行の件数を言わない)', () => {
+    expect(classifyLitigationTimecardPush(rep(), '')).toEqual({ kind: 'ok', message: '22 日ぶん運んだ (運行 5 件、打刻 40 件)' })
+    expect(classifyLitigationTimecardPush(rep({ daysWritten: 0 }), '')).toEqual({ kind: 'ok', message: '変わった日なし (既に運んである。運行 5 件、打刻 40 件)' })
+    expect(classifyLitigationTimecardPush(rep({ operations: null }), '')).toEqual({ kind: 'ok', message: '22 日ぶん運んだ (打刻 40 件)' })
+  })
+
+  it('★ 打刻が無い / 運行NO 付きが無い は「運んだ」にせず、照合できないと言い切る', () => {
+    expect(classifyLitigationTimecardPush(rep({ events: 0, operations: 0, daysWritten: 0 }), '')).toEqual({ kind: 'noOperations', message: 'オンプレにこの乗務員のこの月の打刻が無い — この月は照合できない' })
+    expect(classifyLitigationTimecardPush(rep({ operations: 0 }), '')).toEqual({
+      kind: 'noOperations',
+      message: '打刻 40 件はあるが運行NO 付き (勤務時間登録) が無い — 営業所所属など打刻しない乗務員はこうなり、この月は照合できない',
+    })
   })
 
   it('★ misplaced / 受け側に無い種類は運び方が壊れている印なので失敗、通信失敗は理由をそのまま', () => {
